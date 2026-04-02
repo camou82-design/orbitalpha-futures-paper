@@ -1,0 +1,24 @@
+{
+  "name": "orbitalpha-futures-paper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bybit USDT perpetual futures paper trading engine (simulation only). No live trading.",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "start:loop": "node dist/loop.js",
+    "dev": "node --enable-source-maps --watch dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.9.2"
+  }
+}
+
