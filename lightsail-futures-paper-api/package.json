@@ -1,0 +1,13 @@
+{
+  "name": "lightsail-futures-paper-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx index.ts",
+    "dev": "tsx watch index.ts"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "tsx": "^4.19.3"
+  }
+}
