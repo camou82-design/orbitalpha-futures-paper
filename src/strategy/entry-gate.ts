@@ -67,6 +67,13 @@ export function higherTfLongTrendOk(closes: readonly number[]): boolean {
   return ema20 > ema60;
 }
 
+export function higherTfShortTrendOk(closes: readonly number[]): boolean {
+  const ema20 = emaLastFromCloses([...closes], 20);
+  const ema60 = emaLastFromCloses([...closes], 60);
+  if (ema20 === null || ema60 === null) return false;
+  return ema20 < ema60;
+}
+
 export type EntryGateRuntimeOptions = Readonly<{
   /** Overrides `ENTRY_GATE_CONFIG.minMoveVsCostMultiplier` (paper relaxed vs strict). */
   minMoveMultiplier: number;
@@ -82,6 +89,11 @@ export function evaluateEntryCostAndHigherTfGate(input: Readonly<{
   fundingRate: number;
   /** If omitted, uses strict defaults from `ENTRY_GATE_CONFIG`. */
   gateOptions?: EntryGateRuntimeOptions;
+  /**
+   * Paper: which side the entry is for — higher-TF EMA alignment is checked in that direction.
+   * Defaults to `"long"` for backward compatibility.
+   */
+  entryDirection?: "long" | "short";
   /**
    * Paper simulation only: when true, never block on `low_expected_move` (fee/ATR vs threshold).
    * Live trading code paths must not set this.
@@ -105,10 +117,12 @@ export function evaluateEntryCostAndHigherTfGate(input: Readonly<{
   const atr = atrWilderLast(input.entryTimeframeCandles, period);
   const expectedMove = refOk && atr !== null ? atr / input.refPrice : 0;
 
+  const dir = input.entryDirection ?? "long";
   let higherTfAligned = false;
   if (input.higherTfCandles !== null && input.higherTfCandles.length > 0) {
     const hCloses = input.higherTfCandles.map((c) => c.close);
-    higherTfAligned = higherTfLongTrendOk(hCloses);
+    higherTfAligned =
+      dir === "long" ? higherTfLongTrendOk(hCloses) : higherTfShortTrendOk(hCloses);
   }
 
   const volOk = refOk && atr !== null && expectedMove >= requiredMoveThreshold;

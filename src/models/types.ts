@@ -62,11 +62,11 @@ export type EngineConfig = Readonly<{
   paperMaxOpenPositions: number;
 }>;
 
-/** Single open paper position on disk (`data/positions/open.json`). v1: one at a time. */
+/** One leg in `positions/open.json` (JSON array of up to `paperMaxOpenPositions` records). */
 export type PaperOpenPositionRecord = Readonly<{
   openedAt: number;
   symbol: MarketSymbol;
-  side: "long";
+  side: "long" | "short";
   entryPrice: number;
   leverage: number;
   sizeUsd: number;
@@ -86,7 +86,7 @@ export type PaperClosedPositionRecord = Readonly<{
   openedAt: number;
   closedAt: number;
   symbol: MarketSymbol;
-  side: "long";
+  side: "long" | "short";
   entryPrice: number;
   closePrice: number;
   leverage: number;

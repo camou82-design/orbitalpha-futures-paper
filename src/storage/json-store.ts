@@ -36,6 +36,7 @@ export type CandidateRunIndexItem = Readonly<{
   runPath: string;
   strategyVersion: string;
   longCandidates: number;
+  shortCandidates: number;
   candidateSymbols: string[];
   /** Paths to `snapshots/latest.json` and `snapshots/latest-meta.json` at the time of this run (if available). */
   latestSnapshotPath?: string;
@@ -50,11 +51,12 @@ export type CandidateRunIndex = Readonly<{
   items: CandidateRunIndexItem[];
 }>;
 
-/** Payload written to `runs/{fetchedAt}.json` when a long candidate exists. */
+/** Payload written to `runs/{fetchedAt}.json` when any long or short candidate exists. */
 export type PaperCandidateRunPayload = Readonly<{
   fetchedAt: number;
   strategyVersion: string;
   longCandidates: number;
+  shortCandidates: number;
   candidateSymbols: string[];
   snapshots: unknown;
   latestSnapshotPath?: string;
@@ -101,7 +103,7 @@ export class JsonStore {
     return await this.writeJson("snapshots/latest-meta.json", data);
   }
 
-  /** Only call when at least one snapshot is a long candidate; writes `runs/{timestamp}.json`. */
+  /** Only call when at least one snapshot is a long or short candidate; writes `runs/{timestamp}.json`. */
   async writePaperCandidateRun(timestamp: number, payload: PaperCandidateRunPayload): Promise<string> {
     return await this.writeJson(`runs/${timestamp}.json`, payload);
   }

@@ -1,6 +1,6 @@
 import type { MarketSymbol } from "../models/types";
 
-export type PaperSignal = "paper_long_candidate" | "none";
+export type PaperSignal = "paper_long_candidate" | "paper_short_candidate" | "none";
 
 export type PaperEntryEvaluation = Readonly<{
   symbol: MarketSymbol;
@@ -9,23 +9,26 @@ export type PaperEntryEvaluation = Readonly<{
 }>;
 
 /**
- * Long-only paper v0: trend_ok ∧ latest candle close ≥ EMA20.
- * No lastPrice vs close breakout confirmation (sample collection: candidate = entry path).
+ * Paper bidirectional: long when EMA20 > EMA60 and close ≥ EMA20; short when EMA20 < EMA60 and close ≤ EMA20.
  */
-export function evaluatePaperLongEntryV0(input: Readonly<{
+export function evaluatePaperEntryV1(input: Readonly<{
   symbol: MarketSymbol;
-  trendOk: boolean;
   ema20: number | null;
+  ema60: number | null;
   latestCandleClose: number;
 }>): PaperEntryEvaluation {
-  const { symbol, trendOk, ema20, latestCandleClose } = input;
+  const { symbol, ema20, ema60, latestCandleClose } = input;
   if (ema20 === null || !Number.isFinite(ema20)) {
     return { symbol, entryCandidate: false, signal: "none" };
   }
-  const entryCandidate = trendOk && latestCandleClose >= ema20;
-  return {
-    symbol,
-    entryCandidate,
-    signal: entryCandidate ? "paper_long_candidate" : "none"
-  };
+  if (ema60 === null || !Number.isFinite(ema60)) {
+    return { symbol, entryCandidate: false, signal: "none" };
+  }
+  if (ema20 > ema60 && latestCandleClose >= ema20) {
+    return { symbol, entryCandidate: true, signal: "paper_long_candidate" };
+  }
+  if (ema20 < ema60 && latestCandleClose <= ema20) {
+    return { symbol, entryCandidate: true, signal: "paper_short_candidate" };
+  }
+  return { symbol, entryCandidate: false, signal: "none" };
 }

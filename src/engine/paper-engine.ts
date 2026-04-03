@@ -6,7 +6,7 @@ import { JsonStore } from "../storage/json-store";
 import type { BybitPublicDiagnostics } from "../exchange/bybit-public";
 import { BybitPublicClient } from "../exchange/bybit-public";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
-import { evaluatePaperLongEntryV0 } from "../strategy/entry-signal";
+import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
 import type { PaperSignal } from "../strategy/entry-signal";
 import {
   entryGateHigherTfKlineLimit,
@@ -87,6 +87,7 @@ type RunMeta = Readonly<{
   signalSummary: Readonly<{
     totalSymbols: number;
     longCandidates: number;
+    shortCandidates: number;
     neutralSymbols: number;
   }>;
   fetchedAt: number;
@@ -122,10 +123,12 @@ type RunMeta = Readonly<{
 function buildSignalSummary(snapshots: ReadonlyArray<SymbolSnapshot>): RunMeta["signalSummary"] {
   const totalSymbols = snapshots.length;
   const longCandidates = snapshots.filter((s) => s.signal === "paper_long_candidate").length;
+  const shortCandidates = snapshots.filter((s) => s.signal === "paper_short_candidate").length;
   return {
     totalSymbols,
     longCandidates,
-    neutralSymbols: totalSymbols - longCandidates
+    shortCandidates,
+    neutralSymbols: totalSymbols - longCandidates - shortCandidates
   };
 }
 
@@ -271,7 +274,7 @@ export class PaperEngine {
       latestPath,
       engineMode: "paper",
       exchange: "bybit",
-      notes: `paper-v0 EMA20/EMA60 1m long filter; public-only; ${klineTimeframe}; strict-number-parsing`
+      notes: `paper-v0 EMA20/EMA60 1m long/short; public-only; ${klineTimeframe}; strict-number-parsing`
     };
 
     let metaPath: string | undefined;
@@ -283,17 +286,22 @@ export class PaperEngine {
       this.logger.error("snapshot_latest_meta_save_failed", { error: msg });
     }
 
-    const hasLongCandidate = snapshots.some((s) => s.signal === "paper_long_candidate");
+    const hasAnyCandidate = snapshots.some(
+      (s) => s.signal === "paper_long_candidate" || s.signal === "paper_short_candidate"
+    );
     let candidateRunPath: string | undefined;
-    if (hasLongCandidate && latestPath && metaPath) {
+    if (hasAnyCandidate && latestPath && metaPath) {
       try {
         const candidateSymbols = snapshots
-          .filter((s) => s.signal === "paper_long_candidate")
+          .filter(
+            (s) => s.signal === "paper_long_candidate" || s.signal === "paper_short_candidate"
+          )
           .map((s) => String(s.symbol));
         candidateRunPath = await this.store.writePaperCandidateRun(fetchedAt, {
           fetchedAt,
           strategyVersion: "paper-v0",
           longCandidates: signalSummary.longCandidates,
+          shortCandidates: signalSummary.shortCandidates,
           candidateSymbols,
           snapshots,
           latestSnapshotPath: latestPath,
@@ -307,6 +315,7 @@ export class PaperEngine {
           runPath: candidateRunPath,
           strategyVersion: "paper-v0",
           longCandidates: signalSummary.longCandidates,
+          shortCandidates: signalSummary.shortCandidates,
           candidateSymbols,
           ...(latestPath ? { latestSnapshotPath: latestPath } : {}),
           ...(metaPath ? { latestMetaPath: metaPath } : {}),
@@ -379,7 +388,10 @@ export class PaperEngine {
         continue;
       }
 
-      if (snap.signal === "paper_long_candidate") {
+      const keep =
+        (open.side === "long" && snap.signal === "paper_long_candidate") ||
+        (open.side === "short" && snap.signal === "paper_short_candidate");
+      if (keep) {
         remaining.push(open);
         continue;
       }
@@ -396,7 +408,9 @@ export class PaperEngine {
       const closeNotionalUsd = open.sizeUsd * open.leverage;
       const feeUsd = (openNotionalUsd + closeNotionalUsd) * feeRate;
       const pnlUsdGross =
-        ((closePrice - open.entryPrice) / open.entryPrice) * open.sizeUsd * open.leverage;
+        open.side === "long"
+          ? ((closePrice - open.entryPrice) / open.entryPrice) * open.sizeUsd * open.leverage
+          : ((open.entryPrice - closePrice) / open.entryPrice) * open.sizeUsd * open.leverage;
       const rawOpenFr = open.openFundingRate;
       const fundingRateAppliedOpen = typeof rawOpenFr === "number" && Number.isFinite(rawOpenFr) ? rawOpenFr : 0;
       const rawCloseFr = snap.fundingRate;
@@ -420,7 +434,7 @@ export class PaperEngine {
         openedAt: open.openedAt,
         closedAt,
         symbol: open.symbol,
-        side: "long",
+        side: open.side,
         entryPrice: open.entryPrice,
         closePrice,
         leverage: open.leverage,
@@ -450,6 +464,7 @@ export class PaperEngine {
       await this.positions.appendClosed(closed);
       this.logger.info("paper_position_closed", {
         symbol: open.symbol,
+        side: open.side,
         pnlUsd: pnlUsdNet,
         pnlUsdGross,
         feeUsd,
@@ -476,7 +491,9 @@ export class PaperEngine {
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
 
-    const candidates = input.snapshots.filter((s) => s.signal === "paper_long_candidate");
+    const candidates = input.snapshots.filter(
+      (s) => s.signal === "paper_long_candidate" || s.signal === "paper_short_candidate"
+    );
     if (candidates.length === 0) return;
 
     if (!input.candidateRunPath || !input.latestPath || !input.metaPath || !input.filePath) {
@@ -495,15 +512,18 @@ export class PaperEngine {
         continue;
       }
 
+      const side: "long" | "short" =
+        first.signal === "paper_long_candidate" ? "long" : "short";
+      const sourceSignal = first.signal;
       const record: PaperOpenPositionRecord = {
         openedAt: Date.now(),
         symbol: first.symbol,
-        side: "long",
+        side,
         entryPrice: first.lastPrice,
         leverage: this.config.leverage,
         sizeUsd: DEFAULT_PAPER_SIZE_USD,
         strategyVersion: "paper-v0",
-        sourceSignal: "paper_long_candidate",
+        sourceSignal,
         sourceRunPath: input.candidateRunPath,
         latestSnapshotPath: input.latestPath,
         latestMetaPath: input.metaPath,
@@ -513,7 +533,11 @@ export class PaperEngine {
       };
 
       next.push(record);
-      this.logger.info("paper_position_opened", { symbol: record.symbol, path: "positions/open.json" });
+      this.logger.info("paper_position_opened", {
+        symbol: record.symbol,
+        side: record.side,
+        path: "positions/open.json"
+      });
     }
 
     if (next.length !== before) {
@@ -567,28 +591,43 @@ export class PaperEngine {
 
     const closes = rC.value.map((c) => c.close);
     const trend = trendFilterOneMinuteCloses(closes);
-    const entry = evaluatePaperLongEntryV0({
+    const entry = evaluatePaperEntryV1({
       symbol,
-      trendOk: trend.trendOk,
       ema20: trend.ema20,
+      ema60: trend.ema60,
       latestCandleClose
     });
 
-    const qualityScore = computePaperEntryQualityScore({
-      trendOk: trend.trendOk,
-      ema20: trend.ema20,
-      ema60: trend.ema60,
-      lastPrice,
-      latestCandleClose
-    });
+    const sideForQuality =
+      entry.signal === "paper_long_candidate"
+        ? "long"
+        : entry.signal === "paper_short_candidate"
+          ? "short"
+          : null;
+    const qualityScore =
+      sideForQuality === null
+        ? 0
+        : computePaperEntryQualityScore({
+            ema20: trend.ema20,
+            ema60: trend.ema60,
+            lastPrice,
+            latestCandleClose,
+            side: sideForQuality
+          });
     const signalStrength = paperSignalStrengthLabel(qualityScore, this.config.paperEntryRelaxed);
 
     let signal: PaperSignal = entry.signal;
     let entryCandidate = entry.entryCandidate;
     let gateEval: ReturnType<typeof evaluateEntryCostAndHigherTfGate> | null = null;
     let gateBlockedReason: string | null = null;
+    const entrySide: "long" | "short" | null =
+      entry.signal === "paper_long_candidate"
+        ? "long"
+        : entry.signal === "paper_short_candidate"
+          ? "short"
+          : null;
 
-    if (entry.signal === "paper_long_candidate") {
+    if (entrySide !== null) {
       if (
         this.config.paperEntryRelaxed &&
         this.config.paperQualityMinScore > 0 &&
@@ -621,7 +660,8 @@ export class PaperEngine {
             minMoveMultiplier: this.config.paperGateMinMoveMultiplier,
             requireHigherTfAlign: this.config.paperRequireHigherTfAlign
           },
-          paperBypassExpectedMoveGate: true
+          paperBypassExpectedMoveGate: true,
+          entryDirection: entrySide
         });
         gateEval = gate;
 
@@ -650,6 +690,7 @@ export class PaperEngine {
         trend_ok: trend.trendOk,
         quality_score: qualityScore,
         signal_strength: signalStrength,
+        side: entrySide,
         base_signal: entry.signal,
         fee_filter_disabled: gateEval?.feeExpectedMoveGateBypassed === true,
         original_fee_filter_pass: gateEval?.originalExpectedMovePass === true,
@@ -669,6 +710,26 @@ export class PaperEngine {
         max_open_positions: this.config.paperMaxOpenPositions,
         final_signal: signal
       });
+    } else {
+      this.logger.info("PAPER_ENTRY_LINE", {
+        paper_entry_relaxed: this.config.paperEntryRelaxed,
+        symbol,
+        trend_ok: trend.trendOk,
+        quality_score: 0,
+        signal_strength: paperSignalStrengthLabel(0, this.config.paperEntryRelaxed),
+        side: null,
+        base_signal: entry.signal,
+        fee_filter_disabled: null,
+        original_fee_filter_pass: null,
+        fee_filter_pass: null,
+        entry_blocked: null,
+        gate_expected_move: null,
+        gate_required_threshold: null,
+        higher_tf_required: this.config.paperRequireHigherTfAlign,
+        higher_tf_aligned: null,
+        max_open_positions: this.config.paperMaxOpenPositions,
+        final_signal: "none"
+      });
     }
 
     const snapshot: SymbolSnapshot = {
@@ -686,7 +747,12 @@ export class PaperEngine {
     };
 
     this.logger.info("symbol_snapshot", snapshot);
-    this.logger.info("symbol_signal", { symbol, signal, trendOk: trend.trendOk });
+    this.logger.info("symbol_signal", {
+      symbol,
+      signal,
+      base_signal: entry.signal,
+      trendOk: trend.trendOk
+    });
     return { ok: true, snapshot, symbolDiagnostics };
   }
 }
