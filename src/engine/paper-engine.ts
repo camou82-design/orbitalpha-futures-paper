@@ -195,7 +195,6 @@ export class PaperEngine {
       paper_entry_relaxed: config.paperEntryRelaxed,
       paper_gate_min_move_mult: config.paperGateMinMoveMultiplier,
       paper_require_higher_tf: config.paperRequireHigherTfAlign,
-      paper_breakout_strict: config.paperBreakoutStrict,
       paper_quality_min: config.paperQualityMinScore,
       paper_max_open_positions: config.paperMaxOpenPositions
     });
@@ -551,9 +550,7 @@ export class PaperEngine {
       symbol,
       trendOk: trend.trendOk,
       ema20: trend.ema20,
-      lastPrice,
-      latestCandleClose,
-      breakoutStrict: this.config.paperBreakoutStrict
+      latestCandleClose
     });
 
     const qualityScore = computePaperEntryQualityScore({
@@ -633,7 +630,6 @@ export class PaperEngine {
         quality_score: qualityScore,
         signal_strength: signalStrength,
         base_signal: entry.signal,
-        breakout_confirm_ticks: this.config.paperBreakoutStrict ? 2 : 1,
         fee_filter_disabled: gateEval?.feeExpectedMoveGateBypassed === true,
         original_fee_filter_pass: gateEval?.originalExpectedMovePass === true,
         fee_filter_pass:

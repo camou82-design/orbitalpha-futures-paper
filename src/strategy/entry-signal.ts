@@ -9,27 +9,20 @@ export type PaperEntryEvaluation = Readonly<{
 }>;
 
 /**
- * Long-only paper v0: trend_ok ∧ close ≥ EMA20 ∧ breakout vs latest close.
- * `breakoutStrict`: true → lastPrice > latestCandleClose (stricter). false → lastPrice >= latestCandleClose (paper relaxed, 1-tick).
+ * Long-only paper v0: trend_ok ∧ latest candle close ≥ EMA20.
+ * No lastPrice vs close breakout confirmation (sample collection: candidate = entry path).
  */
 export function evaluatePaperLongEntryV0(input: Readonly<{
   symbol: MarketSymbol;
   trendOk: boolean;
   ema20: number | null;
-  lastPrice: number;
   latestCandleClose: number;
-  /** Default true — omit for legacy callers. */
-  breakoutStrict?: boolean;
 }>): PaperEntryEvaluation {
-  const { symbol, trendOk, ema20, lastPrice, latestCandleClose } = input;
-  const breakoutStrict = input.breakoutStrict !== false;
+  const { symbol, trendOk, ema20, latestCandleClose } = input;
   if (ema20 === null || !Number.isFinite(ema20)) {
     return { symbol, entryCandidate: false, signal: "none" };
   }
-  const breakoutOk = breakoutStrict
-    ? lastPrice > latestCandleClose
-    : lastPrice >= latestCandleClose;
-  const entryCandidate = trendOk && latestCandleClose >= ema20 && breakoutOk;
+  const entryCandidate = trendOk && latestCandleClose >= ema20;
   return {
     symbol,
     entryCandidate,

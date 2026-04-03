@@ -51,7 +51,6 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
   const defaultMoveMult = paperEntryRelaxed ? 1.05 : ENTRY_GATE_CONFIG.minMoveVsCostMultiplier;
   const paperGateMinMoveMultiplier = parseNumber(env.ORBITALPHA_PAPER_GATE_MOVE_MULT, defaultMoveMult);
   const paperRequireHigherTfAlign = parseBool(env.ORBITALPHA_PAPER_GATE_REQUIRE_HIGHER_TF, !paperEntryRelaxed);
-  const paperBreakoutStrict = parseBool(env.ORBITALPHA_PAPER_BREAKOUT_STRICT, !paperEntryRelaxed);
   const defaultQualityMin = paperEntryRelaxed ? 60 : 75;
   const paperQualityMinScore = parseNumber(env.ORBITALPHA_PAPER_QUALITY_MIN_SCORE, defaultQualityMin);
   const paperMaxOpenPositions = parseIntClamped(env.ORBITALPHA_PAPER_MAX_OPEN_POSITIONS, 1, 1, 3);
@@ -71,7 +70,6 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperEntryRelaxed,
     paperGateMinMoveMultiplier,
     paperRequireHigherTfAlign,
-    paperBreakoutStrict,
     paperQualityMinScore,
     paperMaxOpenPositions
   };

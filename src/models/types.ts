@@ -54,11 +54,10 @@ export type EngineConfig = Readonly<{
   paperFundingIntervalHours: number;
   dataDir: string;
   logLevel: "debug" | "info" | "warn" | "error";
-  /** Paper-only: relax gates / breakout (this repo is paper-only; no live engine here). */
+  /** Paper-only: relax gates (this repo is paper-only; no live engine here). */
   paperEntryRelaxed: boolean;
   paperGateMinMoveMultiplier: number;
   paperRequireHigherTfAlign: boolean;
-  paperBreakoutStrict: boolean;
   paperQualityMinScore: number;
   paperMaxOpenPositions: number;
 }>;
