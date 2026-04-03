@@ -12,6 +12,25 @@ import {
 
 export const RUNS_INDEX_MAX_ITEMS = 50;
 
+function isPaperOpenRecord(x: unknown): x is PaperOpenPositionRecord {
+  if (!x || typeof x !== "object") return false;
+  const o = x as Record<string, unknown>;
+  return o.status === "open" && typeof o.symbol === "string";
+}
+
+/** Last write wins if duplicate symbols (defensive). */
+function dedupeOpensBySymbol(list: readonly PaperOpenPositionRecord[]): PaperOpenPositionRecord[] {
+  const seen = new Set<string>();
+  const out: PaperOpenPositionRecord[] = [];
+  for (const r of list) {
+    const sym = String(r.symbol);
+    if (seen.has(sym)) continue;
+    seen.add(sym);
+    out.push(r);
+  }
+  return out;
+}
+
 export type CandidateRunIndexItem = Readonly<{
   fetchedAt: number;
   runPath: string;
@@ -117,23 +136,32 @@ export class JsonStore {
     return await this.writeJson(indexRel, next);
   }
 
-  async readPositionsOpen(): Promise<PaperOpenPositionRecord | null> {
+  /**
+   * `positions/open.json`: JSON array of open records (v2), or legacy single object `{ status:"open", ... }`.
+   */
+  async readPositionsOpenAll(): Promise<PaperOpenPositionRecord[]> {
     const rel = "positions/open.json";
+    const fullPath = path.resolve(this.baseDir, rel);
     try {
-      const fullPath = path.resolve(this.baseDir, rel);
       const raw = await fs.readFile(fullPath, "utf8");
       const j = JSON.parse(raw) as unknown;
-      if (!j || typeof j !== "object" || (j as { status?: string }).status !== "open") return null;
-      return j as PaperOpenPositionRecord;
+      if (Array.isArray(j)) {
+        return j.filter((x): x is PaperOpenPositionRecord => isPaperOpenRecord(x));
+      }
+      if (j && typeof j === "object" && isPaperOpenRecord(j)) {
+        return [j];
+      }
+      return [];
     } catch (e: unknown) {
       const err = e as NodeJS.ErrnoException;
-      if (err.code === "ENOENT") return null;
+      if (err.code === "ENOENT") return [];
       throw e;
     }
   }
 
-  async writePositionsOpen(pos: PaperOpenPositionRecord): Promise<string> {
-    return await this.writeJson("positions/open.json", pos);
+  async writePositionsOpenAll(list: readonly PaperOpenPositionRecord[]): Promise<string> {
+    const dedup = dedupeOpensBySymbol(list);
+    return await this.writeJson("positions/open.json", dedup);
   }
 
   /** Ensure `positions/history.json` exists as an empty array. */
@@ -159,13 +187,7 @@ export class JsonStore {
   }
 
   async deletePositionsOpen(): Promise<void> {
-    const fullPath = path.resolve(this.baseDir, "positions/open.json");
-    try {
-      await fs.unlink(fullPath);
-    } catch (e: unknown) {
-      const err = e as NodeJS.ErrnoException;
-      if (err.code !== "ENOENT") throw e;
-    }
+    await this.writePositionsOpenAll([]);
   }
 
   /** Full `positions/history.json` array (ensures file exists). */

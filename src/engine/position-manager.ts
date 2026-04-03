@@ -5,12 +5,12 @@ import type { JsonStore } from "../storage/json-store";
 export class PositionManager {
   constructor(private readonly store: JsonStore) {}
 
-  async loadOpen(): Promise<PaperOpenPositionRecord | null> {
-    return await this.store.readPositionsOpen();
+  async loadOpenAll(): Promise<PaperOpenPositionRecord[]> {
+    return await this.store.readPositionsOpenAll();
   }
 
-  async saveOpen(pos: PaperOpenPositionRecord): Promise<string> {
-    return await this.store.writePositionsOpen(pos);
+  async saveOpenAll(positions: readonly PaperOpenPositionRecord[]): Promise<string> {
+    return await this.store.writePositionsOpenAll(positions);
   }
 
   async ensureHistoryFile(): Promise<void> {

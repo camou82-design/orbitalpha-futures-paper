@@ -184,13 +184,6 @@ export class PaperEngine {
     this.bybit = new BybitPublicClient();
     this.positions = new PositionManager(this.store);
     this.risk = new RiskManager(config);
-    if (config.paperMaxOpenPositions > 1) {
-      this.logger.warn("paper_max_open_positions_unsupported_schema", {
-        configured: config.paperMaxOpenPositions,
-        effective: 1,
-        note: "data/positions/open.json is single-position v1; clamp behavior to 1 open"
-      });
-    }
     this.logger.info("paper_entry_gate_config", {
       paper_entry_relaxed: config.paperEntryRelaxed,
       paper_gate_min_move_mult: config.paperGateMinMoveMultiplier,
@@ -369,91 +362,108 @@ export class PaperEngine {
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
 
-    const open = await this.positions.loadOpen();
-    if (!open || open.status !== "open") return;
+    const opens = await this.positions.loadOpenAll();
+    if (opens.length === 0) return;
 
-    const snap = input.snapshots.find((s) => s.symbol === open.symbol);
-    if (!snap) return;
+    const remaining: PaperOpenPositionRecord[] = [];
 
-    if (snap.signal === "paper_long_candidate") {
-      return;
+    for (const open of opens) {
+      if (open.status !== "open") {
+        remaining.push(open);
+        continue;
+      }
+
+      const snap = input.snapshots.find((s) => s.symbol === open.symbol);
+      if (!snap) {
+        remaining.push(open);
+        continue;
+      }
+
+      if (snap.signal === "paper_long_candidate") {
+        remaining.push(open);
+        continue;
+      }
+
+      const closePrice = snap.lastPrice;
+      const closedAt = snap.fetchedAt;
+      if (!Number.isFinite(closePrice) || !Number.isFinite(open.entryPrice) || open.entryPrice === 0) {
+        remaining.push(open);
+        continue;
+      }
+
+      const feeRate = this.config.paperTakerFeeRate;
+      const openNotionalUsd = open.sizeUsd * open.leverage;
+      const closeNotionalUsd = open.sizeUsd * open.leverage;
+      const feeUsd = (openNotionalUsd + closeNotionalUsd) * feeRate;
+      const pnlUsdGross =
+        ((closePrice - open.entryPrice) / open.entryPrice) * open.sizeUsd * open.leverage;
+      const rawOpenFr = open.openFundingRate;
+      const fundingRateAppliedOpen = typeof rawOpenFr === "number" && Number.isFinite(rawOpenFr) ? rawOpenFr : 0;
+      const rawCloseFr = snap.fundingRate;
+      const fundingRateAppliedClose =
+        typeof rawCloseFr === "number" && Number.isFinite(rawCloseFr)
+          ? rawCloseFr
+          : fundingRateAppliedOpen !== 0
+            ? fundingRateAppliedOpen
+            : 0;
+      const fundingRateAverage = (fundingRateAppliedOpen + fundingRateAppliedClose) / 2;
+
+      const intervalH = this.config.paperFundingIntervalHours;
+      const intervalMs = intervalH * 60 * 60 * 1000;
+      const holdingMsRaw = closedAt - open.openedAt;
+      const holdingMs = holdingMsRaw <= 0 ? 0 : holdingMsRaw;
+      const fundingPeriods = intervalMs > 0 && holdingMs > 0 ? holdingMs / intervalMs : 0;
+      const fundingUsd = open.sizeUsd * open.leverage * fundingRateAverage * fundingPeriods;
+      const pnlUsdNet = pnlUsdGross - feeUsd - fundingUsd;
+
+      const closed: PaperClosedPositionRecord = {
+        openedAt: open.openedAt,
+        closedAt,
+        symbol: open.symbol,
+        side: "long",
+        entryPrice: open.entryPrice,
+        closePrice,
+        leverage: open.leverage,
+        sizeUsd: open.sizeUsd,
+        pnlUsd: pnlUsdNet,
+        pnlUsdGross,
+        pnlUsdNet,
+        feeRate,
+        feeUsd,
+        fundingModel: "avg_open_close_rate_v3",
+        fundingIntervalHours: intervalH,
+        holdingMs,
+        fundingPeriods,
+        fundingRateAppliedOpen,
+        fundingRateAppliedClose,
+        fundingRateAverage,
+        fundingUsd,
+        strategyVersion: open.strategyVersion,
+        sourceSignal: open.sourceSignal,
+        sourceRunPath: open.sourceRunPath,
+        ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
+        ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
+        ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
+        closeReason: "candidate_lost"
+      };
+
+      await this.positions.appendClosed(closed);
+      this.logger.info("paper_position_closed", {
+        symbol: open.symbol,
+        pnlUsd: pnlUsdNet,
+        pnlUsdGross,
+        feeUsd,
+        fundingUsd,
+        fundingModel: "avg_open_close_rate_v3",
+        fundingRateAverage,
+        fundingPeriods,
+        closeReason: "candidate_lost"
+      });
     }
 
-    const closePrice = snap.lastPrice;
-    const closedAt = snap.fetchedAt;
-    if (!Number.isFinite(closePrice) || !Number.isFinite(open.entryPrice) || open.entryPrice === 0) {
-      return;
+    if (remaining.length !== opens.length) {
+      await this.positions.saveOpenAll(remaining);
     }
-
-    const feeRate = this.config.paperTakerFeeRate;
-    const openNotionalUsd = open.sizeUsd * open.leverage;
-    const closeNotionalUsd = open.sizeUsd * open.leverage;
-    const feeUsd = (openNotionalUsd + closeNotionalUsd) * feeRate;
-    const pnlUsdGross =
-      ((closePrice - open.entryPrice) / open.entryPrice) * open.sizeUsd * open.leverage;
-    const rawOpenFr = open.openFundingRate;
-    const fundingRateAppliedOpen = typeof rawOpenFr === "number" && Number.isFinite(rawOpenFr) ? rawOpenFr : 0;
-    const rawCloseFr = snap.fundingRate;
-    const fundingRateAppliedClose =
-      typeof rawCloseFr === "number" && Number.isFinite(rawCloseFr)
-        ? rawCloseFr
-        : fundingRateAppliedOpen !== 0
-          ? fundingRateAppliedOpen
-          : 0;
-    const fundingRateAverage = (fundingRateAppliedOpen + fundingRateAppliedClose) / 2;
-
-    const intervalH = this.config.paperFundingIntervalHours;
-    const intervalMs = intervalH * 60 * 60 * 1000;
-    const holdingMsRaw = closedAt - open.openedAt;
-    const holdingMs = holdingMsRaw <= 0 ? 0 : holdingMsRaw;
-    const fundingPeriods = intervalMs > 0 && holdingMs > 0 ? holdingMs / intervalMs : 0;
-    const fundingUsd = open.sizeUsd * open.leverage * fundingRateAverage * fundingPeriods;
-    const pnlUsdNet = pnlUsdGross - feeUsd - fundingUsd;
-
-    const closed: PaperClosedPositionRecord = {
-      openedAt: open.openedAt,
-      closedAt,
-      symbol: open.symbol,
-      side: "long",
-      entryPrice: open.entryPrice,
-      closePrice,
-      leverage: open.leverage,
-      sizeUsd: open.sizeUsd,
-      pnlUsd: pnlUsdNet,
-      pnlUsdGross,
-      pnlUsdNet,
-      feeRate,
-      feeUsd,
-      fundingModel: "avg_open_close_rate_v3",
-      fundingIntervalHours: intervalH,
-      holdingMs,
-      fundingPeriods,
-      fundingRateAppliedOpen,
-      fundingRateAppliedClose,
-      fundingRateAverage,
-      fundingUsd,
-      strategyVersion: open.strategyVersion,
-      sourceSignal: open.sourceSignal,
-      sourceRunPath: open.sourceRunPath,
-      ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
-      ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
-      ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
-      closeReason: "candidate_lost"
-    };
-
-    await this.positions.appendClosed(closed);
-    await this.positions.deleteOpen();
-    this.logger.info("paper_position_closed", {
-      symbol: open.symbol,
-      pnlUsd: pnlUsdNet,
-      pnlUsdGross,
-      feeUsd,
-      fundingUsd,
-      fundingModel: "avg_open_close_rate_v3",
-      fundingRateAverage,
-      fundingPeriods,
-      closeReason: "candidate_lost"
-    });
   }
 
   private async tryPaperPositionOpen(input: Readonly<{
@@ -466,38 +476,49 @@ export class PaperEngine {
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
 
-    const first = input.snapshots.find((s) => s.signal === "paper_long_candidate");
-    if (!first) return;
-
-    const existing = await this.positions.loadOpen();
-    if (existing && existing.status === "open") {
-      this.logger.info("paper_position_skipped_existing_open", { symbol: existing.symbol });
-      return;
-    }
+    const candidates = input.snapshots.filter((s) => s.signal === "paper_long_candidate");
+    if (candidates.length === 0) return;
 
     if (!input.candidateRunPath || !input.latestPath || !input.metaPath || !input.filePath) {
       return;
     }
 
-    const record: PaperOpenPositionRecord = {
-      openedAt: Date.now(),
-      symbol: first.symbol,
-      side: "long",
-      entryPrice: first.lastPrice,
-      leverage: this.config.leverage,
-      sizeUsd: DEFAULT_PAPER_SIZE_USD,
-      strategyVersion: "paper-v0",
-      sourceSignal: "paper_long_candidate",
-      sourceRunPath: input.candidateRunPath,
-      latestSnapshotPath: input.latestPath,
-      latestMetaPath: input.metaPath,
-      timestampSnapshotPath: input.filePath,
-      ...(Number.isFinite(first.fundingRate) ? { openFundingRate: first.fundingRate } : {}),
-      status: "open"
-    };
+    const max = this.config.paperMaxOpenPositions;
+    const opens = await this.positions.loadOpenAll();
+    const before = opens.length;
+    const next = [...opens];
 
-    const openPath = await this.positions.saveOpen(record);
-    this.logger.info("paper_position_opened", { symbol: record.symbol, path: openPath });
+    for (const first of candidates) {
+      if (next.length >= max) break;
+      if (next.some((o) => o.symbol === first.symbol)) {
+        this.logger.info("paper_position_skipped_existing_open", { symbol: first.symbol });
+        continue;
+      }
+
+      const record: PaperOpenPositionRecord = {
+        openedAt: Date.now(),
+        symbol: first.symbol,
+        side: "long",
+        entryPrice: first.lastPrice,
+        leverage: this.config.leverage,
+        sizeUsd: DEFAULT_PAPER_SIZE_USD,
+        strategyVersion: "paper-v0",
+        sourceSignal: "paper_long_candidate",
+        sourceRunPath: input.candidateRunPath,
+        latestSnapshotPath: input.latestPath,
+        latestMetaPath: input.metaPath,
+        timestampSnapshotPath: input.filePath,
+        ...(Number.isFinite(first.fundingRate) ? { openFundingRate: first.fundingRate } : {}),
+        status: "open"
+      };
+
+      next.push(record);
+      this.logger.info("paper_position_opened", { symbol: record.symbol, path: "positions/open.json" });
+    }
+
+    if (next.length !== before) {
+      await this.positions.saveOpenAll(next);
+    }
   }
 
   private async pollSymbol(

@@ -53,7 +53,7 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
   const paperRequireHigherTfAlign = parseBool(env.ORBITALPHA_PAPER_GATE_REQUIRE_HIGHER_TF, !paperEntryRelaxed);
   const defaultQualityMin = paperEntryRelaxed ? 60 : 75;
   const paperQualityMinScore = parseNumber(env.ORBITALPHA_PAPER_QUALITY_MIN_SCORE, defaultQualityMin);
-  const paperMaxOpenPositions = parseIntClamped(env.ORBITALPHA_PAPER_MAX_OPEN_POSITIONS, 1, 1, 3);
+  const paperMaxOpenPositions = parseIntClamped(env.ORBITALPHA_PAPER_MAX_OPEN_POSITIONS, 3, 1, 3);
 
   return {
     symbols: parseSymbols(env.SYMBOLS),

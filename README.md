@@ -47,7 +47,7 @@ Each index item may include `latestSnapshotPath` and `latestMetaPath` (absolute 
 
 `timestampSnapshotPath` may point to the immutable `snapshots/{fetchedAt}.json` written for that same run.
 
-Paper positions (simulated only): `data/positions/history.json` is ensured as `[]` on each run; when a `paper_long_candidate` is saved as a candidate run and no open position exists, `data/positions/open.json` records a single long position (one at a time). If the open symbol’s signal is no longer `paper_long_candidate`, the position is closed, appended to history, and `open.json` is removed.
+Paper positions (simulated only): `data/positions/history.json` is ensured as `[]` on each run; `data/positions/open.json` is a JSON array of open long positions (up to `ORBITALPHA_PAPER_MAX_OPEN_POSITIONS`, default 3). When a `paper_long_candidate` is saved as a candidate run and capacity allows, new opens are appended per symbol. If a symbol’s signal is no longer `paper_long_candidate`, that leg is closed, appended to history, and removed from the array (or the file becomes `[]`).
 
 On close, recorded `pnlUsd` / `pnlUsdNet` is **after** a simple round-trip **taker** fee (configurable via `ORBITALPHA_PAPER_FUTURES_TAKER_FEE_RATE`, default `0.0006`) applied to open and close notionals (`sizeUsd * leverage` each). `pnlUsdGross` is the raw mark-to-market before fees.
 
