@@ -602,7 +602,8 @@ export class PaperEngine {
           gateOptions: {
             minMoveMultiplier: this.config.paperGateMinMoveMultiplier,
             requireHigherTfAlign: this.config.paperRequireHigherTfAlign
-          }
+          },
+          paperBypassExpectedMoveGate: true
         });
         gateEval = gate;
 
@@ -614,6 +615,8 @@ export class PaperEngine {
             symbol,
             reason: gate.blockReason,
             paper_entry_relaxed: this.config.paperEntryRelaxed,
+            fee_filter_disabled: gate.feeExpectedMoveGateBypassed === true,
+            original_fee_filter_pass: gate.originalExpectedMovePass === true,
             expected_move: gate.expectedMove,
             required_move: gate.requiredMove,
             required_move_threshold: gate.requiredMoveThreshold,
@@ -631,8 +634,17 @@ export class PaperEngine {
         signal_strength: signalStrength,
         base_signal: entry.signal,
         breakout_confirm_ticks: this.config.paperBreakoutStrict ? 2 : 1,
-        fee_filter_pass: gateEval?.allowed ?? (gateBlockedReason === "quality_below_min" ? false : null),
-        entry_blocked: gateBlockedReason ?? (gateEval && !gateEval.allowed ? gateEval.blockReason : null),
+        fee_filter_disabled: gateEval?.feeExpectedMoveGateBypassed === true,
+        original_fee_filter_pass: gateEval?.originalExpectedMovePass === true,
+        fee_filter_pass:
+          gateEval != null
+            ? gateEval.feeExpectedMoveGateBypassed === true || gateEval.originalExpectedMovePass === true
+            : gateBlockedReason === "quality_below_min"
+              ? false
+              : null,
+        entry_blocked:
+          gateBlockedReason ??
+          (gateEval && !gateEval.allowed ? gateEval.blockReason : false),
         gate_expected_move: gateEval?.expectedMove,
         gate_required_threshold: gateEval?.requiredMoveThreshold,
         higher_tf_required: this.config.paperRequireHigherTfAlign,

@@ -15,6 +15,10 @@ export type EntryGateEvaluation = Readonly<{
   /** `requiredMove * minMoveVsCostMultiplier` — volatility must exceed this. */
   requiredMoveThreshold: number;
   higherTfAligned: boolean;
+  /** Paper-only: fee/ATR vs threshold would have passed without code bypass. */
+  originalExpectedMovePass?: boolean;
+  /** Paper-only: expected-move gate skipped in code (`paperBypassExpectedMoveGate`). */
+  feeExpectedMoveGateBypassed?: boolean;
 }>;
 
 function trueRange(high: number, low: number, prevClose: number): number {
@@ -78,11 +82,17 @@ export function evaluateEntryCostAndHigherTfGate(input: Readonly<{
   fundingRate: number;
   /** If omitted, uses strict defaults from `ENTRY_GATE_CONFIG`. */
   gateOptions?: EntryGateRuntimeOptions;
+  /**
+   * Paper simulation only: when true, never block on `low_expected_move` (fee/ATR vs threshold).
+   * Live trading code paths must not set this.
+   */
+  paperBypassExpectedMoveGate?: boolean;
 }>): EntryGateEvaluation {
   const period = ENTRY_GATE_CONFIG.volatilityAtrPeriod;
   const mult =
     input.gateOptions?.minMoveMultiplier ?? ENTRY_GATE_CONFIG.minMoveVsCostMultiplier;
   const requireHigherTfAlign = input.gateOptions?.requireHigherTfAlign ?? true;
+  const paperBypass = input.paperBypassExpectedMoveGate === true;
 
   const requiredMove = minRequiredMoveFraction({
     takerFeeRate: input.takerFeeRate,
@@ -91,29 +101,9 @@ export function evaluateEntryCostAndHigherTfGate(input: Readonly<{
   });
   const requiredMoveThreshold = requiredMove * mult;
 
-  if (!Number.isFinite(input.refPrice) || input.refPrice <= 0) {
-    return {
-      allowed: false,
-      blockReason: "low_expected_move",
-      expectedMove: 0,
-      requiredMove,
-      requiredMoveThreshold,
-      higherTfAligned: false
-    };
-  }
-
+  const refOk = Number.isFinite(input.refPrice) && input.refPrice > 0;
   const atr = atrWilderLast(input.entryTimeframeCandles, period);
-  const expectedMove = atr !== null ? atr / input.refPrice : 0;
-  if (atr === null) {
-    return {
-      allowed: false,
-      blockReason: "low_expected_move",
-      expectedMove: 0,
-      requiredMove,
-      requiredMoveThreshold,
-      higherTfAligned: false
-    };
-  }
+  const expectedMove = refOk && atr !== null ? atr / input.refPrice : 0;
 
   let higherTfAligned = false;
   if (input.higherTfCandles !== null && input.higherTfCandles.length > 0) {
@@ -121,17 +111,48 @@ export function evaluateEntryCostAndHigherTfGate(input: Readonly<{
     higherTfAligned = higherTfLongTrendOk(hCloses);
   }
 
-  const volOk = expectedMove >= requiredMoveThreshold;
-  if (!volOk) {
-    return {
-      allowed: false,
-      blockReason: "low_expected_move",
-      expectedMove,
-      requiredMove,
-      requiredMoveThreshold,
-      higherTfAligned
-    };
+  const volOk = refOk && atr !== null && expectedMove >= requiredMoveThreshold;
+  const originalExpectedMovePass = volOk;
+
+  if (!paperBypass) {
+    if (!refOk) {
+      return {
+        allowed: false,
+        blockReason: "low_expected_move",
+        expectedMove: 0,
+        requiredMove,
+        requiredMoveThreshold,
+        higherTfAligned: false,
+        originalExpectedMovePass: false,
+        feeExpectedMoveGateBypassed: false
+      };
+    }
+    if (atr === null) {
+      return {
+        allowed: false,
+        blockReason: "low_expected_move",
+        expectedMove: 0,
+        requiredMove,
+        requiredMoveThreshold,
+        higherTfAligned,
+        originalExpectedMovePass: false,
+        feeExpectedMoveGateBypassed: false
+      };
+    }
+    if (!volOk) {
+      return {
+        allowed: false,
+        blockReason: "low_expected_move",
+        expectedMove,
+        requiredMove,
+        requiredMoveThreshold,
+        higherTfAligned,
+        originalExpectedMovePass: false,
+        feeExpectedMoveGateBypassed: false
+      };
+    }
   }
+
   if (requireHigherTfAlign && !higherTfAligned) {
     return {
       allowed: false,
@@ -139,7 +160,9 @@ export function evaluateEntryCostAndHigherTfGate(input: Readonly<{
       expectedMove,
       requiredMove,
       requiredMoveThreshold,
-      higherTfAligned: false
+      higherTfAligned: false,
+      originalExpectedMovePass,
+      feeExpectedMoveGateBypassed: paperBypass
     };
   }
 
@@ -148,7 +171,9 @@ export function evaluateEntryCostAndHigherTfGate(input: Readonly<{
     expectedMove,
     requiredMove,
     requiredMoveThreshold,
-    higherTfAligned
+    higherTfAligned,
+    originalExpectedMovePass,
+    feeExpectedMoveGateBypassed: paperBypass
   };
 }
 
