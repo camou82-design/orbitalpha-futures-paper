@@ -59,7 +59,13 @@ export type EngineConfig = Readonly<{
   paperGateMinMoveMultiplier: number;
   paperRequireHigherTfAlign: boolean;
   paperQualityMinScore: number;
+  /** When relaxed + weak sideways candidate, quality floor (lower than `paperQualityMinScore`). */
+  paperQualityMinScoreWeak: number;
   paperMaxOpenPositions: number;
+  /** Min positive (ema20-ema60)/ema60 for "strong" long; symmetric for short. Paper-only. */
+  paperStrongEmaGapThreshold: number;
+  /** Max |emaGap| for weak/sideways long or short (must be >= strong threshold). Paper-only. */
+  paperSidewaysEmaGapThreshold: number;
 }>;
 
 /** One leg in `positions/open.json` (JSON array of up to `paperMaxOpenPositions` records). */

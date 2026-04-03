@@ -192,6 +192,9 @@ export class PaperEngine {
       paper_gate_min_move_mult: config.paperGateMinMoveMultiplier,
       paper_require_higher_tf: config.paperRequireHigherTfAlign,
       paper_quality_min: config.paperQualityMinScore,
+      paper_quality_min_weak: config.paperQualityMinScoreWeak,
+      paper_strong_ema_gap_threshold: config.paperStrongEmaGapThreshold,
+      paper_sideways_ema_gap_threshold: config.paperSidewaysEmaGapThreshold,
       paper_max_open_positions: config.paperMaxOpenPositions
     });
   }
@@ -595,7 +598,9 @@ export class PaperEngine {
       symbol,
       ema20: trend.ema20,
       ema60: trend.ema60,
-      latestCandleClose
+      latestCandleClose,
+      strongEmaGapThreshold: this.config.paperStrongEmaGapThreshold,
+      sidewaysEmaGapThreshold: this.config.paperSidewaysEmaGapThreshold
     });
 
     const sideForQuality =
@@ -605,14 +610,17 @@ export class PaperEngine {
           ? "short"
           : null;
     const qualityScore =
-      sideForQuality === null
+      sideForQuality === null || entry.candidateStrength === null
         ? 0
         : computePaperEntryQualityScore({
             ema20: trend.ema20,
             ema60: trend.ema60,
             lastPrice,
             latestCandleClose,
-            side: sideForQuality
+            side: sideForQuality,
+            candidateStrength: entry.candidateStrength,
+            emaGap: entry.emaGap ?? 0,
+            sidewaysEmaGapThreshold: this.config.paperSidewaysEmaGapThreshold
           });
     const signalStrength = paperSignalStrengthLabel(qualityScore, this.config.paperEntryRelaxed);
 
@@ -627,12 +635,13 @@ export class PaperEngine {
           ? "short"
           : null;
 
+    const qualityMinEffective =
+      entry.candidateStrength === "weak"
+        ? Math.min(this.config.paperQualityMinScore, this.config.paperQualityMinScoreWeak)
+        : this.config.paperQualityMinScore;
+
     if (entrySide !== null) {
-      if (
-        this.config.paperEntryRelaxed &&
-        this.config.paperQualityMinScore > 0 &&
-        qualityScore < this.config.paperQualityMinScore
-      ) {
+      if (this.config.paperQualityMinScore > 0 && qualityScore < qualityMinEffective) {
         signal = "none";
         entryCandidate = false;
         gateBlockedReason = "quality_below_min";
@@ -641,7 +650,11 @@ export class PaperEngine {
           reason: "quality_below_min",
           paper_entry_relaxed: this.config.paperEntryRelaxed,
           quality_score: qualityScore,
-          paper_quality_min: this.config.paperQualityMinScore
+          paper_quality_min_effective: qualityMinEffective,
+          paper_quality_min: this.config.paperQualityMinScore,
+          paper_quality_min_weak: this.config.paperQualityMinScoreWeak,
+          candidate_strength: entry.candidateStrength,
+          weak_sideways_lower_floor: entry.candidateStrength === "weak"
         });
       } else {
         const tfHi = entryGateHigherTimeframe();
@@ -688,8 +701,16 @@ export class PaperEngine {
         paper_entry_relaxed: this.config.paperEntryRelaxed,
         symbol,
         trend_ok: trend.trendOk,
+        ema_gap: entry.emaGap,
+        sideways_mode: entry.sidewaysMode,
+        candidate_strength: entry.candidateStrength,
         quality_score: qualityScore,
         signal_strength: signalStrength,
+        quality_min_effective: qualityMinEffective,
+        weak_sideways_quality_note:
+          entry.candidateStrength === "weak"
+            ? `weak_floor_${qualityMinEffective}_strong_floor_${this.config.paperQualityMinScore}`
+            : null,
         side: entrySide,
         base_signal: entry.signal,
         fee_filter_disabled: gateEval?.feeExpectedMoveGateBypassed === true,
@@ -715,8 +736,13 @@ export class PaperEngine {
         paper_entry_relaxed: this.config.paperEntryRelaxed,
         symbol,
         trend_ok: trend.trendOk,
+        ema_gap: entry.emaGap,
+        sideways_mode: entry.sidewaysMode,
+        candidate_strength: entry.candidateStrength,
         quality_score: 0,
         signal_strength: paperSignalStrengthLabel(0, this.config.paperEntryRelaxed),
+        quality_min_effective: null,
+        weak_sideways_quality_note: null,
         side: null,
         base_signal: entry.signal,
         fee_filter_disabled: null,
@@ -751,6 +777,10 @@ export class PaperEngine {
       symbol,
       signal,
       base_signal: entry.signal,
+      ema_gap: entry.emaGap,
+      sideways_mode: entry.sidewaysMode,
+      candidate_strength: entry.candidateStrength,
+      signal_strength: signalStrength,
       trendOk: trend.trendOk
     });
     return { ok: true, snapshot, symbolDiagnostics };
