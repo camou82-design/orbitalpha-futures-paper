@@ -63,15 +63,26 @@ export function higherTfLongTrendOk(closes: readonly number[]): boolean {
   return ema20 > ema60;
 }
 
+export type EntryGateRuntimeOptions = Readonly<{
+  /** Overrides `ENTRY_GATE_CONFIG.minMoveVsCostMultiplier` (paper relaxed vs strict). */
+  minMoveMultiplier: number;
+  /** When false, higher-TF EMA alignment is not required after vol passes. */
+  requireHigherTfAlign: boolean;
+}>;
+
 export function evaluateEntryCostAndHigherTfGate(input: Readonly<{
   entryTimeframeCandles: readonly Candle[];
   higherTfCandles: readonly Candle[] | null;
   refPrice: number;
   takerFeeRate: number;
   fundingRate: number;
+  /** If omitted, uses strict defaults from `ENTRY_GATE_CONFIG`. */
+  gateOptions?: EntryGateRuntimeOptions;
 }>): EntryGateEvaluation {
   const period = ENTRY_GATE_CONFIG.volatilityAtrPeriod;
-  const mult = ENTRY_GATE_CONFIG.minMoveVsCostMultiplier;
+  const mult =
+    input.gateOptions?.minMoveMultiplier ?? ENTRY_GATE_CONFIG.minMoveVsCostMultiplier;
+  const requireHigherTfAlign = input.gateOptions?.requireHigherTfAlign ?? true;
 
   const requiredMove = minRequiredMoveFraction({
     takerFeeRate: input.takerFeeRate,
@@ -121,7 +132,7 @@ export function evaluateEntryCostAndHigherTfGate(input: Readonly<{
       higherTfAligned
     };
   }
-  if (!higherTfAligned) {
+  if (requireHigherTfAlign && !higherTfAligned) {
     return {
       allowed: false,
       blockReason: "higher_tf_mismatch",
@@ -137,7 +148,7 @@ export function evaluateEntryCostAndHigherTfGate(input: Readonly<{
     expectedMove,
     requiredMove,
     requiredMoveThreshold,
-    higherTfAligned: true
+    higherTfAligned
   };
 }
 

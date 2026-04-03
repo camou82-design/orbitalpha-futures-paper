@@ -2,6 +2,7 @@ import * as path from "node:path";
 import * as dotenv from "dotenv";
 
 import type { EngineConfig, MarketSymbol } from "../models/types";
+import { ENTRY_GATE_CONFIG } from "../strategy/entry-gate-config";
 
 export type EnvInput = NodeJS.ProcessEnv;
 
@@ -17,6 +18,13 @@ function parseNumber(v: string | undefined, fallback: number): number {
   if (v === undefined) return fallback;
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function parseIntClamped(v: string | undefined, fallback: number, min: number, max: number): number {
+  if (v === undefined || v.trim() === "") return fallback;
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
 }
 
 function parseLogLevel(v: string | undefined): EngineConfig["logLevel"] {
@@ -39,6 +47,15 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
   const dataDir = (env.DATA_DIR ?? "./data").trim();
   const paperTakerFeeRaw = env.ORBITALPHA_PAPER_FUTURES_TAKER_FEE_RATE ?? env.TAKER_FEE_RATE;
   const fundingIntervalRaw = env.ORBITALPHA_PAPER_FUTURES_FUNDING_INTERVAL_HOURS;
+  const paperEntryRelaxed = parseBool(env.ORBITALPHA_PAPER_ENTRY_RELAXED, false);
+  const defaultMoveMult = paperEntryRelaxed ? 1.05 : ENTRY_GATE_CONFIG.minMoveVsCostMultiplier;
+  const paperGateMinMoveMultiplier = parseNumber(env.ORBITALPHA_PAPER_GATE_MOVE_MULT, defaultMoveMult);
+  const paperRequireHigherTfAlign = parseBool(env.ORBITALPHA_PAPER_GATE_REQUIRE_HIGHER_TF, !paperEntryRelaxed);
+  const paperBreakoutStrict = parseBool(env.ORBITALPHA_PAPER_BREAKOUT_STRICT, !paperEntryRelaxed);
+  const defaultQualityMin = paperEntryRelaxed ? 60 : 75;
+  const paperQualityMinScore = parseNumber(env.ORBITALPHA_PAPER_QUALITY_MIN_SCORE, defaultQualityMin);
+  const paperMaxOpenPositions = parseIntClamped(env.ORBITALPHA_PAPER_MAX_OPEN_POSITIONS, 1, 1, 3);
+
   return {
     symbols: parseSymbols(env.SYMBOLS),
     leverage: parseNumber(env.LEVERAGE, 2),
@@ -50,7 +67,13 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperTakerFeeRate: parseNumber(paperTakerFeeRaw, 0.0006),
     paperFundingIntervalHours: parseNumber(fundingIntervalRaw, 8),
     dataDir,
-    logLevel: parseLogLevel(env.LOG_LEVEL)
+    logLevel: parseLogLevel(env.LOG_LEVEL),
+    paperEntryRelaxed,
+    paperGateMinMoveMultiplier,
+    paperRequireHigherTfAlign,
+    paperBreakoutStrict,
+    paperQualityMinScore,
+    paperMaxOpenPositions
   };
 }
 

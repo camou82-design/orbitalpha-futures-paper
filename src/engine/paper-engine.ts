@@ -13,6 +13,7 @@ import {
   entryGateHigherTimeframe,
   evaluateEntryCostAndHigherTfGate
 } from "../strategy/entry-gate";
+import { computePaperEntryQualityScore, paperSignalStrengthLabel } from "../strategy/paper-entry-quality";
 import { paperHealthStatusLogPayload } from "../storage/paper-health";
 import { PositionManager } from "./position-manager";
 import { RiskManager } from "./risk-manager";
@@ -183,6 +184,21 @@ export class PaperEngine {
     this.bybit = new BybitPublicClient();
     this.positions = new PositionManager(this.store);
     this.risk = new RiskManager(config);
+    if (config.paperMaxOpenPositions > 1) {
+      this.logger.warn("paper_max_open_positions_unsupported_schema", {
+        configured: config.paperMaxOpenPositions,
+        effective: 1,
+        note: "data/positions/open.json is single-position v1; clamp behavior to 1 open"
+      });
+    }
+    this.logger.info("paper_entry_gate_config", {
+      paper_entry_relaxed: config.paperEntryRelaxed,
+      paper_gate_min_move_mult: config.paperGateMinMoveMultiplier,
+      paper_require_higher_tf: config.paperRequireHigherTfAlign,
+      paper_breakout_strict: config.paperBreakoutStrict,
+      paper_quality_min: config.paperQualityMinScore,
+      paper_max_open_positions: config.paperMaxOpenPositions
+    });
   }
 
   async runOnce(): Promise<void> {
@@ -536,40 +552,94 @@ export class PaperEngine {
       trendOk: trend.trendOk,
       ema20: trend.ema20,
       lastPrice,
+      latestCandleClose,
+      breakoutStrict: this.config.paperBreakoutStrict
+    });
+
+    const qualityScore = computePaperEntryQualityScore({
+      trendOk: trend.trendOk,
+      ema20: trend.ema20,
+      ema60: trend.ema60,
+      lastPrice,
       latestCandleClose
     });
+    const signalStrength = paperSignalStrengthLabel(qualityScore, this.config.paperEntryRelaxed);
 
     let signal: PaperSignal = entry.signal;
     let entryCandidate = entry.entryCandidate;
+    let gateEval: ReturnType<typeof evaluateEntryCostAndHigherTfGate> | null = null;
+    let gateBlockedReason: string | null = null;
 
     if (entry.signal === "paper_long_candidate") {
-      const tfHi = entryGateHigherTimeframe();
-      const limHi = entryGateHigherTfKlineLimit();
-      const rC5 = await this.bybit.tryGetCandles(symbol, tfHi, limHi);
-      symbolDiagnostics.push(toSymbolDiagnostic(symbol, EP.kline, rC5.diagnostics));
-
-      const higherCandles = rC5.ok ? rC5.value : null;
-      const gate = evaluateEntryCostAndHigherTfGate({
-        entryTimeframeCandles: rC.value,
-        higherTfCandles: higherCandles,
-        refPrice: lastPrice,
-        takerFeeRate: this.config.paperTakerFeeRate,
-        fundingRate: rF.value.rate
-      });
-
-      if (!gate.allowed) {
+      if (
+        this.config.paperEntryRelaxed &&
+        this.config.paperQualityMinScore > 0 &&
+        qualityScore < this.config.paperQualityMinScore
+      ) {
         signal = "none";
         entryCandidate = false;
+        gateBlockedReason = "quality_below_min";
         this.logger.info("DEBUG_ENTRY_BLOCKED_REASON", {
           symbol,
-          reason: gate.blockReason,
-          expected_move: gate.expectedMove,
-          required_move: gate.requiredMove,
-          required_move_threshold: gate.requiredMoveThreshold,
-          higher_tf: tfHi,
-          higher_tf_aligned: gate.higherTfAligned
+          reason: "quality_below_min",
+          paper_entry_relaxed: this.config.paperEntryRelaxed,
+          quality_score: qualityScore,
+          paper_quality_min: this.config.paperQualityMinScore
         });
+      } else {
+        const tfHi = entryGateHigherTimeframe();
+        const limHi = entryGateHigherTfKlineLimit();
+        const rC5 = await this.bybit.tryGetCandles(symbol, tfHi, limHi);
+        symbolDiagnostics.push(toSymbolDiagnostic(symbol, EP.kline, rC5.diagnostics));
+
+        const higherCandles = rC5.ok ? rC5.value : null;
+        const gate = evaluateEntryCostAndHigherTfGate({
+          entryTimeframeCandles: rC.value,
+          higherTfCandles: higherCandles,
+          refPrice: lastPrice,
+          takerFeeRate: this.config.paperTakerFeeRate,
+          fundingRate: rF.value.rate,
+          gateOptions: {
+            minMoveMultiplier: this.config.paperGateMinMoveMultiplier,
+            requireHigherTfAlign: this.config.paperRequireHigherTfAlign
+          }
+        });
+        gateEval = gate;
+
+        if (!gate.allowed) {
+          signal = "none";
+          entryCandidate = false;
+          gateBlockedReason = gate.blockReason ?? "gate";
+          this.logger.info("DEBUG_ENTRY_BLOCKED_REASON", {
+            symbol,
+            reason: gate.blockReason,
+            paper_entry_relaxed: this.config.paperEntryRelaxed,
+            expected_move: gate.expectedMove,
+            required_move: gate.requiredMove,
+            required_move_threshold: gate.requiredMoveThreshold,
+            higher_tf: tfHi,
+            higher_tf_aligned: gate.higherTfAligned
+          });
+        }
       }
+
+      this.logger.info("PAPER_ENTRY_LINE", {
+        paper_entry_relaxed: this.config.paperEntryRelaxed,
+        symbol,
+        trend_ok: trend.trendOk,
+        quality_score: qualityScore,
+        signal_strength: signalStrength,
+        base_signal: entry.signal,
+        breakout_confirm_ticks: this.config.paperBreakoutStrict ? 2 : 1,
+        fee_filter_pass: gateEval?.allowed ?? (gateBlockedReason === "quality_below_min" ? false : null),
+        entry_blocked: gateBlockedReason ?? (gateEval && !gateEval.allowed ? gateEval.blockReason : null),
+        gate_expected_move: gateEval?.expectedMove,
+        gate_required_threshold: gateEval?.requiredMoveThreshold,
+        higher_tf_required: this.config.paperRequireHigherTfAlign,
+        higher_tf_aligned: gateEval?.higherTfAligned ?? null,
+        max_open_positions: this.config.paperMaxOpenPositions,
+        final_signal: signal
+      });
     }
 
     const snapshot: SymbolSnapshot = {
