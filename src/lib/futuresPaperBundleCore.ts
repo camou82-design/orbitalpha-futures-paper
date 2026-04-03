@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { buildLedgerPerformanceFromHistory, type FuturesPaperLedgerPerformance } from "./futuresPaperLedgerStats";
+
 export type FuturesPaperSymbolRow = Readonly<{
   symbol: string;
   signal?: string;
@@ -28,6 +30,7 @@ export type FuturesPaperDataBundle = Readonly<{
   latestMeta: unknown | null;
   symbolRows: FuturesPaperSymbolRow[];
   healthHistoryRecent: FuturesPaperHealthHistoryItem[];
+  ledgerPerformance: FuturesPaperLedgerPerformance | null;
 }>;
 
 async function readJsonFile(filePath: string): Promise<unknown | null> {
@@ -61,6 +64,17 @@ function pickSymbolRows(latest: unknown): FuturesPaperSymbolRow[] {
     });
   }
   return out.sort((a, b) => a.symbol.localeCompare(b.symbol));
+}
+
+async function readPositionsHistoryArray(dataDir: string): Promise<unknown[]> {
+  const p = path.join(dataDir, "positions", "history.json");
+  try {
+    const raw = await fs.readFile(p, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 async function readHealthHistoryTail(dataDir: string, maxLines: number): Promise<FuturesPaperHealthHistoryItem[]> {
@@ -118,8 +132,14 @@ export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): P
     readJsonFile(path.join(snaps, "latest-meta.json"))
   ]);
 
-  const symbolRows = pickSymbolRows(latestSnapshot);
-  const healthHistoryRecent = await readHealthHistoryTail(dataDir, 10);
+  const [symbolRows, healthHistoryRecent, positionsHistory] = await Promise.all([
+    Promise.resolve(pickSymbolRows(latestSnapshot)),
+    readHealthHistoryTail(dataDir, 10),
+    readPositionsHistoryArray(dataDir)
+  ]);
+
+  const generatedAt = Date.now();
+  const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory, generatedAt);
 
   return {
     configured: true,
@@ -132,6 +152,7 @@ export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): P
     latestSnapshot,
     latestMeta,
     symbolRows,
-    healthHistoryRecent
+    healthHistoryRecent,
+    ledgerPerformance
   };
 }

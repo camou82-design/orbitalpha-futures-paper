@@ -21,7 +21,8 @@ function emptyBundle(configHint: string): FuturesPaperDataBundle {
     latestSnapshot: null,
     latestMeta: null,
     symbolRows: [],
-    healthHistoryRecent: []
+    healthHistoryRecent: [],
+    ledgerPerformance: null
   };
 }
 
@@ -60,7 +61,11 @@ async function loadFromRemoteApi(baseUrl: string, secret: string): Promise<Futur
   if (!isBundleShape(json)) {
     return emptyBundle("Lightsail API response did not match the expected bundle shape.");
   }
-  return json;
+  const b = json as FuturesPaperDataBundle;
+  if (b.ledgerPerformance === undefined) {
+    return { ...b, ledgerPerformance: null };
+  }
+  return b;
 }
 
 /**
