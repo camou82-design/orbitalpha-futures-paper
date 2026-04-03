@@ -8,6 +8,11 @@ import { BybitPublicClient } from "../exchange/bybit-public";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
 import { evaluatePaperLongEntryV0 } from "../strategy/entry-signal";
 import type { PaperSignal } from "../strategy/entry-signal";
+import {
+  entryGateHigherTfKlineLimit,
+  entryGateHigherTimeframe,
+  evaluateEntryCostAndHigherTfGate
+} from "../strategy/entry-gate";
 import { paperHealthStatusLogPayload } from "../storage/paper-health";
 import { PositionManager } from "./position-manager";
 import { RiskManager } from "./risk-manager";
@@ -534,6 +539,39 @@ export class PaperEngine {
       latestCandleClose
     });
 
+    let signal: PaperSignal = entry.signal;
+    let entryCandidate = entry.entryCandidate;
+
+    if (entry.signal === "paper_long_candidate") {
+      const tfHi = entryGateHigherTimeframe();
+      const limHi = entryGateHigherTfKlineLimit();
+      const rC5 = await this.bybit.tryGetCandles(symbol, tfHi, limHi);
+      symbolDiagnostics.push(toSymbolDiagnostic(symbol, EP.kline, rC5.diagnostics));
+
+      const higherCandles = rC5.ok ? rC5.value : null;
+      const gate = evaluateEntryCostAndHigherTfGate({
+        entryTimeframeCandles: rC.value,
+        higherTfCandles: higherCandles,
+        refPrice: lastPrice,
+        takerFeeRate: this.config.paperTakerFeeRate,
+        fundingRate: rF.value.rate
+      });
+
+      if (!gate.allowed) {
+        signal = "none";
+        entryCandidate = false;
+        this.logger.info("DEBUG_ENTRY_BLOCKED_REASON", {
+          symbol,
+          reason: gate.blockReason,
+          expected_move: gate.expectedMove,
+          required_move: gate.requiredMove,
+          required_move_threshold: gate.requiredMoveThreshold,
+          higher_tf: tfHi,
+          higher_tf_aligned: gate.higherTfAligned
+        });
+      }
+    }
+
     const snapshot: SymbolSnapshot = {
       symbol,
       lastPrice,
@@ -544,12 +582,12 @@ export class PaperEngine {
       ema20: trend.ema20,
       ema60: trend.ema60,
       trendOk: trend.trendOk,
-      entryCandidate: entry.entryCandidate,
-      signal: entry.signal
+      entryCandidate,
+      signal
     };
 
     this.logger.info("symbol_snapshot", snapshot);
-    this.logger.info("symbol_signal", { symbol, signal: entry.signal, trendOk: trend.trendOk });
+    this.logger.info("symbol_signal", { symbol, signal, trendOk: trend.trendOk });
     return { ok: true, snapshot, symbolDiagnostics };
   }
 }
