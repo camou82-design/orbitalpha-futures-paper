@@ -66,6 +66,11 @@ export type EngineConfig = Readonly<{
   paperStrongEmaGapThreshold: number;
   /** Max |emaGap| for weak/sideways long or short (must be >= strong threshold). Paper-only. */
   paperSidewaysEmaGapThreshold: number;
+  /**
+   * Min ms after a symbol’s last close before a new open on that symbol (0 = off).
+   * Paper-only; cuts fee churn from immediate re-entry after candidate_lost.
+   */
+  paperReentryCooldownMs: number;
 }>;
 
 /** One leg in `positions/open.json` (JSON array of up to `paperMaxOpenPositions` records). */

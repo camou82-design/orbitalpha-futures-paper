@@ -154,6 +154,21 @@ function buildRequestDiagnosticsBySymbol(diags: SymbolDiagnostic[]): Record<stri
   return bySymbol;
 }
 
+/** Latest `closedAt` per symbol from `positions/history.json` rows (paper closed legs). */
+function latestClosedAtBySymbol(history: readonly unknown[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const row of history) {
+    if (!row || typeof row !== "object") continue;
+    const o = row as Record<string, unknown>;
+    const sym = o.symbol;
+    const closed = o.closedAt;
+    if (typeof sym !== "string" || typeof closed !== "number" || !Number.isFinite(closed)) continue;
+    const prev = m.get(sym) ?? 0;
+    if (closed >= prev) m.set(sym, closed);
+  }
+  return m;
+}
+
 function buildFailureSummary(
   errors: ReadonlyArray<{ symbol: MarketSymbol; error: string; failedEndpoint: FailureEndpointKey }>
 ): Record<string, FailureSummaryEntry> {
@@ -195,6 +210,7 @@ export class PaperEngine {
       paper_quality_min_weak: config.paperQualityMinScoreWeak,
       paper_strong_ema_gap_threshold: config.paperStrongEmaGapThreshold,
       paper_sideways_ema_gap_threshold: config.paperSidewaysEmaGapThreshold,
+      paper_reentry_cooldown_ms: config.paperReentryCooldownMs,
       paper_max_open_positions: config.paperMaxOpenPositions
     });
   }
@@ -507,12 +523,28 @@ export class PaperEngine {
     const opens = await this.positions.loadOpenAll();
     const before = opens.length;
     const next = [...opens];
+    const cooldownMs = this.config.paperReentryCooldownMs;
+    const lastCloseBySymbol =
+      cooldownMs > 0 ? latestClosedAtBySymbol(await this.store.readPositionsHistory()) : null;
+    const nowOpen = Date.now();
 
     for (const first of candidates) {
       if (next.length >= max) break;
       if (next.some((o) => o.symbol === first.symbol)) {
         this.logger.info("paper_position_skipped_existing_open", { symbol: first.symbol });
         continue;
+      }
+      if (lastCloseBySymbol !== null) {
+        const lastClose = lastCloseBySymbol.get(String(first.symbol)) ?? 0;
+        const elapsed = nowOpen - lastClose;
+        if (lastClose > 0 && elapsed < cooldownMs) {
+          this.logger.info("paper_position_skipped_reentry_cooldown", {
+            symbol: first.symbol,
+            ms_since_close: elapsed,
+            cooldown_ms: cooldownMs
+          });
+          continue;
+        }
       }
 
       const side: "long" | "short" =

@@ -62,6 +62,16 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperSidewaysEmaGapThreshold = paperStrongEmaGapThreshold;
   }
 
+  const paperReentryCooldownMsRaw = env.ORBITALPHA_PAPER_REENTRY_COOLDOWN_MS;
+  const paperReentryCooldownMsParsed =
+    paperReentryCooldownMsRaw === undefined || paperReentryCooldownMsRaw.trim() === ""
+      ? 300_000
+      : parseInt(paperReentryCooldownMsRaw, 10);
+  const paperReentryCooldownMs =
+    !Number.isFinite(paperReentryCooldownMsParsed) || paperReentryCooldownMsParsed < 0
+      ? 300_000
+      : Math.min(86_400_000, paperReentryCooldownMsParsed);
+
   return {
     symbols: parseSymbols(env.SYMBOLS),
     leverage: parseNumber(env.LEVERAGE, 2),
@@ -81,7 +91,8 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperQualityMinScoreWeak,
     paperMaxOpenPositions,
     paperStrongEmaGapThreshold,
-    paperSidewaysEmaGapThreshold
+    paperSidewaysEmaGapThreshold,
+    paperReentryCooldownMs
   };
 }
 
