@@ -91,6 +91,22 @@ export type PaperOpenPositionRecord = Readonly<{
   openFundingRate?: number;
   /** Timestamp in ms when the signal first disappeared (candidate_lost). Used for grace period. */
   lostAt?: number;
+  /** 롱: 고점 / 숏: 저점 — 트레일링 스탑용 */
+  trailingExtremePrice?: number;
+  /** 진입 시점 적응형 모드 (청산 임계 분기). */
+  adaptiveModeAtEntry?: "trend" | "sideways" | "risk_off";
+  /** 분할 청산 단계 (0=없음, 1=1차 완료, 2=2차 완료·잔여만). 하위 호환: 미설정은 0. */
+  partialExitStage?: number;
+  /** 최초 진입 마진(USD). 미설정 시 `sizeUsd`만 사용(레거시). */
+  initialSizeUsd?: number;
+  /** 진입 후 관측한 최고 순이익률(순손익/마진). 분할·트레일 참고. */
+  highestPnlPctNet?: number;
+  /** 트레일링 기준으로 마지막으로 잠근 가격/레벨(옵션). */
+  lastTrailLevel?: number;
+  /** 진입 시 신뢰도(로그·분석용, 옵션). */
+  entryConfidenceScore?: number;
+  entryConfidenceTier?: string;
+  entrySizeMultiplier?: number;
   status: "open";
 }>;
 
@@ -127,6 +143,13 @@ export type PaperClosedPositionRecord = Readonly<{
   latestSnapshotPath?: string;
   latestMetaPath?: string;
   timestampSnapshotPath?: string;
-  closeReason: "candidate_lost" | "take_profit" | "stop_loss";
+  closeReason:
+    | "candidate_lost"
+    | "take_profit"
+    | "stop_loss"
+    | "trailing_stop"
+    | "time_based_exit"
+    | "partial_exit_1"
+    | "partial_exit_2";
 }>;
 

@@ -1,13 +1,23 @@
 import * as path from "node:path";
 
-import type { EngineConfig, MarketSymbol, PaperClosedPositionRecord, PaperOpenPositionRecord } from "../models/types";
+import type {
+  EngineConfig,
+  MarketSymbol,
+  PaperClosedPositionRecord,
+  PaperOpenPositionRecord
+} from "../models/types";
 import type { Logger } from "../logs/logger";
 import { JsonStore } from "../storage/json-store";
 import type { BybitPublicDiagnostics } from "../exchange/bybit-public";
 import { BybitPublicClient } from "../exchange/bybit-public";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
 import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
-import type { PaperSignal } from "../strategy/entry-signal";
+import type { PaperCandidateStrength, PaperSignal } from "../strategy/entry-signal";
+import { detectFuturesMarketMode, type FuturesMarketMode } from "../strategy/live-market-mode";
+import { runFuturesAdaptiveEntry } from "../strategy/live-entry-pipeline";
+import { evaluateExitPolicy, stopLossPctForMode } from "../strategy/live-exit-policy";
+import { evaluatePartialExitPolicy } from "../strategy/live-partial-exit-policy";
+import { MIN_POSITION_SIZE_USD } from "../strategy/live-position-sizing";
 import {
   entryGateHigherTfKlineLimit,
   entryGateHigherTimeframe,
@@ -26,6 +36,15 @@ const EP = {
 
 const DEFAULT_PAPER_SIZE_USD = 100;
 
+function volumeRatioProxyFromCandles(candles: readonly { volume: number }[]): number {
+  if (candles.length < 24) return 1;
+  const body = candles.slice(-22, -2);
+  if (body.length < 10) return 1;
+  const ma = body.reduce((s, c) => s + c.volume, 0) / body.length;
+  const lastV = candles[candles.length - 2]?.volume ?? 0;
+  return ma > 0 && Number.isFinite(lastV) ? lastV / ma : 1;
+}
+
 type SymbolSnapshot = Readonly<{
   symbol: MarketSymbol;
   lastPrice: number;
@@ -38,6 +57,10 @@ type SymbolSnapshot = Readonly<{
   trendOk: boolean;
   entryCandidate: boolean;
   signal: PaperSignal;
+  qualityScore: number;
+  candidateStrength: PaperCandidateStrength | null;
+  emaGap: number | null;
+  volumeRatioProxy: number;
 }>;
 
 export type SymbolDiagnostic = Readonly<{
@@ -188,11 +211,98 @@ function buildFailureSummary(
   return out;
 }
 
+function exitFullLogKey(cr: PaperClosedPositionRecord["closeReason"]): string {
+  switch (cr) {
+    case "stop_loss":
+      return "exit_full_stop_loss";
+    case "take_profit":
+      return "exit_full_take_profit";
+    case "trailing_stop":
+      return "exit_full_trailing";
+    case "time_based_exit":
+      return "exit_full_time_stop";
+    default:
+      return "exit_full_other";
+  }
+}
+
+type PaperCloseLegMetrics = Readonly<{
+  pnlUsdGross: number;
+  pnlUsdNet: number;
+  pnlPctNet: number;
+  feeUsd: number;
+  fundingUsd: number;
+  fundingPeriods: number;
+  fundingRateAppliedOpen: number;
+  fundingRateAppliedClose: number;
+  fundingRateAverage: number;
+  holdingMs: number;
+}>;
+
+function computePaperCloseLegMetrics(input: Readonly<{
+  open: PaperOpenPositionRecord;
+  closePrice: number;
+  closedAt: number;
+  snapFundingRate: number;
+  marginUsd: number;
+  paperTakerFeeRate: number;
+  paperFundingIntervalHours: number;
+}>): PaperCloseLegMetrics {
+  const feeRate = input.paperTakerFeeRate;
+  const lev = input.open.leverage;
+  const margin = input.marginUsd;
+  const openNotionalUsd = margin * lev;
+  const closeNotionalUsd = margin * lev;
+  const feeUsd = (openNotionalUsd + closeNotionalUsd) * feeRate;
+
+  const pnlUsdGross =
+    input.open.side === "long"
+      ? ((input.closePrice - input.open.entryPrice) / input.open.entryPrice) * margin * lev
+      : ((input.open.entryPrice - input.closePrice) / input.open.entryPrice) * margin * lev;
+
+  const rawOpenFr = input.open.openFundingRate;
+  const fundingRateAppliedOpen = typeof rawOpenFr === "number" && Number.isFinite(rawOpenFr) ? rawOpenFr : 0;
+  const rawCloseFr = input.snapFundingRate;
+  const fundingRateAppliedClose =
+    typeof rawCloseFr === "number" && Number.isFinite(rawCloseFr)
+      ? rawCloseFr
+      : fundingRateAppliedOpen !== 0
+        ? fundingRateAppliedOpen
+        : 0;
+  const fundingRateAverage = (fundingRateAppliedOpen + fundingRateAppliedClose) / 2;
+
+  const intervalH = input.paperFundingIntervalHours;
+  const intervalMs = intervalH * 60 * 60 * 1000;
+  const holdingMsRaw = input.closedAt - input.open.openedAt;
+  const holdingMs = holdingMsRaw <= 0 ? 0 : holdingMsRaw;
+  const fundingPeriods = intervalMs > 0 && holdingMs > 0 ? holdingMs / intervalMs : 0;
+  const fundingUsd = margin * lev * fundingRateAverage * fundingPeriods;
+  const pnlUsdNet = pnlUsdGross - feeUsd - fundingUsd;
+  const pnlPctNet = margin > 0 ? pnlUsdNet / margin : 0;
+
+  return {
+    pnlUsdGross,
+    pnlUsdNet,
+    pnlPctNet,
+    feeUsd,
+    fundingUsd,
+    fundingPeriods,
+    fundingRateAppliedOpen,
+    fundingRateAppliedClose,
+    fundingRateAverage,
+    holdingMs
+  };
+}
+
 export class PaperEngine {
   private readonly store: JsonStore;
   private readonly bybit: BybitPublicClient;
   private readonly positions: PositionManager;
   private readonly risk: RiskManager;
+  private lastAdaptiveMode: Readonly<{ mode: FuturesMarketMode; detail: Record<string, unknown> }> = {
+    mode: "sideways",
+    detail: {}
+  };
 
   constructor(
     private readonly config: EngineConfig,
@@ -225,6 +335,18 @@ export class PaperEngine {
     const klineInterval = "1";
     const klineLimit = 120;
     const category = "linear";
+
+    const btc5r = await this.bybit.tryGetCandles("BTCUSDT", "5m", 50);
+    const btc5 = btc5r.ok ? btc5r.value : [];
+    const modeDetected = detectFuturesMarketMode({ btcCandles5m: btc5 });
+    this.lastAdaptiveMode = modeDetected;
+    const modeLogKey =
+      modeDetected.mode === "trend"
+        ? "market_mode_trend"
+        : modeDetected.mode === "sideways"
+          ? "market_mode_sideways"
+          : "market_mode_risk_off";
+    this.logger.info(modeLogKey, { detail: modeDetected.detail });
 
     const snapshots: SymbolSnapshot[] = [];
     const errors: { symbol: MarketSymbol; error: string; failedEndpoint: FailureEndpointKey }[] = [];
@@ -394,128 +516,253 @@ export class PaperEngine {
     if (opens.length === 0) return;
 
     const remaining: PaperOpenPositionRecord[] = [];
+    const feeRate = this.config.paperTakerFeeRate;
+    const intervalH = this.config.paperFundingIntervalHours;
 
-    for (const open of opens) {
-      if (open.status !== "open") {
-        remaining.push(open);
+    const exitDetailBase = (open: PaperOpenPositionRecord, m: PaperCloseLegMetrics) => ({
+      mode: open.adaptiveModeAtEntry ?? this.lastAdaptiveMode.mode,
+      direction: open.side,
+      confidenceScore: open.entryConfidenceScore,
+      confidenceTier: open.entryConfidenceTier,
+      sizeMultiplier: open.entrySizeMultiplier,
+      finalPositionSize: open.initialSizeUsd ?? open.sizeUsd,
+      remainingSizeUsd: open.sizeUsd,
+      pnl: m.pnlUsdNet,
+      highestPnl: open.highestPnlPctNet,
+      holdingTime: m.holdingMs,
+      partialExitStage: open.partialExitStage ?? 0
+    });
+
+    for (const openRaw of opens) {
+      if (openRaw.status !== "open") {
+        remaining.push(openRaw);
         continue;
       }
 
-      const snap = input.snapshots.find((s) => s.symbol === open.symbol);
+      const snap = input.snapshots.find((s) => s.symbol === openRaw.symbol);
       if (!snap) {
-        remaining.push(open);
+        remaining.push(openRaw);
         continue;
       }
+
+      let open: PaperOpenPositionRecord = {
+        ...openRaw,
+        initialSizeUsd: openRaw.initialSizeUsd ?? openRaw.sizeUsd,
+        partialExitStage: openRaw.partialExitStage ?? 0
+      };
 
       const closePrice = snap.lastPrice;
       const closedAt = snap.fetchedAt;
+      const modeForExit: FuturesMarketMode = open.adaptiveModeAtEntry ?? this.lastAdaptiveMode.mode;
 
-      const feeRate = this.config.paperTakerFeeRate;
-      const openNotionalUsd = open.sizeUsd * open.leverage;
-      const closeNotionalUsd = open.sizeUsd * open.leverage;
-      const feeUsd = (openNotionalUsd + closeNotionalUsd) * feeRate;
-
-      const pnlUsdGross =
-        open.side === "long"
-          ? ((closePrice - open.entryPrice) / open.entryPrice) * open.sizeUsd * open.leverage
-          : ((open.entryPrice - closePrice) / open.entryPrice) * open.sizeUsd * open.leverage;
-
-      const rawOpenFr = open.openFundingRate;
-      const fundingRateAppliedOpen = typeof rawOpenFr === "number" && Number.isFinite(rawOpenFr) ? rawOpenFr : 0;
-      const rawCloseFr = snap.fundingRate;
-      const fundingRateAppliedClose =
-        typeof rawCloseFr === "number" && Number.isFinite(rawCloseFr)
-          ? rawCloseFr
-          : fundingRateAppliedOpen !== 0
-            ? fundingRateAppliedOpen
-            : 0;
-      const fundingRateAverage = (fundingRateAppliedOpen + fundingRateAppliedClose) / 2;
-
-      const intervalH = this.config.paperFundingIntervalHours;
-      const intervalMs = intervalH * 60 * 60 * 1000;
-      const holdingMsRaw = closedAt - open.openedAt;
-      const holdingMs = holdingMsRaw <= 0 ? 0 : holdingMsRaw;
-      const fundingPeriods = intervalMs > 0 && holdingMs > 0 ? holdingMs / intervalMs : 0;
-      const fundingUsd = open.sizeUsd * open.leverage * fundingRateAverage * fundingPeriods;
-      const pnlUsdNet = pnlUsdGross - feeUsd - fundingUsd;
-      const pnlPctNet = pnlUsdNet / open.sizeUsd; // Net PnL relative to initial margin (not notional)
-
-      // 1. Take Profit (+0.5% net)
-      if (pnlPctNet >= 0.005) {
-        await this.positions.appendClosed({
-          ...open,
-          closedAt,
+      const leg = (marginUsd: number) =>
+        computePaperCloseLegMetrics({
+          open,
           closePrice,
-          pnlUsd: pnlUsdNet,
-          pnlUsdGross,
-          pnlUsdNet,
+          closedAt,
+          snapFundingRate: snap.fundingRate,
+          marginUsd,
+          paperTakerFeeRate: this.config.paperTakerFeeRate,
+          paperFundingIntervalHours: this.config.paperFundingIntervalHours
+        });
+
+      let m = leg(open.sizeUsd);
+      const highWater = Math.max(open.highestPnlPctNet ?? m.pnlPctNet, m.pnlPctNet);
+      open = { ...open, highestPnlPctNet: highWater };
+
+      const slThresh = stopLossPctForMode(modeForExit);
+      if (m.pnlPctNet <= slThresh) {
+        const cr = "stop_loss" as const;
+        const closedRow: PaperClosedPositionRecord = {
+          openedAt: open.openedAt,
+          closedAt,
+          symbol: open.symbol,
+          side: open.side,
+          entryPrice: open.entryPrice,
+          closePrice,
+          leverage: open.leverage,
+          sizeUsd: open.sizeUsd,
+          pnlUsd: m.pnlUsdNet,
+          pnlUsdGross: m.pnlUsdGross,
+          pnlUsdNet: m.pnlUsdNet,
           feeRate,
-          feeUsd,
-          holdingMs,
-          fundingPeriods,
-          fundingRateAppliedOpen,
-          fundingRateAppliedClose,
-          fundingRateAverage,
-          fundingUsd,
+          feeUsd: m.feeUsd,
           fundingModel: "avg_open_close_rate_v3",
           fundingIntervalHours: intervalH,
-          closeReason: "take_profit",
-          strategyVersion: "paper-v1"
+          holdingMs: m.holdingMs,
+          fundingPeriods: m.fundingPeriods,
+          fundingRateAppliedOpen: m.fundingRateAppliedOpen,
+          fundingRateAppliedClose: m.fundingRateAppliedClose,
+          fundingRateAverage: m.fundingRateAverage,
+          fundingUsd: m.fundingUsd,
+          strategyVersion: "paper-v1",
+          sourceSignal: open.sourceSignal,
+          sourceRunPath: open.sourceRunPath,
+          ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
+          ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
+          ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
+          closeReason: cr
+        };
+        await this.positions.appendClosed(closedRow);
+        this.logger.info(exitFullLogKey(cr), {
+          ...exitDetailBase(open, m),
+          exitReason: cr
         });
-        this.logger.info("paper_position_closed", { symbol: open.symbol, side: open.side, pnlUsdNet, closeReason: "take_profit" });
+        this.logger.info("paper_position_closed", { symbol: open.symbol, side: open.side, pnlUsdNet: m.pnlUsdNet, closeReason: cr });
         continue;
       }
 
-      // 2. Stop Loss (-1.0% net)
-      if (pnlPctNet <= -0.01) {
-        await this.positions.appendClosed({
-          ...open,
+      const partial = evaluatePartialExitPolicy({
+        mode: modeForExit,
+        direction: open.side,
+        pnlPctNet: m.pnlPctNet,
+        highestPnlPctNet: open.highestPnlPctNet ?? m.pnlPctNet,
+        holdingMs: m.holdingMs,
+        partialExitStage: open.partialExitStage ?? 0
+      });
+
+      if (partial.shouldExitPartial) {
+        const ratio = partial.partialExitRatio;
+        const partialMargin = Math.round(open.sizeUsd * ratio * 100) / 100;
+        const newMargin = Math.round((open.sizeUsd - partialMargin) * 100) / 100;
+        if (newMargin < MIN_POSITION_SIZE_USD) {
+          this.logger.info("partial_exit_skipped", {
+            ...exitDetailBase(open, m),
+            reason: "remaining_below_min",
+            partial_ratio: ratio,
+            remaining_after: newMargin,
+            min_usd: MIN_POSITION_SIZE_USD,
+            detail: partial.detail
+          });
+        } else {
+          const stage = open.partialExitStage ?? 0;
+          const pReason = stage === 0 ? ("partial_exit_1" as const) : ("partial_exit_2" as const);
+          const pLog = stage === 0 ? "partial_exit_first" : "partial_exit_second";
+          const mp = leg(partialMargin);
+          const closedPartial: PaperClosedPositionRecord = {
+            openedAt: open.openedAt,
+            closedAt,
+            symbol: open.symbol,
+            side: open.side,
+            entryPrice: open.entryPrice,
+            closePrice,
+            leverage: open.leverage,
+            sizeUsd: partialMargin,
+            pnlUsd: mp.pnlUsdNet,
+            pnlUsdGross: mp.pnlUsdGross,
+            pnlUsdNet: mp.pnlUsdNet,
+            feeRate,
+            feeUsd: mp.feeUsd,
+            fundingModel: "avg_open_close_rate_v3",
+            fundingIntervalHours: intervalH,
+            holdingMs: mp.holdingMs,
+            fundingPeriods: mp.fundingPeriods,
+            fundingRateAppliedOpen: mp.fundingRateAppliedOpen,
+            fundingRateAppliedClose: mp.fundingRateAppliedClose,
+            fundingRateAverage: mp.fundingRateAverage,
+            fundingUsd: mp.fundingUsd,
+            strategyVersion: "paper-v1",
+            sourceSignal: open.sourceSignal,
+            sourceRunPath: open.sourceRunPath,
+            ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
+            ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
+            ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
+            closeReason: pReason
+          };
+          await this.positions.appendClosed(closedPartial);
+          this.logger.info(pLog, {
+            ...exitDetailBase(open, mp),
+            exitReason: pReason,
+            partial_ratio: ratio,
+            partial_margin_usd: partialMargin,
+            remaining_margin_usd: newMargin,
+            detail: partial.detail
+          });
+          open = {
+            ...open,
+            sizeUsd: newMargin,
+            partialExitStage: stage + 1
+          };
+          m = leg(open.sizeUsd);
+        }
+      }
+
+      const exitEval = evaluateExitPolicy({
+        mode: modeForExit,
+        side: open.side,
+        pnlPctNet: m.pnlPctNet,
+        holdingMs: m.holdingMs,
+        mark: closePrice,
+        trailingExtreme: open.trailingExtremePrice,
+        exitProfile: (open.partialExitStage ?? 0) >= 1 ? "runner" : "full",
+        partialExitStage: open.partialExitStage ?? 0
+      });
+
+      if (exitEval.action === "close") {
+        const cr = exitEval.reason;
+        const closedRow: PaperClosedPositionRecord = {
+          openedAt: open.openedAt,
           closedAt,
+          symbol: open.symbol,
+          side: open.side,
+          entryPrice: open.entryPrice,
           closePrice,
-          pnlUsd: pnlUsdNet,
-          pnlUsdGross,
-          pnlUsdNet,
+          leverage: open.leverage,
+          sizeUsd: open.sizeUsd,
+          pnlUsd: m.pnlUsdNet,
+          pnlUsdGross: m.pnlUsdGross,
+          pnlUsdNet: m.pnlUsdNet,
           feeRate,
-          feeUsd,
-          holdingMs,
-          fundingPeriods,
-          fundingRateAppliedOpen,
-          fundingRateAppliedClose,
-          fundingRateAverage,
-          fundingUsd,
+          feeUsd: m.feeUsd,
           fundingModel: "avg_open_close_rate_v3",
           fundingIntervalHours: intervalH,
-          closeReason: "stop_loss",
-          strategyVersion: "paper-v1"
+          holdingMs: m.holdingMs,
+          fundingPeriods: m.fundingPeriods,
+          fundingRateAppliedOpen: m.fundingRateAppliedOpen,
+          fundingRateAppliedClose: m.fundingRateAppliedClose,
+          fundingRateAverage: m.fundingRateAverage,
+          fundingUsd: m.fundingUsd,
+          strategyVersion: "paper-v1",
+          sourceSignal: open.sourceSignal,
+          sourceRunPath: open.sourceRunPath,
+          ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
+          ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
+          ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
+          closeReason: cr
+        };
+        await this.positions.appendClosed(closedRow);
+        this.logger.info(exitFullLogKey(cr), {
+          ...exitDetailBase(open, m),
+          exitReason: cr
         });
-        this.logger.info("paper_position_closed", { symbol: open.symbol, side: open.side, pnlUsdNet, closeReason: "stop_loss" });
+        this.logger.info("paper_position_closed", { symbol: open.symbol, side: open.side, pnlUsdNet: m.pnlUsdNet, closeReason: cr });
         continue;
       }
 
-      // 3. candidate_lost with Grace Period
+      const posTrail = { ...open, trailingExtremePrice: exitEval.trailingExtreme };
+
       const keep =
         (open.side === "long" && snap.signal === "paper_long_candidate") ||
         (open.side === "short" && snap.signal === "paper_short_candidate");
 
       if (keep) {
-        remaining.push({ ...open, lostAt: undefined });
+        remaining.push({ ...posTrail, lostAt: undefined });
         continue;
       }
 
-      // If not keep, check Min Hold and Grace Period
       const minHoldMs = 3 * 60_000;
       const gracePeriodMs = 5 * 60_000;
 
-      if (holdingMs < minHoldMs) {
-        remaining.push(open);
+      if (m.holdingMs < minHoldMs) {
+        remaining.push(posTrail);
         continue;
       }
 
-      const lostAt = open.lostAt ?? closedAt;
+      const lostAt = posTrail.lostAt ?? closedAt;
       const elapsedLost = closedAt - lostAt;
 
       if (elapsedLost < gracePeriodMs) {
-        remaining.push({ ...open, lostAt });
+        remaining.push({ ...posTrail, lostAt });
         continue;
       }
 
@@ -528,19 +775,19 @@ export class PaperEngine {
         closePrice,
         leverage: open.leverage,
         sizeUsd: open.sizeUsd,
-        pnlUsd: pnlUsdNet,
-        pnlUsdGross,
-        pnlUsdNet,
+        pnlUsd: m.pnlUsdNet,
+        pnlUsdGross: m.pnlUsdGross,
+        pnlUsdNet: m.pnlUsdNet,
         feeRate,
-        feeUsd,
+        feeUsd: m.feeUsd,
         fundingModel: "avg_open_close_rate_v3",
         fundingIntervalHours: intervalH,
-        holdingMs,
-        fundingPeriods,
-        fundingRateAppliedOpen,
-        fundingRateAppliedClose,
-        fundingRateAverage,
-        fundingUsd,
+        holdingMs: m.holdingMs,
+        fundingPeriods: m.fundingPeriods,
+        fundingRateAppliedOpen: m.fundingRateAppliedOpen,
+        fundingRateAppliedClose: m.fundingRateAppliedClose,
+        fundingRateAverage: m.fundingRateAverage,
+        fundingUsd: m.fundingUsd,
         strategyVersion: "paper-v1",
         sourceSignal: open.sourceSignal,
         sourceRunPath: open.sourceRunPath,
@@ -554,9 +801,9 @@ export class PaperEngine {
       this.logger.info("paper_position_closed", {
         symbol: open.symbol,
         side: open.side,
-        pnlUsd: pnlUsdNet,
+        pnlUsd: m.pnlUsdNet,
         closeReason: "candidate_lost",
-        holdingMs
+        holdingMs: m.holdingMs
       });
     }
 
@@ -612,16 +859,108 @@ export class PaperEngine {
         }
       }
 
-      const side: "long" | "short" =
+      const adaptive = runFuturesAdaptiveEntry({
+        mode: this.lastAdaptiveMode.mode,
+        modeDetail: this.lastAdaptiveMode.detail,
+        snap: {
+          symbol: String(first.symbol),
+          signal: first.signal,
+          lastPrice: first.lastPrice,
+          latestCandleClose: first.latestCandleClose,
+          ema20: first.ema20,
+          ema60: first.ema60,
+          qualityScore: first.qualityScore,
+          candidateStrength: first.candidateStrength,
+          emaGap: first.emaGap,
+          volumeRatioProxy: first.volumeRatioProxy
+        },
+        baseSizeUsd: DEFAULT_PAPER_SIZE_USD
+      });
+
+      if (!adaptive.ok) {
+        this.logger.info(adaptive.logMessage, adaptive.detail);
+        this.logger.info("entry_blocked_reason", { reason: adaptive.logMessage, ...adaptive.detail });
+        if (adaptive.logMessage === "position_size_blocked_low_confidence") {
+          this.logger.info("position_size_blocked_low_confidence", adaptive.detail);
+        }
+        continue;
+      }
+
+      const expectedSide: "long" | "short" =
         first.signal === "paper_long_candidate" ? "long" : "short";
+      if (adaptive.direction !== expectedSide) {
+        this.logger.info("entry_blocked_reason", {
+          reason: "blocked_no_structure",
+          sub: "direction_signal_mismatch",
+          signal_side: expectedSide,
+          adaptive_side: adaptive.direction,
+          symbol: first.symbol
+        });
+        continue;
+      }
+
+      if (this.config.longOnly && adaptive.direction === "short") {
+        this.logger.info("entry_blocked_reason", { reason: "long_only_short_blocked", symbol: first.symbol });
+        continue;
+      }
+
       const sourceSignal = first.signal;
+      const levScaled = Math.max(
+        1,
+        Math.round(this.config.leverage * adaptive.leverageMultiplier * 100) / 100
+      );
+      const confScore =
+        typeof adaptive.detail.confidence_score === "number" && Number.isFinite(adaptive.detail.confidence_score)
+          ? adaptive.detail.confidence_score
+          : undefined;
+      const confTier =
+        typeof adaptive.detail.confidence_tier === "string" ? adaptive.detail.confidence_tier : undefined;
+      const sizeMult =
+        typeof adaptive.detail.size_multiplier === "number" && Number.isFinite(adaptive.detail.size_multiplier)
+          ? adaptive.detail.size_multiplier
+          : undefined;
+
+      this.logger.info("trade_confidence_scored", {
+        symbol: first.symbol,
+        mode: this.lastAdaptiveMode.mode,
+        direction: adaptive.direction,
+        confidenceScore: confScore,
+        confidenceTier: confTier,
+        detail: adaptive.detail
+      });
+      if (confTier === "low") {
+        this.logger.info("trade_confidence_low", { symbol: first.symbol, confidenceScore: confScore, detail: adaptive.detail });
+      } else if (confTier === "mid") {
+        this.logger.info("trade_confidence_mid", { symbol: first.symbol, confidenceScore: confScore, detail: adaptive.detail });
+      } else if (confTier === "high") {
+        this.logger.info("trade_confidence_high", { symbol: first.symbol, confidenceScore: confScore, detail: adaptive.detail });
+      } else if (confTier === "top") {
+        this.logger.info("trade_confidence_top", { symbol: first.symbol, confidenceScore: confScore, detail: adaptive.detail });
+      }
+
+      this.logger.info("position_size_adjusted", {
+        symbol: first.symbol,
+        mode: this.lastAdaptiveMode.mode,
+        sizeMultiplier: sizeMult,
+        finalPositionSize: adaptive.sizeUsd,
+        detail: adaptive.detail
+      });
+      if (this.lastAdaptiveMode.mode === "sideways") {
+        this.logger.info("position_size_reduced_sideways", { symbol: first.symbol, finalPositionSize: adaptive.sizeUsd });
+      }
+      if (this.lastAdaptiveMode.mode === "risk_off") {
+        this.logger.info("position_size_reduced_risk_off", { symbol: first.symbol, finalPositionSize: adaptive.sizeUsd });
+      }
+
       const record: PaperOpenPositionRecord = {
         openedAt: Date.now(),
         symbol: first.symbol,
-        side,
+        side: adaptive.direction,
         entryPrice: first.lastPrice,
-        leverage: this.config.leverage,
-        sizeUsd: DEFAULT_PAPER_SIZE_USD,
+        leverage: levScaled,
+        sizeUsd: adaptive.sizeUsd,
+        initialSizeUsd: adaptive.sizeUsd,
+        partialExitStage: 0,
         strategyVersion: "paper-v1",
         sourceSignal,
         sourceRunPath: input.candidateRunPath,
@@ -629,10 +968,27 @@ export class PaperEngine {
         latestMetaPath: input.metaPath,
         timestampSnapshotPath: input.filePath,
         ...(Number.isFinite(first.fundingRate) ? { openFundingRate: first.fundingRate } : {}),
+        trailingExtremePrice: first.lastPrice,
+        adaptiveModeAtEntry: this.lastAdaptiveMode.mode,
+        ...(confScore !== undefined ? { entryConfidenceScore: confScore } : {}),
+        ...(confTier !== undefined ? { entryConfidenceTier: confTier } : {}),
+        ...(sizeMult !== undefined ? { entrySizeMultiplier: sizeMult } : {}),
         status: "open"
       };
 
       next.push(record);
+      const entryOpenedKey = record.side === "long" ? "entry_long_opened" : "entry_short_opened";
+      this.logger.info(entryOpenedKey, {
+        symbol: record.symbol,
+        side: record.side,
+        mode: this.lastAdaptiveMode.mode,
+        size_usd: record.sizeUsd,
+        leverage: record.leverage,
+        confidenceScore: confScore,
+        confidenceTier: confTier,
+        sizeMultiplier: sizeMult,
+        entry_pipeline: adaptive.detail
+      });
       this.logger.info("paper_position_opened", {
         symbol: record.symbol,
         side: record.side,
@@ -866,7 +1222,11 @@ export class PaperEngine {
       ema60: trend.ema60,
       trendOk: trend.trendOk,
       entryCandidate,
-      signal
+      signal,
+      qualityScore,
+      candidateStrength: entry.candidateStrength,
+      emaGap: entry.emaGap,
+      volumeRatioProxy: volumeRatioProxyFromCandles(rC.value)
     };
 
     this.logger.info("symbol_snapshot", snapshot);
