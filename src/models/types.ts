@@ -89,6 +89,8 @@ export type PaperOpenPositionRecord = Readonly<{
   timestampSnapshotPath?: string;
   /** Perpetual funding rate from the open snapshot (`snapshot.fundingRate`); used in funding v3. */
   openFundingRate?: number;
+  /** Timestamp in ms when the signal first disappeared (candidate_lost). Used for grace period. */
+  lostAt?: number;
   status: "open";
 }>;
 
@@ -125,6 +127,6 @@ export type PaperClosedPositionRecord = Readonly<{
   latestSnapshotPath?: string;
   latestMetaPath?: string;
   timestampSnapshotPath?: string;
-  closeReason: "candidate_lost";
+  closeReason: "candidate_lost" | "take_profit" | "stop_loss";
 }>;
 

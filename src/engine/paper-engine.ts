@@ -266,7 +266,7 @@ export class PaperEngine {
     const signalSummary = buildSignalSummary(snapshots);
 
     const meta: RunMeta = {
-      strategyVersion: "paper-v0",
+      strategyVersion: "paper-v1",
       signalSummary,
       fetchedAt,
       symbolsRequested: symbols,
@@ -293,7 +293,7 @@ export class PaperEngine {
       latestPath,
       engineMode: "paper",
       exchange: "bybit",
-      notes: `paper-v0 EMA20/EMA60 1m long/short; public-only; ${klineTimeframe}; strict-number-parsing`
+      notes: `paper-v1 EMA20/EMA60 1m long/short; +0.5%/-1.0% net TP/SL; 3m min_hold + 5m grace; public-only; ${klineTimeframe}`
     };
 
     let metaPath: string | undefined;
@@ -318,7 +318,7 @@ export class PaperEngine {
           .map((s) => String(s.symbol));
         candidateRunPath = await this.store.writePaperCandidateRun(fetchedAt, {
           fetchedAt,
-          strategyVersion: "paper-v0",
+          strategyVersion: "paper-v1",
           longCandidates: signalSummary.longCandidates,
           shortCandidates: signalSummary.shortCandidates,
           candidateSymbols,
@@ -332,7 +332,7 @@ export class PaperEngine {
         const indexPath = await this.store.updateRunsIndex({
           fetchedAt,
           runPath: candidateRunPath,
-          strategyVersion: "paper-v0",
+          strategyVersion: "paper-v1",
           longCandidates: signalSummary.longCandidates,
           shortCandidates: signalSummary.shortCandidates,
           candidateSymbols,
@@ -407,29 +407,19 @@ export class PaperEngine {
         continue;
       }
 
-      const keep =
-        (open.side === "long" && snap.signal === "paper_long_candidate") ||
-        (open.side === "short" && snap.signal === "paper_short_candidate");
-      if (keep) {
-        remaining.push(open);
-        continue;
-      }
-
       const closePrice = snap.lastPrice;
       const closedAt = snap.fetchedAt;
-      if (!Number.isFinite(closePrice) || !Number.isFinite(open.entryPrice) || open.entryPrice === 0) {
-        remaining.push(open);
-        continue;
-      }
 
       const feeRate = this.config.paperTakerFeeRate;
       const openNotionalUsd = open.sizeUsd * open.leverage;
       const closeNotionalUsd = open.sizeUsd * open.leverage;
       const feeUsd = (openNotionalUsd + closeNotionalUsd) * feeRate;
+
       const pnlUsdGross =
         open.side === "long"
           ? ((closePrice - open.entryPrice) / open.entryPrice) * open.sizeUsd * open.leverage
           : ((open.entryPrice - closePrice) / open.entryPrice) * open.sizeUsd * open.leverage;
+
       const rawOpenFr = open.openFundingRate;
       const fundingRateAppliedOpen = typeof rawOpenFr === "number" && Number.isFinite(rawOpenFr) ? rawOpenFr : 0;
       const rawCloseFr = snap.fundingRate;
@@ -448,6 +438,86 @@ export class PaperEngine {
       const fundingPeriods = intervalMs > 0 && holdingMs > 0 ? holdingMs / intervalMs : 0;
       const fundingUsd = open.sizeUsd * open.leverage * fundingRateAverage * fundingPeriods;
       const pnlUsdNet = pnlUsdGross - feeUsd - fundingUsd;
+      const pnlPctNet = pnlUsdNet / open.sizeUsd; // Net PnL relative to initial margin (not notional)
+
+      // 1. Take Profit (+0.5% net)
+      if (pnlPctNet >= 0.005) {
+        await this.positions.appendClosed({
+          ...open,
+          closedAt,
+          closePrice,
+          pnlUsd: pnlUsdNet,
+          pnlUsdGross,
+          pnlUsdNet,
+          feeRate,
+          feeUsd,
+          holdingMs,
+          fundingPeriods,
+          fundingRateAppliedOpen,
+          fundingRateAppliedClose,
+          fundingRateAverage,
+          fundingUsd,
+          fundingModel: "avg_open_close_rate_v3",
+          fundingIntervalHours: intervalH,
+          closeReason: "take_profit",
+          strategyVersion: "paper-v1"
+        });
+        this.logger.info("paper_position_closed", { symbol: open.symbol, side: open.side, pnlUsdNet, closeReason: "take_profit" });
+        continue;
+      }
+
+      // 2. Stop Loss (-1.0% net)
+      if (pnlPctNet <= -0.01) {
+        await this.positions.appendClosed({
+          ...open,
+          closedAt,
+          closePrice,
+          pnlUsd: pnlUsdNet,
+          pnlUsdGross,
+          pnlUsdNet,
+          feeRate,
+          feeUsd,
+          holdingMs,
+          fundingPeriods,
+          fundingRateAppliedOpen,
+          fundingRateAppliedClose,
+          fundingRateAverage,
+          fundingUsd,
+          fundingModel: "avg_open_close_rate_v3",
+          fundingIntervalHours: intervalH,
+          closeReason: "stop_loss",
+          strategyVersion: "paper-v1"
+        });
+        this.logger.info("paper_position_closed", { symbol: open.symbol, side: open.side, pnlUsdNet, closeReason: "stop_loss" });
+        continue;
+      }
+
+      // 3. candidate_lost with Grace Period
+      const keep =
+        (open.side === "long" && snap.signal === "paper_long_candidate") ||
+        (open.side === "short" && snap.signal === "paper_short_candidate");
+
+      if (keep) {
+        remaining.push({ ...open, lostAt: undefined });
+        continue;
+      }
+
+      // If not keep, check Min Hold and Grace Period
+      const minHoldMs = 3 * 60_000;
+      const gracePeriodMs = 5 * 60_000;
+
+      if (holdingMs < minHoldMs) {
+        remaining.push(open);
+        continue;
+      }
+
+      const lostAt = open.lostAt ?? closedAt;
+      const elapsedLost = closedAt - lostAt;
+
+      if (elapsedLost < gracePeriodMs) {
+        remaining.push({ ...open, lostAt });
+        continue;
+      }
 
       const closed: PaperClosedPositionRecord = {
         openedAt: open.openedAt,
@@ -471,7 +541,7 @@ export class PaperEngine {
         fundingRateAppliedClose,
         fundingRateAverage,
         fundingUsd,
-        strategyVersion: open.strategyVersion,
+        strategyVersion: "paper-v1",
         sourceSignal: open.sourceSignal,
         sourceRunPath: open.sourceRunPath,
         ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
@@ -485,13 +555,8 @@ export class PaperEngine {
         symbol: open.symbol,
         side: open.side,
         pnlUsd: pnlUsdNet,
-        pnlUsdGross,
-        feeUsd,
-        fundingUsd,
-        fundingModel: "avg_open_close_rate_v3",
-        fundingRateAverage,
-        fundingPeriods,
-        closeReason: "candidate_lost"
+        closeReason: "candidate_lost",
+        holdingMs
       });
     }
 
@@ -557,7 +622,7 @@ export class PaperEngine {
         entryPrice: first.lastPrice,
         leverage: this.config.leverage,
         sizeUsd: DEFAULT_PAPER_SIZE_USD,
-        strategyVersion: "paper-v0",
+        strategyVersion: "paper-v1",
         sourceSignal,
         sourceRunPath: input.candidateRunPath,
         latestSnapshotPath: input.latestPath,
@@ -645,15 +710,15 @@ export class PaperEngine {
       sideForQuality === null || entry.candidateStrength === null
         ? 0
         : computePaperEntryQualityScore({
-            ema20: trend.ema20,
-            ema60: trend.ema60,
-            lastPrice,
-            latestCandleClose,
-            side: sideForQuality,
-            candidateStrength: entry.candidateStrength,
-            emaGap: entry.emaGap ?? 0,
-            sidewaysEmaGapThreshold: this.config.paperSidewaysEmaGapThreshold
-          });
+          ema20: trend.ema20,
+          ema60: trend.ema60,
+          lastPrice,
+          latestCandleClose,
+          side: sideForQuality,
+          candidateStrength: entry.candidateStrength,
+          emaGap: entry.emaGap ?? 0,
+          sidewaysEmaGapThreshold: this.config.paperSidewaysEmaGapThreshold
+        });
     const signalStrength = paperSignalStrengthLabel(qualityScore, this.config.paperEntryRelaxed);
 
     let signal: PaperSignal = entry.signal;
@@ -705,7 +770,7 @@ export class PaperEngine {
             minMoveMultiplier: this.config.paperGateMinMoveMultiplier,
             requireHigherTfAlign: this.config.paperRequireHigherTfAlign
           },
-          paperBypassExpectedMoveGate: true,
+          paperBypassExpectedMoveGate: false,
           entryDirection: entrySide
         });
         gateEval = gate;
