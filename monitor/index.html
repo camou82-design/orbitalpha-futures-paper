@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>선물 페이퍼 · 실시간 모니터</title>
+    <link rel="stylesheet" href="./monitor.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div>
+          <h1 class="title">선물 페이퍼 · 실시간 모니터</h1>
+          <p class="subtitle">Bybit USDT 모의 · 읽기 전용 · 판단 우선 화면</p>
+        </div>
+        <div class="topbar-actions">
+          <button type="button" class="btn btn-ghost" id="btn-refresh" title="즉시 새로고침">새로고침</button>
+          <span class="muted text-xs" id="last-fetch">—</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="auth-strip" id="auth-strip">
+      <div class="auth-inner">
+        <label class="auth-label">
+          API 베이스 URL
+          <input type="text" id="input-base" class="input" placeholder="예: https://your-host:3991 (비우면 현재 출처)" autocomplete="off" />
+        </label>
+        <label class="auth-label">
+          API 토큰
+          <input type="password" id="input-token" class="input" placeholder="ORBITALPHA_FUTURES_PAPER_API_SECRET" autocomplete="current-password" />
+        </label>
+        <button type="button" class="btn btn-primary" id="btn-save-auth">저장 후 불러오기</button>
+        <p class="auth-hint muted text-xs">
+          Lightsail에서 이 페이지를 연 경우 베이스는 비워 두면 됩니다. 토큰은 브라우저 sessionStorage에만 저장됩니다.
+        </p>
+      </div>
+    </div>
+
+    <main class="main">
+      <div id="msg-loading" class="banner banner-muted hidden">불러오는 중…</div>
+      <div id="msg-error" class="banner banner-error hidden"></div>
+      <div id="msg-config" class="banner banner-warn hidden"></div>
+
+      <section class="hero" id="hero" aria-label="실시간 상태판"></section>
+
+      <section class="section" aria-labelledby="sym-heading">
+        <h2 id="sym-heading" class="section-title">심볼별 판단</h2>
+        <div class="symbol-grid" id="symbol-grid"></div>
+      </section>
+
+      <section class="section" aria-labelledby="perf-heading">
+        <h2 id="perf-heading" class="section-title">핵심 성과</h2>
+        <p class="section-note muted text-xs" id="perf-note"></p>
+        <div class="perf-row" id="perf-row"></div>
+      </section>
+
+      <details class="details-block" id="detail-block">
+        <summary class="details-summary">운영 상세 보기 (상태 흐름 · 헬스 이력 · 이번 달)</summary>
+        <div class="details-body">
+          <div class="detail-cols">
+            <div class="detail-panel">
+              <h3 class="panel-title">최근 상태 흐름</h3>
+              <div id="panel-trend"></div>
+            </div>
+            <div class="detail-panel">
+              <h3 class="panel-title">헬스 이력</h3>
+              <div id="panel-health"></div>
+            </div>
+          </div>
+          <div class="detail-panel detail-panel-full">
+            <h3 class="panel-title">이번 달 (참고)</h3>
+            <div id="panel-mtd"></div>
+          </div>
+        </div>
+      </details>
+    </main>
+
+    <script src="./monitor.js" defer></script>
+  </body>
+</html>

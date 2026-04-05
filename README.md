@@ -5,7 +5,7 @@ Bybit USDT perpetual futures **paper trading (simulation-only)** engine skeleton
 ## Scope
 
 - **Paper trading only** (no live trading, no authenticated endpoints, no order sending)
-- TypeScript 기반, 콘솔/로그 중심 (UI 없음)
+- TypeScript 기반, 콘솔/로그 중심 + **실시간 판단형 모니터** 정적 UI (`monitor/`, Lightsail reader에서 `/monitor`로 서빙)
 - 기존 `orbitalpha-trading` 및 현물 엔진과 **완전 분리된 새 프로젝트**
 
 ## First milestone (1차 목표)

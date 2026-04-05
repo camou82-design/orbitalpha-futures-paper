@@ -46,6 +46,13 @@ ls -la data/reports/
 
 Expected under `data/reports/`: `summary.json`, `summary-daily.json`, `summary-window.json`, `summary-health.json`, `dashboard.json`, `health-history.jsonl` updating over time.
 
+## Reader API + 실시간 모니터 UI
+
+`lightsail-futures-paper-api`를 띄운 경우:
+
+- JSON 번들: `GET /api/futures-paper/data` (토큰 헤더 동일)
+- 모니터: `GET /monitor/` — 기존 번들만 사용하는 **판단 우선** 대시보드(다크 톤). API와 **동일 출처**에서 열면 토큰만 입력하면 됩니다.
+
 ## 5. Never
 
 - `pm2 restart all`

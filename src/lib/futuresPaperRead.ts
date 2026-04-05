@@ -10,6 +10,7 @@ export type {
 const HEADER_TOKEN = "x-orbitalpha-futures-paper-token";
 
 function emptyBundle(configHint: string): FuturesPaperDataBundle {
+  const now = Date.now();
   return {
     configured: false,
     configHint,
@@ -22,7 +23,10 @@ function emptyBundle(configHint: string): FuturesPaperDataBundle {
     latestMeta: null,
     symbolRows: [],
     healthHistoryRecent: [],
-    ledgerPerformance: null
+    ledgerPerformance: null,
+    openPositions: [],
+    positionsHistory: [],
+    generatedAt: now
   };
 }
 
@@ -39,7 +43,10 @@ async function loadFromRemoteApi(baseUrl: string, secret: string): Promise<Futur
   try {
     res = await fetch(url, {
       method: "GET",
-      headers: { [HEADER_TOKEN]: secret },
+      headers: {
+        [HEADER_TOKEN]: secret,
+        Authorization: `Bearer ${secret}`
+      },
       cache: "no-store"
     });
   } catch (e) {
@@ -62,10 +69,14 @@ async function loadFromRemoteApi(baseUrl: string, secret: string): Promise<Futur
     return emptyBundle("Lightsail API response did not match the expected bundle shape.");
   }
   const b = json as FuturesPaperDataBundle;
-  if (b.ledgerPerformance === undefined) {
-    return { ...b, ledgerPerformance: null };
-  }
-  return b;
+  const withDefaults: FuturesPaperDataBundle = {
+    ...b,
+    ledgerPerformance: b.ledgerPerformance ?? null,
+    openPositions: Array.isArray(b.openPositions) ? b.openPositions : [],
+    positionsHistory: Array.isArray(b.positionsHistory) ? b.positionsHistory : [],
+    generatedAt: typeof b.generatedAt === "number" && Number.isFinite(b.generatedAt) ? b.generatedAt : Date.now()
+  };
+  return withDefaults;
 }
 
 /**
