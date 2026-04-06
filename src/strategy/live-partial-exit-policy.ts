@@ -16,13 +16,13 @@ function params(mode: FuturesMarketMode): Readonly<{
 }> {
   switch (mode) {
     case "trend":
-      return { p1: 0.004, r1: 0.38, p2: 0.006, r2: 0.45 };
+      return { p1: 0.0045, r1: 0.38, p2: 0.0065, r2: 0.45 };
     case "sideways":
       return { p1: 0.003, r1: 0.48, p2: 0.0045, r2: 0.5 };
     case "risk_off":
       return { p1: 0.002, r1: 0.55, p2: 0.0032, r2: 0.5 };
     default:
-      return { p1: 0.004, r1: 0.38, p2: 0.006, r2: 0.45 };
+      return { p1: 0.0045, r1: 0.38, p2: 0.0065, r2: 0.45 };
   }
 }
 

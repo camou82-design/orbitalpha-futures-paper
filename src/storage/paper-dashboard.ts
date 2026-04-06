@@ -26,6 +26,24 @@ export type PaperDashboardSnapshot = Readonly<{
   }>;
 }>;
 
+/** 수수료·gross·손익비 요약 (리포트/모니터용). */
+export type PaperDashboardFeeSlice = Readonly<{
+  totalTrades: number;
+  totalPnlUsdGross: number;
+  totalFeeUsd: number;
+  totalFundingUsd: number;
+  totalPnlUsdNet: number;
+  averageWinPnlUsdNet: number | null;
+  averageLossPnlUsdNet: number | null;
+  averageFeeUsdPerTrade: number;
+  profitFactorNet: number | null;
+  avgWinToAvgLossRatio: number | null;
+  tradesGrossPositiveNetNegative: number;
+  tradesGrossPositiveNetNegativeRatio: number;
+  netToGrossRatio: number | null;
+  feeToGrossRatio: number | null;
+}>;
+
 export type PaperDashboardRecentTrend = Readonly<{
   latestStatuses: string[];
   statusCounts: Record<string, number>;
@@ -40,6 +58,12 @@ export type PaperDashboardReport = Readonly<{
   reasons: string[];
   headline: string;
   snapshot: PaperDashboardSnapshot;
+  /** gross·fee·net·profit factor 등 (last7d/30d/전체). */
+  feeAnalytics: Readonly<{
+    last7d: PaperDashboardFeeSlice;
+    last30d: PaperDashboardFeeSlice;
+    all: PaperDashboardFeeSlice;
+  }>;
   recentTrend: PaperDashboardRecentTrend;
 }>;
 
@@ -48,6 +72,25 @@ function pickWinSlice(s: PaperSummaryStats): { totalTrades: number; winRate: num
     totalTrades: s.totalTrades,
     winRate: s.winRate,
     totalPnlUsdNet: s.totalPnlUsdNet
+  };
+}
+
+function pickFeeSlice(s: PaperSummaryStats): PaperDashboardFeeSlice {
+  return {
+    totalTrades: s.totalTrades,
+    totalPnlUsdGross: s.totalPnlUsdGross,
+    totalFeeUsd: s.totalFeeUsd,
+    totalFundingUsd: s.totalFundingUsd,
+    totalPnlUsdNet: s.totalPnlUsdNet,
+    averageWinPnlUsdNet: s.averageWinPnlUsdNet,
+    averageLossPnlUsdNet: s.averageLossPnlUsdNet,
+    averageFeeUsdPerTrade: s.averageFeeUsdPerTrade,
+    profitFactorNet: s.profitFactorNet,
+    avgWinToAvgLossRatio: s.avgWinToAvgLossRatio,
+    tradesGrossPositiveNetNegative: s.tradesGrossPositiveNetNegative,
+    tradesGrossPositiveNetNegativeRatio: s.tradesGrossPositiveNetNegativeRatio,
+    netToGrossRatio: s.netToGrossRatio,
+    feeToGrossRatio: s.feeToGrossRatio
   };
 }
 
@@ -151,12 +194,19 @@ export function buildPaperDashboard(input: Readonly<{
     monthToDate: pickWinSlice(w.monthToDate)
   };
 
+  const feeAnalytics = {
+    last7d: pickFeeSlice(w.last7d),
+    last30d: pickFeeSlice(w.last30d),
+    all: pickFeeSlice(w.all)
+  };
+
   return {
     generatedAt: health.generatedAt,
     status: health.status,
     reasons: [...health.reasons],
     headline: buildHeadline(health, window),
     snapshot,
+    feeAnalytics,
     recentTrend: buildRecentTrend(healthHistoryLines)
   };
 }

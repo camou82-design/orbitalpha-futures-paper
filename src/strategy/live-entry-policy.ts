@@ -5,12 +5,12 @@ import { btcBiasFromModeDetail } from "./live-market-mode";
 export type PositionDirection = "long" | "short" | "none";
 
 /** 최소 품질 점수 — 진입 파이프라인·방향 결정 공통 하한 (수수료 대비 애매한 진입 감소). */
-export const ENTRY_MIN_SCORE = 62;
+export const ENTRY_MIN_SCORE = 64;
 /** 횡보 모드에서 weak 후보는 더 높은 점수 요구. */
-const SIDEWAYS_WEAK_MIN_SCORE = 68;
+const SIDEWAYS_WEAK_MIN_SCORE = 72;
 const STRONG_SCORE = 72;
 /** 횡보에서 EMA 분리가 너무 작으면 애매한 구간으로 진입 차단 (|ema20-ema60|/ema60). */
-const SIDEWAYS_MIN_EMA_REL_SEP = 0.0028;
+const SIDEWAYS_MIN_EMA_REL_SEP = 0.0035;
 
 /**
  * 시장 모드 + BTC 편향 + 후보 신호로 롱/숏/관망 결정.
@@ -44,6 +44,8 @@ export function decidePositionDirection(input: Readonly<{
   }
 
   if (input.mode === "sideways") {
+    /* BTC 5m 편향이 중립이면 횡보 구간에서 방향 진입 보류 */
+    if (btcB === "flat") return "none";
     if (wantLong) {
       if (btcB === "down") return "none";
       if (input.candidateStrength === "weak") {
@@ -136,7 +138,7 @@ export function evaluateEntryPolicy(input: Readonly<{
     if (input.direction === "short" && !emaAlignedShort) {
       return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "ema_short_not_aligned" } };
     }
-    if (input.volumeRatioProxy < 0.95) {
+    if (input.volumeRatioProxy < 1.02) {
       return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "volume_too_thin" } };
     }
     return {

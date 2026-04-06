@@ -346,6 +346,44 @@
     return String(Math.trunc(n));
   }
 
+  function formatRatioPlain(n) {
+    if (n === null || n === undefined || typeof n !== "number" || !Number.isFinite(n)) return "—";
+    return n.toLocaleString("ko-KR", { maximumFractionDigits: 3 });
+  }
+
+  function renderFeeAnalytics(bundle) {
+    const box = $("fee-analytics");
+    if (!box) return;
+    const dashFa = bundle.dashboard && bundle.dashboard.feeAnalytics;
+    const lp7 = bundle.ledgerPerformance && bundle.ledgerPerformance.last7d;
+    const s =
+      dashFa && dashFa.last7d && typeof dashFa.last7d.totalTrades === "number"
+        ? dashFa.last7d
+        : lp7;
+    if (!s || !s.totalTrades) {
+      box.innerHTML =
+        '<p class="muted text-xs">최근 7일 종료 거래 없음 · 또는 엔진 리포트 갱신 후 dashboard에 feeAnalytics가 채워집니다.</p>';
+      return;
+    }
+    const item = (label, val) =>
+      `<div><span class="fee-k">${esc(label)}</span> <span class="fee-v">${val}</span></div>`;
+    box.innerHTML = [
+      item("거래 수", formatCount(s.totalTrades)),
+      item("평균 승리(순)", formatUsd(s.averageWinPnlUsdNet)),
+      item("평균 패배(순)", formatUsd(s.averageLossPnlUsdNet)),
+      item("건당 평균 수수료", formatUsd(s.averageFeeUsdPerTrade)),
+      item("gross 합", formatUsd(s.totalPnlUsdGross)),
+      item("수수료 합", formatUsd(s.totalFeeUsd)),
+      item("순손익 합", formatUsd(s.totalPnlUsdNet)),
+      item("profit factor (순)", formatRatioPlain(s.profitFactorNet)),
+      item("평균승/평균패", formatRatioPlain(s.avgWinToAvgLossRatio)),
+      item("gross+ 순− 건수", formatCount(s.tradesGrossPositiveNetNegative)),
+      item("수수료 역전 비중", formatPct(s.tradesGrossPositiveNetNegativeRatio)),
+      item("순/gross", formatRatioPlain(s.netToGrossRatio)),
+      item("fee/gross", formatRatioPlain(s.feeToGrossRatio))
+    ].join("");
+  }
+
   function esc(s) {
     return String(s)
       .replace(/&/g, "&amp;")
@@ -439,6 +477,8 @@
 
     $("perf-row").innerHTML =
       card("전체 누적", all) + card("최근 7일", w7) + card("최근 30일", w30);
+
+    renderFeeAnalytics(bundle);
 
     const mtdEl = $("panel-mtd");
     mtdEl.innerHTML =

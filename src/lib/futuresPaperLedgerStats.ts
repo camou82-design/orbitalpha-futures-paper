@@ -50,6 +50,15 @@ export type FuturesPaperLedgerWindowStats = Readonly<{
   totalFeeUsd: number;
   totalFundingUsd: number;
   averagePnlUsdNet: number;
+  averageWinPnlUsdNet: number | null;
+  averageLossPnlUsdNet: number | null;
+  averageFeeUsdPerTrade: number;
+  profitFactorNet: number | null;
+  avgWinToAvgLossRatio: number | null;
+  tradesGrossPositiveNetNegative: number;
+  tradesGrossPositiveNetNegativeRatio: number;
+  netToGrossRatio: number | null;
+  feeToGrossRatio: number | null;
 }>;
 
 export type FuturesPaperLedgerPerformance = Readonly<{
@@ -69,6 +78,9 @@ function aggregateRows(rows: ParsedHistoryRow[]): FuturesPaperLedgerWindowStats 
   let totalPnlUsdGross = 0;
   let totalFeeUsd = 0;
   let totalFundingUsd = 0;
+  let sumWinNet = 0;
+  let sumLossNet = 0;
+  let tradesGrossPositiveNetNegative = 0;
 
   for (const row of rows) {
     const p = row.pnlUsdNet;
@@ -76,12 +88,35 @@ function aggregateRows(rows: ParsedHistoryRow[]): FuturesPaperLedgerWindowStats 
     totalPnlUsdGross += row.pnlUsdGross;
     totalFeeUsd += row.feeUsd;
     totalFundingUsd += row.fundingUsd;
-    if (p > 0) winTrades += 1;
-    else if (p < 0) lossTrades += 1;
+    if (p > 0) {
+      winTrades += 1;
+      sumWinNet += p;
+    } else if (p < 0) {
+      lossTrades += 1;
+      sumLossNet += p;
+    }
+    if (row.pnlUsdGross > 0 && row.pnlUsdNet < 0) tradesGrossPositiveNetNegative += 1;
   }
 
   const winRate = totalTrades > 0 ? winTrades / totalTrades : 0;
   const averagePnlUsdNet = totalTrades > 0 ? totalPnlUsdNet / totalTrades : 0;
+  const averageWinPnlUsdNet = winTrades > 0 ? sumWinNet / winTrades : null;
+  const averageLossPnlUsdNet = lossTrades > 0 ? sumLossNet / lossTrades : null;
+  const averageFeeUsdPerTrade = totalTrades > 0 ? totalFeeUsd / totalTrades : 0;
+  const lossAbs = sumLossNet < 0 ? Math.abs(sumLossNet) : 0;
+  const profitFactorNet = lossAbs > 0 && sumWinNet > 0 ? sumWinNet / lossAbs : null;
+  const avgWinToAvgLossRatio =
+    averageWinPnlUsdNet !== null &&
+    averageLossPnlUsdNet !== null &&
+    averageLossPnlUsdNet !== 0
+      ? Math.abs(averageWinPnlUsdNet / averageLossPnlUsdNet)
+      : null;
+  const tradesGrossPositiveNetNegativeRatio =
+    totalTrades > 0 ? tradesGrossPositiveNetNegative / totalTrades : 0;
+  const netToGrossRatio =
+    totalPnlUsdGross !== 0 && Number.isFinite(totalPnlUsdGross) ? totalPnlUsdNet / totalPnlUsdGross : null;
+  const feeToGrossRatio =
+    totalPnlUsdGross !== 0 && Number.isFinite(totalPnlUsdGross) ? totalFeeUsd / totalPnlUsdGross : null;
 
   return {
     totalTrades,
@@ -92,7 +127,16 @@ function aggregateRows(rows: ParsedHistoryRow[]): FuturesPaperLedgerWindowStats 
     totalPnlUsdGross,
     totalFeeUsd,
     totalFundingUsd,
-    averagePnlUsdNet
+    averagePnlUsdNet,
+    averageWinPnlUsdNet,
+    averageLossPnlUsdNet,
+    averageFeeUsdPerTrade,
+    profitFactorNet,
+    avgWinToAvgLossRatio,
+    tradesGrossPositiveNetNegative,
+    tradesGrossPositiveNetNegativeRatio,
+    netToGrossRatio,
+    feeToGrossRatio
   };
 }
 

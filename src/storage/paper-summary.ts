@@ -15,6 +15,26 @@ export type PaperSummaryStats = Readonly<{
   latestClosedAt: number | null;
   strategyVersions: string[];
   symbolsTraded: Record<string, number>;
+  /** 종료 거래 gross 합 (수수료·펀딩 전). */
+  totalPnlUsdGross: number;
+  /** 승리 건 순손익 평균 (승 없으면 null). */
+  averageWinPnlUsdNet: number | null;
+  /** 패배 건 순손익 평균, 음수 (패 없으면 null). */
+  averageLossPnlUsdNet: number | null;
+  /** 건당 평균 수수료. */
+  averageFeeUsdPerTrade: number;
+  /** 순손익 기준 profit factor: Σ(승 net) / |Σ(패 net)|. */
+  profitFactorNet: number | null;
+  /** |평균 승| / |평균 패| (둘 다 있을 때). */
+  avgWinToAvgLossRatio: number | null;
+  /** gross > 0 이지만 net < 0 인 거래 수 (수수료 등으로 역전). */
+  tradesGrossPositiveNetNegative: number;
+  /** 위 비중 / totalTrades. */
+  tradesGrossPositiveNetNegativeRatio: number;
+  /** totalNet / totalGross (gross 0이면 null). */
+  netToGrossRatio: number | null;
+  /** gross 대비 수수료 비율 totalFee/totalGross (gross 0이면 null). */
+  feeToGrossRatio: number | null;
 }>;
 
 /** Written to `data/reports/summary.json` from `positions/history.json`. */
@@ -45,6 +65,7 @@ function parseRow(
   r: unknown
 ): {
   pnlUsdNet: number;
+  pnlUsdGross: number;
   feeUsd: number;
   fundingUsd: number;
   holdingMs: number | undefined;
@@ -68,7 +89,11 @@ function parseRow(
   const strategyVersion = typeof sv === "string" && sv.length > 0 ? sv : undefined;
   const sym = o.symbol;
   const symbol = typeof sym === "string" && sym.length > 0 ? sym : undefined;
-  return { pnlUsdNet: pnl, feeUsd, fundingUsd, holdingMs, closedAt, strategyVersion, symbol };
+  const g = o.pnlUsdGross;
+  let pnlUsdGross: number;
+  if (typeof g === "number" && Number.isFinite(g)) pnlUsdGross = g;
+  else pnlUsdGross = pnl + feeUsd + fundingUsd;
+  return { pnlUsdNet: pnl, pnlUsdGross, feeUsd, fundingUsd, holdingMs, closedAt, strategyVersion, symbol };
 }
 
 type ParsedHistoryRow = NonNullable<ReturnType<typeof parseRow>>;
@@ -93,6 +118,7 @@ function aggregateRows(rows: ParsedHistoryRow[]): PaperSummaryStats {
   let winTrades = 0;
   let lossTrades = 0;
   let totalPnlUsdNet = 0;
+  let totalPnlUsdGross = 0;
   let totalFeeUsd = 0;
   let totalFundingUsd = 0;
   let totalHoldingMs = 0;
@@ -102,14 +128,24 @@ function aggregateRows(rows: ParsedHistoryRow[]): PaperSummaryStats {
   let latestClosedAt: number | null = null;
   const versionSet = new Set<string>();
   const symbolsTraded: Record<string, number> = {};
+  let sumWinNet = 0;
+  let sumLossNet = 0;
+  let tradesGrossPositiveNetNegative = 0;
 
   for (const row of rows) {
     const p = row.pnlUsdNet;
     totalPnlUsdNet += p;
+    totalPnlUsdGross += row.pnlUsdGross;
     totalFeeUsd += row.feeUsd;
     totalFundingUsd += row.fundingUsd;
-    if (p > 0) winTrades += 1;
-    else if (p < 0) lossTrades += 1;
+    if (p > 0) {
+      winTrades += 1;
+      sumWinNet += p;
+    } else if (p < 0) {
+      lossTrades += 1;
+      sumLossNet += p;
+    }
+    if (row.pnlUsdGross > 0 && row.pnlUsdNet < 0) tradesGrossPositiveNetNegative += 1;
     if (best === null || p > best) best = p;
     if (worst === null || p < worst) worst = p;
     if (row.holdingMs !== undefined) {
@@ -131,6 +167,24 @@ function aggregateRows(rows: ParsedHistoryRow[]): PaperSummaryStats {
   const averageHoldingMs = holdingCount > 0 ? totalHoldingMs / holdingCount : 0;
   const strategyVersions = [...versionSet].sort();
 
+  const averageWinPnlUsdNet = winTrades > 0 ? sumWinNet / winTrades : null;
+  const averageLossPnlUsdNet = lossTrades > 0 ? sumLossNet / lossTrades : null;
+  const averageFeeUsdPerTrade = totalTrades > 0 ? totalFeeUsd / totalTrades : 0;
+  const lossAbs = sumLossNet < 0 ? Math.abs(sumLossNet) : 0;
+  const profitFactorNet = lossAbs > 0 && sumWinNet > 0 ? sumWinNet / lossAbs : null;
+  const avgWinToAvgLossRatio =
+    averageWinPnlUsdNet !== null &&
+    averageLossPnlUsdNet !== null &&
+    averageLossPnlUsdNet !== 0
+      ? Math.abs(averageWinPnlUsdNet / averageLossPnlUsdNet)
+      : null;
+  const tradesGrossPositiveNetNegativeRatio =
+    totalTrades > 0 ? tradesGrossPositiveNetNegative / totalTrades : 0;
+  const netToGrossRatio =
+    totalPnlUsdGross !== 0 && Number.isFinite(totalPnlUsdGross) ? totalPnlUsdNet / totalPnlUsdGross : null;
+  const feeToGrossRatio =
+    totalPnlUsdGross !== 0 && Number.isFinite(totalPnlUsdGross) ? totalFeeUsd / totalPnlUsdGross : null;
+
   return {
     totalTrades,
     winTrades,
@@ -145,7 +199,17 @@ function aggregateRows(rows: ParsedHistoryRow[]): PaperSummaryStats {
     averageHoldingMs,
     latestClosedAt,
     strategyVersions,
-    symbolsTraded
+    symbolsTraded,
+    totalPnlUsdGross,
+    averageWinPnlUsdNet,
+    averageLossPnlUsdNet,
+    averageFeeUsdPerTrade,
+    profitFactorNet,
+    avgWinToAvgLossRatio,
+    tradesGrossPositiveNetNegative,
+    tradesGrossPositiveNetNegativeRatio,
+    netToGrossRatio,
+    feeToGrossRatio
   };
 }
 
