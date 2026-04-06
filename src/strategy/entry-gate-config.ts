@@ -8,7 +8,7 @@ export const ENTRY_GATE_CONFIG = {
   /** ATR / mean-range lookback on the entry timeframe (1m) candles. */
   volatilityAtrPeriod: 14,
   /** Require expected move (ATR/price) to exceed `minRequiredMoveFraction * this`. */
-  minMoveVsCostMultiplier: 1.5,
+  minMoveVsCostMultiplier: 1.85,
   /** Higher timeframe for trend alignment (long: EMA20 > EMA60 on closes). */
   higherTimeframe: "5m" as Timeframe,
   /** Bybit kline `limit` for higher TF (needs ≥ 60 for EMA60). */

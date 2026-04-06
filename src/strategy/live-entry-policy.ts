@@ -4,8 +4,13 @@ import { btcBiasFromModeDetail } from "./live-market-mode";
 
 export type PositionDirection = "long" | "short" | "none";
 
-const MID_SCORE = 55;
+/** 최소 품질 점수 — 진입 파이프라인·방향 결정 공통 하한 (수수료 대비 애매한 진입 감소). */
+export const ENTRY_MIN_SCORE = 62;
+/** 횡보 모드에서 weak 후보는 더 높은 점수 요구. */
+const SIDEWAYS_WEAK_MIN_SCORE = 68;
 const STRONG_SCORE = 72;
+/** 횡보에서 EMA 분리가 너무 작으면 애매한 구간으로 진입 차단 (|ema20-ema60|/ema60). */
+const SIDEWAYS_MIN_EMA_REL_SEP = 0.0028;
 
 /**
  * 시장 모드 + BTC 편향 + 후보 신호로 롱/숏/관망 결정.
@@ -41,15 +46,24 @@ export function decidePositionDirection(input: Readonly<{
   if (input.mode === "sideways") {
     if (wantLong) {
       if (btcB === "down") return "none";
-      return input.candidateStrength === "weak" || input.signalStrengthScore >= MID_SCORE ? "long" : "none";
+      if (input.candidateStrength === "weak") {
+        return input.signalStrengthScore >= SIDEWAYS_WEAK_MIN_SCORE ? "long" : "none";
+      }
+      return input.signalStrengthScore >= ENTRY_MIN_SCORE ? "long" : "none";
     }
     if (wantShort) {
       if (btcB === "up") return "none";
-      return input.candidateStrength === "weak" || input.signalStrengthScore >= MID_SCORE ? "short" : "none";
+      if (input.candidateStrength === "weak") {
+        return input.signalStrengthScore >= SIDEWAYS_WEAK_MIN_SCORE ? "short" : "none";
+      }
+      return input.signalStrengthScore >= ENTRY_MIN_SCORE ? "short" : "none";
     }
   }
 
-  /* trend */
+  /* trend — 약한 점수면 방향 자체를 주지 않음 */
+  if (wantLong || wantShort) {
+    if (input.signalStrengthScore < ENTRY_MIN_SCORE) return "none";
+  }
   if (wantLong) {
     if (btcB === "down" && input.signalStrengthScore < STRONG_SCORE) return "none";
     return "long";
@@ -83,11 +97,11 @@ export function evaluateEntryPolicy(input: Readonly<{
     return { ok: false, blockMessage: "blocked_no_structure", detail: { reason: "direction_none" } };
   }
 
-  if (input.signalStrengthScore < MID_SCORE) {
+  if (input.signalStrengthScore < ENTRY_MIN_SCORE) {
     return {
       ok: false,
       blockMessage: "blocked_low_signal",
-      detail: { signal_strength_score: input.signalStrengthScore, floor: MID_SCORE }
+      detail: { signal_strength_score: input.signalStrengthScore, floor: ENTRY_MIN_SCORE }
     };
   }
 
@@ -98,12 +112,22 @@ export function evaluateEntryPolicy(input: Readonly<{
     return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "ema_missing" } };
   }
 
+  const emaRelSep = Math.abs((e20 - e60) / e60);
+
   const emaAlignedLong = e20 > e60 * 1.0002 && cl >= e20 * 0.998;
   const emaAlignedShort = e20 < e60 * 0.9998 && cl <= e20 * 1.002;
   const pullbackLong = cl <= e20 * 1.01;
   const pullbackShort = cl >= e20 * 0.99;
   const chaseLong = input.lastPrice > e20 * 1.012;
   const chaseShort = input.lastPrice < e20 * 0.988;
+
+  if (input.mode === "sideways" && emaRelSep < SIDEWAYS_MIN_EMA_REL_SEP) {
+    return {
+      ok: false,
+      blockMessage: "blocked_no_structure",
+      detail: { sub: "sideways_ema_too_flat", ema_rel_sep: emaRelSep, min: SIDEWAYS_MIN_EMA_REL_SEP }
+    };
+  }
 
   if (input.mode === "trend") {
     if (input.direction === "long" && !emaAlignedLong) {
@@ -112,7 +136,7 @@ export function evaluateEntryPolicy(input: Readonly<{
     if (input.direction === "short" && !emaAlignedShort) {
       return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "ema_short_not_aligned" } };
     }
-    if (input.volumeRatioProxy < 0.85) {
+    if (input.volumeRatioProxy < 0.95) {
       return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "volume_too_thin" } };
     }
     return {

@@ -177,17 +177,19 @@ function buildRequestDiagnosticsBySymbol(diags: SymbolDiagnostic[]): Record<stri
   return bySymbol;
 }
 
-/** Latest `closedAt` per symbol from `positions/history.json` rows (paper closed legs). */
-function latestClosedAtBySymbol(history: readonly unknown[]): Map<string, number> {
-  const m = new Map<string, number>();
+/** Latest close per symbol: time + side (같은 방향 재진입 쿨다운용). */
+function latestCloseMetaBySymbol(history: readonly unknown[]): Map<string, { closedAt: number; side: "long" | "short" }> {
+  const m = new Map<string, { closedAt: number; side: "long" | "short" }>();
   for (const row of history) {
     if (!row || typeof row !== "object") continue;
     const o = row as Record<string, unknown>;
     const sym = o.symbol;
     const closed = o.closedAt;
+    const side = o.side;
     if (typeof sym !== "string" || typeof closed !== "number" || !Number.isFinite(closed)) continue;
-    const prev = m.get(sym) ?? 0;
-    if (closed >= prev) m.set(sym, closed);
+    if (side !== "long" && side !== "short") continue;
+    const prev = m.get(sym);
+    if (!prev || closed >= prev.closedAt) m.set(sym, { closedAt: closed, side });
   }
   return m;
 }
@@ -321,6 +323,7 @@ export class PaperEngine {
       paper_strong_ema_gap_threshold: config.paperStrongEmaGapThreshold,
       paper_sideways_ema_gap_threshold: config.paperSidewaysEmaGapThreshold,
       paper_reentry_cooldown_ms: config.paperReentryCooldownMs,
+      paper_reentry_same_dir_mult: 2,
       paper_max_open_positions: config.paperMaxOpenPositions
     });
   }
@@ -750,8 +753,8 @@ export class PaperEngine {
         continue;
       }
 
-      const minHoldMs = 3 * 60_000;
-      const gracePeriodMs = 5 * 60_000;
+      const minHoldMs = 5 * 60_000;
+      const gracePeriodMs = 7 * 60_000;
 
       if (m.holdingMs < minHoldMs) {
         remaining.push(posTrail);
@@ -836,8 +839,9 @@ export class PaperEngine {
     const before = opens.length;
     const next = [...opens];
     const cooldownMs = this.config.paperReentryCooldownMs;
-    const lastCloseBySymbol =
-      cooldownMs > 0 ? latestClosedAtBySymbol(await this.store.readPositionsHistory()) : null;
+    const sameDirCooldownMult = 2;
+    const lastCloseMetaBySymbol =
+      cooldownMs > 0 ? latestCloseMetaBySymbol(await this.store.readPositionsHistory()) : null;
     const nowOpen = Date.now();
 
     for (const first of candidates) {
@@ -846,14 +850,20 @@ export class PaperEngine {
         this.logger.info("paper_position_skipped_existing_open", { symbol: first.symbol });
         continue;
       }
-      if (lastCloseBySymbol !== null) {
-        const lastClose = lastCloseBySymbol.get(String(first.symbol)) ?? 0;
+      if (lastCloseMetaBySymbol !== null) {
+        const meta = lastCloseMetaBySymbol.get(String(first.symbol));
+        const lastClose = meta?.closedAt ?? 0;
         const elapsed = nowOpen - lastClose;
-        if (lastClose > 0 && elapsed < cooldownMs) {
+        const intentSide: "long" | "short" =
+          first.signal === "paper_long_candidate" ? "long" : "short";
+        const sameDirection = meta !== undefined && meta.side === intentSide;
+        const waitMs = sameDirection ? cooldownMs * sameDirCooldownMult : cooldownMs;
+        if (lastClose > 0 && elapsed < waitMs) {
           this.logger.info("paper_position_skipped_reentry_cooldown", {
             symbol: first.symbol,
             ms_since_close: elapsed,
-            cooldown_ms: cooldownMs
+            cooldown_ms: waitMs,
+            same_direction_reentry: sameDirection
           });
           continue;
         }

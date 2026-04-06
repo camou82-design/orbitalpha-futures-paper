@@ -51,9 +51,9 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
   const defaultMoveMult = paperEntryRelaxed ? 1.05 : ENTRY_GATE_CONFIG.minMoveVsCostMultiplier;
   const paperGateMinMoveMultiplier = parseNumber(env.ORBITALPHA_PAPER_GATE_MOVE_MULT, defaultMoveMult);
   const paperRequireHigherTfAlign = parseBool(env.ORBITALPHA_PAPER_GATE_REQUIRE_HIGHER_TF, !paperEntryRelaxed);
-  const defaultQualityMin = paperEntryRelaxed ? 65 : 80;
+  const defaultQualityMin = paperEntryRelaxed ? 65 : 82;
   const paperQualityMinScore = parseNumber(env.ORBITALPHA_PAPER_QUALITY_MIN_SCORE, defaultQualityMin);
-  const defaultQualityWeak = paperEntryRelaxed ? 50 : 70;
+  const defaultQualityWeak = paperEntryRelaxed ? 50 : 73;
   const paperQualityMinScoreWeak = parseNumber(env.ORBITALPHA_PAPER_QUALITY_MIN_SCORE_WEAK, defaultQualityWeak);
   const paperMaxOpenPositions = parseIntClamped(env.ORBITALPHA_PAPER_MAX_OPEN_POSITIONS, 3, 1, 3);
   const paperStrongEmaGapThreshold = parseNumber(env.ORBITALPHA_PAPER_STRONG_EMA_GAP_THRESHOLD, 0.004);
@@ -65,11 +65,11 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
   const paperReentryCooldownMsRaw = env.ORBITALPHA_PAPER_REENTRY_COOLDOWN_MS;
   const paperReentryCooldownMsParsed =
     paperReentryCooldownMsRaw === undefined || paperReentryCooldownMsRaw.trim() === ""
-      ? 300_000
+      ? 900_000
       : parseInt(paperReentryCooldownMsRaw, 10);
   const paperReentryCooldownMs =
     !Number.isFinite(paperReentryCooldownMsParsed) || paperReentryCooldownMsParsed < 0
-      ? 300_000
+      ? 900_000
       : Math.min(86_400_000, paperReentryCooldownMsParsed);
 
   return {

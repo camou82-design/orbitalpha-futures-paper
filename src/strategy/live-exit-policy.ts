@@ -18,39 +18,39 @@ export function getModeRiskThresholds(mode: FuturesMarketMode): Readonly<{
   switch (mode) {
     case "trend":
       return {
-        tp: 0.005,
+        tp: 0.007,
         sl: -0.01,
         maxHoldMs: 4 * 60 * 60 * 1000,
         trailDrawdown: 0.0035,
-        trailMinPnl: 0.002,
-        runnerTp: 0.0035
+        trailMinPnl: 0.003,
+        runnerTp: 0.005
       };
     case "sideways":
       return {
-        tp: 0.0035,
+        tp: 0.005,
         sl: -0.0065,
         maxHoldMs: 45 * 60 * 1000,
         trailDrawdown: 0.0025,
-        trailMinPnl: 0.0012,
-        runnerTp: 0.0022
+        trailMinPnl: 0.002,
+        runnerTp: 0.0035
       };
     case "risk_off":
       return {
-        tp: 0.0025,
+        tp: 0.0035,
         sl: -0.0045,
         maxHoldMs: 20 * 60 * 1000,
         trailDrawdown: 0.002,
-        trailMinPnl: 0.0008,
-        runnerTp: 0.0016
+        trailMinPnl: 0.0012,
+        runnerTp: 0.0025
       };
     default:
       return {
-        tp: 0.005,
+        tp: 0.007,
         sl: -0.01,
         maxHoldMs: 4 * 60 * 60 * 1000,
         trailDrawdown: 0.0035,
-        trailMinPnl: 0.002,
-        runnerTp: 0.0035
+        trailMinPnl: 0.003,
+        runnerTp: 0.005
       };
   }
 }
