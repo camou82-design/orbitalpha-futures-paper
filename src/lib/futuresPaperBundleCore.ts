@@ -13,6 +13,12 @@ export type FuturesPaperSymbolRow = Readonly<{
   qualityScore?: number;
   emaGap?: number;
   volumeRatioProxy?: number;
+  boxHigh?: number;
+  boxLow?: number;
+  boxPos?: number;
+  boxRel?: number;
+  gateExpectedMove?: number;
+  gateRequiredMove?: number;
   lastPrice?: number;
   fundingRate?: number;
   fetchedAt?: number;
@@ -28,10 +34,13 @@ export type FuturesPaperDataBundle = Readonly<{
   configured: boolean;
   configHint: string | null;
   summary: unknown | null;
+  summaryRange: unknown | null;
+  summaryTrend: unknown | null;
   summaryDaily: unknown | null;
   summaryWindow: unknown | null;
   summaryHealth: unknown | null;
   dashboard: unknown | null;
+  engineState: unknown | null;
   latestSnapshot: unknown | null;
   latestMeta: unknown | null;
   symbolRows: FuturesPaperSymbolRow[];
@@ -39,6 +48,7 @@ export type FuturesPaperDataBundle = Readonly<{
   ledgerPerformance: FuturesPaperLedgerPerformance | null;
   openPositions: unknown[];
   positionsHistory: unknown[];
+  eventsRecent: unknown[];
   generatedAt: number;
 }>;
 
@@ -75,6 +85,12 @@ function pickSymbolRows(latest: unknown): FuturesPaperSymbolRow[] {
       qualityScore: typeof r.qualityScore === "number" ? r.qualityScore : undefined,
       emaGap: typeof r.emaGap === "number" ? r.emaGap : undefined,
       volumeRatioProxy: typeof r.volumeRatioProxy === "number" ? r.volumeRatioProxy : undefined,
+      boxHigh: typeof r.boxHigh === "number" ? r.boxHigh : undefined,
+      boxLow: typeof r.boxLow === "number" ? r.boxLow : undefined,
+      boxPos: typeof r.boxPos === "number" ? r.boxPos : undefined,
+      boxRel: typeof r.boxRel === "number" ? r.boxRel : undefined,
+      gateExpectedMove: typeof r.gateExpectedMove === "number" ? r.gateExpectedMove : undefined,
+      gateRequiredMove: typeof r.gateRequiredMove === "number" ? r.gateRequiredMove : undefined,
       lastPrice: typeof r.lastPrice === "number" ? r.lastPrice : undefined,
       fundingRate: typeof r.fundingRate === "number" ? r.fundingRate : undefined,
       fetchedAt: typeof r.fetchedAt === "number" ? r.fetchedAt : undefined
@@ -133,6 +149,29 @@ async function readHealthHistoryTail(dataDir: string, maxLines: number): Promise
   }
 }
 
+async function readEventsTail(dataDir: string, maxLines: number): Promise<unknown[]> {
+  const p = path.join(dataDir, "reports", "events.jsonl");
+  try {
+    const raw = await fs.readFile(p, "utf8");
+    const lines = raw
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const tail = lines.slice(-maxLines);
+    const out: unknown[] = [];
+    for (const line of tail) {
+      try {
+        out.push(JSON.parse(line) as unknown);
+      } catch {
+        /* skip bad line */
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Read orbitalpha-futures-paper `data/` from a local project root (Lightsail or dev).
  */
@@ -142,22 +181,37 @@ export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): P
   const reports = path.join(dataDir, "reports");
   const snaps = path.join(dataDir, "snapshots");
 
-  const [summary, summaryDaily, summaryWindow, summaryHealth, dashboard, latestSnapshot, latestMeta] =
+  const [
+    summary,
+    summaryRange,
+    summaryTrend,
+    summaryDaily,
+    summaryWindow,
+    summaryHealth,
+    dashboard,
+    engineState,
+    latestSnapshot,
+    latestMeta
+  ] =
     await Promise.all([
       readJsonFile(path.join(reports, "summary.json")),
+      readJsonFile(path.join(reports, "summary-range.json")),
+      readJsonFile(path.join(reports, "summary-trend.json")),
       readJsonFile(path.join(reports, "summary-daily.json")),
       readJsonFile(path.join(reports, "summary-window.json")),
       readJsonFile(path.join(reports, "summary-health.json")),
       readJsonFile(path.join(reports, "dashboard.json")),
+      readJsonFile(path.join(reports, "engine-state.json")),
       readJsonFile(path.join(snaps, "latest.json")),
       readJsonFile(path.join(snaps, "latest-meta.json"))
     ]);
 
-  const [symbolRows, healthHistoryRecent, positionsHistory, openPositions] = await Promise.all([
+  const [symbolRows, healthHistoryRecent, positionsHistory, openPositions, eventsRecent] = await Promise.all([
     Promise.resolve(pickSymbolRows(latestSnapshot)),
     readHealthHistoryTail(dataDir, 10),
     readPositionsHistoryArray(dataDir),
-    readPositionsOpenArray(dataDir)
+    readPositionsOpenArray(dataDir),
+    readEventsTail(dataDir, 20)
   ]);
 
   const generatedAt = Date.now();
@@ -167,10 +221,13 @@ export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): P
     configured: true,
     configHint: null,
     summary,
+    summaryRange,
+    summaryTrend,
     summaryDaily,
     summaryWindow,
     summaryHealth,
     dashboard,
+    engineState,
     latestSnapshot,
     latestMeta,
     symbolRows,
@@ -178,6 +235,7 @@ export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): P
     ledgerPerformance,
     openPositions,
     positionsHistory,
+    eventsRecent,
     generatedAt
   };
 }

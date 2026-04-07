@@ -15,10 +15,13 @@ function emptyBundle(configHint: string): FuturesPaperDataBundle {
     configured: false,
     configHint,
     summary: null,
+    summaryRange: null,
+    summaryTrend: null,
     summaryDaily: null,
     summaryWindow: null,
     summaryHealth: null,
     dashboard: null,
+    engineState: null,
     latestSnapshot: null,
     latestMeta: null,
     symbolRows: [],
@@ -26,6 +29,7 @@ function emptyBundle(configHint: string): FuturesPaperDataBundle {
     ledgerPerformance: null,
     openPositions: [],
     positionsHistory: [],
+    eventsRecent: [],
     generatedAt: now
   };
 }
