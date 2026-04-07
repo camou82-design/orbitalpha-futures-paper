@@ -23,7 +23,24 @@
   const MODE_LABELS = {
     trend: "추세장",
     sideways: "횡보장",
-    risk_off: "위험회피 구간"
+    risk_off: "위험회피 구간",
+    TREND: "TREND",
+    RANGE: "RANGE",
+    NO_TRADE: "NO_TRADE"
+  };
+
+  const ENTRY_BLOCK_LABELS = {
+    fee_slippage_insufficient: "수수료·슬리피지 대비 기대수익 부족",
+    range_center_forbidden: "RANGE 중앙 구간",
+    range_cooldown_active: "RANGE 연속 실패 쿨다운",
+    mode_suspended: "동일 모드 연속 손실로 일시 중단",
+    daily_loss_limit_exceeded: "일일 손실 제한 발동",
+    no_trade_regime: "NO_TRADE 구간",
+    trend_need_breakout_or_pullback: "TREND 돌파/눌림 확인 부족",
+    trend_direction_weak: "TREND 방향성 미약",
+    trend_volume_too_thin: "거래 강도(볼륨) 부족",
+    AI_FILTER: "AI 차단",
+    AI_DIRECTION_MISMATCH: "방향 불일치"
   };
 
   const MAX_OPEN = 3;
@@ -43,6 +60,11 @@
 
   function mapMode(m) {
     return MODE_LABELS[m] || m;
+  }
+
+  function mapBlockReason(r) {
+    if (!r) return "—";
+    return ENTRY_BLOCK_LABELS[r] || mapReason(r) || String(r);
   }
 
   function formatKst(ms) {
@@ -109,6 +131,7 @@
 
   function inferMarketNarrative(bundle) {
     const meta = bundle.latestMeta;
+    const es = bundle.engineState;
     const snaps = getSnapshots(bundle);
     const opens = getOpenPositions(bundle);
     const modes = new Set();
@@ -117,6 +140,9 @@
       if (m === "trend" || m === "sideways" || m === "risk_off") modes.add(m);
     }
     let modeLine = "";
+    if (es && typeof es === "object" && typeof es.regime === "string") {
+      modeLine = "현재 레짐: " + mapMode(es.regime) + (es.riskStatus ? " · 리스크 " + String(es.riskStatus) : "");
+    } else
     if (modes.size === 1) {
       const [one] = Array.from(modes);
       modeLine = "마지막 진입 시 모드: " + mapMode(one);
@@ -186,6 +212,15 @@
     const opens = getOpenPositions(bundle);
     if (opens.length >= MAX_OPEN) {
       return { text: "동시 보유 한도로 신규 진입 불가", tone: "danger" };
+    }
+    const es = bundle.engineState;
+    if (es && typeof es === "object") {
+      const entryAllowed = es.entryAllowed;
+      const blocked = Array.isArray(es.blockedReasons) ? es.blockedReasons : [];
+      if (entryAllowed === false && blocked.length > 0) {
+        const first = blocked[0];
+        return { text: "현재 진입 차단: " + String(first), tone: "danger" };
+      }
     }
     const snaps = getSnapshots(bundle);
     const dr = bundle.dashboard && bundle.dashboard.reasons;
@@ -301,16 +336,39 @@
     const perf = perfSlice(bundle, "last7d");
     const perf30 = perfSlice(bundle, "last30d");
     const all = perfSlice(bundle, "all");
+    const es = bundle.engineState;
+    const curRegime = es && typeof es === "object" ? (es.current_regime || es.regime) : null;
+    const entryGateLine =
+      es && typeof es === "object"
+        ? "레짐 " +
+          mapMode(curRegime) +
+          " · 진입 " +
+          (es.entryAllowed === false ? "차단" : es.entryAllowed === true ? "가능" : "—") +
+          (Array.isArray(es.blockedReasons) && es.blockedReasons.length > 0 ? " · 이유 " + mapBlockReason(es.blockedReasons[0]) : "")
+        : "";
 
     const toneClass =
       blk.tone === "danger" ? "hero-card--danger" : blk.tone === "warn" ? "hero-card--warn" : "";
 
     const hero = $("hero");
+    const topStatus =
+      es && typeof es === "object"
+        ? `<div class="hero-topline muted text-xs" style="margin-top:0.25rem">
+            레짐 <strong>${esc(mapMode(curRegime))}</strong> · 실행기 <strong>${esc(
+              es.active_mode_executor || "—"
+            )}</strong> · 엔진 <strong>${esc(es.engine_status || "—")}</strong> · 리스크 <strong>${esc(
+              es.risk_state || es.riskStatus || "—"
+            )}</strong>
+          </div>`
+        : "";
     hero.innerHTML = `
       <article class="hero-card hero-card--accent">
         <p class="hero-label">시장 맥락</p>
         <p class="hero-value">${esc(nar.context || "스냅샷 분석 중")}</p>
         <p class="hero-sub">${esc(nar.modeLine)}</p>
+        <p class="hero-sub muted">${esc(entryGateLine)}</p>
+        ${topStatus}
+        ${renderAiSummaryInline(bundle)}
         <p class="hero-sub muted">${esc(nar.sub)}</p>
       </article>
       <article class="hero-card hero-card--accent">
@@ -339,6 +397,25 @@
     )} / ${formatCount(all && all.totalTrades)}</p>
       </article>
     `;
+  }
+
+  function renderAiSummaryInline(bundle) {
+    const s = bundle.summary;
+    const ai = s && s.observation && s.observation.aiApproval ? s.observation.aiApproval : null;
+    if (!ai) return "";
+    const rate = typeof ai.ai_approval_rate === "number" ? formatPct(ai.ai_approval_rate) : "—";
+    const q = s && s.observation && s.observation.aiBlockQuality ? s.observation.aiBlockQuality : null;
+    const qRate = q && typeof q.ai_block_quality_rate === "number" ? formatPct(q.ai_block_quality_rate) : "—";
+    const c = q && q.criteria ? q.criteria : null;
+    const cLine = c
+      ? ` · 기준 good ≤ ${String(c.good_block_threshold_pct)}% / missed ≥ ${String(c.missed_opportunity_threshold_pct)}%`
+      : "";
+    const qLine = q
+      ? ` · 차단품질 good ${esc(String(q.ai_block_good_count))} / missed ${esc(String(q.ai_block_missed_count))} (${esc(qRate)})${esc(cLine)}`
+      : "";
+    return `<p class="hero-sub muted">AI 승인: exec ${esc(String(ai.executor_allowed_count))} · 승인 ${esc(
+      String(ai.ai_approved_count)
+    )} · 차단 ${esc(String(ai.ai_blocked_count))} · 승인율 ${esc(rate)}${qLine}</p>`;
   }
 
   function formatCount(n) {
@@ -395,9 +472,51 @@
   function renderSymbols(bundle) {
     const grid = $("symbol-grid");
     const want = ["BTCUSDT", "ETHUSDT"];
+    const es = bundle.engineState;
+    const curRegime = es && typeof es === "object" ? (es.current_regime || es.regime) : null;
+    const recent = Array.isArray(bundle.eventsRecent) ? bundle.eventsRecent : [];
+
+    function latestBlockedFor(sym) {
+      for (let i = recent.length - 1; i >= 0; i--) {
+        const e = recent[i];
+        if (!e || e.symbol !== sym) continue;
+        if (e.type === "ENTRY_BLOCKED" || e.type === "BLOCKED") return e;
+      }
+      return null;
+    }
+
+    function contextFor(sym, snap) {
+      const b = latestBlockedFor(sym);
+      if (b) {
+        const sub =
+          b.reason === "AI_FILTER" && b.detail && b.detail.ai_reason
+            ? " · " + String(b.detail.ai_reason)
+            : b.reason === "AI_DIRECTION_MISMATCH"
+              ? " · 방향 불일치"
+              : "";
+        return { ctx: "blocked", reason: mapBlockReason(b.reason) + sub };
+      }
+      if (curRegime === "RANGE") return { ctx: "range", reason: null };
+      if (curRegime === "TREND") {
+        const hasBox = snap && typeof snap.boxHigh === "number" && typeof snap.boxLow === "number" && snap.boxHigh > snap.boxLow;
+        const last = snap && typeof snap.lastPrice === "number" ? snap.lastPrice : null;
+        const e20 = snap && typeof snap.ema20 === "number" ? snap.ema20 : null;
+        const breakoutUp = hasBox && last !== null ? last >= snap.boxHigh * 1.0006 : false;
+        const breakoutDn = hasBox && last !== null ? last <= snap.boxLow * 0.9994 : false;
+        if (breakoutUp || breakoutDn) return { ctx: "breakout", reason: null };
+        if (e20 !== null && last !== null) {
+          const pb = last <= e20 * 1.006 && last >= e20 * 0.994;
+          if (pb) return { ctx: "pullback", reason: null };
+        }
+        return { ctx: "pullback", reason: "추세 확인 대기" };
+      }
+      return { ctx: "blocked", reason: mapBlockReason("no_trade_regime") };
+    }
+
     const cards = want.map((sym) => {
       const s = snapBySymbol(bundle, sym);
       const pos = openForSymbol(bundle, sym);
+      const ctx = contextFor(sym, s || {});
       const headline = symbolHeadline(sym, bundle);
       const line = symbolOneLiner(sym, bundle);
       let cardClass = "sym-card";
@@ -422,7 +541,7 @@
           <p class="sym-one-liner" style="font-size:0.85rem;font-weight:400;color:var(--muted)">${esc(line)}</p>
           <dl class="sym-meta">
             <dt>방향</dt><dd>${esc(dir)}</dd>
-            <dt>상태 요약</dt><dd>${esc(pos ? "포지션 보유" : s && s.entryCandidate ? "후보 단계" : "차단·중립")}</dd>
+            <dt>컨텍스트</dt><dd>${esc(ctx.ctx)}${ctx.reason ? " · " + esc(ctx.reason) : ""}</dd>
             <dt>현재가</dt><dd>${esc(formatPrice(s && s.lastPrice))}</dd>
             <dt>데이터 시각</dt><dd>${esc(formatKst(s && s.fetchedAt))}</dd>
             <dt>펀딩(원시)</dt><dd>${esc(fund)}</dd>
@@ -475,8 +594,29 @@
       `;
     }
 
+    const rangeAll = bundle.summaryRange;
+    const trendAll = bundle.summaryTrend;
+    const modeCard = (title, s) => {
+      if (!s || typeof s !== "object") {
+        return `<div class="perf-card"><h4>${esc(title)}</h4><p class="perf-metric">데이터 없음</p></div>`;
+      }
+      return `
+        <div class="perf-card">
+          <h4>${esc(title)}</h4>
+          <p class="perf-metric">거래 수 <strong>${formatCount(s.totalTrades)}</strong></p>
+          <p class="perf-metric">승률 <strong>${formatPct(s.winRate)}</strong></p>
+          <p class="perf-metric">gross/fee/net <strong>${formatUsd(s.totalPnlUsdGross)}</strong> / ${formatUsd(
+            s.totalFeeUsd
+          )} / <strong class="perf-pnl">${formatUsd(s.totalPnlUsdNet)}</strong></p>
+          <p class="perf-metric muted text-xs">avg net/trade ${formatUsd(s.averagePnlUsdNet)} · fee/gross ${formatRatioPlain(
+            s.feeToGrossRatio
+          )}</p>
+        </div>
+      `;
+    };
+
     $("perf-row").innerHTML =
-      card("전체 누적", all) + card("최근 7일", w7) + card("최근 30일", w30);
+      card("전체 누적", all) + modeCard("RANGE 성과", rangeAll) + modeCard("TREND 성과", trendAll);
 
     renderFeeAnalytics(bundle);
 
@@ -485,6 +625,80 @@
       '<div class="perf-card" style="border:0;padding:0;background:transparent">' +
       card("이번 달 (참고 · 30일과 겹칠 수 있음)", mtd) +
       "</div>";
+  }
+
+  function renderBlockedCard(bundle) {
+    const box = $("blocked-card");
+    if (!box) return;
+    const es = bundle.engineState;
+    const allowed = es && typeof es === "object" ? es.entryAllowed : null;
+    const reasons = es && typeof es === "object" && Array.isArray(es.blockedReasons) ? es.blockedReasons : [];
+    const primary = reasons.length > 0 ? reasons[0] : es && typeof es === "object" ? es.blocked_reason || es.blockedReason : null;
+
+    const recent = Array.isArray(bundle.eventsRecent) ? bundle.eventsRecent : [];
+    const blocked = recent
+      .filter((e) => e && (e.type === "ENTRY_BLOCKED" || e.type === "BLOCKED"))
+      .slice(-5)
+      .reverse();
+    const rows =
+      blocked.length === 0
+        ? '<p class="muted text-xs">최근 차단 이벤트 없음</p>'
+        : `<ul class="health-list">${blocked
+            .map((e) => {
+              const sym = e.symbol || "—";
+              const rg = e.regime || "—";
+              const ex = e.executor || "—";
+              const rs = mapBlockReason(e.reason);
+              const sub =
+                (e.reason === "AI_FILTER" || e.reason === "AI_DIRECTION_MISMATCH") && e.detail && e.detail.ai_reason
+                  ? " · " + String(e.detail.ai_reason)
+                  : e.reason === "AI_DIRECTION_MISMATCH"
+                    ? " · 방향 불일치"
+                    : "";
+              return `<li><div><strong>${esc(sym)}</strong> · ${esc(rg)} · ${esc(ex)} · ${esc(rs)}${esc(sub)}</div><div class="muted text-xs">${esc(
+                formatKst(e.ts)
+              )}</div></li>`;
+            })
+            .join("")}</ul>`;
+
+    box.innerHTML = `
+      <div class="perf-card">
+        <h4>차단 이유</h4>
+        <p class="perf-metric">현재 진입: <strong>${allowed === false ? "차단" : allowed === true ? "가능" : "—"}</strong></p>
+        <p class="perf-metric">현재 사유: <strong>${esc(mapBlockReason(primary))}</strong></p>
+        ${renderAiBlockedTop(bundle)}
+        <div style="margin-top:0.75rem;border-top:1px solid var(--border);padding-top:0.75rem">
+          <p class="panel-title">최근 차단(최신 5)</p>
+          ${rows}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderAiBlockedTop(bundle) {
+    const s = bundle.summary;
+    const ai = s && s.observation && s.observation.aiApproval ? s.observation.aiApproval : null;
+    if (!ai) return "";
+    const counts = ai.blocked_reason_counts || {};
+    const top = Object.entries(counts)
+      .filter(([k]) => k === "AI_FILTER" || k === "AI_DIRECTION_MISMATCH")
+      .sort((a, b) => (b[1] || 0) - (a[1] || 0))
+      .slice(0, 3);
+    if (top.length === 0) return "";
+    const line = top.map(([k, v]) => mapBlockReason(k) + " " + String(v)).join(" · ");
+    const q = bundle.summary && bundle.summary.observation ? bundle.summary.observation.aiBlockQuality : null;
+    const qRate = q && typeof q.ai_block_quality_rate === "number" ? formatPct(q.ai_block_quality_rate) : "—";
+    const c = q && q.criteria ? q.criteria : null;
+    const cLine = c
+      ? ` · 기준 good ≤ ${String(c.good_block_threshold_pct)}% / missed ≥ ${String(c.missed_opportunity_threshold_pct)}%`
+      : "";
+    const qLine =
+      q
+        ? ` · 품질 good ${String(q.ai_block_good_count)} / missed ${String(q.ai_block_missed_count)} / neutral ${String(
+            q.ai_block_neutral_count
+          )} (${qRate})${cLine}`
+        : "";
+    return `<p class="perf-metric muted text-xs">최근 AI 차단 Top: ${esc(line)}${esc(qLine)}</p>`;
   }
 
   function renderDetails(bundle) {
@@ -566,6 +780,7 @@
       renderHero(bundle);
       renderSymbols(bundle);
       renderPerf(bundle);
+      renderBlockedCard(bundle);
       renderDetails(bundle);
       $("last-fetch").textContent = "갱신: " + formatKst(Date.now());
     } catch (e) {

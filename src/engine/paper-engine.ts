@@ -13,9 +13,9 @@ import { BybitPublicClient } from "../exchange/bybit-public";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
 import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
 import type { PaperCandidateStrength, PaperSignal } from "../strategy/entry-signal";
-import { detectFuturesMarketMode, type FuturesMarketMode } from "../strategy/live-market-mode";
+import type { FuturesMarketMode } from "../strategy/live-market-mode";
 import { runFuturesAdaptiveEntry } from "../strategy/live-entry-pipeline";
-import { evaluateExitPolicy, stopLossPctForMode } from "../strategy/live-exit-policy";
+import { evaluateRegimeExitPolicy, stopLossPctForRegime } from "../strategy/regime-exit";
 import { evaluatePartialExitPolicy } from "../strategy/live-partial-exit-policy";
 import { MIN_POSITION_SIZE_USD } from "../strategy/live-position-sizing";
 import {
@@ -24,9 +24,16 @@ import {
   evaluateEntryCostAndHigherTfGate
 } from "../strategy/entry-gate";
 import { computePaperEntryQualityScore, paperSignalStrengthLabel } from "../strategy/paper-entry-quality";
+import { detectMarketRegime, type MarketRegime } from "../strategy/market-regime-detector";
+import { evaluateRegimeEntry } from "../strategy/regime-entry";
 import { paperHealthStatusLogPayload } from "../storage/paper-health";
 import { PositionManager } from "./position-manager";
 import { RiskManager } from "./risk-manager";
+import { evaluateRiskControls, type RiskControlDecision } from "../strategy/risk-control-layer";
+import { rangeExecutorEvaluateEntry } from "../strategy/executors/range-executor";
+import { trendExecutorEvaluateEntry } from "../strategy/executors/trend-executor";
+import type { AnyEntryDecision } from "../strategy/executors/types";
+import { aiApproveEntry, aiInputFromDecision } from "../ai/entry-approval";
 
 const EP = {
   ticker: "/v5/market/tickers",
@@ -61,6 +68,13 @@ type SymbolSnapshot = Readonly<{
   candidateStrength: PaperCandidateStrength | null;
   emaGap: number | null;
   volumeRatioProxy: number;
+  /** RANGE/TREND 판단용 박스(최근 1m) */
+  boxHigh: number | null;
+  boxLow: number | null;
+  boxPos: number | null;
+  boxRel: number | null;
+  gateExpectedMove: number | null;
+  gateRequiredMove: number | null;
 }>;
 
 export type SymbolDiagnostic = Readonly<{
@@ -223,6 +237,10 @@ function exitFullLogKey(cr: PaperClosedPositionRecord["closeReason"]): string {
       return "exit_full_trailing";
     case "time_based_exit":
       return "exit_full_time_stop";
+    case "trend_break_exit":
+      return "exit_full_trend_break";
+    case "regime_exit":
+      return "exit_full_regime_exit";
     default:
       return "exit_full_other";
   }
@@ -301,10 +319,14 @@ export class PaperEngine {
   private readonly bybit: BybitPublicClient;
   private readonly positions: PositionManager;
   private readonly risk: RiskManager;
-  private lastAdaptiveMode: Readonly<{ mode: FuturesMarketMode; detail: Record<string, unknown> }> = {
-    mode: "sideways",
-    detail: {}
-  };
+  private lastAdaptiveMode: Readonly<{ mode: FuturesMarketMode; detail: Record<string, unknown> }> = { mode: "sideways", detail: {} };
+  private lastRegime: Readonly<{ regime: MarketRegime; detail: Record<string, unknown> }> = { regime: "NO_TRADE", detail: {} };
+  private lastRisk: RiskControlDecision | null = null;
+  private lastModeChangeAt: number = 0;
+  private lastEntryDecision: AnyEntryDecision | null = null;
+  private rangeCooldownUntilByKey = new Map<string, number>();
+  private rangeFailCountByKey = new Map<string, number>();
+  private trendCooldownUntilBySymbol = new Map<string, number>();
 
   constructor(
     private readonly config: EngineConfig,
@@ -330,6 +352,7 @@ export class PaperEngine {
 
   async runOnce(): Promise<void> {
     await this.positions.ensureHistoryFile();
+    const history = await this.store.readPositionsHistory();
 
     const allowed = new Set<MarketSymbol>(["BTCUSDT", "ETHUSDT"]);
     const symbols = this.config.symbols.filter((s) => allowed.has(s));
@@ -341,15 +364,77 @@ export class PaperEngine {
 
     const btc5r = await this.bybit.tryGetCandles("BTCUSDT", "5m", 50);
     const btc5 = btc5r.ok ? btc5r.value : [];
-    const modeDetected = detectFuturesMarketMode({ btcCandles5m: btc5 });
-    this.lastAdaptiveMode = modeDetected;
-    const modeLogKey =
-      modeDetected.mode === "trend"
-        ? "market_mode_trend"
-        : modeDetected.mode === "sideways"
-          ? "market_mode_sideways"
-          : "market_mode_risk_off";
-    this.logger.info(modeLogKey, { detail: modeDetected.detail });
+    const prevRegime = this.lastRegime.regime;
+    const regimeDetected = detectMarketRegime({ btcCandles5m: btc5 });
+    this.lastRegime = regimeDetected;
+    if (regimeDetected.regime !== prevRegime) {
+      this.lastModeChangeAt = Date.now();
+      await this.store.appendJsonlLine("reports/events.jsonl", {
+        ts: this.lastModeChangeAt,
+        type: "MODE_CHANGE",
+        regime: regimeDetected.regime,
+        from: prevRegime,
+        executor: regimeDetected.regime === "RANGE" ? "RANGE" : regimeDetected.regime === "TREND" ? "TREND" : "NONE"
+      });
+    }
+    const adaptiveMode: FuturesMarketMode =
+      regimeDetected.regime === "TREND" ? "trend" : regimeDetected.regime === "RANGE" ? "sideways" : "risk_off";
+    this.lastAdaptiveMode = { mode: adaptiveMode, detail: regimeDetected.detail };
+
+    const regimeLogKey =
+      regimeDetected.regime === "TREND"
+        ? "market_regime_trend"
+        : regimeDetected.regime === "RANGE"
+          ? "market_regime_range"
+          : "market_regime_no_trade";
+    this.logger.info(regimeLogKey, { detail: regimeDetected.detail });
+    const nowStateTs = Date.now();
+    this.lastRisk = evaluateRiskControls({
+      config: this.config,
+      now: nowStateTs,
+      history,
+      priorState: this.lastRisk
+    });
+    const risk = this.lastRisk;
+    // Persist a lightweight engine state for the monitor UI.
+    try {
+      await this.store.writeJson("reports/engine-state.json", {
+        generatedAt: nowStateTs,
+        current_regime: regimeDetected.regime,
+        adaptiveMode,
+        engine_status: risk.dailyLossGuardTriggered ? "PAUSED" : regimeDetected.regime === "NO_TRADE" ? "BLOCKED" : "RUNNING",
+        risk_state: risk.riskStatus,
+        active_mode_executor: regimeDetected.regime === "RANGE" ? "RANGE" : regimeDetected.regime === "TREND" ? "TREND" : "NONE",
+        entryAllowed:
+          regimeDetected.regime !== "NO_TRADE" &&
+          risk.engineBlocked !== true &&
+          !((risk.blockedRegimes?.[regimeDetected.regime]?.until ?? 0) > nowStateTs),
+        blockedReasons: [
+          ...(regimeDetected.regime === "NO_TRADE" ? ["no_trade_regime"] : []),
+          ...(risk.engineBlockReasons ?? []),
+          ...(((risk.blockedRegimes?.[regimeDetected.regime]?.until ?? 0) > nowStateTs)
+            ? [risk.blockedRegimes?.[regimeDetected.regime]?.reason ?? "mode_suspended"]
+            : [])
+        ],
+        blocked_reason:
+          regimeDetected.regime === "NO_TRADE"
+            ? (regimeDetected.detail.reason ?? "no_trade")
+            : risk.engineBlockReasons?.[0] ?? null,
+        expected_move: this.lastEntryDecision?.expected_move ?? null,
+        total_cost: this.lastEntryDecision?.total_cost ?? null,
+        last_mode_change_at: this.lastModeChangeAt || null,
+        mode_cooldown_status: {
+          RANGE: [...this.rangeCooldownUntilByKey.entries()].map(([k, until]) => ({ key: k, until })),
+          TREND: [...this.trendCooldownUntilBySymbol.entries()].map(([sym, until]) => ({ symbol: sym, until }))
+        },
+        recent_loss_streak_by_mode: risk.recentLossStreakByMode,
+        daily_loss_guard_triggered: risk.dailyLossGuardTriggered,
+        risk_detail: risk.detail
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.error("engine_state_write_failed", { error: msg });
+    }
 
     const snapshots: SymbolSnapshot[] = [];
     const errors: { symbol: MarketSymbol; error: string; failedEndpoint: FailureEndpointKey }[] = [];
@@ -489,6 +574,25 @@ export class PaperEngine {
       filePath
     });
 
+    // Update AI-block outcome evaluation store (prices after 5/15/30m).
+    try {
+      const events = await this.store.readEventsJsonlFile();
+      const symbolRows = snapshots.map((s) => ({ symbol: String(s.symbol), lastPrice: s.lastPrice }));
+      await this.store.updateAiBlockEvaluations({
+        now: Date.now(),
+        symbolRows,
+        events,
+        criteria: {
+          good_block_threshold_pct: this.config.aiBlockGoodThresholdPct,
+          missed_opportunity_threshold_pct: this.config.aiBlockMissedThresholdPct,
+          evaluation_horizon_priority: this.config.aiBlockEvaluationHorizonPriorityMins
+        }
+      } as any);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.error("ai_block_eval_update_failed", { error: msg });
+    }
+
     try {
       const { summaryPath, dailyPath, windowPath, healthPath, health } = await this.positions.refreshSummaryReport();
       this.logger.info("paper_summary_report_saved", { path: summaryPath });
@@ -521,6 +625,14 @@ export class PaperEngine {
     const remaining: PaperOpenPositionRecord[] = [];
     const feeRate = this.config.paperTakerFeeRate;
     const intervalH = this.config.paperFundingIntervalHours;
+    const exitTypeForReason = (
+      r: PaperClosedPositionRecord["closeReason"]
+    ): "EXIT_TP" | "EXIT_SL" | "EXIT_REGIME" | "EXIT_TREND_BREAK" => {
+      if (r === "take_profit" || r === "partial_exit_1" || r === "partial_exit_2") return "EXIT_TP";
+      if (r === "stop_loss") return "EXIT_SL";
+      if (r === "trend_break_exit") return "EXIT_TREND_BREAK";
+      return "EXIT_REGIME";
+    };
 
     const exitDetailBase = (open: PaperOpenPositionRecord, m: PaperCloseLegMetrics) => ({
       mode: open.adaptiveModeAtEntry ?? this.lastAdaptiveMode.mode,
@@ -556,7 +668,9 @@ export class PaperEngine {
 
       const closePrice = snap.lastPrice;
       const closedAt = snap.fetchedAt;
-      const modeForExit: FuturesMarketMode = open.adaptiveModeAtEntry ?? this.lastAdaptiveMode.mode;
+      const regimeAtEntry = open.regimeAtEntry ?? "NO_TRADE";
+      const regimeNow = this.lastRegime.regime;
+      const regimeForExit: MarketRegime = regimeAtEntry === "TREND" || regimeAtEntry === "RANGE" ? regimeAtEntry : regimeNow;
 
       const leg = (marginUsd: number) =>
         computePaperCloseLegMetrics({
@@ -573,7 +687,7 @@ export class PaperEngine {
       const highWater = Math.max(open.highestPnlPctNet ?? m.pnlPctNet, m.pnlPctNet);
       open = { ...open, highestPnlPctNet: highWater };
 
-      const slThresh = stopLossPctForMode(modeForExit);
+      const slThresh = stopLossPctForRegime(regimeForExit);
       if (m.pnlPctNet <= slThresh) {
         const cr = "stop_loss" as const;
         const closedRow: PaperClosedPositionRecord = {
@@ -601,6 +715,7 @@ export class PaperEngine {
           strategyVersion: "paper-v1",
           sourceSignal: open.sourceSignal,
           sourceRunPath: open.sourceRunPath,
+          regimeAtEntry: open.regimeAtEntry,
           ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
           ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
           ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
@@ -612,11 +727,37 @@ export class PaperEngine {
           exitReason: cr
         });
         this.logger.info("paper_position_closed", { symbol: open.symbol, side: open.side, pnlUsdNet: m.pnlUsdNet, closeReason: cr });
+        await this.store.appendJsonlLine("reports/events.jsonl", {
+          ts: Date.now(),
+          type: "EXIT_SL",
+          symbol: String(open.symbol),
+          regime: open.regimeAtEntry ?? null,
+          executor: open.executorAtEntry ?? (open.regimeAtEntry === "RANGE" ? "RANGE" : open.regimeAtEntry === "TREND" ? "TREND" : "NONE"),
+          reason: cr,
+          expected_move: open.expectedMoveAtEntry ?? null,
+          total_cost: open.totalCostAtEntry ?? null,
+          hold_time: m.holdingMs,
+          realized_pnl: m.pnlUsdNet,
+          fee: m.feeUsd
+        });
+        // RANGE: consecutive failure cooldown per symbol+direction (2 strikes).
+        if (open.regimeAtEntry === "RANGE") {
+          const k = `${String(open.symbol)}:${open.side}`;
+          const prev = this.rangeFailCountByKey.get(k) ?? 0;
+          const nextFail = prev + 1;
+          this.rangeFailCountByKey.set(k, nextFail);
+          if (nextFail >= 2) {
+            this.rangeCooldownUntilByKey.set(k, Date.now() + 20 * 60_000);
+            this.rangeFailCountByKey.set(k, 0);
+          } else {
+            this.rangeCooldownUntilByKey.set(k, Date.now() + 8 * 60_000);
+          }
+        }
         continue;
       }
 
       const partial = evaluatePartialExitPolicy({
-        mode: modeForExit,
+        mode: regimeForExit === "TREND" ? "trend" : regimeForExit === "RANGE" ? "sideways" : "risk_off",
         direction: open.side,
         pnlPctNet: m.pnlPctNet,
         highestPnlPctNet: open.highestPnlPctNet ?? m.pnlPctNet,
@@ -667,12 +808,27 @@ export class PaperEngine {
             strategyVersion: "paper-v1",
             sourceSignal: open.sourceSignal,
             sourceRunPath: open.sourceRunPath,
+            regimeAtEntry: open.regimeAtEntry,
             ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
             ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
             ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
             closeReason: pReason
           };
           await this.positions.appendClosed(closedPartial);
+          await this.store.appendJsonlLine("reports/events.jsonl", {
+            ts: Date.now(),
+            type: "EXIT_TP",
+            symbol: String(open.symbol),
+            regime: open.regimeAtEntry ?? null,
+            executor:
+              open.executorAtEntry ?? (open.regimeAtEntry === "RANGE" ? "RANGE" : open.regimeAtEntry === "TREND" ? "TREND" : "NONE"),
+            reason: pReason,
+            expected_move: open.expectedMoveAtEntry ?? null,
+            total_cost: open.totalCostAtEntry ?? null,
+            hold_time: mp.holdingMs,
+            realized_pnl: mp.pnlUsdNet,
+            fee: mp.feeUsd
+          });
           this.logger.info(pLog, {
             ...exitDetailBase(open, mp),
             exitReason: pReason,
@@ -690,8 +846,64 @@ export class PaperEngine {
         }
       }
 
-      const exitEval = evaluateExitPolicy({
-        mode: modeForExit,
+      // TREND: if regime flipped away (or snap trendOk breaks), exit quickly.
+      if (regimeAtEntry === "TREND") {
+        const trendOkNow = snap.trendOk === true;
+        if (regimeNow !== "TREND" || !trendOkNow) {
+          const cr = "trend_break_exit" as const;
+          const closedRow: PaperClosedPositionRecord = {
+            openedAt: open.openedAt,
+            closedAt,
+            symbol: open.symbol,
+            side: open.side,
+            entryPrice: open.entryPrice,
+            closePrice,
+            leverage: open.leverage,
+            sizeUsd: open.sizeUsd,
+            pnlUsd: m.pnlUsdNet,
+            pnlUsdGross: m.pnlUsdGross,
+            pnlUsdNet: m.pnlUsdNet,
+            feeRate,
+            feeUsd: m.feeUsd,
+            fundingModel: "avg_open_close_rate_v3",
+            fundingIntervalHours: intervalH,
+            holdingMs: m.holdingMs,
+            fundingPeriods: m.fundingPeriods,
+            fundingRateAppliedOpen: m.fundingRateAppliedOpen,
+            fundingRateAppliedClose: m.fundingRateAppliedClose,
+            fundingRateAverage: m.fundingRateAverage,
+            fundingUsd: m.fundingUsd,
+            strategyVersion: "paper-v1",
+            sourceSignal: open.sourceSignal,
+            sourceRunPath: open.sourceRunPath,
+            regimeAtEntry: open.regimeAtEntry,
+            ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
+            ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
+            ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
+            closeReason: cr
+          };
+          await this.positions.appendClosed(closedRow);
+          this.logger.info(exitFullLogKey(cr), { ...exitDetailBase(open, m), exitReason: cr });
+          await this.store.appendJsonlLine("reports/events.jsonl", {
+            ts: Date.now(),
+            type: "EXIT_TREND_BREAK",
+            symbol: String(open.symbol),
+            regime: open.regimeAtEntry ?? null,
+            executor:
+              open.executorAtEntry ?? (open.regimeAtEntry === "RANGE" ? "RANGE" : open.regimeAtEntry === "TREND" ? "TREND" : "NONE"),
+            reason: cr,
+            expected_move: open.expectedMoveAtEntry ?? null,
+            total_cost: open.totalCostAtEntry ?? null,
+            hold_time: m.holdingMs,
+            realized_pnl: m.pnlUsdNet,
+            fee: m.feeUsd
+          });
+          continue;
+        }
+      }
+
+      const exitEval = evaluateRegimeExitPolicy({
+        regime: regimeForExit,
         side: open.side,
         pnlPctNet: m.pnlPctNet,
         holdingMs: m.holdingMs,
@@ -728,6 +940,7 @@ export class PaperEngine {
           strategyVersion: "paper-v1",
           sourceSignal: open.sourceSignal,
           sourceRunPath: open.sourceRunPath,
+          regimeAtEntry: open.regimeAtEntry,
           ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
           ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
           ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
@@ -739,6 +952,28 @@ export class PaperEngine {
           exitReason: cr
         });
         this.logger.info("paper_position_closed", { symbol: open.symbol, side: open.side, pnlUsdNet: m.pnlUsdNet, closeReason: cr });
+        await this.store.appendJsonlLine("reports/events.jsonl", {
+          ts: Date.now(),
+          type: exitTypeForReason(cr),
+          symbol: String(open.symbol),
+          regime: open.regimeAtEntry ?? null,
+          executor:
+            open.executorAtEntry ?? (open.regimeAtEntry === "RANGE" ? "RANGE" : open.regimeAtEntry === "TREND" ? "TREND" : "NONE"),
+          reason: cr,
+          expected_move: open.expectedMoveAtEntry ?? null,
+          total_cost: open.totalCostAtEntry ?? null,
+          hold_time: m.holdingMs,
+          realized_pnl: m.pnlUsdNet,
+          fee: m.feeUsd
+        });
+        // RANGE: reset fail streak on TP; Trend: add cooldown to avoid immediate re-switch churn.
+        if (open.regimeAtEntry === "RANGE" && cr === "take_profit") {
+          const k = `${String(open.symbol)}:${open.side}`;
+          this.rangeFailCountByKey.set(k, 0);
+        }
+        if (open.regimeAtEntry === "TREND" && (cr === "stop_loss" || cr === "trend_break_exit")) {
+          this.trendCooldownUntilBySymbol.set(String(open.symbol), Date.now() + 12 * 60_000);
+        }
         continue;
       }
 
@@ -794,6 +1029,7 @@ export class PaperEngine {
         strategyVersion: "paper-v1",
         sourceSignal: open.sourceSignal,
         sourceRunPath: open.sourceRunPath,
+        regimeAtEntry: open.regimeAtEntry,
         ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
         ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
         ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
@@ -807,6 +1043,20 @@ export class PaperEngine {
         pnlUsd: m.pnlUsdNet,
         closeReason: "candidate_lost",
         holdingMs: m.holdingMs
+      });
+      await this.store.appendJsonlLine("reports/events.jsonl", {
+        ts: Date.now(),
+        type: "EXIT_REGIME",
+        symbol: String(open.symbol),
+        regime: open.regimeAtEntry ?? null,
+        executor:
+          open.executorAtEntry ?? (open.regimeAtEntry === "RANGE" ? "RANGE" : open.regimeAtEntry === "TREND" ? "TREND" : "NONE"),
+        reason: "candidate_lost",
+        expected_move: open.expectedMoveAtEntry ?? null,
+        total_cost: open.totalCostAtEntry ?? null,
+        hold_time: m.holdingMs,
+        realized_pnl: m.pnlUsdNet,
+        fee: m.feeUsd
       });
     }
 
@@ -824,6 +1074,49 @@ export class PaperEngine {
     filePath: string | undefined;
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
+    if (this.lastRegime.regime === "NO_TRADE") {
+      this.logger.info("entry_blocked_reason", {
+        reason: "no_trade_regime",
+        regime: this.lastRegime.regime,
+        detail: this.lastRegime.detail
+      });
+      return;
+    }
+    const nowTs = Date.now();
+    this.lastEntryDecision = null;
+    if (this.lastRisk?.engineBlocked) {
+      this.logger.info("entry_blocked_reason", {
+        reason: "risk_engine_blocked",
+        blocked: this.lastRisk.engineBlockReasons,
+        detail: this.lastRisk.detail
+      });
+      await this.store.appendJsonlLine("reports/events.jsonl", {
+        ts: nowTs,
+        type: "BLOCKED",
+        reason: "risk_engine_blocked",
+        blocked: this.lastRisk.engineBlockReasons,
+        regime: this.lastRegime.regime
+      });
+      return;
+    }
+    const rBlock = this.lastRisk?.blockedRegimes?.[this.lastRegime.regime];
+    if (rBlock && rBlock.until > nowTs) {
+      this.logger.info("entry_blocked_reason", {
+        reason: "mode_suspended",
+        regime: this.lastRegime.regime,
+        until: rBlock.until,
+        sub: rBlock.reason
+      });
+      await this.store.appendJsonlLine("reports/events.jsonl", {
+        ts: nowTs,
+        type: "BLOCKED",
+        reason: "mode_suspended",
+        sub: rBlock.reason,
+        regime: this.lastRegime.regime,
+        until: rBlock.until
+      });
+      return;
+    }
 
     const candidates = input.snapshots.filter(
       (s) => s.signal === "paper_long_candidate" || s.signal === "paper_short_candidate"
@@ -869,6 +1162,198 @@ export class PaperEngine {
         }
       }
 
+      // Fee + slippage filter (must beat costs before entering).
+      const em = first.gateExpectedMove;
+      const rm = first.gateRequiredMove;
+      const slipFrac = (Math.max(0, this.config.paperSlippageBps) / 10_000) * 2; // round-trip estimate
+      const safety = 0.0001;
+      const totalCost =
+        typeof rm === "number" && Number.isFinite(rm) ? rm + slipFrac + safety : null;
+      if (typeof em === "number" && typeof rm === "number") {
+        if (totalCost !== null && em <= totalCost) {
+          this.logger.info("entry_blocked_reason", {
+            reason: "fee_slippage_insufficient",
+            symbol: first.symbol,
+            regime: this.lastRegime.regime,
+            expected_move: em,
+            required_move: rm,
+            slippage_frac: slipFrac,
+            safety_margin: safety,
+            total_cost: totalCost
+          });
+          await this.store.appendJsonlLine("reports/events.jsonl", {
+            ts: Date.now(),
+            type: "ENTRY_BLOCKED",
+            symbol: String(first.symbol),
+            regime: this.lastRegime.regime,
+            reason: "fee_slippage_insufficient",
+            executor: this.lastRegime.regime === "RANGE" ? "RANGE" : this.lastRegime.regime === "TREND" ? "TREND" : "NONE",
+            expected_move: em,
+            total_cost: totalCost,
+            risk_state: this.lastRisk?.riskStatus ?? "NORMAL"
+          });
+          continue;
+        }
+      }
+
+      // Executor-specific decision (real split between RANGE vs TREND).
+      const sym = String(first.symbol);
+      const intentSide: "long" | "short" = first.signal === "paper_long_candidate" ? "long" : "short";
+      const key = `${sym}:${intentSide}`;
+      const rangeUntil = this.rangeCooldownUntilByKey.get(key) ?? 0;
+      const trendUntil = this.trendCooldownUntilBySymbol.get(sym) ?? 0;
+      const decision =
+        this.lastRegime.regime === "RANGE"
+          ? rangeExecutorEvaluateEntry({
+              regime: this.lastRegime.regime,
+              risk_state: (this.lastRisk?.riskStatus ?? "NORMAL") as any,
+              symbol: sym,
+              signal: first.signal,
+              qualityScore: first.qualityScore,
+              boxPos: first.boxPos ?? null,
+              boxRel: first.boxRel ?? null,
+              expectedMove: typeof em === "number" ? em : null,
+              totalCost,
+              cooldownActive: rangeUntil > nowOpen,
+              cooldownRemainingMs: rangeUntil > nowOpen ? rangeUntil - nowOpen : 0
+            })
+          : this.lastRegime.regime === "TREND"
+            ? trendExecutorEvaluateEntry({
+                regime: this.lastRegime.regime,
+                risk_state: (this.lastRisk?.riskStatus ?? "NORMAL") as any,
+                symbol: sym,
+                signal: first.signal,
+                qualityScore: first.qualityScore,
+                lastPrice: first.lastPrice,
+                ema20: first.ema20,
+                ema60: first.ema60,
+                volumeRatioProxy: first.volumeRatioProxy,
+                boxHigh: first.boxHigh ?? null,
+                boxLow: first.boxLow ?? null,
+                expectedMove: typeof em === "number" ? em : null,
+                totalCost,
+                cooldownActive: trendUntil > nowOpen,
+                cooldownRemainingMs: trendUntil > nowOpen ? trendUntil - nowOpen : 0
+              })
+            : ({
+                regime: this.lastRegime.regime,
+                executor: "NONE",
+                entry_allowed: false,
+                blocked_reason: "no_trade_regime",
+                expected_move: typeof em === "number" ? em : null,
+                total_cost: totalCost,
+                risk_state: (this.lastRisk?.riskStatus ?? "NORMAL") as any,
+                detail: {}
+              } as AnyEntryDecision);
+
+      this.lastEntryDecision = decision;
+      if (!decision.entry_allowed) {
+        await this.store.appendJsonlLine("reports/events.jsonl", {
+          ts: Date.now(),
+          type: "ENTRY_BLOCKED",
+          symbol: sym,
+          regime: this.lastRegime.regime,
+          executor: decision.executor,
+          reason: decision.blocked_reason,
+          expected_move: decision.expected_move,
+          total_cost: decision.total_cost,
+          risk_state: decision.risk_state,
+          detail: decision.detail
+        });
+        // RANGE: count failures for cooldown trigger when blocked at edges? No — only SL will count.
+        continue;
+      } else {
+        await this.store.appendJsonlLine("reports/events.jsonl", {
+          ts: Date.now(),
+          type: "ENTRY_ALLOWED",
+          symbol: sym,
+          regime: this.lastRegime.regime,
+          executor: decision.executor,
+          reason: "executor_allowed",
+          expected_move: decision.expected_move,
+          total_cost: decision.total_cost,
+          risk_state: decision.risk_state,
+          detail: decision.detail
+        });
+      }
+
+      // AI approval layer (final gate). Strategy/executor stays unchanged; AI only approves/denies.
+      const lossStreak = this.lastRisk?.recentLossStreakByMode?.[this.lastRegime.regime] ?? 0;
+      const last10Net =
+        typeof this.lastRisk?.detail?.last10_net_usd === "number" && Number.isFinite(this.lastRisk.detail.last10_net_usd)
+          ? this.lastRisk.detail.last10_net_usd
+          : 0;
+      const aiIn = aiInputFromDecision({ decision, executorDirection: intentSide, lossStreak, last10Net });
+      if (aiIn) {
+        const aiOut = aiApproveEntry(aiIn);
+        const aiDir = aiOut.action === "ENTER_LONG" ? "long" : aiOut.action === "ENTER_SHORT" ? "short" : "none";
+        const mismatch = aiDir !== "none" && aiDir !== intentSide;
+        if (mismatch) {
+          await this.store.appendJsonlLine("reports/events.jsonl", {
+            ts: Date.now(),
+            type: "ENTRY_BLOCKED",
+            symbol: sym,
+            regime: this.lastRegime.regime,
+            executor: decision.executor,
+            reason: "AI_DIRECTION_MISMATCH",
+            expected_move: decision.expected_move,
+            total_cost: decision.total_cost,
+            risk_state: decision.risk_state,
+            executor_direction: intentSide,
+            ai_direction: aiDir,
+            mismatch: true,
+            blocked_at_price: first.lastPrice,
+            price_after_5m: null,
+            price_after_15m: null,
+            price_after_30m: null,
+            hypothetical_outcome_hint: null,
+            detail: { ai_reason: "방향 불일치", ai_confidence: aiOut.confidence }
+          });
+          continue;
+        }
+
+        if (aiOut.action === "NO_ENTRY") {
+          await this.store.appendJsonlLine("reports/events.jsonl", {
+            ts: Date.now(),
+            type: "ENTRY_BLOCKED",
+            symbol: sym,
+            regime: this.lastRegime.regime,
+            executor: decision.executor,
+            reason: "AI_FILTER",
+            expected_move: decision.expected_move,
+            total_cost: decision.total_cost,
+            risk_state: decision.risk_state,
+            executor_direction: intentSide,
+            ai_direction: aiDir,
+            mismatch: false,
+            blocked_at_price: first.lastPrice,
+            price_after_5m: null,
+            price_after_15m: null,
+            price_after_30m: null,
+            hypothetical_outcome_hint: null,
+            detail: { ai_reason: aiOut.reason, ai_confidence: aiOut.confidence, ai_input: aiIn }
+          });
+          continue;
+        }
+
+        // AI approved the executor-proposed direction (approval is separate from ENTRY_OPENED).
+        await this.store.appendJsonlLine("reports/events.jsonl", {
+          ts: Date.now(),
+          type: "AI_APPROVED",
+          symbol: sym,
+          regime: this.lastRegime.regime,
+          executor: decision.executor,
+          reason: "ai_approved",
+          expected_move: decision.expected_move,
+          total_cost: decision.total_cost,
+          risk_state: decision.risk_state,
+          executor_direction: intentSide,
+          ai_direction: aiDir,
+          mismatch: false,
+          detail: { ai_reason: aiOut.reason, ai_confidence: aiOut.confidence }
+        });
+      }
+
       const adaptive = runFuturesAdaptiveEntry({
         mode: this.lastAdaptiveMode.mode,
         modeDetail: this.lastAdaptiveMode.detail,
@@ -884,27 +1369,45 @@ export class PaperEngine {
           emaGap: first.emaGap,
           volumeRatioProxy: first.volumeRatioProxy
         },
-        baseSizeUsd: DEFAULT_PAPER_SIZE_USD
+        baseSizeUsd: DEFAULT_PAPER_SIZE_USD * (this.lastRisk?.sizeMultiplier ?? 1)
       });
-
       if (!adaptive.ok) {
         this.logger.info(adaptive.logMessage, adaptive.detail);
-        this.logger.info("entry_blocked_reason", { reason: adaptive.logMessage, ...adaptive.detail });
-        if (adaptive.logMessage === "position_size_blocked_low_confidence") {
-          this.logger.info("position_size_blocked_low_confidence", adaptive.detail);
-        }
+        this.logger.info("entry_blocked_reason", { reason: adaptive.logMessage, ...adaptive.detail, regime: this.lastRegime.regime });
+        await this.store.appendJsonlLine("reports/events.jsonl", {
+          ts: Date.now(),
+          type: "BLOCKED",
+          symbol: String(first.symbol),
+          regime: this.lastRegime.regime,
+          reason: adaptive.logMessage,
+          detail: adaptive.detail
+        });
         continue;
       }
 
       const expectedSide: "long" | "short" =
         first.signal === "paper_long_candidate" ? "long" : "short";
       if (adaptive.direction !== expectedSide) {
-        this.logger.info("entry_blocked_reason", {
-          reason: "blocked_no_structure",
-          sub: "direction_signal_mismatch",
-          signal_side: expectedSide,
-          adaptive_side: adaptive.direction,
-          symbol: first.symbol
+        await this.store.appendJsonlLine("reports/events.jsonl", {
+          ts: Date.now(),
+          type: "ENTRY_BLOCKED",
+          symbol: sym,
+          regime: this.lastRegime.regime,
+          executor: decision.executor,
+          reason: "AI_DIRECTION_MISMATCH",
+          expected_move: decision.expected_move,
+          total_cost: decision.total_cost,
+          risk_state: decision.risk_state,
+          executor_direction: expectedSide,
+          ai_direction: expectedSide,
+          adaptive_direction: adaptive.direction,
+          mismatch: true,
+          blocked_at_price: first.lastPrice,
+          price_after_5m: null,
+          price_after_15m: null,
+          price_after_30m: null,
+          hypothetical_outcome_hint: null,
+          detail: { sub: "adaptive_mismatch_executor" }
         });
         continue;
       }
@@ -980,6 +1483,10 @@ export class PaperEngine {
         ...(Number.isFinite(first.fundingRate) ? { openFundingRate: first.fundingRate } : {}),
         trailingExtremePrice: first.lastPrice,
         adaptiveModeAtEntry: this.lastAdaptiveMode.mode,
+        regimeAtEntry: this.lastRegime.regime,
+        executorAtEntry: decision.executor,
+        ...(typeof decision.expected_move === "number" ? { expectedMoveAtEntry: decision.expected_move } : {}),
+        ...(typeof decision.total_cost === "number" ? { totalCostAtEntry: decision.total_cost } : {}),
         ...(confScore !== undefined ? { entryConfidenceScore: confScore } : {}),
         ...(confTier !== undefined ? { entryConfidenceTier: confTier } : {}),
         ...(sizeMult !== undefined ? { entrySizeMultiplier: sizeMult } : {}),
@@ -1003,6 +1510,19 @@ export class PaperEngine {
         symbol: record.symbol,
         side: record.side,
         path: "positions/open.json"
+      });
+      await this.store.appendJsonlLine("reports/events.jsonl", {
+        ts: Date.now(),
+        type: "ENTRY_OPENED",
+        symbol: String(record.symbol),
+        side: record.side,
+        regime: this.lastRegime.regime,
+        executor: this.lastRegime.regime === "RANGE" ? "RANGE" : this.lastRegime.regime === "TREND" ? "TREND" : "NONE",
+        sizeUsd: record.sizeUsd,
+        leverage: record.leverage,
+        expected_move: decision.expected_move,
+        total_cost: decision.total_cost,
+        risk_state: (this.lastRisk?.riskStatus ?? "NORMAL")
       });
     }
 
@@ -1221,6 +1741,17 @@ export class PaperEngine {
       });
     }
 
+    // Box context from recent completed 1m candles (used to enforce RANGE edge-only and TREND breakout/pullback).
+    const completed1m = rC.value.slice(0, -1);
+    const boxLookback = completed1m.slice(-30);
+    const boxHigh = boxLookback.length > 0 ? Math.max(...boxLookback.map((x) => x.high)) : null;
+    const boxLow = boxLookback.length > 0 ? Math.min(...boxLookback.map((x) => x.low)) : null;
+    const boxRel = boxHigh !== null && boxLow !== null && lastPrice > 0 ? (boxHigh - boxLow) / (lastPrice + 1e-9) : null;
+    const boxPos =
+      boxHigh !== null && boxLow !== null && boxHigh > boxLow
+        ? Math.min(1, Math.max(0, (lastPrice - boxLow) / (boxHigh - boxLow)))
+        : null;
+
     const snapshot: SymbolSnapshot = {
       symbol,
       lastPrice,
@@ -1236,7 +1767,13 @@ export class PaperEngine {
       qualityScore,
       candidateStrength: entry.candidateStrength,
       emaGap: entry.emaGap,
-      volumeRatioProxy: volumeRatioProxyFromCandles(rC.value)
+      volumeRatioProxy: volumeRatioProxyFromCandles(rC.value),
+      boxHigh,
+      boxLow,
+      boxPos,
+      boxRel,
+      gateExpectedMove: gateEval?.expectedMove ?? null,
+      gateRequiredMove: gateEval?.requiredMove ?? null
     };
 
     this.logger.info("symbol_snapshot", snapshot);

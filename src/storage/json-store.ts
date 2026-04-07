@@ -4,9 +4,18 @@ import * as path from "node:path";
 import type { PaperClosedPositionRecord, PaperOpenPositionRecord } from "../models/types";
 import { buildPaperDashboard, parseHealthHistoryJsonl } from "./paper-dashboard";
 import { buildPaperHealthReport, paperHealthHistoryJsonlLine, type PaperHealthReport } from "./paper-health";
+import type { AiBlockEvaluationCriteria } from "./ai-block-evaluator";
+import {
+  buildSymbolPriceMap,
+  isAiBlockedEventNeedingEval,
+  toAiBlockedEvalFromEvent,
+  tryUpdateAiBlockedEventEval
+} from "./ai-block-evaluator";
 import {
   buildPaperDailySummaryFromHistory,
   buildPaperSummaryFromHistory,
+  buildPaperSummaryByRegimeFromHistory,
+  attachObservationToReports,
   buildPaperWindowSummaryFromHistory
 } from "./paper-summary";
 
@@ -93,6 +102,72 @@ export class JsonStore {
     } catch {
       return [];
     }
+  }
+
+  async readEventsJsonlFile(): Promise<unknown[]> {
+    const fullPath = path.resolve(this.baseDir, "reports/events.jsonl");
+    try {
+      const raw = await fs.readFile(fullPath, "utf8");
+      const out: unknown[] = [];
+      for (const line of raw.split("\n")) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          out.push(JSON.parse(t) as unknown);
+        } catch {
+          /* skip */
+        }
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  async readAiBlockEvalJson(): Promise<unknown | null> {
+    const fullPath = path.resolve(this.baseDir, "reports/ai-block-eval.json");
+    try {
+      const raw = await fs.readFile(fullPath, "utf8");
+      return JSON.parse(raw) as unknown;
+    } catch {
+      return null;
+    }
+  }
+
+  async writeAiBlockEvalJson(data: unknown): Promise<string> {
+    return await this.writeJson("reports/ai-block-eval.json", data);
+  }
+
+  /**
+   * Update AI-block evaluation store using current prices (called each tick by the engine).
+   * We keep evaluations in a separate json (append-only events.jsonl cannot be edited).
+   */
+  async updateAiBlockEvaluations(input: Readonly<{ now: number; symbolRows: readonly any[]; events: unknown[] }>): Promise<string | null> {
+    const criteria: AiBlockEvaluationCriteria = {
+      good_block_threshold_pct: (input as any).criteria?.good_block_threshold_pct ?? -0.25,
+      missed_opportunity_threshold_pct: (input as any).criteria?.missed_opportunity_threshold_pct ?? 0.35,
+      evaluation_horizon_priority: (input as any).criteria?.evaluation_horizon_priority ?? [30, 15, 5]
+    };
+    const priceMap = buildSymbolPriceMap(input.symbolRows as any);
+    const priorRaw = await this.readAiBlockEvalJson();
+    const prior = priorRaw && typeof priorRaw === "object" ? (priorRaw as Record<string, unknown>) : {};
+    const evals: Record<string, unknown> = { ...prior };
+
+    for (const ev of input.events) {
+      if (!isAiBlockedEventNeedingEval(ev)) continue;
+      const parsed = toAiBlockedEvalFromEvent(ev);
+      if (!parsed) continue;
+      const key = `${parsed.ts}:${parsed.symbol}:${parsed.reason}`;
+      const existing = evals[key];
+      const base = existing && typeof existing === "object" ? (existing as any) : parsed;
+      const merged = { ...parsed, ...base };
+      const pNow = priceMap.get(parsed.symbol) ?? null;
+      const updated = tryUpdateAiBlockedEventEval({ now: input.now, ev: merged, symbolPriceNow: pNow, criteria });
+      evals[key] = updated;
+    }
+
+    // If nothing changed, still write (small file) for simplicity.
+    return await this.writeAiBlockEvalJson({ updatedAt: input.now, criteria, evals });
   }
 
   async writeSnapshotLatest(data: unknown): Promise<string> {
@@ -212,11 +287,24 @@ export class JsonStore {
   }> {
     const history = await this.readPositionsHistory();
     const generatedAt = Date.now();
-    const summary = buildPaperSummaryFromHistory(history, generatedAt);
-    const daily = buildPaperDailySummaryFromHistory(history, generatedAt);
+    const events = await this.readEventsJsonlFile();
+    const aiBlockEval = await this.readAiBlockEvalJson();
+    const summaryBase = buildPaperSummaryFromHistory(history, generatedAt);
+    const byRegime = buildPaperSummaryByRegimeFromHistory(history, generatedAt);
+    const dailyBase = buildPaperDailySummaryFromHistory(history, generatedAt);
+    const { summary, daily } = attachObservationToReports({
+      summary: summaryBase,
+      daily: dailyBase,
+      byRegimeAll: { range: byRegime.range, trend: byRegime.trend },
+      history,
+      events,
+      aiBlockEval
+    });
     const window = buildPaperWindowSummaryFromHistory(history, generatedAt);
     const health = buildPaperHealthReport(window);
     const summaryPath = await this.writeJson("reports/summary.json", summary);
+    await this.writeJson("reports/summary-range.json", { generatedAt, ...byRegime.range });
+    await this.writeJson("reports/summary-trend.json", { generatedAt, ...byRegime.trend });
     const dailyPath = await this.writeJson("reports/summary-daily.json", daily);
     const windowPath = await this.writeJson("reports/summary-window.json", window);
     const healthPath = await this.writeJson("reports/summary-health.json", health);

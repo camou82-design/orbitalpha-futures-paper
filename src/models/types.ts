@@ -71,6 +71,24 @@ export type EngineConfig = Readonly<{
    * Paper-only; cuts fee churn from immediate re-entry after candidate_lost.
    */
   paperReentryCooldownMs: number;
+  /** Paper-only: round-trip slippage estimate in bps (1bp = 0.0001). Used by risk fee filter. */
+  paperSlippageBps: number;
+  /** Paper-only: if today's net PnL <= -limit, block all new entries (<=0 disables). */
+  paperDailyLossLimitUsd: number;
+  /** Paper-only: last10 net PnL <= -threshold triggers size reduction (<=0 disables). */
+  paperLast10NetDegradeThresholdUsd: number;
+  /** Paper-only: size multiplier when last10 net is degrading. */
+  paperDegradeSizeMultiplier: number;
+  /** Paper-only: per-regime loss streak count to suspend that regime. */
+  paperModeLossStreakSuspendCount: number;
+  /** Paper-only: suspend duration ms for a regime after loss streak. */
+  paperModeSuspendMs: number;
+  /** AI block evaluator: good_block threshold (percent). Example: -0.25 means <= -0.25% is good_block. */
+  aiBlockGoodThresholdPct: number;
+  /** AI block evaluator: missed_opportunity threshold (percent). Example: 0.35 means >= +0.35% is missed. */
+  aiBlockMissedThresholdPct: number;
+  /** AI block evaluator horizon priority, comma-separated minutes in env (e.g. "30,15,5"). */
+  aiBlockEvaluationHorizonPriorityMins: ReadonlyArray<5 | 15 | 30>;
 }>;
 
 /** One leg in `positions/open.json` (JSON array of up to `paperMaxOpenPositions` records). */
@@ -95,6 +113,14 @@ export type PaperOpenPositionRecord = Readonly<{
   trailingExtremePrice?: number;
   /** 진입 시점 적응형 모드 (청산 임계 분기). */
   adaptiveModeAtEntry?: "trend" | "sideways" | "risk_off";
+  /** 진입 시점 레짐(RANGE/TREND/NO_TRADE). */
+  regimeAtEntry?: "RANGE" | "TREND" | "NO_TRADE";
+  /** 실행기(RANGE/TREND/NONE) — 이벤트/리포트 해석용. */
+  executorAtEntry?: "RANGE" | "TREND" | "NONE";
+  /** 진입 시점 기대 움직임(ATR/price), 비용 대비 필터 값(옵션). */
+  expectedMoveAtEntry?: number;
+  /** 진입 시점 총 비용(fee+slippage+safety) (옵션). */
+  totalCostAtEntry?: number;
   /** 분할 청산 단계 (0=없음, 1=1차 완료, 2=2차 완료·잔여만). 하위 호환: 미설정은 0. */
   partialExitStage?: number;
   /** 최초 진입 마진(USD). 미설정 시 `sizeUsd`만 사용(레거시). */
@@ -140,6 +166,8 @@ export type PaperClosedPositionRecord = Readonly<{
   strategyVersion: string;
   sourceSignal: string;
   sourceRunPath: string;
+  /** 진입 시점 레짐(RANGE/TREND/NO_TRADE) — 모드별 성과 분리용. */
+  regimeAtEntry?: "RANGE" | "TREND" | "NO_TRADE";
   latestSnapshotPath?: string;
   latestMetaPath?: string;
   timestampSnapshotPath?: string;
@@ -149,6 +177,8 @@ export type PaperClosedPositionRecord = Readonly<{
     | "stop_loss"
     | "trailing_stop"
     | "time_based_exit"
+    | "trend_break_exit"
+    | "regime_exit"
     | "partial_exit_1"
     | "partial_exit_2";
 }>;

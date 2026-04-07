@@ -38,10 +38,56 @@ export type PaperSummaryStats = Readonly<{
 }>;
 
 /** Written to `data/reports/summary.json` from `positions/history.json`. */
-export type PaperSummaryReport = Readonly<PaperSummaryStats & { generatedAt: number }>;
+export type PaperExitMix = Readonly<{
+  EXIT_TP: number;
+  EXIT_SL: number;
+  EXIT_REGIME: number;
+  EXIT_TREND_BREAK: number;
+  total: number;
+  /** ratios (0..1) */
+  r_EXIT_TP: number;
+  r_EXIT_SL: number;
+  r_EXIT_REGIME: number;
+  r_EXIT_TREND_BREAK: number;
+}>;
+
+export type PaperEntryBlockMix = Readonly<{
+  entryBlocked: number;
+  entryAllowed: number;
+  entryOpened: number;
+  /** entryBlocked / (entryBlocked + entryOpened) when denom>0 else null */
+  entryBlockedRatio: number | null;
+}>;
+
+export type PaperObservationMetrics = Readonly<{
+  range: Pick<PaperSummaryStats, "totalTrades" | "totalPnlUsdGross" | "totalFeeUsd" | "totalPnlUsdNet" | "feeToGrossRatio">;
+  trend: Pick<PaperSummaryStats, "totalTrades" | "totalPnlUsdGross" | "totalFeeUsd" | "totalPnlUsdNet" | "averagePnlUsdNet">;
+  exitMix: PaperExitMix;
+  entryBlockMix: PaperEntryBlockMix;
+  aiApproval: Readonly<{
+    executor_allowed_count: number;
+    ai_approved_count: number;
+    ai_blocked_count: number;
+    ai_approval_rate: number | null;
+    blocked_reason_counts: Record<string, number>;
+  }>;
+  aiBlockQuality: Readonly<{
+    ai_block_good_count: number;
+    ai_block_missed_count: number;
+    ai_block_neutral_count: number;
+    ai_block_quality_rate: number | null;
+    criteria: Readonly<{
+      good_block_threshold_pct: number;
+      missed_opportunity_threshold_pct: number;
+      evaluation_horizon_priority: ReadonlyArray<5 | 15 | 30>;
+    }> | null;
+  }>;
+}>;
+
+export type PaperSummaryReport = Readonly<PaperSummaryStats & { generatedAt: number; observation: PaperObservationMetrics }>;
 
 /** One UTC calendar day bucket for `summary-daily.json`. */
-export type PaperDayBucket = Readonly<PaperSummaryStats & { date: string }>;
+export type PaperDayBucket = Readonly<PaperSummaryStats & { date: string; observation: PaperObservationMetrics }>;
 
 /** Written to `data/reports/summary-daily.json`. */
 export type PaperDailySummaryReport = Readonly<{
@@ -97,6 +143,147 @@ function parseRow(
 }
 
 type ParsedHistoryRow = NonNullable<ReturnType<typeof parseRow>>;
+
+function pickModeSlice(s: PaperSummaryStats): PaperObservationMetrics["range"] {
+  return {
+    totalTrades: s.totalTrades,
+    totalPnlUsdGross: s.totalPnlUsdGross,
+    totalFeeUsd: s.totalFeeUsd,
+    totalPnlUsdNet: s.totalPnlUsdNet,
+    feeToGrossRatio: s.feeToGrossRatio
+  };
+}
+
+function pickTrendSlice(s: PaperSummaryStats): PaperObservationMetrics["trend"] {
+  return {
+    totalTrades: s.totalTrades,
+    totalPnlUsdGross: s.totalPnlUsdGross,
+    totalFeeUsd: s.totalFeeUsd,
+    totalPnlUsdNet: s.totalPnlUsdNet,
+    averagePnlUsdNet: s.averagePnlUsdNet
+  };
+}
+
+function emptyExitMix(): PaperExitMix {
+  return {
+    EXIT_TP: 0,
+    EXIT_SL: 0,
+    EXIT_REGIME: 0,
+    EXIT_TREND_BREAK: 0,
+    total: 0,
+    r_EXIT_TP: 0,
+    r_EXIT_SL: 0,
+    r_EXIT_REGIME: 0,
+    r_EXIT_TREND_BREAK: 0
+  };
+}
+
+function finishExitMix(m: Omit<PaperExitMix, "r_EXIT_TP" | "r_EXIT_SL" | "r_EXIT_REGIME" | "r_EXIT_TREND_BREAK">): PaperExitMix {
+  const total = m.total > 0 ? m.total : m.EXIT_TP + m.EXIT_SL + m.EXIT_REGIME + m.EXIT_TREND_BREAK;
+  const denom = total > 0 ? total : 0;
+  return {
+    ...m,
+    total,
+    r_EXIT_TP: denom > 0 ? m.EXIT_TP / denom : 0,
+    r_EXIT_SL: denom > 0 ? m.EXIT_SL / denom : 0,
+    r_EXIT_REGIME: denom > 0 ? m.EXIT_REGIME / denom : 0,
+    r_EXIT_TREND_BREAK: denom > 0 ? m.EXIT_TREND_BREAK / denom : 0
+  };
+}
+
+function emptyEntryBlockMix(): PaperEntryBlockMix {
+  return { entryBlocked: 0, entryAllowed: 0, entryOpened: 0, entryBlockedRatio: null };
+}
+
+function finishEntryBlockMix(m: Omit<PaperEntryBlockMix, "entryBlockedRatio">): PaperEntryBlockMix {
+  const denom = m.entryBlocked + m.entryOpened;
+  return { ...m, entryBlockedRatio: denom > 0 ? m.entryBlocked / denom : null };
+}
+
+function parseEventTs(e: unknown): number | null {
+  if (!e || typeof e !== "object") return null;
+  const o = e as Record<string, unknown>;
+  const t = o.ts;
+  return typeof t === "number" && Number.isFinite(t) ? t : null;
+}
+
+function parseEventType(e: unknown): string | null {
+  if (!e || typeof e !== "object") return null;
+  const o = e as Record<string, unknown>;
+  const t = o.type;
+  return typeof t === "string" ? t : null;
+}
+
+function aggregateObservation(
+  byRegime: { range: PaperSummaryStats; trend: PaperSummaryStats },
+  events: readonly unknown[],
+  aiEvalMap: Record<string, unknown> | null
+): PaperObservationMetrics {
+  let exit = { EXIT_TP: 0, EXIT_SL: 0, EXIT_REGIME: 0, EXIT_TREND_BREAK: 0, total: 0 };
+  let entry = { entryBlocked: 0, entryAllowed: 0, entryOpened: 0 };
+  let executorAllowed = 0;
+  let aiApproved = 0;
+  let aiBlocked = 0;
+  const blockedReasonCounts: Record<string, number> = {};
+  let aiGood = 0;
+  let aiMissed = 0;
+  let aiNeutral = 0;
+  let criteria: PaperObservationMetrics["aiBlockQuality"]["criteria"] = null;
+  for (const ev of events) {
+    const ty = parseEventType(ev);
+    if (!ty) continue;
+    if (ty === "EXIT_TP" || ty === "EXIT_SL" || ty === "EXIT_REGIME" || ty === "EXIT_TREND_BREAK") {
+      (exit as any)[ty] = ((exit as any)[ty] ?? 0) + 1;
+      exit.total += 1;
+    } else if (ty === "ENTRY_BLOCKED") {
+      entry.entryBlocked += 1;
+      const r = ev && typeof ev === "object" ? (ev as Record<string, unknown>).reason : undefined;
+      const rs = typeof r === "string" ? r : "unknown";
+      blockedReasonCounts[rs] = (blockedReasonCounts[rs] ?? 0) + 1;
+      if (rs === "AI_FILTER" || rs === "AI_DIRECTION_MISMATCH") aiBlocked += 1;
+    } else if (ty === "ENTRY_ALLOWED") {
+      entry.entryAllowed += 1;
+      executorAllowed += 1;
+    } else if (ty === "ENTRY_OPENED") {
+      entry.entryOpened += 1;
+    } else if (ty === "AI_APPROVED") {
+      aiApproved += 1;
+    }
+  }
+
+  if (aiEvalMap) {
+    for (const v of Object.values(aiEvalMap)) {
+      if (!v || typeof v !== "object") continue;
+      const hint = (v as any).hypothetical_outcome_hint;
+      if (hint === "good_block") aiGood += 1;
+      else if (hint === "missed_opportunity") aiMissed += 1;
+      else if (hint === "neutral") aiNeutral += 1;
+    }
+  }
+  const aiTotal = aiGood + aiMissed + aiNeutral;
+  const aiQualityRate = aiTotal > 0 ? aiGood / aiTotal : null;
+  const aiApprovalRate = executorAllowed > 0 ? aiApproved / executorAllowed : null;
+  return {
+    range: pickModeSlice(byRegime.range),
+    trend: pickTrendSlice(byRegime.trend),
+    exitMix: finishExitMix(exit),
+    entryBlockMix: finishEntryBlockMix(entry),
+    aiApproval: {
+      executor_allowed_count: executorAllowed,
+      ai_approved_count: aiApproved,
+      ai_blocked_count: aiBlocked,
+      ai_approval_rate: aiApprovalRate,
+      blocked_reason_counts: blockedReasonCounts
+    },
+    aiBlockQuality: {
+      ai_block_good_count: aiGood,
+      ai_block_missed_count: aiMissed,
+      ai_block_neutral_count: aiNeutral,
+      ai_block_quality_rate: aiQualityRate,
+      criteria
+    }
+  };
+}
 
 function utcDayKeyFromMs(ms: number): string {
   const d = new Date(ms);
@@ -220,7 +407,55 @@ export function buildPaperSummaryFromHistory(history: unknown[], generatedAt: nu
     const row = parseRow(r);
     if (row) rows.push(row);
   }
-  return { generatedAt, ...aggregateRows(rows) };
+  // NOTE: observation is filled by JsonStore where events are available.
+  const emptyObs: PaperObservationMetrics = {
+    range: pickModeSlice(aggregateRows([])),
+    trend: pickTrendSlice(aggregateRows([])),
+    exitMix: emptyExitMix(),
+    entryBlockMix: emptyEntryBlockMix(),
+    aiApproval: {
+      executor_allowed_count: 0,
+      ai_approved_count: 0,
+      ai_blocked_count: 0,
+      ai_approval_rate: null,
+      blocked_reason_counts: {}
+    },
+    aiBlockQuality: {
+      ai_block_good_count: 0,
+      ai_block_missed_count: 0,
+      ai_block_neutral_count: 0,
+      ai_block_quality_rate: null,
+      criteria: null
+    }
+  };
+  return { generatedAt, ...aggregateRows(rows), observation: emptyObs };
+}
+
+function isRegime(x: unknown): x is "RANGE" | "TREND" | "NO_TRADE" {
+  return x === "RANGE" || x === "TREND" || x === "NO_TRADE";
+}
+
+/** Aggregate by regimeAtEntry (RANGE/TREND). NO_TRADE entries are ignored. */
+export function buildPaperSummaryByRegimeFromHistory(
+  history: unknown[],
+  generatedAt: number = Date.now()
+): Readonly<{
+  generatedAt: number;
+  range: PaperSummaryStats;
+  trend: PaperSummaryStats;
+}> {
+  const rangeRows: ParsedHistoryRow[] = [];
+  const trendRows: ParsedHistoryRow[] = [];
+  for (const r of history) {
+    const row = parseRow(r);
+    if (!row) continue;
+    const regimeAtEntry =
+      r && typeof r === "object" ? (r as Record<string, unknown>).regimeAtEntry : undefined;
+    if (!isRegime(regimeAtEntry)) continue;
+    if (regimeAtEntry === "RANGE") rangeRows.push(row);
+    else if (regimeAtEntry === "TREND") trendRows.push(row);
+  }
+  return { generatedAt, range: aggregateRows(rangeRows), trend: aggregateRows(trendRows) };
 }
 
 /**
@@ -247,7 +482,27 @@ export function buildPaperDailySummaryFromHistory(history: unknown[], generatedA
   const sortedKeys = [...byDay.keys()].sort();
   for (const key of sortedKeys) {
     const dayRows = byDay.get(key)!;
-    days[key] = { date: key, ...aggregateRows(dayRows) };
+    const emptyObs: PaperObservationMetrics = {
+      range: pickModeSlice(aggregateRows([])),
+      trend: pickTrendSlice(aggregateRows([])),
+      exitMix: emptyExitMix(),
+      entryBlockMix: emptyEntryBlockMix(),
+      aiApproval: {
+        executor_allowed_count: 0,
+        ai_approved_count: 0,
+        ai_blocked_count: 0,
+        ai_approval_rate: null,
+        blocked_reason_counts: {}
+      },
+      aiBlockQuality: {
+        ai_block_good_count: 0,
+        ai_block_missed_count: 0,
+        ai_block_neutral_count: 0,
+        ai_block_quality_rate: null,
+        criteria: null
+      }
+    };
+    days[key] = { date: key, ...aggregateRows(dayRows), observation: emptyObs };
   }
 
   return { generatedAt, bucketType: "daily", days };
@@ -280,5 +535,81 @@ export function buildPaperWindowSummaryFromHistory(history: unknown[], generated
       monthToDate: aggregateRows(monthToDate),
       all: aggregateRows(rows)
     }
+  };
+}
+
+/**
+ * Attach observation metrics (mode pnl slices + exit mix + entry blocked mix) to summary and daily reports.
+ * This is pure and does not read disk; pass parsed `events` from `events.jsonl`.
+ */
+export function attachObservationToReports(input: Readonly<{
+  summary: PaperSummaryReport;
+  daily: PaperDailySummaryReport;
+  byRegimeAll: { range: PaperSummaryStats; trend: PaperSummaryStats };
+  history: unknown[];
+  events: unknown[];
+  aiBlockEval: unknown | null;
+}>): Readonly<{ summary: PaperSummaryReport; daily: PaperDailySummaryReport }> {
+  const { summary, daily, byRegimeAll, events, history } = input;
+  const evalObj = input.aiBlockEval && typeof input.aiBlockEval === "object" ? (input.aiBlockEval as any) : null;
+  const evalsAll: Record<string, unknown> | null =
+    evalObj && evalObj.evals && typeof evalObj.evals === "object" ? (evalObj.evals as Record<string, unknown>) : null;
+  const criteriaAll =
+    evalObj && evalObj.criteria && typeof evalObj.criteria === "object"
+      ? {
+          good_block_threshold_pct: Number((evalObj.criteria as any).good_block_threshold_pct),
+          missed_opportunity_threshold_pct: Number((evalObj.criteria as any).missed_opportunity_threshold_pct),
+          evaluation_horizon_priority: Array.isArray((evalObj.criteria as any).evaluation_horizon_priority)
+            ? ((evalObj.criteria as any).evaluation_horizon_priority.filter((x: any) => x === 5 || x === 15 || x === 30) as Array<5 | 15 | 30>)
+            : []
+        }
+      : null;
+
+  const obsAll = aggregateObservation(byRegimeAll, events, evalsAll);
+  (obsAll.aiBlockQuality as any).criteria = criteriaAll;
+
+  // Build per-day observation from (history+events) keyed by UTC day.
+  const byDayHistory: Record<string, unknown[]> = {};
+  for (const r of history) {
+    const row = parseRow(r);
+    if (!row || row.closedAt === undefined) continue;
+    const k = utcDayKeyFromMs(row.closedAt);
+    (byDayHistory[k] ??= []).push(r);
+  }
+  const byDayEvents: Record<string, unknown[]> = {};
+  for (const ev of events) {
+    const ts = parseEventTs(ev);
+    if (ts === null) continue;
+    const k = utcDayKeyFromMs(ts);
+    (byDayEvents[k] ??= []).push(ev);
+  }
+
+  const byDayEvals: Record<string, Record<string, unknown>> = {};
+  if (evalsAll) {
+    for (const [k, v] of Object.entries(evalsAll)) {
+      const parts = k.split(":");
+      const tsRaw = parts.length > 0 ? Number(parts[0]) : NaN;
+      if (!Number.isFinite(tsRaw)) continue;
+      const day = utcDayKeyFromMs(tsRaw);
+      (byDayEvals[day] ??= {})[k] = v;
+    }
+  }
+
+  const nextDays: Record<string, PaperDayBucket> = {};
+  for (const [k, bucket] of Object.entries(daily.days)) {
+    const h = byDayHistory[k] ?? [];
+    const byReg = buildPaperSummaryByRegimeFromHistory(h, daily.generatedAt);
+    const ev = byDayEvents[k] ?? [];
+    const evl = byDayEvals[k] ?? null;
+    nextDays[k] = {
+      ...bucket,
+      observation: aggregateObservation({ range: byReg.range, trend: byReg.trend }, ev, evl)
+    };
+    (nextDays[k]!.observation.aiBlockQuality as any).criteria = criteriaAll;
+  }
+
+  return {
+    summary: { ...summary, observation: obsAll },
+    daily: { ...daily, days: nextDays }
   };
 }
