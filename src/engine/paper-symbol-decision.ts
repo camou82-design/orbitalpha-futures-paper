@@ -1,0 +1,648 @@
+import type {
+  EngineConfig,
+  MarketSymbol,
+  PaperDecisionRejectReason,
+  PaperEdgeState,
+  PaperExecutionState,
+  PaperFinalDecision,
+  PaperRegimeState,
+  PaperRiskState,
+  PaperSignalState,
+  PaperStrategyExecutor,
+  PaperSymbolDecisionRecord
+} from "../models/types";
+import type { MarketRegime } from "../strategy/market-regime-detector";
+import type { RiskControlDecision } from "./risk-control-layer";
+import type { FuturesMarketMode } from "../strategy/live-market-mode";
+import { runFuturesAdaptiveEntry, type FuturesAdaptiveEntryResult } from "../strategy/live-entry-pipeline";
+import { rangeExecutorEvaluateEntry } from "../strategy/executors/range-executor";
+import { trendExecutorEvaluateEntry } from "../strategy/executors/trend-executor";
+import type { AnyEntryDecision } from "../strategy/executors/types";
+import { aiApproveEntry, aiInputFromDecision } from "../ai/entry-approval";
+import type { PaperSignal } from "../strategy/entry-signal";
+import type { PaperCandidateStrength } from "../strategy/entry-signal";
+import { PIPELINE_VERSION } from "./decision-funnel";
+
+/** @deprecated use PaperDecisionRejectReason from `../models/types` */
+export type RejectReasonCode = PaperDecisionRejectReason;
+
+export type PaperSymbolDecision = PaperSymbolDecisionRecord;
+
+export type SymbolSnapshotLike = Readonly<{
+  symbol: MarketSymbol;
+  lastPrice: number;
+  latestCandleClose: number;
+  signal: PaperSignal;
+  gateExpectedMove: number | null;
+  gateRequiredMove: number | null;
+  qualityScore: number;
+  candidateStrength: PaperCandidateStrength | null;
+  boxPos: number | null;
+  boxRel: number | null;
+  ema20: number | null;
+  ema60: number | null;
+  emaGap: number | null;
+  volumeRatioProxy: number;
+  boxHigh: number | null;
+  boxLow: number | null;
+}>;
+
+function signalToState(signal: PaperSignal): PaperSignalState {
+  if (signal === "paper_long_candidate") return "LONG_CANDIDATE";
+  if (signal === "paper_short_candidate") return "SHORT_CANDIDATE";
+  return "NONE";
+}
+
+function regimeToState(regime: MarketRegime, regimeUnknown: boolean): PaperRegimeState {
+  if (regimeUnknown) return "UNKNOWN";
+  return regime;
+}
+
+function rrFromRegime(regime: MarketRegime): number {
+  if (regime === "RANGE") return 0.0038 / 0.0026;
+  if (regime === "TREND") return 0.0105 / 0.0105;
+  return 1;
+}
+
+function mapExecutorBlockToReject(blocked: string | undefined): PaperDecisionRejectReason {
+  switch (blocked) {
+    case "fee_slippage_insufficient":
+      return "EDGE_FAIL_FEE";
+    case "range_center_forbidden":
+      return "EDGE_FAIL_EXPECTANCY";
+    case "range_cooldown_active":
+    case "trend_cooldown_active":
+      return "RISK_COOLDOWN";
+    case "mode_suspended":
+      return "RISK_COOLDOWN";
+    case "no_trade_regime":
+      return "REGIME_NO_TRADE";
+    case "trend_need_breakout_or_pullback":
+    case "trend_direction_weak":
+      return "EDGE_FAIL_EXPECTANCY";
+    case "trend_volume_too_thin":
+      return "EDGE_FAIL_LOW_VOL";
+    default:
+      return "LEGACY_BLOCKED";
+  }
+}
+
+export type EvaluatePaperSymbolEntryInput = Readonly<{
+  config: EngineConfig;
+  snapshot: SymbolSnapshotLike | null;
+  dataReady: boolean;
+  regime: MarketRegime;
+  regimeUnknown: boolean;
+  risk: RiskControlDecision | null;
+  adaptiveMode: FuturesMarketMode;
+  adaptiveDetail: Record<string, unknown>;
+  now: number;
+  rangeCooldownUntilByKey: ReadonlyMap<string, number>;
+  trendCooldownUntilBySymbol: ReadonlyMap<string, number>;
+  lastCloseMetaBySymbol: ReadonlyMap<string, { closedAt: number; side: "long" | "short" }> | null;
+  reentryCooldownMs: number;
+  sameDirCooldownMult: number;
+  hasOpenPosition: boolean;
+  maxPositionsReached: boolean;
+}>;
+
+export type EvaluatePaperSymbolEntryResult = Readonly<{
+  decision: PaperSymbolDecision;
+  intentSide: "long" | "short" | null;
+  executorDecision: AnyEntryDecision | null;
+  adaptiveOk: boolean;
+  adaptiveDirection: "long" | "short" | null;
+  adaptiveDetail: Record<string, unknown> | null;
+  adaptiveResult: Extract<FuturesAdaptiveEntryResult, { ok: true }> | null;
+  /** True once the pipeline reaches adaptive (after AI approval). */
+  aiGatePassed: boolean;
+}>;
+
+const DEFAULT_PAPER_SIZE_USD = 100;
+
+function pack(
+  input: EvaluatePaperSymbolEntryInput,
+  sym: MarketSymbol,
+  em: number | null,
+  fields: {
+    signal_state: PaperSignalState;
+    regime_state: PaperRegimeState;
+    edge_state: PaperEdgeState;
+    risk_state: PaperRiskState;
+    execution_state: PaperExecutionState;
+    final_decision: PaperFinalDecision;
+    reject_reason: PaperDecisionRejectReason | null;
+    expected_move_pct: number | null;
+    fee_estimate_pct: number | null;
+    slippage_buffer_pct: number;
+    safety_margin_pct: number;
+    rr: number | null;
+    atr_pct: number | null;
+    strategy_executor: PaperStrategyExecutor;
+    engine_mode: EngineConfig["paperEngineMode"];
+    ai_decision: string | null;
+    adaptive_decision: string | null;
+  }
+): PaperSymbolDecision {
+  return {
+    ts: input.now,
+    timestamp: new Date(input.now).toISOString(),
+    symbol: String(sym),
+    pipeline_version: PIPELINE_VERSION,
+    volatility_move: typeof em === "number" && Number.isFinite(em) ? em : null,
+    ...fields
+  };
+}
+
+/**
+ * Pipeline: DATA → SIGNAL → REGIME → EDGE → RISK → EXECUTION → AI → ADAPTIVE.
+ */
+export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): EvaluatePaperSymbolEntryResult {
+  const slipFrac = (Math.max(0, input.config.paperSlippageBps) / 10_000) * 2;
+  const safety = 0.0001;
+  const slippage_buffer_pct = slipFrac * 100;
+  const safety_margin_pct = safety * 100;
+  const emMode = input.config.paperEngineMode;
+
+  const sym = input.snapshot?.symbol ?? ("UNKNOWN" as MarketSymbol);
+  let em: number | null = null;
+
+  let signal_state: PaperSignalState = "NONE";
+  let regime_state = regimeToState(input.regime, input.regimeUnknown);
+  let edge_state: PaperEdgeState = "PASS";
+  let risk_state: PaperRiskState = "PASS";
+  let execution_state: PaperExecutionState = "PAPER_READY";
+  let final_decision: PaperFinalDecision = "SKIP";
+  let reject_reason: PaperDecisionRejectReason | null = null;
+  let expected_move_pct: number | null = null;
+  let fee_estimate_pct: number | null = null;
+  let rr: number | null = null;
+  let atr_pct: number | null = null;
+  let strategy_executor: PaperStrategyExecutor = "IDLE";
+
+  let intentSide: "long" | "short" | null = null;
+  let executorDecision: AnyEntryDecision | null = null;
+  let adaptiveDetailOut: Record<string, unknown> | null = null;
+
+  const ret = (
+    extra: Partial<{
+      signal_state: PaperSignalState;
+      regime_state: PaperRegimeState;
+      edge_state: PaperEdgeState;
+      risk_state: PaperRiskState;
+      execution_state: PaperExecutionState;
+      final_decision: PaperFinalDecision;
+      reject_reason: PaperDecisionRejectReason | null;
+      expected_move_pct: number | null;
+      fee_estimate_pct: number | null;
+      rr: number | null;
+      atr_pct: number | null;
+      strategy_executor: PaperStrategyExecutor;
+      ai_decision: string | null;
+      adaptive_decision: string | null;
+    }>,
+    res: {
+      intentSide: "long" | "short" | null;
+      executorDecision: AnyEntryDecision | null;
+      adaptiveOk: boolean;
+      adaptiveDirection: "long" | "short" | null;
+      adaptiveDetail: Record<string, unknown> | null;
+      adaptiveResult: Extract<FuturesAdaptiveEntryResult, { ok: true }> | null;
+      aiGatePassed: boolean;
+    }
+  ): EvaluatePaperSymbolEntryResult => ({
+    decision: pack(input, sym, em, {
+      signal_state: extra.signal_state ?? signal_state,
+      regime_state: extra.regime_state ?? regime_state,
+      edge_state: extra.edge_state ?? edge_state,
+      risk_state: extra.risk_state ?? risk_state,
+      execution_state: extra.execution_state ?? execution_state,
+      final_decision: extra.final_decision ?? final_decision,
+      reject_reason: extra.reject_reason !== undefined ? extra.reject_reason : reject_reason,
+      expected_move_pct: extra.expected_move_pct !== undefined ? extra.expected_move_pct : expected_move_pct,
+      fee_estimate_pct: extra.fee_estimate_pct !== undefined ? extra.fee_estimate_pct : fee_estimate_pct,
+      slippage_buffer_pct,
+      safety_margin_pct,
+      rr: extra.rr !== undefined ? extra.rr : rr,
+      atr_pct: extra.atr_pct !== undefined ? extra.atr_pct : atr_pct,
+      strategy_executor: extra.strategy_executor ?? strategy_executor,
+      engine_mode: emMode,
+      ai_decision: extra.ai_decision !== undefined ? extra.ai_decision : null,
+      adaptive_decision: extra.adaptive_decision !== undefined ? extra.adaptive_decision : null
+    }),
+    ...res
+  });
+
+  if (!input.dataReady || !input.snapshot) {
+    return ret(
+      {
+        signal_state: "NONE",
+        edge_state: "FAIL_EXPECTANCY",
+        risk_state: "PASS",
+        execution_state: "INIT_FAIL",
+        final_decision: "DISABLED",
+        reject_reason: "DATA_NOT_READY",
+        expected_move_pct: null,
+        fee_estimate_pct: null,
+        rr: null,
+        atr_pct: null,
+        strategy_executor: "IDLE",
+        ai_decision: "N/A",
+        adaptive_decision: "N/A"
+      },
+      {
+        intentSide: null,
+        executorDecision: null,
+        adaptiveOk: false,
+        adaptiveDirection: null,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      }
+    );
+  }
+
+  const sn = input.snapshot;
+  em = sn.gateExpectedMove;
+  signal_state = signalToState(sn.signal);
+
+  if (input.regime === "RANGE" || input.regime === "TREND") {
+    strategy_executor = input.regime;
+  }
+
+  if (typeof em === "number" && Number.isFinite(em)) {
+    expected_move_pct = em * 100;
+    atr_pct = em * 100;
+  }
+  const rm = sn.gateRequiredMove;
+  const totalCost =
+    typeof rm === "number" && Number.isFinite(rm) ? rm + slipFrac + safety : null;
+  if (typeof rm === "number" && Number.isFinite(rm)) {
+    fee_estimate_pct = rm * 100;
+  }
+
+  if (signal_state === "NONE") {
+    reject_reason = "SIGNAL_NONE";
+    final_decision = "SKIP";
+    return ret(
+      { execution_state: "PAPER_READY", ai_decision: "N/A", adaptive_decision: "N/A" },
+      {
+        intentSide: null,
+        executorDecision: null,
+        adaptiveOk: false,
+        adaptiveDirection: null,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      }
+    );
+  }
+
+  if (regime_state === "UNKNOWN") {
+    reject_reason = "REGIME_UNKNOWN";
+    final_decision = "REJECT";
+    edge_state = "FAIL_EXPECTANCY";
+    return ret(
+      { execution_state: "PAPER_READY", ai_decision: "N/A", adaptive_decision: "N/A" },
+      {
+        intentSide: null,
+        executorDecision: null,
+        adaptiveOk: false,
+        adaptiveDirection: null,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      }
+    );
+  }
+
+  if (input.regime === "NO_TRADE") {
+    reject_reason = "REGIME_NO_TRADE";
+    final_decision = "REJECT";
+    regime_state = "NO_TRADE";
+    strategy_executor = "IDLE";
+    execution_state = "IDLE";
+    return ret(
+      { regime_state: "NO_TRADE", execution_state: "IDLE", ai_decision: "N/A", adaptive_decision: "N/A" },
+      {
+        intentSide: null,
+        executorDecision: null,
+        adaptiveOk: false,
+        adaptiveDirection: null,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      }
+    );
+  }
+
+  intentSide = sn.signal === "paper_long_candidate" ? "long" : "short";
+  rr = rrFromRegime(input.regime);
+
+  if (typeof em === "number" && typeof rm === "number" && totalCost !== null && em <= totalCost) {
+    edge_state = "FAIL_FEE";
+    reject_reason = "EDGE_FAIL_FEE";
+    final_decision = "REJECT";
+  }
+
+  const minVol = input.config.paperMinEdgeVolatilityMove;
+  if (final_decision !== "REJECT" && typeof em === "number" && em < minVol) {
+    edge_state = "FAIL_LOW_VOL";
+    reject_reason = "EDGE_FAIL_LOW_VOL";
+    final_decision = "REJECT";
+  }
+
+  const minRr = input.config.paperMinEdgeRr;
+  if (final_decision !== "REJECT" && rr < minRr) {
+    edge_state = "FAIL_RR";
+    reject_reason = "EDGE_FAIL_RR";
+    final_decision = "REJECT";
+  }
+
+  if (final_decision !== "REJECT" && input.risk?.engineBlocked) {
+    risk_state = "HARD_BLOCK";
+    reject_reason = "RISK_MAX_DRAWDOWN";
+    final_decision = "REJECT";
+  }
+
+  const rBlock = input.risk?.blockedRegimes?.[input.regime];
+  if (final_decision !== "REJECT" && rBlock && rBlock.until > input.now) {
+    risk_state = "COOLDOWN";
+    reject_reason = "RISK_COOLDOWN";
+    final_decision = "REJECT";
+  }
+
+  if (final_decision !== "REJECT" && input.lastCloseMetaBySymbol && input.reentryCooldownMs > 0 && intentSide) {
+    const meta = input.lastCloseMetaBySymbol.get(String(sym));
+    const lastClose = meta?.closedAt ?? 0;
+    const elapsed = input.now - lastClose;
+    const sameDirection = meta !== undefined && meta.side === intentSide;
+    const waitMs = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
+    if (lastClose > 0 && elapsed < waitMs) {
+      risk_state = "COOLDOWN";
+      reject_reason = "RISK_FAIL_REENTRY";
+      final_decision = "REJECT";
+    }
+  }
+
+  if (input.risk && input.risk.sizeMultiplier < 1 && !input.risk.dailyLossGuardTriggered) {
+    const br = input.risk.blockedRegimes?.[input.regime];
+    if (!(br && br.until > input.now)) {
+      risk_state = "SOFT_BLOCK";
+    }
+  }
+
+  if (final_decision === "REJECT") {
+    return ret(
+      { execution_state: "PAPER_READY", ai_decision: "N/A", adaptive_decision: "N/A" },
+      {
+        intentSide,
+        executorDecision: null,
+        adaptiveOk: false,
+        adaptiveDirection: null,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      }
+    );
+  }
+
+  if (input.maxPositionsReached || input.hasOpenPosition) {
+    final_decision = "SKIP";
+    reject_reason = null;
+    execution_state = "IDLE";
+    return ret(
+      { execution_state: "IDLE", ai_decision: "N/A", adaptive_decision: "N/A" },
+      {
+        intentSide,
+        executorDecision: null,
+        adaptiveOk: false,
+        adaptiveDirection: null,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      }
+    );
+  }
+
+  const nowOpen = input.now;
+  const key = `${String(sym)}:${intentSide}`;
+  const rangeUntil = input.rangeCooldownUntilByKey.get(key) ?? 0;
+  const trendUntil = input.trendCooldownUntilBySymbol.get(String(sym)) ?? 0;
+
+  executorDecision =
+    input.regime === "RANGE"
+      ? rangeExecutorEvaluateEntry({
+          regime: input.regime,
+          risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
+          symbol: String(sym),
+          signal: sn.signal,
+          qualityScore: sn.qualityScore,
+          boxPos: sn.boxPos ?? null,
+          boxRel: sn.boxRel ?? null,
+          expectedMove: typeof em === "number" ? em : null,
+          totalCost,
+          cooldownActive: rangeUntil > nowOpen,
+          cooldownRemainingMs: rangeUntil > nowOpen ? rangeUntil - nowOpen : 0
+        })
+      : input.regime === "TREND"
+        ? trendExecutorEvaluateEntry({
+            regime: input.regime,
+            risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
+            symbol: String(sym),
+            signal: sn.signal,
+            qualityScore: sn.qualityScore,
+            lastPrice: sn.lastPrice,
+            ema20: sn.ema20,
+            ema60: sn.ema60,
+            volumeRatioProxy: sn.volumeRatioProxy,
+            boxHigh: sn.boxHigh ?? null,
+            boxLow: sn.boxLow ?? null,
+            expectedMove: typeof em === "number" ? em : null,
+            totalCost,
+            cooldownActive: trendUntil > nowOpen,
+            cooldownRemainingMs: trendUntil > nowOpen ? trendUntil - nowOpen : 0
+          })
+        : null;
+
+  if (!executorDecision || !executorDecision.entry_allowed) {
+    const br = executorDecision?.blocked_reason;
+    reject_reason = br ? mapExecutorBlockToReject(br) : "LEGACY_BLOCKED";
+    if (reject_reason === "RISK_COOLDOWN") risk_state = "COOLDOWN";
+    final_decision = "REJECT";
+    return ret(
+      { execution_state: "PAPER_READY", ai_decision: "N/A", adaptive_decision: "N/A" },
+      {
+        intentSide,
+        executorDecision,
+        adaptiveOk: false,
+        adaptiveDirection: null,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      }
+    );
+  }
+
+  const lossStreak = input.risk?.recentLossStreakByMode?.[input.regime] ?? 0;
+  const last10Net =
+    typeof input.risk?.detail?.last10_net_usd === "number" && Number.isFinite(input.risk.detail.last10_net_usd as number)
+      ? (input.risk.detail.last10_net_usd as number)
+      : 0;
+  const aiIn = aiInputFromDecision({ decision: executorDecision, executorDirection: intentSide, lossStreak, last10Net });
+  if (aiIn) {
+    const aiOut = aiApproveEntry(aiIn);
+    const aiDir = aiOut.action === "ENTER_LONG" ? "long" : aiOut.action === "ENTER_SHORT" ? "short" : "none";
+    const mismatch = aiDir !== "none" && aiDir !== intentSide;
+    if (mismatch) {
+      reject_reason = "AI_DIRECTION_MISMATCH";
+      final_decision = "REJECT";
+      return ret(
+        {
+          reject_reason: "AI_DIRECTION_MISMATCH",
+          final_decision: "REJECT",
+          ai_decision: "REJECT",
+          adaptive_decision: "N/A"
+        },
+        {
+          intentSide,
+          executorDecision,
+          adaptiveOk: false,
+          adaptiveDirection: null,
+          adaptiveDetail: null,
+          adaptiveResult: null,
+          aiGatePassed: false
+        }
+      );
+    }
+    if (aiOut.action === "NO_ENTRY") {
+      reject_reason = "AI_REJECT";
+      final_decision = "REJECT";
+      return ret(
+        {
+          reject_reason: "AI_REJECT",
+          final_decision: "REJECT",
+          ai_decision: "REJECT",
+          adaptive_decision: "N/A"
+        },
+        {
+          intentSide,
+          executorDecision,
+          adaptiveOk: false,
+          adaptiveDirection: null,
+          adaptiveDetail: null,
+          adaptiveResult: null,
+          aiGatePassed: false
+        }
+      );
+    }
+  }
+
+  const adaptive = runFuturesAdaptiveEntry({
+    mode: input.adaptiveMode,
+    modeDetail: input.adaptiveDetail,
+    snap: {
+      symbol: String(sym),
+      signal: sn.signal,
+      lastPrice: sn.lastPrice,
+      latestCandleClose: sn.latestCandleClose,
+      ema20: sn.ema20,
+      ema60: sn.ema60,
+      qualityScore: sn.qualityScore,
+      candidateStrength: sn.candidateStrength,
+      emaGap: sn.emaGap,
+      volumeRatioProxy: sn.volumeRatioProxy
+    },
+    baseSizeUsd: DEFAULT_PAPER_SIZE_USD * (input.risk?.sizeMultiplier ?? 1)
+  });
+  adaptiveDetailOut = adaptive.detail ?? null;
+  if (!adaptive.ok) {
+    reject_reason = "ORDER_BUILD_FAIL";
+    final_decision = "REJECT";
+    execution_state = "ORDER_BUILD_FAIL";
+    return ret(
+      {
+        reject_reason: "ORDER_BUILD_FAIL",
+        final_decision: "REJECT",
+        execution_state: "ORDER_BUILD_FAIL",
+        ai_decision: "APPROVE",
+        adaptive_decision: "REJECT"
+      },
+      {
+        intentSide,
+        executorDecision,
+        adaptiveOk: false,
+        adaptiveDirection: null,
+        adaptiveDetail: adaptiveDetailOut,
+        adaptiveResult: null,
+        aiGatePassed: true
+      }
+    );
+  }
+
+  const expectedSide: "long" | "short" = sn.signal === "paper_long_candidate" ? "long" : "short";
+  if (adaptive.direction !== expectedSide) {
+    reject_reason = "ADAPTIVE_REJECT";
+    final_decision = "REJECT";
+    return ret(
+      {
+        reject_reason: "ADAPTIVE_REJECT",
+        final_decision: "REJECT",
+        ai_decision: "APPROVE",
+        adaptive_decision: "REJECT"
+      },
+      {
+        intentSide,
+        executorDecision,
+        adaptiveOk: false,
+        adaptiveDirection: adaptive.direction,
+        adaptiveDetail: adaptiveDetailOut,
+        adaptiveResult: null,
+        aiGatePassed: true
+      }
+    );
+  }
+
+  if (input.config.longOnly && adaptive.direction === "short") {
+    reject_reason = "EXECUTION_DISABLED";
+    final_decision = "REJECT";
+    return ret(
+      {
+        reject_reason: "EXECUTION_DISABLED",
+        final_decision: "REJECT",
+        ai_decision: "APPROVE",
+        adaptive_decision: "OK"
+      },
+      {
+        intentSide,
+        executorDecision,
+        adaptiveOk: false,
+        adaptiveDirection: adaptive.direction,
+        adaptiveDetail: adaptiveDetailOut,
+        adaptiveResult: null,
+        aiGatePassed: true
+      }
+    );
+  }
+
+  final_decision = "ENTER";
+  reject_reason = null;
+
+  return ret(
+    {
+      final_decision: "ENTER",
+      reject_reason: null,
+      ai_decision: "APPROVE",
+      adaptive_decision: "OK"
+    },
+    {
+      intentSide,
+      executorDecision,
+      adaptiveOk: true,
+      adaptiveDirection: adaptive.direction,
+      adaptiveDetail: adaptiveDetailOut,
+      adaptiveResult: adaptive,
+      aiGatePassed: true
+    }
+  );
+}
