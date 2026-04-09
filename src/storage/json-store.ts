@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import type { PaperClosedPositionRecord, PaperOpenPositionRecord } from "../models/types";
+import { migrateLegacyExecutorAtEntry } from "../strategy/executors/executor-normalize";
 import { buildPaperDashboard, parseHealthHistoryJsonl } from "./paper-dashboard";
 import { buildPaperHealthReport, paperHealthHistoryJsonlLine, type PaperHealthReport } from "./paper-health";
 import type { AiBlockEvaluationCriteria } from "./ai-block-evaluator";
@@ -75,7 +76,7 @@ export type PaperCandidateRunPayload = Readonly<{
 }>;
 
 export class JsonStore {
-  constructor(private readonly baseDir: string) {}
+  constructor(private readonly baseDir: string) { }
 
   async writeJson(relativePath: string, data: unknown): Promise<string> {
     const fullPath = path.resolve(this.baseDir, relativePath);
@@ -151,7 +152,7 @@ export class JsonStore {
     const priceMap = buildSymbolPriceMap(input.symbolRows as any);
     const priorRaw = await this.readAiBlockEvalJson();
     const prior = priorRaw && typeof priorRaw === "object" ? (priorRaw as Record<string, unknown>) : {};
-    const evals: Record<string, unknown> = { ...prior };
+    const evals: Record<string, unknown> = prior.evals && typeof prior.evals === "object" ? { ...(prior.evals as any) } : {};
 
     for (const ev of input.events) {
       if (!isAiBlockedEventNeedingEval(ev)) continue;
@@ -223,10 +224,12 @@ export class JsonStore {
       const raw = await fs.readFile(fullPath, "utf8");
       const j = JSON.parse(raw) as unknown;
       if (Array.isArray(j)) {
-        return j.filter((x): x is PaperOpenPositionRecord => isPaperOpenRecord(x));
+        return j
+          .filter((x): x is PaperOpenPositionRecord => isPaperOpenRecord(x))
+          .map(migrateLegacyExecutorAtEntry);
       }
       if (j && typeof j === "object" && isPaperOpenRecord(j)) {
-        return [j];
+        return [migrateLegacyExecutorAtEntry(j)];
       }
       return [];
     } catch (e: unknown) {
