@@ -65,6 +65,7 @@ export type PaperDashboardReport = Readonly<{
     all: PaperDashboardFeeSlice;
   }>;
   recentTrend: PaperDashboardRecentTrend;
+  observation: import("./paper-summary").PaperObservationMetrics;
 }>;
 
 function pickWinSlice(s: PaperSummaryStats): { totalTrades: number; winRate: number; totalPnlUsdNet: number } {
@@ -207,6 +208,7 @@ export function buildPaperDashboard(input: Readonly<{
     headline: buildHeadline(health, window),
     snapshot,
     feeAnalytics,
-    recentTrend: buildRecentTrend(healthHistoryLines)
+    recentTrend: buildRecentTrend(healthHistoryLines),
+    observation: summary.observation
   };
 }
