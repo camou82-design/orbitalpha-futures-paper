@@ -102,6 +102,8 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   snapshot: SymbolSnapshotLike | null;
   dataReady: boolean;
   regime: MarketRegime;
+  /** BTC 레짐 `detail` (NO_TRADE 사유·marginal_history 등). */
+  regimeDetail?: Readonly<Record<string, unknown>>;
   regimeUnknown: boolean;
   isAmbiguous: boolean;
   risk: RiskControlDecision | null;
@@ -525,7 +527,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     );
   }
 
-  if (regime_state === "UNKNOWN" && !(input.currentStage === 0 && input.isAmbiguous)) {
+  /**
+   * regimeUnknown: BTC 5m 최소 봉 미만 → regime_state UNKNOWN.
+   * Stage 2+ 는 항상 차단. Stage 1 + isAmbiguous 일 때만 통과(레거시 완화).
+   */
+  const unknownBlocksEntry =
+    regime_state === "UNKNOWN" &&
+    (input.currentStage >= 1 || !(input.currentStage === 0 && input.isAmbiguous));
+  if (unknownBlocksEntry) {
     reject_reason = input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "REGIME_UNKNOWN";
     final_decision = "REJECT";
     edge_state = "FAIL_EXPECTANCY";
@@ -553,7 +562,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     );
   }
 
-  if (input.regime === "NO_TRADE" && !(input.currentStage === 0 && input.isAmbiguous)) {
+  /** NO_TRADE 는 감지기에서 위험/오류·필수 데이터 부족만 — 모호·약추세 등은 NO_TRADE 로 내리지 않음 */
+  if (input.regime === "NO_TRADE") {
     reject_reason = "REGIME_NO_TRADE";
     final_decision = "REJECT";
     regime_state = "NO_TRADE";
@@ -565,7 +575,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         execution_state: "IDLE",
         ai_decision: "N/A",
         adaptive_decision: "N/A",
-        guidance: null,
+        guidance:
+          typeof input.regimeDetail?.reason === "string"
+            ? `NO_TRADE (${String(input.regimeDetail.reason)})`
+            : null,
         target_stage: null,
         stage1_result_code: "STAGE1_BLOCKED_REGIME",
         required_move_pct: null,

@@ -28,7 +28,14 @@ import {
   atrWilderLast
 } from "../strategy/entry-gate";
 import { computePaperEntryQualityScore, paperSignalStrengthLabel } from "../strategy/paper-entry-quality";
-import { detectMarketRegime, type MarketRegime } from "../strategy/market-regime-detector";
+import {
+  detectMarketRegime,
+  INITIAL_ENGINE_REGIME,
+  MIN_BTC_5M_BARS_REGIME,
+  regimeWhenBtcFeedFailed,
+  type MarketRegime,
+  type MarketRegimeDetection
+} from "../strategy/market-regime-detector";
 import { evaluateRegimeEntry } from "../strategy/regime-entry";
 import { paperHealthStatusLogPayload } from "../storage/paper-health";
 import { PositionManager } from "./position-manager";
@@ -334,7 +341,7 @@ export class PaperEngine {
   private readonly positions: PositionManager;
   private readonly risk: RiskManager;
   private lastAdaptiveMode: Readonly<{ mode: FuturesMarketMode; detail: Record<string, unknown> }> = { mode: "sideways", detail: {} };
-  private lastRegime: Readonly<{ regime: MarketRegime; detail: Record<string, unknown> }> = { regime: "NO_TRADE", detail: {} };
+  private lastRegime: MarketRegimeDetection = INITIAL_ENGINE_REGIME;
   private lastRisk: RiskControlDecision | null = null;
   private lastModeChangeAt: number = 0;
   private lastEntryDecision: AnyEntryDecision | null = null;
@@ -383,8 +390,21 @@ export class PaperEngine {
     const btc5r = await this.bybit.tryGetCandles("BTCUSDT", "5m", 120);
     const btc5 = btc5r.ok ? btc5r.value : [];
     const prevRegime = this.lastRegime.regime;
-    const regimeDetected = detectMarketRegime({ btcCandles5m: btc5 });
+    const regimeDetected: MarketRegimeDetection = btc5r.ok
+      ? detectMarketRegime({ btcCandles5m: btc5 })
+      : regimeWhenBtcFeedFailed(btc5r.error ?? "btc_candles_unavailable");
     this.lastRegime = regimeDetected;
+    this.logger.info("regime_decision", {
+      regime_final: regimeDetected.log.regime_final,
+      regime_raw: regimeDetected.log.regime_raw,
+      no_trade_reason: regimeDetected.log.no_trade_reason,
+      unknown_reason: regimeDetected.log.unknown_reason,
+      data_ready: regimeDetected.log.data_ready,
+      dump_protection_hit: regimeDetected.log.dump_protection_hit,
+      volatility_guard_hit: regimeDetected.log.volatility_guard_hit,
+      len_btc_5m: btc5.length,
+      btc_feed_ok: btc5r.ok
+    });
     if (regimeDetected.regime !== prevRegime) {
       this.lastModeChangeAt = Date.now();
       await this.store.appendJsonlLine("reports/events.jsonl", {
@@ -547,7 +567,7 @@ export class PaperEngine {
     const opensAfterClose = await this.positions.loadOpenAll();
     const lastCloseMetaBySymbolForDecision =
       this.config.paperReentryCooldownMs > 0 ? latestCloseMetaBySymbol(await this.store.readPositionsHistory()) : null;
-    const regimeUnknown = btc5.length < 50;
+    const regimeUnknown = btc5.length < MIN_BTC_5M_BARS_REGIME;
     const decisionBySymbol = new Map<string, EvaluatePaperSymbolEntryResult>();
     const nowTick = Date.now();
 
@@ -559,6 +579,7 @@ export class PaperEngine {
           snapshot: null,
           dataReady: false,
           regime: regimeDetected.regime,
+          regimeDetail: regimeDetected.detail,
           regimeUnknown,
           isAmbiguous: regimeDetected.isAmbiguous,
           risk: this.lastRisk,
@@ -630,6 +651,7 @@ export class PaperEngine {
         },
         dataReady: true,
         regime: regimeDetected.regime,
+        regimeDetail: regimeDetected.detail,
         regimeUnknown,
         isAmbiguous: regimeDetected.isAmbiguous,
         risk: this.lastRisk,
