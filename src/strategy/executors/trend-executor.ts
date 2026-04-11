@@ -53,7 +53,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
             : "pullback_bad"
           : "unknown";
 
-  if (input.regime !== "TREND") {
+  if (input.regime !== "TREND" && (input.currentStage ?? 0) !== 0) {
     return {
       regime: input.regime,
       executor: "TREND",

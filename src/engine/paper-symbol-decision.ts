@@ -365,7 +365,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     );
   }
 
-  if (regime_state === "UNKNOWN") {
+  if (regime_state === "UNKNOWN" && !(input.currentStage === 0 && input.isAmbiguous)) {
     reject_reason = input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "REGIME_UNKNOWN";
     final_decision = "REJECT";
     edge_state = "FAIL_EXPECTANCY";
@@ -390,7 +390,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     );
   }
 
-  if (input.regime === "NO_TRADE") {
+  if (input.regime === "NO_TRADE" && !(input.currentStage === 0 && input.isAmbiguous)) {
     reject_reason = "REGIME_NO_TRADE";
     final_decision = "REJECT";
     regime_state = "NO_TRADE";

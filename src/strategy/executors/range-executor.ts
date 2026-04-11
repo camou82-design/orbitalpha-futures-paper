@@ -37,7 +37,7 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
           ? "upper"
           : "middle";
 
-  if (input.regime !== "RANGE") {
+  if (input.regime !== "RANGE" && (input.currentStage ?? 0) !== 0) {
     return {
       regime: input.regime,
       executor: "RANGE",
