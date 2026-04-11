@@ -124,7 +124,18 @@ export type PaperDecisionRejectReason =
   | "EXECUTOR_INIT_FAIL"
   | "EXECUTION_DISABLED"
   | "AI_DIRECTION_MISMATCH"
+  | "STAGE1_BLOCKED_LIMIT"
   | "LEGACY_BLOCKED";
+
+export type PaperStage1ResultCode =
+  | "STAGE1_ENTERED"
+  | "STAGE1_EXEC_PENDING"
+  | "STAGE1_BLOCKED_LIMIT"
+  | "STAGE1_BLOCKED_EDGE"
+  | "STAGE1_BLOCKED_RISK"
+  | "STAGE1_BLOCKED_QUALITY"
+  | "STAGE1_BLOCKED_REGIME"
+  | "STAGE1_BLOCKED_DATA";
 
 export type PaperSignalState = "NONE" | "LONG_CANDIDATE" | "SHORT_CANDIDATE";
 export type PaperRegimeState = "TREND" | "RANGE" | "NO_TRADE" | "UNKNOWN";
@@ -202,6 +213,8 @@ export type PaperSymbolDecisionRecord = Readonly<{
   auto_entry_triggered?: boolean;
   /** 현재 검토 중인 틱 수 */
   reviewing_ticks?: number;
+  /** Stage 1 통합 결과 코드 (Round 7 도입) */
+  stage1_result_code?: PaperStage1ResultCode;
 }>;
 
 /** Minimal row shape for funnel math. */

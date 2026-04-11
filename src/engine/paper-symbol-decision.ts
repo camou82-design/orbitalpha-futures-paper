@@ -160,6 +160,7 @@ function pack(
     ai_floor_relaxed?: boolean;
     auto_entry_triggered?: boolean;
     reviewing_ticks?: number;
+    stage1_result_code?: import("../models/types").PaperStage1ResultCode;
   }
 ): PaperSymbolDecision {
   return {
@@ -181,7 +182,8 @@ function pack(
     stage1_loosened_entry: fields.stage1_loosened_entry,
     ai_floor_relaxed: fields.ai_floor_relaxed,
     auto_entry_triggered: fields.auto_entry_triggered,
-    reviewing_ticks: fields.reviewing_ticks
+    reviewing_ticks: fields.reviewing_ticks,
+    stage1_result_code: fields.stage1_result_code
   };
 }
 
@@ -245,6 +247,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       ai_floor_relaxed?: boolean;
       auto_entry_triggered?: boolean;
       reviewing_ticks?: number;
+      stage1_result_code?: import("../models/types").PaperStage1ResultCode;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -286,7 +289,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       stage1_loosened_entry: extra.stage1_loosened_entry,
       ai_floor_relaxed: extra.ai_floor_relaxed,
       auto_entry_triggered: extra.auto_entry_triggered,
-      reviewing_ticks: extra.reviewing_ticks !== undefined ? extra.reviewing_ticks : input.reviewingTicks
+      reviewing_ticks: extra.reviewing_ticks !== undefined ? extra.reviewing_ticks : input.reviewingTicks,
+      stage1_result_code: extra.stage1_result_code
     }),
     ...res
   });
@@ -315,7 +319,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         entry_progress: null,
         target_stage: null,
         supplemental_reasons: ["DATA_NOT_READY"],
-        is_ambiguous: false
+        is_ambiguous: false,
+        stage1_result_code: "STAGE1_BLOCKED_DATA"
       },
       {
         intentSide: null,
@@ -352,7 +357,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     reject_reason = "SIGNAL_NONE";
     final_decision = "SKIP";
     return ret(
-      { execution_state: "PAPER_READY", ai_decision: "N/A", adaptive_decision: "N/A" },
+      {
+        execution_state: "PAPER_READY",
+        ai_decision: "N/A",
+        adaptive_decision: "N/A",
+        stage1_result_code: "STAGE1_BLOCKED_DATA"
+      },
       {
         intentSide: null,
         executorDecision: null,
@@ -376,7 +386,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         execution_state: "PAPER_READY",
         ai_decision: "N/A",
         adaptive_decision: "N/A",
-        guidance: input.isAmbiguous ? "애매한 장세 관망 중" : "적합한 레짐 없음"
+        guidance: input.isAmbiguous ? "애매한 장세 관망 중" : "적합한 레짐 없음",
+        stage1_result_code: "STAGE1_BLOCKED_REGIME"
       },
       {
         intentSide: null,
@@ -397,7 +408,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     strategy_executor = "IDLE";
     execution_state = "IDLE";
     return ret(
-      { regime_state: "NO_TRADE", execution_state: "IDLE", ai_decision: "N/A", adaptive_decision: "N/A", guidance: null, target_stage: null },
+      {
+        regime_state: "NO_TRADE",
+        execution_state: "IDLE",
+        ai_decision: "N/A",
+        adaptive_decision: "N/A",
+        guidance: null,
+        target_stage: null,
+        stage1_result_code: "STAGE1_BLOCKED_REGIME"
+      },
       {
         intentSide: null,
         executorDecision: null,
@@ -496,7 +515,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   if (final_decision === "REJECT") {
     return ret(
-      { execution_state: "PAPER_READY", ai_decision: "N/A", adaptive_decision: "N/A", supplemental_reasons },
+      {
+        execution_state: "PAPER_READY",
+        ai_decision: "N/A",
+        adaptive_decision: "N/A",
+        supplemental_reasons,
+        stage1_result_code: (reject_reason?.startsWith("EDGE") ? "STAGE1_BLOCKED_EDGE" : "STAGE1_BLOCKED_RISK") as any
+      },
       {
         intentSide,
         executorDecision: null,
@@ -515,7 +540,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     execution_state = "IDLE";
     supplemental_reasons.push("RISK_MAX_POSITIONS");
     return ret(
-      { execution_state: "IDLE", ai_decision: "N/A", adaptive_decision: "N/A", guidance: "최대 포지션 도달", target_stage: null, supplemental_reasons },
+      {
+        execution_state: "IDLE",
+        ai_decision: "N/A",
+        adaptive_decision: "N/A",
+        guidance: "최대 포지션 도달",
+        target_stage: null,
+        supplemental_reasons,
+        stage1_result_code: "STAGE1_BLOCKED_LIMIT"
+      },
       {
         intentSide,
         executorDecision: null,
@@ -621,7 +654,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         watch_zone: executorDecision?.watch_zone ?? null,
         entry_progress: executorDecision?.entry_progress ?? null,
         target_stage: null,
-        supplemental_reasons
+        supplemental_reasons,
+        stage1_result_code: (input.currentStage === 0 && input.isAmbiguous) ? "STAGE1_EXEC_PENDING" : "STAGE1_BLOCKED_REGIME"
       },
       {
         intentSide,
@@ -657,7 +691,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           adaptive_decision: "N/A",
           guidance: "AI 방향 불일치",
           target_stage: null,
-          supplemental_reasons
+          supplemental_reasons,
+          stage1_result_code: "STAGE1_BLOCKED_QUALITY"
         },
         {
           intentSide,
@@ -692,7 +727,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             guidance: `AI 품질 미달 거부 (Floor: ${effectiveFloor})`,
             target_stage: null,
             supplemental_reasons,
-            ai_floor_relaxed: aiFloorRelaxed
+            ai_floor_relaxed: aiFloorRelaxed,
+            stage1_result_code: "STAGE1_BLOCKED_QUALITY"
           },
           {
             intentSide,
@@ -754,7 +790,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           adaptive_decision: "REJECT",
           guidance: "결정 구성 실패",
           target_stage: null,
-          supplemental_reasons
+          supplemental_reasons,
+          stage1_result_code: "STAGE1_BLOCKED_DATA"
         },
         {
           intentSide,
@@ -781,7 +818,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           adaptive_decision: "REJECT",
           guidance: "방향 불일치 (Adaptive)",
           target_stage: null,
-          supplemental_reasons
+          supplemental_reasons,
+          stage1_result_code: "STAGE1_BLOCKED_RISK"
         },
         {
           intentSide,
@@ -807,7 +845,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           adaptive_decision: "OK",
           guidance: "방향 제한 (Long Only)",
           target_stage: null,
-          supplemental_reasons
+          supplemental_reasons,
+          stage1_result_code: "STAGE1_BLOCKED_REGIME"
         },
         {
           intentSide,
@@ -845,7 +884,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         target_stage: executorDecision?.target_stage ?? null,
         supplemental_reasons,
         reviewing_ticks: input.reviewingTicks,
-        auto_entry_triggered: input.autoEntryTriggered
+        auto_entry_triggered: input.autoEntryTriggered,
+        stage1_result_code: (execution_state === "STAGE1_EXEC_PENDING") ? "STAGE1_EXEC_PENDING" : "STAGE1_ENTERED"
       },
       {
         intentSide,
@@ -865,7 +905,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       final_decision: "SKIP",
       reject_reason: "SIGNAL_NONE",
       guidance: "신호 분석 불가",
-      supplemental_reasons
+      supplemental_reasons,
+      stage1_result_code: "STAGE1_BLOCKED_DATA"
     },
     {
       intentSide: null,

@@ -852,7 +852,8 @@ export class PaperEngine {
             price_after_15m: null,
             price_after_30m: null,
             hypothetical_outcome_hint: null,
-            detail: { ai_reason: aiOut.reason, ai_confidence: aiOut.confidence, ai_input: aiIn }
+            detail: { ai_reason: aiOut.reason, ai_confidence: aiOut.confidence, ai_input: aiIn },
+            stage1_result_code: d.stage1_result_code
           });
           return;
         }
@@ -878,7 +879,8 @@ export class PaperEngine {
             price_after_15m: null,
             price_after_30m: null,
             hypothetical_outcome_hint: null,
-            detail: { ai_reason: "방향 불일치", ai_confidence: aiOut.confidence }
+            detail: { ai_reason: "방향 불일치", ai_confidence: aiOut.confidence },
+            stage1_result_code: d.stage1_result_code
           });
           return;
         }
@@ -896,7 +898,8 @@ export class PaperEngine {
           expected_move: ex.expected_move,
           total_cost: ex.total_cost,
           risk_state: ex.risk_state,
-          detail: ex.detail
+          detail: ex.detail,
+          stage1_result_code: d.stage1_result_code
         });
         return;
       }
@@ -909,7 +912,8 @@ export class PaperEngine {
           regime: this.lastRegime.regime,
           reason: "adaptive_policy_block",
           reject_code: d.reject_reason,
-          detail: res.adaptiveDetail
+          detail: res.adaptiveDetail,
+          stage1_result_code: d.stage1_result_code
         });
         return;
       }
@@ -923,7 +927,8 @@ export class PaperEngine {
         reject_code: d.reject_reason,
         expected_move:
           typeof d.expected_move_pct === "number" && Number.isFinite(d.expected_move_pct) ? d.expected_move_pct / 100 : null,
-        risk_state: this.lastRisk?.riskStatus ?? "NORMAL"
+        risk_state: this.lastRisk?.riskStatus ?? "NORMAL",
+        stage1_result_code: d.stage1_result_code
       });
     }
   }
@@ -1402,9 +1407,15 @@ export class PaperEngine {
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
 
-    const candidates = input.snapshots.filter(
-      (s) => s.signal === "paper_long_candidate" || s.signal === "paper_short_candidate"
-    );
+    const candidates = input.snapshots
+      .filter((s) => s.signal === "paper_long_candidate" || s.signal === "paper_short_candidate")
+      .sort((a, b) => {
+        const aMajor = a.symbol === "BTCUSDT" || a.symbol === "ETHUSDT";
+        const bMajor = b.symbol === "BTCUSDT" || b.symbol === "ETHUSDT";
+        if (aMajor && !bMajor) return -1;
+        if (!aMajor && bMajor) return +1;
+        return 0;
+      });
     if (candidates.length === 0) return;
 
     if (!input.candidateRunPath || !input.latestPath || !input.metaPath || !input.filePath) {
@@ -1431,7 +1442,20 @@ export class PaperEngine {
         continue;
       }
 
-      if (next.length >= max) break;
+      if (next.length >= max) {
+        if (res.decision.final_decision === "ENTER") {
+          // Track as blocked by limit even if it was internally allowed
+          const limitBlocked = {
+            ...res,
+            decision: {
+              ...res.decision,
+              stage1_result_code: "STAGE1_BLOCKED_LIMIT" as const
+            }
+          };
+          await this.emitPipelineEventsFromDecision(first, limitBlocked, nowTs);
+        }
+        continue;
+      }
 
       this.lastEntryDecision = res.executorDecision ?? null;
 
@@ -1588,7 +1612,8 @@ export class PaperEngine {
         leverage: record.leverage,
         expected_move: decision.expected_move,
         total_cost: decision.total_cost,
-        risk_state: (this.lastRisk?.riskStatus ?? "NORMAL")
+        risk_state: (this.lastRisk?.riskStatus ?? "NORMAL"),
+        stage1_result_code: res.decision.stage1_result_code
       });
     }
 
