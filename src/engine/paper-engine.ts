@@ -1148,7 +1148,8 @@ export class PaperEngine {
           boxLow: snap.boxLow,
           atr: snap.atr,
           partialExitStage: open.partialExitStage ?? 0,
-          holdingMs: m.holdingMs
+          holdingMs: m.holdingMs,
+          postEntryCostGuard: open.postEntryCostGuard === true
         })
         : trendExecutorEvaluateExit({
           side: open.side,
@@ -1158,7 +1159,8 @@ export class PaperEngine {
           atr: snap.atr,
           partialExitStage: open.partialExitStage ?? 0,
           holdingMs: m.holdingMs,
-          trailingExtreme: open.trailingExtremePrice
+          trailingExtreme: open.trailingExtremePrice,
+          postEntryCostGuard: open.postEntryCostGuard === true
         });
 
       if (exitEval.action === "close") {
@@ -1597,6 +1599,7 @@ export class PaperEngine {
           ...(confScore !== undefined ? { entryConfidenceScore: confScore } : {}),
           ...(confTier !== undefined ? { entryConfidenceTier: confTier } : {}),
           ...(sizeMult !== undefined ? { entrySizeMultiplier: sizeMult } : {}),
+          ...(res.decision.post_entry_cost_guard === true ? { postEntryCostGuard: true } : {}),
           status: "open"
         };
 
@@ -1664,6 +1667,10 @@ export class PaperEngine {
     nowTs: number
   ): Promise<PaperOpenPositionRecord | null> {
     if (res.decision.final_decision !== "ENTER" || !res.adaptiveResult) return null;
+    if (existing.postEntryCostGuard === true) {
+      this.logger.info("scale_in_blocked_post_entry_cost_guard", { symbol: existing.symbol });
+      return null;
+    }
 
     const decision = res.executorDecision!;
     const adaptive = res.adaptiveResult;

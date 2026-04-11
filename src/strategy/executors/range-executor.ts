@@ -319,10 +319,18 @@ export function rangeExecutorEvaluateExit(input: Readonly<{
   atr: number | null;
   partialExitStage: number;
   holdingMs: number;
+  /** Stage 1 비용 경고 진입: 익절·시간 청산 보수화 */
+  postEntryCostGuard?: boolean;
 }>): RangeExitDecision {
   const boxPos = input.boxPos ?? 0.5;
   const isLong = input.side === "long";
   const atr = input.atr ?? 0;
+  const cg = input.postEntryCostGuard === true;
+  const t1 = cg ? 0.4 : 0.42;
+  const t1b = cg ? 0.6 : 0.58;
+  const t2 = cg ? 0.48 : 0.5;
+  const t2b = cg ? 0.52 : 0.5;
+  const maxHoldCostGuardMs = 18 * 60 * 1000;
 
   // 1. 손절 조건 (박스 이탈 + 0.5 ATR 버퍼)
   let stopPrice = 0;
@@ -354,10 +362,21 @@ export function rangeExecutorEvaluateExit(input: Readonly<{
     }
   }
 
+  if (cg && input.holdingMs >= maxHoldCostGuardMs) {
+    return {
+      executor: "RANGE",
+      action: "close",
+      reason: "time_based_exit",
+      guidance: "비용 경고 진입: 보유 시간 상한",
+      exit_progress: 100,
+      detail: { holdingMs: input.holdingMs, postEntryCostGuard: true }
+    };
+  }
+
   // 2. 익절 조건 (3단계 분할)
   // Stage 0 -> 1: 박스 중심선 근처 (0.4 ~ 0.6) 진입 시 70-90% 지점
   if (input.partialExitStage === 0) {
-    const reachedFirstTp = isLong ? boxPos >= 0.42 : boxPos <= 0.58;
+    const reachedFirstTp = isLong ? boxPos >= t1 : boxPos <= t1b;
     if (reachedFirstTp) {
       return {
         executor: "RANGE",
@@ -373,7 +392,7 @@ export function rangeExecutorEvaluateExit(input: Readonly<{
 
   // Stage 1 -> 2: 박스 중심선 (0.5) 도달
   if (input.partialExitStage === 1) {
-    const reachedSecondTp = isLong ? boxPos >= 0.5 : boxPos <= 0.5;
+    const reachedSecondTp = isLong ? boxPos >= t2 : boxPos <= t2b;
     if (reachedSecondTp) {
       return {
         executor: "RANGE",
@@ -389,7 +408,9 @@ export function rangeExecutorEvaluateExit(input: Readonly<{
 
   // 3. 반전 청산 (중심선 넘었다가 다시 밀릴 때)
   if (input.partialExitStage >= 1) {
-    const reversed = isLong ? boxPos < 0.45 : boxPos > 0.55;
+    const revLo = cg ? 0.46 : 0.45;
+    const revHi = cg ? 0.54 : 0.55;
+    const reversed = isLong ? boxPos < revLo : boxPos > revHi;
     if (reversed) {
       return {
         executor: "RANGE",

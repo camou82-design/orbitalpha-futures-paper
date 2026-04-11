@@ -170,6 +170,9 @@ function pack(
     ema_gap_diag?: number | null;
     volatility_proxy_diag?: number | null;
     stage1_leniency_applied?: boolean;
+    cost_warning_applied?: boolean;
+    stage1_size_reduced_due_to_cost?: boolean;
+    post_entry_cost_guard?: boolean;
   }
 ): PaperSymbolDecision {
   return {
@@ -200,7 +203,10 @@ function pack(
     box_position_diag: fields.box_position_diag,
     ema_gap_diag: fields.ema_gap_diag,
     volatility_proxy_diag: fields.volatility_proxy_diag,
-    stage1_leniency_applied: fields.stage1_leniency_applied
+    stage1_leniency_applied: fields.stage1_leniency_applied,
+    cost_warning_applied: fields.cost_warning_applied,
+    stage1_size_reduced_due_to_cost: fields.stage1_size_reduced_due_to_cost,
+    post_entry_cost_guard: fields.post_entry_cost_guard
   };
 }
 
@@ -293,6 +299,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       ema_gap_diag?: number | null;
       volatility_proxy_diag?: number | null;
       stage1_leniency_applied?: boolean;
+      cost_warning_applied?: boolean;
+      stage1_size_reduced_due_to_cost?: boolean;
+      post_entry_cost_guard?: boolean;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -343,7 +352,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       box_position_diag: "box_position_diag" in extra ? extra.box_position_diag : sn?.boxPos,
       ema_gap_diag: "ema_gap_diag" in extra ? extra.ema_gap_diag : sn?.emaGap,
       volatility_proxy_diag: "volatility_proxy_diag" in extra ? extra.volatility_proxy_diag : sn?.volumeRatioProxy,
-      stage1_leniency_applied: extra.stage1_leniency_applied ?? stage1_leniency_applied
+      stage1_leniency_applied: extra.stage1_leniency_applied ?? stage1_leniency_applied,
+      cost_warning_applied: extra.cost_warning_applied,
+      stage1_size_reduced_due_to_cost: extra.stage1_size_reduced_due_to_cost,
+      post_entry_cost_guard: extra.post_entry_cost_guard
     }),
     ...res
   });
@@ -520,18 +532,40 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   const supplemental_reasons: string[] = [];
   let stage1LoosenedEntry = false;
+  /** Stage 1만: 기대이동이 완화 비용 이하여도 탐색 진입 허용(하드 REJECT 안 함) */
+  let costWarningStage1 = false;
 
   if (typeof em === "number" && typeof rm === "number" && effectiveTotalCost !== null) {
-    if (em <= effectiveTotalCost) {
-      edge_state = "FAIL_FEE";
-      reject_reason = "EDGE_FAIL_FEE";
-      final_decision = "REJECT";
-      supplemental_reasons.push("EDGE_FAIL_FEE");
+    const feeWouldBlock = em <= effectiveTotalCost;
+    if (feeWouldBlock) {
+      if (input.currentStage === 0) {
+        costWarningStage1 = true;
+        stage1LoosenedEntry = true;
+        edge_state = "PASS";
+        supplemental_reasons.push("STAGE1_COST_WARNING_ALLOWED");
+      } else {
+        edge_state = "FAIL_FEE";
+        reject_reason = "EDGE_FAIL_FEE";
+        final_decision = "REJECT";
+        supplemental_reasons.push("EDGE_FAIL_FEE");
+      }
     } else if (totalCost !== null && em <= totalCost) {
-      // This is a "loosened" entry logic trigger
       stage1LoosenedEntry = true;
       supplemental_reasons.push("STAGE1_LOOSENED_COST");
     }
+  }
+
+  /** Stage 2/3 증액: 완화 비용선보다 여유 있어야 함(Stage 1 소액 허용과 분리) */
+  if (
+    input.currentStage >= 1 &&
+    typeof em === "number" &&
+    effectiveTotalCost !== null &&
+    em <= effectiveTotalCost * 1.08
+  ) {
+    edge_state = "FAIL_FEE";
+    reject_reason = "EDGE_FAIL_FEE";
+    final_decision = "REJECT";
+    supplemental_reasons.push("EDGE_FAIL_FEE_STAGE2_STRICT");
   }
 
   const minVol = input.config.paperMinEdgeVolatilityMove;
@@ -836,8 +870,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     // Size Multiplier Calculation
     let dynamicSizeMult = input.risk?.sizeMultiplier ?? 1;
     if (stage1LoosenedEntry && input.currentStage === 0) {
-      // Coupled risk reduction: Loosened entries get much smaller initial size
-      dynamicSizeMult *= 0.25; // Reduced from 0.4 to 0.25 to manage risk of high volume entries
+      dynamicSizeMult *= 0.25;
+    }
+    if (costWarningStage1 && input.currentStage === 0) {
+      dynamicSizeMult *= 0.35;
     }
     if (input.isAmbiguous) {
       dynamicSizeMult *= 0.8; // Extra caution for ambiguous market
@@ -975,9 +1011,17 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         target_stage: executorDecision?.target_stage ?? null,
         supplemental_reasons,
         auto_entry_triggered: input.autoEntryTriggered,
-        stage1_result_code: (execution_state === "STAGE1_EXEC_PENDING") ? "STAGE1_EXEC_PENDING" : "STAGE1_ENTERED",
+        stage1_result_code:
+          execution_state === "STAGE1_EXEC_PENDING"
+            ? "STAGE1_EXEC_PENDING"
+            : costWarningStage1
+              ? "STAGE1_COST_WARNING"
+              : "STAGE1_ENTERED",
         required_move_pct,
-        shortfall_pct
+        shortfall_pct,
+        cost_warning_applied: costWarningStage1,
+        stage1_size_reduced_due_to_cost: costWarningStage1 || (stage1LoosenedEntry && input.currentStage === 0),
+        post_entry_cost_guard: costWarningStage1
       },
       {
         intentSide,
@@ -998,7 +1042,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reject_reason: "SIGNAL_NONE",
       guidance: "신호 분석 불가",
       supplemental_reasons,
-      stage1_result_code: "STAGE1_BLOCKED_DATA",
+      stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
       required_move_pct,
       shortfall_pct
     },

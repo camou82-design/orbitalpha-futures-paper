@@ -355,9 +355,14 @@ export function trendExecutorEvaluateExit(input: Readonly<{
   partialExitStage: number;
   holdingMs: number;
   trailingExtreme?: number;
+  postEntryCostGuard?: boolean;
 }>): TrendExitDecision {
   const isLong = input.side === "long";
   const atr = input.atr ?? 0;
+  const cg = input.postEntryCostGuard === true;
+  const p1 = cg ? 0.005 : 0.008;
+  const p2 = cg ? 0.012 : 0.016;
+  const maxHoldCostGuardMs = 50 * 60 * 1000;
   const rr = input.pnlPctNet / (atr / input.entryPrice + 1e-9); // Approx RR based on ATR unit
 
   // 1. 손절 조건 (반대 방향 1.5 ATR 이탈)
@@ -390,10 +395,21 @@ export function trendExecutorEvaluateExit(input: Readonly<{
     }
   }
 
+  if (cg && input.holdingMs >= maxHoldCostGuardMs) {
+    return {
+      executor: "TREND",
+      action: "close",
+      reason: "time_based_exit",
+      guidance: "비용 경고 진입: 보유 시간 상한",
+      exit_progress: 100,
+      detail: { holdingMs: input.holdingMs, postEntryCostGuard: true }
+    };
+  }
+
   // 2. 익절 조건 (RR 기반 분할)
   // Stage 0 -> 1: RR 1.0 (ATR 1배 수익)
   if (input.partialExitStage === 0) {
-    if (input.pnlPctNet >= 0.008) { // 고정 최소 수익률 0.8% or RR 1.0
+    if (input.pnlPctNet >= p1) {
       return {
         executor: "TREND",
         action: "partial_close",
@@ -408,7 +424,7 @@ export function trendExecutorEvaluateExit(input: Readonly<{
 
   // Stage 1 -> 2: RR 2.0 (ATR 2배 수익)
   if (input.partialExitStage === 1) {
-    if (input.pnlPctNet >= 0.016) {
+    if (input.pnlPctNet >= p2) {
       return {
         executor: "TREND",
         action: "partial_close",

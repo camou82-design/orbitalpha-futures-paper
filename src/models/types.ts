@@ -130,6 +130,7 @@ export type PaperDecisionRejectReason =
 export type PaperStage1ResultCode =
   | "STAGE1_ENTERED"
   | "STAGE1_EXEC_PENDING"
+  | "STAGE1_COST_WARNING"
   | "STAGE1_BLOCKED_LIMIT"
   | "STAGE1_BLOCKED_EDGE"
   | "STAGE1_BLOCKED_RISK"
@@ -232,6 +233,12 @@ export type PaperSymbolDecisionRecord = Readonly<{
   volatility_proxy_diag?: number | null;
   /** Stage 1 완화(Leniency) 적용 여부 */
   stage1_leniency_applied?: boolean;
+  /** Stage 1에서 기대이동 < 완화비용이어도 탐색 진입 허용(경고) */
+  cost_warning_applied?: boolean;
+  /** 비용 경고로 Stage 1 사이즈 축소 적용 */
+  stage1_size_reduced_due_to_cost?: boolean;
+  /** 진입 후 비용 가드(증액 제한·청산 보수화) 활성 */
+  post_entry_cost_guard?: boolean;
 }>;
 
 /** Minimal row shape for funnel math. */
@@ -337,6 +344,8 @@ export type PaperOpenPositionRecord = Readonly<{
   entryStage?: number;
   /** 분할 비중 (예: [0.25, 0.35, 0.40]) */
   scalingWeights?: number[];
+  /** Stage 1이 비용 경고 하에 열렸으면 증액(스케일인) 제한·청산 보수화 */
+  postEntryCostGuard?: boolean;
   /** 현재가 (마지막 폴링 기준) */
   currentPrice?: number;
   /** 1차 목표가 (분할익절) */
