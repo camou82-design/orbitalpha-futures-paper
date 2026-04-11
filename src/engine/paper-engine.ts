@@ -594,8 +594,9 @@ export class PaperEngine {
       // Condition-maintained auto-entry check for Stage 1
       if (isCandidate && currentStage === 0 && !hasOpen) {
         if (rev) {
-          const qualityDropped = snap.qualityScore < rev.initialQuality - 2;
-          if (!qualityDropped && rev.ticks >= 5) {
+          const qualityDropped = snap.qualityScore < rev.initialQuality - 1; // Strict stability (max 1pt drop)
+          const highEnough = snap.qualityScore >= 40; // Maintain absolute minimum quality
+          if (!qualityDropped && highEnough && rev.ticks >= 5) {
             autoEntryTriggered = true;
           }
         }

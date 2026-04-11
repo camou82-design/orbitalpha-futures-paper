@@ -412,9 +412,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let leniency = 1.0;
   let stage1LoosenedEntry = false;
   if (input.currentStage === 0) {
-    if (input.regime === "TREND") leniency *= 0.75; // 25% discount for Trend
-    else if (input.regime === "RANGE") leniency *= 0.85; // 15% discount for Range
-    if (isBtcEth) leniency *= 0.85; // Extra 15% discount for Majors
+    if (input.regime === "TREND") leniency *= 0.65; // 35% discount for Trend (Loosened further)
+    else if (input.regime === "RANGE") leniency *= 0.75; // 25% discount for Range (Loosened further)
+    if (isBtcEth) leniency *= 0.82; // Total ~45% discount for Trend, ~38% for Range
   }
 
   const effectiveTotalCost = totalCost !== null ? totalCost * leniency : null;
@@ -677,7 +677,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     let dynamicSizeMult = input.risk?.sizeMultiplier ?? 1;
     if (stage1LoosenedEntry && input.currentStage === 0) {
       // Coupled risk reduction: Loosened entries get much smaller initial size
-      dynamicSizeMult *= 0.4; // Reduced from 0.5 to 0.4 to be safer per user request
+      dynamicSizeMult *= 0.25; // Reduced from 0.4 to 0.25 to manage risk of high volume entries
     }
     if (input.isAmbiguous) {
       dynamicSizeMult *= 0.8; // Extra caution for ambiguous market
