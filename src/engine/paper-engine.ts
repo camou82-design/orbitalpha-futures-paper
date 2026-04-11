@@ -4,7 +4,11 @@ import type {
   EngineConfig,
   MarketSymbol,
   PaperClosedPositionRecord,
-  PaperOpenPositionRecord
+  PaperOpenPositionRecord,
+  PaperEngineMode,
+  PaperEngineState,
+  DecisionFunnelTick,
+  PaperRegimeState
 } from "../models/types";
 import type { Logger } from "../logs/logger";
 import { JsonStore } from "../storage/json-store";
@@ -39,8 +43,7 @@ import {
   aggregateRejectReasonCountsTick,
   computeFunnelTick,
   DECISION_FUNNEL_RING_MAX,
-  sumDecisionFunnelTicks,
-  type DecisionFunnelTick
+  sumDecisionFunnelTicks
 } from "./decision-funnel";
 import { evaluatePaperSymbolEntry, type EvaluatePaperSymbolEntryResult } from "./paper-symbol-decision";
 
@@ -162,7 +165,7 @@ type RunMeta = Readonly<{
   category: string;
   snapshotPath: string;
   latestPath?: string;
-  engineMode: "paper";
+  engineMode: PaperEngineMode;
   exchange: "bybit";
   notes: string;
 }>;
@@ -474,7 +477,7 @@ export class PaperEngine {
       category,
       snapshotPath: filePath,
       latestPath,
-      engineMode: "paper",
+      engineMode: this.config.paperEngineMode,
       exchange: "bybit",
       notes: `paper-v1 EMA20/EMA60 1m long/short; +0.5%/-1.0% net TP/SL; 3m min_hold + 5m grace; public-only; ${klineTimeframe}`
     };
@@ -639,11 +642,11 @@ export class PaperEngine {
       await this.store.writeJson("reports/engine-state.json", {
         generatedAt: nowTick,
         engine_mode: this.config.paperEngineMode,
-        execution_state: "PAPER_READY",
+        execution_state: risk.engineBlocked ? "DISABLED" : "PAPER_READY",
         strategy_executor:
-          regimeDetected.regime === "RANGE" ? "RANGE" : regimeDetected.regime === "TREND" ? "TREND" : "IDLE",
-        current_regime: regimeDetected.regime,
-        adaptiveMode,
+          this.lastAdaptiveMode.mode === "trend" ? "TREND" : this.lastAdaptiveMode.mode === "sideways" ? "RANGE" : "IDLE",
+        current_regime: (regimeDetected.regime === "TREND" ? "TREND" : regimeDetected.regime === "RANGE" ? "RANGE" : "NO_TRADE") as PaperRegimeState,
+        adaptiveMode: this.lastAdaptiveMode.mode,
         engine_status: risk.dailyLossGuardTriggered ? "PAUSED" : "RUNNING",
         risk_state: risk.riskStatus,
         active_mode_executor:

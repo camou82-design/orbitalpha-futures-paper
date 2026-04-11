@@ -87,7 +87,7 @@ export function isAiBlockedEventNeedingEval(e: unknown): boolean {
   const o = e as Record<string, unknown>;
   if (o.type !== "ENTRY_BLOCKED") return false;
   const r = o.reason;
-  return r === "AI_FILTER" || r === "AI_DIRECTION_MISMATCH";
+  return r === "AI_FILTER" || r === "AI_REJECT" || r === "AI_DIRECTION_MISMATCH";
 }
 
 export function toAiBlockedEvalFromEvent(e: unknown): AiBlockedEventEval | null {

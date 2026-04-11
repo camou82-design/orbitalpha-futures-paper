@@ -1,31 +1,6 @@
-import type { PaperDecisionRejectReason, PaperFinalDecision } from "../models/types";
+import type { PaperDecisionRejectReason, PaperFinalDecision, DecisionFunnelTick, DecisionFunnelRow } from "../models/types";
 
 export const PIPELINE_VERSION = "2.1";
-
-/** Minimal row shape for funnel math (avoids circular imports with `paper-symbol-decision`). */
-export type DecisionFunnelRow = Readonly<{
-  decision: Readonly<{
-    signal_state: string;
-    regime_state: string;
-    edge_state: string;
-    risk_state: string;
-    execution_state: string;
-    final_decision: PaperFinalDecision;
-    reject_reason: PaperDecisionRejectReason | null;
-  }>;
-  aiGatePassed: boolean;
-}>;
-
-/** One engine tick funnel (per-symbol rows). Extend later for 24h/7d rollups. */
-export type DecisionFunnelTick = Readonly<{
-  raw_signal_count: number;
-  regime_pass_count: number;
-  edge_pass_count: number;
-  risk_pass_count: number;
-  execution_ready_count: number;
-  ai_pass_count: number;
-  enter_count: number;
-}>;
 
 /** 최근 N틱 누적 퍼널 링 버퍼 최대 길이 (비영속). */
 export const DECISION_FUNNEL_RING_MAX = 50;
@@ -92,12 +67,12 @@ export function sumDecisionFunnelTicks(ticks: readonly DecisionFunnelTick[]): De
 export function aggregateRejectReasonCountsTick(
   m: ReadonlyMap<string, DecisionFunnelRow>
 ): Record<string, number> {
-  const out: Partial<Record<PaperDecisionRejectReason, number>> = {};
+  const out: Record<string, number> = {};
   for (const [, r] of m) {
     if (r.decision.final_decision === "ENTER") continue;
     const code = r.decision.reject_reason;
     if (!code) continue;
     out[code] = (out[code] ?? 0) + 1;
   }
-  return out as Record<string, number>;
+  return out;
 }

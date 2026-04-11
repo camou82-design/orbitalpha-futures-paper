@@ -217,7 +217,8 @@ function parseEventType(e: unknown): string | null {
 function aggregateObservation(
   byRegime: { range: PaperSummaryStats; trend: PaperSummaryStats },
   events: readonly unknown[],
-  aiEvalMap: Record<string, unknown> | null
+  aiEvalMap: Record<string, unknown> | null,
+  criteria: PaperObservationMetrics["aiBlockQuality"]["criteria"] = null
 ): PaperObservationMetrics {
   let exit = { EXIT_TP: 0, EXIT_SL: 0, EXIT_REGIME: 0, EXIT_TREND_BREAK: 0, total: 0 };
   let entry = { entryBlocked: 0, entryAllowed: 0, entryOpened: 0 };
@@ -228,7 +229,6 @@ function aggregateObservation(
   let aiGood = 0;
   let aiMissed = 0;
   let aiNeutral = 0;
-  let criteria: PaperObservationMetrics["aiBlockQuality"]["criteria"] = null;
   for (const ev of events) {
     const ty = parseEventType(ev);
     if (!ty) continue;
@@ -361,8 +361,8 @@ function aggregateRows(rows: ParsedHistoryRow[]): PaperSummaryStats {
   const profitFactorNet = lossAbs > 0 && sumWinNet > 0 ? sumWinNet / lossAbs : null;
   const avgWinToAvgLossRatio =
     averageWinPnlUsdNet !== null &&
-    averageLossPnlUsdNet !== null &&
-    averageLossPnlUsdNet !== 0
+      averageLossPnlUsdNet !== null &&
+      averageLossPnlUsdNet !== 0
       ? Math.abs(averageWinPnlUsdNet / averageLossPnlUsdNet)
       : null;
   const tradesGrossPositiveNetNegativeRatio =
@@ -557,16 +557,15 @@ export function attachObservationToReports(input: Readonly<{
   const criteriaAll =
     evalObj && evalObj.criteria && typeof evalObj.criteria === "object"
       ? {
-          good_block_threshold_pct: Number((evalObj.criteria as any).good_block_threshold_pct),
-          missed_opportunity_threshold_pct: Number((evalObj.criteria as any).missed_opportunity_threshold_pct),
-          evaluation_horizon_priority: Array.isArray((evalObj.criteria as any).evaluation_horizon_priority)
-            ? ((evalObj.criteria as any).evaluation_horizon_priority.filter((x: any) => x === 5 || x === 15 || x === 30) as Array<5 | 15 | 30>)
-            : []
-        }
+        good_block_threshold_pct: Number((evalObj.criteria as any).good_block_threshold_pct),
+        missed_opportunity_threshold_pct: Number((evalObj.criteria as any).missed_opportunity_threshold_pct),
+        evaluation_horizon_priority: Array.isArray((evalObj.criteria as any).evaluation_horizon_priority)
+          ? ((evalObj.criteria as any).evaluation_horizon_priority.filter((x: any) => x === 5 || x === 15 || x === 30) as Array<5 | 15 | 30>)
+          : []
+      }
       : null;
 
-  const obsAll = aggregateObservation(byRegimeAll, events, evalsAll);
-  (obsAll.aiBlockQuality as any).criteria = criteriaAll;
+  const obsAll = aggregateObservation(byRegimeAll, events, evalsAll, criteriaAll);
 
   // Build per-day observation from (history+events) keyed by UTC day.
   const byDayHistory: Record<string, unknown[]> = {};
@@ -603,9 +602,8 @@ export function attachObservationToReports(input: Readonly<{
     const evl = byDayEvals[k] ?? null;
     nextDays[k] = {
       ...bucket,
-      observation: aggregateObservation({ range: byReg.range, trend: byReg.trend }, ev, evl)
+      observation: aggregateObservation({ range: byReg.range, trend: byReg.trend }, ev, evl, criteriaAll)
     };
-    (nextDays[k]!.observation.aiBlockQuality as any).criteria = criteriaAll;
   }
 
   return {
