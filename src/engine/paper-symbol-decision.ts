@@ -66,6 +66,14 @@ function rrFromRegime(regime: MarketRegime): number {
   return 1;
 }
 
+/** Stage 1 소액 탐색: RANGE·모호 맥락에서만 허용(쿨다운·데이터 결손 등은 제외). */
+const STAGE1_SOFT_EXPLORE_BLOCKS = new Set([
+  "range_not_in_interest_zone",
+  "range_center_forbidden",
+  "trend_not_in_pullback",
+  "trend_direction_weak"
+]);
+
 function mapExecutorBlockToReject(blocked: string | undefined): PaperDecisionRejectReason {
   switch (blocked) {
     case "fee_slippage_insufficient":
@@ -581,6 +589,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const supplemental_reasons: string[] = [];
   if (useFixedCost) supplemental_reasons.push("PAPER_FIXED_TOTAL_COST_USD");
   let stage1LoosenedEntry = false;
+  /** Stage 1 소액 탐색: 실행기 소프트 차단 오버라이드 시 true (사이즈 추가 축소). */
+  let stage1ExploreSoftExec = false;
   /** Stage 1만: 기대이동이 완화 비용 이하여도 탐색 진입 허용(하드 REJECT 안 함) */
   let costWarningStage1 = false;
 
@@ -609,22 +619,26 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
   }
 
-  /** Stage 2/3 증액: 완화 비용선보다 여유 있어야 함(Stage 1 소액 허용과 분리) */
+  /** Stage 2+ 증액: 비용 대비 기대이동 여유를 Stage 1(초기 틱)보다 엄격히 요구 */
+  const stage2plusFeeHeadroomMult = input.currentStage >= 2 ? 1.15 : 1.1;
   if (
     input.currentStage >= 1 &&
     typeof em === "number" &&
     effectiveTotalCost !== null &&
-    em <= effectiveTotalCost * 1.08
+    em <= effectiveTotalCost * stage2plusFeeHeadroomMult
   ) {
     edge_state = "FAIL_FEE";
     reject_reason = "EDGE_FAIL_FEE";
     final_decision = "REJECT";
-    supplemental_reasons.push("EDGE_FAIL_FEE_STAGE2_STRICT");
+    supplemental_reasons.push(
+      input.currentStage >= 2 ? "EDGE_FAIL_FEE_STAGE3_STRICT" : "EDGE_FAIL_FEE_STAGE2_STRICT"
+    );
   }
 
   const minVol = input.config.paperMinEdgeVolatilityMove;
-  // Loosen minVol for Stage 1 too
-  const effectiveMinVol = input.currentStage === 0 ? minVol * 0.8 : minVol;
+  /** Stage 1만 기대 변동(게이트 expected move) 하한 추가 완화; Stage 2+는 기본 대비 강화 */
+  const effectiveMinVol =
+    input.currentStage === 0 ? minVol * 0.52 : input.currentStage === 1 ? minVol * 1.1 : minVol * 1.18;
   if (typeof em === "number" && em < effectiveMinVol) {
     edge_state = "FAIL_LOW_VOL";
     if (!reject_reason) reject_reason = "EDGE_FAIL_LOW_VOL";
@@ -776,21 +790,24 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         })
         : null;
 
-  // Round 3: Conditional Override for Auto-Entry Soft Blocks (Stage 1 only)
-  if (
-    !executorDecision?.entry_allowed &&
-    input.autoEntryTriggered &&
-    input.currentStage === 0 &&
-    (executorDecision?.blocked_reason === "trend_not_in_pullback" || executorDecision?.blocked_reason === "range_not_in_interest_zone")
-  ) {
-    // Override soft block to force execution for persistent candidates
-    executorDecision = {
-      ...executorDecision!,
-      entry_allowed: true,
-      blocked_reason: null,
-      guidance: `검토 유지 자동 진입 (${executorDecision?.blocked_reason} 무시)`,
-      target_stage: 1
-    };
+  // Round 3: Stage 1 — RANGE·모호 맥락 소액 탐색 + 자동 진입 시 소프트 실행기 차단 해제
+  const brExec = executorDecision?.blocked_reason ?? null;
+  if (!executorDecision?.entry_allowed && input.currentStage === 0 && brExec) {
+    const allowExploreSoft =
+      STAGE1_SOFT_EXPLORE_BLOCKS.has(brExec) && (input.isAmbiguous || input.regime === "RANGE");
+    const allowAutoEntrySoft =
+      input.autoEntryTriggered && (brExec === "trend_not_in_pullback" || brExec === "range_not_in_interest_zone");
+    if (allowExploreSoft || allowAutoEntrySoft) {
+      stage1ExploreSoftExec = allowExploreSoft;
+      executorDecision = {
+        ...executorDecision!,
+        entry_allowed: true,
+        blocked_reason: null,
+        guidance: allowExploreSoft ? `Stage1 소액 탐색 (${brExec})` : `검토 유지 자동 진입 (${brExec} 무시)`,
+        target_stage: 1
+      };
+      if (allowExploreSoft) supplemental_reasons.push("STAGE1_EXPLORE_SOFT_EXEC");
+    }
   }
 
   if (!executorDecision || !executorDecision.entry_allowed) {
@@ -928,6 +945,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
     if (costWarningStage1 && input.currentStage === 0) {
       dynamicSizeMult *= 0.35;
+    }
+    if (stage1ExploreSoftExec && input.currentStage === 0) {
+      dynamicSizeMult *= 0.28;
     }
     if (input.isAmbiguous) {
       dynamicSizeMult *= 0.8; // Extra caution for ambiguous market

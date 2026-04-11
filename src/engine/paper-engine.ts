@@ -1323,8 +1323,14 @@ export class PaperEngine {
         continue;
       }
 
-      const minHoldMs = 5 * 60_000;
-      const gracePeriodMs = 7 * 60_000;
+      /** 증액(스테이지 2+)·규모 확대 포지션: 신호 소멸 후 시간 청산·유예를 더 짧게 */
+      const stagedOrScaled =
+        (open.entryStage ?? 1) >= 2 ||
+        (typeof open.initialSizeUsd === "number" &&
+          open.initialSizeUsd > 0 &&
+          open.sizeUsd > open.initialSizeUsd * 1.05);
+      const minHoldMs = stagedOrScaled ? 4 * 60_000 : 5 * 60_000;
+      const gracePeriodMs = stagedOrScaled ? 4 * 60_000 : 7 * 60_000;
 
       if (m.holdingMs < minHoldMs) {
         remaining.push(posTrail);
@@ -1691,6 +1697,16 @@ export class PaperEngine {
     if (res.decision.final_decision !== "ENTER" || !res.adaptiveResult) return null;
     if (existing.postEntryCostGuard === true) {
       this.logger.info("scale_in_blocked_post_entry_cost_guard", { symbol: existing.symbol });
+      return null;
+    }
+
+    const stageAtLeast2 = (existing.entryStage ?? 1) >= 2;
+    if (stageAtLeast2 && first.qualityScore < 72) {
+      this.logger.info("scale_in_blocked_stage2plus_quality", {
+        symbol: existing.symbol,
+        qualityScore: first.qualityScore,
+        entryStage: existing.entryStage
+      });
       return null;
     }
 
