@@ -379,7 +379,7 @@ export class PaperEngine {
     const klineLimit = 120;
     const category = "linear";
 
-    const btc5r = await this.bybit.tryGetCandles("BTCUSDT", "5m", 50);
+    const btc5r = await this.bybit.tryGetCandles("BTCUSDT", "5m", 120);
     const btc5 = btc5r.ok ? btc5r.value : [];
     const prevRegime = this.lastRegime.regime;
     const regimeDetected = detectMarketRegime({ btcCandles5m: btc5 });
@@ -546,7 +546,7 @@ export class PaperEngine {
     const opensAfterClose = await this.positions.loadOpenAll();
     const lastCloseMetaBySymbolForDecision =
       this.config.paperReentryCooldownMs > 0 ? latestCloseMetaBySymbol(await this.store.readPositionsHistory()) : null;
-    const regimeUnknown = btc5.length < 60;
+    const regimeUnknown = btc5.length < 50;
     const decisionBySymbol = new Map<string, EvaluatePaperSymbolEntryResult>();
     const nowTick = Date.now();
 

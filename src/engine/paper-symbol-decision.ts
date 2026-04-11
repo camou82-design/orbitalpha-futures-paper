@@ -214,6 +214,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let intentSide: "long" | "short" | null = null;
   let executorDecision: AnyEntryDecision | null = null;
   let adaptiveDetailOut: Record<string, unknown> | null = null;
+  let guidanceOut: string | null = null;
 
   const ret = (
     extra: Partial<{
@@ -273,7 +274,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       engine_mode: emMode,
       ai_decision: extra.ai_decision !== undefined ? extra.ai_decision : null,
       adaptive_decision: extra.adaptive_decision !== undefined ? extra.adaptive_decision : null,
-      guidance: extra.guidance !== undefined ? extra.guidance : null,
+      guidance: extra.guidance !== undefined ? extra.guidance : guidanceOut,
       next_action: extra.next_action !== undefined ? extra.next_action : null,
       invalidate_condition: extra.invalidate_condition !== undefined ? extra.invalidate_condition : null,
       risk_note: extra.risk_note !== undefined ? extra.risk_note : null,
@@ -597,11 +598,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     reject_reason = br ? mapExecutorBlockToReject(br) : (input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "LEGACY_BLOCKED");
     if (reject_reason === "RISK_COOLDOWN") risk_state = "COOLDOWN";
 
-    // Round 4: Active Stage 1 candidate evaluation
+    // Round 4 & 5: Active Stage 1 candidate evaluation (Execution over Review)
     final_decision = input.currentStage === 0 ? "SKIP" : "REJECT";
 
     if (input.isAmbiguous && final_decision === "SKIP") {
-      execution_state = input.regime === "TREND" ? "AMBIGUOUS_TREND_REVIEW" : "AMBIGUOUS_RANGE_REVIEW";
+      const ambCode = input.regime === "TREND" ? "AMBIGUOUS_TREND_REVIEW" : "AMBIGUOUS_RANGE_REVIEW";
+      reject_reason = ambCode;
+      execution_state = ambCode;
     }
 
     if (br) supplemental_reasons.push(`EXEC_BLOCKED_${br.toUpperCase()}`);
@@ -821,9 +824,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     final_decision = "ENTER";
     reject_reason = null;
 
-    // Round 4: Stage 1 Execution Pending state
+    // Round 4 & 5: Stage 1 Execution Pending prioritize
     if (input.currentStage === 0 && input.autoEntryTriggered) {
       execution_state = "STAGE1_EXEC_PENDING";
+      guidanceOut = "Stage 1 실행 대기 (검토 조건 유지)";
     }
 
     return ret(
