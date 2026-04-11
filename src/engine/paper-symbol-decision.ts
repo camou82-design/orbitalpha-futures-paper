@@ -365,11 +365,18 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   }
 
   if (regime_state === "UNKNOWN") {
-    reject_reason = "REGIME_UNKNOWN";
+    reject_reason = input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "REGIME_UNKNOWN";
     final_decision = "REJECT";
     edge_state = "FAIL_EXPECTANCY";
     return ret(
-      { execution_state: "PAPER_READY", ai_decision: "N/A", adaptive_decision: "N/A" },
+      {
+        reject_reason,
+        final_decision,
+        execution_state: "PAPER_READY",
+        ai_decision: "N/A",
+        adaptive_decision: "N/A",
+        guidance: input.isAmbiguous ? "애매한 장세 관망 중" : "적합한 레짐 없음"
+      },
       {
         intentSide: null,
         executorDecision: null,
@@ -587,13 +594,21 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   if (!executorDecision || !executorDecision.entry_allowed) {
     const br = executorDecision?.blocked_reason;
-    reject_reason = br ? mapExecutorBlockToReject(br) : "LEGACY_BLOCKED";
+    reject_reason = br ? mapExecutorBlockToReject(br) : (input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "LEGACY_BLOCKED");
     if (reject_reason === "RISK_COOLDOWN") risk_state = "COOLDOWN";
-    final_decision = "REJECT";
+
+    // Round 4: Active Stage 1 candidate evaluation
+    final_decision = input.currentStage === 0 ? "SKIP" : "REJECT";
+
+    if (input.isAmbiguous && final_decision === "SKIP") {
+      execution_state = input.regime === "TREND" ? "AMBIGUOUS_TREND_REVIEW" : "AMBIGUOUS_RANGE_REVIEW";
+    }
+
     if (br) supplemental_reasons.push(`EXEC_BLOCKED_${br.toUpperCase()}`);
     return ret(
       {
-        execution_state: "PAPER_READY",
+        execution_state,
+        final_decision,
         ai_decision: "N/A",
         adaptive_decision: "N/A",
         guidance: executorDecision?.guidance ?? null,
@@ -805,6 +820,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     final_decision = "ENTER";
     reject_reason = null;
+
+    // Round 4: Stage 1 Execution Pending state
+    if (input.currentStage === 0 && input.autoEntryTriggered) {
+      execution_state = "STAGE1_EXEC_PENDING";
+    }
 
     return ret(
       {

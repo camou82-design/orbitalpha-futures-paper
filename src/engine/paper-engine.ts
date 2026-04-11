@@ -596,7 +596,11 @@ export class PaperEngine {
         if (rev) {
           const qualityDropped = snap.qualityScore < rev.initialQuality - 1; // Strict stability (max 1pt drop)
           const highEnough = snap.qualityScore >= 40; // Maintain absolute minimum quality
-          if (!qualityDropped && highEnough && rev.ticks >= 5) {
+
+          const isMajor = snap.symbol === "BTCUSDT" || snap.symbol === "ETHUSDT";
+          const tickThreshold = isMajor ? 3 : 4; // Round 4: Faster Stage 1 entry (Majors 3 ticks, Others 4 ticks)
+
+          if (!qualityDropped && highEnough && rev.ticks >= tickThreshold) {
             autoEntryTriggered = true;
           }
         }

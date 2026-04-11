@@ -105,6 +105,7 @@ export type PaperDecisionRejectReason =
   | "SIGNAL_NONE"
   | "REGIME_NO_TRADE"
   | "REGIME_UNKNOWN"
+  | "AMBIGUOUS_WATCHING"
   | "EDGE_FAIL_FEE"
   | "EDGE_FAIL_RR"
   | "EDGE_FAIL_LOW_VOL"
@@ -136,6 +137,9 @@ export type PaperRiskState =
 export type PaperExecutionState =
   | "PAPER_READY"
   | "IDLE"
+  | "STAGE1_EXEC_PENDING"
+  | "AMBIGUOUS_TREND_REVIEW"
+  | "AMBIGUOUS_RANGE_REVIEW"
   | "DISABLED"
   | "INIT_FAIL"
   | "ORDER_BUILD_FAIL";
