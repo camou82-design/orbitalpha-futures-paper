@@ -156,6 +156,85 @@
     return gross;
   }
 
+  /** 엔진이 넣은 미실현이 있으면 우선, 없으면 마크 기준 추정 */
+  function unrealizedPnlFor(pos, mark) {
+    if (pos && typeof pos.unrealizedPnl === "number" && Number.isFinite(pos.unrealizedPnl)) {
+      return pos.unrealizedPnl;
+    }
+    return estimatePnlUsd(pos, mark);
+  }
+
+  function formatSignedUsd(n) {
+    if (typeof n !== "number" || !Number.isFinite(n)) return "—";
+    const sign = n > 0 ? "+" : n < 0 ? "−" : "";
+    const abs = Math.abs(n);
+    const frac = abs >= 1000 ? 2 : abs >= 1 ? 2 : 4;
+    return sign + "$" + abs.toLocaleString("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: frac });
+  }
+
+  function formatSignedPctOnMargin(pnlUsd, marginUsd) {
+    if (
+      typeof pnlUsd !== "number" ||
+      !Number.isFinite(pnlUsd) ||
+      typeof marginUsd !== "number" ||
+      !Number.isFinite(marginUsd) ||
+      marginUsd <= 0
+    ) {
+      return "—";
+    }
+    const pct = (pnlUsd / marginUsd) * 100;
+    const sign = pct > 0 ? "+" : pct < 0 ? "−" : "";
+    return sign + Math.abs(pct).toLocaleString("ko-KR", { maximumFractionDigits: 2 }) + "%";
+  }
+
+  function pnlToneClass(n) {
+    if (typeof n !== "number" || !Number.isFinite(n)) return "pnl-zero";
+    if (n > 0.0005) return "pnl-pos";
+    if (n < -0.0005) return "pnl-neg";
+    return "pnl-zero";
+  }
+
+  function formatHoldDuration(openedAtMs) {
+    if (typeof openedAtMs !== "number" || !Number.isFinite(openedAtMs)) return "—";
+    const ms = Date.now() - openedAtMs;
+    if (ms < 0) return "—";
+    const s = Math.floor(ms / 1000);
+    const m = Math.floor(s / 60);
+    const h = Math.floor(m / 60);
+    const d = Math.floor(h / 24);
+    if (d > 0) return `${d}일 ${h % 24}시간`;
+    if (h > 0) return `${h}시간 ${m % 60}분`;
+    if (m > 0) return `${m}분`;
+    return `${s}초`;
+  }
+
+  function aggregatePortfolioMetrics(bundle) {
+    const opens = getOpenPositions(bundle);
+    let totalUnreal = 0;
+    let totalMargin = 0;
+    for (const o of opens) {
+      const snap = snapBySymbol(bundle, o.symbol);
+      const mark = snap && typeof snap.lastPrice === "number" ? snap.lastPrice : null;
+      const margin = typeof o.sizeUsd === "number" && Number.isFinite(o.sizeUsd) ? o.sizeUsd : 0;
+      totalMargin += margin;
+      if (mark === null) continue;
+      const u = unrealizedPnlFor(o, mark);
+      if (typeof u === "number" && Number.isFinite(u)) totalUnreal += u;
+    }
+    return { openCount: opens.length, totalUnreal, totalMargin };
+  }
+
+  function positionStageSummary(pos) {
+    const es = pos.entryStage != null && pos.entryStage > 0 ? pos.entryStage : 1;
+    const pes = pos.partialExitStage ?? 0;
+    let status = "보유 중";
+    if (pes >= 1) status = "부분익절 진행";
+    return {
+      line: `진입 ${es}/3 · 익절 ${pes}/3 · ${status}`,
+      short: `S${es} · TP${pes}/3`
+    };
+  }
+
   function inferMarketNarrative(bundle) {
     const meta = bundle.latestMeta;
     const es = bundle.engineState;
@@ -356,13 +435,48 @@
   }
 
   function renderHero(bundle) {
+    const pm = aggregatePortfolioMetrics(bundle);
+    const perf7 = perfSlice(bundle, "last7d");
+    const unrealClass = pnlToneClass(pm.totalUnreal);
+    const realized7 =
+      perf7 && typeof perf7.totalPnlUsdNet === "number" && Number.isFinite(perf7.totalPnlUsdNet)
+        ? perf7.totalPnlUsdNet
+        : null;
+    const realizedClass = pnlToneClass(realized7 !== null ? realized7 : 0);
+    const win7 =
+      perf7 && typeof perf7.winRate === "number" && Number.isFinite(perf7.winRate) ? perf7.winRate : null;
+    const hero = $("hero");
+    hero.innerHTML = `
+      <article class="hero-card hero-card--metric">
+        <p class="hero-label">보유 포지션 수</p>
+        <p class="hero-metric-xl tabular-nums">${esc(String(pm.openCount))}</p>
+        <p class="hero-sub muted">동시 최대 ${MAX_OPEN}건</p>
+      </article>
+      <article class="hero-card hero-card--metric">
+        <p class="hero-label">총 미실현 손익</p>
+        <p class="hero-metric-xl tabular-nums ${unrealClass}">${esc(formatSignedUsd(pm.totalUnreal))}</p>
+        <p class="hero-sub muted">진입 마진 합 ${esc(formatUsd(pm.totalMargin))}</p>
+      </article>
+      <article class="hero-card hero-card--metric">
+        <p class="hero-label">최근 7일 실현(순)</p>
+        <p class="hero-metric-xl tabular-nums ${realizedClass}">${realized7 !== null ? esc(formatSignedUsd(realized7)) : "—"}</p>
+        <p class="hero-sub muted">종료 ${esc(formatCount(perf7 && perf7.totalTrades))}건</p>
+      </article>
+      <article class="hero-card hero-card--metric">
+        <p class="hero-label">최근 7일 승률</p>
+        <p class="hero-metric-xl tabular-nums">${win7 !== null ? esc(formatPct(win7)) : "—"}</p>
+        <p class="hero-sub muted">종료 거래 기준</p>
+      </article>
+    `;
+  }
+
+  function renderOperatorContext(bundle) {
+    const el = $("operator-context-body");
+    if (!el) return;
     const nar = inferMarketNarrative(bundle);
     const entry = entryAggregate(bundle);
     const pos = positionHeroLine(bundle);
     const blk = primaryBlock(bundle);
-    const perf = perfSlice(bundle, "last7d");
-    const perf30 = perfSlice(bundle, "last30d");
-    const all = perfSlice(bundle, "all");
     const es = bundle.engineState;
     const curRegime = es && typeof es === "object" ? (es.current_regime || es.regime) : null;
     const entryGateLine =
@@ -373,15 +487,12 @@
         (es.entryAllowed === false ? "차단" : es.entryAllowed === true ? "가능" : "—") +
         (Array.isArray(es.blockedReasons) && es.blockedReasons.length > 0 ? " · 이유 " + mapBlockReason(es.blockedReasons[0]) : "")
         : "";
-
     const toneClass =
       blk.tone === "danger" ? "hero-card--danger" : blk.tone === "warn" ? "hero-card--warn" : "";
-
-    const hero = $("hero");
     const funnel = es && es.decision_funnel_tick && typeof es.decision_funnel_tick === "object" ? es.decision_funnel_tick : null;
     const funnelLine =
       funnel && typeof funnel.raw_signal_count === "number"
-        ? `이번 틱 퍼널: 신호 ${funnel.raw_signal_count} → 레짐 ${funnel.regime_pass_count} → 엣지 ${funnel.edge_pass_count} → 리스크 ${funnel.risk_pass_count} → 실행준비 ${funnel.execution_ready_count} → AI통과 ${funnel.ai_pass_count ?? "—"} → 진입 ${funnel.enter_count ?? funnel.order_submitted_count ?? "—"}`
+        ? `이번 틱 퍼널: 신호 ${funnel.raw_signal_count} → 레짐 ${funnel.regime_pass_count} → 엣지 ${funnel.edge_pass_count} → 리스크 ${funnel.risk_pass_count} → 실행준비 ${funnel.execution_ready_count} → AI ${funnel.ai_pass_count ?? "—"} → 진입 ${funnel.enter_count ?? "—"}`
         : "";
     const f50 = es && es.decision_funnel_50 && typeof es.decision_funnel_50 === "object" ? es.decision_funnel_50 : null;
     const f50n =
@@ -390,7 +501,7 @@
         : null;
     const funnel50Line =
       f50 && typeof f50.raw_signal_count === "number"
-        ? `최근 50틱 누적(${f50n != null ? `${f50n}/50` : "—"}): 신호 ${f50.raw_signal_count} → 레짐 ${f50.regime_pass_count} → 엣지 ${f50.edge_pass_count} → 리스크 ${f50.risk_pass_count} → 실행준비 ${f50.execution_ready_count} → AI통과 ${f50.ai_pass_count ?? "—"} → 진입 ${f50.enter_count ?? "—"}`
+        ? `최근 50틱 누적(${f50n != null ? `${f50n}/50` : "—"}): 신호 ${f50.raw_signal_count} → … → 진입 ${f50.enter_count ?? "—"}`
         : "";
     const rj = es && es.reject_reason_counts_tick && typeof es.reject_reason_counts_tick === "object" ? es.reject_reason_counts_tick : null;
     const rejectTickLine =
@@ -400,55 +511,41 @@
           .map((k) => `${mapBlockReason(k)} ${rj[k]}`)
           .join(" · ")
         : "";
-    const topStatus =
-      es && typeof es === "object"
-        ? `<div class="hero-topline muted text-xs" style="margin-top:0.25rem">
-            모드 <strong>${esc(es.engine_mode || "PAPER_TEST")}</strong> · 실행상태 <strong>${esc(
+    el.innerHTML = `
+      <div class="opctx-grid">
+        <article class="hero-card hero-card--accent" style="margin:0">
+          <p class="hero-label">시장·스냅샷</p>
+          <p class="hero-value" style="font-size:0.9rem">${esc(nar.context || "—")}</p>
+          <p class="hero-sub">${esc(nar.modeLine)}</p>
+          <p class="hero-sub muted">${esc(entryGateLine)}</p>
+          <p class="hero-sub muted">${esc(nar.sub)}</p>
+        </article>
+        <article class="hero-card hero-card--accent" style="margin:0">
+          <p class="hero-label">포지션 요약</p>
+          <p class="hero-value" style="font-size:0.9rem">${esc(pos.title)}</p>
+          <p class="hero-sub">${esc(pos.sub)}</p>
+        </article>
+        <article class="hero-card" style="margin:0">
+          <p class="hero-label">신규 진입 문구</p>
+          <p class="hero-value" style="font-size:0.9rem">${esc(entry.title)}</p>
+          <p class="hero-sub">${esc(entry.detail)}</p>
+        </article>
+        <article class="hero-card ${toneClass}" style="margin:0">
+          <p class="hero-label">주의·차단 요약</p>
+          <p class="hero-value" style="font-size:0.85rem">${esc(blk.text)}</p>
+        </article>
+      </div>
+      ${es && typeof es === "object"
+        ? `<div class="muted text-xs" style="margin-top:0.75rem">모드 ${esc(es.engine_mode || "—")} · 실행 ${esc(
           es.execution_state || "—"
-        )}</strong> · 전략 <strong>${esc(es.strategy_executor || es.active_mode_executor || "—")}</strong>
-            · 레짐 <strong>${esc(mapMode(curRegime))}</strong>${es.is_ambiguous ? " <span style='color:var(--warn)'>(모호/인접)</span>" : ""} · 엔진 <strong>${esc(es.engine_status || "—")}</strong> · 리스크 <strong>${esc(
-          es.risk_state || es.riskStatus || "—"
-        )}</strong>
-          </div>
-          ${funnelLine ? `<p class="hero-sub muted">${esc(funnelLine)}</p>` : ""}
-          ${funnel50Line ? `<p class="hero-sub muted">${esc(funnel50Line)}</p>` : ""}
-          ${rejectTickLine ? `<p class="hero-sub muted">${esc(rejectTickLine)}</p>` : ""}`
-        : "";
-    hero.innerHTML = `
-      <article class="hero-card hero-card--accent">
-        <p class="hero-label">시장 맥락</p>
-        <p class="hero-value">${esc(nar.context || "스냅샷 분석 중")}</p>
-        <p class="hero-sub">${esc(nar.modeLine)}</p>
-        <p class="hero-sub muted">${esc(entryGateLine)}</p>
-        ${topStatus}
-        ${renderAiSummaryInline(bundle)}
-        <p class="hero-sub muted">${esc(nar.sub)}</p>
-      </article>
-      <article class="hero-card hero-card--accent">
-        <p class="hero-label">현재 포지션</p>
-        <p class="hero-value">${esc(pos.title)}</p>
-        <p class="hero-sub">${esc(pos.sub)}</p>
-        <span class="badge ${pos.badge}">포지션</span>
-      </article>
-      <article class="hero-card">
-        <p class="hero-label">신규 진입 상태</p>
-        <p class="hero-value">${esc(entry.title)}</p>
-        <p class="hero-sub">${esc(entry.detail)}</p>
-        <span class="badge ${entry.badge}">진입</span>
-      </article>
-      <article class="hero-card ${toneClass}">
-        <p class="hero-label">핵심 차단·주의</p>
-        <p class="hero-value">${esc(blk.text)}</p>
-      </article>
-      <article class="hero-card hero-card--wide">
-        <p class="hero-label">핵심 성과</p>
-        <p class="hero-value tabular-nums">7일 ${formatUsd(perf && perf.totalPnlUsdNet)} · 30일 승률 ${formatPct(
-      perf30 && perf30.winRate
-    )} · 누적 ${formatUsd(all && all.totalPnlUsdNet)}</p>
-        <p class="hero-sub">거래 수 7일/30일/전체: ${formatCount(perf && perf.totalTrades)} / ${formatCount(
-      perf30 && perf30.totalTrades
-    )} / ${formatCount(all && all.totalTrades)}</p>
-      </article>
+        )} · 전략 ${esc(es.strategy_executor || es.active_mode_executor || "—")} · 레짐 ${esc(
+          mapMode(curRegime)
+        )} · 엔진 ${esc(es.engine_status || "—")} · 리스크 ${esc(es.risk_state || es.riskStatus || "—")}</div>`
+        : ""}
+      ${funnelLine ? `<p class="hero-sub muted" style="margin-top:0.5rem">${esc(funnelLine)}</p>` : ""}
+      ${funnel50Line ? `<p class="hero-sub muted">${esc(funnel50Line)}</p>` : ""}
+      ${rejectTickLine ? `<p class="hero-sub muted">${esc(rejectTickLine)}</p>` : ""}
+      ${renderAiSummaryInline(bundle)}
     `;
   }
 
@@ -594,14 +691,95 @@
       const fd = pip && pip.final_decision ? String(pip.final_decision) : null;
       const fdClass = fd === "ENTER" ? "sym-pip--enter" : fd === "REJECT" ? "sym-pip--reject" : "";
 
-      const ambigTag = es && es.is_ambiguous ? " <small style='color:var(--warn)'>(모합/조정)</small>" : "";
+      const ambigTag = es && es.is_ambiguous ? " <small style='color:var(--warn)'>(모호)</small>" : "";
+
+      if (pos) {
+        const margin = typeof pos.sizeUsd === "number" && Number.isFinite(pos.sizeUsd) ? pos.sizeUsd : null;
+        const lev = typeof pos.leverage === "number" && Number.isFinite(pos.leverage) ? pos.leverage : 1;
+        const mark = s && typeof s.lastPrice === "number" ? s.lastPrice : null;
+        const uPnL = mark !== null ? unrealizedPnlFor(pos, mark) : null;
+        const uPct =
+          uPnL !== null && margin !== null && margin > 0 ? formatSignedPctOnMargin(uPnL, margin) : "—";
+        const uClass = pnlToneClass(uPnL ?? 0);
+        const realized =
+          typeof pos.realizedPnl === "number" && Number.isFinite(pos.realizedPnl) ? pos.realizedPnl : 0;
+        const rClass = pnlToneClass(realized);
+        const equity = margin !== null && uPnL !== null ? margin + uPnL : null;
+        const st = positionStageSummary(pos);
+        const sideK = pos.side === "long" ? "LONG" : pos.side === "short" ? "SHORT" : String(pos.side);
+        const stopPx = typeof pos.stopPrice === "number" && Number.isFinite(pos.stopPrice) ? pos.stopPrice : null;
+        const notionalAtEntry = margin !== null ? margin * lev : null;
+
+        return `
+        <article class="${cardClass}">
+          <h3 class="sym-headline">${esc(sym)} · ${esc(sideK)} · ${esc(lev)}x</h3>
+          <div class="pos-stage-pill"><code>${esc(st.line)}</code>${notionalAtEntry !== null ? ` · 명목 ${esc(formatUsd(notionalAtEntry))}` : ""}</div>
+          <div class="pos-money-grid">
+            <div class="pos-metric">
+              <span class="pos-metric-label">진입 마진</span>
+              <span class="pos-metric-val">${esc(formatUsd(margin))}</span>
+            </div>
+            <div class="pos-metric">
+              <span class="pos-metric-label">현재 평가금액</span>
+              <span class="pos-metric-val">${equity !== null ? esc(formatUsd(equity)) : "—"}</span>
+            </div>
+            <div class="pos-metric">
+              <span class="pos-metric-label">미실현 손익</span>
+              <span class="pos-metric-val ${uClass}">${uPnL !== null ? esc(formatSignedUsd(uPnL)) : "—"}</span>
+            </div>
+            <div class="pos-metric">
+              <span class="pos-metric-label">미실현 수익률</span>
+              <span class="pos-metric-val ${uClass}">${esc(uPct)}</span>
+            </div>
+            <div class="pos-metric">
+              <span class="pos-metric-label">누적 실현 손익</span>
+              <span class="pos-metric-val ${rClass}">${esc(formatSignedUsd(realized))}</span>
+            </div>
+            <div class="pos-metric">
+              <span class="pos-metric-label">보유 시간</span>
+              <span class="pos-metric-val">${esc(formatHoldDuration(pos.openedAt))}</span>
+            </div>
+          </div>
+          <p class="sym-guidance">${esc(headline)}</p>
+          <details class="sym-details">
+            <summary>평균가·마크·손절·파이프라인 상세</summary>
+            <dl class="sym-meta">
+              <dt>평균 진입가</dt><dd>${esc(formatPrice(pos.entryPrice))}</dd>
+              <dt>현재가(Mark)</dt><dd>${esc(formatPrice(mark))}</dd>
+              <dt>손절가</dt><dd>${stopPx !== null ? esc(formatPrice(stopPx)) : "—"}</dd>
+              ${typeof pos.unrealizedPnlPct === "number" ? `<dt>엔진 uPnL%</dt><dd>${esc(String(pos.unrealizedPnlPct.toFixed(2)))}%</dd>` : ""}
+              ${pip ? `<dt>파이프라인</dt><dd>v${esc(pipVer)}</dd>` : ""}
+              ${sym === "BTCUSDT" && pip && pip.signal_missing_reason
+                ? `<dt>신호 진단</dt><dd style="font-size:0.8rem">${esc(String(pip.signal_missing_reason))}</dd>`
+                : ""}
+              ${sym === "BTCUSDT" && pip && pip.stage1_result_code
+                ? `<dt>Stage1 코드</dt><dd style="font-size:0.8rem">${esc(String(pip.stage1_result_code))}</dd>`
+                : ""}
+              ${sym === "ETHUSDT" && pip
+                ? `<dt>요구이동·부족</dt><dd style="font-size:0.8rem">req ${pip.required_move_pct != null ? esc(String(Number(pip.required_move_pct).toFixed(4))) : "—"}% · shortfall ${pip.shortfall_pct != null ? esc(String(Number(pip.shortfall_pct).toFixed(4))) : "—"}%</dd>`
+                : ""}
+              ${pip ? `<dt>signal</dt><dd class="${fdClass}">${esc(String(pip.signal_state))}</dd>` : ""}
+              ${pip ? `<dt>regime</dt><dd>${esc(String(pip.regime_state))}${ambigTag}</dd>` : ""}
+              ${pip ? `<dt>edge / risk / exec</dt><dd>${esc(String(pip.edge_state))} · ${esc(String(pip.risk_state))} · ${esc(String(pip.execution_state))}</dd>` : ""}
+              ${pip ? `<dt>final</dt><dd class="${fdClass}"><strong>${esc(String(pip.final_decision))}</strong></dd>` : ""}
+              ${pipReject ? `<dt>reject</dt><dd>${esc(pipReject)}</dd>` : ""}
+              ${pipSuppl.length > 0 ? `<dt>상세 사유</dt><dd style="font-size:0.75rem; color:var(--muted)">${pipSuppl.map((r) => esc(mapBlockReason(r))).join(", ")}</dd>` : ""}
+              ${pip ? `<dt>실행기</dt><dd>${esc(String(pip.strategy_executor))}</dd>` : ""}
+              <dt>데이터 시각</dt><dd>${esc(formatKst(s && s.fetchedAt))}</dd>
+              <dt>펀딩(원시)</dt><dd>${esc(fund)}</dd>
+            </dl>
+          </details>
+        </article>`;
+      }
 
       return `
         <article class="${cardClass}">
           <h3 class="sym-headline">${esc(sym)}</h3>
-          <p class="sym-one-liner">${esc(headline)}</p>
-          <p class="sym-one-liner" style="font-size:0.85rem;font-weight:400;color:var(--muted)">${esc(line)}</p>
-          <dl class="sym-meta">
+          <p class="sym-guidance">${esc(headline)}</p>
+          <p class="sym-guidance" style="font-size:0.8rem">${esc(line)}</p>
+          <details class="sym-details">
+            <summary>스냅샷·파이프라인·차단 상세</summary>
+            <dl class="sym-meta">
             <dt>방향</dt><dd>${esc(dir)}</dd>
             <dt>컨텍스트</dt><dd>${esc(ctx.ctx)}${ctx.reason ? " · " + esc(ctx.reason) : ""}</dd>
             ${pip ? `<dt>파이프라인</dt><dd>v${esc(pipVer)}</dd>` : ""}
@@ -621,13 +799,14 @@
             ${pip ? `<dt>execution</dt><dd>${esc(String(pip.execution_state))}</dd>` : ""}
             ${pip ? `<dt>final</dt><dd class="${fdClass}"><strong>${esc(String(pip.final_decision))}</strong></dd>` : ""}
             ${pipReject ? `<dt>reject</dt><dd>${esc(pipReject)}</dd>` : ""}
-            ${pipSuppl.length > 0 ? `<dt>상세 사유</dt><dd style="font-size:0.75rem; color:var(--muted)">${pipSuppl.map(r => esc(mapBlockReason(r))).join(", ")}</dd>` : ""}
+            ${pipSuppl.length > 0 ? `<dt>상세 사유</dt><dd style="font-size:0.75rem; color:var(--muted)">${pipSuppl.map((r) => esc(mapBlockReason(r))).join(", ")}</dd>` : ""}
             ${pip ? `<dt>실행기</dt><dd>${esc(String(pip.strategy_executor))}</dd>` : ""}
             <dt>현재가</dt><dd>${esc(formatPrice(s && s.lastPrice))}</dd>
             <dt>데이터 시각</dt><dd>${esc(formatKst(s && s.fetchedAt))}</dd>
             <dt>펀딩(원시)</dt><dd>${esc(fund)}</dd>
             <dt>신호 강도(점수)</dt><dd>${esc(q)} · ${esc(strength)}</dd>
           </dl>
+          </details>
         </article>
       `;
     });
@@ -664,12 +843,14 @@
           gross
         )} · 수수료 ${formatUsd(fee)} · 펀딩 ${formatUsd(fund)}</p>`
         : "";
+      const net = typeof slice.totalPnlUsdNet === "number" ? slice.totalPnlUsdNet : null;
+      const netCls = net !== null ? pnlToneClass(net) : "pnl-zero";
+      const netDisplay = net !== null ? formatSignedUsd(net) : "—";
       return `
         <div class="perf-card">
           <h4>${esc(title)}</h4>
-          <p class="perf-metric">거래 수 <strong>${formatCount(slice.totalTrades)}</strong></p>
-          <p class="perf-metric">승률 <strong>${formatPct(slice.winRate)}</strong></p>
-          <p class="perf-metric">순손익 <strong class="perf-pnl">${formatUsd(slice.totalPnlUsdNet)}</strong></p>
+          <p class="perf-metric perf-metric--lead"><span class="muted">순손익</span> <strong class="perf-pnl ${netCls} tabular-nums">${esc(netDisplay)}</strong></p>
+          <p class="perf-metric">거래 <strong>${formatCount(slice.totalTrades)}</strong> · 승률 <strong>${formatPct(slice.winRate)}</strong></p>
           ${extra}
         </div>
       `;
@@ -861,6 +1042,7 @@
         return;
       }
       renderHero(bundle);
+      renderOperatorContext(bundle);
       renderSymbols(bundle);
       renderPerf(bundle);
       renderBlockedCard(bundle);

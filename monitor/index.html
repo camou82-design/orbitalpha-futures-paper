@@ -11,7 +11,7 @@
       <div class="topbar-inner">
         <div>
           <h1 class="title">선물 페이퍼 · 실시간 모니터</h1>
-          <p class="subtitle">Bybit USDT 모의 · 읽기 전용 · 판단 우선 화면</p>
+          <p class="subtitle">Bybit USDT 모의 · 읽기 전용 · 보유·손익 우선</p>
         </div>
         <div class="topbar-actions">
           <button type="button" class="btn btn-ghost" id="btn-refresh" title="즉시 새로고침">새로고침</button>
@@ -42,28 +42,38 @@
       <div id="msg-error" class="banner banner-error hidden"></div>
       <div id="msg-config" class="banner banner-warn hidden"></div>
 
-      <section class="hero" id="hero" aria-label="실시간 상태판"></section>
+      <section class="hero" id="hero" aria-label="포지션·손익 요약"></section>
+
+      <details class="details-block details-secondary" id="operator-context-wrap">
+        <summary class="details-summary">관망·게이트·퍼널 요약 (펼치기)</summary>
+        <div class="details-body" id="operator-context-body"></div>
+      </details>
 
       <section class="section" aria-labelledby="sym-heading">
-        <h2 id="sym-heading" class="section-title">심볼별 판단</h2>
+        <h2 id="sym-heading" class="section-title">종목별 포지션 · 손익</h2>
         <div class="symbol-grid" id="symbol-grid"></div>
       </section>
 
       <section class="section" aria-labelledby="perf-heading">
-        <h2 id="perf-heading" class="section-title">핵심 성과</h2>
+        <h2 id="perf-heading" class="section-title">성과 요약 (종료 거래)</h2>
         <p class="section-note muted text-xs" id="perf-note"></p>
         <div class="perf-row" id="perf-row"></div>
       </section>
 
-      <section class="section" aria-labelledby="blocked-heading">
-        <h2 id="blocked-heading" class="section-title">진입 차단 이유</h2>
-        <div id="blocked-card"></div>
-      </section>
+      <details class="details-block" id="blocked-wrap">
+        <summary class="details-summary">누적 차단 사유·최근 차단 이벤트 (펼치기)</summary>
+        <div class="details-body">
+          <div id="blocked-card"></div>
+        </div>
+      </details>
 
-      <section class="section" aria-labelledby="fee-heading">
-        <h2 id="fee-heading" class="section-title">수수료·gross 대비 순손익 (최근 7일)</h2>
-        <div id="fee-analytics" class="fee-analytics"></div>
-      </section>
+      <details class="details-block" id="fee-wrap">
+        <summary class="details-summary">수수료·gross 대비 순손익 (최근 7일) — 펼치기</summary>
+        <div class="details-body">
+          <h2 id="fee-heading" class="section-title section-title--flush">수수료 분석</h2>
+          <div id="fee-analytics" class="fee-analytics"></div>
+        </div>
+      </details>
 
       <details class="details-block" id="detail-block">
         <summary class="details-summary">운영 상세 보기 (상태 흐름 · 헬스 이력 · 이번 달)</summary>
