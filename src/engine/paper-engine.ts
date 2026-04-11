@@ -752,6 +752,22 @@ export class PaperEngine {
       const es = openPos?.entryStage ?? 0;
       last_order_build_failure = orderBuildFailureStructuredPayload(snap, r, es, regimeDetected.regime);
     }
+    let last_long_only_restriction: Record<string, unknown> | null = null;
+    for (const sym of symbols) {
+      const r = decisionBySymbol.get(String(sym));
+      if (r?.decision.reject_reason !== "LONG_ONLY_SHORT_DEFERRED") continue;
+      const d = r.decision;
+      last_long_only_restriction = {
+        symbol: String(sym),
+        regime: regimeDetected.regime,
+        long_only_restriction: d.long_only_restriction === true,
+        original_signal_state: d.original_signal_state ?? null,
+        final_signal_state: d.final_signal_state ?? null,
+        execution_disabled_reason: d.execution_disabled_reason ?? null,
+        reject_reason: d.reject_reason,
+        stage1_result_code: d.stage1_result_code ?? null
+      };
+    }
     try {
       const risk = this.lastRisk!;
       await this.store.writeJson("reports/engine-state.json", {
@@ -797,6 +813,7 @@ export class PaperEngine {
         decision_funnel_50_size,
         reject_reason_counts_tick,
         last_order_build_failure,
+        last_long_only_restriction,
         symbol_decisions: Object.fromEntries(
           [...decisionBySymbol.entries()].map(([k, v]) => [k, { decision: v.decision, adaptiveOk: v.adaptiveOk }])
         )
@@ -863,6 +880,30 @@ export class PaperEngine {
     const ex = res.executorDecision;
 
     if (d.final_decision === "SKIP" && (d.reject_reason === "SIGNAL_NONE" || d.reject_reason === null)) {
+      return;
+    }
+
+    if (d.final_decision === "SKIP" && d.reject_reason === "LONG_ONLY_SHORT_DEFERRED") {
+      await this.store.appendJsonlLine("reports/events.jsonl", {
+        ts: nowTs,
+        type: "LONG_ONLY_SHORT_DEFERRED",
+        symbol: sym,
+        regime: this.lastRegime.regime,
+        executor: ex?.executor ?? null,
+        reject_code: d.reject_reason,
+        stage1_result_code: d.stage1_result_code ?? null,
+        long_only_restriction: d.long_only_restriction === true,
+        original_signal_state: d.original_signal_state ?? null,
+        final_signal_state: d.final_signal_state ?? null,
+        execution_disabled_reason: d.execution_disabled_reason ?? null,
+        expected_move:
+          typeof ex?.expected_move === "number" && Number.isFinite(ex.expected_move) ? ex.expected_move : null,
+        total_cost: ex?.total_cost ?? null,
+        risk_state: ex?.risk_state ?? this.lastRisk?.riskStatus ?? "NORMAL",
+        supplemental_reasons: d.supplemental_reasons ?? [],
+        adaptive_direction: res.adaptiveDirection,
+        detail: res.adaptiveDetail
+      });
       return;
     }
 

@@ -214,6 +214,10 @@ function pack(
     min_qty?: number | null;
     min_notional?: number | null;
     sizeUsd?: number | null;
+    long_only_restriction?: boolean;
+    original_signal_state?: string;
+    final_signal_state?: string;
+    execution_disabled_reason?: string | null;
   }
 ): PaperSymbolDecision {
   return {
@@ -268,7 +272,11 @@ function pack(
     qty_step: fields.qty_step,
     min_qty: fields.min_qty,
     min_notional: fields.min_notional,
-    sizeUsd: fields.sizeUsd
+    sizeUsd: fields.sizeUsd,
+    long_only_restriction: fields.long_only_restriction,
+    original_signal_state: fields.original_signal_state,
+    final_signal_state: fields.final_signal_state,
+    execution_disabled_reason: fields.execution_disabled_reason
   };
 }
 
@@ -420,6 +428,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       min_qty?: number | null;
       min_notional?: number | null;
       sizeUsd?: number | null;
+      long_only_restriction?: boolean;
+      original_signal_state?: string;
+      final_signal_state?: string;
+      execution_disabled_reason?: string | null;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -494,7 +506,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       qty_step: extra.qty_step,
       min_qty: extra.min_qty,
       min_notional: extra.min_notional,
-      sizeUsd: extra.sizeUsd
+      sizeUsd: extra.sizeUsd,
+      long_only_restriction: extra.long_only_restriction,
+      original_signal_state: extra.original_signal_state,
+      final_signal_state: extra.final_signal_state,
+      execution_disabled_reason: extra.execution_disabled_reason
     }),
     ...res
   });
@@ -1180,9 +1196,41 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
 
     if (input.config.longOnly && adaptive.direction === "short") {
-      reject_reason = "EXECUTION_DISABLED";
-      final_decision = "REJECT";
       supplemental_reasons.push("LONG_ONLY_RESTRICTION");
+      if (
+        input.currentStage === 0 &&
+        input.regime === "RANGE" &&
+        sn.signal === "paper_short_candidate"
+      ) {
+        return ret(
+          {
+            final_decision: "SKIP",
+            reject_reason: "LONG_ONLY_SHORT_DEFERRED",
+            execution_state: "PAPER_READY",
+            ai_decision: "APPROVE",
+            adaptive_decision: "DEFERRED",
+            guidance: "Long Only: 숏 신호 보류(롱 전환 대기), EXECUTION_DISABLED 미발생",
+            target_stage: null,
+            supplemental_reasons,
+            stage1_result_code: "STAGE1_LONG_ONLY_SHORT_DEFERRED",
+            required_move_pct,
+            shortfall_pct,
+            long_only_restriction: true,
+            original_signal_state: "SHORT_CANDIDATE",
+            final_signal_state: "SHORT_CANDIDATE_LONG_ONLY_DEFERRED",
+            execution_disabled_reason: "long_only_no_short_execution; deferred_skip_not_EXECUTION_DISABLED"
+          },
+          {
+            intentSide,
+            executorDecision,
+            adaptiveOk: true,
+            adaptiveDirection: adaptive.direction,
+            adaptiveDetail: adaptiveDetailOut,
+            adaptiveResult: adaptive,
+            aiGatePassed: true
+          }
+        );
+      }
       return ret(
         {
           reject_reason: "EXECUTION_DISABLED",
@@ -1194,7 +1242,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           supplemental_reasons,
           stage1_result_code: "STAGE1_BLOCKED_REGIME",
           required_move_pct,
-          shortfall_pct
+          shortfall_pct,
+          long_only_restriction: true,
+          original_signal_state: "SHORT_CANDIDATE",
+          final_signal_state: "SHORT_CANDIDATE",
+          execution_disabled_reason: "EXECUTION_DISABLED_long_only_short_non_range_or_stage_gt0"
         },
         {
           intentSide,

@@ -129,6 +129,8 @@ export type PaperDecisionRejectReason =
   | "ORDER_BUILD_FAIL"
   | "EXECUTOR_INIT_FAIL"
   | "EXECUTION_DISABLED"
+  /** RANGE·Stage1·SHORT 후보: Long Only로 숏 미체결·보류(SKIP), EXECUTION_DISABLED 미사용 */
+  | "LONG_ONLY_SHORT_DEFERRED"
   | "AI_DIRECTION_MISMATCH"
   | "STAGE1_BLOCKED_LIMIT"
   | "LEGACY_BLOCKED";
@@ -143,7 +145,8 @@ export type PaperStage1ResultCode =
   | "STAGE1_BLOCKED_QUALITY"
   | "STAGE1_BLOCKED_REGIME"
   | "STAGE1_BLOCKED_SIGNAL"
-  | "STAGE1_BLOCKED_DATA";
+  | "STAGE1_BLOCKED_DATA"
+  | "STAGE1_LONG_ONLY_SHORT_DEFERRED";
 
 export type PaperSignalState = "NONE" | "LONG_CANDIDATE" | "SHORT_CANDIDATE";
 export type PaperRegimeState = "TREND" | "RANGE" | "NO_TRADE" | "UNKNOWN";
@@ -275,6 +278,14 @@ export type PaperSymbolDecisionRecord = Readonly<{
   min_notional?: number | null;
   /** 주문 생성 단계에서의 목표 명목(USD), 실패 시 null */
   sizeUsd?: number | null;
+  /** Long Only로 RANGE·Stage1 SHORT 후보가 보류된 경우 */
+  long_only_restriction?: boolean;
+  /** 스냅샷 신호 상태(예: SHORT_CANDIDATE) */
+  original_signal_state?: string;
+  /** 정책 적용 후 표시용 신호 상태 */
+  final_signal_state?: string;
+  /** 숏 실행 불가 사유(구조화·EXECUTION_DISABLED 외 서술) */
+  execution_disabled_reason?: string | null;
 }>;
 
 /** Minimal row shape for funnel math. */
@@ -334,6 +345,8 @@ export type PaperEngineState = Readonly<{
   symbol_decisions: Record<string, { decision: PaperSymbolDecisionRecord; adaptiveOk: boolean }>;
   /** 직전 틱에서 발생한 ORDER_BUILD_FAIL 요약(관측용) */
   last_order_build_failure?: Record<string, unknown> | null;
+  /** 직전 틱 LONG_ONLY_SHORT_DEFERRED 요약(관측용) */
+  last_long_only_restriction?: Record<string, unknown> | null;
 }>;
 
 /** One leg in `positions/open.json` (JSON array of up to `paperMaxOpenPositions` records). */

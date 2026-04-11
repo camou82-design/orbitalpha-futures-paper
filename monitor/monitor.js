@@ -58,6 +58,7 @@
     ORDER_BUILD_FAIL: "주문 생성 실패",
     EXECUTOR_INIT_FAIL: "실행기 초기화 실패",
     EXECUTION_DISABLED: "실행 비활성",
+    LONG_ONLY_SHORT_DEFERRED: "Long Only·숏 보류(RANGE S1)",
     SIGNAL_NONE: "신호 없음",
     LEGACY_BLOCKED: "기타 차단"
   };
