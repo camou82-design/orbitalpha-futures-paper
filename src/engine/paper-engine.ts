@@ -342,6 +342,8 @@ export class PaperEngine {
   private trendCooldownUntilBySymbol = new Map<string, number>();
   /** 비영속: 최근 틱별 `decision_funnel_tick` 스냅샷 (최대 DECISION_FUNNEL_RING_MAX). */
   private decisionFunnelTickRing: DecisionFunnelTick[] = [];
+  /** 비영속: Stage 1 진입 검토(SKIP) 중인 심볼의 체류 시간 및 품질 추적 */
+  private reviewingState = new Map<string, { ticks: number; initialQuality: number; lastQuality: number }>();
 
   constructor(
     private readonly config: EngineConfig,
@@ -583,6 +585,21 @@ export class PaperEngine {
       const openPos = opensAfterClose.find((o) => o.symbol === snap.symbol && o.status === "open");
       const hasOpen = !!openPos;
       const currentStage = openPos?.entryStage ?? 0;
+      const isCandidate = snap.signal === "paper_long_candidate" || snap.signal === "paper_short_candidate";
+
+      const rev = this.reviewingState.get(String(snap.symbol));
+      let reviewingTicks = rev?.ticks ?? 0;
+      let autoEntryTriggered = false;
+
+      // Condition-maintained auto-entry check for Stage 1
+      if (isCandidate && currentStage === 0 && !hasOpen) {
+        if (rev) {
+          const qualityDropped = snap.qualityScore < rev.initialQuality - 2;
+          if (!qualityDropped && rev.ticks >= 5) {
+            autoEntryTriggered = true;
+          }
+        }
+      }
 
       const res = evaluatePaperSymbolEntry({
         config: this.config,
@@ -620,8 +637,21 @@ export class PaperEngine {
         sameDirCooldownMult: 2,
         hasOpenPosition: hasOpen,
         currentStage,
-        maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions
+        maxPositionsReached: (opensAfterClose.length >= this.config.paperMaxOpenPositions && !hasOpen),
+        reviewingTicks,
+        autoEntryTriggered
       });
+
+      // Update reviewing state for next tick
+      if (res.decision.final_decision === "SKIP" && isCandidate && currentStage === 0 && !hasOpen) {
+        this.reviewingState.set(String(snap.symbol), {
+          ticks: reviewingTicks + 1,
+          initialQuality: rev?.initialQuality ?? snap.qualityScore,
+          lastQuality: snap.qualityScore
+        });
+      } else {
+        this.reviewingState.delete(String(snap.symbol));
+      }
       decisionBySymbol.set(String(sym), res);
       try {
         await this.store.appendJsonlLine("reports/decisions.jsonl", { ...res.decision, pipeline: "v1" });

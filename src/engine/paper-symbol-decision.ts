@@ -107,6 +107,8 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   hasOpenPosition: boolean;
   currentStage: number;
   maxPositionsReached: boolean;
+  reviewingTicks?: number;
+  autoEntryTriggered?: boolean;
 }>;
 
 export type EvaluatePaperSymbolEntryResult = Readonly<{
@@ -154,6 +156,10 @@ function pack(
     target_stage: number | null;
     supplemental_reasons?: string[];
     is_ambiguous?: boolean;
+    stage1_loosened_entry?: boolean;
+    ai_floor_relaxed?: boolean;
+    auto_entry_triggered?: boolean;
+    reviewing_ticks?: number;
   }
 ): PaperSymbolDecision {
   return {
@@ -171,7 +177,11 @@ function pack(
     entry_progress: fields.entry_progress ?? undefined,
     target_stage: fields.target_stage ?? undefined,
     supplemental_reasons: fields.supplemental_reasons,
-    is_ambiguous: fields.is_ambiguous
+    is_ambiguous: fields.is_ambiguous,
+    stage1_loosened_entry: fields.stage1_loosened_entry,
+    ai_floor_relaxed: fields.ai_floor_relaxed,
+    auto_entry_triggered: fields.auto_entry_triggered,
+    reviewing_ticks: fields.reviewing_ticks
   };
 }
 
@@ -230,6 +240,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       target_stage: number | null;
       supplemental_reasons?: string[];
       is_ambiguous?: boolean;
+      stage1_loosened_entry?: boolean;
+      ai_floor_relaxed?: boolean;
+      auto_entry_triggered?: boolean;
+      reviewing_ticks?: number;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -267,7 +281,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       entry_progress: extra.entry_progress !== undefined ? extra.entry_progress : null,
       target_stage: extra.target_stage !== undefined ? extra.target_stage : null,
       supplemental_reasons: extra.supplemental_reasons,
-      is_ambiguous: extra.is_ambiguous !== undefined ? extra.is_ambiguous : input.isAmbiguous
+      is_ambiguous: extra.is_ambiguous !== undefined ? extra.is_ambiguous : input.isAmbiguous,
+      stage1_loosened_entry: extra.stage1_loosened_entry,
+      ai_floor_relaxed: extra.ai_floor_relaxed,
+      auto_entry_triggered: extra.auto_entry_triggered,
+      reviewing_ticks: extra.reviewing_ticks !== undefined ? extra.reviewing_ticks : input.reviewingTicks
     }),
     ...res
   });
@@ -392,14 +410,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   // Edge Filter Loosening for Stage 1
   let leniency = 1.0;
+  let stage1LoosenedEntry = false;
   if (input.currentStage === 0) {
-    if (input.regime === "TREND") leniency *= 0.85; // 15% discount for Trend
-    else if (input.regime === "RANGE") leniency *= 0.95; // 5% discount for Range
-    if (isBtcEth) leniency *= 0.9; // Extra 10% discount for Majors
+    if (input.regime === "TREND") leniency *= 0.75; // 25% discount for Trend
+    else if (input.regime === "RANGE") leniency *= 0.85; // 15% discount for Range
+    if (isBtcEth) leniency *= 0.85; // Extra 15% discount for Majors
   }
 
   const effectiveTotalCost = totalCost !== null ? totalCost * leniency : null;
-  let stage1LoosenedEntry = false;
 
   if (typeof em === "number" && typeof rm === "number" && effectiveTotalCost !== null) {
     if (em <= effectiveTotalCost) {
@@ -410,11 +428,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     } else if (totalCost !== null && em <= totalCost) {
       // This is a "loosened" entry logic trigger
       stage1LoosenedEntry = true;
+      supplemental_reasons.push("STAGE1_LOOSENED_COST");
     }
   }
 
   const minVol = input.config.paperMinEdgeVolatilityMove;
-  if (typeof em === "number" && em < minVol) {
+  // Loosen minVol for Stage 1 too
+  const effectiveMinVol = input.currentStage === 0 ? minVol * 0.8 : minVol;
+  if (typeof em === "number" && em < effectiveMinVol) {
     edge_state = "FAIL_LOW_VOL";
     if (!reject_reason) reject_reason = "EDGE_FAIL_LOW_VOL";
     final_decision = "REJECT";
@@ -611,9 +632,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       );
     }
 
-    // AI Role refinement: Only EXTREME_LOW (quality < 45) is hard REJECT
+    // AI Role refinement: Only EXTREME_LOW (quality < 40 for stage 1 or < 45 for others) is hard REJECT
+    let aiFloorRelaxed = false;
     if (aiOut.action === "NO_ENTRY") {
-      if (sn.qualityScore < 45) {
+      const effectiveFloor = input.currentStage === 0 ? 40 : 45;
+      if (input.currentStage === 0 && sn.qualityScore >= 40 && sn.qualityScore < 45) {
+        aiFloorRelaxed = true;
+      }
+
+      if (sn.qualityScore < effectiveFloor) {
         reject_reason = "AI_REJECT";
         final_decision = "REJECT";
         supplemental_reasons.push("AI_REJECT_LOW_QUALITY");
@@ -623,9 +650,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             final_decision: "REJECT",
             ai_decision: "REJECT",
             adaptive_decision: "N/A",
-            guidance: "AI 품질 미달 거부 (진입 불가)",
+            guidance: `AI 품질 미달 거부 (Floor: ${effectiveFloor})`,
             target_stage: null,
-            supplemental_reasons
+            supplemental_reasons,
+            ai_floor_relaxed: aiFloorRelaxed
           },
           {
             intentSide,
@@ -638,147 +666,170 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           }
         );
       } else {
-        // Quality 45~60: Allow but size down + label as LOW_QUALITY
+        // Quality 40/45~60: Allow but size down + label as LOW_QUALITY
         stage1LoosenedEntry = true;
         supplemental_reasons.push("AI_LOW_QUALITY_CAUTION");
+        if (aiFloorRelaxed) supplemental_reasons.push("AI_FLOOR_RELAXED_FOR_STAGE1");
       }
     }
-  }
 
-  // Size Multiplier Calculation
-  let dynamicSizeMult = input.risk?.sizeMultiplier ?? 1;
-  if (stage1LoosenedEntry && input.currentStage === 0) {
-    dynamicSizeMult *= 0.5; // Stage 1 loosened entries get 50% size reduction
-  }
-  if (input.isAmbiguous) {
-    dynamicSizeMult *= 0.8; // Extra caution for ambiguous market
-  }
+    // Size Multiplier Calculation
+    let dynamicSizeMult = input.risk?.sizeMultiplier ?? 1;
+    if (stage1LoosenedEntry && input.currentStage === 0) {
+      // Coupled risk reduction: Loosened entries get much smaller initial size
+      dynamicSizeMult *= 0.4; // Reduced from 0.5 to 0.4 to be safer per user request
+    }
+    if (input.isAmbiguous) {
+      dynamicSizeMult *= 0.8; // Extra caution for ambiguous market
+    }
 
-  const adaptive = runFuturesAdaptiveEntry({
-    mode: input.adaptiveMode,
-    modeDetail: input.adaptiveDetail,
-    snap: {
-      symbol: String(sym),
-      signal: sn.signal,
-      lastPrice: sn.lastPrice,
-      latestCandleClose: sn.latestCandleClose,
-      ema20: sn.ema20,
-      ema60: sn.ema60,
-      qualityScore: sn.qualityScore,
-      candidateStrength: sn.candidateStrength,
-      emaGap: sn.emaGap,
-      volumeRatioProxy: sn.volumeRatioProxy
-    },
-    baseSizeUsd: DEFAULT_PAPER_SIZE_USD * dynamicSizeMult
-  });
-  adaptiveDetailOut = adaptive.detail ?? null;
-  if (!adaptive.ok) {
-    reject_reason = "ORDER_BUILD_FAIL";
-    final_decision = "REJECT";
-    execution_state = "ORDER_BUILD_FAIL";
-    supplemental_reasons.push("ORDER_BUILD_FAIL");
-    return ret(
-      {
-        reject_reason: "ORDER_BUILD_FAIL",
-        final_decision: "REJECT",
-        execution_state: "ORDER_BUILD_FAIL",
-        ai_decision: "APPROVE",
-        adaptive_decision: "REJECT",
-        guidance: "결정 구성 실패",
-        target_stage: null,
-        supplemental_reasons
+    const adaptive = runFuturesAdaptiveEntry({
+      mode: input.adaptiveMode,
+      modeDetail: input.adaptiveDetail,
+      snap: {
+        symbol: String(sym),
+        signal: sn.signal,
+        lastPrice: sn.lastPrice,
+        latestCandleClose: sn.latestCandleClose,
+        ema20: sn.ema20,
+        ema60: sn.ema60,
+        qualityScore: sn.qualityScore,
+        candidateStrength: sn.candidateStrength,
+        emaGap: sn.emaGap,
+        volumeRatioProxy: sn.volumeRatioProxy
       },
-      {
-        intentSide,
-        executorDecision,
-        adaptiveOk: false,
-        adaptiveDirection: null,
-        adaptiveDetail: adaptiveDetailOut,
-        adaptiveResult: null,
-        aiGatePassed: true
-      }
-    );
-  }
+      baseSizeUsd: DEFAULT_PAPER_SIZE_USD * dynamicSizeMult
+    });
+    adaptiveDetailOut = adaptive.detail ?? null;
+    if (!adaptive.ok) {
+      reject_reason = "ORDER_BUILD_FAIL";
+      final_decision = "REJECT";
+      execution_state = "ORDER_BUILD_FAIL";
+      supplemental_reasons.push("ORDER_BUILD_FAIL");
+      return ret(
+        {
+          reject_reason: "ORDER_BUILD_FAIL",
+          final_decision: "REJECT",
+          execution_state: "ORDER_BUILD_FAIL",
+          ai_decision: "APPROVE",
+          adaptive_decision: "REJECT",
+          guidance: "결정 구성 실패",
+          target_stage: null,
+          supplemental_reasons
+        },
+        {
+          intentSide,
+          executorDecision,
+          adaptiveOk: false,
+          adaptiveDirection: null,
+          adaptiveDetail: adaptiveDetailOut,
+          adaptiveResult: null,
+          aiGatePassed: true
+        }
+      );
+    }
 
-  const expectedSide: "long" | "short" = sn.signal === "paper_long_candidate" ? "long" : "short";
-  if (adaptive.direction !== expectedSide) {
-    reject_reason = "ADAPTIVE_REJECT";
-    final_decision = "REJECT";
-    supplemental_reasons.push("ADAPTIVE_DIRECTION_MISMATCH");
+    const expectedSide: "long" | "short" = sn.signal === "paper_long_candidate" ? "long" : "short";
+    if (adaptive.direction !== expectedSide) {
+      reject_reason = "ADAPTIVE_REJECT";
+      final_decision = "REJECT";
+      supplemental_reasons.push("ADAPTIVE_DIRECTION_MISMATCH");
+      return ret(
+        {
+          reject_reason: "ADAPTIVE_REJECT",
+          final_decision: "REJECT",
+          ai_decision: "APPROVE",
+          adaptive_decision: "REJECT",
+          guidance: "방향 불일치 (Adaptive)",
+          target_stage: null,
+          supplemental_reasons
+        },
+        {
+          intentSide,
+          executorDecision,
+          adaptiveOk: false,
+          adaptiveDirection: adaptive.direction,
+          adaptiveDetail: adaptiveDetailOut,
+          adaptiveResult: null,
+          aiGatePassed: true
+        }
+      );
+    }
+
+    if (input.config.longOnly && adaptive.direction === "short") {
+      reject_reason = "EXECUTION_DISABLED";
+      final_decision = "REJECT";
+      supplemental_reasons.push("LONG_ONLY_RESTRICTION");
+      return ret(
+        {
+          reject_reason: "EXECUTION_DISABLED",
+          final_decision: "REJECT",
+          ai_decision: "APPROVE",
+          adaptive_decision: "OK",
+          guidance: "방향 제한 (Long Only)",
+          target_stage: null,
+          supplemental_reasons
+        },
+        {
+          intentSide,
+          executorDecision,
+          adaptiveOk: false,
+          adaptiveDirection: adaptive.direction,
+          adaptiveDetail: adaptiveDetailOut,
+          adaptiveResult: null,
+          aiGatePassed: true
+        }
+      );
+    }
+
+    final_decision = "ENTER";
+    reject_reason = null;
+
     return ret(
       {
-        reject_reason: "ADAPTIVE_REJECT",
-        final_decision: "REJECT",
-        ai_decision: "APPROVE",
-        adaptive_decision: "REJECT",
-        guidance: "방향 불일치 (Adaptive)",
-        target_stage: null,
-        supplemental_reasons
-      },
-      {
-        intentSide,
-        executorDecision,
-        adaptiveOk: false,
-        adaptiveDirection: adaptive.direction,
-        adaptiveDetail: adaptiveDetailOut,
-        adaptiveResult: null,
-        aiGatePassed: true
-      }
-    );
-  }
-
-  if (input.config.longOnly && adaptive.direction === "short") {
-    reject_reason = "EXECUTION_DISABLED";
-    final_decision = "REJECT";
-    supplemental_reasons.push("LONG_ONLY_RESTRICTION");
-    return ret(
-      {
-        reject_reason: "EXECUTION_DISABLED",
-        final_decision: "REJECT",
+        final_decision: "ENTER",
+        reject_reason: null,
         ai_decision: "APPROVE",
         adaptive_decision: "OK",
-        guidance: "방향 제한 (Long Only)",
-        target_stage: null,
-        supplemental_reasons
+        guidance: executorDecision?.guidance ?? null,
+        next_action: executorDecision?.next_action ?? null,
+        invalidate_condition: executorDecision?.invalidate_condition ?? null,
+        risk_note: executorDecision?.risk_note ?? null,
+        watch_zone: executorDecision?.watch_zone ?? null,
+        entry_progress: executorDecision?.entry_progress ?? null,
+        target_stage: executorDecision?.target_stage ?? null,
+        supplemental_reasons,
+        reviewing_ticks: input.reviewingTicks,
+        auto_entry_triggered: input.autoEntryTriggered
       },
       {
         intentSide,
         executorDecision,
-        adaptiveOk: false,
+        adaptiveOk: true,
         adaptiveDirection: adaptive.direction,
         adaptiveDetail: adaptiveDetailOut,
-        adaptiveResult: null,
+        adaptiveResult: adaptive,
         aiGatePassed: true
       }
     );
   }
 
-  final_decision = "ENTER";
-  reject_reason = null;
-
+  // Handle fallback if aiIn is null or logic flows outside
   return ret(
     {
-      final_decision: "ENTER",
-      reject_reason: null,
-      ai_decision: "APPROVE",
-      adaptive_decision: "OK",
-      guidance: executorDecision?.guidance ?? null,
-      next_action: executorDecision?.next_action ?? null,
-      invalidate_condition: executorDecision?.invalidate_condition ?? null,
-      risk_note: executorDecision?.risk_note ?? null,
-      watch_zone: executorDecision?.watch_zone ?? null,
-      entry_progress: executorDecision?.entry_progress ?? null,
-      target_stage: executorDecision?.target_stage ?? null,
+      final_decision: "SKIP",
+      reject_reason: "SIGNAL_NONE",
+      guidance: "신호 분석 불가",
       supplemental_reasons
     },
     {
-      intentSide,
-      executorDecision,
-      adaptiveOk: true,
-      adaptiveDirection: adaptive.direction,
-      adaptiveDetail: adaptiveDetailOut,
-      adaptiveResult: adaptive,
-      aiGatePassed: true
+      intentSide: null,
+      executorDecision: null,
+      adaptiveOk: false,
+      adaptiveDirection: null,
+      adaptiveDetail: null,
+      adaptiveResult: null,
+      aiGatePassed: false
     }
   );
 }

@@ -1,4 +1,4 @@
-import type { Candle } from "../models/types";
+import type { Candle, PaperRegimeState } from "../models/types";
 import { atrWilderLast } from "./entry-gate";
 
 export type MarketRegime = "RANGE" | "TREND" | "NO_TRADE";
@@ -34,11 +34,13 @@ function clamp01(x: number): number {
  */
 export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Candle[] }>): MarketRegimeDetection {
   const c = input.btcCandles5m;
-  if (c.length < 60) {
+  const len = c.length;
+
+  if (len < 50) {
     return {
       regime: "NO_TRADE",
       isAmbiguous: false,
-      detail: { reason: "insufficient_btc_5m", len: c.length }
+      detail: { reason: "insufficient_btc_5m", len }
     };
   }
 
@@ -48,9 +50,11 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
   const last = closes[closes.length - 1]!;
 
   const e20 = emaLast(closes.slice(-80), 20);
-  const e60 = emaLast(closes.slice(-140), 60);
+  // Relax EMA60 to use available length if slightly short (50-60)
+  const e60 = emaLast(closes.slice(-140), Math.min(60, closes.length));
+
   if (e20 === null || e60 === null || !Number.isFinite(last) || last <= 0) {
-    return { regime: "NO_TRADE", isAmbiguous: false, detail: { reason: "ema_not_ready_or_bad_price" } };
+    return { regime: "NO_TRADE", isAmbiguous: false, detail: { reason: "ema_not_ready_or_bad_price", len } };
   }
   const bias: "up" | "down" | "flat" = e20 > e60 * 1.0012 ? "up" : e20 < e60 * 0.9988 ? "down" : "flat";
 
@@ -85,6 +89,7 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
 
   const volTooHigh = atrRel > 0.0105 || boxRel > 0.035; // conservative "unstable" cap
   const dumpRisk = drop5 < -0.013 || drop12 < -0.022;
+
   if (dumpRisk || volTooHigh) {
     return {
       regime: "NO_TRADE",
@@ -98,7 +103,8 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
         ema_sep_rel: emaSepRel,
         slope_rel: slopeRel,
         inside_ratio: insideRatio,
-        bias
+        bias,
+        len
       }
     };
   }
@@ -115,10 +121,13 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
   const flatSepScore = clamp01((0.0036 - emaSepRel) / 0.0022);
   const rangeScore = 0.45 * tightScore + 0.35 * insideScore + 0.2 * flatSepScore;
 
+  // Ambiguity flag for length 50-60
+  const isAmbiguousLength = len < 60;
+
   if (trendScore >= 0.62 && rangeScore < 0.55) {
     return {
       regime: "TREND",
-      isAmbiguous: false,
+      isAmbiguous: isAmbiguousLength,
       detail: {
         atr_rel: atrRel,
         box_rel: boxRel,
@@ -129,7 +138,8 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
         inside_ratio: insideRatio,
         bias,
         trend_score: trendScore,
-        range_score: rangeScore
+        range_score: rangeScore,
+        len
       }
     };
   }
@@ -137,7 +147,7 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
   if (rangeScore >= 0.60 && trendScore < 0.62) {
     return {
       regime: "RANGE",
-      isAmbiguous: false,
+      isAmbiguous: isAmbiguousLength,
       detail: {
         atr_rel: atrRel,
         box_rel: boxRel,
@@ -148,13 +158,14 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
         inside_ratio: insideRatio,
         bias,
         trend_score: trendScore,
-        range_score: rangeScore
+        range_score: rangeScore,
+        len
       }
     };
   }
 
-  // Ambiguous context → Fallback to higher score if reasonable, otherwise mark Ambiguous but continue.
-  const higherScoreRegime: MarketRegime = trendScore >= rangeScore ? "TREND" : "RANGE";
+  // Ambiguous context due to score overlap
+  const higherScoreRegime: PaperRegimeState = trendScore >= rangeScore ? "TREND" : "RANGE";
 
   return {
     regime: higherScoreRegime,
@@ -170,8 +181,8 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
       inside_ratio: insideRatio,
       bias,
       trend_score: trendScore,
-      range_score: rangeScore
+      range_score: rangeScore,
+      len
     }
   };
 }
-

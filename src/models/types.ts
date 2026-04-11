@@ -188,6 +188,14 @@ export type PaperSymbolDecisionRecord = Readonly<{
   supplemental_reasons?: string[];
   /** 애매한 장세 여부 */
   is_ambiguous?: boolean;
+  /** Stage 1 비용 완화 적용 여부 */
+  stage1_loosened_entry?: boolean;
+  /** AI 품질 바닥가 완화 적용 여부 */
+  ai_floor_relaxed?: boolean;
+  /** 자동 진입(시간/틱 유지) 발생 여부 */
+  auto_entry_triggered?: boolean;
+  /** 현재 검토 중인 틱 수 */
+  reviewing_ticks?: number;
 }>;
 
 /** Minimal row shape for funnel math. */
