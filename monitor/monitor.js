@@ -133,6 +133,96 @@
     return getSnapshots(bundle).find((s) => s && s.symbol === sym) || null;
   }
 
+  /** API/JSON에서 숫자가 문자열로 올 수 있음 */
+  function coerceFinite(v) {
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string" && v.trim() !== "") {
+      const x = parseFloat(String(v).replace(/,/g, ""));
+      if (Number.isFinite(x)) return x;
+    }
+    return null;
+  }
+
+  function entryMarginUsd(pos) {
+    const a = coerceFinite(pos.sizeUsd);
+    if (a !== null && a > 0) return a;
+    const b = coerceFinite(pos.initialSizeUsd);
+    if (b !== null && b > 0) return b;
+    return null;
+  }
+
+  /** 스냅샷에 심볼이 없어도 symbolRows / 포지션 currentPrice로 Mark 확보 */
+  function markForOpen(bundle, sym, pos, snap) {
+    if (snap && typeof snap.lastPrice === "number" && Number.isFinite(snap.lastPrice)) return snap.lastPrice;
+    const rows = bundle.symbolRows;
+    if (Array.isArray(rows)) {
+      const row = rows.find((r) => r && String(r.symbol) === String(sym));
+      if (row && typeof row.lastPrice === "number" && Number.isFinite(row.lastPrice)) return row.lastPrice;
+    }
+    const cp = pos && coerceFinite(pos.currentPrice);
+    if (cp !== null) return cp;
+    return null;
+  }
+
+  function normalizeOpenPos(pos) {
+    if (!pos || typeof pos !== "object") return null;
+    return {
+      margin: entryMarginUsd(pos),
+      leverage: coerceFinite(pos.leverage) ?? 1,
+      entryPrice: coerceFinite(pos.entryPrice),
+      openedAt: coerceFinite(pos.openedAt) ?? coerceFinite(pos.firstOpenedAt),
+      realized: coerceFinite(pos.realizedPnl) ?? 0,
+      stopPx: coerceFinite(pos.stopPrice),
+      engineUnreal: coerceFinite(pos.unrealizedPnl),
+      unrealPct: coerceFinite(pos.unrealizedPnlPct),
+      raw: pos
+    };
+  }
+
+  /** 미실현: 엔진값 → %×마진 → 마크 추정 순 */
+  function unrealizedUsdResolved(n, mark) {
+    const pos = n.raw;
+    if (n.engineUnreal !== null && Number.isFinite(n.engineUnreal)) return n.engineUnreal;
+    if (n.unrealPct !== null && n.margin !== null && n.margin > 0) return (n.margin * n.unrealPct) / 100;
+    if (mark === null || n.entryPrice === null || n.entryPrice <= 0 || n.margin === null || n.margin <= 0) return null;
+    const lev = n.leverage;
+    const gross =
+      pos.side === "long"
+        ? ((mark - n.entryPrice) / n.entryPrice) * n.margin * lev
+        : ((n.entryPrice - mark) / n.entryPrice) * n.margin * lev;
+    return Number.isFinite(gross) ? gross : null;
+  }
+
+  function fmtUsdPos(n) {
+    return typeof n === "number" && Number.isFinite(n) ? formatUsd(n) : "N/A";
+  }
+
+  function fmtSignedUsdPos(n) {
+    return typeof n === "number" && Number.isFinite(n) ? formatSignedUsd(n) : "N/A";
+  }
+
+  function fmtPctPos(pnlUsd, marginUsd) {
+    if (typeof marginUsd !== "number" || !Number.isFinite(marginUsd) || marginUsd <= 0) return "N/A";
+    if (typeof pnlUsd !== "number" || !Number.isFinite(pnlUsd)) return "N/A";
+    return formatSignedPctOnMargin(pnlUsd, marginUsd);
+  }
+
+  function fmtHoldPos(ms) {
+    const t = typeof ms === "number" && Number.isFinite(ms) ? ms : null;
+    if (t === null) return "N/A";
+    return formatHoldDuration(t);
+  }
+
+  function fmtRealizedLabel(r) {
+    if (typeof r !== "number" || !Number.isFinite(r)) return "실현 손익 없음";
+    if (Math.abs(r) < 1e-9) return "실현 손익 없음";
+    return formatSignedUsd(r);
+  }
+
+  function fmtStopLabel(px) {
+    return px !== null && typeof px === "number" && Number.isFinite(px) ? formatPrice(px) : "손절 미설정";
+  }
+
   function getOpenPositions(bundle) {
     const o = bundle.openPositions;
     return Array.isArray(o) ? o.filter((x) => x && x.status === "open") : [];
@@ -222,12 +312,14 @@
     let totalUnreal = 0;
     let totalMargin = 0;
     for (const o of opens) {
-      const snap = snapBySymbol(bundle, o.symbol);
-      const mark = snap && typeof snap.lastPrice === "number" ? snap.lastPrice : null;
-      const margin = typeof o.sizeUsd === "number" && Number.isFinite(o.sizeUsd) ? o.sizeUsd : 0;
-      totalMargin += margin;
-      if (mark === null) continue;
-      const u = unrealizedPnlFor(o, mark);
+      const n = normalizeOpenPos(o);
+      if (!n) continue;
+      const sym = o.symbol;
+      const snap = snapBySymbol(bundle, sym);
+      const mark = markForOpen(bundle, sym, o, snap);
+      const m = n.margin;
+      if (typeof m === "number" && Number.isFinite(m) && m > 0) totalMargin += m;
+      const u = unrealizedUsdResolved(n, mark);
       if (typeof u === "number" && Number.isFinite(u)) totalUnreal += u;
     }
     return { openCount: opens.length, totalUnreal, totalMargin };
@@ -720,43 +812,46 @@
       const ambigTag = es && es.is_ambiguous ? " <small style='color:var(--warn)'>(모호)</small>" : "";
 
       if (pos) {
-        const margin = typeof pos.sizeUsd === "number" && Number.isFinite(pos.sizeUsd) ? pos.sizeUsd : null;
-        const lev = typeof pos.leverage === "number" && Number.isFinite(pos.leverage) ? pos.leverage : 1;
-        const mark = s && typeof s.lastPrice === "number" ? s.lastPrice : null;
-        const uPnL = mark !== null ? unrealizedPnlFor(pos, mark) : null;
-        const uPct =
-          uPnL !== null && margin !== null && margin > 0 ? formatSignedPctOnMargin(uPnL, margin) : "—";
-        const uClass = pnlToneClass(uPnL ?? 0);
-        const realized =
-          typeof pos.realizedPnl === "number" && Number.isFinite(pos.realizedPnl) ? pos.realizedPnl : 0;
+        const n = normalizeOpenPos(pos);
+        const lev = n ? n.leverage : 1;
+        const mark = n ? markForOpen(bundle, sym, pos, s) : null;
+        const uPnLRaw = n ? unrealizedUsdResolved(n, mark) : null;
+        const uPnL = uPnLRaw !== null ? uPnLRaw : n && n.margin !== null ? 0 : null;
+        const margin = n ? n.margin : null;
+        const uPct = fmtPctPos(uPnL, margin);
+        const uClass = pnlToneClass(typeof uPnL === "number" ? uPnL : 0);
+        const realized = n ? n.realized : 0;
         const rClass = pnlToneClass(realized);
-        const equity = margin !== null && uPnL !== null ? margin + uPnL : null;
+        const equity = margin !== null && uPnL !== null ? margin + uPnL : margin;
         const esN = pos.entryStage != null && pos.entryStage > 0 ? pos.entryStage : 1;
         const pes = pos.partialExitStage ?? 0;
         const sideK = pos.side === "long" ? "LONG" : pos.side === "short" ? "SHORT" : String(pos.side);
-        const stopPx = typeof pos.stopPrice === "number" && Number.isFinite(pos.stopPrice) ? pos.stopPrice : null;
+        const stopPx = n ? n.stopPx : null;
+        const entryDisp =
+          n && n.entryPrice !== null ? formatPrice(n.entryPrice) : "N/A";
+        const markDisp = mark !== null ? formatPrice(mark) : "N/A";
 
         return `
         <article class="${cardClass}">
           <div class="pos-money-strip pos-money-strip--primary" aria-label="포지션 손익 5항목">
             <div class="pos-money-cell">
-              <span class="pos-money-num tabular-nums">${margin !== null ? esc(formatUsd(margin)) : "—"}</span>
-              <span class="pos-money-lbl">진입금액</span>
+              <span class="pos-money-num tabular-nums">${esc(fmtUsdPos(margin))}</span>
+              <span class="pos-money-lbl">진입금액(USD)</span>
             </div>
             <div class="pos-money-cell">
-              <span class="pos-money-num tabular-nums">${equity !== null ? esc(formatUsd(equity)) : "—"}</span>
-              <span class="pos-money-lbl">현재평가금액</span>
+              <span class="pos-money-num tabular-nums">${esc(fmtUsdPos(equity))}</span>
+              <span class="pos-money-lbl">현재 평가금액(USD)</span>
             </div>
             <div class="pos-money-cell">
-              <span class="pos-money-num tabular-nums ${uClass}">${uPnL !== null ? esc(formatSignedUsd(uPnL)) : "—"}</span>
-              <span class="pos-money-lbl">미실현손익</span>
+              <span class="pos-money-num tabular-nums ${uClass}">${esc(fmtSignedUsdPos(uPnL))}</span>
+              <span class="pos-money-lbl">미실현 손익(USD)</span>
             </div>
             <div class="pos-money-cell">
               <span class="pos-money-num tabular-nums ${uClass}">${esc(uPct)}</span>
               <span class="pos-money-lbl">수익률</span>
             </div>
             <div class="pos-money-cell">
-              <span class="pos-money-num tabular-nums">${esc(formatHoldDuration(pos.openedAt))}</span>
+              <span class="pos-money-num tabular-nums">${esc(fmtHoldPos(n && n.openedAt))}</span>
               <span class="pos-money-lbl">보유시간</span>
             </div>
           </div>
@@ -764,19 +859,19 @@
             <span class="pos-card-titleline"><span class="pos-card-ticker">${esc(sym)}</span> <span class="pos-card-side pos-card-side--${pos.side === "short" ? "short" : "long"}">${esc(sideK)}</span></span>
           </header>
           <div class="pos-sub-strip">
-            <div class="pos-sub-item"><span class="pos-sub-k">평균 진입가</span><span class="pos-sub-v tabular-nums">${esc(formatPrice(pos.entryPrice))}</span></div>
-            <div class="pos-sub-item"><span class="pos-sub-k">Mark</span><span class="pos-sub-v tabular-nums">${mark !== null ? esc(formatPrice(mark)) : "—"}</span></div>
-            <div class="pos-sub-item"><span class="pos-sub-k">실현 손익</span><span class="pos-sub-v tabular-nums ${rClass}">${esc(formatSignedUsd(realized))}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">평균 진입가</span><span class="pos-sub-v tabular-nums">${esc(entryDisp)}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">Mark</span><span class="pos-sub-v tabular-nums">${esc(markDisp)}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">누적 실현</span><span class="pos-sub-v tabular-nums ${rClass}">${esc(fmtRealizedLabel(realized))}</span></div>
             <div class="pos-sub-item"><span class="pos-sub-k">익절 진행</span><span class="pos-sub-v tabular-nums">${esc(String(pes))}/3 · 진입 ${esc(String(esN))}/3</span></div>
-            <div class="pos-sub-item"><span class="pos-sub-k">손절가</span><span class="pos-sub-v tabular-nums">${stopPx !== null ? esc(formatPrice(stopPx)) : "—"}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">손절가(Stop)</span><span class="pos-sub-v tabular-nums">${esc(fmtStopLabel(stopPx))}</span></div>
           </div>
           <details class="sym-details">
             <summary>레버리지·파이프라인·펀딩 상세</summary>
             <dl class="sym-meta">
               <dt>레버리지</dt><dd>${esc(String(lev))}×</dd>
-              <dt>평균 진입가</dt><dd>${esc(formatPrice(pos.entryPrice))}</dd>
-              <dt>현재가(Mark)</dt><dd>${esc(formatPrice(mark))}</dd>
-              <dt>손절가</dt><dd>${stopPx !== null ? esc(formatPrice(stopPx)) : "—"}</dd>
+              <dt>평균 진입가</dt><dd>${esc(entryDisp)}</dd>
+              <dt>현재가(Mark)</dt><dd>${esc(markDisp)}</dd>
+              <dt>손절가</dt><dd>${esc(fmtStopLabel(stopPx))}</dd>
               ${typeof pos.unrealizedPnlPct === "number" ? `<dt>엔진 uPnL%</dt><dd>${esc(String(pos.unrealizedPnlPct.toFixed(2)))}%</dd>` : ""}
               ${pip ? `<dt>파이프라인</dt><dd>v${esc(pipVer)}</dd>` : ""}
               ${sym === "BTCUSDT" && pip && pip.signal_missing_reason
