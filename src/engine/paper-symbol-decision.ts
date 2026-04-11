@@ -173,6 +173,10 @@ function pack(
     cost_warning_applied?: boolean;
     stage1_size_reduced_due_to_cost?: boolean;
     post_entry_cost_guard?: boolean;
+    fixed_total_cost_usd?: number | null;
+    expected_move_usd?: number | null;
+    required_cost_usd?: number | null;
+    shortfall_usd?: number;
   }
 ): PaperSymbolDecision {
   return {
@@ -206,7 +210,11 @@ function pack(
     stage1_leniency_applied: fields.stage1_leniency_applied,
     cost_warning_applied: fields.cost_warning_applied,
     stage1_size_reduced_due_to_cost: fields.stage1_size_reduced_due_to_cost,
-    post_entry_cost_guard: fields.post_entry_cost_guard
+    post_entry_cost_guard: fields.post_entry_cost_guard,
+    fixed_total_cost_usd: fields.fixed_total_cost_usd,
+    expected_move_usd: fields.expected_move_usd,
+    required_cost_usd: fields.required_cost_usd,
+    shortfall_usd: fields.shortfall_usd ?? 0
   };
 }
 
@@ -256,8 +264,40 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   const stage1_leniency_applied = input.currentStage === 0 && leniency < 1.0;
 
-  const totalCost = (typeof rm === "number" && Number.isFinite(rm)) ? rm + slipFrac + safety : null;
-  const effectiveTotalCost = totalCost !== null ? totalCost * leniency : null;
+  const refNotionalUsd = DEFAULT_PAPER_SIZE_USD;
+  const fixedUsd = input.config.paperFixedTotalCostUsd;
+  const useFixedCost = fixedUsd !== null && fixedUsd > 0;
+
+  let totalCost: number | null;
+  let effectiveTotalCost: number | null;
+  let expectedMoveUsd: number | null;
+  let requiredCostUsd: number | null;
+  let shortfallUsd: number;
+
+  if (useFixedCost) {
+    totalCost = fixedUsd / refNotionalUsd;
+    requiredCostUsd = fixedUsd * leniency;
+    effectiveTotalCost = requiredCostUsd / refNotionalUsd;
+    expectedMoveUsd =
+      em !== null && typeof em === "number" && Number.isFinite(em) ? em * refNotionalUsd : null;
+    shortfallUsd =
+      expectedMoveUsd !== null && requiredCostUsd !== null
+        ? Math.max(0, requiredCostUsd - expectedMoveUsd)
+        : requiredCostUsd !== null
+          ? requiredCostUsd
+          : 0;
+  } else {
+    totalCost = (typeof rm === "number" && Number.isFinite(rm)) ? rm + slipFrac + safety : null;
+    effectiveTotalCost = totalCost !== null ? totalCost * leniency : null;
+    requiredCostUsd = effectiveTotalCost !== null ? effectiveTotalCost * refNotionalUsd : null;
+    expectedMoveUsd =
+      em !== null && typeof em === "number" && Number.isFinite(em) ? em * refNotionalUsd : null;
+    shortfallUsd =
+      effectiveTotalCost !== null && em !== null && effectiveTotalCost > em
+        ? (effectiveTotalCost - em) * refNotionalUsd
+        : 0;
+  }
+
   const required_move_pct = effectiveTotalCost !== null ? effectiveTotalCost * 100 : null;
   const shortfall_pct = (effectiveTotalCost !== null && em !== null && effectiveTotalCost > em) ? (effectiveTotalCost - em) * 100 : 0;
 
@@ -302,6 +342,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       cost_warning_applied?: boolean;
       stage1_size_reduced_due_to_cost?: boolean;
       post_entry_cost_guard?: boolean;
+      fixed_total_cost_usd?: number | null;
+      expected_move_usd?: number | null;
+      required_cost_usd?: number | null;
+      shortfall_usd?: number;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -355,7 +399,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       stage1_leniency_applied: extra.stage1_leniency_applied ?? stage1_leniency_applied,
       cost_warning_applied: extra.cost_warning_applied,
       stage1_size_reduced_due_to_cost: extra.stage1_size_reduced_due_to_cost,
-      post_entry_cost_guard: extra.post_entry_cost_guard
+      post_entry_cost_guard: extra.post_entry_cost_guard,
+      fixed_total_cost_usd: extra.fixed_total_cost_usd !== undefined ? extra.fixed_total_cost_usd : fixedUsd,
+      expected_move_usd: extra.expected_move_usd !== undefined ? extra.expected_move_usd : expectedMoveUsd,
+      required_cost_usd: extra.required_cost_usd !== undefined ? extra.required_cost_usd : requiredCostUsd,
+      shortfall_usd: extra.shortfall_usd !== undefined ? extra.shortfall_usd : shortfallUsd
     }),
     ...res
   });
@@ -531,11 +579,17 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   rr = rrFromRegime(input.regime);
 
   const supplemental_reasons: string[] = [];
+  if (useFixedCost) supplemental_reasons.push("PAPER_FIXED_TOTAL_COST_USD");
   let stage1LoosenedEntry = false;
   /** Stage 1만: 기대이동이 완화 비용 이하여도 탐색 진입 허용(하드 REJECT 안 함) */
   let costWarningStage1 = false;
 
-  if (typeof em === "number" && typeof rm === "number" && effectiveTotalCost !== null) {
+  const costGateComparable =
+    typeof em === "number" &&
+    effectiveTotalCost !== null &&
+    (useFixedCost || (typeof rm === "number" && totalCost !== null));
+
+  if (costGateComparable && em !== null && effectiveTotalCost !== null) {
     const feeWouldBlock = em <= effectiveTotalCost;
     if (feeWouldBlock) {
       if (input.currentStage === 0) {

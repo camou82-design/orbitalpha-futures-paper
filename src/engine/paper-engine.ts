@@ -1515,6 +1515,10 @@ export class PaperEngine {
         regime: this.lastRegime.regime,
         executor: decision.executor,
         stage1_result_code: res.decision.stage1_result_code,
+        fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
+        expected_move_usd: res.decision.expected_move_usd ?? null,
+        required_cost_usd: res.decision.required_cost_usd ?? null,
+        shortfall_usd: res.decision.shortfall_usd ?? 0,
         required_move_pct: res.decision.required_move_pct,
         shortfall_pct: res.decision.shortfall_pct
       });
@@ -1571,7 +1575,12 @@ export class PaperEngine {
         this.logger.info("STAGE1_POSITION_OPEN_ATTEMPT", {
           symbol: first.symbol,
           side: adaptive.direction,
-          sizeUsd: adaptive.sizeUsd
+          sizeUsd: adaptive.sizeUsd,
+          stage1_result_code: res.decision.stage1_result_code,
+          fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
+          expected_move_usd: res.decision.expected_move_usd ?? null,
+          required_cost_usd: res.decision.required_cost_usd ?? null,
+          shortfall_usd: res.decision.shortfall_usd ?? 0
         });
 
         const record: PaperOpenPositionRecord = {
@@ -1607,7 +1616,12 @@ export class PaperEngine {
 
         this.logger.info("STAGE1_POSITION_OPEN_SUCCESS", {
           symbol: record.symbol,
-          side: record.side
+          side: record.side,
+          stage1_result_code: res.decision.stage1_result_code,
+          fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
+          expected_move_usd: res.decision.expected_move_usd ?? null,
+          required_cost_usd: res.decision.required_cost_usd ?? null,
+          shortfall_usd: res.decision.shortfall_usd ?? 0
         });
 
         const entryOpenedKey = record.side === "long" ? "entry_long_opened" : "entry_short_opened";
@@ -1639,13 +1653,21 @@ export class PaperEngine {
           expected_move: decision.expected_move,
           total_cost: decision.total_cost,
           risk_state: (this.lastRisk?.riskStatus ?? "NORMAL"),
-          stage1_result_code: res.decision.stage1_result_code
+          stage1_result_code: res.decision.stage1_result_code,
+          fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
+          expected_move_usd: res.decision.expected_move_usd ?? null,
+          required_cost_usd: res.decision.required_cost_usd ?? null,
+          shortfall_usd: res.decision.shortfall_usd ?? 0
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         this.logger.error("STAGE1_POSITION_OPEN_FAIL", {
           symbol: sym,
           stage1_result_code: res.decision.stage1_result_code,
+          fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
+          expected_move_usd: res.decision.expected_move_usd ?? null,
+          required_cost_usd: res.decision.required_cost_usd ?? null,
+          shortfall_usd: res.decision.shortfall_usd ?? 0,
           final_fail_reason: msg,
           reviewing_ticks: res.decision.reviewing_ticks,
           auto_entry_triggered: res.decision.auto_entry_triggered,

@@ -109,6 +109,13 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
   const paperMinEdgeRr = parseNumber(env.ORBITALPHA_PAPER_MIN_EDGE_RR, 1);
   const paperMinEdgeVolatilityMove = parseNumber(env.ORBITALPHA_PAPER_MIN_EDGE_VOL_MOVE, 0.00003);
 
+  const paperFixedTotalCostUsdRaw = env.PAPER_FIXED_TOTAL_COST_USD ?? env.ORBITALPHA_PAPER_FIXED_TOTAL_COST_USD;
+  let paperFixedTotalCostUsd: number | null = null;
+  if (paperFixedTotalCostUsdRaw !== undefined && String(paperFixedTotalCostUsdRaw).trim() !== "") {
+    const x = Number(paperFixedTotalCostUsdRaw);
+    if (Number.isFinite(x) && x > 0) paperFixedTotalCostUsd = Math.min(1_000_000, Math.max(0.01, x));
+  }
+
   return {
     symbols: parseSymbols(env.SYMBOLS),
     leverage: parseNumber(env.LEVERAGE, 2),
@@ -141,7 +148,8 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     aiBlockEvaluationHorizonPriorityMins,
     paperEngineMode,
     paperMinEdgeRr,
-    paperMinEdgeVolatilityMove
+    paperMinEdgeVolatilityMove,
+    paperFixedTotalCostUsd
   };
 }
 

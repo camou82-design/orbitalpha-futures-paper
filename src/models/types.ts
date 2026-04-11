@@ -97,6 +97,12 @@ export type EngineConfig = Readonly<{
   paperMinEdgeRr: number;
   /** Min gate expected move (fraction of price) for EDGE_FAIL_LOW_VOL (default 0.00003). */
   paperMinEdgeVolatilityMove: number;
+  /**
+   * Paper test: if set (>0), skip dynamic fee/slippage fraction for edge checks and use
+   * `required_cost_usd = paperFixedTotalCostUsd * leniency` vs `expected_move_usd = em * DEFAULT_PAPER_SIZE_USD`.
+   * Env: `PAPER_FIXED_TOTAL_COST_USD` (e.g. 30).
+   */
+  paperFixedTotalCostUsd: number | null;
 }>;
 
 /** Standard paper entry decision reject codes (see `evaluatePaperSymbolEntry`). */
@@ -239,6 +245,14 @@ export type PaperSymbolDecisionRecord = Readonly<{
   stage1_size_reduced_due_to_cost?: boolean;
   /** 진입 후 비용 가드(증액 제한·청산 보수화) 활성 */
   post_entry_cost_guard?: boolean;
+  /** 고정 비용 테스트 모드일 때 설정값(예: 30), 아니면 null */
+  fixed_total_cost_usd?: number | null;
+  /** 기대 이동을 USD로 환산(em × 기준 노셔널, 기본 100) */
+  expected_move_usd?: number | null;
+  /** 요구 비용 USD(고정 모드: 고정값×완화, 동적 모드: 분수×노셔널) */
+  required_cost_usd?: number | null;
+  /** USD 기준 부족분 */
+  shortfall_usd?: number;
 }>;
 
 /** Minimal row shape for funnel math. */
