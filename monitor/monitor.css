@@ -334,6 +334,14 @@ body {
   border-color: rgba(250, 204, 21, 0.35);
 }
 
+.sym-pip--enter {
+  color: #86efac;
+}
+
+.sym-pip--reject {
+  color: #fb7185;
+}
+
 .sym-headline {
   margin: 0 0 0.5rem;
   font-size: 1rem;

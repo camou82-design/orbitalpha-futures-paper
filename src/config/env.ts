@@ -103,6 +103,12 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     [30, 15, 5]
   );
 
+  const paperEngineModeRaw = (env.ORBITALPHA_PAPER_ENGINE_MODE ?? "PAPER_TEST").trim().toUpperCase();
+  const paperEngineMode: "PAPER_TEST" | "SAFE" | "RESEARCH" =
+    paperEngineModeRaw === "SAFE" || paperEngineModeRaw === "RESEARCH" ? (paperEngineModeRaw as "SAFE" | "RESEARCH") : "PAPER_TEST";
+  const paperMinEdgeRr = parseNumber(env.ORBITALPHA_PAPER_MIN_EDGE_RR, 1);
+  const paperMinEdgeVolatilityMove = parseNumber(env.ORBITALPHA_PAPER_MIN_EDGE_VOL_MOVE, 0.00003);
+
   return {
     symbols: parseSymbols(env.SYMBOLS),
     leverage: parseNumber(env.LEVERAGE, 2),
@@ -132,7 +138,10 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperModeSuspendMs,
     aiBlockGoodThresholdPct,
     aiBlockMissedThresholdPct,
-    aiBlockEvaluationHorizonPriorityMins
+    aiBlockEvaluationHorizonPriorityMins,
+    paperEngineMode,
+    paperMinEdgeRr,
+    paperMinEdgeVolatilityMove
   };
 }
 

@@ -24,6 +24,8 @@ npm run build
 npm start
 ```
 
+운영 점검: `npm run check:logs-none`(executor 필드 레거시 `NONE` 검사), `npm run report:decisions`(`reports/decisions.jsonl` → `reports/decision-report.md`), `npm run check:funnel-monotonic`(퍼널 카운트 단조 비증가 검사 — 정의상 위반이 날 수 있음, `docs/decision-funnel.md` 참고).
+
 ## Project structure
 
 See `docs/` and `src/` for placeholders and notes.

@@ -45,6 +45,7 @@ export type SymbolSnapshotLike = Readonly<{
   volumeRatioProxy: number;
   boxHigh: number | null;
   boxLow: number | null;
+  atr: number | null;
 }>;
 
 function signalToState(signal: PaperSignal): PaperSignalState {
@@ -103,6 +104,7 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   reentryCooldownMs: number;
   sameDirCooldownMult: number;
   hasOpenPosition: boolean;
+  currentStage: number;
   maxPositionsReached: boolean;
 }>;
 
@@ -142,6 +144,13 @@ function pack(
     engine_mode: EngineConfig["paperEngineMode"];
     ai_decision: string | null;
     adaptive_decision: string | null;
+    guidance: string | null;
+    next_action: string | null;
+    invalidate_condition: string | null;
+    risk_note: string | null;
+    watch_zone: string | null;
+    entry_progress: number | null;
+    target_stage: number | null;
   }
 ): PaperSymbolDecision {
   return {
@@ -150,7 +159,14 @@ function pack(
     symbol: String(sym),
     pipeline_version: PIPELINE_VERSION,
     volatility_move: typeof em === "number" && Number.isFinite(em) ? em : null,
-    ...fields
+    ...fields,
+    guidance: fields.guidance ?? undefined,
+    next_action: fields.next_action ?? undefined,
+    invalidate_condition: fields.invalidate_condition ?? undefined,
+    risk_note: fields.risk_note ?? undefined,
+    watch_zone: fields.watch_zone ?? undefined,
+    entry_progress: fields.entry_progress ?? undefined,
+    target_stage: fields.target_stage ?? undefined
   };
 }
 
@@ -200,6 +216,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       strategy_executor: PaperStrategyExecutor;
       ai_decision: string | null;
       adaptive_decision: string | null;
+      guidance: string | null;
+      next_action: string | null;
+      invalidate_condition: string | null;
+      risk_note: string | null;
+      watch_zone: string | null;
+      entry_progress: number | null;
+      target_stage: number | null;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -228,7 +251,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       strategy_executor: extra.strategy_executor ?? strategy_executor,
       engine_mode: emMode,
       ai_decision: extra.ai_decision !== undefined ? extra.ai_decision : null,
-      adaptive_decision: extra.adaptive_decision !== undefined ? extra.adaptive_decision : null
+      adaptive_decision: extra.adaptive_decision !== undefined ? extra.adaptive_decision : null,
+      guidance: extra.guidance !== undefined ? extra.guidance : null,
+      next_action: extra.next_action !== undefined ? extra.next_action : null,
+      invalidate_condition: extra.invalidate_condition !== undefined ? extra.invalidate_condition : null,
+      risk_note: extra.risk_note !== undefined ? extra.risk_note : null,
+      watch_zone: extra.watch_zone !== undefined ? extra.watch_zone : null,
+      entry_progress: extra.entry_progress !== undefined ? extra.entry_progress : null,
+      target_stage: extra.target_stage !== undefined ? extra.target_stage : null
     }),
     ...res
   });
@@ -248,7 +278,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         atr_pct: null,
         strategy_executor: "IDLE",
         ai_decision: "N/A",
-        adaptive_decision: "N/A"
+        adaptive_decision: "N/A",
+        guidance: null,
+        next_action: null,
+        invalidate_condition: null,
+        risk_note: null,
+        watch_zone: null,
+        entry_progress: null,
+        target_stage: null
       },
       {
         intentSide: null,
@@ -323,7 +360,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     strategy_executor = "IDLE";
     execution_state = "IDLE";
     return ret(
-      { regime_state: "NO_TRADE", execution_state: "IDLE", ai_decision: "N/A", adaptive_decision: "N/A" },
+      { regime_state: "NO_TRADE", execution_state: "IDLE", ai_decision: "N/A", adaptive_decision: "N/A", guidance: null, target_stage: null },
       {
         intentSide: null,
         executorDecision: null,
@@ -407,12 +444,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     );
   }
 
-  if (input.maxPositionsReached || input.hasOpenPosition) {
+  if (input.maxPositionsReached) {
     final_decision = "SKIP";
-    reject_reason = null;
+    reject_reason = "RISK_MAX_POSITIONS";
     execution_state = "IDLE";
     return ret(
-      { execution_state: "IDLE", ai_decision: "N/A", adaptive_decision: "N/A" },
+      { execution_state: "IDLE", ai_decision: "N/A", adaptive_decision: "N/A", guidance: "최대 포지션 도달", target_stage: null },
       {
         intentSide,
         executorDecision: null,
@@ -433,36 +470,40 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   executorDecision =
     input.regime === "RANGE"
       ? rangeExecutorEvaluateEntry({
+        regime: input.regime,
+        risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
+        symbol: String(sym),
+        signal: sn.signal,
+        qualityScore: sn.qualityScore,
+        boxPos: sn.boxPos ?? null,
+        boxRel: sn.boxRel ?? null,
+        expectedMove: typeof em === "number" ? em : null,
+        totalCost,
+        atr: sn.atr,
+        cooldownActive: rangeUntil > nowOpen,
+        cooldownRemainingMs: rangeUntil > nowOpen ? rangeUntil - nowOpen : 0,
+        currentStage: input.currentStage
+      })
+      : input.regime === "TREND"
+        ? trendExecutorEvaluateEntry({
           regime: input.regime,
           risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
           symbol: String(sym),
           signal: sn.signal,
           qualityScore: sn.qualityScore,
-          boxPos: sn.boxPos ?? null,
-          boxRel: sn.boxRel ?? null,
+          lastPrice: sn.lastPrice,
+          ema20: sn.ema20,
+          ema60: sn.ema60,
+          volumeRatioProxy: sn.volumeRatioProxy,
+          boxHigh: sn.boxHigh ?? null,
+          boxLow: sn.boxLow ?? null,
           expectedMove: typeof em === "number" ? em : null,
           totalCost,
-          cooldownActive: rangeUntil > nowOpen,
-          cooldownRemainingMs: rangeUntil > nowOpen ? rangeUntil - nowOpen : 0
+          atr: sn.atr,
+          cooldownActive: trendUntil > nowOpen,
+          cooldownRemainingMs: trendUntil > nowOpen ? trendUntil - nowOpen : 0,
+          currentStage: input.currentStage
         })
-      : input.regime === "TREND"
-        ? trendExecutorEvaluateEntry({
-            regime: input.regime,
-            risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
-            symbol: String(sym),
-            signal: sn.signal,
-            qualityScore: sn.qualityScore,
-            lastPrice: sn.lastPrice,
-            ema20: sn.ema20,
-            ema60: sn.ema60,
-            volumeRatioProxy: sn.volumeRatioProxy,
-            boxHigh: sn.boxHigh ?? null,
-            boxLow: sn.boxLow ?? null,
-            expectedMove: typeof em === "number" ? em : null,
-            totalCost,
-            cooldownActive: trendUntil > nowOpen,
-            cooldownRemainingMs: trendUntil > nowOpen ? trendUntil - nowOpen : 0
-          })
         : null;
 
   if (!executorDecision || !executorDecision.entry_allowed) {
@@ -471,7 +512,18 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     if (reject_reason === "RISK_COOLDOWN") risk_state = "COOLDOWN";
     final_decision = "REJECT";
     return ret(
-      { execution_state: "PAPER_READY", ai_decision: "N/A", adaptive_decision: "N/A" },
+      {
+        execution_state: "PAPER_READY",
+        ai_decision: "N/A",
+        adaptive_decision: "N/A",
+        guidance: executorDecision?.guidance ?? null,
+        next_action: executorDecision?.next_action ?? null,
+        invalidate_condition: executorDecision?.invalidate_condition ?? null,
+        risk_note: executorDecision?.risk_note ?? null,
+        watch_zone: executorDecision?.watch_zone ?? null,
+        entry_progress: executorDecision?.entry_progress ?? null,
+        target_stage: null
+      },
       {
         intentSide,
         executorDecision,
@@ -502,7 +554,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           reject_reason: "AI_DIRECTION_MISMATCH",
           final_decision: "REJECT",
           ai_decision: "REJECT",
-          adaptive_decision: "N/A"
+          adaptive_decision: "N/A",
+          guidance: "AI 방향 불일치",
+          target_stage: null
         },
         {
           intentSide,
@@ -523,7 +577,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           reject_reason: "AI_REJECT",
           final_decision: "REJECT",
           ai_decision: "REJECT",
-          adaptive_decision: "N/A"
+          adaptive_decision: "N/A",
+          guidance: "AI 진입 거부",
+          target_stage: null
         },
         {
           intentSide,
@@ -566,7 +622,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         final_decision: "REJECT",
         execution_state: "ORDER_BUILD_FAIL",
         ai_decision: "APPROVE",
-        adaptive_decision: "REJECT"
+        adaptive_decision: "REJECT",
+        guidance: "결정 구성 실패",
+        target_stage: null
       },
       {
         intentSide,
@@ -589,7 +647,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         reject_reason: "ADAPTIVE_REJECT",
         final_decision: "REJECT",
         ai_decision: "APPROVE",
-        adaptive_decision: "REJECT"
+        adaptive_decision: "REJECT",
+        guidance: "방향 불일치 (Adaptive)",
+        target_stage: null
       },
       {
         intentSide,
@@ -611,7 +671,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         reject_reason: "EXECUTION_DISABLED",
         final_decision: "REJECT",
         ai_decision: "APPROVE",
-        adaptive_decision: "OK"
+        adaptive_decision: "OK",
+        guidance: "방향 제한 (Long Only)",
+        target_stage: null
       },
       {
         intentSide,
@@ -633,7 +695,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       final_decision: "ENTER",
       reject_reason: null,
       ai_decision: "APPROVE",
-      adaptive_decision: "OK"
+      adaptive_decision: "OK",
+      guidance: executorDecision?.guidance ?? null,
+      next_action: executorDecision?.next_action ?? null,
+      invalidate_condition: executorDecision?.invalidate_condition ?? null,
+      risk_note: executorDecision?.risk_note ?? null,
+      watch_zone: executorDecision?.watch_zone ?? null,
+      entry_progress: executorDecision?.entry_progress ?? null,
+      target_stage: executorDecision?.target_stage ?? null
     },
     {
       intentSide,

@@ -40,7 +40,26 @@
     trend_direction_weak: "TREND 방향성 미약",
     trend_volume_too_thin: "거래 강도(볼륨) 부족",
     AI_FILTER: "AI 차단",
-    AI_DIRECTION_MISMATCH: "방향 불일치"
+    AI_REJECT: "AI 거부",
+    AI_LOW_CONFIDENCE: "AI 신뢰도 낮음",
+    ADAPTIVE_REJECT: "적응형 거부",
+    AI_DIRECTION_MISMATCH: "방향 불일치",
+    EDGE_FAIL_FEE: "수수료 불리",
+    EDGE_FAIL_RR: "손익비 부족",
+    EDGE_FAIL_LOW_VOL: "변동성 부족",
+    EDGE_FAIL_EXPECTANCY: "기대값 부족",
+    REGIME_NO_TRADE: "레짐 제외",
+    REGIME_UNKNOWN: "레짐 불명",
+    RISK_COOLDOWN: "쿨다운",
+    RISK_FAIL_REENTRY: "재진입 제한",
+    RISK_LOSS_STREAK: "연속 손실",
+    RISK_MAX_DRAWDOWN: "일일 손실 한도",
+    DATA_NOT_READY: "데이터 부족",
+    ORDER_BUILD_FAIL: "주문 생성 실패",
+    EXECUTOR_INIT_FAIL: "실행기 초기화 실패",
+    EXECUTION_DISABLED: "실행 비활성",
+    SIGNAL_NONE: "신호 없음",
+    LEGACY_BLOCKED: "기타 차단"
   };
 
   const MAX_OPEN = 3;
@@ -65,6 +84,13 @@
   function mapBlockReason(r) {
     if (!r) return "—";
     return ENTRY_BLOCK_LABELS[r] || mapReason(r) || String(r);
+  }
+
+  /** 이벤트/레거시 로그의 executor NONE → IDLE (표시 일관성). */
+  function mapExecutorDisplay(ex) {
+    if (ex === undefined || ex === null || ex === "") return "—";
+    if (ex === "NONE") return "IDLE";
+    return String(ex);
   }
 
   function formatKst(ms) {
@@ -351,15 +377,41 @@
       blk.tone === "danger" ? "hero-card--danger" : blk.tone === "warn" ? "hero-card--warn" : "";
 
     const hero = $("hero");
+    const funnel = es && es.decision_funnel_tick && typeof es.decision_funnel_tick === "object" ? es.decision_funnel_tick : null;
+    const funnelLine =
+      funnel && typeof funnel.raw_signal_count === "number"
+        ? `이번 틱 퍼널: 신호 ${funnel.raw_signal_count} → 레짐 ${funnel.regime_pass_count} → 엣지 ${funnel.edge_pass_count} → 리스크 ${funnel.risk_pass_count} → 실행준비 ${funnel.execution_ready_count} → AI통과 ${funnel.ai_pass_count ?? "—"} → 진입 ${funnel.enter_count ?? funnel.order_submitted_count ?? "—"}`
+        : "";
+    const f50 = es && es.decision_funnel_50 && typeof es.decision_funnel_50 === "object" ? es.decision_funnel_50 : null;
+    const f50n =
+      typeof es?.decision_funnel_50_size === "number" && Number.isFinite(es.decision_funnel_50_size)
+        ? es.decision_funnel_50_size
+        : null;
+    const funnel50Line =
+      f50 && typeof f50.raw_signal_count === "number"
+        ? `최근 50틱 누적(${f50n != null ? `${f50n}/50` : "—"}): 신호 ${f50.raw_signal_count} → 레짐 ${f50.regime_pass_count} → 엣지 ${f50.edge_pass_count} → 리스크 ${f50.risk_pass_count} → 실행준비 ${f50.execution_ready_count} → AI통과 ${f50.ai_pass_count ?? "—"} → 진입 ${f50.enter_count ?? "—"}`
+        : "";
+    const rj = es && es.reject_reason_counts_tick && typeof es.reject_reason_counts_tick === "object" ? es.reject_reason_counts_tick : null;
+    const rejectTickLine =
+      rj && Object.keys(rj).length > 0
+        ? "이번 틱 차단 코드: " +
+          Object.keys(rj)
+            .map((k) => `${mapBlockReason(k)} ${rj[k]}`)
+            .join(" · ")
+        : "";
     const topStatus =
       es && typeof es === "object"
         ? `<div class="hero-topline muted text-xs" style="margin-top:0.25rem">
-            레짐 <strong>${esc(mapMode(curRegime))}</strong> · 실행기 <strong>${esc(
-              es.active_mode_executor || "—"
-            )}</strong> · 엔진 <strong>${esc(es.engine_status || "—")}</strong> · 리스크 <strong>${esc(
+            모드 <strong>${esc(es.engine_mode || "PAPER_TEST")}</strong> · 실행상태 <strong>${esc(
+              es.execution_state || "—"
+            )}</strong> · 전략 <strong>${esc(es.strategy_executor || es.active_mode_executor || "—")}</strong>
+            · 레짐 <strong>${esc(mapMode(curRegime))}</strong> · 엔진 <strong>${esc(es.engine_status || "—")}</strong> · 리스크 <strong>${esc(
               es.risk_state || es.riskStatus || "—"
             )}</strong>
-          </div>`
+          </div>
+          ${funnelLine ? `<p class="hero-sub muted">${esc(funnelLine)}</p>` : ""}
+          ${funnel50Line ? `<p class="hero-sub muted">${esc(funnel50Line)}</p>` : ""}
+          ${rejectTickLine ? `<p class="hero-sub muted">${esc(rejectTickLine)}</p>` : ""}`
         : "";
     hero.innerHTML = `
       <article class="hero-card hero-card--accent">
@@ -489,7 +541,7 @@
       const b = latestBlockedFor(sym);
       if (b) {
         const sub =
-          b.reason === "AI_FILTER" && b.detail && b.detail.ai_reason
+          (b.reason === "AI_FILTER" || b.reason === "AI_REJECT") && b.detail && b.detail.ai_reason
             ? " · " + String(b.detail.ai_reason)
             : b.reason === "AI_DIRECTION_MISMATCH"
               ? " · 방향 불일치"
@@ -534,6 +586,12 @@
       const strength = s && s.candidateStrength ? String(s.candidateStrength) : "—";
       const q = s && typeof s.qualityScore === "number" ? String(s.qualityScore) : "—";
 
+      const pip = es && es.symbol_decisions && es.symbol_decisions[sym] && es.symbol_decisions[sym].decision ? es.symbol_decisions[sym].decision : null;
+      const pipVer = pip && pip.pipeline_version ? String(pip.pipeline_version) : "—";
+      const pipReject = pip && pip.reject_reason ? mapBlockReason(pip.reject_reason) : null;
+      const fd = pip && pip.final_decision ? String(pip.final_decision) : null;
+      const fdClass = fd === "ENTER" ? "sym-pip--enter" : fd === "REJECT" ? "sym-pip--reject" : "";
+
       return `
         <article class="${cardClass}">
           <h3 class="sym-headline">${esc(sym)}</h3>
@@ -542,6 +600,15 @@
           <dl class="sym-meta">
             <dt>방향</dt><dd>${esc(dir)}</dd>
             <dt>컨텍스트</dt><dd>${esc(ctx.ctx)}${ctx.reason ? " · " + esc(ctx.reason) : ""}</dd>
+            ${pip ? `<dt>파이프라인</dt><dd>v${esc(pipVer)}</dd>` : ""}
+            ${pip ? `<dt>signal</dt><dd class="${fdClass}">${esc(String(pip.signal_state))}</dd>` : ""}
+            ${pip ? `<dt>regime</dt><dd>${esc(String(pip.regime_state))}</dd>` : ""}
+            ${pip ? `<dt>edge</dt><dd>${esc(String(pip.edge_state))}</dd>` : ""}
+            ${pip ? `<dt>risk</dt><dd>${esc(String(pip.risk_state))}</dd>` : ""}
+            ${pip ? `<dt>execution</dt><dd>${esc(String(pip.execution_state))}</dd>` : ""}
+            ${pip ? `<dt>final</dt><dd class="${fdClass}"><strong>${esc(String(pip.final_decision))}</strong></dd>` : ""}
+            ${pipReject ? `<dt>reject</dt><dd>${esc(pipReject)}</dd>` : ""}
+            ${pip ? `<dt>실행기</dt><dd>${esc(String(pip.strategy_executor))}</dd>` : ""}
             <dt>현재가</dt><dd>${esc(formatPrice(s && s.lastPrice))}</dd>
             <dt>데이터 시각</dt><dd>${esc(formatKst(s && s.fetchedAt))}</dd>
             <dt>펀딩(원시)</dt><dd>${esc(fund)}</dd>
@@ -647,10 +714,12 @@
             .map((e) => {
               const sym = e.symbol || "—";
               const rg = e.regime || "—";
-              const ex = e.executor || "—";
+              const ex = mapExecutorDisplay(e.executor);
               const rs = mapBlockReason(e.reason);
               const sub =
-                (e.reason === "AI_FILTER" || e.reason === "AI_DIRECTION_MISMATCH") && e.detail && e.detail.ai_reason
+                (e.reason === "AI_FILTER" || e.reason === "AI_REJECT" || e.reason === "AI_DIRECTION_MISMATCH") &&
+                  e.detail &&
+                  e.detail.ai_reason
                   ? " · " + String(e.detail.ai_reason)
                   : e.reason === "AI_DIRECTION_MISMATCH"
                     ? " · 방향 불일치"
@@ -681,7 +750,7 @@
     if (!ai) return "";
     const counts = ai.blocked_reason_counts || {};
     const top = Object.entries(counts)
-      .filter(([k]) => k === "AI_FILTER" || k === "AI_DIRECTION_MISMATCH")
+      .filter(([k]) => k === "AI_FILTER" || k === "AI_REJECT" || k === "AI_DIRECTION_MISMATCH")
       .sort((a, b) => (b[1] || 0) - (a[1] || 0))
       .slice(0, 3);
     if (top.length === 0) return "";

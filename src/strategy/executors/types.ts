@@ -1,6 +1,7 @@
 import type { MarketRegime } from "../market-regime-detector";
 
-export type ExecutorName = "RANGE" | "TREND" | "NONE";
+/** RANGE/TREND = 활성 전략 실행기, IDLE = 대기·미진입·NO_TRADE 등 (레거시 NONE 대체). */
+export type ExecutorName = "RANGE" | "TREND" | "IDLE";
 
 export type RiskState = "NORMAL" | "LIMITED" | "BLOCKED";
 
@@ -13,6 +14,20 @@ export type EntryDecisionBase = Readonly<{
   regime: MarketRegime;
   executor: ExecutorName;
   detail: Record<string, unknown>;
+  /** 목표 진입 단계 (1, 2, 3) */
+  target_stage?: number;
+  /** 현재 행동 가이드 */
+  guidance?: string;
+  /** 다음 예상 행동 */
+  next_action?: string;
+  /** 시나리오 무효화 조건 */
+  invalidate_condition?: string;
+  /** 리스크 특이사항 */
+  risk_note?: string;
+  /** 감시 구역 (예: "박스 하단 102k-103k") */
+  watch_zone?: string;
+  /** 진입 진행도 (0~100%) */
+  entry_progress?: number;
 }>;
 
 export type RangeEntryDecision = Readonly<
@@ -30,7 +45,49 @@ export type TrendEntryDecision = Readonly<
   }
 >;
 
-export type NoopEntryDecision = Readonly<EntryDecisionBase & { executor: "NONE" }>;
+/** 진입 불가·대기 상태의 결정 (레거시 NoopEntryDecision / executor NONE). */
+export type IdleEntryDecision = Readonly<EntryDecisionBase & { executor: "IDLE" }>;
 
-export type AnyEntryDecision = RangeEntryDecision | TrendEntryDecision | NoopEntryDecision;
+/** @deprecated IdleEntryDecision 사용. */
+export type NoopEntryDecision = IdleEntryDecision;
+
+export type AnyEntryDecision = RangeEntryDecision | TrendEntryDecision | IdleEntryDecision;
+
+export type ExitAction = "hold" | "partial_close" | "close";
+
+export type ExitOutcomeBase = Readonly<{
+  action: ExitAction;
+  reason: string | null;
+  /** 현재 행동 가이드 */
+  guidance?: string;
+  /** 다음 예상 행동 */
+  next_action?: string;
+  /** 시나리오 무효화 조건 */
+  invalidate_condition?: string;
+  /** 리스크 특이사항 */
+  risk_note?: string;
+  /** 목표가 1 (1차 익절) */
+  target_price_1?: number;
+  /** 목표가 2 (2차 익절) */
+  target_price_2?: number;
+  /** 손절가 (동적) */
+  stop_price?: number;
+  /** 탈출 진행도 (0~100%) */
+  exit_progress?: number;
+  detail: Record<string, unknown>;
+}>;
+
+export type RangeExitDecision = Readonly<
+  ExitOutcomeBase & {
+    executor: "RANGE";
+  }
+>;
+
+export type TrendExitDecision = Readonly<
+  ExitOutcomeBase & {
+    executor: "TREND";
+  }
+>;
+
+export type AnyExitDecision = RangeExitDecision | TrendExitDecision;
 

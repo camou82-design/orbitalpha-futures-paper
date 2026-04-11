@@ -240,7 +240,7 @@ function aggregateObservation(
       const r = ev && typeof ev === "object" ? (ev as Record<string, unknown>).reason : undefined;
       const rs = typeof r === "string" ? r : "unknown";
       blockedReasonCounts[rs] = (blockedReasonCounts[rs] ?? 0) + 1;
-      if (rs === "AI_FILTER" || rs === "AI_DIRECTION_MISMATCH") aiBlocked += 1;
+      if (rs === "AI_FILTER" || rs === "AI_REJECT" || rs === "AI_DIRECTION_MISMATCH") aiBlocked += 1;
     } else if (ty === "ENTRY_ALLOWED") {
       entry.entryAllowed += 1;
       executorAllowed += 1;
