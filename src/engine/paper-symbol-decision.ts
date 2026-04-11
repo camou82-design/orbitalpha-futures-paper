@@ -74,6 +74,15 @@ const STAGE1_SOFT_EXPLORE_BLOCKS = new Set([
   "trend_direction_weak"
 ]);
 
+/** RANGE 박스 폭·상단 에지 — Stage 1만 소프트 허용 + 추가 사이즈 축소. */
+const STAGE1_RANGE_EDGE_SOFT_TAGS: Readonly<Record<string, string>> = {
+  range_box_too_narrow: "STAGE1_EXPLORE_RANGE_BOX_NARROW",
+  range_not_upper_edge: "STAGE1_EXPLORE_RANGE_EDGE_RELAXED"
+};
+
+/** 기존 Stage1 탐색 배수 위에 한 번 더 곱함(아주 소액). */
+const STAGE1_RANGE_POSITION_SOFT_MULT = 0.38;
+
 function mapExecutorBlockToReject(blocked: string | undefined): PaperDecisionRejectReason {
   switch (blocked) {
     case "fee_slippage_insufficient":
@@ -187,6 +196,9 @@ function pack(
     expected_move_usd?: number | null;
     required_cost_usd?: number | null;
     shortfall_usd?: number;
+    executor_block_reason_original?: string | null;
+    stage1_soft_exec_override?: boolean;
+    stage1_size_multiplier_final?: number | null;
   }
 ): PaperSymbolDecision {
   return {
@@ -224,7 +236,10 @@ function pack(
     fixed_total_cost_usd: fields.fixed_total_cost_usd,
     expected_move_usd: fields.expected_move_usd,
     required_cost_usd: fields.required_cost_usd,
-    shortfall_usd: fields.shortfall_usd ?? 0
+    shortfall_usd: fields.shortfall_usd ?? 0,
+    executor_block_reason_original: fields.executor_block_reason_original,
+    stage1_soft_exec_override: fields.stage1_soft_exec_override,
+    stage1_size_multiplier_final: fields.stage1_size_multiplier_final
   };
 }
 
@@ -311,6 +326,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const required_move_pct = effectiveTotalCost !== null ? effectiveTotalCost * 100 : null;
   const shortfall_pct = (effectiveTotalCost !== null && em !== null && effectiveTotalCost > em) ? (effectiveTotalCost - em) * 100 : 0;
 
+  let executorBlockReasonOriginal: string | null = null;
+  let stage1SoftExecOverrideFlag = false;
+  let stage1RangeEdgeSoftApplied = false;
+
   const ret = (
     extra: Partial<{
       signal_state: PaperSignalState;
@@ -356,6 +375,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       expected_move_usd?: number | null;
       required_cost_usd?: number | null;
       shortfall_usd?: number;
+      executor_block_reason_original?: string | null;
+      stage1_soft_exec_override?: boolean;
+      stage1_size_multiplier_final?: number | null;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -413,7 +435,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       fixed_total_cost_usd: extra.fixed_total_cost_usd !== undefined ? extra.fixed_total_cost_usd : fixedUsd,
       expected_move_usd: extra.expected_move_usd !== undefined ? extra.expected_move_usd : expectedMoveUsd,
       required_cost_usd: extra.required_cost_usd !== undefined ? extra.required_cost_usd : requiredCostUsd,
-      shortfall_usd: extra.shortfall_usd !== undefined ? extra.shortfall_usd : shortfallUsd
+      shortfall_usd: extra.shortfall_usd !== undefined ? extra.shortfall_usd : shortfallUsd,
+      executor_block_reason_original: extra.executor_block_reason_original !== undefined ? extra.executor_block_reason_original : executorBlockReasonOriginal,
+      stage1_soft_exec_override: extra.stage1_soft_exec_override !== undefined ? extra.stage1_soft_exec_override : stage1SoftExecOverrideFlag,
+      stage1_size_multiplier_final: extra.stage1_size_multiplier_final !== undefined ? extra.stage1_size_multiplier_final : null
     }),
     ...res
   });
@@ -803,20 +828,33 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         })
         : null;
 
-  // Round 3: Stage 1 — RANGE·모호 맥락 소액 탐색 + 자동 진입 시 소프트 실행기 차단 해제
+  // Round 3: Stage 1 — RANGE·모호 소액 탐색 + 자동 진입 + RANGE 박스/에지 소프트 허용
   const brExec = executorDecision?.blocked_reason ?? null;
   if (!executorDecision?.entry_allowed && input.currentStage === 0 && brExec) {
     const allowExploreSoft =
       STAGE1_SOFT_EXPLORE_BLOCKS.has(brExec) && (input.isAmbiguous || input.regime === "RANGE");
     const allowAutoEntrySoft =
       input.autoEntryTriggered && (brExec === "trend_not_in_pullback" || brExec === "range_not_in_interest_zone");
-    if (allowExploreSoft || allowAutoEntrySoft) {
+    const rangeEdgeTag = input.regime === "RANGE" ? STAGE1_RANGE_EDGE_SOFT_TAGS[brExec] : undefined;
+    const allowRangeEdgeSoft = rangeEdgeTag !== undefined;
+
+    if (allowExploreSoft || allowAutoEntrySoft || allowRangeEdgeSoft) {
       stage1ExploreSoftExec = allowExploreSoft;
+      executorBlockReasonOriginal = brExec;
+      stage1SoftExecOverrideFlag = true;
+      if (allowRangeEdgeSoft) {
+        stage1RangeEdgeSoftApplied = true;
+        supplemental_reasons.push(rangeEdgeTag!);
+      }
       executorDecision = {
         ...executorDecision!,
         entry_allowed: true,
         blocked_reason: null,
-        guidance: allowExploreSoft ? `Stage1 소액 탐색 (${brExec})` : `검토 유지 자동 진입 (${brExec} 무시)`,
+        guidance: allowRangeEdgeSoft
+          ? `Stage1 RANGE 위치 탐색 (${brExec})`
+          : allowExploreSoft
+            ? `Stage1 소액 탐색 (${brExec})`
+            : `검토 유지 자동 진입 (${brExec} 무시)`,
         target_stage: 1
       };
       if (allowExploreSoft) supplemental_reasons.push("STAGE1_EXPLORE_SOFT_EXEC");
@@ -962,9 +1000,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     if (stage1ExploreSoftExec && input.currentStage === 0) {
       dynamicSizeMult *= 0.28;
     }
+    if (stage1RangeEdgeSoftApplied && input.currentStage === 0) {
+      dynamicSizeMult *= STAGE1_RANGE_POSITION_SOFT_MULT;
+    }
     if (input.isAmbiguous) {
       dynamicSizeMult *= 0.8; // Extra caution for ambiguous market
     }
+
+    const stage1SizeMultFinal = input.currentStage === 0 ? dynamicSizeMult : null;
 
     const adaptive = runFuturesAdaptiveEntry({
       mode: input.adaptiveMode,
@@ -1108,7 +1151,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         shortfall_pct,
         cost_warning_applied: costWarningStage1,
         stage1_size_reduced_due_to_cost: costWarningStage1 || (stage1LoosenedEntry && input.currentStage === 0),
-        post_entry_cost_guard: costWarningStage1
+        post_entry_cost_guard: costWarningStage1,
+        executor_block_reason_original: executorBlockReasonOriginal,
+        stage1_soft_exec_override: stage1SoftExecOverrideFlag,
+        stage1_size_multiplier_final: stage1SizeMultFinal
       },
       {
         intentSide,

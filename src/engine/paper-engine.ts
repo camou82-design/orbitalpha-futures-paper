@@ -1548,7 +1548,10 @@ export class PaperEngine {
         required_cost_usd: res.decision.required_cost_usd ?? null,
         shortfall_usd: res.decision.shortfall_usd ?? 0,
         required_move_pct: res.decision.required_move_pct,
-        shortfall_pct: res.decision.shortfall_pct
+        shortfall_pct: res.decision.shortfall_pct,
+        executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
+        stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
+        stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null
       });
 
       const sourceSignal = first.signal;
@@ -1608,7 +1611,10 @@ export class PaperEngine {
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
           expected_move_usd: res.decision.expected_move_usd ?? null,
           required_cost_usd: res.decision.required_cost_usd ?? null,
-          shortfall_usd: res.decision.shortfall_usd ?? 0
+          shortfall_usd: res.decision.shortfall_usd ?? 0,
+          executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
+          stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
+          stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null
         });
 
         const record: PaperOpenPositionRecord = {
@@ -1649,7 +1655,10 @@ export class PaperEngine {
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
           expected_move_usd: res.decision.expected_move_usd ?? null,
           required_cost_usd: res.decision.required_cost_usd ?? null,
-          shortfall_usd: res.decision.shortfall_usd ?? 0
+          shortfall_usd: res.decision.shortfall_usd ?? 0,
+          executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
+          stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
+          stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null
         });
 
         const entryOpenedKey = record.side === "long" ? "entry_long_opened" : "entry_short_opened";
@@ -1685,7 +1694,10 @@ export class PaperEngine {
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
           expected_move_usd: res.decision.expected_move_usd ?? null,
           required_cost_usd: res.decision.required_cost_usd ?? null,
-          shortfall_usd: res.decision.shortfall_usd ?? 0
+          shortfall_usd: res.decision.shortfall_usd ?? 0,
+          executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
+          stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
+          stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);

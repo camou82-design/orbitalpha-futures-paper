@@ -253,6 +253,12 @@ export type PaperSymbolDecisionRecord = Readonly<{
   required_cost_usd?: number | null;
   /** USD 기준 부족분 */
   shortfall_usd?: number;
+  /** Stage 1 소프트 허용 전 실행기 차단 코드(원본). */
+  executor_block_reason_original?: string | null;
+  /** Stage 1에서 실행기 소프트 오버라이드로 진입 허용으로 전환했는지 */
+  stage1_soft_exec_override?: boolean;
+  /** Stage 1 최종 사이즈 배수(리스크·탐색·RANGE 완화 누적 후, adaptive 직전) */
+  stage1_size_multiplier_final?: number | null;
 }>;
 
 /** Minimal row shape for funnel math. */
