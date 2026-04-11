@@ -94,6 +94,7 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   dataReady: boolean;
   regime: MarketRegime;
   regimeUnknown: boolean;
+  isAmbiguous: boolean;
   risk: RiskControlDecision | null;
   adaptiveMode: FuturesMarketMode;
   adaptiveDetail: Record<string, unknown>;
@@ -151,6 +152,8 @@ function pack(
     watch_zone: string | null;
     entry_progress: number | null;
     target_stage: number | null;
+    supplemental_reasons?: string[];
+    is_ambiguous?: boolean;
   }
 ): PaperSymbolDecision {
   return {
@@ -166,7 +169,9 @@ function pack(
     risk_note: fields.risk_note ?? undefined,
     watch_zone: fields.watch_zone ?? undefined,
     entry_progress: fields.entry_progress ?? undefined,
-    target_stage: fields.target_stage ?? undefined
+    target_stage: fields.target_stage ?? undefined,
+    supplemental_reasons: fields.supplemental_reasons,
+    is_ambiguous: fields.is_ambiguous
   };
 }
 
@@ -223,6 +228,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       watch_zone: string | null;
       entry_progress: number | null;
       target_stage: number | null;
+      supplemental_reasons?: string[];
+      is_ambiguous?: boolean;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -258,7 +265,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       risk_note: extra.risk_note !== undefined ? extra.risk_note : null,
       watch_zone: extra.watch_zone !== undefined ? extra.watch_zone : null,
       entry_progress: extra.entry_progress !== undefined ? extra.entry_progress : null,
-      target_stage: extra.target_stage !== undefined ? extra.target_stage : null
+      target_stage: extra.target_stage !== undefined ? extra.target_stage : null,
+      supplemental_reasons: extra.supplemental_reasons,
+      is_ambiguous: extra.is_ambiguous !== undefined ? extra.is_ambiguous : input.isAmbiguous
     }),
     ...res
   });
@@ -285,7 +294,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         risk_note: null,
         watch_zone: null,
         entry_progress: null,
-        target_stage: null
+        target_stage: null,
+        supplemental_reasons: ["DATA_NOT_READY"],
+        is_ambiguous: false
       },
       {
         intentSide: null,
@@ -376,40 +387,64 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   intentSide = sn.signal === "paper_long_candidate" ? "long" : "short";
   rr = rrFromRegime(input.regime);
 
-  if (typeof em === "number" && typeof rm === "number" && totalCost !== null && em <= totalCost) {
-    edge_state = "FAIL_FEE";
-    reject_reason = "EDGE_FAIL_FEE";
-    final_decision = "REJECT";
+  const supplemental_reasons: string[] = [];
+  const isBtcEth = sym === "BTCUSDT" || sym === "ETHUSDT";
+
+  // Edge Filter Loosening for Stage 1
+  let leniency = 1.0;
+  if (input.currentStage === 0) {
+    if (input.regime === "TREND") leniency *= 0.85; // 15% discount for Trend
+    else if (input.regime === "RANGE") leniency *= 0.95; // 5% discount for Range
+    if (isBtcEth) leniency *= 0.9; // Extra 10% discount for Majors
+  }
+
+  const effectiveTotalCost = totalCost !== null ? totalCost * leniency : null;
+  let stage1LoosenedEntry = false;
+
+  if (typeof em === "number" && typeof rm === "number" && effectiveTotalCost !== null) {
+    if (em <= effectiveTotalCost) {
+      edge_state = "FAIL_FEE";
+      reject_reason = "EDGE_FAIL_FEE";
+      final_decision = "REJECT";
+      supplemental_reasons.push("EDGE_FAIL_FEE");
+    } else if (totalCost !== null && em <= totalCost) {
+      // This is a "loosened" entry logic trigger
+      stage1LoosenedEntry = true;
+    }
   }
 
   const minVol = input.config.paperMinEdgeVolatilityMove;
-  if (final_decision !== "REJECT" && typeof em === "number" && em < minVol) {
+  if (typeof em === "number" && em < minVol) {
     edge_state = "FAIL_LOW_VOL";
-    reject_reason = "EDGE_FAIL_LOW_VOL";
+    if (!reject_reason) reject_reason = "EDGE_FAIL_LOW_VOL";
     final_decision = "REJECT";
+    supplemental_reasons.push("EDGE_FAIL_LOW_VOL");
   }
 
   const minRr = input.config.paperMinEdgeRr;
-  if (final_decision !== "REJECT" && rr < minRr) {
+  if (rr < minRr) {
     edge_state = "FAIL_RR";
-    reject_reason = "EDGE_FAIL_RR";
+    if (!reject_reason) reject_reason = "EDGE_FAIL_RR";
     final_decision = "REJECT";
+    supplemental_reasons.push("EDGE_FAIL_RR");
   }
 
-  if (final_decision !== "REJECT" && input.risk?.engineBlocked) {
+  if (input.risk?.engineBlocked) {
     risk_state = "HARD_BLOCK";
-    reject_reason = "RISK_MAX_DRAWDOWN";
+    if (!reject_reason) reject_reason = "RISK_MAX_DRAWDOWN";
     final_decision = "REJECT";
+    supplemental_reasons.push("RISK_MAX_DRAWDOWN");
   }
 
   const rBlock = input.risk?.blockedRegimes?.[input.regime];
-  if (final_decision !== "REJECT" && rBlock && rBlock.until > input.now) {
+  if (rBlock && rBlock.until > input.now) {
     risk_state = "COOLDOWN";
-    reject_reason = "RISK_COOLDOWN";
+    if (!reject_reason) reject_reason = "RISK_COOLDOWN";
     final_decision = "REJECT";
+    supplemental_reasons.push("RISK_COOLDOWN");
   }
 
-  if (final_decision !== "REJECT" && input.lastCloseMetaBySymbol && input.reentryCooldownMs > 0 && intentSide) {
+  if (input.lastCloseMetaBySymbol && input.reentryCooldownMs > 0 && intentSide) {
     const meta = input.lastCloseMetaBySymbol.get(String(sym));
     const lastClose = meta?.closedAt ?? 0;
     const elapsed = input.now - lastClose;
@@ -417,8 +452,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const waitMs = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
     if (lastClose > 0 && elapsed < waitMs) {
       risk_state = "COOLDOWN";
-      reject_reason = "RISK_FAIL_REENTRY";
+      if (!reject_reason) reject_reason = "RISK_FAIL_REENTRY";
       final_decision = "REJECT";
+      supplemental_reasons.push("RISK_FAIL_REENTRY");
     }
   }
 
@@ -431,7 +467,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   if (final_decision === "REJECT") {
     return ret(
-      { execution_state: "PAPER_READY", ai_decision: "N/A", adaptive_decision: "N/A" },
+      { execution_state: "PAPER_READY", ai_decision: "N/A", adaptive_decision: "N/A", supplemental_reasons },
       {
         intentSide,
         executorDecision: null,
@@ -448,8 +484,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     final_decision = "SKIP";
     reject_reason = "RISK_MAX_POSITIONS";
     execution_state = "IDLE";
+    supplemental_reasons.push("RISK_MAX_POSITIONS");
     return ret(
-      { execution_state: "IDLE", ai_decision: "N/A", adaptive_decision: "N/A", guidance: "최대 포지션 도달", target_stage: null },
+      { execution_state: "IDLE", ai_decision: "N/A", adaptive_decision: "N/A", guidance: "최대 포지션 도달", target_stage: null, supplemental_reasons },
       {
         intentSide,
         executorDecision: null,
@@ -511,6 +548,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     reject_reason = br ? mapExecutorBlockToReject(br) : "LEGACY_BLOCKED";
     if (reject_reason === "RISK_COOLDOWN") risk_state = "COOLDOWN";
     final_decision = "REJECT";
+    if (br) supplemental_reasons.push(`EXEC_BLOCKED_${br.toUpperCase()}`);
     return ret(
       {
         execution_state: "PAPER_READY",
@@ -522,7 +560,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         risk_note: executorDecision?.risk_note ?? null,
         watch_zone: executorDecision?.watch_zone ?? null,
         entry_progress: executorDecision?.entry_progress ?? null,
-        target_stage: null
+        target_stage: null,
+        supplemental_reasons
       },
       {
         intentSide,
@@ -549,6 +588,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     if (mismatch) {
       reject_reason = "AI_DIRECTION_MISMATCH";
       final_decision = "REJECT";
+      supplemental_reasons.push("AI_DIRECTION_MISMATCH");
       return ret(
         {
           reject_reason: "AI_DIRECTION_MISMATCH",
@@ -556,7 +596,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           ai_decision: "REJECT",
           adaptive_decision: "N/A",
           guidance: "AI 방향 불일치",
-          target_stage: null
+          target_stage: null,
+          supplemental_reasons
         },
         {
           intentSide,
@@ -569,29 +610,48 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         }
       );
     }
+
+    // AI Role refinement: Only EXTREME_LOW (quality < 45) is hard REJECT
     if (aiOut.action === "NO_ENTRY") {
-      reject_reason = "AI_REJECT";
-      final_decision = "REJECT";
-      return ret(
-        {
-          reject_reason: "AI_REJECT",
-          final_decision: "REJECT",
-          ai_decision: "REJECT",
-          adaptive_decision: "N/A",
-          guidance: "AI 진입 거부",
-          target_stage: null
-        },
-        {
-          intentSide,
-          executorDecision,
-          adaptiveOk: false,
-          adaptiveDirection: null,
-          adaptiveDetail: null,
-          adaptiveResult: null,
-          aiGatePassed: false
-        }
-      );
+      if (sn.qualityScore < 45) {
+        reject_reason = "AI_REJECT";
+        final_decision = "REJECT";
+        supplemental_reasons.push("AI_REJECT_LOW_QUALITY");
+        return ret(
+          {
+            reject_reason: "AI_REJECT",
+            final_decision: "REJECT",
+            ai_decision: "REJECT",
+            adaptive_decision: "N/A",
+            guidance: "AI 품질 미달 거부 (진입 불가)",
+            target_stage: null,
+            supplemental_reasons
+          },
+          {
+            intentSide,
+            executorDecision,
+            adaptiveOk: false,
+            adaptiveDirection: null,
+            adaptiveDetail: null,
+            adaptiveResult: null,
+            aiGatePassed: false
+          }
+        );
+      } else {
+        // Quality 45~60: Allow but size down + label as LOW_QUALITY
+        stage1LoosenedEntry = true;
+        supplemental_reasons.push("AI_LOW_QUALITY_CAUTION");
+      }
     }
+  }
+
+  // Size Multiplier Calculation
+  let dynamicSizeMult = input.risk?.sizeMultiplier ?? 1;
+  if (stage1LoosenedEntry && input.currentStage === 0) {
+    dynamicSizeMult *= 0.5; // Stage 1 loosened entries get 50% size reduction
+  }
+  if (input.isAmbiguous) {
+    dynamicSizeMult *= 0.8; // Extra caution for ambiguous market
   }
 
   const adaptive = runFuturesAdaptiveEntry({
@@ -609,13 +669,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       emaGap: sn.emaGap,
       volumeRatioProxy: sn.volumeRatioProxy
     },
-    baseSizeUsd: DEFAULT_PAPER_SIZE_USD * (input.risk?.sizeMultiplier ?? 1)
+    baseSizeUsd: DEFAULT_PAPER_SIZE_USD * dynamicSizeMult
   });
   adaptiveDetailOut = adaptive.detail ?? null;
   if (!adaptive.ok) {
     reject_reason = "ORDER_BUILD_FAIL";
     final_decision = "REJECT";
     execution_state = "ORDER_BUILD_FAIL";
+    supplemental_reasons.push("ORDER_BUILD_FAIL");
     return ret(
       {
         reject_reason: "ORDER_BUILD_FAIL",
@@ -624,7 +685,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         ai_decision: "APPROVE",
         adaptive_decision: "REJECT",
         guidance: "결정 구성 실패",
-        target_stage: null
+        target_stage: null,
+        supplemental_reasons
       },
       {
         intentSide,
@@ -642,6 +704,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   if (adaptive.direction !== expectedSide) {
     reject_reason = "ADAPTIVE_REJECT";
     final_decision = "REJECT";
+    supplemental_reasons.push("ADAPTIVE_DIRECTION_MISMATCH");
     return ret(
       {
         reject_reason: "ADAPTIVE_REJECT",
@@ -649,7 +712,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         ai_decision: "APPROVE",
         adaptive_decision: "REJECT",
         guidance: "방향 불일치 (Adaptive)",
-        target_stage: null
+        target_stage: null,
+        supplemental_reasons
       },
       {
         intentSide,
@@ -666,6 +730,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   if (input.config.longOnly && adaptive.direction === "short") {
     reject_reason = "EXECUTION_DISABLED";
     final_decision = "REJECT";
+    supplemental_reasons.push("LONG_ONLY_RESTRICTION");
     return ret(
       {
         reject_reason: "EXECUTION_DISABLED",
@@ -673,7 +738,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         ai_decision: "APPROVE",
         adaptive_decision: "OK",
         guidance: "방향 제한 (Long Only)",
-        target_stage: null
+        target_stage: null,
+        supplemental_reasons
       },
       {
         intentSide,
@@ -702,7 +768,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       risk_note: executorDecision?.risk_note ?? null,
       watch_zone: executorDecision?.watch_zone ?? null,
       entry_progress: executorDecision?.entry_progress ?? null,
-      target_stage: executorDecision?.target_stage ?? null
+      target_stage: executorDecision?.target_stage ?? null,
+      supplemental_reasons
     },
     {
       intentSide,

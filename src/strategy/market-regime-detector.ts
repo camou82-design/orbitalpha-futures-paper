@@ -5,6 +5,7 @@ export type MarketRegime = "RANGE" | "TREND" | "NO_TRADE";
 
 export type MarketRegimeDetection = Readonly<{
   regime: MarketRegime;
+  isAmbiguous: boolean;
   detail: Record<string, unknown>;
 }>;
 
@@ -36,6 +37,7 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
   if (c.length < 60) {
     return {
       regime: "NO_TRADE",
+      isAmbiguous: false,
       detail: { reason: "insufficient_btc_5m", len: c.length }
     };
   }
@@ -48,7 +50,7 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
   const e20 = emaLast(closes.slice(-80), 20);
   const e60 = emaLast(closes.slice(-140), 60);
   if (e20 === null || e60 === null || !Number.isFinite(last) || last <= 0) {
-    return { regime: "NO_TRADE", detail: { reason: "ema_not_ready_or_bad_price" } };
+    return { regime: "NO_TRADE", isAmbiguous: false, detail: { reason: "ema_not_ready_or_bad_price" } };
   }
   const bias: "up" | "down" | "flat" = e20 > e60 * 1.0012 ? "up" : e20 < e60 * 0.9988 ? "down" : "flat";
 
@@ -86,6 +88,7 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
   if (dumpRisk || volTooHigh) {
     return {
       regime: "NO_TRADE",
+      isAmbiguous: false,
       detail: {
         reason: dumpRisk ? "dump_risk" : "vol_too_high",
         atr_rel: atrRel,
@@ -115,6 +118,7 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
   if (trendScore >= 0.62 && rangeScore < 0.55) {
     return {
       regime: "TREND",
+      isAmbiguous: false,
       detail: {
         atr_rel: atrRel,
         box_rel: boxRel,
@@ -133,6 +137,7 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
   if (rangeScore >= 0.60 && trendScore < 0.62) {
     return {
       regime: "RANGE",
+      isAmbiguous: false,
       detail: {
         atr_rel: atrRel,
         box_rel: boxRel,
@@ -148,11 +153,14 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
     };
   }
 
-  // Ambiguous context → NO_TRADE by design ("애매하면 아예 안 친다").
+  // Ambiguous context → Fallback to higher score if reasonable, otherwise mark Ambiguous but continue.
+  const higherScoreRegime: MarketRegime = trendScore >= rangeScore ? "TREND" : "RANGE";
+
   return {
-    regime: "NO_TRADE",
+    regime: higherScoreRegime,
+    isAmbiguous: true,
     detail: {
-      reason: "ambiguous",
+      reason: "ambiguous_context",
       atr_rel: atrRel,
       box_rel: boxRel,
       ema20: e20,

@@ -196,9 +196,8 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
       };
     }
 
-    // 최소 반응 조건 확인 (여기서는 단순히 qualityScore나 boxPos의 미세 변화를 사용하거나, 
-    // 추후 candle 분석 로직을 더 강화할 수 있음. 현재는 qualityScore 60 이상으로 완화)
-    if (input.qualityScore < 60) {
+    // 최소 반응 조건 확인 (Stage 1: 55점 이상으로 완화)
+    if (input.qualityScore < 55) {
       return {
         regime: input.regime,
         executor: "RANGE",
@@ -208,8 +207,8 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
         expected_move: input.expectedMove,
         total_cost: input.totalCost,
         risk_state: input.risk_state,
-        guidance: "진입 대기: 반전 신호 약함",
-        detail: { score: input.qualityScore, floor: 60 }
+        guidance: "진입 대기: 반전 신호 약함 (점수 기준 미달)",
+        detail: { score: input.qualityScore, floor: 55 }
       };
     }
 
@@ -233,7 +232,22 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
     };
   }
 
-  // 2차/3차 추가진입 로직
+  // 2차/3차 추가진입 로직 (품질 기준 68점 이상으로 강화)
+  if (input.qualityScore < 68) {
+    return {
+      regime: input.regime,
+      executor: "RANGE",
+      entry_allowed: false,
+      blocked_reason: "range_scaling_low_quality",
+      box_position,
+      expected_move: input.expectedMove,
+      total_cost: input.totalCost,
+      risk_state: input.risk_state,
+      guidance: "추격 대기: 품질 확인 중",
+      detail: { score: input.qualityScore, floor: 68, currentStage }
+    };
+  }
+
   if (currentStage === 1) {
     // 2차 조건: 방향 전환 확인 (박스 25% 지점 이상 반전)
     const confirmed = dir === "long" ? (boxPos ?? 0) > 0.25 : (boxPos ?? 1) < 0.75;

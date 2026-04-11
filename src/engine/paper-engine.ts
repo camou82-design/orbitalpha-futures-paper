@@ -557,6 +557,7 @@ export class PaperEngine {
           dataReady: false,
           regime: regimeDetected.regime,
           regimeUnknown,
+          isAmbiguous: regimeDetected.isAmbiguous,
           risk: this.lastRisk,
           adaptiveMode: this.lastAdaptiveMode.mode,
           adaptiveDetail: this.lastAdaptiveMode.detail,
@@ -607,6 +608,7 @@ export class PaperEngine {
         dataReady: true,
         regime: regimeDetected.regime,
         regimeUnknown,
+        isAmbiguous: regimeDetected.isAmbiguous,
         risk: this.lastRisk,
         adaptiveMode: this.lastAdaptiveMode.mode,
         adaptiveDetail: this.lastAdaptiveMode.detail,
@@ -646,6 +648,7 @@ export class PaperEngine {
         strategy_executor:
           this.lastAdaptiveMode.mode === "trend" ? "TREND" : this.lastAdaptiveMode.mode === "sideways" ? "RANGE" : "IDLE",
         current_regime: (regimeDetected.regime === "TREND" ? "TREND" : regimeDetected.regime === "RANGE" ? "RANGE" : "NO_TRADE") as PaperRegimeState,
+        is_ambiguous: regimeDetected.isAmbiguous,
         adaptiveMode: this.lastAdaptiveMode.mode,
         engine_status: risk.dailyLossGuardTriggered ? "PAUSED" : "RUNNING",
         risk_state: risk.riskStatus,

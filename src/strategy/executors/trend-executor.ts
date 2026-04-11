@@ -113,7 +113,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
     };
   }
 
-  if (input.qualityScore < 64) {
+  if (input.qualityScore < 50) {
     return {
       regime: input.regime,
       executor: "TREND",
@@ -124,7 +124,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
       expected_move: input.expectedMove,
       total_cost: input.totalCost,
       risk_state: input.risk_state,
-      detail: { score: input.qualityScore, floor: 64 }
+      detail: { score: input.qualityScore, floor: 50 }
     };
   }
 
@@ -224,8 +224,8 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
       };
     }
 
-    // 최소 품질 확인
-    if (input.qualityScore < 60) {
+    // 최소 품질 확인 (Stage 1: 55점 이상으로 완화)
+    if (input.qualityScore < 55) {
       return {
         regime: input.regime,
         executor: "TREND",
@@ -236,8 +236,8 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
         expected_move: input.expectedMove,
         total_cost: input.totalCost,
         risk_state: input.risk_state,
-        guidance: "진입 대기: 추세 반응 약함",
-        detail: { score: input.qualityScore }
+        guidance: "진입 대기: 추세 반응 약함 (점수 기준 미달)",
+        detail: { score: input.qualityScore, floor: 55 }
       };
     }
 
@@ -259,6 +259,23 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
       watch_zone: "EMA20 인근",
       entry_progress: 30,
       detail: { direction: dir, pullbackOk, stage: 1 }
+    };
+  }
+
+  // 2차/3차 추가진입 로직 (품질 기준 68점 이상으로 강화)
+  if (input.qualityScore < 68) {
+    return {
+      regime: input.regime,
+      executor: "TREND",
+      entry_allowed: false,
+      blocked_reason: "trend_scaling_low_quality",
+      breakout_state,
+      pullback_state,
+      expected_move: input.expectedMove,
+      total_cost: input.totalCost,
+      risk_state: input.risk_state,
+      guidance: "추격 대기: 품질 확인 중",
+      detail: { score: input.qualityScore, floor: 68, currentStage }
     };
   }
 

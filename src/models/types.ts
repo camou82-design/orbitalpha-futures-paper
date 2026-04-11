@@ -184,6 +184,10 @@ export type PaperSymbolDecisionRecord = Readonly<{
   entry_progress?: number;
   /** 진입/추가진입 목표 단계 (1, 2, 3) */
   target_stage?: number;
+  /** 보조 차단 사유들 */
+  supplemental_reasons?: string[];
+  /** 애매한 장세 여부 */
+  is_ambiguous?: boolean;
 }>;
 
 /** Minimal row shape for funnel math. */
@@ -239,6 +243,7 @@ export type PaperEngineState = Readonly<{
   decision_funnel_50: DecisionFunnelTick;
   decision_funnel_50_size: number;
   reject_reason_counts_tick: Record<string, number>;
+  is_ambiguous?: boolean;
   symbol_decisions: Record<string, { decision: PaperSymbolDecisionRecord; adaptiveOk: boolean }>;
 }>;
 
