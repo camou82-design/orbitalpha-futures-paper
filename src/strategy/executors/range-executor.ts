@@ -176,8 +176,8 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
     else guidance = "박스 상단 대기 중";
   }
 
-  // 1차 선진입 조건: 박스 끝단 15% 이내 진입
-  const edgeThreshold = 0.15;
+  // 1차 선진입 조건: 박스 끝단 20% 이내 진입 (15% -> 20% 완화)
+  const edgeThreshold = 0.20;
   const inInterestZone = dir === "long" ? (boxPos ?? 0) <= edgeThreshold : (boxPos ?? 1) >= (1 - edgeThreshold);
 
   if (currentStage === 0) {
@@ -196,8 +196,9 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
       };
     }
 
-    // 최소 반응 조건 확인 (Stage 1: 55점 이상으로 완화)
-    if (input.qualityScore < 55) {
+    // 최소 반응 조건 확인 (Stage 1: 48점 이상으로 추가 완화)
+    const floor = 48;
+    if (input.qualityScore < floor) {
       return {
         regime: input.regime,
         executor: "RANGE",
@@ -208,7 +209,7 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
         total_cost: input.totalCost,
         risk_state: input.risk_state,
         guidance: "진입 대기: 반전 신호 약함 (점수 기준 미달)",
-        detail: { score: input.qualityScore, floor: 55 }
+        detail: { score: input.qualityScore, floor }
       };
     }
 
@@ -413,4 +414,3 @@ export function rangeExecutorEvaluateExit(input: Readonly<{
     detail: { boxPos, partialExitStage: input.partialExitStage }
   };
 }
-

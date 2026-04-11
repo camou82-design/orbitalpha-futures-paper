@@ -540,7 +540,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         atr: sn.atr,
         cooldownActive: rangeUntil > nowOpen,
         cooldownRemainingMs: rangeUntil > nowOpen ? rangeUntil - nowOpen : 0,
-        currentStage: input.currentStage
+        currentStage: input.currentStage,
+        autoEntryTriggered: input.autoEntryTriggered,
+        reviewingTicks: input.reviewingTicks
       })
       : input.regime === "TREND"
         ? trendExecutorEvaluateEntry({
@@ -560,9 +562,28 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           atr: sn.atr,
           cooldownActive: trendUntil > nowOpen,
           cooldownRemainingMs: trendUntil > nowOpen ? trendUntil - nowOpen : 0,
-          currentStage: input.currentStage
+          currentStage: input.currentStage,
+          autoEntryTriggered: input.autoEntryTriggered,
+          reviewingTicks: input.reviewingTicks
         })
         : null;
+
+  // Round 3: Conditional Override for Auto-Entry Soft Blocks (Stage 1 only)
+  if (
+    !executorDecision?.entry_allowed &&
+    input.autoEntryTriggered &&
+    input.currentStage === 0 &&
+    (executorDecision?.blocked_reason === "trend_not_in_pullback" || executorDecision?.blocked_reason === "range_not_in_interest_zone")
+  ) {
+    // Override soft block to force execution for persistent candidates
+    executorDecision = {
+      ...executorDecision!,
+      entry_allowed: true,
+      blocked_reason: null,
+      guidance: `검토 유지 자동 진입 (${executorDecision?.blocked_reason} 무시)`,
+      target_stage: 1
+    };
+  }
 
   if (!executorDecision || !executorDecision.entry_allowed) {
     const br = executorDecision?.blocked_reason;

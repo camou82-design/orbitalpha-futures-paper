@@ -175,7 +175,8 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
   }
 
   // Trend should trade less: require stronger activity.
-  if (input.volumeRatioProxy < 1.05) {
+  const minVol = input.currentStage === 0 ? 1.02 : 1.05; // Slightly loosen Stage 1 volume ratio
+  if (input.volumeRatioProxy < minVol) {
     return {
       regime: input.regime,
       executor: "TREND",
@@ -186,7 +187,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
       expected_move: input.expectedMove,
       total_cost: input.totalCost,
       risk_state: input.risk_state,
-      detail: { volume_ratio_proxy: input.volumeRatioProxy, min: 1.05 }
+      detail: { volume_ratio_proxy: input.volumeRatioProxy, min: minVol }
     };
   }
 
@@ -207,8 +208,10 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
   }
 
   if (currentStage === 0) {
-    // 1차 선진입: EMA20 눌림 확인
-    if (!pullbackOk) {
+    // 1차 선진입: EMA20 눌림 확인 OR 고품질 돌파 확인
+    const canBreakoutRaw = breakoutOk && input.qualityScore > 60; // Allow breakout if high quality
+
+    if (!pullbackOk && !canBreakoutRaw) {
       return {
         regime: input.regime,
         executor: "TREND",
@@ -220,12 +223,13 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
         total_cost: input.totalCost,
         risk_state: input.risk_state,
         guidance,
-        detail: { pullback_state }
+        detail: { pullback_state, breakout_state, score: input.qualityScore }
       };
     }
 
-    // 최소 품질 확인 (Stage 1: 55점 이상으로 완화)
-    if (input.qualityScore < 55) {
+    // 최소 품질 확인 (Stage 1: 48점 이상으로 추가 완화)
+    const floor = 48;
+    if (input.qualityScore < floor) {
       return {
         regime: input.regime,
         executor: "TREND",
@@ -237,7 +241,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
         total_cost: input.totalCost,
         risk_state: input.risk_state,
         guidance: "진입 대기: 추세 반응 약함 (점수 기준 미달)",
-        detail: { score: input.qualityScore, floor: 55 }
+        detail: { score: input.qualityScore, floor }
       };
     }
 
@@ -252,13 +256,13 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
       total_cost: input.totalCost,
       risk_state: input.risk_state,
       target_stage: 1,
-      guidance: "1차 추세 선진입 실행 (비중 30%)",
+      guidance: canBreakoutRaw ? "추세 돌파 선진입 실행 (비중 30%)" : "1차 추세 선진입 실행 (비중 30%)",
       next_action: "2차 반등 확인 추가진입 대기",
       invalidate_condition: dir === "long" ? "EMA20 하향 돌파 시" : "EMA20 상향 돌파 시",
       risk_note: input.volumeRatioProxy < 1.1 ? "거래량 다소 부족" : undefined,
       watch_zone: "EMA20 인근",
       entry_progress: 30,
-      detail: { direction: dir, pullbackOk, stage: 1 }
+      detail: { direction: dir, pullbackOk, breakoutOk: canBreakoutRaw, stage: 1 }
     };
   }
 
