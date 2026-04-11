@@ -260,6 +260,18 @@ export type PaperSymbolDecisionRecord = Readonly<{
   executor_block_reason_original?: string | null;
   /** Stage 1에서 실행기 소프트 오버라이드로 진입 허용으로 전환했는지 */
   stage1_soft_exec_override?: boolean;
+  /** RANGE·Stage0 재진입 쿨다운 완화 적용 여부(RISK_FAIL_REENTRY 경로) */
+  reentry_cooldown_applied?: boolean;
+  /** 재진입 대기 원래 밀리초(동일 방향 배수 반영 후) */
+  reentry_cooldown_original_ms?: number | null;
+  /** 실제 비교에 쓴 밀리초(완화 시 축소) */
+  reentry_cooldown_effective_ms?: number | null;
+  /** 완화/비완화 사유 코드 */
+  reentry_cooldown_reason?: string | null;
+  /** 판단 시점 진입 단계(엔진 currentStage) */
+  currentStage?: number;
+  /** 판단 시점 레짐 */
+  regime?: "TREND" | "RANGE" | "NO_TRADE";
   /** Stage 1 최종 사이즈 배수(리스크·탐색·RANGE 완화 누적 후, adaptive 직전) */
   stage1_size_multiplier_final?: number | null;
   /** 적응형 진입(페이퍼) 주문 구성 결과 — 거래소 호가·계약 스펙 없음 */
@@ -450,6 +462,8 @@ export type PaperClosedPositionRecord = Readonly<{
   sourceRunPath: string;
   /** 진입 시점 레짐(RANGE/TREND/NO_TRADE) — 모드별 성과 분리용. */
   regimeAtEntry?: "RANGE" | "TREND" | "NO_TRADE";
+  /** 청산 시점 진입 단계(1=초기, 2+=증액). 재진입 쿨다운 정책용. */
+  entryStageAtClose?: number;
   latestSnapshotPath?: string;
   latestMetaPath?: string;
   timestampSnapshotPath?: string;

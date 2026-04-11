@@ -23,6 +23,22 @@ import type { PaperSignal } from "../strategy/entry-signal";
 import type { PaperCandidateStrength } from "../strategy/entry-signal";
 import { PIPELINE_VERSION } from "./decision-funnel";
 
+/** RANGE·Stage0·RISK_FAIL_REENTRY: 부분익절/TP 계열 청산 후 동일 심볼 재진입 대기만 완화(손절·증액 단계 제외). */
+const RANGE_STAGE0_REENTRY_RELAX_MULT = 0.35;
+const RANGE_STAGE0_REENTRY_RELAX_MIN_MS = 45_000;
+
+function isRangeStage0ReentryRelaxCloseReason(cr: unknown): boolean {
+  if (cr == null || cr === "stop_loss") return false;
+  return (
+    cr === "partial_exit_1" ||
+    cr === "partial_exit_2" ||
+    cr === "take_profit" ||
+    cr === "trailing_stop" ||
+    cr === "time_based_exit" ||
+    cr === "regime_exit"
+  );
+}
+
 /** @deprecated use PaperDecisionRejectReason from `../models/types` */
 export type RejectReasonCode = PaperDecisionRejectReason;
 
@@ -121,7 +137,15 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   now: number;
   rangeCooldownUntilByKey: ReadonlyMap<string, number>;
   trendCooldownUntilBySymbol: ReadonlyMap<string, number>;
-  lastCloseMetaBySymbol: ReadonlyMap<string, { closedAt: number; side: "long" | "short" }> | null;
+  lastCloseMetaBySymbol: ReadonlyMap<
+    string,
+    {
+      closedAt: number;
+      side: "long" | "short";
+      closeReason?: import("../models/types").PaperClosedPositionRecord["closeReason"];
+      entryStageAtClose?: number;
+    }
+  > | null;
   reentryCooldownMs: number;
   sameDirCooldownMult: number;
   hasOpenPosition: boolean;
@@ -218,6 +242,12 @@ function pack(
     original_signal_state?: string;
     final_signal_state?: string;
     execution_disabled_reason?: string | null;
+    reentry_cooldown_applied?: boolean;
+    reentry_cooldown_original_ms?: number | null;
+    reentry_cooldown_effective_ms?: number | null;
+    reentry_cooldown_reason?: string | null;
+    currentStage?: number;
+    regime?: "TREND" | "RANGE" | "NO_TRADE";
   }
 ): PaperSymbolDecision {
   return {
@@ -276,7 +306,13 @@ function pack(
     long_only_restriction: fields.long_only_restriction,
     original_signal_state: fields.original_signal_state,
     final_signal_state: fields.final_signal_state,
-    execution_disabled_reason: fields.execution_disabled_reason
+    execution_disabled_reason: fields.execution_disabled_reason,
+    reentry_cooldown_applied: fields.reentry_cooldown_applied ?? false,
+    reentry_cooldown_original_ms: fields.reentry_cooldown_original_ms ?? null,
+    reentry_cooldown_effective_ms: fields.reentry_cooldown_effective_ms ?? null,
+    reentry_cooldown_reason: fields.reentry_cooldown_reason ?? null,
+    currentStage: fields.currentStage,
+    regime: fields.regime
   };
 }
 
@@ -367,6 +403,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let stage1SoftExecOverrideFlag = false;
   let stage1RangeEdgeSoftApplied = false;
 
+  let reentry_cooldown_applied = false;
+  let reentry_cooldown_original_ms: number | null = null;
+  let reentry_cooldown_effective_ms: number | null = null;
+  let reentry_cooldown_reason: string | null = null;
+
   const ret = (
     extra: Partial<{
       signal_state: PaperSignalState;
@@ -432,6 +473,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       original_signal_state?: string;
       final_signal_state?: string;
       execution_disabled_reason?: string | null;
+      reentry_cooldown_applied?: boolean;
+      reentry_cooldown_original_ms?: number | null;
+      reentry_cooldown_effective_ms?: number | null;
+      reentry_cooldown_reason?: string | null;
+      currentStage?: number;
+      regime?: "TREND" | "RANGE" | "NO_TRADE";
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -510,7 +557,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       long_only_restriction: extra.long_only_restriction,
       original_signal_state: extra.original_signal_state,
       final_signal_state: extra.final_signal_state,
-      execution_disabled_reason: extra.execution_disabled_reason
+      execution_disabled_reason: extra.execution_disabled_reason,
+      reentry_cooldown_applied: extra.reentry_cooldown_applied ?? reentry_cooldown_applied,
+      reentry_cooldown_original_ms: extra.reentry_cooldown_original_ms ?? reentry_cooldown_original_ms,
+      reentry_cooldown_effective_ms: extra.reentry_cooldown_effective_ms ?? reentry_cooldown_effective_ms,
+      reentry_cooldown_reason: extra.reentry_cooldown_reason ?? reentry_cooldown_reason,
+      currentStage: extra.currentStage !== undefined ? extra.currentStage : input.currentStage,
+      regime: extra.regime !== undefined ? extra.regime : input.regime
     }),
     ...res
   });
@@ -784,7 +837,33 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const lastClose = meta?.closedAt ?? 0;
     const elapsed = input.now - lastClose;
     const sameDirection = meta !== undefined && meta.side === intentSide;
-    const waitMs = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
+    let waitMs = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
+    reentry_cooldown_original_ms = waitMs;
+    reentry_cooldown_effective_ms = waitMs;
+    reentry_cooldown_applied = false;
+    reentry_cooldown_reason = null;
+
+    const scaledFromClose = meta != null && (meta.entryStageAtClose ?? 1) >= 2;
+    const relaxEligible =
+      input.currentStage === 0 &&
+      input.regime === "RANGE" &&
+      meta != null &&
+      !scaledFromClose &&
+      isRangeStage0ReentryRelaxCloseReason(meta.closeReason);
+
+    if (relaxEligible && waitMs > 0) {
+      const relaxed = Math.max(
+        RANGE_STAGE0_REENTRY_RELAX_MIN_MS,
+        Math.floor(waitMs * RANGE_STAGE0_REENTRY_RELAX_MULT)
+      );
+      if (relaxed < waitMs) {
+        waitMs = relaxed;
+        reentry_cooldown_applied = true;
+        reentry_cooldown_effective_ms = relaxed;
+        reentry_cooldown_reason = "range_stage0_reentry_relax_partial_or_tp_not_sl_not_stage2plus";
+      }
+    }
+
     if (lastClose > 0 && elapsed < waitMs) {
       risk_state = "COOLDOWN";
       if (!reject_reason) reject_reason = "RISK_FAIL_REENTRY";

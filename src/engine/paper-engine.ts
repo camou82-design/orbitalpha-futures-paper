@@ -212,9 +212,27 @@ function buildRequestDiagnosticsBySymbol(diags: SymbolDiagnostic[]): Record<stri
   return bySymbol;
 }
 
-/** Latest close per symbol: time + side (같은 방향 재진입 쿨다운용). */
-function latestCloseMetaBySymbol(history: readonly unknown[]): Map<string, { closedAt: number; side: "long" | "short" }> {
-  const m = new Map<string, { closedAt: number; side: "long" | "short" }>();
+/** Latest close per symbol: time + side + 청산 사유·단계 (재진입 쿨다운·완화 판단용). */
+function latestCloseMetaBySymbol(
+  history: readonly unknown[]
+): Map<
+  string,
+  {
+    closedAt: number;
+    side: "long" | "short";
+    closeReason?: PaperClosedPositionRecord["closeReason"];
+    entryStageAtClose?: number;
+  }
+> {
+  const m = new Map<
+    string,
+    {
+      closedAt: number;
+      side: "long" | "short";
+      closeReason?: PaperClosedPositionRecord["closeReason"];
+      entryStageAtClose?: number;
+    }
+  >();
   for (const row of history) {
     if (!row || typeof row !== "object") continue;
     const o = row as Record<string, unknown>;
@@ -224,7 +242,24 @@ function latestCloseMetaBySymbol(history: readonly unknown[]): Map<string, { clo
     if (typeof sym !== "string" || typeof closed !== "number" || !Number.isFinite(closed)) continue;
     if (side !== "long" && side !== "short") continue;
     const prev = m.get(sym);
-    if (!prev || closed >= prev.closedAt) m.set(sym, { closedAt: closed, side });
+    if (!prev || closed >= prev.closedAt) {
+      const cr = o.closeReason;
+      const es = o.entryStageAtClose;
+      const closeReason =
+        cr === "candidate_lost" ||
+        cr === "take_profit" ||
+        cr === "stop_loss" ||
+        cr === "trailing_stop" ||
+        cr === "time_based_exit" ||
+        cr === "trend_break_exit" ||
+        cr === "regime_exit" ||
+        cr === "partial_exit_1" ||
+        cr === "partial_exit_2"
+          ? cr
+          : undefined;
+      const entryStageAtClose = typeof es === "number" && Number.isFinite(es) ? es : undefined;
+      m.set(sym, { closedAt: closed, side, closeReason, entryStageAtClose });
+    }
   }
   return m;
 }
@@ -1012,7 +1047,7 @@ export class PaperEngine {
           ts: nowTs,
           type: "ENTRY_BLOCKED",
           symbol: sym,
-          regime: this.lastRegime.regime,
+          regime: d.regime ?? this.lastRegime.regime,
           executor: ex.executor,
           reason: ex.blocked_reason,
           reject_code: d.reject_reason,
@@ -1020,7 +1055,12 @@ export class PaperEngine {
           total_cost: ex.total_cost,
           risk_state: ex.risk_state,
           detail: ex.detail,
-          stage1_result_code: d.stage1_result_code
+          stage1_result_code: d.stage1_result_code,
+          reentry_cooldown_applied: d.reentry_cooldown_applied ?? false,
+          reentry_cooldown_original_ms: d.reentry_cooldown_original_ms ?? null,
+          reentry_cooldown_effective_ms: d.reentry_cooldown_effective_ms ?? null,
+          reentry_cooldown_reason: d.reentry_cooldown_reason ?? null,
+          currentStage: d.currentStage
         });
         return;
       }
@@ -1041,13 +1081,18 @@ export class PaperEngine {
         ts: nowTs,
         type: "ENTRY_BLOCKED",
         symbol: sym,
-        regime: this.lastRegime.regime,
+        regime: d.regime ?? this.lastRegime.regime,
         reason: legacyReason(d.reject_reason),
         reject_code: d.reject_reason,
         expected_move:
           typeof d.expected_move_pct === "number" && Number.isFinite(d.expected_move_pct) ? d.expected_move_pct / 100 : null,
         risk_state: this.lastRisk?.riskStatus ?? "NORMAL",
-        stage1_result_code: d.stage1_result_code
+        stage1_result_code: d.stage1_result_code,
+        reentry_cooldown_applied: d.reentry_cooldown_applied ?? false,
+        reentry_cooldown_original_ms: d.reentry_cooldown_original_ms ?? null,
+        reentry_cooldown_effective_ms: d.reentry_cooldown_effective_ms ?? null,
+        reentry_cooldown_reason: d.reentry_cooldown_reason ?? null,
+        currentStage: d.currentStage
       });
     }
   }
@@ -1160,6 +1205,7 @@ export class PaperEngine {
           sourceSignal: open.sourceSignal,
           sourceRunPath: open.sourceRunPath,
           regimeAtEntry: open.regimeAtEntry,
+          entryStageAtClose: open.entryStage ?? 1,
           ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
           ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
           ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
@@ -1231,6 +1277,7 @@ export class PaperEngine {
             sourceSignal: open.sourceSignal,
             sourceRunPath: open.sourceRunPath,
             regimeAtEntry: open.regimeAtEntry,
+            entryStageAtClose: open.entryStage ?? 1,
             ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
             ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
             ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
@@ -1309,6 +1356,7 @@ export class PaperEngine {
           sourceSignal: open.sourceSignal,
           sourceRunPath: open.sourceRunPath,
           regimeAtEntry: open.regimeAtEntry,
+          entryStageAtClose: open.entryStage ?? 1,
           ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
           ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
           ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
@@ -1387,6 +1435,7 @@ export class PaperEngine {
             sourceSignal: open.sourceSignal,
             sourceRunPath: open.sourceRunPath,
             regimeAtEntry: open.regimeAtEntry,
+            entryStageAtClose: open.entryStage ?? 1,
             ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
             ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
             ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
@@ -1489,6 +1538,7 @@ export class PaperEngine {
         sourceSignal: open.sourceSignal,
         sourceRunPath: open.sourceRunPath,
         regimeAtEntry: open.regimeAtEntry,
+        entryStageAtClose: open.entryStage ?? 1,
         ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
         ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
         ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
