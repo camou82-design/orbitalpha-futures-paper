@@ -169,14 +169,14 @@
     if (es && typeof es === "object" && typeof es.regime === "string") {
       modeLine = "현재 레짐: " + mapMode(es.regime) + (es.riskStatus ? " · 리스크 " + String(es.riskStatus) : "");
     } else
-    if (modes.size === 1) {
-      const [one] = Array.from(modes);
-      modeLine = "마지막 진입 시 모드: " + mapMode(one);
-    } else if (modes.size > 1) {
-      modeLine = "종목별 진입 모드가 다름 · " + Array.from(modes).map(mapMode).join(", ");
-    } else {
-      modeLine = "적응형 모드(trend/횡보/리스크오프)는 스냅샷에 직접 없음 · 아래는 스냅샷 추정";
-    }
+      if (modes.size === 1) {
+        const [one] = Array.from(modes);
+        modeLine = "마지막 진입 시 모드: " + mapMode(one);
+      } else if (modes.size > 1) {
+        modeLine = "종목별 진입 모드가 다름 · " + Array.from(modes).map(mapMode).join(", ");
+      } else {
+        modeLine = "적응형 모드(trend/횡보/리스크오프)는 스냅샷에 직접 없음 · 아래는 스냅샷 추정";
+      }
 
     let context = "";
     if (snaps.length >= 2) {
@@ -367,10 +367,10 @@
     const entryGateLine =
       es && typeof es === "object"
         ? "레짐 " +
-          mapMode(curRegime) +
-          " · 진입 " +
-          (es.entryAllowed === false ? "차단" : es.entryAllowed === true ? "가능" : "—") +
-          (Array.isArray(es.blockedReasons) && es.blockedReasons.length > 0 ? " · 이유 " + mapBlockReason(es.blockedReasons[0]) : "")
+        mapMode(curRegime) +
+        " · 진입 " +
+        (es.entryAllowed === false ? "차단" : es.entryAllowed === true ? "가능" : "—") +
+        (Array.isArray(es.blockedReasons) && es.blockedReasons.length > 0 ? " · 이유 " + mapBlockReason(es.blockedReasons[0]) : "")
         : "";
 
     const toneClass =
@@ -395,19 +395,19 @@
     const rejectTickLine =
       rj && Object.keys(rj).length > 0
         ? "이번 틱 차단 코드: " +
-          Object.keys(rj)
-            .map((k) => `${mapBlockReason(k)} ${rj[k]}`)
-            .join(" · ")
+        Object.keys(rj)
+          .map((k) => `${mapBlockReason(k)} ${rj[k]}`)
+          .join(" · ")
         : "";
     const topStatus =
       es && typeof es === "object"
         ? `<div class="hero-topline muted text-xs" style="margin-top:0.25rem">
             모드 <strong>${esc(es.engine_mode || "PAPER_TEST")}</strong> · 실행상태 <strong>${esc(
-              es.execution_state || "—"
-            )}</strong> · 전략 <strong>${esc(es.strategy_executor || es.active_mode_executor || "—")}</strong>
-            · 레짐 <strong>${esc(mapMode(curRegime))}</strong> · 엔진 <strong>${esc(es.engine_status || "—")}</strong> · 리스크 <strong>${esc(
-              es.risk_state || es.riskStatus || "—"
-            )}</strong>
+          es.execution_state || "—"
+        )}</strong> · 전략 <strong>${esc(es.strategy_executor || es.active_mode_executor || "—")}</strong>
+            · 레짐 <strong>${esc(mapMode(curRegime))}</strong>${es.is_ambiguous ? " <span style='color:var(--warn)'>(모호/인접)</span>" : ""} · 엔진 <strong>${esc(es.engine_status || "—")}</strong> · 리스크 <strong>${esc(
+          es.risk_state || es.riskStatus || "—"
+        )}</strong>
           </div>
           ${funnelLine ? `<p class="hero-sub muted">${esc(funnelLine)}</p>` : ""}
           ${funnel50Line ? `<p class="hero-sub muted">${esc(funnel50Line)}</p>` : ""}
@@ -589,8 +589,11 @@
       const pip = es && es.symbol_decisions && es.symbol_decisions[sym] && es.symbol_decisions[sym].decision ? es.symbol_decisions[sym].decision : null;
       const pipVer = pip && pip.pipeline_version ? String(pip.pipeline_version) : "—";
       const pipReject = pip && pip.reject_reason ? mapBlockReason(pip.reject_reason) : null;
+      const pipSuppl = pip && Array.isArray(pip.supplemental_reasons) ? pip.supplemental_reasons : [];
       const fd = pip && pip.final_decision ? String(pip.final_decision) : null;
       const fdClass = fd === "ENTER" ? "sym-pip--enter" : fd === "REJECT" ? "sym-pip--reject" : "";
+
+      const ambigTag = es && es.is_ambiguous ? " <small style='color:var(--warn)'>(모합/조정)</small>" : "";
 
       return `
         <article class="${cardClass}">
@@ -602,12 +605,13 @@
             <dt>컨텍스트</dt><dd>${esc(ctx.ctx)}${ctx.reason ? " · " + esc(ctx.reason) : ""}</dd>
             ${pip ? `<dt>파이프라인</dt><dd>v${esc(pipVer)}</dd>` : ""}
             ${pip ? `<dt>signal</dt><dd class="${fdClass}">${esc(String(pip.signal_state))}</dd>` : ""}
-            ${pip ? `<dt>regime</dt><dd>${esc(String(pip.regime_state))}</dd>` : ""}
+            ${pip ? `<dt>regime</dt><dd>${esc(String(pip.regime_state))}${ambigTag}</dd>` : ""}
             ${pip ? `<dt>edge</dt><dd>${esc(String(pip.edge_state))}</dd>` : ""}
             ${pip ? `<dt>risk</dt><dd>${esc(String(pip.risk_state))}</dd>` : ""}
             ${pip ? `<dt>execution</dt><dd>${esc(String(pip.execution_state))}</dd>` : ""}
             ${pip ? `<dt>final</dt><dd class="${fdClass}"><strong>${esc(String(pip.final_decision))}</strong></dd>` : ""}
             ${pipReject ? `<dt>reject</dt><dd>${esc(pipReject)}</dd>` : ""}
+            ${pipSuppl.length > 0 ? `<dt>상세 사유</dt><dd style="font-size:0.75rem; color:var(--muted)">${pipSuppl.map(r => esc(mapBlockReason(r))).join(", ")}</dd>` : ""}
             ${pip ? `<dt>실행기</dt><dd>${esc(String(pip.strategy_executor))}</dd>` : ""}
             <dt>현재가</dt><dd>${esc(formatPrice(s && s.lastPrice))}</dd>
             <dt>데이터 시각</dt><dd>${esc(formatKst(s && s.fetchedAt))}</dd>
@@ -647,8 +651,8 @@
         Number.isFinite(fund);
       const extra = hasLedgerDetail
         ? `<p class="perf-metric muted text-xs" style="margin-top:0.75rem;border-top:1px solid var(--border);padding-top:0.5rem">상세 수익 구조: gross ${formatUsd(
-            gross
-          )} · 수수료 ${formatUsd(fee)} · 펀딩 ${formatUsd(fund)}</p>`
+          gross
+        )} · 수수료 ${formatUsd(fee)} · 펀딩 ${formatUsd(fund)}</p>`
         : "";
       return `
         <div class="perf-card">
@@ -673,11 +677,11 @@
           <p class="perf-metric">거래 수 <strong>${formatCount(s.totalTrades)}</strong></p>
           <p class="perf-metric">승률 <strong>${formatPct(s.winRate)}</strong></p>
           <p class="perf-metric">gross/fee/net <strong>${formatUsd(s.totalPnlUsdGross)}</strong> / ${formatUsd(
-            s.totalFeeUsd
-          )} / <strong class="perf-pnl">${formatUsd(s.totalPnlUsdNet)}</strong></p>
+        s.totalFeeUsd
+      )} / <strong class="perf-pnl">${formatUsd(s.totalPnlUsdNet)}</strong></p>
           <p class="perf-metric muted text-xs">avg net/trade ${formatUsd(s.averagePnlUsdNet)} · fee/gross ${formatRatioPlain(
-            s.feeToGrossRatio
-          )}</p>
+        s.feeToGrossRatio
+      )}</p>
         </div>
       `;
     };
@@ -711,24 +715,24 @@
       blocked.length === 0
         ? '<p class="muted text-xs">최근 차단 이벤트 없음</p>'
         : `<ul class="health-list">${blocked
-            .map((e) => {
-              const sym = e.symbol || "—";
-              const rg = e.regime || "—";
-              const ex = mapExecutorDisplay(e.executor);
-              const rs = mapBlockReason(e.reason);
-              const sub =
-                (e.reason === "AI_FILTER" || e.reason === "AI_REJECT" || e.reason === "AI_DIRECTION_MISMATCH") &&
-                  e.detail &&
-                  e.detail.ai_reason
-                  ? " · " + String(e.detail.ai_reason)
-                  : e.reason === "AI_DIRECTION_MISMATCH"
-                    ? " · 방향 불일치"
-                    : "";
-              return `<li><div><strong>${esc(sym)}</strong> · ${esc(rg)} · ${esc(ex)} · ${esc(rs)}${esc(sub)}</div><div class="muted text-xs">${esc(
-                formatKst(e.ts)
-              )}</div></li>`;
-            })
-            .join("")}</ul>`;
+          .map((e) => {
+            const sym = e.symbol || "—";
+            const rg = e.regime || "—";
+            const ex = mapExecutorDisplay(e.executor);
+            const rs = mapBlockReason(e.reason);
+            const sub =
+              (e.reason === "AI_FILTER" || e.reason === "AI_REJECT" || e.reason === "AI_DIRECTION_MISMATCH") &&
+                e.detail &&
+                e.detail.ai_reason
+                ? " · " + String(e.detail.ai_reason)
+                : e.reason === "AI_DIRECTION_MISMATCH"
+                  ? " · 방향 불일치"
+                  : "";
+            return `<li><div><strong>${esc(sym)}</strong> · ${esc(rg)} · ${esc(ex)} · ${esc(rs)}${esc(sub)}</div><div class="muted text-xs">${esc(
+              formatKst(e.ts)
+            )}</div></li>`;
+          })
+          .join("")}</ul>`;
 
     box.innerHTML = `
       <div class="perf-card">
@@ -764,8 +768,8 @@
     const qLine =
       q
         ? ` · 품질 good ${String(q.ai_block_good_count)} / missed ${String(q.ai_block_missed_count)} / neutral ${String(
-            q.ai_block_neutral_count
-          )} (${qRate})${cLine}`
+          q.ai_block_neutral_count
+        )} (${qRate})${cLine}`
         : "";
     return `<p class="perf-metric muted text-xs">최근 AI 차단 Top: ${esc(line)}${esc(qLine)}</p>`;
   }
@@ -799,12 +803,12 @@
       rev.length === 0
         ? '<p class="muted">데이터 없음</p>'
         : `<ul class="health-list">${rev
-            .map((h) => {
-              const rs = Array.isArray(h.reasons) ? h.reasons : [];
-              const tags = rs.map((r) => `<span class="reason-tag">${esc(mapReason(r))}</span>`).join("");
-              return `<li><div>${esc(formatKst(h.generatedAt))} · ${esc(mapStatus(h.status))}</div><div class="reason-tags">${tags}</div></li>`;
-            })
-            .join("")}</ul>`;
+          .map((h) => {
+            const rs = Array.isArray(h.reasons) ? h.reasons : [];
+            const tags = rs.map((r) => `<span class="reason-tag">${esc(mapReason(r))}</span>`).join("");
+            return `<li><div>${esc(formatKst(h.generatedAt))} · ${esc(mapStatus(h.status))}</div><div class="reason-tags">${tags}</div></li>`;
+          })
+          .join("")}</ul>`;
   }
 
   function show(el, on) {
