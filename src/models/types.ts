@@ -215,6 +215,8 @@ export type PaperSymbolDecisionRecord = Readonly<{
   reviewing_ticks?: number;
   /** Stage 1 통합 결과 코드 (Round 7 도입) */
   stage1_result_code?: PaperStage1ResultCode;
+  /** 최종 실패 사유 (추적용) */
+  final_fail_reason?: string;
 }>;
 
 /** Minimal row shape for funnel math. */

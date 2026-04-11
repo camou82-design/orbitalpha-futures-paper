@@ -161,6 +161,7 @@ function pack(
     auto_entry_triggered?: boolean;
     reviewing_ticks?: number;
     stage1_result_code?: import("../models/types").PaperStage1ResultCode;
+    final_fail_reason?: string;
   }
 ): PaperSymbolDecision {
   return {
@@ -183,7 +184,8 @@ function pack(
     ai_floor_relaxed: fields.ai_floor_relaxed,
     auto_entry_triggered: fields.auto_entry_triggered,
     reviewing_ticks: fields.reviewing_ticks,
-    stage1_result_code: fields.stage1_result_code
+    stage1_result_code: fields.stage1_result_code,
+    final_fail_reason: fields.final_fail_reason
   };
 }
 
@@ -248,6 +250,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       auto_entry_triggered?: boolean;
       reviewing_ticks?: number;
       stage1_result_code?: import("../models/types").PaperStage1ResultCode;
+      final_fail_reason?: string;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -288,9 +291,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       is_ambiguous: extra.is_ambiguous !== undefined ? extra.is_ambiguous : input.isAmbiguous,
       stage1_loosened_entry: extra.stage1_loosened_entry,
       ai_floor_relaxed: extra.ai_floor_relaxed,
-      auto_entry_triggered: extra.auto_entry_triggered,
+      auto_entry_triggered: extra.auto_entry_triggered !== undefined ? extra.auto_entry_triggered : input.autoEntryTriggered,
       reviewing_ticks: extra.reviewing_ticks !== undefined ? extra.reviewing_ticks : input.reviewingTicks,
-      stage1_result_code: extra.stage1_result_code
+      stage1_result_code: extra.stage1_result_code,
+      final_fail_reason: extra.final_fail_reason
     }),
     ...res
   });

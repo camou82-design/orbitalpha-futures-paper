@@ -1507,6 +1507,13 @@ export class PaperEngine {
         });
       }
 
+      this.logger.info("STAGE1_ENTER_DECIDED", {
+        symbol: sym,
+        regime: this.lastRegime.regime,
+        executor: decision.executor,
+        stage1_result_code: res.decision.stage1_result_code
+      });
+
       const sourceSignal = first.signal;
       const levScaled = Math.max(
         1,
@@ -1555,66 +1562,89 @@ export class PaperEngine {
         this.logger.info("position_size_reduced_risk_off", { symbol: first.symbol, finalPositionSize: adaptive.sizeUsd });
       }
 
-      const record: PaperOpenPositionRecord = {
-        openedAt: Date.now(),
-        symbol: first.symbol,
-        side: adaptive.direction,
-        entryPrice: first.lastPrice,
-        leverage: levScaled,
-        sizeUsd: adaptive.sizeUsd,
-        initialSizeUsd: adaptive.sizeUsd,
-        partialExitStage: 0,
-        strategyVersion: "paper-v1",
-        sourceSignal,
-        sourceRunPath: input.candidateRunPath,
-        latestSnapshotPath: input.latestPath,
-        latestMetaPath: input.metaPath,
-        timestampSnapshotPath: input.filePath,
-        ...(Number.isFinite(first.fundingRate) ? { openFundingRate: first.fundingRate } : {}),
-        trailingExtremePrice: first.lastPrice,
-        adaptiveModeAtEntry: this.lastAdaptiveMode.mode,
-        regimeAtEntry: this.lastRegime.regime,
-        executorAtEntry: decision.executor,
-        ...(typeof decision.expected_move === "number" ? { expectedMoveAtEntry: decision.expected_move } : {}),
-        ...(typeof decision.total_cost === "number" ? { totalCostAtEntry: decision.total_cost } : {}),
-        ...(confScore !== undefined ? { entryConfidenceScore: confScore } : {}),
-        ...(confTier !== undefined ? { entryConfidenceTier: confTier } : {}),
-        ...(sizeMult !== undefined ? { entrySizeMultiplier: sizeMult } : {}),
-        status: "open"
-      };
+      try {
+        this.logger.info("STAGE1_POSITION_OPEN_ATTEMPT", {
+          symbol: first.symbol,
+          side: adaptive.direction,
+          sizeUsd: adaptive.sizeUsd
+        });
 
-      next.push(record);
-      const entryOpenedKey = record.side === "long" ? "entry_long_opened" : "entry_short_opened";
-      this.logger.info(entryOpenedKey, {
-        symbol: record.symbol,
-        side: record.side,
-        mode: this.lastAdaptiveMode.mode,
-        size_usd: record.sizeUsd,
-        leverage: record.leverage,
-        confidenceScore: confScore,
-        confidenceTier: confTier,
-        sizeMultiplier: sizeMult,
-        entry_pipeline: adaptive.detail
-      });
-      this.logger.info("paper_position_opened", {
-        symbol: record.symbol,
-        side: record.side,
-        path: "positions/open.json"
-      });
-      await this.store.appendJsonlLine("reports/events.jsonl", {
-        ts: Date.now(),
-        type: "ENTRY_OPENED",
-        symbol: String(record.symbol),
-        side: record.side,
-        regime: this.lastRegime.regime,
-        executor: decision.executor,
-        sizeUsd: record.sizeUsd,
-        leverage: record.leverage,
-        expected_move: decision.expected_move,
-        total_cost: decision.total_cost,
-        risk_state: (this.lastRisk?.riskStatus ?? "NORMAL"),
-        stage1_result_code: res.decision.stage1_result_code
-      });
+        const record: PaperOpenPositionRecord = {
+          openedAt: Date.now(),
+          symbol: first.symbol,
+          side: adaptive.direction,
+          entryPrice: first.lastPrice,
+          leverage: levScaled,
+          sizeUsd: adaptive.sizeUsd,
+          initialSizeUsd: adaptive.sizeUsd,
+          partialExitStage: 0,
+          strategyVersion: "paper-v1",
+          sourceSignal,
+          sourceRunPath: input.candidateRunPath,
+          latestSnapshotPath: input.latestPath,
+          latestMetaPath: input.metaPath,
+          timestampSnapshotPath: input.filePath,
+          ...(Number.isFinite(first.fundingRate) ? { openFundingRate: first.fundingRate } : {}),
+          trailingExtremePrice: first.lastPrice,
+          adaptiveModeAtEntry: this.lastAdaptiveMode.mode,
+          regimeAtEntry: this.lastRegime.regime,
+          executorAtEntry: decision.executor,
+          ...(typeof decision.expected_move === "number" ? { expectedMoveAtEntry: decision.expected_move } : {}),
+          ...(typeof decision.total_cost === "number" ? { totalCostAtEntry: decision.total_cost } : {}),
+          ...(confScore !== undefined ? { entryConfidenceScore: confScore } : {}),
+          ...(confTier !== undefined ? { entryConfidenceTier: confTier } : {}),
+          ...(sizeMult !== undefined ? { entrySizeMultiplier: sizeMult } : {}),
+          status: "open"
+        };
+
+        next.push(record);
+
+        this.logger.info("STAGE1_POSITION_OPEN_SUCCESS", {
+          symbol: record.symbol,
+          side: record.side
+        });
+
+        const entryOpenedKey = record.side === "long" ? "entry_long_opened" : "entry_short_opened";
+        this.logger.info(entryOpenedKey, {
+          symbol: record.symbol,
+          side: record.side,
+          mode: this.lastAdaptiveMode.mode,
+          size_usd: record.sizeUsd,
+          leverage: record.leverage,
+          confidenceScore: confScore,
+          confidenceTier: confTier,
+          sizeMultiplier: sizeMult,
+          entry_pipeline: adaptive.detail
+        });
+        this.logger.info("paper_position_opened", {
+          symbol: record.symbol,
+          side: record.side,
+          path: "positions/open.json"
+        });
+        await this.store.appendJsonlLine("reports/events.jsonl", {
+          ts: Date.now(),
+          type: "ENTRY_OPENED",
+          symbol: String(record.symbol),
+          side: record.side,
+          regime: this.lastRegime.regime,
+          executor: decision.executor,
+          sizeUsd: record.sizeUsd,
+          leverage: record.leverage,
+          expected_move: decision.expected_move,
+          total_cost: decision.total_cost,
+          risk_state: (this.lastRisk?.riskStatus ?? "NORMAL"),
+          stage1_result_code: res.decision.stage1_result_code
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.error("STAGE1_POSITION_OPEN_FAIL", {
+          symbol: sym,
+          stage1_result_code: res.decision.stage1_result_code,
+          final_fail_reason: msg,
+          reviewing_ticks: res.decision.reviewing_ticks,
+          auto_entry_triggered: res.decision.auto_entry_triggered
+        });
+      }
     }
 
     if (next.length !== before) {
