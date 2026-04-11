@@ -94,16 +94,26 @@ export function evaluateEntryPolicy(input: Readonly<{
   latestCandleClose: number;
   lastPrice: number;
   volumeRatioProxy: number;
+  /** RANGE Stage1 소액 탐색 전용: sideways EMA 이격(`ema_rel_sep`) 하한만 통과 */
+  sidewaysStage1SoftSkipEmaRelSep?: boolean;
 }>): EntryPolicyResult {
   if (input.direction === "none") {
-    return { ok: false, blockMessage: "blocked_no_structure", detail: { reason: "direction_none" } };
+    return {
+      ok: false,
+      blockMessage: "blocked_no_structure",
+      detail: { reason: "direction_none", order_build_fail_reason: "policy_direction_none" }
+    };
   }
 
   if (input.signalStrengthScore < ENTRY_MIN_SCORE) {
     return {
       ok: false,
       blockMessage: "blocked_low_signal",
-      detail: { signal_strength_score: input.signalStrengthScore, floor: ENTRY_MIN_SCORE }
+      detail: {
+        signal_strength_score: input.signalStrengthScore,
+        floor: ENTRY_MIN_SCORE,
+        order_build_fail_reason: "policy_low_signal"
+      }
     };
   }
 
@@ -111,7 +121,11 @@ export function evaluateEntryPolicy(input: Readonly<{
   const e60 = input.ema60;
   const cl = input.latestCandleClose;
   if (e20 === null || e60 === null || !Number.isFinite(e20) || !Number.isFinite(e60)) {
-    return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "ema_missing" } };
+    return {
+      ok: false,
+      blockMessage: "blocked_no_structure",
+      detail: { sub: "ema_missing", order_build_fail_reason: "policy_ema_missing" }
+    };
   }
 
   const emaRelSep = Math.abs((e20 - e60) / e60);
@@ -123,23 +137,40 @@ export function evaluateEntryPolicy(input: Readonly<{
   const chaseLong = input.lastPrice > e20 * 1.012;
   const chaseShort = input.lastPrice < e20 * 0.988;
 
-  if (input.mode === "sideways" && emaRelSep < SIDEWAYS_MIN_EMA_REL_SEP) {
+  if (input.mode === "sideways" && emaRelSep < SIDEWAYS_MIN_EMA_REL_SEP && !input.sidewaysStage1SoftSkipEmaRelSep) {
     return {
       ok: false,
       blockMessage: "blocked_no_structure",
-      detail: { sub: "sideways_ema_too_flat", ema_rel_sep: emaRelSep, min: SIDEWAYS_MIN_EMA_REL_SEP }
+      detail: {
+        sub: "sideways_ema_too_flat",
+        ema_rel_sep: emaRelSep,
+        min: SIDEWAYS_MIN_EMA_REL_SEP,
+        order_build_fail_reason: "policy_sideways_ema_too_flat"
+      }
     };
   }
 
   if (input.mode === "trend") {
     if (input.direction === "long" && !emaAlignedLong) {
-      return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "ema_long_not_aligned" } };
+      return {
+        ok: false,
+        blockMessage: "blocked_no_structure",
+        detail: { sub: "ema_long_not_aligned", order_build_fail_reason: "policy_trend_long_ema_not_aligned" }
+      };
     }
     if (input.direction === "short" && !emaAlignedShort) {
-      return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "ema_short_not_aligned" } };
+      return {
+        ok: false,
+        blockMessage: "blocked_no_structure",
+        detail: { sub: "ema_short_not_aligned", order_build_fail_reason: "policy_trend_short_ema_not_aligned" }
+      };
     }
     if (input.volumeRatioProxy < 1.02) {
-      return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "volume_too_thin" } };
+      return {
+        ok: false,
+        blockMessage: "blocked_no_structure",
+        detail: { sub: "volume_too_thin", order_build_fail_reason: "policy_trend_volume_too_thin" }
+      };
     }
     return {
       ok: true,
@@ -156,20 +187,40 @@ export function evaluateEntryPolicy(input: Readonly<{
       return {
         ok: false,
         blockMessage: "blocked_no_structure",
-        detail: { sub: "volume_overheated_sideways", volume_ratio_proxy: input.volumeRatioProxy }
+        detail: {
+          sub: "volume_overheated_sideways",
+          volume_ratio_proxy: input.volumeRatioProxy,
+          order_build_fail_reason: "policy_sideways_volume_overheated"
+        }
       };
     }
     if (input.direction === "long" && chaseLong && input.candidateStrength !== "weak") {
-      return { ok: false, blockMessage: "blocked_sideways_chase", detail: { side: "long" } };
+      return {
+        ok: false,
+        blockMessage: "blocked_sideways_chase",
+        detail: { side: "long", order_build_fail_reason: "policy_sideways_chase_long" }
+      };
     }
     if (input.direction === "short" && chaseShort && input.candidateStrength !== "weak") {
-      return { ok: false, blockMessage: "blocked_sideways_chase", detail: { side: "short" } };
+      return {
+        ok: false,
+        blockMessage: "blocked_sideways_chase",
+        detail: { side: "short", order_build_fail_reason: "policy_sideways_chase_short" }
+      };
     }
     if (input.direction === "long" && !pullbackLong) {
-      return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "sideways_long_not_near_ema" } };
+      return {
+        ok: false,
+        blockMessage: "blocked_no_structure",
+        detail: { sub: "sideways_long_not_near_ema", order_build_fail_reason: "policy_sideways_long_not_near_ema" }
+      };
     }
     if (input.direction === "short" && !pullbackShort) {
-      return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "sideways_short_not_near_ema" } };
+      return {
+        ok: false,
+        blockMessage: "blocked_no_structure",
+        detail: { sub: "sideways_short_not_near_ema", order_build_fail_reason: "policy_sideways_short_not_near_ema" }
+      };
     }
     return {
       ok: true,
@@ -185,15 +236,23 @@ export function evaluateEntryPolicy(input: Readonly<{
     return {
       ok: false,
       blockMessage: "blocked_risk_off_long",
-      detail: { signal_strength_score: input.signalStrengthScore }
+      detail: { signal_strength_score: input.signalStrengthScore, order_build_fail_reason: "policy_risk_off_long" }
     };
   }
 
   if (input.volumeRatioProxy < 1.0) {
-    return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "risk_off_need_volume" } };
+    return {
+      ok: false,
+      blockMessage: "blocked_no_structure",
+      detail: { sub: "risk_off_need_volume", order_build_fail_reason: "policy_risk_off_volume" }
+    };
   }
   if (!emaAlignedShort && input.signalStrengthScore < STRONG_SCORE) {
-    return { ok: false, blockMessage: "blocked_no_structure", detail: { sub: "risk_off_short_structure" } };
+    return {
+      ok: false,
+      blockMessage: "blocked_no_structure",
+      detail: { sub: "risk_off_short_structure", order_build_fail_reason: "policy_risk_off_short_structure" }
+    };
   }
   return { ok: true, detail: { risk_off_short: true, pullback_ok: pullbackShort, rebreak_ok: true } };
 }

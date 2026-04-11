@@ -37,7 +37,8 @@ export function calculateAdaptivePositionSize(input: Readonly<{
       detail: {
         confidence_score: input.confidenceScore,
         tier: input.confidenceTier,
-        mode: input.mode
+        mode: input.mode,
+        order_build_fail_reason: "size_blocked_low_confidence"
       }
     };
   }

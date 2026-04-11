@@ -335,6 +335,51 @@ function computePaperCloseLegMetrics(input: Readonly<{
   };
 }
 
+/** Structured ORDER_BUILD_FAIL observability (paper pipeline has no exchange order draft). */
+function orderBuildFailureStructuredPayload(
+  first: SymbolSnapshot,
+  res: EvaluatePaperSymbolEntryResult,
+  entryStage: number,
+  regime: string
+): Record<string, unknown> {
+  const d = res.decision;
+  const ex = res.executorDecision;
+  const af = res.adaptiveFailure;
+  const side =
+    res.intentSide ??
+    (first.signal === "paper_long_candidate" ? "long" : first.signal === "paper_short_candidate" ? "short" : null);
+  return {
+    order_build_ok: false,
+    order_build_fail_reason: d.order_build_fail_reason ?? af?.orderBuildFailReason ?? "unknown",
+    symbol: String(first.symbol),
+    side,
+    entryStage,
+    regime,
+    executor: ex?.executor ?? "IDLE",
+    expected_move:
+      typeof ex?.expected_move === "number" && Number.isFinite(ex.expected_move) ? ex.expected_move : null,
+    fixed_total_cost_usd: d.fixed_total_cost_usd ?? null,
+    required_cost_usd: d.required_cost_usd ?? null,
+    shortfall_usd: typeof d.shortfall_usd === "number" ? d.shortfall_usd : 0,
+    stage1_soft_exec_override: d.stage1_soft_exec_override === true,
+    executor_block_reason_original: d.executor_block_reason_original ?? null,
+    stage1_size_multiplier_final: d.stage1_size_multiplier_final ?? null,
+    sizeUsd: d.sizeUsd ?? null,
+    qty: d.qty ?? null,
+    price: typeof d.price === "number" && Number.isFinite(d.price) ? d.price : first.lastPrice,
+    stopLoss: d.stopLoss ?? null,
+    takeProfit: d.takeProfit ?? null,
+    riskReward: d.riskReward ?? d.rr ?? null,
+    atr_pct: d.atr_pct ?? null,
+    tick_size: d.tick_size ?? null,
+    qty_step: d.qty_step ?? null,
+    min_qty: d.min_qty ?? null,
+    min_notional: d.min_notional ?? null,
+    order_build_fail_stage: d.order_build_fail_stage ?? af?.failStage ?? null,
+    adaptive_detail: res.adaptiveDetail ?? af?.detail ?? null
+  };
+}
+
 export class PaperEngine {
   private readonly store: JsonStore;
   private readonly bybit: BybitPublicClient;
@@ -697,6 +742,16 @@ export class PaperEngine {
     const decision_funnel_50 = sumDecisionFunnelTicks(this.decisionFunnelTickRing);
     const decision_funnel_50_size = this.decisionFunnelTickRing.length;
     const reject_reason_counts_tick = aggregateRejectReasonCountsTick(decisionBySymbol);
+    let last_order_build_failure: Record<string, unknown> | null = null;
+    for (const sym of symbols) {
+      const r = decisionBySymbol.get(String(sym));
+      if (r?.decision.reject_reason !== "ORDER_BUILD_FAIL") continue;
+      const snap = snapshots.find((s) => s.symbol === sym);
+      if (!snap) continue;
+      const openPos = opensAfterClose.find((o) => o.symbol === sym && o.status === "open");
+      const es = openPos?.entryStage ?? 0;
+      last_order_build_failure = orderBuildFailureStructuredPayload(snap, r, es, regimeDetected.regime);
+    }
     try {
       const risk = this.lastRisk!;
       await this.store.writeJson("reports/engine-state.json", {
@@ -741,6 +796,7 @@ export class PaperEngine {
         decision_funnel_50,
         decision_funnel_50_size,
         reject_reason_counts_tick,
+        last_order_build_failure,
         symbol_decisions: Object.fromEntries(
           [...decisionBySymbol.entries()].map(([k, v]) => [k, { decision: v.decision, adaptiveOk: v.adaptiveOk }])
         )
@@ -799,7 +855,8 @@ export class PaperEngine {
   private async emitPipelineEventsFromDecision(
     first: SymbolSnapshot,
     res: EvaluatePaperSymbolEntryResult,
-    nowTs: number
+    nowTs: number,
+    entryStage = 0
   ): Promise<void> {
     const sym = String(first.symbol);
     const d = res.decision;
@@ -928,15 +985,13 @@ export class PaperEngine {
       }
 
       if (d.reject_reason === "ORDER_BUILD_FAIL") {
+        const structured = orderBuildFailureStructuredPayload(first, res, entryStage, this.lastRegime.regime);
         await this.store.appendJsonlLine("reports/events.jsonl", {
           ts: nowTs,
-          type: "BLOCKED",
-          symbol: sym,
-          regime: this.lastRegime.regime,
-          reason: "adaptive_policy_block",
+          type: "ORDER_BUILD_FAIL",
           reject_code: d.reject_reason,
-          detail: res.adaptiveDetail,
-          stage1_result_code: d.stage1_result_code
+          stage1_result_code: d.stage1_result_code,
+          ...structured
         });
         return;
       }
@@ -1461,6 +1516,7 @@ export class PaperEngine {
     this.lastEntryDecision = null;
 
     for (const first of candidates) {
+      const entryStage = next.find((o) => o.symbol === first.symbol)?.entryStage ?? 0;
       const existingIdx = next.findIndex((o) => o.symbol === first.symbol);
       const res = input.decisionBySymbol.get(String(first.symbol));
       if (!res) continue;
@@ -1483,15 +1539,22 @@ export class PaperEngine {
               stage1_result_code: "STAGE1_BLOCKED_LIMIT" as const
             }
           };
-          await this.emitPipelineEventsFromDecision(first, limitBlocked, nowTs);
+          await this.emitPipelineEventsFromDecision(first, limitBlocked, nowTs, entryStage);
         }
         continue;
       }
 
       this.lastEntryDecision = res.executorDecision ?? null;
 
+      if (res.decision.reject_reason === "ORDER_BUILD_FAIL" && res.executorDecision?.entry_allowed) {
+        const ob = orderBuildFailureStructuredPayload(first, res, entryStage, this.lastRegime.regime);
+        this.logger.info("STAGE1_ENTER_DECIDED", ob);
+        this.logger.info("STAGE1_POSITION_OPEN_ATTEMPT", ob);
+        this.logger.info("ORDER_BUILD_FAIL", ob);
+      }
+
       if (res.decision.final_decision !== "ENTER" || !res.adaptiveResult) {
-        await this.emitPipelineEventsFromDecision(first, res, nowTs);
+        await this.emitPipelineEventsFromDecision(first, res, nowTs, entryStage);
         continue;
       }
 

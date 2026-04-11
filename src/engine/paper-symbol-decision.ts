@@ -139,6 +139,8 @@ export type EvaluatePaperSymbolEntryResult = Readonly<{
   adaptiveDirection: "long" | "short" | null;
   adaptiveDetail: Record<string, unknown> | null;
   adaptiveResult: Extract<FuturesAdaptiveEntryResult, { ok: true }> | null;
+  /** `runFuturesAdaptiveEntry` 실패 시 상세(정책/사이즈 단계). */
+  adaptiveFailure?: Extract<FuturesAdaptiveEntryResult, { ok: false }>;
   /** True once the pipeline reaches adaptive (after AI approval). */
   aiGatePassed: boolean;
 }>;
@@ -199,6 +201,19 @@ function pack(
     executor_block_reason_original?: string | null;
     stage1_soft_exec_override?: boolean;
     stage1_size_multiplier_final?: number | null;
+    order_build_ok?: boolean;
+    order_build_fail_reason?: string | null;
+    order_build_fail_stage?: "entry_policy" | "adaptive_sizing" | null;
+    qty?: number | null;
+    price?: number | null;
+    stopLoss?: number | null;
+    takeProfit?: number | null;
+    riskReward?: number | null;
+    tick_size?: number | null;
+    qty_step?: number | null;
+    min_qty?: number | null;
+    min_notional?: number | null;
+    sizeUsd?: number | null;
   }
 ): PaperSymbolDecision {
   return {
@@ -239,7 +254,21 @@ function pack(
     shortfall_usd: fields.shortfall_usd ?? 0,
     executor_block_reason_original: fields.executor_block_reason_original,
     stage1_soft_exec_override: fields.stage1_soft_exec_override,
-    stage1_size_multiplier_final: fields.stage1_size_multiplier_final
+    stage1_size_multiplier_final: fields.stage1_size_multiplier_final,
+    order_build_ok: fields.order_build_ok,
+    order_build_fail_reason: fields.order_build_fail_reason,
+    order_build_fail_stage: fields.order_build_fail_stage,
+    qty: fields.qty,
+    price: fields.price,
+    stopLoss: fields.stopLoss,
+    takeProfit: fields.takeProfit,
+    riskReward: fields.riskReward,
+    atr_pct: fields.atr_pct,
+    tick_size: fields.tick_size,
+    qty_step: fields.qty_step,
+    min_qty: fields.min_qty,
+    min_notional: fields.min_notional,
+    sizeUsd: fields.sizeUsd
   };
 }
 
@@ -378,6 +407,19 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       executor_block_reason_original?: string | null;
       stage1_soft_exec_override?: boolean;
       stage1_size_multiplier_final?: number | null;
+      order_build_ok?: boolean;
+      order_build_fail_reason?: string | null;
+      order_build_fail_stage?: "entry_policy" | "adaptive_sizing" | null;
+      qty?: number | null;
+      price?: number | null;
+      stopLoss?: number | null;
+      takeProfit?: number | null;
+      riskReward?: number | null;
+      tick_size?: number | null;
+      qty_step?: number | null;
+      min_qty?: number | null;
+      min_notional?: number | null;
+      sizeUsd?: number | null;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -386,6 +428,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       adaptiveDirection: "long" | "short" | null;
       adaptiveDetail: Record<string, unknown> | null;
       adaptiveResult: Extract<FuturesAdaptiveEntryResult, { ok: true }> | null;
+      adaptiveFailure?: Extract<FuturesAdaptiveEntryResult, { ok: false }>;
       aiGatePassed: boolean;
     }
   ): EvaluatePaperSymbolEntryResult => ({
@@ -438,7 +481,20 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       shortfall_usd: extra.shortfall_usd !== undefined ? extra.shortfall_usd : shortfallUsd,
       executor_block_reason_original: extra.executor_block_reason_original !== undefined ? extra.executor_block_reason_original : executorBlockReasonOriginal,
       stage1_soft_exec_override: extra.stage1_soft_exec_override !== undefined ? extra.stage1_soft_exec_override : stage1SoftExecOverrideFlag,
-      stage1_size_multiplier_final: extra.stage1_size_multiplier_final !== undefined ? extra.stage1_size_multiplier_final : null
+      stage1_size_multiplier_final: extra.stage1_size_multiplier_final !== undefined ? extra.stage1_size_multiplier_final : null,
+      order_build_ok: extra.order_build_ok,
+      order_build_fail_reason: extra.order_build_fail_reason,
+      order_build_fail_stage: extra.order_build_fail_stage,
+      qty: extra.qty,
+      price: extra.price,
+      stopLoss: extra.stopLoss,
+      takeProfit: extra.takeProfit,
+      riskReward: extra.riskReward,
+      tick_size: extra.tick_size,
+      qty_step: extra.qty_step,
+      min_qty: extra.min_qty,
+      min_notional: extra.min_notional,
+      sizeUsd: extra.sizeUsd
     }),
     ...res
   });
@@ -1009,6 +1065,24 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     const stage1SizeMultFinal = input.currentStage === 0 ? dynamicSizeMult : null;
 
+    /** Stage1 RANGE 탐색: 소프트 탐색·에지·자동진입 소프트, 또는 실행기 자연 허용(소프트 없음). */
+    const stage1RangeExplorePath =
+      stage1ExploreSoftExec ||
+      stage1RangeEdgeSoftApplied ||
+      (stage1SoftExecOverrideFlag &&
+        input.autoEntryTriggered === true &&
+        (executorBlockReasonOriginal === "trend_not_in_pullback" ||
+          executorBlockReasonOriginal === "range_not_in_interest_zone"));
+    /** 실행기가 별도 소프트 없이 RANGE에서 허용한 경우(에지 충족 등). */
+    const naturalRangeStage1EntryAllowed = input.regime === "RANGE" && input.currentStage === 0 && !stage1SoftExecOverrideFlag;
+    /** EXEC_BLOCKED_RANGE_NOT_LOWER_EDGE 소프트는 본 완화 대상 아님 — 원인 블록이면 adaptive 소프트 비적용. */
+    const stage1RangeAdaptiveSoftExplore =
+      input.currentStage === 0 &&
+      input.regime === "RANGE" &&
+      input.adaptiveMode === "sideways" &&
+      executorBlockReasonOriginal !== "range_not_lower_edge" &&
+      (stage1RangeExplorePath || naturalRangeStage1EntryAllowed);
+
     const adaptive = runFuturesAdaptiveEntry({
       mode: input.adaptiveMode,
       modeDetail: input.adaptiveDetail,
@@ -1024,7 +1098,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         emaGap: sn.emaGap,
         volumeRatioProxy: sn.volumeRatioProxy
       },
-      baseSizeUsd: DEFAULT_PAPER_SIZE_USD * dynamicSizeMult
+      baseSizeUsd: DEFAULT_PAPER_SIZE_USD * dynamicSizeMult,
+      stage1RangeAdaptiveSoftExplore
     });
     adaptiveDetailOut = adaptive.detail ?? null;
     if (!adaptive.ok) {
@@ -1032,6 +1107,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       final_decision = "REJECT";
       execution_state = "ORDER_BUILD_FAIL";
       supplemental_reasons.push("ORDER_BUILD_FAIL");
+      supplemental_reasons.push(`ORDER_BUILD_FAIL:${adaptive.orderBuildFailReason}`);
       return ret(
         {
           reject_reason: "ORDER_BUILD_FAIL",
@@ -1039,12 +1115,26 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           execution_state: "ORDER_BUILD_FAIL",
           ai_decision: "APPROVE",
           adaptive_decision: "REJECT",
-          guidance: "결정 구성 실패",
+          guidance: `결정 구성 실패 (${adaptive.orderBuildFailReason})`,
           target_stage: null,
           supplemental_reasons,
           stage1_result_code: "STAGE1_BLOCKED_DATA",
           required_move_pct,
-          shortfall_pct
+          shortfall_pct,
+          order_build_ok: false,
+          order_build_fail_reason: adaptive.orderBuildFailReason,
+          order_build_fail_stage: adaptive.failStage,
+          qty: null,
+          price: sn.lastPrice,
+          stopLoss: null,
+          takeProfit: null,
+          riskReward: rr,
+          atr_pct,
+          tick_size: null,
+          qty_step: null,
+          min_qty: null,
+          min_notional: null,
+          sizeUsd: null
         },
         {
           intentSide,
@@ -1053,6 +1143,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           adaptiveDirection: null,
           adaptiveDetail: adaptiveDetailOut,
           adaptiveResult: null,
+          adaptiveFailure: adaptive,
           aiGatePassed: true
         }
       );
@@ -1120,6 +1211,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     final_decision = "ENTER";
     reject_reason = null;
 
+    const forceEnterAdaptive =
+      adaptive.detail["stage1_adaptive_force_enter"] ?? adaptive.detail["stage1_adaptive_soft_explore"];
+    if (forceEnterAdaptive === "direction_none") supplemental_reasons.push("STAGE1_EXPLORE_ADAPTIVE_DIRECTION_NONE");
+    if (forceEnterAdaptive === "ema_flat") supplemental_reasons.push("STAGE1_EXPLORE_ADAPTIVE_EMA_FLAT");
+
     // Round 4 & 5: Stage 1 Execution Pending prioritize
     if (input.currentStage === 0 && input.autoEntryTriggered) {
       execution_state = "STAGE1_EXEC_PENDING";
@@ -1154,7 +1250,21 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         post_entry_cost_guard: costWarningStage1,
         executor_block_reason_original: executorBlockReasonOriginal,
         stage1_soft_exec_override: stage1SoftExecOverrideFlag,
-        stage1_size_multiplier_final: stage1SizeMultFinal
+        stage1_size_multiplier_final: stage1SizeMultFinal,
+        order_build_ok: true,
+        order_build_fail_reason: null,
+        order_build_fail_stage: null,
+        qty: null,
+        price: sn.lastPrice,
+        stopLoss: null,
+        takeProfit: null,
+        riskReward: rr,
+        atr_pct,
+        tick_size: null,
+        qty_step: null,
+        min_qty: null,
+        min_notional: null,
+        sizeUsd: adaptive.sizeUsd
       },
       {
         intentSide,

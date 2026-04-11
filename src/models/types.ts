@@ -259,6 +259,22 @@ export type PaperSymbolDecisionRecord = Readonly<{
   stage1_soft_exec_override?: boolean;
   /** Stage 1 최종 사이즈 배수(리스크·탐색·RANGE 완화 누적 후, adaptive 직전) */
   stage1_size_multiplier_final?: number | null;
+  /** 적응형 진입(페이퍼) 주문 구성 결과 — 거래소 호가·계약 스펙 없음 */
+  order_build_ok?: boolean;
+  order_build_fail_reason?: string | null;
+  order_build_fail_stage?: "entry_policy" | "adaptive_sizing" | null;
+  /** 페이퍼는 계약 수량 미산출 시 null */
+  qty?: number | null;
+  price?: number | null;
+  stopLoss?: number | null;
+  takeProfit?: number | null;
+  riskReward?: number | null;
+  tick_size?: number | null;
+  qty_step?: number | null;
+  min_qty?: number | null;
+  min_notional?: number | null;
+  /** 주문 생성 단계에서의 목표 명목(USD), 실패 시 null */
+  sizeUsd?: number | null;
 }>;
 
 /** Minimal row shape for funnel math. */
@@ -316,6 +332,8 @@ export type PaperEngineState = Readonly<{
   reject_reason_counts_tick: Record<string, number>;
   is_ambiguous?: boolean;
   symbol_decisions: Record<string, { decision: PaperSymbolDecisionRecord; adaptiveOk: boolean }>;
+  /** 직전 틱에서 발생한 ORDER_BUILD_FAIL 요약(관측용) */
+  last_order_build_failure?: Record<string, unknown> | null;
 }>;
 
 /** One leg in `positions/open.json` (JSON array of up to `paperMaxOpenPositions` records). */
