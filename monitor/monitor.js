@@ -448,23 +448,19 @@
     hero.innerHTML = `
       <article class="hero-card hero-card--metric hero-card--numfirst">
         <p class="hero-metric-xl tabular-nums">${esc(String(pm.openCount))}</p>
-        <p class="hero-label">총 보유 포지션 수</p>
-        <p class="hero-sub muted">최대 ${MAX_OPEN}건</p>
+        <p class="hero-label">총 보유 수</p>
       </article>
       <article class="hero-card hero-card--metric hero-card--numfirst">
         <p class="hero-metric-xl tabular-nums ${unrealClass}">${esc(formatSignedUsd(pm.totalUnreal))}</p>
         <p class="hero-label">총 미실현 손익</p>
-        <p class="hero-sub muted">진입금(마진) 합 ${esc(formatUsd(pm.totalMargin))}</p>
       </article>
       <article class="hero-card hero-card--metric hero-card--numfirst">
         <p class="hero-metric-xl tabular-nums ${realizedClass}">${realized7 !== null ? esc(formatSignedUsd(realized7)) : "—"}</p>
         <p class="hero-label">최근 7일 실현(순)</p>
-        <p class="hero-sub muted">종료 ${esc(formatCount(perf7 && perf7.totalTrades))}건</p>
       </article>
       <article class="hero-card hero-card--metric hero-card--numfirst">
         <p class="hero-metric-xl tabular-nums ${winClass}">${win7 !== null ? esc(formatPct(win7)) : "—"}</p>
         <p class="hero-label">최근 7일 승률</p>
-        <p class="hero-sub muted">TP·청산 승 패턴 요약(종료 건)</p>
       </article>
     `;
   }
@@ -742,43 +738,42 @@
 
         return `
         <article class="${cardClass}">
-          <header class="pos-card-head">
-            <span class="pos-card-ticker">${esc(sym)}</span>
-            <span class="pos-card-side pos-card-side--${pos.side === "short" ? "short" : "long"}">${esc(sideK)}</span>
-            <span class="pos-card-lev muted">${esc(String(lev))}×</span>
-          </header>
-          <div class="pos-money-strip">
+          <div class="pos-money-strip pos-money-strip--primary" aria-label="포지션 손익 5항목">
             <div class="pos-money-cell">
-              <span class="pos-money-lbl">진입금액</span>
               <span class="pos-money-num tabular-nums">${margin !== null ? esc(formatUsd(margin)) : "—"}</span>
+              <span class="pos-money-lbl">진입금액</span>
             </div>
             <div class="pos-money-cell">
-              <span class="pos-money-lbl">현재 평가</span>
               <span class="pos-money-num tabular-nums">${equity !== null ? esc(formatUsd(equity)) : "—"}</span>
+              <span class="pos-money-lbl">현재평가금액</span>
             </div>
             <div class="pos-money-cell">
-              <span class="pos-money-lbl">미실현 손익</span>
               <span class="pos-money-num tabular-nums ${uClass}">${uPnL !== null ? esc(formatSignedUsd(uPnL)) : "—"}</span>
+              <span class="pos-money-lbl">미실현손익</span>
             </div>
             <div class="pos-money-cell">
-              <span class="pos-money-lbl">수익률</span>
               <span class="pos-money-num tabular-nums ${uClass}">${esc(uPct)}</span>
+              <span class="pos-money-lbl">수익률</span>
             </div>
             <div class="pos-money-cell">
-              <span class="pos-money-lbl">보유 시간</span>
               <span class="pos-money-num tabular-nums">${esc(formatHoldDuration(pos.openedAt))}</span>
+              <span class="pos-money-lbl">보유시간</span>
             </div>
           </div>
+          <header class="pos-card-head pos-card-head--compact">
+            <span class="pos-card-titleline"><span class="pos-card-ticker">${esc(sym)}</span> <span class="pos-card-side pos-card-side--${pos.side === "short" ? "short" : "long"}">${esc(sideK)}</span></span>
+          </header>
           <div class="pos-sub-strip">
             <div class="pos-sub-item"><span class="pos-sub-k">평균 진입가</span><span class="pos-sub-v tabular-nums">${esc(formatPrice(pos.entryPrice))}</span></div>
-            <div class="pos-sub-item"><span class="pos-sub-k">현재가 Mark</span><span class="pos-sub-v tabular-nums">${mark !== null ? esc(formatPrice(mark)) : "—"}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">Mark</span><span class="pos-sub-v tabular-nums">${mark !== null ? esc(formatPrice(mark)) : "—"}</span></div>
             <div class="pos-sub-item"><span class="pos-sub-k">실현 손익</span><span class="pos-sub-v tabular-nums ${rClass}">${esc(formatSignedUsd(realized))}</span></div>
-            <div class="pos-sub-item"><span class="pos-sub-k">익절 진행</span><span class="pos-sub-v tabular-nums">${esc(String(pes))}/3 · 진입단계 ${esc(String(esN))}/3</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">익절 진행</span><span class="pos-sub-v tabular-nums">${esc(String(pes))}/3 · 진입 ${esc(String(esN))}/3</span></div>
             <div class="pos-sub-item"><span class="pos-sub-k">손절가</span><span class="pos-sub-v tabular-nums">${stopPx !== null ? esc(formatPrice(stopPx)) : "—"}</span></div>
           </div>
           <details class="sym-details">
-            <summary>파이프라인·펀딩·진단 상세</summary>
+            <summary>레버리지·파이프라인·펀딩 상세</summary>
             <dl class="sym-meta">
+              <dt>레버리지</dt><dd>${esc(String(lev))}×</dd>
               <dt>평균 진입가</dt><dd>${esc(formatPrice(pos.entryPrice))}</dd>
               <dt>현재가(Mark)</dt><dd>${esc(formatPrice(mark))}</dd>
               <dt>손절가</dt><dd>${stopPx !== null ? esc(formatPrice(stopPx)) : "—"}</dd>

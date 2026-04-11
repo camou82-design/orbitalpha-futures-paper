@@ -315,6 +315,10 @@ body {
   margin: 0 0 0.75rem;
 }
 
+.section--after-secondary {
+  margin-top: 1.5rem;
+}
+
 .symbol-grid {
   display: grid;
   gap: 0.85rem;
@@ -335,6 +339,7 @@ body {
 
 .sym-card--hold {
   border-color: rgba(251, 191, 36, 0.35);
+  padding-top: 0.85rem;
 }
 
 .sym-card--block {
@@ -401,13 +406,35 @@ body {
   font-weight: 500;
 }
 
-/* 포지션 보유: 손익 스트립 */
+/* 포지션 보유: 손익 스트립 (숫자 5열이 카드 최상단·최대) */
 .pos-card-head {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0.45rem 0.65rem;
   margin: 0 0 0.5rem;
+}
+
+.pos-card-head--compact {
+  margin: 0 0 0.55rem;
+  padding: 0;
+  border: 0;
+}
+
+.pos-card-titleline {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.pos-card-head--compact .pos-card-ticker {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
 }
 
 .pos-card-ticker {
@@ -437,9 +464,10 @@ body {
   border: 1px solid rgba(248, 113, 113, 0.35);
 }
 
-.pos-card-lev {
-  font-size: 0.72rem;
-  margin-left: auto;
+.pos-money-strip--primary {
+  margin: 0 0 0.5rem;
+  padding: 0 0 0.65rem;
+  border-bottom: 1px solid rgba(63, 63, 70, 0.65);
 }
 
 .pos-money-strip {
@@ -466,8 +494,13 @@ body {
 .pos-money-cell {
   display: flex;
   flex-direction: column;
-  gap: 0.2rem;
+  gap: 0.12rem;
+  justify-content: flex-start;
   min-width: 0;
+}
+
+.pos-money-strip--primary .pos-money-cell {
+  gap: 0.18rem;
 }
 
 .pos-money-lbl {
@@ -479,6 +512,11 @@ body {
   white-space: nowrap;
 }
 
+.pos-money-strip--primary .pos-money-lbl {
+  font-size: 0.52rem;
+  letter-spacing: 0.05em;
+}
+
 .pos-money-num {
   font-size: clamp(1.15rem, 3.8vw, 1.55rem);
   font-weight: 800;
@@ -486,6 +524,12 @@ body {
   line-height: 1.15;
   letter-spacing: -0.02em;
   color: var(--text);
+}
+
+.pos-money-strip--primary .pos-money-num {
+  font-size: clamp(1.35rem, 5vw, 2.05rem);
+  font-weight: 800;
+  line-height: 1.1;
 }
 
 .pos-sub-strip {
@@ -792,15 +836,16 @@ details[open] .details-summary::before {
 }
 
 .hero-card--numfirst .hero-metric-xl {
-  margin: 0 0 0.2rem;
-  font-size: clamp(1.55rem, 5vw, 2.2rem);
+  margin: 0 0 0.15rem;
+  font-size: clamp(1.65rem, 5.5vw, 2.35rem);
   font-weight: 800;
   letter-spacing: -0.03em;
 }
 
 .hero-card--numfirst .hero-label {
-  margin: 0 0 0.35rem;
+  margin: 0;
   order: unset;
+  font-size: 0.6rem;
 }
 
 .hero-card--numfirst .hero-sub {
