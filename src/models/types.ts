@@ -217,6 +217,10 @@ export type PaperSymbolDecisionRecord = Readonly<{
   stage1_result_code?: PaperStage1ResultCode;
   /** 최종 실패 사유 (추적용) */
   final_fail_reason?: string;
+  /** 요구 이동폭 (비용 포함) % */
+  required_move_pct?: number | null;
+  /** 부족분 (요구 - 기대) % */
+  shortfall_pct?: number | null;
 }>;
 
 /** Minimal row shape for funnel math. */

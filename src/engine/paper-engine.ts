@@ -1511,7 +1511,9 @@ export class PaperEngine {
         symbol: sym,
         regime: this.lastRegime.regime,
         executor: decision.executor,
-        stage1_result_code: res.decision.stage1_result_code
+        stage1_result_code: res.decision.stage1_result_code,
+        required_move_pct: res.decision.required_move_pct,
+        shortfall_pct: res.decision.shortfall_pct
       });
 
       const sourceSignal = first.signal;
@@ -1642,7 +1644,9 @@ export class PaperEngine {
           stage1_result_code: res.decision.stage1_result_code,
           final_fail_reason: msg,
           reviewing_ticks: res.decision.reviewing_ticks,
-          auto_entry_triggered: res.decision.auto_entry_triggered
+          auto_entry_triggered: res.decision.auto_entry_triggered,
+          required_move_pct: res.decision.required_move_pct,
+          shortfall_pct: res.decision.shortfall_pct
         });
       }
     }

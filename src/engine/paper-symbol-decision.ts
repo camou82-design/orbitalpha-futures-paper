@@ -162,6 +162,8 @@ function pack(
     reviewing_ticks?: number;
     stage1_result_code?: import("../models/types").PaperStage1ResultCode;
     final_fail_reason?: string;
+    required_move_pct?: number | null;
+    shortfall_pct?: number | null;
   }
 ): PaperSymbolDecision {
   return {
@@ -185,7 +187,9 @@ function pack(
     auto_entry_triggered: fields.auto_entry_triggered,
     reviewing_ticks: fields.reviewing_ticks,
     stage1_result_code: fields.stage1_result_code,
-    final_fail_reason: fields.final_fail_reason
+    final_fail_reason: fields.final_fail_reason,
+    required_move_pct: fields.required_move_pct,
+    shortfall_pct: fields.shortfall_pct
   };
 }
 
@@ -220,6 +224,24 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let adaptiveDetailOut: Record<string, unknown> | null = null;
   let guidanceOut: string | null = null;
 
+  const sn = input.snapshot;
+  const isBtcEth = sym === "BTCUSDT" || sym === "ETHUSDT";
+  const rm = sn?.gateRequiredMove;
+  const emFromSn = sn?.gateExpectedMove ?? null;
+  em = emFromSn; // Use the let-declared em
+
+  let leniency = 1.0;
+  if (input.currentStage === 0) {
+    if (input.regime === "TREND") leniency *= 0.65;
+    else if (input.regime === "RANGE") leniency *= 0.75;
+    if (isBtcEth) leniency *= 0.70;
+  }
+
+  const totalCost = (typeof rm === "number" && Number.isFinite(rm)) ? rm + slipFrac + safety : null;
+  const effectiveTotalCost = totalCost !== null ? totalCost * leniency : null;
+  const required_move_pct = effectiveTotalCost !== null ? effectiveTotalCost * 100 : null;
+  const shortfall_pct = (effectiveTotalCost !== null && em !== null && effectiveTotalCost > em) ? (effectiveTotalCost - em) * 100 : 0;
+
   const ret = (
     extra: Partial<{
       signal_state: PaperSignalState;
@@ -251,6 +273,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reviewing_ticks?: number;
       stage1_result_code?: import("../models/types").PaperStage1ResultCode;
       final_fail_reason?: string;
+      required_move_pct?: number | null;
+      shortfall_pct?: number | null;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -294,7 +318,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       auto_entry_triggered: extra.auto_entry_triggered !== undefined ? extra.auto_entry_triggered : input.autoEntryTriggered,
       reviewing_ticks: extra.reviewing_ticks !== undefined ? extra.reviewing_ticks : input.reviewingTicks,
       stage1_result_code: extra.stage1_result_code,
-      final_fail_reason: extra.final_fail_reason
+      final_fail_reason: extra.final_fail_reason,
+      required_move_pct: extra.required_move_pct,
+      shortfall_pct: extra.shortfall_pct
     }),
     ...res
   });
@@ -324,7 +350,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         target_stage: null,
         supplemental_reasons: ["DATA_NOT_READY"],
         is_ambiguous: false,
-        stage1_result_code: "STAGE1_BLOCKED_DATA"
+        stage1_result_code: "STAGE1_BLOCKED_DATA",
+        required_move_pct,
+        shortfall_pct
       },
       {
         intentSide: null,
@@ -338,8 +366,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     );
   }
 
-  const sn = input.snapshot;
-  em = sn.gateExpectedMove;
+  if (!sn) return ret({ stage1_result_code: "STAGE1_BLOCKED_DATA" }, { intentSide: null, executorDecision: null, adaptiveOk: false, adaptiveDirection: null, adaptiveDetail: null, adaptiveResult: null, aiGatePassed: false });
   signal_state = signalToState(sn.signal);
 
   if (input.regime === "RANGE" || input.regime === "TREND") {
@@ -350,9 +377,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     expected_move_pct = em * 100;
     atr_pct = em * 100;
   }
-  const rm = sn.gateRequiredMove;
-  const totalCost =
-    typeof rm === "number" && Number.isFinite(rm) ? rm + slipFrac + safety : null;
   if (typeof rm === "number" && Number.isFinite(rm)) {
     fee_estimate_pct = rm * 100;
   }
@@ -365,7 +389,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         execution_state: "PAPER_READY",
         ai_decision: "N/A",
         adaptive_decision: "N/A",
-        stage1_result_code: "STAGE1_BLOCKED_DATA"
+        stage1_result_code: "STAGE1_BLOCKED_DATA",
+        required_move_pct: null,
+        shortfall_pct: 0
       },
       {
         intentSide: null,
@@ -391,7 +417,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         ai_decision: "N/A",
         adaptive_decision: "N/A",
         guidance: input.isAmbiguous ? "애매한 장세 관망 중" : "적합한 레짐 없음",
-        stage1_result_code: "STAGE1_BLOCKED_REGIME"
+        stage1_result_code: "STAGE1_BLOCKED_REGIME",
+        required_move_pct: null,
+        shortfall_pct: 0
       },
       {
         intentSide: null,
@@ -419,7 +447,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         adaptive_decision: "N/A",
         guidance: null,
         target_stage: null,
-        stage1_result_code: "STAGE1_BLOCKED_REGIME"
+        stage1_result_code: "STAGE1_BLOCKED_REGIME",
+        required_move_pct: null,
+        shortfall_pct: 0
       },
       {
         intentSide: null,
@@ -437,18 +467,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   rr = rrFromRegime(input.regime);
 
   const supplemental_reasons: string[] = [];
-  const isBtcEth = sym === "BTCUSDT" || sym === "ETHUSDT";
-
-  // Edge Filter Loosening for Stage 1
-  let leniency = 1.0;
   let stage1LoosenedEntry = false;
-  if (input.currentStage === 0) {
-    if (input.regime === "TREND") leniency *= 0.65; // 35% discount for Trend (Loosened further)
-    else if (input.regime === "RANGE") leniency *= 0.75; // 25% discount for Range (Loosened further)
-    if (isBtcEth) leniency *= 0.82; // Total ~45% discount for Trend, ~38% for Range
-  }
-
-  const effectiveTotalCost = totalCost !== null ? totalCost * leniency : null;
 
   if (typeof em === "number" && typeof rm === "number" && effectiveTotalCost !== null) {
     if (em <= effectiveTotalCost) {
@@ -524,7 +543,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         ai_decision: "N/A",
         adaptive_decision: "N/A",
         supplemental_reasons,
-        stage1_result_code: (reject_reason?.startsWith("EDGE") ? "STAGE1_BLOCKED_EDGE" : "STAGE1_BLOCKED_RISK") as any
+        stage1_result_code: (reject_reason?.startsWith("EDGE") ? "STAGE1_BLOCKED_EDGE" : "STAGE1_BLOCKED_RISK") as any,
+        required_move_pct,
+        shortfall_pct
       },
       {
         intentSide,
@@ -551,7 +572,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         guidance: "최대 포지션 도달",
         target_stage: null,
         supplemental_reasons,
-        stage1_result_code: "STAGE1_BLOCKED_LIMIT"
+        stage1_result_code: "STAGE1_BLOCKED_LIMIT",
+        required_move_pct,
+        shortfall_pct
       },
       {
         intentSide,
@@ -659,7 +682,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         entry_progress: executorDecision?.entry_progress ?? null,
         target_stage: null,
         supplemental_reasons,
-        stage1_result_code: (input.currentStage === 0 && input.isAmbiguous) ? "STAGE1_EXEC_PENDING" : "STAGE1_BLOCKED_REGIME"
+        stage1_result_code: (input.currentStage === 0 && input.isAmbiguous) ? "STAGE1_EXEC_PENDING" : "STAGE1_BLOCKED_REGIME",
+        required_move_pct,
+        shortfall_pct
       },
       {
         intentSide,
@@ -696,7 +721,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           guidance: "AI 방향 불일치",
           target_stage: null,
           supplemental_reasons,
-          stage1_result_code: "STAGE1_BLOCKED_QUALITY"
+          stage1_result_code: "STAGE1_BLOCKED_QUALITY",
+          required_move_pct,
+          shortfall_pct
         },
         {
           intentSide,
@@ -732,7 +759,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             target_stage: null,
             supplemental_reasons,
             ai_floor_relaxed: aiFloorRelaxed,
-            stage1_result_code: "STAGE1_BLOCKED_QUALITY"
+            stage1_result_code: "STAGE1_BLOCKED_QUALITY",
+            required_move_pct,
+            shortfall_pct
           },
           {
             intentSide,
@@ -795,7 +824,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           guidance: "결정 구성 실패",
           target_stage: null,
           supplemental_reasons,
-          stage1_result_code: "STAGE1_BLOCKED_DATA"
+          stage1_result_code: "STAGE1_BLOCKED_DATA",
+          required_move_pct,
+          shortfall_pct
         },
         {
           intentSide,
@@ -823,7 +854,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           guidance: "방향 불일치 (Adaptive)",
           target_stage: null,
           supplemental_reasons,
-          stage1_result_code: "STAGE1_BLOCKED_RISK"
+          stage1_result_code: "STAGE1_BLOCKED_RISK",
+          required_move_pct,
+          shortfall_pct
         },
         {
           intentSide,
@@ -850,7 +883,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           guidance: "방향 제한 (Long Only)",
           target_stage: null,
           supplemental_reasons,
-          stage1_result_code: "STAGE1_BLOCKED_REGIME"
+          stage1_result_code: "STAGE1_BLOCKED_REGIME",
+          required_move_pct,
+          shortfall_pct
         },
         {
           intentSide,
@@ -887,9 +922,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         entry_progress: executorDecision?.entry_progress ?? null,
         target_stage: executorDecision?.target_stage ?? null,
         supplemental_reasons,
-        reviewing_ticks: input.reviewingTicks,
         auto_entry_triggered: input.autoEntryTriggered,
-        stage1_result_code: (execution_state === "STAGE1_EXEC_PENDING") ? "STAGE1_EXEC_PENDING" : "STAGE1_ENTERED"
+        stage1_result_code: (execution_state === "STAGE1_EXEC_PENDING") ? "STAGE1_EXEC_PENDING" : "STAGE1_ENTERED",
+        required_move_pct,
+        shortfall_pct
       },
       {
         intentSide,
@@ -910,7 +946,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reject_reason: "SIGNAL_NONE",
       guidance: "신호 분석 불가",
       supplemental_reasons,
-      stage1_result_code: "STAGE1_BLOCKED_DATA"
+      stage1_result_code: "STAGE1_BLOCKED_DATA",
+      required_move_pct,
+      shortfall_pct
     },
     {
       intentSide: null,
