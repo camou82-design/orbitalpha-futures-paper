@@ -350,10 +350,171 @@ body {
 }
 
 .sym-headline {
-  margin: 0 0 0.5rem;
+  margin: 0 0 0.65rem;
   font-size: 1rem;
   font-weight: 600;
   color: var(--amber-dim);
+}
+
+/* 포지션 없음: 상태형 카드 */
+.sym-state-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(9, 9, 11, 0.55);
+  border: 1px solid rgba(63, 63, 70, 0.85);
+}
+
+.sym-state-row {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr;
+  gap: 0.5rem 0.75rem;
+  align-items: baseline;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+@media (max-width: 420px) {
+  .sym-state-row {
+    grid-template-columns: 1fr;
+    gap: 0.15rem;
+  }
+
+  .sym-state-k {
+    opacity: 0.85;
+  }
+}
+
+.sym-state-k {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--dim);
+}
+
+.sym-state-v {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* 포지션 보유: 손익 스트립 */
+.pos-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.45rem 0.65rem;
+  margin: 0 0 0.5rem;
+}
+
+.pos-card-ticker {
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.pos-card-side {
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  letter-spacing: 0.04em;
+}
+
+.pos-card-side--long {
+  background: rgba(74, 222, 128, 0.12);
+  color: var(--pnl-up);
+  border: 1px solid rgba(74, 222, 128, 0.35);
+}
+
+.pos-card-side--short {
+  background: rgba(248, 113, 113, 0.12);
+  color: var(--pnl-down);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+}
+
+.pos-card-lev {
+  font-size: 0.72rem;
+  margin-left: auto;
+}
+
+.pos-money-strip {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.45rem 0.5rem;
+  margin: 0 0 0.75rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid rgba(63, 63, 70, 0.65);
+}
+
+@media (max-width: 720px) {
+  .pos-money-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 380px) {
+  .pos-money-strip {
+    grid-template-columns: 1fr;
+  }
+}
+
+.pos-money-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.pos-money-lbl {
+  font-size: 0.58rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.pos-money-num {
+  font-size: clamp(1.15rem, 3.8vw, 1.55rem);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.pos-sub-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 0.45rem 0.65rem;
+  margin: 0 0 0.65rem;
+  font-size: 0.76rem;
+}
+
+.pos-sub-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.pos-sub-k {
+  font-size: 0.58rem;
+  font-weight: 600;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pos-sub-v {
+  font-weight: 600;
+  color: var(--muted);
+  word-break: break-word;
 }
 
 .sym-one-liner {
@@ -599,6 +760,7 @@ details[open] .details-summary::before {
 }
 
 .details-secondary {
+  margin-top: 1.75rem;
   margin-bottom: 1.25rem;
 }
 
@@ -627,6 +789,22 @@ details[open] .details-summary::before {
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
+}
+
+.hero-card--numfirst .hero-metric-xl {
+  margin: 0 0 0.2rem;
+  font-size: clamp(1.55rem, 5vw, 2.2rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+}
+
+.hero-card--numfirst .hero-label {
+  margin: 0 0 0.35rem;
+  order: unset;
+}
+
+.hero-card--numfirst .hero-sub {
+  margin: 0;
 }
 
 .pnl-pos {

@@ -194,6 +194,15 @@
     return "pnl-zero";
   }
 
+  /** 승률: 0~1 또는 0~100 모두 허용, 50% 근처는 중립 */
+  function winRateToneClass(w) {
+    if (typeof w !== "number" || !Number.isFinite(w)) return "pnl-zero";
+    const frac = w > 1 ? w / 100 : w;
+    if (frac > 0.5005) return "pnl-pos";
+    if (frac < 0.4995) return "pnl-neg";
+    return "pnl-zero";
+  }
+
   function formatHoldDuration(openedAtMs) {
     if (typeof openedAtMs !== "number" || !Number.isFinite(openedAtMs)) return "—";
     const ms = Date.now() - openedAtMs;
@@ -222,17 +231,6 @@
       if (typeof u === "number" && Number.isFinite(u)) totalUnreal += u;
     }
     return { openCount: opens.length, totalUnreal, totalMargin };
-  }
-
-  function positionStageSummary(pos) {
-    const es = pos.entryStage != null && pos.entryStage > 0 ? pos.entryStage : 1;
-    const pes = pos.partialExitStage ?? 0;
-    let status = "보유 중";
-    if (pes >= 1) status = "부분익절 진행";
-    return {
-      line: `진입 ${es}/3 · 익절 ${pes}/3 · ${status}`,
-      short: `S${es} · TP${pes}/3`
-    };
   }
 
   function inferMarketNarrative(bundle) {
@@ -445,27 +443,28 @@
     const realizedClass = pnlToneClass(realized7 !== null ? realized7 : 0);
     const win7 =
       perf7 && typeof perf7.winRate === "number" && Number.isFinite(perf7.winRate) ? perf7.winRate : null;
+    const winClass = win7 !== null ? winRateToneClass(win7) : "";
     const hero = $("hero");
     hero.innerHTML = `
-      <article class="hero-card hero-card--metric">
-        <p class="hero-label">보유 포지션 수</p>
+      <article class="hero-card hero-card--metric hero-card--numfirst">
         <p class="hero-metric-xl tabular-nums">${esc(String(pm.openCount))}</p>
-        <p class="hero-sub muted">동시 최대 ${MAX_OPEN}건</p>
+        <p class="hero-label">총 보유 포지션 수</p>
+        <p class="hero-sub muted">최대 ${MAX_OPEN}건</p>
       </article>
-      <article class="hero-card hero-card--metric">
-        <p class="hero-label">총 미실현 손익</p>
+      <article class="hero-card hero-card--metric hero-card--numfirst">
         <p class="hero-metric-xl tabular-nums ${unrealClass}">${esc(formatSignedUsd(pm.totalUnreal))}</p>
-        <p class="hero-sub muted">진입 마진 합 ${esc(formatUsd(pm.totalMargin))}</p>
+        <p class="hero-label">총 미실현 손익</p>
+        <p class="hero-sub muted">진입금(마진) 합 ${esc(formatUsd(pm.totalMargin))}</p>
       </article>
-      <article class="hero-card hero-card--metric">
-        <p class="hero-label">최근 7일 실현(순)</p>
+      <article class="hero-card hero-card--metric hero-card--numfirst">
         <p class="hero-metric-xl tabular-nums ${realizedClass}">${realized7 !== null ? esc(formatSignedUsd(realized7)) : "—"}</p>
+        <p class="hero-label">최근 7일 실현(순)</p>
         <p class="hero-sub muted">종료 ${esc(formatCount(perf7 && perf7.totalTrades))}건</p>
       </article>
-      <article class="hero-card hero-card--metric">
+      <article class="hero-card hero-card--metric hero-card--numfirst">
+        <p class="hero-metric-xl tabular-nums ${winClass}">${win7 !== null ? esc(formatPct(win7)) : "—"}</p>
         <p class="hero-label">최근 7일 승률</p>
-        <p class="hero-metric-xl tabular-nums">${win7 !== null ? esc(formatPct(win7)) : "—"}</p>
-        <p class="hero-sub muted">종료 거래 기준</p>
+        <p class="hero-sub muted">TP·청산 승 패턴 요약(종료 건)</p>
       </article>
     `;
   }
@@ -663,12 +662,43 @@
       return { ctx: "blocked", reason: mapBlockReason("no_trade_regime") };
     }
 
+    function noPositionStateBlock(sym, bundle) {
+      const s = snapBySymbol(bundle, sym) || {};
+      const headline = symbolHeadline(sym, bundle);
+      const line = symbolOneLiner(sym, bundle);
+      const sig = s.signal || "none";
+      const 방향 =
+        sig === "paper_long_candidate"
+          ? "롱 방향 감지"
+          : sig === "paper_short_candidate"
+            ? "숏 방향 감지"
+            : "방향 후보 없음(중립)";
+      const 가격 = formatPrice(s.lastPrice);
+      return `
+        <div class="sym-state-block">
+          <div class="sym-state-row">
+            <span class="sym-state-k">현재 판단</span>
+            <span class="sym-state-v">${esc(headline)}</span>
+          </div>
+          <div class="sym-state-row">
+            <span class="sym-state-k">방향 감지</span>
+            <span class="sym-state-v">${esc(방향)}</span>
+          </div>
+          <div class="sym-state-row">
+            <span class="sym-state-k">진입 가능성</span>
+            <span class="sym-state-v">${esc(line)}</span>
+          </div>
+          <div class="sym-state-row">
+            <span class="sym-state-k">현재 가격</span>
+            <span class="sym-state-v tabular-nums">${esc(가격)}</span>
+          </div>
+        </div>`;
+    }
+
     const cards = want.map((sym) => {
       const s = snapBySymbol(bundle, sym);
       const pos = openForSymbol(bundle, sym);
       const ctx = contextFor(sym, s || {});
-      const headline = symbolHeadline(sym, bundle);
-      const line = symbolOneLiner(sym, bundle);
       let cardClass = "sym-card";
       if (pos) cardClass += " sym-card--hold";
       else if (s && s.signal && s.signal !== "none") cardClass += " sym-card--block";
@@ -705,44 +735,49 @@
           typeof pos.realizedPnl === "number" && Number.isFinite(pos.realizedPnl) ? pos.realizedPnl : 0;
         const rClass = pnlToneClass(realized);
         const equity = margin !== null && uPnL !== null ? margin + uPnL : null;
-        const st = positionStageSummary(pos);
+        const esN = pos.entryStage != null && pos.entryStage > 0 ? pos.entryStage : 1;
+        const pes = pos.partialExitStage ?? 0;
         const sideK = pos.side === "long" ? "LONG" : pos.side === "short" ? "SHORT" : String(pos.side);
         const stopPx = typeof pos.stopPrice === "number" && Number.isFinite(pos.stopPrice) ? pos.stopPrice : null;
-        const notionalAtEntry = margin !== null ? margin * lev : null;
 
         return `
         <article class="${cardClass}">
-          <h3 class="sym-headline">${esc(sym)} · ${esc(sideK)} · ${esc(lev)}x</h3>
-          <div class="pos-stage-pill"><code>${esc(st.line)}</code>${notionalAtEntry !== null ? ` · 명목 ${esc(formatUsd(notionalAtEntry))}` : ""}</div>
-          <div class="pos-money-grid">
-            <div class="pos-metric">
-              <span class="pos-metric-label">진입 마진</span>
-              <span class="pos-metric-val">${esc(formatUsd(margin))}</span>
+          <header class="pos-card-head">
+            <span class="pos-card-ticker">${esc(sym)}</span>
+            <span class="pos-card-side pos-card-side--${pos.side === "short" ? "short" : "long"}">${esc(sideK)}</span>
+            <span class="pos-card-lev muted">${esc(String(lev))}×</span>
+          </header>
+          <div class="pos-money-strip">
+            <div class="pos-money-cell">
+              <span class="pos-money-lbl">진입금액</span>
+              <span class="pos-money-num tabular-nums">${margin !== null ? esc(formatUsd(margin)) : "—"}</span>
             </div>
-            <div class="pos-metric">
-              <span class="pos-metric-label">현재 평가금액</span>
-              <span class="pos-metric-val">${equity !== null ? esc(formatUsd(equity)) : "—"}</span>
+            <div class="pos-money-cell">
+              <span class="pos-money-lbl">현재 평가</span>
+              <span class="pos-money-num tabular-nums">${equity !== null ? esc(formatUsd(equity)) : "—"}</span>
             </div>
-            <div class="pos-metric">
-              <span class="pos-metric-label">미실현 손익</span>
-              <span class="pos-metric-val ${uClass}">${uPnL !== null ? esc(formatSignedUsd(uPnL)) : "—"}</span>
+            <div class="pos-money-cell">
+              <span class="pos-money-lbl">미실현 손익</span>
+              <span class="pos-money-num tabular-nums ${uClass}">${uPnL !== null ? esc(formatSignedUsd(uPnL)) : "—"}</span>
             </div>
-            <div class="pos-metric">
-              <span class="pos-metric-label">미실현 수익률</span>
-              <span class="pos-metric-val ${uClass}">${esc(uPct)}</span>
+            <div class="pos-money-cell">
+              <span class="pos-money-lbl">수익률</span>
+              <span class="pos-money-num tabular-nums ${uClass}">${esc(uPct)}</span>
             </div>
-            <div class="pos-metric">
-              <span class="pos-metric-label">누적 실현 손익</span>
-              <span class="pos-metric-val ${rClass}">${esc(formatSignedUsd(realized))}</span>
-            </div>
-            <div class="pos-metric">
-              <span class="pos-metric-label">보유 시간</span>
-              <span class="pos-metric-val">${esc(formatHoldDuration(pos.openedAt))}</span>
+            <div class="pos-money-cell">
+              <span class="pos-money-lbl">보유 시간</span>
+              <span class="pos-money-num tabular-nums">${esc(formatHoldDuration(pos.openedAt))}</span>
             </div>
           </div>
-          <p class="sym-guidance">${esc(headline)}</p>
+          <div class="pos-sub-strip">
+            <div class="pos-sub-item"><span class="pos-sub-k">평균 진입가</span><span class="pos-sub-v tabular-nums">${esc(formatPrice(pos.entryPrice))}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">현재가 Mark</span><span class="pos-sub-v tabular-nums">${mark !== null ? esc(formatPrice(mark)) : "—"}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">실현 손익</span><span class="pos-sub-v tabular-nums ${rClass}">${esc(formatSignedUsd(realized))}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">익절 진행</span><span class="pos-sub-v tabular-nums">${esc(String(pes))}/3 · 진입단계 ${esc(String(esN))}/3</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">손절가</span><span class="pos-sub-v tabular-nums">${stopPx !== null ? esc(formatPrice(stopPx)) : "—"}</span></div>
+          </div>
           <details class="sym-details">
-            <summary>평균가·마크·손절·파이프라인 상세</summary>
+            <summary>파이프라인·펀딩·진단 상세</summary>
             <dl class="sym-meta">
               <dt>평균 진입가</dt><dd>${esc(formatPrice(pos.entryPrice))}</dd>
               <dt>현재가(Mark)</dt><dd>${esc(formatPrice(mark))}</dd>
@@ -775,8 +810,7 @@
       return `
         <article class="${cardClass}">
           <h3 class="sym-headline">${esc(sym)}</h3>
-          <p class="sym-guidance">${esc(headline)}</p>
-          <p class="sym-guidance" style="font-size:0.8rem">${esc(line)}</p>
+          ${noPositionStateBlock(sym, bundle)}
           <details class="sym-details">
             <summary>스냅샷·파이프라인·차단 상세</summary>
             <dl class="sym-meta">
