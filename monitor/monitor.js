@@ -604,6 +604,15 @@
             <dt>방향</dt><dd>${esc(dir)}</dd>
             <dt>컨텍스트</dt><dd>${esc(ctx.ctx)}${ctx.reason ? " · " + esc(ctx.reason) : ""}</dd>
             ${pip ? `<dt>파이프라인</dt><dd>v${esc(pipVer)}</dd>` : ""}
+            ${sym === "BTCUSDT" && pip && pip.signal_missing_reason
+              ? `<dt>신호 진단</dt><dd style="font-size:0.8rem">${esc(String(pip.signal_missing_reason))}</dd>`
+              : ""}
+            ${sym === "BTCUSDT" && pip && pip.stage1_result_code
+              ? `<dt>Stage1</dt><dd style="font-size:0.8rem">${esc(String(pip.stage1_result_code))}</dd>`
+              : ""}
+            ${sym === "ETHUSDT" && pip
+              ? `<dt>요구이동·부족·S1완화</dt><dd style="font-size:0.8rem">req ${pip.required_move_pct != null ? esc(String(Number(pip.required_move_pct).toFixed(4))) : "—"}% · shortfall ${pip.shortfall_pct != null ? esc(String(Number(pip.shortfall_pct).toFixed(4))) : "—"}% · leniency ${pip.stage1_leniency_applied === true ? "Y" : pip.stage1_leniency_applied === false ? "N" : "—"}</dd>`
+              : ""}
             ${pip ? `<dt>signal</dt><dd class="${fdClass}">${esc(String(pip.signal_state))}</dd>` : ""}
             ${pip ? `<dt>regime</dt><dd>${esc(String(pip.regime_state))}${ambigTag}</dd>` : ""}
             ${pip ? `<dt>edge</dt><dd>${esc(String(pip.edge_state))}</dd>` : ""}

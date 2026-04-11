@@ -135,6 +135,7 @@ export type PaperStage1ResultCode =
   | "STAGE1_BLOCKED_RISK"
   | "STAGE1_BLOCKED_QUALITY"
   | "STAGE1_BLOCKED_REGIME"
+  | "STAGE1_BLOCKED_SIGNAL"
   | "STAGE1_BLOCKED_DATA";
 
 export type PaperSignalState = "NONE" | "LONG_CANDIDATE" | "SHORT_CANDIDATE";
@@ -221,6 +222,16 @@ export type PaperSymbolDecisionRecord = Readonly<{
   required_move_pct?: number | null;
   /** 부족분 (요구 - 기대) % */
   shortfall_pct?: number | null;
+  /** 진단: 신호가 발생하지 않은 구체적인 이유 (BTC 등) */
+  signal_missing_reason?: string;
+  /** 진단: 박스 내 위치 (0~1) */
+  box_position_diag?: number | null;
+  /** 진단: EMA 이격도 (ema20-ema60)/ema60 */
+  ema_gap_diag?: number | null;
+  /** 진단: 변동성/거래량 프록시 */
+  volatility_proxy_diag?: number | null;
+  /** Stage 1 완화(Leniency) 적용 여부 */
+  stage1_leniency_applied?: boolean;
 }>;
 
 /** Minimal row shape for funnel math. */

@@ -46,6 +46,7 @@ export type SymbolSnapshotLike = Readonly<{
   boxHigh: number | null;
   boxLow: number | null;
   atr: number | null;
+  signalMissingReason?: string;
 }>;
 
 function signalToState(signal: PaperSignal): PaperSignalState {
@@ -164,6 +165,11 @@ function pack(
     final_fail_reason?: string;
     required_move_pct?: number | null;
     shortfall_pct?: number | null;
+    signal_missing_reason?: string;
+    box_position_diag?: number | null;
+    ema_gap_diag?: number | null;
+    volatility_proxy_diag?: number | null;
+    stage1_leniency_applied?: boolean;
   }
 ): PaperSymbolDecision {
   return {
@@ -189,7 +195,12 @@ function pack(
     stage1_result_code: fields.stage1_result_code,
     final_fail_reason: fields.final_fail_reason,
     required_move_pct: fields.required_move_pct,
-    shortfall_pct: fields.shortfall_pct
+    shortfall_pct: fields.shortfall_pct,
+    signal_missing_reason: fields.signal_missing_reason,
+    box_position_diag: fields.box_position_diag,
+    ema_gap_diag: fields.ema_gap_diag,
+    volatility_proxy_diag: fields.volatility_proxy_diag,
+    stage1_leniency_applied: fields.stage1_leniency_applied
   };
 }
 
@@ -225,7 +236,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let guidanceOut: string | null = null;
 
   const sn = input.snapshot;
-  const isBtcEth = sym === "BTCUSDT" || sym === "ETHUSDT";
   const rm = sn?.gateRequiredMove;
   const emFromSn = sn?.gateExpectedMove ?? null;
   em = emFromSn; // Use the let-declared em
@@ -234,8 +244,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   if (input.currentStage === 0) {
     if (input.regime === "TREND") leniency *= 0.65;
     else if (input.regime === "RANGE") leniency *= 0.75;
-    if (isBtcEth) leniency *= 0.70;
+    /** ETH만 추가 완화(0.60). BTC는 후보 생성 경로에서만 완화, 비용 게이트는 레짐 배수만 적용. */
+    if (sym === "ETHUSDT") leniency *= 0.6;
   }
+
+  const stage1_leniency_applied = input.currentStage === 0 && leniency < 1.0;
 
   const totalCost = (typeof rm === "number" && Number.isFinite(rm)) ? rm + slipFrac + safety : null;
   const effectiveTotalCost = totalCost !== null ? totalCost * leniency : null;
@@ -275,6 +288,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       final_fail_reason?: string;
       required_move_pct?: number | null;
       shortfall_pct?: number | null;
+      signal_missing_reason?: string;
+      box_position_diag?: number | null;
+      ema_gap_diag?: number | null;
+      volatility_proxy_diag?: number | null;
+      stage1_leniency_applied?: boolean;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -319,8 +337,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reviewing_ticks: extra.reviewing_ticks !== undefined ? extra.reviewing_ticks : input.reviewingTicks,
       stage1_result_code: extra.stage1_result_code,
       final_fail_reason: extra.final_fail_reason,
-      required_move_pct: extra.required_move_pct,
-      shortfall_pct: extra.shortfall_pct
+      required_move_pct: "required_move_pct" in extra ? extra.required_move_pct : required_move_pct,
+      shortfall_pct: "shortfall_pct" in extra ? extra.shortfall_pct : (shortfall_pct ?? 0),
+      signal_missing_reason: extra.signal_missing_reason ?? sn?.signalMissingReason,
+      box_position_diag: "box_position_diag" in extra ? extra.box_position_diag : sn?.boxPos,
+      ema_gap_diag: "ema_gap_diag" in extra ? extra.ema_gap_diag : sn?.emaGap,
+      volatility_proxy_diag: "volatility_proxy_diag" in extra ? extra.volatility_proxy_diag : sn?.volumeRatioProxy,
+      stage1_leniency_applied: extra.stage1_leniency_applied ?? stage1_leniency_applied
     }),
     ...res
   });
@@ -352,7 +375,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         is_ambiguous: false,
         stage1_result_code: "STAGE1_BLOCKED_DATA",
         required_move_pct,
-        shortfall_pct
+        shortfall_pct,
+        /** 신호 부재와 구분: 시세/캔들 등 시장 데이터 미준비만 */
+        signal_missing_reason: "MARKET_DATA_NOT_READY",
+        box_position_diag: null,
+        ema_gap_diag: null,
+        volatility_proxy_diag: null,
+        stage1_leniency_applied
       },
       {
         intentSide: null,
@@ -366,7 +395,25 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     );
   }
 
-  if (!sn) return ret({ stage1_result_code: "STAGE1_BLOCKED_DATA" }, { intentSide: null, executorDecision: null, adaptiveOk: false, adaptiveDirection: null, adaptiveDetail: null, adaptiveResult: null, aiGatePassed: false });
+  if (!sn) {
+    return ret(
+      {
+        signal_state: "NONE",
+        edge_state: "FAIL_EXPECTANCY",
+        execution_state: "INIT_FAIL",
+        final_decision: "DISABLED",
+        reject_reason: "DATA_NOT_READY",
+        stage1_result_code: "STAGE1_BLOCKED_DATA",
+        signal_missing_reason: "SNAPSHOT_NULL",
+        box_position_diag: null,
+        ema_gap_diag: null,
+        volatility_proxy_diag: null,
+        supplemental_reasons: ["INTERNAL_SNAPSHOT_NULL"],
+        stage1_leniency_applied
+      },
+      { intentSide: null, executorDecision: null, adaptiveOk: false, adaptiveDirection: null, adaptiveDetail: null, adaptiveResult: null, aiGatePassed: false }
+    );
+  }
   signal_state = signalToState(sn.signal);
 
   if (input.regime === "RANGE" || input.regime === "TREND") {
@@ -389,9 +436,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         execution_state: "PAPER_READY",
         ai_decision: "N/A",
         adaptive_decision: "N/A",
-        stage1_result_code: "STAGE1_BLOCKED_DATA",
+        stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
         required_move_pct: null,
-        shortfall_pct: 0
+        shortfall_pct: 0,
+        signal_missing_reason: sn?.signalMissingReason ?? "EMA_CRITERIA_NOT_MET",
+        box_position_diag: sn?.boxPos,
+        ema_gap_diag: sn?.emaGap,
+        volatility_proxy_diag: sn?.volumeRatioProxy,
+        stage1_leniency_applied
       },
       {
         intentSide: null,

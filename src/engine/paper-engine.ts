@@ -88,6 +88,7 @@ type SymbolSnapshot = Readonly<{
   gateExpectedMove: number | null;
   gateRequiredMove: number | null;
   atr: number | null;
+  signalMissingReason?: string;
 }>;
 
 export type SymbolDiagnostic = Readonly<{
@@ -419,7 +420,7 @@ export class PaperEngine {
     const allSymbolDiagnostics: SymbolDiagnostic[] = [];
 
     for (const symbol of symbols) {
-      const result = await this.pollSymbol(symbol, fetchedAt, klineLimit);
+      const result = await this.pollSymbol(symbol, fetchedAt, klineLimit, regimeDetected.regime);
       allSymbolDiagnostics.push(...result.symbolDiagnostics);
       if (result.ok) {
         snapshots.push(result.snapshot);
@@ -1741,7 +1742,8 @@ export class PaperEngine {
   private async pollSymbol(
     symbol: MarketSymbol,
     fetchedAt: number,
-    klineLimit: number
+    klineLimit: number,
+    regime: MarketRegime
   ): Promise<
     | Readonly<{ ok: true; snapshot: SymbolSnapshot; symbolDiagnostics: SymbolDiagnostic[] }>
     | Readonly<{ ok: false; error: string; symbolDiagnostics: SymbolDiagnostic[]; failedEndpoint: FailureEndpointKey }>
@@ -1785,7 +1787,19 @@ export class PaperEngine {
     const closes = rC.value.map((c) => c.close);
     const atr = atrWilderLast(rC.value, 14);
     const trend = trendFilterOneMinuteCloses(closes);
-    const entry = evaluatePaperEntryV1({
+
+    // Box context from recent completed 1m candles (used to enforce RANGE edge-only and TREND breakout/pullback).
+    const completed1m = rC.value.slice(0, -1);
+    const boxLookback = completed1m.slice(-30);
+    const boxHigh = boxLookback.length > 0 ? Math.max(...boxLookback.map((x) => x.high)) : null;
+    const boxLow = boxLookback.length > 0 ? Math.min(...boxLookback.map((x) => x.low)) : null;
+    const boxRel = boxHigh !== null && boxLow !== null && lastPrice > 0 ? (boxHigh - boxLow) / (lastPrice + 1e-9) : null;
+    const boxPos =
+      boxHigh !== null && boxLow !== null && boxHigh > boxLow
+        ? Math.min(1, Math.max(0, (lastPrice - boxLow) / (boxHigh - boxLow)))
+        : null;
+
+    let entry = evaluatePaperEntryV1({
       symbol,
       ema20: trend.ema20,
       ema60: trend.ema60,
@@ -1793,6 +1807,39 @@ export class PaperEngine {
       strongEmaGapThreshold: this.config.paperStrongEmaGapThreshold,
       sidewaysEmaGapThreshold: this.config.paperSidewaysEmaGapThreshold
     });
+
+    // BTC-specific candidate signal relaxation for RANGE regime (후보만; 체결은 기존 게이트 유지)
+    let signal_missing_reason = "NONE";
+    if (symbol === "BTCUSDT" && regime === "RANGE" && entry.signal === "none") {
+      if (boxPos !== null && boxRel !== null && boxRel >= 0.0035) {
+        // 가장자리 기준 소폭 확대(0.28/0.72 → 0.26/0.74): 후보 노출만
+        if (boxPos <= 0.26) {
+          entry = {
+            ...entry,
+            signal: "paper_long_candidate",
+            candidateStrength: "weak",
+            sidewaysMode: true,
+            entryCandidate: true
+          };
+        } else if (boxPos >= 0.74) {
+          entry = {
+            ...entry,
+            signal: "paper_short_candidate",
+            candidateStrength: "weak",
+            sidewaysMode: true,
+            entryCandidate: true
+          };
+        } else {
+          signal_missing_reason = `BOX_CENTER (pos:${boxPos.toFixed(2)})`;
+        }
+      } else if (boxRel !== null && boxRel < 0.0035) {
+        signal_missing_reason = `BOX_TOO_NARROW (rel:${boxRel.toFixed(5)})`;
+      } else {
+        signal_missing_reason = "BOX_MISSING";
+      }
+    } else if (entry.signal === "none") {
+      signal_missing_reason = "EMA_CRITERIA_NOT_MET";
+    }
 
     const sideForQuality =
       entry.signal === "paper_long_candidate"
@@ -1949,16 +1996,7 @@ export class PaperEngine {
       });
     }
 
-    // Box context from recent completed 1m candles (used to enforce RANGE edge-only and TREND breakout/pullback).
-    const completed1m = rC.value.slice(0, -1);
-    const boxLookback = completed1m.slice(-30);
-    const boxHigh = boxLookback.length > 0 ? Math.max(...boxLookback.map((x) => x.high)) : null;
-    const boxLow = boxLookback.length > 0 ? Math.min(...boxLookback.map((x) => x.low)) : null;
-    const boxRel = boxHigh !== null && boxLow !== null && lastPrice > 0 ? (boxHigh - boxLow) / (lastPrice + 1e-9) : null;
-    const boxPos =
-      boxHigh !== null && boxLow !== null && boxHigh > boxLow
-        ? Math.min(1, Math.max(0, (lastPrice - boxLow) / (boxHigh - boxLow)))
-        : null;
+    // (Logic moved up for signal generation context)
 
     const snapshot: SymbolSnapshot = {
       symbol,
@@ -1982,7 +2020,8 @@ export class PaperEngine {
       boxRel,
       atr,
       gateExpectedMove: gateEval?.expectedMove ?? null,
-      gateRequiredMove: gateEval?.requiredMove ?? null
+      gateRequiredMove: gateEval?.requiredMove ?? null,
+      signalMissingReason: signal_missing_reason
     };
 
     this.logger.info("symbol_snapshot", snapshot);
