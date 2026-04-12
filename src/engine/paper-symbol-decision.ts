@@ -1166,67 +1166,38 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const effectiveRangeUntil = rangeCooldownBypass ? 0 : rangeUntil;
   const trendUntil = input.trendCooldownUntilBySymbol.get(String(sym)) ?? 0;
 
-  // Highway Engine First - Regime is only secondary veto logic
-  const isHighwayAcceptable = highwayResult.state === HighwayTrendState.VALID || highwayResult.state === HighwayTrendState.WEAK;
+  // Highway Engine Universal Evaluation - Regime is only secondary veto logic
+  executorDecision = highwayExecutorEvaluateEntry({
+    intentType: _entryIntent,
+    highwayState: highwayResult.state,
+    aiScores: _aiResult,
+    symbol: String(sym),
+    signal: sn.signal,
+    risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
+    currentStage: input.currentStage,
+    expectedMove: typeof em === "number" ? em : null,
+    totalCost
+  });
 
-  if (isHighwayAcceptable) {
-    executorDecision = highwayExecutorEvaluateEntry({
-      intentType: _entryIntent,
-      highwayState: highwayResult.state,
-      aiScores: _aiResult,
-      symbol: String(sym),
-      signal: sn.signal,
-      risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
-      currentStage: input.currentStage,
-      expectedMove: typeof em === "number" ? em : null,
-      totalCost
-    });
+  // Auxiliary RANGE Veto / Downgrade Logic (executed only if Highway returns some valid intent but score is weak-ish)
+  if (executorDecision.entry_allowed && _aiResult.highwayValidityScore < 0.6) {
+    const penalty = sn.rangeConfidence ?? 0;
+    const isChaos = (sn.breakoutFailureRate ?? 0) > 0.8;
 
-    // Auxiliary RANGE Veto / Downgrade Logic (executed only if Highway is weak-ish)
-    if (executorDecision.entry_allowed && _aiResult.highwayValidityScore < 0.6) {
-      const penalty = sn.rangeConfidence ?? 0;
-      const isChaos = (sn.breakoutFailureRate ?? 0) > 0.8;
-
-      if (penalty > 0.85 || isChaos) {
-        executorDecision = {
-          ...executorDecision,
-          entry_allowed: false,
-          blocked_reason: "range_extreme_veto",
-          guidance: "Highway blocked by extreme RANGE chaos/noise"
-        };
-      } else if (penalty > 0.7 && executorDecision.target_stage && executorDecision.target_stage > 1) {
-        executorDecision = {
-          ...executorDecision,
-          target_stage: 1,
-          guidance: "Highway downgraded to Probe/Scale 1 due to RANGE noise"
-        };
-      }
+    if (penalty > 0.85 || isChaos) {
+      executorDecision = {
+        ...executorDecision,
+        entry_allowed: false,
+        blocked_reason: "range_extreme_veto",
+        guidance: "Highway blocked by extreme RANGE chaos/noise"
+      };
+    } else if (penalty > 0.7 && executorDecision.target_stage && executorDecision.target_stage > 1) {
+      executorDecision = {
+        ...executorDecision,
+        target_stage: 1,
+        guidance: "Highway downgraded to Probe/Scale 1 due to RANGE noise"
+      };
     }
-  } else {
-    // Legacy fallback for structural RANGE exploration when not a highway setup
-    executorDecision = input.regime === "RANGE"
-      ? rangeExecutorEvaluateEntry({
-        regime: input.regime,
-        risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
-        symbol: String(sym),
-        signal: sn.signal,
-        qualityScore: sn.qualityScore,
-        boxPos: sn.boxPos ?? null,
-        boxRel: sn.boxRel ?? null,
-        expectedMove: typeof em === "number" ? em : null,
-        totalCost,
-        atr: sn.atr,
-        cooldownActive: effectiveRangeUntil > nowOpen,
-        cooldownRemainingMs: effectiveRangeUntil > nowOpen ? effectiveRangeUntil - nowOpen : 0,
-        currentStage: input.currentStage,
-        autoEntryTriggered: input.autoEntryTriggered,
-        reviewingTicks: input.reviewingTicks,
-        rangeConfidence: sn.rangeConfidence,
-        boxCohesion01: sn.boxCohesion01,
-        trendWeaknessScore: sn.trendWeaknessScore,
-        rangeReasonLabel: sn.rangeReasonLabel
-      })
-      : null;
   }
 
   // Round 3: Stage 1 — RANGE·모호 소액 탐색 + 자동 진입 + RANGE 박스/에지 소프트 허용
