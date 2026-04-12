@@ -1,4 +1,10 @@
-import type { MarketModeSelectorOutput, TrendBreakoutDirection, TrendEngineState } from "../models/types";
+import type {
+  MarketModeSelectorOutput,
+  TrendBreakoutDirection,
+  TrendBreakoutHoldMemory,
+  TrendBreakoutHoldState,
+  TrendEngineState
+} from "../models/types";
 
 export type TrendEngineInput = Readonly<{
   mark: number;
@@ -7,6 +13,8 @@ export type TrendEngineInput = Readonly<{
   marketMode: MarketModeSelectorOutput;
   priorBreakoutDirection: TrendBreakoutDirection;
   pyramidLevelPrior: number;
+  /** 직전 틱 돌파 추적(재돌파 판별). */
+  holdMemoryPrior: TrendBreakoutHoldMemory | null;
   /** 열린 포지션 방향(피라미드 판단). */
   positionSide?: "long" | "short";
 }>;
@@ -20,6 +28,92 @@ export type TrendSwitchPlan = Readonly<{
 
 function finite(n: number, fallback = 0): number {
   return typeof n === "number" && Number.isFinite(n) ? n : fallback;
+}
+
+function bandPos(mark: number, upper: number, lower: number): "inside" | "above" | "below" {
+  if (mark > upper) return "above";
+  if (mark < lower) return "below";
+  return "inside";
+}
+
+/**
+ * 돌파 유지 / 실패(박스 복귀) / 재돌파.
+ */
+export function stepTrendBreakoutHold(input: Readonly<{
+  mark: number;
+  upper: number;
+  lower: number;
+  prior: TrendBreakoutHoldMemory | null;
+}>): Readonly<{
+  holdState: TrendBreakoutHoldState;
+  label: string;
+  memory: TrendBreakoutHoldMemory;
+}> {
+  const { mark, upper, lower } = input;
+  const pos = bandPos(mark, upper, lower);
+  const prev = input.prior ?? {
+    bandPos: "inside" as const,
+    lastFailedFrom: null as "up" | "down" | null,
+    rebreakArm: false
+  };
+
+  let holdState: TrendBreakoutHoldState = "none";
+  let label = "박스 내부 구간";
+  let lastFailedFrom = prev.lastFailedFrom;
+  let rebreakArm = prev.rebreakArm;
+
+  if (pos === "inside") {
+    if (prev.bandPos === "above") {
+      holdState = "failed";
+      label = "상단 돌파 실패(가격 박스 복귀)";
+      lastFailedFrom = "up";
+      rebreakArm = true;
+    } else if (prev.bandPos === "below") {
+      holdState = "failed";
+      label = "하단 돌파 실패(가격 박스 복귀)";
+      lastFailedFrom = "down";
+      rebreakArm = true;
+    } else {
+      holdState = "none";
+    }
+  } else if (pos === "above") {
+    if (rebreakArm && lastFailedFrom === "up") {
+      holdState = "rebreak";
+      label = "상단 재돌파(이전 상단 돌파 실패 후)";
+      rebreakArm = false;
+      lastFailedFrom = null;
+    } else if (prev.bandPos === "inside" || prev.bandPos === "below") {
+      holdState = "hold";
+      label = prev.bandPos === "below" ? "하단 이탈 후 상단 돌파(반전 시도)" : "상단 돌파 확인";
+      if (prev.bandPos === "inside") rebreakArm = false;
+    } else {
+      holdState = "hold";
+      label = "상단 돌파 유지";
+    }
+  } else {
+    /* below */
+    if (rebreakArm && lastFailedFrom === "down") {
+      holdState = "rebreak";
+      label = "하단 재돌파(이전 하단 돌파 실패 후)";
+      rebreakArm = false;
+      lastFailedFrom = null;
+    } else if (prev.bandPos === "inside" || prev.bandPos === "above") {
+      holdState = "hold";
+      label = prev.bandPos === "above" ? "상단 이탈 후 하단 돌파(반전 시도)" : "하단 돌파 확인";
+      if (prev.bandPos === "inside") rebreakArm = false;
+    } else {
+      holdState = "hold";
+      label = "하단 돌파 유지";
+    }
+  }
+
+  const memory: TrendBreakoutHoldMemory = {
+    bandPos: pos,
+    lastFailedFrom,
+    rebreakArm
+  };
+
+  return { holdState, label, memory };
 }
 
 /**
@@ -46,7 +140,10 @@ export function evaluatePyramidLevel(input: Readonly<{
 /**
  * 반대 돌파 시 청산+역신규를 한 계획으로 표현(실행은 오케스트레이터에서 2레그로 기록).
  */
-export function planTrendSwitch(trend: TrendEngineState, openSide: "long" | "short"): TrendSwitchPlan {
+export function planTrendSwitch(
+  trend: TrendEngineState,
+  openSide: "long" | "short"
+): TrendSwitchPlan {
   if (!trend.switchEligible || !trend.switchCloseSide || !trend.switchOpenSide) {
     return {
       execute: false,
@@ -67,7 +164,7 @@ export function planTrendSwitch(trend: TrendEngineState, openSide: "long" | "sho
     execute: true,
     closeSide: trend.switchCloseSide,
     openSide: trend.switchOpenSide,
-    reasonLabel: "반대 돌파 확인 — 기존 청산 후 역방향 진입"
+    reasonLabel: trend.trendSwitchReasonLabel
   };
 }
 
@@ -86,6 +183,13 @@ export function evaluateTrendEngineForSymbol(input: TrendEngineInput): TrendEngi
   let breakoutDirection: TrendBreakoutDirection = "none";
   if (input.mark > breakoutUpper) breakoutDirection = "up";
   else if (input.mark < breakoutLower) breakoutDirection = "down";
+
+  const hold = stepTrendBreakoutHold({
+    mark: input.mark,
+    upper: breakoutUpper,
+    lower: breakoutLower,
+    prior: input.holdMemoryPrior
+  });
 
   const breakoutConfidence = finite(
     input.marketMode.trendConfidence * (breakoutDirection === "none" ? 0.35 : 0.85)
@@ -129,6 +233,13 @@ export function evaluateTrendEngineForSymbol(input: TrendEngineInput): TrendEngi
         })
       : input.pyramidLevelPrior;
 
+  const dirKr =
+    breakoutDirection === "up" ? "상단" : breakoutDirection === "down" ? "하단" : "박스";
+  const oppKr = pri === "up" ? "상단" : pri === "down" ? "하단" : "중립";
+  const trendSwitchReasonLabel = switchEligible
+    ? `${hold.label} — ${oppKr}→${dirKr} 반대 돌파, 기존 청산 후 역진입`
+    : "스위칭 조건 미충족";
+
   return {
     compressionScore,
     breakoutUpper,
@@ -136,9 +247,13 @@ export function evaluateTrendEngineForSymbol(input: TrendEngineInput): TrendEngi
     breakoutDirection,
     breakoutConfidence,
     trendFollowScore,
+    breakoutHoldState: hold.holdState,
+    breakoutHoldLabel: hold.label,
     switchEligible,
     pyramidLevel,
     switchCloseSide,
-    switchOpenSide
+    switchOpenSide,
+    trendSwitchReasonLabel,
+    holdMemory: hold.memory
   };
 }

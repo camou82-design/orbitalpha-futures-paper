@@ -20,6 +20,13 @@ function clamp01(n: number): number {
   return Math.min(1, Math.max(0, n));
 }
 
+/** MIXED/TRANSITION에서 |rc−tc|가 이보다 작으면 IDLE+paused(애매 구간). */
+export const MIXED_AMBIGUITY_DELTA = 0.06;
+/** RANGE 우세: rc − tc ≥ 이 값. */
+export const RANGE_BEATS_TREND_MIN_GAP = 0.06;
+/** TREND 우세: tc − rc ≥ 이 값. */
+export const TREND_BEATS_RANGE_MIN_GAP = 0.06;
+
 function utcSessionProfile(fetchedAt: number): string {
   const h = new Date(fetchedAt).getUTCHours();
   if (h >= 12 && h < 20) return "us_session";
@@ -35,6 +42,7 @@ function resolveRouting(
 ): EngineRoutingDecision {
   const rc = rangeConfidence;
   const tc = trendConfidence;
+  const gap = rc - tc;
 
   if (marketMode === "NO_TRADE") {
     return {
@@ -45,17 +53,31 @@ function resolveRouting(
   }
 
   if (marketMode === "MIXED" || marketMode === "TRANSITION") {
-    if (rc >= tc) {
+    if (Math.abs(gap) < MIXED_AMBIGUITY_DELTA) {
+      return {
+        activeEngine: "IDLE",
+        newEntryPolicy: "paused",
+        routingReasonLabel: `혼합·전환 — 신뢰도 근접(|${rc.toFixed(2)}−${tc.toFixed(2)}|=${Math.abs(gap).toFixed(2)} < ${MIXED_AMBIGUITY_DELTA}) — 신규 진입 보류`
+      };
+    }
+    if (gap >= RANGE_BEATS_TREND_MIN_GAP) {
       return {
         activeEngine: "RANGE",
         newEntryPolicy: "reduced",
-        routingReasonLabel: "혼합·전환 구간 — RANGE 위주·축소 진입"
+        routingReasonLabel: `혼합·전환 — RANGE 우세(Δ≥${RANGE_BEATS_TREND_MIN_GAP}) — 축소·RANGE 위주`
+      };
+    }
+    if (gap <= -TREND_BEATS_RANGE_MIN_GAP) {
+      return {
+        activeEngine: "TREND",
+        newEntryPolicy: "reduced",
+        routingReasonLabel: `혼합·전환 — TREND 우세(Δ≤−${TREND_BEATS_RANGE_MIN_GAP}) — 축소·TREND 위주`
       };
     }
     return {
-      activeEngine: "TREND",
+      activeEngine: "IDLE",
       newEntryPolicy: "reduced",
-      routingReasonLabel: "혼합·전환 구간 — TREND 위주·축소 진입"
+      routingReasonLabel: `혼합·전환 — 중간대(−${TREND_BEATS_RANGE_MIN_GAP}<Δ<${RANGE_BEATS_TREND_MIN_GAP}) — 축소·관망`
     };
   }
 

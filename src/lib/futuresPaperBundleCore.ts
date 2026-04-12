@@ -63,6 +63,30 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
   if (!riskReasonLabel) riskReasonLabel = "리스크 정보 없음";
   if (!lastExitReasonLabel) lastExitReasonLabel = "직전 청산 없음";
   if (!lastSwitchReasonLabel) lastSwitchReasonLabel = "직전 스위칭 없음";
+
+  const policyLine =
+    newEntryPolicy === "full"
+      ? "신규 진입 정책: 전량 진입"
+      : newEntryPolicy === "reduced"
+        ? "신규 진입 정책: 축소 진입"
+        : "신규 진입 정책: 보류";
+
+  const engineLine =
+    activeEngine === "RANGE"
+      ? "현재 활성 엔진: RANGE"
+      : activeEngine === "TREND"
+        ? "현재 활성 엔진: TREND"
+        : "현재 활성 엔진: 없음(관망)";
+
+  const dashboardLines = {
+    currentMarketJudgment: `현재 시장 판단: ${modeReasonLabel}`,
+    currentActiveEngine: engineLine,
+    newEntryPolicyLine: policyLine,
+    currentRiskState: `현재 리스크 상태: ${riskReasonLabel}`,
+    lastExitReasonLine: `직전 종료 이유: ${lastExitReasonLabel}`,
+    lastSwitchReasonLine: `직전 스위칭 이유: ${lastSwitchReasonLabel}`
+  };
+
   return {
     modeReasonLabel,
     engineReasonLabel,
@@ -70,7 +94,8 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
     activeEngine,
     newEntryPolicy,
     lastExitReasonLabel,
-    lastSwitchReasonLabel
+    lastSwitchReasonLabel,
+    dashboardLines
   };
 }
 

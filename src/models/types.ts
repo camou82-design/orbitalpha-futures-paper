@@ -547,6 +547,16 @@ export type RangeEngineState = Readonly<{
 
 export type TrendBreakoutDirection = "up" | "down" | "none";
 
+/** 돌파 확인 / 실패 / 재돌파 추적(스위칭 문구·정책용). */
+export type TrendBreakoutHoldState = "none" | "hold" | "failed" | "rebreak";
+
+/** 틱 간 돌파 추적 메모리(오케스트레이터 맵에 저장). */
+export type TrendBreakoutHoldMemory = Readonly<{
+  bandPos: "inside" | "above" | "below";
+  lastFailedFrom: "up" | "down" | null;
+  rebreakArm: boolean;
+}>;
+
 /** TREND 엔진이 심볼·틱마다 산출하는 상태. */
 export type TrendEngineState = Readonly<{
   compressionScore: number;
@@ -555,11 +565,19 @@ export type TrendEngineState = Readonly<{
   breakoutDirection: TrendBreakoutDirection;
   breakoutConfidence: number;
   trendFollowScore: number;
+  /** 돌파 유지·실패·재돌파. */
+  breakoutHoldState: TrendBreakoutHoldState;
+  /** 사람이 읽는 한 줄(스위칭·대시보드). */
+  breakoutHoldLabel: string;
   switchEligible: boolean;
   pyramidLevel: number;
   /** 반대 돌파 시 스위칭(청산+역진입) 스키마용 힌트. */
   switchCloseSide: "long" | "short" | null;
   switchOpenSide: "long" | "short" | null;
+  /** 스위칭 시 표시할 상세 사유. */
+  trendSwitchReasonLabel: string;
+  /** 다음 틱에 전달할 돌파 추적 메모리. */
+  holdMemory: TrendBreakoutHoldMemory;
 }>;
 
 export type PaperRiskMode = "NORMAL" | "REDUCED" | "DEFENSIVE" | "HALT";
@@ -573,6 +591,11 @@ export type RiskExposureOutput = Readonly<{
   switchSizeMultiplier: number;
   allowNewEntry: boolean;
   allowAdd: boolean;
+  /** RANGE 라우팅 시 같은 심볼 반대 레그(양방향) 허용. */
+  allowRangeBidirectional: boolean;
+  /** TREND 라우팅 시 반대 레그 신규(헤지) 차단. */
+  blockTrendOppositeLeg: boolean;
+  /** @deprecated allowRangeBidirectional 참고 */
   allowHedge: boolean;
   riskReasonLabel: string;
 }>;
@@ -598,6 +621,15 @@ export type PaperOperationalSnapshot = Readonly<{
   newEntryPolicy: EngineRoutingDecision["newEntryPolicy"];
   lastExitReasonLabel: string;
   lastSwitchReasonLabel: string;
+  /** UI 한 줄 문구(고정 키). */
+  dashboardLines: Readonly<{
+    currentMarketJudgment: string;
+    currentActiveEngine: string;
+    newEntryPolicyLine: string;
+    currentRiskState: string;
+    lastExitReasonLine: string;
+    lastSwitchReasonLine: string;
+  }>;
 }>;
 
 /** Appended to `data/positions/history.json` when a paper position is closed. */

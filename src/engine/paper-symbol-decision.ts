@@ -154,6 +154,8 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   maxPositionsReached: boolean;
   reviewingTicks?: number;
   autoEntryTriggered?: boolean;
+  /** RANGE 익절 후 재진입 — RANGE 쿨다운 우회(엔진 판단). */
+  rangeReopenCooldownBypass?: boolean;
 }>;
 
 export type EvaluatePaperSymbolEntryResult = Readonly<{
@@ -1054,6 +1056,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const nowOpen = input.now;
   const key = `${String(sym)}:${intentSide}`;
   const rangeUntil = input.rangeCooldownUntilByKey.get(key) ?? 0;
+  const rangeCooldownBypass = input.rangeReopenCooldownBypass === true;
+  const effectiveRangeUntil = rangeCooldownBypass ? 0 : rangeUntil;
   const trendUntil = input.trendCooldownUntilBySymbol.get(String(sym)) ?? 0;
 
   executorDecision =
@@ -1069,8 +1073,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         expectedMove: typeof em === "number" ? em : null,
         totalCost,
         atr: sn.atr,
-        cooldownActive: rangeUntil > nowOpen,
-        cooldownRemainingMs: rangeUntil > nowOpen ? rangeUntil - nowOpen : 0,
+        cooldownActive: effectiveRangeUntil > nowOpen,
+        cooldownRemainingMs: effectiveRangeUntil > nowOpen ? effectiveRangeUntil - nowOpen : 0,
         currentStage: input.currentStage,
         autoEntryTriggered: input.autoEntryTriggered,
         reviewingTicks: input.reviewingTicks

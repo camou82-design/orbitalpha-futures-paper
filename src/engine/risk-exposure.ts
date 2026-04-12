@@ -6,6 +6,8 @@ export type RiskExposureInput = Readonly<{
   marketMode: MarketModeSelectorOutput;
   risk: RiskControlDecision;
   openPositionCount: number;
+  /** UTC 기준 세션 세분(미장 개장 전후 등). */
+  fetchedAtMs: number;
 }>;
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -13,11 +15,24 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
 
-function sessionRiskBias(sessionProfile: string, volHigh: boolean): Readonly<{
+function sessionRiskBias(
+  sessionProfile: string,
+  volHigh: boolean,
+  utcHour: number,
+  utcMin: number
+): Readonly<{
   rangeHedgeBoost: number;
   trendSwitchBoost: number;
   label: string;
 }> {
+  const usOpenWindow = utcHour === 13 || utcHour === 14 || (utcHour === 15 && utcMin < 30);
+  if (usOpenWindow && sessionProfile === "us_session") {
+    return {
+      rangeHedgeBoost: 0.88,
+      trendSwitchBoost: volHigh ? 1.18 : 1.1,
+      label: "미장 개장 전후 — 변동·스위칭 가중"
+    };
+  }
   if (sessionProfile === "us_session") {
     return {
       rangeHedgeBoost: 0.95,
@@ -32,6 +47,13 @@ function sessionRiskBias(sessionProfile: string, volHigh: boolean): Readonly<{
       label: "아시아 저유동 — 횡보·헤지 완화"
     };
   }
+  if (sessionProfile === "eu_overlap") {
+    return {
+      rangeHedgeBoost: 1.06,
+      trendSwitchBoost: 0.94,
+      label: "유럽·저녁 횡보 — RANGE 완화"
+    };
+  }
   return { rangeHedgeBoost: 1, trendSwitchBoost: 1, label: "기본 세션 프로파일" };
 }
 
@@ -42,7 +64,11 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
   const { marketMode, risk, openPositionCount, config } = input;
   const throttle = marketMode.riskThrottle;
   const volHigh = throttle > 0.55;
-  const sess = sessionRiskBias(marketMode.sessionProfile, volHigh);
+  const eventVol = throttle > 0.68;
+  const d = new Date(input.fetchedAtMs);
+  const utcHour = d.getUTCHours();
+  const utcMin = d.getUTCMinutes();
+  const sess = sessionRiskBias(marketMode.sessionProfile, volHigh || eventVol, utcHour, utcMin);
 
   let riskMode: PaperRiskMode = "NORMAL";
   if (risk.engineBlocked === true || risk.dailyLossGuardTriggered) riskMode = "HALT";
@@ -58,6 +84,9 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
 
   let sizeMultiplier = clamp(baseSize * (1 - throttle * 0.35), 0.12, 1.35);
   const mm = marketMode.marketMode;
+  if (eventVol) {
+    sizeMultiplier *= 0.78;
+  }
   if (mm === "MIXED" || mm === "TRANSITION") {
     sizeMultiplier *= 0.72;
   }
@@ -91,20 +120,24 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
     !routingPaused &&
     openPositionCount < maxSlots;
 
+  const ae = marketMode.routing.activeEngine;
   const allowAdd =
     allowNewEntry &&
     riskMode !== "HALT" &&
     riskMode !== "DEFENSIVE" &&
-    marketMode.routing.newEntryPolicy === "full";
+    (marketMode.routing.newEntryPolicy === "full" || ae === "TREND" || ae === "RANGE");
 
-  const allowHedge =
-    (mm === "RANGE" || mm === "MIXED" || marketMode.routing.activeEngine === "RANGE") && riskMode === "NORMAL";
+  const allowRangeBidirectional = ae === "RANGE" && riskMode !== "HALT";
+
+  const blockTrendOppositeLeg = ae === "TREND";
+
+  const allowHedge = allowRangeBidirectional;
 
   const riskReasonLabel =
     riskMode === "HALT"
       ? "일일 손실 한도 또는 엔진 차단"
       : riskMode === "DEFENSIVE"
-        ? `고스로틀·고변동 — ${sess.label}`
+        ? `고스로틀·고변동${eventVol ? "·이벤트성" : ""} — ${sess.label}`
         : riskMode === "REDUCED"
           ? `제한 모드 — ${sess.label}`
           : `정상 — ${sess.label}`;
@@ -117,6 +150,8 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
     switchSizeMultiplier,
     allowNewEntry,
     allowAdd,
+    allowRangeBidirectional,
+    blockTrendOppositeLeg,
     allowHedge,
     riskReasonLabel
   };

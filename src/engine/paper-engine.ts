@@ -388,6 +388,12 @@ export class PaperEngine {
   private lastExplanation: PaperExplanationFields | null = null;
   private rangeRuntimeBySymbol = new Map<string, { lastZone: RangeBoxZone | null; cycle: number; ladder: number }>();
   private trendBreakoutBySymbol = new Map<string, TrendBreakoutDirection>();
+  private trendHoldMemoryBySymbol = new Map<string, import("../models/types").TrendBreakoutHoldMemory>();
+  private trendPyramidLevelBySymbol = new Map<string, number>();
+  /** RANGE 익절 후 재진입 쿨다운 우회 판단용(만료 시각). */
+  private rangeReopenArmedUntilBySymbol = new Map<string, number>();
+  /** 직전 틱 `evaluateRangeEngineForSymbol` 결과(진입 크기·래더 연동). */
+  private lastTickRangeEvalBySymbol = new Map<string, ReturnType<typeof evaluateRangeEngineForSymbol>>();
   private lastExitReasonLabel = "";
   private lastSwitchReasonLabel = "";
 
@@ -623,7 +629,8 @@ export class PaperEngine {
       config: this.config,
       marketMode: marketModeOut,
       risk: this.lastRisk!,
-      openPositionCount: opensBeforeClose.length
+      openPositionCount: opensBeforeClose.length,
+      fetchedAtMs: fetchedAt
     });
     this.lastRiskExposure = riskExposureOut;
 
@@ -651,6 +658,7 @@ export class PaperEngine {
     const regimeUnknown = btc5.length < MIN_BTC_5M_BARS_REGIME;
     const decisionBySymbol = new Map<string, EvaluatePaperSymbolEntryResult>();
     const nowTick = Date.now();
+    this.lastTickRangeEvalBySymbol.clear();
 
     for (const sym of symbols) {
       const snap = snapshots.find((s) => s.symbol === sym) ?? null;
@@ -674,7 +682,8 @@ export class PaperEngine {
           sameDirCooldownMult: 2,
           hasOpenPosition: false,
           currentStage: 0,
-          maxPositionsReached: false
+          maxPositionsReached: false,
+          rangeReopenCooldownBypass: false
         });
         decisionBySymbol.set(String(sym), res);
         try {
@@ -708,6 +717,36 @@ export class PaperEngine {
           }
         }
       }
+
+      const rrKey = String(snap.symbol);
+      const marginOpens = opensAfterClose.filter((o) => o.status === "open");
+      const { longUsd, shortUsd } = marginsForSymbol(marginOpens, rrKey);
+      const rr0 = this.rangeRuntimeBySymbol.get(rrKey) ?? {
+        lastZone: null as RangeBoxZone | null,
+        cycle: 0,
+        ladder: 0
+      };
+      const rsEval = evaluateRangeEngineForSymbol({
+        symbol: rrKey,
+        lastPrice: snap.lastPrice,
+        boxHigh: snap.boxHigh,
+        boxLow: snap.boxLow,
+        boxPos: snap.boxPos,
+        marketMode: marketModeOut,
+        longMarginUsd: longUsd,
+        shortMarginUsd: shortUsd,
+        rangeCycleCountPrior: rr0.cycle,
+        rangeLadderLevelPrior: rr0.ladder,
+        lastZone: rr0.lastZone
+      });
+      this.rangeRuntimeBySymbol.set(rrKey, {
+        lastZone: rsEval.boxZone,
+        cycle: rsEval.rangeCycleCount,
+        ladder: rsEval.rangeLadderLevel
+      });
+      this.lastTickRangeEvalBySymbol.set(rrKey, rsEval);
+      const armed = this.rangeReopenArmedUntilBySymbol.get(rrKey) ?? 0;
+      const rangeReopenCooldownBypass = armed > nowTick && rsEval.reopenEligible;
 
       const res = evaluatePaperSymbolEntry({
         config: this.config,
@@ -748,7 +787,8 @@ export class PaperEngine {
         currentStage,
         maxPositionsReached: (opensAfterClose.length >= this.config.paperMaxOpenPositions && !hasOpen),
         reviewingTicks,
-        autoEntryTriggered
+        autoEntryTriggered,
+        rangeReopenCooldownBypass
       });
 
       // Update reviewing state for next tick
@@ -873,6 +913,16 @@ export class PaperEngine {
       filePath,
       decisionBySymbol
     });
+
+    const openAfterEntries = await this.positions.loadOpenAll();
+    for (const sym of symbols) {
+      const sk = String(sym);
+      if (!openAfterEntries.some((o) => o.symbol === sym && o.status === "open")) {
+        this.trendHoldMemoryBySymbol.delete(sk);
+        this.trendPyramidLevelBySymbol.delete(sk);
+        this.trendBreakoutBySymbol.delete(sk);
+      }
+    }
 
     // Update AI-block outcome evaluation store (prices after 5/15/30m).
     try {
@@ -1256,10 +1306,13 @@ export class PaperEngine {
           atr: snap.atr,
           marketMode: input.marketMode,
           priorBreakoutDirection: priorBr,
-          pyramidLevelPrior: open.entryStage ?? 1,
+          pyramidLevelPrior: this.trendPyramidLevelBySymbol.get(symKey) ?? 0,
+          holdMemoryPrior: this.trendHoldMemoryBySymbol.get(symKey) ?? null,
           positionSide: open.side
         });
         this.trendBreakoutBySymbol.set(symKey, trendState.breakoutDirection);
+        this.trendHoldMemoryBySymbol.set(symKey, trendState.holdMemory);
+        this.trendPyramidLevelBySymbol.set(symKey, trendState.pyramidLevel);
         this.logger.info("trend_engine_tick", trendState);
       }
 
@@ -1336,7 +1389,7 @@ export class PaperEngine {
           });
           await this.positions.appendClosed(closedRow);
           this.lastExitReasonLabel = "추세 반대 돌파로 청산";
-          this.lastSwitchReasonLabel = plan.reasonLabel;
+          this.lastSwitchReasonLabel = trendState.trendSwitchReasonLabel;
           await this.store.appendJsonlLine("reports/events.jsonl", {
             ts: Date.now(),
             type: "EXIT_TREND_SWITCH",
@@ -1509,6 +1562,7 @@ export class PaperEngine {
         if (open.regimeAtEntry === "RANGE" && cr === "take_profit") {
           const k = `${String(open.symbol)}:${open.side}`;
           this.rangeFailCountByKey.set(k, 0);
+          this.rangeReopenArmedUntilBySymbol.set(symKey, Date.now() + 15 * 60_000);
         }
         if (open.regimeAtEntry === "TREND" && (cr === "stop_loss" || cr === "trend_break_exit")) {
           this.trendCooldownUntilBySymbol.set(String(open.symbol), Date.now() + 12 * 60_000);
@@ -1699,7 +1753,14 @@ export class PaperEngine {
       const entryStage = existingOpen?.entryStage ?? 0;
       const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === intentSide);
       const otherLeg = next.some((o) => o.symbol === first.symbol && o.side !== intentSide);
-      if (otherLeg && this.lastRiskExposure && !this.lastRiskExposure.allowHedge) {
+      const activeEngine = this.lastMarketMode?.routing.activeEngine ?? "IDLE";
+      let hedgeEntryBlocked = false;
+      if (otherLeg && this.lastRiskExposure) {
+        if (activeEngine === "RANGE") hedgeEntryBlocked = !this.lastRiskExposure.allowRangeBidirectional;
+        else if (activeEngine === "TREND") hedgeEntryBlocked = this.lastRiskExposure.blockTrendOppositeLeg;
+        else hedgeEntryBlocked = true;
+      }
+      if (hedgeEntryBlocked) {
         await this.emitPipelineEventsFromDecision(
           first,
           {
@@ -1708,7 +1769,8 @@ export class PaperEngine {
               ...res.decision,
               final_decision: "SKIP",
               reject_reason: "EXECUTION_DISABLED",
-              execution_disabled_reason: "hedge_disabled_by_risk_policy"
+              execution_disabled_reason:
+                activeEngine === "TREND" ? "trend_opposite_leg_blocked_by_policy" : "hedge_blocked_non_range_engine"
             },
             adaptiveResult: null
           },
@@ -1897,11 +1959,53 @@ export class PaperEngine {
         });
 
         let entrySizeUsd = adaptive.sizeUsd;
-        if (this.lastRiskExposure && this.lastMarketMode?.routing.newEntryPolicy === "reduced") {
+        const riskE = this.lastRiskExposure;
+        if (riskE) {
           entrySizeUsd = Math.max(
             MIN_POSITION_SIZE_USD,
-            Math.round(adaptive.sizeUsd * this.lastRiskExposure.sizeMultiplier * 100) / 100
+            Math.round(adaptive.sizeUsd * riskE.sizeMultiplier * 100) / 100
           );
+        }
+        const symS = String(first.symbol);
+        if (this.lastRegime.regime === "TREND" && this.lastMarketMode?.routing.activeEngine === "TREND") {
+          const pyr = this.trendPyramidLevelBySymbol.get(symS) ?? 0;
+          entrySizeUsd = Math.max(
+            MIN_POSITION_SIZE_USD,
+            Math.round(entrySizeUsd * (1 + Math.min(4, pyr) * 0.07) * 100) / 100
+          );
+        }
+        if (this.lastMarketMode?.routing.activeEngine === "RANGE") {
+          const rSt = this.lastTickRangeEvalBySymbol.get(symS);
+          if (rSt) {
+            const hedgeHeavy = Math.max(0.5, 1 - 0.08 * Math.min(5, rSt.rangeLadderLevel));
+            entrySizeUsd = Math.max(
+              MIN_POSITION_SIZE_USD,
+              Math.round(entrySizeUsd * hedgeHeavy * 100) / 100
+            );
+          }
+        }
+        const mPre = marginsForSymbol(next, symS);
+        if (
+          riskE &&
+          ((adaptive.direction === "long" && mPre.longUsd + entrySizeUsd > riskE.maxLongExposure) ||
+            (adaptive.direction === "short" && mPre.shortUsd + entrySizeUsd > riskE.maxShortExposure))
+        ) {
+          await this.emitPipelineEventsFromDecision(
+            first,
+            {
+              ...res,
+              decision: {
+                ...res.decision,
+                final_decision: "SKIP",
+                reject_reason: "EXECUTION_DISABLED",
+                execution_disabled_reason: "risk_exposure_cap_for_leg"
+              },
+              adaptiveResult: null
+            },
+            nowTs,
+            entryStage
+          );
+          continue;
         }
         const record: PaperOpenPositionRecord = {
           openedAt: Date.now(),
@@ -1935,6 +2039,9 @@ export class PaperEngine {
         };
 
         next.push(record);
+        if (this.lastMarketMode?.routing.activeEngine === "RANGE") {
+          this.rangeReopenArmedUntilBySymbol.delete(symS);
+        }
 
         this.logger.info("STAGE1_POSITION_OPEN_SUCCESS", {
           symbol: record.symbol,
@@ -2017,6 +2124,10 @@ export class PaperEngine {
     nowTs: number
   ): Promise<PaperOpenPositionRecord | null> {
     if (res.decision.final_decision !== "ENTER" || !res.adaptiveResult) return null;
+    if (!this.lastRiskExposure?.allowAdd) {
+      this.logger.info("scale_in_blocked_risk_allow_add", { symbol: existing.symbol });
+      return null;
+    }
     if (existing.postEntryCostGuard === true) {
       this.logger.info("scale_in_blocked_post_entry_cost_guard", { symbol: existing.symbol });
       return null;
@@ -2056,7 +2167,36 @@ export class PaperEngine {
     // RangeExecutor: targetUsd = initialTotalUsd * weight;
     // So adaptive.sizeUsd is the INCREMENTAL size.
 
-    const incrementalSizeUsd = adaptive.sizeUsd;
+    let incrementalSizeUsd = adaptive.sizeUsd;
+    const re = this.lastRiskExposure;
+    const symEx = String(existing.symbol);
+    if (re) {
+      incrementalSizeUsd = Math.round(incrementalSizeUsd * re.sizeMultiplier * 100) / 100;
+    }
+    if (existing.regimeAtEntry === "TREND") {
+      const pyr = this.trendPyramidLevelBySymbol.get(symEx) ?? 0;
+      const pm = Math.min(1.45, 1 + pyr * 0.09);
+      incrementalSizeUsd = Math.round(incrementalSizeUsd * pm * (re?.switchSizeMultiplier ?? 1) * 100) / 100;
+    }
+    if (existing.regimeAtEntry === "RANGE") {
+      const rSt = this.lastTickRangeEvalBySymbol.get(symEx);
+      if (rSt) {
+        const hedgeHeavy = Math.max(0.52, 1 - 0.09 * Math.min(5, rSt.rangeLadderLevel));
+        incrementalSizeUsd = Math.round(incrementalSizeUsd * hedgeHeavy * 100) / 100;
+      }
+    }
+    const opensList = await this.positions.loadOpenAll();
+    const { longUsd, shortUsd } = marginsForSymbol(opensList, symEx);
+    if (re) {
+      if (existing.side === "long" && longUsd + incrementalSizeUsd > re.maxLongExposure) {
+        this.logger.info("scale_in_blocked_max_long_exposure", { symbol: existing.symbol });
+        return null;
+      }
+      if (existing.side === "short" && shortUsd + incrementalSizeUsd > re.maxShortExposure) {
+        this.logger.info("scale_in_blocked_max_short_exposure", { symbol: existing.symbol });
+        return null;
+      }
+    }
     const newTotalSizeUsd = existing.sizeUsd + incrementalSizeUsd;
 
     // Weighted average price
