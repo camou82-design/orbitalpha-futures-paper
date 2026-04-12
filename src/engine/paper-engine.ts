@@ -919,11 +919,11 @@ export class PaperEngine {
       const decisionSnap = snapshots.find((s) => s.symbol === sym);
       if (decisionSnap) {
         const d = res.decision;
-        const executorIsHighway = res.executorDecision?.detail?.alignmentQualityScore !== undefined;
+        const isHighwayExecutor = res.executorDecision?.executor === "TREND" || res.executorDecision?.detail?.highwayValidityScore !== undefined;
 
         this.logger.info("PAPER_ENTRY_LINE", {
           symbol: String(sym),
-          decision_source: executorIsHighway ? "HIGHWAY_CORE" : "LEGACY_RANGE",
+          decision_source: isHighwayExecutor ? "HIGHWAY_CORE" : "LEGACY_RANGE",
           side: res.intentSide,
           entry_intent_type: d.entry_intent_type,
           entry_blocked: d.reject_reason !== null ? d.reject_reason : false,
