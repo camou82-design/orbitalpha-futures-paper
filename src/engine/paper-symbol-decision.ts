@@ -878,6 +878,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let stage1ExploreSoftExec = false;
   /** Stage 1만: 기대이동이 완화 비용 이하여도 탐색 진입 허용(하드 REJECT 안 함) */
   let costWarningStage1 = false;
+  let stage1HigherTfBypassSizeMult: number | null = null;
+  let stage1RangeLowerEdgeSoftSizeMult: number | null = null;
 
   const costGateComparable =
     typeof em === "number" &&
@@ -1106,8 +1108,17 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   // Round 3: Stage 1 — RANGE·모호 소액 탐색 + 자동 진입 + RANGE 박스/에지 소프트 허용
   const brExec = executorDecision?.blocked_reason ?? null;
   if (!executorDecision?.entry_allowed && input.currentStage === 0 && brExec) {
+    const isQualityHighForBypass = sn.qualityScore >= 45;
+    const isQualityVeryHighForBypass = sn.qualityScore >= 50;
+    const crashSafe = input.risk?.crashState === "NONE";
+
+    const allowHigherTfSoft = brExec === "higher_tf_mismatch" && isQualityHighForBypass && crashSafe;
+    const allowRangeLowerEdgeSoft = brExec === "range_not_lower_edge" && isQualityVeryHighForBypass && crashSafe;
+
     const allowExploreSoft =
-      STAGE1_SOFT_EXPLORE_BLOCKS.has(brExec) && (input.isAmbiguous || input.regime === "RANGE");
+      (STAGE1_SOFT_EXPLORE_BLOCKS.has(brExec) || allowHigherTfSoft || allowRangeLowerEdgeSoft) &&
+      (input.isAmbiguous || input.regime === "RANGE" || allowHigherTfSoft);
+
     const allowAutoEntrySoft =
       input.autoEntryTriggered && (brExec === "trend_not_in_pullback" || brExec === "range_not_in_interest_zone");
     const rangeEdgeTag = input.regime === "RANGE" ? STAGE1_RANGE_EDGE_SOFT_TAGS[brExec] : undefined;
@@ -1117,22 +1128,40 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       stage1ExploreSoftExec = allowExploreSoft;
       executorBlockReasonOriginal = brExec;
       stage1SoftExecOverrideFlag = true;
+
       if (allowRangeEdgeSoft) {
         stage1RangeEdgeSoftApplied = true;
         supplemental_reasons.push(rangeEdgeTag!);
       }
+
+      // Special size penalty for higher_tf_mismatch bypass
+      if (allowHigherTfSoft) {
+        stage1HigherTfBypassSizeMult = 0.5;
+        supplemental_reasons.push("STAGE1_HIGHER_TF_SOFT_BYPASS");
+      }
+      if (allowRangeLowerEdgeSoft) {
+        stage1RangeLowerEdgeSoftSizeMult = 0.5;
+        supplemental_reasons.push("STAGE1_RANGE_LOWER_EDGE_SOFT_BYPASS");
+      }
+
       executorDecision = {
         ...executorDecision!,
         entry_allowed: true,
         blocked_reason: null,
-        guidance: allowRangeEdgeSoft
-          ? `Stage1 RANGE 위치 탐색 (${brExec})`
-          : allowExploreSoft
-            ? `Stage1 소액 탐색 (${brExec})`
-            : `검토 유지 자동 진입 (${brExec} 무시)`,
+        guidance: allowHigherTfSoft
+          ? `Stage1 상위추세 불일치 소액 허용 (${sn.qualityScore}점)`
+          : allowRangeLowerEdgeSoft
+            ? `Stage1 RANGE 하단 미달 소액 허용 (${sn.qualityScore}점)`
+            : allowRangeEdgeSoft
+              ? `Stage1 RANGE 위치 탐색 (${brExec})`
+              : allowExploreSoft
+                ? `Stage1 소액 탐색 (${brExec})`
+                : `검토 유지 자동 진입 (${brExec} 무시)`,
         target_stage: 1
       };
-      if (allowExploreSoft) supplemental_reasons.push("STAGE1_EXPLORE_SOFT_EXEC");
+      if (allowExploreSoft && !allowHigherTfSoft && !allowRangeLowerEdgeSoft) {
+        supplemental_reasons.push("STAGE1_EXPLORE_SOFT_EXEC");
+      }
     }
   }
 
@@ -1287,12 +1316,16 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       );
     }
 
-    // AI Role refinement: Only EXTREME_LOW (quality < 40 for stage 1 or < 45 for others) is hard REJECT
+    // AI Role refinement: Stage 1 floor relaxed to 35
     let aiFloorRelaxed = false;
+    let aiSizeLadderMult = 1.0;
+
     if (aiOut.action === "NO_ENTRY") {
-      const effectiveFloor = input.currentStage === 0 ? 40 : 45;
-      if (input.currentStage === 0 && sn.qualityScore >= 40 && sn.qualityScore < 45) {
+      const effectiveFloor = input.currentStage === 0 ? 35 : 45; // Relaxed from 40 to 35
+      if (input.currentStage === 0 && sn.qualityScore >= 35 && sn.qualityScore < 45) {
         aiFloorRelaxed = true;
+        // Ladder: 35-39: 0.25x, 40-44: 0.35x
+        aiSizeLadderMult = sn.qualityScore < 40 ? 0.25 : 0.35;
       }
 
       if (sn.qualityScore < effectiveFloor) {
@@ -1324,23 +1357,33 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           }
         );
       } else {
-        // Quality 40/45~60: Allow but size down + label as LOW_QUALITY
+        // Quality 35~60: Allow but size down + label as LOW_QUALITY
         stage1LoosenedEntry = true;
         supplemental_reasons.push("AI_LOW_QUALITY_CAUTION");
-        if (aiFloorRelaxed) supplemental_reasons.push("AI_FLOOR_RELAXED_FOR_STAGE1");
+        if (aiFloorRelaxed) {
+          supplemental_reasons.push("AI_FLOOR_RELAXED_FOR_STAGE1");
+          supplemental_reasons.push(`AI_SIZE_LADDER_${Math.round(aiSizeLadderMult * 100)}PCT`);
+        }
       }
     }
 
     // Size Multiplier Calculation
     let dynamicSizeMult = input.risk?.sizeMultiplier ?? 1;
     if (stage1LoosenedEntry && input.currentStage === 0) {
-      dynamicSizeMult *= 0.25;
+      // Use AI size ladder if applicable, otherwise default Stage 1 loosening
+      dynamicSizeMult *= aiFloorRelaxed ? aiSizeLadderMult : 0.25;
     }
     if (costWarningStage1 && input.currentStage === 0) {
       dynamicSizeMult *= 0.35;
     }
     if (stage1ExploreSoftExec && input.currentStage === 0) {
       dynamicSizeMult *= 0.28;
+    }
+    if (stage1HigherTfBypassSizeMult !== null) {
+      dynamicSizeMult *= stage1HigherTfBypassSizeMult;
+    }
+    if (stage1RangeLowerEdgeSoftSizeMult !== null) {
+      dynamicSizeMult *= stage1RangeLowerEdgeSoftSizeMult;
     }
     if (stage1RangeEdgeSoftApplied && input.currentStage === 0) {
       dynamicSizeMult *= STAGE1_RANGE_POSITION_SOFT_MULT;

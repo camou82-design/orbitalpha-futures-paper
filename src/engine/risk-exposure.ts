@@ -1,5 +1,5 @@
 import type { EngineConfig, MarketModeSelectorOutput, RiskExposureOutput, PaperRiskMode } from "../models/types";
-import type { RiskControlDecision } from "../strategy/risk-control-layer";
+import type { RiskControlDecision } from "./risk-control-layer";
 
 export type RiskExposureInput = Readonly<{
   config: EngineConfig;
@@ -72,8 +72,8 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
 
   let riskMode: PaperRiskMode = "NORMAL";
   if (risk.engineBlocked === true || risk.dailyLossGuardTriggered) riskMode = "HALT";
-  else if (throttle > 0.72 || volHigh) riskMode = "DEFENSIVE";
-  else if (throttle > 0.45 || risk.riskStatus === "LIMITED") riskMode = "REDUCED";
+  else if (throttle > 0.72 || volHigh || risk.crashState === "CRASH_EXIT") riskMode = "DEFENSIVE";
+  else if (throttle > 0.45 || risk.riskStatus === "LIMITED" || risk.crashState !== "NONE") riskMode = "REDUCED";
 
   const baseSize =
     risk.riskStatus === "LIMITED"
@@ -84,21 +84,15 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
 
   let sizeMultiplier = clamp(baseSize * (1 - throttle * 0.35), 0.12, 1.35);
   const mm = marketMode.marketMode;
-  if (eventVol) {
-    sizeMultiplier *= 0.78;
-  }
-  if (mm === "MIXED" || mm === "TRANSITION") {
-    sizeMultiplier *= 0.72;
-  }
-  if (marketMode.routing.newEntryPolicy === "reduced") {
-    sizeMultiplier *= 0.65;
-  }
-  if (marketMode.routing.probeEntryOnly === true) {
-    sizeMultiplier *= 0.42;
-  }
-  if (marketMode.routing.transitionTier === "dominant_reduced") {
-    sizeMultiplier *= 1.05;
-  }
+  if (eventVol) sizeMultiplier *= 0.78;
+  if (mm === "MIXED" || mm === "TRANSITION") sizeMultiplier *= 0.72;
+  if (marketMode.routing.newEntryPolicy === "reduced") sizeMultiplier *= 0.65;
+  if (marketMode.routing.probeEntryOnly === true) sizeMultiplier *= 0.42;
+  if (marketMode.routing.transitionTier === "dominant_reduced") sizeMultiplier *= 1.05;
+
+  // Asymmetric Crash Multipliers
+  const longSizeMultiplier = clamp(sizeMultiplier * risk.longSizeMult, 0.0, 1.48);
+  const shortSizeMultiplier = clamp(sizeMultiplier * risk.shortSizeMult, 0.12, 1.48);
 
   let opportunityBias = 1;
   const ae = marketMode.routing.activeEngine;
@@ -112,10 +106,9 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
   if (marketMode.sessionProfile === "asia_quiet" && ae === "RANGE" && !volHigh && throttle < 0.5) {
     opportunityBias *= 1.06;
   }
-  if (marketMode.routing.transitionTier === "dominant_reduced" && throttle < 0.55) {
-    opportunityBias *= 1.04;
-  }
-  sizeMultiplier = clamp(sizeMultiplier * opportunityBias, 0.12, 1.48);
+
+  const finalLongSizeMult = clamp(longSizeMultiplier * opportunityBias, 0.0, 1.48);
+  const finalShortSizeMult = clamp(shortSizeMultiplier * opportunityBias, 0.12, 1.48);
 
   const maxSlots = Math.max(1, config.paperMaxOpenPositions);
   const perSlot = 100;
@@ -133,15 +126,12 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
     maxShortExposure *= 0.45;
   }
 
-  const switchSizeMultiplier = clamp(sizeMultiplier * 0.92 * sess.trendSwitchBoost, 0.18, 1.22);
-
+  const switchSizeMultiplier = clamp(finalLongSizeMult * 0.92 * sess.trendSwitchBoost, 0.18, 1.22);
   const routingPaused = marketMode.routing.newEntryPolicy === "paused";
-  const allowNewEntry =
-    risk.engineBlocked !== true &&
-    !risk.dailyLossGuardTriggered &&
-    mm !== "NO_TRADE" &&
-    !routingPaused &&
-    openPositionCount < maxSlots;
+
+  const allowNewLong = risk.longAllow && !routingPaused && openPositionCount < maxSlots && riskMode !== "HALT";
+  const allowNewShort = risk.shortAllow && !routingPaused && openPositionCount < maxSlots && riskMode !== "HALT";
+  const allowNewEntry = allowNewLong || allowNewShort;
 
   const allowAdd =
     allowNewEntry &&
@@ -150,19 +140,19 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
     (marketMode.routing.newEntryPolicy === "full" || ae === "TREND" || ae === "RANGE");
 
   const allowRangeBidirectional = ae === "RANGE" && riskMode !== "HALT";
-
   const blockTrendOppositeLeg = ae === "TREND";
-
   const allowHedge = allowRangeBidirectional;
 
   const riskReasonLabel =
     riskMode === "HALT"
       ? "일일 손실 한도 또는 엔진 차단"
       : riskMode === "DEFENSIVE"
-        ? `고스로틀·고변동${eventVol ? "·이벤트성" : ""} — ${sess.label}`
-        : riskMode === "REDUCED"
-          ? `제한 모드 — ${sess.label}`
-          : `정상 — ${sess.label}`;
+        ? `고스로틀·고변동·급락감지 — ${sess.label}`
+        : risk.crashState !== "NONE"
+          ? `급락 경보 (${risk.crashState}) — ${sess.label}`
+          : riskMode === "REDUCED"
+            ? `제한 모드 — ${sess.label}`
+            : `정상 — ${sess.label}`;
 
   let riskStanceLabel = "보통";
   if (riskMode === "HALT" || riskMode === "DEFENSIVE") riskStanceLabel = "보수·축소";
@@ -173,11 +163,15 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
     riskMode,
     opportunityBias,
     riskStanceLabel,
-    sizeMultiplier,
+    sizeMultiplier: finalLongSizeMult, // Legacy support
+    longSizeMultiplier: finalLongSizeMult,
+    shortSizeMultiplier: finalShortSizeMult,
     maxLongExposure,
     maxShortExposure,
     switchSizeMultiplier,
     allowNewEntry,
+    allowNewLong,
+    allowNewShort,
     allowAdd,
     allowRangeBidirectional,
     blockTrendOppositeLeg,

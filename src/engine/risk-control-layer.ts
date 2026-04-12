@@ -1,5 +1,6 @@
-import type { EngineConfig, PaperClosedPositionRecord } from "../models/types";
+import type { EngineConfig, PaperClosedPositionRecord, Candle } from "../models/types";
 import type { MarketRegime } from "../strategy/market-regime-detector";
+import { evaluateCrashRisk, type CrashState } from "./crash-detector";
 
 export type RiskStatus = "NORMAL" | "LIMITED" | "BLOCKED";
 
@@ -14,6 +15,14 @@ export type RiskControlDecision = Readonly<{
   sizeMultiplier: number;
   riskStatus: RiskStatus;
   dailyLossGuardTriggered: boolean;
+  crashState: CrashState;
+  crashReason: string | null;
+  crashLockUntil: number;
+  isLatePursuit: boolean;
+  longAllow: boolean;
+  shortAllow: boolean;
+  longSizeMult: number;
+  shortSizeMult: number;
   detail: Record<string, unknown>;
 }>;
 
@@ -45,20 +54,20 @@ function asRegimeAtEntry(r: unknown): MarketRegime | null {
 
 /**
  * Risk control layer (paper-only).
- *
- * Must run under the regime detector and can block entries even when signals pass.
- * Also produces a size multiplier for "최근 10건 성과 악화 → 포지션 축소".
+ * Asymmetric version: Defensive for Longs, Opportunity-aware for Shorts.
  */
 export function evaluateRiskControls(input: Readonly<{
   config: EngineConfig;
   now: number;
   history: readonly unknown[];
   priorState: RiskControlDecision | null;
+  globalCandles?: Candle[];
+  globalAtr?: number | null;
 }>): RiskControlDecision {
-  const { config, now } = input;
+  const { config, now, globalCandles, globalAtr } = input;
   const last10 = [...input.history].slice(-10);
 
-  // Daily net PnL cutoff.
+  // 1. Daily net PnL cutoff.
   const dayStart = startOfUtcDayMs(now);
   let todayNet = 0;
   for (const r of input.history) {
@@ -75,7 +84,72 @@ export function evaluateRiskControls(input: Readonly<{
     engineBlockReasons.push("daily_loss_limit_exceeded");
   }
 
-  // Size reduction: last10 net degradation.
+  // 2. Crash Detection (Direction-Aware)
+  let crashState: CrashState = "NONE";
+  let crashReason: string | null = null;
+  let crashLockUntil = input.priorState?.crashLockUntil ?? 0;
+  let isLatePursuit = false;
+  let longAllow = true;
+  let shortAllow = true;
+  let longSizeMult = 1.0;
+  let shortSizeMult = 1.0;
+
+  if (globalCandles) {
+    const globalCrash = evaluateCrashRisk({
+      symbol: "BTCUSDT",
+      candles: globalCandles,
+      atr: globalAtr ?? null,
+      now,
+      isGlobal: true
+    });
+
+    isLatePursuit = globalCrash.isLatePursuit;
+
+    function stateOrder(s: CrashState): number {
+      if (s === "NONE") return 0;
+      if (s === "CRASH_ALERT") return 1;
+      if (s === "CRASH_REDUCE") return 2;
+      if (s === "CRASH_EXIT") return 3;
+      if (s === "CRASH_LOCK") return 4;
+      return 0;
+    }
+
+    if (crashLockUntil > now) {
+      crashState = "CRASH_LOCK";
+      crashReason = "급락 후 롱 진입 제한 대기 중";
+      longAllow = false;
+      shortAllow = !isLatePursuit; // 락 상태라도 late pursuit 아니면 숏은 허용 가능
+    } else if (globalCrash.state !== "NONE") {
+      crashState = globalCrash.state;
+      crashReason = globalCrash.reason;
+
+      // Asymmetric Logic
+      longAllow = false; // Any crash level blocks new Longs
+      shortAllow = !isLatePursuit; // Allow shorts while momentum is starting
+
+      if (crashState === "CRASH_ALERT") {
+        longSizeMult = 0.55;
+      } else if (crashState === "CRASH_REDUCE") {
+        longSizeMult = 0.22;
+      }
+
+      if (stateOrder(crashState) >= stateOrder("CRASH_EXIT")) {
+        crashLockUntil = now + Math.max(15 * 60 * 1000, config.paperModeSuspendMs);
+      }
+    }
+  }
+
+  if (dailyLossGuardTriggered) {
+    longAllow = false;
+    shortAllow = false;
+  }
+
+  if (crashState !== "NONE" && crashState !== "CRASH_ALERT" && crashState !== "CRASH_LOCK") {
+    // Only block "engine" (UI red alert) if it's broad risk, but our specific flags handle entry.
+    // engineBlockReasons.push(`crash_risk_${crashState.toLowerCase()}`);
+  }
+
+  // 3. Size reduction: last10 net degradation.
   let last10Net = 0;
   for (const r of last10) {
     const p = asNet(r);
@@ -83,31 +157,30 @@ export function evaluateRiskControls(input: Readonly<{
   }
   const degradeThresh = config.paperLast10NetDegradeThresholdUsd;
   const shouldDegrade = degradeThresh > 0 && last10.length >= 5 && last10Net <= -degradeThresh;
-  const sizeMultiplier = shouldDegrade ? Math.max(0.15, Math.min(1, config.paperDegradeSizeMultiplier)) : 1;
+  const baseSizeMult = shouldDegrade ? Math.max(0.15, Math.min(1, config.paperDegradeSizeMultiplier)) : 1;
 
-  // Per-regime 3-loss streak suspension (based on regimeAtEntry).
+  longSizeMult *= baseSizeMult;
+  shortSizeMult *= baseSizeMult;
+
+  // 4. Per-regime suspension.
   const blockedRegimes: RiskControlDecision["blockedRegimes"] = {};
   const recentLossStreakByMode: RiskControlDecision["recentLossStreakByMode"] = {};
-  const streakN = Math.max(2, config.paperModeLossStreakSuspendCount);
-  const suspendMs = Math.max(60_000, config.paperModeSuspendMs);
+  const streakN_soft = 3;
+  const streakN_hard = 5;
+  const suspendMs = Math.max(30 * 60 * 1000, config.paperModeSuspendMs); // 30 min hard stop
   const regimes: MarketRegime[] = ["RANGE", "TREND", "NO_TRADE"];
   for (const regime of regimes) {
-    // Track most recent consecutive losses for this regime.
     let streak = 0;
     for (let i = input.history.length - 1; i >= 0; i--) {
       const r = input.history[i] as unknown;
-      const m = asRegimeAtEntry(r);
-      if (m !== regime) continue;
+      if (asRegimeAtEntry(r) !== regime) continue;
       const p = asNet(r);
       if (p === null) continue;
       if (p < 0) {
         streak += 1;
-        if (streak >= streakN) break;
-      } else if (p > 0) {
-        break;
-      } else {
-        break;
-      }
+        if (streak >= streakN_hard) break;
+      } else if (p > 0) break;
+      else break;
     }
     recentLossStreakByMode[regime] = streak;
     const prior = input.priorState?.blockedRegimes?.[regime];
@@ -117,35 +190,44 @@ export function evaluateRiskControls(input: Readonly<{
       blockedRegimes[regime] = { until: stillBlocked, reason: prior?.reason ?? "mode_suspended" };
       continue;
     }
-    if (streak >= streakN && regime !== "NO_TRADE") {
-      blockedRegimes[regime] = { until: now + suspendMs, reason: "mode_loss_streak_suspended" };
+    if (streak >= streakN_hard && regime !== "NO_TRADE") {
+      blockedRegimes[regime] = { until: now + suspendMs, reason: "mode_loss_streak_hard_suspended" };
+    } else if (streak >= streakN_soft && regime !== "NO_TRADE") {
+      // Soft penalty: streakSizeMult 0.2
+      longSizeMult *= 0.2;
+      shortSizeMult *= 0.2;
     }
   }
 
-  const engineBlocked = engineBlockReasons.length > 0;
-  const anyModeBlocked =
-    Object.values(blockedRegimes).some((x) => x && typeof x.until === "number" && x.until > now) || false;
-
-  const riskStatus: RiskStatus = engineBlocked ? "BLOCKED" : shouldDegrade || anyModeBlocked ? "LIMITED" : "NORMAL";
+  const engineBlocked = dailyLossGuardTriggered; // Only hard-block engine on total loss limit
+  const anyModeBlocked = Object.values(blockedRegimes).some((x) => x && x.until > now) || false;
+  const riskStatus: RiskStatus = engineBlocked ? "BLOCKED" : shouldDegrade || anyModeBlocked || crashState !== "NONE" ? "LIMITED" : "NORMAL";
 
   return {
     engineBlocked,
     engineBlockReasons,
     blockedRegimes,
     recentLossStreakByMode,
-    sizeMultiplier,
+    sizeMultiplier: baseSizeMult, // Legacy field
     riskStatus,
     dailyLossGuardTriggered,
+    crashState,
+    crashReason,
+    crashLockUntil,
+    isLatePursuit,
+    longAllow,
+    shortAllow,
+    longSizeMult,
+    shortSizeMult,
     detail: {
       today_net_usd: todayNet,
       daily_loss_limit_usd: dailyLimit,
       last10_net_usd: last10Net,
-      last10_count: last10.length,
-      degrade_threshold_usd: degradeThresh,
-      size_multiplier: sizeMultiplier,
-      mode_suspend_loss_streak: streakN,
-      mode_suspend_ms: suspendMs
+      size_multiplier: baseSizeMult,
+      crash_state: crashState,
+      long_allow: longAllow,
+      short_allow: shortAllow,
+      late_pursuit: isLatePursuit
     }
   };
 }
-

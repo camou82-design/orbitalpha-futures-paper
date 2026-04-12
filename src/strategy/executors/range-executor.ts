@@ -330,12 +330,12 @@ export function rangeExecutorEvaluateExit(input: Readonly<{
   const t1b = cg ? 0.6 : 0.58;
   const t2 = cg ? 0.48 : 0.5;
   const t2b = cg ? 0.52 : 0.5;
-  const maxHoldCostGuardMs = 18 * 60 * 1000;
+  const maxHoldCostGuardMs = 45 * 60 * 1000;
 
   // 1. 손절 조건 (박스 이탈 + 0.5 ATR 버퍼)
   let stopPrice = 0;
   if (isLong) {
-    stopPrice = (input.boxLow ?? 0) - 0.5 * atr;
+    stopPrice = (input.boxLow ?? 0) - 1.2 * atr;
     if (input.mark < stopPrice) {
       return {
         executor: "RANGE",
@@ -348,7 +348,7 @@ export function rangeExecutorEvaluateExit(input: Readonly<{
       };
     }
   } else {
-    stopPrice = (input.boxHigh ?? 0) + 0.5 * atr;
+    stopPrice = (input.boxHigh ?? 0) + 1.2 * atr;
     if (input.mark > stopPrice) {
       return {
         executor: "RANGE",

@@ -491,6 +491,11 @@ export type PaperExitType =
   | "EXIT_RANGE_REBALANCE"
   | "EXIT_TREND_SWITCH"
   | "EXIT_RISK"
+  | "EXIT_LONG_CRASH_FORCE"
+  | "EXIT_LONG_CRASH_REDUCE"
+  | "EXIT_SHORT_MOMENTUM_TRAIL"
+  | "EXIT_CRASH_FORCE"
+  | "EXIT_CRASH_REDUCE"
   | "EXIT_UNKNOWN";
 
 /** 종료 저장·API용 카테고리(SL/TP/…). */
@@ -506,6 +511,9 @@ export type PaperCloseSource =
   | "RISK"
   | "SWITCH"
   | "SIGNAL_LOST"
+  | "CRASH_LONG_DEFENSE"
+  | "CRASH_SHORT_MOMENTUM"
+  | "CRASH"
   | "UNKNOWN";
 
 /** Market Mode Selector 단일 출력(틱 단위). */
@@ -616,6 +624,10 @@ export type RiskExposureOutput = Readonly<{
   maxShortExposure: number;
   switchSizeMultiplier: number;
   allowNewEntry: boolean;
+  allowNewLong: boolean;
+  allowNewShort: boolean;
+  longSizeMultiplier: number;
+  shortSizeMultiplier: number;
   allowAdd: boolean;
   /** RANGE 라우팅 시 같은 심볼 반대 레그(양방향) 허용. */
   allowRangeBidirectional: boolean;

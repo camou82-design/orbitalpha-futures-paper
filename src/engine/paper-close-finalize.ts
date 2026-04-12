@@ -36,6 +36,16 @@ export function defaultLabelForExitType(t: PaperExitType): string {
       return "추세 스위칭(청산+역진입)";
     case "EXIT_RISK":
       return "리스크 강제 정리";
+    case "EXIT_LONG_CRASH_FORCE":
+      return "급락 보호 롱 강제 종료";
+    case "EXIT_LONG_CRASH_REDUCE":
+      return "급락 보호 롱 50% 축소";
+    case "EXIT_SHORT_MOMENTUM_TRAIL":
+      return "급락 중 숏 수익보호 전환";
+    case "EXIT_CRASH_FORCE":
+      return "급락 보호 강제 청산";
+    case "EXIT_CRASH_REDUCE":
+      return "급락 위험 비중 축소";
     case "EXIT_UNKNOWN":
       return "미분류 청산";
     default: {
@@ -46,7 +56,6 @@ export function defaultLabelForExitType(t: PaperExitType): string {
 }
 
 /** `exitType`·내부 `closeReason`으로 UI/저장용 종료 출처 코드. */
-/** `closeReason`이 없거나 불명일 때 `exitType`만으로 출처 추정. */
 export function inferPaperCloseSourceFromExitType(et: PaperExitType): PaperCloseSource {
   switch (et) {
     case "EXIT_SL":
@@ -75,6 +84,14 @@ export function inferPaperCloseSourceFromExitType(et: PaperExitType): PaperClose
       return "SWITCH";
     case "EXIT_RISK":
       return "RISK";
+    case "EXIT_LONG_CRASH_FORCE":
+    case "EXIT_LONG_CRASH_REDUCE":
+      return "CRASH_LONG_DEFENSE";
+    case "EXIT_SHORT_MOMENTUM_TRAIL":
+      return "CRASH_SHORT_MOMENTUM";
+    case "EXIT_CRASH_FORCE":
+    case "EXIT_CRASH_REDUCE":
+      return "CRASH";
     case "EXIT_UNKNOWN":
     default:
       return "UNKNOWN";
@@ -86,6 +103,10 @@ export function derivePaperCloseSource(
   exitType: PaperExitType
 ): PaperCloseSource {
   if (exitType === "EXIT_RISK") return "RISK";
+  if (exitType === "EXIT_LONG_CRASH_FORCE" || exitType === "EXIT_LONG_CRASH_REDUCE") return "CRASH_LONG_DEFENSE";
+  if (exitType === "EXIT_SHORT_MOMENTUM_TRAIL") return "CRASH_SHORT_MOMENTUM";
+  if (exitType === "EXIT_CRASH_FORCE" || exitType === "EXIT_CRASH_REDUCE") return "CRASH";
+
   switch (closeReason) {
     case "stop_loss":
       return "SL";
@@ -251,6 +272,7 @@ type FinalizeClosedInput = Readonly<{
   /** 스위칭·리밸런스 등 `closeReason` 맵 외 표준 코드 강제 시 사용. */
   exitTypeOverride?: PaperExitType;
   closeReasonLabelOverride?: string;
+  closeSourceOverride?: PaperCloseSource;
 }>;
 
 /** 모든 종료·부분종료 레코드는 이 함수로 마감해 숫자 NaN → JSON null을 막고 exit 메타를 통일한다. */
@@ -261,7 +283,7 @@ export function finalizePaperClosedRecord(input: FinalizeClosedInput): PaperClos
   const closeReasonLabel =
     input.closeReasonLabelOverride ??
     (input.exitTypeOverride != null ? defaultLabelForExitType(input.exitTypeOverride) : fromReason.closeReasonLabel);
-  const closeSource = derivePaperCloseSource(input.closeReason, exitType);
+  const closeSource = input.closeSourceOverride ?? derivePaperCloseSource(input.closeReason, exitType);
   const outcomeStatus = outcomeStatusFromNetPnl(finiteUsd(m.pnlUsdNet));
   const sizeUsd = finiteUsd(input.legMarginUsd);
   const net = finiteUsd(m.pnlUsdNet);

@@ -78,13 +78,13 @@ export function evaluateRangeStructuralExit(input: Readonly<{
   structuralTrendShift: boolean;
 }>): RangeStructuralExitResult {
   const span = input.boxUpper - input.boxLower;
-  const buf = span > 0 ? span * 0.008 : input.lastPrice * 0.001;
+  const buf = span > 0 ? span * 0.018 : input.lastPrice * 0.001;
   const above = input.lastPrice > input.boxUpper + buf;
   const below = input.lastPrice < input.boxLower - buf;
   if (above || below) {
     return { shouldExit: true, reason: "range_box_break" };
   }
-  if (input.structuralTrendShift && input.marketMode === "TREND" && input.trendConfidence >= 0.58) {
+  if (input.structuralTrendShift && input.marketMode === "TREND" && input.trendConfidence >= 0.65) {
     return { shouldExit: true, reason: "structural_regime_shift" };
   }
   if (input.longUsd > input.maxLongExposure || input.shortUsd > input.maxShortExposure) {
@@ -135,7 +135,7 @@ export function evaluateRangeEngineForSymbol(input: RangeEngineInput): RangeEngi
     hedgeBalance:
       finite(input.longMarginUsd, 0) + finite(input.shortMarginUsd, 0) > 1e-9
         ? (finite(input.longMarginUsd, 0) - finite(input.shortMarginUsd, 0)) /
-          (finite(input.longMarginUsd, 0) + finite(input.shortMarginUsd, 0))
+        (finite(input.longMarginUsd, 0) + finite(input.shortMarginUsd, 0))
         : 0
   });
 

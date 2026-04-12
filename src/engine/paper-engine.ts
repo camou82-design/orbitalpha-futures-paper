@@ -523,19 +523,18 @@ export class PaperEngine {
       regimeDetected.regime === "TREND" ? "trend" : regimeDetected.regime === "RANGE" ? "sideways" : "risk_off";
     this.lastAdaptiveMode = { mode: adaptiveMode, detail: regimeDetected.detail };
 
-    const regimeLogKey =
-      regimeDetected.regime === "TREND"
-        ? "market_regime_trend"
-        : regimeDetected.regime === "RANGE"
-          ? "market_regime_range"
-          : "market_regime_no_trade";
-    this.logger.info(regimeLogKey, { detail: regimeDetected.detail });
+    const btc1m_r = await this.bybit.tryGetCandles("BTCUSDT", "1m", 60);
+    const btc1m = btc1m_r.ok ? btc1m_r.value : [];
+    const btc1m_atr = btc1m.length > 20 ? atrWilderLast(btc1m, 14) : null;
+
     const nowStateTs = Date.now();
     this.lastRisk = evaluateRiskControls({
       config: this.config,
       now: nowStateTs,
       history,
-      priorState: this.lastRisk
+      priorState: this.lastRisk,
+      globalCandles: btc1m,
+      globalAtr: btc1m_atr
     });
     const risk = this.lastRisk;
 
@@ -1256,8 +1255,75 @@ export class PaperEngine {
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
 
-    const opens = await this.positions.loadOpenAll();
-    if (opens.length === 0) return;
+    const rawOpens = await this.positions.loadOpenAll();
+    if (rawOpens.length === 0) return;
+    const opens = rawOpens.map(o => ({ ...o })); // Use mutable copy for state tracking
+
+    // --- ASYMMETRIC CRASH RISK LAYER ---
+    const risk = this.lastRisk;
+    if (risk && risk.crashState !== "NONE") {
+      for (const op of opens) {
+        if (op.status !== "open") continue;
+        const snap = input.snapshots.find(s => s.symbol === op.symbol);
+        if (!snap) continue;
+
+        const isLong = op.side === "long";
+        const isShort = op.side === "short";
+
+        // 1. Long Defense (Force Liquidate)
+        if (isLong) {
+          const forceExit = risk.crashState === "CRASH_EXIT" || risk.crashState === "CRASH_LOCK";
+          const forceReduce = risk.crashState === "CRASH_REDUCE";
+
+          if (forceExit || forceReduce) {
+            const marginToClose = forceExit ? op.sizeUsd : op.sizeUsd * 0.5;
+            const m = computePaperCloseLegMetrics({
+              open: op,
+              closePrice: snap.lastPrice,
+              closedAt: snap.fetchedAt,
+              snapFundingRate: snap.fundingRate,
+              marginUsd: marginToClose,
+              paperTakerFeeRate: this.config.paperTakerFeeRate,
+              paperFundingIntervalHours: this.config.paperFundingIntervalHours
+            });
+
+            const et = forceExit ? "EXIT_LONG_CRASH_FORCE" : "EXIT_LONG_CRASH_REDUCE";
+            const closedRow = finalizePaperClosedRecord({
+              open: op,
+              symbol: op.symbol,
+              closePrice: snap.lastPrice,
+              closedAt: snap.fetchedAt,
+              closeReason: et as any,
+              legMarginUsd: marginToClose,
+              metrics: m,
+              feeRate: this.config.paperTakerFeeRate,
+              fundingIntervalHours: this.config.paperFundingIntervalHours,
+              strategyVersion: "paper-v1-crash-defense",
+              exitTypeOverride: et,
+              closeSourceOverride: "CRASH_LONG_DEFENSE"
+            });
+
+            await this.positions.appendClosed(closedRow);
+            this.logger.warn("crash_long_defense", { symbol: op.symbol, state: risk.crashState, type: et });
+
+            if (forceExit) {
+              (op as any).status = "closed";
+            } else {
+              (op as any).sizeUsd -= marginToClose;
+            }
+          }
+        }
+
+        // 2. Short Opportunity (Trailing Protection)
+        // 숏은 강제 종료하지 않되, 급락 상태에서는 수익 보호를 위해 트레일링 로직 개입 여부만 여기서 플래그 세팅하거나 
+        // 하단 일반 로직에서 risk.crashState를 참고하도록 설계.
+        // 여기서는 '급락 중 숏 수익보호 모드' 진입 로깅만 남김.
+        if (isShort && (risk.crashState === "CRASH_EXIT" || risk.crashState === "CRASH_REDUCE")) {
+          this.logger.info("crash_short_opportunity", { symbol: op.symbol, state: risk.crashState, latePursuit: risk.isLatePursuit });
+        }
+      }
+    }
+    // ------------------------------------
 
     const remaining: PaperOpenPositionRecord[] = [];
     const feeRate = this.config.paperTakerFeeRate;
@@ -1430,20 +1496,20 @@ export class PaperEngine {
           const closedRow =
             st.reason === "risk_exposure_breach"
               ? finalizePaperClosedRecord({
-                  open,
-                  symbol: open.symbol,
-                  closePrice,
-                  closedAt,
-                  closeReason: cr,
-                  legMarginUsd: open.sizeUsd,
-                  metrics: m,
-                  feeRate,
-                  fundingIntervalHours: intervalH,
-                  strategyVersion: "paper-v1",
-                  exitTypeOverride: "EXIT_RISK",
-                  closeReasonLabelOverride: "리스크 노출 한도 초과",
-                  ...snapPaths
-                })
+                open,
+                symbol: open.symbol,
+                closePrice,
+                closedAt,
+                closeReason: cr,
+                legMarginUsd: open.sizeUsd,
+                metrics: m,
+                feeRate,
+                fundingIntervalHours: intervalH,
+                strategyVersion: "paper-v1",
+                exitTypeOverride: "EXIT_RISK",
+                closeReasonLabelOverride: "리스크 노출 한도 초과",
+                ...snapPaths
+              })
               : toClosed(cr, m, open.sizeUsd);
           await this.positions.appendClosed(closedRow);
           this.lastExitReasonLabel =
@@ -1634,6 +1700,21 @@ export class PaperEngine {
             trailingExtreme: open.trailingExtremePrice,
             postEntryCostGuard: open.postEntryCostGuard === true
           });
+
+      // --- CRASH MOMENTUM TRAILING OVERRIDE for SHORTS ---
+      if (open.side === "short" && risk && (risk.crashState === "CRASH_EXIT" || risk.crashState === "CRASH_REDUCE")) {
+        if (m.pnlPctNet > 0.005) { // 0.5% 이상 수익권이면 타이트하게 보호
+          const trailGap = (snap.atr ?? 0) * 0.48;
+          const crashTrailStop = (open.trailingExtremePrice ?? open.entryPrice) + trailGap;
+          // 숏이므로 가격이 상승하여 이 지점을 터치하면 청산
+          if (closePrice >= crashTrailStop) {
+            (exitEval as any).action = "close";
+            (exitEval as any).reason = "trailing_stop";
+            (exitEval as any).detail = { crash_momentum_trail: true, stop: crashTrailStop };
+          }
+        }
+      }
+      // --------------------------------------------------
 
       if (exitEval.action === "close") {
         const cr = exitEval.reason as PaperClosedPositionRecord["closeReason"];
