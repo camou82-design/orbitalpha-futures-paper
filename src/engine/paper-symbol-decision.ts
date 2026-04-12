@@ -1169,7 +1169,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   // Highway Engine First - Regime is only secondary veto logic
   const isHighwayAcceptable = highwayResult.state === HighwayTrendState.VALID || highwayResult.state === HighwayTrendState.WEAK;
 
-  if (isHighwayAcceptable && _aiResult.highwayValidityScore >= 0.3) {
+  if (isHighwayAcceptable) {
     executorDecision = highwayExecutorEvaluateEntry({
       intentType: _entryIntent,
       highwayState: highwayResult.state,
