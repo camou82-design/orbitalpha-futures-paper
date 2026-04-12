@@ -8,7 +8,10 @@ import type {
   PaperEngineMode,
   PaperEngineState,
   DecisionFunnelTick,
-  PaperRegimeState
+  PaperRegimeState,
+  MarketModeSelectorOutput,
+  RiskExposureOutput,
+  PaperExplanationFields
 } from "../models/types";
 import type { Logger } from "../logs/logger";
 import { JsonStore } from "../storage/json-store";
@@ -59,6 +62,11 @@ import {
   paperExitDisplayMeta,
   type PaperCloseLegMetrics
 } from "./paper-close-finalize";
+import { evaluateMarketModeSelector } from "./mode-selector";
+import { evaluateRiskExposure } from "./risk-exposure";
+import { buildPaperExplanation } from "./explanation-layer";
+import { evaluateRangeEngineForSymbol, marginsForSymbol } from "./range-engine";
+import { evaluateTrendEngineForSymbol } from "./trend-engine";
 
 const EP = {
   ticker: "/v5/market/tickers",
@@ -370,6 +378,9 @@ export class PaperEngine {
   private decisionFunnelTickRing: DecisionFunnelTick[] = [];
   /** 비영속: Stage 1 진입 검토(SKIP) 중인 심볼의 체류 시간 및 품질 추적 */
   private reviewingState = new Map<string, { ticks: number; initialQuality: number; lastQuality: number }>();
+  private lastMarketMode: MarketModeSelectorOutput | null = null;
+  private lastRiskExposure: RiskExposureOutput | null = null;
+  private lastExplanation: PaperExplanationFields | null = null;
 
   constructor(
     private readonly config: EngineConfig,
@@ -574,12 +585,50 @@ export class PaperEngine {
       }
     }
 
+    const opensBeforeClose = await this.positions.loadOpenAll();
+    let volatilityProxy = 0.5;
+    if (snapshots.length > 0) {
+      let sum = 0;
+      let n = 0;
+      for (const s of snapshots) {
+        if (s.atr != null && s.lastPrice > 0) {
+          sum += s.atr / s.lastPrice;
+          n += 1;
+        }
+      }
+      if (n > 0) {
+        volatilityProxy = Math.min(1, (sum / n) * 40);
+      }
+    }
+    const marketModeOut = evaluateMarketModeSelector({
+      regimeDetection: regimeDetected,
+      fetchedAt,
+      snapshotCount: snapshots.length,
+      errorCount: errors.length,
+      volatilityProxy
+    });
+    this.lastMarketMode = marketModeOut;
+    const riskExposureOut = evaluateRiskExposure({
+      config: this.config,
+      marketMode: marketModeOut,
+      risk: this.lastRisk!,
+      openPositionCount: opensBeforeClose.length
+    });
+    this.lastRiskExposure = riskExposureOut;
+    const explanationOut = buildPaperExplanation({
+      marketMode: marketModeOut,
+      risk: riskExposureOut
+    });
+    this.lastExplanation = explanationOut;
+
     await this.tryPaperPositionClose({
       snapshots,
       errorsCount: errors.length,
       latestPath,
       metaPath,
-      filePath
+      filePath,
+      marketMode: marketModeOut,
+      riskExposure: riskExposureOut
     });
 
     const opensAfterClose = await this.positions.loadOpenAll();
@@ -745,6 +794,9 @@ export class PaperEngine {
       const risk = this.lastRisk!;
       await this.store.writeJson("reports/engine-state.json", {
         generatedAt: nowTick,
+        market_mode_selector: this.lastMarketMode,
+        risk_exposure: this.lastRiskExposure,
+        explanation: this.lastExplanation,
         engine_mode: this.config.paperEngineMode,
         execution_state: risk.engineBlocked ? "DISABLED" : "PAPER_READY",
         strategy_executor:
@@ -1041,6 +1093,8 @@ export class PaperEngine {
     latestPath: string | undefined;
     metaPath: string | undefined;
     filePath: string | undefined;
+    marketMode: MarketModeSelectorOutput;
+    riskExposure: RiskExposureOutput;
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
 
@@ -1054,8 +1108,9 @@ export class PaperEngine {
     /** events.jsonl `type` — 레거시 호환(부분익절·트레일 등은 기존과 동일 계열로 유지). */
     const exitEventJsonlType = (r: PaperClosedPositionRecord["closeReason"]): string => {
       const t = paperExitDisplayMeta(r).exitType;
-      if (t === "EXIT_PARTIAL_TP") return "EXIT_TP";
+      if (t === "EXIT_PARTIAL_TP" || t === "EXIT_TP_1" || t === "EXIT_TP_2") return "EXIT_TP";
       if (t === "EXIT_TRAILING" || t === "EXIT_TIME_STOP" || t === "EXIT_REGIME") return "EXIT_REGIME";
+      if (t === "EXIT_REGIME_BREAK") return "EXIT_TREND_BREAK";
       return t;
     };
 
@@ -1095,7 +1150,15 @@ export class PaperEngine {
       const closedAt = snap.fetchedAt;
       const regimeAtEntry = open.regimeAtEntry ?? "NO_TRADE";
       const regimeNow = this.lastRegime.regime;
-      const regimeForExit: MarketRegime = regimeAtEntry === "TREND" || regimeAtEntry === "RANGE" ? regimeAtEntry : regimeNow;
+      const exitLane: "RANGE" | "TREND" =
+        open.regimeAtEntry === "RANGE"
+          ? "RANGE"
+          : open.regimeAtEntry === "TREND"
+            ? "TREND"
+            : input.marketMode.marketMode === "TREND" || input.marketMode.marketMode === "MIXED"
+              ? "TREND"
+              : "RANGE";
+      const slRegime: MarketRegime = exitLane === "RANGE" ? "RANGE" : "TREND";
 
       const leg = (marginUsd: number) =>
         computePaperCloseLegMetrics({
@@ -1142,8 +1205,39 @@ export class PaperEngine {
       if (typeof open.stopPrice === "number" && Number.isFinite(open.stopPrice)) {
         isSlTriggered = open.side === "long" ? closePrice <= open.stopPrice : closePrice >= open.stopPrice;
       } else {
-        const slThresh = stopLossPctForRegime(regimeForExit);
+        const slThresh = stopLossPctForRegime(slRegime);
         isSlTriggered = m.pnlPctNet <= slThresh;
+      }
+
+      const { longUsd, shortUsd } = marginsForSymbol(opens, String(open.symbol));
+      if (exitLane === "RANGE") {
+        this.logger.info(
+          "range_engine_tick",
+          evaluateRangeEngineForSymbol({
+            symbol: String(open.symbol),
+            lastPrice: closePrice,
+            boxHigh: snap.boxHigh,
+            boxLow: snap.boxLow,
+            boxPos: snap.boxPos,
+            marketMode: input.marketMode,
+            longMarginUsd: longUsd,
+            shortMarginUsd: shortUsd,
+            rangeCycleCountPrior: 0,
+            rangeLadderLevelPrior: open.partialExitStage ?? 0
+          })
+        );
+      } else {
+        this.logger.info(
+          "trend_engine_tick",
+          evaluateTrendEngineForSymbol({
+            mark: closePrice,
+            entryPrice: open.entryPrice,
+            atr: snap.atr,
+            marketMode: input.marketMode,
+            priorBreakoutDirection: "none",
+            pyramidLevelPrior: open.entryStage ?? 1
+          })
+        );
       }
 
       if (isSlTriggered) {
@@ -1209,31 +1303,32 @@ export class PaperEngine {
         }
       }
 
-      // 3. Evaluate RegimeSpecific Exit (Scale-out)
-      const exitEval = regimeForExit === "RANGE"
-        ? rangeExecutorEvaluateExit({
-          side: open.side,
-          pnlPctNet: m.pnlPctNet,
-          mark: closePrice,
-          boxPos: snap.boxPos,
-          boxHigh: snap.boxHigh,
-          boxLow: snap.boxLow,
-          atr: snap.atr,
-          partialExitStage: open.partialExitStage ?? 0,
-          holdingMs: m.holdingMs,
-          postEntryCostGuard: open.postEntryCostGuard === true
-        })
-        : trendExecutorEvaluateExit({
-          side: open.side,
-          pnlPctNet: m.pnlPctNet,
-          mark: closePrice,
-          entryPrice: open.entryPrice,
-          atr: snap.atr,
-          partialExitStage: open.partialExitStage ?? 0,
-          holdingMs: m.holdingMs,
-          trailingExtreme: open.trailingExtremePrice,
-          postEntryCostGuard: open.postEntryCostGuard === true
-        });
+      // 3. RANGE / TREND 실행기 분리(포지션 레짐·상위 모드로 레인 선택)
+      const exitEval =
+        exitLane === "RANGE"
+          ? rangeExecutorEvaluateExit({
+            side: open.side,
+            pnlPctNet: m.pnlPctNet,
+            mark: closePrice,
+            boxPos: snap.boxPos,
+            boxHigh: snap.boxHigh,
+            boxLow: snap.boxLow,
+            atr: snap.atr,
+            partialExitStage: open.partialExitStage ?? 0,
+            holdingMs: m.holdingMs,
+            postEntryCostGuard: open.postEntryCostGuard === true
+          })
+          : trendExecutorEvaluateExit({
+            side: open.side,
+            pnlPctNet: m.pnlPctNet,
+            mark: closePrice,
+            entryPrice: open.entryPrice,
+            atr: snap.atr,
+            partialExitStage: open.partialExitStage ?? 0,
+            holdingMs: m.holdingMs,
+            trailingExtreme: open.trailingExtremePrice,
+            postEntryCostGuard: open.postEntryCostGuard === true
+          });
 
       if (exitEval.action === "close") {
         const cr = exitEval.reason as PaperClosedPositionRecord["closeReason"];
@@ -1342,24 +1437,25 @@ export class PaperEngine {
         continue;
       }
 
-      /** 증액(스테이지 2+)·규모 확대 포지션: 신호 소멸 후 시간 청산·유예를 더 짧게 */
+      if (regimeAtEntry === "RANGE") {
+        remaining.push({ ...posTrail, lostAt: undefined, candidateLostStreak: 0 });
+        this.logger.info("range_hold_signal_mismatch_no_candidate_lost", {
+          symbol: open.symbol,
+          market_mode: input.marketMode.marketMode
+        });
+        continue;
+      }
+
+      /** 증액(스테이지 2+)·규모 확대 포지션: 신호 소멸 후 시간 청산·유예를 더 짧게 (RANGE 포지션은 상단에서 이미 분기됨) */
       const stagedOrScaled =
         (open.entryStage ?? 1) >= 2 ||
         (typeof open.initialSizeUsd === "number" &&
           open.initialSizeUsd > 0 &&
           open.sizeUsd > open.initialSizeUsd * 1.05);
-      /** RANGE Stage 1 탐색: candidate_lost만으로 즉시 정리하지 않음 */
-      const rangeStage1Exploratory = regimeAtEntry === "RANGE" && (open.entryStage ?? 1) < 2;
       const minHoldMs = stagedOrScaled ? 4 * 60_000 : 5 * 60_000;
-      const minHoldMsEff = rangeStage1Exploratory ? Math.max(minHoldMs, 8 * 60_000) : minHoldMs;
-      const gracePeriodMs = rangeStage1Exploratory
-        ? stagedOrScaled
-          ? 10 * 60_000
-          : 14 * 60_000
-        : stagedOrScaled
-          ? 4 * 60_000
-          : 7 * 60_000;
-      const minLostStreak = rangeStage1Exploratory ? 3 : 1;
+      const minHoldMsEff = minHoldMs;
+      const gracePeriodMs = stagedOrScaled ? 4 * 60_000 : 7 * 60_000;
+      const minLostStreak = 1;
 
       if (m.holdingMs < minHoldMsEff) {
         remaining.push({ ...posTrail, candidateLostStreak: 0 });

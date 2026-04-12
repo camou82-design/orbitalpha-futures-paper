@@ -5,6 +5,45 @@ import type {
   PaperOpenPositionRecord
 } from "../models/types";
 
+function defaultLabelForExitType(t: PaperExitType): string {
+  switch (t) {
+    case "EXIT_SL":
+      return "손절";
+    case "EXIT_TP":
+      return "익절";
+    case "EXIT_TP_1":
+      return "1차 익절";
+    case "EXIT_TP_2":
+      return "2차 익절";
+    case "EXIT_PARTIAL_TP":
+      return "분할 익절";
+    case "EXIT_TRAILING":
+      return "트레일링 스탑";
+    case "EXIT_TIME_STOP":
+      return "시간 청산";
+    case "EXIT_TREND_BREAK":
+      return "추세 이탈 청산";
+    case "EXIT_REGIME":
+      return "레짐 청산";
+    case "EXIT_REGIME_BREAK":
+      return "레짐·구조 이탈 청산";
+    case "EXIT_SIGNAL_LOST":
+      return "진입 후보 약화로 정리";
+    case "EXIT_RANGE_REBALANCE":
+      return "횡보 리밸런스 청산";
+    case "EXIT_TREND_SWITCH":
+      return "추세 스위칭(청산+역진입)";
+    case "EXIT_RISK":
+      return "리스크 강제 정리";
+    case "EXIT_UNKNOWN":
+      return "미분류 청산";
+    default: {
+      const _e: never = t;
+      return _e;
+    }
+  }
+}
+
 /** JSON 직렬화 시 `null`이 되는 NaN 방지용 — 값이 없으면 0. */
 export function finiteUsd(n: number): number {
   return typeof n === "number" && Number.isFinite(n) ? n : 0;
@@ -88,23 +127,23 @@ export function paperExitDisplayMeta(
 ): Readonly<{ exitType: PaperExitType; closeReasonLabel: string }> {
   switch (closeReason) {
     case "candidate_lost":
-      return { exitType: "EXIT_SIGNAL_LOST", closeReasonLabel: "진입 후보 약화로 정리" };
+      return { exitType: "EXIT_SIGNAL_LOST", closeReasonLabel: defaultLabelForExitType("EXIT_SIGNAL_LOST") };
     case "partial_exit_1":
-      return { exitType: "EXIT_PARTIAL_TP", closeReasonLabel: "1차 익절" };
+      return { exitType: "EXIT_TP_1", closeReasonLabel: defaultLabelForExitType("EXIT_TP_1") };
     case "partial_exit_2":
-      return { exitType: "EXIT_PARTIAL_TP", closeReasonLabel: "2차 익절" };
+      return { exitType: "EXIT_TP_2", closeReasonLabel: defaultLabelForExitType("EXIT_TP_2") };
     case "take_profit":
-      return { exitType: "EXIT_TP", closeReasonLabel: "익절" };
+      return { exitType: "EXIT_TP", closeReasonLabel: defaultLabelForExitType("EXIT_TP") };
     case "stop_loss":
-      return { exitType: "EXIT_SL", closeReasonLabel: "손절" };
+      return { exitType: "EXIT_SL", closeReasonLabel: defaultLabelForExitType("EXIT_SL") };
     case "trailing_stop":
-      return { exitType: "EXIT_TRAILING", closeReasonLabel: "트레일링 스탑" };
+      return { exitType: "EXIT_TRAILING", closeReasonLabel: defaultLabelForExitType("EXIT_TRAILING") };
     case "time_based_exit":
-      return { exitType: "EXIT_TIME_STOP", closeReasonLabel: "시간 청산" };
+      return { exitType: "EXIT_TIME_STOP", closeReasonLabel: defaultLabelForExitType("EXIT_TIME_STOP") };
     case "trend_break_exit":
-      return { exitType: "EXIT_TREND_BREAK", closeReasonLabel: "추세 이탈 청산" };
+      return { exitType: "EXIT_REGIME_BREAK", closeReasonLabel: defaultLabelForExitType("EXIT_REGIME_BREAK") };
     case "regime_exit":
-      return { exitType: "EXIT_REGIME", closeReasonLabel: "레짐 청산" };
+      return { exitType: "EXIT_REGIME", closeReasonLabel: defaultLabelForExitType("EXIT_REGIME") };
     default: {
       const _exhaustive: never = closeReason;
       return _exhaustive;
@@ -127,12 +166,19 @@ type FinalizeClosedInput = Readonly<{
   latestSnapshotPath?: string;
   latestMetaPath?: string;
   timestampSnapshotPath?: string;
+  /** 스위칭·리밸런스 등 `closeReason` 맵 외 표준 코드 강제 시 사용. */
+  exitTypeOverride?: PaperExitType;
+  closeReasonLabelOverride?: string;
 }>;
 
 /** 모든 종료·부분종료 레코드는 이 함수로 마감해 숫자 NaN → JSON null을 막고 exit 메타를 통일한다. */
 export function finalizePaperClosedRecord(input: FinalizeClosedInput): PaperClosedPositionRecord {
   const m = input.metrics;
-  const { exitType, closeReasonLabel } = paperExitDisplayMeta(input.closeReason);
+  const fromReason = paperExitDisplayMeta(input.closeReason);
+  const exitType = input.exitTypeOverride ?? fromReason.exitType;
+  const closeReasonLabel =
+    input.closeReasonLabelOverride ??
+    (input.exitTypeOverride != null ? defaultLabelForExitType(input.exitTypeOverride) : fromReason.closeReasonLabel);
   const sizeUsd = finiteUsd(input.legMarginUsd);
   const net = finiteUsd(m.pnlUsdNet);
   const gross = finiteUsd(m.pnlUsdGross);

@@ -392,6 +392,12 @@ export type PaperEngineState = Readonly<{
   last_order_build_failure?: Record<string, unknown> | null;
   /** 직전 틱 LONG_ONLY_SHORT_DEFERRED 요약(관측용) */
   last_long_only_restriction?: Record<string, unknown> | null;
+  /** 직전 틱 Market Mode Selector 출력 */
+  market_mode_selector?: MarketModeSelectorOutput;
+  /** 직전 틱 Risk & Exposure 출력 */
+  risk_exposure?: RiskExposureOutput;
+  /** 직전 틱 설명 레이어 */
+  explanation?: PaperExplanationFields;
 }>;
 
 /** One leg in `positions/open.json` (JSON array of up to `paperMaxOpenPositions` records). */
@@ -465,16 +471,100 @@ export type PaperOpenPositionRecord = Readonly<{
   candidateLostStreak?: number;
 }>;
 
-/** 종료 레코드·이벤트에 함께 쓰는 종료 유형 코드. */
+/** 종료 레코드·이벤트에 함께 쓰는 종료 유형 코드(레저·로그 공통). */
 export type PaperExitType =
   | "EXIT_SL"
   | "EXIT_TP"
+  | "EXIT_TP_1"
+  | "EXIT_TP_2"
   | "EXIT_PARTIAL_TP"
   | "EXIT_TRAILING"
   | "EXIT_TIME_STOP"
   | "EXIT_TREND_BREAK"
   | "EXIT_REGIME"
-  | "EXIT_SIGNAL_LOST";
+  | "EXIT_REGIME_BREAK"
+  | "EXIT_SIGNAL_LOST"
+  | "EXIT_RANGE_REBALANCE"
+  | "EXIT_TREND_SWITCH"
+  | "EXIT_RISK"
+  | "EXIT_UNKNOWN";
+
+/** Market Mode Selector 단일 출력(틱 단위). */
+export type PaperMarketMode = "RANGE" | "TREND" | "MIXED" | "TRANSITION" | "NO_TRADE";
+
+export type MarketModeSelectorOutput = Readonly<{
+  marketMode: PaperMarketMode;
+  /** 0–100 정규화 점수. */
+  marketModeScore: number;
+  /** 0–1 RANGE 적합도. */
+  rangeConfidence: number;
+  /** 0–1 TREND 적합도. */
+  trendConfidence: number;
+  /** 세션/시간대 프로파일 라벨. */
+  sessionProfile: string;
+  /** 0–1 리스크 스로틀(높을수록 보수). */
+  riskThrottle: number;
+  modeReasonLabel: string;
+}>;
+
+/** RANGE 엔진이 심볼·틱마다 유지하는 상태(양방향·박스 기준). */
+export type RangeEngineState = Readonly<{
+  boxUpper: number;
+  boxLower: number;
+  boxMid: number;
+  /** 0–1 또는 엔진 정의 스케일. */
+  boxPosition: number;
+  rangeCycleCount: number;
+  longExposure: number;
+  shortExposure: number;
+  hedgeBalance: number;
+  reopenEligible: boolean;
+  rangeLadderLevel: number;
+  /** RANGE 철학상 후보 소멸만으로 청산할지 — 기본 false. */
+  candidateLostExitAllowed: boolean;
+}>;
+
+export type TrendBreakoutDirection = "up" | "down" | "none";
+
+/** TREND 엔진이 심볼·틱마다 산출하는 상태. */
+export type TrendEngineState = Readonly<{
+  compressionScore: number;
+  breakoutUpper: number;
+  breakoutLower: number;
+  breakoutDirection: TrendBreakoutDirection;
+  breakoutConfidence: number;
+  trendFollowScore: number;
+  switchEligible: boolean;
+  pyramidLevel: number;
+  /** 반대 돌파 시 스위칭(청산+역진입) 스키마용 힌트. */
+  switchCloseSide: "long" | "short" | null;
+  switchOpenSide: "long" | "short" | null;
+}>;
+
+export type PaperRiskMode = "NORMAL" | "REDUCED" | "DEFENSIVE" | "HALT";
+
+/** Risk & Exposure 엔진 출력. */
+export type RiskExposureOutput = Readonly<{
+  riskMode: PaperRiskMode;
+  sizeMultiplier: number;
+  maxLongExposure: number;
+  maxShortExposure: number;
+  switchSizeMultiplier: number;
+  allowNewEntry: boolean;
+  allowAdd: boolean;
+  allowHedge: boolean;
+  riskReasonLabel: string;
+}>;
+
+/** 설명 레이어(번들·엔진 상태에 병기). */
+export type PaperExplanationFields = Readonly<{
+  modeReasonLabel: string;
+  engineReasonLabel: string;
+  riskReasonLabel: string;
+  entryReasonLabel: string;
+  exitReasonLabel: string;
+  switchReasonLabel: string;
+}>;
 
 /** Appended to `data/positions/history.json` when a paper position is closed. */
 export type PaperClosedPositionRecord = Readonly<{
