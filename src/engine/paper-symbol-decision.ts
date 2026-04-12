@@ -728,6 +728,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   if ((risk_state as string) === "COOLDOWN" && input.currentStage === 0 && input.regime === "RANGE") {
     const lastMeta = input.lastCloseMetaBySymbol?.get(String(sym));
     const closeReason = lastMeta?.closeReason;
+    const entryStageAtClose = lastMeta?.entryStageAtClose ?? 0;
     const elapsedSinceCloseMs = lastMeta ? input.now - lastMeta.closedAt : Infinity;
 
     const isRelaxReason =
@@ -738,14 +739,16 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       closeReason === "time_based_exit" ||
       closeReason === "regime_exit";
 
-    if (isRelaxReason) {
+    if (isRelaxReason && entryStageAtClose < 2) {
       reentry_cooldown_applied = true;
-      reentry_cooldown_reason = `range_stage0_relax_${String(closeReason)}`;
+      reentry_cooldown_reason = `range_v2_relax_${String(closeReason)}`;
 
-      const relaxMult = 0.2; // 80% reduction
+      const relaxMult = 0.1; // Phase 2: 90% reduction
       const baseCooldownMs = input.reentryCooldownMs;
       reentry_cooldown_original_ms = baseCooldownMs;
-      reentry_cooldown_effective_ms = Math.floor(baseCooldownMs * relaxMult);
+
+      const calculatedEffective = Math.floor(baseCooldownMs * relaxMult);
+      reentry_cooldown_effective_ms = Math.max(calculatedEffective, RANGE_STAGE0_REENTRY_RELAX_MIN_MS);
 
       if (elapsedSinceCloseMs >= reentry_cooldown_effective_ms) {
         risk_state = "PASS";
