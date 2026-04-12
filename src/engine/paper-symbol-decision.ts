@@ -248,6 +248,8 @@ function pack(
     reentry_cooldown_reason?: string | null;
     currentStage?: number;
     regime?: "TREND" | "RANGE" | "NO_TRADE";
+    stage1_signal_relaxed?: boolean;
+    signal_relax_reason?: string | null;
   }
 ): PaperSymbolDecision {
   return {
@@ -312,7 +314,9 @@ function pack(
     reentry_cooldown_effective_ms: fields.reentry_cooldown_effective_ms ?? null,
     reentry_cooldown_reason: fields.reentry_cooldown_reason ?? null,
     currentStage: fields.currentStage,
-    regime: fields.regime
+    regime: fields.regime,
+    stage1_signal_relaxed: fields.stage1_signal_relaxed,
+    signal_relax_reason: fields.signal_relax_reason
   };
 }
 
@@ -325,6 +329,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const slippage_buffer_pct = slipFrac * 100;
   const safety_margin_pct = safety * 100;
   const emMode = input.config.paperEngineMode;
+
+  const supplemental_reasons: string[] = [];
 
   const sym = input.snapshot?.symbol ?? ("UNKNOWN" as MarketSymbol);
   let em: number | null = null;
@@ -479,6 +485,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reentry_cooldown_reason?: string | null;
       currentStage?: number;
       regime?: "TREND" | "RANGE" | "NO_TRADE";
+      stage1_signal_relaxed?: boolean;
+      signal_relax_reason?: string | null;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -563,7 +571,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reentry_cooldown_effective_ms: extra.reentry_cooldown_effective_ms ?? reentry_cooldown_effective_ms,
       reentry_cooldown_reason: extra.reentry_cooldown_reason ?? reentry_cooldown_reason,
       currentStage: extra.currentStage !== undefined ? extra.currentStage : input.currentStage,
-      regime: extra.regime !== undefined ? extra.regime : input.regime
+      regime: extra.regime !== undefined ? extra.regime : input.regime,
+      stage1_signal_relaxed: extra.stage1_signal_relaxed ?? stage1SignalRelaxed,
+      signal_relax_reason: extra.signal_relax_reason ?? signalRelaxReason
     }),
     ...res
   });
@@ -648,33 +658,64 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     fee_estimate_pct = rm * 100;
   }
 
+  let stage1SignalRelaxed = false;
+  let signalRelaxReason: string | null = null;
+
   if (signal_state === "NONE") {
-    reject_reason = "SIGNAL_NONE";
-    final_decision = "SKIP";
-    return ret(
-      {
-        execution_state: "PAPER_READY",
-        ai_decision: "N/A",
-        adaptive_decision: "N/A",
-        stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
-        required_move_pct: null,
-        shortfall_pct: 0,
-        signal_missing_reason: sn?.signalMissingReason ?? "EMA_CRITERIA_NOT_MET",
-        box_position_diag: sn?.boxPos,
-        ema_gap_diag: sn?.emaGap,
-        volatility_proxy_diag: sn?.volumeRatioProxy,
-        stage1_leniency_applied
-      },
-      {
-        intentSide: null,
-        executorDecision: null,
-        adaptiveOk: false,
-        adaptiveDirection: null,
-        adaptiveDetail: null,
-        adaptiveResult: null,
-        aiGatePassed: false
+    /** 진단: BTC 등 지수급 심볼의 Stage 1 신호 부재 시 모호하지 않고 특정 조건 충족 시 SOFT_RANGE_CANDIDATE 허용. */
+    let softCandidateAllowed = false;
+
+    if (input.currentStage === 0 && input.regime === "RANGE") {
+      const boxPos = sn?.boxPos ?? 0.5;
+      const boxCentered = boxPos > 0.4 && boxPos < 0.6;
+      const emaGap = Math.abs(sn?.emaGap ?? 0);
+      const volProxy = sn?.volumeRatioProxy ?? 0;
+
+      // 1. 박스 위치가 극단 중앙이 아님 (0.4 ~ 0.6 제외)
+      // 2. EMA 이격도/거래량 프록시가 완전 소멸 수준은 아님
+      if (!boxCentered && emaGap > 0.0001 && volProxy > 0.1) {
+        softCandidateAllowed = true;
+        stage1SignalRelaxed = true;
+        signal_state = "LONG_CANDIDATE"; // 임시 승격하여 EDGE/RISK 태움
+        signalRelaxReason = "stage1_range_soft_candidate_pos_and_vol_ok";
+        supplemental_reasons.push("STAGE1_SIGNAL_RELAXED_SOFT_CANDIDATE");
       }
-    );
+    }
+
+    if (!softCandidateAllowed) {
+      reject_reason = "SIGNAL_NONE";
+      final_decision = "SKIP";
+      return ret(
+        {
+          execution_state: "PAPER_READY",
+          ai_decision: "N/A",
+          adaptive_decision: "N/A",
+          stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
+          required_move_pct: null,
+          shortfall_pct: 0,
+          signal_missing_reason: sn?.signalMissingReason ?? "EMA_CRITERIA_NOT_MET",
+          box_position_diag: sn?.boxPos,
+          ema_gap_diag: sn?.emaGap,
+          volatility_proxy_diag: sn?.volumeRatioProxy,
+          stage1_leniency_applied,
+          original_signal_state: "NONE",
+          final_signal_state: "NONE"
+        },
+        {
+          intentSide: null,
+          executorDecision: null,
+          adaptiveOk: false,
+          adaptiveDirection: null,
+          adaptiveDetail: null,
+          adaptiveResult: null,
+          aiGatePassed: false
+        }
+      );
+    } else {
+      // SOFT_RANGE_CANDIDATE 경로 진입
+      // signal_state가 LONG_CANDIDATE/SHORT_CANDIDATE로 잡혀 아래 로직을 계속 타게 됨
+      // 단, PACK 시 final_signal_state를 위해 변수 유지
+    }
   }
 
   /**
@@ -684,6 +725,37 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const unknownBlocksEntry =
     regime_state === "UNKNOWN" &&
     (input.currentStage >= 1 || !(input.currentStage === 0 && input.isAmbiguous));
+  /** 쿨다운 체크(RISK_FAIL_REENTRY) 완화 (RANGE Stage 1 한정) */
+  if ((risk_state as string) === "COOLDOWN" && input.currentStage === 0 && input.regime === "RANGE") {
+    const lastMeta = input.lastCloseMetaBySymbol?.get(String(sym));
+    const closeReason = lastMeta?.closeReason;
+    const elapsedSinceCloseMs = lastMeta ? input.now - lastMeta.closedAt : Infinity;
+
+    const isRelaxReason =
+      closeReason === "partial_exit_1" ||
+      closeReason === "partial_exit_2" ||
+      closeReason === "take_profit" ||
+      closeReason === "trailing_stop" ||
+      closeReason === "time_based_exit" ||
+      closeReason === "regime_exit";
+
+    if (isRelaxReason) {
+      reentry_cooldown_applied = true;
+      reentry_cooldown_reason = `range_stage0_relax_${String(closeReason)}`;
+
+      const relaxMult = 0.2; // 80% reduction
+      const baseCooldownMs = input.reentryCooldownMs;
+      reentry_cooldown_original_ms = baseCooldownMs;
+      reentry_cooldown_effective_ms = Math.floor(baseCooldownMs * relaxMult);
+
+      if (elapsedSinceCloseMs >= reentry_cooldown_effective_ms) {
+        risk_state = "PASS";
+        reject_reason = null;
+        supplemental_reasons.push("RANGE_STAGE0_REENTRY_RELAXED");
+      }
+    }
+  }
+
   if (unknownBlocksEntry) {
     reject_reason = input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "REGIME_UNKNOWN";
     final_decision = "REJECT";
@@ -749,8 +821,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   intentSide = sn.signal === "paper_long_candidate" ? "long" : "short";
   rr = rrFromRegime(input.regime);
 
-  const supplemental_reasons: string[] = [];
-  if (useFixedCost) supplemental_reasons.push("PAPER_FIXED_TOTAL_COST_USD");
   let stage1LoosenedEntry = false;
   /** Stage 1 소액 탐색: 실행기 소프트 차단 오버라이드 시 true (사이즈 추가 축소). */
   let stage1ExploreSoftExec = false;
@@ -1395,10 +1465,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         qty_step: null,
         min_qty: null,
         min_notional: null,
-        sizeUsd: adaptive.sizeUsd
+        sizeUsd: adaptive.sizeUsd,
+        original_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && sn.signal === "none") ? "NONE" : signal_state,
+        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && sn.signal === "none") ? "SOFT_RANGE_CANDIDATE" : signal_state,
+        stage1_signal_relaxed: (input.currentStage === 0 && input.regime === "RANGE" && sn.signal === "none")
       },
       {
-        intentSide,
+        intentSide: intentSide ?? (sn.signal === "paper_long_candidate" || sn.signal === "none" ? "long" : "short"),
         executorDecision,
         adaptiveOk: true,
         adaptiveDirection: adaptive.direction,

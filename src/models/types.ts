@@ -260,6 +260,10 @@ export type PaperSymbolDecisionRecord = Readonly<{
   executor_block_reason_original?: string | null;
   /** Stage 1에서 실행기 소프트 오버라이드로 진입 허용으로 전환했는지 */
   stage1_soft_exec_override?: boolean;
+  /** Stage 1 신호 완화 적용 여부 (BTC 등) */
+  stage1_signal_relaxed?: boolean;
+  /** 신호 완화 구체적 사유 */
+  signal_relax_reason?: string | null;
   /** RANGE·Stage0 재진입 쿨다운 완화 적용 여부(RISK_FAIL_REENTRY 경로) */
   reentry_cooldown_applied?: boolean;
   /** 재진입 대기 원래 밀리초(동일 방향 배수 반영 후) */
