@@ -1166,8 +1166,45 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const effectiveRangeUntil = rangeCooldownBypass ? 0 : rangeUntil;
   const trendUntil = input.trendCooldownUntilBySymbol.get(String(sym)) ?? 0;
 
-  executorDecision =
-    input.regime === "RANGE"
+  // Highway Engine First - Regime is only secondary veto logic
+  const isHighwayAcceptable = highwayResult.state === HighwayTrendState.VALID || highwayResult.state === HighwayTrendState.WEAK;
+
+  if (isHighwayAcceptable && _aiResult.highwayValidityScore >= 0.3) {
+    executorDecision = highwayExecutorEvaluateEntry({
+      intentType: _entryIntent,
+      highwayState: highwayResult.state,
+      aiScores: _aiResult,
+      symbol: String(sym),
+      signal: sn.signal,
+      risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
+      currentStage: input.currentStage,
+      expectedMove: typeof em === "number" ? em : null,
+      totalCost
+    });
+
+    // Auxiliary RANGE Veto / Downgrade Logic (executed only if Highway is weak-ish)
+    if (executorDecision.entry_allowed && _aiResult.highwayValidityScore < 0.6) {
+      const penalty = sn.rangeConfidence ?? 0;
+      const isChaos = (sn.breakoutFailureRate ?? 0) > 0.8;
+
+      if (penalty > 0.85 || isChaos) {
+        executorDecision = {
+          ...executorDecision,
+          entry_allowed: false,
+          blocked_reason: "range_extreme_veto",
+          guidance: "Highway blocked by extreme RANGE chaos/noise"
+        };
+      } else if (penalty > 0.7 && executorDecision.target_stage && executorDecision.target_stage > 1) {
+        executorDecision = {
+          ...executorDecision,
+          target_stage: 1,
+          guidance: "Highway downgraded to Probe/Scale 1 due to RANGE noise"
+        };
+      }
+    }
+  } else {
+    // Legacy fallback for structural RANGE exploration when not a highway setup
+    executorDecision = input.regime === "RANGE"
       ? rangeExecutorEvaluateEntry({
         regime: input.regime,
         risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
@@ -1189,19 +1226,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         trendWeaknessScore: sn.trendWeaknessScore,
         rangeReasonLabel: sn.rangeReasonLabel
       })
-      : input.regime === "TREND"
-        ? highwayExecutorEvaluateEntry({
-          intentType: _entryIntent,
-          highwayState: highwayResult.state,
-          aiScores: _aiResult,
-          symbol: String(sym),
-          signal: sn.signal,
-          risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
-          currentStage: input.currentStage,
-          expectedMove: typeof em === "number" ? em : null,
-          totalCost
-        })
-        : null;
+      : null;
+  }
 
   // Round 3: Stage 1 — RANGE·모호 소액 탐색 + 자동 진입 + RANGE 박스/에지 소프트 허용
   executorBlockReasonOriginal = executorDecision?.blocked_reason ?? null;
