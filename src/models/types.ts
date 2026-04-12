@@ -264,6 +264,12 @@ export type PaperSymbolDecisionRecord = Readonly<{
   stage1_signal_relaxed?: boolean;
   /** 신호 완화 구체적 사유 */
   signal_relax_reason?: string | null;
+  /** Stage 1 Soft Candidate Micro-Entry 적용 여부 */
+  stage1_soft_candidate_enter_applied?: boolean;
+  /** Micro-Entry 원본 차단 사유 (보통 no_signal) */
+  stage1_soft_candidate_original_block_reason?: string | null;
+  /** Micro-Entry 추가 배수 (기본 0.4) */
+  stage1_soft_candidate_size_mult?: number | null;
   /** RANGE·Stage0 재진입 쿨다운 완화 적용 여부(RISK_FAIL_REENTRY 경로) */
   reentry_cooldown_applied?: boolean;
   /** 재진입 대기 원래 밀리초(동일 방향 배수 반영 후) */

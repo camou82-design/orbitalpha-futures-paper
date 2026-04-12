@@ -461,6 +461,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       shortfall_usd?: number;
       executor_block_reason_original?: string | null;
       stage1_soft_exec_override?: boolean;
+      stage1_signal_relaxed?: boolean;
+      signal_relax_reason?: string | null;
+      stage1_soft_candidate_enter_applied?: boolean;
+      stage1_soft_candidate_original_block_reason?: string | null;
+      stage1_soft_candidate_size_mult?: number | null;
       stage1_size_multiplier_final?: number | null;
       order_build_ok?: boolean;
       order_build_fail_reason?: string | null;
@@ -485,8 +490,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reentry_cooldown_reason?: string | null;
       currentStage?: number;
       regime?: "TREND" | "RANGE" | "NO_TRADE";
-      stage1_signal_relaxed?: boolean;
-      signal_relax_reason?: string | null;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -1084,6 +1087,27 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
   }
 
+  /** Round 3.5: RANGE Stage1 Soft Candidate Micro-Entry (no_signal 재차단 우회) */
+  let stage1SoftCandidateMicroEnter = false;
+  if (
+    !executorDecision?.entry_allowed &&
+    input.currentStage === 0 &&
+    input.regime === "RANGE" &&
+    stage1SignalRelaxed === true &&
+    (executorDecision?.blocked_reason === "no_signal" || executorDecision?.blocked_reason === "range_low_quality_for_lead")
+  ) {
+    stage1SoftCandidateMicroEnter = true;
+    executorBlockReasonOriginal = executorDecision.blocked_reason;
+    executorDecision = {
+      ...executorDecision,
+      entry_allowed: true,
+      blocked_reason: null,
+      guidance: `Stage1 Micro-Entry (${executorBlockReasonOriginal})`,
+      target_stage: 1
+    };
+    supplemental_reasons.push("STAGE1_SOFT_CANDIDATE_MICRO_ENTER");
+  }
+
   if (!executorDecision || !executorDecision.entry_allowed) {
     const br = executorDecision?.blocked_reason;
     reject_reason = br ? mapExecutorBlockToReject(br) : (input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "LEGACY_BLOCKED");
@@ -1114,6 +1138,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         target_stage: null,
         supplemental_reasons,
         stage1_result_code: (input.currentStage === 0 && input.isAmbiguous) ? "STAGE1_EXEC_PENDING" : "STAGE1_BLOCKED_REGIME",
+        stage1_signal_relaxed: stage1SignalRelaxed,
+        signal_relax_reason: signalRelaxReason,
+        stage1_soft_candidate_enter_applied: stage1SoftCandidateMicroEnter,
+        stage1_soft_candidate_original_block_reason: stage1SoftCandidateMicroEnter ? executorBlockReasonOriginal : null,
+        stage1_soft_candidate_size_mult: stage1SoftCandidateMicroEnter ? 0.4 : null,
         required_move_pct,
         shortfall_pct
       },
@@ -1228,6 +1257,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
     if (input.isAmbiguous) {
       dynamicSizeMult *= 0.8; // Extra caution for ambiguous market
+    }
+
+    if (stage1SoftCandidateMicroEnter) {
+      dynamicSizeMult *= 0.4; // STAGE1_SOFT_CANDIDATE_MICRO_MULT
     }
 
     const stage1SizeMultFinal = input.currentStage === 0 ? dynamicSizeMult : null;
@@ -1453,7 +1486,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         post_entry_cost_guard: costWarningStage1,
         executor_block_reason_original: executorBlockReasonOriginal,
         stage1_soft_exec_override: stage1SoftExecOverrideFlag,
+        stage1_signal_relaxed: stage1SignalRelaxed,
+        signal_relax_reason: signalRelaxReason,
+        stage1_soft_candidate_enter_applied: stage1SoftCandidateMicroEnter,
+        stage1_soft_candidate_original_block_reason: stage1SoftCandidateMicroEnter ? executorBlockReasonOriginal : null,
+        stage1_soft_candidate_size_mult: stage1SoftCandidateMicroEnter ? 0.4 : null,
         stage1_size_multiplier_final: stage1SizeMultFinal,
+        currentStage: input.currentStage,
+        regime: input.regime,
         order_build_ok: true,
         order_build_fail_reason: null,
         order_build_fail_stage: null,
@@ -1469,8 +1509,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         min_notional: null,
         sizeUsd: adaptive.sizeUsd,
         original_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && sn.signal === "none") ? "NONE" : signal_state,
-        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && sn.signal === "none") ? "SOFT_RANGE_CANDIDATE" : signal_state,
-        stage1_signal_relaxed: (input.currentStage === 0 && input.regime === "RANGE" && sn.signal === "none")
+        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && sn.signal === "none") ? "SOFT_RANGE_CANDIDATE" : signal_state
       },
       {
         intentSide: intentSide ?? (sn.signal === "paper_long_candidate" || sn.signal === "none" ? "long" : "short"),
