@@ -919,21 +919,36 @@ export class PaperEngine {
       const decisionSnap = snapshots.find((s) => s.symbol === sym);
       if (decisionSnap) {
         const d = res.decision;
+        const executorIsHighway = res.executorDecision?.detail?.alignmentQualityScore !== undefined;
+
         this.logger.info("PAPER_ENTRY_LINE", {
-          paper_entry_relaxed: this.config.paperEntryRelaxed,
           symbol: String(sym),
-          trend_ok: decisionSnap.trendOk,
-          ema_gap: decisionSnap.emaGap,
-          sideways_mode: decisionSnap.qualityScore > 0,
-          candidate_strength: decisionSnap.candidateStrength,
-          quality_score: decisionSnap.qualityScore,
-          signal_strength: paperSignalStrengthLabel(decisionSnap.qualityScore, this.config.paperEntryRelaxed),
+          decision_source: executorIsHighway ? "HIGHWAY_CORE" : "LEGACY_RANGE",
           side: res.intentSide,
-          base_signal: decisionSnap.signal,
+          entry_intent_type: d.entry_intent_type,
           entry_blocked: d.reject_reason !== null ? d.reject_reason : false,
-          gate_expected_move: decisionSnap.gateExpectedMove,
           final_signal: d.final_decision === "ENTER" ? d.final_signal_state : "none",
-          // Highway Enrichment
+
+          // Primary Highway Metrics
+          alignment_quality_score: res.executorDecision?.detail?.alignmentQualityScore,
+          highway_validity_score: res.executorDecision?.detail?.highwayValidityScore,
+          ema_spacing_health_score: res.executorDecision?.detail?.emaSpacingHealthScore,
+          pullback_quality_score: res.executorDecision?.detail?.pullbackQualityScore,
+          rebound_strength_score: res.executorDecision?.detail?.reboundStrengthScore,
+          volume_support_score: res.executorDecision?.detail?.volumeSupportScore,
+          trend_exhaustion_score: res.executorDecision?.detail?.trendExhaustionScore,
+          entry_risk_score: res.executorDecision?.detail?.entryRiskScore,
+
+          // Legacy Auxiliary Diagnostics
+          legacy_base_signal: decisionSnap.signal,
+          legacy_trend_ok: decisionSnap.trendOk,
+          legacy_ema_gap: decisionSnap.emaGap,
+          legacy_sideways_mode: decisionSnap.qualityScore > 0,
+          legacy_candidate_strength: decisionSnap.candidateStrength,
+          legacy_quality_score: decisionSnap.qualityScore,
+          legacy_signal_strength: paperSignalStrengthLabel(decisionSnap.qualityScore, this.config.paperEntryRelaxed),
+          gate_expected_move: decisionSnap.gateExpectedMove,
+
           range_confidence: decisionSnap.rangeConfidence,
           box_cohesion: decisionSnap.boxCohesion01,
           breakout_failure_rate: decisionSnap.breakoutFailureRate,
@@ -942,16 +957,8 @@ export class PaperEngine {
           regime_exit_risk: decisionSnap.regimeExitRisk,
           range_cycle_count: decisionSnap.rangeCycleCount,
           range_ladder_level: decisionSnap.rangeLadderLevel,
-          entry_intent_type: d.entry_intent_type,
           regime_state_diag: decisionSnap.regimeStateDiag,
-          alignment_quality_score: res.executorDecision?.detail?.alignmentQualityScore,
-          ema_spacing_health_score: res.executorDecision?.detail?.emaSpacingHealthScore,
-          pullback_quality_score: res.executorDecision?.detail?.pullbackQualityScore,
-          rebound_strength_score: res.executorDecision?.detail?.reboundStrengthScore,
-          volume_support_score: res.executorDecision?.detail?.volumeSupportScore,
-          trend_exhaustion_score: res.executorDecision?.detail?.trendExhaustionScore,
-          highway_validity_score: res.executorDecision?.detail?.highwayValidityScore,
-          entry_risk_score: res.executorDecision?.detail?.entryRiskScore
+          paper_entry_relaxed: this.config.paperEntryRelaxed
         });
       }
 
