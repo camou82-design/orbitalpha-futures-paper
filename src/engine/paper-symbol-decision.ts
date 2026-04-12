@@ -482,6 +482,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let executorBlockReasonOriginal: string | null = null;
   let stage1SoftExecOverrideFlag = false;
   let stage1RangeEdgeSoftApplied = false;
+  let stage1ExploreSoftExec = false;
+  let stage1HigherTfBypassSizeMult: number | null = null;
+  let stage1RangeLowerEdgeSoftSizeMult: number | null = null;
+  let stage1SoftCandidateMicroEnter = false;
+  let stage1CostSoftBypassApplied = false;
+  let stage1CostSoftBypassReason: string | null = null;
 
   let reentry_cooldown_applied = false;
   let reentry_cooldown_original_ms: number | null = null;
@@ -978,12 +984,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   rr = rrFromRegime(input.regime);
 
   let stage1LoosenedEntry = false;
-  /** Stage 1 소액 탐색: 실행기 소프트 차단 오버라이드 시 true (사이즈 추가 축소). */
-  let stage1ExploreSoftExec = false;
   /** Stage 1만: 기대이동이 완화 비용 이하여도 탐색 진입 허용(하드 REJECT 안 함) */
   let costWarningStage1 = false;
-  let stage1HigherTfBypassSizeMult: number | null = null;
-  let stage1RangeLowerEdgeSoftSizeMult: number | null = null;
 
   const costGateComparable =
     typeof em === "number" &&
@@ -1200,122 +1202,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
   }
 
-  // Round 3: Stage 1 — RANGE·모호 소액 탐색 + 자동 진입 + RANGE 박스/에지 소프트 허용
-  executorBlockReasonOriginal = executorDecision?.blocked_reason ?? null;
-  const brExec = executorBlockReasonOriginal;
-  if (!executorDecision?.entry_allowed && input.currentStage === 0 && brExec) {
-    const isQualityHighForBypass = sn.qualityScore >= 45;
-    const isQualityVeryHighForBypass = sn.qualityScore >= 50;
-    const crashSafe = input.risk?.crashState === "NONE";
+  // Rounds 3, 3.5, 3.6 (Legacy Stage 1 Soft Bypasses) have been removed.
+  // Highway evaluation is now the sole authority for entry decisions.
 
-    const allowHigherTfSoft = brExec === "higher_tf_mismatch" && isQualityHighForBypass && crashSafe;
-    const allowRangeLowerEdgeSoft = brExec === "range_not_lower_edge" && isQualityVeryHighForBypass && crashSafe;
-
-    const allowExploreSoft =
-      (STAGE1_SOFT_EXPLORE_BLOCKS.has(brExec) || allowHigherTfSoft || allowRangeLowerEdgeSoft) &&
-      (input.isAmbiguous || input.regime === "RANGE" || allowHigherTfSoft);
-
-    const allowAutoEntrySoft =
-      input.autoEntryTriggered && (brExec === "trend_not_in_pullback" || brExec === "range_not_in_interest_zone");
-    const rangeEdgeTag = input.regime === "RANGE" ? STAGE1_RANGE_EDGE_SOFT_TAGS[brExec] : undefined;
-    const allowRangeEdgeSoft = rangeEdgeTag !== undefined;
-
-    if (allowExploreSoft || allowAutoEntrySoft || allowRangeEdgeSoft) {
-      stage1ExploreSoftExec = allowExploreSoft;
-      executorBlockReasonOriginal = brExec;
-      stage1SoftExecOverrideFlag = true;
-
-      if (allowRangeEdgeSoft) {
-        stage1RangeEdgeSoftApplied = true;
-        supplemental_reasons.push(rangeEdgeTag!);
-      }
-
-      // Special size penalty for higher_tf_mismatch bypass
-      if (allowHigherTfSoft) {
-        stage1HigherTfBypassSizeMult = 0.5;
-        supplemental_reasons.push("STAGE1_HIGHER_TF_SOFT_BYPASS");
-      }
-      if (allowRangeLowerEdgeSoft) {
-        stage1RangeLowerEdgeSoftSizeMult = 0.5;
-        supplemental_reasons.push("STAGE1_RANGE_LOWER_EDGE_SOFT_BYPASS");
-      }
-
-      executorDecision = {
-        ...executorDecision!,
-        entry_allowed: true,
-        blocked_reason: null,
-        guidance: allowHigherTfSoft
-          ? `Stage1 상위추세 불일치 소액 허용 (${sn.qualityScore}점)`
-          : allowRangeLowerEdgeSoft
-            ? `Stage1 RANGE 하단 미달 소액 허용 (${sn.qualityScore}점)`
-            : allowRangeEdgeSoft
-              ? `Stage1 RANGE 위치 탐색 (${brExec})`
-              : allowExploreSoft
-                ? `Stage1 소액 탐색 (${brExec})`
-                : `검토 유지 자동 진입 (${brExec} 무시)`,
-        target_stage: 1
-      };
-      if (allowExploreSoft && !allowHigherTfSoft && !allowRangeLowerEdgeSoft) {
-        supplemental_reasons.push("STAGE1_EXPLORE_SOFT_EXEC");
-      }
-    }
-  }
-
-  /** Round 3.5: RANGE Stage1 Soft Candidate Micro-Entry (no_signal 재차단 우회) */
-  let stage1SoftCandidateMicroEnter = false;
-  if (
-    !executorDecision?.entry_allowed &&
-    input.currentStage === 0 &&
-    input.regime === "RANGE" &&
-    stage1SignalRelaxed === true &&
-    (executorDecision?.blocked_reason === "no_signal" || executorDecision?.blocked_reason === "range_low_quality_for_lead")
-  ) {
-    stage1SoftCandidateMicroEnter = true;
-    stage1SoftCandidateMicroEnter = true;
-    executorDecision = {
-      ...executorDecision,
-      entry_allowed: true,
-      blocked_reason: null,
-      guidance: `Stage1 Micro-Entry (${executorBlockReasonOriginal})`,
-      target_stage: 1
-    };
-    supplemental_reasons.push("STAGE1_SOFT_CANDIDATE_MICRO_ENTER");
-  }
-
-  /** Round 3.6: Stage 1 RANGE Cost/LowVol Soft Bypass (shortfall_pct <= 0.25) */
-  let stage1CostSoftBypassApplied = false;
-  let stage1CostSoftBypassReason: string | null = null;
-  const brCost = executorDecision?.blocked_reason;
-  if (
-    !executorDecision?.entry_allowed &&
-    input.currentStage === 0 &&
-    input.regime === "RANGE" &&
-    stage1SignalRelaxed === true &&
-    (brCost === "fail_fee" || brCost === "fail_low_vol") &&
-    (required_move_pct ?? 0) > 0
-  ) {
-    const costShortfallPctRaw = shortfall_pct ?? 0;
-    // Condition: shortfall_pct <= 0.25 (Relaxed limit)
-    const allowCostBypass = costShortfallPctRaw <= 0.25;
-
-    // Additional restriction for FAIL_LOW_VOL: needs to be more conservative
-    const isActuallyAllowed = brCost === "fail_fee"
-      ? allowCostBypass
-      : (allowCostBypass && (sn.qualityScore >= 45)); // FAIL_LOW_VOL requires slightly better quality
-
-    if (isActuallyAllowed) {
-      stage1CostSoftBypassApplied = true;
-      stage1CostSoftBypassReason = brCost.toUpperCase();
-      executorDecision = {
-        ...executorDecision!,
-        entry_allowed: true,
-        blocked_reason: null,
-        guidance: `Stage1 Cost Bypass (${brCost})`,
-        target_stage: 1
-      };
-      supplemental_reasons.push(`STAGE1_COST_SOFT_BYPASS_${brCost.toUpperCase()}`);
-    }
-  }
 
   if (!executorDecision || !executorDecision.entry_allowed) {
     const br = executorDecision?.blocked_reason;
@@ -1488,14 +1377,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       dynamicSizeMult *= 0.8; // Extra caution for ambiguous market
     }
 
-    if (stage1SoftCandidateMicroEnter) {
-      dynamicSizeMult *= 0.4; // STAGE1_SOFT_CANDIDATE_MICRO_MULT
-    }
-
-    if (stage1CostSoftBypassApplied) {
-      dynamicSizeMult *= 0.5; // Additional restriction for cost bypass
-    }
-
     const stage1SizeMultFinal = input.currentStage === 0 ? dynamicSizeMult : null;
 
     /** Stage1 RANGE 탐색: 소프트 탐색·에지·자동진입 소프트, 또는 실행기 자연 허용(소프트 없음). */
@@ -1521,15 +1402,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       modeDetail: input.adaptiveDetail,
       snap: {
         symbol: String(sym),
-        signal: sn.signal,
-        lastPrice: sn.lastPrice,
-        latestCandleClose: sn.latestCandleClose,
-        ema20: sn.ema20,
-        ema60: sn.ema60,
-        qualityScore: sn.qualityScore,
-        candidateStrength: sn.candidateStrength,
-        emaGap: sn.emaGap,
-        volumeRatioProxy: sn.volumeRatioProxy
+        signal: sn!.signal,
+        lastPrice: sn!.lastPrice,
+        latestCandleClose: sn!.latestCandleClose,
+        ema20: sn!.ema20,
+        ema60: sn!.ema60,
+        qualityScore: sn!.qualityScore,
+        candidateStrength: sn!.candidateStrength,
+        emaGap: sn!.emaGap,
+        volumeRatioProxy: sn!.volumeRatioProxy
       },
       baseSizeUsd: DEFAULT_PAPER_SIZE_USD * dynamicSizeMult,
       stage1RangeAdaptiveSoftExplore
@@ -1543,62 +1424,46 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     if (!adaptive.ok) {
       let stage1DirectionOverrideApplied = false;
       let stage1DirectionOverrideReason: string | null = null;
-      let originalPolicyDirection: string | null = adaptive.orderBuildFailReason === "policy_direction_none" ? "none" : null;
+      let originalPolicyDirection: string | null = (adaptive as any).orderBuildFailReason === "policy_direction_none" ? "none" : null;
       let finalPolicyDirection: string | null = null;
 
+      // Stage 1 Range Directional Override (DEACTIVATED)
       if (
-        adaptive.orderBuildFailReason === "policy_direction_none" &&
+        false && // stage1SoftCandidateMicroEnter disabled
+        (adaptive as any).orderBuildFailReason === "policy_direction_none" &&
         input.currentStage === 0 &&
-        input.regime === "RANGE" &&
-        stage1SoftCandidateMicroEnter === true
+        input.regime === "RANGE"
       ) {
-        // Apply Direction Override Rule: < 0.5 Long, >= 0.5 Short
-        const boxPosDiag = sn.boxPos ?? 0.5;
-        finalPolicyDirection = boxPosDiag < 0.5 ? "long" : "short";
-        stage1DirectionOverrideApplied = true;
-        stage1DirectionOverrideReason = `SoftCandidate Micro-Entry: boxPos ${boxPosDiag.toFixed(2)} -> ${finalPolicyDirection}`;
+        // Logic removed.
+      }
 
-        // Check longOnly restriction
-        if (input.config.longOnly && finalPolicyDirection === "short") {
-          supplemental_reasons.push("STAGE1_DIRECTION_OVERRIDE_LONG_ONLY_REJECT");
-          // Fall through to normal reject or handle here? Let's handle here for precision.
-          return ret(
-            {
-              reject_reason: "LONG_ONLY_SHORT_DEFERRED",
-              final_decision: "SKIP",
-              execution_state: "PAPER_READY",
-              ai_decision: "APPROVE",
-              adaptive_decision: "REJECT",
-              guidance: "방향 보정 결과가 숏이나 longOnly 제한됨",
-              target_stage: null,
-              supplemental_reasons,
-              stage1_result_code: "STAGE1_LONG_ONLY_SHORT_DEFERRED",
-              required_move_pct,
-              shortfall_pct,
-              stage1_direction_override_applied: true,
-              stage1_direction_override_reason: stage1DirectionOverrideReason + " (Blocked by longOnly)",
-              original_policy_direction: originalPolicyDirection,
-              final_policy_direction: "short"
-            },
-            {
-              intentSide,
-              executorDecision,
-              adaptiveOk: false,
-              adaptiveDirection: "short",
-              adaptiveDetail: adaptiveDetailOut,
-              adaptiveResult: null,
-              adaptiveFailure: adaptive,
-              aiGatePassed: true
-            }
-          );
-        }
-
-        // Successfully overrode direction - what's next? 
-        // We can either re-run build or manually construct a minimal "mock" adaptive success 
-        // but given the complexity of runFuturesAdaptiveEntry, the cleanest is to allow the fall-through 
-        // to ENTER if we can "fix" the adaptive object or simply handle ENTER here.
-        // For Stage 1 RANGE, the adaptive result is simple enough.
-
+      if (!stage1DirectionOverrideApplied) {
+        return ret(
+          {
+            reject_reason: "ORDER_BUILD_FAIL",
+            final_decision: "REJECT",
+            execution_state: "ORDER_BUILD_FAIL",
+            ai_decision: "APPROVE",
+            adaptive_decision: "REJECT",
+            guidance: `Adaptive entry failed: ${(adaptive as any).orderBuildFailReason}`,
+            target_stage: null,
+            supplemental_reasons,
+            stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
+            required_move_pct,
+            shortfall_pct
+          },
+          {
+            intentSide,
+            executorDecision,
+            adaptiveOk: false,
+            adaptiveDirection: null,
+            adaptiveDetail: adaptiveDetailOut,
+            adaptiveResult: adaptive as any,
+            aiGatePassed: true
+          }
+        );
+      } else {
+        // This path is unreachable due to false && above, but kept for type safety/future use
         return ret(
           {
             final_decision: "ENTER",
@@ -1610,18 +1475,17 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             target_stage: 1,
             supplemental_reasons,
             stage1_result_code: "STAGE1_ENTERED",
-            required_move_pct,
-            shortfall_pct,
+            required_move_pct, shortfall_pct,
             stage1_direction_override_applied: true,
             stage1_direction_override_reason: stage1DirectionOverrideReason,
             original_policy_direction: originalPolicyDirection,
             final_policy_direction: finalPolicyDirection,
-            qty: (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult) / sn.lastPrice,
-            price: sn.lastPrice,
+            qty: (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult) / sn!.lastPrice,
+            price: sn!.lastPrice,
             stopLoss: null,
             takeProfit: null,
             riskReward: rr,
-            atr_pct
+            atr_pct: atr_pct!
           },
           {
             intentSide,
@@ -1634,49 +1498,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           }
         );
       }
-
-      return ret(
-        {
-          reject_reason: "ORDER_BUILD_FAIL",
-          final_decision: "REJECT",
-          execution_state: "ORDER_BUILD_FAIL",
-          ai_decision: "APPROVE",
-          adaptive_decision: "REJECT",
-          guidance: `결정 구성 실패 (${adaptive.orderBuildFailReason})`,
-          target_stage: null,
-          supplemental_reasons,
-          stage1_result_code: "STAGE1_BLOCKED_DATA",
-          required_move_pct,
-          shortfall_pct,
-          order_build_ok: false,
-          order_build_fail_reason: adaptive.orderBuildFailReason,
-          order_build_fail_stage: adaptive.failStage,
-          qty: null,
-          price: sn.lastPrice,
-          stopLoss: null,
-          takeProfit: null,
-          riskReward: rr,
-          atr_pct,
-          tick_size: null,
-          qty_step: null,
-          min_qty: null,
-          min_notional: null,
-          sizeUsd: null
-        },
-        {
-          intentSide,
-          executorDecision,
-          adaptiveOk: false,
-          adaptiveDirection: null,
-          adaptiveDetail: adaptiveDetailOut,
-          adaptiveResult: null,
-          adaptiveFailure: adaptive,
-          aiGatePassed: true
-        }
-      );
     }
 
-    const expectedSide: "long" | "short" = sn.signal === "paper_long_candidate" ? "long" : "short";
+    const expectedSide: "long" | "short" = sn!.signal === "paper_long_candidate" ? "long" : "short";
     if (adaptive.direction !== expectedSide) {
       reject_reason = "ADAPTIVE_REJECT";
       final_decision = "REJECT";
@@ -1687,10 +1511,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           final_decision: "REJECT",
           ai_decision: "APPROVE",
           adaptive_decision: "REJECT",
-          guidance: "방향 불일치 (Adaptive)",
+          guidance: `Adaptive 방향 불일치 (${adaptive.direction} vs ${expectedSide})`,
           target_stage: null,
           supplemental_reasons,
-          stage1_result_code: "STAGE1_BLOCKED_RISK",
+          stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
           required_move_pct,
           shortfall_pct
         },
@@ -1700,7 +1524,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           adaptiveOk: false,
           adaptiveDirection: adaptive.direction,
           adaptiveDetail: adaptiveDetailOut,
-          adaptiveResult: null,
+          adaptiveResult: adaptive,
           aiGatePassed: true
         }
       );
@@ -1711,7 +1535,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       if (
         input.currentStage === 0 &&
         input.regime === "RANGE" &&
-        sn.signal === "paper_short_candidate"
+        sn!.signal === "paper_short_candidate"
       ) {
         return ret(
           {
@@ -1771,8 +1595,40 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       );
     }
 
+    const initialEntryQty = (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult) / sn!.lastPrice;
+    if (initialEntryQty <= 0) {
+      reject_reason = "ORDER_BUILD_FAIL";
+      final_decision = "REJECT";
+      supplemental_reasons.push("ZERO_QTY_FAIL");
+      return ret(
+        {
+          reject_reason: "ORDER_BUILD_FAIL",
+          final_decision: "REJECT",
+          execution_state: "ORDER_BUILD_FAIL",
+          ai_decision: "APPROVE",
+          adaptive_decision: "REJECT",
+          guidance: "진입 수량 0",
+          target_stage: null,
+          supplemental_reasons,
+          stage1_result_code: "STAGE1_BLOCKED_DATA",
+          required_move_pct,
+          shortfall_pct
+        },
+        {
+          intentSide,
+          executorDecision,
+          adaptiveOk: false,
+          adaptiveDirection: null,
+          adaptiveDetail: adaptiveDetailOut,
+          adaptiveResult: adaptive,
+          aiGatePassed: true
+        }
+      );
+    }
+
     final_decision = "ENTER";
     reject_reason = null;
+    execution_state = "PAPER_READY";
 
     const forceEnterAdaptive =
       adaptive.detail["stage1_adaptive_force_enter"] ?? adaptive.detail["stage1_adaptive_soft_explore"];
@@ -1784,6 +1640,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       execution_state = "STAGE1_EXEC_PENDING";
       guidanceOut = "Stage 1 실행 대기 (검토 조건 유지)";
     }
+
 
     return ret(
       {
@@ -1810,42 +1667,21 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           ),
         required_move_pct,
         shortfall_pct,
-        cost_warning_applied: costWarningStage1,
-        stage1_size_reduced_due_to_cost: costWarningStage1 || (stage1LoosenedEntry && input.currentStage === 0),
-        post_entry_cost_guard: costWarningStage1,
-        executor_block_reason_original: executorBlockReasonOriginal,
-        stage1_soft_exec_override: stage1SoftExecOverrideFlag,
-        stage1_signal_relaxed: stage1SignalRelaxed,
-        signal_relax_reason: signalRelaxReason,
-        stage1_soft_candidate_enter_applied: stage1SoftCandidateMicroEnter,
-        stage1_soft_candidate_original_block_reason: stage1SoftCandidateMicroEnter ? executorBlockReasonOriginal : null,
-        stage1_soft_candidate_size_mult: stage1SoftCandidateMicroEnter ? 0.4 : null,
-        stage1_cost_soft_bypass_applied: stage1CostSoftBypassApplied,
-        stage1_cost_soft_bypass_reason: stage1CostSoftBypassReason,
-        stage1_cost_shortfall_pct: shortfall_pct,
-        stage1_cost_shortfall_usd: ((required_move_pct ?? 0) > 0 && shortfall_pct && totalCost !== null) ? (totalCost * shortfall_pct) : null,
-        stage1_cost_micro_size_mult: stage1CostSoftBypassApplied ? 0.5 : null,
-        stage1_size_multiplier_final: stage1SizeMultFinal,
-        currentStage: input.currentStage,
-        regime: input.regime,
-        order_build_ok: true,
-        order_build_fail_reason: null,
-        order_build_fail_stage: null,
-        qty: null,
-        price: sn.lastPrice,
+        qty: initialEntryQty,
+        price: sn!.lastPrice,
         stopLoss: (() => {
           const slThresh = stopLossPctForRegime(input.regime);
           // Protective SL: fallback to regime SL %
           const baseSlPrice = intentSide === "long"
-            ? sn.lastPrice * (1 + slThresh) // slThresh is negative
-            : sn.lastPrice * (1 - slThresh);
+            ? sn!.lastPrice * (1 + slThresh) // slThresh is negative
+            : sn!.lastPrice * (1 - slThresh);
 
           // ATR-based SL if available (2.5 * ATR)
           if (atr_pct && atr_pct > 0) {
-            const atrSlDist = sn.lastPrice * atr_pct * 2.5;
+            const atrSlDist = sn!.lastPrice * atr_pct * 2.5;
             const atrSlPrice = intentSide === "long"
-              ? sn.lastPrice - atrSlDist
-              : sn.lastPrice + atrSlDist;
+              ? sn!.lastPrice - atrSlDist
+              : sn!.lastPrice + atrSlDist;
 
             // Use the more conservative one (closer to price for protection)
             return intentSide === "long"
@@ -1862,16 +1698,16 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         min_qty: null,
         min_notional: null,
         sizeUsd: adaptive.sizeUsd,
-        original_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && sn.signal === "none") ? "NONE" : signal_state,
-        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && sn.signal === "none") ? "SOFT_RANGE_CANDIDATE" : signal_state
+        original_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && sn!.signal === "none") ? "NONE" : signal_state,
+        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && sn!.signal === "none") ? "SOFT_RANGE_CANDIDATE" : signal_state
       },
       {
-        intentSide: intentSide ?? (sn.signal === "paper_long_candidate" || sn.signal === "none" ? "long" : "short"),
+        intentSide: intentSide ?? (sn!.signal === "paper_long_candidate" || sn!.signal === "none" ? "long" : "short"),
         executorDecision,
         adaptiveOk: true,
         adaptiveDirection: adaptive.direction,
         adaptiveDetail: adaptiveDetailOut,
-        adaptiveResult: adaptive,
+        adaptiveResult: adaptive as any,
         aiGatePassed: true
       }
     );
