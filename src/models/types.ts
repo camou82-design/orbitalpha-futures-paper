@@ -278,6 +278,14 @@ export type PaperSymbolDecisionRecord = Readonly<{
   reentry_cooldown_effective_ms?: number | null;
   /** 완화/비완화 사유 코드 */
   reentry_cooldown_reason?: string | null;
+  /** Stage 1 RANGE 방향 보정 적용 여부 */
+  stage1_direction_override_applied?: boolean;
+  /** 방향 보정 상세 사유 */
+  stage1_direction_override_reason?: string | null;
+  /** 원래 정책 방향 (none 등) */
+  original_policy_direction?: string | null;
+  /** 최종 결정 방향 (long/short) */
+  final_policy_direction?: string | null;
   /** 판단 시점 진입 단계(엔진 currentStage) */
   currentStage?: number;
   /** 판단 시점 레짐 */

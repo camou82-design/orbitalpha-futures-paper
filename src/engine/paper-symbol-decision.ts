@@ -488,6 +488,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reentry_cooldown_original_ms?: number | null;
       reentry_cooldown_effective_ms?: number | null;
       reentry_cooldown_reason?: string | null;
+      stage1_direction_override_applied?: boolean;
+      stage1_direction_override_reason?: string | null;
+      original_policy_direction?: string | null;
+      final_policy_direction?: string | null;
       currentStage?: number;
       regime?: "TREND" | "RANGE" | "NO_TRADE";
     }>,
@@ -1303,11 +1307,100 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     });
     adaptiveDetailOut = adaptive.detail ?? null;
     if (!adaptive.ok) {
-      reject_reason = "ORDER_BUILD_FAIL";
-      final_decision = "REJECT";
-      execution_state = "ORDER_BUILD_FAIL";
-      supplemental_reasons.push("ORDER_BUILD_FAIL");
-      supplemental_reasons.push(`ORDER_BUILD_FAIL:${adaptive.orderBuildFailReason}`);
+      let stage1DirectionOverrideApplied = false;
+      let stage1DirectionOverrideReason: string | null = null;
+      let originalPolicyDirection: string | null = adaptive.orderBuildFailReason === "policy_direction_none" ? "none" : null;
+      let finalPolicyDirection: string | null = null;
+
+      if (
+        adaptive.orderBuildFailReason === "policy_direction_none" &&
+        input.currentStage === 0 &&
+        input.regime === "RANGE" &&
+        stage1SoftCandidateMicroEnter === true
+      ) {
+        // Apply Direction Override Rule: < 0.5 Long, >= 0.5 Short
+        const boxPosDiag = sn.boxPos ?? 0.5;
+        finalPolicyDirection = boxPosDiag < 0.5 ? "long" : "short";
+        stage1DirectionOverrideApplied = true;
+        stage1DirectionOverrideReason = `SoftCandidate Micro-Entry: boxPos ${boxPosDiag.toFixed(2)} -> ${finalPolicyDirection}`;
+
+        // Check longOnly restriction
+        if (input.config.longOnly && finalPolicyDirection === "short") {
+          supplemental_reasons.push("STAGE1_DIRECTION_OVERRIDE_LONG_ONLY_REJECT");
+          // Fall through to normal reject or handle here? Let's handle here for precision.
+          return ret(
+            {
+              reject_reason: "LONG_ONLY_SHORT_DEFERRED",
+              final_decision: "SKIP",
+              execution_state: "PAPER_READY",
+              ai_decision: "APPROVE",
+              adaptive_decision: "REJECT",
+              guidance: "방향 보정 결과가 숏이나 longOnly 제한됨",
+              target_stage: null,
+              supplemental_reasons,
+              stage1_result_code: "STAGE1_LONG_ONLY_SHORT_DEFERRED",
+              required_move_pct,
+              shortfall_pct,
+              stage1_direction_override_applied: true,
+              stage1_direction_override_reason: stage1DirectionOverrideReason + " (Blocked by longOnly)",
+              original_policy_direction: originalPolicyDirection,
+              final_policy_direction: "short"
+            },
+            {
+              intentSide,
+              executorDecision,
+              adaptiveOk: false,
+              adaptiveDirection: "short",
+              adaptiveDetail: adaptiveDetailOut,
+              adaptiveResult: null,
+              adaptiveFailure: adaptive,
+              aiGatePassed: true
+            }
+          );
+        }
+
+        // Successfully overrode direction - what's next? 
+        // We can either re-run build or manually construct a minimal "mock" adaptive success 
+        // but given the complexity of runFuturesAdaptiveEntry, the cleanest is to allow the fall-through 
+        // to ENTER if we can "fix" the adaptive object or simply handle ENTER here.
+        // For Stage 1 RANGE, the adaptive result is simple enough.
+
+        return ret(
+          {
+            final_decision: "ENTER",
+            reject_reason: null,
+            execution_state: "PAPER_READY",
+            ai_decision: "APPROVE",
+            adaptive_decision: "OK",
+            guidance: `방향 보정 진입 (${stage1DirectionOverrideReason})`,
+            target_stage: 1,
+            supplemental_reasons,
+            stage1_result_code: "STAGE1_ENTERED",
+            required_move_pct,
+            shortfall_pct,
+            stage1_direction_override_applied: true,
+            stage1_direction_override_reason: stage1DirectionOverrideReason,
+            original_policy_direction: originalPolicyDirection,
+            final_policy_direction: finalPolicyDirection,
+            qty: (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult) / sn.lastPrice,
+            price: sn.lastPrice,
+            stopLoss: null,
+            takeProfit: null,
+            riskReward: rr,
+            atr_pct
+          },
+          {
+            intentSide,
+            executorDecision,
+            adaptiveOk: true,
+            adaptiveDirection: finalPolicyDirection as any,
+            adaptiveDetail: adaptiveDetailOut,
+            adaptiveResult: { ...adaptive, ok: true, direction: finalPolicyDirection as any } as any,
+            aiGatePassed: true
+          }
+        );
+      }
+
       return ret(
         {
           reject_reason: "ORDER_BUILD_FAIL",
