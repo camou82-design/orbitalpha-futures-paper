@@ -5,7 +5,7 @@ import { btcBiasFromModeDetail } from "./live-market-mode";
 export type PositionDirection = "long" | "short" | "none";
 
 /** 최소 품질 점수 — 진입 파이프라인·방향 결정 공통 하한 (수수료 대비 애매한 진입 감소). */
-export const ENTRY_MIN_SCORE = 64;
+export const ENTRY_MIN_SCORE = 35;
 /** 횡보 모드에서 weak 후보는 더 높은 점수 요구. */
 const SIDEWAYS_WEAK_MIN_SCORE = 72;
 const STRONG_SCORE = 72;
@@ -183,17 +183,19 @@ export function evaluateEntryPolicy(input: Readonly<{
   }
 
   if (input.mode === "sideways") {
-    if (input.volumeRatioProxy > 2.8) {
+    /** vol >= 12.0: Extreme overheating (Hard block) */
+    if (input.volumeRatioProxy >= 12.0) {
       return {
         ok: false,
         blockMessage: "blocked_no_structure",
         detail: {
-          sub: "volume_overheated_sideways",
+          sub: "volume_extreme_overheated_sideways",
           volume_ratio_proxy: input.volumeRatioProxy,
-          order_build_fail_reason: "policy_sideways_volume_overheated"
+          order_build_fail_reason: "policy_sideways_volume_overheated_extreme"
         }
       };
     }
+    // Note: 2.5 ~ 12.0 구간은 감점 및 사이즈 축소 우선 (position-sizing & trade-confidence 에서 처리)
     if (input.direction === "long" && chaseLong && input.candidateStrength !== "weak") {
       return {
         ok: false,

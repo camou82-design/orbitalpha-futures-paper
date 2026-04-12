@@ -21,12 +21,21 @@ export function calculateAdaptivePositionSize(input: Readonly<{
   modeBaseSizeUsd: number;
   modeLeverageMultiplier: number;
   baseSizeUsdCap: number;
+  volumeRatioProxy?: number;
 }>): AdaptiveSizingResult {
   let confMult = 1;
   if (input.confidenceTier === "top") confMult = 1;
   else if (input.confidenceTier === "high") confMult = 0.75;
   else if (input.confidenceTier === "mid") confMult = 0.5;
   else confMult = 0.25;
+
+  let volMult = 1.0;
+  if (input.volumeRatioProxy !== undefined) {
+    const vol = input.volumeRatioProxy;
+    if (vol >= 8.0) volMult = 0.15; // User rule: 0.1x ~ 0.2x
+    else if (vol >= 4.5) volMult = 0.3; // User rule: 0.25x ~ 0.4x
+    // Note: 2.5 ~ 4.5 is handled by confidence penalty only
+  }
 
   if (input.confidenceTier === "low" && input.confidenceScore < 40) {
     return {
@@ -43,10 +52,10 @@ export function calculateAdaptivePositionSize(input: Readonly<{
     };
   }
 
-  let raw = input.modeBaseSizeUsd * confMult;
+  let raw = input.modeBaseSizeUsd * confMult * volMult;
   raw = Math.max(MIN_POSITION_SIZE_USD, Math.min(input.baseSizeUsdCap, Math.round(raw * 100) / 100));
 
-  const sizeMultiplier = input.modeBaseSizeUsd > 0 ? raw / input.modeBaseSizeUsd : confMult;
+  const sizeMultiplier = input.modeBaseSizeUsd > 0 ? raw / input.modeBaseSizeUsd : confMult * volMult;
 
   return {
     sizeMultiplier,
@@ -60,7 +69,8 @@ export function calculateAdaptivePositionSize(input: Readonly<{
       confidence_multiplier: confMult,
       mode_base_usd: input.modeBaseSizeUsd,
       mode_leverage_mult: input.modeLeverageMultiplier,
-      min_size_usd: MIN_POSITION_SIZE_USD
+      min_size_usd: MIN_POSITION_SIZE_USD,
+      volume_mult: volMult
     }
   };
 }

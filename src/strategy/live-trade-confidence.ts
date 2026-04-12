@@ -54,9 +54,18 @@ export function buildTradeConfidenceScore(input: Readonly<{
   if (vol >= 0.95 && vol <= 2.2) {
     score += 7;
     d.volume_quality = "normal";
-  } else if (vol > 2.8) {
-    score -= 14;
-    d.volume_quality = "overheated";
+  } else if (vol >= 12.0) {
+    score -= 35; // Extreme
+    d.volume_quality = "extreme_overheated";
+  } else if (vol >= 8.0) {
+    score -= 25; // Tier 4
+    d.volume_quality = "heavy_overheated";
+  } else if (vol >= 4.5) {
+    score -= 15; // Tier 3
+    d.volume_quality = "moderate_overheated";
+  } else if (vol >= 2.5) {
+    score -= 5; // Tier 2
+    d.volume_quality = "mild_overheated";
   } else if (vol < 0.75) {
     score -= 8;
     d.volume_quality = "thin";

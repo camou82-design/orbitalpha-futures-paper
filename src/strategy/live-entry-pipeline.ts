@@ -29,20 +29,20 @@ export type FuturesAdaptiveSnapshot = Readonly<{
 
 export type FuturesAdaptiveEntryResult =
   | Readonly<{
-      ok: true;
-      direction: "long" | "short";
-      sizeUsd: number;
-      leverageMultiplier: number;
-      detail: Record<string, unknown>;
-    }>
+    ok: true;
+    direction: "long" | "short";
+    sizeUsd: number;
+    leverageMultiplier: number;
+    detail: Record<string, unknown>;
+  }>
   | Readonly<{
-      ok: false;
-      logMessage: string;
-      /** 페이퍼 파이프라인 고정 분기 코드 (거래소 주문 초안 없음 — 정책/사이즈 실패). */
-      orderBuildFailReason: string;
-      failStage: "entry_policy" | "adaptive_sizing";
-      detail: Record<string, unknown>;
-    }>;
+    ok: false;
+    logMessage: string;
+    /** 페이퍼 파이프라인 고정 분기 코드 (거래소 주문 초안 없음 — 정책/사이즈 실패). */
+    orderBuildFailReason: string;
+    failStage: "entry_policy" | "adaptive_sizing";
+    detail: Record<string, unknown>;
+  }>;
 
 /**
  * 1) 방향 2) 정책 3) 사이즈 — 통과 시에만 주문(페이퍼 오픈) 호출.
@@ -170,7 +170,8 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
     confidenceTier: confidence.confidenceTier,
     modeBaseSizeUsd: modeSizing.sizeUsd,
     modeLeverageMultiplier: modeSizing.leverageMultiplier,
-    baseSizeUsdCap: Math.max(modeSizing.sizeUsd, input.baseSizeUsd * 2)
+    baseSizeUsdCap: Math.max(modeSizing.sizeUsd, input.baseSizeUsd * 2),
+    volumeRatioProxy: input.snap.volumeRatioProxy
   });
 
   if (adaptive.blocked) {
@@ -226,11 +227,11 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
       ...policy.detail,
       ...(stage1AdaptiveSoftExplore !== null
         ? {
-            /** RANGE Stage1: policy_direction_none / policy_sideways_ema_too_flat 소액 강제 진입 */
-            stage1_adaptive_force_enter: stage1AdaptiveSoftExplore,
-            stage1_adaptive_soft_explore: stage1AdaptiveSoftExplore,
-            stage1_adaptive_soft_extra_size_mult: STAGE1_RANGE_ADAPTIVE_SOFT_EXTRA_SIZE_MULT
-          }
+          /** RANGE Stage1: policy_direction_none / policy_sideways_ema_too_flat 소액 강제 진입 */
+          stage1_adaptive_force_enter: stage1AdaptiveSoftExplore,
+          stage1_adaptive_soft_explore: stage1AdaptiveSoftExplore,
+          stage1_adaptive_soft_extra_size_mult: STAGE1_RANGE_ADAPTIVE_SOFT_EXTRA_SIZE_MULT
+        }
         : {})
     }
   };

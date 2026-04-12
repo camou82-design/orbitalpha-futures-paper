@@ -87,18 +87,22 @@ function rrFromRegime(regime: MarketRegime): number {
 const STAGE1_SOFT_EXPLORE_BLOCKS = new Set([
   "range_not_in_interest_zone",
   "range_center_forbidden",
+  "range_low_quality_for_lead",
   "trend_not_in_pullback",
-  "trend_direction_weak"
+  "trend_direction_weak",
+  "trend_low_quality",
+  "trend_volume_too_thin"
 ]);
 
 /** RANGE 박스 폭·상단 에지 — Stage 1만 소프트 허용 + 추가 사이즈 축소. */
 const STAGE1_RANGE_EDGE_SOFT_TAGS: Readonly<Record<string, string>> = {
   range_box_too_narrow: "STAGE1_EXPLORE_RANGE_BOX_NARROW",
-  range_not_upper_edge: "STAGE1_EXPLORE_RANGE_EDGE_RELAXED"
+  range_not_upper_edge: "STAGE1_EXPLORE_RANGE_EDGE_RELAXED",
+  range_not_lower_edge: "STAGE1_EXPLORE_RANGE_EDGE_RELAXED"
 };
 
 /** 기존 Stage1 탐색 배수 위에 한 번 더 곱함(아주 소액). */
-const STAGE1_RANGE_POSITION_SOFT_MULT = 0.38;
+const STAGE1_RANGE_POSITION_SOFT_MULT = 0.42;
 
 function mapExecutorBlockToReject(blocked: string | undefined): PaperDecisionRejectReason {
   switch (blocked) {
@@ -1106,7 +1110,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         : null;
 
   // Round 3: Stage 1 — RANGE·모호 소액 탐색 + 자동 진입 + RANGE 박스/에지 소프트 허용
-  const brExec = executorDecision?.blocked_reason ?? null;
+  executorBlockReasonOriginal = executorDecision?.blocked_reason ?? null;
+  const brExec = executorBlockReasonOriginal;
   if (!executorDecision?.entry_allowed && input.currentStage === 0 && brExec) {
     const isQualityHighForBypass = sn.qualityScore >= 45;
     const isQualityVeryHighForBypass = sn.qualityScore >= 50;
@@ -1175,7 +1180,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     (executorDecision?.blocked_reason === "no_signal" || executorDecision?.blocked_reason === "range_low_quality_for_lead")
   ) {
     stage1SoftCandidateMicroEnter = true;
-    executorBlockReasonOriginal = executorDecision.blocked_reason;
+    stage1SoftCandidateMicroEnter = true;
     executorDecision = {
       ...executorDecision,
       entry_allowed: true,
@@ -1321,11 +1326,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     let aiSizeLadderMult = 1.0;
 
     if (aiOut.action === "NO_ENTRY") {
-      const effectiveFloor = input.currentStage === 0 ? 35 : 45; // Relaxed from 40 to 35
+      const effectiveFloor = input.currentStage === 0 ? 35 : 45;
       if (input.currentStage === 0 && sn.qualityScore >= 35 && sn.qualityScore < 45) {
         aiFloorRelaxed = true;
-        // Ladder: 35-39: 0.25x, 40-44: 0.35x
-        aiSizeLadderMult = sn.qualityScore < 40 ? 0.25 : 0.35;
+        // Ladder: 35~39: 0.25x, 40~44: 0.38x (User rule)
+        aiSizeLadderMult = sn.qualityScore < 40 ? 0.25 : 0.38;
       }
 
       if (sn.qualityScore < effectiveFloor) {
@@ -1439,6 +1444,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       stage1RangeAdaptiveSoftExplore
     });
     adaptiveDetailOut = adaptive.detail ?? null;
+
+    // Consolidate reasons: Use policy failure over executor failure if it's from entry_policy
+    if (!adaptive.ok && adaptive.orderBuildFailReason && adaptive.failStage === "entry_policy") {
+      executorBlockReasonOriginal = adaptive.orderBuildFailReason;
+    }
     if (!adaptive.ok) {
       let stage1DirectionOverrideApplied = false;
       let stage1DirectionOverrideReason: string | null = null;
