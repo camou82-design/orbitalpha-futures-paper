@@ -773,21 +773,35 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     );
   }
   signal_state = signalToState(sn.signal);
+  intentSide = (sn.signal === "paper_long_candidate") ? "long" : (sn.signal === "paper_short_candidate" ? "short" : "none") as any;
 
-  // Core Highway detection and AI quality scoring
+  // Initial core detection and scoring
   const highwayResult = detectHighwayTrend(input.snapshot?.candles ?? [], sym);
   const _aiResult = evaluateAiHighwayQuality(input.snapshot?.candles ?? [], sym);
-  // Determine executor based on core state and AI defer flag
+
+  // Determine executor intent based on core state
   let _entryIntent: "probe" | "standard" | "scale" | "trend" = "trend";
   if (highwayResult.state === HighwayTrendState.VALID) {
     _entryIntent = "standard";
   } else if (highwayResult.state === HighwayTrendState.WEAK) {
     _entryIntent = "probe";
-  } else {
-    _entryIntent = "trend"; // fallback, will likely be rejected later
   }
-  strategy_executor = "TREND"; // Use TREND executor for highway core
-  // Attach AI scores to decision fields later via pack call
+
+  // Pre-calculate executor decision to preserve metrics in rejection paths
+  executorDecision = highwayExecutorEvaluateEntry({
+    intentType: _entryIntent,
+    highwayState: highwayResult.state,
+    aiScores: _aiResult,
+    symbol: String(sym),
+    signal: sn.signal,
+    risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
+    currentStage: input.currentStage,
+    expectedMove: typeof em === "number" ? em : null,
+    totalCost
+  });
+  strategy_executor = "TREND";
+
+  // Highway Result & AI Result previously computed and assigned to executorDecision
 
   // Retain core executor selection; overriding removed
 
@@ -842,8 +856,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           final_signal_state: "NONE"
         },
         {
-          intentSide: null,
-          executorDecision: null,
+          intentSide,
+          executorDecision,
           adaptiveOk: false,
           adaptiveDirection: null,
           adaptiveDetail: null,
@@ -935,8 +949,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         shortfall_pct: 0
       },
       {
-        intentSide: null,
-        executorDecision: null,
+        intentSide,
+        executorDecision,
         adaptiveOk: false,
         adaptiveDirection: null,
         adaptiveDetail: null,
@@ -969,8 +983,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         shortfall_pct: 0
       },
       {
-        intentSide: null,
-        executorDecision: null,
+        intentSide,
+        executorDecision,
         adaptiveOk: false,
         adaptiveDirection: null,
         adaptiveDetail: null,
@@ -1122,7 +1136,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       },
       {
         intentSide,
-        executorDecision: null,
+        executorDecision,
         adaptiveOk: false,
         adaptiveDirection: null,
         adaptiveDetail: null,
@@ -1151,7 +1165,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       },
       {
         intentSide,
-        executorDecision: null,
+        executorDecision,
         adaptiveOk: false,
         adaptiveDirection: null,
         adaptiveDetail: null,
@@ -1169,17 +1183,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const trendUntil = input.trendCooldownUntilBySymbol.get(String(sym)) ?? 0;
 
   // Highway Engine Universal Evaluation - Regime is only secondary veto logic
-  executorDecision = highwayExecutorEvaluateEntry({
-    intentType: _entryIntent,
-    highwayState: highwayResult.state,
-    aiScores: _aiResult,
-    symbol: String(sym),
-    signal: sn.signal,
-    risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
-    currentStage: input.currentStage,
-    expectedMove: typeof em === "number" ? em : null,
-    totalCost
-  });
+  // Highway Engine Universal Evaluation already performed earlier to preserve metrics
 
   // Auxiliary RANGE Veto / Downgrade Logic (executed only if Highway returns some valid intent but score is weak-ish)
   if (executorDecision.entry_allowed && _aiResult.highwayValidityScore < 0.6) {
