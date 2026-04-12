@@ -493,6 +493,21 @@ export type PaperExitType =
   | "EXIT_RISK"
   | "EXIT_UNKNOWN";
 
+/** 종료 저장·API용 카테고리(SL/TP/…). */
+export type PaperCloseSource =
+  | "SL"
+  | "TP"
+  | "TP_PARTIAL"
+  | "TRAIL"
+  | "TIME"
+  | "REGIME_EXIT"
+  | "TREND_BREAK"
+  | "STRUCTURAL"
+  | "RISK"
+  | "SWITCH"
+  | "SIGNAL_LOST"
+  | "UNKNOWN";
+
 /** Market Mode Selector 단일 출력(틱 단위). */
 export type PaperMarketMode = "RANGE" | "TREND" | "MIXED" | "TRANSITION" | "NO_TRADE";
 
@@ -699,4 +714,14 @@ export type PaperClosedPositionRecord = Readonly<{
   exitType: PaperExitType;
   /** 사용자·리포트용 종료 사유 문구. */
   closeReasonLabel: string;
+  /** API/UI 명시명 — 보통 `closeReasonLabel`과 동일(신규 건 항상 기록). */
+  exitReason?: string;
+  /** SL / TP / TIME / RISK 등 카테고리(신규 건 항상 기록). */
+  closeSource?: PaperCloseSource;
+  /** 실현 손익 USD (= pnlUsdNet, 신규 건 항상 기록). */
+  realizedPnlUsd?: number;
+  /** 마진 대비 실현 손익률(레그 기준, 신규 건 항상 기록). */
+  realizedPnlPct?: number;
+  /** 익/손/보합(신규 건 항상 기록). */
+  outcomeStatus?: "win" | "loss" | "flat";
 }>;

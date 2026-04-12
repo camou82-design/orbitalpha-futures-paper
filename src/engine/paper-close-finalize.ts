@@ -1,11 +1,12 @@
 import type {
   MarketSymbol,
+  PaperCloseSource,
   PaperClosedPositionRecord,
   PaperExitType,
   PaperOpenPositionRecord
 } from "../models/types";
 
-function defaultLabelForExitType(t: PaperExitType): string {
+export function defaultLabelForExitType(t: PaperExitType): string {
   switch (t) {
     case "EXIT_SL":
       return "손절";
@@ -42,6 +43,82 @@ function defaultLabelForExitType(t: PaperExitType): string {
       return _e;
     }
   }
+}
+
+/** `exitType`·내부 `closeReason`으로 UI/저장용 종료 출처 코드. */
+/** `closeReason`이 없거나 불명일 때 `exitType`만으로 출처 추정. */
+export function inferPaperCloseSourceFromExitType(et: PaperExitType): PaperCloseSource {
+  switch (et) {
+    case "EXIT_SL":
+      return "SL";
+    case "EXIT_TP":
+      return "TP";
+    case "EXIT_TP_1":
+    case "EXIT_TP_2":
+    case "EXIT_PARTIAL_TP":
+      return "TP_PARTIAL";
+    case "EXIT_TRAILING":
+      return "TRAIL";
+    case "EXIT_TIME_STOP":
+      return "TIME";
+    case "EXIT_TREND_BREAK":
+      return "TREND_BREAK";
+    case "EXIT_REGIME":
+      return "REGIME_EXIT";
+    case "EXIT_REGIME_BREAK":
+      return "TREND_BREAK";
+    case "EXIT_SIGNAL_LOST":
+      return "SIGNAL_LOST";
+    case "EXIT_RANGE_REBALANCE":
+      return "STRUCTURAL";
+    case "EXIT_TREND_SWITCH":
+      return "SWITCH";
+    case "EXIT_RISK":
+      return "RISK";
+    case "EXIT_UNKNOWN":
+    default:
+      return "UNKNOWN";
+  }
+}
+
+export function derivePaperCloseSource(
+  closeReason: PaperClosedPositionRecord["closeReason"],
+  exitType: PaperExitType
+): PaperCloseSource {
+  if (exitType === "EXIT_RISK") return "RISK";
+  switch (closeReason) {
+    case "stop_loss":
+      return "SL";
+    case "take_profit":
+      return "TP";
+    case "partial_exit_1":
+    case "partial_exit_2":
+      return "TP_PARTIAL";
+    case "trailing_stop":
+      return "TRAIL";
+    case "time_based_exit":
+      return "TIME";
+    case "trend_break_exit":
+      return "TREND_BREAK";
+    case "regime_exit":
+      return "REGIME_EXIT";
+    case "range_box_break":
+    case "structural_regime_shift":
+      return "STRUCTURAL";
+    case "trend_switch":
+      return "SWITCH";
+    case "candidate_lost":
+      return "SIGNAL_LOST";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+export function outcomeStatusFromNetPnl(netUsd: number): "win" | "loss" | "flat" {
+  const eps = 1e-9;
+  if (netUsd > eps) return "win";
+  if (netUsd < -eps) return "loss";
+  return "flat";
 }
 
 /** JSON 직렬화 시 `null`이 되는 NaN 방지용 — 값이 없으면 0. */
@@ -151,8 +228,7 @@ export function paperExitDisplayMeta(
     case "trend_switch":
       return { exitType: "EXIT_TREND_SWITCH", closeReasonLabel: defaultLabelForExitType("EXIT_TREND_SWITCH") };
     default: {
-      const _exhaustive: never = closeReason;
-      return _exhaustive;
+      return { exitType: "EXIT_UNKNOWN", closeReasonLabel: "기록 없음" };
     }
   }
 }
@@ -185,9 +261,12 @@ export function finalizePaperClosedRecord(input: FinalizeClosedInput): PaperClos
   const closeReasonLabel =
     input.closeReasonLabelOverride ??
     (input.exitTypeOverride != null ? defaultLabelForExitType(input.exitTypeOverride) : fromReason.closeReasonLabel);
+  const closeSource = derivePaperCloseSource(input.closeReason, exitType);
+  const outcomeStatus = outcomeStatusFromNetPnl(finiteUsd(m.pnlUsdNet));
   const sizeUsd = finiteUsd(input.legMarginUsd);
   const net = finiteUsd(m.pnlUsdNet);
   const gross = finiteUsd(m.pnlUsdGross);
+  const pct = finiteUsd(m.pnlPctNet);
   return {
     openedAt: input.open.openedAt,
     closedAt: input.closedAt,
@@ -220,6 +299,11 @@ export function finalizePaperClosedRecord(input: FinalizeClosedInput): PaperClos
     ...(input.timestampSnapshotPath ? { timestampSnapshotPath: input.timestampSnapshotPath } : {}),
     closeReason: input.closeReason,
     exitType,
-    closeReasonLabel
+    closeReasonLabel,
+    exitReason: closeReasonLabel,
+    closeSource,
+    realizedPnlUsd: net,
+    realizedPnlPct: pct,
+    outcomeStatus
   };
 }

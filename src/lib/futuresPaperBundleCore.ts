@@ -3,6 +3,14 @@ import path from "node:path";
 
 import type { EngineRoutingDecision, PaperEngineRoutingKind, PaperOperationalSnapshot } from "../models/types";
 import { buildLedgerPerformanceFromHistory, type FuturesPaperLedgerPerformance } from "./futuresPaperLedgerStats";
+import { normalizePositionsHistoryArray } from "./paperClosedHistoryNormalize";
+
+export {
+  normalizePositionsHistoryArray,
+  normalizeClosedHistoryRow,
+  displayFieldsForClosedRow
+} from "./paperClosedHistoryNormalize";
+export type { NormalizedPaperClosedRow, ClosedRowDisplayFields } from "./paperClosedHistoryNormalize";
 
 function isRoutingKind(x: unknown): x is PaperEngineRoutingKind {
   return x === "RANGE" || x === "TREND" || x === "IDLE";
@@ -312,7 +320,7 @@ export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): P
       readJsonFile(path.join(snaps, "latest-meta.json"))
     ]);
 
-  const [symbolRows, healthHistoryRecent, positionsHistory, openPositions, eventsRecent] = await Promise.all([
+  const [symbolRows, healthHistoryRecent, positionsHistoryRaw, openPositions, eventsRecent] = await Promise.all([
     Promise.resolve(pickSymbolRows(latestSnapshot)),
     readHealthHistoryTail(dataDir, 10),
     readPositionsHistoryArray(dataDir),
@@ -320,8 +328,9 @@ export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): P
     readEventsTail(dataDir, 20)
   ]);
 
+  const positionsHistory = normalizePositionsHistoryArray(positionsHistoryRaw);
   const generatedAt = Date.now();
-  const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory, generatedAt);
+  const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt);
   const paperOperational = paperOperationalFromEngineState(engineState);
 
   return {

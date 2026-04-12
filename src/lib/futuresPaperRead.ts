@@ -1,12 +1,24 @@
 import type { FuturesPaperDataBundle } from "./futuresPaperBundleCore";
-import { loadFuturesPaperBundleFromDiskRoot, paperOperationalFromEngineState } from "./futuresPaperBundleCore";
+import {
+  loadFuturesPaperBundleFromDiskRoot,
+  normalizePositionsHistoryArray,
+  paperOperationalFromEngineState
+} from "./futuresPaperBundleCore";
+import { buildLedgerPerformanceFromHistory } from "./futuresPaperLedgerStats";
 
 export type {
+  ClosedRowDisplayFields,
   FuturesPaperDataBundle,
   FuturesPaperHealthHistoryItem,
-  FuturesPaperSymbolRow
+  FuturesPaperSymbolRow,
+  NormalizedPaperClosedRow
 } from "./futuresPaperBundleCore";
-export { paperOperationalFromEngineState } from "./futuresPaperBundleCore";
+export {
+  displayFieldsForClosedRow,
+  normalizeClosedHistoryRow,
+  normalizePositionsHistoryArray,
+  paperOperationalFromEngineState
+} from "./futuresPaperBundleCore";
 
 const HEADER_TOKEN = "x-orbitalpha-futures-paper-token";
 
@@ -75,13 +87,15 @@ async function loadFromRemoteApi(baseUrl: string, secret: string): Promise<Futur
     return emptyBundle("Lightsail API response did not match the expected bundle shape.");
   }
   const b = json as FuturesPaperDataBundle;
+  const generatedAt = typeof b.generatedAt === "number" && Number.isFinite(b.generatedAt) ? b.generatedAt : Date.now();
+  const positionsHistory = normalizePositionsHistoryArray(Array.isArray(b.positionsHistory) ? b.positionsHistory : []);
   const withDefaults: FuturesPaperDataBundle = {
     ...b,
-    ledgerPerformance: b.ledgerPerformance ?? null,
+    ledgerPerformance: buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt),
     openPositions: Array.isArray(b.openPositions) ? b.openPositions : [],
-    positionsHistory: Array.isArray(b.positionsHistory) ? b.positionsHistory : [],
+    positionsHistory,
     paperOperational: paperOperationalFromEngineState(b.engineState) ?? b.paperOperational,
-    generatedAt: typeof b.generatedAt === "number" && Number.isFinite(b.generatedAt) ? b.generatedAt : Date.now()
+    generatedAt
   };
   return withDefaults;
 }
