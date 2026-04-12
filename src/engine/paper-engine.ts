@@ -534,7 +534,8 @@ export class PaperEngine {
       history,
       priorState: this.lastRisk,
       globalCandles: btc1m,
-      globalAtr: btc1m_atr
+      globalAtr: btc1m_atr,
+      rangeConfidence: regimeDetected.rangeConfidence
     });
     const risk = this.lastRisk;
 
@@ -1687,7 +1688,9 @@ export class PaperEngine {
             atr: snap.atr,
             partialExitStage: open.partialExitStage ?? 0,
             holdingMs: m.holdingMs,
-            postEntryCostGuard: open.postEntryCostGuard === true
+            postEntryCostGuard: open.postEntryCostGuard === true,
+            rangeConfidence: this.lastRegime.rangeConfidence,
+            boxBreakConfirmed: rangeState?.boxBreakout ?? false
           })
           : trendExecutorEvaluateExit({
             side: open.side,

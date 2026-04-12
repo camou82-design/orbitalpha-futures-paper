@@ -64,6 +64,18 @@ export type SymbolSnapshotLike = Readonly<{
   boxLow: number | null;
   atr: number | null;
   signalMissingReason?: string;
+  /** 하이웨이: 횡보 확신도 */
+  rangeConfidence?: number;
+  /** 하이웨이: 박스 응집도 */
+  boxCohesion01?: number;
+  /** 하이웨이: 돌파 실패율 */
+  breakoutFailureRate?: number;
+  /** 하이웨이: 왕복 빈도 */
+  rangeOscillationScore?: number;
+  /** 하이웨이: 추세 약성 */
+  trendWeaknessScore?: number;
+  /** 하이웨이: 횡보 판단 근거 라벨 */
+  rangeReasonLabel?: string;
 }>;
 
 function signalToState(signal: PaperSignal): PaperSignalState {
@@ -260,6 +272,16 @@ function pack(
     regime_original_state?: PaperRegimeState;
     regime_fallback_applied?: boolean;
     regime_fallback_reason?: string | null;
+    range_confidence_diag?: number | null;
+    box_cohesion_diag?: number | null;
+    breakout_failure_rate_diag?: number | null;
+    range_oscillation_diag?: number | null;
+    trend_weakness_diag?: number | null;
+    range_reason_label?: string | null;
+    range_cycle_count?: number | null;
+    range_ladder_level?: number | null;
+    regime_exit_risk?: number | null;
+    box_break_side?: "upper" | "lower" | "none";
   }
 ): PaperSymbolDecision {
   return {
@@ -329,7 +351,17 @@ function pack(
     signal_relax_reason: fields.signal_relax_reason,
     regime_original_state: fields.regime_original_state,
     regime_fallback_applied: fields.regime_fallback_applied,
-    regime_fallback_reason: fields.regime_fallback_reason
+    regime_fallback_reason: fields.regime_fallback_reason,
+    range_confidence_diag: fields.range_confidence_diag,
+    box_cohesion_diag: fields.box_cohesion_diag,
+    breakout_failure_rate_diag: fields.breakout_failure_rate_diag,
+    range_oscillation_diag: fields.range_oscillation_diag,
+    trend_weakness_diag: fields.trend_weakness_diag,
+    range_reason_label: fields.range_reason_label,
+    range_cycle_count: fields.range_cycle_count,
+    range_ladder_level: fields.range_ladder_level,
+    regime_exit_risk: fields.regime_exit_risk,
+    box_break_side: fields.box_break_side
   };
 }
 
@@ -515,6 +547,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       regime_original_state?: PaperRegimeState;
       regime_fallback_applied?: boolean;
       regime_fallback_reason?: string | null;
+      range_confidence_diag?: number | null;
+      box_cohesion_diag?: number | null;
+      breakout_failure_rate_diag?: number | null;
+      range_oscillation_diag?: number | null;
+      trend_weakness_diag?: number | null;
+      range_reason_label?: string | null;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -604,7 +642,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       signal_relax_reason: extra.signal_relax_reason ?? signalRelaxReason,
       regime_original_state: extra.regime_original_state ?? originalRegimeState,
       regime_fallback_applied: extra.regime_fallback_applied ?? regimeFallbackApplied,
-      regime_fallback_reason: extra.regime_fallback_reason ?? regimeFallbackReason
+      regime_fallback_reason: extra.regime_fallback_reason ?? regimeFallbackReason,
+      range_confidence_diag: extra.range_confidence_diag !== undefined ? extra.range_confidence_diag : sn?.rangeConfidence,
+      box_cohesion_diag: extra.box_cohesion_diag !== undefined ? extra.box_cohesion_diag : sn?.boxCohesion01,
+      breakout_failure_rate_diag: extra.breakout_failure_rate_diag !== undefined ? extra.breakout_failure_rate_diag : sn?.breakoutFailureRate,
+      range_oscillation_diag: extra.range_oscillation_diag !== undefined ? extra.range_oscillation_diag : sn?.rangeOscillationScore,
+      trend_weakness_diag: extra.trend_weakness_diag !== undefined ? extra.trend_weakness_diag : sn?.trendWeaknessScore,
+      range_reason_label: extra.range_reason_label !== undefined ? extra.range_reason_label : sn?.rangeReasonLabel
     }),
     ...res
   });
@@ -1083,7 +1127,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         cooldownRemainingMs: effectiveRangeUntil > nowOpen ? effectiveRangeUntil - nowOpen : 0,
         currentStage: input.currentStage,
         autoEntryTriggered: input.autoEntryTriggered,
-        reviewingTicks: input.reviewingTicks
+        reviewingTicks: input.reviewingTicks,
+        rangeConfidence: sn.rangeConfidence,
+        boxCohesion01: sn.boxCohesion01,
+        trendWeaknessScore: sn.trendWeaknessScore,
+        rangeReasonLabel: sn.rangeReasonLabel
       })
       : input.regime === "TREND"
         ? trendExecutorEvaluateEntry({

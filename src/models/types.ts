@@ -241,6 +241,26 @@ export type PaperSymbolDecisionRecord = Readonly<{
   ema_gap_diag?: number | null;
   /** 진단: 변동성/거래량 프록시 */
   volatility_proxy_diag?: number | null;
+  /** 하이웨이: 횡보 확신도 (0~1) */
+  range_confidence_diag?: number | null;
+  /** 하이웨이: 박스 응집도 (0~1) */
+  box_cohesion_diag?: number | null;
+  /** 하이웨이: 돌파 실패율 (0~1) */
+  breakout_failure_rate_diag?: number | null;
+  /** 하이웨이: 왕복 빈도 점수 */
+  range_oscillation_diag?: number | null;
+  /** 하이웨이: 추세 약성 점수 */
+  trend_weakness_diag?: number | null;
+  /** 하이웨이: 횡보 판단 근거 라벨 */
+  range_reason_label?: string | null;
+  /** 하이웨이: 박스 왕복 누적 횟수 */
+  range_cycle_count?: number | null;
+  /** 하이웨이: 박스 내 분할 진입 단계 */
+  range_ladder_level?: number | null;
+  /** 하이웨이: RANGE 해제 위험도 (0~1) */
+  regime_exit_risk?: number | null;
+  /** 하이웨이: 박스 붕괴 방향 (upper / lower / none) */
+  box_break_side?: "upper" | "lower" | "none";
   /** Stage 1 완화(Leniency) 적용 여부 */
   stage1_leniency_applied?: boolean;
   /** Stage 1에서 기대이동 < 완화비용이어도 탐색 진입 허용(경고) */
@@ -549,6 +569,20 @@ export type MarketModeSelectorOutput = Readonly<{
   /** 0–1 리스크 스로틀(높을수록 보수). */
   riskThrottle: number;
   modeReasonLabel: string;
+  /** 하이웨이: 횡보 판단 근거 라벨 */
+  rangeReasonLabel?: string;
+  /** 하이웨이: 박스 응집도 */
+  boxCohesion01?: number;
+  /** 하이웨이: 돌파 실패율 */
+  breakoutFailureRate?: number;
+  /** 하이웨이: 왕복 빈도 */
+  rangeOscillationScore?: number;
+  /** 하이웨이: 추세 약성 */
+  trendWeaknessScore?: number;
+  /** 하이웨이: 박스 왕복 횟수 */
+  rangeCycleCount?: number;
+  /** 하이웨이: 박스 붕괴 위험도 */
+  regimeExitRisk?: number;
   routing: EngineRoutingDecision;
 }>;
 
@@ -646,6 +680,8 @@ export type PaperExplanationFields = Readonly<{
   entryReasonLabel: string;
   exitReasonLabel: string;
   switchReasonLabel: string;
+  /** 하이웨이: 횡보 판단 상세 사유 */
+  rangeReasonLabel?: string;
   activeEngine: PaperEngineRoutingKind;
   newEntryPolicy: EngineRoutingDecision["newEntryPolicy"];
 }>;

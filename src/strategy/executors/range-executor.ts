@@ -23,21 +23,37 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
   cooldownRemainingMs: number;
   /** 현재 들고 있는 단계 (없으면 0) */
   currentStage?: number;
+  risk_note?: string;
+  /** 감시 구역 (예: "박스 하단 102k-103k") */
+  watch_zone?: string;
+  /** 진입 진행도 (0~100%) */
+  entry_progress?: number;
+  /** 하이웨이: 횡보 확신도 */
+  rangeConfidence?: number;
+  /** 하이웨이: 박스 응집도 */
+  boxCohesion01?: number;
+  /** 하이웨이: 추세 약성 */
+  trendWeaknessScore?: number;
+  /** 하이웨이: 횡보 판단 근거 라벨 */
+  rangeReasonLabel?: string;
 } & Record<string, unknown>>): RangeEntryDecision {
   const dir = intentDirection(input.signal);
   const boxPos = input.boxPos;
   const boxRel = input.boxRel;
+  const currentStage = input.currentStage ?? 0;
+  const rangeCycleCount = input.rangeCycleCount ?? 0;
+  const rangeConfidence = input.rangeConfidence ?? 0.5;
 
   const box_position =
     boxPos === null || !Number.isFinite(boxPos)
       ? "unknown"
-      : boxPos < 0.33
+      : boxPos < 0.35
         ? "lower"
-        : boxPos > 0.67
+        : boxPos > 0.65
           ? "upper"
           : "middle";
 
-  if (input.regime !== "RANGE" && (input.currentStage ?? 0) !== 0) {
+  if (input.regime !== "RANGE" && currentStage === 0) {
     return {
       regime: input.regime,
       executor: "RANGE",
@@ -65,7 +81,7 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
     };
   }
 
-  if (input.cooldownActive) {
+  if (input.cooldownActive && currentStage === 0) {
     return {
       regime: input.regime,
       executor: "RANGE",
@@ -93,7 +109,6 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
     };
   }
 
-  // Box must exist and be wide enough.
   if (boxPos === null || boxRel === null) {
     return {
       regime: input.regime,
@@ -107,7 +122,9 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
       detail: {}
     };
   }
-  if (boxRel < 0.0045) {
+
+  // Highway Tiered Box Filter
+  if (boxRel < 0.0035) {
     return {
       regime: input.regime,
       executor: "RANGE",
@@ -117,71 +134,66 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
       expected_move: input.expectedMove,
       total_cost: input.totalCost,
       risk_state: input.risk_state,
-      detail: { box_rel: boxRel, min: 0.0045 }
+      detail: { box_rel: boxRel, min: 0.0035 }
     };
   }
 
-  // Middle is forbidden in range.
-  if (box_position === "middle") {
+  // Highway Zone Priorities
+  if (box_position === "lower" && dir === "short" && currentStage === 0) {
     return {
       regime: input.regime,
       executor: "RANGE",
       entry_allowed: false,
-      blocked_reason: "range_center_forbidden",
+      blocked_reason: "lower_zone_short_forbidden",
       box_position,
       expected_move: input.expectedMove,
       total_cost: input.totalCost,
       risk_state: input.risk_state,
+      guidance: "하단 존: 숏 신규 진입 금지 (롱 반등 대기)",
       detail: { box_pos: boxPos }
     };
   }
-
-  // Edge-only single-direction.
-  if (dir === "long" && box_position !== "lower") {
+  if (box_position === "upper" && dir === "long" && currentStage === 0) {
     return {
       regime: input.regime,
       executor: "RANGE",
       entry_allowed: false,
-      blocked_reason: "range_not_lower_edge",
+      blocked_reason: "upper_zone_long_forbidden",
       box_position,
       expected_move: input.expectedMove,
       total_cost: input.totalCost,
       risk_state: input.risk_state,
-      detail: { box_pos: boxPos }
-    };
-  }
-  if (dir === "short" && box_position !== "upper") {
-    return {
-      regime: input.regime,
-      executor: "RANGE",
-      entry_allowed: false,
-      blocked_reason: "range_not_upper_edge",
-      box_position,
-      expected_move: input.expectedMove,
-      total_cost: input.totalCost,
-      risk_state: input.risk_state,
+      guidance: "상단 존: 롱 신규 진입 금지 (숏 저항 대기)",
       detail: { box_pos: boxPos }
     };
   }
 
-  const currentStage = input.currentStage ?? 0;
-
-  // 가이드 메시지 생성
-  let guidance = "";
-  if (dir === "long") {
-    if (box_position === "lower") guidance = "박스 하단 지지 확인 중 (선진입 대기)";
-    else guidance = "박스 하단 대기 중";
-  } else if (dir === "short") {
-    if (box_position === "upper") guidance = "박스 상단 저항 확인 중 (선진입 대기)";
-    else guidance = "박스 상단 대기 중";
+  // Highway Mid-zone Restriction
+  if (box_position === "middle" && currentStage === 0) {
+    // Only allow very high quality signals or probe_only if rangeConfidence is exceptionally high
+    const midZoneAllowed = input.qualityScore >= 75 && rangeConfidence >= 0.85;
+    if (!midZoneAllowed) {
+      return {
+        regime: input.regime,
+        executor: "RANGE",
+        entry_allowed: false,
+        blocked_reason: "range_mid_zone_restricted",
+        box_position,
+        expected_move: input.expectedMove,
+        total_cost: input.totalCost,
+        risk_state: input.risk_state,
+        guidance: "중단 구역: 신규 진입 자제 (상/하단 대기)",
+        detail: { score: input.qualityScore, rangeConfidence }
+      };
+    }
   }
 
-  // 1차 선진입 조건: 박스 끝단 20% 이내 진입 (15% -> 20% 완화)
-  const edgeThreshold = 0.20;
+  // 1차 선진입 조건 (Highway Ladder 1)
+  const edgeThreshold = 0.25;
   const inInterestZone = dir === "long" ? (boxPos ?? 0) <= edgeThreshold : (boxPos ?? 1) >= (1 - edgeThreshold);
 
   if (currentStage === 0) {
-    if (!inInterestZone) {
+    if (!inInterestZone && rangeConfidence < 0.85) {
       return {
         regime: input.regime,
         executor: "RANGE",
@@ -191,13 +203,12 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
         expected_move: input.expectedMove,
         total_cost: input.totalCost,
         risk_state: input.risk_state,
-        guidance,
+        guidance: "진입 대기: 주요 구역(상/하단) 접근 필요",
         detail: { box_pos: boxPos, threshold: edgeThreshold }
       };
     }
 
-    // 최소 반응 조건 확인 (Stage 1: 48점 이상으로 추가 완화)
-    const floor = 48;
+    const floor = 35; // Stage 1 exploratory ladder floor
     if (input.qualityScore < floor) {
       return {
         regime: input.regime,
@@ -208,7 +219,7 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
         expected_move: input.expectedMove,
         total_cost: input.totalCost,
         risk_state: input.risk_state,
-        guidance: "진입 대기: 반전 신호 약함 (점수 기준 미달)",
+        guidance: "진입 대기: 반전 신호 미약",
         detail: { score: input.qualityScore, floor }
       };
     }
@@ -223,18 +234,17 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
       total_cost: input.totalCost,
       risk_state: input.risk_state,
       target_stage: 1,
-      guidance: "1차 선진입 실행 (비중 25%)",
-      next_action: "2차 추가진입 대기 (방향 전환 확인 시)",
-      invalidate_condition: dir === "long" ? "박스 하단 이탈 시" : "박스 상단 돌파 시",
-      risk_note: input.expectedMove && input.expectedMove < 0.005 ? "저변동성 주의" : undefined,
-      watch_zone: dir === "long" ? "박스 하단 지지선" : "박스 상단 저항선",
+      guidance: `Highway Stage 1 (Confirming ${dir === "long" ? "Support" : "Resistance"})`,
+      next_action: "Scaling-in on reversal confirmation",
+      invalidate_condition: "Structural box break",
       entry_progress: 25,
-      detail: { direction: dir, box_pos: boxPos, box_rel: boxRel, stage: 1 }
+      detail: { stage: 1, cycle: rangeCycleCount }
     };
   }
 
-  // 2차/3차 추가진입 로직 (품질 기준 68점 이상으로 강화)
-  if (input.qualityScore < 68) {
+  // Highway Scaling Logic (Ladder 2 & 3)
+  const scalingFloor = 65;
+  if (input.qualityScore < scalingFloor) {
     return {
       regime: input.regime,
       executor: "RANGE",
@@ -244,15 +254,14 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
       expected_move: input.expectedMove,
       total_cost: input.totalCost,
       risk_state: input.risk_state,
-      guidance: "추격 대기: 품질 확인 중",
-      detail: { score: input.qualityScore, floor: 68, currentStage }
+      guidance: "Scaling 대기: 모멘텀 하락",
+      detail: { score: input.qualityScore, floor: scalingFloor, currentStage }
     };
   }
 
   if (currentStage === 1) {
-    // 2차 조건: 방향 전환 확인 (박스 25% 지점 이상 반전)
-    const confirmed = dir === "long" ? (boxPos ?? 0) > 0.25 : (boxPos ?? 1) < 0.75;
-    if (confirmed) {
+    const confirmedReversal = dir === "long" ? (boxPos ?? 0) > 0.30 : (boxPos ?? 1) < 0.70;
+    if (confirmedReversal) {
       return {
         regime: input.regime,
         executor: "RANGE",
@@ -263,9 +272,7 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
         total_cost: input.totalCost,
         risk_state: input.risk_state,
         target_stage: 2,
-        guidance: "2차 추가진입 실행 (비중 35%)",
-        next_action: "3차 확정진입 대기 (중심선 향해 가속 시)",
-        invalidate_condition: dir === "long" ? "다시 박스 하단으로 밀릴 시" : "다시 박스 상단으로 밀릴 시",
+        guidance: "Highway Stage 2 (Reversal Confirmed)",
         entry_progress: 60,
         detail: { stage: 2 }
       };
@@ -273,9 +280,8 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
   }
 
   if (currentStage === 2) {
-    // 3차 조건: 중심선(0.5) 향해 가속 (40% 지점 돌파)
-    const finalConfirm = dir === "long" ? (boxPos ?? 0) > 0.4 : (boxPos ?? 1) < 0.6;
-    if (finalConfirm) {
+    const finalPush = dir === "long" ? (boxPos ?? 0) > 0.45 : (boxPos ?? 1) < 0.55;
+    if (finalPush) {
       return {
         regime: input.regime,
         executor: "RANGE",
@@ -286,9 +292,7 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
         total_cost: input.totalCost,
         risk_state: input.risk_state,
         target_stage: 3,
-        guidance: "3차 확정진입 실행 (비중 40%)",
-        next_action: "1차 분할익절 대기 (중심선 도달 시)",
-        invalidate_condition: "역추세 발생 시 즉시 정리",
+        guidance: "Highway Stage 3 (Accelerating to Median)",
         entry_progress: 100,
         detail: { stage: 3 }
       };
@@ -304,7 +308,6 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
     expected_move: input.expectedMove,
     total_cost: input.totalCost,
     risk_state: input.risk_state,
-    guidance: "추가 진입 대기 및 가격 관찰 중",
     detail: { currentStage, boxPos }
   };
 }
@@ -321,117 +324,113 @@ export function rangeExecutorEvaluateExit(input: Readonly<{
   holdingMs: number;
   /** Stage 1 비용 경고 진입: 익절·시간 청산 보수화 */
   postEntryCostGuard?: boolean;
+  /** 하이웨이: 횡보 확신도 */
+  rangeConfidence?: number;
+  /** 하이웨이: 박스 붕괴 감지 여부 (구조적 손절용) */
+  boxBreakConfirmed?: boolean;
 }>): RangeExitDecision {
   const boxPos = input.boxPos ?? 0.5;
   const isLong = input.side === "long";
   const atr = input.atr ?? 0;
-  const cg = input.postEntryCostGuard === true;
-  const t1 = cg ? 0.4 : 0.42;
-  const t1b = cg ? 0.6 : 0.58;
-  const t2 = cg ? 0.48 : 0.5;
-  const t2b = cg ? 0.52 : 0.5;
-  const maxHoldCostGuardMs = 45 * 60 * 1000;
+  const rangeConfidence = input.rangeConfidence ?? 0.5;
+  const boxBreakConfirmed = input.boxBreakConfirmed === true;
 
-  // 1. 손절 조건 (박스 이탈 + 0.5 ATR 버퍼)
-  let stopPrice = 0;
-  if (isLong) {
-    stopPrice = (input.boxLow ?? 0) - 1.2 * atr;
-    if (input.mark < stopPrice) {
-      return {
-        executor: "RANGE",
-        action: "close",
-        reason: "stop_loss",
-        guidance: "박스 하단 이탈로 인한 손절",
-        exit_progress: 100,
-        stop_price: stopPrice,
-        detail: { mark: input.mark, stopPrice, boxLow: input.boxLow }
-      };
-    }
-  } else {
-    stopPrice = (input.boxHigh ?? 0) + 1.2 * atr;
-    if (input.mark > stopPrice) {
-      return {
-        executor: "RANGE",
-        action: "close",
-        reason: "stop_loss",
-        guidance: "박스 상단 돌파로 인한 손절",
-        exit_progress: 100,
-        stop_price: stopPrice,
-        detail: { mark: input.mark, stopPrice, boxHigh: input.boxHigh }
-      };
-    }
-  }
+  // Highway Hysteresis: Confirmed RANGE mode reduces exit points
+  const highwayMode = rangeConfidence >= 0.70;
 
-  if (cg && input.holdingMs >= maxHoldCostGuardMs) {
+  // 1. Highway Structural Stop-Loss
+  if (boxBreakConfirmed) {
     return {
       executor: "RANGE",
       action: "close",
-      reason: "time_based_exit",
-      guidance: "비용 경고 진입: 보유 시간 상한",
+      reason: "range_box_break",
+      guidance: "박스 구조 붕괴: 긴급 청산",
       exit_progress: 100,
-      detail: { holdingMs: input.holdingMs, postEntryCostGuard: true }
+      detail: { rangeConfidence, boxBreakConfirmed: true }
     };
   }
 
-  // 2. 익절 조건 (3단계 분할)
-  // Stage 0 -> 1: 박스 중심선 근처 (0.4 ~ 0.6) 진입 시 70-90% 지점
+  // 2. Highway Noise Tolerance (Disable minor stop losses in strong RANGE)
+  if (!highwayMode) {
+    let stopPrice = 0;
+    if (isLong) {
+      stopPrice = (input.boxLow ?? 0) - 1.2 * atr;
+      if (input.mark < stopPrice) {
+        return {
+          executor: "RANGE",
+          action: "close",
+          reason: "stop_loss",
+          guidance: "박스 하단 이탈 (비보강 모드)",
+          exit_progress: 100,
+          stop_price: stopPrice,
+          detail: { mark: input.mark, stopPrice }
+        };
+      }
+    } else {
+      stopPrice = (input.boxHigh ?? 0) + 1.2 * atr;
+      if (input.mark > stopPrice) {
+        return {
+          executor: "RANGE",
+          action: "close",
+          reason: "stop_loss",
+          guidance: "박스 상단 돌파 (비보강 모드)",
+          exit_progress: 100,
+          stop_price: stopPrice,
+          detail: { mark: input.mark, stopPrice }
+        };
+      }
+    }
+  }
+
+  // 3. Highway Round-Trip Take Profit (Aggressive in Zones)
+  const isUpperZone = boxPos >= 0.65;
+  const isLowerZone = boxPos <= 0.35;
+
+  if (isLong && isUpperZone) {
+    return {
+      executor: "RANGE",
+      action: "close",
+      reason: "take_profit",
+      guidance: "Highway Target Reached (Upper Zone)",
+      exit_progress: 100,
+      detail: { boxPos }
+    };
+  }
+  if (!isLong && isLowerZone) {
+    return {
+      executor: "RANGE",
+      action: "close",
+      reason: "take_profit",
+      guidance: "Highway Target Reached (Lower Zone)",
+      exit_progress: 100,
+      detail: { boxPos }
+    };
+  }
+
+  // 4. Default Partial Exits (Legacy support for gradual profit taking)
+  const t1 = 0.45;
+  const t2 = 0.55;
+
   if (input.partialExitStage === 0) {
-    const reachedFirstTp = isLong ? boxPos >= t1 : boxPos <= t1b;
-    if (reachedFirstTp) {
+    const reachedTp = isLong ? boxPos >= t1 : boxPos <= t2;
+    if (reachedTp) {
       return {
         executor: "RANGE",
         action: "partial_close",
         reason: "partial_exit_1",
-        guidance: "1차 익절구역 도달 (중심선 인근)",
-        next_action: "2차 익절 대기 (중심선 완전 도달 시)",
+        guidance: "Highway Milestone 1: Reaching Median",
         exit_progress: 30,
         detail: { boxPos, stage: 1 }
       };
     }
   }
 
-  // Stage 1 -> 2: 박스 중심선 (0.5) 도달
-  if (input.partialExitStage === 1) {
-    const reachedSecondTp = isLong ? boxPos >= t2 : boxPos <= t2b;
-    if (reachedSecondTp) {
-      return {
-        executor: "RANGE",
-        action: "partial_close",
-        reason: "partial_exit_2",
-        guidance: "2차 익절구역 도달 (중심선 확정)",
-        next_action: "잔량 트레일링 및 역추세 감시",
-        exit_progress: 70,
-        detail: { boxPos, stage: 2 }
-      };
-    }
-  }
-
-  // 3. 반전 청산 (중심선 넘었다가 다시 밀릴 때)
-  if (input.partialExitStage >= 1) {
-    const revLo = cg ? 0.46 : 0.45;
-    const revHi = cg ? 0.54 : 0.55;
-    const reversed = isLong ? boxPos < revLo : boxPos > revHi;
-    if (reversed) {
-      return {
-        executor: "RANGE",
-        action: "close",
-        reason: "trend_break_exit",
-        guidance: "중심선 지지 실패로 인한 조기 청산",
-        exit_progress: 100,
-        detail: { boxPos }
-      };
-    }
-  }
-
-  // 기본 유지
   return {
     executor: "RANGE",
     action: "hold",
     reason: null,
-    guidance: input.partialExitStage === 0 ? "중심선 방향 진행 중" : "잔량 수익 극대화 중",
-    next_action: input.partialExitStage === 0 ? "1차 익절 대기" : "최종 청산 대기",
-    exit_progress: input.partialExitStage === 0 ? 10 : input.partialExitStage === 1 ? 50 : 80,
-    stop_price: stopPrice,
-    detail: { boxPos, partialExitStage: input.partialExitStage }
+    guidance: "박스 내 왕복 진행 중 (Highway)",
+    exit_progress: isLong ? boxPos * 100 : (1 - boxPos) * 100,
+    detail: { boxPos, highwayMode }
   };
 }

@@ -17,6 +17,8 @@ export type RegimeDecisionLog = Readonly<{
 export type MarketRegimeDetection = Readonly<{
   regime: MarketRegime;
   isAmbiguous: boolean;
+  /** 0–1 RANGE 적합도. */
+  rangeConfidence: number;
   detail: Record<string, unknown>;
   log: RegimeDecisionLog;
 }>;
@@ -48,6 +50,7 @@ function makeLog(p: {
 export const INITIAL_ENGINE_REGIME: MarketRegimeDetection = {
   regime: "NO_TRADE",
   isAmbiguous: false,
+  rangeConfidence: 0,
   detail: { reason: "engine_init" },
   log: {
     regime_raw: "NO_TRADE",
@@ -65,6 +68,7 @@ export function regimeWhenBtcFeedFailed(errorMessage: string): MarketRegimeDetec
   return {
     regime: "NO_TRADE",
     isAmbiguous: false,
+    rangeConfidence: 0,
     detail: { reason: "btc_candles_fetch_failed", error: errorMessage },
     log: makeLog({
       regimeRaw: "NO_TRADE",
@@ -97,29 +101,33 @@ function clamp01(x: number): number {
  * - NO_TRADE: 필수 데이터 부족, 지표 계산 실패, 덤프/비정상 변동 보호만 (진짜 위험·오류).
  * - 그 외 불명확·스코어 경계는 TREND 또는 RANGE + isAmbiguous 로 내려 Stage 1 탐색에 포함.
  */
-export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Candle[] }>): MarketRegimeDetection {
+export function detectMarketRegime(input: Readonly<{
+  btcCandles5m: readonly Candle[];
+  prevRegime?: MarketRegime;
+}>): MarketRegimeDetection {
   const c = input.btcCandles5m;
+  const prevRegime = input.prevRegime ?? "UNKNOWN";
   const len = c.length;
 
   if (len < MIN_BTC_5M_BARS_REGIME) {
     return {
       regime: "NO_TRADE",
       isAmbiguous: false,
+      rangeConfidence: 0,
       detail: { reason: "insufficient_btc_5m", len, min_required: MIN_BTC_5M_BARS_REGIME },
       log: makeLog({
         regimeRaw: "NO_TRADE",
         regimeFinal: "NO_TRADE",
-        noTradeReason: "insufficient_btc_5m",
+        no_trade_reason: "insufficient_btc_5m",
         unknownReason: "insufficient_btc_5m",
         dataReady: false,
         dumpHit: false,
         volHit: false
-      })
+      } as any)
     };
   }
 
   const marginalHistory = len < 50;
-
   // Use only completed candles for stability.
   const completed = c.slice(0, -1);
   const closes = completed.map((x) => x.close);
@@ -132,16 +140,17 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
     return {
       regime: "NO_TRADE",
       isAmbiguous: false,
+      rangeConfidence: 0,
       detail: { reason: "ema_not_ready_or_bad_price", len },
       log: makeLog({
         regimeRaw: "NO_TRADE",
         regimeFinal: "NO_TRADE",
-        noTradeReason: "ema_not_ready_or_bad_price",
+        no_trade_reason: "ema_not_ready_or_bad_price",
         unknownReason: null,
         dataReady: false,
         dumpHit: false,
         volHit: false
-      })
+      } as any)
     };
   }
   const bias: "up" | "down" | "flat" = e20 > e60 * 1.0012 ? "up" : e20 < e60 * 0.9988 ? "down" : "flat";
@@ -149,7 +158,8 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
   const atr = atrWilderLast(completed.slice(-80), 14);
   const atrRel = atr !== null && atr > 0 ? atr / last : 0;
 
-  const lookback = completed.slice(-24);
+  const lookbackPeriod = 24;
+  const lookback = completed.slice(-lookbackPeriod);
   const hi = Math.max(...lookback.map((x) => x.high));
   const lo = Math.min(...lookback.map((x) => x.low));
   const boxRel = (hi - lo) / (last + 1e-9);
@@ -158,11 +168,43 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
   const e20Prev = emaLast(closes.slice(-100, -20), 20);
   const slopeRel = e20Prev !== null ? (e20 - e20Prev) / (last + 1e-9) : 0;
 
+  // 1. Box Cohesion (박스 응집도)
   let inside = 0;
   for (const x of lookback) {
     if (x.close <= hi * 1.0005 && x.close >= lo * 0.9995) inside += 1;
   }
-  const insideRatio = lookback.length > 0 ? inside / lookback.length : 0;
+  const boxCohesion01 = lookback.length > 0 ? inside / lookback.length : 0;
+
+  // 2. Trend Weakness (추세 약함)
+  const sepWeakness = clamp01((0.0035 - emaSepRel) / 0.0025);
+  const slopeWeakness = clamp01((0.0010 - Math.abs(slopeRel)) / 0.0008);
+  const boxTightness = clamp01((0.025 - boxRel) / 0.015);
+  const trendWeaknessScore = 0.4 * sepWeakness + 0.3 * slopeWeakness + 0.3 * boxTightness;
+
+  // 3. Breakout Failure Rate (돌파 지속 실패)
+  const recents = completed.slice(-30);
+  let attempts = 0;
+  let failures = 0;
+  for (let i = 1; i < recents.length; i++) {
+    const prev = recents[i - 1]!;
+    const curr = recents[i]!;
+    if ((prev.high <= hi && curr.high > hi) || (prev.low >= lo && curr.low < lo)) {
+      attempts++;
+      const slice = recents.slice(i, i + 4);
+      const returned = slice.some(x => x.close <= hi * 1.0005 && x.close >= lo * 0.9995);
+      if (returned) failures++;
+    }
+  }
+  const breakoutFailureRate = attempts > 0 ? failures / attempts : 0.5;
+
+  // 4. Range Oscillation Score (왕복 빈도)
+  const midPrice = (hi + lo) / 2;
+  const zones = lookback.map(x => (x.close > midPrice ? "upper" : "lower"));
+  let switches = 0;
+  for (let i = 1; i < zones.length; i++) {
+    if (zones[i] !== zones[i - 1]) switches++;
+  }
+  const rangeOscillationScore = clamp01((switches - 2) / 6);
 
   const drop5 =
     closes.length >= 6 ? (closes[closes.length - 1]! - closes[closes.length - 6]!) / closes[closes.length - 6]! : 0;
@@ -174,118 +216,110 @@ export function detectMarketRegime(input: Readonly<{ btcCandles5m: readonly Cand
   const volTooHigh = atrRel > 0.0105 || boxRel > 0.035;
   const dumpRisk = drop5 < -0.013 || drop12 < -0.022;
 
-  if (dumpRisk || volTooHigh) {
-    const reason = dumpRisk ? "dump_risk" : "vol_too_high";
+  // Highway Exclusion Conditions: Block RANGE if volume + EMA gap expansion occurs
+  const emaGapGrowing = emaSepRel > 0.0055 && Math.abs(slopeRel) > 0.0012;
+  const forceTrendBias = emaGapGrowing && !dumpRisk;
+
+  if (dumpRisk || volTooHigh || forceTrendBias) {
+    const reason = dumpRisk ? "dump_risk" : volTooHigh ? "vol_too_high" : "ema_expansion_trend";
     return {
       regime: "NO_TRADE",
       isAmbiguous: false,
+      rangeConfidence: 0,
       detail: {
         reason,
         atr_rel: atrRel,
         box_rel: boxRel,
-        drop5,
-        drop12,
-        ema_sep_rel: emaSepRel,
-        slope_rel: slopeRel,
-        inside_ratio: insideRatio,
         bias,
         len
       },
       log: makeLog({
         regimeRaw: "NO_TRADE",
         regimeFinal: "NO_TRADE",
-        noTradeReason: reason,
+        no_trade_reason: reason,
         unknownReason: null,
         dataReady: true,
         dumpHit: dumpRisk,
         volHit: !dumpRisk && volTooHigh
-      })
+      } as any)
     };
   }
 
+  // Highway Range Confidence Scoring
+  const rangeConfidence = 0.3 * boxCohesion01 + 0.3 * trendWeaknessScore + 0.2 * breakoutFailureRate + 0.2 * rangeOscillationScore;
+
+  // Existing Trend Core Scoring
   const sepScore = clamp01((emaSepRel - 0.0025) / 0.0045);
   const slopeScore = clamp01((Math.abs(slopeRel) - 0.0006) / 0.0014);
   const boxScore = clamp01((boxRel - 0.015) / 0.02);
   const trendScore = 0.45 * sepScore + 0.35 * slopeScore + 0.2 * boxScore;
 
-  const tightScore = clamp01((0.020 - boxRel) / 0.010);
-  const insideScore = clamp01((insideRatio - 0.70) / 0.25);
-  const flatSepScore = clamp01((0.0036 - emaSepRel) / 0.0022);
-  const rangeScore = 0.45 * tightScore + 0.35 * insideScore + 0.2 * flatSepScore;
+  const ambiguousFlag = len < 60 || marginalHistory;
 
-  const isAmbiguousLength = len < 60;
-  const forceAmbiguousMarginal = marginalHistory;
-  const ambiguousFlag = isAmbiguousLength || forceAmbiguousMarginal;
+  const reasons: string[] = [];
+  if (boxCohesion01 >= 0.8) reasons.push("박스 응집 높음");
+  if (trendWeaknessScore >= 0.7) reasons.push("추세 약성 뚜렷");
+  if (breakoutFailureRate >= 0.6) reasons.push("돌파 지속 실패 관측");
+  if (rangeOscillationScore >= 0.6) reasons.push("상하단 왕복 빈번");
+  const rangeReasonLabel = reasons.length > 0 ? reasons.join(" / ") : "일반 횡보세";
 
   const baseDetail = (extra: Record<string, unknown>) => ({
+    range_confidence: rangeConfidence,
+    box_cohesion: boxCohesion01,
+    trend_weakness: trendWeaknessScore,
+    breakout_failure_rate: breakoutFailureRate,
+    oscillation_score: rangeOscillationScore,
+    range_reason_label: rangeReasonLabel,
+    trend_score: trendScore,
     atr_rel: atrRel,
     box_rel: boxRel,
-    ema20: e20,
-    ema60: e60,
     ema_sep_rel: emaSepRel,
     slope_rel: slopeRel,
-    inside_ratio: insideRatio,
     bias,
-    trend_score: trendScore,
-    range_score: rangeScore,
     len,
-    ...(marginalHistory ? { marginal_history: true as const } : {}),
     ...extra
   });
 
-  if (trendScore >= 0.62 && rangeScore < 0.55) {
-    return {
-      regime: "TREND",
-      isAmbiguous: ambiguousFlag,
-      detail: baseDetail({}),
-      log: makeLog({
-        regimeRaw: "TREND",
-        regimeFinal: "TREND",
-        noTradeReason: null,
-        unknownReason: null,
-        dataReady: true,
-        dumpHit: false,
-        volHit: false
-      })
-    };
+  // Thresholds: Enter RANGE >= 0.72, Exit RANGE < 0.55 (Hysteresis)
+  const rangeEntryThreshold = 0.72;
+  const rangeExitThreshold = 0.55;
+
+  let regimeOut: MarketRegime = "NO_TRADE";
+
+  if (prevRegime === "RANGE") {
+    // Already in RANGE: stay until it drops below exit threshold
+    if (rangeConfidence >= rangeExitThreshold && trendScore < 0.75) {
+      regimeOut = "RANGE";
+    } else {
+      regimeOut = trendScore >= 0.65 ? "TREND" : "NO_TRADE";
+    }
+  } else {
+    // Try to enter RANGE
+    if (rangeConfidence >= rangeEntryThreshold && trendScore < 0.65) {
+      regimeOut = "RANGE";
+    } else if (trendScore >= 0.70) {
+      regimeOut = "TREND";
+    } else {
+      regimeOut = trendScore >= rangeConfidence ? "TREND" : "RANGE";
+    }
   }
 
-  if (rangeScore >= 0.60 && trendScore < 0.62) {
-    return {
-      regime: "RANGE",
-      isAmbiguous: ambiguousFlag,
-      detail: baseDetail({}),
-      log: makeLog({
-        regimeRaw: "RANGE",
-        regimeFinal: "RANGE",
-        noTradeReason: null,
-        unknownReason: null,
-        dataReady: true,
-        dumpHit: false,
-        volHit: false
-      })
-    };
-  }
-
-  const higherScoreRegime: PaperRegimeState = trendScore >= rangeScore ? "TREND" : "RANGE";
-  const regimeOut = higherScoreRegime as MarketRegime;
+  // Final Ambiguity Handling
+  const finalIsAmbiguous = ambiguousFlag || (rangeConfidence > 0.58 && rangeConfidence < 0.72);
 
   return {
     regime: regimeOut,
-    isAmbiguous: true,
-    detail: baseDetail({
-      reason: "ambiguous_context",
-      trend_score: trendScore,
-      range_score: rangeScore
-    }),
+    isAmbiguous: finalIsAmbiguous,
+    rangeConfidence,
+    detail: baseDetail({ prevRegime }),
     log: makeLog({
       regimeRaw: regimeOut,
       regimeFinal: regimeOut,
-      noTradeReason: null,
+      no_trade_reason: null,
       unknownReason: null,
       dataReady: true,
       dumpHit: false,
       volHit: false
-    })
+    } as any)
   };
 }

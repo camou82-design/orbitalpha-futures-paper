@@ -52,10 +52,6 @@ function asRegimeAtEntry(r: unknown): MarketRegime | null {
   return m === "RANGE" || m === "TREND" || m === "NO_TRADE" ? m : null;
 }
 
-/**
- * Risk control layer (paper-only).
- * Asymmetric version: Defensive for Longs, Opportunity-aware for Shorts.
- */
 export function evaluateRiskControls(input: Readonly<{
   config: EngineConfig;
   now: number;
@@ -63,8 +59,10 @@ export function evaluateRiskControls(input: Readonly<{
   priorState: RiskControlDecision | null;
   globalCandles?: Candle[];
   globalAtr?: number | null;
+  /** 하이웨이: 횡보 확신도 (Opportunity Bias 용) */
+  rangeConfidence?: number;
 }>): RiskControlDecision {
-  const { config, now, globalCandles, globalAtr } = input;
+  const { config, now, globalCandles, globalAtr, history, priorState } = input;
   const last10 = [...input.history].slice(-10);
 
   // 1. Daily net PnL cutoff.
@@ -167,10 +165,14 @@ export function evaluateRiskControls(input: Readonly<{
   const recentLossStreakByMode: RiskControlDecision["recentLossStreakByMode"] = {};
   const streakN_soft = 3;
   const streakN_hard = 5;
-  const suspendMs = Math.max(30 * 60 * 1000, config.paperModeSuspendMs); // 30 min hard stop
+  const suspendMs = Math.max(30 * 60 * 1000, config.paperModeSuspendMs);
   const regimes: MarketRegime[] = ["RANGE", "TREND", "NO_TRADE"];
+  const highwayMode = (input.rangeConfidence ?? 0) >= 0.72;
   for (const regime of regimes) {
     let streak = 0;
+    const isHighwayRange = regime === "RANGE" && highwayMode;
+    const effectiveStreakSoft = isHighwayRange ? 5 : 3;
+    const effectiveStreakHard = isHighwayRange ? 8 : 5;
     for (let i = input.history.length - 1; i >= 0; i--) {
       const r = input.history[i] as unknown;
       if (asRegimeAtEntry(r) !== regime) continue;
@@ -190,9 +192,9 @@ export function evaluateRiskControls(input: Readonly<{
       blockedRegimes[regime] = { until: stillBlocked, reason: prior?.reason ?? "mode_suspended" };
       continue;
     }
-    if (streak >= streakN_hard && regime !== "NO_TRADE") {
-      blockedRegimes[regime] = { until: now + suspendMs, reason: "mode_loss_streak_hard_suspended" };
-    } else if (streak >= streakN_soft && regime !== "NO_TRADE") {
+    if (streak >= effectiveStreakHard && regime !== "NO_TRADE") {
+      blockedRegimes[regime] = { until: now + suspendMs, reason: isHighwayRange ? "highway_range_streak_hard_suspended" : "mode_loss_streak_hard_suspended" };
+    } else if (streak >= effectiveStreakSoft && regime !== "NO_TRADE") {
       // Soft penalty: streakSizeMult 0.2
       longSizeMult *= 0.2;
       shortSizeMult *= 0.2;
