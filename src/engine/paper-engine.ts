@@ -19,7 +19,7 @@ import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
 import type { PaperCandidateStrength, PaperSignal } from "../strategy/entry-signal";
 import type { FuturesMarketMode } from "../strategy/live-market-mode";
 import { evaluateRegimeExitPolicy, stopLossPctForRegime } from "../strategy/regime-exit";
-import { evaluatePartialExitPolicy } from "../strategy/live-partial-exit-policy";
+import { evaluatePartialExitPolicy, defaultPartialExitRatioForStage } from "../strategy/live-partial-exit-policy";
 import { MIN_POSITION_SIZE_USD } from "../strategy/live-position-sizing";
 import {
   entryGateHigherTfKlineLimit,
@@ -53,6 +53,12 @@ import {
   sumDecisionFunnelTicks
 } from "./decision-funnel";
 import { evaluatePaperSymbolEntry, type EvaluatePaperSymbolEntryResult } from "./paper-symbol-decision";
+import {
+  computePaperCloseLegMetrics,
+  finalizePaperClosedRecord,
+  paperExitDisplayMeta,
+  type PaperCloseLegMetrics
+} from "./paper-close-finalize";
 
 const EP = {
   ticker: "/v5/market/tickers",
@@ -300,74 +306,6 @@ function exitFullLogKey(cr: PaperClosedPositionRecord["closeReason"]): string {
     default:
       return "exit_full_other";
   }
-}
-
-type PaperCloseLegMetrics = Readonly<{
-  pnlUsdGross: number;
-  pnlUsdNet: number;
-  pnlPctNet: number;
-  feeUsd: number;
-  fundingUsd: number;
-  fundingPeriods: number;
-  fundingRateAppliedOpen: number;
-  fundingRateAppliedClose: number;
-  fundingRateAverage: number;
-  holdingMs: number;
-}>;
-
-function computePaperCloseLegMetrics(input: Readonly<{
-  open: PaperOpenPositionRecord;
-  closePrice: number;
-  closedAt: number;
-  snapFundingRate: number;
-  marginUsd: number;
-  paperTakerFeeRate: number;
-  paperFundingIntervalHours: number;
-}>): PaperCloseLegMetrics {
-  const feeRate = input.paperTakerFeeRate;
-  const lev = input.open.leverage;
-  const margin = input.marginUsd;
-  const openNotionalUsd = margin * lev;
-  const closeNotionalUsd = margin * lev;
-  const feeUsd = (openNotionalUsd + closeNotionalUsd) * feeRate;
-
-  const pnlUsdGross =
-    input.open.side === "long"
-      ? ((input.closePrice - input.open.entryPrice) / input.open.entryPrice) * margin * lev
-      : ((input.open.entryPrice - input.closePrice) / input.open.entryPrice) * margin * lev;
-
-  const rawOpenFr = input.open.openFundingRate;
-  const fundingRateAppliedOpen = typeof rawOpenFr === "number" && Number.isFinite(rawOpenFr) ? rawOpenFr : 0;
-  const rawCloseFr = input.snapFundingRate;
-  const fundingRateAppliedClose =
-    typeof rawCloseFr === "number" && Number.isFinite(rawCloseFr)
-      ? rawCloseFr
-      : fundingRateAppliedOpen !== 0
-        ? fundingRateAppliedOpen
-        : 0;
-  const fundingRateAverage = (fundingRateAppliedOpen + fundingRateAppliedClose) / 2;
-
-  const intervalH = input.paperFundingIntervalHours;
-  const intervalMs = intervalH * 60 * 60 * 1000;
-  const holdingMsRaw = input.closedAt - input.open.openedAt;
-  const holdingMs = holdingMsRaw <= 0 ? 0 : holdingMsRaw;
-  const fundingPeriods = intervalMs > 0 && holdingMs > 0 ? holdingMs / intervalMs : 0;
-  const fundingUsd = margin * lev * fundingRateAverage * fundingPeriods;
-  const pnlUsdNet = pnlUsdGross - feeUsd - fundingUsd;
-  const pnlPctNet = margin > 0 ? pnlUsdNet / margin : 0;
-
-  return {
-    pnlUsdGross,
-    pnlUsdNet,
-    pnlPctNet,
-    feeUsd,
-    fundingUsd,
-    fundingPeriods,
-    fundingRateAppliedOpen,
-    fundingRateAppliedClose,
-    fundingRateAverage,
-    holdingMs
-  };
 }
 
 /** Structured ORDER_BUILD_FAIL observability (paper pipeline has no exchange order draft). */
@@ -1113,13 +1051,12 @@ export class PaperEngine {
     const feeRate = this.config.paperTakerFeeRate;
     const intervalH = this.config.paperFundingIntervalHours;
 
-    const exitTypeForReason = (
-      r: PaperClosedPositionRecord["closeReason"]
-    ): "EXIT_TP" | "EXIT_SL" | "EXIT_REGIME" | "EXIT_TREND_BREAK" => {
-      if (r === "take_profit" || r === "partial_exit_1" || r === "partial_exit_2") return "EXIT_TP";
-      if (r === "stop_loss") return "EXIT_SL";
-      if (r === "trend_break_exit") return "EXIT_TREND_BREAK";
-      return "EXIT_REGIME";
+    /** events.jsonl `type` — 레거시 호환(부분익절·트레일 등은 기존과 동일 계열로 유지). */
+    const exitEventJsonlType = (r: PaperClosedPositionRecord["closeReason"]): string => {
+      const t = paperExitDisplayMeta(r).exitType;
+      if (t === "EXIT_PARTIAL_TP") return "EXIT_TP";
+      if (t === "EXIT_TRAILING" || t === "EXIT_TIME_STOP" || t === "EXIT_REGIME") return "EXIT_REGIME";
+      return t;
     };
 
     const exitDetailBase = (open: PaperOpenPositionRecord, m: PaperCloseLegMetrics) => ({
@@ -1175,6 +1112,31 @@ export class PaperEngine {
       const highWater = Math.max(open.highestPnlPctNet ?? m.pnlPctNet, m.pnlPctNet);
       open = { ...open, highestPnlPctNet: highWater };
 
+      const snapPaths = {
+        ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
+        ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
+        ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {})
+      };
+
+      const toClosed = (
+        cr: PaperClosedPositionRecord["closeReason"],
+        metrics: PaperCloseLegMetrics,
+        legMarginUsd: number
+      ): PaperClosedPositionRecord =>
+        finalizePaperClosedRecord({
+          open,
+          symbol: open.symbol,
+          closePrice,
+          closedAt,
+          closeReason: cr,
+          legMarginUsd,
+          metrics,
+          feeRate,
+          fundingIntervalHours: intervalH,
+          strategyVersion: "paper-v1",
+          ...snapPaths
+        });
+
       // 1. Hard SL check
       let isSlTriggered = false;
       if (typeof open.stopPrice === "number" && Number.isFinite(open.stopPrice)) {
@@ -1186,38 +1148,7 @@ export class PaperEngine {
 
       if (isSlTriggered) {
         const cr = "stop_loss" as const;
-        const closedRow: PaperClosedPositionRecord = {
-          openedAt: open.openedAt,
-          closedAt,
-          symbol: open.symbol,
-          side: open.side,
-          entryPrice: open.entryPrice,
-          closePrice,
-          leverage: open.leverage,
-          sizeUsd: open.sizeUsd,
-          pnlUsd: m.pnlUsdNet,
-          pnlUsdGross: m.pnlUsdGross,
-          pnlUsdNet: m.pnlUsdNet,
-          feeRate,
-          feeUsd: m.feeUsd,
-          fundingModel: "avg_open_close_rate_v3",
-          fundingIntervalHours: intervalH,
-          holdingMs: m.holdingMs,
-          fundingPeriods: m.fundingPeriods,
-          fundingRateAppliedOpen: m.fundingRateAppliedOpen,
-          fundingRateAppliedClose: m.fundingRateAppliedClose,
-          fundingRateAverage: m.fundingRateAverage,
-          fundingUsd: m.fundingUsd,
-          strategyVersion: "paper-v1",
-          sourceSignal: open.sourceSignal,
-          sourceRunPath: open.sourceRunPath,
-          regimeAtEntry: open.regimeAtEntry,
-          entryStageAtClose: open.entryStage ?? 1,
-          ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
-          ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
-          ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
-          closeReason: cr
-        };
+        const closedRow = toClosed(cr, m, open.sizeUsd);
         await this.positions.appendClosed(closedRow);
         this.logger.info(exitFullLogKey(cr), {
           ...exitDetailBase(open, m),
@@ -1258,38 +1189,7 @@ export class PaperEngine {
         const trendOkNow = snap.trendOk === true;
         if (regimeNow !== "TREND" || !trendOkNow) {
           const cr = "trend_break_exit" as const;
-          const closedRow: PaperClosedPositionRecord = {
-            openedAt: open.openedAt,
-            closedAt,
-            symbol: open.symbol,
-            side: open.side,
-            entryPrice: open.entryPrice,
-            closePrice,
-            leverage: open.leverage,
-            sizeUsd: open.sizeUsd,
-            pnlUsd: m.pnlUsdNet,
-            pnlUsdGross: m.pnlUsdGross,
-            pnlUsdNet: m.pnlUsdNet,
-            feeRate,
-            feeUsd: m.feeUsd,
-            fundingModel: "avg_open_close_rate_v3",
-            fundingIntervalHours: intervalH,
-            holdingMs: m.holdingMs,
-            fundingPeriods: m.fundingPeriods,
-            fundingRateAppliedOpen: m.fundingRateAppliedOpen,
-            fundingRateAppliedClose: m.fundingRateAppliedClose,
-            fundingRateAverage: m.fundingRateAverage,
-            fundingUsd: m.fundingUsd,
-            strategyVersion: "paper-v1",
-            sourceSignal: open.sourceSignal,
-            sourceRunPath: open.sourceRunPath,
-            regimeAtEntry: open.regimeAtEntry,
-            entryStageAtClose: open.entryStage ?? 1,
-            ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
-            ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
-            ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
-            closeReason: cr
-          };
+          const closedRow = toClosed(cr, m, open.sizeUsd);
           await this.positions.appendClosed(closedRow);
           this.logger.info(exitFullLogKey(cr), { ...exitDetailBase(open, m), exitReason: cr });
           await this.store.appendJsonlLine("reports/events.jsonl", {
@@ -1337,44 +1237,13 @@ export class PaperEngine {
 
       if (exitEval.action === "close") {
         const cr = exitEval.reason as PaperClosedPositionRecord["closeReason"];
-        const closedRow: PaperClosedPositionRecord = {
-          openedAt: open.openedAt,
-          closedAt,
-          symbol: open.symbol,
-          side: open.side,
-          entryPrice: open.entryPrice,
-          closePrice,
-          leverage: open.leverage,
-          sizeUsd: open.sizeUsd,
-          pnlUsd: m.pnlUsdNet,
-          pnlUsdGross: m.pnlUsdGross,
-          pnlUsdNet: m.pnlUsdNet,
-          feeRate,
-          feeUsd: m.feeUsd,
-          fundingModel: "avg_open_close_rate_v3",
-          fundingIntervalHours: intervalH,
-          holdingMs: m.holdingMs,
-          fundingPeriods: m.fundingPeriods,
-          fundingRateAppliedOpen: m.fundingRateAppliedOpen,
-          fundingRateAppliedClose: m.fundingRateAppliedClose,
-          fundingRateAverage: m.fundingRateAverage,
-          fundingUsd: m.fundingUsd,
-          strategyVersion: "paper-v1",
-          sourceSignal: open.sourceSignal,
-          sourceRunPath: open.sourceRunPath,
-          regimeAtEntry: open.regimeAtEntry,
-          entryStageAtClose: open.entryStage ?? 1,
-          ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
-          ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
-          ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
-          closeReason: cr
-        };
+        const closedRow = toClosed(cr, m, open.sizeUsd);
         await this.positions.appendClosed(closedRow);
         this.logger.info(exitFullLogKey(cr), { ...exitDetailBase(open, m), exitReason: cr });
         this.logger.info("paper_position_closed", { symbol: open.symbol, side: open.side, pnlUsdNet: m.pnlUsdNet, closeReason: cr });
         await this.store.appendJsonlLine("reports/events.jsonl", {
           ts: Date.now(),
-          type: exitTypeForReason(cr),
+          type: exitEventJsonlType(cr),
           symbol: String(open.symbol),
           regime: open.regimeAtEntry ?? null,
           executor: executorForExitEventPayload(open.executorAtEntry, open.regimeAtEntry),
@@ -1398,7 +1267,13 @@ export class PaperEngine {
 
       if (exitEval.action === "partial_close") {
         const partial = exitEval;
-        const ratio = (partial as any).partialExitRatio;
+        const adaptiveMode: FuturesMarketMode = open.adaptiveModeAtEntry ?? this.lastAdaptiveMode.mode;
+        const rawRatio = (partial as { partialExitRatio?: number }).partialExitRatio;
+        let ratio =
+          typeof rawRatio === "number" && Number.isFinite(rawRatio) && rawRatio > 0
+            ? rawRatio
+            : defaultPartialExitRatioForStage(adaptiveMode, open.partialExitStage ?? 0);
+        ratio = Math.min(1, Math.max(0.05, ratio));
         const partialMargin = Math.round(open.sizeUsd * ratio * 100) / 100;
         const newMargin = Math.round((open.sizeUsd - partialMargin) * 100) / 100;
 
@@ -1416,38 +1291,7 @@ export class PaperEngine {
           const pLog = stage === 1 ? "partial_exit_first" : "partial_exit_second";
           const mp = leg(partialMargin);
 
-          const closedPartial: PaperClosedPositionRecord = {
-            openedAt: open.openedAt,
-            closedAt,
-            symbol: open.symbol,
-            side: open.side,
-            entryPrice: open.entryPrice,
-            closePrice,
-            leverage: open.leverage,
-            sizeUsd: partialMargin,
-            pnlUsd: mp.pnlUsdNet,
-            pnlUsdGross: mp.pnlUsdGross,
-            pnlUsdNet: mp.pnlUsdNet,
-            feeRate,
-            feeUsd: mp.feeUsd,
-            fundingModel: "avg_open_close_rate_v3",
-            fundingIntervalHours: intervalH,
-            holdingMs: mp.holdingMs,
-            fundingPeriods: mp.fundingPeriods,
-            fundingRateAppliedOpen: mp.fundingRateAppliedOpen,
-            fundingRateAppliedClose: mp.fundingRateAppliedClose,
-            fundingRateAverage: mp.fundingRateAverage,
-            fundingUsd: mp.fundingUsd,
-            strategyVersion: "paper-v1",
-            sourceSignal: open.sourceSignal,
-            sourceRunPath: open.sourceRunPath,
-            regimeAtEntry: open.regimeAtEntry,
-            entryStageAtClose: open.entryStage ?? 1,
-            ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
-            ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
-            ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
-            closeReason: pReason
-          };
+          const closedPartial = toClosed(pReason, mp, partialMargin);
           await this.positions.appendClosed(closedPartial);
 
           this.logger.info(pLog, {
@@ -1478,7 +1322,8 @@ export class PaperEngine {
             sizeUsd: newMargin,
             partialExitStage: stage,
             realizedPnl: (open.realizedPnl ?? 0) + mp.pnlUsdNet,
-            trailingExtremePrice: (partial as any).trailingExtreme
+            trailingExtremePrice: (partial as any).trailingExtreme,
+            candidateLostStreak: 0
           };
           remaining.push(open);
           continue;
@@ -1493,7 +1338,7 @@ export class PaperEngine {
         (open.side === "short" && snap.signal === "paper_short_candidate");
 
       if (keep) {
-        remaining.push({ ...posTrail, lostAt: undefined });
+        remaining.push({ ...posTrail, lostAt: undefined, candidateLostStreak: 0 });
         continue;
       }
 
@@ -1503,69 +1348,50 @@ export class PaperEngine {
         (typeof open.initialSizeUsd === "number" &&
           open.initialSizeUsd > 0 &&
           open.sizeUsd > open.initialSizeUsd * 1.05);
+      /** RANGE Stage 1 탐색: candidate_lost만으로 즉시 정리하지 않음 */
+      const rangeStage1Exploratory = regimeAtEntry === "RANGE" && (open.entryStage ?? 1) < 2;
       const minHoldMs = stagedOrScaled ? 4 * 60_000 : 5 * 60_000;
-      const gracePeriodMs = stagedOrScaled ? 4 * 60_000 : 7 * 60_000;
+      const minHoldMsEff = rangeStage1Exploratory ? Math.max(minHoldMs, 8 * 60_000) : minHoldMs;
+      const gracePeriodMs = rangeStage1Exploratory
+        ? stagedOrScaled
+          ? 10 * 60_000
+          : 14 * 60_000
+        : stagedOrScaled
+          ? 4 * 60_000
+          : 7 * 60_000;
+      const minLostStreak = rangeStage1Exploratory ? 3 : 1;
 
-      if (m.holdingMs < minHoldMs) {
-        remaining.push(posTrail);
+      if (m.holdingMs < minHoldMsEff) {
+        remaining.push({ ...posTrail, candidateLostStreak: 0 });
         continue;
       }
 
       const lostAt = posTrail.lostAt ?? closedAt;
       const elapsedLost = closedAt - lostAt;
+      const lostStreak = (posTrail.candidateLostStreak ?? 0) + 1;
 
-      if (elapsedLost < gracePeriodMs) {
-        remaining.push({ ...posTrail, lostAt });
+      if (elapsedLost < gracePeriodMs || lostStreak < minLostStreak) {
+        remaining.push({ ...posTrail, lostAt, candidateLostStreak: lostStreak });
         continue;
       }
 
-      const closedRow: PaperClosedPositionRecord = {
-        openedAt: open.openedAt,
-        closedAt,
-        symbol: open.symbol,
-        side: open.side,
-        entryPrice: open.entryPrice,
-        closePrice,
-        leverage: open.leverage,
-        sizeUsd: open.sizeUsd,
-        pnlUsd: m.pnlUsdNet,
-        pnlUsdGross: m.pnlUsdGross,
-        pnlUsdNet: m.pnlUsdNet,
-        feeRate,
-        feeUsd: m.feeUsd,
-        fundingModel: "avg_open_close_rate_v3",
-        fundingIntervalHours: intervalH,
-        holdingMs: m.holdingMs,
-        fundingPeriods: m.fundingPeriods,
-        fundingRateAppliedOpen: m.fundingRateAppliedOpen,
-        fundingRateAppliedClose: m.fundingRateAppliedClose,
-        fundingRateAverage: m.fundingRateAverage,
-        fundingUsd: m.fundingUsd,
-        strategyVersion: "paper-v1",
-        sourceSignal: open.sourceSignal,
-        sourceRunPath: open.sourceRunPath,
-        regimeAtEntry: open.regimeAtEntry,
-        entryStageAtClose: open.entryStage ?? 1,
-        ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
-        ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
-        ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {}),
-        closeReason: "candidate_lost"
-      };
+      const cr = "candidate_lost" as const;
+      const closedRow = toClosed(cr, m, open.sizeUsd);
       await this.positions.appendClosed(closedRow);
       this.logger.info("paper_position_closed", {
         symbol: open.symbol,
         side: open.side,
         pnlUsd: m.pnlUsdNet,
-        closeReason: "candidate_lost",
+        closeReason: cr,
         holdingMs: m.holdingMs
       });
       await this.store.appendJsonlLine("reports/events.jsonl", {
         ts: Date.now(),
-        type: "EXIT_REGIME",
+        type: exitEventJsonlType(cr),
         symbol: String(open.symbol),
         regime: open.regimeAtEntry ?? null,
         executor: executorForExitEventPayload(open.executorAtEntry, open.regimeAtEntry),
-        reason: "candidate_lost",
+        reason: cr,
         expected_move: open.expectedMoveAtEntry ?? null,
         total_cost: open.totalCostAtEntry ?? null,
         hold_time: m.holdingMs,

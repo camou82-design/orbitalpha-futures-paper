@@ -83,3 +83,16 @@ export function evaluatePartialExitPolicy(input: Readonly<{
     }
   };
 }
+
+/**
+ * RANGE/TREND 실행기가 `partialExitRatio` 없이 partial_close만 줄 때 사용할 기본 분할 비율.
+ * `partialExitStage` 0 → 1차(r1), 1 → 2차(r2).
+ */
+export function defaultPartialExitRatioForStage(
+  mode: FuturesMarketMode,
+  partialExitStage: number
+): number {
+  const t = params(mode);
+  const s = Math.min(1, Math.max(0, partialExitStage));
+  return s === 0 ? t.r1 : t.r2;
+}

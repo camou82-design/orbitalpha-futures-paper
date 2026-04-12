@@ -461,7 +461,20 @@ export type PaperOpenPositionRecord = Readonly<{
   /** 포지션 상태 (예: "관찰중", "익절완료") */
   positionStatus?: string;
   status: "open";
+  /** 신호 불일치 연속 틱 수 (candidate_lost 완화·연속 확인용). */
+  candidateLostStreak?: number;
 }>;
+
+/** 종료 레코드·이벤트에 함께 쓰는 종료 유형 코드. */
+export type PaperExitType =
+  | "EXIT_SL"
+  | "EXIT_TP"
+  | "EXIT_PARTIAL_TP"
+  | "EXIT_TRAILING"
+  | "EXIT_TIME_STOP"
+  | "EXIT_TREND_BREAK"
+  | "EXIT_REGIME"
+  | "EXIT_SIGNAL_LOST";
 
 /** Appended to `data/positions/history.json` when a paper position is closed. */
 export type PaperClosedPositionRecord = Readonly<{
@@ -510,4 +523,8 @@ export type PaperClosedPositionRecord = Readonly<{
   | "regime_exit"
   | "partial_exit_1"
   | "partial_exit_2";
+  /** 표준 종료 유형 (내부 코드). */
+  exitType: PaperExitType;
+  /** 사용자·리포트용 종료 사유 문구. */
+  closeReasonLabel: string;
 }>;
