@@ -492,6 +492,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       stage1_direction_override_reason?: string | null;
       original_policy_direction?: string | null;
       final_policy_direction?: string | null;
+      stage1_cost_soft_bypass_applied?: boolean;
+      stage1_cost_soft_bypass_reason?: string | null;
+      stage1_cost_shortfall_pct?: number | null;
+      stage1_cost_shortfall_usd?: number | null;
+      stage1_cost_micro_size_mult?: number | null;
       currentStage?: number;
       regime?: "TREND" | "RANGE" | "NO_TRADE";
     }>,
@@ -1112,6 +1117,41 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     supplemental_reasons.push("STAGE1_SOFT_CANDIDATE_MICRO_ENTER");
   }
 
+  /** Round 3.6: Stage 1 RANGE Cost/LowVol Soft Bypass (shortfall_pct <= 0.25) */
+  let stage1CostSoftBypassApplied = false;
+  let stage1CostSoftBypassReason: string | null = null;
+  const brCost = executorDecision?.blocked_reason;
+  if (
+    !executorDecision?.entry_allowed &&
+    input.currentStage === 0 &&
+    input.regime === "RANGE" &&
+    stage1SignalRelaxed === true &&
+    (brCost === "fail_fee" || brCost === "fail_low_vol") &&
+    (required_move_pct ?? 0) > 0
+  ) {
+    const costShortfallPctRaw = shortfall_pct ?? 0;
+    // Condition: shortfall_pct <= 0.25 (Relaxed limit)
+    const allowCostBypass = costShortfallPctRaw <= 0.25;
+
+    // Additional restriction for FAIL_LOW_VOL: needs to be more conservative
+    const isActuallyAllowed = brCost === "fail_fee"
+      ? allowCostBypass
+      : (allowCostBypass && (sn.qualityScore >= 45)); // FAIL_LOW_VOL requires slightly better quality
+
+    if (isActuallyAllowed) {
+      stage1CostSoftBypassApplied = true;
+      stage1CostSoftBypassReason = brCost.toUpperCase();
+      executorDecision = {
+        ...executorDecision!,
+        entry_allowed: true,
+        blocked_reason: null,
+        guidance: `Stage1 Cost Bypass (${brCost})`,
+        target_stage: 1
+      };
+      supplemental_reasons.push(`STAGE1_COST_SOFT_BYPASS_${brCost.toUpperCase()}`);
+    }
+  }
+
   if (!executorDecision || !executorDecision.entry_allowed) {
     const br = executorDecision?.blocked_reason;
     reject_reason = br ? mapExecutorBlockToReject(br) : (input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "LEGACY_BLOCKED");
@@ -1147,6 +1187,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         stage1_soft_candidate_enter_applied: stage1SoftCandidateMicroEnter,
         stage1_soft_candidate_original_block_reason: stage1SoftCandidateMicroEnter ? executorBlockReasonOriginal : null,
         stage1_soft_candidate_size_mult: stage1SoftCandidateMicroEnter ? 0.4 : null,
+        stage1_cost_soft_bypass_applied: stage1CostSoftBypassApplied,
+        stage1_cost_soft_bypass_reason: stage1CostSoftBypassReason,
+        stage1_cost_shortfall_pct: shortfall_pct,
+        stage1_cost_shortfall_usd: ((required_move_pct ?? 0) > 0 && shortfall_pct && totalCost !== null) ? (totalCost * shortfall_pct) : null,
+        stage1_cost_micro_size_mult: stage1CostSoftBypassApplied ? 0.5 : null,
+        currentStage: input.currentStage,
         required_move_pct,
         shortfall_pct
       },
@@ -1265,6 +1311,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     if (stage1SoftCandidateMicroEnter) {
       dynamicSizeMult *= 0.4; // STAGE1_SOFT_CANDIDATE_MICRO_MULT
+    }
+
+    if (stage1CostSoftBypassApplied) {
+      dynamicSizeMult *= 0.5; // Additional restriction for cost bypass
     }
 
     const stage1SizeMultFinal = input.currentStage === 0 ? dynamicSizeMult : null;
@@ -1584,6 +1634,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         stage1_soft_candidate_enter_applied: stage1SoftCandidateMicroEnter,
         stage1_soft_candidate_original_block_reason: stage1SoftCandidateMicroEnter ? executorBlockReasonOriginal : null,
         stage1_soft_candidate_size_mult: stage1SoftCandidateMicroEnter ? 0.4 : null,
+        stage1_cost_soft_bypass_applied: stage1CostSoftBypassApplied,
+        stage1_cost_soft_bypass_reason: stage1CostSoftBypassReason,
+        stage1_cost_shortfall_pct: shortfall_pct,
+        stage1_cost_shortfall_usd: ((required_move_pct ?? 0) > 0 && shortfall_pct && totalCost !== null) ? (totalCost * shortfall_pct) : null,
+        stage1_cost_micro_size_mult: stage1CostSoftBypassApplied ? 0.5 : null,
         stage1_size_multiplier_final: stage1SizeMultFinal,
         currentStage: input.currentStage,
         regime: input.regime,

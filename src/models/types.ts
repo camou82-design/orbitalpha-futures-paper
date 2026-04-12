@@ -286,6 +286,16 @@ export type PaperSymbolDecisionRecord = Readonly<{
   original_policy_direction?: string | null;
   /** 최종 결정 방향 (long/short) */
   final_policy_direction?: string | null;
+  /** Stage 1 RANGE 비용 부족 완화(Bypass) 적용 여부 */
+  stage1_cost_soft_bypass_applied?: boolean;
+  /** 비용 완화 상세 사유 */
+  stage1_cost_soft_bypass_reason?: string | null;
+  /** 완화 시점의 부족분 % */
+  stage1_cost_shortfall_pct?: number | null;
+  /** 완화 시점의 부족분 USD */
+  stage1_cost_shortfall_usd?: number | null;
+  /** 비용 완화로 인한 추가 사이즈 축소 배수 (예: 0.5) */
+  stage1_cost_micro_size_mult?: number | null;
   /** 판단 시점 진입 단계(엔진 currentStage) */
   currentStage?: number;
   /** 판단 시점 레짐 */
