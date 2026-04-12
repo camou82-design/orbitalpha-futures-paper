@@ -261,6 +261,16 @@ export type PaperSymbolDecisionRecord = Readonly<{
   regime_exit_risk?: number | null;
   /** 하이웨이: 박스 붕괴 방향 (upper / lower / none) */
   box_break_side?: "upper" | "lower" | "none";
+  /** 하이웨이: 현재 레짐 상태 (RANGE / TREND / UNKNOWN) */
+  regime_state_diag?: PaperRegimeState;
+  /** 하이웨이: 진입 의도 유형 (probe / standard / scale) */
+  entry_intent_type?: "probe" | "standard" | "scale" | "trend";
+  /** 하이웨이: 진입 확인 상태 (unconfirmed / reacting / confirmed) */
+  entry_confirmation_state?: "unconfirmed" | "reacting" | "confirmed";
+  /** 하이웨이: 규모 확대 허용 여부 */
+  scaling_permission?: boolean;
+  /** 하이웨이: 초소형 탐색 전용 모드 강제 여부 */
+  probe_only_mode?: boolean;
   /** Stage 1 완화(Leniency) 적용 여부 */
   stage1_leniency_applied?: boolean;
   /** Stage 1에서 기대이동 < 완화비용이어도 탐색 진입 허용(경고) */
@@ -583,6 +593,16 @@ export type MarketModeSelectorOutput = Readonly<{
   rangeCycleCount?: number;
   /** 하이웨이: 박스 붕괴 위험도 */
   regimeExitRisk?: number;
+  /** 하이웨이: 레짐 상태 */
+  regimeState?: PaperRegimeState;
+  /** 하이웨이: 진입 의도 */
+  entryIntentType?: "probe" | "standard" | "scale" | "trend";
+  /** 하이웨이: 진입 확인 상태 */
+  entryConfirmationState?: "unconfirmed" | "reacting" | "confirmed";
+  /** 하이웨이: 스케일링 권한 */
+  scalingPermission?: boolean;
+  /** 하이웨이: 탐색 전용 모드 */
+  probeOnlyMode?: boolean;
   routing: EngineRoutingDecision;
 }>;
 

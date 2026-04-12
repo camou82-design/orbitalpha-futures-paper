@@ -76,6 +76,16 @@ export type SymbolSnapshotLike = Readonly<{
   trendWeaknessScore?: number;
   /** 하이웨이: 횡보 판단 근거 라벨 */
   rangeReasonLabel?: string;
+  /** 하이웨이: 박스 왕복 누적 횟수 */
+  rangeCycleCount?: number;
+  /** 하이웨이: 박스 내 분할 진입 단계 */
+  rangeLadderLevel?: number;
+  /** 하이웨이: RANGE 해제 위험도 */
+  regimeExitRisk?: number;
+  /** 하이웨이: 박스 붕괴 방향 */
+  boxBreakSide?: "upper" | "lower" | "none";
+  /** 하이웨이: 현재 레짐 상태 */
+  regimeStateDiag?: PaperRegimeState;
 }>;
 
 function signalToState(signal: PaperSignal): PaperSignalState {
@@ -282,6 +292,11 @@ function pack(
     range_ladder_level?: number | null;
     regime_exit_risk?: number | null;
     box_break_side?: "upper" | "lower" | "none";
+    regime_state_diag?: PaperRegimeState;
+    entry_intent_type?: "probe" | "standard" | "scale" | "trend";
+    entry_confirmation_state?: "unconfirmed" | "reacting" | "confirmed";
+    scaling_permission?: boolean;
+    probe_only_mode?: boolean;
   }
 ): PaperSymbolDecision {
   return {
@@ -361,7 +376,12 @@ function pack(
     range_cycle_count: fields.range_cycle_count,
     range_ladder_level: fields.range_ladder_level,
     regime_exit_risk: fields.regime_exit_risk,
-    box_break_side: fields.box_break_side
+    box_break_side: fields.box_break_side,
+    regime_state_diag: fields.regime_state_diag,
+    entry_intent_type: fields.entry_intent_type,
+    entry_confirmation_state: fields.entry_confirmation_state,
+    scaling_permission: fields.scaling_permission,
+    probe_only_mode: fields.probe_only_mode
   };
 }
 
@@ -553,6 +573,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_oscillation_diag?: number | null;
       trend_weakness_diag?: number | null;
       range_reason_label?: string | null;
+      range_cycle_count?: number | null;
+      range_ladder_level?: number | null;
+      regime_exit_risk?: number | null;
+      box_break_side?: "upper" | "lower" | "none";
+      regime_state_diag?: PaperRegimeState;
+      entry_intent_type?: "probe" | "standard" | "scale" | "trend";
+      entry_confirmation_state?: "unconfirmed" | "reacting" | "confirmed";
+      scaling_permission?: boolean;
+      probe_only_mode?: boolean;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -648,7 +677,16 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       breakout_failure_rate_diag: extra.breakout_failure_rate_diag !== undefined ? extra.breakout_failure_rate_diag : sn?.breakoutFailureRate,
       range_oscillation_diag: extra.range_oscillation_diag !== undefined ? extra.range_oscillation_diag : sn?.rangeOscillationScore,
       trend_weakness_diag: extra.trend_weakness_diag !== undefined ? extra.trend_weakness_diag : sn?.trendWeaknessScore,
-      range_reason_label: extra.range_reason_label !== undefined ? extra.range_reason_label : sn?.rangeReasonLabel
+      range_reason_label: extra.range_reason_label !== undefined ? extra.range_reason_label : sn?.rangeReasonLabel,
+      range_cycle_count: extra.range_cycle_count !== undefined ? extra.range_cycle_count : sn?.rangeCycleCount,
+      range_ladder_level: extra.range_ladder_level !== undefined ? extra.range_ladder_level : sn?.rangeLadderLevel,
+      regime_exit_risk: extra.regime_exit_risk !== undefined ? extra.regime_exit_risk : sn?.regimeExitRisk,
+      box_break_side: extra.box_break_side !== undefined ? extra.box_break_side : sn?.boxBreakSide,
+      regime_state_diag: extra.regime_state_diag !== undefined ? extra.regime_state_diag : sn?.regimeStateDiag,
+      entry_intent_type: extra.entry_intent_type !== undefined ? extra.entry_intent_type : res.executorDecision?.entryIntentType,
+      entry_confirmation_state: extra.entry_confirmation_state !== undefined ? extra.entry_confirmation_state : res.executorDecision?.entryConfirmationState,
+      scaling_permission: extra.scaling_permission !== undefined ? extra.scaling_permission : res.executorDecision?.scalingPermission,
+      probe_only_mode: extra.probe_only_mode !== undefined ? extra.probe_only_mode : res.executorDecision?.probeOnlyMode
     }),
     ...res
   });

@@ -61,6 +61,10 @@ export function evaluateRiskControls(input: Readonly<{
   globalAtr?: number | null;
   /** 하이웨이: 횡보 확신도 (Opportunity Bias 용) */
   rangeConfidence?: number;
+  /** 하이웨이: 레짐 이탈 리스크 (사이즈 축소용) */
+  regimeExitRisk?: number;
+  /** 하이웨이: 박스 붕괴 방향 */
+  boxBreakSide?: "up" | "down" | "none";
 }>): RiskControlDecision {
   const { config, now, globalCandles, globalAtr, history, priorState } = input;
   const last10 = [...input.history].slice(-10);
@@ -147,7 +151,7 @@ export function evaluateRiskControls(input: Readonly<{
     // engineBlockReasons.push(`crash_risk_${crashState.toLowerCase()}`);
   }
 
-  // 3. Size reduction: last10 net degradation.
+  // 3. Size reduction: last10 net degradation & Regime Exit Risk.
   let last10Net = 0;
   for (const r of last10) {
     const p = asNet(r);
@@ -157,8 +161,12 @@ export function evaluateRiskControls(input: Readonly<{
   const shouldDegrade = degradeThresh > 0 && last10.length >= 5 && last10Net <= -degradeThresh;
   const baseSizeMult = shouldDegrade ? Math.max(0.15, Math.min(1, config.paperDegradeSizeMultiplier)) : 1;
 
-  longSizeMult *= baseSizeMult;
-  shortSizeMult *= baseSizeMult;
+  // Highway: Scale down if regime exit risk is high
+  const exitRiskScale = 1 - (input.regimeExitRisk ?? 0);
+  const highwayScaleMult = Math.max(0.1, exitRiskScale);
+
+  longSizeMult *= baseSizeMult * highwayScaleMult;
+  shortSizeMult *= baseSizeMult * highwayScaleMult;
 
   // 4. Per-regime suspension.
   const blockedRegimes: RiskControlDecision["blockedRegimes"] = {};
@@ -193,11 +201,22 @@ export function evaluateRiskControls(input: Readonly<{
       continue;
     }
     if (streak >= effectiveStreakHard && regime !== "NO_TRADE") {
-      blockedRegimes[regime] = { until: now + suspendMs, reason: isHighwayRange ? "highway_range_streak_hard_suspended" : "mode_loss_streak_hard_suspended" };
+      blockedRegimes[regime] = {
+        until: now + suspendMs,
+        reason: isHighwayRange ? "highway_range_streak_hard_suspended" : "mode_loss_streak_hard_suspended"
+      };
     } else if (streak >= effectiveStreakSoft && regime !== "NO_TRADE") {
       // Soft penalty: streakSizeMult 0.2
       longSizeMult *= 0.2;
       shortSizeMult *= 0.2;
+    }
+
+    // Highway: Structural Box Break Suspension
+    if (regime === "RANGE" && input.boxBreakSide && input.boxBreakSide !== "none") {
+      blockedRegimes[regime] = {
+        until: now + Math.max(20 * 60 * 1000, config.paperModeSuspendMs),
+        reason: `structural_box_break_${input.boxBreakSide}`
+      };
     }
   }
 

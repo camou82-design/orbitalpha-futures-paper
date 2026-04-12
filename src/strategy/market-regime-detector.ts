@@ -19,6 +19,15 @@ export type MarketRegimeDetection = Readonly<{
   isAmbiguous: boolean;
   /** 0–1 RANGE 적합도. */
   rangeConfidence: number;
+  /** 하이웨이: 세부 점수들 */
+  boxCohesion01: number;
+  breakoutFailureRate: number;
+  rangeOscillationScore: number;
+  trendWeaknessScore: number;
+  rangeReasonLabel: string;
+  regimeExitRisk: number;
+  boxBreakSide: "upper" | "lower" | "none";
+  regimeState: PaperRegimeState;
   detail: Record<string, unknown>;
   log: RegimeDecisionLog;
 }>;
@@ -60,7 +69,15 @@ export const INITIAL_ENGINE_REGIME: MarketRegimeDetection = {
     data_ready: false,
     dump_protection_hit: false,
     volatility_guard_hit: false
-  }
+  },
+  boxCohesion01: 0,
+  breakoutFailureRate: 0,
+  rangeOscillationScore: 0,
+  trendWeaknessScore: 0,
+  rangeReasonLabel: "engine_init",
+  regimeExitRisk: 0,
+  boxBreakSide: "none",
+  regimeState: "NO_TRADE"
 };
 
 /** BTC 캔들 피드 실패 시 전용 NO_TRADE (거래소/피드 이상). */
@@ -78,7 +95,15 @@ export function regimeWhenBtcFeedFailed(errorMessage: string): MarketRegimeDetec
       dataReady: false,
       dumpHit: false,
       volHit: false
-    })
+    }),
+    boxCohesion01: 0,
+    breakoutFailureRate: 0,
+    rangeOscillationScore: 0,
+    trendWeaknessScore: 0,
+    rangeReasonLabel: "btc_feed_failed",
+    regimeExitRisk: 0,
+    boxBreakSide: "none",
+    regimeState: "NO_TRADE"
   };
 }
 
@@ -118,12 +143,20 @@ export function detectMarketRegime(input: Readonly<{
       log: makeLog({
         regimeRaw: "NO_TRADE",
         regimeFinal: "NO_TRADE",
-        no_trade_reason: "insufficient_btc_5m",
+        noTradeReason: "insufficient_btc_5m",
         unknownReason: "insufficient_btc_5m",
         dataReady: false,
         dumpHit: false,
         volHit: false
-      } as any)
+      }),
+      boxCohesion01: 0,
+      breakoutFailureRate: 0,
+      rangeOscillationScore: 0,
+      trendWeaknessScore: 0,
+      rangeReasonLabel: "insufficient_data",
+      regimeExitRisk: 0,
+      boxBreakSide: "none",
+      regimeState: "NO_TRADE"
     };
   }
 
@@ -145,12 +178,20 @@ export function detectMarketRegime(input: Readonly<{
       log: makeLog({
         regimeRaw: "NO_TRADE",
         regimeFinal: "NO_TRADE",
-        no_trade_reason: "ema_not_ready_or_bad_price",
+        noTradeReason: "ema_not_ready_or_bad_price",
         unknownReason: null,
         dataReady: false,
         dumpHit: false,
         volHit: false
-      } as any)
+      }),
+      boxCohesion01: 0,
+      breakoutFailureRate: 0,
+      rangeOscillationScore: 0,
+      trendWeaknessScore: 0,
+      rangeReasonLabel: "indicator_fail",
+      regimeExitRisk: 0,
+      boxBreakSide: "none",
+      regimeState: "NO_TRADE"
     };
   }
   const bias: "up" | "down" | "flat" = e20 > e60 * 1.0012 ? "up" : e20 < e60 * 0.9988 ? "down" : "flat";
@@ -236,12 +277,20 @@ export function detectMarketRegime(input: Readonly<{
       log: makeLog({
         regimeRaw: "NO_TRADE",
         regimeFinal: "NO_TRADE",
-        no_trade_reason: reason,
+        noTradeReason: reason,
         unknownReason: null,
         dataReady: true,
         dumpHit: dumpRisk,
         volHit: !dumpRisk && volTooHigh
-      } as any)
+      }),
+      boxCohesion01: boxCohesion01 || 0,
+      breakoutFailureRate: breakoutFailureRate || 0,
+      rangeOscillationScore: rangeOscillationScore || 0,
+      trendWeaknessScore: trendWeaknessScore || 0,
+      rangeReasonLabel: `exclusion_${reason}`,
+      regimeExitRisk: 1,
+      boxBreakSide: "none",
+      regimeState: "NO_TRADE"
     };
   }
 
@@ -307,19 +356,30 @@ export function detectMarketRegime(input: Readonly<{
   // Final Ambiguity Handling
   const finalIsAmbiguous = ambiguousFlag || (rangeConfidence > 0.58 && rangeConfidence < 0.72);
 
+  // Regime Exit Risk: 1.0 (Low confidence), 0.0 (High confidence)
+  const regimeExitRisk = clamp01((0.8 - rangeConfidence) / 0.4);
+
   return {
     regime: regimeOut,
     isAmbiguous: finalIsAmbiguous,
     rangeConfidence,
+    boxCohesion01,
+    breakoutFailureRate,
+    rangeOscillationScore,
+    trendWeaknessScore,
+    rangeReasonLabel,
+    regimeExitRisk,
     detail: baseDetail({ prevRegime }),
     log: makeLog({
       regimeRaw: regimeOut,
       regimeFinal: regimeOut,
-      no_trade_reason: null,
+      noTradeReason: null,
       unknownReason: null,
       dataReady: true,
       dumpHit: false,
       volHit: false
-    } as any)
+    }),
+    boxBreakSide: "none",
+    regimeState: regimeOut as PaperRegimeState
   };
 }

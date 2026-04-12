@@ -1,6 +1,6 @@
 import type { PaperDecisionRejectReason, PaperFinalDecision, DecisionFunnelTick, DecisionFunnelRow } from "../models/types";
 
-export const PIPELINE_VERSION = "2.1";
+export const PIPELINE_VERSION = "2.2-HIGHWAY";
 
 /** 최근 N틱 누적 퍼널 링 버퍼 최대 길이 (비영속). */
 export const DECISION_FUNNEL_RING_MAX = 50;

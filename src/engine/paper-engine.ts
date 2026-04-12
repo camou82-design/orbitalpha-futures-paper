@@ -142,6 +142,17 @@ type SymbolSnapshot = Readonly<{
   gateRequiredMove: number | null;
   atr: number | null;
   signalMissingReason?: string;
+  rangeConfidence?: number;
+  boxCohesion01?: number;
+  breakoutFailureRate?: number;
+  rangeOscillationScore?: number;
+  trendWeaknessScore?: number;
+  rangeReasonLabel?: string;
+  rangeCycleCount?: number;
+  rangeLadderLevel?: number;
+  regimeExitRisk?: number;
+  boxBreakSide?: "upper" | "lower" | "none";
+  regimeStateDiag?: PaperRegimeState;
 }>;
 
 export type SymbolDiagnostic = Readonly<{
@@ -544,7 +555,7 @@ export class PaperEngine {
     const allSymbolDiagnostics: SymbolDiagnostic[] = [];
 
     for (const symbol of symbols) {
-      const result = await this.pollSymbol(symbol, fetchedAt, klineLimit, regimeDetected.regime);
+      const result = await this.pollSymbol(symbol, fetchedAt, klineLimit, regimeDetected);
       allSymbolDiagnostics.push(...result.symbolDiagnostics);
       if (result.ok) {
         snapshots.push(result.snapshot);
@@ -855,7 +866,18 @@ export class PaperEngine {
           volumeRatioProxy: snap.volumeRatioProxy,
           boxHigh: snap.boxHigh,
           boxLow: snap.boxLow,
-          atr: snap.atr
+          atr: snap.atr,
+          rangeConfidence: snap.rangeConfidence,
+          boxCohesion01: snap.boxCohesion01,
+          breakoutFailureRate: snap.breakoutFailureRate,
+          rangeOscillationScore: snap.rangeOscillationScore,
+          trendWeaknessScore: snap.trendWeaknessScore,
+          rangeReasonLabel: snap.rangeReasonLabel,
+          rangeCycleCount: snap.rangeCycleCount,
+          rangeLadderLevel: snap.rangeLadderLevel,
+          regimeExitRisk: snap.regimeExitRisk,
+          boxBreakSide: snap.boxBreakSide,
+          regimeStateDiag: snap.regimeStateDiag
         },
         dataReady: true,
         regime: regimeDetected.regime,
@@ -2456,7 +2478,7 @@ export class PaperEngine {
     symbol: MarketSymbol,
     fetchedAt: number,
     klineLimit: number,
-    regime: MarketRegime
+    regimeDetected: MarketRegimeDetection
   ): Promise<
     | Readonly<{ ok: true; snapshot: SymbolSnapshot; symbolDiagnostics: SymbolDiagnostic[] }>
     | Readonly<{ ok: false; error: string; symbolDiagnostics: SymbolDiagnostic[]; failedEndpoint: FailureEndpointKey }>
@@ -2523,7 +2545,7 @@ export class PaperEngine {
 
     // BTC-specific candidate signal relaxation for RANGE regime (후보만; 체결은 기존 게이트 유지)
     let signal_missing_reason = "NONE";
-    if (symbol === "BTCUSDT" && regime === "RANGE" && entry.signal === "none") {
+    if (symbol === "BTCUSDT" && regimeDetected.regime === "RANGE" && entry.signal === "none") {
       if (boxPos !== null && boxRel !== null && boxRel >= 0.0035) {
         // 가장자리 기준 소폭 확대(0.28/0.72 → 0.26/0.74): 후보 노출만
         if (boxPos <= 0.26) {
@@ -2731,10 +2753,21 @@ export class PaperEngine {
       boxLow,
       boxPos,
       boxRel,
-      atr,
       gateExpectedMove: gateEval?.expectedMove ?? null,
       gateRequiredMove: gateEval?.requiredMove ?? null,
-      signalMissingReason: signal_missing_reason
+      atr,
+      signalMissingReason: signal_missing_reason,
+      rangeConfidence: regimeDetected.rangeConfidence,
+      boxCohesion01: regimeDetected.boxCohesion01,
+      breakoutFailureRate: regimeDetected.breakoutFailureRate,
+      rangeOscillationScore: regimeDetected.rangeOscillationScore,
+      trendWeaknessScore: regimeDetected.trendWeaknessScore,
+      rangeReasonLabel: regimeDetected.rangeReasonLabel,
+      rangeCycleCount: (this.rangeRuntimeBySymbol.get(String(symbol))?.cycle ?? 0),
+      rangeLadderLevel: (this.rangeRuntimeBySymbol.get(String(symbol))?.ladder ?? 0),
+      regimeExitRisk: regimeDetected.regimeExitRisk,
+      boxBreakSide: regimeDetected.boxBreakSide,
+      regimeStateDiag: regimeDetected.regimeState
     };
 
     this.logger.info("symbol_snapshot", snapshot);

@@ -28,6 +28,14 @@ export type EntryDecisionBase = Readonly<{
   watch_zone?: string;
   /** 진입 진행도 (0~100%) */
   entry_progress?: number;
+  /** 하이웨이: 진입 의도 */
+  entryIntentType?: "probe" | "standard" | "scale" | "trend";
+  /** 하이웨이: 진입 확정 상태 */
+  entryConfirmationState?: "unconfirmed" | "reacting" | "confirmed";
+  /** 하이웨이: 불확실 구간 축소 진입 여부 */
+  probeOnlyMode?: boolean;
+  /** 하이웨이: 추가 불타기 권한 */
+  scalingPermission?: boolean;
 }>;
 
 export type RangeEntryDecision = Readonly<

@@ -8,6 +8,11 @@ function intentDirection(signal: PaperSignal): "long" | "short" | null {
   return null;
 }
 
+function clamp01(x: number): number {
+  if (!Number.isFinite(x)) return 0;
+  return x < 0 ? 0 : x > 1 ? 1 : x;
+}
+
 export function rangeExecutorEvaluateEntry(input: Readonly<{
   regime: MarketRegime;
   risk_state: RiskState;
@@ -36,6 +41,8 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
   trendWeaknessScore?: number;
   /** 하이웨이: 횡보 판단 근거 라벨 */
   rangeReasonLabel?: string;
+  rangeCycleCount?: number;
+  boxBreakConfirmed?: boolean;
 } & Record<string, unknown>>): RangeEntryDecision {
   const dir = intentDirection(input.signal);
   const boxPos = input.boxPos;
@@ -124,7 +131,8 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
   }
 
   // Highway Tiered Box Filter
-  if (boxRel < 0.0035) {
+  const minBoxWidth = 0.0035;
+  if (boxRel < minBoxWidth) {
     return {
       regime: input.regime,
       executor: "RANGE",
@@ -134,7 +142,7 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
       expected_move: input.expectedMove,
       total_cost: input.totalCost,
       risk_state: input.risk_state,
-      detail: { box_rel: boxRel, min: 0.0035 }
+      detail: { box_rel: boxRel, min: minBoxWidth }
     };
   }
 
@@ -188,39 +196,39 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
     }
   }
 
-  // 1차 선진입 조건 (Highway Ladder 1)
-  const edgeThreshold = 0.25;
-  const inInterestZone = dir === "long" ? (boxPos ?? 0) <= edgeThreshold : (boxPos ?? 1) >= (1 - edgeThreshold);
+  // 1차 탐색 진입 (Highway Probe - Ladder 1)
+  const probeEdgeThreshold = 0.30;
+  const inProbeZone = dir === "long" ? (boxPos ?? 0) <= probeEdgeThreshold : (boxPos ?? 1) >= (1 - probeEdgeThreshold);
 
   if (currentStage === 0) {
-    if (!inInterestZone && rangeConfidence < 0.85) {
+    if (!inProbeZone && rangeConfidence < 0.88) {
       return {
         regime: input.regime,
         executor: "RANGE",
         entry_allowed: false,
-        blocked_reason: "range_not_in_interest_zone",
+        blocked_reason: "range_not_in_probe_zone",
         box_position,
         expected_move: input.expectedMove,
         total_cost: input.totalCost,
         risk_state: input.risk_state,
-        guidance: "진입 대기: 주요 구역(상/하단) 접근 필요",
-        detail: { box_pos: boxPos, threshold: edgeThreshold }
+        guidance: "진입 대기: 주요 구역(상/하단) 외곽 접근 대기",
+        detail: { box_pos: boxPos, threshold: probeEdgeThreshold }
       };
     }
 
-    const floor = 35; // Stage 1 exploratory ladder floor
-    if (input.qualityScore < floor) {
+    const probeFloor = 35;
+    if (input.qualityScore < probeFloor) {
       return {
         regime: input.regime,
         executor: "RANGE",
         entry_allowed: false,
-        blocked_reason: "range_low_quality_for_lead",
+        blocked_reason: "range_low_quality_for_probe",
         box_position,
         expected_move: input.expectedMove,
         total_cost: input.totalCost,
         risk_state: input.risk_state,
-        guidance: "진입 대기: 반전 신호 미약",
-        detail: { score: input.qualityScore, floor }
+        guidance: "진입 대기: 탐색 신호 미달",
+        detail: { score: input.qualityScore, floor: probeFloor }
       };
     }
 
@@ -234,34 +242,39 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
       total_cost: input.totalCost,
       risk_state: input.risk_state,
       target_stage: 1,
-      guidance: `Highway Stage 1 (Confirming ${dir === "long" ? "Support" : "Resistance"})`,
-      next_action: "Scaling-in on reversal confirmation",
-      invalidate_condition: "Structural box break",
-      entry_progress: 25,
+      entryIntentType: "probe",
+      entryConfirmationState: "unconfirmed",
+      guidance: `Highway Stage 1 (Probe ${dir === "long" ? "Support" : "Resistance"})`,
+      entry_progress: 20,
       detail: { stage: 1, cycle: rangeCycleCount }
     };
   }
 
-  // Highway Scaling Logic (Ladder 2 & 3)
-  const scalingFloor = 65;
-  if (input.qualityScore < scalingFloor) {
-    return {
-      regime: input.regime,
-      executor: "RANGE",
-      entry_allowed: false,
-      blocked_reason: "range_scaling_low_quality",
-      box_position,
-      expected_move: input.expectedMove,
-      total_cost: input.totalCost,
-      risk_state: input.risk_state,
-      guidance: "Scaling 대기: 모멘텀 하락",
-      detail: { score: input.qualityScore, floor: scalingFloor, currentStage }
-    };
-  }
+  // Highway Reaction & Standard (Ladder 2)
+  const standardFloor = 60;
+
+  // Cycle Fatigue: Reduce priority as cycle count grows
+  const fatigueFactor = clamp01((5 - rangeCycleCount) / 4); // 5 cycles = hard limit
+  const cycleBlocked = rangeCycleCount >= 5;
 
   if (currentStage === 1) {
-    const confirmedReversal = dir === "long" ? (boxPos ?? 0) > 0.30 : (boxPos ?? 1) < 0.70;
-    if (confirmedReversal) {
+    if (cycleBlocked) {
+      return {
+        regime: input.regime,
+        executor: "RANGE",
+        entry_allowed: false,
+        blocked_reason: "range_cycle_fatigue",
+        box_position,
+        expected_move: input.expectedMove,
+        total_cost: input.totalCost,
+        risk_state: input.risk_state,
+        guidance: "사이클 피로도 누적: 박스 이탈 가능성 대비 관망",
+        detail: { cycle: rangeCycleCount }
+      };
+    }
+    // Reaction check: slight bounce away from edge
+    const reactionConfirmed = dir === "long" ? (boxPos ?? 0) > 0.15 : (boxPos ?? 1) < 0.85;
+    if (input.qualityScore >= standardFloor && reactionConfirmed) {
       return {
         regime: input.regime,
         executor: "RANGE",
@@ -272,16 +285,33 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
         total_cost: input.totalCost,
         risk_state: input.risk_state,
         target_stage: 2,
-        guidance: "Highway Stage 2 (Reversal Confirmed)",
-        entry_progress: 60,
+        entryIntentType: "standard",
+        entryConfirmationState: "reacting",
+        scalingPermission: true,
+        guidance: "Highway Stage 2 (Standard - Reaction Confirmed)",
+        entry_progress: 55,
         detail: { stage: 2 }
+      };
+    } else {
+      return {
+        regime: input.regime,
+        executor: "RANGE",
+        entry_allowed: false,
+        blocked_reason: reactionConfirmed ? "standard_score_insufficient" : "waiting_reversal_reaction",
+        box_position,
+        expected_move: input.expectedMove,
+        total_cost: input.totalCost,
+        risk_state: input.risk_state,
+        guidance: reactionConfirmed ? "표준 진입 점수 대기" : "단기 반전 반응 확인 중",
+        detail: { score: input.qualityScore, boxPos, currentStage }
       };
     }
   }
 
+  // Highway Acceleration & Scale (Ladder 3)
   if (currentStage === 2) {
-    const finalPush = dir === "long" ? (boxPos ?? 0) > 0.45 : (boxPos ?? 1) < 0.55;
-    if (finalPush) {
+    const momentumAccelerating = dir === "long" ? (boxPos ?? 0) > 0.40 : (boxPos ?? 1) < 0.60;
+    if (input.qualityScore >= 75 && momentumAccelerating) {
       return {
         regime: input.regime,
         executor: "RANGE",
@@ -292,7 +322,9 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
         total_cost: input.totalCost,
         risk_state: input.risk_state,
         target_stage: 3,
-        guidance: "Highway Stage 3 (Accelerating to Median)",
+        entryIntentType: "scale",
+        entryConfirmationState: "confirmed",
+        guidance: "Highway Stage 3 (Scale - Acceleration towards Median)",
         entry_progress: 100,
         detail: { stage: 3 }
       };
@@ -308,7 +340,7 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
     expected_move: input.expectedMove,
     total_cost: input.totalCost,
     risk_state: input.risk_state,
-    detail: { currentStage, boxPos }
+    detail: { currentStage, boxPos, fatigueFactor }
   };
 }
 
@@ -431,6 +463,6 @@ export function rangeExecutorEvaluateExit(input: Readonly<{
     reason: null,
     guidance: "박스 내 왕복 진행 중 (Highway)",
     exit_progress: isLong ? boxPos * 100 : (1 - boxPos) * 100,
-    detail: { boxPos, highwayMode }
+    detail: { boxPos, highwayMode, rangeConfidence }
   };
 }
