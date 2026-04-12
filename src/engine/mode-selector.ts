@@ -2,7 +2,8 @@ import type {
   EngineRoutingDecision,
   MarketModeSelectorOutput,
   PaperEngineRoutingKind,
-  PaperMarketMode
+  PaperMarketMode,
+  TransitionPolicyTier
 } from "../models/types";
 import type { MarketRegimeDetection } from "../strategy/market-regime-detector";
 
@@ -15,6 +16,8 @@ export type ModeSelectorInput = Readonly<{
   volatilityProxy?: number;
   /** 최근 1시간 TREND 스위칭(청산) 횟수 — 전환 구간 정책용 */
   recentTrendSwitchCount1h?: number;
+  /** 0–1 박스 응집·지속성(높을수록 횡보 박스 유효). */
+  boxCohesion01?: number;
 }>;
 
 function clamp01(n: number): number {
@@ -46,6 +49,7 @@ function refineMixedTransition(
     sessionProfile: string;
     recentTrendSwitchCount1h: number;
     fetchedAt: number;
+    boxCohesion01: number;
   }>
 ): EngineRoutingDecision {
   if (marketMode !== "MIXED" && marketMode !== "TRANSITION") return base;
@@ -54,36 +58,46 @@ function refineMixedTransition(
     return {
       activeEngine: "IDLE",
       newEntryPolicy: "paused",
-      routingReasonLabel: "전환 구간 · 최근 스위칭 잦음 — 관망",
-      probeEntryOnly: false
+      routingReasonLabel: "전환 구간 · 스위칭 과다 — 정지",
+      probeEntryOnly: false,
+      transitionTier: "paused"
     };
   }
 
-  if (base.newEntryPolicy === "paused" && base.activeEngine === "IDLE") {
+  if (base.transitionTier === "paused" && base.activeEngine === "IDLE") {
     return { ...base, probeEntryOnly: false };
   }
 
   let probe = false;
   const tags: string[] = [];
-  if (ctx.vol >= 0.66) {
+  if (ctx.vol >= 0.64) {
     probe = true;
-    tags.push("변동↑ 소형만");
+    tags.push("변동↑");
   }
   if (ctx.sessionProfile === "asia_quiet" && Math.abs(gap) < 0.12) {
     probe = true;
-    tags.push("저유동·경계 협소");
+    tags.push("유동 낮음");
   }
   const uh = new Date(ctx.fetchedAt).getUTCHours();
-  if ((ctx.sessionProfile === "eu_overlap" || (uh >= 17 && uh <= 21)) && ctx.vol > 0.48) {
+  if ((ctx.sessionProfile === "eu_overlap" || (uh >= 17 && uh <= 21)) && ctx.vol > 0.46) {
     probe = true;
-    tags.push("저녁·전환");
+    tags.push("저녁");
+  }
+  if (ctx.boxCohesion01 >= 0.62 && ctx.vol < 0.58 && base.transitionTier === "dominant_reduced") {
+    probe = false;
+    tags.push("박스 응집");
   }
 
   const extra = tags.length > 0 ? ` · ${tags.join(" · ")}` : "";
+  let tier: TransitionPolicyTier = base.transitionTier ?? "reduced";
+  if (probe) tier = "probe_only";
+  if (base.activeEngine !== "IDLE" && base.newEntryPolicy === "reduced" && !probe) tier = "dominant_reduced";
+
   return {
     ...base,
     routingReasonLabel: base.routingReasonLabel + extra,
-    probeEntryOnly: probe
+    probeEntryOnly: probe,
+    transitionTier: tier
   };
 }
 
@@ -96,6 +110,7 @@ function resolveRouting(
     sessionProfile: string;
     recentTrendSwitchCount1h: number;
     fetchedAt: number;
+    boxCohesion01: number;
   }>
 ): EngineRoutingDecision {
   const rc = rangeConfidence;
@@ -106,7 +121,8 @@ function resolveRouting(
     return {
       activeEngine: "IDLE",
       newEntryPolicy: "paused",
-      routingReasonLabel: "거래 보류 구간"
+      routingReasonLabel: "거래 보류",
+      transitionTier: "paused"
     };
   }
 
@@ -116,25 +132,29 @@ function resolveRouting(
       branch = {
         activeEngine: "IDLE",
         newEntryPolicy: "paused",
-        routingReasonLabel: "혼합·전환 — 신뢰도 차이 좁음 — 관망"
+        routingReasonLabel: "혼합·전환 — 확신 낮음",
+        transitionTier: "paused"
       };
     } else if (gap >= RANGE_BEATS_TREND_MIN_GAP) {
       branch = {
         activeEngine: "RANGE",
         newEntryPolicy: "reduced",
-        routingReasonLabel: "혼합·전환 — 횡보 쪽 우세 — 축소만"
+        routingReasonLabel: "혼합·전환 — 횡보 우세",
+        transitionTier: "dominant_reduced"
       };
     } else if (gap <= -TREND_BEATS_RANGE_MIN_GAP) {
       branch = {
         activeEngine: "TREND",
         newEntryPolicy: "reduced",
-        routingReasonLabel: "혼합·전환 — 추세 쪽 우세 — 축소만"
+        routingReasonLabel: "혼합·전환 — 추세 우세",
+        transitionTier: "dominant_reduced"
       };
     } else {
       branch = {
         activeEngine: "IDLE",
         newEntryPolicy: "reduced",
-        routingReasonLabel: "혼합·전환 — 중간대 — 소형만"
+        routingReasonLabel: "혼합·전환 — 중간",
+        transitionTier: "reduced"
       };
     }
     return refineMixedTransition(branch, marketMode, gap, ctx);
@@ -160,7 +180,8 @@ function resolveRouting(
   return {
     activeEngine: idle,
     newEntryPolicy: "paused",
-    routingReasonLabel: "모드 미정 — 관망"
+    routingReasonLabel: "모드 미정 — 관망",
+    transitionTier: "paused"
   };
 }
 
@@ -172,6 +193,7 @@ export function evaluateMarketModeSelector(input: ModeSelectorInput): MarketMode
   const vol = clamp01(input.volatilityProxy ?? 0.5);
   const sessionProfile = utcSessionProfile(fetchedAt);
   const dataDegraded = errorCount > 0 || snapshotCount === 0;
+  const boxCohesion01 = clamp01(input.boxCohesion01 ?? 0.5);
 
   const raw = regimeDetection.regime;
   const amb = regimeDetection.isAmbiguous === true;
@@ -231,7 +253,8 @@ export function evaluateMarketModeSelector(input: ModeSelectorInput): MarketMode
     vol,
     sessionProfile,
     recentTrendSwitchCount1h: input.recentTrendSwitchCount1h ?? 0,
-    fetchedAt
+    fetchedAt,
+    boxCohesion01
   });
 
   return {

@@ -45,9 +45,11 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
     }
   }
   const risk = o.risk_exposure;
-  if (!riskReasonLabel && risk && typeof risk === "object") {
+  let riskStanceLabel = "";
+  if (risk && typeof risk === "object") {
     const rx = risk as Record<string, unknown>;
-    if (typeof rx.riskReasonLabel === "string") riskReasonLabel = rx.riskReasonLabel;
+    if (!riskReasonLabel && typeof rx.riskReasonLabel === "string") riskReasonLabel = rx.riskReasonLabel;
+    if (typeof rx.riskStanceLabel === "string") riskStanceLabel = rx.riskStanceLabel;
   }
   let lastExitReasonLabel = "";
   let lastSwitchReasonLabel = "";
@@ -66,19 +68,29 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
 
   const policyLine =
     newEntryPolicy === "full"
-      ? "진입: 전량"
+      ? "진입 정책: 전량"
       : newEntryPolicy === "reduced"
-        ? "진입: 축소"
-        : "진입: 보류";
+        ? "진입 정책: 축소"
+        : "진입 정책: 보류";
 
   const engineLineShort =
-    activeEngine === "RANGE" ? "활성 엔진: RANGE" : activeEngine === "TREND" ? "활성 엔진: TREND" : "활성 엔진: 없음";
+    activeEngine === "RANGE"
+      ? "운용: RANGE 양방향"
+      : activeEngine === "TREND"
+        ? "운용: TREND 돌파"
+        : "운용: 대기";
+
+  const stanceLine =
+    riskStanceLabel.trim().length > 0
+      ? `공격/보수: ${riskStanceLabel}`
+      : `공격/보수: ${riskReasonLabel.includes("정상") ? "보통" : "주의"}`;
 
   const dashboardLines = {
     currentMarketJudgment: `시장 판단: ${modeReasonLabel}`,
     currentActiveEngine: engineLineShort,
     newEntryPolicyLine: policyLine,
-    currentRiskState: `리스크: ${riskReasonLabel}`,
+    currentRiskState: riskReasonLabel.startsWith("리스크:") ? riskReasonLabel : `리스크: ${riskReasonLabel}`,
+    stanceLine,
     lastExitReasonLine: `직전 종료: ${lastExitReasonLabel}`,
     lastSwitchReasonLine: `직전 전환: ${lastSwitchReasonLabel}`
   };

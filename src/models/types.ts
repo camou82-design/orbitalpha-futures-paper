@@ -498,6 +498,9 @@ export type PaperMarketMode = "RANGE" | "TREND" | "MIXED" | "TRANSITION" | "NO_T
 
 export type PaperEngineRoutingKind = "RANGE" | "TREND" | "IDLE";
 
+/** MIXED/TRANSITION 단계(전량 금지 전제). */
+export type TransitionPolicyTier = "paused" | "probe_only" | "reduced" | "dominant_reduced";
+
 /** Selector가 결정하는 상위 라우팅(실제 엔진 지휘). */
 export type EngineRoutingDecision = Readonly<{
   activeEngine: PaperEngineRoutingKind;
@@ -506,6 +509,8 @@ export type EngineRoutingDecision = Readonly<{
   routingReasonLabel: string;
   /** MIXED/TRANSITION 등: 초소형 탐색만(리스크에서 추가 축소). */
   probeEntryOnly?: boolean;
+  /** 혼합·전환 구간 세분(비해당 시 생략). */
+  transitionTier?: TransitionPolicyTier;
 }>;
 
 export type MarketModeSelectorOutput = Readonly<{
@@ -587,6 +592,10 @@ export type PaperRiskMode = "NORMAL" | "REDUCED" | "DEFENSIVE" | "HALT";
 /** Risk & Exposure 엔진 출력. */
 export type RiskExposureOutput = Readonly<{
   riskMode: PaperRiskMode;
+  /** 0=방어, 1=중립, >1=기회 구간 확대 가중 적용됨. */
+  opportunityBias: number;
+  /** 수익 확대 vs 보수 운용 한 줄. */
+  riskStanceLabel: string;
   sizeMultiplier: number;
   maxLongExposure: number;
   maxShortExposure: number;
@@ -629,6 +638,8 @@ export type PaperOperationalSnapshot = Readonly<{
     currentActiveEngine: string;
     newEntryPolicyLine: string;
     currentRiskState: string;
+    /** 공격/보수/보통 한눈에. */
+    stanceLine: string;
     lastExitReasonLine: string;
     lastSwitchReasonLine: string;
   }>;

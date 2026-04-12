@@ -71,12 +71,20 @@ import {
   evaluateRangeEngineForSymbol,
   evaluateRangeStructuralExit,
   evaluateRangeReopenAllowed,
+  computeRangeEdgeIntensity01,
   marginsForSymbol,
-  rangeCycleEntryMultiplier,
+  rangeCycleSizePolicy,
   rangeLadderLegMultiplier,
-  RANGE_REOPEN_WINDOW_MS
+  rangeAccumulationRecoveryMultiplier,
+  RANGE_REOPEN_WINDOW_MS,
+  type RangeReopenSoftMetrics
 } from "./range-engine";
-import { evaluateTrendEngineForSymbol, planTrendSwitch, trendPyramidAllowsScaleIn } from "./trend-engine";
+import {
+  evaluateTrendEngineForSymbol,
+  planTrendSwitch,
+  trendPyramidAllowsScaleIn,
+  trendPyramidSizeUplift
+} from "./trend-engine";
 
 const EP = {
   ticker: "/v5/market/tickers",
@@ -85,6 +93,20 @@ const EP = {
 } as const;
 
 const DEFAULT_PAPER_SIZE_USD = 100;
+
+function computeAvgBoxCohesion01(
+  snapshots: ReadonlyArray<{ boxHigh: number | null; boxLow: number | null; lastPrice: number }>
+): number {
+  let sum = 0;
+  let n = 0;
+  for (const s of snapshots) {
+    if (s.boxHigh == null || s.boxLow == null || s.lastPrice <= 0) continue;
+    const span = s.boxHigh - s.boxLow;
+    sum += 1 - Math.min(1, span / s.lastPrice);
+    n += 1;
+  }
+  return n > 0 ? Math.min(1, sum / n) : 0.5;
+}
 
 function volumeRatioProxyFromCandles(candles: readonly { volume: number }[]): number {
   if (candles.length < 24) return 1;
@@ -407,6 +429,9 @@ export class PaperEngine {
   /** RANGE 재진입 성공 시각(윈도 내 횟수 제한). */
   private rangeReopenTimestampsBySymbol = new Map<string, number[]>();
   private trendFollowScoreBySymbol = new Map<string, number>();
+  private trendBreakoutConfidenceBySymbol = new Map<string, number>();
+  private rangeRoundTripStreakBySymbol = new Map<string, number>();
+  private rangeRecentOutcomeScoresBySymbol = new Map<string, number[]>();
   private lastExitReasonLabel = "";
   private lastSwitchReasonLabel = "";
 
@@ -414,6 +439,20 @@ export class PaperEngine {
     const cutoff = now - 3_600_000;
     this.trendSwitchTimestampsMs = this.trendSwitchTimestampsMs.filter((t) => t > cutoff);
     return this.trendSwitchTimestampsMs.length;
+  }
+
+  private recordRangeRoundTripOutcome(symbolKey: string, win: boolean): void {
+    const arr = this.rangeRecentOutcomeScoresBySymbol.get(symbolKey) ?? [];
+    arr.push(win ? 1 : -1);
+    this.rangeRecentOutcomeScoresBySymbol.set(symbolKey, arr.slice(-8));
+    const s = this.rangeRoundTripStreakBySymbol.get(symbolKey) ?? 0;
+    this.rangeRoundTripStreakBySymbol.set(symbolKey, win ? s + 1 : 0);
+  }
+
+  private recentRangeWinRate01(symbolKey: string): number {
+    const arr = this.rangeRecentOutcomeScoresBySymbol.get(symbolKey) ?? [];
+    if (arr.length === 0) return 0.5;
+    return arr.filter((x) => x > 0).length / arr.length;
   }
 
   constructor(
@@ -636,13 +675,15 @@ export class PaperEngine {
         volatilityProxy = Math.min(1, (sum / n) * 40);
       }
     }
+    const boxCohesion01 = computeAvgBoxCohesion01(snapshots);
     const marketModeOut = evaluateMarketModeSelector({
       regimeDetection: regimeDetected,
       fetchedAt,
       snapshotCount: snapshots.length,
       errorCount: errors.length,
       volatilityProxy,
-      recentTrendSwitchCount1h: this.pruneTrendSwitches1h(fetchedAt)
+      recentTrendSwitchCount1h: this.pruneTrendSwitches1h(fetchedAt),
+      boxCohesion01
     });
     this.lastMarketMode = marketModeOut;
     const riskExposureOut = evaluateRiskExposure({
@@ -775,6 +816,12 @@ export class PaperEngine {
           ? Math.round(DEFAULT_PAPER_SIZE_USD * this.lastRiskExposure.sizeMultiplier * 100) / 100
           : DEFAULT_PAPER_SIZE_USD
       );
+      const reopenSoft: RangeReopenSoftMetrics = {
+        edgeIntensity01: computeRangeEdgeIntensity01(rsEval.boxPosition, rsEval.boxZone),
+        rangeCycleCount: rsEval.rangeCycleCount,
+        recentRoundTripWinRate01: this.recentRangeWinRate01(rrKey),
+        roundTripStreak: this.rangeRoundTripStreakBySymbol.get(rrKey) ?? 0
+      };
       const reopenGate = evaluateRangeReopenAllowed({
         armed: armed > nowTick,
         state: rsEval,
@@ -784,7 +831,8 @@ export class PaperEngine {
         longUsd,
         shortUsd,
         proposedEntryUsd: proposedUsd,
-        reopenCountInWindow: reopenRecent.length
+        reopenCountInWindow: reopenRecent.length,
+        soft: reopenSoft
       });
       const rangeReopenCooldownBypass = reopenGate.allowed;
 
@@ -962,6 +1010,9 @@ export class PaperEngine {
         this.trendPyramidLevelBySymbol.delete(sk);
         this.trendBreakoutBySymbol.delete(sk);
         this.trendFollowScoreBySymbol.delete(sk);
+        this.trendBreakoutConfidenceBySymbol.delete(sk);
+        this.rangeRoundTripStreakBySymbol.delete(sk);
+        this.rangeRecentOutcomeScoresBySymbol.delete(sk);
       }
     }
 
@@ -1355,6 +1406,7 @@ export class PaperEngine {
         this.trendHoldMemoryBySymbol.set(symKey, trendState.holdMemory);
         this.trendPyramidLevelBySymbol.set(symKey, trendState.pyramidLevel);
         this.trendFollowScoreBySymbol.set(symKey, trendState.trendFollowScore);
+        this.trendBreakoutConfidenceBySymbol.set(symKey, trendState.breakoutConfidence);
         this.logger.info("trend_engine_tick", trendState);
       }
 
@@ -1516,6 +1568,7 @@ export class PaperEngine {
         });
 
         if (open.regimeAtEntry === "RANGE") {
+          this.recordRangeRoundTripOutcome(symKey, false);
           const k = `${String(open.symbol)}:${open.side}`;
           const prev = this.rangeFailCountByKey.get(k) ?? 0;
           const nextFail = prev + 1;
@@ -1603,6 +1656,7 @@ export class PaperEngine {
         });
 
         if (open.regimeAtEntry === "RANGE" && cr === "take_profit") {
+          this.recordRangeRoundTripOutcome(symKey, true);
           const k = `${String(open.symbol)}:${open.side}`;
           this.rangeFailCountByKey.set(k, 0);
           this.rangeReopenArmedUntilBySymbol.set(symKey, Date.now() + 15 * 60_000);
@@ -2020,11 +2074,12 @@ export class PaperEngine {
         if (this.lastMarketMode?.routing.activeEngine === "RANGE") {
           const rSt = this.lastTickRangeEvalBySymbol.get(symS);
           if (rSt) {
-            const cycleM = rangeCycleEntryMultiplier(rSt.rangeCycleCount);
+            const cycleM = rangeCycleSizePolicy(rSt.rangeCycleCount, rSt.hedgeBalance);
             const legM = rangeLadderLegMultiplier(rSt.rangeLadderLevel, rSt.hedgeBalance);
+            const recM = rangeAccumulationRecoveryMultiplier(rSt.hedgeBalance, adaptive.direction, rSt.rangeCycleCount);
             entrySizeUsd = Math.max(
               MIN_POSITION_SIZE_USD,
-              Math.round(entrySizeUsd * cycleM * legM * 100) / 100
+              Math.round(entrySizeUsd * cycleM * legM * recM * 100) / 100
             );
           }
         }
@@ -2229,6 +2284,7 @@ export class PaperEngine {
     if (existing.regimeAtEntry === "TREND") {
       const pyr = this.trendPyramidLevelBySymbol.get(symEx) ?? 0;
       const tfs = this.trendFollowScoreBySymbol.get(symEx) ?? 0;
+      const bcf = this.trendBreakoutConfidenceBySymbol.get(symEx) ?? 0.5;
       if (!trendPyramidAllowsScaleIn(tfs, pyr)) {
         this.logger.info("scale_in_blocked_trend_pyramid_policy", {
           symbol: existing.symbol,
@@ -2237,15 +2293,18 @@ export class PaperEngine {
         });
         return null;
       }
-      const pm = Math.min(1.45, 1 + pyr * 0.09);
-      incrementalSizeUsd = Math.round(incrementalSizeUsd * pm * (re?.switchSizeMultiplier ?? 1) * 100) / 100;
+      const uplift = trendPyramidSizeUplift(pyr, tfs, bcf);
+      incrementalSizeUsd = Math.round(
+        incrementalSizeUsd * uplift * (re?.switchSizeMultiplier ?? 1) * 100
+      ) / 100;
     }
     if (existing.regimeAtEntry === "RANGE") {
       const rSt = this.lastTickRangeEvalBySymbol.get(symEx);
       if (rSt) {
         const legM = rangeLadderLegMultiplier(rSt.rangeLadderLevel, rSt.hedgeBalance);
-        const cycM = rangeCycleEntryMultiplier(rSt.rangeCycleCount);
-        incrementalSizeUsd = Math.round(incrementalSizeUsd * legM * cycM * 100) / 100;
+        const cycM = rangeCycleSizePolicy(rSt.rangeCycleCount, rSt.hedgeBalance);
+        const recM = rangeAccumulationRecoveryMultiplier(rSt.hedgeBalance, existing.side, rSt.rangeCycleCount);
+        incrementalSizeUsd = Math.round(incrementalSizeUsd * legM * cycM * recM * 100) / 100;
       }
     }
     const opensList = await this.positions.loadOpenAll();

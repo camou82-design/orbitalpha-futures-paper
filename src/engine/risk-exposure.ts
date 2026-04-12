@@ -96,6 +96,26 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
   if (marketMode.routing.probeEntryOnly === true) {
     sizeMultiplier *= 0.42;
   }
+  if (marketMode.routing.transitionTier === "dominant_reduced") {
+    sizeMultiplier *= 1.05;
+  }
+
+  let opportunityBias = 1;
+  const ae = marketMode.routing.activeEngine;
+  if (riskMode === "NORMAL" && throttle < 0.48) {
+    if (ae === "TREND" && (mm === "TREND" || mm === "MIXED")) opportunityBias *= 1.07;
+    if (ae === "RANGE" && (mm === "RANGE" || mm === "TRANSITION")) opportunityBias *= 1.06;
+  }
+  if (marketMode.sessionProfile === "us_session" && ae === "TREND" && !volHigh && throttle < 0.52) {
+    opportunityBias *= 1.08;
+  }
+  if (marketMode.sessionProfile === "asia_quiet" && ae === "RANGE" && !volHigh && throttle < 0.5) {
+    opportunityBias *= 1.06;
+  }
+  if (marketMode.routing.transitionTier === "dominant_reduced" && throttle < 0.55) {
+    opportunityBias *= 1.04;
+  }
+  sizeMultiplier = clamp(sizeMultiplier * opportunityBias, 0.12, 1.48);
 
   const maxSlots = Math.max(1, config.paperMaxOpenPositions);
   const perSlot = 100;
@@ -123,7 +143,6 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
     !routingPaused &&
     openPositionCount < maxSlots;
 
-  const ae = marketMode.routing.activeEngine;
   const allowAdd =
     allowNewEntry &&
     riskMode !== "HALT" &&
@@ -145,8 +164,15 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
           ? `제한 모드 — ${sess.label}`
           : `정상 — ${sess.label}`;
 
+  let riskStanceLabel = "보통";
+  if (riskMode === "HALT" || riskMode === "DEFENSIVE") riskStanceLabel = "보수·축소";
+  else if (opportunityBias >= 1.08 && throttle < 0.52) riskStanceLabel = "기회·확대";
+  else if (opportunityBias <= 0.98 || throttle > 0.58) riskStanceLabel = "주의·보수";
+
   return {
     riskMode,
+    opportunityBias,
+    riskStanceLabel,
     sizeMultiplier,
     maxLongExposure,
     maxShortExposure,

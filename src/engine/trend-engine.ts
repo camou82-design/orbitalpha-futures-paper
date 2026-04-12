@@ -139,8 +139,22 @@ export function evaluatePyramidLevel(input: Readonly<{
 
 /** 추세 지속 점수·단계로 증액(scale-in) 허용 여부(TREND 전용). */
 export function trendPyramidAllowsScaleIn(trendFollowScore: number, pyramidLevel: number): boolean {
-  if (pyramidLevel <= 0) return trendFollowScore >= 0.58;
-  return trendFollowScore >= 0.53;
+  const relax = Math.max(0, trendFollowScore - 0.62) * 0.22;
+  if (pyramidLevel <= 0) return trendFollowScore >= 0.56 - relax;
+  return trendFollowScore >= 0.5 - relax;
+}
+
+/** 피라미드·추세 강도를 증액 USD 배수로 직결. */
+export function trendPyramidSizeUplift(
+  pyramidLevel: number,
+  trendFollowScore: number,
+  breakoutConfidence: number
+): number {
+  const p = Math.min(4, Math.max(0, pyramidLevel));
+  let m = 1 + 0.12 * p;
+  m += Math.max(0, trendFollowScore - 0.55) * 0.42;
+  m += Math.max(0, breakoutConfidence - 0.45) * 0.18;
+  return Math.min(1.45, m);
 }
 
 /**
@@ -212,12 +226,19 @@ export function evaluateTrendEngineForSymbol(input: TrendEngineInput): TrendEngi
   const routingTrend =
     input.marketMode.routing.activeEngine === "TREND" || input.marketMode.marketMode === "MIXED";
 
+  const speedBoost =
+    Math.max(0, trendFollowScore - 0.62) * 0.38 +
+    (hold.holdState === "rebreak" ? 0.09 : 0) +
+    (breakoutConfidence >= 0.58 ? 0.04 : 0);
+  const minTf = Math.max(0.47, 0.52 - speedBoost * 0.14);
+  const minBc = Math.max(0.36, 0.42 - speedBoost * 0.11);
+
   const switchEligible =
     opposed &&
     breakoutDirection !== "none" &&
     oppositeBreakoutConfirmed &&
-    trendFollowScore >= 0.52 &&
-    breakoutConfidence >= 0.42 &&
+    trendFollowScore >= minTf &&
+    breakoutConfidence >= minBc &&
     routingTrend &&
     (input.marketMode.marketMode === "TREND" ||
       input.marketMode.marketMode === "MIXED" ||
