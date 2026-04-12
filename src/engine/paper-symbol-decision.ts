@@ -17,9 +17,12 @@ import type { RiskControlDecision } from "./risk-control-layer";
 import type { FuturesMarketMode } from "../strategy/live-market-mode";
 import { runFuturesAdaptiveEntry, type FuturesAdaptiveEntryResult } from "../strategy/live-entry-pipeline";
 import { rangeExecutorEvaluateEntry } from "../strategy/executors/range-executor";
-import { trendExecutorEvaluateEntry } from "../strategy/executors/trend-executor";
+import { highwayExecutorEvaluateEntry } from "./highway-entry-executor";
 import type { AnyEntryDecision } from "../strategy/executors/types";
 import { aiApproveEntry, aiInputFromDecision } from "../ai/entry-approval";
+import { detectHighwayTrend } from "../engine/highway-trend-detector";
+import { HighwayTrendState } from "../models/types";
+import { evaluateAiHighwayQuality } from "../engine/ai-highway-filter";
 import type { PaperSignal } from "../strategy/entry-signal";
 import type { PaperCandidateStrength } from "../strategy/entry-signal";
 import { PIPELINE_VERSION } from "./decision-funnel";
@@ -86,6 +89,8 @@ export type SymbolSnapshotLike = Readonly<{
   boxBreakSide?: "upper" | "lower" | "none";
   /** 하이웨이: 현재 레짐 상태 */
   regimeStateDiag?: PaperRegimeState;
+  /** Raw candles fetched from Bybit */
+  candles?: import("../models/types").Candle[];
 }>;
 
 function signalToState(signal: PaperSignal): PaperSignalState {
@@ -759,9 +764,22 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   }
   signal_state = signalToState(sn.signal);
 
-  if (input.regime === "RANGE" || input.regime === "TREND") {
-    strategy_executor = input.regime;
+  // Core Highway detection and AI quality scoring
+  const highwayResult = detectHighwayTrend(input.snapshot?.candles ?? [], sym);
+  const _aiResult = evaluateAiHighwayQuality(input.snapshot?.candles ?? [], sym);
+  // Determine executor based on core state and AI defer flag
+  let _entryIntent: "probe" | "standard" | "scale" | "trend" = "trend";
+  if (highwayResult.state === HighwayTrendState.VALID) {
+    _entryIntent = "standard";
+  } else if (highwayResult.state === HighwayTrendState.WEAK) {
+    _entryIntent = "probe";
+  } else {
+    _entryIntent = "trend"; // fallback, will likely be rejected later
   }
+  strategy_executor = "TREND"; // Use TREND executor for highway core
+  // Attach AI scores to decision fields later via pack call
+
+  // Retain core executor selection; overriding removed
 
   if (typeof em === "number" && Number.isFinite(em)) {
     expected_move_pct = em * 100;
@@ -1172,26 +1190,16 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         rangeReasonLabel: sn.rangeReasonLabel
       })
       : input.regime === "TREND"
-        ? trendExecutorEvaluateEntry({
-          regime: input.regime,
-          risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
+        ? highwayExecutorEvaluateEntry({
+          intentType: _entryIntent,
+          highwayState: highwayResult.state,
+          aiScores: _aiResult,
           symbol: String(sym),
           signal: sn.signal,
-          qualityScore: sn.qualityScore,
-          lastPrice: sn.lastPrice,
-          ema20: sn.ema20,
-          ema60: sn.ema60,
-          volumeRatioProxy: sn.volumeRatioProxy,
-          boxHigh: sn.boxHigh ?? null,
-          boxLow: sn.boxLow ?? null,
-          expectedMove: typeof em === "number" ? em : null,
-          totalCost,
-          atr: sn.atr,
-          cooldownActive: trendUntil > nowOpen,
-          cooldownRemainingMs: trendUntil > nowOpen ? trendUntil - nowOpen : 0,
+          risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
           currentStage: input.currentStage,
-          autoEntryTriggered: input.autoEntryTriggered,
-          reviewingTicks: input.reviewingTicks
+          expectedMove: typeof em === "number" ? em : null,
+          totalCost
         })
         : null;
 

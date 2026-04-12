@@ -168,6 +168,24 @@ export type PaperExecutionState =
   | "DISABLED"
   | "INIT_FAIL"
   | "ORDER_BUILD_FAIL";
+export enum HighwayTrendState {
+  VALID = "VALID",
+  WEAK = "WEAK",
+  INVALID = "INVALID"
+}
+
+export interface AiHighwayQualityScores {
+  alignmentQualityScore: number;
+  emaSpacingHealthScore: number;
+  pullbackQualityScore: number;
+  reboundStrengthScore: number;
+  volumeSupportScore: number;
+  trendExhaustionScore: number;
+  highwayValidityScore: number;
+  entryRiskScore: number;
+  deferEntry?: boolean;
+}
+
 export type PaperFinalDecision = "ENTER" | "REJECT" | "SKIP" | "DISABLED";
 export type PaperStrategyExecutor = "TREND" | "RANGE" | "IDLE";
 
@@ -793,3 +811,5 @@ export type PaperClosedPositionRecord = Readonly<{
   /** 익/손/보합(신규 건 항상 기록). */
   outcomeStatus?: "win" | "loss" | "flat";
 }>;
+
+// --- EOF ---

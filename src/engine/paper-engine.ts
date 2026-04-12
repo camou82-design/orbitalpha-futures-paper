@@ -47,7 +47,9 @@ import { PositionManager } from "./position-manager";
 import { RiskManager } from "./risk-manager";
 import { evaluateRiskControls, type RiskControlDecision } from "../strategy/risk-control-layer";
 import { rangeExecutorEvaluateEntry, rangeExecutorEvaluateExit } from "../strategy/executors/range-executor";
-import { trendExecutorEvaluateEntry, trendExecutorEvaluateExit } from "../strategy/executors/trend-executor";
+import { trendExecutorEvaluateEntry } from "../strategy/executors/trend-executor";
+import { evaluateAiHighwayQuality } from "./ai-highway-filter";
+import { highwayExitEngine } from "./highway-exit-engine";
 import type { AnyEntryDecision } from "../strategy/executors/types";
 import { executorForExitEventPayload } from "../strategy/executors/executor-normalize";
 import { aiApproveEntry, aiInputFromDecision } from "../ai/entry-approval";
@@ -153,6 +155,7 @@ type SymbolSnapshot = Readonly<{
   regimeExitRisk?: number;
   boxBreakSide?: "upper" | "lower" | "none";
   regimeStateDiag?: PaperRegimeState;
+  candles?: import("../models/types").Candle[];
 }>;
 
 export type SymbolDiagnostic = Readonly<{
@@ -912,6 +915,46 @@ export class PaperEngine {
         this.reviewingState.delete(String(snap.symbol));
       }
       decisionBySymbol.set(String(sym), res);
+
+      const decisionSnap = snapshots.find((s) => s.symbol === sym);
+      if (decisionSnap) {
+        const d = res.decision;
+        this.logger.info("PAPER_ENTRY_LINE", {
+          paper_entry_relaxed: this.config.paperEntryRelaxed,
+          symbol: String(sym),
+          trend_ok: decisionSnap.trendOk,
+          ema_gap: decisionSnap.emaGap,
+          sideways_mode: decisionSnap.qualityScore > 0,
+          candidate_strength: decisionSnap.candidateStrength,
+          quality_score: decisionSnap.qualityScore,
+          signal_strength: paperSignalStrengthLabel(decisionSnap.qualityScore, this.config.paperEntryRelaxed),
+          side: res.intentSide,
+          base_signal: decisionSnap.signal,
+          entry_blocked: d.reject_reason !== null ? d.reject_reason : false,
+          gate_expected_move: decisionSnap.gateExpectedMove,
+          final_signal: d.final_decision === "ENTER" ? d.final_signal_state : "none",
+          // Highway Enrichment
+          range_confidence: decisionSnap.rangeConfidence,
+          box_cohesion: decisionSnap.boxCohesion01,
+          breakout_failure_rate: decisionSnap.breakoutFailureRate,
+          range_oscillation_score: decisionSnap.rangeOscillationScore,
+          trend_weakness_score: decisionSnap.trendWeaknessScore,
+          regime_exit_risk: decisionSnap.regimeExitRisk,
+          range_cycle_count: decisionSnap.rangeCycleCount,
+          range_ladder_level: decisionSnap.rangeLadderLevel,
+          entry_intent_type: d.entry_intent_type,
+          regime_state_diag: decisionSnap.regimeStateDiag,
+          alignment_quality_score: res.executorDecision?.detail?.alignmentQualityScore,
+          ema_spacing_health_score: res.executorDecision?.detail?.emaSpacingHealthScore,
+          pullback_quality_score: res.executorDecision?.detail?.pullbackQualityScore,
+          rebound_strength_score: res.executorDecision?.detail?.reboundStrengthScore,
+          volume_support_score: res.executorDecision?.detail?.volumeSupportScore,
+          trend_exhaustion_score: res.executorDecision?.detail?.trendExhaustionScore,
+          highway_validity_score: res.executorDecision?.detail?.highwayValidityScore,
+          entry_risk_score: res.executorDecision?.detail?.entryRiskScore
+        });
+      }
+
       try {
         await this.store.appendJsonlLine("reports/decisions.jsonl", { ...res.decision, pipeline: "v1" });
       } catch (e) {
@@ -1714,16 +1757,12 @@ export class PaperEngine {
             rangeConfidence: this.lastRegime.rangeConfidence,
             boxBreakConfirmed: rangeState?.boxBreakout ?? false
           })
-          : trendExecutorEvaluateExit({
-            side: open.side,
-            pnlPctNet: m.pnlPctNet,
-            mark: closePrice,
-            entryPrice: open.entryPrice,
-            atr: snap.atr,
-            partialExitStage: open.partialExitStage ?? 0,
-            holdingMs: m.holdingMs,
-            trailingExtreme: open.trailingExtremePrice,
-            postEntryCostGuard: open.postEntryCostGuard === true
+          : highwayExitEngine({
+            position: open,
+            aiScores: evaluateAiHighwayQuality(snap.candles ?? [], open.symbol),
+            lastPrice: closePrice,
+            ema20: snap.ema20,
+            ema60: snap.ema60
           });
 
       // --- CRASH MOMENTUM TRAILING OVERRIDE for SHORTS ---
@@ -2618,17 +2657,6 @@ export class PaperEngine {
         signal = "none";
         entryCandidate = false;
         gateBlockedReason = "quality_below_min";
-        this.logger.info("DEBUG_ENTRY_BLOCKED_REASON", {
-          symbol,
-          reason: "quality_below_min",
-          paper_entry_relaxed: this.config.paperEntryRelaxed,
-          quality_score: qualityScore,
-          paper_quality_min_effective: qualityMinEffective,
-          paper_quality_min: this.config.paperQualityMinScore,
-          paper_quality_min_weak: this.config.paperQualityMinScoreWeak,
-          candidate_strength: entry.candidateStrength,
-          weak_sideways_lower_floor: entry.candidateStrength === "weak"
-        });
       } else {
         const tfHi = entryGateHigherTimeframe();
         const limHi = entryGateHigherTfKlineLimit();
@@ -2655,84 +2683,13 @@ export class PaperEngine {
           signal = "none";
           entryCandidate = false;
           gateBlockedReason = gate.blockReason ?? "gate";
-          this.logger.info("DEBUG_ENTRY_BLOCKED_REASON", {
-            symbol,
-            reason: gate.blockReason,
-            paper_entry_relaxed: this.config.paperEntryRelaxed,
-            fee_filter_disabled: gate.feeExpectedMoveGateBypassed === true,
-            original_fee_filter_pass: gate.originalExpectedMovePass === true,
-            expected_move: gate.expectedMove,
-            required_move: gate.requiredMove,
-            required_move_threshold: gate.requiredMoveThreshold,
-            higher_tf: tfHi,
-            higher_tf_aligned: gate.higherTfAligned
-          });
         }
       }
-
-      this.logger.info("PAPER_ENTRY_LINE", {
-        paper_entry_relaxed: this.config.paperEntryRelaxed,
-        symbol,
-        trend_ok: trend.trendOk,
-        ema_gap: entry.emaGap,
-        sideways_mode: entry.sidewaysMode,
-        candidate_strength: entry.candidateStrength,
-        quality_score: qualityScore,
-        signal_strength: signalStrength,
-        quality_min_effective: qualityMinEffective,
-        weak_sideways_quality_note:
-          entry.candidateStrength === "weak"
-            ? `weak_floor_${qualityMinEffective}_strong_floor_${this.config.paperQualityMinScore}`
-            : null,
-        side: entrySide,
-        base_signal: entry.signal,
-        fee_filter_disabled: gateEval?.feeExpectedMoveGateBypassed === true,
-        original_fee_filter_pass: gateEval?.originalExpectedMovePass === true,
-        fee_filter_pass:
-          gateEval != null
-            ? gateEval.feeExpectedMoveGateBypassed === true || gateEval.originalExpectedMovePass === true
-            : gateBlockedReason === "quality_below_min"
-              ? false
-              : null,
-        entry_blocked:
-          gateBlockedReason ??
-          (gateEval && !gateEval.allowed ? gateEval.blockReason : false),
-        gate_expected_move: gateEval?.expectedMove,
-        gate_required_threshold: gateEval?.requiredMoveThreshold,
-        higher_tf_required: this.config.paperRequireHigherTfAlign,
-        higher_tf_aligned: gateEval?.higherTfAligned ?? null,
-        max_open_positions: this.config.paperMaxOpenPositions,
-        final_signal: signal
-      });
-    } else {
-      this.logger.info("PAPER_ENTRY_LINE", {
-        paper_entry_relaxed: this.config.paperEntryRelaxed,
-        symbol,
-        trend_ok: trend.trendOk,
-        ema_gap: entry.emaGap,
-        sideways_mode: entry.sidewaysMode,
-        candidate_strength: entry.candidateStrength,
-        quality_score: 0,
-        signal_strength: paperSignalStrengthLabel(0, this.config.paperEntryRelaxed),
-        quality_min_effective: null,
-        weak_sideways_quality_note: null,
-        side: null,
-        base_signal: entry.signal,
-        fee_filter_disabled: null,
-        original_fee_filter_pass: null,
-        fee_filter_pass: null,
-        entry_blocked: null,
-        gate_expected_move: null,
-        gate_required_threshold: null,
-        higher_tf_required: this.config.paperRequireHigherTfAlign,
-        higher_tf_aligned: null,
-        max_open_positions: this.config.paperMaxOpenPositions,
-        final_signal: "none"
-      });
     }
 
-    // (Logic moved up for signal generation context)
-
+    // ------------------------------------------------------------------------
+    // Construct Snapshot
+    // ------------------------------------------------------------------------
     const snapshot: SymbolSnapshot = {
       symbol,
       lastPrice,
@@ -2767,9 +2724,11 @@ export class PaperEngine {
       rangeLadderLevel: (this.rangeRuntimeBySymbol.get(String(symbol))?.ladder ?? 0),
       regimeExitRisk: regimeDetected.regimeExitRisk,
       boxBreakSide: regimeDetected.boxBreakSide,
-      regimeStateDiag: regimeDetected.regimeState
+      regimeStateDiag: regimeDetected.regimeState,
+      candles: rC.value
     };
 
+    /** ENTRY_LINE은 runTick 루프에서 의사결정 결과(Intent 등)와 합쳐서 로깅하기 위해 여기서는 생략 */
     this.logger.info("symbol_snapshot", snapshot);
     this.logger.info("symbol_signal", {
       symbol,
@@ -2781,6 +2740,7 @@ export class PaperEngine {
       signal_strength: signalStrength,
       trendOk: trend.trendOk
     });
+
     return { ok: true, snapshot, symbolDiagnostics };
   }
 }
