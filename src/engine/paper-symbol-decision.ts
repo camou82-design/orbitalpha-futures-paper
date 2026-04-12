@@ -667,18 +667,17 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     if (input.currentStage === 0 && input.regime === "RANGE") {
       const boxPos = sn?.boxPos ?? 0.5;
-      const boxCentered = boxPos > 0.4 && boxPos < 0.6;
+      const boxCentered = boxPos > 0.45 && boxPos < 0.55; // Phase 2: 0.4->0.45, 0.6->0.55
       const emaGap = Math.abs(sn?.emaGap ?? 0);
       const volProxy = sn?.volumeRatioProxy ?? 0;
 
-      // 1. 박스 위치가 극단 중앙이 아님 (0.4 ~ 0.6 제외)
-      // 2. EMA 이격도/거래량 프록시가 완전 소멸 수준은 아님
-      if (!boxCentered && emaGap > 0.0001 && volProxy > 0.1) {
+      // Phase 2: emaGap 0.0001->0.00005, volProxy 0.1->0.05
+      if (!boxCentered && emaGap > 0.00005 && volProxy > 0.05) {
         softCandidateAllowed = true;
         stage1SignalRelaxed = true;
         signal_state = "LONG_CANDIDATE"; // 임시 승격하여 EDGE/RISK 태움
-        signalRelaxReason = "stage1_range_soft_candidate_pos_and_vol_ok";
-        supplemental_reasons.push("STAGE1_SIGNAL_RELAXED_SOFT_CANDIDATE");
+        signalRelaxReason = "stage1_range_soft_candidate_v2";
+        supplemental_reasons.push("STAGE1_SIGNAL_RELAXED_SOFT_CANDIDATE_V2");
       }
     }
 
