@@ -1,4 +1,9 @@
-import type { MarketModeSelectorOutput, PaperMarketMode } from "../models/types";
+import type {
+  EngineRoutingDecision,
+  MarketModeSelectorOutput,
+  PaperEngineRoutingKind,
+  PaperMarketMode
+} from "../models/types";
 import type { MarketRegimeDetection } from "../strategy/market-regime-detector";
 
 export type ModeSelectorInput = Readonly<{
@@ -21,6 +26,61 @@ function utcSessionProfile(fetchedAt: number): string {
   if (h >= 7 && h < 12) return "eu_overlap";
   if (h >= 0 && h < 7) return "asia_quiet";
   return "other_utc";
+}
+
+function resolveRouting(
+  marketMode: PaperMarketMode,
+  rangeConfidence: number,
+  trendConfidence: number
+): EngineRoutingDecision {
+  const rc = rangeConfidence;
+  const tc = trendConfidence;
+
+  if (marketMode === "NO_TRADE") {
+    return {
+      activeEngine: "IDLE",
+      newEntryPolicy: "paused",
+      routingReasonLabel: "NO_TRADE — 신규 진입 보류"
+    };
+  }
+
+  if (marketMode === "MIXED" || marketMode === "TRANSITION") {
+    if (rc >= tc) {
+      return {
+        activeEngine: "RANGE",
+        newEntryPolicy: "reduced",
+        routingReasonLabel: "혼합·전환 구간 — RANGE 위주·축소 진입"
+      };
+    }
+    return {
+      activeEngine: "TREND",
+      newEntryPolicy: "reduced",
+      routingReasonLabel: "혼합·전환 구간 — TREND 위주·축소 진입"
+    };
+  }
+
+  if (marketMode === "RANGE") {
+    return {
+      activeEngine: "RANGE",
+      newEntryPolicy: "full",
+      routingReasonLabel: "RANGE 우세 — 횡보 엔진 단독 활성"
+    };
+  }
+
+  if (marketMode === "TREND") {
+    return {
+      activeEngine: "TREND",
+      newEntryPolicy: "full",
+      routingReasonLabel: "TREND 우세 — 돌파·추세 엔진 단독 활성"
+    };
+  }
+
+  const idle: PaperEngineRoutingKind = "IDLE";
+  return {
+    activeEngine: idle,
+    newEntryPolicy: "paused",
+    routingReasonLabel: "모드 미정 — 관망"
+  };
 }
 
 /**
@@ -84,13 +144,18 @@ export function evaluateMarketModeSelector(input: ModeSelectorInput): MarketMode
     dataDegraded ? 0.85 : raw === "NO_TRADE" ? 0.75 : vol * 0.55 + (amb ? 0.15 : 0)
   );
 
+  const rc = clamp01(rangeConfidence);
+  const tc = clamp01(trendConfidence);
+  const routing = resolveRouting(marketMode, rc, tc);
+
   return {
     marketMode,
     marketModeScore: Math.min(100, Math.max(0, marketModeScore)),
-    rangeConfidence: clamp01(rangeConfidence),
-    trendConfidence: clamp01(trendConfidence),
+    rangeConfidence: rc,
+    trendConfidence: tc,
     sessionProfile,
     riskThrottle,
-    modeReasonLabel
+    modeReasonLabel,
+    routing
   };
 }

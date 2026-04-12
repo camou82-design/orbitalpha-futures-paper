@@ -144,6 +144,12 @@ export function paperExitDisplayMeta(
       return { exitType: "EXIT_REGIME_BREAK", closeReasonLabel: defaultLabelForExitType("EXIT_REGIME_BREAK") };
     case "regime_exit":
       return { exitType: "EXIT_REGIME", closeReasonLabel: defaultLabelForExitType("EXIT_REGIME") };
+    case "range_box_break":
+      return { exitType: "EXIT_RANGE_REBALANCE", closeReasonLabel: "박스 붕괴·구조 이탈" };
+    case "structural_regime_shift":
+      return { exitType: "EXIT_REGIME_BREAK", closeReasonLabel: "구조적 추세 전환" };
+    case "trend_switch":
+      return { exitType: "EXIT_TREND_SWITCH", closeReasonLabel: defaultLabelForExitType("EXIT_TREND_SWITCH") };
     default: {
       const _exhaustive: never = closeReason;
       return _exhaustive;

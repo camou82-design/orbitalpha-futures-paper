@@ -1,7 +1,78 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import type { EngineRoutingDecision, PaperEngineRoutingKind, PaperOperationalSnapshot } from "../models/types";
 import { buildLedgerPerformanceFromHistory, type FuturesPaperLedgerPerformance } from "./futuresPaperLedgerStats";
+
+function isRoutingKind(x: unknown): x is PaperEngineRoutingKind {
+  return x === "RANGE" || x === "TREND" || x === "IDLE";
+}
+
+function isNewEntryPolicy(x: unknown): x is EngineRoutingDecision["newEntryPolicy"] {
+  return x === "full" || x === "reduced" || x === "paused";
+}
+
+/** `engine-state.json`에서 대시보드 상단용 운영 스냅샷을 만든다. */
+export function paperOperationalFromEngineState(engineState: unknown): PaperOperationalSnapshot | null {
+  if (!engineState || typeof engineState !== "object") return null;
+  const o = engineState as Record<string, unknown>;
+  const expl = o.explanation;
+  let modeReasonLabel = "";
+  let engineReasonLabel = "";
+  let riskReasonLabel = "";
+  let activeEngine: PaperEngineRoutingKind = "IDLE";
+  let newEntryPolicy: EngineRoutingDecision["newEntryPolicy"] = "paused";
+  if (expl && typeof expl === "object") {
+    const e = expl as Record<string, unknown>;
+    if (typeof e.modeReasonLabel === "string") modeReasonLabel = e.modeReasonLabel;
+    if (typeof e.engineReasonLabel === "string") engineReasonLabel = e.engineReasonLabel;
+    if (typeof e.riskReasonLabel === "string") riskReasonLabel = e.riskReasonLabel;
+    if (isRoutingKind(e.activeEngine)) activeEngine = e.activeEngine;
+    if (isNewEntryPolicy(e.newEntryPolicy)) newEntryPolicy = e.newEntryPolicy;
+  }
+  const mm = o.market_mode_selector;
+  if ((!modeReasonLabel || !engineReasonLabel) && mm && typeof mm === "object") {
+    const m = mm as Record<string, unknown>;
+    if (!modeReasonLabel && typeof m.modeReasonLabel === "string") modeReasonLabel = m.modeReasonLabel;
+    const r = m.routing;
+    if (r && typeof r === "object") {
+      const rr = r as Record<string, unknown>;
+      if (!engineReasonLabel && typeof rr.routingReasonLabel === "string") {
+        engineReasonLabel = `라우팅: ${rr.routingReasonLabel}`;
+      }
+      if (isRoutingKind(rr.activeEngine)) activeEngine = rr.activeEngine;
+      if (isNewEntryPolicy(rr.newEntryPolicy)) newEntryPolicy = rr.newEntryPolicy;
+    }
+  }
+  const risk = o.risk_exposure;
+  if (!riskReasonLabel && risk && typeof risk === "object") {
+    const rx = risk as Record<string, unknown>;
+    if (typeof rx.riskReasonLabel === "string") riskReasonLabel = rx.riskReasonLabel;
+  }
+  let lastExitReasonLabel = "";
+  let lastSwitchReasonLabel = "";
+  if (typeof o.last_exit_reason === "string") lastExitReasonLabel = o.last_exit_reason;
+  if (typeof o.last_switch_reason === "string") lastSwitchReasonLabel = o.last_switch_reason;
+  if (expl && typeof expl === "object") {
+    const e = expl as Record<string, unknown>;
+    if (!lastExitReasonLabel && typeof e.exitReasonLabel === "string") lastExitReasonLabel = e.exitReasonLabel;
+    if (!lastSwitchReasonLabel && typeof e.switchReasonLabel === "string") lastSwitchReasonLabel = e.switchReasonLabel;
+  }
+  if (!modeReasonLabel) modeReasonLabel = "시장 모드 정보 없음";
+  if (!engineReasonLabel) engineReasonLabel = "엔진 라우팅 정보 없음";
+  if (!riskReasonLabel) riskReasonLabel = "리스크 정보 없음";
+  if (!lastExitReasonLabel) lastExitReasonLabel = "직전 청산 없음";
+  if (!lastSwitchReasonLabel) lastSwitchReasonLabel = "직전 스위칭 없음";
+  return {
+    modeReasonLabel,
+    engineReasonLabel,
+    riskReasonLabel,
+    activeEngine,
+    newEntryPolicy,
+    lastExitReasonLabel,
+    lastSwitchReasonLabel
+  };
+}
 
 export type FuturesPaperSymbolRow = Readonly<{
   symbol: string;
@@ -41,6 +112,8 @@ export type FuturesPaperDataBundle = Readonly<{
   summaryHealth: unknown | null;
   dashboard: unknown | null;
   engineState: unknown | null;
+  /** `engineState`에서 파생한 운영 대시보드 요약 */
+  paperOperational: PaperOperationalSnapshot | null;
   latestSnapshot: unknown | null;
   latestMeta: unknown | null;
   symbolRows: FuturesPaperSymbolRow[];
@@ -216,6 +289,7 @@ export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): P
 
   const generatedAt = Date.now();
   const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory, generatedAt);
+  const paperOperational = paperOperationalFromEngineState(engineState);
 
   return {
     configured: true,
@@ -228,6 +302,7 @@ export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): P
     summaryHealth,
     dashboard,
     engineState,
+    paperOperational,
     latestSnapshot,
     latestMeta,
     symbolRows,

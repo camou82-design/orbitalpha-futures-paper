@@ -13,16 +13,40 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
 
+function sessionRiskBias(sessionProfile: string, volHigh: boolean): Readonly<{
+  rangeHedgeBoost: number;
+  trendSwitchBoost: number;
+  label: string;
+}> {
+  if (sessionProfile === "us_session") {
+    return {
+      rangeHedgeBoost: 0.95,
+      trendSwitchBoost: volHigh ? 1.12 : 1.05,
+      label: "미장 세션 — 추세·스위칭 가중"
+    };
+  }
+  if (sessionProfile === "asia_quiet") {
+    return {
+      rangeHedgeBoost: 1.08,
+      trendSwitchBoost: 0.92,
+      label: "아시아 저유동 — 횡보·헤지 완화"
+    };
+  }
+  return { rangeHedgeBoost: 1, trendSwitchBoost: 1, label: "기본 세션 프로파일" };
+}
+
 /**
- * 모드·세션·기존 리스크 상태를 종합해 노출 한도와 허용 플래그를 낸다.
+ * 모드별 운용 강도: RANGE는 양방향 한도·헤지, TREND는 스위칭·돌파 크기.
  */
 export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutput {
   const { marketMode, risk, openPositionCount, config } = input;
   const throttle = marketMode.riskThrottle;
+  const volHigh = throttle > 0.55;
+  const sess = sessionRiskBias(marketMode.sessionProfile, volHigh);
 
   let riskMode: PaperRiskMode = "NORMAL";
   if (risk.engineBlocked === true || risk.dailyLossGuardTriggered) riskMode = "HALT";
-  else if (throttle > 0.72) riskMode = "DEFENSIVE";
+  else if (throttle > 0.72 || volHigh) riskMode = "DEFENSIVE";
   else if (throttle > 0.45 || risk.riskStatus === "LIMITED") riskMode = "REDUCED";
 
   const baseSize =
@@ -32,45 +56,58 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
         ? config.paperDegradeSizeMultiplier * 0.85
         : 1;
 
-  const sizeMultiplier = clamp(baseSize * (1 - throttle * 0.35), 0.15, 1.25);
+  let sizeMultiplier = clamp(baseSize * (1 - throttle * 0.35), 0.12, 1.35);
+  const mm = marketMode.marketMode;
+  if (mm === "MIXED" || mm === "TRANSITION") {
+    sizeMultiplier *= 0.72;
+  }
+  if (marketMode.routing.newEntryPolicy === "reduced") {
+    sizeMultiplier *= 0.65;
+  }
 
   const maxSlots = Math.max(1, config.paperMaxOpenPositions);
   const perSlot = 100;
   let maxLongExposure = perSlot * maxSlots;
   let maxShortExposure = perSlot * maxSlots;
 
-  if (marketMode.marketMode === "RANGE" || marketMode.marketMode === "TRANSITION") {
-    maxLongExposure *= 1.1;
-    maxShortExposure *= 1.1;
-  } else if (marketMode.marketMode === "TREND" || marketMode.marketMode === "MIXED") {
-    maxLongExposure *= 1;
-    maxShortExposure *= 1;
+  if (mm === "RANGE" || mm === "TRANSITION" || marketMode.routing.activeEngine === "RANGE") {
+    maxLongExposure *= 1.12 * sess.rangeHedgeBoost;
+    maxShortExposure *= 1.12 * sess.rangeHedgeBoost;
+  } else if (mm === "TREND" || mm === "MIXED" || marketMode.routing.activeEngine === "TREND") {
+    maxLongExposure *= 1.02;
+    maxShortExposure *= 1.02;
   } else {
-    maxLongExposure *= 0.5;
-    maxShortExposure *= 0.5;
+    maxLongExposure *= 0.45;
+    maxShortExposure *= 0.45;
   }
 
-  const switchSizeMultiplier = clamp(sizeMultiplier * 0.95, 0.2, 1.15);
+  const switchSizeMultiplier = clamp(sizeMultiplier * 0.92 * sess.trendSwitchBoost, 0.18, 1.22);
 
+  const routingPaused = marketMode.routing.newEntryPolicy === "paused";
   const allowNewEntry =
     risk.engineBlocked !== true &&
     !risk.dailyLossGuardTriggered &&
-    marketMode.marketMode !== "NO_TRADE" &&
+    mm !== "NO_TRADE" &&
+    !routingPaused &&
     openPositionCount < maxSlots;
 
-  const allowAdd = allowNewEntry && riskMode !== "HALT" && riskMode !== "DEFENSIVE";
+  const allowAdd =
+    allowNewEntry &&
+    riskMode !== "HALT" &&
+    riskMode !== "DEFENSIVE" &&
+    marketMode.routing.newEntryPolicy === "full";
+
   const allowHedge =
-    (marketMode.marketMode === "RANGE" || marketMode.marketMode === "MIXED") &&
-    riskMode === "NORMAL";
+    (mm === "RANGE" || mm === "MIXED" || marketMode.routing.activeEngine === "RANGE") && riskMode === "NORMAL";
 
   const riskReasonLabel =
     riskMode === "HALT"
       ? "일일 손실 한도 또는 엔진 차단"
       : riskMode === "DEFENSIVE"
-        ? "고스로틀·변동성·NO_TRADE 성향"
+        ? `고스로틀·고변동 — ${sess.label}`
         : riskMode === "REDUCED"
-          ? "제한적 리스크 상태·스로틀"
-          : "정상 프로파일";
+          ? `제한 모드 — ${sess.label}`
+          : `정상 — ${sess.label}`;
 
   return {
     riskMode,

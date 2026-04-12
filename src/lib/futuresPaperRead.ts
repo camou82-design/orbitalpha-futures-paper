@@ -1,11 +1,12 @@
 import type { FuturesPaperDataBundle } from "./futuresPaperBundleCore";
-import { loadFuturesPaperBundleFromDiskRoot } from "./futuresPaperBundleCore";
+import { loadFuturesPaperBundleFromDiskRoot, paperOperationalFromEngineState } from "./futuresPaperBundleCore";
 
 export type {
   FuturesPaperDataBundle,
   FuturesPaperHealthHistoryItem,
   FuturesPaperSymbolRow
 } from "./futuresPaperBundleCore";
+export { paperOperationalFromEngineState } from "./futuresPaperBundleCore";
 
 const HEADER_TOKEN = "x-orbitalpha-futures-paper-token";
 
@@ -22,6 +23,7 @@ function emptyBundle(configHint: string): FuturesPaperDataBundle {
     summaryHealth: null,
     dashboard: null,
     engineState: null,
+    paperOperational: null,
     latestSnapshot: null,
     latestMeta: null,
     symbolRows: [],
@@ -78,6 +80,7 @@ async function loadFromRemoteApi(baseUrl: string, secret: string): Promise<Futur
     ledgerPerformance: b.ledgerPerformance ?? null,
     openPositions: Array.isArray(b.openPositions) ? b.openPositions : [],
     positionsHistory: Array.isArray(b.positionsHistory) ? b.positionsHistory : [],
+    paperOperational: b.paperOperational ?? paperOperationalFromEngineState(b.engineState),
     generatedAt: typeof b.generatedAt === "number" && Number.isFinite(b.generatedAt) ? b.generatedAt : Date.now()
   };
   return withDefaults;

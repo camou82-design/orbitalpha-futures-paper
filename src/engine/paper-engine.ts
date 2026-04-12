@@ -11,7 +11,9 @@ import type {
   PaperRegimeState,
   MarketModeSelectorOutput,
   RiskExposureOutput,
-  PaperExplanationFields
+  PaperExplanationFields,
+  RangeBoxZone,
+  TrendBreakoutDirection
 } from "../models/types";
 import type { Logger } from "../logs/logger";
 import { JsonStore } from "../storage/json-store";
@@ -65,8 +67,8 @@ import {
 import { evaluateMarketModeSelector } from "./mode-selector";
 import { evaluateRiskExposure } from "./risk-exposure";
 import { buildPaperExplanation } from "./explanation-layer";
-import { evaluateRangeEngineForSymbol, marginsForSymbol } from "./range-engine";
-import { evaluateTrendEngineForSymbol } from "./trend-engine";
+import { evaluateRangeEngineForSymbol, evaluateRangeStructuralExit, marginsForSymbol } from "./range-engine";
+import { evaluateTrendEngineForSymbol, planTrendSwitch } from "./trend-engine";
 
 const EP = {
   ticker: "/v5/market/tickers",
@@ -268,7 +270,10 @@ function latestCloseMetaBySymbol(
           cr === "trend_break_exit" ||
           cr === "regime_exit" ||
           cr === "partial_exit_1" ||
-          cr === "partial_exit_2"
+          cr === "partial_exit_2" ||
+          cr === "range_box_break" ||
+          cr === "structural_regime_shift" ||
+          cr === "trend_switch"
           ? cr
           : undefined;
       const entryStageAtClose = typeof es === "number" && Number.isFinite(es) ? es : undefined;
@@ -381,6 +386,10 @@ export class PaperEngine {
   private lastMarketMode: MarketModeSelectorOutput | null = null;
   private lastRiskExposure: RiskExposureOutput | null = null;
   private lastExplanation: PaperExplanationFields | null = null;
+  private rangeRuntimeBySymbol = new Map<string, { lastZone: RangeBoxZone | null; cycle: number; ladder: number }>();
+  private trendBreakoutBySymbol = new Map<string, TrendBreakoutDirection>();
+  private lastExitReasonLabel = "";
+  private lastSwitchReasonLabel = "";
 
   constructor(
     private readonly config: EngineConfig,
@@ -405,6 +414,8 @@ export class PaperEngine {
   }
 
   async runOnce(): Promise<void> {
+    this.lastExitReasonLabel = "";
+    this.lastSwitchReasonLabel = "";
     await this.positions.ensureHistoryFile();
     const history = await this.store.readPositionsHistory();
 
@@ -615,11 +626,6 @@ export class PaperEngine {
       openPositionCount: opensBeforeClose.length
     });
     this.lastRiskExposure = riskExposureOut;
-    const explanationOut = buildPaperExplanation({
-      marketMode: marketModeOut,
-      risk: riskExposureOut
-    });
-    this.lastExplanation = explanationOut;
 
     await this.tryPaperPositionClose({
       snapshots,
@@ -630,6 +636,14 @@ export class PaperEngine {
       marketMode: marketModeOut,
       riskExposure: riskExposureOut
     });
+
+    const explanationOut = buildPaperExplanation({
+      marketMode: marketModeOut,
+      risk: riskExposureOut,
+      exitHint: this.lastExitReasonLabel,
+      switchHint: this.lastSwitchReasonLabel
+    });
+    this.lastExplanation = explanationOut;
 
     const opensAfterClose = await this.positions.loadOpenAll();
     const lastCloseMetaBySymbolForDecision =
@@ -797,6 +811,8 @@ export class PaperEngine {
         market_mode_selector: this.lastMarketMode,
         risk_exposure: this.lastRiskExposure,
         explanation: this.lastExplanation,
+        last_exit_reason: this.lastExitReasonLabel,
+        last_switch_reason: this.lastSwitchReasonLabel,
         engine_mode: this.config.paperEngineMode,
         execution_state: risk.engineBlocked ? "DISABLED" : "PAPER_READY",
         strategy_executor:
@@ -1155,7 +1171,7 @@ export class PaperEngine {
           ? "RANGE"
           : open.regimeAtEntry === "TREND"
             ? "TREND"
-            : input.marketMode.marketMode === "TREND" || input.marketMode.marketMode === "MIXED"
+            : input.marketMode.routing.activeEngine === "TREND"
               ? "TREND"
               : "RANGE";
       const slRegime: MarketRegime = exitLane === "RANGE" ? "RANGE" : "TREND";
@@ -1200,6 +1216,176 @@ export class PaperEngine {
           ...snapPaths
         });
 
+      const symKey = String(open.symbol);
+      const { longUsd, shortUsd } = marginsForSymbol(opens, symKey);
+      const rr = this.rangeRuntimeBySymbol.get(symKey) ?? {
+        lastZone: null as RangeBoxZone | null,
+        cycle: 0,
+        ladder: 0
+      };
+
+      let rangeState = null as ReturnType<typeof evaluateRangeEngineForSymbol> | null;
+      if (exitLane === "RANGE" || regimeAtEntry === "RANGE") {
+        rangeState = evaluateRangeEngineForSymbol({
+          symbol: symKey,
+          lastPrice: closePrice,
+          boxHigh: snap.boxHigh,
+          boxLow: snap.boxLow,
+          boxPos: snap.boxPos,
+          marketMode: input.marketMode,
+          longMarginUsd: longUsd,
+          shortMarginUsd: shortUsd,
+          rangeCycleCountPrior: rr.cycle,
+          rangeLadderLevelPrior: rr.ladder,
+          lastZone: rr.lastZone
+        });
+        this.rangeRuntimeBySymbol.set(symKey, {
+          lastZone: rangeState.boxZone,
+          cycle: rangeState.rangeCycleCount,
+          ladder: rangeState.rangeLadderLevel
+        });
+        this.logger.info("range_engine_tick", rangeState);
+      }
+
+      const priorBr = this.trendBreakoutBySymbol.get(symKey) ?? "none";
+      let trendState = null as ReturnType<typeof evaluateTrendEngineForSymbol> | null;
+      if (exitLane === "TREND" || regimeAtEntry === "TREND") {
+        trendState = evaluateTrendEngineForSymbol({
+          mark: closePrice,
+          entryPrice: open.entryPrice,
+          atr: snap.atr,
+          marketMode: input.marketMode,
+          priorBreakoutDirection: priorBr,
+          pyramidLevelPrior: open.entryStage ?? 1,
+          positionSide: open.side
+        });
+        this.trendBreakoutBySymbol.set(symKey, trendState.breakoutDirection);
+        this.logger.info("trend_engine_tick", trendState);
+      }
+
+      if (regimeAtEntry === "RANGE" && rangeState) {
+        const st = evaluateRangeStructuralExit({
+          lastPrice: closePrice,
+          boxUpper: rangeState.boxUpper,
+          boxLower: rangeState.boxLower,
+          longUsd,
+          shortUsd,
+          maxLongExposure: input.riskExposure.maxLongExposure,
+          maxShortExposure: input.riskExposure.maxShortExposure,
+          marketMode: input.marketMode.marketMode,
+          trendConfidence: input.marketMode.trendConfidence,
+          structuralTrendShift: regimeAtEntry === "RANGE" && regimeNow === "TREND"
+        });
+        if (st.shouldExit && st.reason) {
+          let cr: PaperClosedPositionRecord["closeReason"] = "range_box_break";
+          if (st.reason === "structural_regime_shift") cr = "structural_regime_shift";
+          if (st.reason === "risk_exposure_breach") cr = "regime_exit";
+          const closedRow =
+            st.reason === "risk_exposure_breach"
+              ? finalizePaperClosedRecord({
+                  open,
+                  symbol: open.symbol,
+                  closePrice,
+                  closedAt,
+                  closeReason: cr,
+                  legMarginUsd: open.sizeUsd,
+                  metrics: m,
+                  feeRate,
+                  fundingIntervalHours: intervalH,
+                  strategyVersion: "paper-v1",
+                  exitTypeOverride: "EXIT_RISK",
+                  closeReasonLabelOverride: "리스크 노출 한도 초과",
+                  ...snapPaths
+                })
+              : toClosed(cr, m, open.sizeUsd);
+          await this.positions.appendClosed(closedRow);
+          this.lastExitReasonLabel =
+            st.reason === "range_box_break"
+              ? "박스 붕괴 청산"
+              : st.reason === "structural_regime_shift"
+                ? "구조적 추세 전환 청산"
+                : "노출 한도 청산";
+          await this.store.appendJsonlLine("reports/events.jsonl", {
+            ts: Date.now(),
+            type: "EXIT_REGIME",
+            symbol: symKey,
+            reason: cr,
+            structural: st.reason,
+            realized_pnl: m.pnlUsdNet
+          });
+          continue;
+        }
+      }
+
+      if (regimeAtEntry === "TREND" && trendState) {
+        const plan = planTrendSwitch(trendState, open.side);
+        if (plan.execute && plan.openSide && plan.closeSide) {
+          const cr = "trend_switch" as const;
+          const closedRow = finalizePaperClosedRecord({
+            open,
+            symbol: open.symbol,
+            closePrice,
+            closedAt,
+            closeReason: cr,
+            legMarginUsd: open.sizeUsd,
+            metrics: m,
+            feeRate,
+            fundingIntervalHours: intervalH,
+            strategyVersion: "paper-v1",
+            ...snapPaths
+          });
+          await this.positions.appendClosed(closedRow);
+          this.lastExitReasonLabel = "추세 반대 돌파로 청산";
+          this.lastSwitchReasonLabel = plan.reasonLabel;
+          await this.store.appendJsonlLine("reports/events.jsonl", {
+            ts: Date.now(),
+            type: "EXIT_TREND_SWITCH",
+            phase: "close",
+            symbol: symKey,
+            side: open.side,
+            realized_pnl: m.pnlUsdNet
+          });
+          const newSz = Math.max(
+            MIN_POSITION_SIZE_USD,
+            Math.round(open.sizeUsd * input.riskExposure.switchSizeMultiplier * 100) / 100
+          );
+          const rev: PaperOpenPositionRecord = {
+            openedAt: closedAt,
+            symbol: open.symbol,
+            side: plan.openSide,
+            entryPrice: closePrice,
+            leverage: open.leverage,
+            sizeUsd: newSz,
+            initialSizeUsd: newSz,
+            partialExitStage: 0,
+            realizedPnl: 0,
+            strategyVersion: "paper-v1",
+            sourceSignal: open.sourceSignal,
+            sourceRunPath: open.sourceRunPath,
+            latestSnapshotPath: input.latestPath,
+            latestMetaPath: input.metaPath,
+            timestampSnapshotPath: input.filePath,
+            ...(Number.isFinite(snap.fundingRate) ? { openFundingRate: snap.fundingRate } : {}),
+            trailingExtremePrice: closePrice,
+            adaptiveModeAtEntry: open.adaptiveModeAtEntry,
+            regimeAtEntry: "TREND",
+            executorAtEntry: "TREND",
+            entryStage: Math.min(3, (open.entryStage ?? 1) + 1),
+            status: "open"
+          };
+          remaining.push(rev);
+          await this.store.appendJsonlLine("reports/events.jsonl", {
+            ts: Date.now(),
+            type: "EXIT_TREND_SWITCH",
+            phase: "open",
+            symbol: symKey,
+            side: plan.openSide,
+            size_usd: newSz
+          });
+          continue;
+        }
+      }
+
       // 1. Hard SL check
       let isSlTriggered = false;
       if (typeof open.stopPrice === "number" && Number.isFinite(open.stopPrice)) {
@@ -1209,41 +1395,11 @@ export class PaperEngine {
         isSlTriggered = m.pnlPctNet <= slThresh;
       }
 
-      const { longUsd, shortUsd } = marginsForSymbol(opens, String(open.symbol));
-      if (exitLane === "RANGE") {
-        this.logger.info(
-          "range_engine_tick",
-          evaluateRangeEngineForSymbol({
-            symbol: String(open.symbol),
-            lastPrice: closePrice,
-            boxHigh: snap.boxHigh,
-            boxLow: snap.boxLow,
-            boxPos: snap.boxPos,
-            marketMode: input.marketMode,
-            longMarginUsd: longUsd,
-            shortMarginUsd: shortUsd,
-            rangeCycleCountPrior: 0,
-            rangeLadderLevelPrior: open.partialExitStage ?? 0
-          })
-        );
-      } else {
-        this.logger.info(
-          "trend_engine_tick",
-          evaluateTrendEngineForSymbol({
-            mark: closePrice,
-            entryPrice: open.entryPrice,
-            atr: snap.atr,
-            marketMode: input.marketMode,
-            priorBreakoutDirection: "none",
-            pyramidLevelPrior: open.entryStage ?? 1
-          })
-        );
-      }
-
       if (isSlTriggered) {
         const cr = "stop_loss" as const;
         const closedRow = toClosed(cr, m, open.sizeUsd);
         await this.positions.appendClosed(closedRow);
+        this.lastExitReasonLabel = "손절 청산";
         this.logger.info(exitFullLogKey(cr), {
           ...exitDetailBase(open, m),
           exitReason: cr
@@ -1536,10 +1692,31 @@ export class PaperEngine {
     this.lastEntryDecision = null;
 
     for (const first of candidates) {
-      const entryStage = next.find((o) => o.symbol === first.symbol)?.entryStage ?? 0;
-      const existingIdx = next.findIndex((o) => o.symbol === first.symbol);
       const res = input.decisionBySymbol.get(String(first.symbol));
       if (!res) continue;
+      const intentSide = res.intentSide ?? (first.signal === "paper_short_candidate" ? "short" : "long");
+      const existingOpen = next.find((o) => o.symbol === first.symbol && o.side === intentSide);
+      const entryStage = existingOpen?.entryStage ?? 0;
+      const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === intentSide);
+      const otherLeg = next.some((o) => o.symbol === first.symbol && o.side !== intentSide);
+      if (otherLeg && this.lastRiskExposure && !this.lastRiskExposure.allowHedge) {
+        await this.emitPipelineEventsFromDecision(
+          first,
+          {
+            ...res,
+            decision: {
+              ...res.decision,
+              final_decision: "SKIP",
+              reject_reason: "EXECUTION_DISABLED",
+              execution_disabled_reason: "hedge_disabled_by_risk_policy"
+            },
+            adaptiveResult: null
+          },
+          nowTs,
+          entryStage
+        );
+        continue;
+      }
 
       if (existingIdx >= 0) {
         const scaled = await this.tryPaperPositionScaleIn(next[existingIdx], res, first, nowTs);
@@ -1578,10 +1755,29 @@ export class PaperEngine {
         continue;
       }
 
+      const blockNew =
+        !this.lastRiskExposure?.allowNewEntry || this.lastMarketMode?.routing.newEntryPolicy === "paused";
+      if (existingIdx < 0 && blockNew) {
+        await this.emitPipelineEventsFromDecision(
+          first,
+          {
+            ...res,
+            decision: {
+              ...res.decision,
+              final_decision: "SKIP",
+              reject_reason: "REGIME_NO_TRADE"
+            },
+            adaptiveResult: null
+          },
+          nowTs,
+          entryStage
+        );
+        continue;
+      }
+
       const decision = res.executorDecision!;
       const adaptive = res.adaptiveResult;
       const sym = String(first.symbol);
-      const intentSide = res.intentSide!;
 
       await this.store.appendJsonlLine("reports/events.jsonl", {
         ts: Date.now(),
@@ -1700,14 +1896,21 @@ export class PaperEngine {
           stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null
         });
 
+        let entrySizeUsd = adaptive.sizeUsd;
+        if (this.lastRiskExposure && this.lastMarketMode?.routing.newEntryPolicy === "reduced") {
+          entrySizeUsd = Math.max(
+            MIN_POSITION_SIZE_USD,
+            Math.round(adaptive.sizeUsd * this.lastRiskExposure.sizeMultiplier * 100) / 100
+          );
+        }
         const record: PaperOpenPositionRecord = {
           openedAt: Date.now(),
           symbol: first.symbol,
           side: adaptive.direction,
           entryPrice: first.lastPrice,
           leverage: levScaled,
-          sizeUsd: adaptive.sizeUsd,
-          initialSizeUsd: adaptive.sizeUsd,
+          sizeUsd: entrySizeUsd,
+          initialSizeUsd: entrySizeUsd,
           partialExitStage: 0,
           realizedPnl: 0,
           stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : undefined,

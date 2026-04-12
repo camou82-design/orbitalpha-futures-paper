@@ -398,6 +398,10 @@ export type PaperEngineState = Readonly<{
   risk_exposure?: RiskExposureOutput;
   /** 직전 틱 설명 레이어 */
   explanation?: PaperExplanationFields;
+  /** 대시보드용 직전 청산 라벨(설명·이벤트와 동기화) */
+  last_exit_reason?: string;
+  /** 대시보드용 직전 TREND 스위칭 라벨 */
+  last_switch_reason?: string;
 }>;
 
 /** One leg in `positions/open.json` (JSON array of up to `paperMaxOpenPositions` records). */
@@ -492,6 +496,16 @@ export type PaperExitType =
 /** Market Mode Selector 단일 출력(틱 단위). */
 export type PaperMarketMode = "RANGE" | "TREND" | "MIXED" | "TRANSITION" | "NO_TRADE";
 
+export type PaperEngineRoutingKind = "RANGE" | "TREND" | "IDLE";
+
+/** Selector가 결정하는 상위 라우팅(실제 엔진 지휘). */
+export type EngineRoutingDecision = Readonly<{
+  activeEngine: PaperEngineRoutingKind;
+  /** 신규 진입 정책: 전량 / 축소 / 보류 */
+  newEntryPolicy: "full" | "reduced" | "paused";
+  routingReasonLabel: string;
+}>;
+
 export type MarketModeSelectorOutput = Readonly<{
   marketMode: PaperMarketMode;
   /** 0–100 정규화 점수. */
@@ -505,7 +519,10 @@ export type MarketModeSelectorOutput = Readonly<{
   /** 0–1 리스크 스로틀(높을수록 보수). */
   riskThrottle: number;
   modeReasonLabel: string;
+  routing: EngineRoutingDecision;
 }>;
+
+export type RangeBoxZone = "upper" | "lower" | "mid";
 
 /** RANGE 엔진이 심볼·틱마다 유지하는 상태(양방향·박스 기준). */
 export type RangeEngineState = Readonly<{
@@ -514,6 +531,8 @@ export type RangeEngineState = Readonly<{
   boxMid: number;
   /** 0–1 또는 엔진 정의 스케일. */
   boxPosition: number;
+  /** 상단/하단/중앙 과밀 구간 분기. */
+  boxZone: RangeBoxZone;
   rangeCycleCount: number;
   longExposure: number;
   shortExposure: number;
@@ -522,6 +541,8 @@ export type RangeEngineState = Readonly<{
   rangeLadderLevel: number;
   /** RANGE 철학상 후보 소멸만으로 청산할지 — 기본 false. */
   candidateLostExitAllowed: boolean;
+  /** 박스 붕괴(구조적 이탈) 감지. */
+  boxBreakout: boolean;
 }>;
 
 export type TrendBreakoutDirection = "up" | "down" | "none";
@@ -564,6 +585,19 @@ export type PaperExplanationFields = Readonly<{
   entryReasonLabel: string;
   exitReasonLabel: string;
   switchReasonLabel: string;
+  activeEngine: PaperEngineRoutingKind;
+  newEntryPolicy: EngineRoutingDecision["newEntryPolicy"];
+}>;
+
+/** 대시보드/번들 상단 운영 요약(엔진 상태에서 파생). */
+export type PaperOperationalSnapshot = Readonly<{
+  modeReasonLabel: string;
+  engineReasonLabel: string;
+  riskReasonLabel: string;
+  activeEngine: PaperEngineRoutingKind;
+  newEntryPolicy: EngineRoutingDecision["newEntryPolicy"];
+  lastExitReasonLabel: string;
+  lastSwitchReasonLabel: string;
 }>;
 
 /** Appended to `data/positions/history.json` when a paper position is closed. */
@@ -612,7 +646,10 @@ export type PaperClosedPositionRecord = Readonly<{
   | "trend_break_exit"
   | "regime_exit"
   | "partial_exit_1"
-  | "partial_exit_2";
+  | "partial_exit_2"
+  | "range_box_break"
+  | "structural_regime_shift"
+  | "trend_switch";
   /** 표준 종료 유형 (내부 코드). */
   exitType: PaperExitType;
   /** 사용자·리포트용 종료 사유 문구. */

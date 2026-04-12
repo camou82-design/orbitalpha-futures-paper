@@ -28,14 +28,16 @@ function isPaperOpenRecord(x: unknown): x is PaperOpenPositionRecord {
   return o.status === "open" && typeof o.symbol === "string";
 }
 
-/** Last write wins if duplicate symbols (defensive). */
+/** 심볼+방향 단위 유일(양방향 RANGE: 동일 심볼 롱/숏 동시 보유). */
 function dedupeOpensBySymbol(list: readonly PaperOpenPositionRecord[]): PaperOpenPositionRecord[] {
   const seen = new Set<string>();
   const out: PaperOpenPositionRecord[] = [];
   for (const r of list) {
     const sym = String(r.symbol);
-    if (seen.has(sym)) continue;
-    seen.add(sym);
+    const side = r.side === "short" ? "short" : "long";
+    const key = `${sym}:${side}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     out.push(r);
   }
   return out;
