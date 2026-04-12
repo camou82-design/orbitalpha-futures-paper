@@ -247,14 +247,14 @@ function latestCloseMetaBySymbol(
       const es = o.entryStageAtClose;
       const closeReason =
         cr === "candidate_lost" ||
-        cr === "take_profit" ||
-        cr === "stop_loss" ||
-        cr === "trailing_stop" ||
-        cr === "time_based_exit" ||
-        cr === "trend_break_exit" ||
-        cr === "regime_exit" ||
-        cr === "partial_exit_1" ||
-        cr === "partial_exit_2"
+          cr === "take_profit" ||
+          cr === "stop_loss" ||
+          cr === "trailing_stop" ||
+          cr === "time_based_exit" ||
+          cr === "trend_break_exit" ||
+          cr === "regime_exit" ||
+          cr === "partial_exit_1" ||
+          cr === "partial_exit_2"
           ? cr
           : undefined;
       const entryStageAtClose = typeof es === "number" && Number.isFinite(es) ? es : undefined;
@@ -1175,9 +1175,16 @@ export class PaperEngine {
       const highWater = Math.max(open.highestPnlPctNet ?? m.pnlPctNet, m.pnlPctNet);
       open = { ...open, highestPnlPctNet: highWater };
 
-      // 1. Hard SL check (global safety)
-      const slThresh = stopLossPctForRegime(regimeForExit);
-      if (m.pnlPctNet <= slThresh) {
+      // 1. Hard SL check
+      let isSlTriggered = false;
+      if (typeof open.stopPrice === "number" && Number.isFinite(open.stopPrice)) {
+        isSlTriggered = open.side === "long" ? closePrice <= open.stopPrice : closePrice >= open.stopPrice;
+      } else {
+        const slThresh = stopLossPctForRegime(regimeForExit);
+        isSlTriggered = m.pnlPctNet <= slThresh;
+      }
+
+      if (isSlTriggered) {
         const cr = "stop_loss" as const;
         const closedRow: PaperClosedPositionRecord = {
           openedAt: open.openedAt,
@@ -1780,6 +1787,8 @@ export class PaperEngine {
           sizeUsd: adaptive.sizeUsd,
           initialSizeUsd: adaptive.sizeUsd,
           partialExitStage: 0,
+          realizedPnl: 0,
+          stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : undefined,
           strategyVersion: "paper-v1",
           sourceSignal,
           sourceRunPath: input.candidateRunPath,

@@ -12,6 +12,7 @@ import type {
   PaperSymbolDecisionRecord
 } from "../models/types";
 import type { MarketRegime } from "../strategy/market-regime-detector";
+import { stopLossPctForRegime } from "../strategy/regime-exit";
 import type { RiskControlDecision } from "./risk-control-layer";
 import type { FuturesMarketMode } from "../strategy/live-market-mode";
 import { runFuturesAdaptiveEntry, type FuturesAdaptiveEntryResult } from "../strategy/live-entry-pipeline";
@@ -1684,7 +1685,27 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         order_build_fail_stage: null,
         qty: null,
         price: sn.lastPrice,
-        stopLoss: null,
+        stopLoss: (() => {
+          const slThresh = stopLossPctForRegime(input.regime);
+          // Protective SL: fallback to regime SL %
+          const baseSlPrice = intentSide === "long"
+            ? sn.lastPrice * (1 + slThresh) // slThresh is negative
+            : sn.lastPrice * (1 - slThresh);
+
+          // ATR-based SL if available (2.5 * ATR)
+          if (atr_pct && atr_pct > 0) {
+            const atrSlDist = sn.lastPrice * atr_pct * 2.5;
+            const atrSlPrice = intentSide === "long"
+              ? sn.lastPrice - atrSlDist
+              : sn.lastPrice + atrSlDist;
+
+            // Use the more conservative one (closer to price for protection)
+            return intentSide === "long"
+              ? Math.max(baseSlPrice, atrSlPrice)
+              : Math.min(baseSlPrice, atrSlPrice);
+          }
+          return baseSlPrice;
+        })(),
         takeProfit: null,
         riskReward: rr,
         atr_pct,
