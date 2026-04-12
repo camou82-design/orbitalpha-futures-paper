@@ -917,9 +917,16 @@ export class PaperEngine {
       decisionBySymbol.set(String(sym), res);
 
       const decisionSnap = snapshots.find((s) => s.symbol === sym);
-      if (decisionSnap) {
+      if (decisionSnap || res.executorDecision) {
         const d = res.decision;
-        const isHighwayExecutor = res.executorDecision?.executor === "TREND" || res.executorDecision?.detail?.highwayValidityScore !== undefined;
+        const exDetail = res.executorDecision?.detail;
+
+        // Force HIGHWAY_CORE if Highway metrics are present or regime is TREND
+        const isHighwayExecutor =
+          res.executorDecision?.executor === "TREND" ||
+          exDetail?.highwayValidityScore !== undefined ||
+          exDetail?.alignmentQualityScore !== undefined ||
+          regimeDetected.regime === "TREND";
 
         this.logger.info("PAPER_ENTRY_LINE", {
           symbol: String(sym),
@@ -929,35 +936,42 @@ export class PaperEngine {
           entry_blocked: d.reject_reason !== null ? d.reject_reason : false,
           final_signal: d.final_decision === "ENTER" ? d.final_signal_state : "none",
 
-          // Primary Highway Metrics
-          alignment_quality_score: res.executorDecision?.detail?.alignmentQualityScore,
-          highway_validity_score: res.executorDecision?.detail?.highwayValidityScore,
-          ema_spacing_health_score: res.executorDecision?.detail?.emaSpacingHealthScore,
-          pullback_quality_score: res.executorDecision?.detail?.pullbackQualityScore,
-          rebound_strength_score: res.executorDecision?.detail?.reboundStrengthScore,
-          volume_support_score: res.executorDecision?.detail?.volumeSupportScore,
-          trend_exhaustion_score: res.executorDecision?.detail?.trendExhaustionScore,
-          entry_risk_score: res.executorDecision?.detail?.entryRiskScore,
+          // --- PRIMARY HIGHWAY METRICS ---
+          highway_validity_score: exDetail?.highwayValidityScore,
+          alignment_quality_score: exDetail?.alignmentQualityScore,
+          ema_spacing_health_score: exDetail?.emaSpacingHealthScore,
+          pullback_quality_score: exDetail?.pullbackQualityScore,
+          rebound_strength_score: exDetail?.reboundStrengthScore,
+          volume_support_score: exDetail?.volumeSupportScore,
+          trend_exhaustion_score: exDetail?.trendExhaustionScore,
+          entry_risk_score: exDetail?.entryRiskScore,
 
-          // Legacy Auxiliary Diagnostics
-          legacy_base_signal: decisionSnap.signal,
-          legacy_trend_ok: decisionSnap.trendOk,
-          legacy_ema_gap: decisionSnap.emaGap,
-          legacy_sideways_mode: decisionSnap.qualityScore > 0,
-          legacy_candidate_strength: decisionSnap.candidateStrength,
-          legacy_quality_score: decisionSnap.qualityScore,
-          legacy_signal_strength: paperSignalStrengthLabel(decisionSnap.qualityScore, this.config.paperEntryRelaxed),
-          gate_expected_move: decisionSnap.gateExpectedMove,
+          // --- EXECUTION DETAILS ---
+          stage1_result_code: d.stage1_result_code,
+          reject_reason: d.reject_reason,
+          guidance: d.guidance,
+          required_move_pct: d.required_move_pct,
+          shortfall_pct: d.shortfall_pct,
 
-          range_confidence: decisionSnap.rangeConfidence,
-          box_cohesion: decisionSnap.boxCohesion01,
-          breakout_failure_rate: decisionSnap.breakoutFailureRate,
-          range_oscillation_score: decisionSnap.rangeOscillationScore,
-          trend_weakness_score: decisionSnap.trendWeaknessScore,
-          regime_exit_risk: decisionSnap.regimeExitRisk,
-          range_cycle_count: decisionSnap.rangeCycleCount,
-          range_ladder_level: decisionSnap.rangeLadderLevel,
-          regime_state_diag: decisionSnap.regimeStateDiag,
+          // --- AUXILIARY LEGACY DIAGNOSTICS ---
+          legacy_base_signal: decisionSnap?.signal ?? "none",
+          legacy_trend_ok: decisionSnap?.trendOk ?? false,
+          legacy_ema_gap: decisionSnap?.emaGap ?? null,
+          legacy_quality_score: decisionSnap?.qualityScore ?? 0,
+          legacy_candidate_strength: decisionSnap?.candidateStrength ?? null,
+          legacy_signal_strength: decisionSnap ? paperSignalStrengthLabel(decisionSnap.qualityScore, this.config.paperEntryRelaxed) : null,
+
+          // --- RANGE/BOX AUXILIARY ---
+          range_confidence: decisionSnap?.rangeConfidence,
+          box_cohesion: decisionSnap?.boxCohesion01,
+          breakout_failure_rate: decisionSnap?.breakoutFailureRate,
+          range_oscillation_score: decisionSnap?.rangeOscillationScore,
+          trend_weakness_score: decisionSnap?.trendWeaknessScore,
+          regime_exit_risk: decisionSnap?.regimeExitRisk,
+          range_cycle_count: decisionSnap?.rangeCycleCount,
+          range_ladder_level: decisionSnap?.rangeLadderLevel,
+          regime_state_diag: decisionSnap?.regimeStateDiag,
+
           paper_entry_relaxed: this.config.paperEntryRelaxed
         });
       }
