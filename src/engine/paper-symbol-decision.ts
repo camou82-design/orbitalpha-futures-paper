@@ -407,6 +407,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   let signal_state: PaperSignalState = "NONE";
   let regime_state = regimeToState(input.regime, input.regimeUnknown);
+  const originalRegimeState = regime_state;
   let edge_state: PaperEdgeState = "PASS";
   let risk_state: PaperRiskState = "PASS";
   let execution_state: PaperExecutionState = "PAPER_READY";
@@ -851,7 +852,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   /**
    * regimeUnknown: BTC 5m 최소 봉 미만 → regime_state UNKNOWN.
    */
-  const originalRegimeState = regime_state;
   let regimeFallbackApplied = false;
   let regimeFallbackReason: string | null = null;
   let stage1ResultCodeOverride: import("../models/types").PaperStage1ResultCode | null = null;
