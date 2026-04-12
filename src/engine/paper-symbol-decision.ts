@@ -25,7 +25,7 @@ import { PIPELINE_VERSION } from "./decision-funnel";
 
 /** RANGE·Stage0·RISK_FAIL_REENTRY: 부분익절/TP 계열 청산 후 동일 심볼 재진입 대기만 완화(손절·증액 단계 제외). */
 const RANGE_STAGE0_REENTRY_RELAX_MULT = 0.35;
-const RANGE_STAGE0_REENTRY_RELAX_MIN_MS = 45_000;
+const RANGE_STAGE0_REENTRY_RELAX_MIN_MS = 25_000;
 
 function isRangeStage0ReentryRelaxCloseReason(cr: unknown): boolean {
   if (cr == null || cr === "stop_loss") return false;
@@ -250,6 +250,9 @@ function pack(
     regime?: "TREND" | "RANGE" | "NO_TRADE";
     stage1_signal_relaxed?: boolean;
     signal_relax_reason?: string | null;
+    regime_original_state?: PaperRegimeState;
+    regime_fallback_applied?: boolean;
+    regime_fallback_reason?: string | null;
   }
 ): PaperSymbolDecision {
   return {
@@ -316,7 +319,10 @@ function pack(
     currentStage: fields.currentStage,
     regime: fields.regime,
     stage1_signal_relaxed: fields.stage1_signal_relaxed,
-    signal_relax_reason: fields.signal_relax_reason
+    signal_relax_reason: fields.signal_relax_reason,
+    regime_original_state: fields.regime_original_state,
+    regime_fallback_applied: fields.regime_fallback_applied,
+    regime_fallback_reason: fields.regime_fallback_reason
   };
 }
 
@@ -499,6 +505,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       stage1_cost_micro_size_mult?: number | null;
       currentStage?: number;
       regime?: "TREND" | "RANGE" | "NO_TRADE";
+      regime_original_state?: PaperRegimeState;
+      regime_fallback_applied?: boolean;
+      regime_fallback_reason?: string | null;
     }>,
     res: {
       intentSide: "long" | "short" | null;
@@ -585,7 +594,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       currentStage: extra.currentStage !== undefined ? extra.currentStage : input.currentStage,
       regime: extra.regime !== undefined ? extra.regime : input.regime,
       stage1_signal_relaxed: extra.stage1_signal_relaxed ?? stage1SignalRelaxed,
-      signal_relax_reason: extra.signal_relax_reason ?? signalRelaxReason
+      signal_relax_reason: extra.signal_relax_reason ?? signalRelaxReason,
+      regime_original_state: extra.regime_original_state ?? originalRegimeState,
+      regime_fallback_applied: extra.regime_fallback_applied ?? regimeFallbackApplied,
+      regime_fallback_reason: extra.regime_fallback_reason ?? regimeFallbackReason
     }),
     ...res
   });
@@ -731,6 +743,29 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   /**
    * regimeUnknown: BTC 5m 최소 봉 미만 → regime_state UNKNOWN.
+   */
+  const originalRegimeState = regime_state;
+  let regimeFallbackApplied = false;
+  let regimeFallbackReason: string | null = null;
+  let stage1ResultCodeOverride: import("../models/types").PaperStage1ResultCode | null = null;
+
+  if (regime_state === "UNKNOWN" && input.currentStage === 0 && stage1SignalRelaxed) {
+    // Stage 1 soft candidate + UNKNOWN regime -> Fallback to RANGE if safety criteria met
+    const boxPos = sn?.boxPos ?? 0.5;
+    const boxNotCentered = boxPos < 0.45 || boxPos > 0.55;
+    const qualityHighEnough = sn.qualityScore >= 35;
+
+    if (boxNotCentered && qualityHighEnough) {
+      regime_state = "RANGE";
+      strategy_executor = "RANGE";
+      regimeFallbackApplied = true;
+      regimeFallbackReason = "stage1_unknown_fallback_to_range_soft_candidate_safe";
+      stage1ResultCodeOverride = "STAGE1_UNKNOWN_REGIME_RANGE_FALLBACK";
+      supplemental_reasons.push("STAGE1_UNKNOWN_REGIME_RANGE_FALLBACK_APPLIED");
+    }
+  }
+
+  /**
    * Stage 2+ 는 항상 차단. Stage 1 + isAmbiguous 일 때만 통과(레거시 완화).
    */
   const unknownBlocksEntry =
@@ -753,9 +788,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     if (isRelaxReason && entryStageAtClose < 2) {
       reentry_cooldown_applied = true;
-      reentry_cooldown_reason = `range_v2_relax_${String(closeReason)}`;
+      reentry_cooldown_reason = `range_v3_relax_reentry_cooldown_${String(closeReason)}`;
 
-      const relaxMult = 0.1; // Phase 2: 90% reduction
+      const relaxMult = 0.05; // Phase 3: Further relaxation (95% reduction)
       const baseCooldownMs = input.reentryCooldownMs;
       reentry_cooldown_original_ms = baseCooldownMs;
 
@@ -782,7 +817,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         ai_decision: "N/A",
         adaptive_decision: "N/A",
         guidance: input.isAmbiguous ? "애매한 장세 관망 중" : "적합한 레짐 없음",
-        stage1_result_code: "STAGE1_BLOCKED_REGIME",
+        stage1_result_code: stage1ResultCodeOverride ?? "STAGE1_BLOCKED_REGIME",
         required_move_pct: null,
         shortfall_pct: 0
       },
@@ -944,7 +979,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         waitMs = relaxed;
         reentry_cooldown_applied = true;
         reentry_cooldown_effective_ms = relaxed;
-        reentry_cooldown_reason = "range_stage0_reentry_relax_partial_or_tp_not_sl_not_stage2plus";
+        reentry_cooldown_reason = `range_v3_relax_reentry_cooldown_${String(meta.closeReason)}`;
       }
     }
 
@@ -1617,11 +1652,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         supplemental_reasons,
         auto_entry_triggered: input.autoEntryTriggered,
         stage1_result_code:
-          execution_state === "STAGE1_EXEC_PENDING"
-            ? "STAGE1_EXEC_PENDING"
-            : costWarningStage1
-              ? "STAGE1_COST_WARNING"
-              : "STAGE1_ENTERED",
+          stage1ResultCodeOverride ?? (
+            execution_state === "STAGE1_EXEC_PENDING"
+              ? "STAGE1_EXEC_PENDING"
+              : costWarningStage1
+                ? "STAGE1_COST_WARNING"
+                : "STAGE1_ENTERED"
+          ),
         required_move_pct,
         shortfall_pct,
         cost_warning_applied: costWarningStage1,

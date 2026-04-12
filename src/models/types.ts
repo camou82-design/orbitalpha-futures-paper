@@ -146,7 +146,8 @@ export type PaperStage1ResultCode =
   | "STAGE1_BLOCKED_REGIME"
   | "STAGE1_BLOCKED_SIGNAL"
   | "STAGE1_BLOCKED_DATA"
-  | "STAGE1_LONG_ONLY_SHORT_DEFERRED";
+  | "STAGE1_LONG_ONLY_SHORT_DEFERRED"
+  | "STAGE1_UNKNOWN_REGIME_RANGE_FALLBACK";
 
 export type PaperSignalState = "NONE" | "LONG_CANDIDATE" | "SHORT_CANDIDATE";
 export type PaperRegimeState = "TREND" | "RANGE" | "NO_TRADE" | "UNKNOWN";
@@ -326,6 +327,10 @@ export type PaperSymbolDecisionRecord = Readonly<{
   final_signal_state?: string;
   /** 숏 실행 불가 사유(구조화·EXECUTION_DISABLED 외 서술) */
   execution_disabled_reason?: string | null;
+  /** 진단: UNKNOWN 레짐에서의 FALLBACK 관측용 */
+  regime_original_state?: PaperRegimeState;
+  regime_fallback_applied?: boolean;
+  regime_fallback_reason?: string | null;
 }>;
 
 /** Minimal row shape for funnel math. */
