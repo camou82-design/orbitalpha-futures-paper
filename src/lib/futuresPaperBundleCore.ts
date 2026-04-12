@@ -66,25 +66,21 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
 
   const policyLine =
     newEntryPolicy === "full"
-      ? "신규 진입 정책: 전량 진입"
+      ? "진입: 전량"
       : newEntryPolicy === "reduced"
-        ? "신규 진입 정책: 축소 진입"
-        : "신규 진입 정책: 보류";
+        ? "진입: 축소"
+        : "진입: 보류";
 
-  const engineLine =
-    activeEngine === "RANGE"
-      ? "현재 활성 엔진: RANGE"
-      : activeEngine === "TREND"
-        ? "현재 활성 엔진: TREND"
-        : "현재 활성 엔진: 없음(관망)";
+  const engineLineShort =
+    activeEngine === "RANGE" ? "활성 엔진: RANGE" : activeEngine === "TREND" ? "활성 엔진: TREND" : "활성 엔진: 없음";
 
   const dashboardLines = {
-    currentMarketJudgment: `현재 시장 판단: ${modeReasonLabel}`,
-    currentActiveEngine: engineLine,
+    currentMarketJudgment: `시장 판단: ${modeReasonLabel}`,
+    currentActiveEngine: engineLineShort,
     newEntryPolicyLine: policyLine,
-    currentRiskState: `현재 리스크 상태: ${riskReasonLabel}`,
-    lastExitReasonLine: `직전 종료 이유: ${lastExitReasonLabel}`,
-    lastSwitchReasonLine: `직전 스위칭 이유: ${lastSwitchReasonLabel}`
+    currentRiskState: `리스크: ${riskReasonLabel}`,
+    lastExitReasonLine: `직전 종료: ${lastExitReasonLabel}`,
+    lastSwitchReasonLine: `직전 전환: ${lastSwitchReasonLabel}`
   };
 
   return {

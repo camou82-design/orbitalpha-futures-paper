@@ -504,6 +504,8 @@ export type EngineRoutingDecision = Readonly<{
   /** 신규 진입 정책: 전량 / 축소 / 보류 */
   newEntryPolicy: "full" | "reduced" | "paused";
   routingReasonLabel: string;
+  /** MIXED/TRANSITION 등: 초소형 탐색만(리스크에서 추가 축소). */
+  probeEntryOnly?: boolean;
 }>;
 
 export type MarketModeSelectorOutput = Readonly<{

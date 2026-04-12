@@ -13,14 +13,14 @@ export type ExplanationInput = Readonly<{
   switchHint?: string;
 }>;
 
-function labelForActiveEngine(a: PaperEngineRoutingKind): string {
+function shortEngineLine(a: PaperEngineRoutingKind): string {
   switch (a) {
     case "RANGE":
-      return "활성 엔진: RANGE(양방향 박스)";
+      return "활성 엔진: RANGE";
     case "TREND":
-      return "활성 엔진: TREND(돌파·스위칭)";
+      return "활성 엔진: TREND";
     default:
-      return "활성 엔진: 없음(관망)";
+      return "활성 엔진: 없음";
   }
 }
 
@@ -30,15 +30,16 @@ function labelForActiveEngine(a: PaperEngineRoutingKind): string {
 export function buildPaperExplanation(input: ExplanationInput): PaperExplanationFields {
   const { marketMode, risk } = input;
   const routing = marketMode.routing;
-  const engineReasonLabel = `${labelForActiveEngine(routing.activeEngine)} — ${routing.routingReasonLabel}`;
+  const probe = routing.probeEntryOnly === true ? " · 소형 탐색만" : "";
+  const engineReasonLabel = `${shortEngineLine(routing.activeEngine)} — ${routing.routingReasonLabel}${probe}`;
 
   return {
     modeReasonLabel: marketMode.modeReasonLabel,
     engineReasonLabel,
     riskReasonLabel: risk.riskReasonLabel,
-    entryReasonLabel: input.entryHint?.trim() ? input.entryHint! : "직전 틱 진입 설명 없음",
-    exitReasonLabel: input.exitHint?.trim() ? input.exitHint! : "직전 틱 청산 설명 없음",
-    switchReasonLabel: input.switchHint?.trim() ? input.switchHint! : "직전 틱 스위칭 없음",
+    entryReasonLabel: input.entryHint?.trim() ? input.entryHint! : "진입 이벤트 없음",
+    exitReasonLabel: input.exitHint?.trim() ? input.exitHint! : "청산 이벤트 없음",
+    switchReasonLabel: input.switchHint?.trim() ? input.switchHint! : "전환 없음",
     activeEngine: routing.activeEngine,
     newEntryPolicy: routing.newEntryPolicy
   };

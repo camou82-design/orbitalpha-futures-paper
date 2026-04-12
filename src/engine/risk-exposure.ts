@@ -93,6 +93,9 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
   if (marketMode.routing.newEntryPolicy === "reduced") {
     sizeMultiplier *= 0.65;
   }
+  if (marketMode.routing.probeEntryOnly === true) {
+    sizeMultiplier *= 0.42;
+  }
 
   const maxSlots = Math.max(1, config.paperMaxOpenPositions);
   const perSlot = 100;

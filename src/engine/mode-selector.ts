@@ -13,6 +13,8 @@ export type ModeSelectorInput = Readonly<{
   errorCount: number;
   /** 대표 변동성 프록시(0–1 스케일), 없으면 0.5 */
   volatilityProxy?: number;
+  /** 최근 1시간 TREND 스위칭(청산) 횟수 — 전환 구간 정책용 */
+  recentTrendSwitchCount1h?: number;
 }>;
 
 function clamp01(n: number): number {
@@ -35,10 +37,66 @@ function utcSessionProfile(fetchedAt: number): string {
   return "other_utc";
 }
 
+function refineMixedTransition(
+  base: EngineRoutingDecision,
+  marketMode: PaperMarketMode,
+  gap: number,
+  ctx: Readonly<{
+    vol: number;
+    sessionProfile: string;
+    recentTrendSwitchCount1h: number;
+    fetchedAt: number;
+  }>
+): EngineRoutingDecision {
+  if (marketMode !== "MIXED" && marketMode !== "TRANSITION") return base;
+
+  if (ctx.recentTrendSwitchCount1h >= 4) {
+    return {
+      activeEngine: "IDLE",
+      newEntryPolicy: "paused",
+      routingReasonLabel: "전환 구간 · 최근 스위칭 잦음 — 관망",
+      probeEntryOnly: false
+    };
+  }
+
+  if (base.newEntryPolicy === "paused" && base.activeEngine === "IDLE") {
+    return { ...base, probeEntryOnly: false };
+  }
+
+  let probe = false;
+  const tags: string[] = [];
+  if (ctx.vol >= 0.66) {
+    probe = true;
+    tags.push("변동↑ 소형만");
+  }
+  if (ctx.sessionProfile === "asia_quiet" && Math.abs(gap) < 0.12) {
+    probe = true;
+    tags.push("저유동·경계 협소");
+  }
+  const uh = new Date(ctx.fetchedAt).getUTCHours();
+  if ((ctx.sessionProfile === "eu_overlap" || (uh >= 17 && uh <= 21)) && ctx.vol > 0.48) {
+    probe = true;
+    tags.push("저녁·전환");
+  }
+
+  const extra = tags.length > 0 ? ` · ${tags.join(" · ")}` : "";
+  return {
+    ...base,
+    routingReasonLabel: base.routingReasonLabel + extra,
+    probeEntryOnly: probe
+  };
+}
+
 function resolveRouting(
   marketMode: PaperMarketMode,
   rangeConfidence: number,
-  trendConfidence: number
+  trendConfidence: number,
+  ctx: Readonly<{
+    vol: number;
+    sessionProfile: string;
+    recentTrendSwitchCount1h: number;
+    fetchedAt: number;
+  }>
 ): EngineRoutingDecision {
   const rc = rangeConfidence;
   const tc = trendConfidence;
@@ -48,44 +106,45 @@ function resolveRouting(
     return {
       activeEngine: "IDLE",
       newEntryPolicy: "paused",
-      routingReasonLabel: "NO_TRADE — 신규 진입 보류"
+      routingReasonLabel: "거래 보류 구간"
     };
   }
 
   if (marketMode === "MIXED" || marketMode === "TRANSITION") {
+    let branch: EngineRoutingDecision;
     if (Math.abs(gap) < MIXED_AMBIGUITY_DELTA) {
-      return {
+      branch = {
         activeEngine: "IDLE",
         newEntryPolicy: "paused",
-        routingReasonLabel: `혼합·전환 — 신뢰도 근접(|${rc.toFixed(2)}−${tc.toFixed(2)}|=${Math.abs(gap).toFixed(2)} < ${MIXED_AMBIGUITY_DELTA}) — 신규 진입 보류`
+        routingReasonLabel: "혼합·전환 — 신뢰도 차이 좁음 — 관망"
       };
-    }
-    if (gap >= RANGE_BEATS_TREND_MIN_GAP) {
-      return {
+    } else if (gap >= RANGE_BEATS_TREND_MIN_GAP) {
+      branch = {
         activeEngine: "RANGE",
         newEntryPolicy: "reduced",
-        routingReasonLabel: `혼합·전환 — RANGE 우세(Δ≥${RANGE_BEATS_TREND_MIN_GAP}) — 축소·RANGE 위주`
+        routingReasonLabel: "혼합·전환 — 횡보 쪽 우세 — 축소만"
       };
-    }
-    if (gap <= -TREND_BEATS_RANGE_MIN_GAP) {
-      return {
+    } else if (gap <= -TREND_BEATS_RANGE_MIN_GAP) {
+      branch = {
         activeEngine: "TREND",
         newEntryPolicy: "reduced",
-        routingReasonLabel: `혼합·전환 — TREND 우세(Δ≤−${TREND_BEATS_RANGE_MIN_GAP}) — 축소·TREND 위주`
+        routingReasonLabel: "혼합·전환 — 추세 쪽 우세 — 축소만"
+      };
+    } else {
+      branch = {
+        activeEngine: "IDLE",
+        newEntryPolicy: "reduced",
+        routingReasonLabel: "혼합·전환 — 중간대 — 소형만"
       };
     }
-    return {
-      activeEngine: "IDLE",
-      newEntryPolicy: "reduced",
-      routingReasonLabel: `혼합·전환 — 중간대(−${TREND_BEATS_RANGE_MIN_GAP}<Δ<${RANGE_BEATS_TREND_MIN_GAP}) — 축소·관망`
-    };
+    return refineMixedTransition(branch, marketMode, gap, ctx);
   }
 
   if (marketMode === "RANGE") {
     return {
       activeEngine: "RANGE",
       newEntryPolicy: "full",
-      routingReasonLabel: "RANGE 우세 — 횡보 엔진 단독 활성"
+      routingReasonLabel: "횡보 우세 — RANGE"
     };
   }
 
@@ -93,7 +152,7 @@ function resolveRouting(
     return {
       activeEngine: "TREND",
       newEntryPolicy: "full",
-      routingReasonLabel: "TREND 우세 — 돌파·추세 엔진 단독 활성"
+      routingReasonLabel: "추세 우세 — TREND"
     };
   }
 
@@ -168,7 +227,12 @@ export function evaluateMarketModeSelector(input: ModeSelectorInput): MarketMode
 
   const rc = clamp01(rangeConfidence);
   const tc = clamp01(trendConfidence);
-  const routing = resolveRouting(marketMode, rc, tc);
+  const routing = resolveRouting(marketMode, rc, tc, {
+    vol,
+    sessionProfile,
+    recentTrendSwitchCount1h: input.recentTrendSwitchCount1h ?? 0,
+    fetchedAt
+  });
 
   return {
     marketMode,

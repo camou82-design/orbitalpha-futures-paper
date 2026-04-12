@@ -165,6 +165,83 @@ export function evaluateRangeEngineForSymbol(input: RangeEngineInput): RangeEngi
   };
 }
 
+/** 짧은 시간 내 RANGE 재진입 과다 방지(창 길이·최대 횟수). */
+export const RANGE_REOPEN_WINDOW_MS = 30 * 60_000;
+export const RANGE_REOPEN_MAX_PER_WINDOW = 2;
+const REOPEN_HEDGE_MAX_ABS = 0.52;
+const EXPOSURE_HEADROOM = 0.92;
+
+export type RangeReopenGateInput = Readonly<{
+  /** TP 후 재진입 ARM이 유효할 것. */
+  armed: boolean;
+  state: RangeEngineState;
+  intentSide: "long" | "short";
+  maxLongExposure: number;
+  maxShortExposure: number;
+  longUsd: number;
+  shortUsd: number;
+  /** 헤드룸 검사용 의도 크기(USD). */
+  proposedEntryUsd: number;
+  /** `RANGE_REOPEN_WINDOW_MS` 안의 재진입 성공 횟수. */
+  reopenCountInWindow: number;
+}>;
+
+/**
+ * 익절 ARM만으로 열지 않고, 박스 가장자리·헤지·노출·반복 제한을 동시에 만족할 때만 재오픈 허용.
+ */
+export function evaluateRangeReopenAllowed(input: RangeReopenGateInput): Readonly<{
+  allowed: boolean;
+  blockReason: string;
+}> {
+  if (!input.armed) {
+    return { allowed: false, blockReason: "재진입 ARM 없음" };
+  }
+  const st = input.state;
+  if (!st.reopenEligible) {
+    return { allowed: false, blockReason: "모드상 재진입 비허용" };
+  }
+  if (st.boxBreakout) {
+    return { allowed: false, blockReason: "박스 이탈(붕괴) 구간" };
+  }
+  if (st.boxZone === "mid") {
+    return { allowed: false, blockReason: "중앙대 — 왕복 가장자리 아님" };
+  }
+  if (Math.abs(st.hedgeBalance) > REOPEN_HEDGE_MAX_ABS) {
+    return { allowed: false, blockReason: "헤지 편중 과다" };
+  }
+  if (input.reopenCountInWindow >= RANGE_REOPEN_MAX_PER_WINDOW) {
+    return { allowed: false, blockReason: "재진입 빈도 상한" };
+  }
+  const addL = input.intentSide === "long" ? input.proposedEntryUsd : 0;
+  const addS = input.intentSide === "short" ? input.proposedEntryUsd : 0;
+  if (input.longUsd + addL > input.maxLongExposure * EXPOSURE_HEADROOM) {
+    return { allowed: false, blockReason: "롱 노출 여유 부족" };
+  }
+  if (input.shortUsd + addS > input.maxShortExposure * EXPOSURE_HEADROOM) {
+    return { allowed: false, blockReason: "숏 노출 여유 부족" };
+  }
+  return { allowed: true, blockReason: "" };
+}
+
+/**
+ * 왕복 사이클 누적에 따른 진입·증액 배수(표시·주문 공통).
+ */
+export function rangeCycleEntryMultiplier(rangeCycleCount: number): number {
+  const c = Math.min(12, Math.max(0, rangeCycleCount));
+  return Math.max(0.55, 1 - 0.035 * c);
+}
+
+/**
+ * 레더·헤지 누적에 따른 반대 레그/추가 진입 축소.
+ */
+export function rangeLadderLegMultiplier(rangeLadderLevel: number, hedgeBalance: number): number {
+  const ladder = Math.min(5, Math.max(0, rangeLadderLevel));
+  const hb = Math.abs(hedgeBalance);
+  const ladderPart = Math.max(0.48, 1 - 0.09 * ladder);
+  const hedgePart = hb > 0.48 ? Math.max(0.55, 1 - 0.22 * (hb - 0.48)) : 1;
+  return Math.max(0.45, Math.min(1, ladderPart * hedgePart));
+}
+
 /** 동일 심볼 오픈 배열에서 롱/숏 마진 합산. */
 export function marginsForSymbol(
   opens: readonly PaperOpenPositionRecord[],

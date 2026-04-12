@@ -67,8 +67,16 @@ import {
 import { evaluateMarketModeSelector } from "./mode-selector";
 import { evaluateRiskExposure } from "./risk-exposure";
 import { buildPaperExplanation } from "./explanation-layer";
-import { evaluateRangeEngineForSymbol, evaluateRangeStructuralExit, marginsForSymbol } from "./range-engine";
-import { evaluateTrendEngineForSymbol, planTrendSwitch } from "./trend-engine";
+import {
+  evaluateRangeEngineForSymbol,
+  evaluateRangeStructuralExit,
+  evaluateRangeReopenAllowed,
+  marginsForSymbol,
+  rangeCycleEntryMultiplier,
+  rangeLadderLegMultiplier,
+  RANGE_REOPEN_WINDOW_MS
+} from "./range-engine";
+import { evaluateTrendEngineForSymbol, planTrendSwitch, trendPyramidAllowsScaleIn } from "./trend-engine";
 
 const EP = {
   ticker: "/v5/market/tickers",
@@ -394,8 +402,19 @@ export class PaperEngine {
   private rangeReopenArmedUntilBySymbol = new Map<string, number>();
   /** 직전 틱 `evaluateRangeEngineForSymbol` 결과(진입 크기·래더 연동). */
   private lastTickRangeEvalBySymbol = new Map<string, ReturnType<typeof evaluateRangeEngineForSymbol>>();
+  /** TREND 스위칭 시각(1h 카운트 → selector). */
+  private trendSwitchTimestampsMs: number[] = [];
+  /** RANGE 재진입 성공 시각(윈도 내 횟수 제한). */
+  private rangeReopenTimestampsBySymbol = new Map<string, number[]>();
+  private trendFollowScoreBySymbol = new Map<string, number>();
   private lastExitReasonLabel = "";
   private lastSwitchReasonLabel = "";
+
+  private pruneTrendSwitches1h(now: number): number {
+    const cutoff = now - 3_600_000;
+    this.trendSwitchTimestampsMs = this.trendSwitchTimestampsMs.filter((t) => t > cutoff);
+    return this.trendSwitchTimestampsMs.length;
+  }
 
   constructor(
     private readonly config: EngineConfig,
@@ -622,7 +641,8 @@ export class PaperEngine {
       fetchedAt,
       snapshotCount: snapshots.length,
       errorCount: errors.length,
-      volatilityProxy
+      volatilityProxy,
+      recentTrendSwitchCount1h: this.pruneTrendSwitches1h(fetchedAt)
     });
     this.lastMarketMode = marketModeOut;
     const riskExposureOut = evaluateRiskExposure({
@@ -746,7 +766,27 @@ export class PaperEngine {
       });
       this.lastTickRangeEvalBySymbol.set(rrKey, rsEval);
       const armed = this.rangeReopenArmedUntilBySymbol.get(rrKey) ?? 0;
-      const rangeReopenCooldownBypass = armed > nowTick && rsEval.reopenEligible;
+      const reopenRecent =
+        this.rangeReopenTimestampsBySymbol.get(rrKey)?.filter((t) => t > nowTick - RANGE_REOPEN_WINDOW_MS) ?? [];
+      const intentSideForReopen = snap.signal === "paper_short_candidate" ? ("short" as const) : ("long" as const);
+      const proposedUsd = Math.max(
+        MIN_POSITION_SIZE_USD,
+        this.lastRiskExposure
+          ? Math.round(DEFAULT_PAPER_SIZE_USD * this.lastRiskExposure.sizeMultiplier * 100) / 100
+          : DEFAULT_PAPER_SIZE_USD
+      );
+      const reopenGate = evaluateRangeReopenAllowed({
+        armed: armed > nowTick,
+        state: rsEval,
+        intentSide: intentSideForReopen,
+        maxLongExposure: this.lastRiskExposure!.maxLongExposure,
+        maxShortExposure: this.lastRiskExposure!.maxShortExposure,
+        longUsd,
+        shortUsd,
+        proposedEntryUsd: proposedUsd,
+        reopenCountInWindow: reopenRecent.length
+      });
+      const rangeReopenCooldownBypass = reopenGate.allowed;
 
       const res = evaluatePaperSymbolEntry({
         config: this.config,
@@ -921,6 +961,7 @@ export class PaperEngine {
         this.trendHoldMemoryBySymbol.delete(sk);
         this.trendPyramidLevelBySymbol.delete(sk);
         this.trendBreakoutBySymbol.delete(sk);
+        this.trendFollowScoreBySymbol.delete(sk);
       }
     }
 
@@ -1313,6 +1354,7 @@ export class PaperEngine {
         this.trendBreakoutBySymbol.set(symKey, trendState.breakoutDirection);
         this.trendHoldMemoryBySymbol.set(symKey, trendState.holdMemory);
         this.trendPyramidLevelBySymbol.set(symKey, trendState.pyramidLevel);
+        this.trendFollowScoreBySymbol.set(symKey, trendState.trendFollowScore);
         this.logger.info("trend_engine_tick", trendState);
       }
 
@@ -1390,6 +1432,7 @@ export class PaperEngine {
           await this.positions.appendClosed(closedRow);
           this.lastExitReasonLabel = "추세 반대 돌파로 청산";
           this.lastSwitchReasonLabel = trendState.trendSwitchReasonLabel;
+          this.trendSwitchTimestampsMs.push(Date.now());
           await this.store.appendJsonlLine("reports/events.jsonl", {
             ts: Date.now(),
             type: "EXIT_TREND_SWITCH",
@@ -1977,10 +2020,11 @@ export class PaperEngine {
         if (this.lastMarketMode?.routing.activeEngine === "RANGE") {
           const rSt = this.lastTickRangeEvalBySymbol.get(symS);
           if (rSt) {
-            const hedgeHeavy = Math.max(0.5, 1 - 0.08 * Math.min(5, rSt.rangeLadderLevel));
+            const cycleM = rangeCycleEntryMultiplier(rSt.rangeCycleCount);
+            const legM = rangeLadderLegMultiplier(rSt.rangeLadderLevel, rSt.hedgeBalance);
             entrySizeUsd = Math.max(
               MIN_POSITION_SIZE_USD,
-              Math.round(entrySizeUsd * hedgeHeavy * 100) / 100
+              Math.round(entrySizeUsd * cycleM * legM * 100) / 100
             );
           }
         }
@@ -2039,6 +2083,15 @@ export class PaperEngine {
         };
 
         next.push(record);
+        const reopenArmActive = (this.rangeReopenArmedUntilBySymbol.get(symS) ?? 0) > nowTs;
+        if (reopenArmActive && this.lastMarketMode?.routing.activeEngine === "RANGE") {
+          const arr = this.rangeReopenTimestampsBySymbol.get(symS) ?? [];
+          arr.push(Date.now());
+          this.rangeReopenTimestampsBySymbol.set(
+            symS,
+            arr.filter((t) => t > Date.now() - RANGE_REOPEN_WINDOW_MS)
+          );
+        }
         if (this.lastMarketMode?.routing.activeEngine === "RANGE") {
           this.rangeReopenArmedUntilBySymbol.delete(symS);
         }
@@ -2175,14 +2228,24 @@ export class PaperEngine {
     }
     if (existing.regimeAtEntry === "TREND") {
       const pyr = this.trendPyramidLevelBySymbol.get(symEx) ?? 0;
+      const tfs = this.trendFollowScoreBySymbol.get(symEx) ?? 0;
+      if (!trendPyramidAllowsScaleIn(tfs, pyr)) {
+        this.logger.info("scale_in_blocked_trend_pyramid_policy", {
+          symbol: existing.symbol,
+          trendFollowScore: tfs,
+          pyramidLevel: pyr
+        });
+        return null;
+      }
       const pm = Math.min(1.45, 1 + pyr * 0.09);
       incrementalSizeUsd = Math.round(incrementalSizeUsd * pm * (re?.switchSizeMultiplier ?? 1) * 100) / 100;
     }
     if (existing.regimeAtEntry === "RANGE") {
       const rSt = this.lastTickRangeEvalBySymbol.get(symEx);
       if (rSt) {
-        const hedgeHeavy = Math.max(0.52, 1 - 0.09 * Math.min(5, rSt.rangeLadderLevel));
-        incrementalSizeUsd = Math.round(incrementalSizeUsd * hedgeHeavy * 100) / 100;
+        const legM = rangeLadderLegMultiplier(rSt.rangeLadderLevel, rSt.hedgeBalance);
+        const cycM = rangeCycleEntryMultiplier(rSt.rangeCycleCount);
+        incrementalSizeUsd = Math.round(incrementalSizeUsd * legM * cycM * 100) / 100;
       }
     }
     const opensList = await this.positions.loadOpenAll();

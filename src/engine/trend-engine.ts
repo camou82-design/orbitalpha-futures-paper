@@ -137,6 +137,12 @@ export function evaluatePyramidLevel(input: Readonly<{
   return input.prior;
 }
 
+/** 추세 지속 점수·단계로 증액(scale-in) 허용 여부(TREND 전용). */
+export function trendPyramidAllowsScaleIn(trendFollowScore: number, pyramidLevel: number): boolean {
+  if (pyramidLevel <= 0) return trendFollowScore >= 0.58;
+  return trendFollowScore >= 0.53;
+}
+
 /**
  * 반대 돌파 시 청산+역신규를 한 계획으로 표현(실행은 오케스트레이터에서 2레그로 기록).
  */
@@ -200,12 +206,18 @@ export function evaluateTrendEngineForSymbol(input: TrendEngineInput): TrendEngi
   const opposed =
     (pri === "up" && breakoutDirection === "down") || (pri === "down" && breakoutDirection === "up");
 
+  /** 성급한 노이즈 반전 방지: 반대 밴드 밖 확인(hold/rebreak) + 점수 하한. */
+  const oppositeBreakoutConfirmed = hold.holdState === "hold" || hold.holdState === "rebreak";
+
   const routingTrend =
     input.marketMode.routing.activeEngine === "TREND" || input.marketMode.marketMode === "MIXED";
 
   const switchEligible =
     opposed &&
     breakoutDirection !== "none" &&
+    oppositeBreakoutConfirmed &&
+    trendFollowScore >= 0.52 &&
+    breakoutConfidence >= 0.42 &&
     routingTrend &&
     (input.marketMode.marketMode === "TREND" ||
       input.marketMode.marketMode === "MIXED" ||
@@ -233,11 +245,8 @@ export function evaluateTrendEngineForSymbol(input: TrendEngineInput): TrendEngi
         })
       : input.pyramidLevelPrior;
 
-  const dirKr =
-    breakoutDirection === "up" ? "상단" : breakoutDirection === "down" ? "하단" : "박스";
-  const oppKr = pri === "up" ? "상단" : pri === "down" ? "하단" : "중립";
   const trendSwitchReasonLabel = switchEligible
-    ? `${hold.label} — ${oppKr}→${dirKr} 반대 돌파, 기존 청산 후 역진입`
+    ? `반대 돌파 확인 후 전환 · ${hold.label}`
     : "스위칭 조건 미충족";
 
   return {
