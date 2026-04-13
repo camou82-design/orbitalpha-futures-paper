@@ -287,6 +287,11 @@ function pack(
     cooldown_remaining_ms?: number | null;
     same_dir_cooldown_applied?: boolean;
     blocked_regime_reason?: string | null;
+    legacy_block_reason?: string | null;
+    legacy_regime_gate?: string | null;
+    legacy_gate_source?: string | null;
+    override_by_legacy?: boolean;
+    stage1_block_origin?: string | null;
     currentStage?: number;
     regime?: "TREND" | "RANGE" | "NO_TRADE";
     stage1_signal_relaxed?: boolean;
@@ -376,6 +381,11 @@ function pack(
     cooldown_remaining_ms: fields.cooldown_remaining_ms ?? null,
     same_dir_cooldown_applied: fields.same_dir_cooldown_applied ?? false,
     blocked_regime_reason: fields.blocked_regime_reason ?? null,
+    legacy_block_reason: fields.legacy_block_reason ?? null,
+    legacy_regime_gate: fields.legacy_regime_gate ?? null,
+    legacy_gate_source: fields.legacy_gate_source ?? null,
+    override_by_legacy: fields.override_by_legacy ?? false,
+    stage1_block_origin: fields.stage1_block_origin ?? null,
     currentStage: fields.currentStage,
     regime: fields.regime,
     stage1_signal_relaxed: fields.stage1_signal_relaxed,
@@ -508,6 +518,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let cooldown_remaining_ms: number | null = null;
   let same_dir_cooldown_applied = false;
   let blocked_regime_reason: string | null = null;
+  let legacy_block_reason: string | null = null;
+  let legacy_regime_gate: string | null = null;
+  let legacy_gate_source: string | null = null;
+  let override_by_legacy = false;
+  let stage1_block_origin: string | null = null;
   let stage1SignalRelaxed = false;
   let signalRelaxReason: string | null = null;
 
@@ -589,6 +604,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       cooldown_remaining_ms?: number | null;
       same_dir_cooldown_applied?: boolean;
       blocked_regime_reason?: string | null;
+      legacy_block_reason?: string | null;
+      legacy_regime_gate?: string | null;
+      legacy_gate_source?: string | null;
+      override_by_legacy?: boolean;
+      stage1_block_origin?: string | null;
       stage1_direction_override_applied?: boolean;
       stage1_direction_override_reason?: string | null;
       original_policy_direction?: string | null;
@@ -705,6 +725,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       cooldown_remaining_ms: extra.cooldown_remaining_ms ?? cooldown_remaining_ms,
       same_dir_cooldown_applied: extra.same_dir_cooldown_applied ?? same_dir_cooldown_applied,
       blocked_regime_reason: extra.blocked_regime_reason ?? blocked_regime_reason,
+      legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
+      legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
+      legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
+      override_by_legacy: extra.override_by_legacy ?? override_by_legacy,
+      stage1_block_origin: extra.stage1_block_origin ?? stage1_block_origin,
       currentStage: extra.currentStage !== undefined ? extra.currentStage : input.currentStage,
       regime: extra.regime !== undefined ? extra.regime : input.regime,
       stage1_signal_relaxed: extra.stage1_signal_relaxed ?? stage1SignalRelaxed,
@@ -965,6 +990,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   }
 
   if (unknownBlocksEntry) {
+    stage1_block_origin = "regime_unknown_gate";
     reject_reason = input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "REGIME_UNKNOWN";
     final_decision = "REJECT";
     edge_state = "FAIL_EXPECTANCY";
@@ -994,6 +1020,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   /** NO_TRADE 는 감지기에서 위험/오류·필수 데이터 부족만 — 모호·약추세 등은 NO_TRADE 로 내리지 않음 */
   if (input.regime === "NO_TRADE") {
+    stage1_block_origin = "regime_no_trade_gate";
     reject_reason = "REGIME_NO_TRADE";
     final_decision = "REJECT";
     regime_state = "NO_TRADE";
@@ -1221,6 +1248,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   }
 
   if (final_decision === "REJECT") {
+    stage1_block_origin = stage1_block_origin ?? "pre_executor_risk_or_edge_gate";
     return ret(
       {
         execution_state: "PAPER_READY",
@@ -1309,7 +1337,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   if (!executorDecision || !executorDecision.entry_allowed) {
     const br = executorDecision?.blocked_reason;
+    legacy_block_reason = br ?? "executor_block_reason_missing";
+    legacy_regime_gate = input.currentStage === 0 && !input.isAmbiguous ? "STAGE1_BLOCKED_REGIME" : "STAGE1_EXEC_PENDING";
+    legacy_gate_source = executorDecision?.executor ? `executor_${String(executorDecision.executor).toLowerCase()}` : "executor_unknown";
+    stage1_block_origin = "legacy_executor_gate";
     reject_reason = br ? mapExecutorBlockToReject(br) : (input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "LEGACY_BLOCKED");
+    override_by_legacy = reject_reason === "LEGACY_BLOCKED" || legacy_regime_gate === "STAGE1_BLOCKED_REGIME";
     if (reject_reason === "RISK_COOLDOWN") risk_state = "COOLDOWN";
     const invalidTier = (executorDecision?.detail?.highway_invalid_tier as string | undefined) ?? null;
     const invalidReasonsRaw = executorDecision?.detail?.highway_invalid_reasons;
@@ -1344,6 +1377,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         target_stage: null,
         supplemental_reasons,
         stage1_result_code: (input.currentStage === 0 && input.isAmbiguous) ? "STAGE1_EXEC_PENDING" : "STAGE1_BLOCKED_REGIME",
+        legacy_block_reason,
+        legacy_regime_gate,
+        legacy_gate_source,
+        override_by_legacy,
+        stage1_block_origin,
         stage1_signal_relaxed: stage1SignalRelaxed,
         signal_relax_reason: signalRelaxReason,
         stage1_soft_candidate_enter_applied: stage1SoftCandidateMicroEnter,

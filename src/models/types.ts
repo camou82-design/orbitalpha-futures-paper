@@ -335,6 +335,16 @@ export type PaperSymbolDecisionRecord = Readonly<{
   same_dir_cooldown_applied?: boolean;
   /** blockedRegimes에서 내려온 원본 사유 */
   blocked_regime_reason?: string | null;
+  /** 레거시 차단 원인 (executor blocked_reason 원본) */
+  legacy_block_reason?: string | null;
+  /** 레거시 레짐 게이트 분류값 */
+  legacy_regime_gate?: string | null;
+  /** 레거시 게이트 발생 소스 */
+  legacy_gate_source?: string | null;
+  /** 신규 판단 결과가 레거시 게이트로 덮였는지 */
+  override_by_legacy?: boolean;
+  /** Stage1 차단 기원 레이어 */
+  stage1_block_origin?: string | null;
   /** Stage 1 RANGE 방향 보정 적용 여부 */
   stage1_direction_override_applied?: boolean;
   /** 방향 보정 상세 사유 */
