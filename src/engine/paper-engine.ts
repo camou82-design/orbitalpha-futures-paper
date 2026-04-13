@@ -933,6 +933,14 @@ export class PaperEngine {
 
         this.logger.info("PAPER_ENTRY_LINE", {
           paper_entry_line_trace_marker: "paper_entry_line_v2_legacy_trace",
+          sd_origin: decisionSnap?.signalDecisionOrigin ?? "missing",
+          sd_gate: decisionSnap?.signalGateBlockedReason ?? "none",
+          sd_missing: decisionSnap?.signalMissingReason ?? "none",
+          ex_block: res.executorDecision?.blocked_reason ?? "none",
+          signal_decision_origin: decisionSnap?.signalDecisionOrigin ?? "missing",
+          signal_gate_block_reason: decisionSnap?.signalGateBlockedReason ?? "none",
+          signal_missing_reason_raw: decisionSnap?.signalMissingReason ?? "none",
+          executor_blocked_reason_direct: res.executorDecision?.blocked_reason ?? "none",
           symbol: String(sym),
           decision_source: isHighwayExecutor ? "HIGHWAY_CORE" : "LEGACY_RANGE",
           legacy_block_reason: d.legacy_block_reason ?? null,
@@ -942,7 +950,6 @@ export class PaperEngine {
           stage1_block_origin: d.stage1_block_origin ?? null,
           side: res.intentSide,
           entry_intent_type: d.entry_intent_type,
-          executor_blocked_reason_direct: res.executorDecision?.blocked_reason ?? null,
           entry_blocked: res.executorDecision?.blocked_reason ?? (d.reject_reason !== null ? d.reject_reason : false),
           final_signal: d.final_decision === "ENTER" ? d.final_signal_state : "none",
 
@@ -972,9 +979,6 @@ export class PaperEngine {
 
           // --- AUXILIARY LEGACY DIAGNOSTICS ---
           legacy_base_signal: decisionSnap?.signal ?? "none",
-          signal_decision_origin: decisionSnap?.signalDecisionOrigin ?? "unknown",
-          signal_gate_block_reason: decisionSnap?.signalGateBlockedReason ?? null,
-          signal_missing_reason_raw: decisionSnap?.signalMissingReason ?? null,
           legacy_trend_ok: decisionSnap?.trendOk ?? false,
           legacy_ema_gap: decisionSnap?.emaGap ?? null,
           legacy_quality_score: decisionSnap?.qualityScore ?? 0,
