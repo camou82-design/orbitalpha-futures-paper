@@ -20,7 +20,6 @@ import { rangeExecutorEvaluateEntry } from "../strategy/executors/range-executor
 import { highwayExecutorEvaluateEntry } from "./highway-entry-executor";
 import type { AnyEntryDecision } from "../strategy/executors/types";
 import { aiApproveEntry, aiInputFromDecision } from "../ai/entry-approval";
-import { detectHighwayTrend } from "../engine/highway-trend-detector";
 import { HighwayTrendState } from "../models/types";
 import { evaluateAiHighwayQuality } from "../engine/ai-highway-filter";
 import type { PaperSignal } from "../strategy/entry-signal";
@@ -782,21 +781,31 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   intentSide = (sn.signal === "paper_long_candidate") ? "long" : (sn.signal === "paper_short_candidate" ? "short" : "none") as any;
 
   // Initial core detection and scoring
-  const highwayResult = detectHighwayTrend(input.snapshot?.candles ?? [], sym);
-  const _aiResult = evaluateAiHighwayQuality(input.snapshot?.candles ?? [], sym);
+  const _aiResult = evaluateAiHighwayQuality(input.snapshot?.candles ?? [], sym, {
+    regime: input.regime,
+    currentStage: input.currentStage,
+    boxPos: sn?.boxPos,
+    emaGap: sn?.emaGap,
+    volumeRatioProxy: sn?.volumeRatioProxy,
+    rangeConfidence: sn?.rangeConfidence,
+    boxCohesion01: sn?.boxCohesion01,
+    breakoutFailureRate: sn?.breakoutFailureRate,
+    rangeOscillationScore: sn?.rangeOscillationScore,
+    trendWeaknessScore: sn?.trendWeaknessScore
+  });
 
   // Determine executor intent based on core state
   let _entryIntent: "probe" | "standard" | "scale" | "trend" = "trend";
-  if (highwayResult.state === HighwayTrendState.VALID) {
+  if (_aiResult.state === HighwayTrendState.VALID) {
     _entryIntent = "standard";
-  } else if (highwayResult.state === HighwayTrendState.WEAK) {
+  } else if (_aiResult.state === HighwayTrendState.WEAK) {
     _entryIntent = "probe";
   }
 
   // Pre-calculate executor decision to preserve metrics in rejection paths
   executorDecision = highwayExecutorEvaluateEntry({
     intentType: _entryIntent,
-    highwayState: highwayResult.state,
+    highwayState: _aiResult.state,
     aiScores: _aiResult,
     symbol: String(sym),
     signal: sn.signal,
