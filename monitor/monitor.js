@@ -201,6 +201,17 @@
     return typeof n === "number" && Number.isFinite(n) ? formatSignedUsd(n) : "N/A";
   }
 
+  function fmtUsdPosNoDecimal(n) {
+    if (typeof n !== "number" || !Number.isFinite(n)) return "N/A";
+    return "$" + Math.round(n).toLocaleString("ko-KR");
+  }
+
+  function fmtSignedUsdPosNoDecimal(n) {
+    if (typeof n !== "number" || !Number.isFinite(n)) return "N/A";
+    const sign = n > 0 ? "+" : n < 0 ? "−" : "";
+    return sign + "$" + Math.abs(Math.round(n)).toLocaleString("ko-KR");
+  }
+
   function fmtPctPos(pnlUsd, marginUsd) {
     if (typeof marginUsd !== "number" || !Number.isFinite(marginUsd) || marginUsd <= 0) return "N/A";
     if (typeof pnlUsd !== "number" || !Number.isFinite(pnlUsd)) return "N/A";
@@ -243,6 +254,22 @@
         ? ((mark - entry) / entry) * margin * lev
         : ((entry - mark) / entry) * margin * lev;
     return gross;
+  }
+
+  const DEFAULT_TAKER_FEE_RATE = 0.0006;
+  function estimateNetPnlUsd(pos, mark) {
+    const gross = estimatePnlUsd(pos, mark);
+    if (typeof gross !== "number" || !Number.isFinite(gross)) return null;
+    const entry = coerceFinite(pos.entryPrice);
+    const lev = coerceFinite(pos.leverage);
+    const margin = entryMarginUsd(pos);
+    if (entry === null || lev === null || margin === null || entry <= 0 || lev <= 0 || margin <= 0) return gross;
+    const notionalOpen = margin * lev;
+    const exitMark = typeof mark === "number" && Number.isFinite(mark) && mark > 0 ? mark : entry;
+    const notionalClose = notionalOpen * (exitMark / entry);
+    const entryFee = notionalOpen * DEFAULT_TAKER_FEE_RATE;
+    const exitFee = notionalClose * DEFAULT_TAKER_FEE_RATE;
+    return gross - entryFee - exitFee;
   }
 
   /** 엔진이 넣은 미실현이 있으면 우선, 없으면 마크 기준 추정 */
@@ -471,7 +498,7 @@
     const mark = typeof s.lastPrice === "number" ? s.lastPrice : null;
     if (pos) {
       const sideK = pos.side === "long" ? "롱" : pos.side === "short" ? "숏" : pos.side;
-      const pnl = estimatePnlUsd(pos, mark);
+      const pnl = estimateNetPnlUsd(pos, mark);
       const pnlStr = pnl !== null ? " · 추정 손익 " + formatUsd(pnl) : "";
       return sym + " · " + sideK + " 포지션 보유 중" + pnlStr;
     }
@@ -842,7 +869,7 @@
         const n = normalizeOpenPos(pos);
         const lev = n ? n.leverage : 1;
         const mark = n ? markForOpen(bundle, sym, pos, s) : null;
-        const uPnLRaw = n ? unrealizedUsdResolved(n, mark) : null;
+        const uPnLRaw = estimateNetPnlUsd(pos, mark);
         const uPnL = uPnLRaw !== null ? uPnLRaw : n && n.margin !== null ? 0 : null;
         const margin = n ? n.margin : null;
         const uPct = fmtPctPos(uPnL, margin);
@@ -854,6 +881,7 @@
         const pes = pos.partialExitStage ?? 0;
         const sideK = pos.side === "long" ? "LONG" : pos.side === "short" ? "SHORT" : String(pos.side);
         const stopPx = n ? n.stopPx : null;
+        const stopNet = stopPx !== null ? estimateNetPnlUsd(pos, stopPx) : null;
         const entryDisp =
           n && n.entryPrice !== null ? formatPrice(n.entryPrice) : "N/A";
         const markDisp = mark !== null ? formatPrice(mark) : "N/A";
@@ -862,20 +890,20 @@
         <article class="${cardClass}">
           <div class="pos-money-strip pos-money-strip--primary" aria-label="포지션 손익 5항목">
             <div class="pos-money-cell">
-              <span class="pos-money-num tabular-nums">${esc(fmtUsdPos(margin))}</span>
+              <span class="pos-money-num tabular-nums">${esc(fmtUsdPosNoDecimal(margin))}</span>
               <span class="pos-money-lbl">진입금액(USD)</span>
             </div>
             <div class="pos-money-cell">
-              <span class="pos-money-num tabular-nums">${esc(fmtUsdPos(equity))}</span>
+              <span class="pos-money-num tabular-nums">${esc(fmtUsdPosNoDecimal(equity))}</span>
               <span class="pos-money-lbl">현재 평가금액(USD)</span>
             </div>
             <div class="pos-money-cell">
-              <span class="pos-money-num tabular-nums ${uClass}">${esc(fmtSignedUsdPos(uPnL))}</span>
-              <span class="pos-money-lbl">미실현 손익(USD)</span>
+              <span class="pos-money-num tabular-nums ${uClass}">${esc(fmtSignedUsdPosNoDecimal(uPnL))}</span>
+              <span class="pos-money-lbl">지금 청산 순손익(USD)</span>
             </div>
             <div class="pos-money-cell">
               <span class="pos-money-num tabular-nums ${uClass}">${esc(uPct)}</span>
-              <span class="pos-money-lbl">수익률</span>
+              <span class="pos-money-lbl">순수익률</span>
             </div>
             <div class="pos-money-cell">
               <span class="pos-money-num tabular-nums">${esc(fmtHoldPos(n && n.openedAt))}</span>
@@ -890,7 +918,7 @@
             <div class="pos-sub-item"><span class="pos-sub-k">Mark</span><span class="pos-sub-v tabular-nums">${esc(markDisp)}</span></div>
             <div class="pos-sub-item"><span class="pos-sub-k">누적 실현</span><span class="pos-sub-v tabular-nums ${rClass}">${esc(fmtRealizedLabel(realized))}</span></div>
             <div class="pos-sub-item"><span class="pos-sub-k">익절 진행</span><span class="pos-sub-v tabular-nums">${esc(String(pes))}/3 · 진입 ${esc(String(esN))}/3</span></div>
-            <div class="pos-sub-item"><span class="pos-sub-k">손절가(Stop)</span><span class="pos-sub-v tabular-nums">${esc(fmtStopLabel(stopPx))}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">손절 시 순손익</span><span class="pos-sub-v tabular-nums">${esc(fmtSignedUsdPos(stopNet))}</span></div>
           </div>
           <details class="sym-details">
             <summary>레버리지·파이프라인·펀딩 상세</summary>
@@ -899,6 +927,7 @@
               <dt>평균 진입가</dt><dd>${esc(entryDisp)}</dd>
               <dt>현재가(Mark)</dt><dd>${esc(markDisp)}</dd>
               <dt>손절가</dt><dd>${esc(fmtStopLabel(stopPx))}</dd>
+              <dt>손절 시 순손익</dt><dd>${esc(fmtSignedUsdPos(stopNet))}</dd>
               ${typeof pos.unrealizedPnlPct === "number" ? `<dt>엔진 uPnL%</dt><dd>${esc(String(pos.unrealizedPnlPct.toFixed(2)))}%</dd>` : ""}
               ${pip ? `<dt>파이프라인</dt><dd>v${esc(pipVer)}</dd>` : ""}
               ${sym === "BTCUSDT" && pip && pip.signal_missing_reason
