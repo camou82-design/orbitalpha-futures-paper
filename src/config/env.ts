@@ -120,7 +120,9 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     const x = Number(paperFixedTotalCostUsdRaw);
     if (Number.isFinite(x) && x > 0) paperFixedTotalCostUsd = Math.min(1_000_000, Math.max(0.01, x));
   }
-  const okxDemoEnabled = parseBool(env.OKX_DEMO_ENABLED, false);
+  const okxDemoEnvRequested = parseBool(env.OKX_DEMO_ENABLED, false);
+  const okxExchangeAuthOptIn = parseBool(env.ORBITALPHA_OKX_EXCHANGE_ENABLED, false);
+  const okxDemoEnabled = okxDemoEnvRequested && okxExchangeAuthOptIn;
   const okxDemoBaseUrl = (env.OKX_DEMO_BASE_URL ?? "https://www.okx.com").trim();
   const okxDemoApiKey = (env.OKX_DEMO_API_KEY ?? "").trim();
   const okxDemoApiSecret = (env.OKX_DEMO_API_SECRET ?? "").trim();
@@ -162,6 +164,8 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperMinEdgeRr,
     paperMinEdgeVolatilityMove,
     paperFixedTotalCostUsd,
+    okxDemoEnvRequested,
+    okxExchangeAuthOptIn,
     okxDemoEnabled,
     okxDemoBaseUrl,
     okxDemoApiKey,

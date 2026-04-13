@@ -107,7 +107,18 @@ export type EngineConfig = Readonly<{
    * Env: `PAPER_FIXED_TOTAL_COST_USD` (e.g. 30).
    */
   paperFixedTotalCostUsd: number | null;
-  /** OKX demo adapter toggle (strictly isolated from live env). */
+  /**
+   * Raw `OKX_DEMO_ENABLED` env (diagnostics). Effective signed REST is `okxDemoEnabled`.
+   */
+  okxDemoEnvRequested: boolean;
+  /**
+   * Explicit opt-in `ORBITALPHA_OKX_EXCHANGE_ENABLED` for OKX signed REST (orders/positions/balance).
+   * Default false: fills/opens/closes/PnL stay on internal paper paths only; market data stays public Bybit.
+   */
+  okxExchangeAuthOptIn: boolean;
+  /**
+   * Effective OKX demo adapter: `okxDemoEnvRequested && okxExchangeAuthOptIn`.
+   */
   okxDemoEnabled: boolean;
   /** OKX demo REST base URL (default https://www.okx.com). */
   okxDemoBaseUrl: string;

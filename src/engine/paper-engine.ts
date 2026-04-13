@@ -598,6 +598,17 @@ export class PaperEngine {
     } else {
       this.okxDemo = null;
     }
+    if (config.okxDemoEnvRequested && !config.okxExchangeAuthOptIn) {
+      this.logger.info("okx_exchange_auth_disabled", {
+        detail:
+          "OKX_DEMO_ENABLED is on but ORBITALPHA_OKX_EXCHANGE_ENABLED is not true — no signed OKX calls; paper execution + public market data only"
+      });
+    }
+    this.logger.info("paper_data_and_execution_mode", {
+      market_data: "bybit_public_unauthenticated",
+      okx_signed_rest_active: config.okxDemoEnabled,
+      position_fill_pnl_path: config.okxDemoEnabled ? "paper_json_plus_okx_submit" : "paper_json_only"
+    });
     this.logger.info("paper_entry_gate_config", {
       paper_entry_relaxed: config.paperEntryRelaxed,
       paper_gate_min_move_mult: config.paperGateMinMoveMultiplier,
@@ -979,6 +990,20 @@ export class PaperEngine {
           const msg = e instanceof Error ? e.message : String(e);
           this.logger.error("decisions_jsonl_append_failed", { error: msg, symbol: String(sym) });
         }
+        this.logger.info(
+          "PAPER_TRADE_BLOCK_DECOMPOSITION",
+          this.paperTradeBlockDecompositionPayload(sym, null, res, {
+            nowTick,
+            regime: regimeDetected.regime,
+            regimeUnknown,
+            isAmbiguous: regimeDetected.isAmbiguous,
+            maxPositionsReached: false,
+            paperMaxOpenPositions: this.config.paperMaxOpenPositions,
+            openPositionsTotal: opensAfterClose.length,
+            hasOpenForSymbol: false,
+            dataReady: false
+          })
+        );
         continue;
       }
       const openPos = opensAfterClose.find((o) => o.symbol === snap.symbol && o.status === "open");
@@ -1313,6 +1338,9 @@ export class PaperEngine {
           range_mid_wait_applied: d.range_mid_wait_applied ?? false,
           range_final_trade_side_by_zone: d.range_final_trade_side_by_zone ?? null,
           range_stage0_branch_proof: d.range_stage0_branch_proof ?? null,
+          range_upper_edge_structure_ok: exDetail?.range_upper_edge_structure_ok ?? null,
+          range_upper_edge_structure_failed_checks: exDetail?.range_upper_edge_structure_failed_checks ?? null,
+          range_upper_edge_structure_one_liner: exDetail?.range_upper_edge_structure_one_liner ?? null,
           range_existing_long_reversal_exit_applied:
             this.rangeReversalExitThisTickBySymbol.get(String(sym))?.range_existing_long_reversal_exit_applied ?? false,
           range_existing_short_reversal_exit_applied:
@@ -1395,6 +1423,20 @@ export class PaperEngine {
           signal_decision_origin: payload.signal_decision_origin
         });
         this.logger.info("PAPER_ENTRY_LINE", payload);
+        this.logger.info(
+          "PAPER_TRADE_BLOCK_DECOMPOSITION",
+          this.paperTradeBlockDecompositionPayload(sym, decisionSnap ?? snap, res, {
+            nowTick,
+            regime: regimeDetected.regime,
+            regimeUnknown,
+            isAmbiguous: regimeDetected.isAmbiguous,
+            maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions && !hasOpen,
+            paperMaxOpenPositions: this.config.paperMaxOpenPositions,
+            openPositionsTotal: opensAfterClose.length,
+            hasOpenForSymbol: hasOpen,
+            dataReady: true
+          })
+        );
       }
 
       try {
@@ -1932,6 +1974,216 @@ export class PaperEngine {
   }
 
   /**
+   * 최종 decision + 모니터 UI가 쓰는 스냅/판정 필드 + 리스크·재진입 활성 값을 한 로그에 묶어
+   * “왜 이번 틱에 체결이 더 안 나오는지” 분해한다.
+   */
+  private paperTradeBlockDecompositionPayload(
+    sym: MarketSymbol,
+    snap: SymbolSnapshot | null,
+    res: EvaluatePaperSymbolEntryResult,
+    ctx: Readonly<{
+      nowTick: number;
+      regime: MarketRegime;
+      regimeUnknown: boolean;
+      isAmbiguous: boolean;
+      maxPositionsReached: boolean;
+      paperMaxOpenPositions: number;
+      openPositionsTotal: number;
+      hasOpenForSymbol: boolean;
+      dataReady: boolean;
+    }>
+  ): Record<string, unknown> {
+    const d = res.decision;
+    const risk = this.lastRisk;
+    const rexp = this.lastRiskExposure;
+    const ex = res.executorDecision;
+    const exDetail = ex?.detail as Record<string, unknown> | undefined;
+    const mm = this.lastMarketMode;
+
+    const br = risk?.blockedRegimes?.[ctx.regime];
+    const regimeBlockActive = br != null && br.until > ctx.nowTick;
+
+    const uiSourceSnapshot =
+      snap == null
+        ? { snapshot_absent: true as const }
+        : {
+            snapshot_absent: false as const,
+            signal: snap.signal,
+            signal_decision_origin: snap.signalDecisionOrigin ?? null,
+            signal_gate_blocked_reason: snap.signalGateBlockedReason ?? null,
+            signal_missing_reason: snap.signalMissingReason ?? null,
+            quality_score: snap.qualityScore ?? null,
+            candidate_strength: snap.candidateStrength ?? null,
+            trend_ok: snap.trendOk ?? null,
+            regime_state_diag: snap.regimeStateDiag ?? null,
+            box_pos: snap.boxPos ?? null,
+            range_confidence: snap.rangeConfidence ?? null,
+            box_cohesion_01: snap.boxCohesion01 ?? null,
+            breakout_failure_rate: snap.breakoutFailureRate ?? null,
+            range_oscillation_score: snap.rangeOscillationScore ?? null,
+            range_signal_origin: snap.rangeSignalOrigin ?? null,
+            range_signal_downgraded: snap.rangeSignalDowngraded ?? null,
+            range_signal_downgrade_reason: snap.rangeSignalDowngradeReason ?? null
+          };
+
+    const uiSourceDecision = {
+      regime: d.regime ?? null,
+      current_stage: d.currentStage ?? null,
+      signal_state: d.signal_state ?? null,
+      final_signal_state: d.final_signal_state ?? null,
+      final_decision: d.final_decision,
+      reject_reason: d.reject_reason ?? null,
+      stage1_result_code: d.stage1_result_code ?? null,
+      entry_blocked: d.entry_blocked ?? null,
+      guidance: d.guidance ?? null,
+      intent_side: res.intentSide,
+      adaptive_ok: res.adaptiveOk,
+      ai_gate_passed: res.aiGatePassed,
+      executor: ex?.executor ?? null,
+      executor_entry_allowed: ex?.entry_allowed ?? null,
+      executor_blocked_reason: ex?.blocked_reason ?? null,
+      range_zone_detected: d.range_zone_detected ?? null,
+      range_mid_wait_applied: d.range_mid_wait_applied ?? null,
+      range_center_wait: d.range_center_wait ?? null,
+      range_upper_edge_near: d.range_upper_edge_near ?? null,
+      range_short_allowed: d.range_short_allowed ?? null,
+      range_short_allowed_reason: d.range_short_allowed_reason ?? null,
+      box_position_diag: d.box_position_diag ?? null,
+      range_stage0_engine_taken: d.range_stage0_engine_taken ?? false,
+      range_stage0_exit_reason: d.range_stage0_exit_reason ?? null,
+      range_final_selected_side: d.range_final_selected_side ?? null,
+      range_signal_reason: typeof exDetail?.range_signal_reason === "string" ? exDetail.range_signal_reason : null,
+      range_gate_result: typeof exDetail?.range_gate_result === "string" ? exDetail.range_gate_result : null,
+      range_upper_edge_structure_ok: exDetail?.range_upper_edge_structure_ok ?? null,
+      range_upper_edge_structure_one_liner: exDetail?.range_upper_edge_structure_one_liner ?? null
+    };
+
+    const blockedRegimesCompact =
+      risk?.blockedRegimes != null
+        ? (Object.entries(risk.blockedRegimes) as [MarketRegime, { until: number; reason: string } | undefined][])
+            .filter(([, v]) => v != null)
+            .map(([reg, v]) =>
+              v
+                ? {
+                    regime: reg,
+                    until: v.until,
+                    remaining_ms: Math.max(0, v.until - ctx.nowTick),
+                    reason: v.reason
+                  }
+                : null
+            )
+            .filter((x): x is NonNullable<typeof x> => x != null)
+        : [];
+
+    let oneLineWhyNoEnter: string;
+    if (!ctx.dataReady) {
+      oneLineWhyNoEnter = "DATA_NOT_READY: symbol snapshot missing → entry pipeline short-circuited";
+    } else if (ctx.maxPositionsReached && !ctx.hasOpenForSymbol) {
+      oneLineWhyNoEnter = `CAPACITY: open_slots_full (total=${ctx.openPositionsTotal} max=${ctx.paperMaxOpenPositions}) and this symbol has no position → new entry blocked`;
+    } else if (risk?.engineBlocked === true) {
+      oneLineWhyNoEnter = `RISK_ENGINE_BLOCKED: ${risk.engineBlockReasons?.[0] ?? "no_reason"}`;
+    } else if (ctx.regime === "NO_TRADE") {
+      oneLineWhyNoEnter = "REGIME_NO_TRADE: detector returned NO_TRADE for this tick";
+    } else if (regimeBlockActive && br) {
+      oneLineWhyNoEnter = `RISK_REGIME_SUSPENDED: regime=${ctx.regime} remaining_ms=${Math.max(0, br.until - ctx.nowTick)} reason=${br.reason}`;
+    } else if (rexp && !rexp.allowNewEntry) {
+      oneLineWhyNoEnter = `EXPOSURE_NEW_ENTRY_OFF: ${rexp.riskReasonLabel}`;
+    } else if (d.final_decision === "ENTER" && res.adaptiveOk !== true) {
+      oneLineWhyNoEnter = "FINAL_ENTER but adaptiveOk=false → adaptive sizing / build did not complete ok";
+    } else if (d.final_decision === "ENTER") {
+      oneLineWhyNoEnter = "FINAL_ENTER with adaptiveOk=true (if still no fill, check order path / exchange sim)";
+    } else {
+      const parts = [
+        `final_decision=${d.final_decision}`,
+        d.reject_reason ? `reject=${d.reject_reason}` : null,
+        d.entry_blocked ? `entry_blocked=${d.entry_blocked}` : null,
+        ex?.blocked_reason ? `executor_block=${ex.blocked_reason}` : null,
+        d.risk_cooldown_subreason ? `risk_cooldown_sub=${d.risk_cooldown_subreason}` : null,
+        typeof d.cooldown_remaining_ms === "number" ? `cooldown_remaining_ms=${d.cooldown_remaining_ms}` : null
+      ].filter((x): x is string => x != null);
+      oneLineWhyNoEnter = parts.length > 0 ? `DECISION_PATH: ${parts.join(" | ")}` : "No single dominant block; see final_* and executor fields";
+    }
+
+    return {
+      proof_version: 1,
+      marker: "PAPER_TRADE_BLOCK_DECOMPOSITION",
+      at_ms: ctx.nowTick,
+      symbol: String(sym),
+      data_ready: ctx.dataReady,
+      final_core: {
+        final_decision: d.final_decision,
+        reject_reason: d.reject_reason ?? null,
+        stage1_result_code: d.stage1_result_code ?? null,
+        entry_blocked: d.entry_blocked ?? null,
+        execution_state: d.execution_state ?? null,
+        strategy_executor: d.strategy_executor ?? null,
+        guidance: d.guidance ?? null
+      },
+      ui_source_snapshot: uiSourceSnapshot,
+      ui_source_decision: uiSourceDecision,
+      risk_control_tick: risk
+        ? {
+            engine_blocked: risk.engineBlocked,
+            engine_block_reasons: risk.engineBlockReasons ?? [],
+            risk_status: risk.riskStatus,
+            daily_loss_guard_triggered: risk.dailyLossGuardTriggered,
+            crash_state: risk.crashState,
+            crash_reason: risk.crashReason,
+            size_multiplier: risk.sizeMultiplier,
+            long_allow: risk.longAllow,
+            short_allow: risk.shortAllow,
+            blocked_regimes_compact: blockedRegimesCompact,
+            current_regime_block_active: regimeBlockActive,
+            current_regime_block: br
+              ? { until: br.until, remaining_ms: Math.max(0, br.until - ctx.nowTick), reason: br.reason }
+              : null
+          }
+        : null,
+      risk_exposure_tick: rexp
+        ? {
+            risk_mode: rexp.riskMode,
+            allow_new_entry: rexp.allowNewEntry,
+            allow_new_long: rexp.allowNewLong,
+            allow_new_short: rexp.allowNewShort,
+            allow_add: rexp.allowAdd,
+            size_multiplier: rexp.sizeMultiplier,
+            allow_range_bidirectional: rexp.allowRangeBidirectional,
+            block_trend_opposite_leg: rexp.blockTrendOppositeLeg,
+            risk_reason_label: rexp.riskReasonLabel
+          }
+        : null,
+      reentry_and_cooldown: {
+        reentry_cooldown_applied: d.reentry_cooldown_applied ?? false,
+        reentry_wait_ms: d.reentry_wait_ms ?? null,
+        reentry_elapsed_ms: d.reentry_elapsed_ms ?? null,
+        cooldown_remaining_ms: d.cooldown_remaining_ms ?? null,
+        risk_cooldown_subreason: d.risk_cooldown_subreason ?? null,
+        same_dir_cooldown_applied: d.same_dir_cooldown_applied ?? false,
+        range_reentry_cooldown_applied: d.range_reentry_cooldown_applied ?? false,
+        range_reentry_remaining_ms: d.range_reentry_remaining_ms ?? null,
+        range_reentry_same_direction: d.range_reentry_same_direction ?? false,
+        range_reentry_source: d.range_reentry_source ?? null,
+        blocked_regime_until_bypass_applied: d.blocked_regime_until_bypass_applied ?? false,
+        blocked_regime_until_bypass_reason: d.blocked_regime_until_bypass_reason ?? null
+      },
+      capacity: {
+        max_positions_reached: ctx.maxPositionsReached,
+        paper_max_open_positions: ctx.paperMaxOpenPositions,
+        open_positions_total: ctx.openPositionsTotal,
+        has_open_this_symbol: ctx.hasOpenForSymbol
+      },
+      regime_and_routing: {
+        detected_regime: ctx.regime,
+        regime_unknown_data: ctx.regimeUnknown,
+        is_ambiguous: ctx.isAmbiguous,
+        active_engine: mm?.routing.activeEngine ?? null,
+        new_entry_policy: mm?.routing.newEntryPolicy ?? null
+      },
+      one_line_why_no_enter: oneLineWhyNoEnter
+    };
+  }
+
+  /**
    * RANGE 구간·반전 스위치·적응형까지 한 틱에서 추적(상단 롱 편향·숏 미체결 원인 증명용).
    */
   private rangeZoneEvalProofPayload(
@@ -1968,6 +2220,9 @@ export class PaperEngine {
       range_stage0_inner_signal_reason: rangeSigReason,
       range_stage0_inner_signal_state: rangeSigState,
       range_stage0_branch_proof: d.range_stage0_branch_proof ?? null,
+      range_upper_edge_structure_ok: exDetail?.range_upper_edge_structure_ok ?? null,
+      range_upper_edge_structure_failed_checks: exDetail?.range_upper_edge_structure_failed_checks ?? null,
+      range_upper_edge_structure_one_liner: exDetail?.range_upper_edge_structure_one_liner ?? null,
       range_reversal_immediate_switch_input: revIn,
       range_stage0_engine_taken: d.range_stage0_engine_taken ?? false,
       range_zone_detected: d.range_zone_detected ?? null,

@@ -191,10 +191,53 @@ function rangeStage0EdgeStructureGate(sn: SymbolSnapshotLike): {
   };
 }
 
+function rangeStage0EdgeSubconditions(
+  edge: ReturnType<typeof rangeStage0EdgeStructureGate>
+): ReadonlyArray<{
+  id: "conf" | "cohesion" | "oscillation";
+  snapshot_field: string;
+  value_clamped_01: number;
+  threshold_min: number;
+  pass: boolean;
+  shortfall: number;
+}> {
+  const t = edge.thresholds;
+  return [
+    {
+      id: "conf",
+      snapshot_field: "rangeConfidence",
+      value_clamped_01: edge.conf,
+      threshold_min: t.conf,
+      pass: edge.conf >= t.conf,
+      shortfall: Math.max(0, t.conf - edge.conf)
+    },
+    {
+      id: "cohesion",
+      snapshot_field: "boxCohesion01",
+      value_clamped_01: edge.cohesion,
+      threshold_min: t.cohesion,
+      pass: edge.cohesion >= t.cohesion,
+      shortfall: Math.max(0, t.cohesion - edge.cohesion)
+    },
+    {
+      id: "oscillation",
+      snapshot_field: "rangeOscillationScore",
+      value_clamped_01: edge.oscillation,
+      threshold_min: t.oscillation,
+      pass: edge.oscillation >= t.oscillation,
+      shortfall: Math.max(0, t.oscillation - edge.oscillation)
+    }
+  ];
+}
+
 function buildRangeUpperLongSuppressBranchProof(args: {
   edge: ReturnType<typeof rangeStage0EdgeStructureGate>;
   rangeSignal: { signal: RangeSignalState; reason: string; side: "long" | "short" | null };
   rawSnapshotSignal: string;
+  sn: SymbolSnapshotLike;
+  boxPos: number;
+  zone: RangeBoxZone;
+  reversalImmediate: Readonly<{ preferredSide: "long" | "short" }> | null | undefined;
   gateResult: RangeGateResult;
   gateReason: string;
   entryResult: RangeEntryResult;
@@ -206,6 +249,10 @@ function buildRangeUpperLongSuppressBranchProof(args: {
     edge,
     rangeSignal,
     rawSnapshotSignal,
+    sn,
+    boxPos,
+    zone,
+    reversalImmediate,
     gateResult,
     gateReason,
     entryResult,
@@ -213,13 +260,50 @@ function buildRangeUpperLongSuppressBranchProof(args: {
     lowConfidence,
     rangeReversalSwitchMatches
   } = args;
+  const edge_subconditions = rangeStage0EdgeSubconditions(edge);
   const branch_order_upper = [
-    "reversal_immediate_switch_short_upper (if armed)",
-    "paper_short_candidate → RANGE_SHORT_CANDIDATE / range_upper_short_from_base_signal",
-    "edgeStructureOk → RANGE_SHORT_CANDIDATE / range_upper_short_priority_structure",
-    "paper_long_candidate → RANGE_SIGNAL_NONE / range_upper_suppress_long_candidate_no_inertia",
-    "else → RANGE_SIGNAL_NONE / range_upper_short_structure_not_ready"
+    "0. reversalImmediate preferredSide=short && zone=upper → RANGE_SHORT_CANDIDATE / range_reversal_immediate_switch_upper_short",
+    "1. sn.signal === paper_short_candidate → RANGE_SHORT_CANDIDATE / range_upper_short_from_base_signal",
+    "2. edgeStructureOk (conf/cohesion/oscillation thresholds) → RANGE_SHORT_CANDIDATE / range_upper_short_priority_structure",
+    "3. sn.signal === paper_long_candidate → RANGE_SIGNAL_NONE / range_upper_suppress_long_candidate_no_inertia",
+    "4. else → RANGE_SIGNAL_NONE / range_upper_short_structure_not_ready"
   ];
+  const reversalShortUpperArmed =
+    reversalImmediate != null &&
+    reversalImmediate.preferredSide === "short" &&
+    zone === "upper";
+  const step0Taken = rangeSignal.reason === "range_reversal_immediate_switch_upper_short";
+  const step1WouldMatch = sn.signal === "paper_short_candidate";
+  const step2WouldMatch = edge.ok;
+  const step3WouldMatch = sn.signal === "paper_long_candidate";
+  let firedStepIndex: number;
+  let firedStepLabel: string;
+  if (step0Taken) {
+    firedStepIndex = 0;
+    firedStepLabel = branch_order_upper[0] ?? "";
+  } else if (step1WouldMatch) {
+    firedStepIndex = 1;
+    firedStepLabel = branch_order_upper[1] ?? "";
+  } else if (step2WouldMatch) {
+    firedStepIndex = 2;
+    firedStepLabel = branch_order_upper[2] ?? "";
+  } else if (step3WouldMatch) {
+    firedStepIndex = 3;
+    firedStepLabel = branch_order_upper[3] ?? "";
+  } else {
+    firedStepIndex = 4;
+    firedStepLabel = branch_order_upper[4] ?? "";
+  }
+  const return_order_matches_code =
+    (rangeSignal.reason === "range_reversal_immediate_switch_upper_short" && firedStepIndex === 0) ||
+    (rangeSignal.reason === "range_upper_short_from_base_signal" && firedStepIndex === 1) ||
+    (rangeSignal.reason === "range_upper_short_priority_structure" && firedStepIndex === 2) ||
+    (rangeSignal.reason === "range_upper_suppress_long_candidate_no_inertia" && firedStepIndex === 3) ||
+    (rangeSignal.reason === "range_upper_short_structure_not_ready" && firedStepIndex === 4);
+  const raw_long_suppress_implies_edge_false =
+    rawSnapshotSignal === "paper_long_candidate" && rangeSignal.reason === "range_upper_suppress_long_candidate_no_inertia"
+      ? !edge.ok
+      : null;
   let range_upper_short_priority_false_because: string;
   if (range_upper_short_priority_applied) {
     range_upper_short_priority_false_because = "range_upper_short_priority_applied is true (zone upper and RANGE_SHORT_ENTRY)";
@@ -227,10 +311,10 @@ function buildRangeUpperLongSuppressBranchProof(args: {
     range_upper_short_priority_false_because = "invariant: entry short but flag false (should not happen)";
   } else if (rangeSignal.signal === "RANGE_SIGNAL_NONE" && rangeSignal.reason === "range_upper_suppress_long_candidate_no_inertia") {
     range_upper_short_priority_false_because =
-      "inner RANGE_SIGNAL_NONE from long suppress after edge/short branches; entryResult stays RANGE_ENTRY_NONE, so range_upper_short_priority_applied (requires RANGE_SHORT_ENTRY) is false";
+      "inner RANGE_SIGNAL_NONE from long suppress: edgeStructureOk was false so step 2 did not return SHORT; step 3 matched raw long → suppress; entryResult RANGE_ENTRY_NONE → range_upper_short_priority_applied false";
   } else if (rangeSignal.signal === "RANGE_SIGNAL_NONE" && rangeSignal.reason === "range_upper_short_structure_not_ready") {
     range_upper_short_priority_false_because =
-      "edgeStructureOk false → no structural short candidate; long suppress branch not reached for raw long-only ticks";
+      "edgeStructureOk false and raw not long candidate path → structure_not_ready; short priority branch skipped";
   } else if (rangeSignal.signal === "RANGE_SHORT_CANDIDATE" && gateResult !== "RANGE_GATE_PASS") {
     range_upper_short_priority_false_because = `inner short candidate (${rangeSignal.reason}) but gate blocked: ${gateResult} / ${gateReason}`;
   } else if (rangeSignal.signal === "RANGE_SHORT_CANDIDATE" && lowConfidence && !rangeReversalSwitchMatches) {
@@ -239,14 +323,48 @@ function buildRangeUpperLongSuppressBranchProof(args: {
   } else {
     range_upper_short_priority_false_because = `entryResult=${entryResult}, inner=${rangeSignal.signal}/${rangeSignal.reason}, gate=${gateResult}/${gateReason}`;
   }
+  const failedParts = edge_subconditions.filter((r) => !r.pass).map((r) => `${r.id}=${r.value_clamped_01.toFixed(3)}<${r.threshold_min}`);
+  const one_line_summary =
+    !edge.ok
+      ? `upper+raw_long: edgeStructureOk=false [${failedParts.join(", ") || edge.failed_checks.join(",")}] → step3 long suppress → inner NONE; short_priority_flag false (no RANGE_SHORT_ENTRY)`
+      : rangeSignal.signal === "RANGE_SHORT_CANDIDATE" && gateResult !== "RANGE_GATE_PASS"
+        ? `upper: edgeStructureOk=true → inner SHORT (${rangeSignal.reason}) but gate ${gateResult}: ${gateReason} → short_priority_flag false`
+        : rangeSignal.signal === "RANGE_SHORT_CANDIDATE" && lowConfidence && !rangeReversalSwitchMatches
+          ? `upper: inner SHORT but lowConfidence scores blocked gate → short_priority_flag false`
+          : `upper: ${range_upper_short_priority_false_because}`;
   return {
-    proof_version: 1,
+    proof_version: 2,
     scenario: "range_upper_raw_paper_long_candidate",
     raw_snapshot_signal: rawSnapshotSignal,
+    box_pos: boxPos,
+    zone,
     branch_order_upper,
+    edge_structure_ok: edge.ok,
+    edge_structure_failed_checks: edge.failed_checks,
+    edge_subconditions_detail: edge_subconditions,
+    edge_structure_gate: {
+      ok: edge.ok,
+      conf: edge.conf,
+      cohesion: edge.cohesion,
+      oscillation: edge.oscillation,
+      thresholds: edge.thresholds,
+      failed_checks: edge.failed_checks
+    },
+    upper_eval_runtime_trace: {
+      reversal_immediate_switch_input: reversalImmediate ?? null,
+      reversal_short_upper_armed: reversalShortUpperArmed,
+      step0_reversal_short_upper_returned: step0Taken,
+      step1_raw_is_paper_short: step1WouldMatch,
+      step2_edge_structure_ok: edge.ok,
+      step3_raw_is_paper_long: step3WouldMatch,
+      fired_step_index: firedStepIndex,
+      fired_step_label: firedStepLabel,
+      return_order_matches_code,
+      invariant_raw_long_suppress_requires_edge_false: raw_long_suppress_implies_edge_false,
+      note: "If edgeStructureOk is true, step 2 returns RANGE_SHORT_CANDIDATE before step 3; raw paper_long with suppress reason implies edge was false at runtime."
+    },
     legacy_order_bug_note:
-      "Previously paper_long_candidate was checked first, returning RANGE_SIGNAL_NONE before edgeStructureOk / short-from-base / short-priority-structure could run.",
-    edge_structure_gate: edge,
+      "Previously paper_long_candidate was checked before edgeStructureOk, so short structure never ran on long-raw ticks.",
     evaluate_range_stage0_signal_out: {
       signal: rangeSignal.signal,
       reason: rangeSignal.reason,
@@ -269,6 +387,7 @@ function buildRangeUpperLongSuppressBranchProof(args: {
     entry_result: entryResult,
     range_upper_short_priority_applied,
     range_upper_short_priority_false_because,
+    one_line_summary,
     formula:
       "range_upper_short_priority_applied := (zone === 'upper') && (entryResult === 'RANGE_SHORT_ENTRY')"
   };
@@ -1671,6 +1790,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         edge: rangeStage0EdgeStructureGate(sn),
         rangeSignal,
         rawSnapshotSignal: sn.signal,
+        sn,
+        boxPos,
+        zone,
+        reversalImmediate: input.rangeReversalImmediateSwitch,
         gateResult,
         gateReason,
         entryResult,
@@ -1711,6 +1834,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         final_entry_reason: entryResult,
         range_zone_detected: zone,
         range_zone_action_policy: RANGE_ZONE_ACTION_POLICY,
+        ...(range_stage0_branch_proof && zone === "upper" && sn.signal === "paper_long_candidate"
+          ? {
+              range_upper_edge_structure_ok: (range_stage0_branch_proof as { edge_structure_ok?: boolean }).edge_structure_ok,
+              range_upper_edge_structure_failed_checks: (range_stage0_branch_proof as { edge_structure_failed_checks?: string[] })
+                .edge_structure_failed_checks,
+              range_upper_edge_structure_one_liner: (range_stage0_branch_proof as { one_line_summary?: string }).one_line_summary
+            }
+          : {}),
         ...(range_stage0_branch_proof ? { range_stage0_branch_proof } : {})
       }
     };
