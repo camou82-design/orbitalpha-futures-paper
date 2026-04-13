@@ -4,6 +4,53 @@ import { AiHighwayQualityScores, HighwayTrendState } from "../models/types";
 import { detectHighwayTrend } from "./highway-trend-detector";
 import { Candle, MarketSymbol } from "../models/types";
 
+function buildHighwayStiffnessProof(
+  core: ReturnType<typeof detectHighwayTrend>,
+  finalAlign: number,
+  finalSpacing: number,
+  finalVol: number,
+  highwayValidity: number,
+  rangeStage0: boolean
+): Record<string, unknown> {
+  const zt = 0.02;
+  const approxZero = {
+    alignment_quality: finalAlign < zt,
+    ema_spacing_health: finalSpacing < zt,
+    volume_support: finalVol < zt
+  };
+  const collapseDrivers: string[] = [];
+  for (const r of core.invalidReasons) collapseDrivers.push(`core_reason:${r}`);
+  if (approxZero.alignment_quality) collapseDrivers.push("final_alignment_quality_near_zero");
+  if (approxZero.ema_spacing_health) collapseDrivers.push("final_ema_spacing_health_near_zero");
+  if (approxZero.volume_support) collapseDrivers.push("final_volume_support_near_zero");
+  if (core.alignmentScore < zt && !core.invalidReasons.includes("insufficient_candles_lt_60")) {
+    collapseDrivers.push("core_alignment_stack_no_credits");
+  }
+  if (core.spacingScore < 0.36) collapseDrivers.push("core_spacing_low_or_overextended");
+  if (core.volumeSupportScore < zt) collapseDrivers.push("core_volume_support_near_zero");
+  collapseDrivers.push(rangeStage0 ? "scoring_path:range_stage0_context" : "scoring_path:trend_core_default");
+  return {
+    proof_version: 1,
+    scoring_path: rangeStage0 ? "range_stage0_context" : "trend_core_default",
+    core: {
+      alignment: core.alignmentScore,
+      spacing: core.spacingScore,
+      volume_support: core.volumeSupportScore,
+      pullback_detected: core.pullbackDetected,
+      invalid_tier: core.invalidTier,
+      invalid_reasons: core.invalidReasons
+    },
+    final: {
+      alignment_quality: finalAlign,
+      ema_spacing_health: finalSpacing,
+      volume_support: finalVol,
+      highway_validity: highwayValidity
+    },
+    approx_zero: approxZero,
+    collapse_drivers: [...new Set(collapseDrivers)]
+  };
+}
+
 type HighwayScoreContext = Readonly<{
     regime?: "TREND" | "RANGE" | "NO_TRADE";
     currentStage?: number;
@@ -101,6 +148,15 @@ export function evaluateAiHighwayQuality(candles: Candle[], symbol: MarketSymbol
             : core.invalidReasons;
     }
 
+    const highwayStiffnessProof = buildHighwayStiffnessProof(
+        core,
+        alignmentQualityScore,
+        emaSpacingHealthScore,
+        volumeSupportScore,
+        highwayValidityScore,
+        rangeStage0
+    );
+
     return {
         alignmentQualityScore,
         emaSpacingHealthScore,
@@ -125,6 +181,7 @@ export function evaluateAiHighwayQuality(candles: Candle[], symbol: MarketSymbol
             coreSpacing: core.spacingScore,
             coreVolumeSupport: core.volumeSupportScore,
             finalState: state,
+            highwayStiffnessProof,
             finalScores: {
                 highwayValidityScore,
                 alignmentQualityScore,

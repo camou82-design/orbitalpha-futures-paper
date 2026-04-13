@@ -232,6 +232,8 @@ function mapExecutorBlockToReject(blocked: string | undefined): PaperDecisionRej
     case "highway_invalid_hard":
     case "highway_invalid_soft":
       return "EDGE_FAIL_EXPECTANCY";
+    case "trend_box_edge_highway_watch":
+      return "HIGHWAY_BOX_EDGE_WATCH";
     case "fee_slippage_insufficient":
       return "EDGE_FAIL_FEE";
     case "range_center_forbidden":
@@ -1595,26 +1597,105 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   supplemental_reasons.push(`AI_SCORE_CONTEXT_RANGE_STAGE0_APPLIED_${_aiResult.rangeStage0ScoringApplied ? "Y" : "N"}`);
 
   if (!useRangeStage0Engine) {
-    // Determine executor intent based on core state
-    let _entryIntent: "probe" | "standard" | "scale" | "trend" = "trend";
-    if (_aiResult.state === HighwayTrendState.VALID) {
-      _entryIntent = "standard";
-    } else if (_aiResult.state === HighwayTrendState.WEAK) {
-      _entryIntent = "probe";
+    let aiForHighway = _aiResult;
+    let skipHighwayExecutorCall = false;
+    const trendBoxEdgeBufferEligible =
+      input.regime === "TREND" &&
+      input.currentStage === 0 &&
+      typeof sn.boxPos === "number" &&
+      !_aiResult.rangeStage0ScoringApplied &&
+      _aiResult.state === HighwayTrendState.INVALID &&
+      _aiResult.invalidTier === "hard_invalid";
+    if (trendBoxEdgeBufferEligible) {
+      const z = classifyBoxZone(sn.boxPos);
+      const atBoxEdge = z === "upper" || z === "lower";
+      if (atBoxEdge) {
+        const rangeRescore = evaluateAiHighwayQuality(input.snapshot?.candles ?? [], sym, {
+          regime: "RANGE",
+          currentStage: 0,
+          boxPos: sn.boxPos,
+          emaGap: sn.emaGap,
+          volumeRatioProxy: sn.volumeRatioProxy,
+          rangeConfidence: sn.rangeConfidence,
+          boxCohesion01: sn.boxCohesion01,
+          breakoutFailureRate: sn.breakoutFailureRate,
+          rangeOscillationScore: sn.rangeOscillationScore,
+          trendWeaknessScore: sn.trendWeaknessScore
+        });
+        supplemental_reasons.push("HIGHWAY_TREND_BOX_EDGE_RANGE_RESCORE");
+        const rangeStillHardInvalid =
+          rangeRescore.state === HighwayTrendState.INVALID && rangeRescore.invalidTier === "hard_invalid";
+        const rangeEscapesHardInvalid = !rangeStillHardInvalid;
+        if (rangeEscapesHardInvalid) {
+          aiForHighway = rangeRescore;
+          supplemental_reasons.push("HIGHWAY_TREND_BOX_EDGE_RANGE_FALLBACK_APPLIED");
+        } else if (rangeRescore.highwayValidityScore > _aiResult.highwayValidityScore + 0.03) {
+          aiForHighway = rangeRescore;
+          supplemental_reasons.push("HIGHWAY_TREND_BOX_EDGE_RANGE_SCORE_PRIORITY");
+        } else {
+          executorDecision = {
+            entry_allowed: false,
+            blocked_reason: "trend_box_edge_highway_watch",
+            target_stage: 1,
+            expected_move: typeof em === "number" ? em : null,
+            total_cost: totalCost,
+            risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
+            regime: "TREND",
+            executor: "TREND",
+            breakout_state: "none",
+            pullback_state: "unknown",
+            guidance:
+              "박스 상·하단 근처 TREND: Highway 코어 과경직 — RANGE 재점수도 무효. 약추세 관망(HIGHWAY_BOX_EDGE_WATCH).",
+            detail: {
+              highway_state: "INVALID",
+              highway_invalid_tier: "hard_invalid",
+              highway_invalid_reasons: _aiResult.invalidReasons,
+              highway_stiffness_proof_trend_path: (_aiResult.aiScoreRaw as { highwayStiffnessProof?: unknown } | undefined)
+                ?.highwayStiffnessProof,
+              highway_stiffness_proof_range_rescore: (rangeRescore.aiScoreRaw as { highwayStiffnessProof?: unknown } | undefined)
+                ?.highwayStiffnessProof,
+              trend_path_ai_scores: _aiResult,
+              range_rescore_ai_scores: rangeRescore,
+              trend_box_edge_watch: true,
+              box_zone: z
+            }
+          };
+          supplemental_reasons.push("HIGHWAY_TREND_BOX_EDGE_WATCH_ONLY");
+          skipHighwayExecutorCall = true;
+        }
+      }
     }
 
-    // Pre-calculate executor decision to preserve metrics in rejection paths
-    executorDecision = highwayExecutorEvaluateEntry({
-      intentType: _entryIntent,
-      highwayState: _aiResult.state,
-      aiScores: _aiResult,
-      symbol: String(sym),
-      signal: workingSignal,
-      risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
-      currentStage: input.currentStage,
-      expectedMove: typeof em === "number" ? em : null,
-      totalCost
-    });
+    if (!skipHighwayExecutorCall) {
+      let _entryIntent: "probe" | "standard" | "scale" | "trend" = "trend";
+      if (aiForHighway.state === HighwayTrendState.VALID) {
+        _entryIntent = "standard";
+      } else if (aiForHighway.state === HighwayTrendState.WEAK) {
+        _entryIntent = "probe";
+      }
+
+      executorDecision = highwayExecutorEvaluateEntry({
+        intentType: _entryIntent,
+        highwayState: aiForHighway.state,
+        aiScores: aiForHighway,
+        symbol: String(sym),
+        signal: workingSignal,
+        risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
+        currentStage: input.currentStage,
+        expectedMove: typeof em === "number" ? em : null,
+        totalCost
+      });
+      if (trendBoxEdgeBufferEligible && aiForHighway !== _aiResult) {
+        executorDecision = {
+          ...executorDecision,
+          detail: {
+            ...executorDecision.detail,
+            trend_box_edge_range_ai_blend: true,
+            trend_path_stiffness: (_aiResult.aiScoreRaw as { highwayStiffnessProof?: unknown } | undefined)?.highwayStiffnessProof
+          }
+        };
+      }
+    }
     strategy_executor = "TREND";
   } else {
     supplemental_reasons.push("RANGE_STAGE0_ENGINE_ACTIVE");
@@ -2257,15 +2338,20 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     legacy_gate_source = executorDecision?.executor ? `executor_${String(executorDecision.executor).toLowerCase()}` : "executor_unknown";
     stage1_block_origin = "legacy_executor_gate";
     reject_reason = br ? mapExecutorBlockToReject(br) : (input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "EDGE_FAIL_EXPECTANCY");
+    if (reject_reason === "HIGHWAY_BOX_EDGE_WATCH") {
+      execution_state = "HIGHWAY_BOX_EDGE_WATCH";
+    }
     const stage1BlockCode =
       input.currentStage === 0
-        ? (input.isAmbiguous
+        ? reject_reason === "HIGHWAY_BOX_EDGE_WATCH"
           ? "STAGE1_EXEC_PENDING"
-          : reject_reason === "RISK_COOLDOWN" || reject_reason === "RISK_FAIL_REENTRY"
-            ? "STAGE1_BLOCKED_RISK"
-            : reject_reason?.startsWith("EDGE")
-              ? "STAGE1_BLOCKED_EDGE"
-              : "STAGE1_BLOCKED_REGIME")
+          : input.isAmbiguous
+            ? "STAGE1_EXEC_PENDING"
+            : reject_reason === "RISK_COOLDOWN" || reject_reason === "RISK_FAIL_REENTRY"
+              ? "STAGE1_BLOCKED_RISK"
+              : reject_reason?.startsWith("EDGE")
+                ? "STAGE1_BLOCKED_EDGE"
+                : "STAGE1_BLOCKED_REGIME"
         : "STAGE1_BLOCKED_RISK";
     override_by_legacy = stage1BlockCode === "STAGE1_BLOCKED_REGIME";
     if (reject_reason === "RISK_COOLDOWN") risk_state = "COOLDOWN";
@@ -2319,7 +2405,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       // Round 4 & 5: Active Stage 1 candidate evaluation (Execution over Review)
       final_decision = input.currentStage === 0 ? "SKIP" : "REJECT";
 
-      if (input.isAmbiguous && final_decision === "SKIP") {
+      if (input.isAmbiguous && final_decision === "SKIP" && reject_reason !== "HIGHWAY_BOX_EDGE_WATCH") {
         const ambCode = input.regime === "TREND" ? "AMBIGUOUS_TREND_REVIEW" : "AMBIGUOUS_RANGE_REVIEW";
         reject_reason = ambCode;
         execution_state = ambCode;

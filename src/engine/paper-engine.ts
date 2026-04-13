@@ -892,6 +892,7 @@ export class PaperEngine {
           rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly
         });
         decisionBySymbol.set(String(sym), res);
+        this.logHighwayCoreStiffnessProofIfNeeded(sym, res);
         if (res.decision.reject_reason === "EXECUTION_DISABLED") {
           this.logger.warn("EXECUTION_DISABLED_TOP_PROOF", {
             symbol: String(sym),
@@ -1084,6 +1085,7 @@ export class PaperEngine {
         this.reviewingState.delete(String(snap.symbol));
       }
       decisionBySymbol.set(String(sym), res);
+      this.logHighwayCoreStiffnessProofIfNeeded(sym, res);
       if (res.decision.reject_reason === "EXECUTION_DISABLED") {
         this.logger.warn("EXECUTION_DISABLED_TOP_PROOF", {
           symbol: String(sym),
@@ -1773,6 +1775,41 @@ export class PaperEngine {
       return { preferredSide: "long", reason: "lower_flatten_to_long_pending" };
     }
     return undefined;
+  }
+
+  /** HIGHWAY_CORE Stage1 과경직: alignment/spacing/volume 붕괴 원인을 executor 단에서 최상위로 남김. */
+  private logHighwayCoreStiffnessProofIfNeeded(sym: MarketSymbol, res: EvaluatePaperSymbolEntryResult): void {
+    const br = res.executorDecision?.blocked_reason;
+    const det = res.executorDecision?.detail as Record<string, unknown> | undefined;
+    if (br === "highway_invalid_hard" || br === "highway_invalid_soft") {
+      this.logger.warn("HIGHWAY_CORE_STIFFNESS_PROOF", {
+        symbol: String(sym),
+        regime: res.decision.regime ?? null,
+        final_decision: res.decision.final_decision,
+        reject_reason: res.decision.reject_reason,
+        blocked_reason: br,
+        highway_stiffness_proof: det?.highway_stiffness_proof ?? null,
+        highway_validity_score: det?.highwayValidityScore ?? null,
+        alignment_quality_score: det?.alignmentQualityScore ?? null,
+        ema_spacing_health_score: det?.emaSpacingHealthScore ?? null,
+        volume_support_score: det?.volumeSupportScore ?? null,
+        pullback_quality_score: det?.pullbackQualityScore ?? null,
+        highway_invalid_tier: det?.highway_invalid_tier ?? null,
+        highway_invalid_reasons: det?.highway_invalid_reasons ?? null,
+        score_source: det?.scoreSource ?? null
+      });
+    }
+    if (br === "trend_box_edge_highway_watch") {
+      this.logger.warn("HIGHWAY_TREND_BOX_EDGE_WATCH_PROOF", {
+        symbol: String(sym),
+        regime: res.decision.regime ?? null,
+        final_decision: res.decision.final_decision,
+        reject_reason: res.decision.reject_reason,
+        box_zone: det?.box_zone ?? null,
+        highway_stiffness_proof_trend_path: det?.highway_stiffness_proof_trend_path ?? null,
+        highway_stiffness_proof_range_attempt: det?.highway_stiffness_proof_range_rescore ?? null
+      });
+    }
   }
 
   /**

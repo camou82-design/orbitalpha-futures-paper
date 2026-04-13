@@ -24,6 +24,9 @@ export function highwayExecutorEvaluateEntry(input: Readonly<{
     const invalidReasons = Array.isArray((input.aiScores as any).invalidReasons)
         ? ((input.aiScores as any).invalidReasons as string[])
         : [];
+    const stiffnessProof =
+        (input.aiScores as { aiScoreRaw?: { highwayStiffnessProof?: Record<string, unknown> } }).aiScoreRaw
+            ?.highwayStiffnessProof ?? null;
 
     // Reject if too weak
     if (input.highwayState === HighwayTrendState.INVALID) {
@@ -51,6 +54,7 @@ export function highwayExecutorEvaluateEntry(input: Readonly<{
                     highway_state: "INVALID",
                     highway_invalid_tier: invalidTier,
                     highway_invalid_reasons: invalidReasons,
+                    highway_stiffness_proof: stiffnessProof,
                     ...input.aiScores
                 }
             };
@@ -68,8 +72,9 @@ export function highwayExecutorEvaluateEntry(input: Readonly<{
             pullback_state: "unknown",
             detail: {
                 highway_state: "INVALID",
-                    highway_invalid_tier: invalidTier ?? "hard_invalid",
-                    highway_invalid_reasons: invalidReasons,
+                highway_invalid_tier: invalidTier ?? "hard_invalid",
+                highway_invalid_reasons: invalidReasons,
+                highway_stiffness_proof: stiffnessProof,
                 ...input.aiScores
             }
         };
@@ -131,6 +136,7 @@ export function highwayExecutorEvaluateEntry(input: Readonly<{
         detail: {
             highwayValidity: input.aiScores?.highwayValidityScore,
             intent: input.intentType,
+            highway_stiffness_proof: stiffnessProof,
             ...input.aiScores
         }
     };
