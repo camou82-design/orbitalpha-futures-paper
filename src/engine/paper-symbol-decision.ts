@@ -1103,6 +1103,32 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           : gateResult === "RANGE_GATE_BLOCK_LOW_CONFIDENCE" && rangeSignal.signal === "RANGE_SIGNAL_NONE"
             ? "STAGE1_BLOCKED_SIGNAL"
             : "STAGE1_BLOCKED_EDGE";
+      const blockedRegimeReasonText = String(blockedRegime?.reason ?? "");
+      const blockedRegimeIsLossStreak =
+        blockedRegimeReasonText.includes("mode_loss_streak") || blockedRegimeReasonText.includes("highway_range_streak");
+      const rangeRiskSubreason =
+        gateResult === "RANGE_GATE_BLOCK_REENTRY"
+          ? (rangeReentrySameDirection ? "range_reentry_same_direction_wait_active" : "range_reentry_wait_active")
+          : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
+            ? blockedRegimeActive
+              ? (blockedRegimeIsLossStreak ? "range_blocked_regime_loss_streak_suspend" : "range_blocked_regime_until_active")
+              : "range_risk_unknown"
+            : null;
+      const rangeCooldownRemainingMs =
+        gateResult === "RANGE_GATE_BLOCK_REENTRY"
+          ? (rangeReentryRemainingMs ?? 0)
+          : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE" && blockedRegimeActive
+            ? Math.max(0, (blockedRegime?.until ?? input.now) - input.now)
+            : 0;
+      const rangeReentryWaitMsOut = rangeReentryWaitMs ?? 0;
+      const rangeReentryElapsedMsOut = rangeReentryElapsedMs ?? 0;
+      const rangeReentryRemainingMsOut = rangeReentryRemainingMs ?? 0;
+      const rangeReentrySourceOut =
+        gateResult === "RANGE_GATE_BLOCK_REENTRY"
+          ? rangeReentrySource
+          : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE" && blockedRegimeActive
+            ? "range_blocked_regime"
+            : "range_risk_engine";
       return ret(
         {
           strategy_executor: "RANGE",
@@ -1113,14 +1139,16 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           range_stage0_engine_taken: true,
           range_stage0_exit_reason: rangeFinalBlockReason,
           legacy_executor_path_taken: false,
+          risk_cooldown_subreason: rangeRiskSubreason,
+          cooldown_remaining_ms: rangeCooldownRemainingMs,
           range_reentry_cooldown_applied: gateResult === "RANGE_GATE_BLOCK_REENTRY",
-          range_reentry_wait_ms: rangeReentryWaitMs,
-          range_reentry_elapsed_ms: rangeReentryElapsedMs,
-          range_reentry_remaining_ms: rangeReentryRemainingMs,
-          range_reentry_source: gateResult === "RANGE_GATE_BLOCK_REENTRY" ? rangeReentrySource : null,
+          range_reentry_wait_ms: rangeReentryWaitMsOut,
+          range_reentry_elapsed_ms: rangeReentryElapsedMsOut,
+          range_reentry_remaining_ms: rangeReentryRemainingMsOut,
+          range_reentry_source: rangeReentrySourceOut,
           range_reentry_same_direction: rangeReentrySameDirection,
-          reentry_wait_ms: rangeReentryWaitMs,
-          reentry_elapsed_ms: rangeReentryElapsedMs,
+          reentry_wait_ms: rangeReentryWaitMsOut,
+          reentry_elapsed_ms: rangeReentryElapsedMsOut,
           guidance: gateReason,
           required_move_pct,
           shortfall_pct,
