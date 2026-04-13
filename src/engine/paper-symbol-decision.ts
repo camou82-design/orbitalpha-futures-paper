@@ -1001,6 +1001,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     supplemental_reasons.push(gateResult);
     supplemental_reasons.push(entryResult);
     if (gateResult !== "RANGE_GATE_PASS") {
+      const rangeFinalBlockReason =
+        gateResult === "RANGE_GATE_BLOCK_LOW_CONFIDENCE" && rangeSignal.signal === "RANGE_SIGNAL_NONE"
+          ? "RANGE_SIGNAL_NONE"
+          : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
+            ? "RANGE_RISK_BLOCK_ENGINE"
+            : gateResult === "RANGE_GATE_BLOCK_REENTRY"
+              ? "RANGE_RISK_BLOCK_REENTRY"
+              : gateResult;
       const stage1Code =
         gateResult === "RANGE_GATE_BLOCK_REENTRY" || gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
           ? "STAGE1_BLOCKED_RISK"
@@ -1017,7 +1025,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           required_move_pct,
           shortfall_pct,
           supplemental_reasons,
-          final_fail_reason: gateResult
+          final_fail_reason: rangeFinalBlockReason
         },
         {
           intentSide,
@@ -1608,6 +1616,62 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   // Rounds 3, 3.5, 3.6 (Legacy Stage 1 Soft Bypasses) have been removed.
   // Highway evaluation is now the sole authority for entry decisions.
 
+
+  if (useRangeStage0Engine && (!executorDecision || !executorDecision.entry_allowed)) {
+    const rangeBlocked = executorDecision?.blocked_reason ?? "RANGE_GATE_BLOCK_UNKNOWN";
+    const rangeFinalBlockReason =
+      rangeBlocked === "RANGE_GATE_BLOCK_LOW_CONFIDENCE" && signal_state === "NONE"
+        ? "RANGE_SIGNAL_NONE"
+        : rangeBlocked === "RANGE_GATE_BLOCK_RISK_ENGINE"
+          ? "RANGE_RISK_BLOCK_ENGINE"
+          : rangeBlocked === "RANGE_GATE_BLOCK_REENTRY"
+            ? "RANGE_RISK_BLOCK_REENTRY"
+            : rangeBlocked.startsWith("RANGE_GATE_BLOCK_")
+              ? rangeBlocked
+              : "RANGE_GATE_BLOCK_UNKNOWN";
+    const rangeStage1Code =
+      rangeFinalBlockReason.startsWith("RANGE_RISK_BLOCK_")
+        ? "STAGE1_BLOCKED_RISK"
+        : rangeFinalBlockReason === "RANGE_SIGNAL_NONE"
+          ? "STAGE1_BLOCKED_SIGNAL"
+          : "STAGE1_BLOCKED_EDGE";
+    reject_reason =
+      rangeFinalBlockReason === "RANGE_RISK_BLOCK_REENTRY"
+        ? "RISK_FAIL_REENTRY"
+        : rangeFinalBlockReason.startsWith("RANGE_RISK_BLOCK_")
+          ? "RISK_COOLDOWN"
+          : rangeFinalBlockReason === "RANGE_SIGNAL_NONE"
+            ? "SIGNAL_NONE"
+            : "EDGE_FAIL_EXPECTANCY";
+    if (reject_reason === "RISK_COOLDOWN" || reject_reason === "RISK_FAIL_REENTRY") risk_state = "COOLDOWN";
+    supplemental_reasons.push(`RANGE_FINAL_BLOCK_${rangeFinalBlockReason}`);
+    return ret(
+      {
+        execution_state,
+        final_decision: "SKIP",
+        strategy_executor: "RANGE",
+        ai_decision: "N/A",
+        adaptive_decision: "N/A",
+        guidance: executorDecision?.guidance ?? null,
+        target_stage: null,
+        supplemental_reasons,
+        stage1_result_code: rangeStage1Code as any,
+        required_move_pct,
+        shortfall_pct,
+        reject_reason,
+        final_fail_reason: rangeFinalBlockReason
+      },
+      {
+        intentSide,
+        executorDecision,
+        adaptiveOk: false,
+        adaptiveDirection: null,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      }
+    );
+  }
 
   if (!executorDecision || !executorDecision.entry_allowed) {
     const br = executorDecision?.blocked_reason;

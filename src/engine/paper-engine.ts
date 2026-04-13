@@ -985,6 +985,7 @@ export class PaperEngine {
           range_signal_kept_by_relax: decisionSnap?.rangeSignalKeptByRelax ?? false,
           executor_blocked_reason_direct: res.executorDecision?.blocked_reason ?? "none",
           symbol: String(sym),
+          engine_path: res.decision.currentStage === 0 && res.decision.regime === "RANGE" ? "RANGE_ENGINE" : "COMMON_ENGINE",
           decision_source: isHighwayExecutor ? "HIGHWAY_CORE" : "LEGACY_RANGE",
           legacy_block_reason: d.legacy_block_reason ?? null,
           legacy_regime_gate: d.legacy_regime_gate ?? null,
