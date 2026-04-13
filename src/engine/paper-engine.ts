@@ -528,6 +528,8 @@ export class PaperEngine {
   private trendFollowScoreBySymbol = new Map<string, number>();
   private trendBreakoutConfidenceBySymbol = new Map<string, number>();
   private rangeRoundTripStreakBySymbol = new Map<string, number>();
+  /** Consecutive close-eval ticks with raw box break (for EXIT_RANGE_REBALANCE debounce). */
+  private rangeBoxBreakConsecutiveBySymbol = new Map<string, number>();
   private rangeRecentOutcomeScoresBySymbol = new Map<string, number[]>();
   private lastExitReasonLabel = "";
   private lastSwitchReasonLabel = "";
@@ -2615,7 +2617,8 @@ export class PaperEngine {
       }
 
       if (regimeAtEntry === "RANGE" && rangeState) {
-        const st = evaluateRangeStructuralExit({
+        const rebalanceTickKey = `${symKey}:${open.openedAt}`;
+        let st = evaluateRangeStructuralExit({
           lastPrice: closePrice,
           boxUpper: rangeState.boxUpper,
           boxLower: rangeState.boxLower,
@@ -2627,7 +2630,41 @@ export class PaperEngine {
           trendConfidence: input.marketMode.trendConfidence,
           structuralTrendShift: regimeAtEntry === "RANGE" && regimeNow === "TREND"
         });
+        if (st.shouldExit && st.reason === "range_box_break") {
+          const holdingMs = Math.max(0, closedAt - open.openedAt);
+          const minHold = this.config.rangeRebalanceMinHoldMs;
+          const needTicks = this.config.rangeRebalanceBoxBreakConfirmTicks;
+          if (holdingMs < minHold) {
+            this.rangeBoxBreakConsecutiveBySymbol.delete(rebalanceTickKey);
+            this.logger.info("range_rebalance_exit_deferred", {
+              symbol: symKey,
+              gate: "min_hold_ms",
+              holding_ms: holdingMs,
+              min_hold_ms: minHold,
+              range_box_break_raw: st.rangeBoxBreakRaw
+            });
+            st = { shouldExit: false, reason: null, rangeBoxBreakRaw: st.rangeBoxBreakRaw };
+          } else if (st.rangeBoxBreakRaw) {
+            const next = (this.rangeBoxBreakConsecutiveBySymbol.get(rebalanceTickKey) ?? 0) + 1;
+            this.rangeBoxBreakConsecutiveBySymbol.set(rebalanceTickKey, next);
+            if (next < needTicks) {
+              this.logger.info("range_rebalance_exit_deferred", {
+                symbol: symKey,
+                gate: "confirm_ticks",
+                consecutive_box_break_ticks: next,
+                required_ticks: needTicks,
+                holding_ms: holdingMs
+              });
+              st = { shouldExit: false, reason: null, rangeBoxBreakRaw: true };
+            }
+          }
+        } else if (!st.rangeBoxBreakRaw) {
+          this.rangeBoxBreakConsecutiveBySymbol.delete(rebalanceTickKey);
+        }
         if (st.shouldExit && st.reason) {
+          if (st.reason === "range_box_break") {
+            this.rangeBoxBreakConsecutiveBySymbol.delete(rebalanceTickKey);
+          }
           let cr: PaperClosedPositionRecord["closeReason"] = "range_box_break";
           if (st.reason === "structural_regime_shift") cr = "structural_regime_shift";
           if (st.reason === "risk_exposure_breach") cr = "regime_exit";

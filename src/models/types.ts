@@ -73,6 +73,16 @@ export type EngineConfig = Readonly<{
    * Paper-only; cuts fee churn from immediate re-entry after candidate_lost.
    */
   paperReentryCooldownMs: number;
+  /**
+   * RANGE `EXIT_RANGE_REBALANCE` (`range_box_break`): minimum ms from open before a box-break exit may fire.
+   * Reduces whipsaw from box recalculation / edge jitter shortly after entry.
+   */
+  rangeRebalanceMinHoldMs: number;
+  /**
+   * RANGE box-break exit: consecutive close-evaluation ticks with raw price outside box before exiting (>=2).
+   * Single-tick spikes or one-off reclassification alone do not clear the bar.
+   */
+  rangeRebalanceBoxBreakConfirmTicks: number;
   /** Test-only: bypass legacy block path for RANGE stage0 candidate diagnostics. */
   paperTestBypassLegacyRangeStage0: boolean;
   /** Test-only: bypass only blocked_regime_until_active for RANGE stage0 candidate diagnostics. */

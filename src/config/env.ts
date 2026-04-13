@@ -90,6 +90,23 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
       ? 900_000
       : Math.min(86_400_000, paperReentryCooldownMsParsed);
 
+  const rangeRebalanceMinHoldMsRaw = env.ORBITALPHA_RANGE_REBALANCE_MIN_HOLD_MS;
+  const rangeRebalanceMinHoldMsParsed =
+    rangeRebalanceMinHoldMsRaw === undefined || String(rangeRebalanceMinHoldMsRaw).trim() === ""
+      ? 480_000
+      : parseInt(String(rangeRebalanceMinHoldMsRaw), 10);
+  const rangeRebalanceMinHoldMs =
+    !Number.isFinite(rangeRebalanceMinHoldMsParsed) || rangeRebalanceMinHoldMsParsed < 0
+      ? 480_000
+      : Math.min(86_400_000, rangeRebalanceMinHoldMsParsed);
+
+  const rangeRebalanceBoxBreakConfirmTicks = parseIntClamped(
+    env.ORBITALPHA_RANGE_REBALANCE_BOX_BREAK_CONFIRM_TICKS,
+    2,
+    1,
+    8
+  );
+
   const paperSlippageBps = parseNumber(env.ORBITALPHA_PAPER_SLIPPAGE_BPS, 2);
   const paperDailyLossLimitUsd = parseNumber(env.ORBITALPHA_PAPER_DAILY_LOSS_LIMIT_USD, 40);
   const paperLast10NetDegradeThresholdUsd = parseNumber(env.ORBITALPHA_PAPER_LAST10_NET_DEGRADE_USD, 15);
@@ -151,6 +168,8 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperStrongEmaGapThreshold,
     paperSidewaysEmaGapThreshold,
     paperReentryCooldownMs,
+    rangeRebalanceMinHoldMs,
+    rangeRebalanceBoxBreakConfirmTicks,
     paperSlippageBps,
     paperDailyLossLimitUsd,
     paperLast10NetDegradeThresholdUsd,

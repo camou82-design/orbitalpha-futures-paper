@@ -63,6 +63,8 @@ export function stepRangeZoneMachine(input: Readonly<{
 export type RangeStructuralExitResult = Readonly<{
   shouldExit: boolean;
   reason: "range_box_break" | "structural_regime_shift" | "risk_exposure_breach" | null;
+  /** True iff price is outside box ± structural buffer (before any hold/confirm gating in the engine). */
+  rangeBoxBreakRaw: boolean;
 }>;
 
 /**
@@ -85,16 +87,17 @@ export function evaluateRangeStructuralExit(input: Readonly<{
   const buf = span > 0 ? span * 0.018 : input.lastPrice * 0.001;
   const above = input.lastPrice > input.boxUpper + buf;
   const below = input.lastPrice < input.boxLower - buf;
-  if (above || below) {
-    return { shouldExit: true, reason: "range_box_break" };
+  const rangeBoxBreakRaw = above || below;
+  if (rangeBoxBreakRaw) {
+    return { shouldExit: true, reason: "range_box_break", rangeBoxBreakRaw: true };
   }
   if (input.structuralTrendShift && input.marketMode === "TREND" && input.trendConfidence >= 0.65) {
-    return { shouldExit: true, reason: "structural_regime_shift" };
+    return { shouldExit: true, reason: "structural_regime_shift", rangeBoxBreakRaw: false };
   }
   if (input.longUsd > input.maxLongExposure || input.shortUsd > input.maxShortExposure) {
-    return { shouldExit: true, reason: "risk_exposure_breach" };
+    return { shouldExit: true, reason: "risk_exposure_breach", rangeBoxBreakRaw: false };
   }
-  return { shouldExit: false, reason: null };
+  return { shouldExit: false, reason: null, rangeBoxBreakRaw: false };
 }
 
 /**
