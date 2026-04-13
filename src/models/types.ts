@@ -437,6 +437,21 @@ export type PaperSymbolDecisionRecord = Readonly<{
   range_final_selected_side?: "long" | "short" | "none" | null;
   /** RANGE 반전 구간 라벨 */
   range_reversal_zone?: "upper" | "lower" | "mid" | null;
+  /** RANGE 구간별 체결·게이트 정책 버전 문자열 */
+  range_zone_action_policy?: string | null;
+  /** RANGE 정책 기준 감지 구간 */
+  range_zone_detected?: "upper" | "lower" | "mid" | null;
+  /** 상단 구간에서 숏 우선 정책 적용 */
+  range_upper_short_priority_applied?: boolean;
+  /** 하단 구간에서 롱 우선 정책 적용 */
+  range_lower_long_priority_applied?: boolean;
+  /** 중단 구간 대기(비진입) 우선 적용 */
+  range_mid_wait_applied?: boolean;
+  /** 구간·방향 라벨 기준 최종 의도 side */
+  range_final_trade_side_by_zone?: string | null;
+  /** 반전 청산 직후(또는 pending) 반대 방향 즉시 평가 적용 */
+  range_reversal_immediate_switch_applied?: boolean;
+  range_reversal_immediate_switch_reason?: string | null;
   /** RANGE 상단 반전 숏 평가 시작 여부 */
   range_reversal_short_eval_started?: boolean;
   /** RANGE 상단에서 기존 롱 정리 트리거 여부 */
@@ -509,6 +524,8 @@ export type PaperSymbolDecisionRecord = Readonly<{
   final_signal_state?: string;
   /** 숏 실행 불가 사유(구조화·EXECUTION_DISABLED 외 서술) */
   execution_disabled_reason?: string | null;
+  /** EXECUTION_DISABLED 시 어떤 가드가 막았는지(진단·모니터링) */
+  execution_disabled_top_proof?: Record<string, unknown> | null;
   /** 진단: UNKNOWN 레짐에서의 FALLBACK 관측용 */
   regime_original_state?: PaperRegimeState;
   regime_fallback_applied?: boolean;
@@ -634,6 +651,12 @@ export type PaperOpenPositionRecord = Readonly<{
   scalingWeights?: number[];
   /** Stage 1이 비용 경고 하에 열렸으면 증액(스케일인) 제한·청산 보수화 */
   postEntryCostGuard?: boolean;
+  /** RANGE 진입 시 박스 내 상대 위치 (분석·최근 체결 분포용) */
+  rangeEntryBoxPos?: number;
+  /** RANGE 진입 시 구간(상단/중단/하단) */
+  rangeEntryZone?: "upper" | "lower" | "mid";
+  /** 구간 반전 청산 직후 합성 후보로 연결된 진입 */
+  rangeEntryFromReversalSwitch?: boolean;
   /** 현재가 (마지막 폴링 기준) */
   currentPrice?: number;
   /** 1차 목표가 (분할익절) */
@@ -912,6 +935,10 @@ export type PaperClosedPositionRecord = Readonly<{
   sourceRunPath: string;
   /** 진입 시점 레짐(RANGE/TREND/NO_TRADE) — 모드별 성과 분리용. */
   regimeAtEntry?: "RANGE" | "TREND" | "NO_TRADE";
+  /** RANGE 진입 시 박스 위치·구간 스냅샷 */
+  rangeEntryBoxPos?: number;
+  rangeEntryZone?: "upper" | "lower" | "mid";
+  rangeEntryFromReversalSwitch?: boolean;
   /** 청산 시점 진입 단계(1=초기, 2+=증액). 재진입 쿨다운 정책용. */
   entryStageAtClose?: number;
   latestSnapshotPath?: string;

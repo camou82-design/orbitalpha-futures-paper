@@ -892,6 +892,16 @@ export class PaperEngine {
           rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly
         });
         decisionBySymbol.set(String(sym), res);
+        if (res.decision.reject_reason === "EXECUTION_DISABLED") {
+          this.logger.warn("EXECUTION_DISABLED_TOP_PROOF", {
+            symbol: String(sym),
+            final_decision: res.decision.final_decision,
+            reject_reason: res.decision.reject_reason,
+            execution_disabled_reason: res.decision.execution_disabled_reason ?? null,
+            execution_disabled_top_proof: res.decision.execution_disabled_top_proof ?? null,
+            guidance: res.decision.guidance ?? null
+          });
+        }
         if (regimeDetected.regime === "RANGE") {
           const zProof = this.rangeZoneEvalProofPayload(sym, null, res, rangeReversalImmediateSwitchEarly, null);
           this.logger.info("RANGE_ZONE_EVAL_PROOF", zProof);
@@ -1074,6 +1084,16 @@ export class PaperEngine {
         this.reviewingState.delete(String(snap.symbol));
       }
       decisionBySymbol.set(String(sym), res);
+      if (res.decision.reject_reason === "EXECUTION_DISABLED") {
+        this.logger.warn("EXECUTION_DISABLED_TOP_PROOF", {
+          symbol: String(sym),
+          final_decision: res.decision.final_decision,
+          reject_reason: res.decision.reject_reason,
+          execution_disabled_reason: res.decision.execution_disabled_reason ?? null,
+          execution_disabled_top_proof: res.decision.execution_disabled_top_proof ?? null,
+          guidance: res.decision.guidance ?? null
+        });
+      }
       if (regimeDetected.regime === "RANGE") {
         const zProof = this.rangeZoneEvalProofPayload(sym, snap, res, rangeReversalImmediateSwitch, openPos?.side ?? null);
         this.logger.info("RANGE_ZONE_EVAL_PROOF", zProof);

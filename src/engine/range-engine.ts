@@ -23,6 +23,10 @@ function clamp01(n: number): number {
   return Math.min(1, Math.max(0, n));
 }
 
+/** Align all RANGE zone policy, entry, exit, and monitor with the same thresholds. */
+export const RANGE_ZONE_ACTION_POLICY =
+  "range_reversal_switch_engine_upper_short_lower_long_mid_wait_v2" as const;
+
 export function classifyBoxZone(boxPosition: number): RangeBoxZone {
   if (boxPosition >= 0.62) return "upper";
   if (boxPosition <= 0.38) return "lower";

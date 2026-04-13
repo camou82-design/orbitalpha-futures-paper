@@ -25,6 +25,8 @@ import { evaluateAiHighwayQuality } from "../engine/ai-highway-filter";
 import type { PaperSignal } from "../strategy/entry-signal";
 import type { PaperCandidateStrength } from "../strategy/entry-signal";
 import { PIPELINE_VERSION } from "./decision-funnel";
+import { classifyBoxZone, RANGE_ZONE_ACTION_POLICY } from "./range-engine";
+import type { RangeBoxZone } from "../models/types";
 
 /** RANGE·Stage0·RISK_FAIL_REENTRY: 부분익절/TP 계열 청산 후 동일 심볼 재진입 대기만 완화(손절·증액 단계 제외). */
 const RANGE_STAGE0_REENTRY_RELAX_MULT = 0.35;
@@ -148,22 +150,60 @@ function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x;
 }
 
-function evaluateRangeStage0Signal(sn: SymbolSnapshotLike): { signal: RangeSignalState; reason: string; side: "long" | "short" | null } {
+function evaluateRangeStage0Signal(
+  sn: SymbolSnapshotLike,
+  reversalImmediate?: Readonly<{ preferredSide: "long" | "short" }> | null
+): { signal: RangeSignalState; reason: string; side: "long" | "short" | null } {
   const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
-  if (boxPos >= 0.68) return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_reversal_short_priority", side: "short" };
-  if (boxPos <= 0.32) return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_reversal_long_priority", side: "long" };
-  if (sn.signal === "paper_long_candidate") return { signal: "RANGE_LONG_CANDIDATE", reason: "base_candidate_long", side: "long" };
-  if (sn.signal === "paper_short_candidate") return { signal: "RANGE_SHORT_CANDIDATE", reason: "base_candidate_short", side: "short" };
-
+  const zone: RangeBoxZone = classifyBoxZone(boxPos);
+  if (reversalImmediate) {
+    if (reversalImmediate.preferredSide === "short" && zone === "upper") {
+      return {
+        signal: "RANGE_SHORT_CANDIDATE",
+        reason: "range_reversal_immediate_switch_upper_short",
+        side: "short"
+      };
+    }
+    if (reversalImmediate.preferredSide === "long" && zone === "lower") {
+      return {
+        signal: "RANGE_LONG_CANDIDATE",
+        reason: "range_reversal_immediate_switch_lower_long",
+        side: "long"
+      };
+    }
+  }
   const conf = clamp01(sn.rangeConfidence ?? 0);
   const cohesion = clamp01(sn.boxCohesion01 ?? 0);
   const oscillation = clamp01(sn.rangeOscillationScore ?? 0);
-  const edgeSignalReady = conf >= 0.38 && cohesion >= 0.32 && oscillation >= 0.3;
-  if (!edgeSignalReady) return { signal: "RANGE_SIGNAL_NONE", reason: "range_signal_low_structure", side: null };
+  const edgeStructureOk = conf >= 0.38 && cohesion >= 0.32 && oscillation >= 0.3;
 
-  if (boxPos <= 0.30) return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_edge_candidate", side: "long" };
-  if (boxPos >= 0.70) return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_edge_candidate", side: "short" };
-  return { signal: "RANGE_SIGNAL_NONE", reason: "range_box_middle", side: null };
+  if (zone === "upper") {
+    if (sn.signal === "paper_long_candidate") {
+      return { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_suppress_long_candidate_no_inertia", side: null };
+    }
+    if (sn.signal === "paper_short_candidate") {
+      return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_from_base_signal", side: "short" };
+    }
+    if (!edgeStructureOk) {
+      return { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_short_structure_not_ready", side: null };
+    }
+    return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_priority_structure", side: "short" };
+  }
+
+  if (zone === "lower") {
+    if (sn.signal === "paper_short_candidate") {
+      return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_suppress_short_candidate", side: null };
+    }
+    if (sn.signal === "paper_long_candidate") {
+      return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_from_base_signal", side: "long" };
+    }
+    if (!edgeStructureOk) {
+      return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_long_structure_not_ready", side: null };
+    }
+    return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_priority_structure", side: "long" };
+  }
+
+  return { signal: "RANGE_SIGNAL_NONE", reason: "range_mid_wait_no_directional_chase", side: null };
 }
 
 function evaluateRangeStage0Scores(sn: SymbolSnapshotLike): { rangeSignalScore: number; rangeEntryScore: number; reason: string } {
@@ -217,6 +257,15 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   config: EngineConfig;
   snapshot: SymbolSnapshotLike | null;
   dataReady: boolean;
+  /** 현재 열린 포지션 방향(반전 청산 분기·proof용). 없으면 null */
+  openPositionSide?: "long" | "short" | null;
+  /**
+   * 구간 반전 청산 직후 같은 틱·pending 구간에서 반대 방향 재진입을 허용(쿨다운·저신뢰 게이트 완화).
+   */
+  rangeReversalImmediateSwitch?: Readonly<{
+    preferredSide: "long" | "short";
+    reason: "upper_flatten_to_short" | "lower_flatten_to_long" | "upper_flatten_to_short_pending" | "lower_flatten_to_long_pending";
+  }> | null;
   regime: MarketRegime;
   /** BTC 레짐 `detail` (NO_TRADE 사유·marginal_history 등). */
   regimeDetail?: Readonly<Record<string, unknown>>;
@@ -339,6 +388,7 @@ function pack(
     original_signal_state?: string;
     final_signal_state?: string;
     execution_disabled_reason?: string | null;
+    execution_disabled_top_proof?: Record<string, unknown> | null;
     reentry_cooldown_applied?: boolean;
     reentry_cooldown_original_ms?: number | null;
     reentry_cooldown_effective_ms?: number | null;
@@ -391,6 +441,14 @@ function pack(
     range_reversal_long_exit_triggered?: boolean;
     range_reversal_short_entry_allowed?: boolean;
     range_reversal_short_entry_block_reason?: string | null;
+    range_reversal_immediate_switch_applied?: boolean;
+    range_reversal_immediate_switch_reason?: string | null;
+    range_zone_action_policy?: string | null;
+    range_zone_detected?: "upper" | "lower" | "mid" | null;
+    range_upper_short_priority_applied?: boolean;
+    range_lower_long_priority_applied?: boolean;
+    range_mid_wait_applied?: boolean;
+    range_final_trade_side_by_zone?: string | null;
     legacy_block_reason?: string | null;
     legacy_regime_gate?: string | null;
     legacy_gate_source?: string | null;
@@ -484,6 +542,7 @@ function pack(
     original_signal_state: fields.original_signal_state,
     final_signal_state: fields.final_signal_state,
     execution_disabled_reason: fields.execution_disabled_reason,
+    execution_disabled_top_proof: fields.execution_disabled_top_proof ?? null,
     reentry_cooldown_applied: fields.reentry_cooldown_applied ?? false,
     reentry_cooldown_original_ms: fields.reentry_cooldown_original_ms ?? null,
     reentry_cooldown_effective_ms: fields.reentry_cooldown_effective_ms ?? null,
@@ -536,6 +595,14 @@ function pack(
     range_reversal_long_exit_triggered: fields.range_reversal_long_exit_triggered ?? false,
     range_reversal_short_entry_allowed: fields.range_reversal_short_entry_allowed ?? false,
     range_reversal_short_entry_block_reason: fields.range_reversal_short_entry_block_reason ?? null,
+    range_reversal_immediate_switch_applied: fields.range_reversal_immediate_switch_applied ?? false,
+    range_reversal_immediate_switch_reason: fields.range_reversal_immediate_switch_reason ?? null,
+    range_zone_action_policy: fields.range_zone_action_policy ?? null,
+    range_zone_detected: fields.range_zone_detected ?? null,
+    range_upper_short_priority_applied: fields.range_upper_short_priority_applied ?? false,
+    range_lower_long_priority_applied: fields.range_lower_long_priority_applied ?? false,
+    range_mid_wait_applied: fields.range_mid_wait_applied ?? false,
+    range_final_trade_side_by_zone: fields.range_final_trade_side_by_zone ?? null,
     legacy_block_reason: fields.legacy_block_reason ?? null,
     legacy_regime_gate: fields.legacy_regime_gate ?? null,
     legacy_gate_source: fields.legacy_gate_source ?? null,
@@ -720,6 +787,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_reversal_long_exit_triggered = false;
   let range_reversal_short_entry_allowed = false;
   let range_reversal_short_entry_block_reason: string | null = null;
+  let range_zone_action_policy: string | null = null;
+  let range_zone_detected: "upper" | "lower" | "mid" | null = null;
+  let range_upper_short_priority_applied = false;
+  let range_lower_long_priority_applied = false;
+  let range_mid_wait_applied = false;
+  let range_final_trade_side_by_zone: string | null = null;
+  let range_reversal_immediate_switch_applied = false;
+  let range_reversal_immediate_switch_reason: string | null = null;
   let range_stage0_engine_taken = false;
   let range_stage0_exit_reason: string | null = null;
   let legacy_executor_path_taken = false;
@@ -808,6 +883,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       original_signal_state?: string;
       final_signal_state?: string;
       execution_disabled_reason?: string | null;
+      execution_disabled_top_proof?: Record<string, unknown> | null;
       reentry_cooldown_applied?: boolean;
       reentry_cooldown_original_ms?: number | null;
       reentry_cooldown_effective_ms?: number | null;
@@ -860,6 +936,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reversal_long_exit_triggered?: boolean;
       range_reversal_short_entry_allowed?: boolean;
       range_reversal_short_entry_block_reason?: string | null;
+      range_reversal_immediate_switch_applied?: boolean;
+      range_reversal_immediate_switch_reason?: string | null;
+      range_zone_action_policy?: string | null;
+      range_zone_detected?: "upper" | "lower" | "mid" | null;
+      range_upper_short_priority_applied?: boolean;
+      range_lower_long_priority_applied?: boolean;
+      range_mid_wait_applied?: boolean;
+      range_final_trade_side_by_zone?: string | null;
       legacy_block_reason?: string | null;
       legacy_regime_gate?: string | null;
       legacy_gate_source?: string | null;
@@ -980,6 +1064,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       original_signal_state: extra.original_signal_state,
       final_signal_state: extra.final_signal_state,
       execution_disabled_reason: extra.execution_disabled_reason,
+      execution_disabled_top_proof: extra.execution_disabled_top_proof,
       reentry_cooldown_applied: extra.reentry_cooldown_applied ?? reentry_cooldown_applied,
       reentry_cooldown_original_ms: extra.reentry_cooldown_original_ms ?? reentry_cooldown_original_ms,
       reentry_cooldown_effective_ms: extra.reentry_cooldown_effective_ms ?? reentry_cooldown_effective_ms,
@@ -1049,6 +1134,16 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reversal_short_entry_allowed: extra.range_reversal_short_entry_allowed ?? range_reversal_short_entry_allowed,
       range_reversal_short_entry_block_reason:
         extra.range_reversal_short_entry_block_reason ?? range_reversal_short_entry_block_reason,
+      range_reversal_immediate_switch_applied:
+        extra.range_reversal_immediate_switch_applied ?? range_reversal_immediate_switch_applied,
+      range_reversal_immediate_switch_reason:
+        extra.range_reversal_immediate_switch_reason ?? range_reversal_immediate_switch_reason,
+      range_zone_action_policy: extra.range_zone_action_policy ?? range_zone_action_policy,
+      range_zone_detected: extra.range_zone_detected ?? range_zone_detected,
+      range_upper_short_priority_applied: extra.range_upper_short_priority_applied ?? range_upper_short_priority_applied,
+      range_lower_long_priority_applied: extra.range_lower_long_priority_applied ?? range_lower_long_priority_applied,
+      range_mid_wait_applied: extra.range_mid_wait_applied ?? range_mid_wait_applied,
+      range_final_trade_side_by_zone: extra.range_final_trade_side_by_zone ?? range_final_trade_side_by_zone,
       legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
       legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
       legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
@@ -1157,7 +1252,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   if (useRangeStage0Engine) {
     range_stage0_engine_taken = true;
     strategy_executor = "RANGE";
-    const rangeSignal = evaluateRangeStage0Signal(sn);
+    const rangeSignal = evaluateRangeStage0Signal(sn, input.rangeReversalImmediateSwitch);
     const rangeScores = evaluateRangeStage0Scores(sn);
     const blockedRegime = input.risk?.blockedRegimes?.[input.regime];
     const blockedRegimeActive = !!(blockedRegime && blockedRegime.until > input.now);
@@ -1183,38 +1278,46 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const RANGE_SOFT_SUSPEND_SIZE_MULT = 0.35;
     const RANGE_SOFT_SUSPEND_COOLDOWN_MS = 45_000;
     const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
-    range_upper_edge_near = boxPos >= 0.68;
-    range_center_wait = boxPos > 0.42 && boxPos < 0.58;
-    range_reversal_zone = range_upper_edge_near ? "upper" : (boxPos <= 0.32 ? "lower" : "mid");
-    range_reversal_short_eval_started = range_reversal_zone === "upper";
-    range_reversal_long_exit_triggered = range_reversal_short_eval_started && input.hasOpenPosition;
-    const rangeLowerEdge = boxPos <= 0.38;
+    const zone = classifyBoxZone(boxPos);
+    range_zone_action_policy = RANGE_ZONE_ACTION_POLICY;
+    range_zone_detected = zone;
+    range_mid_wait_applied = zone === "mid";
+    range_upper_edge_near = zone === "upper";
+    range_center_wait = zone === "mid";
+    range_reversal_zone = zone;
+    range_reversal_short_eval_started = zone === "upper";
+    range_reversal_long_exit_triggered = zone === "upper" && input.openPositionSide === "long";
+    const rangeLowerEdge = zone === "lower";
     const rangeExitRiskOk = (sn.regimeExitRisk ?? 0) <= 0.62;
     const rangeConfidenceOk = (sn.rangeConfidence ?? 0) >= 0.45;
     const rangeBreakoutFailureOk = (sn.breakoutFailureRate ?? 0) >= 0.42;
     const rangeSameDirBaseEligible = rangeConfidenceOk && rangeBreakoutFailureOk && rangeExitRiskOk;
+    const rangeReversalSwitchMatches =
+      input.rangeReversalImmediateSwitch != null &&
+      rangeSignal.side === input.rangeReversalImmediateSwitch.preferredSide &&
+      ((input.rangeReversalImmediateSwitch.preferredSide === "short" && zone === "upper") ||
+        (input.rangeReversalImmediateSwitch.preferredSide === "long" && zone === "lower"));
     range_short_allowed =
       rangeSignal.side === "short" &&
       range_upper_edge_near &&
       !range_center_wait &&
       !rangeLowerEdge &&
-      rangeConfidenceOk &&
-      rangeBreakoutFailureOk &&
-      rangeExitRiskOk;
+      (rangeReversalSwitchMatches ||
+        (rangeConfidenceOk && rangeBreakoutFailureOk && rangeExitRiskOk));
     if (rangeSignal.side === "short") {
       if (range_center_wait) range_short_allowed_reason = "range_center_wait";
       else if (rangeLowerEdge) range_short_allowed_reason = "range_lower_zone_short_forbidden";
       else if (!range_upper_edge_near) range_short_allowed_reason = "range_upper_edge_not_near";
       else if (!rangeConfidenceOk) range_short_allowed_reason = "range_confidence_low";
       else if (!rangeBreakoutFailureOk) range_short_allowed_reason = "range_breakout_failure_low";
-      else if (!rangeExitRiskOk) range_short_allowed_reason = "range_exit_risk_high";
+      else if (!rangeExitRiskOk && !rangeReversalSwitchMatches) range_short_allowed_reason = "range_exit_risk_high";
+      else if (rangeReversalSwitchMatches) range_short_allowed_reason = "range_reversal_immediate_short_after_upper_flatten";
       else range_short_allowed_reason = "range_short_allowed_upper_edge";
     } else if (rangeSignal.side === "long") {
       range_short_allowed_reason = range_center_wait ? "range_center_wait" : "range_long_path";
     }
     range_reversal_short_entry_allowed = range_short_allowed;
     range_reversal_short_entry_block_reason = range_short_allowed ? null : range_short_allowed_reason;
-    const boxMiddle = boxPos > 0.42 && boxPos < 0.58;
     const lowConfidence = rangeScores.rangeSignalScore < 0.34 || rangeScores.rangeEntryScore < 0.36;
     let reentryBlocked = false;
     let rangeReentryWaitMs: number | null = null;
@@ -1234,7 +1337,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         rangeSignal.side === "long"
           ? boxPos <= 0.38
           : rangeSignal.side === "short"
-            ? boxPos >= 0.68
+            ? boxPos >= 0.62
             : false;
       range_same_direction_reentry_edge_ok = rangeEdgeOkForSameDir;
       const sameDirRelaxEligible =
@@ -1265,6 +1368,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_same_direction_reentry_final_allowed =
         sameDirection && (meta?.closedAt ?? 0) > 0 ? elapsedMs >= waitMs : true;
     }
+    if (rangeReversalSwitchMatches) {
+      reentryBlocked = false;
+      rangeReentryRemainingMs = 0;
+      rangeReentryWaitMs = 0;
+      range_same_direction_reentry_final_allowed = true;
+      supplemental_reasons.push("RANGE_REVERSAL_IMMEDIATE_REENTRY_BYPASS");
+    }
     let gateResult: RangeGateResult = "RANGE_GATE_PASS";
     let gateReason = "range_gate_pass";
     if (rangeSignal.signal === "RANGE_SIGNAL_NONE") {
@@ -1281,10 +1391,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       gateReason = blockedRegimeLossStreakSuspend
         ? "range_reentry_cooldown_active_soft_suspend_same_direction"
         : "range_reentry_cooldown_active";
-    } else if (boxMiddle) {
-      gateResult = "RANGE_GATE_BLOCK_BOX_MIDDLE";
-      gateReason = "range_box_middle";
-    } else if (lowConfidence) {
+    } else if (lowConfidence && !rangeReversalSwitchMatches) {
       gateResult = "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
       gateReason = "range_score_below_threshold";
     }
@@ -1295,6 +1402,18 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           ? "RANGE_LONG_ENTRY"
           : "RANGE_SHORT_ENTRY";
     range_final_selected_side = entryResult === "RANGE_LONG_ENTRY" ? "long" : entryResult === "RANGE_SHORT_ENTRY" ? "short" : "none";
+    range_upper_short_priority_applied = zone === "upper" && entryResult === "RANGE_SHORT_ENTRY";
+    range_lower_long_priority_applied = zone === "lower" && entryResult === "RANGE_LONG_ENTRY";
+    range_final_trade_side_by_zone =
+      zone === "upper"
+        ? `upper:${entryResult === "RANGE_SHORT_ENTRY" ? "short" : "none"}`
+        : zone === "lower"
+          ? `lower:${entryResult === "RANGE_LONG_ENTRY" ? "long" : "none"}`
+          : `mid:wait`;
+    if (gateResult === "RANGE_GATE_PASS" && rangeReversalSwitchMatches) {
+      range_reversal_immediate_switch_applied = true;
+      range_reversal_immediate_switch_reason = input.rangeReversalImmediateSwitch?.reason ?? null;
+    }
     workingSignal = entryResult === "RANGE_LONG_ENTRY"
       ? "paper_long_candidate"
       : entryResult === "RANGE_SHORT_ENTRY"
@@ -1320,7 +1439,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         range_score_reason: rangeScores.reason,
         range_gate_result: gateResult,
         range_gate_reason: gateReason,
-        final_entry_reason: entryResult
+        final_entry_reason: entryResult,
+        range_zone_detected: zone,
+        range_zone_action_policy: RANGE_ZONE_ACTION_POLICY
       }
     };
     supplemental_reasons.push(rangeSignal.signal);
@@ -1419,6 +1540,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           range_reversal_long_exit_triggered: range_reversal_long_exit_triggered,
           range_reversal_short_entry_allowed: range_reversal_short_entry_allowed,
           range_reversal_short_entry_block_reason: range_reversal_short_entry_block_reason,
+          range_reversal_immediate_switch_applied: range_reversal_immediate_switch_applied,
+          range_reversal_immediate_switch_reason: range_reversal_immediate_switch_reason,
+          range_zone_action_policy: range_zone_action_policy,
+          range_zone_detected: range_zone_detected,
+          range_upper_short_priority_applied: range_upper_short_priority_applied,
+          range_lower_long_priority_applied: range_lower_long_priority_applied,
+          range_mid_wait_applied: range_mid_wait_applied,
+          range_final_trade_side_by_zone: range_final_trade_side_by_zone,
           reentry_wait_ms: rangeReentryWaitMsOut,
           reentry_elapsed_ms: rangeReentryElapsedMsOut,
           guidance: gateReason,
@@ -1509,17 +1638,19 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     if (input.currentStage === 0 && input.regime === "RANGE") {
       const boxPos = sn?.boxPos ?? 0.5;
-      const boxCentered = boxPos > 0.45 && boxPos < 0.55; // Phase 2: 0.4->0.45, 0.6->0.55
-      const emaGap = Math.abs(sn?.emaGap ?? 0);
-      const volProxy = sn?.volumeRatioProxy ?? 0;
+      if (classifyBoxZone(boxPos) === "lower") {
+        const boxCentered = boxPos > 0.45 && boxPos < 0.55; // Phase 2: 0.4->0.45, 0.6->0.55
+        const emaGap = Math.abs(sn?.emaGap ?? 0);
+        const volProxy = sn?.volumeRatioProxy ?? 0;
 
-      // Phase 2: emaGap 0.0001->0.00005, volProxy 0.1->0.05
-      if (!boxCentered && emaGap > 0.00005 && volProxy > 0.05) {
-        softCandidateAllowed = true;
-        stage1SignalRelaxed = true;
-        signal_state = "LONG_CANDIDATE"; // 임시 승격하여 EDGE/RISK 태움
-        signalRelaxReason = "stage1_range_soft_candidate_v2";
-        supplemental_reasons.push("STAGE1_SIGNAL_RELAXED_SOFT_CANDIDATE_V2");
+        // Phase 2: emaGap 0.0001->0.00005, volProxy 0.1->0.05
+        if (!boxCentered && emaGap > 0.00005 && volProxy > 0.05) {
+          softCandidateAllowed = true;
+          stage1SignalRelaxed = true;
+          signal_state = "LONG_CANDIDATE"; // 임시 승격하여 EDGE/RISK 태움
+          signalRelaxReason = "stage1_range_soft_candidate_v2";
+          supplemental_reasons.push("STAGE1_SIGNAL_RELAXED_SOFT_CANDIDATE_V2");
+        }
       }
     }
 
@@ -1566,10 +1697,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   if (regime_state === "UNKNOWN" && input.currentStage === 0 && stage1SignalRelaxed) {
     // Stage 1 soft candidate + UNKNOWN regime -> Fallback to RANGE if safety criteria met
     const boxPos = sn?.boxPos ?? 0.5;
+    const zoneFb = classifyBoxZone(boxPos);
     const boxNotCentered = boxPos < 0.45 || boxPos > 0.55;
     const qualityHighEnough = sn.qualityScore >= 35;
 
-    if (boxNotCentered && qualityHighEnough) {
+    if (boxNotCentered && qualityHighEnough && zoneFb !== "mid") {
       regime_state = "RANGE";
       strategy_executor = "RANGE";
       regimeFallbackApplied = true;
@@ -1779,7 +1911,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       input.regime === "RANGE" &&
       signal_state !== "NONE" &&
       typeof sn.boxPos === "number" &&
-      (sn.boxPos <= 0.32 || sn.boxPos >= 0.68);
+      (sn.boxPos <= 0.38 || sn.boxPos >= 0.62);
     const streakSuspend =
       rBlock.reason.includes("mode_loss_streak") || rBlock.reason.includes("highway_range_streak");
     const relaxModeCooldown =
@@ -1859,6 +1991,16 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
   }
 
+  const rangeReversalGlobalReentryBypass =
+    input.rangeReversalImmediateSwitch != null &&
+    intentSide === input.rangeReversalImmediateSwitch.preferredSide &&
+    input.regime === "RANGE" &&
+    input.currentStage === 0 &&
+    sn != null &&
+    typeof sn.boxPos === "number" &&
+    ((input.rangeReversalImmediateSwitch.preferredSide === "short" && classifyBoxZone(sn.boxPos) === "upper") ||
+      (input.rangeReversalImmediateSwitch.preferredSide === "long" && classifyBoxZone(sn.boxPos) === "lower"));
+
   if (input.lastCloseMetaBySymbol && input.reentryCooldownMs > 0 && intentSide) {
     const meta = input.lastCloseMetaBySymbol.get(String(sym));
     const lastClose = meta?.closedAt ?? 0;
@@ -1932,7 +2074,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reentry_elapsed_ms = elapsed;
     }
 
-    if (lastClose > 0 && elapsed < waitMs) {
+    if (lastClose > 0 && elapsed < waitMs && !rangeReversalGlobalReentryBypass) {
       risk_state = "COOLDOWN";
       risk_cooldown_subreason =
         rangeStage0SignalActive && sameDirection
@@ -1944,6 +2086,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       supplemental_reasons.push("RISK_FAIL_REENTRY");
       if (reentry_cooldown_reason) supplemental_reasons.push(`REENTRY_COOLDOWN_REASON_${reentry_cooldown_reason}`);
       supplemental_reasons.push(`REENTRY_COOLDOWN_WAIT_MS_${String(waitMs)}`);
+    } else if (lastClose > 0 && elapsed < waitMs && rangeReversalGlobalReentryBypass) {
+      supplemental_reasons.push("RANGE_REVERSAL_GLOBAL_REENTRY_BYPASS");
     }
   }
 
@@ -2519,16 +2663,25 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     if (input.config.longOnly && adaptive.direction === "short") {
       supplemental_reasons.push("LONG_ONLY_RESTRICTION");
-      if (
+      const longOnlyBoxPos = typeof sn.boxPos === "number" ? sn.boxPos : null;
+      const longOnlyClassifiedZone = longOnlyBoxPos !== null ? classifyBoxZone(longOnlyBoxPos) : null;
+      const longOnlyZoneUpperBypass = longOnlyClassifiedZone === "upper";
+      /** RANGE Stage0 숏 의도: workingSignal만 보면 레인지 엔진과 불일치 시 Long Only 차단에 걸림 → final_selected_side 포함 */
+      const rangeBidirectionalShortIntent =
         input.currentStage === 0 &&
         input.regime === "RANGE" &&
-        workingSignal === "paper_short_candidate"
-      ) {
+        (workingSignal === "paper_short_candidate" || range_final_selected_side === "short");
+      const allowRangeShortDespiteLongOnly = range_short_allowed || longOnlyZoneUpperBypass;
+
+      if (rangeBidirectionalShortIntent) {
         range_bidirectional_applied = true;
-        if (range_short_allowed) {
-          supplemental_reasons.push("RANGE_SHORT_ALLOWED_BIDIRECTIONAL");
+        if (allowRangeShortDespiteLongOnly) {
+          if (range_short_allowed) supplemental_reasons.push("RANGE_SHORT_ALLOWED_BIDIRECTIONAL");
+          if (longOnlyZoneUpperBypass && !range_short_allowed) {
+            supplemental_reasons.push("RANGE_UPPER_SHORT_LONG_ONLY_EXEC_BYPASS");
+          }
           range_long_only_short_deferred_applied = false;
-          range_long_only_short_deferred_bypassed = false;
+          range_long_only_short_deferred_bypassed = longOnlyZoneUpperBypass && !range_short_allowed;
         } else {
           range_long_only_short_deferred_applied = true;
           return ret(
@@ -2573,36 +2726,61 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             }
           );
         }
+      } else {
+        return ret(
+          {
+            reject_reason: "EXECUTION_DISABLED",
+            final_decision: "REJECT",
+            ai_decision: "APPROVE",
+            adaptive_decision: "OK",
+            guidance: "방향 제한 (Long Only)",
+            target_stage: null,
+            supplemental_reasons,
+            stage1_result_code: "STAGE1_BLOCKED_REGIME",
+            required_move_pct,
+            shortfall_pct,
+            range_long_only_short_deferred_applied: false,
+            range_long_only_short_deferred_bypassed: range_long_only_short_deferred_bypassed,
+            long_only_restriction: true,
+            original_signal_state: "SHORT_CANDIDATE",
+            final_signal_state: "SHORT_CANDIDATE",
+            execution_disabled_reason: "EXECUTION_DISABLED_long_only_short_non_range_or_stage_gt0",
+            execution_disabled_top_proof: {
+              guard_id: "LONG_ONLY_STRICT_SHORT_BLOCK",
+              proof_version: 1,
+              at_ms: input.now,
+              symbol: String(sym),
+              long_only_config: input.config.longOnly,
+              regime: input.regime,
+              current_stage: input.currentStage,
+              signal_state,
+              working_signal: workingSignal,
+              intent_side: intentSide,
+              adaptive_direction: adaptive.direction,
+              expected_side_from_working_signal: expectedSide,
+              range_stage0_engine_taken,
+              range_final_selected_side,
+              range_short_allowed,
+              range_short_allowed_reason,
+              range_zone_detected,
+              range_upper_edge_near,
+              box_pos: longOnlyBoxPos,
+              classify_box_zone: longOnlyClassifiedZone,
+              long_only_zone_upper_bypass_would_apply: longOnlyZoneUpperBypass,
+              range_bidirectional_short_intent_would_apply: rangeBidirectionalShortIntent
+            }
+          },
+          {
+            intentSide,
+            executorDecision,
+            adaptiveOk: false,
+            adaptiveDirection: adaptive.direction,
+            adaptiveDetail: adaptiveDetailOut,
+            adaptiveResult: null,
+            aiGatePassed: true
+          }
+        );
       }
-      return ret(
-        {
-          reject_reason: "EXECUTION_DISABLED",
-          final_decision: "REJECT",
-          ai_decision: "APPROVE",
-          adaptive_decision: "OK",
-          guidance: "방향 제한 (Long Only)",
-          target_stage: null,
-          supplemental_reasons,
-          stage1_result_code: "STAGE1_BLOCKED_REGIME",
-          required_move_pct,
-          shortfall_pct,
-          range_long_only_short_deferred_applied: false,
-          range_long_only_short_deferred_bypassed: range_long_only_short_deferred_bypassed,
-          long_only_restriction: true,
-          original_signal_state: "SHORT_CANDIDATE",
-          final_signal_state: "SHORT_CANDIDATE",
-          execution_disabled_reason: "EXECUTION_DISABLED_long_only_short_non_range_or_stage_gt0"
-        },
-        {
-          intentSide,
-          executorDecision,
-          adaptiveOk: false,
-          adaptiveDirection: adaptive.direction,
-          adaptiveDetail: adaptiveDetailOut,
-          adaptiveResult: null,
-          aiGatePassed: true
-        }
-      );
     }
 
     const initialEntryQty = (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult) / sn!.lastPrice;
@@ -2720,7 +2898,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         range_reversal_short_eval_started: range_reversal_short_eval_started,
         range_reversal_long_exit_triggered: range_reversal_long_exit_triggered,
         range_reversal_short_entry_allowed: range_reversal_short_entry_allowed,
-        range_reversal_short_entry_block_reason: range_reversal_short_entry_block_reason
+        range_reversal_short_entry_block_reason: range_reversal_short_entry_block_reason,
+        range_reversal_immediate_switch_applied: range_reversal_immediate_switch_applied,
+        range_reversal_immediate_switch_reason: range_reversal_immediate_switch_reason
       },
       {
         intentSide: intentSide ?? (workingSignal === "paper_long_candidate" || workingSignal === "none" ? "long" : "short"),

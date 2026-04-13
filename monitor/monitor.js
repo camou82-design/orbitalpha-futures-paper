@@ -504,6 +504,10 @@
     }
     if (pip && String(pip.regime) === "RANGE") {
       if (pip.range_cost_warning_applied === true) return sym + " · 비용 경고로 보수 관찰 중";
+      if (pip.range_zone_detected === "mid" || pip.range_mid_wait_applied === true)
+        return sym + " · 박스 중단 대기(진입보다 관망)";
+      if (pip.range_zone_detected === "upper") return sym + " · 박스 상단: 숏 우선 평가";
+      if (pip.range_zone_detected === "lower") return sym + " · 박스 하단: 롱 우선 평가";
       if (pip.range_center_wait === true) return sym + " · 박스 중단 대기";
       if (pip.range_upper_edge_near === true && pip.range_short_allowed === true) return sym + " · 박스 상단 근접";
       if (String(pip.range_short_allowed_reason || "") === "range_lower_zone_short_forbidden") return sym + " · 신규 롱 대기";
@@ -537,6 +541,12 @@
     if (pip && String(pip.regime) === "RANGE") {
       const boxPos = typeof pip.box_position_diag === "number" ? Number(pip.box_position_diag) : null;
       const boxTxt = boxPos === null ? "박스 위치 산출 중" : "박스 위치 " + boxPos.toFixed(2);
+      if (pip.range_zone_detected === "mid" || pip.range_mid_wait_applied === true)
+        return boxTxt + " · 중단 구간: 기본은 대기(no-trade 우선)";
+      if (pip.range_zone_detected === "upper")
+        return boxTxt + " · 상단: 롱 신호는 진입로 이어기지 않고 숏 우선";
+      if (pip.range_zone_detected === "lower")
+        return boxTxt + " · 하단: 숏 억제, 롱 평가 우선";
       if (pip.range_center_wait === true) return boxTxt + " · 중앙 구간이라 진입 대기";
       if (pip.range_upper_edge_near === true && pip.range_short_allowed === true)
         return boxTxt + " · 상단 근접 숏 조건 충족으로 진입 평가 중";
