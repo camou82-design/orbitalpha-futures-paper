@@ -949,6 +949,25 @@ export class PaperEngine {
       if (decisionSnap || res.executorDecision) {
         const d = res.decision;
         const exDetail = res.executorDecision?.detail;
+        if (d.range_stage0_engine_taken === true) {
+          this.logger.info("RANGE_STAGE0_PATH_PROOF", {
+            symbol: String(sym),
+            range_stage0_engine_taken: true,
+            range_stage0_exit_reason: d.range_stage0_exit_reason ?? null,
+            entry_blocked: d.entry_blocked ?? null,
+            reject_reason: d.reject_reason ?? null,
+            stage1_result_code: d.stage1_result_code ?? null
+          });
+        } else if (d.legacy_executor_path_taken === true) {
+          this.logger.info("LEGACY_EXECUTOR_PATH_PROOF", {
+            symbol: String(sym),
+            legacy_executor_path_taken: true,
+            blocked_reason: res.executorDecision?.blocked_reason ?? null,
+            entry_blocked: d.entry_blocked ?? null,
+            reject_reason: d.reject_reason ?? null,
+            stage1_result_code: d.stage1_result_code ?? null
+          });
+        }
 
         // Force HIGHWAY_CORE if Highway metrics are present or regime is TREND
         const isHighwayExecutor =
