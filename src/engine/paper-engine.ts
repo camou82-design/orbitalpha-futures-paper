@@ -147,6 +147,10 @@ type SymbolSnapshot = Readonly<{
   signalMissingReason?: string;
   signalGateBlockedReason?: string | null;
   signalDecisionOrigin?: string;
+  rangeSignalOrigin?: string;
+  rangeSignalDowngraded?: boolean;
+  rangeSignalDowngradeReason?: string;
+  rangeSignalKeptByRelax?: boolean;
   rangeConfidence?: number;
   boxCohesion01?: number;
   breakoutFailureRate?: number;
@@ -420,6 +424,7 @@ export class PaperEngine {
   private readonly risk: RiskManager;
   private lastAdaptiveMode: Readonly<{ mode: FuturesMarketMode; detail: Record<string, unknown> }> = { mode: "sideways", detail: {} };
   private lastRegime: MarketRegimeDetection = INITIAL_ENGINE_REGIME;
+  private lastHealthyBtcRegime: { detected: MarketRegimeDetection; ts: number } | null = null;
   private lastRisk: RiskControlDecision | null = null;
   private lastModeChangeAt: number = 0;
   private lastEntryDecision: AnyEntryDecision | null = null;
@@ -512,9 +517,26 @@ export class PaperEngine {
     const btc5r = await this.bybit.tryGetCandles("BTCUSDT", "5m", 120);
     const btc5 = btc5r.ok ? btc5r.value : [];
     const prevRegime = this.lastRegime.regime;
-    const regimeDetected: MarketRegimeDetection = btc5r.ok
-      ? detectMarketRegime({ btcCandles5m: btc5 })
-      : regimeWhenBtcFeedFailed(btc5r.error ?? "btc_candles_unavailable");
+    const fallbackMaxAgeMs = 90_000;
+    let btcFeedFallbackApplied = false;
+    let btcFeedFallbackAgeMs: number | null = null;
+    let regimeFallbackSource = "direct_btc_feed";
+    let regimeDetected: MarketRegimeDetection;
+    if (btc5r.ok) {
+      regimeDetected = detectMarketRegime({ btcCandles5m: btc5 });
+      this.lastHealthyBtcRegime = { detected: regimeDetected, ts: fetchedAt };
+    } else {
+      const fallback = this.lastHealthyBtcRegime;
+      const age = fallback ? fetchedAt - fallback.ts : Number.POSITIVE_INFINITY;
+      if (fallback && age <= fallbackMaxAgeMs) {
+        btcFeedFallbackApplied = true;
+        btcFeedFallbackAgeMs = age;
+        regimeFallbackSource = "cached_recent_btc_regime";
+        regimeDetected = fallback.detected;
+      } else {
+        regimeDetected = regimeWhenBtcFeedFailed(btc5r.error ?? "btc_candles_unavailable");
+      }
+    }
     this.lastRegime = regimeDetected;
     this.logger.info("regime_decision", {
       regime_final: regimeDetected.log.regime_final,
@@ -525,7 +547,10 @@ export class PaperEngine {
       dump_protection_hit: regimeDetected.log.dump_protection_hit,
       volatility_guard_hit: regimeDetected.log.volatility_guard_hit,
       len_btc_5m: btc5.length,
-      btc_feed_ok: btc5r.ok
+      btc_feed_ok: btc5r.ok,
+      btc_feed_fallback_applied: btcFeedFallbackApplied,
+      btc_feed_fallback_age_ms: btcFeedFallbackAgeMs,
+      regime_fallback_source: regimeFallbackSource
     });
     if (regimeDetected.regime !== prevRegime) {
       this.lastModeChangeAt = Date.now();
@@ -954,6 +979,10 @@ export class PaperEngine {
           signal_decision_origin: decisionSnap?.signalDecisionOrigin ?? "missing",
           signal_gate_block_reason: decisionSnap?.signalGateBlockedReason ?? "none",
           signal_missing_reason_raw: decisionSnap?.signalMissingReason ?? "none",
+          range_signal_origin: decisionSnap?.rangeSignalOrigin ?? "none",
+          range_signal_downgraded: decisionSnap?.rangeSignalDowngraded ?? false,
+          range_signal_downgrade_reason: decisionSnap?.rangeSignalDowngradeReason ?? "none",
+          range_signal_kept_by_relax: decisionSnap?.rangeSignalKeptByRelax ?? false,
           executor_blocked_reason_direct: res.executorDecision?.blocked_reason ?? "none",
           symbol: String(sym),
           decision_source: isHighwayExecutor ? "HIGHWAY_CORE" : "LEGACY_RANGE",
@@ -2657,6 +2686,10 @@ export class PaperEngine {
     // BTC-specific candidate signal relaxation for RANGE regime (후보만; 체결은 기존 게이트 유지)
     let signalDecisionOrigin = "entry_signal_raw";
     let signal_missing_reason = "NONE";
+    let rangeSignalOrigin = "entry_signal_raw";
+    let rangeSignalDowngraded = false;
+    let rangeSignalDowngradeReason = "none";
+    let rangeSignalKeptByRelax = false;
     if (symbol === "BTCUSDT" && regimeDetected.regime === "RANGE" && entry.signal === "none") {
       if (boxPos !== null && boxRel !== null && boxRel >= 0.0035) {
         // 가장자리 기준 소폭 확대(0.28/0.72 → 0.26/0.74): 후보 노출만
@@ -2669,6 +2702,7 @@ export class PaperEngine {
             entryCandidate: true
           };
           signalDecisionOrigin = "btc_range_soft_candidate_lower_edge";
+          rangeSignalOrigin = signalDecisionOrigin;
         } else if (boxPos >= 0.74) {
           entry = {
             ...entry,
@@ -2678,20 +2712,27 @@ export class PaperEngine {
             entryCandidate: true
           };
           signalDecisionOrigin = "btc_range_soft_candidate_upper_edge";
+          rangeSignalOrigin = signalDecisionOrigin;
         } else {
           signal_missing_reason = `BOX_CENTER (pos:${boxPos.toFixed(2)})`;
           signalDecisionOrigin = "btc_range_soft_candidate_rejected_box_center";
+          rangeSignalOrigin = signalDecisionOrigin;
         }
       } else if (boxRel !== null && boxRel < 0.0035) {
         signal_missing_reason = `BOX_TOO_NARROW (rel:${boxRel.toFixed(5)})`;
         signalDecisionOrigin = "btc_range_soft_candidate_rejected_box_too_narrow";
+        rangeSignalOrigin = signalDecisionOrigin;
       } else {
         signal_missing_reason = "BOX_MISSING";
         signalDecisionOrigin = "btc_range_soft_candidate_rejected_box_missing";
+        rangeSignalOrigin = signalDecisionOrigin;
       }
     } else if (entry.signal === "none") {
       signal_missing_reason = "EMA_CRITERIA_NOT_MET";
       signalDecisionOrigin = "entry_signal_none";
+      rangeSignalOrigin = signalDecisionOrigin;
+    } else {
+      rangeSignalOrigin = "entry_signal_candidate";
     }
 
     const sideForQuality =
@@ -2732,11 +2773,28 @@ export class PaperEngine {
         : this.config.paperQualityMinScore;
 
     if (entrySide !== null) {
+      const isBtcRange = symbol === "BTCUSDT" && regimeDetected.regime === "RANGE";
+      const hasRangeEdge = boxPos !== null && (boxPos <= 0.36 || boxPos >= 0.64);
+      const rangeSignalKeepByRelaxCandidate =
+        isBtcRange &&
+        (regimeDetected.rangeConfidence ?? 0) >= 0.5 &&
+        (regimeDetected.boxCohesion01 ?? 0) >= 0.45 &&
+        (regimeDetected.trendWeaknessScore ?? 0) >= 0.5 &&
+        hasRangeEdge;
       if (this.config.paperQualityMinScore > 0 && qualityScore < qualityMinEffective) {
-        signal = "none";
-        entryCandidate = false;
-        gateBlockedReason = "quality_below_min";
-        signalDecisionOrigin = "entry_gate_blocked_quality_min";
+        if (rangeSignalKeepByRelaxCandidate) {
+          signal = entry.signal;
+          entryCandidate = true;
+          rangeSignalKeptByRelax = true;
+          signalDecisionOrigin = "btc_range_relax_keep_candidate_quality";
+        } else {
+          signal = "none";
+          entryCandidate = false;
+          gateBlockedReason = "quality_below_min";
+          signalDecisionOrigin = "entry_gate_blocked_quality_min";
+          rangeSignalDowngraded = true;
+          rangeSignalDowngradeReason = "quality_below_min";
+        }
       } else {
         const tfHi = entryGateHigherTimeframe();
         const limHi = entryGateHigherTfKlineLimit();
@@ -2760,10 +2818,19 @@ export class PaperEngine {
         gateEval = gate;
 
         if (!gate.allowed) {
-          signal = "none";
-          entryCandidate = false;
-          gateBlockedReason = gate.blockReason ?? "gate";
-          signalDecisionOrigin = `entry_gate_blocked_${String(gateBlockedReason)}`;
+          if (rangeSignalKeepByRelaxCandidate) {
+            signal = entry.signal;
+            entryCandidate = true;
+            rangeSignalKeptByRelax = true;
+            signalDecisionOrigin = `btc_range_relax_keep_candidate_gate_${String(gate.blockReason ?? "gate")}`;
+          } else {
+            signal = "none";
+            entryCandidate = false;
+            gateBlockedReason = gate.blockReason ?? "gate";
+            signalDecisionOrigin = `entry_gate_blocked_${String(gateBlockedReason)}`;
+            rangeSignalDowngraded = true;
+            rangeSignalDowngradeReason = gateBlockedReason;
+          }
         }
       }
     }
@@ -2797,6 +2864,10 @@ export class PaperEngine {
       signalMissingReason: signal_missing_reason,
       signalGateBlockedReason: gateBlockedReason,
       signalDecisionOrigin,
+      rangeSignalOrigin,
+      rangeSignalDowngraded,
+      rangeSignalDowngradeReason,
+      rangeSignalKeptByRelax,
       rangeConfidence: regimeDetected.rangeConfidence,
       boxCohesion01: regimeDetected.boxCohesion01,
       breakoutFailureRate: regimeDetected.breakoutFailureRate,
