@@ -80,6 +80,8 @@ import {
   rangeLadderLegMultiplier,
   rangeAccumulationRecoveryMultiplier,
   RANGE_REOPEN_WINDOW_MS,
+  RANGE_ZONE_ACTION_POLICY,
+  classifyBoxZone,
   type RangeReopenSoftMetrics
 } from "./range-engine";
 import {
@@ -97,6 +99,29 @@ const EP = {
 
 const DEFAULT_PAPER_SIZE_USD = 100;
 const SAME_DIR_REENTRY_COOLDOWN_MULT = 1.35;
+const RANGE_REVERSAL_SWITCH_PENDING_MS = 90_000;
+
+type RangeReversalSwitchPending = Readonly<{
+  untilMs: number;
+  preferredSide: "long" | "short";
+  zone: RangeBoxZone;
+}>;
+
+type RangeReversalImmediateSwitchArg = Readonly<{
+  preferredSide: "long" | "short";
+  reason:
+    | "upper_flatten_to_short"
+    | "lower_flatten_to_long"
+    | "upper_flatten_to_short_pending"
+    | "lower_flatten_to_long_pending";
+}>;
+
+/** RANGE 청산·유지 정책용 박스 위치 구간 (상단 ≥0.62, 하단 ≤0.38). */
+function classifyRangeActionZone(boxPos: number): RangeBoxZone {
+  if (boxPos >= 0.62) return "upper";
+  if (boxPos <= 0.38) return "lower";
+  return "mid";
+}
 
 function computeAvgBoxCohesion01(
   snapshots: ReadonlyArray<{ boxHigh: number | null; boxLow: number | null; lastPrice: number }>
@@ -457,6 +482,13 @@ export class PaperEngine {
   private rangeRecentOutcomeScoresBySymbol = new Map<string, number[]>();
   private lastExitReasonLabel = "";
   private lastSwitchReasonLabel = "";
+  /** 직전 틱 구간 반전 청산 적용(PEL proof용) */
+  private rangeReversalExitThisTickBySymbol = new Map<
+    string,
+    { range_existing_long_reversal_exit_applied?: boolean; range_existing_short_reversal_exit_applied?: boolean }
+  >();
+  /** 반전 청산 후 짧은 TTL 동안 동일 구간·반대 방향 재평가 허용(틱 스킵·쿨다운 대비). */
+  private rangeReversalSwitchPendingBySymbol = new Map<string, RangeReversalSwitchPending>();
   private readonly okxDemo: OkxDemoClient | null;
   private okxAccountConfigLoaded = false;
 
@@ -535,6 +567,7 @@ export class PaperEngine {
   async runOnce(): Promise<void> {
     this.lastExitReasonLabel = "";
     this.lastSwitchReasonLabel = "";
+    this.rangeReversalExitThisTickBySymbol.clear();
     await this.positions.ensureHistoryFile();
     if (this.okxDemo) {
       try {
@@ -824,6 +857,15 @@ export class PaperEngine {
 
     for (const sym of symbols) {
       const snap = snapshots.find((s) => s.symbol === sym) ?? null;
+      const symKeyEarly = String(sym);
+      this.pruneRangeReversalSwitchPending(symKeyEarly, snap, nowTick);
+      const rangeReversalImmediateSwitchEarly = this.rangeReversalImmediateSwitchForSymbol(
+        symKeyEarly,
+        snap,
+        nowTick,
+        regimeDetected.regime,
+        marketModeOut.routing.activeEngine
+      );
       if (!snap) {
         const res = evaluatePaperSymbolEntry({
           config: this.config,
@@ -843,11 +885,23 @@ export class PaperEngine {
           reentryCooldownMs: this.config.paperReentryCooldownMs,
           sameDirCooldownMult: SAME_DIR_REENTRY_COOLDOWN_MULT,
           hasOpenPosition: false,
+          openPositionSide: null,
           currentStage: 0,
           maxPositionsReached: false,
-          rangeReopenCooldownBypass: false
+          rangeReopenCooldownBypass: false,
+          rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly
         });
         decisionBySymbol.set(String(sym), res);
+        if (regimeDetected.regime === "RANGE") {
+          const zProof = this.rangeZoneEvalProofPayload(sym, null, res, rangeReversalImmediateSwitchEarly, null);
+          this.logger.info("RANGE_ZONE_EVAL_PROOF", zProof);
+          if (
+            zProof.reversal_switch_stalled === true &&
+            rangeReversalImmediateSwitchEarly?.preferredSide === "short"
+          ) {
+            this.logger.warn("RANGE_REVERSAL_SHORT_STALLED_PROOF", zProof);
+          }
+        }
         try {
           await this.store.appendJsonlLine("reports/decisions.jsonl", { ...res.decision, pipeline: "v1" });
         } catch (e) {
@@ -910,7 +964,15 @@ export class PaperEngine {
       const armed = this.rangeReopenArmedUntilBySymbol.get(rrKey) ?? 0;
       const reopenRecent =
         this.rangeReopenTimestampsBySymbol.get(rrKey)?.filter((t) => t > nowTick - RANGE_REOPEN_WINDOW_MS) ?? [];
-      const intentSideForReopen = snap.signal === "paper_short_candidate" ? ("short" as const) : ("long" as const);
+      const reopenZone = classifyBoxZone(rsEval.boxPosition);
+      const intentSideForReopen =
+        reopenZone === "upper"
+          ? ("short" as const)
+          : reopenZone === "lower"
+            ? ("long" as const)
+            : snap.signal === "paper_short_candidate"
+              ? ("short" as const)
+              : ("long" as const);
       const proposedUsd = Math.max(
         MIN_POSITION_SIZE_USD,
         this.lastRiskExposure
@@ -936,6 +998,14 @@ export class PaperEngine {
         soft: reopenSoft
       });
       const rangeReopenCooldownBypass = reopenGate.allowed;
+
+      const rangeReversalImmediateSwitch = this.rangeReversalImmediateSwitchForSymbol(
+        rrKey,
+        snap,
+        nowTick,
+        regimeDetected.regime,
+        marketModeOut.routing.activeEngine
+      );
 
       const res = evaluatePaperSymbolEntry({
         config: this.config,
@@ -984,11 +1054,13 @@ export class PaperEngine {
         reentryCooldownMs: this.config.paperReentryCooldownMs,
         sameDirCooldownMult: SAME_DIR_REENTRY_COOLDOWN_MULT,
         hasOpenPosition: hasOpen,
+        openPositionSide: openPos?.side ?? null,
         currentStage,
         maxPositionsReached: (opensAfterClose.length >= this.config.paperMaxOpenPositions && !hasOpen),
         reviewingTicks,
         autoEntryTriggered,
-        rangeReopenCooldownBypass
+        rangeReopenCooldownBypass,
+        rangeReversalImmediateSwitch
       });
 
       // Update reviewing state for next tick
@@ -1002,6 +1074,17 @@ export class PaperEngine {
         this.reviewingState.delete(String(snap.symbol));
       }
       decisionBySymbol.set(String(sym), res);
+      if (regimeDetected.regime === "RANGE") {
+        const zProof = this.rangeZoneEvalProofPayload(sym, snap, res, rangeReversalImmediateSwitch, openPos?.side ?? null);
+        this.logger.info("RANGE_ZONE_EVAL_PROOF", zProof);
+        if (
+          zProof.reversal_switch_stalled === true &&
+          zProof.zone === "upper" &&
+          rangeReversalImmediateSwitch?.preferredSide === "short"
+        ) {
+          this.logger.warn("RANGE_UPPER_REVERSAL_SHORT_STALLED_PROOF", zProof);
+        }
+      }
 
       const decisionSnap = snapshots.find((s) => s.symbol === sym);
       if (decisionSnap || res.executorDecision) {
@@ -1103,6 +1186,19 @@ export class PaperEngine {
           range_reversal_long_exit_triggered: d.range_reversal_long_exit_triggered ?? false,
           range_reversal_short_entry_allowed: d.range_reversal_short_entry_allowed ?? false,
           range_reversal_short_entry_block_reason: d.range_reversal_short_entry_block_reason ?? null,
+          range_zone_action_policy: d.range_zone_action_policy ?? null,
+          range_zone_detected: d.range_zone_detected ?? null,
+          range_upper_short_priority_applied: d.range_upper_short_priority_applied ?? false,
+          range_lower_long_priority_applied: d.range_lower_long_priority_applied ?? false,
+          range_mid_wait_applied: d.range_mid_wait_applied ?? false,
+          range_final_trade_side_by_zone: d.range_final_trade_side_by_zone ?? null,
+          range_existing_long_reversal_exit_applied:
+            this.rangeReversalExitThisTickBySymbol.get(String(sym))?.range_existing_long_reversal_exit_applied ?? false,
+          range_existing_short_reversal_exit_applied:
+            this.rangeReversalExitThisTickBySymbol.get(String(sym))?.range_existing_short_reversal_exit_applied ??
+            false,
+          range_reversal_immediate_switch_applied: d.range_reversal_immediate_switch_applied ?? false,
+          range_reversal_immediate_switch_reason: d.range_reversal_immediate_switch_reason ?? null,
           executor_blocked_reason_direct: res.executorDecision?.blocked_reason ?? "none",
           symbol: String(sym),
           engine_path: res.decision.currentStage === 0 && res.decision.regime === "RANGE" ? "RANGE_ENGINE" : "COMMON_ENGINE",
@@ -1308,6 +1404,69 @@ export class PaperEngine {
       filePath,
       decisionBySymbol
     });
+
+    try {
+      const hist = await this.store.readPositionsHistory();
+      const rows = Array.isArray(hist) ? hist : [];
+      type HistRow = {
+        regimeAtEntry?: string;
+        side?: "long" | "short";
+        rangeEntryZone?: "upper" | "lower" | "mid";
+        rangeEntryFromReversalSwitch?: boolean;
+      };
+      const rangeRows = rows
+        .filter((r: unknown): r is HistRow => {
+          const x = r as HistRow;
+          return x.regimeAtEntry === "RANGE";
+        })
+        .slice(-20);
+      const byZoneSide = {
+        upper: { long: 0, short: 0 },
+        mid: { long: 0, short: 0 },
+        lower: { long: 0, short: 0 }
+      };
+      let entriesWithoutZone = 0;
+      let entriesFromReversalSwitch = 0;
+      for (const r of rangeRows) {
+        if (r.rangeEntryFromReversalSwitch === true) entriesFromReversalSwitch += 1;
+        const z = r.rangeEntryZone;
+        if (z === "upper" || z === "mid" || z === "lower") {
+          if (r.side === "long") byZoneSide[z].long += 1;
+          else if (r.side === "short") byZoneSide[z].short += 1;
+        } else {
+          entriesWithoutZone += 1;
+        }
+      }
+      const midTotal = byZoneSide.mid.long + byZoneSide.mid.short;
+      const policyCompliance = {
+        /** 목표: 상단 롱 체결 0 */
+        upper_long_entries: byZoneSide.upper.long,
+        upper_short_entries: byZoneSide.upper.short,
+        /** 목표: 하단 숏 체결 0 */
+        lower_short_entries: byZoneSide.lower.short,
+        lower_long_entries: byZoneSide.lower.long,
+        /** 목표: 중단 신규 0 */
+        mid_total_entries: midTotal,
+        upper_compliant_no_long: byZoneSide.upper.long === 0,
+        lower_compliant_no_short: byZoneSide.lower.short === 0,
+        mid_compliant_no_entry: midTotal === 0
+      };
+      const distPayload = {
+        source: "positions/history.json",
+        note: "최근 20건은 regimeAtEntry===RANGE 인 종료(체결) 행 기준",
+        range_zone_action_policy: RANGE_ZONE_ACTION_POLICY,
+        sample_size: rangeRows.length,
+        by_zone_side: byZoneSide,
+        entries_without_range_entry_zone: entriesWithoutZone,
+        entries_from_reversal_switch_in_sample: entriesFromReversalSwitch,
+        policy_compliance: policyCompliance
+      };
+      this.logger.info("range_recent_20_closed_distribution_proof", distPayload);
+      this.logger.info("range_recent_20_fill_distribution", distPayload);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.error("range_recent_20_fill_distribution_failed", { error: msg });
+    }
 
     const openAfterEntries = await this.positions.loadOpenAll();
     for (const sym of symbols) {
@@ -1555,6 +1714,123 @@ export class PaperEngine {
     }
   }
 
+  private pruneRangeReversalSwitchPending(symKey: string, snap: SymbolSnapshot | null, nowMs: number): void {
+    const p = this.rangeReversalSwitchPendingBySymbol.get(symKey);
+    if (!p) return;
+    if (nowMs > p.untilMs) {
+      this.rangeReversalSwitchPendingBySymbol.delete(symKey);
+      return;
+    }
+    if (snap != null && typeof snap.boxPos === "number" && classifyBoxZone(snap.boxPos) !== p.zone) {
+      this.rangeReversalSwitchPendingBySymbol.delete(symKey);
+    }
+  }
+
+  private rangeReversalImmediateSwitchForSymbol(
+    symKey: string,
+    snap: SymbolSnapshot | null,
+    nowMs: number,
+    regime: MarketRegime,
+    activeEngine: string
+  ): RangeReversalImmediateSwitchArg | undefined {
+    if (regime !== "RANGE" || activeEngine !== "RANGE") return undefined;
+    if (snap == null || typeof snap.boxPos !== "number") return undefined;
+    const ex = this.rangeReversalExitThisTickBySymbol.get(symKey);
+    if (ex?.range_existing_long_reversal_exit_applied) {
+      return { preferredSide: "short", reason: "upper_flatten_to_short" };
+    }
+    if (ex?.range_existing_short_reversal_exit_applied) {
+      return { preferredSide: "long", reason: "lower_flatten_to_long" };
+    }
+    const pend = this.rangeReversalSwitchPendingBySymbol.get(symKey);
+    if (!pend || nowMs > pend.untilMs) return undefined;
+    const z = classifyBoxZone(snap.boxPos);
+    if (z !== pend.zone) return undefined;
+    if (pend.preferredSide === "short" && z === "upper") {
+      return { preferredSide: "short", reason: "upper_flatten_to_short_pending" };
+    }
+    if (pend.preferredSide === "long" && z === "lower") {
+      return { preferredSide: "long", reason: "lower_flatten_to_long_pending" };
+    }
+    return undefined;
+  }
+
+  /**
+   * RANGE 구간·반전 스위치·적응형까지 한 틱에서 추적(상단 롱 편향·숏 미체결 원인 증명용).
+   */
+  private rangeZoneEvalProofPayload(
+    sym: MarketSymbol,
+    snap: SymbolSnapshot | null,
+    res: EvaluatePaperSymbolEntryResult,
+    rangeReversalImmediateSwitchIn: RangeReversalImmediateSwitchArg | undefined,
+    openPositionSide: "long" | "short" | null = null
+  ): Record<string, unknown> {
+    const d = res.decision;
+    const boxPos = snap?.boxPos ?? null;
+    const zone = typeof boxPos === "number" && Number.isFinite(boxPos) ? classifyBoxZone(boxPos) : null;
+    const sup = d.supplemental_reasons ?? [];
+    const raw = snap?.signal ?? null;
+    const upperLongRaw = zone === "upper" && raw === "paper_long_candidate";
+    const exDetail = res.executorDecision?.detail as Record<string, unknown> | undefined;
+    const rangeSigReason =
+      typeof exDetail?.range_signal_reason === "string" ? (exDetail.range_signal_reason as string) : null;
+    const rangeSigState =
+      typeof exDetail?.range_signal === "string" ? (exDetail.range_signal as string) : null;
+    const revIn = rangeReversalImmediateSwitchIn ?? null;
+    const stalled =
+      revIn != null &&
+      (d.final_decision !== "ENTER" || res.adaptiveOk !== true || res.adaptiveResult == null);
+    return {
+      symbol: String(sym),
+      box_pos: boxPos,
+      zone,
+      raw_snapshot_signal: raw,
+      signal_decision_origin: snap?.signalDecisionOrigin ?? null,
+      range_signal_kept_by_relax: snap?.rangeSignalKeptByRelax ?? false,
+      /** (1) 상단에서 raw long 후보가 들어와도 stage0가 무력화하는지 */
+      upper_zone_long_candidate_received: upperLongRaw,
+      range_stage0_inner_signal_reason: rangeSigReason,
+      range_stage0_inner_signal_state: rangeSigState,
+      range_reversal_immediate_switch_input: revIn,
+      range_stage0_engine_taken: d.range_stage0_engine_taken ?? false,
+      range_zone_detected: d.range_zone_detected ?? null,
+      range_final_trade_side_by_zone: d.range_final_trade_side_by_zone ?? null,
+      range_final_selected_side: d.range_final_selected_side ?? null,
+      range_reversal_immediate_switch_applied: d.range_reversal_immediate_switch_applied ?? false,
+      range_reversal_immediate_switch_reason: d.range_reversal_immediate_switch_reason ?? null,
+      range_mid_wait_applied: d.range_mid_wait_applied ?? false,
+      legacy_executor_path_taken: d.legacy_executor_path_taken ?? false,
+      legacy_block_test_bypass_applied: d.legacy_block_test_bypass_applied ?? false,
+      final_decision: d.final_decision,
+      reject_reason: d.reject_reason ?? null,
+      intent_side: res.intentSide,
+      /** (2)(4) short 평가 이후 적응형·게이트 */
+      adaptive_ok: res.adaptiveOk,
+      adaptive_direction: res.adaptiveDirection ?? null,
+      ai_gate_passed: res.aiGatePassed,
+      stage1_result_code: d.stage1_result_code ?? null,
+      entry_blocked: d.entry_blocked ?? null,
+      /** 소프트 롱 승격(하단 전용이나 UNKNOWN 경로에서 롱 편향 재기동 여부) */
+      soft_long_v2_path: sup.some((x) => x.includes("STAGE1_SIGNAL_RELAXED_SOFT_CANDIDATE_V2")),
+      unknown_regime_range_fallback: sup.some((x) => x.includes("STAGE1_UNKNOWN_REGIME_RANGE_FALLBACK")),
+      /** (3) 반전 스위치가 켜졌는데도 ENTER/adaptive 미도달 */
+      reversal_switch_stalled: stalled,
+      /** stage0가 아닌 경로(레거시 하이웨이 등)에서 상단 롱 의도 — 편향 재기동 추적 */
+      long_intent_upper_without_range_stage0:
+        d.range_stage0_engine_taken !== true &&
+        zone === "upper" &&
+        res.intentSide === "long",
+      /** 정책 위반 의심: stage0인데 상단·롱 의도 */
+      range_stage0_upper_long_intent_anomaly:
+        d.range_stage0_engine_taken === true &&
+        zone === "upper" &&
+        res.intentSide === "long",
+      order_build_fail_reason: d.order_build_fail_reason ?? null,
+      order_build_fail_stage: d.order_build_fail_stage ?? null,
+      open_position_side: openPositionSide
+    };
+  }
+
   private async tryPaperPositionClose(input: Readonly<{
     snapshots: SymbolSnapshot[];
     errorsCount: number;
@@ -1764,6 +2040,125 @@ export class PaperEngine {
           ladder: rangeState.rangeLadderLevel
         });
         this.logger.info("range_engine_tick", rangeState);
+
+        if (regimeAtEntry === "RANGE" && typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos)) {
+          const raZone = classifyRangeActionZone(snap.boxPos);
+          const alignedHold =
+            (open.side === "long" && raZone === "lower") || (open.side === "short" && raZone === "upper");
+          this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
+            symbol: symKey,
+            side: open.side,
+            range_zone_detected: raZone,
+            range_hold_alignment: alignedHold,
+            range_hold_misaligned_exit_applied: false,
+            box_pos: snap.boxPos,
+            phase: "pre_exit_eval_alignment"
+          });
+          if (open.side === "long" && raZone === "upper") {
+            const cr = "regime_exit" as const;
+            const closedRow = finalizePaperClosedRecord({
+              open,
+              symbol: open.symbol,
+              closePrice,
+              closedAt,
+              closeReason: cr,
+              legMarginUsd: open.sizeUsd,
+              metrics: m,
+              feeRate,
+              fundingIntervalHours: intervalH,
+              strategyVersion: "paper-v1",
+              closeReasonLabelOverride: "상단 반전 구간: 롱 정리(숏 평가 우선)",
+              ...snapPaths
+            });
+            await this.positions.appendClosed(closedRow);
+            this.rangeReversalExitThisTickBySymbol.set(symKey, {
+              ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
+              range_existing_long_reversal_exit_applied: true
+            });
+            this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
+              symbol: symKey,
+              side: open.side,
+              range_zone_detected: raZone,
+              range_hold_alignment: false,
+              range_hold_misaligned_exit_applied: true,
+              box_pos: snap.boxPos,
+              phase: "pre_exit_eval_regime_exit_long_upper"
+            });
+            this.logger.info("range_existing_long_reversal_exit_applied", {
+              symbol: symKey,
+              range_zone_detected: raZone,
+              box_pos: snap.boxPos,
+              range_zone_action_policy: RANGE_ZONE_ACTION_POLICY
+            });
+            this.rangeReversalSwitchPendingBySymbol.set(symKey, {
+              untilMs: Date.now() + RANGE_REVERSAL_SWITCH_PENDING_MS,
+              preferredSide: "short",
+              zone: "upper"
+            });
+            this.lastExitReasonLabel = "상단 반전 구간 롱 정리";
+            await this.store.appendJsonlLine("reports/events.jsonl", {
+              ts: Date.now(),
+              type: "EXIT_REGIME",
+              symbol: symKey,
+              reason: cr,
+              range_zone_reversal: "upper_long_flatten",
+              realized_pnl: m.pnlUsdNet
+            });
+            continue;
+          }
+          if (open.side === "short" && raZone === "lower") {
+            const cr = "regime_exit" as const;
+            const closedRow = finalizePaperClosedRecord({
+              open,
+              symbol: open.symbol,
+              closePrice,
+              closedAt,
+              closeReason: cr,
+              legMarginUsd: open.sizeUsd,
+              metrics: m,
+              feeRate,
+              fundingIntervalHours: intervalH,
+              strategyVersion: "paper-v1",
+              closeReasonLabelOverride: "하단 반전 구간: 숏 정리(롱 평가 우선)",
+              ...snapPaths
+            });
+            await this.positions.appendClosed(closedRow);
+            this.rangeReversalExitThisTickBySymbol.set(symKey, {
+              ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
+              range_existing_short_reversal_exit_applied: true
+            });
+            this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
+              symbol: symKey,
+              side: open.side,
+              range_zone_detected: raZone,
+              range_hold_alignment: false,
+              range_hold_misaligned_exit_applied: true,
+              box_pos: snap.boxPos,
+              phase: "pre_exit_eval_regime_exit_short_lower"
+            });
+            this.logger.info("range_existing_short_reversal_exit_applied", {
+              symbol: symKey,
+              range_zone_detected: raZone,
+              box_pos: snap.boxPos,
+              range_zone_action_policy: RANGE_ZONE_ACTION_POLICY
+            });
+            this.rangeReversalSwitchPendingBySymbol.set(symKey, {
+              untilMs: Date.now() + RANGE_REVERSAL_SWITCH_PENDING_MS,
+              preferredSide: "long",
+              zone: "lower"
+            });
+            this.lastExitReasonLabel = "하단 반전 구간 숏 정리";
+            await this.store.appendJsonlLine("reports/events.jsonl", {
+              ts: Date.now(),
+              type: "EXIT_REGIME",
+              symbol: symKey,
+              reason: cr,
+              range_zone_reversal: "lower_short_flatten",
+              realized_pnl: m.pnlUsdNet
+            });
+            continue;
+          }
+        }
       }
 
       const priorBr = this.trendBreakoutBySymbol.get(symKey) ?? "none";
@@ -2159,22 +2554,81 @@ export class PaperEngine {
       // 4. Default persistence (with Trailing SL update)
       const posTrail = { ...open, trailingExtremePrice: (exitEval as any).trailingExtreme };
 
-      const keep =
-        (open.side === "long" && snap.signal === "paper_long_candidate") ||
-        (open.side === "short" && snap.signal === "paper_short_candidate");
-
-      if (keep) {
-        remaining.push({ ...posTrail, lostAt: undefined, candidateLostStreak: 0 });
-        continue;
-      }
-
       if (regimeAtEntry === "RANGE") {
-        remaining.push({ ...posTrail, lostAt: undefined, candidateLostStreak: 0 });
-        this.logger.info("range_hold_signal_mismatch_no_candidate_lost", {
+        const raZone =
+          typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos)
+            ? classifyRangeActionZone(snap.boxPos)
+            : ("mid" as const);
+        const aligned =
+          (open.side === "long" && raZone === "lower") || (open.side === "short" && raZone === "upper");
+        this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
           symbol: open.symbol,
-          market_mode: input.marketMode.marketMode
+          side: open.side,
+          range_zone_detected: raZone,
+          range_hold_alignment: aligned,
+          range_hold_misaligned_exit_applied: false,
+          box_pos: snap.boxPos ?? null,
+          phase: "default_persistence"
         });
-        continue;
+        if (aligned) {
+          remaining.push({ ...posTrail, lostAt: undefined, candidateLostStreak: 0 });
+          continue;
+        }
+        if ((open.side === "long" && raZone === "upper") || (open.side === "short" && raZone === "lower")) {
+          const cr = "regime_exit" as const;
+          const closedRow = finalizePaperClosedRecord({
+            open,
+            symbol: open.symbol,
+            closePrice,
+            closedAt,
+            closeReason: cr,
+            legMarginUsd: open.sizeUsd,
+            metrics: m,
+            feeRate,
+            fundingIntervalHours: intervalH,
+            strategyVersion: "paper-v1",
+            closeReasonLabelOverride:
+              open.side === "long"
+                ? "RANGE 정합성: 상단 롱 강제 청산"
+                : "RANGE 정합성: 하단 숏 강제 청산",
+            ...snapPaths
+          });
+          await this.positions.appendClosed(closedRow);
+          this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            range_zone_detected: raZone,
+            range_hold_alignment: false,
+            range_hold_misaligned_exit_applied: true,
+            box_pos: snap.boxPos ?? null,
+            phase: "default_persistence_regime_exit_safety_net"
+          });
+          this.lastExitReasonLabel = open.side === "long" ? "RANGE 상단 롱 정합성 청산" : "RANGE 하단 숏 정합성 청산";
+          await this.store.appendJsonlLine("reports/events.jsonl", {
+            ts: Date.now(),
+            type: "EXIT_REGIME",
+            symbol: String(open.symbol),
+            reason: cr,
+            range_alignment_forced_exit: true,
+            realized_pnl: m.pnlUsdNet
+          });
+          continue;
+        }
+        // mid: 무조건 유지 금지 → 아래 minHold / candidate_lost 로 진행
+      } else {
+        const zk =
+          typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos) ? classifyBoxZone(snap.boxPos) : ("mid" as const);
+        const keep =
+          (open.side === "long" &&
+            snap.signal === "paper_long_candidate" &&
+            zk !== "upper") ||
+          (open.side === "short" &&
+            snap.signal === "paper_short_candidate" &&
+            zk !== "lower");
+        if (keep) {
+          remaining.push({ ...posTrail, lostAt: undefined, candidateLostStreak: 0 });
+          continue;
+        }
       }
 
       /** 증액(스테이지 2+)·규모 확대 포지션: 신호 소멸 후 시간 청산·유예를 더 짧게 (RANGE 포지션은 상단에서 이미 분기됨) */
@@ -2244,16 +2698,29 @@ export class PaperEngine {
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
 
-    const candidates = input.snapshots
-      .filter((s) => s.signal === "paper_long_candidate" || s.signal === "paper_short_candidate")
-      .sort((a, b) => {
-        const aMajor = a.symbol === "BTCUSDT" || a.symbol === "ETHUSDT";
-        const bMajor = b.symbol === "BTCUSDT" || b.symbol === "ETHUSDT";
-        if (aMajor && !bMajor) return -1;
-        if (!aMajor && bMajor) return +1;
-        return 0;
-      });
-    if (candidates.length === 0) return;
+    const snapshotBySymbol = new Map<string, SymbolSnapshot>();
+    for (const s of input.snapshots) {
+      snapshotBySymbol.set(String(s.symbol), s);
+    }
+    const entryQueue: SymbolSnapshot[] = [];
+    for (const [symKey, res] of input.decisionBySymbol.entries()) {
+      if (res.decision.final_decision !== "ENTER") continue;
+      const intent = res.intentSide;
+      if (intent !== "long" && intent !== "short") continue;
+      if (res.adaptiveResult == null) continue;
+      const base = snapshotBySymbol.get(symKey);
+      if (!base) continue;
+      const sig: PaperSignal = intent === "long" ? "paper_long_candidate" : "paper_short_candidate";
+      entryQueue.push({ ...base, signal: sig });
+    }
+    entryQueue.sort((a, b) => {
+      const aMajor = a.symbol === "BTCUSDT" || a.symbol === "ETHUSDT";
+      const bMajor = b.symbol === "BTCUSDT" || b.symbol === "ETHUSDT";
+      if (aMajor && !bMajor) return -1;
+      if (!aMajor && bMajor) return +1;
+      return 0;
+    });
+    if (entryQueue.length === 0) return;
 
     if (!input.candidateRunPath || !input.latestPath || !input.metaPath || !input.filePath) {
       return;
@@ -2266,10 +2733,30 @@ export class PaperEngine {
     const nowTs = Date.now();
     this.lastEntryDecision = null;
 
-    for (const first of candidates) {
+    for (const first of entryQueue) {
       const res = input.decisionBySymbol.get(String(first.symbol));
       if (!res) continue;
-      const intentSide = res.intentSide ?? (first.signal === "paper_short_candidate" ? "short" : "long");
+      const intentSide = res.intentSide;
+      if (intentSide !== "long" && intentSide !== "short") continue;
+      if (this.lastRegime.regime === "RANGE") {
+        const origSnap = input.snapshots.find((s) => s.symbol === first.symbol);
+        const qz = typeof first.boxPos === "number" ? classifyBoxZone(first.boxPos) : null;
+        this.logger.info("RANGE_OPEN_QUEUE_PROOF", {
+          symbol: first.symbol,
+          zone: qz,
+          original_snapshot_signal: origSnap?.signal ?? null,
+          queued_signal_after_merge: first.signal,
+          signal_corrected_for_intent: origSnap != null && origSnap.signal !== first.signal,
+          intent_side: intentSide,
+          final_decision: res.decision.final_decision,
+          reject_reason: res.decision.reject_reason ?? null,
+          adaptive_ok: res.adaptiveOk,
+          adaptive_direction: res.adaptiveDirection ?? null,
+          range_reversal_immediate_switch_applied: res.decision.range_reversal_immediate_switch_applied ?? false,
+          will_attempt_open: res.decision.final_decision === "ENTER" && res.adaptiveResult != null,
+          active_engine: this.lastMarketMode?.routing.activeEngine ?? null
+        });
+      }
       const existingOpen = next.find((o) => o.symbol === first.symbol && o.side === intentSide);
       const entryStage = existingOpen?.entryStage ?? 0;
       const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === intentSide);
@@ -2609,10 +3096,59 @@ export class PaperEngine {
           ...(confTier !== undefined ? { entryConfidenceTier: confTier } : {}),
           ...(sizeMult !== undefined ? { entrySizeMultiplier: sizeMult } : {}),
           ...(res.decision.post_entry_cost_guard === true ? { postEntryCostGuard: true } : {}),
+          ...(this.lastRegime.regime === "RANGE" && typeof first.boxPos === "number"
+            ? {
+                rangeEntryBoxPos: first.boxPos,
+                rangeEntryZone: classifyBoxZone(first.boxPos)
+              }
+            : {}),
+          ...(res.decision.range_reversal_immediate_switch_applied === true ? { rangeEntryFromReversalSwitch: true } : {}),
           status: "open"
         };
 
         next.push(record);
+        if (res.decision.range_reversal_immediate_switch_applied === true) {
+          this.rangeReversalSwitchPendingBySymbol.delete(symS);
+        }
+        if (this.lastRegime.regime === "RANGE") {
+          const fillZone = typeof first.boxPos === "number" ? classifyBoxZone(first.boxPos) : null;
+          const origOpen = input.snapshots.find((s) => s.symbol === first.symbol);
+          const fillProof = {
+            symbol: record.symbol,
+            side: record.side,
+            range_entry_zone: record.rangeEntryZone ?? fillZone,
+            box_pos_at_open: first.boxPos,
+            source_signal_stored_on_record: sourceSignal,
+            original_snapshot_signal: origOpen?.signal ?? null,
+            queued_signal_at_execution: first.signal,
+            range_stage0_engine_taken: res.decision.range_stage0_engine_taken ?? false,
+            range_reversal_immediate_switch_applied: res.decision.range_reversal_immediate_switch_applied ?? false,
+            range_final_trade_side_by_zone: res.decision.range_final_trade_side_by_zone ?? null,
+            legacy_executor_path_taken: res.decision.legacy_executor_path_taken ?? false,
+            legacy_block_test_bypass_applied: res.decision.legacy_block_test_bypass_applied ?? false,
+            stage1_result_code: res.decision.stage1_result_code ?? null,
+            adaptive_soft_explore:
+              (adaptive.detail as { stage1_adaptive_soft_explore?: string | null })?.stage1_adaptive_soft_explore ?? null
+          };
+          this.logger.info("RANGE_FILL_PATH_PROOF", fillProof);
+          if (fillZone === "upper" && record.side === "long") {
+            this.logger.warn("RANGE_ANOMALY_UPPER_LONG_OPEN_CODE_PATH", {
+              ...fillProof,
+              anomaly_note:
+                "RANGE stage0 상단에서는 롱 진입이 나오면 안 됨 — 레거시 하이웨이·테스트 바이패스·히스토리 zone 라벨 불일치 등을 의심"
+            });
+            try {
+              await this.store.appendJsonlLine("reports/events.jsonl", {
+                ts: Date.now(),
+                type: "RANGE_ANOMALY_UPPER_LONG_OPEN",
+                ...fillProof
+              });
+            } catch (appendErr) {
+              const m = appendErr instanceof Error ? appendErr.message : String(appendErr);
+              this.logger.error("range_anomaly_event_append_failed", { error: m });
+            }
+          }
+        }
         const reopenArmActive = (this.rangeReopenArmedUntilBySymbol.get(symS) ?? 0) > nowTs;
         if (reopenArmActive && this.lastMarketMode?.routing.activeEngine === "RANGE") {
           const arr = this.rangeReopenTimestampsBySymbol.get(symS) ?? [];
@@ -2728,6 +3264,17 @@ export class PaperEngine {
 
     const decision = res.executorDecision!;
     const adaptive = res.adaptiveResult;
+    if (existing.regimeAtEntry === "RANGE" && typeof first.boxPos === "number") {
+      const zz = classifyRangeActionZone(first.boxPos);
+      if (existing.side === "long" && zz === "upper" && adaptive.direction === "long") {
+        this.logger.info("scale_in_blocked_range_upper_long_add", { symbol: existing.symbol, box_zone: zz });
+        return null;
+      }
+      if (existing.side === "short" && zz === "lower" && adaptive.direction === "short") {
+        this.logger.info("scale_in_blocked_range_lower_short_add", { symbol: existing.symbol, box_zone: zz });
+        return null;
+      }
+    }
     const targetStage = res.decision.target_stage ?? (existing.entryStage ?? 1) + 1;
 
     // scaling_weights based on regime
@@ -2820,6 +3367,20 @@ export class PaperEngine {
         guidance: res.decision.guidance
       }
     });
+
+    if (existing.regimeAtEntry === "RANGE" && typeof first.boxPos === "number") {
+      this.logger.info("RANGE_SCALE_IN_SUCCESS_PROOF", {
+        symbol: existing.symbol,
+        side: existing.side,
+        box_zone: classifyRangeActionZone(first.boxPos),
+        box_pos: first.boxPos,
+        snapshot_signal: first.signal,
+        adaptive_direction: adaptive.direction,
+        incremental_usd: incrementalSizeUsd,
+        target_stage: targetStage,
+        note: "상단 롱 증액은 별도 블록에서 차단됨 — 이 로그는 통과한 증액만"
+      });
+    }
 
     this.logger.info("paper_position_scaled_in", {
       symbol: existing.symbol,
