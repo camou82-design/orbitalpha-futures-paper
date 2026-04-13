@@ -107,6 +107,16 @@ export type EngineConfig = Readonly<{
    * Env: `PAPER_FIXED_TOTAL_COST_USD` (e.g. 30).
    */
   paperFixedTotalCostUsd: number | null;
+  /** OKX demo adapter toggle (strictly isolated from live env). */
+  okxDemoEnabled: boolean;
+  /** OKX demo REST base URL (default https://www.okx.com). */
+  okxDemoBaseUrl: string;
+  /** OKX demo API key. */
+  okxDemoApiKey: string;
+  /** OKX demo API secret. */
+  okxDemoApiSecret: string;
+  /** OKX demo passphrase. */
+  okxDemoPassphrase: string;
 }>;
 
 /** Standard paper entry decision reject codes (see `evaluatePaperSymbolEntry`). */

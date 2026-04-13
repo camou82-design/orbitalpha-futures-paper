@@ -19,6 +19,7 @@ import type { Logger } from "../logs/logger";
 import { JsonStore } from "../storage/json-store";
 import type { BybitPublicDiagnostics } from "../exchange/bybit-public";
 import { BybitPublicClient } from "../exchange/bybit-public";
+import { OkxDemoClient, toOkxSwapInstId } from "../exchange/okx-demo";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
 import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
 import type { PaperCandidateStrength, PaperSignal } from "../strategy/entry-signal";
@@ -456,6 +457,8 @@ export class PaperEngine {
   private rangeRecentOutcomeScoresBySymbol = new Map<string, number[]>();
   private lastExitReasonLabel = "";
   private lastSwitchReasonLabel = "";
+  private readonly okxDemo: OkxDemoClient | null;
+  private okxAccountConfigLoaded = false;
 
   private pruneTrendSwitches1h(now: number): number {
     const cutoff = now - 3_600_000;
@@ -485,6 +488,35 @@ export class PaperEngine {
     this.bybit = new BybitPublicClient();
     this.positions = new PositionManager(this.store);
     this.risk = new RiskManager(config);
+    if (config.okxDemoEnabled) {
+      const credsReady =
+        config.okxDemoApiKey.length > 0 && config.okxDemoApiSecret.length > 0 && config.okxDemoPassphrase.length > 0;
+      if (!credsReady) {
+        this.okxDemo = null;
+        this.logger.error("okx_demo_env_mismatch_detected", {
+          okx_demo_enabled: true,
+          has_api_key: config.okxDemoApiKey.length > 0,
+          has_api_secret: config.okxDemoApiSecret.length > 0,
+          has_passphrase: config.okxDemoPassphrase.length > 0
+        });
+      } else {
+        this.okxDemo = new OkxDemoClient({
+          baseUrl: config.okxDemoBaseUrl,
+          apiKey: config.okxDemoApiKey,
+          apiSecret: config.okxDemoApiSecret,
+          passphrase: config.okxDemoPassphrase
+        });
+        this.logger.info("okx_demo_mode_active", {
+          okx_demo_base_url: config.okxDemoBaseUrl
+        });
+        this.logger.info("okx_simulated_trading_header_applied", {
+          header_name: "x-simulated-trading",
+          header_value: "1"
+        });
+      }
+    } else {
+      this.okxDemo = null;
+    }
     this.logger.info("paper_entry_gate_config", {
       paper_entry_relaxed: config.paperEntryRelaxed,
       paper_gate_min_move_mult: config.paperGateMinMoveMultiplier,
@@ -504,6 +536,32 @@ export class PaperEngine {
     this.lastExitReasonLabel = "";
     this.lastSwitchReasonLabel = "";
     await this.positions.ensureHistoryFile();
+    if (this.okxDemo) {
+      try {
+        if (!this.okxAccountConfigLoaded) {
+          const cfg = await this.okxDemo.getAccountConfig();
+          this.okxAccountConfigLoaded = true;
+          this.logger.info("okx_account_config_loaded", {
+            account_level: cfg.data?.[0]?.acctLv ?? null,
+            pos_mode: cfg.data?.[0]?.posMode ?? null
+          });
+        }
+        await this.okxDemo.getBalance("USDT");
+        const p = await this.okxDemo.getPositions("SWAP");
+        this.logger.info("okx_position_sync_success", {
+          positions: p.data?.length ?? 0
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.logger.error("okx_position_sync_failed", { message: msg });
+        if (msg.includes("50101")) {
+          this.logger.error("okx_demo_env_mismatch_detected", {
+            reason: "50101",
+            check: "api_key_type_or_x_simulated_trading_header"
+          });
+        }
+      }
+    }
     const history = await this.store.readPositionsHistory();
 
     const allowed = new Set<MarketSymbol>(["BTCUSDT", "ETHUSDT"]);
@@ -2471,6 +2529,57 @@ export class PaperEngine {
             entryStage
           );
           continue;
+        }
+        if (this.okxDemo) {
+          const instId = toOkxSwapInstId(first.symbol);
+          const side = adaptive.direction === "long" ? "buy" : "sell";
+          const posSide = adaptive.direction === "long" ? "long" : "short";
+          const qty = Math.max(0.001, Math.round((entrySizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
+          const clOrdId = `paper-${first.symbol}-${Date.now()}`;
+          this.logger.info("okx_order_submit_requested", {
+            symbol: first.symbol,
+            instId,
+            side,
+            posSide,
+            qty,
+            clOrdId
+          });
+          try {
+            const submit = await this.okxDemo.submitOrder({
+              instId,
+              side,
+              posSide,
+              sz: String(qty),
+              clOrdId,
+              tdMode: "isolated",
+              ordType: "market"
+            });
+            const ordId = String(submit.data?.[0]?.ordId ?? "");
+            const status = await this.okxDemo.getOrder(instId, ordId || undefined, clOrdId);
+            this.logger.info("okx_order_submit_success", {
+              symbol: first.symbol,
+              instId,
+              ordId: ordId || null,
+              clOrdId,
+              order_state: status.data?.[0]?.state ?? null,
+              fill_px: status.data?.[0]?.fillPx ?? null
+            });
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            this.logger.error("okx_order_submit_failed", {
+              symbol: first.symbol,
+              instId,
+              clOrdId,
+              message: msg
+            });
+            if (msg.includes("50101")) {
+              this.logger.error("okx_demo_env_mismatch_detected", {
+                reason: "50101",
+                check: "api_key_type_or_x_simulated_trading_header"
+              });
+            }
+            continue;
+          }
         }
         const record: PaperOpenPositionRecord = {
           openedAt: Date.now(),

@@ -120,6 +120,11 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     const x = Number(paperFixedTotalCostUsdRaw);
     if (Number.isFinite(x) && x > 0) paperFixedTotalCostUsd = Math.min(1_000_000, Math.max(0.01, x));
   }
+  const okxDemoEnabled = parseBool(env.OKX_DEMO_ENABLED, false);
+  const okxDemoBaseUrl = (env.OKX_DEMO_BASE_URL ?? "https://www.okx.com").trim();
+  const okxDemoApiKey = (env.OKX_DEMO_API_KEY ?? "").trim();
+  const okxDemoApiSecret = (env.OKX_DEMO_API_SECRET ?? "").trim();
+  const okxDemoPassphrase = (env.OKX_DEMO_PASSPHRASE ?? "").trim();
 
   return {
     symbols: parseSymbols(env.SYMBOLS),
@@ -156,7 +161,12 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperEngineMode,
     paperMinEdgeRr,
     paperMinEdgeVolatilityMove,
-    paperFixedTotalCostUsd
+    paperFixedTotalCostUsd,
+    okxDemoEnabled,
+    okxDemoBaseUrl,
+    okxDemoApiKey,
+    okxDemoApiSecret,
+    okxDemoPassphrase
   };
 }
 
