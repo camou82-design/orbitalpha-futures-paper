@@ -59,7 +59,11 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
   stage1RangeAdaptiveSoftExplore?: boolean;
   /** TREND: `evaluateEntryPolicy` 볼륨 하한 덮어쓰기 (Highway strong 완화 등). */
   trendVolumeRatioMinOverride?: number | null;
+  /** TREND: 완화 적용/미적용 진단(`paper-symbol-decision`에서만 설정). */
+  trendVolumeRelaxProof?: Record<string, unknown> | null;
 }>): FuturesAdaptiveEntryResult {
+  const relaxProofBag =
+    input.trendVolumeRelaxProof != null ? { trend_volume_relax_proof: input.trendVolumeRelaxProof } : {};
   const direction: PositionDirection = decidePositionDirection({
     mode: input.mode,
     modeDetail: input.modeDetail,
@@ -144,6 +148,7 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
         symbol: input.snap.symbol,
         signal_strength_score: input.snap.qualityScore,
         block_message: policy.blockMessage,
+        ...relaxProofBag,
         ...policy.detail
       }
     };
@@ -199,6 +204,7 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
         confidence_score: confidence.confidenceScore,
         confidence_tier: confidence.confidenceTier,
         block_reason: adaptive.blockReason,
+        ...relaxProofBag,
         ...confidence.detail,
         ...adaptive.detail
       }
@@ -229,6 +235,7 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
       size_multiplier: adaptive.sizeMultiplier,
       final_position_size_usd: finalPositionSizeUsd,
       adaptive_sizing_detail: adaptive.detail,
+      ...relaxProofBag,
       ...policy.detail,
       ...(stage1AdaptiveSoftExplore !== null
         ? {

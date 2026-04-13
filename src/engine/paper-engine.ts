@@ -415,6 +415,10 @@ function orderBuildFailureStructuredPayload(
     adaptiveMergedDetail && typeof adaptiveMergedDetail.entry_policy_proof === "object"
       ? adaptiveMergedDetail.entry_policy_proof
       : null;
+  const trendVolumeRelaxProof =
+    adaptiveMergedDetail && typeof adaptiveMergedDetail.trend_volume_relax_proof === "object"
+      ? adaptiveMergedDetail.trend_volume_relax_proof
+      : (d.trend_volume_relax_proof ?? null);
   const side =
     res.intentSide ??
     (first.signal === "paper_long_candidate" ? "long" : first.signal === "paper_short_candidate" ? "short" : null);
@@ -447,7 +451,8 @@ function orderBuildFailureStructuredPayload(
     min_notional: d.min_notional ?? null,
     order_build_fail_stage: d.order_build_fail_stage ?? af?.failStage ?? null,
     adaptive_detail: adaptiveMergedDetail,
-    entry_policy_proof: entryPolicyProof
+    entry_policy_proof: entryPolicyProof,
+    trend_volume_relax_proof: trendVolumeRelaxProof
   };
 }
 

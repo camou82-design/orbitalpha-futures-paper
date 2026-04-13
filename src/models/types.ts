@@ -530,6 +530,8 @@ export type PaperSymbolDecisionRecord = Readonly<{
   execution_disabled_reason?: string | null;
   /** EXECUTION_DISABLED 시 어떤 가드가 막았는지(진단·모니터링) */
   execution_disabled_top_proof?: Record<string, unknown> | null;
+  /** TREND adaptive 볼륨 하한 완화 적용/미적용 진단(proof_version≥2) */
+  trend_volume_relax_proof?: Record<string, unknown> | null;
   /** 진단: UNKNOWN 레짐에서의 FALLBACK 관측용 */
   regime_original_state?: PaperRegimeState;
   regime_fallback_applied?: boolean;

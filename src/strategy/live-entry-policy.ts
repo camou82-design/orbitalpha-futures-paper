@@ -17,6 +17,17 @@ export const TREND_POLICY_MIN_VOLUME_RATIO_PROXY = 1.02;
  * `paper-symbol-decision`에서만 override로 전달.
  */
 export const TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_STRONG_RELAX = 1.0;
+/**
+ * Stage1 TREND weak 후보: 하이웨이 동일 + 엣지(shortfall 없음·기대이동 있음·required_move 낮음) 시
+ * strong(1.0)보다 완만한 하한 — `volumeRatioProxy`가 1.01~1.02 사이일 때만 체감.
+ */
+export const TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_WEAK_RELAX = 1.01;
+/** weak 완화 최소 품질(Highway·엣지 보완 가정). */
+export const TREND_VOLUME_RELAX_WEAK_MIN_QUALITY_SCORE = 65;
+/** weak이어도 이 점수 이상이면 엣지 양호 시 볼륨 하한을 strong과 동일(1.0)으로 허용. */
+export const TREND_VOLUME_RELAX_WEAK_QUALITY_FOR_STRONG_MIN = 70;
+/** weak 완화: `required_move_pct`(유효비용×100) 상한 — 비용 부담 큰 틱 제외. */
+export const TREND_VOLUME_RELAX_WEAK_MAX_REQUIRED_MOVE_PCT = 0.4;
 /** 횡보에서 EMA 분리가 너무 작으면 애매한 구간으로 진입 차단 (|ema20-ema60|/ema60). */
 const SIDEWAYS_MIN_EMA_REL_SEP = 0.0035;
 
@@ -201,6 +212,7 @@ export function evaluateEntryPolicy(input: Readonly<{
             shortfall_ratio: trendVolMin - input.volumeRatioProxy,
             trend_volume_min_override_applied: trendVolMin !== TREND_POLICY_MIN_VOLUME_RATIO_PROXY,
             pipeline_order_in_runFuturesAdaptiveEntry: [
+              "0_paper_symbol_decision: trend_volume_relax_proof (strong 72+ / weak 65+ with edge gates) → trendVolumeRatioMinOverride",
               "1_decidePositionDirection (qualityScore as signal strength, BTC bias, candidateStrength — not Highway volume_support_score)",
               "2_evaluateEntryPolicy: ENTRY_MIN_SCORE, EMA present, trend EMA align long/short, then volumeRatioProxy vs min",
               "3_buildTradeConfidenceScore (uses volumeRatioProxy again)",

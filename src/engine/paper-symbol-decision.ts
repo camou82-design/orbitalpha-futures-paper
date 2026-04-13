@@ -18,7 +18,12 @@ import type { FuturesMarketMode } from "../strategy/live-market-mode";
 import { runFuturesAdaptiveEntry, type FuturesAdaptiveEntryResult } from "../strategy/live-entry-pipeline";
 import {
   STRONG_SCORE,
-  TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_STRONG_RELAX
+  TREND_POLICY_MIN_VOLUME_RATIO_PROXY,
+  TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_STRONG_RELAX,
+  TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_WEAK_RELAX,
+  TREND_VOLUME_RELAX_WEAK_MAX_REQUIRED_MOVE_PCT,
+  TREND_VOLUME_RELAX_WEAK_MIN_QUALITY_SCORE,
+  TREND_VOLUME_RELAX_WEAK_QUALITY_FOR_STRONG_MIN
 } from "../strategy/live-entry-policy";
 import { rangeExecutorEvaluateEntry } from "../strategy/executors/range-executor";
 import { highwayExecutorEvaluateEntry } from "./highway-entry-executor";
@@ -326,6 +331,123 @@ export type EvaluatePaperSymbolEntryResult = Readonly<{
 
 const DEFAULT_PAPER_SIZE_USD = 100;
 
+/** TREND adaptive 직전: 볼륨 하한 완화 적용 여부·미적용 사유를 proof로 고정. */
+function computeTrendVolumeRelaxForAdaptive(input: Readonly<{
+  adaptiveMode: FuturesMarketMode;
+  currentStage: number;
+  highwayDet: Record<string, unknown> | undefined;
+  highwayStateOk: boolean;
+  highwayCoreFinalOk: boolean;
+  scoreSourceOk: boolean;
+  candidateStrength: PaperCandidateStrength | null;
+  qualityScore: number;
+  required_move_pct: number | null;
+  shortfall_pct: number;
+  em: number | null;
+}>): { override: number | null; proof: Record<string, unknown> } {
+  const notRelaxedReasons: string[] = [];
+  const gates = {
+    adaptive_mode_trend: input.adaptiveMode === "trend",
+    stage0: input.currentStage === 0,
+    highway_state_valid: input.highwayStateOk,
+    highway_core_final_ok: input.highwayCoreFinalOk,
+    score_source_trend_core_default: input.scoreSourceOk,
+    candidate_strength: input.candidateStrength,
+    quality_score: input.qualityScore,
+    strong_tier_eligible:
+      input.candidateStrength === "strong" && input.qualityScore >= STRONG_SCORE,
+    weak_candidate: input.candidateStrength === "weak",
+    weak_tier_quality_ok: input.qualityScore >= TREND_VOLUME_RELAX_WEAK_MIN_QUALITY_SCORE,
+    weak_tier_edge_shortfall_ok: input.shortfall_pct <= 0,
+    weak_tier_expected_move_available: input.em !== null && Number.isFinite(input.em),
+    weak_tier_required_move_available:
+      input.required_move_pct !== null && Number.isFinite(input.required_move_pct),
+    weak_tier_required_move_low_enough:
+      input.required_move_pct !== null &&
+      input.required_move_pct <= TREND_VOLUME_RELAX_WEAK_MAX_REQUIRED_MOVE_PCT,
+    weak_tier_uses_strong_volume_min:
+      input.qualityScore >= TREND_VOLUME_RELAX_WEAK_QUALITY_FOR_STRONG_MIN
+  };
+
+  const baseOk =
+    gates.adaptive_mode_trend &&
+    gates.stage0 &&
+    gates.highway_state_valid &&
+    gates.highway_core_final_ok &&
+    gates.score_source_trend_core_default;
+
+  if (!gates.adaptive_mode_trend) notRelaxedReasons.push("adaptive_mode_not_trend");
+  if (!gates.stage0) notRelaxedReasons.push("not_stage0");
+  if (!gates.highway_state_valid) notRelaxedReasons.push("highway_state_not_valid");
+  if (!gates.highway_core_final_ok) notRelaxedReasons.push("highway_core_or_final_not_valid");
+  if (!gates.score_source_trend_core_default) notRelaxedReasons.push("score_source_not_trend_core_default");
+
+  let relaxTier: "strong_highway" | "weak_highway_edge_ok" | null = null;
+  let override: number | null = null;
+
+  if (baseOk) {
+    if (gates.strong_tier_eligible) {
+      relaxTier = "strong_highway";
+      override = TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_STRONG_RELAX;
+    } else if (
+      gates.weak_candidate &&
+      gates.weak_tier_quality_ok &&
+      gates.weak_tier_edge_shortfall_ok &&
+      gates.weak_tier_expected_move_available &&
+      gates.weak_tier_required_move_available &&
+      gates.weak_tier_required_move_low_enough
+    ) {
+      relaxTier = "weak_highway_edge_ok";
+      override =
+        input.qualityScore >= TREND_VOLUME_RELAX_WEAK_QUALITY_FOR_STRONG_MIN
+          ? TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_STRONG_RELAX
+          : TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_WEAK_RELAX;
+      notRelaxedReasons.length = 0;
+    } else {
+      if (input.candidateStrength === "strong" && !gates.strong_tier_eligible) {
+        notRelaxedReasons.push("strong_candidate_but_quality_below_72");
+      }
+      if (input.candidateStrength === "weak") {
+        if (!gates.weak_tier_quality_ok) {
+          notRelaxedReasons.push(`weak_candidate_quality_below_${TREND_VOLUME_RELAX_WEAK_MIN_QUALITY_SCORE}`);
+        }
+        if (!gates.weak_tier_edge_shortfall_ok) {
+          notRelaxedReasons.push("weak_tier_blocked_positive_shortfall_pct");
+        }
+        if (!gates.weak_tier_expected_move_available) {
+          notRelaxedReasons.push("weak_tier_blocked_expected_move_missing");
+        }
+        if (!gates.weak_tier_required_move_available) {
+          notRelaxedReasons.push("weak_tier_blocked_required_move_pct_missing");
+        } else if (!gates.weak_tier_required_move_low_enough) {
+          notRelaxedReasons.push(
+            `weak_tier_blocked_required_move_pct_above_${TREND_VOLUME_RELAX_WEAK_MAX_REQUIRED_MOVE_PCT}`
+          );
+        }
+      }
+      if (input.candidateStrength !== "strong" && input.candidateStrength !== "weak") {
+        notRelaxedReasons.push("candidate_strength_neither_strong_nor_weak");
+      }
+    }
+  }
+
+  return {
+    override,
+    proof: {
+      proof_version: 2,
+      relax_evaluated: true,
+      relax_applied: override !== null,
+      relax_tier: relaxTier,
+      trend_volume_ratio_min_override: override,
+      default_min_volume_ratio_proxy: TREND_POLICY_MIN_VOLUME_RATIO_PROXY,
+      strong_relax_min: TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_STRONG_RELAX,
+      weak_relax_min: TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_WEAK_RELAX,
+      gates,
+      not_relaxed_reasons: relaxTier !== null ? [] : [...new Set(notRelaxedReasons)]
+    }
+  };
+}
+
 function pack(
   input: EvaluatePaperSymbolEntryInput,
   sym: MarketSymbol,
@@ -402,6 +524,7 @@ function pack(
     final_signal_state?: string;
     execution_disabled_reason?: string | null;
     execution_disabled_top_proof?: Record<string, unknown> | null;
+    trend_volume_relax_proof?: Record<string, unknown> | null;
     reentry_cooldown_applied?: boolean;
     reentry_cooldown_original_ms?: number | null;
     reentry_cooldown_effective_ms?: number | null;
@@ -556,6 +679,7 @@ function pack(
     final_signal_state: fields.final_signal_state,
     execution_disabled_reason: fields.execution_disabled_reason,
     execution_disabled_top_proof: fields.execution_disabled_top_proof ?? null,
+    trend_volume_relax_proof: fields.trend_volume_relax_proof ?? null,
     reentry_cooldown_applied: fields.reentry_cooldown_applied ?? false,
     reentry_cooldown_original_ms: fields.reentry_cooldown_original_ms ?? null,
     reentry_cooldown_effective_ms: fields.reentry_cooldown_effective_ms ?? null,
@@ -684,6 +808,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let intentSide: "long" | "short" | null = null;
   let executorDecision: AnyEntryDecision | null = null;
   let adaptiveDetailOut: Record<string, unknown> | null = null;
+  /** TREND adaptive 직전 볼륨 완화 proof(`relax_evaluated` true일 때만 채움). */
+  let trendVolumeRelaxProof: Record<string, unknown> | null = null;
   let guidanceOut: string | null = null;
 
   const sn = input.snapshot;
@@ -897,6 +1023,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       final_signal_state?: string;
       execution_disabled_reason?: string | null;
       execution_disabled_top_proof?: Record<string, unknown> | null;
+      trend_volume_relax_proof?: Record<string, unknown> | null;
       reentry_cooldown_applied?: boolean;
       reentry_cooldown_original_ms?: number | null;
       reentry_cooldown_effective_ms?: number | null;
@@ -1078,6 +1205,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       final_signal_state: extra.final_signal_state,
       execution_disabled_reason: extra.execution_disabled_reason,
       execution_disabled_top_proof: extra.execution_disabled_top_proof,
+      trend_volume_relax_proof:
+        "trend_volume_relax_proof" in extra ? extra.trend_volume_relax_proof : trendVolumeRelaxProof,
       reentry_cooldown_applied: extra.reentry_cooldown_applied ?? reentry_cooldown_applied,
       reentry_cooldown_original_ms: extra.reentry_cooldown_original_ms ?? reentry_cooldown_original_ms,
       reentry_cooldown_effective_ms: extra.reentry_cooldown_effective_ms ?? reentry_cooldown_effective_ms,
@@ -2645,18 +2774,30 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const highwayCoreFinalOk =
       !highwayAiRaw ||
       (highwayAiRaw.coreState === HighwayTrendState.VALID && highwayAiRaw.finalState === HighwayTrendState.VALID);
-    const trendVolumeRatioMinOverride =
-      input.adaptiveMode === "trend" &&
-      input.currentStage === 0 &&
-      highwayStateOk &&
-      highwayCoreFinalOk &&
-      highwayDet?.scoreSource === "trend_core_default" &&
-      sn!.candidateStrength === "strong" &&
-      sn!.qualityScore >= STRONG_SCORE
-        ? TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_STRONG_RELAX
-        : null;
-    if (trendVolumeRatioMinOverride !== null) {
-      supplemental_reasons.push("ADAPTIVE_TREND_VOLUME_MIN_RELAXED_HIGHWAY_STRONG");
+    const scoreSourceTrendCore = highwayDet?.scoreSource === "trend_core_default";
+
+    let trendVolumeRatioMinOverride: number | null = null;
+    if (input.adaptiveMode === "trend") {
+      const volRelax = computeTrendVolumeRelaxForAdaptive({
+        adaptiveMode: input.adaptiveMode,
+        currentStage: input.currentStage,
+        highwayDet,
+        highwayStateOk,
+        highwayCoreFinalOk,
+        scoreSourceOk: scoreSourceTrendCore,
+        candidateStrength: sn!.candidateStrength,
+        qualityScore: sn!.qualityScore,
+        required_move_pct,
+        shortfall_pct: shortfall_pct ?? 0,
+        em
+      });
+      trendVolumeRatioMinOverride = volRelax.override;
+      trendVolumeRelaxProof = volRelax.proof;
+      const tier = volRelax.proof["relax_tier"];
+      if (tier === "strong_highway") supplemental_reasons.push("ADAPTIVE_TREND_VOLUME_MIN_RELAXED_HIGHWAY_STRONG");
+      if (tier === "weak_highway_edge_ok") supplemental_reasons.push("ADAPTIVE_TREND_VOLUME_MIN_RELAXED_HIGHWAY_WEAK_EDGE");
+    } else {
+      trendVolumeRelaxProof = null;
     }
 
     const adaptive = runFuturesAdaptiveEntry({
@@ -2676,7 +2817,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       },
       baseSizeUsd: DEFAULT_PAPER_SIZE_USD * dynamicSizeMult,
       stage1RangeAdaptiveSoftExplore,
-      trendVolumeRatioMinOverride
+      trendVolumeRatioMinOverride,
+      trendVolumeRelaxProof
     });
     adaptiveDetailOut = adaptive.detail ?? null;
 
