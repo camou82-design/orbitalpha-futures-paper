@@ -25,6 +25,9 @@ import { evaluateAiHighwayQuality } from "../engine/ai-highway-filter";
 import type { PaperSignal } from "../strategy/entry-signal";
 import type { PaperCandidateStrength } from "../strategy/entry-signal";
 import { PIPELINE_VERSION } from "./decision-funnel";
+import { createLogger } from "../logs/logger";
+
+const proofLogger = createLogger("info");
 
 /** RANGE·Stage0·RISK_FAIL_REENTRY: 부분익절/TP 계열 청산 후 동일 심볼 재진입 대기만 완화(손절·증액 단계 제외). */
 const RANGE_STAGE0_REENTRY_RELAX_MULT = 0.35;
@@ -1129,6 +1132,20 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE" && blockedRegimeActive
             ? "range_blocked_regime"
             : "range_risk_engine";
+      if (rangeFinalBlockReason === "RANGE_RISK_BLOCK_REENTRY") {
+        proofLogger.info("RANGE_REENTRY_VALUE_PROOF", {
+          symbol: String(sym),
+          risk_cooldown_subreason: rangeRiskSubreason,
+          cooldown_remaining_ms: rangeCooldownRemainingMs,
+          reentry_wait_ms: rangeReentryWaitMsOut,
+          reentry_elapsed_ms: rangeReentryElapsedMsOut,
+          range_reentry_wait_ms: rangeReentryWaitMsOut,
+          range_reentry_elapsed_ms: rangeReentryElapsedMsOut,
+          range_reentry_remaining_ms: rangeReentryRemainingMsOut,
+          range_reentry_source: rangeReentrySourceOut,
+          range_reentry_same_direction: rangeReentrySameDirection
+        });
+      }
       return ret(
         {
           strategy_executor: "RANGE",
