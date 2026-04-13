@@ -1941,10 +1941,35 @@ export class PaperEngine {
 
       if (exitEval.action === "close") {
         const cr = exitEval.reason as PaperClosedPositionRecord["closeReason"];
+        const exDetail = (exitEval.detail ?? {}) as Record<string, unknown>;
         const closedRow = toClosed(cr, m, open.sizeUsd);
         await this.positions.appendClosed(closedRow);
-        this.logger.info(exitFullLogKey(cr), { ...exitDetailBase(open, m), exitReason: cr });
-        this.logger.info("paper_position_closed", { symbol: open.symbol, side: open.side, pnlUsdNet: m.pnlUsdNet, closeReason: cr });
+        this.logger.info(exitFullLogKey(cr), {
+          ...exitDetailBase(open, m),
+          exitReason: cr,
+          range_exit_protection_applied: exDetail["range_exit_protection_applied"] ?? null,
+          range_exit_protection_remaining_ms: exDetail["range_exit_protection_remaining_ms"] ?? null,
+          range_exit_mode: exDetail["range_exit_mode"] ?? null,
+          range_exit_box_break_confirmed: exDetail["range_exit_box_break_confirmed"] ?? null,
+          range_exit_mid_target_hit: exDetail["range_exit_mid_target_hit"] ?? null,
+          range_exit_far_target_hit: exDetail["range_exit_far_target_hit"] ?? null,
+          range_exit_min_profit_after_cost_ok: exDetail["range_exit_min_profit_after_cost_ok"] ?? null,
+          range_exit_reason_detail: exDetail["range_exit_reason_detail"] ?? null
+        });
+        this.logger.info("paper_position_closed", {
+          symbol: open.symbol,
+          side: open.side,
+          pnlUsdNet: m.pnlUsdNet,
+          closeReason: cr,
+          range_exit_protection_applied: exDetail["range_exit_protection_applied"] ?? null,
+          range_exit_protection_remaining_ms: exDetail["range_exit_protection_remaining_ms"] ?? null,
+          range_exit_mode: exDetail["range_exit_mode"] ?? null,
+          range_exit_box_break_confirmed: exDetail["range_exit_box_break_confirmed"] ?? null,
+          range_exit_mid_target_hit: exDetail["range_exit_mid_target_hit"] ?? null,
+          range_exit_far_target_hit: exDetail["range_exit_far_target_hit"] ?? null,
+          range_exit_min_profit_after_cost_ok: exDetail["range_exit_min_profit_after_cost_ok"] ?? null,
+          range_exit_reason_detail: exDetail["range_exit_reason_detail"] ?? null
+        });
         await this.store.appendJsonlLine("reports/events.jsonl", {
           ts: Date.now(),
           type: exitEventJsonlType(cr),
@@ -1973,6 +1998,7 @@ export class PaperEngine {
 
       if (exitEval.action === "partial_close") {
         const partial = exitEval;
+        const partialDetail = (partial.detail ?? {}) as Record<string, unknown>;
         const adaptiveMode: FuturesMarketMode = open.adaptiveModeAtEntry ?? this.lastAdaptiveMode.mode;
         const rawRatio = (partial as { partialExitRatio?: number }).partialExitRatio;
         let ratio =
@@ -2006,7 +2032,15 @@ export class PaperEngine {
             partial_ratio: ratio,
             partial_margin_usd: partialMargin,
             remaining_margin_usd: newMargin,
-            detail: partial.detail
+            detail: partial.detail,
+            range_exit_protection_applied: partialDetail["range_exit_protection_applied"] ?? null,
+            range_exit_protection_remaining_ms: partialDetail["range_exit_protection_remaining_ms"] ?? null,
+            range_exit_mode: partialDetail["range_exit_mode"] ?? null,
+            range_exit_box_break_confirmed: partialDetail["range_exit_box_break_confirmed"] ?? null,
+            range_exit_mid_target_hit: partialDetail["range_exit_mid_target_hit"] ?? null,
+            range_exit_far_target_hit: partialDetail["range_exit_far_target_hit"] ?? null,
+            range_exit_min_profit_after_cost_ok: partialDetail["range_exit_min_profit_after_cost_ok"] ?? null,
+            range_exit_reason_detail: partialDetail["range_exit_reason_detail"] ?? null
           });
 
           await this.store.appendJsonlLine("reports/events.jsonl", {

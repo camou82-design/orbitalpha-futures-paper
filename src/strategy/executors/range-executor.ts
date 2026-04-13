@@ -366,103 +366,146 @@ export function rangeExecutorEvaluateExit(input: Readonly<{
   const atr = input.atr ?? 0;
   const rangeConfidence = input.rangeConfidence ?? 0.5;
   const boxBreakConfirmed = input.boxBreakConfirmed === true;
+  const PROTECTION_MS = 75_000;
+  const protectionRemainingMs = Math.max(0, PROTECTION_MS - input.holdingMs);
+  const protectionApplied = protectionRemainingMs > 0;
+  const minProfitAfterCostPct = 0.0012;
+  const minProfitAfterCostOk = input.pnlPctNet >= minProfitAfterCostPct;
+  const midTargetHit = isLong ? boxPos >= 0.5 : boxPos <= 0.5;
+  const farTargetHit = isLong ? boxPos >= 0.8 : boxPos <= 0.2;
+  const baseDetail = {
+    range_exit_protection_applied: protectionApplied,
+    range_exit_protection_remaining_ms: protectionRemainingMs,
+    range_exit_box_break_confirmed: boxBreakConfirmed,
+    range_exit_mid_target_hit: midTargetHit,
+    range_exit_far_target_hit: farTargetHit,
+    range_exit_min_profit_after_cost_ok: minProfitAfterCostOk
+  };
 
-  // Highway Hysteresis: Confirmed RANGE mode reduces exit points
-  const highwayMode = rangeConfidence >= 0.70;
-
-  // 1. Highway Structural Stop-Loss
   if (boxBreakConfirmed) {
     return {
       executor: "RANGE",
       action: "close",
       reason: "range_box_break",
-      guidance: "박스 구조 붕괴: 긴급 청산",
+      guidance: "박스 구조 훼손 확정 청산",
       exit_progress: 100,
-      detail: { rangeConfidence, boxBreakConfirmed: true }
+      detail: {
+        ...baseDetail,
+        range_exit_mode: "box_break_exit",
+        range_exit_reason_detail: "box_break_confirmed"
+      }
     };
   }
 
-  // 2. Highway Noise Tolerance (Disable minor stop losses in strong RANGE)
-  if (!highwayMode) {
-    let stopPrice = 0;
-    if (isLong) {
-      stopPrice = (input.boxLow ?? 0) - 1.2 * atr;
-      if (input.mark < stopPrice) {
-        return {
-          executor: "RANGE",
-          action: "close",
-          reason: "stop_loss",
-          guidance: "박스 하단 이탈 (비보강 모드)",
-          exit_progress: 100,
-          stop_price: stopPrice,
-          detail: { mark: input.mark, stopPrice }
-        };
-      }
-    } else {
-      stopPrice = (input.boxHigh ?? 0) + 1.2 * atr;
-      if (input.mark > stopPrice) {
-        return {
-          executor: "RANGE",
-          action: "close",
-          reason: "stop_loss",
-          guidance: "박스 상단 돌파 (비보강 모드)",
-          exit_progress: 100,
-          stop_price: stopPrice,
-          detail: { mark: input.mark, stopPrice }
-        };
-      }
-    }
-  }
-
-  // 3. Highway Round-Trip Take Profit (Aggressive in Zones)
-  const isUpperZone = boxPos >= 0.65;
-  const isLowerZone = boxPos <= 0.35;
-
-  if (isLong && isUpperZone) {
+  // Avoid immediate noise exits right after entry unless structural break is confirmed.
+  if (protectionApplied) {
     return {
       executor: "RANGE",
-      action: "close",
-      reason: "take_profit",
-      guidance: "Highway Target Reached (Upper Zone)",
-      exit_progress: 100,
-      detail: { boxPos }
-    };
-  }
-  if (!isLong && isLowerZone) {
-    return {
-      executor: "RANGE",
-      action: "close",
-      reason: "take_profit",
-      guidance: "Highway Target Reached (Lower Zone)",
-      exit_progress: 100,
-      detail: { boxPos }
+      action: "hold",
+      reason: null,
+      guidance: "RANGE 초기 보호구간 유지",
+      exit_progress: isLong ? boxPos * 100 : (1 - boxPos) * 100,
+      detail: {
+        ...baseDetail,
+        range_exit_mode: "noise_hold",
+        range_exit_reason_detail: "entry_protection_window_active"
+      }
     };
   }
 
-  // 4. Default Partial Exits (Legacy support for gradual profit taking)
-  const t1 = 0.45;
-  const t2 = 0.55;
-
-  if (input.partialExitStage === 0) {
-    const reachedTp = isLong ? boxPos >= t1 : boxPos <= t2;
-    if (reachedTp) {
+  // Structural stop only when box boundary is clearly violated.
+  if (isLong) {
+    const breakLevel = (input.boxLow ?? input.mark) - Math.max(atr * 0.35, input.mark * 0.0009);
+    if (input.mark < breakLevel) {
       return {
         executor: "RANGE",
-        action: "partial_close",
-        reason: "partial_exit_1",
-        guidance: "Highway Milestone 1: Reaching Median",
-        exit_progress: 30,
-        detail: { boxPos, stage: 1 }
+        action: "close",
+        reason: "stop_loss",
+        guidance: "박스 하단 구조 이탈 청산",
+        stop_price: breakLevel,
+        exit_progress: 100,
+        detail: {
+          ...baseDetail,
+          range_exit_mode: "box_break_exit",
+          range_exit_reason_detail: "long_structure_break_below_box_low"
+        }
       };
     }
+  } else {
+    const breakLevel = (input.boxHigh ?? input.mark) + Math.max(atr * 0.35, input.mark * 0.0009);
+    if (input.mark > breakLevel) {
+      return {
+        executor: "RANGE",
+        action: "close",
+        reason: "stop_loss",
+        guidance: "박스 상단 구조 이탈 청산",
+        stop_price: breakLevel,
+        exit_progress: 100,
+        detail: {
+          ...baseDetail,
+          range_exit_mode: "box_break_exit",
+          range_exit_reason_detail: "short_structure_break_above_box_high"
+        }
+      };
+    }
+  }
+
+  // Partial on median, full near opposite edge only if net profitability is sufficient.
+  if (input.partialExitStage === 0 && midTargetHit && minProfitAfterCostOk) {
+    return {
+      executor: "RANGE",
+      action: "partial_close",
+      reason: "partial_exit_1",
+      guidance: "RANGE 중간 목표 1차 청산",
+      exit_progress: 45,
+      detail: {
+        ...baseDetail,
+        range_exit_mode: "tp_partial",
+        range_exit_reason_detail: "mid_target_hit"
+      }
+    };
+  }
+
+  if (farTargetHit && minProfitAfterCostOk) {
+    return {
+      executor: "RANGE",
+      action: "close",
+      reason: "take_profit",
+      guidance: "RANGE 반대편 목표 도달 청산",
+      exit_progress: 100,
+      detail: {
+        ...baseDetail,
+        range_exit_mode: "tp_full",
+        range_exit_reason_detail: "far_target_hit"
+      }
+    };
+  }
+
+  if (input.holdingMs >= 30 * 60_000 && !midTargetHit && !farTargetHit) {
+    return {
+      executor: "RANGE",
+      action: "close",
+      reason: "time_based_exit",
+      guidance: "RANGE 시간 소모/맥락 약화 청산",
+      exit_progress: 100,
+      detail: {
+        ...baseDetail,
+        range_exit_mode: "time_decay_exit",
+        range_exit_reason_detail: "time_decay_without_target_progress"
+      }
+    };
   }
 
   return {
     executor: "RANGE",
     action: "hold",
     reason: null,
-    guidance: "박스 내 왕복 진행 중 (Highway)",
+    guidance: "박스 구조 유지: 노이즈 보유",
     exit_progress: isLong ? boxPos * 100 : (1 - boxPos) * 100,
-    detail: { boxPos, highwayMode, rangeConfidence }
+    detail: {
+      ...baseDetail,
+      range_exit_mode: "noise_hold",
+      range_exit_reason_detail: "box_structure_intact"
+    }
   };
 }
