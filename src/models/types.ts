@@ -389,6 +389,18 @@ export type PaperSymbolDecisionRecord = Readonly<{
   range_soft_suspend_cooldown_ms?: number | null;
   /** RANGE stage0 loss streak suspend 동일 방향 제한 적용 여부 */
   range_soft_suspend_same_direction_restricted?: boolean;
+  /** RANGE 엔진에서 양방향 허용 로직 적용 여부 */
+  range_bidirectional_applied?: boolean;
+  /** RANGE 숏 허용 판정 결과 */
+  range_short_allowed?: boolean;
+  /** RANGE 숏 허용/대기 판정 사유 */
+  range_short_allowed_reason?: string | null;
+  /** RANGE 상단 근접 판정 */
+  range_upper_edge_near?: boolean;
+  /** RANGE 중앙 대기 판정 */
+  range_center_wait?: boolean;
+  /** RANGE 최종 선택 방향 */
+  range_final_selected_side?: "long" | "short" | "none" | null;
   /** 레거시 차단 원인 (executor blocked_reason 원본) */
   legacy_block_reason?: string | null;
   /** 레거시 레짐 게이트 분류값 */

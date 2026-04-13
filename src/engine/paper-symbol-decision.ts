@@ -362,6 +362,12 @@ function pack(
     range_soft_suspend_size_mult?: number | null;
     range_soft_suspend_cooldown_ms?: number | null;
     range_soft_suspend_same_direction_restricted?: boolean;
+    range_bidirectional_applied?: boolean;
+    range_short_allowed?: boolean;
+    range_short_allowed_reason?: string | null;
+    range_upper_edge_near?: boolean;
+    range_center_wait?: boolean;
+    range_final_selected_side?: "long" | "short" | "none" | null;
     legacy_block_reason?: string | null;
     legacy_regime_gate?: string | null;
     legacy_gate_source?: string | null;
@@ -484,6 +490,12 @@ function pack(
     range_soft_suspend_size_mult: fields.range_soft_suspend_size_mult ?? null,
     range_soft_suspend_cooldown_ms: fields.range_soft_suspend_cooldown_ms ?? null,
     range_soft_suspend_same_direction_restricted: fields.range_soft_suspend_same_direction_restricted ?? false,
+    range_bidirectional_applied: fields.range_bidirectional_applied ?? false,
+    range_short_allowed: fields.range_short_allowed ?? false,
+    range_short_allowed_reason: fields.range_short_allowed_reason ?? null,
+    range_upper_edge_near: fields.range_upper_edge_near ?? false,
+    range_center_wait: fields.range_center_wait ?? false,
+    range_final_selected_side: fields.range_final_selected_side ?? null,
     legacy_block_reason: fields.legacy_block_reason ?? null,
     legacy_regime_gate: fields.legacy_regime_gate ?? null,
     legacy_gate_source: fields.legacy_gate_source ?? null,
@@ -645,6 +657,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_soft_suspend_size_mult: number | null = null;
   let range_soft_suspend_cooldown_ms: number | null = null;
   let range_soft_suspend_same_direction_restricted = false;
+  let range_bidirectional_applied = false;
+  let range_short_allowed = false;
+  let range_short_allowed_reason: string | null = null;
+  let range_upper_edge_near = false;
+  let range_center_wait = false;
+  let range_final_selected_side: "long" | "short" | "none" | null = null;
   let range_stage0_engine_taken = false;
   let range_stage0_exit_reason: string | null = null;
   let legacy_executor_path_taken = false;
@@ -762,6 +780,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_soft_suspend_size_mult?: number | null;
       range_soft_suspend_cooldown_ms?: number | null;
       range_soft_suspend_same_direction_restricted?: boolean;
+      range_bidirectional_applied?: boolean;
+      range_short_allowed?: boolean;
+      range_short_allowed_reason?: string | null;
+      range_upper_edge_near?: boolean;
+      range_center_wait?: boolean;
+      range_final_selected_side?: "long" | "short" | "none" | null;
       legacy_block_reason?: string | null;
       legacy_regime_gate?: string | null;
       legacy_gate_source?: string | null;
@@ -918,6 +942,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_soft_suspend_cooldown_ms: extra.range_soft_suspend_cooldown_ms ?? range_soft_suspend_cooldown_ms,
       range_soft_suspend_same_direction_restricted:
         extra.range_soft_suspend_same_direction_restricted ?? range_soft_suspend_same_direction_restricted,
+      range_bidirectional_applied: extra.range_bidirectional_applied ?? range_bidirectional_applied,
+      range_short_allowed: extra.range_short_allowed ?? range_short_allowed,
+      range_short_allowed_reason: extra.range_short_allowed_reason ?? range_short_allowed_reason,
+      range_upper_edge_near: extra.range_upper_edge_near ?? range_upper_edge_near,
+      range_center_wait: extra.range_center_wait ?? range_center_wait,
+      range_final_selected_side: extra.range_final_selected_side ?? range_final_selected_side,
       legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
       legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
       legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
@@ -1040,6 +1070,31 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const RANGE_SOFT_SUSPEND_SIZE_MULT = 0.35;
     const RANGE_SOFT_SUSPEND_COOLDOWN_MS = 45_000;
     const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
+    range_upper_edge_near = boxPos >= 0.68;
+    range_center_wait = boxPos > 0.42 && boxPos < 0.58;
+    const rangeLowerEdge = boxPos <= 0.38;
+    const rangeExitRiskOk = (sn.regimeExitRisk ?? 0) <= 0.62;
+    const rangeConfidenceOk = (sn.rangeConfidence ?? 0) >= 0.45;
+    const rangeBreakoutFailureOk = (sn.breakoutFailureRate ?? 0) >= 0.42;
+    range_short_allowed =
+      rangeSignal.side === "short" &&
+      range_upper_edge_near &&
+      !range_center_wait &&
+      !rangeLowerEdge &&
+      rangeConfidenceOk &&
+      rangeBreakoutFailureOk &&
+      rangeExitRiskOk;
+    if (rangeSignal.side === "short") {
+      if (range_center_wait) range_short_allowed_reason = "range_center_wait";
+      else if (rangeLowerEdge) range_short_allowed_reason = "range_lower_zone_short_forbidden";
+      else if (!range_upper_edge_near) range_short_allowed_reason = "range_upper_edge_not_near";
+      else if (!rangeConfidenceOk) range_short_allowed_reason = "range_confidence_low";
+      else if (!rangeBreakoutFailureOk) range_short_allowed_reason = "range_breakout_failure_low";
+      else if (!rangeExitRiskOk) range_short_allowed_reason = "range_exit_risk_high";
+      else range_short_allowed_reason = "range_short_allowed_upper_edge";
+    } else if (rangeSignal.side === "long") {
+      range_short_allowed_reason = range_center_wait ? "range_center_wait" : "range_long_path";
+    }
     const boxMiddle = boxPos > 0.42 && boxPos < 0.58;
     const lowConfidence = rangeScores.rangeSignalScore < 0.34 || rangeScores.rangeEntryScore < 0.36;
     let reentryBlocked = false;
@@ -1093,6 +1148,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         : rangeSignal.signal === "RANGE_LONG_CANDIDATE"
           ? "RANGE_LONG_ENTRY"
           : "RANGE_SHORT_ENTRY";
+    range_final_selected_side = entryResult === "RANGE_LONG_ENTRY" ? "long" : entryResult === "RANGE_SHORT_ENTRY" ? "short" : "none";
     workingSignal = entryResult === "RANGE_LONG_ENTRY"
       ? "paper_long_candidate"
       : entryResult === "RANGE_SHORT_ENTRY"
@@ -2277,41 +2333,48 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         input.regime === "RANGE" &&
         workingSignal === "paper_short_candidate"
       ) {
-        if (String(sym) === "BTCUSDT" && useRangeStage0Engine) {
+        range_bidirectional_applied = true;
+        if (range_short_allowed) {
           range_long_only_short_deferred_bypassed = true;
-          supplemental_reasons.push("RANGE_LONG_ONLY_SHORT_DEFERRED_BYPASSED");
+          supplemental_reasons.push("RANGE_SHORT_ALLOWED_BIDIRECTIONAL");
         } else {
           range_long_only_short_deferred_applied = true;
-        return ret(
-          {
-            final_decision: "SKIP",
-            reject_reason: "LONG_ONLY_SHORT_DEFERRED",
-            execution_state: "PAPER_READY",
-            ai_decision: "APPROVE",
-            adaptive_decision: "DEFERRED",
-            guidance: "Long Only: 숏 신호 보류(롱 전환 대기), EXECUTION_DISABLED 미발생",
-            target_stage: null,
-            supplemental_reasons,
-            stage1_result_code: "STAGE1_LONG_ONLY_SHORT_DEFERRED",
-            required_move_pct,
-            shortfall_pct,
-            range_long_only_short_deferred_applied: true,
-            range_long_only_short_deferred_bypassed: false,
-            long_only_restriction: true,
-            original_signal_state: "SHORT_CANDIDATE",
-            final_signal_state: "SHORT_CANDIDATE_LONG_ONLY_DEFERRED",
-            execution_disabled_reason: "long_only_no_short_execution; deferred_skip_not_EXECUTION_DISABLED"
-          },
-          {
-            intentSide,
-            executorDecision,
-            adaptiveOk: true,
-            adaptiveDirection: adaptive.direction,
-            adaptiveDetail: adaptiveDetailOut,
-            adaptiveResult: adaptive,
-            aiGatePassed: true
-          }
-        );
+          return ret(
+            {
+              final_decision: "SKIP",
+              reject_reason: "EDGE_FAIL_EXPECTANCY",
+              execution_state: "PAPER_READY",
+              ai_decision: "APPROVE",
+              adaptive_decision: "DEFERRED",
+              guidance: range_short_allowed_reason ?? "range_short_not_allowed",
+              target_stage: null,
+              supplemental_reasons,
+              stage1_result_code: "STAGE1_BLOCKED_EDGE",
+              required_move_pct,
+              shortfall_pct,
+              range_long_only_short_deferred_applied: true,
+              range_long_only_short_deferred_bypassed: false,
+              range_bidirectional_applied: true,
+              range_short_allowed: false,
+              range_short_allowed_reason: range_short_allowed_reason,
+              range_upper_edge_near: range_upper_edge_near,
+              range_center_wait: range_center_wait,
+              range_final_selected_side: "none",
+              long_only_restriction: true,
+              original_signal_state: "SHORT_CANDIDATE",
+              final_signal_state: "SHORT_CANDIDATE_RANGE_WAIT",
+              execution_disabled_reason: "range_short_condition_not_met"
+            },
+            {
+              intentSide,
+              executorDecision,
+              adaptiveOk: true,
+              adaptiveDirection: adaptive.direction,
+              adaptiveDetail: adaptiveDetailOut,
+              adaptiveResult: adaptive,
+              aiGatePassed: true
+            }
+          );
         }
       }
       return ret(
@@ -2449,7 +2512,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         min_notional: null,
         sizeUsd: adaptive.sizeUsd,
         original_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === "none") ? "NONE" : signal_state,
-        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === "none") ? "SOFT_RANGE_CANDIDATE" : signal_state
+        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === "none") ? "SOFT_RANGE_CANDIDATE" : signal_state,
+        range_bidirectional_applied: range_bidirectional_applied,
+        range_short_allowed: range_short_allowed,
+        range_short_allowed_reason: range_short_allowed_reason,
+        range_upper_edge_near: range_upper_edge_near,
+        range_center_wait: range_center_wait,
+        range_final_selected_side: adaptive.direction
       },
       {
         intentSide: intentSide ?? (workingSignal === "paper_long_candidate" || workingSignal === "none" ? "long" : "short"),
