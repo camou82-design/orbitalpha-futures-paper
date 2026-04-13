@@ -130,6 +130,56 @@ const STAGE1_RANGE_EDGE_SOFT_TAGS: Readonly<Record<string, string>> = {
 /** 기존 Stage1 탐색 배수 위에 한 번 더 곱함(아주 소액). */
 const STAGE1_RANGE_POSITION_SOFT_MULT = 0.42;
 
+type RangeSignalState = "RANGE_LONG_CANDIDATE" | "RANGE_SHORT_CANDIDATE" | "RANGE_SIGNAL_NONE";
+type RangeGateResult =
+  | "RANGE_GATE_PASS"
+  | "RANGE_GATE_BLOCK_BOX_MIDDLE"
+  | "RANGE_GATE_BLOCK_LOW_CONFIDENCE"
+  | "RANGE_GATE_BLOCK_RISK_ENGINE"
+  | "RANGE_GATE_BLOCK_REENTRY";
+type RangeEntryResult = "RANGE_LONG_ENTRY" | "RANGE_SHORT_ENTRY" | "RANGE_ENTRY_NONE";
+
+function clamp01(x: number): number {
+  if (!Number.isFinite(x)) return 0;
+  return x < 0 ? 0 : x > 1 ? 1 : x;
+}
+
+function evaluateRangeStage0Signal(sn: SymbolSnapshotLike): { signal: RangeSignalState; reason: string; side: "long" | "short" | null } {
+  if (sn.signal === "paper_long_candidate") return { signal: "RANGE_LONG_CANDIDATE", reason: "base_candidate_long", side: "long" };
+  if (sn.signal === "paper_short_candidate") return { signal: "RANGE_SHORT_CANDIDATE", reason: "base_candidate_short", side: "short" };
+
+  const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
+  const conf = clamp01(sn.rangeConfidence ?? 0);
+  const cohesion = clamp01(sn.boxCohesion01 ?? 0);
+  const oscillation = clamp01(sn.rangeOscillationScore ?? 0);
+  const edgeSignalReady = conf >= 0.38 && cohesion >= 0.32 && oscillation >= 0.3;
+  if (!edgeSignalReady) return { signal: "RANGE_SIGNAL_NONE", reason: "range_signal_low_structure", side: null };
+
+  if (boxPos <= 0.30) return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_edge_candidate", side: "long" };
+  if (boxPos >= 0.70) return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_edge_candidate", side: "short" };
+  return { signal: "RANGE_SIGNAL_NONE", reason: "range_box_middle", side: null };
+}
+
+function evaluateRangeStage0Scores(sn: SymbolSnapshotLike): { rangeSignalScore: number; rangeEntryScore: number; reason: string } {
+  const conf = clamp01(sn.rangeConfidence ?? 0);
+  const cohesion = clamp01(sn.boxCohesion01 ?? 0);
+  const breakoutFail = clamp01(sn.breakoutFailureRate ?? 0);
+  const oscillation = clamp01(sn.rangeOscillationScore ?? 0);
+  const weakness = clamp01(sn.trendWeaknessScore ?? 0.5);
+  const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
+  const edgeProximity = clamp01(Math.abs(boxPos - 0.5) / 0.5);
+  const emaGapAbs = Math.abs(sn.emaGap ?? 0);
+  const emaAssist = clamp01(1 - Math.min(1, emaGapAbs / 0.0015));
+  const volAssist = clamp01(1 - Math.min(1, Math.abs((sn.volumeRatioProxy ?? 1) - 1) / 1.5));
+  const rangeSignalScore = clamp01(0.3 * conf + 0.2 * cohesion + 0.2 * breakoutFail + 0.2 * oscillation + 0.1 * edgeProximity);
+  const rangeEntryScore = clamp01(0.25 * conf + 0.2 * cohesion + 0.15 * oscillation + 0.15 * weakness + 0.15 * emaAssist + 0.1 * volAssist);
+  return {
+    rangeSignalScore,
+    rangeEntryScore,
+    reason: `conf=${conf.toFixed(2)},cohesion=${cohesion.toFixed(2)},edge=${edgeProximity.toFixed(2)}`
+  };
+}
+
 function mapExecutorBlockToReject(blocked: string | undefined): PaperDecisionRejectReason {
   switch (blocked) {
     case "highway_invalid":
@@ -839,6 +889,114 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   }
   signal_state = signalToState(sn.signal);
   intentSide = (sn.signal === "paper_long_candidate") ? "long" : (sn.signal === "paper_short_candidate" ? "short" : "none") as any;
+  let workingSignal: PaperSignal = sn.signal;
+
+  const useRangeStage0Engine = input.regime === "RANGE" && input.currentStage === 0;
+  if (useRangeStage0Engine) {
+    strategy_executor = "RANGE";
+    const rangeSignal = evaluateRangeStage0Signal(sn);
+    const rangeScores = evaluateRangeStage0Scores(sn);
+    const riskEngineBlocked =
+      input.risk?.engineBlocked === true ||
+      (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE");
+    const blockedRegime = input.risk?.blockedRegimes?.[input.regime];
+    const blockedRegimeActive = !!(blockedRegime && blockedRegime.until > input.now);
+    const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
+    const boxMiddle = boxPos > 0.42 && boxPos < 0.58;
+    const lowConfidence = rangeScores.rangeSignalScore < 0.34 || rangeScores.rangeEntryScore < 0.36;
+    let reentryBlocked = false;
+    if (input.lastCloseMetaBySymbol && rangeSignal.side) {
+      const meta = input.lastCloseMetaBySymbol.get(String(sym));
+      const sameDirection = meta !== undefined && meta.side === rangeSignal.side;
+      const waitMs = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
+      if ((meta?.closedAt ?? 0) > 0 && input.now - (meta?.closedAt ?? 0) < waitMs) reentryBlocked = true;
+    }
+    let gateResult: RangeGateResult = "RANGE_GATE_PASS";
+    let gateReason = "range_gate_pass";
+    if (rangeSignal.signal === "RANGE_SIGNAL_NONE") {
+      gateResult = "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
+      gateReason = rangeSignal.reason;
+    } else if (riskEngineBlocked || blockedRegimeActive) {
+      gateResult = "RANGE_GATE_BLOCK_RISK_ENGINE";
+      gateReason = blockedRegime?.reason ?? "risk_engine_block";
+    } else if (reentryBlocked) {
+      gateResult = "RANGE_GATE_BLOCK_REENTRY";
+      gateReason = "range_reentry_cooldown_active";
+    } else if (boxMiddle) {
+      gateResult = "RANGE_GATE_BLOCK_BOX_MIDDLE";
+      gateReason = "range_box_middle";
+    } else if (lowConfidence) {
+      gateResult = "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
+      gateReason = "range_score_below_threshold";
+    }
+    const entryResult: RangeEntryResult =
+      gateResult !== "RANGE_GATE_PASS"
+        ? "RANGE_ENTRY_NONE"
+        : rangeSignal.signal === "RANGE_LONG_CANDIDATE"
+          ? "RANGE_LONG_ENTRY"
+          : "RANGE_SHORT_ENTRY";
+    workingSignal = entryResult === "RANGE_LONG_ENTRY"
+      ? "paper_long_candidate"
+      : entryResult === "RANGE_SHORT_ENTRY"
+        ? "paper_short_candidate"
+        : "none";
+    signal_state = signalToState(workingSignal);
+    intentSide = entryResult === "RANGE_LONG_ENTRY" ? "long" : entryResult === "RANGE_SHORT_ENTRY" ? "short" : null;
+    executorDecision = {
+      entry_allowed: gateResult === "RANGE_GATE_PASS",
+      blocked_reason: gateResult === "RANGE_GATE_PASS" ? null : gateResult,
+      expected_move: typeof em === "number" ? em : null,
+      total_cost: totalCost,
+      risk_state: (input.risk?.riskStatus ?? "NORMAL") as any,
+      regime: "RANGE",
+      executor: "RANGE",
+      box_position: boxPos <= 0.34 ? "lower" : boxPos >= 0.66 ? "upper" : "middle",
+      entryIntentType: entryResult === "RANGE_ENTRY_NONE" ? "probe" : "standard",
+      detail: {
+        range_signal: rangeSignal.signal,
+        range_signal_reason: rangeSignal.reason,
+        range_signal_score: rangeScores.rangeSignalScore,
+        range_entry_score: rangeScores.rangeEntryScore,
+        range_score_reason: rangeScores.reason,
+        range_gate_result: gateResult,
+        range_gate_reason: gateReason,
+        final_entry_reason: entryResult
+      }
+    };
+    supplemental_reasons.push(rangeSignal.signal);
+    supplemental_reasons.push(gateResult);
+    supplemental_reasons.push(entryResult);
+    if (gateResult !== "RANGE_GATE_PASS") {
+      const stage1Code =
+        gateResult === "RANGE_GATE_BLOCK_REENTRY" || gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
+          ? "STAGE1_BLOCKED_RISK"
+          : gateResult === "RANGE_GATE_BLOCK_LOW_CONFIDENCE" && rangeSignal.signal === "RANGE_SIGNAL_NONE"
+            ? "STAGE1_BLOCKED_SIGNAL"
+            : "STAGE1_BLOCKED_EDGE";
+      return ret(
+        {
+          strategy_executor: "RANGE",
+          final_decision: "SKIP",
+          reject_reason: gateResult === "RANGE_GATE_BLOCK_REENTRY" ? "RISK_FAIL_REENTRY" : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE" ? "RISK_COOLDOWN" : "EDGE_FAIL_EXPECTANCY",
+          stage1_result_code: stage1Code as any,
+          guidance: gateReason,
+          required_move_pct,
+          shortfall_pct,
+          supplemental_reasons,
+          final_fail_reason: gateResult
+        },
+        {
+          intentSide,
+          executorDecision,
+          adaptiveOk: false,
+          adaptiveDirection: null,
+          adaptiveDetail: null,
+          adaptiveResult: null,
+          aiGatePassed: false
+        }
+      );
+    }
+  }
 
   // Initial core detection and scoring
   // Use an effective scoring regime so stage0 UNKNOWN/ambiguous contexts can still exercise RANGE-stage0 scoring.
@@ -865,27 +1023,31 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   supplemental_reasons.push(`AI_SCORE_CONTEXT_RANGE_STAGE0_EXPECTED_${rangeStage0ContextExpected ? "Y" : "N"}`);
   supplemental_reasons.push(`AI_SCORE_CONTEXT_RANGE_STAGE0_APPLIED_${_aiResult.rangeStage0ScoringApplied ? "Y" : "N"}`);
 
-  // Determine executor intent based on core state
-  let _entryIntent: "probe" | "standard" | "scale" | "trend" = "trend";
-  if (_aiResult.state === HighwayTrendState.VALID) {
-    _entryIntent = "standard";
-  } else if (_aiResult.state === HighwayTrendState.WEAK) {
-    _entryIntent = "probe";
-  }
+  if (!useRangeStage0Engine) {
+    // Determine executor intent based on core state
+    let _entryIntent: "probe" | "standard" | "scale" | "trend" = "trend";
+    if (_aiResult.state === HighwayTrendState.VALID) {
+      _entryIntent = "standard";
+    } else if (_aiResult.state === HighwayTrendState.WEAK) {
+      _entryIntent = "probe";
+    }
 
-  // Pre-calculate executor decision to preserve metrics in rejection paths
-  executorDecision = highwayExecutorEvaluateEntry({
-    intentType: _entryIntent,
-    highwayState: _aiResult.state,
-    aiScores: _aiResult,
-    symbol: String(sym),
-    signal: sn.signal,
-    risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
-    currentStage: input.currentStage,
-    expectedMove: typeof em === "number" ? em : null,
-    totalCost
-  });
-  strategy_executor = "TREND";
+    // Pre-calculate executor decision to preserve metrics in rejection paths
+    executorDecision = highwayExecutorEvaluateEntry({
+      intentType: _entryIntent,
+      highwayState: _aiResult.state,
+      aiScores: _aiResult,
+      symbol: String(sym),
+      signal: workingSignal,
+      risk_state: (input.risk?.riskStatus ?? "NORMAL") as "NORMAL" | "LIMITED" | "BLOCKED",
+      currentStage: input.currentStage,
+      expectedMove: typeof em === "number" ? em : null,
+      totalCost
+    });
+    strategy_executor = "TREND";
+  } else {
+    supplemental_reasons.push("RANGE_STAGE0_ENGINE_ACTIVE");
+  }
 
   // Highway Result & AI Result previously computed and assigned to executorDecision
 
@@ -1079,7 +1241,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     );
   }
 
-  intentSide = sn.signal === "paper_long_candidate" ? "long" : "short";
+  intentSide = workingSignal === "paper_long_candidate" ? "long" : "short";
   rr = rrFromRegime(input.regime);
 
   let stage1LoosenedEntry = false;
@@ -1337,20 +1499,21 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   // Highway Engine Universal Evaluation already performed earlier to preserve metrics
 
   // Auxiliary RANGE Veto / Downgrade Logic (executed only if Highway returns some valid intent but score is weak-ish)
-  if (executorDecision.entry_allowed && _aiResult.highwayValidityScore < 0.6) {
+  if (!useRangeStage0Engine && executorDecision?.entry_allowed && _aiResult.highwayValidityScore < 0.6) {
+    const currentExecutor = executorDecision;
     const penalty = sn.rangeConfidence ?? 0;
     const isChaos = (sn.breakoutFailureRate ?? 0) > 0.8;
 
     if (penalty > 0.85 || isChaos) {
       executorDecision = {
-        ...executorDecision,
+        ...currentExecutor,
         entry_allowed: false,
         blocked_reason: "range_extreme_veto",
         guidance: "Highway blocked by extreme RANGE chaos/noise"
       };
-    } else if (penalty > 0.7 && executorDecision.target_stage && executorDecision.target_stage > 1) {
+    } else if (penalty > 0.7 && currentExecutor.target_stage && currentExecutor.target_stage > 1) {
       executorDecision = {
-        ...executorDecision,
+        ...currentExecutor,
         target_stage: 1,
         guidance: "Highway downgraded to Probe/Scale 1 due to RANGE noise"
       };
@@ -1385,8 +1548,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const invalidReasonsRaw = executorDecision?.detail?.highway_invalid_reasons;
     const invalidReasons = Array.isArray(invalidReasonsRaw) ? invalidReasonsRaw : [];
     const baseCandidateExists =
-      sn.signal === "paper_long_candidate" ||
-      sn.signal === "paper_short_candidate" ||
+      workingSignal === "paper_long_candidate" ||
+      workingSignal === "paper_short_candidate" ||
       signal_state === "LONG_CANDIDATE" ||
       signal_state === "SHORT_CANDIDATE";
     const requiredMoveLowEnough = typeof required_move_pct === "number" && required_move_pct <= 0.25;
@@ -1632,7 +1795,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       modeDetail: input.adaptiveDetail,
       snap: {
         symbol: String(sym),
-        signal: sn!.signal,
+        signal: workingSignal,
         lastPrice: sn!.lastPrice,
         latestCandleClose: sn!.latestCandleClose,
         ema20: sn!.ema20,
@@ -1730,7 +1893,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       }
     }
 
-    const expectedSide: "long" | "short" = sn!.signal === "paper_long_candidate" ? "long" : "short";
+    const expectedSide: "long" | "short" = workingSignal === "paper_long_candidate" ? "long" : "short";
     if (adaptive.direction !== expectedSide) {
       reject_reason = "ADAPTIVE_REJECT";
       final_decision = "REJECT";
@@ -1765,7 +1928,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       if (
         input.currentStage === 0 &&
         input.regime === "RANGE" &&
-        sn!.signal === "paper_short_candidate"
+        workingSignal === "paper_short_candidate"
       ) {
         return ret(
           {
@@ -1928,11 +2091,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         min_qty: null,
         min_notional: null,
         sizeUsd: adaptive.sizeUsd,
-        original_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && sn!.signal === "none") ? "NONE" : signal_state,
-        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && sn!.signal === "none") ? "SOFT_RANGE_CANDIDATE" : signal_state
+        original_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === "none") ? "NONE" : signal_state,
+        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === "none") ? "SOFT_RANGE_CANDIDATE" : signal_state
       },
       {
-        intentSide: intentSide ?? (sn!.signal === "paper_long_candidate" || sn!.signal === "none" ? "long" : "short"),
+        intentSide: intentSide ?? (workingSignal === "paper_long_candidate" || workingSignal === "none" ? "long" : "short"),
         executorDecision,
         adaptiveOk: true,
         adaptiveDirection: adaptive.direction,
