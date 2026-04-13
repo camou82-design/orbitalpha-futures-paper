@@ -352,6 +352,12 @@ function pack(
     range_cost_warning_applied?: boolean;
     range_cost_warning_threshold?: number | null;
     range_cost_warning_shortfall?: number | null;
+    range_reentry_cooldown_applied?: boolean;
+    range_reentry_wait_ms?: number | null;
+    range_reentry_elapsed_ms?: number | null;
+    range_reentry_remaining_ms?: number | null;
+    range_reentry_source?: string | null;
+    range_reentry_same_direction?: boolean;
     legacy_block_reason?: string | null;
     legacy_regime_gate?: string | null;
     legacy_gate_source?: string | null;
@@ -464,6 +470,12 @@ function pack(
     range_cost_warning_applied: fields.range_cost_warning_applied ?? false,
     range_cost_warning_threshold: fields.range_cost_warning_threshold ?? null,
     range_cost_warning_shortfall: fields.range_cost_warning_shortfall ?? null,
+    range_reentry_cooldown_applied: fields.range_reentry_cooldown_applied ?? false,
+    range_reentry_wait_ms: fields.range_reentry_wait_ms ?? null,
+    range_reentry_elapsed_ms: fields.range_reentry_elapsed_ms ?? null,
+    range_reentry_remaining_ms: fields.range_reentry_remaining_ms ?? null,
+    range_reentry_source: fields.range_reentry_source ?? null,
+    range_reentry_same_direction: fields.range_reentry_same_direction ?? false,
     legacy_block_reason: fields.legacy_block_reason ?? null,
     legacy_regime_gate: fields.legacy_regime_gate ?? null,
     legacy_gate_source: fields.legacy_gate_source ?? null,
@@ -615,6 +627,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_cost_warning_applied = false;
   let range_cost_warning_threshold: number | null = null;
   let range_cost_warning_shortfall: number | null = null;
+  let range_reentry_cooldown_applied = false;
+  let range_reentry_wait_ms: number | null = null;
+  let range_reentry_elapsed_ms: number | null = null;
+  let range_reentry_remaining_ms: number | null = null;
+  let range_reentry_source: string | null = null;
+  let range_reentry_same_direction = false;
   let range_stage0_engine_taken = false;
   let range_stage0_exit_reason: string | null = null;
   let legacy_executor_path_taken = false;
@@ -722,6 +740,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_cost_warning_applied?: boolean;
       range_cost_warning_threshold?: number | null;
       range_cost_warning_shortfall?: number | null;
+      range_reentry_cooldown_applied?: boolean;
+      range_reentry_wait_ms?: number | null;
+      range_reentry_elapsed_ms?: number | null;
+      range_reentry_remaining_ms?: number | null;
+      range_reentry_source?: string | null;
+      range_reentry_same_direction?: boolean;
       legacy_block_reason?: string | null;
       legacy_regime_gate?: string | null;
       legacy_gate_source?: string | null;
@@ -867,6 +891,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_cost_warning_applied: extra.range_cost_warning_applied ?? range_cost_warning_applied,
       range_cost_warning_threshold: extra.range_cost_warning_threshold ?? range_cost_warning_threshold,
       range_cost_warning_shortfall: extra.range_cost_warning_shortfall ?? range_cost_warning_shortfall,
+      range_reentry_cooldown_applied: extra.range_reentry_cooldown_applied ?? range_reentry_cooldown_applied,
+      range_reentry_wait_ms: extra.range_reentry_wait_ms ?? range_reentry_wait_ms,
+      range_reentry_elapsed_ms: extra.range_reentry_elapsed_ms ?? range_reentry_elapsed_ms,
+      range_reentry_remaining_ms: extra.range_reentry_remaining_ms ?? range_reentry_remaining_ms,
+      range_reentry_source: extra.range_reentry_source ?? range_reentry_source,
+      range_reentry_same_direction: extra.range_reentry_same_direction ?? range_reentry_same_direction,
       legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
       legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
       legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
@@ -986,11 +1016,22 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const boxMiddle = boxPos > 0.42 && boxPos < 0.58;
     const lowConfidence = rangeScores.rangeSignalScore < 0.34 || rangeScores.rangeEntryScore < 0.36;
     let reentryBlocked = false;
+    let rangeReentryWaitMs: number | null = null;
+    let rangeReentryElapsedMs: number | null = null;
+    let rangeReentryRemainingMs: number | null = null;
+    let rangeReentrySameDirection = false;
+    let rangeReentrySource = "range_stage0_reentry";
     if (input.lastCloseMetaBySymbol && rangeSignal.side) {
       const meta = input.lastCloseMetaBySymbol.get(String(sym));
       const sameDirection = meta !== undefined && meta.side === rangeSignal.side;
-      const waitMs = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
-      if ((meta?.closedAt ?? 0) > 0 && input.now - (meta?.closedAt ?? 0) < waitMs) reentryBlocked = true;
+      const waitMsBase = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
+      const waitMs = Math.min(waitMsBase, 95_000);
+      const elapsedMs = input.now - (meta?.closedAt ?? 0);
+      rangeReentrySameDirection = sameDirection;
+      rangeReentryWaitMs = waitMs;
+      rangeReentryElapsedMs = elapsedMs;
+      rangeReentryRemainingMs = (meta?.closedAt ?? 0) > 0 && elapsedMs < waitMs ? waitMs - elapsedMs : 0;
+      if ((meta?.closedAt ?? 0) > 0 && elapsedMs < waitMs) reentryBlocked = true;
     }
     let gateResult: RangeGateResult = "RANGE_GATE_PASS";
     let gateReason = "range_gate_pass";
@@ -1072,6 +1113,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           range_stage0_engine_taken: true,
           range_stage0_exit_reason: rangeFinalBlockReason,
           legacy_executor_path_taken: false,
+          range_reentry_cooldown_applied: gateResult === "RANGE_GATE_BLOCK_REENTRY",
+          range_reentry_wait_ms: rangeReentryWaitMs,
+          range_reentry_elapsed_ms: rangeReentryElapsedMs,
+          range_reentry_remaining_ms: rangeReentryRemainingMs,
+          range_reentry_source: gateResult === "RANGE_GATE_BLOCK_REENTRY" ? rangeReentrySource : null,
+          range_reentry_same_direction: rangeReentrySameDirection,
+          reentry_wait_ms: rangeReentryWaitMs,
+          reentry_elapsed_ms: rangeReentryElapsedMs,
           guidance: gateReason,
           required_move_pct,
           shortfall_pct,

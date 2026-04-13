@@ -369,6 +369,18 @@ export type PaperSymbolDecisionRecord = Readonly<{
   range_cost_warning_threshold?: number | null;
   /** RANGE stage0 전용 비용 경고 부족분(기준치-기대이동) */
   range_cost_warning_shortfall?: number | null;
+  /** RANGE stage0 전용 재진입 쿨다운 적용 여부 */
+  range_reentry_cooldown_applied?: boolean;
+  /** RANGE stage0 전용 재진입 대기 기준값(ms) */
+  range_reentry_wait_ms?: number | null;
+  /** RANGE stage0 전용 마지막 청산 후 경과(ms) */
+  range_reentry_elapsed_ms?: number | null;
+  /** RANGE stage0 전용 재진입 잔여(ms) */
+  range_reentry_remaining_ms?: number | null;
+  /** RANGE stage0 전용 재진입 판정 소스 */
+  range_reentry_source?: string | null;
+  /** RANGE stage0 전용 동일 방향 여부 */
+  range_reentry_same_direction?: boolean;
   /** 레거시 차단 원인 (executor blocked_reason 원본) */
   legacy_block_reason?: string | null;
   /** 레거시 레짐 게이트 분류값 */
