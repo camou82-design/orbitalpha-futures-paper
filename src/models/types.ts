@@ -453,6 +453,8 @@ export type PaperSymbolDecisionRecord = Readonly<{
   range_mid_wait_applied?: boolean;
   /** 구간·방향 라벨 기준 최종 의도 side */
   range_final_trade_side_by_zone?: string | null;
+  /** RANGE stage0 상단·raw long 등 분기 증명(로그/트레이스용) */
+  range_stage0_branch_proof?: Record<string, unknown> | null;
   /** 반전 청산 직후(또는 pending) 반대 방향 즉시 평가 적용 */
   range_reversal_immediate_switch_applied?: boolean;
   range_reversal_immediate_switch_reason?: string | null;

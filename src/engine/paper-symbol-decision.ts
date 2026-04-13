@@ -164,6 +164,116 @@ function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x;
 }
 
+const RANGE_STAGE0_EDGE_THRESHOLDS = { conf: 0.38, cohesion: 0.32, oscillation: 0.3 } as const;
+
+function rangeStage0EdgeStructureGate(sn: SymbolSnapshotLike): {
+  ok: boolean;
+  conf: number;
+  cohesion: number;
+  oscillation: number;
+  thresholds: typeof RANGE_STAGE0_EDGE_THRESHOLDS;
+  failed_checks: string[];
+} {
+  const conf = clamp01(sn.rangeConfidence ?? 0);
+  const cohesion = clamp01(sn.boxCohesion01 ?? 0);
+  const oscillation = clamp01(sn.rangeOscillationScore ?? 0);
+  const failed_checks: string[] = [];
+  if (conf < RANGE_STAGE0_EDGE_THRESHOLDS.conf) failed_checks.push("conf_below_min");
+  if (cohesion < RANGE_STAGE0_EDGE_THRESHOLDS.cohesion) failed_checks.push("cohesion_below_min");
+  if (oscillation < RANGE_STAGE0_EDGE_THRESHOLDS.oscillation) failed_checks.push("oscillation_below_min");
+  return {
+    ok: failed_checks.length === 0,
+    conf,
+    cohesion,
+    oscillation,
+    thresholds: RANGE_STAGE0_EDGE_THRESHOLDS,
+    failed_checks
+  };
+}
+
+function buildRangeUpperLongSuppressBranchProof(args: {
+  edge: ReturnType<typeof rangeStage0EdgeStructureGate>;
+  rangeSignal: { signal: RangeSignalState; reason: string; side: "long" | "short" | null };
+  rawSnapshotSignal: string;
+  gateResult: RangeGateResult;
+  gateReason: string;
+  entryResult: RangeEntryResult;
+  range_upper_short_priority_applied: boolean;
+  lowConfidence: boolean;
+  rangeReversalSwitchMatches: boolean;
+}): Record<string, unknown> {
+  const {
+    edge,
+    rangeSignal,
+    rawSnapshotSignal,
+    gateResult,
+    gateReason,
+    entryResult,
+    range_upper_short_priority_applied,
+    lowConfidence,
+    rangeReversalSwitchMatches
+  } = args;
+  const branch_order_upper = [
+    "reversal_immediate_switch_short_upper (if armed)",
+    "paper_short_candidate → RANGE_SHORT_CANDIDATE / range_upper_short_from_base_signal",
+    "edgeStructureOk → RANGE_SHORT_CANDIDATE / range_upper_short_priority_structure",
+    "paper_long_candidate → RANGE_SIGNAL_NONE / range_upper_suppress_long_candidate_no_inertia",
+    "else → RANGE_SIGNAL_NONE / range_upper_short_structure_not_ready"
+  ];
+  let range_upper_short_priority_false_because: string;
+  if (range_upper_short_priority_applied) {
+    range_upper_short_priority_false_because = "range_upper_short_priority_applied is true (zone upper and RANGE_SHORT_ENTRY)";
+  } else if (entryResult === "RANGE_SHORT_ENTRY") {
+    range_upper_short_priority_false_because = "invariant: entry short but flag false (should not happen)";
+  } else if (rangeSignal.signal === "RANGE_SIGNAL_NONE" && rangeSignal.reason === "range_upper_suppress_long_candidate_no_inertia") {
+    range_upper_short_priority_false_because =
+      "inner RANGE_SIGNAL_NONE from long suppress after edge/short branches; entryResult stays RANGE_ENTRY_NONE, so range_upper_short_priority_applied (requires RANGE_SHORT_ENTRY) is false";
+  } else if (rangeSignal.signal === "RANGE_SIGNAL_NONE" && rangeSignal.reason === "range_upper_short_structure_not_ready") {
+    range_upper_short_priority_false_because =
+      "edgeStructureOk false → no structural short candidate; long suppress branch not reached for raw long-only ticks";
+  } else if (rangeSignal.signal === "RANGE_SHORT_CANDIDATE" && gateResult !== "RANGE_GATE_PASS") {
+    range_upper_short_priority_false_because = `inner short candidate (${rangeSignal.reason}) but gate blocked: ${gateResult} / ${gateReason}`;
+  } else if (rangeSignal.signal === "RANGE_SHORT_CANDIDATE" && lowConfidence && !rangeReversalSwitchMatches) {
+    range_upper_short_priority_false_because =
+      "inner short candidate but range score gate: lowConfidence && !rangeReversalSwitchMatches → range_score_below_threshold";
+  } else {
+    range_upper_short_priority_false_because = `entryResult=${entryResult}, inner=${rangeSignal.signal}/${rangeSignal.reason}, gate=${gateResult}/${gateReason}`;
+  }
+  return {
+    proof_version: 1,
+    scenario: "range_upper_raw_paper_long_candidate",
+    raw_snapshot_signal: rawSnapshotSignal,
+    branch_order_upper,
+    legacy_order_bug_note:
+      "Previously paper_long_candidate was checked first, returning RANGE_SIGNAL_NONE before edgeStructureOk / short-from-base / short-priority-structure could run.",
+    edge_structure_gate: edge,
+    evaluate_range_stage0_signal_out: {
+      signal: rangeSignal.signal,
+      reason: rangeSignal.reason,
+      side: rangeSignal.side
+    },
+    prior_order_would_skip_short_eval:
+      rawSnapshotSignal === "paper_long_candidate"
+        ? {
+            first_matching_branch: "paper_long_candidate",
+            immediate_return: "RANGE_SIGNAL_NONE",
+            immediate_reason: "range_upper_suppress_long_candidate_no_inertia",
+            short_priority_never_reached: true
+          }
+        : null,
+    post_reorder_inner_when_raw_long: edge.ok
+      ? { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_priority_structure" }
+      : { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_suppress_long_candidate_no_inertia" },
+    gate_result: gateResult,
+    gate_reason: gateReason,
+    entry_result: entryResult,
+    range_upper_short_priority_applied,
+    range_upper_short_priority_false_because,
+    formula:
+      "range_upper_short_priority_applied := (zone === 'upper') && (entryResult === 'RANGE_SHORT_ENTRY')"
+  };
+}
+
 function evaluateRangeStage0Signal(
   sn: SymbolSnapshotLike,
   reversalImmediate?: Readonly<{ preferredSide: "long" | "short" }> | null
@@ -186,22 +296,20 @@ function evaluateRangeStage0Signal(
       };
     }
   }
-  const conf = clamp01(sn.rangeConfidence ?? 0);
-  const cohesion = clamp01(sn.boxCohesion01 ?? 0);
-  const oscillation = clamp01(sn.rangeOscillationScore ?? 0);
-  const edgeStructureOk = conf >= 0.38 && cohesion >= 0.32 && oscillation >= 0.3;
+  const edgeGate = rangeStage0EdgeStructureGate(sn);
+  const edgeStructureOk = edgeGate.ok;
 
   if (zone === "upper") {
-    if (sn.signal === "paper_long_candidate") {
-      return { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_suppress_long_candidate_no_inertia", side: null };
-    }
     if (sn.signal === "paper_short_candidate") {
       return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_from_base_signal", side: "short" };
     }
-    if (!edgeStructureOk) {
-      return { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_short_structure_not_ready", side: null };
+    if (edgeStructureOk) {
+      return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_priority_structure", side: "short" };
     }
-    return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_priority_structure", side: "short" };
+    if (sn.signal === "paper_long_candidate") {
+      return { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_suppress_long_candidate_no_inertia", side: null };
+    }
+    return { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_short_structure_not_ready", side: null };
   }
 
   if (zone === "lower") {
@@ -585,6 +693,7 @@ function pack(
     range_lower_long_priority_applied?: boolean;
     range_mid_wait_applied?: boolean;
     range_final_trade_side_by_zone?: string | null;
+    range_stage0_branch_proof?: Record<string, unknown> | null;
     legacy_block_reason?: string | null;
     legacy_regime_gate?: string | null;
     legacy_gate_source?: string | null;
@@ -740,6 +849,7 @@ function pack(
     range_lower_long_priority_applied: fields.range_lower_long_priority_applied ?? false,
     range_mid_wait_applied: fields.range_mid_wait_applied ?? false,
     range_final_trade_side_by_zone: fields.range_final_trade_side_by_zone ?? null,
+    range_stage0_branch_proof: fields.range_stage0_branch_proof ?? null,
     legacy_block_reason: fields.legacy_block_reason ?? null,
     legacy_regime_gate: fields.legacy_regime_gate ?? null,
     legacy_gate_source: fields.legacy_gate_source ?? null,
@@ -936,6 +1046,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_reversal_immediate_switch_reason: string | null = null;
   let range_stage0_engine_taken = false;
   let range_stage0_exit_reason: string | null = null;
+  let range_stage0_branch_proof: Record<string, unknown> | null = null;
   let legacy_executor_path_taken = false;
   let legacy_block_reason: string | null = null;
   let legacy_regime_gate: string | null = null;
@@ -1084,6 +1195,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_lower_long_priority_applied?: boolean;
       range_mid_wait_applied?: boolean;
       range_final_trade_side_by_zone?: string | null;
+      range_stage0_branch_proof?: Record<string, unknown> | null;
       legacy_block_reason?: string | null;
       legacy_regime_gate?: string | null;
       legacy_gate_source?: string | null;
@@ -1286,6 +1398,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_lower_long_priority_applied: extra.range_lower_long_priority_applied ?? range_lower_long_priority_applied,
       range_mid_wait_applied: extra.range_mid_wait_applied ?? range_mid_wait_applied,
       range_final_trade_side_by_zone: extra.range_final_trade_side_by_zone ?? range_final_trade_side_by_zone,
+      range_stage0_branch_proof:
+        "range_stage0_branch_proof" in extra ? extra.range_stage0_branch_proof : range_stage0_branch_proof,
       legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
       legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
       legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
@@ -1552,6 +1666,19 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         : zone === "lower"
           ? `lower:${entryResult === "RANGE_LONG_ENTRY" ? "long" : "none"}`
           : `mid:wait`;
+    if (zone === "upper" && sn.signal === "paper_long_candidate") {
+      range_stage0_branch_proof = buildRangeUpperLongSuppressBranchProof({
+        edge: rangeStage0EdgeStructureGate(sn),
+        rangeSignal,
+        rawSnapshotSignal: sn.signal,
+        gateResult,
+        gateReason,
+        entryResult,
+        range_upper_short_priority_applied,
+        lowConfidence,
+        rangeReversalSwitchMatches
+      });
+    }
     if (gateResult === "RANGE_GATE_PASS" && rangeReversalSwitchMatches) {
       range_reversal_immediate_switch_applied = true;
       range_reversal_immediate_switch_reason = input.rangeReversalImmediateSwitch?.reason ?? null;
@@ -1583,7 +1710,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         range_gate_reason: gateReason,
         final_entry_reason: entryResult,
         range_zone_detected: zone,
-        range_zone_action_policy: RANGE_ZONE_ACTION_POLICY
+        range_zone_action_policy: RANGE_ZONE_ACTION_POLICY,
+        ...(range_stage0_branch_proof ? { range_stage0_branch_proof } : {})
       }
     };
     supplemental_reasons.push(rangeSignal.signal);

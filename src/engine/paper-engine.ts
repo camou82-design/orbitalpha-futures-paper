@@ -1214,6 +1214,7 @@ export class PaperEngine {
             symbol: String(sym),
             range_stage0_engine_taken: true,
             range_stage0_exit_reason: d.range_stage0_exit_reason ?? null,
+            range_stage0_branch_proof: d.range_stage0_branch_proof ?? null,
             entry_blocked: d.entry_blocked ?? null,
             reject_reason: d.reject_reason ?? null,
             stage1_result_code: d.stage1_result_code ?? null
@@ -1311,6 +1312,7 @@ export class PaperEngine {
           range_lower_long_priority_applied: d.range_lower_long_priority_applied ?? false,
           range_mid_wait_applied: d.range_mid_wait_applied ?? false,
           range_final_trade_side_by_zone: d.range_final_trade_side_by_zone ?? null,
+          range_stage0_branch_proof: d.range_stage0_branch_proof ?? null,
           range_existing_long_reversal_exit_applied:
             this.rangeReversalExitThisTickBySymbol.get(String(sym))?.range_existing_long_reversal_exit_applied ?? false,
           range_existing_short_reversal_exit_applied:
@@ -1965,6 +1967,7 @@ export class PaperEngine {
       upper_zone_long_candidate_received: upperLongRaw,
       range_stage0_inner_signal_reason: rangeSigReason,
       range_stage0_inner_signal_state: rangeSigState,
+      range_stage0_branch_proof: d.range_stage0_branch_proof ?? null,
       range_reversal_immediate_switch_input: revIn,
       range_stage0_engine_taken: d.range_stage0_engine_taken ?? false,
       range_zone_detected: d.range_zone_detected ?? null,
