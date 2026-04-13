@@ -358,6 +358,12 @@ function pack(
     range_reentry_remaining_ms?: number | null;
     range_reentry_source?: string | null;
     range_reentry_same_direction?: boolean;
+    range_same_direction_reentry_relaxed_applied?: boolean;
+    range_same_direction_reentry_wait_ms?: number | null;
+    range_same_direction_reentry_size_mult?: number | null;
+    range_same_direction_reentry_edge_ok?: boolean;
+    range_same_direction_reentry_center_blocked?: boolean;
+    range_same_direction_reentry_final_allowed?: boolean;
     range_soft_suspend_applied?: boolean;
     range_soft_suspend_size_mult?: number | null;
     range_soft_suspend_cooldown_ms?: number | null;
@@ -486,6 +492,12 @@ function pack(
     range_reentry_remaining_ms: fields.range_reentry_remaining_ms ?? null,
     range_reentry_source: fields.range_reentry_source ?? null,
     range_reentry_same_direction: fields.range_reentry_same_direction ?? false,
+    range_same_direction_reentry_relaxed_applied: fields.range_same_direction_reentry_relaxed_applied ?? false,
+    range_same_direction_reentry_wait_ms: fields.range_same_direction_reentry_wait_ms ?? null,
+    range_same_direction_reentry_size_mult: fields.range_same_direction_reentry_size_mult ?? null,
+    range_same_direction_reentry_edge_ok: fields.range_same_direction_reentry_edge_ok ?? false,
+    range_same_direction_reentry_center_blocked: fields.range_same_direction_reentry_center_blocked ?? false,
+    range_same_direction_reentry_final_allowed: fields.range_same_direction_reentry_final_allowed ?? false,
     range_soft_suspend_applied: fields.range_soft_suspend_applied ?? false,
     range_soft_suspend_size_mult: fields.range_soft_suspend_size_mult ?? null,
     range_soft_suspend_cooldown_ms: fields.range_soft_suspend_cooldown_ms ?? null,
@@ -653,6 +665,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_reentry_remaining_ms: number | null = null;
   let range_reentry_source: string | null = null;
   let range_reentry_same_direction = false;
+  let range_same_direction_reentry_relaxed_applied = false;
+  let range_same_direction_reentry_wait_ms: number | null = null;
+  let range_same_direction_reentry_size_mult: number | null = null;
+  let range_same_direction_reentry_edge_ok = false;
+  let range_same_direction_reentry_center_blocked = false;
+  let range_same_direction_reentry_final_allowed = false;
   let range_soft_suspend_applied = false;
   let range_soft_suspend_size_mult: number | null = null;
   let range_soft_suspend_cooldown_ms: number | null = null;
@@ -776,6 +794,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reentry_remaining_ms?: number | null;
       range_reentry_source?: string | null;
       range_reentry_same_direction?: boolean;
+      range_same_direction_reentry_relaxed_applied?: boolean;
+      range_same_direction_reentry_wait_ms?: number | null;
+      range_same_direction_reentry_size_mult?: number | null;
+      range_same_direction_reentry_edge_ok?: boolean;
+      range_same_direction_reentry_center_blocked?: boolean;
+      range_same_direction_reentry_final_allowed?: boolean;
       range_soft_suspend_applied?: boolean;
       range_soft_suspend_size_mult?: number | null;
       range_soft_suspend_cooldown_ms?: number | null;
@@ -937,6 +961,18 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reentry_remaining_ms: extra.range_reentry_remaining_ms ?? range_reentry_remaining_ms,
       range_reentry_source: extra.range_reentry_source ?? range_reentry_source,
       range_reentry_same_direction: extra.range_reentry_same_direction ?? range_reentry_same_direction,
+      range_same_direction_reentry_relaxed_applied:
+        extra.range_same_direction_reentry_relaxed_applied ?? range_same_direction_reentry_relaxed_applied,
+      range_same_direction_reentry_wait_ms:
+        extra.range_same_direction_reentry_wait_ms ?? range_same_direction_reentry_wait_ms,
+      range_same_direction_reentry_size_mult:
+        extra.range_same_direction_reentry_size_mult ?? range_same_direction_reentry_size_mult,
+      range_same_direction_reentry_edge_ok:
+        extra.range_same_direction_reentry_edge_ok ?? range_same_direction_reentry_edge_ok,
+      range_same_direction_reentry_center_blocked:
+        extra.range_same_direction_reentry_center_blocked ?? range_same_direction_reentry_center_blocked,
+      range_same_direction_reentry_final_allowed:
+        extra.range_same_direction_reentry_final_allowed ?? range_same_direction_reentry_final_allowed,
       range_soft_suspend_applied: extra.range_soft_suspend_applied ?? range_soft_suspend_applied,
       range_soft_suspend_size_mult: extra.range_soft_suspend_size_mult ?? range_soft_suspend_size_mult,
       range_soft_suspend_cooldown_ms: extra.range_soft_suspend_cooldown_ms ?? range_soft_suspend_cooldown_ms,
@@ -1076,6 +1112,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const rangeExitRiskOk = (sn.regimeExitRisk ?? 0) <= 0.62;
     const rangeConfidenceOk = (sn.rangeConfidence ?? 0) >= 0.45;
     const rangeBreakoutFailureOk = (sn.breakoutFailureRate ?? 0) >= 0.42;
+    const rangeSameDirBaseEligible = rangeConfidenceOk && rangeBreakoutFailureOk && rangeExitRiskOk;
     range_short_allowed =
       rangeSignal.side === "short" &&
       range_upper_edge_near &&
@@ -1110,6 +1147,28 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       let waitMs = Math.min(waitMsBase, 95_000);
       const elapsedMs = input.now - (meta?.closedAt ?? 0);
       rangeReentrySameDirection = sameDirection;
+      range_same_direction_reentry_center_blocked = range_center_wait;
+      const rangeEdgeOkForSameDir =
+        rangeSignal.side === "long"
+          ? boxPos <= 0.38
+          : rangeSignal.side === "short"
+            ? boxPos >= 0.68
+            : false;
+      range_same_direction_reentry_edge_ok = rangeEdgeOkForSameDir;
+      const sameDirRelaxEligible =
+        sameDirection &&
+        !range_center_wait &&
+        rangeEdgeOkForSameDir &&
+        rangeSameDirBaseEligible;
+      if (sameDirRelaxEligible) {
+        const relaxedWaitMs = Math.min(45_000, Math.max(20_000, Math.floor(waitMs * 0.35)));
+        waitMs = relaxedWaitMs;
+        range_same_direction_reentry_relaxed_applied = true;
+        range_same_direction_reentry_wait_ms = relaxedWaitMs;
+        range_same_direction_reentry_size_mult = 0.5;
+      } else if (sameDirection) {
+        range_same_direction_reentry_wait_ms = waitMs;
+      }
       if (blockedRegimeActive && blockedRegimeLossStreakSuspend) {
         range_soft_suspend_applied = true;
         range_soft_suspend_size_mult = RANGE_SOFT_SUSPEND_SIZE_MULT;
@@ -1121,6 +1180,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       rangeReentryElapsedMs = elapsedMs;
       rangeReentryRemainingMs = (meta?.closedAt ?? 0) > 0 && elapsedMs < waitMs ? waitMs - elapsedMs : 0;
       if ((meta?.closedAt ?? 0) > 0 && elapsedMs < waitMs) reentryBlocked = true;
+      range_same_direction_reentry_final_allowed =
+        sameDirection && (meta?.closedAt ?? 0) > 0 ? elapsedMs >= waitMs : true;
     }
     let gateResult: RangeGateResult = "RANGE_GATE_PASS";
     let gateReason = "range_gate_pass";
@@ -2171,6 +2232,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     if (input.currentStage === 0 && input.regime === "RANGE" && range_soft_suspend_applied && range_soft_suspend_size_mult) {
       dynamicSizeMult *= range_soft_suspend_size_mult;
       supplemental_reasons.push("RANGE_SOFT_SUSPEND_SIZE_REDUCED");
+    }
+    if (
+      input.currentStage === 0 &&
+      input.regime === "RANGE" &&
+      range_same_direction_reentry_relaxed_applied &&
+      range_same_direction_reentry_size_mult
+    ) {
+      dynamicSizeMult *= range_same_direction_reentry_size_mult;
+      supplemental_reasons.push("RANGE_SAME_DIRECTION_REENTRY_SIZE_REDUCED");
     }
 
     const stage1SizeMultFinal = input.currentStage === 0 ? dynamicSizeMult : null;

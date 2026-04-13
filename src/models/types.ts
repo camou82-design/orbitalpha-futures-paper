@@ -381,6 +381,18 @@ export type PaperSymbolDecisionRecord = Readonly<{
   range_reentry_source?: string | null;
   /** RANGE stage0 전용 동일 방향 여부 */
   range_reentry_same_direction?: boolean;
+  /** RANGE 동일방향 재진입 감속 완화 적용 여부 */
+  range_same_direction_reentry_relaxed_applied?: boolean;
+  /** RANGE 동일방향 재진입 완화 대기(ms) */
+  range_same_direction_reentry_wait_ms?: number | null;
+  /** RANGE 동일방향 재진입 완화 사이즈 배수 */
+  range_same_direction_reentry_size_mult?: number | null;
+  /** RANGE 동일방향 재진입 에지 적합 여부 */
+  range_same_direction_reentry_edge_ok?: boolean;
+  /** RANGE 동일방향 재진입 중앙부 대기 차단 여부 */
+  range_same_direction_reentry_center_blocked?: boolean;
+  /** RANGE 동일방향 재진입 최종 허용 여부 */
+  range_same_direction_reentry_final_allowed?: boolean;
   /** RANGE stage0 loss streak suspend 소프트 완화 적용 여부 */
   range_soft_suspend_applied?: boolean;
   /** RANGE stage0 loss streak suspend 시 축소 진입 배수 */
