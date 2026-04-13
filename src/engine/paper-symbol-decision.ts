@@ -1028,14 +1028,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     strategy_executor = "RANGE";
     const rangeSignal = evaluateRangeStage0Signal(sn);
     const rangeScores = evaluateRangeStage0Scores(sn);
-    const riskEngineBlocked =
-      input.risk?.engineBlocked === true ||
-      (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE");
     const blockedRegime = input.risk?.blockedRegimes?.[input.regime];
     const blockedRegimeActive = !!(blockedRegime && blockedRegime.until > input.now);
     const blockedRegimeReasonText = String(blockedRegime?.reason ?? "");
     const blockedRegimeLossStreakSuspend =
       blockedRegimeReasonText.includes("mode_loss_streak") || blockedRegimeReasonText.includes("highway_range_streak");
+    const riskEngineHardBlocked = input.risk?.crashState !== undefined && input.risk.crashState !== "NONE";
+    const riskEngineBlockedBySuspendOnly =
+      input.risk?.engineBlocked === true && blockedRegimeActive && blockedRegimeLossStreakSuspend;
+    const riskEngineBlocked = riskEngineHardBlocked || (input.risk?.engineBlocked === true && !riskEngineBlockedBySuspendOnly);
     const RANGE_SOFT_SUSPEND_SIZE_MULT = 0.35;
     const RANGE_SOFT_SUSPEND_COOLDOWN_MS = 45_000;
     const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
