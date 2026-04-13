@@ -1161,6 +1161,20 @@ export class PaperEngine {
     }
     try {
       const risk = this.lastRisk!;
+      const regimeBlocked = (risk.blockedRegimes?.[regimeDetected.regime]?.until ?? 0) > nowTick;
+      const statusRelaxBypass = regimeDetected.regime === "RANGE" &&
+        this.config.paperEngineMode === "PAPER_TEST" &&
+        [...decisionBySymbol.values()].some((v) =>
+          v.decision.range_risk_limit_relax_active === true &&
+          (v.decision.risk_cooldown_subreason === "blocked_regime_loss_streak_suspend" ||
+            v.decision.risk_cooldown_subreason === "blocked_regime_loss_streak_suspend_relaxed_validation_window" ||
+            v.decision.blocked_regime_reason?.includes("mode_loss_streak") === true ||
+            v.decision.blocked_regime_reason?.includes("highway_range_streak") === true)
+        );
+      const statusBlockedReasonOriginal = regimeBlocked
+        ? (risk.blockedRegimes?.[regimeDetected.regime]?.reason ?? "mode_suspended")
+        : null;
+      const statusBlockedReasonFinal = statusRelaxBypass ? null : statusBlockedReasonOriginal;
       await this.store.writeJson("reports/engine-state.json", {
         generatedAt: nowTick,
         market_mode_selector: this.lastMarketMode,
@@ -1182,14 +1196,17 @@ export class PaperEngine {
         entryAllowed:
           regimeDetected.regime !== "NO_TRADE" &&
           risk.engineBlocked !== true &&
-          !((risk.blockedRegimes?.[regimeDetected.regime]?.until ?? 0) > nowTick),
+          !(regimeBlocked && !statusRelaxBypass),
         blockedReasons: [
           ...(regimeDetected.regime === "NO_TRADE" ? ["no_trade_regime"] : []),
           ...(risk.engineBlockReasons ?? []),
-          ...(((risk.blockedRegimes?.[regimeDetected.regime]?.until ?? 0) > nowTick)
-            ? [risk.blockedRegimes?.[regimeDetected.regime]?.reason ?? "mode_suspended"]
+          ...((regimeBlocked && !statusRelaxBypass)
+            ? [statusBlockedReasonOriginal ?? "mode_suspended"]
             : [])
         ],
+        range_risk_limit_relax_applied_to_status_summary: statusRelaxBypass,
+        range_risk_limit_relax_status_original_reason: statusBlockedReasonOriginal,
+        range_risk_limit_relax_status_final_label: statusBlockedReasonFinal,
         blocked_reason:
           regimeDetected.regime === "NO_TRADE"
             ? (regimeDetected.detail.reason ?? "no_trade")
