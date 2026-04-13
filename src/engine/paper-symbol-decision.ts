@@ -16,6 +16,10 @@ import { stopLossPctForRegime } from "../strategy/regime-exit";
 import type { RiskControlDecision } from "./risk-control-layer";
 import type { FuturesMarketMode } from "../strategy/live-market-mode";
 import { runFuturesAdaptiveEntry, type FuturesAdaptiveEntryResult } from "../strategy/live-entry-pipeline";
+import {
+  STRONG_SCORE,
+  TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_STRONG_RELAX
+} from "../strategy/live-entry-policy";
 import { rangeExecutorEvaluateEntry } from "../strategy/executors/range-executor";
 import { highwayExecutorEvaluateEntry } from "./highway-entry-executor";
 import type { AnyEntryDecision } from "../strategy/executors/types";
@@ -2635,6 +2639,26 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       executorBlockReasonOriginal !== "range_not_lower_edge" &&
       (stage1RangeExplorePath || naturalRangeStage1EntryAllowed);
 
+    const highwayDet = executorDecision?.detail as Record<string, unknown> | undefined;
+    const highwayAiRaw = highwayDet?.aiScoreRaw as Record<string, unknown> | undefined;
+    const highwayStateOk = highwayDet?.state === HighwayTrendState.VALID;
+    const highwayCoreFinalOk =
+      !highwayAiRaw ||
+      (highwayAiRaw.coreState === HighwayTrendState.VALID && highwayAiRaw.finalState === HighwayTrendState.VALID);
+    const trendVolumeRatioMinOverride =
+      input.adaptiveMode === "trend" &&
+      input.currentStage === 0 &&
+      highwayStateOk &&
+      highwayCoreFinalOk &&
+      highwayDet?.scoreSource === "trend_core_default" &&
+      sn!.candidateStrength === "strong" &&
+      sn!.qualityScore >= STRONG_SCORE
+        ? TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_STRONG_RELAX
+        : null;
+    if (trendVolumeRatioMinOverride !== null) {
+      supplemental_reasons.push("ADAPTIVE_TREND_VOLUME_MIN_RELAXED_HIGHWAY_STRONG");
+    }
+
     const adaptive = runFuturesAdaptiveEntry({
       mode: input.adaptiveMode,
       modeDetail: input.adaptiveDetail,
@@ -2651,7 +2675,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         volumeRatioProxy: sn!.volumeRatioProxy
       },
       baseSizeUsd: DEFAULT_PAPER_SIZE_USD * dynamicSizeMult,
-      stage1RangeAdaptiveSoftExplore
+      stage1RangeAdaptiveSoftExplore,
+      trendVolumeRatioMinOverride
     });
     adaptiveDetailOut = adaptive.detail ?? null;
 
@@ -2676,6 +2701,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       }
 
       if (!stage1DirectionOverrideApplied) {
+        const af = adaptive as Extract<FuturesAdaptiveEntryResult, { ok: false }>;
         return ret(
           {
             reject_reason: "ORDER_BUILD_FAIL",
@@ -2683,12 +2709,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             execution_state: "ORDER_BUILD_FAIL",
             ai_decision: "APPROVE",
             adaptive_decision: "REJECT",
-            guidance: `Adaptive entry failed: ${(adaptive as any).orderBuildFailReason}`,
+            guidance: `Adaptive entry failed: ${af.orderBuildFailReason}`,
             target_stage: null,
             supplemental_reasons,
             stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
             required_move_pct,
-            shortfall_pct
+            shortfall_pct,
+            order_build_ok: false,
+            order_build_fail_reason: af.orderBuildFailReason,
+            order_build_fail_stage: af.failStage
           },
           {
             intentSide,
@@ -2696,7 +2725,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             adaptiveOk: false,
             adaptiveDirection: null,
             adaptiveDetail: adaptiveDetailOut,
-            adaptiveResult: adaptive as any,
+            adaptiveResult: null,
+            adaptiveFailure: af,
             aiGatePassed: true
           }
         );

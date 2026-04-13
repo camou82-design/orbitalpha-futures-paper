@@ -410,6 +410,11 @@ function orderBuildFailureStructuredPayload(
   const d = res.decision;
   const ex = res.executorDecision;
   const af = res.adaptiveFailure;
+  const adaptiveMergedDetail = (res.adaptiveDetail ?? af?.detail ?? null) as Record<string, unknown> | null;
+  const entryPolicyProof =
+    adaptiveMergedDetail && typeof adaptiveMergedDetail.entry_policy_proof === "object"
+      ? adaptiveMergedDetail.entry_policy_proof
+      : null;
   const side =
     res.intentSide ??
     (first.signal === "paper_long_candidate" ? "long" : first.signal === "paper_short_candidate" ? "short" : null);
@@ -441,7 +446,8 @@ function orderBuildFailureStructuredPayload(
     min_qty: d.min_qty ?? null,
     min_notional: d.min_notional ?? null,
     order_build_fail_stage: d.order_build_fail_stage ?? af?.failStage ?? null,
-    adaptive_detail: res.adaptiveDetail ?? af?.detail ?? null
+    adaptive_detail: adaptiveMergedDetail,
+    entry_policy_proof: entryPolicyProof
   };
 }
 
@@ -2945,6 +2951,9 @@ export class PaperEngine {
         this.logger.info("STAGE1_ENTER_DECIDED", ob);
         this.logger.info("STAGE1_POSITION_OPEN_ATTEMPT", ob);
         this.logger.info("ORDER_BUILD_FAIL", ob);
+        if (ob.order_build_fail_reason === "policy_trend_volume_too_thin") {
+          this.logger.warn("ADAPTIVE_ENTRY_POLICY_TREND_VOLUME_PROOF", ob);
+        }
       }
 
       if (res.decision.final_decision !== "ENTER" || !res.adaptiveResult) {

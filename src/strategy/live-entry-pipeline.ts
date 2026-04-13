@@ -57,6 +57,8 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
    * `policy_sideways_ema_too_flat` 을 소액 탐색 진입으로 완화(Stage2/3에는 전달 금지).
    */
   stage1RangeAdaptiveSoftExplore?: boolean;
+  /** TREND: `evaluateEntryPolicy` 볼륨 하한 덮어쓰기 (Highway strong 완화 등). */
+  trendVolumeRatioMinOverride?: number | null;
 }>): FuturesAdaptiveEntryResult {
   const direction: PositionDirection = decidePositionDirection({
     mode: input.mode,
@@ -83,7 +85,8 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
   let policy = evaluateEntryPolicy({
     ...policyBase,
     direction,
-    sidewaysStage1SoftSkipEmaRelSep: false
+    sidewaysStage1SoftSkipEmaRelSep: false,
+    trendVolumeRatioMinOverride: input.trendVolumeRatioMinOverride ?? null
   });
 
   let stage1AdaptiveSoftExplore: "direction_none" | "ema_flat" | null = null;
@@ -105,7 +108,8 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
         policy = evaluateEntryPolicy({
           ...policyBase,
           direction: fd,
-          sidewaysStage1SoftSkipEmaRelSep: true
+          sidewaysStage1SoftSkipEmaRelSep: true,
+          trendVolumeRatioMinOverride: input.trendVolumeRatioMinOverride ?? null
         });
         if (policy.ok) {
           stage1AdaptiveSoftExplore = "direction_none";
@@ -115,7 +119,8 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
       policy = evaluateEntryPolicy({
         ...policyBase,
         direction,
-        sidewaysStage1SoftSkipEmaRelSep: true
+        sidewaysStage1SoftSkipEmaRelSep: true,
+        trendVolumeRatioMinOverride: input.trendVolumeRatioMinOverride ?? null
       });
       if (policy.ok) {
         stage1AdaptiveSoftExplore = "ema_flat";

@@ -8,7 +8,15 @@ export type PositionDirection = "long" | "short" | "none";
 export const ENTRY_MIN_SCORE = 35;
 /** 횡보 모드에서 weak 후보는 더 높은 점수 요구. */
 const SIDEWAYS_WEAK_MIN_SCORE = 72;
-const STRONG_SCORE = 72;
+/** TREND BTC 역풍 완화·하이웨이 strong 연동 등과 동일 하한(72). */
+export const STRONG_SCORE = 72;
+/** TREND 모드 `evaluateEntryPolicy`: 최소 거래량 비율(스냅샷 `volumeRatioProxy`). trend-executor minVol(1.02)과 정렬. */
+export const TREND_POLICY_MIN_VOLUME_RATIO_PROXY = 1.02;
+/**
+ * Stage1 TREND: 하이웨이 코어 VALID + strong 후보 완화 시 하한(여전히 neutral 이상).
+ * `paper-symbol-decision`에서만 override로 전달.
+ */
+export const TREND_POLICY_MIN_VOLUME_RATIO_PROXY_HIGHWAY_STRONG_RELAX = 1.0;
 /** 횡보에서 EMA 분리가 너무 작으면 애매한 구간으로 진입 차단 (|ema20-ema60|/ema60). */
 const SIDEWAYS_MIN_EMA_REL_SEP = 0.0035;
 
@@ -96,6 +104,11 @@ export function evaluateEntryPolicy(input: Readonly<{
   volumeRatioProxy: number;
   /** RANGE Stage1 소액 탐색 전용: sideways EMA 이격(`ema_rel_sep`) 하한만 통과 */
   sidewaysStage1SoftSkipEmaRelSep?: boolean;
+  /**
+   * TREND 볼륨 하한 덮어쓰기(기본 `TREND_POLICY_MIN_VOLUME_RATIO_PROXY`).
+   * Highway VALID + trend_core_default + strong 후보 등에서만 낮춤.
+   */
+  trendVolumeRatioMinOverride?: number | null;
 }>): EntryPolicyResult {
   if (input.direction === "none") {
     return {
@@ -165,11 +178,43 @@ export function evaluateEntryPolicy(input: Readonly<{
         detail: { sub: "ema_short_not_aligned", order_build_fail_reason: "policy_trend_short_ema_not_aligned" }
       };
     }
-    if (input.volumeRatioProxy < 1.02) {
+    const trendVolMin =
+      typeof input.trendVolumeRatioMinOverride === "number" &&
+      Number.isFinite(input.trendVolumeRatioMinOverride) &&
+      input.trendVolumeRatioMinOverride > 0
+        ? input.trendVolumeRatioMinOverride
+        : TREND_POLICY_MIN_VOLUME_RATIO_PROXY;
+    if (input.volumeRatioProxy < trendVolMin) {
       return {
         ok: false,
         blockMessage: "blocked_no_structure",
-        detail: { sub: "volume_too_thin", order_build_fail_reason: "policy_trend_volume_too_thin" }
+        detail: {
+          sub: "volume_too_thin",
+          order_build_fail_reason: "policy_trend_volume_too_thin",
+          entry_policy_proof: {
+            proof_version: 1,
+            policy_id: "trend_volume_ratio_gate",
+            branch: "after_trend_ema_alignment_passes",
+            min_volume_ratio_proxy: trendVolMin,
+            default_min_volume_ratio_proxy: TREND_POLICY_MIN_VOLUME_RATIO_PROXY,
+            volume_ratio_proxy_actual: input.volumeRatioProxy,
+            shortfall_ratio: trendVolMin - input.volumeRatioProxy,
+            trend_volume_min_override_applied: trendVolMin !== TREND_POLICY_MIN_VOLUME_RATIO_PROXY,
+            pipeline_order_in_runFuturesAdaptiveEntry: [
+              "1_decidePositionDirection (qualityScore as signal strength, BTC bias, candidateStrength — not Highway volume_support_score)",
+              "2_evaluateEntryPolicy: ENTRY_MIN_SCORE, EMA present, trend EMA align long/short, then volumeRatioProxy vs min",
+              "3_buildTradeConfidenceScore (uses volumeRatioProxy again)",
+              "4_calculateAdaptivePositionSize (may block on low confidence — separate failStage)"
+            ],
+            not_in_this_stage: {
+              required_move_pct: "EDGE/cost gates in paper-symbol-decision before adaptive",
+              shortfall_pct: "same upstream edge pipeline",
+              same_dir_cooldown: "risk/reentry in paper-symbol-decision before executor/adaptive",
+              volume_support_score:
+                "Highway `evaluateAiHighwayQuality`; adaptive entry uses `snap.volumeRatioProxy` (1m candle-derived proxy, different formula)"
+            }
+          }
+        }
       };
     }
     return {
@@ -177,7 +222,9 @@ export function evaluateEntryPolicy(input: Readonly<{
       detail: {
         pullback_ok: input.direction === "long" ? pullbackLong : pullbackShort,
         rebreak_ok: true,
-        ema_aligned: true
+        ema_aligned: true,
+        trend_volume_ratio_ok: input.volumeRatioProxy,
+        trend_volume_min_used: trendVolMin
       }
     };
   }
