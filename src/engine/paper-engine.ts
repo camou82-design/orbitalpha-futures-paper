@@ -1019,6 +1019,8 @@ export class PaperEngine {
           cooldown_remaining_ms: d.cooldown_remaining_ms ?? null,
           same_dir_cooldown_applied: d.same_dir_cooldown_applied ?? false,
           blocked_regime_reason: d.blocked_regime_reason ?? null,
+          reentry_wait_ms: d.reentry_wait_ms ?? null,
+          reentry_elapsed_ms: d.reentry_elapsed_ms ?? null,
           guidance: d.guidance,
           required_move_pct: d.required_move_pct,
           shortfall_pct: d.shortfall_pct,

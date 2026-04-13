@@ -337,6 +337,10 @@ export type PaperSymbolDecisionRecord = Readonly<{
   same_dir_cooldown_applied?: boolean;
   /** blockedRegimes에서 내려온 원본 사유 */
   blocked_regime_reason?: string | null;
+  /** 재진입 대기 기준값(ms) */
+  reentry_wait_ms?: number | null;
+  /** 마지막 청산 후 경과(ms) */
+  reentry_elapsed_ms?: number | null;
   /** 레거시 차단 원인 (executor blocked_reason 원본) */
   legacy_block_reason?: string | null;
   /** 레거시 레짐 게이트 분류값 */

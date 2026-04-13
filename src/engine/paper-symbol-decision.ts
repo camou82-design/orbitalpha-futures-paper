@@ -337,6 +337,8 @@ function pack(
     cooldown_remaining_ms?: number | null;
     same_dir_cooldown_applied?: boolean;
     blocked_regime_reason?: string | null;
+    reentry_wait_ms?: number | null;
+    reentry_elapsed_ms?: number | null;
     legacy_block_reason?: string | null;
     legacy_regime_gate?: string | null;
     legacy_gate_source?: string | null;
@@ -434,6 +436,8 @@ function pack(
     cooldown_remaining_ms: fields.cooldown_remaining_ms ?? null,
     same_dir_cooldown_applied: fields.same_dir_cooldown_applied ?? false,
     blocked_regime_reason: fields.blocked_regime_reason ?? null,
+    reentry_wait_ms: fields.reentry_wait_ms ?? null,
+    reentry_elapsed_ms: fields.reentry_elapsed_ms ?? null,
     legacy_block_reason: fields.legacy_block_reason ?? null,
     legacy_regime_gate: fields.legacy_regime_gate ?? null,
     legacy_gate_source: fields.legacy_gate_source ?? null,
@@ -574,6 +578,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let cooldown_remaining_ms: number | null = null;
   let same_dir_cooldown_applied = false;
   let blocked_regime_reason: string | null = null;
+  let reentry_wait_ms: number | null = null;
+  let reentry_elapsed_ms: number | null = null;
   let legacy_block_reason: string | null = null;
   let legacy_regime_gate: string | null = null;
   let legacy_gate_source: string | null = null;
@@ -663,6 +669,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       cooldown_remaining_ms?: number | null;
       same_dir_cooldown_applied?: boolean;
       blocked_regime_reason?: string | null;
+      reentry_wait_ms?: number | null;
+      reentry_elapsed_ms?: number | null;
       legacy_block_reason?: string | null;
       legacy_regime_gate?: string | null;
       legacy_gate_source?: string | null;
@@ -787,6 +795,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       cooldown_remaining_ms: extra.cooldown_remaining_ms ?? cooldown_remaining_ms,
       same_dir_cooldown_applied: extra.same_dir_cooldown_applied ?? same_dir_cooldown_applied,
       blocked_regime_reason: extra.blocked_regime_reason ?? blocked_regime_reason,
+      reentry_wait_ms: extra.reentry_wait_ms ?? reentry_wait_ms,
+      reentry_elapsed_ms: extra.reentry_elapsed_ms ?? reentry_elapsed_ms,
       legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
       legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
       legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
@@ -1315,6 +1325,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     supplemental_reasons.push("RISK_MAX_DRAWDOWN");
   }
 
+  const rangeStage0SignalActive =
+    input.currentStage === 0 &&
+    input.regime === "RANGE" &&
+    (signal_state === "LONG_CANDIDATE" || signal_state === "SHORT_CANDIDATE");
+
   const rBlock = input.risk?.blockedRegimes?.[input.regime];
   if (rBlock && rBlock.until > input.now) {
     const remainingMs = rBlock.until - input.now;
@@ -1340,7 +1355,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       supplemental_reasons.push(`RISK_COOLDOWN_REASON_${String(rBlock.reason).toUpperCase()}`);
     } else {
       risk_state = "COOLDOWN";
-      risk_cooldown_subreason = "blocked_regime_active";
+      risk_cooldown_subreason =
+        rangeStage0SignalActive && streakSuspend
+          ? "blocked_regime_loss_streak_suspend"
+          : "blocked_regime_until_active";
       if (!reject_reason) reject_reason = "RISK_COOLDOWN";
       final_decision = "REJECT";
       supplemental_reasons.push("RISK_COOLDOWN");
@@ -1416,9 +1434,17 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reentry_cooldown_effective_ms = waitMs;
     }
 
+    if (rangeStage0SignalActive && lastClose > 0) {
+      reentry_wait_ms = waitMs;
+      reentry_elapsed_ms = elapsed;
+    }
+
     if (lastClose > 0 && elapsed < waitMs) {
       risk_state = "COOLDOWN";
-      risk_cooldown_subreason = "reentry_wait_active";
+      risk_cooldown_subreason =
+        rangeStage0SignalActive && sameDirection
+          ? "reentry_same_direction_wait_active"
+          : "reentry_wait_active";
       cooldown_remaining_ms = waitMs - elapsed;
       if (!reject_reason) reject_reason = "RISK_FAIL_REENTRY";
       final_decision = "REJECT";
