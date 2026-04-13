@@ -26,6 +26,9 @@ export function evaluateAiHighwayQuality(candles: Candle[], symbol: MarketSymbol
     deferEntry: boolean;
     invalidTier: "hard_invalid" | "soft_invalid" | "warning";
     invalidReasons: string[];
+    scoreSource: "range_stage0_context" | "trend_core_default";
+    rangeStage0ScoringApplied: boolean;
+    aiScoreRaw: Record<string, unknown>;
 } {
     const core = detectHighwayTrend(candles, symbol);
     const rangeStage0 = context?.regime === "RANGE" && (context?.currentStage ?? 0) === 0;
@@ -110,6 +113,26 @@ export function evaluateAiHighwayQuality(candles: Candle[], symbol: MarketSymbol
         state,
         deferEntry,
         invalidTier,
-        invalidReasons
+        invalidReasons,
+        scoreSource: rangeStage0 ? "range_stage0_context" : "trend_core_default",
+        rangeStage0ScoringApplied: rangeStage0,
+        aiScoreRaw: {
+            symbol,
+            rangeStage0,
+            context: context ?? null,
+            coreState: core.state,
+            coreAlignment: core.alignmentScore,
+            coreSpacing: core.spacingScore,
+            coreVolumeSupport: core.volumeSupportScore,
+            finalState: state,
+            finalScores: {
+                highwayValidityScore,
+                alignmentQualityScore,
+                emaSpacingHealthScore,
+                pullbackQualityScore,
+                volumeSupportScore,
+                entryRiskScore
+            }
+        }
     };
 }

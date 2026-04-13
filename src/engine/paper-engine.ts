@@ -946,6 +946,9 @@ export class PaperEngine {
           volume_support_score: exDetail?.volumeSupportScore,
           trend_exhaustion_score: exDetail?.trendExhaustionScore,
           entry_risk_score: exDetail?.entryRiskScore,
+          score_source: exDetail?.scoreSource ?? "missing",
+          range_stage0_scoring_applied: exDetail?.rangeStage0ScoringApplied ?? false,
+          ai_score_raw: exDetail?.aiScoreRaw ?? null,
 
           // --- EXECUTION DETAILS ---
           stage1_result_code: d.stage1_result_code,
