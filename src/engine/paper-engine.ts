@@ -1005,8 +1005,10 @@ export class PaperEngine {
           range_stage0_engine_taken: d.range_stage0_engine_taken ?? false,
           range_stage0_exit_reason: d.range_stage0_exit_reason ?? null,
           legacy_executor_path_taken: d.legacy_executor_path_taken ?? false,
-          range_long_only_short_deferred_applied: d.range_long_only_short_deferred_applied ?? false,
-          range_long_only_short_deferred_bypassed: d.range_long_only_short_deferred_bypassed ?? false,
+          range_long_only_short_deferred_applied:
+            d.range_bidirectional_applied ? false : (d.range_long_only_short_deferred_applied ?? false),
+          range_long_only_short_deferred_bypassed:
+            d.range_bidirectional_applied ? false : (d.range_long_only_short_deferred_bypassed ?? false),
           range_cost_warning_applied: d.range_cost_warning_applied ?? false,
           range_cost_warning_threshold: d.range_cost_warning_threshold ?? null,
           range_cost_warning_shortfall: d.range_cost_warning_shortfall ?? null,

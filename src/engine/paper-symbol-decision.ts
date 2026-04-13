@@ -2335,8 +2335,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       ) {
         range_bidirectional_applied = true;
         if (range_short_allowed) {
-          range_long_only_short_deferred_bypassed = true;
           supplemental_reasons.push("RANGE_SHORT_ALLOWED_BIDIRECTIONAL");
+          range_long_only_short_deferred_applied = false;
+          range_long_only_short_deferred_bypassed = false;
         } else {
           range_long_only_short_deferred_applied = true;
           return ret(
