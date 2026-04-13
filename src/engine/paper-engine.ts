@@ -869,6 +869,17 @@ export class PaperEngine {
         marketModeOut.routing.activeEngine
       );
       if (!snap) {
+        this.logHighwayCandlePipelineProof("evaluate_paper_symbol_entry_input", {
+          trace_fetched_at_ms: fetchedAt,
+          symbol: String(sym),
+          poll_ok_snapshot_present: false,
+          source_snapshot_candles_length: null,
+          decision_input_candles_length: null,
+          decision_input_has_candles_key: false,
+          passthrough_length_match: null,
+          classify:
+            "no_symbol_snapshot_tick_poll_failed_or_symbol_missing_from_snapshots_array_evaluator_gets_null"
+        });
         const res = evaluatePaperSymbolEntry({
           config: this.config,
           snapshot: null,
@@ -1020,38 +1031,75 @@ export class PaperEngine {
         marketModeOut.routing.activeEngine
       );
 
+      const paperEntrySnapshot = {
+        symbol: snap.symbol,
+        lastPrice: snap.lastPrice,
+        latestCandleClose: snap.latestCandleClose,
+        signal: snap.signal,
+        gateExpectedMove: snap.gateExpectedMove,
+        gateRequiredMove: snap.gateRequiredMove,
+        qualityScore: snap.qualityScore,
+        candidateStrength: snap.candidateStrength,
+        boxPos: snap.boxPos,
+        boxRel: snap.boxRel,
+        ema20: snap.ema20,
+        ema60: snap.ema60,
+        emaGap: snap.emaGap,
+        volumeRatioProxy: snap.volumeRatioProxy,
+        boxHigh: snap.boxHigh,
+        boxLow: snap.boxLow,
+        atr: snap.atr,
+        rangeConfidence: snap.rangeConfidence,
+        boxCohesion01: snap.boxCohesion01,
+        breakoutFailureRate: snap.breakoutFailureRate,
+        rangeOscillationScore: snap.rangeOscillationScore,
+        trendWeaknessScore: snap.trendWeaknessScore,
+        rangeReasonLabel: snap.rangeReasonLabel,
+        rangeCycleCount: snap.rangeCycleCount,
+        rangeLadderLevel: snap.rangeLadderLevel,
+        regimeExitRisk: snap.regimeExitRisk,
+        boxBreakSide: snap.boxBreakSide,
+        regimeStateDiag: snap.regimeStateDiag,
+        candles: snap.candles,
+        recentCandlesCount: snap.recentCandlesCount,
+        highwayKlineLimitRequested: snap.highwayKlineLimitRequested,
+        highwayEntryTf: snap.highwayEntryTf,
+        signalMissingReason: snap.signalMissingReason
+      };
+
+      const srcLen = snap.candles?.length ?? 0;
+      const inLen = paperEntrySnapshot.candles?.length ?? 0;
+      this.logHighwayCandlePipelineProof("evaluate_paper_symbol_entry_input", {
+        trace_fetched_at_ms: fetchedAt,
+        symbol: String(sym),
+        poll_ok_snapshot_present: true,
+        source_snapshot_candles_length: srcLen,
+        decision_input_candles_length: inLen,
+        decision_input_has_candles_key: "candles" in paperEntrySnapshot && paperEntrySnapshot.candles !== undefined,
+        source_recent_candles_count: snap.recentCandlesCount,
+        passthrough_length_match: srcLen === inLen,
+        classify:
+          srcLen === 0 && (snap.recentCandlesCount ?? 0) > 0
+            ? "anomaly_snapshot_count_positive_but_candles_missing"
+            : inLen === 0 && srcLen > 0
+              ? "anomaly_decision_payload_dropped_candles_fix_required"
+              : inLen === 0 && srcLen === 0
+                ? (snap.recentCandlesCount ?? 0) === 0
+                  ? "both_zero_true_fetch_or_poll_issue"
+                  : "zero_candles_array_despite_positive_recent_count"
+                : "passthrough_ok"
+      });
+      if (inLen === 0 && srcLen > 0) {
+        this.logger.warn("HIGHWAY_CANDLE_PIPELINE_ANOMALY", {
+          symbol: String(sym),
+          trace_fetched_at_ms: fetchedAt,
+          detail: "decision_input_would_drop_candles"
+        });
+      }
+
       const res = evaluatePaperSymbolEntry({
         config: this.config,
-        snapshot: {
-          symbol: snap.symbol,
-          lastPrice: snap.lastPrice,
-          latestCandleClose: snap.latestCandleClose,
-          signal: snap.signal,
-          gateExpectedMove: snap.gateExpectedMove,
-          gateRequiredMove: snap.gateRequiredMove,
-          qualityScore: snap.qualityScore,
-          candidateStrength: snap.candidateStrength,
-          boxPos: snap.boxPos,
-          boxRel: snap.boxRel,
-          ema20: snap.ema20,
-          ema60: snap.ema60,
-          emaGap: snap.emaGap,
-          volumeRatioProxy: snap.volumeRatioProxy,
-          boxHigh: snap.boxHigh,
-          boxLow: snap.boxLow,
-          atr: snap.atr,
-          rangeConfidence: snap.rangeConfidence,
-          boxCohesion01: snap.boxCohesion01,
-          breakoutFailureRate: snap.breakoutFailureRate,
-          rangeOscillationScore: snap.rangeOscillationScore,
-          trendWeaknessScore: snap.trendWeaknessScore,
-          rangeReasonLabel: snap.rangeReasonLabel,
-          rangeCycleCount: snap.rangeCycleCount,
-          rangeLadderLevel: snap.rangeLadderLevel,
-          regimeExitRisk: snap.regimeExitRisk,
-          boxBreakSide: snap.boxBreakSide,
-          regimeStateDiag: snap.regimeStateDiag
-        },
+        snapshot: paperEntrySnapshot,
         dataReady: true,
         regime: regimeDetected.regime,
         regimeDetail: regimeDetected.detail,
@@ -1777,6 +1825,14 @@ export class PaperEngine {
       return { preferredSide: "long", reason: "lower_flatten_to_long_pending" };
     }
     return undefined;
+  }
+
+  /**
+   * 1m kline: Bybit 응답 → 스냅샷 객체 → evaluatePaperSymbolEntry 입력까지 캔들 배열 길이 추적.
+   * fetch 빈값 / 스냅샷 누락 / 평가 직전 누락(과거 버그) 구분용.
+   */
+  private logHighwayCandlePipelineProof(stage: string, payload: Record<string, unknown>): void {
+    this.logger.info("HIGHWAY_CANDLE_PIPELINE_PROOF", { pipeline_stage: stage, ...payload });
   }
 
   /** HIGHWAY_CORE Stage1 과경직: alignment/spacing/volume 붕괴 원인을 executor 단에서 최상위로 남김. */
@@ -3520,6 +3576,21 @@ export class PaperEngine {
       return { ok: false, error: `Invalid fundingRate for ${symbol}`, symbolDiagnostics, failedEndpoint: "funding" };
     }
 
+    const bybitKlineLen = rC.value.length;
+    this.logHighwayCandlePipelineProof("bybit_kline_ok", {
+      trace_fetched_at_ms: fetchedAt,
+      symbol: String(symbol),
+      bybit_kline_array_length: bybitKlineLen,
+      kline_limit_requested: klineLimit,
+      interval: "1m",
+      classify:
+        bybitKlineLen === 0
+          ? "bybit_returned_empty_array"
+          : bybitKlineLen < klineLimit
+            ? "bybit_fewer_than_requested"
+            : "bybit_length_matches_or_exceeds_request"
+    });
+
     const closes = rC.value.map((c) => c.close);
     const atr = atrWilderLast(rC.value, 14);
     const trend = trendFilterOneMinuteCloses(closes);
@@ -3744,6 +3815,20 @@ export class PaperEngine {
       highwayKlineLimitRequested: klineLimit,
       highwayEntryTf: "1m"
     };
+
+    this.logHighwayCandlePipelineProof("snapshot_before_return", {
+      trace_fetched_at_ms: fetchedAt,
+      symbol: String(symbol),
+      snapshot_candles_array_length: snapshot.candles?.length ?? 0,
+      snapshot_recent_candles_count: snapshot.recentCandlesCount,
+      candles_same_reference_as_bybit_response: snapshot.candles === rC.value,
+      classify:
+        (snapshot.candles?.length ?? 0) === 0
+          ? "snapshot_candles_empty_after_poll_ok"
+          : (snapshot.candles?.length ?? 0) !== snapshot.recentCandlesCount
+            ? "snapshot_len_mismatch_candles_vs_recent_count"
+            : "snapshot_candles_consistent"
+    });
 
     /** ENTRY_LINE은 runTick 루프에서 의사결정 결과(Intent 등)와 합쳐서 로깅하기 위해 여기서는 생략 */
     this.logger.info("symbol_snapshot", snapshot);
