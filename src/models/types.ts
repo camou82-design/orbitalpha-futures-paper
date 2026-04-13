@@ -393,6 +393,18 @@ export type PaperSymbolDecisionRecord = Readonly<{
   range_same_direction_reentry_center_blocked?: boolean;
   /** RANGE 동일방향 재진입 최종 허용 여부 */
   range_same_direction_reentry_final_allowed?: boolean;
+  /** RANGE 리스크 제한 한시 완화 적용 여부 */
+  range_risk_limit_temporarily_relaxed?: boolean;
+  /** RANGE 리스크 제한 한시 완화 사유 */
+  range_risk_limit_relax_reason?: string | null;
+  /** RANGE 리스크 제한 한시 완화 시작 시각(epoch ms) */
+  range_risk_limit_relax_started_at?: number | null;
+  /** RANGE 리스크 제한 한시 완화 만료 시각(epoch ms) */
+  range_risk_limit_relax_expires_at?: number | null;
+  /** RANGE 리스크 제한 한시 완화 활성 여부 */
+  range_risk_limit_relax_active?: boolean;
+  /** RANGE 리스크 제한 한시 완화 만료 여부 */
+  range_risk_limit_relax_expired?: boolean;
   /** RANGE stage0 loss streak suspend 소프트 완화 적용 여부 */
   range_soft_suspend_applied?: boolean;
   /** RANGE stage0 loss streak suspend 시 축소 진입 배수 */

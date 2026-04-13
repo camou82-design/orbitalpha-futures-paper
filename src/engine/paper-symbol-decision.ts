@@ -29,6 +29,10 @@ import { PIPELINE_VERSION } from "./decision-funnel";
 /** RANGE·Stage0·RISK_FAIL_REENTRY: 부분익절/TP 계열 청산 후 동일 심볼 재진입 대기만 완화(손절·증액 단계 제외). */
 const RANGE_STAGE0_REENTRY_RELAX_MULT = 0.35;
 const RANGE_STAGE0_REENTRY_RELAX_MIN_MS = 25_000;
+const RANGE_RISK_LIMIT_RELAX_WINDOW_MS = 3 * 60 * 60 * 1000;
+const RANGE_RISK_LIMIT_RELAX_STARTED_AT = Date.now();
+const RANGE_RISK_LIMIT_RELAX_EXPIRES_AT = RANGE_RISK_LIMIT_RELAX_STARTED_AT + RANGE_RISK_LIMIT_RELAX_WINDOW_MS;
+const RANGE_RISK_LIMIT_RELAX_REASON = "paper_exit_validation_3h";
 
 function isRangeStage0ReentryRelaxCloseReason(cr: unknown): boolean {
   if (cr == null || cr === "stop_loss") return false;
@@ -364,6 +368,12 @@ function pack(
     range_same_direction_reentry_edge_ok?: boolean;
     range_same_direction_reentry_center_blocked?: boolean;
     range_same_direction_reentry_final_allowed?: boolean;
+    range_risk_limit_temporarily_relaxed?: boolean;
+    range_risk_limit_relax_reason?: string | null;
+    range_risk_limit_relax_started_at?: number | null;
+    range_risk_limit_relax_expires_at?: number | null;
+    range_risk_limit_relax_active?: boolean;
+    range_risk_limit_relax_expired?: boolean;
     range_soft_suspend_applied?: boolean;
     range_soft_suspend_size_mult?: number | null;
     range_soft_suspend_cooldown_ms?: number | null;
@@ -498,6 +508,12 @@ function pack(
     range_same_direction_reentry_edge_ok: fields.range_same_direction_reentry_edge_ok ?? false,
     range_same_direction_reentry_center_blocked: fields.range_same_direction_reentry_center_blocked ?? false,
     range_same_direction_reentry_final_allowed: fields.range_same_direction_reentry_final_allowed ?? false,
+    range_risk_limit_temporarily_relaxed: fields.range_risk_limit_temporarily_relaxed ?? false,
+    range_risk_limit_relax_reason: fields.range_risk_limit_relax_reason ?? null,
+    range_risk_limit_relax_started_at: fields.range_risk_limit_relax_started_at ?? null,
+    range_risk_limit_relax_expires_at: fields.range_risk_limit_relax_expires_at ?? null,
+    range_risk_limit_relax_active: fields.range_risk_limit_relax_active ?? false,
+    range_risk_limit_relax_expired: fields.range_risk_limit_relax_expired ?? false,
     range_soft_suspend_applied: fields.range_soft_suspend_applied ?? false,
     range_soft_suspend_size_mult: fields.range_soft_suspend_size_mult ?? null,
     range_soft_suspend_cooldown_ms: fields.range_soft_suspend_cooldown_ms ?? null,
@@ -671,6 +687,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_same_direction_reentry_edge_ok = false;
   let range_same_direction_reentry_center_blocked = false;
   let range_same_direction_reentry_final_allowed = false;
+  let range_risk_limit_temporarily_relaxed = false;
+  let range_risk_limit_relax_reason: string | null = null;
+  let range_risk_limit_relax_started_at: number | null = null;
+  let range_risk_limit_relax_expires_at: number | null = null;
+  let range_risk_limit_relax_active = false;
+  let range_risk_limit_relax_expired = false;
   let range_soft_suspend_applied = false;
   let range_soft_suspend_size_mult: number | null = null;
   let range_soft_suspend_cooldown_ms: number | null = null;
@@ -800,6 +822,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_same_direction_reentry_edge_ok?: boolean;
       range_same_direction_reentry_center_blocked?: boolean;
       range_same_direction_reentry_final_allowed?: boolean;
+      range_risk_limit_temporarily_relaxed?: boolean;
+      range_risk_limit_relax_reason?: string | null;
+      range_risk_limit_relax_started_at?: number | null;
+      range_risk_limit_relax_expires_at?: number | null;
+      range_risk_limit_relax_active?: boolean;
+      range_risk_limit_relax_expired?: boolean;
       range_soft_suspend_applied?: boolean;
       range_soft_suspend_size_mult?: number | null;
       range_soft_suspend_cooldown_ms?: number | null;
@@ -973,6 +1001,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         extra.range_same_direction_reentry_center_blocked ?? range_same_direction_reentry_center_blocked,
       range_same_direction_reentry_final_allowed:
         extra.range_same_direction_reentry_final_allowed ?? range_same_direction_reentry_final_allowed,
+      range_risk_limit_temporarily_relaxed:
+        extra.range_risk_limit_temporarily_relaxed ?? range_risk_limit_temporarily_relaxed,
+      range_risk_limit_relax_reason: extra.range_risk_limit_relax_reason ?? range_risk_limit_relax_reason,
+      range_risk_limit_relax_started_at:
+        extra.range_risk_limit_relax_started_at ?? range_risk_limit_relax_started_at,
+      range_risk_limit_relax_expires_at:
+        extra.range_risk_limit_relax_expires_at ?? range_risk_limit_relax_expires_at,
+      range_risk_limit_relax_active: extra.range_risk_limit_relax_active ?? range_risk_limit_relax_active,
+      range_risk_limit_relax_expired: extra.range_risk_limit_relax_expired ?? range_risk_limit_relax_expired,
       range_soft_suspend_applied: extra.range_soft_suspend_applied ?? range_soft_suspend_applied,
       range_soft_suspend_size_mult: extra.range_soft_suspend_size_mult ?? range_soft_suspend_size_mult,
       range_soft_suspend_cooldown_ms: extra.range_soft_suspend_cooldown_ms ?? range_soft_suspend_cooldown_ms,
@@ -1099,9 +1136,21 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const blockedRegimeReasonText = String(blockedRegime?.reason ?? "");
     const blockedRegimeLossStreakSuspend =
       blockedRegimeReasonText.includes("mode_loss_streak") || blockedRegimeReasonText.includes("highway_range_streak");
+    const rangeRiskRelaxEligible = input.regime === "RANGE" && blockedRegimeLossStreakSuspend;
+    range_risk_limit_temporarily_relaxed = rangeRiskRelaxEligible;
+    if (rangeRiskRelaxEligible) {
+      range_risk_limit_relax_reason = RANGE_RISK_LIMIT_RELAX_REASON;
+      range_risk_limit_relax_started_at = RANGE_RISK_LIMIT_RELAX_STARTED_AT;
+      range_risk_limit_relax_expires_at = RANGE_RISK_LIMIT_RELAX_EXPIRES_AT;
+      range_risk_limit_relax_active = input.now < RANGE_RISK_LIMIT_RELAX_EXPIRES_AT;
+      range_risk_limit_relax_expired = !range_risk_limit_relax_active;
+    }
     const riskEngineHardBlocked = input.risk?.crashState !== undefined && input.risk.crashState !== "NONE";
     const riskEngineBlockedBySuspendOnly =
-      input.risk?.engineBlocked === true && blockedRegimeActive && blockedRegimeLossStreakSuspend;
+      input.risk?.engineBlocked === true &&
+      blockedRegimeActive &&
+      blockedRegimeLossStreakSuspend &&
+      range_risk_limit_relax_active;
     const riskEngineBlocked = riskEngineHardBlocked || (input.risk?.engineBlocked === true && !riskEngineBlockedBySuspendOnly);
     const RANGE_SOFT_SUSPEND_SIZE_MULT = 0.35;
     const RANGE_SOFT_SUSPEND_COOLDOWN_MS = 45_000;
@@ -1188,7 +1237,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     if (rangeSignal.signal === "RANGE_SIGNAL_NONE") {
       gateResult = "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
       gateReason = rangeSignal.reason;
-    } else if (riskEngineBlocked || (blockedRegimeActive && !blockedRegimeLossStreakSuspend)) {
+    } else if (
+      riskEngineBlocked ||
+      (blockedRegimeActive && (!blockedRegimeLossStreakSuspend || !range_risk_limit_relax_active))
+    ) {
       gateResult = "RANGE_GATE_BLOCK_RISK_ENGINE";
       gateReason = blockedRegimeLossStreakSuspend ? "mode_loss_streak_soft_suspended" : (blockedRegime?.reason ?? "risk_engine_block");
     } else if (reentryBlocked) {
@@ -1313,6 +1365,18 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           range_reentry_remaining_ms: rangeReentryRemainingMsOut,
           range_reentry_source: rangeReentrySourceOut,
           range_reentry_same_direction: rangeReentrySameDirection,
+          range_same_direction_reentry_relaxed_applied: range_same_direction_reentry_relaxed_applied,
+          range_same_direction_reentry_wait_ms: range_same_direction_reentry_wait_ms,
+          range_same_direction_reentry_size_mult: range_same_direction_reentry_size_mult,
+          range_same_direction_reentry_edge_ok: range_same_direction_reentry_edge_ok,
+          range_same_direction_reentry_center_blocked: range_same_direction_reentry_center_blocked,
+          range_same_direction_reentry_final_allowed: range_same_direction_reentry_final_allowed,
+          range_risk_limit_temporarily_relaxed: range_risk_limit_temporarily_relaxed,
+          range_risk_limit_relax_reason: range_risk_limit_relax_reason,
+          range_risk_limit_relax_started_at: range_risk_limit_relax_started_at,
+          range_risk_limit_relax_expires_at: range_risk_limit_relax_expires_at,
+          range_risk_limit_relax_active: range_risk_limit_relax_active,
+          range_risk_limit_relax_expired: range_risk_limit_relax_expired,
           range_soft_suspend_applied: range_soft_suspend_applied,
           range_soft_suspend_size_mult: range_soft_suspend_size_mult,
           range_soft_suspend_cooldown_ms: range_soft_suspend_cooldown_ms,
