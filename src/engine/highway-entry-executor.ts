@@ -1,6 +1,7 @@
 // src/engine/highway-entry-executor.ts
 
 import { AiHighwayQualityScores, HighwayTrendState } from "../models/types";
+import { isInsufficientCandlesLt60Only } from "./highway-trend-detector";
 import type { AnyEntryDecision } from "../strategy/executors/types";
 
 export function highwayExecutorEvaluateEntry(input: Readonly<{
@@ -24,12 +25,33 @@ export function highwayExecutorEvaluateEntry(input: Readonly<{
     const invalidReasons = Array.isArray((input.aiScores as any).invalidReasons)
         ? ((input.aiScores as any).invalidReasons as string[])
         : [];
-    const stiffnessProof =
-        (input.aiScores as { aiScoreRaw?: { highwayStiffnessProof?: Record<string, unknown> } }).aiScoreRaw
-            ?.highwayStiffnessProof ?? null;
-
+    const aiRaw = (input.aiScores as { aiScoreRaw?: Record<string, unknown> }).aiScoreRaw;
+    const stiffnessProof = (aiRaw?.highwayStiffnessProof as Record<string, unknown> | undefined) ?? null;
+    const candleGateProof = (aiRaw?.highwayCandleGateProof as Record<string, unknown> | undefined) ?? null;
     // Reject if too weak
     if (input.highwayState === HighwayTrendState.INVALID) {
+        if (isInsufficientCandlesLt60Only(invalidReasons)) {
+            return {
+                entry_allowed: false,
+                blocked_reason: "highway_insufficient_candles_watch",
+                expected_move: input.expectedMove,
+                total_cost: input.totalCost,
+                risk_state: input.risk_state as any,
+                regime: "TREND",
+                executor: "TREND",
+                breakout_state: "none",
+                pullback_state: "unknown",
+                guidance: "Highway: 1m 캔들 부족(워밍업/응답 단축) — hard_invalid 대신 관망",
+                detail: {
+                    highway_state: "INVALID",
+                    highway_invalid_tier: (input.aiScores as { invalidTier?: string }).invalidTier ?? "soft_invalid",
+                    highway_invalid_reasons: invalidReasons,
+                    highway_candle_gate_proof: candleGateProof,
+                    highway_stiffness_proof: stiffnessProof,
+                    ...input.aiScores
+                }
+            };
+        }
         const allowSoftInvalidProbe =
             invalidTier === "soft_invalid" &&
             (input.currentStage ?? 0) === 0 &&

@@ -4,6 +4,13 @@ import { MarketSymbol, Candle } from "../models/types";
 import { HighwayTrendState } from "../models/types";
 import { emaLastFromCloses } from "../utils/math";
 
+/** EMA60 스택 + 볼륨 비교에 필요한 최소 1m 봉 수 (`detectHighwayTrend` 하드 게이트). */
+export const HIGHWAY_TREND_MIN_CANDLES = 60;
+
+export function isInsufficientCandlesLt60Only(invalidReasons: readonly string[]): boolean {
+  return invalidReasons.length === 1 && invalidReasons[0] === "insufficient_candles_lt_60";
+}
+
 export function detectHighwayTrend(candles: Candle[], symbol: MarketSymbol): {
     state: HighwayTrendState;
     alignmentScore: number;
@@ -13,7 +20,7 @@ export function detectHighwayTrend(candles: Candle[], symbol: MarketSymbol): {
     invalidTier: "hard_invalid" | "soft_invalid" | "warning";
     invalidReasons: string[];
 } {
-    if (candles.length < 60) {
+    if (candles.length < HIGHWAY_TREND_MIN_CANDLES) {
         return {
             state: HighwayTrendState.INVALID,
             alignmentScore: 0,

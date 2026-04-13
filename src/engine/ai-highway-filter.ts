@@ -1,7 +1,11 @@
 // src/engine/ai-highway-filter.ts
 
 import { AiHighwayQualityScores, HighwayTrendState } from "../models/types";
-import { detectHighwayTrend } from "./highway-trend-detector";
+import {
+  detectHighwayTrend,
+  HIGHWAY_TREND_MIN_CANDLES,
+  isInsufficientCandlesLt60Only
+} from "./highway-trend-detector";
 import { Candle, MarketSymbol } from "../models/types";
 
 function buildHighwayStiffnessProof(
@@ -51,6 +55,53 @@ function buildHighwayStiffnessProof(
   };
 }
 
+function buildHighwayCandleGateProof(
+  candles: Candle[],
+  symbol: MarketSymbol,
+  meta?: Readonly<{
+    snapshotRecentCandlesCount?: number | null;
+    klineLimitRequested?: number | null;
+    entryTimeframe?: string | null;
+  }>
+): Record<string, unknown> {
+  const arrayLen = candles.length;
+  const snapCount = meta?.snapshotRecentCandlesCount;
+  const reqLimit = meta?.klineLimitRequested;
+  const tf = meta?.entryTimeframe ?? "1m";
+  let countDiscrepancy: string | null = null;
+  if (typeof snapCount === "number" && Number.isFinite(snapCount) && snapCount !== arrayLen) {
+    countDiscrepancy = `candles_array_length_${arrayLen}_vs_snapshot_recentCandlesCount_${snapCount}`;
+  }
+  let likelyCause: string;
+  if (arrayLen === 0) {
+    likelyCause = "empty_candles_array_evaluator_input";
+  } else if (arrayLen < HIGHWAY_TREND_MIN_CANDLES) {
+    if (typeof reqLimit === "number" && reqLimit >= HIGHWAY_TREND_MIN_CANDLES && arrayLen < reqLimit * 0.5) {
+      likelyCause = "api_or_transport_shortfall_vs_requested_limit";
+    } else if (typeof reqLimit === "number" && arrayLen < reqLimit) {
+      likelyCause = "partial_kline_response_or_warmup";
+    } else {
+      likelyCause = "below_highway_min_without_request_meta";
+    }
+  } else {
+    likelyCause = "satisfies_highway_min";
+  }
+  return {
+    proof_version: 1,
+    symbol: String(symbol),
+    entry_timeframe: tf,
+    candles_array_length: arrayLen,
+    highway_min_candles: HIGHWAY_TREND_MIN_CANDLES,
+    ema240_ideal_min_candles: 240,
+    snapshot_recent_candles_count: snapCount ?? null,
+    kline_limit_requested: reqLimit ?? null,
+    count_discrepancy: countDiscrepancy,
+    likely_cause: likelyCause,
+    note:
+      "Engine poll uses Bybit 1m klines into snapshot.candles; empty or short array = warmup, fetch shortfall, or missing passthrough."
+  };
+}
+
 type HighwayScoreContext = Readonly<{
     regime?: "TREND" | "RANGE" | "NO_TRADE";
     currentStage?: number;
@@ -62,6 +113,11 @@ type HighwayScoreContext = Readonly<{
     breakoutFailureRate?: number | null;
     rangeOscillationScore?: number | null;
     trendWeaknessScore?: number | null;
+    /** 스냅샷의 recentCandlesCount (pollSymbol rC.value.length) */
+    snapshotRecentCandlesCount?: number | null;
+    /** pollSymbol에 넘긴 kline limit (기본 120) */
+    klineLimitRequested?: number | null;
+    entryTimeframe?: string | null;
 }>;
 
 /**
@@ -79,6 +135,12 @@ export function evaluateAiHighwayQuality(candles: Candle[], symbol: MarketSymbol
 } {
     const core = detectHighwayTrend(candles, symbol);
     const rangeStage0 = context?.regime === "RANGE" && (context?.currentStage ?? 0) === 0;
+    const coreInsufficientOnly = isInsufficientCandlesLt60Only(core.invalidReasons);
+    const highwayCandleGateProof = buildHighwayCandleGateProof(candles, symbol, {
+      snapshotRecentCandlesCount: context?.snapshotRecentCandlesCount,
+      klineLimitRequested: context?.klineLimitRequested,
+      entryTimeframe: context?.entryTimeframe
+    });
     const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
 
     let alignmentQualityScore = core.alignmentScore;
@@ -157,6 +219,10 @@ export function evaluateAiHighwayQuality(candles: Candle[], symbol: MarketSymbol
         rangeStage0
     );
 
+    if (coreInsufficientOnly && state === HighwayTrendState.INVALID && invalidTier === "hard_invalid") {
+      invalidTier = "soft_invalid";
+    }
+
     return {
         alignmentQualityScore,
         emaSpacingHealthScore,
@@ -180,6 +246,8 @@ export function evaluateAiHighwayQuality(candles: Candle[], symbol: MarketSymbol
             coreAlignment: core.alignmentScore,
             coreSpacing: core.spacingScore,
             coreVolumeSupport: core.volumeSupportScore,
+            highwayCandleShortfallCoreOnly: coreInsufficientOnly,
+            highwayCandleGateProof,
             finalState: state,
             highwayStiffnessProof,
             finalScores: {

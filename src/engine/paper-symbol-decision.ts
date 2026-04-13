@@ -96,6 +96,11 @@ export type SymbolSnapshotLike = Readonly<{
   regimeStateDiag?: PaperRegimeState;
   /** Raw candles fetched from Bybit */
   candles?: import("../models/types").Candle[];
+  /** pollSymbol 1m kline 배열 길이(엔진 스냅샷) */
+  recentCandlesCount?: number;
+  /** Highway 진입용 1m 요청 limit (기본 120) */
+  highwayKlineLimitRequested?: number;
+  highwayEntryTf?: string;
 }>;
 
 function signalToState(signal: PaperSignal): PaperSignalState {
@@ -234,6 +239,8 @@ function mapExecutorBlockToReject(blocked: string | undefined): PaperDecisionRej
       return "EDGE_FAIL_EXPECTANCY";
     case "trend_box_edge_highway_watch":
       return "HIGHWAY_BOX_EDGE_WATCH";
+    case "highway_insufficient_candles_watch":
+      return "HIGHWAY_CANDLE_WARMUP_WATCH";
     case "fee_slippage_insufficient":
       return "EDGE_FAIL_FEE";
     case "range_center_forbidden":
@@ -1589,7 +1596,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     boxCohesion01: sn?.boxCohesion01,
     breakoutFailureRate: sn?.breakoutFailureRate,
     rangeOscillationScore: sn?.rangeOscillationScore,
-    trendWeaknessScore: sn?.trendWeaknessScore
+    trendWeaknessScore: sn?.trendWeaknessScore,
+    snapshotRecentCandlesCount: sn?.recentCandlesCount ?? null,
+    klineLimitRequested: sn?.highwayKlineLimitRequested ?? null,
+    entryTimeframe: sn?.highwayEntryTf ?? "1m"
   });
   supplemental_reasons.push(`AI_SCORE_CONTEXT_REGIME_${scoringRegime}`);
   supplemental_reasons.push(`AI_SCORE_CONTEXT_STAGE_${String(input.currentStage)}`);
@@ -1620,7 +1630,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           boxCohesion01: sn.boxCohesion01,
           breakoutFailureRate: sn.breakoutFailureRate,
           rangeOscillationScore: sn.rangeOscillationScore,
-          trendWeaknessScore: sn.trendWeaknessScore
+          trendWeaknessScore: sn.trendWeaknessScore,
+          snapshotRecentCandlesCount: sn.recentCandlesCount ?? null,
+          klineLimitRequested: sn.highwayKlineLimitRequested ?? null,
+          entryTimeframe: sn.highwayEntryTf ?? "1m"
         });
         supplemental_reasons.push("HIGHWAY_TREND_BOX_EDGE_RANGE_RESCORE");
         const rangeStillHardInvalid =
@@ -2341,9 +2354,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     if (reject_reason === "HIGHWAY_BOX_EDGE_WATCH") {
       execution_state = "HIGHWAY_BOX_EDGE_WATCH";
     }
+    if (reject_reason === "HIGHWAY_CANDLE_WARMUP_WATCH") {
+      execution_state = "HIGHWAY_CANDLE_WARMUP_WATCH";
+    }
     const stage1BlockCode =
       input.currentStage === 0
-        ? reject_reason === "HIGHWAY_BOX_EDGE_WATCH"
+        ? reject_reason === "HIGHWAY_BOX_EDGE_WATCH" || reject_reason === "HIGHWAY_CANDLE_WARMUP_WATCH"
           ? "STAGE1_EXEC_PENDING"
           : input.isAmbiguous
             ? "STAGE1_EXEC_PENDING"
@@ -2405,7 +2421,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       // Round 4 & 5: Active Stage 1 candidate evaluation (Execution over Review)
       final_decision = input.currentStage === 0 ? "SKIP" : "REJECT";
 
-      if (input.isAmbiguous && final_decision === "SKIP" && reject_reason !== "HIGHWAY_BOX_EDGE_WATCH") {
+      if (
+        input.isAmbiguous &&
+        final_decision === "SKIP" &&
+        reject_reason !== "HIGHWAY_BOX_EDGE_WATCH" &&
+        reject_reason !== "HIGHWAY_CANDLE_WARMUP_WATCH"
+      ) {
         const ambCode = input.regime === "TREND" ? "AMBIGUOUS_TREND_REVIEW" : "AMBIGUOUS_RANGE_REVIEW";
         reject_reason = ambCode;
         execution_state = ambCode;

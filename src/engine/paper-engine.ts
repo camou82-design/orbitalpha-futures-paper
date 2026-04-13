@@ -189,6 +189,8 @@ type SymbolSnapshot = Readonly<{
   boxBreakSide?: "upper" | "lower" | "none";
   regimeStateDiag?: PaperRegimeState;
   candles?: import("../models/types").Candle[];
+  highwayKlineLimitRequested?: number;
+  highwayEntryTf?: string;
 }>;
 
 export type SymbolDiagnostic = Readonly<{
@@ -1808,6 +1810,18 @@ export class PaperEngine {
         box_zone: det?.box_zone ?? null,
         highway_stiffness_proof_trend_path: det?.highway_stiffness_proof_trend_path ?? null,
         highway_stiffness_proof_range_attempt: det?.highway_stiffness_proof_range_rescore ?? null
+      });
+    }
+    if (br === "highway_insufficient_candles_watch") {
+      this.logger.warn("HIGHWAY_CANDLE_GATE_PROOF", {
+        symbol: String(sym),
+        regime: res.decision.regime ?? null,
+        final_decision: res.decision.final_decision,
+        reject_reason: res.decision.reject_reason,
+        blocked_reason: br,
+        highway_candle_gate_proof: det?.highway_candle_gate_proof ?? null,
+        highway_stiffness_proof: det?.highway_stiffness_proof ?? null,
+        highway_invalid_reasons: det?.highway_invalid_reasons ?? null
       });
     }
   }
@@ -3726,7 +3740,9 @@ export class PaperEngine {
       regimeExitRisk: regimeDetected.regimeExitRisk,
       boxBreakSide: regimeDetected.boxBreakSide,
       regimeStateDiag: regimeDetected.regimeState,
-      candles: rC.value
+      candles: rC.value,
+      highwayKlineLimitRequested: klineLimit,
+      highwayEntryTf: "1m"
     };
 
     /** ENTRY_LINE은 runTick 루프에서 의사결정 결과(Intent 등)와 합쳐서 로깅하기 위해 여기서는 생략 */
