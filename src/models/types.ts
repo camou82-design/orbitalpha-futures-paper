@@ -381,6 +381,14 @@ export type PaperSymbolDecisionRecord = Readonly<{
   range_reentry_source?: string | null;
   /** RANGE stage0 전용 동일 방향 여부 */
   range_reentry_same_direction?: boolean;
+  /** RANGE stage0 loss streak suspend 소프트 완화 적용 여부 */
+  range_soft_suspend_applied?: boolean;
+  /** RANGE stage0 loss streak suspend 시 축소 진입 배수 */
+  range_soft_suspend_size_mult?: number | null;
+  /** RANGE stage0 loss streak suspend 완화 쿨다운(ms) */
+  range_soft_suspend_cooldown_ms?: number | null;
+  /** RANGE stage0 loss streak suspend 동일 방향 제한 적용 여부 */
+  range_soft_suspend_same_direction_restricted?: boolean;
   /** 레거시 차단 원인 (executor blocked_reason 원본) */
   legacy_block_reason?: string | null;
   /** 레거시 레짐 게이트 분류값 */

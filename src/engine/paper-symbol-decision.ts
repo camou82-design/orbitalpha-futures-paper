@@ -358,6 +358,10 @@ function pack(
     range_reentry_remaining_ms?: number | null;
     range_reentry_source?: string | null;
     range_reentry_same_direction?: boolean;
+    range_soft_suspend_applied?: boolean;
+    range_soft_suspend_size_mult?: number | null;
+    range_soft_suspend_cooldown_ms?: number | null;
+    range_soft_suspend_same_direction_restricted?: boolean;
     legacy_block_reason?: string | null;
     legacy_regime_gate?: string | null;
     legacy_gate_source?: string | null;
@@ -476,6 +480,10 @@ function pack(
     range_reentry_remaining_ms: fields.range_reentry_remaining_ms ?? null,
     range_reentry_source: fields.range_reentry_source ?? null,
     range_reentry_same_direction: fields.range_reentry_same_direction ?? false,
+    range_soft_suspend_applied: fields.range_soft_suspend_applied ?? false,
+    range_soft_suspend_size_mult: fields.range_soft_suspend_size_mult ?? null,
+    range_soft_suspend_cooldown_ms: fields.range_soft_suspend_cooldown_ms ?? null,
+    range_soft_suspend_same_direction_restricted: fields.range_soft_suspend_same_direction_restricted ?? false,
     legacy_block_reason: fields.legacy_block_reason ?? null,
     legacy_regime_gate: fields.legacy_regime_gate ?? null,
     legacy_gate_source: fields.legacy_gate_source ?? null,
@@ -633,6 +641,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_reentry_remaining_ms: number | null = null;
   let range_reentry_source: string | null = null;
   let range_reentry_same_direction = false;
+  let range_soft_suspend_applied = false;
+  let range_soft_suspend_size_mult: number | null = null;
+  let range_soft_suspend_cooldown_ms: number | null = null;
+  let range_soft_suspend_same_direction_restricted = false;
   let range_stage0_engine_taken = false;
   let range_stage0_exit_reason: string | null = null;
   let legacy_executor_path_taken = false;
@@ -746,6 +758,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reentry_remaining_ms?: number | null;
       range_reentry_source?: string | null;
       range_reentry_same_direction?: boolean;
+      range_soft_suspend_applied?: boolean;
+      range_soft_suspend_size_mult?: number | null;
+      range_soft_suspend_cooldown_ms?: number | null;
+      range_soft_suspend_same_direction_restricted?: boolean;
       legacy_block_reason?: string | null;
       legacy_regime_gate?: string | null;
       legacy_gate_source?: string | null;
@@ -897,6 +913,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reentry_remaining_ms: extra.range_reentry_remaining_ms ?? range_reentry_remaining_ms,
       range_reentry_source: extra.range_reentry_source ?? range_reentry_source,
       range_reentry_same_direction: extra.range_reentry_same_direction ?? range_reentry_same_direction,
+      range_soft_suspend_applied: extra.range_soft_suspend_applied ?? range_soft_suspend_applied,
+      range_soft_suspend_size_mult: extra.range_soft_suspend_size_mult ?? range_soft_suspend_size_mult,
+      range_soft_suspend_cooldown_ms: extra.range_soft_suspend_cooldown_ms ?? range_soft_suspend_cooldown_ms,
+      range_soft_suspend_same_direction_restricted:
+        extra.range_soft_suspend_same_direction_restricted ?? range_soft_suspend_same_direction_restricted,
       legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
       legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
       legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
@@ -1012,6 +1033,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE");
     const blockedRegime = input.risk?.blockedRegimes?.[input.regime];
     const blockedRegimeActive = !!(blockedRegime && blockedRegime.until > input.now);
+    const blockedRegimeReasonText = String(blockedRegime?.reason ?? "");
+    const blockedRegimeLossStreakSuspend =
+      blockedRegimeReasonText.includes("mode_loss_streak") || blockedRegimeReasonText.includes("highway_range_streak");
+    const RANGE_SOFT_SUSPEND_SIZE_MULT = 0.35;
+    const RANGE_SOFT_SUSPEND_COOLDOWN_MS = 45_000;
     const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
     const boxMiddle = boxPos > 0.42 && boxPos < 0.58;
     const lowConfidence = rangeScores.rangeSignalScore < 0.34 || rangeScores.rangeEntryScore < 0.36;
@@ -1025,9 +1051,16 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       const meta = input.lastCloseMetaBySymbol.get(String(sym));
       const sameDirection = meta !== undefined && meta.side === rangeSignal.side;
       const waitMsBase = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
-      const waitMs = Math.min(waitMsBase, 95_000);
+      let waitMs = Math.min(waitMsBase, 95_000);
       const elapsedMs = input.now - (meta?.closedAt ?? 0);
       rangeReentrySameDirection = sameDirection;
+      if (blockedRegimeActive && blockedRegimeLossStreakSuspend) {
+        range_soft_suspend_applied = true;
+        range_soft_suspend_size_mult = RANGE_SOFT_SUSPEND_SIZE_MULT;
+        range_soft_suspend_cooldown_ms = RANGE_SOFT_SUSPEND_COOLDOWN_MS;
+        range_soft_suspend_same_direction_restricted = sameDirection;
+        waitMs = sameDirection ? RANGE_SOFT_SUSPEND_COOLDOWN_MS : 0;
+      }
       rangeReentryWaitMs = waitMs;
       rangeReentryElapsedMs = elapsedMs;
       rangeReentryRemainingMs = (meta?.closedAt ?? 0) > 0 && elapsedMs < waitMs ? waitMs - elapsedMs : 0;
@@ -1038,12 +1071,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     if (rangeSignal.signal === "RANGE_SIGNAL_NONE") {
       gateResult = "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
       gateReason = rangeSignal.reason;
-    } else if (riskEngineBlocked || blockedRegimeActive) {
+    } else if (riskEngineBlocked || (blockedRegimeActive && !blockedRegimeLossStreakSuspend)) {
       gateResult = "RANGE_GATE_BLOCK_RISK_ENGINE";
-      gateReason = blockedRegime?.reason ?? "risk_engine_block";
+      gateReason = blockedRegimeLossStreakSuspend ? "mode_loss_streak_soft_suspended" : (blockedRegime?.reason ?? "risk_engine_block");
     } else if (reentryBlocked) {
       gateResult = "RANGE_GATE_BLOCK_REENTRY";
-      gateReason = "range_reentry_cooldown_active";
+      gateReason = blockedRegimeLossStreakSuspend
+        ? "range_reentry_cooldown_active_soft_suspend_same_direction"
+        : "range_reentry_cooldown_active";
     } else if (boxMiddle) {
       gateResult = "RANGE_GATE_BLOCK_BOX_MIDDLE";
       gateReason = "range_box_middle";
@@ -1103,7 +1138,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           : gateResult === "RANGE_GATE_BLOCK_LOW_CONFIDENCE" && rangeSignal.signal === "RANGE_SIGNAL_NONE"
             ? "STAGE1_BLOCKED_SIGNAL"
             : "STAGE1_BLOCKED_EDGE";
-      const blockedRegimeReasonText = String(blockedRegime?.reason ?? "");
       const blockedRegimeIsLossStreak =
         blockedRegimeReasonText.includes("mode_loss_streak") || blockedRegimeReasonText.includes("highway_range_streak");
       const rangeRiskSubreason =
@@ -1161,6 +1195,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           range_reentry_remaining_ms: rangeReentryRemainingMsOut,
           range_reentry_source: rangeReentrySourceOut,
           range_reentry_same_direction: rangeReentrySameDirection,
+          range_soft_suspend_applied: range_soft_suspend_applied,
+          range_soft_suspend_size_mult: range_soft_suspend_size_mult,
+          range_soft_suspend_cooldown_ms: range_soft_suspend_cooldown_ms,
+          range_soft_suspend_same_direction_restricted: range_soft_suspend_same_direction_restricted,
           reentry_wait_ms: rangeReentryWaitMsOut,
           reentry_elapsed_ms: rangeReentryElapsedMsOut,
           guidance: gateReason,
@@ -2072,6 +2110,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
     if (input.isAmbiguous) {
       dynamicSizeMult *= 0.8; // Extra caution for ambiguous market
+    }
+    if (input.currentStage === 0 && input.regime === "RANGE" && range_soft_suspend_applied && range_soft_suspend_size_mult) {
+      dynamicSizeMult *= range_soft_suspend_size_mult;
+      supplemental_reasons.push("RANGE_SOFT_SUSPEND_SIZE_REDUCED");
     }
 
     const stage1SizeMultFinal = input.currentStage === 0 ? dynamicSizeMult : null;
