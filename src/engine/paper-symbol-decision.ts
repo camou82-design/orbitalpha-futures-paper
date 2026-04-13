@@ -347,6 +347,11 @@ function pack(
     blocked_regime_until_bypass_reason?: string | null;
     blocked_regime_original_until_ms?: number | null;
     blocked_regime_original_reason?: string | null;
+    range_long_only_short_deferred_applied?: boolean;
+    range_long_only_short_deferred_bypassed?: boolean;
+    range_cost_warning_applied?: boolean;
+    range_cost_warning_threshold?: number | null;
+    range_cost_warning_shortfall?: number | null;
     legacy_block_reason?: string | null;
     legacy_regime_gate?: string | null;
     legacy_gate_source?: string | null;
@@ -454,6 +459,11 @@ function pack(
     blocked_regime_until_bypass_reason: fields.blocked_regime_until_bypass_reason ?? null,
     blocked_regime_original_until_ms: fields.blocked_regime_original_until_ms ?? null,
     blocked_regime_original_reason: fields.blocked_regime_original_reason ?? null,
+    range_long_only_short_deferred_applied: fields.range_long_only_short_deferred_applied ?? false,
+    range_long_only_short_deferred_bypassed: fields.range_long_only_short_deferred_bypassed ?? false,
+    range_cost_warning_applied: fields.range_cost_warning_applied ?? false,
+    range_cost_warning_threshold: fields.range_cost_warning_threshold ?? null,
+    range_cost_warning_shortfall: fields.range_cost_warning_shortfall ?? null,
     legacy_block_reason: fields.legacy_block_reason ?? null,
     legacy_regime_gate: fields.legacy_regime_gate ?? null,
     legacy_gate_source: fields.legacy_gate_source ?? null,
@@ -600,6 +610,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let blocked_regime_until_bypass_reason: string | null = null;
   let blocked_regime_original_until_ms: number | null = null;
   let blocked_regime_original_reason: string | null = null;
+  let range_long_only_short_deferred_applied = false;
+  let range_long_only_short_deferred_bypassed = false;
+  let range_cost_warning_applied = false;
+  let range_cost_warning_threshold: number | null = null;
+  let range_cost_warning_shortfall: number | null = null;
   let range_stage0_engine_taken = false;
   let range_stage0_exit_reason: string | null = null;
   let legacy_executor_path_taken = false;
@@ -702,6 +717,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       blocked_regime_until_bypass_reason?: string | null;
       blocked_regime_original_until_ms?: number | null;
       blocked_regime_original_reason?: string | null;
+      range_long_only_short_deferred_applied?: boolean;
+      range_long_only_short_deferred_bypassed?: boolean;
+      range_cost_warning_applied?: boolean;
+      range_cost_warning_threshold?: number | null;
+      range_cost_warning_shortfall?: number | null;
       legacy_block_reason?: string | null;
       legacy_regime_gate?: string | null;
       legacy_gate_source?: string | null;
@@ -840,6 +860,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         extra.blocked_regime_original_until_ms ?? blocked_regime_original_until_ms,
       blocked_regime_original_reason:
         extra.blocked_regime_original_reason ?? blocked_regime_original_reason,
+      range_long_only_short_deferred_applied:
+        extra.range_long_only_short_deferred_applied ?? range_long_only_short_deferred_applied,
+      range_long_only_short_deferred_bypassed:
+        extra.range_long_only_short_deferred_bypassed ?? range_long_only_short_deferred_bypassed,
+      range_cost_warning_applied: extra.range_cost_warning_applied ?? range_cost_warning_applied,
+      range_cost_warning_threshold: extra.range_cost_warning_threshold ?? range_cost_warning_threshold,
+      range_cost_warning_shortfall: extra.range_cost_warning_shortfall ?? range_cost_warning_shortfall,
       legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
       legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
       legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
@@ -1320,10 +1347,17 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     (useFixedCost || (typeof rm === "number" && totalCost !== null));
 
   if (costGateComparable && em !== null && effectiveTotalCost !== null) {
-    const feeWouldBlock = em <= effectiveTotalCost;
+    const rangeStage0CostMode = input.currentStage === 0 && input.regime === "RANGE";
+    const costThreshold = rangeStage0CostMode ? effectiveTotalCost * 0.82 : effectiveTotalCost;
+    if (rangeStage0CostMode) {
+      range_cost_warning_threshold = costThreshold;
+      range_cost_warning_shortfall = em < costThreshold ? costThreshold - em : 0;
+    }
+    const feeWouldBlock = em <= costThreshold;
     if (feeWouldBlock) {
       if (input.currentStage === 0) {
         costWarningStage1 = true;
+        if (rangeStage0CostMode) range_cost_warning_applied = true;
         stage1LoosenedEntry = true;
         edge_state = "PASS";
         supplemental_reasons.push("STAGE1_COST_WARNING_ALLOWED");
@@ -2109,6 +2143,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         input.regime === "RANGE" &&
         workingSignal === "paper_short_candidate"
       ) {
+        if (String(sym) === "BTCUSDT" && useRangeStage0Engine) {
+          range_long_only_short_deferred_bypassed = true;
+          supplemental_reasons.push("RANGE_LONG_ONLY_SHORT_DEFERRED_BYPASSED");
+        } else {
+          range_long_only_short_deferred_applied = true;
         return ret(
           {
             final_decision: "SKIP",
@@ -2122,6 +2161,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             stage1_result_code: "STAGE1_LONG_ONLY_SHORT_DEFERRED",
             required_move_pct,
             shortfall_pct,
+            range_long_only_short_deferred_applied: true,
+            range_long_only_short_deferred_bypassed: false,
             long_only_restriction: true,
             original_signal_state: "SHORT_CANDIDATE",
             final_signal_state: "SHORT_CANDIDATE_LONG_ONLY_DEFERRED",
@@ -2137,6 +2178,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             aiGatePassed: true
           }
         );
+        }
       }
       return ret(
         {
@@ -2150,6 +2192,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           stage1_result_code: "STAGE1_BLOCKED_REGIME",
           required_move_pct,
           shortfall_pct,
+          range_long_only_short_deferred_applied: false,
+          range_long_only_short_deferred_bypassed: range_long_only_short_deferred_bypassed,
           long_only_restriction: true,
           original_signal_state: "SHORT_CANDIDATE",
           final_signal_state: "SHORT_CANDIDATE",

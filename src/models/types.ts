@@ -359,6 +359,16 @@ export type PaperSymbolDecisionRecord = Readonly<{
   blocked_regime_original_until_ms?: number | null;
   /** 테스트: 우회 전 blocked regime 원본 사유 */
   blocked_regime_original_reason?: string | null;
+  /** RANGE stage0에서 long-only short deferred가 실제 적용됐는지 */
+  range_long_only_short_deferred_applied?: boolean;
+  /** RANGE stage0에서 long-only short deferred를 우회했는지 */
+  range_long_only_short_deferred_bypassed?: boolean;
+  /** RANGE stage0 전용 비용 경고 적용 여부 */
+  range_cost_warning_applied?: boolean;
+  /** RANGE stage0 전용 비용 경고 기준치 */
+  range_cost_warning_threshold?: number | null;
+  /** RANGE stage0 전용 비용 경고 부족분(기준치-기대이동) */
+  range_cost_warning_shortfall?: number | null;
   /** 레거시 차단 원인 (executor blocked_reason 원본) */
   legacy_block_reason?: string | null;
   /** 레거시 레짐 게이트 분류값 */
