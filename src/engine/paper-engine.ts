@@ -145,6 +145,8 @@ type SymbolSnapshot = Readonly<{
   gateRequiredMove: number | null;
   atr: number | null;
   signalMissingReason?: string;
+  signalGateBlockedReason?: string | null;
+  signalDecisionOrigin?: string;
   rangeConfidence?: number;
   boxCohesion01?: number;
   breakoutFailureRate?: number;
@@ -970,6 +972,9 @@ export class PaperEngine {
 
           // --- AUXILIARY LEGACY DIAGNOSTICS ---
           legacy_base_signal: decisionSnap?.signal ?? "none",
+          signal_decision_origin: decisionSnap?.signalDecisionOrigin ?? "unknown",
+          signal_gate_block_reason: decisionSnap?.signalGateBlockedReason ?? null,
+          signal_missing_reason_raw: decisionSnap?.signalMissingReason ?? null,
           legacy_trend_ok: decisionSnap?.trendOk ?? false,
           legacy_ema_gap: decisionSnap?.emaGap ?? null,
           legacy_quality_score: decisionSnap?.qualityScore ?? 0,
@@ -2622,6 +2627,7 @@ export class PaperEngine {
     });
 
     // BTC-specific candidate signal relaxation for RANGE regime (후보만; 체결은 기존 게이트 유지)
+    let signalDecisionOrigin = "entry_signal_raw";
     let signal_missing_reason = "NONE";
     if (symbol === "BTCUSDT" && regimeDetected.regime === "RANGE" && entry.signal === "none") {
       if (boxPos !== null && boxRel !== null && boxRel >= 0.0035) {
@@ -2634,6 +2640,7 @@ export class PaperEngine {
             sidewaysMode: true,
             entryCandidate: true
           };
+          signalDecisionOrigin = "btc_range_soft_candidate_lower_edge";
         } else if (boxPos >= 0.74) {
           entry = {
             ...entry,
@@ -2642,16 +2649,21 @@ export class PaperEngine {
             sidewaysMode: true,
             entryCandidate: true
           };
+          signalDecisionOrigin = "btc_range_soft_candidate_upper_edge";
         } else {
           signal_missing_reason = `BOX_CENTER (pos:${boxPos.toFixed(2)})`;
+          signalDecisionOrigin = "btc_range_soft_candidate_rejected_box_center";
         }
       } else if (boxRel !== null && boxRel < 0.0035) {
         signal_missing_reason = `BOX_TOO_NARROW (rel:${boxRel.toFixed(5)})`;
+        signalDecisionOrigin = "btc_range_soft_candidate_rejected_box_too_narrow";
       } else {
         signal_missing_reason = "BOX_MISSING";
+        signalDecisionOrigin = "btc_range_soft_candidate_rejected_box_missing";
       }
     } else if (entry.signal === "none") {
       signal_missing_reason = "EMA_CRITERIA_NOT_MET";
+      signalDecisionOrigin = "entry_signal_none";
     }
 
     const sideForQuality =
@@ -2696,6 +2708,7 @@ export class PaperEngine {
         signal = "none";
         entryCandidate = false;
         gateBlockedReason = "quality_below_min";
+        signalDecisionOrigin = "entry_gate_blocked_quality_min";
       } else {
         const tfHi = entryGateHigherTimeframe();
         const limHi = entryGateHigherTfKlineLimit();
@@ -2722,6 +2735,7 @@ export class PaperEngine {
           signal = "none";
           entryCandidate = false;
           gateBlockedReason = gate.blockReason ?? "gate";
+          signalDecisionOrigin = `entry_gate_blocked_${String(gateBlockedReason)}`;
         }
       }
     }
@@ -2753,6 +2767,8 @@ export class PaperEngine {
       gateRequiredMove: gateEval?.requiredMove ?? null,
       atr,
       signalMissingReason: signal_missing_reason,
+      signalGateBlockedReason: gateBlockedReason,
+      signalDecisionOrigin,
       rangeConfidence: regimeDetected.rangeConfidence,
       boxCohesion01: regimeDetected.boxCohesion01,
       breakoutFailureRate: regimeDetected.breakoutFailureRate,
