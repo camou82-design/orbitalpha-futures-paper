@@ -1756,8 +1756,23 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       supplemental_reasons.push(`RISK_COOLDOWN_REASON_${String(rBlock.reason).toUpperCase()}`);
     } else {
       const regimeStateIsRange = sn.regimeStateDiag === "RANGE" || input.regime === "RANGE";
+      const rangeRelaxWindowEligible = regimeStateIsRange && input.currentStage === 0 && streakSuspend;
+      const rangeRelaxWindowActive = rangeRelaxWindowEligible && input.now < RANGE_RISK_LIMIT_RELAX_EXPIRES_AT;
+      if (rangeRelaxWindowEligible) {
+        range_risk_limit_temporarily_relaxed = true;
+        range_risk_limit_relax_reason = RANGE_RISK_LIMIT_RELAX_REASON;
+        range_risk_limit_relax_started_at = RANGE_RISK_LIMIT_RELAX_STARTED_AT;
+        range_risk_limit_relax_expires_at = RANGE_RISK_LIMIT_RELAX_EXPIRES_AT;
+        range_risk_limit_relax_active = rangeRelaxWindowActive;
+        range_risk_limit_relax_expired = !rangeRelaxWindowActive;
+      }
+      const engineBlockedOnlyByLossSuspend =
+        input.risk?.engineBlocked === true &&
+        streakSuspend &&
+        rangeRelaxWindowActive &&
+        (input.risk?.crashState === undefined || input.risk.crashState === "NONE");
       const upperRiskHit =
-        input.risk?.engineBlocked === true ||
+        (input.risk?.engineBlocked === true && !engineBlockedOnlyByLossSuspend) ||
         (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
         input.regimeDetail?.dump_protection_hit === true ||
         input.regimeDetail?.volatility_guard_hit === true;
@@ -1780,7 +1795,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         !streakSuspend &&
         !previewSameDir &&
         !previewReentryActive;
-      if (bypassBlockedRegimeUntilOnly) {
+      if (rangeRelaxWindowActive && streakSuspend && !upperRiskHit && rangeStage0SignalActive) {
+        risk_state = "SOFT_BLOCK";
+        risk_cooldown_subreason = "blocked_regime_loss_streak_suspend_relaxed_validation_window";
+        supplemental_reasons.push("RANGE_RISK_LIMIT_RELAX_WINDOW_ACTIVE");
+      } else if (bypassBlockedRegimeUntilOnly) {
         blocked_regime_until_bypass_applied = true;
         blocked_regime_until_bypass_reason = "range_stage0_signal_alive_blocked_regime_until_only";
         blocked_regime_original_until_ms = remainingMs;
