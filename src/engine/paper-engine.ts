@@ -937,7 +937,14 @@ export class PaperEngine {
           sd_origin: decisionSnap?.signalDecisionOrigin ?? "missing",
           ex_block: res.executorDecision?.blocked_reason ?? "none"
         });
-        this.logger.info("PAPER_ENTRY_LINE", {
+        console.log("[PEL_SOURCE_OBJ]", {
+          symbol: String(sym),
+          has_decision: !!res.decision,
+          has_decision_snap: !!decisionSnap,
+          has_executor_decision: !!res.executorDecision,
+          has_ex_detail: !!exDetail
+        });
+        const payload = {
           paper_entry_line_trace_marker: "paper_entry_line_v2_legacy_trace",
           sd_origin: decisionSnap?.signalDecisionOrigin ?? "missing",
           sd_gate: decisionSnap?.signalGateBlockedReason ?? "none",
@@ -1003,7 +1010,14 @@ export class PaperEngine {
           regime_state_diag: decisionSnap?.regimeStateDiag,
 
           paper_entry_relaxed: this.config.paperEntryRelaxed
+        };
+        console.log("[PEL_PAYLOAD_KEYS]", Object.keys(payload));
+        console.log("[PEL_PAYLOAD_SAMPLE]", {
+          sd_origin: payload.sd_origin,
+          ex_block: payload.ex_block,
+          signal_decision_origin: payload.signal_decision_origin
         });
+        this.logger.info("PAPER_ENTRY_LINE", payload);
       }
 
       try {
