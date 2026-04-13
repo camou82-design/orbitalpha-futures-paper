@@ -251,6 +251,14 @@ export type PaperSymbolDecisionRecord = Readonly<{
   stage1_result_code?: PaperStage1ResultCode;
   /** 최종 실패 사유 (추적용) */
   final_fail_reason?: string;
+  /** 로그용 직접 차단 코드 */
+  entry_blocked?: string | null;
+  /** RANGE stage0 전용 엔진 분기 탑승 여부 */
+  range_stage0_engine_taken?: boolean;
+  /** RANGE stage0 전용 엔진 종료 사유 */
+  range_stage0_exit_reason?: string | null;
+  /** legacy executor 차단 분기 탑승 여부 */
+  legacy_executor_path_taken?: boolean;
   /** 요구 이동폭 (비용 포함) % */
   required_move_pct?: number | null;
   /** 부족분 (요구 - 기대) % */

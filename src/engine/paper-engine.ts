@@ -983,6 +983,9 @@ export class PaperEngine {
           range_signal_downgraded: decisionSnap?.rangeSignalDowngraded ?? false,
           range_signal_downgrade_reason: decisionSnap?.rangeSignalDowngradeReason ?? "none",
           range_signal_kept_by_relax: decisionSnap?.rangeSignalKeptByRelax ?? false,
+          range_stage0_engine_taken: d.range_stage0_engine_taken ?? false,
+          range_stage0_exit_reason: d.range_stage0_exit_reason ?? null,
+          legacy_executor_path_taken: d.legacy_executor_path_taken ?? false,
           executor_blocked_reason_direct: res.executorDecision?.blocked_reason ?? "none",
           symbol: String(sym),
           engine_path: res.decision.currentStage === 0 && res.decision.regime === "RANGE" ? "RANGE_ENGINE" : "COMMON_ENGINE",
@@ -997,7 +1000,7 @@ export class PaperEngine {
           legacy_block_original_reason: d.legacy_block_original_reason ?? null,
           side: res.intentSide,
           entry_intent_type: d.entry_intent_type,
-          entry_blocked: res.executorDecision?.blocked_reason ?? (d.reject_reason !== null ? d.reject_reason : false),
+          entry_blocked: d.entry_blocked ?? res.executorDecision?.blocked_reason ?? (d.reject_reason !== null ? d.reject_reason : false),
           final_signal: d.final_decision === "ENTER" ? d.final_signal_state : "none",
 
           // --- PRIMARY HIGHWAY METRICS ---

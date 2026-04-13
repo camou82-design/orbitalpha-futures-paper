@@ -295,6 +295,10 @@ function pack(
     reviewing_ticks?: number;
     stage1_result_code?: import("../models/types").PaperStage1ResultCode;
     final_fail_reason?: string;
+    entry_blocked?: string | null;
+    range_stage0_engine_taken?: boolean;
+    range_stage0_exit_reason?: string | null;
+    legacy_executor_path_taken?: boolean;
     required_move_pct?: number | null;
     shortfall_pct?: number | null;
     signal_missing_reason?: string;
@@ -397,6 +401,10 @@ function pack(
     reviewing_ticks: fields.reviewing_ticks,
     stage1_result_code: fields.stage1_result_code,
     final_fail_reason: fields.final_fail_reason,
+    entry_blocked: fields.entry_blocked ?? null,
+    range_stage0_engine_taken: fields.range_stage0_engine_taken ?? false,
+    range_stage0_exit_reason: fields.range_stage0_exit_reason ?? null,
+    legacy_executor_path_taken: fields.legacy_executor_path_taken ?? false,
     required_move_pct: fields.required_move_pct,
     shortfall_pct: fields.shortfall_pct,
     signal_missing_reason: fields.signal_missing_reason,
@@ -592,6 +600,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let blocked_regime_until_bypass_reason: string | null = null;
   let blocked_regime_original_until_ms: number | null = null;
   let blocked_regime_original_reason: string | null = null;
+  let range_stage0_engine_taken = false;
+  let range_stage0_exit_reason: string | null = null;
+  let legacy_executor_path_taken = false;
   let legacy_block_reason: string | null = null;
   let legacy_regime_gate: string | null = null;
   let legacy_gate_source: string | null = null;
@@ -634,6 +645,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reviewing_ticks?: number;
       stage1_result_code?: import("../models/types").PaperStage1ResultCode;
       final_fail_reason?: string;
+      entry_blocked?: string | null;
+      range_stage0_engine_taken?: boolean;
+      range_stage0_exit_reason?: string | null;
+      legacy_executor_path_taken?: boolean;
       required_move_pct?: number | null;
       shortfall_pct?: number | null;
       signal_missing_reason?: string;
@@ -769,6 +784,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reviewing_ticks: extra.reviewing_ticks !== undefined ? extra.reviewing_ticks : input.reviewingTicks,
       stage1_result_code: extra.stage1_result_code,
       final_fail_reason: extra.final_fail_reason,
+      entry_blocked: extra.entry_blocked ?? null,
+      range_stage0_engine_taken: extra.range_stage0_engine_taken ?? range_stage0_engine_taken,
+      range_stage0_exit_reason: extra.range_stage0_exit_reason ?? range_stage0_exit_reason,
+      legacy_executor_path_taken: extra.legacy_executor_path_taken ?? legacy_executor_path_taken,
       required_move_pct: "required_move_pct" in extra ? extra.required_move_pct : required_move_pct,
       shortfall_pct: "shortfall_pct" in extra ? extra.shortfall_pct : (shortfall_pct ?? 0),
       signal_missing_reason: extra.signal_missing_reason ?? sn?.signalMissingReason,
@@ -927,6 +946,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   const useRangeStage0Engine = input.regime === "RANGE" && input.currentStage === 0;
   if (useRangeStage0Engine) {
+    range_stage0_engine_taken = true;
     strategy_executor = "RANGE";
     const rangeSignal = evaluateRangeStage0Signal(sn);
     const rangeScores = evaluateRangeStage0Scores(sn);
@@ -1021,6 +1041,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           final_decision: "SKIP",
           reject_reason: gateResult === "RANGE_GATE_BLOCK_REENTRY" ? "RISK_FAIL_REENTRY" : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE" ? "RISK_COOLDOWN" : "EDGE_FAIL_EXPECTANCY",
           stage1_result_code: stage1Code as any,
+          entry_blocked: rangeFinalBlockReason,
+          range_stage0_engine_taken: true,
+          range_stage0_exit_reason: rangeFinalBlockReason,
+          legacy_executor_path_taken: false,
           guidance: gateReason,
           required_move_pct,
           shortfall_pct,
@@ -1645,6 +1669,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             : "EDGE_FAIL_EXPECTANCY";
     if (reject_reason === "RISK_COOLDOWN" || reject_reason === "RISK_FAIL_REENTRY") risk_state = "COOLDOWN";
     supplemental_reasons.push(`RANGE_FINAL_BLOCK_${rangeFinalBlockReason}`);
+    range_stage0_exit_reason = rangeFinalBlockReason;
     return ret(
       {
         execution_state,
@@ -1656,6 +1681,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         target_stage: null,
         supplemental_reasons,
         stage1_result_code: rangeStage1Code as any,
+        entry_blocked: rangeFinalBlockReason,
+        range_stage0_engine_taken: true,
+        range_stage0_exit_reason: rangeFinalBlockReason,
+        legacy_executor_path_taken: false,
         required_move_pct,
         shortfall_pct,
         reject_reason,
@@ -1674,6 +1703,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   }
 
   if (!executorDecision || !executorDecision.entry_allowed) {
+    legacy_executor_path_taken = true;
     const br = executorDecision?.blocked_reason;
     legacy_block_original_reason = br ?? "executor_block_reason_missing";
     legacy_block_reason = br ?? "executor_block_reason_missing";
