@@ -283,6 +283,10 @@ function pack(
     reentry_cooldown_original_ms?: number | null;
     reentry_cooldown_effective_ms?: number | null;
     reentry_cooldown_reason?: string | null;
+    risk_cooldown_subreason?: string | null;
+    cooldown_remaining_ms?: number | null;
+    same_dir_cooldown_applied?: boolean;
+    blocked_regime_reason?: string | null;
     currentStage?: number;
     regime?: "TREND" | "RANGE" | "NO_TRADE";
     stage1_signal_relaxed?: boolean;
@@ -368,6 +372,10 @@ function pack(
     reentry_cooldown_original_ms: fields.reentry_cooldown_original_ms ?? null,
     reentry_cooldown_effective_ms: fields.reentry_cooldown_effective_ms ?? null,
     reentry_cooldown_reason: fields.reentry_cooldown_reason ?? null,
+    risk_cooldown_subreason: fields.risk_cooldown_subreason ?? null,
+    cooldown_remaining_ms: fields.cooldown_remaining_ms ?? null,
+    same_dir_cooldown_applied: fields.same_dir_cooldown_applied ?? false,
+    blocked_regime_reason: fields.blocked_regime_reason ?? null,
     currentStage: fields.currentStage,
     regime: fields.regime,
     stage1_signal_relaxed: fields.stage1_signal_relaxed,
@@ -496,6 +504,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let reentry_cooldown_original_ms: number | null = null;
   let reentry_cooldown_effective_ms: number | null = null;
   let reentry_cooldown_reason: string | null = null;
+  let risk_cooldown_subreason: string | null = null;
+  let cooldown_remaining_ms: number | null = null;
+  let same_dir_cooldown_applied = false;
+  let blocked_regime_reason: string | null = null;
   let stage1SignalRelaxed = false;
   let signalRelaxReason: string | null = null;
 
@@ -573,6 +585,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reentry_cooldown_original_ms?: number | null;
       reentry_cooldown_effective_ms?: number | null;
       reentry_cooldown_reason?: string | null;
+      risk_cooldown_subreason?: string | null;
+      cooldown_remaining_ms?: number | null;
+      same_dir_cooldown_applied?: boolean;
+      blocked_regime_reason?: string | null;
       stage1_direction_override_applied?: boolean;
       stage1_direction_override_reason?: string | null;
       original_policy_direction?: string | null;
@@ -685,6 +701,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reentry_cooldown_original_ms: extra.reentry_cooldown_original_ms ?? reentry_cooldown_original_ms,
       reentry_cooldown_effective_ms: extra.reentry_cooldown_effective_ms ?? reentry_cooldown_effective_ms,
       reentry_cooldown_reason: extra.reentry_cooldown_reason ?? reentry_cooldown_reason,
+      risk_cooldown_subreason: extra.risk_cooldown_subreason ?? risk_cooldown_subreason,
+      cooldown_remaining_ms: extra.cooldown_remaining_ms ?? cooldown_remaining_ms,
+      same_dir_cooldown_applied: extra.same_dir_cooldown_applied ?? same_dir_cooldown_applied,
+      blocked_regime_reason: extra.blocked_regime_reason ?? blocked_regime_reason,
       currentStage: extra.currentStage !== undefined ? extra.currentStage : input.currentStage,
       regime: extra.regime !== undefined ? extra.regime : input.regime,
       stage1_signal_relaxed: extra.stage1_signal_relaxed ?? stage1SignalRelaxed,
@@ -1083,6 +1103,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const rBlock = input.risk?.blockedRegimes?.[input.regime];
   if (rBlock && rBlock.until > input.now) {
     const remainingMs = rBlock.until - input.now;
+    blocked_regime_reason = rBlock.reason;
+    cooldown_remaining_ms = remainingMs;
     const nearEdgeRangeCandidate =
       input.currentStage === 0 &&
       input.regime === "RANGE" &&
@@ -1098,10 +1120,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     if (relaxModeCooldown) {
       risk_state = "SOFT_BLOCK";
+      risk_cooldown_subreason = "blocked_regime_relaxed_range_stage0";
       supplemental_reasons.push("RISK_COOLDOWN_RELAXED_RANGE_STAGE0");
       supplemental_reasons.push(`RISK_COOLDOWN_REASON_${String(rBlock.reason).toUpperCase()}`);
     } else {
       risk_state = "COOLDOWN";
+      risk_cooldown_subreason = "blocked_regime_active";
       if (!reject_reason) reject_reason = "RISK_COOLDOWN";
       final_decision = "REJECT";
       supplemental_reasons.push("RISK_COOLDOWN");
@@ -1114,6 +1138,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const lastClose = meta?.closedAt ?? 0;
     const elapsed = input.now - lastClose;
     const sameDirection = meta !== undefined && meta.side === intentSide;
+    same_dir_cooldown_applied = sameDirection;
     let waitMs = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
     reentry_cooldown_original_ms = waitMs;
     reentry_cooldown_effective_ms = waitMs;
@@ -1178,6 +1203,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     if (lastClose > 0 && elapsed < waitMs) {
       risk_state = "COOLDOWN";
+      risk_cooldown_subreason = "reentry_wait_active";
+      cooldown_remaining_ms = waitMs - elapsed;
       if (!reject_reason) reject_reason = "RISK_FAIL_REENTRY";
       final_decision = "REJECT";
       supplemental_reasons.push("RISK_FAIL_REENTRY");

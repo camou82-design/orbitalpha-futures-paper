@@ -327,6 +327,14 @@ export type PaperSymbolDecisionRecord = Readonly<{
   reentry_cooldown_effective_ms?: number | null;
   /** 완화/비완화 사유 코드 */
   reentry_cooldown_reason?: string | null;
+  /** RISK_COOLDOWN 세부 사유 코드 */
+  risk_cooldown_subreason?: string | null;
+  /** 현재 쿨다운 잔여 시간(ms) */
+  cooldown_remaining_ms?: number | null;
+  /** 동일 방향 재진입 배수가 적용됐는지 */
+  same_dir_cooldown_applied?: boolean;
+  /** blockedRegimes에서 내려온 원본 사유 */
+  blocked_regime_reason?: string | null;
   /** Stage 1 RANGE 방향 보정 적용 여부 */
   stage1_direction_override_applied?: boolean;
   /** 방향 보정 상세 사유 */

@@ -953,6 +953,10 @@ export class PaperEngine {
           // --- EXECUTION DETAILS ---
           stage1_result_code: d.stage1_result_code,
           reject_reason: d.reject_reason,
+          risk_cooldown_subreason: d.risk_cooldown_subreason ?? null,
+          cooldown_remaining_ms: d.cooldown_remaining_ms ?? null,
+          same_dir_cooldown_applied: d.same_dir_cooldown_applied ?? false,
+          blocked_regime_reason: d.blocked_regime_reason ?? null,
           guidance: d.guidance,
           required_move_pct: d.required_move_pct,
           shortfall_pct: d.shortfall_pct,
