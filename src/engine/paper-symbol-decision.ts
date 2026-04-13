@@ -339,6 +339,10 @@ function pack(
     blocked_regime_reason?: string | null;
     reentry_wait_ms?: number | null;
     reentry_elapsed_ms?: number | null;
+    blocked_regime_until_bypass_applied?: boolean;
+    blocked_regime_until_bypass_reason?: string | null;
+    blocked_regime_original_until_ms?: number | null;
+    blocked_regime_original_reason?: string | null;
     legacy_block_reason?: string | null;
     legacy_regime_gate?: string | null;
     legacy_gate_source?: string | null;
@@ -438,6 +442,10 @@ function pack(
     blocked_regime_reason: fields.blocked_regime_reason ?? null,
     reentry_wait_ms: fields.reentry_wait_ms ?? null,
     reentry_elapsed_ms: fields.reentry_elapsed_ms ?? null,
+    blocked_regime_until_bypass_applied: fields.blocked_regime_until_bypass_applied ?? false,
+    blocked_regime_until_bypass_reason: fields.blocked_regime_until_bypass_reason ?? null,
+    blocked_regime_original_until_ms: fields.blocked_regime_original_until_ms ?? null,
+    blocked_regime_original_reason: fields.blocked_regime_original_reason ?? null,
     legacy_block_reason: fields.legacy_block_reason ?? null,
     legacy_regime_gate: fields.legacy_regime_gate ?? null,
     legacy_gate_source: fields.legacy_gate_source ?? null,
@@ -580,6 +588,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let blocked_regime_reason: string | null = null;
   let reentry_wait_ms: number | null = null;
   let reentry_elapsed_ms: number | null = null;
+  let blocked_regime_until_bypass_applied = false;
+  let blocked_regime_until_bypass_reason: string | null = null;
+  let blocked_regime_original_until_ms: number | null = null;
+  let blocked_regime_original_reason: string | null = null;
   let legacy_block_reason: string | null = null;
   let legacy_regime_gate: string | null = null;
   let legacy_gate_source: string | null = null;
@@ -671,6 +683,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       blocked_regime_reason?: string | null;
       reentry_wait_ms?: number | null;
       reentry_elapsed_ms?: number | null;
+      blocked_regime_until_bypass_applied?: boolean;
+      blocked_regime_until_bypass_reason?: string | null;
+      blocked_regime_original_until_ms?: number | null;
+      blocked_regime_original_reason?: string | null;
       legacy_block_reason?: string | null;
       legacy_regime_gate?: string | null;
       legacy_gate_source?: string | null;
@@ -797,6 +813,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       blocked_regime_reason: extra.blocked_regime_reason ?? blocked_regime_reason,
       reentry_wait_ms: extra.reentry_wait_ms ?? reentry_wait_ms,
       reentry_elapsed_ms: extra.reentry_elapsed_ms ?? reentry_elapsed_ms,
+      blocked_regime_until_bypass_applied:
+        extra.blocked_regime_until_bypass_applied ?? blocked_regime_until_bypass_applied,
+      blocked_regime_until_bypass_reason:
+        extra.blocked_regime_until_bypass_reason ?? blocked_regime_until_bypass_reason,
+      blocked_regime_original_until_ms:
+        extra.blocked_regime_original_until_ms ?? blocked_regime_original_until_ms,
+      blocked_regime_original_reason:
+        extra.blocked_regime_original_reason ?? blocked_regime_original_reason,
       legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
       legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
       legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
@@ -1354,15 +1378,50 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       supplemental_reasons.push("RISK_COOLDOWN_RELAXED_RANGE_STAGE0");
       supplemental_reasons.push(`RISK_COOLDOWN_REASON_${String(rBlock.reason).toUpperCase()}`);
     } else {
-      risk_state = "COOLDOWN";
-      risk_cooldown_subreason =
-        rangeStage0SignalActive && streakSuspend
-          ? "blocked_regime_loss_streak_suspend"
-          : "blocked_regime_until_active";
-      if (!reject_reason) reject_reason = "RISK_COOLDOWN";
-      final_decision = "REJECT";
-      supplemental_reasons.push("RISK_COOLDOWN");
-      supplemental_reasons.push(`RISK_COOLDOWN_REASON_${String(rBlock.reason).toUpperCase()}`);
+      const regimeStateIsRange = sn.regimeStateDiag === "RANGE" || input.regime === "RANGE";
+      const upperRiskHit =
+        input.risk?.engineBlocked === true ||
+        (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
+        input.regimeDetail?.dump_protection_hit === true ||
+        input.regimeDetail?.volatility_guard_hit === true;
+      const previewMeta = input.lastCloseMetaBySymbol?.get(String(sym));
+      const previewSameDir = previewMeta !== undefined && previewMeta.side === intentSide;
+      const previewWaitMs = previewSameDir
+        ? input.reentryCooldownMs * input.sameDirCooldownMult
+        : input.reentryCooldownMs;
+      const previewElapsedMs = input.now - (previewMeta?.closedAt ?? 0);
+      const previewReentryActive =
+        (previewMeta?.closedAt ?? 0) > 0 &&
+        previewWaitMs > 0 &&
+        previewElapsedMs < previewWaitMs;
+      const bypassBlockedRegimeUntilOnly =
+        input.config.paperTestBypassBlockedRegimeUntilRangeStage0 === true &&
+        regimeStateIsRange &&
+        input.currentStage === 0 &&
+        rangeStage0SignalActive &&
+        !upperRiskHit &&
+        !streakSuspend &&
+        !previewSameDir &&
+        !previewReentryActive;
+      if (bypassBlockedRegimeUntilOnly) {
+        blocked_regime_until_bypass_applied = true;
+        blocked_regime_until_bypass_reason = "range_stage0_signal_alive_blocked_regime_until_only";
+        blocked_regime_original_until_ms = remainingMs;
+        blocked_regime_original_reason = rBlock.reason;
+        risk_state = "SOFT_BLOCK";
+        risk_cooldown_subreason = "blocked_regime_until_bypassed_test";
+        supplemental_reasons.push("BLOCKED_REGIME_UNTIL_BYPASS_APPLIED");
+      } else {
+        risk_state = "COOLDOWN";
+        risk_cooldown_subreason =
+          rangeStage0SignalActive && streakSuspend
+            ? "blocked_regime_loss_streak_suspend"
+            : "blocked_regime_until_active";
+        if (!reject_reason) reject_reason = "RISK_COOLDOWN";
+        final_decision = "REJECT";
+        supplemental_reasons.push("RISK_COOLDOWN");
+        supplemental_reasons.push(`RISK_COOLDOWN_REASON_${String(rBlock.reason).toUpperCase()}`);
+      }
     }
   }
 

@@ -75,6 +75,8 @@ export type EngineConfig = Readonly<{
   paperReentryCooldownMs: number;
   /** Test-only: bypass legacy block path for RANGE stage0 candidate diagnostics. */
   paperTestBypassLegacyRangeStage0: boolean;
+  /** Test-only: bypass only blocked_regime_until_active for RANGE stage0 candidate diagnostics. */
+  paperTestBypassBlockedRegimeUntilRangeStage0: boolean;
   /** Paper-only: round-trip slippage estimate in bps (1bp = 0.0001). Used by risk fee filter. */
   paperSlippageBps: number;
   /** Paper-only: if today's net PnL <= -limit, block all new entries (<=0 disables). */
@@ -341,6 +343,14 @@ export type PaperSymbolDecisionRecord = Readonly<{
   reentry_wait_ms?: number | null;
   /** 마지막 청산 후 경과(ms) */
   reentry_elapsed_ms?: number | null;
+  /** 테스트: blocked_regime_until_active 단일 우회 적용 여부 */
+  blocked_regime_until_bypass_applied?: boolean;
+  /** 테스트: blocked_regime_until_active 우회 사유 */
+  blocked_regime_until_bypass_reason?: string | null;
+  /** 테스트: 우회 전 blocked regime 잔여(ms) */
+  blocked_regime_original_until_ms?: number | null;
+  /** 테스트: 우회 전 blocked regime 원본 사유 */
+  blocked_regime_original_reason?: string | null;
   /** 레거시 차단 원인 (executor blocked_reason 원본) */
   legacy_block_reason?: string | null;
   /** 레거시 레짐 게이트 분류값 */
