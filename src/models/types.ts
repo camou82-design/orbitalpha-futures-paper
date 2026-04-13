@@ -73,6 +73,8 @@ export type EngineConfig = Readonly<{
    * Paper-only; cuts fee churn from immediate re-entry after candidate_lost.
    */
   paperReentryCooldownMs: number;
+  /** Test-only: bypass legacy block path for RANGE stage0 candidate diagnostics. */
+  paperTestBypassLegacyRangeStage0: boolean;
   /** Paper-only: round-trip slippage estimate in bps (1bp = 0.0001). Used by risk fee filter. */
   paperSlippageBps: number;
   /** Paper-only: if today's net PnL <= -limit, block all new entries (<=0 disables). */
@@ -345,6 +347,12 @@ export type PaperSymbolDecisionRecord = Readonly<{
   override_by_legacy?: boolean;
   /** Stage1 차단 기원 레이어 */
   stage1_block_origin?: string | null;
+  /** 테스트: 레거시 차단 우회 적용 여부 */
+  legacy_block_test_bypass_applied?: boolean;
+  /** 테스트: 레거시 차단 우회 사유 */
+  legacy_block_test_bypass_reason?: string | null;
+  /** 테스트: 우회 전 원본 차단 사유 */
+  legacy_block_original_reason?: string | null;
   /** Stage 1 RANGE 방향 보정 적용 여부 */
   stage1_direction_override_applied?: boolean;
   /** 방향 보정 상세 사유 */

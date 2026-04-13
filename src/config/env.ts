@@ -61,6 +61,7 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
   const paperTakerFeeRaw = env.ORBITALPHA_PAPER_FUTURES_TAKER_FEE_RATE ?? env.TAKER_FEE_RATE;
   const fundingIntervalRaw = env.ORBITALPHA_PAPER_FUTURES_FUNDING_INTERVAL_HOURS;
   const paperEntryRelaxed = parseBool(env.ORBITALPHA_PAPER_ENTRY_RELAXED, false);
+  const paperTestBypassLegacyRangeStage0 = parseBool(env.ORBITALPHA_PAPER_TEST_BYPASS_LEGACY_RANGE_STAGE0, false);
   const defaultMoveMult = paperEntryRelaxed ? 1.05 : ENTRY_GATE_CONFIG.minMoveVsCostMultiplier;
   const paperGateMinMoveMultiplier = parseNumber(env.ORBITALPHA_PAPER_GATE_MOVE_MULT, defaultMoveMult);
   const paperRequireHigherTfAlign = parseBool(env.ORBITALPHA_PAPER_GATE_REQUIRE_HIGHER_TF, !paperEntryRelaxed);
@@ -129,6 +130,7 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     dataDir,
     logLevel: parseLogLevel(env.LOG_LEVEL),
     paperEntryRelaxed,
+    paperTestBypassLegacyRangeStage0,
     paperGateMinMoveMultiplier,
     paperRequireHigherTfAlign,
     paperQualityMinScore,

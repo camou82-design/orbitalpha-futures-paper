@@ -490,6 +490,7 @@ export class PaperEngine {
       paper_sideways_ema_gap_threshold: config.paperSidewaysEmaGapThreshold,
       paper_reentry_cooldown_ms: config.paperReentryCooldownMs,
       paper_reentry_same_dir_mult: 2,
+      paper_test_bypass_legacy_range_stage0: config.paperTestBypassLegacyRangeStage0,
       paper_max_open_positions: config.paperMaxOpenPositions
     });
   }
@@ -961,6 +962,9 @@ export class PaperEngine {
           legacy_gate_source: d.legacy_gate_source ?? null,
           override_by_legacy: d.override_by_legacy ?? false,
           stage1_block_origin: d.stage1_block_origin ?? null,
+          legacy_block_test_bypass_applied: d.legacy_block_test_bypass_applied ?? false,
+          legacy_block_test_bypass_reason: d.legacy_block_test_bypass_reason ?? null,
+          legacy_block_original_reason: d.legacy_block_original_reason ?? null,
           side: res.intentSide,
           entry_intent_type: d.entry_intent_type,
           entry_blocked: res.executorDecision?.blocked_reason ?? (d.reject_reason !== null ? d.reject_reason : false),

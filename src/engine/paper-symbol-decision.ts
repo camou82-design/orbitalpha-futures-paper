@@ -292,6 +292,9 @@ function pack(
     legacy_gate_source?: string | null;
     override_by_legacy?: boolean;
     stage1_block_origin?: string | null;
+    legacy_block_test_bypass_applied?: boolean;
+    legacy_block_test_bypass_reason?: string | null;
+    legacy_block_original_reason?: string | null;
     currentStage?: number;
     regime?: "TREND" | "RANGE" | "NO_TRADE";
     stage1_signal_relaxed?: boolean;
@@ -386,6 +389,9 @@ function pack(
     legacy_gate_source: fields.legacy_gate_source ?? null,
     override_by_legacy: fields.override_by_legacy ?? false,
     stage1_block_origin: fields.stage1_block_origin ?? null,
+    legacy_block_test_bypass_applied: fields.legacy_block_test_bypass_applied ?? false,
+    legacy_block_test_bypass_reason: fields.legacy_block_test_bypass_reason ?? null,
+    legacy_block_original_reason: fields.legacy_block_original_reason ?? null,
     currentStage: fields.currentStage,
     regime: fields.regime,
     stage1_signal_relaxed: fields.stage1_signal_relaxed,
@@ -523,6 +529,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let legacy_gate_source: string | null = null;
   let override_by_legacy = false;
   let stage1_block_origin: string | null = null;
+  let legacy_block_test_bypass_applied = false;
+  let legacy_block_test_bypass_reason: string | null = null;
+  let legacy_block_original_reason: string | null = null;
   let stage1SignalRelaxed = false;
   let signalRelaxReason: string | null = null;
 
@@ -609,6 +618,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       legacy_gate_source?: string | null;
       override_by_legacy?: boolean;
       stage1_block_origin?: string | null;
+      legacy_block_test_bypass_applied?: boolean;
+      legacy_block_test_bypass_reason?: string | null;
+      legacy_block_original_reason?: string | null;
       stage1_direction_override_applied?: boolean;
       stage1_direction_override_reason?: string | null;
       original_policy_direction?: string | null;
@@ -730,6 +742,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
       override_by_legacy: extra.override_by_legacy ?? override_by_legacy,
       stage1_block_origin: extra.stage1_block_origin ?? stage1_block_origin,
+      legacy_block_test_bypass_applied: extra.legacy_block_test_bypass_applied ?? legacy_block_test_bypass_applied,
+      legacy_block_test_bypass_reason: extra.legacy_block_test_bypass_reason ?? legacy_block_test_bypass_reason,
+      legacy_block_original_reason: extra.legacy_block_original_reason ?? legacy_block_original_reason,
       currentStage: extra.currentStage !== undefined ? extra.currentStage : input.currentStage,
       regime: extra.regime !== undefined ? extra.regime : input.regime,
       stage1_signal_relaxed: extra.stage1_signal_relaxed ?? stage1SignalRelaxed,
@@ -1348,6 +1363,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   if (!executorDecision || !executorDecision.entry_allowed) {
     const br = executorDecision?.blocked_reason;
+    legacy_block_original_reason = br ?? "executor_block_reason_missing";
     legacy_block_reason = br ?? "executor_block_reason_missing";
     legacy_regime_gate = input.currentStage === 0 && !input.isAmbiguous ? "STAGE1_BLOCKED_REGIME" : "STAGE1_EXEC_PENDING";
     legacy_gate_source = executorDecision?.executor ? `executor_${String(executorDecision.executor).toLowerCase()}` : "executor_unknown";
@@ -1368,65 +1384,112 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const invalidTier = (executorDecision?.detail?.highway_invalid_tier as string | undefined) ?? null;
     const invalidReasonsRaw = executorDecision?.detail?.highway_invalid_reasons;
     const invalidReasons = Array.isArray(invalidReasonsRaw) ? invalidReasonsRaw : [];
+    const baseCandidateExists =
+      sn.signal === "paper_long_candidate" ||
+      sn.signal === "paper_short_candidate" ||
+      signal_state === "LONG_CANDIDATE" ||
+      signal_state === "SHORT_CANDIDATE";
+    const requiredMoveLowEnough = typeof required_move_pct === "number" && required_move_pct <= 0.25;
+    const rangeStage0LegacyPath =
+      (sn.regimeStateDiag ?? input.regime) === "RANGE" &&
+      input.currentStage === 0 &&
+      baseCandidateExists &&
+      requiredMoveLowEnough;
+    const detailDumpHit = input.regimeDetail?.dump_protection_hit === true;
+    const detailVolHit = input.regimeDetail?.volatility_guard_hit === true;
+    const severeRiskLock =
+      input.risk?.engineBlocked === true ||
+      (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
+      detailDumpHit ||
+      detailVolHit;
+    const testBypassAllowed =
+      input.config.paperTestBypassLegacyRangeStage0 === true &&
+      rangeStage0LegacyPath &&
+      !severeRiskLock &&
+      reject_reason !== "RISK_COOLDOWN" &&
+      reject_reason !== "RISK_FAIL_REENTRY";
 
-    // Round 4 & 5: Active Stage 1 candidate evaluation (Execution over Review)
-    final_decision = input.currentStage === 0 ? "SKIP" : "REJECT";
-
-    if (input.isAmbiguous && final_decision === "SKIP") {
-      const ambCode = input.regime === "TREND" ? "AMBIGUOUS_TREND_REVIEW" : "AMBIGUOUS_RANGE_REVIEW";
-      reject_reason = ambCode;
-      execution_state = ambCode;
+    if (testBypassAllowed && executorDecision) {
+      legacy_block_test_bypass_applied = true;
+      legacy_block_test_bypass_reason = "range_stage0_legacy_block_test_bypass";
+      supplemental_reasons.push("LEGACY_BLOCK_TEST_BYPASS_APPLIED");
+      executorDecision = {
+        ...executorDecision,
+        entry_allowed: true,
+        blocked_reason: null,
+        target_stage: executorDecision.target_stage ?? 1,
+        guidance: "test bypass: legacy range stage0 block skipped"
+      };
+      reject_reason = null;
+      final_decision = "SKIP";
     }
 
-    if (br) supplemental_reasons.push(`EXEC_BLOCKED_${br.toUpperCase()}`);
-    if (invalidTier) supplemental_reasons.push(`HIGHWAY_INVALID_TIER_${invalidTier.toUpperCase()}`);
-    for (const reason of invalidReasons.slice(0, 3)) {
-      supplemental_reasons.push(`HIGHWAY_INVALID_SUBREASON_${String(reason).toUpperCase()}`);
-    }
-    return ret(
-      {
-        execution_state,
-        final_decision,
-        ai_decision: "N/A",
-        adaptive_decision: "N/A",
-        guidance: executorDecision?.guidance ?? null,
-        next_action: executorDecision?.next_action ?? null,
-        invalidate_condition: executorDecision?.invalidate_condition ?? null,
-        risk_note: executorDecision?.risk_note ?? null,
-        watch_zone: executorDecision?.watch_zone ?? null,
-        entry_progress: executorDecision?.entry_progress ?? null,
-        target_stage: null,
-        supplemental_reasons,
-        stage1_result_code: stage1BlockCode as any,
-        legacy_block_reason,
-        legacy_regime_gate,
-        legacy_gate_source,
-        override_by_legacy,
-        stage1_block_origin,
-        stage1_signal_relaxed: stage1SignalRelaxed,
-        signal_relax_reason: signalRelaxReason,
-        stage1_soft_candidate_enter_applied: stage1SoftCandidateMicroEnter,
-        stage1_soft_candidate_original_block_reason: stage1SoftCandidateMicroEnter ? executorBlockReasonOriginal : null,
-        stage1_soft_candidate_size_mult: stage1SoftCandidateMicroEnter ? 0.4 : null,
-        stage1_cost_soft_bypass_applied: stage1CostSoftBypassApplied,
-        stage1_cost_soft_bypass_reason: stage1CostSoftBypassReason,
-        stage1_cost_shortfall_pct: shortfall_pct,
-        stage1_cost_shortfall_usd: ((required_move_pct ?? 0) > 0 && shortfall_pct && totalCost !== null) ? (totalCost * shortfall_pct) : null,
-        stage1_cost_micro_size_mult: stage1CostSoftBypassApplied ? 0.5 : null,
-        currentStage: input.currentStage,
-        required_move_pct,
-        shortfall_pct
-      },
-      {
-        intentSide,
-        executorDecision,
-        adaptiveOk: false,
-        adaptiveDirection: null,
-        adaptiveDetail: null,
-        adaptiveResult: null,
-        aiGatePassed: false
+    if (executorDecision?.entry_allowed) {
+      stage1_block_origin = "legacy_executor_gate_bypassed_for_test";
+      override_by_legacy = false;
+    } else {
+      // Round 4 & 5: Active Stage 1 candidate evaluation (Execution over Review)
+      final_decision = input.currentStage === 0 ? "SKIP" : "REJECT";
+
+      if (input.isAmbiguous && final_decision === "SKIP") {
+        const ambCode = input.regime === "TREND" ? "AMBIGUOUS_TREND_REVIEW" : "AMBIGUOUS_RANGE_REVIEW";
+        reject_reason = ambCode;
+        execution_state = ambCode;
       }
-    );
+
+      if (br) supplemental_reasons.push(`EXEC_BLOCKED_${br.toUpperCase()}`);
+      if (invalidTier) supplemental_reasons.push(`HIGHWAY_INVALID_TIER_${invalidTier.toUpperCase()}`);
+      for (const reason of invalidReasons.slice(0, 3)) {
+        supplemental_reasons.push(`HIGHWAY_INVALID_SUBREASON_${String(reason).toUpperCase()}`);
+      }
+      return ret(
+        {
+          execution_state,
+          final_decision,
+          ai_decision: "N/A",
+          adaptive_decision: "N/A",
+          guidance: executorDecision?.guidance ?? null,
+          next_action: executorDecision?.next_action ?? null,
+          invalidate_condition: executorDecision?.invalidate_condition ?? null,
+          risk_note: executorDecision?.risk_note ?? null,
+          watch_zone: executorDecision?.watch_zone ?? null,
+          entry_progress: executorDecision?.entry_progress ?? null,
+          target_stage: null,
+          supplemental_reasons,
+          stage1_result_code: stage1BlockCode as any,
+          legacy_block_reason,
+          legacy_regime_gate,
+          legacy_gate_source,
+          override_by_legacy,
+          stage1_block_origin,
+          legacy_block_test_bypass_applied,
+          legacy_block_test_bypass_reason,
+          legacy_block_original_reason,
+          stage1_signal_relaxed: stage1SignalRelaxed,
+          signal_relax_reason: signalRelaxReason,
+          stage1_soft_candidate_enter_applied: stage1SoftCandidateMicroEnter,
+          stage1_soft_candidate_original_block_reason: stage1SoftCandidateMicroEnter ? executorBlockReasonOriginal : null,
+          stage1_soft_candidate_size_mult: stage1SoftCandidateMicroEnter ? 0.4 : null,
+          stage1_cost_soft_bypass_applied: stage1CostSoftBypassApplied,
+          stage1_cost_soft_bypass_reason: stage1CostSoftBypassReason,
+          stage1_cost_shortfall_pct: shortfall_pct,
+          stage1_cost_shortfall_usd: ((required_move_pct ?? 0) > 0 && shortfall_pct && totalCost !== null) ? (totalCost * shortfall_pct) : null,
+          stage1_cost_micro_size_mult: stage1CostSoftBypassApplied ? 0.5 : null,
+          currentStage: input.currentStage,
+          required_move_pct,
+          shortfall_pct
+        },
+        {
+          intentSide,
+          executorDecision,
+          adaptiveOk: false,
+          adaptiveDirection: null,
+          adaptiveDetail: null,
+          adaptiveResult: null,
+          aiGatePassed: false
+        }
+      );
+    }
   }
 
   const lossStreak = input.risk?.recentLossStreakByMode?.[input.regime] ?? 0;
