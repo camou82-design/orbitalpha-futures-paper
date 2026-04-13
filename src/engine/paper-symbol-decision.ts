@@ -149,10 +149,12 @@ function clamp01(x: number): number {
 }
 
 function evaluateRangeStage0Signal(sn: SymbolSnapshotLike): { signal: RangeSignalState; reason: string; side: "long" | "short" | null } {
+  const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
+  if (boxPos >= 0.68) return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_reversal_short_priority", side: "short" };
+  if (boxPos <= 0.32) return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_reversal_long_priority", side: "long" };
   if (sn.signal === "paper_long_candidate") return { signal: "RANGE_LONG_CANDIDATE", reason: "base_candidate_long", side: "long" };
   if (sn.signal === "paper_short_candidate") return { signal: "RANGE_SHORT_CANDIDATE", reason: "base_candidate_short", side: "short" };
 
-  const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
   const conf = clamp01(sn.rangeConfidence ?? 0);
   const cohesion = clamp01(sn.boxCohesion01 ?? 0);
   const oscillation = clamp01(sn.rangeOscillationScore ?? 0);
@@ -384,6 +386,11 @@ function pack(
     range_upper_edge_near?: boolean;
     range_center_wait?: boolean;
     range_final_selected_side?: "long" | "short" | "none" | null;
+    range_reversal_zone?: "upper" | "lower" | "mid" | null;
+    range_reversal_short_eval_started?: boolean;
+    range_reversal_long_exit_triggered?: boolean;
+    range_reversal_short_entry_allowed?: boolean;
+    range_reversal_short_entry_block_reason?: string | null;
     legacy_block_reason?: string | null;
     legacy_regime_gate?: string | null;
     legacy_gate_source?: string | null;
@@ -524,6 +531,11 @@ function pack(
     range_upper_edge_near: fields.range_upper_edge_near ?? false,
     range_center_wait: fields.range_center_wait ?? false,
     range_final_selected_side: fields.range_final_selected_side ?? null,
+    range_reversal_zone: fields.range_reversal_zone ?? null,
+    range_reversal_short_eval_started: fields.range_reversal_short_eval_started ?? false,
+    range_reversal_long_exit_triggered: fields.range_reversal_long_exit_triggered ?? false,
+    range_reversal_short_entry_allowed: fields.range_reversal_short_entry_allowed ?? false,
+    range_reversal_short_entry_block_reason: fields.range_reversal_short_entry_block_reason ?? null,
     legacy_block_reason: fields.legacy_block_reason ?? null,
     legacy_regime_gate: fields.legacy_regime_gate ?? null,
     legacy_gate_source: fields.legacy_gate_source ?? null,
@@ -703,6 +715,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_upper_edge_near = false;
   let range_center_wait = false;
   let range_final_selected_side: "long" | "short" | "none" | null = null;
+  let range_reversal_zone: "upper" | "lower" | "mid" | null = null;
+  let range_reversal_short_eval_started = false;
+  let range_reversal_long_exit_triggered = false;
+  let range_reversal_short_entry_allowed = false;
+  let range_reversal_short_entry_block_reason: string | null = null;
   let range_stage0_engine_taken = false;
   let range_stage0_exit_reason: string | null = null;
   let legacy_executor_path_taken = false;
@@ -838,6 +855,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_upper_edge_near?: boolean;
       range_center_wait?: boolean;
       range_final_selected_side?: "long" | "short" | "none" | null;
+      range_reversal_zone?: "upper" | "lower" | "mid" | null;
+      range_reversal_short_eval_started?: boolean;
+      range_reversal_long_exit_triggered?: boolean;
+      range_reversal_short_entry_allowed?: boolean;
+      range_reversal_short_entry_block_reason?: string | null;
       legacy_block_reason?: string | null;
       legacy_regime_gate?: string | null;
       legacy_gate_source?: string | null;
@@ -1021,6 +1043,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_upper_edge_near: extra.range_upper_edge_near ?? range_upper_edge_near,
       range_center_wait: extra.range_center_wait ?? range_center_wait,
       range_final_selected_side: extra.range_final_selected_side ?? range_final_selected_side,
+      range_reversal_zone: extra.range_reversal_zone ?? range_reversal_zone,
+      range_reversal_short_eval_started: extra.range_reversal_short_eval_started ?? range_reversal_short_eval_started,
+      range_reversal_long_exit_triggered: extra.range_reversal_long_exit_triggered ?? range_reversal_long_exit_triggered,
+      range_reversal_short_entry_allowed: extra.range_reversal_short_entry_allowed ?? range_reversal_short_entry_allowed,
+      range_reversal_short_entry_block_reason:
+        extra.range_reversal_short_entry_block_reason ?? range_reversal_short_entry_block_reason,
       legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
       legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
       legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
@@ -1157,6 +1185,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
     range_upper_edge_near = boxPos >= 0.68;
     range_center_wait = boxPos > 0.42 && boxPos < 0.58;
+    range_reversal_zone = range_upper_edge_near ? "upper" : (boxPos <= 0.32 ? "lower" : "mid");
+    range_reversal_short_eval_started = range_reversal_zone === "upper";
+    range_reversal_long_exit_triggered = range_reversal_short_eval_started && input.hasOpenPosition;
     const rangeLowerEdge = boxPos <= 0.38;
     const rangeExitRiskOk = (sn.regimeExitRisk ?? 0) <= 0.62;
     const rangeConfidenceOk = (sn.rangeConfidence ?? 0) >= 0.45;
@@ -1181,6 +1212,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     } else if (rangeSignal.side === "long") {
       range_short_allowed_reason = range_center_wait ? "range_center_wait" : "range_long_path";
     }
+    range_reversal_short_entry_allowed = range_short_allowed;
+    range_reversal_short_entry_block_reason = range_short_allowed ? null : range_short_allowed_reason;
     const boxMiddle = boxPos > 0.42 && boxPos < 0.58;
     const lowConfidence = rangeScores.rangeSignalScore < 0.34 || rangeScores.rangeEntryScore < 0.36;
     let reentryBlocked = false;
@@ -1381,6 +1414,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           range_soft_suspend_size_mult: range_soft_suspend_size_mult,
           range_soft_suspend_cooldown_ms: range_soft_suspend_cooldown_ms,
           range_soft_suspend_same_direction_restricted: range_soft_suspend_same_direction_restricted,
+          range_reversal_zone: range_reversal_zone,
+          range_reversal_short_eval_started: range_reversal_short_eval_started,
+          range_reversal_long_exit_triggered: range_reversal_long_exit_triggered,
+          range_reversal_short_entry_allowed: range_reversal_short_entry_allowed,
+          range_reversal_short_entry_block_reason: range_reversal_short_entry_block_reason,
           reentry_wait_ms: rangeReentryWaitMsOut,
           reentry_elapsed_ms: rangeReentryElapsedMsOut,
           guidance: gateReason,
@@ -2514,6 +2552,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
               range_upper_edge_near: range_upper_edge_near,
               range_center_wait: range_center_wait,
               range_final_selected_side: "none",
+              range_reversal_zone: range_reversal_zone,
+              range_reversal_short_eval_started: range_reversal_short_eval_started,
+              range_reversal_long_exit_triggered: range_reversal_long_exit_triggered,
+              range_reversal_short_entry_allowed: range_reversal_short_entry_allowed,
+              range_reversal_short_entry_block_reason: range_reversal_short_entry_block_reason,
               long_only_restriction: true,
               original_signal_state: "SHORT_CANDIDATE",
               final_signal_state: "SHORT_CANDIDATE_RANGE_WAIT",
@@ -2672,7 +2715,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         range_short_allowed_reason: range_short_allowed_reason,
         range_upper_edge_near: range_upper_edge_near,
         range_center_wait: range_center_wait,
-        range_final_selected_side: adaptive.direction
+        range_final_selected_side: adaptive.direction,
+        range_reversal_zone: range_reversal_zone,
+        range_reversal_short_eval_started: range_reversal_short_eval_started,
+        range_reversal_long_exit_triggered: range_reversal_long_exit_triggered,
+        range_reversal_short_entry_allowed: range_reversal_short_entry_allowed,
+        range_reversal_short_entry_block_reason: range_reversal_short_entry_block_reason
       },
       {
         intentSide: intentSide ?? (workingSignal === "paper_long_candidate" || workingSignal === "none" ? "long" : "short"),

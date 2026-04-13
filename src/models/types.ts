@@ -425,6 +425,16 @@ export type PaperSymbolDecisionRecord = Readonly<{
   range_center_wait?: boolean;
   /** RANGE 최종 선택 방향 */
   range_final_selected_side?: "long" | "short" | "none" | null;
+  /** RANGE 반전 구간 라벨 */
+  range_reversal_zone?: "upper" | "lower" | "mid" | null;
+  /** RANGE 상단 반전 숏 평가 시작 여부 */
+  range_reversal_short_eval_started?: boolean;
+  /** RANGE 상단에서 기존 롱 정리 트리거 여부 */
+  range_reversal_long_exit_triggered?: boolean;
+  /** RANGE 상단 반전 숏 진입 허용 여부 */
+  range_reversal_short_entry_allowed?: boolean;
+  /** RANGE 상단 반전 숏 진입 차단 사유 */
+  range_reversal_short_entry_block_reason?: string | null;
   /** 레거시 차단 원인 (executor blocked_reason 원본) */
   legacy_block_reason?: string | null;
   /** 레거시 레짐 게이트 분류값 */
