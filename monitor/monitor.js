@@ -463,12 +463,24 @@
   function symbolHeadline(sym, bundle) {
     const pos = openForSymbol(bundle, sym);
     const s = snapBySymbol(bundle, sym) || {};
+    const es = bundle.engineState;
+    const pip =
+      es && es.symbol_decisions && es.symbol_decisions[sym] && es.symbol_decisions[sym].decision
+        ? es.symbol_decisions[sym].decision
+        : null;
     const mark = typeof s.lastPrice === "number" ? s.lastPrice : null;
     if (pos) {
       const sideK = pos.side === "long" ? "롱" : pos.side === "short" ? "숏" : pos.side;
       const pnl = estimatePnlUsd(pos, mark);
       const pnlStr = pnl !== null ? " · 추정 손익 " + formatUsd(pnl) : "";
       return sym + " · " + sideK + " 포지션 보유 중" + pnlStr;
+    }
+    if (pip && String(pip.regime) === "RANGE") {
+      if (pip.range_cost_warning_applied === true) return sym + " · 비용 경고로 보수 관찰 중";
+      if (pip.range_center_wait === true) return sym + " · 박스 중단 대기";
+      if (pip.range_upper_edge_near === true && pip.range_short_allowed === true) return sym + " · 박스 상단 근접";
+      if (String(pip.range_short_allowed_reason || "") === "range_lower_zone_short_forbidden") return sym + " · 신규 롱 대기";
+      return sym + " · 기대값 애매 구간 대기";
     }
     const sig = s.signal || "none";
     if (sig === "paper_long_candidate") return sym + " · 롱 후보 감지";
@@ -479,6 +491,11 @@
   function symbolOneLiner(sym, bundle) {
     const pos = openForSymbol(bundle, sym);
     const s = snapBySymbol(bundle, sym) || {};
+    const es = bundle.engineState;
+    const pip =
+      es && es.symbol_decisions && es.symbol_decisions[sym] && es.symbol_decisions[sym].decision
+        ? es.symbol_decisions[sym].decision
+        : null;
     if (pos) {
       return (
         "진입가 " +
@@ -489,6 +506,17 @@
         String(pos.leverage ?? "—") +
         "x"
       );
+    }
+    if (pip && String(pip.regime) === "RANGE") {
+      const boxPos = typeof pip.box_position_diag === "number" ? Number(pip.box_position_diag) : null;
+      const boxTxt = boxPos === null ? "박스 위치 산출 중" : "박스 위치 " + boxPos.toFixed(2);
+      if (pip.range_center_wait === true) return boxTxt + " · 중앙 구간이라 진입 대기";
+      if (pip.range_upper_edge_near === true && pip.range_short_allowed === true)
+        return boxTxt + " · 상단 근접 숏 조건 충족으로 진입 평가 중";
+      if (String(pip.range_short_allowed_reason || "") === "range_lower_zone_short_forbidden")
+        return boxTxt + " · 하단권 숏 금지, 롱 반응 신호 대기";
+      if (pip.range_cost_warning_applied === true) return boxTxt + " · 비용 경고 반영, 보수 관찰 유지";
+      return boxTxt + " · 자리 기반 기대값 재평가 중";
     }
     const sig = s.signal || "none";
     const q = typeof s.qualityScore === "number" ? s.qualityScore : null;
