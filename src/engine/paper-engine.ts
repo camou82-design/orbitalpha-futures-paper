@@ -930,11 +930,18 @@ export class PaperEngine {
           regimeDetected.regime === "TREND";
 
         this.logger.info("PAPER_ENTRY_LINE", {
+          paper_entry_line_trace_marker: "paper_entry_line_v2_legacy_trace",
           symbol: String(sym),
           decision_source: isHighwayExecutor ? "HIGHWAY_CORE" : "LEGACY_RANGE",
+          legacy_block_reason: d.legacy_block_reason ?? null,
+          legacy_regime_gate: d.legacy_regime_gate ?? null,
+          legacy_gate_source: d.legacy_gate_source ?? null,
+          override_by_legacy: d.override_by_legacy ?? false,
+          stage1_block_origin: d.stage1_block_origin ?? null,
           side: res.intentSide,
           entry_intent_type: d.entry_intent_type,
-          entry_blocked: d.reject_reason !== null ? d.reject_reason : false,
+          executor_blocked_reason_direct: res.executorDecision?.blocked_reason ?? null,
+          entry_blocked: res.executorDecision?.blocked_reason ?? (d.reject_reason !== null ? d.reject_reason : false),
           final_signal: d.final_decision === "ENTER" ? d.final_signal_state : "none",
 
           // --- PRIMARY HIGHWAY METRICS ---
@@ -957,11 +964,6 @@ export class PaperEngine {
           cooldown_remaining_ms: d.cooldown_remaining_ms ?? null,
           same_dir_cooldown_applied: d.same_dir_cooldown_applied ?? false,
           blocked_regime_reason: d.blocked_regime_reason ?? null,
-          legacy_block_reason: d.legacy_block_reason ?? null,
-          legacy_regime_gate: d.legacy_regime_gate ?? null,
-          legacy_gate_source: d.legacy_gate_source ?? null,
-          override_by_legacy: d.override_by_legacy ?? false,
-          stage1_block_origin: d.stage1_block_origin ?? null,
           guidance: d.guidance,
           required_move_pct: d.required_move_pct,
           shortfall_pct: d.shortfall_pct,

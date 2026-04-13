@@ -153,7 +153,7 @@ function mapExecutorBlockToReject(blocked: string | undefined): PaperDecisionRej
     case "trend_volume_too_thin":
       return "EDGE_FAIL_LOW_VOL";
     default:
-      return "LEGACY_BLOCKED";
+      return "EDGE_FAIL_EXPECTANCY";
   }
 }
 
@@ -1352,8 +1352,18 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     legacy_regime_gate = input.currentStage === 0 && !input.isAmbiguous ? "STAGE1_BLOCKED_REGIME" : "STAGE1_EXEC_PENDING";
     legacy_gate_source = executorDecision?.executor ? `executor_${String(executorDecision.executor).toLowerCase()}` : "executor_unknown";
     stage1_block_origin = "legacy_executor_gate";
-    reject_reason = br ? mapExecutorBlockToReject(br) : (input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "LEGACY_BLOCKED");
-    override_by_legacy = reject_reason === "LEGACY_BLOCKED" || legacy_regime_gate === "STAGE1_BLOCKED_REGIME";
+    reject_reason = br ? mapExecutorBlockToReject(br) : (input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "EDGE_FAIL_EXPECTANCY");
+    const stage1BlockCode =
+      input.currentStage === 0
+        ? (input.isAmbiguous
+          ? "STAGE1_EXEC_PENDING"
+          : reject_reason === "RISK_COOLDOWN" || reject_reason === "RISK_FAIL_REENTRY"
+            ? "STAGE1_BLOCKED_RISK"
+            : reject_reason?.startsWith("EDGE")
+              ? "STAGE1_BLOCKED_EDGE"
+              : "STAGE1_BLOCKED_REGIME")
+        : "STAGE1_BLOCKED_RISK";
+    override_by_legacy = stage1BlockCode === "STAGE1_BLOCKED_REGIME";
     if (reject_reason === "RISK_COOLDOWN") risk_state = "COOLDOWN";
     const invalidTier = (executorDecision?.detail?.highway_invalid_tier as string | undefined) ?? null;
     const invalidReasonsRaw = executorDecision?.detail?.highway_invalid_reasons;
@@ -1387,7 +1397,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         entry_progress: executorDecision?.entry_progress ?? null,
         target_stage: null,
         supplemental_reasons,
-        stage1_result_code: (input.currentStage === 0 && input.isAmbiguous) ? "STAGE1_EXEC_PENDING" : "STAGE1_BLOCKED_REGIME",
+        stage1_result_code: stage1BlockCode as any,
         legacy_block_reason,
         legacy_regime_gate,
         legacy_gate_source,
