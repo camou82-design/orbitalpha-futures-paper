@@ -205,16 +205,16 @@ function evaluateRangeStage0Signal(
   }
 
   if (zone === "lower") {
-    if (sn.signal === "paper_short_candidate") {
-      return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_suppress_short_candidate", side: null };
-    }
     if (sn.signal === "paper_long_candidate") {
       return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_from_base_signal", side: "long" };
     }
-    if (!edgeStructureOk) {
-      return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_long_structure_not_ready", side: null };
+    if (edgeStructureOk) {
+      return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_priority_structure", side: "long" };
     }
-    return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_priority_structure", side: "long" };
+    if (sn.signal === "paper_short_candidate") {
+      return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_suppress_short_candidate", side: null };
+    }
+    return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_long_structure_not_ready", side: null };
   }
 
   return { signal: "RANGE_SIGNAL_NONE", reason: "range_mid_wait_no_directional_chase", side: null };
