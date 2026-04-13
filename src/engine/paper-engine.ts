@@ -931,6 +931,12 @@ export class PaperEngine {
           exDetail?.alignmentQualityScore !== undefined ||
           regimeDetected.regime === "TREND";
 
+        console.log("[PEL_TRACE_DIRECT]", {
+          marker: "paper_entry_line_direct_console_v1",
+          symbol: String(sym),
+          sd_origin: decisionSnap?.signalDecisionOrigin ?? "missing",
+          ex_block: res.executorDecision?.blocked_reason ?? "none"
+        });
         this.logger.info("PAPER_ENTRY_LINE", {
           paper_entry_line_trace_marker: "paper_entry_line_v2_legacy_trace",
           sd_origin: decisionSnap?.signalDecisionOrigin ?? "missing",
