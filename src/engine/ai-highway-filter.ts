@@ -11,6 +11,8 @@ import { Candle, MarketSymbol } from "../models/types";
 export function evaluateAiHighwayQuality(candles: Candle[], symbol: MarketSymbol): AiHighwayQualityScores & {
     state: HighwayTrendState;
     deferEntry: boolean;
+    invalidTier: "hard_invalid" | "soft_invalid" | "warning";
+    invalidReasons: string[];
 } {
     const core = detectHighwayTrend(candles, symbol);
     // Placeholder scoring logic – replace with real ML model or heuristic.
@@ -35,5 +37,7 @@ export function evaluateAiHighwayQuality(candles: Candle[], symbol: MarketSymbol
         entryRiskScore,
         state: core.state,
         deferEntry,
+        invalidTier: core.invalidTier,
+        invalidReasons: core.invalidReasons
     };
 }

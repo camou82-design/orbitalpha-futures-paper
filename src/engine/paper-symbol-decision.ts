@@ -133,6 +133,10 @@ const STAGE1_RANGE_POSITION_SOFT_MULT = 0.42;
 
 function mapExecutorBlockToReject(blocked: string | undefined): PaperDecisionRejectReason {
   switch (blocked) {
+    case "highway_invalid":
+    case "highway_invalid_hard":
+    case "highway_invalid_soft":
+      return "EDGE_FAIL_EXPECTANCY";
     case "fee_slippage_insufficient":
       return "EDGE_FAIL_FEE";
     case "range_center_forbidden":
@@ -493,6 +497,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let reentry_cooldown_original_ms: number | null = null;
   let reentry_cooldown_effective_ms: number | null = null;
   let reentry_cooldown_reason: string | null = null;
+  let stage1SignalRelaxed = false;
+  let signalRelaxReason: string | null = null;
 
   const ret = (
     extra: Partial<{
@@ -813,9 +819,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     fee_estimate_pct = rm * 100;
   }
 
-  let stage1SignalRelaxed = false;
-  let signalRelaxReason: string | null = null;
-
   if (signal_state === "NONE") {
     /** 진단: BTC 등 지수급 심볼의 Stage 1 신호 부재 시 모호하지 않고 특정 조건 충족 시 SOFT_RANGE_CANDIDATE 허용. */
     let softCandidateAllowed = false;
@@ -1070,10 +1073,31 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   const rBlock = input.risk?.blockedRegimes?.[input.regime];
   if (rBlock && rBlock.until > input.now) {
-    risk_state = "COOLDOWN";
-    if (!reject_reason) reject_reason = "RISK_COOLDOWN";
-    final_decision = "REJECT";
-    supplemental_reasons.push("RISK_COOLDOWN");
+    const remainingMs = rBlock.until - input.now;
+    const nearEdgeRangeCandidate =
+      input.currentStage === 0 &&
+      input.regime === "RANGE" &&
+      signal_state !== "NONE" &&
+      typeof sn.boxPos === "number" &&
+      (sn.boxPos <= 0.32 || sn.boxPos >= 0.68);
+    const streakSuspend =
+      rBlock.reason.includes("mode_loss_streak") || rBlock.reason.includes("highway_range_streak");
+    const relaxModeCooldown =
+      nearEdgeRangeCandidate &&
+      streakSuspend &&
+      (input.rangeReopenCooldownBypass === true || remainingMs <= 12 * 60_000);
+
+    if (relaxModeCooldown) {
+      risk_state = "SOFT_BLOCK";
+      supplemental_reasons.push("RISK_COOLDOWN_RELAXED_RANGE_STAGE0");
+      supplemental_reasons.push(`RISK_COOLDOWN_REASON_${String(rBlock.reason).toUpperCase()}`);
+    } else {
+      risk_state = "COOLDOWN";
+      if (!reject_reason) reject_reason = "RISK_COOLDOWN";
+      final_decision = "REJECT";
+      supplemental_reasons.push("RISK_COOLDOWN");
+      supplemental_reasons.push(`RISK_COOLDOWN_REASON_${String(rBlock.reason).toUpperCase()}`);
+    }
   }
 
   if (input.lastCloseMetaBySymbol && input.reentryCooldownMs > 0 && intentSide) {
@@ -1108,11 +1132,48 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       }
     }
 
+    const rangeStage0 = input.currentStage === 0 && input.regime === "RANGE";
+    if (rangeStage0 && meta != null && waitMs > 0) {
+      const boxReformed =
+        typeof sn.rangeCycleCount === "number" &&
+        sn.rangeCycleCount >= 2 &&
+        (sn.boxCohesion01 ?? 0) >= 0.45;
+      const directionFlipped = sameDirection === false;
+      const enoughTimeElapsed = elapsed >= Math.max(45_000, Math.floor(waitMs * 0.55));
+      const lowerEdgeCandidate = typeof sn.boxPos === "number" && sn.boxPos <= 0.30;
+      const upperEdgeCandidate = typeof sn.boxPos === "number" && sn.boxPos >= 0.70;
+      const edgeCandidate = lowerEdgeCandidate || upperEdgeCandidate;
+
+      if (directionFlipped || boxReformed || (enoughTimeElapsed && edgeCandidate)) {
+        const relaxedByStructure = Math.max(
+          RANGE_STAGE0_REENTRY_RELAX_MIN_MS,
+          Math.floor(waitMs * (directionFlipped ? 0.45 : 0.6))
+        );
+        if (relaxedByStructure < waitMs) {
+          waitMs = relaxedByStructure;
+          reentry_cooldown_applied = true;
+          reentry_cooldown_effective_ms = relaxedByStructure;
+          reentry_cooldown_reason =
+            directionFlipped
+              ? "range_reentry_relax_direction_flip"
+              : boxReformed
+                ? "range_reentry_relax_box_reformed"
+                : "range_reentry_relax_edge_after_elapsed";
+        }
+      }
+    }
+    if (rangeStage0 && waitMs > 0) {
+      waitMs = Math.min(waitMs, 95_000);
+      reentry_cooldown_effective_ms = waitMs;
+    }
+
     if (lastClose > 0 && elapsed < waitMs) {
       risk_state = "COOLDOWN";
       if (!reject_reason) reject_reason = "RISK_FAIL_REENTRY";
       final_decision = "REJECT";
       supplemental_reasons.push("RISK_FAIL_REENTRY");
+      if (reentry_cooldown_reason) supplemental_reasons.push(`REENTRY_COOLDOWN_REASON_${reentry_cooldown_reason}`);
+      supplemental_reasons.push(`REENTRY_COOLDOWN_WAIT_MS_${String(waitMs)}`);
     }
   }
 
@@ -1214,6 +1275,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const br = executorDecision?.blocked_reason;
     reject_reason = br ? mapExecutorBlockToReject(br) : (input.isAmbiguous ? "AMBIGUOUS_WATCHING" : "LEGACY_BLOCKED");
     if (reject_reason === "RISK_COOLDOWN") risk_state = "COOLDOWN";
+    const invalidTier = (executorDecision?.detail?.highway_invalid_tier as string | undefined) ?? null;
+    const invalidReasonsRaw = executorDecision?.detail?.highway_invalid_reasons;
+    const invalidReasons = Array.isArray(invalidReasonsRaw) ? invalidReasonsRaw : [];
 
     // Round 4 & 5: Active Stage 1 candidate evaluation (Execution over Review)
     final_decision = input.currentStage === 0 ? "SKIP" : "REJECT";
@@ -1225,6 +1289,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
 
     if (br) supplemental_reasons.push(`EXEC_BLOCKED_${br.toUpperCase()}`);
+    if (invalidTier) supplemental_reasons.push(`HIGHWAY_INVALID_TIER_${invalidTier.toUpperCase()}`);
+    for (const reason of invalidReasons.slice(0, 3)) {
+      supplemental_reasons.push(`HIGHWAY_INVALID_SUBREASON_${String(reason).toUpperCase()}`);
+    }
     return ret(
       {
         execution_state,

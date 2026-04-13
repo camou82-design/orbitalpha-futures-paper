@@ -95,6 +95,7 @@ const EP = {
 } as const;
 
 const DEFAULT_PAPER_SIZE_USD = 100;
+const SAME_DIR_REENTRY_COOLDOWN_MULT = 1.35;
 
 function computeAvgBoxCohesion01(
   snapshots: ReadonlyArray<{ boxHigh: number | null; boxLow: number | null; lastPrice: number }>
@@ -754,7 +755,7 @@ export class PaperEngine {
           trendCooldownUntilBySymbol: this.trendCooldownUntilBySymbol,
           lastCloseMetaBySymbol: lastCloseMetaBySymbolForDecision,
           reentryCooldownMs: this.config.paperReentryCooldownMs,
-          sameDirCooldownMult: 2,
+          sameDirCooldownMult: SAME_DIR_REENTRY_COOLDOWN_MULT,
           hasOpenPosition: false,
           currentStage: 0,
           maxPositionsReached: false,
@@ -895,7 +896,7 @@ export class PaperEngine {
         trendCooldownUntilBySymbol: this.trendCooldownUntilBySymbol,
         lastCloseMetaBySymbol: lastCloseMetaBySymbolForDecision,
         reentryCooldownMs: this.config.paperReentryCooldownMs,
-        sameDirCooldownMult: 2,
+        sameDirCooldownMult: SAME_DIR_REENTRY_COOLDOWN_MULT,
         hasOpenPosition: hasOpen,
         currentStage,
         maxPositionsReached: (opensAfterClose.length >= this.config.paperMaxOpenPositions && !hasOpen),
@@ -1179,6 +1180,9 @@ export class PaperEngine {
     const legacyReason = (code: string | null): string => {
       if (!code) return "blocked";
       const m: Record<string, string> = {
+        highway_invalid: "highway_invalid",
+        highway_invalid_hard: "highway_invalid_hard",
+        highway_invalid_soft: "highway_invalid_soft",
         EDGE_FAIL_FEE: "fee_slippage_insufficient",
         EDGE_FAIL_RR: "edge_fail_rr",
         EDGE_FAIL_LOW_VOL: "edge_fail_low_vol",

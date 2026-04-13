@@ -59,6 +59,11 @@ type PublicGetFail = Readonly<{ success: false; error: string; diagnostics: Bybi
 
 export class BybitPublicClient {
   private readonly baseUrl: string;
+  private readonly minRequestIntervalMs = 120;
+  private nextRequestAtMs = 0;
+  private readonly tickerCache = new Map<string, { expiresAt: number; value: TryResult<Ticker> }>();
+  private readonly candleCache = new Map<string, { expiresAt: number; value: TryResult<Candle[]> }>();
+  private readonly fundingCache = new Map<string, { expiresAt: number; value: TryResult<FundingRate> }>();
 
   constructor(opts: BybitPublicClientOptions = {}) {
     this.baseUrl = (opts.baseUrl ?? "https://api.bybit.com").replace(/\/+$/, "");
@@ -83,6 +88,10 @@ export class BybitPublicClient {
   }
 
   async tryGetTicker(symbol: MarketSymbol): Promise<TryResult<Ticker>> {
+    const tickerCacheKey = `${symbol}`;
+    const tickerHit = this.tickerCache.get(tickerCacheKey);
+    if (tickerHit && tickerHit.expiresAt > Date.now()) return tickerHit.value;
+
     const path = "/v5/market/tickers";
     const query = { category: "linear", symbol };
     const gr = await this.publicGetResult<BybitV5Response<{ list: unknown[] }>>(path, query);
@@ -107,7 +116,9 @@ export class BybitPublicClient {
       const bid = item.bid1Price !== undefined ? mustFiniteNumber(item.bid1Price, `${symbol}.bid1Price`) : undefined;
       const ask = item.ask1Price !== undefined ? mustFiniteNumber(item.ask1Price, `${symbol}.ask1Price`) : undefined;
 
-      return { ok: true, value: { symbol, ts: fetchedAt, last, bid, ask }, diagnostics: gr.diagnostics };
+      const out: TryResult<Ticker> = { ok: true, value: { symbol, ts: fetchedAt, last, bid, ask }, diagnostics: gr.diagnostics };
+      this.tickerCache.set(tickerCacheKey, { expiresAt: Date.now() + 1_000, value: out });
+      return out;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg, diagnostics: gr.diagnostics };
@@ -115,6 +126,10 @@ export class BybitPublicClient {
   }
 
   async tryGetCandles(symbol: MarketSymbol, timeframe: Timeframe, limit = 200): Promise<TryResult<Candle[]>> {
+    const candlesCacheKey = `${symbol}:${timeframe}:${limit}`;
+    const candlesHit = this.candleCache.get(candlesCacheKey);
+    if (candlesHit && candlesHit.expiresAt > Date.now()) return candlesHit.value;
+
     const interval = timeframeToBybitInterval(timeframe);
     const path = "/v5/market/kline";
     const query = { category: "linear", symbol, interval, limit: String(limit) };
@@ -142,7 +157,10 @@ export class BybitPublicClient {
         const volume = mustFiniteNumber(r[5], `${symbol}.kline.volume`);
         return { ts, open, high, low, close, volume };
       });
-      return { ok: true, value: parsed.reverse(), diagnostics: gr.diagnostics };
+      const out: TryResult<Candle[]> = { ok: true, value: parsed.reverse(), diagnostics: gr.diagnostics };
+      const ttlMs = timeframe === "1m" ? 2_500 : timeframe === "3m" ? 4_000 : timeframe === "5m" ? 7_000 : 12_000;
+      this.candleCache.set(candlesCacheKey, { expiresAt: Date.now() + ttlMs, value: out });
+      return out;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg, diagnostics: gr.diagnostics };
@@ -150,6 +168,10 @@ export class BybitPublicClient {
   }
 
   async tryGetFundingRate(symbol: MarketSymbol): Promise<TryResult<FundingRate>> {
+    const fundingCacheKey = `${symbol}`;
+    const fundingHit = this.fundingCache.get(fundingCacheKey);
+    if (fundingHit && fundingHit.expiresAt > Date.now()) return fundingHit.value;
+
     const path = "/v5/market/funding/history";
     const query = { category: "linear", symbol, limit: "1" };
     const gr = await this.publicGetResult<BybitV5Response<{ list: unknown[] }>>(path, query);
@@ -168,13 +190,19 @@ export class BybitPublicClient {
       const list = (json.result?.list ?? []) as any[];
       const item = list[0];
       const fetchedAt = Date.now();
-      if (!item) return { ok: true, value: { symbol, ts: fetchedAt, rate: 0 }, diagnostics: gr.diagnostics };
+      if (!item) {
+        const out: TryResult<FundingRate> = { ok: true, value: { symbol, ts: fetchedAt, rate: 0 }, diagnostics: gr.diagnostics };
+        this.fundingCache.set(fundingCacheKey, { expiresAt: Date.now() + 30_000, value: out });
+        return out;
+      }
 
       const rate = mustFiniteNumber(item.fundingRate, `${symbol}.fundingRate`);
       const tsRaw = item.fundingRateTimestamp ?? item.fundingRateTimestampMs ?? item.fundingTime;
       const ts = tsRaw !== undefined ? mustFiniteNumber(tsRaw, `${symbol}.fundingRateTimestamp`) : fetchedAt;
 
-      return { ok: true, value: { symbol, ts, rate }, diagnostics: gr.diagnostics };
+      const out: TryResult<FundingRate> = { ok: true, value: { symbol, ts, rate }, diagnostics: gr.diagnostics };
+      this.fundingCache.set(fundingCacheKey, { expiresAt: Date.now() + 30_000, value: out });
+      return out;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg, diagnostics: gr.diagnostics };
@@ -191,6 +219,7 @@ export class BybitPublicClient {
 
     let res: Response;
     try {
+      await this.acquireRateLimitSlot();
       res = await fetch(requestUrl, {
         method: "GET",
         headers: { Accept: "application/json" }
@@ -241,5 +270,13 @@ export class BybitPublicClient {
     }
 
     return { success: true, json: parsed as T, diagnostics };
+  }
+
+  private async acquireRateLimitSlot(): Promise<void> {
+    const now = Date.now();
+    if (this.nextRequestAtMs > now) {
+      await new Promise((resolve) => setTimeout(resolve, this.nextRequestAtMs - now));
+    }
+    this.nextRequestAtMs = Date.now() + this.minRequestIntervalMs;
   }
 }

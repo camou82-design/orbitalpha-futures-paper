@@ -20,11 +20,45 @@ export function highwayExecutorEvaluateEntry(input: Readonly<{
     let blocked_reason: string | null = "highway_weak_signal";
     let target_stage = input.currentStage ?? 1;
 
+    const invalidTier = (input.aiScores as any).invalidTier as "hard_invalid" | "soft_invalid" | "warning" | undefined;
+    const invalidReasons = Array.isArray((input.aiScores as any).invalidReasons)
+        ? ((input.aiScores as any).invalidReasons as string[])
+        : [];
+
     // Reject if too weak
     if (input.highwayState === HighwayTrendState.INVALID) {
+        const allowSoftInvalidProbe =
+            invalidTier === "soft_invalid" &&
+            (input.currentStage ?? 0) === 0 &&
+            input.aiScores.highwayValidityScore >= 0.38 &&
+            input.aiScores.pullbackQualityScore >= 0.25 &&
+            !input.aiScores.deferEntry;
+
+        if (allowSoftInvalidProbe) {
+            return {
+                entry_allowed: true,
+                blocked_reason: null,
+                target_stage: 1,
+                expected_move: input.expectedMove,
+                total_cost: input.totalCost,
+                risk_state: input.risk_state as any,
+                regime: "TREND",
+                executor: "TREND",
+                breakout_state: "none",
+                pullback_state: "unknown",
+                guidance: "soft-invalid highway: stage1 probe allowed",
+                detail: {
+                    highway_state: "INVALID",
+                    highway_invalid_tier: invalidTier,
+                    highway_invalid_reasons: invalidReasons,
+                    ...input.aiScores
+                }
+            };
+        }
+
         return {
             entry_allowed: false,
-            blocked_reason: "highway_invalid",
+            blocked_reason: invalidTier === "soft_invalid" ? "highway_invalid_soft" : "highway_invalid_hard",
             expected_move: input.expectedMove,
             total_cost: input.totalCost,
             risk_state: input.risk_state as any,
@@ -34,6 +68,8 @@ export function highwayExecutorEvaluateEntry(input: Readonly<{
             pullback_state: "unknown",
             detail: {
                 highway_state: "INVALID",
+                    highway_invalid_tier: invalidTier ?? "hard_invalid",
+                    highway_invalid_reasons: invalidReasons,
                 ...input.aiScores
             }
         };

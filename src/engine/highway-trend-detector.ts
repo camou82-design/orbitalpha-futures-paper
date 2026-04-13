@@ -10,6 +10,8 @@ export function detectHighwayTrend(candles: Candle[], symbol: MarketSymbol): {
     spacingScore: number;
     pullbackDetected: boolean;
     volumeSupportScore: number;
+    invalidTier: "hard_invalid" | "soft_invalid" | "warning";
+    invalidReasons: string[];
 } {
     if (candles.length < 60) {
         return {
@@ -17,7 +19,9 @@ export function detectHighwayTrend(candles: Candle[], symbol: MarketSymbol): {
             alignmentScore: 0,
             spacingScore: 0,
             pullbackDetected: false,
-            volumeSupportScore: 0
+            volumeSupportScore: 0,
+            invalidTier: "hard_invalid",
+            invalidReasons: ["insufficient_candles_lt_60"]
         };
     }
 
@@ -34,7 +38,9 @@ export function detectHighwayTrend(candles: Candle[], symbol: MarketSymbol): {
             alignmentScore: 0,
             spacingScore: 0,
             pullbackDetected: false,
-            volumeSupportScore: 0
+            volumeSupportScore: 0,
+            invalidTier: "hard_invalid",
+            invalidReasons: ["ema_stack_unavailable"]
         };
     }
 
@@ -84,12 +90,25 @@ export function detectHighwayTrend(candles: Candle[], symbol: MarketSymbol): {
     const recentVolume = candles.slice(-5).reduce((s, c) => s + c.volume, 0) / 5;
     const olderVolume = candles.slice(-15, -5).reduce((s, c) => s + c.volume, 0) / 10;
     const volumeSupportScore = olderVolume > 0 ? Math.min(1, recentVolume / olderVolume) : 0.5;
+    const invalidReasons: string[] = [];
+    if (alignmentScore < 0.6) invalidReasons.push("alignment_below_weak_threshold");
+    if (!pullbackDetected) invalidReasons.push("pullback_not_detected");
+    if (spacingScore < 0.5) invalidReasons.push("ema_spacing_overextended");
+    if (volumeSupportScore < 0.45) invalidReasons.push("volume_support_thin");
+    const invalidTier: "hard_invalid" | "soft_invalid" | "warning" =
+        state !== HighwayTrendState.INVALID
+            ? "warning"
+            : alignmentScore >= 0.45 && spacingScore >= 0.45 && volumeSupportScore >= 0.35
+                ? "soft_invalid"
+                : "hard_invalid";
 
     return {
         state,
         alignmentScore,
         spacingScore,
         pullbackDetected,
-        volumeSupportScore
+        volumeSupportScore,
+        invalidTier,
+        invalidReasons
     };
 }
