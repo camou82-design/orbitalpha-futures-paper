@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 
 import type {
   EngineConfig,
@@ -455,6 +456,41 @@ function orderBuildFailureStructuredPayload(
     trend_volume_relax_proof: trendVolumeRelaxProof
   };
 }
+
+/** OKX `submitOrder`/`getOrder` throw 또는 envelope 실패 메시지 파싱 */
+function parseOkxSubmitErrorMessage(msg: string): { code: string | null; message: string } {
+  const mApi = /^okx_api_([^:]+):([\s\S]*)$/.exec(msg);
+  if (mApi) return { code: mApi[1].trim(), message: (mApi[2] ?? "").trim() || "request_failed" };
+  const mHttp = /^okx_http_([^:]+):([\s\S]*)$/.exec(msg);
+  if (mHttp) return { code: `http_${mHttp[1].trim()}`, message: (mHttp[2] ?? "").trim() || "request_failed" };
+  return { code: null, message: msg };
+}
+
+function isBtcEthSampleSymbol(symbol: string): boolean {
+  const s = String(symbol).toUpperCase();
+  return s === "BTCUSDT" || s === "ETHUSDT";
+}
+
+type MutablePositionOpenTrace = {
+  open_trace_id: string;
+  symbol: string;
+  sample_symbol_btc_eth: boolean;
+  order_submit_requested: boolean;
+  order_submit_ack: "accepted" | "rejected" | "skipped_no_okx_demo" | null;
+  order_submit_error_code: string | null;
+  order_submit_error_message: string | null;
+  exchange_client_order_id: string | null;
+  exchange_ord_id: string | null;
+  exchange_order_state: string | null;
+  exchange_fill_px: string | number | null;
+  exchange_ack_s_code: string | null;
+  exchange_ack_s_msg: string | null;
+  position_open_record_written: boolean;
+  position_open_final_state: "opened" | "failed" | "aborted_pre_exchange";
+  open_fail_stage: string;
+  qty_submitted: number | null;
+  inst_id: string | null;
+};
 
 export class PaperEngine {
   private readonly store: JsonStore;
@@ -3092,8 +3128,52 @@ export class PaperEngine {
         this.logger.info("position_size_reduced_risk_off", { symbol: first.symbol, finalPositionSize: adaptive.sizeUsd });
       }
 
+      let positionOpenTraceRef: MutablePositionOpenTrace | null = null;
       try {
+        const openTraceId = randomUUID();
+        const sampleBtcEth = isBtcEthSampleSymbol(sym);
+        const trace: MutablePositionOpenTrace = {
+          open_trace_id: openTraceId,
+          symbol: sym,
+          sample_symbol_btc_eth: sampleBtcEth,
+          order_submit_requested: false,
+          order_submit_ack: null,
+          order_submit_error_code: null,
+          order_submit_error_message: null,
+          exchange_client_order_id: null,
+          exchange_ord_id: null,
+          exchange_order_state: null,
+          exchange_fill_px: null,
+          exchange_ack_s_code: null,
+          exchange_ack_s_msg: null,
+          position_open_record_written: false,
+          position_open_final_state: "failed",
+          open_fail_stage: "none",
+          qty_submitted: null,
+          inst_id: null
+        };
+        positionOpenTraceRef = trace;
+
+        const emitPositionOpenTraceFinal = () => {
+          this.logger.info("POSITION_OPEN_TRACE_FINAL", {
+            ...trace,
+            exchange_ack: trace.order_submit_ack,
+            stored_position: trace.position_open_record_written,
+            final_open_result: trace.position_open_final_state
+          });
+        };
+        const logPaperPositionOpenFailed = () => {
+          this.logger.error("paper_position_open_failed", {
+            ...trace,
+            exchange_ack: trace.order_submit_ack,
+            stored_position: trace.position_open_record_written,
+            final_open_result: trace.position_open_final_state
+          });
+        };
+
         this.logger.info("STAGE1_POSITION_OPEN_ATTEMPT", {
+          open_trace_id: openTraceId,
+          sample_symbol_btc_eth: sampleBtcEth,
           symbol: first.symbol,
           side: adaptive.direction,
           sizeUsd: adaptive.sizeUsd,
@@ -3141,6 +3221,12 @@ export class PaperEngine {
           ((adaptive.direction === "long" && mPre.longUsd + entrySizeUsd > riskE.maxLongExposure) ||
             (adaptive.direction === "short" && mPre.shortUsd + entrySizeUsd > riskE.maxShortExposure))
         ) {
+          trace.open_fail_stage = "risk_exposure_cap_pre_submit";
+          trace.position_open_final_state = "aborted_pre_exchange";
+          trace.order_submit_requested = false;
+          trace.order_submit_ack = null;
+          emitPositionOpenTraceFinal();
+          logPaperPositionOpenFailed();
           await this.emitPipelineEventsFromDecision(
             first,
             {
@@ -3160,11 +3246,17 @@ export class PaperEngine {
         }
         if (this.okxDemo) {
           const instId = toOkxSwapInstId(first.symbol);
+          trace.inst_id = instId;
           const side = adaptive.direction === "long" ? "buy" : "sell";
           const posSide = adaptive.direction === "long" ? "long" : "short";
           const qty = Math.max(0.001, Math.round((entrySizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
+          trace.qty_submitted = qty;
           const clOrdId = `paper-${first.symbol}-${Date.now()}`;
+          trace.exchange_client_order_id = clOrdId;
+          trace.order_submit_requested = true;
           this.logger.info("okx_order_submit_requested", {
+            open_trace_id: openTraceId,
+            sample_symbol_btc_eth: sampleBtcEth,
             symbol: first.symbol,
             instId,
             side,
@@ -3182,32 +3274,116 @@ export class PaperEngine {
               tdMode: "isolated",
               ordType: "market"
             });
-            const ordId = String(submit.data?.[0]?.ordId ?? "");
-            const status = await this.okxDemo.getOrder(instId, ordId || undefined, clOrdId);
-            this.logger.info("okx_order_submit_success", {
+            const row0 = submit.data?.[0] as Record<string, unknown> | undefined;
+            const ackS = row0?.sCode != null ? String(row0.sCode) : null;
+            const ackM = row0?.sMsg != null ? String(row0.sMsg) : "";
+            trace.exchange_ack_s_code = ackS;
+            trace.exchange_ack_s_msg = ackM || null;
+            if (ackS !== null && ackS !== "0") {
+              trace.order_submit_ack = "rejected";
+              trace.order_submit_error_code = ackS;
+              trace.order_submit_error_message = ackM || "order_level_ack_failed";
+              const low = ackM.toLowerCase();
+              trace.open_fail_stage =
+                ackS === "51121" || low.includes("minimum") || low.includes("min") || low.includes("lot")
+                  ? "exchange_reject_min_sz_or_lot"
+                  : "exchange_submit_rejected_in_ack";
+              this.logger.error("okx_order_submit_rejected", {
+                open_trace_id: openTraceId,
+                sample_symbol_btc_eth: sampleBtcEth,
+                symbol: first.symbol,
+                instId,
+                clOrdId,
+                exchange_ack_s_code: ackS,
+                exchange_ack_s_msg: ackM,
+                open_fail_stage: trace.open_fail_stage
+              });
+              emitPositionOpenTraceFinal();
+              logPaperPositionOpenFailed();
+              continue;
+            }
+            const ordId = String(row0?.ordId ?? "");
+            trace.exchange_ord_id = ordId || null;
+            let status: Awaited<ReturnType<OkxDemoClient["getOrder"]>>;
+            try {
+              status = await this.okxDemo.getOrder(instId, ordId || undefined, clOrdId);
+            } catch (pollErr) {
+              const pmsg = pollErr instanceof Error ? pollErr.message : String(pollErr);
+              const parsed = parseOkxSubmitErrorMessage(pmsg);
+              trace.order_submit_ack = "rejected";
+              trace.order_submit_error_code = parsed.code;
+              trace.order_submit_error_message = parsed.message;
+              trace.open_fail_stage = "exchange_order_status_poll_failed";
+              this.logger.error("okx_order_submit_rejected", {
+                open_trace_id: openTraceId,
+                sample_symbol_btc_eth: sampleBtcEth,
+                symbol: first.symbol,
+                instId,
+                clOrdId,
+                ordId: ordId || null,
+                phase: "getOrder_after_submit",
+                message: pmsg,
+                open_fail_stage: trace.open_fail_stage
+              });
+              emitPositionOpenTraceFinal();
+              logPaperPositionOpenFailed();
+              continue;
+            }
+            const st0 = status.data?.[0] as Record<string, unknown> | undefined;
+            trace.order_submit_ack = "accepted";
+            trace.exchange_order_state = st0?.state != null ? String(st0.state) : null;
+            const rawFill = st0?.fillPx;
+            trace.exchange_fill_px =
+              typeof rawFill === "string" || typeof rawFill === "number" ? rawFill : rawFill != null ? String(rawFill) : null;
+            this.logger.info("okx_order_submit_accepted", {
+              open_trace_id: openTraceId,
+              sample_symbol_btc_eth: sampleBtcEth,
               symbol: first.symbol,
               instId,
               ordId: ordId || null,
               clOrdId,
-              order_state: status.data?.[0]?.state ?? null,
-              fill_px: status.data?.[0]?.fillPx ?? null
+              order_state: trace.exchange_order_state,
+              fill_px: trace.exchange_fill_px,
+              exchange_ack_s_code: trace.exchange_ack_s_code,
+              exchange_ack_s_msg: trace.exchange_ack_s_msg
             });
           } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
-            this.logger.error("okx_order_submit_failed", {
-              symbol: first.symbol,
-              instId,
-              clOrdId,
-              message: msg
-            });
+            const parsed = parseOkxSubmitErrorMessage(msg);
+            trace.order_submit_ack = "rejected";
+            trace.order_submit_error_code = parsed.code;
+            trace.order_submit_error_message = parsed.message;
             if (msg.includes("50101")) {
+              trace.open_fail_stage = "okx_auth_passphrase_or_demo_header";
               this.logger.error("okx_demo_env_mismatch_detected", {
+                open_trace_id: openTraceId,
                 reason: "50101",
                 check: "api_key_type_or_x_simulated_trading_header"
               });
+            } else if (/51121|min(imum)?\s*(sz|size|notional)|lot/i.test(msg)) {
+              trace.open_fail_stage = "exchange_reject_min_sz_or_lot";
+            } else if (parsed.code?.startsWith("http_")) {
+              trace.open_fail_stage = "exchange_http_before_json";
+            } else {
+              trace.open_fail_stage = "exchange_submit_exception_before_ack";
             }
+            this.logger.error("okx_order_submit_rejected", {
+              open_trace_id: openTraceId,
+              sample_symbol_btc_eth: sampleBtcEth,
+              symbol: first.symbol,
+              instId,
+              clOrdId,
+              message: msg,
+              order_submit_error_code: trace.order_submit_error_code,
+              open_fail_stage: trace.open_fail_stage
+            });
+            emitPositionOpenTraceFinal();
+            logPaperPositionOpenFailed();
             continue;
           }
+        } else {
+          trace.order_submit_requested = false;
+          trace.order_submit_ack = "skipped_no_okx_demo";
         }
         const record: PaperOpenPositionRecord = {
           openedAt: Date.now(),
@@ -3248,6 +3424,7 @@ export class PaperEngine {
         };
 
         next.push(record);
+        trace.position_open_record_written = true;
         if (res.decision.range_reversal_immediate_switch_applied === true) {
           this.rangeReversalSwitchPendingBySymbol.delete(symS);
         }
@@ -3303,7 +3480,12 @@ export class PaperEngine {
           this.rangeReopenArmedUntilBySymbol.delete(symS);
         }
 
+        trace.position_open_final_state = "opened";
+        trace.open_fail_stage = "none";
+
         this.logger.info("STAGE1_POSITION_OPEN_SUCCESS", {
+          open_trace_id: trace.open_trace_id,
+          sample_symbol_btc_eth: trace.sample_symbol_btc_eth,
           symbol: record.symbol,
           side: record.side,
           stage1_result_code: res.decision.stage1_result_code,
@@ -3318,6 +3500,8 @@ export class PaperEngine {
 
         const entryOpenedKey = record.side === "long" ? "entry_long_opened" : "entry_short_opened";
         this.logger.info(entryOpenedKey, {
+          open_trace_id: trace.open_trace_id,
+          sample_symbol_btc_eth: trace.sample_symbol_btc_eth,
           symbol: record.symbol,
           side: record.side,
           mode: this.lastAdaptiveMode.mode,
@@ -3329,34 +3513,82 @@ export class PaperEngine {
           entry_pipeline: adaptive.detail
         });
         this.logger.info("paper_position_opened", {
+          open_trace_id: trace.open_trace_id,
+          sample_symbol_btc_eth: trace.sample_symbol_btc_eth,
+          order_submit_requested: trace.order_submit_requested,
+          order_submit_ack: trace.order_submit_ack,
+          order_submit_error_code: trace.order_submit_error_code,
+          order_submit_error_message: trace.order_submit_error_message,
+          position_open_record_written: trace.position_open_record_written,
+          position_open_final_state: trace.position_open_final_state,
+          open_fail_stage: trace.open_fail_stage,
+          exchange_client_order_id: trace.exchange_client_order_id,
+          stored_position: "queued_in_memory_before_saveOpenAll",
           symbol: record.symbol,
           side: record.side,
           path: "positions/open.json"
         });
-        await this.store.appendJsonlLine("reports/events.jsonl", {
-          ts: Date.now(),
-          type: "ENTRY_OPENED",
-          symbol: String(record.symbol),
-          side: record.side,
-          regime: this.lastRegime.regime,
-          executor: decision.executor,
-          sizeUsd: record.sizeUsd,
-          leverage: record.leverage,
-          expected_move: decision.expected_move,
-          total_cost: decision.total_cost,
-          risk_state: (this.lastRisk?.riskStatus ?? "NORMAL"),
-          stage1_result_code: res.decision.stage1_result_code,
-          fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
-          expected_move_usd: res.decision.expected_move_usd ?? null,
-          required_cost_usd: res.decision.required_cost_usd ?? null,
-          shortfall_usd: res.decision.shortfall_usd ?? 0,
-          executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
-          stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
-          stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null
-        });
+        try {
+          await this.store.appendJsonlLine("reports/events.jsonl", {
+            ts: Date.now(),
+            type: "ENTRY_OPENED",
+            open_trace_id: trace.open_trace_id,
+            sample_symbol_btc_eth: trace.sample_symbol_btc_eth,
+            order_submit_requested: trace.order_submit_requested,
+            order_submit_ack: trace.order_submit_ack,
+            exchange_client_order_id: trace.exchange_client_order_id,
+            symbol: String(record.symbol),
+            side: record.side,
+            regime: this.lastRegime.regime,
+            executor: decision.executor,
+            sizeUsd: record.sizeUsd,
+            leverage: record.leverage,
+            expected_move: decision.expected_move,
+            total_cost: decision.total_cost,
+            risk_state: (this.lastRisk?.riskStatus ?? "NORMAL"),
+            stage1_result_code: res.decision.stage1_result_code,
+            fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
+            expected_move_usd: res.decision.expected_move_usd ?? null,
+            required_cost_usd: res.decision.required_cost_usd ?? null,
+            shortfall_usd: res.decision.shortfall_usd ?? 0,
+            executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
+            stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
+            stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null
+          });
+        } catch (appendErr) {
+          const am = appendErr instanceof Error ? appendErr.message : String(appendErr);
+          trace.open_fail_stage = "events_jsonl_append_failed";
+          trace.order_submit_error_message = trace.order_submit_error_message ?? am;
+          this.logger.error("entry_opened_jsonl_append_failed", {
+            open_trace_id: trace.open_trace_id,
+            sample_symbol_btc_eth: trace.sample_symbol_btc_eth,
+            message: am
+          });
+        }
+        emitPositionOpenTraceFinal();
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
+        const tr = positionOpenTraceRef;
+        if (tr) {
+          tr.position_open_final_state = tr.position_open_record_written ? "failed" : "aborted_pre_exchange";
+          tr.open_fail_stage = tr.position_open_record_written ? "internal_exception_after_record_push" : "internal_exception_before_record_push";
+          tr.order_submit_error_message = tr.order_submit_error_message ?? msg;
+          this.logger.info("POSITION_OPEN_TRACE_FINAL", {
+            ...tr,
+            exchange_ack: tr.order_submit_ack,
+            stored_position: tr.position_open_record_written,
+            final_open_result: tr.position_open_final_state
+          });
+          this.logger.error("paper_position_open_failed", {
+            ...tr,
+            exchange_ack: tr.order_submit_ack,
+            stored_position: tr.position_open_record_written,
+            final_open_result: tr.position_open_final_state
+          });
+        }
         this.logger.error("STAGE1_POSITION_OPEN_FAIL", {
+          open_trace_id: tr?.open_trace_id ?? null,
+          sample_symbol_btc_eth: tr?.sample_symbol_btc_eth ?? isBtcEthSampleSymbol(sym),
           symbol: sym,
           stage1_result_code: res.decision.stage1_result_code,
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
@@ -3373,7 +3605,17 @@ export class PaperEngine {
     }
 
     if (next.length !== before) {
-      await this.positions.saveOpenAll(next);
+      try {
+        await this.positions.saveOpenAll(next);
+        this.logger.info("paper_positions_persist_open_batch_ok", { added: next.length - before });
+      } catch (persistErr) {
+        const pm = persistErr instanceof Error ? persistErr.message : String(persistErr);
+        this.logger.error("paper_positions_persist_open_batch_failed", {
+          message: pm,
+          added: next.length - before,
+          open_fail_stage: "persist_save_open_all_failed"
+        });
+      }
     }
   }
 
