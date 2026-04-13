@@ -826,8 +826,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   intentSide = (sn.signal === "paper_long_candidate") ? "long" : (sn.signal === "paper_short_candidate" ? "short" : "none") as any;
 
   // Initial core detection and scoring
+  // Use an effective scoring regime so stage0 UNKNOWN/ambiguous contexts can still exercise RANGE-stage0 scoring.
+  const scoringRegime: "TREND" | "RANGE" | "NO_TRADE" =
+    input.currentStage === 0 && (input.regime === "RANGE" || (regime_state === "UNKNOWN" && input.isAmbiguous))
+      ? "RANGE"
+      : (input.regime as "TREND" | "RANGE" | "NO_TRADE");
+  const rangeStage0ContextExpected = scoringRegime === "RANGE" && input.currentStage === 0;
+
   const _aiResult = evaluateAiHighwayQuality(input.snapshot?.candles ?? [], sym, {
-    regime: input.regime,
+    regime: scoringRegime,
     currentStage: input.currentStage,
     boxPos: sn?.boxPos,
     emaGap: sn?.emaGap,
@@ -838,6 +845,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     rangeOscillationScore: sn?.rangeOscillationScore,
     trendWeaknessScore: sn?.trendWeaknessScore
   });
+  supplemental_reasons.push(`AI_SCORE_CONTEXT_REGIME_${scoringRegime}`);
+  supplemental_reasons.push(`AI_SCORE_CONTEXT_STAGE_${String(input.currentStage)}`);
+  supplemental_reasons.push(`AI_SCORE_CONTEXT_RANGE_STAGE0_EXPECTED_${rangeStage0ContextExpected ? "Y" : "N"}`);
+  supplemental_reasons.push(`AI_SCORE_CONTEXT_RANGE_STAGE0_APPLIED_${_aiResult.rangeStage0ScoringApplied ? "Y" : "N"}`);
 
   // Determine executor intent based on core state
   let _entryIntent: "probe" | "standard" | "scale" | "trend" = "trend";
