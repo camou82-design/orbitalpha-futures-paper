@@ -1147,6 +1147,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let trendVolumeRelaxProof: Record<string, unknown> | null = null;
   let guidanceOut: string | null = null;
   let workingSignal: PaperSignal = "none";
+  let aiGatePassed = false;
+  let adaptiveOk = false;
+  let adaptiveDirection: "long" | "short" | "none" | null = null;
+  let adaptiveResult: any = null;
   let final_executor_before_priority: PaperStrategyExecutor = "IDLE";
   let final_reject_before_priority: string | null = null;
   let final_decision_before_priority: PaperFinalDecision = "SKIP";
@@ -1219,13 +1223,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_mid_wait_applied = false;
   let range_final_trade_side_by_zone: string | null = null;
   let range_stage0_branch_proof: Record<string, unknown> | null = null;
+  let stage1_block_origin: string | null = null;
   let legacy_block_reason: string | null = null;
   let legacy_regime_gate: string | null = null;
   let legacy_gate_source: string | null = null;
   let override_by_legacy = false;
-  let stage1_block_origin: string | null = null;
-  let legacy_block_test_bypass_applied = false;
-  let legacy_block_test_bypass_reason: string | null = null;
   let reentry_cooldown_applied = false;
   let reentry_cooldown_original_ms: number | null = null;
   let reentry_cooldown_effective_ms: number | null = null;
@@ -1737,8 +1739,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
         override_by_legacy: extra.override_by_legacy ?? override_by_legacy,
         stage1_block_origin: extra.stage1_block_origin ?? stage1_block_origin,
-        legacy_block_test_bypass_applied: extra.legacy_block_test_bypass_applied ?? legacy_block_test_bypass_applied,
-        legacy_block_test_bypass_reason: extra.legacy_block_test_bypass_reason ?? legacy_block_test_bypass_reason,
         legacy_block_original_reason: extra.legacy_block_original_reason ?? legacy_block_original_reason,
         currentStage: extra.currentStage !== undefined ? extra.currentStage : input.currentStage,
         regime: extra.regime !== undefined ? extra.regime : input.regime,
@@ -2085,6 +2085,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reversal_immediate_switch_applied = true;
       range_reversal_immediate_switch_reason = input.rangeReversalImmediateSwitch?.reason ?? null;
     }
+    // [DIRECTION LOCK] RANGE Engine Sets Intent
     workingSignal = (entryResult === "RANGE_LONG_ENTRY"
       ? "paper_long_candidate"
       : entryResult === "RANGE_SHORT_ENTRY"
@@ -2092,6 +2093,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         : "none") as any;
     signal_state = signalToState(workingSignal);
     intentSide = (entryResult === "RANGE_LONG_ENTRY" ? "long" : entryResult === "RANGE_SHORT_ENTRY" ? "short" : null) as "long" | "short" | null;
+
     executorDecision = {
       entry_allowed: gateResult === "RANGE_GATE_PASS",
       blocked_reason: gateResult === "RANGE_GATE_PASS" ? null : gateResult,
@@ -2393,11 +2395,33 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       }
     }
     strategy_executor = "TREND";
+
+    // [DIRECTION LOCK] TREND Engine Sets Intent
+    if (executorDecision?.entry_allowed) {
+      signal_state = signalToState(workingSignal);
+      intentSide = (workingSignal === "paper_long_candidate" ? "long" : workingSignal === "paper_short_candidate" ? "short" : null);
+    }
   } else {
     supplemental_reasons.push("RANGE_STAGE0_ENGINE_ACTIVE");
   }
 
-  // Highway Result & AI Result previously computed and assigned to executorDecision
+  // Unified Direction Lock Verification
+  if (!intentSide) {
+    return ret({
+      signal_state: "NONE",
+      final_decision: "SKIP",
+      reject_reason: "SIGNAL_NONE",
+      signal_missing_reason: "NO_ENGINE_SIGNAL"
+    }, {
+      intentSide: null,
+      executorDecision,
+      adaptiveOk: false,
+      adaptiveDirection: null,
+      adaptiveDetail: null,
+      adaptiveResult: null,
+      aiGatePassed: false
+    });
+  }
 
   // Retain core executor selection; overriding removed
 
@@ -2409,63 +2433,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     fee_estimate_pct = rm * 100;
   }
 
-  if (signal_state === "NONE") {
-    /** 진단: BTC 등 지수급 심볼의 Stage 1 신호 부재 시 모호하지 않고 특정 조건 충족 시 SOFT_RANGE_CANDIDATE 허용. */
-    let softCandidateAllowed = false;
-
-    if (input.currentStage === 0 && input.regime === "RANGE") {
-      const boxPos = sn?.boxPos ?? 0.5;
-      if (classifyBoxZone(boxPos) === "lower") {
-        const boxCentered = boxPos > 0.45 && boxPos < 0.55; // Phase 2: 0.4->0.45, 0.6->0.55
-        const emaGap = Math.abs(sn?.emaGap ?? 0);
-        const volProxy = sn?.volumeRatioProxy ?? 0;
-
-        // Phase 2: emaGap 0.0001->0.00005, volProxy 0.1->0.05
-        if (!boxCentered && emaGap > 0.00005 && volProxy > 0.05) {
-          softCandidateAllowed = true;
-          stage1SignalRelaxed = true;
-          signal_state = "LONG_CANDIDATE"; // 임시 승격하여 EDGE/RISK 태움
-          signalRelaxReason = "stage1_range_soft_candidate_v2";
-          supplemental_reasons.push("STAGE1_SIGNAL_RELAXED_SOFT_CANDIDATE_V2");
-        }
-      }
-    }
-
-    if (!softCandidateAllowed) {
-      reject_reason = "SIGNAL_NONE";
-      final_decision = "SKIP";
-      return ret(
-        {
-          execution_state: "PAPER_READY",
-          ai_decision: "N/A",
-          adaptive_decision: "N/A",
-          stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
-          required_move_pct: null,
-          shortfall_pct: 0,
-          signal_missing_reason: sn?.signalMissingReason ?? "EMA_CRITERIA_NOT_MET",
-          box_position_diag: sn?.boxPos,
-          ema_gap_diag: sn?.emaGap,
-          volatility_proxy_diag: sn?.volumeRatioProxy,
-          stage1_leniency_applied,
-          original_signal_state: "NONE",
-          final_signal_state: "NONE"
-        },
-        {
-          intentSide,
-          executorDecision,
-          adaptiveOk: false,
-          adaptiveDirection: null,
-          adaptiveDetail: null,
-          adaptiveResult: null,
-          aiGatePassed: false
-        }
-      );
-    } else {
-      // SOFT_RANGE_CANDIDATE 경로 진입
-      // signal_state가 LONG_CANDIDATE/SHORT_CANDIDATE로 잡혀 아래 로직을 계속 타게 됨
-      // 단, PACK 시 final_signal_state를 위해 변수 유지
-    }
-  }
+  /**
+   * regimeUnknown: BTC 5m 최소 봉 미만 → regime_state UNKNOWN.
+   */
 
   /**
    * regimeUnknown: BTC 5m 최소 봉 미만 → regime_state UNKNOWN.
@@ -2686,7 +2656,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const nearEdgeRangeCandidate =
       input.currentStage === 0 &&
       input.regime === "RANGE" &&
-      signal_state !== "NONE" &&
       typeof sn.boxPos === "number" &&
       (sn.boxPos <= 0.38 || sn.boxPos >= 0.62);
     const streakSuspend =
@@ -3075,30 +3044,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
       detailDumpHit ||
       detailVolHit;
-    const testBypassAllowed =
-      input.config.paperTestBypassLegacyRangeStage0 === true &&
-      rangeStage0LegacyPath &&
-      !severeRiskLock &&
-      reject_reason !== "RISK_COOLDOWN" &&
-      reject_reason !== "RISK_FAIL_REENTRY";
-
-    if (testBypassAllowed && executorDecision) {
-      legacy_block_test_bypass_applied = true;
-      legacy_block_test_bypass_reason = "range_stage0_legacy_block_test_bypass";
-      supplemental_reasons.push("LEGACY_BLOCK_TEST_BYPASS_APPLIED");
-      executorDecision = {
-        ...executorDecision,
-        entry_allowed: true,
-        blocked_reason: null,
-        target_stage: executorDecision.target_stage ?? 1,
-        guidance: "test bypass: legacy range stage0 block skipped"
-      };
-      reject_reason = null;
-      final_decision = "SKIP";
-    }
-
     if (executorDecision?.entry_allowed) {
-      stage1_block_origin = "legacy_executor_gate_bypassed_for_test";
+      stage1_block_origin = "legacy_executor_gate_passed";
       override_by_legacy = false;
     } else {
       // Round 4 & 5: Active Stage 1 candidate evaluation (Execution over Review)
@@ -3140,8 +3087,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           legacy_gate_source,
           override_by_legacy,
           stage1_block_origin,
-          legacy_block_test_bypass_applied,
-          legacy_block_test_bypass_reason,
           legacy_block_original_reason,
           stage1_signal_relaxed: stage1SignalRelaxed,
           signal_relax_reason: signalRelaxReason,
@@ -3178,36 +3123,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const aiIn = aiInputFromDecision({ decision: executorDecision, executorDirection: intentSide, lossStreak, last10Net });
   if (aiIn) {
     const aiOut = aiApproveEntry(aiIn);
-    const aiDir = aiOut.action === "ENTER_LONG" ? "long" : aiOut.action === "ENTER_SHORT" ? "short" : "none";
-    const mismatch = aiDir !== "none" && aiDir !== intentSide;
-    if (mismatch) {
-      reject_reason = "AI_DIRECTION_MISMATCH";
-      final_decision = "REJECT";
-      supplemental_reasons.push("AI_DIRECTION_MISMATCH");
-      return ret(
-        {
-          reject_reason: "AI_DIRECTION_MISMATCH",
-          final_decision: "REJECT",
-          ai_decision: "REJECT",
-          adaptive_decision: "N/A",
-          guidance: "AI 방향 불일치",
-          target_stage: null,
-          supplemental_reasons,
-          stage1_result_code: "STAGE1_BLOCKED_QUALITY",
-          required_move_pct,
-          shortfall_pct
-        },
-        {
-          intentSide,
-          executorDecision,
-          adaptiveOk: false,
-          adaptiveDirection: null,
-          adaptiveDetail: null,
-          adaptiveResult: null,
-          aiGatePassed: false
-        }
-      );
-    }
+    // [ROLE REDUCTION] AI only handles quality approval/rejection for the locked direction
 
     // AI Role refinement: Stage 1 floor relaxed to 35
     let aiFloorRelaxed = false;
@@ -3474,118 +3390,40 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       executorBlockReasonOriginal = adaptive.orderBuildFailReason;
     }
     if (!adaptive.ok) {
-      let stage1DirectionOverrideApplied = false;
-      let stage1DirectionOverrideReason: string | null = null;
-      let originalPolicyDirection: string | null = (adaptive as any).orderBuildFailReason === "policy_direction_none" ? "none" : null;
-      let finalPolicyDirection: string | null = null;
-
-      // Stage 1 Range Directional Override (DEACTIVATED)
-      if (
-        false && // stage1SoftCandidateMicroEnter disabled
-        (adaptive as any).orderBuildFailReason === "policy_direction_none" &&
-        input.currentStage === 0 &&
-        input.regime === "RANGE"
-      ) {
-        // Logic removed.
-      }
-
-      if (!stage1DirectionOverrideApplied) {
-        const af = adaptive as Extract<FuturesAdaptiveEntryResult, { ok: false }>;
-        return ret(
-          {
-            reject_reason: "ORDER_BUILD_FAIL",
-            final_decision: "REJECT",
-            execution_state: "ORDER_BUILD_FAIL",
-            ai_decision: "APPROVE",
-            adaptive_decision: "REJECT",
-            guidance: `Adaptive entry failed: ${af.orderBuildFailReason}`,
-            target_stage: null,
-            supplemental_reasons,
-            stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
-            required_move_pct,
-            shortfall_pct,
-            order_build_ok: false,
-            order_build_fail_reason: af.orderBuildFailReason,
-            order_build_fail_stage: af.failStage
-          },
-          {
-            intentSide,
-            executorDecision,
-            adaptiveOk: false,
-            adaptiveDirection: null,
-            adaptiveDetail: adaptiveDetailOut,
-            adaptiveResult: null,
-            adaptiveFailure: af,
-            aiGatePassed: true
-          }
-        );
-      } else {
-        // This path is unreachable due to false && above, but kept for type safety/future use
-        return ret(
-          {
-            final_decision: "ENTER",
-            reject_reason: null,
-            execution_state: "PAPER_READY",
-            ai_decision: "APPROVE",
-            adaptive_decision: "OK",
-            guidance: `방향 보정 진입 (${stage1DirectionOverrideReason})`,
-            target_stage: 1,
-            supplemental_reasons,
-            stage1_result_code: "STAGE1_ENTERED",
-            required_move_pct, shortfall_pct,
-            stage1_direction_override_applied: true,
-            stage1_direction_override_reason: stage1DirectionOverrideReason,
-            original_policy_direction: originalPolicyDirection,
-            final_policy_direction: finalPolicyDirection,
-            qty: (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult) / sn!.lastPrice,
-            price: sn!.lastPrice,
-            stopLoss: null,
-            takeProfit: null,
-            riskReward: rr,
-            atr_pct: atr_pct!
-          },
-          {
-            intentSide,
-            executorDecision,
-            adaptiveOk: true,
-            adaptiveDirection: finalPolicyDirection as any,
-            adaptiveDetail: adaptiveDetailOut,
-            adaptiveResult: { ...adaptive, ok: true, direction: finalPolicyDirection as any } as any,
-            aiGatePassed: true
-          }
-        );
-      }
-    }
-
-    const expectedSide: "long" | "short" = workingSignal === "paper_long_candidate" ? "long" : "short";
-    if (adaptive.direction !== expectedSide) {
-      reject_reason = "ADAPTIVE_REJECT";
-      final_decision = "REJECT";
-      supplemental_reasons.push("ADAPTIVE_DIRECTION_MISMATCH");
+      const af = adaptive as Extract<FuturesAdaptiveEntryResult, { ok: false }>;
       return ret(
         {
-          reject_reason: "ADAPTIVE_REJECT",
+          reject_reason: "ORDER_BUILD_FAIL",
           final_decision: "REJECT",
+          execution_state: "ORDER_BUILD_FAIL",
           ai_decision: "APPROVE",
           adaptive_decision: "REJECT",
-          guidance: `Adaptive 방향 불일치 (${adaptive.direction} vs ${expectedSide})`,
+          guidance: `Adaptive entry failed: ${af.orderBuildFailReason}`,
           target_stage: null,
           supplemental_reasons,
           stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
           required_move_pct,
-          shortfall_pct
+          shortfall_pct,
+          order_build_ok: false,
+          order_build_fail_reason: af.orderBuildFailReason,
+          order_build_fail_stage: af.failStage
         },
         {
           intentSide,
           executorDecision,
-          adaptiveOk: false,
-          adaptiveDirection: adaptive.direction,
+          adaptiveOk,
+          adaptiveDirection,
           adaptiveDetail: adaptiveDetailOut,
-          adaptiveResult: adaptive,
+          adaptiveResult,
+          adaptiveFailure: af,
           aiGatePassed: true
         }
       );
     }
+
+    adaptiveOk = true;
+    adaptiveDirection = adaptive.direction;
+    adaptiveResult = adaptive;
 
     if (input.config.longOnly && adaptive.direction === "short") {
       supplemental_reasons.push("LONG_ONLY_RESTRICTION");
@@ -3652,217 +3490,203 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             }
           );
         }
-      } else {
+
+        if (input.config.longOnly && adaptive.direction === "short") {
+          supplemental_reasons.push("LONG_ONLY_RESTRICTION");
+          return ret(
+            {
+              reject_reason: "EXECUTION_DISABLED",
+              final_decision: "REJECT",
+              execution_state: "DISABLED",
+              ai_decision: "APPROVE",
+              adaptive_decision: "REJECT",
+              guidance: "Long Only 제한으로 숏 진입 차단",
+              target_stage: null,
+              supplemental_reasons,
+              stage1_result_code: "STAGE1_BLOCKED_RISK"
+            },
+            { intentSide, executorDecision, aiGatePassed, adaptiveOk: false, adaptiveDirection: null, adaptiveDetail: adaptiveDetailOut, adaptiveResult: null }
+          );
+        }
+
+        const initialEntryQty = (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult) / sn!.lastPrice;
+        if (initialEntryQty <= 0) {
+          reject_reason = "ORDER_BUILD_FAIL";
+          final_decision = "REJECT";
+          supplemental_reasons.push("ZERO_QTY_FAIL");
+          return ret(
+            {
+              reject_reason: "ORDER_BUILD_FAIL",
+              final_decision: "REJECT",
+              execution_state: "ORDER_BUILD_FAIL",
+              ai_decision: "APPROVE",
+              adaptive_decision: "REJECT",
+              guidance: "진입 수량 0",
+              target_stage: null,
+              supplemental_reasons,
+              stage1_result_code: "STAGE1_BLOCKED_DATA",
+              required_move_pct,
+              shortfall_pct
+            },
+            {
+              intentSide,
+              executorDecision,
+              adaptiveOk: false,
+              adaptiveDirection: null,
+              adaptiveDetail: adaptiveDetailOut,
+              adaptiveResult: adaptive,
+              aiGatePassed: true
+            }
+          );
+        }
+
+        final_decision = "ENTER";
+        reject_reason = null;
+        execution_state = "PAPER_READY";
+
+        const forceEnterAdaptive =
+          adaptive.detail["stage1_adaptive_force_enter"] ?? adaptive.detail["stage1_adaptive_soft_explore"];
+        if (forceEnterAdaptive === "direction_none") supplemental_reasons.push("STAGE1_EXPLORE_ADAPTIVE_DIRECTION_NONE");
+        if (forceEnterAdaptive === "ema_flat") supplemental_reasons.push("STAGE1_EXPLORE_ADAPTIVE_EMA_FLAT");
+
+        // Round 4 & 5: Stage 1 Execution Pending prioritize
+        if (input.currentStage === 0 && input.autoEntryTriggered) {
+          execution_state = "STAGE1_EXEC_PENDING";
+          guidanceOut = "Stage 1 실행 대기 (검토 조건 유지)";
+        }
+
+
         return ret(
           {
-            reject_reason: "EXECUTION_DISABLED",
-            final_decision: "REJECT",
+            final_decision: "ENTER",
+            reject_reason: null,
             ai_decision: "APPROVE",
             adaptive_decision: "OK",
-            guidance: "방향 제한 (Long Only)",
-            target_stage: null,
+            guidance: executorDecision?.guidance ?? null,
+            next_action: executorDecision?.next_action ?? null,
+            invalidate_condition: executorDecision?.invalidate_condition ?? null,
+            risk_note: executorDecision?.risk_note ?? null,
+            watch_zone: executorDecision?.watch_zone ?? null,
+            entry_progress: executorDecision?.entry_progress ?? null,
+            target_stage: executorDecision?.target_stage ?? null,
             supplemental_reasons,
-            stage1_result_code: "STAGE1_BLOCKED_REGIME",
+            auto_entry_triggered: input.autoEntryTriggered,
+            stage1_result_code:
+              stage1ResultCodeOverride ?? (
+                execution_state === "STAGE1_EXEC_PENDING"
+                  ? "STAGE1_EXEC_PENDING"
+                  : costWarningStage1
+                    ? "STAGE1_COST_WARNING"
+                    : "STAGE1_ENTERED"
+              ),
             required_move_pct,
             shortfall_pct,
-            range_long_only_short_deferred_applied: false,
-            range_long_only_short_deferred_bypassed: range_long_only_short_deferred_bypassed,
-            long_only_restriction: true,
-            original_signal_state: "SHORT_CANDIDATE",
-            final_signal_state: "SHORT_CANDIDATE",
-            execution_disabled_reason: "EXECUTION_DISABLED_long_only_short_non_range_or_stage_gt0",
-            execution_disabled_top_proof: {
-              guard_id: "LONG_ONLY_STRICT_SHORT_BLOCK",
-              proof_version: 1,
-              at_ms: input.now,
-              symbol: String(sym),
-              long_only_config: input.config.longOnly,
-              regime: input.regime,
-              current_stage: input.currentStage,
-              signal_state,
-              working_signal: workingSignal,
-              intent_side: intentSide,
-              adaptive_direction: adaptive.direction,
-              expected_side_from_working_signal: expectedSide,
-              range_stage0_engine_taken,
-              range_final_selected_side,
-              range_short_allowed,
-              range_short_allowed_reason,
-              range_zone_detected,
-              range_upper_edge_near,
-              box_pos: longOnlyBoxPos,
-              classify_box_zone: longOnlyClassifiedZone,
-              long_only_zone_upper_bypass_would_apply: longOnlyZoneUpperBypass,
-              range_bidirectional_short_intent_would_apply: rangeBidirectionalShortIntent
-            }
+            stage1_size_multiplier_final: stage1SizeMultFinal,
+            expected_move_usd: expectedMoveUsd,
+            required_cost_usd: requiredCostUsd,
+            shortfall_usd: shortfallUsd,
+            fee_drag_filter_applied,
+            fee_drag_size_reduced,
+            fee_drag_blocked,
+            fee_drag_reason,
+            fee_drag_proof,
+            qty: initialEntryQty,
+            price: sn!.lastPrice,
+            stopLoss: (() => {
+              const slThresh = stopLossPctForRegime(input.regime);
+              // Protective SL: fallback to regime SL %
+              const baseSlPrice = intentSide === "long"
+                ? sn!.lastPrice * (1 + slThresh) // slThresh is negative
+                : sn!.lastPrice * (1 - slThresh);
+
+              // ATR-based SL if available (2.5 * ATR)
+              if (atr_pct && atr_pct > 0) {
+                const atrSlDist = sn!.lastPrice * atr_pct * 2.5;
+                const atrSlPrice = intentSide === "long"
+                  ? sn!.lastPrice - atrSlDist
+                  : sn!.lastPrice + atrSlDist;
+
+                // Use the more conservative one (closer to price for protection)
+                return intentSide === "long"
+                  ? Math.max(baseSlPrice, atrSlPrice)
+                  : Math.min(baseSlPrice, atrSlPrice);
+              }
+              return baseSlPrice;
+            })(),
+            takeProfit: null,
+            riskReward: rr,
+            atr_pct,
+            tick_size: null,
+            qty_step: null,
+            min_qty: null,
+            min_notional: null,
+            sizeUsd: adaptive.sizeUsd,
+            original_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === ("none" as any)) ? "NONE" : signal_state as any,
+            final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === ("none" as any)) ? "SOFT_RANGE_CANDIDATE" : signal_state as any,
+            range_bidirectional_applied: range_bidirectional_applied,
+            range_short_allowed: range_short_allowed,
+            range_short_allowed_reason: range_short_allowed_reason,
+            range_upper_edge_near: range_upper_edge_near,
+            range_center_wait: range_center_wait,
+            range_final_selected_side: adaptive.direction,
+            range_reversal_zone: range_reversal_zone,
+            range_reversal_short_eval_started: range_reversal_short_eval_started,
+            range_reversal_long_exit_triggered: range_reversal_long_exit_triggered,
+            range_reversal_short_entry_allowed: range_reversal_short_entry_allowed,
+            range_reversal_short_entry_block_reason: range_reversal_short_entry_block_reason,
+            range_reversal_immediate_switch_applied: range_reversal_immediate_switch_applied,
+            range_reversal_immediate_switch_reason: range_reversal_immediate_switch_reason
           },
           {
-            intentSide,
+            intentSide: intentSide ?? (workingSignal === "paper_long_candidate" || workingSignal === "none" ? "long" : "short"),
             executorDecision,
-            adaptiveOk: false,
+            adaptiveOk: true,
             adaptiveDirection: adaptive.direction,
             adaptiveDetail: adaptiveDetailOut,
-            adaptiveResult: null,
+            adaptiveResult: adaptive as any,
             aiGatePassed: true
           }
         );
       }
-    }
 
-    const initialEntryQty = (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult) / sn!.lastPrice;
-    if (initialEntryQty <= 0) {
-      reject_reason = "ORDER_BUILD_FAIL";
-      final_decision = "REJECT";
-      supplemental_reasons.push("ZERO_QTY_FAIL");
+      // Handle fallback if aiIn is null or logic flows outside
       return ret(
         {
-          reject_reason: "ORDER_BUILD_FAIL",
-          final_decision: "REJECT",
-          execution_state: "ORDER_BUILD_FAIL",
-          ai_decision: "APPROVE",
-          adaptive_decision: "REJECT",
-          guidance: "진입 수량 0",
-          target_stage: null,
+          final_decision: "SKIP",
+          reject_reason: "SIGNAL_NONE",
+          guidance: "신호 분석 불가",
           supplemental_reasons,
-          stage1_result_code: "STAGE1_BLOCKED_DATA",
+          stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
           required_move_pct,
           shortfall_pct
         },
         {
-          intentSide,
-          executorDecision,
+          intentSide: null,
+          executorDecision: null,
           adaptiveOk: false,
           adaptiveDirection: null,
-          adaptiveDetail: adaptiveDetailOut,
-          adaptiveResult: adaptive,
-          aiGatePassed: true
+          adaptiveDetail: null,
+          adaptiveResult: null,
+          aiGatePassed: false
         }
       );
     }
-
-    final_decision = "ENTER";
-    reject_reason = null;
-    execution_state = "PAPER_READY";
-
-    const forceEnterAdaptive =
-      adaptive.detail["stage1_adaptive_force_enter"] ?? adaptive.detail["stage1_adaptive_soft_explore"];
-    if (forceEnterAdaptive === "direction_none") supplemental_reasons.push("STAGE1_EXPLORE_ADAPTIVE_DIRECTION_NONE");
-    if (forceEnterAdaptive === "ema_flat") supplemental_reasons.push("STAGE1_EXPLORE_ADAPTIVE_EMA_FLAT");
-
-    // Round 4 & 5: Stage 1 Execution Pending prioritize
-    if (input.currentStage === 0 && input.autoEntryTriggered) {
-      execution_state = "STAGE1_EXEC_PENDING";
-      guidanceOut = "Stage 1 실행 대기 (검토 조건 유지)";
-    }
-
-
-    return ret(
-      {
-        final_decision: "ENTER",
-        reject_reason: null,
-        ai_decision: "APPROVE",
-        adaptive_decision: "OK",
-        guidance: executorDecision?.guidance ?? null,
-        next_action: executorDecision?.next_action ?? null,
-        invalidate_condition: executorDecision?.invalidate_condition ?? null,
-        risk_note: executorDecision?.risk_note ?? null,
-        watch_zone: executorDecision?.watch_zone ?? null,
-        entry_progress: executorDecision?.entry_progress ?? null,
-        target_stage: executorDecision?.target_stage ?? null,
-        supplemental_reasons,
-        auto_entry_triggered: input.autoEntryTriggered,
-        stage1_result_code:
-          stage1ResultCodeOverride ?? (
-            execution_state === "STAGE1_EXEC_PENDING"
-              ? "STAGE1_EXEC_PENDING"
-              : costWarningStage1
-                ? "STAGE1_COST_WARNING"
-                : "STAGE1_ENTERED"
-          ),
-        required_move_pct,
-        shortfall_pct,
-        stage1_size_multiplier_final: stage1SizeMultFinal,
-        expected_move_usd: expectedMoveUsd,
-        required_cost_usd: requiredCostUsd,
-        shortfall_usd: shortfallUsd,
-        fee_drag_filter_applied,
-        fee_drag_size_reduced,
-        fee_drag_blocked,
-        fee_drag_reason,
-        fee_drag_proof,
-        qty: initialEntryQty,
-        price: sn!.lastPrice,
-        stopLoss: (() => {
-          const slThresh = stopLossPctForRegime(input.regime);
-          // Protective SL: fallback to regime SL %
-          const baseSlPrice = intentSide === "long"
-            ? sn!.lastPrice * (1 + slThresh) // slThresh is negative
-            : sn!.lastPrice * (1 - slThresh);
-
-          // ATR-based SL if available (2.5 * ATR)
-          if (atr_pct && atr_pct > 0) {
-            const atrSlDist = sn!.lastPrice * atr_pct * 2.5;
-            const atrSlPrice = intentSide === "long"
-              ? sn!.lastPrice - atrSlDist
-              : sn!.lastPrice + atrSlDist;
-
-            // Use the more conservative one (closer to price for protection)
-            return intentSide === "long"
-              ? Math.max(baseSlPrice, atrSlPrice)
-              : Math.min(baseSlPrice, atrSlPrice);
-          }
-          return baseSlPrice;
-        })(),
-        takeProfit: null,
-        riskReward: rr,
-        atr_pct,
-        tick_size: null,
-        qty_step: null,
-        min_qty: null,
-        min_notional: null,
-        sizeUsd: adaptive.sizeUsd,
-        original_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === ("none" as any)) ? "NONE" : signal_state as any,
-        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === ("none" as any)) ? "SOFT_RANGE_CANDIDATE" : signal_state as any,
-        range_bidirectional_applied: range_bidirectional_applied,
-        range_short_allowed: range_short_allowed,
-        range_short_allowed_reason: range_short_allowed_reason,
-        range_upper_edge_near: range_upper_edge_near,
-        range_center_wait: range_center_wait,
-        range_final_selected_side: adaptive.direction,
-        range_reversal_zone: range_reversal_zone,
-        range_reversal_short_eval_started: range_reversal_short_eval_started,
-        range_reversal_long_exit_triggered: range_reversal_long_exit_triggered,
-        range_reversal_short_entry_allowed: range_reversal_short_entry_allowed,
-        range_reversal_short_entry_block_reason: range_reversal_short_entry_block_reason,
-        range_reversal_immediate_switch_applied: range_reversal_immediate_switch_applied,
-        range_reversal_immediate_switch_reason: range_reversal_immediate_switch_reason
-      },
-      {
-        intentSide: intentSide ?? (workingSignal === "paper_long_candidate" || workingSignal === "none" ? "long" : "short"),
-        executorDecision,
-        adaptiveOk: true,
-        adaptiveDirection: adaptive.direction,
-        adaptiveDetail: adaptiveDetailOut,
-        adaptiveResult: adaptive as any,
-        aiGatePassed: true
-      }
-    );
   }
 
-  // Handle fallback if aiIn is null or logic flows outside
   return ret(
     {
+      execution_state: "IDLE",
       final_decision: "SKIP",
       reject_reason: "SIGNAL_NONE",
-      guidance: "신호 분석 불가",
+      guidance: "Fallback: No decision path matched",
       supplemental_reasons,
       stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
       required_move_pct,
       shortfall_pct
     },
     {
-      intentSide: null,
-      executorDecision: null,
+      intentSide,
+      executorDecision,
       adaptiveOk: false,
       adaptiveDirection: null,
       adaptiveDetail: null,
