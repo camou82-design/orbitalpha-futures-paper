@@ -496,9 +496,31 @@ type MutablePositionOpenTrace = {
 };
 type RangeManagementState = "INIT" | "REATTACK_READY" | "REATTACK_USED" | "PROFIT_LOCKED";
 
+export function normalizeEntryStageFromSizeEvidence(
+  rec: PaperOpenPositionRecord
+): { normalized: PaperOpenPositionRecord; changed: boolean } {
+  const entryStage = rec.entryStage ?? 1;
+  const scaled =
+    typeof rec.initialSizeUsd === "number" &&
+    rec.initialSizeUsd > 0 &&
+    rec.sizeUsd > rec.initialSizeUsd * 1.05;
+
+  if (scaled && entryStage < 2) {
+    return {
+      normalized: { ...rec, entryStage: 2 },
+      changed: true
+    };
+  }
+  return { normalized: rec, changed: false };
+}
+
 function normalizeRangeManagementState(
   rec: PaperOpenPositionRecord
 ): { normalized: PaperOpenPositionRecord; changed: boolean } {
+  if (rec.regimeAtEntry !== "RANGE") {
+    return { normalized: rec, changed: false };
+  }
+
   let normalized = rec;
   let changed = false;
 
@@ -2446,14 +2468,17 @@ export class PaperEngine {
         continue;
       }
 
-      const normalizedOpen = normalizeRangeManagementState(openRaw);
+      const nStage = normalizeEntryStageFromSizeEvidence(openRaw);
+      const nRange = normalizeRangeManagementState(nStage.normalized);
+      const finalNorm = nRange.normalized;
+
       let open: PaperOpenPositionRecord = {
-        ...normalizedOpen.normalized,
-        initialSizeUsd: openRaw.initialSizeUsd ?? openRaw.sizeUsd,
-        partialExitStage: openRaw.partialExitStage ?? 0,
-        rangeManagementState: normalizedOpen.normalized.rangeManagementState ?? "INIT",
-        rangeAddOnUsed: normalizedOpen.normalized.rangeAddOnUsed ?? false,
-        rangeFirstProfitLocked: normalizedOpen.normalized.rangeFirstProfitLocked ?? false
+        ...finalNorm,
+        initialSizeUsd: finalNorm.initialSizeUsd ?? openRaw.sizeUsd,
+        partialExitStage: finalNorm.partialExitStage ?? 0,
+        rangeManagementState: finalNorm.rangeManagementState ?? "INIT",
+        rangeAddOnUsed: finalNorm.rangeAddOnUsed ?? false,
+        rangeFirstProfitLocked: finalNorm.rangeFirstProfitLocked ?? false
       };
 
       const closePrice = snap.lastPrice;
@@ -3527,9 +3552,14 @@ export class PaperEngine {
     const opensRaw = await this.positions.loadOpenAll();
     let openPositionsChanged = false;
     const opens = opensRaw.map((r) => {
-      const n = normalizeRangeManagementState(r);
-      if (n.changed) openPositionsChanged = true;
-      return n.normalized;
+      let current = r;
+      let changed = false;
+      const stageN = normalizeEntryStageFromSizeEvidence(current);
+      if (stageN.changed) { current = stageN.normalized; changed = true; }
+      const rangeN = normalizeRangeManagementState(current);
+      if (rangeN.changed) { current = rangeN.normalized; changed = true; }
+      if (changed) openPositionsChanged = true;
+      return current;
     });
     const before = opens.length;
     const next = [...opens];
