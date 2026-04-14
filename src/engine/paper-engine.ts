@@ -965,6 +965,7 @@ export class PaperEngine {
           reentryCooldownMs: this.config.paperReentryCooldownMs,
           sameDirCooldownMult: SAME_DIR_REENTRY_COOLDOWN_MULT,
           hasOpenPosition: false,
+          openPositionsTotal: opensAfterClose.length,
           openPositionSide: null,
           currentStage: 0,
           maxPositionsReached: false,
@@ -1196,6 +1197,7 @@ export class PaperEngine {
         reentryCooldownMs: this.config.paperReentryCooldownMs,
         sameDirCooldownMult: SAME_DIR_REENTRY_COOLDOWN_MULT,
         hasOpenPosition: hasOpen,
+        openPositionsTotal: opensAfterClose.length,
         openPositionSide: openPos?.side ?? null,
         currentStage,
         maxPositionsReached: (opensAfterClose.length >= this.config.paperMaxOpenPositions && !hasOpen),
@@ -2063,6 +2065,12 @@ export class PaperEngine {
       range_final_selected_side: d.range_final_selected_side ?? null,
       range_signal_reason: typeof exDetail?.range_signal_reason === "string" ? exDetail.range_signal_reason : null,
       range_gate_result: typeof exDetail?.range_gate_result === "string" ? exDetail.range_gate_result : null,
+      range_fresh_reentry_allowed: d.range_fresh_reentry_allowed ?? false,
+      range_fresh_reentry_blocked_reason: d.range_fresh_reentry_blocked_reason ?? null,
+      range_fresh_reentry_size_mult: d.range_fresh_reentry_size_mult ?? null,
+      range_reentry_wait_bypassed_no_open_position: d.range_reentry_wait_bypassed_no_open_position ?? false,
+      range_loss_streak_reduced_entry_applied: d.range_loss_streak_reduced_entry_applied ?? false,
+      range_loss_streak_reduced_entry_size_mult: d.range_loss_streak_reduced_entry_size_mult ?? null,
       range_upper_edge_structure_ok: exDetail?.range_upper_edge_structure_ok ?? null,
       range_upper_edge_structure_one_liner: exDetail?.range_upper_edge_structure_one_liner ?? null
     };
@@ -2172,6 +2180,9 @@ export class PaperEngine {
         range_reentry_remaining_ms: d.range_reentry_remaining_ms ?? null,
         range_reentry_same_direction: d.range_reentry_same_direction ?? false,
         range_reentry_source: d.range_reentry_source ?? null,
+        range_fresh_reentry_allowed: d.range_fresh_reentry_allowed ?? false,
+        range_fresh_reentry_blocked_reason: d.range_fresh_reentry_blocked_reason ?? null,
+        range_reentry_wait_bypassed_no_open_position: d.range_reentry_wait_bypassed_no_open_position ?? false,
         blocked_regime_until_bypass_applied: d.blocked_regime_until_bypass_applied ?? false,
         blocked_regime_until_bypass_reason: d.blocked_regime_until_bypass_reason ?? null
       },

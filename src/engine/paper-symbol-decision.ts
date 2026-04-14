@@ -543,6 +543,7 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   reentryCooldownMs: number;
   sameDirCooldownMult: number;
   hasOpenPosition: boolean;
+  openPositionsTotal: number;
   currentStage: number;
   maxPositionsReached: boolean;
   reviewingTicks?: number;
@@ -815,6 +816,12 @@ function pack(
     range_reversal_short_entry_block_reason?: string | null;
     range_reversal_immediate_switch_applied?: boolean;
     range_reversal_immediate_switch_reason?: string | null;
+    range_fresh_reentry_allowed?: boolean;
+    range_fresh_reentry_blocked_reason?: string | null;
+    range_fresh_reentry_size_mult?: number | null;
+    range_reentry_wait_bypassed_no_open_position?: boolean;
+    range_loss_streak_reduced_entry_applied?: boolean;
+    range_loss_streak_reduced_entry_size_mult?: number | null;
     range_zone_action_policy?: string | null;
     range_zone_detected?: "upper" | "lower" | "mid" | null;
     range_upper_short_priority_applied?: boolean;
@@ -976,6 +983,12 @@ function pack(
     range_reversal_short_entry_block_reason: fields.range_reversal_short_entry_block_reason ?? null,
     range_reversal_immediate_switch_applied: fields.range_reversal_immediate_switch_applied ?? false,
     range_reversal_immediate_switch_reason: fields.range_reversal_immediate_switch_reason ?? null,
+    range_fresh_reentry_allowed: fields.range_fresh_reentry_allowed ?? false,
+    range_fresh_reentry_blocked_reason: fields.range_fresh_reentry_blocked_reason ?? null,
+    range_fresh_reentry_size_mult: fields.range_fresh_reentry_size_mult ?? null,
+    range_reentry_wait_bypassed_no_open_position: fields.range_reentry_wait_bypassed_no_open_position ?? false,
+    range_loss_streak_reduced_entry_applied: fields.range_loss_streak_reduced_entry_applied ?? false,
+    range_loss_streak_reduced_entry_size_mult: fields.range_loss_streak_reduced_entry_size_mult ?? null,
     range_zone_action_policy: fields.range_zone_action_policy ?? null,
     range_zone_detected: fields.range_zone_detected ?? null,
     range_upper_short_priority_applied: fields.range_upper_short_priority_applied ?? false,
@@ -1187,6 +1200,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_final_trade_side_by_zone: string | null = null;
   let range_reversal_immediate_switch_applied = false;
   let range_reversal_immediate_switch_reason: string | null = null;
+  let range_fresh_reentry_allowed = false;
+  let range_fresh_reentry_blocked_reason: string | null = null;
+  let range_fresh_reentry_size_mult: number | null = null;
+  let range_reentry_wait_bypassed_no_open_position = false;
+  let range_loss_streak_reduced_entry_applied = false;
+  let range_loss_streak_reduced_entry_size_mult: number | null = null;
   let range_stage0_engine_taken = false;
   let range_stage0_exit_reason: string | null = null;
   let range_stage0_branch_proof: Record<string, unknown> | null = null;
@@ -1332,6 +1351,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reversal_short_entry_block_reason?: string | null;
       range_reversal_immediate_switch_applied?: boolean;
       range_reversal_immediate_switch_reason?: string | null;
+      range_fresh_reentry_allowed?: boolean;
+      range_fresh_reentry_blocked_reason?: string | null;
+      range_fresh_reentry_size_mult?: number | null;
+      range_reentry_wait_bypassed_no_open_position?: boolean;
+      range_loss_streak_reduced_entry_applied?: boolean;
+      range_loss_streak_reduced_entry_size_mult?: number | null;
       range_zone_action_policy?: string | null;
       range_zone_detected?: "upper" | "lower" | "mid" | null;
       range_upper_short_priority_applied?: boolean;
@@ -1540,6 +1565,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         extra.range_reversal_immediate_switch_applied ?? range_reversal_immediate_switch_applied,
       range_reversal_immediate_switch_reason:
         extra.range_reversal_immediate_switch_reason ?? range_reversal_immediate_switch_reason,
+      range_fresh_reentry_allowed: extra.range_fresh_reentry_allowed ?? range_fresh_reentry_allowed,
+      range_fresh_reentry_blocked_reason: extra.range_fresh_reentry_blocked_reason ?? range_fresh_reentry_blocked_reason,
+      range_fresh_reentry_size_mult: extra.range_fresh_reentry_size_mult ?? range_fresh_reentry_size_mult,
+      range_reentry_wait_bypassed_no_open_position:
+        extra.range_reentry_wait_bypassed_no_open_position ?? range_reentry_wait_bypassed_no_open_position,
+      range_loss_streak_reduced_entry_applied:
+        extra.range_loss_streak_reduced_entry_applied ?? range_loss_streak_reduced_entry_applied,
+      range_loss_streak_reduced_entry_size_mult:
+        extra.range_loss_streak_reduced_entry_size_mult ?? range_loss_streak_reduced_entry_size_mult,
       range_zone_action_policy: extra.range_zone_action_policy ?? range_zone_action_policy,
       range_zone_detected: extra.range_zone_detected ?? range_zone_detected,
       range_upper_short_priority_applied: extra.range_upper_short_priority_applied ?? range_upper_short_priority_applied,
@@ -1688,6 +1722,37 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const RANGE_SOFT_SUSPEND_COOLDOWN_MS = 45_000;
     const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
     const zone = classifyBoxZone(boxPos);
+    const edgeGateCurrent = rangeStage0EdgeStructureGate(sn);
+    const edgeStructureOkCurrent = edgeGateCurrent.ok;
+    const prioritySignalAligned =
+      (zone === "upper" && rangeSignal.side === "short") || (zone === "lower" && rangeSignal.side === "long");
+    const noOpenPositionFreshEntry = !input.hasOpenPosition && input.openPositionsTotal === 0;
+    const freshReentryCandidate =
+      noOpenPositionFreshEntry &&
+      prioritySignalAligned &&
+      edgeStructureOkCurrent &&
+      rangeSignal.signal !== "RANGE_SIGNAL_NONE";
+    const RANGE_FRESH_REENTRY_SIZE_MULT = 0.42;
+    if (freshReentryCandidate) {
+      range_fresh_reentry_allowed = true;
+      range_fresh_reentry_size_mult = RANGE_FRESH_REENTRY_SIZE_MULT;
+      range_fresh_reentry_blocked_reason = null;
+    } else {
+      range_fresh_reentry_blocked_reason =
+        input.hasOpenPosition
+          ? "has_open_this_symbol"
+          : input.openPositionsTotal > 0
+            ? "open_positions_total_not_zero"
+            : zone === "mid"
+              ? "range_mid_wait_no_directional_chase"
+              : !prioritySignalAligned
+                ? "priority_signal_not_aligned"
+                : !edgeStructureOkCurrent
+                  ? "edge_structure_not_ok"
+                  : rangeSignal.signal === "RANGE_SIGNAL_NONE"
+                    ? "range_signal_none"
+                    : "fresh_reentry_not_eligible";
+    }
     range_zone_action_policy = RANGE_ZONE_ACTION_POLICY;
     range_zone_detected = zone;
     range_mid_wait_applied = zone === "mid";
@@ -1769,11 +1834,25 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         range_same_direction_reentry_wait_ms = waitMs;
       }
       if (blockedRegimeActive && blockedRegimeLossStreakSuspend) {
-        range_soft_suspend_applied = true;
-        range_soft_suspend_size_mult = RANGE_SOFT_SUSPEND_SIZE_MULT;
-        range_soft_suspend_cooldown_ms = RANGE_SOFT_SUSPEND_COOLDOWN_MS;
-        range_soft_suspend_same_direction_restricted = sameDirection;
-        waitMs = sameDirection ? RANGE_SOFT_SUSPEND_COOLDOWN_MS : 0;
+        if (freshReentryCandidate) {
+          range_loss_streak_reduced_entry_applied = true;
+          range_loss_streak_reduced_entry_size_mult = RANGE_FRESH_REENTRY_SIZE_MULT;
+          range_soft_suspend_applied = false;
+          range_soft_suspend_size_mult = null;
+          range_soft_suspend_cooldown_ms = null;
+          range_soft_suspend_same_direction_restricted = false;
+        } else {
+          range_soft_suspend_applied = true;
+          range_soft_suspend_size_mult = RANGE_SOFT_SUSPEND_SIZE_MULT;
+          range_soft_suspend_cooldown_ms = RANGE_SOFT_SUSPEND_COOLDOWN_MS;
+          range_soft_suspend_same_direction_restricted = sameDirection;
+          waitMs = sameDirection ? RANGE_SOFT_SUSPEND_COOLDOWN_MS : 0;
+        }
+      }
+      if (sameDirection && freshReentryCandidate) {
+        waitMs = 0;
+        range_reentry_wait_bypassed_no_open_position = true;
+        rangeReentrySource = "range_fresh_reentry_no_open_position";
       }
       rangeReentryWaitMs = waitMs;
       rangeReentryElapsedMs = elapsedMs;
@@ -1796,7 +1875,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       gateReason = rangeSignal.reason;
     } else if (
       riskEngineBlocked ||
-      (blockedRegimeActive && (!blockedRegimeLossStreakSuspend || !range_risk_limit_relax_active))
+      (blockedRegimeActive &&
+        (!blockedRegimeLossStreakSuspend || !range_risk_limit_relax_active) &&
+        !(freshReentryCandidate && blockedRegimeLossStreakSuspend))
     ) {
       gateResult = "RANGE_GATE_BLOCK_RISK_ENGINE";
       gateReason = blockedRegimeLossStreakSuspend ? "mode_loss_streak_soft_suspended" : (blockedRegime?.reason ?? "risk_engine_block");
@@ -3047,6 +3128,24 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     ) {
       dynamicSizeMult *= range_same_direction_reentry_size_mult;
       supplemental_reasons.push("RANGE_SAME_DIRECTION_REENTRY_SIZE_REDUCED");
+    }
+    if (
+      input.currentStage === 0 &&
+      input.regime === "RANGE" &&
+      range_fresh_reentry_allowed &&
+      range_fresh_reentry_size_mult !== null
+    ) {
+      dynamicSizeMult *= range_fresh_reentry_size_mult;
+      supplemental_reasons.push("RANGE_FRESH_REENTRY_SIZE_REDUCED");
+    }
+    if (
+      input.currentStage === 0 &&
+      input.regime === "RANGE" &&
+      range_loss_streak_reduced_entry_applied &&
+      range_loss_streak_reduced_entry_size_mult !== null
+    ) {
+      dynamicSizeMult *= range_loss_streak_reduced_entry_size_mult;
+      supplemental_reasons.push("RANGE_LOSS_STREAK_REDUCED_ENTRY_APPLIED");
     }
 
     /**

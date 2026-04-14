@@ -520,6 +520,18 @@ export type PaperSymbolDecisionRecord = Readonly<{
   /** 반전 청산 직후(또는 pending) 반대 방향 즉시 평가 적용 */
   range_reversal_immediate_switch_applied?: boolean;
   range_reversal_immediate_switch_reason?: string | null;
+  /** 포지션 없는 상태에서 핵심 extreme 구조가 확인되어 fresh re-entry 허용됨 */
+  range_fresh_reentry_allowed?: boolean;
+  /** fresh re-entry가 허용되지 않은 경우 차단 이유 */
+  range_fresh_reentry_blocked_reason?: string | null;
+  /** fresh re-entry 허용 시 적용된 축소 진입 배수 */
+  range_fresh_reentry_size_mult?: number | null;
+  /** 포지션 없음 조건에서 same-direction reentry wait 우회 여부 */
+  range_reentry_wait_bypassed_no_open_position?: boolean;
+  /** loss streak suspend를 완전 차단 대신 축소 진입으로 완화 적용 */
+  range_loss_streak_reduced_entry_applied?: boolean;
+  /** loss streak 완화 진입 시 적용된 축소 배수 */
+  range_loss_streak_reduced_entry_size_mult?: number | null;
   /** RANGE 상단 반전 숏 평가 시작 여부 */
   range_reversal_short_eval_started?: boolean;
   /** RANGE 상단에서 기존 롱 정리 트리거 여부 */
