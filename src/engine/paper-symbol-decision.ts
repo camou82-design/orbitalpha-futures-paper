@@ -1865,17 +1865,60 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_risk_limit_relax_active = input.now < (RANGE_RISK_LIMIT_RELAX_EXPIRES_AT as number);
       range_risk_limit_relax_expired = !range_risk_limit_relax_active;
     }
+    const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
+    const zone = classifyBoxZone(boxPos);
+
     const riskEngineHardBlocked = input.risk?.crashState !== undefined && input.risk.crashState !== "NONE";
     const riskEngineBlockedBySuspendOnly =
       input.risk?.engineBlocked === true &&
       blockedRegimeActive &&
       blockedRegimeLossStreakSuspend &&
       range_risk_limit_relax_active;
-    const riskEngineBlocked = riskEngineHardBlocked || (input.risk?.engineBlocked === true && !riskEngineBlockedBySuspendOnly);
+
+    let crashLockBypassApplied = false;
+    let crashLockBypassReason: string | null = null;
+    let crashLockBypassSizeMult = 1.0;
+
+    if (riskEngineHardBlocked && input.risk?.dailyLossGuardTriggered !== true) {
+      const isRangeLowerLong = zone === "lower" && rangeSignal.side === "long" && rangeSignal.signal === "RANGE_LONG_CANDIDATE";
+      const hasQuality = (sn.rangeConfidence ?? 0) >= 0.45 && (sn.boxCohesion01 ?? 0) >= 0.25;
+      const extremeLower = boxPos <= 0.22;
+
+      if (isRangeLowerLong && hasQuality && extremeLower) {
+        crashLockBypassApplied = true;
+        crashLockBypassReason = `range_lower_long_crash_bypass_allowed_${input.risk?.crashState}`;
+        crashLockBypassSizeMult = 0.35;
+      }
+    }
+
+    const riskEngineBlocked = (!crashLockBypassApplied && riskEngineHardBlocked) || (input.risk?.engineBlocked === true && !riskEngineBlockedBySuspendOnly);
+
+    if (zone === "lower" && rangeSignal.signal === "RANGE_LONG_CANDIDATE") {
+      console.log("[RANGE_LONG_BLOCK_PROOF]", {
+        symbol: String(sn.symbol),
+        lower_zone_recognized: zone === "lower",
+        long_candidate_established: rangeSignal.signal === "RANGE_LONG_CANDIDATE",
+        pre_risk_crash_state: input.risk?.crashState,
+        pre_risk_allow_long: input.risk?.longAllow,
+        risk_engine_blocked_before_bypass: riskEngineHardBlocked || input.risk?.engineBlocked === true,
+        risk_engine_bypass_applied: crashLockBypassApplied,
+        risk_engine_final_block: riskEngineBlocked,
+        bypass_reason: crashLockBypassReason
+      });
+    }
+
+    if (input.risk?.longAllow === false || riskEngineHardBlocked) {
+      console.log("[CRASH_LOCK_POLICY_TRACE]", {
+        symbol: String(sn.symbol),
+        why_allow_new_long_false: input.risk?.crashReason ?? "loss_limit_or_unknown",
+        price_drop_state: input.risk?.crashState,
+        range_bypass_eligible: crashLockBypassApplied,
+        range_bypass_ineligible_reasons: !crashLockBypassApplied ? `zone=${zone},side=${rangeSignal.side},boxPos=${boxPos.toFixed(3)},conf=${sn.rangeConfidence?.toFixed(2)}` : null
+      });
+    }
+
     const RANGE_SOFT_SUSPEND_SIZE_MULT = 0.35;
     const RANGE_SOFT_SUSPEND_COOLDOWN_MS = 45_000;
-    const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
-    const zone = classifyBoxZone(boxPos);
     const edgeGateCurrent = rangeStage0EdgeStructureGate(sn);
     const edgeStructureOkCurrent = edgeGateCurrent.ok;
     const prioritySignalAligned =
@@ -2101,6 +2144,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       box_position: boxPos <= 0.34 ? "lower" : boxPos >= 0.66 ? "upper" : "middle",
       entryIntentType: entryResult === "RANGE_ENTRY_NONE" ? "probe" : "standard",
       detail: {
+        crash_lock_bypass_applied: crashLockBypassApplied,
+        crash_lock_bypass_reason: crashLockBypassReason,
+        crash_lock_bypass_size_mult: crashLockBypassSizeMult,
         range_signal: rangeSignal.signal,
         range_signal_reason: rangeSignal.reason,
         range_signal_score: rangeScores.rangeSignalScore,
@@ -2137,6 +2183,24 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     supplemental_reasons.push(rangeSignal.signal);
     supplemental_reasons.push(gateResult);
     supplemental_reasons.push(entryResult);
+
+    console.log("[RANGE_RISK_DECISION_TRACE]", {
+      symbol: String(sn.symbol),
+      marketMode: input.adaptiveMode,
+      activeEngine: input.regime,
+      crash_state: input.risk?.crashState ?? "NONE",
+      risk_state: input.risk?.riskStatus ?? "NORMAL",
+      allowNewLong: input.risk?.longAllow ?? true,
+      allowNewShort: input.risk?.shortAllow ?? true,
+      range_zone_detected: zone,
+      signal_state: signal_state,
+      final_trade_side: intentSide,
+      blocked_by: gateResult !== "RANGE_GATE_PASS" ? gateResult : null,
+      blocked_reason: gateResult !== "RANGE_GATE_PASS" ? gateReason : null,
+      override_applied: crashLockBypassApplied,
+      override_reason: crashLockBypassReason
+    });
+
     if (gateResult !== "RANGE_GATE_PASS") {
       const rangeFinalBlockReason =
         gateResult === "RANGE_GATE_BLOCK_LOW_CONFIDENCE" && rangeSignal.signal === "RANGE_SIGNAL_NONE"
