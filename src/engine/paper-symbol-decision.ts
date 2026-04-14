@@ -843,6 +843,11 @@ function pack(
     entry_confirmation_state?: "unconfirmed" | "reacting" | "confirmed";
     scaling_permission?: boolean;
     probe_only_mode?: boolean;
+    fee_drag_filter_applied?: boolean;
+    fee_drag_size_reduced?: boolean;
+    fee_drag_blocked?: boolean;
+    fee_drag_reason?: string | null;
+    fee_drag_proof?: Record<string, unknown> | null;
   }
 ): PaperSymbolDecision {
   return {
@@ -998,7 +1003,12 @@ function pack(
     entry_intent_type: fields.entry_intent_type,
     entry_confirmation_state: fields.entry_confirmation_state,
     scaling_permission: fields.scaling_permission,
-    probe_only_mode: fields.probe_only_mode
+    probe_only_mode: fields.probe_only_mode,
+    fee_drag_filter_applied: fields.fee_drag_filter_applied ?? false,
+    fee_drag_size_reduced: fields.fee_drag_size_reduced ?? false,
+    fee_drag_blocked: fields.fee_drag_blocked ?? false,
+    fee_drag_reason: fields.fee_drag_reason ?? null,
+    fee_drag_proof: fields.fee_drag_proof ?? null
   };
 }
 
@@ -1122,6 +1132,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_cost_warning_applied = false;
   let range_cost_warning_threshold: number | null = null;
   let range_cost_warning_shortfall: number | null = null;
+  let fee_drag_filter_applied = false;
+  let fee_drag_size_reduced = false;
+  let fee_drag_blocked = false;
+  let fee_drag_reason: string | null = null;
+  let fee_drag_proof: Record<string, unknown> | null = null;
   let range_reentry_cooldown_applied = false;
   let range_reentry_wait_ms: number | null = null;
   let range_reentry_elapsed_ms: number | null = null;
@@ -1332,6 +1347,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       stage1_cost_shortfall_pct?: number | null;
       stage1_cost_shortfall_usd?: number | null;
       stage1_cost_micro_size_mult?: number | null;
+      fee_drag_filter_applied?: boolean;
+      fee_drag_size_reduced?: boolean;
+      fee_drag_blocked?: boolean;
+      fee_drag_reason?: string | null;
+      fee_drag_proof?: Record<string, unknown> | null;
       currentStage?: number;
       regime?: "TREND" | "RANGE" | "NO_TRADE";
       regime_original_state?: PaperRegimeState;
@@ -1548,7 +1568,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       entry_intent_type: extra.entry_intent_type !== undefined ? extra.entry_intent_type : res.executorDecision?.entryIntentType,
       entry_confirmation_state: extra.entry_confirmation_state !== undefined ? extra.entry_confirmation_state : res.executorDecision?.entryConfirmationState,
       scaling_permission: extra.scaling_permission !== undefined ? extra.scaling_permission : res.executorDecision?.scalingPermission,
-      probe_only_mode: extra.probe_only_mode !== undefined ? extra.probe_only_mode : res.executorDecision?.probeOnlyMode
+      probe_only_mode: extra.probe_only_mode !== undefined ? extra.probe_only_mode : res.executorDecision?.probeOnlyMode,
+      fee_drag_filter_applied: extra.fee_drag_filter_applied ?? fee_drag_filter_applied,
+      fee_drag_size_reduced: extra.fee_drag_size_reduced ?? fee_drag_size_reduced,
+      fee_drag_blocked: extra.fee_drag_blocked ?? fee_drag_blocked,
+      fee_drag_reason: extra.fee_drag_reason !== undefined ? extra.fee_drag_reason : fee_drag_reason,
+      fee_drag_proof: extra.fee_drag_proof !== undefined ? extra.fee_drag_proof : fee_drag_proof
     }),
     ...res
   });
@@ -3007,6 +3032,85 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       supplemental_reasons.push("RANGE_SAME_DIRECTION_REENTRY_SIZE_REDUCED");
     }
 
+    /**
+     * Fee-drag (STAGE1_COST_WARNING 후처리만): 비용 경고 꼬리에서 추가 사이즈 축소만.
+     * `return ret(...)`로 REJECT 금지 · `fee_drag_blocked`는 항상 false(호환 필드).
+     * `range_lower_long_priority_applied` / `range_upper_short_priority_applied` true면 fee-drag 전체 스킵.
+     */
+    const feeDragRangePriorityProtected =
+      input.regime === "RANGE" &&
+      input.currentStage === 0 &&
+      (range_lower_long_priority_applied || range_upper_short_priority_applied);
+
+    if (costWarningStage1 && input.currentStage === 0 && !feeDragRangePriorityProtected) {
+      const rc = requiredCostUsd;
+      const emU = expectedMoveUsd;
+      if (rc !== null && rc > 0 && emU !== null) {
+        const emRatio = emU / rc;
+        const c = input.config;
+        const extremeTail =
+          emRatio <= c.paperFeeDragBlockEmRatioMax &&
+          shortfallUsd >= c.paperFeeDragBlockShortfallUsdMin &&
+          shortfall_pct >= c.paperFeeDragBlockShortfallPctMin;
+        if (extremeTail && c.paperFeeDragTailSizeMult < 1) {
+          const extremeMult = c.paperFeeDragTailSizeMult * c.paperFeeDragTailSizeMult;
+          dynamicSizeMult *= extremeMult;
+          fee_drag_filter_applied = true;
+          fee_drag_size_reduced = true;
+          fee_drag_reason = "extreme_cost_tail_size_mult";
+          fee_drag_proof = {
+            fee_drag_filter_applied: true,
+            fee_drag_size_reduced: true,
+            fee_drag_blocked: false,
+            fee_drag_reason,
+            shortfall_pct,
+            shortfall_usd: shortfallUsd,
+            expected_move_usd: emU,
+            required_cost_usd: rc,
+            em_ratio: emRatio,
+            tail_size_mult_applied: extremeMult,
+            range_priority_protected: false,
+            thresholds: {
+              block_em_ratio_max: c.paperFeeDragBlockEmRatioMax,
+              block_shortfall_usd_min: c.paperFeeDragBlockShortfallUsdMin,
+              block_shortfall_pct_min: c.paperFeeDragBlockShortfallPctMin
+            }
+          };
+          supplemental_reasons.push("fee_drag_filter_applied");
+          supplemental_reasons.push("fee_drag_size_reduced");
+        } else {
+          const weakTail =
+            shortfall_pct >= c.paperFeeDragWeakShortfallPctMin &&
+            emRatio <= c.paperFeeDragWeakEmRatioMax;
+          if (weakTail && c.paperFeeDragTailSizeMult < 1) {
+            dynamicSizeMult *= c.paperFeeDragTailSizeMult;
+            fee_drag_filter_applied = true;
+            fee_drag_size_reduced = true;
+            fee_drag_reason = "weak_cost_tail_size_mult";
+            fee_drag_proof = {
+              fee_drag_filter_applied: true,
+              fee_drag_size_reduced: true,
+              fee_drag_blocked: false,
+              fee_drag_reason,
+              shortfall_pct,
+              shortfall_usd: shortfallUsd,
+              expected_move_usd: emU,
+              required_cost_usd: rc,
+              em_ratio: emRatio,
+              tail_size_mult_applied: c.paperFeeDragTailSizeMult,
+              range_priority_protected: false,
+              thresholds: {
+                weak_shortfall_pct_min: c.paperFeeDragWeakShortfallPctMin,
+                weak_em_ratio_max: c.paperFeeDragWeakEmRatioMax
+              }
+            };
+            supplemental_reasons.push("fee_drag_filter_applied");
+            supplemental_reasons.push("fee_drag_size_reduced");
+          }
+        }
+      }
+    }
+
     const stage1SizeMultFinal = input.currentStage === 0 ? dynamicSizeMult : null;
 
     /** Stage1 RANGE 탐색: 소프트 탐색·에지·자동진입 소프트, 또는 실행기 자연 허용(소프트 없음). */
@@ -3393,6 +3497,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           ),
         required_move_pct,
         shortfall_pct,
+        stage1_size_multiplier_final: stage1SizeMultFinal,
+        expected_move_usd: expectedMoveUsd,
+        required_cost_usd: requiredCostUsd,
+        shortfall_usd: shortfallUsd,
+        fee_drag_filter_applied,
+        fee_drag_size_reduced,
+        fee_drag_blocked,
+        fee_drag_reason,
+        fee_drag_proof,
         qty: initialEntryQty,
         price: sn!.lastPrice,
         stopLoss: (() => {
