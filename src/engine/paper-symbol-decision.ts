@@ -430,7 +430,7 @@ function evaluateRangeStage0Signal(
     if (sn.signal === "paper_short_candidate") {
       return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_from_base_signal", side: "short" };
     }
-    if (edgeStructureOk || (upperExtremeEdge && relaxedEdgeStructureOk)) {
+    if (upperExtremeEdge && (edgeStructureOk || relaxedEdgeStructureOk)) {
       return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_priority_structure", side: "short" };
     }
     if (sn.signal === "paper_long_candidate") {
@@ -444,7 +444,7 @@ function evaluateRangeStage0Signal(
     if (sn.signal === "paper_long_candidate") {
       return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_from_base_signal", side: "long" };
     }
-    if (edgeStructureOk || (lowerExtremeEdge && relaxedEdgeStructureOk)) {
+    if (lowerExtremeEdge && (edgeStructureOk || relaxedEdgeStructureOk)) {
       return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_priority_structure", side: "long" };
     }
     if (sn.signal === "paper_short_candidate") {
