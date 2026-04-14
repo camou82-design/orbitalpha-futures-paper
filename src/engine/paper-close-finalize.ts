@@ -6,6 +6,8 @@ import type {
   PaperOpenPositionRecord
 } from "../models/types";
 
+export type PaperCloseReasonLike = PaperClosedPositionRecord["closeReason"] | string;
+
 export function defaultLabelForExitType(t: PaperExitType): string {
   switch (t) {
     case "EXIT_SL":
@@ -99,7 +101,7 @@ export function inferPaperCloseSourceFromExitType(et: PaperExitType): PaperClose
 }
 
 export function derivePaperCloseSource(
-  closeReason: PaperClosedPositionRecord["closeReason"],
+  closeReason: PaperCloseReasonLike,
   exitType: PaperExitType
 ): PaperCloseSource {
   if (exitType === "EXIT_RISK") return "RISK";
@@ -108,6 +110,14 @@ export function derivePaperCloseSource(
   if (exitType === "EXIT_CRASH_FORCE" || exitType === "EXIT_CRASH_REDUCE") return "CRASH";
 
   switch (closeReason) {
+    case "EXIT_LONG_CRASH_FORCE":
+    case "EXIT_LONG_CRASH_REDUCE":
+      return "CRASH_LONG_DEFENSE";
+    case "EXIT_SHORT_MOMENTUM_TRAIL":
+      return "CRASH_SHORT_MOMENTUM";
+    case "EXIT_CRASH_FORCE":
+    case "EXIT_CRASH_REDUCE":
+      return "CRASH";
     case "stop_loss":
       return "SL";
     case "take_profit":
@@ -223,9 +233,19 @@ export function computePaperCloseLegMetrics(input: Readonly<{
 }
 
 export function paperExitDisplayMeta(
-  closeReason: PaperClosedPositionRecord["closeReason"]
+  closeReason: PaperCloseReasonLike
 ): Readonly<{ exitType: PaperExitType; closeReasonLabel: string }> {
   switch (closeReason) {
+    case "EXIT_LONG_CRASH_FORCE":
+      return { exitType: "EXIT_LONG_CRASH_FORCE", closeReasonLabel: defaultLabelForExitType("EXIT_LONG_CRASH_FORCE") };
+    case "EXIT_LONG_CRASH_REDUCE":
+      return { exitType: "EXIT_LONG_CRASH_REDUCE", closeReasonLabel: defaultLabelForExitType("EXIT_LONG_CRASH_REDUCE") };
+    case "EXIT_SHORT_MOMENTUM_TRAIL":
+      return { exitType: "EXIT_SHORT_MOMENTUM_TRAIL", closeReasonLabel: defaultLabelForExitType("EXIT_SHORT_MOMENTUM_TRAIL") };
+    case "EXIT_CRASH_FORCE":
+      return { exitType: "EXIT_CRASH_FORCE", closeReasonLabel: defaultLabelForExitType("EXIT_CRASH_FORCE") };
+    case "EXIT_CRASH_REDUCE":
+      return { exitType: "EXIT_CRASH_REDUCE", closeReasonLabel: defaultLabelForExitType("EXIT_CRASH_REDUCE") };
     case "candidate_lost":
       return { exitType: "EXIT_SIGNAL_LOST", closeReasonLabel: defaultLabelForExitType("EXIT_SIGNAL_LOST") };
     case "partial_exit_1":
@@ -253,7 +273,8 @@ export function paperExitDisplayMeta(
     case "trend_switch":
       return { exitType: "EXIT_TREND_SWITCH", closeReasonLabel: defaultLabelForExitType("EXIT_TREND_SWITCH") };
     default: {
-      return { exitType: "EXIT_UNKNOWN", closeReasonLabel: "기록 없음" };
+      const raw = typeof closeReason === "string" && closeReason.trim().length > 0 ? closeReason : "unknown";
+      return { exitType: "EXIT_UNKNOWN", closeReasonLabel: `미분류 청산 (${raw})` };
     }
   }
 }
@@ -263,7 +284,7 @@ type FinalizeClosedInput = Readonly<{
   symbol: MarketSymbol;
   closePrice: number;
   closedAt: number;
-  closeReason: PaperClosedPositionRecord["closeReason"];
+  closeReason: PaperCloseReasonLike;
   /** 청산 레그의 마진(USD). 전량이면 열린 포지션 `sizeUsd`, 분할이면 해당 분할 마진. */
   legMarginUsd: number;
   metrics: PaperCloseLegMetrics;
@@ -326,7 +347,7 @@ export function finalizePaperClosedRecord(input: FinalizeClosedInput): PaperClos
     ...(input.latestSnapshotPath ? { latestSnapshotPath: input.latestSnapshotPath } : {}),
     ...(input.latestMetaPath ? { latestMetaPath: input.latestMetaPath } : {}),
     ...(input.timestampSnapshotPath ? { timestampSnapshotPath: input.timestampSnapshotPath } : {}),
-    closeReason: input.closeReason,
+    closeReason: input.closeReason as PaperClosedPositionRecord["closeReason"],
     exitType,
     closeReasonLabel,
     exitReason: closeReasonLabel,

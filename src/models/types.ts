@@ -1065,7 +1065,12 @@ export type PaperClosedPositionRecord = Readonly<{
   | "range_box_break"
   | "range_profit_trail"
   | "structural_regime_shift"
-  | "trend_switch";
+  | "trend_switch"
+  | "EXIT_LONG_CRASH_FORCE"
+  | "EXIT_LONG_CRASH_REDUCE"
+  | "EXIT_SHORT_MOMENTUM_TRAIL"
+  | "EXIT_CRASH_FORCE"
+  | "EXIT_CRASH_REDUCE";
   /** 표준 종료 유형 (내부 코드). */
   exitType: PaperExitType;
   /** 사용자·리포트용 종료 사유 문구. */
