@@ -4331,25 +4331,45 @@ export class PaperEngine {
     const weight = scalingWeights[targetStage - 1] ?? 0;
     if (weight <= 0) return null;
 
-    // Calculate incremental size. 
-    // initialSizeUsd was the 100% target or the logic's target size.
-    // In our case, adaptive.sizeUsd is already scaled by weight in Executors. 
-    // BUT adaptiveResult in executors (adaptive-entry-policy) might be recalculating the whole size.
-    // Actually, Executor returns EntryDecisionBase.size_usd which is the incremental size?
-    // Let's check executors.
-    // RangeExecutor: targetUsd = initialTotalUsd * weight;
-    // So adaptive.sizeUsd is the INCREMENTAL size.
+    const baseStageWeight = scalingWeights[0] || 1;
+    const baseEntrySizeUsd = existing.initialSizeUsd ?? existing.sizeUsd;
+    const baseFullSize = baseEntrySizeUsd / baseStageWeight;
+    let incrementalSizeUsd = Math.round(baseFullSize * weight * 100) / 100;
 
-    let incrementalSizeUsd = adaptive.sizeUsd;
+    // add-on multiplier
+    const rangeAddOnSizeMultApplied = rangeAddOnCandidate ? 0.45 : 1;
+    incrementalSizeUsd = Math.round(incrementalSizeUsd * rangeAddOnSizeMultApplied * 100) / 100;
+
+    let minSizeGuardApplied = false;
+    if (incrementalSizeUsd < 10) {
+      incrementalSizeUsd = 10;
+      minSizeGuardApplied = true;
+    }
+
+    const sizeTrace = {
+      original_stage1_size: baseEntrySizeUsd,
+      base_stage_weight: baseStageWeight,
+      target_stage: targetStage,
+      target_weight: weight,
+      stage_weight_ratio: weight / baseStageWeight,
+      base_full_size_usd: baseFullSize,
+      base_target_usd: baseFullSize * weight,
+      mult_risk_exposure: 1,
+      mult_range_leg: 1,
+      mult_range_cycle: 1,
+      mult_range_recovery: 1,
+      mult_add_on: rangeAddOnSizeMultApplied,
+      min_size_guard_applied: minSizeGuardApplied,
+      final_incremental_usd: incrementalSizeUsd
+    };
+    this.logger.info("stage2_size_calculation_trace", sizeTrace);
+
     const re = this.lastRiskExposure;
     const symEx = String(existing.symbol);
-    if (re) {
-      incrementalSizeUsd = Math.round(incrementalSizeUsd * re.sizeMultiplier * 100) / 100;
-    }
+
     if (existing.regimeAtEntry === "TREND") {
       const pyr = this.trendPyramidLevelBySymbol.get(symEx) ?? 0;
       const tfs = this.trendFollowScoreBySymbol.get(symEx) ?? 0;
-      const bcf = this.trendBreakoutConfidenceBySymbol.get(symEx) ?? 0.5;
       if (!trendPyramidAllowsScaleIn(tfs, pyr)) {
         this.logger.info("scale_in_blocked_trend_pyramid_policy", {
           symbol: existing.symbol,
@@ -4358,25 +4378,8 @@ export class PaperEngine {
         });
         return null;
       }
-      const uplift = trendPyramidSizeUplift(pyr, tfs, bcf);
-      incrementalSizeUsd = Math.round(
-        incrementalSizeUsd * uplift * (re?.switchSizeMultiplier ?? 1) * 100
-      ) / 100;
     }
-    if (existing.regimeAtEntry === "RANGE") {
-      const rSt = this.lastTickRangeEvalBySymbol.get(symEx);
-      if (rSt) {
-        const legM = rangeLadderLegMultiplier(rSt.rangeLadderLevel, rSt.hedgeBalance);
-        const cycM = rangeCycleSizePolicy(rSt.rangeCycleCount, rSt.hedgeBalance);
-        const recM = rangeAccumulationRecoveryMultiplier(rSt.hedgeBalance, existing.side, rSt.rangeCycleCount);
-        incrementalSizeUsd = Math.round(incrementalSizeUsd * legM * cycM * recM * 100) / 100;
-      }
-    }
-    let rangeAddOnSizeMultApplied = 1;
-    if (rangeAddOnCandidate) {
-      rangeAddOnSizeMultApplied = 0.45;
-      incrementalSizeUsd = Math.round(incrementalSizeUsd * rangeAddOnSizeMultApplied * 100) / 100;
-    }
+
     const opensList = await this.positions.loadOpenAll();
     const { longUsd, shortUsd } = marginsForSymbol(opensList, symEx);
     if (re) {
