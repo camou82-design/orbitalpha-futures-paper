@@ -140,6 +140,18 @@ export type EngineConfig = Readonly<{
   paperMinEdgeRr: number;
   /** Min gate expected move (fraction of price) for EDGE_FAIL_LOW_VOL (default 0.00003). */
   paperMinEdgeVolatilityMove: number;
+  /** STAGE1_COST_WARNING weak tail: min shortfall_pct to apply fee-drag size trim. */
+  paperFeeDragWeakShortfallPctMin: number;
+  /** Weak tail trigger: expected_move_usd / required_cost_usd <= this. */
+  paperFeeDragWeakEmRatioMax: number;
+  /** Fee-drag tail size multiplier (1 = disabled trim). */
+  paperFeeDragTailSizeMult: number;
+  /** Extreme tail threshold (em ratio) for stronger size-only trim. */
+  paperFeeDragBlockEmRatioMax: number;
+  /** Extreme tail minimum shortfall USD for stronger size-only trim. */
+  paperFeeDragBlockShortfallUsdMin: number;
+  /** Extreme tail minimum shortfall pct for stronger size-only trim. */
+  paperFeeDragBlockShortfallPctMin: number;
   /**
    * Paper test: if set (>0), skip dynamic fee/slippage fraction for edge checks and use
    * `required_cost_usd = paperFixedTotalCostUsd * leniency` vs `expected_move_usd = em * DEFAULT_PAPER_SIZE_USD`.
@@ -550,6 +562,14 @@ export type PaperSymbolDecisionRecord = Readonly<{
   stage1_cost_shortfall_usd?: number | null;
   /** 비용 완화로 인한 추가 사이즈 축소 배수 (예: 0.5) */
   stage1_cost_micro_size_mult?: number | null;
+  /** Fee-drag tail filter evaluated (Stage1 cost warning tail). */
+  fee_drag_filter_applied?: boolean;
+  /** Additional size reduction from fee-drag tail. */
+  fee_drag_size_reduced?: boolean;
+  /** Reserved compatibility field: fee-drag pre-executor hard block is disabled. */
+  fee_drag_blocked?: boolean;
+  fee_drag_reason?: string | null;
+  fee_drag_proof?: Record<string, unknown> | null;
   /** 판단 시점 진입 단계(엔진 currentStage) */
   currentStage?: number;
   /** 판단 시점 레짐 */

@@ -158,6 +158,14 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperEngineModeRaw === "SAFE" || paperEngineModeRaw === "RESEARCH" ? (paperEngineModeRaw as "SAFE" | "RESEARCH") : "PAPER_TEST";
   const paperMinEdgeRr = parseNumber(env.ORBITALPHA_PAPER_MIN_EDGE_RR, 1);
   const paperMinEdgeVolatilityMove = parseNumber(env.ORBITALPHA_PAPER_MIN_EDGE_VOL_MOVE, 0.00003);
+  const paperFeeDragWeakShortfallPctMin = parseNumber(env.ORBITALPHA_PAPER_FEE_DRAG_WEAK_SHORTFALL_PCT_MIN, 0.038);
+  const paperFeeDragWeakEmRatioMax = parseNumber(env.ORBITALPHA_PAPER_FEE_DRAG_WEAK_EM_RATIO_MAX, 0.55);
+  let paperFeeDragTailSizeMult = parseNumber(env.ORBITALPHA_PAPER_FEE_DRAG_TAIL_SIZE_MULT, 0.72);
+  if (!Number.isFinite(paperFeeDragTailSizeMult) || paperFeeDragTailSizeMult <= 0) paperFeeDragTailSizeMult = 0.72;
+  paperFeeDragTailSizeMult = Math.min(1, paperFeeDragTailSizeMult);
+  const paperFeeDragBlockEmRatioMax = parseNumber(env.ORBITALPHA_PAPER_FEE_DRAG_BLOCK_EM_RATIO_MAX, 0.3);
+  const paperFeeDragBlockShortfallUsdMin = parseNumber(env.ORBITALPHA_PAPER_FEE_DRAG_BLOCK_SHORTFALL_USD_MIN, 6.5);
+  const paperFeeDragBlockShortfallPctMin = parseNumber(env.ORBITALPHA_PAPER_FEE_DRAG_BLOCK_SHORTFALL_PCT_MIN, 0.065);
 
   const paperFixedTotalCostUsdRaw = env.PAPER_FIXED_TOTAL_COST_USD ?? env.ORBITALPHA_PAPER_FIXED_TOTAL_COST_USD;
   let paperFixedTotalCostUsd: number | null = null;
@@ -218,6 +226,12 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperEngineMode,
     paperMinEdgeRr,
     paperMinEdgeVolatilityMove,
+    paperFeeDragWeakShortfallPctMin,
+    paperFeeDragWeakEmRatioMax,
+    paperFeeDragTailSizeMult,
+    paperFeeDragBlockEmRatioMax,
+    paperFeeDragBlockShortfallUsdMin,
+    paperFeeDragBlockShortfallPctMin,
     paperFixedTotalCostUsd,
     okxDemoEnvRequested,
     okxExchangeAuthOptIn,

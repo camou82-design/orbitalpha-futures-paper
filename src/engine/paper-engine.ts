@@ -535,6 +535,8 @@ export class PaperEngine {
   private rangeBoxBreakConsecutiveBySymbol = new Map<string, number>();
   /** RANGE 수익권 추종: 심볼:openedAt → 피크·잠금 (박스 이탈 리밸런스 지연용). */
   private rangeProfitTrailByKey = new Map<string, RangeProfitTrailState>();
+  /** RANGE upper short add-on: per-position one-shot guard (symbol:openedAt -> count). */
+  private rangeUpperShortAddOnCountByKey = new Map<string, number>();
   private rangeRecentOutcomeScoresBySymbol = new Map<string, number[]>();
   private lastExitReasonLabel = "";
   private lastSwitchReasonLabel = "";
@@ -2708,7 +2710,37 @@ export class PaperEngine {
           const holdingMs = Math.max(0, closedAt - open.openedAt);
           const minHold = this.config.rangeRebalanceMinHoldMs;
           const needTicks = this.config.rangeRebalanceBoxBreakConfirmTicks;
-          if (holdingMs < minHold) {
+          const boxZoneNow =
+            typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos) ? classifyRangeActionZone(snap.boxPos) : ("mid" as const);
+          const addOnKey = `${symKey}:${open.openedAt}`;
+          const addOnCount = this.rangeUpperShortAddOnCountByKey.get(addOnKey) ?? 0;
+          const addOnAvailableUpperShort =
+            open.regimeAtEntry === "RANGE" &&
+            open.side === "short" &&
+            open.rangeEntryZone === "upper" &&
+            (open.partialExitStage ?? 0) === 0 &&
+            boxZoneNow === "upper" &&
+            addOnCount < 1;
+          const holdExtraMs = 90_000;
+          const preferHoldOverRebalance =
+            addOnAvailableUpperShort &&
+            holdingMs >= minHold &&
+            holdingMs <= minHold + holdExtraMs;
+          if (preferHoldOverRebalance) {
+            this.rangeBoxBreakConsecutiveBySymbol.delete(rebalanceTickKey);
+            this.logger.info("range_rebalance_exit_deferred", {
+              symbol: symKey,
+              gate: "upper_short_add_on_preferred_hold",
+              range_exit_hold_preferred_over_rebalance: true,
+              range_add_on_entry_count: addOnCount,
+              holding_ms: holdingMs,
+              min_hold_ms: minHold,
+              hold_extra_ms: holdExtraMs,
+              remaining_ms: Math.max(0, minHold + holdExtraMs - holdingMs),
+              range_box_break_raw: st.rangeBoxBreakRaw
+            });
+            st = { shouldExit: false, reason: null, rangeBoxBreakRaw: st.rangeBoxBreakRaw };
+          } else if (holdingMs < minHold) {
             this.rangeBoxBreakConsecutiveBySymbol.delete(rebalanceTickKey);
             this.logger.info("range_rebalance_exit_deferred", {
               symbol: symKey,
@@ -2924,7 +2956,7 @@ export class PaperEngine {
       }
 
       // 3. RANGE / TREND 실행기 분리(포지션 레짐·상위 모드로 레인 선택)
-      const exitEval =
+      let exitEval =
         exitLane === "RANGE"
           ? rangeExecutorEvaluateExit({
             side: open.side,
@@ -2947,6 +2979,44 @@ export class PaperEngine {
             ema20: snap.ema20,
             ema60: snap.ema60
           });
+
+      if (
+        exitLane === "RANGE" &&
+        open.regimeAtEntry === "RANGE" &&
+        open.side === "short" &&
+        open.rangeEntryZone === "upper" &&
+        (open.partialExitStage ?? 0) === 0 &&
+        exitEval.action === "hold"
+      ) {
+        const firstProfitLockThreshold = 0.00035;
+        const firstProfitLockEligible =
+          m.pnlPctNet >= firstProfitLockThreshold &&
+          m.pnlUsdNet >= Math.max(0.01, open.sizeUsd * 0.00002);
+        if (firstProfitLockEligible) {
+          const detail = ((exitEval.detail ?? {}) as Record<string, unknown>);
+          exitEval = {
+            ...exitEval,
+            action: "partial_close",
+            reason: "partial_exit_1",
+            guidance: "RANGE upper short 첫 수익권 미세 잠금",
+            exit_progress: Math.max(35, exitEval.exit_progress ?? 0),
+            detail: {
+              ...detail,
+              range_first_profit_lock_applied: true,
+              range_first_profit_lock_threshold: firstProfitLockThreshold
+            }
+          };
+          this.logger.info("range_first_profit_lock", {
+            symbol: open.symbol,
+            side: open.side,
+            range_first_profit_lock_applied: true,
+            range_first_profit_lock_threshold: firstProfitLockThreshold,
+            pnl_pct_net: m.pnlPctNet,
+            pnl_usd_net: m.pnlUsdNet,
+            partial_exit_stage: open.partialExitStage ?? 0
+          });
+        }
+      }
 
       // --- CRASH MOMENTUM TRAILING OVERRIDE for SHORTS ---
       if (open.side === "short" && risk && (risk.crashState === "CRASH_EXIT" || risk.crashState === "CRASH_REDUCE")) {
@@ -4016,6 +4086,33 @@ export class PaperEngine {
 
     const decision = res.executorDecision!;
     const adaptive = res.adaptiveResult;
+    const addOnKey = `${String(existing.symbol)}:${existing.openedAt}`;
+    const addOnCount = this.rangeUpperShortAddOnCountByKey.get(addOnKey) ?? 0;
+    const exDetail = (decision.detail ?? {}) as Record<string, unknown>;
+    const rangeSignalReason = typeof exDetail.range_signal_reason === "string" ? exDetail.range_signal_reason : null;
+    const edgeStructureOk =
+      exDetail.range_upper_edge_structure_ok === true || rangeSignalReason === "range_upper_short_priority_structure";
+    const upperShortAddOnCandidate =
+      existing.regimeAtEntry === "RANGE" &&
+      existing.side === "short" &&
+      existing.rangeEntryZone === "upper" &&
+      typeof first.boxPos === "number" &&
+      classifyRangeActionZone(first.boxPos) === "upper" &&
+      res.decision.range_upper_short_priority_applied === true &&
+      edgeStructureOk === true;
+    if (upperShortAddOnCandidate && addOnCount >= 1) {
+      this.logger.info("range_add_on_entry_guard_blocked", {
+        symbol: existing.symbol,
+        side: existing.side,
+        range_add_on_entry_applied: false,
+        range_add_on_entry_count: addOnCount,
+        range_add_on_entry_size_mult: 0,
+        range_entry_zone: existing.rangeEntryZone ?? null,
+        range_upper_short_priority_applied: res.decision.range_upper_short_priority_applied ?? false,
+        edgeStructureOk
+      });
+      return null;
+    }
     if (existing.regimeAtEntry === "RANGE" && typeof first.boxPos === "number") {
       const zz = classifyRangeActionZone(first.boxPos);
       if (existing.side === "long" && zz === "upper" && adaptive.direction === "long") {
@@ -4081,6 +4178,11 @@ export class PaperEngine {
         incrementalSizeUsd = Math.round(incrementalSizeUsd * legM * cycM * recM * 100) / 100;
       }
     }
+    let rangeAddOnSizeMultApplied = 1;
+    if (upperShortAddOnCandidate) {
+      rangeAddOnSizeMultApplied = 0.45;
+      incrementalSizeUsd = Math.round(incrementalSizeUsd * rangeAddOnSizeMultApplied * 100) / 100;
+    }
     const opensList = await this.positions.loadOpenAll();
     const { longUsd, shortUsd } = marginsForSymbol(opensList, symEx);
     if (re) {
@@ -4143,6 +4245,20 @@ export class PaperEngine {
       new_total_size: newTotalSizeUsd,
       guidance: res.decision.guidance
     });
+    if (upperShortAddOnCandidate) {
+      const nextAddOnCount = addOnCount + 1;
+      this.rangeUpperShortAddOnCountByKey.set(addOnKey, nextAddOnCount);
+      this.logger.info("range_add_on_entry", {
+        symbol: existing.symbol,
+        side: existing.side,
+        range_add_on_entry_applied: true,
+        range_add_on_entry_count: nextAddOnCount,
+        range_add_on_entry_size_mult: rangeAddOnSizeMultApplied,
+        range_entry_zone: existing.rangeEntryZone ?? null,
+        range_upper_short_priority_applied: res.decision.range_upper_short_priority_applied ?? false,
+        edgeStructureOk
+      });
+    }
 
     return {
       ...existing,
