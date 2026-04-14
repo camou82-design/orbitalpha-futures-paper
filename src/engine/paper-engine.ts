@@ -3456,12 +3456,16 @@ export class PaperEngine {
           (open.side === "short" && classifyRangeActionZone(snap.boxPos) !== "upper"));
 
       const tightHold = open.regimeAtEntry === "RANGE" && opposingSignal && zoneMismatch;
+      const isImmatureRange = !stagedOrScaled && open.rangeFirstProfitLocked !== true;
 
       const baseMinHoldMs = stagedOrScaled ? 4 * 60_000 : 5 * 60_000;
       const baseGracePeriodMs = stagedOrScaled ? 4 * 60_000 : 7 * 60_000;
 
-      const minHoldMsEff = tightHold ? Math.min(baseMinHoldMs, 1 * 60_000) : baseMinHoldMs;
-      const gracePeriodMs = tightHold ? Math.min(baseGracePeriodMs, 1 * 60_000) : baseGracePeriodMs;
+      const tightMinHoldMs = isImmatureRange ? 3 * 60_000 : 1 * 60_000;
+      const tightGracePeriodMs = isImmatureRange ? 3 * 60_000 : 1 * 60_000;
+
+      const minHoldMsEff = tightHold ? Math.min(baseMinHoldMs, tightMinHoldMs) : baseMinHoldMs;
+      const gracePeriodMs = tightHold ? Math.min(baseGracePeriodMs, tightGracePeriodMs) : baseGracePeriodMs;
       const minLostStreak = 1;
 
       if (m.holdingMs < minHoldMsEff) {
