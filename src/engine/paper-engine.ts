@@ -113,10 +113,10 @@ type RangeReversalSwitchPending = Readonly<{
 type RangeReversalImmediateSwitchArg = Readonly<{
   preferredSide: "long" | "short";
   reason:
-    | "upper_flatten_to_short"
-    | "lower_flatten_to_long"
-    | "upper_flatten_to_short_pending"
-    | "lower_flatten_to_long_pending";
+  | "upper_flatten_to_short"
+  | "lower_flatten_to_long"
+  | "upper_flatten_to_short_pending"
+  | "lower_flatten_to_long_pending";
 }>;
 
 /** RANGE 청산·유지 정책용 박스 위치 구간 (상단 ≥0.62, 하단 ≤0.38). */
@@ -2057,24 +2057,24 @@ export class PaperEngine {
       snap == null
         ? { snapshot_absent: true as const }
         : {
-            snapshot_absent: false as const,
-            signal: snap.signal,
-            signal_decision_origin: snap.signalDecisionOrigin ?? null,
-            signal_gate_blocked_reason: snap.signalGateBlockedReason ?? null,
-            signal_missing_reason: snap.signalMissingReason ?? null,
-            quality_score: snap.qualityScore ?? null,
-            candidate_strength: snap.candidateStrength ?? null,
-            trend_ok: snap.trendOk ?? null,
-            regime_state_diag: snap.regimeStateDiag ?? null,
-            box_pos: snap.boxPos ?? null,
-            range_confidence: snap.rangeConfidence ?? null,
-            box_cohesion_01: snap.boxCohesion01 ?? null,
-            breakout_failure_rate: snap.breakoutFailureRate ?? null,
-            range_oscillation_score: snap.rangeOscillationScore ?? null,
-            range_signal_origin: snap.rangeSignalOrigin ?? null,
-            range_signal_downgraded: snap.rangeSignalDowngraded ?? null,
-            range_signal_downgrade_reason: snap.rangeSignalDowngradeReason ?? null
-          };
+          snapshot_absent: false as const,
+          signal: snap.signal,
+          signal_decision_origin: snap.signalDecisionOrigin ?? null,
+          signal_gate_blocked_reason: snap.signalGateBlockedReason ?? null,
+          signal_missing_reason: snap.signalMissingReason ?? null,
+          quality_score: snap.qualityScore ?? null,
+          candidate_strength: snap.candidateStrength ?? null,
+          trend_ok: snap.trendOk ?? null,
+          regime_state_diag: snap.regimeStateDiag ?? null,
+          box_pos: snap.boxPos ?? null,
+          range_confidence: snap.rangeConfidence ?? null,
+          box_cohesion_01: snap.boxCohesion01 ?? null,
+          breakout_failure_rate: snap.breakoutFailureRate ?? null,
+          range_oscillation_score: snap.rangeOscillationScore ?? null,
+          range_signal_origin: snap.rangeSignalOrigin ?? null,
+          range_signal_downgraded: snap.rangeSignalDowngraded ?? null,
+          range_signal_downgrade_reason: snap.rangeSignalDowngradeReason ?? null
+        };
 
     const uiSourceDecision = {
       regime: d.regime ?? null,
@@ -2117,18 +2117,18 @@ export class PaperEngine {
     const blockedRegimesCompact =
       risk?.blockedRegimes != null
         ? (Object.entries(risk.blockedRegimes) as [MarketRegime, { until: number; reason: string } | undefined][])
-            .filter(([, v]) => v != null)
-            .map(([reg, v]) =>
-              v
-                ? {
-                    regime: reg,
-                    until: v.until,
-                    remaining_ms: Math.max(0, v.until - ctx.nowTick),
-                    reason: v.reason
-                  }
-                : null
-            )
-            .filter((x): x is NonNullable<typeof x> => x != null)
+          .filter(([, v]) => v != null)
+          .map(([reg, v]) =>
+            v
+              ? {
+                regime: reg,
+                until: v.until,
+                remaining_ms: Math.max(0, v.until - ctx.nowTick),
+                reason: v.reason
+              }
+              : null
+          )
+          .filter((x): x is NonNullable<typeof x> => x != null)
         : [];
 
     let oneLineWhyNoEnter: string;
@@ -2179,34 +2179,34 @@ export class PaperEngine {
       ui_source_decision: uiSourceDecision,
       risk_control_tick: risk
         ? {
-            engine_blocked: risk.engineBlocked,
-            engine_block_reasons: risk.engineBlockReasons ?? [],
-            risk_status: risk.riskStatus,
-            daily_loss_guard_triggered: risk.dailyLossGuardTriggered,
-            crash_state: risk.crashState,
-            crash_reason: risk.crashReason,
-            size_multiplier: risk.sizeMultiplier,
-            long_allow: risk.longAllow,
-            short_allow: risk.shortAllow,
-            blocked_regimes_compact: blockedRegimesCompact,
-            current_regime_block_active: regimeBlockActive,
-            current_regime_block: br
-              ? { until: br.until, remaining_ms: Math.max(0, br.until - ctx.nowTick), reason: br.reason }
-              : null
-          }
+          engine_blocked: risk.engineBlocked,
+          engine_block_reasons: risk.engineBlockReasons ?? [],
+          risk_status: risk.riskStatus,
+          daily_loss_guard_triggered: risk.dailyLossGuardTriggered,
+          crash_state: risk.crashState,
+          crash_reason: risk.crashReason,
+          size_multiplier: risk.sizeMultiplier,
+          long_allow: risk.longAllow,
+          short_allow: risk.shortAllow,
+          blocked_regimes_compact: blockedRegimesCompact,
+          current_regime_block_active: regimeBlockActive,
+          current_regime_block: br
+            ? { until: br.until, remaining_ms: Math.max(0, br.until - ctx.nowTick), reason: br.reason }
+            : null
+        }
         : null,
       risk_exposure_tick: rexp
         ? {
-            risk_mode: rexp.riskMode,
-            allow_new_entry: rexp.allowNewEntry,
-            allow_new_long: rexp.allowNewLong,
-            allow_new_short: rexp.allowNewShort,
-            allow_add: rexp.allowAdd,
-            size_multiplier: rexp.sizeMultiplier,
-            allow_range_bidirectional: rexp.allowRangeBidirectional,
-            block_trend_opposite_leg: rexp.blockTrendOppositeLeg,
-            risk_reason_label: rexp.riskReasonLabel
-          }
+          risk_mode: rexp.riskMode,
+          allow_new_entry: rexp.allowNewEntry,
+          allow_new_long: rexp.allowNewLong,
+          allow_new_short: rexp.allowNewShort,
+          allow_add: rexp.allowAdd,
+          size_multiplier: rexp.sizeMultiplier,
+          allow_range_bidirectional: rexp.allowRangeBidirectional,
+          block_trend_opposite_leg: rexp.blockTrendOppositeLeg,
+          risk_reason_label: rexp.riskReasonLabel
+        }
         : null,
       reentry_and_cooldown: {
         reentry_cooldown_applied: d.reentry_cooldown_applied ?? false,
@@ -2550,108 +2550,142 @@ export class PaperEngine {
             phase: "pre_exit_eval_alignment"
           });
           if (open.side === "long" && raZone === "upper") {
-            const cr = "regime_exit" as const;
-            const closedRow = finalizePaperClosedRecord({
-              open,
-              symbol: open.symbol,
-              closePrice,
-              closedAt,
-              closeReason: cr,
-              legMarginUsd: open.sizeUsd,
-              metrics: m,
-              feeRate,
-              fundingIntervalHours: intervalH,
-              strategyVersion: "paper-v1",
-              closeReasonLabelOverride: "상단 반전 구간: 롱 정리(숏 평가 우선)",
-              ...snapPaths
-            });
-            await this.positions.appendClosed(closedRow);
-            this.rangeReversalExitThisTickBySymbol.set(symKey, {
-              ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
-              range_existing_long_reversal_exit_applied: true
-            });
-            this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
-              symbol: symKey,
-              side: open.side,
-              range_zone_detected: raZone,
-              range_hold_alignment: false,
-              range_hold_misaligned_exit_applied: true,
-              box_pos: snap.boxPos,
-              phase: "pre_exit_eval_regime_exit_long_upper"
-            });
-            this.logger.info("range_existing_long_reversal_exit_applied", {
-              symbol: symKey,
-              range_zone_detected: raZone,
-              box_pos: snap.boxPos,
-              range_zone_action_policy: RANGE_ZONE_ACTION_POLICY
-            });
-            this.rangeReversalSwitchPendingBySymbol.set(symKey, {
-              untilMs: Date.now() + RANGE_REVERSAL_SWITCH_PENDING_MS,
-              preferredSide: "short",
-              zone: "upper"
-            });
-            this.lastExitReasonLabel = "상단 반전 구간 롱 정리";
-            await this.store.appendJsonlLine("reports/events.jsonl", {
-              ts: Date.now(),
-              type: "EXIT_REGIME",
-              symbol: symKey,
-              reason: cr,
-              range_zone_reversal: "upper_long_flatten",
-              realized_pnl: m.pnlUsdNet
-            });
-            continue;
+            const minHold = this.config.rangeRebalanceMinHoldMs;
+            const holdingMs = Math.max(0, closedAt - open.openedAt);
+            const isReattackUsedOrLocked = open.rangeManagementState === "REATTACK_USED" || open.rangeManagementState === "PROFIT_LOCKED";
+            const isNearBreakEven = m.pnlPctNet >= -0.0003 && m.pnlPctNet <= 0.003;
+            const isInDeferWindow = holdingMs < minHold + 180_000;
+
+            if (isReattackUsedOrLocked && isNearBreakEven && isInDeferWindow) {
+              this.logger.info("range_regime_exit_deferred", {
+                symbol: symKey,
+                side: open.side,
+                range_regime_exit_deferred_reason: "reattack_locked_near_breakeven_window",
+                pnl_pct_net: m.pnlPctNet,
+                holding_ms: holdingMs,
+                rangeManagementState: open.rangeManagementState
+              });
+            } else {
+              const cr = "regime_exit" as const;
+              const closedRow = finalizePaperClosedRecord({
+                open,
+                symbol: open.symbol,
+                closePrice,
+                closedAt,
+                closeReason: cr,
+                legMarginUsd: open.sizeUsd,
+                metrics: m,
+                feeRate,
+                fundingIntervalHours: intervalH,
+                strategyVersion: "paper-v1",
+                closeReasonLabelOverride: "상단 반전 구간: 롱 정리(숏 평가 우선)",
+                ...snapPaths
+              });
+              await this.positions.appendClosed(closedRow);
+              this.rangeReversalExitThisTickBySymbol.set(symKey, {
+                ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
+                range_existing_long_reversal_exit_applied: true
+              });
+              this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
+                symbol: symKey,
+                side: open.side,
+                range_zone_detected: raZone,
+                range_hold_alignment: false,
+                range_hold_misaligned_exit_applied: true,
+                box_pos: snap.boxPos,
+                phase: "pre_exit_eval_regime_exit_long_upper"
+              });
+              this.logger.info("range_existing_long_reversal_exit_applied", {
+                symbol: symKey,
+                range_zone_detected: raZone,
+                box_pos: snap.boxPos,
+                range_zone_action_policy: RANGE_ZONE_ACTION_POLICY
+              });
+              this.rangeReversalSwitchPendingBySymbol.set(symKey, {
+                untilMs: Date.now() + RANGE_REVERSAL_SWITCH_PENDING_MS,
+                preferredSide: "short",
+                zone: "upper"
+              });
+              this.lastExitReasonLabel = "상단 반전 구간 롱 정리";
+              await this.store.appendJsonlLine("reports/events.jsonl", {
+                ts: Date.now(),
+                type: "EXIT_REGIME",
+                symbol: symKey,
+                reason: cr,
+                range_zone_reversal: "upper_long_flatten",
+                realized_pnl: m.pnlUsdNet
+              });
+              continue;
+            }
           }
           if (open.side === "short" && raZone === "lower") {
-            const cr = "regime_exit" as const;
-            const closedRow = finalizePaperClosedRecord({
-              open,
-              symbol: open.symbol,
-              closePrice,
-              closedAt,
-              closeReason: cr,
-              legMarginUsd: open.sizeUsd,
-              metrics: m,
-              feeRate,
-              fundingIntervalHours: intervalH,
-              strategyVersion: "paper-v1",
-              closeReasonLabelOverride: "하단 반전 구간: 숏 정리(롱 평가 우선)",
-              ...snapPaths
-            });
-            await this.positions.appendClosed(closedRow);
-            this.rangeReversalExitThisTickBySymbol.set(symKey, {
-              ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
-              range_existing_short_reversal_exit_applied: true
-            });
-            this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
-              symbol: symKey,
-              side: open.side,
-              range_zone_detected: raZone,
-              range_hold_alignment: false,
-              range_hold_misaligned_exit_applied: true,
-              box_pos: snap.boxPos,
-              phase: "pre_exit_eval_regime_exit_short_lower"
-            });
-            this.logger.info("range_existing_short_reversal_exit_applied", {
-              symbol: symKey,
-              range_zone_detected: raZone,
-              box_pos: snap.boxPos,
-              range_zone_action_policy: RANGE_ZONE_ACTION_POLICY
-            });
-            this.rangeReversalSwitchPendingBySymbol.set(symKey, {
-              untilMs: Date.now() + RANGE_REVERSAL_SWITCH_PENDING_MS,
-              preferredSide: "long",
-              zone: "lower"
-            });
-            this.lastExitReasonLabel = "하단 반전 구간 숏 정리";
-            await this.store.appendJsonlLine("reports/events.jsonl", {
-              ts: Date.now(),
-              type: "EXIT_REGIME",
-              symbol: symKey,
-              reason: cr,
-              range_zone_reversal: "lower_short_flatten",
-              realized_pnl: m.pnlUsdNet
-            });
-            continue;
+            const minHold = this.config.rangeRebalanceMinHoldMs;
+            const holdingMs = Math.max(0, closedAt - open.openedAt);
+            const isReattackUsedOrLocked = open.rangeManagementState === "REATTACK_USED" || open.rangeManagementState === "PROFIT_LOCKED";
+            const isNearBreakEven = m.pnlPctNet >= -0.0003 && m.pnlPctNet <= 0.003;
+            const isInDeferWindow = holdingMs < minHold + 180_000;
+
+            if (isReattackUsedOrLocked && isNearBreakEven && isInDeferWindow) {
+              this.logger.info("range_regime_exit_deferred", {
+                symbol: symKey,
+                side: open.side,
+                range_regime_exit_deferred_reason: "reattack_locked_near_breakeven_window",
+                pnl_pct_net: m.pnlPctNet,
+                holding_ms: holdingMs,
+                rangeManagementState: open.rangeManagementState
+              });
+            } else {
+              const cr = "regime_exit" as const;
+              const closedRow = finalizePaperClosedRecord({
+                open,
+                symbol: open.symbol,
+                closePrice,
+                closedAt,
+                closeReason: cr,
+                legMarginUsd: open.sizeUsd,
+                metrics: m,
+                feeRate,
+                fundingIntervalHours: intervalH,
+                strategyVersion: "paper-v1",
+                closeReasonLabelOverride: "하단 반전 구간: 숏 정리(롱 평가 우선)",
+                ...snapPaths
+              });
+              await this.positions.appendClosed(closedRow);
+              this.rangeReversalExitThisTickBySymbol.set(symKey, {
+                ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
+                range_existing_short_reversal_exit_applied: true
+              });
+              this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
+                symbol: symKey,
+                side: open.side,
+                range_zone_detected: raZone,
+                range_hold_alignment: false,
+                range_hold_misaligned_exit_applied: true,
+                box_pos: snap.boxPos,
+                phase: "pre_exit_eval_regime_exit_short_lower"
+              });
+              this.logger.info("range_existing_short_reversal_exit_applied", {
+                symbol: symKey,
+                range_zone_detected: raZone,
+                box_pos: snap.boxPos,
+                range_zone_action_policy: RANGE_ZONE_ACTION_POLICY
+              });
+              this.rangeReversalSwitchPendingBySymbol.set(symKey, {
+                untilMs: Date.now() + RANGE_REVERSAL_SWITCH_PENDING_MS,
+                preferredSide: "long",
+                zone: "lower"
+              });
+              this.lastExitReasonLabel = "하단 반전 구간 숏 정리";
+              await this.store.appendJsonlLine("reports/events.jsonl", {
+                ts: Date.now(),
+                type: "EXIT_REGIME",
+                symbol: symKey,
+                reason: cr,
+                range_zone_reversal: "lower_short_flatten",
+                realized_pnl: m.pnlUsdNet
+              });
+              continue;
+            }
           }
         }
       }
@@ -2815,28 +2849,30 @@ export class PaperEngine {
             (open.partialExitStage ?? 0) === 0 &&
             m.pnlPctNet >= -0.0002;
           const holdExtraMs = 120_000;
+          const isReattackUsed = open.rangeManagementState === "REATTACK_USED";
           const preferHoldOverRebalance =
             (open.rangeManagementState ?? "INIT") !== "PROFIT_LOCKED" &&
-            (addOnAvailableForStateLoop || profitLockWindowActive) &&
+            (addOnAvailableForStateLoop || profitLockWindowActive || isReattackUsed) &&
             holdingMs >= minHold &&
-            holdingMs <= minHold + holdExtraMs;
+            holdingMs <= minHold + (isReattackUsed ? holdExtraMs + 60_000 : holdExtraMs);
           if (preferHoldOverRebalance) {
             this.rangeBoxBreakConsecutiveBySymbol.delete(rebalanceTickKey);
             this.logger.info("range_rebalance_exit_deferred", {
               symbol: symKey,
-              gate: addOnAvailableForStateLoop ? "range_add_on_window_hold" : "range_profit_lock_window_hold",
+              gate: addOnAvailableForStateLoop ? "range_add_on_window_hold" : (isReattackUsed ? "reattack_used_hold" : "range_profit_lock_window_hold"),
               range_rebalance_exit_deferred_reason: addOnAvailableForStateLoop
                 ? "range_add_on_window"
-                : "range_profit_lock_window",
+                : (isReattackUsed ? "reattack_used_priority" : "range_profit_lock_window"),
               range_exit_hold_preferred_over_rebalance: true,
               range_add_on_entry_count: addOnCount,
               range_add_on_used: addOnUsed,
               range_management_state: open.rangeManagementState ?? "INIT",
+              rangeManagementState: open.rangeManagementState ?? "INIT",
               range_first_profit_locked: open.rangeFirstProfitLocked === true,
               holding_ms: holdingMs,
               min_hold_ms: minHold,
-              hold_extra_ms: holdExtraMs,
-              remaining_ms: Math.max(0, minHold + holdExtraMs - holdingMs),
+              hold_extra_ms: isReattackUsed ? holdExtraMs + 60_000 : holdExtraMs,
+              remaining_ms: Math.max(0, minHold + (isReattackUsed ? holdExtraMs + 60_000 : holdExtraMs) - holdingMs),
               range_box_break_raw: st.rangeBoxBreakRaw
             });
             st = { shouldExit: false, reason: null, rangeBoxBreakRaw: st.rangeBoxBreakRaw };
@@ -3269,9 +3305,9 @@ export class PaperEngine {
             trailingExtremePrice: (partial as any).trailingExtreme,
             ...(partialDetail["range_first_profit_lock_applied"] === true
               ? ({
-                  rangeFirstProfitLocked: true,
-                  rangeManagementState: "PROFIT_LOCKED"
-                } as const)
+                rangeFirstProfitLocked: true,
+                rangeManagementState: "PROFIT_LOCKED"
+              } as const)
               : {}),
             candidateLostStreak: 0
           };
@@ -3991,12 +4027,12 @@ export class PaperEngine {
           ...(res.decision.post_entry_cost_guard === true ? { postEntryCostGuard: true } : {}),
           ...(this.lastRegime.regime === "RANGE" && typeof first.boxPos === "number"
             ? {
-                rangeEntryBoxPos: first.boxPos,
-                rangeEntryZone: classifyBoxZone(first.boxPos),
-                rangeManagementState: "INIT" as RangeManagementState,
-                rangeAddOnUsed: false,
-                rangeFirstProfitLocked: false
-              }
+              rangeEntryBoxPos: first.boxPos,
+              rangeEntryZone: classifyBoxZone(first.boxPos),
+              rangeManagementState: "INIT" as RangeManagementState,
+              rangeAddOnUsed: false,
+              rangeFirstProfitLocked: false
+            }
             : {}),
           ...(res.decision.range_reversal_immediate_switch_applied === true ? { rangeEntryFromReversalSwitch: true } : {}),
           status: "open"
