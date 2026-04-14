@@ -184,7 +184,7 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
   return {
     symbols: parseSymbols(env.SYMBOLS),
     leverage: parseNumber(env.LEVERAGE, 2),
-    longOnly: parseBool(env.LONG_ONLY, true),
+    longOnly: parseBool(env.LONG_ONLY, false),
     fees: {
       taker: parseNumber(env.TAKER_FEE_RATE, 0.0006),
       maker: parseNumber(env.MAKER_FEE_RATE, 0.0002)

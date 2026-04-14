@@ -3489,9 +3489,31 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     adaptiveResult = adaptive;
 
     // [EXECUTION GUARD] Simplify Long Only Policy
-    // Responsibility: Only block short execution when policy is longOnly.
-    // Direction was already locked by engine; this is purely an execution filter.
-    if (input.config.longOnly && intentSide === "short") {
+    const longOnlyActive = input.config.longOnly;
+    const isExecutionBlockedByLongOnly = longOnlyActive && intentSide === "short";
+
+    console.log("[LONG_ONLY_POLICY_TRACE]", {
+      symbol: String(sn!.symbol),
+      longOnly_effective_value: longOnlyActive,
+      config_source: "input.config.longOnly",
+      intended_side: intentSide,
+      execution_blocked: isExecutionBlockedByLongOnly,
+      blocked_reason: isExecutionBlockedByLongOnly ? "long_only_restriction" : "none"
+    });
+
+    if (input.regime === "RANGE" || strategy_executor === "RANGE") {
+      console.log("[RANGE_EXECUTION_POLICY_ALIGNMENT]", {
+        symbol: String(sn!.symbol),
+        zone: executorDecision?.detail?.range_zone_detected ?? "none",
+        signal_state: signal_state,
+        final_trade_side: intentSide,
+        longOnly: longOnlyActive,
+        action_taken: isExecutionBlockedByLongOnly ? "BLOCK" : "ALLOW",
+        action_reason: isExecutionBlockedByLongOnly ? "intent_short_but_longOnly_is_true" : "passed_execution_guard"
+      });
+    }
+
+    if (isExecutionBlockedByLongOnly) {
       supplemental_reasons.push("LONG_ONLY_RESTRICTION");
       return ret(
         {
