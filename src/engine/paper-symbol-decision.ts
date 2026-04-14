@@ -396,22 +396,41 @@ function buildRangeUpperLongSuppressBranchProof(args: {
 function evaluateRangeStage0Signal(
   sn: SymbolSnapshotLike,
   reversalImmediate?: Readonly<{ preferredSide: "long" | "short" }> | null
-): { signal: RangeSignalState; reason: string; side: "long" | "short" | null } {
+): {
+  signal: RangeSignalState;
+  reason: string;
+  side: "long" | "short" | null;
+  interpretation?: {
+    checked: boolean;
+    passed: boolean;
+    failed_reasons: string[];
+    raw_side: "long" | "short" | "none";
+  };
+} {
   const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
   const zone: RangeBoxZone = classifyBoxZone(boxPos);
+  const interpretation: NonNullable<ReturnType<typeof evaluateRangeStage0Signal>["interpretation"]> = {
+    checked: false,
+    passed: false,
+    failed_reasons: [],
+    raw_side: sn.signal === "paper_long_candidate" ? "long" : sn.signal === "paper_short_candidate" ? "short" : "none"
+  };
+
   if (reversalImmediate) {
     if (reversalImmediate.preferredSide === "short" && zone === "upper") {
       return {
         signal: "RANGE_SHORT_CANDIDATE",
         reason: "range_reversal_immediate_switch_upper_short",
-        side: "short"
+        side: "short",
+        interpretation
       };
     }
     if (reversalImmediate.preferredSide === "long" && zone === "lower") {
       return {
         signal: "RANGE_LONG_CANDIDATE",
         reason: "range_reversal_immediate_switch_lower_long",
-        side: "long"
+        side: "long",
+        interpretation
       };
     }
   }
@@ -428,32 +447,76 @@ function evaluateRangeStage0Signal(
   if (zone === "upper") {
     const upperExtremeEdge = boxPos >= 0.74;
     if (sn.signal === "paper_short_candidate") {
-      return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_from_base_signal", side: "short" };
+      return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_from_base_signal", side: "short", interpretation };
     }
     if (upperExtremeEdge && (edgeStructureOk || relaxedEdgeStructureOk)) {
-      return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_priority_structure", side: "short" };
+      return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_priority_structure", side: "short", interpretation };
     }
     if (sn.signal === "paper_long_candidate") {
-      return { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_suppress_long_candidate_no_inertia", side: null };
+      // Reinterpretation check for Upper Zone Long -> Short Reversal
+      interpretation.checked = true;
+      const conf = sn.rangeConfidence ?? 0;
+      const cohesion = sn.boxCohesion01 ?? 0;
+      const brkFail = sn.breakoutFailureRate ?? 0;
+      const trendWeak = sn.trendWeaknessScore ?? 0;
+
+      if (conf < 0.3) interpretation.failed_reasons.push(`low_conf:${conf.toFixed(2)}<0.3`);
+      if (cohesion < 0.25) interpretation.failed_reasons.push(`low_cohesion:${cohesion.toFixed(2)}<0.25`);
+      if (brkFail < 0.2) interpretation.failed_reasons.push(`low_brk_fail:${brkFail.toFixed(2)}<0.2`);
+      if (trendWeak < 0.15) interpretation.failed_reasons.push(`low_trend_weak:${trendWeak.toFixed(2)}<0.15`);
+      if (!upperExtremeEdge) interpretation.failed_reasons.push(`not_extreme_upper:${boxPos.toFixed(2)}<0.74`);
+
+      if (interpretation.failed_reasons.length === 0) {
+        interpretation.passed = true;
+        return {
+          signal: "RANGE_SHORT_CANDIDATE",
+          reason: "range_upper_short_from_long_reversal_interpretation",
+          side: "short",
+          interpretation
+        };
+      }
+      return { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_suppress_long_candidate_no_inertia", side: null, interpretation };
     }
-    return { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_short_structure_not_ready", side: null };
+    return { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_short_structure_not_ready", side: null, interpretation };
   }
 
   if (zone === "lower") {
     const lowerExtremeEdge = boxPos <= 0.26;
     if (sn.signal === "paper_long_candidate") {
-      return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_from_base_signal", side: "long" };
+      return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_from_base_signal", side: "long", interpretation };
     }
     if (lowerExtremeEdge && (edgeStructureOk || relaxedEdgeStructureOk)) {
-      return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_priority_structure", side: "long" };
+      return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_priority_structure", side: "long", interpretation };
     }
     if (sn.signal === "paper_short_candidate") {
-      return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_suppress_short_candidate", side: null };
+      // Reinterpretation check for Lower Zone Short -> Long Reversal
+      interpretation.checked = true;
+      const conf = sn.rangeConfidence ?? 0;
+      const cohesion = sn.boxCohesion01 ?? 0;
+      const brkFail = sn.breakoutFailureRate ?? 0;
+      const trendWeak = sn.trendWeaknessScore ?? 0;
+
+      if (conf < 0.3) interpretation.failed_reasons.push(`low_conf:${conf.toFixed(2)}<0.3`);
+      if (cohesion < 0.25) interpretation.failed_reasons.push(`low_cohesion:${cohesion.toFixed(2)}<0.25`);
+      if (brkFail < 0.2) interpretation.failed_reasons.push(`low_brk_fail:${brkFail.toFixed(2)}<0.2`);
+      if (trendWeak < 0.15) interpretation.failed_reasons.push(`low_trend_weak:${trendWeak.toFixed(2)}<0.15`);
+      if (!lowerExtremeEdge) interpretation.failed_reasons.push(`not_extreme_lower:${boxPos.toFixed(2)}>0.26`);
+
+      if (interpretation.failed_reasons.length === 0) {
+        interpretation.passed = true;
+        return {
+          signal: "RANGE_LONG_CANDIDATE",
+          reason: "range_lower_long_from_short_reversal_interpretation",
+          side: "long",
+          interpretation
+        };
+      }
+      return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_suppress_short_candidate", side: null, interpretation };
     }
-    return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_long_structure_not_ready", side: null };
+    return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_long_structure_not_ready", side: null, interpretation };
   }
 
-  return { signal: "RANGE_SIGNAL_NONE", reason: "range_mid_wait_no_directional_chase", side: null };
+  return { signal: "RANGE_SIGNAL_NONE", reason: "range_mid_wait_no_directional_chase", side: null, interpretation };
 }
 
 function evaluateRangeStage0Scores(sn: SymbolSnapshotLike): { rangeSignalScore: number; rangeEntryScore: number; reason: string } {
@@ -2053,6 +2116,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         final_entry_reason: entryResult,
         range_zone_detected: zone,
         range_zone_action_policy: RANGE_ZONE_ACTION_POLICY,
+        // Interpretation Evidence
+        lower_raw_short_seen: zone === "lower" && rangeSignal.interpretation?.raw_side === "short",
+        lower_raw_short_reversal_interpret_checked: zone === "lower" && (rangeSignal.interpretation?.checked ?? false),
+        lower_raw_short_reversal_interpret_passed: zone === "lower" && (rangeSignal.interpretation?.passed ?? false),
+        lower_raw_short_reversal_interpret_failed_reasons: zone === "lower" ? (rangeSignal.interpretation?.failed_reasons ?? []) : [],
+        upper_raw_long_seen: zone === "upper" && rangeSignal.interpretation?.raw_side === "long",
+        upper_raw_long_reversal_interpret_checked: zone === "upper" && (rangeSignal.interpretation?.checked ?? false),
+        upper_raw_long_reversal_interpret_passed: zone === "upper" && (rangeSignal.interpretation?.passed ?? false),
+        upper_raw_long_reversal_interpret_failed_reasons: zone === "upper" ? (rangeSignal.interpretation?.failed_reasons ?? []) : [],
         ...(range_stage0_branch_proof && zone === "upper" && sn.signal === "paper_long_candidate"
           ? {
             range_upper_edge_structure_ok: (range_stage0_branch_proof as { edge_structure_ok?: boolean }).edge_structure_ok,
