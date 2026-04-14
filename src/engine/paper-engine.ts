@@ -494,6 +494,7 @@ type MutablePositionOpenTrace = {
   qty_submitted: number | null;
   inst_id: string | null;
 };
+type RangeManagementState = "INIT" | "REATTACK_ELIGIBLE" | "PROFIT_LOCKED";
 
 export class PaperEngine {
   private readonly store: JsonStore;
@@ -2406,7 +2407,10 @@ export class PaperEngine {
       let open: PaperOpenPositionRecord = {
         ...openRaw,
         initialSizeUsd: openRaw.initialSizeUsd ?? openRaw.sizeUsd,
-        partialExitStage: openRaw.partialExitStage ?? 0
+        partialExitStage: openRaw.partialExitStage ?? 0,
+        rangeManagementState: openRaw.rangeManagementState ?? "INIT",
+        rangeAddOnUsed: openRaw.rangeAddOnUsed ?? false,
+        rangeFirstProfitLocked: openRaw.rangeFirstProfitLocked ?? false
       };
 
       const closePrice = snap.lastPrice;
@@ -2635,6 +2639,39 @@ export class PaperEngine {
       }
 
       if (regimeAtEntry === "RANGE" && rangeState) {
+        const liveZone =
+          typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos)
+            ? classifyRangeActionZone(snap.boxPos)
+            : ("mid" as const);
+        const rangeReattackEligibleNow =
+          open.rangeFirstProfitLocked !== true &&
+          open.rangeAddOnUsed !== true &&
+          ((open.side === "short" && open.rangeEntryZone === "upper" && liveZone === "upper") ||
+            (open.side === "long" && open.rangeEntryZone === "lower" && liveZone === "lower"));
+        if ((open.rangeManagementState ?? "INIT") === "INIT" && rangeReattackEligibleNow) {
+          open = { ...open, rangeManagementState: "REATTACK_ELIGIBLE" };
+          this.logger.info("range_add_on_transition", {
+            symbol: symKey,
+            side: open.side,
+            range_add_on_transition_applied: true,
+            range_add_on_used: open.rangeAddOnUsed === true,
+            range_management_state_before: "INIT",
+            range_management_state_after: "REATTACK_ELIGIBLE",
+            range_entry_zone: open.rangeEntryZone ?? null,
+            box_zone_now: liveZone
+          });
+        }
+        this.logger.info("range_management_path_summary", {
+          symbol: symKey,
+          side: open.side,
+          range_management_state: open.rangeManagementState ?? "INIT",
+          range_add_on_used: open.rangeAddOnUsed === true,
+          range_first_profit_locked: open.rangeFirstProfitLocked === true,
+          partial_exit_stage: open.partialExitStage ?? 0,
+          highest_pnl_pct_net: open.highestPnlPctNet ?? null,
+          box_pos: snap.boxPos ?? null,
+          range_entry_zone: open.rangeEntryZone ?? null
+        });
         const rebalanceTickKey = `${symKey}:${open.openedAt}`;
         let st = evaluateRangeStructuralExit({
           lastPrice: closePrice,
@@ -2712,6 +2749,7 @@ export class PaperEngine {
           this.logger.info("range_rebalance_exit_deferred", {
             symbol: symKey,
             gate: "profit_trail_defer_box_break",
+            range_rebalance_exit_deferred_reason: "profit_trail_defer_box_break",
             pnl_pct_net: m.pnlPctNet,
             pnl_usd_net: m.pnlUsdNet,
             range_box_break_raw: st.rangeBoxBreakRaw
@@ -2725,25 +2763,37 @@ export class PaperEngine {
             typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos) ? classifyRangeActionZone(snap.boxPos) : ("mid" as const);
           const addOnKey = `${symKey}:${open.openedAt}`;
           const addOnCount = this.rangeUpperShortAddOnCountByKey.get(addOnKey) ?? 0;
-          const addOnAvailableUpperShort =
+          const addOnUsed = open.rangeAddOnUsed === true || addOnCount >= 1;
+          const addOnAvailableForStateLoop =
             open.regimeAtEntry === "RANGE" &&
-            open.side === "short" &&
-            open.rangeEntryZone === "upper" &&
+            ((open.side === "short" && open.rangeEntryZone === "upper") ||
+              (open.side === "long" && open.rangeEntryZone === "lower")) &&
             (open.partialExitStage ?? 0) === 0 &&
-            boxZoneNow === "upper" &&
-            addOnCount < 1;
-          const holdExtraMs = 90_000;
+            boxZoneNow === open.rangeEntryZone &&
+            !addOnUsed;
+          const profitLockWindowActive =
+            open.rangeFirstProfitLocked !== true &&
+            (open.partialExitStage ?? 0) === 0 &&
+            m.pnlPctNet >= -0.0002;
+          const holdExtraMs = 120_000;
           const preferHoldOverRebalance =
-            addOnAvailableUpperShort &&
+            (open.rangeManagementState ?? "INIT") !== "PROFIT_LOCKED" &&
+            (addOnAvailableForStateLoop || profitLockWindowActive) &&
             holdingMs >= minHold &&
             holdingMs <= minHold + holdExtraMs;
           if (preferHoldOverRebalance) {
             this.rangeBoxBreakConsecutiveBySymbol.delete(rebalanceTickKey);
             this.logger.info("range_rebalance_exit_deferred", {
               symbol: symKey,
-              gate: "upper_short_add_on_preferred_hold",
+              gate: addOnAvailableForStateLoop ? "range_add_on_window_hold" : "range_profit_lock_window_hold",
+              range_rebalance_exit_deferred_reason: addOnAvailableForStateLoop
+                ? "range_add_on_window"
+                : "range_profit_lock_window",
               range_exit_hold_preferred_over_rebalance: true,
               range_add_on_entry_count: addOnCount,
+              range_add_on_used: addOnUsed,
+              range_management_state: open.rangeManagementState ?? "INIT",
+              range_first_profit_locked: open.rangeFirstProfitLocked === true,
               holding_ms: holdingMs,
               min_hold_ms: minHold,
               hold_extra_ms: holdExtraMs,
@@ -2756,6 +2806,7 @@ export class PaperEngine {
             this.logger.info("range_rebalance_exit_deferred", {
               symbol: symKey,
               gate: "min_hold_ms",
+              range_rebalance_exit_deferred_reason: "min_hold_ms",
               holding_ms: holdingMs,
               min_hold_ms: minHold,
               range_box_break_raw: st.rangeBoxBreakRaw
@@ -2768,6 +2819,7 @@ export class PaperEngine {
               this.logger.info("range_rebalance_exit_deferred", {
                 symbol: symKey,
                 gate: "confirm_ticks",
+                range_rebalance_exit_deferred_reason: "confirm_ticks",
                 consecutive_box_break_ticks: next,
                 required_ticks: needTicks,
                 holding_ms: holdingMs
@@ -2997,6 +3049,7 @@ export class PaperEngine {
         open.side === "short" &&
         open.rangeEntryZone === "upper" &&
         (open.partialExitStage ?? 0) === 0 &&
+        open.rangeFirstProfitLocked !== true &&
         exitEval.action === "hold"
       ) {
         const firstProfitLockThreshold = 0.00035;
@@ -3020,6 +3073,7 @@ export class PaperEngine {
           this.logger.info("range_first_profit_lock", {
             symbol: open.symbol,
             side: open.side,
+            range_profit_lock_transition_applied: true,
             range_first_profit_lock_applied: true,
             range_first_profit_lock_threshold: firstProfitLockThreshold,
             pnl_pct_net: m.pnlPctNet,
@@ -3168,8 +3222,23 @@ export class PaperEngine {
             partialExitStage: stage,
             realizedPnl: (open.realizedPnl ?? 0) + mp.pnlUsdNet,
             trailingExtremePrice: (partial as any).trailingExtreme,
+            ...(partialDetail["range_first_profit_lock_applied"] === true
+              ? ({
+                  rangeFirstProfitLocked: true,
+                  rangeManagementState: "PROFIT_LOCKED"
+                } as const)
+              : {}),
             candidateLostStreak: 0
           };
+          if (partialDetail["range_first_profit_lock_applied"] === true) {
+            this.logger.info("range_profit_lock_transition", {
+              symbol: open.symbol,
+              side: open.side,
+              range_profit_lock_transition_applied: true,
+              range_profit_lock_threshold: partialDetail["range_first_profit_lock_threshold"] ?? null,
+              partial_exit_stage_after: stage
+            });
+          }
           remaining.push(open);
           continue;
         }
@@ -3866,7 +3935,10 @@ export class PaperEngine {
           ...(this.lastRegime.regime === "RANGE" && typeof first.boxPos === "number"
             ? {
                 rangeEntryBoxPos: first.boxPos,
-                rangeEntryZone: classifyBoxZone(first.boxPos)
+                rangeEntryZone: classifyBoxZone(first.boxPos),
+                rangeManagementState: "INIT" as RangeManagementState,
+                rangeAddOnUsed: false,
+                rangeFirstProfitLocked: false
               }
             : {}),
           ...(res.decision.range_reversal_immediate_switch_applied === true ? { rangeEntryFromReversalSwitch: true } : {}),
@@ -4099,10 +4171,13 @@ export class PaperEngine {
     const adaptive = res.adaptiveResult;
     const addOnKey = `${String(existing.symbol)}:${existing.openedAt}`;
     const addOnCount = this.rangeUpperShortAddOnCountByKey.get(addOnKey) ?? 0;
+    const addOnUsed = existing.rangeAddOnUsed === true || addOnCount >= 1;
     const exDetail = (decision.detail ?? {}) as Record<string, unknown>;
     const rangeSignalReason = typeof exDetail.range_signal_reason === "string" ? exDetail.range_signal_reason : null;
     const edgeStructureOk =
-      exDetail.range_upper_edge_structure_ok === true || rangeSignalReason === "range_upper_short_priority_structure";
+      exDetail.range_upper_edge_structure_ok === true ||
+      rangeSignalReason === "range_upper_short_priority_structure" ||
+      rangeSignalReason === "range_lower_long_priority_structure";
     const upperShortAddOnCandidate =
       existing.regimeAtEntry === "RANGE" &&
       existing.side === "short" &&
@@ -4111,15 +4186,27 @@ export class PaperEngine {
       classifyRangeActionZone(first.boxPos) === "upper" &&
       res.decision.range_upper_short_priority_applied === true &&
       edgeStructureOk === true;
-    if (upperShortAddOnCandidate && addOnCount >= 1) {
+    const lowerLongAddOnCandidate =
+      existing.regimeAtEntry === "RANGE" &&
+      existing.side === "long" &&
+      existing.rangeEntryZone === "lower" &&
+      typeof first.boxPos === "number" &&
+      classifyRangeActionZone(first.boxPos) === "lower" &&
+      res.decision.range_lower_long_priority_applied === true &&
+      edgeStructureOk === true;
+    const rangeAddOnCandidate = upperShortAddOnCandidate || lowerLongAddOnCandidate;
+    if (rangeAddOnCandidate && addOnUsed) {
       this.logger.info("range_add_on_entry_guard_blocked", {
         symbol: existing.symbol,
         side: existing.side,
         range_add_on_entry_applied: false,
+        range_add_on_transition_applied: false,
+        range_add_on_used: true,
         range_add_on_entry_count: addOnCount,
         range_add_on_entry_size_mult: 0,
         range_entry_zone: existing.rangeEntryZone ?? null,
         range_upper_short_priority_applied: res.decision.range_upper_short_priority_applied ?? false,
+        range_lower_long_priority_applied: res.decision.range_lower_long_priority_applied ?? false,
         edgeStructureOk
       });
       return null;
@@ -4190,7 +4277,7 @@ export class PaperEngine {
       }
     }
     let rangeAddOnSizeMultApplied = 1;
-    if (upperShortAddOnCandidate) {
+    if (rangeAddOnCandidate) {
       rangeAddOnSizeMultApplied = 0.45;
       incrementalSizeUsd = Math.round(incrementalSizeUsd * rangeAddOnSizeMultApplied * 100) / 100;
     }
@@ -4256,17 +4343,20 @@ export class PaperEngine {
       new_total_size: newTotalSizeUsd,
       guidance: res.decision.guidance
     });
-    if (upperShortAddOnCandidate) {
+    if (rangeAddOnCandidate) {
       const nextAddOnCount = addOnCount + 1;
       this.rangeUpperShortAddOnCountByKey.set(addOnKey, nextAddOnCount);
       this.logger.info("range_add_on_entry", {
         symbol: existing.symbol,
         side: existing.side,
         range_add_on_entry_applied: true,
+        range_add_on_transition_applied: true,
+        range_add_on_used: true,
         range_add_on_entry_count: nextAddOnCount,
         range_add_on_entry_size_mult: rangeAddOnSizeMultApplied,
         range_entry_zone: existing.rangeEntryZone ?? null,
         range_upper_short_priority_applied: res.decision.range_upper_short_priority_applied ?? false,
+        range_lower_long_priority_applied: res.decision.range_lower_long_priority_applied ?? false,
         edgeStructureOk
       });
     }
@@ -4277,6 +4367,10 @@ export class PaperEngine {
       entryPrice: newEntryPrice,
       entryStage: targetStage,
       scalingWeights,
+      rangeAddOnUsed: rangeAddOnCandidate ? true : existing.rangeAddOnUsed,
+      rangeManagementState: rangeAddOnCandidate
+        ? ("REATTACK_ELIGIBLE" as RangeManagementState)
+        : (existing.rangeManagementState ?? "INIT"),
       trailingExtremePrice: existing.side === "long"
         ? Math.max(existing.trailingExtremePrice ?? 0, first.lastPrice)
         : Math.min(existing.trailingExtremePrice ?? 999999, first.lastPrice)
