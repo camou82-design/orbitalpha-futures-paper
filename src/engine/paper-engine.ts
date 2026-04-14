@@ -496,6 +496,44 @@ type MutablePositionOpenTrace = {
 };
 type RangeManagementState = "INIT" | "REATTACK_READY" | "REATTACK_USED" | "PROFIT_LOCKED";
 
+function normalizeRangeManagementState(
+  rec: PaperOpenPositionRecord
+): { normalized: PaperOpenPositionRecord; changed: boolean } {
+  let normalized = rec;
+  let changed = false;
+  const raw = rec.rangeManagementState as string | undefined;
+  const mapped: RangeManagementState =
+    raw === "REATTACK_ELIGIBLE"
+      ? "REATTACK_READY"
+      : raw === "REATTACK_READY" || raw === "REATTACK_USED" || raw === "PROFIT_LOCKED"
+        ? raw
+        : "INIT";
+  if (mapped !== (raw ?? "INIT")) {
+    normalized = { ...normalized, rangeManagementState: mapped };
+    changed = true;
+  }
+  if (normalized.rangeManagementState === "PROFIT_LOCKED" && normalized.rangeFirstProfitLocked !== true) {
+    normalized = { ...normalized, rangeFirstProfitLocked: true };
+    changed = true;
+  }
+  if (normalized.rangeManagementState === "REATTACK_USED" && normalized.rangeAddOnUsed !== true) {
+    normalized = { ...normalized, rangeAddOnUsed: true };
+    changed = true;
+  }
+  if (normalized.rangeFirstProfitLocked === true && normalized.rangeManagementState !== "PROFIT_LOCKED") {
+    normalized = { ...normalized, rangeManagementState: "PROFIT_LOCKED" };
+    changed = true;
+  } else if (
+    normalized.rangeAddOnUsed === true &&
+    normalized.rangeFirstProfitLocked !== true &&
+    normalized.rangeManagementState !== "REATTACK_USED"
+  ) {
+    normalized = { ...normalized, rangeManagementState: "REATTACK_USED" };
+    changed = true;
+  }
+  return { normalized, changed };
+}
+
 export class PaperEngine {
   private readonly store: JsonStore;
   private readonly bybit: BybitPublicClient;
@@ -2404,29 +2442,15 @@ export class PaperEngine {
         continue;
       }
 
+      const normalizedOpen = normalizeRangeManagementState(openRaw);
       let open: PaperOpenPositionRecord = {
-        ...openRaw,
+        ...normalizedOpen.normalized,
         initialSizeUsd: openRaw.initialSizeUsd ?? openRaw.sizeUsd,
         partialExitStage: openRaw.partialExitStage ?? 0,
-        rangeManagementState: openRaw.rangeManagementState ?? "INIT",
-        rangeAddOnUsed: openRaw.rangeAddOnUsed ?? false,
-        rangeFirstProfitLocked: openRaw.rangeFirstProfitLocked ?? false
+        rangeManagementState: normalizedOpen.normalized.rangeManagementState ?? "INIT",
+        rangeAddOnUsed: normalizedOpen.normalized.rangeAddOnUsed ?? false,
+        rangeFirstProfitLocked: normalizedOpen.normalized.rangeFirstProfitLocked ?? false
       };
-      if (open.rangeManagementState === "PROFIT_LOCKED" && open.rangeFirstProfitLocked !== true) {
-        open = { ...open, rangeFirstProfitLocked: true };
-      }
-      if (open.rangeManagementState === "REATTACK_USED" && open.rangeAddOnUsed !== true) {
-        open = { ...open, rangeAddOnUsed: true };
-      }
-      if (open.rangeFirstProfitLocked === true && open.rangeManagementState !== "PROFIT_LOCKED") {
-        open = { ...open, rangeManagementState: "PROFIT_LOCKED" };
-      } else if (
-        open.rangeAddOnUsed === true &&
-        open.rangeFirstProfitLocked !== true &&
-        open.rangeManagementState !== "REATTACK_USED"
-      ) {
-        open = { ...open, rangeManagementState: "REATTACK_USED" };
-      }
 
       const closePrice = snap.lastPrice;
       const closedAt = snap.fetchedAt;
@@ -3446,7 +3470,13 @@ export class PaperEngine {
     }
 
     const max = this.config.paperMaxOpenPositions;
-    const opens = await this.positions.loadOpenAll();
+    const opensRaw = await this.positions.loadOpenAll();
+    let openPositionsChanged = false;
+    const opens = opensRaw.map((r) => {
+      const n = normalizeRangeManagementState(r);
+      if (n.changed) openPositionsChanged = true;
+      return n.normalized;
+    });
     const before = opens.length;
     const next = [...opens];
     const nowTs = Date.now();
@@ -3511,6 +3541,7 @@ export class PaperEngine {
         const scaled = await this.tryPaperPositionScaleIn(next[existingIdx], res, first, nowTs);
         if (scaled) {
           next[existingIdx] = scaled;
+          openPositionsChanged = true;
         }
         continue;
       }
@@ -3972,6 +4003,7 @@ export class PaperEngine {
         };
 
         next.push(record);
+        openPositionsChanged = true;
         trace.position_open_record_written = true;
         if (res.decision.range_reversal_immediate_switch_applied === true) {
           this.rangeReversalSwitchPendingBySymbol.delete(symS);
@@ -4152,7 +4184,7 @@ export class PaperEngine {
       }
     }
 
-    if (next.length !== before) {
+    if (openPositionsChanged || next.length !== before) {
       try {
         await this.positions.saveOpenAll(next);
         this.logger.info("paper_positions_persist_open_batch_ok", { added: next.length - before });
