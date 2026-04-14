@@ -171,16 +171,18 @@ export function evaluateRiskControls(input: Readonly<{
   // 4. Per-regime suspension.
   const blockedRegimes: RiskControlDecision["blockedRegimes"] = {};
   const recentLossStreakByMode: RiskControlDecision["recentLossStreakByMode"] = {};
-  const streakN_soft = 3;
-  const streakN_hard = 5;
-  const suspendMs = Math.max(30 * 60 * 1000, config.paperModeSuspendMs);
+  /** Soft-only path: reduce size without hour-long regime block (was 0.2; 0.45 keeps flow while trimming risk). */
+  const lossStreakSoftSizeMult = 0.45;
+  const hardSuspendMs = Math.max(60_000, config.paperModeHardSuspendMs);
   const regimes: MarketRegime[] = ["RANGE", "TREND", "NO_TRADE"];
   const highwayMode = (input.rangeConfidence ?? 0) >= 0.72;
+  const baseSoft = config.paperModeLossStreakSoftCount;
+  const baseHard = config.paperModeLossStreakSuspendCount;
   for (const regime of regimes) {
     let streak = 0;
     const isHighwayRange = regime === "RANGE" && highwayMode;
-    const effectiveStreakSoft = isHighwayRange ? 5 : 3;
-    const effectiveStreakHard = isHighwayRange ? 8 : 5;
+    const effectiveStreakSoft = isHighwayRange ? baseSoft + 2 : baseSoft;
+    const effectiveStreakHard = isHighwayRange ? baseHard + 2 : baseHard;
     for (let i = input.history.length - 1; i >= 0; i--) {
       const r = input.history[i] as unknown;
       if (asRegimeAtEntry(r) !== regime) continue;
@@ -188,7 +190,7 @@ export function evaluateRiskControls(input: Readonly<{
       if (p === null) continue;
       if (p < 0) {
         streak += 1;
-        if (streak >= streakN_hard) break;
+        if (streak >= effectiveStreakHard) break;
       } else if (p > 0) break;
       else break;
     }
@@ -202,13 +204,12 @@ export function evaluateRiskControls(input: Readonly<{
     }
     if (streak >= effectiveStreakHard && regime !== "NO_TRADE") {
       blockedRegimes[regime] = {
-        until: now + suspendMs,
+        until: now + hardSuspendMs,
         reason: isHighwayRange ? "highway_range_streak_hard_suspended" : "mode_loss_streak_hard_suspended"
       };
     } else if (streak >= effectiveStreakSoft && regime !== "NO_TRADE") {
-      // Soft penalty: streakSizeMult 0.2
-      longSizeMult *= 0.2;
-      shortSizeMult *= 0.2;
+      longSizeMult *= lossStreakSoftSizeMult;
+      shortSizeMult *= lossStreakSoftSizeMult;
     }
 
     // Highway: Structural Box Break Suspension

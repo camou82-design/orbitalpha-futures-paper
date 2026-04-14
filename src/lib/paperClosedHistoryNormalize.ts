@@ -21,6 +21,7 @@ const VALID_CLOSE_REASONS = new Set<string>([
   "partial_exit_1",
   "partial_exit_2",
   "range_box_break",
+  "range_profit_trail",
   "structural_regime_shift",
   "trend_switch"
 ]);

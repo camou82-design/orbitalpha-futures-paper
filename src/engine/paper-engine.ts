@@ -74,6 +74,7 @@ import { buildPaperExplanation } from "./explanation-layer";
 import {
   evaluateRangeEngineForSymbol,
   evaluateRangeStructuralExit,
+  computeRangeProfitTrailStep,
   evaluateRangeReopenAllowed,
   computeRangeEdgeIntensity01,
   marginsForSymbol,
@@ -83,6 +84,7 @@ import {
   RANGE_REOPEN_WINDOW_MS,
   RANGE_ZONE_ACTION_POLICY,
   classifyBoxZone,
+  type RangeProfitTrailState,
   type RangeReopenSoftMetrics
 } from "./range-engine";
 import {
@@ -352,6 +354,7 @@ function latestCloseMetaBySymbol(
           cr === "partial_exit_1" ||
           cr === "partial_exit_2" ||
           cr === "range_box_break" ||
+          cr === "range_profit_trail" ||
           cr === "structural_regime_shift" ||
           cr === "trend_switch"
           ? cr
@@ -530,6 +533,8 @@ export class PaperEngine {
   private rangeRoundTripStreakBySymbol = new Map<string, number>();
   /** Consecutive close-eval ticks with raw box break (for EXIT_RANGE_REBALANCE debounce). */
   private rangeBoxBreakConsecutiveBySymbol = new Map<string, number>();
+  /** RANGE 수익권 추종: 심볼:openedAt → 피크·잠금 (박스 이탈 리밸런스 지연용). */
+  private rangeProfitTrailByKey = new Map<string, RangeProfitTrailState>();
   private rangeRecentOutcomeScoresBySymbol = new Map<string, number[]>();
   private lastExitReasonLabel = "";
   private lastSwitchReasonLabel = "";
@@ -2630,7 +2635,76 @@ export class PaperEngine {
           trendConfidence: input.marketMode.trendConfidence,
           structuralTrendShift: regimeAtEntry === "RANGE" && regimeNow === "TREND"
         });
-        if (st.shouldExit && st.reason === "range_box_break") {
+
+        const holdingMsRange = Math.max(0, closedAt - open.openedAt);
+        const priorTrail = this.rangeProfitTrailByKey.get(rebalanceTickKey) ?? null;
+        const securedMinUsd = open.sizeUsd * this.config.rangeRebalanceSecuredMinPnlPct;
+        const atrSnap = typeof snap.atr === "number" && Number.isFinite(snap.atr) ? snap.atr : null;
+        const trailStep = computeRangeProfitTrailStep({
+          side: open.side,
+          closePrice,
+          boxUpper: rangeState.boxUpper,
+          boxLower: rangeState.boxLower,
+          pnlPctNet: m.pnlPctNet,
+          pnlUsdNet: m.pnlUsdNet,
+          marginUsd: open.sizeUsd,
+          atr: atrSnap,
+          prior: priorTrail,
+          armPnlPct: this.config.rangeRebalanceProfitArmPnlPct,
+          securedMinPnlUsd: securedMinUsd,
+          pullbackSpanFrac: this.config.rangeRebalanceTrailPullbackSpanFrac,
+          pullbackMinPriceFrac: this.config.rangeRebalanceTrailPullbackMinPriceFrac,
+          atrMult: this.config.rangeRebalanceTrailAtrMult,
+          holdingMs: holdingMsRange,
+          maxArmedNoLockDeferMs: this.config.rangeRebalanceTrailMaxArmedNoLockMs
+        });
+        if (trailStep.next === null) {
+          this.rangeProfitTrailByKey.delete(rebalanceTickKey);
+        } else {
+          this.rangeProfitTrailByKey.set(rebalanceTickKey, trailStep.next);
+        }
+
+        if (trailStep.trailExit) {
+          this.rangeBoxBreakConsecutiveBySymbol.delete(rebalanceTickKey);
+          const crTrail = "range_profit_trail" as const;
+          const closedRowTrail = finalizePaperClosedRecord({
+            open,
+            symbol: open.symbol,
+            closePrice,
+            closedAt,
+            closeReason: crTrail,
+            legMarginUsd: open.sizeUsd,
+            metrics: m,
+            feeRate,
+            fundingIntervalHours: intervalH,
+            strategyVersion: "paper-v1",
+            closeReasonLabelOverride: "수익권 되돌림 추종 청산",
+            ...snapPaths
+          });
+          await this.positions.appendClosed(closedRowTrail);
+          this.lastExitReasonLabel = "수익권 되돌림 추종 청산";
+          await this.store.appendJsonlLine("reports/events.jsonl", {
+            ts: Date.now(),
+            type: "EXIT_REGIME",
+            symbol: symKey,
+            reason: crTrail,
+            structural: "range_profit_trail",
+            realized_pnl: m.pnlUsdNet
+          });
+          continue;
+        }
+
+        if (trailStep.deferBoxBreak && st.shouldExit && st.reason === "range_box_break") {
+          this.rangeBoxBreakConsecutiveBySymbol.delete(rebalanceTickKey);
+          this.logger.info("range_rebalance_exit_deferred", {
+            symbol: symKey,
+            gate: "profit_trail_defer_box_break",
+            pnl_pct_net: m.pnlPctNet,
+            pnl_usd_net: m.pnlUsdNet,
+            range_box_break_raw: st.rangeBoxBreakRaw
+          });
+          st = { shouldExit: false, reason: null, rangeBoxBreakRaw: st.rangeBoxBreakRaw };
+        } else if (st.shouldExit && st.reason === "range_box_break") {
           const holdingMs = Math.max(0, closedAt - open.openedAt);
           const minHold = this.config.rangeRebalanceMinHoldMs;
           const needTicks = this.config.rangeRebalanceBoxBreakConfirmTicks;

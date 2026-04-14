@@ -117,6 +117,8 @@ export function derivePaperCloseSource(
       return "TP_PARTIAL";
     case "trailing_stop":
       return "TRAIL";
+    case "range_profit_trail":
+      return "TRAIL";
     case "time_based_exit":
       return "TIME";
     case "trend_break_exit":
@@ -244,6 +246,8 @@ export function paperExitDisplayMeta(
       return { exitType: "EXIT_REGIME", closeReasonLabel: defaultLabelForExitType("EXIT_REGIME") };
     case "range_box_break":
       return { exitType: "EXIT_RANGE_REBALANCE", closeReasonLabel: "박스 붕괴·구조 이탈" };
+    case "range_profit_trail":
+      return { exitType: "EXIT_TRAILING", closeReasonLabel: "수익권 되돌림 추종" };
     case "structural_regime_shift":
       return { exitType: "EXIT_REGIME_BREAK", closeReasonLabel: "구조적 추세 전환" };
     case "trend_switch":

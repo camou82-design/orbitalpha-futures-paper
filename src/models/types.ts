@@ -83,6 +83,24 @@ export type EngineConfig = Readonly<{
    * Single-tick spikes or one-off reclassification alone do not clear the bar.
    */
   rangeRebalanceBoxBreakConfirmTicks: number;
+  /**
+   * Net PnL% on margin (after fees) to enter RANGE profit-trail zone: defer `range_box_break` until pullback trail or disarm.
+   */
+  rangeRebalanceProfitArmPnlPct: number;
+  /**
+   * Minimum net PnL USD = margin × this fraction to lock trailing (0 = breakeven net, i.e. pnlUsdNet ≥ 0).
+   */
+  rangeRebalanceSecuredMinPnlPct: number;
+  /** Pullback from peak (fraction of box span) to trigger profit-trail exit when locked. */
+  rangeRebalanceTrailPullbackSpanFrac: number;
+  /** Minimum pullback as fraction of price (noise floor vs span). */
+  rangeRebalanceTrailPullbackMinPriceFrac: number;
+  /** ATR multiplier for pullback floor (0 = ignore ATR). */
+  rangeRebalanceTrailAtrMult: number;
+  /**
+   * After profit-arm without lock, max ms to defer box break before releasing (0 = no cap).
+   */
+  rangeRebalanceTrailMaxArmedNoLockMs: number;
   /** Test-only: bypass legacy block path for RANGE stage0 candidate diagnostics. */
   paperTestBypassLegacyRangeStage0: boolean;
   /** Test-only: bypass only blocked_regime_until_active for RANGE stage0 candidate diagnostics. */
@@ -95,10 +113,21 @@ export type EngineConfig = Readonly<{
   paperLast10NetDegradeThresholdUsd: number;
   /** Paper-only: size multiplier when last10 net is degrading. */
   paperDegradeSizeMultiplier: number;
-  /** Paper-only: per-regime loss streak count to suspend that regime. */
+  /**
+   * Consecutive losses (same regime) at/above this → hard regime suspend (`mode_loss_streak_hard_suspended`).
+   * Soft-only band is below this and at/above `paperModeLossStreakSoftCount`.
+   */
   paperModeLossStreakSuspendCount: number;
-  /** Paper-only: suspend duration ms for a regime after loss streak. */
+  /**
+   * Consecutive losses at/above this → soft size reduction only (no hour-long block).
+   */
+  paperModeLossStreakSoftCount: number;
+  /** Paper-only: generic suspend duration ms (legacy caps, crash lock, structural box break upper bound). */
   paperModeSuspendMs: number;
+  /**
+   * Hard loss-streak suspend duration (ms). Kept shorter than `paperModeSuspendMs` so RANGE/TREND recover faster.
+   */
+  paperModeHardSuspendMs: number;
   /** AI block evaluator: good_block threshold (percent). Example: -0.25 means <= -0.25% is good_block. */
   aiBlockGoodThresholdPct: number;
   /** AI block evaluator: missed_opportunity threshold (percent). Example: 0.35 means >= +0.35% is missed. */
@@ -984,6 +1013,7 @@ export type PaperClosedPositionRecord = Readonly<{
   | "partial_exit_1"
   | "partial_exit_2"
   | "range_box_break"
+  | "range_profit_trail"
   | "structural_regime_shift"
   | "trend_switch";
   /** 표준 종료 유형 (내부 코드). */

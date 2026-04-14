@@ -100,6 +100,96 @@ export function evaluateRangeStructuralExit(input: Readonly<{
   return { shouldExit: false, reason: null, rangeBoxBreakRaw: false };
 }
 
+/** Per-position profit trail (peak + lock) for RANGE defer / pullback exit. */
+export type RangeProfitTrailState = Readonly<{
+  peakPrice: number;
+  locked: boolean;
+}>;
+
+/**
+ * RANGE 수익권: 일정 이익 구간 진입 후에는 `range_box_break` 리밸런스를 즉시 허용하지 않고,
+ * 본전 이상 확보(locked) 뒤 피크 대비 되돌림이 임계를 넘을 때만 청산(trailExit).
+ */
+export function computeRangeProfitTrailStep(input: Readonly<{
+  side: "long" | "short";
+  closePrice: number;
+  boxUpper: number;
+  boxLower: number;
+  pnlPctNet: number;
+  pnlUsdNet: number;
+  marginUsd: number;
+  atr: number | null;
+  prior: RangeProfitTrailState | null;
+  armPnlPct: number;
+  securedMinPnlUsd: number;
+  pullbackSpanFrac: number;
+  pullbackMinPriceFrac: number;
+  atrMult: number;
+  holdingMs: number;
+  maxArmedNoLockDeferMs: number;
+}>): Readonly<{
+  next: RangeProfitTrailState | null;
+  deferBoxBreak: boolean;
+  trailExit: boolean;
+}> {
+  if (input.pnlUsdNet < 0) {
+    return { next: null, deferBoxBreak: false, trailExit: false };
+  }
+  const armed = input.pnlPctNet >= input.armPnlPct;
+  if (!armed) {
+    return { next: null, deferBoxBreak: false, trailExit: false };
+  }
+  const locked = input.pnlUsdNet >= input.securedMinPnlUsd;
+  if (input.prior?.locked && !locked) {
+    return { next: null, deferBoxBreak: false, trailExit: false };
+  }
+  const timeoutNoLock =
+    !locked &&
+    input.maxArmedNoLockDeferMs > 0 &&
+    input.holdingMs >= input.maxArmedNoLockDeferMs;
+  if (timeoutNoLock) {
+    return { next: null, deferBoxBreak: false, trailExit: false };
+  }
+
+  const span = Math.max(0, input.boxUpper - input.boxLower);
+  const trailDist = Math.max(
+    span * input.pullbackSpanFrac,
+    input.closePrice * input.pullbackMinPriceFrac,
+    (input.atr ?? 0) * input.atrMult
+  );
+
+  const prior = input.prior;
+  let peak = prior?.peakPrice ?? input.closePrice;
+  const wasLocked = prior?.locked ?? false;
+
+  if (locked) {
+    if (!wasLocked) {
+      peak = input.closePrice;
+    } else {
+      peak = input.side === "long" ? Math.max(peak, input.closePrice) : Math.min(peak, input.closePrice);
+    }
+  } else {
+    peak = input.closePrice;
+  }
+
+  const next: RangeProfitTrailState = { peakPrice: peak, locked };
+
+  let trailExit = false;
+  if (locked) {
+    if (input.side === "long") {
+      trailExit = input.closePrice <= peak - trailDist;
+    } else {
+      trailExit = input.closePrice >= peak + trailDist;
+    }
+  }
+
+  if (trailExit) {
+    return { next: null, deferBoxBreak: false, trailExit: true };
+  }
+
+  return { next, deferBoxBreak: true, trailExit: false };
+}
+
 /**
  * 횡보 전용 상태 산출. 후보 소멸 청산은 RANGE 핵심 사유에서 제외(candidateLostExitAllowed=false).
  */

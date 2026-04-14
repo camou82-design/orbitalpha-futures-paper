@@ -93,25 +93,53 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
   const rangeRebalanceMinHoldMsRaw = env.ORBITALPHA_RANGE_REBALANCE_MIN_HOLD_MS;
   const rangeRebalanceMinHoldMsParsed =
     rangeRebalanceMinHoldMsRaw === undefined || String(rangeRebalanceMinHoldMsRaw).trim() === ""
-      ? 480_000
+      ? 600_000
       : parseInt(String(rangeRebalanceMinHoldMsRaw), 10);
   const rangeRebalanceMinHoldMs =
     !Number.isFinite(rangeRebalanceMinHoldMsParsed) || rangeRebalanceMinHoldMsParsed < 0
-      ? 480_000
+      ? 600_000
       : Math.min(86_400_000, rangeRebalanceMinHoldMsParsed);
 
   const rangeRebalanceBoxBreakConfirmTicks = parseIntClamped(
     env.ORBITALPHA_RANGE_REBALANCE_BOX_BREAK_CONFIRM_TICKS,
-    2,
+    3,
     1,
     8
   );
+
+  const rangeRebalanceProfitArmPnlPct = parseNumber(env.ORBITALPHA_RANGE_PROFIT_ARM_PNL_PCT, 0.0012);
+  const rangeRebalanceSecuredMinPnlPct = parseNumber(env.ORBITALPHA_RANGE_SECURED_MIN_PNL_PCT, 0);
+  const rangeRebalanceTrailPullbackSpanFrac = parseNumber(env.ORBITALPHA_RANGE_TRAIL_PULLBACK_SPAN_FRAC, 0.08);
+  const rangeRebalanceTrailPullbackMinPriceFrac = parseNumber(env.ORBITALPHA_RANGE_TRAIL_PULLBACK_MIN_PRICE_FRAC, 0.0005);
+  const rangeRebalanceTrailAtrMult = parseNumber(env.ORBITALPHA_RANGE_TRAIL_ATR_MULT, 0.35);
+  const rangeRebalanceTrailMaxArmedNoLockMsRaw = env.ORBITALPHA_RANGE_TRAIL_MAX_ARMED_NO_LOCK_MS;
+  const rangeRebalanceTrailMaxArmedNoLockMsParsed =
+    rangeRebalanceTrailMaxArmedNoLockMsRaw === undefined || String(rangeRebalanceTrailMaxArmedNoLockMsRaw).trim() === ""
+      ? 0
+      : parseInt(String(rangeRebalanceTrailMaxArmedNoLockMsRaw), 10);
+  const rangeRebalanceTrailMaxArmedNoLockMs =
+    !Number.isFinite(rangeRebalanceTrailMaxArmedNoLockMsParsed) || rangeRebalanceTrailMaxArmedNoLockMsParsed < 0
+      ? 0
+      : Math.min(86_400_000, rangeRebalanceTrailMaxArmedNoLockMsParsed);
 
   const paperSlippageBps = parseNumber(env.ORBITALPHA_PAPER_SLIPPAGE_BPS, 2);
   const paperDailyLossLimitUsd = parseNumber(env.ORBITALPHA_PAPER_DAILY_LOSS_LIMIT_USD, 40);
   const paperLast10NetDegradeThresholdUsd = parseNumber(env.ORBITALPHA_PAPER_LAST10_NET_DEGRADE_USD, 15);
   const paperDegradeSizeMultiplier = parseNumber(env.ORBITALPHA_PAPER_DEGRADE_SIZE_MULT, 0.6);
-  const paperModeLossStreakSuspendCount = parseIntClamped(env.ORBITALPHA_PAPER_MODE_SUSPEND_LOSS_STREAK, 3, 2, 6);
+  let paperModeLossStreakSoftCount = parseIntClamped(env.ORBITALPHA_PAPER_SOFT_LOSS_STREAK, 3, 2, 12);
+  let paperModeLossStreakSuspendCount = parseIntClamped(env.ORBITALPHA_PAPER_MODE_SUSPEND_LOSS_STREAK, 7, 4, 16);
+  if (paperModeLossStreakSuspendCount <= paperModeLossStreakSoftCount) {
+    paperModeLossStreakSuspendCount = paperModeLossStreakSoftCount + 1;
+  }
+  const paperModeHardSuspendMsRaw = env.ORBITALPHA_PAPER_HARD_SUSPEND_MS;
+  const paperModeHardSuspendMsParsed =
+    paperModeHardSuspendMsRaw === undefined || String(paperModeHardSuspendMsRaw).trim() === ""
+      ? 1_200_000
+      : parseInt(String(paperModeHardSuspendMsRaw), 10);
+  const paperModeHardSuspendMs =
+    !Number.isFinite(paperModeHardSuspendMsParsed) || paperModeHardSuspendMsParsed < 0
+      ? 1_200_000
+      : Math.min(86_400_000, Math.max(300_000, paperModeHardSuspendMsParsed));
   const paperModeSuspendMsRaw = env.ORBITALPHA_PAPER_MODE_SUSPEND_MS;
   const paperModeSuspendMsParsed =
     paperModeSuspendMsRaw === undefined || paperModeSuspendMsRaw.trim() === "" ? 3_600_000 : parseInt(paperModeSuspendMsRaw, 10);
@@ -170,12 +198,20 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperReentryCooldownMs,
     rangeRebalanceMinHoldMs,
     rangeRebalanceBoxBreakConfirmTicks,
+    rangeRebalanceProfitArmPnlPct,
+    rangeRebalanceSecuredMinPnlPct,
+    rangeRebalanceTrailPullbackSpanFrac,
+    rangeRebalanceTrailPullbackMinPriceFrac,
+    rangeRebalanceTrailAtrMult,
+    rangeRebalanceTrailMaxArmedNoLockMs,
     paperSlippageBps,
     paperDailyLossLimitUsd,
     paperLast10NetDegradeThresholdUsd,
     paperDegradeSizeMultiplier,
     paperModeLossStreakSuspendCount,
+    paperModeLossStreakSoftCount,
     paperModeSuspendMs,
+    paperModeHardSuspendMs,
     aiBlockGoodThresholdPct,
     aiBlockMissedThresholdPct,
     aiBlockEvaluationHorizonPriorityMins,
