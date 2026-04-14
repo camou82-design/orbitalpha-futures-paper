@@ -373,11 +373,11 @@ function buildRangeUpperLongSuppressBranchProof(args: {
     prior_order_would_skip_short_eval:
       rawSnapshotSignal === "paper_long_candidate"
         ? {
-            first_matching_branch: "paper_long_candidate",
-            immediate_return: "RANGE_SIGNAL_NONE",
-            immediate_reason: "range_upper_suppress_long_candidate_no_inertia",
-            short_priority_never_reached: true
-          }
+          first_matching_branch: "paper_long_candidate",
+          immediate_return: "RANGE_SIGNAL_NONE",
+          immediate_reason: "range_upper_suppress_long_candidate_no_inertia",
+          short_priority_never_reached: true
+        }
         : null,
     post_reorder_inner_when_raw_long: edge.ok
       ? { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_priority_structure" }
@@ -864,6 +864,12 @@ function pack(
     fee_drag_blocked?: boolean;
     fee_drag_reason?: string | null;
     fee_drag_proof?: Record<string, unknown> | null;
+    range_executor_priority_applied?: boolean;
+    range_executor_priority_reason?: string | null;
+    final_executor_before_priority?: PaperStrategyExecutor | null;
+    final_executor_after_priority?: PaperStrategyExecutor | null;
+    final_reject_before_priority?: string | null;
+    final_reject_after_priority?: string | null;
   }
 ): PaperSymbolDecision {
   return {
@@ -1030,7 +1036,13 @@ function pack(
     fee_drag_size_reduced: fields.fee_drag_size_reduced ?? false,
     fee_drag_blocked: fields.fee_drag_blocked ?? false,
     fee_drag_reason: fields.fee_drag_reason ?? null,
-    fee_drag_proof: fields.fee_drag_proof ?? null
+    fee_drag_proof: fields.fee_drag_proof ?? null,
+    range_executor_priority_applied: fields.range_executor_priority_applied,
+    range_executor_priority_reason: fields.range_executor_priority_reason,
+    final_executor_before_priority: fields.final_executor_before_priority,
+    final_executor_after_priority: fields.final_executor_after_priority,
+    final_reject_before_priority: fields.final_reject_before_priority,
+    final_reject_after_priority: fields.final_reject_after_priority
   };
 }
 
@@ -1069,96 +1081,33 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let intentSide: "long" | "short" | null = null;
   let executorDecision: AnyEntryDecision | null = null;
   let adaptiveDetailOut: Record<string, unknown> | null = null;
-  /** TREND adaptive 직전 볼륨 완화 proof(`relax_evaluated` true일 때만 채움). */
   let trendVolumeRelaxProof: Record<string, unknown> | null = null;
   let guidanceOut: string | null = null;
+  let workingSignal: PaperSignal = "none";
+  let final_executor_before_priority: PaperStrategyExecutor = "IDLE";
+  let final_reject_before_priority: string | null = null;
+  let final_decision_before_priority: PaperFinalDecision = "SKIP";
+  let final_executor_after_priority: PaperStrategyExecutor = "IDLE";
+  let final_reject_after_priority: string | null = null;
+  let final_decision_after_priority: PaperFinalDecision = "SKIP";
+  let br: string | null = null;
 
-  const sn = input.snapshot;
-  const rm = sn?.gateRequiredMove;
-  const emFromSn = sn?.gateExpectedMove ?? null;
-  em = emFromSn; // Use the let-declared em
-
-  let leniency = 1.0;
-  if (input.currentStage === 0) {
-    if (input.regime === "TREND") leniency *= 0.65;
-    else if (input.regime === "RANGE") leniency *= 0.75;
-    /** ETH만 추가 완화(0.60). BTC는 후보 생성 경로에서만 완화, 비용 게이트는 레짐 배수만 적용. */
-    if (sym === "ETHUSDT") leniency *= 0.6;
-  }
-
-  const stage1_leniency_applied = input.currentStage === 0 && leniency < 1.0;
-
-  const refNotionalUsd = DEFAULT_PAPER_SIZE_USD;
-  const fixedUsd = input.config.paperFixedTotalCostUsd;
-  const useFixedCost = fixedUsd !== null && fixedUsd > 0;
-
-  let totalCost: number | null;
-  let effectiveTotalCost: number | null;
-  let expectedMoveUsd: number | null;
-  let requiredCostUsd: number | null;
-  let shortfallUsd: number;
-
-  if (useFixedCost) {
-    totalCost = fixedUsd / refNotionalUsd;
-    requiredCostUsd = fixedUsd * leniency;
-    effectiveTotalCost = requiredCostUsd / refNotionalUsd;
-    expectedMoveUsd =
-      em !== null && typeof em === "number" && Number.isFinite(em) ? em * refNotionalUsd : null;
-    shortfallUsd =
-      expectedMoveUsd !== null && requiredCostUsd !== null
-        ? Math.max(0, requiredCostUsd - expectedMoveUsd)
-        : requiredCostUsd !== null
-          ? requiredCostUsd
-          : 0;
-  } else {
-    totalCost = (typeof rm === "number" && Number.isFinite(rm)) ? rm + slipFrac + safety : null;
-    effectiveTotalCost = totalCost !== null ? totalCost * leniency : null;
-    requiredCostUsd = effectiveTotalCost !== null ? effectiveTotalCost * refNotionalUsd : null;
-    expectedMoveUsd =
-      em !== null && typeof em === "number" && Number.isFinite(em) ? em * refNotionalUsd : null;
-    shortfallUsd =
-      effectiveTotalCost !== null && em !== null && effectiveTotalCost > em
-        ? (effectiveTotalCost - em) * refNotionalUsd
-        : 0;
-  }
-
-  const required_move_pct = effectiveTotalCost !== null ? effectiveTotalCost * 100 : null;
-  const shortfall_pct = (effectiveTotalCost !== null && em !== null && effectiveTotalCost > em) ? (effectiveTotalCost - em) * 100 : 0;
-
-  let executorBlockReasonOriginal: string | null = null;
-  let stage1SoftExecOverrideFlag = false;
-  let stage1RangeEdgeSoftApplied = false;
-  let stage1ExploreSoftExec = false;
-  let stage1HigherTfBypassSizeMult: number | null = null;
-  let stage1RangeLowerEdgeSoftSizeMult: number | null = null;
-  let stage1SoftCandidateMicroEnter = false;
-  let stage1CostSoftBypassApplied = false;
-  let stage1CostSoftBypassReason: string | null = null;
-
-  let reentry_cooldown_applied = false;
-  let reentry_cooldown_original_ms: number | null = null;
-  let reentry_cooldown_effective_ms: number | null = null;
-  let reentry_cooldown_reason: string | null = null;
-  let risk_cooldown_subreason: string | null = null;
-  let cooldown_remaining_ms: number | null = null;
-  let same_dir_cooldown_applied = false;
-  let blocked_regime_reason: string | null = null;
-  let reentry_wait_ms: number | null = null;
-  let reentry_elapsed_ms: number | null = null;
-  let blocked_regime_until_bypass_applied = false;
-  let blocked_regime_until_bypass_reason: string | null = null;
-  let blocked_regime_original_until_ms: number | null = null;
-  let blocked_regime_original_reason: string | null = null;
-  let range_long_only_short_deferred_applied = false;
-  let range_long_only_short_deferred_bypassed = false;
-  let range_cost_warning_applied = false;
-  let range_cost_warning_threshold: number | null = null;
-  let range_cost_warning_shortfall: number | null = null;
   let fee_drag_filter_applied = false;
   let fee_drag_size_reduced = false;
   let fee_drag_blocked = false;
   let fee_drag_reason: string | null = null;
+  let legacy_block_original_reason: string | null = null;
+  let isRangeFallbackActive = false;
   let fee_drag_proof: Record<string, unknown> | null = null;
+  let range_stage0_engine_taken = false;
+  let range_stage0_exit_reason: string | null = null;
+  let legacy_executor_path_taken = false;
+  let required_move_pct: number | null = null;
+  let shortfall_pct = 0;
+  let stage1_leniency_applied = false;
+  let range_cost_warning_applied = false;
+  let range_cost_warning_threshold: number | null = null;
+  let range_cost_warning_shortfall: number | null = null;
   let range_reentry_cooldown_applied = false;
   let range_reentry_wait_ms: number | null = null;
   let range_reentry_elapsed_ms: number | null = null;
@@ -1192,12 +1141,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_reversal_long_exit_triggered = false;
   let range_reversal_short_entry_allowed = false;
   let range_reversal_short_entry_block_reason: string | null = null;
-  let range_zone_action_policy: string | null = null;
-  let range_zone_detected: "upper" | "lower" | "mid" | null = null;
-  let range_upper_short_priority_applied = false;
-  let range_lower_long_priority_applied = false;
-  let range_mid_wait_applied = false;
-  let range_final_trade_side_by_zone: string | null = null;
   let range_reversal_immediate_switch_applied = false;
   let range_reversal_immediate_switch_reason: string | null = null;
   let range_fresh_reentry_allowed = false;
@@ -1206,10 +1149,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let range_reentry_wait_bypassed_no_open_position = false;
   let range_loss_streak_reduced_entry_applied = false;
   let range_loss_streak_reduced_entry_size_mult: number | null = null;
-  let range_stage0_engine_taken = false;
-  let range_stage0_exit_reason: string | null = null;
+  let range_zone_action_policy: string | null = null;
+  let range_zone_detected: "upper" | "lower" | "mid" | string | null = null;
+  let range_upper_short_priority_applied = false;
+  let range_lower_long_priority_applied = false;
+  let range_mid_wait_applied = false;
+  let range_final_trade_side_by_zone: string | null = null;
   let range_stage0_branch_proof: Record<string, unknown> | null = null;
-  let legacy_executor_path_taken = false;
   let legacy_block_reason: string | null = null;
   let legacy_regime_gate: string | null = null;
   let legacy_gate_source: string | null = null;
@@ -1217,9 +1163,126 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let stage1_block_origin: string | null = null;
   let legacy_block_test_bypass_applied = false;
   let legacy_block_test_bypass_reason: string | null = null;
-  let legacy_block_original_reason: string | null = null;
+  let reentry_cooldown_applied = false;
+  let reentry_cooldown_original_ms: number | null = null;
+  let reentry_cooldown_effective_ms: number | null = null;
+  let reentry_cooldown_reason: string | null = null;
+
+  // Working metrics and intermediate states
+  let waitMs: number = 0;
+  let elapsedMs: number = 0;
+  let meta: any = null;
+  let sameDirection: boolean = false;
+  let reentryBlocked: boolean = false;
+  let lowConfidence: boolean = false;
+  let zone: "upper" | "lower" | "mid" | string = "mid";
+  let boxPos: number = 0.5;
+  let rangeSignal: any = null;
+  let rangeScores: any = null;
+  let lowConfidenceSignalMin: number = 0.34;
+  let lowConfidenceEntryMin: number = 0.36;
+  let edgeRelaxZoneForConfidence: boolean = false;
+  let blockedRegimeActive: boolean = false;
+  let blockedRegimeLossStreakSuspend: boolean = false;
+  let freshReentryCandidate: boolean = false;
+  let blockedRegime: any = null;
+  let blockedRegimeReasonText: string = "";
+  let edgeGateCurrent: any = null;
+  let edgeStructureOkCurrent: boolean = false;
+  let prioritySignalAligned: boolean = false;
+  let noOpenPositionFreshEntry: boolean = false;
+  let rangeRiskRelaxEligible: boolean = false;
+  let riskEngineHardBlocked: boolean = false;
+  let riskEngineBlockedBySuspendOnly: boolean = false;
+  let riskEngineBlocked: boolean = false;
+  let sameDirRelaxEligible: boolean = false;
   let stage1SignalRelaxed = false;
   let signalRelaxReason: string | null = null;
+  let stage1SoftCandidateMicroEnter = false;
+  let stage1CostSoftBypassApplied = false;
+  let stage1CostSoftBypassReason: string | null = null;
+  let effectiveTotalCost: number | null = null;
+  let useFixedCost: boolean = false;
+  let cooldowned: boolean = false;
+  let cooldown_remaining_ms: number | null = null;
+  let stage1ExploreSoftExec = false;
+  let stage1HigherTfBypassSizeMult: number | null = null;
+  let stage1RangeLowerEdgeSoftSizeMult: number | null = null;
+  let stage1RangeEdgeSoftApplied = false;
+  let range_executor_priority_applied = false;
+  let range_executor_priority_reason: string | null = null;
+  final_executor_before_priority = "IDLE";
+  final_executor_after_priority = "IDLE";
+  final_reject_before_priority = null;
+  final_reject_after_priority = null;
+  final_decision_before_priority = "SKIP";
+  final_decision_after_priority = "SKIP";
+  let risk_cooldown_subreason: string | null = null;
+  let same_dir_cooldown_applied = false;
+  let blocked_regime_reason: string | null = null;
+  let reentry_wait_ms: number | null = null;
+  let reentry_elapsed_ms: number | null = null;
+  let blocked_regime_until_bypass_applied = false;
+  let blocked_regime_until_bypass_reason: string | null = null;
+  let blocked_regime_original_until_ms: number | null = null;
+  let blocked_regime_original_reason: string | null = null;
+  let range_long_only_short_deferred_applied = false;
+  let range_long_only_short_deferred_bypassed = false;
+  let stage1SoftExecOverrideFlag = false;
+  let fixedUsd: number | null = null;
+  let expectedMoveUsd: number | null = null;
+  let requiredCostUsd: number | null = null;
+  let shortfallUsd: number | null = null;
+  let executorBlockReasonOriginal: string | null = null;
+  let totalCost: number | null = null;
+
+  const sn = input.snapshot;
+  const rm = sn?.gateRequiredMove;
+  const emFromSn = sn?.gateExpectedMove ?? null;
+  em = emFromSn;
+
+  let leniency = 1.0;
+  if (input.currentStage === 0) {
+    if (input.regime === "TREND") leniency *= 0.65;
+    else if (input.regime === "RANGE") leniency *= 0.75;
+    if (sym === "ETHUSDT") leniency *= 0.6;
+  }
+
+  stage1_leniency_applied = input.currentStage === 0 && leniency < 1.0;
+
+  const refNotionalUsd = DEFAULT_PAPER_SIZE_USD;
+  fixedUsd = input.config.paperFixedTotalCostUsd;
+  useFixedCost = fixedUsd !== null && fixedUsd > 0;
+
+  if (useFixedCost) {
+    totalCost = (fixedUsd as number) / refNotionalUsd;
+    requiredCostUsd = (fixedUsd as number) * leniency;
+    effectiveTotalCost = requiredCostUsd / refNotionalUsd;
+    expectedMoveUsd =
+      em !== null && typeof em === "number" && Number.isFinite(em) ? em * refNotionalUsd : null;
+    shortfallUsd =
+      expectedMoveUsd !== null && requiredCostUsd !== null
+        ? Math.max(0, requiredCostUsd - expectedMoveUsd)
+        : requiredCostUsd !== null
+          ? requiredCostUsd
+          : 0;
+  } else {
+    totalCost = (typeof rm === "number" && Number.isFinite(rm)) ? rm + slipFrac + safety : null;
+    effectiveTotalCost = totalCost !== null ? totalCost * leniency : null;
+    requiredCostUsd = effectiveTotalCost !== null ? effectiveTotalCost * refNotionalUsd : null;
+    expectedMoveUsd =
+      em !== null && typeof em === "number" && Number.isFinite(em) ? em * refNotionalUsd : null;
+    shortfallUsd =
+      effectiveTotalCost !== null && em !== null && effectiveTotalCost > em
+        ? (effectiveTotalCost - em) * refNotionalUsd
+        : 0;
+  }
+
+  required_move_pct = effectiveTotalCost !== null ? effectiveTotalCost * 100 : null;
+  shortfall_pct = (effectiveTotalCost !== null && em !== null && effectiveTotalCost > em) ? (effectiveTotalCost - em) * 100 : 0;
+
+  executorBlockReasonOriginal = null;
+  stage1SoftExecOverrideFlag = false;
 
   const ret = (
     extra: Partial<{
@@ -1272,6 +1335,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       shortfall_usd?: number;
       executor_block_reason_original?: string | null;
       stage1_soft_exec_override?: boolean;
+      stage1_soft_exec_override_reason?: string | null;
       stage1_signal_relaxed?: boolean;
       signal_relax_reason?: string | null;
       stage1_soft_candidate_enter_applied?: boolean;
@@ -1417,209 +1481,233 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       adaptiveFailure?: Extract<FuturesAdaptiveEntryResult, { ok: false }>;
       aiGatePassed: boolean;
     }
-  ): EvaluatePaperSymbolEntryResult => ({
-    decision: pack(input, sym, em, {
-      signal_state: extra.signal_state ?? signal_state,
-      regime_state: extra.regime_state ?? regime_state,
-      edge_state: extra.edge_state ?? edge_state,
-      risk_state: extra.risk_state ?? risk_state,
-      execution_state: extra.execution_state ?? execution_state,
-      final_decision: extra.final_decision ?? final_decision,
-      reject_reason: extra.reject_reason !== undefined ? extra.reject_reason : reject_reason,
-      expected_move_pct: extra.expected_move_pct !== undefined ? extra.expected_move_pct : expected_move_pct,
-      fee_estimate_pct: extra.fee_estimate_pct !== undefined ? extra.fee_estimate_pct : fee_estimate_pct,
-      slippage_buffer_pct,
-      safety_margin_pct,
-      rr: extra.rr !== undefined ? extra.rr : rr,
-      atr_pct: extra.atr_pct !== undefined ? extra.atr_pct : atr_pct,
-      strategy_executor: extra.strategy_executor ?? strategy_executor,
-      engine_mode: emMode,
-      ai_decision: extra.ai_decision !== undefined ? extra.ai_decision : null,
-      adaptive_decision: extra.adaptive_decision !== undefined ? extra.adaptive_decision : null,
-      guidance: extra.guidance !== undefined ? extra.guidance : guidanceOut,
-      next_action: extra.next_action !== undefined ? extra.next_action : null,
-      invalidate_condition: extra.invalidate_condition !== undefined ? extra.invalidate_condition : null,
-      risk_note: extra.risk_note !== undefined ? extra.risk_note : null,
-      watch_zone: extra.watch_zone !== undefined ? extra.watch_zone : null,
-      entry_progress: extra.entry_progress !== undefined ? extra.entry_progress : null,
-      target_stage: extra.target_stage !== undefined ? extra.target_stage : null,
-      supplemental_reasons: extra.supplemental_reasons,
-      is_ambiguous: extra.is_ambiguous !== undefined ? extra.is_ambiguous : input.isAmbiguous,
-      stage1_loosened_entry: extra.stage1_loosened_entry,
-      ai_floor_relaxed: extra.ai_floor_relaxed,
-      auto_entry_triggered: extra.auto_entry_triggered !== undefined ? extra.auto_entry_triggered : input.autoEntryTriggered,
-      reviewing_ticks: extra.reviewing_ticks !== undefined ? extra.reviewing_ticks : input.reviewingTicks,
-      stage1_result_code: extra.stage1_result_code,
-      final_fail_reason: extra.final_fail_reason,
-      entry_blocked: extra.entry_blocked ?? null,
-      range_stage0_engine_taken: extra.range_stage0_engine_taken ?? range_stage0_engine_taken,
-      range_stage0_exit_reason: extra.range_stage0_exit_reason ?? range_stage0_exit_reason,
-      legacy_executor_path_taken: extra.legacy_executor_path_taken ?? legacy_executor_path_taken,
-      required_move_pct: "required_move_pct" in extra ? extra.required_move_pct : required_move_pct,
-      shortfall_pct: "shortfall_pct" in extra ? extra.shortfall_pct : (shortfall_pct ?? 0),
-      signal_missing_reason: extra.signal_missing_reason ?? sn?.signalMissingReason,
-      box_position_diag: "box_position_diag" in extra ? extra.box_position_diag : sn?.boxPos,
-      ema_gap_diag: "ema_gap_diag" in extra ? extra.ema_gap_diag : sn?.emaGap,
-      volatility_proxy_diag: "volatility_proxy_diag" in extra ? extra.volatility_proxy_diag : sn?.volumeRatioProxy,
-      stage1_leniency_applied: extra.stage1_leniency_applied ?? stage1_leniency_applied,
-      cost_warning_applied: extra.cost_warning_applied,
-      stage1_size_reduced_due_to_cost: extra.stage1_size_reduced_due_to_cost,
-      post_entry_cost_guard: extra.post_entry_cost_guard,
-      fixed_total_cost_usd: extra.fixed_total_cost_usd !== undefined ? extra.fixed_total_cost_usd : fixedUsd,
-      expected_move_usd: extra.expected_move_usd !== undefined ? extra.expected_move_usd : expectedMoveUsd,
-      required_cost_usd: extra.required_cost_usd !== undefined ? extra.required_cost_usd : requiredCostUsd,
-      shortfall_usd: extra.shortfall_usd !== undefined ? extra.shortfall_usd : shortfallUsd,
-      executor_block_reason_original: extra.executor_block_reason_original !== undefined ? extra.executor_block_reason_original : executorBlockReasonOriginal,
-      stage1_soft_exec_override: extra.stage1_soft_exec_override !== undefined ? extra.stage1_soft_exec_override : stage1SoftExecOverrideFlag,
-      stage1_size_multiplier_final: extra.stage1_size_multiplier_final !== undefined ? extra.stage1_size_multiplier_final : null,
-      order_build_ok: extra.order_build_ok,
-      order_build_fail_reason: extra.order_build_fail_reason,
-      order_build_fail_stage: extra.order_build_fail_stage,
-      qty: extra.qty,
-      price: extra.price,
-      stopLoss: extra.stopLoss,
-      takeProfit: extra.takeProfit,
-      riskReward: extra.riskReward,
-      tick_size: extra.tick_size,
-      qty_step: extra.qty_step,
-      min_qty: extra.min_qty,
-      min_notional: extra.min_notional,
-      sizeUsd: extra.sizeUsd,
-      long_only_restriction: extra.long_only_restriction,
-      original_signal_state: extra.original_signal_state,
-      final_signal_state: extra.final_signal_state,
-      execution_disabled_reason: extra.execution_disabled_reason,
-      execution_disabled_top_proof: extra.execution_disabled_top_proof,
-      trend_volume_relax_proof:
-        "trend_volume_relax_proof" in extra ? extra.trend_volume_relax_proof : trendVolumeRelaxProof,
-      reentry_cooldown_applied: extra.reentry_cooldown_applied ?? reentry_cooldown_applied,
-      reentry_cooldown_original_ms: extra.reentry_cooldown_original_ms ?? reentry_cooldown_original_ms,
-      reentry_cooldown_effective_ms: extra.reentry_cooldown_effective_ms ?? reentry_cooldown_effective_ms,
-      reentry_cooldown_reason: extra.reentry_cooldown_reason ?? reentry_cooldown_reason,
-      risk_cooldown_subreason: extra.risk_cooldown_subreason ?? risk_cooldown_subreason,
-      cooldown_remaining_ms: extra.cooldown_remaining_ms ?? cooldown_remaining_ms,
-      same_dir_cooldown_applied: extra.same_dir_cooldown_applied ?? same_dir_cooldown_applied,
-      blocked_regime_reason: extra.blocked_regime_reason ?? blocked_regime_reason,
-      reentry_wait_ms: extra.reentry_wait_ms ?? reentry_wait_ms,
-      reentry_elapsed_ms: extra.reentry_elapsed_ms ?? reentry_elapsed_ms,
-      blocked_regime_until_bypass_applied:
-        extra.blocked_regime_until_bypass_applied ?? blocked_regime_until_bypass_applied,
-      blocked_regime_until_bypass_reason:
-        extra.blocked_regime_until_bypass_reason ?? blocked_regime_until_bypass_reason,
-      blocked_regime_original_until_ms:
-        extra.blocked_regime_original_until_ms ?? blocked_regime_original_until_ms,
-      blocked_regime_original_reason:
-        extra.blocked_regime_original_reason ?? blocked_regime_original_reason,
-      range_long_only_short_deferred_applied:
-        extra.range_long_only_short_deferred_applied ?? range_long_only_short_deferred_applied,
-      range_long_only_short_deferred_bypassed:
-        extra.range_long_only_short_deferred_bypassed ?? range_long_only_short_deferred_bypassed,
-      range_cost_warning_applied: extra.range_cost_warning_applied ?? range_cost_warning_applied,
-      range_cost_warning_threshold: extra.range_cost_warning_threshold ?? range_cost_warning_threshold,
-      range_cost_warning_shortfall: extra.range_cost_warning_shortfall ?? range_cost_warning_shortfall,
-      range_reentry_cooldown_applied: extra.range_reentry_cooldown_applied ?? range_reentry_cooldown_applied,
-      range_reentry_wait_ms: extra.range_reentry_wait_ms ?? range_reentry_wait_ms,
-      range_reentry_elapsed_ms: extra.range_reentry_elapsed_ms ?? range_reentry_elapsed_ms,
-      range_reentry_remaining_ms: extra.range_reentry_remaining_ms ?? range_reentry_remaining_ms,
-      range_reentry_source: extra.range_reentry_source ?? range_reentry_source,
-      range_reentry_same_direction: extra.range_reentry_same_direction ?? range_reentry_same_direction,
-      range_same_direction_reentry_relaxed_applied:
-        extra.range_same_direction_reentry_relaxed_applied ?? range_same_direction_reentry_relaxed_applied,
-      range_same_direction_reentry_wait_ms:
-        extra.range_same_direction_reentry_wait_ms ?? range_same_direction_reentry_wait_ms,
-      range_same_direction_reentry_size_mult:
-        extra.range_same_direction_reentry_size_mult ?? range_same_direction_reentry_size_mult,
-      range_same_direction_reentry_edge_ok:
-        extra.range_same_direction_reentry_edge_ok ?? range_same_direction_reentry_edge_ok,
-      range_same_direction_reentry_center_blocked:
-        extra.range_same_direction_reentry_center_blocked ?? range_same_direction_reentry_center_blocked,
-      range_same_direction_reentry_final_allowed:
-        extra.range_same_direction_reentry_final_allowed ?? range_same_direction_reentry_final_allowed,
-      range_risk_limit_temporarily_relaxed:
-        extra.range_risk_limit_temporarily_relaxed ?? range_risk_limit_temporarily_relaxed,
-      range_risk_limit_relax_reason: extra.range_risk_limit_relax_reason ?? range_risk_limit_relax_reason,
-      range_risk_limit_relax_started_at:
-        extra.range_risk_limit_relax_started_at ?? range_risk_limit_relax_started_at,
-      range_risk_limit_relax_expires_at:
-        extra.range_risk_limit_relax_expires_at ?? range_risk_limit_relax_expires_at,
-      range_risk_limit_relax_active: extra.range_risk_limit_relax_active ?? range_risk_limit_relax_active,
-      range_risk_limit_relax_expired: extra.range_risk_limit_relax_expired ?? range_risk_limit_relax_expired,
-      range_soft_suspend_applied: extra.range_soft_suspend_applied ?? range_soft_suspend_applied,
-      range_soft_suspend_size_mult: extra.range_soft_suspend_size_mult ?? range_soft_suspend_size_mult,
-      range_soft_suspend_cooldown_ms: extra.range_soft_suspend_cooldown_ms ?? range_soft_suspend_cooldown_ms,
-      range_soft_suspend_same_direction_restricted:
-        extra.range_soft_suspend_same_direction_restricted ?? range_soft_suspend_same_direction_restricted,
-      range_bidirectional_applied: extra.range_bidirectional_applied ?? range_bidirectional_applied,
-      range_short_allowed: extra.range_short_allowed ?? range_short_allowed,
-      range_short_allowed_reason: extra.range_short_allowed_reason ?? range_short_allowed_reason,
-      range_upper_edge_near: extra.range_upper_edge_near ?? range_upper_edge_near,
-      range_center_wait: extra.range_center_wait ?? range_center_wait,
-      range_final_selected_side: extra.range_final_selected_side ?? range_final_selected_side,
-      range_reversal_zone: extra.range_reversal_zone ?? range_reversal_zone,
-      range_reversal_short_eval_started: extra.range_reversal_short_eval_started ?? range_reversal_short_eval_started,
-      range_reversal_long_exit_triggered: extra.range_reversal_long_exit_triggered ?? range_reversal_long_exit_triggered,
-      range_reversal_short_entry_allowed: extra.range_reversal_short_entry_allowed ?? range_reversal_short_entry_allowed,
-      range_reversal_short_entry_block_reason:
-        extra.range_reversal_short_entry_block_reason ?? range_reversal_short_entry_block_reason,
-      range_reversal_immediate_switch_applied:
-        extra.range_reversal_immediate_switch_applied ?? range_reversal_immediate_switch_applied,
-      range_reversal_immediate_switch_reason:
-        extra.range_reversal_immediate_switch_reason ?? range_reversal_immediate_switch_reason,
-      range_fresh_reentry_allowed: extra.range_fresh_reentry_allowed ?? range_fresh_reentry_allowed,
-      range_fresh_reentry_blocked_reason: extra.range_fresh_reentry_blocked_reason ?? range_fresh_reentry_blocked_reason,
-      range_fresh_reentry_size_mult: extra.range_fresh_reentry_size_mult ?? range_fresh_reentry_size_mult,
-      range_reentry_wait_bypassed_no_open_position:
-        extra.range_reentry_wait_bypassed_no_open_position ?? range_reentry_wait_bypassed_no_open_position,
-      range_loss_streak_reduced_entry_applied:
-        extra.range_loss_streak_reduced_entry_applied ?? range_loss_streak_reduced_entry_applied,
-      range_loss_streak_reduced_entry_size_mult:
-        extra.range_loss_streak_reduced_entry_size_mult ?? range_loss_streak_reduced_entry_size_mult,
-      range_zone_action_policy: extra.range_zone_action_policy ?? range_zone_action_policy,
-      range_zone_detected: extra.range_zone_detected ?? range_zone_detected,
-      range_upper_short_priority_applied: extra.range_upper_short_priority_applied ?? range_upper_short_priority_applied,
-      range_lower_long_priority_applied: extra.range_lower_long_priority_applied ?? range_lower_long_priority_applied,
-      range_mid_wait_applied: extra.range_mid_wait_applied ?? range_mid_wait_applied,
-      range_final_trade_side_by_zone: extra.range_final_trade_side_by_zone ?? range_final_trade_side_by_zone,
-      range_stage0_branch_proof:
-        "range_stage0_branch_proof" in extra ? extra.range_stage0_branch_proof : range_stage0_branch_proof,
-      legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
-      legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
-      legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
-      override_by_legacy: extra.override_by_legacy ?? override_by_legacy,
-      stage1_block_origin: extra.stage1_block_origin ?? stage1_block_origin,
-      legacy_block_test_bypass_applied: extra.legacy_block_test_bypass_applied ?? legacy_block_test_bypass_applied,
-      legacy_block_test_bypass_reason: extra.legacy_block_test_bypass_reason ?? legacy_block_test_bypass_reason,
-      legacy_block_original_reason: extra.legacy_block_original_reason ?? legacy_block_original_reason,
-      currentStage: extra.currentStage !== undefined ? extra.currentStage : input.currentStage,
-      regime: extra.regime !== undefined ? extra.regime : input.regime,
-      stage1_signal_relaxed: extra.stage1_signal_relaxed ?? stage1SignalRelaxed,
-      signal_relax_reason: extra.signal_relax_reason ?? signalRelaxReason,
-      regime_original_state: extra.regime_original_state ?? originalRegimeState,
-      regime_fallback_applied: extra.regime_fallback_applied ?? regimeFallbackApplied,
-      regime_fallback_reason: extra.regime_fallback_reason ?? regimeFallbackReason,
-      range_confidence_diag: extra.range_confidence_diag !== undefined ? extra.range_confidence_diag : sn?.rangeConfidence,
-      box_cohesion_diag: extra.box_cohesion_diag !== undefined ? extra.box_cohesion_diag : sn?.boxCohesion01,
-      breakout_failure_rate_diag: extra.breakout_failure_rate_diag !== undefined ? extra.breakout_failure_rate_diag : sn?.breakoutFailureRate,
-      range_oscillation_diag: extra.range_oscillation_diag !== undefined ? extra.range_oscillation_diag : sn?.rangeOscillationScore,
-      trend_weakness_diag: extra.trend_weakness_diag !== undefined ? extra.trend_weakness_diag : sn?.trendWeaknessScore,
-      range_reason_label: extra.range_reason_label !== undefined ? extra.range_reason_label : sn?.rangeReasonLabel,
-      range_cycle_count: extra.range_cycle_count !== undefined ? extra.range_cycle_count : sn?.rangeCycleCount,
-      range_ladder_level: extra.range_ladder_level !== undefined ? extra.range_ladder_level : sn?.rangeLadderLevel,
-      regime_exit_risk: extra.regime_exit_risk !== undefined ? extra.regime_exit_risk : sn?.regimeExitRisk,
-      box_break_side: extra.box_break_side !== undefined ? extra.box_break_side : sn?.boxBreakSide,
-      regime_state_diag: extra.regime_state_diag !== undefined ? extra.regime_state_diag : sn?.regimeStateDiag,
-      entry_intent_type: extra.entry_intent_type !== undefined ? extra.entry_intent_type : res.executorDecision?.entryIntentType,
-      entry_confirmation_state: extra.entry_confirmation_state !== undefined ? extra.entry_confirmation_state : res.executorDecision?.entryConfirmationState,
-      scaling_permission: extra.scaling_permission !== undefined ? extra.scaling_permission : res.executorDecision?.scalingPermission,
-      probe_only_mode: extra.probe_only_mode !== undefined ? extra.probe_only_mode : res.executorDecision?.probeOnlyMode,
-      fee_drag_filter_applied: extra.fee_drag_filter_applied ?? fee_drag_filter_applied,
-      fee_drag_size_reduced: extra.fee_drag_size_reduced ?? fee_drag_size_reduced,
-      fee_drag_blocked: extra.fee_drag_blocked ?? fee_drag_blocked,
-      fee_drag_reason: extra.fee_drag_reason !== undefined ? extra.fee_drag_reason : fee_drag_reason,
-      fee_drag_proof: extra.fee_drag_proof !== undefined ? extra.fee_drag_proof : fee_drag_proof
-    }),
-    ...res
-  });
+  ): EvaluatePaperSymbolEntryResult => {
+    final_executor_before_priority = extra.strategy_executor ?? strategy_executor;
+    final_reject_before_priority = extra.reject_reason !== undefined ? (extra.reject_reason ? String(extra.reject_reason) : null) : (reject_reason ? String(reject_reason) : null);
+    final_decision_before_priority = extra.final_decision ?? final_decision;
+
+    final_executor_after_priority = final_executor_before_priority;
+    final_reject_after_priority = final_reject_before_priority;
+    final_decision_after_priority = final_decision_before_priority;
+
+    if (isRangeFallbackActive && final_decision_before_priority === "REJECT" && final_executor_before_priority === "TREND" && (extra.reject_reason === "EDGE_FAIL_FEE" || reject_reason === "EDGE_FAIL_FEE")) {
+      final_executor_after_priority = "RANGE";
+      final_reject_after_priority = null;
+      final_decision_after_priority = "SKIP";
+      range_executor_priority_applied = true;
+      range_executor_priority_reason = "range_diag_context_override_trend_reject_fee";
+    }
+
+    return {
+      decision: pack(input, sym, em, {
+        signal_state: (extra.signal_state ?? signal_state) as any,
+        regime_state: (extra.regime_state ?? regime_state) as any,
+        edge_state: (extra.edge_state ?? edge_state) as any,
+        risk_state: (extra.risk_state ?? risk_state) as any,
+        execution_state: (extra.execution_state ?? execution_state) as any,
+        final_decision: (final_decision_after_priority as any),
+        reject_reason: (final_reject_after_priority as any),
+        expected_move_pct: extra.expected_move_pct !== undefined ? extra.expected_move_pct : expected_move_pct,
+        fee_estimate_pct: extra.fee_estimate_pct !== undefined ? extra.fee_estimate_pct : fee_estimate_pct,
+        slippage_buffer_pct,
+        safety_margin_pct,
+        rr: extra.rr !== undefined ? extra.rr : rr,
+        atr_pct: extra.atr_pct !== undefined ? extra.atr_pct : atr_pct,
+        strategy_executor: final_executor_after_priority,
+        engine_mode: emMode,
+        ai_decision: extra.ai_decision !== undefined ? extra.ai_decision : null,
+        adaptive_decision: extra.adaptive_decision !== undefined ? extra.adaptive_decision : null,
+        guidance: extra.guidance !== undefined ? extra.guidance : guidanceOut,
+        next_action: extra.next_action !== undefined ? extra.next_action : null,
+        invalidate_condition: extra.invalidate_condition !== undefined ? extra.invalidate_condition : null,
+        risk_note: extra.risk_note !== undefined ? extra.risk_note : null,
+        watch_zone: extra.watch_zone !== undefined ? extra.watch_zone : null,
+        entry_progress: extra.entry_progress !== undefined ? extra.entry_progress : null,
+        target_stage: extra.target_stage !== undefined ? extra.target_stage : null,
+        supplemental_reasons: extra.supplemental_reasons ?? supplemental_reasons,
+        is_ambiguous: extra.is_ambiguous ?? false,
+        stage1_loosened_entry: extra.stage1_loosened_entry,
+        ai_floor_relaxed: extra.ai_floor_relaxed,
+        auto_entry_triggered: extra.auto_entry_triggered !== undefined ? extra.auto_entry_triggered : input.autoEntryTriggered,
+        reviewing_ticks: extra.reviewing_ticks !== undefined ? extra.reviewing_ticks : input.reviewingTicks,
+        stage1_result_code: extra.stage1_result_code,
+        final_fail_reason: extra.final_fail_reason,
+        entry_blocked: extra.entry_blocked ?? null,
+        range_executor_priority_applied,
+        range_executor_priority_reason,
+        final_executor_before_priority,
+        final_executor_after_priority,
+        final_reject_before_priority: final_reject_before_priority ? String(final_reject_before_priority) : null,
+        final_reject_after_priority: final_reject_after_priority ? String(final_reject_after_priority) : null,
+        range_stage0_engine_taken: extra.range_stage0_engine_taken ?? range_stage0_engine_taken,
+        range_stage0_exit_reason: extra.range_stage0_exit_reason ?? range_stage0_exit_reason,
+        legacy_executor_path_taken: extra.legacy_executor_path_taken ?? legacy_executor_path_taken,
+        required_move_pct: "required_move_pct" in extra ? extra.required_move_pct : required_move_pct,
+        shortfall_pct: "shortfall_pct" in extra ? extra.shortfall_pct : (shortfall_pct ?? 0),
+        signal_missing_reason: extra.signal_missing_reason ?? sn?.signalMissingReason,
+        box_position_diag: "box_position_diag" in extra ? extra.box_position_diag : sn?.boxPos,
+        ema_gap_diag: "ema_gap_diag" in extra ? extra.ema_gap_diag : sn?.emaGap,
+        volatility_proxy_diag: "volatility_proxy_diag" in extra ? extra.volatility_proxy_diag : sn?.volumeRatioProxy,
+        stage1_leniency_applied: extra.stage1_leniency_applied ?? stage1_leniency_applied,
+        cost_warning_applied: extra.cost_warning_applied,
+        stage1_size_reduced_due_to_cost: extra.stage1_size_reduced_due_to_cost,
+        post_entry_cost_guard: extra.post_entry_cost_guard,
+        fixed_total_cost_usd: extra.fixed_total_cost_usd !== undefined ? extra.fixed_total_cost_usd : fixedUsd,
+        expected_move_usd: extra.expected_move_usd !== undefined ? extra.expected_move_usd : expectedMoveUsd,
+        required_cost_usd: extra.required_cost_usd !== undefined ? extra.required_cost_usd : requiredCostUsd,
+        shortfall_usd: extra.shortfall_usd !== undefined ? extra.shortfall_usd : shortfallUsd,
+        executor_block_reason_original: extra.executor_block_reason_original !== undefined ? extra.executor_block_reason_original : executorBlockReasonOriginal,
+        stage1_soft_exec_override: extra.stage1_soft_exec_override !== undefined ? extra.stage1_soft_exec_override : stage1SoftExecOverrideFlag,
+        stage1_size_multiplier_final: extra.stage1_size_multiplier_final !== undefined ? extra.stage1_size_multiplier_final : null,
+        order_build_ok: extra.order_build_ok,
+        order_build_fail_reason: extra.order_build_fail_reason,
+        order_build_fail_stage: extra.order_build_fail_stage,
+        qty: extra.qty,
+        price: extra.price,
+        stopLoss: extra.stopLoss,
+        takeProfit: extra.takeProfit,
+        riskReward: extra.riskReward,
+        tick_size: extra.tick_size,
+        qty_step: extra.qty_step,
+        min_qty: extra.min_qty,
+        min_notional: extra.min_notional,
+        sizeUsd: extra.sizeUsd,
+        long_only_restriction: extra.long_only_restriction,
+        original_signal_state: extra.original_signal_state,
+        final_signal_state: extra.final_signal_state,
+        execution_disabled_reason: extra.execution_disabled_reason,
+        execution_disabled_top_proof: extra.execution_disabled_top_proof,
+        trend_volume_relax_proof:
+          "trend_volume_relax_proof" in extra ? extra.trend_volume_relax_proof : trendVolumeRelaxProof,
+        reentry_cooldown_applied: extra.reentry_cooldown_applied ?? reentry_cooldown_applied,
+        reentry_cooldown_original_ms: extra.reentry_cooldown_original_ms ?? reentry_cooldown_original_ms,
+        reentry_cooldown_effective_ms: extra.reentry_cooldown_effective_ms ?? reentry_cooldown_effective_ms,
+        reentry_cooldown_reason: extra.reentry_cooldown_reason ?? reentry_cooldown_reason,
+        risk_cooldown_subreason: extra.risk_cooldown_subreason ?? risk_cooldown_subreason,
+        cooldown_remaining_ms: extra.cooldown_remaining_ms ?? cooldown_remaining_ms,
+        same_dir_cooldown_applied: extra.same_dir_cooldown_applied ?? same_dir_cooldown_applied,
+        blocked_regime_reason: extra.blocked_regime_reason ?? blocked_regime_reason,
+        reentry_wait_ms: extra.reentry_wait_ms ?? reentry_wait_ms,
+        reentry_elapsed_ms: extra.reentry_elapsed_ms ?? reentry_elapsed_ms,
+        blocked_regime_until_bypass_applied:
+          extra.blocked_regime_until_bypass_applied ?? blocked_regime_until_bypass_applied,
+        blocked_regime_until_bypass_reason:
+          extra.blocked_regime_until_bypass_reason ?? blocked_regime_until_bypass_reason,
+        blocked_regime_original_until_ms:
+          extra.blocked_regime_original_until_ms ?? blocked_regime_original_until_ms,
+        blocked_regime_original_reason:
+          extra.blocked_regime_original_reason ?? blocked_regime_original_reason,
+        range_long_only_short_deferred_applied:
+          extra.range_long_only_short_deferred_applied ?? range_long_only_short_deferred_applied,
+        range_long_only_short_deferred_bypassed:
+          extra.range_long_only_short_deferred_bypassed ?? range_long_only_short_deferred_bypassed,
+        range_cost_warning_applied: extra.range_cost_warning_applied ?? range_cost_warning_applied,
+        range_cost_warning_threshold: extra.range_cost_warning_threshold ?? range_cost_warning_threshold,
+        range_cost_warning_shortfall: extra.range_cost_warning_shortfall ?? range_cost_warning_shortfall,
+        range_reentry_cooldown_applied: extra.range_reentry_cooldown_applied ?? range_reentry_cooldown_applied,
+        range_reentry_wait_ms: extra.range_reentry_wait_ms ?? range_reentry_wait_ms,
+        range_reentry_elapsed_ms: extra.range_reentry_elapsed_ms ?? range_reentry_elapsed_ms,
+        range_reentry_remaining_ms: extra.range_reentry_remaining_ms ?? range_reentry_remaining_ms,
+        range_reentry_source: extra.range_reentry_source ?? range_reentry_source,
+        range_reentry_same_direction: extra.range_reentry_same_direction ?? range_reentry_same_direction,
+        range_same_direction_reentry_relaxed_applied:
+          extra.range_same_direction_reentry_relaxed_applied ?? range_same_direction_reentry_relaxed_applied,
+        range_same_direction_reentry_wait_ms:
+          extra.range_same_direction_reentry_wait_ms ?? range_same_direction_reentry_wait_ms,
+        range_same_direction_reentry_size_mult:
+          extra.range_same_direction_reentry_size_mult ?? range_same_direction_reentry_size_mult,
+        range_same_direction_reentry_edge_ok:
+          extra.range_same_direction_reentry_edge_ok ?? range_same_direction_reentry_edge_ok,
+        range_same_direction_reentry_center_blocked:
+          extra.range_same_direction_reentry_center_blocked ?? range_same_direction_reentry_center_blocked,
+        range_same_direction_reentry_final_allowed:
+          extra.range_same_direction_reentry_final_allowed ?? range_same_direction_reentry_final_allowed,
+        range_risk_limit_temporarily_relaxed:
+          extra.range_risk_limit_temporarily_relaxed ?? range_risk_limit_temporarily_relaxed,
+        range_risk_limit_relax_reason: extra.range_risk_limit_relax_reason ?? range_risk_limit_relax_reason,
+        range_risk_limit_relax_started_at:
+          extra.range_risk_limit_relax_started_at ?? range_risk_limit_relax_started_at,
+        range_risk_limit_relax_expires_at:
+          extra.range_risk_limit_relax_expires_at ?? range_risk_limit_relax_expires_at,
+        range_risk_limit_relax_active: extra.range_risk_limit_relax_active ?? range_risk_limit_relax_active,
+        range_risk_limit_relax_expired: extra.range_risk_limit_relax_expired ?? range_risk_limit_relax_expired,
+        range_soft_suspend_applied: extra.range_soft_suspend_applied ?? range_soft_suspend_applied,
+        range_soft_suspend_size_mult: extra.range_soft_suspend_size_mult ?? range_soft_suspend_size_mult,
+        range_soft_suspend_cooldown_ms: extra.range_soft_suspend_cooldown_ms ?? range_soft_suspend_cooldown_ms,
+        range_soft_suspend_same_direction_restricted:
+          extra.range_soft_suspend_same_direction_restricted ?? range_soft_suspend_same_direction_restricted,
+        range_bidirectional_applied: extra.range_bidirectional_applied ?? range_bidirectional_applied,
+        range_short_allowed: extra.range_short_allowed ?? range_short_allowed,
+        range_short_allowed_reason: extra.range_short_allowed_reason ?? range_short_allowed_reason,
+        range_upper_edge_near: extra.range_upper_edge_near ?? range_upper_edge_near,
+        range_center_wait: extra.range_center_wait ?? range_center_wait,
+        range_final_selected_side: extra.range_final_selected_side ?? range_final_selected_side,
+        range_reversal_zone: extra.range_reversal_zone ?? range_reversal_zone,
+        range_reversal_short_eval_started: extra.range_reversal_short_eval_started ?? range_reversal_short_eval_started,
+        range_reversal_long_exit_triggered: extra.range_reversal_long_exit_triggered ?? range_reversal_long_exit_triggered,
+        range_reversal_short_entry_allowed: extra.range_reversal_short_entry_allowed ?? range_reversal_short_entry_allowed,
+        range_reversal_short_entry_block_reason:
+          extra.range_reversal_short_entry_block_reason ?? range_reversal_short_entry_block_reason,
+        range_reversal_immediate_switch_applied:
+          extra.range_reversal_immediate_switch_applied ?? range_reversal_immediate_switch_applied,
+        range_reversal_immediate_switch_reason:
+          extra.range_reversal_immediate_switch_reason ?? range_reversal_immediate_switch_reason,
+        range_fresh_reentry_allowed: extra.range_fresh_reentry_allowed ?? range_fresh_reentry_allowed,
+        range_fresh_reentry_blocked_reason: extra.range_fresh_reentry_blocked_reason ?? range_fresh_reentry_blocked_reason,
+        range_fresh_reentry_size_mult: extra.range_fresh_reentry_size_mult ?? range_fresh_reentry_size_mult,
+        range_reentry_wait_bypassed_no_open_position:
+          extra.range_reentry_wait_bypassed_no_open_position ?? range_reentry_wait_bypassed_no_open_position,
+        range_loss_streak_reduced_entry_applied:
+          extra.range_loss_streak_reduced_entry_applied ?? range_loss_streak_reduced_entry_applied,
+        range_loss_streak_reduced_entry_size_mult:
+          extra.range_loss_streak_reduced_entry_size_mult ?? range_loss_streak_reduced_entry_size_mult,
+        range_zone_action_policy: extra.range_zone_action_policy ?? range_zone_action_policy,
+        range_zone_detected: (extra.range_zone_detected ?? range_zone_detected) as any,
+        range_upper_short_priority_applied: extra.range_upper_short_priority_applied ?? range_upper_short_priority_applied,
+        range_lower_long_priority_applied: extra.range_lower_long_priority_applied ?? range_lower_long_priority_applied,
+        range_mid_wait_applied: extra.range_mid_wait_applied ?? range_mid_wait_applied,
+        range_final_trade_side_by_zone: extra.range_final_trade_side_by_zone ?? range_final_trade_side_by_zone,
+        range_stage0_branch_proof:
+          "range_stage0_branch_proof" in extra ? extra.range_stage0_branch_proof : range_stage0_branch_proof,
+        legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
+        legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
+        legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
+        override_by_legacy: extra.override_by_legacy ?? override_by_legacy,
+        stage1_block_origin: extra.stage1_block_origin ?? stage1_block_origin,
+        legacy_block_test_bypass_applied: extra.legacy_block_test_bypass_applied ?? legacy_block_test_bypass_applied,
+        legacy_block_test_bypass_reason: extra.legacy_block_test_bypass_reason ?? legacy_block_test_bypass_reason,
+        legacy_block_original_reason: extra.legacy_block_original_reason ?? legacy_block_original_reason,
+        currentStage: extra.currentStage !== undefined ? extra.currentStage : input.currentStage,
+        regime: extra.regime !== undefined ? extra.regime : input.regime,
+        stage1_signal_relaxed: extra.stage1_signal_relaxed ?? stage1SignalRelaxed,
+        signal_relax_reason: extra.signal_relax_reason ?? signalRelaxReason,
+        regime_original_state: extra.regime_original_state ?? originalRegimeState,
+        regime_fallback_applied: extra.regime_fallback_applied ?? regimeFallbackApplied,
+        regime_fallback_reason: extra.regime_fallback_reason ?? regimeFallbackReason,
+        range_confidence_diag: extra.range_confidence_diag !== undefined ? extra.range_confidence_diag : sn?.rangeConfidence,
+        box_cohesion_diag: extra.box_cohesion_diag !== undefined ? extra.box_cohesion_diag : sn?.boxCohesion01,
+        breakout_failure_rate_diag: extra.breakout_failure_rate_diag !== undefined ? extra.breakout_failure_rate_diag : sn?.breakoutFailureRate,
+        range_oscillation_diag: extra.range_oscillation_diag !== undefined ? extra.range_oscillation_diag : sn?.rangeOscillationScore,
+        trend_weakness_diag: extra.trend_weakness_diag !== undefined ? extra.trend_weakness_diag : sn?.trendWeaknessScore,
+        range_reason_label: extra.range_reason_label !== undefined ? extra.range_reason_label : sn?.rangeReasonLabel,
+        range_cycle_count: extra.range_cycle_count !== undefined ? extra.range_cycle_count : sn?.rangeCycleCount,
+        range_ladder_level: extra.range_ladder_level !== undefined ? extra.range_ladder_level : sn?.rangeLadderLevel,
+        regime_exit_risk: extra.regime_exit_risk !== undefined ? extra.regime_exit_risk : sn?.regimeExitRisk,
+        box_break_side: extra.box_break_side !== undefined ? extra.box_break_side : sn?.boxBreakSide,
+        regime_state_diag: extra.regime_state_diag !== undefined ? extra.regime_state_diag : sn?.regimeStateDiag,
+        entry_intent_type: extra.entry_intent_type !== undefined ? extra.entry_intent_type : res.executorDecision?.entryIntentType,
+        entry_confirmation_state: extra.entry_confirmation_state !== undefined ? extra.entry_confirmation_state : res.executorDecision?.entryConfirmationState,
+        scaling_permission: extra.scaling_permission !== undefined ? extra.scaling_permission : res.executorDecision?.scalingPermission,
+        probe_only_mode: extra.probe_only_mode !== undefined ? extra.probe_only_mode : res.executorDecision?.probeOnlyMode,
+        fee_drag_filter_applied: extra.fee_drag_filter_applied ?? fee_drag_filter_applied,
+        fee_drag_size_reduced: extra.fee_drag_size_reduced ?? fee_drag_size_reduced,
+        fee_drag_blocked: extra.fee_drag_blocked ?? fee_drag_blocked,
+        fee_drag_reason: extra.fee_drag_reason !== undefined ? extra.fee_drag_reason : fee_drag_reason,
+        fee_drag_proof: extra.fee_drag_proof !== undefined ? extra.fee_drag_proof : fee_drag_proof
+      }),
+      ...res
+    };
+  };
 
   if (!input.dataReady || !input.snapshot) {
     return ret(
@@ -1689,10 +1777,17 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   }
   signal_state = signalToState(sn.signal);
   intentSide = (sn.signal === "paper_long_candidate") ? "long" : (sn.signal === "paper_short_candidate" ? "short" : "none") as any;
-  let workingSignal: PaperSignal = sn.signal;
+  workingSignal = sn.signal as any;
 
-  const useRangeStage0Engine = input.regime === "RANGE" && input.currentStage === 0;
+  const contextRangeDiag = sn.regimeStateDiag === "RANGE";
+  const hasRangeContextMetrics = (sn.rangeConfidence ?? 0) >= 0.3 && (sn.boxCohesion01 ?? 0) >= 0.25;
+  isRangeFallbackActive = contextRangeDiag && hasRangeContextMetrics && input.regime !== "NO_TRADE";
+
+  const useRangeStage0Engine = (input.regime === "RANGE" || isRangeFallbackActive) && input.currentStage === 0;
   if (useRangeStage0Engine) {
+    if (isRangeFallbackActive && input.regime !== "RANGE") {
+      supplemental_reasons.push(`[RANGE_PRIORITY_FALLBACK] regime=${input.regime},diag=${sn.regimeStateDiag},conf=${sn.rangeConfidence}`);
+    }
     range_stage0_engine_taken = true;
     strategy_executor = "RANGE";
     const rangeSignal = evaluateRangeStage0Signal(sn, input.rangeReversalImmediateSwitch);
@@ -1708,7 +1803,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_risk_limit_relax_reason = RANGE_RISK_LIMIT_RELAX_REASON;
       range_risk_limit_relax_started_at = RANGE_RISK_LIMIT_RELAX_STARTED_AT;
       range_risk_limit_relax_expires_at = RANGE_RISK_LIMIT_RELAX_EXPIRES_AT;
-      range_risk_limit_relax_active = input.now < RANGE_RISK_LIMIT_RELAX_EXPIRES_AT;
+      range_risk_limit_relax_active = input.now < (RANGE_RISK_LIMIT_RELAX_EXPIRES_AT as number);
       range_risk_limit_relax_expired = !range_risk_limit_relax_active;
     }
     const riskEngineHardBlocked = input.risk?.crashState !== undefined && input.risk.crashState !== "NONE";
@@ -1799,18 +1894,18 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const lowConfidenceEntryMin = edgeRelaxZoneForConfidence ? 0.33 : 0.36;
     const lowConfidence = rangeScores.rangeSignalScore < lowConfidenceSignalMin || rangeScores.rangeEntryScore < lowConfidenceEntryMin;
     let reentryBlocked = false;
-    let rangeReentryWaitMs: number | null = null;
-    let rangeReentryElapsedMs: number | null = null;
-    let rangeReentryRemainingMs: number | null = null;
-    let rangeReentrySameDirection = false;
-    let rangeReentrySource = "range_stage0_reentry";
+    range_reentry_wait_ms = null;
+    range_reentry_elapsed_ms = null;
+    range_reentry_remaining_ms = null;
+    range_reentry_same_direction = false;
+    range_reentry_source = "range_stage0_reentry";
     if (input.lastCloseMetaBySymbol && rangeSignal.side) {
       const meta = input.lastCloseMetaBySymbol.get(String(sym));
       const sameDirection = meta !== undefined && meta.side === rangeSignal.side;
       const waitMsBase = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
       let waitMs = Math.min(waitMsBase, 95_000);
       const elapsedMs = input.now - (meta?.closedAt ?? 0);
-      rangeReentrySameDirection = sameDirection;
+      range_reentry_same_direction = sameDirection;
       range_same_direction_reentry_center_blocked = range_center_wait;
       const rangeEdgeOkForSameDir =
         rangeSignal.side === "long"
@@ -1852,19 +1947,20 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       if (sameDirection && freshReentryCandidate) {
         waitMs = 0;
         range_reentry_wait_bypassed_no_open_position = true;
-        rangeReentrySource = "range_fresh_reentry_no_open_position";
+        range_reentry_source = "range_fresh_reentry_no_open_position";
       }
-      rangeReentryWaitMs = waitMs;
-      rangeReentryElapsedMs = elapsedMs;
-      rangeReentryRemainingMs = (meta?.closedAt ?? 0) > 0 && elapsedMs < waitMs ? waitMs - elapsedMs : 0;
-      if ((meta?.closedAt ?? 0) > 0 && elapsedMs < waitMs) reentryBlocked = true;
-      range_same_direction_reentry_final_allowed =
-        sameDirection && (meta?.closedAt ?? 0) > 0 ? elapsedMs >= waitMs : true;
     }
+    range_reentry_wait_ms = waitMs;
+    range_reentry_elapsed_ms = elapsedMs;
+    range_reentry_remaining_ms = (meta?.closedAt ?? 0) > 0 && elapsedMs < waitMs ? waitMs - elapsedMs : 0;
+    if ((meta?.closedAt ?? 0) > 0 && elapsedMs < waitMs) reentryBlocked = true;
+    range_same_direction_reentry_final_allowed =
+      sameDirection && (meta?.closedAt ?? 0) > 0 ? elapsedMs >= waitMs : true;
+
     if (rangeReversalSwitchMatches) {
       reentryBlocked = false;
-      rangeReentryRemainingMs = 0;
-      rangeReentryWaitMs = 0;
+      range_reentry_remaining_ms = 0;
+      range_reentry_wait_ms = 0;
       range_same_direction_reentry_final_allowed = true;
       supplemental_reasons.push("RANGE_REVERSAL_IMMEDIATE_REENTRY_BYPASS");
     }
@@ -1926,13 +2022,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reversal_immediate_switch_applied = true;
       range_reversal_immediate_switch_reason = input.rangeReversalImmediateSwitch?.reason ?? null;
     }
-    workingSignal = entryResult === "RANGE_LONG_ENTRY"
+    workingSignal = (entryResult === "RANGE_LONG_ENTRY"
       ? "paper_long_candidate"
       : entryResult === "RANGE_SHORT_ENTRY"
         ? "paper_short_candidate"
-        : "none";
+        : "none") as any;
     signal_state = signalToState(workingSignal);
-    intentSide = entryResult === "RANGE_LONG_ENTRY" ? "long" : entryResult === "RANGE_SHORT_ENTRY" ? "short" : null;
+    intentSide = (entryResult === "RANGE_LONG_ENTRY" ? "long" : entryResult === "RANGE_SHORT_ENTRY" ? "short" : null) as "long" | "short" | null;
     executorDecision = {
       entry_allowed: gateResult === "RANGE_GATE_PASS",
       blocked_reason: gateResult === "RANGE_GATE_PASS" ? null : gateResult,
@@ -1959,11 +2055,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         range_zone_action_policy: RANGE_ZONE_ACTION_POLICY,
         ...(range_stage0_branch_proof && zone === "upper" && sn.signal === "paper_long_candidate"
           ? {
-              range_upper_edge_structure_ok: (range_stage0_branch_proof as { edge_structure_ok?: boolean }).edge_structure_ok,
-              range_upper_edge_structure_failed_checks: (range_stage0_branch_proof as { edge_structure_failed_checks?: string[] })
-                .edge_structure_failed_checks,
-              range_upper_edge_structure_one_liner: (range_stage0_branch_proof as { one_line_summary?: string }).one_line_summary
-            }
+            range_upper_edge_structure_ok: (range_stage0_branch_proof as { edge_structure_ok?: boolean }).edge_structure_ok,
+            range_upper_edge_structure_failed_checks: (range_stage0_branch_proof as { edge_structure_failed_checks?: string[] })
+              .edge_structure_failed_checks,
+            range_upper_edge_structure_one_liner: (range_stage0_branch_proof as { one_line_summary?: string }).one_line_summary
+          }
           : {}),
         ...(range_stage0_branch_proof ? { range_stage0_branch_proof } : {})
       }
@@ -1990,7 +2086,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         blockedRegimeReasonText.includes("mode_loss_streak") || blockedRegimeReasonText.includes("highway_range_streak");
       const rangeRiskSubreason =
         gateResult === "RANGE_GATE_BLOCK_REENTRY"
-          ? (rangeReentrySameDirection ? "range_reentry_same_direction_wait_active" : "range_reentry_wait_active")
+          ? (range_reentry_same_direction ? "range_reentry_same_direction_wait_active" : "range_reentry_wait_active")
           : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
             ? blockedRegimeActive
               ? (blockedRegimeIsLossStreak ? "range_blocked_regime_loss_streak_suspend" : "range_blocked_regime_until_active")
@@ -1998,16 +2094,16 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             : null;
       const rangeCooldownRemainingMs =
         gateResult === "RANGE_GATE_BLOCK_REENTRY"
-          ? (rangeReentryRemainingMs ?? 0)
+          ? (range_reentry_remaining_ms ?? 0)
           : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE" && blockedRegimeActive
             ? Math.max(0, (blockedRegime?.until ?? input.now) - input.now)
             : 0;
-      const rangeReentryWaitMsOut = rangeReentryWaitMs ?? 0;
-      const rangeReentryElapsedMsOut = rangeReentryElapsedMs ?? 0;
-      const rangeReentryRemainingMsOut = rangeReentryRemainingMs ?? 0;
+      const rangeReentryWaitMsOut = range_reentry_wait_ms ?? 0;
+      const rangeReentryElapsedMsOut = range_reentry_elapsed_ms ?? 0;
+      const rangeReentryRemainingMsOut = range_reentry_remaining_ms ?? 0;
       const rangeReentrySourceOut =
         gateResult === "RANGE_GATE_BLOCK_REENTRY"
-          ? rangeReentrySource
+          ? range_reentry_source
           : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE" && blockedRegimeActive
             ? "range_blocked_regime"
             : "range_risk_engine";
@@ -2022,7 +2118,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           range_reentry_elapsed_ms: rangeReentryElapsedMsOut,
           range_reentry_remaining_ms: rangeReentryRemainingMsOut,
           range_reentry_source: rangeReentrySourceOut,
-          range_reentry_same_direction: rangeReentrySameDirection
+          range_reentry_same_direction: range_reentry_same_direction
         });
       }
       return ret(
@@ -2042,7 +2138,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           range_reentry_elapsed_ms: rangeReentryElapsedMsOut,
           range_reentry_remaining_ms: rangeReentryRemainingMsOut,
           range_reentry_source: rangeReentrySourceOut,
-          range_reentry_same_direction: rangeReentrySameDirection,
+          range_reentry_same_direction: range_reentry_same_direction,
           range_same_direction_reentry_relaxed_applied: range_same_direction_reentry_relaxed_applied,
           range_same_direction_reentry_wait_ms: range_same_direction_reentry_wait_ms,
           range_same_direction_reentry_size_mult: range_same_direction_reentry_size_mult,
@@ -2067,7 +2163,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           range_reversal_immediate_switch_applied: range_reversal_immediate_switch_applied,
           range_reversal_immediate_switch_reason: range_reversal_immediate_switch_reason,
           range_zone_action_policy: range_zone_action_policy,
-          range_zone_detected: range_zone_detected,
+          range_zone_detected: range_zone_detected as any,
           range_upper_short_priority_applied: range_upper_short_priority_applied,
           range_lower_long_priority_applied: range_lower_long_priority_applied,
           range_mid_wait_applied: range_mid_wait_applied,
@@ -2091,6 +2187,29 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         }
       );
     }
+
+    return ret(
+      {
+        strategy_executor: "RANGE",
+        final_decision: "SKIP",
+        reject_reason: null,
+        stage1_result_code: ("STAGE1_READY" as any),
+        range_stage0_engine_taken: true,
+        legacy_executor_path_taken: false,
+        required_move_pct,
+        shortfall_pct,
+        supplemental_reasons,
+      },
+      {
+        intentSide,
+        executorDecision,
+        adaptiveOk: true,
+        adaptiveDirection: intentSide,
+        adaptiveDetail: (executorDecision as any)?.detail,
+        adaptiveResult: null,
+        aiGatePassed: true
+      }
+    );
   }
 
   // Initial core detection and scoring
@@ -2859,7 +2978,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   if (!executorDecision || !executorDecision.entry_allowed) {
     legacy_executor_path_taken = true;
-    const br = executorDecision?.blocked_reason;
+    br = executorDecision?.blocked_reason ?? null;
     legacy_block_original_reason = br ?? "executor_block_reason_missing";
     legacy_block_reason = br ?? "executor_block_reason_missing";
     legacy_regime_gate = input.currentStage === 0 && !input.isAmbiguous ? "STAGE1_BLOCKED_REGIME" : "STAGE1_EXEC_PENDING";
@@ -3653,8 +3772,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         min_qty: null,
         min_notional: null,
         sizeUsd: adaptive.sizeUsd,
-        original_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === "none") ? "NONE" : signal_state,
-        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === "none") ? "SOFT_RANGE_CANDIDATE" : signal_state,
+        original_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === ("none" as any)) ? "NONE" : signal_state as any,
+        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === ("none" as any)) ? "SOFT_RANGE_CANDIDATE" : signal_state as any,
         range_bidirectional_applied: range_bidirectional_applied,
         range_short_allowed: range_short_allowed,
         range_short_allowed_reason: range_short_allowed_reason,

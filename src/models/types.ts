@@ -620,6 +620,18 @@ export type PaperSymbolDecisionRecord = Readonly<{
   regime_original_state?: PaperRegimeState;
   regime_fallback_applied?: boolean;
   regime_fallback_reason?: string | null;
+  /** RANGE executor priority applied (fallback path path) */
+  range_executor_priority_applied?: boolean;
+  /** GAP: RANGE priority fallback reason */
+  range_executor_priority_reason?: string | null;
+  /** GAP: Original executor before priority shift */
+  final_executor_before_priority?: PaperStrategyExecutor | null;
+  /** GAP: Final executor after priority shift */
+  final_executor_after_priority?: PaperStrategyExecutor | null;
+  /** GAP: Original reject reason before priority shift */
+  final_reject_before_priority?: string | null;
+  /** GAP: Final reject reason after priority shift */
+  final_reject_after_priority?: string | null;
 }>;
 
 /** Minimal row shape for funnel math. */
