@@ -494,7 +494,7 @@ type MutablePositionOpenTrace = {
   qty_submitted: number | null;
   inst_id: string | null;
 };
-type RangeManagementState = "INIT" | "REATTACK_ELIGIBLE" | "PROFIT_LOCKED";
+type RangeManagementState = "INIT" | "REATTACK_READY" | "REATTACK_USED" | "PROFIT_LOCKED";
 
 export class PaperEngine {
   private readonly store: JsonStore;
@@ -2412,6 +2412,21 @@ export class PaperEngine {
         rangeAddOnUsed: openRaw.rangeAddOnUsed ?? false,
         rangeFirstProfitLocked: openRaw.rangeFirstProfitLocked ?? false
       };
+      if (open.rangeManagementState === "PROFIT_LOCKED" && open.rangeFirstProfitLocked !== true) {
+        open = { ...open, rangeFirstProfitLocked: true };
+      }
+      if (open.rangeManagementState === "REATTACK_USED" && open.rangeAddOnUsed !== true) {
+        open = { ...open, rangeAddOnUsed: true };
+      }
+      if (open.rangeFirstProfitLocked === true && open.rangeManagementState !== "PROFIT_LOCKED") {
+        open = { ...open, rangeManagementState: "PROFIT_LOCKED" };
+      } else if (
+        open.rangeAddOnUsed === true &&
+        open.rangeFirstProfitLocked !== true &&
+        open.rangeManagementState !== "REATTACK_USED"
+      ) {
+        open = { ...open, rangeManagementState: "REATTACK_USED" };
+      }
 
       const closePrice = snap.lastPrice;
       const closedAt = snap.fetchedAt;
@@ -2649,14 +2664,14 @@ export class PaperEngine {
           ((open.side === "short" && open.rangeEntryZone === "upper" && liveZone === "upper") ||
             (open.side === "long" && open.rangeEntryZone === "lower" && liveZone === "lower"));
         if ((open.rangeManagementState ?? "INIT") === "INIT" && rangeReattackEligibleNow) {
-          open = { ...open, rangeManagementState: "REATTACK_ELIGIBLE" };
+          open = { ...open, rangeManagementState: "REATTACK_READY" };
           this.logger.info("range_add_on_transition", {
             symbol: symKey,
             side: open.side,
             range_add_on_transition_applied: true,
             range_add_on_used: open.rangeAddOnUsed === true,
             range_management_state_before: "INIT",
-            range_management_state_after: "REATTACK_ELIGIBLE",
+            range_management_state_after: "REATTACK_READY",
             range_entry_zone: open.rangeEntryZone ?? null,
             box_zone_now: liveZone
           });
@@ -3046,13 +3061,15 @@ export class PaperEngine {
       if (
         exitLane === "RANGE" &&
         open.regimeAtEntry === "RANGE" &&
-        open.side === "short" &&
-        open.rangeEntryZone === "upper" &&
+        ((open.side === "short" && open.rangeEntryZone === "upper") ||
+          (open.side === "long" && open.rangeEntryZone === "lower")) &&
         (open.partialExitStage ?? 0) === 0 &&
         open.rangeFirstProfitLocked !== true &&
         exitEval.action === "hold"
       ) {
         const firstProfitLockThreshold = 0.00035;
+        const profitLockSymmetryBranch = open.side === "short" ? "upper_short" : "lower_long";
+        const profitLockSide = open.side;
         const firstProfitLockEligible =
           m.pnlPctNet >= firstProfitLockThreshold &&
           m.pnlUsdNet >= Math.max(0.01, open.sizeUsd * 0.00002);
@@ -3062,12 +3079,14 @@ export class PaperEngine {
             ...exitEval,
             action: "partial_close",
             reason: "partial_exit_1",
-            guidance: "RANGE upper short 첫 수익권 미세 잠금",
+            guidance: open.side === "short" ? "RANGE upper short 첫 수익권 미세 잠금" : "RANGE lower long 첫 수익권 미세 잠금",
             exit_progress: Math.max(35, exitEval.exit_progress ?? 0),
             detail: {
               ...detail,
               range_first_profit_lock_applied: true,
-              range_first_profit_lock_threshold: firstProfitLockThreshold
+              range_first_profit_lock_threshold: firstProfitLockThreshold,
+              range_profit_lock_side: profitLockSide,
+              range_profit_lock_symmetry_branch: profitLockSymmetryBranch
             }
           };
           this.logger.info("range_first_profit_lock", {
@@ -3076,6 +3095,8 @@ export class PaperEngine {
             range_profit_lock_transition_applied: true,
             range_first_profit_lock_applied: true,
             range_first_profit_lock_threshold: firstProfitLockThreshold,
+            range_profit_lock_side: profitLockSide,
+            range_profit_lock_symmetry_branch: profitLockSymmetryBranch,
             pnl_pct_net: m.pnlPctNet,
             pnl_usd_net: m.pnlUsdNet,
             partial_exit_stage: open.partialExitStage ?? 0
@@ -3234,8 +3255,13 @@ export class PaperEngine {
             this.logger.info("range_profit_lock_transition", {
               symbol: open.symbol,
               side: open.side,
+              range_management_state_before: open.rangeAddOnUsed === true ? "REATTACK_USED" : "REATTACK_READY",
+              range_management_state_after: "PROFIT_LOCKED",
               range_profit_lock_transition_applied: true,
               range_profit_lock_threshold: partialDetail["range_first_profit_lock_threshold"] ?? null,
+              range_first_profit_locked: true,
+              range_profit_lock_side: partialDetail["range_profit_lock_side"] ?? open.side,
+              range_profit_lock_symmetry_branch: partialDetail["range_profit_lock_symmetry_branch"] ?? null,
               partial_exit_stage_after: stage
             });
           }
@@ -4202,6 +4228,8 @@ export class PaperEngine {
         range_add_on_entry_applied: false,
         range_add_on_transition_applied: false,
         range_add_on_used: true,
+        range_management_state_before: existing.rangeManagementState ?? "INIT",
+        range_management_state_after: existing.rangeManagementState ?? "INIT",
         range_add_on_entry_count: addOnCount,
         range_add_on_entry_size_mult: 0,
         range_entry_zone: existing.rangeEntryZone ?? null,
@@ -4346,12 +4374,16 @@ export class PaperEngine {
     if (rangeAddOnCandidate) {
       const nextAddOnCount = addOnCount + 1;
       this.rangeUpperShortAddOnCountByKey.set(addOnKey, nextAddOnCount);
+      const nextState: RangeManagementState =
+        existing.rangeFirstProfitLocked === true ? "PROFIT_LOCKED" : "REATTACK_USED";
       this.logger.info("range_add_on_entry", {
         symbol: existing.symbol,
         side: existing.side,
         range_add_on_entry_applied: true,
         range_add_on_transition_applied: true,
         range_add_on_used: true,
+        range_management_state_before: existing.rangeManagementState ?? "INIT",
+        range_management_state_after: nextState,
         range_add_on_entry_count: nextAddOnCount,
         range_add_on_entry_size_mult: rangeAddOnSizeMultApplied,
         range_entry_zone: existing.rangeEntryZone ?? null,
@@ -4369,7 +4401,7 @@ export class PaperEngine {
       scalingWeights,
       rangeAddOnUsed: rangeAddOnCandidate ? true : existing.rangeAddOnUsed,
       rangeManagementState: rangeAddOnCandidate
-        ? ("REATTACK_ELIGIBLE" as RangeManagementState)
+        ? ("REATTACK_USED" as RangeManagementState)
         : (existing.rangeManagementState ?? "INIT"),
       trailingExtremePrice: existing.side === "long"
         ? Math.max(existing.trailingExtremePrice ?? 0, first.lastPrice)

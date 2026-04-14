@@ -747,8 +747,8 @@ export type PaperOpenPositionRecord = Readonly<{
   rangeEntryZone?: "upper" | "lower" | "mid";
   /** 구간 반전 청산 직후 합성 후보로 연결된 진입 */
   rangeEntryFromReversalSwitch?: boolean;
-  /** RANGE 포지션 운용 상태(INIT → REATTACK_ELIGIBLE → PROFIT_LOCKED) */
-  rangeManagementState?: "INIT" | "REATTACK_ELIGIBLE" | "PROFIT_LOCKED";
+  /** RANGE 포지션 운용 상태(INIT → REATTACK_READY → REATTACK_USED → PROFIT_LOCKED) */
+  rangeManagementState?: "INIT" | "REATTACK_READY" | "REATTACK_USED" | "PROFIT_LOCKED";
   /** RANGE 동일 extreme 재접근 add-on 1회 사용 여부 */
   rangeAddOnUsed?: boolean;
   /** RANGE first profit lock(미세 수익 잠금) 성공 여부 */
