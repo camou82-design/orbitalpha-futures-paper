@@ -1763,7 +1763,7 @@ export class PaperEngine {
         total_cost: ex?.total_cost ?? null,
         risk_state: ex?.risk_state ?? this.lastRisk?.riskStatus ?? "NORMAL",
         supplemental_reasons: d.supplemental_reasons ?? [],
-        adaptive_direction: res.adaptiveDirection,
+        adaptive_direction: null,
         detail: res.adaptiveDetail
       });
       return;
@@ -2297,7 +2297,7 @@ export class PaperEngine {
       intent_side: res.intentSide,
       /** (2)(4) short 평가 이후 적응형·게이트 */
       adaptive_ok: res.adaptiveOk,
-      adaptive_direction: res.adaptiveDirection ?? null,
+      adaptive_direction: null,
       ai_gate_passed: res.aiGatePassed,
       stage1_result_code: d.stage1_result_code ?? null,
       entry_blocked: d.entry_blocked ?? null,
@@ -3536,7 +3536,7 @@ export class PaperEngine {
           final_decision: res.decision.final_decision,
           reject_reason: res.decision.reject_reason ?? null,
           adaptive_ok: res.adaptiveOk,
-          adaptive_direction: res.adaptiveDirection ?? null,
+          adaptive_direction: null,
           range_reversal_immediate_switch_applied: res.decision.range_reversal_immediate_switch_applied ?? false,
           will_attempt_open: res.decision.final_decision === "ENTER" && res.adaptiveResult != null,
           active_engine: this.lastMarketMode?.routing.activeEngine ?? null

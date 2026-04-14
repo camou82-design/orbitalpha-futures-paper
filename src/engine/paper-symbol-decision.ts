@@ -620,7 +620,6 @@ export type EvaluatePaperSymbolEntryResult = Readonly<{
   intentSide: "long" | "short" | null;
   executorDecision: AnyEntryDecision | null;
   adaptiveOk: boolean;
-  adaptiveDirection: "long" | "short" | null;
   adaptiveDetail: Record<string, unknown> | null;
   adaptiveResult: Extract<FuturesAdaptiveEntryResult, { ok: true }> | null;
   /** `runFuturesAdaptiveEntry` 실패 시 상세(정책/사이즈 단계). */
@@ -1149,7 +1148,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let workingSignal: PaperSignal = "none";
   let aiGatePassed = false;
   let adaptiveOk = false;
-  let adaptiveDirection: "long" | "short" | "none" | null = null;
   let adaptiveResult: any = null;
   let final_executor_before_priority: PaperStrategyExecutor = "IDLE";
   let final_reject_before_priority: string | null = null;
@@ -1540,7 +1538,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       intentSide: "long" | "short" | null;
       executorDecision: AnyEntryDecision | null;
       adaptiveOk: boolean;
-      adaptiveDirection: "long" | "short" | null;
       adaptiveDetail: Record<string, unknown> | null;
       adaptiveResult: Extract<FuturesAdaptiveEntryResult, { ok: true }> | null;
       adaptiveFailure?: Extract<FuturesAdaptiveEntryResult, { ok: false }>;
@@ -1811,7 +1808,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         intentSide: null,
         executorDecision: null,
         adaptiveOk: false,
-        adaptiveDirection: null,
         adaptiveDetail: null,
         adaptiveResult: null,
         aiGatePassed: false
@@ -1835,7 +1831,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         supplemental_reasons: ["INTERNAL_SNAPSHOT_NULL"],
         stage1_leniency_applied
       },
-      { intentSide: null, executorDecision: null, adaptiveOk: false, adaptiveDirection: null, adaptiveDetail: null, adaptiveResult: null, aiGatePassed: false }
+      { intentSide: null, executorDecision: null, adaptiveOk: false, adaptiveDetail: null, adaptiveResult: null, aiGatePassed: false }
     );
   }
   signal_state = signalToState(sn.signal);
@@ -2086,13 +2082,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reversal_immediate_switch_reason = input.rangeReversalImmediateSwitch?.reason ?? null;
     }
     // [DIRECTION LOCK] RANGE Engine Sets Intent
-    workingSignal = (entryResult === "RANGE_LONG_ENTRY"
+    workingSignal = (rangeSignal.signal === "RANGE_LONG_CANDIDATE"
       ? "paper_long_candidate"
-      : entryResult === "RANGE_SHORT_ENTRY"
+      : rangeSignal.signal === "RANGE_SHORT_CANDIDATE"
         ? "paper_short_candidate"
         : "none") as any;
     signal_state = signalToState(workingSignal);
-    intentSide = (entryResult === "RANGE_LONG_ENTRY" ? "long" : entryResult === "RANGE_SHORT_ENTRY" ? "short" : null) as "long" | "short" | null;
+    intentSide = rangeSignal.side as "long" | "short" | null;
 
     executorDecision = {
       entry_allowed: gateResult === "RANGE_GATE_PASS",
@@ -2254,7 +2250,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           intentSide,
           executorDecision,
           adaptiveOk: false,
-          adaptiveDirection: null,
           adaptiveDetail: null,
           adaptiveResult: null,
           aiGatePassed: false
@@ -2397,15 +2392,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     strategy_executor = "TREND";
 
     // [DIRECTION LOCK] TREND Engine Sets Intent
-    if (executorDecision?.entry_allowed) {
-      workingSignal = workingSignal; // already set
-      signal_state = signalToState(workingSignal);
-      intentSide = (workingSignal === "paper_long_candidate" ? "long" : workingSignal === "paper_short_candidate" ? "short" : null);
-    } else {
-      // Logic: If executor blocked, we still preserve the "intention" of the candidate if it existed
-      intentSide = (workingSignal === "paper_long_candidate" ? "long" : workingSignal === "paper_short_candidate" ? "short" : null);
-      signal_state = signalToState(workingSignal);
-    }
+    signal_state = signalToState(workingSignal);
+    intentSide = (workingSignal === "paper_long_candidate" ? "long" : workingSignal === "paper_short_candidate" ? "short" : null);
   } else {
     supplemental_reasons.push("RANGE_STAGE0_ENGINE_ACTIVE");
   }
@@ -2422,7 +2410,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       intentSide: null,
       executorDecision,
       adaptiveOk: false,
-      adaptiveDirection: null,
       adaptiveDetail: null,
       adaptiveResult: null,
       aiGatePassed: false
@@ -2525,7 +2512,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         intentSide,
         executorDecision,
         adaptiveOk: false,
-        adaptiveDirection: null,
         adaptiveDetail: null,
         adaptiveResult: null,
         aiGatePassed: false
@@ -2560,7 +2546,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         intentSide,
         executorDecision,
         adaptiveOk: false,
-        adaptiveDirection: null,
         adaptiveDetail: null,
         adaptiveResult: null,
         aiGatePassed: false
@@ -2866,7 +2851,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         intentSide,
         executorDecision,
         adaptiveOk: false,
-        adaptiveDirection: null,
         adaptiveDetail: null,
         adaptiveResult: null,
         aiGatePassed: false
@@ -2895,7 +2879,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         intentSide,
         executorDecision,
         adaptiveOk: false,
-        adaptiveDirection: null,
         adaptiveDetail: null,
         adaptiveResult: null,
         aiGatePassed: false
@@ -2992,7 +2975,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         intentSide,
         executorDecision,
         adaptiveOk: false,
-        adaptiveDirection: null,
         adaptiveDetail: null,
         adaptiveResult: null,
         aiGatePassed: false
@@ -3112,7 +3094,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           intentSide,
           executorDecision,
           adaptiveOk: false,
-          adaptiveDirection: null,
           adaptiveDetail: null,
           adaptiveResult: null,
           aiGatePassed: false
@@ -3165,7 +3146,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             intentSide,
             executorDecision,
             adaptiveOk: false,
-            adaptiveDirection: null,
             adaptiveDetail: null,
             adaptiveResult: null,
             aiGatePassed: false
@@ -3418,7 +3398,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           intentSide,
           executorDecision,
           adaptiveOk,
-          adaptiveDirection,
           adaptiveDetail: adaptiveDetailOut,
           adaptiveResult,
           adaptiveFailure: af,
@@ -3428,7 +3407,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
 
     adaptiveOk = true;
-    adaptiveDirection = adaptive.direction;
     adaptiveResult = adaptive;
 
     // [EXECUTION GUARD] Simplify Long Only Policy
@@ -3448,7 +3426,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           supplemental_reasons,
           stage1_result_code: "STAGE1_BLOCKED_RISK"
         },
-        { intentSide, executorDecision, aiGatePassed, adaptiveOk: false, adaptiveDirection: null, adaptiveDetail: adaptiveDetailOut, adaptiveResult: null }
+        { intentSide, executorDecision, aiGatePassed, adaptiveOk: false, adaptiveDetail: adaptiveDetailOut, adaptiveResult: null }
       );
     }
 
@@ -3475,7 +3453,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           intentSide,
           executorDecision,
           adaptiveOk: false,
-          adaptiveDirection: null,
           adaptiveDetail: adaptiveDetailOut,
           adaptiveResult: adaptive,
           aiGatePassed: true
@@ -3564,8 +3541,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         min_qty: null,
         min_notional: null,
         sizeUsd: adaptive.sizeUsd,
-        original_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === ("none" as any)) ? "NONE" : signal_state as any,
-        final_signal_state: (input.currentStage === 0 && input.regime === "RANGE" && workingSignal === ("none" as any)) ? "SOFT_RANGE_CANDIDATE" : signal_state as any,
+        original_signal_state: signal_state as any,
+        final_signal_state: signal_state as any,
         range_bidirectional_applied: range_bidirectional_applied,
         range_short_allowed: range_short_allowed,
         range_short_allowed_reason: range_short_allowed_reason,
@@ -3584,7 +3561,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         intentSide,
         executorDecision,
         adaptiveOk: true,
-        adaptiveDirection: adaptive.direction,
         adaptiveDetail: adaptiveDetailOut,
         adaptiveResult: adaptive as any,
         aiGatePassed: true
@@ -3608,7 +3584,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       intentSide,
       executorDecision,
       adaptiveOk: false,
-      adaptiveDirection: null,
       adaptiveDetail: null,
       adaptiveResult: null,
       aiGatePassed: false
