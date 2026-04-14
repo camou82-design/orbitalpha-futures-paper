@@ -173,16 +173,23 @@ export function evaluateRiskControls(input: Readonly<{
   const recentLossStreakByMode: RiskControlDecision["recentLossStreakByMode"] = {};
   /** Soft-only path: reduce size without hour-long regime block (was 0.2; 0.45 keeps flow while trimming risk). */
   const lossStreakSoftSizeMult = 0.45;
-  const hardSuspendMs = Math.max(60_000, config.paperModeHardSuspendMs);
+  const hardSuspendMs = Math.max(45_000, Math.floor(Math.max(60_000, config.paperModeHardSuspendMs) * 0.6));
   const regimes: MarketRegime[] = ["RANGE", "TREND", "NO_TRADE"];
   const highwayMode = (input.rangeConfidence ?? 0) >= 0.72;
   const baseSoft = config.paperModeLossStreakSoftCount;
   const baseHard = config.paperModeLossStreakSuspendCount;
+  const lossStreakThresholdsByMode: Partial<Record<MarketRegime, { soft: number; hard: number; highwayRange: boolean }>> = {};
   for (const regime of regimes) {
     let streak = 0;
     const isHighwayRange = regime === "RANGE" && highwayMode;
     const effectiveStreakSoft = isHighwayRange ? baseSoft + 2 : baseSoft;
-    const effectiveStreakHard = isHighwayRange ? baseHard + 2 : baseHard;
+    const effectiveStreakHardBase = isHighwayRange ? baseHard + 4 : baseHard + 2;
+    const effectiveStreakHard = Math.max(effectiveStreakSoft + 2, effectiveStreakHardBase);
+    lossStreakThresholdsByMode[regime] = {
+      soft: effectiveStreakSoft,
+      hard: effectiveStreakHard,
+      highwayRange: isHighwayRange
+    };
     for (let i = input.history.length - 1; i >= 0; i--) {
       const r = input.history[i] as unknown;
       if (asRegimeAtEntry(r) !== regime) continue;
@@ -246,6 +253,9 @@ export function evaluateRiskControls(input: Readonly<{
       daily_loss_limit_usd: dailyLimit,
       last10_net_usd: last10Net,
       size_multiplier: baseSizeMult,
+      mode_loss_streak_soft_size_mult: lossStreakSoftSizeMult,
+      mode_loss_streak_hard_suspend_ms_applied: hardSuspendMs,
+      mode_loss_streak_thresholds_by_mode: lossStreakThresholdsByMode,
       crash_state: crashState,
       long_allow: longAllow,
       short_allow: shortAllow,

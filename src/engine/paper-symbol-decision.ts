@@ -417,12 +417,20 @@ function evaluateRangeStage0Signal(
   }
   const edgeGate = rangeStage0EdgeStructureGate(sn);
   const edgeStructureOk = edgeGate.ok;
+  const strictOscMin = RANGE_STAGE0_EDGE_THRESHOLDS.oscillation;
+  const relaxedOscMin = Math.max(0.24, strictOscMin - 0.06);
+  const relaxedEdgeStructureOk =
+    !edgeStructureOk &&
+    edgeGate.conf >= RANGE_STAGE0_EDGE_THRESHOLDS.conf &&
+    edgeGate.cohesion >= RANGE_STAGE0_EDGE_THRESHOLDS.cohesion &&
+    edgeGate.oscillation >= relaxedOscMin;
 
   if (zone === "upper") {
+    const upperExtremeEdge = boxPos >= 0.74;
     if (sn.signal === "paper_short_candidate") {
       return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_from_base_signal", side: "short" };
     }
-    if (edgeStructureOk) {
+    if (edgeStructureOk || (upperExtremeEdge && relaxedEdgeStructureOk)) {
       return { signal: "RANGE_SHORT_CANDIDATE", reason: "range_upper_short_priority_structure", side: "short" };
     }
     if (sn.signal === "paper_long_candidate") {
@@ -432,10 +440,11 @@ function evaluateRangeStage0Signal(
   }
 
   if (zone === "lower") {
+    const lowerExtremeEdge = boxPos <= 0.26;
     if (sn.signal === "paper_long_candidate") {
       return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_from_base_signal", side: "long" };
     }
-    if (edgeStructureOk) {
+    if (edgeStructureOk || (lowerExtremeEdge && relaxedEdgeStructureOk)) {
       return { signal: "RANGE_LONG_CANDIDATE", reason: "range_lower_long_priority_structure", side: "long" };
     }
     if (sn.signal === "paper_short_candidate") {
@@ -1718,7 +1727,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
     range_reversal_short_entry_allowed = range_short_allowed;
     range_reversal_short_entry_block_reason = range_short_allowed ? null : range_short_allowed_reason;
-    const lowConfidence = rangeScores.rangeSignalScore < 0.34 || rangeScores.rangeEntryScore < 0.36;
+    const edgeRelaxZoneForConfidence =
+      (zone === "upper" && boxPos >= 0.74 && rangeSignal.side === "short") ||
+      (zone === "lower" && boxPos <= 0.26 && rangeSignal.side === "long");
+    const lowConfidenceSignalMin = edgeRelaxZoneForConfidence ? 0.31 : 0.34;
+    const lowConfidenceEntryMin = edgeRelaxZoneForConfidence ? 0.33 : 0.36;
+    const lowConfidence = rangeScores.rangeSignalScore < lowConfidenceSignalMin || rangeScores.rangeEntryScore < lowConfidenceEntryMin;
     let reentryBlocked = false;
     let rangeReentryWaitMs: number | null = null;
     let rangeReentryElapsedMs: number | null = null;
@@ -1854,6 +1868,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         range_signal_score: rangeScores.rangeSignalScore,
         range_entry_score: rangeScores.rangeEntryScore,
         range_score_reason: rangeScores.reason,
+        range_low_conf_signal_min: lowConfidenceSignalMin,
+        range_low_conf_entry_min: lowConfidenceEntryMin,
+        range_low_conf_edge_relaxed: edgeRelaxZoneForConfidence,
         range_gate_result: gateResult,
         range_gate_reason: gateReason,
         final_entry_reason: entryResult,
