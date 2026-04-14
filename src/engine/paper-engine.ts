@@ -501,34 +501,38 @@ function normalizeRangeManagementState(
 ): { normalized: PaperOpenPositionRecord; changed: boolean } {
   let normalized = rec;
   let changed = false;
+
   const raw = rec.rangeManagementState as string | undefined;
-  const mapped: RangeManagementState =
+  let currentState: RangeManagementState =
     raw === "REATTACK_ELIGIBLE"
       ? "REATTACK_READY"
       : raw === "REATTACK_READY" || raw === "REATTACK_USED" || raw === "PROFIT_LOCKED"
         ? raw
         : "INIT";
-  if (mapped !== (raw ?? "INIT")) {
-    normalized = { ...normalized, rangeManagementState: mapped };
-    changed = true;
+
+  const isScaled =
+    (normalized.entryStage ?? 1) >= 2 ||
+    (typeof normalized.initialSizeUsd === "number" &&
+      normalized.initialSizeUsd > 0 &&
+      normalized.sizeUsd > normalized.initialSizeUsd * 1.05);
+
+  if (normalized.rangeFirstProfitLocked === true) {
+    currentState = "PROFIT_LOCKED";
+  } else if (isScaled) {
+    currentState = "REATTACK_USED";
+    if (normalized.rangeAddOnUsed !== true) {
+      normalized = { ...normalized, rangeAddOnUsed: true };
+      changed = true;
+    }
+  } else {
+    // REATTACK_READY 는 실제 미증액 준비 상태일 때만 유지
+    if (currentState === "PROFIT_LOCKED" || currentState === "REATTACK_USED") {
+      currentState = "INIT";
+    }
   }
-  if (normalized.rangeManagementState === "PROFIT_LOCKED" && normalized.rangeFirstProfitLocked !== true) {
-    normalized = { ...normalized, rangeFirstProfitLocked: true };
-    changed = true;
-  }
-  if (normalized.rangeManagementState === "REATTACK_USED" && normalized.rangeAddOnUsed !== true) {
-    normalized = { ...normalized, rangeAddOnUsed: true };
-    changed = true;
-  }
-  if (normalized.rangeFirstProfitLocked === true && normalized.rangeManagementState !== "PROFIT_LOCKED") {
-    normalized = { ...normalized, rangeManagementState: "PROFIT_LOCKED" };
-    changed = true;
-  } else if (
-    normalized.rangeAddOnUsed === true &&
-    normalized.rangeFirstProfitLocked !== true &&
-    normalized.rangeManagementState !== "REATTACK_USED"
-  ) {
-    normalized = { ...normalized, rangeManagementState: "REATTACK_USED" };
+
+  if (currentState !== (rec.rangeManagementState ?? "INIT")) {
+    normalized = { ...normalized, rangeManagementState: currentState };
     changed = true;
   }
   return { normalized, changed };
@@ -3416,9 +3420,23 @@ export class PaperEngine {
         (typeof open.initialSizeUsd === "number" &&
           open.initialSizeUsd > 0 &&
           open.sizeUsd > open.initialSizeUsd * 1.05);
-      const minHoldMs = stagedOrScaled ? 4 * 60_000 : 5 * 60_000;
-      const minHoldMsEff = minHoldMs;
-      const gracePeriodMs = stagedOrScaled ? 4 * 60_000 : 7 * 60_000;
+
+      const opposingSignal =
+        (open.side === "long" && snap.signal === "paper_short_candidate") ||
+        (open.side === "short" && snap.signal === "paper_long_candidate");
+
+      const zoneMismatch =
+        typeof snap.boxPos === "number" &&
+        ((open.side === "long" && classifyRangeActionZone(snap.boxPos) !== "lower") ||
+          (open.side === "short" && classifyRangeActionZone(snap.boxPos) !== "upper"));
+
+      const tightHold = open.regimeAtEntry === "RANGE" && opposingSignal && zoneMismatch;
+
+      const baseMinHoldMs = stagedOrScaled ? 4 * 60_000 : 5 * 60_000;
+      const baseGracePeriodMs = stagedOrScaled ? 4 * 60_000 : 7 * 60_000;
+
+      const minHoldMsEff = tightHold ? Math.min(baseMinHoldMs, 1 * 60_000) : baseMinHoldMs;
+      const gracePeriodMs = tightHold ? Math.min(baseGracePeriodMs, 1 * 60_000) : baseGracePeriodMs;
       const minLostStreak = 1;
 
       if (m.holdingMs < minHoldMsEff) {
