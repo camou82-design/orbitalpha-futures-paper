@@ -2187,29 +2187,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         }
       );
     }
-
-    return ret(
-      {
-        strategy_executor: "RANGE",
-        final_decision: "SKIP",
-        reject_reason: null,
-        stage1_result_code: ("STAGE1_READY" as any),
-        range_stage0_engine_taken: true,
-        legacy_executor_path_taken: false,
-        required_move_pct,
-        shortfall_pct,
-        supplemental_reasons,
-      },
-      {
-        intentSide,
-        executorDecision,
-        adaptiveOk: true,
-        adaptiveDirection: intentSide,
-        adaptiveDetail: (executorDecision as any)?.detail,
-        adaptiveResult: null,
-        aiGatePassed: true
-      }
-    );
   }
 
   // Initial core detection and scoring
