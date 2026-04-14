@@ -2362,6 +2362,7 @@ export class PaperEngine {
     const rawOpens = await this.positions.loadOpenAll();
     if (rawOpens.length === 0) return;
     const opens = rawOpens.map(o => ({ ...o })); // Use mutable copy for state tracking
+    let crashPositionsModified = false;
 
     // --- ASYMMETRIC CRASH RISK LAYER ---
     const risk = this.lastRisk;
@@ -2412,8 +2413,10 @@ export class PaperEngine {
 
             if (forceExit) {
               (op as any).status = "closed";
+              crashPositionsModified = true;
             } else {
               (op as any).sizeUsd -= marginToClose;
+              crashPositionsModified = true;
             }
           }
         }
@@ -3507,7 +3510,7 @@ export class PaperEngine {
       });
     }
 
-    if (remaining.length !== opens.length || remaining.some((r, i) => r !== opens[i])) {
+    if (crashPositionsModified || remaining.length !== opens.length || remaining.some((r, i) => r !== opens[i])) {
       await this.positions.saveOpenAll(remaining);
     }
   }
