@@ -1269,6 +1269,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let cooldowned: boolean = false;
   let cooldown_remaining_ms: number | null = null;
   let stage1ExploreSoftExec = false;
+  let crashLockBypassApplied = false;
+  let crashLockBypassReason: string | null = null;
+  let crashLockBypassSizeMult = 1.0;
   let stage1HigherTfBypassSizeMult: number | null = null;
   let stage1RangeLowerEdgeSoftSizeMult: number | null = null;
   let stage1RangeEdgeSoftApplied = false;
@@ -1875,9 +1878,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       blockedRegimeLossStreakSuspend &&
       range_risk_limit_relax_active;
 
-    let crashLockBypassApplied = false;
-    let crashLockBypassReason: string | null = null;
-    let crashLockBypassSizeMult = 1.0;
+    crashLockBypassApplied = false;
+    crashLockBypassReason = null;
+    crashLockBypassSizeMult = 1.0;
 
     if (riskEngineHardBlocked && input.risk?.dailyLossGuardTriggered !== true) {
       const isRangeLowerLong = zone === "lower" && rangeSignal.side === "long" && rangeSignal.signal === "RANGE_LONG_CANDIDATE";
@@ -3243,6 +3246,18 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
     if (stage1RangeLowerEdgeSoftSizeMult !== null) {
       dynamicSizeMult *= stage1RangeLowerEdgeSoftSizeMult;
+    }
+    if (crashLockBypassApplied && crashLockBypassSizeMult !== 1.0) {
+      const dynamicSizeMult_before = dynamicSizeMult;
+      dynamicSizeMult *= crashLockBypassSizeMult;
+      supplemental_reasons.push("RANGE_CRASH_BYPASS_SIZE_APPLIED");
+      console.log("[RANGE_CRASH_BYPASS_SIZE_APPLIED]", {
+        symbol: String(sn.symbol),
+        crashLockBypassApplied,
+        crashLockBypassSizeMult,
+        dynamicSizeMult_before,
+        dynamicSizeMult_after: dynamicSizeMult
+      });
     }
     if (stage1RangeEdgeSoftApplied && input.currentStage === 0) {
       dynamicSizeMult *= STAGE1_RANGE_POSITION_SOFT_MULT;
