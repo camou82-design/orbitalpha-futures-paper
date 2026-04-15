@@ -3336,7 +3336,7 @@ export class PaperEngine {
         executor: decision.executor,
         reason: "executor_allowed",
         expected_move: decision.expected_move,
-        total_cost: decision.total_cost,
+        total_cost: effectiveSizeUsd, // Use effectiveSizeUsd
         risk_state: decision.risk_state,
         detail: decision.detail
       });
@@ -3345,7 +3345,7 @@ export class PaperEngine {
         typeof this.lastRisk?.detail?.last10_net_usd === "number" && Number.isFinite(this.lastRisk.detail.last10_net_usd)
           ? this.lastRisk.detail.last10_net_usd
           : 0;
-      const aiIn = aiInputFromDecision({ decision, executorDirection: intentSide, lossStreak, last10Net });
+      const aiIn = aiInputFromDecision({ decision, executorDirection: effectiveSide, lossStreak, last10Net });
       if (aiIn) {
         const aiOut = aiApproveEntry(aiIn);
         const aiDir = aiOut.action === "ENTER_LONG" ? "long" : aiOut.action === "ENTER_SHORT" ? "short" : "none";
@@ -3357,9 +3357,9 @@ export class PaperEngine {
           executor: decision.executor,
           reason: "ai_approved",
           expected_move: decision.expected_move,
-          total_cost: decision.total_cost,
+          total_cost: effectiveSizeUsd, // Use effectiveSizeUsd
           risk_state: decision.risk_state,
-          executor_direction: intentSide,
+          executor_direction: effectiveSide, // Use effectiveSide
           ai_direction: aiDir,
           mismatch: false,
           detail: { ai_reason: aiOut.reason, ai_confidence: aiOut.confidence }
@@ -3373,7 +3373,7 @@ export class PaperEngine {
         stage1_result_code: res.decision.stage1_result_code,
         fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
         expected_move_usd: res.decision.expected_move_usd ?? null,
-        required_cost_usd: res.decision.required_cost_usd ?? null,
+        required_cost_usd: effectiveSizeUsd, // Use effectiveSizeUsd for authority
         shortfall_usd: res.decision.shortfall_usd ?? 0,
         required_move_pct: res.decision.required_move_pct,
         shortfall_pct: res.decision.shortfall_pct,
