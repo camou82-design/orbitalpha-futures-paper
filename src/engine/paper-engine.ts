@@ -1393,168 +1393,46 @@ export class PaperEngine {
         risk_state: ex?.risk_state ?? this.lastRisk?.riskStatus ?? "NORMAL",
         supplemental_reasons: d.supplemental_reasons ?? [],
         adaptive_direction: null,
-        detail: res.adaptiveDetail
+        detail: res.adaptiveDetail,
+        ...buildAuthorityEventMeta(authority)
       });
       return;
     }
 
-    const legacyReason = (code: string | null): string => {
-      if (!code) return "blocked";
-      const m: Record<string, string> = {
-        highway_invalid: "highway_invalid",
-        highway_invalid_hard: "highway_invalid_hard",
-        highway_invalid_soft: "highway_invalid_soft",
-        EDGE_FAIL_FEE: "fee_slippage_insufficient",
-        EDGE_FAIL_RR: "edge_fail_rr",
-        EDGE_FAIL_LOW_VOL: "edge_fail_low_vol",
-        REGIME_NO_TRADE: "no_trade_regime",
-        REGIME_UNKNOWN: "regime_unknown",
-        RISK_MAX_DRAWDOWN: "daily_loss_limit_exceeded",
-        RISK_COOLDOWN: "mode_suspended",
-        RISK_FAIL_REENTRY: "reentry_cooldown",
-        AI_REJECT: "AI_REJECT",
-        AI_FILTER: "AI_REJECT",
-        AI_DIRECTION_MISMATCH: "AI_DIRECTION_MISMATCH",
-        ORDER_BUILD_FAIL: "adaptive_policy_block",
-        EXECUTION_DISABLED: "long_only_short_blocked",
-        DATA_NOT_READY: "DATA_NOT_READY"
-      };
-      return m[code] ?? code;
-    };
-
     if (ex?.entry_allowed) {
-      await this.store.appendJsonlLine("reports/events.jsonl", {
-        ts: nowTs,
-        type: "ENTRY_ALLOWED",
-        symbol: sym,
-        regime: this.lastRegime.regime,
-        executor: ex.executor,
-        reason: "executor_allowed",
-        expected_move: ex.expected_move,
-        total_cost: ex.total_cost,
-        risk_state: ex.risk_state,
-        detail: ex.detail
-      });
+      await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, this.lastRegime.regime, ex, authority));
     }
 
-    if (d.final_decision === "REJECT" || d.final_decision === "DISABLED") {
+    if (authority.decision === "REJECT" || authority.decision === "DISABLED") {
       if (ex?.entry_allowed && (d.reject_reason === "AI_REJECT" || d.reject_reason === "AI_DIRECTION_MISMATCH")) {
-        const intentSide = res.intentSide ?? "long";
+        const intentSide = authority.side ?? "long";
         const lossStreak = this.lastRisk?.recentLossStreakByMode?.[this.lastRegime.regime] ?? 0;
         const last10Net =
           typeof this.lastRisk?.detail?.last10_net_usd === "number" && Number.isFinite(this.lastRisk.detail.last10_net_usd)
             ? this.lastRisk.detail.last10_net_usd
             : 0;
         const aiIn = ex ? aiInputFromDecision({ decision: ex, executorDirection: intentSide, lossStreak, last10Net }) : null;
-        if (d.reject_reason === "AI_REJECT" && aiIn) {
+        if (aiIn) {
           const aiOut = aiApproveEntry(aiIn);
-          await this.store.appendJsonlLine("reports/events.jsonl", {
-            ts: nowTs,
-            type: "ENTRY_BLOCKED",
-            symbol: sym,
-            regime: this.lastRegime.regime,
-            executor: ex.executor,
-            reason: "AI_REJECT",
-            aiValidity: aiOut.confidence,
-            aiConfidence: aiOut.confidence,
-            reject_code: d.reject_reason,
-            expected_move: ex.expected_move,
-            total_cost: ex.total_cost,
-            risk_state: ex.risk_state,
-            executor_direction: intentSide,
-            ai_direction: "none",
-            mismatch: false,
-            blocked_at_price: first.lastPrice,
-            price_after_5m: null,
-            price_after_15m: null,
-            price_after_30m: null,
-            hypothetical_outcome_hint: null,
-            detail: { ai_reason: aiOut.reason, ai_confidence: aiOut.confidence, ai_input: aiIn },
-            stage1_result_code: d.stage1_result_code
-          });
-          return;
-        }
-        if (d.reject_reason === "AI_DIRECTION_MISMATCH" && aiIn) {
-          const aiOut = aiApproveEntry(aiIn);
-          const aiDir = aiOut.action === "ENTER_LONG" ? "long" : aiOut.action === "ENTER_SHORT" ? "short" : "none";
-          await this.store.appendJsonlLine("reports/events.jsonl", {
-            ts: nowTs,
-            type: "ENTRY_BLOCKED",
-            symbol: sym,
-            regime: this.lastRegime.regime,
-            executor: ex.executor,
-            reason: "AI_DIRECTION_MISMATCH",
-            reject_code: d.reject_reason,
-            expected_move: ex.expected_move,
-            total_cost: ex.total_cost,
-            risk_state: ex.risk_state,
-            executor_direction: intentSide,
-            ai_direction: aiDir,
-            mismatch: true,
-            blocked_at_price: first.lastPrice,
-            price_after_5m: null,
-            price_after_15m: null,
-            price_after_30m: null,
-            hypothetical_outcome_hint: null,
-            detail: { ai_reason: "방향 불일치", ai_confidence: aiOut.confidence },
-            stage1_result_code: d.stage1_result_code
-          });
-          return;
+          await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, this.lastRegime.regime, aiIn as any, aiOut as any, authority));
         }
       }
 
-      if (!ex?.entry_allowed && ex) {
-        await this.store.appendJsonlLine("reports/events.jsonl", {
-          ts: nowTs,
-          type: "ENTRY_BLOCKED",
-          symbol: sym,
-          regime: d.regime ?? this.lastRegime.regime,
-          executor: ex.executor,
-          reason: ex.blocked_reason,
-          reject_code: d.reject_reason,
-          expected_move: ex.expected_move,
-          total_cost: ex.total_cost,
-          risk_state: ex.risk_state,
-          detail: ex.detail,
-          stage1_result_code: d.stage1_result_code,
-          reentry_cooldown_applied: d.reentry_cooldown_applied ?? false,
-          reentry_cooldown_original_ms: d.reentry_cooldown_original_ms ?? null,
-          reentry_cooldown_effective_ms: d.reentry_cooldown_effective_ms ?? null,
-          reentry_cooldown_reason: d.reentry_cooldown_reason ?? null,
-          currentStage: d.currentStage
-        });
-        return;
-      }
+      await this.store.appendJsonlLine("reports/events.jsonl", buildEntryBlockedEventPayload(sym, this.lastRegime.regime, res, authority, this.lastRisk?.riskStatus ?? "NORMAL"));
+      return;
+    }
 
-      if (d.reject_reason === "ORDER_BUILD_FAIL") {
-        const structured = orderBuildFailureStructuredPayload(first, res, entryStage, this.lastRegime.regime);
-        await this.store.appendJsonlLine("reports/events.jsonl", {
-          ts: nowTs,
-          type: "ORDER_BUILD_FAIL",
-          reject_code: d.reject_reason,
-          stage1_result_code: d.stage1_result_code,
-          ...structured
-        });
-        return;
-      }
-
+    if (d.reject_reason === "ORDER_BUILD_FAIL") {
+      const structured = orderBuildFailureStructuredPayload(first, res, entryStage, this.lastRegime.regime);
       await this.store.appendJsonlLine("reports/events.jsonl", {
         ts: nowTs,
-        type: "ENTRY_BLOCKED",
-        symbol: sym,
-        regime: d.regime ?? this.lastRegime.regime,
-        reason: legacyReason(d.reject_reason),
+        type: "ORDER_BUILD_FAIL",
         reject_code: d.reject_reason,
-        expected_move:
-          typeof d.expected_move_pct === "number" && Number.isFinite(d.expected_move_pct) ? d.expected_move_pct / 100 : null,
-        risk_state: this.lastRisk?.riskStatus ?? "NORMAL",
         stage1_result_code: d.stage1_result_code,
-        reentry_cooldown_applied: d.reentry_cooldown_applied ?? false,
-        reentry_cooldown_original_ms: d.reentry_cooldown_original_ms ?? null,
-        reentry_cooldown_effective_ms: d.reentry_cooldown_effective_ms ?? null,
-        reentry_cooldown_reason: d.reentry_cooldown_reason ?? null,
-        currentStage: d.currentStage
+        ...structured,
+        ...buildAuthorityEventMeta(authority)
       });
+      return;
     }
   }
 
@@ -2124,7 +2002,9 @@ export class PaperEngine {
       const nowTick = snap.fetchedAt;
       const symbol = open.symbol;
       const sk = String(symbol);
-      const res = input.decisionBySymbol.get(sk)!;
+      const envelope = input.decisionBySymbol.get(sk)!;
+      const res = envelope.legacy;
+      const authority = envelope.authority;
 
       const closePrice = snap.lastPrice;
       const closedAt = snap.fetchedAt;
@@ -2287,7 +2167,8 @@ export class PaperEngine {
                 symbol: symKey,
                 reason: cr,
                 range_zone_reversal: "upper_long_flatten",
-                realized_pnl: m.pnlUsdNet
+                realized_pnl: m.pnlUsdNet,
+                ...buildAuthorityEventMeta(authority)
               });
               continue;
             }
@@ -2356,7 +2237,8 @@ export class PaperEngine {
                 symbol: symKey,
                 reason: cr,
                 range_zone_reversal: "lower_short_flatten",
-                realized_pnl: m.pnlUsdNet
+                realized_pnl: m.pnlUsdNet,
+                ...buildAuthorityEventMeta(authority)
               });
               continue;
             }
@@ -2486,7 +2368,8 @@ export class PaperEngine {
             symbol: symKey,
             reason: crTrail,
             structural: "range_profit_trail",
-            realized_pnl: m.pnlUsdNet
+            realized_pnl: m.pnlUsdNet,
+            ...buildAuthorityEventMeta(authority)
           });
           continue;
         }
@@ -2617,7 +2500,8 @@ export class PaperEngine {
             symbol: symKey,
             reason: cr,
             structural: st.reason,
-            realized_pnl: m.pnlUsdNet
+            realized_pnl: m.pnlUsdNet,
+            ...buildAuthorityEventMeta(authority)
           });
           continue;
         }
@@ -2650,7 +2534,8 @@ export class PaperEngine {
             phase: "close",
             symbol: symKey,
             side: open.side,
-            realized_pnl: m.pnlUsdNet
+            realized_pnl: m.pnlUsdNet,
+            ...buildAuthorityEventMeta(authority)
           });
           const newSz = Math.max(
             MIN_POSITION_SIZE_USD,
@@ -2723,7 +2608,8 @@ export class PaperEngine {
           total_cost: open.totalCostAtEntry ?? null,
           hold_time: m.holdingMs,
           realized_pnl: m.pnlUsdNet,
-          fee: m.feeUsd
+          fee: m.feeUsd,
+          ...buildAuthorityEventMeta(authority)
         });
 
         if (open.regimeAtEntry === "RANGE") {
@@ -2761,7 +2647,8 @@ export class PaperEngine {
             total_cost: open.totalCostAtEntry ?? null,
             hold_time: m.holdingMs,
             realized_pnl: m.pnlUsdNet,
-            fee: m.feeUsd
+            fee: m.feeUsd,
+            ...buildAuthorityEventMeta(authority)
           });
           continue;
         }
@@ -2898,7 +2785,8 @@ export class PaperEngine {
           total_cost: open.totalCostAtEntry ?? null,
           hold_time: m.holdingMs,
           realized_pnl: m.pnlUsdNet,
-          fee: m.feeUsd
+          fee: m.feeUsd,
+          ...buildAuthorityEventMeta(authority)
         });
 
         if (open.regimeAtEntry === "RANGE" && cr === "take_profit") {
@@ -3353,18 +3241,7 @@ export class PaperEngine {
       const adaptive = res.adaptiveResult;
       const sym = String(first.symbol);
 
-      await this.store.appendJsonlLine("reports/events.jsonl", {
-        ts: Date.now(),
-        type: "ENTRY_ALLOWED",
-        symbol: sym,
-        regime: this.lastRegime.regime,
-        executor: decision.executor,
-        reason: "executor_allowed",
-        expected_move: decision.expected_move,
-        total_cost: authority.sizeUsd,
-        risk_state: decision.risk_state,
-        detail: decision.detail
-      });
+      await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, this.lastRegime.regime, decision, authority));
 
       const lossStreak = this.lastRisk?.recentLossStreakByMode?.[this.lastRegime.regime] ?? 0;
       const last10Net =
@@ -3380,21 +3257,7 @@ export class PaperEngine {
       if (aiIn) {
         const aiOut = aiApproveEntry(aiIn);
         const aiDir = aiOut.action === "ENTER_LONG" ? "long" : aiOut.action === "ENTER_SHORT" ? "short" : "none";
-        await this.store.appendJsonlLine("reports/events.jsonl", {
-          ts: Date.now(),
-          type: "AI_APPROVED",
-          symbol: sym,
-          regime: this.lastRegime.regime,
-          executor: decision.executor,
-          reason: "ai_approved",
-          expected_move: decision.expected_move,
-          total_cost: authority.sizeUsd,
-          risk_state: decision.risk_state,
-          executor_direction: authority.side,
-          ai_direction: aiDir,
-          mismatch: false,
-          detail: { ai_reason: aiOut.reason, ai_confidence: aiOut.confidence }
-        });
+        await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, this.lastRegime.regime, aiIn as any, aiOut as any, authority));
       }
 
       this.logger.info("STAGE1_ENTER_DECIDED", {
@@ -3410,7 +3273,8 @@ export class PaperEngine {
         shortfall_pct: res.decision.shortfall_pct,
         executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
         stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
-        stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null
+        stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null,
+        ...buildAuthorityEventMeta(authority)
       });
 
       const sourceSignal = first.signal;
@@ -3517,7 +3381,8 @@ export class PaperEngine {
           shortfall_usd: res.decision.shortfall_usd ?? 0,
           executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
           stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
-          stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null
+          stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null,
+          ...buildAuthorityEventMeta(authority)
         });
 
         let entrySizeUsd = adaptive.sizeUsd;
@@ -3869,32 +3734,7 @@ export class PaperEngine {
           path: "positions/open.json"
         });
         try {
-          await this.store.appendJsonlLine("reports/events.jsonl", {
-            ts: Date.now(),
-            type: "ENTRY_OPENED",
-            open_trace_id: trace.open_trace_id,
-            sample_symbol_btc_eth: trace.sample_symbol_btc_eth,
-            order_submit_requested: trace.order_submit_requested,
-            order_submit_ack: trace.order_submit_ack,
-            exchange_client_order_id: trace.exchange_client_order_id,
-            symbol: String(record.symbol),
-            side: record.side,
-            regime: this.lastRegime.regime,
-            executor: decision.executor,
-            sizeUsd: record.sizeUsd,
-            leverage: record.leverage,
-            expected_move: decision.expected_move,
-            total_cost: authority.sizeUsd,
-            risk_state: (this.lastRisk?.riskStatus ?? "NORMAL"),
-            stage1_result_code: res.decision.stage1_result_code,
-            fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
-            expected_move_usd: res.decision.expected_move_usd ?? null,
-            required_cost_usd: authority.sizeUsd,
-            shortfall_usd: res.decision.shortfall_usd ?? 0,
-            executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
-            stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
-            stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null
-          });
+          await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(sym, authority, record));
         } catch (appendErr) {
           const am = appendErr instanceof Error ? appendErr.message : String(appendErr);
           trace.open_fail_stage = "events_jsonl_append_failed";
@@ -3939,7 +3779,8 @@ export class PaperEngine {
           reviewing_ticks: res.decision.reviewing_ticks,
           auto_entry_triggered: res.decision.auto_entry_triggered,
           required_move_pct: res.decision.required_move_pct,
-          shortfall_pct: res.decision.shortfall_pct
+          shortfall_pct: res.decision.shortfall_pct,
+          ...buildAuthorityEventMeta(authority)
         });
       }
     }
@@ -4122,27 +3963,11 @@ export class PaperEngine {
     // Weighted average price
     const newEntryPrice = (existing.entryPrice * existing.sizeUsd + first.lastPrice * incrementalSizeUsd) / newTotalSizeUsd;
 
-    await this.store.appendJsonlLine("reports/events.jsonl", {
-      ts: nowTs,
-      type: "ENTRY_OPENED", // reusing type to track increments
-      symbol: String(existing.symbol),
-      side: existing.side,
-      regime: this.lastRegime.regime,
-      executor: decision.executor,
+    await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(String(existing.symbol), authority, {
+      ...existing,
       sizeUsd: incrementalSizeUsd,
-      leverage: existing.leverage,
-      expected_move: decision.expected_move,
-      total_cost: decision.total_cost,
-      risk_state: (this.lastRisk?.riskStatus ?? "NORMAL"),
-      detail: {
-        is_scale_in: true,
-        prev_stage: existing.entryStage,
-        target_stage: targetStage,
-        prev_size: existing.sizeUsd,
-        new_total_size: newTotalSizeUsd,
-        guidance: res.decision.guidance
-      }
-    });
+      entryStage: targetStage
+    }));
 
     if (existing.regimeAtEntry === "RANGE" && typeof first.boxPos === "number") {
       this.logger.info("RANGE_SCALE_IN_SUCCESS_PROOF", {
@@ -4629,5 +4454,119 @@ function buildEngineStateSymbolDecision(envelope: SymbolDecisionEnvelope): Recor
     authority_side: authority.side,
     authority_size_usd: authority.sizeUsd,
     authority_source: authority.source
+  };
+}
+
+/**
+ * AUTHORITY EVENT METADATA HELPER (Phase 3)
+ */
+function buildAuthorityEventMeta(authority: EntryExecutionAuthority): Record<string, unknown> {
+  return {
+    authority_decision: authority.decision,
+    authority_side: authority.side,
+    authority_size_usd: authority.sizeUsd,
+    authority_source: authority.source,
+    authority_regime: authority.regime
+  };
+}
+
+/**
+ * ENTRY ALLOWED EVENT PAYLOAD HELPER (Phase 3)
+ */
+function buildEntryAllowedEventPayload(
+  symbol: string,
+  regime: string,
+  ex: NonNullable<EvaluatePaperSymbolEntryResult["executorDecision"]>,
+  authority: EntryExecutionAuthority
+): Record<string, unknown> {
+  return {
+    ts: Date.now(),
+    type: "ENTRY_ALLOWED",
+    symbol,
+    regime,
+    executor: ex.executor,
+    reason: "executor_allowed",
+    expected_move: ex.expected_move,
+    total_cost: ex.total_cost,
+    risk_state: ex.risk_state,
+    detail: ex.detail,
+    ...buildAuthorityEventMeta(authority)
+  };
+}
+
+/**
+ * AI APPROVED EVENT PAYLOAD HELPER (Phase 3)
+ */
+function buildAiApprovedEventPayload(
+  symbol: string,
+  regime: string,
+  aiIn: Record<string, unknown>,
+  aiOut: Record<string, unknown>,
+  authority: EntryExecutionAuthority
+): Record<string, unknown> {
+  return {
+    ts: Date.now(),
+    type: "AI_APPROVED",
+    symbol,
+    regime,
+    ai_input: aiIn,
+    ai_output: aiOut,
+    ...buildAuthorityEventMeta(authority)
+  };
+}
+
+/**
+ * ENTRY BLOCKED EVENT PAYLOAD HELPER (Phase 3)
+ */
+function buildEntryBlockedEventPayload(
+  symbol: string,
+  regime: string,
+  res: EvaluatePaperSymbolEntryResult,
+  authority: EntryExecutionAuthority,
+  riskStatus: string
+): Record<string, unknown> {
+  const d = res.decision;
+  const ex = res.executorDecision;
+  return {
+    ts: Date.now(),
+    type: "ENTRY_BLOCKED",
+    symbol,
+    regime,
+    legacy_decision: d.final_decision,
+    reject_reason: d.reject_reason,
+    original_signal_state: d.original_signal_state ?? null,
+    final_signal_state: d.final_signal_state ?? null,
+    execution_disabled_reason: d.execution_disabled_reason ?? null,
+    expected_move: typeof ex?.expected_move === "number" && Number.isFinite(ex.expected_move) ? ex.expected_move : null,
+    total_cost: ex?.total_cost ?? null,
+    risk_state: ex?.risk_state ?? riskStatus,
+    supplemental_reasons: d.supplemental_reasons ?? [],
+    adaptive_direction: null,
+    detail: res.adaptiveDetail,
+    ...buildAuthorityEventMeta(authority)
+  };
+}
+
+/**
+ * ENTRY OPENED EVENT PAYLOAD HELPER (Phase 3)
+ */
+function buildEntryOpenedEventPayload(
+  symbol: string,
+  authority: EntryExecutionAuthority,
+  pos: PaperOpenPositionRecord
+): Record<string, unknown> {
+  return {
+    ts: Date.now(),
+    type: "ENTRY_OPENED",
+    symbol,
+    side: pos.side,
+    entry_price: pos.entryPrice,
+    size_usd: pos.sizeUsd,
+    initial_size_usd: pos.initialSizeUsd,
+    leverage: pos.leverage,
+    regime: pos.regimeAtEntry,
+    executor: pos.executorAtEntry,
+    entry_stage: pos.entryStage,
+    ...buildAuthorityEventMeta(authority)
   };
 }
