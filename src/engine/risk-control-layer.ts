@@ -52,6 +52,13 @@ function asRegimeAtEntry(r: unknown): MarketRegime | null {
   return m === "RANGE" || m === "TREND" || m === "NO_TRADE" ? m : null;
 }
 
+function asCloseReason(r: unknown): string | null {
+  if (!r || typeof r !== "object") return null;
+  const o = r as Record<string, unknown>;
+  const c = o.closeReason;
+  return typeof c === "string" ? c : null;
+}
+
 export function evaluateRiskControls(input: Readonly<{
   config: EngineConfig;
   now: number;
@@ -171,6 +178,8 @@ export function evaluateRiskControls(input: Readonly<{
   // 4. Per-regime suspension.
   const blockedRegimes: RiskControlDecision["blockedRegimes"] = {};
   const recentLossStreakByMode: RiskControlDecision["recentLossStreakByMode"] = {};
+  const recentCrashDefenseCountByMode: Record<string, number> = {};
+
   /** Soft-only path: reduce size without hour-long regime block (was 0.2; 0.45 keeps flow while trimming risk). */
   const lossStreakSoftSizeMult = 0.45;
   const hardSuspendMs = Math.max(45_000, Math.floor(Math.max(60_000, config.paperModeHardSuspendMs) * 0.6));
@@ -181,6 +190,7 @@ export function evaluateRiskControls(input: Readonly<{
   const lossStreakThresholdsByMode: Partial<Record<MarketRegime, { soft: number; hard: number; highwayRange: boolean }>> = {};
   for (const regime of regimes) {
     let streak = 0;
+    let crashDefenseCount = 0;
     const isHighwayRange = regime === "RANGE" && highwayMode;
     const effectiveStreakSoft = isHighwayRange ? baseSoft + 2 : baseSoft;
     const effectiveStreakHardBase = isHighwayRange ? baseHard + 4 : baseHard + 2;
@@ -193,15 +203,41 @@ export function evaluateRiskControls(input: Readonly<{
     for (let i = input.history.length - 1; i >= 0; i--) {
       const r = input.history[i] as unknown;
       if (asRegimeAtEntry(r) !== regime) continue;
+
+      const reason = asCloseReason(r);
+      const isCrashDefense = reason && (
+        reason === "EXIT_LONG_CRASH_FORCE" ||
+        reason === "EXIT_LONG_CRASH_REDUCE" ||
+        reason === "EXIT_CRASH_FORCE" ||
+        reason === "EXIT_CRASH_REDUCE"
+      );
+
       const p = asNet(r);
       if (p === null) continue;
+
+      if (isCrashDefense) {
+        crashDefenseCount += 1;
+        if (regime === "RANGE") {
+          console.log(`[RISK] RANGE_STREAK_CLASSIFICATION | symbol: BTCUSDT | regimeAtEntry: ${regime} | closeReason: ${reason} | pnlUsdNet: ${p} | counted_as_general_range_loss: false | counted_as_crash_defense_event: true | excluded_from_general_loss_streak_reason: protective_crash_defense`);
+        }
+        continue;
+      }
+
       if (p < 0) {
         streak += 1;
+        if (regime === "RANGE") {
+          console.log(`[RISK] RANGE_STREAK_CLASSIFICATION | symbol: BTCUSDT | regimeAtEntry: ${regime} | closeReason: ${reason ?? "unknown"} | pnlUsdNet: ${p} | counted_as_general_range_loss: true | counted_as_crash_defense_event: false | excluded_from_general_loss_streak_reason: none`);
+        }
         if (streak >= effectiveStreakHard) break;
-      } else if (p > 0) break;
-      else break;
+      } else {
+        if (regime === "RANGE") {
+          console.log(`[RISK] RANGE_STREAK_CLASSIFICATION | symbol: BTCUSDT | regimeAtEntry: ${regime} | closeReason: ${reason ?? "unknown"} | pnlUsdNet: ${p} | counted_as_general_range_loss: false | counted_as_crash_defense_event: false | excluded_from_general_loss_streak_reason: positive_or_flat_pnl_breaks_streak`);
+        }
+        break;
+      }
     }
     recentLossStreakByMode[regime] = streak;
+    recentCrashDefenseCountByMode[regime] = crashDefenseCount;
     const prior = input.priorState?.blockedRegimes?.[regime];
     const priorUntil = prior?.until ?? 0;
     const stillBlocked = priorUntil > now ? priorUntil : 0;
@@ -210,13 +246,24 @@ export function evaluateRiskControls(input: Readonly<{
       continue;
     }
     if (streak >= effectiveStreakHard && regime !== "NO_TRADE") {
+      const suspendReason = isHighwayRange ? "highway_range_streak_hard_suspended" : "mode_loss_streak_hard_suspended";
       blockedRegimes[regime] = {
         until: now + hardSuspendMs,
-        reason: isHighwayRange ? "highway_range_streak_hard_suspended" : "mode_loss_streak_hard_suspended"
+        reason: suspendReason
       };
+      if (regime === "RANGE") {
+        console.log(`[RISK] RANGE_HARD_SUSPEND_DECISION_TRACE | regime: ${regime} | effective_general_loss_streak: ${streak} | effective_crash_defense_count: ${crashDefenseCount} | soft_threshold: ${effectiveStreakSoft} | hard_threshold: ${effectiveStreakHard} | hard_suspend_triggered: true | hard_suspend_reason: ${suspendReason}`);
+      }
     } else if (streak >= effectiveStreakSoft && regime !== "NO_TRADE") {
       longSizeMult *= lossStreakSoftSizeMult;
       shortSizeMult *= lossStreakSoftSizeMult;
+      if (regime === "RANGE") {
+        console.log(`[RISK] RANGE_HARD_SUSPEND_DECISION_TRACE | regime: ${regime} | effective_general_loss_streak: ${streak} | effective_crash_defense_count: ${crashDefenseCount} | soft_threshold: ${effectiveStreakSoft} | hard_threshold: ${effectiveStreakHard} | hard_suspend_triggered: false | soft_degrade_triggered: true`);
+      }
+    } else {
+      if (regime === "RANGE") {
+        console.log(`[RISK] RANGE_HARD_SUSPEND_DECISION_TRACE | regime: ${regime} | effective_general_loss_streak: ${streak} | effective_crash_defense_count: ${crashDefenseCount} | soft_threshold: ${effectiveStreakSoft} | hard_threshold: ${effectiveStreakHard} | hard_suspend_triggered: false | reason: below_threshold`);
+      }
     }
 
     // Highway: Structural Box Break Suspension
@@ -256,6 +303,7 @@ export function evaluateRiskControls(input: Readonly<{
       mode_loss_streak_soft_size_mult: lossStreakSoftSizeMult,
       mode_loss_streak_hard_suspend_ms_applied: hardSuspendMs,
       mode_loss_streak_thresholds_by_mode: lossStreakThresholdsByMode,
+      recent_crash_defense_count_by_mode: recentCrashDefenseCountByMode,
       crash_state: crashState,
       long_allow: longAllow,
       short_allow: shortAllow,
