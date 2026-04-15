@@ -1898,6 +1898,8 @@ export class PaperEngine {
     if (rawOpens.length === 0) return;
     const opens = rawOpens.map(o => ({ ...o })); // Use mutable copy for state tracking
     let crashPositionsModified = false;
+    const crashForceClosedKeys = new Set<string>();
+    const crashReducedThisTickKeys = new Set<string>();
 
     // --- ASYMMETRIC CRASH RISK LAYER ---
     const risk = this.lastRisk;
@@ -1946,11 +1948,14 @@ export class PaperEngine {
             await this.positions.appendClosed(closedRow);
             this.logger.warn("crash_long_defense", { symbol: op.symbol, state: risk.crashState, type: et });
 
+            const key = `${op.symbol}:${op.openedAt}`;
             if (forceExit) {
               (op as any).status = "closed";
+              crashForceClosedKeys.add(key);
               crashPositionsModified = true;
             } else {
               (op as any).sizeUsd -= marginToClose;
+              crashReducedThisTickKeys.add(key);
               crashPositionsModified = true;
             }
           }
@@ -1995,8 +2000,34 @@ export class PaperEngine {
     });
 
     for (const openRaw of opens) {
-      if (openRaw.status !== "open") {
+      const posKey = `${openRaw.symbol}:${openRaw.openedAt}`;
+
+      // A. FORCE CLOSED Short-Circuit: Absolutely exclude from "remaining" to prevent re-entry.
+      if (crashForceClosedKeys.has(posKey)) {
+        this.logger.info("force_closed_position_excluded_from_open_ledger", {
+          symbol: openRaw.symbol,
+          openedAt: openRaw.openedAt,
+          excluded_from_remaining: true
+        });
+        continue;
+      }
+
+      // B. REDUCE Short-Circuit: Skip general pipeline, push reduced object, and continue.
+      if (crashReducedThisTickKeys.has(posKey)) {
         remaining.push(openRaw);
+        this.logger.info("crash_close_short_circuit_applied", {
+          symbol: openRaw.symbol,
+          openedAt: openRaw.openedAt,
+          crash_action: "CRASH_REDUCE",
+          skipped_general_close_pipeline: true,
+          remaining_size_usd_after_crash: openRaw.sizeUsd
+        });
+        continue;
+      }
+
+      if (openRaw.status !== "open") {
+        // This case exists for positions closed by internal logic but not filtered by the CRASH sets.
+        // Usually, forceExit will be handled above.
         continue;
       }
 
