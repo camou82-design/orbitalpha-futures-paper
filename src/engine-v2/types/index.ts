@@ -144,22 +144,24 @@ export interface EngineV2Decision {
 }
 
 /** Final Adoption Result - Selector Wrapper (3-Layer Separation) */
+export interface V2AdoptedResult {
+    engine: "V1" | "V2";
+    adopted_decision: EngineV2FinalDecision;
+    adopted_regime: string;
+    adopted_side: EngineV2Side;
+    adopted_size_usd: number;
+    adoption_reason: string;
+}
+
 export interface V2SelectorDecision {
-    v1: {
+    legacy_result: {
         regime: string;
         decision: string;
         side: string | null;
         size: number;
     };
-    v2: EngineV2Decision;
-    adopted: {
-        engine: "V1" | "V2";
-        decision: string;
-        regime: string;
-        side: string | null;
-        size: number;
-        reason: string;
-    };
+    v2_result: EngineV2Decision;
+    adopted_result: V2AdoptedResult;
     mismatch: boolean;
 }
 
