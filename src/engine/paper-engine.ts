@@ -218,6 +218,43 @@ type SymbolSnapshot = Readonly<{
   reviewing_ticks?: number;
 }>;
 
+interface EntryExecutionAuthority {
+  decision: "ENTER" | "SKIP"; // PaperFinalDecision compatible
+  side: "long" | "short" | "none"; // PaperSide compatible
+  sizeUsd: number;
+  regime: string;
+  source: "v2" | "legacy";
+}
+
+interface SymbolDecisionEnvelope {
+  legacy: EvaluatePaperSymbolEntryResult;
+  selector: V2SelectorDecision | null;
+  authority: EntryExecutionAuthority;
+}
+
+function buildExecutionAuthority(
+  res: EvaluatePaperSymbolEntryResult,
+  selector: V2SelectorDecision | null
+): EntryExecutionAuthority {
+  const adopted = selector?.adopted_result;
+  if (adopted) {
+    return {
+      decision: adopted.adopted_decision === "ENTER" ? "ENTER" : "SKIP",
+      side: adopted.adopted_side as any,
+      sizeUsd: adopted.adopted_size_usd,
+      regime: adopted.adopted_regime,
+      source: "v2"
+    };
+  }
+  return {
+    decision: res.decision.final_decision === "ENTER" ? "ENTER" : "SKIP",
+    side: res.intentSide as any,
+    sizeUsd: res.decision.required_cost_usd || 0,
+    regime: "legacy",
+    source: "legacy"
+  };
+}
+
 export type SymbolDiagnostic = Readonly<{
   symbol: MarketSymbol;
   endpoint: string;
@@ -1031,7 +1068,7 @@ export class PaperEngine {
       this.config.paperReentryCooldownMs > 0 ? latestCloseMetaBySymbol(await this.store.readPositionsHistory()) : null;
     const regimeUnknown = btc5.length < MIN_BTC_5M_BARS_REGIME;
     const polledSymbols = this.config.symbols;
-    const decisionBySymbol = new Map<string, EvaluatePaperSymbolEntryResult>();
+    const decisionBySymbol = new Map<string, SymbolDecisionEnvelope>();
     for (const sym of polledSymbols) {
       const symKeyEarly = String(sym);
       const snap = snapshots.find((s) => s.symbol === sym);
@@ -1125,34 +1162,23 @@ export class PaperEngine {
       const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as EngineV2OpMode) || "legacy";
       let selectorResult: V2SelectorDecision | null = null;
 
-      if (v2Mode !== "legacy") {
-        // Strict mapping to eliminate 'any'
+      if (v2Mode === "engine_v2" || v2Mode === "shadow_v2") {
         const v2Input = adaptV2Input(
           symKeyEarly,
           fetchedAt,
           {
-            lastPrice: snap.lastPrice,
-            latestCandleClose: snap.latestCandleClose,
-            boxHigh: snap.boxHigh ?? null,
-            boxLow: snap.boxLow ?? null,
+            ...snap,
             boxPosDiag: snap.boxPos ?? null,
             rangeConfidenceDiag: snap.rangeConfidence ?? null,
-            ema20: snap.ema20 ?? null,
             emaGapDiag: snap.emaGap ?? null,
-            volatilityProxyDiag: 0,
-            boxCohesion01: snap.boxCohesion01 ?? 0,
-            breakoutFailureRate: snap.breakoutFailureRate ?? 0,
-            trendWeaknessScore: snap.trendWeaknessScore ?? 0,
-            reviewing_ticks: snap.reviewing_ticks ?? 0,
-            regimeExitRisk: 0,
-            boxBreakSide: "none",
-            signal: snap.signal,
-            qualityScore: snap.qualityScore
+            volatilityProxyDiag: snap.volumeRatioProxy ?? 0,
+            boxCohesionDiag: snap.boxCohesion01 ?? 0,
+            breakoutFailureRateDiag: snap.breakoutFailureRate ?? 0,
+            trendWeaknessDiag: snap.trendWeaknessScore ?? 0
           },
           {
-            paperMaxOpenPositions: this.config.paperMaxOpenPositions,
-            paperReentryCooldownMs: this.config.paperReentryCooldownMs,
-            baseSizeUsd: DEFAULT_PAPER_SIZE_USD // Standard 100
+            ...this.config,
+            baseSizeUsd: DEFAULT_PAPER_SIZE_USD
           },
           {
             currentPositions: opensAfterClose.filter(o => o.symbol === sym).map(p => ({
@@ -1160,24 +1186,12 @@ export class PaperEngine {
               side: p.side as "long" | "short",
               entryPrice: p.entryPrice,
               sizeUsd: p.sizeUsd,
-              pnlPct: 0 // Placeholder or calculated from loop state
+              entryStage: p.entryStage
             })),
             globalRiskScore: 0,
             lossStreaks: risk.recentLossStreakByMode || {}
           },
-          {
-            decision: {
-              regime_state: res.decision?.regime_state,
-              final_decision: res.decision?.final_decision,
-              reject_reason: res.decision?.reject_reason,
-              required_cost_usd: res.decision?.required_cost_usd ?? 0
-            },
-            executorDecision: {
-              entry_allowed: res.executorDecision?.entry_allowed,
-              total_cost: res.executorDecision ? (res.executorDecision.total_cost || 0) : 0
-            },
-            intentSide: res.intentSide
-          }
+          res as any
         );
 
         const engineV2Out = runEngineV2(v2Input);
@@ -1190,7 +1204,7 @@ export class PaperEngine {
           selectorResult.adopted_result.engine = "V2";
         }
 
-        // Standard 10: Shadow Comparison Logging (Fixed Fields: V1, V2, Adopted)
+        // Standard 10: Shadow Comparison Logging
         this.logger.info("v2_shadow_parity", {
           symbol: symKeyEarly,
           ts: fetchedAt,
@@ -1210,17 +1224,10 @@ export class PaperEngine {
           adoption_reason: selectorResult.adopted_result.adoption_reason,
           mismatch: selectorResult.mismatch
         });
-
-        // Adoption logic: Attach effective execution fields directly to res for downstream authority
-        // We use non-destructive assignment to avoid mutating the core legacy logic or types.
-        if (v2Mode === "engine_v2") {
-          (res as any).effectiveDecision = selectorResult.adopted_result.adopted_decision;
-          (res as any).effectiveSide = selectorResult.adopted_result.adopted_side;
-          (res as any).effectiveSizeUsd = selectorResult.adopted_result.adopted_size_usd;
-        }
       }
 
-      decisionBySymbol.set(symKeyEarly, res);
+      const authority = buildExecutionAuthority(res, selectorResult);
+      decisionBySymbol.set(symKeyEarly, { legacy: res, selector: selectorResult, authority });
     } // End of sym loop
 
     // 1. First closing (including reversals)
@@ -1248,16 +1255,18 @@ export class PaperEngine {
 
     // Post-loop aggregate reporting
     const decisionBySymbolValues: EvaluatePaperSymbolEntryResult[] = [];
-    decisionBySymbol.forEach((v) => { decisionBySymbolValues.push(v); });
+    decisionBySymbol.forEach((env) => { decisionBySymbolValues.push(env.legacy); });
     if (decisionBySymbol.size > 0) {
-      const funnel_tick = computeFunnelTick(decisionBySymbol);
+      const legacyMap = new Map<string, EvaluatePaperSymbolEntryResult>();
+      decisionBySymbol.forEach((env, k) => legacyMap.set(k, env.legacy));
+      const funnel_tick = computeFunnelTick(legacyMap);
       this.decisionFunnelTickRing.push(funnel_tick);
       if (this.decisionFunnelTickRing.length > DECISION_FUNNEL_RING_MAX) {
         this.decisionFunnelTickRing.shift();
       }
       const decision_funnel_50 = sumDecisionFunnelTicks(this.decisionFunnelTickRing);
       const decision_funnel_50_size = this.decisionFunnelTickRing.length;
-      const reject_reason_counts_tick = aggregateRejectReasonCountsTick(decisionBySymbol);
+      const reject_reason_counts_tick = aggregateRejectReasonCountsTick(legacyMap);
 
       try {
         const risk = this.lastRisk!;
@@ -1314,7 +1323,7 @@ export class PaperEngine {
           decision_funnel_50_size,
           reject_reason_counts_tick,
           symbol_decisions: Object.fromEntries(
-            [...decisionBySymbol.entries()].map(([k, v]) => [k, { decision: v.decision, adaptiveOk: v.adaptiveOk }])
+            [...decisionBySymbol.entries()].map(([k, v]) => [k, { decision: v.legacy.decision, adaptiveOk: v.legacy.adaptiveOk }])
           )
         });
       } catch (e) {
@@ -1939,7 +1948,7 @@ export class PaperEngine {
     filePath: string | undefined;
     marketMode: MarketModeSelectorOutput;
     riskExposure: RiskExposureOutput;
-    decisionBySymbol: Map<string, EvaluatePaperSymbolEntryResult>;
+    decisionBySymbol: ReadonlyMap<string, SymbolDecisionEnvelope>;
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
 
@@ -3143,7 +3152,7 @@ export class PaperEngine {
     latestPath: string | undefined;
     metaPath: string | undefined;
     filePath: string | undefined;
-    decisionBySymbol: ReadonlyMap<string, EvaluatePaperSymbolEntryResult>;
+    decisionBySymbol: ReadonlyMap<string, SymbolDecisionEnvelope>;
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
 
@@ -3152,18 +3161,16 @@ export class PaperEngine {
       snapshotBySymbol.set(String(s.symbol), s);
     }
     const entryQueue: SymbolSnapshot[] = [];
-    input.decisionBySymbol.forEach((res, symKey) => {
-      // Priority: Adopted V2 (effectiveDecision) > Legacy decision
-      const effectiveDecision = (res as any).effectiveDecision ?? res.decision.final_decision;
-      const effectiveSide = (res as any).effectiveSide ?? res.intentSide;
+    input.decisionBySymbol.forEach((envelope, symKey) => {
+      const { authority } = envelope;
 
-      if (effectiveDecision !== "ENTER") return;
-      if (effectiveSide !== "long" && effectiveSide !== "short") return;
+      if (authority.decision !== "ENTER") return;
+      if (authority.side !== "long" && authority.side !== "short") return;
 
-      if (res.adaptiveResult == null) return;
+      if (envelope.legacy.adaptiveResult == null) return;
       const base = snapshotBySymbol.get(symKey);
       if (!base) return;
-      const sig: PaperSignal = effectiveSide === "long" ? "paper_long_candidate" : "paper_short_candidate";
+      const sig: PaperSignal = authority.side === "long" ? "paper_long_candidate" : "paper_short_candidate";
       entryQueue.push({ ...base, signal: sig });
     });
     entryQueue.sort((a, b) => {
@@ -3198,12 +3205,14 @@ export class PaperEngine {
     this.lastEntryDecision = null;
 
     for (const first of entryQueue) {
-      const res = input.decisionBySymbol.get(String(first.symbol))!;
+      const envelope = input.decisionBySymbol.get(String(first.symbol))!;
+      const res = envelope.legacy;
+      const authority = envelope.authority;
 
-      // Define effective variables once per symbol loop
-      const effectiveDecision = (res as any).effectiveDecision ?? res.decision.final_decision;
-      const effectiveSide = (res as any).effectiveSide ?? res.intentSide;
-      const effectiveSizeUsd = (res as any).effectiveSizeUsd ?? (res.decision.required_cost_usd || 0);
+      // authority object is now the single source of truth for execution.
+      const effectiveDecision = authority.decision;
+      const effectiveSide = authority.side;
+      const effectiveSizeUsd = authority.sizeUsd;
 
       if (this.lastRegime.regime === "RANGE") {
         const origSnap = input.snapshots.find((s) => s.symbol === first.symbol);
@@ -3215,7 +3224,7 @@ export class PaperEngine {
           original_snapshot_signal: origSnap?.signal ?? null,
           queued_signal_after_merge: first.signal,
           signal_corrected_for_intent: origSnap != null && origSnap.signal !== first.signal,
-          intent_side: effectiveSide,
+          intent_side: effectiveSide as "long" | "short" | "none", // Explicit
           final_decision: effectiveDecision,
           reject_reason: res.decision.reject_reason ?? null,
           adaptive_ok: res.adaptiveOk,
@@ -3343,7 +3352,7 @@ export class PaperEngine {
         typeof this.lastRisk?.detail?.last10_net_usd === "number" && Number.isFinite(this.lastRisk.detail.last10_net_usd)
           ? this.lastRisk.detail.last10_net_usd
           : 0;
-      const aiIn = aiInputFromDecision({ decision, executorDirection: effectiveSide, lossStreak, last10Net });
+      const aiIn = aiInputFromDecision({ decision, executorDirection: effectiveSide as any, lossStreak, last10Net });
       if (aiIn) {
         const aiOut = aiApproveEntry(aiIn);
         const aiDir = aiOut.action === "ENTER_LONG" ? "long" : aiOut.action === "ENTER_SHORT" ? "short" : "none";
@@ -3357,7 +3366,7 @@ export class PaperEngine {
           expected_move: decision.expected_move,
           total_cost: effectiveSizeUsd, // Use effectiveSizeUsd
           risk_state: decision.risk_state,
-          executor_direction: effectiveSide, // Use effectiveSide
+          executor_direction: effectiveSide as any, // Final cast
           ai_direction: aiDir,
           mismatch: false,
           detail: { ai_reason: aiOut.reason, ai_confidence: aiOut.confidence }
@@ -3475,7 +3484,7 @@ export class PaperEngine {
           open_trace_id: openTraceId,
           sample_symbol_btc_eth: sampleBtcEth,
           symbol: first.symbol,
-          side: adaptive.direction,
+          side: effectiveSide as "long" | "short", // Cast
           sizeUsd: adaptive.sizeUsd,
           stage1_result_code: res.decision.stage1_result_code,
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
@@ -3518,8 +3527,8 @@ export class PaperEngine {
         const mPre = marginsForSymbol(next, symS);
         if (
           riskE &&
-          ((adaptive.direction === "long" && mPre.longUsd + entrySizeUsd > riskE.maxLongExposure) ||
-            (adaptive.direction === "short" && mPre.shortUsd + entrySizeUsd > riskE.maxShortExposure))
+          ((effectiveSide === "long" && mPre.longUsd + entrySizeUsd > riskE.maxLongExposure) ||
+            (effectiveSide === "short" && mPre.shortUsd + entrySizeUsd > riskE.maxShortExposure))
         ) {
           trace.open_fail_stage = "risk_exposure_cap_pre_submit";
           trace.position_open_final_state = "aborted_pre_exchange";
@@ -3547,8 +3556,8 @@ export class PaperEngine {
         if (this.okxDemo) {
           const instId = toOkxSwapInstId(first.symbol);
           trace.inst_id = instId;
-          const side = adaptive.direction === "long" ? "buy" : "sell";
-          const posSide = adaptive.direction === "long" ? "long" : "short";
+          const side = effectiveSide === "long" ? "buy" : "sell";
+          const posSide = effectiveSide === "long" ? "long" : "short";
           const qty = Math.max(0.001, Math.round((entrySizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
           trace.qty_submitted = qty;
           const clOrdId = `paper-${first.symbol}-${Date.now()}`;
@@ -3688,7 +3697,7 @@ export class PaperEngine {
         const record: PaperOpenPositionRecord = {
           openedAt: Date.now(),
           symbol: first.symbol,
-          side: adaptive.direction,
+          side: effectiveSide as "long" | "short", // Authority
           entryPrice: first.lastPrice,
           leverage: levScaled,
           sizeUsd: entrySizeUsd,
@@ -3730,7 +3739,7 @@ export class PaperEngine {
         openPositionsChanged = true;
         trace.position_open_record_written = true;
         if (res.decision.range_reversal_immediate_switch_applied === true) {
-          this.rangeReversalSwitchPendingBySymbol.delete(symS);
+          this.rangeReversalSwitchPendingBySymbol.delete(sym);
         }
         if (this.lastRegime.regime === "RANGE") {
           const fillZone = typeof first.boxPos === "number" ? classifyBoxZone(first.boxPos) : null;
