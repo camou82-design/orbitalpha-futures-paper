@@ -9,18 +9,15 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     const mixedBreakoutState = (sn.breakoutFailureRate || 0) > 0.4 && (sn.breakoutFailureRate || 0) < 0.7;
     const emaExpansionWeak = Math.abs(sn.emaGap || 0) > 0.0003 && (sn.trendWeaknessScore || 0) > 0.6;
 
-    // Standard 3: Strict TRANSITION rule (Conflict-based)
-    // Transition if at least 2 criteria are met (Mid Range, Mid Trend, Collapse, Mixed Breakout, or Weak EMA Expansion)
-    let transitionScore = 0;
-    if (rangeScore > 0.45) transitionScore++;
-    if (trendScore > 0.45) transitionScore++;
-    if (boxCohesionCollapse) transitionScore++;
-    if (mixedBreakoutState) transitionScore++;
-    if (emaExpansionWeak) transitionScore++;
+    // Standard 3: Strict TRANSITION rule (Conflict-based Scouting)
+    // Transition ONLY if scores reflect simultaneous indecision and structural conflict.
+    const midRange = rangeScore > 0.4 && rangeScore < 0.7;
+    const midTrend = trendScore > 0.4 && trendScore < 0.7;
+    const structuralConflict = mixedBreakoutState || boxCohesionCollapse;
 
     let regime: MarketJudgmentOutput["regime"] = "NO_TRADE";
 
-    if (transitionScore >= 2) {
+    if (midRange && midTrend && structuralConflict) {
         regime = "TRANSITION";
     } else if (rangeScore > 0.6) {
         regime = "RANGE";
@@ -30,8 +27,8 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
 
     return {
         regime,
-        reason: transitionScore >= 2
-            ? `Conflict detected (${transitionScore} criteria); entering scouting mode.`
+        reason: regime === "TRANSITION"
+            ? `CONFLICT DETECTED: Simultaneous Range/Trend presence with structural indecision. Entering Scouting Mode.`
             : `Market detected as ${regime} based on score analysis`,
         metrics: {
             rangeScore,

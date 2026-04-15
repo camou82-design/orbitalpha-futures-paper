@@ -19,8 +19,60 @@ export interface EngineV2Position {
 
 /** 
  * Input Adapter: Bridges Legacy Objects to V2 
- * Ensures as any is never needed in bridge logic.
+ * Zero 'any' policy.
  */
+export interface LegacySnapshotAdapter {
+    lastPrice: number;
+    latestCandleClose: number;
+    boxHigh: number | null;
+    boxLow: number | null;
+    boxPosDiag: number | null;
+    rangeConfidenceDiag: number | null;
+    ema20: number | null;
+    emaGapDiag: number | null;
+    volatilityProxyDiag: number | null;
+    boxCohesion01?: number;
+    boxCohesionDiag?: number;
+    breakoutFailureRate?: number;
+    breakoutFailureRateDiag?: number;
+    trendWeaknessScore?: number;
+    trendWeaknessDiag?: number;
+    reviewing_ticks?: number;
+    regimeExitRisk?: number;
+    boxBreakSide?: "upper" | "lower" | "none";
+    signal?: string;
+    qualityScore?: number;
+}
+
+export interface LegacyConfigAdapter {
+    paperMaxOpenPositions: number;
+    paperReentryCooldownMs: number;
+    baseSizeUsd: number;
+}
+
+export interface LegacyPositionAdapter {
+    symbol: MarketSymbol;
+    side: "long" | "short";
+    entryPrice: number;
+    sizeUsd: number;
+    entryStage?: number;
+    pnlPct?: number;
+}
+
+export interface LegacyResultAdapter {
+    decision?: {
+        regime_state?: string;
+        final_decision?: string;
+        reject_reason?: string | null;
+        required_cost_usd?: number;
+    };
+    executorDecision?: {
+        entry_allowed?: boolean;
+        total_cost?: number;
+    };
+    intentSide?: string | null;
+}
+
 export interface EngineV2Input {
     symbol: MarketSymbol;
     snapshot: EngineV2SnapshotAdapter;
@@ -49,12 +101,12 @@ export interface EngineV2SnapshotAdapter {
     ema20: number | null;
     emaGap: number | null;
     volatilityProxy: number | null;
-    boxCohesion01: number | null;
-    breakoutFailureRate: number | null;
-    trendWeaknessScore: number | null;
-    reviewing_ticks: number | null;
-    regimeExitRisk: number | null;
-    boxBreakSide: "upper" | "lower" | "none" | null;
+    boxCohesion01: number;
+    breakoutFailureRate: number;
+    trendWeaknessScore: number;
+    reviewing_ticks: number;
+    regimeExitRisk: number;
+    boxBreakSide: "upper" | "lower" | "none";
     signal: string;
     qualityScore: number;
 }
@@ -91,7 +143,7 @@ export interface EngineV2Decision {
     rawMetrics: Record<string, number | boolean>;
 }
 
-/** Final Adoption Result - Selector Wrapper */
+/** Final Adoption Result - Selector Wrapper (3-Layer Separation) */
 export interface V2SelectorDecision {
     v1: {
         regime: string;
@@ -102,8 +154,8 @@ export interface V2SelectorDecision {
     v2: EngineV2Decision;
     adopted: {
         engine: "V1" | "V2";
-        regime: string;
         decision: string;
+        regime: string;
         side: string | null;
         size: number;
         reason: string;

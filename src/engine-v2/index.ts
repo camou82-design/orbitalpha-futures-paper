@@ -1,4 +1,13 @@
-import { EngineV2Input, EngineV2Decision, EngineV2InternalResult, EngineV2FinalDecision } from "./types";
+import {
+    EngineV2Input,
+    EngineV2Decision,
+    EngineV2InternalResult,
+    EngineV2FinalDecision,
+    LegacySnapshotAdapter,
+    LegacyConfigAdapter,
+    LegacyPositionAdapter,
+    LegacyResultAdapter
+} from "./types";
 import type { MarketSymbol } from "../models/types";
 import { detectMarketRegime } from "./market-judgment/detector";
 import { calculateRegimeConfidence } from "./regime-confidence/scorer";
@@ -109,23 +118,23 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 }
 
 /** 
- * Legacy-to-V2 Input Adapter to eliminate 'as any' in bridge.
- * Maps legacy complex objects into strictly typed EngineV2Input.
+ * Legacy-to-V2 Input Adapter (Zero Any).
+ * Maps legacy complex objects through strict adapter interfaces.
  */
 export function adaptV2Input(
     symbol: MarketSymbol,
     now: number,
-    snapshot: any,
-    config: any,
-    state: any,
-    v1Decision: any
+    snapshot: LegacySnapshotAdapter,
+    config: LegacyConfigAdapter,
+    state: { currentPositions: LegacyPositionAdapter[], globalRiskScore: number, lossStreaks: Record<string, number> },
+    v1Result: LegacyResultAdapter
 ): EngineV2Input {
     return {
         symbol,
         now,
         snapshot: {
-            lastPrice: Number(snapshot.lastPrice) || 0,
-            latestCandleClose: Number(snapshot.latestCandleClose) || 0,
+            lastPrice: snapshot.lastPrice,
+            latestCandleClose: snapshot.latestCandleClose,
             boxHigh: snapshot.boxHigh,
             boxLow: snapshot.boxLow,
             boxPos: snapshot.boxPosDiag,
@@ -133,37 +142,37 @@ export function adaptV2Input(
             ema20: snapshot.ema20,
             emaGap: snapshot.emaGapDiag,
             volatilityProxy: snapshot.volatilityProxyDiag,
-            boxCohesion01: snapshot.boxCohesion01 || snapshot.boxCohesionDiag || 0,
-            breakoutFailureRate: snapshot.breakoutFailureRate || snapshot.breakoutFailureRateDiag || 0,
-            trendWeaknessScore: snapshot.trendWeaknessScore || snapshot.trendWeaknessDiag || 0,
-            reviewing_ticks: snapshot.reviewing_ticks || 0,
-            regimeExitRisk: snapshot.regimeExitRisk || 0,
-            boxBreakSide: snapshot.boxBreakSide || "none",
-            signal: snapshot.signal || "NONE",
-            qualityScore: Number(snapshot.qualityScore) || 0
+            boxCohesion01: snapshot.boxCohesion01 ?? snapshot.boxCohesionDiag ?? 0,
+            breakoutFailureRate: snapshot.breakoutFailureRate ?? snapshot.breakoutFailureRateDiag ?? 0,
+            trendWeaknessScore: snapshot.trendWeaknessScore ?? snapshot.trendWeaknessDiag ?? 0,
+            reviewing_ticks: snapshot.reviewing_ticks ?? 0,
+            regimeExitRisk: snapshot.regimeExitRisk ?? 0,
+            boxBreakSide: snapshot.boxBreakSide ?? "none",
+            signal: snapshot.signal ?? "NONE",
+            qualityScore: snapshot.qualityScore ?? 0
         },
         config: {
-            paperMaxOpenPositions: Number(config.paperMaxOpenPositions) || 5,
-            paperReentryCooldownMs: Number(config.paperReentryCooldownMs) || 180000,
-            baseSizeUsd: Number(config.baseSizeUsd) || 100
+            paperMaxOpenPositions: config.paperMaxOpenPositions,
+            paperReentryCooldownMs: config.paperReentryCooldownMs,
+            baseSizeUsd: config.baseSizeUsd
         },
         state: {
-            currentPositions: (state.currentPositions || []).map((p: any) => ({
+            currentPositions: state.currentPositions.map((p: LegacyPositionAdapter) => ({
                 symbol: p.symbol,
-                side: p.side === "long" ? "LONG" : "SHORT",
+                side: p.side === "long" ? "LONG" : "SHORT" as const,
                 entryPrice: p.entryPrice,
                 sizeUsd: p.sizeUsd,
-                entryStage: p.entryStage || 0,
-                pnlPct: p.pnlPct || 0
+                entryStage: p.entryStage ?? 0,
+                pnlPct: p.pnlPct ?? 0
             })),
-            globalRiskScore: Number(state.globalRiskScore) || 0,
-            lossStreaks: state.lossStreaks || {}
+            globalRiskScore: state.globalRiskScore,
+            lossStreaks: state.lossStreaks
         },
         v1Result: {
-            regime: String(v1Decision.decision?.regime_state || "UNDEFINED"),
-            decision: String(v1Decision.decision?.final_decision || "SKIP"),
-            side: String(v1Decision.intentSide || "none"),
-            isBlocked: !!v1Decision.decision?.reject_reason
+            regime: v1Result.decision?.regime_state ?? "UNDEFINED",
+            decision: v1Result.decision?.final_decision ?? "SKIP",
+            side: v1Result.intentSide ?? "none",
+            isBlocked: !!v1Result.decision?.reject_reason
         }
     };
 }

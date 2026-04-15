@@ -1120,22 +1120,64 @@ export class PaperEngine {
       let selectorResult: V2SelectorDecision | null = null;
 
       if (v2Mode !== "legacy") {
+        // Strict mapping to eliminate 'any'
         const v2Input = adaptV2Input(
           symKeyEarly,
           fetchedAt,
-          snap,
-          this.config,
           {
-            currentPositions: opensAfterClose.filter(o => o.symbol === sym),
+            lastPrice: snap.lastPrice,
+            latestCandleClose: snap.latestCandleClose,
+            boxHigh: snap.boxHigh ?? null,
+            boxLow: snap.boxLow ?? null,
+            boxPosDiag: snap.boxPos ?? null,
+            rangeConfidenceDiag: snap.rangeConfidence ?? null,
+            ema20: snap.ema20 ?? null,
+            emaGapDiag: snap.emaGap ?? null,
+            volatilityProxyDiag: 0,
+            boxCohesion01: snap.boxCohesion01 ?? 0,
+            breakoutFailureRate: snap.breakoutFailureRate ?? 0,
+            trendWeaknessScore: snap.trendWeaknessScore ?? 0,
+            reviewing_ticks: snap.reviewing_ticks ?? 0,
+            regimeExitRisk: 0,
+            boxBreakSide: "none",
+            signal: snap.signal,
+            qualityScore: snap.qualityScore
+          },
+          {
+            paperMaxOpenPositions: this.config.paperMaxOpenPositions,
+            paperReentryCooldownMs: this.config.paperReentryCooldownMs,
+            baseSizeUsd: DEFAULT_PAPER_SIZE_USD // Standard 100
+          },
+          {
+            currentPositions: opensAfterClose.filter(o => o.symbol === sym).map(p => ({
+              symbol: p.symbol,
+              side: p.side as "long" | "short",
+              entryPrice: p.entryPrice,
+              sizeUsd: p.sizeUsd,
+              pnlPct: 0 // Placeholder or calculated from loop state
+            })),
             globalRiskScore: 0,
             lossStreaks: risk.recentLossStreakByMode || {}
           },
-          res
+          {
+            decision: {
+              regime_state: res.decision?.regime_state,
+              final_decision: res.decision?.final_decision,
+              reject_reason: res.decision?.reject_reason,
+              required_cost_usd: res.decision?.required_cost_usd ?? 0
+            },
+            executorDecision: {
+              entry_allowed: res.executorDecision?.entry_allowed,
+              total_cost: res.executorDecision ? (res.executorDecision.total_cost || 0) : 0
+            },
+            intentSide: res.intentSide
+          }
         );
+
         const engineV2Out = runEngineV2(v2Input);
         const v2Decision = engineV2Out.decision;
 
-        // Perform Selection
+        // Perform Selection (Strictly Decoupled)
         const adopted = v2Mode === "engine_v2"
           ? selectV2Decision(res, v2Decision)
           : res;
@@ -1145,13 +1187,13 @@ export class PaperEngine {
             regime: res.decision?.regime_state || "UNKNOWN",
             decision: res.decision?.final_decision || "SKIP",
             side: res.intentSide,
-            size: res.decision?.required_cost_usd || 0
+            size: res.decision?.required_cost_usd ?? 0
           },
           v2: v2Decision,
           adopted: {
             engine: v2Mode === "engine_v2" ? "V2" : "V1",
-            regime: adopted.decision?.regime_state || "UNKNOWN",
             decision: adopted.decision?.final_decision || "SKIP",
+            regime: adopted.decision?.regime_state || "UNKNOWN",
             side: adopted.intentSide,
             size: (adopted.executorDecision ? (adopted.executorDecision.total_cost ?? 0) : 0) || (adopted.decision?.required_cost_usd ?? 0),
             reason: v2Mode === "engine_v2" ? v2Decision.explanation.reason : "Legacy mode active"
@@ -1159,7 +1201,7 @@ export class PaperEngine {
           mismatch: (res.executorDecision?.entry_allowed ?? false) !== (v2Decision.decision === "ENTER")
         };
 
-        // Standard 10: Shadow Comparison Logging (Fixed Fields)
+        // Standard 10: Shadow Comparison Logging (Fixed Fields: V1, V2, Adopted)
         this.logger.info("v2_shadow_parity", {
           symbol: symKeyEarly,
           ts: fetchedAt,
@@ -1171,14 +1213,16 @@ export class PaperEngine {
           side_v2: selectorResult.v2.side,
           size_v1: selectorResult.v1.size,
           size_v2: selectorResult.v2.risk.finalSizeUsd,
-          mismatch: selectorResult.mismatch,
           adopted_engine: selectorResult.adopted.engine,
+          adopted_decision: selectorResult.adopted.decision,
+          adopted_regime: selectorResult.adopted.regime,
+          adopted_side: selectorResult.adopted.side,
+          adopted_size: selectorResult.adopted.size,
           adoption_reason: selectorResult.adopted.reason,
-          v2_block_reason: v2Decision.risk.blockReason,
-          v2_explain_label: v2Decision.explanation.reason
+          mismatch: selectorResult.mismatch
         });
 
-        // Adopt if authorized
+        // Adopt ONLY if authorized
         if (v2Mode === "engine_v2") {
           res = adopted;
         }

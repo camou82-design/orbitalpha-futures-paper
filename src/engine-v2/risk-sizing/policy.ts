@@ -27,16 +27,16 @@ export function calculateRiskSizing(
         blockReason = "WAIT_RECHECK";
     }
 
-    // TRANSITION: Scale down
+    // TRANSITION: Force Scouting Mode (Very small size)
     if (judgment.regime === "TRANSITION") {
-        sizeMultiplier *= 0.5;
+        sizeMultiplier *= 0.1; // Scouting mode is forced to 10% size
     }
 
     // Confidence adjustment
     if (confidence.level === "MID") {
-        sizeMultiplier *= 0.8;
+        sizeMultiplier *= 0.7;
     } else if (confidence.level === "LOW") {
-        sizeMultiplier *= 0.5;
+        sizeMultiplier *= 0.4;
     }
 
     return {
