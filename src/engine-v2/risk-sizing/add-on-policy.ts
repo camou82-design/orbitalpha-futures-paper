@@ -35,5 +35,5 @@ export function evaluateAddonPolicy(
         }
     }
 
-    return { allowed, addOnSizeUsd, ratioVsInitial, reason };
+    return { allowed, addOnSizeUsd, reason };
 }

@@ -1,33 +1,81 @@
-import { PaperRegimeState, PaperSignalState, MarketSymbol, PositionSide } from "../../models/types";
+import { MarketSymbol, PositionSide } from "../../models/types";
 
 export type EngineV2OpMode = "legacy" | "shadow_v2" | "engine_v2";
 export type EngineV2Regime = "RANGE" | "TREND" | "TRANSITION" | "NO_TRADE";
 export type EngineV2ConfidenceLevel = "HIGH" | "MID" | "LOW";
 export type EngineV2SignalState = "LONG_CANDIDATE" | "SHORT_CANDIDATE" | "WAIT_RECHECK" | "NONE";
 export type EngineV2Side = "long" | "short" | "none";
+export type EngineV2FinalDecision = "ENTER" | "EXIT" | "SKIP" | "HOLD";
 
-/** Specific interfaces to replace 'any' */
-export interface EngineV2Snapshot {
-    boxPos?: number | null;
-    rangeConfidence?: number | null;
-    boxCohesion01?: number | null;
-    breakoutFailureRate?: number | null;
-    trendWeaknessScore?: number | null;
-    emaGap?: number | null;
-    volumeRatioProxy?: number | null;
-    reviewing_ticks?: number | null;
-    [key: string]: any;
+/** Engine-V2 Specific Position Type (Independent from legacy) */
+export interface EngineV2Position {
+    symbol: MarketSymbol;
+    side: PositionSide;
+    entryPrice: number;
+    sizeUsd: number;
+    entryStage: number;
+    pnlPct: number;
 }
 
-export interface EngineV2Config {
-    defaultPaperSizeUsd?: number;
-    paperMaxOpenPositions?: number;
-    [key: string]: any;
+/** 
+ * Input Adapter: Bridges Legacy Objects to V2 
+ * Ensures as any is never needed in bridge logic.
+ */
+export interface EngineV2Input {
+    symbol: MarketSymbol;
+    snapshot: EngineV2SnapshotAdapter;
+    config: EngineV2ConfigAdapter;
+    state: {
+        currentPositions: EngineV2Position[];
+        lossStreaks: Record<string, number>;
+    };
+    now: number;
 }
 
-export interface EngineV2State {
-    currentPositions: any[];
-    lossStreaks: Record<string, number>;
+export interface EngineV2SnapshotAdapter {
+    lastPrice: number;
+    boxHigh: number;
+    boxLow: number;
+    boxPos: number;
+    rangeConfidence: number;
+    emaGap: number;
+    volumeRatioProxy: number;
+    boxCohesion01: number;
+    breakoutFailureRate: number;
+    trendWeaknessScore: number;
+    reviewing_ticks: number;
+}
+
+export interface EngineV2ConfigAdapter {
+    paperMaxOpenPositions: number;
+    paperReentryCooldownMs: number;
+    baseSizeUsd: number;
+}
+
+/** Final V2 Decision Object - Completely Independent Output */
+export interface EngineV2Decision {
+    symbol: MarketSymbol;
+    ts: number;
+    regime: EngineV2Regime;
+    confidence: EngineV2ConfidenceLevel;
+    confidenceScore: number;
+    signal: EngineV2SignalState;
+    side: EngineV2Side;
+    decision: EngineV2FinalDecision;
+    risk: {
+        isBlocked: boolean;
+        blockReason: string | null;
+        sizeMultiplier: number;
+        baseSizeUsd: number;
+        finalSizeUsd: number;
+        isAddOn: boolean;
+    };
+    explanation: {
+        reason: string;
+        uiLabelRegime: string;
+        uiLabelStatus: string;
+    };
+    rawMetrics: Record<string, number | boolean>;
 }
 
 /** Tier 1: Market Judgment */
@@ -62,7 +110,8 @@ export interface ExecutorOutput {
     reason: string;
     baseSizeIntent: number;
     recheckSuggested: boolean;
-    metadata: Record<string, any>;
+    isAddOnEligible: boolean;
+    metadata: Record<string, string | number | boolean>;
 }
 
 /** Tier 5: Risk Sizing Output */
@@ -71,16 +120,14 @@ export interface RiskSizingOutput {
     sizeMultiplier: number;
     finalSizeUsd: number;
     isBlocked: boolean;
-    blockReason?: string;
-    addOnAllowed: boolean;
-    addOnSizeUsd: number;
+    blockReason: string | null;
+    isAddOn: boolean;
 }
 
 /** Tier 5: Add-on Policy Output */
 export interface AddonPolicyOutput {
     allowed: boolean;
     addOnSizeUsd: number;
-    ratioVsInitial: number;
     reason: string;
 }
 
@@ -93,22 +140,12 @@ export interface ExplanationOutput {
     };
 }
 
-/** Composite V2 Output */
-export interface EngineV2Output {
-    ts: number;
-    symbol: MarketSymbol;
+/** Internal Pipeline Result */
+export interface EngineV2InternalResult {
     judgment: MarketJudgmentOutput;
     confidence: RegimeConfidenceOutput;
     routing: RouterOutput;
     execution: ExecutorOutput;
     riskSizing: RiskSizingOutput;
     explanation: ExplanationOutput;
-}
-
-/** Input for V2 Pipeline */
-export interface EngineV2Input {
-    symbol: MarketSymbol;
-    snapshot: EngineV2Snapshot;
-    config: EngineV2Config;
-    state: EngineV2State;
 }

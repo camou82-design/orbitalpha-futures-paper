@@ -7,11 +7,12 @@ import { EngineV2Input, ExecutorOutput } from "../types";
 export function executeTransitionRegime(input: EngineV2Input): ExecutorOutput {
     // Transition logic: Exploration only, small size
     return {
-        signal: "WAIT_RECHECK",
+        signal: "NONE",
         side: "none",
-        reason: "Transition zone search; passive waiting",
-        baseSizeIntent: 0.5,
+        reason: "TRANSITION_SCOUTING",
+        baseSizeIntent: 0,
         recheckSuggested: true,
+        isAddOnEligible: false,
         metadata: {}
     };
 }

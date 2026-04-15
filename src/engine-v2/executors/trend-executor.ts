@@ -24,11 +24,12 @@ export function executeTrendRegime(input: EngineV2Input): ExecutorOutput {
     }
 
     return {
-        signal,
-        side,
-        reason,
-        baseSizeIntent: 1.2,
+        signal: "NONE",
+        side: "none",
+        reason: "TREND_NOT_IMPLEMENTED",
+        baseSizeIntent: 0,
         recheckSuggested: false,
-        metadata: { emaGap }
+        isAddOnEligible: false,
+        metadata: {}
     };
 }

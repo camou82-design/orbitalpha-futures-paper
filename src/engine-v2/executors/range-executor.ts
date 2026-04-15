@@ -38,11 +38,14 @@ export function executeRangeRegime(input: EngineV2Input): ExecutorOutput {
     }
 
     return {
-        signal,
-        side,
-        reason,
-        baseSizeIntent,
-        recheckSuggested,
-        metadata: { boxPos }
+        signal: signal,
+        side: side,
+        reason: signal === "NONE" ? "NO_RANGE_EDGE" : reason,
+        baseSizeIntent: signal === "NONE" ? 0 : 1,
+        recheckSuggested: recheckSuggested,
+        isAddOnEligible: true, // RANGE allow add-ons
+        metadata: {
+            boxPos: input.snapshot.boxPos
+        }
     };
 }

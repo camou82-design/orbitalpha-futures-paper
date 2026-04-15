@@ -11,7 +11,7 @@ export function calculateRiskSizing(
     input: EngineV2Input
 ): RiskSizingOutput {
     const { config } = input;
-    const baseSizeUsd = config.defaultPaperSizeUsd ?? 100;
+    const baseSizeUsd = config.baseSizeUsd;
     let sizeMultiplier = executor.baseSizeIntent;
     let isBlocked = false;
     let blockReason = undefined;
@@ -44,8 +44,7 @@ export function calculateRiskSizing(
         sizeMultiplier,
         finalSizeUsd: isBlocked ? 0 : baseSizeUsd * sizeMultiplier,
         isBlocked,
-        blockReason,
-        addOnAllowed: false, // Updated downstream
-        addOnSizeUsd: 0
+        blockReason: blockReason || null,
+        isAddOn: false // Logic for add-on will be handled by addon-policy if needed
     };
 }

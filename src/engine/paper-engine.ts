@@ -153,6 +153,15 @@ function volumeRatioProxyFromCandles(candles: readonly { volume: number }[]): nu
   return ma > 0 && Number.isFinite(lastV) ? lastV / ma : 1;
 }
 
+export interface EngineV2Position {
+  symbol: MarketSymbol;
+  side: "long" | "short";
+  entryPrice: number;
+  sizeUsd: number;
+  entryStage: number;
+  pnlPct: number;
+}
+
 type SymbolSnapshot = Readonly<{
   symbol: MarketSymbol;
   lastPrice: number;
@@ -198,6 +207,7 @@ type SymbolSnapshot = Readonly<{
   candles?: import("../models/types").Candle[];
   highwayKlineLimitRequested?: number;
   highwayEntryTf?: string;
+  reviewing_ticks?: number;
 }>;
 
 export type SymbolDiagnostic = Readonly<{
@@ -1021,16 +1031,6 @@ export class PaperEngine {
       const snap = snapshots.find((s) => s.symbol === sym);
       this.lastTickSymbolSnapshotBySymbol.set(symKeyEarly, snap ?? null);
 
-      if (snap) {
-        this.logHighwayCandlePipelineProof("paper_symbol_tick_poll_entry", {
-          symbol: String(sym),
-          poll_ok_snapshot_present: true,
-          fetched_at_ms: fetchedAt,
-          last_price: snap.lastPrice,
-          signal: snap.signal
-        });
-      }
-
       const nowTick = snap;
 
       this.pruneRangeReversalSwitchPending(symKeyEarly, snap ?? null, fetchedAt);
@@ -1043,7 +1043,6 @@ export class PaperEngine {
         marketModeOut.routing.activeEngine
       );
 
-      // history rebalance sync - removed due to missing method
       const existingPos = opensAfterClose.find((o) => o.symbol === sym);
 
       // 1. Snapshot-Check & Preliminary Block Logging
@@ -1071,13 +1070,6 @@ export class PaperEngine {
           maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions,
           currentStage: existingPos?.entryStage ?? 0,
           rangeReversalImmediateSwitch: undefined
-        });
-
-        this.logHighwayCandlePipelineProof("evaluate_paper_symbol_entry_input", {
-          trace_fetched_at_ms: fetchedAt,
-          symbol: String(sym),
-          poll_ok_snapshot_present: false,
-          classify: "no_symbol_snapshot_tick_poll_failed"
         });
 
         this.logger.info(
@@ -1123,134 +1115,83 @@ export class PaperEngine {
         rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly
       });
 
-      if (regimeDetected.regime === "RANGE") {
-        console.log("STAGE_ROUTING_INPUT_TRACE", {
-          symbol: String(sym),
-          regime: regimeDetected.regime,
-          currentStage: existingPos?.entryStage ?? 0,
-          hasOpenPosition: !!existingPos
-        });
-      }
-
       decisionBySymbol.set(symKeyEarly, res);
 
       // 3. Execution Logic
-      const openPos = opensAfterClose.find((o) => o.symbol === sym);
-
-      // --- [Engine-V2 Bridge & Execution Authority] ---
       const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE || "legacy") as EngineV2OpMode;
       const v2Input: EngineV2Input = {
         symbol: symKeyEarly,
-        snapshot: snap as any,
-        config: this.config as any,
+        snapshot: {
+          lastPrice: snap.lastPrice,
+          boxHigh: snap.boxHigh ?? snap.lastPrice,
+          boxLow: snap.boxLow ?? snap.lastPrice,
+          boxPos: snap.boxPos ?? 0.5,
+          rangeConfidence: snap.rangeConfidence ?? 0,
+          emaGap: snap.emaGap ?? 0,
+          volumeRatioProxy: snap.volumeRatioProxy ?? 1,
+          boxCohesion01: snap.boxCohesion01 ?? 0,
+          breakoutFailureRate: snap.breakoutFailureRate ?? 0,
+          trendWeaknessScore: snap.trendWeaknessScore ?? 0,
+          reviewing_ticks: snap.reviewing_ticks ?? 0
+        },
+        config: {
+          paperMaxOpenPositions: this.config.paperMaxOpenPositions,
+          paperReentryCooldownMs: this.config.paperReentryCooldownMs,
+          baseSizeUsd: (this.config as any).baseSizeUsd || DEFAULT_PAPER_SIZE_USD
+        },
         state: {
-          currentPositions: opensAfterClose.filter(o => o.symbol === sym),
+          currentPositions: opensAfterClose.filter(o => o.symbol === sym).map(o => ({
+            symbol: o.symbol,
+            side: o.side === "long" ? "long" : "short",
+            entryPrice: o.entryPrice,
+            sizeUsd: o.sizeUsd,
+            entryStage: o.entryStage ?? 0,
+            pnlPct: 0
+          })) as any[],
           lossStreaks: risk?.recentLossStreakByMode || {}
-        }
+        },
+        now: fetchedAt
       };
 
       const v2Out = runEngineV2(v2Input);
 
-      // 1. Shadow Mode Comparison Logs
-      if (v2Mode === "shadow_v2" || v2Mode === "engine_v2") {
+      if (v2Mode !== "legacy") {
         await this.store.appendJsonlLine("reports/decisions-v2.jsonl", {
-          symbol: String(sym),
+          symbol: symKeyEarly,
           ts: fetchedAt,
-          regime_v1: regimeDetected.regime,
-          regime_v2: v2Out.judgment.regime,
-          confidence_v2: v2Out.confidence.score,
-          router_target_v2: v2Out.routing.executor,
-          signal_state_v2: v2Out.execution.signal,
-          intent_side_v2: v2Out.execution.side,
-          entry_allowed_v1: res.executorDecision?.entry_allowed ?? false,
-          entry_allowed_v2: !v2Out.riskSizing.isBlocked && v2Out.execution.signal !== "NONE",
-          base_size_usd_v2: v2Out.riskSizing.baseSizeUsd,
-          size_multiplier_v2: v2Out.riskSizing.sizeMultiplier,
-          final_size_usd_v2: v2Out.riskSizing.finalSizeUsd,
-          block_reason_v1: res.decision.reject_reason ?? null,
-          block_reason_v2: v2Out.riskSizing.blockReason ?? null,
-          explain_label_v2: v2Out.explanation.uiLabels.regime
+          regime_v1: res.decision.regime_state,
+          regime_v2: v2Out.decision.regime,
+          confidence_v2: v2Out.decision.confidence,
+          decision_v1: res.decision.final_decision,
+          decision_v2: v2Out.decision.decision,
+          signal_v1: res.decision.signal_state,
+          signal_v2: v2Out.decision.signal,
+          side_v1: res.intentSide,
+          side_v2: v2Out.decision.side,
+          size_v1: res.decision.required_cost_usd,
+          size_v2: v2Out.decision.risk.finalSizeUsd,
+          v2_block_reason: v2Out.decision.risk.blockReason,
+          v2_ui_label: v2Out.decision.explanation.uiLabelStatus
         });
-      }
 
-      // 2. Execution Authority Transition (Standard 3)
-      if (v2Mode === "engine_v2") {
-        // Map V2 signal/side/size to legacy result 'res' for injection into decision loop
-        const v2Signal = v2Out.execution.signal;
-        const v2Side = v2Out.execution.side;
-
-        // Map EngineV2SignalState to PaperSignalState (simplified for authority injection)
-        let legacyMappedSignal: PaperSignalState = "NONE";
-        if (v2Signal === "LONG_CANDIDATE") legacyMappedSignal = "LONG_CANDIDATE";
-        else if (v2Signal === "SHORT_CANDIDATE") legacyMappedSignal = "SHORT_CANDIDATE";
-
-        res = {
-          ...res,
-          intentSide: v2Side === "long" ? "long" : (v2Side === "short" ? "short" : null),
-          decision: {
-            ...res.decision,
-            signal_state: legacyMappedSignal,
-            final_decision: !v2Out.riskSizing.isBlocked ? "ENTER" : "SKIP",
-            reject_reason: (v2Out.riskSizing.blockReason || null) as any,
-            required_cost_usd: v2Out.riskSizing.finalSizeUsd
-          },
-          executorDecision: res.executorDecision ? {
-            ...res.executorDecision,
-            entry_allowed: !v2Out.riskSizing.isBlocked && legacyMappedSignal !== "NONE",
-            blocked_reason: v2Out.riskSizing.blockReason || null
-          } as AnyEntryDecision : null
-        };
-      }
-      // ----------------------------------------------
-
-      const { longUsd, shortUsd } = marginsForSymbol(opensAfterClose.filter((o) => o.status === "open"), symKeyEarly);
-
-      const rr0 = this.rangeRuntimeBySymbol.get(symKeyEarly) ?? { lastZone: null as RangeBoxZone | null, cycle: 0, ladder: 0 };
-      const rsEval = evaluateRangeEngineForSymbol({
-        symbol: symKeyEarly,
-        lastPrice: snap.lastPrice,
-        boxHigh: snap.boxHigh,
-        boxLow: snap.boxLow,
-        boxPos: snap.boxPos,
-        marketMode: marketModeOut,
-        longMarginUsd: longUsd,
-        shortMarginUsd: shortUsd,
-        rangeCycleCountPrior: rr0.cycle,
-        rangeLadderLevelPrior: rr0.ladder,
-        lastZone: rr0.lastZone
-      });
-      this.rangeRuntimeBySymbol.set(symKeyEarly, {
-        lastZone: rsEval.boxZone,
-        cycle: rsEval.rangeCycleCount,
-        ladder: rsEval.rangeLadderLevel
-      });
-      this.lastTickRangeEvalBySymbol.set(symKeyEarly, rsEval);
-
-      // Logs & Persistence
-      try {
-        await this.store.appendJsonlLine("reports/decisions.jsonl", { ...res.decision, pipeline: "v1" });
-      } catch (e) {
-        this.logger.error("decisions_jsonl_append_failed", { error: String(e), symbol: String(sym) });
-      }
-
-      this.logger.info(
-        "PAPER_TRADE_BLOCK_DECOMPOSITION",
-        this.paperTradeBlockDecompositionPayload(sym, snap, res, {
-          nowTick: fetchedAt,
-          regime: regimeDetected.regime,
-          regimeUnknown,
-          isAmbiguous: regimeDetected.isAmbiguous,
-          maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions,
-          paperMaxOpenPositions: this.config.paperMaxOpenPositions,
-          openPositionsTotal: opensAfterClose.length,
-          hasOpenForSymbol: !!openPos,
-          dataReady: true
-        })
-      );
-
-      if (regimeDetected.regime === "RANGE") {
-        const zProof = this.rangeZoneEvalProofPayload(sym, snap, res, rangeReversalImmediateSwitchEarly, rsEval as any);
-        this.logger.info("RANGE_ZONE_EVAL_PROOF", zProof);
+        if (v2Mode === "engine_v2") {
+          res = {
+            ...res,
+            intentSide: v2Out.decision.side === "long" ? "long" : (v2Out.decision.side === "short" ? "short" : null),
+            decision: {
+              ...res.decision,
+              signal_state: v2Out.decision.signal === "LONG_CANDIDATE" ? "LONG_CANDIDATE" : (v2Out.decision.signal === "SHORT_CANDIDATE" ? "SHORT_CANDIDATE" : "NONE"),
+              final_decision: v2Out.decision.decision === "ENTER" ? "ENTER" : "SKIP",
+              reject_reason: v2Out.decision.risk.blockReason as any,
+              required_cost_usd: v2Out.decision.risk.finalSizeUsd
+            },
+            executorDecision: res.executorDecision ? {
+              ...res.executorDecision,
+              entry_allowed: v2Out.decision.decision === "ENTER",
+              blocked_reason: v2Out.decision.risk.blockReason || null
+            } as AnyEntryDecision : null
+          };
+        }
       }
 
       // Decision is always recorded for potential close/entry
@@ -1467,6 +1408,7 @@ export class PaperEngine {
             regime: this.lastRegime.regime,
             executor: ex.executor,
             reason: "AI_REJECT",
+            rawMetrics: (aiOut as any).judgment?.metrics || {},
             reject_code: d.reject_reason,
             expected_move: ex.expected_move,
             total_cost: ex.total_cost,
