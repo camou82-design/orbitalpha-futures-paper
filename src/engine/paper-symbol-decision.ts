@@ -261,6 +261,12 @@ function buildRangeUpperLongSuppressBranchProof(args: {
     rangeReversalSwitchMatches
   } = args;
   const edge_subconditions = rangeStage0EdgeSubconditions(edge);
+  const relaxedOscMin = Math.max(0.24, RANGE_STAGE0_EDGE_THRESHOLDS.oscillation - 0.06);
+  const relaxedEdgeStructureOk =
+    !edge.ok &&
+    edge.conf >= RANGE_STAGE0_EDGE_THRESHOLDS.conf &&
+    edge.cohesion >= RANGE_STAGE0_EDGE_THRESHOLDS.cohesion &&
+    edge.oscillation >= relaxedOscMin;
   const branch_order_upper = [
     "0. reversalImmediate preferredSide=short && zone=upper → RANGE_SHORT_CANDIDATE / range_reversal_immediate_switch_upper_short",
     "1. sn.signal === paper_short_candidate → RANGE_SHORT_CANDIDATE / range_upper_short_from_base_signal",
@@ -311,7 +317,7 @@ function buildRangeUpperLongSuppressBranchProof(args: {
     range_upper_short_priority_false_because = "invariant: entry short but flag false (should not happen)";
   } else if (rangeSignal.signal === "RANGE_SIGNAL_NONE" && rangeSignal.reason === "range_upper_suppress_long_candidate_no_inertia") {
     range_upper_short_priority_false_because =
-      "inner RANGE_SIGNAL_NONE from long suppress: edgeStructureOk was false so step 2 did not return SHORT; step 3 matched raw long → suppress; entryResult RANGE_ENTRY_NONE → range_upper_short_priority_applied false";
+      `inner RANGE_SIGNAL_NONE from long suppress: (edgeStructureOk=${edge.ok}) and (upperExtremeEdge=${boxPos >= 0.74}) so step 2 did not return SHORT; step 3 matched raw long but reinterpretation failed; entryResult=${entryResult}`;
   } else if (rangeSignal.signal === "RANGE_SIGNAL_NONE" && rangeSignal.reason === "range_upper_short_structure_not_ready") {
     range_upper_short_priority_false_because =
       "edgeStructureOk false and raw not long candidate path → structure_not_ready; short priority branch skipped";
@@ -321,12 +327,12 @@ function buildRangeUpperLongSuppressBranchProof(args: {
     range_upper_short_priority_false_because =
       "inner short candidate but range score gate: lowConfidence && !rangeReversalSwitchMatches → range_score_below_threshold";
   } else {
-    range_upper_short_priority_false_because = `entryResult=${entryResult}, inner=${rangeSignal.signal}/${rangeSignal.reason}, gate=${gateResult}/${gateReason}`;
+    range_upper_short_priority_false_because = `entryResult=${entryResult}, inner=${rangeSignal.signal}/${rangeSignal.reason}, gate=${gateResult}/${gateReason}, edgeOk=${edge.ok}, extreme=${boxPos >= 0.74}`;
   }
   const failedParts = edge_subconditions.filter((r) => !r.pass).map((r) => `${r.id}=${r.value_clamped_01.toFixed(3)}<${r.threshold_min}`);
   const one_line_summary =
-    !edge.ok
-      ? `upper+raw_long: edgeStructureOk=false [${failedParts.join(", ") || edge.failed_checks.join(",")}] → step3 long suppress → inner NONE; short_priority_flag false (no RANGE_SHORT_ENTRY)`
+    (!edge.ok && !relaxedEdgeStructureOk && rangeSignal.reason === "range_upper_suppress_long_candidate_no_inertia")
+      ? `upper+raw_long: structure weak and not extreme_edge → step3 suppress [${failedParts.join(", ") || edge.failed_checks.join(",")}]`
       : rangeSignal.signal === "RANGE_SHORT_CANDIDATE" && gateResult !== "RANGE_GATE_PASS"
         ? `upper: edgeStructureOk=true → inner SHORT (${rangeSignal.reason}) but gate ${gateResult}: ${gateReason} → short_priority_flag false`
         : rangeSignal.signal === "RANGE_SHORT_CANDIDATE" && lowConfidence && !rangeReversalSwitchMatches
@@ -464,7 +470,9 @@ function evaluateRangeStage0Signal(
       if (cohesion < 0.25) interpretation.failed_reasons.push(`low_cohesion:${cohesion.toFixed(2)}<0.25`);
       if (brkFail < 0.2) interpretation.failed_reasons.push(`low_brk_fail:${brkFail.toFixed(2)}<0.2`);
       if (trendWeak < 0.15) interpretation.failed_reasons.push(`low_trend_weak:${trendWeak.toFixed(2)}<0.15`);
-      if (!upperExtremeEdge) interpretation.failed_reasons.push(`not_extreme_upper:${boxPos.toFixed(2)}<0.74`);
+      if (!upperExtremeEdge && !edgeStructureOk && !relaxedEdgeStructureOk) {
+        interpretation.failed_reasons.push(`not_extreme_upper_and_no_solid_structure:${boxPos.toFixed(2)}<0.74`);
+      }
 
       if (interpretation.failed_reasons.length === 0) {
         interpretation.passed = true;
@@ -500,7 +508,9 @@ function evaluateRangeStage0Signal(
       if (cohesion < 0.25) interpretation.failed_reasons.push(`low_cohesion:${cohesion.toFixed(2)}<0.25`);
       if (brkFail < 0.2) interpretation.failed_reasons.push(`low_brk_fail:${brkFail.toFixed(2)}<0.2`);
       if (trendWeak < 0.15) interpretation.failed_reasons.push(`low_trend_weak:${trendWeak.toFixed(2)}<0.15`);
-      if (!lowerExtremeEdge) interpretation.failed_reasons.push(`not_extreme_lower:${boxPos.toFixed(2)}>0.26`);
+      if (!lowerExtremeEdge && !edgeStructureOk && !relaxedEdgeStructureOk) {
+        interpretation.failed_reasons.push(`not_extreme_lower_and_no_solid_structure:${boxPos.toFixed(2)}>0.26`);
+      }
 
       if (interpretation.failed_reasons.length === 0) {
         interpretation.passed = true;
