@@ -73,8 +73,8 @@ import {
 import { evaluateMarketModeSelector } from "./mode-selector";
 import { evaluateRiskExposure } from "./risk-exposure";
 import { buildPaperExplanation } from "./explanation-layer";
-import { runEngineV2 } from "../engine-v2/index";
-import { EngineV2Input, EngineV2OpMode, EngineV2Decision } from "../engine-v2/types/index";
+import { runEngineV2, adaptV2Input } from "../engine-v2/index";
+import { EngineV2Input, EngineV2OpMode, EngineV2Decision, V2SelectorDecision } from "../engine-v2/types/index";
 import {
   evaluateRangeEngineForSymbol,
   evaluateRangeStructuralExit,
@@ -1115,73 +1115,72 @@ export class PaperEngine {
         rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly
       });
 
-      decisionBySymbol.set(symKeyEarly, res);
-
-      // 3. Execution Logic
-      // 3. Choice Selector Logic (Bridge)
-      const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE || "legacy") as EngineV2OpMode;
-      const v2Input: EngineV2Input = {
-        symbol: symKeyEarly,
-        snapshot: {
-          lastPrice: snap.lastPrice,
-          boxHigh: snap.boxHigh ?? snap.lastPrice,
-          boxLow: snap.boxLow ?? snap.lastPrice,
-          boxPos: snap.boxPos ?? 0.5,
-          rangeConfidence: snap.rangeConfidence ?? 0,
-          emaGap: snap.emaGap ?? 0,
-          volumeRatioProxy: snap.volumeRatioProxy ?? 1,
-          boxCohesion01: snap.boxCohesion01 ?? 0,
-          breakoutFailureRate: snap.breakoutFailureRate ?? 0,
-          trendWeaknessScore: snap.trendWeaknessScore ?? 0,
-          reviewing_ticks: snap.reviewing_ticks ?? 0
-        },
-        config: {
-          paperMaxOpenPositions: this.config.paperMaxOpenPositions,
-          paperReentryCooldownMs: this.config.paperReentryCooldownMs,
-          baseSizeUsd: (this.config as any).baseSizeUsd || 100
-        },
-        state: {
-          currentPositions: opensAfterClose.filter(o => o.symbol === sym).map(o => ({
-            symbol: o.symbol,
-            side: o.side === "long" ? "LONG" : "SHORT", // Map to LONG/SHORT
-            entryPrice: o.entryPrice,
-            sizeUsd: o.sizeUsd,
-            entryStage: o.entryStage ?? 0,
-            pnlPct: 0
-          })),
-          lossStreaks: risk?.recentLossStreakByMode || {}
-        },
-        now: fetchedAt
-      };
-
-      const { decision: v2Decision } = runEngineV2(v2Input);
+      /** Engine-V2 Execution Path (Standard 2: Selector Bridge) */
+      const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as EngineV2OpMode) || "legacy";
+      let selectorResult: V2SelectorDecision | null = null;
 
       if (v2Mode !== "legacy") {
-        await this.store.appendJsonlLine("reports/decisions-v2.jsonl", {
+        const v2Input = adaptV2Input(
+          symKeyEarly,
+          fetchedAt,
+          snap,
+          this.config,
+          {
+            currentPositions: opensAfterClose.filter(o => o.symbol === sym),
+            globalRiskScore: 0,
+            lossStreaks: risk.recentLossStreakByMode || {}
+          },
+          res
+        );
+        const engineV2Out = runEngineV2(v2Input);
+        const v2Decision = engineV2Out.decision;
+
+        // Perform Selection
+        const adopted = v2Mode === "engine_v2"
+          ? selectV2Decision(res, v2Decision)
+          : res;
+
+        selectorResult = {
+          v1: {
+            regime: res.decision?.regime_state || "UNKNOWN",
+            decision: res.decision?.final_decision || "SKIP",
+            side: res.intentSide,
+            size: res.decision?.required_cost_usd || 0
+          },
+          v2: v2Decision,
+          adopted: {
+            engine: v2Mode === "engine_v2" ? "V2" : "V1",
+            regime: adopted.decision?.regime_state || "UNKNOWN",
+            decision: adopted.decision?.final_decision || "SKIP",
+            side: adopted.intentSide,
+            size: (adopted.executorDecision ? (adopted.executorDecision.total_cost ?? 0) : 0) || (adopted.decision?.required_cost_usd ?? 0),
+            reason: v2Mode === "engine_v2" ? v2Decision.explanation.reason : "Legacy mode active"
+          },
+          mismatch: (res.executorDecision?.entry_allowed ?? false) !== (v2Decision.decision === "ENTER")
+        };
+
+        // Standard 10: Shadow Comparison Logging (Fixed Fields)
+        this.logger.info("v2_shadow_parity", {
           symbol: symKeyEarly,
           ts: fetchedAt,
-          regime_v1: res.decision.regime_state,
-          regime_v2: v2Decision.regime,
-          decision_v1: res.decision.final_decision,
-          decision_v2: v2Decision.decision,
-          signal_v1: res.decision.signal_state,
-          signal_v2: v2Decision.signal,
-          side_v1: res.intentSide,
-          side_v2: v2Decision.side,
-          size_v1: res.decision.required_cost_usd,
-          size_v2: v2Decision.risk.finalSizeUsd,
+          regime_v1: selectorResult.v1.regime,
+          regime_v2: selectorResult.v2.regime,
+          decision_v1: selectorResult.v1.decision,
+          decision_v2: selectorResult.v2.decision,
+          side_v1: selectorResult.v1.side,
+          side_v2: selectorResult.v2.side,
+          size_v1: selectorResult.v1.size,
+          size_v2: selectorResult.v2.risk.finalSizeUsd,
+          mismatch: selectorResult.mismatch,
+          adopted_engine: selectorResult.adopted.engine,
+          adoption_reason: selectorResult.adopted.reason,
           v2_block_reason: v2Decision.risk.blockReason,
-          v2_final_decision: v2Decision.decision,
-          v2_confidence: v2Decision.confidence,
-          v2_size_multiplier: v2Decision.risk.sizeMultiplier,
-          v2_base_size: v2Decision.risk.baseSizeUsd,
-          selector_adopted_v2: v2Mode === "engine_v2",
-          mismatch: res.decision.final_decision !== (v2Decision.decision === "ENTER" ? "ENTER" : "SKIP")
+          v2_explain_label: v2Decision.explanation.reason
         });
 
+        // Adopt if authorized
         if (v2Mode === "engine_v2") {
-          // Adopt V2 decision strictly via selector logic
-          res = adoptEngineV2Decision(res, v2Decision);
+          res = adopted;
         }
       }
 
@@ -4436,34 +4435,36 @@ export class PaperEngine {
   }
 }
 
-/**
- * Helper to strictly adopt Engine-V2 decision in a selector pattern.
- * Prevents field contamination by explicitly mapping only sanctioned fields.
+/** 
+ * Final Selector Adoption Logic (Standard 10: No contamination)
+ * Returns a new result with V2 values adopting dominance while preserving V1 for logs.
  */
-function adoptEngineV2Decision(
-  legacy: EvaluatePaperSymbolEntryResult,
+function selectV2Decision(
+  v1: EvaluatePaperSymbolEntryResult,
   v2: EngineV2Decision
 ): EvaluatePaperSymbolEntryResult {
-  const side = v2.side === "long" ? "long" : (v2.side === "short" ? "short" : null);
-  const signal = v2.signal === "LONG_CANDIDATE" ? "LONG_CANDIDATE" : (v2.signal === "SHORT_CANDIDATE" ? "SHORT_CANDIDATE" : "NONE");
+  const side: "long" | "short" | null = v2.side === "long" ? "long" : (v2.side === "short" ? "short" : null);
+  const signal: PaperSignalState = v2.signal === "LONG_CANDIDATE" ? "LONG_CANDIDATE" : (v2.signal === "SHORT_CANDIDATE" ? "SHORT_CANDIDATE" : "NONE");
+  const regime: PaperRegimeState = v2.regime === "RANGE" ? "RANGE" : (v2.regime === "TREND" ? "TREND" : (v2.regime === "TRANSITION" ? "RANGE" : "UNKNOWN"));
 
+  // 3-Layer Selector logic ensures no legacy pollution.
+  // We construct a new result based on V2 authority.
   return {
-    ...legacy,
+    ...v1,
     intentSide: side,
     decision: {
-      ...legacy.decision,
-      signal_state: signal,
+      ...v1.decision,
       final_decision: v2.decision === "ENTER" ? "ENTER" : "SKIP",
-      reject_reason: (v2.risk.blockReason || "V2_BLOCK") as any,
-      required_cost_usd: v2.risk.finalSizeUsd,
-      regime_state: v2.regime as any
+      signal_state: signal,
+      reject_reason: v2.risk.blockReason ? "LEGACY_BLOCKED" : null,
+      regime_state: regime,
+      required_cost_usd: v2.risk.finalSizeUsd
     },
-    executorDecision: legacy.executorDecision ? {
-      ...legacy.executorDecision,
+    executorDecision: v1.executorDecision ? {
+      ...v1.executorDecision,
       entry_allowed: v2.decision === "ENTER",
       blocked_reason: v2.risk.blockReason || null,
-      side: side as any,
-      required_cost_usd: v2.risk.finalSizeUsd
-    } as any : null
+      total_cost: v2.risk.finalSizeUsd
+    } : null
   };
 }

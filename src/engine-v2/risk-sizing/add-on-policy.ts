@@ -15,27 +15,51 @@ export function evaluateAddonPolicy(
 
     let allowed = false;
     let addOnSizeUsd = 0;
-    let ratioVsInitial = 0;
     let reason = "Add-on conditions not met";
 
     // Standard 8: State-based Add-on Policy
     const position = state.currentPositions[0];
+    const lossStreakCount = input.state.lossStreaks[input.symbol] || 0;
+    const isLossStreak = lossStreakCount > 2;
+    const confidenceThreshold = (input.snapshot.qualityScore || 0) > 0.7;
+
+    // 1. Position-based state
+    const hasPosition = !!position;
+    const sideMatch = position?.side === (input.snapshot.signal === "LONG_CANDIDATE" ? "LONG" : "SHORT");
     const avgPriceImprovement = position ? (position.side === "LONG" ? input.snapshot.lastPrice > position.entryPrice : input.snapshot.lastPrice < position.entryPrice) : false;
-    const sameDirection = position ? (position.side === (riskSizing.isAddOn ? position.side : "NONE")) : true; // logic placeholder
-    const confidenceThreshold = 0.7; // Example high threshold for add-on
+    const pnlProtection = position ? position.pnlPct >= -0.015 : true; // Prevent add-on if pnl < -1.5%
+    const maxAddonsReached = state.currentPositions.length >= 3;
 
     if (regime === "TRANSITION") {
-        reason = "TRANSITION add-ons strictly prohibited (Highway Standard)";
-    } else if (!position) {
-        reason = "No position to add on";
-    } else if (position.pnlPct < -0.02) {
-        reason = "Add-on blocked: Loss exceeding threshold (Protection)";
-    } else if (state.currentPositions.length >= 3) {
-        reason = "Add-on blocked: Max count reached";
+        reason = "TRANSITION (Scouting mode) add-ons strictly prohibited";
+    } else if (!hasPosition) {
+        reason = "No active position to aggregate";
+    } else if (!sideMatch) {
+        reason = "Add-on blocked: Signal direction mismatch with existing position";
+    } else if (isLossStreak) {
+        reason = `Add-on blocked: Symbol loss streak (${lossStreakCount}) protection active`;
+    } else if (!confidenceThreshold) {
+        reason = "Add-on blocked: Signal quality below threshold (0.7)";
+    } else if (!pnlProtection) {
+        reason = "Add-on blocked: Existing position underwater (>1.5%)";
+    } else if (maxAddonsReached) {
+        reason = "Add-on blocked: Max position count (3) reached";
     } else if (regime === "RANGE" && riskSizing.finalSizeUsd > 0) {
-        allowed = true;
-        addOnSizeUsd = riskSizing.baseSizeUsd * 0.5;
-        reason = "RANGE state-based add-on allowed";
+        if (riskSizing.sizeMultiplier > 0.8 && avgPriceImprovement) {
+            allowed = true;
+            addOnSizeUsd = riskSizing.baseSizeUsd * 0.5;
+            reason = "RANGE state-based add-on allowed (Price Improved + High Multiplier)";
+        } else {
+            reason = "RANGE add-on skipped: Size multiplier low or price not improved";
+        }
+    } else if (regime === "TREND" && riskSizing.finalSizeUsd > 0) {
+        if (avgPriceImprovement) {
+            allowed = true;
+            addOnSizeUsd = riskSizing.baseSizeUsd * 0.3;
+            reason = "TREND pyramid add-on allowed (Price Improved)";
+        } else {
+            reason = "TREND add-on skipped: Price worsening (No averaging down in trend)";
+        }
     }
 
     return { allowed, addOnSizeUsd, reason };

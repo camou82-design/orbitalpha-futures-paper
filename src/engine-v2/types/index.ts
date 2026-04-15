@@ -28,22 +28,35 @@ export interface EngineV2Input {
     state: {
         currentPositions: EngineV2Position[];
         lossStreaks: Record<string, number>;
+        globalRiskScore: number;
     };
     now: number;
+    v1Result: {
+        regime: string;
+        decision: string;
+        side: string;
+        isBlocked: boolean;
+    };
 }
 
 export interface EngineV2SnapshotAdapter {
     lastPrice: number;
-    boxHigh: number;
-    boxLow: number;
-    boxPos: number;
-    rangeConfidence: number;
-    emaGap: number;
-    volumeRatioProxy: number;
-    boxCohesion01: number;
-    breakoutFailureRate: number;
-    trendWeaknessScore: number;
-    reviewing_ticks: number;
+    latestCandleClose: number;
+    boxHigh: number | null;
+    boxLow: number | null;
+    boxPos: number | null;
+    rangeConfidence: number | null;
+    ema20: number | null;
+    emaGap: number | null;
+    volatilityProxy: number | null;
+    boxCohesion01: number | null;
+    breakoutFailureRate: number | null;
+    trendWeaknessScore: number | null;
+    reviewing_ticks: number | null;
+    regimeExitRisk: number | null;
+    boxBreakSide: "upper" | "lower" | "none" | null;
+    signal: string;
+    qualityScore: number;
 }
 
 export interface EngineV2ConfigAdapter {
@@ -76,6 +89,26 @@ export interface EngineV2Decision {
         uiLabelStatus: string;
     };
     rawMetrics: Record<string, number | boolean>;
+}
+
+/** Final Adoption Result - Selector Wrapper */
+export interface V2SelectorDecision {
+    v1: {
+        regime: string;
+        decision: string;
+        side: string | null;
+        size: number;
+    };
+    v2: EngineV2Decision;
+    adopted: {
+        engine: "V1" | "V2";
+        regime: string;
+        decision: string;
+        side: string | null;
+        size: number;
+        reason: string;
+    };
+    mismatch: boolean;
 }
 
 /** Tier 1: Market Judgment */

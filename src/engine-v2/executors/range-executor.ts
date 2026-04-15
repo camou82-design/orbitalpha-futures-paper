@@ -45,7 +45,7 @@ export function executeRangeRegime(input: EngineV2Input): ExecutorOutput {
         recheckSuggested: recheckSuggested,
         isAddOnEligible: true, // RANGE allow add-ons
         metadata: {
-            boxPos: input.snapshot.boxPos
+            boxPos: input.snapshot.boxPos ?? 0.5
         }
     };
 }
