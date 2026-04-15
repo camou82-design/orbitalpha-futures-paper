@@ -56,7 +56,7 @@ import { evaluateAiHighwayQuality } from "./ai-highway-filter";
 import { highwayExitEngine } from "./highway-exit-engine";
 import type { AnyEntryDecision } from "../strategy/executors/types";
 import { executorForExitEventPayload } from "../strategy/executors/executor-normalize";
-import { aiApproveEntry, aiInputFromDecision } from "../ai/entry-approval";
+import { aiApproveEntry, aiInputFromDecision, type AiApprovalInput, type AiApprovalOutput } from "../ai/entry-approval";
 import {
   aggregateRejectReasonCountsTick,
   computeFunnelTick,
@@ -1414,7 +1414,7 @@ export class PaperEngine {
         const aiIn = ex ? aiInputFromDecision({ decision: ex, executorDirection: intentSide, lossStreak, last10Net }) : null;
         if (aiIn) {
           const aiOut = aiApproveEntry(aiIn);
-          await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, this.lastRegime.regime, aiIn as any, aiOut as any, authority));
+          await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, this.lastRegime.regime, aiIn, aiOut, authority));
         }
       }
 
@@ -3257,7 +3257,7 @@ export class PaperEngine {
       if (aiIn) {
         const aiOut = aiApproveEntry(aiIn);
         const aiDir = aiOut.action === "ENTER_LONG" ? "long" : aiOut.action === "ENTER_SHORT" ? "short" : "none";
-        await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, this.lastRegime.regime, aiIn as any, aiOut as any, authority));
+        await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, this.lastRegime.regime, aiIn, aiOut, authority));
       }
 
       this.logger.info("STAGE1_ENTER_DECIDED", {
@@ -4500,8 +4500,8 @@ function buildEntryAllowedEventPayload(
 function buildAiApprovedEventPayload(
   symbol: string,
   regime: string,
-  aiIn: Record<string, unknown>,
-  aiOut: Record<string, unknown>,
+  aiIn: AiApprovalInput,
+  aiOut: AiApprovalOutput,
   authority: EntryExecutionAuthority
 ): Record<string, unknown> {
   return {
