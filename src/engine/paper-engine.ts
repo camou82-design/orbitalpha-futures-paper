@@ -3198,13 +3198,16 @@ export class PaperEngine {
     this.lastEntryDecision = null;
 
     for (const first of entryQueue) {
+      const res = input.decisionBySymbol.get(String(first.symbol))!;
+
+      // Define effective variables once per symbol loop
+      const effectiveDecision = (res as any).effectiveDecision ?? res.decision.final_decision;
+      const effectiveSide = (res as any).effectiveSide ?? res.intentSide;
+      const effectiveSizeUsd = (res as any).effectiveSizeUsd ?? (res.decision.required_cost_usd || 0);
+
       if (this.lastRegime.regime === "RANGE") {
         const origSnap = input.snapshots.find((s) => s.symbol === first.symbol);
         const qz = typeof first.boxPos === "number" ? classifyBoxZone(first.boxPos) : null;
-
-        const resForLog = input.decisionBySymbol.get(String(first.symbol))!;
-        const effDecisionLog = (resForLog as any).effectiveDecision ?? resForLog.decision.final_decision;
-        const effSideLog = (resForLog as any).effectiveSide ?? resForLog.intentSide;
 
         this.logger.info("RANGE_OPEN_QUEUE_PROOF", {
           symbol: first.symbol,
@@ -3212,21 +3215,16 @@ export class PaperEngine {
           original_snapshot_signal: origSnap?.signal ?? null,
           queued_signal_after_merge: first.signal,
           signal_corrected_for_intent: origSnap != null && origSnap.signal !== first.signal,
-          intent_side: effSideLog,
-          final_decision: effDecisionLog,
-          reject_reason: resForLog.decision.reject_reason ?? null,
-          adaptive_ok: resForLog.adaptiveOk,
+          intent_side: effectiveSide,
+          final_decision: effectiveDecision,
+          reject_reason: res.decision.reject_reason ?? null,
+          adaptive_ok: res.adaptiveOk,
           adaptive_direction: null,
-          range_reversal_immediate_switch_applied: resForLog.decision.range_reversal_immediate_switch_applied ?? false,
-          will_attempt_open: effDecisionLog === "ENTER" && resForLog.adaptiveResult != null,
+          range_reversal_immediate_switch_applied: res.decision.range_reversal_immediate_switch_applied ?? false,
+          will_attempt_open: effectiveDecision === "ENTER" && res.adaptiveResult != null,
           active_engine: this.lastMarketMode?.routing.activeEngine ?? null
         });
       }
-      const res = input.decisionBySymbol.get(String(first.symbol))!;
-
-      const effectiveDecision = (res as any).effectiveDecision ?? res.decision.final_decision;
-      const effectiveSide = (res as any).effectiveSide ?? res.intentSide;
-      const effectiveSizeUsd = (res as any).effectiveSizeUsd ?? (res.decision.required_cost_usd || 0);
 
       const intentSide = effectiveSide as "long" | "short";
       const existingOpen = next.find((o) => o.symbol === first.symbol && o.side === intentSide);
