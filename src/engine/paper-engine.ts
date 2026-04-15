@@ -218,18 +218,38 @@ type SymbolSnapshot = Readonly<{
   reviewing_ticks?: number;
 }>;
 
-interface EntryExecutionAuthority {
-  decision: "ENTER" | "SKIP"; // PaperFinalDecision compatible
-  side: "long" | "short" | "none"; // PaperSide compatible
+type EntryExecutionAuthority = Readonly<{
+  decision: "ENTER" | "SKIP" | "REJECT" | "DISABLED";
+  side: "long" | "short" | null;
   sizeUsd: number;
   regime: string;
   source: "v2" | "legacy";
-}
+}>;
 
 interface SymbolDecisionEnvelope {
   legacy: EvaluatePaperSymbolEntryResult;
   selector: V2SelectorDecision | null;
   authority: EntryExecutionAuthority;
+}
+
+function normalizeAuthoritySide(
+  side: unknown
+): "long" | "short" | null {
+  return side === "long" || side === "short" ? side : null;
+}
+
+function normalizeAuthorityDecision(
+  decision: unknown
+): "ENTER" | "SKIP" | "REJECT" | "DISABLED" {
+  if (
+    decision === "ENTER" ||
+    decision === "SKIP" ||
+    decision === "REJECT" ||
+    decision === "DISABLED"
+  ) {
+    return decision as "ENTER" | "SKIP" | "REJECT" | "DISABLED";
+  }
+  return "SKIP";
 }
 
 function buildExecutionAuthority(
@@ -239,18 +259,28 @@ function buildExecutionAuthority(
   const adopted = selector?.adopted_result;
   if (adopted) {
     return {
-      decision: adopted.adopted_decision === "ENTER" ? "ENTER" : "SKIP",
-      side: adopted.adopted_side as any,
-      sizeUsd: adopted.adopted_size_usd,
-      regime: adopted.adopted_regime,
+      decision: normalizeAuthorityDecision(adopted.adopted_decision),
+      side: normalizeAuthoritySide(adopted.adopted_side),
+      sizeUsd:
+        typeof adopted.adopted_size_usd === "number" && Number.isFinite(adopted.adopted_size_usd)
+          ? adopted.adopted_size_usd
+          : 0,
+      regime:
+        typeof adopted.adopted_regime === "string" && adopted.adopted_regime.length > 0
+          ? adopted.adopted_regime
+          : (res.decision.regime_state ?? "UNKNOWN"),
       source: "v2"
     };
   }
+
   return {
-    decision: res.decision.final_decision === "ENTER" ? "ENTER" : "SKIP",
-    side: res.intentSide as any,
-    sizeUsd: res.decision.required_cost_usd || 0,
-    regime: "legacy",
+    decision: normalizeAuthorityDecision(res.decision.final_decision),
+    side: normalizeAuthoritySide(res.intentSide),
+    sizeUsd:
+      typeof res.decision.required_cost_usd === "number" && Number.isFinite(res.decision.required_cost_usd)
+        ? res.decision.required_cost_usd
+        : 0,
+    regime: res.decision.regime_state ?? "UNKNOWN",
     source: "legacy"
   };
 }
@@ -1163,6 +1193,26 @@ export class PaperEngine {
       let selectorResult: V2SelectorDecision | null = null;
 
       if (v2Mode === "engine_v2" || v2Mode === "shadow_v2") {
+        const v2LegacyAdapter = {
+          decision: {
+            regime_state: res.decision?.regime_state ?? "UNKNOWN",
+            final_decision: res.decision?.final_decision ?? "SKIP",
+            reject_reason: res.decision?.reject_reason ?? null,
+            required_cost_usd:
+              typeof res.decision?.required_cost_usd === "number" && Number.isFinite(res.decision.required_cost_usd)
+                ? res.decision.required_cost_usd
+                : 0
+          },
+          executorDecision: {
+            entry_allowed: res.executorDecision?.entry_allowed ?? false,
+            total_cost:
+              typeof res.executorDecision?.total_cost === "number" && Number.isFinite(res.executorDecision.total_cost)
+                ? res.executorDecision.total_cost
+                : 0
+          },
+          intentSide: normalizeAuthoritySide(res.intentSide)
+        };
+
         const v2Input = adaptV2Input(
           symKeyEarly,
           fetchedAt,
@@ -1191,7 +1241,7 @@ export class PaperEngine {
             globalRiskScore: 0,
             lossStreaks: risk.recentLossStreakByMode || {}
           },
-          res as any
+          v2LegacyAdapter
         );
 
         const engineV2Out = runEngineV2(v2Input);
@@ -1199,10 +1249,6 @@ export class PaperEngine {
 
         // Perform Selection (Strictly Decoupled)
         selectorResult = selectV2Decision(res, v2Decision, v2Mode);
-
-        if (v2Mode === "engine_v2") {
-          selectorResult.adopted_result.engine = "V2";
-        }
 
         // Standard 10: Shadow Comparison Logging
         this.logger.info("v2_shadow_parity", {
@@ -2832,9 +2878,12 @@ export class PaperEngine {
           const crashTrailStop = (open.trailingExtremePrice ?? open.entryPrice) + trailGap;
           // 숏이므로 가격이 상승하여 이 지점을 터치하면 청산
           if (closePrice >= crashTrailStop) {
-            (exitEval as any).action = "close";
-            (exitEval as any).reason = "trailing_stop";
-            (exitEval as any).detail = { crash_momentum_trail: true, stop: crashTrailStop };
+            exitEval = {
+              ...exitEval,
+              action: "close",
+              reason: "trailing_stop",
+              detail: { crash_momentum_trail: true, stop: crashTrailStop }
+            };
           }
         }
       }
@@ -2963,7 +3012,7 @@ export class PaperEngine {
             sizeUsd: newMargin,
             partialExitStage: stage,
             realizedPnl: (open.realizedPnl ?? 0) + mp.pnlUsdNet,
-            trailingExtremePrice: (partial as any).trailingExtreme,
+            trailingExtremePrice: (partial as { trailingExtreme?: number }).trailingExtreme,
             ...(partialDetail["range_first_profit_lock_applied"] === true
               ? ({
                 rangeFirstProfitLocked: true,
@@ -2992,7 +3041,7 @@ export class PaperEngine {
       }
 
       // 4. Default persistence (with Trailing SL update)
-      const posTrail = { ...open, trailingExtremePrice: (exitEval as any).trailingExtreme };
+      const posTrail = { ...open, trailingExtremePrice: (exitEval as { trailingExtreme?: number }).trailingExtreme };
 
       if (regimeAtEntry === "RANGE") {
         const raZone =
@@ -3209,11 +3258,6 @@ export class PaperEngine {
       const res = envelope.legacy;
       const authority = envelope.authority;
 
-      // authority object is now the single source of truth for execution.
-      const effectiveDecision = authority.decision;
-      const effectiveSide = authority.side;
-      const effectiveSizeUsd = authority.sizeUsd;
-
       if (this.lastRegime.regime === "RANGE") {
         const origSnap = input.snapshots.find((s) => s.symbol === first.symbol);
         const qz = typeof first.boxPos === "number" ? classifyBoxZone(first.boxPos) : null;
@@ -3224,25 +3268,24 @@ export class PaperEngine {
           original_snapshot_signal: origSnap?.signal ?? null,
           queued_signal_after_merge: first.signal,
           signal_corrected_for_intent: origSnap != null && origSnap.signal !== first.signal,
-          intent_side: effectiveSide as "long" | "short" | "none", // Explicit
-          final_decision: effectiveDecision,
+          intent_side: authority.side,
+          final_decision: authority.decision,
           reject_reason: res.decision.reject_reason ?? null,
           adaptive_ok: res.adaptiveOk,
           adaptive_direction: null,
           range_reversal_immediate_switch_applied: res.decision.range_reversal_immediate_switch_applied ?? false,
-          will_attempt_open: effectiveDecision === "ENTER" && res.adaptiveResult != null,
+          will_attempt_open: authority.decision === "ENTER" && res.adaptiveResult != null,
           active_engine: this.lastMarketMode?.routing.activeEngine ?? null
         });
       }
 
-      const intentSide = effectiveSide as "long" | "short";
+      const intentSide = authority.side as "long" | "short";
       const existingOpen = next.find((o) => o.symbol === first.symbol && o.side === intentSide);
       const entryStage = existingOpen?.entryStage ?? 0;
       const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === intentSide);
       const otherLeg = next.some((o) => o.symbol === first.symbol && o.side !== intentSide);
 
-      // will_attempt_open also unified
-      const will_attempt_open = effectiveDecision === "ENTER" && res.adaptiveResult != null;
+      const will_attempt_open = authority.decision === "ENTER" && res.adaptiveResult != null;
       const activeEngine = this.lastMarketMode?.routing.activeEngine ?? "IDLE";
       let hedgeEntryBlocked = false;
       if (otherLeg && this.lastRiskExposure) {
@@ -3271,7 +3314,7 @@ export class PaperEngine {
       }
 
       if (existingIdx >= 0) {
-        const scaled = await this.tryPaperPositionScaleIn(next[existingIdx], res, first, nowTs);
+        const scaled = await this.tryPaperPositionScaleIn(next[existingIdx], envelope, first, nowTs);
         if (scaled) {
           next[existingIdx] = scaled;
           openPositionsChanged = true;
@@ -3280,8 +3323,7 @@ export class PaperEngine {
       }
 
       if (next.length >= max) {
-        if (effectiveDecision === "ENTER") {
-          // Track as blocked by limit even if it was internally allowed
+        if (authority.decision === "ENTER") {
           const limitBlocked = {
             ...res,
             decision: {
@@ -3306,7 +3348,7 @@ export class PaperEngine {
         }
       }
 
-      if (effectiveDecision !== "ENTER" || !res.adaptiveResult) {
+      if (authority.decision !== "ENTER" || !res.adaptiveResult) {
         await this.emitPipelineEventsFromDecision(first, res, nowTs, entryStage);
         continue;
       }
@@ -3343,16 +3385,22 @@ export class PaperEngine {
         executor: decision.executor,
         reason: "executor_allowed",
         expected_move: decision.expected_move,
-        total_cost: effectiveSizeUsd, // Use effectiveSizeUsd
+        total_cost: authority.sizeUsd,
         risk_state: decision.risk_state,
         detail: decision.detail
       });
+
       const lossStreak = this.lastRisk?.recentLossStreakByMode?.[this.lastRegime.regime] ?? 0;
       const last10Net =
         typeof this.lastRisk?.detail?.last10_net_usd === "number" && Number.isFinite(this.lastRisk.detail.last10_net_usd)
           ? this.lastRisk.detail.last10_net_usd
           : 0;
-      const aiIn = aiInputFromDecision({ decision, executorDirection: effectiveSide as any, lossStreak, last10Net });
+      const aiIn = aiInputFromDecision({
+        decision,
+        executorDirection: authority.side as "long" | "short",
+        lossStreak,
+        last10Net
+      });
       if (aiIn) {
         const aiOut = aiApproveEntry(aiIn);
         const aiDir = aiOut.action === "ENTER_LONG" ? "long" : aiOut.action === "ENTER_SHORT" ? "short" : "none";
@@ -3364,9 +3412,9 @@ export class PaperEngine {
           executor: decision.executor,
           reason: "ai_approved",
           expected_move: decision.expected_move,
-          total_cost: effectiveSizeUsd, // Use effectiveSizeUsd
+          total_cost: authority.sizeUsd,
           risk_state: decision.risk_state,
-          executor_direction: effectiveSide as any, // Final cast
+          executor_direction: authority.side,
           ai_direction: aiDir,
           mismatch: false,
           detail: { ai_reason: aiOut.reason, ai_confidence: aiOut.confidence }
@@ -3380,7 +3428,7 @@ export class PaperEngine {
         stage1_result_code: res.decision.stage1_result_code,
         fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
         expected_move_usd: res.decision.expected_move_usd ?? null,
-        required_cost_usd: effectiveSizeUsd, // Use effectiveSizeUsd for authority
+        required_cost_usd: authority.sizeUsd,
         shortfall_usd: res.decision.shortfall_usd ?? 0,
         required_move_pct: res.decision.required_move_pct,
         shortfall_pct: res.decision.shortfall_pct,
@@ -3484,12 +3532,12 @@ export class PaperEngine {
           open_trace_id: openTraceId,
           sample_symbol_btc_eth: sampleBtcEth,
           symbol: first.symbol,
-          side: effectiveSide as "long" | "short", // Cast
+          side: authority.side as "long" | "short", // Authority
           sizeUsd: adaptive.sizeUsd,
           stage1_result_code: res.decision.stage1_result_code,
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
           expected_move_usd: res.decision.expected_move_usd ?? null,
-          required_cost_usd: effectiveSizeUsd, // Use effectiveSizeUsd
+          required_cost_usd: authority.sizeUsd,
           shortfall_usd: res.decision.shortfall_usd ?? 0,
           executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
           stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
@@ -3527,8 +3575,8 @@ export class PaperEngine {
         const mPre = marginsForSymbol(next, symS);
         if (
           riskE &&
-          ((effectiveSide === "long" && mPre.longUsd + entrySizeUsd > riskE.maxLongExposure) ||
-            (effectiveSide === "short" && mPre.shortUsd + entrySizeUsd > riskE.maxShortExposure))
+          ((authority.side === "long" && mPre.longUsd + entrySizeUsd > riskE.maxLongExposure) ||
+            (authority.side === "short" && mPre.shortUsd + entrySizeUsd > riskE.maxShortExposure))
         ) {
           trace.open_fail_stage = "risk_exposure_cap_pre_submit";
           trace.position_open_final_state = "aborted_pre_exchange";
@@ -3556,8 +3604,8 @@ export class PaperEngine {
         if (this.okxDemo) {
           const instId = toOkxSwapInstId(first.symbol);
           trace.inst_id = instId;
-          const side = effectiveSide === "long" ? "buy" : "sell";
-          const posSide = effectiveSide === "long" ? "long" : "short";
+          const side = authority.side === "long" ? "buy" : "sell";
+          const posSide = authority.side === "long" ? "long" : "short";
           const qty = Math.max(0.001, Math.round((entrySizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
           trace.qty_submitted = qty;
           const clOrdId = `paper-${first.symbol}-${Date.now()}`;
@@ -3697,7 +3745,7 @@ export class PaperEngine {
         const record: PaperOpenPositionRecord = {
           openedAt: Date.now(),
           symbol: first.symbol,
-          side: effectiveSide as "long" | "short", // Authority
+          side: authority.side as "long" | "short", // Authority
           entryPrice: first.lastPrice,
           leverage: levScaled,
           sizeUsd: entrySizeUsd,
@@ -3717,7 +3765,7 @@ export class PaperEngine {
           regimeAtEntry: this.lastRegime.regime,
           executorAtEntry: decision.executor,
           ...(typeof decision.expected_move === "number" ? { expectedMoveAtEntry: decision.expected_move } : {}),
-          ...(typeof effectiveSizeUsd === "number" ? { totalCostAtEntry: effectiveSizeUsd } : {}),
+          ...(typeof authority.sizeUsd === "number" ? { totalCostAtEntry: authority.sizeUsd } : {}),
           ...(confScore !== undefined ? { entryConfidenceScore: confScore } : {}),
           ...(confTier !== undefined ? { entryConfidenceTier: confTier } : {}),
           ...(sizeMult !== undefined ? { entrySizeMultiplier: sizeMult } : {}),
@@ -3804,7 +3852,7 @@ export class PaperEngine {
           stage1_result_code: res.decision.stage1_result_code,
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
           expected_move_usd: res.decision.expected_move_usd ?? null,
-          required_cost_usd: effectiveSizeUsd, // Use effectiveSizeUsd
+          required_cost_usd: authority.sizeUsd,
           shortfall_usd: res.decision.shortfall_usd ?? 0,
           executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
           stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
@@ -3857,12 +3905,12 @@ export class PaperEngine {
             sizeUsd: record.sizeUsd,
             leverage: record.leverage,
             expected_move: decision.expected_move,
-            total_cost: effectiveSizeUsd, // Use effectiveSizeUsd
+            total_cost: authority.sizeUsd,
             risk_state: (this.lastRisk?.riskStatus ?? "NORMAL"),
             stage1_result_code: res.decision.stage1_result_code,
             fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
             expected_move_usd: res.decision.expected_move_usd ?? null,
-            required_cost_usd: effectiveSizeUsd, // Use effectiveSizeUsd
+            required_cost_usd: authority.sizeUsd,
             shortfall_usd: res.decision.shortfall_usd ?? 0,
             executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
             stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
@@ -3906,7 +3954,7 @@ export class PaperEngine {
           stage1_result_code: res.decision.stage1_result_code,
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
           expected_move_usd: res.decision.expected_move_usd ?? null,
-          required_cost_usd: effectiveSizeUsd, // Use effectiveSizeUsd
+          required_cost_usd: authority.sizeUsd,
           shortfall_usd: res.decision.shortfall_usd ?? 0,
           final_fail_reason: msg,
           reviewing_ticks: res.decision.reviewing_ticks,
@@ -3934,11 +3982,12 @@ export class PaperEngine {
 
   private async tryPaperPositionScaleIn(
     existing: PaperOpenPositionRecord,
-    res: EvaluatePaperSymbolEntryResult,
+    envelope: SymbolDecisionEnvelope,
     first: SymbolSnapshot,
     nowTs: number
   ): Promise<PaperOpenPositionRecord | null> {
-    if (res.decision.final_decision !== "ENTER" || !res.adaptiveResult) return null;
+    const { legacy: res, authority } = envelope;
+    if (authority.decision !== "ENTER" || !res.adaptiveResult) return null;
     if (!this.lastRiskExposure?.allowAdd) {
       this.logger.info("scale_in_blocked_risk_allow_add", { symbol: existing.symbol });
       return null;
@@ -4504,9 +4553,12 @@ function selectV2Decision(
 ): V2SelectorDecision {
   const legacy_result = {
     regime: v1.decision?.regime_state || "UNKNOWN",
-    decision: v1.decision?.final_decision || "SKIP",
-    side: v1.intentSide || null,
-    size: v1.decision?.required_cost_usd || 0
+    decision: normalizeAuthorityDecision(v1.decision?.final_decision),
+    side: normalizeAuthoritySide(v1.intentSide),
+    size:
+      typeof v1.decision?.required_cost_usd === "number" && Number.isFinite(v1.decision.required_cost_usd)
+        ? v1.decision.required_cost_usd
+        : 0
   };
 
   const useV2 = engineMode === "engine_v2";
@@ -4514,9 +4566,9 @@ function selectV2Decision(
   // Fresh object creation (No legacy mutation)
   const adopted_result: V2AdoptedResult = {
     engine: useV2 ? "V2" : "V1",
-    adopted_decision: useV2 ? v2.decision : (legacy_result.decision as EngineV2FinalDecision),
+    adopted_decision: useV2 ? v2.decision : legacy_result.decision,
     adopted_regime: useV2 ? v2.regime : legacy_result.regime,
-    adopted_side: useV2 ? v2.side : (legacy_result.side as EngineV2Side),
+    adopted_side: useV2 ? v2.side : legacy_result.side,
     adopted_size_usd: useV2 ? v2.risk.finalSizeUsd : legacy_result.size,
     adoption_reason: useV2 ? v2.explanation.reason : "v1_fallback"
   };
