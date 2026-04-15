@@ -143,7 +143,7 @@ export interface EngineV2Decision {
     rawMetrics: Record<string, number | boolean>;
 }
 
-export interface V2AdoptedResult {
+export interface EngineV2AdoptionOutcome {
     engine: "V1" | "V2";
     adopted_decision: EngineV2FinalDecision;
     adopted_regime: string;
@@ -152,7 +152,7 @@ export interface V2AdoptedResult {
     adoption_reason: string;
 }
 
-export interface V2SelectorDecision {
+export interface EngineV2SelectorResult {
     legacy_result: {
         regime: string;
         decision: EngineV2FinalDecision;
@@ -160,7 +160,7 @@ export interface V2SelectorDecision {
         size: number;
     };
     v2_result: EngineV2Decision;
-    adopted_result: V2AdoptedResult;
+    adopted_result: EngineV2AdoptionOutcome;
     mismatch: boolean;
 }
 
@@ -225,6 +225,15 @@ export interface ExplanationOutput {
         status: string;
     };
 }
+
+/** Unified Execution Authority (Phase 4 Independence) */
+export type EntryExecutionAuthority = Readonly<{
+    decision: EngineV2FinalDecision;
+    side: EngineV2Side;
+    sizeUsd: number;
+    regime: string;
+    source: "v1" | "v2";
+}>;
 
 /** Internal Pipeline Result */
 export interface EngineV2InternalResult {

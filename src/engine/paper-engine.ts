@@ -78,12 +78,21 @@ import {
   EngineV2Input,
   EngineV2OpMode,
   EngineV2Decision,
-  V2SelectorDecision,
-  V2AdoptedResult,
+  EngineV2SelectorResult,
+  EngineV2AdoptionOutcome,
   EngineV2FinalDecision,
   LegacyResultAdapter,
-  EngineV2Side
+  EngineV2Side,
+  EntryExecutionAuthority
 } from "../engine-v2/types";
+import {
+  reconcileV2Decision,
+  deriveExecutionAuthority,
+  buildV2LegacyAdapter,
+  buildV2ShadowParityPayload,
+  normalizeAuthoritySide,
+  normalizeAuthorityDecision
+} from "../engine-v2/reconciler";
 import {
   evaluateRangeEngineForSymbol,
   evaluateRangeStructuralExit,
@@ -219,72 +228,12 @@ type SymbolSnapshot = Readonly<{
   reviewing_ticks?: number;
 }>;
 
-type EntryExecutionAuthority = Readonly<{
-  decision: "ENTER" | "SKIP" | "REJECT" | "DISABLED";
-  side: "long" | "short" | null;
-  sizeUsd: number;
-  regime: string;
-  source: "v2" | "legacy";
-}>;
-
 interface SymbolDecisionEnvelope {
   legacy: EvaluatePaperSymbolEntryResult;
-  selector: V2SelectorDecision | null;
+  selector: EngineV2SelectorResult | null;
   authority: EntryExecutionAuthority;
 }
 
-function normalizeAuthoritySide(
-  side: unknown
-): "long" | "short" | null {
-  return side === "long" || side === "short" ? side : null;
-}
-
-function normalizeAuthorityDecision(
-  decision: unknown
-): "ENTER" | "SKIP" | "REJECT" | "DISABLED" {
-  if (
-    decision === "ENTER" ||
-    decision === "SKIP" ||
-    decision === "REJECT" ||
-    decision === "DISABLED"
-  ) {
-    return decision as "ENTER" | "SKIP" | "REJECT" | "DISABLED";
-  }
-  return "SKIP";
-}
-
-function buildExecutionAuthority(
-  res: EvaluatePaperSymbolEntryResult,
-  selector: V2SelectorDecision | null
-): EntryExecutionAuthority {
-  const adopted = selector?.adopted_result;
-  if (adopted) {
-    return {
-      decision: normalizeAuthorityDecision(adopted.adopted_decision),
-      side: normalizeAuthoritySide(adopted.adopted_side),
-      sizeUsd:
-        typeof adopted.adopted_size_usd === "number" && Number.isFinite(adopted.adopted_size_usd)
-          ? adopted.adopted_size_usd
-          : 0,
-      regime:
-        typeof adopted.adopted_regime === "string" && adopted.adopted_regime.length > 0
-          ? adopted.adopted_regime
-          : (res.decision.regime_state ?? "UNKNOWN"),
-      source: "v2"
-    };
-  }
-
-  return {
-    decision: normalizeAuthorityDecision(res.decision.final_decision),
-    side: normalizeAuthoritySide(res.intentSide),
-    sizeUsd:
-      typeof res.decision.required_cost_usd === "number" && Number.isFinite(res.decision.required_cost_usd)
-        ? res.decision.required_cost_usd
-        : 0,
-    regime: res.decision.regime_state ?? "UNKNOWN",
-    source: "legacy"
-  };
-}
 
 export type SymbolDiagnostic = Readonly<{
   symbol: MarketSymbol;
@@ -1190,54 +1139,9 @@ export class PaperEngine {
       });
 
       /** Engine-V2 Execution Path (Standard 2: Selector Bridge) */
-      const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as EngineV2OpMode) || "legacy";
-      let selectorResult: V2SelectorDecision | null = null;
-
-      if (v2Mode === "engine_v2" || v2Mode === "shadow_v2") {
-        const v2LegacyAdapter = buildV2LegacyAdapter(res);
-
-        const v2Input = adaptV2Input(
-          symKeyEarly,
-          fetchedAt,
-          {
-            ...snap,
-            boxPosDiag: snap.boxPos ?? null,
-            rangeConfidenceDiag: snap.rangeConfidence ?? null,
-            emaGapDiag: snap.emaGap ?? null,
-            volatilityProxyDiag: snap.volumeRatioProxy ?? 0,
-            boxCohesionDiag: snap.boxCohesion01 ?? 0,
-            breakoutFailureRateDiag: snap.breakoutFailureRate ?? 0,
-            trendWeaknessDiag: snap.trendWeaknessScore ?? 0
-          },
-          {
-            ...this.config,
-            baseSizeUsd: DEFAULT_PAPER_SIZE_USD
-          },
-          {
-            currentPositions: opensAfterClose.filter(o => o.symbol === sym).map(p => ({
-              symbol: p.symbol,
-              side: p.side as "long" | "short",
-              entryPrice: p.entryPrice,
-              sizeUsd: p.sizeUsd,
-              entryStage: p.entryStage
-            })),
-            globalRiskScore: 0,
-            lossStreaks: risk.recentLossStreakByMode || {}
-          },
-          v2LegacyAdapter
-        );
-
-        const engineV2Out = runEngineV2(v2Input);
-        const v2Decision = engineV2Out.decision;
-
-        // Perform Selection (Strictly Decoupled)
-        selectorResult = selectV2Decision(res, v2Decision, v2Mode);
-
-        // Standard 10: Shadow Comparison Logging
-        this.logger.info("v2_shadow_parity", buildV2ShadowParityPayload(symKeyEarly, fetchedAt, selectorResult));
-      }
-
-      const authority = buildExecutionAuthority(res, selectorResult);
+      const envelope = await this.resolveSymbolDecisionEnvelope(sym, snap, res, opensAfterClose);
+      const authority = envelope.authority;
+      const selectorResult = envelope.selector;
       decisionBySymbol.set(symKeyEarly, { legacy: res, selector: selectorResult, authority });
     } // End of sym loop
 
@@ -1405,7 +1309,7 @@ export class PaperEngine {
 
     if (authority.decision === "REJECT" || authority.decision === "DISABLED") {
       if (ex?.entry_allowed && (d.reject_reason === "AI_REJECT" || d.reject_reason === "AI_DIRECTION_MISMATCH")) {
-        const intentSide = authority.side ?? "long";
+        const intentSide = (authority.side === "long" || authority.side === "short") ? authority.side : "long";
         const lossStreak = this.lastRisk?.recentLossStreakByMode?.[this.lastRegime.regime] ?? 0;
         const last10Net =
           typeof this.lastRisk?.detail?.last10_net_usd === "number" && Number.isFinite(this.lastRisk.detail.last10_net_usd)
@@ -4344,101 +4248,51 @@ export class PaperEngine {
 
     return { ok: true, snapshot, symbolDiagnostics };
   }
-}
+  private async resolveSymbolDecisionEnvelope(
+    symbol: MarketSymbol,
+    snapshot: SymbolSnapshot,
+    legacy: EvaluatePaperSymbolEntryResult,
+    opensAfterClose: PaperOpenPositionRecord[]
+  ): Promise<SymbolDecisionEnvelope> {
+    const fetchedAt = snapshot.fetchedAt;
+    const configAdapter = {
+      baseSizeUsd: (this.config as any).paperBaseSizeUsd ?? 100,
+      paperMaxOpenPositions: this.config.paperMaxOpenPositions,
+      paperReentryCooldownMs: this.config.paperReentryCooldownMs
+    };
+    const stateAdapter = {
+      currentPositions: opensAfterClose.map(p => ({
+        symbol: p.symbol as MarketSymbol,
+        side: p.side as "long" | "short",
+        entryPrice: p.entryPrice,
+        sizeUsd: p.sizeUsd,
+        entryStage: p.entryStage
+      })),
+      globalRiskScore: 0.5,
+      lossStreaks: {} as Record<string, number>
+    };
 
-/** 
- * Final Selector Adoption Logic (Standard 10: No contamination)
- * Returns a strictly decoupled 3-layer selector result.
- */
-function selectV2Decision(
-  v1: EvaluatePaperSymbolEntryResult,
-  v2: EngineV2Decision,
-  engineMode: string
-): V2SelectorDecision {
-  const legacy_result: V2SelectorDecision["legacy_result"] = {
-    regime: v1.decision?.regime_state || "UNKNOWN",
-    decision: normalizeAuthorityDecision(v1.decision?.final_decision),
-    side: normalizeAuthoritySide(v1.intentSide),
-    size:
-      typeof v1.decision?.required_cost_usd === "number" && Number.isFinite(v1.decision.required_cost_usd)
-        ? v1.decision.required_cost_usd
-        : 0
-  };
+    const legacyAdapter = buildV2LegacyAdapter(legacy as any);
+    const snapshotAdapter = {
+      ...snapshot,
+      boxPosDiag: snapshot.boxPos ?? 0.5,
+      rangeConfidenceDiag: snapshot.rangeConfidence ?? 0.5,
+      emaGapDiag: snapshot.emaGap ?? 0,
+      volatilityProxyDiag: snapshot.atr ?? 0
+    };
 
-  const useV2 = engineMode === "engine_v2";
+    const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as EngineV2OpMode) || "legacy";
+    const v2Input = adaptV2Input(symbol, fetchedAt, snapshotAdapter as any, configAdapter, stateAdapter, legacyAdapter);
+    const v2Res = runEngineV2(v2Input);
+    const selector = reconcileV2Decision(legacy as any, v2Res.decision, v2Mode);
+    const authority = deriveExecutionAuthority(selector);
 
-  // Fresh object creation (No legacy mutation)
-  const adopted_result: V2AdoptedResult = {
-    engine: useV2 ? "V2" : "V1",
-    adopted_decision: useV2 ? v2.decision : legacy_result.decision,
-    adopted_regime: useV2 ? v2.regime : legacy_result.regime,
-    adopted_side: useV2 ? v2.side : legacy_result.side,
-    adopted_size_usd: useV2 ? v2.risk.finalSizeUsd : legacy_result.size,
-    adoption_reason: useV2 ? v2.explanation.reason : "v1_fallback"
-  };
+    if (selector) {
+      await this.store.appendJsonlLine("reports/v2_shadow_parity.jsonl", buildV2ShadowParityPayload(symbol, fetchedAt, selector));
+    }
 
-  return {
-    legacy_result,
-    v2_result: v2,
-    adopted_result,
-    mismatch: legacy_result.decision !== v2.decision || legacy_result.side !== v2.side
-  };
-}
-
-/** 
- * LEGACY ADAPTER HELPER (Phase 2 Extraction)
- * Decouples raw legacy decision from V2 adaptive input.
- */
-function buildV2LegacyAdapter(res: EvaluatePaperSymbolEntryResult): LegacyResultAdapter {
-  return {
-    decision: {
-      regime_state: res.decision?.regime_state ?? "UNKNOWN",
-      final_decision: res.decision?.final_decision ?? "SKIP",
-      reject_reason: res.decision?.reject_reason ?? null,
-      required_cost_usd:
-        typeof res.decision?.required_cost_usd === "number" && Number.isFinite(res.decision.required_cost_usd)
-          ? res.decision.required_cost_usd
-          : 0
-    },
-    executorDecision: {
-      entry_allowed: res.executorDecision?.entry_allowed ?? false,
-      total_cost:
-        typeof res.executorDecision?.total_cost === "number" && Number.isFinite(res.executorDecision.total_cost)
-          ? res.executorDecision.total_cost
-          : 0
-    },
-    intentSide: normalizeAuthoritySide(res.intentSide)
-  };
-}
-
-/**
- * SHADOW PARITY LOGGING HELPER (Phase 2 Extraction)
- * Standardizes comparison logging between V1 and V2.
- */
-function buildV2ShadowParityPayload(
-  symbol: string,
-  ts: number,
-  selectorResult: V2SelectorDecision
-): Record<string, unknown> {
-  return {
-    symbol,
-    ts,
-    regime_v1: selectorResult.legacy_result.regime,
-    regime_v2: selectorResult.v2_result.regime,
-    decision_v1: selectorResult.legacy_result.decision,
-    decision_v2: selectorResult.v2_result.decision,
-    side_v1: selectorResult.legacy_result.side,
-    side_v2: selectorResult.v2_result.side,
-    size_v1: selectorResult.legacy_result.size,
-    size_v2: selectorResult.v2_result.risk.finalSizeUsd,
-    adopted_engine: selectorResult.adopted_result.engine,
-    adopted_decision: selectorResult.adopted_result.adopted_decision,
-    adopted_regime: selectorResult.adopted_result.adopted_regime,
-    adopted_side: selectorResult.adopted_result.adopted_side,
-    adopted_size: selectorResult.adopted_result.adopted_size_usd,
-    adoption_reason: selectorResult.adopted_result.adoption_reason,
-    mismatch: selectorResult.mismatch
-  };
+    return { legacy, selector, authority };
+  }
 }
 
 /**
@@ -4446,14 +4300,17 @@ function buildV2ShadowParityPayload(
  * Promotes authority-first status for terminal/dashboard state.
  */
 function buildEngineStateSymbolDecision(envelope: SymbolDecisionEnvelope): Record<string, unknown> {
-  const { legacy, authority } = envelope;
+  const { legacy, authority, selector } = envelope;
   return {
-    decision: legacy.decision, // Legacy field retained for dashboard compatibility
+    decision: legacy.decision.final_decision,
     adaptiveOk: legacy.adaptiveOk,
     authority_decision: authority.decision,
     authority_side: authority.side,
     authority_size_usd: authority.sizeUsd,
-    authority_source: authority.source
+    authority_source: authority.source,
+    selector_engine: selector?.adopted_result.engine ?? "v1",
+    adopted_engine: selector?.adopted_result.engine ?? "v1",
+    adoption_reason: selector?.adopted_result.adoption_reason ?? "legacy_fallback"
   };
 }
 

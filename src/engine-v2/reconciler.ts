@@ -1,0 +1,140 @@
+import {
+    EngineV2Decision,
+    EngineV2FinalDecision,
+    EngineV2Side,
+    EngineV2SelectorResult,
+    EngineV2AdoptionOutcome,
+    LegacyResultAdapter,
+    EntryExecutionAuthority
+} from "./types";
+
+/** 
+ * LEGACY NORMALIZATION HELPERS (Phase 4 Independence)
+ * Ensures consistent behavior across engine boundaries.
+ */
+export function normalizeAuthoritySide(side: unknown): EngineV2Side {
+    return side === "long" || side === "short" ? (side as EngineV2Side) : null;
+}
+
+export function normalizeAuthorityDecision(decision: unknown): EngineV2FinalDecision {
+    const d = String(decision).toUpperCase();
+    if (d === "ENTER" || d === "SKIP" || d === "REJECT" || d === "DISABLED") return d as EngineV2FinalDecision;
+    return "SKIP";
+}
+
+/** 
+ * LEGACY ADAPTER HELPER (Phase 4 Extraction)
+ * Decouples raw legacy decision from V2 adaptive input.
+ */
+export function buildV2LegacyAdapter(res: {
+    decision?: { regime_state?: string; final_decision?: string; reject_reason?: string | null; required_cost_usd?: number };
+    executorDecision?: { entry_allowed?: boolean; total_cost?: number };
+    intentSide?: string | null;
+}): LegacyResultAdapter {
+    return {
+        decision: {
+            regime_state: res.decision?.regime_state ?? "UNKNOWN",
+            final_decision: res.decision?.final_decision ?? "SKIP",
+            reject_reason: res.decision?.reject_reason ?? null,
+            required_cost_usd:
+                typeof res.decision?.required_cost_usd === "number" && Number.isFinite(res.decision.required_cost_usd)
+                    ? res.decision.required_cost_usd
+                    : 0
+        },
+        executorDecision: {
+            entry_allowed: res.executorDecision?.entry_allowed ?? false,
+            total_cost:
+                typeof res.executorDecision?.total_cost === "number" && Number.isFinite(res.executorDecision.total_cost)
+                    ? res.executorDecision.total_cost
+                    : 0
+        },
+        intentSide: normalizeAuthoritySide(res.intentSide)
+    };
+}
+
+/** 
+ * V2 RECONCILER (Phase 4 Extraction)
+ * Final Selector Adoption Logic (Standard 10: No contamination)
+ * Returns a strictly decoupled 3-layer selector result.
+ */
+export function reconcileV2Decision(
+    v1: { decision?: { regime_state?: string; final_decision?: string; required_cost_usd?: number }; intentSide?: string | null },
+    v2: EngineV2Decision,
+    engineMode: string
+): EngineV2SelectorResult {
+    const legacy_result: EngineV2SelectorResult["legacy_result"] = {
+        regime: v1.decision?.regime_state || "UNKNOWN",
+        decision: normalizeAuthorityDecision(v1.decision?.final_decision),
+        side: normalizeAuthoritySide(v1.intentSide),
+        size:
+            typeof v1.decision?.required_cost_usd === "number" && Number.isFinite(v1.decision.required_cost_usd)
+                ? v1.decision.required_cost_usd
+                : 0
+    };
+
+    const useV2 = engineMode === "engine_v2";
+
+    // Fresh object creation (No legacy mutation)
+    const adopted_result: EngineV2AdoptionOutcome = {
+        engine: useV2 ? "V2" : "V1",
+        adopted_decision: useV2 ? v2.decision : legacy_result.decision,
+        adopted_regime: useV2 ? v2.regime : legacy_result.regime,
+        adopted_side: useV2 ? v2.side : legacy_result.side,
+        adopted_size_usd: useV2 ? v2.risk.finalSizeUsd : legacy_result.size,
+        adoption_reason: useV2 ? v2.explanation.reason : "v1_fallback"
+    };
+
+    return {
+        legacy_result,
+        v2_result: v2,
+        adopted_result,
+        mismatch: legacy_result.decision !== v2.decision || legacy_result.side !== v2.side
+    };
+}
+
+/** 
+ * EXECUTION AUTHORITY ENFORCER (Phase 4 Extraction)
+ * Final Source of Truth derivation for the engine loop.
+ */
+export function deriveExecutionAuthority(
+    selector: EngineV2SelectorResult
+): EntryExecutionAuthority {
+    const res = selector.adopted_result;
+    return {
+        decision: res.adopted_decision,
+        side: res.adopted_side,
+        sizeUsd: res.adopted_size_usd,
+        regime: res.adopted_regime,
+        source: res.engine === "V2" ? "v2" : "v1"
+    };
+}
+
+/**
+ * SHADOW PARITY LOGGING HELPER (Phase 4 Extraction)
+ * Standardizes comparison logging between V1 and V2.
+ */
+export function buildV2ShadowParityPayload(
+    symbol: string,
+    ts: number,
+    selectorResult: EngineV2SelectorResult
+): Record<string, unknown> {
+    return {
+        symbol,
+        ts,
+        regime_v1: selectorResult.legacy_result.regime,
+        regime_v2: selectorResult.v2_result.regime,
+        decision_v1: selectorResult.legacy_result.decision,
+        decision_v2: selectorResult.v2_result.decision,
+        side_v1: selectorResult.legacy_result.side,
+        side_v2: selectorResult.v2_result.side,
+        size_v1: selectorResult.legacy_result.size,
+        size_v2: selectorResult.v2_result.risk.finalSizeUsd,
+        adopted_engine: selectorResult.adopted_result.engine,
+        adopted_decision: selectorResult.adopted_result.adopted_decision,
+        adopted_regime: selectorResult.adopted_result.adopted_regime,
+        adopted_side: selectorResult.adopted_result.adopted_side,
+        adopted_size: selectorResult.adopted_result.adopted_size_usd,
+        adoption_reason: selectorResult.adopted_result.adoption_reason,
+        mismatch: selectorResult.mismatch
+    };
+}
