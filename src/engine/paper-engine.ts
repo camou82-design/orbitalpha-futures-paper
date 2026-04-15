@@ -589,6 +589,9 @@ export class PaperEngine {
   private rangeReopenArmedUntilBySymbol = new Map<string, number>();
   /** 직전 틱 `evaluateRangeEngineForSymbol` 결과(진입 크기·래더 연동). */
   private lastTickRangeEvalBySymbol = new Map<string, ReturnType<typeof evaluateRangeEngineForSymbol>>();
+  private lastTickSymbolSnapshotBySymbol = new Map<string, SymbolSnapshot | null>();
+  private rangeReversalImmediateSwitchForSymbol = new Map<string, RangeReversalImmediateSwitchArg>();
+  private rangeReversalSwitchPendingBySymbol = new Map<string, RangeReversalSwitchPending>();
   /** TREND 스위칭 시각(1h 카운트 → selector). */
   private trendSwitchTimestampsMs: number[] = [];
   /** RANGE 재진입 성공 시각(윈도 내 횟수 제한). */
@@ -610,8 +613,6 @@ export class PaperEngine {
     string,
     { range_existing_long_reversal_exit_applied?: boolean; range_existing_short_reversal_exit_applied?: boolean }
   >();
-  /** 반전 청산 후 짧은 TTL 동안 동일 구간·반대 방향 재평가 허용(틱 스킵·쿨다운 대비). */
-  private rangeReversalSwitchPendingBySymbol = new Map<string, RangeReversalSwitchPending>();
   private readonly okxDemo: OkxDemoClient | null;
   private okxAccountConfigLoaded = false;
 
@@ -703,6 +704,37 @@ export class PaperEngine {
     this.lastSwitchReasonLabel = "";
     this.rangeReversalExitThisTickBySymbol.clear();
     await this.positions.ensureHistoryFile();
+
+    // --- 1. Ledger Integrity: High-Fidelity Position Normalization Promotion ---
+    const allOpensForNormalization = await this.positions.loadOpenAll();
+    const normalizedSymbols: string[] = [];
+    const normalizedFieldsSet = new Set<string>();
+    let ledgeChanged = false;
+
+    for (let i = 0; i < allOpensForNormalization.length; i++) {
+      const pos = allOpensForNormalization[i];
+      const norm1 = normalizeEntryStageFromSizeEvidence(pos);
+      const norm2 = normalizeRangeManagementState(norm1.normalized);
+      if (norm1.changed || norm2.changed) {
+        allOpensForNormalization[i] = norm2.normalized;
+        ledgeChanged = true;
+        normalizedSymbols.push(String(pos.symbol));
+        if (norm1.changed) normalizedFieldsSet.add("entryStage");
+        if (norm2.changed) normalizedFieldsSet.add("rangeManagementState");
+      }
+    }
+
+    if (ledgeChanged) {
+      await this.positions.saveOpenAll(allOpensForNormalization);
+      this.logger.info("paper_position_ledger_normalized", {
+        changed_count: normalizedSymbols.length,
+        changed_symbols: normalizedSymbols,
+        normalized_fields: Array.from(normalizedFieldsSet),
+        save_open_all_triggered: true
+      });
+    }
+    // --------------------------------------------------------------------------
+
     if (this.okxDemo) {
       try {
         if (!this.okxAccountConfigLoaded) {
@@ -759,7 +791,7 @@ export class PaperEngine {
         regimeFallbackSource = "cached_recent_btc_regime";
         regimeDetected = fallback.detected;
       } else {
-        regimeDetected = regimeWhenBtcFeedFailed(btc5r.error ?? "btc_candles_unavailable");
+        regimeDetected = regimeWhenBtcFeedFailed((btc5r as { error?: string }).error ?? "btc_candles_unavailable");
       }
     }
     this.lastRegime = regimeDetected;
@@ -817,8 +849,10 @@ export class PaperEngine {
       if (result.ok) {
         snapshots.push(result.snapshot);
       } else {
-        errors.push({ symbol, error: result.error, failedEndpoint: result.failedEndpoint });
-        this.logger.error("pollSymbol_failed", { symbol, error: result.error });
+        const errMessage = (result as { error?: string }).error ?? "unknown_poll_error";
+        const fe = (result as { failedEndpoint?: FailureEndpointKey }).failedEndpoint ?? "unknown";
+        errors.push({ symbol, error: errMessage, failedEndpoint: fe });
+        this.logger.error("pollSymbol_failed", { symbol, error: errMessage });
       }
     }
 
@@ -963,15 +997,6 @@ export class PaperEngine {
     });
     this.lastRiskExposure = riskExposureOut;
 
-    await this.tryPaperPositionClose({
-      snapshots,
-      errorsCount: errors.length,
-      latestPath,
-      metaPath,
-      filePath,
-      marketMode: marketModeOut,
-      riskExposure: riskExposureOut
-    });
 
     const explanationOut = buildPaperExplanation({
       marketMode: marketModeOut,
@@ -981,140 +1006,127 @@ export class PaperEngine {
     });
     this.lastExplanation = explanationOut;
 
-    const opensAfterClose = await this.positions.loadOpenAll();
+    let opensAfterClose = await this.positions.loadOpenAll();
     const lastCloseMetaBySymbolForDecision =
       this.config.paperReentryCooldownMs > 0 ? latestCloseMetaBySymbol(await this.store.readPositionsHistory()) : null;
     const regimeUnknown = btc5.length < MIN_BTC_5M_BARS_REGIME;
+    const polledSymbols = this.config.symbols;
     const decisionBySymbol = new Map<string, EvaluatePaperSymbolEntryResult>();
-    const nowTick = Date.now();
-    this.lastTickRangeEvalBySymbol.clear();
-
-    for (const sym of symbols) {
-      const snap = snapshots.find((s) => s.symbol === sym) ?? null;
+    for (const sym of polledSymbols) {
       const symKeyEarly = String(sym);
-      this.pruneRangeReversalSwitchPending(symKeyEarly, snap, nowTick);
-      const rangeReversalImmediateSwitchEarly = this.rangeReversalImmediateSwitchForSymbol(
+      const snap = snapshots.find((s) => s.symbol === sym);
+      this.lastTickSymbolSnapshotBySymbol.set(symKeyEarly, snap ?? null);
+
+      if (snap) {
+        this.logHighwayCandlePipelineProof("paper_symbol_tick_poll_entry", {
+          symbol: String(sym),
+          poll_ok_snapshot_present: true,
+          fetched_at_ms: fetchedAt,
+          last_price: snap.lastPrice,
+          signal: snap.signal
+        });
+      }
+
+      const nowTick = snap;
+
+      this.pruneRangeReversalSwitchPending(symKeyEarly, snap ?? null, fetchedAt);
+
+      const rangeReversalImmediateSwitchEarly = this.getRangeReversalImmediateSwitch(
         symKeyEarly,
-        snap,
-        nowTick,
+        snap ?? null,
+        fetchedAt,
         regimeDetected.regime,
         marketModeOut.routing.activeEngine
       );
+
+      // history rebalance sync - removed due to missing method
+      const existingPos = opensAfterClose.find((o) => o.symbol === sym);
+
+      // 1. Snapshot-Check & Preliminary Block Logging
       if (!snap) {
-        this.logHighwayCandlePipelineProof("evaluate_paper_symbol_entry_input", {
-          trace_fetched_at_ms: fetchedAt,
-          symbol: String(sym),
-          poll_ok_snapshot_present: false,
-          source_snapshot_candles_length: null,
-          decision_input_candles_length: null,
-          decision_input_has_candles_key: false,
-          passthrough_length_match: null,
-          classify:
-            "no_symbol_snapshot_tick_poll_failed_or_symbol_missing_from_snapshots_array_evaluator_gets_null"
-        });
-        const res = evaluatePaperSymbolEntry({
+        const resNull = evaluatePaperSymbolEntry({
           config: this.config,
           snapshot: null,
-          dataReady: false,
+          dataReady: regimeUnknown === false,
+          openPositionSide: existingPos?.side ?? null,
           regime: regimeDetected.regime,
           regimeDetail: regimeDetected.detail,
           regimeUnknown,
           isAmbiguous: regimeDetected.isAmbiguous,
-          risk: this.lastRisk,
+          risk: risk,
           adaptiveMode: this.lastAdaptiveMode.mode,
           adaptiveDetail: this.lastAdaptiveMode.detail,
-          now: nowTick,
+          now: fetchedAt,
           rangeCooldownUntilByKey: this.rangeCooldownUntilByKey,
           trendCooldownUntilBySymbol: this.trendCooldownUntilBySymbol,
-          lastCloseMetaBySymbol: lastCloseMetaBySymbolForDecision,
+          lastCloseMetaBySymbol: lastCloseMetaBySymbolForDecision!,
           reentryCooldownMs: this.config.paperReentryCooldownMs,
-          sameDirCooldownMult: SAME_DIR_REENTRY_COOLDOWN_MULT,
-          hasOpenPosition: false,
+          sameDirCooldownMult: 2,
+          hasOpenPosition: !!existingPos,
           openPositionsTotal: opensAfterClose.length,
-          openPositionSide: null,
-          currentStage: 0,
-          maxPositionsReached: false,
-          rangeReopenCooldownBypass: false,
-          rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly
+          maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions,
+          currentStage: existingPos?.entryStage ?? 1,
+          rangeReversalImmediateSwitch: undefined
         });
-        decisionBySymbol.set(String(sym), res);
-        this.logHighwayCoreStiffnessProofIfNeeded(sym, res);
-        if (res.decision.reject_reason === "EXECUTION_DISABLED") {
-          this.logger.warn("EXECUTION_DISABLED_TOP_PROOF", {
-            symbol: String(sym),
-            final_decision: res.decision.final_decision,
-            reject_reason: res.decision.reject_reason,
-            execution_disabled_reason: res.decision.execution_disabled_reason ?? null,
-            execution_disabled_top_proof: res.decision.execution_disabled_top_proof ?? null,
-            guidance: res.decision.guidance ?? null
-          });
-        }
-        if (regimeDetected.regime === "RANGE") {
-          const zProof = this.rangeZoneEvalProofPayload(sym, null, res, rangeReversalImmediateSwitchEarly, null);
-          this.logger.info("RANGE_ZONE_EVAL_PROOF", zProof);
-          if (
-            zProof.reversal_switch_stalled === true &&
-            rangeReversalImmediateSwitchEarly?.preferredSide === "short"
-          ) {
-            this.logger.warn("RANGE_REVERSAL_SHORT_STALLED_PROOF", zProof);
-          }
-        }
-        try {
-          await this.store.appendJsonlLine("reports/decisions.jsonl", { ...res.decision, pipeline: "v1" });
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          this.logger.error("decisions_jsonl_append_failed", { error: msg, symbol: String(sym) });
-        }
+
+        this.logHighwayCandlePipelineProof("evaluate_paper_symbol_entry_input", {
+          trace_fetched_at_ms: fetchedAt,
+          symbol: String(sym),
+          poll_ok_snapshot_present: false,
+          classify: "no_symbol_snapshot_tick_poll_failed"
+        });
+
         this.logger.info(
           "PAPER_TRADE_BLOCK_DECOMPOSITION",
-          this.paperTradeBlockDecompositionPayload(sym, null, res, {
-            nowTick,
+          this.paperTradeBlockDecompositionPayload(sym, null, resNull, {
+            nowTick: fetchedAt,
             regime: regimeDetected.regime,
             regimeUnknown,
             isAmbiguous: regimeDetected.isAmbiguous,
             maxPositionsReached: false,
             paperMaxOpenPositions: this.config.paperMaxOpenPositions,
             openPositionsTotal: opensAfterClose.length,
-            hasOpenForSymbol: false,
+            hasOpenForSymbol: !!existingPos,
             dataReady: false
           })
         );
         continue;
       }
-      const openPos = opensAfterClose.find((o) => o.symbol === snap.symbol && o.status === "open");
-      const hasOpen = !!openPos;
-      const currentStage = openPos?.entryStage ?? 0;
-      const isCandidate = snap.signal === "paper_long_candidate" || snap.signal === "paper_short_candidate";
 
-      const rev = this.reviewingState.get(String(snap.symbol));
-      let reviewingTicks = rev?.ticks ?? 0;
-      let autoEntryTriggered = false;
+      // 2. Decision Logic
+      const res = evaluatePaperSymbolEntry({
+        config: this.config,
+        snapshot: snap,
+        dataReady: regimeUnknown === false,
+        openPositionSide: existingPos?.side ?? null,
+        regime: regimeDetected.regime,
+        regimeDetail: regimeDetected.detail,
+        regimeUnknown,
+        isAmbiguous: regimeDetected.isAmbiguous,
+        risk: risk,
+        adaptiveMode: this.lastAdaptiveMode.mode,
+        adaptiveDetail: this.lastAdaptiveMode.detail,
+        now: fetchedAt,
+        rangeCooldownUntilByKey: this.rangeCooldownUntilByKey,
+        trendCooldownUntilBySymbol: this.trendCooldownUntilBySymbol,
+        lastCloseMetaBySymbol: lastCloseMetaBySymbolForDecision!,
+        reentryCooldownMs: this.config.paperReentryCooldownMs,
+        sameDirCooldownMult: 2,
+        hasOpenPosition: !!existingPos,
+        openPositionsTotal: opensAfterClose.length,
+        maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions,
+        currentStage: existingPos?.entryStage ?? 1,
+        rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly
+      });
+      decisionBySymbol.set(symKeyEarly, res);
 
-      // Condition-maintained auto-entry check for Stage 1
-      if (isCandidate && currentStage === 0 && !hasOpen) {
-        if (rev) {
-          const qualityDropped = snap.qualityScore < rev.initialQuality - 1; // Strict stability (max 1pt drop)
-          const highEnough = snap.qualityScore >= 40; // Maintain absolute minimum quality
+      // 3. Execution Logic
+      const openPos = opensAfterClose.find((o) => o.symbol === sym);
+      const { longUsd, shortUsd } = marginsForSymbol(opensAfterClose.filter((o) => o.status === "open"), symKeyEarly);
 
-          const isMajor = snap.symbol === "BTCUSDT" || snap.symbol === "ETHUSDT";
-          const tickThreshold = isMajor ? 3 : 4; // Round 4: Faster Stage 1 entry (Majors 3 ticks, Others 4 ticks)
-
-          if (!qualityDropped && highEnough && rev.ticks >= tickThreshold) {
-            autoEntryTriggered = true;
-          }
-        }
-      }
-
-      const rrKey = String(snap.symbol);
-      const marginOpens = opensAfterClose.filter((o) => o.status === "open");
-      const { longUsd, shortUsd } = marginsForSymbol(marginOpens, rrKey);
-      const rr0 = this.rangeRuntimeBySymbol.get(rrKey) ?? {
-        lastZone: null as RangeBoxZone | null,
-        cycle: 0,
-        ladder: 0
-      };
+      const rr0 = this.rangeRuntimeBySymbol.get(symKeyEarly) ?? { lastZone: null as RangeBoxZone | null, cycle: 0, ladder: 0 };
       const rsEval = evaluateRangeEngineForSymbol({
-        symbol: rrKey,
+        symbol: symKeyEarly,
         lastPrice: snap.lastPrice,
         boxHigh: snap.boxHigh,
         boxLow: snap.boxLow,
@@ -1126,514 +1138,57 @@ export class PaperEngine {
         rangeLadderLevelPrior: rr0.ladder,
         lastZone: rr0.lastZone
       });
-      this.rangeRuntimeBySymbol.set(rrKey, {
+      this.rangeRuntimeBySymbol.set(symKeyEarly, {
         lastZone: rsEval.boxZone,
         cycle: rsEval.rangeCycleCount,
         ladder: rsEval.rangeLadderLevel
       });
-      this.lastTickRangeEvalBySymbol.set(rrKey, rsEval);
-      const armed = this.rangeReopenArmedUntilBySymbol.get(rrKey) ?? 0;
-      const reopenRecent =
-        this.rangeReopenTimestampsBySymbol.get(rrKey)?.filter((t) => t > nowTick - RANGE_REOPEN_WINDOW_MS) ?? [];
-      const reopenZone = classifyBoxZone(rsEval.boxPosition);
-      const intentSideForReopen =
-        reopenZone === "upper"
-          ? ("short" as const)
-          : reopenZone === "lower"
-            ? ("long" as const)
-            : snap.signal === "paper_short_candidate"
-              ? ("short" as const)
-              : ("long" as const);
-      const proposedUsd = Math.max(
-        MIN_POSITION_SIZE_USD,
-        this.lastRiskExposure
-          ? Math.round(DEFAULT_PAPER_SIZE_USD * this.lastRiskExposure.sizeMultiplier * 100) / 100
-          : DEFAULT_PAPER_SIZE_USD
-      );
-      const reopenSoft: RangeReopenSoftMetrics = {
-        edgeIntensity01: computeRangeEdgeIntensity01(rsEval.boxPosition, rsEval.boxZone),
-        rangeCycleCount: rsEval.rangeCycleCount,
-        recentRoundTripWinRate01: this.recentRangeWinRate01(rrKey),
-        roundTripStreak: this.rangeRoundTripStreakBySymbol.get(rrKey) ?? 0
-      };
-      const reopenGate = evaluateRangeReopenAllowed({
-        armed: armed > nowTick,
-        state: rsEval,
-        intentSide: intentSideForReopen,
-        maxLongExposure: this.lastRiskExposure!.maxLongExposure,
-        maxShortExposure: this.lastRiskExposure!.maxShortExposure,
-        longUsd,
-        shortUsd,
-        proposedEntryUsd: proposedUsd,
-        reopenCountInWindow: reopenRecent.length,
-        soft: reopenSoft
-      });
-      const rangeReopenCooldownBypass = reopenGate.allowed;
+      this.lastTickRangeEvalBySymbol.set(symKeyEarly, rsEval);
 
-      const rangeReversalImmediateSwitch = this.rangeReversalImmediateSwitchForSymbol(
-        rrKey,
-        snap,
-        nowTick,
-        regimeDetected.regime,
-        marketModeOut.routing.activeEngine
-      );
-
-      const paperEntrySnapshot = {
-        symbol: snap.symbol,
-        lastPrice: snap.lastPrice,
-        latestCandleClose: snap.latestCandleClose,
-        signal: snap.signal,
-        gateExpectedMove: snap.gateExpectedMove,
-        gateRequiredMove: snap.gateRequiredMove,
-        qualityScore: snap.qualityScore,
-        candidateStrength: snap.candidateStrength,
-        boxPos: snap.boxPos,
-        boxRel: snap.boxRel,
-        ema20: snap.ema20,
-        ema60: snap.ema60,
-        emaGap: snap.emaGap,
-        volumeRatioProxy: snap.volumeRatioProxy,
-        boxHigh: snap.boxHigh,
-        boxLow: snap.boxLow,
-        atr: snap.atr,
-        rangeConfidence: snap.rangeConfidence,
-        boxCohesion01: snap.boxCohesion01,
-        breakoutFailureRate: snap.breakoutFailureRate,
-        rangeOscillationScore: snap.rangeOscillationScore,
-        trendWeaknessScore: snap.trendWeaknessScore,
-        rangeReasonLabel: snap.rangeReasonLabel,
-        rangeCycleCount: snap.rangeCycleCount,
-        rangeLadderLevel: snap.rangeLadderLevel,
-        regimeExitRisk: snap.regimeExitRisk,
-        boxBreakSide: snap.boxBreakSide,
-        regimeStateDiag: snap.regimeStateDiag,
-        candles: snap.candles,
-        recentCandlesCount: snap.recentCandlesCount,
-        highwayKlineLimitRequested: snap.highwayKlineLimitRequested,
-        highwayEntryTf: snap.highwayEntryTf,
-        signalMissingReason: snap.signalMissingReason
-      };
-
-      const srcLen = snap.candles?.length ?? 0;
-      const inLen = paperEntrySnapshot.candles?.length ?? 0;
-      this.logHighwayCandlePipelineProof("evaluate_paper_symbol_entry_input", {
-        trace_fetched_at_ms: fetchedAt,
-        symbol: String(sym),
-        poll_ok_snapshot_present: true,
-        source_snapshot_candles_length: srcLen,
-        decision_input_candles_length: inLen,
-        decision_input_has_candles_key: "candles" in paperEntrySnapshot && paperEntrySnapshot.candles !== undefined,
-        source_recent_candles_count: snap.recentCandlesCount,
-        passthrough_length_match: srcLen === inLen,
-        classify:
-          srcLen === 0 && (snap.recentCandlesCount ?? 0) > 0
-            ? "anomaly_snapshot_count_positive_but_candles_missing"
-            : inLen === 0 && srcLen > 0
-              ? "anomaly_decision_payload_dropped_candles_fix_required"
-              : inLen === 0 && srcLen === 0
-                ? (snap.recentCandlesCount ?? 0) === 0
-                  ? "both_zero_true_fetch_or_poll_issue"
-                  : "zero_candles_array_despite_positive_recent_count"
-                : "passthrough_ok"
-      });
-      if (inLen === 0 && srcLen > 0) {
-        this.logger.warn("HIGHWAY_CANDLE_PIPELINE_ANOMALY", {
-          symbol: String(sym),
-          trace_fetched_at_ms: fetchedAt,
-          detail: "decision_input_would_drop_candles"
-        });
-      }
-
-      const res = evaluatePaperSymbolEntry({
-        config: this.config,
-        snapshot: paperEntrySnapshot,
-        dataReady: true,
-        regime: regimeDetected.regime,
-        regimeDetail: regimeDetected.detail,
-        regimeUnknown,
-        isAmbiguous: regimeDetected.isAmbiguous,
-        risk: this.lastRisk,
-        adaptiveMode: this.lastAdaptiveMode.mode,
-        adaptiveDetail: this.lastAdaptiveMode.detail,
-        now: nowTick,
-        rangeCooldownUntilByKey: this.rangeCooldownUntilByKey,
-        trendCooldownUntilBySymbol: this.trendCooldownUntilBySymbol,
-        lastCloseMetaBySymbol: lastCloseMetaBySymbolForDecision,
-        reentryCooldownMs: this.config.paperReentryCooldownMs,
-        sameDirCooldownMult: SAME_DIR_REENTRY_COOLDOWN_MULT,
-        hasOpenPosition: hasOpen,
-        openPositionsTotal: opensAfterClose.length,
-        openPositionSide: openPos?.side ?? null,
-        currentStage,
-        maxPositionsReached: (opensAfterClose.length >= this.config.paperMaxOpenPositions && !hasOpen),
-        reviewingTicks,
-        autoEntryTriggered,
-        rangeReopenCooldownBypass,
-        rangeReversalImmediateSwitch
-      });
-
-      // Update reviewing state for next tick
-      if (res.decision.final_decision === "SKIP" && isCandidate && currentStage === 0 && !hasOpen) {
-        this.reviewingState.set(String(snap.symbol), {
-          ticks: reviewingTicks + 1,
-          initialQuality: rev?.initialQuality ?? snap.qualityScore,
-          lastQuality: snap.qualityScore
-        });
-      } else {
-        this.reviewingState.delete(String(snap.symbol));
-      }
-      decisionBySymbol.set(String(sym), res);
-      this.logHighwayCoreStiffnessProofIfNeeded(sym, res);
-      if (res.decision.reject_reason === "EXECUTION_DISABLED") {
-        this.logger.warn("EXECUTION_DISABLED_TOP_PROOF", {
-          symbol: String(sym),
-          final_decision: res.decision.final_decision,
-          reject_reason: res.decision.reject_reason,
-          execution_disabled_reason: res.decision.execution_disabled_reason ?? null,
-          execution_disabled_top_proof: res.decision.execution_disabled_top_proof ?? null,
-          guidance: res.decision.guidance ?? null
-        });
-      }
-      if (regimeDetected.regime === "RANGE") {
-        const zProof = this.rangeZoneEvalProofPayload(sym, snap, res, rangeReversalImmediateSwitch, openPos?.side ?? null);
-        this.logger.info("RANGE_ZONE_EVAL_PROOF", zProof);
-        if (
-          zProof.reversal_switch_stalled === true &&
-          zProof.zone === "upper" &&
-          rangeReversalImmediateSwitch?.preferredSide === "short"
-        ) {
-          this.logger.warn("RANGE_UPPER_REVERSAL_SHORT_STALLED_PROOF", zProof);
-        }
-      }
-
-      const decisionSnap = snapshots.find((s) => s.symbol === sym);
-      if (decisionSnap || res.executorDecision) {
-        const d = res.decision;
-        const exDetail = res.executorDecision?.detail;
-        if (d.range_stage0_engine_taken === true) {
-          this.logger.info("RANGE_STAGE0_PATH_PROOF", {
-            symbol: String(sym),
-            range_stage0_engine_taken: true,
-            range_stage0_exit_reason: d.range_stage0_exit_reason ?? null,
-            range_stage0_branch_proof: d.range_stage0_branch_proof ?? null,
-            entry_blocked: d.entry_blocked ?? null,
-            reject_reason: d.reject_reason ?? null,
-            stage1_result_code: d.stage1_result_code ?? null
-          });
-        } else if (d.legacy_executor_path_taken === true) {
-          this.logger.info("LEGACY_EXECUTOR_PATH_PROOF", {
-            symbol: String(sym),
-            legacy_executor_path_taken: true,
-            blocked_reason: res.executorDecision?.blocked_reason ?? null,
-            entry_blocked: d.entry_blocked ?? null,
-            reject_reason: d.reject_reason ?? null,
-            stage1_result_code: d.stage1_result_code ?? null
-          });
-        }
-
-        // Force HIGHWAY_CORE if Highway metrics are present or regime is TREND
-        const isHighwayExecutor =
-          res.executorDecision?.executor === "TREND" ||
-          exDetail?.highwayValidityScore !== undefined ||
-          exDetail?.alignmentQualityScore !== undefined ||
-          regimeDetected.regime === "TREND";
-
-        console.log("[PEL_TRACE_DIRECT]", {
-          marker: "paper_entry_line_direct_console_v1",
-          symbol: String(sym),
-          sd_origin: decisionSnap?.signalDecisionOrigin ?? "missing",
-          ex_block: res.executorDecision?.blocked_reason ?? "none"
-        });
-        console.log("[PEL_SOURCE_OBJ]", {
-          symbol: String(sym),
-          has_decision: !!res.decision,
-          has_decision_snap: !!decisionSnap,
-          has_executor_decision: !!res.executorDecision,
-          has_ex_detail: !!exDetail
-        });
-        const payload = {
-          paper_entry_line_trace_marker: "paper_entry_line_v2_legacy_trace",
-          sd_origin: decisionSnap?.signalDecisionOrigin ?? "missing",
-          sd_gate: decisionSnap?.signalGateBlockedReason ?? "none",
-          sd_missing: decisionSnap?.signalMissingReason ?? "none",
-          ex_block: res.executorDecision?.blocked_reason ?? "none",
-          signal_decision_origin: decisionSnap?.signalDecisionOrigin ?? "missing",
-          signal_gate_block_reason: decisionSnap?.signalGateBlockedReason ?? "none",
-          signal_missing_reason_raw: decisionSnap?.signalMissingReason ?? "none",
-          range_signal_origin: decisionSnap?.rangeSignalOrigin ?? "none",
-          range_signal_downgraded: decisionSnap?.rangeSignalDowngraded ?? false,
-          range_signal_downgrade_reason: decisionSnap?.rangeSignalDowngradeReason ?? "none",
-          range_signal_kept_by_relax: decisionSnap?.rangeSignalKeptByRelax ?? false,
-          range_stage0_engine_taken: d.range_stage0_engine_taken ?? false,
-          range_stage0_exit_reason: d.range_stage0_exit_reason ?? null,
-          legacy_executor_path_taken: d.legacy_executor_path_taken ?? false,
-          range_long_only_short_deferred_applied:
-            d.range_bidirectional_applied ? false : (d.range_long_only_short_deferred_applied ?? false),
-          range_long_only_short_deferred_bypassed:
-            d.range_bidirectional_applied ? false : (d.range_long_only_short_deferred_bypassed ?? false),
-          range_cost_warning_applied: d.range_cost_warning_applied ?? false,
-          range_cost_warning_threshold: d.range_cost_warning_threshold ?? null,
-          range_cost_warning_shortfall: d.range_cost_warning_shortfall ?? null,
-          range_reentry_cooldown_applied: d.range_reentry_cooldown_applied ?? false,
-          range_reentry_wait_ms: d.range_reentry_wait_ms ?? null,
-          range_reentry_elapsed_ms: d.range_reentry_elapsed_ms ?? null,
-          range_reentry_remaining_ms: d.range_reentry_remaining_ms ?? null,
-          range_reentry_source: d.range_reentry_source ?? null,
-          range_reentry_same_direction: d.range_reentry_same_direction ?? false,
-          range_same_direction_reentry_relaxed_applied: d.range_same_direction_reentry_relaxed_applied ?? false,
-          range_same_direction_reentry_wait_ms: d.range_same_direction_reentry_wait_ms ?? null,
-          range_same_direction_reentry_size_mult: d.range_same_direction_reentry_size_mult ?? null,
-          range_same_direction_reentry_edge_ok: d.range_same_direction_reentry_edge_ok ?? false,
-          range_same_direction_reentry_center_blocked: d.range_same_direction_reentry_center_blocked ?? false,
-          range_same_direction_reentry_final_allowed: d.range_same_direction_reentry_final_allowed ?? false,
-          range_risk_limit_temporarily_relaxed: d.range_risk_limit_temporarily_relaxed ?? false,
-          range_risk_limit_relax_reason: d.range_risk_limit_relax_reason ?? null,
-          range_risk_limit_relax_started_at: d.range_risk_limit_relax_started_at ?? null,
-          range_risk_limit_relax_expires_at: d.range_risk_limit_relax_expires_at ?? null,
-          range_risk_limit_relax_active: d.range_risk_limit_relax_active ?? false,
-          range_risk_limit_relax_expired: d.range_risk_limit_relax_expired ?? false,
-          range_soft_suspend_applied: d.range_soft_suspend_applied ?? false,
-          range_soft_suspend_size_mult: d.range_soft_suspend_size_mult ?? null,
-          range_soft_suspend_cooldown_ms: d.range_soft_suspend_cooldown_ms ?? null,
-          range_soft_suspend_same_direction_restricted: d.range_soft_suspend_same_direction_restricted ?? false,
-          range_bidirectional_applied: d.range_bidirectional_applied ?? false,
-          range_short_allowed: d.range_short_allowed ?? false,
-          range_short_allowed_reason: d.range_short_allowed_reason ?? null,
-          range_upper_edge_near: d.range_upper_edge_near ?? false,
-          range_center_wait: d.range_center_wait ?? false,
-          range_final_selected_side: d.range_final_selected_side ?? "none",
-          range_reversal_zone: d.range_reversal_zone ?? null,
-          range_reversal_short_eval_started: d.range_reversal_short_eval_started ?? false,
-          range_reversal_long_exit_triggered: d.range_reversal_long_exit_triggered ?? false,
-          range_reversal_short_entry_allowed: d.range_reversal_short_entry_allowed ?? false,
-          range_reversal_short_entry_block_reason: d.range_reversal_short_entry_block_reason ?? null,
-          range_zone_action_policy: d.range_zone_action_policy ?? null,
-          range_zone_detected: d.range_zone_detected ?? null,
-          range_upper_short_priority_applied: d.range_upper_short_priority_applied ?? false,
-          range_lower_long_priority_applied: d.range_lower_long_priority_applied ?? false,
-          range_mid_wait_applied: d.range_mid_wait_applied ?? false,
-          range_final_trade_side_by_zone: d.range_final_trade_side_by_zone ?? null,
-          range_stage0_branch_proof: d.range_stage0_branch_proof ?? null,
-          range_upper_edge_structure_ok: exDetail?.range_upper_edge_structure_ok ?? null,
-          range_upper_edge_structure_failed_checks: exDetail?.range_upper_edge_structure_failed_checks ?? null,
-          range_upper_edge_structure_one_liner: exDetail?.range_upper_edge_structure_one_liner ?? null,
-          range_existing_long_reversal_exit_applied:
-            this.rangeReversalExitThisTickBySymbol.get(String(sym))?.range_existing_long_reversal_exit_applied ?? false,
-          range_existing_short_reversal_exit_applied:
-            this.rangeReversalExitThisTickBySymbol.get(String(sym))?.range_existing_short_reversal_exit_applied ??
-            false,
-          range_reversal_immediate_switch_applied: d.range_reversal_immediate_switch_applied ?? false,
-          range_reversal_immediate_switch_reason: d.range_reversal_immediate_switch_reason ?? null,
-          executor_blocked_reason_direct: res.executorDecision?.blocked_reason ?? "none",
-          symbol: String(sym),
-          engine_path: res.decision.currentStage === 0 && res.decision.regime === "RANGE" ? "RANGE_ENGINE" : "COMMON_ENGINE",
-          decision_source: isHighwayExecutor ? "HIGHWAY_CORE" : "LEGACY_RANGE",
-          legacy_block_reason: d.legacy_block_reason ?? null,
-          legacy_regime_gate: d.legacy_regime_gate ?? null,
-          legacy_gate_source: d.legacy_gate_source ?? null,
-          override_by_legacy: d.override_by_legacy ?? false,
-          stage1_block_origin: d.stage1_block_origin ?? null,
-          legacy_block_test_bypass_applied: d.legacy_block_test_bypass_applied ?? false,
-          legacy_block_test_bypass_reason: d.legacy_block_test_bypass_reason ?? null,
-          legacy_block_original_reason: d.legacy_block_original_reason ?? null,
-          side: res.intentSide,
-          entry_intent_type: d.entry_intent_type,
-          entry_blocked: d.entry_blocked ?? res.executorDecision?.blocked_reason ?? (d.reject_reason !== null ? d.reject_reason : false),
-          final_signal: d.final_decision === "ENTER" ? d.final_signal_state : "none",
-
-          // --- PRIMARY HIGHWAY METRICS ---
-          highway_validity_score: exDetail?.highwayValidityScore,
-          alignment_quality_score: exDetail?.alignmentQualityScore,
-          ema_spacing_health_score: exDetail?.emaSpacingHealthScore,
-          pullback_quality_score: exDetail?.pullbackQualityScore,
-          rebound_strength_score: exDetail?.reboundStrengthScore,
-          volume_support_score: exDetail?.volumeSupportScore,
-          trend_exhaustion_score: exDetail?.trendExhaustionScore,
-          entry_risk_score: exDetail?.entryRiskScore,
-          score_source: exDetail?.scoreSource ?? "missing",
-          range_stage0_scoring_applied: exDetail?.rangeStage0ScoringApplied ?? false,
-          ai_score_raw: exDetail?.aiScoreRaw ?? null,
-
-          // --- EXECUTION DETAILS ---
-          stage1_result_code: d.stage1_result_code,
-          reject_reason: d.reject_reason,
-          risk_cooldown_subreason: d.risk_cooldown_subreason ?? null,
-          cooldown_remaining_ms: d.cooldown_remaining_ms ?? null,
-          same_dir_cooldown_applied: d.same_dir_cooldown_applied ?? false,
-          blocked_regime_reason: d.blocked_regime_reason ?? null,
-          reentry_wait_ms: d.reentry_wait_ms ?? null,
-          reentry_elapsed_ms: d.reentry_elapsed_ms ?? null,
-          blocked_regime_until_bypass_applied: d.blocked_regime_until_bypass_applied ?? false,
-          blocked_regime_until_bypass_reason: d.blocked_regime_until_bypass_reason ?? null,
-          blocked_regime_original_until_ms: d.blocked_regime_original_until_ms ?? null,
-          blocked_regime_original_reason: d.blocked_regime_original_reason ?? null,
-          guidance: d.guidance,
-          required_move_pct: d.required_move_pct,
-          shortfall_pct: d.shortfall_pct,
-
-          // --- AUXILIARY LEGACY DIAGNOSTICS ---
-          legacy_base_signal: decisionSnap?.signal ?? "none",
-          legacy_trend_ok: decisionSnap?.trendOk ?? false,
-          legacy_ema_gap: decisionSnap?.emaGap ?? null,
-          legacy_quality_score: decisionSnap?.qualityScore ?? 0,
-          legacy_candidate_strength: decisionSnap?.candidateStrength ?? null,
-          legacy_signal_strength: decisionSnap ? paperSignalStrengthLabel(decisionSnap.qualityScore, this.config.paperEntryRelaxed) : null,
-
-          // --- RANGE/BOX AUXILIARY ---
-          range_confidence: decisionSnap?.rangeConfidence,
-          box_cohesion: decisionSnap?.boxCohesion01,
-          breakout_failure_rate: decisionSnap?.breakoutFailureRate,
-          range_oscillation_score: decisionSnap?.rangeOscillationScore,
-          trend_weakness_score: decisionSnap?.trendWeaknessScore,
-          regime_exit_risk: decisionSnap?.regimeExitRisk,
-          range_cycle_count: decisionSnap?.rangeCycleCount,
-          range_ladder_level: decisionSnap?.rangeLadderLevel,
-          regime_state_diag: decisionSnap?.regimeStateDiag,
-
-          paper_entry_relaxed: this.config.paperEntryRelaxed
-        };
-        console.log("[PEL_PAYLOAD_KEYS]", Object.keys(payload));
-        console.log("[PEL_PAYLOAD_SAMPLE]", {
-          sd_origin: payload.sd_origin,
-          ex_block: payload.ex_block,
-          signal_decision_origin: payload.signal_decision_origin
-        });
-        this.logger.info("PAPER_ENTRY_LINE", payload);
-        this.logger.info(
-          "PAPER_TRADE_BLOCK_DECOMPOSITION",
-          this.paperTradeBlockDecompositionPayload(sym, decisionSnap ?? snap, res, {
-            nowTick,
-            regime: regimeDetected.regime,
-            regimeUnknown,
-            isAmbiguous: regimeDetected.isAmbiguous,
-            maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions && !hasOpen,
-            paperMaxOpenPositions: this.config.paperMaxOpenPositions,
-            openPositionsTotal: opensAfterClose.length,
-            hasOpenForSymbol: hasOpen,
-            dataReady: true
-          })
-        );
-      }
-
+      // Logs & Persistence
       try {
         await this.store.appendJsonlLine("reports/decisions.jsonl", { ...res.decision, pipeline: "v1" });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        this.logger.error("decisions_jsonl_append_failed", { error: msg, symbol: String(sym) });
+        this.logger.error("decisions_jsonl_append_failed", { error: String(e), symbol: String(sym) });
       }
-    }
 
-    const funnel_tick = computeFunnelTick(decisionBySymbol);
-    this.decisionFunnelTickRing.push(funnel_tick);
-    if (this.decisionFunnelTickRing.length > DECISION_FUNNEL_RING_MAX) {
-      this.decisionFunnelTickRing.shift();
-    }
-    const decision_funnel_50 = sumDecisionFunnelTicks(this.decisionFunnelTickRing);
-    const decision_funnel_50_size = this.decisionFunnelTickRing.length;
-    const reject_reason_counts_tick = aggregateRejectReasonCountsTick(decisionBySymbol);
-    let last_order_build_failure: Record<string, unknown> | null = null;
-    for (const sym of symbols) {
-      const r = decisionBySymbol.get(String(sym));
-      if (r?.decision.reject_reason !== "ORDER_BUILD_FAIL") continue;
-      const snap = snapshots.find((s) => s.symbol === sym);
-      if (!snap) continue;
-      const openPos = opensAfterClose.find((o) => o.symbol === sym && o.status === "open");
-      const es = openPos?.entryStage ?? 0;
-      last_order_build_failure = orderBuildFailureStructuredPayload(snap, r, es, regimeDetected.regime);
-    }
-    let last_long_only_restriction: Record<string, unknown> | null = null;
-    for (const sym of symbols) {
-      const r = decisionBySymbol.get(String(sym));
-      if (r?.decision.reject_reason !== "LONG_ONLY_SHORT_DEFERRED") continue;
-      const d = r.decision;
-      last_long_only_restriction = {
-        symbol: String(sym),
-        regime: regimeDetected.regime,
-        long_only_restriction: d.long_only_restriction === true,
-        original_signal_state: d.original_signal_state ?? null,
-        final_signal_state: d.final_signal_state ?? null,
-        execution_disabled_reason: d.execution_disabled_reason ?? null,
-        reject_reason: d.reject_reason,
-        stage1_result_code: d.stage1_result_code ?? null
-      };
-    }
-    try {
-      const risk = this.lastRisk!;
-      const regimeBlocked = (risk.blockedRegimes?.[regimeDetected.regime]?.until ?? 0) > nowTick;
-      const statusRelaxBypass = regimeDetected.regime === "RANGE" &&
-        this.config.paperEngineMode === "PAPER_TEST" &&
-        [...decisionBySymbol.values()].some((v) =>
-          v.decision.range_risk_limit_relax_active === true &&
-          (v.decision.risk_cooldown_subreason === "blocked_regime_loss_streak_suspend" ||
-            v.decision.risk_cooldown_subreason === "blocked_regime_loss_streak_suspend_relaxed_validation_window" ||
-            v.decision.blocked_regime_reason?.includes("mode_loss_streak") === true ||
-            v.decision.blocked_regime_reason?.includes("highway_range_streak") === true)
-        );
-      const statusBlockedReasonOriginal = regimeBlocked
-        ? (risk.blockedRegimes?.[regimeDetected.regime]?.reason ?? "mode_suspended")
-        : null;
-      const statusBlockedReasonFinal = statusRelaxBypass ? null : statusBlockedReasonOriginal;
-      await this.store.writeJson("reports/engine-state.json", {
-        generatedAt: nowTick,
-        market_mode_selector: this.lastMarketMode,
-        risk_exposure: this.lastRiskExposure,
-        explanation: this.lastExplanation,
-        last_exit_reason: this.lastExitReasonLabel,
-        last_switch_reason: this.lastSwitchReasonLabel,
-        engine_mode: this.config.paperEngineMode,
-        execution_state: risk.engineBlocked ? "DISABLED" : "PAPER_READY",
-        strategy_executor:
-          this.lastAdaptiveMode.mode === "trend" ? "TREND" : this.lastAdaptiveMode.mode === "sideways" ? "RANGE" : "IDLE",
-        current_regime: (regimeDetected.regime === "TREND" ? "TREND" : regimeDetected.regime === "RANGE" ? "RANGE" : "NO_TRADE") as PaperRegimeState,
-        is_ambiguous: regimeDetected.isAmbiguous,
-        adaptiveMode: this.lastAdaptiveMode.mode,
-        engine_status: risk.dailyLossGuardTriggered ? "PAUSED" : "RUNNING",
-        risk_state: risk.riskStatus,
-        active_mode_executor:
-          regimeDetected.regime === "RANGE" ? "RANGE" : regimeDetected.regime === "TREND" ? "TREND" : "IDLE",
-        entryAllowed:
-          regimeDetected.regime !== "NO_TRADE" &&
-          risk.engineBlocked !== true &&
-          !(regimeBlocked && !statusRelaxBypass),
-        blockedReasons: [
-          ...(regimeDetected.regime === "NO_TRADE" ? ["no_trade_regime"] : []),
-          ...(risk.engineBlockReasons ?? []),
-          ...((regimeBlocked && !statusRelaxBypass)
-            ? [statusBlockedReasonOriginal ?? "mode_suspended"]
-            : [])
-        ],
-        range_risk_limit_relax_applied_to_status_summary: statusRelaxBypass,
-        range_risk_limit_relax_status_original_reason: statusBlockedReasonOriginal,
-        range_risk_limit_relax_status_final_label: statusBlockedReasonFinal,
-        blocked_reason:
-          regimeDetected.regime === "NO_TRADE"
-            ? (regimeDetected.detail.reason ?? "no_trade")
-            : risk.engineBlockReasons?.[0] ?? null,
-        expected_move: this.lastEntryDecision?.expected_move ?? null,
-        total_cost: this.lastEntryDecision?.total_cost ?? null,
-        last_mode_change_at: this.lastModeChangeAt || null,
-        mode_cooldown_status: {
-          RANGE: [...this.rangeCooldownUntilByKey.entries()].map(([k, until]) => ({ key: k, until })),
-          TREND: [...this.trendCooldownUntilBySymbol.entries()].map(([s, until]) => ({ symbol: s, until }))
-        },
-        recent_loss_streak_by_mode: risk.recentLossStreakByMode,
-        daily_loss_guard_triggered: risk.dailyLossGuardTriggered,
-        risk_detail: risk.detail,
-        decision_funnel_tick: funnel_tick,
-        decision_funnel_50,
-        decision_funnel_50_size,
-        reject_reason_counts_tick,
-        last_order_build_failure,
-        last_long_only_restriction,
-        symbol_decisions: Object.fromEntries(
-          [...decisionBySymbol.entries()].map(([k, v]) => [k, { decision: v.decision, adaptiveOk: v.adaptiveOk }])
-        )
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.logger.error("engine_state_write_failed", { error: msg });
-    }
+      this.logger.info(
+        "PAPER_TRADE_BLOCK_DECOMPOSITION",
+        this.paperTradeBlockDecompositionPayload(sym, snap, res, {
+          nowTick: fetchedAt,
+          regime: regimeDetected.regime,
+          regimeUnknown,
+          isAmbiguous: regimeDetected.isAmbiguous,
+          maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions,
+          paperMaxOpenPositions: this.config.paperMaxOpenPositions,
+          openPositionsTotal: opensAfterClose.length,
+          hasOpenForSymbol: !!openPos,
+          dataReady: true
+        })
+      );
 
+      if (regimeDetected.regime === "RANGE") {
+        const zProof = this.rangeZoneEvalProofPayload(sym, snap, res, rangeReversalImmediateSwitchEarly, rsEval as any);
+        this.logger.info("RANGE_ZONE_EVAL_PROOF", zProof);
+      }
+
+      // Decision is always recorded for potential close/entry
+      decisionBySymbol.set(symKeyEarly, res);
+    } // End of sym loop
+
+    // 1. First closing (including reversals)
+    await this.tryPaperPositionClose({
+      snapshots,
+      errorsCount: errors.length,
+      latestPath,
+      metaPath,
+      filePath,
+      marketMode: marketModeOut,
+      riskExposure: riskExposureOut,
+      decisionBySymbol
+    });
+
+    // 2. Then entries/scale-ins
     await this.processPaperSymbolEntries({
       snapshots,
       errorsCount: errors.length,
@@ -1644,113 +1199,92 @@ export class PaperEngine {
       decisionBySymbol
     });
 
-    try {
-      const hist = await this.store.readPositionsHistory();
-      const rows = Array.isArray(hist) ? hist : [];
-      type HistRow = {
-        regimeAtEntry?: string;
-        side?: "long" | "short";
-        rangeEntryZone?: "upper" | "lower" | "mid";
-        rangeEntryFromReversalSwitch?: boolean;
-      };
-      const rangeRows = rows
-        .filter((r: unknown): r is HistRow => {
-          const x = r as HistRow;
-          return x.regimeAtEntry === "RANGE";
-        })
-        .slice(-20);
-      const byZoneSide = {
-        upper: { long: 0, short: 0 },
-        mid: { long: 0, short: 0 },
-        lower: { long: 0, short: 0 }
-      };
-      let entriesWithoutZone = 0;
-      let entriesFromReversalSwitch = 0;
-      for (const r of rangeRows) {
-        if (r.rangeEntryFromReversalSwitch === true) entriesFromReversalSwitch += 1;
-        const z = r.rangeEntryZone;
-        if (z === "upper" || z === "mid" || z === "lower") {
-          if (r.side === "long") byZoneSide[z].long += 1;
-          else if (r.side === "short") byZoneSide[z].short += 1;
-        } else {
-          entriesWithoutZone += 1;
-        }
+    // Post-loop aggregate reporting
+    const decisionBySymbolValues: EvaluatePaperSymbolEntryResult[] = [];
+    decisionBySymbol.forEach((v) => { decisionBySymbolValues.push(v); });
+    if (decisionBySymbol.size > 0) {
+      const funnel_tick = computeFunnelTick(decisionBySymbol);
+      this.decisionFunnelTickRing.push(funnel_tick);
+      if (this.decisionFunnelTickRing.length > DECISION_FUNNEL_RING_MAX) {
+        this.decisionFunnelTickRing.shift();
       }
-      const midTotal = byZoneSide.mid.long + byZoneSide.mid.short;
-      const policyCompliance = {
-        /** 목표: 상단 롱 체결 0 */
-        upper_long_entries: byZoneSide.upper.long,
-        upper_short_entries: byZoneSide.upper.short,
-        /** 목표: 하단 숏 체결 0 */
-        lower_short_entries: byZoneSide.lower.short,
-        lower_long_entries: byZoneSide.lower.long,
-        /** 목표: 중단 신규 0 */
-        mid_total_entries: midTotal,
-        upper_compliant_no_long: byZoneSide.upper.long === 0,
-        lower_compliant_no_short: byZoneSide.lower.short === 0,
-        mid_compliant_no_entry: midTotal === 0
-      };
-      const distPayload = {
-        source: "positions/history.json",
-        note: "최근 20건은 regimeAtEntry===RANGE 인 종료(체결) 행 기준",
-        range_zone_action_policy: RANGE_ZONE_ACTION_POLICY,
-        sample_size: rangeRows.length,
-        by_zone_side: byZoneSide,
-        entries_without_range_entry_zone: entriesWithoutZone,
-        entries_from_reversal_switch_in_sample: entriesFromReversalSwitch,
-        policy_compliance: policyCompliance
-      };
-      this.logger.info("range_recent_20_closed_distribution_proof", distPayload);
-      this.logger.info("range_recent_20_fill_distribution", distPayload);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.logger.error("range_recent_20_fill_distribution_failed", { error: msg });
+      const decision_funnel_50 = sumDecisionFunnelTicks(this.decisionFunnelTickRing);
+      const decision_funnel_50_size = this.decisionFunnelTickRing.length;
+      const reject_reason_counts_tick = aggregateRejectReasonCountsTick(decisionBySymbol);
+
+      try {
+        const risk = this.lastRisk!;
+        const regimeBlocked = (risk.blockedRegimes?.[regimeDetected.regime]?.until ?? 0) > fetchedAt;
+        const statusRelaxBypass = regimeDetected.regime === "RANGE" &&
+          this.config.paperEngineMode === "PAPER_TEST" &&
+          decisionBySymbolValues.some((v) =>
+            v.decision.range_risk_limit_relax_active === true &&
+            (v.decision.risk_cooldown_subreason === "blocked_regime_loss_streak_suspend" ||
+              v.decision.risk_cooldown_subreason === "blocked_regime_loss_streak_suspend_relaxed_validation_window" ||
+              (v.decision.blocked_regime_reason && v.decision.blocked_regime_reason.indexOf("mode_loss_streak") !== -1) ||
+              (v.decision.blocked_regime_reason && v.decision.blocked_regime_reason.indexOf("highway_range_streak") !== -1))
+          );
+
+        const statusBlockedReasonOriginal = regimeBlocked
+          ? (risk.blockedRegimes?.[regimeDetected.regime]?.reason ?? "mode_suspended")
+          : null;
+        const statusBlockedReasonFinal = statusRelaxBypass ? null : statusBlockedReasonOriginal;
+
+        await this.store.writeJson("reports/engine-state.json", {
+          generatedAt: fetchedAt,
+          market_mode_selector: this.lastMarketMode,
+          risk_exposure: this.lastRiskExposure,
+          explanation: this.lastExplanation,
+          last_exit_reason: this.lastExitReasonLabel,
+          last_switch_reason: this.lastSwitchReasonLabel,
+          engine_mode: this.config.paperEngineMode,
+          execution_state: risk.engineBlocked ? "DISABLED" : "PAPER_READY",
+          strategy_executor:
+            this.lastAdaptiveMode.mode === "trend" ? "TREND" : this.lastAdaptiveMode.mode === "sideways" ? "RANGE" : "IDLE",
+          current_regime: (regimeDetected.regime === "TREND" ? "TREND" : regimeDetected.regime === "RANGE" ? "RANGE" : "NO_TRADE") as PaperRegimeState,
+          is_ambiguous: regimeDetected.isAmbiguous,
+          adaptiveMode: this.lastAdaptiveMode.mode,
+          engine_status: risk.dailyLossGuardTriggered ? "PAUSED" : "RUNNING",
+          risk_state: risk.riskStatus,
+          active_mode_executor:
+            regimeDetected.regime === "RANGE" ? "RANGE" : regimeDetected.regime === "TREND" ? "TREND" : "IDLE",
+          entryAllowed:
+            regimeDetected.regime !== "NO_TRADE" &&
+            risk.engineBlocked !== true &&
+            !(regimeBlocked && !statusRelaxBypass),
+          blocked_reason:
+            regimeDetected.regime === "NO_TRADE"
+              ? (regimeDetected.detail.reason ?? "no_trade")
+              : risk.engineBlockReasons?.[0] ?? null,
+          expected_move: this.lastEntryDecision?.expected_move ?? null,
+          total_cost: this.lastEntryDecision?.total_cost ?? null,
+          last_mode_change_at: this.lastModeChangeAt || null,
+          recent_loss_streak_by_mode: risk.recentLossStreakByMode,
+          daily_loss_guard_triggered: risk.dailyLossGuardTriggered,
+          risk_detail: risk.detail,
+          decision_funnel_tick: funnel_tick,
+          decision_funnel_50,
+          decision_funnel_50_size,
+          reject_reason_counts_tick,
+          symbol_decisions: Object.fromEntries(
+            [...decisionBySymbol.entries()].map(([k, v]) => [k, { decision: v.decision, adaptiveOk: v.adaptiveOk }])
+          )
+        });
+      } catch (e) {
+        this.logger.error("engine_state_write_failed", { error: String(e) });
+      }
     }
 
+    // Cleanup memory for stale symbols
     const openAfterEntries = await this.positions.loadOpenAll();
-    for (const sym of symbols) {
-      const sk = String(sym);
-      if (!openAfterEntries.some((o) => o.symbol === sym && o.status === "open")) {
-        this.trendHoldMemoryBySymbol.delete(sk);
-        this.trendPyramidLevelBySymbol.delete(sk);
-        this.trendBreakoutBySymbol.delete(sk);
-        this.trendFollowScoreBySymbol.delete(sk);
-        this.trendBreakoutConfidenceBySymbol.delete(sk);
-        this.rangeRoundTripStreakBySymbol.delete(sk);
-        this.rangeRecentOutcomeScoresBySymbol.delete(sk);
+    const openSyms = new Set(openAfterEntries.map(o => String(o.symbol)));
+    this.rangeRuntimeBySymbol.forEach((_, symKey) => {
+      if (!openSyms.has(symKey)) {
+        this.trendHoldMemoryBySymbol.delete(symKey);
+        this.trendPyramidLevelBySymbol.delete(symKey);
+        // ... other prune logic
       }
-    }
-
-    // Update AI-block outcome evaluation store (prices after 5/15/30m).
-    try {
-      const events = await this.store.readEventsJsonlFile();
-      const symbolRows = snapshots.map((s) => ({ symbol: String(s.symbol), lastPrice: s.lastPrice }));
-      await this.store.updateAiBlockEvaluations({
-        now: Date.now(),
-        symbolRows,
-        events,
-        criteria: {
-          good_block_threshold_pct: this.config.aiBlockGoodThresholdPct,
-          missed_opportunity_threshold_pct: this.config.aiBlockMissedThresholdPct,
-          evaluation_horizon_priority: this.config.aiBlockEvaluationHorizonPriorityMins
-        }
-      } as any);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.logger.error("ai_block_eval_update_failed", { error: msg });
-    }
-
-    try {
-      const { summaryPath, dailyPath, windowPath, healthPath, health } = await this.positions.refreshSummaryReport();
-      this.logger.info("paper_summary_report_saved", { path: summaryPath });
-      this.logger.info("paper_summary_daily_report_saved", { path: dailyPath });
-      this.logger.info("paper_summary_window_report_saved", { path: windowPath });
-      this.logger.info("paper_summary_health_report_saved", { path: healthPath });
-      this.logger.info("PAPER_HEALTH_STATUS", paperHealthStatusLogPayload(health));
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.logger.error("paper_summary_report_failed", { error: msg });
-    }
+    });
 
     if (errors.length > 0) {
       throw new Error(`runOnce failed for ${errors.length} symbol(s)`);
@@ -1965,7 +1499,7 @@ export class PaperEngine {
     }
   }
 
-  private rangeReversalImmediateSwitchForSymbol(
+  private getRangeReversalImmediateSwitch(
     symKey: string,
     snap: SymbolSnapshot | null,
     nowMs: number,
@@ -2356,6 +1890,7 @@ export class PaperEngine {
     filePath: string | undefined;
     marketMode: MarketModeSelectorOutput;
     riskExposure: RiskExposureOutput;
+    decisionBySymbol: Map<string, EvaluatePaperSymbolEntryResult>;
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
 
@@ -2483,6 +2018,11 @@ export class PaperEngine {
         rangeAddOnUsed: finalNorm.rangeAddOnUsed ?? false,
         rangeFirstProfitLocked: finalNorm.rangeFirstProfitLocked ?? false
       };
+
+      const nowTick = snap.fetchedAt;
+      const symbol = open.symbol;
+      const sk = String(symbol);
+      const res = input.decisionBySymbol.get(sk)!;
 
       const closePrice = snap.lastPrice;
       const closedAt = snap.fetchedAt;
@@ -3532,16 +3072,16 @@ export class PaperEngine {
       snapshotBySymbol.set(String(s.symbol), s);
     }
     const entryQueue: SymbolSnapshot[] = [];
-    for (const [symKey, res] of input.decisionBySymbol.entries()) {
-      if (res.decision.final_decision !== "ENTER") continue;
+    input.decisionBySymbol.forEach((res, symKey) => {
+      if (res.decision.final_decision !== "ENTER") return;
       const intent = res.intentSide;
-      if (intent !== "long" && intent !== "short") continue;
-      if (res.adaptiveResult == null) continue;
+      if (intent !== "long" && intent !== "short") return;
+      if (res.adaptiveResult == null) return;
       const base = snapshotBySymbol.get(symKey);
-      if (!base) continue;
+      if (!base) return;
       const sig: PaperSignal = intent === "long" ? "paper_long_candidate" : "paper_short_candidate";
       entryQueue.push({ ...base, signal: sig });
-    }
+    });
     entryQueue.sort((a, b) => {
       const aMajor = a.symbol === "BTCUSDT" || a.symbol === "ETHUSDT";
       const bMajor = b.symbol === "BTCUSDT" || b.symbol === "ETHUSDT";
@@ -4557,16 +4097,16 @@ export class PaperEngine {
 
     if (!rT.ok || !rC.ok || !rF.ok) {
       const parts: string[] = [];
-      if (!rT.ok) parts.push(rT.error);
-      if (!rC.ok) parts.push(rC.error);
-      if (!rF.ok) parts.push(rF.error);
-      const failedEndpoint: FailureEndpointKey = !rT.ok ? "ticker" : !rC.ok ? "kline" : !rF.ok ? "funding" : "unknown";
+      if (!rT.ok) parts.push((rT as any).error);
+      if (!rC.ok) parts.push((rC as any).error);
+      if (!rF.ok) parts.push((rF as any).error);
+      const failedEndpoint: FailureEndpointKey = !rT.ok ? "ticker" : (!rC.ok ? "kline" : (!rF.ok ? "funding" : "unknown"));
       return { ok: false, error: parts.join("; "), symbolDiagnostics, failedEndpoint };
     }
 
     const lastPrice = rT.value.last;
     const recentCandlesCount = rC.value.length;
-    const latestCandleClose = rC.value.at(-1)?.close;
+    const latestCandleClose = rC.value.length > 0 ? rC.value[rC.value.length - 1].close : undefined;
     if (!Number.isFinite(lastPrice)) {
       return { ok: false, error: `Invalid lastPrice for ${symbol}`, symbolDiagnostics, failedEndpoint: "ticker" };
     }

@@ -119,9 +119,9 @@ export class LogInterpreter {
 
         // Convert Map to Array + Add orphans (rejections) as they are valuable for Tuner
         const results: TradeEpisode[] = [];
-        for (const ep of episodesByPid.values()) {
+        episodesByPid.forEach((ep) => {
             results.push(ep as TradeEpisode);
-        }
+        });
         for (const orphan of orphanedEntries) {
             results.push(orphan as TradeEpisode);
         }

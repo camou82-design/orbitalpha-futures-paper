@@ -13,7 +13,8 @@ export function computeFunnelTick(m: ReadonlyMap<string, DecisionFunnelRow>): De
   let execution_ready_count = 0;
   let ai_pass_count = 0;
   let enter_count = 0;
-  for (const [, r] of m) {
+
+  m.forEach((r) => {
     const d = r.decision;
     if (d.signal_state !== "NONE") raw_signal_count += 1;
     if (d.regime_state === "TREND" || d.regime_state === "RANGE") regime_pass_count += 1;
@@ -22,7 +23,8 @@ export function computeFunnelTick(m: ReadonlyMap<string, DecisionFunnelRow>): De
     if (d.execution_state === "PAPER_READY" || d.execution_state === "IDLE") execution_ready_count += 1;
     if (r.aiGatePassed) ai_pass_count += 1;
     if (d.final_decision === "ENTER") enter_count += 1;
-  }
+  });
+
   return {
     raw_signal_count,
     regime_pass_count,
@@ -68,11 +70,11 @@ export function aggregateRejectReasonCountsTick(
   m: ReadonlyMap<string, DecisionFunnelRow>
 ): Record<string, number> {
   const out: Record<string, number> = {};
-  for (const [, r] of m) {
-    if (r.decision.final_decision === "ENTER") continue;
+  m.forEach((r) => {
+    if (r.decision.final_decision === "ENTER") return;
     const code = r.decision.reject_reason;
-    if (!code) continue;
+    if (!code) return;
     out[code] = (out[code] ?? 0) + 1;
-  }
+  });
   return out;
 }
