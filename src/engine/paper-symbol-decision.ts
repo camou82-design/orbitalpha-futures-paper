@@ -1238,7 +1238,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let sameDirection: boolean = false;
   let reentryBlocked: boolean = false;
   let lowConfidence: boolean = false;
-  let zone: "upper" | "lower" | "mid" | string = "mid";
+  let gateResult: any = "RANGE_GATE_PASS";
+  let gateReason: string = "range_gate_pass";
+  let entryResult: any = "RANGE_ENTRY_NONE";
+  let zone: "upper" | "lower" | "mid" | null = "mid";
   let boxPos: number = 0.5;
   let rangeSignal: any = null;
   let rangeScores: any = null;
@@ -1852,8 +1855,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
     range_stage0_engine_taken = true;
     strategy_executor = "RANGE";
-    const rangeSignal = evaluateRangeStage0Signal(sn, input.rangeReversalImmediateSwitch);
-    const rangeScores = evaluateRangeStage0Scores(sn);
+    rangeSignal = evaluateRangeStage0Signal(sn, input.rangeReversalImmediateSwitch);
+    rangeScores = evaluateRangeStage0Scores(sn);
     const blockedRegime = input.risk?.blockedRegimes?.[input.regime];
     const blockedRegimeActive = !!(blockedRegime && blockedRegime.until > input.now);
     const blockedRegimeReasonText = String(blockedRegime?.reason ?? "");
@@ -1868,8 +1871,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_risk_limit_relax_active = input.now < (RANGE_RISK_LIMIT_RELAX_EXPIRES_AT as number);
       range_risk_limit_relax_expired = !range_risk_limit_relax_active;
     }
-    const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
-    const zone = classifyBoxZone(boxPos);
+    boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
+    zone = classifyBoxZone(boxPos);
 
     const riskEngineHardBlocked = input.risk?.crashState !== undefined && input.risk.crashState !== "NONE";
     const riskEngineBlockedBySuspendOnly =
@@ -1992,12 +1995,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
     range_reversal_short_entry_allowed = range_short_allowed;
     range_reversal_short_entry_block_reason = range_short_allowed ? null : range_short_allowed_reason;
-    const edgeRelaxZoneForConfidence =
+    edgeRelaxZoneForConfidence =
       (zone === "upper" && boxPos >= 0.74 && rangeSignal.side === "short") ||
       (zone === "lower" && boxPos <= 0.26 && rangeSignal.side === "long");
-    const lowConfidenceSignalMin = edgeRelaxZoneForConfidence ? 0.31 : 0.34;
-    const lowConfidenceEntryMin = edgeRelaxZoneForConfidence ? 0.33 : 0.36;
-    const lowConfidence = rangeScores.rangeSignalScore < lowConfidenceSignalMin || rangeScores.rangeEntryScore < lowConfidenceEntryMin;
+    lowConfidenceSignalMin = edgeRelaxZoneForConfidence ? 0.31 : 0.34;
+    lowConfidenceEntryMin = edgeRelaxZoneForConfidence ? 0.33 : 0.36;
+    lowConfidence = rangeScores.rangeSignalScore < lowConfidenceSignalMin || rangeScores.rangeEntryScore < lowConfidenceEntryMin;
     let reentryBlocked = false;
     range_reentry_wait_ms = null;
     range_reentry_elapsed_ms = null;
@@ -2069,8 +2072,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_same_direction_reentry_final_allowed = true;
       supplemental_reasons.push("RANGE_REVERSAL_IMMEDIATE_REENTRY_BYPASS");
     }
-    let gateResult: RangeGateResult = "RANGE_GATE_PASS";
-    let gateReason = "range_gate_pass";
+    gateResult = "RANGE_GATE_PASS";
+    gateReason = "range_gate_pass";
     if (rangeSignal.signal === "RANGE_SIGNAL_NONE") {
       gateResult = "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
       gateReason = rangeSignal.reason;
@@ -2091,7 +2094,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       gateResult = "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
       gateReason = "range_score_below_threshold";
     }
-    const entryResult: RangeEntryResult =
+    entryResult =
       gateResult !== "RANGE_GATE_PASS"
         ? "RANGE_ENTRY_NONE"
         : rangeSignal.signal === "RANGE_LONG_CANDIDATE"
@@ -3018,6 +3021,58 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     if (reject_reason === "RISK_COOLDOWN" || reject_reason === "RISK_FAIL_REENTRY") risk_state = "COOLDOWN";
     supplemental_reasons.push(`RANGE_FINAL_BLOCK_${rangeFinalBlockReason}`);
     range_stage0_exit_reason = rangeFinalBlockReason;
+
+    if (zone === "upper" && sn.signal === "paper_long_candidate") {
+      const relaxedOscMin = Math.max(0.24, RANGE_STAGE0_EDGE_THRESHOLDS.oscillation - 0.06);
+      const relaxedEdgeStructureOk = !edgeStructureOkCurrent &&
+        edgeGateCurrent.conf >= RANGE_STAGE0_EDGE_THRESHOLDS.conf &&
+        edgeGateCurrent.cohesion >= RANGE_STAGE0_EDGE_THRESHOLDS.cohesion &&
+        edgeGateCurrent.oscillation >= relaxedOscMin;
+
+      console.log("RANGE_REVERSAL_BOTTLENECK_PROOF", {
+        symbol: String(sn.symbol),
+        raw_snapshot_signal: sn.signal,
+        box_pos: boxPos,
+        zone,
+        metrics: {
+          rangeConfidence: sn.rangeConfidence,
+          boxCohesion01: sn.boxCohesion01,
+          breakoutFailureRate: sn.breakoutFailureRate,
+          trendWeaknessScore: sn.trendWeaknessScore,
+          rangeOscillationScore: sn.rangeOscillationScore
+        },
+        priority_structure: {
+          upperExtremeEdge: boxPos >= 0.74,
+          edgeStructureOk: edgeStructureOkCurrent,
+          relaxedEdgeStructureOk,
+          range_upper_short_priority_structure_candidate: rangeSignal.reason === "range_upper_short_priority_structure",
+          range_upper_short_priority_structure_block_reason: !(boxPos >= 0.74) ? "not_extreme_edge" : (!edgeStructureOkCurrent && !relaxedEdgeStructureOk) ? "structure_not_ready" : "none"
+        },
+        reversal_interpretation: {
+          interpretation_checked: rangeSignal.interpretation?.checked ?? false,
+          interpretation_passed: rangeSignal.interpretation?.passed ?? false,
+          interpretation_failed_reasons: rangeSignal.interpretation?.failed_reasons ?? []
+        },
+        scores_and_gate: {
+          rangeSignalScore: rangeScores.rangeSignalScore,
+          rangeEntryScore: rangeScores.rangeEntryScore,
+          lowConfidenceSignalMin,
+          lowConfidenceEntryMin,
+          lowConfidence
+        },
+        final_result: {
+          rangeSignal_signal: rangeSignal.signal,
+          rangeSignal_reason: rangeSignal.reason,
+          gateResult,
+          gateReason,
+          entryResult,
+          final_decision: "SKIP",
+          stage1_result_code: rangeStage1Code,
+          reject_reason: reject_reason
+        }
+      });
+    }
+
     return ret(
       {
         execution_state,
