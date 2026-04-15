@@ -1065,7 +1065,7 @@ export class PaperEngine {
           hasOpenPosition: !!existingPos,
           openPositionsTotal: opensAfterClose.length,
           maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions,
-          currentStage: existingPos?.entryStage ?? 1,
+          currentStage: existingPos?.entryStage ?? 0,
           rangeReversalImmediateSwitch: undefined
         });
 
@@ -1115,7 +1115,7 @@ export class PaperEngine {
         hasOpenPosition: !!existingPos,
         openPositionsTotal: opensAfterClose.length,
         maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions,
-        currentStage: existingPos?.entryStage ?? 1,
+        currentStage: existingPos?.entryStage ?? 0,
         rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly
       });
 
@@ -1123,7 +1123,7 @@ export class PaperEngine {
         console.log("STAGE_ROUTING_INPUT_TRACE", {
           symbol: String(sym),
           regime: regimeDetected.regime,
-          currentStage: existingPos?.entryStage ?? 1,
+          currentStage: existingPos?.entryStage ?? 0,
           hasOpenPosition: !!existingPos
         });
       }
