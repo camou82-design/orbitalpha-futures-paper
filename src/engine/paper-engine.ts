@@ -1211,26 +1211,9 @@ export class PaperEngine {
           mismatch: selectorResult.mismatch
         });
 
-        // Adopt ONLY if authorized
-        if (v2Mode === "engine_v2") {
-          // Manual conversion to legacy result structure for downstream compatibility IF needed,
-          // but steering logic will rely on adopted_result properties.
-          res = {
-            ...res,
-            intentSide: selectorResult.adopted_result.adopted_side === "long" ? "long" : (selectorResult.adopted_result.adopted_side === "short" ? "short" : null),
-            decision: {
-              ...res.decision,
-              final_decision: selectorResult.adopted_result.adopted_decision === "ENTER" ? "ENTER" : "SKIP",
-              regime_state: selectorResult.adopted_result.adopted_regime as PaperRegimeState,
-              required_cost_usd: selectorResult.adopted_result.adopted_size_usd
-            },
-            executorDecision: res.executorDecision ? {
-              ...res.executorDecision,
-              entry_allowed: selectorResult.adopted_result.adopted_decision === "ENTER",
-              total_cost: selectorResult.adopted_result.adopted_size_usd
-            } : null
-          };
-        }
+        // Adoption logic: In shadow mode, we just log. In engine_v2 mode, 
+        // the downstream logic should eventually be updated to read from selectorResult.adopted_result.
+        // For now, we DO NOT mutate the legacy 'res' object here to avoid re-hydration pollution.
       }
 
       // Decision is always recorded for potential close/entry
@@ -3208,10 +3191,6 @@ export class PaperEngine {
     this.lastEntryDecision = null;
 
     for (const first of entryQueue) {
-      const op = (this.positions as unknown as Map<string, { status: string; sizeUsd: number; side: string }>).get(String(first.symbol));
-      if (!op) continue;
-      op.status = "closed";
-      op.sizeUsd -= (0 || 0); // Note: This logic seems to be a placeholder for position size tracking
       if (this.lastRegime.regime === "RANGE") {
         const origSnap = input.snapshots.find((s) => s.symbol === first.symbol);
         const qz = typeof first.boxPos === "number" ? classifyBoxZone(first.boxPos) : null;
