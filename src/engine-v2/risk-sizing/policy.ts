@@ -1,30 +1,42 @@
 import { EngineV2Input, ExecutorOutput, RiskSizingOutput, MarketJudgmentOutput, RegimeConfidenceOutput } from "../types";
 
+/**
+ * Tier 5: Risk & Sizing Policy (Refined)
+ * Adjusts size based on regime and confidence.
+ */
 export function calculateRiskSizing(
     judgment: MarketJudgmentOutput,
     confidence: RegimeConfidenceOutput,
     executor: ExecutorOutput,
     input: EngineV2Input
 ): RiskSizingOutput {
-    const baseSizeUsd = input.config.defaultPaperSizeUsd || 100;
+    const { config } = input;
+    const baseSizeUsd = config.defaultPaperSizeUsd ?? 100;
     let sizeMultiplier = executor.baseSizeIntent;
     let isBlocked = false;
     let blockReason = undefined;
 
+    // NO_TRADE: Hard block
     if (judgment.regime === "NO_TRADE") {
         isBlocked = true;
         blockReason = "NO_TRADE_REGIME";
-    } else if (executor.signal === "WAIT_RECHECK") {
+    }
+    // WAIT_RECHECK: Block but diagnostic handled via explanation
+    else if (executor.signal === "WAIT_RECHECK") {
         isBlocked = true;
         blockReason = "WAIT_RECHECK";
     }
 
+    // TRANSITION: Scale down
     if (judgment.regime === "TRANSITION") {
         sizeMultiplier *= 0.5;
     }
 
+    // Confidence adjustment
     if (confidence.level === "MID") {
         sizeMultiplier *= 0.8;
+    } else if (confidence.level === "LOW") {
+        sizeMultiplier *= 0.5;
     }
 
     return {
@@ -33,7 +45,7 @@ export function calculateRiskSizing(
         finalSizeUsd: isBlocked ? 0 : baseSizeUsd * sizeMultiplier,
         isBlocked,
         blockReason,
-        addOnAllowed: false, // Updated by add-on policy
+        addOnAllowed: false, // Updated downstream
         addOnSizeUsd: 0
     };
 }

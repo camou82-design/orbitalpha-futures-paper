@@ -6,6 +6,30 @@ export type EngineV2ConfidenceLevel = "HIGH" | "MID" | "LOW";
 export type EngineV2SignalState = "LONG_CANDIDATE" | "SHORT_CANDIDATE" | "WAIT_RECHECK" | "NONE";
 export type EngineV2Side = "long" | "short" | "none";
 
+/** Specific interfaces to replace 'any' */
+export interface EngineV2Snapshot {
+    boxPos?: number | null;
+    rangeConfidence?: number | null;
+    boxCohesion01?: number | null;
+    breakoutFailureRate?: number | null;
+    trendWeaknessScore?: number | null;
+    emaGap?: number | null;
+    volumeRatioProxy?: number | null;
+    reviewing_ticks?: number | null;
+    [key: string]: any;
+}
+
+export interface EngineV2Config {
+    defaultPaperSizeUsd?: number;
+    paperMaxOpenPositions?: number;
+    [key: string]: any;
+}
+
+export interface EngineV2State {
+    currentPositions: any[];
+    lossStreaks: Record<string, number>;
+}
+
 /** Tier 1: Market Judgment */
 export interface MarketJudgmentOutput {
     regime: EngineV2Regime;
@@ -38,7 +62,7 @@ export interface ExecutorOutput {
     reason: string;
     baseSizeIntent: number;
     recheckSuggested: boolean;
-    metadata: any;
+    metadata: Record<string, any>;
 }
 
 /** Tier 5: Risk Sizing Output */
@@ -84,10 +108,7 @@ export interface EngineV2Output {
 /** Input for V2 Pipeline */
 export interface EngineV2Input {
     symbol: MarketSymbol;
-    snapshot: any;
-    config: any;
-    state: {
-        currentPositions: any[];
-        lossStreaks: Record<string, number>;
-    };
+    snapshot: EngineV2Snapshot;
+    config: EngineV2Config;
+    state: EngineV2State;
 }

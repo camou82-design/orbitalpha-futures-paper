@@ -14,8 +14,10 @@ import type {
   RiskExposureOutput,
   PaperExplanationFields,
   RangeBoxZone,
-  TrendBreakoutDirection
+  TrendBreakoutDirection,
+  PaperSignalState
 } from "../models/types";
+
 import type { Logger } from "../logs/logger";
 import { JsonStore } from "../storage/json-store";
 import type { BybitPublicDiagnostics } from "../exchange/bybit-public";
@@ -1096,7 +1098,7 @@ export class PaperEngine {
       }
 
       // 2. Decision Logic
-      const res = evaluatePaperSymbolEntry({
+      let res = evaluatePaperSymbolEntry({
         config: this.config,
         snapshot: snap,
         dataReady: regimeUnknown === false,
@@ -1135,12 +1137,12 @@ export class PaperEngine {
       // 3. Execution Logic
       const openPos = opensAfterClose.find((o) => o.symbol === sym);
 
-      // --- [Engine-V2 Bridge] ---
+      // --- [Engine-V2 Bridge & Execution Authority] ---
       const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE || "legacy") as EngineV2OpMode;
       const v2Input: EngineV2Input = {
         symbol: symKeyEarly,
-        snapshot: snap,
-        config: this.config,
+        snapshot: snap as any,
+        config: this.config as any,
         state: {
           currentPositions: opensAfterClose.filter(o => o.symbol === sym),
           lossStreaks: risk?.recentLossStreakByMode || {}
@@ -1149,6 +1151,7 @@ export class PaperEngine {
 
       const v2Out = runEngineV2(v2Input);
 
+      // 1. Shadow Mode Comparison Logs
       if (v2Mode === "shadow_v2" || v2Mode === "engine_v2") {
         await this.store.appendJsonlLine("reports/decisions-v2.jsonl", {
           symbol: String(sym),
@@ -1169,7 +1172,36 @@ export class PaperEngine {
           explain_label_v2: v2Out.explanation.uiLabels.regime
         });
       }
-      // ----------------------------
+
+      // 2. Execution Authority Transition (Standard 3)
+      if (v2Mode === "engine_v2") {
+        // Map V2 signal/side/size to legacy result 'res' for injection into decision loop
+        const v2Signal = v2Out.execution.signal;
+        const v2Side = v2Out.execution.side;
+
+        // Map EngineV2SignalState to PaperSignalState (simplified for authority injection)
+        let legacyMappedSignal: PaperSignalState = "NONE";
+        if (v2Signal === "LONG_CANDIDATE") legacyMappedSignal = "LONG_CANDIDATE";
+        else if (v2Signal === "SHORT_CANDIDATE") legacyMappedSignal = "SHORT_CANDIDATE";
+
+        res = {
+          ...res,
+          intentSide: v2Side === "long" ? "long" : (v2Side === "short" ? "short" : null),
+          decision: {
+            ...res.decision,
+            signal_state: legacyMappedSignal,
+            final_decision: !v2Out.riskSizing.isBlocked ? "ENTER" : "SKIP",
+            reject_reason: (v2Out.riskSizing.blockReason || null) as any,
+            required_cost_usd: v2Out.riskSizing.finalSizeUsd
+          },
+          executorDecision: res.executorDecision ? {
+            ...res.executorDecision,
+            entry_allowed: !v2Out.riskSizing.isBlocked && legacyMappedSignal !== "NONE",
+            blocked_reason: v2Out.riskSizing.blockReason || null
+          } as AnyEntryDecision : null
+        };
+      }
+      // ----------------------------------------------
 
       const { longUsd, shortUsd } = marginsForSymbol(opensAfterClose.filter((o) => o.status === "open"), symKeyEarly);
 
