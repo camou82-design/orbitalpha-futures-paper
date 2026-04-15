@@ -3155,9 +3155,9 @@ export class PaperEngine {
     input.decisionBySymbol.forEach((res, symKey) => {
       // Priority: Adopted V2 (effectiveDecision) > Legacy decision
       const effectiveDecision = (res as any).effectiveDecision ?? res.decision.final_decision;
-      if (effectiveDecision !== "ENTER") return;
-
       const effectiveSide = (res as any).effectiveSide ?? res.intentSide;
+
+      if (effectiveDecision !== "ENTER") return;
       if (effectiveSide !== "long" && effectiveSide !== "short") return;
 
       if (res.adaptiveResult == null) return;
@@ -3201,19 +3201,24 @@ export class PaperEngine {
       if (this.lastRegime.regime === "RANGE") {
         const origSnap = input.snapshots.find((s) => s.symbol === first.symbol);
         const qz = typeof first.boxPos === "number" ? classifyBoxZone(first.boxPos) : null;
+
+        const resForLog = input.decisionBySymbol.get(String(first.symbol))!;
+        const effDecisionLog = (resForLog as any).effectiveDecision ?? resForLog.decision.final_decision;
+        const effSideLog = (resForLog as any).effectiveSide ?? resForLog.intentSide;
+
         this.logger.info("RANGE_OPEN_QUEUE_PROOF", {
           symbol: first.symbol,
           zone: qz,
           original_snapshot_signal: origSnap?.signal ?? null,
           queued_signal_after_merge: first.signal,
           signal_corrected_for_intent: origSnap != null && origSnap.signal !== first.signal,
-          intent_side: input.decisionBySymbol.get(String(first.symbol))?.intentSide,
-          final_decision: input.decisionBySymbol.get(String(first.symbol))?.decision.final_decision,
-          reject_reason: input.decisionBySymbol.get(String(first.symbol))?.decision.reject_reason ?? null,
-          adaptive_ok: input.decisionBySymbol.get(String(first.symbol))?.adaptiveOk,
+          intent_side: effSideLog,
+          final_decision: effDecisionLog,
+          reject_reason: resForLog.decision.reject_reason ?? null,
+          adaptive_ok: resForLog.adaptiveOk,
           adaptive_direction: null,
-          range_reversal_immediate_switch_applied: input.decisionBySymbol.get(String(first.symbol))?.decision.range_reversal_immediate_switch_applied ?? false,
-          will_attempt_open: input.decisionBySymbol.get(String(first.symbol))?.decision.final_decision === "ENTER" && input.decisionBySymbol.get(String(first.symbol))?.adaptiveResult != null,
+          range_reversal_immediate_switch_applied: resForLog.decision.range_reversal_immediate_switch_applied ?? false,
+          will_attempt_open: effDecisionLog === "ENTER" && resForLog.adaptiveResult != null,
           active_engine: this.lastMarketMode?.routing.activeEngine ?? null
         });
       }
@@ -3226,8 +3231,11 @@ export class PaperEngine {
       const intentSide = effectiveSide as "long" | "short";
       const existingOpen = next.find((o) => o.symbol === first.symbol && o.side === intentSide);
       const entryStage = existingOpen?.entryStage ?? 0;
-      const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === (intentSide!));
+      const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === intentSide);
       const otherLeg = next.some((o) => o.symbol === first.symbol && o.side !== intentSide);
+
+      // will_attempt_open also unified
+      const will_attempt_open = effectiveDecision === "ENTER" && res.adaptiveResult != null;
       const activeEngine = this.lastMarketMode?.routing.activeEngine ?? "IDLE";
       let hedgeEntryBlocked = false;
       if (otherLeg && this.lastRiskExposure) {
@@ -3265,7 +3273,7 @@ export class PaperEngine {
       }
 
       if (next.length >= max) {
-        if (res.decision.final_decision === "ENTER") {
+        if (effectiveDecision === "ENTER") {
           // Track as blocked by limit even if it was internally allowed
           const limitBlocked = {
             ...res,
@@ -3291,7 +3299,7 @@ export class PaperEngine {
         }
       }
 
-      if (res.decision.final_decision !== "ENTER" || !res.adaptiveResult) {
+      if (effectiveDecision !== "ENTER" || !res.adaptiveResult) {
         await this.emitPipelineEventsFromDecision(first, res, nowTs, entryStage);
         continue;
       }
