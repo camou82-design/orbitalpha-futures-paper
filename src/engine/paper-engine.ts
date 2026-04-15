@@ -1211,6 +1211,13 @@ export class PaperEngine {
           mismatch: selectorResult.mismatch
         });
 
+        // Adoption logic: Attach effective execution fields directly to res for downstream authority
+        // We use non-destructive assignment to avoid mutating the core legacy logic or types.
+        if (v2Mode === "engine_v2") {
+          (res as any).effectiveDecision = selectorResult.adopted_result.adopted_decision;
+          (res as any).effectiveSide = selectorResult.adopted_result.adopted_side;
+          (res as any).effectiveSizeUsd = selectorResult.adopted_result.adopted_size_usd;
+        }
       }
 
       decisionBySymbol.set(symKeyEarly, res);
@@ -3146,13 +3153,17 @@ export class PaperEngine {
     }
     const entryQueue: SymbolSnapshot[] = [];
     input.decisionBySymbol.forEach((res, symKey) => {
-      if (res.decision.final_decision !== "ENTER") return;
-      const intent = res.intentSide;
-      if (intent !== "long" && intent !== "short") return;
+      // Priority: Adopted V2 (effectiveDecision) > Legacy decision
+      const effectiveDecision = (res as any).effectiveDecision ?? res.decision.final_decision;
+      if (effectiveDecision !== "ENTER") return;
+
+      const effectiveSide = (res as any).effectiveSide ?? res.intentSide;
+      if (effectiveSide !== "long" && effectiveSide !== "short") return;
+
       if (res.adaptiveResult == null) return;
       const base = snapshotBySymbol.get(symKey);
       if (!base) return;
-      const sig: PaperSignal = intent === "long" ? "paper_long_candidate" : "paper_short_candidate";
+      const sig: PaperSignal = effectiveSide === "long" ? "paper_long_candidate" : "paper_short_candidate";
       entryQueue.push({ ...base, signal: sig });
     });
     entryQueue.sort((a, b) => {
@@ -3208,11 +3219,9 @@ export class PaperEngine {
       }
       const res = input.decisionBySymbol.get(String(first.symbol))!;
 
-      const effectiveDecision = (res.decision.final_decision as EngineV2FinalDecision);
-
-      const effectiveSide = (res.intentSide as EngineV2Side);
-
-      const effectiveSizeUsd = (res.decision.required_cost_usd || 0);
+      const effectiveDecision = (res as any).effectiveDecision ?? res.decision.final_decision;
+      const effectiveSide = (res as any).effectiveSide ?? res.intentSide;
+      const effectiveSizeUsd = (res as any).effectiveSizeUsd ?? (res.decision.required_cost_usd || 0);
 
       const intentSide = effectiveSide as "long" | "short";
       const existingOpen = next.find((o) => o.symbol === first.symbol && o.side === intentSide);
