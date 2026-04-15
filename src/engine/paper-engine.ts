@@ -71,6 +71,8 @@ import {
 import { evaluateMarketModeSelector } from "./mode-selector";
 import { evaluateRiskExposure } from "./risk-exposure";
 import { buildPaperExplanation } from "./explanation-layer";
+import { runEngineV2 } from "../engine-v2/index";
+import { EngineV2Input, EngineV2OpMode } from "../engine-v2/types/index";
 import {
   evaluateRangeEngineForSymbol,
   evaluateRangeStructuralExit,
@@ -1132,6 +1134,43 @@ export class PaperEngine {
 
       // 3. Execution Logic
       const openPos = opensAfterClose.find((o) => o.symbol === sym);
+
+      // --- [Engine-V2 Bridge] ---
+      const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE || "legacy") as EngineV2OpMode;
+      const v2Input: EngineV2Input = {
+        symbol: symKeyEarly,
+        snapshot: snap,
+        config: this.config,
+        state: {
+          currentPositions: opensAfterClose.filter(o => o.symbol === sym),
+          lossStreaks: risk?.recentLossStreakByMode || {}
+        }
+      };
+
+      const v2Out = runEngineV2(v2Input);
+
+      if (v2Mode === "shadow_v2" || v2Mode === "engine_v2") {
+        await this.store.appendJsonlLine("reports/decisions-v2.jsonl", {
+          symbol: String(sym),
+          ts: fetchedAt,
+          regime_v1: regimeDetected.regime,
+          regime_v2: v2Out.judgment.regime,
+          confidence_v2: v2Out.confidence.score,
+          router_target_v2: v2Out.routing.executor,
+          signal_state_v2: v2Out.execution.signal,
+          intent_side_v2: v2Out.execution.side,
+          entry_allowed_v1: res.executorDecision?.entry_allowed ?? false,
+          entry_allowed_v2: !v2Out.riskSizing.isBlocked && v2Out.execution.signal !== "NONE",
+          base_size_usd_v2: v2Out.riskSizing.baseSizeUsd,
+          size_multiplier_v2: v2Out.riskSizing.sizeMultiplier,
+          final_size_usd_v2: v2Out.riskSizing.finalSizeUsd,
+          block_reason_v1: res.decision.reject_reason ?? null,
+          block_reason_v2: v2Out.riskSizing.blockReason ?? null,
+          explain_label_v2: v2Out.explanation.uiLabels.regime
+        });
+      }
+      // ----------------------------
+
       const { longUsd, shortUsd } = marginsForSymbol(opensAfterClose.filter((o) => o.status === "open"), symKeyEarly);
 
       const rr0 = this.rangeRuntimeBySymbol.get(symKeyEarly) ?? { lastZone: null as RangeBoxZone | null, cycle: 0, ladder: 0 };

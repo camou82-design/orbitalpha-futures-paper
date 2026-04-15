@@ -1,0 +1,17 @@
+src/engine/paper-symbol-decision.ts:1776:    return ret(
+src/engine/paper-symbol-decision.ts:1822:    return ret(
+src/engine/paper-symbol-decision.ts:2261:      return ret(
+src/engine/paper-symbol-decision.ts:2471:    return ret({
+src/engine/paper-symbol-decision.ts:2566:    return ret(
+src/engine/paper-symbol-decision.ts:2597:    return ret(
+src/engine/paper-symbol-decision.ts:2907:    return ret(
+src/engine/paper-symbol-decision.ts:2933:    return ret(
+src/engine/paper-symbol-decision.ts:3021:    return ret(
+src/engine/paper-symbol-decision.ts:3125:      return ret(
+src/engine/paper-symbol-decision.ts:3198:        return ret(
+src/engine/paper-symbol-decision.ts:3302:     * `return ret(...)`로 REJECT 금지 · `fee_drag_blocked`는 항상 false(호환 필드).
+src/engine/paper-symbol-decision.ts:3459:      return ret(
+src/engine/paper-symbol-decision.ts:3518:      return ret(
+src/engine/paper-symbol-decision.ts:3539:      return ret(
+src/engine/paper-symbol-decision.ts:3580:    return ret(
+src/engine/paper-symbol-decision.ts:3673:  return ret(
