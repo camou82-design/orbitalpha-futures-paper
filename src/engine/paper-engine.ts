@@ -3482,7 +3482,7 @@ export class PaperEngine {
           stage1_result_code: res.decision.stage1_result_code,
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
           expected_move_usd: res.decision.expected_move_usd ?? null,
-          required_cost_usd: res.decision.required_cost_usd ?? null,
+          required_cost_usd: effectiveSizeUsd, // Use effectiveSizeUsd
           shortfall_usd: res.decision.shortfall_usd ?? 0,
           executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
           stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
@@ -3710,7 +3710,7 @@ export class PaperEngine {
           regimeAtEntry: this.lastRegime.regime,
           executorAtEntry: decision.executor,
           ...(typeof decision.expected_move === "number" ? { expectedMoveAtEntry: decision.expected_move } : {}),
-          ...(typeof decision.total_cost === "number" ? { totalCostAtEntry: decision.total_cost } : {}),
+          ...(typeof effectiveSizeUsd === "number" ? { totalCostAtEntry: effectiveSizeUsd } : {}),
           ...(confScore !== undefined ? { entryConfidenceScore: confScore } : {}),
           ...(confTier !== undefined ? { entryConfidenceTier: confTier } : {}),
           ...(sizeMult !== undefined ? { entrySizeMultiplier: sizeMult } : {}),
@@ -3797,7 +3797,7 @@ export class PaperEngine {
           stage1_result_code: res.decision.stage1_result_code,
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
           expected_move_usd: res.decision.expected_move_usd ?? null,
-          required_cost_usd: res.decision.required_cost_usd ?? null,
+          required_cost_usd: effectiveSizeUsd, // Use effectiveSizeUsd
           shortfall_usd: res.decision.shortfall_usd ?? 0,
           executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
           stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
@@ -3850,12 +3850,12 @@ export class PaperEngine {
             sizeUsd: record.sizeUsd,
             leverage: record.leverage,
             expected_move: decision.expected_move,
-            total_cost: decision.total_cost,
+            total_cost: effectiveSizeUsd, // Use effectiveSizeUsd
             risk_state: (this.lastRisk?.riskStatus ?? "NORMAL"),
             stage1_result_code: res.decision.stage1_result_code,
             fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
             expected_move_usd: res.decision.expected_move_usd ?? null,
-            required_cost_usd: res.decision.required_cost_usd ?? null,
+            required_cost_usd: effectiveSizeUsd, // Use effectiveSizeUsd
             shortfall_usd: res.decision.shortfall_usd ?? 0,
             executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
             stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
@@ -3899,7 +3899,7 @@ export class PaperEngine {
           stage1_result_code: res.decision.stage1_result_code,
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
           expected_move_usd: res.decision.expected_move_usd ?? null,
-          required_cost_usd: res.decision.required_cost_usd ?? null,
+          required_cost_usd: effectiveSizeUsd, // Use effectiveSizeUsd
           shortfall_usd: res.decision.shortfall_usd ?? 0,
           final_fail_reason: msg,
           reviewing_ticks: res.decision.reviewing_ticks,
