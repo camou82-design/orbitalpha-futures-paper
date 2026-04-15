@@ -4,8 +4,8 @@ export type EngineV2OpMode = "legacy" | "shadow_v2" | "engine_v2";
 export type EngineV2Regime = "RANGE" | "TREND" | "TRANSITION" | "NO_TRADE";
 export type EngineV2ConfidenceLevel = "HIGH" | "MID" | "LOW";
 export type EngineV2SignalState = "LONG_CANDIDATE" | "SHORT_CANDIDATE" | "WAIT_RECHECK" | "NONE";
-export type EngineV2Side = "long" | "short" | "none";
-export type EngineV2FinalDecision = "ENTER" | "EXIT" | "SKIP" | "HOLD";
+export type EngineV2Side = "long" | "short" | "none" | null;
+export type EngineV2FinalDecision = "ENTER" | "EXIT" | "SKIP" | "HOLD" | "REJECT" | "DISABLED";
 
 /** Engine-V2 Specific Position Type (Independent from legacy) */
 export interface EngineV2Position {
@@ -143,7 +143,6 @@ export interface EngineV2Decision {
     rawMetrics: Record<string, number | boolean>;
 }
 
-/** Final Adoption Result - Selector Wrapper (3-Layer Separation) */
 export interface V2AdoptedResult {
     engine: "V1" | "V2";
     adopted_decision: EngineV2FinalDecision;
@@ -156,8 +155,8 @@ export interface V2AdoptedResult {
 export interface V2SelectorDecision {
     legacy_result: {
         regime: string;
-        decision: string;
-        side: string | null;
+        decision: EngineV2FinalDecision;
+        side: EngineV2Side;
         size: number;
     };
     v2_result: EngineV2Decision;

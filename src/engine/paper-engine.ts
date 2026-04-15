@@ -81,6 +81,7 @@ import {
   V2SelectorDecision,
   V2AdoptedResult,
   EngineV2FinalDecision,
+  LegacyResultAdapter,
   EngineV2Side
 } from "../engine-v2/types";
 import {
@@ -1193,25 +1194,7 @@ export class PaperEngine {
       let selectorResult: V2SelectorDecision | null = null;
 
       if (v2Mode === "engine_v2" || v2Mode === "shadow_v2") {
-        const v2LegacyAdapter = {
-          decision: {
-            regime_state: res.decision?.regime_state ?? "UNKNOWN",
-            final_decision: res.decision?.final_decision ?? "SKIP",
-            reject_reason: res.decision?.reject_reason ?? null,
-            required_cost_usd:
-              typeof res.decision?.required_cost_usd === "number" && Number.isFinite(res.decision.required_cost_usd)
-                ? res.decision.required_cost_usd
-                : 0
-          },
-          executorDecision: {
-            entry_allowed: res.executorDecision?.entry_allowed ?? false,
-            total_cost:
-              typeof res.executorDecision?.total_cost === "number" && Number.isFinite(res.executorDecision.total_cost)
-                ? res.executorDecision.total_cost
-                : 0
-          },
-          intentSide: normalizeAuthoritySide(res.intentSide)
-        };
+        const v2LegacyAdapter = buildV2LegacyAdapter(res);
 
         const v2Input = adaptV2Input(
           symKeyEarly,
@@ -1251,25 +1234,7 @@ export class PaperEngine {
         selectorResult = selectV2Decision(res, v2Decision, v2Mode);
 
         // Standard 10: Shadow Comparison Logging
-        this.logger.info("v2_shadow_parity", {
-          symbol: symKeyEarly,
-          ts: fetchedAt,
-          regime_v1: selectorResult.legacy_result.regime,
-          regime_v2: selectorResult.v2_result.regime,
-          decision_v1: selectorResult.legacy_result.decision,
-          decision_v2: selectorResult.v2_result.decision,
-          side_v1: selectorResult.legacy_result.side,
-          side_v2: selectorResult.v2_result.side,
-          size_v1: selectorResult.legacy_result.size,
-          size_v2: selectorResult.v2_result.risk.finalSizeUsd,
-          adopted_engine: selectorResult.adopted_result.engine,
-          adopted_decision: selectorResult.adopted_result.adopted_decision,
-          adopted_regime: selectorResult.adopted_result.adopted_regime,
-          adopted_side: selectorResult.adopted_result.adopted_side,
-          adopted_size: selectorResult.adopted_result.adopted_size_usd,
-          adoption_reason: selectorResult.adopted_result.adoption_reason,
-          mismatch: selectorResult.mismatch
-        });
+        this.logger.info("v2_shadow_parity", buildV2ShadowParityPayload(symKeyEarly, fetchedAt, selectorResult));
       }
 
       const authority = buildExecutionAuthority(res, selectorResult);
@@ -1369,7 +1334,7 @@ export class PaperEngine {
           decision_funnel_50_size,
           reject_reason_counts_tick,
           symbol_decisions: Object.fromEntries(
-            [...decisionBySymbol.entries()].map(([k, v]) => [k, { decision: v.legacy.decision, adaptiveOk: v.legacy.adaptiveOk }])
+            [...decisionBySymbol.entries()].map(([k, v]) => [k, buildEngineStateSymbolDecision(v)])
           )
         });
       } catch (e) {
@@ -1395,10 +1360,12 @@ export class PaperEngine {
 
   private async emitPipelineEventsFromDecision(
     first: SymbolSnapshot,
-    res: EvaluatePaperSymbolEntryResult,
+    envelope: SymbolDecisionEnvelope,
     nowTs: number,
     entryStage = 0
   ): Promise<void> {
+    const res = envelope.legacy;
+    const authority = envelope.authority;
     const sym = String(first.symbol);
     const d = res.decision;
     const ex = res.executorDecision;
@@ -3297,15 +3264,18 @@ export class PaperEngine {
         await this.emitPipelineEventsFromDecision(
           first,
           {
-            ...res,
-            decision: {
-              ...res.decision,
-              final_decision: "SKIP",
-              reject_reason: "EXECUTION_DISABLED",
-              execution_disabled_reason:
-                activeEngine === "TREND" ? "trend_opposite_leg_blocked_by_policy" : "hedge_blocked_non_range_engine"
-            },
-            adaptiveResult: null
+            ...envelope,
+            legacy: {
+              ...res,
+              decision: {
+                ...res.decision,
+                final_decision: "SKIP",
+                reject_reason: "EXECUTION_DISABLED",
+                execution_disabled_reason:
+                  activeEngine === "TREND" ? "trend_opposite_leg_blocked_by_policy" : "hedge_blocked_non_range_engine"
+              },
+              adaptiveResult: null
+            }
           },
           nowTs,
           entryStage
@@ -3324,14 +3294,17 @@ export class PaperEngine {
 
       if (next.length >= max) {
         if (authority.decision === "ENTER") {
-          const limitBlocked = {
-            ...res,
-            decision: {
-              ...res.decision,
-              stage1_result_code: "STAGE1_BLOCKED_LIMIT" as const
+          const limitBlockedEnvelope: SymbolDecisionEnvelope = {
+            ...envelope,
+            legacy: {
+              ...res,
+              decision: {
+                ...res.decision,
+                stage1_result_code: "STAGE1_BLOCKED_LIMIT" as const
+              }
             }
           };
-          await this.emitPipelineEventsFromDecision(first, limitBlocked, nowTs, entryStage);
+          await this.emitPipelineEventsFromDecision(first, limitBlockedEnvelope, nowTs, entryStage);
         }
         continue;
       }
@@ -3349,7 +3322,7 @@ export class PaperEngine {
       }
 
       if (authority.decision !== "ENTER" || !res.adaptiveResult) {
-        await this.emitPipelineEventsFromDecision(first, res, nowTs, entryStage);
+        await this.emitPipelineEventsFromDecision(first, envelope, nowTs, entryStage);
         continue;
       }
 
@@ -3359,13 +3332,16 @@ export class PaperEngine {
         await this.emitPipelineEventsFromDecision(
           first,
           {
-            ...res,
-            decision: {
-              ...res.decision,
-              final_decision: "SKIP",
-              reject_reason: "REGIME_NO_TRADE"
-            },
-            adaptiveResult: null
+            ...envelope,
+            legacy: {
+              ...res,
+              decision: {
+                ...res.decision,
+                final_decision: "SKIP",
+                reject_reason: "REGIME_NO_TRADE"
+              },
+              adaptiveResult: null
+            }
           },
           nowTs,
           entryStage
@@ -3587,14 +3563,17 @@ export class PaperEngine {
           await this.emitPipelineEventsFromDecision(
             first,
             {
-              ...res,
-              decision: {
-                ...res.decision,
-                final_decision: "SKIP",
-                reject_reason: "EXECUTION_DISABLED",
-                execution_disabled_reason: "risk_exposure_cap_for_leg"
-              },
-              adaptiveResult: null
+              ...envelope,
+              legacy: {
+                ...res,
+                decision: {
+                  ...res.decision,
+                  final_decision: "SKIP",
+                  reject_reason: "EXECUTION_DISABLED",
+                  execution_disabled_reason: "risk_exposure_cap_for_leg"
+                },
+                adaptiveResult: null
+              }
             },
             nowTs,
             entryStage
@@ -4551,7 +4530,7 @@ function selectV2Decision(
   v2: EngineV2Decision,
   engineMode: string
 ): V2SelectorDecision {
-  const legacy_result = {
+  const legacy_result: V2SelectorDecision["legacy_result"] = {
     regime: v1.decision?.regime_state || "UNKNOWN",
     decision: normalizeAuthorityDecision(v1.decision?.final_decision),
     side: normalizeAuthoritySide(v1.intentSide),
@@ -4578,5 +4557,77 @@ function selectV2Decision(
     v2_result: v2,
     adopted_result,
     mismatch: legacy_result.decision !== v2.decision || legacy_result.side !== v2.side
+  };
+}
+
+/** 
+ * LEGACY ADAPTER HELPER (Phase 2 Extraction)
+ * Decouples raw legacy decision from V2 adaptive input.
+ */
+function buildV2LegacyAdapter(res: EvaluatePaperSymbolEntryResult): LegacyResultAdapter {
+  return {
+    decision: {
+      regime_state: res.decision?.regime_state ?? "UNKNOWN",
+      final_decision: res.decision?.final_decision ?? "SKIP",
+      reject_reason: res.decision?.reject_reason ?? null,
+      required_cost_usd:
+        typeof res.decision?.required_cost_usd === "number" && Number.isFinite(res.decision.required_cost_usd)
+          ? res.decision.required_cost_usd
+          : 0
+    },
+    executorDecision: {
+      entry_allowed: res.executorDecision?.entry_allowed ?? false,
+      total_cost:
+        typeof res.executorDecision?.total_cost === "number" && Number.isFinite(res.executorDecision.total_cost)
+          ? res.executorDecision.total_cost
+          : 0
+    },
+    intentSide: normalizeAuthoritySide(res.intentSide)
+  };
+}
+
+/**
+ * SHADOW PARITY LOGGING HELPER (Phase 2 Extraction)
+ * Standardizes comparison logging between V1 and V2.
+ */
+function buildV2ShadowParityPayload(
+  symbol: string,
+  ts: number,
+  selectorResult: V2SelectorDecision
+): Record<string, unknown> {
+  return {
+    symbol,
+    ts,
+    regime_v1: selectorResult.legacy_result.regime,
+    regime_v2: selectorResult.v2_result.regime,
+    decision_v1: selectorResult.legacy_result.decision,
+    decision_v2: selectorResult.v2_result.decision,
+    side_v1: selectorResult.legacy_result.side,
+    side_v2: selectorResult.v2_result.side,
+    size_v1: selectorResult.legacy_result.size,
+    size_v2: selectorResult.v2_result.risk.finalSizeUsd,
+    adopted_engine: selectorResult.adopted_result.engine,
+    adopted_decision: selectorResult.adopted_result.adopted_decision,
+    adopted_regime: selectorResult.adopted_result.adopted_regime,
+    adopted_side: selectorResult.adopted_result.adopted_side,
+    adopted_size: selectorResult.adopted_result.adopted_size_usd,
+    adoption_reason: selectorResult.adopted_result.adoption_reason,
+    mismatch: selectorResult.mismatch
+  };
+}
+
+/**
+ * ENGINE STATE SUMMARY HELPER (Phase 2 Extraction)
+ * Promotes authority-first status for terminal/dashboard state.
+ */
+function buildEngineStateSymbolDecision(envelope: SymbolDecisionEnvelope): Record<string, unknown> {
+  const { legacy, authority } = envelope;
+  return {
+    decision: legacy.decision, // Legacy field retained for dashboard compatibility
+    adaptiveOk: legacy.adaptiveOk,
+    authority_decision: authority.decision,
+    authority_side: authority.side,
+    authority_size_usd: authority.sizeUsd,
+    authority_source: authority.source
   };
 }
