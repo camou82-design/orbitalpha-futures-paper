@@ -1849,6 +1849,18 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   isRangeFallbackActive = contextRangeDiag && hasRangeContextMetrics && input.regime !== "NO_TRADE";
 
   const useRangeStage0Engine = (input.regime === "RANGE" || isRangeFallbackActive) && input.currentStage === 0;
+
+  if (input.regime === "RANGE") {
+    console.log("STAGE_ROUTING_BOTTLENECK_PROOF", {
+      symbol: String(sn.symbol),
+      currentStage: input.currentStage,
+      hasOpenPosition: input.hasOpenPosition,
+      isRangeFallbackActive,
+      useRangeStage0Engine,
+      classify: useRangeStage0Engine ? "range_stage0_eligible" : "range_stage0_bypassed_by_stage"
+    });
+  }
+
   if (useRangeStage0Engine) {
     if (isRangeFallbackActive && input.regime !== "RANGE") {
       supplemental_reasons.push(`[RANGE_PRIORITY_FALLBACK] regime=${input.regime},diag=${sn.regimeStateDiag},conf=${sn.rangeConfidence}`);

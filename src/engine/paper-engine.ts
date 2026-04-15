@@ -1118,6 +1118,16 @@ export class PaperEngine {
         currentStage: existingPos?.entryStage ?? 1,
         rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly
       });
+
+      if (regimeDetected.regime === "RANGE") {
+        console.log("STAGE_ROUTING_INPUT_TRACE", {
+          symbol: String(sym),
+          regime: regimeDetected.regime,
+          currentStage: existingPos?.entryStage ?? 1,
+          hasOpenPosition: !!existingPos
+        });
+      }
+
       decisionBySymbol.set(symKeyEarly, res);
 
       // 3. Execution Logic
