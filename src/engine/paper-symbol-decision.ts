@@ -28,6 +28,7 @@ import {
 import { rangeExecutorEvaluateEntry } from "../strategy/executors/range-executor";
 import { highwayExecutorEvaluateEntry } from "./highway-entry-executor";
 import type { AnyEntryDecision } from "../strategy/executors/types";
+import type { EntryExecutionAuthority } from "../engine-v2/types";
 import { aiApproveEntry, aiInputFromDecision } from "../ai/entry-approval";
 import { HighwayTrendState } from "../models/types";
 import { evaluateAiHighwayQuality } from "../engine/ai-highway-filter";
@@ -679,6 +680,8 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   autoEntryTriggered?: boolean;
   /** RANGE 익절 후 재진입 — RANGE 쿨다운 우회(엔진 판단). */
   rangeReopenCooldownBypass?: boolean;
+  /** V2 Engine Authority — expectancy bypass 결정용. */
+  authority?: EntryExecutionAuthority;
 }>;
 
 export type EvaluatePaperSymbolEntryResult = Readonly<{
@@ -1418,6 +1421,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   required_move_pct = effectiveTotalCost !== null ? effectiveTotalCost * 100 : null;
   shortfall_pct = (effectiveTotalCost !== null && em !== null && effectiveTotalCost > em) ? (effectiveTotalCost - em) * 100 : 0;
+
+  let authorityExpectancySoftPassApplied = false;
+  let authorityExpectancySoftPassReason: string | null = null;
+  const authorityExpectancySoftPassSizeMult = 0.5;
 
   executorBlockReasonOriginal = null;
   stage1SoftExecOverrideFlag = false;
@@ -3278,73 +3285,95 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
       detailDumpHit ||
       detailVolHit;
-    if (executorDecision?.entry_allowed) {
-      stage1_block_origin = "legacy_executor_gate_passed";
-      override_by_legacy = false;
+
+    const hasAuthorityEnterFromV2 = input.authority?.decision === "ENTER" && input.authority?.source === "v2";
+    const authorityExpectancySoftPassEligible =
+      hasAuthorityEnterFromV2 &&
+      !severeRiskLock &&
+      (input.authority?.sizeUsd ?? 0) > 0 &&
+      (input.authority?.side === "long" || input.authority?.side === "short");
+
+    if (reject_reason === "EDGE_FAIL_EXPECTANCY" && authorityExpectancySoftPassEligible) {
+      authorityExpectancySoftPassApplied = true;
+      authorityExpectancySoftPassReason = "v2_authority_expectancy_bypass";
+      // Skip the early return and mark for size reduction
+      console.log("[AUTHORITY_EXPECTANCY_DECISION_PROOF]", {
+        symbol: String(sn.symbol),
+        decision: "SOFT_PASS",
+        reason: authorityExpectancySoftPassReason,
+        v2_side: input.authority?.side,
+        v2_size: input.authority?.sizeUsd,
+        original_reject: "EDGE_FAIL_EXPECTANCY"
+      });
     } else {
-      // Round 4 & 5: Active Stage 1 candidate evaluation (Execution over Review)
-      final_decision = input.currentStage === 0 ? "SKIP" : "REJECT";
+      if (executorDecision?.entry_allowed) {
+        stage1_block_origin = "legacy_executor_gate_passed";
+        override_by_legacy = false;
+      } else {
+        // Round 4 & 5: Active Stage 1 candidate evaluation (Execution over Review)
+        final_decision = input.currentStage === 0 ? "SKIP" : "REJECT";
 
-      if (
-        input.isAmbiguous &&
-        final_decision === "SKIP" &&
-        reject_reason !== "HIGHWAY_BOX_EDGE_WATCH" &&
-        reject_reason !== "HIGHWAY_CANDLE_WARMUP_WATCH"
-      ) {
-        const ambCode = input.regime === "TREND" ? "AMBIGUOUS_TREND_REVIEW" : "AMBIGUOUS_RANGE_REVIEW";
-        reject_reason = ambCode;
-        execution_state = ambCode;
-      }
-
-      if (br) supplemental_reasons.push(`EXEC_BLOCKED_${br.toUpperCase()}`);
-      if (invalidTier) supplemental_reasons.push(`HIGHWAY_INVALID_TIER_${invalidTier.toUpperCase()}`);
-      for (const reason of invalidReasons.slice(0, 3)) {
-        supplemental_reasons.push(`HIGHWAY_INVALID_SUBREASON_${String(reason).toUpperCase()}`);
-      }
-      return ret(
-        {
-          execution_state,
-          final_decision,
-          ai_decision: "N/A",
-          adaptive_decision: "N/A",
-          guidance: executorDecision?.guidance ?? null,
-          next_action: executorDecision?.next_action ?? null,
-          invalidate_condition: executorDecision?.invalidate_condition ?? null,
-          risk_note: executorDecision?.risk_note ?? null,
-          watch_zone: executorDecision?.watch_zone ?? null,
-          entry_progress: executorDecision?.entry_progress ?? null,
-          target_stage: null,
-          supplemental_reasons,
-          stage1_result_code: stage1BlockCode as any,
-          legacy_block_reason,
-          legacy_regime_gate,
-          legacy_gate_source,
-          override_by_legacy,
-          stage1_block_origin,
-          legacy_block_original_reason,
-          stage1_signal_relaxed: stage1SignalRelaxed,
-          signal_relax_reason: signalRelaxReason,
-          stage1_soft_candidate_enter_applied: stage1SoftCandidateMicroEnter,
-          stage1_soft_candidate_original_block_reason: stage1SoftCandidateMicroEnter ? executorBlockReasonOriginal : null,
-          stage1_soft_candidate_size_mult: stage1SoftCandidateMicroEnter ? 0.4 : null,
-          stage1_cost_soft_bypass_applied: stage1CostSoftBypassApplied,
-          stage1_cost_soft_bypass_reason: stage1CostSoftBypassReason,
-          stage1_cost_shortfall_pct: shortfall_pct,
-          stage1_cost_shortfall_usd: ((required_move_pct ?? 0) > 0 && shortfall_pct && totalCost !== null) ? (totalCost * shortfall_pct) : null,
-          stage1_cost_micro_size_mult: stage1CostSoftBypassApplied ? 0.5 : null,
-          currentStage: input.currentStage,
-          required_move_pct,
-          shortfall_pct
-        },
-        {
-          intentSide,
-          executorDecision,
-          adaptiveOk: false,
-          adaptiveDetail: null,
-          adaptiveResult: null,
-          aiGatePassed: false
+        if (
+          input.isAmbiguous &&
+          final_decision === "SKIP" &&
+          reject_reason !== "HIGHWAY_BOX_EDGE_WATCH" &&
+          reject_reason !== "HIGHWAY_CANDLE_WARMUP_WATCH"
+        ) {
+          const ambCode = input.regime === "TREND" ? "AMBIGUOUS_TREND_REVIEW" : "AMBIGUOUS_RANGE_REVIEW";
+          reject_reason = ambCode;
+          execution_state = ambCode;
         }
-      );
+
+        if (br) supplemental_reasons.push(`EXEC_BLOCKED_${br.toUpperCase()}`);
+        if (invalidTier) supplemental_reasons.push(`HIGHWAY_INVALID_TIER_${invalidTier.toUpperCase()}`);
+        for (const reason of invalidReasons.slice(0, 3)) {
+          supplemental_reasons.push(`HIGHWAY_INVALID_SUBREASON_${String(reason).toUpperCase()}`);
+        }
+        return ret(
+          {
+            execution_state,
+            final_decision,
+            ai_decision: "N/A",
+            adaptive_decision: "N/A",
+            guidance: executorDecision?.guidance ?? null,
+            next_action: executorDecision?.next_action ?? null,
+            invalidate_condition: executorDecision?.invalidate_condition ?? null,
+            risk_note: executorDecision?.risk_note ?? null,
+            watch_zone: executorDecision?.watch_zone ?? null,
+            entry_progress: executorDecision?.entry_progress ?? null,
+            target_stage: null,
+            supplemental_reasons,
+            stage1_result_code: stage1BlockCode as any,
+            legacy_block_reason,
+            legacy_regime_gate,
+            legacy_gate_source,
+            override_by_legacy,
+            stage1_block_origin,
+            legacy_block_original_reason,
+            stage1_signal_relaxed: stage1SignalRelaxed,
+            signal_relax_reason: signalRelaxReason,
+            stage1_soft_candidate_enter_applied: stage1SoftCandidateMicroEnter,
+            stage1_soft_candidate_original_block_reason: stage1SoftCandidateMicroEnter ? executorBlockReasonOriginal : null,
+            stage1_soft_candidate_size_mult: stage1SoftCandidateMicroEnter ? 0.4 : null,
+            stage1_cost_soft_bypass_applied: stage1CostSoftBypassApplied,
+            stage1_cost_soft_bypass_reason: stage1CostSoftBypassReason,
+            stage1_cost_shortfall_pct: shortfall_pct,
+            stage1_cost_shortfall_usd: ((required_move_pct ?? 0) > 0 && shortfall_pct && totalCost !== null) ? (totalCost * shortfall_pct) : null,
+            stage1_cost_micro_size_mult: stage1CostSoftBypassApplied ? 0.5 : null,
+            currentStage: input.currentStage,
+            required_move_pct,
+            shortfall_pct
+          },
+          {
+            intentSide,
+            executorDecision,
+            adaptiveOk: false,
+            adaptiveDetail: null,
+            adaptiveResult: null,
+            aiGatePassed: false
+          }
+        );
+      }
     }
   }
 
@@ -3353,7 +3382,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     typeof input.risk?.detail?.last10_net_usd === "number" && Number.isFinite(input.risk.detail.last10_net_usd as number)
       ? (input.risk.detail.last10_net_usd as number)
       : 0;
-  const aiIn = aiInputFromDecision({ decision: executorDecision, executorDirection: intentSide, lossStreak, last10Net });
+
+  const aiIn = executorDecision
+    ? aiInputFromDecision({ decision: executorDecision, executorDirection: intentSide, lossStreak, last10Net })
+    : null;
+
   if (aiIn) {
     const aiOut = aiApproveEntry(aiIn);
     // [ROLE REDUCTION] AI only handles quality approval/rejection for the locked direction
@@ -3476,10 +3509,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       supplemental_reasons.push("RANGE_LOSS_STREAK_REDUCED_ENTRY_APPLIED");
     }
 
-    // Apply Tiered Reversal Size Multiplier (from 3-tier interpretation)
     if (input.currentStage === 0 && input.regime === "RANGE" && rangeReversalSizeMult !== 1.0) {
       dynamicSizeMult *= rangeReversalSizeMult;
       supplemental_reasons.push(`RANGE_REVERSAL_TIER_${rangeReversalTier.toUpperCase()}_SIZE_REDUCED`);
+    }
+
+    if (authorityExpectancySoftPassApplied) {
+      dynamicSizeMult *= authorityExpectancySoftPassSizeMult;
+      supplemental_reasons.push("authority_expectancy_soft_pass");
     }
 
     /**
@@ -3782,15 +3819,17 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         auto_entry_triggered: input.autoEntryTriggered,
         stage1_result_code:
           stage1ResultCodeOverride ?? (
-            execution_state === "STAGE1_EXEC_PENDING"
-              ? "STAGE1_EXEC_PENDING"
-              : gateReason === "range_wait_recheck_soft_pass_candidate"
-                ? "STAGE1_SOFT_FILTERED"
-                : gateReason === "range_upper_long_candidate_preserved_despite_weak_reversal"
-                  ? "STAGE1_PENDING_RECHECK"
-                  : costWarningStage1
-                    ? "STAGE1_COST_WARNING"
-                    : "STAGE1_ENTERED"
+            authorityExpectancySoftPassApplied
+              ? "STAGE1_SOFT_EXPECTANCY_PASS"
+              : execution_state === "STAGE1_EXEC_PENDING"
+                ? "STAGE1_EXEC_PENDING"
+                : gateReason === "range_wait_recheck_soft_pass_candidate"
+                  ? "STAGE1_SOFT_FILTERED"
+                  : gateReason === "range_upper_long_candidate_preserved_despite_weak_reversal"
+                    ? "STAGE1_PENDING_RECHECK"
+                    : costWarningStage1
+                      ? "STAGE1_COST_WARNING"
+                      : "STAGE1_ENTERED"
           ),
         required_move_pct,
         shortfall_pct,
