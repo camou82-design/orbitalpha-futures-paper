@@ -1002,6 +1002,10 @@ function pack(
     final_executor_after_priority?: PaperStrategyExecutor | null;
     final_reject_before_priority?: string | null;
     final_reject_after_priority?: string | null;
+    authority_decision?: string | null;
+    authority_source?: string | null;
+    authority_side?: string | null;
+    authority_size_usd?: number | null;
   }
 ): PaperSymbolDecision {
   return {
@@ -1174,7 +1178,11 @@ function pack(
     final_executor_before_priority: fields.final_executor_before_priority,
     final_executor_after_priority: fields.final_executor_after_priority,
     final_reject_before_priority: fields.final_reject_before_priority,
-    final_reject_after_priority: fields.final_reject_after_priority
+    final_reject_after_priority: fields.final_reject_after_priority,
+    authority_decision: fields.authority_decision ?? null,
+    authority_source: fields.authority_source ?? null,
+    authority_side: fields.authority_side ?? null,
+    authority_size_usd: fields.authority_size_usd ?? null
   };
 }
 
@@ -1555,6 +1563,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       min_qty?: number | null;
       min_notional?: number | null;
       sizeUsd?: number | null;
+      authority_decision?: string | null;
+      authority_source?: string | null;
+      authority_side?: string | null;
+      authority_size_usd?: number | null;
       long_only_restriction?: boolean;
       original_signal_state?: string;
       final_signal_state?: string;
@@ -1779,6 +1791,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         min_qty: extra.min_qty,
         min_notional: extra.min_notional,
         sizeUsd: extra.sizeUsd,
+        authority_decision: extra.authority_decision ?? authority.decision,
+        authority_source: extra.authority_source ?? authority.source,
+        authority_side: extra.authority_side ?? authority.side,
+        authority_size_usd: extra.authority_size_usd ?? authority.sizeUsd,
         long_only_restriction: extra.long_only_restriction,
         original_signal_state: extra.original_signal_state,
         final_signal_state: extra.final_signal_state,
@@ -3745,6 +3761,20 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     });
     adaptiveDetailOut = adaptive.detail ?? null;
 
+    console.log("[ADAPTIVE_RESULT_SUMMARY]", {
+      authority_decision: authority?.decision ?? null,
+      authority_source: authority?.source ?? null,
+      authority_side: authority?.side ?? null,
+      authority_size_usd: authority?.sizeUsd ?? null,
+      adaptive_ok: adaptive?.ok ?? null,
+      fail_stage: (adaptive && !adaptive.ok) ? adaptive.failStage ?? null : null,
+      fail_reason: (adaptive && !adaptive.ok) ? adaptive.orderBuildFailReason ?? null : null,
+      signal: sn?.signal ?? null,
+      trend_ok: sn?.trendOk ?? null,
+      candidate_strength: (sn as any)?.candidateStrength ?? null,
+      quality_score: sn?.qualityScore ?? null
+    });
+
     // Consolidate reasons: Use policy failure over executor failure if it's from entry_policy
     if (adaptive && !adaptive.ok) {
       executorBlockReasonOriginal = adaptive.orderBuildFailReason;
@@ -3783,6 +3813,22 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         reject_reason: "AUTHORITY_ADAPTIVE_SOFT_PASS"
       });
     } else {
+      console.log("[ORDER_BUILD_ADAPTIVE_FAIL_PROOF]", {
+        authority_decision: authority?.decision ?? null,
+        authority_source: authority?.source ?? null,
+        authority_side: authority?.side ?? null,
+        authority_size_usd: authority?.sizeUsd ?? null,
+        adaptive_ok: false,
+        adaptive_fail_stage: af.failStage ?? null,
+        adaptive_fail_reason: af.orderBuildFailReason ?? null,
+        reject_reason: "ORDER_BUILD_FAIL",
+        current_stage: input.currentStage ?? null,
+        signal: sn?.signal ?? null,
+        trend_ok: sn?.trendOk ?? null,
+        candidate_strength: (sn as any)?.candidateStrength ?? null,
+        quality_score: sn?.qualityScore ?? null
+      });
+
       return ret(
         {
           reject_reason: "ORDER_BUILD_FAIL",
@@ -3864,15 +3910,23 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const rangeSoftPassSizeMult =
     gateReason === "range_wait_recheck_soft_pass_candidate" ? 0.45 : 1.0;
 
-  const initialEntryQty = (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult * rangeSoftPassSizeMult) / sn!.lastPrice;
+  const authorityAdaptiveSoftPassSizeMult =
+    reject_reason === "AUTHORITY_ADAPTIVE_SOFT_PASS" ? 0.5 : 1.0;
+
+  const authorityExpectancySoftPassSizeMult =
+    reject_reason === "AUTHORITY_EXPECTANCY_SOFT_PASS" ? 0.45 : 1.0;
+
+  const initialEntryQty = (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult * rangeSoftPassSizeMult * authorityAdaptiveSoftPassSizeMult * authorityExpectancySoftPassSizeMult) / sn!.lastPrice;
   if (initialEntryQty <= 0) {
     console.log("[ORDER_BUILD_ZERO_QTY_PROOF]", {
-      authority_decision: authority.decision,
-      authority_source: authority.source,
-      authority_side: authority.side,
-      authority_size_usd: authority.sizeUsd,
+      authority_decision: authority?.decision ?? null,
+      authority_source: authority?.source ?? null,
+      authority_side: authority?.side ?? null,
+      authority_size_usd: authority?.sizeUsd ?? null,
       dynamic_size_mult: dynamicSizeMult,
       range_soft_pass_size_mult: rangeSoftPassSizeMult,
+      authority_expectancy_soft_pass_size_mult: authorityExpectancySoftPassSizeMult,
+      authority_adaptive_soft_pass_size_mult: authorityAdaptiveSoftPassSizeMult,
       last_price: sn?.lastPrice ?? null,
       initial_entry_qty: initialEntryQty,
       reject_reason: "ORDER_BUILD_FAIL"
@@ -3893,7 +3947,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         supplemental_reasons,
         stage1_result_code: "STAGE1_BLOCKED_DATA",
         required_move_pct,
-        shortfall_pct
+        shortfall_pct,
+        order_build_fail_reason: "ZERO_QTY",
+        order_build_fail_stage: "adaptive_sizing"
       },
       {
         intentSide,

@@ -640,6 +640,11 @@ export type PaperSymbolDecisionRecord = Readonly<{
   final_reject_before_priority?: string | null;
   /** GAP: Final reject reason after priority shift */
   final_reject_after_priority?: string | null;
+  /** V2 Authority decision fields (diagnostics) */
+  authority_decision?: string | null;
+  authority_source?: string | null;
+  authority_side?: string | null;
+  authority_size_usd?: number | null;
 }>;
 
 /** Minimal row shape for funnel math. */

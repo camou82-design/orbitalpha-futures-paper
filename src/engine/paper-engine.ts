@@ -485,6 +485,11 @@ function orderBuildFailureStructuredPayload(
   return {
     order_build_ok: false,
     order_build_fail_reason: d.order_build_fail_reason ?? af?.orderBuildFailReason ?? "unknown",
+    order_build_fail_stage: d.order_build_fail_stage ?? af?.failStage ?? null,
+    authority_decision: d.authority_decision ?? null,
+    authority_source: d.authority_source ?? null,
+    authority_side: d.authority_side ?? null,
+    authority_size_usd: d.authority_size_usd ?? null,
     symbol: String(first.symbol),
     side,
     entryStage,
@@ -509,7 +514,6 @@ function orderBuildFailureStructuredPayload(
     qty_step: d.qty_step ?? null,
     min_qty: d.min_qty ?? null,
     min_notional: d.min_notional ?? null,
-    order_build_fail_stage: d.order_build_fail_stage ?? af?.failStage ?? null,
     adaptive_detail: adaptiveMergedDetail,
     entry_policy_proof: entryPolicyProof,
     trend_volume_relax_proof: trendVolumeRelaxProof
