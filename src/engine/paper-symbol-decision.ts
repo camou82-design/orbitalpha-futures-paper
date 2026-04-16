@@ -1006,6 +1006,9 @@ function pack(
     authority_source?: string | null;
     authority_side?: string | null;
     authority_size_usd?: number | null;
+    final_block_owner?: string | null;
+    adaptive_fail_stage?: string | null;
+    adaptive_fail_reason?: string | null;
   }
 ): PaperSymbolDecision {
   return {
@@ -1181,8 +1184,10 @@ function pack(
     final_reject_after_priority: fields.final_reject_after_priority,
     authority_decision: fields.authority_decision ?? null,
     authority_source: fields.authority_source ?? null,
-    authority_side: fields.authority_side ?? null,
-    authority_size_usd: fields.authority_size_usd ?? null
+    authority_size_usd: fields.authority_size_usd ?? null,
+    final_block_owner: fields.final_block_owner ?? null,
+    adaptive_fail_stage: fields.adaptive_fail_stage ?? null,
+    adaptive_fail_reason: fields.adaptive_fail_reason ?? null
   };
 }
 
@@ -1567,6 +1572,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       authority_source?: string | null;
       authority_side?: string | null;
       authority_size_usd?: number | null;
+      final_block_owner?: string | null;
+      adaptive_fail_stage?: string | null;
+      adaptive_fail_reason?: string | null;
       long_only_restriction?: boolean;
       original_signal_state?: string;
       final_signal_state?: string;
@@ -1795,6 +1803,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         authority_source: extra.authority_source ?? authority.source,
         authority_side: extra.authority_side ?? authority.side,
         authority_size_usd: extra.authority_size_usd ?? authority.sizeUsd,
+        final_block_owner: extra.final_block_owner ?? null,
+        adaptive_fail_stage: extra.adaptive_fail_stage ?? null,
+        adaptive_fail_reason: extra.adaptive_fail_reason ?? null,
         long_only_restriction: extra.long_only_restriction,
         original_signal_state: extra.original_signal_state,
         final_signal_state: extra.final_signal_state,
@@ -3781,77 +3792,84 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
   }
 
-  const hasAuthorityEnterFromV2ForAdaptive =
+  const hasAuthorityEnterFromV2 =
     authority.decision === "ENTER" &&
     authority.source === "v2" &&
     (authority.side === "long" || authority.side === "short") &&
     (authority.sizeUsd ?? 0) > 0;
 
-  const hardBlockedForAdaptiveBypass =
+  const hardBlockedForExecution =
     severeRiskLock === true ||
     risk_state === "HARD_BLOCK";
 
   if (adaptive && !adaptive.ok) {
     const af = adaptive as Extract<FuturesAdaptiveEntryResult, { ok: false }>;
-    const adaptiveFailIsSoftenable = hasAuthorityEnterFromV2ForAdaptive && af.failStage === "entry_policy";
-    const allowAuthorityAdaptiveSoftPass = adaptiveFailIsSoftenable && !hardBlockedForAdaptiveBypass;
+    const isEntryPolicyFailure = af.failStage === "entry_policy";
+    const authorityBypassesPolicyVeto = hasAuthorityEnterFromV2 && isEntryPolicyFailure && !hardBlockedForExecution;
 
-    if (allowAuthorityAdaptiveSoftPass) {
+    if (authorityBypassesPolicyVeto) {
+      // Philosophy: V2 Authority ENTER overrides adaptive's entry_policy re-check.
+      // We log the policy failure but proceed to sizing/execution.
       reject_reason = "AUTHORITY_ADAPTIVE_SOFT_PASS";
       supplemental_reasons.push("AUTHORITY_ADAPTIVE_SOFT_PASS");
       adaptiveOk = true;
       adaptiveDetailOut = adaptive.detail ?? null;
 
-      console.log("[AUTHORITY_ADAPTIVE_DECISION_PROOF]", {
+      console.log("[AUTHORITY_ADAPTIVE_Bypass_POLICY_VETO]", {
         authority_decision: authority.decision,
         authority_source: authority.source,
         authority_side: authority.side,
         authority_size_usd: authority.sizeUsd,
-        adaptive_fail_stage: af.failStage,
-        adaptive_fail_reason: af.orderBuildFailReason,
-        allow_authority_adaptive_soft_pass: true,
-        reject_reason: "AUTHORITY_ADAPTIVE_SOFT_PASS"
+        parked_fail_stage: af.failStage,
+        parked_fail_reason: af.orderBuildFailReason,
+        final_block_owner: null,
+        decision_action: "BYPASS_VETO_PROCEED_TO_EXECUTION"
       });
     } else {
-      console.log("[ORDER_BUILD_ADAPTIVE_FAIL_PROOF]", {
+      // Physical failure (sizing) or Policy failure without V2 override
+      const finalRejectReason = isEntryPolicyFailure ? "ADAPTIVE_POLICY_BLOCK" : "ORDER_BUILD_FAIL";
+      const blockOwner = isEntryPolicyFailure ? "adaptive_policy" : "adaptive_sizing";
+
+      console.log("[ENTRY_EXECUTION_BLOCKED_BY_ADAPTIVE]", {
         authority_decision: authority?.decision ?? null,
         authority_source: authority?.source ?? null,
         authority_side: authority?.side ?? null,
         authority_size_usd: authority?.sizeUsd ?? null,
         adaptive_ok: false,
-        adaptive_fail_stage: af.failStage ?? null,
-        adaptive_fail_reason: af.orderBuildFailReason ?? null,
-        reject_reason: "ORDER_BUILD_FAIL",
-        current_stage: input.currentStage ?? null,
+        fail_stage: af.failStage ?? null,
+        fail_reason: af.orderBuildFailReason ?? null,
+        reject_reason: finalRejectReason,
+        final_block_owner: blockOwner,
         signal: sn?.signal ?? null,
-        trend_ok: sn?.trendOk ?? null,
-        candidate_strength: (sn as any)?.candidateStrength ?? null,
-        quality_score: sn?.qualityScore ?? null
+        trend_ok: sn?.trendOk ?? null
       });
 
       return ret(
         {
-          reject_reason: "ORDER_BUILD_FAIL",
+          reject_reason: finalRejectReason,
           final_decision: "REJECT",
           execution_state: "ORDER_BUILD_FAIL",
           ai_decision: "APPROVE",
           adaptive_decision: "REJECT",
-          guidance: `Adaptive entry failed: ${af.orderBuildFailReason}`,
+          guidance: `Adaptive entry blocked [${blockOwner}]: ${af.orderBuildFailReason}`,
           target_stage: null,
           supplemental_reasons,
-          stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
+          stage1_result_code: isEntryPolicyFailure ? "STAGE1_SOFT_FILTERED" : "STAGE1_BLOCKED_SIGNAL",
           required_move_pct,
           shortfall_pct,
           order_build_ok: false,
           order_build_fail_reason: af.orderBuildFailReason,
-          order_build_fail_stage: af.failStage
+          order_build_fail_stage: af.failStage,
+          final_block_owner: blockOwner,
+          adaptive_fail_stage: af.failStage,
+          adaptive_fail_reason: af.orderBuildFailReason
         },
         {
           intentSide,
           executorDecision,
-          adaptiveOk,
+          adaptiveOk: false,
           adaptiveDetail: adaptiveDetailOut,
-          adaptiveResult,
+          adaptiveResult: null,
           adaptiveFailure: af,
           aiGatePassed: true
         }
@@ -3901,7 +3919,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         guidance: "Long Only 제한으로 숏 진입 차단",
         target_stage: null,
         supplemental_reasons,
-        stage1_result_code: "STAGE1_BLOCKED_RISK"
+        stage1_result_code: "STAGE1_BLOCKED_RISK",
+        final_block_owner: "execution_guard"
       },
       { intentSide, executorDecision, aiGatePassed, adaptiveOk: false, adaptiveDetail: adaptiveDetailOut, adaptiveResult: null }
     );
@@ -3929,7 +3948,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       authority_adaptive_soft_pass_size_mult: authorityAdaptiveSoftPassSizeMult,
       last_price: sn?.lastPrice ?? null,
       initial_entry_qty: initialEntryQty,
-      reject_reason: "ORDER_BUILD_FAIL"
+      reject_reason: "ORDER_BUILD_FAIL",
+      final_block_owner: "adaptive_sizing"
     });
 
     reject_reason = "ORDER_BUILD_FAIL";
@@ -3949,7 +3969,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         required_move_pct,
         shortfall_pct,
         order_build_fail_reason: "ZERO_QTY",
-        order_build_fail_stage: "adaptive_sizing"
+        order_build_fail_stage: "adaptive_sizing",
+        final_block_owner: "adaptive_sizing"
       },
       {
         intentSide,

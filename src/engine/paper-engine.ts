@@ -490,6 +490,7 @@ function orderBuildFailureStructuredPayload(
     authority_source: d.authority_source ?? null,
     authority_side: d.authority_side ?? null,
     authority_size_usd: d.authority_size_usd ?? null,
+    final_block_owner: d.final_block_owner ?? null,
     symbol: String(first.symbol),
     side,
     entryStage,

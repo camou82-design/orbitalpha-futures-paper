@@ -208,6 +208,7 @@ export type PaperDecisionRejectReason =
   | "ADAPTIVE_REJECT"
   | "AUTHORITY_EXPECTANCY_SOFT_PASS"
   | "AUTHORITY_ADAPTIVE_SOFT_PASS"
+  | "ADAPTIVE_POLICY_BLOCK"
   | "ORDER_BUILD_FAIL"
   | "EXECUTOR_INIT_FAIL"
   | "EXECUTION_DISABLED"
@@ -645,6 +646,11 @@ export type PaperSymbolDecisionRecord = Readonly<{
   authority_source?: string | null;
   authority_side?: string | null;
   authority_size_usd?: number | null;
+  /** Accountability: Who definitively blocked this entry? (v1_executor, adaptive_policy, execution_guard, etc) */
+  final_block_owner?: string | null;
+  /** Diagnostics: adaptive engine fail metadata */
+  adaptive_fail_stage?: string | null;
+  adaptive_fail_reason?: string | null;
 }>;
 
 /** Minimal row shape for funnel math. */
