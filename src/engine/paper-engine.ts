@@ -1156,20 +1156,7 @@ export class PaperEngine {
       /** Engine-V2 Execution Path (Standard 2: Selector Bridge) */
       const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as EngineV2OpMode) || "legacy";
 
-      // Assemble Bridge DTOs (Phase 5 Autonomous Boundary)
-      const snapshotBridge: V2BridgeSnapshot = {
-        lastPrice: snap.lastPrice,
-        latestCandleClose: snap.latestCandleClose,
-        boxHigh: snap.boxHigh ?? 0,
-        boxLow: snap.boxLow ?? 0,
-        boxPos: snap.boxPos ?? 0.5,
-        rangeConfidence: snap.rangeConfidence ?? 0.5,
-        ema20: snap.ema20 ?? 0,
-        emaGap: snap.emaGap ?? 0,
-        atr: snap.atr ?? 0,
-        signal: snap.signal ?? "NONE",
-        qualityScore: snap.qualityScore ?? 0,
-      };
+
 
       const envelope = resolveSymbolDecisionEnvelope({
         symbol: sym,
