@@ -161,7 +161,7 @@ export function resolveSymbolDecisionEnvelope(
         ema20: snapshot.ema20,
         emaGapDiag: snapshot.emaGap,
         volatilityProxyDiag: snapshot.atr,
-        signal: snapshot.signal as any,
+        signal: String(snapshot.signal),
         qualityScore: snapshot.qualityScore
     };
 
@@ -188,7 +188,7 @@ export function resolveSymbolDecisionEnvelope(
             risk_state: "OK",
             detail: {},
         } : null,
-        intentSide: legacyBridge.intentSide as any,
+        intentSide: normalizeAuthoritySide(legacyBridge.intentSide),
         adaptiveOk: legacyBridge.adaptiveOk,
         adaptiveDetail: legacyBridge.adaptiveDetail
     };
