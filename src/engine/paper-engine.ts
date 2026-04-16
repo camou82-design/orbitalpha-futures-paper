@@ -332,15 +332,33 @@ type RunMeta = Readonly<{
   notes: string;
 }>;
 
-function buildSignalSummary(snapshots: ReadonlyArray<SymbolSnapshot>): RunMeta["signalSummary"] {
+function buildSignalSummary(snapshots: ReadonlyArray<SymbolSnapshot>) {
   const totalSymbols = snapshots.length;
-  const longCandidates = snapshots.filter((s) => s.signal === "paper_long_candidate").length;
-  const shortCandidates = snapshots.filter((s) => s.signal === "paper_short_candidate").length;
+  const longV1 = snapshots.filter((s) => s.signal === "paper_long_candidate").length;
+  const longV2 = snapshots.filter((s) => (s.signal as string) === "paper_long_candidate_v2").length;
+  const shortV1 = snapshots.filter((s) => s.signal === "paper_short_candidate").length;
+  const shortV2 = snapshots.filter((s) => (s.signal as string) === "paper_short_candidate_v2").length;
+
   return {
     totalSymbols,
-    longCandidates,
-    shortCandidates,
-    neutralSymbols: totalSymbols - longCandidates - shortCandidates
+    longCandidates: longV1 + longV2,
+    shortCandidates: shortV1 + shortV2,
+    neutralSymbols: totalSymbols - (longV1 + longV2 + shortV1 + shortV2),
+    longV1, longV2, shortV1, shortV2
+  };
+}
+
+function deriveRunIdentity(snapshots: ReadonlyArray<SymbolSnapshot>) {
+  const v2Sigs = snapshots.filter(s => (s.signal as string).includes("_v2"));
+  const v2Count = v2Sigs.length;
+  const v2Active = v2Count > 0;
+
+  return {
+    runStrategyVersion: v2Active ? "paper-hybrid-v2" : "paper-v1",
+    v2AuthorityActive: v2Active,
+    v2DecisionCount: v2Count,
+    v1DecisionCount: snapshots.length - v2Count,
+    mixedAuthorityRun: v2Active && (snapshots.length > v2Count)
   };
 }
 
@@ -938,10 +956,11 @@ export class PaperEngine {
     };
 
     const signalSummary = buildSignalSummary(snapshots);
+    const runId = deriveRunIdentity(snapshots);
 
     const meta: RunMeta = {
-      strategyVersion: "paper-v1",
-      signalSummary,
+      strategyVersion: runId.runStrategyVersion,
+      signalSummary: signalSummary as any,
       fetchedAt,
       symbolsRequested: symbols,
       symbolsSucceeded,
@@ -967,8 +986,10 @@ export class PaperEngine {
       latestPath,
       engineMode: this.config.paperEngineMode,
       exchange: "bybit",
-      notes: `paper-v1 EMA20/EMA60 1m long/short; +0.5%/-1.0% net TP/SL; 3m min_hold + 5m grace; public-only; ${klineTimeframe}`
-    };
+      v2AuthorityActive: runId.v2AuthorityActive,
+      runIdentity: runId as any,
+      notes: "paper hybrid authority pipeline; legacy + v2 authority bridge active; position identity stored per executor/regime resolution; run metadata reflects hybrid execution"
+    } as any;
 
     let metaPath: string | undefined;
     try {
@@ -980,19 +1001,19 @@ export class PaperEngine {
     }
 
     const hasAnyCandidate = snapshots.some(
-      (s) => s.signal === "paper_long_candidate" || s.signal === "paper_short_candidate"
+      (s) => (s.signal as string).includes("_candidate")
     );
     let candidateRunPath: string | undefined;
     if (hasAnyCandidate && latestPath && metaPath) {
       try {
         const candidateSymbols = snapshots
           .filter(
-            (s) => s.signal === "paper_long_candidate" || s.signal === "paper_short_candidate"
+            (s) => (s.signal as string).includes("_candidate")
           )
           .map((s) => String(s.symbol));
         candidateRunPath = await this.store.writePaperCandidateRun(fetchedAt, {
           fetchedAt,
-          strategyVersion: "paper-v1",
+          strategyVersion: runId.runStrategyVersion,
           longCandidates: signalSummary.longCandidates,
           shortCandidates: signalSummary.shortCandidates,
           candidateSymbols,
@@ -1006,7 +1027,7 @@ export class PaperEngine {
         const indexPath = await this.store.updateRunsIndex({
           fetchedAt,
           runPath: candidateRunPath,
-          strategyVersion: "paper-v1",
+          strategyVersion: runId.runStrategyVersion,
           longCandidates: signalSummary.longCandidates,
           shortCandidates: signalSummary.shortCandidates,
           candidateSymbols,
@@ -1931,6 +1952,15 @@ export class PaperEngine {
             await this.positions.appendClosed(closedRow);
             this.logger.warn("crash_long_defense", { symbol: op.symbol, state: risk.crashState, type: et });
 
+            await this.store.appendJsonlLine("reports/events.jsonl", {
+              ts: Date.now(),
+              type: et,
+              symbol: op.symbol,
+              reason: et,
+              realized_pnl: m.pnlUsdNet,
+              ...buildPositionIdentityMeta(op)
+            });
+
             const key = `${op.symbol}:${op.openedAt}`;
             if (forceExit) {
               (op as { status: string; sizeUsd: number }).status = "closed";
@@ -2326,6 +2356,7 @@ export class PaperEngine {
                   reason: cr,
                   range_zone_reversal: "lower_short_flatten",
                   realized_pnl: m.pnlUsdNet,
+                  ...buildPositionIdentityMeta(open),
                   ...buildAuthorityEventMeta(authority)
                 });
                 continue;
@@ -2482,6 +2513,7 @@ export class PaperEngine {
               reason: crTrail,
               structural: "range_profit_trail",
               realized_pnl: m.pnlUsdNet,
+              ...buildPositionIdentityMeta(open),
               ...buildAuthorityEventMeta(authority)
             });
             continue;
@@ -2627,6 +2659,7 @@ export class PaperEngine {
               reason: cr,
               structural: st.reason,
               realized_pnl: m.pnlUsdNet,
+              ...buildPositionIdentityMeta(open),
               ...buildAuthorityEventMeta(authority)
             });
             continue;
@@ -2661,6 +2694,7 @@ export class PaperEngine {
               symbol: symKey,
               side: open.side,
               realized_pnl: m.pnlUsdNet,
+              ...buildPositionIdentityMeta(open),
               ...buildAuthorityEventMeta(authority)
             });
             const newSz = Math.max(
@@ -2698,7 +2732,8 @@ export class PaperEngine {
               phase: "open",
               symbol: symKey,
               side: plan.openSide,
-              size_usd: newSz
+              size_usd: newSz,
+              ...buildPositionIdentityMeta(rev)
             });
             continue;
           }
@@ -2735,6 +2770,7 @@ export class PaperEngine {
             hold_time: m.holdingMs,
             realized_pnl: m.pnlUsdNet,
             fee: m.feeUsd,
+            ...buildPositionIdentityMeta(open),
             ...buildAuthorityEventMeta(authority)
           });
 
@@ -2774,6 +2810,7 @@ export class PaperEngine {
               hold_time: m.holdingMs,
               realized_pnl: m.pnlUsdNet,
               fee: m.feeUsd,
+              ...buildPositionIdentityMeta(open),
               ...buildAuthorityEventMeta(authority)
             });
             continue;
@@ -2912,6 +2949,7 @@ export class PaperEngine {
             hold_time: m.holdingMs,
             realized_pnl: m.pnlUsdNet,
             fee: m.feeUsd,
+            ...buildPositionIdentityMeta(open),
             ...buildAuthorityEventMeta(authority)
           });
 
@@ -2985,7 +3023,8 @@ export class PaperEngine {
               total_cost: open.totalCostAtEntry ?? null,
               hold_time: mp.holdingMs,
               realized_pnl: mp.pnlUsdNet,
-              fee: mp.feeUsd
+              fee: mp.feeUsd,
+              ...buildPositionIdentityMeta(open)
             });
 
             open = {
@@ -3097,7 +3136,8 @@ export class PaperEngine {
               symbol: String(open.symbol),
               reason: cr,
               range_alignment_forced_exit: true,
-              realized_pnl: m.pnlUsdNet
+              realized_pnl: m.pnlUsdNet,
+              ...buildPositionIdentityMeta(open)
             });
             continue;
           }
@@ -3182,7 +3222,8 @@ export class PaperEngine {
           total_cost: open.totalCostAtEntry ?? null,
           hold_time: m.holdingMs,
           realized_pnl: m.pnlUsdNet,
-          fee: m.feeUsd
+          fee: m.feeUsd,
+          ...buildPositionIdentityMeta(open)
         });
       }
 
@@ -3859,9 +3900,12 @@ export class PaperEngine {
           const fillProof = {
             symbol: record.symbol,
             side: record.side,
+            strategyVersion: record.strategyVersion,
+            executorAtEntry: record.executorAtEntry,
+            regimeAtEntry: record.regimeAtEntry,
+            source_signal_stored_on_record: record.sourceSignal,
             range_entry_zone: record.rangeEntryZone ?? fillZone,
             box_pos_at_open: first.boxPos,
-            source_signal_stored_on_record: sourceSignal,
             original_snapshot_signal: origOpen?.signal ?? null,
             queued_signal_at_execution: first.signal,
             range_stage0_engine_taken: res.decision.range_stage0_engine_taken ?? false,
@@ -4711,6 +4755,7 @@ function buildEntryOpenedEventPayload(
     regime: pos.regimeAtEntry,
     executor: pos.executorAtEntry,
     entry_stage: pos.entryStage,
+    ...buildPositionIdentityMeta(pos),
     ...buildAuthorityEventMeta(authority)
   };
 }
@@ -4772,5 +4817,15 @@ function buildV2StateBridge(
       .filter((x): x is V2BridgePosition => x !== null),
     globalRiskScore: 0.5,
     lossStreaks: lastRisk?.recentLossStreakByMode ?? {}
+  };
+}
+
+function buildPositionIdentityMeta(pos: PaperOpenPositionRecord | PaperClosedPositionRecord): Record<string, unknown> {
+  const p = pos as any;
+  return {
+    strategyVersion: p.strategyVersion ?? "paper-v1",
+    sourceSignal: p.sourceSignal ?? null,
+    executorAtEntry: p.executorAtEntry ?? null,
+    regimeAtEntry: p.regimeAtEntry ?? null
   };
 }
