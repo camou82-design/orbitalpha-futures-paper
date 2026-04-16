@@ -522,7 +522,13 @@ function evaluateRangeStage0Signal(
           interpretation
         };
       }
-      return { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_suppress_long_candidate_weak_tier", side: null, interpretation };
+      // PART 1: upper zone + weak tier long candidate -> No longer immediate NONE. Downgrade to WAIT_RECHECK for strong signals.
+      return {
+        signal: "RANGE_SIGNAL_WAIT_RECHECK",
+        reason: "range_upper_recheck_weak_tier",
+        side: null,
+        interpretation
+      };
     }
     return { signal: "RANGE_SIGNAL_NONE", reason: "range_upper_short_structure_not_ready", side: null, interpretation };
   }
@@ -561,7 +567,13 @@ function evaluateRangeStage0Signal(
           interpretation
         };
       }
-      return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_suppress_short_candidate_weak_tier", side: null, interpretation };
+      // PART 1: lower zone + weak tier short candidate -> Downgrade to WAIT_RECHECK.
+      return {
+        signal: "RANGE_SIGNAL_WAIT_RECHECK",
+        reason: "range_lower_recheck_weak_tier",
+        side: null,
+        interpretation
+      };
     }
     return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_long_structure_not_ready", side: null, interpretation };
   }
@@ -2143,8 +2155,18 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       gateResult = "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
       gateReason = rangeSignal.reason;
     } else if (rangeSignal.signal === "RANGE_SIGNAL_WAIT_RECHECK") {
-      gateResult = "RANGE_GATE_BLOCK_WAIT_RECHECK";
-      gateReason = `range_reversal_recheck_tier_${rangeReversalTier.toLowerCase()}`;
+      // PART 2: Soft pass if no position and strong signal.
+      const isStrongCandidate = sn.candidateStrength === "strong" || (sn.qualityScore ?? 0) >= STRONG_SCORE;
+      const noOpenPos = !input.openPositionSide || input.openPositionSide === null;
+
+      if (noOpenPos && isStrongCandidate) {
+        gateResult = "RANGE_GATE_PASS";
+        gateReason = "range_wait_recheck_soft_pass_candidate";
+        supplemental_reasons.push("RANGE_WAIT_RECHECK_SOFT_PASS");
+      } else {
+        gateResult = "RANGE_GATE_BLOCK_WAIT_RECHECK";
+        gateReason = `range_reversal_recheck_tier_${rangeReversalTier.toLowerCase()}`;
+      }
     } else if (
       riskEngineBlocked ||
       (blockedRegimeActive &&
@@ -2298,9 +2320,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       const stage1Code =
         gateResult === "RANGE_GATE_BLOCK_REENTRY" || gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
           ? "STAGE1_BLOCKED_RISK"
-          : gateResult === "RANGE_GATE_BLOCK_LOW_CONFIDENCE" && rangeSignal.signal === "RANGE_SIGNAL_NONE"
-            ? "STAGE1_BLOCKED_SIGNAL"
-            : "STAGE1_BLOCKED_EDGE";
+          : gateResult === "RANGE_GATE_BLOCK_WAIT_RECHECK"
+            ? "STAGE1_PENDING_RECHECK"
+            : gateResult === "RANGE_GATE_BLOCK_LOW_CONFIDENCE" && rangeSignal.signal === "RANGE_SIGNAL_NONE"
+              ? "STAGE1_BLOCKED_SIGNAL"
+              : "STAGE1_BLOCKED_EDGE";
       const blockedRegimeIsLossStreak =
         blockedRegimeReasonText.includes("mode_loss_streak") || blockedRegimeReasonText.includes("highway_range_streak");
       const rangeRiskSubreason =
@@ -3088,7 +3112,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         ? "STAGE1_BLOCKED_RISK"
         : rangeFinalBlockReason === "RANGE_SIGNAL_NONE"
           ? "STAGE1_BLOCKED_SIGNAL"
-          : "STAGE1_BLOCKED_EDGE";
+          : rangeFinalBlockReason === "RANGE_GATE_BLOCK_WAIT_RECHECK"
+            ? "STAGE1_PENDING_RECHECK"
+            : "STAGE1_BLOCKED_EDGE";
     reject_reason =
       rangeFinalBlockReason === "RANGE_RISK_BLOCK_REENTRY"
         ? "RISK_FAIL_REENTRY"
@@ -3741,9 +3767,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           stage1ResultCodeOverride ?? (
             execution_state === "STAGE1_EXEC_PENDING"
               ? "STAGE1_EXEC_PENDING"
-              : costWarningStage1
-                ? "STAGE1_COST_WARNING"
-                : "STAGE1_ENTERED"
+              : gateReason === "range_wait_recheck_soft_pass_candidate"
+                ? "STAGE1_SOFT_FILTERED"
+                : costWarningStage1
+                  ? "STAGE1_COST_WARNING"
+                  : "STAGE1_ENTERED"
           ),
         required_move_pct,
         shortfall_pct,
