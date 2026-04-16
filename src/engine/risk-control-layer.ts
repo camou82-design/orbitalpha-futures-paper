@@ -1,8 +1,9 @@
-import type { EngineConfig, PaperClosedPositionRecord, Candle } from "../models/types";
+import type { EngineConfig, Candle } from "../models/types";
 import type { MarketRegime } from "../strategy/market-regime-detector";
-import { evaluateCrashRisk, type CrashState } from "./crash-detector";
+import { evaluateCrashRisk, evaluatePumpRisk, type CrashState, type PumpState } from "./crash-detector";
 
 export type RiskStatus = "NORMAL" | "LIMITED" | "BLOCKED";
+export type DirectionalShockState = "UP" | "DOWN" | "NONE";
 
 export type RiskControlDecision = Readonly<{
   engineBlocked: boolean;
@@ -18,7 +19,12 @@ export type RiskControlDecision = Readonly<{
   crashState: CrashState;
   crashReason: string | null;
   crashLockUntil: number;
+  pumpState: PumpState;
+  pumpReason: string | null;
+  pumpLockUntil: number;
+  directionalShockState: DirectionalShockState;
   isLatePursuit: boolean;
+  isLateChase: boolean;
   longAllow: boolean;
   shortAllow: boolean;
   longSizeMult: number;
@@ -59,6 +65,15 @@ function asCloseReason(r: unknown): string | null {
   return typeof c === "string" ? c : null;
 }
 
+function stateOrder(s: CrashState | PumpState): number {
+  if (s === "NONE") return 0;
+  if (s === "CRASH_ALERT" || s === "PUMP_ALERT") return 1;
+  if (s === "CRASH_REDUCE" || s === "PUMP_REDUCE") return 2;
+  if (s === "CRASH_EXIT" || s === "PUMP_EXIT") return 3;
+  if (s === "CRASH_LOCK" || s === "PUMP_LOCK") return 4;
+  return 0;
+}
+
 export function evaluateRiskControls(input: Readonly<{
   config: EngineConfig;
   now: number;
@@ -73,10 +88,9 @@ export function evaluateRiskControls(input: Readonly<{
   /** 하이웨이: 박스 붕괴 방향 */
   boxBreakSide?: "up" | "down" | "none";
 }>): RiskControlDecision {
-  const { config, now, globalCandles, globalAtr, history, priorState } = input;
+  const { config, now, globalCandles, globalAtr } = input;
   const last10 = [...input.history].slice(-10);
 
-  // 1. Daily net PnL cutoff.
   const dayStart = startOfUtcDayMs(now);
   let todayNet = 0;
   for (const r of input.history) {
@@ -93,11 +107,15 @@ export function evaluateRiskControls(input: Readonly<{
     engineBlockReasons.push("daily_loss_limit_exceeded");
   }
 
-  // 2. Crash Detection (Direction-Aware)
   let crashState: CrashState = "NONE";
   let crashReason: string | null = null;
   let crashLockUntil = input.priorState?.crashLockUntil ?? 0;
+  let pumpState: PumpState = "NONE";
+  let pumpReason: string | null = null;
+  let pumpLockUntil = input.priorState?.pumpLockUntil ?? 0;
+  let directionalShockState: DirectionalShockState = "NONE";
   let isLatePursuit = false;
+  let isLateChase = false;
   let longAllow = true;
   let shortAllow = true;
   let longSizeMult = 1.0;
@@ -112,17 +130,16 @@ export function evaluateRiskControls(input: Readonly<{
       now,
       isGlobal: true
     });
+    const globalPump = evaluatePumpRisk({
+      symbol: "BTCUSDT",
+      candles: globalCandles,
+      atr: globalAtr ?? null,
+      now,
+      isGlobal: true
+    });
 
     isLatePursuit = globalCrash.isLatePursuit;
-
-    function stateOrder(s: CrashState): number {
-      if (s === "NONE") return 0;
-      if (s === "CRASH_ALERT") return 1;
-      if (s === "CRASH_REDUCE") return 2;
-      if (s === "CRASH_EXIT") return 3;
-      if (s === "CRASH_LOCK") return 4;
-      return 0;
-    }
+    isLateChase = globalPump.isLateChase;
 
     const rangeRecoveryEligible =
       (input.rangeConfidence ?? 0) >= 0.6 &&
@@ -134,41 +151,53 @@ export function evaluateRiskControls(input: Readonly<{
         crashState = "NONE";
         crashReason = null;
         crashLockRangeRecoveryBypassActive = true;
-        longAllow = true;
-        shortAllow = !isLatePursuit;
-        longSizeMult = 0.35;
       } else {
         crashState = "CRASH_LOCK";
         crashReason = "급락 후 롱 진입 제한 대기 중";
-        longAllow = false;
-        shortAllow = !isLatePursuit; // 락 상태라도 late pursuit 아니면 숏은 허용 가능
       }
     } else if (globalCrash.state !== "NONE") {
       if (globalCrash.state === "CRASH_LOCK" && rangeRecoveryEligible) {
         crashState = "NONE";
         crashReason = null;
         crashLockRangeRecoveryBypassActive = true;
-        longAllow = true;
-        shortAllow = !isLatePursuit;
-        longSizeMult = 0.35;
       } else {
         crashState = globalCrash.state;
         crashReason = globalCrash.reason;
-
-        // Asymmetric Logic
-        longAllow = false; // Any crash level blocks new Longs
-        shortAllow = !isLatePursuit; // Allow shorts while momentum is starting
-
-        if (crashState === "CRASH_ALERT") {
-          longSizeMult = 0.55;
-        } else if (crashState === "CRASH_REDUCE") {
-          longSizeMult = 0.22;
-        }
-
         if (stateOrder(crashState) >= stateOrder("CRASH_EXIT")) {
           crashLockUntil = now + Math.max(15 * 60 * 1000, config.paperModeSuspendMs);
         }
       }
+    }
+
+    if (pumpLockUntil > now) {
+      pumpState = "PUMP_LOCK";
+      pumpReason = "급등 후 숏 진입 제한 대기 중";
+    } else if (globalPump.state !== "NONE") {
+      pumpState = globalPump.state;
+      pumpReason = globalPump.reason;
+      if (stateOrder(pumpState) >= stateOrder("PUMP_EXIT")) {
+        pumpLockUntil = now + Math.max(15 * 60 * 1000, config.paperModeSuspendMs);
+      }
+    }
+
+    if (stateOrder(crashState) > stateOrder(pumpState)) directionalShockState = "DOWN";
+    else if (stateOrder(pumpState) > stateOrder(crashState)) directionalShockState = "UP";
+    else directionalShockState = "NONE";
+
+    if (directionalShockState === "DOWN") {
+      longAllow = false;
+      shortAllow = !isLatePursuit;
+      if (crashState === "CRASH_ALERT") longSizeMult *= 0.55;
+      else if (crashState === "CRASH_REDUCE") longSizeMult *= 0.22;
+      else if (crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK") longSizeMult *= 0.1;
+      if (isLatePursuit) shortSizeMult *= 0.35;
+    } else if (directionalShockState === "UP") {
+      shortAllow = false;
+      longAllow = !isLateChase;
+      if (pumpState === "PUMP_ALERT") shortSizeMult *= 0.55;
+      else if (pumpState === "PUMP_REDUCE") shortSizeMult *= 0.22;
+      else if (pumpState === "PUMP_EXIT" || pumpState === "PUMP_LOCK") shortSizeMult *= 0.1;
+      if (isLateChase) longSizeMult *= 0.35;
     }
   }
 
@@ -177,12 +206,6 @@ export function evaluateRiskControls(input: Readonly<{
     shortAllow = false;
   }
 
-  if (crashState !== "NONE" && crashState !== "CRASH_ALERT" && crashState !== "CRASH_LOCK") {
-    // Only block "engine" (UI red alert) if it's broad risk, but our specific flags handle entry.
-    // engineBlockReasons.push(`crash_risk_${crashState.toLowerCase()}`);
-  }
-
-  // 3. Size reduction: last10 net degradation & Regime Exit Risk.
   let last10Net = 0;
   for (const r of last10) {
     const p = asNet(r);
@@ -192,19 +215,16 @@ export function evaluateRiskControls(input: Readonly<{
   const shouldDegrade = degradeThresh > 0 && last10.length >= 5 && last10Net <= -degradeThresh;
   const baseSizeMult = shouldDegrade ? Math.max(0.15, Math.min(1, config.paperDegradeSizeMultiplier)) : 1;
 
-  // Highway: Scale down if regime exit risk is high
   const exitRiskScale = 1 - (input.regimeExitRisk ?? 0);
   const highwayScaleMult = Math.max(0.1, exitRiskScale);
 
   longSizeMult *= baseSizeMult * highwayScaleMult;
   shortSizeMult *= baseSizeMult * highwayScaleMult;
 
-  // 4. Per-regime suspension.
   const blockedRegimes: RiskControlDecision["blockedRegimes"] = {};
   const recentLossStreakByMode: RiskControlDecision["recentLossStreakByMode"] = {};
   const recentCrashDefenseCountByMode: Record<string, number> = {};
 
-  /** Soft-only path: reduce size without hour-long regime block (was 0.2; 0.45 keeps flow while trimming risk). */
   const lossStreakSoftSizeMult = 0.45;
   const hardSuspendMs = Math.max(45_000, Math.floor(Math.max(60_000, config.paperModeHardSuspendMs) * 0.6));
   const regimes: MarketRegime[] = ["RANGE", "TREND", "NO_TRADE"];
@@ -290,7 +310,6 @@ export function evaluateRiskControls(input: Readonly<{
       }
     }
 
-    // Highway: Structural Box Break Suspension
     if (regime === "RANGE" && input.boxBreakSide && input.boxBreakSide !== "none") {
       blockedRegimes[regime] = {
         until: now + Math.max(20 * 60 * 1000, config.paperModeSuspendMs),
@@ -299,22 +318,28 @@ export function evaluateRiskControls(input: Readonly<{
     }
   }
 
-  const engineBlocked = dailyLossGuardTriggered; // Only hard-block engine on total loss limit
+  const engineBlocked = dailyLossGuardTriggered;
   const anyModeBlocked = Object.values(blockedRegimes).some((x) => x && x.until > now) || false;
-  const riskStatus: RiskStatus = engineBlocked ? "BLOCKED" : shouldDegrade || anyModeBlocked || crashState !== "NONE" ? "LIMITED" : "NORMAL";
+  const riskStatus: RiskStatus =
+    engineBlocked ? "BLOCKED" : shouldDegrade || anyModeBlocked || directionalShockState !== "NONE" ? "LIMITED" : "NORMAL";
 
   return {
     engineBlocked,
     engineBlockReasons,
     blockedRegimes,
     recentLossStreakByMode,
-    sizeMultiplier: baseSizeMult, // Legacy field
+    sizeMultiplier: baseSizeMult,
     riskStatus,
     dailyLossGuardTriggered,
     crashState,
     crashReason,
     crashLockUntil,
+    pumpState,
+    pumpReason,
+    pumpLockUntil,
+    directionalShockState,
     isLatePursuit,
+    isLateChase,
     longAllow,
     shortAllow,
     longSizeMult,
@@ -330,9 +355,14 @@ export function evaluateRiskControls(input: Readonly<{
       recent_crash_defense_count_by_mode: recentCrashDefenseCountByMode,
       crash_state: crashState,
       crash_lock_range_recovery_bypass_active: crashLockRangeRecoveryBypassActive,
+      pump_state: pumpState,
+      directional_shock_state: directionalShockState,
       long_allow: longAllow,
       short_allow: shortAllow,
-      late_pursuit: isLatePursuit
+      late_pursuit: isLatePursuit,
+      late_chase: isLateChase,
+      pump_lock_until: pumpLockUntil,
+      crash_lock_until: crashLockUntil
     }
   };
 }
