@@ -102,6 +102,7 @@ export function evaluateRiskControls(input: Readonly<{
   let shortAllow = true;
   let longSizeMult = 1.0;
   let shortSizeMult = 1.0;
+  let crashLockRangeRecoveryBypassActive = false;
 
   if (globalCandles) {
     const globalCrash = evaluateCrashRisk({
@@ -123,27 +124,50 @@ export function evaluateRiskControls(input: Readonly<{
       return 0;
     }
 
+    const rangeRecoveryEligible =
+      (input.rangeConfidence ?? 0) >= 0.6 &&
+      (input.regimeExitRisk ?? 1) <= 0.55 &&
+      (input.boxBreakSide ?? "none") === "none";
+
     if (crashLockUntil > now) {
-      crashState = "CRASH_LOCK";
-      crashReason = "급락 후 롱 진입 제한 대기 중";
-      longAllow = false;
-      shortAllow = !isLatePursuit; // 락 상태라도 late pursuit 아니면 숏은 허용 가능
-    } else if (globalCrash.state !== "NONE") {
-      crashState = globalCrash.state;
-      crashReason = globalCrash.reason;
-
-      // Asymmetric Logic
-      longAllow = false; // Any crash level blocks new Longs
-      shortAllow = !isLatePursuit; // Allow shorts while momentum is starting
-
-      if (crashState === "CRASH_ALERT") {
-        longSizeMult = 0.55;
-      } else if (crashState === "CRASH_REDUCE") {
-        longSizeMult = 0.22;
+      if (rangeRecoveryEligible) {
+        crashState = "NONE";
+        crashReason = null;
+        crashLockRangeRecoveryBypassActive = true;
+        longAllow = true;
+        shortAllow = !isLatePursuit;
+        longSizeMult = 0.35;
+      } else {
+        crashState = "CRASH_LOCK";
+        crashReason = "급락 후 롱 진입 제한 대기 중";
+        longAllow = false;
+        shortAllow = !isLatePursuit; // 락 상태라도 late pursuit 아니면 숏은 허용 가능
       }
+    } else if (globalCrash.state !== "NONE") {
+      if (globalCrash.state === "CRASH_LOCK" && rangeRecoveryEligible) {
+        crashState = "NONE";
+        crashReason = null;
+        crashLockRangeRecoveryBypassActive = true;
+        longAllow = true;
+        shortAllow = !isLatePursuit;
+        longSizeMult = 0.35;
+      } else {
+        crashState = globalCrash.state;
+        crashReason = globalCrash.reason;
 
-      if (stateOrder(crashState) >= stateOrder("CRASH_EXIT")) {
-        crashLockUntil = now + Math.max(15 * 60 * 1000, config.paperModeSuspendMs);
+        // Asymmetric Logic
+        longAllow = false; // Any crash level blocks new Longs
+        shortAllow = !isLatePursuit; // Allow shorts while momentum is starting
+
+        if (crashState === "CRASH_ALERT") {
+          longSizeMult = 0.55;
+        } else if (crashState === "CRASH_REDUCE") {
+          longSizeMult = 0.22;
+        }
+
+        if (stateOrder(crashState) >= stateOrder("CRASH_EXIT")) {
+          crashLockUntil = now + Math.max(15 * 60 * 1000, config.paperModeSuspendMs);
+        }
       }
     }
   }
@@ -305,6 +329,7 @@ export function evaluateRiskControls(input: Readonly<{
       mode_loss_streak_thresholds_by_mode: lossStreakThresholdsByMode,
       recent_crash_defense_count_by_mode: recentCrashDefenseCountByMode,
       crash_state: crashState,
+      crash_lock_range_recovery_bypass_active: crashLockRangeRecoveryBypassActive,
       long_allow: longAllow,
       short_allow: shortAllow,
       late_pursuit: isLatePursuit
