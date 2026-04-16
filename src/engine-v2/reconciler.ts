@@ -257,10 +257,12 @@ export function resolveSymbolDecisionEnvelope(
     const v2FinalSize = v2Res.decision.risk.finalSizeUsd ?? 0;
 
     const v1FinalDecision = legacyDecision.decision.final_decision;
+    const v1BlocksEntry =
+        v1FinalDecision === "SKIP" || v1FinalDecision === "REJECT";
 
     const allowV2Override =
         isV2OverrideEnabled() &&
-        v1FinalDecision === "SKIP" &&
+        v1BlocksEntry &&
         v2FinalDecision === "ENTER" &&
         (v2FinalSide === "long" || v2FinalSide === "short") &&
         v2FinalSize > 0;
@@ -273,9 +275,21 @@ export function resolveSymbolDecisionEnvelope(
             adopted_decision: allowV2Override ? "ENTER" : selector.adopted_result.adopted_decision,
             adopted_side: allowV2Override ? v2FinalSide : selector.adopted_result.adopted_side,
             adopted_size_usd: allowV2Override ? v2FinalSize : selector.adopted_result.adopted_size_usd,
-            adoption_reason: allowV2Override ? "v2_override_legacy_skip" : adoption_reason
+            adoption_reason: allowV2Override ? "v2_override_legacy_block" : adoption_reason
         }
     };
+
+    console.log("[V2_OVERRIDE_DECISION_PROOF]", {
+        symbol: input.symbol,
+        override_env_enabled: isV2OverrideEnabled(),
+        v1_final_decision: v1FinalDecision,
+        v2_final_decision: v2FinalDecision,
+        v2_final_side: v2FinalSide,
+        v2_final_size: v2FinalSize,
+        allow_v2_override: allowV2Override,
+        final_engine: allowV2Override ? "V2" : selector.adopted_result.engine,
+        final_adoption_reason: allowV2Override ? "v2_override_legacy_block" : adoption_reason
+    });
     const authority = deriveExecutionAuthority(refinedSelector);
 
     const v1Side = legacyDecision.intentSide ?? "none";
