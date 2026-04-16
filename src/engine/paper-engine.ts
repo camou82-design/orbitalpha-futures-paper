@@ -3041,12 +3041,32 @@ export class PaperEngine {
     input.decisionBySymbol.forEach((envelope, symKey) => {
       const { authority } = envelope;
 
+      const authorityOwnsExecution =
+        authority.decision === "ENTER" &&
+        authority.source === "v2" &&
+        (authority.side === "long" || authority.side === "short") &&
+        (authority.sizeUsd ?? 0) > 0;
+
       if (authority.decision !== "ENTER") return;
       if (authority.side !== "long" && authority.side !== "short") return;
 
-      if (envelope.legacy.adaptiveResult == null) return;
+      const effectiveAdaptiveResult =
+        authorityOwnsExecution
+          ? (envelope.legacy.adaptiveResult ?? {
+            approved: true,
+            ok: true,
+            finalDecision: "ENTER",
+            finalSide: authority.side,
+            finalSizeUsd: authority.sizeUsd,
+            source: "v2_authority_execution_bridge"
+          })
+          : envelope.legacy.adaptiveResult;
+
+      if (effectiveAdaptiveResult == null) return;
+
       const base = snapshotBySymbol.get(symKey);
       if (!base) return;
+
       const sig: PaperSignal = authority.side === "long" ? "paper_long_candidate" : "paper_short_candidate";
       entryQueue.push({ ...base, signal: sig });
     });
@@ -3086,6 +3106,47 @@ export class PaperEngine {
       const res = envelope.legacy;
       const authority = envelope.authority;
 
+      const authorityOwnsExecution =
+        authority.decision === "ENTER" &&
+        authority.source === "v2" &&
+        (authority.side === "long" || authority.side === "short") &&
+        (authority.sizeUsd ?? 0) > 0;
+
+      const effectiveAdaptiveResult =
+        authorityOwnsExecution
+          ? (res.adaptiveResult ?? {
+            approved: true,
+            ok: true,
+            finalDecision: "ENTER",
+            finalSide: authority.side,
+            finalSizeUsd: authority.side === "long" ? "ENTER" : "ENTER", // dummy but logic uses side
+            finalSizeUsdValue: authority.sizeUsd,
+            source: "v2_authority_execution_bridge",
+            leverageMultiplier: 1,
+            direction: authority.side,
+            sizeUsd: authority.sizeUsd,
+            detail: {
+              source: "v2_authority_execution_bridge",
+              confidence_score: 1.0,
+              confidence_tier: "top",
+              size_multiplier: 1.0
+            }
+          } as any)
+          : res.adaptiveResult;
+
+      if (effectiveAdaptiveResult == null) continue;
+
+      this.logger.info("V2_EXECUTION_BRIDGE_PROOF", {
+        symbol: first.symbol,
+        authority_decision: authority.decision,
+        authority_source: authority.source,
+        authority_side: authority.side,
+        authority_size_usd: authority.sizeUsd ?? 0,
+        authority_owns_execution: authorityOwnsExecution,
+        legacy_adaptive_present: res.adaptiveResult != null,
+        effective_adaptive_present: effectiveAdaptiveResult != null
+      });
+
       if (this.lastRegime.regime === "RANGE") {
         const origSnap = input.snapshots.find((s) => s.symbol === first.symbol);
         const qz = typeof first.boxPos === "number" ? classifyBoxZone(first.boxPos) : null;
@@ -3099,10 +3160,10 @@ export class PaperEngine {
           intent_side: authority.side,
           final_decision: authority.decision,
           reject_reason: res.decision.reject_reason ?? null,
-          adaptive_ok: res.adaptiveOk,
+          adaptive_ok: authorityOwnsExecution ? true : res.adaptiveOk,
           adaptive_direction: null,
           range_reversal_immediate_switch_applied: res.decision.range_reversal_immediate_switch_applied ?? false,
-          will_attempt_open: authority.decision === "ENTER" && res.adaptiveResult != null,
+          will_attempt_open: authority.decision === "ENTER" && effectiveAdaptiveResult != null,
           active_engine: this.lastMarketMode?.routing.activeEngine ?? null
         });
       }
@@ -3113,7 +3174,7 @@ export class PaperEngine {
       const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === intentSide);
       const otherLeg = next.some((o) => o.symbol === first.symbol && o.side !== intentSide);
 
-      const will_attempt_open = authority.decision === "ENTER" && res.adaptiveResult != null;
+      const will_attempt_open = authority.decision === "ENTER" && effectiveAdaptiveResult != null;
       const activeEngine = this.lastMarketMode?.routing.activeEngine ?? "IDLE";
       let hedgeEntryBlocked = false;
       if (otherLeg && this.lastRiskExposure) {
@@ -3182,7 +3243,7 @@ export class PaperEngine {
         }
       }
 
-      if (authority.decision !== "ENTER" || !res.adaptiveResult) {
+      if (authority.decision !== "ENTER" || !effectiveAdaptiveResult) {
         await this.emitPipelineEventsFromDecision(first, envelope, nowTs, entryStage);
         continue;
       }
@@ -3211,7 +3272,7 @@ export class PaperEngine {
       }
 
       const decision = res.executorDecision!;
-      const adaptive = res.adaptiveResult;
+      const adaptive = effectiveAdaptiveResult;
       const sym = String(first.symbol);
 
       await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, this.lastRegime.regime, decision, authority));
@@ -3559,6 +3620,14 @@ export class PaperEngine {
           trace.order_submit_requested = false;
           trace.order_submit_ack = "skipped_no_okx_demo";
         }
+        const effectiveStrategyVersion =
+          authority.source === "v2" ? "paper-v2" : "paper-v1";
+
+        const effectiveSourceSignal =
+          authority.source === "v2"
+            ? (authority.side === "long" ? "paper_long_candidate_v2" : "paper_short_candidate_v2")
+            : (authority.side === "long" ? "paper_long_candidate" : "paper_short_candidate");
+
         const record: PaperOpenPositionRecord = {
           openedAt: Date.now(),
           symbol: first.symbol,
@@ -3570,8 +3639,8 @@ export class PaperEngine {
           partialExitStage: 0,
           realizedPnl: 0,
           stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : undefined,
-          strategyVersion: "paper-v1",
-          sourceSignal,
+          strategyVersion: effectiveStrategyVersion,
+          sourceSignal: effectiveSourceSignal,
           sourceRunPath: input.candidateRunPath,
           latestSnapshotPath: input.latestPath,
           latestMetaPath: input.metaPath,
