@@ -14,6 +14,10 @@ import {
 } from "./types";
 import { adaptV2Input, runEngineV2 } from "./index";
 
+function isV2OverrideEnabled(): boolean {
+    return process.env.ORBITALPHA_ENGINE_V2_ALLOW_OVERRIDE === "1";
+}
+
 /** 
  * LEGACY NORMALIZATION HELPERS (Phase 4 Independence)
  * Ensures consistent behavior across engine boundaries.
@@ -248,11 +252,28 @@ export function resolveSymbolDecisionEnvelope(
         }
     }
 
+    const v2FinalDecision = v2Res.decision.decision;
+    const v2FinalSide = v2Res.decision.side ?? "none";
+    const v2FinalSize = v2Res.decision.risk.finalSizeUsd ?? 0;
+
+    const v1FinalDecision = legacyDecision.decision.final_decision;
+
+    const allowV2Override =
+        isV2OverrideEnabled() &&
+        v1FinalDecision === "SKIP" &&
+        v2FinalDecision === "ENTER" &&
+        (v2FinalSide === "long" || v2FinalSide === "short") &&
+        v2FinalSize > 0;
+
     const refinedSelector: EngineV2SelectorResult = {
         ...selector,
         adopted_result: {
             ...selector.adopted_result,
-            adoption_reason
+            engine: allowV2Override ? "V2" : selector.adopted_result.engine,
+            adopted_decision: allowV2Override ? "ENTER" : selector.adopted_result.adopted_decision,
+            adopted_side: allowV2Override ? v2FinalSide : selector.adopted_result.adopted_side,
+            adopted_size_usd: allowV2Override ? v2FinalSize : selector.adopted_result.adopted_size_usd,
+            adoption_reason: allowV2Override ? "v2_override_legacy_skip" : adoption_reason
         }
     };
     const authority = deriveExecutionAuthority(refinedSelector);

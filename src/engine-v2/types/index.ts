@@ -66,6 +66,10 @@ export interface LegacySnapshotAdapter {
     boxBreakSide?: "upper" | "lower" | "none";
     signal?: string;
     qualityScore?: number;
+    data_ready?: boolean;
+    dump_protection_hit?: boolean;
+    volatility_guard_hit?: boolean;
+    entryCandidate?: boolean;
 }
 
 export interface LegacyConfigAdapter {
@@ -133,6 +137,10 @@ export interface EngineV2SnapshotAdapter {
     boxBreakSide: "upper" | "lower" | "none";
     signal: string;
     qualityScore: number;
+    data_ready: boolean;
+    dump_protection_hit: boolean;
+    volatility_guard_hit: boolean;
+    entryCandidate: boolean;
 }
 
 export interface EngineV2ConfigAdapter {
@@ -273,6 +281,11 @@ export interface SymbolDecisionEnvelope {
 /** Tier 1: Market Judgment */
 export interface MarketJudgmentOutput {
     regime: EngineV2Regime;
+    regime_final: EngineV2Regime;
+    no_trade_reason: string | null;
+    data_ready: boolean;
+    dump_protection_hit: boolean;
+    volatility_guard_hit: boolean;
     reason: string;
     metrics: {
         rangeScore: number;
@@ -326,6 +339,7 @@ export interface AddonPolicyOutput {
 /** Tier 5: Explanation Output */
 export interface ExplanationOutput {
     reason: string;
+    summary?: string;
     uiLabels: {
         regime: string;
         status: string;

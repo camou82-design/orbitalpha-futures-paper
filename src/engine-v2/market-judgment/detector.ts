@@ -25,11 +25,29 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         regime = "TREND";
     }
 
+    let regime_final = regime;
+    let no_trade_reason: string | null = null;
+    const data_ready = sn.data_ready;
+    const dump_protection_hit = sn.dump_protection_hit;
+
+    if (data_ready === false) {
+        regime_final = "NO_TRADE";
+        no_trade_reason = "DATA_NOT_READY";
+    } else if (dump_protection_hit === true) {
+        regime_final = "NO_TRADE";
+        no_trade_reason = "DUMP_PROTECTION";
+    }
+
     return {
         regime,
-        reason: regime === "TRANSITION"
-            ? `CONFLICT DETECTED: Simultaneous Range/Trend presence with structural indecision. Entering Scouting Mode.`
-            : `Market detected as ${regime} based on score analysis`,
+        regime_final,
+        no_trade_reason,
+        data_ready,
+        dump_protection_hit,
+        volatility_guard_hit: sn.volatility_guard_hit,
+        reason: regime_final === "NO_TRADE"
+            ? `NO_TRADE: ${no_trade_reason ?? "METRICS_INSUFFICIENT"}`
+            : `Market detected as ${regime_final} based on score analysis`,
         metrics: {
             rangeScore,
             trendScore,

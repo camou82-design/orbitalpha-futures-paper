@@ -58,15 +58,33 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Final Decision Formulation (Authority Enforcer)
     let finalDecision: EngineV2FinalDecision = "SKIP";
 
+    const rawSignal = input.snapshot?.signal ?? "none";
+    const hasRawCandidate =
+        rawSignal === "paper_long_candidate" ||
+        rawSignal === "paper_short_candidate" ||
+        input.snapshot?.entryCandidate === true;
+
+    const hardNoTrade =
+        judgment.data_ready === false ||
+        judgment.dump_protection_hit === true;
+
+    const softNoTrade =
+        judgment.volatility_guard_hit === true ||
+        judgment.regime_final === "NO_TRADE" ||
+        judgment.no_trade_reason != null;
+
     const isBlocked = riskSizing.isBlocked;
     const invalidNoneSignal = execution.signal === "NONE";
     const waitingRecheck = execution.signal === "WAIT_RECHECK";
     const invalidSideForEnter = execution.side === "none";
     const invalidSize = riskSizing.finalSizeUsd <= 0;
-    const noTradeRegime = judgment.regime === "NO_TRADE";
     const blockReason = riskSizing.blockReason ?? null;
 
-    if (noTradeRegime) {
+    if (hardNoTrade) {
+        finalDecision = "DISABLED";
+    } else if (softNoTrade && hasRawCandidate) {
+        finalDecision = "HOLD";
+    } else if (softNoTrade) {
         finalDecision = "DISABLED";
     } else if (waitingRecheck) {
         finalDecision = "HOLD";
@@ -84,13 +102,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         finalDecision = "ENTER";
     }
 
+    if (softNoTrade && hasRawCandidate && !hardNoTrade) {
+        explanation.reason = "SOFT_NO_TRADE_DOWNGRADED_TO_HOLD";
+        explanation.summary = "신호는 있으나 상위 시장판단이 보수적으로 작동해 즉시 진입 대신 재확인 대기";
+    }
+
     let finalReason: string;
     if (finalDecision === "ENTER") {
         finalReason = explanation.reason;
     } else if (finalDecision === "HOLD") {
-        finalReason = `HOLD: ${execution.reason}`;
+        finalReason = `HOLD: ${explanation.reason || execution.reason}`;
     } else if (finalDecision === "DISABLED") {
-        finalReason = `DISABLED: ${blockReason ?? judgment.regime}`;
+        finalReason = `DISABLED: ${judgment.no_trade_reason ?? blockReason ?? judgment.regime}`;
     } else if (finalDecision === "REJECT") {
         finalReason = `REJECTED: ${blockReason ?? execution.reason}`;
     } else {
@@ -163,7 +186,11 @@ export function adaptV2Input(
             regimeExitRisk: snapshot.regimeExitRisk ?? 0,
             boxBreakSide: snapshot.boxBreakSide ?? "none",
             signal: snapshot.signal ?? "NONE",
-            qualityScore: snapshot.qualityScore ?? 0
+            qualityScore: snapshot.qualityScore ?? 0,
+            data_ready: snapshot.data_ready ?? true,
+            dump_protection_hit: snapshot.dump_protection_hit ?? false,
+            volatility_guard_hit: snapshot.volatility_guard_hit ?? false,
+            entryCandidate: snapshot.entryCandidate ?? false
         },
         config: {
             paperMaxOpenPositions: config.paperMaxOpenPositions,
