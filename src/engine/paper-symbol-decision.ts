@@ -524,13 +524,18 @@ function evaluateRangeStage0Signal(
           interpretation
         };
       }
-      // PART 1: upper zone + weak tier long candidate -> No longer immediate NONE. Downgrade to WAIT_RECHECK for strong signals.
-      const hasStrongBaseSignalForUpperPreserve = (sn.signal_strength === "strong" || sn.trendOk === true) && sn.signal === "paper_long_candidate";
+      // PART 1: upper zone + weak tier long candidate -> strong base signal preservation
+      if (sn.signal === "paper_long_candidate" && (sn.signal_strength === "strong" || sn.trendOk === true)) {
+        return {
+          signal: "RANGE_SIGNAL_WAIT_RECHECK",
+          reason: "range_upper_long_candidate_preserved_despite_weak_reversal",
+          side: null,
+          interpretation
+        };
+      }
       return {
         signal: "RANGE_SIGNAL_WAIT_RECHECK",
-        reason: hasStrongBaseSignalForUpperPreserve
-          ? "range_upper_long_candidate_preserved_despite_weak_reversal"
-          : "range_upper_recheck_weak_tier",
+        reason: "range_upper_recheck_weak_tier",
         side: null,
         interpretation
       };
@@ -572,7 +577,7 @@ function evaluateRangeStage0Signal(
           interpretation
         };
       }
-      return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_suppress_short_candidate_weak_tier", side: null, interpretation };
+      return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_suppress_short_candidate", side: null, interpretation };
     }
     return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_long_structure_not_ready", side: null, interpretation };
   }
@@ -2168,7 +2173,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           (!blockedRegimeLossStreakSuspend || !range_risk_limit_relax_active) &&
           !(freshReentryCandidate && blockedRegimeLossStreakSuspend));
 
-      if (noOpenPos && hasBaseCandidate && hasStrongBaseSignal && !hardBlockedForSoftPass && (input.risk?.crashState === "NONE" || !input.risk?.crashState)) {
+      if (noOpenPos && hasBaseCandidate && hasStrongBaseSignal && !hardBlockedForSoftPass) {
         gateResult = "RANGE_GATE_PASS";
         gateReason = "range_wait_recheck_soft_pass_candidate";
         supplemental_reasons.push("RANGE_WAIT_RECHECK_SOFT_PASS");
@@ -3781,9 +3786,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
               ? "STAGE1_EXEC_PENDING"
               : gateReason === "range_wait_recheck_soft_pass_candidate"
                 ? "STAGE1_SOFT_FILTERED"
-                : costWarningStage1
-                  ? "STAGE1_COST_WARNING"
-                  : "STAGE1_ENTERED"
+                : gateReason === "range_upper_long_candidate_preserved_despite_weak_reversal"
+                  ? "STAGE1_PENDING_RECHECK"
+                  : costWarningStage1
+                    ? "STAGE1_COST_WARNING"
+                    : "STAGE1_ENTERED"
           ),
         required_move_pct,
         shortfall_pct,
