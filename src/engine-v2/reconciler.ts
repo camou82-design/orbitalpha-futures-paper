@@ -15,7 +15,9 @@ import {
 import { adaptV2Input, runEngineV2 } from "./index";
 
 function isV2OverrideEnabled(): boolean {
-    return process.env.ORBITALPHA_ENGINE_V2_ALLOW_OVERRIDE === "1";
+    const val = process.env.ORBITALPHA_ENGINE_V2_ALLOW_OVERRIDE;
+    // Default to true unless explicitly disabled with "0" or "false"
+    return val !== "0" && val !== "false";
 }
 
 /** 
@@ -238,8 +240,6 @@ export function resolveSymbolDecisionEnvelope(
 
     if (v2Mode === "engine_v2") {
         adoption_reason = "v2_mode_forced";
-    } else if (v2Mode === "legacy") {
-        adoption_reason = "legacy_mode_forced";
     } else if (v2Mode === "shadow_v2") {
         if (v1_dec === v2_dec && legacyDecision.intentSide === v2Res.decision.side) {
             adoption_reason = "shadow_parity_match";
@@ -250,6 +250,9 @@ export function resolveSymbolDecisionEnvelope(
         } else {
             adoption_reason = "shadow_compare_only";
         }
+    } else {
+        // Default for "legacy" or any other mode
+        adoption_reason = "legacy_mode_default";
     }
 
     const v2FinalDecision = v2Res.decision.decision;
@@ -275,20 +278,22 @@ export function resolveSymbolDecisionEnvelope(
             adopted_decision: allowV2Override ? "ENTER" : selector.adopted_result.adopted_decision,
             adopted_side: allowV2Override ? v2FinalSide : selector.adopted_result.adopted_side,
             adopted_size_usd: allowV2Override ? v2FinalSize : selector.adopted_result.adopted_size_usd,
-            adoption_reason: allowV2Override ? "v2_override_legacy_block" : adoption_reason
+            adoption_reason: allowV2Override ? "v2_override_legacy_block" : (allowV2Override === false && v2Mode === "legacy" ? "legacy_mode_forced" : adoption_reason)
         }
     };
 
     console.log("[V2_OVERRIDE_DECISION_PROOF]", {
         symbol: input.symbol,
-        override_env_enabled: isV2OverrideEnabled(),
-        v1_final_decision: v1FinalDecision,
-        v2_final_decision: v2FinalDecision,
-        v2_final_side: v2FinalSide,
-        v2_final_size: v2FinalSize,
+        v2_mode: v2Mode,
+        override_env_val: process.env.ORBITALPHA_ENGINE_V2_ALLOW_OVERRIDE ?? "undefined",
+        override_enabled: isV2OverrideEnabled(),
+        v1_blocks: v1BlocksEntry,
+        v2_wants_enter: v2FinalDecision === "ENTER",
+        v2_side_valid: (v2FinalSide === "long" || v2FinalSide === "short"),
+        v2_size_valid: v2FinalSize > 0,
         allow_v2_override: allowV2Override,
         final_engine: allowV2Override ? "V2" : selector.adopted_result.engine,
-        final_adoption_reason: allowV2Override ? "v2_override_legacy_block" : adoption_reason
+        final_adoption_reason: allowV2Override ? "v2_override_legacy_block" : (allowV2Override === false && v2Mode === "legacy" ? "legacy_mode_forced" : adoption_reason)
     });
     const authority = deriveExecutionAuthority(refinedSelector);
 
