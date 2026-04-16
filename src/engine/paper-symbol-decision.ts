@@ -29,6 +29,7 @@ import { rangeExecutorEvaluateEntry } from "../strategy/executors/range-executor
 import { highwayExecutorEvaluateEntry } from "./highway-entry-executor";
 import type { AnyEntryDecision } from "../strategy/executors/types";
 import type { EntryExecutionAuthority } from "../engine-v2/types";
+import { resolveSymbolDecisionEnvelope } from "../engine-v2/reconciler";
 import { aiApproveEntry, aiInputFromDecision } from "../ai/entry-approval";
 import { HighwayTrendState } from "../models/types";
 import { evaluateAiHighwayQuality } from "../engine/ai-highway-filter";
@@ -1177,6 +1178,56 @@ function pack(
   };
 }
 
+/** Internal candidate discovery for V2 authority when not injected from caller. */
+function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): EntryExecutionAuthority {
+  const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as any) || "legacy";
+  const sn = input.snapshot;
+  if (!sn) {
+    return { decision: "HOLD", source: "v2", side: "none", sizeUsd: 0, regime: "UNKNOWN" };
+  }
+
+  const v2Env = resolveSymbolDecisionEnvelope({
+    symbol: sn.symbol,
+    fetchedAt: input.now,
+    snapshot: {
+      lastPrice: sn.lastPrice,
+      latestCandleClose: sn.latestCandleClose,
+      boxHigh: sn.boxHigh ?? 0,
+      boxLow: sn.boxLow ?? 0,
+      boxPos: sn.boxPos ?? 0.5,
+      rangeConfidence: sn.rangeConfidence ?? 0.5,
+      ema20: sn.ema20 ?? 0,
+      emaGap: sn.emaGap ?? 0,
+      atr: sn.atr ?? 0,
+      signal: sn.signal ?? "NONE",
+      qualityScore: sn.qualityScore ?? 0
+    },
+    legacy: {
+      regime: input.regime,
+      finalDecision: "SKIP",
+      rejectReason: "v2_dry_run_candidate",
+      requiredCostUsd: 0,
+      entryAllowed: false,
+      executorLabel: "none",
+      intentSide: null,
+      adaptiveOk: false
+    },
+    config: {
+      baseSizeUsd: input.config.paperBaseSizeUsd,
+      maxOpenPositions: input.config.paperMaxOpenPositions,
+      reentryCooldownMs: input.config.paperReentryCooldownMs
+    },
+    state: {
+      currentPositions: [], // Dry run only
+      globalRiskScore: 0.5,
+      lossStreaks: input.risk?.recentLossStreakByMode ?? {}
+    },
+    v2Mode
+  });
+
+  return v2Env.authority;
+}
+
 /**
  * Pipeline: DATA → SIGNAL → REGIME → EDGE → RISK → EXECUTION → AI → ADAPTIVE.
  */
@@ -1189,7 +1240,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   const supplemental_reasons: string[] = [];
 
-  const sym = input.snapshot?.symbol ?? ("UNKNOWN" as MarketSymbol);
+  const sn = input.snapshot;
+  const sym = sn?.symbol ?? ("UNKNOWN" as MarketSymbol);
+  const authority = input.authority || internalDiscoverV2Authority(input);
+
   let em: number | null = null;
 
   let signal_state: PaperSignalState = "NONE";
@@ -1377,7 +1431,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let rangeReversalSizeMult = 1.0;
   let rangeReversalConfidence = 0;
 
-  const sn = input.snapshot;
   const rm = sn?.gateRequiredMove;
   const emFromSn = sn?.gateExpectedMove ?? null;
   em = emFromSn;
@@ -1421,10 +1474,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   required_move_pct = effectiveTotalCost !== null ? effectiveTotalCost * 100 : null;
   shortfall_pct = (effectiveTotalCost !== null && em !== null && effectiveTotalCost > em) ? (effectiveTotalCost - em) * 100 : 0;
-
-  let authorityExpectancySoftPassApplied = false;
-  let authorityExpectancySoftPassReason: string | null = null;
-  const authorityExpectancySoftPassSizeMult = 0.5;
 
   executorBlockReasonOriginal = null;
   stage1SoftExecOverrideFlag = false;
@@ -3286,24 +3335,27 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       detailDumpHit ||
       detailVolHit;
 
-    const hasAuthorityEnterFromV2 = input.authority?.decision === "ENTER" && input.authority?.source === "v2";
+    const hasAuthorityEnterFromV2 = authority.decision === "ENTER" && authority.source === "v2";
     const authorityExpectancySoftPassEligible =
       hasAuthorityEnterFromV2 &&
       !severeRiskLock &&
-      (input.authority?.sizeUsd ?? 0) > 0 &&
-      (input.authority?.side === "long" || input.authority?.side === "short");
+      (authority.sizeUsd ?? 0) > 0 &&
+      (authority.side === "long" || authority.side === "short");
 
     if (reject_reason === "EDGE_FAIL_EXPECTANCY" && authorityExpectancySoftPassEligible) {
-      authorityExpectancySoftPassApplied = true;
-      authorityExpectancySoftPassReason = "v2_authority_expectancy_bypass";
-      // Skip the early return and mark for size reduction
+      reject_reason = "AUTHORITY_EXPECTANCY_SOFT_PASS";
+
       console.log("[AUTHORITY_EXPECTANCY_DECISION_PROOF]", {
-        symbol: String(sn.symbol),
-        decision: "SOFT_PASS",
-        reason: authorityExpectancySoftPassReason,
-        v2_side: input.authority?.side,
-        v2_size: input.authority?.sizeUsd,
-        original_reject: "EDGE_FAIL_EXPECTANCY"
+        authority_decision: authority.decision,
+        authority_source: authority.source,
+        authority_side: authority.side,
+        authority_size_usd: authority.sizeUsd,
+        expectancy_failed: true,
+        allow_authority_expectancy_soft_pass: true,
+        reject_reason: "AUTHORITY_EXPECTANCY_SOFT_PASS",
+        final_decision: input.currentStage === 0 ? "SKIP" : "REJECT",
+        adaptive_ok: true,
+        authority_expectancy_soft_pass_size_mult: 0.5
       });
     } else {
       if (executorDecision?.entry_allowed) {
@@ -3514,9 +3566,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       supplemental_reasons.push(`RANGE_REVERSAL_TIER_${rangeReversalTier.toUpperCase()}_SIZE_REDUCED`);
     }
 
-    if (authorityExpectancySoftPassApplied) {
+    const authorityExpectancySoftPassSizeMult =
+      reject_reason === "AUTHORITY_EXPECTANCY_SOFT_PASS" ? 0.5 : 1.0;
+
+    if (authorityExpectancySoftPassSizeMult < 1.0) {
       dynamicSizeMult *= authorityExpectancySoftPassSizeMult;
-      supplemental_reasons.push("authority_expectancy_soft_pass");
+      supplemental_reasons.push("AUTHORITY_EXPECTANCY_SOFT_PASS");
     }
 
     /**
@@ -3819,7 +3874,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         auto_entry_triggered: input.autoEntryTriggered,
         stage1_result_code:
           stage1ResultCodeOverride ?? (
-            authorityExpectancySoftPassApplied
+            reject_reason === "AUTHORITY_EXPECTANCY_SOFT_PASS"
               ? "STAGE1_SOFT_EXPECTANCY_PASS"
               : execution_state === "STAGE1_EXEC_PENDING"
                 ? "STAGE1_EXEC_PENDING"

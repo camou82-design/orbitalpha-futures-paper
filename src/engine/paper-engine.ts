@@ -1130,32 +1130,6 @@ export class PaperEngine {
       }
 
       // 2. Decision Logic
-      const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as EngineV2OpMode) || "legacy";
-      const v2SnapshotPre = buildV2SnapshotBridge(snap);
-      const v2ConfigPre = buildV2ConfigBridge(this.config);
-      const v2StatePre = buildV2StateBridge(opensAfterClose, this.lastRisk);
-
-      // Candidate V2 Authority (Phase 4 Strict Dependency)
-      // Runs V2 logic with dummy legacy result to get the V2-side's intent before V1 finalizes.
-      const authorityCandidate = resolveSymbolDecisionEnvelope({
-        symbol: sym,
-        fetchedAt,
-        snapshot: v2SnapshotPre,
-        legacy: {
-          regime: regimeDetected.regime,
-          finalDecision: "SKIP",
-          rejectReason: "v2_pre_discovery",
-          requiredCostUsd: 0,
-          entryAllowed: false,
-          executorLabel: "none",
-          intentSide: null,
-          adaptiveOk: false
-        },
-        config: v2ConfigPre,
-        state: v2StatePre,
-        v2Mode
-      }).authority;
-
       let res = evaluatePaperSymbolEntry({
         config: this.config,
         snapshot: snap,
@@ -1178,18 +1152,21 @@ export class PaperEngine {
         openPositionsTotal: opensAfterClose.length,
         maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions,
         currentStage: existingPos?.entryStage ?? 0,
-        rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly,
-        authority: authorityCandidate
+        rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly
       });
 
       /** Engine-V2 Execution Path (Standard 2: Selector Bridge) */
+      const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as EngineV2OpMode) || "legacy";
+
+
+
       const envelope = resolveSymbolDecisionEnvelope({
         symbol: sym,
         fetchedAt,
-        snapshot: v2SnapshotPre,
+        snapshot: buildV2SnapshotBridge(snap),
         legacy: buildV2LegacyBridge(res),
-        config: v2ConfigPre,
-        state: v2StatePre,
+        config: buildV2ConfigBridge(this.config),
+        state: buildV2StateBridge(opensAfterClose, this.lastRisk),
         v2Mode
       });
 
