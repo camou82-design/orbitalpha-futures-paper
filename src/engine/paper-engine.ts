@@ -3022,6 +3022,48 @@ export class PaperEngine {
   }
 
 
+  /**
+   * V2 AUTHORITY EXECUTION BRIDGE (Standard 10)
+   * Unifies initial entry and scale-in pathways to prioritize V2 authority signals.
+   * Ensures type-safe fallback when legacy adaptive results are missing.
+   */
+  private buildAuthorityAdaptiveBridge(
+    authority: EntryExecutionAuthority,
+    legacyAdaptive: NonNullable<EvaluatePaperSymbolEntryResult["adaptiveResult"]> | null | undefined
+  ): NonNullable<EvaluatePaperSymbolEntryResult["adaptiveResult"]> | null {
+    if (authority.decision !== "ENTER") return null;
+
+    const side = authority.side;
+    if (side !== "long" && side !== "short") return null;
+
+    const sizeUsd = authority.sizeUsd ?? 0;
+    if (sizeUsd <= 0) return null;
+
+    // Use legacy results if they already match authority intent
+    if (legacyAdaptive && legacyAdaptive.ok && legacyAdaptive.direction === side) {
+      return legacyAdaptive;
+    }
+
+    // Build synthetic fallback bridge for V2 or missing results
+    return {
+      ok: true,
+      direction: side as "long" | "short",
+      sizeUsd: sizeUsd,
+      leverageMultiplier: 1.0,
+      detail: {
+        source: "v2_authority_execution_bridge",
+        bridge_activated: true,
+        authority_source: authority.source,
+        authority_side: side,
+        authority_size_usd: sizeUsd,
+        finalSizeUsd: sizeUsd,
+        confidence_score: 1.0,
+        confidence_tier: "top",
+        size_multiplier: 1.0
+      }
+    };
+  }
+
   private async processPaperSymbolEntries(input: Readonly<{
     snapshots: SymbolSnapshot[];
     errorsCount: number;
@@ -3041,27 +3083,7 @@ export class PaperEngine {
     input.decisionBySymbol.forEach((envelope, symKey) => {
       const { authority } = envelope;
 
-      const authorityOwnsExecution =
-        authority.decision === "ENTER" &&
-        authority.source === "v2" &&
-        (authority.side === "long" || authority.side === "short") &&
-        (authority.sizeUsd ?? 0) > 0;
-
-      if (authority.decision !== "ENTER") return;
-      if (authority.side !== "long" && authority.side !== "short") return;
-
-      const effectiveAdaptiveResult =
-        authorityOwnsExecution
-          ? (envelope.legacy.adaptiveResult ?? {
-            approved: true,
-            ok: true,
-            finalDecision: "ENTER",
-            finalSide: authority.side,
-            finalSizeUsd: authority.sizeUsd,
-            source: "v2_authority_execution_bridge"
-          })
-          : envelope.legacy.adaptiveResult;
-
+      const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(authority, envelope.legacy.adaptiveResult);
       if (effectiveAdaptiveResult == null) return;
 
       const base = snapshotBySymbol.get(symKey);
@@ -3106,33 +3128,7 @@ export class PaperEngine {
       const res = envelope.legacy;
       const authority = envelope.authority;
 
-      const authorityOwnsExecution =
-        authority.decision === "ENTER" &&
-        authority.source === "v2" &&
-        (authority.side === "long" || authority.side === "short") &&
-        (authority.sizeUsd ?? 0) > 0;
-
-      const effectiveAdaptiveResult =
-        authorityOwnsExecution
-          ? (res.adaptiveResult ?? {
-            approved: true,
-            ok: true,
-            finalDecision: "ENTER",
-            finalSide: authority.side,
-            finalSizeUsd: authority.side === "long" ? "ENTER" : "ENTER", // dummy but logic uses side
-            finalSizeUsdValue: authority.sizeUsd,
-            source: "v2_authority_execution_bridge",
-            leverageMultiplier: 1,
-            direction: authority.side,
-            sizeUsd: authority.sizeUsd,
-            detail: {
-              source: "v2_authority_execution_bridge",
-              confidence_score: 1.0,
-              confidence_tier: "top",
-              size_multiplier: 1.0
-            }
-          } as any)
-          : res.adaptiveResult;
+      const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(authority, res.adaptiveResult);
 
       if (effectiveAdaptiveResult == null) continue;
 
@@ -3142,7 +3138,7 @@ export class PaperEngine {
         authority_source: authority.source,
         authority_side: authority.side,
         authority_size_usd: authority.sizeUsd ?? 0,
-        authority_owns_execution: authorityOwnsExecution,
+        authority_owns_execution: authority.source === "v2",
         legacy_adaptive_present: res.adaptiveResult != null,
         effective_adaptive_present: effectiveAdaptiveResult != null
       });
@@ -3160,7 +3156,7 @@ export class PaperEngine {
           intent_side: authority.side,
           final_decision: authority.decision,
           reject_reason: res.decision.reject_reason ?? null,
-          adaptive_ok: authorityOwnsExecution ? true : res.adaptiveOk,
+          adaptive_ok: res.adaptiveOk || authority.source === "v2",
           adaptive_direction: null,
           range_reversal_immediate_switch_applied: res.decision.range_reversal_immediate_switch_applied ?? false,
           will_attempt_open: authority.decision === "ENTER" && effectiveAdaptiveResult != null,
@@ -3849,7 +3845,8 @@ export class PaperEngine {
     nowTs: number
   ): Promise<PaperOpenPositionRecord | null> {
     const { legacy: res, authority } = envelope;
-    if (authority.decision !== "ENTER" || !res.adaptiveResult) return null;
+    const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(authority, res.adaptiveResult);
+    if (!effectiveAdaptiveResult) return null;
     if (!this.lastRiskExposure?.allowAdd) {
       this.logger.info("scale_in_blocked_risk_allow_add", { symbol: existing.symbol });
       return null;
@@ -3870,7 +3867,7 @@ export class PaperEngine {
     }
 
     const decision = res.executorDecision!;
-    const adaptive = res.adaptiveResult;
+    const adaptive = effectiveAdaptiveResult;
     const addOnKey = `${String(existing.symbol)}:${existing.openedAt}`;
     const addOnCount = this.rangeUpperShortAddOnCountByKey.get(addOnKey) ?? 0;
     const addOnUsed = existing.rangeAddOnUsed === true || addOnCount >= 1;
