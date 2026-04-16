@@ -171,7 +171,7 @@ export function adaptV2Input(
             baseSizeUsd: config.baseSizeUsd
         },
         state: {
-            currentPositions: state.currentPositions.map((p: any) => ({
+            currentPositions: state.currentPositions.map((p: LegacyPositionAdapter) => ({
                 symbol: p.symbol,
                 side: p.side === "long" ? "LONG" : "SHORT" as const,
                 entryPrice: p.entryPrice,

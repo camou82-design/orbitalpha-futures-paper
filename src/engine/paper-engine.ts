@@ -63,7 +63,7 @@ import {
   DECISION_FUNNEL_RING_MAX,
   sumDecisionFunnelTicks
 } from "./decision-funnel";
-import { evaluatePaperSymbolEntry, type EvaluatePaperSymbolEntryResult } from "./paper-symbol-decision";
+import { evaluatePaperSymbolEntry, type EvaluatePaperSymbolEntryResult, type SymbolSnapshotLike } from "./paper-symbol-decision";
 import {
   computePaperCloseLegMetrics,
   finalizePaperClosedRecord,
@@ -1171,43 +1171,13 @@ export class PaperEngine {
         qualityScore: snap.qualityScore ?? 0,
       };
 
-      const legacyBridge: V2BridgeLegacyDecision = {
-        regime: String(res.decision.regime ?? "UNKNOWN"),
-        finalDecision: res.decision.final_decision,
-        rejectReason: res.decision.reject_reason,
-        requiredCostUsd: res.decision.required_cost_usd ?? 0,
-        entryAllowed: res.executorDecision?.entry_allowed ?? false,
-        executorLabel: res.executorDecision?.executor ?? "unknown",
-        intentSide: (res.intentSide === "long" || res.intentSide === "short" ? res.intentSide : null),
-        adaptiveOk: res.adaptiveOk,
-        adaptiveDetail: res.adaptiveDetail
-      };
-
-      const configBridge: V2BridgeConfig = {
-        baseSizeUsd: this.config.paperBaseSizeUsd,
-        maxOpenPositions: this.config.paperMaxOpenPositions,
-        reentryCooldownMs: this.config.paperReentryCooldownMs
-      };
-
-      const stateBridge: V2BridgeState = {
-        currentPositions: opensAfterClose.map(p => ({
-          symbol: p.symbol as MarketSymbol,
-          side: String(p.side).toUpperCase() as "LONG" | "SHORT",
-          entryPrice: p.entryPrice,
-          sizeUsd: p.sizeUsd,
-          entryStage: p.entryStage ?? 1
-        })),
-        globalRiskScore: 0.5,
-        lossStreaks: this.lastRisk?.recentLossStreakByMode ?? {}
-      };
-
       const envelope = resolveSymbolDecisionEnvelope({
         symbol: sym,
         fetchedAt,
-        snapshot: snapshotBridge,
-        legacy: legacyBridge,
-        config: configBridge,
-        state: stateBridge,
+        snapshot: buildV2SnapshotBridge(snap),
+        legacy: buildV2LegacyBridge(res),
+        config: buildV2ConfigBridge(this.config),
+        state: buildV2StateBridge(opensAfterClose, this.lastRisk),
         v2Mode
       });
 
@@ -4490,5 +4460,59 @@ function buildEntryOpenedEventPayload(
     executor: pos.executorAtEntry,
     entry_stage: pos.entryStage,
     ...buildAuthorityEventMeta(authority)
+  };
+}
+function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapshot {
+  return {
+    lastPrice: snap.lastPrice,
+    latestCandleClose: snap.latestCandleClose,
+    boxHigh: snap.boxHigh ?? 0,
+    boxLow: snap.boxLow ?? 0,
+    boxPos: snap.boxPos ?? 0.5,
+    rangeConfidence: snap.rangeConfidence ?? 0.5,
+    ema20: snap.ema20 ?? 0,
+    emaGap: snap.emaGap ?? 0,
+    atr: snap.atr ?? 0,
+    signal: snap.signal ?? "NONE",
+    qualityScore: snap.qualityScore ?? 0
+  };
+}
+
+function buildV2LegacyBridge(res: EvaluatePaperSymbolEntryResult): V2BridgeLegacyDecision {
+  return {
+    regime: String(res.decision.regime ?? "UNKNOWN"),
+    finalDecision: res.decision.final_decision,
+    rejectReason: res.decision.reject_reason,
+    requiredCostUsd: res.decision.required_cost_usd ?? 0,
+    entryAllowed: res.executorDecision?.entry_allowed ?? false,
+    executorLabel: res.executorDecision?.executor ?? "unknown",
+    intentSide: res.intentSide === "long" || res.intentSide === "short" ? res.intentSide : null,
+    adaptiveOk: res.adaptiveOk,
+    adaptiveDetail: res.adaptiveDetail
+  };
+}
+
+function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
+  return {
+    baseSizeUsd: config.paperBaseSizeUsd,
+    maxOpenPositions: config.paperMaxOpenPositions,
+    reentryCooldownMs: config.paperReentryCooldownMs
+  };
+}
+
+function buildV2StateBridge(
+  opensAfterClose: ReadonlyArray<PaperOpenPositionRecord>,
+  lastRisk: RiskControlDecision | null
+): V2BridgeState {
+  return {
+    currentPositions: opensAfterClose.map((p): V2BridgePosition => ({
+      symbol: p.symbol,
+      side: String(p.side).toUpperCase() as "LONG" | "SHORT",
+      entryPrice: p.entryPrice,
+      sizeUsd: p.sizeUsd,
+      entryStage: p.entryStage ?? 1
+    })),
+    globalRiskScore: 0.5,
+    lossStreaks: lastRisk?.recentLossStreakByMode ?? {}
   };
 }
