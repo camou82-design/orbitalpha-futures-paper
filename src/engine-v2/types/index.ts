@@ -1,4 +1,5 @@
-import { MarketSymbol, PositionSide } from "../../models/types";
+import { MarketSymbol, PositionSide, EngineConfig, PaperOpenPositionRecord } from "../../models/types";
+import { EvaluatePaperSymbolEntryResult, SymbolSnapshotLike } from "../../engine/paper-symbol-decision";
 
 export type EngineV2OpMode = "legacy" | "shadow_v2" | "engine_v2";
 export type EngineV2Regime = "RANGE" | "TREND" | "TRANSITION" | "NO_TRADE";
@@ -174,14 +175,11 @@ export interface EngineV2Decision {
 export interface V2BridgeInput {
     symbol: MarketSymbol;
     fetchedAt: number;
-    snapshot: LegacySnapshotAdapter;
-    legacy: LegacyDecisionResult;
-    config: LegacyConfigAdapter;
-    state: {
-        currentPositions: EngineV2Position[];
-        globalRiskScore: number;
-        lossStreaks: Record<string, number>;
-    };
+    snapshot: SymbolSnapshotLike;
+    legacyResult: EvaluatePaperSymbolEntryResult;
+    config: EngineConfig;
+    positions: PaperOpenPositionRecord[];
+    recentLossStreakByMode: Record<string, number>;
     v2Mode: EngineV2OpMode;
 }
 

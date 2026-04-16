@@ -1144,49 +1144,11 @@ export class PaperEngine {
       const envelope = resolveSymbolDecisionEnvelope({
         symbol: sym,
         fetchedAt,
-        snapshot: {
-          ...snap,
-          boxPosDiag: snap.boxPos ?? 0.5,
-          rangeConfidenceDiag: snap.rangeConfidence ?? 0.5,
-          emaGapDiag: snap.emaGap ?? 0,
-          volatilityProxyDiag: snap.atr ?? 0
-        },
-        legacy: {
-          decision: {
-            regime_state: String(res.decision.regime ?? "UNKNOWN"),
-            final_decision: res.decision.final_decision,
-            reject_reason: res.decision.reject_reason,
-            required_cost_usd: res.decision.required_cost_usd ?? 0
-          },
-          executorDecision: res.executorDecision ? {
-            entry_allowed: res.executorDecision.entry_allowed,
-            total_cost: res.executorDecision.total_cost ?? 0,
-            executor: res.executorDecision.executor,
-            expected_move: res.executorDecision.expected_move ?? 0,
-            risk_state: res.executorDecision.risk_state,
-            detail: res.executorDecision.detail
-          } : null,
-          intentSide: (res.intentSide === "long" || res.intentSide === "short" ? res.intentSide : null),
-          adaptiveOk: res.adaptiveOk,
-          adaptiveDetail: res.adaptiveDetail
-        },
-        config: {
-          baseSizeUsd: this.config.paperBaseSizeUsd,
-          paperMaxOpenPositions: this.config.paperMaxOpenPositions,
-          paperReentryCooldownMs: this.config.paperReentryCooldownMs
-        },
-        state: {
-          currentPositions: opensAfterClose.map(p => ({
-            symbol: p.symbol as MarketSymbol,
-            side: String(p.side).toUpperCase() as "LONG" | "SHORT",
-            entryPrice: p.entryPrice,
-            sizeUsd: p.sizeUsd,
-            entryStage: p.entryStage ?? 1,
-            pnlPct: 0
-          })),
-          globalRiskScore: 0.5,
-          lossStreaks: this.lastRisk?.recentLossStreakByMode ?? {}
-        },
+        snapshot: snap,
+        legacyResult: res,
+        config: this.config,
+        positions: opensAfterClose,
+        recentLossStreakByMode: this.lastRisk?.recentLossStreakByMode ?? {},
         v2Mode
       });
       const authority = envelope.authority;

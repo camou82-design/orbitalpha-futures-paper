@@ -8,9 +8,12 @@ import {
     EntryExecutionAuthority,
     LegacyDecisionResult,
     SymbolDecisionEnvelope,
-    V2BridgeInput
+    V2BridgeInput,
+    LegacySnapshotAdapter,
+    LegacyConfigAdapter
 } from "./types";
 import { adaptV2Input, runEngineV2 } from "./index";
+import { PaperOpenPositionRecord } from "../models/types";
 
 /** 
  * LEGACY NORMALIZATION HELPERS (Phase 4 Independence)
@@ -30,11 +33,7 @@ export function normalizeAuthorityDecision(decision: unknown): EngineV2FinalDeci
  * LEGACY ADAPTER HELPER (Phase 4 Extraction)
  * Decouples raw legacy decision from V2 adaptive input.
  */
-export function buildV2LegacyAdapter(res: {
-    decision?: { regime_state?: string; final_decision?: string; reject_reason?: string | null; required_cost_usd?: number };
-    executorDecision?: { entry_allowed?: boolean; total_cost?: number };
-    intentSide?: string | null;
-}): LegacyResultAdapter {
+export function buildV2LegacyAdapter(res: LegacyDecisionResult): LegacyResultAdapter {
     return {
         decision: {
             regime_state: res.decision?.regime_state ?? "UNKNOWN",
@@ -45,13 +44,13 @@ export function buildV2LegacyAdapter(res: {
                     ? res.decision.required_cost_usd
                     : 0
         },
-        executorDecision: {
-            entry_allowed: res.executorDecision?.entry_allowed ?? false,
+        executorDecision: res.executorDecision ? {
+            entry_allowed: res.executorDecision.entry_allowed ?? false,
             total_cost:
-                typeof res.executorDecision?.total_cost === "number" && Number.isFinite(res.executorDecision.total_cost)
+                typeof res.executorDecision.total_cost === "number" && Number.isFinite(res.executorDecision.total_cost)
                     ? res.executorDecision.total_cost
                     : 0
-        },
+        } : null,
         intentSide: normalizeAuthoritySide(res.intentSide)
     };
 }
@@ -150,20 +149,78 @@ export function buildV2ShadowParityPayload(
 export function resolveSymbolDecisionEnvelope(
     input: V2BridgeInput
 ): SymbolDecisionEnvelope {
-    const { symbol, fetchedAt, snapshot, legacy, config, state, v2Mode } = input;
+    const { symbol, fetchedAt, snapshot, legacyResult, config, positions, recentLossStreakByMode, v2Mode } = input;
+
+    // 1. Snapshot Adapter (Standard 4: Zero-any mapping)
+    const snapshotAdapter: LegacySnapshotAdapter = {
+        ...snapshot,
+        lastPrice: snapshot.lastPrice,
+        latestCandleClose: snapshot.latestCandleClose,
+        boxHigh: snapshot.boxHigh,
+        boxLow: snapshot.boxLow,
+        boxPosDiag: snapshot.boxPos ?? 0.5,
+        rangeConfidenceDiag: snapshot.rangeConfidence ?? 0.5,
+        ema20: snapshot.ema20,
+        emaGapDiag: snapshot.emaGap ?? 0,
+        volatilityProxyDiag: snapshot.atr ?? 0,
+        signal: snapshot.signal,
+        qualityScore: snapshot.qualityScore
+    };
+
+    // 2. Config Adapter
+    const configAdapter: LegacyConfigAdapter = {
+        baseSizeUsd: config.paperBaseSizeUsd,
+        paperMaxOpenPositions: config.paperMaxOpenPositions,
+        paperReentryCooldownMs: config.paperReentryCooldownMs
+    };
+
+    // 3. State Adapter
+    const stateAdapter = {
+        currentPositions: positions.map((p: PaperOpenPositionRecord) => ({
+            symbol: p.symbol,
+            side: String(p.side).toUpperCase() as "LONG" | "SHORT",
+            entryPrice: p.entryPrice,
+            sizeUsd: p.sizeUsd,
+            entryStage: p.entryStage ?? 1,
+            pnlPct: 0
+        })),
+        globalRiskScore: 0.5,
+        lossStreaks: recentLossStreakByMode
+    };
+
+    // 4. Legacy Result Adapter
+    const legacyDecision: LegacyDecisionResult = {
+        decision: {
+            regime_state: String(legacyResult.decision.regime ?? "UNKNOWN"),
+            final_decision: legacyResult.decision.final_decision,
+            reject_reason: legacyResult.decision.reject_reason,
+            required_cost_usd: legacyResult.decision.required_cost_usd ?? 0
+        },
+        executorDecision: legacyResult.executorDecision ? {
+            entry_allowed: legacyResult.executorDecision.entry_allowed,
+            total_cost: legacyResult.executorDecision.total_cost ?? 0,
+            executor: legacyResult.executorDecision.executor,
+            expected_move: legacyResult.executorDecision.expected_move ?? 0,
+            risk_state: legacyResult.executorDecision.risk_state,
+            detail: legacyResult.executorDecision.detail
+        } : null,
+        intentSide: (legacyResult.intentSide === "long" || legacyResult.intentSide === "short" ? legacyResult.intentSide : null),
+        adaptiveOk: legacyResult.adaptiveOk,
+        adaptiveDetail: legacyResult.adaptiveDetail
+    };
 
     const v2Input = adaptV2Input(
         symbol,
         fetchedAt,
-        snapshot,
-        config,
-        state,
-        legacy
+        snapshotAdapter,
+        configAdapter,
+        stateAdapter,
+        buildV2LegacyAdapter(legacyDecision)
     );
 
     const v2Res = runEngineV2(v2Input);
-    const selector = reconcileV2Decision(legacy, v2Res.decision, v2Mode);
+    const selector = reconcileV2Decision(legacyDecision, v2Res.decision, v2Mode);
     const authority = deriveExecutionAuthority(selector);
 
-    return { legacy, selector, authority };
+    return { legacy: legacyDecision, selector, authority };
 }
