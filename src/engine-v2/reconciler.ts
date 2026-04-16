@@ -21,18 +21,16 @@ import { adaptV2Input, runEngineV2 } from "./index";
 export function normalizePositionSideUpper(
     side: unknown
 ): "LONG" | "SHORT" | "NONE" {
-    const s = String(side).toUpperCase();
-    if (s === "LONG") return "LONG";
-    if (s === "SHORT") return "SHORT";
+    if (side === "long" || side === "LONG") return "LONG";
+    if (side === "short" || side === "SHORT") return "SHORT";
     return "NONE";
 }
 
 export function normalizePositionSideLower(
     side: unknown
 ): "long" | "short" | "none" {
-    const s = String(side).toLowerCase();
-    if (s === "long") return "long";
-    if (s === "short") return "short";
+    if (side === "long" || side === "LONG") return "long";
+    if (side === "short" || side === "SHORT") return "short";
     return "none";
 }
 
@@ -110,7 +108,10 @@ export function reconcileV2Decision(
         legacy_result,
         v2_result: v2,
         adopted_result,
-        mismatch: legacy_result.decision !== v2.decision || legacy_result.side !== v2.side
+        mismatch:
+            legacy_result.decision !== v2.decision ||
+            legacy_result.side !== v2.side ||
+            Math.abs(legacy_result.size - v2.risk.finalSizeUsd) > 0.000001
     };
 }
 
@@ -256,17 +257,27 @@ export function resolveSymbolDecisionEnvelope(
     };
     const authority = deriveExecutionAuthority(refinedSelector);
 
+    const v1Side = legacyDecision.intentSide ?? "none";
+    const v2Side = v2Res.decision.side ?? "none";
+    const v1Size = legacyDecision.executorDecision?.total_cost ?? 0;
+    const v2Size = v2Res.decision.risk.finalSizeUsd ?? 0;
+
+    const selectorMismatch =
+        v1_dec !== v2_dec ||
+        v1Side !== v2Side ||
+        Math.abs(v1Size - v2Size) > 0.000001;
+
     // 6. Comparison Metrics for Engine-State
     return {
         legacy: legacyDecision,
         selector: refinedSelector,
         authority,
         v1_decision: v1_dec,
-        v1_side: legacyDecision.intentSide ?? "none",
-        v1_size: legacyDecision.executorDecision?.total_cost ?? 0,
+        v1_side: v1Side,
+        v1_size: v1Size,
         v2_decision: v2_dec,
-        v2_side: v2Res.decision.side ?? "none",
-        v2_size: v2Res.decision.risk.finalSizeUsd,
-        selector_mismatch: v1_dec !== v2_dec
+        v2_side: v2Side,
+        v2_size: v2Size,
+        selector_mismatch: selectorMismatch
     };
 }

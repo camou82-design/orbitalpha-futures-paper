@@ -4317,7 +4317,7 @@ function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): 
 
     authority_decision: authority.decision,
     authority_side: authority.side,
-    authority_size_usd: authority.sizeUsd,
+    authority_size_usd: authority.decision === "ENTER" ? authority.sizeUsd : 0,
     authority_source: authority.source,
 
     selector_engine: selector?.adopted_result.engine ?? "v1",
@@ -4345,7 +4345,7 @@ function buildAuthorityEventMeta(authority: EntryExecutionAuthority): Record<str
   return {
     authority_decision: authority.decision,
     authority_side: authority.side,
-    authority_size_usd: authority.sizeUsd,
+    authority_size_usd: authority.decision === "ENTER" ? authority.sizeUsd : 0,
     authority_source: authority.source,
     authority_regime: authority.regime
   };
