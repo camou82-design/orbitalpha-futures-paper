@@ -100,7 +100,9 @@ import {
   buildV2LegacyAdapter,
   buildV2ShadowParityPayload,
   normalizeAuthoritySide,
-  normalizeAuthorityDecision
+  normalizeAuthorityDecision,
+  normalizePositionSideUpper,
+  normalizePositionSideLower
 } from "../engine-v2/reconciler";
 import {
   evaluateRangeEngineForSymbol,
@@ -4492,13 +4494,19 @@ function buildV2StateBridge(
   lastRisk: RiskControlDecision | null
 ): V2BridgeState {
   return {
-    currentPositions: opensAfterClose.map((p): V2BridgePosition => ({
-      symbol: p.symbol,
-      side: String(p.side).toUpperCase() as "LONG" | "SHORT",
-      entryPrice: p.entryPrice,
-      sizeUsd: p.sizeUsd,
-      entryStage: p.entryStage ?? 1
-    })),
+    currentPositions: opensAfterClose
+      .map((p): V2BridgePosition | null => {
+        const side = normalizePositionSideUpper(p.side);
+        if (side === "NONE") return null;
+        return {
+          symbol: p.symbol,
+          side: side,
+          entryPrice: p.entryPrice,
+          sizeUsd: p.sizeUsd,
+          entryStage: p.entryStage ?? 1
+        };
+      })
+      .filter((x): x is V2BridgePosition => x !== null),
     globalRiskScore: 0.5,
     lossStreaks: lastRisk?.recentLossStreakByMode ?? {}
   };

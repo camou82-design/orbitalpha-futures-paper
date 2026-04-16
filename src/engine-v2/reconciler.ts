@@ -18,8 +18,28 @@ import { adaptV2Input, runEngineV2 } from "./index";
  * LEGACY NORMALIZATION HELPERS (Phase 4 Independence)
  * Ensures consistent behavior across engine boundaries.
  */
+export function normalizePositionSideUpper(
+    side: unknown
+): "LONG" | "SHORT" | "NONE" {
+    const s = String(side).toUpperCase();
+    if (s === "LONG") return "LONG";
+    if (s === "SHORT") return "SHORT";
+    return "NONE";
+}
+
+export function normalizePositionSideLower(
+    side: unknown
+): "long" | "short" | "none" {
+    const s = String(side).toLowerCase();
+    if (s === "long") return "long";
+    if (s === "short") return "short";
+    return "none";
+}
+
 export function normalizeAuthoritySide(side: unknown): EngineV2Side {
-    return side === "long" || side === "short" ? (side as EngineV2Side) : null;
+    const s = normalizePositionSideLower(side);
+    if (s === "none") return null;
+    return s;
 }
 
 export function normalizeAuthorityDecision(decision: unknown): EngineV2FinalDecision {
