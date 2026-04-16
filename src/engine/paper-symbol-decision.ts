@@ -1184,6 +1184,7 @@ function pack(
     final_reject_after_priority: fields.final_reject_after_priority,
     authority_decision: fields.authority_decision ?? null,
     authority_source: fields.authority_source ?? null,
+    authority_side: fields.authority_side ?? null,
     authority_size_usd: fields.authority_size_usd ?? null,
     final_block_owner: fields.final_block_owner ?? null,
     adaptive_fail_stage: fields.adaptive_fail_stage ?? null,
