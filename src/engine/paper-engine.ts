@@ -250,6 +250,13 @@ type PaperEngineDecisionEnvelope = {
   legacy: EvaluatePaperSymbolEntryResult;
   selector: EngineV2SelectorResult | null;
   authority: EntryExecutionAuthority;
+  v1_decision?: string;
+  v1_side?: string;
+  v1_size?: number;
+  v2_decision?: string;
+  v2_side?: string;
+  v2_size?: number;
+  selector_mismatch?: boolean;
 };
 
 function toSymbolDiagnostic(symbol: MarketSymbol, endpoint: string, d: BybitPublicDiagnostics): SymbolDiagnostic {
@@ -1219,7 +1226,18 @@ export class PaperEngine {
           selector_mismatch: envelope.selector_mismatch
         });
       }
-      decisionBySymbol.set(symKeyEarly, { legacy: res, selector: selectorResult, authority });
+      decisionBySymbol.set(symKeyEarly, {
+        legacy: res,
+        selector: selectorResult,
+        authority,
+        v1_decision: envelope.v1_decision,
+        v1_side: envelope.v1_side,
+        v1_size: envelope.v1_size,
+        v2_decision: envelope.v2_decision,
+        v2_side: envelope.v2_side,
+        v2_size: envelope.v2_size,
+        selector_mismatch: envelope.selector_mismatch
+      });
     } // End of sym loop
 
     // 1. First closing (including reversals)
@@ -4337,13 +4355,27 @@ function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): 
   return {
     decision: legacy.decision.final_decision,
     adaptiveOk: legacy.adaptiveOk,
+
     authority_decision: authority.decision,
     authority_side: authority.side,
     authority_size_usd: authority.sizeUsd,
     authority_source: authority.source,
+
     selector_engine: selector?.adopted_result.engine ?? "v1",
     adopted_engine: selector?.adopted_result.engine ?? "v1",
-    adoption_reason: selector?.adopted_result.adoption_reason ?? "legacy_fallback"
+    adoption_reason: selector?.adopted_result.adoption_reason ?? "legacy_fallback",
+
+    v1_decision: envelope.v1_decision ?? legacy.decision.final_decision,
+    v1_side: envelope.v1_side ?? legacy.intentSide ?? "none",
+    v1_size: envelope.v1_size ?? legacy.executorDecision?.total_cost ?? 0,
+
+    v2_decision: envelope.v2_decision ?? selector?.v2_result.decision ?? "SKIP",
+    v2_side: envelope.v2_side ?? selector?.v2_result.side ?? "none",
+    v2_size: envelope.v2_size ?? selector?.v2_result.risk.finalSizeUsd ?? 0,
+
+    selector_mismatch:
+      envelope.selector_mismatch ??
+      (selector ? selector.mismatch : false)
   };
 }
 

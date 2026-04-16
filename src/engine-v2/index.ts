@@ -52,35 +52,50 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Tier 5: Risk Sizing
     const riskSizing = calculateRiskSizing(judgment, confidence, execution, input);
 
+    // Tier 5: Explanation (Diagnostics)
+    const explanation = generateExplanation(judgment, execution, riskSizing);
+
     // Final Decision Formulation (Authority Enforcer)
     let finalDecision: EngineV2FinalDecision = "SKIP";
 
     const isBlocked = riskSizing.isBlocked;
-    const isWait = execution.signal === "WAIT_RECHECK";
-    const invalidSignal = execution.signal === "NONE";
-    const invalidSide = execution.side === "none";
+    const invalidNoneSignal = execution.signal === "NONE";
+    const waitingRecheck = execution.signal === "WAIT_RECHECK";
+    const invalidSideForEnter = execution.side === "none";
     const invalidSize = riskSizing.finalSizeUsd <= 0;
+    const noTradeRegime = judgment.regime === "NO_TRADE";
+    const blockReason = riskSizing.blockReason ?? null;
 
-    if (isBlocked) {
-        // Distinguish between REJECT (soft) and DISABLED (hard)
-        if (riskSizing.blockReason?.includes("MAX_POSITIONS") || riskSizing.blockReason?.includes("COOLDOWN")) {
-            finalDecision = "REJECT";
-        } else {
-            finalDecision = "DISABLED";
-        }
-    } else if (isWait) {
+    if (noTradeRegime) {
+        finalDecision = "DISABLED";
+    } else if (waitingRecheck) {
         finalDecision = "HOLD";
-    } else if (invalidSignal || invalidSide || invalidSize) {
+    } else if (isBlocked && blockReason === "NO_TRADE_REGIME") {
+        finalDecision = "DISABLED";
+    } else if (isBlocked) {
+        finalDecision = "REJECT";
+    } else if (invalidNoneSignal) {
         finalDecision = "SKIP";
+    } else if (invalidSideForEnter) {
+        finalDecision = "SKIP";
+    } else if (invalidSize) {
+        finalDecision = "REJECT";
     } else {
         finalDecision = "ENTER";
     }
 
-    // Tier 5: Explanation
-    const explanation = generateExplanation(judgment, execution, riskSizing);
-    const finalReason = isBlocked
-        ? `BLOCKED: ${riskSizing.blockReason}`
-        : (finalDecision === "ENTER" ? explanation.reason : `SKIPPED: ${execution.reason}`);
+    let finalReason: string;
+    if (finalDecision === "ENTER") {
+        finalReason = explanation.reason;
+    } else if (finalDecision === "HOLD") {
+        finalReason = `HOLD: ${execution.reason}`;
+    } else if (finalDecision === "DISABLED") {
+        finalReason = `DISABLED: ${blockReason ?? judgment.regime}`;
+    } else if (finalDecision === "REJECT") {
+        finalReason = `REJECTED: ${blockReason ?? execution.reason}`;
+    } else {
+        finalReason = `SKIPPED: ${execution.reason}`;
+    }
 
     const decision: EngineV2Decision = {
         symbol: input.symbol,
@@ -91,20 +106,17 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         signal: execution.signal,
         side: execution.side,
         decision: finalDecision,
-        risk: {
-            isBlocked: riskSizing.isBlocked,
-            blockReason: riskSizing.blockReason,
-            sizeMultiplier: riskSizing.sizeMultiplier,
-            baseSizeUsd: riskSizing.baseSizeUsd,
-            finalSizeUsd: riskSizing.finalSizeUsd,
-            isAddOn: riskSizing.isAddOn
-        },
+        risk: riskSizing,
         explanation: {
             reason: finalReason,
-            uiLabelRegime: explanation.uiLabels.regime,
-            uiLabelStatus: explanation.uiLabels.status
+            uiLabelRegime: judgment.regime,
+            uiLabelStatus: finalDecision === "ENTER" ? "ACTIVE" : "IDLE"
         },
-        rawMetrics: judgment.metrics
+        rawMetrics: {
+            ...judgment.metrics,
+            confidenceScore: confidence.score,
+            sizingMultiplier: riskSizing.sizeMultiplier
+        }
     };
 
     const internal: EngineV2InternalResult = {
@@ -137,13 +149,13 @@ export function adaptV2Input(
         snapshot: {
             lastPrice: snapshot.lastPrice,
             latestCandleClose: snapshot.latestCandleClose,
-            boxHigh: snapshot.boxHigh,
-            boxLow: snapshot.boxLow,
-            boxPos: snapshot.boxPosDiag,
-            rangeConfidence: snapshot.rangeConfidenceDiag,
-            ema20: snapshot.ema20,
-            emaGap: snapshot.emaGapDiag,
-            volatilityProxy: snapshot.volatilityProxyDiag,
+            boxHigh: snapshot.boxHigh ?? 0,
+            boxLow: snapshot.boxLow ?? 0,
+            boxPos: snapshot.boxPosDiag ?? 0,
+            rangeConfidence: snapshot.rangeConfidenceDiag ?? 0,
+            ema20: snapshot.ema20 ?? 0,
+            emaGap: snapshot.emaGapDiag ?? 0,
+            volatilityProxy: snapshot.volatilityProxyDiag ?? 0,
             boxCohesion01: snapshot.boxCohesion01 ?? snapshot.boxCohesionDiag ?? 0,
             breakoutFailureRate: snapshot.breakoutFailureRate ?? snapshot.breakoutFailureRateDiag ?? 0,
             trendWeaknessScore: snapshot.trendWeaknessScore ?? snapshot.trendWeaknessDiag ?? 0,
@@ -159,7 +171,7 @@ export function adaptV2Input(
             baseSizeUsd: config.baseSizeUsd
         },
         state: {
-            currentPositions: state.currentPositions.map((p: LegacyPositionAdapter) => ({
+            currentPositions: state.currentPositions.map((p: any) => ({
                 symbol: p.symbol,
                 side: p.side === "long" ? "LONG" : "SHORT" as const,
                 entryPrice: p.entryPrice,

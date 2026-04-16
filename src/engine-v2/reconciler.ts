@@ -216,12 +216,14 @@ export function resolveSymbolDecisionEnvelope(
     } else if (v2Mode === "legacy") {
         adoption_reason = "legacy_mode_forced";
     } else if (v2Mode === "shadow_v2") {
-        if (v1_dec === v2_dec) {
-            adoption_reason = v1_dec === "ENTER" ? "parity_match_v2" : "parity_match_v1";
+        if (v1_dec === v2_dec && legacyDecision.intentSide === v2Res.decision.side) {
+            adoption_reason = "shadow_parity_match";
+        } else if (v1_dec === "ENTER" && v2_dec !== "ENTER") {
+            adoption_reason = "v2_blocked_v1_open";
+        } else if (v1_dec !== "ENTER" && v2_dec === "ENTER") {
+            adoption_reason = "v2_open_v1_blocked";
         } else {
-            if (v1_dec === "ENTER" && v2_dec !== "ENTER") adoption_reason = "v2_blocked_v1_open";
-            else if (v1_dec !== "ENTER" && v2_dec === "ENTER") adoption_reason = "v2_open_v1_blocked";
-            else adoption_reason = "shadow_compare_only";
+            adoption_reason = "shadow_compare_only";
         }
     }
 
