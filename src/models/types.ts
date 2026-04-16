@@ -78,6 +78,8 @@ export type EngineConfig = Readonly<{
    * Reduces whipsaw from box recalculation / edge jitter shortly after entry.
    */
   rangeRebalanceMinHoldMs: number;
+  /** Paper-only: base position size in USD if not overridden by dynamic sizing. */
+  paperBaseSizeUsd: number;
   /**
    * RANGE box-break exit: consecutive close-evaluation ticks with raw price outside box before exiting (>=2).
    * Single-tick spikes or one-off reclassification alone do not clear the bar.

@@ -145,6 +145,7 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperModeSuspendMsRaw === undefined || paperModeSuspendMsRaw.trim() === "" ? 3_600_000 : parseInt(paperModeSuspendMsRaw, 10);
   const paperModeSuspendMs =
     !Number.isFinite(paperModeSuspendMsParsed) || paperModeSuspendMsParsed < 0 ? 3_600_000 : Math.min(86_400_000, paperModeSuspendMsParsed);
+  const paperBaseSizeUsd = parseNumber(env.ORBITALPHA_PAPER_BASE_SIZE_USD ?? env.DEFAULT_PAPER_SIZE_USD, 100);
 
   const aiBlockGoodThresholdPct = parseNumber(env.ORBITALPHA_AI_BLOCK_GOOD_THRESHOLD_PCT, -0.25);
   const aiBlockMissedThresholdPct = parseNumber(env.ORBITALPHA_AI_BLOCK_MISSED_THRESHOLD_PCT, 0.35);
@@ -212,6 +213,7 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     rangeRebalanceTrailPullbackMinPriceFrac,
     rangeRebalanceTrailAtrMult,
     rangeRebalanceTrailMaxArmedNoLockMs,
+    paperBaseSizeUsd,
     paperSlippageBps,
     paperDailyLossLimitUsd,
     paperLast10NetDegradeThresholdUsd,

@@ -7,7 +7,31 @@ export type EngineV2SignalState = "LONG_CANDIDATE" | "SHORT_CANDIDATE" | "WAIT_R
 export type EngineV2Side = "long" | "short" | "none" | null;
 export type EngineV2FinalDecision = "ENTER" | "EXIT" | "SKIP" | "HOLD" | "REJECT" | "DISABLED";
 
-/** Engine-V2 Specific Position Type (Independent from legacy) */
+/** Legacy Result Interface for Bridge (Zero-any policy) */
+export interface LegacyDecisionResult {
+    decision: {
+        regime_state: string;
+        final_decision: string;
+        reject_reason: string | null;
+        required_cost_usd: number;
+        original_signal_state?: string;
+        final_signal_state?: string;
+        execution_disabled_reason?: string | null;
+        supplemental_reasons?: string[];
+    };
+    executorDecision: {
+        entry_allowed: boolean;
+        total_cost: number;
+        executor?: string;
+        expected_move?: number;
+        risk_state?: string;
+        detail?: any;
+    } | null;
+    intentSide: EngineV2Side;
+    adaptiveOk: boolean;
+    adaptiveDetail?: any;
+}
+
 export interface EngineV2Position {
     symbol: MarketSymbol;
     side: PositionSide;
@@ -52,7 +76,7 @@ export interface LegacyConfigAdapter {
 
 export interface LegacyPositionAdapter {
     symbol: MarketSymbol;
-    side: "long" | "short";
+    side: PositionSide | "long" | "short";
     entryPrice: number;
     sizeUsd: number;
     entryStage?: number;
@@ -69,8 +93,8 @@ export interface LegacyResultAdapter {
     executorDecision?: {
         entry_allowed?: boolean;
         total_cost?: number;
-    };
-    intentSide?: string | null;
+    } | null;
+    intentSide?: EngineV2Side;
 }
 
 export interface EngineV2Input {
@@ -143,6 +167,24 @@ export interface EngineV2Decision {
     rawMetrics: Record<string, number | boolean>;
 }
 
+/** 
+ * Bridge Input (Phase 4 Strict Decoupling) 
+ * Defines all data required for reconciliation without exposing PaperEngine internals.
+ */
+export interface V2BridgeInput {
+    symbol: MarketSymbol;
+    fetchedAt: number;
+    snapshot: LegacySnapshotAdapter;
+    legacy: LegacyDecisionResult;
+    config: LegacyConfigAdapter;
+    state: {
+        currentPositions: EngineV2Position[];
+        globalRiskScore: number;
+        lossStreaks: Record<string, number>;
+    };
+    v2Mode: EngineV2OpMode;
+}
+
 export interface EngineV2AdoptionOutcome {
     engine: "V1" | "V2";
     adopted_decision: EngineV2FinalDecision;
@@ -162,6 +204,16 @@ export interface EngineV2SelectorResult {
     v2_result: EngineV2Decision;
     adopted_result: EngineV2AdoptionOutcome;
     mismatch: boolean;
+}
+
+/** 
+ * Unified Bridge Interface (Phase 4 Strict Decoupling) 
+ * Zero-any entry point for the paper engine. 
+ */
+export interface SymbolDecisionEnvelope {
+    legacy: LegacyDecisionResult;
+    selector: EngineV2SelectorResult | null;
+    authority: EntryExecutionAuthority;
 }
 
 /** Tier 1: Market Judgment */
