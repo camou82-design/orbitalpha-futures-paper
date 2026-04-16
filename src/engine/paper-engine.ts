@@ -1316,6 +1316,16 @@ export class PaperEngine {
       }
     });
 
+    try {
+      const summary = await this.positions.refreshSummaryReport();
+      this.logger.info("summary_report_refreshed", {
+        summaryPath: summary.summaryPath,
+        health: summary.health.status
+      });
+    } catch (e) {
+      this.logger.error("summary_report_refresh_failed", { error: String(e) });
+    }
+
     if (errors.length > 0) {
       throw new Error(`runOnce failed for ${errors.length} symbol(s)`);
     }
