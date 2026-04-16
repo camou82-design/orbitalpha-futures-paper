@@ -1410,9 +1410,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   final_decision_before_priority = "SKIP";
   final_decision_after_priority = "SKIP";
   let risk_cooldown_subreason: string | null = null;
+  const severeRiskLock =
+    input.risk?.engineBlocked === true ||
+    (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
+    (input.regimeDetail?.dump_protection_hit === true) ||
+    (input.regimeDetail?.volatility_guard_hit === true);
   let same_dir_cooldown_applied = false;
   let blocked_regime_reason: string | null = null;
   let reentry_wait_ms: number | null = null;
+  let stage1SizeMultFinal: number | null = null;
   let reentry_elapsed_ms: number | null = null;
   let blocked_regime_until_bypass_applied = false;
   let blocked_regime_until_bypass_reason: string | null = null;
@@ -1723,7 +1729,15 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         ai_floor_relaxed: extra.ai_floor_relaxed,
         auto_entry_triggered: extra.auto_entry_triggered !== undefined ? extra.auto_entry_triggered : input.autoEntryTriggered,
         reviewing_ticks: extra.reviewing_ticks !== undefined ? extra.reviewing_ticks : input.reviewingTicks,
-        stage1_result_code: extra.stage1_result_code,
+        stage1_result_code: extra.stage1_result_code ?? (
+          stage1ResultCodeOverride ?? (
+            final_reject_after_priority === "AUTHORITY_ADAPTIVE_SOFT_PASS"
+              ? "STAGE1_SOFT_ADAPTIVE_PASS"
+              : final_reject_after_priority === "AUTHORITY_EXPECTANCY_SOFT_PASS"
+                ? "STAGE1_SOFT_EXPECTANCY_PASS"
+                : (extra as any).stage1_result_code
+          )
+        ),
         final_fail_reason: extra.final_fail_reason,
         entry_blocked: extra.entry_blocked ?? null,
         range_executor_priority_applied,
@@ -3327,13 +3341,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       input.currentStage === 0 &&
       baseCandidateExists &&
       requiredMoveLowEnough;
-    const detailDumpHit = input.regimeDetail?.dump_protection_hit === true;
-    const detailVolHit = input.regimeDetail?.volatility_guard_hit === true;
-    const severeRiskLock =
-      input.risk?.engineBlocked === true ||
-      (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
-      detailDumpHit ||
-      detailVolHit;
 
     const hasAuthorityEnterFromV2 = authority.decision === "ENTER" && authority.source === "v2";
     const authorityExpectancySoftPassEligible =
@@ -3439,6 +3446,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     ? aiInputFromDecision({ decision: executorDecision, executorDirection: intentSide, lossStreak, last10Net })
     : null;
 
+  let dynamicSizeMult = input.risk?.sizeMultiplier ?? 1;
+  let adaptive: FuturesAdaptiveEntryResult | null = null;
+
   if (aiIn) {
     const aiOut = aiApproveEntry(aiIn);
     // [ROLE REDUCTION] AI only handles quality approval/rejection for the locked direction
@@ -3494,7 +3504,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
 
     // Size Multiplier Calculation
-    let dynamicSizeMult = input.risk?.sizeMultiplier ?? 1;
+    dynamicSizeMult = input.risk?.sizeMultiplier ?? 1;
     if (stage1LoosenedEntry && input.currentStage === 0) {
       // Use AI size ladder if applicable, otherwise default Stage 1 loosening
       dynamicSizeMult *= aiFloorRelaxed ? aiSizeLadderMult : 0.25;
@@ -3572,6 +3582,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     if (authorityExpectancySoftPassSizeMult < 1.0) {
       dynamicSizeMult *= authorityExpectancySoftPassSizeMult;
       supplemental_reasons.push("AUTHORITY_EXPECTANCY_SOFT_PASS");
+    }
+
+    const authorityAdaptiveSoftPassSizeMult =
+      reject_reason === "AUTHORITY_ADAPTIVE_SOFT_PASS" ? 0.5 : 1.0;
+
+    if (authorityAdaptiveSoftPassSizeMult < 1.0) {
+      dynamicSizeMult *= authorityAdaptiveSoftPassSizeMult;
+      supplemental_reasons.push("AUTHORITY_ADAPTIVE_SOFT_PASS");
     }
 
     /**
@@ -3653,7 +3671,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       }
     }
 
-    const stage1SizeMultFinal = input.currentStage === 0 ? dynamicSizeMult : null;
+    stage1SizeMultFinal = input.currentStage === 0 ? dynamicSizeMult : null;
 
     /** Stage1 RANGE 탐색: 소프트 탐색·에지·자동진입 소프트, 또는 실행기 자연 허용(소프트 없음). */
     const stage1RangeExplorePath =
@@ -3705,7 +3723,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       trendVolumeRelaxProof = null;
     }
 
-    const adaptive = runFuturesAdaptiveEntry({
+    adaptive = runFuturesAdaptiveEntry({
       mode: input.adaptiveMode,
       modeDetail: input.adaptiveDetail,
       snap: {
@@ -3728,11 +3746,43 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     adaptiveDetailOut = adaptive.detail ?? null;
 
     // Consolidate reasons: Use policy failure over executor failure if it's from entry_policy
-    if (!adaptive.ok && adaptive.orderBuildFailReason && adaptive.failStage === "entry_policy") {
+    if (adaptive && !adaptive.ok) {
       executorBlockReasonOriginal = adaptive.orderBuildFailReason;
     }
-    if (!adaptive.ok) {
-      const af = adaptive as Extract<FuturesAdaptiveEntryResult, { ok: false }>;
+  }
+
+  const hasAuthorityEnterFromV2ForAdaptive =
+    authority.decision === "ENTER" &&
+    authority.source === "v2" &&
+    (authority.side === "long" || authority.side === "short") &&
+    (authority.sizeUsd ?? 0) > 0;
+
+  const hardBlockedForAdaptiveBypass =
+    severeRiskLock === true ||
+    risk_state === "HARD_BLOCK";
+
+  if (adaptive && !adaptive.ok) {
+    const af = adaptive as Extract<FuturesAdaptiveEntryResult, { ok: false }>;
+    const adaptiveFailIsSoftenable = hasAuthorityEnterFromV2ForAdaptive && af.failStage === "entry_policy";
+    const allowAuthorityAdaptiveSoftPass = adaptiveFailIsSoftenable && !hardBlockedForAdaptiveBypass;
+
+    if (allowAuthorityAdaptiveSoftPass) {
+      reject_reason = "AUTHORITY_ADAPTIVE_SOFT_PASS";
+      supplemental_reasons.push("AUTHORITY_ADAPTIVE_SOFT_PASS");
+      adaptiveOk = true;
+      adaptiveDetailOut = adaptive.detail ?? null;
+
+      console.log("[AUTHORITY_ADAPTIVE_DECISION_PROOF]", {
+        authority_decision: authority.decision,
+        authority_source: authority.source,
+        authority_side: authority.side,
+        authority_size_usd: authority.sizeUsd,
+        adaptive_fail_stage: af.failStage,
+        adaptive_fail_reason: af.orderBuildFailReason,
+        allow_authority_adaptive_soft_pass: true,
+        reject_reason: "AUTHORITY_ADAPTIVE_SOFT_PASS"
+      });
+    } else {
       return ret(
         {
           reject_reason: "ORDER_BUILD_FAIL",
@@ -3761,219 +3811,211 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         }
       );
     }
+  }
 
+  if (adaptive) {
     adaptiveOk = true;
     adaptiveResult = adaptive;
+  }
 
-    // [EXECUTION GUARD] Simplify Long Only Policy
-    const longOnlyActive = input.config.longOnly;
-    const isExecutionBlockedByLongOnly = longOnlyActive && intentSide === "short";
+  // [EXECUTION GUARD] Simplify Long Only Policy
+  const longOnlyActive = input.config.longOnly;
+  const isExecutionBlockedByLongOnly = longOnlyActive && intentSide === "short";
 
-    console.log("[LONG_ONLY_POLICY_TRACE]", {
+  console.log("[LONG_ONLY_POLICY_TRACE]", {
+    symbol: String(sn!.symbol),
+    longOnly_effective_value: longOnlyActive,
+    config_source: "input.config.longOnly",
+    intended_side: intentSide,
+    execution_blocked: isExecutionBlockedByLongOnly,
+    blocked_reason: isExecutionBlockedByLongOnly ? "long_only_restriction" : "none"
+  });
+
+  if (input.regime === "RANGE" || strategy_executor === "RANGE") {
+    console.log("[RANGE_EXECUTION_POLICY_ALIGNMENT]", {
       symbol: String(sn!.symbol),
-      longOnly_effective_value: longOnlyActive,
-      config_source: "input.config.longOnly",
-      intended_side: intentSide,
-      execution_blocked: isExecutionBlockedByLongOnly,
-      blocked_reason: isExecutionBlockedByLongOnly ? "long_only_restriction" : "none"
+      zone: executorDecision?.detail?.range_zone_detected ?? "none",
+      signal_state: signal_state,
+      final_trade_side: intentSide,
+      longOnly: longOnlyActive,
+      action_taken: isExecutionBlockedByLongOnly ? "BLOCK" : "ALLOW",
+      action_reason: isExecutionBlockedByLongOnly ? "intent_short_but_longOnly_is_true" : "passed_execution_guard"
     });
+  }
 
-    if (input.regime === "RANGE" || strategy_executor === "RANGE") {
-      console.log("[RANGE_EXECUTION_POLICY_ALIGNMENT]", {
-        symbol: String(sn!.symbol),
-        zone: executorDecision?.detail?.range_zone_detected ?? "none",
-        signal_state: signal_state,
-        final_trade_side: intentSide,
-        longOnly: longOnlyActive,
-        action_taken: isExecutionBlockedByLongOnly ? "BLOCK" : "ALLOW",
-        action_reason: isExecutionBlockedByLongOnly ? "intent_short_but_longOnly_is_true" : "passed_execution_guard"
-      });
-    }
-
-    if (isExecutionBlockedByLongOnly) {
-      supplemental_reasons.push("LONG_ONLY_RESTRICTION");
-      return ret(
-        {
-          reject_reason: "EXECUTION_DISABLED",
-          final_decision: "REJECT",
-          execution_state: "DISABLED",
-          ai_decision: "APPROVE",
-          adaptive_decision: "REJECT",
-          guidance: "Long Only 제한으로 숏 진입 차단",
-          target_stage: null,
-          supplemental_reasons,
-          stage1_result_code: "STAGE1_BLOCKED_RISK"
-        },
-        { intentSide, executorDecision, aiGatePassed, adaptiveOk: false, adaptiveDetail: adaptiveDetailOut, adaptiveResult: null }
-      );
-    }
-
-    const rangeSoftPassSizeMult =
-      gateReason === "range_wait_recheck_soft_pass_candidate" ? 0.45 : 1.0;
-
-    const initialEntryQty = (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult * rangeSoftPassSizeMult) / sn!.lastPrice;
-    if (initialEntryQty <= 0) {
-      reject_reason = "ORDER_BUILD_FAIL";
-      final_decision = "REJECT";
-      supplemental_reasons.push("ZERO_QTY_FAIL");
-      return ret(
-        {
-          reject_reason: "ORDER_BUILD_FAIL",
-          final_decision: "REJECT",
-          execution_state: "ORDER_BUILD_FAIL",
-          ai_decision: "APPROVE",
-          adaptive_decision: "REJECT",
-          guidance: "진입 수량 0",
-          target_stage: null,
-          supplemental_reasons,
-          stage1_result_code: "STAGE1_BLOCKED_DATA",
-          required_move_pct,
-          shortfall_pct
-        },
-        {
-          intentSide,
-          executorDecision,
-          adaptiveOk: false,
-          adaptiveDetail: adaptiveDetailOut,
-          adaptiveResult: adaptive,
-          aiGatePassed: true
-        }
-      );
-    }
-
-    final_decision = "ENTER";
-    reject_reason = null;
-    execution_state = "PAPER_READY";
-
-    const forceEnterAdaptive =
-      adaptive.detail["stage1_adaptive_force_enter"] ?? adaptive.detail["stage1_adaptive_soft_explore"];
-    if (forceEnterAdaptive === "direction_none") supplemental_reasons.push("STAGE1_EXPLORE_ADAPTIVE_DIRECTION_NONE");
-    if (forceEnterAdaptive === "ema_flat") supplemental_reasons.push("STAGE1_EXPLORE_ADAPTIVE_EMA_FLAT");
-
-    // Round 4 & 5: Stage 1 Execution Pending prioritize
-    if (input.currentStage === 0 && input.autoEntryTriggered) {
-      execution_state = "STAGE1_EXEC_PENDING";
-      guidanceOut = "Stage 1 실행 대기 (검토 조건 유지)";
-    }
-
-
+  if (isExecutionBlockedByLongOnly) {
+    supplemental_reasons.push("LONG_ONLY_RESTRICTION");
     return ret(
       {
-        final_decision: "ENTER",
-        reject_reason: null,
+        reject_reason: "EXECUTION_DISABLED",
+        final_decision: "REJECT",
+        execution_state: "DISABLED",
         ai_decision: "APPROVE",
-        adaptive_decision: "OK",
-        guidance: executorDecision?.guidance ?? null,
-        next_action: executorDecision?.next_action ?? null,
-        invalidate_condition: executorDecision?.invalidate_condition ?? null,
-        risk_note: executorDecision?.risk_note ?? null,
-        watch_zone: executorDecision?.watch_zone ?? null,
-        entry_progress: executorDecision?.entry_progress ?? null,
-        target_stage: executorDecision?.target_stage ?? null,
+        adaptive_decision: "REJECT",
+        guidance: "Long Only 제한으로 숏 진입 차단",
+        target_stage: null,
         supplemental_reasons,
-        auto_entry_triggered: input.autoEntryTriggered,
-        stage1_result_code:
-          stage1ResultCodeOverride ?? (
-            reject_reason === "AUTHORITY_EXPECTANCY_SOFT_PASS"
-              ? "STAGE1_SOFT_EXPECTANCY_PASS"
-              : execution_state === "STAGE1_EXEC_PENDING"
-                ? "STAGE1_EXEC_PENDING"
-                : gateReason === "range_wait_recheck_soft_pass_candidate"
-                  ? "STAGE1_SOFT_FILTERED"
-                  : gateReason === "range_upper_long_candidate_preserved_despite_weak_reversal"
-                    ? "STAGE1_PENDING_RECHECK"
-                    : costWarningStage1
-                      ? "STAGE1_COST_WARNING"
-                      : "STAGE1_ENTERED"
-          ),
+        stage1_result_code: "STAGE1_BLOCKED_RISK"
+      },
+      { intentSide, executorDecision, aiGatePassed, adaptiveOk: false, adaptiveDetail: adaptiveDetailOut, adaptiveResult: null }
+    );
+  }
+
+  const rangeSoftPassSizeMult =
+    gateReason === "range_wait_recheck_soft_pass_candidate" ? 0.45 : 1.0;
+
+  const initialEntryQty = (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult * rangeSoftPassSizeMult) / sn!.lastPrice;
+  if (initialEntryQty <= 0) {
+    console.log("[ORDER_BUILD_ZERO_QTY_PROOF]", {
+      authority_decision: authority.decision,
+      authority_source: authority.source,
+      authority_side: authority.side,
+      authority_size_usd: authority.sizeUsd,
+      dynamic_size_mult: dynamicSizeMult,
+      range_soft_pass_size_mult: rangeSoftPassSizeMult,
+      last_price: sn?.lastPrice ?? null,
+      initial_entry_qty: initialEntryQty,
+      reject_reason: "ORDER_BUILD_FAIL"
+    });
+
+    reject_reason = "ORDER_BUILD_FAIL";
+    final_decision = "REJECT";
+    supplemental_reasons.push("ZERO_QTY_FAIL");
+    return ret(
+      {
+        reject_reason: "ORDER_BUILD_FAIL",
+        final_decision: "REJECT",
+        execution_state: "ORDER_BUILD_FAIL",
+        ai_decision: "APPROVE",
+        adaptive_decision: "REJECT",
+        guidance: "진입 수량 0",
+        target_stage: null,
+        supplemental_reasons,
+        stage1_result_code: "STAGE1_BLOCKED_DATA",
         required_move_pct,
-        shortfall_pct,
-        stage1_size_multiplier_final: stage1SizeMultFinal,
-        expected_move_usd: expectedMoveUsd,
-        required_cost_usd: requiredCostUsd,
-        shortfall_usd: shortfallUsd,
-        fee_drag_filter_applied,
-        fee_drag_size_reduced,
-        fee_drag_blocked,
-        fee_drag_reason,
-        fee_drag_proof,
-        qty: initialEntryQty,
-        price: sn!.lastPrice,
-        stopLoss: (() => {
-          const slThresh = stopLossPctForRegime(input.regime);
-          // Protective SL: fallback to regime SL %
-          const baseSlPrice = intentSide === "long"
-            ? sn!.lastPrice * (1 + slThresh) // slThresh is negative
-            : sn!.lastPrice * (1 - slThresh);
-
-          // ATR-based SL if available (2.5 * ATR)
-          if (atr_pct && atr_pct > 0) {
-            const atrSlDist = sn!.lastPrice * atr_pct * 2.5;
-            const atrSlPrice = intentSide === "long"
-              ? sn!.lastPrice - atrSlDist
-              : sn!.lastPrice + atrSlDist;
-
-            // Use the more conservative one (closer to price for protection)
-            return intentSide === "long"
-              ? Math.max(baseSlPrice, atrSlPrice)
-              : Math.min(baseSlPrice, atrSlPrice);
-          }
-          return baseSlPrice;
-        })(),
-        takeProfit: null,
-        riskReward: rr,
-        atr_pct,
-        tick_size: null,
-        qty_step: null,
-        min_qty: null,
-        min_notional: null,
-        sizeUsd: adaptive.sizeUsd,
-        original_signal_state: signal_state as any,
-        final_signal_state: signal_state as any,
-        range_bidirectional_applied: range_bidirectional_applied,
-        range_short_allowed: range_short_allowed,
-        range_short_allowed_reason: range_short_allowed_reason,
-        range_upper_edge_near: range_upper_edge_near,
-        range_center_wait: range_center_wait,
-        range_final_selected_side: intentSide,
-        range_reversal_zone: range_reversal_zone,
-        range_reversal_short_eval_started: range_reversal_short_eval_started,
-        range_reversal_long_exit_triggered: range_reversal_long_exit_triggered,
-        range_reversal_short_entry_allowed: range_reversal_short_entry_allowed,
-        range_reversal_short_entry_block_reason: range_reversal_short_entry_block_reason,
-        range_reversal_immediate_switch_applied: range_reversal_immediate_switch_applied,
-        range_reversal_immediate_switch_reason: range_reversal_immediate_switch_reason
+        shortfall_pct
       },
       {
         intentSide,
         executorDecision,
-        adaptiveOk: true,
+        adaptiveOk: false,
         adaptiveDetail: adaptiveDetailOut,
-        adaptiveResult: adaptive as any,
+        adaptiveResult: adaptiveOk ? (adaptive as any) : null,
         aiGatePassed: true
       }
     );
   }
 
-  // Global Fallback
+  final_decision = "ENTER";
+  reject_reason = null;
+  execution_state = "PAPER_READY";
+
+  const forceEnterAdaptive =
+    adaptive?.detail["stage1_adaptive_force_enter"] ?? adaptive?.detail["stage1_adaptive_soft_explore"];
+  if (forceEnterAdaptive === "direction_none") supplemental_reasons.push("STAGE1_EXPLORE_ADAPTIVE_DIRECTION_NONE");
+  if (forceEnterAdaptive === "ema_flat") supplemental_reasons.push("STAGE1_EXPLORE_ADAPTIVE_EMA_FLAT");
+
+  // Round 4 & 5: Stage 1 Execution Pending prioritize
+  if (input.currentStage === 0 && input.autoEntryTriggered) {
+    execution_state = "STAGE1_EXEC_PENDING";
+    guidanceOut = "Stage 1 실행 대기 (검토 조건 유지)";
+  }
+
+
   return ret(
     {
-      execution_state: "IDLE",
-      final_decision: "SKIP",
-      reject_reason: "SIGNAL_NONE",
-      guidance: "Fallback: No decision path matched",
+      final_decision: "ENTER",
+      reject_reason: null,
+      ai_decision: "APPROVE",
+      adaptive_decision: "OK",
+      guidance: executorDecision?.guidance ?? null,
+      next_action: executorDecision?.next_action ?? null,
+      invalidate_condition: executorDecision?.invalidate_condition ?? null,
+      risk_note: executorDecision?.risk_note ?? null,
+      watch_zone: executorDecision?.watch_zone ?? null,
+      entry_progress: executorDecision?.entry_progress ?? null,
+      target_stage: executorDecision?.target_stage ?? null,
       supplemental_reasons,
-      stage1_result_code: "STAGE1_BLOCKED_SIGNAL",
+      auto_entry_triggered: input.autoEntryTriggered,
+      stage1_result_code:
+        stage1ResultCodeOverride ?? (
+          reject_reason === "AUTHORITY_EXPECTANCY_SOFT_PASS"
+            ? "STAGE1_SOFT_EXPECTANCY_PASS"
+            : execution_state === "STAGE1_EXEC_PENDING"
+              ? "STAGE1_EXEC_PENDING"
+              : gateReason === "range_wait_recheck_soft_pass_candidate"
+                ? "STAGE1_SOFT_FILTERED"
+                : gateReason === "range_upper_long_candidate_preserved_despite_weak_reversal"
+                  ? "STAGE1_PENDING_RECHECK"
+                  : costWarningStage1
+                    ? "STAGE1_COST_WARNING"
+                    : "STAGE1_ENTERED"
+        ),
       required_move_pct,
-      shortfall_pct
+      shortfall_pct,
+      stage1_size_multiplier_final: stage1SizeMultFinal,
+      expected_move_usd: expectedMoveUsd,
+      required_cost_usd: requiredCostUsd,
+      shortfall_usd: shortfallUsd,
+      fee_drag_filter_applied,
+      fee_drag_size_reduced,
+      fee_drag_blocked,
+      fee_drag_reason,
+      fee_drag_proof,
+      qty: initialEntryQty,
+      price: sn!.lastPrice,
+      stopLoss: (() => {
+        const slThresh = stopLossPctForRegime(input.regime);
+        // Protective SL: fallback to regime SL %
+        const baseSlPrice = intentSide === "long"
+          ? sn!.lastPrice * (1 + slThresh) // slThresh is negative
+          : sn!.lastPrice * (1 - slThresh);
+
+        // ATR-based SL if available (2.5 * ATR)
+        if (atr_pct && atr_pct > 0) {
+          const atrSlDist = sn!.lastPrice * atr_pct * 2.5;
+          const atrSlPrice = intentSide === "long"
+            ? sn!.lastPrice - atrSlDist
+            : sn!.lastPrice + atrSlDist;
+
+          // Use the more conservative one (closer to price for protection)
+          return intentSide === "long"
+            ? Math.max(baseSlPrice, atrSlPrice)
+            : Math.min(baseSlPrice, atrSlPrice);
+        }
+        return baseSlPrice;
+      })(),
+      takeProfit: null,
+      riskReward: rr,
+      atr_pct,
+      tick_size: null,
+      qty_step: null,
+      min_qty: null,
+      min_notional: null,
+      sizeUsd: (adaptive?.ok ? adaptive.sizeUsd : 0),
+      original_signal_state: signal_state as any,
+      final_signal_state: signal_state as any,
+      range_bidirectional_applied: range_bidirectional_applied,
+      range_short_allowed: range_short_allowed,
+      range_short_allowed_reason: range_short_allowed_reason,
+      range_upper_edge_near: range_upper_edge_near,
+      range_center_wait: range_center_wait,
+      range_final_selected_side: intentSide,
+      range_reversal_zone: range_reversal_zone,
+      range_reversal_short_eval_started: range_reversal_short_eval_started,
+      range_reversal_long_exit_triggered: range_reversal_long_exit_triggered,
+      range_reversal_short_entry_allowed: range_reversal_short_entry_allowed,
+      range_reversal_short_entry_block_reason: range_reversal_short_entry_block_reason,
+      range_reversal_immediate_switch_applied: range_reversal_immediate_switch_applied,
+      range_reversal_immediate_switch_reason: range_reversal_immediate_switch_reason
     },
     {
       intentSide,
       executorDecision,
-      adaptiveOk: false,
-      adaptiveDetail: null,
-      adaptiveResult: null,
-      aiGatePassed: false
+      adaptiveOk: true,
+      adaptiveDetail: adaptiveDetailOut,
+      adaptiveResult: (adaptiveOk && adaptive) ? (adaptive as any) : null,
+      aiGatePassed: true
     }
   );
 }
