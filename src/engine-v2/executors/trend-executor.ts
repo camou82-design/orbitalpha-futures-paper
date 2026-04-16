@@ -1,4 +1,4 @@
-import { EngineV2Input, ExecutorOutput } from "../types";
+import { EngineV2Input, ExecutorOutput, EngineV2SignalState, EngineV2Side } from "../types";
 
 /**
  * Tier 4: Trend Executor (Refined)
@@ -9,8 +9,8 @@ export function executeTrendRegime(input: EngineV2Input): ExecutorOutput {
     const emaGap = sn.emaGap ?? 0;
     const trendWeakness = sn.trendWeaknessScore ?? 0;
 
-    let signal: ExecutorOutput["signal"] = "NONE";
-    let side: ExecutorOutput["side"] = "none";
+    let signal: EngineV2SignalState = "NONE";
+    let side: EngineV2Side = "none";
     let reason = "Waiting for trend alignment";
 
     if (emaGap >= 0.001 && trendWeakness < 0.3) {
@@ -21,15 +21,22 @@ export function executeTrendRegime(input: EngineV2Input): ExecutorOutput {
         signal = "SHORT_CANDIDATE";
         side = "short";
         reason = "Strong downward momentum alignment";
+    } else if (Math.abs(emaGap) > 0 && trendWeakness < 0.5) {
+        signal = "WAIT_RECHECK";
+        side = "none";
+        reason = "Momentum forming, awaiting confirmation";
     }
 
     return {
-        signal: "NONE",
-        side: "none",
-        reason: "TREND_NOT_IMPLEMENTED",
-        baseSizeIntent: 0,
-        recheckSuggested: false,
-        isAddOnEligible: false,
-        metadata: {}
+        signal,
+        side,
+        reason,
+        baseSizeIntent: signal !== "NONE" ? 1 : 0,
+        recheckSuggested: signal === "WAIT_RECHECK",
+        isAddOnEligible: true,
+        metadata: {
+            emaGap,
+            trendWeakness
+        }
     };
 }

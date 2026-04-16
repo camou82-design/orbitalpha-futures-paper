@@ -25,11 +25,11 @@ export interface LegacyDecisionResult {
         executor?: string;
         expected_move?: number;
         risk_state?: string;
-        detail?: any;
+        detail?: Record<string, unknown> | null;
     } | null;
     intentSide: EngineV2Side;
     adaptiveOk: boolean;
-    adaptiveDetail?: any;
+    adaptiveDetail?: Record<string, unknown> | null;
 }
 
 export interface EngineV2Position {
@@ -198,7 +198,7 @@ export interface V2BridgeLegacyDecision {
     executorLabel: string;
     intentSide: string | null;
     adaptiveOk: boolean;
-    adaptiveDetail?: any;
+    adaptiveDetail?: Record<string, unknown> | null;
 }
 
 export interface V2BridgeConfig {

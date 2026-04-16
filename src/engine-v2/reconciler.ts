@@ -186,7 +186,7 @@ export function resolveSymbolDecisionEnvelope(
             executor: legacyBridge.executorLabel,
             expected_move: 0,
             risk_state: "OK",
-            detail: null
+            detail: {},
         } : null,
         intentSide: legacyBridge.intentSide as any,
         adaptiveOk: legacyBridge.adaptiveOk,
