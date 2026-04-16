@@ -101,6 +101,8 @@ export type SymbolSnapshotLike = Readonly<{
   regimeExitRisk?: number;
   /** 하이웨이: 박스 붕괴 방향 */
   boxBreakSide?: "upper" | "lower" | "none";
+  signal_strength?: "strong" | "ok" | "weak";
+  trendOk?: boolean;
   /** 하이웨이: 현재 레짐 상태 */
   regimeStateDiag?: PaperRegimeState;
   /** Raw candles fetched from Bybit */
@@ -523,9 +525,12 @@ function evaluateRangeStage0Signal(
         };
       }
       // PART 1: upper zone + weak tier long candidate -> No longer immediate NONE. Downgrade to WAIT_RECHECK for strong signals.
+      const hasStrongBaseSignalForUpperPreserve = (sn.signal_strength === "strong" || sn.trendOk === true) && sn.signal === "paper_long_candidate";
       return {
         signal: "RANGE_SIGNAL_WAIT_RECHECK",
-        reason: "range_upper_recheck_weak_tier",
+        reason: hasStrongBaseSignalForUpperPreserve
+          ? "range_upper_long_candidate_preserved_despite_weak_reversal"
+          : "range_upper_recheck_weak_tier",
         side: null,
         interpretation
       };
@@ -567,13 +572,7 @@ function evaluateRangeStage0Signal(
           interpretation
         };
       }
-      // PART 1: lower zone + weak tier short candidate -> Downgrade to WAIT_RECHECK.
-      return {
-        signal: "RANGE_SIGNAL_WAIT_RECHECK",
-        reason: "range_lower_recheck_weak_tier",
-        side: null,
-        interpretation
-      };
+      return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_suppress_short_candidate_weak_tier", side: null, interpretation };
     }
     return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_long_structure_not_ready", side: null, interpretation };
   }
@@ -2156,10 +2155,20 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       gateReason = rangeSignal.reason;
     } else if (rangeSignal.signal === "RANGE_SIGNAL_WAIT_RECHECK") {
       // PART 2: Soft pass if no position and strong signal.
-      const isStrongCandidate = sn.candidateStrength === "strong" || (sn.qualityScore ?? 0) >= STRONG_SCORE;
       const noOpenPos = !input.openPositionSide || input.openPositionSide === null;
+      const hasBaseCandidate =
+        sn.signal === "paper_long_candidate" || sn.signal === "paper_short_candidate";
+      const hasStrongBaseSignal =
+        sn.signal_strength === "strong" || sn.trendOk === true;
 
-      if (noOpenPos && isStrongCandidate) {
+      const hardBlockedForSoftPass =
+        riskEngineBlocked === true ||
+        reentryBlocked === true ||
+        (blockedRegimeActive &&
+          (!blockedRegimeLossStreakSuspend || !range_risk_limit_relax_active) &&
+          !(freshReentryCandidate && blockedRegimeLossStreakSuspend));
+
+      if (noOpenPos && hasBaseCandidate && hasStrongBaseSignal && !hardBlockedForSoftPass && (input.risk?.crashState === "NONE" || !input.risk?.crashState)) {
         gateResult = "RANGE_GATE_PASS";
         gateReason = "range_wait_recheck_soft_pass_candidate";
         supplemental_reasons.push("RANGE_WAIT_RECHECK_SOFT_PASS");
@@ -3702,7 +3711,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       );
     }
 
-    const initialEntryQty = (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult) / sn!.lastPrice;
+    const rangeSoftPassSizeMult =
+      gateReason === "range_wait_recheck_soft_pass_candidate" ? 0.45 : 1.0;
+
+    const initialEntryQty = (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult * rangeSoftPassSizeMult) / sn!.lastPrice;
     if (initialEntryQty <= 0) {
       reject_reason = "ORDER_BUILD_FAIL";
       final_decision = "REJECT";
