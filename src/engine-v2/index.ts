@@ -56,22 +56,24 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let finalDecision: EngineV2FinalDecision = "SKIP";
 
     const isBlocked = riskSizing.isBlocked;
-    const invalidSignalForEnter = execution.signal === "NONE" || execution.signal === "WAIT_RECHECK";
-    const invalidSideForEnter = execution.side === "none";
+    const isWait = execution.signal === "WAIT_RECHECK";
+    const invalidSignal = execution.signal === "NONE";
+    const invalidSide = execution.side === "none";
     const invalidSize = riskSizing.finalSizeUsd <= 0;
 
-    /**
-     * Standard Execution Authority:
-     * ENTER is ONLY allowed if:
-     * 1. Signal is valid (LONG/SHORT_CANDIDATE)
-     * 2. Side is valid (long/short)
-     * 3. Risk sizing did not block the trade
-     * 4. Final size is greater than 0
-     */
-    if (!isBlocked && !invalidSignalForEnter && !invalidSideForEnter && !invalidSize) {
-        finalDecision = "ENTER";
-    } else {
+    if (isBlocked) {
+        // Distinguish between REJECT (soft) and DISABLED (hard)
+        if (riskSizing.blockReason?.includes("MAX_POSITIONS") || riskSizing.blockReason?.includes("COOLDOWN")) {
+            finalDecision = "REJECT";
+        } else {
+            finalDecision = "DISABLED";
+        }
+    } else if (isWait) {
+        finalDecision = "HOLD";
+    } else if (invalidSignal || invalidSide || invalidSize) {
         finalDecision = "SKIP";
+    } else {
+        finalDecision = "ENTER";
     }
 
     // Tier 5: Explanation

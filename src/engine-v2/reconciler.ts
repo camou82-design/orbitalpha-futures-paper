@@ -13,7 +13,6 @@ import {
     LegacyConfigAdapter
 } from "./types";
 import { adaptV2Input, runEngineV2 } from "./index";
-import { PaperOpenPositionRecord } from "../models/types";
 
 /** 
  * LEGACY NORMALIZATION HELPERS (Phase 4 Independence)
@@ -149,78 +148,103 @@ export function buildV2ShadowParityPayload(
 export function resolveSymbolDecisionEnvelope(
     input: V2BridgeInput
 ): SymbolDecisionEnvelope {
-    const { symbol, fetchedAt, snapshot, legacyResult, config, positions, recentLossStreakByMode, v2Mode } = input;
+    const { symbol, fetchedAt, snapshot, legacy: legacyBridge, config, state, v2Mode } = input;
 
-    // 1. Snapshot Adapter (Standard 4: Zero-any mapping)
+    // 1. Snapshot Mapping (Bridge DTO -> Internal Adapter)
     const snapshotAdapter: LegacySnapshotAdapter = {
-        ...snapshot,
         lastPrice: snapshot.lastPrice,
         latestCandleClose: snapshot.latestCandleClose,
         boxHigh: snapshot.boxHigh,
         boxLow: snapshot.boxLow,
-        boxPosDiag: snapshot.boxPos ?? 0.5,
-        rangeConfidenceDiag: snapshot.rangeConfidence ?? 0.5,
+        boxPosDiag: snapshot.boxPos,
+        rangeConfidenceDiag: snapshot.rangeConfidence,
         ema20: snapshot.ema20,
-        emaGapDiag: snapshot.emaGap ?? 0,
-        volatilityProxyDiag: snapshot.atr ?? 0,
-        signal: snapshot.signal,
+        emaGapDiag: snapshot.emaGap,
+        volatilityProxyDiag: snapshot.atr,
+        signal: snapshot.signal as any,
         qualityScore: snapshot.qualityScore
     };
 
-    // 2. Config Adapter
+    // 2. Config Mapping
     const configAdapter: LegacyConfigAdapter = {
-        baseSizeUsd: config.paperBaseSizeUsd,
-        paperMaxOpenPositions: config.paperMaxOpenPositions,
-        paperReentryCooldownMs: config.paperReentryCooldownMs
+        baseSizeUsd: config.baseSizeUsd,
+        paperMaxOpenPositions: config.maxOpenPositions,
+        paperReentryCooldownMs: config.reentryCooldownMs
     };
 
-    // 3. State Adapter
-    const stateAdapter = {
-        currentPositions: positions.map((p: PaperOpenPositionRecord) => ({
-            symbol: p.symbol,
-            side: String(p.side).toUpperCase() as "LONG" | "SHORT",
-            entryPrice: p.entryPrice,
-            sizeUsd: p.sizeUsd,
-            entryStage: p.entryStage ?? 1,
-            pnlPct: 0
-        })),
-        globalRiskScore: 0.5,
-        lossStreaks: recentLossStreakByMode
-    };
-
-    // 4. Legacy Result Adapter
+    // 3. Legacy Decision Mapping
     const legacyDecision: LegacyDecisionResult = {
         decision: {
-            regime_state: String(legacyResult.decision.regime ?? "UNKNOWN"),
-            final_decision: legacyResult.decision.final_decision,
-            reject_reason: legacyResult.decision.reject_reason,
-            required_cost_usd: legacyResult.decision.required_cost_usd ?? 0
+            regime_state: legacyBridge.regime,
+            final_decision: legacyBridge.finalDecision,
+            reject_reason: legacyBridge.rejectReason,
+            required_cost_usd: legacyBridge.requiredCostUsd
         },
-        executorDecision: legacyResult.executorDecision ? {
-            entry_allowed: legacyResult.executorDecision.entry_allowed,
-            total_cost: legacyResult.executorDecision.total_cost ?? 0,
-            executor: legacyResult.executorDecision.executor,
-            expected_move: legacyResult.executorDecision.expected_move ?? 0,
-            risk_state: legacyResult.executorDecision.risk_state,
-            detail: legacyResult.executorDecision.detail
+        executorDecision: legacyBridge.entryAllowed ? {
+            entry_allowed: true,
+            total_cost: legacyBridge.requiredCostUsd,
+            executor: legacyBridge.executorLabel,
+            expected_move: 0,
+            risk_state: "OK",
+            detail: null
         } : null,
-        intentSide: (legacyResult.intentSide === "long" || legacyResult.intentSide === "short" ? legacyResult.intentSide : null),
-        adaptiveOk: legacyResult.adaptiveOk,
-        adaptiveDetail: legacyResult.adaptiveDetail
+        intentSide: legacyBridge.intentSide as any,
+        adaptiveOk: legacyBridge.adaptiveOk,
+        adaptiveDetail: legacyBridge.adaptiveDetail
     };
 
+    // 4. Execution
     const v2Input = adaptV2Input(
         symbol,
         fetchedAt,
         snapshotAdapter,
         configAdapter,
-        stateAdapter,
+        state,
         buildV2LegacyAdapter(legacyDecision)
     );
 
     const v2Res = runEngineV2(v2Input);
     const selector = reconcileV2Decision(legacyDecision, v2Res.decision, v2Mode);
-    const authority = deriveExecutionAuthority(selector);
 
-    return { legacy: legacyDecision, selector, authority };
+    // 5. Adoption Reason Refinement (Phase 5)
+    let adoption_reason = selector.adopted_result.adoption_reason;
+    const v1_dec = legacyDecision.decision.final_decision;
+    const v2_dec = v2Res.decision.decision;
+
+    if (v2Mode === "engine_v2") {
+        adoption_reason = "v2_mode_forced";
+    } else if (v2Mode === "legacy") {
+        adoption_reason = "legacy_mode_forced";
+    } else if (v2Mode === "shadow_v2") {
+        if (v1_dec === v2_dec) {
+            adoption_reason = v1_dec === "ENTER" ? "parity_match_v2" : "parity_match_v1";
+        } else {
+            if (v1_dec === "ENTER" && v2_dec !== "ENTER") adoption_reason = "v2_blocked_v1_open";
+            else if (v1_dec !== "ENTER" && v2_dec === "ENTER") adoption_reason = "v2_open_v1_blocked";
+            else adoption_reason = "shadow_compare_only";
+        }
+    }
+
+    const refinedSelector: EngineV2SelectorResult = {
+        ...selector,
+        adopted_result: {
+            ...selector.adopted_result,
+            adoption_reason
+        }
+    };
+    const authority = deriveExecutionAuthority(refinedSelector);
+
+    // 6. Comparison Metrics for Engine-State
+    return {
+        legacy: legacyDecision,
+        selector: refinedSelector,
+        authority,
+        v1_decision: v1_dec,
+        v1_side: legacyDecision.intentSide ?? "none",
+        v1_size: legacyDecision.executorDecision?.total_cost ?? 0,
+        v2_decision: v2_dec,
+        v2_side: v2Res.decision.side ?? "none",
+        v2_size: v2Res.decision.risk.finalSizeUsd,
+        selector_mismatch: v1_dec !== v2_dec
+    };
 }

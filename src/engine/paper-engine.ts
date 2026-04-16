@@ -82,6 +82,14 @@ import {
   EngineV2AdoptionOutcome,
   EngineV2FinalDecision,
   LegacyResultAdapter,
+  LegacyDecisionResult,
+  SymbolDecisionEnvelope,
+  V2BridgeInput,
+  V2BridgeSnapshot,
+  V2BridgeLegacyDecision,
+  V2BridgeConfig,
+  V2BridgeState,
+  V2BridgePosition,
   EngineV2Side,
   EntryExecutionAuthority
 } from "../engine-v2/types";
@@ -229,13 +237,6 @@ type SymbolSnapshot = Readonly<{
   reviewing_ticks?: number;
 }>;
 
-interface SymbolDecisionEnvelope {
-  legacy: EvaluatePaperSymbolEntryResult;
-  selector: EngineV2SelectorResult | null;
-  authority: EntryExecutionAuthority;
-}
-
-
 export type SymbolDiagnostic = Readonly<{
   symbol: MarketSymbol;
   endpoint: string;
@@ -244,6 +245,12 @@ export type SymbolDiagnostic = Readonly<{
   retMsg?: string;
   requestUrl: string;
 }>;
+
+type PaperEngineDecisionEnvelope = {
+  legacy: EvaluatePaperSymbolEntryResult;
+  selector: EngineV2SelectorResult | null;
+  authority: EntryExecutionAuthority;
+};
 
 function toSymbolDiagnostic(symbol: MarketSymbol, endpoint: string, d: BybitPublicDiagnostics): SymbolDiagnostic {
   return {
@@ -1049,7 +1056,7 @@ export class PaperEngine {
       this.config.paperReentryCooldownMs > 0 ? latestCloseMetaBySymbol(await this.store.readPositionsHistory()) : null;
     const regimeUnknown = btc5.length < MIN_BTC_5M_BARS_REGIME;
     const polledSymbols = this.config.symbols;
-    const decisionBySymbol = new Map<string, SymbolDecisionEnvelope>();
+    const decisionBySymbol = new Map<string, PaperEngineDecisionEnvelope>();
     for (const sym of polledSymbols) {
       const symKeyEarly = String(sym);
       const snap = snapshots.find((s) => s.symbol === sym);
@@ -1141,21 +1148,76 @@ export class PaperEngine {
 
       /** Engine-V2 Execution Path (Standard 2: Selector Bridge) */
       const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as EngineV2OpMode) || "legacy";
+
+      // Assemble Bridge DTOs (Phase 5 Autonomous Boundary)
+      const snapshotBridge: V2BridgeSnapshot = {
+        lastPrice: snap.lastPrice,
+        latestCandleClose: snap.latestCandleClose,
+        boxHigh: snap.boxHigh ?? 0,
+        boxLow: snap.boxLow ?? 0,
+        boxPos: snap.boxPos ?? 0.5,
+        rangeConfidence: snap.rangeConfidence ?? 0.5,
+        ema20: snap.ema20 ?? 0,
+        emaGap: snap.emaGap ?? 0,
+        atr: snap.atr ?? 0,
+        signal: snap.signal ?? "NONE",
+        qualityScore: snap.qualityScore ?? 0,
+      };
+
+      const legacyBridge: V2BridgeLegacyDecision = {
+        regime: String(res.decision.regime ?? "UNKNOWN"),
+        finalDecision: res.decision.final_decision,
+        rejectReason: res.decision.reject_reason,
+        requiredCostUsd: res.decision.required_cost_usd ?? 0,
+        entryAllowed: res.executorDecision?.entry_allowed ?? false,
+        executorLabel: res.executorDecision?.executor ?? "unknown",
+        intentSide: (res.intentSide === "long" || res.intentSide === "short" ? res.intentSide : null),
+        adaptiveOk: res.adaptiveOk,
+        adaptiveDetail: res.adaptiveDetail
+      };
+
+      const configBridge: V2BridgeConfig = {
+        baseSizeUsd: this.config.paperBaseSizeUsd,
+        maxOpenPositions: this.config.paperMaxOpenPositions,
+        reentryCooldownMs: this.config.paperReentryCooldownMs
+      };
+
+      const stateBridge: V2BridgeState = {
+        currentPositions: opensAfterClose.map(p => ({
+          symbol: p.symbol as MarketSymbol,
+          side: String(p.side).toUpperCase() as "LONG" | "SHORT",
+          entryPrice: p.entryPrice,
+          sizeUsd: p.sizeUsd,
+          entryStage: p.entryStage ?? 1
+        })),
+        globalRiskScore: 0.5,
+        lossStreaks: this.lastRisk?.recentLossStreakByMode ?? {}
+      };
+
       const envelope = resolveSymbolDecisionEnvelope({
         symbol: sym,
         fetchedAt,
-        snapshot: snap,
-        legacyResult: res,
-        config: this.config,
-        positions: opensAfterClose,
-        recentLossStreakByMode: this.lastRisk?.recentLossStreakByMode ?? {},
+        snapshot: snapshotBridge,
+        legacy: legacyBridge,
+        config: configBridge,
+        state: stateBridge,
         v2Mode
       });
+
       const authority = envelope.authority;
       const selectorResult = envelope.selector;
 
       if (selectorResult) {
-        await this.store.appendJsonlLine("reports/v2_shadow_parity.jsonl", buildV2ShadowParityPayload(String(sym), fetchedAt, selectorResult));
+        await this.store.appendJsonlLine("reports/v2_shadow_parity.jsonl", {
+          ...buildV2ShadowParityPayload(String(sym), fetchedAt, selectorResult),
+          v1_decision: envelope.v1_decision,
+          v1_side: envelope.v1_side,
+          v1_size: envelope.v1_size,
+          v2_decision: envelope.v2_decision,
+          v2_side: envelope.v2_side,
+          v2_size: envelope.v2_size,
+          selector_mismatch: envelope.selector_mismatch
+        });
       }
       decisionBySymbol.set(symKeyEarly, { legacy: res, selector: selectorResult, authority });
     } // End of sym loop
@@ -1279,7 +1341,7 @@ export class PaperEngine {
 
   private async emitPipelineEventsFromDecision(
     first: SymbolSnapshot,
-    envelope: SymbolDecisionEnvelope,
+    envelope: PaperEngineDecisionEnvelope,
     nowTs: number,
     entryStage = 0
   ): Promise<void> {
@@ -1758,7 +1820,7 @@ export class PaperEngine {
     filePath: string | undefined;
     marketMode: MarketModeSelectorOutput;
     riskExposure: RiskExposureOutput;
-    decisionBySymbol: ReadonlyMap<string, SymbolDecisionEnvelope>;
+    decisionBySymbol: ReadonlyMap<string, PaperEngineDecisionEnvelope>;
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
 
@@ -2975,7 +3037,7 @@ export class PaperEngine {
     latestPath: string | undefined;
     metaPath: string | undefined;
     filePath: string | undefined;
-    decisionBySymbol: ReadonlyMap<string, SymbolDecisionEnvelope>;
+    decisionBySymbol: ReadonlyMap<string, PaperEngineDecisionEnvelope>;
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
 
@@ -3101,7 +3163,7 @@ export class PaperEngine {
 
       if (next.length >= max) {
         if (authority.decision === "ENTER") {
-          const limitBlockedEnvelope: SymbolDecisionEnvelope = {
+          const limitBlockedEnvelope: PaperEngineDecisionEnvelope = {
             ...envelope,
             legacy: {
               ...res,
@@ -3721,7 +3783,7 @@ export class PaperEngine {
 
   private async tryPaperPositionScaleIn(
     existing: PaperOpenPositionRecord,
-    envelope: SymbolDecisionEnvelope,
+    envelope: PaperEngineDecisionEnvelope,
     first: SymbolSnapshot,
     nowTs: number
   ): Promise<PaperOpenPositionRecord | null> {
@@ -4270,7 +4332,7 @@ export class PaperEngine {
  * ENGINE STATE SUMMARY HELPER (Phase 2 Extraction)
  * Promotes authority-first status for terminal/dashboard state.
  */
-function buildEngineStateSymbolDecision(envelope: SymbolDecisionEnvelope): Record<string, unknown> {
+function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): Record<string, unknown> {
   const { legacy, authority, selector } = envelope;
   return {
     decision: legacy.decision.final_decision,

@@ -1,5 +1,4 @@
-import { MarketSymbol, PositionSide, EngineConfig, PaperOpenPositionRecord } from "../../models/types";
-import { EvaluatePaperSymbolEntryResult, SymbolSnapshotLike } from "../../engine/paper-symbol-decision";
+import { MarketSymbol, PositionSide } from "../../models/types";
 
 export type EngineV2OpMode = "legacy" | "shadow_v2" | "engine_v2";
 export type EngineV2Regime = "RANGE" | "TREND" | "TRANSITION" | "NO_TRADE";
@@ -172,14 +171,63 @@ export interface EngineV2Decision {
  * Bridge Input (Phase 4 Strict Decoupling) 
  * Defines all data required for reconciliation without exposing PaperEngine internals.
  */
+/** 
+ * V2 INDEPENDENT BRIDGE DTOs (Phase 5)
+ * These interfaces decouple engine-v2 from the main paper-engine types.
+ */
+export interface V2BridgeSnapshot {
+    lastPrice: number;
+    latestCandleClose: number;
+    boxHigh: number;
+    boxLow: number;
+    boxPos: number;
+    rangeConfidence: number;
+    ema20: number;
+    emaGap: number;
+    atr: number;
+    signal: string;
+    qualityScore: number;
+}
+
+export interface V2BridgeLegacyDecision {
+    regime: string;
+    finalDecision: string;
+    rejectReason: string | null;
+    requiredCostUsd: number;
+    entryAllowed: boolean;
+    executorLabel: string;
+    intentSide: string | null;
+    adaptiveOk: boolean;
+    adaptiveDetail?: any;
+}
+
+export interface V2BridgeConfig {
+    baseSizeUsd: number;
+    maxOpenPositions: number;
+    reentryCooldownMs: number;
+}
+
+export interface V2BridgePosition {
+    symbol: MarketSymbol;
+    side: "LONG" | "SHORT";
+    entryPrice: number;
+    sizeUsd: number;
+    entryStage: number;
+}
+
+export interface V2BridgeState {
+    currentPositions: V2BridgePosition[];
+    globalRiskScore: number;
+    lossStreaks: Record<string, number>;
+}
+
 export interface V2BridgeInput {
     symbol: MarketSymbol;
     fetchedAt: number;
-    snapshot: SymbolSnapshotLike;
-    legacyResult: EvaluatePaperSymbolEntryResult;
-    config: EngineConfig;
-    positions: PaperOpenPositionRecord[];
-    recentLossStreakByMode: Record<string, number>;
+    snapshot: V2BridgeSnapshot;
+    legacy: V2BridgeLegacyDecision;
+    config: V2BridgeConfig;
+    state: V2BridgeState;
     v2Mode: EngineV2OpMode;
 }
 
@@ -212,6 +260,14 @@ export interface SymbolDecisionEnvelope {
     legacy: LegacyDecisionResult;
     selector: EngineV2SelectorResult | null;
     authority: EntryExecutionAuthority;
+    // V1/V2 Comparison Metrics (Phase 5 Summary)
+    v1_decision?: string;
+    v1_side?: string;
+    v1_size?: number;
+    v2_decision?: string;
+    v2_side?: string;
+    v2_size?: number;
+    selector_mismatch?: boolean;
 }
 
 /** Tier 1: Market Judgment */
