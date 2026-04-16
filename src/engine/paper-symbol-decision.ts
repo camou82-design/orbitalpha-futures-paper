@@ -1257,6 +1257,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const sn = input.snapshot;
   const sym = sn?.symbol ?? ("UNKNOWN" as MarketSymbol);
   const authority = input.authority || internalDiscoverV2Authority(input);
+  const v2AuthorityOwnsExecution =
+    authority.decision === "ENTER" &&
+    authority.source === "v2" &&
+    (authority.side === "long" || authority.side === "short") &&
+    (authority.sizeUsd ?? 0) > 0;
 
   let em: number | null = null;
 
@@ -2015,7 +2020,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const hasRangeContextMetrics = (sn.rangeConfidence ?? 0) >= 0.3 && (sn.boxCohesion01 ?? 0) >= 0.25;
   isRangeFallbackActive = contextRangeDiag && hasRangeContextMetrics && input.regime !== "NO_TRADE";
 
-  const useRangeStage0Engine = (input.regime === "RANGE" || isRangeFallbackActive) && input.currentStage === 0;
+  const useRangeStage0Engine =
+    !v2AuthorityOwnsExecution &&
+    (input.regime === "RANGE" || isRangeFallbackActive) &&
+    input.currentStage === 0;
 
   if (input.regime === "RANGE") {
     console.log("STAGE_ROUTING_BOTTLENECK_PROOF", {
@@ -2023,8 +2031,17 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       currentStage: input.currentStage,
       hasOpenPosition: input.hasOpenPosition,
       isRangeFallbackActive,
+      v2AuthorityOwnsExecution,
+      authority_decision: authority.decision,
+      authority_source: authority.source,
+      authority_side: authority.side,
+      authority_size_usd: authority.sizeUsd,
       useRangeStage0Engine,
-      classify: useRangeStage0Engine ? "range_stage0_eligible" : "range_stage0_bypassed_by_stage"
+      classify: v2AuthorityOwnsExecution
+        ? "range_stage0_blocked_by_v2_authority"
+        : useRangeStage0Engine
+          ? "range_stage0_eligible"
+          : "range_stage0_bypassed_by_stage"
     });
   }
 
