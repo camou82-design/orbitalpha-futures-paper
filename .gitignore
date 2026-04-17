@@ -4,6 +4,12 @@ data/
 .env
 .env.*
 !.env.example
-*.log
 .DS_Store
 Thumbs.db
+
+# Scratch / Temp Files
+tmp/
+*.log
+tsc_output*.txt
+final_*.txt
+brace_counter*.js

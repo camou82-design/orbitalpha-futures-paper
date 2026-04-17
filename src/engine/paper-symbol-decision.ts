@@ -788,10 +788,6 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   adaptiveMode: FuturesMarketMode;
   adaptiveDetail: Record<string, unknown>;
   now: number;
-  directionalTrendCooldownLongBySymbol: ReadonlyMap<string, number>;
-  directionalTrendCooldownShortBySymbol: ReadonlyMap<string, number>;
-  directionalTrendAddOnCooldownLongBySymbol: ReadonlyMap<string, number>;
-  directionalTrendAddOnCooldownShortBySymbol: ReadonlyMap<string, number>;
   rangeCooldownUntilByKey: ReadonlyMap<string, number>;
   trendCooldownUntilBySymbol: ReadonlyMap<string, number>;
   lastCloseMetaBySymbol: ReadonlyMap<
@@ -815,8 +811,6 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   rangeReopenCooldownBypass?: boolean;
   /** V2 Engine Authority — expectancy bypass 결정용. */
   authority?: EntryExecutionAuthority;
-  /** Symmetric Directional Routing Override */
-  directionalOverride: any;
 }>;
 
 export type EvaluatePaperSymbolEntryResult = Readonly<{
