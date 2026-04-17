@@ -116,6 +116,41 @@ export type SymbolSnapshotLike = Readonly<{
   highwayEntryTf?: string;
 }>;
 
+export function paperTradeBlockDecompositionPayload(
+  symbol: MarketSymbol,
+  resNull: EvaluatePaperSymbolEntryResult,
+  fields: {
+    nowTick: number;
+    regime: string;
+    regimeUnknown: boolean;
+    isAmbiguous: boolean;
+    maxPositionsReached: boolean;
+    paperMaxOpenPositions: number;
+    openPositionsTotal: number;
+    hasOpenForSymbol: boolean;
+    dataReady: boolean;
+    directionalShockState?: string;
+  }
+): Record<string, unknown> {
+  const p = resNull.decision;
+  return {
+    symbol: String(symbol),
+    final_decision: p.final_decision,
+    reject_reason: p.reject_reason,
+    reject_reason_original: p.reject_reason_original,
+    now: fields.nowTick,
+    regime: fields.regime,
+    regimeUnknown: fields.regimeUnknown,
+    isAmbiguous: fields.isAmbiguous,
+    maxPositionsReached: fields.maxPositionsReached,
+    paperMaxOpenPositions: fields.paperMaxOpenPositions,
+    openPositionsTotal: fields.openPositionsTotal,
+    hasOpenForSymbol: fields.hasOpenForSymbol,
+    dataReady: fields.dataReady,
+    directionalShockState: fields.directionalShockState ?? "NONE"
+  };
+}
+
 function signalToState(signal: PaperSignal): PaperSignalState {
   if (signal === "paper_long_candidate") return "LONG_CANDIDATE";
   if (signal === "paper_short_candidate") return "SHORT_CANDIDATE";
@@ -131,6 +166,157 @@ function rrFromRegime(regime: MarketRegime): number {
   if (regime === "RANGE") return 0.0038 / 0.0026;
   if (regime === "TREND") return 0.0105 / 0.0105;
   return 1;
+}
+
+export function evaluateDirectionalTrendAddOnGuard(args: {
+  config: EngineConfig;
+  snapshot: SymbolSnapshotLike;
+  risk: RiskControlDecision;
+  regime: MarketRegime;
+  side: "long" | "short";
+  symbol: MarketSymbol;
+  directionalOverride: import("../models/types").DirectionalRoutingOverride;
+}): {
+  allowed: boolean;
+  reason: string;
+  proof?: Record<string, unknown>;
+} {
+  const { directionalOverride, snapshot, side, symbol } = args;
+
+  // 1. Check if directional routing is active
+  if (!directionalOverride.directionalRoutingActive) {
+    return { allowed: true, reason: "DIRECTIONAL_ROUTING_INACTIVE" };
+  }
+
+  // 2. Enforce Lane/Side Consistency (Symmetric)
+  const bias = directionalOverride.directionalBias;
+  const intendedSide = side; // In add-on, we are scaling the existing side
+  const shock = directionalOverride.directional_shock_state || "NONE";
+
+  if (bias !== "none" && intendedSide !== bias) {
+    return {
+      allowed: false,
+      reason: `DIRECTIONAL_ADDON_LANE_MISMATCH (pos: ${intendedSide}, bias: ${bias}, shock: ${shock})`,
+      proof: {
+        symbol: symbol,
+        side: side,
+        bias,
+        shock,
+        effective_execution_lane: directionalOverride.effectiveExecutionLane,
+        directional_addon_allowed: false
+      }
+    };
+  }
+
+  // 3. Check Cooldown (Directional specific)
+  if (directionalOverride.addOnCooldownPassed === false) {
+    return {
+      allowed: false,
+      reason: "DIRECTIONAL_ADDON_COOLDOWN_ACTIVE",
+      proof: {
+        symbol: symbol,
+        side: side,
+        bias,
+        cooldown_passed: false,
+        directional_addon_allowed: false
+      }
+    };
+  }
+
+  // 4. Stricter Trend Continuation Validation
+  const qualityOk = snapshot.qualityScore >= 75;
+  const trendOk = snapshot.trendOk === true;
+  const emaAligned = side === "long"
+    ? (snapshot.ema20 ?? 0) > (snapshot.ema60 ?? 0)
+    : (snapshot.ema20 ?? 0) < (snapshot.ema60 ?? 0);
+  const volumeOk = snapshot.volumeRatioProxy >= 1.25;
+
+  const allowed = qualityOk && trendOk && emaAligned && volumeOk;
+
+  const proof = {
+    symbol: symbol,
+    side: side,
+    bias,
+    shock,
+    qualityScore: snapshot.qualityScore,
+    qualityOk,
+    trendOk,
+    emaAligned,
+    volumeRatioProxy: snapshot.volumeRatioProxy,
+    volumeOk,
+    effective_execution_lane: directionalOverride.effectiveExecutionLane,
+    directional_addon_allowed: allowed
+  };
+
+  return {
+    allowed,
+    reason: allowed ? "DIRECTIONAL_ADDON_GUARD_PASS" : "DIRECTIONAL_ADDON_CONSERVATISM_BLOCK",
+    proof
+  };
+}
+
+function evaluateDirectionalTrendEntryGuard(args: {
+  config: EngineConfig;
+  snapshot: SymbolSnapshotLike;
+  risk: RiskControlDecision;
+  regime: MarketRegime;
+}): {
+  allowTrendOverride: boolean;
+  blockRangeEntirely: boolean;
+  forcedSide: "long" | "short" | null;
+  reason: string;
+  effective_execution_lane: "RANGE" | "TREND";
+  directional_shock_state: "UP" | "DOWN" | "NONE";
+  directional_bias: "long" | "short" | "none";
+  directional_routing_override_applied: boolean;
+} {
+  const shock = args.risk.directionalShockState;
+  const longAllow = args.risk.longAllow;
+  const shortAllow = args.risk.shortAllow;
+  const signal = args.snapshot.signal;
+
+  // 1. Downside Shock Logic (DOWN)
+  if (shock === "DOWN") {
+    const isShortSignal = signal === "paper_short_candidate";
+
+    return {
+      allowTrendOverride: true,
+      blockRangeEntirely: true,
+      forcedSide: "short",
+      reason: isShortSignal ? `DIRECTIONAL_SHORT_OVERRIDE (shock: DOWN)` : "DIRECTIONAL_LONG_BLOCKED_BY_DOWN_SHOCK",
+      effective_execution_lane: "TREND",
+      directional_shock_state: "DOWN",
+      directional_bias: "short",
+      directional_routing_override_applied: true
+    };
+  }
+
+  // 2. Upside Shock Logic (UP)
+  if (shock === "UP") {
+    const isLongSignal = signal === "paper_long_candidate";
+
+    return {
+      allowTrendOverride: true,
+      blockRangeEntirely: true,
+      forcedSide: "long",
+      reason: isLongSignal ? `DIRECTIONAL_LONG_OVERRIDE (shock: UP)` : "DIRECTIONAL_SHORT_BLOCKED_BY_UP_SHOCK",
+      effective_execution_lane: "TREND",
+      directional_shock_state: "UP",
+      directional_bias: "long",
+      directional_routing_override_applied: true
+    };
+  }
+
+  return {
+    allowTrendOverride: false,
+    blockRangeEntirely: false,
+    forcedSide: null,
+    reason: "NORMAL_ROUTING",
+    effective_execution_lane: args.regime === "RANGE" ? "RANGE" : "TREND",
+    directional_shock_state: "NONE",
+    directional_bias: "none",
+    directional_routing_override_applied: false
+  };
 }
 
 /** Stage 1 소액 탐색: RANGE·모호 맥락에서만 허용(쿨다운·데이터 결손 등은 제외). */
@@ -660,6 +846,10 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   adaptiveMode: FuturesMarketMode;
   adaptiveDetail: Record<string, unknown>;
   now: number;
+  directionalTrendCooldownLongBySymbol: ReadonlyMap<string, number>;
+  directionalTrendCooldownShortBySymbol: ReadonlyMap<string, number>;
+  directionalTrendAddOnCooldownLongBySymbol: ReadonlyMap<string, number>;
+  directionalTrendAddOnCooldownShortBySymbol: ReadonlyMap<string, number>;
   rangeCooldownUntilByKey: ReadonlyMap<string, number>;
   trendCooldownUntilBySymbol: ReadonlyMap<string, number>;
   lastCloseMetaBySymbol: ReadonlyMap<
@@ -683,6 +873,8 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   rangeReopenCooldownBypass?: boolean;
   /** V2 Engine Authority — expectancy bypass 결정용. */
   authority?: EntryExecutionAuthority;
+  /** Symmetric Directional Routing Override */
+  directionalOverride: import("../models/types").DirectionalRoutingOverride;
 }>;
 
 export type EvaluatePaperSymbolEntryResult = Readonly<{
@@ -821,195 +1013,7 @@ function pack(
   input: EvaluatePaperSymbolEntryInput,
   sym: MarketSymbol,
   em: number | null,
-  fields: {
-    signal_state: PaperSignalState;
-    regime_state: PaperRegimeState;
-    edge_state: PaperEdgeState;
-    risk_state: PaperRiskState;
-    execution_state: PaperExecutionState;
-    final_decision: PaperFinalDecision;
-    reject_reason: PaperDecisionRejectReason | null;
-    expected_move_pct: number | null;
-    fee_estimate_pct: number | null;
-    slippage_buffer_pct: number;
-    safety_margin_pct: number;
-    rr: number | null;
-    atr_pct: number | null;
-    strategy_executor: PaperStrategyExecutor;
-    engine_mode: EngineConfig["paperEngineMode"];
-    ai_decision: string | null;
-    adaptive_decision: string | null;
-    guidance: string | null;
-    next_action: string | null;
-    invalidate_condition: string | null;
-    risk_note: string | null;
-    watch_zone: string | null;
-    entry_progress: number | null;
-    target_stage: number | null;
-    supplemental_reasons?: string[];
-    is_ambiguous?: boolean;
-    stage1_loosened_entry?: boolean;
-    ai_floor_relaxed?: boolean;
-    auto_entry_triggered?: boolean;
-    reviewing_ticks?: number;
-    stage1_result_code?: import("../models/types").PaperStage1ResultCode;
-    final_fail_reason?: string;
-    entry_blocked?: string | null;
-    range_stage0_engine_taken?: boolean;
-    range_stage0_exit_reason?: string | null;
-    legacy_executor_path_taken?: boolean;
-    required_move_pct?: number | null;
-    shortfall_pct?: number | null;
-    signal_missing_reason?: string;
-    box_position_diag?: number | null;
-    ema_gap_diag?: number | null;
-    volatility_proxy_diag?: number | null;
-    stage1_leniency_applied?: boolean;
-    cost_warning_applied?: boolean;
-    stage1_size_reduced_due_to_cost?: boolean;
-    post_entry_cost_guard?: boolean;
-    fixed_total_cost_usd?: number | null;
-    expected_move_usd?: number | null;
-    required_cost_usd?: number | null;
-    shortfall_usd?: number;
-    executor_block_reason_original?: string | null;
-    stage1_soft_exec_override?: boolean;
-    stage1_size_multiplier_final?: number | null;
-    order_build_ok?: boolean;
-    order_build_fail_reason?: string | null;
-    order_build_fail_stage?: "entry_policy" | "adaptive_sizing" | null;
-    qty?: number | null;
-    price?: number | null;
-    stopLoss?: number | null;
-    takeProfit?: number | null;
-    riskReward?: number | null;
-    tick_size?: number | null;
-    qty_step?: number | null;
-    min_qty?: number | null;
-    min_notional?: number | null;
-    sizeUsd?: number | null;
-    long_only_restriction?: boolean;
-    original_signal_state?: string;
-    final_signal_state?: string;
-    execution_disabled_reason?: string | null;
-    execution_disabled_top_proof?: Record<string, unknown> | null;
-    trend_volume_relax_proof?: Record<string, unknown> | null;
-    reentry_cooldown_applied?: boolean;
-    reentry_cooldown_original_ms?: number | null;
-    reentry_cooldown_effective_ms?: number | null;
-    reentry_cooldown_reason?: string | null;
-    risk_cooldown_subreason?: string | null;
-    cooldown_remaining_ms?: number | null;
-    same_dir_cooldown_applied?: boolean;
-    blocked_regime_reason?: string | null;
-    reentry_wait_ms?: number | null;
-    reentry_elapsed_ms?: number | null;
-    blocked_regime_until_bypass_applied?: boolean;
-    blocked_regime_until_bypass_reason?: string | null;
-    blocked_regime_original_until_ms?: number | null;
-    blocked_regime_original_reason?: string | null;
-    range_long_only_short_deferred_applied?: boolean;
-    range_long_only_short_deferred_bypassed?: boolean;
-    range_cost_warning_applied?: boolean;
-    range_cost_warning_threshold?: number | null;
-    range_cost_warning_shortfall?: number | null;
-    range_reentry_cooldown_applied?: boolean;
-    range_reentry_wait_ms?: number | null;
-    range_reentry_elapsed_ms?: number | null;
-    range_reentry_remaining_ms?: number | null;
-    range_reentry_source?: string | null;
-    range_reentry_same_direction?: boolean;
-    range_same_direction_reentry_relaxed_applied?: boolean;
-    range_same_direction_reentry_wait_ms?: number | null;
-    range_same_direction_reentry_size_mult?: number | null;
-    range_same_direction_reentry_edge_ok?: boolean;
-    range_same_direction_reentry_center_blocked?: boolean;
-    range_same_direction_reentry_final_allowed?: boolean;
-    range_risk_limit_temporarily_relaxed?: boolean;
-    range_risk_limit_relax_reason?: string | null;
-    range_risk_limit_relax_started_at?: number | null;
-    range_risk_limit_relax_expires_at?: number | null;
-    range_risk_limit_relax_active?: boolean;
-    range_risk_limit_relax_expired?: boolean;
-    range_soft_suspend_applied?: boolean;
-    range_soft_suspend_size_mult?: number | null;
-    range_soft_suspend_cooldown_ms?: number | null;
-    range_soft_suspend_same_direction_restricted?: boolean;
-    range_bidirectional_applied?: boolean;
-    range_short_allowed?: boolean;
-    range_short_allowed_reason?: string | null;
-    range_upper_edge_near?: boolean;
-    range_center_wait?: boolean;
-    range_final_selected_side?: "long" | "short" | "none" | null;
-    range_reversal_zone?: "upper" | "lower" | "mid" | null;
-    range_reversal_short_eval_started?: boolean;
-    range_reversal_long_exit_triggered?: boolean;
-    range_reversal_short_entry_allowed?: boolean;
-    range_reversal_short_entry_block_reason?: string | null;
-    range_reversal_immediate_switch_applied?: boolean;
-    range_reversal_immediate_switch_reason?: string | null;
-    range_fresh_reentry_allowed?: boolean;
-    range_fresh_reentry_blocked_reason?: string | null;
-    range_fresh_reentry_size_mult?: number | null;
-    range_reentry_wait_bypassed_no_open_position?: boolean;
-    range_loss_streak_reduced_entry_applied?: boolean;
-    range_loss_streak_reduced_entry_size_mult?: number | null;
-    range_zone_action_policy?: string | null;
-    range_zone_detected?: "upper" | "lower" | "mid" | null;
-    range_upper_short_priority_applied?: boolean;
-    range_lower_long_priority_applied?: boolean;
-    range_mid_wait_applied?: boolean;
-    range_final_trade_side_by_zone?: string | null;
-    range_stage0_branch_proof?: Record<string, unknown> | null;
-    legacy_block_reason?: string | null;
-    legacy_regime_gate?: string | null;
-    legacy_gate_source?: string | null;
-    override_by_legacy?: boolean;
-    stage1_block_origin?: string | null;
-    legacy_block_test_bypass_applied?: boolean;
-    legacy_block_test_bypass_reason?: string | null;
-    legacy_block_original_reason?: string | null;
-    currentStage?: number;
-    regime?: "TREND" | "RANGE" | "NO_TRADE";
-    stage1_signal_relaxed?: boolean;
-    signal_relax_reason?: string | null;
-    regime_original_state?: PaperRegimeState;
-    regime_fallback_applied?: boolean;
-    regime_fallback_reason?: string | null;
-    range_confidence_diag?: number | null;
-    box_cohesion_diag?: number | null;
-    breakout_failure_rate_diag?: number | null;
-    range_oscillation_diag?: number | null;
-    trend_weakness_diag?: number | null;
-    range_reason_label?: string | null;
-    range_cycle_count?: number | null;
-    range_ladder_level?: number | null;
-    regime_exit_risk?: number | null;
-    box_break_side?: "upper" | "lower" | "none";
-    regime_state_diag?: PaperRegimeState;
-    entry_intent_type?: "probe" | "standard" | "scale" | "trend";
-    entry_confirmation_state?: "unconfirmed" | "reacting" | "confirmed";
-    scaling_permission?: boolean;
-    probe_only_mode?: boolean;
-    fee_drag_filter_applied?: boolean;
-    fee_drag_size_reduced?: boolean;
-    fee_drag_blocked?: boolean;
-    fee_drag_reason?: string | null;
-    fee_drag_proof?: Record<string, unknown> | null;
-    range_executor_priority_applied?: boolean;
-    range_executor_priority_reason?: string | null;
-    final_executor_before_priority?: PaperStrategyExecutor | null;
-    final_executor_after_priority?: PaperStrategyExecutor | null;
-    final_reject_before_priority?: string | null;
-    final_reject_after_priority?: string | null;
-    authority_decision?: string | null;
-    authority_source?: string | null;
-    authority_side?: string | null;
-    authority_size_usd?: number | null;
-    final_block_owner?: string | null;
-    adaptive_fail_stage?: string | null;
-    adaptive_fail_reason?: string | null;
-  }
+  fields: any
 ): PaperSymbolDecision {
   return {
     ts: input.now,
@@ -1188,7 +1192,14 @@ function pack(
     authority_size_usd: fields.authority_size_usd ?? null,
     final_block_owner: fields.final_block_owner ?? null,
     adaptive_fail_stage: fields.adaptive_fail_stage ?? null,
-    adaptive_fail_reason: fields.adaptive_fail_reason ?? null
+    adaptive_fail_reason: fields.adaptive_fail_reason ?? null,
+    directional_addon_proof: fields.directional_addon_proof ?? null,
+    reject_reason_original: fields.reject_reason_original ?? null,
+    effective_execution_lane: fields.effective_execution_lane ?? null,
+    directional_shock_state: fields.directional_shock_state ?? null,
+    directional_bias: fields.directional_bias ?? null,
+    directional_routing_override_applied: fields.directional_routing_override_applied ?? false,
+    directional_routing_override_reason: fields.directional_routing_override_reason ?? null
   };
 }
 
@@ -1255,7 +1266,29 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const supplemental_reasons: string[] = [];
 
   const sn = input.snapshot;
-  const sym = sn?.symbol ?? ("UNKNOWN" as MarketSymbol);
+  if (!sn) {
+    return {
+      decision: pack(input, "UNKNOWN" as MarketSymbol, null, {
+        signal_state: "NONE",
+        regime_state: "UNKNOWN",
+        edge_state: "FAIL_EXPECTANCY", // Placeholder
+        risk_state: "PASS",
+        execution_state: "PAPER_READY",
+        final_decision: "DISABLED",
+        reject_reason: "DATA_NOT_READY",
+        stage1_result_code: "STAGE1_BLOCKED_DATA"
+      } as any),
+      intentSide: null,
+      executorDecision: null,
+      adaptiveOk: false,
+      adaptiveDetail: null,
+      adaptiveResult: null,
+      aiGatePassed: false
+    };
+  }
+  const sym = sn.symbol;
+
+
   const authority = input.authority || internalDiscoverV2Authority(input);
   const v2AuthorityOwnsExecution =
     authority.decision === "ENTER" &&
@@ -1263,11 +1296,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     (authority.side === "long" || authority.side === "short") &&
     (authority.sizeUsd ?? 0) > 0;
 
+  // --- 4. Decision State Accumulators (Hoisted to avoid scoping/TDZ issues) ---
   let em: number | null = null;
-
-  let signal_state: PaperSignalState = "NONE";
-  let regime_state = regimeToState(input.regime, input.regimeUnknown);
+  let signal_state: PaperSignalState = signalToState(sn.signal);
+  let regime_state: PaperRegimeState = regimeToState(input.regime, input.regimeUnknown);
   const originalRegimeState = regime_state;
+  let overrideRegime: MarketRegime = input.regime;
+
   let regimeFallbackApplied = false;
   let regimeFallbackReason: string | null = null;
   let stage1ResultCodeOverride: import("../models/types").PaperStage1ResultCode | null = null;
@@ -1373,71 +1408,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let reentry_cooldown_effective_ms: number | null = null;
   let reentry_cooldown_reason: string | null = null;
 
-  // Working metrics and intermediate states
-  let waitMs: number = 0;
-  let elapsedMs: number = 0;
-  let meta: any = null;
-  let sameDirection: boolean = false;
-  let reentryBlocked: boolean = false;
-  let lowConfidence: boolean = false;
-  let gateResult: any = "RANGE_GATE_PASS";
-  let gateReason: string = "range_gate_pass";
-  let entryResult: any = "RANGE_ENTRY_NONE";
-  let zone: "upper" | "lower" | "mid" | null = "mid";
-  let boxPos: number = 0.5;
-  let rangeSignal: any = null;
-  let rangeScores: any = null;
-  let lowConfidenceSignalMin: number = 0.34;
-  let lowConfidenceEntryMin: number = 0.36;
-  let edgeRelaxZoneForConfidence: boolean = false;
-  let blockedRegimeActive: boolean = false;
-  let blockedRegimeLossStreakSuspend: boolean = false;
-  let freshReentryCandidate: boolean = false;
-  let blockedRegime: any = null;
-  let blockedRegimeReasonText: string = "";
-  let edgeGateCurrent: any = null;
-  let edgeStructureOkCurrent: boolean = false;
-  let prioritySignalAligned: boolean = false;
-  let noOpenPositionFreshEntry: boolean = false;
-  let rangeRiskRelaxEligible: boolean = false;
-  let riskEngineHardBlocked: boolean = false;
-  let riskEngineBlockedBySuspendOnly: boolean = false;
-  let riskEngineBlocked: boolean = false;
-  let sameDirRelaxEligible: boolean = false;
-  let stage1SignalRelaxed = false;
-  let signalRelaxReason: string | null = null;
-  let stage1SoftCandidateMicroEnter = false;
-  let stage1CostSoftBypassApplied = false;
-  let stage1CostSoftBypassReason: string | null = null;
-  let effectiveTotalCost: number | null = null;
-  let useFixedCost: boolean = false;
-  let cooldowned: boolean = false;
-  let cooldown_remaining_ms: number | null = null;
-  let stage1ExploreSoftExec = false;
-  let crashLockBypassApplied = false;
-  let crashLockBypassReason: string | null = null;
-  let crashLockBypassSizeMult = 1.0;
-  let stage1HigherTfBypassSizeMult: number | null = null;
-  let stage1RangeLowerEdgeSoftSizeMult: number | null = null;
-  let stage1RangeEdgeSoftApplied = false;
-  let range_executor_priority_applied = false;
-  let range_executor_priority_reason: string | null = null;
-  final_executor_before_priority = "IDLE";
-  final_executor_after_priority = "IDLE";
-  final_reject_before_priority = null;
-  final_reject_after_priority = null;
-  final_decision_before_priority = "SKIP";
-  final_decision_after_priority = "SKIP";
   let risk_cooldown_subreason: string | null = null;
-  const severeRiskLock =
-    input.risk?.engineBlocked === true ||
-    (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
-    (input.regimeDetail?.dump_protection_hit === true) ||
-    (input.regimeDetail?.volatility_guard_hit === true);
+  let cooldown_remaining_ms: number | null = null;
   let same_dir_cooldown_applied = false;
   let blocked_regime_reason: string | null = null;
   let reentry_wait_ms: number | null = null;
-  let stage1SizeMultFinal: number | null = null;
   let reentry_elapsed_ms: number | null = null;
   let blocked_regime_until_bypass_applied = false;
   let blocked_regime_until_bypass_reason: string | null = null;
@@ -1445,6 +1420,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let blocked_regime_original_reason: string | null = null;
   let range_long_only_short_deferred_applied = false;
   let range_long_only_short_deferred_bypassed = false;
+  let stage1LoosenedEntry = false;
+  let costWarningStage1 = false;
+  let stage1ExploreSoftExec = false;
+  let stage1HigherTfBypassSizeMult: number | null = null;
+  let stage1RangeLowerEdgeSoftSizeMult: number | null = null;
+  let stage1RangeEdgeSoftApplied = false;
   let stage1SoftExecOverrideFlag = false;
   let fixedUsd: number | null = null;
   let expectedMoveUsd: number | null = null;
@@ -1452,9 +1433,250 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let shortfallUsd: number | null = null;
   let executorBlockReasonOriginal: string | null = null;
   let totalCost: number | null = null;
-  let rangeReversalTier: "Strong" | "Watch" | "Suppress" | "None" = "None";
+  let effectiveTotalCost: number | null = null;
+  let stage1SizeMultFinal: number | null = null;
+  let range_executor_priority_applied = false;
+  let range_executor_priority_reason: string | null = null;
+
+  // New hoists for resolving compilation errors
+  let useFixedCost = false;
+  let rangeSignal: any = null;
+  let rangeScores: any = null;
+  let boxPos = 0.5;
+  let zone: any = null;
+  let crashLockBypassApplied = false;
+  let crashLockBypassReason: string | null = null;
+  let crashLockBypassSizeMult = 1.0;
+  let lowConfidenceSignalMin = 0.34;
+  let lowConfidenceEntryMin = 0.36;
+  let lowConfidence = false;
+  let edgeRelaxZoneForConfidence = false;
+  let gateResult: any = null;
+  let gateReason = "";
+  let entryResult: any = null;
+  let rangeReversalTier = "None";
   let rangeReversalSizeMult = 1.0;
   let rangeReversalConfidence = 0;
+  let waitMs = 0;
+  let elapsedMs = 0;
+  let meta: any = null;
+  let sameDirection = false;
+  let severeRiskLock: boolean = false;
+  let stage1SignalRelaxed = false;
+  let signalRelaxReason: string | null = null;
+  let edgeStructureOkCurrent = false;
+  let edgeGateCurrent: any = null;
+  let stage1SoftCandidateMicroEnter = false;
+  let stage1CostSoftBypassApplied = false;
+  let stage1CostSoftBypassReason: string | null = null;
+  let useRangeStage0Engine = false;
+  let reentryBlocked = false;
+  let riskEngineBlocked = false;
+  let blockedRegimeActive = false;
+  let blockedRegimeLossStreakSuspend = false;
+  let freshReentryCandidate = false;
+  let noOpenPos = false;
+  let hasBaseCandidate = false;
+  let hasStrongBaseSignal = false;
+  let hardBlockedForSoftPass = false;
+  let scoringRegime: any = null;
+  let rangeStage0ContextExpected = false;
+  let aiForHighway: any = null;
+  let skipHighwayExecutorCall = false;
+  let trendBoxEdgeBufferEligible = false;
+  let z: any = null;
+  let _entryIntent: any = null;
+
+  let blockedRegime: any = null;
+  let blockedRegimeReasonText = "";
+  let rangeRiskRelaxEligible = false;
+  let riskEngineHardBlocked = false;
+  let riskEngineBlockedBySuspendOnly = false;
+  let isRangeLowerLong = false;
+  let hasQuality = false;
+  let extremeLower = false;
+  let prioritySignalAligned = false;
+  let noOpenPositionFreshEntry = false;
+  let rangeLowerEdge = false;
+  let rangeExitRiskOk = false;
+  let rangeConfidenceOk = false;
+  let rangeBreakoutFailureOk = false;
+  let rangeSameDirBaseEligible = false;
+  let rangeReversalSwitchMatches = false;
+
+  // --- 5. Directional Routing Override Calculation ---
+  const directionalOverride: any = evaluateDirectionalTrendEntryGuard({
+    config: input.config,
+    snapshot: sn,
+    risk: input.risk!,
+    regime: overrideRegime
+  });
+
+  // --- 6. Packaging Helpers (Restored) ---
+  const extra: any = {};
+  const ret = (patch: any, res: any = {}): EvaluatePaperSymbolEntryResult => {
+    Object.assign(extra, patch);
+    return {
+      decision: pack(input, sym, em, {
+        signal_state: (extra.signal_state ?? signal_state) as any,
+        regime_state: (extra.regime_state ?? regime_state) as any,
+        edge_state: (extra.edge_state ?? edge_state) as any,
+        risk_state: (extra.risk_state ?? risk_state) as any,
+        execution_state: (extra.execution_state ?? execution_state) as any,
+        final_decision: (extra.final_decision ?? final_decision) as any,
+        reject_reason: (extra.reject_reason ?? reject_reason) as any,
+        expected_move_pct: "expected_move_pct" in extra ? extra.expected_move_pct : expected_move_pct,
+        fee_estimate_pct: "fee_estimate_pct" in extra ? extra.fee_estimate_pct : fee_estimate_pct,
+        slippage_buffer_pct,
+        safety_margin_pct,
+        rr: "rr" in extra ? extra.rr : rr,
+        atr_pct: "atr_pct" in extra ? extra.atr_pct : atr_pct,
+        strategy_executor: (extra.strategy_executor ?? strategy_executor) as any,
+        engine_mode: emMode,
+        ai_decision: extra.ai_decision !== undefined ? extra.ai_decision : null,
+        adaptive_decision: extra.adaptive_decision !== undefined ? extra.adaptive_decision : null,
+        guidance: extra.guidance !== undefined ? extra.guidance : guidanceOut,
+        next_action: extra.next_action !== undefined ? extra.next_action : null,
+        invalidate_condition: extra.invalidate_condition !== undefined ? extra.invalidate_condition : null,
+        risk_note: extra.risk_note !== undefined ? extra.risk_note : null,
+        watch_zone: extra.watch_zone !== undefined ? extra.watch_zone : null,
+        entry_progress: extra.entry_progress !== undefined ? extra.entry_progress : null,
+        target_stage: extra.target_stage !== undefined ? extra.target_stage : null,
+        supplemental_reasons: extra.supplemental_reasons ?? (supplemental_reasons || []),
+        is_ambiguous: extra.is_ambiguous ?? false,
+        stage1_loosened_entry: extra.stage1_loosened_entry ?? stage1LoosenedEntry,
+        ai_floor_relaxed: extra.ai_floor_relaxed ?? false,
+        auto_entry_triggered: extra.auto_entry_triggered !== undefined ? extra.auto_entry_triggered : input.autoEntryTriggered,
+        reviewing_ticks: extra.reviewing_ticks !== undefined ? extra.reviewing_ticks : input.reviewingTicks,
+        stage1_result_code: extra.stage1_result_code ?? (stage1ResultCodeOverride ?? "STAGE0_ENTERED"),
+        final_fail_reason: extra.final_fail_reason ?? null,
+        entry_blocked: extra.entry_blocked ?? null,
+        range_executor_priority_applied: extra.range_executor_priority_applied ?? range_executor_priority_applied,
+        range_executor_priority_reason: extra.range_executor_priority_reason ?? range_executor_priority_reason,
+        final_executor_before_priority: extra.final_executor_before_priority ?? final_executor_before_priority,
+        final_executor_after_priority: extra.final_executor_after_priority ?? final_executor_after_priority,
+        final_reject_before_priority: extra.final_reject_before_priority ?? final_reject_before_priority,
+        final_reject_after_priority: extra.final_reject_after_priority ?? final_reject_after_priority,
+        range_stage0_engine_taken: extra.range_stage0_engine_taken ?? range_stage0_engine_taken,
+        range_stage0_exit_reason: extra.range_stage0_exit_reason ?? range_stage0_exit_reason,
+        legacy_executor_path_taken: extra.legacy_executor_path_taken ?? legacy_executor_path_taken,
+        required_move_pct: "required_move_pct" in extra ? extra.required_move_pct : required_move_pct,
+        shortfall_pct: "shortfall_pct" in extra ? extra.shortfall_pct : (shortfall_pct ?? 0),
+        signal_missing_reason: extra.signal_missing_reason ?? (sn?.signalMissingReason ?? null),
+        box_position_diag: "box_position_diag" in extra ? extra.box_position_diag : (sn?.boxPos ?? 0.5),
+        ema_gap_diag: "ema_gap_diag" in extra ? extra.ema_gap_diag : (sn?.emaGap ?? 0),
+        volatility_proxy_diag: "volatility_proxy_diag" in extra ? extra.volatility_proxy_diag : (sn?.volumeRatioProxy ?? 1),
+        stage1_leniency_applied: extra.stage1_leniency_applied ?? stage1_leniency_applied,
+        cost_warning_applied: extra.cost_warning_applied ?? costWarningStage1,
+        stage1_size_reduced_due_to_cost: extra.stage1_size_reduced_due_to_cost ?? false,
+        post_entry_cost_guard: extra.post_entry_cost_guard ?? false,
+        fixed_total_cost_usd: extra.fixed_total_cost_usd !== undefined ? extra.fixed_total_cost_usd : fixedUsd,
+        expected_move_usd: extra.expected_move_usd !== undefined ? extra.expected_move_usd : expectedMoveUsd,
+        required_cost_usd: extra.required_cost_usd !== undefined ? extra.required_cost_usd : requiredCostUsd,
+        shortfall_usd: extra.shortfall_usd !== undefined ? extra.shortfall_usd : shortfallUsd,
+        executor_block_reason_original: extra.executor_block_reason_original !== undefined ? extra.executor_block_reason_original : executorBlockReasonOriginal,
+        stage1_soft_exec_override: extra.stage1_soft_exec_override !== undefined ? extra.stage1_soft_exec_override : stage1SoftExecOverrideFlag,
+        stage1_size_multiplier_final: "stage1_size_multiplier_final" in extra ? extra.stage1_size_multiplier_final : (input.currentStage === 0 ? stage1SizeMultFinal : null),
+        authority_decision: extra.authority_decision ?? (authority?.decision || "HOLD"),
+        authority_source: extra.authority_source ?? (authority?.source || "unknown"),
+        authority_side: extra.authority_side ?? (authority?.side || "none"),
+        authority_size_usd: extra.authority_size_usd ?? (authority?.sizeUsd || 0),
+        effective_execution_lane: (extra.effective_execution_lane ?? directionalOverride?.effective_execution_lane) || null,
+        directional_shock_state: (extra.directional_shock_state ?? directionalOverride?.directional_shock_state) || "NONE",
+        directional_bias: (extra.directional_bias ?? directionalOverride?.directional_bias) || "none",
+        directional_routing_override_applied: extra.directional_routing_override_applied ?? directionalOverride?.directional_routing_override_applied,
+        directional_routing_override_reason: extra.directional_routing_override_reason ?? directionalOverride?.reason,
+        regime_original_state: extra.regime_original_state ?? originalRegimeState,
+        regime_fallback_applied: extra.regime_fallback_applied ?? regimeFallbackApplied,
+        regime_fallback_reason: extra.regime_fallback_reason ?? regimeFallbackReason
+      }),
+      ...res
+    };
+  };
+
+  // --- 7. Ultimate Directional Guard Early Exit ---
+  const incomingSide = sn.signal === "paper_long_candidate" ? "long" : sn.signal === "paper_short_candidate" ? "short" : "none";
+  if (directionalOverride.directional_routing_override_applied) {
+    const bias = directionalOverride.directional_bias;
+    const isMismatched = (bias === "short" && incomingSide === "long") || (bias === "long" && incomingSide === "short");
+
+    if (isMismatched || directionalOverride.reason.includes("BLOCKED")) {
+      return ret({
+        signal_state: signalToState(sn.signal),
+        final_decision: "DISABLED",
+        reject_reason: "DIRECTIONAL_BIAS_BLOCKED",
+        execution_disabled_reason: "directional_bias_blocked",
+        final_block_owner: "directional_guard",
+        execution_disabled_top_proof: {
+          symbol: String(sym),
+          shock: directionalOverride.directional_shock_state,
+          bias: directionalOverride.directional_bias,
+          incoming_signal: sn.signal,
+          override_reason: directionalOverride.reason
+        },
+        directional_routing_override_applied: true,
+        directional_routing_override_reason: directionalOverride.reason
+      }, {
+        intentSide: (incomingSide === "none" ? null : incomingSide) as any,
+        executorDecision: null,
+        adaptiveOk: false,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      });
+    }
+
+    if (directionalOverride.allowTrendOverride && overrideRegime === "RANGE") {
+      overrideRegime = "TREND";
+      regime_state = "TREND";
+      (sn as any).directionalRoutingApplied = true;
+    }
+
+    if (input.currentStage >= 1 && input.hasOpenPosition && input.openPositionSide) {
+      const addOnGuard = evaluateDirectionalTrendAddOnGuard({
+        config: input.config,
+        snapshot: sn,
+        risk: input.risk!,
+        regime: overrideRegime,
+        side: input.openPositionSide,
+        symbol: sym as MarketSymbol,
+        directionalOverride
+      });
+
+      if (!addOnGuard.allowed) {
+        return ret({
+          signal_state: signalToState(sn.signal),
+          final_decision: "DISABLED",
+          reject_reason: "DIRECTIONAL_ADDON_BLOCKED",
+          execution_disabled_reason: "directional_addon_mismatch",
+          final_block_owner: "directional_addon_guard",
+          directional_addon_proof: addOnGuard.proof,
+          directional_routing_override_applied: true,
+          directional_routing_override_reason: addOnGuard.reason
+        }, {
+          intentSide: (input.openPositionSide === ("none" as any) ? null : input.openPositionSide) as any,
+          executorDecision: null,
+          adaptiveOk: false,
+          adaptiveDetail: null,
+          adaptiveResult: null,
+          aiGatePassed: false
+        });
+      }
+    }
+  }
+
+  // Working metrics and intermediate states (already partially hoisted, consolidating remaining)
+  // Working metrics and intermediate states consolidated
+  let reentryBlocked_local_deprecated: boolean = false; // Placeholder if needed by other legacy code, but we use top scope
+  let lowConfidence_local: boolean = false;
+  let gateResult_local: any = "RANGE_GATE_PASS";
+  let gateReason_local: string = "range_gate_pass";
+  let entryResult_local: any = "RANGE_ENTRY_NONE";
+
+  rangeReversalTier = "None";
+  rangeReversalSizeMult = 1.0;
+  rangeReversalConfidence = 0;
+
 
   const rm = sn?.gateRequiredMove;
   const emFromSn = sn?.gateExpectedMove ?? null;
@@ -1503,450 +1725,25 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   executorBlockReasonOriginal = null;
   stage1SoftExecOverrideFlag = false;
 
-  const ret = (
-    extra: Partial<{
-      signal_state: PaperSignalState;
-      regime_state: PaperRegimeState;
-      edge_state: PaperEdgeState;
-      risk_state: PaperRiskState;
-      execution_state: PaperExecutionState;
-      final_decision: PaperFinalDecision;
-      reject_reason: PaperDecisionRejectReason | null;
-      expected_move_pct: number | null;
-      fee_estimate_pct: number | null;
-      rr: number | null;
-      atr_pct: number | null;
-      strategy_executor: PaperStrategyExecutor;
-      ai_decision: string | null;
-      adaptive_decision: string | null;
-      guidance: string | null;
-      next_action: string | null;
-      invalidate_condition: string | null;
-      risk_note: string | null;
-      watch_zone: string | null;
-      entry_progress: number | null;
-      target_stage: number | null;
-      supplemental_reasons?: string[];
-      is_ambiguous?: boolean;
-      stage1_loosened_entry?: boolean;
-      ai_floor_relaxed?: boolean;
-      auto_entry_triggered?: boolean;
-      reviewing_ticks?: number;
-      stage1_result_code?: import("../models/types").PaperStage1ResultCode;
-      final_fail_reason?: string;
-      entry_blocked?: string | null;
-      range_stage0_engine_taken?: boolean;
-      range_stage0_exit_reason?: string | null;
-      legacy_executor_path_taken?: boolean;
-      required_move_pct?: number | null;
-      shortfall_pct?: number | null;
-      signal_missing_reason?: string;
-      box_position_diag?: number | null;
-      ema_gap_diag?: number | null;
-      volatility_proxy_diag?: number | null;
-      stage1_leniency_applied?: boolean;
-      cost_warning_applied?: boolean;
-      stage1_size_reduced_due_to_cost?: boolean;
-      post_entry_cost_guard?: boolean;
-      fixed_total_cost_usd?: number | null;
-      expected_move_usd?: number | null;
-      required_cost_usd?: number | null;
-      shortfall_usd?: number;
-      executor_block_reason_original?: string | null;
-      stage1_soft_exec_override?: boolean;
-      stage1_soft_exec_override_reason?: string | null;
-      stage1_signal_relaxed?: boolean;
-      signal_relax_reason?: string | null;
-      stage1_soft_candidate_enter_applied?: boolean;
-      stage1_soft_candidate_original_block_reason?: string | null;
-      stage1_soft_candidate_size_mult?: number | null;
-      stage1_size_multiplier_final?: number | null;
-      order_build_ok?: boolean;
-      order_build_fail_reason?: string | null;
-      order_build_fail_stage?: "entry_policy" | "adaptive_sizing" | null;
-      qty?: number | null;
-      price?: number | null;
-      stopLoss?: number | null;
-      takeProfit?: number | null;
-      riskReward?: number | null;
-      tick_size?: number | null;
-      qty_step?: number | null;
-      min_qty?: number | null;
-      min_notional?: number | null;
-      sizeUsd?: number | null;
-      authority_decision?: string | null;
-      authority_source?: string | null;
-      authority_side?: string | null;
-      authority_size_usd?: number | null;
-      final_block_owner?: string | null;
-      adaptive_fail_stage?: string | null;
-      adaptive_fail_reason?: string | null;
-      long_only_restriction?: boolean;
-      original_signal_state?: string;
-      final_signal_state?: string;
-      execution_disabled_reason?: string | null;
-      execution_disabled_top_proof?: Record<string, unknown> | null;
-      trend_volume_relax_proof?: Record<string, unknown> | null;
-      reentry_cooldown_applied?: boolean;
-      reentry_cooldown_original_ms?: number | null;
-      reentry_cooldown_effective_ms?: number | null;
-      reentry_cooldown_reason?: string | null;
-      risk_cooldown_subreason?: string | null;
-      cooldown_remaining_ms?: number | null;
-      same_dir_cooldown_applied?: boolean;
-      blocked_regime_reason?: string | null;
-      reentry_wait_ms?: number | null;
-      reentry_elapsed_ms?: number | null;
-      blocked_regime_until_bypass_applied?: boolean;
-      blocked_regime_until_bypass_reason?: string | null;
-      blocked_regime_original_until_ms?: number | null;
-      blocked_regime_original_reason?: string | null;
-      range_long_only_short_deferred_applied?: boolean;
-      range_long_only_short_deferred_bypassed?: boolean;
-      range_cost_warning_applied?: boolean;
-      range_cost_warning_threshold?: number | null;
-      range_cost_warning_shortfall?: number | null;
-      range_reentry_cooldown_applied?: boolean;
-      range_reentry_wait_ms?: number | null;
-      range_reentry_elapsed_ms?: number | null;
-      range_reentry_remaining_ms?: number | null;
-      range_reentry_source?: string | null;
-      range_reentry_same_direction?: boolean;
-      range_same_direction_reentry_relaxed_applied?: boolean;
-      range_same_direction_reentry_wait_ms?: number | null;
-      range_same_direction_reentry_size_mult?: number | null;
-      range_same_direction_reentry_edge_ok?: boolean;
-      range_same_direction_reentry_center_blocked?: boolean;
-      range_same_direction_reentry_final_allowed?: boolean;
-      range_risk_limit_temporarily_relaxed?: boolean;
-      range_risk_limit_relax_reason?: string | null;
-      range_risk_limit_relax_started_at?: number | null;
-      range_risk_limit_relax_expires_at?: number | null;
-      range_risk_limit_relax_active?: boolean;
-      range_risk_limit_relax_expired?: boolean;
-      range_soft_suspend_applied?: boolean;
-      range_soft_suspend_size_mult?: number | null;
-      range_soft_suspend_cooldown_ms?: number | null;
-      range_soft_suspend_same_direction_restricted?: boolean;
-      range_bidirectional_applied?: boolean;
-      range_short_allowed?: boolean;
-      range_short_allowed_reason?: string | null;
-      range_upper_edge_near?: boolean;
-      range_center_wait?: boolean;
-      range_final_selected_side?: "long" | "short" | "none" | null;
-      range_reversal_zone?: "upper" | "lower" | "mid" | null;
-      range_reversal_short_eval_started?: boolean;
-      range_reversal_long_exit_triggered?: boolean;
-      range_reversal_short_entry_allowed?: boolean;
-      range_reversal_short_entry_block_reason?: string | null;
-      range_reversal_immediate_switch_applied?: boolean;
-      range_reversal_immediate_switch_reason?: string | null;
-      range_fresh_reentry_allowed?: boolean;
-      range_fresh_reentry_blocked_reason?: string | null;
-      range_fresh_reentry_size_mult?: number | null;
-      range_reentry_wait_bypassed_no_open_position?: boolean;
-      range_loss_streak_reduced_entry_applied?: boolean;
-      range_loss_streak_reduced_entry_size_mult?: number | null;
-      range_zone_action_policy?: string | null;
-      range_zone_detected?: "upper" | "lower" | "mid" | null;
-      range_upper_short_priority_applied?: boolean;
-      range_lower_long_priority_applied?: boolean;
-      range_mid_wait_applied?: boolean;
-      range_final_trade_side_by_zone?: string | null;
-      range_stage0_branch_proof?: Record<string, unknown> | null;
-      legacy_block_reason?: string | null;
-      legacy_regime_gate?: string | null;
-      legacy_gate_source?: string | null;
-      override_by_legacy?: boolean;
-      stage1_block_origin?: string | null;
-      legacy_block_test_bypass_applied?: boolean;
-      legacy_block_test_bypass_reason?: string | null;
-      legacy_block_original_reason?: string | null;
-      stage1_direction_override_applied?: boolean;
-      stage1_direction_override_reason?: string | null;
-      original_policy_direction?: string | null;
-      final_policy_direction?: string | null;
-      stage1_cost_soft_bypass_applied?: boolean;
-      stage1_cost_soft_bypass_reason?: string | null;
-      stage1_cost_shortfall_pct?: number | null;
-      stage1_cost_shortfall_usd?: number | null;
-      stage1_cost_micro_size_mult?: number | null;
-      fee_drag_filter_applied?: boolean;
-      fee_drag_size_reduced?: boolean;
-      fee_drag_blocked?: boolean;
-      fee_drag_reason?: string | null;
-      fee_drag_proof?: Record<string, unknown> | null;
-      currentStage?: number;
-      regime?: "TREND" | "RANGE" | "NO_TRADE";
-      regime_original_state?: PaperRegimeState;
-      regime_fallback_applied?: boolean;
-      regime_fallback_reason?: string | null;
-      range_confidence_diag?: number | null;
-      box_cohesion_diag?: number | null;
-      breakout_failure_rate_diag?: number | null;
-      range_oscillation_diag?: number | null;
-      trend_weakness_diag?: number | null;
-      range_reason_label?: string | null;
-      range_cycle_count?: number | null;
-      range_ladder_level?: number | null;
-      regime_exit_risk?: number | null;
-      box_break_side?: "upper" | "lower" | "none";
-      regime_state_diag?: PaperRegimeState;
-      entry_intent_type?: "probe" | "standard" | "scale" | "trend";
-      entry_confirmation_state?: "unconfirmed" | "reacting" | "confirmed";
-      scaling_permission?: boolean;
-      probe_only_mode?: boolean;
-    }>,
-    res: {
-      intentSide: "long" | "short" | null;
-      executorDecision: AnyEntryDecision | null;
-      adaptiveOk: boolean;
-      adaptiveDetail: Record<string, unknown> | null;
-      adaptiveResult: Extract<FuturesAdaptiveEntryResult, { ok: true }> | null;
-      adaptiveFailure?: Extract<FuturesAdaptiveEntryResult, { ok: false }>;
-      aiGatePassed: boolean;
-    }
-  ): EvaluatePaperSymbolEntryResult => {
-    final_executor_before_priority = extra.strategy_executor ?? strategy_executor;
-    final_reject_before_priority = extra.reject_reason !== undefined ? (extra.reject_reason ? String(extra.reject_reason) : null) : (reject_reason ? String(reject_reason) : null);
-    final_decision_before_priority = extra.final_decision ?? final_decision;
 
-    final_executor_after_priority = final_executor_before_priority;
-    final_reject_after_priority = final_reject_before_priority;
-    final_decision_after_priority = final_decision_before_priority;
+  final_executor_before_priority = extra.strategy_executor ?? strategy_executor;
+  final_reject_before_priority = extra.reject_reason !== undefined ? (extra.reject_reason ? String(extra.reject_reason) : null) : (reject_reason ? String(reject_reason) : null);
+  final_decision_before_priority = extra.final_decision ?? final_decision;
 
-    if (isRangeFallbackActive && final_decision_before_priority === "REJECT" && final_executor_before_priority === "TREND" && (extra.reject_reason === "EDGE_FAIL_FEE" || reject_reason === "EDGE_FAIL_FEE")) {
-      final_executor_after_priority = "RANGE";
-      final_reject_after_priority = null;
-      final_decision_after_priority = "SKIP";
-      range_executor_priority_applied = true;
-      range_executor_priority_reason = "range_diag_context_override_trend_reject_fee";
-    }
+  final_executor_after_priority = final_executor_before_priority;
+  final_reject_after_priority = final_reject_before_priority;
+  final_decision_after_priority = final_decision_before_priority;
 
-    return {
-      decision: pack(input, sym, em, {
-        signal_state: (extra.signal_state ?? signal_state) as any,
-        regime_state: (extra.regime_state ?? regime_state) as any,
-        edge_state: (extra.edge_state ?? edge_state) as any,
-        risk_state: (extra.risk_state ?? risk_state) as any,
-        execution_state: (extra.execution_state ?? execution_state) as any,
-        final_decision: (final_decision_after_priority as any),
-        reject_reason: (final_reject_after_priority as any),
-        expected_move_pct: extra.expected_move_pct !== undefined ? extra.expected_move_pct : expected_move_pct,
-        fee_estimate_pct: extra.fee_estimate_pct !== undefined ? extra.fee_estimate_pct : fee_estimate_pct,
-        slippage_buffer_pct,
-        safety_margin_pct,
-        rr: extra.rr !== undefined ? extra.rr : rr,
-        atr_pct: extra.atr_pct !== undefined ? extra.atr_pct : atr_pct,
-        strategy_executor: final_executor_after_priority,
-        engine_mode: emMode,
-        ai_decision: extra.ai_decision !== undefined ? extra.ai_decision : null,
-        adaptive_decision: extra.adaptive_decision !== undefined ? extra.adaptive_decision : null,
-        guidance: extra.guidance !== undefined ? extra.guidance : guidanceOut,
-        next_action: extra.next_action !== undefined ? extra.next_action : null,
-        invalidate_condition: extra.invalidate_condition !== undefined ? extra.invalidate_condition : null,
-        risk_note: extra.risk_note !== undefined ? extra.risk_note : null,
-        watch_zone: extra.watch_zone !== undefined ? extra.watch_zone : null,
-        entry_progress: extra.entry_progress !== undefined ? extra.entry_progress : null,
-        target_stage: extra.target_stage !== undefined ? extra.target_stage : null,
-        supplemental_reasons: extra.supplemental_reasons ?? supplemental_reasons,
-        is_ambiguous: extra.is_ambiguous ?? false,
-        stage1_loosened_entry: extra.stage1_loosened_entry,
-        ai_floor_relaxed: extra.ai_floor_relaxed,
-        auto_entry_triggered: extra.auto_entry_triggered !== undefined ? extra.auto_entry_triggered : input.autoEntryTriggered,
-        reviewing_ticks: extra.reviewing_ticks !== undefined ? extra.reviewing_ticks : input.reviewingTicks,
-        stage1_result_code: extra.stage1_result_code ?? (
-          stage1ResultCodeOverride ?? (
-            final_reject_after_priority === "AUTHORITY_ADAPTIVE_SOFT_PASS"
-              ? "STAGE1_SOFT_ADAPTIVE_PASS"
-              : final_reject_after_priority === "AUTHORITY_EXPECTANCY_SOFT_PASS"
-                ? "STAGE1_SOFT_EXPECTANCY_PASS"
-                : (extra as any).stage1_result_code
-          )
-        ),
-        final_fail_reason: extra.final_fail_reason,
-        entry_blocked: extra.entry_blocked ?? null,
-        range_executor_priority_applied,
-        range_executor_priority_reason,
-        final_executor_before_priority,
-        final_executor_after_priority,
-        final_reject_before_priority: final_reject_before_priority ? String(final_reject_before_priority) : null,
-        final_reject_after_priority: final_reject_after_priority ? String(final_reject_after_priority) : null,
-        range_stage0_engine_taken: extra.range_stage0_engine_taken ?? range_stage0_engine_taken,
-        range_stage0_exit_reason: extra.range_stage0_exit_reason ?? range_stage0_exit_reason,
-        legacy_executor_path_taken: extra.legacy_executor_path_taken ?? legacy_executor_path_taken,
-        required_move_pct: "required_move_pct" in extra ? extra.required_move_pct : required_move_pct,
-        shortfall_pct: "shortfall_pct" in extra ? extra.shortfall_pct : (shortfall_pct ?? 0),
-        signal_missing_reason: extra.signal_missing_reason ?? sn?.signalMissingReason,
-        box_position_diag: "box_position_diag" in extra ? extra.box_position_diag : sn?.boxPos,
-        ema_gap_diag: "ema_gap_diag" in extra ? extra.ema_gap_diag : sn?.emaGap,
-        volatility_proxy_diag: "volatility_proxy_diag" in extra ? extra.volatility_proxy_diag : sn?.volumeRatioProxy,
-        stage1_leniency_applied: extra.stage1_leniency_applied ?? stage1_leniency_applied,
-        cost_warning_applied: extra.cost_warning_applied,
-        stage1_size_reduced_due_to_cost: extra.stage1_size_reduced_due_to_cost,
-        post_entry_cost_guard: extra.post_entry_cost_guard,
-        fixed_total_cost_usd: extra.fixed_total_cost_usd !== undefined ? extra.fixed_total_cost_usd : fixedUsd,
-        expected_move_usd: extra.expected_move_usd !== undefined ? extra.expected_move_usd : expectedMoveUsd,
-        required_cost_usd: extra.required_cost_usd !== undefined ? extra.required_cost_usd : requiredCostUsd,
-        shortfall_usd: extra.shortfall_usd !== undefined ? extra.shortfall_usd : shortfallUsd,
-        executor_block_reason_original: extra.executor_block_reason_original !== undefined ? extra.executor_block_reason_original : executorBlockReasonOriginal,
-        stage1_soft_exec_override: extra.stage1_soft_exec_override !== undefined ? extra.stage1_soft_exec_override : stage1SoftExecOverrideFlag,
-        stage1_size_multiplier_final: extra.stage1_size_multiplier_final !== undefined ? extra.stage1_size_multiplier_final : null,
-        order_build_ok: extra.order_build_ok,
-        order_build_fail_reason: extra.order_build_fail_reason,
-        order_build_fail_stage: extra.order_build_fail_stage,
-        qty: extra.qty,
-        price: extra.price,
-        stopLoss: extra.stopLoss,
-        takeProfit: extra.takeProfit,
-        riskReward: extra.riskReward,
-        tick_size: extra.tick_size,
-        qty_step: extra.qty_step,
-        min_qty: extra.min_qty,
-        min_notional: extra.min_notional,
-        sizeUsd: extra.sizeUsd,
-        authority_decision: extra.authority_decision ?? authority.decision,
-        authority_source: extra.authority_source ?? authority.source,
-        authority_side: extra.authority_side ?? authority.side,
-        authority_size_usd: extra.authority_size_usd ?? authority.sizeUsd,
-        final_block_owner: extra.final_block_owner ?? null,
-        adaptive_fail_stage: extra.adaptive_fail_stage ?? null,
-        adaptive_fail_reason: extra.adaptive_fail_reason ?? null,
-        long_only_restriction: extra.long_only_restriction,
-        original_signal_state: extra.original_signal_state,
-        final_signal_state: extra.final_signal_state,
-        execution_disabled_reason: extra.execution_disabled_reason,
-        execution_disabled_top_proof: extra.execution_disabled_top_proof,
-        trend_volume_relax_proof:
-          "trend_volume_relax_proof" in extra ? extra.trend_volume_relax_proof : trendVolumeRelaxProof,
-        reentry_cooldown_applied: extra.reentry_cooldown_applied ?? reentry_cooldown_applied,
-        reentry_cooldown_original_ms: extra.reentry_cooldown_original_ms ?? reentry_cooldown_original_ms,
-        reentry_cooldown_effective_ms: extra.reentry_cooldown_effective_ms ?? reentry_cooldown_effective_ms,
-        reentry_cooldown_reason: extra.reentry_cooldown_reason ?? reentry_cooldown_reason,
-        risk_cooldown_subreason: extra.risk_cooldown_subreason ?? risk_cooldown_subreason,
-        cooldown_remaining_ms: extra.cooldown_remaining_ms ?? cooldown_remaining_ms,
-        same_dir_cooldown_applied: extra.same_dir_cooldown_applied ?? same_dir_cooldown_applied,
-        blocked_regime_reason: extra.blocked_regime_reason ?? blocked_regime_reason,
-        reentry_wait_ms: extra.reentry_wait_ms ?? reentry_wait_ms,
-        reentry_elapsed_ms: extra.reentry_elapsed_ms ?? reentry_elapsed_ms,
-        blocked_regime_until_bypass_applied:
-          extra.blocked_regime_until_bypass_applied ?? blocked_regime_until_bypass_applied,
-        blocked_regime_until_bypass_reason:
-          extra.blocked_regime_until_bypass_reason ?? blocked_regime_until_bypass_reason,
-        blocked_regime_original_until_ms:
-          extra.blocked_regime_original_until_ms ?? blocked_regime_original_until_ms,
-        blocked_regime_original_reason:
-          extra.blocked_regime_original_reason ?? blocked_regime_original_reason,
-        range_long_only_short_deferred_applied:
-          extra.range_long_only_short_deferred_applied ?? range_long_only_short_deferred_applied,
-        range_long_only_short_deferred_bypassed:
-          extra.range_long_only_short_deferred_bypassed ?? range_long_only_short_deferred_bypassed,
-        range_cost_warning_applied: extra.range_cost_warning_applied ?? range_cost_warning_applied,
-        range_cost_warning_threshold: extra.range_cost_warning_threshold ?? range_cost_warning_threshold,
-        range_cost_warning_shortfall: extra.range_cost_warning_shortfall ?? range_cost_warning_shortfall,
-        range_reentry_cooldown_applied: extra.range_reentry_cooldown_applied ?? range_reentry_cooldown_applied,
-        range_reentry_wait_ms: extra.range_reentry_wait_ms ?? range_reentry_wait_ms,
-        range_reentry_elapsed_ms: extra.range_reentry_elapsed_ms ?? range_reentry_elapsed_ms,
-        range_reentry_remaining_ms: extra.range_reentry_remaining_ms ?? range_reentry_remaining_ms,
-        range_reentry_source: extra.range_reentry_source ?? range_reentry_source,
-        range_reentry_same_direction: extra.range_reentry_same_direction ?? range_reentry_same_direction,
-        range_same_direction_reentry_relaxed_applied:
-          extra.range_same_direction_reentry_relaxed_applied ?? range_same_direction_reentry_relaxed_applied,
-        range_same_direction_reentry_wait_ms:
-          extra.range_same_direction_reentry_wait_ms ?? range_same_direction_reentry_wait_ms,
-        range_same_direction_reentry_size_mult:
-          extra.range_same_direction_reentry_size_mult ?? range_same_direction_reentry_size_mult,
-        range_same_direction_reentry_edge_ok:
-          extra.range_same_direction_reentry_edge_ok ?? range_same_direction_reentry_edge_ok,
-        range_same_direction_reentry_center_blocked:
-          extra.range_same_direction_reentry_center_blocked ?? range_same_direction_reentry_center_blocked,
-        range_same_direction_reentry_final_allowed:
-          extra.range_same_direction_reentry_final_allowed ?? range_same_direction_reentry_final_allowed,
-        range_risk_limit_temporarily_relaxed:
-          extra.range_risk_limit_temporarily_relaxed ?? range_risk_limit_temporarily_relaxed,
-        range_risk_limit_relax_reason: extra.range_risk_limit_relax_reason ?? range_risk_limit_relax_reason,
-        range_risk_limit_relax_started_at:
-          extra.range_risk_limit_relax_started_at ?? range_risk_limit_relax_started_at,
-        range_risk_limit_relax_expires_at:
-          extra.range_risk_limit_relax_expires_at ?? range_risk_limit_relax_expires_at,
-        range_risk_limit_relax_active: extra.range_risk_limit_relax_active ?? range_risk_limit_relax_active,
-        range_risk_limit_relax_expired: extra.range_risk_limit_relax_expired ?? range_risk_limit_relax_expired,
-        range_soft_suspend_applied: extra.range_soft_suspend_applied ?? range_soft_suspend_applied,
-        range_soft_suspend_size_mult: extra.range_soft_suspend_size_mult ?? range_soft_suspend_size_mult,
-        range_soft_suspend_cooldown_ms: extra.range_soft_suspend_cooldown_ms ?? range_soft_suspend_cooldown_ms,
-        range_soft_suspend_same_direction_restricted:
-          extra.range_soft_suspend_same_direction_restricted ?? range_soft_suspend_same_direction_restricted,
-        range_bidirectional_applied: extra.range_bidirectional_applied ?? range_bidirectional_applied,
-        range_short_allowed: extra.range_short_allowed ?? range_short_allowed,
-        range_short_allowed_reason: extra.range_short_allowed_reason ?? range_short_allowed_reason,
-        range_upper_edge_near: extra.range_upper_edge_near ?? range_upper_edge_near,
-        range_center_wait: extra.range_center_wait ?? range_center_wait,
-        range_final_selected_side: extra.range_final_selected_side ?? range_final_selected_side,
-        range_reversal_zone: extra.range_reversal_zone ?? range_reversal_zone,
-        range_reversal_short_eval_started: extra.range_reversal_short_eval_started ?? range_reversal_short_eval_started,
-        range_reversal_long_exit_triggered: extra.range_reversal_long_exit_triggered ?? range_reversal_long_exit_triggered,
-        range_reversal_short_entry_allowed: extra.range_reversal_short_entry_allowed ?? range_reversal_short_entry_allowed,
-        range_reversal_short_entry_block_reason:
-          extra.range_reversal_short_entry_block_reason ?? range_reversal_short_entry_block_reason,
-        range_reversal_immediate_switch_applied:
-          extra.range_reversal_immediate_switch_applied ?? range_reversal_immediate_switch_applied,
-        range_reversal_immediate_switch_reason:
-          extra.range_reversal_immediate_switch_reason ?? range_reversal_immediate_switch_reason,
-        range_fresh_reentry_allowed: extra.range_fresh_reentry_allowed ?? range_fresh_reentry_allowed,
-        range_fresh_reentry_blocked_reason: extra.range_fresh_reentry_blocked_reason ?? range_fresh_reentry_blocked_reason,
-        range_fresh_reentry_size_mult: extra.range_fresh_reentry_size_mult ?? range_fresh_reentry_size_mult,
-        range_reentry_wait_bypassed_no_open_position:
-          extra.range_reentry_wait_bypassed_no_open_position ?? range_reentry_wait_bypassed_no_open_position,
-        range_loss_streak_reduced_entry_applied:
-          extra.range_loss_streak_reduced_entry_applied ?? range_loss_streak_reduced_entry_applied,
-        range_loss_streak_reduced_entry_size_mult:
-          extra.range_loss_streak_reduced_entry_size_mult ?? range_loss_streak_reduced_entry_size_mult,
-        range_zone_action_policy: extra.range_zone_action_policy ?? range_zone_action_policy,
-        range_zone_detected: (extra.range_zone_detected ?? range_zone_detected) as any,
-        range_upper_short_priority_applied: extra.range_upper_short_priority_applied ?? range_upper_short_priority_applied,
-        range_lower_long_priority_applied: extra.range_lower_long_priority_applied ?? range_lower_long_priority_applied,
-        range_mid_wait_applied: extra.range_mid_wait_applied ?? range_mid_wait_applied,
-        range_final_trade_side_by_zone: extra.range_final_trade_side_by_zone ?? range_final_trade_side_by_zone,
-        range_stage0_branch_proof:
-          "range_stage0_branch_proof" in extra ? extra.range_stage0_branch_proof : range_stage0_branch_proof,
-        legacy_block_reason: extra.legacy_block_reason ?? legacy_block_reason,
-        legacy_regime_gate: extra.legacy_regime_gate ?? legacy_regime_gate,
-        legacy_gate_source: extra.legacy_gate_source ?? legacy_gate_source,
-        override_by_legacy: extra.override_by_legacy ?? override_by_legacy,
-        stage1_block_origin: extra.stage1_block_origin ?? stage1_block_origin,
-        legacy_block_original_reason: extra.legacy_block_original_reason ?? legacy_block_original_reason,
-        currentStage: extra.currentStage !== undefined ? extra.currentStage : input.currentStage,
-        regime: extra.regime !== undefined ? extra.regime : input.regime,
-        stage1_signal_relaxed: extra.stage1_signal_relaxed ?? stage1SignalRelaxed,
-        signal_relax_reason: extra.signal_relax_reason ?? signalRelaxReason,
-        regime_original_state: extra.regime_original_state ?? originalRegimeState,
-        regime_fallback_applied: extra.regime_fallback_applied ?? regimeFallbackApplied,
-        regime_fallback_reason: extra.regime_fallback_reason ?? regimeFallbackReason,
-        range_confidence_diag: extra.range_confidence_diag !== undefined ? extra.range_confidence_diag : sn?.rangeConfidence,
-        box_cohesion_diag: extra.box_cohesion_diag !== undefined ? extra.box_cohesion_diag : sn?.boxCohesion01,
-        breakout_failure_rate_diag: extra.breakout_failure_rate_diag !== undefined ? extra.breakout_failure_rate_diag : sn?.breakoutFailureRate,
-        range_oscillation_diag: extra.range_oscillation_diag !== undefined ? extra.range_oscillation_diag : sn?.rangeOscillationScore,
-        trend_weakness_diag: extra.trend_weakness_diag !== undefined ? extra.trend_weakness_diag : sn?.trendWeaknessScore,
-        range_reason_label: extra.range_reason_label !== undefined ? extra.range_reason_label : sn?.rangeReasonLabel,
-        range_cycle_count: extra.range_cycle_count !== undefined ? extra.range_cycle_count : sn?.rangeCycleCount,
-        range_ladder_level: extra.range_ladder_level !== undefined ? extra.range_ladder_level : sn?.rangeLadderLevel,
-        regime_exit_risk: extra.regime_exit_risk !== undefined ? extra.regime_exit_risk : sn?.regimeExitRisk,
-        box_break_side: extra.box_break_side !== undefined ? extra.box_break_side : sn?.boxBreakSide,
-        regime_state_diag: extra.regime_state_diag !== undefined ? extra.regime_state_diag : sn?.regimeStateDiag,
-        entry_intent_type: extra.entry_intent_type !== undefined ? extra.entry_intent_type : res.executorDecision?.entryIntentType,
-        entry_confirmation_state: extra.entry_confirmation_state !== undefined ? extra.entry_confirmation_state : res.executorDecision?.entryConfirmationState,
-        scaling_permission: extra.scaling_permission !== undefined ? extra.scaling_permission : res.executorDecision?.scalingPermission,
-        probe_only_mode: extra.probe_only_mode !== undefined ? extra.probe_only_mode : res.executorDecision?.probeOnlyMode,
-        fee_drag_filter_applied: extra.fee_drag_filter_applied ?? fee_drag_filter_applied,
-        fee_drag_size_reduced: extra.fee_drag_size_reduced ?? fee_drag_size_reduced,
-        fee_drag_blocked: extra.fee_drag_blocked ?? fee_drag_blocked,
-        fee_drag_reason: extra.fee_drag_reason !== undefined ? extra.fee_drag_reason : fee_drag_reason,
-        fee_drag_proof: extra.fee_drag_proof !== undefined ? extra.fee_drag_proof : fee_drag_proof
-      }),
-      ...res
-    };
-  };
+  if (isRangeFallbackActive && final_decision_before_priority === "REJECT" && final_executor_before_priority === "TREND" && (extra.reject_reason === "EDGE_FAIL_FEE" || reject_reason === "EDGE_FAIL_FEE")) {
+    final_executor_after_priority = "RANGE";
+    final_reject_after_priority = null;
+    final_decision_after_priority = "SKIP";
+    range_executor_priority_applied = true;
+    range_executor_priority_reason = "range_diag_context_override_trend_reject_fee";
+  }
 
+
+  // --- 8. Core Pipeline Routing & Execution ---
   if (!input.dataReady || !input.snapshot) {
     return ret(
       {
@@ -2020,12 +1817,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const hasRangeContextMetrics = (sn.rangeConfidence ?? 0) >= 0.3 && (sn.boxCohesion01 ?? 0) >= 0.25;
   isRangeFallbackActive = contextRangeDiag && hasRangeContextMetrics && input.regime !== "NO_TRADE";
 
-  const useRangeStage0Engine =
+  useRangeStage0Engine =
     !v2AuthorityOwnsExecution &&
-    (input.regime === "RANGE" || isRangeFallbackActive) &&
+    !directionalOverride.blockRangeEntirely &&
+    ((sn as any).directionalRoutingApplied ? false : (overrideRegime === "RANGE" || isRangeFallbackActive)) &&
     input.currentStage === 0;
 
-  if (input.regime === "RANGE") {
+  if (overrideRegime === "RANGE") {
     console.log("STAGE_ROUTING_BOTTLENECK_PROOF", {
       symbol: String(sn.symbol),
       currentStage: input.currentStage,
@@ -2053,12 +1851,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     strategy_executor = "RANGE";
     rangeSignal = evaluateRangeStage0Signal(sn, input.rangeReversalImmediateSwitch);
     rangeScores = evaluateRangeStage0Scores(sn);
-    const blockedRegime = input.risk?.blockedRegimes?.[input.regime];
-    const blockedRegimeActive = !!(blockedRegime && blockedRegime.until > input.now);
-    const blockedRegimeReasonText = String(blockedRegime?.reason ?? "");
-    const blockedRegimeLossStreakSuspend =
+    blockedRegime = input.risk?.blockedRegimes?.[input.regime];
+    blockedRegimeActive = !!(blockedRegime && blockedRegime.until > input.now);
+    blockedRegimeReasonText = String(blockedRegime?.reason ?? "");
+    blockedRegimeLossStreakSuspend =
       blockedRegimeReasonText.includes("mode_loss_streak") || blockedRegimeReasonText.includes("highway_range_streak");
-    const rangeRiskRelaxEligible = input.regime === "RANGE" && blockedRegimeLossStreakSuspend;
+    rangeRiskRelaxEligible = input.regime === "RANGE" && blockedRegimeLossStreakSuspend;
     range_risk_limit_temporarily_relaxed = rangeRiskRelaxEligible;
     if (rangeRiskRelaxEligible) {
       range_risk_limit_relax_reason = RANGE_RISK_LIMIT_RELAX_REASON;
@@ -2070,8 +1868,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
     zone = classifyBoxZone(boxPos);
 
-    const riskEngineHardBlocked = input.risk?.crashState !== undefined && input.risk.crashState !== "NONE";
-    const riskEngineBlockedBySuspendOnly =
+    riskEngineHardBlocked = input.risk?.crashState !== undefined && input.risk.crashState !== "NONE";
+    riskEngineBlockedBySuspendOnly =
       input.risk?.engineBlocked === true &&
       blockedRegimeActive &&
       blockedRegimeLossStreakSuspend &&
@@ -2082,9 +1880,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     crashLockBypassSizeMult = 1.0;
 
     if (riskEngineHardBlocked && input.risk?.dailyLossGuardTriggered !== true) {
-      const isRangeLowerLong = zone === "lower" && rangeSignal.side === "long" && rangeSignal.signal === "RANGE_LONG_CANDIDATE";
-      const hasQuality = (sn.rangeConfidence ?? 0) >= 0.45 && (sn.boxCohesion01 ?? 0) >= 0.25;
-      const extremeLower = boxPos <= 0.22;
+      isRangeLowerLong = zone === "lower" && rangeSignal.side === "long" && rangeSignal.signal === "RANGE_LONG_CANDIDATE";
+      hasQuality = (sn.rangeConfidence ?? 0) >= 0.45 && (sn.boxCohesion01 ?? 0) >= 0.25;
+      extremeLower = boxPos <= 0.22;
 
       if (isRangeLowerLong && hasQuality && extremeLower) {
         crashLockBypassApplied = true;
@@ -2093,7 +1891,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       }
     }
 
-    const riskEngineBlocked = (!crashLockBypassApplied && riskEngineHardBlocked) || (input.risk?.engineBlocked === true && !riskEngineBlockedBySuspendOnly);
+    riskEngineBlocked = (!crashLockBypassApplied && riskEngineHardBlocked) || (input.risk?.engineBlocked === true && !riskEngineBlockedBySuspendOnly);
 
     if (zone === "lower" && rangeSignal.signal === "RANGE_LONG_CANDIDATE") {
       console.log("[RANGE_LONG_BLOCK_PROOF]", {
@@ -2121,12 +1919,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     const RANGE_SOFT_SUSPEND_SIZE_MULT = 0.35;
     const RANGE_SOFT_SUSPEND_COOLDOWN_MS = 45_000;
-    const edgeGateCurrent = rangeStage0EdgeStructureGate(sn);
-    const edgeStructureOkCurrent = edgeGateCurrent.ok;
-    const prioritySignalAligned =
+    edgeGateCurrent = rangeStage0EdgeStructureGate(sn);
+    edgeStructureOkCurrent = edgeGateCurrent.ok;
+    prioritySignalAligned =
       (zone === "upper" && rangeSignal.side === "short") || (zone === "lower" && rangeSignal.side === "long");
-    const noOpenPositionFreshEntry = !input.hasOpenPosition && input.openPositionsTotal === 0;
-    const freshReentryCandidate =
+    noOpenPositionFreshEntry = !input.hasOpenPosition && input.openPositionsTotal === 0;
+    freshReentryCandidate =
       noOpenPositionFreshEntry &&
       prioritySignalAligned &&
       edgeStructureOkCurrent &&
@@ -2160,12 +1958,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     range_reversal_zone = zone;
     range_reversal_short_eval_started = zone === "upper";
     range_reversal_long_exit_triggered = zone === "upper" && input.openPositionSide === "long";
-    const rangeLowerEdge = zone === "lower";
-    const rangeExitRiskOk = (sn.regimeExitRisk ?? 0) <= 0.62;
-    const rangeConfidenceOk = (sn.rangeConfidence ?? 0) >= 0.45;
-    const rangeBreakoutFailureOk = (sn.breakoutFailureRate ?? 0) >= 0.42;
-    const rangeSameDirBaseEligible = rangeConfidenceOk && rangeBreakoutFailureOk && rangeExitRiskOk;
-    const rangeReversalSwitchMatches =
+    rangeLowerEdge = zone === "lower";
+    rangeExitRiskOk = (sn.regimeExitRisk ?? 0) <= 0.62;
+    rangeConfidenceOk = (sn.rangeConfidence ?? 0) >= 0.45;
+    rangeBreakoutFailureOk = (sn.breakoutFailureRate ?? 0) >= 0.42;
+    rangeSameDirBaseEligible = rangeConfidenceOk && rangeBreakoutFailureOk && rangeExitRiskOk;
+    rangeReversalSwitchMatches =
       input.rangeReversalImmediateSwitch != null &&
       rangeSignal.side === input.rangeReversalImmediateSwitch.preferredSide &&
       ((input.rangeReversalImmediateSwitch.preferredSide === "short" && zone === "upper") ||
@@ -2197,18 +1995,18 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     lowConfidenceSignalMin = edgeRelaxZoneForConfidence ? 0.31 : 0.34;
     lowConfidenceEntryMin = edgeRelaxZoneForConfidence ? 0.33 : 0.36;
     lowConfidence = rangeScores.rangeSignalScore < lowConfidenceSignalMin || rangeScores.rangeEntryScore < lowConfidenceEntryMin;
-    let reentryBlocked = false;
+    reentryBlocked = false;
     range_reentry_wait_ms = null;
     range_reentry_elapsed_ms = null;
     range_reentry_remaining_ms = null;
     range_reentry_same_direction = false;
     range_reentry_source = "range_stage0_reentry";
     if (input.lastCloseMetaBySymbol && rangeSignal.side) {
-      const meta = input.lastCloseMetaBySymbol.get(String(sym));
-      const sameDirection = meta !== undefined && meta.side === rangeSignal.side;
+      meta = input.lastCloseMetaBySymbol.get(String(sym));
+      sameDirection = meta !== undefined && meta.side === rangeSignal.side;
       const waitMsBase = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
-      let waitMs = Math.min(waitMsBase, 95_000);
-      const elapsedMs = input.now - (meta?.closedAt ?? 0);
+      waitMs = Math.min(waitMsBase, 95_000);
+      elapsedMs = input.now - (meta?.closedAt ?? 0);
       range_reentry_same_direction = sameDirection;
       range_same_direction_reentry_center_blocked = range_center_wait;
       const rangeEdgeOkForSameDir =
@@ -2275,13 +2073,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       gateReason = rangeSignal.reason;
     } else if (rangeSignal.signal === "RANGE_SIGNAL_WAIT_RECHECK") {
       // PART 2: Soft pass if no position and strong signal.
-      const noOpenPos = !input.openPositionSide || input.openPositionSide === null;
-      const hasBaseCandidate =
+      noOpenPos = !input.openPositionSide || input.openPositionSide === null;
+      hasBaseCandidate =
         sn.signal === "paper_long_candidate" || sn.signal === "paper_short_candidate";
-      const hasStrongBaseSignal =
+      hasStrongBaseSignal =
         sn.signal_strength === "strong" || sn.trendOk === true;
 
-      const hardBlockedForSoftPass =
+      hardBlockedForSoftPass =
         riskEngineBlocked === true ||
         reentryBlocked === true ||
         (blockedRegimeActive &&
@@ -2346,7 +2144,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         zone,
         reversalImmediate: input.rangeReversalImmediateSwitch,
         gateResult,
-        gateReason,
+        gateReason: gateReason || "none",
         entryResult,
         range_upper_short_priority_applied,
         lowConfidence,
@@ -2562,11 +2360,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   // Initial core detection and scoring
   // Use an effective scoring regime so stage0 UNKNOWN/ambiguous contexts can still exercise RANGE-stage0 scoring.
-  const scoringRegime: "TREND" | "RANGE" | "NO_TRADE" =
+  scoringRegime =
     input.currentStage === 0 && (input.regime === "RANGE" || (regime_state === "UNKNOWN" && input.isAmbiguous))
       ? "RANGE"
       : (input.regime as "TREND" | "RANGE" | "NO_TRADE");
-  const rangeStage0ContextExpected = scoringRegime === "RANGE" && input.currentStage === 0;
+  rangeStage0ContextExpected = scoringRegime === "RANGE" && input.currentStage === 0;
 
   const _aiResult = evaluateAiHighwayQuality(input.snapshot?.candles ?? [], sym, {
     regime: scoringRegime,
@@ -2589,9 +2387,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   supplemental_reasons.push(`AI_SCORE_CONTEXT_RANGE_STAGE0_APPLIED_${_aiResult.rangeStage0ScoringApplied ? "Y" : "N"}`);
 
   if (!useRangeStage0Engine) {
-    let aiForHighway = _aiResult;
-    let skipHighwayExecutorCall = false;
-    const trendBoxEdgeBufferEligible =
+    aiForHighway = _aiResult;
+    skipHighwayExecutorCall = false;
+    trendBoxEdgeBufferEligible =
       input.regime === "TREND" &&
       input.currentStage === 0 &&
       typeof sn.boxPos === "number" &&
@@ -2599,7 +2397,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       _aiResult.state === HighwayTrendState.INVALID &&
       _aiResult.invalidTier === "hard_invalid";
     if (trendBoxEdgeBufferEligible) {
-      const z = classifyBoxZone(sn.boxPos);
+      z = classifyBoxZone(sn.boxPos as number);
       const atBoxEdge = z === "upper" || z === "lower";
       if (atBoxEdge) {
         const rangeRescore = evaluateAiHighwayQuality(input.snapshot?.candles ?? [], sym, {
@@ -2662,7 +2460,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
 
     if (!skipHighwayExecutorCall) {
-      let _entryIntent: "probe" | "standard" | "scale" | "trend" = "trend";
+      _entryIntent = "trend";
       if (aiForHighway.state === HighwayTrendState.VALID) {
         _entryIntent = "standard";
       } else if (aiForHighway.state === HighwayTrendState.WEAK) {
@@ -2738,7 +2536,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   if (regime_state === "UNKNOWN" && input.currentStage === 0 && stage1SignalRelaxed) {
     // Stage 1 soft candidate + UNKNOWN regime -> Fallback to RANGE if safety criteria met
-    const boxPos = sn?.boxPos ?? 0.5;
+    boxPos = sn?.boxPos ?? 0.5;
     const zoneFb = classifyBoxZone(boxPos);
     const boxNotCentered = boxPos < 0.45 || boxPos > 0.55;
     const qualityHighEnough = sn.qualityScore >= 35;
@@ -2858,9 +2656,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   intentSide = workingSignal === "paper_long_candidate" ? "long" : "short";
   rr = rrFromRegime(input.regime);
 
-  let stage1LoosenedEntry = false;
+  stage1LoosenedEntry = false;
   /** Stage 1만: 기대이동이 완화 비용 이하여도 탐색 진입 허용(하드 REJECT 안 함) */
-  let costWarningStage1 = false;
+  costWarningStage1 = false;
 
   const costGateComparable =
     typeof em === "number" &&
@@ -2941,10 +2739,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     input.regime === "RANGE" &&
     (signal_state === "LONG_CANDIDATE" || signal_state === "SHORT_CANDIDATE");
 
-  const rBlock = input.risk?.blockedRegimes?.[input.regime];
-  if (rBlock && rBlock.until > input.now) {
-    const remainingMs = rBlock.until - input.now;
-    blocked_regime_reason = rBlock.reason;
+  blockedRegime = input.risk?.blockedRegimes?.[input.regime];
+  if (blockedRegime && blockedRegime.until > input.now) {
+    const remainingMs = blockedRegime.until - input.now;
+    blocked_regime_reason = blockedRegime.reason;
     cooldown_remaining_ms = remainingMs;
     const nearEdgeRangeCandidate =
       input.currentStage === 0 &&
@@ -2952,7 +2750,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       typeof sn.boxPos === "number" &&
       (sn.boxPos <= 0.38 || sn.boxPos >= 0.62);
     const streakSuspend =
-      rBlock.reason.includes("mode_loss_streak") || rBlock.reason.includes("highway_range_streak");
+      blockedRegime.reason.includes("mode_loss_streak") || blockedRegime.reason.includes("highway_range_streak");
     const relaxModeCooldown =
       nearEdgeRangeCandidate &&
       streakSuspend &&
@@ -2962,7 +2760,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       risk_state = "SOFT_BLOCK";
       risk_cooldown_subreason = "blocked_regime_relaxed_range_stage0";
       supplemental_reasons.push("RISK_COOLDOWN_RELAXED_RANGE_STAGE0");
-      supplemental_reasons.push(`RISK_COOLDOWN_REASON_${String(rBlock.reason).toUpperCase()}`);
+      supplemental_reasons.push(`RISK_COOLDOWN_REASON_${String(blockedRegime.reason).toUpperCase()}`);
     } else {
       const regimeStateIsRange = sn.regimeStateDiag === "RANGE" || input.regime === "RANGE";
       const rangeRelaxWindowEligible = regimeStateIsRange && input.currentStage === 0 && streakSuspend;
@@ -2985,16 +2783,16 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
         input.regimeDetail?.dump_protection_hit === true ||
         input.regimeDetail?.volatility_guard_hit === true;
-      const previewMeta = input.lastCloseMetaBySymbol?.get(String(sym));
-      const previewSameDir = previewMeta !== undefined && previewMeta.side === intentSide;
-      const previewWaitMs = previewSameDir
+      meta = input.lastCloseMetaBySymbol?.get(String(sym));
+      sameDirection = meta !== undefined && meta.side === intentSide;
+      waitMs = sameDirection
         ? input.reentryCooldownMs * input.sameDirCooldownMult
         : input.reentryCooldownMs;
-      const previewElapsedMs = input.now - (previewMeta?.closedAt ?? 0);
+      elapsedMs = input.now - (meta?.closedAt ?? 0);
       const previewReentryActive =
-        (previewMeta?.closedAt ?? 0) > 0 &&
-        previewWaitMs > 0 &&
-        previewElapsedMs < previewWaitMs;
+        (meta?.closedAt ?? 0) > 0 &&
+        waitMs > 0 &&
+        elapsedMs < waitMs;
       const bypassBlockedRegimeUntilOnly =
         input.config.paperTestBypassBlockedRegimeUntilRangeStage0 === true &&
         regimeStateIsRange &&
@@ -3002,7 +2800,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         rangeStage0SignalActive &&
         !upperRiskHit &&
         !streakSuspend &&
-        !previewSameDir &&
+        !sameDirection &&
         !previewReentryActive;
       if (rangeRelaxWindowActive && streakSuspend && !upperRiskHit && rangeStage0SignalActive) {
         risk_state = "SOFT_BLOCK";
@@ -3012,7 +2810,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         blocked_regime_until_bypass_applied = true;
         blocked_regime_until_bypass_reason = "range_stage0_signal_alive_blocked_regime_until_only";
         blocked_regime_original_until_ms = remainingMs;
-        blocked_regime_original_reason = rBlock.reason;
+        blocked_regime_original_reason = blockedRegime.reason;
         risk_state = "SOFT_BLOCK";
         risk_cooldown_subreason = "blocked_regime_until_bypassed_test";
         supplemental_reasons.push("BLOCKED_REGIME_UNTIL_BYPASS_APPLIED");
@@ -3025,7 +2823,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         if (!reject_reason) reject_reason = "RISK_COOLDOWN";
         final_decision = "REJECT";
         supplemental_reasons.push("RISK_COOLDOWN");
-        supplemental_reasons.push(`RISK_COOLDOWN_REASON_${String(rBlock.reason).toUpperCase()}`);
+        supplemental_reasons.push(`RISK_COOLDOWN_REASON_${String(blockedRegime.reason).toUpperCase()}`);
       }
     }
   }
@@ -3041,12 +2839,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       (input.rangeReversalImmediateSwitch.preferredSide === "long" && classifyBoxZone(sn.boxPos) === "lower"));
 
   if (input.lastCloseMetaBySymbol && input.reentryCooldownMs > 0 && intentSide) {
-    const meta = input.lastCloseMetaBySymbol.get(String(sym));
+    meta = input.lastCloseMetaBySymbol.get(String(sym));
     const lastClose = meta?.closedAt ?? 0;
-    const elapsed = input.now - lastClose;
-    const sameDirection = meta !== undefined && meta.side === intentSide;
+    elapsedMs = input.now - lastClose;
+    sameDirection = meta !== undefined && meta.side === intentSide;
     same_dir_cooldown_applied = sameDirection;
-    let waitMs = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
+    waitMs = sameDirection ? input.reentryCooldownMs * input.sameDirCooldownMult : input.reentryCooldownMs;
     reentry_cooldown_original_ms = waitMs;
     reentry_cooldown_effective_ms = waitMs;
     reentry_cooldown_applied = false;
@@ -3080,7 +2878,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         sn.rangeCycleCount >= 2 &&
         (sn.boxCohesion01 ?? 0) >= 0.45;
       const directionFlipped = sameDirection === false;
-      const enoughTimeElapsed = elapsed >= Math.max(45_000, Math.floor(waitMs * 0.55));
+      const enoughTimeElapsed = elapsedMs >= Math.max(45_000, Math.floor(waitMs * 0.55));
       const lowerEdgeCandidate = typeof sn.boxPos === "number" && sn.boxPos <= 0.30;
       const upperEdgeCandidate = typeof sn.boxPos === "number" && sn.boxPos >= 0.70;
       const edgeCandidate = lowerEdgeCandidate || upperEdgeCandidate;
@@ -3110,29 +2908,29 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     if (rangeStage0SignalActive && lastClose > 0) {
       reentry_wait_ms = waitMs;
-      reentry_elapsed_ms = elapsed;
+      reentry_elapsed_ms = elapsedMs;
     }
 
-    if (lastClose > 0 && elapsed < waitMs && !rangeReversalGlobalReentryBypass) {
+    if (lastClose > 0 && elapsedMs < waitMs && !rangeReversalGlobalReentryBypass) {
       risk_state = "COOLDOWN";
       risk_cooldown_subreason =
         rangeStage0SignalActive && sameDirection
           ? "reentry_same_direction_wait_active"
           : "reentry_wait_active";
-      cooldown_remaining_ms = waitMs - elapsed;
+      cooldown_remaining_ms = waitMs - elapsedMs;
       if (!reject_reason) reject_reason = "RISK_FAIL_REENTRY";
       final_decision = "REJECT";
       supplemental_reasons.push("RISK_FAIL_REENTRY");
       if (reentry_cooldown_reason) supplemental_reasons.push(`REENTRY_COOLDOWN_REASON_${reentry_cooldown_reason}`);
       supplemental_reasons.push(`REENTRY_COOLDOWN_WAIT_MS_${String(waitMs)}`);
-    } else if (lastClose > 0 && elapsed < waitMs && rangeReversalGlobalReentryBypass) {
+    } else if (lastClose > 0 && elapsedMs < waitMs && rangeReversalGlobalReentryBypass) {
       supplemental_reasons.push("RANGE_REVERSAL_GLOBAL_REENTRY_BYPASS");
     }
   }
 
   if (input.risk && input.risk.sizeMultiplier < 1 && !input.risk.dailyLossGuardTriggered) {
-    const br = input.risk.blockedRegimes?.[input.regime];
-    if (!(br && br.until > input.now)) {
+    blockedRegime = input.risk.blockedRegimes?.[input.regime];
+    if (!(blockedRegime && blockedRegime.until > input.now)) {
       risk_state = "SOFT_BLOCK";
     }
   }
@@ -3796,8 +3594,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       authority_side: authority?.side ?? null,
       authority_size_usd: authority?.sizeUsd ?? null,
       adaptive_ok: adaptive?.ok ?? null,
-      fail_stage: (adaptive && !adaptive.ok) ? adaptive.failStage ?? null : null,
-      fail_reason: (adaptive && !adaptive.ok) ? adaptive.orderBuildFailReason ?? null : null,
+      fail_stage: (adaptive && !adaptive.ok) ? (adaptive as any).failStage ?? null : null,
+      fail_reason: (adaptive && !adaptive.ok) ? (adaptive as any).orderBuildFailReason ?? null : null,
       signal: sn?.signal ?? null,
       trend_ok: sn?.trendOk ?? null,
       candidate_strength: (sn as any)?.candidateStrength ?? null,
@@ -3806,7 +3604,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     // Consolidate reasons: Use policy failure over executor failure if it's from entry_policy
     if (adaptive && !adaptive.ok) {
-      executorBlockReasonOriginal = adaptive.orderBuildFailReason;
+      executorBlockReasonOriginal = (adaptive as any).orderBuildFailReason;
     }
   }
 
@@ -3817,11 +3615,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     (authority.sizeUsd ?? 0) > 0;
 
   const hardBlockedForExecution =
-    severeRiskLock === true ||
+    !!severeRiskLock ||
     risk_state === "HARD_BLOCK";
 
   if (adaptive && !adaptive.ok) {
-    const af = adaptive as Extract<FuturesAdaptiveEntryResult, { ok: false }>;
+    const af: any = adaptive;
     const isEntryPolicyFailure = af.failStage === "entry_policy";
     const authorityBypassesPolicyVeto = hasAuthorityEnterFromV2 && isEntryPolicyFailure && !hardBlockedForExecution;
 
@@ -3831,7 +3629,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       reject_reason = "AUTHORITY_ADAPTIVE_SOFT_PASS";
       supplemental_reasons.push("AUTHORITY_ADAPTIVE_SOFT_PASS");
       adaptiveOk = true;
-      adaptiveDetailOut = adaptive.detail ?? null;
+      adaptiveDetailOut = (adaptive as any).detail ?? null;
 
       console.log("[AUTHORITY_ADAPTIVE_Bypass_POLICY_VETO]", {
         authority_decision: authority.decision,
@@ -3880,7 +3678,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           order_build_fail_stage: af.failStage,
           final_block_owner: blockOwner,
           adaptive_fail_stage: af.failStage,
-          adaptive_fail_reason: af.orderBuildFailReason
+          adaptive_fail_reason: af.orderBuildFailReason,
+          logMessage: af.logMessage
         },
         {
           intentSide,
@@ -4113,4 +3912,34 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       aiGatePassed: true
     }
   );
+
+  if (directionalOverride.blockRangeEntirely) {
+    const isMatchingSide = (sn?.signal === "paper_long_candidate" && directionalOverride.forcedSide === "long") ||
+      (sn?.signal === "paper_short_candidate" && directionalOverride.forcedSide === "short");
+
+    if (!isMatchingSide) {
+      return ret(
+        {
+          signal_state: signalToState(sn?.signal as any),
+          regime_state: regimeToState(input.regime, input.regimeUnknown),
+          edge_state: "FAIL_EXPECTANCY",
+          risk_state: "DIRECTIONAL_SHOCK",
+          execution_state: "DISABLED",
+          final_decision: "REJECT",
+          reject_reason: "RISK_COOLDOWN",
+          stage1_result_code: "STAGE1_BLOCKED_RISK",
+          supplemental_reasons: ["DIRECTIONAL_BIAS_BLOCKED", `shock:${directionalOverride.reason}`],
+          adaptive_decision: "REJECT"
+        },
+        {
+          intentSide: (sn?.signal === "paper_long_candidate") ? "long" : "short",
+          executorDecision: null,
+          adaptiveOk: false,
+          adaptiveDetail: { directional_blocking: true, reason: directionalOverride.reason },
+          adaptiveResult: null,
+          aiGatePassed: false
+        }
+      );
+    }
+  }
 }
