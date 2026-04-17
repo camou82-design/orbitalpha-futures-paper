@@ -64,6 +64,7 @@ import {
   sumDecisionFunnelTicks
 } from "./decision-funnel";
 import { evaluatePaperSymbolEntry, type EvaluatePaperSymbolEntryResult, type SymbolSnapshotLike } from "./paper-symbol-decision";
+import { deriveDirectionalRoutingOverride } from "./directional-routing";
 import {
   computePaperCloseLegMetrics,
   finalizePaperClosedRecord,
@@ -648,6 +649,7 @@ export class PaperEngine {
   private lastRegime: MarketRegimeDetection = INITIAL_ENGINE_REGIME;
   private lastHealthyBtcRegime: { detected: MarketRegimeDetection; ts: number } | null = null;
   private lastRisk: RiskControlDecision | null = null;
+  private lastEffectiveLane: string = "IDLE";
   private lastModeChangeAt: number = 0;
   private lastEntryDecision: AnyEntryDecision | null = null;
   private rangeCooldownUntilByKey = new Map<string, number>();
@@ -874,33 +876,6 @@ export class PaperEngine {
       }
     }
     this.lastRegime = regimeDetected;
-    this.logger.info("regime_decision", {
-      regime_final: regimeDetected.log.regime_final,
-      regime_raw: regimeDetected.log.regime_raw,
-      no_trade_reason: regimeDetected.log.no_trade_reason,
-      unknown_reason: regimeDetected.log.unknown_reason,
-      data_ready: regimeDetected.log.data_ready,
-      dump_protection_hit: regimeDetected.log.dump_protection_hit,
-      volatility_guard_hit: regimeDetected.log.volatility_guard_hit,
-      len_btc_5m: btc5.length,
-      btc_feed_ok: btc5r.ok,
-      btc_feed_fallback_applied: btcFeedFallbackApplied,
-      btc_feed_fallback_age_ms: btcFeedFallbackAgeMs,
-      regime_fallback_source: regimeFallbackSource
-    });
-    if (regimeDetected.regime !== prevRegime) {
-      this.lastModeChangeAt = Date.now();
-      await this.store.appendJsonlLine("reports/events.jsonl", {
-        ts: this.lastModeChangeAt,
-        type: "MODE_CHANGE",
-        regime: regimeDetected.regime,
-        from: prevRegime,
-        executor: regimeDetected.regime === "RANGE" ? "RANGE" : regimeDetected.regime === "TREND" ? "TREND" : "IDLE"
-      });
-    }
-    const adaptiveMode: FuturesMarketMode =
-      regimeDetected.regime === "TREND" ? "trend" : regimeDetected.regime === "RANGE" ? "sideways" : "risk_off";
-    this.lastAdaptiveMode = { mode: adaptiveMode, detail: regimeDetected.detail };
 
     const btc1m_r = await this.bybit.tryGetCandles("BTCUSDT", "1m", 60);
     const btc1m = btc1m_r.ok ? btc1m_r.value : [];
@@ -917,6 +892,51 @@ export class PaperEngine {
       rangeConfidence: regimeDetected.rangeConfidence
     });
     const risk = this.lastRisk;
+
+    // --- Directional Routing Override Evaluation (Tick Master Switch) ---
+    const routingOverride = deriveDirectionalRoutingOverride({
+      rawRegime: regimeDetected.regime,
+      directionalShockState: risk.directionalShockState
+    });
+
+    this.logger.info("regime_decision", {
+      regime_final: regimeDetected.log.regime_final,
+      regime_raw: regimeDetected.log.regime_raw,
+      effective_lane: routingOverride.effectiveExecutionLane,
+      shock_state: routingOverride.directionalShockState,
+      no_trade_reason: regimeDetected.log.no_trade_reason,
+      unknown_reason: regimeDetected.log.unknown_reason,
+      data_ready: regimeDetected.log.data_ready,
+      dump_protection_hit: regimeDetected.log.dump_protection_hit,
+      volatility_guard_hit: regimeDetected.log.volatility_guard_hit,
+      len_btc_5m: btc5.length,
+      btc_feed_ok: btc5r.ok,
+      btc_feed_fallback_applied: btcFeedFallbackApplied,
+      btc_feed_fallback_age_ms: btcFeedFallbackAgeMs,
+      regime_fallback_source: regimeFallbackSource
+    });
+
+    const prevLane = this.lastEffectiveLane;
+    if (routingOverride.effectiveExecutionLane !== prevLane) {
+      this.lastModeChangeAt = Date.now();
+      await this.store.appendJsonlLine("reports/events.jsonl", {
+        ts: this.lastModeChangeAt,
+        type: "MODE_CHANGE",
+        regime_raw: regimeDetected.regime,
+        effective_lane: routingOverride.effectiveExecutionLane,
+        from_lane: prevLane,
+        override_applied: routingOverride.overrideApplied,
+        override_reason: routingOverride.overrideReason,
+        executor: routingOverride.effectiveExecutionLane
+      });
+      this.lastEffectiveLane = routingOverride.effectiveExecutionLane;
+    }
+
+    const adaptiveMode: FuturesMarketMode =
+      routingOverride.effectiveExecutionLane === "TREND" ? "trend" :
+        routingOverride.effectiveExecutionLane === "RANGE" ? "sideways" : "risk_off";
+    this.lastAdaptiveMode = { mode: adaptiveMode, detail: regimeDetected.detail };
+
 
     const snapshots: SymbolSnapshot[] = [];
     const errors: { symbol: MarketSymbol; error: string; failedEndpoint: FailureEndpointKey }[] = [];
@@ -1092,6 +1112,9 @@ export class PaperEngine {
     const regimeUnknown = btc5.length < MIN_BTC_5M_BARS_REGIME;
     const polledSymbols = this.config.symbols;
     const decisionBySymbol = new Map<string, PaperEngineDecisionEnvelope>();
+    const effectiveLane = routingOverride.effectiveExecutionLane;
+    const effectiveRegimeForDecision = (effectiveLane === "IDLE" ? "NO_TRADE" : effectiveLane) as MarketRegime;
+
     for (const sym of polledSymbols) {
       const symKeyEarly = String(sym);
       const snap = snapshots.find((s) => s.symbol === sym);
@@ -1105,7 +1128,7 @@ export class PaperEngine {
         symKeyEarly,
         snap ?? null,
         fetchedAt,
-        regimeDetected.regime,
+        effectiveRegimeForDecision,
         marketModeOut.routing.activeEngine
       );
 
@@ -1118,7 +1141,7 @@ export class PaperEngine {
           snapshot: null,
           dataReady: regimeUnknown === false,
           openPositionSide: existingPos?.side ?? null,
-          regime: regimeDetected.regime,
+          regime: effectiveRegimeForDecision,
           regimeDetail: regimeDetected.detail,
           regimeUnknown,
           isAmbiguous: regimeDetected.isAmbiguous,
@@ -1142,7 +1165,8 @@ export class PaperEngine {
           "PAPER_TRADE_BLOCK_DECOMPOSITION",
           this.paperTradeBlockDecompositionPayload(sym, null, resNull, {
             nowTick: fetchedAt,
-            regime: regimeDetected.regime,
+            regime: effectiveRegimeForDecision,
+            effectiveLane,
             regimeUnknown,
             isAmbiguous: regimeDetected.isAmbiguous,
             maxPositionsReached: false,
@@ -1161,7 +1185,7 @@ export class PaperEngine {
         snapshot: snap,
         dataReady: regimeUnknown === false,
         openPositionSide: existingPos?.side ?? null,
-        regime: regimeDetected.regime,
+        regime: effectiveRegimeForDecision,
         regimeDetail: regimeDetected.detail,
         regimeUnknown,
         isAmbiguous: regimeDetected.isAmbiguous,
@@ -1290,21 +1314,19 @@ export class PaperEngine {
           last_switch_reason: this.lastSwitchReasonLabel,
           engine_mode: this.config.paperEngineMode,
           execution_state: risk.engineBlocked ? "DISABLED" : "PAPER_READY",
-          strategy_executor:
-            this.lastAdaptiveMode.mode === "trend" ? "TREND" : this.lastAdaptiveMode.mode === "sideways" ? "RANGE" : "IDLE",
-          current_regime: (regimeDetected.regime === "TREND" ? "TREND" : regimeDetected.regime === "RANGE" ? "RANGE" : "NO_TRADE") as PaperRegimeState,
+          strategy_executor: routingOverride.effectiveExecutionLane,
+          current_regime: (routingOverride.effectiveExecutionLane === "IDLE" ? "NO_TRADE" : routingOverride.effectiveExecutionLane) as PaperRegimeState,
           is_ambiguous: regimeDetected.isAmbiguous,
           adaptiveMode: this.lastAdaptiveMode.mode,
           engine_status: risk.dailyLossGuardTriggered ? "PAUSED" : "RUNNING",
           risk_state: risk.riskStatus,
-          active_mode_executor:
-            regimeDetected.regime === "RANGE" ? "RANGE" : regimeDetected.regime === "TREND" ? "TREND" : "IDLE",
+          active_mode_executor: routingOverride.effectiveExecutionLane,
           entryAllowed:
-            regimeDetected.regime !== "NO_TRADE" &&
+            routingOverride.effectiveExecutionLane !== "IDLE" &&
             risk.engineBlocked !== true &&
             !(regimeBlocked && !statusRelaxBypass),
           blocked_reason:
-            regimeDetected.regime === "NO_TRADE"
+            routingOverride.effectiveExecutionLane === "IDLE"
               ? (regimeDetected.detail.reason ?? "no_trade")
               : risk.engineBlockReasons?.[0] ?? null,
           expected_move: this.lastEntryDecision?.expected_move ?? null,
@@ -1368,54 +1390,29 @@ export class PaperEngine {
       return;
     }
 
-    if (d.final_decision === "SKIP" && d.reject_reason === "LONG_ONLY_SHORT_DEFERRED") {
-      await this.store.appendJsonlLine("reports/events.jsonl", {
-        ts: nowTs,
-        type: "LONG_ONLY_SHORT_DEFERRED",
-        symbol: sym,
-        regime: this.lastRegime.regime,
-        executor: ex?.executor ?? null,
-        reject_code: d.reject_reason,
-        stage1_result_code: d.stage1_result_code ?? null,
-        long_only_restriction: d.long_only_restriction === true,
-        original_signal_state: d.original_signal_state ?? null,
-        final_signal_state: d.final_signal_state ?? null,
-        execution_disabled_reason: d.execution_disabled_reason ?? null,
-        expected_move:
-          typeof ex?.expected_move === "number" && Number.isFinite(ex.expected_move) ? ex.expected_move : null,
-        total_cost: ex?.total_cost ?? null,
-        risk_state: ex?.risk_state ?? this.lastRisk?.riskStatus ?? "NORMAL",
-        supplemental_reasons: d.supplemental_reasons ?? [],
-        adaptive_direction: null,
-        detail: res.adaptiveDetail,
-        ...buildAuthorityEventMeta(authority)
-      });
-      return;
-    }
-
-    if (ex?.entry_allowed) {
-      await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, this.lastRegime.regime, ex, authority));
-    }
-
-    if (authority.decision === "REJECT" || authority.decision === "DISABLED") {
-      if (ex?.entry_allowed && (d.reject_reason === "AI_REJECT" || d.reject_reason === "AI_DIRECTION_MISMATCH")) {
-        const intentSide = (authority.side === "long" || authority.side === "short") ? authority.side : "long";
-        const lossStreak = this.lastRisk?.recentLossStreakByMode?.[this.lastRegime.regime] ?? 0;
-        const last10Net =
-          typeof this.lastRisk?.detail?.last10_net_usd === "number" && Number.isFinite(this.lastRisk.detail.last10_net_usd)
-            ? this.lastRisk.detail.last10_net_usd
-            : 0;
-        const aiIn = ex ? aiInputFromDecision({ decision: ex, executorDirection: intentSide, lossStreak, last10Net }) : null;
-        if (aiIn) {
-          const aiOut = aiApproveEntry(aiIn);
-          await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, this.lastRegime.regime, aiIn, aiOut, authority));
-        }
-      }
-
-      await this.store.appendJsonlLine("reports/events.jsonl", buildEntryBlockedEventPayload(sym, this.lastRegime.regime, res, authority, this.lastRisk?.riskStatus ?? "NORMAL"));
-      return;
-    }
-
+    const effectiveRegime = this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane;
+    await this.store.appendJsonlLine("reports/events.jsonl", {
+      ts: nowTs,
+      type: "LONG_ONLY_SHORT_DEFERRED",
+      symbol: sym,
+      regime: effectiveRegime,
+      executor: ex?.executor ?? null,
+      reject_code: d.reject_reason,
+      stage1_result_code: d.stage1_result_code ?? null,
+      long_only_restriction: d.long_only_restriction === true,
+      original_signal_state: d.original_signal_state ?? null,
+      final_signal_state: d.final_signal_state ?? null,
+      execution_disabled_reason: d.execution_disabled_reason ?? null,
+      expected_move:
+        typeof ex?.expected_move === "number" && Number.isFinite(ex.expected_move) ? ex.expected_move : null,
+      total_cost: ex?.total_cost ?? null,
+      risk_state: ex?.risk_state ?? this.lastRisk?.riskStatus ?? "NORMAL",
+      supplemental_reasons: d.supplemental_reasons ?? [],
+      adaptive_direction: null,
+      detail: res.adaptiveDetail,
+      effective_lane: this.lastEffectiveLane,
+      ...buildAuthorityEventMeta(authority)
+    });
     if (d.reject_reason === "ORDER_BUILD_FAIL") {
       const structured = orderBuildFailureStructuredPayload(first, res, entryStage, this.lastRegime.regime);
       await this.store.appendJsonlLine("reports/events.jsonl", {
@@ -1426,6 +1423,29 @@ export class PaperEngine {
         ...structured,
         ...buildAuthorityEventMeta(authority)
       });
+      return;
+    }
+
+    if (ex?.entry_allowed) {
+      await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, effectiveRegime, ex, authority));
+    }
+
+    if (authority.decision === "REJECT" || authority.decision === "DISABLED") {
+      if (ex?.entry_allowed && (d.reject_reason === "AI_REJECT" || d.reject_reason === "AI_DIRECTION_MISMATCH")) {
+        const intentSide = (authority.side === "long" || authority.side === "short") ? authority.side : "long";
+        const lossStreak = this.lastRisk?.recentLossStreakByMode?.[effectiveRegime as MarketRegime] ?? 0;
+        const last10Net =
+          typeof this.lastRisk?.detail?.last10_net_usd === "number" && Number.isFinite(this.lastRisk.detail.last10_net_usd)
+            ? this.lastRisk.detail.last10_net_usd
+            : 0;
+        const aiIn = ex ? aiInputFromDecision({ decision: ex, executorDirection: intentSide, lossStreak, last10Net }) : null;
+        if (aiIn) {
+          const aiOut = aiApproveEntry(aiIn);
+          await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, effectiveRegime, aiIn, aiOut, authority));
+        }
+      }
+
+      await this.store.appendJsonlLine("reports/events.jsonl", buildEntryBlockedEventPayload(sym, effectiveRegime, res, authority, this.lastRisk?.riskStatus ?? "NORMAL"));
       return;
     }
   }
@@ -1544,6 +1564,7 @@ export class PaperEngine {
       openPositionsTotal: number;
       hasOpenForSymbol: boolean;
       dataReady: boolean;
+      effectiveLane: string;
     }>
   ): Record<string, unknown> {
     const d = res.decision;
@@ -1641,8 +1662,8 @@ export class PaperEngine {
       oneLineWhyNoEnter = `CAPACITY: open_slots_full (total=${ctx.openPositionsTotal} max=${ctx.paperMaxOpenPositions}) and this symbol has no position → new entry blocked`;
     } else if (risk?.engineBlocked === true) {
       oneLineWhyNoEnter = `RISK_ENGINE_BLOCKED: ${risk.engineBlockReasons?.[0] ?? "no_reason"}`;
-    } else if (ctx.regime === "NO_TRADE") {
-      oneLineWhyNoEnter = "REGIME_NO_TRADE: detector returned NO_TRADE for this tick";
+    } else if (ctx.effectiveLane === "IDLE") {
+      oneLineWhyNoEnter = `REGIME_IDLE: effective lane is IDLE (raw_regime=${ctx.regime})`;
     } else if (regimeBlockActive && br) {
       oneLineWhyNoEnter = `RISK_REGIME_SUSPENDED: regime=${ctx.regime} remaining_ms=${Math.max(0, br.until - ctx.nowTick)} reason=${br.reason}`;
     } else if (rexp && !rexp.allowNewEntry) {
@@ -1668,6 +1689,7 @@ export class PaperEngine {
       marker: "PAPER_TRADE_BLOCK_DECOMPOSITION",
       at_ms: ctx.nowTick,
       symbol: String(sym),
+      effective_lane: ctx.effectiveLane,
       data_ready: ctx.dataReady,
       final_core: {
         final_decision: d.final_decision,
