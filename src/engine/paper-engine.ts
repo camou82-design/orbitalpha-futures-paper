@@ -1299,8 +1299,8 @@ export class PaperEngine {
 
       try {
         const risk = this.lastRisk!;
-        const regimeBlocked = (risk.blockedRegimes?.[regimeDetected.regime]?.until ?? 0) > fetchedAt;
-        const statusRelaxBypass = regimeDetected.regime === "RANGE" &&
+        const regimeBlocked = (risk.blockedRegimes?.[effectiveRegimeForDecision]?.until ?? 0) > fetchedAt;
+        const statusRelaxBypass = effectiveRegimeForDecision === "RANGE" &&
           this.config.paperEngineMode === "PAPER_TEST" &&
           decisionBySymbolValues.some((v) =>
             v.decision.range_risk_limit_relax_active === true &&
@@ -1311,7 +1311,7 @@ export class PaperEngine {
           );
 
         const statusBlockedReasonOriginal = regimeBlocked
-          ? (risk.blockedRegimes?.[regimeDetected.regime]?.reason ?? "mode_suspended")
+          ? (risk.blockedRegimes?.[effectiveRegimeForDecision]?.reason ?? "mode_suspended")
           : null;
         const statusBlockedReasonFinal = statusRelaxBypass ? null : statusBlockedReasonOriginal;
 
@@ -1427,7 +1427,7 @@ export class PaperEngine {
       return;
     }
     if (d.reject_reason === "ORDER_BUILD_FAIL") {
-      const structured = orderBuildFailureStructuredPayload(first, res, entryStage, this.lastRegime.regime);
+      const structured = orderBuildFailureStructuredPayload(first, res, entryStage, effectiveRegime as MarketRegime);
       await this.store.appendJsonlLine("reports/events.jsonl", {
         ts: nowTs,
         type: "ORDER_BUILD_FAIL",
@@ -2142,7 +2142,7 @@ export class PaperEngine {
       const closePrice = snap.lastPrice;
       const closedAt = snap.fetchedAt;
       const regimeAtEntry = open.regimeAtEntry ?? "NO_TRADE";
-      const regimeNow = this.lastRegime.regime;
+      const regimeNow = input.marketMode.marketMode as MarketRegime;
       const slRegime: MarketRegime = exitLane === "RANGE" ? "RANGE" : "TREND";
       const leg = (marginUsd: number) =>
         computePaperCloseLegMetrics({
@@ -3391,7 +3391,7 @@ export class PaperEngine {
         effective_adaptive_present: effectiveAdaptiveResult != null
       });
 
-      if (this.lastRegime.regime === "RANGE") {
+      if (this.lastEffectiveLane === "RANGE") {
         const origSnap = input.snapshots.find((s) => s.symbol === first.symbol);
         const qz = typeof first.boxPos === "number" ? classifyBoxZone(first.boxPos) : null;
 
@@ -3478,7 +3478,7 @@ export class PaperEngine {
       this.lastEntryDecision = res.executorDecision ?? null;
 
       if (res.decision.reject_reason === "ORDER_BUILD_FAIL" && res.executorDecision?.entry_allowed) {
-        const ob = orderBuildFailureStructuredPayload(first, res, entryStage, this.lastRegime.regime);
+        const ob = orderBuildFailureStructuredPayload(first, res, entryStage, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime);
         this.logger.info("STAGE1_ENTER_DECIDED", ob);
         this.logger.info("STAGE1_POSITION_OPEN_ATTEMPT", ob);
         this.logger.info("ORDER_BUILD_FAIL", ob);
@@ -3519,9 +3519,9 @@ export class PaperEngine {
       const adaptive = effectiveAdaptiveResult;
       const sym = String(first.symbol);
 
-      await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, this.lastRegime.regime, decision, authority));
+      await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime, decision, authority));
 
-      const lossStreak = this.lastRisk?.recentLossStreakByMode?.[this.lastRegime.regime] ?? 0;
+      const lossStreak = this.lastRisk?.recentLossStreakByMode?.[(this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime] ?? 0;
       const last10Net =
         typeof this.lastRisk?.detail?.last10_net_usd === "number" && Number.isFinite(this.lastRisk.detail.last10_net_usd)
           ? this.lastRisk.detail.last10_net_usd
@@ -3535,12 +3535,12 @@ export class PaperEngine {
       if (aiIn) {
         const aiOut = aiApproveEntry(aiIn);
         const aiDir = aiOut.action === "ENTER_LONG" ? "long" : aiOut.action === "ENTER_SHORT" ? "short" : "none";
-        await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, this.lastRegime.regime, aiIn, aiOut, authority));
+        await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime, aiIn, aiOut, authority));
       }
 
       this.logger.info("STAGE1_ENTER_DECIDED", {
         symbol: sym,
-        regime: this.lastRegime.regime,
+        regime: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
         executor: decision.executor,
         stage1_result_code: res.decision.stage1_result_code,
         fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
@@ -3672,7 +3672,7 @@ export class PaperEngine {
           );
         }
         const symS = String(first.symbol);
-        if (this.lastRegime.regime === "TREND" && this.lastMarketMode?.routing.activeEngine === "TREND") {
+        if (this.lastMarketMode?.routing.activeEngine === "TREND") {
           const pyr = this.trendPyramidLevelBySymbol.get(symS) ?? 0;
           entrySizeUsd = Math.max(
             MIN_POSITION_SIZE_USD,
@@ -3867,7 +3867,7 @@ export class PaperEngine {
         const entryIdentity = this.resolveEntryIdentity(
           authority,
           decision,
-          this.lastRegime.regime
+          (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as PaperRegimeState
         );
 
         const record: PaperOpenPositionRecord = {
@@ -3929,7 +3929,7 @@ export class PaperEngine {
         if (res.decision.range_reversal_immediate_switch_applied === true) {
           this.rangeReversalSwitchPendingBySymbol.delete(sym);
         }
-        if (this.lastRegime.regime === "RANGE") {
+        if (this.lastEffectiveLane === "RANGE") {
           const fillZone = typeof first.boxPos === "number" ? classifyBoxZone(first.boxPos) : null;
           const origOpen = input.snapshots.find((s) => s.symbol === first.symbol);
           const fillProof = {
