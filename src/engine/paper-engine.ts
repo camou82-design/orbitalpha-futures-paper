@@ -1078,7 +1078,7 @@ export class PaperEngine {
       }
     }
     const boxCohesion01 = computeAvgBoxCohesion01(snapshots);
-    const marketModeOut = evaluateMarketModeSelector({
+    const rawMarketModeOut = evaluateMarketModeSelector({
       regimeDetection: regimeDetected,
       fetchedAt,
       snapshotCount: snapshots.length,
@@ -1087,6 +1087,16 @@ export class PaperEngine {
       recentTrendSwitchCount1h: this.pruneTrendSwitches1h(fetchedAt),
       boxCohesion01
     });
+
+    const marketModeOut: MarketModeSelectorOutput = {
+      ...rawMarketModeOut,
+      marketMode: routingOverride.effectiveExecutionLane === "IDLE" ? "NO_TRADE" :
+        (routingOverride.effectiveExecutionLane === "TREND" ? "TREND" : "RANGE"),
+      routing: {
+        ...rawMarketModeOut.routing,
+        activeEngine: routingOverride.effectiveExecutionLane
+      }
+    };
     this.lastMarketMode = marketModeOut;
     const riskExposureOut = evaluateRiskExposure({
       config: this.config,
