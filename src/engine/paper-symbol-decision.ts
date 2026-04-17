@@ -38,6 +38,11 @@ import type { PaperCandidateStrength } from "../strategy/entry-signal";
 import { PIPELINE_VERSION } from "./decision-funnel";
 import { classifyBoxZone, RANGE_ZONE_ACTION_POLICY } from "./range-engine";
 import type { RangeBoxZone } from "../models/types";
+import {
+  evaluateDirectionalTrendEntryGuard,
+  deriveDirectionalRoutingOverride,
+  type DirectionalRoutingOverride
+} from "./directional-routing";
 
 /** RANGE·Stage0·RISK_FAIL_REENTRY: 부분익절/TP 계열 청산 후 동일 심볼 재진입 대기만 완화(손절·증액 단계 제외). */
 const RANGE_STAGE0_REENTRY_RELAX_MULT = 0.35;
@@ -137,7 +142,7 @@ export function paperTradeBlockDecompositionPayload(
     symbol: String(symbol),
     final_decision: p.final_decision,
     reject_reason: p.reject_reason,
-    reject_reason_original: p.reject_reason_original,
+    reject_reason_original: (p as any).reject_reason_original,
     now: fields.nowTick,
     regime: fields.regime,
     regimeUnknown: fields.regimeUnknown,
@@ -175,7 +180,7 @@ export function evaluateDirectionalTrendAddOnGuard(args: {
   regime: MarketRegime;
   side: "long" | "short";
   symbol: MarketSymbol;
-  directionalOverride: import("../models/types").DirectionalRoutingOverride;
+  directionalOverride: any;
 }): {
   allowed: boolean;
   reason: string;
@@ -255,69 +260,6 @@ export function evaluateDirectionalTrendAddOnGuard(args: {
   };
 }
 
-function evaluateDirectionalTrendEntryGuard(args: {
-  config: EngineConfig;
-  snapshot: SymbolSnapshotLike;
-  risk: RiskControlDecision;
-  regime: MarketRegime;
-}): {
-  allowTrendOverride: boolean;
-  blockRangeEntirely: boolean;
-  forcedSide: "long" | "short" | null;
-  reason: string;
-  effective_execution_lane: "RANGE" | "TREND";
-  directional_shock_state: "UP" | "DOWN" | "NONE";
-  directional_bias: "long" | "short" | "none";
-  directional_routing_override_applied: boolean;
-} {
-  const shock = args.risk.directionalShockState;
-  const longAllow = args.risk.longAllow;
-  const shortAllow = args.risk.shortAllow;
-  const signal = args.snapshot.signal;
-
-  // 1. Downside Shock Logic (DOWN)
-  if (shock === "DOWN") {
-    const isShortSignal = signal === "paper_short_candidate";
-
-    return {
-      allowTrendOverride: true,
-      blockRangeEntirely: true,
-      forcedSide: "short",
-      reason: isShortSignal ? `DIRECTIONAL_SHORT_OVERRIDE (shock: DOWN)` : "DIRECTIONAL_LONG_BLOCKED_BY_DOWN_SHOCK",
-      effective_execution_lane: "TREND",
-      directional_shock_state: "DOWN",
-      directional_bias: "short",
-      directional_routing_override_applied: true
-    };
-  }
-
-  // 2. Upside Shock Logic (UP)
-  if (shock === "UP") {
-    const isLongSignal = signal === "paper_long_candidate";
-
-    return {
-      allowTrendOverride: true,
-      blockRangeEntirely: true,
-      forcedSide: "long",
-      reason: isLongSignal ? `DIRECTIONAL_LONG_OVERRIDE (shock: UP)` : "DIRECTIONAL_SHORT_BLOCKED_BY_UP_SHOCK",
-      effective_execution_lane: "TREND",
-      directional_shock_state: "UP",
-      directional_bias: "long",
-      directional_routing_override_applied: true
-    };
-  }
-
-  return {
-    allowTrendOverride: false,
-    blockRangeEntirely: false,
-    forcedSide: null,
-    reason: "NORMAL_ROUTING",
-    effective_execution_lane: args.regime === "RANGE" ? "RANGE" : "TREND",
-    directional_shock_state: "NONE",
-    directional_bias: "none",
-    directional_routing_override_applied: false
-  };
-}
 
 /** Stage 1 소액 탐색: RANGE·모호 맥락에서만 허용(쿨다운·데이터 결손 등은 제외). */
 const STAGE1_SOFT_EXPLORE_BLOCKS = new Set([
@@ -874,7 +816,7 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   /** V2 Engine Authority — expectancy bypass 결정용. */
   authority?: EntryExecutionAuthority;
   /** Symmetric Directional Routing Override */
-  directionalOverride: import("../models/types").DirectionalRoutingOverride;
+  directionalOverride: any;
 }>;
 
 export type EvaluatePaperSymbolEntryResult = Readonly<{
@@ -1458,6 +1400,41 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let rangeReversalSizeMult = 1.0;
   let rangeReversalConfidence = 0;
   let waitMs = 0;
+
+  // --- 4.5 Directional Bias Guard (Tier 0) ---
+  const directionalGuardResult = evaluateDirectionalTrendEntryGuard({
+    rawRegime: input.regime,
+    directionalShockState: input.risk?.directionalShockState ?? "NONE",
+    signal: sn.signal,
+    rangeReversalImmediateSwitch: input.rangeReversalImmediateSwitch
+  } as any);
+
+  if (directionalGuardResult.blocked) {
+    return {
+      decision: pack(input, sym, null, {
+        signal_state,
+        regime_state,
+        edge_state: "PASS",
+        risk_state: "PASS",
+        execution_state: "DISABLED",
+        final_decision: "DISABLED",
+        reject_reason: "DIRECTIONAL_BIAS_BLOCKED" as any,
+        stage1_result_code: "STAGE1_BLOCKED_RISK",
+        final_fail_reason: directionalGuardResult.blockedReason,
+        execution_disabled_reason: "directional_bias_blocked",
+        final_block_owner: "directional_guard",
+        execution_disabled_top_proof: directionalGuardResult.proof
+      } as any),
+      intentSide: null,
+      executorDecision: null,
+      adaptiveOk: false,
+      adaptiveDetail: null,
+      adaptiveResult: null,
+      aiGatePassed: false
+    };
+  }
+
+  const shouldBypassRangeStage0 = directionalGuardResult.shouldBypassRangeStage0;
   let elapsedMs = 0;
   let meta: any = null;
   let sameDirection = false;
@@ -1505,11 +1482,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let rangeReversalSwitchMatches = false;
 
   // --- 5. Directional Routing Override Calculation ---
-  const directionalOverride: any = evaluateDirectionalTrendEntryGuard({
-    config: input.config,
-    snapshot: sn,
-    risk: input.risk!,
-    regime: overrideRegime
+  const directionalOverride: any = deriveDirectionalRoutingOverride({
+    rawRegime: overrideRegime,
+    directionalShockState: input.risk?.directionalShockState ?? "NONE"
   });
 
   // --- 6. Packaging Helpers (Restored) ---
@@ -1819,7 +1794,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   useRangeStage0Engine =
     !v2AuthorityOwnsExecution &&
-    !directionalOverride.blockRangeEntirely &&
+    !directionalGuardResult.blocked &&
+    !shouldBypassRangeStage0 &&
     ((sn as any).directionalRoutingApplied ? false : (overrideRegime === "RANGE" || isRangeFallbackActive)) &&
     input.currentStage === 0;
 
@@ -3179,11 +3155,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       signal_state === "LONG_CANDIDATE" ||
       signal_state === "SHORT_CANDIDATE";
     const requiredMoveLowEnough = typeof required_move_pct === "number" && required_move_pct <= 0.25;
-    const rangeStage0LegacyPath =
-      (sn.regimeStateDiag ?? input.regime) === "RANGE" &&
+    const useRangeStage0Engine =
+      overrideRegime === "RANGE" &&
       input.currentStage === 0 &&
-      baseCandidateExists &&
-      requiredMoveLowEnough;
+      !shouldBypassRangeStage0;
 
     const hasAuthorityEnterFromV2 = authority.decision === "ENTER" && authority.source === "v2";
     const authorityExpectancySoftPassEligible =
