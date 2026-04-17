@@ -1391,28 +1391,31 @@ export class PaperEngine {
     }
 
     const effectiveRegime = this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane;
-    await this.store.appendJsonlLine("reports/events.jsonl", {
-      ts: nowTs,
-      type: "LONG_ONLY_SHORT_DEFERRED",
-      symbol: sym,
-      regime: effectiveRegime,
-      executor: ex?.executor ?? null,
-      reject_code: d.reject_reason,
-      stage1_result_code: d.stage1_result_code ?? null,
-      long_only_restriction: d.long_only_restriction === true,
-      original_signal_state: d.original_signal_state ?? null,
-      final_signal_state: d.final_signal_state ?? null,
-      execution_disabled_reason: d.execution_disabled_reason ?? null,
-      expected_move:
-        typeof ex?.expected_move === "number" && Number.isFinite(ex.expected_move) ? ex.expected_move : null,
-      total_cost: ex?.total_cost ?? null,
-      risk_state: ex?.risk_state ?? this.lastRisk?.riskStatus ?? "NORMAL",
-      supplemental_reasons: d.supplemental_reasons ?? [],
-      adaptive_direction: null,
-      detail: res.adaptiveDetail,
-      effective_lane: this.lastEffectiveLane,
-      ...buildAuthorityEventMeta(authority)
-    });
+    if (d.final_decision === "SKIP" && d.reject_reason === "LONG_ONLY_SHORT_DEFERRED") {
+      await this.store.appendJsonlLine("reports/events.jsonl", {
+        ts: nowTs,
+        type: "LONG_ONLY_SHORT_DEFERRED",
+        symbol: sym,
+        regime: effectiveRegime,
+        executor: ex?.executor ?? null,
+        reject_code: d.reject_reason,
+        stage1_result_code: d.stage1_result_code ?? null,
+        long_only_restriction: d.long_only_restriction === true,
+        original_signal_state: d.original_signal_state ?? null,
+        final_signal_state: d.final_signal_state ?? null,
+        execution_disabled_reason: d.execution_disabled_reason ?? null,
+        expected_move:
+          typeof ex?.expected_move === "number" && Number.isFinite(ex.expected_move) ? ex.expected_move : null,
+        total_cost: ex?.total_cost ?? null,
+        risk_state: ex?.risk_state ?? this.lastRisk?.riskStatus ?? "NORMAL",
+        supplemental_reasons: d.supplemental_reasons ?? [],
+        adaptive_direction: null,
+        detail: res.adaptiveDetail,
+        effective_lane: this.lastEffectiveLane,
+        ...buildAuthorityEventMeta(authority)
+      });
+      return;
+    }
     if (d.reject_reason === "ORDER_BUILD_FAIL") {
       const structured = orderBuildFailureStructuredPayload(first, res, entryStage, this.lastRegime.regime);
       await this.store.appendJsonlLine("reports/events.jsonl", {
