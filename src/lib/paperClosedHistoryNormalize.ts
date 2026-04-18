@@ -62,6 +62,18 @@ function parseExitType(x: unknown, fallback: PaperExitType): PaperExitType {
   return fallback;
 }
 
+function resolveCloseReasonText(val: unknown): string | null {
+  if (typeof val !== "string") return null;
+  const t = val.trim();
+  if (t === "" || t === MISSING) return null;
+
+  if (isPaperCloseReason(t)) {
+    const meta = paperExitDisplayMeta(t);
+    return meta.closeReasonLabel !== MISSING ? meta.closeReasonLabel : null;
+  }
+  return t;
+}
+
 /** 번들·UI용: 디스크 `history.json` 한 행을 항상 표시 가능한 형태로 보강한다. */
 export type NormalizedPaperClosedRow = Readonly<
   PaperClosedPositionRecord & {
@@ -91,15 +103,17 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
 
   const exitType = parseExitType(o.exitType, meta.exitType);
 
+  const resolvedCloseReasonCandidate = resolveCloseReasonText(crRaw);
+
   /**
-   * 종료 사유 우선순위 (A):
-   * closeReasonLabel > exitReason > closeReason > exitType > closeSource
+   * 종료 사유 우선순위 (B):
+   * closeReasonLabel > exitReason > resolveCloseReasonText(closeReason) > exitType > closeSource
    */
   const mappedReasonLabel = (() => {
     const vals = [
       o.closeReasonLabel,
       o.exitReason,
-      isPaperCloseReason(crRaw) ? paperExitDisplayMeta(crRaw).closeReasonLabel : null,
+      resolvedCloseReasonCandidate,
       defaultLabelForExitType(exitType),
       o.closeSource
     ];
@@ -166,13 +180,14 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
     outcomeStatus
   }) as NormalizedPaperClosedRow;
 
-  // Proof Log (E)
+  // Proof Log (D)
   console.log("EXIT_HISTORY_MAPPING_PROOF", {
     symbol: String(o.symbol ?? "UNKNOWN"),
     closed_at: closedAt,
     raw_close_reason_label: o.closeReasonLabel ?? null,
     raw_exit_reason: o.exitReason ?? null,
-    raw_close_reason: o.closeReason ?? null,
+    raw_close_reason: crRaw ?? null,
+    resolved_close_reason_candidate: resolvedCloseReasonCandidate,
     raw_exit_type: o.exitType ?? null,
     raw_close_source: o.closeSource ?? null,
     mapped_exit_reason_label: mappedReasonLabel,
@@ -210,10 +225,11 @@ export function displayFieldsForClosedRow(row: unknown): ClosedRowDisplayFields 
 
   const et = parseExitType(o.exitType, "EXIT_UNKNOWN");
 
+  /** 우선순위 (C): exitReason > closeReasonLabel > resolveCloseReasonText(closeReason) > fallback */
   const exitReason = nz(
     o.exitReason,
     o.closeReasonLabel,
-    typeof o.closeReason === "string" ? o.closeReason : null,
+    resolveCloseReasonText(o.closeReason),
     et === "EXIT_UNKNOWN" ? "종료 사유 미기록 (EXIT_UNKNOWN)" : defaultLabelForExitType(et)
   );
 
@@ -251,6 +267,7 @@ export function displayFieldsForClosedRow(row: unknown): ClosedRowDisplayFields 
     pnlPctLabel
   };
 }
+
 
 export function normalizePositionsHistoryArray(rows: unknown[]): NormalizedPaperClosedRow[] {
   if (!Array.isArray(rows)) return [];
