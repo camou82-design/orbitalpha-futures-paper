@@ -813,6 +813,8 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   rangeReopenCooldownBypass?: boolean;
   /** V2 Engine Authority — expectancy bypass 결정용. */
   authority?: EntryExecutionAuthority;
+  /** 장세 부적합 종료(EXIT_REGIME) 소모 이력 (dedup gate). */
+  regimeExitConsumed?: { side: "long" | "short"; ts: number } | null;
 }>;
 
 /** 상위 시장 모드·엔진·신규 방향 허용 — 시그널 레이어 TREND-UP 정렬(숏 후보 억제)용 */
@@ -2040,6 +2042,21 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     range_reentry_remaining_ms = null;
     range_reentry_same_direction = false;
     range_reentry_source = "range_stage0_reentry";
+
+    // --- [DEDUP GATE] Regime Exit Consumption (One-Shot) ---
+    if (input.regimeExitConsumed && rangeSignal.side === input.regimeExitConsumed.side) {
+      reentryBlocked = true;
+      range_reentry_source = "regime_exit_dedup";
+      supplemental_reasons.push("REGIME_EXIT_DEDUP_BLOCKED");
+      console.log("REGIME_EXIT_DEDUP_PROOF", {
+        symbol: String(sym),
+        side: rangeSignal.side,
+        consumedAt: input.regimeExitConsumed.ts,
+        blockingAt: input.now,
+        one_shot_block: true
+      });
+    }
+
     if (input.lastCloseMetaBySymbol && rangeSignal.side) {
       meta = input.lastCloseMetaBySymbol.get(String(sym));
       sameDirection = meta !== undefined && meta.side === rangeSignal.side;
@@ -3319,12 +3336,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   const aiIn = executorDecision
     ? aiInputFromDecision({
-        decision: executorDecision,
-        executorDirection: intentSide,
-        lossStreak,
-        last10Net,
-        effectiveRegime: input.regime
-      })
+      decision: executorDecision,
+      executorDirection: intentSide,
+      lossStreak,
+      last10Net,
+      effectiveRegime: input.regime
+    })
     : null;
 
   let dynamicSizeMult = input.risk?.sizeMultiplier ?? 1;

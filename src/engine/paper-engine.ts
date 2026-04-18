@@ -694,6 +694,8 @@ export class PaperEngine {
   /** RANGE upper short add-on: per-position one-shot guard (symbol:openedAt -> count). */
   private rangeUpperShortAddOnCountByKey = new Map<string, number>();
   private rangeRecentOutcomeScoresBySymbol = new Map<string, number[]>();
+  /** 장세 부적합 종료(EXIT_REGIME) 소모 이력. 동일 흐름 내 반복 진입/종료 방지. */
+  private regimeExitConsumedBySymbol = new Map<string, { side: "long" | "short"; ts: number }>();
   private lastExitReasonLabel = "";
   private lastSwitchReasonLabel = "";
   /** 직전 틱 구간 반전 청산 적용(PEL proof용) */
@@ -1141,6 +1143,23 @@ export class PaperEngine {
 
     for (const sym of polledSymbols) {
       const symKeyEarly = String(sym);
+
+      // --- 2.1 Regime Exit Dedup Lifecycle ---
+      const consumed = this.regimeExitConsumedBySymbol.get(symKeyEarly);
+      if (consumed) {
+        const currentSnap = this.lastTickSymbolSnapshotBySymbol.get(symKeyEarly);
+        const currentSignalSide =
+          currentSnap?.signal === "paper_long_candidate"
+            ? "long"
+            : currentSnap?.signal === "paper_short_candidate"
+              ? "short"
+              : "none";
+        // 시그널 방향이 바뀌거나 소멸하면 기존 장세 부적합 종료 소모 기록 초기화 (새로운 흐름 허용)
+        if (currentSignalSide !== consumed.side) {
+          this.regimeExitConsumedBySymbol.delete(symKeyEarly);
+        }
+      }
+
       const snap = snapshots.find((s) => s.symbol === sym);
       const snapForDecision =
         snap == null
@@ -1192,7 +1211,8 @@ export class PaperEngine {
           openPositionsTotal: opensAfterClose.length,
           maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions,
           currentStage: existingPos?.entryStage ?? 0,
-          rangeReversalImmediateSwitch: undefined
+          rangeReversalImmediateSwitch: undefined,
+          regimeExitConsumed: this.regimeExitConsumedBySymbol.get(symKeyEarly)
         });
 
         this.logger.info(
@@ -1236,7 +1256,8 @@ export class PaperEngine {
         openPositionsTotal: opensAfterClose.length,
         maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions,
         currentStage: existingPos?.entryStage ?? 0,
-        rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly
+        rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly,
+        regimeExitConsumed: this.regimeExitConsumedBySymbol.get(symKeyEarly)
       });
 
       /** Engine-V2 Execution Path (Standard 2: Selector Bridge) */
@@ -1390,6 +1411,7 @@ export class PaperEngine {
         this.trendHoldMemoryBySymbol.delete(symKey);
         this.trendPyramidLevelBySymbol.delete(symKey);
         // ... other prune logic
+        this.regimeExitConsumedBySymbol.delete(symKey);
       }
     });
 
@@ -3205,12 +3227,10 @@ export class PaperEngine {
             await this.store.appendJsonlLine("reports/events.jsonl", {
               ts: Date.now(),
               type: "EXIT_REGIME",
-              symbol: String(open.symbol),
-              reason: cr,
-              range_alignment_forced_exit: true,
               realized_pnl: m.pnlUsdNet,
               ...buildPositionIdentityMeta(open)
             });
+            this.regimeExitConsumedBySymbol.set(String(open.symbol), { side: open.side, ts: closedAt });
             continue;
           }
           // mid: 무조건 유지 금지 → 아래 minHold / candidate_lost 로 진행
