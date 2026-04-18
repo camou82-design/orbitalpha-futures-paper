@@ -212,7 +212,13 @@ export type PaperDecisionRejectReason =
   | "LONG_ONLY_SHORT_DEFERRED"
   | "AI_DIRECTION_MISMATCH"
   | "STAGE1_BLOCKED_LIMIT"
-  | "LEGACY_BLOCKED";
+  | "LEGACY_BLOCKED"
+  /** RANGE 상단 숏: 완성봉 2개 반전 미충족 */
+  | "RANGE_UPPER_SHORT_NO_REVERSAL_CONFIRMATION"
+  /** RANGE 하단 롱: 완성봉 2개 반전 미충족 */
+  | "RANGE_LOWER_LONG_NO_REVERSAL_CONFIRMATION"
+  /** RANGE 엣지 stop_loss 직후 동일 맥락 재진입 차단 */
+  | "RANGE_STOP_REENTRY_SAME_CONTEXT_BLOCKED";
 
 export type PaperStage1ResultCode =
   | "STAGE1_ENTERED"

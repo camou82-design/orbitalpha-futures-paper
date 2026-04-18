@@ -67,7 +67,8 @@ import {
   applyPaperSignalMarketAlignment,
   evaluatePaperSymbolEntry,
   type EvaluatePaperSymbolEntryResult,
-  type SymbolSnapshotLike
+  type SymbolSnapshotLike,
+  type RangeStopReentryBlock,
 } from "./paper-symbol-decision";
 import { deriveDirectionalRoutingOverride } from "./directional-routing";
 import {
@@ -696,6 +697,8 @@ export class PaperEngine {
   private rangeRecentOutcomeScoresBySymbol = new Map<string, number[]>();
   /** 장세 부적합 종료(EXIT_REGIME) 소모 이력. 동일 흐름 내 반복 진입/종료 방지. */
   private regimeExitConsumedBySymbol = new Map<string, { side: "long" | "short"; ts: number }>();
+  /** RANGE edge stop_loss 재진입 차단용 메모리 맵. */
+  private rangeStopReentryBlockedBySymbol = new Map<string, RangeStopReentryBlock>();
   private lastExitReasonLabel = "";
   private lastSwitchReasonLabel = "";
   /** 직전 틱 구간 반전 청산 적용(PEL proof용) */
@@ -1180,6 +1183,34 @@ export class PaperEngine {
           });
       this.lastTickSymbolSnapshotBySymbol.set(symKeyEarly, snapForDecision ?? snap ?? null);
 
+      const stopBlkPre = this.rangeStopReentryBlockedBySymbol.get(symKeyEarly);
+      if (stopBlkPre && snapForDecision) {
+        const sig = snapForDecision.signal;
+        const sigSide = sig === "paper_long_candidate" ? "long" : sig === "paper_short_candidate" ? "short" : "none";
+        const bp = typeof snapForDecision.boxPos === "number" ? snapForDecision.boxPos : 0.5;
+        const curZone = classifyBoxZone(bp);
+        let releaseReason: string | null = null;
+        if (effectiveRegimeForDecision !== "RANGE") releaseReason = "regime_not_range";
+        else if (sigSide === "none") releaseReason = "signal_none";
+        else if (sigSide !== stopBlkPre.side) releaseReason = "signal_opposite";
+        else if (curZone !== stopBlkPre.zone) releaseReason = "zone_left_block_zone";
+        if (releaseReason) {
+          this.logger.info("RANGE_STOP_REENTRY_BLOCK_PROOF", {
+            symbol: symKeyEarly,
+            side: stopBlkPre.side,
+            zone: stopBlkPre.zone,
+            block_active: false,
+            block_reason: stopBlkPre.reason,
+            armed_at: stopBlkPre.armedAt,
+            current_signal: snapForDecision.signal,
+            current_regime: effectiveRegimeForDecision,
+            current_zone: curZone,
+            release_reason: releaseReason
+          });
+          this.rangeStopReentryBlockedBySymbol.delete(symKeyEarly);
+        }
+      }
+
       const nowTick = snap;
 
       this.pruneRangeReversalSwitchPending(symKeyEarly, snap ?? null, fetchedAt);
@@ -1219,7 +1250,8 @@ export class PaperEngine {
           maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions,
           currentStage: existingPos?.entryStage ?? 0,
           rangeReversalImmediateSwitch: undefined,
-          regimeExitConsumed: this.regimeExitConsumedBySymbol.get(symKeyEarly)
+          regimeExitConsumed: this.regimeExitConsumedBySymbol.get(symKeyEarly),
+          logger: this.logger
         });
 
         this.logger.info(
@@ -1264,7 +1296,9 @@ export class PaperEngine {
         maxPositionsReached: opensAfterClose.length >= this.config.paperMaxOpenPositions,
         currentStage: existingPos?.entryStage ?? 0,
         rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly,
-        regimeExitConsumed: this.regimeExitConsumedBySymbol.get(symKeyEarly)
+        regimeExitConsumed: this.regimeExitConsumedBySymbol.get(symKeyEarly),
+        rangeStopReentryBlock: this.rangeStopReentryBlockedBySymbol.get(symKeyEarly),
+        logger: this.logger
       });
 
       /** Engine-V2 Execution Path (Standard 2: Selector Bridge) */
@@ -3030,6 +3064,30 @@ export class PaperEngine {
               this.rangeFailCountByKey.set(k, 0);
             } else {
               this.rangeCooldownUntilByKey.set(k, Date.now() + 8 * 60_000);
+            }
+
+            // [ARM RANGE STOP REENTRY BLOCK]
+            const entryZone = open.rangeEntryZone;
+            const isEdgeStop = (open.side === "short" && entryZone === "upper") || (open.side === "long" && entryZone === "lower");
+            if (isEdgeStop && entryZone && (entryZone === "upper" || entryZone === "lower")) {
+              const armedAt = Date.now();
+              this.rangeStopReentryBlockedBySymbol.set(symKey, {
+                side: open.side,
+                zone: entryZone,
+                armedAt,
+                reason: "stop_loss",
+                regime: "RANGE"
+              });
+              this.logger.info("RANGE_STOP_REENTRY_BLOCK_ARMED", {
+                symbol: open.symbol,
+                side: open.side,
+                zone: entryZone,
+                armed_at: armedAt,
+                close_reason: cr,
+                openedAt: open.openedAt,
+                regimeAtEntry: open.regimeAtEntry ?? null,
+                executorAtEntry: open.executorAtEntry ?? null
+              });
             }
           }
           continue;

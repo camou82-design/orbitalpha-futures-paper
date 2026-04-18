@@ -39,7 +39,7 @@ import type { PaperSignal } from "../strategy/entry-signal";
 import type { PaperCandidateStrength } from "../strategy/entry-signal";
 import { PIPELINE_VERSION } from "./decision-funnel";
 import { classifyBoxZone, RANGE_ZONE_ACTION_POLICY } from "./range-engine";
-import type { RangeBoxZone } from "../models/types";
+import type { Candle, RangeBoxZone } from "../models/types";
 import {
   evaluateDirectionalTrendEntryGuard,
   deriveDirectionalRoutingOverride,
@@ -64,6 +64,73 @@ function isRangeStage0ReentryRelaxCloseReason(cr: unknown): boolean {
     cr === "time_based_exit" ||
     cr === "regime_exit"
   );
+}
+
+export type RangeStopReentryBlock = Readonly<{
+  side: "long" | "short";
+  zone: "upper" | "lower";
+  armedAt: number;
+  reason: "stop_loss";
+  regime: "RANGE";
+}>;
+
+/** 진행 중 1m 봉 제외: 완성봉만으로 최근 2개(직전·최근) OHLC */
+function getLastTwoCompletedOneMinuteBars(
+  candles: readonly Candle[] | null | undefined
+): { latest: Pick<Candle, "high" | "low" | "close">; prev: Pick<Candle, "high" | "low" | "close"> } | null {
+  if (!candles || candles.length < 2) return null;
+  const completed = candles.length >= 2 ? candles.slice(0, -1) : candles;
+  if (completed.length < 2) return null;
+  const latest = completed[completed.length - 1]!;
+  const prev = completed[completed.length - 2]!;
+  return { latest, prev };
+}
+
+function computeRangeEdgeReversalConfirmation(args: Readonly<{
+  zone: RangeBoxZone;
+  entrySide: "long" | "short";
+  candles: readonly Candle[] | null | undefined;
+}>): Readonly<{
+  reversal_confirmed: boolean;
+  reject_reason: "RANGE_UPPER_SHORT_NO_REVERSAL_CONFIRMATION" | "RANGE_LOWER_LONG_NO_REVERSAL_CONFIRMATION" | null;
+  prev: Pick<Candle, "high" | "low" | "close"> | null;
+  latest: Pick<Candle, "high" | "low" | "close"> | null;
+}> {
+  const bars = getLastTwoCompletedOneMinuteBars(args.candles);
+  if (!bars) {
+    const reject =
+      args.zone === "upper" && args.entrySide === "short"
+        ? ("RANGE_UPPER_SHORT_NO_REVERSAL_CONFIRMATION" as const)
+        : args.zone === "lower" && args.entrySide === "long"
+          ? ("RANGE_LOWER_LONG_NO_REVERSAL_CONFIRMATION" as const)
+          : null;
+    return {
+      reversal_confirmed: false,
+      reject_reason: reject,
+      prev: null,
+      latest: null
+    };
+  }
+  const { latest, prev } = bars;
+  if (args.zone === "upper" && args.entrySide === "short") {
+    const ok = latest.close < prev.close && latest.high <= prev.high;
+    return {
+      reversal_confirmed: ok,
+      reject_reason: ok ? null : "RANGE_UPPER_SHORT_NO_REVERSAL_CONFIRMATION",
+      prev,
+      latest
+    };
+  }
+  if (args.zone === "lower" && args.entrySide === "long") {
+    const ok = latest.close > prev.close && latest.low >= prev.low;
+    return {
+      reversal_confirmed: ok,
+      reject_reason: ok ? null : "RANGE_LOWER_LONG_NO_REVERSAL_CONFIRMATION",
+      prev,
+      latest
+    };
+  }
+  return { reversal_confirmed: true, reject_reason: null, prev, latest };
 }
 
 /** @deprecated use PaperDecisionRejectReason from `../models/types` */
@@ -813,8 +880,12 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   rangeReopenCooldownBypass?: boolean;
   /** V2 Engine Authority — expectancy bypass 결정용. */
   authority?: EntryExecutionAuthority;
-  /** 장세 부적합 종료(EXIT_REGIME) 소모 이력 (dedup gate). */
+  /** 장세 부적합 종료(EXIT_REGIME) 소모 이력 (one-shot). */
   regimeExitConsumed?: { side: "long" | "short"; ts: number } | null;
+  /** RANGE edge stop_loss 재진입 차단(엔진 메모리 → 판단 레이어 전달). */
+  rangeStopReentryBlock?: RangeStopReentryBlock | null;
+  /** 진단용 로거 (Proof logging). */
+  logger?: { info: (event: string, payload?: any) => void };
 }>;
 
 /** 상위 시장 모드·엔진·신규 방향 허용 — 시그널 레이어 TREND-UP 정렬(숏 후보 억제)용 */
@@ -1465,6 +1536,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let rangeReversalSizeMult = 1.0;
   let rangeReversalConfidence = 0;
   let waitMs = 0;
+  let rangeStopReentrySameContextBlock = false;
+  let rangeStopReentryRejectOverride: PaperDecisionRejectReason | null = null;
+  let rangeEdgeConfirmationReject: PaperDecisionRejectReason | null = null;
 
   // --- 4.5 Directional Bias Guard (Tier 0) ---
   const directionalGuardResult = evaluateDirectionalTrendEntryGuard({
@@ -1726,7 +1800,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   if (input.currentStage === 0) {
     if (input.regime === "TREND") leniency *= 0.65;
     else if (input.regime === "RANGE") leniency *= 0.75;
-    if (sym === "ETHUSDT") leniency *= 0.6;
   }
 
   stage1_leniency_applied = input.currentStage === 0 && leniency < 1.0;
@@ -2057,6 +2130,36 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       });
     }
 
+    // [STOP REENTRY BLOCK] 동일 symbol / side / zone / RANGE + base signal 방향 일치 시 재진입 금지
+    if (input.rangeStopReentryBlock && input.regime === "RANGE") {
+      const blk = input.rangeStopReentryBlock;
+      const snSigSide =
+        sn.signal === "paper_long_candidate" ? "long" : sn.signal === "paper_short_candidate" ? "short" : null;
+      const candidateMatches =
+        rangeSignal.side != null &&
+        rangeSignal.side === blk.side &&
+        zone === blk.zone &&
+        snSigSide === blk.side;
+      if (candidateMatches) {
+        rangeStopReentrySameContextBlock = true;
+        rangeStopReentryRejectOverride = "RANGE_STOP_REENTRY_SAME_CONTEXT_BLOCKED";
+        range_reentry_source = "range_stop_reentry_same_context";
+        supplemental_reasons.push("RANGE_STOP_REENTRY_SAME_CONTEXT");
+        input.logger?.info("RANGE_STOP_REENTRY_BLOCK_PROOF", {
+          symbol: String(sym),
+          side: blk.side,
+          zone: blk.zone,
+          block_active: true,
+          block_reason: blk.reason,
+          armed_at: blk.armedAt,
+          current_signal: sn.signal,
+          current_regime: input.regime,
+          current_zone: zone,
+          release_reason: null
+        });
+      }
+    }
+
     if (input.lastCloseMetaBySymbol && rangeSignal.side) {
       meta = input.lastCloseMetaBySymbol.get(String(sym));
       sameDirection = meta !== undefined && meta.side === rangeSignal.side;
@@ -2167,6 +2270,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       gateResult = "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
       gateReason = "range_score_below_threshold";
     }
+    if (rangeStopReentrySameContextBlock && gateResult === "RANGE_GATE_PASS") {
+      gateResult = "RANGE_GATE_BLOCK_REENTRY";
+      gateReason = "range_stop_reentry_same_context_blocked";
+    }
 
     // Capture interpretation results for scaling and proofs (tier/mult must stay consistent — avoid undefined.toUpperCase downstream).
     if (rangeSignal.interpretation) {
@@ -2190,6 +2297,59 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         : rangeSignal.signal === "RANGE_LONG_CANDIDATE"
           ? "RANGE_LONG_ENTRY"
           : "RANGE_SHORT_ENTRY";
+
+    // [RANGE EDGE REVERSAL CONFIRMATION] 완성 1m 봉 2개(close/high 또는 close/low) — 진행 봉 제외
+    let rangeReversalConfirmed = true;
+    if (entryResult === "RANGE_SHORT_ENTRY" && zone === "upper") {
+      const conf = computeRangeEdgeReversalConfirmation({
+        zone,
+        entrySide: "short",
+        candles: sn.candles ?? []
+      });
+      rangeReversalConfirmed = conf.reversal_confirmed;
+      if (!conf.reversal_confirmed && conf.reject_reason) rangeEdgeConfirmationReject = conf.reject_reason;
+      input.logger?.info("RANGE_EDGE_CONFIRMATION_PROOF", {
+        symbol: String(sym),
+        side: "short" as const,
+        zone,
+        prev_completed_close: conf.prev?.close ?? null,
+        latest_completed_close: conf.latest?.close ?? null,
+        prev_completed_high: conf.prev?.high ?? null,
+        latest_completed_high: conf.latest?.high ?? null,
+        prev_completed_low: conf.prev?.low ?? null,
+        latest_completed_low: conf.latest?.low ?? null,
+        reversal_confirmed: conf.reversal_confirmed,
+        reject_reason: conf.reject_reason,
+        source_signal: sn.signal,
+        range_signal_reason: rangeSignal.reason
+      });
+      if (!rangeReversalConfirmed) entryResult = "RANGE_ENTRY_NONE";
+    } else if (entryResult === "RANGE_LONG_ENTRY" && zone === "lower") {
+      const conf = computeRangeEdgeReversalConfirmation({
+        zone,
+        entrySide: "long",
+        candles: sn.candles ?? []
+      });
+      rangeReversalConfirmed = conf.reversal_confirmed;
+      if (!conf.reversal_confirmed && conf.reject_reason) rangeEdgeConfirmationReject = conf.reject_reason;
+      input.logger?.info("RANGE_EDGE_CONFIRMATION_PROOF", {
+        symbol: String(sym),
+        side: "long" as const,
+        zone,
+        prev_completed_close: conf.prev?.close ?? null,
+        latest_completed_close: conf.latest?.close ?? null,
+        prev_completed_high: conf.prev?.high ?? null,
+        latest_completed_high: conf.latest?.high ?? null,
+        prev_completed_low: conf.prev?.low ?? null,
+        latest_completed_low: conf.latest?.low ?? null,
+        reversal_confirmed: conf.reversal_confirmed,
+        reject_reason: conf.reject_reason,
+        source_signal: sn.signal,
+        range_signal_reason: rangeSignal.reason
+      });
+      if (!rangeReversalConfirmed) entryResult = "RANGE_ENTRY_NONE";
+    }
+
     range_final_selected_side = entryResult === "RANGE_LONG_ENTRY" ? "long" : entryResult === "RANGE_SHORT_ENTRY" ? "short" : "none";
     range_upper_short_priority_applied = zone === "upper" && entryResult === "RANGE_SHORT_ENTRY";
     range_lower_long_priority_applied = zone === "lower" && entryResult === "RANGE_LONG_ENTRY";
@@ -2220,14 +2380,19 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reversal_immediate_switch_applied = true;
       range_reversal_immediate_switch_reason = input.rangeReversalImmediateSwitch?.reason ?? null;
     }
-    // [DIRECTION LOCK] RANGE Engine Sets Intent
-    workingSignal = (rangeSignal.signal === "RANGE_LONG_CANDIDATE"
-      ? "paper_long_candidate"
-      : rangeSignal.signal === "RANGE_SHORT_CANDIDATE"
-        ? "paper_short_candidate"
-        : "none") as any;
+    // [DIRECTION LOCK] RANGE Engine Sets Intent (반전 미확인 시 entryResult 기준으로 시그널 소거)
+    workingSignal = (
+      entryResult === "RANGE_LONG_ENTRY"
+        ? "paper_long_candidate"
+        : entryResult === "RANGE_SHORT_ENTRY"
+          ? "paper_short_candidate"
+          : "none"
+    ) as PaperSignal;
     signal_state = signalToState(workingSignal);
-    intentSide = rangeSignal.side as "long" | "short" | null;
+    intentSide = (entryResult === "RANGE_LONG_ENTRY" ? "long" : entryResult === "RANGE_SHORT_ENTRY" ? "short" : null) as
+      | "long"
+      | "short"
+      | null;
 
     executorDecision = {
       entry_allowed: gateResult === "RANGE_GATE_PASS",
@@ -2300,48 +2465,70 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       override_reason: crashLockBypassReason
     });
 
-    if (gateResult !== "RANGE_GATE_PASS") {
+    if (rangeEdgeConfirmationReject != null && executorDecision) {
+      executorDecision = {
+        ...executorDecision,
+        entry_allowed: false,
+        blocked_reason: String(rangeEdgeConfirmationReject)
+      };
+    }
+
+    if (gateResult !== "RANGE_GATE_PASS" || rangeEdgeConfirmationReject != null) {
       const rangeFinalBlockReason =
-        gateResult === "RANGE_GATE_BLOCK_LOW_CONFIDENCE" && rangeSignal.signal === "RANGE_SIGNAL_NONE"
-          ? "RANGE_SIGNAL_NONE"
-          : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
-            ? "RANGE_RISK_BLOCK_ENGINE"
-            : gateResult === "RANGE_GATE_BLOCK_REENTRY"
-              ? "RANGE_RISK_BLOCK_REENTRY"
-              : gateResult;
+        rangeEdgeConfirmationReject != null
+          ? String(rangeEdgeConfirmationReject)
+          : gateResult === "RANGE_GATE_BLOCK_LOW_CONFIDENCE" && rangeSignal.signal === "RANGE_SIGNAL_NONE"
+            ? "RANGE_SIGNAL_NONE"
+            : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
+              ? "RANGE_RISK_BLOCK_ENGINE"
+              : gateResult === "RANGE_GATE_BLOCK_REENTRY"
+                ? "RANGE_RISK_BLOCK_REENTRY"
+                : gateResult;
       const stage1Code =
-        gateResult === "RANGE_GATE_BLOCK_REENTRY" || gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
-          ? "STAGE1_BLOCKED_RISK"
-          : gateResult === "RANGE_GATE_BLOCK_WAIT_RECHECK"
-            ? "STAGE1_PENDING_RECHECK"
-            : gateResult === "RANGE_GATE_BLOCK_LOW_CONFIDENCE" && rangeSignal.signal === "RANGE_SIGNAL_NONE"
-              ? "STAGE1_BLOCKED_SIGNAL"
-              : "STAGE1_BLOCKED_EDGE";
+        rangeEdgeConfirmationReject != null
+          ? "STAGE1_BLOCKED_EDGE"
+          : gateResult === "RANGE_GATE_BLOCK_REENTRY" || gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
+            ? "STAGE1_BLOCKED_RISK"
+            : gateResult === "RANGE_GATE_BLOCK_WAIT_RECHECK"
+              ? "STAGE1_PENDING_RECHECK"
+              : gateResult === "RANGE_GATE_BLOCK_LOW_CONFIDENCE" && rangeSignal.signal === "RANGE_SIGNAL_NONE"
+                ? "STAGE1_BLOCKED_SIGNAL"
+                : "STAGE1_BLOCKED_EDGE";
       const blockedRegimeIsLossStreak =
         blockedRegimeReasonText.includes("mode_loss_streak") || blockedRegimeReasonText.includes("highway_range_streak");
       const rangeRiskSubreason =
-        gateResult === "RANGE_GATE_BLOCK_REENTRY"
-          ? (range_reentry_same_direction ? "range_reentry_same_direction_wait_active" : "range_reentry_wait_active")
-          : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
-            ? blockedRegimeActive
-              ? (blockedRegimeIsLossStreak ? "range_blocked_regime_loss_streak_suspend" : "range_blocked_regime_until_active")
-              : "range_risk_unknown"
-            : null;
+        rangeEdgeConfirmationReject != null
+          ? String(rangeEdgeConfirmationReject)
+          : gateResult === "RANGE_GATE_BLOCK_REENTRY"
+            ? rangeStopReentryRejectOverride != null
+              ? "range_stop_reentry_same_context_blocked"
+              : range_reentry_same_direction
+                ? "range_reentry_same_direction_wait_active"
+                : "range_reentry_wait_active"
+            : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
+              ? blockedRegimeActive
+                ? (blockedRegimeIsLossStreak ? "range_blocked_regime_loss_streak_suspend" : "range_blocked_regime_until_active")
+                : "range_risk_unknown"
+              : null;
       const rangeCooldownRemainingMs =
-        gateResult === "RANGE_GATE_BLOCK_REENTRY"
-          ? (range_reentry_remaining_ms ?? 0)
-          : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE" && blockedRegimeActive
-            ? Math.max(0, (blockedRegime?.until ?? input.now) - input.now)
-            : 0;
+        rangeEdgeConfirmationReject != null
+          ? 0
+          : gateResult === "RANGE_GATE_BLOCK_REENTRY"
+            ? (range_reentry_remaining_ms ?? 0)
+            : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE" && blockedRegimeActive
+              ? Math.max(0, (blockedRegime?.until ?? input.now) - input.now)
+              : 0;
       const rangeReentryWaitMsOut = range_reentry_wait_ms ?? 0;
       const rangeReentryElapsedMsOut = range_reentry_elapsed_ms ?? 0;
       const rangeReentryRemainingMsOut = range_reentry_remaining_ms ?? 0;
       const rangeReentrySourceOut =
-        gateResult === "RANGE_GATE_BLOCK_REENTRY"
-          ? range_reentry_source
-          : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE" && blockedRegimeActive
-            ? "range_blocked_regime"
-            : "range_risk_engine";
+        rangeEdgeConfirmationReject != null
+          ? "range_edge_reversal_confirmation"
+          : gateResult === "RANGE_GATE_BLOCK_REENTRY"
+            ? range_reentry_source
+            : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE" && blockedRegimeActive
+              ? "range_blocked_regime"
+              : "range_risk_engine";
       if (rangeFinalBlockReason === "RANGE_RISK_BLOCK_REENTRY") {
         console.log("[RANGE_REENTRY_VALUE_PROOF]", {
           symbol: String(sym),
@@ -2360,7 +2547,14 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         {
           strategy_executor: "RANGE",
           final_decision: "SKIP",
-          reject_reason: gateResult === "RANGE_GATE_BLOCK_REENTRY" ? "RISK_FAIL_REENTRY" : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE" ? "RISK_COOLDOWN" : "EDGE_FAIL_EXPECTANCY",
+          reject_reason:
+            rangeEdgeConfirmationReject != null
+              ? rangeEdgeConfirmationReject
+              : gateResult === "RANGE_GATE_BLOCK_REENTRY"
+                ? (rangeStopReentryRejectOverride ?? "RISK_FAIL_REENTRY")
+                : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
+                  ? "RISK_COOLDOWN"
+                  : "EDGE_FAIL_EXPECTANCY",
           stage1_result_code: stage1Code as any,
           entry_blocked: rangeFinalBlockReason,
           range_stage0_engine_taken: true,
@@ -2368,7 +2562,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           legacy_executor_path_taken: false,
           risk_cooldown_subreason: rangeRiskSubreason,
           cooldown_remaining_ms: rangeCooldownRemainingMs,
-          range_reentry_cooldown_applied: gateResult === "RANGE_GATE_BLOCK_REENTRY",
+          range_reentry_cooldown_applied:
+            gateResult === "RANGE_GATE_BLOCK_REENTRY" &&
+            rangeEdgeConfirmationReject == null &&
+            rangeStopReentryRejectOverride == null,
           range_reentry_wait_ms: rangeReentryWaitMsOut,
           range_reentry_elapsed_ms: rangeReentryElapsedMsOut,
           range_reentry_remaining_ms: rangeReentryRemainingMsOut,
