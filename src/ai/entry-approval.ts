@@ -5,6 +5,8 @@ export type AiApprovalAction = "ENTER_LONG" | "ENTER_SHORT" | "NO_ENTRY";
 
 export type AiCostGateMode = "hard_block" | "soft_penalty" | "bypass_due_to_regime_first" | "neutral";
 
+export type AiTrendStateGateMode = "hard_block" | "soft_penalty" | "neutral";
+
 export type AiGateTrace = Readonly<{
   regime: MarketRegime;
   executor: "RANGE" | "TREND";
@@ -16,6 +18,13 @@ export type AiGateTrace = Readonly<{
   edgeScore: number | null;
   cost_gate_applied: boolean;
   cost_gate_mode: AiCostGateMode;
+  trend_state_gate_applied: boolean;
+  trend_state_gate_mode: AiTrendStateGateMode;
+  breakout_state: string | null;
+  pullback_state: string | null;
+  trend_state_penalty: number;
+  /** Confidence after cost × trend penalties (same as output.confidence when set). */
+  final_confidence_after_penalty: number | null;
 }>;
 
 export type AiApprovalOutput = Readonly<{
@@ -46,10 +55,20 @@ function clamp01(x: number): number {
   return x < 0 ? 0 : x > 1 ? 1 : x;
 }
 
+const TREND_TRACE_NEUTRAL = {
+  trend_state_gate_applied: false,
+  trend_state_gate_mode: "neutral" as const,
+  breakout_state: null as string | null,
+  pullback_state: null as string | null,
+  trend_state_penalty: 1.0,
+  final_confidence_after_penalty: null as number | null
+};
+
 function costTraceHard(
   input: AiApprovalInput,
   gate_mode: "RANGE" | "TREND",
-  cost_gate_mode: AiCostGateMode
+  cost_gate_mode: AiCostGateMode,
+  finalConfidence: number | null
 ): AiGateTrace {
   return {
     regime: input.regime,
@@ -60,18 +79,28 @@ function costTraceHard(
     edge: null,
     edgeScore: null,
     cost_gate_applied: true,
-    cost_gate_mode
+    cost_gate_mode,
+    ...TREND_TRACE_NEUTRAL,
+    final_confidence_after_penalty: finalConfidence
   };
 }
 
-function costTraceSoft(
+function buildGateTrace(
   input: AiApprovalInput,
   gate_mode: "RANGE" | "TREND",
   em: number,
   tc: number,
   edge: number,
   edgeScore: number,
-  cost_gate_mode: AiCostGateMode
+  cost_gate_mode: AiCostGateMode,
+  trend: Readonly<{
+    trend_state_gate_applied: boolean;
+    trend_state_gate_mode: AiTrendStateGateMode;
+    breakout_state: string | null;
+    pullback_state: string | null;
+    trend_state_penalty: number;
+    final_confidence_after_penalty: number | null;
+  }>
 ): AiGateTrace {
   return {
     regime: input.regime,
@@ -82,7 +111,8 @@ function costTraceSoft(
     edge,
     edgeScore,
     cost_gate_applied: true,
-    cost_gate_mode
+    cost_gate_mode,
+    ...trend
   };
 }
 
@@ -94,6 +124,9 @@ function costTraceSoft(
  *
  * Cost: upper market lane (regime) is authoritative — raw em vs tc is not a duplicate hard veto
  * after executor/authority already advanced the candidate (units may differ).
+ *
+ * TREND: breakout/pullback unknown or weak states apply soft penalties only — no duplicate hard veto
+ * after upper routing + authority ENTER.
  */
 export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
   const gate_mode: "RANGE" | "TREND" =
@@ -104,21 +137,21 @@ export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
 
   const attach = (o: Pick<AiApprovalOutput, "action" | "reason" | "confidence">, trace: AiGateTrace): AiApprovalOutput => ({
     ...o,
-    ai_gate_trace: trace
+    ai_gate_trace: { ...trace, final_confidence_after_penalty: o.confidence }
   });
 
   // Hard NOs (must NO_ENTRY).
   if (input.risk_state === "BLOCKED") {
     return attach(
       { action: "NO_ENTRY", reason: "리스크 차단", confidence: 0.99 },
-      costTraceHard(input, gate_mode, "hard_block")
+      costTraceHard(input, gate_mode, "hard_block", 0.99)
     );
   }
 
   if (typeof em !== "number" || typeof tc !== "number" || !Number.isFinite(em) || !Number.isFinite(tc)) {
     return attach(
       { action: "NO_ENTRY", reason: "비용/기대움직임 불명확", confidence: 0.9 },
-      costTraceHard(input, gate_mode, "hard_block")
+      costTraceHard(input, gate_mode, "hard_block", 0.9)
     );
   }
 
@@ -140,22 +173,45 @@ export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
     }
   }
 
-  const costTrace = costTraceSoft(input, gate_mode, em, tc, edge, edgeScore, cost_gate_mode);
-
-  if (gate_mode === "RANGE") {
-    if (input.box_position === "middle") {
-      return attach({ action: "NO_ENTRY", reason: "박스 중앙", confidence: 0.99 }, costTrace);
-    }
-  }
+  let trend_state_gate_applied = false;
+  let trend_state_gate_mode: AiTrendStateGateMode = "neutral";
+  let trend_state_penalty = 1.0;
+  let breakout_state: string | null = null;
+  let pullback_state: string | null = null;
 
   if (gate_mode === "TREND") {
     const bs = input.breakout_state ?? "unknown";
     const ps = input.pullback_state ?? "unknown";
-    if (bs === "unknown" || ps === "unknown") {
-      return attach({ action: "NO_ENTRY", reason: "추세 상태 불명확", confidence: 0.88 }, costTrace);
+    breakout_state = bs;
+    pullback_state = ps;
+    trend_state_gate_applied = true;
+
+    const unknownish = bs === "unknown" || ps === "unknown";
+    const weakish = bs === "none" && ps !== "pullback_ok";
+
+    if (unknownish) {
+      trend_state_gate_mode = "soft_penalty";
+      trend_state_penalty = bs === "unknown" && ps === "unknown" ? 0.65 : 0.72;
+    } else if (weakish) {
+      trend_state_gate_mode = "soft_penalty";
+      trend_state_penalty = 0.78;
     }
-    if (bs === "none" && ps !== "pullback_ok") {
-      return attach({ action: "NO_ENTRY", reason: "추세 약화", confidence: 0.92 }, costTrace);
+  }
+
+  const trendTrace = {
+    trend_state_gate_applied,
+    trend_state_gate_mode,
+    breakout_state,
+    pullback_state,
+    trend_state_penalty,
+    final_confidence_after_penalty: null as number | null
+  };
+
+  const costTrace = buildGateTrace(input, gate_mode, em, tc, edge, edgeScore, cost_gate_mode, trendTrace);
+
+  if (gate_mode === "RANGE") {
+    if (input.box_position === "middle") {
+      return attach({ action: "NO_ENTRY", reason: "박스 중앙", confidence: 0.99 }, costTrace);
     }
   }
 
@@ -170,17 +226,28 @@ export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
     return attach({ action: "NO_ENTRY", reason: "리스크 제한", confidence: 0.85 }, costTrace);
   }
 
-  let confidence = 0.65 * costPenalty;
+  const baseConfidence = 0.65;
+  let confidence = baseConfidence * costPenalty * trend_state_penalty;
   confidence = clamp01(confidence);
 
-  if (gate_mode === "TREND" && confidence < 0.4) {
-    return attach({ action: "NO_ENTRY", reason: "비용 우위 부족", confidence: clamp01(confidence) }, costTrace);
+  const minPass = 0.38;
+  if (confidence < minPass) {
+    const costSoft = cost_gate_mode === "soft_penalty" || cost_gate_mode === "bypass_due_to_regime_first";
+    const reason =
+      trend_state_penalty < 1
+        ? "조건 부족 (추세 확인 약함)"
+        : costSoft
+          ? "조건 부족 (비용 edge 보조)"
+          : "조건 부족";
+    return attach({ action: "NO_ENTRY", reason, confidence }, costTrace);
   }
 
-  const reason =
-    cost_gate_mode === "bypass_due_to_regime_first" || cost_gate_mode === "soft_penalty"
-      ? "조건 충족 (비용 edge 보조)"
-      : "조건 충족";
+  let reason = "조건 충족";
+  if (trend_state_penalty < 1) {
+    reason = "조건 충족 (추세 확인 약함)";
+  } else if (cost_gate_mode === "bypass_due_to_regime_first" || cost_gate_mode === "soft_penalty") {
+    reason = "조건 충족 (비용 edge 보조)";
+  }
 
   return attach(
     {
