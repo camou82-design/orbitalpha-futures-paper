@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { readLastLines } from "../lib/file-utils";
 
 import type { PaperClosedPositionRecord, PaperOpenPositionRecord } from "../models/types";
 import { migrateLegacyExecutorAtEntry } from "../strategy/executors/executor-normalize";
@@ -96,23 +97,24 @@ export class JsonStore {
     return fullPath;
   }
 
-  /** Read `reports/health-history.jsonl` (empty if missing). */
+  /** Read `reports/health-history.jsonl` (empty if missing). Tails last 2000 lines. */
   async readHealthHistoryJsonlFile(): Promise<ReturnType<typeof parseHealthHistoryJsonl>> {
     const fullPath = path.resolve(this.baseDir, "reports/health-history.jsonl");
     try {
-      const raw = await fs.readFile(fullPath, "utf8");
-      return parseHealthHistoryJsonl(raw);
+      const lines = await readLastLines(fullPath, 2000);
+      return parseHealthHistoryJsonl(lines.join("\n"));
     } catch {
       return [];
     }
   }
 
+  /** Tails last 50,000 events to prevent memory exhaustion in summary reporting. */
   async readEventsJsonlFile(): Promise<unknown[]> {
     const fullPath = path.resolve(this.baseDir, "reports/events.jsonl");
     try {
-      const raw = await fs.readFile(fullPath, "utf8");
+      const lines = await readLastLines(fullPath, 50000);
       const out: unknown[] = [];
-      for (const line of raw.split("\n")) {
+      for (const line of lines) {
         const t = line.trim();
         if (!t) continue;
         try {

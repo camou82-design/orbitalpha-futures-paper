@@ -11,7 +11,7 @@ export {
   displayFieldsForClosedRow
 } from "./paperClosedHistoryNormalize";
 export type { NormalizedPaperClosedRow, ClosedRowDisplayFields } from "./paperClosedHistoryNormalize";
-
+import { readLastLines } from "./file-utils";
 function isRoutingKind(x: unknown): x is PaperEngineRoutingKind {
   return x === "RANGE" || x === "TREND" || x === "IDLE";
 }
@@ -235,55 +235,38 @@ async function readPositionsOpenArray(dataDir: string): Promise<unknown[]> {
   }
 }
 
+
 async function readHealthHistoryTail(dataDir: string, maxLines: number): Promise<FuturesPaperHealthHistoryItem[]> {
   const p = path.join(dataDir, "reports", "health-history.jsonl");
-  try {
-    const raw = await fs.readFile(p, "utf8");
-    const lines = raw
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-    const tail = lines.slice(-maxLines);
-    const out: FuturesPaperHealthHistoryItem[] = [];
-    for (const line of tail) {
-      try {
-        const j = JSON.parse(line) as Record<string, unknown>;
-        out.push({
-          generatedAt: typeof j.generatedAt === "number" ? j.generatedAt : undefined,
-          status: typeof j.status === "string" ? j.status : undefined,
-          reasons: Array.isArray(j.reasons) ? j.reasons.filter((x): x is string => typeof x === "string") : undefined
-        });
-      } catch {
-        /* skip bad line */
-      }
+  const tail = await readLastLines(p, maxLines);
+  const out: FuturesPaperHealthHistoryItem[] = [];
+  for (const line of tail) {
+    try {
+      const j = JSON.parse(line) as Record<string, unknown>;
+      out.push({
+        generatedAt: typeof j.generatedAt === "number" ? j.generatedAt : undefined,
+        status: typeof j.status === "string" ? j.status : undefined,
+        reasons: Array.isArray(j.reasons) ? j.reasons.filter((x): x is string => typeof x === "string") : undefined
+      });
+    } catch {
+      /* skip bad line */
     }
-    return out;
-  } catch {
-    return [];
   }
+  return out;
 }
 
 async function readEventsTail(dataDir: string, maxLines: number): Promise<unknown[]> {
   const p = path.join(dataDir, "reports", "events.jsonl");
-  try {
-    const raw = await fs.readFile(p, "utf8");
-    const lines = raw
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-    const tail = lines.slice(-maxLines);
-    const out: unknown[] = [];
-    for (const line of tail) {
-      try {
-        out.push(JSON.parse(line) as unknown);
-      } catch {
-        /* skip bad line */
-      }
+  const tail = await readLastLines(p, maxLines);
+  const out: unknown[] = [];
+  for (const line of tail) {
+    try {
+      out.push(JSON.parse(line) as unknown);
+    } catch {
+      /* skip bad line */
     }
-    return out;
-  } catch {
-    return [];
   }
+  return out;
 }
 
 /**
