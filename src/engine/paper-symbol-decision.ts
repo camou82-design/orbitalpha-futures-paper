@@ -3,8 +3,10 @@ import type {
   MarketSymbol,
   PaperDecisionRejectReason,
   PaperEdgeState,
+  PaperEngineRoutingKind,
   PaperExecutionState,
   PaperFinalDecision,
+  PaperMarketMode,
   PaperRegimeState,
   PaperRiskState,
   PaperSignalState,
@@ -812,6 +814,81 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   /** V2 Engine Authority — expectancy bypass 결정용. */
   authority?: EntryExecutionAuthority;
 }>;
+
+/** 상위 시장 모드·엔진·신규 방향 허용 — 시그널 레이어 TREND-UP 정렬(숏 후보 억제)용 */
+export type PaperSignalMarketAlignmentContext = Readonly<{
+  marketMode: PaperMarketMode;
+  activeEngine: PaperEngineRoutingKind;
+  allowNewLong: boolean;
+  allowNewShort: boolean;
+}>;
+
+export type PaperSignalMarketAlignmentProofLogger = Readonly<{
+  info: (event: string, payload?: Record<string, unknown>) => void;
+}>;
+
+function isTrendUpShortSuppressMarketGuard(
+  risk: RiskControlDecision | null,
+  ctx: PaperSignalMarketAlignmentContext
+): boolean {
+  if (risk == null) return false;
+  if (risk.directionalShockState !== "UP") return false;
+  if (ctx.marketMode !== "TREND" && ctx.activeEngine !== "TREND") return false;
+  if (!ctx.allowNewLong || ctx.allowNewShort) return false;
+  return true;
+}
+
+/**
+ * 상위 TREND-UP + 롱 허용·숏 신규 금지일 때 하위 `paper_short_candidate`만 `none`으로 맞춘다.
+ * 숏→롱 강제 변환은 하지 않으며, 예외는 상위 shock/모드/allow 플래그가 바뀐 경우뿐이다.
+ */
+export function applyPaperSignalMarketAlignment<T extends SymbolSnapshotLike>(input: Readonly<{
+  snapshot: T;
+  risk: RiskControlDecision | null;
+  signalAlignmentContext: PaperSignalMarketAlignmentContext;
+  adaptiveMode: FuturesMarketMode;
+  marketSignalProofLogger?: PaperSignalMarketAlignmentProofLogger;
+}>): T {
+  const { snapshot, risk, signalAlignmentContext: ctx, adaptiveMode, marketSignalProofLogger } = input;
+  const raw = snapshot.signal;
+  const guardActive = isTrendUpShortSuppressMarketGuard(risk, ctx);
+
+  let alignmentApplied = false;
+  let alignmentReason: "TREND_UP_SUPPRESS_RANGE_SHORT" | "TREND_UP_KEEP_LONG" | "NO_ALIGNMENT_APPLIED" =
+    "NO_ALIGNMENT_APPLIED";
+  let out: T = snapshot;
+
+  if (guardActive && raw === "paper_short_candidate") {
+    out = { ...snapshot, signal: "none" } as T;
+    alignmentApplied = true;
+    alignmentReason = "TREND_UP_SUPPRESS_RANGE_SHORT";
+  } else if (guardActive && raw === "paper_long_candidate") {
+    alignmentReason = "TREND_UP_KEEP_LONG";
+  }
+
+  const shouldEmit =
+    marketSignalProofLogger != null &&
+    (raw === "paper_short_candidate" || raw === "paper_long_candidate" || alignmentApplied);
+
+  if (shouldEmit && marketSignalProofLogger) {
+    marketSignalProofLogger.info("SIGNAL_MARKET_ALIGNMENT_PROOF", {
+      symbol: String(snapshot.symbol),
+      directional_shock_state: risk?.directionalShockState ?? "NONE",
+      market_mode: ctx.marketMode,
+      active_engine: ctx.activeEngine,
+      allow_new_long: ctx.allowNewLong,
+      allow_new_short: ctx.allowNewShort,
+      sideways_mode: adaptiveMode === "sideways",
+      regime_state_diag: snapshot.regimeStateDiag ?? null,
+      raw_signal_before_alignment: raw,
+      signal_after_alignment: out.signal,
+      alignment_applied: alignmentApplied,
+      alignment_reason: alignmentReason
+    });
+  }
+
+  return out;
+}
 
 export type EvaluatePaperSymbolEntryResult = Readonly<{
   decision: PaperSymbolDecision;

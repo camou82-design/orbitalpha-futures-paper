@@ -63,7 +63,12 @@ import {
   DECISION_FUNNEL_RING_MAX,
   sumDecisionFunnelTicks
 } from "./decision-funnel";
-import { evaluatePaperSymbolEntry, type EvaluatePaperSymbolEntryResult, type SymbolSnapshotLike } from "./paper-symbol-decision";
+import {
+  applyPaperSignalMarketAlignment,
+  evaluatePaperSymbolEntry,
+  type EvaluatePaperSymbolEntryResult,
+  type SymbolSnapshotLike
+} from "./paper-symbol-decision";
 import { deriveDirectionalRoutingOverride } from "./directional-routing";
 import {
   computePaperCloseLegMetrics,
@@ -1125,10 +1130,27 @@ export class PaperEngine {
     const effectiveLane = routingOverride.effectiveExecutionLane;
     const effectiveRegimeForDecision = (effectiveLane === "IDLE" ? "NO_TRADE" : effectiveLane) as MarketRegime;
 
+    const signalAlignmentContextBase = {
+      marketMode: marketModeOut.marketMode,
+      activeEngine: marketModeOut.routing.activeEngine,
+      allowNewLong: riskExposureOut.allowNewLong,
+      allowNewShort: riskExposureOut.allowNewShort
+    } as const;
+
     for (const sym of polledSymbols) {
       const symKeyEarly = String(sym);
       const snap = snapshots.find((s) => s.symbol === sym);
-      this.lastTickSymbolSnapshotBySymbol.set(symKeyEarly, snap ?? null);
+      const snapForDecision =
+        snap == null
+          ? null
+          : applyPaperSignalMarketAlignment({
+              snapshot: snap,
+              risk,
+              signalAlignmentContext: signalAlignmentContextBase,
+              adaptiveMode: this.lastAdaptiveMode.mode,
+              marketSignalProofLogger: this.logger
+            });
+      this.lastTickSymbolSnapshotBySymbol.set(symKeyEarly, snapForDecision ?? snap ?? null);
 
       const nowTick = snap;
 
@@ -1192,7 +1214,7 @@ export class PaperEngine {
       // 2. Decision Logic
       let res = evaluatePaperSymbolEntry({
         config: this.config,
-        snapshot: snap,
+        snapshot: snapForDecision!,
         dataReady: regimeUnknown === false,
         openPositionSide: existingPos?.side ?? null,
         regime: effectiveRegimeForDecision,
@@ -1223,7 +1245,7 @@ export class PaperEngine {
       const envelope = resolveSymbolDecisionEnvelope({
         symbol: sym,
         fetchedAt,
-        snapshot: buildV2SnapshotBridge(snap),
+        snapshot: buildV2SnapshotBridge(snapForDecision!),
         legacy: buildV2LegacyBridge(res),
         config: buildV2ConfigBridge(this.config),
         state: buildV2StateBridge(opensAfterClose, this.lastRisk),
