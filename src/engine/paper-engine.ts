@@ -1758,9 +1758,7 @@ export class PaperEngine {
         range_reentry_source: d.range_reentry_source ?? null,
         range_fresh_reentry_allowed: d.range_fresh_reentry_allowed ?? false,
         range_fresh_reentry_blocked_reason: d.range_fresh_reentry_blocked_reason ?? null,
-        range_reentry_wait_bypassed_no_open_position: d.range_reentry_wait_bypassed_no_open_position ?? false,
-        blocked_regime_until_bypass_applied: d.blocked_regime_until_bypass_applied ?? false,
-        blocked_regime_until_bypass_reason: d.blocked_regime_until_bypass_reason ?? null
+        range_reentry_wait_bypassed_no_open_position: d.range_reentry_wait_bypassed_no_open_position ?? false
       },
       capacity: {
         max_positions_reached: ctx.maxPositionsReached,

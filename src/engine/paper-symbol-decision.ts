@@ -1024,10 +1024,6 @@ function pack(
     blocked_regime_reason: fields.blocked_regime_reason ?? null,
     reentry_wait_ms: fields.reentry_wait_ms ?? null,
     reentry_elapsed_ms: fields.reentry_elapsed_ms ?? null,
-    blocked_regime_until_bypass_applied: fields.blocked_regime_until_bypass_applied ?? false,
-    blocked_regime_until_bypass_reason: fields.blocked_regime_until_bypass_reason ?? null,
-    blocked_regime_original_until_ms: fields.blocked_regime_original_until_ms ?? null,
-    blocked_regime_original_reason: fields.blocked_regime_original_reason ?? null,
     range_long_only_short_deferred_applied: fields.range_long_only_short_deferred_applied ?? false,
     range_long_only_short_deferred_bypassed: fields.range_long_only_short_deferred_bypassed ?? false,
     range_cost_warning_applied: fields.range_cost_warning_applied ?? false,
@@ -1350,10 +1346,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let blocked_regime_reason: string | null = null;
   let reentry_wait_ms: number | null = null;
   let reentry_elapsed_ms: number | null = null;
-  let blocked_regime_until_bypass_applied = false;
-  let blocked_regime_until_bypass_reason: string | null = null;
-  let blocked_regime_original_until_ms: number | null = null;
-  let blocked_regime_original_reason: string | null = null;
   let range_long_only_short_deferred_applied = false;
   let range_long_only_short_deferred_bypassed = false;
   let stage1LoosenedEntry = false;

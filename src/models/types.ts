@@ -432,14 +432,6 @@ export type PaperSymbolDecisionRecord = Readonly<{
   reentry_wait_ms?: number | null;
   /** 마지막 청산 후 경과(ms) */
   reentry_elapsed_ms?: number | null;
-  /** 테스트: blocked_regime_until_active 단일 우회 적용 여부 */
-  blocked_regime_until_bypass_applied?: boolean;
-  /** 테스트: blocked_regime_until_active 우회 사유 */
-  blocked_regime_until_bypass_reason?: string | null;
-  /** 테스트: 우회 전 blocked regime 잔여(ms) */
-  blocked_regime_original_until_ms?: number | null;
-  /** 테스트: 우회 전 blocked regime 원본 사유 */
-  blocked_regime_original_reason?: string | null;
   /** RANGE stage0에서 long-only short deferred가 실제 적용됐는지 */
   range_long_only_short_deferred_applied?: boolean;
   /** RANGE stage0에서 long-only short deferred를 우회했는지 */
