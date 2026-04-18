@@ -1,12 +1,12 @@
 # Lightsail: orbitalpha-futures-paper (paper only)
 
-**Do not** stop or restart existing Upbit (`orbitalpha-trading`) processes. **Do not** run `pm2 restart all`. Add this app only.
+**Do not** stop or restart existing production processes. **Do not** run `pm2 restart all`. Add this app only.
 
 ## 1. Deploy code (separate directory)
 
 ```bash
 mkdir -p ~/orbitalpha-futures-paper
-# copy or git clone this repo into ~/orbitalpha-futures-paper (not inside orbitalpha-trading)
+# copy or git clone this repo into ~/orbitalpha-futures-paper (not inside other projects)
 cd ~/orbitalpha-futures-paper
 npm install
 npm run build
@@ -56,5 +56,5 @@ Expected under `data/reports/`: `summary.json`, `summary-daily.json`, `summary-w
 ## 5. Never
 
 - `pm2 restart all`
-- Editing `orbitalpha-trading` or its env for this app
-- Sharing env files between Upbit trading and this project
+- Editing unrelated project env files for this app
+- Sharing env files between different projects

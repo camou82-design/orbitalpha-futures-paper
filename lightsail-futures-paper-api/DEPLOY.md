@@ -1,6 +1,6 @@
 # paper-api.orbitalpha.kr — Lightsail + Nginx + Vercel
 
-This repository (`camou82-design/orbitalpha-futures-paper`) contains the paper engine **and** this API. `orbitalpha-trading` is unrelated.
+This repository (`camou82-design/orbitalpha-futures-paper`) contains the paper engine **and** this API. Other projects are unrelated.
 
 ## 0. Paths on Lightsail
 

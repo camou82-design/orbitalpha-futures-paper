@@ -1,7 +1,7 @@
 /**
  * pm2: paper loop only (Bybit public, no orders).
  * Start from repo root: pm2 start ecosystem.futures-paper.config.cjs
- * Do not merge with orbitalpha-trading; use a separate app name and cwd.
+ * Do not merge with other projects; use a separate app name and cwd.
  */
 const path = require("path");
 

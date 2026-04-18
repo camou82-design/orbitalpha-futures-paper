@@ -1,34 +1,31 @@
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 const { execSync } = require("child_process");
 
 /**
- * Production Validation Script (Kodari Standard - Linux/Debian)
+ * Production Validation Script (Kodari Standard - Futures Paper ONLY)
  * Checks: 
  * 1. PM2 process status (online)
- * 2. Listening ports (ss -nlt actual socket check)
+ * 2. Listening ports (ss -nlt for API)
  * 3. Health check (Internal loopback)
  * 4. Data/Status API response (Logic validation)
+ * 5. Report file freshness (Loop validation)
  */
 
 const CONFIG = {
     apps: [
         {
             name: "lightsail-futures-paper-api",
+            type: "api",
             port: 3991,
             health: "/health",
             data: "/api/futures-paper/data"
         },
         {
-            name: "orbitalpha-trading-api",
-            port: 8787,
-            health: "/api/v1/health",
-            data: "/api/v1/trade/status"
-        },
-        {
-            name: "orbitalpha-trading-dashboard",
-            port: 3010,
-            health: "/",
-            data: "/login"
+            name: "orbitalpha-futures-paper-loop",
+            type: "loop",
+            reportPath: "reports/summary.json"
         }
     ]
 };
@@ -56,7 +53,6 @@ async function checkUrl(port, path) {
 
 function checkPortListingLinux(port) {
     try {
-        // Debian/Linux: ss -nlt | grep ":PORT "
         const cmd = `ss -nlt | grep ":${port} "`;
         const out = execSync(cmd, { stdio: ["pipe", "pipe", "ignore"] }).toString();
         return out.includes(`:${port}`);
@@ -66,7 +62,7 @@ function checkPortListingLinux(port) {
 }
 
 async function validate() {
-    console.log("=== ORBITALPHA PRODUCTION VALIDATION (LINUX/DEBIAN) ===");
+    console.log("=== ORBITALPHA FUTURES PRODUCTION VALIDATION (KODARI) ===");
     let allOk = true;
 
     for (const app of CONFIG.apps) {
@@ -94,37 +90,62 @@ async function validate() {
             allOk = false;
         }
 
-        // 2. Port listening
-        if (checkPortListingLinux(app.port)) {
-            console.log(`  [OK] Port ${app.port} is LISTENING (ss check)`);
-        } else {
-            console.error(`  [FAIL] Port ${app.port} is NOT listening (Actual socket check)`);
-            allOk = false;
+        if (app.type === "api") {
+            // 2. Port listening
+            if (checkPortListingLinux(app.port)) {
+                console.log(`  [OK] Port ${app.port} is LISTENING (ss check)`);
+            } else {
+                console.error(`  [FAIL] Port ${app.port} is NOT listening`);
+                allOk = false;
+            }
+
+            // 3. Health check
+            const health = await checkUrl(app.port, app.health);
+            if (health.ok) {
+                console.log(`  [OK] Health check (${app.health}): ${health.status}`);
+            } else {
+                console.error(`  [FAIL] Health check (${app.health}) failed: ${health.error || health.status}`);
+                allOk = false;
+            }
+
+            // 4. Data API / Logic check
+            const data = await checkUrl(app.port, app.data);
+            if (data.status === 200 || data.status === 401 || data.status === 403) {
+                console.log(`  [OK] Data API responded: ${data.status} (Logic active)`);
+            } else {
+                console.error(`  [FAIL] Data API failed: ${data.status}`);
+                allOk = false;
+            }
         }
 
-        // 3. Health check
-        const health = await checkUrl(app.port, app.health);
-        if (health.ok) {
-            console.log(`  [OK] Health check (${app.health}): ${health.status}`);
-        } else {
-            console.error(`  [FAIL] Health check (${app.health}) failed: ${health.error || health.status}`);
-            allOk = false;
-        }
-
-        // 4. Data API / Logic check
-        const data = await checkUrl(app.port, app.data);
-        // 200 (Dashboard), 401 (API Auth needed), 403 (Forbidden) are all "Logic Active" signals.
-        if (data.status === 200 || data.status === 401 || data.status === 403) {
-            console.log(`  [OK] Data/Status API responded: ${data.status} (Logic active)`);
-        } else {
-            console.error(`  [FAIL] Data/Status API failed: ${data.status}`);
-            allOk = false;
+        if (app.type === "loop") {
+            // 5. File Freshness Check
+            try {
+                const fullPath = path.resolve(process.cwd(), app.reportPath);
+                if (fs.existsSync(fullPath)) {
+                    const stats = fs.statSync(fullPath);
+                    const ageMs = Date.now() - stats.mtimeMs;
+                    const ageSec = Math.floor(ageMs / 1000);
+                    if (ageMs < 120000) { // 2 minutes
+                        console.log(`  [OK] Report freshness: ${app.reportPath} updated ${ageSec}s ago`);
+                    } else {
+                        console.warn(`  [FAIL] Report is STALE: ${app.reportPath} was last updated ${ageSec}s ago`);
+                        allOk = false;
+                    }
+                } else {
+                    console.error(`  [FAIL] Report file NOT FOUND: ${app.reportPath}`);
+                    allOk = false;
+                }
+            } catch (e) {
+                console.error(`  [FAIL] File verification error: ${e.message}`);
+                allOk = false;
+            }
         }
     }
 
     console.log("\n-------------------------------------------");
     if (allOk) {
-        console.log("FINAL STATUS: ALL SYSTEMS NORMAL (LINUX)");
+        console.log("FINAL STATUS: ALL SYSTEMS NORMAL (FUTURES)");
         process.exit(0);
     } else {
         console.log("FINAL STATUS: CRITICAL FAILURES DETECTED");
