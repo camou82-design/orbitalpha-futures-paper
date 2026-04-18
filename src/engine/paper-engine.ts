@@ -144,6 +144,12 @@ const DEFAULT_PAPER_SIZE_USD = 100;
 const SAME_DIR_REENTRY_COOLDOWN_MULT = 1.35;
 const RANGE_REVERSAL_SWITCH_PENDING_MS = 90_000;
 
+/** RANGE 캠페인: 심볼 1회전당 총 배정의 80%만 사용(초기 40% + 추가 40%, 보류 20%). */
+const RANGE_CAMPAIGN_TOTAL_RATIO = 0.8;
+const RANGE_INITIAL_RATIO = 0.4;
+const RANGE_ADD_ON_RATIO = 0.4;
+const RANGE_RESERVE_RATIO = 0.2;
+
 type RangeReversalSwitchPending = Readonly<{
   untilMs: number;
   preferredSide: "long" | "short";
@@ -4025,23 +4031,29 @@ export class PaperEngine {
           ...buildAuthorityEventMeta(authority)
         });
 
-        let entrySizeUsd = adaptive.sizeUsd;
+        const liveRegimeForEntryIdentity = (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as PaperRegimeState;
+        const entryIdentity = this.resolveEntryIdentity(authority, decision, liveRegimeForEntryIdentity);
+        const isRangeCampaignNewEntry =
+          entryIdentity.effectiveExecutorAtEntry === "RANGE" && entryIdentity.effectiveRegimeAtEntry === "RANGE";
+
         const riskE = this.lastRiskExposure;
-        if (riskE) {
+        const adaptiveSizeUsdBefore = adaptive.sizeUsd;
+        let entrySizeUsd = adaptive.sizeUsd;
+        if (!isRangeCampaignNewEntry && riskE) {
           entrySizeUsd = Math.max(
             MIN_POSITION_SIZE_USD,
             Math.round(adaptive.sizeUsd * riskE.sizeMultiplier * 100) / 100
           );
         }
         const symS = String(first.symbol);
-        if (this.lastMarketMode?.routing.activeEngine === "TREND") {
+        if (!isRangeCampaignNewEntry && this.lastMarketMode?.routing.activeEngine === "TREND") {
           const pyr = this.trendPyramidLevelBySymbol.get(symS) ?? 0;
           entrySizeUsd = Math.max(
             MIN_POSITION_SIZE_USD,
             Math.round(entrySizeUsd * (1 + Math.min(4, pyr) * 0.07) * 100) / 100
           );
         }
-        if (this.lastMarketMode?.routing.activeEngine === "RANGE") {
+        if (!isRangeCampaignNewEntry && this.lastMarketMode?.routing.activeEngine === "RANGE") {
           const rSt = this.lastTickRangeEvalBySymbol.get(symS);
           if (rSt) {
             const cycleM = rangeCycleSizePolicy(rSt.rangeCycleCount, rSt.hedgeBalance);
@@ -4052,6 +4064,38 @@ export class PaperEngine {
               Math.round(entrySizeUsd * cycleM * legM * recM * 100) / 100
             );
           }
+        }
+        if (isRangeCampaignNewEntry) {
+          const paperBase = this.config.paperBaseSizeUsd;
+          const campaignTotalUsd = paperBase * RANGE_CAMPAIGN_TOTAL_RATIO;
+          const campaignInitialUsd = paperBase * RANGE_INITIAL_RATIO;
+          const campaignAddOnUsd = paperBase * RANGE_ADD_ON_RATIO;
+          const campaignReserveUsd = paperBase * RANGE_RESERVE_RATIO;
+          const riskM = riskE?.sizeMultiplier ?? 1;
+          const plannedInitialUsd = paperBase * RANGE_INITIAL_RATIO;
+          const riskScaledInitialUsd = plannedInitialUsd * riskM;
+          entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(riskScaledInitialUsd * 100) / 100);
+          this.logger.info("RANGE_CAMPAIGN_SIZING_PROOF", {
+            symbol: first.symbol,
+            side: authority.side,
+            regime: entryIdentity.effectiveRegimeAtEntry,
+            executor: entryIdentity.effectiveExecutorAtEntry,
+            paper_base_size_usd: paperBase,
+            campaign_total_usd: campaignTotalUsd,
+            campaign_initial_usd: campaignInitialUsd,
+            campaign_add_on_usd: campaignAddOnUsd,
+            campaign_reserve_usd: campaignReserveUsd,
+            risk_size_multiplier: riskM,
+            final_applied_size_usd: entrySizeUsd,
+            path: "new_entry" as const
+          });
+          this.logger.info("RANGE_SIZE_OVERRIDE_PROOF", {
+            symbol: first.symbol,
+            adaptive_size_usd_before: adaptiveSizeUsdBefore,
+            final_range_campaign_size_usd_after: entrySizeUsd,
+            override_applied: true,
+            reason: "range_campaign_normalization"
+          });
         }
         const mPre = marginsForSymbol(next, symS);
         if (
@@ -4086,12 +4130,6 @@ export class PaperEngine {
           );
           continue;
         }
-
-        const entryIdentity = this.resolveEntryIdentity(
-          authority,
-          decision,
-          (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as PaperRegimeState
-        );
 
         if (this.okxDemo) {
           const instId = toOkxSwapInstId(first.symbol);
@@ -4278,6 +4316,8 @@ export class PaperEngine {
               rangeManagementState: "INIT" as RangeManagementState,
               rangeAddOnUsed: false,
               rangeFirstProfitLocked: false,
+              entryStage: 1,
+              scalingWeights: [0.5, 0.5],
               ...(res.decision.range_reversal_immediate_switch_applied === true ? { rangeEntryFromReversalSwitch: true } : {})
             }
             : {}),
@@ -4499,118 +4539,193 @@ export class PaperEngine {
       return null;
     }
 
-    const stageAtLeast2 = (existing.entryStage ?? 1) >= 2;
-    if (stageAtLeast2 && first.qualityScore < 72) {
-      this.logger.info("scale_in_blocked_stage2plus_quality", {
-        symbol: existing.symbol,
-        qualityScore: first.qualityScore,
-        entryStage: existing.entryStage
-      });
-      return null;
-    }
-
     const decision = res.executorDecision!;
     const adaptive = effectiveAdaptiveResult;
+    const isRangeCampaignScaleIn = existing.regimeAtEntry === "RANGE" && existing.executorAtEntry === "RANGE";
+
     const addOnKey = `${String(existing.symbol)}:${existing.openedAt}`;
-    const addOnCount = this.rangeUpperShortAddOnCountByKey.get(addOnKey) ?? 0;
-    const addOnUsed = existing.rangeAddOnUsed === true || addOnCount >= 1;
-    const exDetail = (decision.detail ?? {}) as Record<string, unknown>;
-    const rangeSignalReason = typeof exDetail.range_signal_reason === "string" ? exDetail.range_signal_reason : null;
-    const edgeStructureOk =
-      exDetail.range_upper_edge_structure_ok === true ||
-      rangeSignalReason === "range_upper_short_priority_structure" ||
-      rangeSignalReason === "range_lower_long_priority_structure";
-    const upperShortAddOnCandidate =
-      existing.regimeAtEntry === "RANGE" &&
-      existing.side === "short" &&
-      existing.rangeEntryZone === "upper" &&
-      typeof first.boxPos === "number" &&
-      classifyRangeActionZone(first.boxPos) === "upper" &&
-      res.decision.range_upper_short_priority_applied === true &&
-      edgeStructureOk === true;
-    const lowerLongAddOnCandidate =
-      existing.regimeAtEntry === "RANGE" &&
-      existing.side === "long" &&
-      existing.rangeEntryZone === "lower" &&
-      typeof first.boxPos === "number" &&
-      classifyRangeActionZone(first.boxPos) === "lower" &&
-      res.decision.range_lower_long_priority_applied === true &&
-      edgeStructureOk === true;
-    const rangeAddOnCandidate = upperShortAddOnCandidate || lowerLongAddOnCandidate;
-    if (rangeAddOnCandidate && addOnUsed) {
-      this.logger.info("range_add_on_entry_guard_blocked", {
+    let rangeAddOnCandidate = false;
+    let edgeStructureOkForAddon = false;
+
+    let incrementalSizeUsd: number;
+    let targetStage: number;
+    let scalingWeights: number[];
+    let rangeAddOnSizeMultApplied: number;
+    let minSizeGuardApplied = false;
+    let rangeCampaignScaleInPath = false;
+    let baseEntrySizeUsdForTrace = existing.initialSizeUsd ?? existing.sizeUsd;
+
+    if (isRangeCampaignScaleIn) {
+      if ((existing.entryStage ?? 1) >= 2 || existing.rangeAddOnUsed === true) {
+        this.logger.info("RANGE_ADD_ON_CAP_REACHED", {
+          symbol: existing.symbol,
+          side: existing.side,
+          entryStage: existing.entryStage ?? 1,
+          rangeAddOnUsed: existing.rangeAddOnUsed === true,
+          attempted_target_stage: res.decision.target_stage ?? (existing.entryStage ?? 1) + 1,
+          reason: "already_stage2_or_addon_used"
+        });
+        return null;
+      }
+      const requestedTargetStage = res.decision.target_stage ?? (existing.entryStage ?? 1) + 1;
+      if (requestedTargetStage > 2) {
+        this.logger.info("RANGE_ADD_ON_CAP_REACHED", {
+          symbol: existing.symbol,
+          side: existing.side,
+          entryStage: existing.entryStage ?? 1,
+          rangeAddOnUsed: existing.rangeAddOnUsed ?? false,
+          attempted_target_stage: requestedTargetStage,
+          reason: "target_stage_gt_2"
+        });
+        return null;
+      }
+      rangeCampaignScaleInPath = true;
+      targetStage = 2;
+      scalingWeights = [0.5, 0.5];
+      rangeAddOnSizeMultApplied = 1;
+      const paperBase = this.config.paperBaseSizeUsd;
+      const riskM = this.lastRiskExposure?.sizeMultiplier ?? 1;
+      const plannedAddOnUsd = paperBase * RANGE_ADD_ON_RATIO;
+      const riskScaledAddOnUsd = plannedAddOnUsd * riskM;
+      incrementalSizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(riskScaledAddOnUsd * 100) / 100);
+      this.logger.info("stage2_size_calculation_trace", {
+        range_campaign_scale_in: true,
+        target_stage: targetStage,
+        mult_add_on: rangeAddOnSizeMultApplied,
+        min_size_guard_applied: minSizeGuardApplied,
+        final_incremental_usd: incrementalSizeUsd,
+        original_stage1_size: existing.initialSizeUsd ?? existing.sizeUsd
+      });
+      this.logger.info("RANGE_CAMPAIGN_SIZING_PROOF", {
         symbol: existing.symbol,
         side: existing.side,
-        range_add_on_entry_applied: false,
-        range_add_on_transition_applied: false,
-        range_add_on_used: true,
-        range_management_state_before: existing.rangeManagementState ?? "INIT",
-        range_management_state_after: existing.rangeManagementState ?? "INIT",
-        range_add_on_entry_count: addOnCount,
-        range_add_on_entry_size_mult: 0,
-        range_entry_zone: existing.rangeEntryZone ?? null,
-        range_upper_short_priority_applied: res.decision.range_upper_short_priority_applied ?? false,
-        range_lower_long_priority_applied: res.decision.range_lower_long_priority_applied ?? false,
-        edgeStructureOk
+        regime: existing.regimeAtEntry ?? null,
+        executor: existing.executorAtEntry ?? null,
+        paper_base_size_usd: paperBase,
+        campaign_total_usd: paperBase * RANGE_CAMPAIGN_TOTAL_RATIO,
+        campaign_initial_usd: paperBase * RANGE_INITIAL_RATIO,
+        campaign_add_on_usd: paperBase * RANGE_ADD_ON_RATIO,
+        campaign_reserve_usd: paperBase * RANGE_RESERVE_RATIO,
+        risk_size_multiplier: riskM,
+        final_applied_size_usd: incrementalSizeUsd,
+        path: "scale_in" as const
       });
-      return null;
-    }
-    if (existing.regimeAtEntry === "RANGE" && typeof first.boxPos === "number") {
-      const zz = classifyRangeActionZone(first.boxPos);
-      if (existing.side === "long" && zz === "upper" && adaptive.direction === "long") {
-        this.logger.info("scale_in_blocked_range_upper_long_add", { symbol: existing.symbol, box_zone: zz });
+      this.logger.info("RANGE_SIZE_OVERRIDE_PROOF", {
+        symbol: existing.symbol,
+        adaptive_size_usd_before: adaptive.sizeUsd,
+        final_range_campaign_size_usd_after: incrementalSizeUsd,
+        override_applied: true,
+        reason: "range_campaign_normalization"
+      });
+    } else {
+      const stageAtLeast2 = (existing.entryStage ?? 1) >= 2;
+      if (stageAtLeast2 && first.qualityScore < 72) {
+        this.logger.info("scale_in_blocked_stage2plus_quality", {
+          symbol: existing.symbol,
+          qualityScore: first.qualityScore,
+          entryStage: existing.entryStage
+        });
         return null;
       }
-      if (existing.side === "short" && zz === "lower" && adaptive.direction === "short") {
-        this.logger.info("scale_in_blocked_range_lower_short_add", { symbol: existing.symbol, box_zone: zz });
+
+      const addOnCount = this.rangeUpperShortAddOnCountByKey.get(addOnKey) ?? 0;
+      const addOnUsed = existing.rangeAddOnUsed === true || addOnCount >= 1;
+      const exDetail = (decision.detail ?? {}) as Record<string, unknown>;
+      const rangeSignalReason = typeof exDetail.range_signal_reason === "string" ? exDetail.range_signal_reason : null;
+      const edgeStructureOk =
+        exDetail.range_upper_edge_structure_ok === true ||
+        rangeSignalReason === "range_upper_short_priority_structure" ||
+        rangeSignalReason === "range_lower_long_priority_structure";
+      const upperShortAddOnCandidate =
+        existing.regimeAtEntry === "RANGE" &&
+        existing.side === "short" &&
+        existing.rangeEntryZone === "upper" &&
+        typeof first.boxPos === "number" &&
+        classifyRangeActionZone(first.boxPos) === "upper" &&
+        res.decision.range_upper_short_priority_applied === true &&
+        edgeStructureOk === true;
+      const lowerLongAddOnCandidate =
+        existing.regimeAtEntry === "RANGE" &&
+        existing.side === "long" &&
+        existing.rangeEntryZone === "lower" &&
+        typeof first.boxPos === "number" &&
+        classifyRangeActionZone(first.boxPos) === "lower" &&
+        res.decision.range_lower_long_priority_applied === true &&
+        edgeStructureOk === true;
+      rangeAddOnCandidate = upperShortAddOnCandidate || lowerLongAddOnCandidate;
+      edgeStructureOkForAddon = edgeStructureOk;
+      if (rangeAddOnCandidate && addOnUsed) {
+        this.logger.info("range_add_on_entry_guard_blocked", {
+          symbol: existing.symbol,
+          side: existing.side,
+          range_add_on_entry_applied: false,
+          range_add_on_transition_applied: false,
+          range_add_on_used: true,
+          range_management_state_before: existing.rangeManagementState ?? "INIT",
+          range_management_state_after: existing.rangeManagementState ?? "INIT",
+          range_add_on_entry_count: addOnCount,
+          range_add_on_entry_size_mult: 0,
+          range_entry_zone: existing.rangeEntryZone ?? null,
+          range_upper_short_priority_applied: res.decision.range_upper_short_priority_applied ?? false,
+          range_lower_long_priority_applied: res.decision.range_lower_long_priority_applied ?? false,
+          edgeStructureOk
+        });
         return null;
       }
+      if (existing.regimeAtEntry === "RANGE" && typeof first.boxPos === "number") {
+        const zz = classifyRangeActionZone(first.boxPos);
+        if (existing.side === "long" && zz === "upper" && adaptive.direction === "long") {
+          this.logger.info("scale_in_blocked_range_upper_long_add", { symbol: existing.symbol, box_zone: zz });
+          return null;
+        }
+        if (existing.side === "short" && zz === "lower" && adaptive.direction === "short") {
+          this.logger.info("scale_in_blocked_range_lower_short_add", { symbol: existing.symbol, box_zone: zz });
+          return null;
+        }
+      }
+      targetStage = res.decision.target_stage ?? (existing.entryStage ?? 1) + 1;
+
+      let sw = existing.scalingWeights;
+      if (!sw) {
+        if (existing.regimeAtEntry === "RANGE") sw = [0.30, 0.30, 0.40];
+        else if (existing.regimeAtEntry === "TREND") sw = [0.30, 0.30, 0.40];
+        else sw = [1.0];
+      }
+      scalingWeights = sw;
+
+      const weight = scalingWeights[targetStage - 1] ?? 0;
+      if (weight <= 0) return null;
+
+      const baseStageWeight = scalingWeights[0] || 1;
+      baseEntrySizeUsdForTrace = existing.initialSizeUsd ?? existing.sizeUsd;
+      const baseFullSize = baseEntrySizeUsdForTrace / baseStageWeight;
+      incrementalSizeUsd = Math.round(baseFullSize * weight * 100) / 100;
+
+      rangeAddOnSizeMultApplied = 1;
+
+      if (incrementalSizeUsd < MIN_POSITION_SIZE_USD) {
+        incrementalSizeUsd = MIN_POSITION_SIZE_USD;
+        minSizeGuardApplied = true;
+      }
+
+      const sizeTrace = {
+        original_stage1_size: baseEntrySizeUsdForTrace,
+        base_stage_weight: baseStageWeight,
+        target_stage: targetStage,
+        target_weight: weight,
+        stage_weight_ratio: weight / baseStageWeight,
+        base_full_size_usd: baseFullSize,
+        base_target_usd: baseFullSize * weight,
+        mult_risk_exposure: 1,
+        mult_range_leg: 1,
+        mult_range_cycle: 1,
+        mult_range_recovery: 1,
+        mult_add_on: rangeAddOnSizeMultApplied,
+        min_size_guard_applied: minSizeGuardApplied,
+        final_incremental_usd: incrementalSizeUsd
+      };
+      this.logger.info("stage2_size_calculation_trace", sizeTrace);
     }
-    const targetStage = res.decision.target_stage ?? (existing.entryStage ?? 1) + 1;
-
-    // scaling_weights based on regime
-    let scalingWeights = existing.scalingWeights;
-    if (!scalingWeights) {
-      if (existing.regimeAtEntry === "RANGE") scalingWeights = [0.25, 0.35, 0.40];
-      else if (existing.regimeAtEntry === "TREND") scalingWeights = [0.30, 0.30, 0.40];
-      else scalingWeights = [1.0]; // fallback
-    }
-
-    const weight = scalingWeights[targetStage - 1] ?? 0;
-    if (weight <= 0) return null;
-
-    const baseStageWeight = scalingWeights[0] || 1;
-    const baseEntrySizeUsd = existing.initialSizeUsd ?? existing.sizeUsd;
-    const baseFullSize = baseEntrySizeUsd / baseStageWeight;
-    let incrementalSizeUsd = Math.round(baseFullSize * weight * 100) / 100;
-
-    // add-on multiplier
-    const rangeAddOnSizeMultApplied = rangeAddOnCandidate ? 0.45 : 1;
-    incrementalSizeUsd = Math.round(incrementalSizeUsd * rangeAddOnSizeMultApplied * 100) / 100;
-
-    let minSizeGuardApplied = false;
-    if (incrementalSizeUsd < 10) {
-      incrementalSizeUsd = 10;
-      minSizeGuardApplied = true;
-    }
-
-    const sizeTrace = {
-      original_stage1_size: baseEntrySizeUsd,
-      base_stage_weight: baseStageWeight,
-      target_stage: targetStage,
-      target_weight: weight,
-      stage_weight_ratio: weight / baseStageWeight,
-      base_full_size_usd: baseFullSize,
-      base_target_usd: baseFullSize * weight,
-      mult_risk_exposure: 1,
-      mult_range_leg: 1,
-      mult_range_cycle: 1,
-      mult_range_recovery: 1,
-      mult_add_on: rangeAddOnSizeMultApplied,
-      min_size_guard_applied: minSizeGuardApplied,
-      final_incremental_usd: incrementalSizeUsd
-    };
-    this.logger.info("stage2_size_calculation_trace", sizeTrace);
 
     const re = this.lastRiskExposure;
     const symEx = String(existing.symbol);
@@ -4671,7 +4786,8 @@ export class PaperEngine {
       new_total_size: newTotalSizeUsd,
       guidance: res.decision.guidance
     });
-    if (rangeAddOnCandidate) {
+    if (rangeCampaignScaleInPath || rangeAddOnCandidate) {
+      const addOnCount = this.rangeUpperShortAddOnCountByKey.get(addOnKey) ?? 0;
       const nextAddOnCount = addOnCount + 1;
       this.rangeUpperShortAddOnCountByKey.set(addOnKey, nextAddOnCount);
       const nextState: RangeManagementState =
@@ -4682,6 +4798,7 @@ export class PaperEngine {
         range_add_on_entry_applied: true,
         range_add_on_transition_applied: true,
         range_add_on_used: true,
+        range_campaign_scale_in: rangeCampaignScaleInPath,
         range_management_state_before: existing.rangeManagementState ?? "INIT",
         range_management_state_after: nextState,
         range_add_on_entry_count: nextAddOnCount,
@@ -4689,7 +4806,7 @@ export class PaperEngine {
         range_entry_zone: existing.rangeEntryZone ?? null,
         range_upper_short_priority_applied: res.decision.range_upper_short_priority_applied ?? false,
         range_lower_long_priority_applied: res.decision.range_lower_long_priority_applied ?? false,
-        edgeStructureOk
+        edgeStructureOk: edgeStructureOkForAddon
       });
     }
 
@@ -4699,8 +4816,8 @@ export class PaperEngine {
       entryPrice: newEntryPrice,
       entryStage: targetStage,
       scalingWeights,
-      rangeAddOnUsed: (targetStage >= 2 || rangeAddOnCandidate) ? true : existing.rangeAddOnUsed,
-      rangeManagementState: (targetStage >= 2 || rangeAddOnCandidate)
+      rangeAddOnUsed: (targetStage >= 2 || rangeAddOnCandidate || rangeCampaignScaleInPath) ? true : existing.rangeAddOnUsed,
+      rangeManagementState: (targetStage >= 2 || rangeAddOnCandidate || rangeCampaignScaleInPath)
         ? ("REATTACK_USED" as RangeManagementState)
         : (existing.rangeManagementState ?? "INIT"),
       stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : existing.stopPrice,
@@ -4719,7 +4836,11 @@ export class PaperEngine {
       rangeManagementState_before: existing.rangeManagementState ?? "INIT",
       rangeManagementState_after: updatedRecord.rangeManagementState,
       is_scale_in: true,
-      reason: rangeAddOnCandidate ? "range_add_on_candidate" : "standard_scale_in"
+      reason: rangeCampaignScaleInPath
+        ? "range_campaign_scale_in"
+        : rangeAddOnCandidate
+          ? "range_add_on_candidate"
+          : "standard_scale_in"
     });
 
     if (updatedRecord.stopPrice !== existing.stopPrice || existing.stopPrice === undefined) {
