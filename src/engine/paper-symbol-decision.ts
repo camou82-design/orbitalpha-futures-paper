@@ -2109,6 +2109,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     lowConfidenceSignalMin = edgeRelaxZoneForConfidence ? 0.31 : 0.34;
     lowConfidenceEntryMin = edgeRelaxZoneForConfidence ? 0.33 : 0.36;
     lowConfidence = rangeScores.rangeSignalScore < lowConfidenceSignalMin || rangeScores.rangeEntryScore < lowConfidenceEntryMin;
+
     reentryBlocked = false;
     range_reentry_wait_ms = null;
     range_reentry_elapsed_ms = null;
@@ -2225,54 +2226,41 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_same_direction_reentry_final_allowed = true;
       supplemental_reasons.push("RANGE_REVERSAL_IMMEDIATE_REENTRY_BYPASS");
     }
-    gateResult = "RANGE_GATE_PASS";
-    gateReason = "range_gate_pass";
-    if (rangeSignal.signal === "RANGE_SIGNAL_NONE") {
-      gateResult = "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
-      gateReason = rangeSignal.reason;
-    } else if (rangeSignal.signal === "RANGE_SIGNAL_WAIT_RECHECK") {
-      // PART 2: Soft pass if no position and strong signal.
-      noOpenPos = !input.openPositionSide || input.openPositionSide === null;
-      hasBaseCandidate =
-        sn.signal === "paper_long_candidate" || sn.signal === "paper_short_candidate";
-      hasStrongBaseSignal =
-        sn.signal_strength === "strong" || sn.trendOk === true;
-
-      hardBlockedForSoftPass =
-        riskEngineBlocked === true ||
-        reentryBlocked === true ||
+    // --- Phase 1: Unified Authority Filtering (Down-classify weak/blocked candidates early) ---
+    if (rangeSignal.signal.includes("CANDIDATE")) {
+      const sideRiskBlocked = rangeSignal.side === "long" ? input.risk?.longAllow === false : rangeSignal.side === "short" ? input.risk?.shortAllow === false : false;
+      const isRiskBlocked = riskEngineBlocked || sideRiskBlocked ||
         (blockedRegimeActive &&
           (!blockedRegimeLossStreakSuspend || !range_risk_limit_relax_active) &&
           !(freshReentryCandidate && blockedRegimeLossStreakSuspend));
 
-      if (noOpenPos && hasBaseCandidate && hasStrongBaseSignal && !hardBlockedForSoftPass) {
-        gateResult = "RANGE_GATE_PASS";
-        gateReason = "range_wait_recheck_soft_pass_candidate";
-        supplemental_reasons.push("RANGE_WAIT_RECHECK_SOFT_PASS");
-      } else {
-        gateResult = "RANGE_GATE_BLOCK_WAIT_RECHECK";
-        gateReason = `range_reversal_recheck_tier_${(typeof rangeReversalTier === "string" ? rangeReversalTier : "none").toLowerCase()}`;
+      if (lowConfidence && !rangeReversalSwitchMatches) {
+        rangeSignal.signal = "RANGE_SIGNAL_WAIT_RECHECK";
+        rangeSignal.reason = "range_score_below_threshold";
+      } else if (isRiskBlocked) {
+        rangeSignal.signal = "RANGE_SIGNAL_WAIT_RECHECK";
+        rangeSignal.reason = "range_risk_auth_blocked";
       }
-    } else if (
-      riskEngineBlocked ||
-      (blockedRegimeActive &&
-        (!blockedRegimeLossStreakSuspend || !range_risk_limit_relax_active) &&
-        !(freshReentryCandidate && blockedRegimeLossStreakSuspend))
-    ) {
-      gateResult = "RANGE_GATE_BLOCK_RISK_ENGINE";
-      gateReason = blockedRegimeLossStreakSuspend ? "mode_loss_streak_soft_suspended" : (blockedRegime?.reason ?? "risk_engine_block");
+    }
+
+    // --- Phase 2: Final Gate Evaluation ---
+    if (rangeSignal.signal === "RANGE_SIGNAL_NONE") {
+      gateResult = "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
+      gateReason = rangeSignal.reason;
+    } else if (rangeSignal.signal === "RANGE_SIGNAL_WAIT_RECHECK") {
+      // Authority Philosophy: Wait/Recheck is an observation state, never a candidate.
+      gateResult = "RANGE_GATE_BLOCK_WAIT_RECHECK";
+      gateReason = rangeSignal.reason;
     } else if (reentryBlocked) {
       gateResult = "RANGE_GATE_BLOCK_REENTRY";
-      gateReason = blockedRegimeLossStreakSuspend
-        ? "range_reentry_cooldown_active_soft_suspend_same_direction"
-        : "range_reentry_cooldown_active";
-    } else if (lowConfidence && !rangeReversalSwitchMatches) {
-      gateResult = "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
-      gateReason = "range_score_below_threshold";
-    }
-    if (rangeStopReentrySameContextBlock && gateResult === "RANGE_GATE_PASS") {
+      gateReason = "range_reentry_cooldown_active";
+    } else if (rangeStopReentrySameContextBlock) {
       gateResult = "RANGE_GATE_BLOCK_REENTRY";
       gateReason = "range_stop_reentry_same_context_blocked";
+    } else {
+      // Only high-confidence, authorized candidates reach here.
+      gateResult = "RANGE_GATE_PASS";
+      gateReason = "range_gate_pass";
     }
 
     // Capture interpretation results for scaling and proofs (tier/mult must stay consistent — avoid undefined.toUpperCase downstream).
