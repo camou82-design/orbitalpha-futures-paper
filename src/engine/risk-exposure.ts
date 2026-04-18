@@ -1,5 +1,6 @@
 import type { EngineConfig, MarketModeSelectorOutput, RiskExposureOutput, PaperRiskMode } from "../models/types";
 import type { RiskControlDecision } from "./risk-control-layer";
+import type { Logger } from "../logs/logger";
 
 export type RiskExposureInput = Readonly<{
   config: EngineConfig;
@@ -8,11 +9,41 @@ export type RiskExposureInput = Readonly<{
   openPositionCount: number;
   /** UTC 기준 세션 세분(미장 개장 전후 등). */
   fetchedAtMs: number;
+  /** When set, emits one structured proof line for short new-entry gating (upstream diagnosis). */
+  proofLogger?: Logger;
 }>;
 
 function clamp(n: number, lo: number, hi: number): number {
   if (!Number.isFinite(n)) return lo;
   return Math.min(hi, Math.max(lo, n));
+}
+
+function shortBlockedReason(input: {
+  riskShortAllow: boolean;
+  routingPaused: boolean;
+  openPositionCount: number;
+  maxSlots: number;
+  riskMode: PaperRiskMode;
+}): string | null {
+  if (!input.riskShortAllow) return "RISK_SHORT_DISALLOWED";
+  if (input.routingPaused) return "ROUTING_PAUSED";
+  if (!(input.openPositionCount < input.maxSlots)) return "MAX_SLOTS_REACHED";
+  if (input.riskMode === "HALT") return "RISK_MODE_HALT";
+  return null;
+}
+
+function longBlockedReason(input: {
+  riskLongAllow: boolean;
+  routingPaused: boolean;
+  openPositionCount: number;
+  maxSlots: number;
+  riskMode: PaperRiskMode;
+}): string | null {
+  if (!input.riskLongAllow) return "RISK_LONG_DISALLOWED";
+  if (input.routingPaused) return "ROUTING_PAUSED";
+  if (!(input.openPositionCount < input.maxSlots)) return "MAX_SLOTS_REACHED";
+  if (input.riskMode === "HALT") return "RISK_MODE_HALT";
+  return null;
 }
 
 function sessionRiskBias(
@@ -132,6 +163,44 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
   const allowNewLong = risk.longAllow && !routingPaused && openPositionCount < maxSlots && riskMode !== "HALT";
   const allowNewShort = risk.shortAllow && !routingPaused && openPositionCount < maxSlots && riskMode !== "HALT";
   const allowNewEntry = allowNewLong || allowNewShort;
+
+  const shortReason = shortBlockedReason({
+    riskShortAllow: risk.shortAllow,
+    routingPaused,
+    openPositionCount,
+    maxSlots,
+    riskMode
+  });
+  const longReason = longBlockedReason({
+    riskLongAllow: risk.longAllow,
+    routingPaused,
+    openPositionCount,
+    maxSlots,
+    riskMode
+  });
+
+  if (input.proofLogger) {
+    input.proofLogger.info("RISK_EXPOSURE_SHORT_GATE_PROOF", {
+      market_mode: mm,
+      active_engine: ae,
+      new_entry_policy: marketMode.routing.newEntryPolicy,
+      routing_paused: routingPaused,
+      risk_short_allow: risk.shortAllow,
+      risk_long_allow: risk.longAllow,
+      risk_mode: riskMode,
+      open_position_count: openPositionCount,
+      max_slots: maxSlots,
+      allow_new_long: allowNewLong,
+      allow_new_short: allowNewShort,
+      allow_new_entry: allowNewEntry,
+      short_blocked_reason: shortReason,
+      long_blocked_reason: longReason,
+      directional_shock_state: risk.directionalShockState,
+      late_pursuit: risk.isLatePursuit,
+      late_chase: risk.isLateChase,
+      symbol: null
+    });
+  }
 
   const allowAdd =
     allowNewEntry &&

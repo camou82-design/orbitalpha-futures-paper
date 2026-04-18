@@ -1102,7 +1102,8 @@ export class PaperEngine {
       marketMode: marketModeOut,
       risk: this.lastRisk!,
       openPositionCount: opensBeforeClose.length,
-      fetchedAtMs: fetchedAt
+      fetchedAtMs: fetchedAt,
+      proofLogger: this.logger
     });
     this.lastRiskExposure = riskExposureOut;
 

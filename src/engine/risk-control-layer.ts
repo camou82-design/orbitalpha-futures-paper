@@ -186,7 +186,8 @@ export function evaluateRiskControls(input: Readonly<{
 
     if (directionalShockState === "DOWN") {
       longAllow = false;
-      shortAllow = !isLatePursuit;
+      // Engine-2: downside / crash path must not blanket-ban shorts; late pursuit is size-only (shortSizeMult below).
+      shortAllow = true;
       if (crashState === "CRASH_ALERT") longSizeMult *= 0.55;
       else if (crashState === "CRASH_REDUCE") longSizeMult *= 0.22;
       else if (crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK") longSizeMult *= 0.1;
