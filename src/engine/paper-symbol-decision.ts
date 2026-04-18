@@ -3241,7 +3241,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       : 0;
 
   const aiIn = executorDecision
-    ? aiInputFromDecision({ decision: executorDecision, executorDirection: intentSide, lossStreak, last10Net })
+    ? aiInputFromDecision({
+        decision: executorDecision,
+        executorDirection: intentSide,
+        lossStreak,
+        last10Net,
+        effectiveRegime: input.regime
+      })
     : null;
 
   let dynamicSizeMult = input.risk?.sizeMultiplier ?? 1;

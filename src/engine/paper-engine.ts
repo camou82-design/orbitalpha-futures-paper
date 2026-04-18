@@ -1457,7 +1457,15 @@ export class PaperEngine {
           typeof this.lastRisk?.detail?.last10_net_usd === "number" && Number.isFinite(this.lastRisk.detail.last10_net_usd)
             ? this.lastRisk.detail.last10_net_usd
             : 0;
-        const aiIn = ex ? aiInputFromDecision({ decision: ex, executorDirection: intentSide, lossStreak, last10Net }) : null;
+        const aiIn = ex
+          ? aiInputFromDecision({
+              decision: ex,
+              executorDirection: intentSide,
+              lossStreak,
+              last10Net,
+              effectiveRegime: effectiveRegime as MarketRegime
+            })
+          : null;
         if (aiIn) {
           const aiOut = aiApproveEntry(aiIn);
           await this.store.appendJsonlLine("reports/events.jsonl", buildAiEventPayload("AI_APPROVED", sym, effectiveRegime, aiIn, aiOut, authority));
@@ -3440,11 +3448,13 @@ export class PaperEngine {
       const adaptive = effectiveAdaptiveResult;
 
       // --- UNIFIED ENTRY GATE CONSOLIDATION (Phase 1: Decision Logic & Guards) ---
+      const effectiveRegimeForAi = (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime;
       const aiIn = aiInputFromDecision({
         decision,
         executorDirection: authority.side as "long" | "short",
-        lossStreak: this.lastRisk?.recentLossStreakByMode?.[(this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime] ?? 0,
-        last10Net: typeof this.lastRisk?.detail?.last10_net_usd === "number" ? this.lastRisk.detail.last10_net_usd : 0
+        lossStreak: this.lastRisk?.recentLossStreakByMode?.[effectiveRegimeForAi] ?? 0,
+        last10Net: typeof this.lastRisk?.detail?.last10_net_usd === "number" ? this.lastRisk.detail.last10_net_usd : 0,
+        effectiveRegime: effectiveRegimeForAi
       });
 
       let aiExecutionApproved = true;
