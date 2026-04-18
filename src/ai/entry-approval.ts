@@ -9,6 +9,8 @@ export type AiTrendStateGateMode = "hard_block" | "soft_penalty" | "neutral";
 
 export type AiLossFlowGateMode = "hard_block" | "soft_penalty" | "neutral";
 
+export type AiDominantPenaltySource = "cost" | "trend" | "loss_flow" | "none";
+
 export type AiGateTrace = Readonly<{
   regime: MarketRegime;
   executor: "RANGE" | "TREND";
@@ -30,7 +32,14 @@ export type AiGateTrace = Readonly<{
   loss_streak: number;
   last_10_net: number;
   loss_flow_penalty: number;
-  /** Confidence after all penalties (same as output.confidence when set). */
+  dominant_penalty_source: AiDominantPenaltySource;
+  dominant_penalty_value: number;
+  secondary_penalty_value: number;
+  tertiary_penalty_value: number;
+  aggregate_penalty: number;
+  penalty_aggregation_mode: "dominant_with_light_secondary";
+  confidence_before_aggregation: number;
+  /** Confidence after aggregation (same as output.confidence when set). */
   final_confidence_after_penalty: number | null;
 }>;
 
@@ -77,6 +86,81 @@ const LOSS_FLOW_NEUTRAL = (input: AiApprovalInput) => ({
   last_10_net: input.last_10_net,
   loss_flow_penalty: 1.0
 });
+
+const AGG_NEUTRAL: Pick<
+  AiGateTrace,
+  | "dominant_penalty_source"
+  | "dominant_penalty_value"
+  | "secondary_penalty_value"
+  | "tertiary_penalty_value"
+  | "aggregate_penalty"
+  | "penalty_aggregation_mode"
+  | "confidence_before_aggregation"
+> = {
+  dominant_penalty_source: "none",
+  dominant_penalty_value: 1,
+  secondary_penalty_value: 1,
+  tertiary_penalty_value: 1,
+  aggregate_penalty: 1,
+  penalty_aggregation_mode: "dominant_with_light_secondary",
+  confidence_before_aggregation: 0.65
+};
+
+/** Smallest multiplier = strongest penalty → dominant; others lightly blend (no full product collapse). */
+function aggregateSoftPenalties(
+  costPenalty: number,
+  trendPenalty: number,
+  lossPenalty: number,
+  baseConfidence: number
+): Pick<
+  AiGateTrace,
+  | "dominant_penalty_source"
+  | "dominant_penalty_value"
+  | "secondary_penalty_value"
+  | "tertiary_penalty_value"
+  | "aggregate_penalty"
+  | "penalty_aggregation_mode"
+  | "confidence_before_aggregation"
+> {
+  type Src = Exclude<AiDominantPenaltySource, "none">;
+  const items: { src: Src; v: number }[] = [
+    { src: "cost", v: costPenalty },
+    { src: "trend", v: trendPenalty },
+    { src: "loss_flow", v: lossPenalty }
+  ];
+  items.sort((a, b) => a.v - b.v);
+  const p1 = items[0].v;
+  const p2 = items[1].v;
+  const p3 = items[2].v;
+  const secondaryPart = 1 - (1 - p2) * 0.35;
+  const tertiaryPart = 1 - (1 - p3) * 0.15;
+  const rawAgg = p1 * secondaryPart * tertiaryPart;
+  const aggregate_penalty = Math.max(0.62, Math.min(1.15, rawAgg));
+  const allNeutral = costPenalty >= 0.999 && trendPenalty >= 0.999 && lossPenalty >= 0.999;
+  const dominant_penalty_source: AiDominantPenaltySource = allNeutral ? "none" : items[0].src;
+  return {
+    dominant_penalty_source,
+    dominant_penalty_value: p1,
+    secondary_penalty_value: p2,
+    tertiary_penalty_value: p3,
+    aggregate_penalty,
+    penalty_aggregation_mode: "dominant_with_light_secondary",
+    confidence_before_aggregation: baseConfidence
+  };
+}
+
+function reasonFromDominant(dom: AiDominantPenaltySource, ok: boolean): string {
+  if (ok) {
+    if (dom === "none") return "조건 충족";
+    if (dom === "trend") return "조건 충족 (추세 확인 약함)";
+    if (dom === "loss_flow") return "조건 충족 (손실 흐름 약화)";
+    return "조건 충족 (비용 edge 보조)";
+  }
+  if (dom === "none") return "조건 부족";
+  if (dom === "trend") return "조건 부족 (추세 확인 약함)";
+  if (dom === "loss_flow") return "조건 부족 (손실 흐름 약화)";
+  return "조건 부족 (비용 edge 약함)";
+}
 
 /** Streak bands: 2–3 → 0.88~0.82, 4–6 → 0.78~0.70, 7+ → down to ~0.58 floor with overall product floor. */
 function computeLossFlowPenalty(input: AiApprovalInput): {
@@ -137,6 +221,7 @@ function costTraceHard(
     cost_gate_mode,
     ...TREND_TRACE_NEUTRAL,
     ...lf,
+    ...AGG_NEUTRAL,
     final_confidence_after_penalty: finalConfidence
   };
 }
@@ -160,7 +245,17 @@ function buildGateTrace(
     loss_flow_gate_applied: boolean;
     loss_flow_gate_mode: AiLossFlowGateMode;
     loss_flow_penalty: number;
-  }>
+  }>,
+  aggregation: Pick<
+    AiGateTrace,
+    | "dominant_penalty_source"
+    | "dominant_penalty_value"
+    | "secondary_penalty_value"
+    | "tertiary_penalty_value"
+    | "aggregate_penalty"
+    | "penalty_aggregation_mode"
+    | "confidence_before_aggregation"
+  >
 ): AiGateTrace {
   return {
     regime: input.regime,
@@ -176,6 +271,7 @@ function buildGateTrace(
     loss_streak: input.loss_streak,
     last_10_net: input.last_10_net,
     ...lossFlow,
+    ...aggregation,
     final_confidence_after_penalty: null
   };
 }
@@ -183,11 +279,8 @@ function buildGateTrace(
 /**
  * AI approval layer (deterministic, conservative).
  *
- * This does NOT change strategy logic; it only approves/denies an entry at the very end.
- * Rule: ambiguous => NO_ENTRY.
- *
- * Cost / TREND state / loss flow: soft penalties only after upper routing + authority ENTER —
- * hard veto reserved for structural risk (BLOCKED), bad inputs, RANGE middle.
+ * Soft penalties: dominant weakest multiplier + light secondary blend + floor — not full product
+ * (avoids stacked “soft” becoming effective hard veto after regime/authority ENTER).
  */
 export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
   const gate_mode: "RANGE" | "TREND" =
@@ -275,7 +368,20 @@ export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
     loss_flow_penalty
   };
 
-  const costTrace = buildGateTrace(input, gate_mode, em, tc, edge, edgeScore, cost_gate_mode, trendTrace, lossTrace);
+  const baseConfidence = 0.65;
+  const aggregation = aggregateSoftPenalties(costPenalty, trend_state_penalty, loss_flow_penalty, baseConfidence);
+  const costTrace = buildGateTrace(
+    input,
+    gate_mode,
+    em,
+    tc,
+    edge,
+    edgeScore,
+    cost_gate_mode,
+    trendTrace,
+    lossTrace,
+    aggregation
+  );
 
   if (gate_mode === "RANGE") {
     if (input.box_position === "middle") {
@@ -283,41 +389,21 @@ export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
     }
   }
 
-  const baseConfidence = 0.65;
-  const confidenceBeforeLoss = baseConfidence * costPenalty * trend_state_penalty;
-  let confidence = confidenceBeforeLoss * loss_flow_penalty;
-  confidence = clamp01(confidence);
-
+  let confidence = clamp01(baseConfidence * aggregation.aggregate_penalty);
   const minPass = 0.38;
-  if (confidence < minPass) {
-    const costSoft = cost_gate_mode === "soft_penalty" || cost_gate_mode === "bypass_due_to_regime_first";
-    const lossOnlyPushedBelow =
-      loss_flow_penalty < 1 && clamp01(confidenceBeforeLoss) >= minPass;
-    const reason = lossOnlyPushedBelow
-      ? "조건 부족 (손실 흐름 약화)"
-      : trend_state_penalty < 1
-        ? "조건 부족 (추세 확인 약함)"
-        : costSoft
-          ? "조건 부족 (비용 edge 보조)"
-          : loss_flow_gate_mode === "soft_penalty"
-            ? "조건 부족 (손실 흐름 약화)"
-            : "조건 부족";
-    return attach({ action: "NO_ENTRY", reason, confidence }, costTrace);
-  }
+  const dom = aggregation.dominant_penalty_source;
 
-  let reason = "조건 충족";
-  if (loss_flow_penalty < 1) {
-    reason = "조건 충족 (손실 흐름 약화)";
-  } else if (trend_state_penalty < 1) {
-    reason = "조건 충족 (추세 확인 약함)";
-  } else if (cost_gate_mode === "bypass_due_to_regime_first" || cost_gate_mode === "soft_penalty") {
-    reason = "조건 충족 (비용 edge 보조)";
+  if (confidence < minPass) {
+    return attach(
+      { action: "NO_ENTRY", reason: reasonFromDominant(dom, false), confidence },
+      costTrace
+    );
   }
 
   return attach(
     {
       action: input.executor_direction === "long" ? "ENTER_LONG" : "ENTER_SHORT",
-      reason,
+      reason: reasonFromDominant(dom, true),
       confidence
     },
     costTrace
