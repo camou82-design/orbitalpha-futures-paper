@@ -3,10 +3,19 @@ import type { AnyEntryDecision } from "../strategy/executors/types";
 
 export type AiApprovalAction = "ENTER_LONG" | "ENTER_SHORT" | "NO_ENTRY";
 
+export type AiGateTrace = Readonly<{
+  regime: MarketRegime;
+  executor: "RANGE" | "TREND";
+  /** Rules applied: regime-first (RANGE/TREND lane), else executor fallback. */
+  gate_mode: "RANGE" | "TREND";
+}>;
+
 export type AiApprovalOutput = Readonly<{
   action: AiApprovalAction;
   reason: string;
   confidence: number; // 0..1
+  /** Set on every outcome so logs can correlate regime vs executor vs applied rule set. */
+  ai_gate_trace?: AiGateTrace;
 }>;
 
 export type AiApprovalInput = Readonly<{
@@ -36,62 +45,75 @@ function clamp01(x: number): number {
  * Rule: ambiguous => NO_ENTRY.
  */
 export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
+  const gate_mode: "RANGE" | "TREND" =
+    input.regime === "RANGE" ? "RANGE" : input.regime === "TREND" ? "TREND" : input.executor;
+  const ai_gate_trace: AiGateTrace = {
+    regime: input.regime,
+    executor: input.executor,
+    gate_mode
+  };
+
+  const withTrace = (o: Pick<AiApprovalOutput, "action" | "reason" | "confidence">): AiApprovalOutput =>
+    ({ ...o, ai_gate_trace });
+
   const em = input.expected_move;
   const tc = input.total_cost;
 
   // Hard NOs (must NO_ENTRY).
-  if (input.risk_state === "BLOCKED") return { action: "NO_ENTRY", reason: "리스크 차단", confidence: 0.99 };
+  if (input.risk_state === "BLOCKED") {
+    return withTrace({ action: "NO_ENTRY", reason: "리스크 차단", confidence: 0.99 });
+  }
 
   if (typeof em === "number" && typeof tc === "number") {
     if (!Number.isFinite(em) || !Number.isFinite(tc) || em <= tc) {
-      return { action: "NO_ENTRY", reason: "비용 우위 부족", confidence: 0.99 };
+      return withTrace({ action: "NO_ENTRY", reason: "비용 우위 부족", confidence: 0.99 });
     }
   } else {
     // Missing cost/move => ambiguous => deny.
-    return { action: "NO_ENTRY", reason: "비용/기대움직임 불명확", confidence: 0.9 };
+    return withTrace({ action: "NO_ENTRY", reason: "비용/기대움직임 불명확", confidence: 0.9 });
   }
 
-  if (input.executor === "RANGE") {
+  if (gate_mode === "RANGE") {
     if (input.box_position === "middle") {
-      return { action: "NO_ENTRY", reason: "박스 중앙", confidence: 0.99 };
+      return withTrace({ action: "NO_ENTRY", reason: "박스 중앙", confidence: 0.99 });
     }
   }
 
-  if (input.executor === "TREND") {
+  if (gate_mode === "TREND") {
     const bs = input.breakout_state ?? "unknown";
     const ps = input.pullback_state ?? "unknown";
     if (bs === "unknown" || ps === "unknown") {
-      return { action: "NO_ENTRY", reason: "추세 상태 불명확", confidence: 0.88 };
+      return withTrace({ action: "NO_ENTRY", reason: "추세 상태 불명확", confidence: 0.88 });
     }
     if (bs === "none" && ps !== "pullback_ok") {
-      return { action: "NO_ENTRY", reason: "추세 약화", confidence: 0.92 };
+      return withTrace({ action: "NO_ENTRY", reason: "추세 약화", confidence: 0.92 });
     }
   }
 
   // Loss-flow deterioration => conservative NO.
   if (input.loss_streak >= 2) {
-    return { action: "NO_ENTRY", reason: "손실 흐름 악화", confidence: 0.92 };
+    return withTrace({ action: "NO_ENTRY", reason: "손실 흐름 악화", confidence: 0.92 });
   }
   if (input.last_10_net < -8) {
-    return { action: "NO_ENTRY", reason: "최근 성과 악화", confidence: 0.9 };
+    return withTrace({ action: "NO_ENTRY", reason: "최근 성과 악화", confidence: 0.9 });
   }
   if (input.risk_state === "LIMITED" && input.last_10_net < 0) {
-    return { action: "NO_ENTRY", reason: "리스크 제한", confidence: 0.85 };
+    return withTrace({ action: "NO_ENTRY", reason: "리스크 제한", confidence: 0.85 });
   }
 
   // Cost edge must be meaningful; otherwise deny.
   const edge = em - tc;
   const edgeScore = clamp01((edge - 0.00025) / 0.0015);
   if (edgeScore < 0.25) {
-    return { action: "NO_ENTRY", reason: "비용 우위 부족", confidence: 0.8 };
+    return withTrace({ action: "NO_ENTRY", reason: "비용 우위 부족", confidence: 0.8 });
   }
 
   // Approve ONLY in executor's proposed direction (AI must not propose a new direction).
-  return {
+  return withTrace({
     action: input.executor_direction === "long" ? "ENTER_LONG" : "ENTER_SHORT",
     reason: "조건 충족",
     confidence: 0.65
-  };
+  });
 }
 
 export function aiInputFromDecision(input: Readonly<{
