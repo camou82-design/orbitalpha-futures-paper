@@ -2210,7 +2210,14 @@ export class PaperEngine {
           action: "blocking_repetitive_exit",
           note: "이 포지션 흐름은 이미 터미널 종료가 발생했으므로 중복 이벤트를 차단함"
         });
-        remaining.push(open);
+        this.logger.info("TERMINAL_FLOW_PRUNED_FROM_OPEN_LEDGER", {
+          symbol: open.symbol,
+          side: open.side,
+          openedAt: open.openedAt,
+          flowId,
+          prune_reason: "terminal_exit_already_consumed",
+          action: "excluded_from_remaining"
+        });
         continue;
       }
 
