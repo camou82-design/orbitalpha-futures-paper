@@ -1,0 +1,108 @@
+
+--- TEST 1: WEAK CANDIDATE ---
+STAGE_ROUTING_BOTTLENECK_PROOF {
+  symbol: 'BTCUSDT',
+  currentStage: 0,
+  hasOpenPosition: false,
+  isRangeFallbackActive: true,
+  v2AuthorityOwnsExecution: false,
+  authority_decision: 'HOLD',
+  authority_source: 'v2',
+  authority_side: 'none',
+  authority_size_usd: 0,
+  useRangeStage0Engine: true,
+  classify: 'range_stage0_eligible'
+}
+[RANGE_RISK_DECISION_TRACE] {
+  symbol: 'BTCUSDT',
+  marketMode: undefined,
+  activeEngine: 'RANGE',
+  crash_state: 'NONE',
+  risk_state: 'NORMAL',
+  allowNewLong: true,
+  allowNewShort: true,
+  range_zone_detected: 'upper',
+  signal_state: 'NONE',
+  final_trade_side: null,
+  blocked_by: null,
+  blocked_reason: null,
+  override_applied: false,
+  override_reason: null
+}
+- Signal: paper_short_candidate (weak)
+- Final Decision: SKIP
+- Signal State: NONE
+- Reject Reason: RANGE_UPPER_SHORT_NO_REVERSAL_CONFIRMATION
+- Result Code: STAGE1_BLOCKED_EDGE
+
+--- TEST 2: RISK BLOCKED ---
+STAGE_ROUTING_BOTTLENECK_PROOF {
+  symbol: 'BTCUSDT',
+  currentStage: 0,
+  hasOpenPosition: false,
+  isRangeFallbackActive: true,
+  v2AuthorityOwnsExecution: false,
+  authority_decision: 'HOLD',
+  authority_source: 'v2',
+  authority_side: 'none',
+  authority_size_usd: 0,
+  useRangeStage0Engine: true,
+  classify: 'range_stage0_eligible'
+}
+[RANGE_RISK_DECISION_TRACE] {
+  symbol: 'BTCUSDT',
+  marketMode: undefined,
+  activeEngine: 'RANGE',
+  crash_state: 'NONE',
+  risk_state: 'NORMAL',
+  allowNewLong: true,
+  allowNewShort: false,
+  range_zone_detected: 'upper',
+  signal_state: 'NONE',
+  final_trade_side: null,
+  blocked_by: 'RANGE_GATE_BLOCK_WAIT_RECHECK',
+  blocked_reason: 'range_risk_auth_blocked',
+  override_applied: false,
+  override_reason: null
+}
+- Signal: paper_short_candidate (strong)
+- Final Decision: SKIP
+- Signal State: NONE
+- Reject Reason: EDGE_FAIL_EXPECTANCY
+- Result Code: STAGE1_PENDING_RECHECK
+
+--- TEST 3: STRONG CANDIDATE ---
+STAGE_ROUTING_BOTTLENECK_PROOF {
+  symbol: 'BTCUSDT',
+  currentStage: 0,
+  hasOpenPosition: false,
+  isRangeFallbackActive: true,
+  v2AuthorityOwnsExecution: false,
+  authority_decision: 'HOLD',
+  authority_source: 'v2',
+  authority_side: 'none',
+  authority_size_usd: 0,
+  useRangeStage0Engine: true,
+  classify: 'range_stage0_eligible'
+}
+[RANGE_RISK_DECISION_TRACE] {
+  symbol: 'BTCUSDT',
+  marketMode: undefined,
+  activeEngine: 'RANGE',
+  crash_state: 'NONE',
+  risk_state: 'NORMAL',
+  allowNewLong: true,
+  allowNewShort: true,
+  range_zone_detected: 'upper',
+  signal_state: 'NONE',
+  final_trade_side: null,
+  blocked_by: null,
+  blocked_reason: null,
+  override_applied: false,
+  override_reason: null
+}
+- Signal: paper_short_candidate (strong)
+- Final Decision: SKIP
+- Signal State: NONE
+- Reject Reason: RANGE_UPPER_SHORT_NO_REVERSAL_CONFIRMATION
+- Result Code: STAGE1_BLOCKED_EDGE

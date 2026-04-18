@@ -3993,8 +3993,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     );
   }
 
-  const rangeSoftPassSizeMult =
-    gateReason === "range_wait_recheck_soft_pass_candidate" ? 0.45 : 1.0;
+  const rangeSoftPassSizeMult = 1.0;
 
   const authorityAdaptiveSoftPassSizeMult =
     reject_reason === "AUTHORITY_ADAPTIVE_SOFT_PASS" ? 0.5 : 1.0;
@@ -4087,13 +4086,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             ? "STAGE1_SOFT_EXPECTANCY_PASS"
             : execution_state === "STAGE1_EXEC_PENDING"
               ? "STAGE1_EXEC_PENDING"
-              : gateReason === "range_wait_recheck_soft_pass_candidate"
-                ? "STAGE1_SOFT_FILTERED"
-                : gateReason === "range_upper_long_candidate_preserved_despite_weak_reversal"
-                  ? "STAGE1_PENDING_RECHECK"
-                  : costWarningStage1
-                    ? "STAGE1_COST_WARNING"
-                    : "STAGE1_ENTERED"
+              : gateReason === "range_upper_long_candidate_preserved_despite_weak_reversal"
+                ? "STAGE1_PENDING_RECHECK"
+                : costWarningStage1
+                  ? "STAGE1_COST_WARNING"
+                  : "STAGE1_ENTERED"
         ),
       required_move_pct,
       shortfall_pct,
