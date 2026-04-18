@@ -2388,9 +2388,26 @@ export class PaperEngine {
                   zone: "upper"
                 });
                 this.lastExitReasonLabel = "상단 반전 구간 롱 정리";
+
+                const mappedType = exitEventJsonlType(cr);
+                this.terminalExitConsumedByFlow.add(flowId);
+                if (mappedType === "EXIT_REGIME") {
+                  this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
+                }
+
+                this.logger.info("EXIT_CLASSIFICATION_PROOF", {
+                  symbol: open.symbol,
+                  side: open.side,
+                  openedAt: open.openedAt,
+                  raw_reason: cr,
+                  mapped_exit_type: mappedType,
+                  regime_dedup_set: mappedType === "EXIT_REGIME",
+                  flowId
+                });
+
                 await this.store.appendJsonlLine("reports/events.jsonl", {
                   ts: Date.now(),
-                  type: "EXIT_REGIME",
+                  type: mappedType,
                   symbol: symKey,
                   reason: cr,
                   range_zone_reversal: "upper_long_flatten",
@@ -2471,9 +2488,26 @@ export class PaperEngine {
                   zone: "lower"
                 });
                 this.lastExitReasonLabel = "하단 반전 구간 숏 정리";
+
+                const mappedType = exitEventJsonlType(cr);
+                this.terminalExitConsumedByFlow.add(flowId);
+                if (mappedType === "EXIT_REGIME") {
+                  this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
+                }
+
+                this.logger.info("EXIT_CLASSIFICATION_PROOF", {
+                  symbol: open.symbol,
+                  side: open.side,
+                  openedAt: open.openedAt,
+                  raw_reason: cr,
+                  mapped_exit_type: mappedType,
+                  regime_dedup_set: mappedType === "EXIT_REGIME",
+                  flowId
+                });
+
                 await this.store.appendJsonlLine("reports/events.jsonl", {
                   ts: Date.now(),
-                  type: "EXIT_REGIME",
+                  type: mappedType,
                   symbol: symKey,
                   reason: cr,
                   range_zone_reversal: "lower_short_flatten",
@@ -2627,9 +2661,26 @@ export class PaperEngine {
             if (blockedByExecutorMismatch) continue;
             await this.positions.appendClosed(closedRowTrail);
             this.lastExitReasonLabel = "수익권 되돌림 추종 청산";
+
+            const mappedType = exitEventJsonlType(crTrail);
+            this.terminalExitConsumedByFlow.add(flowId);
+            if (mappedType === "EXIT_REGIME") {
+              this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
+            }
+
+            this.logger.info("EXIT_CLASSIFICATION_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              openedAt: open.openedAt,
+              raw_reason: crTrail,
+              mapped_exit_type: mappedType,
+              regime_dedup_set: mappedType === "EXIT_REGIME",
+              flowId
+            });
+
             await this.store.appendJsonlLine("reports/events.jsonl", {
               ts: Date.now(),
-              type: "EXIT_REGIME",
+              type: mappedType,
               symbol: symKey,
               reason: crTrail,
               structural: "range_profit_trail",
