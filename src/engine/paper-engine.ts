@@ -2128,6 +2128,13 @@ export class PaperEngine {
     // ------------------------------------
 
     const remaining: PaperOpenPositionRecord[] = [];
+    const stopBackfillSaveExpectations: Array<{
+      flowId: string;
+      symbol: string;
+      side: string;
+      openedAt: number;
+      expectedStopPrice: number;
+    }> = [];
     const feeRate = this.config.paperTakerFeeRate;
     const intervalH = this.config.paperFundingIntervalHours;
 
@@ -2218,6 +2225,13 @@ export class PaperEngine {
             oldStopPrice: oldStop ?? null,
             newStopPrice: newStop,
             source: "ledger_normalization_backfill"
+          });
+          stopBackfillSaveExpectations.push({
+            flowId: `${open.symbol}:${open.side}:${open.openedAt}`,
+            symbol: open.symbol,
+            side: open.side,
+            openedAt: open.openedAt,
+            expectedStopPrice: newStop
           });
         }
       }
@@ -3618,10 +3632,10 @@ export class PaperEngine {
       side: r.side,
       openedAt: r.openedAt
     }));
-    const openLedgerStructureChanged =
+    const openPositionsChanged =
       remaining.length !== opens.length || remaining.some((r, i) => r !== opens[i]);
     const shouldSaveOpenLedger =
-      crashPositionsModified || openLedgerPruned || openLedgerStructureChanged;
+      crashPositionsModified || openLedgerPruned || openPositionsChanged;
 
     this.logger.info("OPEN_LEDGER_SAVE_PROOF", {
       before_count: opens.length,
@@ -3629,7 +3643,10 @@ export class PaperEngine {
       removed_flows: removedFlows,
       remaining_flows: remainingFlows,
       save_called: shouldSaveOpenLedger,
-      caller: "tryPaperPositionClose"
+      caller: "tryPaperPositionClose",
+      crashPositionsModified,
+      openLedgerPruned,
+      openPositionsChanged
     });
 
     if (shouldSaveOpenLedger) {
@@ -3638,10 +3655,27 @@ export class PaperEngine {
       const reloaded = await this.positions.loadOpenAll();
       const reloadedIds = new Set(reloaded.map((r) => `${r.symbol}:${r.side}:${r.openedAt}`));
       const stillPresentFlows = removedFlowIds.filter((id) => reloadedIds.has(id));
+      const stopBackfillStillMissing: string[] = [];
+      for (const exp of stopBackfillSaveExpectations) {
+        const row = reloaded.find((r) => `${r.symbol}:${r.side}:${r.openedAt}` === exp.flowId);
+        const sp = row?.stopPrice;
+        const tol = Math.max(1e-6, 1e-9 * Math.abs(exp.expectedStopPrice));
+        const ok =
+          row != null &&
+          typeof sp === "number" &&
+          Number.isFinite(sp) &&
+          Math.abs(sp - exp.expectedStopPrice) <= tol;
+        if (!ok) {
+          stopBackfillStillMissing.push(exp.flowId);
+        }
+      }
       this.logger.info("OPEN_LEDGER_POST_SAVE_VERIFY", {
         removed_flows: removedFlowIds,
         still_present_flows: stillPresentFlows,
-        verify_ok: stillPresentFlows.length === 0
+        verify_ok: stillPresentFlows.length === 0,
+        stop_backfill_expected: stopBackfillSaveExpectations,
+        stop_backfill_still_missing: stopBackfillStillMissing,
+        stop_backfill_verify_ok: stopBackfillStillMissing.length === 0
       });
     }
   }
