@@ -3655,27 +3655,40 @@ export class PaperEngine {
       const reloaded = await this.positions.loadOpenAll();
       const reloadedIds = new Set(reloaded.map((r) => `${r.symbol}:${r.side}:${r.openedAt}`));
       const stillPresentFlows = removedFlowIds.filter((id) => reloadedIds.has(id));
+      const removedFlowIdSet = new Set(removedFlowIds);
+      const stillPresentFlowSet = new Set(stillPresentFlows);
+      const stopBackfillVerifiedPresentFlows: string[] = [];
+      const stopBackfillSkippedRemovedFlows: string[] = [];
       const stopBackfillStillMissing: string[] = [];
       for (const exp of stopBackfillSaveExpectations) {
         const row = reloaded.find((r) => `${r.symbol}:${r.side}:${r.openedAt}` === exp.flowId);
         const sp = row?.stopPrice;
         const tol = Math.max(1e-6, 1e-9 * Math.abs(exp.expectedStopPrice));
-        const ok =
+        const priceOk =
           row != null &&
           typeof sp === "number" &&
           Number.isFinite(sp) &&
           Math.abs(sp - exp.expectedStopPrice) <= tol;
-        if (!ok) {
-          stopBackfillStillMissing.push(exp.flowId);
+        if (priceOk) {
+          stopBackfillVerifiedPresentFlows.push(exp.flowId);
+          continue;
         }
+        if (removedFlowIdSet.has(exp.flowId) && !stillPresentFlowSet.has(exp.flowId)) {
+          stopBackfillSkippedRemovedFlows.push(exp.flowId);
+          continue;
+        }
+        stopBackfillStillMissing.push(exp.flowId);
       }
       this.logger.info("OPEN_LEDGER_POST_SAVE_VERIFY", {
         removed_flows: removedFlowIds,
         still_present_flows: stillPresentFlows,
         verify_ok: stillPresentFlows.length === 0,
         stop_backfill_expected: stopBackfillSaveExpectations,
+        stop_backfill_verified_present_flows: stopBackfillVerifiedPresentFlows,
+        stop_backfill_skipped_removed_flows: stopBackfillSkippedRemovedFlows,
         stop_backfill_still_missing: stopBackfillStillMissing,
-        stop_backfill_verify_ok: stopBackfillStillMissing.length === 0
+        stop_backfill_verify_ok: stopBackfillStillMissing.length === 0,
+        stop_backfill_verify_mode: "present_or_removed_same_tick_ok"
       });
     }
   }
