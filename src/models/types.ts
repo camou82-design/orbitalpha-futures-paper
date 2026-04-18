@@ -103,10 +103,6 @@ export type EngineConfig = Readonly<{
    * After profit-arm without lock, max ms to defer box break before releasing (0 = no cap).
    */
   rangeRebalanceTrailMaxArmedNoLockMs: number;
-  /** Test-only: bypass legacy block path for RANGE stage0 candidate diagnostics. */
-  paperTestBypassLegacyRangeStage0: boolean;
-  /** Test-only: bypass only blocked_regime_until_active for RANGE stage0 candidate diagnostics. */
-  paperTestBypassBlockedRegimeUntilRangeStage0: boolean;
   /** Paper-only: round-trip slippage estimate in bps (1bp = 0.0001). Used by risk fee filter. */
   paperSlippageBps: number;
   /** Paper-only: if today's net PnL <= -limit, block all new entries (<=0 disables). */

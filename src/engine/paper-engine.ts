@@ -775,7 +775,6 @@ export class PaperEngine {
       paper_sideways_ema_gap_threshold: config.paperSidewaysEmaGapThreshold,
       paper_reentry_cooldown_ms: config.paperReentryCooldownMs,
       paper_reentry_same_dir_mult: 2,
-      paper_test_bypass_legacy_range_stage0: config.paperTestBypassLegacyRangeStage0,
       paper_max_open_positions: config.paperMaxOpenPositions
     });
   }

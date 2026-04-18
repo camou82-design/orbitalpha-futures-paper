@@ -2763,27 +2763,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         (meta?.closedAt ?? 0) > 0 &&
         waitMs > 0 &&
         elapsedMs < waitMs;
-      const bypassBlockedRegimeUntilOnly =
-        input.config.paperTestBypassBlockedRegimeUntilRangeStage0 === true &&
-        regimeStateIsRange &&
-        input.currentStage === 0 &&
-        rangeStage0SignalActive &&
-        !upperRiskHit &&
-        !streakSuspend &&
-        !sameDirection &&
-        !previewReentryActive;
       if (rangeRelaxWindowActive && streakSuspend && !upperRiskHit && rangeStage0SignalActive) {
         risk_state = "SOFT_BLOCK";
         risk_cooldown_subreason = "blocked_regime_loss_streak_suspend_relaxed_validation_window";
         supplemental_reasons.push("RANGE_RISK_LIMIT_RELAX_WINDOW_ACTIVE");
-      } else if (bypassBlockedRegimeUntilOnly) {
-        blocked_regime_until_bypass_applied = true;
-        blocked_regime_until_bypass_reason = "range_stage0_signal_alive_blocked_regime_until_only";
-        blocked_regime_original_until_ms = remainingMs;
-        blocked_regime_original_reason = blockedRegime.reason;
-        risk_state = "SOFT_BLOCK";
-        risk_cooldown_subreason = "blocked_regime_until_bypassed_test";
-        supplemental_reasons.push("BLOCKED_REGIME_UNTIL_BYPASS_APPLIED");
       } else {
         risk_state = "COOLDOWN";
         risk_cooldown_subreason =
