@@ -79,6 +79,10 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
   const pnlNet = parseFinite(o.pnlUsdNet) ?? parseFinite(o.pnlUsd) ?? parseFinite(o.realizedPnlUsd) ?? 0;
   const sizeUsd = finiteUsd(parseFinite(o.sizeUsd) ?? 0);
   const closedAt = parseFinite(o.closedAt) ?? 0;
+  const entryPrice = parseFinite(o.entryPrice);
+  const closePrice = parseFinite(o.closePrice) ?? parseFinite(o.exitPrice) ?? parseFinite(o.avgExitPrice) ?? 0;
+  const leverage = parseFinite(o.leverage) ?? 1;
+  const side = (typeof o.side === "string" ? o.side.toLowerCase() : "long") as "long" | "short";
 
   const crRaw = o.closeReason;
   const meta = isPaperCloseReason(crRaw)
@@ -87,6 +91,27 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
 
   const exitType = parseExitType(o.exitType, meta.exitType);
 
+  /**
+   * 종료 사유 우선순위 (A):
+   * closeReasonLabel > exitReason > closeReason > exitType > closeSource
+   */
+  const mappedReasonLabel = (() => {
+    const vals = [
+      o.closeReasonLabel,
+      o.exitReason,
+      isPaperCloseReason(crRaw) ? paperExitDisplayMeta(crRaw).closeReasonLabel : null,
+      defaultLabelForExitType(exitType),
+      o.closeSource
+    ];
+    for (const v of vals) {
+      if (typeof v === "string" && v.trim().length > 0 && v !== MISSING) return v.trim();
+    }
+    return exitType === "EXIT_UNKNOWN" ? "종료 사유 미기록 (EXIT_UNKNOWN)" : defaultLabelForExitType(exitType);
+  })();
+
+  const closeReasonLabel = mappedReasonLabel;
+  const exitReason = mappedReasonLabel;
+
   let closeSource: PaperCloseSource = isPaperCloseReason(crRaw)
     ? derivePaperCloseSource(crRaw, exitType)
     : inferPaperCloseSourceFromExitType(exitType);
@@ -94,21 +119,16 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
     closeSource = inferPaperCloseSourceFromExitType(exitType);
   }
 
-  const closeReasonLabel =
-    typeof o.closeReasonLabel === "string" && o.closeReasonLabel.trim().length > 0
-      ? String(o.closeReasonLabel).trim()
-      : meta.closeReasonLabel !== MISSING
-        ? meta.closeReasonLabel
-        : defaultLabelForExitType(exitType);
-
-  const exitReason =
-    typeof o.exitReason === "string" && o.exitReason.trim().length > 0
-      ? String(o.exitReason).trim()
-      : closeReasonLabel;
+  /** 수익률 매핑 복구 (C): realizedPnlPct > (pnlNet/sizeUsd) > Calculation from price */
+  let computedPnlPct: number | null = null;
+  if (entryPrice && entryPrice > 0 && closePrice && closePrice > 0) {
+    const move = side === "long" ? (closePrice - entryPrice) / entryPrice : (entryPrice - closePrice) / entryPrice;
+    computedPnlPct = move * leverage;
+  }
 
   const realizedPnlPct =
     parseFinite(o.realizedPnlPct) ??
-    (sizeUsd > 0 && Number.isFinite(pnlNet) ? finiteUsd(pnlNet / sizeUsd) : 0);
+    (sizeUsd > 0 && Number.isFinite(pnlNet) ? finiteUsd(pnlNet / sizeUsd) : (computedPnlPct ?? 0));
 
   const outcomeRaw = o.outcomeStatus;
   const outcomeStatus =
@@ -128,8 +148,10 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
 
   const base = raw && typeof raw === "object" ? { ...(raw as object) } : {};
 
-  return Object.assign(base, {
+  const record: NormalizedPaperClosedRow = Object.assign(base, {
     closedAt,
+    entryPrice: entryPrice ?? (base as any).entryPrice ?? 0,
+    closePrice,
     pnlUsd: finiteUsd(pnlNet),
     pnlUsdNet: finiteUsd(pnlNet),
     pnlUsdGross: pnlGross,
@@ -143,6 +165,26 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
     realizedPnlPct,
     outcomeStatus
   }) as NormalizedPaperClosedRow;
+
+  // Proof Log (E)
+  console.log("EXIT_HISTORY_MAPPING_PROOF", {
+    symbol: String(o.symbol ?? "UNKNOWN"),
+    closed_at: closedAt,
+    raw_close_reason_label: o.closeReasonLabel ?? null,
+    raw_exit_reason: o.exitReason ?? null,
+    raw_close_reason: o.closeReason ?? null,
+    raw_exit_type: o.exitType ?? null,
+    raw_close_source: o.closeSource ?? null,
+    mapped_exit_reason_label: mappedReasonLabel,
+    raw_close_price: o.closePrice ?? null,
+    mapped_close_price: closePrice,
+    raw_realized_pnl_pct: o.realizedPnlPct ?? null,
+    computed_realized_pnl_pct: computedPnlPct,
+    mapped_realized_pnl_pct: realizedPnlPct,
+    mapping_fallback_used: (closePrice === 0 && (o.closePrice == null)) || exitType === "EXIT_UNKNOWN"
+  });
+
+  return record;
 }
 
 export type ClosedRowDisplayFields = Readonly<{
@@ -150,32 +192,29 @@ export type ClosedRowDisplayFields = Readonly<{
   exitReason: string;
   status: string;
   closeSource: string;
+  closePriceLabel: string;
+  pnlPctLabel: string;
 }>;
 
 /** UI: "해당 없음" 대신 우선순위 fallback — 모두 비면 `기록 없음`. */
 export function displayFieldsForClosedRow(row: unknown): ClosedRowDisplayFields {
   const o = (row && typeof row === "object" ? row : {}) as Record<string, unknown>;
+
+  // 만약 normalize를 거친 record라면 이미 강화된 필드들이 있을 것임.
   const nz = (...vals: unknown[]): string => {
     for (const x of vals) {
-      if (typeof x === "string" && x.trim().length > 0) return x.trim();
+      if (typeof x === "string" && x.trim().length > 0 && x !== MISSING) return x.trim();
     }
     return MISSING;
   };
 
   const et = parseExitType(o.exitType, "EXIT_UNKNOWN");
 
-  const exitType = nz(
-    typeof o.exitType === "string" ? o.exitType : null,
-    defaultLabelForExitType(et),
-    o.closeReasonLabel,
-    typeof o.closeReason === "string" ? o.closeReason : null
-  );
-
   const exitReason = nz(
     o.exitReason,
     o.closeReasonLabel,
     typeof o.closeReason === "string" ? o.closeReason : null,
-    defaultLabelForExitType(et)
+    et === "EXIT_UNKNOWN" ? "종료 사유 미기록 (EXIT_UNKNOWN)" : defaultLabelForExitType(et)
   );
 
   const st = o.outcomeStatus;
@@ -187,21 +226,29 @@ export function displayFieldsForClosedRow(row: unknown): ClosedRowDisplayFields 
         : st === "flat"
           ? "보합"
           : nz(
-              typeof o.positionStatus === "string" ? o.positionStatus : null,
-              typeof (o as { status?: string }).status === "string" ? (o as { status?: string }).status : null
-            );
+            o.positionStatus,
+            (o as any).status
+          );
 
   const closeSource = nz(
-    typeof o.closeSource === "string" ? o.closeSource : null,
+    o.closeSource,
     inferPaperCloseSourceFromExitType(et),
-    defaultLabelForExitType(et)
+    "UNKNOWN"
   );
 
+  const cp = parseFinite(o.closePrice);
+  const closePriceLabel = cp !== null && cp > 0 ? cp.toLocaleString() : MISSING;
+
+  const pct = parseFinite(o.realizedPnlPct);
+  const pnlPctLabel = pct !== null ? `${(pct * 100).toFixed(2)}%` : MISSING;
+
   return {
-    exitType,
+    exitType: exitReason, // UI에서 exitType 자리에 reason을 표시하는 경우가 많음
     exitReason,
     status,
-    closeSource
+    closeSource,
+    closePriceLabel,
+    pnlPctLabel
   };
 }
 
