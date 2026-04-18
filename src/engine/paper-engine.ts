@@ -2391,7 +2391,8 @@ export class PaperEngine {
 
                 const mappedType = exitEventJsonlType(cr);
                 this.terminalExitConsumedByFlow.add(flowId);
-                if (mappedType === "EXIT_REGIME") {
+                const isRegimeRelatedCode = mappedType === "EXIT_REGIME" || mappedType === "EXIT_TREND_BREAK" || mappedType === "EXIT_RANGE_REBALANCE";
+                if (isRegimeRelatedCode) {
                   this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
                 }
 
@@ -2491,7 +2492,8 @@ export class PaperEngine {
 
                 const mappedType = exitEventJsonlType(cr);
                 this.terminalExitConsumedByFlow.add(flowId);
-                if (mappedType === "EXIT_REGIME") {
+                const isRegimeRelatedCode = mappedType === "EXIT_REGIME" || mappedType === "EXIT_TREND_BREAK" || mappedType === "EXIT_RANGE_REBALANCE";
+                if (isRegimeRelatedCode) {
                   this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
                 }
 
@@ -2664,7 +2666,8 @@ export class PaperEngine {
 
             const mappedType = exitEventJsonlType(crTrail);
             this.terminalExitConsumedByFlow.add(flowId);
-            if (mappedType === "EXIT_REGIME") {
+            const isRegimeRelatedCode = mappedType === "EXIT_REGIME" || mappedType === "EXIT_TREND_BREAK" || mappedType === "EXIT_RANGE_REBALANCE";
+            if (isRegimeRelatedCode) {
               this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
             }
 
@@ -2826,7 +2829,8 @@ export class PaperEngine {
 
             const mappedType = exitEventJsonlType(cr);
             this.terminalExitConsumedByFlow.add(flowId);
-            if (mappedType === "EXIT_REGIME") {
+            const isRegimeRelatedCode = mappedType === "EXIT_REGIME" || mappedType === "EXIT_TREND_BREAK" || mappedType === "EXIT_RANGE_REBALANCE";
+            if (isRegimeRelatedCode) {
               this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
             }
 
@@ -3018,7 +3022,8 @@ export class PaperEngine {
 
             const mappedType = exitEventJsonlType(cr);
             this.terminalExitConsumedByFlow.add(flowId);
-            if (mappedType === "EXIT_TREND_BREAK") {
+            const isRegimeRelatedCode = mappedType === "EXIT_REGIME" || mappedType === "EXIT_TREND_BREAK" || mappedType === "EXIT_RANGE_REBALANCE";
+            if (isRegimeRelatedCode) {
               this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
             }
 
@@ -3174,7 +3179,7 @@ export class PaperEngine {
           const mappedType = exitEventJsonlType(cr);
           this.terminalExitConsumedByFlow.add(flowId);
 
-          const isRegimeRelated = mappedType === "EXIT_REGIME" || mappedType === "EXIT_TREND_BREAK";
+          const isRegimeRelated = mappedType === "EXIT_REGIME" || mappedType === "EXIT_TREND_BREAK" || mappedType === "EXIT_RANGE_REBALANCE";
           if (isRegimeRelated) {
             this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
           }
@@ -3786,6 +3791,7 @@ export class PaperEngine {
             regime: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
             side: scaled.side,
             new_size: scaled.sizeUsd,
+            stop_price: scaled.stopPrice ?? null,
             ...buildAuthorityEventMeta(authority)
           });
         }
@@ -5084,6 +5090,7 @@ function buildEntryOpenedEventPayload(
     regime: pos.regimeAtEntry,
     executor: pos.executorAtEntry,
     entry_stage: pos.entryStage,
+    stop_price: pos.stopPrice ?? null,
     ...buildPositionIdentityMeta(pos),
     ...buildAuthorityEventMeta(authority)
   };
