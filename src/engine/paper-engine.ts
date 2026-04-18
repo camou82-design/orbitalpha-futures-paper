@@ -703,6 +703,13 @@ export class PaperEngine {
     string,
     { range_existing_long_reversal_exit_applied?: boolean; range_existing_short_reversal_exit_applied?: boolean }
   >();
+
+  /**
+   * Flow-based one-shot deduplication for terminal exits (EXIT_REGIME, EXIT_SL, EXIT_TIME_STOP).
+   * Key: `${symbol}:${side}:${openedAt}`
+   */
+  private readonly terminalExitConsumedByFlow = new Set<string>();
+
   private readonly okxDemo: OkxDemoClient | null;
   private okxAccountConfigLoaded = false;
 
@@ -2084,10 +2091,14 @@ export class PaperEngine {
     const intervalH = this.config.paperFundingIntervalHours;
 
     /** events.jsonl `type` — 레거시 호환(부분익절·트레일 등은 기존과 동일 계열로 유지). */
-    const exitEventJsonlType = (r: PaperClosedPositionRecord["closeReason"]): string => {
+    const exitEventJsonlType = (r: PaperClosedPositionRecord["closeReason"]): "EXIT_TP" | "EXIT_REGIME" | "EXIT_TREND_BREAK" | "EXIT_SL" | "EXIT_TIME_STOP" | string => {
+      if (r === "time_based_exit") return "EXIT_TIME_STOP";
+      if (r === "stop_loss") return "EXIT_SL";
       const t = paperExitDisplayMeta(r).exitType;
       if (t === "EXIT_PARTIAL_TP" || t === "EXIT_TP_1" || t === "EXIT_TP_2") return "EXIT_TP";
-      if (t === "EXIT_TRAILING" || t === "EXIT_TIME_STOP" || t === "EXIT_REGIME") return "EXIT_REGIME";
+      if (t === "EXIT_TIME_STOP") return "EXIT_TIME_STOP";
+      if (t === "EXIT_SL") return "EXIT_SL";
+      if (t === "EXIT_TRAILING" || t === "EXIT_REGIME") return "EXIT_REGIME";
       if (t === "EXIT_REGIME_BREAK") return "EXIT_TREND_BREAK";
       return t;
     };
@@ -2108,6 +2119,8 @@ export class PaperEngine {
 
     for (const openRaw of opens) {
       const posKey = `${openRaw.symbol}:${openRaw.openedAt}`;
+      // Unique flow identifier for one-shot terminal exit deduplication
+      const flowId = `${openRaw.symbol}:${openRaw.side}:${openRaw.openedAt}`;
 
       const nStage = normalizeEntryStageFromSizeEvidence(openRaw);
       const nRange = normalizeRangeManagementState(nStage.normalized);
@@ -2121,6 +2134,21 @@ export class PaperEngine {
         rangeAddOnUsed: finalNorm.rangeAddOnUsed ?? false,
         rangeFirstProfitLocked: finalNorm.rangeFirstProfitLocked ?? false
       };
+
+      const terminalConsumed = this.terminalExitConsumedByFlow.has(flowId);
+      if (terminalConsumed) {
+        this.logger.info("EXIT_TERMINAL_DEDUP_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          openedAt: open.openedAt,
+          flowId,
+          terminal_exit_already_consumed: true,
+          action: "blocking_repetitive_exit",
+          note: "이 포지션 흐름은 이미 터미널 종료가 발생했으므로 중복 이벤트를 차단함"
+        });
+        remaining.push(open);
+        continue;
+      }
 
       const inheritedStrategyVersion = open.strategyVersion ?? "paper-v1";
       const trendManagedPosition = this.isTrendManagedPosition(open);
@@ -2367,7 +2395,7 @@ export class PaperEngine {
                   reason: cr,
                   range_zone_reversal: "upper_long_flatten",
                   realized_pnl: m.pnlUsdNet,
-                  ...buildAuthorityEventMeta(authority)
+                  ...buildPositionIdentityMeta(open)
                 });
                 continue;
               }
@@ -2450,8 +2478,7 @@ export class PaperEngine {
                   reason: cr,
                   range_zone_reversal: "lower_short_flatten",
                   realized_pnl: m.pnlUsdNet,
-                  ...buildPositionIdentityMeta(open),
-                  ...buildAuthorityEventMeta(authority)
+                  ...buildPositionIdentityMeta(open)
                 });
                 continue;
               }
@@ -2607,8 +2634,7 @@ export class PaperEngine {
               reason: crTrail,
               structural: "range_profit_trail",
               realized_pnl: m.pnlUsdNet,
-              ...buildPositionIdentityMeta(open),
-              ...buildAuthorityEventMeta(authority)
+              ...buildPositionIdentityMeta(open)
             });
             continue;
           }
@@ -2746,15 +2772,32 @@ export class PaperEngine {
                 : st.reason === "structural_regime_shift"
                   ? "구조적 추세 전환 청산"
                   : "노출 한도 청산";
+
+            const mappedType = exitEventJsonlType(cr);
+            this.terminalExitConsumedByFlow.add(flowId);
+            if (mappedType === "EXIT_REGIME") {
+              this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
+            }
+
+            this.logger.info("EXIT_CLASSIFICATION_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              openedAt: open.openedAt,
+              raw_reason: cr,
+              mapped_exit_type: mappedType,
+              regime_dedup_set: mappedType === "EXIT_REGIME",
+              flowId
+            });
+
             await this.store.appendJsonlLine("reports/events.jsonl", {
               ts: Date.now(),
-              type: "EXIT_REGIME",
+              type: mappedType,
               symbol: symKey,
+              side: open.side,
               reason: cr,
               structural: st.reason,
               realized_pnl: m.pnlUsdNet,
-              ...buildPositionIdentityMeta(open),
-              ...buildAuthorityEventMeta(authority)
+              ...buildPositionIdentityMeta(open)
             });
             continue;
           }
@@ -2781,15 +2824,31 @@ export class PaperEngine {
             this.lastExitReasonLabel = "추세 반대 돌파로 청산";
             this.lastSwitchReasonLabel = trendState.trendSwitchReasonLabel;
             this.trendSwitchTimestampsMs.push(Date.now());
+            const mappedType = exitEventJsonlType(cr);
+            this.terminalExitConsumedByFlow.add(flowId);
+            if (mappedType === "EXIT_TREND_SWITCH") {
+              // 스위칭은 반대 방향으로 열리므로 Dedup이 새 진입을 막지 않음 (방향이 다름)
+              this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
+            }
+
+            this.logger.info("EXIT_CLASSIFICATION_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              openedAt: open.openedAt,
+              raw_reason: cr,
+              mapped_exit_type: mappedType,
+              regime_dedup_set: true,
+              flowId
+            });
+
             await this.store.appendJsonlLine("reports/events.jsonl", {
               ts: Date.now(),
-              type: "EXIT_TREND_SWITCH",
+              type: mappedType,
               phase: "close",
               symbol: symKey,
               side: open.side,
               realized_pnl: m.pnlUsdNet,
-              ...buildPositionIdentityMeta(open),
-              ...buildAuthorityEventMeta(authority)
+              ...buildPositionIdentityMeta(open)
             });
             const newSz = Math.max(
               MIN_POSITION_SIZE_USD,
@@ -2852,10 +2911,24 @@ export class PaperEngine {
             exitReason: cr
           });
           this.logger.info("paper_position_closed", { symbol: open.symbol, side: open.side, pnlUsdNet: m.pnlUsdNet, closeReason: cr });
+
+          const mappedType = exitEventJsonlType(cr);
+          this.terminalExitConsumedByFlow.add(flowId);
+          this.logger.info("EXIT_CLASSIFICATION_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            openedAt: open.openedAt,
+            raw_reason: cr,
+            mapped_exit_type: mappedType,
+            regime_dedup_set: false,
+            flowId
+          });
+
           await this.store.appendJsonlLine("reports/events.jsonl", {
             ts: Date.now(),
-            type: "EXIT_SL",
+            type: mappedType,
             symbol: String(open.symbol),
+            side: open.side,
             regime: open.regimeAtEntry ?? null,
             executor: executorForExitEventPayload(open.executorAtEntry, open.regimeAtEntry),
             reason: cr,
@@ -2864,8 +2937,7 @@ export class PaperEngine {
             hold_time: m.holdingMs,
             realized_pnl: m.pnlUsdNet,
             fee: m.feeUsd,
-            ...buildPositionIdentityMeta(open),
-            ...buildAuthorityEventMeta(authority)
+            ...buildPositionIdentityMeta(open)
           });
 
           if (open.regimeAtEntry === "RANGE") {
@@ -2892,10 +2964,28 @@ export class PaperEngine {
             const closedRow = toClosed(cr, m, open.sizeUsd);
             await this.positions.appendClosed(closedRow);
             this.logger.info(exitFullLogKey(cr), { ...exitDetailBase(open, m), exitReason: cr });
+
+            const mappedType = exitEventJsonlType(cr);
+            this.terminalExitConsumedByFlow.add(flowId);
+            if (mappedType === "EXIT_TREND_BREAK") {
+              this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
+            }
+
+            this.logger.info("EXIT_CLASSIFICATION_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              openedAt: open.openedAt,
+              raw_reason: cr,
+              mapped_exit_type: mappedType,
+              regime_dedup_set: mappedType === "EXIT_TREND_BREAK",
+              flowId
+            });
+
             await this.store.appendJsonlLine("reports/events.jsonl", {
               ts: Date.now(),
-              type: "EXIT_TREND_BREAK",
+              type: mappedType,
               symbol: String(open.symbol),
+              side: open.side,
               regime: open.regimeAtEntry ?? null,
               executor: executorForExitEventPayload(open.executorAtEntry, open.regimeAtEntry),
               reason: cr,
@@ -2904,8 +2994,7 @@ export class PaperEngine {
               hold_time: m.holdingMs,
               realized_pnl: m.pnlUsdNet,
               fee: m.feeUsd,
-              ...buildPositionIdentityMeta(open),
-              ...buildAuthorityEventMeta(authority)
+              ...buildPositionIdentityMeta(open)
             });
             continue;
           }
@@ -3031,10 +3120,29 @@ export class PaperEngine {
             range_exit_min_profit_after_cost_ok: exDetail["range_exit_min_profit_after_cost_ok"] ?? null,
             range_exit_reason_detail: exDetail["range_exit_reason_detail"] ?? null
           });
+          const mappedType = exitEventJsonlType(cr);
+          this.terminalExitConsumedByFlow.add(flowId);
+
+          const isRegimeRelated = mappedType === "EXIT_REGIME" || mappedType === "EXIT_TREND_BREAK";
+          if (isRegimeRelated) {
+            this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
+          }
+
+          this.logger.info("EXIT_CLASSIFICATION_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            openedAt: open.openedAt,
+            raw_reason: cr,
+            mapped_exit_type: mappedType,
+            regime_dedup_set: isRegimeRelated,
+            flowId
+          });
+
           await this.store.appendJsonlLine("reports/events.jsonl", {
             ts: Date.now(),
-            type: exitEventJsonlType(cr),
+            type: mappedType,
             symbol: String(open.symbol),
+            side: open.side,
             regime: open.regimeAtEntry ?? null,
             executor: executorForExitEventPayload(open.executorAtEntry, open.regimeAtEntry),
             reason: cr,
@@ -3043,8 +3151,7 @@ export class PaperEngine {
             hold_time: m.holdingMs,
             realized_pnl: m.pnlUsdNet,
             fee: m.feeUsd,
-            ...buildPositionIdentityMeta(open),
-            ...buildAuthorityEventMeta(authority)
+            ...buildPositionIdentityMeta(open)
           });
 
           if (open.regimeAtEntry === "RANGE" && cr === "take_profit") {
