@@ -112,7 +112,7 @@ export class JsonStore {
   async readEventsJsonlFile(): Promise<unknown[]> {
     const fullPath = path.resolve(this.baseDir, "reports/events.jsonl");
     try {
-      const lines = await readLastLines(fullPath, 50000);
+      const lines = await readLastLines(fullPath, 2000);
       const out: unknown[] = [];
       for (const line of lines) {
         const t = line.trim();
@@ -143,11 +143,17 @@ export class JsonStore {
     return await this.writeJson("reports/ai-block-eval.json", data);
   }
 
+  private lastAiEvalMs = 0;
+
   /**
-   * Update AI-block evaluation store using current prices (called each tick by the engine).
-   * We keep evaluations in a separate json (append-only events.jsonl cannot be edited).
+   * Update AI-block evaluation store using current prices.
+   * Frequency gated (every 2 mins) to avoid 13MB reads choking the CPU.
    */
-  async updateAiBlockEvaluations(input: Readonly<{ now: number; symbolRows: readonly any[]; events: unknown[] }>): Promise<string | null> {
+  async updateAiBlockEvaluations(input: Readonly<{ now: number; symbolRows: readonly any[]; events: unknown[] }>, force = false): Promise<string | null> {
+    const minInterval = 120_000;
+    if (!force && input.now - this.lastAiEvalMs < minInterval) return null;
+    this.lastAiEvalMs = input.now;
+
     const criteria: AiBlockEvaluationCriteria = {
       good_block_threshold_pct: (input as any).criteria?.good_block_threshold_pct ?? -0.25,
       missed_opportunity_threshold_pct: (input as any).criteria?.missed_opportunity_threshold_pct ?? 0.35,

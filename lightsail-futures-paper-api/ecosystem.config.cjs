@@ -19,7 +19,7 @@ module.exports = {
         NODE_ENV: "production",
         PORT: 3991,
         ORBITALPHA_FUTURES_PAPER_ROOT: path.resolve(__dirname, ".."),
-        ORBITALPHA_FUTURES_PAPER_API_SECRET: "PLACEHOLDER_CHANGE_ME"
+        // SECURE: Do NOT put production secrets here. Inject via CLI or .env mapping.
       },
       env_production: {
         NODE_ENV: "production",

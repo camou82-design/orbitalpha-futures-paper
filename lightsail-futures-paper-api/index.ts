@@ -20,11 +20,19 @@ const PORT = Number(process.env.PORT ?? 3991);
 const secret = process.env.ORBITALPHA_FUTURES_PAPER_API_SECRET?.trim();
 const root = process.env.ORBITALPHA_FUTURES_PAPER_ROOT?.trim();
 
-if (!secret || secret === "REPLACE_WITH_STRONG_SECRET" || secret === "PLACEHOLDER_CHANGE_ME") {
-  console.warn("!! CRITICAL: Placeholder secret or NO secret detected in ORBITALPHA_FUTURES_PAPER_API_SECRET.");
+const isProd = process.env.NODE_ENV === "production";
+if (!isProd) {
+  console.warn("!! WARNING: Running in non-production mode. Ensure this is intentional.");
+}
+
+const placeholders = ["PLACEHOLDER_CHANGE_ME", "REPLACE_WITH_STRONG_SECRET", "123456", "SECRET"];
+if (!secret || placeholders.includes(secret.toUpperCase())) {
+  console.error("!! FATAL: Insecure or missing ORBITALPHA_FUTURES_PAPER_API_SECRET. Boot aborted.");
+  process.exit(1);
 }
 if (!root) {
-  console.warn("!! CRITICAL: ORBITALPHA_FUTURES_PAPER_ROOT is NOT set.");
+  console.error("!! FATAL: ORBITALPHA_FUTURES_PAPER_ROOT is NOT set. Boot aborted.");
+  process.exit(1);
 }
 
 function requestPaperToken(req: Request): string {
