@@ -2,12 +2,12 @@ const http = require("http");
 const { execSync } = require("child_process");
 
 /**
- * Production Validation Script (Kodari Standard)
+ * Production Validation Script (Kodari Standard - Linux/Debian)
  * Checks: 
- * 1. PM2 process status
- * 2. Listening ports (actual netstat/lsof check)
- * 3. Health check (Internal & External loopback)
- * 4. Data API response
+ * 1. PM2 process status (online)
+ * 2. Listening ports (ss -nlt actual socket check)
+ * 3. Health check (Internal loopback)
+ * 4. Data/Status API response (Logic validation)
  */
 
 const CONFIG = {
@@ -16,14 +16,19 @@ const CONFIG = {
             name: "lightsail-futures-paper-api",
             port: 3991,
             health: "/health",
-            data: "/api/futures-paper/data",
-            tokenHeader: "x-orbitalpha-futures-paper-token"
+            data: "/api/futures-paper/data"
         },
         {
-            name: "orbitalpha-trading-server",
+            name: "orbitalpha-trading-api",
             port: 8787,
             health: "/api/v1/health",
             data: "/api/v1/trade/status"
+        },
+        {
+            name: "orbitalpha-trading-dashboard",
+            port: 3010,
+            health: "/",
+            data: "/login"
         }
     ]
 };
@@ -35,7 +40,7 @@ async function checkUrl(port, path) {
             port: port,
             path: path,
             method: "GET",
-            timeout: 2000
+            timeout: 3000
         };
         const req = http.request(options, (res) => {
             resolve({ status: res.statusCode, ok: res.statusCode < 500 });
@@ -49,19 +54,19 @@ async function checkUrl(port, path) {
     });
 }
 
-function checkPort(port) {
+function checkPortListingLinux(port) {
     try {
-        // Windows: netstat -ano | findstr :PORT
-        const cmd = `netstat -ano | findstr :${port}`;
-        const out = execSync(cmd).toString();
-        return out.includes("LISTENING");
+        // Debian/Linux: ss -nlt | grep ":PORT "
+        const cmd = `ss -nlt | grep ":${port} "`;
+        const out = execSync(cmd, { stdio: ["pipe", "pipe", "ignore"] }).toString();
+        return out.includes(`:${port}`);
     } catch {
         return false;
     }
 }
 
 async function validate() {
-    console.log("=== ORBITALPHA PRODUCTION VALIDATION (KODARI) ===");
+    console.log("=== ORBITALPHA PRODUCTION VALIDATION (LINUX/DEBIAN) ===");
     let allOk = true;
 
     for (const app of CONFIG.apps) {
@@ -73,21 +78,25 @@ async function validate() {
             const list = JSON.parse(pm2Out);
             const proc = list.find(p => p.name === app.name);
             if (!proc) {
-                console.error(`  [FAIL] PM2 process not found.`);
+                console.error(`  [FAIL] PM2 process '${app.name}' not found.`);
                 allOk = false;
-            } else if (proc.pm2_env.status !== "online") {
-                console.error(`  [FAIL] PM2 state: ${proc.pm2_env.status}`);
+                continue;
+            }
+            const status = proc.pm2_env.status;
+            if (status !== "online") {
+                console.error(`  [FAIL] PM2 state: ${status}`);
                 allOk = false;
             } else {
                 console.log(`  [OK] PM2 state: online`);
             }
         } catch (e) {
-            console.error(`  [WARN] Failed to read PM2 list: ${e.message}`);
+            console.error(`  [FAIL] Failed to read PM2 list: ${e.message}`);
+            allOk = false;
         }
 
         // 2. Port listening
-        if (checkPort(app.port)) {
-            console.log(`  [OK] Port ${app.port} is LISTENING`);
+        if (checkPortListingLinux(app.port)) {
+            console.log(`  [OK] Port ${app.port} is LISTENING (ss check)`);
         } else {
             console.error(`  [FAIL] Port ${app.port} is NOT listening (Actual socket check)`);
             allOk = false;
@@ -102,19 +111,20 @@ async function validate() {
             allOk = false;
         }
 
-        // 4. Data API (Basic check)
+        // 4. Data API / Logic check
         const data = await checkUrl(app.port, app.data);
-        if (data.status === 401 || data.status === 200 || data.status === 403) {
-            console.log(`  [OK] Data API responded: ${data.status} (Logic active)`);
+        // 200 (Dashboard), 401 (API Auth needed), 403 (Forbidden) are all "Logic Active" signals.
+        if (data.status === 200 || data.status === 401 || data.status === 403) {
+            console.log(`  [OK] Data/Status API responded: ${data.status} (Logic active)`);
         } else {
-            console.error(`  [FAIL] Data API unreachable or 500: ${data.status}`);
+            console.error(`  [FAIL] Data/Status API failed: ${data.status}`);
             allOk = false;
         }
     }
 
     console.log("\n-------------------------------------------");
     if (allOk) {
-        console.log("FINAL STATUS: ALL SYSTEMS NORMAL");
+        console.log("FINAL STATUS: ALL SYSTEMS NORMAL (LINUX)");
         process.exit(0);
     } else {
         console.log("FINAL STATUS: CRITICAL FAILURES DETECTED");
