@@ -2135,6 +2135,30 @@ export class PaperEngine {
         rangeFirstProfitLocked: finalNorm.rangeFirstProfitLocked ?? false
       };
 
+      // Backfill stopPrice if missing for existing positions
+      if (open.status === "open" && (open.stopPrice === undefined || open.stopPrice === null || !Number.isFinite(open.stopPrice))) {
+        const slRegime = open.regimeAtEntry ?? "UNKNOWN";
+        const slPct = stopLossPctForRegime(slRegime as any);
+        const ep = open.entryPrice;
+        if (ep > 0) {
+          const oldStop = open.stopPrice;
+          const newStop = open.side === "long" ? ep * (1 + slPct) : ep * (1 - slPct);
+          open = {
+            ...open,
+            stopPrice: newStop
+          };
+          crashPositionsModified = true; // Trigger saveOpenAll
+          this.logger.info("STOP_BACKFILL_APPLIED", {
+            symbol: open.symbol,
+            side: open.side,
+            openedAt: open.openedAt,
+            oldStopPrice: oldStop ?? null,
+            newStopPrice: newStop,
+            source: "ledger_normalization_backfill"
+          });
+        }
+      }
+
       const terminalConsumed = this.terminalExitConsumedByFlow.has(flowId);
       if (terminalConsumed) {
         this.logger.info("EXIT_TERMINAL_DEDUP_PROOF", {
