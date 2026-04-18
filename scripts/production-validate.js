@@ -25,7 +25,7 @@ const CONFIG = {
         {
             name: "orbitalpha-futures-paper-loop",
             type: "loop",
-            reportPath: "reports/summary.json"
+            reportPath: "data/reports/summary.json"
         }
     ]
 };
