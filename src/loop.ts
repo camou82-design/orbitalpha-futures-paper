@@ -34,7 +34,13 @@ async function main(): Promise<void> {
       await engine.runOnce();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      logger.error("paper_loop_error", { error: msg });
+      const stack = e instanceof Error ? e.stack : undefined;
+      logger.error("paper_loop_error", {
+        phase,
+        error_message: msg,
+        error_name: e instanceof Error ? e.name : typeof e,
+        error_stack: stack ?? null
+      });
     } finally {
       running = false;
     }

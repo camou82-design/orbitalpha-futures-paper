@@ -47,7 +47,8 @@ export function normalizeAuthoritySide(side: unknown): EngineV2Side {
 }
 
 export function normalizeAuthorityDecision(decision: unknown): EngineV2FinalDecision {
-    const d = String(decision).toUpperCase();
+    if (decision === undefined || decision === null) return "SKIP";
+    const d = String(decision).trim().toUpperCase();
     if (d === "ENTER" || d === "SKIP" || d === "REJECT" || d === "DISABLED") return d as EngineV2FinalDecision;
     return "SKIP";
 }

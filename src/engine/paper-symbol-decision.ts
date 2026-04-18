@@ -2054,7 +2054,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         supplemental_reasons.push("RANGE_WAIT_RECHECK_SOFT_PASS");
       } else {
         gateResult = "RANGE_GATE_BLOCK_WAIT_RECHECK";
-        gateReason = `range_reversal_recheck_tier_${rangeReversalTier.toLowerCase()}`;
+        gateReason = `range_reversal_recheck_tier_${(typeof rangeReversalTier === "string" ? rangeReversalTier : "none").toLowerCase()}`;
       }
     } else if (
       riskEngineBlocked ||
@@ -2074,11 +2074,20 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       gateReason = "range_score_below_threshold";
     }
 
-    // Capture interpretation results for scaling and proofs
+    // Capture interpretation results for scaling and proofs (tier/mult must stay consistent — avoid undefined.toUpperCase downstream).
     if (rangeSignal.interpretation) {
-      rangeReversalTier = rangeSignal.interpretation.tier;
-      rangeReversalSizeMult = rangeSignal.interpretation.reversal_size_mult;
-      rangeReversalConfidence = rangeSignal.interpretation.confidence_score;
+      const interp = rangeSignal.interpretation;
+      const rawTier = interp.tier;
+      const rawMult = interp.reversal_size_mult;
+      const rawConf = interp.confidence_score;
+      const tierMissing = rawTier === undefined || rawTier === null || (typeof rawTier === "string" && rawTier.length === 0);
+      const multMissing = rawMult === undefined || rawMult === null || (typeof rawMult === "number" && !Number.isFinite(rawMult));
+      if (tierMissing || multMissing) {
+        supplemental_reasons.push("RANGE_REVERSAL_INTERPRETATION_INCOMPLETE_GUARD");
+      }
+      rangeReversalTier = typeof rawTier === "string" && rawTier.length > 0 ? rawTier : "None";
+      rangeReversalSizeMult = typeof rawMult === "number" && Number.isFinite(rawMult) ? rawMult : 1.0;
+      rangeReversalConfidence = typeof rawConf === "number" && Number.isFinite(rawConf) ? rawConf : 0;
     }
 
     entryResult =
@@ -3170,8 +3179,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           execution_state = ambCode;
         }
 
-        if (br) supplemental_reasons.push(`EXEC_BLOCKED_${br.toUpperCase()}`);
-        if (invalidTier) supplemental_reasons.push(`HIGHWAY_INVALID_TIER_${invalidTier.toUpperCase()}`);
+        if (typeof br === "string" && br.length > 0) supplemental_reasons.push(`EXEC_BLOCKED_${br.toUpperCase()}`);
+        if (typeof invalidTier === "string" && invalidTier.length > 0) {
+          supplemental_reasons.push(`HIGHWAY_INVALID_TIER_${invalidTier.toUpperCase()}`);
+        }
         for (const reason of invalidReasons.slice(0, 3)) {
           supplemental_reasons.push(`HIGHWAY_INVALID_SUBREASON_${String(reason).toUpperCase()}`);
         }
@@ -3358,9 +3369,19 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       supplemental_reasons.push("RANGE_LOSS_STREAK_REDUCED_ENTRY_APPLIED");
     }
 
-    if (input.currentStage === 0 && input.regime === "RANGE" && rangeReversalSizeMult !== 1.0) {
+    if (
+      input.currentStage === 0 &&
+      input.regime === "RANGE" &&
+      typeof rangeReversalSizeMult === "number" &&
+      Number.isFinite(rangeReversalSizeMult) &&
+      rangeReversalSizeMult !== 1.0
+    ) {
       dynamicSizeMult *= rangeReversalSizeMult;
-      supplemental_reasons.push(`RANGE_REVERSAL_TIER_${rangeReversalTier.toUpperCase()}_SIZE_REDUCED`);
+      const tierTag =
+        typeof rangeReversalTier === "string" && rangeReversalTier.length > 0
+          ? rangeReversalTier.toUpperCase()
+          : "UNKNOWN";
+      supplemental_reasons.push(`RANGE_REVERSAL_TIER_${tierTag}_SIZE_REDUCED`);
     }
 
     const authorityExpectancySoftPassSizeMult =
