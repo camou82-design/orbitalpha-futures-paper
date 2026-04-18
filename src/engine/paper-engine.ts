@@ -3488,7 +3488,7 @@ export class PaperEngine {
       const decision = res.executorDecision!;
       const adaptive = effectiveAdaptiveResult;
 
-      // --- UNIFIED ENTRY GATE CONSOLIDATION (Phase 1: Decision Logic) ---
+      // --- UNIFIED ENTRY GATE CONSOLIDATION (Phase 1: Decision Logic & Guards) ---
       const aiIn = aiInputFromDecision({
         decision,
         executorDirection: authority.side as "long" | "short",
@@ -3500,7 +3500,6 @@ export class PaperEngine {
       let aiOutput: AiApprovalOutput | null = null;
       if (aiIn) {
         aiOutput = aiApproveEntry(aiIn);
-        // Strict mapping: AI NO_ENTRY means execution must be aborted
         if (aiOutput.action === "NO_ENTRY") {
           aiExecutionApproved = false;
         }
@@ -3509,62 +3508,80 @@ export class PaperEngine {
       const policyPaused = !this.lastRiskExposure?.allowNewEntry || this.lastMarketMode?.routing.newEntryPolicy === "paused";
       const isNewEntry = existingIdx < 0;
 
-      // Final Authorization Boolean: All gates must pass for any ENTRY_OPENED to occur
-      const finalEntryAuthorization =
-        authority.decision === "ENTER" &&
-        effectiveAdaptiveResult != null &&
-        aiExecutionApproved &&
-        !(isNewEntry && policyPaused);
+      // Reinforced Side Validation & Allow-Guards
+      const validSide = authority.side === "long" || authority.side === "short";
+      const allowLongGuard = this.lastRiskExposure?.allowNewLong !== false; // default true if undefined
+      const allowShortGuard = this.lastRiskExposure?.allowNewShort !== false; // default true if undefined
+
+      const sideAllowedByGuard =
+        authority.side === "long" ? allowLongGuard :
+          authority.side === "short" ? allowShortGuard : false;
+
+      let finalBlockedReason: string | null = null;
+      if (authority.decision !== "ENTER") {
+        finalBlockedReason = "AUTHORITY_DECISION_NOT_ENTER";
+      } else if (!validSide) {
+        finalBlockedReason = "AUTHORITY_ENTER_WITH_INVALID_SIDE";
+      } else if (!sideAllowedByGuard) {
+        finalBlockedReason = authority.side === "long" ? "SIDE_NOT_ALLOWED_LONG" : "SIDE_NOT_ALLOWED_SHORT";
+      } else if (effectiveAdaptiveResult == null) {
+        finalBlockedReason = "ADAPTIVE_RESULT_NULL";
+      } else if (!aiExecutionApproved) {
+        finalBlockedReason = "AI_POLICY_BLOCKED";
+      } else if (isNewEntry && policyPaused) {
+        finalBlockedReason = "POLICY_PAUSED_OR_FORBIDDEN";
+      }
+
+      // Final Authorization Boolean: The ONLY gate that allows execution
+      const finalEntryAuthorization = (finalBlockedReason === null);
 
       // --- PIEPLINE EVENT EMISSION ---
       // 1. AI Event (Report BLOCKED if AI rejected)
       if (aiIn && aiOutput) {
         const aiEventType = aiExecutionApproved ? "AI_APPROVED" : "AI_BLOCKED";
-        await this.store.appendJsonlLine("reports/events.jsonl", {
-          ts: Date.now(),
-          type: aiEventType,
-          symbol: sym,
-          regime: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
-          ai_input: aiIn,
-          ai_output: aiOutput,
-          ...buildAuthorityEventMeta(authority)
-        });
+        await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane), aiIn, aiOutput, authority));
       }
 
-      // 2. ENTRY_ALLOWED (Only if passed AI gate)
-      if (aiExecutionApproved) {
-        await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime, decision, authority));
-      }
-
-      // 3. Final Decision Log
+      // 2. Final Decision Log & ENTRY_ALLOWED (Strictly Gated)
       this.logger.info("STAGE1_ENTER_DECIDED", {
         symbol: sym,
         regime: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
         executor: decision.executor,
         final_authorized: finalEntryAuthorization,
+        final_blocked_reason: finalBlockedReason,
         ai_approved: aiExecutionApproved,
         policy_paused: policyPaused,
+        allow_long: allowLongGuard,
+        allow_short: allowShortGuard,
         ...buildAuthorityEventMeta(authority)
       });
 
-      // --- EXECUTION BRANCHING ---
       if (!finalEntryAuthorization) {
-        // If V2 wanted to enter but was blocked by AI or Policy, we report as a SKIP/BLOCK event
+        // Report specific block event to events.jsonl
+        await this.store.appendJsonlLine("reports/events.jsonl", {
+          ts: Date.now(),
+          type: "ENTRY_BLOCKED_FINAL_GATE",
+          symbol: sym,
+          regime: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
+          blocked_reason: finalBlockedReason,
+          ...buildAuthorityEventMeta(authority)
+        });
+
         const refinedEnvelope = { ...envelope };
-        if (!aiExecutionApproved) {
-          refinedEnvelope.legacy = {
-            ...res,
-            decision: { ...res.decision, final_decision: "SKIP", reject_reason: "AI_BLOCK" as any }
-          };
-        } else if (isNewEntry && policyPaused) {
-          refinedEnvelope.legacy = {
-            ...res,
-            decision: { ...res.decision, final_decision: "SKIP", reject_reason: "REGIME_NO_TRADE" }
-          };
-        }
+        refinedEnvelope.legacy = {
+          ...res,
+          decision: {
+            ...res.decision,
+            final_decision: "SKIP",
+            reject_reason: (finalBlockedReason as any) || "FINAL_GATE_BLOCKED"
+          }
+        };
         await this.emitPipelineEventsFromDecision(first, refinedEnvelope, nowTs, entryStage);
         continue;
       }
+
+      // 3. ENTRY_ALLOWED (Only if passed finalEntryAuthorization)
+      await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime, decision, authority));
 
       const sourceSignal = first.signal;
       const levScaled = Math.max(
