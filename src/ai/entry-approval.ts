@@ -7,6 +7,8 @@ export type AiCostGateMode = "hard_block" | "soft_penalty" | "bypass_due_to_regi
 
 export type AiTrendStateGateMode = "hard_block" | "soft_penalty" | "neutral";
 
+export type AiLossFlowGateMode = "hard_block" | "soft_penalty" | "neutral";
+
 export type AiGateTrace = Readonly<{
   regime: MarketRegime;
   executor: "RANGE" | "TREND";
@@ -23,7 +25,12 @@ export type AiGateTrace = Readonly<{
   breakout_state: string | null;
   pullback_state: string | null;
   trend_state_penalty: number;
-  /** Confidence after cost × trend penalties (same as output.confidence when set). */
+  loss_flow_gate_applied: boolean;
+  loss_flow_gate_mode: AiLossFlowGateMode;
+  loss_streak: number;
+  last_10_net: number;
+  loss_flow_penalty: number;
+  /** Confidence after all penalties (same as output.confidence when set). */
   final_confidence_after_penalty: number | null;
 }>;
 
@@ -60,9 +67,56 @@ const TREND_TRACE_NEUTRAL = {
   trend_state_gate_mode: "neutral" as const,
   breakout_state: null as string | null,
   pullback_state: null as string | null,
-  trend_state_penalty: 1.0,
-  final_confidence_after_penalty: null as number | null
+  trend_state_penalty: 1.0
 };
+
+const LOSS_FLOW_NEUTRAL = (input: AiApprovalInput) => ({
+  loss_flow_gate_applied: false,
+  loss_flow_gate_mode: "neutral" as const,
+  loss_streak: input.loss_streak,
+  last_10_net: input.last_10_net,
+  loss_flow_penalty: 1.0
+});
+
+/** Streak bands: 2–3 → 0.88~0.82, 4–6 → 0.78~0.70, 7+ → down to ~0.58 floor with overall product floor. */
+function computeLossFlowPenalty(input: AiApprovalInput): {
+  loss_flow_penalty: number;
+  loss_flow_gate_applied: boolean;
+  loss_flow_gate_mode: AiLossFlowGateMode;
+} {
+  const ls = input.loss_streak;
+  const ln = input.last_10_net;
+  let p = 1.0;
+  let applied = false;
+
+  if (ls >= 2) {
+    applied = true;
+    if (ls <= 3) {
+      p *= 0.88 - (ls - 2) * 0.06;
+    } else if (ls <= 6) {
+      p *= 0.78 - (ls - 4) * (0.08 / 2);
+    } else {
+      p *= Math.max(0.58, 0.66 - (ls - 7) * 0.01);
+    }
+  }
+
+  if (ln < 0) {
+    applied = true;
+    p *= ln <= -8 ? 0.92 : 0.96;
+  }
+
+  if (input.risk_state === "LIMITED" && ln < 0) {
+    applied = true;
+    p *= 0.93;
+  }
+
+  p = Math.max(0.42, p);
+  return {
+    loss_flow_penalty: p,
+    loss_flow_gate_applied: applied,
+    loss_flow_gate_mode: applied ? "soft_penalty" : "neutral"
+  };
+}
 
 function costTraceHard(
   input: AiApprovalInput,
@@ -70,6 +124,7 @@ function costTraceHard(
   cost_gate_mode: AiCostGateMode,
   finalConfidence: number | null
 ): AiGateTrace {
+  const lf = LOSS_FLOW_NEUTRAL(input);
   return {
     regime: input.regime,
     executor: input.executor,
@@ -81,6 +136,7 @@ function costTraceHard(
     cost_gate_applied: true,
     cost_gate_mode,
     ...TREND_TRACE_NEUTRAL,
+    ...lf,
     final_confidence_after_penalty: finalConfidence
   };
 }
@@ -99,7 +155,11 @@ function buildGateTrace(
     breakout_state: string | null;
     pullback_state: string | null;
     trend_state_penalty: number;
-    final_confidence_after_penalty: number | null;
+  }>,
+  lossFlow: Readonly<{
+    loss_flow_gate_applied: boolean;
+    loss_flow_gate_mode: AiLossFlowGateMode;
+    loss_flow_penalty: number;
   }>
 ): AiGateTrace {
   return {
@@ -112,7 +172,11 @@ function buildGateTrace(
     edgeScore,
     cost_gate_applied: true,
     cost_gate_mode,
-    ...trend
+    ...trend,
+    loss_streak: input.loss_streak,
+    last_10_net: input.last_10_net,
+    ...lossFlow,
+    final_confidence_after_penalty: null
   };
 }
 
@@ -122,11 +186,8 @@ function buildGateTrace(
  * This does NOT change strategy logic; it only approves/denies an entry at the very end.
  * Rule: ambiguous => NO_ENTRY.
  *
- * Cost: upper market lane (regime) is authoritative — raw em vs tc is not a duplicate hard veto
- * after executor/authority already advanced the candidate (units may differ).
- *
- * TREND: breakout/pullback unknown or weak states apply soft penalties only — no duplicate hard veto
- * after upper routing + authority ENTER.
+ * Cost / TREND state / loss flow: soft penalties only after upper routing + authority ENTER —
+ * hard veto reserved for structural risk (BLOCKED), bad inputs, RANGE middle.
  */
 export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
   const gate_mode: "RANGE" | "TREND" =
@@ -198,16 +259,23 @@ export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
     }
   }
 
+  const { loss_flow_penalty, loss_flow_gate_applied, loss_flow_gate_mode } = computeLossFlowPenalty(input);
+
   const trendTrace = {
     trend_state_gate_applied,
     trend_state_gate_mode,
     breakout_state,
     pullback_state,
-    trend_state_penalty,
-    final_confidence_after_penalty: null as number | null
+    trend_state_penalty
   };
 
-  const costTrace = buildGateTrace(input, gate_mode, em, tc, edge, edgeScore, cost_gate_mode, trendTrace);
+  const lossTrace = {
+    loss_flow_gate_applied,
+    loss_flow_gate_mode,
+    loss_flow_penalty
+  };
+
+  const costTrace = buildGateTrace(input, gate_mode, em, tc, edge, edgeScore, cost_gate_mode, trendTrace, lossTrace);
 
   if (gate_mode === "RANGE") {
     if (input.box_position === "middle") {
@@ -215,35 +283,32 @@ export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
     }
   }
 
-  // Loss-flow deterioration => conservative NO.
-  if (input.loss_streak >= 2) {
-    return attach({ action: "NO_ENTRY", reason: "손실 흐름 악화", confidence: 0.92 }, costTrace);
-  }
-  if (input.last_10_net < -8) {
-    return attach({ action: "NO_ENTRY", reason: "최근 성과 악화", confidence: 0.9 }, costTrace);
-  }
-  if (input.risk_state === "LIMITED" && input.last_10_net < 0) {
-    return attach({ action: "NO_ENTRY", reason: "리스크 제한", confidence: 0.85 }, costTrace);
-  }
-
   const baseConfidence = 0.65;
-  let confidence = baseConfidence * costPenalty * trend_state_penalty;
+  const confidenceBeforeLoss = baseConfidence * costPenalty * trend_state_penalty;
+  let confidence = confidenceBeforeLoss * loss_flow_penalty;
   confidence = clamp01(confidence);
 
   const minPass = 0.38;
   if (confidence < minPass) {
     const costSoft = cost_gate_mode === "soft_penalty" || cost_gate_mode === "bypass_due_to_regime_first";
-    const reason =
-      trend_state_penalty < 1
+    const lossOnlyPushedBelow =
+      loss_flow_penalty < 1 && clamp01(confidenceBeforeLoss) >= minPass;
+    const reason = lossOnlyPushedBelow
+      ? "조건 부족 (손실 흐름 약화)"
+      : trend_state_penalty < 1
         ? "조건 부족 (추세 확인 약함)"
         : costSoft
           ? "조건 부족 (비용 edge 보조)"
-          : "조건 부족";
+          : loss_flow_gate_mode === "soft_penalty"
+            ? "조건 부족 (손실 흐름 약화)"
+            : "조건 부족";
     return attach({ action: "NO_ENTRY", reason, confidence }, costTrace);
   }
 
   let reason = "조건 충족";
-  if (trend_state_penalty < 1) {
+  if (loss_flow_penalty < 1) {
+    reason = "조건 충족 (손실 흐름 약화)";
+  } else if (trend_state_penalty < 1) {
     reason = "조건 충족 (추세 확인 약함)";
   } else if (cost_gate_mode === "bypass_due_to_regime_first" || cost_gate_mode === "soft_penalty") {
     reason = "조건 충족 (비용 edge 보조)";
