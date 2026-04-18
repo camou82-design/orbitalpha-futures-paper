@@ -3484,73 +3484,87 @@ export class PaperEngine {
         }
       }
 
-      if (authority.decision !== "ENTER" || !effectiveAdaptiveResult) {
-        await this.emitPipelineEventsFromDecision(first, envelope, nowTs, entryStage);
-        continue;
-      }
-
-      const blockNew =
-        !this.lastRiskExposure?.allowNewEntry || this.lastMarketMode?.routing.newEntryPolicy === "paused";
-      if (existingIdx < 0 && blockNew) {
-        await this.emitPipelineEventsFromDecision(
-          first,
-          {
-            ...envelope,
-            legacy: {
-              ...res,
-              decision: {
-                ...res.decision,
-                final_decision: "SKIP",
-                reject_reason: "REGIME_NO_TRADE"
-              },
-              adaptiveResult: null
-            }
-          },
-          nowTs,
-          entryStage
-        );
-        continue;
-      }
-
+      const sym = String(first.symbol);
       const decision = res.executorDecision!;
       const adaptive = effectiveAdaptiveResult;
-      const sym = String(first.symbol);
 
-      await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime, decision, authority));
-
-      const lossStreak = this.lastRisk?.recentLossStreakByMode?.[(this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime] ?? 0;
-      const last10Net =
-        typeof this.lastRisk?.detail?.last10_net_usd === "number" && Number.isFinite(this.lastRisk.detail.last10_net_usd)
-          ? this.lastRisk.detail.last10_net_usd
-          : 0;
+      // --- UNIFIED ENTRY GATE CONSOLIDATION (Phase 1: Decision Logic) ---
       const aiIn = aiInputFromDecision({
         decision,
         executorDirection: authority.side as "long" | "short",
-        lossStreak,
-        last10Net
+        lossStreak: this.lastRisk?.recentLossStreakByMode?.[(this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime] ?? 0,
+        last10Net: typeof this.lastRisk?.detail?.last10_net_usd === "number" ? this.lastRisk.detail.last10_net_usd : 0
       });
+
+      let aiExecutionApproved = true;
+      let aiOutput: AiApprovalOutput | null = null;
       if (aiIn) {
-        const aiOut = aiApproveEntry(aiIn);
-        const aiDir = aiOut.action === "ENTER_LONG" ? "long" : aiOut.action === "ENTER_SHORT" ? "short" : "none";
-        await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime, aiIn, aiOut, authority));
+        aiOutput = aiApproveEntry(aiIn);
+        // Strict mapping: AI NO_ENTRY means execution must be aborted
+        if (aiOutput.action === "NO_ENTRY") {
+          aiExecutionApproved = false;
+        }
       }
 
+      const policyPaused = !this.lastRiskExposure?.allowNewEntry || this.lastMarketMode?.routing.newEntryPolicy === "paused";
+      const isNewEntry = existingIdx < 0;
+
+      // Final Authorization Boolean: All gates must pass for any ENTRY_OPENED to occur
+      const finalEntryAuthorization =
+        authority.decision === "ENTER" &&
+        effectiveAdaptiveResult != null &&
+        aiExecutionApproved &&
+        !(isNewEntry && policyPaused);
+
+      // --- PIEPLINE EVENT EMISSION ---
+      // 1. AI Event (Report BLOCKED if AI rejected)
+      if (aiIn && aiOutput) {
+        const aiEventType = aiExecutionApproved ? "AI_APPROVED" : "AI_BLOCKED";
+        await this.store.appendJsonlLine("reports/events.jsonl", {
+          ts: Date.now(),
+          type: aiEventType,
+          symbol: sym,
+          regime: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
+          ai_input: aiIn,
+          ai_output: aiOutput,
+          ...buildAuthorityEventMeta(authority)
+        });
+      }
+
+      // 2. ENTRY_ALLOWED (Only if passed AI gate)
+      if (aiExecutionApproved) {
+        await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime, decision, authority));
+      }
+
+      // 3. Final Decision Log
       this.logger.info("STAGE1_ENTER_DECIDED", {
         symbol: sym,
         regime: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
         executor: decision.executor,
-        stage1_result_code: res.decision.stage1_result_code,
-        fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
-        expected_move_usd: res.decision.expected_move_usd ?? null,
-        required_cost_usd: authority.sizeUsd,
-        shortfall_usd: res.decision.shortfall_usd ?? 0,
-        required_move_pct: res.decision.required_move_pct,
-        shortfall_pct: res.decision.shortfall_pct,
-        executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
-        stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
-        stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null,
+        final_authorized: finalEntryAuthorization,
+        ai_approved: aiExecutionApproved,
+        policy_paused: policyPaused,
         ...buildAuthorityEventMeta(authority)
       });
+
+      // --- EXECUTION BRANCHING ---
+      if (!finalEntryAuthorization) {
+        // If V2 wanted to enter but was blocked by AI or Policy, we report as a SKIP/BLOCK event
+        const refinedEnvelope = { ...envelope };
+        if (!aiExecutionApproved) {
+          refinedEnvelope.legacy = {
+            ...res,
+            decision: { ...res.decision, final_decision: "SKIP", reject_reason: "AI_BLOCK" as any }
+          };
+        } else if (isNewEntry && policyPaused) {
+          refinedEnvelope.legacy = {
+            ...res,
+            decision: { ...res.decision, final_decision: "SKIP", reject_reason: "REGIME_NO_TRADE" }
+          };
+        }
+        await this.emitPipelineEventsFromDecision(first, refinedEnvelope, nowTs, entryStage);
+        continue;
+      }
 
       const sourceSignal = first.signal;
       const levScaled = Math.max(
@@ -3649,14 +3663,6 @@ export class PaperEngine {
           symbol: first.symbol,
           side: authority.side as "long" | "short", // Authority
           sizeUsd: adaptive.sizeUsd,
-          stage1_result_code: res.decision.stage1_result_code,
-          fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
-          expected_move_usd: res.decision.expected_move_usd ?? null,
-          required_cost_usd: authority.sizeUsd,
-          shortfall_usd: res.decision.shortfall_usd ?? 0,
-          executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
-          stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
-          stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null,
           ...buildAuthorityEventMeta(authority)
         });
 
@@ -3720,6 +3726,13 @@ export class PaperEngine {
           );
           continue;
         }
+
+        const entryIdentity = this.resolveEntryIdentity(
+          authority,
+          decision,
+          (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as PaperRegimeState
+        );
+
         if (this.okxDemo) {
           const instId = toOkxSwapInstId(first.symbol);
           trace.inst_id = instId;
@@ -3861,11 +3874,6 @@ export class PaperEngine {
           trace.order_submit_requested = false;
           trace.order_submit_ack = "skipped_no_okx_demo";
         }
-        const entryIdentity = this.resolveEntryIdentity(
-          authority,
-          decision,
-          (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as PaperRegimeState
-        );
 
         const record: PaperOpenPositionRecord = {
           openedAt: Date.now(),
@@ -3893,7 +3901,7 @@ export class PaperEngine {
           ...(typeof authority.sizeUsd === "number" ? { totalCostAtEntry: authority.sizeUsd } : {}),
           ...(confScore !== undefined ? { entryConfidenceScore: confScore } : {}),
           ...(confTier !== undefined ? { entryConfidenceTier: confTier } : {}),
-          ...(sizeMult !== undefined ? { entrySizeMultiplier: sizeMult } : {}),
+          ...(confTier !== undefined ? { entrySizeMultiplier: sizeMult } : {}),
           ...(res.decision.post_entry_cost_guard === true ? { postEntryCostGuard: true } : {}),
           ...(entryIdentity.attachRangeMetadata
             ? {
