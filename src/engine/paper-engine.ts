@@ -1387,13 +1387,20 @@ export class PaperEngine {
     first: SymbolSnapshot,
     envelope: PaperEngineDecisionEnvelope,
     nowTs: number,
-    entryStage = 0
+    entryStage = 0,
+    /**
+     * When set (final gate, capacity limit, risk cap, etc.), legacy `executorDecision.entry_allowed`
+     * must not emit ENTRY_ALLOWED — avoids re-logging after ENTRY_BLOCKED_FINAL_GATE.
+     */
+    suppressLegacyEntryAllowedReason: string | null | undefined = undefined
   ): Promise<void> {
     const res = envelope.legacy;
     const authority = envelope.authority;
     const sym = String(first.symbol);
     const d = res.decision;
     const ex = res.executorDecision;
+    const suppressLegacyEntryAllowed =
+      suppressLegacyEntryAllowedReason != null && suppressLegacyEntryAllowedReason !== "";
 
     if (d.final_decision === "SKIP" && (d.reject_reason === "SIGNAL_NONE" || d.reject_reason === null)) {
       return;
@@ -1438,7 +1445,7 @@ export class PaperEngine {
       return;
     }
 
-    if (ex?.entry_allowed) {
+    if (ex?.entry_allowed && !suppressLegacyEntryAllowed) {
       await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, effectiveRegime, ex, authority));
     }
 
@@ -1453,7 +1460,7 @@ export class PaperEngine {
         const aiIn = ex ? aiInputFromDecision({ decision: ex, executorDirection: intentSide, lossStreak, last10Net }) : null;
         if (aiIn) {
           const aiOut = aiApproveEntry(aiIn);
-          await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload("AI_APPROVED", sym, effectiveRegime, aiIn, aiOut, authority));
+          await this.store.appendJsonlLine("reports/events.jsonl", buildAiEventPayload("AI_APPROVED", sym, effectiveRegime, aiIn, aiOut, authority));
         }
       }
 
@@ -3414,23 +3421,7 @@ export class PaperEngine {
       const entryStage = existingOpen?.entryStage ?? 0;
       const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === intentSide);
       const otherLeg = next.some((o) => o.symbol === first.symbol && o.side !== intentSide);
-
-      if (next.length >= max) {
-        if (authority.decision === "ENTER") {
-          const limitBlockedEnvelope: PaperEngineDecisionEnvelope = {
-            ...envelope,
-            legacy: {
-              ...res,
-              decision: {
-                ...res.decision,
-                stage1_result_code: "STAGE1_BLOCKED_LIMIT" as const
-              }
-            }
-          };
-          await this.emitPipelineEventsFromDecision(first, limitBlockedEnvelope, nowTs, entryStage);
-        }
-        continue;
-      }
+      const activeEngine = this.lastMarketMode?.routing.activeEngine ?? "IDLE";
 
       this.lastEntryDecision = res.executorDecision ?? null;
 
@@ -3478,12 +3469,29 @@ export class PaperEngine {
           authority.side === "short" ? allowShortGuard : false;
 
       let finalBlockedReason: string | null = null;
+
+      // Opposite-leg / hedge: part of final gate (single blocked_reason source).
+      let oppositeLegBlockedReason: string | null = null;
+      if (otherLeg) {
+        if (!this.lastRiskExposure) {
+          oppositeLegBlockedReason = "OPPOSITE_LEG_BLOCKED_NON_ACTIVE_ENGINE";
+        } else if (activeEngine === "RANGE" && !this.lastRiskExposure.allowRangeBidirectional) {
+          oppositeLegBlockedReason = "RANGE_HEDGE_BLOCKED";
+        } else if (activeEngine === "TREND" && this.lastRiskExposure.blockTrendOppositeLeg) {
+          oppositeLegBlockedReason = "TREND_OPPOSITE_LEG_BLOCKED";
+        } else if (activeEngine !== "RANGE" && activeEngine !== "TREND") {
+          oppositeLegBlockedReason = "OPPOSITE_LEG_BLOCKED_NON_ACTIVE_ENGINE";
+        }
+      }
+
       if (authority.decision !== "ENTER") {
         finalBlockedReason = "AUTHORITY_DECISION_NOT_ENTER";
       } else if (!validSide) {
         finalBlockedReason = "AUTHORITY_ENTER_WITH_INVALID_SIDE";
       } else if (!sideAllowedByGuard) {
         finalBlockedReason = authority.side === "long" ? "SIDE_NOT_ALLOWED_LONG" : "SIDE_NOT_ALLOWED_SHORT";
+      } else if (oppositeLegBlockedReason) {
+        finalBlockedReason = oppositeLegBlockedReason;
       } else if (effectiveAdaptiveResult == null) {
         finalBlockedReason = "ADAPTIVE_RESULT_NULL";
       } else if (!aiExecutionApproved) {
@@ -3499,7 +3507,7 @@ export class PaperEngine {
       // 1. AI Event (Report BLOCKED if AI rejected)
       if (aiIn && aiOutput) {
         const aiEventType = aiExecutionApproved ? "AI_APPROVED" : "AI_BLOCKED";
-        await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(aiEventType, sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane), aiIn, aiOutput, authority));
+        await this.store.appendJsonlLine("reports/events.jsonl", buildAiEventPayload(aiEventType, sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane), aiIn, aiOutput, authority));
       }
 
       // 2. Final Decision Log & ENTRY_ALLOWED (Strictly Gated)
@@ -3531,25 +3539,33 @@ export class PaperEngine {
         const refinedEnvelope = { ...envelope };
         refinedEnvelope.legacy = {
           ...res,
+          ...(res.executorDecision != null
+            ? {
+              executorDecision: {
+                ...res.executorDecision,
+                entry_allowed: false
+              }
+            }
+            : {}),
           decision: {
             ...res.decision,
             final_decision: "SKIP",
             reject_reason: (finalBlockedReason as any) || "FINAL_GATE_BLOCKED"
           }
         };
-        await this.emitPipelineEventsFromDecision(first, refinedEnvelope, nowTs, entryStage);
+        await this.emitPipelineEventsFromDecision(first, refinedEnvelope, nowTs, entryStage, finalBlockedReason);
         continue;
       }
 
       // --- EXECUTION BRANCHING (Scale-In vs New Entry) ---
 
-      // 3. SCALE-IN BRANCH (Now gated by finalEntryAuthorization)
+      // 3. SCALE-IN BRANCH (final gate passed; max open positions does not apply to scale-in)
       if (existingIdx >= 0) {
         const scaled = await this.tryPaperPositionScaleIn(next[existingIdx], envelope, first, nowTs);
         if (scaled) {
           next[existingIdx] = scaled;
           openPositionsChanged = true;
-          // Emit SCALE_IN_SUCCESS event
+          // Scale-in: POSITION_SCALE_IN_SUCCESS only — no ENTRY_OPENED here (initial entry records ENTRY_OPENED).
           await this.store.appendJsonlLine("reports/events.jsonl", {
             ts: Date.now(),
             type: "POSITION_SCALE_IN_SUCCESS",
@@ -3563,7 +3579,7 @@ export class PaperEngine {
         continue;
       }
 
-      // 4. LIMIT Check (New entries only)
+      // 4. Max open positions (new entry only — single check after final gate, after scale-in branch)
       if (next.length >= max) {
         if (authority.decision === "ENTER") {
           const limitBlockedEnvelope: PaperEngineDecisionEnvelope = {
@@ -3576,12 +3592,12 @@ export class PaperEngine {
               }
             }
           };
-          await this.emitPipelineEventsFromDecision(first, limitBlockedEnvelope, nowTs, entryStage);
+          await this.emitPipelineEventsFromDecision(first, limitBlockedEnvelope, nowTs, entryStage, "STAGE1_BLOCKED_LIMIT");
         }
         continue;
       }
 
-      // 5. ENTRY_ALLOWED (Only if passed finalEntryAuthorization and is new entry)
+      // 5. New entry only: ENTRY_ALLOWED here; ENTRY_OPENED after successful open below (not on scale-in).
       await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime, decision, authority));
 
       const sourceSignal = first.signal;
@@ -3740,7 +3756,8 @@ export class PaperEngine {
               }
             },
             nowTs,
-            entryStage
+            entryStage,
+            "risk_exposure_cap_for_leg"
           );
           continue;
         }
@@ -4738,9 +4755,9 @@ function buildEntryAllowedEventPayload(
 }
 
 /**
- * AI APPROVED EVENT PAYLOAD HELPER (Phase 3)
+ * AI event payload helper (approved / blocked).
  */
-function buildAiApprovedEventPayload(
+function buildAiEventPayload(
   type: "AI_APPROVED" | "AI_BLOCKED",
   symbol: string,
   regime: string,
