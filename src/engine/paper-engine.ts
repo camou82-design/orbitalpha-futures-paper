@@ -2042,6 +2042,7 @@ export class PaperEngine {
     if (rawOpens.length === 0) return;
     const opens = rawOpens.map(o => ({ ...o })); // Use mutable copy for state tracking
     let crashPositionsModified = false;
+    let openLedgerPruned = false;
     const crashForceClosedKeys = new Set<string>();
     const crashReducedThisTickKeys = new Set<string>();
 
@@ -2162,6 +2163,28 @@ export class PaperEngine {
       // Unique flow identifier for one-shot terminal exit deduplication
       const flowId = `${openRaw.symbol}:${openRaw.side}:${openRaw.openedAt}`;
 
+      if (this.terminalExitConsumedByFlow.has(flowId)) {
+        openLedgerPruned = true;
+        this.logger.info("EXIT_TERMINAL_DEDUP_PROOF", {
+          symbol: openRaw.symbol,
+          side: openRaw.side,
+          openedAt: openRaw.openedAt,
+          flowId,
+          terminal_exit_already_consumed: true,
+          action: "blocking_repetitive_exit",
+          note: "이 포지션 흐름은 이미 터미널 종료가 발생했으므로 중복 이벤트를 차단함"
+        });
+        this.logger.info("TERMINAL_FLOW_PRUNED_FROM_OPEN_LEDGER", {
+          symbol: openRaw.symbol,
+          side: openRaw.side,
+          openedAt: openRaw.openedAt,
+          flowId,
+          prune_reason: "terminal_exit_already_consumed",
+          action: "excluded_from_remaining"
+        });
+        continue;
+      }
+
       const nStage = normalizeEntryStageFromSizeEvidence(openRaw);
       const nRange = normalizeRangeManagementState(nStage.normalized);
       const finalNorm = nRange.normalized;
@@ -2197,28 +2220,6 @@ export class PaperEngine {
             source: "ledger_normalization_backfill"
           });
         }
-      }
-
-      const terminalConsumed = this.terminalExitConsumedByFlow.has(flowId);
-      if (terminalConsumed) {
-        this.logger.info("EXIT_TERMINAL_DEDUP_PROOF", {
-          symbol: open.symbol,
-          side: open.side,
-          openedAt: open.openedAt,
-          flowId,
-          terminal_exit_already_consumed: true,
-          action: "blocking_repetitive_exit",
-          note: "이 포지션 흐름은 이미 터미널 종료가 발생했으므로 중복 이벤트를 차단함"
-        });
-        this.logger.info("TERMINAL_FLOW_PRUNED_FROM_OPEN_LEDGER", {
-          symbol: open.symbol,
-          side: open.side,
-          openedAt: open.openedAt,
-          flowId,
-          prune_reason: "terminal_exit_already_consumed",
-          action: "excluded_from_remaining"
-        });
-        continue;
       }
 
       const inheritedStrategyVersion = open.strategyVersion ?? "paper-v1";
@@ -3600,10 +3601,48 @@ export class PaperEngine {
           ...buildPositionIdentityMeta(open)
         });
       }
+    }
 
-      if (crashPositionsModified || remaining.length !== opens.length || remaining.some((r, i) => r !== opens[i])) {
-        await this.positions.saveOpenAll(remaining);
-      }
+    const remainingIds = new Set(remaining.map((r) => `${r.symbol}:${r.side}:${r.openedAt}`));
+    const removedFlows = opens
+      .filter((o) => !remainingIds.has(`${o.symbol}:${o.side}:${o.openedAt}`))
+      .map((o) => ({
+        flowId: `${o.symbol}:${o.side}:${o.openedAt}`,
+        symbol: o.symbol,
+        side: o.side,
+        openedAt: o.openedAt
+      }));
+    const remainingFlows = remaining.map((r) => ({
+      flowId: `${r.symbol}:${r.side}:${r.openedAt}`,
+      symbol: r.symbol,
+      side: r.side,
+      openedAt: r.openedAt
+    }));
+    const openLedgerStructureChanged =
+      remaining.length !== opens.length || remaining.some((r, i) => r !== opens[i]);
+    const shouldSaveOpenLedger =
+      crashPositionsModified || openLedgerPruned || openLedgerStructureChanged;
+
+    this.logger.info("OPEN_LEDGER_SAVE_PROOF", {
+      before_count: opens.length,
+      after_count: remaining.length,
+      removed_flows: removedFlows,
+      remaining_flows: remainingFlows,
+      save_called: shouldSaveOpenLedger,
+      caller: "tryPaperPositionClose"
+    });
+
+    if (shouldSaveOpenLedger) {
+      await this.positions.saveOpenAll(remaining);
+      const removedFlowIds = removedFlows.map((x) => x.flowId);
+      const reloaded = await this.positions.loadOpenAll();
+      const reloadedIds = new Set(reloaded.map((r) => `${r.symbol}:${r.side}:${r.openedAt}`));
+      const stillPresentFlows = removedFlowIds.filter((id) => reloadedIds.has(id));
+      this.logger.info("OPEN_LEDGER_POST_SAVE_VERIFY", {
+        removed_flows: removedFlowIds,
+        still_present_flows: stillPresentFlows,
+        verify_ok: stillPresentFlows.length === 0
+      });
     }
   }
 
@@ -3693,8 +3732,15 @@ export class PaperEngine {
     }
 
     const max = this.config.paperMaxOpenPositions;
-    const opensRaw = await this.positions.loadOpenAll();
+    const opensRawFull = await this.positions.loadOpenAll();
     let openPositionsChanged = false;
+    const opensRaw = opensRawFull.filter((o) => {
+      const fid = `${o.symbol}:${o.side}:${o.openedAt}`;
+      return !this.terminalExitConsumedByFlow.has(fid);
+    });
+    if (opensRaw.length !== opensRawFull.length) {
+      openPositionsChanged = true;
+    }
     const opens = opensRaw.map((r) => {
       let current = r;
       let changed = false;
