@@ -3387,13 +3387,37 @@ export class PaperEngine {
               phase: "default_persistence_regime_exit_safety_net"
             });
             this.lastExitReasonLabel = open.side === "long" ? "RANGE 상단 롱 정합성 청산" : "RANGE 하단 숏 정합성 청산";
+            const mappedType = exitEventJsonlType(cr);
+            this.terminalExitConsumedByFlow.add(flowId);
+
+            const isRegimeRelatedCode =
+              mappedType === "EXIT_REGIME" ||
+              mappedType === "EXIT_TREND_BREAK" ||
+              mappedType === "EXIT_RANGE_REBALANCE";
+
+            if (isRegimeRelatedCode) {
+              this.regimeExitConsumedBySymbol.set(String(open.symbol), { side: open.side, ts: closedAt });
+            }
+
+            this.logger.info("EXIT_CLASSIFICATION_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              openedAt: open.openedAt,
+              raw_reason: cr,
+              mapped_exit_type: mappedType,
+              regime_dedup_set: isRegimeRelatedCode,
+              flowId
+            });
+
             await this.store.appendJsonlLine("reports/events.jsonl", {
               ts: Date.now(),
-              type: "EXIT_REGIME",
+              type: mappedType,
+              symbol: String(open.symbol),
+              side: open.side,
+              reason: cr,
               realized_pnl: m.pnlUsdNet,
               ...buildPositionIdentityMeta(open)
             });
-            this.regimeExitConsumedBySymbol.set(String(open.symbol), { side: open.side, ts: closedAt });
             continue;
           }
           // mid: 무조건 유지 금지 → 아래 minHold / candidate_lost 로 진행
