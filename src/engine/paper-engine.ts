@@ -1453,7 +1453,7 @@ export class PaperEngine {
         const aiIn = ex ? aiInputFromDecision({ decision: ex, executorDirection: intentSide, lossStreak, last10Net }) : null;
         if (aiIn) {
           const aiOut = aiApproveEntry(aiIn);
-          await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, effectiveRegime, aiIn, aiOut, authority));
+          await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload("AI_APPROVED", sym, effectiveRegime, aiIn, aiOut, authority));
         }
       }
 
@@ -3415,46 +3415,6 @@ export class PaperEngine {
       const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === intentSide);
       const otherLeg = next.some((o) => o.symbol === first.symbol && o.side !== intentSide);
 
-      const will_attempt_open = authority.decision === "ENTER" && effectiveAdaptiveResult != null;
-      const activeEngine = this.lastMarketMode?.routing.activeEngine ?? "IDLE";
-      let hedgeEntryBlocked = false;
-      if (otherLeg && this.lastRiskExposure) {
-        if (activeEngine === "RANGE") hedgeEntryBlocked = !this.lastRiskExposure.allowRangeBidirectional;
-        else if (activeEngine === "TREND") hedgeEntryBlocked = this.lastRiskExposure.blockTrendOppositeLeg;
-        else hedgeEntryBlocked = true;
-      }
-      if (hedgeEntryBlocked) {
-        await this.emitPipelineEventsFromDecision(
-          first,
-          {
-            ...envelope,
-            legacy: {
-              ...res,
-              decision: {
-                ...res.decision,
-                final_decision: "SKIP",
-                reject_reason: "EXECUTION_DISABLED",
-                execution_disabled_reason:
-                  activeEngine === "TREND" ? "trend_opposite_leg_blocked_by_policy" : "hedge_blocked_non_range_engine"
-              },
-              adaptiveResult: null
-            }
-          },
-          nowTs,
-          entryStage
-        );
-        continue;
-      }
-
-      if (existingIdx >= 0) {
-        const scaled = await this.tryPaperPositionScaleIn(next[existingIdx], envelope, first, nowTs);
-        if (scaled) {
-          next[existingIdx] = scaled;
-          openPositionsChanged = true;
-        }
-        continue;
-      }
-
       if (next.length >= max) {
         if (authority.decision === "ENTER") {
           const limitBlockedEnvelope: PaperEngineDecisionEnvelope = {
@@ -3539,7 +3499,7 @@ export class PaperEngine {
       // 1. AI Event (Report BLOCKED if AI rejected)
       if (aiIn && aiOutput) {
         const aiEventType = aiExecutionApproved ? "AI_APPROVED" : "AI_BLOCKED";
-        await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane), aiIn, aiOutput, authority));
+        await this.store.appendJsonlLine("reports/events.jsonl", buildAiApprovedEventPayload(aiEventType, sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane), aiIn, aiOutput, authority));
       }
 
       // 2. Final Decision Log & ENTRY_ALLOWED (Strictly Gated)
@@ -3553,6 +3513,7 @@ export class PaperEngine {
         policy_paused: policyPaused,
         allow_long: allowLongGuard,
         allow_short: allowShortGuard,
+        is_scale_in: existingIdx >= 0,
         ...buildAuthorityEventMeta(authority)
       });
 
@@ -3580,7 +3541,47 @@ export class PaperEngine {
         continue;
       }
 
-      // 3. ENTRY_ALLOWED (Only if passed finalEntryAuthorization)
+      // --- EXECUTION BRANCHING (Scale-In vs New Entry) ---
+
+      // 3. SCALE-IN BRANCH (Now gated by finalEntryAuthorization)
+      if (existingIdx >= 0) {
+        const scaled = await this.tryPaperPositionScaleIn(next[existingIdx], envelope, first, nowTs);
+        if (scaled) {
+          next[existingIdx] = scaled;
+          openPositionsChanged = true;
+          // Emit SCALE_IN_SUCCESS event
+          await this.store.appendJsonlLine("reports/events.jsonl", {
+            ts: Date.now(),
+            type: "POSITION_SCALE_IN_SUCCESS",
+            symbol: sym,
+            regime: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
+            side: scaled.side,
+            new_size: scaled.sizeUsd,
+            ...buildAuthorityEventMeta(authority)
+          });
+        }
+        continue;
+      }
+
+      // 4. LIMIT Check (New entries only)
+      if (next.length >= max) {
+        if (authority.decision === "ENTER") {
+          const limitBlockedEnvelope: PaperEngineDecisionEnvelope = {
+            ...envelope,
+            legacy: {
+              ...res,
+              decision: {
+                ...res.decision,
+                stage1_result_code: "STAGE1_BLOCKED_LIMIT" as const
+              }
+            }
+          };
+          await this.emitPipelineEventsFromDecision(first, limitBlockedEnvelope, nowTs, entryStage);
+        }
+        continue;
+      }
+
+      // 5. ENTRY_ALLOWED (Only if passed finalEntryAuthorization and is new entry)
       await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime, decision, authority));
 
       const sourceSignal = first.signal;
@@ -4285,11 +4286,8 @@ export class PaperEngine {
     // Weighted average price
     const newEntryPrice = (existing.entryPrice * existing.sizeUsd + first.lastPrice * incrementalSizeUsd) / newTotalSizeUsd;
 
-    await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(String(existing.symbol), authority, {
-      ...existing,
-      sizeUsd: incrementalSizeUsd,
-      entryStage: targetStage
-    }));
+    // NOTE: ENTRY_OPENED is no longer recorded here. 
+    // It is recorded in the main loop or as POSITION_SCALE_IN_SUCCESS.
 
     if (existing.regimeAtEntry === "RANGE" && typeof first.boxPos === "number") {
       this.logger.info("RANGE_SCALE_IN_SUCCESS_PROOF", {
@@ -4743,6 +4741,7 @@ function buildEntryAllowedEventPayload(
  * AI APPROVED EVENT PAYLOAD HELPER (Phase 3)
  */
 function buildAiApprovedEventPayload(
+  type: "AI_APPROVED" | "AI_BLOCKED",
   symbol: string,
   regime: string,
   aiIn: AiApprovalInput,
@@ -4751,7 +4750,7 @@ function buildAiApprovedEventPayload(
 ): Record<string, unknown> {
   return {
     ts: Date.now(),
-    type: "AI_APPROVED",
+    type,
     symbol,
     regime,
     ai_input: aiIn,
