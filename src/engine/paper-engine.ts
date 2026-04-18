@@ -591,8 +591,10 @@ export function normalizeEntryStageFromSizeEvidence(
     rec.sizeUsd > rec.initialSizeUsd * 1.05;
 
   if (scaled && entryStage < 2) {
+    const normalized = { ...rec, entryStage: 2 };
+    // This is a passive alignment (not during execution), but still important to log.
     return {
-      normalized: { ...rec, entryStage: 2 },
+      normalized,
       changed: true
     };
   }
@@ -631,17 +633,17 @@ function normalizeRangeManagementState(
       normalized = { ...normalized, rangeAddOnUsed: true };
       changed = true;
     }
-  } else {
-    // REATTACK_READY 는 실제 미증액 준비 상태일 때만 유지
-    if (currentState === "PROFIT_LOCKED" || currentState === "REATTACK_USED") {
-      currentState = "INIT";
-    }
   }
 
   if (currentState !== (rec.rangeManagementState ?? "INIT")) {
     normalized = { ...normalized, rangeManagementState: currentState };
     changed = true;
   }
+
+  if (changed) {
+    console.log(`[POSITION_STATE_ALIGNMENT_PROOF] ${rec.symbol} | Stage: ${rec.entryStage}->${normalized.entryStage} | AddOnUsed: ${rec.rangeAddOnUsed}->${normalized.rangeAddOnUsed} | State: ${rec.rangeManagementState}->${normalized.rangeManagementState} | Size: ${rec.sizeUsd} (Initial: ${rec.initialSizeUsd})`);
+  }
+
   return { normalized, changed };
 }
 
@@ -1144,12 +1146,12 @@ export class PaperEngine {
         snap == null
           ? null
           : applyPaperSignalMarketAlignment({
-              snapshot: snap,
-              risk,
-              signalAlignmentContext: signalAlignmentContextBase,
-              adaptiveMode: this.lastAdaptiveMode.mode,
-              marketSignalProofLogger: this.logger
-            });
+            snapshot: snap,
+            risk,
+            signalAlignmentContext: signalAlignmentContextBase,
+            adaptiveMode: this.lastAdaptiveMode.mode,
+            marketSignalProofLogger: this.logger
+          });
       this.lastTickSymbolSnapshotBySymbol.set(symKeyEarly, snapForDecision ?? snap ?? null);
 
       const nowTick = snap;
@@ -1482,12 +1484,12 @@ export class PaperEngine {
             : 0;
         const aiIn = ex
           ? aiInputFromDecision({
-              decision: ex,
-              executorDirection: intentSide,
-              lossStreak,
-              last10Net,
-              effectiveRegime: effectiveRegime as MarketRegime
-            })
+            decision: ex,
+            executorDirection: intentSide,
+            lossStreak,
+            last10Net,
+            effectiveRegime: effectiveRegime as MarketRegime
+          })
           : null;
         if (aiIn) {
           const aiOut = aiApproveEntry(aiIn);
@@ -3953,7 +3955,16 @@ export class PaperEngine {
           initialSizeUsd: entrySizeUsd,
           partialExitStage: 0,
           realizedPnl: 0,
-          stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : undefined,
+          stopPrice: (() => {
+            const val = typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : undefined;
+            if (val !== undefined) return val;
+            // Fallback calculation if decision lacks stopLoss
+            const slThresh = 0.05; // 5% hard fallback
+            const fallback = (authority.side === "long")
+              ? first.lastPrice * (1 - slThresh)
+              : first.lastPrice * (1 + slThresh);
+            return fallback;
+          })(),
           strategyVersion: entryIdentity.effectiveStrategyVersion,
           sourceSignal: entryIdentity.effectiveSourceSignal,
           sourceRunPath: input.candidateRunPath,
@@ -3998,6 +4009,14 @@ export class PaperEngine {
 
         next.push(record);
         openPositionsChanged = true;
+
+        this.logger.info("STOP_STATE_PROOF", {
+          symbol: record.symbol,
+          side: record.side,
+          stopPrice_at_entry: record.stopPrice ?? "미설정",
+          entryPrice: record.entryPrice,
+          source: typeof res.decision.stopLoss === "number" ? "executor_decision" : "engine_fallback"
+        });
         trace.position_open_record_written = true;
         if (res.decision.range_reversal_immediate_switch_applied === true) {
           this.rangeReversalSwitchPendingBySymbol.delete(sym);
@@ -4384,20 +4403,46 @@ export class PaperEngine {
       });
     }
 
-    return {
+    const updatedRecord: PaperOpenPositionRecord = {
       ...existing,
       sizeUsd: newTotalSizeUsd,
       entryPrice: newEntryPrice,
       entryStage: targetStage,
       scalingWeights,
-      rangeAddOnUsed: rangeAddOnCandidate ? true : existing.rangeAddOnUsed,
-      rangeManagementState: rangeAddOnCandidate
+      rangeAddOnUsed: (targetStage >= 2 || rangeAddOnCandidate) ? true : existing.rangeAddOnUsed,
+      rangeManagementState: (targetStage >= 2 || rangeAddOnCandidate)
         ? ("REATTACK_USED" as RangeManagementState)
         : (existing.rangeManagementState ?? "INIT"),
+      stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : existing.stopPrice,
       trailingExtremePrice: existing.side === "long"
         ? Math.max(existing.trailingExtremePrice ?? 0, first.lastPrice)
         : Math.min(existing.trailingExtremePrice ?? 999999, first.lastPrice)
     };
+
+    this.logger.info("POSITION_STATE_ALIGNMENT_PROOF", {
+      symbol: existing.symbol,
+      side: existing.side,
+      entryStage_before: existing.entryStage,
+      entryStage_after: updatedRecord.entryStage,
+      rangeAddOnUsed_before: existing.rangeAddOnUsed,
+      rangeAddOnUsed_after: updatedRecord.rangeAddOnUsed,
+      rangeManagementState_before: existing.rangeManagementState ?? "INIT",
+      rangeManagementState_after: updatedRecord.rangeManagementState,
+      is_scale_in: true,
+      reason: rangeAddOnCandidate ? "range_add_on_candidate" : "standard_scale_in"
+    });
+
+    if (updatedRecord.stopPrice !== existing.stopPrice || existing.stopPrice === undefined) {
+      this.logger.info("STOP_STATE_PROOF", {
+        symbol: existing.symbol,
+        side: existing.side,
+        stopPrice_before: existing.stopPrice ?? "미설정",
+        stopPrice_after: updatedRecord.stopPrice ?? "미설정",
+        source: typeof res.decision.stopLoss === "number" ? "executor_decision" : "persisted_value"
+      });
+    }
+
+    return updatedRecord;
   }
 
   private async pollSymbol(
