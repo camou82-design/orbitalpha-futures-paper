@@ -1287,7 +1287,9 @@ function pack(
 
 /** Internal candidate discovery for V2 authority when not injected from caller. */
 function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): EntryExecutionAuthority {
-  const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as any) || "legacy";
+  const configuredV2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as any) || "legacy";
+  // When the caller is evaluating RANGE, do not allow legacy mode to own final execution authority.
+  const v2Mode = input.regime === "RANGE" ? "engine_v2" : configuredV2Mode;
   const sn = input.snapshot;
   if (!sn) {
     return { decision: "HOLD", source: "v2", side: "none", sizeUsd: 0, regime: "UNKNOWN" };

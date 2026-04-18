@@ -1308,7 +1308,10 @@ export class PaperEngine {
       });
 
       /** Engine-V2 Execution Path (Standard 2: Selector Bridge) */
-      const v2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as EngineV2OpMode) || "legacy";
+      const configuredV2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as EngineV2OpMode) || "legacy";
+      // RANGE lane must not be executed under V1 authority; enforce V2 authority ownership.
+      const v2Mode: EngineV2OpMode =
+        marketModeOut.routing.activeEngine === "RANGE" ? "engine_v2" : configuredV2Mode;
 
 
 

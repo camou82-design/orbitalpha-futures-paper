@@ -279,7 +279,7 @@ export function resolveSymbolDecisionEnvelope(
             adopted_decision: allowV2Override ? "ENTER" : selector.adopted_result.adopted_decision,
             adopted_side: allowV2Override ? v2FinalSide : selector.adopted_result.adopted_side,
             adopted_size_usd: allowV2Override ? v2FinalSize : selector.adopted_result.adopted_size_usd,
-            adoption_reason: allowV2Override ? "v2_override_legacy_block" : (allowV2Override === false && v2Mode === "legacy" ? "legacy_mode_forced" : adoption_reason)
+            adoption_reason: allowV2Override ? "v2_override_legacy_block" : adoption_reason
         }
     };
 
@@ -294,7 +294,7 @@ export function resolveSymbolDecisionEnvelope(
         v2_size_valid: v2FinalSize > 0,
         allow_v2_override: allowV2Override,
         final_engine: allowV2Override ? "V2" : selector.adopted_result.engine,
-        final_adoption_reason: allowV2Override ? "v2_override_legacy_block" : (allowV2Override === false && v2Mode === "legacy" ? "legacy_mode_forced" : adoption_reason)
+        final_adoption_reason: allowV2Override ? "v2_override_legacy_block" : adoption_reason
     });
     const authority = deriveExecutionAuthority(refinedSelector);
 
