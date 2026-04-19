@@ -8,6 +8,20 @@ import type {
 
 export type PaperCloseReasonLike = PaperClosedPositionRecord["closeReason"] | string;
 
+/** 디스크·레거시에 남은 Highway 60 EMA 전량 종료 원문 → 표준 closeReason 코드. */
+export function coerceCanonicalPaperCloseReason(closeReason: PaperCloseReasonLike): PaperCloseReasonLike {
+  if (typeof closeReason !== "string") return closeReason;
+  const t = closeReason.trim();
+  if (
+    t === "Highway 60 EMA Breakout (Short)" ||
+    t === "Highway 60 EMA Breakdown (Long)" ||
+    t === "Highway 60 EMA Breakout (Long)"
+  ) {
+    return t.includes("Short") ? "highway_ema60_break_short" : "highway_ema60_break_long";
+  }
+  return closeReason;
+}
+
 export function defaultLabelForExitType(t: PaperExitType): string {
   switch (t) {
     case "EXIT_SL":
@@ -142,7 +156,11 @@ export function derivePaperCloseSource(
       return "SWITCH";
     case "candidate_lost":
       return "SIGNAL_LOST";
+    case "highway_ema60_break_long":
+    case "highway_ema60_break_short":
+      return "TREND_BREAK";
     default:
+      if (exitType !== "EXIT_UNKNOWN") return inferPaperCloseSourceFromExitType(exitType);
       return "UNKNOWN";
   }
 }
@@ -272,7 +290,14 @@ export function paperExitDisplayMeta(
       return { exitType: "EXIT_REGIME_BREAK", closeReasonLabel: "구조적 추세 전환" };
     case "trend_switch":
       return { exitType: "EXIT_TREND_SWITCH", closeReasonLabel: defaultLabelForExitType("EXIT_TREND_SWITCH") };
+    case "highway_ema60_break_long":
+    case "highway_ema60_break_short":
+      return { exitType: "EXIT_REGIME_BREAK", closeReasonLabel: defaultLabelForExitType("EXIT_REGIME_BREAK") };
     default: {
+      const coerced = coerceCanonicalPaperCloseReason(closeReason);
+      if (coerced !== closeReason) {
+        return paperExitDisplayMeta(coerced as PaperClosedPositionRecord["closeReason"]);
+      }
       const raw = typeof closeReason === "string" && closeReason.trim().length > 0 ? closeReason : "unknown";
       return { exitType: "EXIT_UNKNOWN", closeReasonLabel: `미분류 청산 (${raw})` };
     }
@@ -303,12 +328,13 @@ type FinalizeClosedInput = Readonly<{
 /** 모든 종료·부분종료 레코드는 이 함수로 마감해 숫자 NaN → JSON null을 막고 exit 메타를 통일한다. */
 export function finalizePaperClosedRecord(input: FinalizeClosedInput): PaperClosedPositionRecord {
   const m = input.metrics;
-  const fromReason = paperExitDisplayMeta(input.closeReason);
+  const closeReasonNorm = coerceCanonicalPaperCloseReason(input.closeReason);
+  const fromReason = paperExitDisplayMeta(closeReasonNorm);
   const exitType = input.exitTypeOverride ?? fromReason.exitType;
   const closeReasonLabel =
     input.closeReasonLabelOverride ??
     (input.exitTypeOverride != null ? defaultLabelForExitType(input.exitTypeOverride) : fromReason.closeReasonLabel);
-  const closeSource = input.closeSourceOverride ?? derivePaperCloseSource(input.closeReason, exitType);
+  const closeSource = input.closeSourceOverride ?? derivePaperCloseSource(closeReasonNorm, exitType);
   const outcomeStatus = outcomeStatusFromNetPnl(finiteUsd(m.pnlUsdNet));
   const sizeUsd = finiteUsd(input.legMarginUsd);
   const net = finiteUsd(m.pnlUsdNet);
@@ -347,7 +373,7 @@ export function finalizePaperClosedRecord(input: FinalizeClosedInput): PaperClos
     ...(input.latestSnapshotPath ? { latestSnapshotPath: input.latestSnapshotPath } : {}),
     ...(input.latestMetaPath ? { latestMetaPath: input.latestMetaPath } : {}),
     ...(input.timestampSnapshotPath ? { timestampSnapshotPath: input.timestampSnapshotPath } : {}),
-    closeReason: input.closeReason as PaperClosedPositionRecord["closeReason"],
+    closeReason: closeReasonNorm as PaperClosedPositionRecord["closeReason"],
     exitType,
     closeReasonLabel,
     exitReason: closeReasonLabel,

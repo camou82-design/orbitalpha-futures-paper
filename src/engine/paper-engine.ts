@@ -447,7 +447,9 @@ function latestCloseMetaBySymbol(
           cr === "range_box_break" ||
           cr === "range_profit_trail" ||
           cr === "structural_regime_shift" ||
-          cr === "trend_switch"
+          cr === "trend_switch" ||
+          cr === "highway_ema60_break_long" ||
+          cr === "highway_ema60_break_short"
           ? cr
           : undefined;
       const entryStageAtClose = typeof es === "number" && Number.isFinite(es) ? es : undefined;
@@ -490,6 +492,9 @@ function exitFullLogKey(cr: PaperClosedPositionRecord["closeReason"]): string {
       return "exit_full_trend_break";
     case "regime_exit":
       return "exit_full_regime_exit";
+    case "highway_ema60_break_long":
+    case "highway_ema60_break_short":
+      return "exit_full_highway_ema60_regime_break";
     default:
       return "exit_full_other";
   }
@@ -3575,7 +3580,14 @@ export class PaperEngine {
           this.rangeFailCountByKey.set(k, 0);
           this.rangeReopenArmedUntilBySymbol.set(symKey, Date.now() + 15 * 60_000);
         }
-        if (open.regimeAtEntry === "TREND" && (cr === "stop_loss" || cr === "trend_break_exit" || cr === "regime_exit")) {
+        if (
+          open.regimeAtEntry === "TREND" &&
+          (cr === "stop_loss" ||
+            cr === "trend_break_exit" ||
+            cr === "regime_exit" ||
+            cr === "highway_ema60_break_long" ||
+            cr === "highway_ema60_break_short")
+        ) {
           this.trendCooldownUntilBySymbol.set(String(open.symbol), Date.now() + 12 * 60_000);
         }
         continue;

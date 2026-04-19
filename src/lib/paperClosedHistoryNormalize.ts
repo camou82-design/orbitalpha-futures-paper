@@ -1,5 +1,6 @@
 import type { PaperCloseSource, PaperClosedPositionRecord, PaperExitType } from "../models/types";
 import {
+  coerceCanonicalPaperCloseReason,
   defaultLabelForExitType,
   derivePaperCloseSource,
   finiteUsd,
@@ -23,7 +24,9 @@ const VALID_CLOSE_REASONS = new Set<string>([
   "range_box_break",
   "range_profit_trail",
   "structural_regime_shift",
-  "trend_switch"
+  "trend_switch",
+  "highway_ema60_break_long",
+  "highway_ema60_break_short"
 ]);
 
 const VALID_EXIT_TYPES = new Set<PaperExitType>([
@@ -67,8 +70,9 @@ function resolveCloseReasonText(val: unknown): string | null {
   const t = val.trim();
   if (t === "" || t === MISSING) return null;
 
-  if (isPaperCloseReason(t)) {
-    const meta = paperExitDisplayMeta(t);
+  const coerced = coerceCanonicalPaperCloseReason(t as PaperClosedPositionRecord["closeReason"]);
+  if (isPaperCloseReason(coerced)) {
+    const meta = paperExitDisplayMeta(coerced);
     return meta.closeReasonLabel !== MISSING ? meta.closeReasonLabel : null;
   }
   return t;
@@ -97,9 +101,11 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
   const side = (typeof o.side === "string" ? o.side.toLowerCase() : "long") as "long" | "short";
 
   const crRaw = o.closeReason;
-  const meta = isPaperCloseReason(crRaw)
-    ? paperExitDisplayMeta(crRaw)
-    : { exitType: "EXIT_UNKNOWN" as PaperExitType, closeReasonLabel: MISSING };
+  const crNorm = typeof crRaw === "string" ? coerceCanonicalPaperCloseReason(crRaw) : null;
+  const meta =
+    crNorm !== null && isPaperCloseReason(crNorm)
+      ? paperExitDisplayMeta(crNorm)
+      : { exitType: "EXIT_UNKNOWN" as PaperExitType, closeReasonLabel: MISSING };
 
   const exitType = parseExitType(o.exitType, meta.exitType);
 
@@ -126,9 +132,10 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
   const closeReasonLabel = mappedReasonLabel;
   const exitReason = mappedReasonLabel;
 
-  let closeSource: PaperCloseSource = isPaperCloseReason(crRaw)
-    ? derivePaperCloseSource(crRaw, exitType)
-    : inferPaperCloseSourceFromExitType(exitType);
+  let closeSource: PaperCloseSource =
+    crNorm !== null && isPaperCloseReason(crNorm)
+      ? derivePaperCloseSource(crNorm, exitType)
+      : inferPaperCloseSourceFromExitType(exitType);
   if (closeSource === "UNKNOWN") {
     closeSource = inferPaperCloseSourceFromExitType(exitType);
   }
@@ -150,11 +157,12 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
       ? outcomeRaw
       : outcomeStatusFromNetPnl(pnlNet);
 
-  const closeReasonForRecord: PaperClosedPositionRecord["closeReason"] = isPaperCloseReason(crRaw)
-    ? crRaw
-    : typeof crRaw === "string" && crRaw.length > 0
-      ? (crRaw as PaperClosedPositionRecord["closeReason"])
-      : "regime_exit";
+  const closeReasonForRecord: PaperClosedPositionRecord["closeReason"] =
+    crNorm !== null && isPaperCloseReason(crNorm)
+      ? (crNorm as PaperClosedPositionRecord["closeReason"])
+      : typeof crRaw === "string" && crRaw.length > 0
+        ? (crRaw as PaperClosedPositionRecord["closeReason"])
+        : "regime_exit";
 
   const pnlGross =
     parseFinite(o.pnlUsdGross) ??

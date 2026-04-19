@@ -1079,6 +1079,8 @@ export type PaperClosedPositionRecord = Readonly<{
   | "range_profit_trail"
   | "structural_regime_shift"
   | "trend_switch"
+  | "highway_ema60_break_long"
+  | "highway_ema60_break_short"
   | "EXIT_LONG_CRASH_FORCE"
   | "EXIT_LONG_CRASH_REDUCE"
   | "EXIT_SHORT_MOMENTUM_TRAIL"
