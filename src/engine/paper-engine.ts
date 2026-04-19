@@ -2062,18 +2062,15 @@ export class PaperEngine {
     const crashForceClosedKeys = new Set<string>();
     const crashReducedThisTickKeys = new Set<string>();
 
+    /** Issued only immediately after a successful `appendClosed` row with full attestation (never from terminal-dedup shortcut). */
     const openLedgerPruneAuthorizedFlowIds = new Set<string>();
-    const authorizeOpenLedgerPrune = (fid: string, proof: "terminal_dedup_prior_close" | PaperClosedPositionRecord) => {
-      if (proof === "terminal_dedup_prior_close") {
-        openLedgerPruneAuthorizedFlowIds.add(fid);
-        return;
-      }
-      if (!isPaperCloseAttestationComplete(proof)) {
+    const authorizeOpenLedgerPruneAfterAttestedClose = (fid: string, closedRow: PaperClosedPositionRecord) => {
+      if (!isPaperCloseAttestationComplete(closedRow)) {
         this.logger.error("LEDGER_PRUNE_AUTHORIZATION_DENIED_INCOMPLETE_CLOSE_ATTESTATION", {
           flowId: fid,
-          closeReason: proof.closeReason,
-          exitType: proof.exitType,
-          closeSource: proof.closeSource
+          closeReason: closedRow.closeReason,
+          exitType: closedRow.exitType,
+          closeSource: closedRow.closeSource
         });
         return;
       }
@@ -2126,7 +2123,7 @@ export class PaperEngine {
             });
 
             await this.positions.appendClosed(closedRow);
-            authorizeOpenLedgerPrune(`${op.symbol}:${op.side}:${op.openedAt}`, closedRow);
+            authorizeOpenLedgerPruneAfterAttestedClose(`${op.symbol}:${op.side}:${op.openedAt}`, closedRow);
             this.logger.warn("crash_long_defense", { symbol: op.symbol, state: risk.crashState, type: et });
 
             await this.store.appendJsonlLine("reports/events.jsonl", {
@@ -2206,7 +2203,6 @@ export class PaperEngine {
       const flowId = `${openRaw.symbol}:${openRaw.side}:${openRaw.openedAt}`;
 
       if (this.terminalExitConsumedByFlow.has(flowId)) {
-        authorizeOpenLedgerPrune(flowId, "terminal_dedup_prior_close");
         openLedgerPruned = true;
         this.logger.info("EXIT_TERMINAL_DEDUP_PROOF", {
           symbol: openRaw.symbol,
@@ -2464,7 +2460,7 @@ export class PaperEngine {
                 ...snapPaths
               });
               await this.positions.appendClosed(closedRow);
-              authorizeOpenLedgerPrune(flowId, closedRow);
+              authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
               this.rangeReversalExitThisTickBySymbol.set(symKey, {
                 ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
                 range_existing_long_reversal_exit_applied: true
@@ -2552,7 +2548,7 @@ export class PaperEngine {
                 ...snapPaths
               });
               await this.positions.appendClosed(closedRow);
-              authorizeOpenLedgerPrune(flowId, closedRow);
+              authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
               this.rangeReversalExitThisTickBySymbol.set(symKey, {
                 ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
                 range_existing_short_reversal_exit_applied: true
@@ -2751,7 +2747,7 @@ export class PaperEngine {
           confirmedExitType = exitEventJsonlType(crTrail);
           confirmedCloseSource = "range_profit_trail_executor";
           await this.positions.appendClosed(closedRowTrail);
-          authorizeOpenLedgerPrune(flowId, closedRowTrail);
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRowTrail);
           this.lastExitReasonLabel = "수익권 되돌림 추종 청산";
 
           const mappedType = exitEventJsonlType(crTrail);
@@ -2916,7 +2912,7 @@ export class PaperEngine {
               })
               : toClosed(cr, m, open.sizeUsd);
           await this.positions.appendClosed(closedRow);
-          authorizeOpenLedgerPrune(flowId, closedRow);
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
           this.lastExitReasonLabel =
             st.reason === "range_box_break"
               ? "박스 붕괴 청산"
@@ -2976,7 +2972,7 @@ export class PaperEngine {
             ...snapPaths
           });
           await this.positions.appendClosed(closedRow);
-          authorizeOpenLedgerPrune(flowId, closedRow);
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
           this.lastExitReasonLabel = "추세 반대 돌파로 청산";
           this.lastSwitchReasonLabel = trendState.trendSwitchReasonLabel;
           this.trendSwitchTimestampsMs.push(Date.now());
@@ -3064,7 +3060,7 @@ export class PaperEngine {
         confirmedCloseSource = "hard_stop_loss_gate";
         const closedRow = toClosed(cr, m, open.sizeUsd);
         await this.positions.appendClosed(closedRow);
-        authorizeOpenLedgerPrune(flowId, closedRow);
+        authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
         this.lastExitReasonLabel = "손절 청산";
         this.logger.info(exitFullLogKey(cr), {
           ...exitDetailBase(open, m),
@@ -3150,7 +3146,7 @@ export class PaperEngine {
           confirmedCloseSource = "trend_regime_shift_gate";
           const closedRow = toClosed(cr, m, open.sizeUsd);
           await this.positions.appendClosed(closedRow);
-          authorizeOpenLedgerPrune(flowId, closedRow);
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
           this.logger.info(exitFullLogKey(cr), { ...exitDetailBase(open, m), exitReason: cr });
 
           const mappedType = exitEventJsonlType(cr);
@@ -3286,7 +3282,7 @@ export class PaperEngine {
         const exDetail = (exitEval.detail ?? {}) as Record<string, unknown>;
         const closedRow = toClosed(cr, m, open.sizeUsd);
         await this.positions.appendClosed(closedRow);
-        authorizeOpenLedgerPrune(flowId, closedRow);
+        authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
         this.logger.info(exitFullLogKey(cr), {
           ...exitDetailBase(open, m),
           exitReason: cr,
@@ -3521,7 +3517,7 @@ export class PaperEngine {
             ...snapPaths
           });
           await this.positions.appendClosed(closedRow);
-          authorizeOpenLedgerPrune(flowId, closedRow);
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
           this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
             symbol: open.symbol,
             side: open.side,
@@ -3622,7 +3618,7 @@ export class PaperEngine {
       confirmedCloseSource = "candidate_lost_watchdog";
       const closedRow = toClosed(cr, m, open.sizeUsd);
       await this.positions.appendClosed(closedRow);
-      authorizeOpenLedgerPrune(flowId, closedRow);
+      authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
       this.logger.info("paper_position_closed", {
         symbol: open.symbol,
         side: open.side,
@@ -3661,7 +3657,7 @@ export class PaperEngine {
       }
     }
 
-    // OPEN_LEDGER_SAVE_FINAL_GATE: deny open-ledger prune unless flow has terminal-dedup or full-close attestation (finalCloseReason none / empty exit meta => no prune).
+    // OPEN_LEDGER_SAVE_FINAL_GATE: deny open-ledger prune unless this tick's attested close row OR prior terminal-exit registry (set only after appendClosed elsewhere).
     const remainingIdsBeforeFinalGate = new Set(remaining.map((r) => `${r.symbol}:${r.side}:${r.openedAt}`));
     const rescuedForUnauthorizedLedgerPrune: Array<{
       flowId: string;
@@ -3672,7 +3668,9 @@ export class PaperEngine {
     for (const o of opens) {
       const fid = `${o.symbol}:${o.side}:${o.openedAt}`;
       if (remainingIdsBeforeFinalGate.has(fid)) continue;
-      if (openLedgerPruneAuthorizedFlowIds.has(fid)) continue;
+      const ledgerPruneAllowed =
+        openLedgerPruneAuthorizedFlowIds.has(fid) || this.terminalExitConsumedByFlow.has(fid);
+      if (ledgerPruneAllowed) continue;
       remaining.push(o);
       rescuedForUnauthorizedLedgerPrune.push({
         flowId: fid,
@@ -3692,6 +3690,7 @@ export class PaperEngine {
     this.logger.info("FINAL_CLOSE_CONFIRMATION_PROOF", {
       phase: "open_ledger_save_final_gate",
       prune_authorized_flow_ids: openLedgerPruneAuthorizedFlowIds.size,
+      prune_auth_issued_only_after_attested_close_record: true,
       unauthorized_prune_rescues: rescuedForUnauthorizedLedgerPrune.length,
       final_gate_ok: rescuedForUnauthorizedLedgerPrune.length === 0
     });
