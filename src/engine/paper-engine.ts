@@ -144,6 +144,9 @@ const DEFAULT_PAPER_SIZE_USD = 100;
 const SAME_DIR_REENTRY_COOLDOWN_MULT = 1.35;
 const RANGE_REVERSAL_SWITCH_PENDING_MS = 90_000;
 
+/** 진입 직후 entry identity 레인 유지: 장세·레인 전환성 전량 청산만 이 구간에서 금지(손절·노출 한도 등은 허용). */
+const ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS = 120_000;
+
 /** RANGE 캠페인: 심볼 1회전당 총 배정의 80%만 사용(초기 40% + 추가 40%, 보류 20%). */
 const RANGE_CAMPAIGN_TOTAL_RATIO = 0.8;
 const RANGE_INITIAL_RATIO = 0.4;
@@ -1974,6 +1977,32 @@ export class PaperEngine {
     );
   }
 
+  private isEntryPostOpenRegimeLaneProtectActive(openedAt: number, evalAtMs: number): boolean {
+    const elapsed = evalAtMs - openedAt;
+    return elapsed >= 0 && elapsed < ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS;
+  }
+
+  /** true → 전량 청산을 이번 틱에서 하지 않고 유지(장세/레인 전환성). 손절·리스크 한도 등은 호출부에서 별도 허용. */
+  private shouldDeferRegimeLaneTransitionClose(
+    open: PaperOpenPositionRecord,
+    evalAtMs: number,
+    closeReason: PaperClosedPositionRecord["closeReason"]
+  ): boolean {
+    if (!this.isEntryPostOpenRegimeLaneProtectActive(open.openedAt, evalAtMs)) return false;
+    switch (closeReason) {
+      case "regime_exit":
+      case "structural_regime_shift":
+      case "range_box_break":
+      case "range_profit_trail":
+      case "trend_break_exit":
+      case "candidate_lost":
+      case "trend_switch":
+        return true;
+      default:
+        return false;
+    }
+  }
+
   /**
    * RANGE 구간·반전 스위치·적응형까지 한 틱에서 추적(상단 롱 편향·숏 미체결 원인 증명용).
    */
@@ -2453,6 +2482,22 @@ export class PaperEngine {
                 continue;
               }
 
+              if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "regime_exit")) {
+                this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
+                  symbol: open.symbol,
+                  side: open.side,
+                  flowId,
+                  openedAt: open.openedAt,
+                  eval_at_ms: closedAt,
+                  elapsed_ms: closedAt - open.openedAt,
+                  protect_window_ms: ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS,
+                  deferred_close_reason: "regime_exit",
+                  lane: "range_long_upper_reversal"
+                });
+                remaining.push(open);
+                continue;
+              }
+
               const cr = "regime_exit" as const;
               finalCloseReason = cr;
               confirmedExitType = exitEventJsonlType(cr);
@@ -2537,6 +2582,22 @@ export class PaperEngine {
               if (blockedByExecutorMismatch) {
                 this.logger.info("REGIME_EXIT_GUARD_BLOCKED", { symbol: open.symbol, reason: "executor_mismatch_v2_protection", lane: "range_short_lower_reversal" });
                 finalCloseReason = "none";
+                remaining.push(open);
+                continue;
+              }
+
+              if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "regime_exit")) {
+                this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
+                  symbol: open.symbol,
+                  side: open.side,
+                  flowId,
+                  openedAt: open.openedAt,
+                  eval_at_ms: closedAt,
+                  elapsed_ms: closedAt - open.openedAt,
+                  protect_window_ms: ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS,
+                  deferred_close_reason: "regime_exit",
+                  lane: "range_short_lower_reversal"
+                });
                 remaining.push(open);
                 continue;
               }
@@ -2724,6 +2785,21 @@ export class PaperEngine {
         }
 
         if (trailStep.trailExit) {
+          if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "range_profit_trail")) {
+            this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
+              symbol: open.symbol,
+              side: open.side,
+              flowId,
+              openedAt: open.openedAt,
+              eval_at_ms: closedAt,
+              elapsed_ms: closedAt - open.openedAt,
+              protect_window_ms: ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS,
+              deferred_close_reason: "range_profit_trail",
+              lane: "range_profit_trail"
+            });
+            remaining.push(posTrail);
+            continue;
+          }
           this.rangeBoxBreakConsecutiveBySymbol.delete(rebalanceTickKey);
           const crTrail = "range_profit_trail" as const;
           const closedRowTrail = finalizePaperClosedRecord({
@@ -2887,6 +2963,26 @@ export class PaperEngine {
           if (st.reason === "structural_regime_shift") cr = "structural_regime_shift";
           if (st.reason === "risk_exposure_breach") cr = "regime_exit";
 
+          if (
+            st.reason !== "risk_exposure_breach" &&
+            this.isEntryPostOpenRegimeLaneProtectActive(open.openedAt, closedAt)
+          ) {
+            this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
+              symbol: open.symbol,
+              side: open.side,
+              flowId,
+              openedAt: open.openedAt,
+              eval_at_ms: closedAt,
+              elapsed_ms: closedAt - open.openedAt,
+              protect_window_ms: ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS,
+              deferred_close_reason: cr,
+              structural_reason: st.reason,
+              lane: "range_structural_exit"
+            });
+            remaining.push(posTrail);
+            continue;
+          }
+
           this.logger.info("REGIME_EXIT_GUARD_PROOF", {
             symbol: open.symbol,
             side: open.side,
@@ -2966,6 +3062,21 @@ export class PaperEngine {
       if (regimeAtEntry === "TREND" && trendState) {
         const plan = planTrendSwitch(trendState, open.side);
         if (plan.execute && plan.openSide && plan.closeSide) {
+          if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "trend_switch")) {
+            this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
+              symbol: open.symbol,
+              side: open.side,
+              flowId,
+              openedAt: open.openedAt,
+              eval_at_ms: closedAt,
+              elapsed_ms: closedAt - open.openedAt,
+              protect_window_ms: ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS,
+              deferred_close_reason: "trend_switch",
+              lane: "trend_engine_switch"
+            });
+            remaining.push(open);
+            continue;
+          }
           const cr = "trend_switch" as const;
           finalCloseReason = cr;
           confirmedExitType = "EXIT_TREND_SWITCH";
@@ -3152,6 +3263,21 @@ export class PaperEngine {
       if (regimeAtEntry === "TREND") {
         const trendOkNow = snap.trendOk === true;
         if (regimeNow !== "TREND" || !trendOkNow) {
+          if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "trend_break_exit")) {
+            this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
+              symbol: open.symbol,
+              side: open.side,
+              flowId,
+              openedAt: open.openedAt,
+              eval_at_ms: closedAt,
+              elapsed_ms: closedAt - open.openedAt,
+              protect_window_ms: ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS,
+              deferred_close_reason: "trend_break_exit",
+              lane: "trend_regime_shift_gate"
+            });
+            remaining.push(open);
+            continue;
+          }
           const cr = "trend_break_exit" as const;
           finalCloseReason = cr;
           confirmedExitType = "EXIT_TREND_BREAK";
@@ -3288,6 +3414,21 @@ export class PaperEngine {
 
       if (exitEval.action === "close") {
         const cr = exitEval.reason as PaperClosedPositionRecord["closeReason"];
+        if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, cr)) {
+          this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
+            symbol: open.symbol,
+            side: open.side,
+            flowId,
+            openedAt: open.openedAt,
+            eval_at_ms: closedAt,
+            elapsed_ms: closedAt - open.openedAt,
+            protect_window_ms: ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS,
+            deferred_close_reason: cr,
+            lane: "executor_close_action"
+          });
+          remaining.push(open);
+          continue;
+        }
         finalCloseReason = cr;
         confirmedExitType = exitEventJsonlType(cr);
         confirmedCloseSource = "executor_close_action";
@@ -3507,6 +3648,21 @@ export class PaperEngine {
             remaining.push(posTrail);
             continue;
           }
+          if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "regime_exit")) {
+            this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
+              symbol: open.symbol,
+              side: open.side,
+              flowId,
+              openedAt: open.openedAt,
+              eval_at_ms: closedAt,
+              elapsed_ms: closedAt - open.openedAt,
+              protect_window_ms: ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS,
+              deferred_close_reason: "regime_exit",
+              lane: "range_safety_net_misaligned"
+            });
+            remaining.push(posTrail);
+            continue;
+          }
           finalCloseReason = cr;
           confirmedExitType = exitEventJsonlType(cr);
           confirmedCloseSource = "range_misaligned_safety_net";
@@ -3620,6 +3776,22 @@ export class PaperEngine {
       const minLostStreak = 1;
 
       if (m.holdingMs < minHoldMsEff) {
+        remaining.push({ ...posTrail, candidateLostStreak: 0 });
+        continue;
+      }
+
+      if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "candidate_lost")) {
+        this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          openedAt: open.openedAt,
+          eval_at_ms: closedAt,
+          elapsed_ms: closedAt - open.openedAt,
+          protect_window_ms: ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS,
+          deferred_close_reason: "candidate_lost",
+          lane: "candidate_lost_watchdog"
+        });
         remaining.push({ ...posTrail, candidateLostStreak: 0 });
         continue;
       }
