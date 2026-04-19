@@ -3977,19 +3977,32 @@ export class PaperEngine {
       return legacyAdaptive;
     }
 
-    // Build synthetic fallback bridge for V2 or missing results
+    let bridgeSizeUsd = sizeUsd;
+    if (
+      legacyAdaptive &&
+      legacyAdaptive.direction === side &&
+      typeof legacyAdaptive.sizeUsd === "number" &&
+      Number.isFinite(legacyAdaptive.sizeUsd) &&
+      legacyAdaptive.sizeUsd > 0
+    ) {
+      bridgeSizeUsd = legacyAdaptive.sizeUsd;
+    }
+    if (bridgeSizeUsd <= 0) return null;
+
+    // Build synthetic fallback bridge for V2 or missing results (execution size follows legacy adaptive when side matches)
     return {
       ok: true,
       direction: side as "long" | "short",
-      sizeUsd: sizeUsd,
+      sizeUsd: bridgeSizeUsd,
       leverageMultiplier: 1.0,
       detail: {
         source: "v2_authority_execution_bridge",
         bridge_activated: true,
         authority_source: authority.source,
         authority_side: side,
-        authority_size_usd: sizeUsd,
-        finalSizeUsd: sizeUsd,
+        authority_selector_size_usd: sizeUsd,
+        authority_size_usd: bridgeSizeUsd,
+        finalSizeUsd: bridgeSizeUsd,
         confidence_score: 1.0,
         confidence_tier: "top",
         size_multiplier: 1.0
@@ -4077,7 +4090,8 @@ export class PaperEngine {
         authority_decision: authority.decision,
         authority_source: authority.source,
         authority_side: authority.side,
-        authority_size_usd: authority.sizeUsd ?? 0,
+        authority_selector_size_usd: authority.sizeUsd ?? 0,
+        authority_size_usd: effectiveAdaptiveResult.sizeUsd,
         authority_owns_execution: authority.source === "v2",
         legacy_adaptive_present: res.adaptiveResult != null,
         effective_adaptive_present: effectiveAdaptiveResult != null
@@ -4339,6 +4353,73 @@ export class PaperEngine {
         this.logger.info("position_size_reduced_risk_off", { symbol: first.symbol, finalPositionSize: adaptive.sizeUsd });
       }
 
+      const liveRegimeForEntryIdentity = (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as PaperRegimeState;
+      const entryIdentity = this.resolveEntryIdentity(authority, decision, liveRegimeForEntryIdentity);
+      const isRangeCampaignNewEntry =
+        entryIdentity.effectiveExecutorAtEntry === "RANGE" && entryIdentity.effectiveRegimeAtEntry === "RANGE";
+
+      const riskE = this.lastRiskExposure;
+      const adaptiveSizeUsdBefore = adaptive.sizeUsd;
+      let entrySizeUsd = adaptive.sizeUsd;
+      if (!isRangeCampaignNewEntry && riskE) {
+        entrySizeUsd = Math.max(
+          MIN_POSITION_SIZE_USD,
+          Math.round(adaptive.sizeUsd * riskE.sizeMultiplier * 100) / 100
+        );
+      }
+      const symS = String(first.symbol);
+      if (!isRangeCampaignNewEntry && this.lastMarketMode?.routing.activeEngine === "TREND") {
+        const pyr = this.trendPyramidLevelBySymbol.get(symS) ?? 0;
+        entrySizeUsd = Math.max(
+          MIN_POSITION_SIZE_USD,
+          Math.round(entrySizeUsd * (1 + Math.min(4, pyr) * 0.07) * 100) / 100
+        );
+      }
+      if (!isRangeCampaignNewEntry && this.lastMarketMode?.routing.activeEngine === "RANGE") {
+        const rSt = this.lastTickRangeEvalBySymbol.get(symS);
+        if (rSt) {
+          const cycleM = rangeCycleSizePolicy(rSt.rangeCycleCount, rSt.hedgeBalance);
+          const legM = rangeLadderLegMultiplier(rSt.rangeLadderLevel, rSt.hedgeBalance);
+          const recM = rangeAccumulationRecoveryMultiplier(rSt.hedgeBalance, adaptive.direction, rSt.rangeCycleCount);
+          entrySizeUsd = Math.max(
+            MIN_POSITION_SIZE_USD,
+            Math.round(entrySizeUsd * cycleM * legM * recM * 100) / 100
+          );
+        }
+      }
+      if (isRangeCampaignNewEntry) {
+        const paperBase = this.config.paperBaseSizeUsd;
+        const campaignTotalUsd = paperBase * RANGE_CAMPAIGN_TOTAL_RATIO;
+        const campaignInitialUsd = paperBase * RANGE_INITIAL_RATIO;
+        const campaignAddOnUsd = paperBase * RANGE_ADD_ON_RATIO;
+        const campaignReserveUsd = paperBase * RANGE_RESERVE_RATIO;
+        const riskM = riskE?.sizeMultiplier ?? 1;
+        const plannedInitialUsd = paperBase * RANGE_INITIAL_RATIO;
+        const riskScaledInitialUsd = plannedInitialUsd * riskM;
+        entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(riskScaledInitialUsd * 100) / 100);
+        this.logger.info("RANGE_CAMPAIGN_SIZING_PROOF", {
+          symbol: first.symbol,
+          side: authority.side,
+          regime: entryIdentity.effectiveRegimeAtEntry,
+          executor: entryIdentity.effectiveExecutorAtEntry,
+          paper_base_size_usd: paperBase,
+          campaign_total_usd: campaignTotalUsd,
+          campaign_initial_usd: campaignInitialUsd,
+          campaign_add_on_usd: campaignAddOnUsd,
+          campaign_reserve_usd: campaignReserveUsd,
+          risk_size_multiplier: riskM,
+          final_applied_size_usd: entrySizeUsd,
+          path: "new_entry" as const
+        });
+        this.logger.info("RANGE_SIZE_OVERRIDE_PROOF", {
+          symbol: first.symbol,
+          adaptive_size_usd_before: adaptiveSizeUsdBefore,
+          final_range_campaign_size_usd_after: entrySizeUsd,
+          override_applied: true,
+          reason: "range_campaign_normalization"
+        });
+      }
+
       let positionOpenTraceRef: MutablePositionOpenTrace | null = null;
       try {
         const openTraceId = randomUUID();
@@ -4386,77 +4467,11 @@ export class PaperEngine {
           open_trace_id: openTraceId,
           sample_symbol_btc_eth: sampleBtcEth,
           symbol: first.symbol,
-          side: authority.side as "long" | "short", // Authority
-          sizeUsd: adaptive.sizeUsd,
-          ...buildAuthorityEventMeta(authority)
+          side: authority.side as "long" | "short",
+          sizeUsd: entrySizeUsd,
+          ...buildAuthorityEventMeta(authority, entrySizeUsd)
         });
 
-        const liveRegimeForEntryIdentity = (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as PaperRegimeState;
-        const entryIdentity = this.resolveEntryIdentity(authority, decision, liveRegimeForEntryIdentity);
-        const isRangeCampaignNewEntry =
-          entryIdentity.effectiveExecutorAtEntry === "RANGE" && entryIdentity.effectiveRegimeAtEntry === "RANGE";
-
-        const riskE = this.lastRiskExposure;
-        const adaptiveSizeUsdBefore = adaptive.sizeUsd;
-        let entrySizeUsd = adaptive.sizeUsd;
-        if (!isRangeCampaignNewEntry && riskE) {
-          entrySizeUsd = Math.max(
-            MIN_POSITION_SIZE_USD,
-            Math.round(adaptive.sizeUsd * riskE.sizeMultiplier * 100) / 100
-          );
-        }
-        const symS = String(first.symbol);
-        if (!isRangeCampaignNewEntry && this.lastMarketMode?.routing.activeEngine === "TREND") {
-          const pyr = this.trendPyramidLevelBySymbol.get(symS) ?? 0;
-          entrySizeUsd = Math.max(
-            MIN_POSITION_SIZE_USD,
-            Math.round(entrySizeUsd * (1 + Math.min(4, pyr) * 0.07) * 100) / 100
-          );
-        }
-        if (!isRangeCampaignNewEntry && this.lastMarketMode?.routing.activeEngine === "RANGE") {
-          const rSt = this.lastTickRangeEvalBySymbol.get(symS);
-          if (rSt) {
-            const cycleM = rangeCycleSizePolicy(rSt.rangeCycleCount, rSt.hedgeBalance);
-            const legM = rangeLadderLegMultiplier(rSt.rangeLadderLevel, rSt.hedgeBalance);
-            const recM = rangeAccumulationRecoveryMultiplier(rSt.hedgeBalance, adaptive.direction, rSt.rangeCycleCount);
-            entrySizeUsd = Math.max(
-              MIN_POSITION_SIZE_USD,
-              Math.round(entrySizeUsd * cycleM * legM * recM * 100) / 100
-            );
-          }
-        }
-        if (isRangeCampaignNewEntry) {
-          const paperBase = this.config.paperBaseSizeUsd;
-          const campaignTotalUsd = paperBase * RANGE_CAMPAIGN_TOTAL_RATIO;
-          const campaignInitialUsd = paperBase * RANGE_INITIAL_RATIO;
-          const campaignAddOnUsd = paperBase * RANGE_ADD_ON_RATIO;
-          const campaignReserveUsd = paperBase * RANGE_RESERVE_RATIO;
-          const riskM = riskE?.sizeMultiplier ?? 1;
-          const plannedInitialUsd = paperBase * RANGE_INITIAL_RATIO;
-          const riskScaledInitialUsd = plannedInitialUsd * riskM;
-          entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(riskScaledInitialUsd * 100) / 100);
-          this.logger.info("RANGE_CAMPAIGN_SIZING_PROOF", {
-            symbol: first.symbol,
-            side: authority.side,
-            regime: entryIdentity.effectiveRegimeAtEntry,
-            executor: entryIdentity.effectiveExecutorAtEntry,
-            paper_base_size_usd: paperBase,
-            campaign_total_usd: campaignTotalUsd,
-            campaign_initial_usd: campaignInitialUsd,
-            campaign_add_on_usd: campaignAddOnUsd,
-            campaign_reserve_usd: campaignReserveUsd,
-            risk_size_multiplier: riskM,
-            final_applied_size_usd: entrySizeUsd,
-            path: "new_entry" as const
-          });
-          this.logger.info("RANGE_SIZE_OVERRIDE_PROOF", {
-            symbol: first.symbol,
-            adaptive_size_usd_before: adaptiveSizeUsdBefore,
-            final_range_campaign_size_usd_after: entrySizeUsd,
-            override_applied: true,
-            reason: "range_campaign_normalization"
-          });
-        }
         const mPre = marginsForSymbol(next, symS);
         if (
           riskE &&
@@ -4665,7 +4680,7 @@ export class PaperEngine {
           regimeAtEntry: entryIdentity.effectiveRegimeAtEntry as any,
           executorAtEntry: entryIdentity.effectiveExecutorAtEntry,
           ...(typeof decision.expected_move === "number" ? { expectedMoveAtEntry: decision.expected_move } : {}),
-          ...(typeof authority.sizeUsd === "number" ? { totalCostAtEntry: authority.sizeUsd } : {}),
+          ...(Number.isFinite(entrySizeUsd) && entrySizeUsd > 0 ? { totalCostAtEntry: entrySizeUsd } : {}),
           ...(confScore !== undefined ? { entryConfidenceScore: confScore } : {}),
           ...(confTier !== undefined ? { entryConfidenceTier: confTier } : {}),
           ...(confTier !== undefined ? { entrySizeMultiplier: sizeMult } : {}),
@@ -4777,11 +4792,12 @@ export class PaperEngine {
           stage1_result_code: res.decision.stage1_result_code,
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
           expected_move_usd: res.decision.expected_move_usd ?? null,
-          required_cost_usd: authority.sizeUsd,
+          required_cost_usd: entrySizeUsd,
           shortfall_usd: res.decision.shortfall_usd ?? 0,
           executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
           stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
-          stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null
+          stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null,
+          ...buildAuthorityEventMeta(authority, entrySizeUsd)
         });
 
         const entryOpenedKey = record.side === "long" ? "entry_long_opened" : "entry_short_opened";
@@ -4796,7 +4812,9 @@ export class PaperEngine {
           confidenceScore: confScore,
           confidenceTier: confTier,
           sizeMultiplier: sizeMult,
-          entry_pipeline: adaptive.detail
+          entry_pipeline: adaptive.detail,
+          total_cost_at_entry: record.totalCostAtEntry ?? null,
+          ...buildAuthorityEventMeta(authority, entrySizeUsd)
         });
         this.logger.info("paper_position_opened", {
           open_trace_id: trace.open_trace_id,
@@ -4812,7 +4830,10 @@ export class PaperEngine {
           stored_position: "queued_in_memory_before_saveOpenAll",
           symbol: record.symbol,
           side: record.side,
-          path: "positions/open.json"
+          path: "positions/open.json",
+          size_usd: record.sizeUsd,
+          total_cost_at_entry: record.totalCostAtEntry ?? null,
+          ...buildAuthorityEventMeta(authority, entrySizeUsd)
         });
         try {
           await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(sym, authority, record));
@@ -4854,14 +4875,14 @@ export class PaperEngine {
           stage1_result_code: res.decision.stage1_result_code,
           fixed_total_cost_usd: res.decision.fixed_total_cost_usd ?? null,
           expected_move_usd: res.decision.expected_move_usd ?? null,
-          required_cost_usd: authority.sizeUsd,
+          required_cost_usd: entrySizeUsd,
           shortfall_usd: res.decision.shortfall_usd ?? 0,
           final_fail_reason: msg,
           reviewing_ticks: res.decision.reviewing_ticks,
           auto_entry_triggered: res.decision.auto_entry_triggered,
           required_move_pct: res.decision.required_move_pct,
           shortfall_pct: res.decision.shortfall_pct,
-          ...buildAuthorityEventMeta(authority)
+          ...buildAuthorityEventMeta(authority, entrySizeUsd)
         });
       }
     }
@@ -5569,11 +5590,19 @@ function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): 
 /**
  * AUTHORITY EVENT METADATA HELPER (Phase 3)
  */
-function buildAuthorityEventMeta(authority: EntryExecutionAuthority): Record<string, unknown> {
+function buildAuthorityEventMeta(
+  authority: EntryExecutionAuthority,
+  executedEntrySizeUsd?: number | null
+): Record<string, unknown> {
+  const useExecuted =
+    authority.decision === "ENTER" &&
+    typeof executedEntrySizeUsd === "number" &&
+    Number.isFinite(executedEntrySizeUsd) &&
+    executedEntrySizeUsd > 0;
   return {
     authority_decision: authority.decision,
     authority_side: authority.side,
-    authority_size_usd: authority.decision === "ENTER" ? authority.sizeUsd : 0,
+    authority_size_usd: useExecuted ? executedEntrySizeUsd : authority.decision === "ENTER" ? authority.sizeUsd : 0,
     authority_source: authority.source,
     authority_regime: authority.regime
   };
@@ -5679,7 +5708,7 @@ function buildEntryOpenedEventPayload(
     entry_stage: pos.entryStage,
     stop_price: pos.stopPrice ?? null,
     ...buildPositionIdentityMeta(pos),
-    ...buildAuthorityEventMeta(authority)
+    ...buildAuthorityEventMeta(authority, pos.sizeUsd)
   };
 }
 function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapshot {
