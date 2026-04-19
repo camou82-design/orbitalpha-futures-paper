@@ -654,6 +654,19 @@ function normalizeRangeManagementState(
   return { normalized, changed };
 }
 
+/** Required fields before an open-ledger row may be pruned (OPEN_LEDGER_SAVE_FINAL_GATE). */
+function isPaperCloseAttestationComplete(
+  row: Pick<PaperClosedPositionRecord, "closeReason" | "exitType" | "closeSource">
+): boolean {
+  const cr = row.closeReason as string | undefined;
+  if (cr == null || cr === "" || (cr as string) === "none") return false;
+  const et = row.exitType as string | undefined;
+  const cs = row.closeSource as string | undefined;
+  if (et == null || String(et).trim() === "") return false;
+  if (cs == null || String(cs).trim() === "") return false;
+  return true;
+}
+
 export class PaperEngine {
   private readonly store: JsonStore;
   private readonly bybit: BybitPublicClient;
@@ -2049,6 +2062,24 @@ export class PaperEngine {
     const crashForceClosedKeys = new Set<string>();
     const crashReducedThisTickKeys = new Set<string>();
 
+    const openLedgerPruneAuthorizedFlowIds = new Set<string>();
+    const authorizeOpenLedgerPrune = (fid: string, proof: "terminal_dedup_prior_close" | PaperClosedPositionRecord) => {
+      if (proof === "terminal_dedup_prior_close") {
+        openLedgerPruneAuthorizedFlowIds.add(fid);
+        return;
+      }
+      if (!isPaperCloseAttestationComplete(proof)) {
+        this.logger.error("LEDGER_PRUNE_AUTHORIZATION_DENIED_INCOMPLETE_CLOSE_ATTESTATION", {
+          flowId: fid,
+          closeReason: proof.closeReason,
+          exitType: proof.exitType,
+          closeSource: proof.closeSource
+        });
+        return;
+      }
+      openLedgerPruneAuthorizedFlowIds.add(fid);
+    };
+
     // --- ASYMMETRIC CRASH RISK LAYER ---
     const risk = this.lastRisk;
     if (risk && risk.crashState !== "NONE") {
@@ -2095,6 +2126,7 @@ export class PaperEngine {
             });
 
             await this.positions.appendClosed(closedRow);
+            authorizeOpenLedgerPrune(`${op.symbol}:${op.side}:${op.openedAt}`, closedRow);
             this.logger.warn("crash_long_defense", { symbol: op.symbol, state: risk.crashState, type: et });
 
             await this.store.appendJsonlLine("reports/events.jsonl", {
@@ -2130,7 +2162,7 @@ export class PaperEngine {
     }
     // ------------------------------------
 
-    const remaining: PaperOpenPositionRecord[] = [];
+    let remaining: PaperOpenPositionRecord[] = [];
     const stopBackfillSaveExpectations: Array<{
       flowId: string;
       symbol: string;
@@ -2174,6 +2206,7 @@ export class PaperEngine {
       const flowId = `${openRaw.symbol}:${openRaw.side}:${openRaw.openedAt}`;
 
       if (this.terminalExitConsumedByFlow.has(flowId)) {
+        authorizeOpenLedgerPrune(flowId, "terminal_dedup_prior_close");
         openLedgerPruned = true;
         this.logger.info("EXIT_TERMINAL_DEDUP_PROOF", {
           symbol: openRaw.symbol,
@@ -2431,6 +2464,7 @@ export class PaperEngine {
                 ...snapPaths
               });
               await this.positions.appendClosed(closedRow);
+              authorizeOpenLedgerPrune(flowId, closedRow);
               this.rangeReversalExitThisTickBySymbol.set(symKey, {
                 ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
                 range_existing_long_reversal_exit_applied: true
@@ -2518,6 +2552,7 @@ export class PaperEngine {
                 ...snapPaths
               });
               await this.positions.appendClosed(closedRow);
+              authorizeOpenLedgerPrune(flowId, closedRow);
               this.rangeReversalExitThisTickBySymbol.set(symKey, {
                 ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
                 range_existing_short_reversal_exit_applied: true
@@ -2716,6 +2751,7 @@ export class PaperEngine {
           confirmedExitType = exitEventJsonlType(crTrail);
           confirmedCloseSource = "range_profit_trail_executor";
           await this.positions.appendClosed(closedRowTrail);
+          authorizeOpenLedgerPrune(flowId, closedRowTrail);
           this.lastExitReasonLabel = "수익권 되돌림 추종 청산";
 
           const mappedType = exitEventJsonlType(crTrail);
@@ -2880,6 +2916,7 @@ export class PaperEngine {
               })
               : toClosed(cr, m, open.sizeUsd);
           await this.positions.appendClosed(closedRow);
+          authorizeOpenLedgerPrune(flowId, closedRow);
           this.lastExitReasonLabel =
             st.reason === "range_box_break"
               ? "박스 붕괴 청산"
@@ -2939,6 +2976,7 @@ export class PaperEngine {
             ...snapPaths
           });
           await this.positions.appendClosed(closedRow);
+          authorizeOpenLedgerPrune(flowId, closedRow);
           this.lastExitReasonLabel = "추세 반대 돌파로 청산";
           this.lastSwitchReasonLabel = trendState.trendSwitchReasonLabel;
           this.trendSwitchTimestampsMs.push(Date.now());
@@ -3026,6 +3064,7 @@ export class PaperEngine {
         confirmedCloseSource = "hard_stop_loss_gate";
         const closedRow = toClosed(cr, m, open.sizeUsd);
         await this.positions.appendClosed(closedRow);
+        authorizeOpenLedgerPrune(flowId, closedRow);
         this.lastExitReasonLabel = "손절 청산";
         this.logger.info(exitFullLogKey(cr), {
           ...exitDetailBase(open, m),
@@ -3111,6 +3150,7 @@ export class PaperEngine {
           confirmedCloseSource = "trend_regime_shift_gate";
           const closedRow = toClosed(cr, m, open.sizeUsd);
           await this.positions.appendClosed(closedRow);
+          authorizeOpenLedgerPrune(flowId, closedRow);
           this.logger.info(exitFullLogKey(cr), { ...exitDetailBase(open, m), exitReason: cr });
 
           const mappedType = exitEventJsonlType(cr);
@@ -3246,6 +3286,7 @@ export class PaperEngine {
         const exDetail = (exitEval.detail ?? {}) as Record<string, unknown>;
         const closedRow = toClosed(cr, m, open.sizeUsd);
         await this.positions.appendClosed(closedRow);
+        authorizeOpenLedgerPrune(flowId, closedRow);
         this.logger.info(exitFullLogKey(cr), {
           ...exitDetailBase(open, m),
           exitReason: cr,
@@ -3480,6 +3521,7 @@ export class PaperEngine {
             ...snapPaths
           });
           await this.positions.appendClosed(closedRow);
+          authorizeOpenLedgerPrune(flowId, closedRow);
           this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
             symbol: open.symbol,
             side: open.side,
@@ -3580,6 +3622,7 @@ export class PaperEngine {
       confirmedCloseSource = "candidate_lost_watchdog";
       const closedRow = toClosed(cr, m, open.sizeUsd);
       await this.positions.appendClosed(closedRow);
+      authorizeOpenLedgerPrune(flowId, closedRow);
       this.logger.info("paper_position_closed", {
         symbol: open.symbol,
         side: open.side,
@@ -3617,6 +3660,41 @@ export class PaperEngine {
         remaining.push(posTrail);
       }
     }
+
+    // OPEN_LEDGER_SAVE_FINAL_GATE: deny open-ledger prune unless flow has terminal-dedup or full-close attestation (finalCloseReason none / empty exit meta => no prune).
+    const remainingIdsBeforeFinalGate = new Set(remaining.map((r) => `${r.symbol}:${r.side}:${r.openedAt}`));
+    const rescuedForUnauthorizedLedgerPrune: Array<{
+      flowId: string;
+      symbol: string;
+      side: string;
+      openedAt: number;
+    }> = [];
+    for (const o of opens) {
+      const fid = `${o.symbol}:${o.side}:${o.openedAt}`;
+      if (remainingIdsBeforeFinalGate.has(fid)) continue;
+      if (openLedgerPruneAuthorizedFlowIds.has(fid)) continue;
+      remaining.push(o);
+      rescuedForUnauthorizedLedgerPrune.push({
+        flowId: fid,
+        symbol: String(o.symbol),
+        side: o.side,
+        openedAt: o.openedAt
+      });
+    }
+    if (rescuedForUnauthorizedLedgerPrune.length > 0) {
+      this.logger.warn("OPEN_LEDGER_REMOVAL_BLOCKED_RESCUED", {
+        gate: "OPEN_LEDGER_SAVE_FINAL_GATE",
+        finalCloseReason_none_ledger_prune_denied: true,
+        rescued_flows: rescuedForUnauthorizedLedgerPrune
+      });
+    }
+
+    this.logger.info("FINAL_CLOSE_CONFIRMATION_PROOF", {
+      phase: "open_ledger_save_final_gate",
+      prune_authorized_flow_ids: openLedgerPruneAuthorizedFlowIds.size,
+      unauthorized_prune_rescues: rescuedForUnauthorizedLedgerPrune.length,
+      final_gate_ok: rescuedForUnauthorizedLedgerPrune.length === 0
+    });
 
     const remainingIds = new Set(remaining.map((r) => `${r.symbol}:${r.side}:${r.openedAt}`));
     const removedFlows = opens
