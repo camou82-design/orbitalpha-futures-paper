@@ -1924,20 +1924,31 @@ export class PaperEngine {
         ? "paper_long_candidate"
         : "paper_short_candidate";
 
-    const effectiveExecutorAtEntry =
-      decision.executor === "TREND"
-        ? "TREND"
-        : decision.executor === "RANGE"
-          ? "RANGE"
-          : "IDLE";
+    const authReg = String(authority.regime ?? "").trim().toUpperCase();
 
-    // TREND executor면 무조건 TREND regime으로 저장 (구조적 충돌 방지)
-    const effectiveRegimeAtEntryCandidate: PaperRegimeState =
-      effectiveExecutorAtEntry === "TREND"
-        ? "TREND"
-        : effectiveExecutorAtEntry === "RANGE"
-          ? "RANGE"
-          : liveRegime;
+    let effectiveExecutorAtEntry: "RANGE" | "TREND" | "IDLE";
+    let effectiveRegimeAtEntryCandidate: PaperRegimeState;
+
+    if (authReg === "RANGE") {
+      effectiveExecutorAtEntry = "RANGE";
+      effectiveRegimeAtEntryCandidate = "RANGE";
+    } else if (authReg === "TREND") {
+      effectiveExecutorAtEntry = "TREND";
+      effectiveRegimeAtEntryCandidate = "TREND";
+    } else {
+      effectiveExecutorAtEntry =
+        decision.executor === "TREND"
+          ? "TREND"
+          : decision.executor === "RANGE"
+            ? "RANGE"
+            : "IDLE";
+      effectiveRegimeAtEntryCandidate =
+        effectiveExecutorAtEntry === "TREND"
+          ? "TREND"
+          : effectiveExecutorAtEntry === "RANGE"
+            ? "RANGE"
+            : liveRegime;
+    }
 
     const normalizedRegimeAtEntry: any =
       effectiveRegimeAtEntryCandidate === "UNKNOWN" ? "NO_TRADE" : effectiveRegimeAtEntryCandidate;
@@ -1952,10 +1963,11 @@ export class PaperEngine {
   }
 
   private isTrendManagedPosition(pos: PaperOpenPositionRecord): boolean {
+    if (pos.executorAtEntry === "RANGE") return false;
+    if (pos.regimeAtEntry === "RANGE" && pos.executorAtEntry !== "TREND") return false;
     const sourceSignal = typeof pos.sourceSignal === "string" ? pos.sourceSignal : "";
+    if (pos.executorAtEntry === "TREND" || pos.regimeAtEntry === "TREND") return true;
     return (
-      pos.executorAtEntry === "TREND" ||
-      pos.regimeAtEntry === "TREND" ||
       pos.strategyVersion === "paper-v2" ||
       sourceSignal.includes("_v2") ||
       (pos.executorAtEntry === undefined && pos.strategyVersion === "paper-v2")
