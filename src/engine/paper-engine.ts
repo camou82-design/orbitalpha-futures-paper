@@ -15,7 +15,8 @@ import type {
   PaperExplanationFields,
   RangeBoxZone,
   TrendBreakoutDirection,
-  PaperSignalState
+  PaperSignalState,
+  PaperMarketMode
 } from "../models/types";
 
 import type { Logger } from "../logs/logger";
@@ -2004,6 +2005,46 @@ export class PaperEngine {
   }
 
   /**
+   * trend_break 하위 트리거 이후 전량 청산은 상위 시장모드·동틱 V2 authority로만 EXIT 확정.
+   * MIXED/TRANSITION·구조 흔들림만으로는 DE_RISK, TREND 레인+반대 ENTER 확정 시에만 EXIT.
+   */
+  private classifyUpperExitAuthorityTrendBreakTrigger(input: Readonly<{
+    marketMode: PaperMarketMode;
+    trendOkNow: boolean;
+    positionSide: "long" | "short";
+    snapSignal: string;
+    v2Decision: string | undefined;
+    v2Side: string | undefined;
+  }>): "HOLD" | "DE_RISK" | "EXIT" {
+    const { marketMode, trendOkNow, positionSide, snapSignal, v2Decision, v2Side } = input;
+
+    const opposingSignal =
+      (positionSide === "long" && snapSignal === "paper_short_candidate") ||
+      (positionSide === "short" && snapSignal === "paper_long_candidate");
+
+    if (marketMode === "RANGE" || marketMode === "NO_TRADE") {
+      return "EXIT";
+    }
+    if (marketMode === "MIXED" || marketMode === "TRANSITION") {
+      return "DE_RISK";
+    }
+    if (marketMode === "TREND" && !trendOkNow) {
+      const v2WantsOpposite =
+        v2Decision === "ENTER" &&
+        v2Side != null &&
+        ((positionSide === "long" && v2Side === "short") || (positionSide === "short" && v2Side === "long"));
+      if (opposingSignal && v2WantsOpposite) {
+        return "EXIT";
+      }
+      return "DE_RISK";
+    }
+    if (marketMode === "TREND" && trendOkNow) {
+      return "HOLD";
+    }
+    return "DE_RISK";
+  }
+
+  /**
    * RANGE 구간·반전 스위치·적응형까지 한 틱에서 추적(상단 롱 편향·숏 미체결 원인 증명용).
    */
   private rangeZoneEvalProofPayload(
@@ -3259,7 +3300,7 @@ export class PaperEngine {
         continue;
       }
 
-      // 2. Regime Flip / Trend Break check
+      // 2. Regime Flip / Trend Break check (하위 트리거 → 상위 exit authority 재판정 후에만 전량 청산)
       if (regimeAtEntry === "TREND") {
         const trendOkNow = snap.trendOk === true;
         if (regimeNow !== "TREND" || !trendOkNow) {
@@ -3278,10 +3319,42 @@ export class PaperEngine {
             remaining.push(open);
             continue;
           }
-          const cr = "trend_break_exit" as const;
+          const marketMode = input.marketMode.marketMode;
+          const upperExitVerdict = this.classifyUpperExitAuthorityTrendBreakTrigger({
+            marketMode,
+            trendOkNow,
+            positionSide: open.side,
+            snapSignal: snap.signal ?? "",
+            v2Decision: envelope.v2_decision,
+            v2Side: envelope.v2_side
+          });
+          this.logger.info("UPPER_EXIT_AUTHORITY_TREND_BREAK_REEVAL", {
+            symbol: open.symbol,
+            side: open.side,
+            flowId,
+            upper_exit_verdict: upperExitVerdict,
+            market_mode: marketMode,
+            regime_now_lane: regimeNow,
+            trend_ok_snapshot: trendOkNow,
+            authority_decision: envelope.authority.decision,
+            authority_regime: envelope.authority.regime,
+            authority_source: envelope.authority.source,
+            v2_decision: envelope.v2_decision ?? null,
+            v2_side: envelope.v2_side ?? null,
+            trend_break_substrate: "regime_shift_or_trend_ok_false"
+          });
+          if (upperExitVerdict !== "EXIT") {
+            remaining.push(open);
+            continue;
+          }
+          const cr: PaperClosedPositionRecord["closeReason"] =
+            marketMode === "RANGE" || marketMode === "NO_TRADE" ? "regime_exit" : "trend_break_exit";
           finalCloseReason = cr;
-          confirmedExitType = "EXIT_TREND_BREAK";
-          confirmedCloseSource = "trend_regime_shift_gate";
+          confirmedExitType = exitEventJsonlType(cr);
+          confirmedCloseSource =
+            cr === "regime_exit"
+              ? "trend_gate_upper_regime_lane_exit"
+              : "trend_regime_shift_gate_upper_opposing_trend_confirmed";
           const closedRow = toClosed(cr, m, open.sizeUsd);
           await this.positions.appendClosed(closedRow);
           authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
@@ -3300,7 +3373,7 @@ export class PaperEngine {
             openedAt: open.openedAt,
             raw_reason: cr,
             mapped_exit_type: mappedType,
-            regime_dedup_set: mappedType === "EXIT_TREND_BREAK",
+            regime_dedup_set: mappedType === "EXIT_REGIME" || mappedType === "EXIT_TREND_BREAK",
             flowId
           });
 
@@ -3502,7 +3575,7 @@ export class PaperEngine {
           this.rangeFailCountByKey.set(k, 0);
           this.rangeReopenArmedUntilBySymbol.set(symKey, Date.now() + 15 * 60_000);
         }
-        if (open.regimeAtEntry === "TREND" && (cr === "stop_loss" || cr === "trend_break_exit")) {
+        if (open.regimeAtEntry === "TREND" && (cr === "stop_loss" || cr === "trend_break_exit" || cr === "regime_exit")) {
           this.trendCooldownUntilBySymbol.set(String(open.symbol), Date.now() + 12 * 60_000);
         }
         continue;
