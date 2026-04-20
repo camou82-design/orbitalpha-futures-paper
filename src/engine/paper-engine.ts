@@ -3194,6 +3194,14 @@ export class PaperEngine {
             adaptiveModeAtEntry: open.adaptiveModeAtEntry,
             regimeAtEntry: "TREND",
             executorAtEntry: "TREND",
+            ...(open.authoritySourceAtEntry !== undefined
+              ? { authoritySourceAtEntry: open.authoritySourceAtEntry }
+              : {}),
+            ...(open.authoritySideAtEntry !== undefined
+              ? { authoritySideAtEntry: open.authoritySideAtEntry }
+              : {}),
+            ...(typeof open.authority === "string" ? { authority: open.authority } : {}),
+            ...(typeof open.authoritySide === "string" ? { authoritySide: open.authoritySide } : {}),
             entryStage: Math.min(3, (open.entryStage ?? 1) + 1),
             status: "open"
           };
@@ -4817,6 +4825,10 @@ export class PaperEngine {
           })(),
           strategyVersion: entryIdentity.effectiveStrategyVersion,
           sourceSignal: entryIdentity.effectiveSourceSignal,
+          authoritySourceAtEntry: authority.source,
+          ...(authority.side == null
+            ? {}
+            : { authoritySideAtEntry: String(authority.side) }),
           sourceRunPath: input.candidateRunPath,
           latestSnapshotPath: input.latestPath,
           latestMetaPath: input.metaPath,

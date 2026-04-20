@@ -306,6 +306,31 @@ export function paperExitDisplayMeta(
   }
 }
 
+/** 종료 행에 쓰는 진입 문맥 alias(저장 정합성). */
+function closedHistoryContextAliases(open: PaperOpenPositionRecord): Readonly<{
+  strategy?: PaperOpenPositionRecord["executorAtEntry"];
+  regime?: PaperOpenPositionRecord["regimeAtEntry"];
+  entryReason: string;
+  authority?: string;
+  authoritySide?: string;
+}> {
+  const authRaw =
+    open.authoritySourceAtEntry ??
+    (typeof open.authority === "string" && open.authority.trim().length > 0 ? open.authority : undefined);
+  const sideRaw =
+    open.authoritySideAtEntry ??
+    (typeof open.authoritySide === "string" && open.authoritySide.trim().length > 0
+      ? open.authoritySide
+      : undefined);
+  return {
+    ...(open.executorAtEntry !== undefined ? { strategy: open.executorAtEntry } : {}),
+    ...(open.regimeAtEntry !== undefined ? { regime: open.regimeAtEntry } : {}),
+    entryReason: open.sourceSignal,
+    ...(authRaw !== undefined ? { authority: authRaw } : {}),
+    ...(sideRaw !== undefined ? { authoritySide: sideRaw } : {})
+  };
+}
+
 type FinalizeClosedInput = Readonly<{
   open: PaperOpenPositionRecord;
   symbol: MarketSymbol;
@@ -358,6 +383,7 @@ export function finalizePaperClosedRecord(input: FinalizeClosedInput): PaperClos
   const net = finiteUsd(m.pnlUsdNet);
   const gross = finiteUsd(m.pnlUsdGross);
   const pct = finiteUsd(m.pnlPctNet);
+  const ctxAliases = closedHistoryContextAliases(input.open);
   return {
     openedAt: input.open.openedAt,
     closedAt: input.closedAt,
@@ -383,7 +409,13 @@ export function finalizePaperClosedRecord(input: FinalizeClosedInput): PaperClos
     strategyVersion: input.strategyVersion,
     sourceSignal: input.open.sourceSignal,
     sourceRunPath: input.open.sourceRunPath,
+    ...(input.open.executorAtEntry !== undefined ? { executorAtEntry: input.open.executorAtEntry } : {}),
     regimeAtEntry: input.open.regimeAtEntry,
+    ...(ctxAliases.strategy !== undefined ? { strategy: ctxAliases.strategy } : {}),
+    ...(ctxAliases.regime !== undefined ? { regime: ctxAliases.regime } : {}),
+    entryReason: ctxAliases.entryReason,
+    ...(ctxAliases.authority !== undefined ? { authority: ctxAliases.authority } : {}),
+    ...(ctxAliases.authoritySide !== undefined ? { authoritySide: ctxAliases.authoritySide } : {}),
     ...(input.open.rangeEntryBoxPos !== undefined ? { rangeEntryBoxPos: input.open.rangeEntryBoxPos } : {}),
     ...(input.open.rangeEntryZone !== undefined ? { rangeEntryZone: input.open.rangeEntryZone } : {}),
     ...(input.open.rangeEntryFromReversalSwitch === true ? { rangeEntryFromReversalSwitch: true } : {}),

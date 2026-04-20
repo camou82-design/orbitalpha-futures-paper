@@ -250,7 +250,44 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
     mapping_fallback_used: (closePrice === 0 && (o.closePrice == null)) || exitType === "EXIT_UNKNOWN"
   });
 
-  return record;
+  /** raw에 이미 있으면 유지; 없을 때만 동일 의미 필드로 보강(덮어쓰기 금지). */
+  const enriched = record as Record<string, unknown>;
+  if (enriched.strategy === undefined && typeof o.executorAtEntry === "string") {
+    enriched.strategy = o.executorAtEntry;
+  }
+  if (enriched.regime === undefined && typeof o.regimeAtEntry === "string") {
+    enriched.regime = o.regimeAtEntry;
+  }
+  if (
+    enriched.entryReason === undefined &&
+    typeof o.sourceSignal === "string" &&
+    o.sourceSignal.trim().length > 0
+  ) {
+    enriched.entryReason = o.sourceSignal;
+  }
+  if (enriched.authority === undefined) {
+    const auth =
+      typeof o.authoritySourceAtEntry === "string" && String(o.authoritySourceAtEntry).trim().length > 0
+        ? o.authoritySourceAtEntry
+        : typeof o.authority === "string" && String(o.authority).trim().length > 0
+          ? o.authority
+          : undefined;
+    if (auth !== undefined) enriched.authority = auth;
+  }
+  if (enriched.authoritySide === undefined) {
+    const asd =
+      typeof o.authoritySideAtEntry === "string" && String(o.authoritySideAtEntry).trim().length > 0
+        ? o.authoritySideAtEntry
+        : typeof o.authoritySide === "string" && String(o.authoritySide).trim().length > 0
+          ? o.authoritySide
+          : undefined;
+    if (asd !== undefined) enriched.authoritySide = asd;
+  }
+  if (enriched.executorAtEntry === undefined && typeof o.executorAtEntry === "string") {
+    enriched.executorAtEntry = o.executorAtEntry;
+  }
+
+  return enriched as NormalizedPaperClosedRow;
 }
 
 export type ClosedRowDisplayFields = Readonly<{

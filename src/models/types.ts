@@ -799,6 +799,14 @@ export type PaperOpenPositionRecord = Readonly<{
   status: "open";
   /** 신호 불일치 연속 틱 수 (candidate_lost 완화·연속 확인용). */
   candidateLostStreak?: number;
+  /** 진입 시점 실행 권한 소스 스냅샷(종료 history alias `authority` 우선값). */
+  authoritySourceAtEntry?: string;
+  /** 진입 시점 권한 방향 스냅샷(종료 history alias `authoritySide` 우선값). */
+  authoritySideAtEntry?: string;
+  /** 레거시 단일 authority 문자열(디스크·구버전; alias 해석 시 fallback). */
+  authority?: string;
+  /** 레거시 authority 방향. */
+  authoritySide?: string;
 }>;
 
 /** 종료 레코드·이벤트에 함께 쓰는 종료 유형 코드(레저·로그 공통). */
@@ -1059,8 +1067,20 @@ export type PaperClosedPositionRecord = Readonly<{
   strategyVersion: string;
   sourceSignal: string;
   sourceRunPath: string;
+  /** 진입 시 실행기(RANGE/TREND/IDLE) — 종료 행에도 보존. */
+  executorAtEntry?: "RANGE" | "TREND" | "IDLE";
   /** 진입 시점 레짐(RANGE/TREND/NO_TRADE) — 모드별 성과 분리용. */
   regimeAtEntry?: "RANGE" | "TREND" | "NO_TRADE";
+  /** `executorAtEntry`와 동일 의미의 뷰 alias(전략/실행기). */
+  strategy?: "RANGE" | "TREND" | "IDLE";
+  /** `regimeAtEntry`와 동일 의미의 뷰 alias. */
+  regime?: "RANGE" | "TREND" | "NO_TRADE";
+  /** `sourceSignal`과 동일 의미의 뷰 alias(진입 신호·진입 사유). */
+  entryReason?: string;
+  /** 권한 소스 alias(`authoritySourceAtEntry` 우선, 없으면 레거시 `authority`). */
+  authority?: string;
+  /** 권한 방향 alias(`authoritySideAtEntry` 우선, 없으면 레거시 `authoritySide`). */
+  authoritySide?: string;
   /** RANGE 진입 시 박스 위치·구간 스냅샷 */
   rangeEntryBoxPos?: number;
   rangeEntryZone?: "upper" | "lower" | "mid";
