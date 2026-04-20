@@ -447,9 +447,7 @@ function latestCloseMetaBySymbol(
           cr === "range_box_break" ||
           cr === "range_profit_trail" ||
           cr === "structural_regime_shift" ||
-          cr === "trend_switch" ||
-          cr === "highway_ema60_break_long" ||
-          cr === "highway_ema60_break_short"
+          cr === "trend_switch"
           ? cr
           : undefined;
       const entryStageAtClose = typeof es === "number" && Number.isFinite(es) ? es : undefined;
@@ -492,9 +490,6 @@ function exitFullLogKey(cr: PaperClosedPositionRecord["closeReason"]): string {
       return "exit_full_trend_break";
     case "regime_exit":
       return "exit_full_regime_exit";
-    case "highway_ema60_break_long":
-    case "highway_ema60_break_short":
-      return "exit_full_highway_ema60_regime_break";
     default:
       return "exit_full_other";
   }
@@ -1992,7 +1987,7 @@ export class PaperEngine {
   private shouldDeferRegimeLaneTransitionClose(
     open: PaperOpenPositionRecord,
     evalAtMs: number,
-    closeReason: PaperClosedPositionRecord["closeReason"]
+    closeReason: PaperClosedPositionRecord["closeReason"] | "highway_ema60_break_long" | "highway_ema60_break_short"
   ): boolean {
     if (!this.isEntryPostOpenRegimeLaneProtectActive(open.openedAt, evalAtMs)) return false;
     switch (closeReason) {
@@ -2003,6 +1998,8 @@ export class PaperEngine {
       case "trend_break_exit":
       case "candidate_lost":
       case "trend_switch":
+      case "highway_ema60_break_long":
+      case "highway_ema60_break_short":
         return true;
       default:
         return false;
@@ -3490,6 +3487,70 @@ export class PaperEngine {
       }
       // --------------------------------------------------
 
+      const ema60ReevalTrigger =
+        exitLane === "TREND" &&
+        (exitEval.reason === "highway_ema60_break_long" || exitEval.reason === "highway_ema60_break_short");
+      if (ema60ReevalTrigger) {
+        const highwayReason = exitEval.reason as "highway_ema60_break_long" | "highway_ema60_break_short";
+        if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, highwayReason)) {
+          this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
+            symbol: open.symbol,
+            side: open.side,
+            flowId,
+            openedAt: open.openedAt,
+            eval_at_ms: closedAt,
+            elapsed_ms: closedAt - open.openedAt,
+            protect_window_ms: ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS,
+            deferred_close_reason: highwayReason,
+            lane: "highway_ema60_upper_authority_gate"
+          });
+          remaining.push(open);
+          continue;
+        }
+
+        const marketMode = input.marketMode.marketMode;
+        const upperExitVerdict = this.classifyUpperExitAuthorityTrendBreakTrigger({
+          marketMode,
+          trendOkNow: snap.trendOk === true,
+          positionSide: open.side,
+          snapSignal: snap.signal ?? "",
+          v2Decision: envelope.v2_decision,
+          v2Side: envelope.v2_side
+        });
+        this.logger.info("UPPER_EXIT_AUTHORITY_TREND_BREAK_REEVAL", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          trigger_reason: highwayReason,
+          upper_exit_verdict: upperExitVerdict,
+          market_mode: marketMode,
+          regime_now_lane: regimeNow,
+          trend_ok_snapshot: snap.trendOk === true,
+          authority_decision: envelope.authority.decision,
+          authority_regime: envelope.authority.regime,
+          authority_source: envelope.authority.source,
+          v2_decision: envelope.v2_decision ?? null,
+          v2_side: envelope.v2_side ?? null,
+          trend_break_substrate: "highway_ema60_break_trigger"
+        });
+
+        if (upperExitVerdict !== "EXIT") {
+          remaining.push(open);
+          continue;
+        }
+
+        exitEval = {
+          ...exitEval,
+          action: "close",
+          reason: marketMode === "RANGE" || marketMode === "NO_TRADE" ? "regime_exit" : "trend_break_exit",
+          detail: {
+            ...(exitEval.detail ?? {}),
+            upper_authority_exit_confirmed: true,
+            upper_authority_exit_trigger: highwayReason
+          }
+        };
+      }
+
       if (exitEval.action === "close") {
         const cr = exitEval.reason as PaperClosedPositionRecord["closeReason"];
         if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, cr)) {
@@ -3584,9 +3645,7 @@ export class PaperEngine {
           open.regimeAtEntry === "TREND" &&
           (cr === "stop_loss" ||
             cr === "trend_break_exit" ||
-            cr === "regime_exit" ||
-            cr === "highway_ema60_break_long" ||
-            cr === "highway_ema60_break_short")
+            cr === "regime_exit")
         ) {
           this.trendCooldownUntilBySymbol.set(String(open.symbol), Date.now() + 12 * 60_000);
         }

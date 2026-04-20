@@ -24,9 +24,7 @@ const VALID_CLOSE_REASONS = new Set<string>([
   "range_box_break",
   "range_profit_trail",
   "structural_regime_shift",
-  "trend_switch",
-  "highway_ema60_break_long",
-  "highway_ema60_break_short"
+  "trend_switch"
 ]);
 
 const VALID_EXIT_TYPES = new Set<PaperExitType>([

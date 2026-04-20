@@ -156,9 +156,6 @@ export function derivePaperCloseSource(
       return "SWITCH";
     case "candidate_lost":
       return "SIGNAL_LOST";
-    case "highway_ema60_break_long":
-    case "highway_ema60_break_short":
-      return "TREND_BREAK";
     default:
       if (exitType !== "EXIT_UNKNOWN") return inferPaperCloseSourceFromExitType(exitType);
       return "UNKNOWN";
@@ -290,9 +287,6 @@ export function paperExitDisplayMeta(
       return { exitType: "EXIT_REGIME_BREAK", closeReasonLabel: "구조적 추세 전환" };
     case "trend_switch":
       return { exitType: "EXIT_TREND_SWITCH", closeReasonLabel: defaultLabelForExitType("EXIT_TREND_SWITCH") };
-    case "highway_ema60_break_long":
-    case "highway_ema60_break_short":
-      return { exitType: "EXIT_REGIME_BREAK", closeReasonLabel: defaultLabelForExitType("EXIT_REGIME_BREAK") };
     default: {
       const coerced = coerceCanonicalPaperCloseReason(closeReason);
       if (coerced !== closeReason) {

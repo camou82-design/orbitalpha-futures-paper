@@ -22,10 +22,10 @@ export function highwayExitEngine(input: Readonly<{
             // 20 EMA breakdown
             if (lastPrice < ema20) {
                 if (lastPrice < ema60) {
-                    action = "close";
+                    action = "hold";
                     reason = "highway_ema60_break_long";
-                    guidance = "Full exit triggered by 60 EMA failure";
-                    exitUrgency = "urgent";
+                    guidance = "EMA60 break detected; waiting upper exit authority re-evaluation";
+                    exitUrgency = "normal";
                 } else {
                     action = "partial_close";
                     reason = "Highway 20 EMA Breakdown (Long)";
@@ -42,10 +42,10 @@ export function highwayExitEngine(input: Readonly<{
             // 20 EMA breakdown
             if (lastPrice > ema20) {
                 if (lastPrice > ema60) {
-                    action = "close";
+                    action = "hold";
                     reason = "highway_ema60_break_short";
-                    guidance = "Full exit triggered by 60 EMA failure";
-                    exitUrgency = "urgent";
+                    guidance = "EMA60 break detected; waiting upper exit authority re-evaluation";
+                    exitUrgency = "normal";
                 } else {
                     action = "partial_close";
                     reason = "Highway 20 EMA Breakout (Short)";
