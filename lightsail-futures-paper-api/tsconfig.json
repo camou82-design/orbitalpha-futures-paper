@@ -12,7 +12,9 @@
         "checkJs": false,
         "types": [
             "node"
-        ]
+        ],
+        "noEmit": true,
+        "allowImportingTsExtensions": true
     },
     "include": [
         "index.ts",

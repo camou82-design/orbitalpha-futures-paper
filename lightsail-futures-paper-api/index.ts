@@ -76,8 +76,11 @@ async function loadBundleFromDisk(projectRoot: string): Promise<unknown> {
 }
 
 /**
- * TTL 안 캐시 반환, 만료 시 단일 in-flight rebuild(동시 요청 공유).
- * 실패 시 stale 캐시가 있으면 그걸 반환하는 Promise.
+ * - TTL 안: 즉시 hit.
+ * - TTL 만료 + 이전 성공 캐시 있음: **즉시 stale(이전 번들)** 반환하고 백그라운드에서 단일 in-flight 재생성
+ *   → 폴링이 rebuild 완료를 기다리며 게이트웨이 타임아웃(504)에 걸릴 확률을 줄임.
+ * - 캐시 없음(최초 등): in-flight 공유하며 await → miss(또는 실패 시 throw).
+ * - 재생성 실패 + 이전 캐시 있음: stale.
  */
 async function getFuturesPaperDataBundleCached(projectRoot: string): Promise<{
   bundle: unknown;
@@ -88,7 +91,8 @@ async function getFuturesPaperDataBundleCached(projectRoot: string): Promise<{
     return { bundle: bundleCache.bundle, cache: "hit" };
   }
 
-  if (!bundleRebuild) {
+  const startInFlightRebuild = (): void => {
+    if (bundleRebuild) return;
     bundleRebuild = loadBundleFromDisk(projectRoot)
       .then((b) => {
         bundleCache = { bundle: b, ts: Date.now() };
@@ -97,17 +101,22 @@ async function getFuturesPaperDataBundleCached(projectRoot: string): Promise<{
       .finally(() => {
         bundleRebuild = null;
       });
+    void bundleRebuild.catch((err) => {
+      console.error("[lightsail-futures-paper-api] bundle refresh failed", err);
+    });
+  };
+
+  if (bundleCache !== null) {
+    startInFlightRebuild();
+    return { bundle: bundleCache.bundle, cache: "stale" };
   }
 
-  try {
-    const bundle = await bundleRebuild;
-    return { bundle, cache: "miss" };
-  } catch (e) {
-    if (bundleCache !== null) {
-      return { bundle: bundleCache.bundle, cache: "stale" };
-    }
-    throw e;
+  if (!bundleRebuild) {
+    startInFlightRebuild();
   }
+
+  const bundle = await bundleRebuild!;
+  return { bundle, cache: "miss" };
 }
 
 app.get("/api/futures-paper/data", async (req: Request, res: Response) => {
