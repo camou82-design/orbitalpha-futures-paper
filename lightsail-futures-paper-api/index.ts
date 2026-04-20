@@ -19,6 +19,14 @@ const PORT = Number(process.env.PORT ?? 3991);
 const secret = process.env.ORBITALPHA_FUTURES_PAPER_API_SECRET?.trim();
 const root = process.env.ORBITALPHA_FUTURES_PAPER_ROOT?.trim();
 
+/** bundle cache TTL (ms); 5–15s 권장, 폴링 5s에서 upstream 재생성 폭주 완화 */
+export const FUTURES_PAPER_DATA_CACHE_TTL_MS = 10_000;
+
+type BundleCacheEntry = Readonly<{ bundle: unknown; ts: number }>;
+
+let bundleCache: BundleCacheEntry | null = null;
+let bundleRebuild: Promise<unknown> | null = null;
+
 const isProd = process.env.NODE_ENV === "production";
 if (!isProd) {
   console.warn("!! WARNING: Running in non-production mode. Ensure this is intentional.");
@@ -50,11 +58,57 @@ app.use("/monitor", express.static(monitorDir));
 app.get("/health", (_req: Request, res: Response) => {
   res.json({
     ok: true,
-    status: (secret && root) ? "ok" : "misconfigured",
+    status: secret && root ? "ok" : "misconfigured",
     service: "lightsail-futures-paper-api",
     timestamp: Date.now()
   });
 });
+
+async function loadBundleFromDisk(projectRoot: string): Promise<unknown> {
+  const bundleCore = await import("../src/lib/futuresPaperBundleCore.ts");
+  const loadFuturesPaperBundleFromDiskRoot = (
+    bundleCore as { loadFuturesPaperBundleFromDiskRoot?: (r: string) => Promise<unknown> }
+  ).loadFuturesPaperBundleFromDiskRoot;
+  if (typeof loadFuturesPaperBundleFromDiskRoot !== "function") {
+    throw new Error("bundle_loader_unavailable");
+  }
+  return loadFuturesPaperBundleFromDiskRoot(projectRoot);
+}
+
+/**
+ * TTL 안 캐시 반환, 만료 시 단일 in-flight rebuild(동시 요청 공유).
+ * 실패 시 stale 캐시가 있으면 그걸 반환하는 Promise.
+ */
+async function getFuturesPaperDataBundleCached(projectRoot: string): Promise<{
+  bundle: unknown;
+  cache: "hit" | "miss" | "stale";
+}> {
+  const now = Date.now();
+  if (bundleCache !== null && now - bundleCache.ts < FUTURES_PAPER_DATA_CACHE_TTL_MS) {
+    return { bundle: bundleCache.bundle, cache: "hit" };
+  }
+
+  if (!bundleRebuild) {
+    bundleRebuild = loadBundleFromDisk(projectRoot)
+      .then((b) => {
+        bundleCache = { bundle: b, ts: Date.now() };
+        return b;
+      })
+      .finally(() => {
+        bundleRebuild = null;
+      });
+  }
+
+  try {
+    const bundle = await bundleRebuild;
+    return { bundle, cache: "miss" };
+  } catch (e) {
+    if (bundleCache !== null) {
+      return { bundle: bundleCache.bundle, cache: "stale" };
+    }
+    throw e;
+  }
+}
 
 app.get("/api/futures-paper/data", async (req: Request, res: Response) => {
   const token = requestPaperToken(req);
@@ -67,13 +121,8 @@ app.get("/api/futures-paper/data", async (req: Request, res: Response) => {
     return;
   }
   try {
-    const bundleCore = await import("../src/lib/futuresPaperBundleCore.ts");
-    const loadFuturesPaperBundleFromDiskRoot =
-      (bundleCore as { loadFuturesPaperBundleFromDiskRoot?: (projectRoot: string) => Promise<unknown> }).loadFuturesPaperBundleFromDiskRoot;
-    if (typeof loadFuturesPaperBundleFromDiskRoot !== "function") {
-      throw new Error("bundle_loader_unavailable");
-    }
-    const bundle = await loadFuturesPaperBundleFromDiskRoot(root);
+    const { bundle, cache } = await getFuturesPaperDataBundleCached(root);
+    res.setHeader("X-Orbitalpha-Futures-Paper-Bundle-Cache", cache);
     res.json(bundle);
   } catch (e) {
     console.error("[lightsail-futures-paper-api]", e);

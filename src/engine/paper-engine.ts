@@ -2259,6 +2259,7 @@ export class PaperEngine {
       if (r === "time_based_exit") return "EXIT_TIME_STOP";
       if (r === "stop_loss") return "EXIT_SL";
       const t = paperExitDisplayMeta(r).exitType;
+      if (t === "EXIT_PARTIAL_SPLIT_1" || t === "EXIT_PARTIAL_SPLIT_2") return "EXIT_PARTIAL_SPLIT";
       if (t === "EXIT_PARTIAL_TP" || t === "EXIT_TP_1" || t === "EXIT_TP_2") return "EXIT_TP";
       if (t === "EXIT_TIME_STOP") return "EXIT_TIME_STOP";
       if (t === "EXIT_SL") return "EXIT_SL";
@@ -3682,6 +3683,8 @@ export class PaperEngine {
           const closedPartial = toClosed(pReason, mp, partialMargin);
           await this.positions.appendClosed(closedPartial);
 
+          const partialEventProfitable = mp.pnlUsdNet > 1e-9 && mp.pnlPctNet > 1e-9;
+
           this.logger.info(pLog, {
             ...exitDetailBase(open, mp),
             exitReason: pReason,
@@ -3701,7 +3704,7 @@ export class PaperEngine {
 
           await this.store.appendJsonlLine("reports/events.jsonl", {
             ts: Date.now(),
-            type: "EXIT_TP",
+            type: partialEventProfitable ? "EXIT_TP" : "EXIT_PARTIAL_SPLIT",
             symbol: String(open.symbol),
             regime: open.regimeAtEntry ?? null,
             executor: executorForExitEventPayload(open.executorAtEntry, open.regimeAtEntry),

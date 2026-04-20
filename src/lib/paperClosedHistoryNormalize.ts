@@ -37,6 +37,8 @@ const VALID_EXIT_TYPES = new Set<PaperExitType>([
   "EXIT_TP",
   "EXIT_TP_1",
   "EXIT_TP_2",
+  "EXIT_PARTIAL_SPLIT_1",
+  "EXIT_PARTIAL_SPLIT_2",
   "EXIT_PARTIAL_TP",
   "EXIT_TRAILING",
   "EXIT_TIME_STOP",
@@ -136,6 +138,22 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
     exitType = "EXIT_UNKNOWN";
   }
 
+  let computedPnlPct: number | null = null;
+  if (entryPrice && entryPrice > 0 && closePrice && closePrice > 0) {
+    const move = side === "long" ? (closePrice - entryPrice) / entryPrice : (entryPrice - closePrice) / entryPrice;
+    computedPnlPct = move * leverage;
+  }
+  const realizedPnlPct =
+    parseFinite(o.realizedPnlPct) ??
+    (sizeUsd > 0 && Number.isFinite(pnlNet) ? finiteUsd(pnlNet / sizeUsd) : (computedPnlPct ?? 0));
+
+  const rowEps = 1e-9;
+  const isPartialCr = crNorm === "partial_exit_1" || crNorm === "partial_exit_2";
+  const partialProfitable = pnlNet > rowEps && realizedPnlPct > rowEps;
+  if (isPartialCr && !partialProfitable) {
+    exitType = crNorm === "partial_exit_1" ? "EXIT_PARTIAL_SPLIT_1" : "EXIT_PARTIAL_SPLIT_2";
+  }
+
   const resolvedCloseReasonCandidate = resolveCloseReasonText(crRaw);
 
   /**
@@ -158,7 +176,7 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
   if (isLegacyHighwayReason) {
     mappedReasonLabel = "레거시 EMA60 종료";
   }
-  if ((crNorm === "partial_exit_1" || crNorm === "partial_exit_2") && pnlNet <= 0) {
+  if (isPartialCr && !partialProfitable) {
     mappedReasonLabel = crNorm === "partial_exit_1" ? "1차 분할 청산" : "2차 분할 청산";
   }
 
@@ -175,17 +193,6 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
   if (closeSource === "UNKNOWN") {
     closeSource = inferPaperCloseSourceFromExitType(exitType);
   }
-
-  /** 수익률 매핑 복구 (C): realizedPnlPct > (pnlNet/sizeUsd) > Calculation from price */
-  let computedPnlPct: number | null = null;
-  if (entryPrice && entryPrice > 0 && closePrice && closePrice > 0) {
-    const move = side === "long" ? (closePrice - entryPrice) / entryPrice : (entryPrice - closePrice) / entryPrice;
-    computedPnlPct = move * leverage;
-  }
-
-  const realizedPnlPct =
-    parseFinite(o.realizedPnlPct) ??
-    (sizeUsd > 0 && Number.isFinite(pnlNet) ? finiteUsd(pnlNet / sizeUsd) : (computedPnlPct ?? 0));
 
   const outcomeRaw = o.outcomeStatus;
   const outcomeStatus =

@@ -32,6 +32,10 @@ export function defaultLabelForExitType(t: PaperExitType): string {
       return "1차 익절";
     case "EXIT_TP_2":
       return "2차 익절";
+    case "EXIT_PARTIAL_SPLIT_1":
+      return "1차 분할 청산";
+    case "EXIT_PARTIAL_SPLIT_2":
+      return "2차 분할 청산";
     case "EXIT_PARTIAL_TP":
       return "분할 익절";
     case "EXIT_TRAILING":
@@ -82,6 +86,9 @@ export function inferPaperCloseSourceFromExitType(et: PaperExitType): PaperClose
     case "EXIT_TP_2":
     case "EXIT_PARTIAL_TP":
       return "TP_PARTIAL";
+    case "EXIT_PARTIAL_SPLIT_1":
+    case "EXIT_PARTIAL_SPLIT_2":
+      return "PARTIAL_SPLIT";
     case "EXIT_TRAILING":
       return "TRAIL";
     case "EXIT_TIME_STOP":
@@ -138,6 +145,7 @@ export function derivePaperCloseSource(
       return "TP";
     case "partial_exit_1":
     case "partial_exit_2":
+      if (exitType === "EXIT_PARTIAL_SPLIT_1" || exitType === "EXIT_PARTIAL_SPLIT_2") return "PARTIAL_SPLIT";
       return "TP_PARTIAL";
     case "trailing_stop":
       return "TRAIL";
@@ -324,11 +332,27 @@ export function finalizePaperClosedRecord(input: FinalizeClosedInput): PaperClos
   const m = input.metrics;
   const closeReasonNorm = coerceCanonicalPaperCloseReason(input.closeReason);
   const fromReason = paperExitDisplayMeta(closeReasonNorm);
-  const exitType = input.exitTypeOverride ?? fromReason.exitType;
+  const eps = 1e-9;
+  const netForTpGate = finiteUsd(m.pnlUsdNet);
+  const pctForTpGate = finiteUsd(m.pnlPctNet);
+  const partialTpSemanticsOk = netForTpGate > eps && pctForTpGate > eps;
+  const isPartialStage =
+    closeReasonNorm === "partial_exit_1" || closeReasonNorm === "partial_exit_2";
+
+  let exitType = input.exitTypeOverride ?? fromReason.exitType;
+  let neutralPartialLabel: string | null = null;
+  if (isPartialStage && input.exitTypeOverride == null && !partialTpSemanticsOk) {
+    exitType = closeReasonNorm === "partial_exit_1" ? "EXIT_PARTIAL_SPLIT_1" : "EXIT_PARTIAL_SPLIT_2";
+    neutralPartialLabel = closeReasonNorm === "partial_exit_1" ? "1차 분할 청산" : "2차 분할 청산";
+  }
+
   const closeReasonLabel =
     input.closeReasonLabelOverride ??
+    neutralPartialLabel ??
     (input.exitTypeOverride != null ? defaultLabelForExitType(input.exitTypeOverride) : fromReason.closeReasonLabel);
-  const closeSource = input.closeSourceOverride ?? derivePaperCloseSource(closeReasonNorm, exitType);
+  const closeSource =
+    input.closeSourceOverride ??
+    (neutralPartialLabel != null ? ("PARTIAL_SPLIT" as PaperCloseSource) : derivePaperCloseSource(closeReasonNorm, exitType));
   const outcomeStatus = outcomeStatusFromNetPnl(finiteUsd(m.pnlUsdNet));
   const sizeUsd = finiteUsd(input.legMarginUsd);
   const net = finiteUsd(m.pnlUsdNet);

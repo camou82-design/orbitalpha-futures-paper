@@ -807,6 +807,9 @@ export type PaperExitType =
   | "EXIT_TP"
   | "EXIT_TP_1"
   | "EXIT_TP_2"
+  /** 분할 청산 레그(손익 무관 코드) — 손실·보합 시 TP 라벨과 분리 */
+  | "EXIT_PARTIAL_SPLIT_1"
+  | "EXIT_PARTIAL_SPLIT_2"
   | "EXIT_PARTIAL_TP"
   | "EXIT_TRAILING"
   | "EXIT_TIME_STOP"
@@ -829,6 +832,8 @@ export type PaperCloseSource =
   | "SL"
   | "TP"
   | "TP_PARTIAL"
+  /** partial_exit 레그 중 실현손익이 익절 조건을 만족하지 않을 때 */
+  | "PARTIAL_SPLIT"
   | "TRAIL"
   | "TIME"
   | "REGIME_EXIT"
