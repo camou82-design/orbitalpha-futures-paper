@@ -24,7 +24,12 @@ const VALID_CLOSE_REASONS = new Set<string>([
   "range_box_break",
   "range_profit_trail",
   "structural_regime_shift",
-  "trend_switch"
+  "trend_switch",
+  "EXIT_LONG_CRASH_FORCE",
+  "EXIT_LONG_CRASH_REDUCE",
+  "EXIT_SHORT_MOMENTUM_TRAIL",
+  "EXIT_CRASH_FORCE",
+  "EXIT_CRASH_REDUCE"
 ]);
 
 const VALID_EXIT_TYPES = new Set<PaperExitType>([
@@ -42,8 +47,25 @@ const VALID_EXIT_TYPES = new Set<PaperExitType>([
   "EXIT_RANGE_REBALANCE",
   "EXIT_TREND_SWITCH",
   "EXIT_RISK",
+  "EXIT_LONG_CRASH_FORCE",
+  "EXIT_LONG_CRASH_REDUCE",
+  "EXIT_SHORT_MOMENTUM_TRAIL",
+  "EXIT_CRASH_FORCE",
+  "EXIT_CRASH_REDUCE",
   "EXIT_UNKNOWN"
 ]);
+
+function isLegacyHighwayEmaReason(x: unknown): boolean {
+  if (typeof x !== "string") return false;
+  const t = x.trim();
+  return (
+    t === "highway_ema60_break_long" ||
+    t === "highway_ema60_break_short" ||
+    t === "Highway 60 EMA Breakout (Short)" ||
+    t === "Highway 60 EMA Breakdown (Long)" ||
+    t === "Highway 60 EMA Breakout (Long)"
+  );
+}
 
 function isPaperCloseReason(x: unknown): x is PaperClosedPositionRecord["closeReason"] {
   return typeof x === "string" && VALID_CLOSE_REASONS.has(x);
@@ -99,13 +121,20 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
   const side = (typeof o.side === "string" ? o.side.toLowerCase() : "long") as "long" | "short";
 
   const crRaw = o.closeReason;
+  const isLegacyHighwayReason = isLegacyHighwayEmaReason(crRaw);
   const crNorm = typeof crRaw === "string" ? coerceCanonicalPaperCloseReason(crRaw) : null;
   const meta =
     crNorm !== null && isPaperCloseReason(crNorm)
       ? paperExitDisplayMeta(crNorm)
       : { exitType: "EXIT_UNKNOWN" as PaperExitType, closeReasonLabel: MISSING };
 
-  const exitType = parseExitType(o.exitType, meta.exitType);
+  let exitType = parseExitType(o.exitType, meta.exitType);
+  if (exitType === "EXIT_UNKNOWN" && crNorm !== null && isPaperCloseReason(crNorm) && meta.exitType !== "EXIT_UNKNOWN") {
+    exitType = meta.exitType;
+  }
+  if (isLegacyHighwayReason && (exitType === "EXIT_REGIME_BREAK" || exitType === "EXIT_TREND_BREAK")) {
+    exitType = "EXIT_UNKNOWN";
+  }
 
   const resolvedCloseReasonCandidate = resolveCloseReasonText(crRaw);
 
@@ -113,7 +142,7 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
    * 종료 사유 우선순위 (B):
    * closeReasonLabel > exitReason > resolveCloseReasonText(closeReason) > exitType > closeSource
    */
-  const mappedReasonLabel = (() => {
+  let mappedReasonLabel = (() => {
     const vals = [
       o.closeReasonLabel,
       o.exitReason,
@@ -126,6 +155,12 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
     }
     return exitType === "EXIT_UNKNOWN" ? "종료 사유 미기록 (EXIT_UNKNOWN)" : defaultLabelForExitType(exitType);
   })();
+  if (isLegacyHighwayReason) {
+    mappedReasonLabel = "레거시 EMA60 종료";
+  }
+  if ((crNorm === "partial_exit_1" || crNorm === "partial_exit_2") && pnlNet <= 0) {
+    mappedReasonLabel = crNorm === "partial_exit_1" ? "1차 분할 청산" : "2차 분할 청산";
+  }
 
   const closeReasonLabel = mappedReasonLabel;
   const exitReason = mappedReasonLabel;
@@ -134,6 +169,9 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
     crNorm !== null && isPaperCloseReason(crNorm)
       ? derivePaperCloseSource(crNorm, exitType)
       : inferPaperCloseSourceFromExitType(exitType);
+  if (isLegacyHighwayReason) {
+    closeSource = "UNKNOWN";
+  }
   if (closeSource === "UNKNOWN") {
     closeSource = inferPaperCloseSourceFromExitType(exitType);
   }

@@ -10,7 +10,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import express, { Request, Response } from "express";
-import { loadFuturesPaperBundleFromDiskRoot } from "../src/lib/futuresPaperBundleCore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const monitorDir = path.join(__dirname, "..", "monitor");
@@ -68,6 +67,12 @@ app.get("/api/futures-paper/data", async (req: Request, res: Response) => {
     return;
   }
   try {
+    const bundleCore = await import("../src/lib/futuresPaperBundleCore.ts");
+    const loadFuturesPaperBundleFromDiskRoot =
+      (bundleCore as { loadFuturesPaperBundleFromDiskRoot?: (projectRoot: string) => Promise<unknown> }).loadFuturesPaperBundleFromDiskRoot;
+    if (typeof loadFuturesPaperBundleFromDiskRoot !== "function") {
+      throw new Error("bundle_loader_unavailable");
+    }
     const bundle = await loadFuturesPaperBundleFromDiskRoot(root);
     res.json(bundle);
   } catch (e) {
