@@ -112,6 +112,7 @@ import {
   normalizePositionSideUpper,
   normalizePositionSideLower
 } from "../engine-v2/reconciler";
+import { parseEngineV2OpModeFromEnv } from "../engine-v2/op-mode";
 import {
   evaluateRangeEngineForSymbol,
   evaluateRangeStructuralExit,
@@ -1324,7 +1325,7 @@ export class PaperEngine {
       });
 
       /** Engine-V2 Execution Path (Standard 2: Selector Bridge) */
-      const configuredV2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as EngineV2OpMode) || "legacy";
+      const configuredV2Mode = parseEngineV2OpModeFromEnv(process.env.ORBITALPHA_ENGINE_V2_MODE);
       // RANGE lane must not be executed under V1 authority; enforce V2 authority ownership.
       const v2Mode: EngineV2OpMode =
         marketModeOut.routing.activeEngine === "RANGE" ? "engine_v2" : configuredV2Mode;
@@ -1343,6 +1344,18 @@ export class PaperEngine {
 
       const authority = envelope.authority;
       const selectorResult = envelope.selector;
+
+      this.logger.info("ENTRY_AUTHORITY_ENVELOPE_PROOF", {
+        symbol: sym,
+        v2_mode_runtime: v2Mode,
+        authority_owner: authority.source,
+        final_engine_owner: selectorResult?.adopted_result.engine ?? null,
+        adopted_engine: selectorResult?.adopted_result.engine ?? null,
+        adoption_reason: selectorResult?.adopted_result.adoption_reason ?? null,
+        authority_decision: authority.decision,
+        regime_at_decision: effectiveRegimeForDecision,
+        active_engine_routing: marketModeOut.routing.activeEngine
+      });
 
       if (selectorResult) {
         await this.store.appendJsonlLine("reports/v2_shadow_parity.jsonl", {
@@ -5718,6 +5731,7 @@ export class PaperEngine {
  */
 function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): Record<string, unknown> {
   const { legacy, authority, selector } = envelope;
+  const adopted = selector?.adopted_result.engine ?? null;
   return {
     decision: legacy.decision.final_decision,
     adaptiveOk: legacy.adaptiveOk,
@@ -5726,10 +5740,12 @@ function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): 
     authority_side: authority.side,
     authority_size_usd: authority.decision === "ENTER" ? authority.sizeUsd : 0,
     authority_source: authority.source,
+    authority_owner: authority.source,
+    final_engine_owner: adopted ?? authority.source,
 
-    selector_engine: selector?.adopted_result.engine ?? "v1",
-    adopted_engine: selector?.adopted_result.engine ?? "v1",
-    adoption_reason: selector?.adopted_result.adoption_reason ?? "legacy_fallback",
+    selector_engine: adopted ?? "unknown",
+    adopted_engine: adopted ?? "unknown",
+    adoption_reason: selector?.adopted_result.adoption_reason ?? "no_selector_result",
 
     v1_decision: envelope.v1_decision ?? legacy.decision.final_decision,
     v1_side: envelope.v1_side ?? legacy.intentSide ?? "none",

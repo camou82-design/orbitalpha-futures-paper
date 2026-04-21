@@ -120,6 +120,10 @@ export function evaluateEntryPolicy(input: Readonly<{
    * Highway VALID + trend_core_default + strong 후보 등에서만 낮춤.
    */
   trendVolumeRatioMinOverride?: number | null;
+  /**
+   * 상위 실행권(V2 ENTER + TREND)일 때: 미세 EMA 불일치·볼륨 하한을 soft(완화)로 처리하고 `trend_ema_soft_pass` 등으로 표시.
+   */
+  trendEmaSoftGate?: boolean;
 }>): EntryPolicyResult {
   if (input.direction === "none") {
     return {
@@ -156,6 +160,9 @@ export function evaluateEntryPolicy(input: Readonly<{
 
   const emaAlignedLong = e20 > e60 * 1.0002 && cl >= e20 * 0.998;
   const emaAlignedShort = e20 < e60 * 0.9998 && cl <= e20 * 1.002;
+  /** V2 soft gate: 약간 느슨한 스택·종가(상·하 대칭). */
+  const emaNearAlignedLong = e20 > e60 * 1.00005 && cl >= e20 * 0.994;
+  const emaNearAlignedShort = e20 < e60 * 0.99995 && cl <= e20 * 1.006;
   const pullbackLong = cl <= e20 * 1.01;
   const pullbackShort = cl >= e20 * 0.99;
   const chaseLong = input.lastPrice > e20 * 1.012;
@@ -175,19 +182,31 @@ export function evaluateEntryPolicy(input: Readonly<{
   }
 
   if (input.mode === "trend") {
-    if (input.direction === "long" && !emaAlignedLong) {
-      return {
-        ok: false,
-        blockMessage: "blocked_no_structure",
-        detail: { sub: "ema_long_not_aligned", order_build_fail_reason: "policy_trend_long_ema_not_aligned" }
-      };
-    }
-    if (input.direction === "short" && !emaAlignedShort) {
-      return {
-        ok: false,
-        blockMessage: "blocked_no_structure",
-        detail: { sub: "ema_short_not_aligned", order_build_fail_reason: "policy_trend_short_ema_not_aligned" }
-      };
+    let trendEmaSoftPass = false;
+    if (input.direction === "long") {
+      if (!emaAlignedLong) {
+        const soft = input.trendEmaSoftGate === true && emaNearAlignedLong;
+        if (!soft) {
+          return {
+            ok: false,
+            blockMessage: "blocked_no_structure",
+            detail: { sub: "ema_long_not_aligned", order_build_fail_reason: "policy_trend_long_ema_not_aligned" }
+          };
+        }
+        trendEmaSoftPass = true;
+      }
+    } else if (input.direction === "short") {
+      if (!emaAlignedShort) {
+        const soft = input.trendEmaSoftGate === true && emaNearAlignedShort;
+        if (!soft) {
+          return {
+            ok: false,
+            blockMessage: "blocked_no_structure",
+            detail: { sub: "ema_short_not_aligned", order_build_fail_reason: "policy_trend_short_ema_not_aligned" }
+          };
+        }
+        trendEmaSoftPass = true;
+      }
     }
     const trendVolMin =
       typeof input.trendVolumeRatioMinOverride === "number" &&
@@ -195,7 +214,9 @@ export function evaluateEntryPolicy(input: Readonly<{
       input.trendVolumeRatioMinOverride > 0
         ? input.trendVolumeRatioMinOverride
         : TREND_POLICY_MIN_VOLUME_RATIO_PROXY;
-    if (input.volumeRatioProxy < trendVolMin) {
+    const trendVolFloor =
+      input.trendEmaSoftGate === true ? Math.min(trendVolMin, 1.0) : trendVolMin;
+    if (input.volumeRatioProxy < trendVolFloor) {
       return {
         ok: false,
         blockMessage: "blocked_no_structure",
@@ -206,11 +227,13 @@ export function evaluateEntryPolicy(input: Readonly<{
             proof_version: 1,
             policy_id: "trend_volume_ratio_gate",
             branch: "after_trend_ema_alignment_passes",
-            min_volume_ratio_proxy: trendVolMin,
+            min_volume_ratio_proxy: trendVolFloor,
             default_min_volume_ratio_proxy: TREND_POLICY_MIN_VOLUME_RATIO_PROXY,
             volume_ratio_proxy_actual: input.volumeRatioProxy,
-            shortfall_ratio: trendVolMin - input.volumeRatioProxy,
+            shortfall_ratio: trendVolFloor - input.volumeRatioProxy,
             trend_volume_min_override_applied: trendVolMin !== TREND_POLICY_MIN_VOLUME_RATIO_PROXY,
+            trend_volume_floor_effective: trendVolFloor,
+            trend_ema_soft_gate: input.trendEmaSoftGate === true,
             pipeline_order_in_runFuturesAdaptiveEntry: [
               "0_paper_symbol_decision: trend_volume_relax_proof (strong 72+ / weak 65+ with edge gates) → trendVolumeRatioMinOverride",
               "1_decidePositionDirection (qualityScore as signal strength, BTC bias, candidateStrength — not Highway volume_support_score)",
@@ -234,9 +257,11 @@ export function evaluateEntryPolicy(input: Readonly<{
       detail: {
         pullback_ok: input.direction === "long" ? pullbackLong : pullbackShort,
         rebreak_ok: true,
-        ema_aligned: true,
+        ema_aligned: !trendEmaSoftPass,
+        trend_ema_soft_pass: trendEmaSoftPass,
         trend_volume_ratio_ok: input.volumeRatioProxy,
-        trend_volume_min_used: trendVolMin
+        trend_volume_min_used: trendVolMin,
+        trend_volume_floor_effective: trendVolFloor
       }
     };
   }

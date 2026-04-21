@@ -34,9 +34,13 @@ export function buildTradeConfidenceScore(input: Readonly<{
   d.signal_strength = input.signalStrengthScore;
 
   const emaOk = input.entryPolicyDetail.ema_aligned === true;
+  const emaSoft = input.entryPolicyDetail.trend_ema_soft_pass === true;
   if (emaOk) {
     score += 12;
     d.ema_aligned_bonus = true;
+  } else if (emaSoft) {
+    score += 4;
+    d.trend_ema_soft_pass = true;
   }
 
   const pullbackOk = input.entryPolicyDetail.pullback_ok === true;

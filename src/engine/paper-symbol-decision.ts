@@ -18,7 +18,7 @@ import { stopLossPctForRegime } from "../strategy/regime-exit";
 import type { RiskControlDecision } from "./risk-control-layer";
 import type { FuturesMarketMode } from "../strategy/live-market-mode";
 import { runFuturesAdaptiveEntry, type FuturesAdaptiveEntryResult } from "../strategy/live-entry-pipeline";
-import { computePaperSizingAnchorUsd } from "../strategy/live-position-sizing";
+import { computePaperSizingAnchorUsd, MIN_POSITION_SIZE_USD } from "../strategy/live-position-sizing";
 import {
   STRONG_SCORE,
   TREND_POLICY_MIN_VOLUME_RATIO_PROXY,
@@ -33,6 +33,7 @@ import { highwayExecutorEvaluateEntry } from "./highway-entry-executor";
 import type { AnyEntryDecision } from "../strategy/executors/types";
 import type { EntryExecutionAuthority } from "../engine-v2/types";
 import { resolveSymbolDecisionEnvelope } from "../engine-v2/reconciler";
+import { parseEngineV2OpModeFromEnv } from "../engine-v2/op-mode";
 import { aiApproveEntry, aiInputFromDecision } from "../ai/entry-approval";
 import { HighwayTrendState } from "../models/types";
 import { evaluateAiHighwayQuality } from "../engine/ai-highway-filter";
@@ -1286,7 +1287,7 @@ function pack(
 
 /** Internal candidate discovery for V2 authority when not injected from caller. */
 function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): EntryExecutionAuthority {
-  const configuredV2Mode = (process.env.ORBITALPHA_ENGINE_V2_MODE as any) || "legacy";
+  const configuredV2Mode = parseEngineV2OpModeFromEnv(process.env.ORBITALPHA_ENGINE_V2_MODE);
   // When the caller is evaluating RANGE, do not allow legacy mode to own final execution authority.
   const v2Mode = input.regime === "RANGE" ? "engine_v2" : configuredV2Mode;
   const sn = input.snapshot;
@@ -3817,6 +3818,30 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       trendVolumeRelaxProof = null;
     }
 
+    const trendEmaSoftGate =
+      authority.decision === "ENTER" &&
+      authority.source === "v2" &&
+      input.adaptiveMode === "trend";
+
+    const effectiveV2ModeForLog =
+      input.regime === "RANGE" ? "engine_v2" : parseEngineV2OpModeFromEnv(process.env.ORBITALPHA_ENGINE_V2_MODE);
+
+    console.log("[ENTRY_EXECUTION_AUTHORITY_TRACE]", {
+      symbol: String(sym),
+      authority_owner: authority.source,
+      authority_decision: authority.decision,
+      configured_v2_mode: parseEngineV2OpModeFromEnv(process.env.ORBITALPHA_ENGINE_V2_MODE),
+      effective_v2_mode_in_decision: effectiveV2ModeForLog,
+      final_engine_owner: authority.source === "v2" ? "engine_v2" : "legacy_selector",
+      block_owner: null,
+      hard_block_reason: null,
+      soft_pass_applied: trendEmaSoftGate,
+      trend_ema_soft_gate: trendEmaSoftGate,
+      regime_at_decision: input.regime,
+      executor_at_decision: strategy_executor,
+      adaptive_mode: input.adaptiveMode
+    });
+
     adaptive = runFuturesAdaptiveEntry({
       mode: input.adaptiveMode,
       modeDetail: input.adaptiveDetail,
@@ -3835,7 +3860,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       baseSizeUsd: computePaperSizingAnchorUsd(input.config) * dynamicSizeMult,
       stage1RangeAdaptiveSoftExplore,
       trendVolumeRatioMinOverride,
-      trendVolumeRelaxProof
+      trendVolumeRelaxProof,
+      trendEmaSoftGate
     });
     adaptiveDetailOut = adaptive.detail ?? null;
 
@@ -3882,6 +3908,32 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       adaptiveOk = true;
       adaptiveDetailOut = (adaptive as any).detail ?? null;
 
+      const bypassSide =
+        authority.side === "long" || authority.side === "short"
+          ? authority.side
+          : intentSide === "long" || intentSide === "short"
+            ? intentSide
+            : null;
+      const authUsd =
+        typeof authority.sizeUsd === "number" && Number.isFinite(authority.sizeUsd) && authority.sizeUsd > 0
+          ? authority.sizeUsd
+          : 0;
+      const anchorMult = computePaperSizingAnchorUsd(input.config) * dynamicSizeMult;
+      if (bypassSide != null) {
+        adaptive = {
+          ok: true,
+          direction: bypassSide,
+          sizeUsd: Math.max(MIN_POSITION_SIZE_USD, authUsd > 0 ? authUsd : anchorMult),
+          leverageMultiplier: 1,
+          detail: {
+            source: "v2_authority_policy_bypass_synthetic_adaptive",
+            parked_fail_stage: af.failStage,
+            parked_fail_reason: af.orderBuildFailReason,
+            parked_policy_detail: af.detail ?? null
+          }
+        };
+      }
+
       console.log("[AUTHORITY_ADAPTIVE_Bypass_POLICY_VETO]", {
         authority_decision: authority.decision,
         authority_source: authority.source,
@@ -3890,7 +3942,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         parked_fail_stage: af.failStage,
         parked_fail_reason: af.orderBuildFailReason,
         final_block_owner: null,
-        decision_action: "BYPASS_VETO_PROCEED_TO_EXECUTION"
+        decision_action: "BYPASS_VETO_PROCEED_TO_EXECUTION",
+        authority_owner: authority.source,
+        block_owner: "adaptive_policy_bypassed_by_v2",
+        hard_block_reason: null,
+        soft_pass_applied: true,
+        regime_at_decision: input.regime,
+        executor_at_decision: strategy_executor
       });
     } else {
       // Physical failure (sizing) or Policy failure without V2 override
@@ -3906,11 +3964,17 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         authority_source: authority?.source ?? null,
         authority_side: authority?.side ?? null,
         authority_size_usd: authority?.sizeUsd ?? null,
+        authority_owner: authority?.source ?? null,
         adaptive_ok: false,
         fail_stage: af.failStage ?? null,
         fail_reason: af.orderBuildFailReason ?? null,
         reject_reason: finalRejectReason,
         final_block_owner: blockOwner,
+        block_owner: blockOwner,
+        hard_block_reason: isEntryPolicyFailure ? String(af.orderBuildFailReason ?? "") : null,
+        soft_pass_applied: false,
+        regime_at_decision: input.regime,
+        executor_at_decision: strategy_executor,
         signal: sn?.signal ?? null,
         trend_ok: sn?.trendOk ?? null
       });

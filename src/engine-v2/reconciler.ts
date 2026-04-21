@@ -252,8 +252,7 @@ export function resolveSymbolDecisionEnvelope(
             adoption_reason = "shadow_compare_only";
         }
     } else {
-        // Default for "legacy" or any other mode
-        adoption_reason = "legacy_mode_default";
+        adoption_reason = v2Mode === "legacy" ? "legacy_mode_explicit" : "legacy_mode_unknown";
     }
 
     const v2FinalDecision = v2Res.decision.decision;

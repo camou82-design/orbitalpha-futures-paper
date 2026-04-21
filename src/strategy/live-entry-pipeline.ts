@@ -61,6 +61,8 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
   trendVolumeRatioMinOverride?: number | null;
   /** TREND: 완화 적용/미적용 진단(`paper-symbol-decision`에서만 설정). */
   trendVolumeRelaxProof?: Record<string, unknown> | null;
+  /** V2 ENTER + TREND: EMA/볼륨 하한 soft gate (`evaluateEntryPolicy`). */
+  trendEmaSoftGate?: boolean;
 }>): FuturesAdaptiveEntryResult {
   const relaxProofBag =
     input.trendVolumeRelaxProof != null ? { trend_volume_relax_proof: input.trendVolumeRelaxProof } : {};
@@ -83,7 +85,8 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
     ema60: input.snap.ema60,
     latestCandleClose: input.snap.latestCandleClose,
     lastPrice: input.snap.lastPrice,
-    volumeRatioProxy: input.snap.volumeRatioProxy
+    volumeRatioProxy: input.snap.volumeRatioProxy,
+    trendEmaSoftGate: input.trendEmaSoftGate === true
   } as const;
 
   let policy = evaluateEntryPolicy({
