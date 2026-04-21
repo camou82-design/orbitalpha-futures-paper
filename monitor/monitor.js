@@ -143,11 +143,18 @@
     return null;
   }
 
-  function entryMarginUsd(pos) {
-    const a = coerceFinite(pos.sizeUsd);
-    if (a !== null && a > 0) return a;
-    const b = coerceFinite(pos.initialSizeUsd);
-    if (b !== null && b > 0) return b;
+  function entryNotionalUsd(pos) {
+    const sizeUsd = coerceFinite(pos.sizeUsd);
+    if (sizeUsd !== null && sizeUsd > 0) return sizeUsd;
+    return null;
+  }
+
+  function marginUsdFromPosition(pos) {
+    const marginUsd = coerceFinite(pos.marginUsd);
+    if (marginUsd !== null && marginUsd > 0) return marginUsd;
+    const sizeUsd = entryNotionalUsd(pos);
+    const lev = coerceFinite(pos.leverage);
+    if (sizeUsd !== null && lev !== null && lev > 0) return sizeUsd / lev;
     return null;
   }
 
@@ -167,7 +174,8 @@
   function normalizeOpenPos(pos) {
     if (!pos || typeof pos !== "object") return null;
     return {
-      margin: entryMarginUsd(pos),
+      sizeUsd: entryNotionalUsd(pos),
+      marginUsd: marginUsdFromPosition(pos),
       leverage: coerceFinite(pos.leverage) ?? 1,
       entryPrice: coerceFinite(pos.entryPrice),
       openedAt: coerceFinite(pos.openedAt) ?? coerceFinite(pos.firstOpenedAt),
@@ -183,13 +191,13 @@
   function unrealizedUsdResolved(n, mark) {
     const pos = n.raw;
     if (n.engineUnreal !== null && Number.isFinite(n.engineUnreal)) return n.engineUnreal;
-    if (n.unrealPct !== null && n.margin !== null && n.margin > 0) return (n.margin * n.unrealPct) / 100;
-    if (mark === null || n.entryPrice === null || n.entryPrice <= 0 || n.margin === null || n.margin <= 0) return null;
+    if (n.unrealPct !== null && n.marginUsd !== null && n.marginUsd > 0) return (n.marginUsd * n.unrealPct) / 100;
+    if (mark === null || n.entryPrice === null || n.entryPrice <= 0 || n.marginUsd === null || n.marginUsd <= 0) return null;
     const lev = n.leverage;
     const gross =
       pos.side === "long"
-        ? ((mark - n.entryPrice) / n.entryPrice) * n.margin * lev
-        : ((n.entryPrice - mark) / n.entryPrice) * n.margin * lev;
+        ? ((mark - n.entryPrice) / n.entryPrice) * n.marginUsd * lev
+        : ((n.entryPrice - mark) / n.entryPrice) * n.marginUsd * lev;
     return Number.isFinite(gross) ? gross : null;
   }
 
@@ -262,7 +270,7 @@
     if (typeof gross !== "number" || !Number.isFinite(gross)) return null;
     const entry = coerceFinite(pos.entryPrice);
     const lev = coerceFinite(pos.leverage);
-    const margin = entryMarginUsd(pos);
+    const margin = marginUsdFromPosition(pos);
     if (entry === null || lev === null || margin === null || entry <= 0 || lev <= 0 || margin <= 0) return gross;
     const notionalOpen = margin * lev;
     const exitMark = typeof mark === "number" && Number.isFinite(mark) && mark > 0 ? mark : entry;
@@ -343,7 +351,7 @@
       const sym = o.symbol;
       const snap = snapBySymbol(bundle, sym);
       const mark = markForOpen(bundle, sym, o, snap);
-      const m = n.margin;
+      const m = n.marginUsd;
       if (typeof m === "number" && Number.isFinite(m) && m > 0) totalMargin += m;
       const u = unrealizedUsdResolved(n, mark);
       if (typeof u === "number" && Number.isFinite(u)) totalUnreal += u;
@@ -880,13 +888,14 @@
         const lev = n ? n.leverage : 1;
         const mark = n ? markForOpen(bundle, sym, pos, s) : null;
         const uPnLRaw = estimateNetPnlUsd(pos, mark);
-        const uPnL = uPnLRaw !== null ? uPnLRaw : n && n.margin !== null ? 0 : null;
-        const margin = n ? n.margin : null;
-        const uPct = fmtPctPos(uPnL, margin);
+        const uPnL = uPnLRaw !== null ? uPnLRaw : n && n.marginUsd !== null ? 0 : null;
+        const sizeUsd = n ? n.sizeUsd : null;
+        const marginUsd = n ? n.marginUsd : null;
+        const uPct = fmtPctPos(uPnL, marginUsd);
         const uClass = pnlToneClass(typeof uPnL === "number" ? uPnL : 0);
         const realized = n ? n.realized : 0;
         const rClass = pnlToneClass(realized);
-        const equity = margin !== null && uPnL !== null ? margin + uPnL : margin;
+        const equity = marginUsd !== null && uPnL !== null ? marginUsd + uPnL : marginUsd;
         const esN = pos.entryStage != null && pos.entryStage > 0 ? pos.entryStage : 1;
         const pes = pos.partialExitStage ?? 0;
         const sideK = pos.side === "long" ? "LONG" : pos.side === "short" ? "SHORT" : String(pos.side);
@@ -900,7 +909,7 @@
         <article class="${cardClass}">
           <div class="pos-money-strip pos-money-strip--primary" aria-label="포지션 손익 5항목">
             <div class="pos-money-cell">
-              <span class="pos-money-num tabular-nums">${esc(fmtUsdPosNoDecimal(margin))}</span>
+              <span class="pos-money-num tabular-nums">${esc(fmtUsdPosNoDecimal(sizeUsd))}</span>
               <span class="pos-money-lbl">진입금액(USD)</span>
             </div>
             <div class="pos-money-cell">
