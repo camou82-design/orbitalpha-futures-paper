@@ -7,6 +7,7 @@
  *   PORT — default 3991
  */
 import path from "node:path";
+import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 import express, { Request, Response } from "express";
@@ -19,13 +20,24 @@ const PORT = Number(process.env.PORT ?? 3991);
 const secret = process.env.ORBITALPHA_FUTURES_PAPER_API_SECRET?.trim();
 const root = process.env.ORBITALPHA_FUTURES_PAPER_ROOT?.trim();
 
-/** bundle cache TTL (ms); 5–15s 권장, 폴링 5s에서 upstream 재생성 폭주 완화 */
-export const FUTURES_PAPER_DATA_CACHE_TTL_MS = 10_000;
+const DATA_ROUTE_TIMEOUT_MS = Number(process.env.FUTURES_PAPER_DATA_ROUTE_TIMEOUT_MS ?? 2_500);
+const HEALTH_ROUTE_TIMEOUT_MS = Number(process.env.FUTURES_PAPER_HEALTH_ROUTE_TIMEOUT_MS ?? 800);
+const LATEST_SNAPSHOT_PATH = path.join("data", "snapshots", "latest.json");
+const SUMMARY_PATH = path.join("data", "reports", "summary.json");
+const SUMMARY_WINDOW_PATH = path.join("data", "reports", "summary-window.json");
+const SUMMARY_HEALTH_PATH = path.join("data", "reports", "summary-health.json");
 
-type BundleCacheEntry = Readonly<{ bundle: unknown; ts: number }>;
+type DataBundle = Readonly<{
+  configured: boolean;
+  configHint: string | null;
+  summary: unknown | null;
+  summaryWindow: unknown | null;
+  summaryHealth: unknown | null;
+  latestSnapshot: unknown | null;
+  generatedAt: number;
+}>;
 
-let bundleCache: BundleCacheEntry | null = null;
-let bundleRebuild: Promise<unknown> | null = null;
+let lastKnownSafeBundle: DataBundle | null = null;
 
 const isProd = process.env.NODE_ENV === "production";
 if (!isProd) {
@@ -56,86 +68,129 @@ app.disable("x-powered-by");
 app.use("/monitor", express.static(monitorDir));
 
 app.get("/health", (_req: Request, res: Response) => {
-  res.json({
-    ok: true,
-    status: secret && root ? "ok" : "misconfigured",
-    service: "lightsail-futures-paper-api",
-    timestamp: Date.now()
-  });
+  const startedAt = Date.now();
+  const timer = setTimeout(() => {
+    console.error("[lightsail-futures-paper-api] health_hit timeout", {
+      elapsedMs: Date.now() - startedAt,
+      timeoutMs: HEALTH_ROUTE_TIMEOUT_MS
+    });
+    if (!res.headersSent) {
+      res.status(503).json({
+        ok: false,
+        error: "health_timeout",
+        service: "lightsail-futures-paper-api",
+        timestamp: Date.now()
+      });
+    }
+  }, HEALTH_ROUTE_TIMEOUT_MS);
+  timer.unref();
+
+  try {
+    const body = {
+      ok: true,
+      alive: true,
+      service: "lightsail-futures-paper-api",
+      timestamp: Date.now()
+    };
+    res.json(body);
+    console.info("[lightsail-futures-paper-api] health_hit", {
+      elapsedMs: Date.now() - startedAt
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 });
 
-async function loadBundleFromDisk(projectRoot: string): Promise<unknown> {
-  const bundleCore = await import("../src/lib/futuresPaperBundleCore.ts");
-  const loadFuturesPaperBundleFromDiskRoot = (
-    bundleCore as { loadFuturesPaperBundleFromDiskRoot?: (r: string) => Promise<unknown> }
-  ).loadFuturesPaperBundleFromDiskRoot;
-  if (typeof loadFuturesPaperBundleFromDiskRoot !== "function") {
-    throw new Error("bundle_loader_unavailable");
-  }
-  return loadFuturesPaperBundleFromDiskRoot(projectRoot);
+function timeoutPromise<T>(ms: number, message: string): Promise<T> {
+  return new Promise<T>((_, reject) => {
+    const t = setTimeout(() => reject(new Error(message)), ms);
+    t.unref();
+  });
 }
 
-/**
- * - TTL 안: 즉시 hit.
- * - TTL 만료 + 이전 성공 캐시 있음: **즉시 stale(이전 번들)** 반환하고 백그라운드에서 단일 in-flight 재생성
- *   → 폴링이 rebuild 완료를 기다리며 게이트웨이 타임아웃(504)에 걸릴 확률을 줄임.
- * - 캐시 없음(최초 등): in-flight 공유하며 await → miss(또는 실패 시 throw).
- * - 재생성 실패 + 이전 캐시 있음: stale.
- */
-async function getFuturesPaperDataBundleCached(projectRoot: string): Promise<{
-  bundle: unknown;
-  cache: "hit" | "miss" | "stale";
-}> {
-  const now = Date.now();
-  if (bundleCache !== null && now - bundleCache.ts < FUTURES_PAPER_DATA_CACHE_TTL_MS) {
-    return { bundle: bundleCache.bundle, cache: "hit" };
+async function readJsonSafe(projectRoot: string, relPath: string): Promise<{ file: string; value: unknown | null }> {
+  const fullPath = path.join(projectRoot, relPath);
+  try {
+    const raw = await fs.readFile(fullPath, "utf8");
+    if (!raw.trim()) return { file: relPath, value: null };
+    return { file: relPath, value: JSON.parse(raw) as unknown };
+  } catch {
+    return { file: relPath, value: null };
   }
+}
 
-  const startInFlightRebuild = (): void => {
-    if (bundleRebuild) return;
-    bundleRebuild = loadBundleFromDisk(projectRoot)
-      .then((b) => {
-        bundleCache = { bundle: b, ts: Date.now() };
-        return b;
-      })
-      .finally(() => {
-        bundleRebuild = null;
-      });
-    void bundleRebuild.catch((err) => {
-      console.error("[lightsail-futures-paper-api] bundle refresh failed", err);
-    });
+async function loadDataBundleFromStaticFiles(projectRoot: string): Promise<{ bundle: DataBundle; readFiles: string[] }> {
+  const [latestSnapshot, summary, summaryWindow, summaryHealth] = await Promise.all([
+    readJsonSafe(projectRoot, LATEST_SNAPSHOT_PATH),
+    readJsonSafe(projectRoot, SUMMARY_PATH),
+    readJsonSafe(projectRoot, SUMMARY_WINDOW_PATH),
+    readJsonSafe(projectRoot, SUMMARY_HEALTH_PATH)
+  ]);
+  const readFiles = [latestSnapshot.file, summary.file, summaryWindow.file, summaryHealth.file];
+  const bundle: DataBundle = {
+    configured: true,
+    configHint: null,
+    latestSnapshot: latestSnapshot.value,
+    summary: summary.value,
+    summaryWindow: summaryWindow.value,
+    summaryHealth: summaryHealth.value,
+    generatedAt: Date.now()
   };
-
-  if (bundleCache !== null) {
-    startInFlightRebuild();
-    return { bundle: bundleCache.bundle, cache: "stale" };
-  }
-
-  if (!bundleRebuild) {
-    startInFlightRebuild();
-  }
-
-  const bundle = await bundleRebuild!;
-  return { bundle, cache: "miss" };
+  return { bundle, readFiles };
 }
 
 app.get("/api/futures-paper/data", async (req: Request, res: Response) => {
+  const startedAt = Date.now();
+  console.info("[lightsail-futures-paper-api] data_route_start", { startedAt });
   const token = requestPaperToken(req);
   if (!secret || token !== secret) {
+    console.error("[lightsail-futures-paper-api] data_route_fail", {
+      reason: "unauthorized",
+      elapsedMs: Date.now() - startedAt
+    });
     res.status(401).json({ error: "unauthorized" });
     return;
   }
   if (!root) {
+    console.error("[lightsail-futures-paper-api] data_route_fail", {
+      reason: "misconfigured_root",
+      elapsedMs: Date.now() - startedAt
+    });
     res.status(500).json({ error: "ORBITALPHA_FUTURES_PAPER_ROOT not set" });
     return;
   }
   try {
-    const { bundle, cache } = await getFuturesPaperDataBundleCached(root);
-    res.setHeader("X-Orbitalpha-Futures-Paper-Bundle-Cache", cache);
+    const { bundle, readFiles } = await Promise.race([
+      loadDataBundleFromStaticFiles(root),
+      timeoutPromise<{ bundle: DataBundle; readFiles: string[] }>(DATA_ROUTE_TIMEOUT_MS, "data_route_timeout")
+    ]);
+    lastKnownSafeBundle = bundle;
+    res.setHeader("X-Orbitalpha-Futures-Paper-Source", "static-snapshot");
+    res.setHeader("X-Orbitalpha-Futures-Paper-Read-Files", readFiles.join(","));
     res.json(bundle);
+    console.info("[lightsail-futures-paper-api] data_route_success", {
+      elapsedMs: Date.now() - startedAt,
+      readFiles
+    });
   } catch (e) {
-    console.error("[lightsail-futures-paper-api]", e);
-    res.status(500).json({ error: "bundle_failed" });
+    const message = e instanceof Error ? e.message : "bundle_failed";
+    if (lastKnownSafeBundle) {
+      res.setHeader("X-Orbitalpha-Futures-Paper-Source", "last-known-safe");
+      res.json(lastKnownSafeBundle);
+      console.error("[lightsail-futures-paper-api] data_route_fail", {
+        elapsedMs: Date.now() - startedAt,
+        reason: message,
+        fallback: "last-known-safe"
+      });
+      return;
+    }
+    console.error("[lightsail-futures-paper-api] data_route_fail", {
+      elapsedMs: Date.now() - startedAt,
+      reason: message,
+      fallback: "none"
+    });
+    const status = message === "data_route_timeout" ? 503 : 500;
+    res.status(status).json({ error: message });
   }
 });
 
