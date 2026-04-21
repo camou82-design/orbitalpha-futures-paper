@@ -99,7 +99,7 @@ export function reconcileV2Decision(
                 : 0
     };
 
-    const useV2 = engineMode === "engine_v2";
+    const useV2 = engineMode === "engine_v2" || engineMode === "shadow_v2";
 
     // Fresh object creation (No legacy mutation)
     const adopted_result: EngineV2AdoptionOutcome = {

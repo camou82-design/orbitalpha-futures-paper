@@ -888,6 +888,8 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   rangeStopReentryBlock?: RangeStopReentryBlock | null;
   /** 진단용 로거 (Proof logging). */
   logger?: { info: (event: string, payload?: any) => void };
+  /** `paper-engine` 라우팅 activeEngine — internal V2 MODE를 envelope과 동기(RANGE 강제 engine_v2). */
+  routingActiveEngine?: PaperEngineRoutingKind | null;
 }>;
 
 /** 상위 시장 모드·엔진·신규 방향 허용 — 시그널 레이어 TREND-UP 정렬(숏 후보 억제)용 */
@@ -1288,8 +1290,9 @@ function pack(
 /** Internal candidate discovery for V2 authority when not injected from caller. */
 function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): EntryExecutionAuthority {
   const configuredV2Mode = parseEngineV2OpModeFromEnv(process.env.ORBITALPHA_ENGINE_V2_MODE);
-  // When the caller is evaluating RANGE, do not allow legacy mode to own final execution authority.
-  const v2Mode = input.regime === "RANGE" ? "engine_v2" : configuredV2Mode;
+  const rangeLaneForcesV2 =
+    input.regime === "RANGE" || input.routingActiveEngine === "RANGE";
+  const v2Mode = rangeLaneForcesV2 ? "engine_v2" : configuredV2Mode;
   const sn = input.snapshot;
   if (!sn) {
     return { decision: "HOLD", source: "v2", side: "none", sizeUsd: 0, regime: "UNKNOWN" };
@@ -3824,7 +3827,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       input.adaptiveMode === "trend";
 
     const effectiveV2ModeForLog =
-      input.regime === "RANGE" ? "engine_v2" : parseEngineV2OpModeFromEnv(process.env.ORBITALPHA_ENGINE_V2_MODE);
+      input.regime === "RANGE" || input.routingActiveEngine === "RANGE"
+        ? "engine_v2"
+        : parseEngineV2OpModeFromEnv(process.env.ORBITALPHA_ENGINE_V2_MODE);
 
     console.log("[ENTRY_EXECUTION_AUTHORITY_TRACE]", {
       symbol: String(sym),

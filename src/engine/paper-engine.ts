@@ -1274,6 +1274,7 @@ export class PaperEngine {
           currentStage: existingPos?.entryStage ?? 0,
           rangeReversalImmediateSwitch: undefined,
           regimeExitConsumed: this.regimeExitConsumedBySymbol.get(symKeyEarly),
+          routingActiveEngine: marketModeOut.routing.activeEngine,
           logger: this.logger
         });
 
@@ -1321,6 +1322,7 @@ export class PaperEngine {
         rangeReversalImmediateSwitch: rangeReversalImmediateSwitchEarly,
         regimeExitConsumed: this.regimeExitConsumedBySymbol.get(symKeyEarly),
         rangeStopReentryBlock: this.rangeStopReentryBlockedBySymbol.get(symKeyEarly),
+        routingActiveEngine: marketModeOut.routing.activeEngine,
         logger: this.logger
       });
 
