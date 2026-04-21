@@ -1997,6 +1997,11 @@ export class PaperEngine {
     return elapsed >= 0 && elapsed < ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS;
   }
 
+  private isV2AuthorityPosition(open: PaperOpenPositionRecord): boolean {
+    const authSrc = String(open.authoritySourceAtEntry ?? open.authority ?? "").trim().toLowerCase();
+    return authSrc === "v2";
+  }
+
   /** true → 전량 청산을 이번 틱에서 하지 않고 유지(장세/레인 전환성). 손절·리스크 한도 등은 호출부에서 별도 허용. */
   private shouldDeferRegimeLaneTransitionClose(
     open: PaperOpenPositionRecord,
@@ -2187,8 +2192,19 @@ export class PaperEngine {
         const isShort = op.side === "short";
         const inheritedStrategyVersion = op.strategyVersion ?? "paper-v1";
 
-        // 1. Long Defense (Force Liquidate)
+        // 1. Long Defense (Force Liquidate) - legacy cleanup only.
         if (isLong) {
+          if (this.isV2AuthorityPosition(op)) {
+            this.logger.info("CRASH_LONG_DEFENSE_SKIPPED_V2_POSITION", {
+              symbol: op.symbol,
+              state: risk.crashState,
+              authority_owner: op.authoritySourceAtEntry ?? op.authority ?? null,
+              executor_at_entry: op.executorAtEntry ?? null,
+              regime_at_entry: op.regimeAtEntry ?? null
+            });
+            continue;
+          }
+
           const forceExit = risk.crashState === "CRASH_EXIT" || risk.crashState === "CRASH_LOCK";
           const forceReduce = risk.crashState === "CRASH_REDUCE";
 
@@ -4342,6 +4358,15 @@ export class PaperEngine {
           authority.side === "short" ? allowShortGuard : false;
 
       let finalBlockedReason: string | null = null;
+      const crashState = this.lastRisk?.crashState ?? "NONE";
+      const crashEntryGuardApplies =
+        authority.side === "long" &&
+        (crashState === "CRASH_REDUCE" || crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK");
+      const zone = typeof first.boxPos === "number" && Number.isFinite(first.boxPos) ? classifyBoxZone(first.boxPos) : null;
+      const ngeStage0UpperLongBlock =
+        authority.side === "long" &&
+        zone === "upper" &&
+        res.decision.range_stage0_engine_taken === true;
 
       // Opposite-leg / hedge: part of final gate (single blocked_reason source).
       let oppositeLegBlockedReason: string | null = null;
@@ -4359,8 +4384,12 @@ export class PaperEngine {
 
       if (authority.decision !== "ENTER") {
         finalBlockedReason = "AUTHORITY_DECISION_NOT_ENTER";
+      } else if (crashEntryGuardApplies) {
+        finalBlockedReason = "CRASH_ENTRY_GUARD_BLOCK";
       } else if (!validSide) {
         finalBlockedReason = "AUTHORITY_ENTER_WITH_INVALID_SIDE";
+      } else if (ngeStage0UpperLongBlock) {
+        finalBlockedReason = "NGE_STAGE0_UPPER_LONG_BLOCK";
       } else if (!sideAllowedByGuard) {
         finalBlockedReason = authority.side === "long" ? "SIDE_NOT_ALLOWED_LONG" : "SIDE_NOT_ALLOWED_SHORT";
       } else if (oppositeLegBlockedReason) {
@@ -4397,6 +4426,27 @@ export class PaperEngine {
         is_scale_in: existingIdx >= 0,
         ...buildAuthorityEventMeta(authority)
       });
+      if (finalBlockedReason === "CRASH_ENTRY_GUARD_BLOCK") {
+        this.logger.warn("CRASH_ENTRY_GUARD_BLOCK", {
+          symbol: sym,
+          crash_state: crashState,
+          final_decision: "SKIP",
+          reject_reason: finalBlockedReason,
+          authority_owner: authority.source,
+          active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null
+        });
+      }
+      if (finalBlockedReason === "NGE_STAGE0_UPPER_LONG_BLOCK") {
+        this.logger.warn("NGE_STAGE0_UPPER_LONG_BLOCK", {
+          symbol: sym,
+          zone,
+          range_stage0_engine_taken: res.decision.range_stage0_engine_taken ?? false,
+          final_decision: "SKIP",
+          reject_reason: finalBlockedReason,
+          authority_owner: authority.source,
+          active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null
+        });
+      }
 
       if (!finalEntryAuthorization) {
         // Report specific block event to events.jsonl
