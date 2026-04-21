@@ -18,6 +18,7 @@ import { stopLossPctForRegime } from "../strategy/regime-exit";
 import type { RiskControlDecision } from "./risk-control-layer";
 import type { FuturesMarketMode } from "../strategy/live-market-mode";
 import { runFuturesAdaptiveEntry, type FuturesAdaptiveEntryResult } from "../strategy/live-entry-pipeline";
+import { computePaperSizingAnchorUsd } from "../strategy/live-position-sizing";
 import {
   STRONG_SCORE,
   TREND_POLICY_MIN_VOLUME_RATIO_PROXY,
@@ -976,8 +977,6 @@ export type EvaluatePaperSymbolEntryResult = Readonly<{
   aiGatePassed: boolean;
 }>;
 
-const DEFAULT_PAPER_SIZE_USD = 100;
-
 /** TREND adaptive 직전: 볼륨 하한 완화 적용 여부·미적용 사유를 proof로 고정. */
 function computeTrendVolumeRelaxForAdaptive(input: Readonly<{
   adaptiveMode: FuturesMarketMode;
@@ -1322,7 +1321,7 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
       adaptiveOk: false
     },
     config: {
-      baseSizeUsd: input.config.paperBaseSizeUsd,
+      baseSizeUsd: computePaperSizingAnchorUsd(input.config),
       maxOpenPositions: input.config.paperMaxOpenPositions,
       reentryCooldownMs: input.config.paperReentryCooldownMs
     },
@@ -1806,7 +1805,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
   stage1_leniency_applied = input.currentStage === 0 && leniency < 1.0;
 
-  const refNotionalUsd = DEFAULT_PAPER_SIZE_USD;
+  const refNotionalUsd = computePaperSizingAnchorUsd(input.config);
   fixedUsd = input.config.paperFixedTotalCostUsd;
   useFixedCost = fixedUsd !== null && fixedUsd > 0;
 
@@ -3833,7 +3832,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         emaGap: sn!.emaGap,
         volumeRatioProxy: sn!.volumeRatioProxy
       },
-      baseSizeUsd: DEFAULT_PAPER_SIZE_USD * dynamicSizeMult,
+      baseSizeUsd: computePaperSizingAnchorUsd(input.config) * dynamicSizeMult,
       stage1RangeAdaptiveSoftExplore,
       trendVolumeRatioMinOverride,
       trendVolumeRelaxProof
@@ -3895,7 +3894,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       });
     } else {
       // Physical failure (sizing) or Policy failure without V2 override
-      const finalRejectReason = isEntryPolicyFailure ? "ADAPTIVE_POLICY_BLOCK" : "ORDER_BUILD_FAIL";
+      const finalRejectReason = isEntryPolicyFailure
+        ? "ADAPTIVE_POLICY_BLOCK"
+        : af.orderBuildFailReason === "SIZE_FLOOR_BLOCK"
+          ? "SIZE_FLOOR_BLOCK"
+          : "ORDER_BUILD_FAIL";
       const blockOwner = isEntryPolicyFailure ? "adaptive_policy" : "adaptive_sizing";
 
       console.log("[ENTRY_EXECUTION_BLOCKED_BY_ADAPTIVE]", {
@@ -4003,7 +4006,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const authorityExpectancySoftPassSizeMult =
     reject_reason === "AUTHORITY_EXPECTANCY_SOFT_PASS" ? 0.45 : 1.0;
 
-  const initialEntryQty = (DEFAULT_PAPER_SIZE_USD * dynamicSizeMult * rangeSoftPassSizeMult * authorityAdaptiveSoftPassSizeMult * authorityExpectancySoftPassSizeMult) / sn!.lastPrice;
+  const initialEntryQty =
+    adaptive?.ok === true && typeof adaptive.sizeUsd === "number" && Number.isFinite(adaptive.sizeUsd) && sn!.lastPrice > 0
+      ? adaptive.sizeUsd / sn!.lastPrice
+      : 0;
   if (initialEntryQty <= 0) {
     console.log("[ORDER_BUILD_ZERO_QTY_PROOF]", {
       authority_decision: authority?.decision ?? null,

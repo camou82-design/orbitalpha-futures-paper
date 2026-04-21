@@ -78,8 +78,18 @@ export type EngineConfig = Readonly<{
    * Reduces whipsaw from box recalculation / edge jitter shortly after entry.
    */
   rangeRebalanceMinHoldMs: number;
-  /** Paper-only: base position size in USD if not overridden by dynamic sizing. */
+  /** Paper-only: base position size in USD (anchor when `paperAccountEquityUsd` is unset). Env: `ORBITALPHA_PAPER_BASE_SIZE_USD`. */
   paperBaseSizeUsd: number;
+  /**
+   * Optional account equity (USD). When set (>0), sizing anchor = `paperAccountEquityUsd * paperEntryNotionalTargetFrac`.
+   * Env: `ORBITALPHA_PAPER_ACCOUNT_EQUITY_USD`.
+   */
+  paperAccountEquityUsd: number | null;
+  /**
+   * Fraction of equity (or 1.0 when using `paperBaseSizeUsd` only) applied to the sizing anchor. E.g. 0.98 ≈ almost full notional.
+   * Env: `ORBITALPHA_PAPER_ENTRY_NOTIONAL_TARGET_FRAC` (default 1).
+   */
+  paperEntryNotionalTargetFrac: number;
   /**
    * RANGE box-break exit: consecutive close-evaluation ticks with raw price outside box before exiting (>=2).
    * Single-tick spikes or one-off reclassification alone do not clear the bar.
@@ -152,7 +162,7 @@ export type EngineConfig = Readonly<{
   paperFeeDragBlockShortfallPctMin: number;
   /**
    * Paper test: if set (>0), skip dynamic fee/slippage fraction for edge checks and use
-   * `required_cost_usd = paperFixedTotalCostUsd * leniency` vs `expected_move_usd = em * DEFAULT_PAPER_SIZE_USD`.
+   * `required_cost_usd = paperFixedTotalCostUsd * leniency` vs `expected_move_usd = em * paper_sizing_anchor_usd`.
    * Env: `PAPER_FIXED_TOTAL_COST_USD` (e.g. 30).
    */
   paperFixedTotalCostUsd: number | null;
@@ -205,6 +215,7 @@ export type PaperDecisionRejectReason =
   | "AUTHORITY_EXPECTANCY_SOFT_PASS"
   | "AUTHORITY_ADAPTIVE_SOFT_PASS"
   | "ADAPTIVE_POLICY_BLOCK"
+  | "SIZE_FLOOR_BLOCK"
   | "ORDER_BUILD_FAIL"
   | "EXECUTOR_INIT_FAIL"
   | "EXECUTION_DISABLED"

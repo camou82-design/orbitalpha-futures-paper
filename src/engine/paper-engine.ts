@@ -30,7 +30,7 @@ import type { PaperCandidateStrength, PaperSignal } from "../strategy/entry-sign
 import type { FuturesMarketMode } from "../strategy/live-market-mode";
 import { evaluateRegimeExitPolicy, stopLossPctForRegime } from "../strategy/regime-exit";
 import { evaluatePartialExitPolicy, defaultPartialExitRatioForStage } from "../strategy/live-partial-exit-policy";
-import { MIN_POSITION_SIZE_USD } from "../strategy/live-position-sizing";
+import { computePaperSizingAnchorUsd, MIN_POSITION_SIZE_USD } from "../strategy/live-position-sizing";
 import {
   entryGateHigherTfKlineLimit,
   entryGateHigherTimeframe,
@@ -141,7 +141,6 @@ const EP = {
   funding: "/v5/market/funding/history"
 } as const;
 
-const DEFAULT_PAPER_SIZE_USD = 100;
 const SAME_DIR_REENTRY_COOLDOWN_MULT = 1.35;
 const RANGE_REVERSAL_SWITCH_PENDING_MS = 90_000;
 
@@ -4543,7 +4542,7 @@ export class PaperEngine {
         }
       }
       if (isRangeCampaignNewEntry) {
-        const paperBase = this.config.paperBaseSizeUsd;
+        const paperBase = computePaperSizingAnchorUsd(this.config);
         const campaignTotalUsd = paperBase * RANGE_CAMPAIGN_TOTAL_RATIO;
         const campaignInitialUsd = paperBase * RANGE_INITIAL_RATIO;
         const campaignAddOnUsd = paperBase * RANGE_ADD_ON_RATIO;
@@ -5123,7 +5122,7 @@ export class PaperEngine {
       targetStage = 2;
       scalingWeights = [0.5, 0.5];
       rangeAddOnSizeMultApplied = 1;
-      const paperBase = this.config.paperBaseSizeUsd;
+      const paperBase = computePaperSizingAnchorUsd(this.config);
       const riskM = this.lastRiskExposure?.sizeMultiplier ?? 1;
       const plannedAddOnUsd = paperBase * RANGE_ADD_ON_RATIO;
       const riskScaledAddOnUsd = plannedAddOnUsd * riskM;
@@ -5902,7 +5901,7 @@ function buildV2LegacyBridge(res: EvaluatePaperSymbolEntryResult): V2BridgeLegac
 
 function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
   return {
-    baseSizeUsd: config.paperBaseSizeUsd,
+    baseSizeUsd: computePaperSizingAnchorUsd(config),
     maxOpenPositions: config.paperMaxOpenPositions,
     reentryCooldownMs: config.paperReentryCooldownMs
   };

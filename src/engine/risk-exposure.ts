@@ -1,6 +1,7 @@
 import type { EngineConfig, MarketModeSelectorOutput, RiskExposureOutput, PaperRiskMode } from "../models/types";
 import type { RiskControlDecision } from "./risk-control-layer";
 import type { Logger } from "../logs/logger";
+import { computePaperSizingAnchorUsd } from "../strategy/live-position-sizing";
 
 export type RiskExposureInput = Readonly<{
   config: EngineConfig;
@@ -142,7 +143,7 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
   const finalShortSizeMult = clamp(shortSizeMultiplier * opportunityBias, 0.12, 1.48);
 
   const maxSlots = Math.max(1, config.paperMaxOpenPositions);
-  const perSlot = 100;
+  const perSlot = Math.max(1, computePaperSizingAnchorUsd(config));
   let maxLongExposure = perSlot * maxSlots;
   let maxShortExposure = perSlot * maxSlots;
 

@@ -1,3 +1,4 @@
+import type { EngineConfig } from "../models/types";
 import type { FuturesMarketMode } from "./live-market-mode";
 import type { ConfidenceTier } from "./live-trade-confidence";
 
@@ -12,7 +13,32 @@ export type AdaptiveSizingResult = Readonly<{
 export const MIN_POSITION_SIZE_USD = 15;
 
 /**
+ * Paper sizing anchor: `paperAccountEquityUsd * paperEntryNotionalTargetFrac` when equity is set; else `paperBaseSizeUsd`.
+ */
+export function computePaperSizingAnchorUsd(
+  config: Readonly<
+    Pick<EngineConfig, "paperBaseSizeUsd" | "paperAccountEquityUsd" | "paperEntryNotionalTargetFrac">
+  >
+): number {
+  const frac =
+    Number.isFinite(config.paperEntryNotionalTargetFrac) && config.paperEntryNotionalTargetFrac > 0
+      ? Math.min(1, config.paperEntryNotionalTargetFrac)
+      : 1;
+  if (
+    config.paperAccountEquityUsd != null &&
+    Number.isFinite(config.paperAccountEquityUsd) &&
+    config.paperAccountEquityUsd > 0
+  ) {
+    return Math.round(config.paperAccountEquityUsd * frac * 100) / 100;
+  }
+  const base =
+    Number.isFinite(config.paperBaseSizeUsd) && config.paperBaseSizeUsd > 0 ? config.paperBaseSizeUsd : 100;
+  return Math.round(base * 100) / 100;
+}
+
+/**
  * 모드 베이스 × 신뢰도 티어. 저신뢰는 차단 또는 최소만.
+ * 최소 명목(MIN)은 `runFuturesAdaptiveEntry` 종단에서만 강제(소프트 배수 이후).
  */
 export function calculateAdaptivePositionSize(input: Readonly<{
   mode: FuturesMarketMode;
@@ -53,7 +79,19 @@ export function calculateAdaptivePositionSize(input: Readonly<{
   }
 
   let raw = input.modeBaseSizeUsd * confMult * volMult;
-  raw = Math.max(MIN_POSITION_SIZE_USD, Math.min(input.baseSizeUsdCap, Math.round(raw * 100) / 100));
+  raw = Math.min(input.baseSizeUsdCap, Math.round(raw * 100) / 100);
+  if (raw <= 0 || !Number.isFinite(raw)) {
+    return {
+      sizeMultiplier: 0,
+      finalPositionSize: 0,
+      blocked: true,
+      blockReason: "position_size_invalid",
+      detail: {
+        mode: input.mode,
+        order_build_fail_reason: "size_invalid"
+      }
+    };
+  }
 
   const sizeMultiplier = input.modeBaseSizeUsd > 0 ? raw / input.modeBaseSizeUsd : confMult * volMult;
 

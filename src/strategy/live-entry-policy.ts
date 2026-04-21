@@ -326,9 +326,9 @@ export function calculatePositionSize(input: Readonly<{
     case "trend":
       return { sizeUsd: input.baseSizeUsd, leverageMultiplier: 1 };
     case "sideways":
-      return { sizeUsd: Math.max(1, input.baseSizeUsd * 0.5), leverageMultiplier: 0.75 };
+      return { sizeUsd: input.baseSizeUsd * 0.5, leverageMultiplier: 0.75 };
     case "risk_off":
-      return { sizeUsd: Math.max(1, input.baseSizeUsd * 0.25), leverageMultiplier: 0.5 };
+      return { sizeUsd: input.baseSizeUsd * 0.25, leverageMultiplier: 0.5 };
     default:
       return { sizeUsd: input.baseSizeUsd, leverageMultiplier: 1 };
   }

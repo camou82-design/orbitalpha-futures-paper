@@ -141,6 +141,15 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
   const paperModeSuspendMs =
     !Number.isFinite(paperModeSuspendMsParsed) || paperModeSuspendMsParsed < 0 ? 3_600_000 : Math.min(86_400_000, paperModeSuspendMsParsed);
   const paperBaseSizeUsd = parseNumber(env.ORBITALPHA_PAPER_BASE_SIZE_USD ?? env.DEFAULT_PAPER_SIZE_USD, 100);
+  const paperAccountEquityUsdRaw = env.ORBITALPHA_PAPER_ACCOUNT_EQUITY_USD;
+  let paperAccountEquityUsd: number | null = null;
+  if (paperAccountEquityUsdRaw !== undefined && String(paperAccountEquityUsdRaw).trim() !== "") {
+    const eq = Number(paperAccountEquityUsdRaw);
+    if (Number.isFinite(eq) && eq > 0) paperAccountEquityUsd = Math.min(1_000_000_000, Math.max(0.01, eq));
+  }
+  let paperEntryNotionalTargetFrac = parseNumber(env.ORBITALPHA_PAPER_ENTRY_NOTIONAL_TARGET_FRAC, 1);
+  if (!Number.isFinite(paperEntryNotionalTargetFrac) || paperEntryNotionalTargetFrac <= 0) paperEntryNotionalTargetFrac = 1;
+  paperEntryNotionalTargetFrac = Math.min(1, paperEntryNotionalTargetFrac);
 
   const aiBlockGoodThresholdPct = parseNumber(env.ORBITALPHA_AI_BLOCK_GOOD_THRESHOLD_PCT, -0.25);
   const aiBlockMissedThresholdPct = parseNumber(env.ORBITALPHA_AI_BLOCK_MISSED_THRESHOLD_PCT, 0.35);
@@ -207,6 +216,8 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     rangeRebalanceTrailAtrMult,
     rangeRebalanceTrailMaxArmedNoLockMs,
     paperBaseSizeUsd,
+    paperAccountEquityUsd,
+    paperEntryNotionalTargetFrac,
     paperSlippageBps,
     paperDailyLossLimitUsd,
     paperLast10NetDegradeThresholdUsd,

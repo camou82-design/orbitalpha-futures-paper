@@ -11,7 +11,7 @@ import {
 /** RANGE Stage1 실행기 소프트 이후 adaptive 1차 실패 시, 최종 명목에 한 번 더 곱함(아주 소액 탐색). */
 const STAGE1_RANGE_ADAPTIVE_SOFT_EXTRA_SIZE_MULT = 0.28;
 import { buildTradeConfidenceScore } from "./live-trade-confidence";
-import { calculateAdaptivePositionSize } from "./live-position-sizing";
+import { calculateAdaptivePositionSize, MIN_POSITION_SIZE_USD } from "./live-position-sizing";
 
 /** 스냅샷에서 적응형 진입 파이프라인 입력 (signal-monitor/entry-signal 산출 유지). */
 export type FuturesAdaptiveSnapshot = Readonly<{
@@ -213,7 +213,30 @@ export function runFuturesAdaptiveEntry(input: Readonly<{
 
   const softMult =
     stage1AdaptiveSoftExplore !== null ? STAGE1_RANGE_ADAPTIVE_SOFT_EXTRA_SIZE_MULT : 1;
-  const finalPositionSizeUsd = Math.max(1, adaptive.finalPositionSize * softMult);
+  const finalPositionSizeUsd = Math.round(adaptive.finalPositionSize * softMult * 100) / 100;
+  if (finalPositionSizeUsd < MIN_POSITION_SIZE_USD) {
+    return {
+      ok: false,
+      logMessage: `size_below_min_after_soft_mult:${finalPositionSizeUsd}<${MIN_POSITION_SIZE_USD}`,
+      orderBuildFailReason: "SIZE_FLOOR_BLOCK",
+      failStage: "adaptive_sizing",
+      detail: {
+        mode: input.mode,
+        direction,
+        symbol: input.snap.symbol,
+        signal_strength_score: input.snap.qualityScore,
+        confidence_score: confidence.confidenceScore,
+        confidence_tier: confidence.confidenceTier,
+        ...relaxProofBag,
+        ...confidence.detail,
+        ...adaptive.detail,
+        order_build_fail_reason: "SIZE_FLOOR_BLOCK",
+        final_position_size_usd_after_soft_mult: finalPositionSizeUsd,
+        min_position_size_usd: MIN_POSITION_SIZE_USD,
+        stage1_adaptive_soft_extra_size_mult: softMult
+      }
+    };
+  }
 
   return {
     ok: true,
