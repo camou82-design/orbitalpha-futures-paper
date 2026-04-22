@@ -269,10 +269,119 @@ async function readEventsTail(dataDir: string, maxLines: number): Promise<unknow
   return out;
 }
 
+const PUBLIC_BUNDLE_REL_PARTS = ["data", "reports", "public-futures-paper-bundle.json"] as const;
+
+function publishedBundlePath(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot.trim()), ...PUBLIC_BUNDLE_REL_PARTS);
+}
+
+function isFiniteRecordBundle(x: unknown): x is FuturesPaperDataBundle {
+  if (!x || typeof x !== "object") return false;
+  const o = x as Record<string, unknown>;
+  if (o.configured !== true) return false;
+  if (typeof o.generatedAt !== "number" || !Number.isFinite(o.generatedAt)) return false;
+  if (!Array.isArray(o.openPositions)) return false;
+  if (!Array.isArray(o.positionsHistory)) return false;
+  if (!Array.isArray(o.eventsRecent)) return false;
+  if (!Array.isArray(o.symbolRows)) return false;
+  return true;
+}
+
+/** Prefer the prebuilt public bundle (single-file read) when present and valid. */
+async function tryReadPublishedPublicBundle(projectRoot: string): Promise<FuturesPaperDataBundle | null> {
+  try {
+    const raw = await fs.readFile(publishedBundlePath(projectRoot), "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!isFiniteRecordBundle(parsed)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function mapHealthHistorySlice(lines: readonly unknown[]): FuturesPaperHealthHistoryItem[] {
+  const out: FuturesPaperHealthHistoryItem[] = [];
+  for (const line of lines) {
+    if (!line || typeof line !== "object") continue;
+    const j = line as Record<string, unknown>;
+    out.push({
+      generatedAt: typeof j.generatedAt === "number" ? j.generatedAt : undefined,
+      status: typeof j.status === "string" ? j.status : undefined,
+      reasons: Array.isArray(j.reasons) ? j.reasons.filter((x): x is string => typeof x === "string") : undefined
+    });
+  }
+  return out;
+}
+
 /**
- * Read orbitalpha-futures-paper `data/` from a local project root (Lightsail or dev).
+ * Build the public API bundle during `writePaperSummaryReport` without re-reading
+ * summary/dashboard/history inputs that are already in memory.
  */
-export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): Promise<FuturesPaperDataBundle> {
+export type ComposePublicFuturesPaperBundleInput = Readonly<{
+  projectRoot: string;
+  summary: unknown;
+  summaryRange: unknown;
+  summaryTrend: unknown;
+  summaryDaily: unknown;
+  summaryWindow: unknown;
+  summaryHealth: unknown;
+  dashboard: unknown;
+  /** Same rows as `positions/history.json` (pre-normalize). */
+  positionsHistoryRaw: unknown[];
+  /** Parsed objects from `readEventsJsonlFile` (or equivalent). */
+  eventsParsed: readonly unknown[];
+  /** Parsed rows from `readHealthHistoryJsonlFile` (or equivalent). */
+  healthHistoryParsed: readonly unknown[];
+}>;
+
+export async function composePublicFuturesPaperBundleForWrite(
+  input: ComposePublicFuturesPaperBundleInput
+): Promise<FuturesPaperDataBundle> {
+  const root = path.resolve(input.projectRoot.trim());
+  const dataDir = path.join(root, "data");
+  const [engineState, latestSnapshot, latestMeta, openPositions] = await Promise.all([
+    readJsonFile(path.join(dataDir, "reports", "engine-state.json")),
+    readJsonFile(path.join(dataDir, "snapshots", "latest.json")),
+    readJsonFile(path.join(dataDir, "snapshots", "latest-meta.json")),
+    readPositionsOpenArray(dataDir)
+  ]);
+
+  const symbolRows = pickSymbolRows(latestSnapshot);
+  const eventsRecent = input.eventsParsed.slice(-20);
+  const healthHistoryRecent = mapHealthHistorySlice(input.healthHistoryParsed.slice(-10));
+  const positionsHistory = normalizePositionsHistoryArray(input.positionsHistoryRaw);
+  const generatedAt = Date.now();
+  const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt);
+  const paperOperational = paperOperationalFromEngineState(engineState);
+
+  return {
+    configured: true,
+    configHint: null,
+    summary: input.summary,
+    summaryRange: input.summaryRange,
+    summaryTrend: input.summaryTrend,
+    summaryDaily: input.summaryDaily,
+    summaryWindow: input.summaryWindow,
+    summaryHealth: input.summaryHealth,
+    dashboard: input.dashboard,
+    engineState,
+    paperOperational,
+    latestSnapshot,
+    latestMeta,
+    symbolRows,
+    healthHistoryRecent,
+    ledgerPerformance,
+    openPositions,
+    positionsHistory,
+    eventsRecent,
+    generatedAt
+  };
+}
+
+/**
+ * Full disk assembly (bootstrap / missing public bundle). Avoid on hot request paths.
+ */
+async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): Promise<FuturesPaperDataBundle> {
   const root = path.resolve(projectRoot.trim());
   const dataDir = path.join(root, "data");
   const reports = path.join(dataDir, "reports");
@@ -338,4 +447,14 @@ export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): P
     eventsRecent,
     generatedAt
   };
+}
+
+/**
+ * Read orbitalpha-futures-paper `data/` from a local project root (Lightsail or dev).
+ * When `data/reports/public-futures-paper-bundle.json` exists, returns it with a single read.
+ */
+export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): Promise<FuturesPaperDataBundle> {
+  const published = await tryReadPublishedPublicBundle(projectRoot);
+  if (published) return published;
+  return assembleFuturesPaperBundleFromDiskSources(projectRoot);
 }

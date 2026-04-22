@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { readLastLines } from "../lib/file-utils";
+import { composePublicFuturesPaperBundleForWrite } from "../lib/futuresPaperBundleCore";
 
 import type { PaperClosedPositionRecord, PaperOpenPositionRecord } from "../models/types";
 import { migrateLegacyExecutorAtEntry } from "../strategy/executors/executor-normalize";
@@ -296,6 +297,7 @@ export class JsonStore {
     dailyPath: string;
     windowPath: string;
     healthPath: string;
+    publicBundlePath: string;
     health: PaperHealthReport;
   }> {
     const history = await this.readPositionsHistory();
@@ -325,7 +327,22 @@ export class JsonStore {
     const healthHistoryLines = await this.readHealthHistoryJsonlFile();
     const dashboard = buildPaperDashboard({ summary, window, health, healthHistoryLines });
     await this.writeJson("reports/dashboard.json", dashboard);
-    return { summaryPath, dailyPath, windowPath, healthPath, health };
+    const projectRoot = path.resolve(this.baseDir, "..");
+    const publicBundle = await composePublicFuturesPaperBundleForWrite({
+      projectRoot,
+      summary,
+      summaryRange: { generatedAt, ...byRegime.range },
+      summaryTrend: { generatedAt, ...byRegime.trend },
+      summaryDaily: daily,
+      summaryWindow: window,
+      summaryHealth: health,
+      dashboard,
+      positionsHistoryRaw: history,
+      eventsParsed: events,
+      healthHistoryParsed: healthHistoryLines
+    });
+    const publicBundlePath = await this.writeJson("reports/public-futures-paper-bundle.json", publicBundle);
+    return { summaryPath, dailyPath, windowPath, healthPath, publicBundlePath, health };
   }
 }
 

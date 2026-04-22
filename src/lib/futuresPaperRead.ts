@@ -4,7 +4,8 @@ import {
   normalizePositionsHistoryArray,
   paperOperationalFromEngineState
 } from "./futuresPaperBundleCore";
-import { buildLedgerPerformanceFromHistory } from "./futuresPaperLedgerStats";
+import { buildLedgerPerformanceFromHistory, type FuturesPaperLedgerPerformance } from "./futuresPaperLedgerStats";
+import type { PaperOperationalSnapshot } from "../models/types";
 
 export type {
   ClosedRowDisplayFields,
@@ -54,6 +55,25 @@ function isBundleShape(v: unknown): v is FuturesPaperDataBundle {
   return typeof o.configured === "boolean" && Array.isArray(o.symbolRows) && Array.isArray(o.healthHistoryRecent);
 }
 
+function isServerLedgerPerformance(x: unknown): x is FuturesPaperLedgerPerformance {
+  if (!x || typeof x !== "object") return false;
+  const o = x as Record<string, unknown>;
+  return (
+    typeof o.parsedTradeCount === "number" &&
+    Number.isFinite(o.parsedTradeCount) &&
+    o.all !== null &&
+    typeof o.all === "object" &&
+    o.last7d !== null &&
+    typeof o.last7d === "object"
+  );
+}
+
+function isServerPaperOperational(x: unknown): x is PaperOperationalSnapshot {
+  if (!x || typeof x !== "object") return false;
+  const o = x as Record<string, unknown>;
+  return typeof o.modeReasonLabel === "string" && o.dashboardLines !== null && typeof o.dashboardLines === "object";
+}
+
 async function loadFromRemoteApi(baseUrl: string, secret: string): Promise<FuturesPaperDataBundle> {
   const root = baseUrl.replace(/\/+$/, "");
   const url = `${root}/api/futures-paper/data`;
@@ -88,13 +108,29 @@ async function loadFromRemoteApi(baseUrl: string, secret: string): Promise<Futur
   }
   const b = json as FuturesPaperDataBundle;
   const generatedAt = typeof b.generatedAt === "number" && Number.isFinite(b.generatedAt) ? b.generatedAt : Date.now();
-  const positionsHistory = normalizePositionsHistoryArray(Array.isArray(b.positionsHistory) ? b.positionsHistory : []);
+  const rawHistory = Array.isArray(b.positionsHistory) ? b.positionsHistory : [];
+  const positionsHistory =
+    rawHistory.length > 0 &&
+    rawHistory.every(
+      (r) =>
+        r &&
+        typeof r === "object" &&
+        typeof (r as Record<string, unknown>).realizedPnlUsd === "number" &&
+        typeof (r as Record<string, unknown>).outcomeStatus === "string"
+    )
+      ? rawHistory
+      : normalizePositionsHistoryArray(rawHistory);
+  const ledgerPerformance = isServerLedgerPerformance(b.ledgerPerformance)
+    ? b.ledgerPerformance
+    : buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt);
+  const paperOperational =
+    isServerPaperOperational(b.paperOperational) ? b.paperOperational : paperOperationalFromEngineState(b.engineState) ?? null;
   const withDefaults: FuturesPaperDataBundle = {
     ...b,
-    ledgerPerformance: buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt),
+    ledgerPerformance,
     openPositions: Array.isArray(b.openPositions) ? b.openPositions : [],
     positionsHistory,
-    paperOperational: paperOperationalFromEngineState(b.engineState) ?? b.paperOperational,
+    paperOperational,
     generatedAt
   };
   return withDefaults;
