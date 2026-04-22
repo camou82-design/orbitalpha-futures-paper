@@ -20,7 +20,19 @@ const HEALTH_ROUTE_TIMEOUT_MS = Number(process.env.FUTURES_PAPER_HEALTH_ROUTE_TI
 const PUBLIC_BUNDLE_REL = "data/reports/public-futures-paper-bundle.json";
 
 type DataBundle = Readonly<Record<string, unknown>>;
-let lastKnownSafeBundle: DataBundle | null = null;
+
+interface CacheContext {
+  bundle: DataBundle;
+  mtimeMs: number;
+  cachedAt: number;
+  metrics?: {
+    stat_ms?: number;
+    read_ms?: number;
+    parse_ms?: number;
+  };
+}
+let memoryCache: CacheContext | null = null;
+let inFlightLoad: Promise<CacheContext> | null = null;
 
 const isProd = process.env.NODE_ENV === "production";
 if (!isProd) {
@@ -77,28 +89,57 @@ function logDataRouteLine(payload: Record<string, unknown>): void {
   }
 }
 
-async function loadPublicBundle(projectRoot: string): Promise<{ bundle: DataBundle; readFiles: string[] }> {
+async function doLoadBundle(projectRoot: string): Promise<CacheContext> {
   const fullPath = path.join(projectRoot, ...PUBLIC_BUNDLE_REL.split("/"));
+  
+  const t0 = Date.now();
+  let stat: { mtimeMs: number };
+  try {
+    stat = await fs.stat(fullPath);
+  } catch (err: unknown) {
+    const code = err && typeof err === "object" && "code" in err ? String((err as NodeJS.ErrnoException).code) : "";
+    if (code === "ENOENT") throw new Error("public_bundle_file_missing");
+    throw new Error("public_bundle_stat_failed");
+  }
+  const t1 = Date.now();
+
+  if (memoryCache && stat.mtimeMs <= memoryCache.mtimeMs) {
+    return {
+      ...memoryCache,
+      metrics: { stat_ms: t1 - t0 }
+    };
+  }
+
   let raw: string;
   try {
     raw = await fs.readFile(fullPath, "utf8");
-  } catch (err: unknown) {
-    const code = err && typeof err === "object" && "code" in err ? String((err as NodeJS.ErrnoException).code) : "";
-    if (code === "ENOENT") {
-      throw new Error("public_bundle_file_missing");
-    }
+  } catch {
     throw new Error("public_bundle_read_failed");
   }
+  const t2 = Date.now();
+
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw) as unknown;
+    parsed = JSON.parse(raw);
   } catch {
     throw new Error("public_bundle_invalid_json");
   }
+  const t3 = Date.now();
+
   if (!parsed || typeof parsed !== "object") {
     throw new Error("public_bundle_invalid_shape");
   }
-  return { bundle: parsed as DataBundle, readFiles: [PUBLIC_BUNDLE_REL] };
+
+  return {
+    bundle: parsed as DataBundle,
+    mtimeMs: stat.mtimeMs,
+    cachedAt: Date.now(),
+    metrics: {
+      stat_ms: t1 - t0,
+      read_ms: t2 - t1,
+      parse_ms: t3 - t2
+    }
+  };
 }
 
 app.disable("x-powered-by");
@@ -168,50 +209,82 @@ app.get("/api/futures-paper/data", async (req: Request, res: Response) => {
     return;
   }
   try {
-    const { bundle, readFiles } = await Promise.race([
-      loadPublicBundle(root),
-      timeoutPromise<{ bundle: DataBundle; readFiles: string[] }>(DATA_ROUTE_TIMEOUT_MS, "data_route_timeout")
+    if (!inFlightLoad) {
+      inFlightLoad = doLoadBundle(root)
+        .then(res => {
+          memoryCache = res;
+          return res;
+        })
+        .finally(() => {
+          inFlightLoad = null;
+        });
+    }
+
+    const timeoutMs = memoryCache ? 500 : DATA_ROUTE_TIMEOUT_MS;
+    const result = await Promise.race([
+      inFlightLoad,
+      timeoutPromise<CacheContext>(timeoutMs, "data_route_timeout")
     ]);
-    lastKnownSafeBundle = bundle;
+    
+    const total_ms = Date.now() - startedAt;
     res.setHeader("X-Orbitalpha-Futures-Paper-Source", "public-bundle");
-    res.setHeader("X-Orbitalpha-Futures-Paper-Read-Files", readFiles.join(","));
-    res.json(bundle);
+    res.setHeader("X-Orbitalpha-Futures-Paper-Read-Files", PUBLIC_BUNDLE_REL);
+    res.json(result.bundle);
+    
     logDataRouteLine({
       event: "data_route_success",
-      elapsedMs: Date.now() - startedAt,
-      readFiles,
+      elapsedMs: total_ms,
+      readFiles: [PUBLIC_BUNDLE_REL],
       tokenPresent,
       remoteAddress: ra || undefined,
-      userAgentSnippet: ua || undefined
+      userAgentSnippet: ua || undefined,
+      cache_hit: !result.metrics?.read_ms,
+      fallback_source: "file",
+      bundle_file_mtime: result.mtimeMs,
+      bundle_age_ms: Date.now() - result.cachedAt,
+      stat_ms: result.metrics?.stat_ms,
+      read_ms: result.metrics?.read_ms,
+      parse_ms: result.metrics?.parse_ms,
+      total_ms
     });
+
   } catch (e) {
     const message = e instanceof Error ? e.message : "bundle_failed";
-    if (lastKnownSafeBundle) {
-      res.setHeader("X-Orbitalpha-Futures-Paper-Source", "last-known-safe");
-      res.json(lastKnownSafeBundle);
+    const total_ms = Date.now() - startedAt;
+    
+    if (memoryCache) {
+      res.setHeader("X-Orbitalpha-Futures-Paper-Source", "memory-last-known-safe");
+      res.json(memoryCache.bundle);
       logDataRouteLine({
         event: "data_route_fail",
         reason: message,
-        elapsedMs: Date.now() - startedAt,
+        elapsedMs: total_ms,
         fallback: "last-known-safe",
+        fallback_source: "memory",
         tokenPresent,
         remoteAddress: ra || undefined,
         userAgentSnippet: ua || undefined,
-        readFiles: [PUBLIC_BUNDLE_REL]
+        readFiles: [PUBLIC_BUNDLE_REL],
+        bundle_file_mtime: memoryCache.mtimeMs,
+        bundle_age_ms: Date.now() - memoryCache.cachedAt,
+        total_ms
       });
       return;
     }
+    
     const status = message === "data_route_timeout" ? 503 : 500;
     res.status(status).json({ error: message });
     logDataRouteLine({
       event: "data_route_fail",
       reason: message,
-      elapsedMs: Date.now() - startedAt,
+      elapsedMs: total_ms,
       fallback: "none",
+      fallback_source: "none",
       tokenPresent,
       remoteAddress: ra || undefined,
       userAgentSnippet: ua || undefined,
-      readFiles: [PUBLIC_BUNDLE_REL]
+      readFiles: [PUBLIC_BUNDLE_REL],
+      total_ms
     });
   }
 });
