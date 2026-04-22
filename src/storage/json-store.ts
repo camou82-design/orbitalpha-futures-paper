@@ -328,21 +328,66 @@ export class JsonStore {
     const dashboard = buildPaperDashboard({ summary, window, health, healthHistoryLines });
     await this.writeJson("reports/dashboard.json", dashboard);
     const projectRoot = path.resolve(this.baseDir, "..");
-    const publicBundle = await composePublicFuturesPaperBundleForWrite({
-      projectRoot,
-      summary,
-      summaryRange: { generatedAt, ...byRegime.range },
-      summaryTrend: { generatedAt, ...byRegime.trend },
-      summaryDaily: daily,
-      summaryWindow: window,
-      summaryHealth: health,
-      dashboard,
-      positionsHistoryRaw: history,
-      eventsParsed: events,
-      healthHistoryParsed: healthHistoryLines
-    });
-    const publicBundlePath = await this.writeJson("reports/public-futures-paper-bundle.json", publicBundle);
-    return { summaryPath, dailyPath, windowPath, healthPath, publicBundlePath, health };
+    const publicBundleRel = "reports/public-futures-paper-bundle.json";
+    const publicBundleAbs = path.resolve(this.baseDir, publicBundleRel);
+    console.log(
+      JSON.stringify({
+        event: "PUBLIC_BUNDLE_WRITE_START",
+        path: publicBundleAbs,
+        at: Date.now()
+      })
+    );
+    try {
+      const publicBundle = await composePublicFuturesPaperBundleForWrite({
+        projectRoot,
+        summary,
+        summaryRange: { generatedAt, ...byRegime.range },
+        summaryTrend: { generatedAt, ...byRegime.trend },
+        summaryDaily: daily,
+        summaryWindow: window,
+        summaryHealth: health,
+        dashboard,
+        positionsHistoryRaw: history,
+        eventsParsed: events,
+        healthHistoryParsed: healthHistoryLines
+      });
+      const publicBundlePath = await this.writeJson(publicBundleRel, publicBundle);
+      const st = await fs.stat(publicBundlePath);
+      const openPositionsCount = Array.isArray(publicBundle.openPositions) ? publicBundle.openPositions.length : -1;
+      const positionsHistoryCount = Array.isArray(publicBundle.positionsHistory) ? publicBundle.positionsHistory.length : -1;
+      const symbolRowsCount = Array.isArray(publicBundle.symbolRows) ? publicBundle.symbolRows.length : -1;
+      const hasDashboard = publicBundle.dashboard != null;
+      const hasEngineState = publicBundle.engineState != null;
+      console.log(
+        JSON.stringify({
+          event: "PUBLIC_BUNDLE_WRITE_SUCCESS",
+          path: publicBundlePath,
+          bytes: st.size,
+          generatedAt: publicBundle.generatedAt,
+          openPositionsCount,
+          positionsHistoryCount,
+          symbolRowsCount,
+          hasDashboard,
+          hasEngineState
+        })
+      );
+      return { summaryPath, dailyPath, windowPath, healthPath, publicBundlePath, health };
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      const reason = e instanceof Error ? e.name : "unknown";
+      const stackSlice =
+        e instanceof Error && e.stack ? e.stack.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim().slice(0, 400) : undefined;
+      console.error(
+        JSON.stringify({
+          event: "PUBLIC_BUNDLE_WRITE_FAIL",
+          path: publicBundleAbs,
+          reason,
+          message,
+          stackSlice
+        })
+      );
+      throw e;
+    }
   }
 }
 
