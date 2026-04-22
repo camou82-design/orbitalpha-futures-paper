@@ -27,13 +27,53 @@ const SUMMARY_PATH = path.join("data", "reports", "summary.json");
 const SUMMARY_WINDOW_PATH = path.join("data", "reports", "summary-window.json");
 const SUMMARY_HEALTH_PATH = path.join("data", "reports", "summary-health.json");
 
+type SymbolRow = Readonly<{
+  symbol: string;
+  signal?: string;
+  trendOk?: boolean;
+  candidateStrength?: string;
+  sidewaysMode?: boolean;
+  entryCandidate?: boolean;
+  qualityScore?: number;
+  emaGap?: number;
+  volumeRatioProxy?: number;
+  boxHigh?: number;
+  boxLow?: number;
+  boxPos?: number;
+  boxRel?: number;
+  gateExpectedMove?: number;
+  gateRequiredMove?: number;
+  lastPrice?: number;
+  fundingRate?: number;
+  fetchedAt?: number;
+}>;
+
+type HealthHistoryItem = Readonly<{
+  generatedAt?: number;
+  status?: string;
+  reasons?: string[];
+}>;
+
 type DataBundle = Readonly<{
   configured: boolean;
   configHint: string | null;
+  summaryRange: unknown | null;
+  summaryTrend: unknown | null;
+  summaryDaily: unknown | null;
   summary: unknown | null;
   summaryWindow: unknown | null;
   summaryHealth: unknown | null;
+  dashboard: unknown | null;
+  engineState: unknown | null;
+  paperOperational: unknown | null;
   latestSnapshot: unknown | null;
+  latestMeta: unknown | null;
+  symbolRows: SymbolRow[];
+  healthHistoryRecent: HealthHistoryItem[];
+  ledgerPerformance: unknown | null;
+  openPositions: unknown[];
+  positionsHistory: unknown[];
+  eventsRecent: unknown[];
   generatedAt: number;
 }>;
 
@@ -119,6 +159,59 @@ async function readJsonSafe(projectRoot: string, relPath: string): Promise<{ fil
   }
 }
 
+function pickSymbolRows(latestSnapshot: unknown): SymbolRow[] {
+  if (!latestSnapshot || typeof latestSnapshot !== "object") return [];
+  const snapshots = (latestSnapshot as Record<string, unknown>).snapshots;
+  if (!Array.isArray(snapshots)) return [];
+  const wanted = new Set(["BTCUSDT", "ETHUSDT"]);
+  const rows: SymbolRow[] = [];
+  for (const item of snapshots) {
+    if (!item || typeof item !== "object") continue;
+    const src = item as Record<string, unknown>;
+    const symbol = String(src.symbol ?? "");
+    if (!wanted.has(symbol)) continue;
+    rows.push({
+      symbol,
+      signal: typeof src.signal === "string" ? src.signal : undefined,
+      trendOk: typeof src.trendOk === "boolean" ? src.trendOk : undefined,
+      candidateStrength:
+        src.candidateStrength === "strong" || src.candidateStrength === "weak" ? src.candidateStrength : undefined,
+      sidewaysMode: typeof src.sidewaysMode === "boolean" ? src.sidewaysMode : undefined,
+      entryCandidate: typeof src.entryCandidate === "boolean" ? src.entryCandidate : undefined,
+      qualityScore: typeof src.qualityScore === "number" ? src.qualityScore : undefined,
+      emaGap: typeof src.emaGap === "number" ? src.emaGap : undefined,
+      volumeRatioProxy: typeof src.volumeRatioProxy === "number" ? src.volumeRatioProxy : undefined,
+      boxHigh: typeof src.boxHigh === "number" ? src.boxHigh : undefined,
+      boxLow: typeof src.boxLow === "number" ? src.boxLow : undefined,
+      boxPos: typeof src.boxPos === "number" ? src.boxPos : undefined,
+      boxRel: typeof src.boxRel === "number" ? src.boxRel : undefined,
+      gateExpectedMove: typeof src.gateExpectedMove === "number" ? src.gateExpectedMove : undefined,
+      gateRequiredMove: typeof src.gateRequiredMove === "number" ? src.gateRequiredMove : undefined,
+      lastPrice: typeof src.lastPrice === "number" ? src.lastPrice : undefined,
+      fundingRate: typeof src.fundingRate === "number" ? src.fundingRate : undefined,
+      fetchedAt: typeof src.fetchedAt === "number" ? src.fetchedAt : undefined
+    });
+  }
+  return rows.sort((a, b) => a.symbol.localeCompare(b.symbol));
+}
+
+function pickHealthHistory(summaryHealth: unknown): HealthHistoryItem[] {
+  if (!summaryHealth || typeof summaryHealth !== "object") return [];
+  const history = (summaryHealth as Record<string, unknown>).history;
+  if (!Array.isArray(history)) return [];
+  const rows: HealthHistoryItem[] = [];
+  for (const item of history) {
+    if (!item || typeof item !== "object") continue;
+    const src = item as Record<string, unknown>;
+    rows.push({
+      generatedAt: typeof src.generatedAt === "number" ? src.generatedAt : undefined,
+      status: typeof src.status === "string" ? src.status : undefined,
+      reasons: Array.isArray(src.reasons) ? src.reasons.filter((x): x is string => typeof x === "string") : undefined
+    });
+  }
+  return rows.slice(-10);
+}
+
 async function loadDataBundleFromStaticFiles(projectRoot: string): Promise<{ bundle: DataBundle; readFiles: string[] }> {
   const [latestSnapshot, summary, summaryWindow, summaryHealth] = await Promise.all([
     readJsonSafe(projectRoot, LATEST_SNAPSHOT_PATH),
@@ -127,13 +220,28 @@ async function loadDataBundleFromStaticFiles(projectRoot: string): Promise<{ bun
     readJsonSafe(projectRoot, SUMMARY_HEALTH_PATH)
   ]);
   const readFiles = [latestSnapshot.file, summary.file, summaryWindow.file, summaryHealth.file];
+  const symbolRows = pickSymbolRows(latestSnapshot.value);
+  const healthHistoryRecent = pickHealthHistory(summaryHealth.value);
   const bundle: DataBundle = {
     configured: true,
     configHint: null,
-    latestSnapshot: latestSnapshot.value,
     summary: summary.value,
+    summaryRange: null,
+    summaryTrend: null,
+    summaryDaily: null,
     summaryWindow: summaryWindow.value,
     summaryHealth: summaryHealth.value,
+    dashboard: null,
+    engineState: null,
+    paperOperational: null,
+    latestSnapshot: latestSnapshot.value,
+    latestMeta: null,
+    symbolRows,
+    healthHistoryRecent,
+    ledgerPerformance: null,
+    openPositions: [],
+    positionsHistory: [],
+    eventsRecent: [],
     generatedAt: Date.now()
   };
   return { bundle, readFiles };
