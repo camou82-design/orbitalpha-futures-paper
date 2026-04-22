@@ -107,6 +107,46 @@ export type PaperWindowSummaryReport = Readonly<{
   }>;
 }>;
 
+/**
+ * [FIX: history-ledger] Guard: partial/defense sub-events must NOT count as final closed positions.
+ * If such rows are present in history.json (legacy contamination or future regression), they are
+ * excluded from summary aggregation here as a safety net.
+ *
+ * Excluded closeReason values (intermediate events, not full position closes):
+ *   - partial_exit_1, partial_exit_2  → sub-position partial liquidation
+ *   - EXIT_LONG_CRASH_REDUCE           → 50% crash defense reduction (not full close)
+ *   - EXIT_CRASH_REDUCE                → generic crash partial reduction
+ *
+ * Excluded exitType/closeSource values (belt-and-suspenders):
+ *   - EXIT_PARTIAL_SPLIT_1, EXIT_PARTIAL_SPLIT_2, EXIT_LONG_CRASH_REDUCE, EXIT_CRASH_REDUCE
+ *   - closeSource: PARTIAL_SPLIT
+ */
+const PARTIAL_EVENT_CLOSE_REASONS = new Set([
+  "partial_exit_1",
+  "partial_exit_2",
+  "EXIT_LONG_CRASH_REDUCE",
+  "EXIT_CRASH_REDUCE"
+]);
+
+const PARTIAL_EVENT_EXIT_TYPES = new Set([
+  "EXIT_PARTIAL_SPLIT_1",
+  "EXIT_PARTIAL_SPLIT_2",
+  "EXIT_LONG_CRASH_REDUCE",
+  "EXIT_CRASH_REDUCE"
+]);
+
+function isFinalClosedRow(r: unknown): boolean {
+  if (!r || typeof r !== "object") return true; // parseRow will handle invalid rows
+  const o = r as Record<string, unknown>;
+  // Filter by closeReason
+  if (typeof o.closeReason === "string" && PARTIAL_EVENT_CLOSE_REASONS.has(o.closeReason)) return false;
+  // Filter by exitType
+  if (typeof o.exitType === "string" && PARTIAL_EVENT_EXIT_TYPES.has(o.exitType)) return false;
+  // Filter by closeSource (PARTIAL_SPLIT is only ever a sub-event, never a final close)
+  if (o.closeSource === "PARTIAL_SPLIT") return false;
+  return true;
+}
+
 function parseRow(
   r: unknown
 ): {
@@ -404,6 +444,8 @@ function aggregateRows(rows: ParsedHistoryRow[]): PaperSummaryStats {
 export function buildPaperSummaryFromHistory(history: unknown[], generatedAt: number = Date.now()): PaperSummaryReport {
   const rows: ParsedHistoryRow[] = [];
   for (const r of history) {
+    // [FIX: history-ledger] Exclude partial/defense sub-events from final-position statistics.
+    if (!isFinalClosedRow(r)) continue;
     const row = parseRow(r);
     if (row) rows.push(row);
   }
@@ -447,6 +489,8 @@ export function buildPaperSummaryByRegimeFromHistory(
   const rangeRows: ParsedHistoryRow[] = [];
   const trendRows: ParsedHistoryRow[] = [];
   for (const r of history) {
+    // [FIX: history-ledger] Exclude partial/defense sub-events from regime-slice statistics.
+    if (!isFinalClosedRow(r)) continue;
     const row = parseRow(r);
     if (!row) continue;
     const regimeAtEntry =
@@ -465,6 +509,8 @@ export function buildPaperSummaryByRegimeFromHistory(
 export function buildPaperDailySummaryFromHistory(history: unknown[], generatedAt: number = Date.now()): PaperDailySummaryReport {
   const rows: ParsedHistoryRow[] = [];
   for (const r of history) {
+    // [FIX: history-ledger] Exclude partial/defense sub-events from daily statistics.
+    if (!isFinalClosedRow(r)) continue;
     const row = parseRow(r);
     if (row) rows.push(row);
   }
@@ -515,6 +561,8 @@ export function buildPaperDailySummaryFromHistory(history: unknown[], generatedA
 export function buildPaperWindowSummaryFromHistory(history: unknown[], generatedAt: number = Date.now()): PaperWindowSummaryReport {
   const rows: ParsedHistoryRow[] = [];
   for (const r of history) {
+    // [FIX: history-ledger] Exclude partial/defense sub-events from window statistics.
+    if (!isFinalClosedRow(r)) continue;
     const row = parseRow(r);
     if (row) rows.push(row);
   }

@@ -2236,8 +2236,20 @@ export class PaperEngine {
               closeSourceOverride: "CRASH_LONG_DEFENSE"
             });
 
-            await this.positions.appendClosed(closedRow);
-            authorizeOpenLedgerPruneAfterAttestedClose(`${op.symbol}:${op.side}:${op.openedAt}`, closedRow);
+            // [FIX: history-ledger] CRASH_REDUCE is a partial defense event (50% reduction).
+            // Only full-liquidation (forceExit → EXIT_LONG_CRASH_FORCE) goes into history.json.
+            // CRASH_REDUCE is recorded to events.jsonl only (see below).
+            if (forceExit) {
+              await this.positions.appendClosed(closedRow);
+              authorizeOpenLedgerPruneAfterAttestedClose(`${op.symbol}:${op.side}:${op.openedAt}`, closedRow);
+            } else {
+              this.logger.info("CRASH_REDUCE_PARTIAL_EVENT_ONLY", {
+                symbol: op.symbol,
+                state: risk.crashState,
+                type: et,
+                note: "CRASH_REDUCE is a partial defense event — not appended to history.json ledger"
+              });
+            }
             this.logger.warn("crash_long_defense", { symbol: op.symbol, state: risk.crashState, type: et });
 
             await this.store.appendJsonlLine("reports/events.jsonl", {
@@ -3718,8 +3730,13 @@ export class PaperEngine {
           const pLog = stage === 1 ? "partial_exit_first" : "partial_exit_second";
           const mp = leg(partialMargin);
 
+          // [FIX: history-ledger] Partial exits (partial_exit_1, partial_exit_2) are
+          // intermediate sub-events within a position lifecycle — NOT final position closes.
+          // They must NOT be appended to positions/history.json.
+          // The position identity is preserved; only the final full-close goes to the ledger.
+          // Sub-events are recorded to events.jsonl only (below).
           const closedPartial = toClosed(pReason, mp, partialMargin);
-          await this.positions.appendClosed(closedPartial);
+          // NOTE: appendClosed intentionally omitted here. closedPartial is for events.jsonl only.
 
           const partialEventProfitable = mp.pnlUsdNet > 1e-9 && mp.pnlPctNet > 1e-9;
 
