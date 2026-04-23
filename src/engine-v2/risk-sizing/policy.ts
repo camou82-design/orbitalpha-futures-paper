@@ -85,16 +85,21 @@ export function calculateRiskSizing(
         isBlocked = true;
         blockReason = "ENTRY_QUALITY_LOSS_SIMILAR";
     }
-    else if (
-        state.serverTradeEnabled === false ||
-        state.closeOnlyMode === true ||
-        state.killSwitch === true ||
-        state.reconcileSafeMode === true ||
-        state.killSwitchActive === true ||
-        state.reconcileSafeModeActive === true
-    ) {
+    else if (state.serverTradeEnabled === false) {
         isBlocked = true;
-        blockReason = "SERVER_AUTHORITY_BLOCKED";
+        blockReason = "SERVER_TRADE_DISABLED";
+    }
+    else if (state.closeOnlyMode === true) {
+        isBlocked = true;
+        blockReason = "CLOSE_ONLY_MODE";
+    }
+    else if (state.killSwitch === true || state.killSwitchActive === true) {
+        isBlocked = true;
+        blockReason = "KILL_SWITCH_ACTIVE";
+    }
+    else if (state.reconcileSafeMode === true || state.reconcileSafeModeActive === true) {
+        isBlocked = true;
+        blockReason = "RECONCILE_SAFE_MODE";
     }
 
     // TRANSITION: Force Scouting Mode (Very small size)
@@ -238,6 +243,10 @@ export function calculateRiskSizing(
         fresh_tick_barrier_active: state.freshTickBarrierActive,
         fresh_tick_completed_cycles: state.freshTickCompletedCycles,
         fresh_tick_required_cycles: state.freshTickRequiredCycles,
+        server_trade_enabled: state.serverTradeEnabled ?? null,
+        close_only_mode: state.closeOnlyMode ?? null,
+        kill_switch: (state.killSwitch ?? state.killSwitchActive) ?? null,
+        reconcile_safe_mode: (state.reconcileSafeMode ?? state.reconcileSafeModeActive) ?? null,
         entry_quality_grade: entryQualityGrade,
         leverage_profile: leverageProfile,
         applied_leverage: appliedLeverage,

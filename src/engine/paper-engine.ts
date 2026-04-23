@@ -838,6 +838,7 @@ export class PaperEngine {
   private reconcileLastCheckedAt: number | null = null;
   private reconcileLastMismatchReason: string | null = null;
   private readonly reconcileCheckIntervalMs = 30_000;
+  private startupRecoveryBarrierApplied = false;
 
   private tradeControlPath(): string {
     return path.resolve(this.config.dataDir, "reports/trade-control-state.json");
@@ -964,6 +965,19 @@ export class PaperEngine {
       authority_source: this.serverTradeControlState.authority_source,
       updated_at: this.serverTradeControlState.updated_at,
       reason: this.serverTradeControlState.reason
+    });
+  }
+
+  private applyStartupRecoveryBarrier(nowTs: number): void {
+    if (this.startupRecoveryBarrierApplied) return;
+    this.startupRecoveryBarrierApplied = true;
+    this.freshTickRequiredAfterReadiness = true;
+    this.clearPendingDecisionState("process_restart_recovery_barrier", nowTs, "server_state");
+    this.logger.warn("STARTUP_RECOVERY_ENTRY_BARRIER_APPLIED", {
+      run_cycle_id: this.runCycleId,
+      reason: "restart_recovery_requires_fresh_tick_reevaluation",
+      fresh_tick_required_cycles: this.readinessFreshTickRequiredCycles,
+      authority_source: "server_state"
     });
   }
 
@@ -1203,6 +1217,17 @@ export class PaperEngine {
     const tickNow = Date.now();
     this.engineLastTickAt = tickNow;
     await this.loadServerTradeControlState(tickNow);
+    if (this.runCycleId === 1) {
+      this.logger.info("SERVER_TRADE_CONTROL_STATE_RESTORED", {
+        serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+        closeOnlyMode: this.serverTradeControlState.close_only_mode,
+        killSwitch: this.serverTradeControlState.kill_switch_active,
+        authority_source: this.serverTradeControlState.authority_source,
+        updated_at: this.serverTradeControlState.updated_at,
+        reason: this.serverTradeControlState.reason
+      });
+      this.applyStartupRecoveryBarrier(tickNow);
+    }
     this.evaluateServerTradeControlTransition(tickNow);
     this.lastExitReasonLabel = "";
     this.lastSwitchReasonLabel = "";
