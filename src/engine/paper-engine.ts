@@ -359,6 +359,13 @@ type RunMeta = Readonly<{
   latestPath?: string;
   engineMode: PaperEngineMode;
   exchange: "okx";
+  okx_demo_enabled: boolean;
+  okx_demo_keys_loaded: boolean;
+  okx_signed_rest_ready: boolean;
+  okx_account_config_ok: boolean;
+  okx_balance_ok: boolean;
+  okx_positions_ok: boolean;
+  okx_order_submit_ok: boolean;
   notes: string;
 }>;
 
@@ -808,13 +815,17 @@ export class PaperEngine {
         });
         this.logger.info("okx_demo_client_initialized", {
           okx_demo_base_url: config.okxDemoBaseUrl,
-          okx_demo_keys_loaded: true
+          okx_demo_enabled: true,
+          okx_demo_keys_loaded: true,
+          api_key_masked: config.okxDemoApiKey.slice(0, 4) + "****",
+          passphrase_masked: "****"
         });
       }
     } else {
       this.okxDemo = null;
       this.okxDemoKeysLoaded = false;
     }
+
     if (config.okxDemoEnvRequested && !config.okxExchangeAuthOptIn) {
       this.logger.info("okx_exchange_auth_disabled", {
         detail:
@@ -822,7 +833,9 @@ export class PaperEngine {
       });
     }
     this.logger.info("paper_data_and_execution_mode", {
+      exchange: "okx",
       market_data: "okx_public_unauthenticated",
+      okx_demo_enabled: config.okxDemoEnabled,
       okx_signed_rest_active: config.okxDemoEnabled,
       position_fill_pnl_path: config.okxDemoEnabled ? "paper_json_plus_okx_submit" : "paper_json_only"
     });
@@ -2292,6 +2305,42 @@ export class PaperEngine {
     };
   }
 
+  /**
+   * Helper to dispatch an OKX order to close (fully or partially) a paper position.
+   */
+  private async dispatchOkxClose(input: {
+    symbol: string;
+    side: "long" | "short";
+    sizeUsd: number;
+    lastPrice: number;
+    flowId: string;
+    reason: string;
+  }): Promise<void> {
+    if (!this.okxDemo || !this.okxSignedRestReady) {
+      this.logger.info("okx_close_dispatch_skipped", {
+        symbol: input.symbol,
+        reason: input.reason,
+        okx_demo_active: !!this.okxDemo,
+        okx_signed_ready: this.okxSignedRestReady
+      });
+      return;
+    }
+
+    const side = input.side === "long" ? "sell" : "buy";
+    const posSide = input.side === "long" ? "long" : "short";
+    const qty = Math.max(0.001, Math.round((input.sizeUsd / Math.max(1e-9, input.lastPrice)) * 1_000_000) / 1_000_000);
+
+    await this.submitOkxOrder({
+      symbol: input.symbol as MarketSymbol,
+      side,
+      posSide,
+      qty,
+      clOrdId: `close-${input.symbol}-${Date.now()}`,
+      traceId: input.flowId,
+      reason: input.reason
+    });
+  }
+
   private async submitOkxOrder(input: {
     symbol: MarketSymbol;
     side: "buy" | "sell";
@@ -2315,15 +2364,21 @@ export class PaperEngine {
 
     const instId = toOkxSwapInstId(input.symbol);
     const logCtx = {
-      trace_id: input.traceId,
+      order_trace_id: input.traceId,
       symbol: input.symbol,
       instId,
       side: input.side,
       posSide: input.posSide,
       qty: input.qty,
       clOrdId: input.clOrdId,
-      reason: input.reason
+      order_reason: input.reason,
+      order_ts: Date.now()
     };
+
+    if (!this.okxSignedRestReady) {
+      this.logger.warn("okx_order_submit_skipped_signed_not_ready", logCtx);
+      return { ok: false, ordId: null, fillPx: null, errorCode: "signed_not_ready", errorMessage: "OKX signed REST smoke test not passed", ackCode: "rejected", orderState: null };
+    }
 
     try {
       const submit = await this.okxDemo.submitOrder({
@@ -2339,7 +2394,7 @@ export class PaperEngine {
       if (!submit.ok) {
         const errorCode = submit.diagnostics.retCode || "submit_error";
         const errorMessage = submit.diagnostics.retMsg || submit.error || "order_level_ack_failed";
-        this.logger.error("okx_order_submit_rejected", { ...logCtx, errorCode, errorMessage });
+        this.logger.error("okx_order_submit_rejected", { ...logCtx, order_submit_ack: "rejected", order_error_code: errorCode, order_error_msg: errorMessage });
         return { ok: false, ordId: null, fillPx: null, errorCode, errorMessage, ackCode: "rejected", orderState: null };
       }
 
@@ -2350,7 +2405,7 @@ export class PaperEngine {
       // Poll for status/fill
       const status = await this.okxDemo.getOrder(instId, ordId || undefined, input.clOrdId);
       if (!status.ok) {
-        this.logger.warn("okx_order_poll_failed", { ...logCtx, ordId, error: status.error });
+        this.logger.warn("okx_order_poll_failed", { ...logCtx, ordId, order_submit_ack: "accepted", error: status.error });
         return { ok: true, ordId, fillPx: null, errorCode: null, errorMessage: status.error || "poll_failed", ackCode: "accepted", orderState: null };
       }
 
@@ -2358,7 +2413,13 @@ export class PaperEngine {
       const fillPx = st0?.fillPx ?? null;
       const orderState = st0?.state != null ? String(st0.state) : null;
 
-      this.logger.info("okx_order_submit_accepted", { ...logCtx, ordId, order_state: orderState, fill_px: fillPx });
+      this.logger.info("okx_order_submit_accepted", {
+        ...logCtx,
+        ordId,
+        order_submit_ack: "accepted",
+        order_state: orderState,
+        order_fill_px: fillPx
+      });
 
       return {
         ok: true,
@@ -2453,6 +2514,15 @@ export class PaperEngine {
             });
 
             const et = forceExit ? "EXIT_LONG_CRASH_FORCE" : "EXIT_LONG_CRASH_REDUCE";
+            await this.dispatchOkxClose({
+              symbol: op.symbol,
+              side: op.side,
+              sizeUsd: marginToClose,
+              lastPrice: snap.lastPrice,
+              flowId: `${op.symbol}:${op.side}:${op.openedAt}`,
+              reason: et
+            });
+
             const closedRow = finalizePaperClosedRecord({
               open: op,
               symbol: op.symbol,
@@ -2865,6 +2935,14 @@ export class PaperEngine {
                 closeReasonLabelOverride: "상단 반전 구간: 롱 정리(숏 평가 우선)",
                 ...snapPaths
               });
+              await this.dispatchOkxClose({
+                symbol: open.symbol,
+                side: open.side,
+                sizeUsd: open.sizeUsd,
+                lastPrice: closePrice,
+                flowId,
+                reason: "range_long_upper_reversal"
+              });
               await this.positions.appendClosed(closedRow);
               authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
               this.rangeReversalExitThisTickBySymbol.set(symKey, {
@@ -2975,6 +3053,14 @@ export class PaperEngine {
                 strategyVersion: inheritedStrategyVersion,
                 closeReasonLabelOverride: "하단 반전 구간: 숏 정리(롱 평가 우선)",
                 ...snapPaths
+              });
+              await this.dispatchOkxClose({
+                symbol: open.symbol,
+                side: open.side,
+                sizeUsd: open.sizeUsd,
+                lastPrice: closePrice,
+                flowId,
+                reason: "range_short_lower_reversal"
               });
               await this.positions.appendClosed(closedRow);
               authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
@@ -3190,6 +3276,14 @@ export class PaperEngine {
           finalCloseReason = crTrail;
           confirmedExitType = exitEventJsonlType(crTrail);
           confirmedCloseSource = "range_profit_trail_executor";
+          await this.dispatchOkxClose({
+            symbol: open.symbol,
+            side: open.side,
+            sizeUsd: open.sizeUsd,
+            lastPrice: closePrice,
+            flowId,
+            reason: "range_profit_trail"
+          });
           await this.positions.appendClosed(closedRowTrail);
           authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRowTrail);
           this.lastExitReasonLabel = "수익권 되돌림 추종 청산";
@@ -3375,6 +3469,14 @@ export class PaperEngine {
                 ...snapPaths
               })
               : toClosed(cr, m, open.sizeUsd);
+          await this.dispatchOkxClose({
+            symbol: open.symbol,
+            side: open.side,
+            sizeUsd: open.sizeUsd,
+            lastPrice: closePrice,
+            flowId,
+            reason: st.reason ?? cr
+          });
           await this.positions.appendClosed(closedRow);
           authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
           this.lastExitReasonLabel =
@@ -3437,23 +3539,15 @@ export class PaperEngine {
           finalCloseReason = cr;
           confirmedExitType = "EXIT_TREND_SWITCH";
           confirmedCloseSource = "trend_engine_switch";
-          if (this.okxDemo) {
-            const cSide = open.side === "long" ? "sell" : "buy";
-            const cPosSide = open.side === "long" ? "long" : "short";
-            const cQty = Math.max(0.001, Math.round((open.sizeUsd / Math.max(1e-9, m.mark)) * 1_000_000) / 1_000_000);
-            await this.submitOkxOrder({
-              symbol: open.symbol,
-              side: cSide,
-              posSide: cPosSide,
-              qty: cQty,
-              clOrdId: `close-rev-${open.symbol}-${Date.now()}`,
-              traceId: flowId,
-              reason: "trend_switch_close"
-            });
-            
-            // newSz and plan.openSide are calculated below, but we can pre-calculate or submit after open record is created.
-            // Actually, we need newSz here. Let's pull it up.
-          }
+          await this.dispatchOkxClose({
+            symbol: open.symbol,
+            side: open.side,
+            sizeUsd: open.sizeUsd,
+            lastPrice: closePrice,
+            flowId,
+            reason: "trend_switch_close"
+          });
+
           let newSz = Math.max(
             MIN_POSITION_SIZE_USD,
             Math.round(open.sizeUsd * input.riskExposure.switchSizeMultiplier * 100) / 100
@@ -3582,22 +3676,16 @@ export class PaperEngine {
         confirmedExitType = "EXIT_SL";
         confirmedCloseSource = "hard_stop_loss_gate";
         const closedRow = toClosed(cr, m, open.sizeUsd);
+        await this.dispatchOkxClose({
+          symbol: open.symbol,
+          side: open.side,
+          sizeUsd: open.sizeUsd,
+          lastPrice: closePrice,
+          flowId,
+          reason: "stop_loss_close"
+        });
         await this.positions.appendClosed(closedRow);
         authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
-        if (this.okxDemo) {
-          const closeSide = open.side === "long" ? "sell" : "buy";
-          const closePosSide = open.side === "long" ? "long" : "short";
-          const closeQty = Math.max(0.001, Math.round((open.sizeUsd / Math.max(1e-9, m.mark)) * 1_000_000) / 1_000_000);
-          await this.submitOkxOrder({
-            symbol: open.symbol,
-            side: closeSide,
-            posSide: closePosSide,
-            qty: closeQty,
-            clOrdId: `close-sl-${open.symbol}-${Date.now()}`,
-            traceId: flowId,
-            reason: "stop_loss_close"
-          });
-        }
         this.lastExitReasonLabel = "손절 청산";
         this.logger.info(exitFullLogKey(cr), {
           ...exitDetailBase(open, m),
@@ -3737,22 +3825,16 @@ export class PaperEngine {
               ? "trend_gate_upper_regime_lane_exit"
               : "trend_regime_shift_gate_upper_opposing_trend_confirmed";
           const closedRow = toClosed(cr, m, open.sizeUsd);
+          await this.dispatchOkxClose({
+            symbol: open.symbol,
+            side: open.side,
+            sizeUsd: open.sizeUsd,
+            lastPrice: closePrice,
+            flowId,
+            reason: `regime_shift_${cr}`
+          });
           await this.positions.appendClosed(closedRow);
           authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
-          if (this.okxDemo) {
-            const closeSide = open.side === "long" ? "sell" : "buy";
-            const closePosSide = open.side === "long" ? "long" : "short";
-            const closeQty = Math.max(0.001, Math.round((open.sizeUsd / Math.max(1e-9, m.mark)) * 1_000_000) / 1_000_000);
-            await this.submitOkxOrder({
-              symbol: open.symbol,
-              side: closeSide,
-              posSide: closePosSide,
-              qty: closeQty,
-              clOrdId: `close-shift-${open.symbol}-${Date.now()}`,
-              traceId: flowId,
-              reason: `regime_shift_${cr}`
-            });
-          }
           this.logger.info(exitFullLogKey(cr), { ...exitDetailBase(open, m), exitReason: cr });
 
           const mappedType = exitEventJsonlType(cr);
@@ -3980,6 +4062,14 @@ export class PaperEngine {
         confirmedCloseSource = "executor_close_action";
         const exDetail = (exitEval.detail ?? {}) as Record<string, unknown>;
         const closedRow = toClosed(cr, m, open.sizeUsd);
+        await this.dispatchOkxClose({
+          symbol: open.symbol,
+          side: open.side,
+          sizeUsd: open.sizeUsd,
+          lastPrice: closePrice,
+          flowId,
+          reason: `executor_${cr}`
+        });
         await this.positions.appendClosed(closedRow);
         authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
         this.logger.info(exitFullLogKey(cr), {
@@ -4265,6 +4355,14 @@ export class PaperEngine {
                 : "RANGE 정합성: 하단 숏 강제 청산",
             ...snapPaths
           });
+          await this.dispatchOkxClose({
+            symbol: open.symbol,
+            side: open.side,
+            sizeUsd: open.sizeUsd,
+            lastPrice: closePrice,
+            flowId,
+            reason: "safety_net_alignment"
+          });
           await this.positions.appendClosed(closedRow);
           authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
           this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
@@ -4276,20 +4374,6 @@ export class PaperEngine {
             box_pos: snap.boxPos ?? null,
             phase: "default_persistence_regime_exit_safety_net"
           });
-          if (this.okxDemo) {
-            const closeSide = open.side === "long" ? "sell" : "buy";
-            const closePosSide = open.side === "long" ? "long" : "short";
-            const closeQty = Math.max(0.001, Math.round((open.sizeUsd / Math.max(1e-9, m.mark)) * 1_000_000) / 1_000_000);
-            await this.submitOkxOrder({
-              symbol: open.symbol,
-              side: closeSide,
-              posSide: closePosSide,
-              qty: closeQty,
-              clOrdId: `close-align-${open.symbol}-${Date.now()}`,
-              traceId: flowId,
-              reason: "safety_net_alignment"
-            });
-          }
           this.lastExitReasonLabel = open.side === "long" ? "RANGE 상단 롱 정합성 청산" : "RANGE 하단 숏 정합성 청산";
           const mappedType = exitEventJsonlType(cr);
           this.terminalExitConsumedByFlow.add(flowId);
@@ -4396,6 +4480,14 @@ export class PaperEngine {
       confirmedExitType = exitEventJsonlType(cr);
       confirmedCloseSource = "candidate_lost_watchdog";
       const closedRow = toClosed(cr, m, open.sizeUsd);
+      await this.dispatchOkxClose({
+        symbol: open.symbol,
+        side: open.side,
+        sizeUsd: open.sizeUsd,
+        lastPrice: closePrice,
+        flowId,
+        reason: "candidate_lost"
+      });
       await this.positions.appendClosed(closedRow);
       authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
       this.logger.info("paper_position_closed", {
