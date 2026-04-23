@@ -1081,6 +1081,14 @@ export type PaperOperationalSnapshot = Readonly<{
   okx_balance_ok: boolean;
   okx_positions_ok: boolean;
   okx_order_submit_ok: boolean;
+  strategy_executor: PaperEngineRoutingKind;
+  current_regime: PaperRegimeState;
+  entryAllowedLong: boolean;
+  entryAllowedShort: boolean;
+  directional_shock_state: string;
+  long_allow: boolean;
+  short_allow: boolean;
+  symbol_decisions: Record<string, { decision: PaperSymbolDecisionRecord; adaptiveOk: boolean }>;
 }>;
 
 /** Appended to `data/positions/history.json` when a paper position is closed. */

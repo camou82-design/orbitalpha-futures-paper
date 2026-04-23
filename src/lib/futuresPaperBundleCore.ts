@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 
-import type { EngineRoutingDecision, PaperEngineRoutingKind, PaperOperationalSnapshot } from "../models/types";
+import type { EngineRoutingDecision, PaperEngineRoutingKind, PaperOperationalSnapshot, PaperRegimeState, PaperSymbolDecisionRecord } from "../models/types";
 import { buildLedgerPerformanceFromHistory, type FuturesPaperLedgerPerformance } from "./futuresPaperLedgerStats";
 import { normalizePositionsHistoryArray } from "./paperClosedHistoryNormalize";
 
@@ -119,7 +119,15 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
     okx_account_config_ok: !!o.okx_account_config_ok,
     okx_balance_ok: !!o.okx_balance_ok,
     okx_positions_ok: !!o.okx_positions_ok,
-    okx_order_submit_ok: !!o.okx_order_submit_ok
+    okx_order_submit_ok: !!o.okx_order_submit_ok,
+    strategy_executor: (o.strategy_executor as PaperEngineRoutingKind) || activeEngine,
+    current_regime: (o.current_regime as PaperRegimeState) || (activeEngine === "IDLE" ? "NO_TRADE" : activeEngine),
+    entryAllowedLong: !!o.entryAllowedLong,
+    entryAllowedShort: !!o.entryAllowedShort,
+    directional_shock_state: String(o.directional_shock_state ?? "NONE"),
+    long_allow: !!o.long_allow,
+    short_allow: !!o.short_allow,
+    symbol_decisions: (o.symbol_decisions as Record<string, { decision: PaperSymbolDecisionRecord; adaptiveOk: boolean }>) || {}
   };
 }
 
