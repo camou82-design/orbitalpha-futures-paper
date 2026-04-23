@@ -240,7 +240,34 @@ export function resolveSymbolDecisionEnvelope(
         buildV2LegacyAdapter(legacyDecision)
     );
 
-    const v2Res = runEngineV2(v2Input);
+    const v2ResRaw = runEngineV2(v2Input);
+    const v2Res =
+        state.reconcileSafeMode === true &&
+        v2ResRaw.decision.decision === "ENTER"
+            ? {
+                ...v2ResRaw,
+                decision: {
+                    ...v2ResRaw.decision,
+                    decision: "REJECT" as const,
+                    risk: {
+                        ...v2ResRaw.decision.risk,
+                        isBlocked: true,
+                        blockReason: "RECONCILE_SAFE_MODE_BLOCKED",
+                        finalSizeUsd: 0,
+                        leverageProfile: "BASE" as const,
+                        appliedLeverage: 0,
+                        leverageReason: "reconcile_safe_mode_blocked",
+                        leverageBlockReason: "RECONCILE_SAFE_MODE_BLOCKED",
+                        exposureNotionalKrw: 0,
+                        equityMultiple: 0
+                    },
+                    explanation: {
+                        ...v2ResRaw.decision.explanation,
+                        reason: "REJECTED: RECONCILE_SAFE_MODE_BLOCKED"
+                    }
+                }
+            }
+            : v2ResRaw;
     const selector = reconcileV2Decision(legacyDecision, v2Res.decision, v2Mode);
 
     // 5. Adoption Reason Refinement (Phase 5)

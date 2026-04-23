@@ -6,6 +6,8 @@ export type EngineV2ConfidenceLevel = "HIGH" | "MID" | "LOW";
 export type EngineV2SignalState = "LONG_CANDIDATE" | "SHORT_CANDIDATE" | "WAIT_RECHECK" | "NONE";
 export type EngineV2Side = "long" | "short" | "none" | null;
 export type EngineV2FinalDecision = "ENTER" | "EXIT" | "SKIP" | "HOLD" | "REJECT" | "DISABLED";
+export type LeverageProfile = "BASE" | "BOOST_1" | "BOOST_2";
+export type EntryQualityGrade = "S" | "A" | "B";
 
 /** Legacy Result Interface for Bridge (Zero-any policy) */
 export interface LegacyDecisionResult {
@@ -382,11 +384,11 @@ export interface RiskSizingOutput {
     isBlocked: boolean;
     blockReason: string | null;
     isAddOn: boolean;
-    leverageProfile: "BASE" | "BOOST_1" | "BOOST_2";
+    leverageProfile: LeverageProfile;
     appliedLeverage: number;
     leverageReason: string;
     leverageBlockReason: string | null;
-    entryQualityGrade: "S" | "A" | "B";
+    entryQualityGrade: EntryQualityGrade;
     exposureNotionalKrw: number;
     equityMultiple: number;
 }
@@ -415,13 +417,13 @@ export type EntryExecutionAuthority = Readonly<{
     sizeUsd: number;
     regime: string;
     source: "v1" | "v2";
-    leverageProfile?: "BASE" | "BOOST_1" | "BOOST_2";
+    leverageProfile?: LeverageProfile;
     appliedLeverage?: number;
     leverageReason?: string;
     leverageBlockReason?: string | null;
     exposureNotionalKrw?: number;
     equityMultiple?: number;
-    entryQualityGrade?: "S" | "A" | "B";
+    entryQualityGrade?: EntryQualityGrade;
 }>;
 
 /** Internal Pipeline Result */
