@@ -1800,6 +1800,10 @@ export class PaperEngine {
         leverage_block_reason: selectorResult?.v2_result.risk.leverageBlockReason ?? authority.leverageBlockReason ?? null,
         exposure_notional_krw: selectorResult?.v2_result.risk.exposureNotionalKrw ?? authority.exposureNotionalKrw ?? 0,
         equity_multiple: selectorResult?.v2_result.risk.equityMultiple ?? authority.equityMultiple ?? 0,
+        serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+        closeOnlyMode: this.serverTradeControlState.close_only_mode,
+        killSwitch: this.serverTradeControlState.kill_switch_active,
+        reconcileSafeMode: this.reconcileSafetyCloseOnly,
         v2_entry_quality_profit_distance:
           (selectorResult?.v2_result.risk as { diagnostics?: Record<string, unknown> } | undefined)?.diagnostics?.["entry_quality_distance_profit"] ?? null,
         v2_entry_quality_loss_distance:
@@ -5177,22 +5181,7 @@ export class PaperEngine {
     const sizeUsd = authority.sizeUsd ?? 0;
     if (sizeUsd <= 0) return null;
 
-    // Use legacy results if they already match authority intent
-    if (legacyAdaptive && legacyAdaptive.ok && legacyAdaptive.direction === side) {
-      return legacyAdaptive;
-    }
-
-    let bridgeSizeUsd = sizeUsd;
-    if (
-      legacyAdaptive &&
-      legacyAdaptive.direction === side &&
-      typeof legacyAdaptive.sizeUsd === "number" &&
-      Number.isFinite(legacyAdaptive.sizeUsd) &&
-      legacyAdaptive.sizeUsd > 0
-    ) {
-      bridgeSizeUsd = legacyAdaptive.sizeUsd;
-    }
-    if (bridgeSizeUsd <= 0) return null;
+    const bridgeSizeUsd = sizeUsd;
     const appliedLeverage = Math.max(0, authority.appliedLeverage ?? this.config.leverage);
     const leverageMultiplier =
       this.config.leverage > 0 ? Math.max(0.5, appliedLeverage / this.config.leverage) : 1.0;
@@ -5735,6 +5724,10 @@ export class PaperEngine {
         allow_long: allowLongGuard,
         allow_short: allowShortGuard,
         is_scale_in: existingIdx >= 0,
+        serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+        closeOnlyMode: this.serverTradeControlState.close_only_mode,
+        killSwitch: this.serverTradeControlState.kill_switch_active,
+        reconcileSafeMode: this.reconcileSafetyCloseOnly,
         ...buildAuthorityEventMeta(authority)
       });
       if (finalBlockedReason === "CRASH_ENTRY_GUARD_BLOCK") {

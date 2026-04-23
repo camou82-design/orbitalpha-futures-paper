@@ -1098,6 +1098,13 @@ export type PaperOperationalSnapshot = Readonly<{
   closeOnlyModeEffective?: boolean;
   killSwitch?: boolean;
   reconcileSafeMode?: boolean;
+  entry_quality_grade?: string | null;
+  leverage_profile?: string | null;
+  applied_leverage?: number | null;
+  leverage_reason?: string | null;
+  leverage_block_reason?: string | null;
+  exposure_notional_krw?: number | null;
+  equity_multiple?: number | null;
   authority_source?: string;
   fresh_tick_age_ms?: number | null;
   snapshot_age_ms?: number | null;

@@ -73,6 +73,13 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
   if (!riskReasonLabel) riskReasonLabel = "리스크 정보 없음";
   if (!lastExitReasonLabel) lastExitReasonLabel = "직전 청산 없음";
   if (!lastSwitchReasonLabel) lastSwitchReasonLabel = "직전 스위칭 없음";
+  const symbolDecisionsRaw =
+    (o.symbol_decisions as Record<string, Record<string, unknown>> | undefined) ?? {};
+  const symbolDecisionRows = Object.values(symbolDecisionsRaw);
+  const selectedDecisionMeta =
+    symbolDecisionRows.find((d) => d?.v2_decision === "ENTER") ??
+    symbolDecisionRows[0] ??
+    null;
 
   const policyLine =
     newEntryPolicy === "full"
@@ -135,6 +142,34 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
     closeOnlyModeEffective: !!(o.closeOnlyModeEffective ?? o.close_only_mode_effective),
     killSwitch: !!(o.killSwitch ?? o.kill_switch_active),
     reconcileSafeMode: !!(o.reconcileSafeMode ?? o.reconcile_safe_mode_active),
+    entry_quality_grade:
+      selectedDecisionMeta && typeof selectedDecisionMeta.entry_quality_grade === "string"
+        ? selectedDecisionMeta.entry_quality_grade
+        : null,
+    leverage_profile:
+      selectedDecisionMeta && typeof selectedDecisionMeta.leverage_profile === "string"
+        ? selectedDecisionMeta.leverage_profile
+        : null,
+    applied_leverage:
+      selectedDecisionMeta && typeof selectedDecisionMeta.applied_leverage === "number"
+        ? selectedDecisionMeta.applied_leverage
+        : null,
+    leverage_reason:
+      selectedDecisionMeta && typeof selectedDecisionMeta.leverage_reason === "string"
+        ? selectedDecisionMeta.leverage_reason
+        : null,
+    leverage_block_reason:
+      selectedDecisionMeta && typeof selectedDecisionMeta.leverage_block_reason === "string"
+        ? selectedDecisionMeta.leverage_block_reason
+        : null,
+    exposure_notional_krw:
+      selectedDecisionMeta && typeof selectedDecisionMeta.exposure_notional_krw === "number"
+        ? selectedDecisionMeta.exposure_notional_krw
+        : null,
+    equity_multiple:
+      selectedDecisionMeta && typeof selectedDecisionMeta.equity_multiple === "number"
+        ? selectedDecisionMeta.equity_multiple
+        : null,
     authority_source: typeof o.authority_source === "string" ? o.authority_source : undefined,
     fresh_tick_age_ms: typeof o.fresh_tick_age_ms === "number" ? o.fresh_tick_age_ms : null,
     snapshot_age_ms: typeof o.snapshot_age_ms === "number" ? o.snapshot_age_ms : null,
