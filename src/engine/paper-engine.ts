@@ -1471,10 +1471,16 @@ export class PaperEngine {
           engine_status: risk.dailyLossGuardTriggered ? "PAUSED" : "RUNNING",
           risk_state: risk.riskStatus,
           active_mode_executor: routingOverride.effectiveExecutionLane,
-          entryAllowed:
+          entryAllowedLong:
             routingOverride.effectiveExecutionLane !== "IDLE" &&
             risk.engineBlocked !== true &&
-            !(regimeBlocked && !statusRelaxBypass),
+            !(regimeBlocked && !statusRelaxBypass) &&
+            risk.longAllow,
+          entryAllowedShort:
+            routingOverride.effectiveExecutionLane !== "IDLE" &&
+            risk.engineBlocked !== true &&
+            !(regimeBlocked && !statusRelaxBypass) &&
+            risk.shortAllow,
           blocked_reason:
             routingOverride.effectiveExecutionLane === "IDLE"
               ? (regimeDetected.detail.reason ?? "no_trade")
@@ -5901,6 +5907,12 @@ function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): 
   return {
     decision: legacy.decision.final_decision,
     adaptiveOk: legacy.adaptiveOk,
+    
+    reject_reason: legacy.decision.reject_reason ?? null,
+    risk_state: legacy.decision.risk_state ?? null,
+    risk_cooldown_subreason: legacy.decision.risk_cooldown_subreason ?? null,
+    final_decision: legacy.decision.final_decision,
+    fail_stage: legacy.decision.stage1_result_code ?? null,
 
     authority_decision: authority.decision,
     authority_side: authority.side,
@@ -6108,7 +6120,10 @@ function buildV2StateBridge(
       })
       .filter((x): x is V2BridgePosition => x !== null),
     globalRiskScore: 0.5,
-    lossStreaks: lastRisk?.recentLossStreakByMode ?? {}
+    lossStreaks: lastRisk?.recentLossStreakByMode ?? {},
+    directionalShockState: lastRisk?.directionalShockState ?? "NONE",
+    longAllow: lastRisk?.longAllow ?? true,
+    shortAllow: lastRisk?.shortAllow ?? true
   };
 }
 

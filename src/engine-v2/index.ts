@@ -78,10 +78,17 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const waitingRecheck = execution.signal === "WAIT_RECHECK";
     const invalidSideForEnter = execution.side === "none";
     const invalidSize = riskSizing.finalSizeUsd <= 0;
-    const blockReason = riskSizing.blockReason ?? null;
+    let blockReason = riskSizing.blockReason ?? null;
+
+    const isBlockedByDirectional =
+        (execution.side === "long" && input.state.longAllow === false) ||
+        (execution.side === "short" && input.state.shortAllow === false);
 
     if (hardNoTrade) {
         finalDecision = "DISABLED";
+    } else if (isBlockedByDirectional) {
+        finalDecision = "REJECT";
+        blockReason = `DIRECTIONAL_BLOCK_${input.state.directionalShockState}`;
     } else if (softNoTrade && hasRawCandidate) {
         finalDecision = "HOLD";
     } else if (softNoTrade) {
@@ -163,7 +170,7 @@ export function adaptV2Input(
     now: number,
     snapshot: LegacySnapshotAdapter,
     config: LegacyConfigAdapter,
-    state: { currentPositions: LegacyPositionAdapter[], globalRiskScore: number, lossStreaks: Record<string, number> },
+    state: { currentPositions: LegacyPositionAdapter[], globalRiskScore: number, lossStreaks: Record<string, number>, directionalShockState: "UP" | "DOWN" | "NONE", longAllow: boolean, shortAllow: boolean },
     v1Result: LegacyResultAdapter
 ): EngineV2Input {
     return {
@@ -207,7 +214,10 @@ export function adaptV2Input(
                 pnlPct: p.pnlPct ?? 0
             })),
             globalRiskScore: state.globalRiskScore,
-            lossStreaks: state.lossStreaks
+            lossStreaks: state.lossStreaks,
+            directionalShockState: state.directionalShockState,
+            longAllow: state.longAllow,
+            shortAllow: state.shortAllow
         },
         v1Result: {
             regime: v1Result.decision?.regime_state ?? "UNDEFINED",

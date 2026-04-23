@@ -109,6 +109,9 @@ export interface EngineV2Input {
         currentPositions: EngineV2Position[];
         lossStreaks: Record<string, number>;
         globalRiskScore: number;
+        directionalShockState: "UP" | "DOWN" | "NONE";
+        longAllow: boolean;
+        shortAllow: boolean;
     };
     now: number;
     v1Result: {
@@ -227,6 +230,9 @@ export interface V2BridgeState {
     currentPositions: V2BridgePosition[];
     globalRiskScore: number;
     lossStreaks: Record<string, number>;
+    directionalShockState: "UP" | "DOWN" | "NONE";
+    longAllow: boolean;
+    shortAllow: boolean;
 }
 
 export interface V2BridgeInput {

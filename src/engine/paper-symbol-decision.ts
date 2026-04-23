@@ -1332,7 +1332,10 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
     state: {
       currentPositions: [], // Dry run only
       globalRiskScore: 0.5,
-      lossStreaks: input.risk?.recentLossStreakByMode ?? {}
+      lossStreaks: input.risk?.recentLossStreakByMode ?? {},
+      directionalShockState: input.risk?.directionalShockState ?? "NONE",
+      longAllow: input.risk?.longAllow ?? true,
+      shortAllow: input.risk?.shortAllow ?? true
     },
     v2Mode
   });
@@ -1720,10 +1723,11 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const isMismatched = (bias === "short" && incomingSide === "long") || (bias === "long" && incomingSide === "short");
 
     if (isMismatched || directionalOverride.reason.includes("BLOCKED")) {
+      const blockReasonStr = incomingSide === "long" ? "DIRECTIONAL_LONG_BLOCK" : incomingSide === "short" ? "DIRECTIONAL_SHORT_BLOCK" : "DIRECTIONAL_BIAS_BLOCKED";
       return ret({
         signal_state: signalToState(sn.signal),
         final_decision: "DISABLED",
-        reject_reason: "DIRECTIONAL_BIAS_BLOCKED",
+        reject_reason: blockReasonStr as any,
         execution_disabled_reason: "directional_bias_blocked",
         final_block_owner: "directional_guard",
         execution_disabled_top_proof: {
@@ -4245,6 +4249,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       (sn?.signal === "paper_short_candidate" && directionalOverride.forcedSide === "short");
 
     if (!isMatchingSide) {
+      const intentSide = sn?.signal === "paper_long_candidate" ? "long" : "short";
+      const blockReasonStr = intentSide === "long" ? "DIRECTIONAL_LONG_BLOCK" : "DIRECTIONAL_SHORT_BLOCK";
       return ret(
         {
           signal_state: signalToState(sn?.signal as any),
@@ -4253,9 +4259,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           risk_state: "DIRECTIONAL_SHOCK",
           execution_state: "DISABLED",
           final_decision: "REJECT",
-          reject_reason: "RISK_COOLDOWN",
+          reject_reason: blockReasonStr as any,
           stage1_result_code: "STAGE1_BLOCKED_RISK",
-          supplemental_reasons: ["DIRECTIONAL_BIAS_BLOCKED", `shock:${directionalOverride.reason}`],
+          supplemental_reasons: [blockReasonStr, `shock:${directionalOverride.reason}`],
           adaptive_decision: "REJECT"
         },
         {
