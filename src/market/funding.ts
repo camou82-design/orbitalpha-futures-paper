@@ -1,7 +1,7 @@
 import type { FundingRate, MarketSymbol } from "../models/types";
-import type { BybitPublicClient } from "../exchange/bybit-public";
+import type { OkxDemoClient } from "../exchange/okx-demo";
 
-export async function fetchFundingRate(client: BybitPublicClient, symbol: MarketSymbol): Promise<FundingRate> {
+export async function fetchFundingRate(client: OkxDemoClient, symbol: MarketSymbol): Promise<FundingRate> {
   return await client.getFundingRate(symbol);
 }
 

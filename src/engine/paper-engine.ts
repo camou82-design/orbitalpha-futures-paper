@@ -21,8 +21,7 @@ import type {
 
 import type { Logger } from "../logs/logger";
 import { JsonStore } from "../storage/json-store";
-import type { BybitPublicDiagnostics } from "../exchange/bybit-public";
-import { BybitPublicClient } from "../exchange/bybit-public";
+import type { OkxPublicDiagnostics } from "../exchange/okx-demo";
 import { OkxDemoClient, toOkxSwapInstId } from "../exchange/okx-demo";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
 import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
@@ -292,12 +291,12 @@ type PaperEngineDecisionEnvelope = {
   selector_mismatch?: boolean;
 };
 
-function toSymbolDiagnostic(symbol: MarketSymbol, endpoint: string, d: BybitPublicDiagnostics): SymbolDiagnostic {
+function toSymbolDiagnostic(symbol: MarketSymbol, endpoint: string, d: OkxPublicDiagnostics): SymbolDiagnostic {
   return {
     symbol,
     endpoint,
     httpStatus: d.httpStatus,
-    retCode: d.retCode,
+    retCode: d.retCode ? Number(d.retCode) : undefined,
     retMsg: d.retMsg,
     requestUrl: d.requestUrl
   };
@@ -359,7 +358,7 @@ type RunMeta = Readonly<{
   snapshotPath: string;
   latestPath?: string;
   engineMode: PaperEngineMode;
-  exchange: "bybit";
+  exchange: "okx";
   notes: string;
 }>;
 
@@ -687,7 +686,7 @@ function isPaperCloseAttestationComplete(
 
 export class PaperEngine {
   private readonly store: JsonStore;
-  private readonly bybit: BybitPublicClient;
+  private readonly okxPublic: OkxDemoClient;
   private readonly positions: PositionManager;
   private readonly risk: RiskManager;
   private lastAdaptiveMode: Readonly<{ mode: FuturesMarketMode; detail: Record<string, unknown> }> = { mode: "sideways", detail: {} };
@@ -778,7 +777,7 @@ export class PaperEngine {
     private readonly logger: Logger
   ) {
     this.store = new JsonStore(path.resolve(config.dataDir));
-    this.bybit = new BybitPublicClient();
+    this.okxPublic = new OkxDemoClient({ baseUrl: "https://www.okx.com", apiKey: "", apiSecret: "", passphrase: "" });
     this.positions = new PositionManager(this.store);
     this.risk = new RiskManager(config);
     if (config.okxDemoEnabled) {
@@ -817,7 +816,7 @@ export class PaperEngine {
       });
     }
     this.logger.info("paper_data_and_execution_mode", {
-      market_data: "bybit_public_unauthenticated",
+      market_data: "okx_public_unauthenticated",
       okx_signed_rest_active: config.okxDemoEnabled,
       position_fill_pnl_path: config.okxDemoEnabled ? "paper_json_plus_okx_submit" : "paper_json_only"
     });
@@ -907,7 +906,7 @@ export class PaperEngine {
     const klineLimit = 120;
     const category = "linear";
 
-    const btc5r = await this.bybit.tryGetCandles("BTCUSDT", "5m", 120);
+    const btc5r = await this.okxPublic.tryGetCandles("BTCUSDT", "5m", 120);
     const btc5 = btc5r.ok ? btc5r.value : [];
     const prevRegime = this.lastRegime.regime;
     const fallbackMaxAgeMs = 90_000;
@@ -932,7 +931,7 @@ export class PaperEngine {
     }
     this.lastRegime = regimeDetected;
 
-    const btc1m_r = await this.bybit.tryGetCandles("BTCUSDT", "1m", 60);
+    const btc1m_r = await this.okxPublic.tryGetCandles("BTCUSDT", "1m", 60);
     const btc1m = btc1m_r.ok ? btc1m_r.value : [];
     const btc1m_atr = btc1m.length > 20 ? atrWilderLast(btc1m, 14) : null;
 
@@ -1060,7 +1059,7 @@ export class PaperEngine {
       snapshotPath: filePath,
       latestPath,
       engineMode: this.config.paperEngineMode,
-      exchange: "bybit",
+      exchange: "okx",
       v2AuthorityActive: runId.v2AuthorityActive,
       runIdentity: runId as any,
       notes: "paper hybrid authority pipeline; legacy + v2 authority bridge active; position identity stored per executor/regime resolution; run metadata reflects hybrid execution"
@@ -1668,7 +1667,7 @@ export class PaperEngine {
   }
 
   /**
-   * 1m kline: Bybit 응답 → 스냅샷 객체 → evaluatePaperSymbolEntry 입력까지 캔들 배열 길이 추적.
+   * 1m kline: OKX 응답 → 스냅샷 객체 → evaluatePaperSymbolEntry 입력까지 캔들 배열 길이 추적.
    * fetch 빈값 / 스냅샷 누락 / 평가 직전 누락(과거 버그) 구분용.
    */
   private logHighwayCandlePipelineProof(stage: string, payload: Record<string, unknown>): void {
@@ -5714,13 +5713,13 @@ export class PaperEngine {
   > {
     const symbolDiagnostics: SymbolDiagnostic[] = [];
 
-    const rT = await this.bybit.tryGetTicker(symbol);
+    const rT = await this.okxPublic.tryGetTicker(symbol);
     symbolDiagnostics.push(toSymbolDiagnostic(symbol, EP.ticker, rT.diagnostics));
 
-    const rC = await this.bybit.tryGetCandles(symbol, "1m", klineLimit);
+    const rC = await this.okxPublic.tryGetCandles(symbol, "1m", klineLimit);
     symbolDiagnostics.push(toSymbolDiagnostic(symbol, EP.kline, rC.diagnostics));
 
-    const rF = await this.bybit.tryGetFundingRate(symbol);
+    const rF = await this.okxPublic.tryGetFundingRate(symbol);
     symbolDiagnostics.push(toSymbolDiagnostic(symbol, EP.funding, rF.diagnostics));
 
     if (!rT.ok || !rC.ok || !rF.ok) {
@@ -5748,19 +5747,19 @@ export class PaperEngine {
       return { ok: false, error: `Invalid fundingRate for ${symbol}`, symbolDiagnostics, failedEndpoint: "funding" };
     }
 
-    const bybitKlineLen = rC.value.length;
-    this.logHighwayCandlePipelineProof("bybit_kline_ok", {
+    const okxKlineLen = rC.value.length;
+    this.logHighwayCandlePipelineProof("okx_kline_ok", {
       trace_fetched_at_ms: fetchedAt,
       symbol: String(symbol),
-      bybit_kline_array_length: bybitKlineLen,
+      okx_kline_array_length: okxKlineLen,
       kline_limit_requested: klineLimit,
       interval: "1m",
       classify:
-        bybitKlineLen === 0
-          ? "bybit_returned_empty_array"
-          : bybitKlineLen < klineLimit
-            ? "bybit_fewer_than_requested"
-            : "bybit_length_matches_or_exceeds_request"
+        okxKlineLen === 0
+          ? "okx_returned_empty_array"
+          : okxKlineLen < klineLimit
+            ? "okx_fewer_than_requested"
+            : "okx_length_matches_or_exceeds_request"
     });
 
     const closes = rC.value.map((c) => c.close);
@@ -5902,7 +5901,7 @@ export class PaperEngine {
       } else {
         const tfHi = entryGateHigherTimeframe();
         const limHi = entryGateHigherTfKlineLimit();
-        const rC5 = await this.bybit.tryGetCandles(symbol, tfHi, limHi);
+        const rC5 = await this.okxPublic.tryGetCandles(symbol, tfHi, limHi);
         symbolDiagnostics.push(toSymbolDiagnostic(symbol, EP.kline, rC5.diagnostics));
 
         const higherCandles = rC5.ok ? rC5.value : null;
@@ -5993,7 +5992,7 @@ export class PaperEngine {
       symbol: String(symbol),
       snapshot_candles_array_length: snapshot.candles?.length ?? 0,
       snapshot_recent_candles_count: snapshot.recentCandlesCount,
-      candles_same_reference_as_bybit_response: snapshot.candles === rC.value,
+      candles_same_reference_as_okx_response: snapshot.candles === rC.value,
       classify:
         (snapshot.candles?.length ?? 0) === 0
           ? "snapshot_candles_empty_after_poll_ok"

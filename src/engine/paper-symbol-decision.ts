@@ -183,7 +183,7 @@ export type SymbolSnapshotLike = Readonly<{
   trendOk?: boolean;
   /** 하이웨이: 현재 레짐 상태 */
   regimeStateDiag?: PaperRegimeState;
-  /** Raw candles fetched from Bybit */
+  /** Raw candles fetched from OKX */
   candles?: import("../models/types").Candle[];
   /** pollSymbol 1m kline 배열 길이(엔진 스냅샷) */
   recentCandlesCount?: number;

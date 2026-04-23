@@ -1,8 +1,8 @@
 import type { Candle, MarketSymbol, Timeframe } from "../models/types";
-import type { BybitPublicClient } from "../exchange/bybit-public";
+import type { OkxDemoClient } from "../exchange/okx-demo";
 
 export async function fetchCandles(
-  client: BybitPublicClient,
+  client: OkxDemoClient,
   symbol: MarketSymbol,
   timeframe: Timeframe,
   limit = 200

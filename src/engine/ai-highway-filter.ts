@@ -98,7 +98,7 @@ function buildHighwayCandleGateProof(
     count_discrepancy: countDiscrepancy,
     likely_cause: likelyCause,
     note:
-      "Engine poll uses Bybit 1m klines into snapshot.candles; empty or short array = warmup, fetch shortfall, or missing passthrough."
+      "Engine poll uses OKX 1m klines into snapshot.candles; empty or short array = warmup, fetch shortfall, or missing passthrough."
   };
 }
 
