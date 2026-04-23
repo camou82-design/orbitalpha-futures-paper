@@ -16,24 +16,36 @@ export function executeRangeRegime(input: EngineV2Input): ExecutorOutput {
     let reason = "Watching mid-zone";
 
     if (boxPos >= 0.74) {
-        side = "short";
-        if (rangeConfidence > 0.8) {
-            signal = "SHORT_CANDIDATE";
-            reason = "Upper edge reversal identified";
+        if (!input.state.shortAllow) {
+            signal = "NONE";
+            side = "none";
+            reason = `Upper edge reached but short is blocked by directional bias (${input.state.directionalShockState})`;
         } else {
-            signal = "WAIT_RECHECK";
-            reason = "Upper edge reached; awaiting confirmation";
-            recheckSuggested = true;
+            side = "short";
+            if (rangeConfidence > 0.8) {
+                signal = "SHORT_CANDIDATE";
+                reason = "Upper edge reversal identified";
+            } else {
+                signal = "WAIT_RECHECK";
+                reason = "Upper edge reached; awaiting confirmation";
+                recheckSuggested = true;
+            }
         }
     } else if (boxPos <= 0.26) {
-        side = "long";
-        if (rangeConfidence > 0.8) {
-            signal = "LONG_CANDIDATE";
-            reason = "Lower edge reversal identified";
+        if (!input.state.longAllow) {
+            signal = "NONE";
+            side = "none";
+            reason = `Lower edge reached but long is blocked by directional bias (${input.state.directionalShockState})`;
         } else {
-            signal = "WAIT_RECHECK";
-            reason = "Lower edge reached; awaiting confirmation";
-            recheckSuggested = true;
+            side = "long";
+            if (rangeConfidence > 0.8) {
+                signal = "LONG_CANDIDATE";
+                reason = "Lower edge reversal identified";
+            } else {
+                signal = "WAIT_RECHECK";
+                reason = "Lower edge reached; awaiting confirmation";
+                recheckSuggested = true;
+            }
         }
     }
 

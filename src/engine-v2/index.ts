@@ -80,15 +80,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const invalidSize = riskSizing.finalSizeUsd <= 0;
     let blockReason = riskSizing.blockReason ?? null;
 
-    const isBlockedByDirectional =
-        (execution.side === "long" && input.state.longAllow === false) ||
-        (execution.side === "short" && input.state.shortAllow === false);
-
     if (hardNoTrade) {
         finalDecision = "DISABLED";
-    } else if (isBlockedByDirectional) {
-        finalDecision = "REJECT";
-        blockReason = `DIRECTIONAL_BLOCK_${input.state.directionalShockState}`;
     } else if (softNoTrade && hasRawCandidate) {
         finalDecision = "HOLD";
     } else if (softNoTrade) {

@@ -3037,13 +3037,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         streakSuspend &&
         rangeRelaxWindowActive &&
         (input.risk?.crashState === undefined || input.risk.crashState === "NONE");
-      const isCrashAligningShort = intentSide === "short" && 
-        (input.risk?.directionalShockState === "DOWN" || (input.risk?.crashState !== undefined && input.risk?.crashState !== "NONE"));
-        
+      // `isCrashAligningShort` broad exception has been removed.
+      // Directional filtering is now handled natively via `longAllow`/`shortAllow` in the V2 engine pipeline.
+      // Therefore, global `crashState` or `dump_protection` correctly blocks legacy entry without needing side-specific exceptions here.
       const upperRiskHit =
         (input.risk?.engineBlocked === true && !engineBlockedOnlyByLossSuspend) ||
-        (!isCrashAligningShort && input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
-        (!isCrashAligningShort && input.regimeDetail?.dump_protection_hit === true) ||
+        (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
+        (input.regimeDetail?.dump_protection_hit === true) ||
         input.regimeDetail?.volatility_guard_hit === true;
       meta = input.lastCloseMetaBySymbol?.get(String(sym));
       sameDirection = meta !== undefined && meta.side === intentSide;

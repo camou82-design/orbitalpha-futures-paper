@@ -1471,16 +1471,17 @@ export class PaperEngine {
           engine_status: risk.dailyLossGuardTriggered ? "PAUSED" : "RUNNING",
           risk_state: risk.riskStatus,
           active_mode_executor: routingOverride.effectiveExecutionLane,
-          entryAllowedLong:
-            routingOverride.effectiveExecutionLane !== "IDLE" &&
-            risk.engineBlocked !== true &&
-            !(regimeBlocked && !statusRelaxBypass) &&
-            risk.longAllow,
-          entryAllowedShort:
-            routingOverride.effectiveExecutionLane !== "IDLE" &&
-            risk.engineBlocked !== true &&
-            !(regimeBlocked && !statusRelaxBypass) &&
-            risk.shortAllow,
+          directional_shock_state: risk.directionalShockState ?? "NONE",
+          long_allow: risk.longAllow,
+          short_allow: risk.shortAllow,
+          entryAllowedLong: Array.from(decisionBySymbol.values()).some(env => 
+            (env.v2_side ?? env.selector?.v2_result.side) === "long" && 
+            (env.v2_decision ?? env.selector?.v2_result.decision) === "ENTER"
+          ),
+          entryAllowedShort: Array.from(decisionBySymbol.values()).some(env => 
+            (env.v2_side ?? env.selector?.v2_result.side) === "short" && 
+            (env.v2_decision ?? env.selector?.v2_result.decision) === "ENTER"
+          ),
           blocked_reason:
             routingOverride.effectiveExecutionLane === "IDLE"
               ? (regimeDetected.detail.reason ?? "no_trade")

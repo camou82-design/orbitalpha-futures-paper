@@ -14,13 +14,25 @@ export function executeTrendRegime(input: EngineV2Input): ExecutorOutput {
     let reason = "Waiting for trend alignment";
 
     if (emaGap >= 0.001 && trendWeakness < 0.3) {
-        signal = "LONG_CANDIDATE";
-        side = "long";
-        reason = "Strong momentum alignment";
+        if (!input.state.longAllow) {
+            signal = "NONE";
+            side = "none";
+            reason = `Strong momentum alignment but long is blocked by directional bias (${input.state.directionalShockState})`;
+        } else {
+            signal = "LONG_CANDIDATE";
+            side = "long";
+            reason = "Strong momentum alignment";
+        }
     } else if (emaGap <= -0.001 && trendWeakness < 0.3) {
-        signal = "SHORT_CANDIDATE";
-        side = "short";
-        reason = "Strong downward momentum alignment";
+        if (!input.state.shortAllow) {
+            signal = "NONE";
+            side = "none";
+            reason = `Strong downward momentum alignment but short is blocked by directional bias (${input.state.directionalShockState})`;
+        } else {
+            signal = "SHORT_CANDIDATE";
+            side = "short";
+            reason = "Strong downward momentum alignment";
+        }
     } else if (Math.abs(emaGap) > 0 && trendWeakness < 0.5) {
         signal = "WAIT_RECHECK";
         side = "none";
