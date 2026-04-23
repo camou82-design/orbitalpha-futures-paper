@@ -112,6 +112,25 @@ export interface EngineV2Input {
         directionalShockState: "UP" | "DOWN" | "NONE";
         longAllow: boolean;
         shortAllow: boolean;
+        executionReadiness: boolean;
+        freshTickBarrierActive: boolean;
+        freshTickCompletedCycles: number;
+        freshTickRequiredCycles: number;
+        entryQualityProfiles?: {
+            profit: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
+            loss: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
+            contaminated: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
+        };
+        serverTradeEnabled?: boolean;
+        closeOnlyMode?: boolean;
+        killSwitch?: boolean;
+        reconcileSafeMode?: boolean;
+        killSwitchActive?: boolean;
+        reconcileSafeModeActive?: boolean;
+        accountEquityKrw?: number;
+        maxUsableMarginKrw?: number;
+        exposureNotionalCapKrw?: number;
+        symbolExposureNotionalCapKrw?: number;
     };
     now: number;
     v1Result: {
@@ -162,14 +181,7 @@ export interface EngineV2Decision {
     signal: EngineV2SignalState;
     side: EngineV2Side;
     decision: EngineV2FinalDecision;
-    risk: {
-        isBlocked: boolean;
-        blockReason: string | null;
-        sizeMultiplier: number;
-        baseSizeUsd: number;
-        finalSizeUsd: number;
-        isAddOn: boolean;
-    };
+    risk: RiskSizingOutput;
     explanation: {
         reason: string;
         uiLabelRegime: string;
@@ -233,6 +245,43 @@ export interface V2BridgeState {
     directionalShockState: "UP" | "DOWN" | "NONE";
     longAllow: boolean;
     shortAllow: boolean;
+    executionReadiness: boolean;
+    freshTickBarrierActive: boolean;
+    freshTickCompletedCycles: number;
+    freshTickRequiredCycles: number;
+    entryQualityProfiles?: {
+        profit: {
+            qualityScoreAvg: number;
+            emaGapAvg: number;
+            atrPctAvg: number;
+            volumeRatioAvg: number;
+            count: number;
+        };
+        loss: {
+            qualityScoreAvg: number;
+            emaGapAvg: number;
+            atrPctAvg: number;
+            volumeRatioAvg: number;
+            count: number;
+        };
+        contaminated: {
+            qualityScoreAvg: number;
+            emaGapAvg: number;
+            atrPctAvg: number;
+            volumeRatioAvg: number;
+            count: number;
+        };
+    };
+    serverTradeEnabled?: boolean;
+    closeOnlyMode?: boolean;
+    killSwitch?: boolean;
+    reconcileSafeMode?: boolean;
+    killSwitchActive?: boolean;
+    reconcileSafeModeActive?: boolean;
+    accountEquityKrw?: number;
+    maxUsableMarginKrw?: number;
+    exposureNotionalCapKrw?: number;
+    symbolExposureNotionalCapKrw?: number;
 }
 
 export interface V2BridgeInput {
@@ -333,6 +382,13 @@ export interface RiskSizingOutput {
     isBlocked: boolean;
     blockReason: string | null;
     isAddOn: boolean;
+    leverageProfile: "BASE" | "BOOST_1" | "BOOST_2";
+    appliedLeverage: number;
+    leverageReason: string;
+    leverageBlockReason: string | null;
+    entryQualityGrade: "S" | "A" | "B";
+    exposureNotionalKrw: number;
+    equityMultiple: number;
 }
 
 /** Tier 5: Add-on Policy Output */
@@ -359,6 +415,13 @@ export type EntryExecutionAuthority = Readonly<{
     sizeUsd: number;
     regime: string;
     source: "v1" | "v2";
+    leverageProfile?: "BASE" | "BOOST_1" | "BOOST_2";
+    appliedLeverage?: number;
+    leverageReason?: string;
+    leverageBlockReason?: string | null;
+    exposureNotionalKrw?: number;
+    equityMultiple?: number;
+    entryQualityGrade?: "S" | "A" | "B";
 }>;
 
 /** Internal Pipeline Result */

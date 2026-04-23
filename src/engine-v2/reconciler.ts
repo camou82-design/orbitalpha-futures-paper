@@ -130,12 +130,21 @@ export function deriveExecutionAuthority(
     selector: EngineV2SelectorResult
 ): EntryExecutionAuthority {
     const res = selector.adopted_result;
+    const v2Risk = selector.v2_result.risk;
+    const useV2 = res.engine === "V2";
     return {
         decision: res.adopted_decision,
         side: res.adopted_side,
         sizeUsd: res.adopted_size_usd,
         regime: res.adopted_regime,
-        source: res.engine === "V2" ? "v2" : "v1"
+        source: useV2 ? "v2" : "v1",
+        leverageProfile: useV2 ? v2Risk.leverageProfile : "BASE",
+        appliedLeverage: useV2 ? v2Risk.appliedLeverage : 0,
+        leverageReason: useV2 ? v2Risk.leverageReason : "legacy_authority",
+        leverageBlockReason: useV2 ? v2Risk.leverageBlockReason : null,
+        exposureNotionalKrw: useV2 ? v2Risk.exposureNotionalKrw : 0,
+        equityMultiple: useV2 ? v2Risk.equityMultiple : 0,
+        entryQualityGrade: useV2 ? v2Risk.entryQualityGrade : "B"
     };
 }
 

@@ -163,7 +163,33 @@ export function adaptV2Input(
     now: number,
     snapshot: LegacySnapshotAdapter,
     config: LegacyConfigAdapter,
-    state: { currentPositions: LegacyPositionAdapter[], globalRiskScore: number, lossStreaks: Record<string, number>, directionalShockState: "UP" | "DOWN" | "NONE", longAllow: boolean, shortAllow: boolean },
+    state: {
+        currentPositions: LegacyPositionAdapter[];
+        globalRiskScore: number;
+        lossStreaks: Record<string, number>;
+        directionalShockState: "UP" | "DOWN" | "NONE";
+        longAllow: boolean;
+        shortAllow: boolean;
+        executionReadiness: boolean;
+        freshTickBarrierActive: boolean;
+        freshTickCompletedCycles: number;
+        freshTickRequiredCycles: number;
+        entryQualityProfiles?: {
+            profit: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
+            loss: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
+            contaminated: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
+        };
+        serverTradeEnabled?: boolean;
+        closeOnlyMode?: boolean;
+        killSwitch?: boolean;
+        reconcileSafeMode?: boolean;
+        killSwitchActive?: boolean;
+        reconcileSafeModeActive?: boolean;
+        accountEquityKrw?: number;
+        maxUsableMarginKrw?: number;
+        exposureNotionalCapKrw?: number;
+        symbolExposureNotionalCapKrw?: number;
+    },
     v1Result: LegacyResultAdapter
 ): EngineV2Input {
     return {
@@ -210,7 +236,22 @@ export function adaptV2Input(
             lossStreaks: state.lossStreaks,
             directionalShockState: state.directionalShockState,
             longAllow: state.longAllow,
-            shortAllow: state.shortAllow
+            shortAllow: state.shortAllow,
+            executionReadiness: state.executionReadiness,
+            freshTickBarrierActive: state.freshTickBarrierActive,
+            freshTickCompletedCycles: state.freshTickCompletedCycles,
+            freshTickRequiredCycles: state.freshTickRequiredCycles,
+            entryQualityProfiles: state.entryQualityProfiles,
+            serverTradeEnabled: state.serverTradeEnabled,
+            closeOnlyMode: state.closeOnlyMode,
+            killSwitch: state.killSwitch,
+            reconcileSafeMode: state.reconcileSafeMode,
+            killSwitchActive: state.killSwitchActive,
+            reconcileSafeModeActive: state.reconcileSafeModeActive,
+            accountEquityKrw: state.accountEquityKrw,
+            maxUsableMarginKrw: state.maxUsableMarginKrw,
+            exposureNotionalCapKrw: state.exposureNotionalCapKrw,
+            symbolExposureNotionalCapKrw: state.symbolExposureNotionalCapKrw
         },
         v1Result: {
             regime: v1Result.decision?.regime_state ?? "UNDEFINED",

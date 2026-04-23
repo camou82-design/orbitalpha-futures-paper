@@ -1088,6 +1088,22 @@ export type PaperOperationalSnapshot = Readonly<{
   directional_shock_state: string;
   long_allow: boolean;
   short_allow: boolean;
+  server_trade_enabled?: boolean;
+  close_only_mode?: boolean;
+  close_only_mode_effective?: boolean;
+  serverTradeEnabled?: boolean;
+  closeOnlyMode?: boolean;
+  closeOnlyModeEffective?: boolean;
+  killSwitch?: boolean;
+  reconcileSafeMode?: boolean;
+  authority_source?: string;
+  fresh_tick_age_ms?: number | null;
+  snapshot_age_ms?: number | null;
+  position_tracking_alive?: boolean;
+  entry_pipeline_ready?: boolean;
+  exit_pipeline_ready?: boolean;
+  reconcile_safe_mode_active?: boolean;
+  reconcile_last_mismatch_reason?: string | null;
   symbol_decisions: Record<string, { decision: PaperSymbolDecisionRecord; adaptiveOk: boolean }>;
 }>;
 

@@ -127,6 +127,23 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
     directional_shock_state: String(o.directional_shock_state ?? "NONE"),
     long_allow: !!o.long_allow,
     short_allow: !!o.short_allow,
+    server_trade_enabled: !!o.server_trade_enabled,
+    close_only_mode: !!o.close_only_mode,
+    close_only_mode_effective: !!o.close_only_mode_effective,
+    serverTradeEnabled: !!(o.serverTradeEnabled ?? o.server_trade_enabled),
+    closeOnlyMode: !!(o.closeOnlyMode ?? o.close_only_mode),
+    closeOnlyModeEffective: !!(o.closeOnlyModeEffective ?? o.close_only_mode_effective),
+    killSwitch: !!(o.killSwitch ?? o.kill_switch_active),
+    reconcileSafeMode: !!(o.reconcileSafeMode ?? o.reconcile_safe_mode_active),
+    authority_source: typeof o.authority_source === "string" ? o.authority_source : undefined,
+    fresh_tick_age_ms: typeof o.fresh_tick_age_ms === "number" ? o.fresh_tick_age_ms : null,
+    snapshot_age_ms: typeof o.snapshot_age_ms === "number" ? o.snapshot_age_ms : null,
+    position_tracking_alive: !!o.position_tracking_alive,
+    entry_pipeline_ready: !!o.entry_pipeline_ready,
+    exit_pipeline_ready: !!o.exit_pipeline_ready,
+    reconcile_safe_mode_active: !!o.reconcile_safe_mode_active,
+    reconcile_last_mismatch_reason:
+      typeof o.reconcile_last_mismatch_reason === "string" ? o.reconcile_last_mismatch_reason : null,
     symbol_decisions: (o.symbol_decisions as Record<string, { decision: PaperSymbolDecisionRecord; adaptiveOk: boolean }>) || {}
   };
 }

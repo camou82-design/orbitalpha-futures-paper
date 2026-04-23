@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -294,6 +295,32 @@ type PaperEngineDecisionEnvelope = {
   v2_size?: number;
   selector_mismatch?: boolean;
 };
+
+type EntryQualityFeatureVector = Readonly<{
+  qualityScore: number;
+  atrPct: number;
+  emaGap: number;
+  volumeRatioProxy: number;
+  sideBias: number;
+}>;
+
+type EntryQualitySample = Readonly<{
+  ts: number;
+  symbol: string;
+  side: "long" | "short";
+  source: "profit" | "loss" | "contaminated";
+  vector: EntryQualityFeatureVector;
+  reason: string;
+}>;
+
+type ServerTradeControlState = Readonly<{
+  server_trade_enabled: boolean;
+  close_only_mode: boolean;
+  kill_switch_active: boolean;
+  authority_source: "server_state";
+  updated_at: number;
+  reason: string | null;
+}>;
 
 function toSymbolDiagnostic(symbol: MarketSymbol, endpoint: string, d: OkxPublicDiagnostics): SymbolDiagnostic {
   return {
@@ -777,13 +804,118 @@ export class PaperEngine {
   private staleEntryDroppedCount = 0;
   private lastEntryEvaluatedAt: number | null = null;
   private lastEntrySignalFetchedAt: number | null = null;
+  private readinessFreshTickCompletedCycles = 0;
+  private readinessFreshTickRequiredCycles = 2;
+  private readinessFreshTickLastFetchedAt: number | null = null;
+  private readinessFreshTickLastCandleTs: number | null = null;
+  private contaminatedEntrySamples: EntryQualitySample[] = [];
+  private lastEntryQualitySamples = {
+    profit: [] as EntryQualitySample[],
+    loss: [] as EntryQualitySample[],
+    contaminated: [] as EntryQualitySample[]
+  };
+  private engineLastTickAt: number | null = null;
+  private marketDataLastUpdateAt: number | null = null;
+  private v2LastDecisionAt: number | null = null;
+  private bundleLastWrittenAt: number | null = null;
+  private publicMarketDataReady = false;
+  private v2JudgmentReady = false;
+  private positionTrackingAlive = false;
+  private bundleWriterReady = false;
+  private entryPipelineReady = false;
+  private exitPipelineReady = false;
+  private serverTradeControlState: ServerTradeControlState = {
+    server_trade_enabled: true,
+    close_only_mode: false,
+    kill_switch_active: false,
+    authority_source: "server_state",
+    updated_at: 0,
+    reason: null
+  };
+  private readonly executionKeysConsumed = new Set<string>();
+  private executionKeysLoaded = false;
+  private lastServerTradeControlSignature: string | null = null;
+  private reconcileSafetyCloseOnly = false;
+  private reconcileLastCheckedAt: number | null = null;
+  private reconcileLastMismatchReason: string | null = null;
+  private readonly reconcileCheckIntervalMs = 30_000;
 
-  private computeExecutionReadiness(): boolean {
-    if (!this.config.okxDemoEnabled) return true;
-    return this.okxSignedRestReady === true;
+  private tradeControlPath(): string {
+    return path.resolve(this.config.dataDir, "reports/trade-control-state.json");
   }
 
-  private dropReadinessStaleState(reason: string, changedAt: number): void {
+  private executionKeysPath(): string {
+    return path.resolve(this.config.dataDir, "reports/execution-keys.json");
+  }
+
+  private async loadServerTradeControlState(nowTs: number): Promise<void> {
+    const p = this.tradeControlPath();
+    try {
+      const raw = await fs.readFile(p, "utf8");
+      const parsed = JSON.parse(raw) as Partial<ServerTradeControlState>;
+      this.serverTradeControlState = {
+        server_trade_enabled: parsed.server_trade_enabled !== false,
+        close_only_mode: parsed.close_only_mode === true,
+        kill_switch_active: parsed.kill_switch_active === true,
+        authority_source: "server_state",
+        updated_at: typeof parsed.updated_at === "number" && Number.isFinite(parsed.updated_at) ? parsed.updated_at : nowTs,
+        reason: typeof parsed.reason === "string" ? parsed.reason : null
+      };
+    } catch {
+      this.serverTradeControlState = {
+        server_trade_enabled: true,
+        close_only_mode: false,
+        kill_switch_active: false,
+        authority_source: "server_state",
+        updated_at: nowTs,
+        reason: "default_bootstrap_state"
+      };
+      await fs.mkdir(path.dirname(p), { recursive: true });
+      await fs.writeFile(p, JSON.stringify(this.serverTradeControlState, null, 2), "utf8");
+    }
+  }
+
+  private async ensureExecutionKeysLoaded(): Promise<void> {
+    if (this.executionKeysLoaded) return;
+    const p = this.executionKeysPath();
+    try {
+      const raw = await fs.readFile(p, "utf8");
+      const parsed = JSON.parse(raw) as { consumed?: string[] };
+      for (const k of parsed.consumed ?? []) {
+        if (typeof k === "string" && k.trim() !== "") this.executionKeysConsumed.add(k);
+      }
+    } catch {
+      // empty bootstrap
+    }
+    this.executionKeysLoaded = true;
+  }
+
+  private async consumeExecutionKey(key: string): Promise<boolean> {
+    if (key.trim() === "") return false;
+    await this.ensureExecutionKeysLoaded();
+    if (this.executionKeysConsumed.has(key)) {
+      this.logger.warn("EXECUTION_KEY_DUPLICATE_BLOCKED", { execution_key: key });
+      return false;
+    }
+    this.executionKeysConsumed.add(key);
+    const p = this.executionKeysPath();
+    await fs.mkdir(path.dirname(p), { recursive: true });
+    const consumed = Array.from(this.executionKeysConsumed).slice(-4000);
+    await fs.writeFile(p, JSON.stringify({ updated_at: Date.now(), consumed }, null, 2), "utf8");
+    return true;
+  }
+
+  private currentServerTradeControlSignature(): string {
+    return [
+      this.serverTradeControlState.server_trade_enabled ? "1" : "0",
+      this.serverTradeControlState.close_only_mode ? "1" : "0",
+      this.serverTradeControlState.kill_switch_active ? "1" : "0",
+      String(this.serverTradeControlState.updated_at ?? 0),
+      String(this.serverTradeControlState.reason ?? "")
+    ].join("|");
+  }
+
+  private clearPendingDecisionState(reason: string, changedAt: number, authoritySource: string): void {
     const dropped = {
       reviewing_state: this.reviewingState.size,
       last_tick_range_eval: this.lastTickRangeEvalBySymbol.size,
@@ -796,6 +928,9 @@ export class PaperEngine {
     this.lastTickSymbolSnapshotBySymbol.clear();
     this.rangeReversalSwitchPendingBySymbol.clear();
     this.lastEntryDecision = null;
+    this.readinessFreshTickCompletedCycles = 0;
+    this.readinessFreshTickLastFetchedAt = null;
+    this.readinessFreshTickLastCandleTs = null;
     const droppedCount =
       dropped.reviewing_state +
       dropped.last_tick_range_eval +
@@ -803,12 +938,152 @@ export class PaperEngine {
       dropped.range_reversal_switch_pending +
       (dropped.had_last_entry_decision ? 1 : 0);
     this.staleEntryDroppedCount += droppedCount;
-    this.logger.warn("READINESS_STALE_ENTRY_DROPPED", {
+    this.logger.warn("PENDING_DECISION_STATE_DROPPED", {
       reason,
       changed_at: changedAt,
+      authority_source: authoritySource,
       dropped,
       dropped_count: droppedCount,
       stale_entry_dropped_count_total: this.staleEntryDroppedCount
+    });
+  }
+
+  private evaluateServerTradeControlTransition(nowTs: number): void {
+    const nextSig = this.currentServerTradeControlSignature();
+    if (this.lastServerTradeControlSignature == null) {
+      this.lastServerTradeControlSignature = nextSig;
+      return;
+    }
+    if (this.lastServerTradeControlSignature === nextSig) return;
+    this.lastServerTradeControlSignature = nextSig;
+    this.freshTickRequiredAfterReadiness = true;
+    this.clearPendingDecisionState("server_trade_control_transition", nowTs, this.serverTradeControlState.authority_source);
+    this.logger.warn("SERVER_TRADE_CONTROL_TRANSITION_APPLIED", {
+      server_trade_enabled: this.serverTradeControlState.server_trade_enabled,
+      close_only_mode: this.serverTradeControlState.close_only_mode,
+      kill_switch_active: this.serverTradeControlState.kill_switch_active,
+      authority_source: this.serverTradeControlState.authority_source,
+      updated_at: this.serverTradeControlState.updated_at,
+      reason: this.serverTradeControlState.reason
+    });
+  }
+
+  private async runPositionStateReconciliation(nowTs: number): Promise<void> {
+    if (this.reconcileLastCheckedAt != null && nowTs - this.reconcileLastCheckedAt < this.reconcileCheckIntervalMs) return;
+    this.reconcileLastCheckedAt = nowTs;
+    if (!this.okxDemo || !this.executionReadiness) return;
+    const localOpen = await this.positions.loadOpenAll();
+    const localKeys = new Set(localOpen.map((p) => `${String(p.symbol)}:${String(p.side)}`));
+    const remote = await this.okxDemo.getPositions("SWAP");
+    if (!remote.ok) {
+      this.reconcileSafetyCloseOnly = true;
+      this.reconcileLastMismatchReason = `remote_positions_unavailable:${remote.error}`;
+      this.logger.error("POSITION_RECONCILE_MISMATCH_SAFE_MODE", {
+        reason: this.reconcileLastMismatchReason,
+        authority_source: "server_state_reconcile"
+      });
+      return;
+    }
+    const remoteKeys = new Set<string>();
+    for (const row of remote.value) {
+      const inst = String((row as { instId?: unknown }).instId ?? "");
+      const posSideRaw = String((row as { posSide?: unknown }).posSide ?? "").toLowerCase();
+      const posRaw = (row as { pos?: unknown }).pos;
+      const sizeNum = typeof posRaw === "number" ? posRaw : typeof posRaw === "string" ? Number(posRaw) : NaN;
+      if (!Number.isFinite(sizeNum) || Math.abs(sizeNum) <= 0) continue;
+      const side: "long" | "short" = posSideRaw === "short" ? "short" : "long";
+      const symbol = inst.endsWith("-USDT-SWAP") ? `${inst.slice(0, -"-USDT-SWAP".length)}USDT` : inst;
+      if (symbol === "BTCUSDT" || symbol === "ETHUSDT") remoteKeys.add(`${symbol}:${side}`);
+    }
+    const localOnly = Array.from(localKeys).filter((k) => !remoteKeys.has(k));
+    const remoteOnly = Array.from(remoteKeys).filter((k) => !localKeys.has(k));
+    if (localOnly.length > 0 || remoteOnly.length > 0) {
+      this.reconcileSafetyCloseOnly = true;
+      this.reconcileLastMismatchReason = "position_state_mismatch";
+      this.logger.error("POSITION_RECONCILE_MISMATCH_SAFE_MODE", {
+        reason: "position_state_mismatch",
+        authority_source: "server_state_reconcile",
+        local_only: localOnly,
+        remote_only: remoteOnly
+      });
+      return;
+    }
+    if (this.reconcileSafetyCloseOnly) {
+      this.logger.info("POSITION_RECONCILE_RECOVERED_SAFE_MODE_OFF", {
+        authority_source: "server_state_reconcile"
+      });
+    }
+    this.reconcileSafetyCloseOnly = false;
+    this.reconcileLastMismatchReason = null;
+  }
+
+  private computeExecutionReadiness(): boolean {
+    if (!this.config.okxDemoEnabled) return true;
+    return this.okxSignedRestReady === true;
+  }
+
+  private dropReadinessStaleState(reason: string, changedAt: number): void {
+    const beforeDroppedTotal = this.staleEntryDroppedCount;
+    this.clearPendingDecisionState(reason, changedAt, "server_state");
+    const droppedCount = this.staleEntryDroppedCount - beforeDroppedTotal;
+    this.logger.warn("READINESS_STALE_ENTRY_DROPPED", {
+      reason,
+      changed_at: changedAt,
+      dropped_count: droppedCount,
+      dropped_previous_side_intent: true,
+      dropped_pending_stage: true,
+      stale_entry_dropped_count_total: this.staleEntryDroppedCount
+    });
+  }
+
+  private maxCandleTsFromSnapshots(snapshots: ReadonlyArray<SymbolSnapshot>): number | null {
+    let maxTs: number | null = null;
+    for (const s of snapshots) {
+      const candles = Array.isArray(s.candles) ? s.candles : [];
+      for (const c of candles) {
+        const ts = (c as { ts?: unknown }).ts;
+        if (typeof ts === "number" && Number.isFinite(ts)) {
+          maxTs = maxTs == null ? ts : Math.max(maxTs, ts);
+        }
+      }
+    }
+    return maxTs;
+  }
+
+  private updateReadinessFreshTickBarrierProgress(
+    fetchedAt: number,
+    snapshots: ReadonlyArray<SymbolSnapshot>
+  ): void {
+    if (!this.freshTickRequiredAfterReadiness) return;
+    const candleTs = this.maxCandleTsFromSnapshots(snapshots);
+    if (this.readinessFreshTickLastFetchedAt == null || this.readinessFreshTickLastCandleTs == null || candleTs == null) {
+      this.readinessFreshTickLastFetchedAt = fetchedAt;
+      this.readinessFreshTickLastCandleTs = candleTs;
+      this.logger.warn("READINESS_FRESH_TICK_BARRIER_ACTIVE", {
+        run_cycle_id: this.runCycleId,
+        fresh_tick_completed_cycles: this.readinessFreshTickCompletedCycles,
+        fresh_tick_required_cycles: this.readinessFreshTickRequiredCycles,
+        reason: "baseline_captured_or_candle_missing",
+        snapshot_fetched_at: fetchedAt,
+        max_candle_ts: candleTs
+      });
+      return;
+    }
+    const fetchedAdvanced = fetchedAt > this.readinessFreshTickLastFetchedAt;
+    const candleAdvanced = candleTs > this.readinessFreshTickLastCandleTs;
+    if (fetchedAdvanced && candleAdvanced) {
+      this.readinessFreshTickCompletedCycles += 1;
+      this.readinessFreshTickLastFetchedAt = fetchedAt;
+      this.readinessFreshTickLastCandleTs = candleTs;
+    }
+    this.logger.warn("READINESS_FRESH_TICK_BARRIER_ACTIVE", {
+      run_cycle_id: this.runCycleId,
+      fresh_tick_completed_cycles: this.readinessFreshTickCompletedCycles,
+      fresh_tick_required_cycles: this.readinessFreshTickRequiredCycles,
+      fetched_advanced: fetchedAdvanced,
+      candle_advanced: candleAdvanced,
+      snapshot_fetched_at: fetchedAt,
+      max_candle_ts: candleTs
     });
   }
 
@@ -926,10 +1201,15 @@ export class PaperEngine {
 
   async runOnce(): Promise<void> {
     this.runCycleId += 1;
+    const tickNow = Date.now();
+    this.engineLastTickAt = tickNow;
+    await this.loadServerTradeControlState(tickNow);
+    this.evaluateServerTradeControlTransition(tickNow);
     this.lastExitReasonLabel = "";
     this.lastSwitchReasonLabel = "";
     this.rangeReversalExitThisTickBySymbol.clear();
     await this.positions.ensureHistoryFile();
+    this.positionTrackingAlive = true;
 
     // --- 1. Ledger Integrity: High-Fidelity Position Normalization Promotion ---
     const allOpensForNormalization = await this.positions.loadOpenAll();
@@ -991,18 +1271,9 @@ export class PaperEngine {
       }
     }
     this.evaluateReadinessTransition(Date.now());
-    const readinessBarrierActive =
-      this.freshTickRequiredAfterReadiness === true &&
-      this.readinessTransitionCycleId != null &&
-      this.runCycleId <= this.readinessTransitionCycleId;
-    if (readinessBarrierActive) {
-      this.logger.warn("READINESS_FRESH_TICK_BARRIER_ACTIVE", {
-        run_cycle_id: this.runCycleId,
-        readiness_transition_cycle_id: this.readinessTransitionCycleId,
-        execution_readiness_changed_at: this.executionReadinessChangedAt
-      });
-    }
+    await this.runPositionStateReconciliation(Date.now());
     const history = await this.store.readPositionsHistory();
+    await this.refreshEntryQualitySamples(history as PaperClosedPositionRecord[]);
 
     const allowed = new Set<MarketSymbol>(["BTCUSDT", "ETHUSDT"]);
     const symbols = this.config.symbols.filter((s) => allowed.has(s));
@@ -1136,6 +1407,12 @@ export class PaperEngine {
     };
 
     const signalSummary = buildSignalSummary(snapshots);
+    this.marketDataLastUpdateAt = fetchedAt;
+    this.publicMarketDataReady = errors.length === 0 && snapshots.length > 0;
+    this.updateReadinessFreshTickBarrierProgress(fetchedAt, snapshots);
+    const readinessBarrierActive =
+      this.freshTickRequiredAfterReadiness &&
+      this.readinessFreshTickCompletedCycles < this.readinessFreshTickRequiredCycles;
     const runId = deriveRunIdentity(snapshots);
 
     const meta: RunMeta = {
@@ -1466,7 +1743,17 @@ export class PaperEngine {
         snapshot: buildV2SnapshotBridge(snapForDecision!),
         legacy: buildV2LegacyBridge(res),
         config: buildV2ConfigBridge(this.config),
-        state: buildV2StateBridge(opensAfterClose, this.lastRisk),
+        state: buildV2StateBridge(
+          opensAfterClose,
+          this.lastRisk,
+          this.executionReadiness,
+          readinessBarrierActive,
+          this.readinessFreshTickCompletedCycles,
+          this.readinessFreshTickRequiredCycles,
+          this.buildEntryQualityProfilesForV2(),
+          this.serverTradeControlState,
+          this.reconcileSafetyCloseOnly
+        ),
         v2Mode
       });
 
@@ -1481,6 +1768,22 @@ export class PaperEngine {
         adopted_engine: selectorResult?.adopted_result.engine ?? null,
         adoption_reason: selectorResult?.adopted_result.adoption_reason ?? null,
         authority_decision: authority.decision,
+        v2_decision: selectorResult?.v2_result.decision ?? null,
+        v2_side: selectorResult?.v2_result.side ?? null,
+        v2_reject_reason: selectorResult?.v2_result.risk.blockReason ?? null,
+        entry_quality_grade: selectorResult?.v2_result.risk.entryQualityGrade ?? authority.entryQualityGrade ?? null,
+        leverage_profile: selectorResult?.v2_result.risk.leverageProfile ?? authority.leverageProfile ?? "BASE",
+        applied_leverage: selectorResult?.v2_result.risk.appliedLeverage ?? authority.appliedLeverage ?? 0,
+        leverage_reason: selectorResult?.v2_result.risk.leverageReason ?? authority.leverageReason ?? null,
+        leverage_block_reason: selectorResult?.v2_result.risk.leverageBlockReason ?? authority.leverageBlockReason ?? null,
+        exposure_notional_krw: selectorResult?.v2_result.risk.exposureNotionalKrw ?? authority.exposureNotionalKrw ?? 0,
+        equity_multiple: selectorResult?.v2_result.risk.equityMultiple ?? authority.equityMultiple ?? 0,
+        v2_entry_quality_profit_distance:
+          (selectorResult?.v2_result.risk as { diagnostics?: Record<string, unknown> } | undefined)?.diagnostics?.["entry_quality_distance_profit"] ?? null,
+        v2_entry_quality_loss_distance:
+          (selectorResult?.v2_result.risk as { diagnostics?: Record<string, unknown> } | undefined)?.diagnostics?.["entry_quality_distance_loss"] ?? null,
+        v2_entry_quality_contaminated_distance:
+          (selectorResult?.v2_result.risk as { diagnostics?: Record<string, unknown> } | undefined)?.diagnostics?.["entry_quality_distance_contaminated"] ?? null,
         regime_at_decision: effectiveRegimeForDecision,
         active_engine_routing: marketModeOut.routing.activeEngine
       });
@@ -1514,6 +1817,10 @@ export class PaperEngine {
         selector_mismatch: envelope.selector_mismatch
       });
     } // End of sym loop
+    this.v2JudgmentReady = decisionBySymbol.size > 0;
+    if (decisionBySymbol.size > 0) this.v2LastDecisionAt = fetchedAt;
+    this.entryPipelineReady = this.publicMarketDataReady && this.v2JudgmentReady;
+    this.exitPipelineReady = this.publicMarketDataReady && snapshots.length > 0;
 
     // 1. First closing (including reversals)
     await this.tryPaperPositionClose({
@@ -1528,6 +1835,7 @@ export class PaperEngine {
     });
 
     // 2. Then entries/scale-ins
+    const effectiveCloseOnlyMode = this.serverTradeControlState.close_only_mode || this.reconcileSafetyCloseOnly;
     await this.processPaperSymbolEntries({
       snapshots,
       errorsCount: errors.length,
@@ -1538,14 +1846,19 @@ export class PaperEngine {
       decisionBySymbol,
       executionReadiness: this.executionReadiness,
       readinessBarrierActive,
-      readinessChangedAt: this.executionReadinessChangedAt
+      readinessChangedAt: this.executionReadinessChangedAt,
+      serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+      closeOnlyMode: effectiveCloseOnlyMode,
+      killSwitchActive: this.serverTradeControlState.kill_switch_active
     });
     if (this.freshTickRequiredAfterReadiness && !readinessBarrierActive) {
       this.freshTickRequiredAfterReadiness = false;
       this.logger.info("READINESS_REEVALUATION_PASSED", {
         run_cycle_id: this.runCycleId,
         execution_readiness: this.executionReadiness,
-        execution_readiness_changed_at: this.executionReadinessChangedAt
+        execution_readiness_changed_at: this.executionReadinessChangedAt,
+        fresh_tick_completed_cycles: this.readinessFreshTickCompletedCycles,
+        fresh_tick_required_cycles: this.readinessFreshTickRequiredCycles
       });
     }
 
@@ -1566,6 +1879,7 @@ export class PaperEngine {
 
       try {
         const risk = this.lastRisk!;
+        const stateNow = Date.now();
         const regimeBlocked = (risk.blockedRegimes?.[effectiveRegimeForDecision]?.until ?? 0) > fetchedAt;
         const statusRelaxBypass = effectiveRegimeForDecision === "RANGE" &&
           this.config.paperEngineMode === "PAPER_TEST" &&
@@ -1632,9 +1946,47 @@ export class PaperEngine {
           execution_readiness: this.executionReadiness,
           execution_readiness_changed_at: this.executionReadinessChangedAt,
           fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness,
+          fresh_tick_completed_cycles_after_readiness: this.readinessFreshTickCompletedCycles,
+          fresh_tick_required_cycles_after_readiness: this.readinessFreshTickRequiredCycles,
           stale_entry_dropped_count: this.staleEntryDroppedCount,
           last_entry_evaluated_at: this.lastEntryEvaluatedAt,
           last_entry_signal_fetched_at: this.lastEntrySignalFetchedAt,
+          entry_quality_profit_samples: this.lastEntryQualitySamples.profit.length,
+          entry_quality_loss_samples: this.lastEntryQualitySamples.loss.length,
+          entry_quality_contaminated_samples: this.lastEntryQualitySamples.contaminated.length,
+          engine_loop_alive: true,
+          engine_last_tick_at: this.engineLastTickAt,
+          market_data_last_update_at: this.marketDataLastUpdateAt,
+          v2_last_decision_at: this.v2LastDecisionAt,
+          bundle_last_written_at: this.bundleLastWrittenAt,
+          signed_execution_ready: this.executionReadiness,
+          server_trade_enabled: this.serverTradeControlState.server_trade_enabled,
+          serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+          close_only_mode: this.serverTradeControlState.close_only_mode,
+          closeOnlyMode: this.serverTradeControlState.close_only_mode,
+          close_only_mode_effective: this.serverTradeControlState.close_only_mode || this.reconcileSafetyCloseOnly,
+          closeOnlyModeEffective: this.serverTradeControlState.close_only_mode || this.reconcileSafetyCloseOnly,
+          kill_switch_active: this.serverTradeControlState.kill_switch_active,
+          killSwitch: this.serverTradeControlState.kill_switch_active,
+          authority_source: this.serverTradeControlState.authority_source,
+          trade_control_authority_source: this.serverTradeControlState.authority_source,
+          trade_control_updated_at: this.serverTradeControlState.updated_at,
+          trade_control_reason: this.serverTradeControlState.reason,
+          reconcile_safe_mode_active: this.reconcileSafetyCloseOnly,
+          reconcileSafeMode: this.reconcileSafetyCloseOnly,
+          reconcile_last_mismatch_reason: this.reconcileLastMismatchReason,
+          reconcile_last_checked_at: this.reconcileLastCheckedAt,
+          public_market_data_ready: this.publicMarketDataReady,
+          v2_judgment_ready: this.v2JudgmentReady,
+          position_state_ready: this.positionTrackingAlive,
+          bundle_writer_ready: this.bundleWriterReady,
+          position_tracking_alive: this.positionTrackingAlive,
+          entry_pipeline_ready: this.entryPipelineReady,
+          exit_pipeline_ready: this.exitPipelineReady,
+          fresh_tick_age_ms:
+            this.readinessFreshTickLastFetchedAt != null ? Math.max(0, stateNow - this.readinessFreshTickLastFetchedAt) : null,
+          snapshot_age_ms:
+            this.marketDataLastUpdateAt != null ? Math.max(0, stateNow - this.marketDataLastUpdateAt) : null,
           okx_signed_rest_ready: this.okxSignedRestReady,
           okx_account_config_ok: this.okxAccountConfigOk,
           okx_balance_ok: this.okxBalanceOk,
@@ -1660,11 +2012,45 @@ export class PaperEngine {
 
     try {
       const summary = await this.positions.refreshSummaryReport();
+      this.bundleLastWrittenAt = Date.now();
+      this.bundleWriterReady = true;
       this.logger.info("summary_report_refreshed", {
         summaryPath: summary.summaryPath,
         health: summary.health.status
       });
+      this.logger.info("ENGINE_24H_RUNTIME_STATUS", {
+        engine_loop_alive: true,
+        engine_last_tick_at: this.engineLastTickAt,
+        market_data_last_update_at: this.marketDataLastUpdateAt,
+        v2_last_decision_at: this.v2LastDecisionAt,
+        bundle_last_written_at: this.bundleLastWrittenAt,
+        signed_execution_ready: this.executionReadiness,
+        server_trade_enabled: this.serverTradeControlState.server_trade_enabled,
+        serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+        close_only_mode: this.serverTradeControlState.close_only_mode,
+        closeOnlyMode: this.serverTradeControlState.close_only_mode,
+        close_only_mode_effective: this.serverTradeControlState.close_only_mode || this.reconcileSafetyCloseOnly,
+        closeOnlyModeEffective: this.serverTradeControlState.close_only_mode || this.reconcileSafetyCloseOnly,
+        kill_switch_active: this.serverTradeControlState.kill_switch_active,
+        killSwitch: this.serverTradeControlState.kill_switch_active,
+        authority_source: this.serverTradeControlState.authority_source,
+        trade_control_authority_source: this.serverTradeControlState.authority_source,
+        reconcile_safe_mode_active: this.reconcileSafetyCloseOnly,
+        reconcileSafeMode: this.reconcileSafetyCloseOnly,
+        reconcile_last_mismatch_reason: this.reconcileLastMismatchReason,
+        fresh_tick_age_ms:
+          this.readinessFreshTickLastFetchedAt != null ? Math.max(0, Date.now() - this.readinessFreshTickLastFetchedAt) : null,
+        snapshot_age_ms:
+          this.marketDataLastUpdateAt != null ? Math.max(0, Date.now() - this.marketDataLastUpdateAt) : null,
+        public_market_data_ready: this.publicMarketDataReady,
+        v2_judgment_ready: this.v2JudgmentReady,
+        position_state_ready: this.positionTrackingAlive,
+        bundle_writer_ready: this.bundleWriterReady,
+        entry_pipeline_ready: this.entryPipelineReady,
+        exit_pipeline_ready: this.exitPipelineReady
+      });
     } catch (e) {
+      this.bundleWriterReady = false;
       this.logger.error("summary_report_refresh_failed", { error: String(e) });
     }
 
@@ -2466,7 +2852,6 @@ export class PaperEngine {
     if (!this.okxDemo) {
       return { ok: false, ordId: null, fillPx: null, errorCode: "no_client", errorMessage: "OKX Demo client not initialized", ackCode: "rejected", orderState: null };
     }
-
     const instId = toOkxSwapInstId(input.symbol);
     const logCtx = {
       order_trace_id: input.traceId,
@@ -2483,6 +2868,11 @@ export class PaperEngine {
     if (!this.okxSignedRestReady) {
       this.logger.warn("okx_order_submit_skipped_signed_not_ready", logCtx);
       return { ok: false, ordId: null, fillPx: null, errorCode: "signed_not_ready", errorMessage: "OKX signed REST smoke test not passed", ackCode: "rejected", orderState: null };
+    }
+    const orderExecutionKey = `order:${input.traceId}:${input.reason}:${input.side}:${input.posSide}:${input.qty}`;
+    const orderKeyOk = await this.consumeExecutionKey(orderExecutionKey);
+    if (!orderKeyOk) {
+      return { ok: false, ordId: null, fillPx: null, errorCode: "duplicate_execution_key", errorMessage: "Duplicate order execution key blocked", ackCode: "rejected", orderState: null };
     }
 
     try {
@@ -4780,13 +5170,16 @@ export class PaperEngine {
       bridgeSizeUsd = legacyAdaptive.sizeUsd;
     }
     if (bridgeSizeUsd <= 0) return null;
+    const appliedLeverage = Math.max(0, authority.appliedLeverage ?? this.config.leverage);
+    const leverageMultiplier =
+      this.config.leverage > 0 ? Math.max(0.5, appliedLeverage / this.config.leverage) : 1.0;
 
     // Build synthetic fallback bridge for V2 or missing results (execution size follows legacy adaptive when side matches)
     return {
       ok: true,
       direction: side as "long" | "short",
       sizeUsd: bridgeSizeUsd,
-      leverageMultiplier: 1.0,
+      leverageMultiplier,
       detail: {
         source: "v2_authority_execution_bridge",
         bridge_activated: true,
@@ -4795,10 +5188,181 @@ export class PaperEngine {
         authority_selector_size_usd: sizeUsd,
         authority_size_usd: bridgeSizeUsd,
         finalSizeUsd: bridgeSizeUsd,
+        entry_quality_grade: authority.entryQualityGrade ?? null,
+        leverage_profile: authority.leverageProfile ?? "BASE",
+        applied_leverage: appliedLeverage,
+        leverage_reason: authority.leverageReason ?? null,
+        leverage_block_reason: authority.leverageBlockReason ?? null,
+        exposure_notional_krw: authority.exposureNotionalKrw ?? null,
+        equity_multiple: authority.equityMultiple ?? null,
         confidence_score: 1.0,
         confidence_tier: "top",
         size_multiplier: 1.0
       }
+    };
+  }
+
+  private toEntryQualityVectorFromSnapshot(
+    snapshot: Pick<SymbolSnapshot, "qualityScore" | "atr" | "lastPrice" | "emaGap" | "volumeRatioProxy">,
+    side: "long" | "short"
+  ): EntryQualityFeatureVector {
+    const atrPct = snapshot.atr != null && snapshot.lastPrice > 0 ? snapshot.atr / snapshot.lastPrice : 0;
+    return {
+      qualityScore: Number.isFinite(snapshot.qualityScore) ? snapshot.qualityScore : 0,
+      atrPct: Number.isFinite(atrPct) ? atrPct : 0,
+      emaGap: Number.isFinite(snapshot.emaGap ?? NaN) ? Math.abs(snapshot.emaGap ?? 0) : 0,
+      volumeRatioProxy: Number.isFinite(snapshot.volumeRatioProxy) ? snapshot.volumeRatioProxy : 0,
+      sideBias: side === "long" ? 1 : -1
+    };
+  }
+
+  private qualityVectorDistance(a: EntryQualityFeatureVector, b: EntryQualityFeatureVector): number {
+    const dq = (a.qualityScore - b.qualityScore) / 100;
+    const datr = a.atrPct - b.atrPct;
+    const dema = a.emaGap - b.emaGap;
+    const dvol = (a.volumeRatioProxy - b.volumeRatioProxy) / 5;
+    const dside = a.sideBias - b.sideBias;
+    return Math.sqrt(dq * dq + datr * datr + dema * dema + dvol * dvol + dside * dside);
+  }
+
+  private async buildEntryQualitySamplesFromHistory(
+    history: ReadonlyArray<PaperClosedPositionRecord>
+  ): Promise<{ profit: EntryQualitySample[]; loss: EntryQualitySample[] }> {
+    const profit: EntryQualitySample[] = [];
+    const loss: EntryQualitySample[] = [];
+    for (const row of history.slice(-120)) {
+      const symbol = String(row.symbol ?? "");
+      const side = row.side === "short" ? "short" : "long";
+      const tsPathRaw = typeof row.timestampSnapshotPath === "string" ? row.timestampSnapshotPath : "";
+      if (symbol === "" || tsPathRaw === "") continue;
+      try {
+        const raw = await fs.readFile(tsPathRaw, "utf8");
+        const parsed = JSON.parse(raw) as { snapshots?: unknown[] };
+        const snaps = Array.isArray(parsed.snapshots) ? parsed.snapshots : [];
+        const snap = snaps.find((s) => String((s as { symbol?: unknown }).symbol ?? "") === symbol) as
+          | (Pick<SymbolSnapshot, "qualityScore" | "atr" | "lastPrice" | "emaGap" | "volumeRatioProxy"> & Record<string, unknown>)
+          | undefined;
+        if (!snap) continue;
+        const vector = this.toEntryQualityVectorFromSnapshot(
+          {
+            qualityScore: Number((snap as { qualityScore?: unknown }).qualityScore ?? 0),
+            atr: Number((snap as { atr?: unknown }).atr ?? 0),
+            lastPrice: Number((snap as { lastPrice?: unknown }).lastPrice ?? 0),
+            emaGap: Number((snap as { emaGap?: unknown }).emaGap ?? 0),
+            volumeRatioProxy: Number((snap as { volumeRatioProxy?: unknown }).volumeRatioProxy ?? 0)
+          },
+          side
+        );
+        const sample: EntryQualitySample = {
+          ts: Number(row.openedAt ?? Date.now()),
+          symbol,
+          side,
+          source: row.pnlUsdNet > 0 ? "profit" : "loss",
+          vector,
+          reason: row.closeReason ?? "history_close_reason_unknown"
+        };
+        if (sample.source === "profit") profit.push(sample);
+        else loss.push(sample);
+      } catch {
+        // ignore malformed/rotated snapshot files
+      }
+    }
+    return { profit, loss };
+  }
+
+  private async refreshEntryQualitySamples(history: ReadonlyArray<PaperClosedPositionRecord>): Promise<void> {
+    const built = await this.buildEntryQualitySamplesFromHistory(history);
+    this.lastEntryQualitySamples = {
+      profit: built.profit,
+      loss: built.loss,
+      contaminated: this.contaminatedEntrySamples.slice(-120)
+    };
+    this.logger.info("ENTRY_QUALITY_SAMPLE_COMPARISON", {
+      profit_samples: this.lastEntryQualitySamples.profit.length,
+      loss_samples: this.lastEntryQualitySamples.loss.length,
+      contaminated_samples: this.lastEntryQualitySamples.contaminated.length
+    });
+    const recent = history.slice(-20);
+    const prev = history.slice(-40, -20);
+    const regimeExitRate = (rows: ReadonlyArray<PaperClosedPositionRecord>): number => {
+      if (rows.length === 0) return 0;
+      let regimeExits = 0;
+      for (const r of rows) {
+        const reason = String(r.closeReason ?? "").toLowerCase();
+        if (reason.includes("regime")) regimeExits += 1;
+      }
+      return regimeExits / rows.length;
+    };
+    const recentRate = regimeExitRate(recent);
+    const prevRate = regimeExitRate(prev);
+    this.logger.info("EARLY_REGIME_EXIT_RATE_PROOF", {
+      recent_window_count: recent.length,
+      previous_window_count: prev.length,
+      recent_regime_exit_rate: recentRate,
+      previous_regime_exit_rate: prevRate,
+      reduced_vs_previous: prev.length > 0 ? recentRate < prevRate : null
+    });
+  }
+
+  private evaluateEntryQualityGate(
+    snapshot: SymbolSnapshot,
+    side: "long" | "short"
+  ): { pass: boolean; shrink: boolean; sizeMultiplier: number; score: number; reason: string } {
+    const current = this.toEntryQualityVectorFromSnapshot(snapshot, side);
+    const nearest = (samples: EntryQualitySample[]): number => {
+      if (samples.length === 0) return Number.POSITIVE_INFINITY;
+      let best = Number.POSITIVE_INFINITY;
+      for (const s of samples) best = Math.min(best, this.qualityVectorDistance(current, s.vector));
+      return best;
+    };
+    const dProfit = nearest(this.lastEntryQualitySamples.profit);
+    const dLoss = nearest(this.lastEntryQualitySamples.loss);
+    const dContam = nearest(this.lastEntryQualitySamples.contaminated);
+    const similarityScore = Math.max(0, Math.min(1, 1 / (1 + dProfit)));
+    if (Number.isFinite(dContam) && dContam < dProfit) {
+      return { pass: false, shrink: false, sizeMultiplier: 0, score: similarityScore, reason: "similar_to_contaminated_sample" };
+    }
+    if (Number.isFinite(dLoss) && dLoss < dProfit) {
+      return { pass: false, shrink: false, sizeMultiplier: 0, score: similarityScore, reason: "similar_to_loss_sample" };
+    }
+    if (!Number.isFinite(dProfit)) {
+      return { pass: false, shrink: false, sizeMultiplier: 0, score: 0, reason: "profit_sample_missing" };
+    }
+    if (similarityScore < 0.55) {
+      return { pass: true, shrink: true, sizeMultiplier: 0.5, score: similarityScore, reason: "weak_similarity_to_profit_sample" };
+    }
+    return { pass: true, shrink: false, sizeMultiplier: 1, score: similarityScore, reason: "similar_to_profit_sample" };
+  }
+
+  private buildEntryQualityProfilesForV2(): {
+    profit: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
+    loss: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
+    contaminated: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
+  } {
+    const avg = (rows: EntryQualitySample[]) => {
+      if (rows.length === 0) return { qualityScoreAvg: 0, emaGapAvg: 0, atrPctAvg: 0, volumeRatioAvg: 0, count: 0 };
+      let q = 0;
+      let e = 0;
+      let a = 0;
+      let v = 0;
+      for (const r of rows) {
+        q += r.vector.qualityScore;
+        e += Math.abs(r.vector.emaGap);
+        a += Math.abs(r.vector.atrPct);
+        v += r.vector.volumeRatioProxy;
+      }
+      return {
+        qualityScoreAvg: q / rows.length,
+        emaGapAvg: e / rows.length,
+        atrPctAvg: a / rows.length,
+        volumeRatioAvg: v / rows.length,
+        count: rows.length
+      };
+    };
+    return {
+      profit: avg(this.lastEntryQualitySamples.profit),
+      loss: avg(this.lastEntryQualitySamples.loss),
+      contaminated: avg(this.lastEntryQualitySamples.contaminated)
     };
   }
 
@@ -4813,8 +5377,25 @@ export class PaperEngine {
     executionReadiness: boolean;
     readinessBarrierActive: boolean;
     readinessChangedAt: number | null;
+    serverTradeEnabled: boolean;
+    closeOnlyMode: boolean;
+    killSwitchActive: boolean;
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
+    if (input.killSwitchActive || !input.serverTradeEnabled) {
+      this.logger.warn("ENTRY_BLOCKED_SERVER_AUTHORITY_STATE", {
+        reason: input.killSwitchActive ? "kill_switch_active" : "server_trade_disabled",
+        authority_source: "server_state"
+      });
+      return;
+    }
+    if (input.closeOnlyMode) {
+      this.logger.warn("ENTRY_BLOCKED_SERVER_AUTHORITY_STATE", {
+        reason: this.reconcileSafetyCloseOnly ? "reconcile_safe_mode_close_only" : "close_only_mode",
+        authority_source: "server_state"
+      });
+      return;
+    }
     if (!input.executionReadiness) {
       this.logger.warn("READINESS_REEVALUATION_BLOCKED", {
         reason: "execution_readiness_false",
@@ -4864,6 +5445,16 @@ export class PaperEngine {
         reason: "fresh_tick_barrier_active",
         run_cycle_id: this.runCycleId
       });
+      for (const q of entryQueue) {
+        this.contaminatedEntrySamples.push({
+          ts: Date.now(),
+          symbol: String(q.symbol),
+          side: q.signal === "paper_short_candidate" ? "short" : "long",
+          source: "contaminated",
+          vector: this.toEntryQualityVectorFromSnapshot(q, q.signal === "paper_short_candidate" ? "short" : "long"),
+          reason: "blocked_by_readiness_fresh_tick_barrier"
+        });
+      }
       return;
     }
 
@@ -4923,6 +5514,14 @@ export class PaperEngine {
           snapshot_fetched_at: first.fetchedAt,
           decision_cycle_id: envelope.decisionCycleId,
           current_cycle_id: this.runCycleId
+        });
+        this.contaminatedEntrySamples.push({
+          ts: Date.now(),
+          symbol: String(first.symbol),
+          side: authority.side === "short" ? "short" : "long",
+          source: "contaminated",
+          vector: this.toEntryQualityVectorFromSnapshot(first, authority.side === "short" ? "short" : "long"),
+          reason: staleReasons.join("|")
         });
         continue;
       }
@@ -4986,6 +5585,7 @@ export class PaperEngine {
       const sym = String(first.symbol);
       const decision = res.executorDecision!;
       const adaptive = effectiveAdaptiveResult;
+      const entryQualitySizeMultiplier = 1;
 
       // --- UNIFIED ENTRY GATE CONSOLIDATION (Phase 1: Decision Logic & Guards) ---
       const effectiveRegimeForAi = (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime;
@@ -5171,7 +5771,10 @@ export class PaperEngine {
 
       // 3. SCALE-IN BRANCH (final gate passed; max open positions does not apply to scale-in)
       if (existingIdx >= 0) {
-        const scaled = await this.tryPaperPositionScaleIn(next[existingIdx], envelope, first, nowTs);
+        const scaleExecutionKey = `scalein:${sym}:${intentSide}:${next[existingIdx].openedAt}:${this.runCycleId}`;
+        const scaleKeyOk = await this.consumeExecutionKey(scaleExecutionKey);
+        if (!scaleKeyOk) continue;
+        const scaled = await this.tryPaperPositionScaleIn(next[existingIdx], envelope, first, nowTs, entryQualitySizeMultiplier);
         if (scaled) {
           next[existingIdx] = scaled;
           openPositionsChanged = true;
@@ -5209,6 +5812,9 @@ export class PaperEngine {
       }
 
       // 5. New entry only: ENTRY_ALLOWED here; ENTRY_OPENED after successful open below (not on scale-in).
+      const entryExecutionKey = `entry:${sym}:${intentSide}:${first.fetchedAt}:${this.runCycleId}`;
+      const entryKeyOk = await this.consumeExecutionKey(entryExecutionKey);
+      if (!entryKeyOk) continue;
       await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime, decision, authority));
 
       const sourceSignal = first.signal;
@@ -5267,6 +5873,7 @@ export class PaperEngine {
       const riskE = this.lastRiskExposure;
       const adaptiveSizeUsdBefore = adaptive.sizeUsd;
       let entrySizeUsd = adaptive.sizeUsd;
+      entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(entrySizeUsd * entryQualitySizeMultiplier * 100) / 100);
       if (!isRangeCampaignNewEntry && riskE) {
         entrySizeUsd = Math.max(
           MIN_POSITION_SIZE_USD,
@@ -5725,7 +6332,8 @@ export class PaperEngine {
     existing: PaperOpenPositionRecord,
     envelope: PaperEngineDecisionEnvelope,
     first: SymbolSnapshot,
-    nowTs: number
+    nowTs: number,
+    entryQualitySizeMultiplier = 1
   ): Promise<PaperOpenPositionRecord | null> {
     const { legacy: res, authority } = envelope;
     if (this.freshTickRequiredAfterReadiness) {
@@ -5937,6 +6545,18 @@ export class PaperEngine {
 
     const re = this.lastRiskExposure;
     const symEx = String(existing.symbol);
+    if (entryQualitySizeMultiplier < 1) {
+      incrementalSizeUsd = Math.max(
+        MIN_POSITION_SIZE_USD,
+        Math.round(incrementalSizeUsd * entryQualitySizeMultiplier * 100) / 100
+      );
+      this.logger.info("ENTRY_QUALITY_SCALE_IN_SIZE_REDUCED", {
+        symbol: existing.symbol,
+        side: existing.side,
+        entry_quality_size_multiplier: entryQualitySizeMultiplier,
+        final_incremental_size_usd: incrementalSizeUsd
+      });
+    }
 
     if (existing.regimeAtEntry === "TREND") {
       const pyr = this.trendPyramidLevelBySymbol.get(symEx) ?? 0;
@@ -6431,6 +7051,13 @@ function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): 
     v2_decision: envelope.v2_decision ?? selector?.v2_result.decision ?? "SKIP",
     v2_side: envelope.v2_side ?? selector?.v2_result.side ?? "none",
     v2_size: envelope.v2_size ?? selector?.v2_result.risk.finalSizeUsd ?? 0,
+    entry_quality_grade: selector?.v2_result.risk.entryQualityGrade ?? authority.entryQualityGrade ?? "B",
+    leverage_profile: selector?.v2_result.risk.leverageProfile ?? authority.leverageProfile ?? "BASE",
+    applied_leverage: selector?.v2_result.risk.appliedLeverage ?? authority.appliedLeverage ?? 0,
+    leverage_reason: selector?.v2_result.risk.leverageReason ?? authority.leverageReason ?? null,
+    leverage_block_reason: selector?.v2_result.risk.leverageBlockReason ?? authority.leverageBlockReason ?? null,
+    exposure_notional_krw: selector?.v2_result.risk.exposureNotionalKrw ?? authority.exposureNotionalKrw ?? 0,
+    equity_multiple: selector?.v2_result.risk.equityMultiple ?? authority.equityMultiple ?? 0,
 
     selector_mismatch:
       envelope.selector_mismatch ??
@@ -6455,7 +7082,14 @@ function buildAuthorityEventMeta(
     authority_side: authority.side,
     authority_size_usd: useExecuted ? executedEntrySizeUsd : authority.decision === "ENTER" ? authority.sizeUsd : 0,
     authority_source: authority.source,
-    authority_regime: authority.regime
+    authority_regime: authority.regime,
+    entry_quality_grade: authority.entryQualityGrade ?? null,
+    leverage_profile: authority.leverageProfile ?? "BASE",
+    applied_leverage: authority.appliedLeverage ?? 0,
+    leverage_reason: authority.leverageReason ?? null,
+    leverage_block_reason: authority.leverageBlockReason ?? null,
+    exposure_notional_krw: authority.exposureNotionalKrw ?? 0,
+    equity_multiple: authority.equityMultiple ?? 0
   };
 }
 
@@ -6602,7 +7236,18 @@ function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
 
 function buildV2StateBridge(
   opensAfterClose: ReadonlyArray<PaperOpenPositionRecord>,
-  lastRisk: RiskControlDecision | null
+  lastRisk: RiskControlDecision | null,
+  executionReadiness: boolean,
+  freshTickBarrierActive: boolean,
+  freshTickCompletedCycles: number,
+  freshTickRequiredCycles: number,
+  entryQualityProfiles: {
+    profit: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
+    loss: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
+    contaminated: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
+  },
+  serverTradeControlState: ServerTradeControlState,
+  reconcileSafeModeActive: boolean
 ): V2BridgeState {
   return {
     currentPositions: opensAfterClose
@@ -6622,7 +7267,22 @@ function buildV2StateBridge(
     lossStreaks: lastRisk?.recentLossStreakByMode ?? {},
     directionalShockState: lastRisk?.directionalShockState ?? "NONE",
     longAllow: lastRisk?.longAllow ?? true,
-    shortAllow: lastRisk?.shortAllow ?? true
+    shortAllow: lastRisk?.shortAllow ?? true,
+    executionReadiness,
+    freshTickBarrierActive,
+    freshTickCompletedCycles,
+    freshTickRequiredCycles,
+    entryQualityProfiles,
+    serverTradeEnabled: serverTradeControlState.server_trade_enabled,
+    closeOnlyMode: serverTradeControlState.close_only_mode,
+    killSwitch: serverTradeControlState.kill_switch_active,
+    reconcileSafeMode: reconcileSafeModeActive,
+    killSwitchActive: serverTradeControlState.kill_switch_active,
+    reconcileSafeModeActive,
+    accountEquityKrw: 500_000,
+    maxUsableMarginKrw: 420_000,
+    exposureNotionalCapKrw: 2_000_000,
+    symbolExposureNotionalCapKrw: 1_400_000
   };
 }
 

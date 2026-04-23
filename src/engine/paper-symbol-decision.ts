@@ -1335,7 +1335,21 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
       lossStreaks: input.risk?.recentLossStreakByMode ?? {},
       directionalShockState: input.risk?.directionalShockState ?? "NONE",
       longAllow: input.risk?.longAllow ?? true,
-      shortAllow: input.risk?.shortAllow ?? true
+      shortAllow: input.risk?.shortAllow ?? true,
+      executionReadiness: true,
+      freshTickBarrierActive: false,
+      freshTickCompletedCycles: 2,
+      freshTickRequiredCycles: 2,
+      serverTradeEnabled: true,
+      closeOnlyMode: false,
+      killSwitch: false,
+      reconcileSafeMode: false,
+      killSwitchActive: false,
+      reconcileSafeModeActive: false,
+      accountEquityKrw: 500_000,
+      maxUsableMarginKrw: 420_000,
+      exposureNotionalCapKrw: 2_000_000,
+      symbolExposureNotionalCapKrw: 1_400_000
     },
     v2Mode
   });
