@@ -14,7 +14,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "report:decisions": "python scripts/report_decisions_jsonl.py --input data/reports/decisions.jsonl",
     "check:logs-none": "python scripts/check_logs_for_legacy_none.py data/reports/decisions.jsonl data/reports/events.jsonl",
-    "check:funnel-monotonic": "python scripts/check_funnel_monotonic.py"
+    "check:funnel-monotonic": "python scripts/check_funnel_monotonic.py",
+    "local:loop": "npm run start:loop",
+    "local:web": "node dist/web/local-server.js"
   },
   "dependencies": {
     "dotenv": "^16.6.1"
