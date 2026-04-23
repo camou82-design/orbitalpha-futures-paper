@@ -193,6 +193,7 @@ export type PaperCloseLegMetrics = Readonly<{
   fundingRateAppliedClose: number;
   fundingRateAverage: number;
   holdingMs: number;
+  mark: number;
 }>;
 
 export function computePaperCloseLegMetrics(input: Readonly<{
@@ -251,7 +252,8 @@ export function computePaperCloseLegMetrics(input: Readonly<{
     fundingRateAppliedOpen: finiteUsd(fundingRateAppliedOpen),
     fundingRateAppliedClose: finiteUsd(fundingRateAppliedClose),
     fundingRateAverage: finiteUsd(fundingRateAverage),
-    holdingMs: finiteUsd(holdingMs)
+    holdingMs: finiteUsd(holdingMs),
+    mark: finiteUsd(input.closePrice)
   };
 }
 

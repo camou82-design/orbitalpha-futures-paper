@@ -111,7 +111,15 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
     newEntryPolicy,
     lastExitReasonLabel,
     lastSwitchReasonLabel,
-    dashboardLines
+    dashboardLines,
+    exchange: (o.exchange as "okx") || "okx",
+    okx_demo_enabled: !!o.okx_demo_enabled,
+    okx_demo_keys_loaded: !!o.okx_demo_keys_loaded,
+    okx_signed_rest_ready: !!o.okx_signed_rest_ready,
+    okx_account_config_ok: !!o.okx_account_config_ok,
+    okx_balance_ok: !!o.okx_balance_ok,
+    okx_positions_ok: !!o.okx_positions_ok,
+    okx_order_submit_ok: !!o.okx_order_submit_ok
   };
 }
 

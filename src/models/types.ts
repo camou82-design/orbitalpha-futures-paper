@@ -172,7 +172,7 @@ export type EngineConfig = Readonly<{
   okxDemoEnvRequested: boolean;
   /**
    * Explicit opt-in `ORBITALPHA_OKX_EXCHANGE_ENABLED` for OKX signed REST (orders/positions/balance).
-   * Default false: fills/opens/closes/PnL stay on internal paper paths only; market data stays public Bybit.
+   * Default false: fills/opens/closes/PnL stay on internal paper paths only; market data stays public OKX.
    */
   okxExchangeAuthOptIn: boolean;
   /**
@@ -723,10 +723,16 @@ export type PaperEngineState = Readonly<{
   risk_exposure?: RiskExposureOutput;
   /** 직전 틱 설명 레이어 */
   explanation?: PaperExplanationFields;
-  /** 대시보드용 직전 청산 라벨(설명·이벤트와 동기화) */
   last_exit_reason?: string;
-  /** 대시보드용 직전 TREND 스위칭 라벨 */
   last_switch_reason?: string;
+  exchange: "okx";
+  okx_demo_enabled: boolean;
+  okx_demo_keys_loaded: boolean;
+  okx_signed_rest_ready: boolean;
+  okx_account_config_ok: boolean;
+  okx_balance_ok: boolean;
+  okx_positions_ok: boolean;
+  okx_order_submit_ok: boolean;
 }>;
 
 /** One leg in `positions/open.json` (JSON array of up to `paperMaxOpenPositions` records). */
@@ -1065,6 +1071,16 @@ export type PaperOperationalSnapshot = Readonly<{
     lastExitReasonLine: string;
     lastSwitchReasonLine: string;
   }>;
+  last_exit_reason?: string;
+  last_switch_reason?: string;
+  exchange: "okx";
+  okx_demo_enabled: boolean;
+  okx_demo_keys_loaded: boolean;
+  okx_signed_rest_ready: boolean;
+  okx_account_config_ok: boolean;
+  okx_balance_ok: boolean;
+  okx_positions_ok: boolean;
+  okx_order_submit_ok: boolean;
 }>;
 
 /** Appended to `data/positions/history.json` when a paper position is closed. */

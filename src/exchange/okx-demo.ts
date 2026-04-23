@@ -83,62 +83,98 @@ export class OkxDemoClient {
     return createHmac("sha256", this.cfg.apiSecret).update(prehash).digest("base64");
   }
 
-  private async request<T>(
+  private async signedRequest<T>(
     method: "GET" | "POST",
     requestPath: string,
     query: URLSearchParams | null,
     body: Record<string, unknown> | null
-  ): Promise<OkxApiEnvelope<T>> {
+  ): Promise<TryResult<T[]>> {
     const q = query && Array.from(query.keys()).length > 0 ? `?${query.toString()}` : "";
     const pathWithQuery = `${requestPath}${q}`;
     const bodyRaw = body ? JSON.stringify(body) : "";
     const ts = new Date().toISOString();
-    
-    // For demo/simulated mode, headers must be present even if empty key
+    const requestUrl = `${this.cfg.baseUrl}${pathWithQuery}`;
+
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "x-simulated-trading": "1"
     };
-    if (this.cfg.apiKey) {
-      headers["OK-ACCESS-KEY"] = this.cfg.apiKey;
-      headers["OK-ACCESS-SIGN"] = this.sign(ts, method, pathWithQuery, bodyRaw);
-      headers["OK-ACCESS-TIMESTAMP"] = ts;
-      headers["OK-ACCESS-PASSPHRASE"] = this.cfg.passphrase;
+    if (!this.cfg.apiKey) {
+      return {
+        ok: false,
+        error: "apiKey_missing",
+        diagnostics: { httpStatus: 0, requestUrl, retMsg: "No API key configured for signed request" }
+      };
     }
 
-    const url = `${this.cfg.baseUrl}${pathWithQuery}`;
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: method === "POST" ? bodyRaw : undefined
-    });
-    const json = (await res.json()) as OkxApiEnvelope<T>;
-    if (!res.ok) {
-      throw new Error(`okx_http_${res.status}:${json.msg || "request_failed"}`);
+    headers["OK-ACCESS-KEY"] = this.cfg.apiKey;
+    headers["OK-ACCESS-SIGN"] = this.sign(ts, method, pathWithQuery, bodyRaw);
+    headers["OK-ACCESS-TIMESTAMP"] = ts;
+    headers["OK-ACCESS-PASSPHRASE"] = this.cfg.passphrase;
+
+    try {
+      await this.acquireRateLimitSlot();
+      const res = await fetch(requestUrl, {
+        method,
+        headers,
+        body: method === "POST" ? bodyRaw : undefined
+      });
+
+      const httpStatus = res.status;
+      const text = await res.text();
+      let json: any;
+      try {
+        json = text.length > 0 ? JSON.parse(text) : null;
+      } catch {
+        return {
+          ok: false,
+          error: `invalid_json_http_${httpStatus}`,
+          diagnostics: { httpStatus, requestUrl, retMsg: "Failed to parse JSON response" }
+        };
+      }
+
+      const diagnostics: OkxPublicDiagnostics = {
+        httpStatus,
+        requestUrl,
+        retCode: json?.code,
+        retMsg: json?.msg
+      };
+
+      if (!res.ok) {
+        return { ok: false, error: `okx_http_${httpStatus}:${json?.msg || "request_failed"}`, diagnostics };
+      }
+      if (json?.code !== "0") {
+        return { ok: false, error: `okx_api_${json?.code}:${json?.msg || "request_failed"}`, diagnostics };
+      }
+
+      return { ok: true, value: json.data as T[], diagnostics };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return {
+        ok: false,
+        error: `signed_request_network_error: ${msg}`,
+        diagnostics: { httpStatus: 0, requestUrl, retMsg: msg }
+      };
     }
-    if (json.code !== "0") {
-      throw new Error(`okx_api_${json.code}:${json.msg || "request_failed"}`);
-    }
-    return json;
   }
 
-  getAccountConfig(): Promise<OkxApiEnvelope<Record<string, unknown>>> {
-    return this.request<Record<string, unknown>>("GET", "/api/v5/account/config", null, null);
+  getAccountConfig(): Promise<TryResult<Record<string, unknown>[]>> {
+    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/account/config", null, null);
   }
 
-  getBalance(ccy?: string): Promise<OkxApiEnvelope<Record<string, unknown>>> {
+  getBalance(ccy?: string): Promise<TryResult<Record<string, unknown>[]>> {
     const q = new URLSearchParams();
     if (ccy) q.set("ccy", ccy);
-    return this.request<Record<string, unknown>>("GET", "/api/v5/account/balance", q, null);
+    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/account/balance", q, null);
   }
 
-  getPositions(instType = "SWAP"): Promise<OkxApiEnvelope<Record<string, unknown>>> {
+  getPositions(instType = "SWAP"): Promise<TryResult<Record<string, unknown>[]>> {
     const q = new URLSearchParams();
     q.set("instType", instType);
-    return this.request<Record<string, unknown>>("GET", "/api/v5/account/positions", q, null);
+    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/account/positions", q, null);
   }
 
-  submitOrder(input: OkxOrderSubmitInput): Promise<OkxApiEnvelope<Record<string, unknown>>> {
+  submitOrder(input: OkxOrderSubmitInput): Promise<TryResult<Record<string, unknown>[]>> {
     const payload = {
       instId: input.instId,
       tdMode: input.tdMode ?? "isolated",
@@ -148,15 +184,39 @@ export class OkxDemoClient {
       sz: input.sz,
       ...(input.clOrdId ? { clOrdId: input.clOrdId } : {})
     };
-    return this.request<Record<string, unknown>>("POST", "/api/v5/trade/order", null, payload);
+    return this.signedRequest<Record<string, unknown>>("POST", "/api/v5/trade/order", null, payload);
   }
 
-  getOrder(instId: string, ordId?: string, clOrdId?: string): Promise<OkxApiEnvelope<Record<string, unknown>>> {
+  getOrder(instId: string, ordId?: string, clOrdId?: string): Promise<TryResult<Record<string, unknown>[]>> {
     const q = new URLSearchParams();
     q.set("instId", instId);
     if (ordId) q.set("ordId", ordId);
     if (clOrdId) q.set("clOrdId", clOrdId);
-    return this.request<Record<string, unknown>>("GET", "/api/v5/trade/order", q, null);
+    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/order", q, null);
+  }
+
+  async checkSignedReady(): Promise<{
+    configOk: boolean;
+    balanceOk: boolean;
+    positionsOk: boolean;
+    diagnostics: Record<string, OkxPublicDiagnostics>;
+  }> {
+    const [cfg, bal, pos] = await Promise.all([
+      this.getAccountConfig(),
+      this.getBalance(),
+      this.getPositions()
+    ]);
+
+    return {
+      configOk: cfg.ok,
+      balanceOk: bal.ok,
+      positionsOk: pos.ok,
+      diagnostics: {
+        config: cfg.diagnostics,
+        balance: bal.diagnostics,
+        positions: pos.diagnostics
+      }
+    };
   }
 
   private async publicRequest<T>(

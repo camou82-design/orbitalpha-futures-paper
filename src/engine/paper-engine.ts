@@ -136,9 +136,9 @@ import {
 } from "./trend-engine";
 
 const EP = {
-  ticker: "/v5/market/tickers",
-  kline: "/v5/market/kline",
-  funding: "/v5/market/funding/history"
+  ticker: "/api/v5/market/ticker",
+  kline: "/api/v5/market/candles",
+  funding: "/api/v5/public/funding-rate"
 } as const;
 
 const SAME_DIR_REENTRY_COOLDOWN_MULT = 1.35;
@@ -751,6 +751,13 @@ export class PaperEngine {
 
   private readonly okxDemo: OkxDemoClient | null;
   private okxAccountConfigLoaded = false;
+  private okxDemoKeysLoaded = false;
+  private okxSignedRestReady = false;
+  private okxAccountConfigOk = false;
+  private okxBalanceOk = false;
+  private okxPositionsOk = false;
+  private okxOrderSubmitOk = false;
+  private okxSmokeTestPerformed = false;
 
   private pruneTrendSwitches1h(now: number): number {
     const cutoff = now - 3_600_000;
@@ -781,11 +788,12 @@ export class PaperEngine {
     this.positions = new PositionManager(this.store);
     this.risk = new RiskManager(config);
     if (config.okxDemoEnabled) {
-      const credsReady =
+      this.okxDemoKeysLoaded =
         config.okxDemoApiKey.length > 0 && config.okxDemoApiSecret.length > 0 && config.okxDemoPassphrase.length > 0;
-      if (!credsReady) {
+      
+      if (!this.okxDemoKeysLoaded) {
         this.okxDemo = null;
-        this.logger.error("okx_demo_env_mismatch_detected", {
+        this.logger.error("okx_demo_keys_incomplete", {
           okx_demo_enabled: true,
           has_api_key: config.okxDemoApiKey.length > 0,
           has_api_secret: config.okxDemoApiSecret.length > 0,
@@ -798,16 +806,14 @@ export class PaperEngine {
           apiSecret: config.okxDemoApiSecret,
           passphrase: config.okxDemoPassphrase
         });
-        this.logger.info("okx_demo_mode_active", {
-          okx_demo_base_url: config.okxDemoBaseUrl
-        });
-        this.logger.info("okx_simulated_trading_header_applied", {
-          header_name: "x-simulated-trading",
-          header_value: "1"
+        this.logger.info("okx_demo_client_initialized", {
+          okx_demo_base_url: config.okxDemoBaseUrl,
+          okx_demo_keys_loaded: true
         });
       }
     } else {
       this.okxDemo = null;
+      this.okxDemoKeysLoaded = false;
     }
     if (config.okxDemoEnvRequested && !config.okxExchangeAuthOptIn) {
       this.logger.info("okx_exchange_auth_disabled", {
@@ -870,30 +876,33 @@ export class PaperEngine {
     }
     // --------------------------------------------------------------------------
 
-    if (this.okxDemo) {
+    if (this.okxDemo && !this.okxSmokeTestPerformed) {
+      this.okxSmokeTestPerformed = true;
+      this.logger.info("performing_okx_signed_smoke_test");
       try {
-        if (!this.okxAccountConfigLoaded) {
-          const cfg = await this.okxDemo.getAccountConfig();
-          this.okxAccountConfigLoaded = true;
-          this.logger.info("okx_account_config_loaded", {
-            account_level: cfg.data?.[0]?.acctLv ?? null,
-            pos_mode: cfg.data?.[0]?.posMode ?? null
-          });
+        const ready = await this.okxDemo.checkSignedReady();
+        this.okxAccountConfigOk = ready.configOk;
+        this.okxBalanceOk = ready.balanceOk;
+        this.okxPositionsOk = ready.positionsOk;
+        this.okxSignedRestReady = ready.configOk && ready.balanceOk && ready.positionsOk;
+
+        if (this.okxAccountConfigOk) this.logger.info("OKX_DEMO_ACCOUNT_CONFIG_OK");
+        else this.logger.error("OKX_DEMO_ACCOUNT_CONFIG_FAIL", ready.diagnostics.config);
+
+        if (this.okxBalanceOk) this.logger.info("OKX_DEMO_BALANCE_OK");
+        else this.logger.error("OKX_DEMO_BALANCE_FAIL", ready.diagnostics.balance);
+
+        if (this.okxPositionsOk) this.logger.info("OKX_DEMO_POSITIONS_OK");
+        else this.logger.error("OKX_DEMO_POSITIONS_FAIL", ready.diagnostics.positions);
+
+        if (this.okxSignedRestReady) {
+          this.logger.info("OKX_DEMO_SIGNED_REST_READY");
+        } else {
+          this.logger.error("OKX_DEMO_SIGNED_REST_INCOMPLETE");
         }
-        await this.okxDemo.getBalance("USDT");
-        const p = await this.okxDemo.getPositions("SWAP");
-        this.logger.info("okx_position_sync_success", {
-          positions: p.data?.length ?? 0
-        });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        this.logger.error("okx_position_sync_failed", { message: msg });
-        if (msg.includes("50101")) {
-          this.logger.error("okx_demo_env_mismatch_detected", {
-            reason: "50101",
-            check: "api_key_type_or_x_simulated_trading_header"
-          });
-        }
+        this.logger.error("okx_smoke_test_error", { error: msg });
       }
     }
     const history = await this.store.readPositionsHistory();
@@ -904,7 +913,7 @@ export class PaperEngine {
     const klineTimeframe = "1m" as const;
     const klineInterval = "1";
     const klineLimit = 120;
-    const category = "linear";
+    const category = "SWAP";
 
     const btc5r = await this.okxPublic.tryGetCandles("BTCUSDT", "5m", 120);
     const btc5 = btc5r.ok ? btc5r.value : [];
@@ -1060,9 +1069,16 @@ export class PaperEngine {
       latestPath,
       engineMode: this.config.paperEngineMode,
       exchange: "okx",
+      okx_demo_enabled: this.config.okxDemoEnabled,
+      okx_demo_keys_loaded: this.okxDemoKeysLoaded,
+      okx_signed_rest_ready: this.okxSignedRestReady,
+      okx_account_config_ok: this.okxAccountConfigOk,
+      okx_balance_ok: this.okxBalanceOk,
+      okx_positions_ok: this.okxPositionsOk,
+      okx_order_submit_ok: this.okxOrderSubmitOk,
       v2AuthorityActive: runId.v2AuthorityActive,
       runIdentity: runId as any,
-      notes: "paper hybrid authority pipeline; legacy + v2 authority bridge active; position identity stored per executor/regime resolution; run metadata reflects hybrid execution"
+      notes: "paper okx-demo unified pipeline; legacy + v2 authority bridge active; position identity stored per executor/regime resolution; run metadata reflects okx-demo execution"
     } as any;
 
     let metaPath: string | undefined;
@@ -1497,7 +1513,15 @@ export class PaperEngine {
           reject_reason_counts_tick,
           symbol_decisions: Object.fromEntries(
             [...decisionBySymbol.entries()].map(([k, v]) => [k, buildEngineStateSymbolDecision(v)])
-          )
+          ),
+          exchange: "okx",
+          okx_demo_enabled: this.config.okxDemoEnabled,
+          okx_demo_keys_loaded: this.okxDemoKeysLoaded,
+          okx_signed_rest_ready: this.okxSignedRestReady,
+          okx_account_config_ok: this.okxAccountConfigOk,
+          okx_balance_ok: this.okxBalanceOk,
+          okx_positions_ok: this.okxPositionsOk,
+          okx_order_submit_ok: this.okxOrderSubmitOk
         });
       } catch (e) {
         this.logger.error("engine_state_write_failed", { error: String(e) });
@@ -2266,6 +2290,91 @@ export class PaperEngine {
       order_build_fail_stage: d.order_build_fail_stage ?? null,
       open_position_side: openPositionSide
     };
+  }
+
+  private async submitOkxOrder(input: {
+    symbol: MarketSymbol;
+    side: "buy" | "sell";
+    posSide: "long" | "short";
+    qty: number;
+    clOrdId: string;
+    traceId: string;
+    reason: string;
+  }): Promise<{
+    ok: boolean;
+    ordId: string | null;
+    fillPx: string | number | null;
+    errorCode: string | null;
+    errorMessage: string | null;
+    ackCode: "accepted" | "rejected";
+    orderState: string | null;
+  }> {
+    if (!this.okxDemo) {
+      return { ok: false, ordId: null, fillPx: null, errorCode: "no_client", errorMessage: "OKX Demo client not initialized", ackCode: "rejected", orderState: null };
+    }
+
+    const instId = toOkxSwapInstId(input.symbol);
+    const logCtx = {
+      trace_id: input.traceId,
+      symbol: input.symbol,
+      instId,
+      side: input.side,
+      posSide: input.posSide,
+      qty: input.qty,
+      clOrdId: input.clOrdId,
+      reason: input.reason
+    };
+
+    try {
+      const submit = await this.okxDemo.submitOrder({
+        instId,
+        side: input.side,
+        posSide: input.posSide,
+        sz: String(input.qty),
+        clOrdId: input.clOrdId,
+        tdMode: "isolated",
+        ordType: "market"
+      });
+
+      if (!submit.ok) {
+        const errorCode = submit.diagnostics.retCode || "submit_error";
+        const errorMessage = submit.diagnostics.retMsg || submit.error || "order_level_ack_failed";
+        this.logger.error("okx_order_submit_rejected", { ...logCtx, errorCode, errorMessage });
+        return { ok: false, ordId: null, fillPx: null, errorCode, errorMessage, ackCode: "rejected", orderState: null };
+      }
+
+      this.okxOrderSubmitOk = true;
+      const row0 = submit.value?.[0];
+      const ordId = String(row0?.ordId ?? "");
+
+      // Poll for status/fill
+      const status = await this.okxDemo.getOrder(instId, ordId || undefined, input.clOrdId);
+      if (!status.ok) {
+        this.logger.warn("okx_order_poll_failed", { ...logCtx, ordId, error: status.error });
+        return { ok: true, ordId, fillPx: null, errorCode: null, errorMessage: status.error || "poll_failed", ackCode: "accepted", orderState: null };
+      }
+
+      const st0 = status.value?.[0];
+      const fillPx = st0?.fillPx ?? null;
+      const orderState = st0?.state != null ? String(st0.state) : null;
+
+      this.logger.info("okx_order_submit_accepted", { ...logCtx, ordId, order_state: orderState, fill_px: fillPx });
+
+      return {
+        ok: true,
+        ordId,
+        fillPx: typeof fillPx === "string" || typeof fillPx === "number" ? fillPx : (fillPx != null ? String(fillPx) : null),
+        errorCode: null,
+        errorMessage: null,
+        ackCode: "accepted",
+        orderState
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const parsed = parseOkxSubmitErrorMessage(msg);
+      this.logger.error("okx_order_submit_exception", { ...logCtx, errorCode: parsed.code, errorMessage: parsed.message });
+      return { ok: false, ordId: null, fillPx: null, errorCode: parsed.code, errorMessage: parsed.message, ackCode: "rejected", orderState: null };
+    }
   }
 
   private async tryPaperPositionClose(input: Readonly<{
@@ -3328,6 +3437,42 @@ export class PaperEngine {
           finalCloseReason = cr;
           confirmedExitType = "EXIT_TREND_SWITCH";
           confirmedCloseSource = "trend_engine_switch";
+          if (this.okxDemo) {
+            const cSide = open.side === "long" ? "sell" : "buy";
+            const cPosSide = open.side === "long" ? "long" : "short";
+            const cQty = Math.max(0.001, Math.round((open.sizeUsd / Math.max(1e-9, m.mark)) * 1_000_000) / 1_000_000);
+            await this.submitOkxOrder({
+              symbol: open.symbol,
+              side: cSide,
+              posSide: cPosSide,
+              qty: cQty,
+              clOrdId: `close-rev-${open.symbol}-${Date.now()}`,
+              traceId: flowId,
+              reason: "trend_switch_close"
+            });
+            
+            // newSz and plan.openSide are calculated below, but we can pre-calculate or submit after open record is created.
+            // Actually, we need newSz here. Let's pull it up.
+          }
+          let newSz = Math.max(
+            MIN_POSITION_SIZE_USD,
+            Math.round(open.sizeUsd * input.riskExposure.switchSizeMultiplier * 100) / 100
+          );
+          if (this.okxDemo) {
+            const oSide = plan.openSide === "long" ? "buy" : "sell";
+            const oPosSide = plan.openSide === "long" ? "long" : "short";
+            const oQty = Math.max(0.001, Math.round((newSz / Math.max(1e-9, closePrice)) * 1_000_000) / 1_000_000);
+            await this.submitOkxOrder({
+              symbol: open.symbol,
+              side: oSide,
+              posSide: oPosSide,
+              qty: oQty,
+              clOrdId: `open-rev-${open.symbol}-${Date.now()}`,
+              traceId: flowId,
+              reason: "trend_switch_open"
+            });
+          }
+
           const closedRow = finalizePaperClosedRecord({
             open,
             symbol: open.symbol,
@@ -3372,7 +3517,7 @@ export class PaperEngine {
             realized_pnl: m.pnlUsdNet,
             ...buildPositionIdentityMeta(open)
           });
-          const newSz = Math.max(
+          newSz = Math.max(
             MIN_POSITION_SIZE_USD,
             Math.round(open.sizeUsd * input.riskExposure.switchSizeMultiplier * 100) / 100
           );
@@ -3439,6 +3584,20 @@ export class PaperEngine {
         const closedRow = toClosed(cr, m, open.sizeUsd);
         await this.positions.appendClosed(closedRow);
         authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
+        if (this.okxDemo) {
+          const closeSide = open.side === "long" ? "sell" : "buy";
+          const closePosSide = open.side === "long" ? "long" : "short";
+          const closeQty = Math.max(0.001, Math.round((open.sizeUsd / Math.max(1e-9, m.mark)) * 1_000_000) / 1_000_000);
+          await this.submitOkxOrder({
+            symbol: open.symbol,
+            side: closeSide,
+            posSide: closePosSide,
+            qty: closeQty,
+            clOrdId: `close-sl-${open.symbol}-${Date.now()}`,
+            traceId: flowId,
+            reason: "stop_loss_close"
+          });
+        }
         this.lastExitReasonLabel = "손절 청산";
         this.logger.info(exitFullLogKey(cr), {
           ...exitDetailBase(open, m),
@@ -3580,6 +3739,20 @@ export class PaperEngine {
           const closedRow = toClosed(cr, m, open.sizeUsd);
           await this.positions.appendClosed(closedRow);
           authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
+          if (this.okxDemo) {
+            const closeSide = open.side === "long" ? "sell" : "buy";
+            const closePosSide = open.side === "long" ? "long" : "short";
+            const closeQty = Math.max(0.001, Math.round((open.sizeUsd / Math.max(1e-9, m.mark)) * 1_000_000) / 1_000_000);
+            await this.submitOkxOrder({
+              symbol: open.symbol,
+              side: closeSide,
+              posSide: closePosSide,
+              qty: closeQty,
+              clOrdId: `close-shift-${open.symbol}-${Date.now()}`,
+              traceId: flowId,
+              reason: `regime_shift_${cr}`
+            });
+          }
           this.logger.info(exitFullLogKey(cr), { ...exitDetailBase(open, m), exitReason: cr });
 
           const mappedType = exitEventJsonlType(cr);
@@ -3918,6 +4091,20 @@ export class PaperEngine {
           // They must NOT be appended to positions/history.json.
           // The position identity is preserved; only the final full-close goes to the ledger.
           // Sub-events are recorded to events.jsonl only (below).
+          if (this.okxDemo) {
+            const pSide = open.side === "long" ? "sell" : "buy";
+            const pPosSide = open.side === "long" ? "long" : "short";
+            const pQty = Math.max(0.001, Math.round((partialMargin / Math.max(1e-9, mp.mark)) * 1_000_000) / 1_000_000);
+            await this.submitOkxOrder({
+              symbol: open.symbol,
+              side: pSide,
+              posSide: pPosSide,
+              qty: pQty,
+              clOrdId: `partial-${open.symbol}-${Date.now()}`,
+              traceId: flowId,
+              reason: `partial_close_${pReason}`
+            });
+          }
           const closedPartial = toClosed(pReason, mp, partialMargin);
           // NOTE: appendClosed intentionally omitted here. closedPartial is for events.jsonl only.
 
@@ -4089,6 +4276,20 @@ export class PaperEngine {
             box_pos: snap.boxPos ?? null,
             phase: "default_persistence_regime_exit_safety_net"
           });
+          if (this.okxDemo) {
+            const closeSide = open.side === "long" ? "sell" : "buy";
+            const closePosSide = open.side === "long" ? "long" : "short";
+            const closeQty = Math.max(0.001, Math.round((open.sizeUsd / Math.max(1e-9, m.mark)) * 1_000_000) / 1_000_000);
+            await this.submitOkxOrder({
+              symbol: open.symbol,
+              side: closeSide,
+              posSide: closePosSide,
+              qty: closeQty,
+              clOrdId: `close-align-${open.symbol}-${Date.now()}`,
+              traceId: flowId,
+              reason: "safety_net_alignment"
+            });
+          }
           this.lastExitReasonLabel = open.side === "long" ? "RANGE 상단 롱 정합성 청산" : "RANGE 하단 숏 정합성 청산";
           const mappedType = exitEventJsonlType(cr);
           this.terminalExitConsumedByFlow.add(flowId);
@@ -4970,129 +5171,31 @@ export class PaperEngine {
           const clOrdId = `paper-${first.symbol}-${Date.now()}`;
           trace.exchange_client_order_id = clOrdId;
           trace.order_submit_requested = true;
-          this.logger.info("okx_order_submit_requested", {
-            open_trace_id: openTraceId,
-            sample_symbol_btc_eth: sampleBtcEth,
+
+          const submit = await this.submitOkxOrder({
             symbol: first.symbol,
-            instId,
             side,
             posSide,
             qty,
-            clOrdId
+            clOrdId,
+            traceId: openTraceId,
+            reason: "entry_authorized"
           });
-          try {
-            const submit = await this.okxDemo.submitOrder({
-              instId,
-              side,
-              posSide,
-              sz: String(qty),
-              clOrdId,
-              tdMode: "isolated",
-              ordType: "market"
-            });
-            const row0 = submit.data?.[0] as Record<string, unknown> | undefined;
-            const ackS = row0?.sCode != null ? String(row0.sCode) : null;
-            const ackM = row0?.sMsg != null ? String(row0.sMsg) : "";
-            trace.exchange_ack_s_code = ackS;
-            trace.exchange_ack_s_msg = ackM || null;
-            if (ackS !== null && ackS !== "0") {
-              trace.order_submit_ack = "rejected";
-              trace.order_submit_error_code = ackS;
-              trace.order_submit_error_message = ackM || "order_level_ack_failed";
-              const low = ackM.toLowerCase();
-              trace.open_fail_stage =
-                ackS === "51121" || low.includes("minimum") || low.includes("min") || low.includes("lot")
-                  ? "exchange_reject_min_sz_or_lot"
-                  : "exchange_submit_rejected_in_ack";
-              this.logger.error("okx_order_submit_rejected", {
-                open_trace_id: openTraceId,
-                sample_symbol_btc_eth: sampleBtcEth,
-                symbol: first.symbol,
-                instId,
-                clOrdId,
-                exchange_ack_s_code: ackS,
-                exchange_ack_s_msg: ackM,
-                open_fail_stage: trace.open_fail_stage
-              });
-              emitPositionOpenTraceFinal();
-              logPaperPositionOpenFailed();
-              continue;
-            }
-            const ordId = String(row0?.ordId ?? "");
-            trace.exchange_ord_id = ordId || null;
-            let status: Awaited<ReturnType<OkxDemoClient["getOrder"]>>;
-            try {
-              status = await this.okxDemo.getOrder(instId, ordId || undefined, clOrdId);
-            } catch (pollErr) {
-              const pmsg = pollErr instanceof Error ? pollErr.message : String(pollErr);
-              const parsed = parseOkxSubmitErrorMessage(pmsg);
-              trace.order_submit_ack = "rejected";
-              trace.order_submit_error_code = parsed.code;
-              trace.order_submit_error_message = parsed.message;
-              trace.open_fail_stage = "exchange_order_status_poll_failed";
-              this.logger.error("okx_order_submit_rejected", {
-                open_trace_id: openTraceId,
-                sample_symbol_btc_eth: sampleBtcEth,
-                symbol: first.symbol,
-                instId,
-                clOrdId,
-                ordId: ordId || null,
-                phase: "getOrder_after_submit",
-                message: pmsg,
-                open_fail_stage: trace.open_fail_stage
-              });
-              emitPositionOpenTraceFinal();
-              logPaperPositionOpenFailed();
-              continue;
-            }
-            const st0 = status.data?.[0] as Record<string, unknown> | undefined;
-            trace.order_submit_ack = "accepted";
-            trace.exchange_order_state = st0?.state != null ? String(st0.state) : null;
-            const rawFill = st0?.fillPx;
-            trace.exchange_fill_px =
-              typeof rawFill === "string" || typeof rawFill === "number" ? rawFill : rawFill != null ? String(rawFill) : null;
-            this.logger.info("okx_order_submit_accepted", {
-              open_trace_id: openTraceId,
-              sample_symbol_btc_eth: sampleBtcEth,
-              symbol: first.symbol,
-              instId,
-              ordId: ordId || null,
-              clOrdId,
-              order_state: trace.exchange_order_state,
-              fill_px: trace.exchange_fill_px,
-              exchange_ack_s_code: trace.exchange_ack_s_code,
-              exchange_ack_s_msg: trace.exchange_ack_s_msg
-            });
-          } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
-            const parsed = parseOkxSubmitErrorMessage(msg);
-            trace.order_submit_ack = "rejected";
-            trace.order_submit_error_code = parsed.code;
-            trace.order_submit_error_message = parsed.message;
-            if (msg.includes("50101")) {
-              trace.open_fail_stage = "okx_auth_passphrase_or_demo_header";
-              this.logger.error("okx_demo_env_mismatch_detected", {
-                open_trace_id: openTraceId,
-                reason: "50101",
-                check: "api_key_type_or_x_simulated_trading_header"
-              });
-            } else if (/51121|min(imum)?\s*(sz|size|notional)|lot/i.test(msg)) {
-              trace.open_fail_stage = "exchange_reject_min_sz_or_lot";
-            } else if (parsed.code?.startsWith("http_")) {
-              trace.open_fail_stage = "exchange_http_before_json";
-            } else {
-              trace.open_fail_stage = "exchange_submit_exception_before_ack";
-            }
-            this.logger.error("okx_order_submit_rejected", {
-              open_trace_id: openTraceId,
-              sample_symbol_btc_eth: sampleBtcEth,
-              symbol: first.symbol,
-              instId,
-              clOrdId,
-              message: msg,
-              order_submit_error_code: trace.order_submit_error_code,
-              open_fail_stage: trace.open_fail_stage
-            });
+
+          trace.order_submit_ack = submit.ackCode;
+          trace.order_submit_error_code = submit.errorCode;
+          trace.order_submit_error_message = submit.errorMessage;
+          trace.exchange_ord_id = submit.ordId;
+          trace.exchange_order_state = submit.orderState;
+          trace.exchange_fill_px = submit.fillPx;
+
+          if (!submit.ok) {
+            const low = (submit.errorMessage || "").toLowerCase();
+            trace.open_fail_stage =
+              submit.errorCode === "51121" || low.includes("minimum") || low.includes("min") || low.includes("lot")
+                ? "exchange_reject_min_sz_or_lot"
+                : "exchange_submit_rejected_in_ack";
+            
             emitPositionOpenTraceFinal();
             logPaperPositionOpenFailed();
             continue;
@@ -5696,6 +5799,21 @@ export class PaperEngine {
         stopPrice_before: existing.stopPrice ?? "미설정",
         stopPrice_after: updatedRecord.stopPrice ?? "미설정",
         source: typeof res.decision.stopLoss === "number" ? "executor_decision" : "persisted_value"
+      });
+    }
+
+    if (this.okxDemo) {
+      const sSide = existing.side === "long" ? "buy" : "sell";
+      const sPosSide = existing.side === "long" ? "long" : "short";
+      const sQty = Math.max(0.001, Math.round((incrementalSizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
+      await this.submitOkxOrder({
+        symbol: existing.symbol,
+        side: sSide,
+        posSide: sPosSide,
+        qty: sQty,
+        clOrdId: `scalein-${existing.symbol}-${Date.now()}`,
+        traceId: `${existing.symbol}:${existing.side}:${existing.openedAt}`,
+        reason: "scale_in_authorized"
       });
     }
 

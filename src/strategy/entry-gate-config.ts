@@ -11,7 +11,7 @@ export const ENTRY_GATE_CONFIG = {
   minMoveVsCostMultiplier: 2.05,
   /** Higher timeframe for trend alignment (long: EMA20 > EMA60 on closes). */
   higherTimeframe: "5m" as Timeframe,
-  /** Bybit kline `limit` for higher TF (needs ≥ 60 for EMA60). */
+  /** OKX kline `limit` for higher TF (needs ≥ 60 for EMA60). */
   higherTfKlineLimit: 120,
   /**
    * Conservative estimate of funding accrual periods at entry for min-move padding.
