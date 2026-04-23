@@ -3033,10 +3033,13 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         streakSuspend &&
         rangeRelaxWindowActive &&
         (input.risk?.crashState === undefined || input.risk.crashState === "NONE");
+      const isCrashAligningShort = intentSide === "short" && 
+        (input.risk?.directionalShockState === "DOWN" || (input.risk?.crashState !== undefined && input.risk?.crashState !== "NONE"));
+        
       const upperRiskHit =
         (input.risk?.engineBlocked === true && !engineBlockedOnlyByLossSuspend) ||
-        (input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
-        input.regimeDetail?.dump_protection_hit === true ||
+        (!isCrashAligningShort && input.risk?.crashState !== undefined && input.risk.crashState !== "NONE") ||
+        (!isCrashAligningShort && input.regimeDetail?.dump_protection_hit === true) ||
         input.regimeDetail?.volatility_guard_hit === true;
       meta = input.lastCloseMetaBySymbol?.get(String(sym));
       sameDirection = meta !== undefined && meta.side === intentSide;
