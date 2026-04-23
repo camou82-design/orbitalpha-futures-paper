@@ -112,7 +112,6 @@ import {
   normalizePositionSideUpper,
   normalizePositionSideLower
 } from "../engine-v2/reconciler";
-import { parseEngineV2OpModeFromEnv } from "../engine-v2/op-mode";
 import {
   evaluateRangeEngineForSymbol,
   evaluateRangeStructuralExit,
@@ -1730,10 +1729,8 @@ export class PaperEngine {
       });
 
       /** Engine-V2 Execution Path (Standard 2: Selector Bridge) */
-      const configuredV2Mode = parseEngineV2OpModeFromEnv(process.env.ORBITALPHA_ENGINE_V2_MODE);
-      // RANGE lane must not be executed under V1 authority; enforce V2 authority ownership.
-      const v2Mode: EngineV2OpMode =
-        marketModeOut.routing.activeEngine === "RANGE" ? "engine_v2" : configuredV2Mode;
+      // Entry authority is fully transferred to engine-v2.
+      const v2Mode: EngineV2OpMode = "engine_v2";
 
 
 
@@ -5491,6 +5488,7 @@ export class PaperEngine {
       const envelope = input.decisionBySymbol.get(String(first.symbol))!;
       const res = envelope.legacy;
       const authority = envelope.authority;
+      const adoptedEngine = envelope.selector?.adopted_result.engine ?? null;
       this.lastEntryEvaluatedAt = nowTs;
       this.lastEntrySignalFetchedAt = envelope.signalFetchedAt ?? first.fetchedAt ?? null;
 
@@ -5665,7 +5663,11 @@ export class PaperEngine {
         }
       }
 
-      if (authority.decision !== "ENTER") {
+      if (authority.source !== "v2") {
+        finalBlockedReason = "AUTHORITY_SOURCE_NOT_V2";
+      } else if (adoptedEngine !== "V2") {
+        finalBlockedReason = "ADOPTED_ENGINE_NOT_V2";
+      } else if (authority.decision !== "ENTER") {
         finalBlockedReason = "AUTHORITY_DECISION_NOT_ENTER";
       } else if (crashEntryGuardApplies) {
         finalBlockedReason = "CRASH_ENTRY_GUARD_BLOCK";
@@ -6336,6 +6338,44 @@ export class PaperEngine {
     entryQualitySizeMultiplier = 1
   ): Promise<PaperOpenPositionRecord | null> {
     const { legacy: res, authority } = envelope;
+    if (authority.source !== "v2") {
+      this.logger.info("scale_in_blocked_non_v2_authority", { symbol: existing.symbol, authority_source: authority.source });
+      return null;
+    }
+    if (authority.decision !== "ENTER") {
+      this.logger.info("scale_in_blocked_authority_not_enter", { symbol: existing.symbol, authority_decision: authority.decision });
+      return null;
+    }
+    if (authority.side !== existing.side) {
+      this.logger.info("scale_in_blocked_side_mismatch", {
+        symbol: existing.symbol,
+        authority_side: authority.side,
+        existing_side: existing.side
+      });
+      return null;
+    }
+    const pnlPctNow =
+      existing.side === "long"
+        ? (first.lastPrice - existing.entryPrice) / Math.max(1e-9, existing.entryPrice)
+        : (existing.entryPrice - first.lastPrice) / Math.max(1e-9, existing.entryPrice);
+    if (pnlPctNow <= 0) {
+      this.logger.info("scale_in_blocked_loss_averaging_forbidden", {
+        symbol: existing.symbol,
+        pnl_pct: pnlPctNow
+      });
+      return null;
+    }
+    if (authority.regime != null && existing.regimeAtEntry != null) {
+      const authorityRegime = String(authority.regime).toUpperCase();
+      if (authorityRegime !== String(existing.regimeAtEntry).toUpperCase()) {
+        this.logger.info("scale_in_blocked_regime_identity_mismatch", {
+          symbol: existing.symbol,
+          authority_regime: authority.regime,
+          position_regime_at_entry: existing.regimeAtEntry
+        });
+        return null;
+      }
+    }
     if (this.freshTickRequiredAfterReadiness) {
       this.logger.warn("ENTRY_BLOCKED_PREPARED_BUT_NOT_REEVALUATED", {
         symbol: existing.symbol,

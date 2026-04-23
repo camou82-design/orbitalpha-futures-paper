@@ -14,12 +14,6 @@ import {
 } from "./types";
 import { adaptV2Input, runEngineV2 } from "./index";
 
-function isV2OverrideEnabled(): boolean {
-    const val = process.env.ORBITALPHA_ENGINE_V2_ALLOW_OVERRIDE;
-    // Default to true unless explicitly disabled with "0" or "false"
-    return val !== "0" && val !== "false";
-}
-
 /** 
  * LEGACY NORMALIZATION HELPERS (Phase 4 Independence)
  * Ensures consistent behavior across engine boundaries.
@@ -295,16 +289,7 @@ export function resolveSymbolDecisionEnvelope(
     const v2FinalSide = v2Res.decision.side ?? "none";
     const v2FinalSize = v2Res.decision.risk.finalSizeUsd ?? 0;
 
-    const v1FinalDecision = legacyDecision.decision.final_decision;
-    const v1BlocksEntry =
-        v1FinalDecision === "SKIP" || v1FinalDecision === "REJECT";
-
-    const allowV2Override =
-        isV2OverrideEnabled() &&
-        v1BlocksEntry &&
-        v2FinalDecision === "ENTER" &&
-        (v2FinalSide === "long" || v2FinalSide === "short") &&
-        v2FinalSize > 0;
+    const allowV2Override = false;
 
     const refinedSelector: EngineV2SelectorResult = {
         ...selector,
@@ -322,14 +307,14 @@ export function resolveSymbolDecisionEnvelope(
         symbol: input.symbol,
         v2_mode: v2Mode,
         override_env_val: process.env.ORBITALPHA_ENGINE_V2_ALLOW_OVERRIDE ?? "undefined",
-        override_enabled: isV2OverrideEnabled(),
-        v1_blocks: v1BlocksEntry,
+        override_enabled: false,
+        v1_blocks: null,
         v2_wants_enter: v2FinalDecision === "ENTER",
         v2_side_valid: (v2FinalSide === "long" || v2FinalSide === "short"),
         v2_size_valid: v2FinalSize > 0,
-        allow_v2_override: allowV2Override,
-        final_engine: allowV2Override ? "V2" : selector.adopted_result.engine,
-        final_adoption_reason: allowV2Override ? "v2_override_legacy_block" : adoption_reason
+        allow_v2_override: false,
+        final_engine: selector.adopted_result.engine,
+        final_adoption_reason: adoption_reason
     });
     const authority = deriveExecutionAuthority(refinedSelector);
 
