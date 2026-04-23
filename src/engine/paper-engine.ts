@@ -5895,7 +5895,11 @@ export class PaperEngine {
       const riskE = this.lastRiskExposure;
       const adaptiveSizeUsdBefore = adaptive.sizeUsd;
       let entrySizeUsd = adaptive.sizeUsd;
-      entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(entrySizeUsd * entryQualitySizeMultiplier * 100) / 100);
+      if (authority.source !== "v2") {
+        entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(entrySizeUsd * entryQualitySizeMultiplier * 100) / 100);
+      } else {
+        entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(entrySizeUsd * 100) / 100);
+      }
       if (authority.source !== "v2") {
         if (!isRangeCampaignNewEntry && riskE) {
           entrySizeUsd = Math.max(
