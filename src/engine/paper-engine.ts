@@ -5903,63 +5903,65 @@ export class PaperEngine {
       const adaptiveSizeUsdBefore = adaptive.sizeUsd;
       let entrySizeUsd = adaptive.sizeUsd;
       entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(entrySizeUsd * entryQualitySizeMultiplier * 100) / 100);
-      if (!isRangeCampaignNewEntry && riskE) {
-        entrySizeUsd = Math.max(
-          MIN_POSITION_SIZE_USD,
-          Math.round(adaptive.sizeUsd * riskE.sizeMultiplier * 100) / 100
-        );
-      }
-      const symS = String(first.symbol);
-      if (!isRangeCampaignNewEntry && this.lastMarketMode?.routing.activeEngine === "TREND") {
-        const pyr = this.trendPyramidLevelBySymbol.get(symS) ?? 0;
-        entrySizeUsd = Math.max(
-          MIN_POSITION_SIZE_USD,
-          Math.round(entrySizeUsd * (1 + Math.min(4, pyr) * 0.07) * 100) / 100
-        );
-      }
-      if (!isRangeCampaignNewEntry && this.lastMarketMode?.routing.activeEngine === "RANGE") {
-        const rSt = this.lastTickRangeEvalBySymbol.get(symS);
-        if (rSt) {
-          const cycleM = rangeCycleSizePolicy(rSt.rangeCycleCount, rSt.hedgeBalance);
-          const legM = rangeLadderLegMultiplier(rSt.rangeLadderLevel, rSt.hedgeBalance);
-          const recM = rangeAccumulationRecoveryMultiplier(rSt.hedgeBalance, adaptive.direction, rSt.rangeCycleCount);
+      if (authority.source !== "v2") {
+        if (!isRangeCampaignNewEntry && riskE) {
           entrySizeUsd = Math.max(
             MIN_POSITION_SIZE_USD,
-            Math.round(entrySizeUsd * cycleM * legM * recM * 100) / 100
+            Math.round(adaptive.sizeUsd * riskE.sizeMultiplier * 100) / 100
           );
         }
-      }
-      if (isRangeCampaignNewEntry) {
-        const paperBase = computePaperSizingAnchorUsd(this.config);
-        const campaignTotalUsd = paperBase * RANGE_CAMPAIGN_TOTAL_RATIO;
-        const campaignInitialUsd = paperBase * RANGE_INITIAL_RATIO;
-        const campaignAddOnUsd = paperBase * RANGE_ADD_ON_RATIO;
-        const campaignReserveUsd = paperBase * RANGE_RESERVE_RATIO;
-        const riskM = riskE?.sizeMultiplier ?? 1;
-        const plannedInitialUsd = paperBase * RANGE_INITIAL_RATIO;
-        const riskScaledInitialUsd = plannedInitialUsd * riskM;
-        entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(riskScaledInitialUsd * 100) / 100);
-        this.logger.info("RANGE_CAMPAIGN_SIZING_PROOF", {
-          symbol: first.symbol,
-          side: authority.side,
-          regime: entryIdentity.effectiveRegimeAtEntry,
-          executor: entryIdentity.effectiveExecutorAtEntry,
-          paper_base_size_usd: paperBase,
-          campaign_total_usd: campaignTotalUsd,
-          campaign_initial_usd: campaignInitialUsd,
-          campaign_add_on_usd: campaignAddOnUsd,
-          campaign_reserve_usd: campaignReserveUsd,
-          risk_size_multiplier: riskM,
-          final_applied_size_usd: entrySizeUsd,
-          path: "new_entry" as const
-        });
-        this.logger.info("RANGE_SIZE_OVERRIDE_PROOF", {
-          symbol: first.symbol,
-          adaptive_size_usd_before: adaptiveSizeUsdBefore,
-          final_range_campaign_size_usd_after: entrySizeUsd,
-          override_applied: true,
-          reason: "range_campaign_normalization"
-        });
+        const symS = String(first.symbol);
+        if (!isRangeCampaignNewEntry && this.lastMarketMode?.routing.activeEngine === "TREND") {
+          const pyr = this.trendPyramidLevelBySymbol.get(symS) ?? 0;
+          entrySizeUsd = Math.max(
+            MIN_POSITION_SIZE_USD,
+            Math.round(entrySizeUsd * (1 + Math.min(4, pyr) * 0.07) * 100) / 100
+          );
+        }
+        if (!isRangeCampaignNewEntry && this.lastMarketMode?.routing.activeEngine === "RANGE") {
+          const rSt = this.lastTickRangeEvalBySymbol.get(symS);
+          if (rSt) {
+            const cycleM = rangeCycleSizePolicy(rSt.rangeCycleCount, rSt.hedgeBalance);
+            const legM = rangeLadderLegMultiplier(rSt.rangeLadderLevel, rSt.hedgeBalance);
+            const recM = rangeAccumulationRecoveryMultiplier(rSt.hedgeBalance, adaptive.direction, rSt.rangeCycleCount);
+            entrySizeUsd = Math.max(
+              MIN_POSITION_SIZE_USD,
+              Math.round(entrySizeUsd * cycleM * legM * recM * 100) / 100
+            );
+          }
+        }
+        if (isRangeCampaignNewEntry) {
+          const paperBase = computePaperSizingAnchorUsd(this.config);
+          const campaignTotalUsd = paperBase * RANGE_CAMPAIGN_TOTAL_RATIO;
+          const campaignInitialUsd = paperBase * RANGE_INITIAL_RATIO;
+          const campaignAddOnUsd = paperBase * RANGE_ADD_ON_RATIO;
+          const campaignReserveUsd = paperBase * RANGE_RESERVE_RATIO;
+          const riskM = riskE?.sizeMultiplier ?? 1;
+          const plannedInitialUsd = paperBase * RANGE_INITIAL_RATIO;
+          const riskScaledInitialUsd = plannedInitialUsd * riskM;
+          entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(riskScaledInitialUsd * 100) / 100);
+          this.logger.info("RANGE_CAMPAIGN_SIZING_PROOF", {
+            symbol: first.symbol,
+            side: authority.side,
+            regime: entryIdentity.effectiveRegimeAtEntry,
+            executor: entryIdentity.effectiveExecutorAtEntry,
+            paper_base_size_usd: paperBase,
+            campaign_total_usd: campaignTotalUsd,
+            campaign_initial_usd: campaignInitialUsd,
+            campaign_add_on_usd: campaignAddOnUsd,
+            campaign_reserve_usd: campaignReserveUsd,
+            risk_size_multiplier: riskM,
+            final_applied_size_usd: entrySizeUsd,
+            path: "new_entry" as const
+          });
+          this.logger.info("RANGE_SIZE_OVERRIDE_PROOF", {
+            symbol: first.symbol,
+            adaptive_size_usd_before: adaptiveSizeUsdBefore,
+            final_range_campaign_size_usd_after: entrySizeUsd,
+            override_applied: true,
+            reason: "range_campaign_normalization"
+          });
+        }
       }
 
       let positionOpenTraceRef: MutablePositionOpenTrace | null = null;
@@ -6014,6 +6016,7 @@ export class PaperEngine {
           ...buildAuthorityEventMeta(authority, entrySizeUsd)
         });
 
+        const symS = String(first.symbol);
         const mPre = marginsForSymbol(next, symS);
         if (
           riskE &&
@@ -6447,7 +6450,20 @@ export class PaperEngine {
     let rangeCampaignScaleInPath = false;
     let baseEntrySizeUsdForTrace = existing.initialSizeUsd ?? existing.sizeUsd;
 
-    if (isRangeCampaignScaleIn) {
+    if (authority.source === "v2") {
+      targetStage = Math.min(3, (existing.entryStage ?? 1) + 1);
+      scalingWeights = existing.scalingWeights ?? [0.5, 0.5];
+      rangeAddOnSizeMultApplied = 1;
+      incrementalSizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(adaptive.sizeUsd * 100) / 100);
+      this.logger.info("V2_POLICY_SCALE_IN_SIZING_APPLIED", {
+        symbol: existing.symbol,
+        side: existing.side,
+        target_stage: targetStage,
+        authority_size_usd: authority.sizeUsd ?? null,
+        adaptive_size_usd: adaptive.sizeUsd,
+        final_incremental_usd: incrementalSizeUsd
+      });
+    } else if (isRangeCampaignScaleIn) {
       if ((existing.entryStage ?? 1) >= 2 || existing.rangeAddOnUsed === true) {
         this.logger.info("RANGE_ADD_ON_CAP_REACHED", {
           symbol: existing.symbol,
