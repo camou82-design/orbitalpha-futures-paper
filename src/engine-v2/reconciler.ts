@@ -138,7 +138,8 @@ export function deriveExecutionAuthority(
         leverageBlockReason: useV2 ? v2Risk.leverageBlockReason : null,
         exposureNotionalKrw: useV2 ? v2Risk.exposureNotionalKrw : 0,
         equityMultiple: useV2 ? v2Risk.equityMultiple : 0,
-        entryQualityGrade: useV2 ? v2Risk.entryQualityGrade : "B"
+        entryQualityGrade: useV2 ? v2Risk.entryQualityGrade : "B",
+        addOnAllowed: useV2 ? v2Risk.isAddOn === true : false
     };
 }
 

@@ -424,6 +424,7 @@ export type EntryExecutionAuthority = Readonly<{
     exposureNotionalKrw?: number;
     equityMultiple?: number;
     entryQualityGrade?: EntryQualityGrade;
+    addOnAllowed?: boolean;
 }>;
 
 /** Internal Pipeline Result */

@@ -4728,6 +4728,7 @@ export class PaperEngine {
             ...open,
             sizeUsd: newMargin,
             partialExitStage: stage,
+            lifecycleState: "PARTIAL_ACTIVE",
             lastPartialAt: closedAt,
             realizedPnl: (open.realizedPnl ?? 0) + mp.pnlUsdNet,
             trailingExtremePrice: (partial as { trailingExtreme?: number }).trailingExtreme,
@@ -5773,7 +5774,8 @@ export class PaperEngine {
 
       // 3. SCALE-IN BRANCH (final gate passed; max open positions does not apply to scale-in)
       if (existingIdx >= 0) {
-        const scaleExecutionKey = `scalein:${sym}:${intentSide}:${next[existingIdx].openedAt}:${this.runCycleId}`;
+        const targetScaleStage = (next[existingIdx].entryStage ?? 1) + 1;
+        const scaleExecutionKey = `scalein:${sym}:${intentSide}:${next[existingIdx].openedAt}:stage${targetScaleStage}`;
         const scaleKeyOk = await this.consumeExecutionKey(scaleExecutionKey);
         if (!scaleKeyOk) continue;
         const scaled = await this.tryPaperPositionScaleIn(next[existingIdx], envelope, first, nowTs, entryQualitySizeMultiplier);
@@ -6074,6 +6076,7 @@ export class PaperEngine {
           sizeUsd: entrySizeUsd,
           initialSizeUsd: entrySizeUsd,
           partialExitStage: 0,
+          lifecycleState: "INITIAL",
           realizedPnl: 0,
           stopPrice: (() => {
             const val = typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : undefined;
@@ -6351,6 +6354,14 @@ export class PaperEngine {
         symbol: existing.symbol,
         authority_side: authority.side,
         existing_side: existing.side
+      });
+      return null;
+    }
+    if (authority.addOnAllowed !== true) {
+      this.logger.info("scale_in_blocked_authority_addon_not_allowed", {
+        symbol: existing.symbol,
+        add_on_allowed: authority.addOnAllowed ?? false,
+        authority_source: authority.source
       });
       return null;
     }
@@ -6683,6 +6694,7 @@ export class PaperEngine {
       sizeUsd: newTotalSizeUsd,
       entryPrice: newEntryPrice,
       entryStage: targetStage,
+      lifecycleState: "ADDON_ACTIVE",
       scalingWeights,
       rangeAddOnUsed: (targetStage >= 2 || rangeAddOnCandidate || rangeCampaignScaleInPath) ? true : existing.rangeAddOnUsed,
       rangeManagementState: (targetStage >= 2 || rangeAddOnCandidate || rangeCampaignScaleInPath)
@@ -7129,7 +7141,8 @@ function buildAuthorityEventMeta(
     leverage_reason: authority.leverageReason ?? null,
     leverage_block_reason: authority.leverageBlockReason ?? null,
     exposure_notional_krw: authority.exposureNotionalKrw ?? 0,
-    equity_multiple: authority.equityMultiple ?? 0
+    equity_multiple: authority.equityMultiple ?? 0,
+    add_on_allowed: authority.addOnAllowed ?? false
   };
 }
 
