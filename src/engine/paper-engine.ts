@@ -282,6 +282,10 @@ type PaperEngineDecisionEnvelope = {
   legacy: EvaluatePaperSymbolEntryResult;
   selector: EngineV2SelectorResult | null;
   authority: EntryExecutionAuthority;
+  authorityEvaluatedAt: number;
+  executorDecisionEvaluatedAt: number;
+  signalFetchedAt: number;
+  decisionCycleId: number;
   v1_decision?: string;
   v1_side?: string;
   v1_size?: number;
@@ -765,6 +769,73 @@ export class PaperEngine {
   private okxPositionsOk = false;
   private okxOrderSubmitOk = false;
   private okxSmokeTestPerformed = false;
+  private runCycleId = 0;
+  private executionReadiness = false;
+  private executionReadinessChangedAt: number | null = null;
+  private freshTickRequiredAfterReadiness = false;
+  private readinessTransitionCycleId: number | null = null;
+  private staleEntryDroppedCount = 0;
+  private lastEntryEvaluatedAt: number | null = null;
+  private lastEntrySignalFetchedAt: number | null = null;
+
+  private computeExecutionReadiness(): boolean {
+    if (!this.config.okxDemoEnabled) return true;
+    return this.okxSignedRestReady === true;
+  }
+
+  private dropReadinessStaleState(reason: string, changedAt: number): void {
+    const dropped = {
+      reviewing_state: this.reviewingState.size,
+      last_tick_range_eval: this.lastTickRangeEvalBySymbol.size,
+      last_tick_symbol_snapshot: this.lastTickSymbolSnapshotBySymbol.size,
+      range_reversal_switch_pending: this.rangeReversalSwitchPendingBySymbol.size,
+      had_last_entry_decision: this.lastEntryDecision != null
+    };
+    this.reviewingState.clear();
+    this.lastTickRangeEvalBySymbol.clear();
+    this.lastTickSymbolSnapshotBySymbol.clear();
+    this.rangeReversalSwitchPendingBySymbol.clear();
+    this.lastEntryDecision = null;
+    const droppedCount =
+      dropped.reviewing_state +
+      dropped.last_tick_range_eval +
+      dropped.last_tick_symbol_snapshot +
+      dropped.range_reversal_switch_pending +
+      (dropped.had_last_entry_decision ? 1 : 0);
+    this.staleEntryDroppedCount += droppedCount;
+    this.logger.warn("READINESS_STALE_ENTRY_DROPPED", {
+      reason,
+      changed_at: changedAt,
+      dropped,
+      dropped_count: droppedCount,
+      stale_entry_dropped_count_total: this.staleEntryDroppedCount
+    });
+  }
+
+  private evaluateReadinessTransition(nowTs: number): void {
+    const current = this.computeExecutionReadiness();
+    if (!this.executionReadiness && current) {
+      this.executionReadinessChangedAt = nowTs;
+      this.freshTickRequiredAfterReadiness = true;
+      this.readinessTransitionCycleId = this.runCycleId;
+      this.logger.info("READINESS_TRANSITION_DETECTED", {
+        from: false,
+        to: true,
+        execution_readiness_changed_at: nowTs,
+        run_cycle_id: this.runCycleId
+      });
+      this.dropReadinessStaleState("false_to_true_transition", nowTs);
+    } else if (this.executionReadiness !== current) {
+      this.executionReadinessChangedAt = nowTs;
+      this.logger.info("READINESS_TRANSITION_DETECTED", {
+        from: this.executionReadiness,
+        to: current,
+        execution_readiness_changed_at: nowTs,
+        run_cycle_id: this.runCycleId
+      });
+    }
+    this.executionReadiness = current;
+  }
 
   private pruneTrendSwitches1h(now: number): number {
     const cutoff = now - 3_600_000;
@@ -854,6 +925,7 @@ export class PaperEngine {
   }
 
   async runOnce(): Promise<void> {
+    this.runCycleId += 1;
     this.lastExitReasonLabel = "";
     this.lastSwitchReasonLabel = "";
     this.rangeReversalExitThisTickBySymbol.clear();
@@ -917,6 +989,18 @@ export class PaperEngine {
         const msg = e instanceof Error ? e.message : String(e);
         this.logger.error("okx_smoke_test_error", { error: msg });
       }
+    }
+    this.evaluateReadinessTransition(Date.now());
+    const readinessBarrierActive =
+      this.freshTickRequiredAfterReadiness === true &&
+      this.readinessTransitionCycleId != null &&
+      this.runCycleId <= this.readinessTransitionCycleId;
+    if (readinessBarrierActive) {
+      this.logger.warn("READINESS_FRESH_TICK_BARRIER_ACTIVE", {
+        run_cycle_id: this.runCycleId,
+        readiness_transition_cycle_id: this.readinessTransitionCycleId,
+        execution_readiness_changed_at: this.executionReadinessChangedAt
+      });
     }
     const history = await this.store.readPositionsHistory();
 
@@ -1417,6 +1501,10 @@ export class PaperEngine {
         legacy: res,
         selector: selectorResult,
         authority,
+        authorityEvaluatedAt: fetchedAt,
+        executorDecisionEvaluatedAt: fetchedAt,
+        signalFetchedAt: snapForDecision?.fetchedAt ?? snap?.fetchedAt ?? fetchedAt,
+        decisionCycleId: this.runCycleId,
         v1_decision: envelope.v1_decision,
         v1_side: envelope.v1_side,
         v1_size: envelope.v1_size,
@@ -1447,8 +1535,19 @@ export class PaperEngine {
       latestPath,
       metaPath,
       filePath,
-      decisionBySymbol
+      decisionBySymbol,
+      executionReadiness: this.executionReadiness,
+      readinessBarrierActive,
+      readinessChangedAt: this.executionReadinessChangedAt
     });
+    if (this.freshTickRequiredAfterReadiness && !readinessBarrierActive) {
+      this.freshTickRequiredAfterReadiness = false;
+      this.logger.info("READINESS_REEVALUATION_PASSED", {
+        run_cycle_id: this.runCycleId,
+        execution_readiness: this.executionReadiness,
+        execution_readiness_changed_at: this.executionReadinessChangedAt
+      });
+    }
 
     // Post-loop aggregate reporting
     const decisionBySymbolValues: EvaluatePaperSymbolEntryResult[] = [];
@@ -1530,6 +1629,12 @@ export class PaperEngine {
           exchange: "okx",
           okx_demo_enabled: this.config.okxDemoEnabled,
           okx_demo_keys_loaded: this.okxDemoKeysLoaded,
+          execution_readiness: this.executionReadiness,
+          execution_readiness_changed_at: this.executionReadinessChangedAt,
+          fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness,
+          stale_entry_dropped_count: this.staleEntryDroppedCount,
+          last_entry_evaluated_at: this.lastEntryEvaluatedAt,
+          last_entry_signal_fetched_at: this.lastEntrySignalFetchedAt,
           okx_signed_rest_ready: this.okxSignedRestReady,
           okx_account_config_ok: this.okxAccountConfigOk,
           okx_balance_ok: this.okxBalanceOk,
@@ -4705,8 +4810,18 @@ export class PaperEngine {
     metaPath: string | undefined;
     filePath: string | undefined;
     decisionBySymbol: ReadonlyMap<string, PaperEngineDecisionEnvelope>;
+    executionReadiness: boolean;
+    readinessBarrierActive: boolean;
+    readinessChangedAt: number | null;
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
+    if (!input.executionReadiness) {
+      this.logger.warn("READINESS_REEVALUATION_BLOCKED", {
+        reason: "execution_readiness_false",
+        run_cycle_id: this.runCycleId
+      });
+      return;
+    }
 
     const snapshotBySymbol = new Map<string, SymbolSnapshot>();
     for (const s of input.snapshots) {
@@ -4733,6 +4848,24 @@ export class PaperEngine {
       return 0;
     });
     if (entryQueue.length === 0) return;
+    this.logger.info("READINESS_REEVALUATION_STARTED", {
+      run_cycle_id: this.runCycleId,
+      queued_entries: entryQueue.length,
+      readiness_changed_at: input.readinessChangedAt
+    });
+    if (input.readinessBarrierActive) {
+      this.logger.warn("ENTRY_BLOCKED_PREPARED_BUT_NOT_REEVALUATED", {
+        reason: "fresh_tick_barrier_active",
+        queued_entries: entryQueue.length,
+        run_cycle_id: this.runCycleId,
+        readiness_changed_at: input.readinessChangedAt
+      });
+      this.logger.warn("READINESS_REEVALUATION_BLOCKED", {
+        reason: "fresh_tick_barrier_active",
+        run_cycle_id: this.runCycleId
+      });
+      return;
+    }
 
     if (!input.candidateRunPath || !input.latestPath || !input.metaPath || !input.filePath) {
       return;
@@ -4767,6 +4900,32 @@ export class PaperEngine {
       const envelope = input.decisionBySymbol.get(String(first.symbol))!;
       const res = envelope.legacy;
       const authority = envelope.authority;
+      this.lastEntryEvaluatedAt = nowTs;
+      this.lastEntrySignalFetchedAt = envelope.signalFetchedAt ?? first.fetchedAt ?? null;
+
+      const readinessChangedAt = input.readinessChangedAt;
+      const staleReasons: string[] = [];
+      if (readinessChangedAt != null) {
+        if ((envelope.signalFetchedAt ?? first.fetchedAt) < readinessChangedAt) staleReasons.push("signal_fetched_before_readiness_recovered");
+        if (envelope.authorityEvaluatedAt < readinessChangedAt) staleReasons.push("authority_evaluated_before_readiness_recovered");
+        if (envelope.executorDecisionEvaluatedAt < readinessChangedAt) staleReasons.push("executor_decision_before_readiness_recovered");
+        if (first.fetchedAt < readinessChangedAt) staleReasons.push("snapshot_fetched_before_readiness_recovered");
+        if (envelope.decisionCycleId < this.runCycleId) staleReasons.push("order_basis_previous_cycle");
+      }
+      if (staleReasons.length > 0) {
+        this.logger.warn("ENTRY_BLOCKED_STALE_SIGNAL", {
+          symbol: first.symbol,
+          stale_reasons: staleReasons,
+          readiness_changed_at: readinessChangedAt,
+          signal_fetched_at: envelope.signalFetchedAt ?? first.fetchedAt,
+          authority_evaluated_at: envelope.authorityEvaluatedAt,
+          executor_decision_evaluated_at: envelope.executorDecisionEvaluatedAt,
+          snapshot_fetched_at: first.fetchedAt,
+          decision_cycle_id: envelope.decisionCycleId,
+          current_cycle_id: this.runCycleId
+        });
+        continue;
+      }
 
       const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(authority, res.adaptiveResult);
 
@@ -5569,6 +5728,14 @@ export class PaperEngine {
     nowTs: number
   ): Promise<PaperOpenPositionRecord | null> {
     const { legacy: res, authority } = envelope;
+    if (this.freshTickRequiredAfterReadiness) {
+      this.logger.warn("ENTRY_BLOCKED_PREPARED_BUT_NOT_REEVALUATED", {
+        symbol: existing.symbol,
+        mode: "scale_in",
+        reason: "fresh_tick_required_after_readiness"
+      });
+      return null;
+    }
     const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(authority, res.adaptiveResult);
     if (!effectiveAdaptiveResult) return null;
     if (!this.lastRiskExposure?.allowAdd) {
