@@ -2072,7 +2072,85 @@ export class PaperEngine {
   }
 
   /**
-   * trend_break 하위 트리거 이후 전량 청산은 상위 시장모드·동틱 V2 authority로만 EXIT 확정.
+   * REGIME_EXIT 후보 판정 및 확정 구조 (V2)
+   * 단순 레짐 라벨 변경만으로 전량 청산하는 것을 막고,
+   * 후보 상태가 일정 틱 연속되거나 확정된 구조적 무효화가 누적될 때만 최종 청산 승격.
+   */
+  private evaluateRegimeExitConfirmation(
+    open: PaperOpenPositionRecord,
+    triggerOwner: string,
+    invalidationReason: string,
+    requiredTicks: number = 2,
+    evalAtMs: number
+  ): { confirmed: boolean; updatedPosition: PaperOpenPositionRecord } {
+    if (!this.isV2AuthorityPosition(open)) {
+      return { confirmed: true, updatedPosition: open };
+    }
+
+    const o = { ...open };
+
+    const gapMs = o.regime_exit_last_eval_ms ? evalAtMs - o.regime_exit_last_eval_ms : 0;
+    const isContiguous = gapMs >= 0 && gapMs < 20000;
+
+    if (
+      o.regime_exit_trigger_owner !== triggerOwner ||
+      o.invalidation_reason !== invalidationReason ||
+      o.regime_exit_candidate !== true ||
+      !isContiguous
+    ) {
+      o.regime_exit_candidate = true;
+      o.regime_exit_confirmed = false;
+      o.regime_exit_confirmation_ticks = 1;
+      o.regime_exit_trigger_owner = triggerOwner;
+      o.invalidation_reason = invalidationReason;
+      o.regime_exit_last_eval_ms = evalAtMs;
+      
+      this.logger.info("REGIME_EXIT_CANDIDATE_STARTED", {
+        symbol: o.symbol,
+        side: o.side,
+        regimeAtEntry: o.regimeAtEntry,
+        executorAtEntry: o.executorAtEntry,
+        position_identity_at_entry: o.executorAtEntry,
+        current_executor: triggerOwner,
+        trigger_owner: triggerOwner,
+        invalidation_reason: invalidationReason,
+        gap_ms: gapMs,
+        reset_reason: !isContiguous ? "non_contiguous_ticks" : "new_reason"
+      });
+      return { confirmed: false, updatedPosition: o };
+    }
+
+    o.regime_exit_last_eval_ms = evalAtMs;
+
+    o.regime_exit_confirmation_ticks = (o.regime_exit_confirmation_ticks ?? 1) + 1;
+
+    if (o.regime_exit_confirmation_ticks >= requiredTicks) {
+      o.regime_exit_confirmed = true;
+      this.logger.info("REGIME_EXIT_CONFIRMED", {
+        symbol: o.symbol,
+        side: o.side,
+        ticks: o.regime_exit_confirmation_ticks,
+        position_identity_at_entry: o.executorAtEntry,
+        current_executor: triggerOwner,
+        trigger_owner: triggerOwner,
+        invalidation_reason: invalidationReason
+      });
+      return { confirmed: true, updatedPosition: o };
+    }
+
+    this.logger.info("REGIME_EXIT_CANDIDATE_WAITING", {
+      symbol: o.symbol,
+      side: o.side,
+      ticks: o.regime_exit_confirmation_ticks,
+      position_identity_at_entry: o.executorAtEntry,
+      current_executor: triggerOwner,
+      trigger_owner: triggerOwner,
+      invalidation_reason: invalidationReason
+    });
+    return { confirmed: false, updatedPosition: o };
+  }
+
+  /**
    * MIXED/TRANSITION·구조 흔들림만으로는 DE_RISK, TREND 레인+반대 ENTER 확정 시에만 EXIT.
    */
   private classifyUpperExitAuthorityTrendBreakTrigger(input: Readonly<{
@@ -2650,9 +2728,16 @@ export class PaperEngine {
                   deferred_close_reason: "regime_exit",
                   lane: "range_long_upper_reversal"
                 });
-                remaining.push(open);
+                remaining.push(posTrail);
                 continue;
               }
+
+              const exitConf = this.evaluateRegimeExitConfirmation(posTrail, "RANGE_EXECUTOR", "range_long_upper_reversal_confirmed", 2, closedAt);
+              if (!exitConf.confirmed) {
+                remaining.push(exitConf.updatedPosition);
+                continue;
+              }
+              posTrail = exitConf.updatedPosition;
 
               const cr = "regime_exit" as const;
               finalCloseReason = cr;
@@ -2754,9 +2839,16 @@ export class PaperEngine {
                   deferred_close_reason: "regime_exit",
                   lane: "range_short_lower_reversal"
                 });
-                remaining.push(open);
+                remaining.push(posTrail);
                 continue;
               }
+
+              const exitConf = this.evaluateRegimeExitConfirmation(posTrail, "RANGE_EXECUTOR", "range_short_lower_reversal_confirmed", 2, closedAt);
+              if (!exitConf.confirmed) {
+                remaining.push(exitConf.updatedPosition);
+                continue;
+              }
+              posTrail = exitConf.updatedPosition;
 
               const cr = "regime_exit" as const;
               finalCloseReason = cr;
@@ -3467,11 +3559,19 @@ export class PaperEngine {
             trend_break_substrate: "regime_shift_or_trend_ok_false"
           });
           if (upperExitVerdict !== "EXIT") {
-            remaining.push(open);
+            remaining.push(posTrail);
             continue;
           }
           const cr: PaperClosedPositionRecord["closeReason"] =
             marketMode === "RANGE" || marketMode === "NO_TRADE" ? "regime_exit" : "trend_break_exit";
+
+          const exitConf = this.evaluateRegimeExitConfirmation(posTrail, "UPPER_ENGINE", `upper_authority_trend_break_${cr}`, 2, closedAt);
+          if (!exitConf.confirmed) {
+            remaining.push(exitConf.updatedPosition);
+            continue;
+          }
+          posTrail = exitConf.updatedPosition;
+
           finalCloseReason = cr;
           confirmedExitType = exitEventJsonlType(cr);
           confirmedCloseSource =
@@ -3686,9 +3786,23 @@ export class PaperEngine {
             deferred_close_reason: cr,
             lane: "executor_close_action"
           });
-          remaining.push(open);
+          remaining.push(posTrail);
           continue;
         }
+
+        if (cr === "regime_exit" || cr === "trend_break_exit" || cr === "candidate_lost" || cr === "trend_switch") {
+          const exDetail = (exitEval.detail ?? {}) as Record<string, unknown>;
+          const triggerOwner = trendManagedPosition ? "TREND_EXECUTOR" : "RANGE_EXECUTOR";
+          const invalidationReason = exDetail["upper_authority_exit_trigger"] ? String(exDetail["upper_authority_exit_trigger"]) : `executor_verdict_${cr}`;
+          
+          const exitConf = this.evaluateRegimeExitConfirmation(posTrail, triggerOwner, invalidationReason, 2, closedAt);
+          if (!exitConf.confirmed) {
+            remaining.push(exitConf.updatedPosition);
+            continue;
+          }
+          posTrail = exitConf.updatedPosition;
+        }
+
         finalCloseReason = cr;
         confirmedExitType = exitEventJsonlType(cr);
         confirmedCloseSource = "executor_close_action";
@@ -3936,6 +4050,14 @@ export class PaperEngine {
             remaining.push(posTrail);
             continue;
           }
+
+          const exitConf = this.evaluateRegimeExitConfirmation(posTrail, "RANGE_EXECUTOR", "range_misaligned_safety_net_confirmed", 2, closedAt);
+          if (!exitConf.confirmed) {
+            remaining.push(exitConf.updatedPosition);
+            continue;
+          }
+          posTrail = exitConf.updatedPosition;
+
           finalCloseReason = cr;
           confirmedExitType = exitEventJsonlType(cr);
           confirmedCloseSource = "range_misaligned_safety_net";

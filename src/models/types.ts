@@ -824,6 +824,19 @@ export type PaperOpenPositionRecord = Readonly<{
   authority?: string;
   /** 레거시 authority 방향. */
   authoritySide?: string;
+
+  /** REGIME_EXIT 2단계 구조: 후보 상태 여부 */
+  regime_exit_candidate?: boolean;
+  /** REGIME_EXIT 2단계 구조: 확정 여부 */
+  regime_exit_confirmed?: boolean;
+  /** REGIME_EXIT 2단계 구조: 후보 상태 연속 틱 수 */
+  regime_exit_confirmation_ticks?: number;
+  /** REGIME_EXIT 발동 주체 (e.g. "TREND_EXECUTOR", "RANGE_EXECUTOR") */
+  regime_exit_trigger_owner?: string;
+  /** REGIME_EXIT 발생 시 기존 진입 논리 무효화 사유 */
+  invalidation_reason?: string;
+  /** REGIME_EXIT 후보 연속성 검증을 위한 최근 평가 시각 */
+  regime_exit_last_eval_ms?: number;
 }>;
 
 /** 종료 레코드·이벤트에 함께 쓰는 종료 유형 코드(레저·로그 공통). */
