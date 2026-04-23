@@ -1,0 +1,14 @@
+
+src\engine\paper-engine.ts:2097:            await this.positions.appendClosed(closedRow);
+src\engine\paper-engine.ts:2454:                await this.positions.appendClosed(closedRow);
+src\engine\paper-engine.ts:2555:                await this.positions.appendClosed(closedRow);
+src\engine\paper-engine.ts:2753:            await this.positions.appendClosed(closedRowTrail);
+src\engine\paper-engine.ts:2911:            await this.positions.appendClosed(closedRow);
+src\engine\paper-engine.ts:2967:            await this.positions.appendClosed(closedRow);
+src\engine\paper-engine.ts:3051:          await this.positions.appendClosed(closedRow);
+src\engine\paper-engine.ts:3133:            await this.positions.appendClosed(closedRow);
+src\engine\paper-engine.ts:3265:          await this.positions.appendClosed(closedRow);
+src\engine\paper-engine.ts:3366:            await this.positions.appendClosed(closedPartial);
+src\engine\paper-engine.ts:3492:            await this.positions.appendClosed(closedRow);
+src\engine\paper-engine.ts:3598:        await this.positions.appendClosed(closedRow);
+

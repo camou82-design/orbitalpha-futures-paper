@@ -148,6 +148,20 @@ const RANGE_REVERSAL_SWITCH_PENDING_MS = 90_000;
 /** 진입 직후 entry identity 레인 유지: 장세·레인 전환성 전량 청산만 이 구간에서 금지(손절·노출 한도 등은 허용). */
 const ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS = 120_000;
 
+/**
+ * Partial 이후 잔여 포지션 보호 구간(ms).
+ * 부분청산(TP_PARTIAL / PARTIAL_SPLIT) 직후 SIGNAL_LOST / REGIME_EXIT 과민 청산 차단.
+ * STRUCTURAL / TREND_BREAK / CRASH_FORCE 는 이 구간에서도 예외적으로 청산 허용.
+ */
+const POST_PARTIAL_REGIME_PROTECT_MS = 3 * 60_000; // 3분
+
+/**
+ * Crash guard 자동 해제 유예 시간(ms): CRASH_EXIT/LOCK 발생 후 이 시간이 지나고
+ * activeEngine 이 RANGE 로 전환돼 있으면 롱 진입 차단을 해제한다.
+ * 극단 크래시 직후 무기한 block 방지.
+ */
+const CRASH_GUARD_REGIME_AWARE_RELEASE_MS = 5 * 60_000; // 5분
+
 /** RANGE 캠페인: 심볼 1회전당 총 배정의 80%만 사용(초기 40% + 추가 40%, 보류 20%). */
 const RANGE_CAMPAIGN_TOTAL_RATIO = 0.8;
 const RANGE_INITIAL_RATIO = 0.4;
@@ -2006,9 +2020,34 @@ export class PaperEngine {
   private shouldDeferRegimeLaneTransitionClose(
     open: PaperOpenPositionRecord,
     evalAtMs: number,
-    closeReason: PaperClosedPositionRecord["closeReason"] | "highway_ema60_break_long" | "highway_ema60_break_short"
+    closeReason: PaperClosedPositionRecord["closeReason"] | "highway_ema60_break_long" | "highway_ema60_break_short",
+    postPartialProtectActive?: boolean
   ): boolean {
-    if (!this.isEntryPostOpenRegimeLaneProtectActive(open.openedAt, evalAtMs)) return false;
+    if (!this.isEntryPostOpenRegimeLaneProtectActive(open.openedAt, evalAtMs)) {
+      // 진입 직후 포지션 보호 없지만, 부분청산 직후 보호는 여전히 상태일 수 있다.
+      if (postPartialProtectActive === true) {
+        switch (closeReason) {
+          case "regime_exit":
+          case "candidate_lost":
+          case "trend_switch":
+          case "range_box_break":
+          case "range_profit_trail":
+          case "highway_ema60_break_long":
+          case "highway_ema60_break_short":
+            this.logger.info("POST_PARTIAL_PROTECT_DEFER", {
+              symbol: open.symbol,
+              side: open.side,
+              closeReason,
+              postPartialProtectActive: true,
+              note: "부분청산 직후 보호 구간: 지정된 신호/레징 쫐출 청산 일시 유예"
+            });
+            return true;
+          default:
+            return false;
+        }
+      }
+      return false;
+    }
     switch (closeReason) {
       case "regime_exit":
       case "structural_regime_shift":
@@ -2518,6 +2557,30 @@ export class PaperEngine {
 
       const symKey = String(open.symbol);
       const { longUsd, shortUsd } = marginsForSymbol(opens, symKey);
+
+      // [PARTIAL EXIT PROTECTION]
+      // 부분청산(TP_PARTIAL / PARTIAL_SPLIT) 직후 잔여 포지션은 POST_PARTIAL_REGIME_PROTECT_MS 동안
+      // 주요 레징/신호 소멸 청산(regime_exit, candidate_lost, trend_switch) 일시 차단.
+      // 단 STRUCTURAL, CRASH_FORCE, STOP_LOSS, TRAILING 은 허용한다(안전망 연소).
+      // 이 플래그는 shouldDeferRegimeLaneTransitionClose 안에서 참조된다.
+      const postPartialProtectActive: boolean = (
+        (open.partialExitStage ?? 0) >= 1 &&
+        open.lastPartialAt !== undefined &&
+        closedAt - open.lastPartialAt < POST_PARTIAL_REGIME_PROTECT_MS
+      );
+      if (postPartialProtectActive) {
+        this.logger.info("POST_PARTIAL_REGIME_PROTECT_ACTIVE", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          partialExitStage: open.partialExitStage,
+          lastPartialAt: open.lastPartialAt,
+          elapsed_since_partial_ms: open.lastPartialAt ? closedAt - open.lastPartialAt : null,
+          protect_window_ms: POST_PARTIAL_REGIME_PROTECT_MS,
+          note: "regime_exit/candidate_lost 종류 대상 업도 일시 차단"
+        });
+      }
+
       const rr = this.rangeRuntimeBySymbol.get(symKey) ?? {
         lastZone: null as RangeBoxZone | null,
         cycle: 0,
@@ -2568,7 +2631,7 @@ export class PaperEngine {
                 continue;
               }
 
-              if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "regime_exit")) {
+              if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "regime_exit", postPartialProtectActive)) {
                 this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
                   symbol: open.symbol,
                   side: open.side,
@@ -2672,7 +2735,7 @@ export class PaperEngine {
                 continue;
               }
 
-              if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "regime_exit")) {
+              if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "regime_exit", postPartialProtectActive)) {
                 this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
                   symbol: open.symbol,
                   side: open.side,
@@ -2871,7 +2934,7 @@ export class PaperEngine {
         }
 
         if (trailStep.trailExit) {
-          if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "range_profit_trail")) {
+          if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "range_profit_trail", postPartialProtectActive)) {
             this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
               symbol: open.symbol,
               side: open.side,
@@ -3148,7 +3211,7 @@ export class PaperEngine {
       if (regimeAtEntry === "TREND" && trendState) {
         const plan = planTrendSwitch(trendState, open.side);
         if (plan.execute && plan.openSide && plan.closeSide) {
-          if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "trend_switch")) {
+          if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "trend_switch", postPartialProtectActive)) {
             this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
               symbol: open.symbol,
               side: open.side,
@@ -3357,7 +3420,7 @@ export class PaperEngine {
       if (regimeAtEntry === "TREND") {
         const trendOkNow = snap.trendOk === true;
         if (regimeNow !== "TREND" || !trendOkNow) {
-          if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "trend_break_exit")) {
+          if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "trend_break_exit", postPartialProtectActive)) {
             this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
               symbol: open.symbol,
               side: open.side,
@@ -3543,7 +3606,7 @@ export class PaperEngine {
         (exitEval.reason === "highway_ema60_break_long" || exitEval.reason === "highway_ema60_break_short");
       if (ema60ReevalTrigger) {
         const highwayReason = exitEval.reason as "highway_ema60_break_long" | "highway_ema60_break_short";
-        if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, highwayReason)) {
+        if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, highwayReason, postPartialProtectActive)) {
           this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
             symbol: open.symbol,
             side: open.side,
@@ -3604,7 +3667,7 @@ export class PaperEngine {
 
       if (exitEval.action === "close") {
         const cr = exitEval.reason as PaperClosedPositionRecord["closeReason"];
-        if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, cr)) {
+        if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, cr, postPartialProtectActive)) {
           this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
             symbol: open.symbol,
             side: open.side,
@@ -3776,6 +3839,7 @@ export class PaperEngine {
             ...open,
             sizeUsd: newMargin,
             partialExitStage: stage,
+            lastPartialAt: closedAt,
             realizedPnl: (open.realizedPnl ?? 0) + mp.pnlUsdNet,
             trailingExtremePrice: (partial as { trailingExtreme?: number }).trailingExtreme,
             ...(partialDetail["range_first_profit_lock_applied"] === true
@@ -3850,7 +3914,7 @@ export class PaperEngine {
             remaining.push(posTrail);
             continue;
           }
-          if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "regime_exit")) {
+          if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "regime_exit", postPartialProtectActive)) {
             this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
               symbol: open.symbol,
               side: open.side,
@@ -3982,7 +4046,7 @@ export class PaperEngine {
         continue;
       }
 
-      if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "candidate_lost")) {
+      if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "candidate_lost", postPartialProtectActive)) {
         this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
           symbol: open.symbol,
           side: open.side,
@@ -4376,9 +4440,31 @@ export class PaperEngine {
 
       let finalBlockedReason: string | null = null;
       const crashState = this.lastRisk?.crashState ?? "NONE";
+      const crashLockUntil = this.lastRisk?.crashLockUntil ?? 0;
+      const nowForCrash = Date.now();
+
+      // [CRASH GUARD REDESIGN]
+      // CRASH_REDUCE: 사이즈 축소/공격성 약화 전용 → 진입 자체는 차단하지 않는다.
+      //   longAllow=false 를 통해 risk-exposure 레이어에서 이미 억제됨.
+      // CRASH_EXIT/LOCK: 강한 no-entry 허용. 단 아래 조건이 모두 충족되면 자동 해제:
+      //   (a) 현재 activeEngine 이 RANGE (시장판단이 이미 바뀐 상태)
+      //   (b) crashLockUntil 이 만료됐거나(=0) CRASH_GUARD_REGIME_AWARE_RELEASE_MS 경과
+      // 목표: crash guard 가 시장판단 변경 후에도 무기한 전체 진입을 얼리지 않게.
+      const crashLockExpiredOrSoon =
+        crashLockUntil === 0 ||
+        nowForCrash >= crashLockUntil ||
+        (nowForCrash + CRASH_GUARD_REGIME_AWARE_RELEASE_MS) >= crashLockUntil;
+      const crashGuardRegimeAwareReleased =
+        (crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK") &&
+        activeEngine === "RANGE" &&
+        crashLockExpiredOrSoon;
+
+      // CRASH_REDUCE 는 더 이상 롱 진입 전면 차단하지 않음 (size 축소 레이어로 대체)
       const crashEntryGuardApplies =
         authority.side === "long" &&
-        (crashState === "CRASH_REDUCE" || crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK");
+        (crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK") &&
+        !crashGuardRegimeAwareReleased;
+
       const zone = typeof first.boxPos === "number" && Number.isFinite(first.boxPos) ? classifyBoxZone(first.boxPos) : null;
       const ngeStage0UpperLongBlock =
         authority.side === "long" &&
@@ -4447,10 +4533,14 @@ export class PaperEngine {
         this.logger.warn("CRASH_ENTRY_GUARD_BLOCK", {
           symbol: sym,
           crash_state: crashState,
+          crash_lock_until: crashLockUntil,
+          crash_guard_regime_aware_released: crashGuardRegimeAwareReleased,
+          crash_lock_expired_or_soon: crashLockExpiredOrSoon,
           final_decision: "SKIP",
           reject_reason: finalBlockedReason,
           authority_owner: authority.source,
-          active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null
+          active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
+          note: "CRASH_REDUCE no longer blocks entry — only CRASH_EXIT/LOCK when regime still in shock"
         });
       }
       if (finalBlockedReason === "NGE_STAGE0_UPPER_LONG_BLOCK") {
@@ -4990,9 +5080,16 @@ export class PaperEngine {
               (adaptive.detail as { stage1_adaptive_soft_explore?: string | null })?.stage1_adaptive_soft_explore ?? null
           };
           this.logger.info("RANGE_FILL_PATH_PROOF", fillProof);
-          if (fillZone === "upper" && record.side === "long") {
+          // [ENTRY IDENTITY FIX] RANGE anomaly 판정은 반드시 진입 시점에 기록된 rangeEntryZone 기준이어야 한다.
+          // fillZone(현재 스냅샷 boxPos)으로 판정하면 TREND로 열린 포지션이 나중에 박스 상단에 있을 때 오탐이 발생한다.
+          // executorAtEntry가 TREND인 포지션은 RANGE anomaly 판정 대상이 아니다.
+          const entryZoneForAnomaly = record.rangeEntryZone ?? fillZone;
+          const isRangeOriginPosition = record.executorAtEntry === "RANGE" || record.regimeAtEntry === "RANGE";
+          if (entryZoneForAnomaly === "upper" && record.side === "long" && isRangeOriginPosition) {
             this.logger.warn("RANGE_ANOMALY_UPPER_LONG_OPEN_CODE_PATH", {
               ...fillProof,
+              entry_zone_for_anomaly: entryZoneForAnomaly,
+              anomaly_source: record.rangeEntryZone ? "rangeEntryZone_stored" : "fillZone_fallback",
               anomaly_note:
                 "RANGE stage0 상단에서는 롱 진입이 나오면 안 됨 — 레거시 하이웨이·테스트 바이패스·히스토리 zone 라벨 불일치 등을 의심"
             });

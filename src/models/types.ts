@@ -810,6 +810,12 @@ export type PaperOpenPositionRecord = Readonly<{
   status: "open";
   /** 신호 불일치 연속 틱 수 (candidate_lost 완화·연속 확인용). */
   candidateLostStreak?: number;
+  /**
+   * 마지막 부분청산(TP_PARTIAL / PARTIAL_SPLIT) 발생 시각(ms).
+   * POST_PARTIAL_REGIME_PROTECT_MS 보호 윈도우 계산에 사용.
+   * undefined = 부분청산 없음.
+   */
+  lastPartialAt?: number;
   /** 진입 시점 실행 권한 소스 스냅샷(종료 history alias `authority` 우선값). */
   authoritySourceAtEntry?: string;
   /** 진입 시점 권한 방향 스냅샷(종료 history alias `authoritySide` 우선값). */
