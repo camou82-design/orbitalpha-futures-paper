@@ -17,7 +17,8 @@ import type {
   RangeBoxZone,
   TrendBreakoutDirection,
   PaperSignalState,
-  PaperMarketMode
+  PaperMarketMode,
+  PaperCloseSource
 } from "../models/types";
 
 import type { Logger } from "../logs/logger";
@@ -2959,6 +2960,79 @@ export class PaperEngine {
     }
   }
 
+  private buildInvariantProofPayload(input: Readonly<{
+    symbol: string;
+    side: string | null;
+    authority: EntryExecutionAuthority | null;
+    adoptedEngine: string | null;
+    lifecycleState: string | null;
+    reason: string;
+  }>): Record<string, unknown> {
+    return {
+      symbol: input.symbol,
+      side: input.side,
+      authority_source: input.authority?.source ?? null,
+      adopted_engine: input.adoptedEngine,
+      entry_quality_grade: input.authority?.entryQualityGrade ?? null,
+      leverage_profile: input.authority?.leverageProfile ?? null,
+      applied_leverage: input.authority?.appliedLeverage ?? null,
+      serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+      closeOnlyMode: this.serverTradeControlState.close_only_mode,
+      killSwitch: this.serverTradeControlState.kill_switch_active,
+      reconcileSafeMode: this.reconcileSafetyCloseOnly,
+      lifecycleState: input.lifecycleState,
+      reason: input.reason
+    };
+  }
+
+  private async appendClosedWithStandardRouting(input: Readonly<{
+    closedRow: PaperClosedPositionRecord;
+    open: PaperOpenPositionRecord;
+    flowId: string;
+    envelope?: PaperEngineDecisionEnvelope | null;
+    exitReason: string;
+    closeSource: string;
+    currentRegime: MarketRegime | "NO_TRADE";
+  }>): Promise<PaperClosedPositionRecord> {
+    const authoritySource =
+      input.envelope?.authority.source ??
+      input.open.authoritySourceAtEntry ??
+      input.open.authority ??
+      null;
+    const adoptedEngine =
+      input.envelope?.selector?.adopted_result.engine ??
+      (authoritySource === "v2" ? "V2" : authoritySource === "v1" ? "V1" : null);
+    const closeOnlyManaged = this.serverTradeControlState.close_only_mode || this.reconcileSafetyCloseOnly;
+    const routedExitReason = closeOnlyManaged ? "close_only_exit" : input.exitReason;
+    const routedCloseSource = closeOnlyManaged ? "server_close_only" : input.closeSource;
+    const normalized: PaperClosedPositionRecord = {
+      ...input.closedRow,
+      closeSource: routedCloseSource as PaperCloseSource,
+      exitReason: routedExitReason,
+      ...(authoritySource != null ? { authority: authoritySource } : {}),
+      ...(input.open.authoritySideAtEntry != null ? { authoritySide: input.open.authoritySideAtEntry } : {})
+    };
+    await this.positions.appendClosed(normalized);
+    this.logger.info("EXIT_STANDARD_ROUTING_PROOF", {
+      symbol: input.open.symbol,
+      side: input.open.side,
+      flowId: input.flowId,
+      exitReason: routedExitReason,
+      exitType: normalized.exitType ?? null,
+      closeSource: normalized.closeSource ?? null,
+      authority_source: authoritySource,
+      adopted_engine: adoptedEngine,
+      lifecycleState: input.open.lifecycleState ?? "INITIAL",
+      position_regime_at_entry: input.open.regimeAtEntry ?? null,
+      current_regime: input.currentRegime,
+      serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+      closeOnlyMode: this.serverTradeControlState.close_only_mode,
+      killSwitch: this.serverTradeControlState.kill_switch_active,
+      reconcileSafeMode: this.reconcileSafetyCloseOnly
+    });
+    return normalized;
+  }
+
   private async tryPaperPositionClose(input: Readonly<{
     snapshots: SymbolSnapshot[];
     errorsCount: number;
@@ -2974,6 +3048,7 @@ export class PaperEngine {
     const rawOpens = await this.positions.loadOpenAll();
     if (rawOpens.length === 0) return;
     const opens = rawOpens.map(o => ({ ...o })); // Use mutable copy for state tracking
+    const effectiveCloseOnlyMode = this.serverTradeControlState.close_only_mode || this.reconcileSafetyCloseOnly;
     let crashPositionsModified = false;
     let openLedgerPruned = false;
     const crashForceClosedKeys = new Set<string>();
@@ -3063,8 +3138,16 @@ export class PaperEngine {
             // Only full-liquidation (forceExit → EXIT_LONG_CRASH_FORCE) goes into history.json.
             // CRASH_REDUCE is recorded to events.jsonl only (see below).
             if (forceExit) {
-              await this.positions.appendClosed(closedRow);
-              authorizeOpenLedgerPruneAfterAttestedClose(`${op.symbol}:${op.side}:${op.openedAt}`, closedRow);
+              const routedClosed = await this.appendClosedWithStandardRouting({
+                closedRow,
+                open: op,
+                flowId: `${op.symbol}:${op.side}:${op.openedAt}`,
+                envelope: null,
+                exitReason: et,
+                closeSource: "CRASH_LONG_DEFENSE",
+                currentRegime: (input.marketMode.marketMode as MarketRegime) ?? "NO_TRADE"
+              });
+              authorizeOpenLedgerPruneAfterAttestedClose(`${op.symbol}:${op.side}:${op.openedAt}`, routedClosed);
             } else {
               this.logger.info("CRASH_REDUCE_PARTIAL_EVENT_ONLY", {
                 symbol: op.symbol,
@@ -3186,6 +3269,10 @@ export class PaperEngine {
         rangeAddOnUsed: finalNorm.rangeAddOnUsed ?? false,
         rangeFirstProfitLocked: finalNorm.rangeFirstProfitLocked ?? false
       };
+      if (effectiveCloseOnlyMode && open.lifecycleState !== "CLOSE_ONLY_MANAGED") {
+        open = { ...open, lifecycleState: "CLOSE_ONLY_MANAGED" };
+        crashPositionsModified = true;
+      }
 
       // Backfill stopPrice if missing for existing positions
       if (open.status === "open" && (open.stopPrice === undefined || open.stopPrice === null || !Number.isFinite(open.stopPrice))) {
@@ -3464,8 +3551,16 @@ export class PaperEngine {
                 flowId,
                 reason: "range_long_upper_reversal"
               });
-              await this.positions.appendClosed(closedRow);
-              authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
+              const routedClosed = await this.appendClosedWithStandardRouting({
+                closedRow,
+                open,
+                flowId,
+                envelope,
+                exitReason: cr,
+                closeSource: "range_reversal_logic",
+                currentRegime: regimeNow
+              });
+              authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
               this.rangeReversalExitThisTickBySymbol.set(symKey, {
                 ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
                 range_existing_long_reversal_exit_applied: true
@@ -3583,8 +3678,16 @@ export class PaperEngine {
                 flowId,
                 reason: "range_short_lower_reversal"
               });
-              await this.positions.appendClosed(closedRow);
-              authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
+              const routedClosed = await this.appendClosedWithStandardRouting({
+                closedRow,
+                open,
+                flowId,
+                envelope,
+                exitReason: cr,
+                closeSource: "range_reversal_logic",
+                currentRegime: regimeNow
+              });
+              authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
               this.rangeReversalExitThisTickBySymbol.set(symKey, {
                 ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
                 range_existing_short_reversal_exit_applied: true
@@ -3805,8 +3908,16 @@ export class PaperEngine {
             flowId,
             reason: "range_profit_trail"
           });
-          await this.positions.appendClosed(closedRowTrail);
-          authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRowTrail);
+          const routedClosedTrail = await this.appendClosedWithStandardRouting({
+            closedRow: closedRowTrail,
+            open,
+            flowId,
+            envelope,
+            exitReason: crTrail,
+            closeSource: "range_profit_trail",
+            currentRegime: regimeNow
+          });
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosedTrail);
           this.lastExitReasonLabel = "수익권 되돌림 추종 청산";
 
           const mappedType = exitEventJsonlType(crTrail);
@@ -3998,8 +4109,16 @@ export class PaperEngine {
             flowId,
             reason: st.reason ?? cr
           });
-          await this.positions.appendClosed(closedRow);
-          authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
+          const routedClosed = await this.appendClosedWithStandardRouting({
+            closedRow,
+            open,
+            flowId,
+            envelope,
+            exitReason: cr,
+            closeSource: confirmedCloseSource ?? "executor_close_action",
+            currentRegime: regimeNow
+          });
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
           this.lastExitReasonLabel =
             st.reason === "range_box_break"
               ? "박스 붕괴 청산"
@@ -4101,8 +4220,16 @@ export class PaperEngine {
             strategyVersion: inheritedStrategyVersion,
             ...snapPaths
           });
-          await this.positions.appendClosed(closedRow);
-          authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
+          const routedClosed = await this.appendClosedWithStandardRouting({
+            closedRow,
+            open,
+            flowId,
+            envelope,
+            exitReason: cr,
+            closeSource: String(closedRow.closeSource ?? "executor_close_action"),
+            currentRegime: regimeNow
+          });
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
           this.lastExitReasonLabel = "추세 반대 돌파로 청산";
           this.lastSwitchReasonLabel = trendState.trendSwitchReasonLabel;
           this.trendSwitchTimestampsMs.push(Date.now());
@@ -4205,8 +4332,16 @@ export class PaperEngine {
           flowId,
           reason: "stop_loss_close"
         });
-        await this.positions.appendClosed(closedRow);
-        authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
+        const routedClosed = await this.appendClosedWithStandardRouting({
+          closedRow,
+          open,
+          flowId,
+          envelope,
+          exitReason: cr,
+          closeSource: String(closedRow.closeSource ?? "executor_close_action"),
+          currentRegime: regimeNow
+        });
+        authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
         this.lastExitReasonLabel = "손절 청산";
         this.logger.info(exitFullLogKey(cr), {
           ...exitDetailBase(open, m),
@@ -4354,8 +4489,16 @@ export class PaperEngine {
             flowId,
             reason: `regime_shift_${cr}`
           });
-          await this.positions.appendClosed(closedRow);
-          authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
+          const routedClosed = await this.appendClosedWithStandardRouting({
+            closedRow,
+            open,
+            flowId,
+            envelope,
+            exitReason: cr,
+            closeSource: String(closedRow.closeSource ?? "executor_close_action"),
+            currentRegime: regimeNow
+          });
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
           this.logger.info(exitFullLogKey(cr), { ...exitDetailBase(open, m), exitReason: cr });
 
           const mappedType = exitEventJsonlType(cr);
@@ -4591,8 +4734,16 @@ export class PaperEngine {
           flowId,
           reason: `executor_${cr}`
         });
-        await this.positions.appendClosed(closedRow);
-        authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
+        const routedClosed = await this.appendClosedWithStandardRouting({
+          closedRow,
+          open,
+          flowId,
+          envelope,
+          exitReason: cr,
+          closeSource: String(closedRow.closeSource ?? "executor_close_action"),
+          currentRegime: regimeNow
+        });
+        authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
         this.logger.info(exitFullLogKey(cr), {
           ...exitDetailBase(open, m),
           exitReason: cr,
@@ -4885,8 +5036,16 @@ export class PaperEngine {
             flowId,
             reason: "safety_net_alignment"
           });
-          await this.positions.appendClosed(closedRow);
-          authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
+          const routedClosed = await this.appendClosedWithStandardRouting({
+            closedRow,
+            open,
+            flowId,
+            envelope,
+            exitReason: cr,
+            closeSource: "range_misaligned_safety_net",
+            currentRegime: regimeNow
+          });
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
           this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
             symbol: open.symbol,
             side: open.side,
@@ -5010,8 +5169,16 @@ export class PaperEngine {
         flowId,
         reason: "candidate_lost"
       });
-      await this.positions.appendClosed(closedRow);
-      authorizeOpenLedgerPruneAfterAttestedClose(flowId, closedRow);
+      const routedClosed = await this.appendClosedWithStandardRouting({
+        closedRow,
+        open,
+        flowId,
+        envelope,
+        exitReason: cr,
+        closeSource: String(closedRow.closeSource ?? "executor_close_action"),
+        currentRegime: regimeNow
+      });
+      authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
       this.logger.info("paper_position_closed", {
         symbol: open.symbol,
         side: open.side,
@@ -5395,6 +5562,14 @@ export class PaperEngine {
   }>): Promise<void> {
     if (input.errorsCount > 0) return;
     if (input.killSwitchActive || !input.serverTradeEnabled) {
+      this.logger.error("SERVER_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+        symbol: "*",
+        side: null,
+        authority: null,
+        adoptedEngine: null,
+        lifecycleState: null,
+        reason: input.killSwitchActive ? "kill_switch_active" : "server_trade_disabled"
+      }));
       this.logger.warn("ENTRY_BLOCKED_SERVER_AUTHORITY_STATE", {
         reason: input.killSwitchActive ? "kill_switch_active" : "server_trade_disabled",
         authority_source: "server_state"
@@ -5402,6 +5577,14 @@ export class PaperEngine {
       return;
     }
     if (input.closeOnlyMode) {
+      this.logger.error("SERVER_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+        symbol: "*",
+        side: null,
+        authority: null,
+        adoptedEngine: null,
+        lifecycleState: null,
+        reason: this.reconcileSafetyCloseOnly ? "reconcile_safe_mode_close_only" : "close_only_mode"
+      }));
       this.logger.warn("ENTRY_BLOCKED_SERVER_AUTHORITY_STATE", {
         reason: this.reconcileSafetyCloseOnly ? "reconcile_safe_mode_close_only" : "close_only_mode",
         authority_source: "server_state"
@@ -5537,6 +5720,26 @@ export class PaperEngine {
           reason: staleReasons.join("|")
         });
         continue;
+      }
+      if (this.freshTickRequiredAfterReadiness && authority.decision === "ENTER") {
+        this.logger.error("RECOVERY_BARRIER_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+          symbol: String(first.symbol),
+          side: authority.side,
+          authority,
+          adoptedEngine,
+          lifecycleState: null,
+          reason: "entry_attempt_while_fresh_tick_barrier_active"
+        }));
+      }
+      if (readinessChangedAt != null && authority.decision === "ENTER" && envelope.decisionCycleId === this.runCycleId) {
+        this.logger.error("RECOVERY_BARRIER_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+          symbol: String(first.symbol),
+          side: authority.side,
+          authority,
+          adoptedEngine,
+          lifecycleState: null,
+          reason: "entry_attempt_same_cycle_after_readiness_recovery"
+        }));
       }
 
       const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(authority, res.adaptiveResult);
@@ -5679,8 +5882,24 @@ export class PaperEngine {
       }
 
       if (authority.source !== "v2") {
+        this.logger.error("ENTRY_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+          symbol: sym,
+          side: authority.side,
+          authority,
+          adoptedEngine,
+          lifecycleState: existingOpen?.lifecycleState ?? null,
+          reason: "authority_source_not_v2"
+        }));
         finalBlockedReason = "AUTHORITY_SOURCE_NOT_V2";
       } else if (adoptedEngine !== "V2") {
+        this.logger.error("ENTRY_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+          symbol: sym,
+          side: authority.side,
+          authority,
+          adoptedEngine,
+          lifecycleState: existingOpen?.lifecycleState ?? null,
+          reason: "adopted_engine_not_v2"
+        }));
         finalBlockedReason = "ADOPTED_ENGINE_NOT_V2";
       } else if (authority.decision !== "ENTER") {
         finalBlockedReason = "AUTHORITY_DECISION_NOT_ENTER";
@@ -5701,9 +5920,50 @@ export class PaperEngine {
       } else if (isNewEntry && policyPaused) {
         finalBlockedReason = "POLICY_PAUSED_OR_FORBIDDEN";
       }
+      const regimeNowForInvariant = (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime;
+      if ((regimeNowForInvariant === "RANGE" || regimeNowForInvariant === "NO_TRADE") && authority.leverageProfile && authority.leverageProfile !== "BASE") {
+        this.logger.error("LEVERAGE_POLICY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+          symbol: sym,
+          side: authority.side,
+          authority,
+          adoptedEngine,
+          lifecycleState: existingOpen?.lifecycleState ?? null,
+          reason: "boost_not_allowed_in_range_or_no_trade"
+        }));
+      }
+      if (this.lastRisk?.directionalShockState && this.lastRisk.directionalShockState !== "NONE" && authority.leverageProfile && authority.leverageProfile !== "BASE") {
+        this.logger.error("LEVERAGE_POLICY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+          symbol: sym,
+          side: authority.side,
+          authority,
+          adoptedEngine,
+          lifecycleState: existingOpen?.lifecycleState ?? null,
+          reason: "boost_not_allowed_during_shock"
+        }));
+      }
+      if (authority.entryQualityGrade === "A" && (authority.appliedLeverage ?? 0) >= 6) {
+        this.logger.error("LEVERAGE_POLICY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+          symbol: sym,
+          side: authority.side,
+          authority,
+          adoptedEngine,
+          lifecycleState: existingOpen?.lifecycleState ?? null,
+          reason: "a_grade_6x_not_allowed"
+        }));
+      }
 
       // Final Authorization Boolean: The ONLY gate that allows execution
       const finalEntryAuthorization = (finalBlockedReason === null);
+      if (finalEntryAuthorization && (!this.serverTradeControlState.server_trade_enabled || this.serverTradeControlState.close_only_mode || this.serverTradeControlState.kill_switch_active || this.reconcileSafetyCloseOnly)) {
+        this.logger.error("SERVER_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+          symbol: sym,
+          side: authority.side,
+          authority,
+          adoptedEngine,
+          lifecycleState: existingOpen?.lifecycleState ?? null,
+          reason: "entry_authorized_under_server_authority_block"
+        }));
+      }
 
       // --- PIEPLINE EVENT EMISSION ---
       // 1. AI Event (Report BLOCKED if AI rejected)
@@ -5899,6 +6159,16 @@ export class PaperEngine {
         entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(entrySizeUsd * entryQualitySizeMultiplier * 100) / 100);
       } else {
         entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(entrySizeUsd * 100) / 100);
+      }
+      if (authority.source === "v2" && entryQualitySizeMultiplier !== 1) {
+        this.logger.error("SIZING_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+          symbol: sym,
+          side: authority.side,
+          authority,
+          adoptedEngine,
+          lifecycleState: existingOpen?.lifecycleState ?? null,
+          reason: "v2_entry_local_multiplier_reintervention_detected"
+        }));
       }
       if (authority.source !== "v2") {
         if (!isRangeCampaignNewEntry && riskE) {
@@ -6366,15 +6636,29 @@ export class PaperEngine {
     entryQualitySizeMultiplier = 1
   ): Promise<PaperOpenPositionRecord | null> {
     const { legacy: res, authority } = envelope;
+    const emitScaleInvariantBroken = (reason: string): null => {
+      this.logger.error("SCALE_IN_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+        symbol: String(existing.symbol),
+        side: authority.side,
+        authority,
+        adoptedEngine: envelope.selector?.adopted_result.engine ?? null,
+        lifecycleState: existing.lifecycleState ?? null,
+        reason
+      }));
+      return null;
+    };
     if (authority.source !== "v2") {
+      emitScaleInvariantBroken("authority_source_not_v2");
       this.logger.info("scale_in_blocked_non_v2_authority", { symbol: existing.symbol, authority_source: authority.source });
       return null;
     }
     if (authority.decision !== "ENTER") {
+      emitScaleInvariantBroken("authority_decision_not_enter");
       this.logger.info("scale_in_blocked_authority_not_enter", { symbol: existing.symbol, authority_decision: authority.decision });
       return null;
     }
     if (authority.side !== existing.side) {
+      emitScaleInvariantBroken("authority_side_mismatch");
       this.logger.info("scale_in_blocked_side_mismatch", {
         symbol: existing.symbol,
         authority_side: authority.side,
@@ -6383,6 +6667,7 @@ export class PaperEngine {
       return null;
     }
     if (authority.addOnAllowed !== true) {
+      emitScaleInvariantBroken("authority_addon_not_allowed");
       this.logger.info("scale_in_blocked_authority_addon_not_allowed", {
         symbol: existing.symbol,
         add_on_allowed: authority.addOnAllowed ?? false,
@@ -6395,6 +6680,7 @@ export class PaperEngine {
         ? (first.lastPrice - existing.entryPrice) / Math.max(1e-9, existing.entryPrice)
         : (existing.entryPrice - first.lastPrice) / Math.max(1e-9, existing.entryPrice);
     if (pnlPctNow <= 0) {
+      emitScaleInvariantBroken("loss_averaging_forbidden");
       this.logger.info("scale_in_blocked_loss_averaging_forbidden", {
         symbol: existing.symbol,
         pnl_pct: pnlPctNow
@@ -6404,6 +6690,7 @@ export class PaperEngine {
     if (authority.regime != null && existing.regimeAtEntry != null) {
       const authorityRegime = String(authority.regime).toUpperCase();
       if (authorityRegime !== String(existing.regimeAtEntry).toUpperCase()) {
+        emitScaleInvariantBroken("authority_regime_mismatch");
         this.logger.info("scale_in_blocked_regime_identity_mismatch", {
           symbol: existing.symbol,
           authority_regime: authority.regime,
