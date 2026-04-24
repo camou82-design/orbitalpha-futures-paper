@@ -1039,15 +1039,12 @@ export class PaperEngine {
       this.serverTradeControlState.close_only_mode === false &&
       this.serverTradeControlState.kill_switch_active === false &&
       this.reconcileSafetyCloseOnly === false;
-    const recoveryBarrierReleased =
-      !this.freshTickRequiredAfterReadiness ||
-      this.readinessFreshTickCompletedCycles >= this.readinessFreshTickRequiredCycles;
     const engineLoopHealthy = this.engineLastTickAt != null;
     const pipelineReady = this.entryPipelineReady && this.exitPipelineReady;
     const marketReady = this.publicMarketDataReady === true;
     const writerReady = this.bundleWriterReady === true;
     const positionStateReady = this.positionTrackingAlive === true;
-    return serverAuthorityOk && recoveryBarrierReleased && engineLoopHealthy && pipelineReady && marketReady && writerReady && positionStateReady;
+    return serverAuthorityOk && engineLoopHealthy && pipelineReady && marketReady && writerReady && positionStateReady;
   }
 
   private computeSignedExecutionReadiness(): boolean {
