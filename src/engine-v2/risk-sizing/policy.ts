@@ -46,7 +46,8 @@ export function calculateRiskSizing(
         qualityScore >= 90 ? "S" : qualityScore >= 80 ? "A" : "B";
     const isTrend = judgment.regime === "TREND";
     const shockActive = state.directionalShockState !== "NONE";
-    const sideAllowed = executor.side === "long" ? state.longAllow : executor.side === "short" ? state.shortAllow : false;
+    const hasDirectionalSide = executor.side === "long" || executor.side === "short";
+    const sideAllowed = executor.side === "long" ? state.longAllow : executor.side === "short" ? state.shortAllow : true;
     const trendLossStreak = Math.max(0, Number(state.lossStreaks?.TREND ?? 0));
     const symbolFlowLossStreak = trendLossStreak;
     const sameSymbolSide = state.currentPositions.filter((p) => p.symbol === input.symbol && String(p.side).toLowerCase() === executor.side);
@@ -223,7 +224,7 @@ export function calculateRiskSizing(
         isBlocked = true;
         blockReason = "SYMBOL_EXPOSURE_NOTIONAL_CAP_EXCEEDED";
     }
-    if (!isBlocked && !sideAllowed) {
+    if (!isBlocked && hasDirectionalSide && !sideAllowed) {
         isBlocked = true;
         blockReason = executor.side === "long" ? "SIDE_NOT_ALLOWED_LONG" : "SIDE_NOT_ALLOWED_SHORT";
     }
@@ -255,6 +256,8 @@ export function calculateRiskSizing(
         applied_leverage: appliedLeverage,
         leverage_reason: leverageReason,
         leverage_block_reason: leverageBlockReason,
+        executor_side: executor.side ?? "none",
+        executor_side_none_diagnostic: hasDirectionalSide ? null : "EXECUTOR_SIDE_NONE_DIAGNOSTIC",
         exposure_notional_krw: effectiveNotional,
         equity_multiple: accountEquityKrw > 0 ? effectiveNotional / accountEquityKrw : 0
     };
