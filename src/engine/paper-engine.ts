@@ -797,8 +797,10 @@ export class PaperEngine {
   private okxOrderSubmitOk = false;
   private okxSmokeTestPerformed = false;
   private runCycleId = 0;
-  private executionReadiness = false;
-  private executionReadinessChangedAt: number | null = null;
+  private paperExecutionReady = false;
+  private paperExecutionReadyChangedAt: number | null = null;
+  private signedExecutionReady = false;
+  private signedExecutionReadyChangedAt: number | null = null;
   private freshTickRequiredAfterReadiness = false;
   private readinessTransitionCycleId: number | null = null;
   private staleEntryDroppedCount = 0;
@@ -985,7 +987,7 @@ export class PaperEngine {
   private async runPositionStateReconciliation(nowTs: number): Promise<void> {
     if (this.reconcileLastCheckedAt != null && nowTs - this.reconcileLastCheckedAt < this.reconcileCheckIntervalMs) return;
     this.reconcileLastCheckedAt = nowTs;
-    if (!this.okxDemo || !this.executionReadiness) return;
+    if (!this.okxDemo || !this.signedExecutionReady) return;
     const localOpen = await this.positions.loadOpenAll();
     const localKeys = new Set(localOpen.map((p) => `${String(p.symbol)}:${String(p.side)}`));
     const remote = await this.okxDemo.getPositions("SWAP");
@@ -1031,9 +1033,32 @@ export class PaperEngine {
     this.reconcileLastMismatchReason = null;
   }
 
-  private computeExecutionReadiness(): boolean {
-    if (!this.config.okxDemoEnabled) return true;
-    return this.okxSignedRestReady === true;
+  private computePaperExecutionReadiness(): boolean {
+    const serverAuthorityOk =
+      this.serverTradeControlState.server_trade_enabled === true &&
+      this.serverTradeControlState.close_only_mode === false &&
+      this.serverTradeControlState.kill_switch_active === false &&
+      this.reconcileSafetyCloseOnly === false;
+    const recoveryBarrierReleased =
+      !this.freshTickRequiredAfterReadiness ||
+      this.readinessFreshTickCompletedCycles >= this.readinessFreshTickRequiredCycles;
+    const engineLoopHealthy = this.engineLastTickAt != null;
+    const pipelineReady = this.entryPipelineReady && this.exitPipelineReady;
+    const marketReady = this.publicMarketDataReady === true;
+    const writerReady = this.bundleWriterReady === true;
+    const positionStateReady = this.positionTrackingAlive === true;
+    return serverAuthorityOk && recoveryBarrierReleased && engineLoopHealthy && pipelineReady && marketReady && writerReady && positionStateReady;
+  }
+
+  private computeSignedExecutionReadiness(): boolean {
+    if (!this.config.okxDemoEnabled) return false;
+    return (
+      this.okxSignedRestReady === true &&
+      this.okxAccountConfigOk === true &&
+      this.okxBalanceOk === true &&
+      this.okxPositionsOk === true &&
+      (this.okxOrderSubmitOk === true || this.okxSignedRestReady === true)
+    );
   }
 
   private dropReadinessStaleState(reason: string, changedAt: number): void {
@@ -1102,28 +1127,39 @@ export class PaperEngine {
   }
 
   private evaluateReadinessTransition(nowTs: number): void {
-    const current = this.computeExecutionReadiness();
-    if (!this.executionReadiness && current) {
-      this.executionReadinessChangedAt = nowTs;
+    const currentPaper = this.computePaperExecutionReadiness();
+    const currentSigned = this.computeSignedExecutionReadiness();
+    if (!this.paperExecutionReady && currentPaper) {
+      this.paperExecutionReadyChangedAt = nowTs;
       this.freshTickRequiredAfterReadiness = true;
       this.readinessTransitionCycleId = this.runCycleId;
       this.logger.info("READINESS_TRANSITION_DETECTED", {
         from: false,
         to: true,
-        execution_readiness_changed_at: nowTs,
+        paper_execution_ready_changed_at: nowTs,
         run_cycle_id: this.runCycleId
       });
       this.dropReadinessStaleState("false_to_true_transition", nowTs);
-    } else if (this.executionReadiness !== current) {
-      this.executionReadinessChangedAt = nowTs;
+    } else if (this.paperExecutionReady !== currentPaper) {
+      this.paperExecutionReadyChangedAt = nowTs;
       this.logger.info("READINESS_TRANSITION_DETECTED", {
-        from: this.executionReadiness,
-        to: current,
-        execution_readiness_changed_at: nowTs,
+        from: this.paperExecutionReady,
+        to: currentPaper,
+        paper_execution_ready_changed_at: nowTs,
         run_cycle_id: this.runCycleId
       });
     }
-    this.executionReadiness = current;
+    if (this.signedExecutionReady !== currentSigned) {
+      this.signedExecutionReadyChangedAt = nowTs;
+      this.logger.info("SIGNED_EXECUTION_READINESS_TRANSITION", {
+        from: this.signedExecutionReady,
+        to: currentSigned,
+        signed_execution_ready_changed_at: nowTs,
+        run_cycle_id: this.runCycleId
+      });
+    }
+    this.paperExecutionReady = currentPaper;
+    this.signedExecutionReady = currentSigned;
   }
 
   private pruneTrendSwitches1h(now: number): number {
@@ -1475,6 +1511,10 @@ export class PaperEngine {
       okx_balance_ok: this.okxBalanceOk,
       okx_positions_ok: this.okxPositionsOk,
       okx_order_submit_ok: this.okxOrderSubmitOk,
+      paper_execution_ready: this.paperExecutionReady,
+      signed_execution_ready: this.signedExecutionReady,
+      signed_submit_mode: this.signedExecutionReady ? "enabled" : "skipped_not_ready",
+      signed_submit_block_reason: this.signedExecutionReady ? null : "SIGNED_EXECUTION_NOT_READY",
       v2AuthorityActive: runId.v2AuthorityActive,
       runIdentity: runId as any,
       notes: "paper okx-demo unified pipeline; legacy + v2 authority bridge active; position identity stored per executor/regime resolution; run metadata reflects okx-demo execution"
@@ -1769,7 +1809,8 @@ export class PaperEngine {
         state: buildV2StateBridge(
           opensAfterClose,
           this.lastRisk,
-          this.executionReadiness,
+          this.paperExecutionReady,
+          this.signedExecutionReady,
           readinessBarrierActive,
           this.readinessFreshTickCompletedCycles,
           this.readinessFreshTickRequiredCycles,
@@ -1801,6 +1842,10 @@ export class PaperEngine {
         leverage_block_reason: selectorResult?.v2_result.risk.leverageBlockReason ?? authority.leverageBlockReason ?? null,
         exposure_notional_krw: selectorResult?.v2_result.risk.exposureNotionalKrw ?? authority.exposureNotionalKrw ?? 0,
         equity_multiple: selectorResult?.v2_result.risk.equityMultiple ?? authority.equityMultiple ?? 0,
+        paper_execution_ready: this.paperExecutionReady,
+        signed_execution_ready: this.signedExecutionReady,
+        signed_submit_mode: this.signedExecutionReady ? "enabled" : "skipped_not_ready",
+        signed_submit_block_reason: this.signedExecutionReady ? null : "SIGNED_EXECUTION_NOT_READY",
         serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
         closeOnlyMode: this.serverTradeControlState.close_only_mode,
         killSwitch: this.serverTradeControlState.kill_switch_active,
@@ -1871,9 +1916,9 @@ export class PaperEngine {
       metaPath,
       filePath,
       decisionBySymbol,
-      executionReadiness: this.executionReadiness,
+      paperExecutionReady: this.paperExecutionReady,
       readinessBarrierActive,
-      readinessChangedAt: this.executionReadinessChangedAt,
+      readinessChangedAt: this.paperExecutionReadyChangedAt,
       serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
       closeOnlyMode: effectiveCloseOnlyMode,
       killSwitchActive: this.serverTradeControlState.kill_switch_active
@@ -1882,8 +1927,10 @@ export class PaperEngine {
       this.freshTickRequiredAfterReadiness = false;
       this.logger.info("READINESS_REEVALUATION_PASSED", {
         run_cycle_id: this.runCycleId,
-        execution_readiness: this.executionReadiness,
-        execution_readiness_changed_at: this.executionReadinessChangedAt,
+        paper_execution_ready: this.paperExecutionReady,
+        paper_execution_ready_changed_at: this.paperExecutionReadyChangedAt,
+        signed_execution_ready: this.signedExecutionReady,
+        signed_execution_ready_changed_at: this.signedExecutionReadyChangedAt,
         fresh_tick_completed_cycles: this.readinessFreshTickCompletedCycles,
         fresh_tick_required_cycles: this.readinessFreshTickRequiredCycles
       });
@@ -1970,8 +2017,8 @@ export class PaperEngine {
           exchange: "okx",
           okx_demo_enabled: this.config.okxDemoEnabled,
           okx_demo_keys_loaded: this.okxDemoKeysLoaded,
-          execution_readiness: this.executionReadiness,
-          execution_readiness_changed_at: this.executionReadinessChangedAt,
+          paper_execution_ready: this.paperExecutionReady,
+          paper_execution_ready_changed_at: this.paperExecutionReadyChangedAt,
           fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness,
           fresh_tick_completed_cycles_after_readiness: this.readinessFreshTickCompletedCycles,
           fresh_tick_required_cycles_after_readiness: this.readinessFreshTickRequiredCycles,
@@ -1986,7 +2033,9 @@ export class PaperEngine {
           market_data_last_update_at: this.marketDataLastUpdateAt,
           v2_last_decision_at: this.v2LastDecisionAt,
           bundle_last_written_at: this.bundleLastWrittenAt,
-          signed_execution_ready: this.executionReadiness,
+          signed_execution_ready: this.signedExecutionReady,
+          signed_submit_mode: this.signedExecutionReady ? "enabled" : "skipped_not_ready",
+          signed_submit_block_reason: this.signedExecutionReady ? null : "SIGNED_EXECUTION_NOT_READY",
           server_trade_enabled: this.serverTradeControlState.server_trade_enabled,
           serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
           close_only_mode: this.serverTradeControlState.close_only_mode,
@@ -2051,7 +2100,10 @@ export class PaperEngine {
         market_data_last_update_at: this.marketDataLastUpdateAt,
         v2_last_decision_at: this.v2LastDecisionAt,
         bundle_last_written_at: this.bundleLastWrittenAt,
-        signed_execution_ready: this.executionReadiness,
+        signed_execution_ready: this.signedExecutionReady,
+        paper_execution_ready: this.paperExecutionReady,
+        signed_submit_mode: this.signedExecutionReady ? "enabled" : "skipped_not_ready",
+        signed_submit_block_reason: this.signedExecutionReady ? null : "SIGNED_EXECUTION_NOT_READY",
         server_trade_enabled: this.serverTradeControlState.server_trade_enabled,
         serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
         close_only_mode: this.serverTradeControlState.close_only_mode,
@@ -2867,6 +2919,12 @@ export class PaperEngine {
     clOrdId: string;
     traceId: string;
     reason: string;
+    authoritySource?: string | null;
+    adoptedEngine?: string | null;
+    entryQualityGrade?: string | null;
+    leverageProfile?: string | null;
+    appliedLeverage?: number | null;
+    paperExecutionReady?: boolean;
   }): Promise<{
     ok: boolean;
     ordId: string | null;
@@ -2889,11 +2947,26 @@ export class PaperEngine {
       qty: input.qty,
       clOrdId: input.clOrdId,
       order_reason: input.reason,
-      order_ts: Date.now()
+      order_ts: Date.now(),
+      authority_source: input.authoritySource ?? null,
+      adopted_engine: input.adoptedEngine ?? null,
+      entry_quality_grade: input.entryQualityGrade ?? null,
+      leverage_profile: input.leverageProfile ?? null,
+      applied_leverage: input.appliedLeverage ?? null,
+      paper_execution_ready: input.paperExecutionReady ?? this.paperExecutionReady,
+      signed_execution_ready: this.signedExecutionReady
     };
 
-    if (!this.okxSignedRestReady) {
-      this.logger.warn("okx_order_submit_skipped_signed_not_ready", logCtx);
+    if (!this.signedExecutionReady) {
+      const reason = "SIGNED_EXECUTION_NOT_READY";
+      const tag =
+        input.reason.indexOf("close") !== -1
+          ? "SIGNED_CLOSE_SUBMIT_SKIPPED_NOT_READY"
+          : input.reason.indexOf("scale_in") !== -1
+            ? "SIGNED_SCALE_IN_SUBMIT_SKIPPED_NOT_READY"
+            : "SIGNED_ORDER_SUBMIT_SKIPPED_NOT_READY";
+      this.logger.warn("SIGNED_EXECUTION_NOT_READY", { ...logCtx, reason });
+      this.logger.warn(tag, { ...logCtx, reason });
       return { ok: false, ordId: null, fillPx: null, errorCode: "signed_not_ready", errorMessage: "OKX signed REST smoke test not passed", ackCode: "rejected", orderState: null };
     }
     const orderExecutionKey = `order:${input.traceId}:${input.reason}:${input.side}:${input.posSide}:${input.qty}`;
@@ -2976,6 +3049,10 @@ export class PaperEngine {
       entry_quality_grade: input.authority?.entryQualityGrade ?? null,
       leverage_profile: input.authority?.leverageProfile ?? null,
       applied_leverage: input.authority?.appliedLeverage ?? null,
+      paper_execution_ready: this.paperExecutionReady,
+      signed_execution_ready: this.signedExecutionReady,
+      signed_submit_mode: this.signedExecutionReady ? "enabled" : "skipped_not_ready",
+      signed_submit_block_reason: this.signedExecutionReady ? null : "SIGNED_EXECUTION_NOT_READY",
       serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
       closeOnlyMode: this.serverTradeControlState.close_only_mode,
       killSwitch: this.serverTradeControlState.kill_switch_active,
@@ -5553,7 +5630,7 @@ export class PaperEngine {
     metaPath: string | undefined;
     filePath: string | undefined;
     decisionBySymbol: ReadonlyMap<string, PaperEngineDecisionEnvelope>;
-    executionReadiness: boolean;
+    paperExecutionReady: boolean;
     readinessBarrierActive: boolean;
     readinessChangedAt: number | null;
     serverTradeEnabled: boolean;
@@ -5591,9 +5668,9 @@ export class PaperEngine {
       });
       return;
     }
-    if (!input.executionReadiness) {
+    if (!input.paperExecutionReady) {
       this.logger.warn("READINESS_REEVALUATION_BLOCKED", {
-        reason: "execution_readiness_false",
+        reason: "paper_execution_ready_false",
         run_cycle_id: this.runCycleId
       });
       return;
@@ -6336,7 +6413,13 @@ export class PaperEngine {
             qty,
             clOrdId,
             traceId: openTraceId,
-            reason: "entry_authorized"
+            reason: "entry_authorized",
+            authoritySource: authority.source,
+            adoptedEngine,
+            entryQualityGrade: authority.entryQualityGrade ?? null,
+            leverageProfile: authority.leverageProfile ?? null,
+            appliedLeverage: authority.appliedLeverage ?? null,
+            paperExecutionReady: this.paperExecutionReady
           });
 
           trace.order_submit_ack = submit.ackCode;
@@ -7069,7 +7152,13 @@ export class PaperEngine {
         qty: sQty,
         clOrdId: `scalein-${existing.symbol}-${Date.now()}`,
         traceId: `${existing.symbol}:${existing.side}:${existing.openedAt}`,
-        reason: "scale_in_authorized"
+        reason: "scale_in_authorized",
+        authoritySource: authority.source,
+        adoptedEngine: envelope.selector?.adopted_result.engine ?? null,
+        entryQualityGrade: authority.entryQualityGrade ?? null,
+        leverageProfile: authority.leverageProfile ?? null,
+        appliedLeverage: authority.appliedLeverage ?? null,
+        paperExecutionReady: this.paperExecutionReady
       });
     }
 
@@ -7615,7 +7704,8 @@ function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
 function buildV2StateBridge(
   opensAfterClose: ReadonlyArray<PaperOpenPositionRecord>,
   lastRisk: RiskControlDecision | null,
-  executionReadiness: boolean,
+  paperExecutionReady: boolean,
+  signedExecutionReady: boolean,
   freshTickBarrierActive: boolean,
   freshTickCompletedCycles: number,
   freshTickRequiredCycles: number,
@@ -7646,7 +7736,9 @@ function buildV2StateBridge(
     directionalShockState: lastRisk?.directionalShockState ?? "NONE",
     longAllow: lastRisk?.longAllow ?? true,
     shortAllow: lastRisk?.shortAllow ?? true,
-    executionReadiness,
+    executionReadiness: paperExecutionReady,
+    paperExecutionReady,
+    signedExecutionReady,
     freshTickBarrierActive,
     freshTickCompletedCycles,
     freshTickRequiredCycles,

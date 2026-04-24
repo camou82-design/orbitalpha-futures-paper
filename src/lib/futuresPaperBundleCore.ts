@@ -127,6 +127,14 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
     okx_balance_ok: !!o.okx_balance_ok,
     okx_positions_ok: !!o.okx_positions_ok,
     okx_order_submit_ok: !!o.okx_order_submit_ok,
+    paper_execution_ready: !!o.paper_execution_ready,
+    signed_execution_ready: !!o.signed_execution_ready,
+    signed_submit_mode:
+      o.signed_submit_mode === "enabled" || o.signed_submit_mode === "skipped_not_ready"
+        ? o.signed_submit_mode
+        : "skipped_not_ready",
+    signed_submit_block_reason:
+      typeof o.signed_submit_block_reason === "string" ? o.signed_submit_block_reason : null,
     strategy_executor: (o.strategy_executor as PaperEngineRoutingKind) || activeEngine,
     current_regime: (o.current_regime as PaperRegimeState) || (activeEngine === "IDLE" ? "NO_TRADE" : activeEngine),
     entryAllowedLong: !!o.entryAllowedLong,

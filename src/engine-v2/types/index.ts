@@ -115,6 +115,8 @@ export interface EngineV2Input {
         longAllow: boolean;
         shortAllow: boolean;
         executionReadiness: boolean;
+        paperExecutionReady?: boolean;
+        signedExecutionReady?: boolean;
         freshTickBarrierActive: boolean;
         freshTickCompletedCycles: number;
         freshTickRequiredCycles: number;
@@ -248,6 +250,8 @@ export interface V2BridgeState {
     longAllow: boolean;
     shortAllow: boolean;
     executionReadiness: boolean;
+    paperExecutionReady?: boolean;
+    signedExecutionReady?: boolean;
     freshTickBarrierActive: boolean;
     freshTickCompletedCycles: number;
     freshTickRequiredCycles: number;

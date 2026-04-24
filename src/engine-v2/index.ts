@@ -171,6 +171,8 @@ export function adaptV2Input(
         longAllow: boolean;
         shortAllow: boolean;
         executionReadiness: boolean;
+        paperExecutionReady?: boolean;
+        signedExecutionReady?: boolean;
         freshTickBarrierActive: boolean;
         freshTickCompletedCycles: number;
         freshTickRequiredCycles: number;
@@ -238,6 +240,8 @@ export function adaptV2Input(
             longAllow: state.longAllow,
             shortAllow: state.shortAllow,
             executionReadiness: state.executionReadiness,
+            paperExecutionReady: state.paperExecutionReady,
+            signedExecutionReady: state.signedExecutionReady,
             freshTickBarrierActive: state.freshTickBarrierActive,
             freshTickCompletedCycles: state.freshTickCompletedCycles,
             freshTickRequiredCycles: state.freshTickRequiredCycles,

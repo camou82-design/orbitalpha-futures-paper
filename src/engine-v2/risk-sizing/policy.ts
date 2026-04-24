@@ -240,6 +240,8 @@ export function calculateRiskSizing(
         entry_quality_distance_loss: Number.isFinite(dLoss) ? dLoss : null,
         entry_quality_distance_contaminated: Number.isFinite(dContaminated) ? dContaminated : null,
         execution_readiness: state.executionReadiness,
+        paper_execution_ready: state.paperExecutionReady ?? state.executionReadiness,
+        signed_execution_ready: state.signedExecutionReady ?? null,
         fresh_tick_barrier_active: state.freshTickBarrierActive,
         fresh_tick_completed_cycles: state.freshTickCompletedCycles,
         fresh_tick_required_cycles: state.freshTickRequiredCycles,
