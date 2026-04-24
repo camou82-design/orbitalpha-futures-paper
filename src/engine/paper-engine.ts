@@ -1034,6 +1034,7 @@ export class PaperEngine {
   }
 
   private computePaperExecutionReadiness(): boolean {
+    const previousPaperExecutionReady = this.paperExecutionReady;
     const serverAuthorityOk =
       this.serverTradeControlState.server_trade_enabled === true &&
       this.serverTradeControlState.close_only_mode === false &&
@@ -1044,7 +1045,32 @@ export class PaperEngine {
     const marketReady = this.publicMarketDataReady === true;
     const writerReady = this.bundleWriterReady === true;
     const positionStateReady = this.positionTrackingAlive === true;
-    return serverAuthorityOk && engineLoopHealthy && pipelineReady && marketReady && writerReady && positionStateReady;
+    const currentPaper = serverAuthorityOk && engineLoopHealthy && pipelineReady && marketReady && writerReady && positionStateReady;
+
+    if (!currentPaper) {
+      this.logger.warn("PAPER_EXECUTION_READINESS_BREAKDOWN", {
+        currentPaper,
+        previousPaperExecutionReady,
+        serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+        closeOnlyMode: this.serverTradeControlState.close_only_mode,
+        killSwitch: this.serverTradeControlState.kill_switch_active,
+        reconcileSafeMode: this.reconcileSafetyCloseOnly,
+        engineLoopHealthy,
+        publicMarketDataReady: this.publicMarketDataReady,
+        positionTrackingAlive: this.positionTrackingAlive,
+        bundleWriterReady: this.bundleWriterReady,
+        entryPipelineReady: this.entryPipelineReady,
+        exitPipelineReady: this.exitPipelineReady,
+        signedExecutionReady: this.signedExecutionReady,
+        freshTickRequiredAfterReadiness: this.freshTickRequiredAfterReadiness,
+        readinessFreshTickCompletedCycles: this.readinessFreshTickCompletedCycles,
+        readinessFreshTickRequiredCycles: this.readinessFreshTickRequiredCycles,
+        paperExecutionReadyChangedAt: this.paperExecutionReadyChangedAt,
+        run_cycle_id: this.runCycleId
+      });
+    }
+
+    return currentPaper;
   }
 
   private computeSignedExecutionReadiness(): boolean {
