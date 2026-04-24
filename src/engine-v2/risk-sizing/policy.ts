@@ -68,10 +68,6 @@ export function calculateRiskSizing(
         isBlocked = true;
         blockReason = "EXECUTION_READINESS_FALSE";
     }
-    else if (state.freshTickBarrierActive) {
-        isBlocked = true;
-        blockReason = "FRESH_TICK_BARRIER_ACTIVE";
-    }
     // WAIT_RECHECK: Block but diagnostic handled via explanation
     else if (executor.signal === "WAIT_RECHECK") {
         isBlocked = true;
@@ -112,6 +108,11 @@ export function calculateRiskSizing(
         sizeMultiplier *= 0.7;
     } else if (confidence.level === "LOW") {
         sizeMultiplier *= 0.4;
+    }
+
+    // Fresh-tick barrier is a stabilization signal, not a hard entry kill-switch.
+    if (!isBlocked && state.freshTickBarrierActive) {
+        sizeMultiplier *= 0.7;
     }
 
     if (!isBlocked && Number.isFinite(dProfit)) {
