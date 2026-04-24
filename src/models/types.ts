@@ -735,7 +735,7 @@ export type PaperEngineState = Readonly<{
   okx_order_submit_ok: boolean;
   paper_execution_ready?: boolean;
   signed_execution_ready?: boolean;
-  signed_submit_mode?: "enabled" | "skipped_not_ready";
+  signed_submit_mode?: "enabled" | "skipped_not_ready" | "paper_only";
   signed_submit_block_reason?: string | null;
 }>;
 
@@ -1089,7 +1089,7 @@ export type PaperOperationalSnapshot = Readonly<{
   okx_order_submit_ok: boolean;
   paper_execution_ready?: boolean;
   signed_execution_ready?: boolean;
-  signed_submit_mode?: "enabled" | "skipped_not_ready";
+  signed_submit_mode?: "enabled" | "skipped_not_ready" | "paper_only";
   signed_submit_block_reason?: string | null;
   strategy_executor: PaperEngineRoutingKind;
   current_regime: PaperRegimeState;

@@ -130,9 +130,9 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
     paper_execution_ready: !!o.paper_execution_ready,
     signed_execution_ready: !!o.signed_execution_ready,
     signed_submit_mode:
-      o.signed_submit_mode === "enabled" || o.signed_submit_mode === "skipped_not_ready"
+      o.signed_submit_mode === "enabled" || o.signed_submit_mode === "skipped_not_ready" || o.signed_submit_mode === "paper_only"
         ? o.signed_submit_mode
-        : "skipped_not_ready",
+        : "paper_only",
     signed_submit_block_reason:
       typeof o.signed_submit_block_reason === "string" ? o.signed_submit_block_reason : null,
     strategy_executor: (o.strategy_executor as PaperEngineRoutingKind) || activeEngine,

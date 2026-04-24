@@ -626,7 +626,7 @@ type MutablePositionOpenTrace = {
   symbol: string;
   sample_symbol_btc_eth: boolean;
   order_submit_requested: boolean;
-  order_submit_ack: "accepted" | "rejected" | "skipped_no_okx_demo" | null;
+  order_submit_ack: "accepted" | "rejected" | "skipped_no_okx_demo" | "paper_only" | null;
   order_submit_error_code: string | null;
   order_submit_error_message: string | null;
   exchange_client_order_id: string | null;
@@ -1084,6 +1084,15 @@ export class PaperEngine {
     );
   }
 
+  private signedSubmitMode(): "enabled" | "skipped_not_ready" | "paper_only" {
+    if (!this.config.okxDemoEnabled) return "paper_only";
+    return this.signedExecutionReady ? "enabled" : "skipped_not_ready";
+  }
+
+  private signedSubmitBlockReason(mode: "enabled" | "skipped_not_ready" | "paper_only"): string | null {
+    return mode === "enabled" ? null : "SIGNED_EXECUTION_NOT_READY";
+  }
+
   private dropReadinessStaleState(reason: string, changedAt: number): void {
     const beforeDroppedTotal = this.staleEntryDroppedCount;
     this.clearPendingDecisionState(reason, changedAt, "server_state");
@@ -1162,10 +1171,22 @@ export class PaperEngine {
         paper_execution_ready_changed_at: nowTs,
         run_cycle_id: this.runCycleId
       });
+      this.logger.info("PAPER_EXECUTION_READINESS_CHANGED", {
+        from: false,
+        to: true,
+        paper_execution_ready_changed_at: nowTs,
+        run_cycle_id: this.runCycleId
+      });
       this.dropReadinessStaleState("false_to_true_transition", nowTs);
     } else if (this.paperExecutionReady !== currentPaper) {
       this.paperExecutionReadyChangedAt = nowTs;
       this.logger.info("READINESS_TRANSITION_DETECTED", {
+        from: this.paperExecutionReady,
+        to: currentPaper,
+        paper_execution_ready_changed_at: nowTs,
+        run_cycle_id: this.runCycleId
+      });
+      this.logger.info("PAPER_EXECUTION_READINESS_CHANGED", {
         from: this.paperExecutionReady,
         to: currentPaper,
         paper_execution_ready_changed_at: nowTs,
@@ -1499,6 +1520,7 @@ export class PaperEngine {
       this.readinessFreshTickCompletedCycles < this.readinessFreshTickRequiredCycles;
     const runId = deriveRunIdentity(snapshots);
 
+    const signedSubmitMode = this.signedSubmitMode();
     const meta: RunMeta = {
       strategyVersion: runId.runStrategyVersion,
       signalSummary: signalSummary as any,
@@ -1536,8 +1558,8 @@ export class PaperEngine {
       okx_order_submit_ok: this.okxOrderSubmitOk,
       paper_execution_ready: this.paperExecutionReady,
       signed_execution_ready: this.signedExecutionReady,
-      signed_submit_mode: this.signedExecutionReady ? "enabled" : "skipped_not_ready",
-      signed_submit_block_reason: this.signedExecutionReady ? null : "SIGNED_EXECUTION_NOT_READY",
+      signed_submit_mode: signedSubmitMode,
+      signed_submit_block_reason: this.signedSubmitBlockReason(signedSubmitMode),
       v2AuthorityActive: runId.v2AuthorityActive,
       runIdentity: runId as any,
       notes: "paper okx-demo unified pipeline; legacy + v2 authority bridge active; position identity stored per executor/regime resolution; run metadata reflects okx-demo execution"
@@ -1867,8 +1889,8 @@ export class PaperEngine {
         equity_multiple: selectorResult?.v2_result.risk.equityMultiple ?? authority.equityMultiple ?? 0,
         paper_execution_ready: this.paperExecutionReady,
         signed_execution_ready: this.signedExecutionReady,
-        signed_submit_mode: this.signedExecutionReady ? "enabled" : "skipped_not_ready",
-        signed_submit_block_reason: this.signedExecutionReady ? null : "SIGNED_EXECUTION_NOT_READY",
+        signed_submit_mode: this.signedSubmitMode(),
+        signed_submit_block_reason: this.signedSubmitBlockReason(this.signedSubmitMode()),
         serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
         closeOnlyMode: this.serverTradeControlState.close_only_mode,
         killSwitch: this.serverTradeControlState.kill_switch_active,
@@ -1916,6 +1938,7 @@ export class PaperEngine {
     if (decisionBySymbol.size > 0) this.v2LastDecisionAt = fetchedAt;
     this.entryPipelineReady = this.publicMarketDataReady && this.v2JudgmentReady;
     this.exitPipelineReady = this.publicMarketDataReady && snapshots.length > 0;
+    this.evaluateReadinessTransition(Date.now());
 
     // 1. First closing (including reversals)
     await this.tryPaperPositionClose({
@@ -2057,8 +2080,8 @@ export class PaperEngine {
           v2_last_decision_at: this.v2LastDecisionAt,
           bundle_last_written_at: this.bundleLastWrittenAt,
           signed_execution_ready: this.signedExecutionReady,
-          signed_submit_mode: this.signedExecutionReady ? "enabled" : "skipped_not_ready",
-          signed_submit_block_reason: this.signedExecutionReady ? null : "SIGNED_EXECUTION_NOT_READY",
+          signed_submit_mode: this.signedSubmitMode(),
+          signed_submit_block_reason: this.signedSubmitBlockReason(this.signedSubmitMode()),
           server_trade_enabled: this.serverTradeControlState.server_trade_enabled,
           serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
           close_only_mode: this.serverTradeControlState.close_only_mode,
@@ -2113,6 +2136,7 @@ export class PaperEngine {
       const summary = await this.positions.refreshSummaryReport();
       this.bundleLastWrittenAt = Date.now();
       this.bundleWriterReady = true;
+      this.evaluateReadinessTransition(Date.now());
       this.logger.info("summary_report_refreshed", {
         summaryPath: summary.summaryPath,
         health: summary.health.status
@@ -2125,8 +2149,8 @@ export class PaperEngine {
         bundle_last_written_at: this.bundleLastWrittenAt,
         signed_execution_ready: this.signedExecutionReady,
         paper_execution_ready: this.paperExecutionReady,
-        signed_submit_mode: this.signedExecutionReady ? "enabled" : "skipped_not_ready",
-        signed_submit_block_reason: this.signedExecutionReady ? null : "SIGNED_EXECUTION_NOT_READY",
+        signed_submit_mode: this.signedSubmitMode(),
+        signed_submit_block_reason: this.signedSubmitBlockReason(this.signedSubmitMode()),
         server_trade_enabled: this.serverTradeControlState.server_trade_enabled,
         serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
         close_only_mode: this.serverTradeControlState.close_only_mode,
@@ -2153,6 +2177,7 @@ export class PaperEngine {
       });
     } catch (e) {
       this.bundleWriterReady = false;
+      this.evaluateReadinessTransition(Date.now());
       this.logger.error("summary_report_refresh_failed", { error: String(e) });
     }
 
@@ -3074,8 +3099,8 @@ export class PaperEngine {
       applied_leverage: input.authority?.appliedLeverage ?? null,
       paper_execution_ready: this.paperExecutionReady,
       signed_execution_ready: this.signedExecutionReady,
-      signed_submit_mode: this.signedExecutionReady ? "enabled" : "skipped_not_ready",
-      signed_submit_block_reason: this.signedExecutionReady ? null : "SIGNED_EXECUTION_NOT_READY",
+      signed_submit_mode: this.signedSubmitMode(),
+      signed_submit_block_reason: this.signedSubmitBlockReason(this.signedSubmitMode()),
       serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
       closeOnlyMode: this.serverTradeControlState.close_only_mode,
       killSwitch: this.serverTradeControlState.kill_switch_active,
@@ -5822,7 +5847,7 @@ export class PaperEngine {
         continue;
       }
       if (this.freshTickRequiredAfterReadiness && authority.decision === "ENTER") {
-        this.logger.error("RECOVERY_BARRIER_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+        this.logger.warn("RECOVERY_BARRIER_INVARIANT_WARN", this.buildInvariantProofPayload({
           symbol: String(first.symbol),
           side: authority.side,
           authority,
@@ -5832,7 +5857,7 @@ export class PaperEngine {
         }));
       }
       if (readinessChangedAt != null && authority.decision === "ENTER" && envelope.decisionCycleId === this.runCycleId) {
-        this.logger.error("RECOVERY_BARRIER_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+        this.logger.warn("RECOVERY_BARRIER_INVARIANT_WARN", this.buildInvariantProofPayload({
           symbol: String(first.symbol),
           side: authority.side,
           authority,
@@ -6418,7 +6443,8 @@ export class PaperEngine {
           continue;
         }
 
-        if (this.okxDemo) {
+        const signedModeForEntry = this.signedSubmitMode();
+        if (this.okxDemo && signedModeForEntry === "enabled") {
           const instId = toOkxSwapInstId(first.symbol);
           trace.inst_id = instId;
           const side = authority.side === "long" ? "buy" : "sell";
@@ -6465,7 +6491,21 @@ export class PaperEngine {
           }
         } else {
           trace.order_submit_requested = false;
-          trace.order_submit_ack = "skipped_no_okx_demo";
+          trace.order_submit_ack = this.okxDemo ? "paper_only" : "skipped_no_okx_demo";
+          trace.open_fail_stage = "none";
+          this.logger.info("SIGNED_ORDER_SUBMIT_SKIPPED_PAPER_ONLY", {
+            symbol: first.symbol,
+            side: authority.side,
+            authority_source: authority.source,
+            adopted_engine: adoptedEngine,
+            entry_quality_grade: authority.entryQualityGrade ?? null,
+            leverage_profile: authority.leverageProfile ?? null,
+            applied_leverage: authority.appliedLeverage ?? null,
+            paper_execution_ready: this.paperExecutionReady,
+            signed_execution_ready: this.signedExecutionReady,
+            signed_submit_mode: signedModeForEntry,
+            reason: this.signedSubmitBlockReason(signedModeForEntry)
+          });
         }
 
         const record: PaperOpenPositionRecord = {
