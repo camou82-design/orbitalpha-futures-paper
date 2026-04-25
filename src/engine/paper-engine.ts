@@ -194,6 +194,9 @@ const ENTRY_SIGNAL_LOST_PROTECT_MS = 10 * 60_000;
 const ENTRY_SIGNAL_LOST_CONFIRM_TICKS = 3;
 const ENTRY_EVIDENCE_TREND_EMA_GAP_MIN = 0.0002;
 const ENTRY_EVIDENCE_TREND_WEAKNESS_MAX = 0.65;
+const RANGE_RECHECK_PROMOTION_TICKS = 3;
+const RANGE_CONFIDENCE_HARD_HOLD_MAX = 0.45;
+const RANGE_CONFIDENCE_RECHECK_ALLOW_MIN = 0.55;
 
 function computeEntryEvidenceScore(input: {
   qualityScore: number | null;
@@ -780,6 +783,15 @@ export class PaperEngine {
   private trendBreakoutBySymbol = new Map<string, TrendBreakoutDirection>();
   private trendHoldMemoryBySymbol = new Map<string, import("../models/types").TrendBreakoutHoldMemory>();
   private trendPyramidLevelBySymbol = new Map<string, number>();
+  private rangeRecheckPromotionByKey = new Map<string, {
+    ticks: number;
+    side: "long" | "short";
+    zone: RangeBoxZone;
+    lastQualityScore: number;
+    lastRangeConfidence: number;
+    lastPrice: number;
+    updatedAt: number;
+  }>();
   /** RANGE 익절 후 재진입 쿨다운 우회 판단용(만료 시각). */
   private rangeReopenArmedUntilBySymbol = new Map<string, number>();
   /** 직전 틱 `evaluateRangeEngineForSymbol` 결과(진입 크기·래더 연동). */
@@ -5597,14 +5609,23 @@ export class PaperEngine {
    */
   private buildAuthorityAdaptiveBridge(
     authority: EntryExecutionAuthority,
-    legacyAdaptive: NonNullable<EvaluatePaperSymbolEntryResult["adaptiveResult"]> | null | undefined
+    legacyAdaptive: NonNullable<EvaluatePaperSymbolEntryResult["adaptiveResult"]> | null | undefined,
+    forceEnter = false
   ): NonNullable<EvaluatePaperSymbolEntryResult["adaptiveResult"]> | null {
-    if (authority.decision !== "ENTER") return null;
+    if (!forceEnter && authority.decision !== "ENTER") return null;
 
     const side = authority.side;
     if (side !== "long" && side !== "short") return null;
 
-    const sizeUsd = authority.sizeUsd ?? 0;
+    const sizeUsd =
+      (authority.sizeUsd ?? 0) > 0
+        ? (authority.sizeUsd ?? 0)
+        : forceEnter
+          ? Math.max(
+            MIN_POSITION_SIZE_USD,
+            Math.round(computePaperSizingAnchorUsd(this.config) * 0.35 * 100) / 100
+          )
+          : 0;
     if (sizeUsd <= 0) return null;
 
     const bridgeSizeUsd = sizeUsd;
@@ -5625,6 +5646,7 @@ export class PaperEngine {
         authority_side: side,
         authority_selector_size_usd: sizeUsd,
         authority_size_usd: bridgeSizeUsd,
+        recheck_promotion_applied: forceEnter,
         finalSizeUsd: bridgeSizeUsd,
         entry_quality_grade: authority.entryQualityGrade ?? null,
         leverage_profile: authority.leverageProfile ?? "BASE",
@@ -5637,6 +5659,71 @@ export class PaperEngine {
         confidence_tier: "top",
         size_multiplier: 1.0
       }
+    };
+  }
+
+  private evaluateRangeRecheckPromotion(input: Readonly<{
+    symbol: string;
+    side: "long" | "short";
+    activeEngine: "RANGE" | "TREND" | "IDLE";
+    boxPos: number | null;
+    rangeConfidence: number | null;
+    qualityScore: number;
+    lastPrice: number;
+    v2BlockReason: string | null;
+    v2Signal: string | null;
+    entryEvidenceScore: number;
+  }>): { promote: boolean; reason: string; ticks: number } {
+    const key = `${input.symbol}:${input.side}`;
+    const reasonRaw = String(input.v2BlockReason ?? "");
+    const signalRaw = String(input.v2Signal ?? "");
+    const recheckCandidate =
+      signalRaw === "WAIT_RECHECK" ||
+      reasonRaw === "WAIT_RECHECK" ||
+      reasonRaw === "RANGE_GATE_BLOCK_WAIT_RECHECK" ||
+      reasonRaw === "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
+    if (!recheckCandidate || input.activeEngine !== "RANGE") {
+      this.rangeRecheckPromotionByKey.delete(key);
+      return { promote: false, reason: "not_range_recheck_candidate", ticks: 0 };
+    }
+    const rangeConfidence = Math.max(0, input.rangeConfidence ?? 0);
+    if (rangeConfidence < RANGE_CONFIDENCE_HARD_HOLD_MAX) {
+      this.rangeRecheckPromotionByKey.delete(key);
+      return { promote: false, reason: "hard_hold_low_confidence", ticks: 0 };
+    }
+    if (typeof input.boxPos !== "number" || !Number.isFinite(input.boxPos)) {
+      this.rangeRecheckPromotionByKey.delete(key);
+      return { promote: false, reason: "range_zone_unknown", ticks: 0 };
+    }
+    const zone = classifyRangeActionZone(input.boxPos);
+    const zoneAligned =
+      (input.side === "short" && zone === "upper") ||
+      (input.side === "long" && zone === "lower");
+    if (!zoneAligned) {
+      this.rangeRecheckPromotionByKey.delete(key);
+      return { promote: false, reason: "range_zone_mismatch", ticks: 0 };
+    }
+    const prev = this.rangeRecheckPromotionByKey.get(key);
+    const qualityNotWorse = !prev || input.qualityScore >= prev.lastQualityScore - 2;
+    const structureNotBroken = !prev || Math.abs(input.lastPrice - prev.lastPrice) / Math.max(1e-9, prev.lastPrice) <= 0.02;
+    const ticks = prev && qualityNotWorse && structureNotBroken ? prev.ticks + 1 : 1;
+    this.rangeRecheckPromotionByKey.set(key, {
+      ticks,
+      side: input.side,
+      zone,
+      lastQualityScore: input.qualityScore,
+      lastRangeConfidence: rangeConfidence,
+      lastPrice: input.lastPrice,
+      updatedAt: Date.now()
+    });
+    const canPromote =
+      ticks >= RANGE_RECHECK_PROMOTION_TICKS &&
+      rangeConfidence >= RANGE_CONFIDENCE_RECHECK_ALLOW_MIN &&
+      input.entryEvidenceScore >= 55;
+    return {
+      promote: canPromote,
+      reason: canPromote ? "range_recheck_pass_promoted" : "range_recheck_watch",
+      ticks
     };
   }
 
@@ -6256,18 +6343,71 @@ export class PaperEngine {
         }));
       }
 
-      const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(authority, res.adaptiveResult);
+      const v2BlockReason = envelope.selector?.v2_result.risk.blockReason ?? null;
+      const v2Signal = envelope.selector?.v2_result.signal ?? null;
+      const activeEngine = this.lastMarketMode?.routing.activeEngine ?? "IDLE";
+      const preEntryEvidenceScore = computeEntryEvidenceScore({
+        qualityScore: first.qualityScore ?? null,
+        candidateStrength: first.candidateStrength ?? null,
+        activeEngine,
+        side: (authority.side ?? "long") as "long" | "short",
+        boxPos: first.boxPos ?? null,
+        trendOk: first.trendOk === true,
+        emaGap: first.emaGap ?? null,
+        trendWeaknessScore: first.trendWeaknessScore ?? null
+      });
+      const recheckPromotion =
+        authority.side === "long" || authority.side === "short"
+          ? this.evaluateRangeRecheckPromotion({
+            symbol: String(first.symbol),
+            side: authority.side,
+            activeEngine,
+            boxPos: first.boxPos ?? null,
+            rangeConfidence: first.rangeConfidence ?? null,
+            qualityScore: first.qualityScore ?? 0,
+            lastPrice: first.lastPrice,
+            v2BlockReason,
+            v2Signal,
+            entryEvidenceScore: preEntryEvidenceScore
+          })
+          : { promote: false, reason: "no_directional_side", ticks: 0 };
+      const authorityDecisionForExecution =
+        authority.decision === "ENTER" || recheckPromotion.promote
+          ? "ENTER"
+          : authority.decision;
+      if (recheckPromotion.promote) {
+        this.logger.info("ENTRY_EVIDENCE_RECHECK_PASS", {
+          symbol: first.symbol,
+          side: authority.side,
+          ticks: recheckPromotion.ticks,
+          recheck_reason: recheckPromotion.reason,
+          range_confidence: first.rangeConfidence ?? null,
+          box_pos: first.boxPos ?? null,
+          entry_evidence_score: preEntryEvidenceScore,
+          authority_source: authority.source,
+          adopted_engine: adoptedEngine
+        });
+      }
+      const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(
+        authority,
+        res.adaptiveResult,
+        authorityDecisionForExecution === "ENTER" && authority.decision !== "ENTER"
+      );
 
       if (effectiveAdaptiveResult == null) continue;
 
       this.logger.info("V2_EXECUTION_BRIDGE_PROOF", {
         symbol: first.symbol,
         authority_decision: authority.decision,
+        authority_decision_for_execution: authorityDecisionForExecution,
         authority_source: authority.source,
         authority_side: authority.side,
         authority_selector_size_usd: authority.sizeUsd ?? 0,
         authority_size_usd: effectiveAdaptiveResult.sizeUsd,
         authority_owns_execution: authority.source === "v2",
+        recheck_promotion_applied: recheckPromotion.promote,
+        recheck_promotion_ticks: recheckPromotion.ticks,
+        range_confidence: first.rangeConfidence ?? null,
         legacy_adaptive_present: res.adaptiveResult != null,
         effective_adaptive_present: effectiveAdaptiveResult != null
       });
@@ -6298,7 +6438,6 @@ export class PaperEngine {
       const entryStage = existingOpen?.entryStage ?? 0;
       const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === intentSide);
       const otherLeg = next.some((o) => o.symbol === first.symbol && o.side !== intentSide);
-      const activeEngine = this.lastMarketMode?.routing.activeEngine ?? "IDLE";
 
       this.lastEntryDecision = res.executorDecision ?? null;
 
@@ -6443,7 +6582,7 @@ export class PaperEngine {
           reason: "adopted_engine_not_v2"
         }));
         finalBlockedReason = "ADOPTED_ENGINE_NOT_V2";
-      } else if (authority.decision !== "ENTER") {
+      } else if (authorityDecisionForExecution !== "ENTER") {
         finalBlockedReason = "AUTHORITY_DECISION_NOT_ENTER";
       } else if (crashEntryGuardApplies) {
         finalBlockedReason = "CRASH_ENTRY_GUARD_BLOCK";
