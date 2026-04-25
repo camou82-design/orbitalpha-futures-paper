@@ -190,6 +190,38 @@ function classifyRangeActionZone(boxPos: number): RangeBoxZone {
   return "mid";
 }
 
+const ENTRY_SIGNAL_LOST_PROTECT_MS = 10 * 60_000;
+const ENTRY_SIGNAL_LOST_CONFIRM_TICKS = 3;
+const ENTRY_EVIDENCE_TREND_EMA_GAP_MIN = 0.0002;
+const ENTRY_EVIDENCE_TREND_WEAKNESS_MAX = 0.65;
+
+function computeEntryEvidenceScore(input: {
+  qualityScore: number | null;
+  candidateStrength: PaperCandidateStrength | null;
+  activeEngine: "RANGE" | "TREND" | "IDLE";
+  side: "long" | "short";
+  boxPos: number | null;
+  trendOk: boolean;
+  emaGap: number | null;
+  trendWeaknessScore: number | null;
+}): number {
+  let score = 0;
+  const quality = Math.max(0, Math.min(100, input.qualityScore ?? 0));
+  score += quality * 0.6;
+  if (input.candidateStrength === "strong") score += 20;
+  else if (input.candidateStrength === "weak") score += 8;
+  if (input.activeEngine === "RANGE" && typeof input.boxPos === "number") {
+    const zone = classifyRangeActionZone(input.boxPos);
+    if ((input.side === "short" && zone === "upper") || (input.side === "long" && zone === "lower")) score += 20;
+  }
+  if (input.activeEngine === "TREND") {
+    if (input.trendOk) score += 10;
+    if (Math.abs(input.emaGap ?? 0) >= ENTRY_EVIDENCE_TREND_EMA_GAP_MIN) score += 6;
+    if ((input.trendWeaknessScore ?? 1) <= ENTRY_EVIDENCE_TREND_WEAKNESS_MAX) score += 4;
+  }
+  return Math.max(0, Math.min(100, score));
+}
+
 function computeAvgBoxCohesion01(
   snapshots: ReadonlyArray<{ boxHigh: number | null; boxLow: number | null; lastPrice: number }>
 ): number {
@@ -5258,10 +5290,89 @@ export class PaperEngine {
 
       const minHoldMsEff = tightHold ? Math.min(baseMinHoldMs, tightMinHoldMs) : baseMinHoldMs;
       const gracePeriodMs = tightHold ? Math.min(baseGracePeriodMs, tightGracePeriodMs) : baseGracePeriodMs;
-      const minLostStreak = 1;
+      const minLostStreak = ENTRY_SIGNAL_LOST_CONFIRM_TICKS;
+      const signalLostCandidateCount = (posTrail.candidateLostStreak ?? 0) + 1;
+      const entryEvidence = open.entryEvidence;
+
+      const trendStructureStillValid =
+        open.regimeAtEntry === "TREND"
+          ? (snap.trendOk === true &&
+            Math.abs(snap.emaGap ?? 0) >= ENTRY_EVIDENCE_TREND_EMA_GAP_MIN &&
+            (snap.trendWeaknessScore ?? 1) <= ENTRY_EVIDENCE_TREND_WEAKNESS_MAX)
+          : false;
+      const rangeStructureStillValid =
+        open.regimeAtEntry === "RANGE"
+          ? (typeof snap.boxPos === "number" &&
+            ((open.side === "short" && classifyRangeActionZone(snap.boxPos) === "upper") ||
+              (open.side === "long" && classifyRangeActionZone(snap.boxPos) === "lower")))
+          : false;
+      const entryEvidenceStillValid =
+        entryEvidence == null
+          ? (rangeStructureStillValid || trendStructureStillValid)
+          : (entryEvidence.regime_at_entry === "RANGE"
+            ? rangeStructureStillValid
+            : entryEvidence.regime_at_entry === "TREND"
+              ? trendStructureStillValid
+              : false);
 
       if (m.holdingMs < minHoldMsEff) {
-        remaining.push({ ...posTrail, candidateLostStreak: 0 });
+        this.logger.info("SIGNAL_LOST_WATCH", {
+          symbol: open.symbol,
+          side: open.side,
+          signal_lost_candidate_count: signalLostCandidateCount,
+          holding_ms: m.holdingMs,
+          min_hold_ms: minHoldMsEff,
+          entry_evidence_still_valid: entryEvidenceStillValid
+        });
+        this.logger.info("SIGNAL_LOST_PROTECTED", {
+          symbol: open.symbol,
+          side: open.side,
+          reason: "min_hold_protection",
+          protect_ms: minHoldMsEff
+        });
+        remaining.push({ ...posTrail, candidateLostStreak: signalLostCandidateCount });
+        continue;
+      }
+
+      if (m.holdingMs < ENTRY_SIGNAL_LOST_PROTECT_MS) {
+        this.logger.info("SIGNAL_LOST_WATCH", {
+          symbol: open.symbol,
+          side: open.side,
+          signal_lost_candidate_count: signalLostCandidateCount,
+          holding_ms: m.holdingMs,
+          protect_ms: ENTRY_SIGNAL_LOST_PROTECT_MS,
+          entry_evidence_still_valid: entryEvidenceStillValid
+        });
+        this.logger.info("SIGNAL_LOST_PROTECTED", {
+          symbol: open.symbol,
+          side: open.side,
+          reason: "entry_signal_lost_protect_window"
+        });
+        remaining.push({ ...posTrail, candidateLostStreak: signalLostCandidateCount });
+        continue;
+      }
+
+      if (entryEvidenceStillValid) {
+        this.logger.info("SIGNAL_LOST_PROTECTED", {
+          symbol: open.symbol,
+          side: open.side,
+          reason: "entry_evidence_still_valid",
+          entry_regime: open.regimeAtEntry ?? null
+        });
+        remaining.push({ ...posTrail, candidateLostStreak: signalLostCandidateCount });
+        continue;
+      }
+
+      if (signalLostCandidateCount < minLostStreak) {
+        this.logger.info("SIGNAL_LOST_WATCH", {
+          symbol: open.symbol,
+          side: open.side,
+          signal_lost_candidate_count: signalLostCandidateCount,
+          required_count: minLostStreak,
+          holding_ms: m.holdingMs,
+          entry_evidence_still_valid: entryEvidenceStillValid
+        });
+        remaining.push({ ...posTrail, candidateLostStreak: signalLostCandidateCount });
         continue;
       }
 
@@ -5282,6 +5393,16 @@ export class PaperEngine {
       }
 
       const cr = "candidate_lost" as const;
+      this.logger.info("EXIT_ENTRY_EVIDENCE_INVALIDATED", {
+        symbol: open.symbol,
+        side: open.side,
+        signal_lost_candidate_count: signalLostCandidateCount,
+        required_count: minLostStreak,
+        entry_regime: open.regimeAtEntry ?? null,
+        range_structure_still_valid: rangeStructureStillValid,
+        trend_structure_still_valid: trendStructureStillValid,
+        entry_evidence_still_valid: entryEvidenceStillValid
+      });
       finalCloseReason = cr;
       confirmedExitType = exitEventJsonlType(cr);
       confirmedCloseSource = "candidate_lost_watchdog";
@@ -5991,6 +6112,34 @@ export class PaperEngine {
         authority.side === "long" &&
         zone === "upper" &&
         res.decision.range_stage0_engine_taken === true;
+      const entryEvidenceScore = computeEntryEvidenceScore({
+        qualityScore: first.qualityScore ?? null,
+        candidateStrength: first.candidateStrength ?? null,
+        activeEngine,
+        side: authority.side as "long" | "short",
+        boxPos: first.boxPos ?? null,
+        trendOk: first.trendOk === true,
+        emaGap: first.emaGap ?? null,
+        trendWeaknessScore: first.trendWeaknessScore ?? null
+      });
+      let entryEvidenceReason = "ENTRY_EVIDENCE_ACCEPTED";
+      this.logger.info("ENTRY_EVIDENCE_SNAPSHOT", {
+        symbol: first.symbol,
+        regime_at_entry: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
+        active_engine_at_entry: activeEngine,
+        entry_signal: first.signal,
+        entry_quality_grade: authority.entryQualityGrade ?? null,
+        entry_quality_score: first.qualityScore ?? null,
+        side: authority.side,
+        boxPos: first.boxPos ?? null,
+        rangeConfidence: first.rangeConfidence ?? null,
+        emaGap: first.emaGap ?? null,
+        trendWeaknessScore: first.trendWeaknessScore ?? null,
+        candidateStrength: first.candidateStrength ?? null,
+        authority_source: authority.source,
+        adopted_engine: adoptedEngine,
+        entry_evidence_score: entryEvidenceScore
+      });
 
       // Opposite-leg / hedge: part of final gate (single blocked_reason source).
       let oppositeLegBlockedReason: string | null = null;
@@ -6034,6 +6183,35 @@ export class PaperEngine {
         finalBlockedReason = "AUTHORITY_ENTER_WITH_INVALID_SIDE";
       } else if (ngeStage0UpperLongBlock) {
         finalBlockedReason = "NGE_STAGE0_UPPER_LONG_BLOCK";
+      } else if (
+        first.candidateStrength === "weak" &&
+        (authority.entryQualityGrade == null || authority.entryQualityGrade === "B")
+      ) {
+        finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE";
+        entryEvidenceReason = "weak_candidate_with_low_grade_recheck";
+      } else if (activeEngine === "RANGE") {
+        if (typeof first.boxPos !== "number" || !Number.isFinite(first.boxPos)) {
+          finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_UNKNOWN";
+          entryEvidenceReason = "range_zone_unknown_recheck";
+        } else {
+          const rz = classifyRangeActionZone(first.boxPos);
+          const rangeSideOk = (authority.side === "short" && rz === "upper") || (authority.side === "long" && rz === "lower");
+          if (!rangeSideOk) {
+            finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_MISMATCH";
+            entryEvidenceReason = "range_zone_mismatch_recheck";
+          }
+        }
+      } else if (activeEngine === "TREND") {
+        const emaGapAbs = Math.abs(first.emaGap ?? 0);
+        const trendWeakness = first.trendWeaknessScore ?? 1;
+        const trendEvidenceOk =
+          first.trendOk === true &&
+          emaGapAbs >= ENTRY_EVIDENCE_TREND_EMA_GAP_MIN &&
+          trendWeakness <= ENTRY_EVIDENCE_TREND_WEAKNESS_MAX;
+        if (!trendEvidenceOk) {
+          finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_TREND_WEAK";
+          entryEvidenceReason = "trend_structure_insufficient_recheck";
+        }
       } else if (!sideAllowedByGuard) {
         finalBlockedReason = authority.side === "long" ? "SIDE_NOT_ALLOWED_LONG" : "SIDE_NOT_ALLOWED_SHORT";
       } else if (oppositeLegBlockedReason) {
@@ -6142,6 +6320,15 @@ export class PaperEngine {
       }
 
       if (!finalEntryAuthorization) {
+        this.logger.info("ENTRY_EVIDENCE_RECHECK", {
+          symbol: first.symbol,
+          side: authority.side,
+          blocked_reason: finalBlockedReason,
+          entry_evidence_score: entryEvidenceScore,
+          entry_evidence_reason: entryEvidenceReason,
+          authority_source: authority.source,
+          adopted_engine: adoptedEngine
+        });
         // Report specific block event to events.jsonl
         await this.store.appendJsonlLine("reports/events.jsonl", {
           ts: Date.now(),
@@ -6172,6 +6359,14 @@ export class PaperEngine {
         await this.emitPipelineEventsFromDecision(first, refinedEnvelope, nowTs, entryStage, finalBlockedReason);
         continue;
       }
+      this.logger.info("ENTRY_EVIDENCE_ACCEPTED", {
+        symbol: first.symbol,
+        side: authority.side,
+        entry_evidence_score: entryEvidenceScore,
+        entry_evidence_reason: entryEvidenceReason,
+        authority_source: authority.source,
+        adopted_engine: adoptedEngine
+      });
 
       // --- EXECUTION BRANCHING (Scale-In vs New Entry) ---
 
@@ -6561,6 +6756,27 @@ export class PaperEngine {
               ...(res.decision.range_reversal_immediate_switch_applied === true ? { rangeEntryFromReversalSwitch: true } : {})
             }
             : {}),
+          entryEvidence: {
+            capturedAt: nowTs,
+            regime_at_entry:
+              entryIdentity.effectiveRegimeAtEntry === "UNKNOWN"
+                ? "NO_TRADE"
+                : entryIdentity.effectiveRegimeAtEntry,
+            active_engine_at_entry: activeEngine,
+            entry_signal: first.signal,
+            entry_quality_grade: authority.entryQualityGrade ?? null,
+            entry_quality_score: first.qualityScore ?? null,
+            side: authority.side as "long" | "short",
+            boxPos: first.boxPos ?? null,
+            rangeConfidence: first.rangeConfidence ?? null,
+            emaGap: first.emaGap ?? null,
+            trendWeaknessScore: first.trendWeaknessScore ?? null,
+            candidateStrength: first.candidateStrength ?? null,
+            authority_source: authority.source,
+            adopted_engine: adoptedEngine,
+            entry_evidence_score: entryEvidenceScore,
+            entry_evidence_reason: entryEvidenceReason
+          },
           status: "open"
         };
 

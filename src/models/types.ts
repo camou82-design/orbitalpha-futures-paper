@@ -849,6 +849,25 @@ export type PaperOpenPositionRecord = Readonly<{
   invalidation_reason?: string;
   /** REGIME_EXIT 후보 연속성 검증을 위한 최근 평가 시각 */
   regime_exit_last_eval_ms?: number;
+  /** Entry-time evidence snapshot for entry/exit consistency checks. */
+  entryEvidence?: Readonly<{
+    capturedAt: number;
+    regime_at_entry: "RANGE" | "TREND" | "NO_TRADE";
+    active_engine_at_entry: "RANGE" | "TREND" | "IDLE";
+    entry_signal: string;
+    entry_quality_grade: string | null;
+    entry_quality_score: number | null;
+    side: "long" | "short";
+    boxPos: number | null;
+    rangeConfidence: number | null;
+    emaGap: number | null;
+    trendWeaknessScore: number | null;
+    candidateStrength: string | null;
+    authority_source: string | null;
+    adopted_engine: string | null;
+    entry_evidence_score: number;
+    entry_evidence_reason: string;
+  }>;
 }>;
 
 /** 종료 레코드·이벤트에 함께 쓰는 종료 유형 코드(레저·로그 공통). */
