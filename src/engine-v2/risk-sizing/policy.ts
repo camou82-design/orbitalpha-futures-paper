@@ -42,6 +42,11 @@ export function calculateRiskSizing(
     const dProfit = qualityProfiles ? dist(qualityProfiles.profit) : Number.POSITIVE_INFINITY;
     const dLoss = qualityProfiles ? dist(qualityProfiles.loss) : Number.POSITIVE_INFINITY;
     const dContaminated = qualityProfiles ? dist(qualityProfiles.contaminated) : Number.POSITIVE_INFINITY;
+    const profitSampleCount = qualityProfiles?.profit.count ?? 0;
+    const lossSampleCount = qualityProfiles?.loss.count ?? 0;
+    const contaminatedSampleCount = qualityProfiles?.contaminated.count ?? 0;
+    let lossSimilarityWatch = false;
+    let lossSimilarityHardRejected = false;
     const entryQualityGrade: "S" | "A" | "B" =
         qualityScore >= 90 ? "S" : qualityScore >= 80 ? "A" : "B";
     const isTrend = judgment.regime === "TREND";
@@ -79,8 +84,18 @@ export function calculateRiskSizing(
         blockReason = "ENTRY_QUALITY_CONTAMINATED_SIMILAR";
     }
     else if (Number.isFinite(dLoss) && dLoss < dProfit) {
-        isBlocked = true;
-        blockReason = "ENTRY_QUALITY_LOSS_SIMILAR";
+        const hasEnoughLossSamples = lossSampleCount >= 5;
+        const hasSupportingSamples = profitSampleCount >= 3 || contaminatedSampleCount >= 3;
+        const extremeLossSimilarity = dLoss <= 0.08;
+        if (hasEnoughLossSamples && hasSupportingSamples && extremeLossSimilarity) {
+            isBlocked = true;
+            blockReason = "ENTRY_QUALITY_LOSS_SIMILAR";
+            lossSimilarityHardRejected = true;
+        } else {
+            // Loss similarity in low-sample or bootstrap phases is advisory only.
+            lossSimilarityWatch = true;
+            sizeMultiplier *= 0.7;
+        }
     }
     else if (state.serverTradeEnabled === false) {
         isBlocked = true;
@@ -229,8 +244,7 @@ export function calculateRiskSizing(
         blockReason = executor.side === "long" ? "SIDE_NOT_ALLOWED_LONG" : "SIDE_NOT_ALLOWED_SHORT";
     }
     if (!isBlocked && state.executionReadiness && trendLossStreak >= 2 && entryQualityGrade === "B") {
-        isBlocked = true;
-        blockReason = "WATCH_MODE_AFTER_LOSS_STREAK";
+        sizeMultiplier *= 0.7;
     }
 
     const effectiveMargin = isBlocked ? 0 : stageMarginKrw;
@@ -241,6 +255,11 @@ export function calculateRiskSizing(
         entry_quality_distance_profit: Number.isFinite(dProfit) ? dProfit : null,
         entry_quality_distance_loss: Number.isFinite(dLoss) ? dLoss : null,
         entry_quality_distance_contaminated: Number.isFinite(dContaminated) ? dContaminated : null,
+        entry_quality_profit_sample_count: profitSampleCount,
+        entry_quality_loss_sample_count: lossSampleCount,
+        entry_quality_contaminated_sample_count: contaminatedSampleCount,
+        loss_similarity_watch: lossSimilarityWatch,
+        loss_similarity_hard_rejected: lossSimilarityHardRejected,
         execution_readiness: state.executionReadiness,
         paper_execution_ready: state.paperExecutionReady ?? state.executionReadiness,
         signed_execution_ready: state.signedExecutionReady ?? null,
