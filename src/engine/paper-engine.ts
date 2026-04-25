@@ -5748,6 +5748,50 @@ export class PaperEngine {
     };
   }
 
+  private eventTypeFromEvent(ev: Record<string, unknown>): {
+    value: string;
+    source: "type" | "event" | "name" | "reason" | "none";
+  } {
+    if (ev.type != null) return { value: String(ev.type), source: "type" };
+    if (ev.event != null) return { value: String(ev.event), source: "event" };
+    if (ev.name != null) return { value: String(ev.name), source: "name" };
+    const reasonLike =
+      ev.eventType ?? ev.exitType ?? ev.closeType ?? ev.reason ?? ev.closeReason ?? ev.exitReason;
+    if (reasonLike != null) return { value: String(reasonLike), source: "reason" };
+    return { value: "", source: "none" };
+  }
+
+  private sideFromEvent(ev: Record<string, unknown>): "long" | "short" | null {
+    const raws = [
+      ev.side,
+      ev.positionSide,
+      ev.posSide,
+      ev.authority_side,
+      ev.effectiveSide
+    ];
+    for (const raw of raws) {
+      const s = String(raw ?? "").toLowerCase();
+      if (s === "long" || s === "buy") return "long";
+      if (s === "short" || s === "sell") return "short";
+    }
+    return null;
+  }
+
+  private symbolFromEvent(ev: Record<string, unknown>): string {
+    const direct =
+      (typeof ev.symbol === "string" && ev.symbol.trim().length > 0
+        ? ev.symbol
+        : typeof ev.marketSymbol === "string" && ev.marketSymbol.trim().length > 0
+          ? ev.marketSymbol
+          : "") as string;
+    if (direct) return direct.toUpperCase();
+    const instIdRaw = typeof ev.instId === "string" ? ev.instId.toUpperCase() : "";
+    if (instIdRaw.endsWith("-USDT-SWAP")) {
+      return `${instIdRaw.slice(0, -"-USDT-SWAP".length)}USDT`;
+    }
+    return instIdRaw;
+  }
+
   private async buildEntryQualitySamplesFromEvents(): Promise<{
     profit: EntryQualitySample[];
     loss: EntryQualitySample[];
@@ -5756,8 +5800,15 @@ export class PaperEngine {
       events_lines: number;
       entry_opened_events: number;
       exit_events: number;
+      exit_candidate_events: number;
       usable_exit_samples: number;
       contaminated_events: number;
+      event_type_field_hits_type: number;
+      event_type_field_hits_event: number;
+      event_type_field_hits_name: number;
+      event_type_field_hits_reason: number;
+      exit_contaminated_missing_side: number;
+      exit_contaminated_missing_pnl: number;
     };
   }> {
     const profit: EntryQualitySample[] = [];
@@ -5767,8 +5818,15 @@ export class PaperEngine {
       events_lines: 0,
       entry_opened_events: 0,
       exit_events: 0,
+      exit_candidate_events: 0,
       usable_exit_samples: 0,
-      contaminated_events: 0
+      contaminated_events: 0,
+      event_type_field_hits_type: 0,
+      event_type_field_hits_event: 0,
+      event_type_field_hits_name: 0,
+      event_type_field_hits_reason: 0,
+      exit_contaminated_missing_side: 0,
+      exit_contaminated_missing_pnl: 0
     };
     const p = path.resolve(this.config.dataDir, "reports/events.jsonl");
     let raw = "";
@@ -5790,16 +5848,26 @@ export class PaperEngine {
         continue;
       }
       if (!ev) continue;
-      const type = String(ev.type ?? "");
-      if (type === "ENTRY_OPENED") diagnostics.entry_opened_events += 1;
-      if (!type.startsWith("EXIT_")) continue;
-      diagnostics.exit_events += 1;
-      const sideRaw = String(ev.side ?? "").toLowerCase();
-      if (sideRaw !== "long" && sideRaw !== "short") {
+      const { value: type, source: typeSource } = this.eventTypeFromEvent(ev);
+      if (typeSource === "type") diagnostics.event_type_field_hits_type += 1;
+      else if (typeSource === "event") diagnostics.event_type_field_hits_event += 1;
+      else if (typeSource === "name") diagnostics.event_type_field_hits_name += 1;
+      else if (typeSource === "reason") diagnostics.event_type_field_hits_reason += 1;
+      if (type === "ENTRY_OPENED" || type.includes("ENTRY_OPENED")) diagnostics.entry_opened_events += 1;
+      const hasExitReason =
+        ev.closeReason != null || ev.exitReason != null || ev.exitType != null || ev.closeType != null;
+      const isExitCandidate =
+        type.startsWith("EXIT_") || type.includes("EXIT_") || hasExitReason;
+      if (!isExitCandidate) continue;
+      diagnostics.exit_candidate_events += 1;
+      if (type.startsWith("EXIT_") || type.includes("EXIT_")) diagnostics.exit_events += 1;
+      const side = this.sideFromEvent(ev);
+      if (side == null) {
         diagnostics.contaminated_events += 1;
+        diagnostics.exit_contaminated_missing_side += 1;
         contaminated.push({
           ts: this.toNumberOrNull(ev.ts) ?? Date.now(),
-          symbol: String(ev.symbol ?? "UNKNOWN"),
+          symbol: this.symbolFromEvent(ev) || "UNKNOWN",
           side: "long",
           source: "contaminated",
           vector: this.toEntryQualityVectorFromEvent(ev, "long"),
@@ -5807,18 +5875,22 @@ export class PaperEngine {
         });
         continue;
       }
-      const side = sideRaw as "long" | "short";
       const pnlUsd =
-        this.toNumberOrNull(ev.realized_pnl) ??
         this.toNumberOrNull(ev.realizedPnlUsd) ??
+        this.toNumberOrNull(ev.realized_pnl_usd) ??
+        this.toNumberOrNull(ev.realized_pnl) ??
         this.toNumberOrNull(ev.pnlUsd) ??
         this.toNumberOrNull(ev.pnl) ??
-        this.toNumberOrNull(ev.realized_pnl_usd);
-      if (pnlUsd == null) {
+        this.toNumberOrNull(ev.realizedPnl);
+      const pnlPct =
+        this.toNumberOrNull(ev.realizedPnlPct) ??
+        this.toNumberOrNull(ev.pnlPct);
+      if (pnlUsd == null && pnlPct == null) {
         diagnostics.contaminated_events += 1;
+        diagnostics.exit_contaminated_missing_pnl += 1;
         contaminated.push({
           ts: this.toNumberOrNull(ev.ts) ?? Date.now(),
-          symbol: String(ev.symbol ?? "UNKNOWN"),
+          symbol: this.symbolFromEvent(ev) || "UNKNOWN",
           side,
           source: "contaminated",
           vector: this.toEntryQualityVectorFromEvent(ev, side),
@@ -5826,13 +5898,16 @@ export class PaperEngine {
         });
         continue;
       }
+      const effectivePnl = pnlUsd ?? pnlPct ?? 0;
       const sample: EntryQualitySample = {
         ts: this.toNumberOrNull(ev.ts) ?? Date.now(),
-        symbol: String(ev.symbol ?? "UNKNOWN"),
+        symbol: this.symbolFromEvent(ev) || "UNKNOWN",
         side,
-        source: pnlUsd > 0 ? "profit" : "loss",
+        source: effectivePnl > 0 ? "profit" : "loss",
         vector: this.toEntryQualityVectorFromEvent(ev, side),
-        reason: String(ev.reason ?? ev.closeReason ?? ev.exitReason ?? type)
+        reason: pnlUsd == null
+          ? `${String(ev.reason ?? ev.closeReason ?? ev.exitReason ?? type)}|events_exit_pct_only_sample`
+          : String(ev.reason ?? ev.closeReason ?? ev.exitReason ?? type)
       };
       diagnostics.usable_exit_samples += 1;
       if (sample.source === "profit") profit.push(sample);
@@ -5880,8 +5955,15 @@ export class PaperEngine {
       events_lines: fromEvents.diagnostics.events_lines,
       entry_opened_events: fromEvents.diagnostics.entry_opened_events,
       exit_events: fromEvents.diagnostics.exit_events,
+      exit_candidate_events: fromEvents.diagnostics.exit_candidate_events,
       usable_exit_samples: fromEvents.diagnostics.usable_exit_samples,
-      contaminated_events: fromEvents.diagnostics.contaminated_events
+      contaminated_events: fromEvents.diagnostics.contaminated_events,
+      event_type_field_hits_type: fromEvents.diagnostics.event_type_field_hits_type,
+      event_type_field_hits_event: fromEvents.diagnostics.event_type_field_hits_event,
+      event_type_field_hits_name: fromEvents.diagnostics.event_type_field_hits_name,
+      event_type_field_hits_reason: fromEvents.diagnostics.event_type_field_hits_reason,
+      exit_contaminated_missing_side: fromEvents.diagnostics.exit_contaminated_missing_side,
+      exit_contaminated_missing_pnl: fromEvents.diagnostics.exit_contaminated_missing_pnl
     });
     this.logger.info("ENTRY_QUALITY_SAMPLE_COMPARISON", {
       profit_samples: this.lastEntryQualitySamples.profit.length,
