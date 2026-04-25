@@ -7045,6 +7045,36 @@ export class PaperEngine {
           continue;
         }
 
+        const lowExpectedMoveRelaxSizeLimited =
+          first.rangeSignalKeptByRelax === true &&
+          first.rangeSignalDowngradeReason === "low_expected_move_relaxed_by_range_structure";
+        if (lowExpectedMoveRelaxSizeLimited) {
+          const capped = Math.max(
+            MIN_POSITION_SIZE_USD,
+            Math.round(computePaperSizingAnchorUsd(this.config) * 0.4 * 100) / 100
+          );
+          const beforeCap = entrySizeUsd;
+          entrySizeUsd = Math.min(entrySizeUsd, capped);
+          this.logger.info("RANGE_LOW_EXPECTED_MOVE_RELAX_PROOF", {
+            symbol: first.symbol,
+            side: authority.side,
+            boxPos: first.boxPos ?? null,
+            rangeConfidence: first.rangeConfidence ?? null,
+            boxCohesion01: first.boxCohesion01 ?? null,
+            breakoutFailureRate: first.breakoutFailureRate ?? null,
+            gateExpectedMove: first.gateExpectedMove ?? null,
+            gateRequiredMove: first.gateRequiredMove ?? null,
+            expectedMoveRatio:
+              first.gateExpectedMove != null && first.gateRequiredMove != null && first.gateRequiredMove > 0
+                ? first.gateExpectedMove / first.gateRequiredMove
+                : null,
+            rangeSignalKeptByRelax: first.rangeSignalKeptByRelax ?? false,
+            low_expected_move_relax_size_limited: true,
+            size_before_cap_usd: beforeCap,
+            size_after_cap_usd: entrySizeUsd
+          });
+        }
+
         const signedModeForEntry = this.signedSubmitMode();
         if (this.okxDemo && signedModeForEntry === "enabled") {
           const instId = toOkxSwapInstId(first.symbol);
@@ -7289,6 +7319,9 @@ export class PaperEngine {
           expected_move_usd: res.decision.expected_move_usd ?? null,
           required_cost_usd: entrySizeUsd,
           shortfall_usd: res.decision.shortfall_usd ?? 0,
+          low_expected_move_relax_size_limited:
+            first.rangeSignalKeptByRelax === true &&
+            first.rangeSignalDowngradeReason === "low_expected_move_relaxed_by_range_structure",
           executor_block_reason_original: res.decision.executor_block_reason_original ?? null,
           stage1_soft_exec_override: res.decision.stage1_soft_exec_override === true,
           stage1_size_multiplier_final: res.decision.stage1_size_multiplier_final ?? null,
@@ -7319,6 +7352,9 @@ export class PaperEngine {
           order_submit_error_code: trace.order_submit_error_code,
           order_submit_error_message: trace.order_submit_error_message,
           position_open_record_written: trace.position_open_record_written,
+          low_expected_move_relax_size_limited:
+            first.rangeSignalKeptByRelax === true &&
+            first.rangeSignalDowngradeReason === "low_expected_move_relaxed_by_range_structure",
           position_open_final_state: trace.position_open_final_state,
           open_fail_stage: trace.open_fail_stage,
           exchange_client_order_id: trace.exchange_client_order_id,
@@ -8025,10 +8061,22 @@ export class PaperEngine {
         : this.config.paperQualityMinScore;
 
     if (entrySide !== null) {
-      const isBtcRange = symbol === "BTCUSDT" && regimeDetected.regime === "RANGE";
-      const hasRangeEdge = boxPos !== null && (boxPos <= 0.36 || boxPos >= 0.64);
+      const isRangeRegime = regimeDetected.regime === "RANGE";
+      const hasRangeEdge = boxPos !== null && (boxPos <= 0.35 || boxPos >= 0.65);
+      const sideEdgeAligned =
+        hasRangeEdge &&
+        ((entrySide === "long" && (boxPos ?? 0.5) <= 0.35) ||
+          (entrySide === "short" && (boxPos ?? 0.5) >= 0.65));
+      const rangeStructureStrong =
+        isRangeRegime &&
+        (regimeDetected.rangeConfidence ?? 0) >= 0.70 &&
+        (regimeDetected.boxCohesion01 ?? 0) >= 0.8 &&
+        (regimeDetected.breakoutFailureRate ?? 0) >= 0.7 &&
+        (regimeDetected.trendWeaknessScore ?? 0) >= 0.55 &&
+        sideEdgeAligned;
       const rangeSignalKeepByRelaxCandidate =
-        isBtcRange &&
+        symbol === "BTCUSDT" &&
+        isRangeRegime &&
         (regimeDetected.rangeConfidence ?? 0) >= 0.5 &&
         (regimeDetected.boxCohesion01 ?? 0) >= 0.45 &&
         (regimeDetected.trendWeaknessScore ?? 0) >= 0.5 &&
@@ -8070,11 +8118,43 @@ export class PaperEngine {
         gateEval = gate;
 
         if (!gate.allowed) {
-          if (rangeSignalKeepByRelaxCandidate) {
+          const expectedMoveRatio =
+            gate.requiredMove > 0 && Number.isFinite(gate.expectedMove) && Number.isFinite(gate.requiredMove)
+              ? gate.expectedMove / gate.requiredMove
+              : null;
+          const lowExpectedMoveRelaxCandidate =
+            gate.blockReason === "low_expected_move" &&
+            isRangeRegime &&
+            rangeStructureStrong &&
+            expectedMoveRatio != null &&
+            expectedMoveRatio >= 0.25;
+          const lowExpectedMoveRelaxHardBlocked =
+            gate.blockReason === "low_expected_move" &&
+            expectedMoveRatio != null &&
+            expectedMoveRatio < 0.25;
+          if (lowExpectedMoveRelaxCandidate || rangeSignalKeepByRelaxCandidate) {
             signal = entry.signal;
             entryCandidate = true;
             rangeSignalKeptByRelax = true;
-            signalDecisionOrigin = `btc_range_relax_keep_candidate_gate_${String(gate.blockReason ?? "gate")}`;
+            signalDecisionOrigin = lowExpectedMoveRelaxCandidate
+              ? "entry_gate_low_expected_move_relaxed_by_range_structure"
+              : `btc_range_relax_keep_candidate_gate_${String(gate.blockReason ?? "gate")}`;
+            rangeSignalDowngradeReason = lowExpectedMoveRelaxCandidate
+              ? "low_expected_move_relaxed_by_range_structure"
+              : "none";
+            this.logger.info("RANGE_LOW_EXPECTED_MOVE_RELAX_PROOF", {
+              symbol: String(symbol),
+              side: entrySide,
+              boxPos,
+              rangeConfidence: regimeDetected.rangeConfidence ?? null,
+              boxCohesion01: regimeDetected.boxCohesion01 ?? null,
+              breakoutFailureRate: regimeDetected.breakoutFailureRate ?? null,
+              gateExpectedMove: gate.expectedMove ?? null,
+              gateRequiredMove: gate.requiredMove ?? null,
+              expectedMoveRatio,
+              rangeSignalKeptByRelax: true,
+              low_expected_move_relax_size_limited: lowExpectedMoveRelaxCandidate
+            });
           } else {
             signal = "none";
             entryCandidate = false;
@@ -8082,6 +8162,22 @@ export class PaperEngine {
             signalDecisionOrigin = `entry_gate_blocked_${String(gateBlockedReason)}`;
             rangeSignalDowngraded = true;
             rangeSignalDowngradeReason = gateBlockedReason;
+            if (gate.blockReason === "low_expected_move") {
+              this.logger.info("RANGE_LOW_EXPECTED_MOVE_RELAX_PROOF", {
+                symbol: String(symbol),
+                side: entrySide,
+                boxPos,
+                rangeConfidence: regimeDetected.rangeConfidence ?? null,
+                boxCohesion01: regimeDetected.boxCohesion01 ?? null,
+                breakoutFailureRate: regimeDetected.breakoutFailureRate ?? null,
+                gateExpectedMove: gate.expectedMove ?? null,
+                gateRequiredMove: gate.requiredMove ?? null,
+                expectedMoveRatio,
+                rangeSignalKeptByRelax: false,
+                low_expected_move_relax_size_limited: false,
+                hard_block_due_to_expected_move_ratio_below_min: lowExpectedMoveRelaxHardBlocked
+              });
+            }
           }
         }
       }
