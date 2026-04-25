@@ -848,6 +848,14 @@ export class PaperEngine {
     loss: [] as EntryQualitySample[],
     contaminated: [] as EntryQualitySample[]
   };
+  private lastEntryQualitySampleSourceBreakdown = {
+    history_profit_samples: 0,
+    history_loss_samples: 0,
+    events_profit_samples: 0,
+    events_loss_samples: 0,
+    contaminated_samples: 0,
+    total_sample_count: 0
+  };
   private engineLastTickAt: number | null = null;
   private marketDataLastUpdateAt: number | null = null;
   private v2LastDecisionAt: number | null = null;
@@ -2106,6 +2114,11 @@ export class PaperEngine {
           entry_quality_profit_samples: this.lastEntryQualitySamples.profit.length,
           entry_quality_loss_samples: this.lastEntryQualitySamples.loss.length,
           entry_quality_contaminated_samples: this.lastEntryQualitySamples.contaminated.length,
+          entry_quality_history_profit_samples: this.lastEntryQualitySampleSourceBreakdown.history_profit_samples,
+          entry_quality_history_loss_samples: this.lastEntryQualitySampleSourceBreakdown.history_loss_samples,
+          entry_quality_events_profit_samples: this.lastEntryQualitySampleSourceBreakdown.events_profit_samples,
+          entry_quality_events_loss_samples: this.lastEntryQualitySampleSourceBreakdown.events_loss_samples,
+          entry_quality_total_sample_count: this.lastEntryQualitySampleSourceBreakdown.total_sample_count,
           engine_loop_alive: true,
           engine_last_tick_at: this.engineLastTickAt,
           market_data_last_update_at: this.marketDataLastUpdateAt,
@@ -5695,17 +5708,190 @@ export class PaperEngine {
     return { profit, loss };
   }
 
-  private async refreshEntryQualitySamples(history: ReadonlyArray<PaperClosedPositionRecord>): Promise<void> {
-    const built = await this.buildEntryQualitySamplesFromHistory(history);
-    this.lastEntryQualitySamples = {
-      profit: built.profit,
-      loss: built.loss,
-      contaminated: this.contaminatedEntrySamples.slice(-120)
+  private toNumberOrNull(v: unknown): number | null {
+    const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+    return Number.isFinite(n) ? n : null;
+  }
+
+  private toEntryQualityVectorFromEvent(
+    ev: Record<string, unknown>,
+    side: "long" | "short"
+  ): EntryQualityFeatureVector {
+    const qualityScore =
+      this.toNumberOrNull(ev.entry_quality_score) ??
+      this.toNumberOrNull(ev.quality_score) ??
+      this.toNumberOrNull(ev.qualityScore) ??
+      50;
+    const atrPct =
+      this.toNumberOrNull(ev.atr_pct) ??
+      this.toNumberOrNull(ev.atrPct) ??
+      0;
+    const emaGapAbs =
+      Math.abs(
+        this.toNumberOrNull(ev.ema_gap) ??
+        this.toNumberOrNull(ev.emaGap) ??
+        this.toNumberOrNull(ev.entry_ema_gap) ??
+        0
+      );
+    const volumeRatioProxy =
+      this.toNumberOrNull(ev.range_confidence) ??
+      this.toNumberOrNull(ev.rangeConfidence) ??
+      this.toNumberOrNull(ev.volume_ratio_proxy) ??
+      this.toNumberOrNull(ev.volumeRatioProxy) ??
+      0;
+    return {
+      qualityScore,
+      atrPct,
+      emaGap: emaGapAbs,
+      volumeRatioProxy,
+      sideBias: side === "long" ? 1 : -1
     };
+  }
+
+  private async buildEntryQualitySamplesFromEvents(): Promise<{
+    profit: EntryQualitySample[];
+    loss: EntryQualitySample[];
+    contaminated: EntryQualitySample[];
+    diagnostics: {
+      events_lines: number;
+      entry_opened_events: number;
+      exit_events: number;
+      usable_exit_samples: number;
+      contaminated_events: number;
+    };
+  }> {
+    const profit: EntryQualitySample[] = [];
+    const loss: EntryQualitySample[] = [];
+    const contaminated: EntryQualitySample[] = [];
+    const diagnostics = {
+      events_lines: 0,
+      entry_opened_events: 0,
+      exit_events: 0,
+      usable_exit_samples: 0,
+      contaminated_events: 0
+    };
+    const p = path.resolve(this.config.dataDir, "reports/events.jsonl");
+    let raw = "";
+    try {
+      raw = await fs.readFile(p, "utf8");
+    } catch {
+      return { profit, loss, contaminated, diagnostics };
+    }
+    const lines = raw.split("\n");
+    diagnostics.events_lines = lines.filter((x) => x.trim().length > 0).length;
+    for (const line of lines) {
+      const t = line.trim();
+      if (t === "") continue;
+      let ev: Record<string, unknown> | null = null;
+      try {
+        const parsed = JSON.parse(t) as unknown;
+        if (parsed && typeof parsed === "object") ev = parsed as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (!ev) continue;
+      const type = String(ev.type ?? "");
+      if (type === "ENTRY_OPENED") diagnostics.entry_opened_events += 1;
+      if (!type.startsWith("EXIT_")) continue;
+      diagnostics.exit_events += 1;
+      const sideRaw = String(ev.side ?? "").toLowerCase();
+      if (sideRaw !== "long" && sideRaw !== "short") {
+        diagnostics.contaminated_events += 1;
+        contaminated.push({
+          ts: this.toNumberOrNull(ev.ts) ?? Date.now(),
+          symbol: String(ev.symbol ?? "UNKNOWN"),
+          side: "long",
+          source: "contaminated",
+          vector: this.toEntryQualityVectorFromEvent(ev, "long"),
+          reason: "events_exit_missing_side"
+        });
+        continue;
+      }
+      const side = sideRaw as "long" | "short";
+      const pnlUsd =
+        this.toNumberOrNull(ev.realized_pnl) ??
+        this.toNumberOrNull(ev.realizedPnlUsd) ??
+        this.toNumberOrNull(ev.pnlUsd) ??
+        this.toNumberOrNull(ev.pnl) ??
+        this.toNumberOrNull(ev.realized_pnl_usd);
+      if (pnlUsd == null) {
+        diagnostics.contaminated_events += 1;
+        contaminated.push({
+          ts: this.toNumberOrNull(ev.ts) ?? Date.now(),
+          symbol: String(ev.symbol ?? "UNKNOWN"),
+          side,
+          source: "contaminated",
+          vector: this.toEntryQualityVectorFromEvent(ev, side),
+          reason: "events_exit_missing_pnl"
+        });
+        continue;
+      }
+      const sample: EntryQualitySample = {
+        ts: this.toNumberOrNull(ev.ts) ?? Date.now(),
+        symbol: String(ev.symbol ?? "UNKNOWN"),
+        side,
+        source: pnlUsd > 0 ? "profit" : "loss",
+        vector: this.toEntryQualityVectorFromEvent(ev, side),
+        reason: String(ev.reason ?? ev.closeReason ?? ev.exitReason ?? type)
+      };
+      diagnostics.usable_exit_samples += 1;
+      if (sample.source === "profit") profit.push(sample);
+      else loss.push(sample);
+    }
+    return { profit: profit.slice(-600), loss: loss.slice(-600), contaminated: contaminated.slice(-300), diagnostics };
+  }
+
+  private async refreshEntryQualitySamples(history: ReadonlyArray<PaperClosedPositionRecord>): Promise<void> {
+    const [fromHistory, fromEvents] = await Promise.all([
+      this.buildEntryQualitySamplesFromHistory(history),
+      this.buildEntryQualitySamplesFromEvents()
+    ]);
+    const maxPerClass = 160;
+    const mergedProfit = [
+      ...fromHistory.profit,
+      ...fromEvents.profit
+    ].slice(-maxPerClass);
+    const mergedLoss = [
+      ...fromHistory.loss,
+      ...fromEvents.loss
+    ].slice(-maxPerClass);
+    const mergedContaminated = [
+      ...fromEvents.contaminated,
+      ...this.contaminatedEntrySamples
+    ].slice(-160);
+    this.lastEntryQualitySamples = {
+      profit: mergedProfit,
+      loss: mergedLoss,
+      contaminated: mergedContaminated
+    };
+    this.lastEntryQualitySampleSourceBreakdown = {
+      history_profit_samples: fromHistory.profit.length,
+      history_loss_samples: fromHistory.loss.length,
+      events_profit_samples: fromEvents.profit.length,
+      events_loss_samples: fromEvents.loss.length,
+      contaminated_samples: this.lastEntryQualitySamples.contaminated.length,
+      total_sample_count:
+        this.lastEntryQualitySamples.profit.length +
+        this.lastEntryQualitySamples.loss.length +
+        this.lastEntryQualitySamples.contaminated.length
+    };
+    this.logger.info("ENTRY_QUALITY_SAMPLE_SOURCE_BREAKDOWN", {
+      ...this.lastEntryQualitySampleSourceBreakdown,
+      events_lines: fromEvents.diagnostics.events_lines,
+      entry_opened_events: fromEvents.diagnostics.entry_opened_events,
+      exit_events: fromEvents.diagnostics.exit_events,
+      usable_exit_samples: fromEvents.diagnostics.usable_exit_samples,
+      contaminated_events: fromEvents.diagnostics.contaminated_events
+    });
     this.logger.info("ENTRY_QUALITY_SAMPLE_COMPARISON", {
       profit_samples: this.lastEntryQualitySamples.profit.length,
       loss_samples: this.lastEntryQualitySamples.loss.length,
-      contaminated_samples: this.lastEntryQualitySamples.contaminated.length
+      contaminated_samples: this.lastEntryQualitySamples.contaminated.length,
+      history_profit_samples: this.lastEntryQualitySampleSourceBreakdown.history_profit_samples,
+      history_loss_samples: this.lastEntryQualitySampleSourceBreakdown.history_loss_samples,
+      events_profit_samples: this.lastEntryQualitySampleSourceBreakdown.events_profit_samples,
+      events_loss_samples: this.lastEntryQualitySampleSourceBreakdown.events_loss_samples,
+      total_sample_count: this.lastEntryQualitySampleSourceBreakdown.total_sample_count
     });
     const recent = history.slice(-20);
     const prev = history.slice(-40, -20);
