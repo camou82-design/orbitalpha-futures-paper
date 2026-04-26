@@ -5665,66 +5665,140 @@ export class PaperEngine {
   private evaluateRangeRecheckPromotion(input: Readonly<{
     symbol: string;
     side: "long" | "short";
+    authoritySource: string;
+    authorityDecision: string;
+    authorityRegime: string | null;
+    authorityEntryQualityGrade: string | null;
+    adoptedEngine: string | null;
+    finalEngineOwner: string | null;
     activeEngine: "RANGE" | "TREND" | "IDLE";
     boxPos: number | null;
     rangeConfidence: number | null;
+    boxCohesion01: number | null;
+    trendWeaknessScore: number | null;
+    trendOk: boolean;
+    emaGap: number | null;
     qualityScore: number;
     lastPrice: number;
     v2BlockReason: string | null;
     v2Signal: string | null;
+    relaxedRangeEntry: boolean;
+    reversalConfirmed: boolean;
+    directionalShockState: string | null;
+    serverTradeEnabled: boolean;
+    closeOnlyMode: boolean;
+    killSwitch: boolean;
+    reconcileSafeMode: boolean;
+    riskMode: string | null;
+    dailyLossGuardActive: boolean;
+    openPositionCount: number;
+    maxSlots: number;
     entryEvidenceScore: number;
   }>): { promote: boolean; reason: string; ticks: number } {
     const key = `${input.symbol}:${input.side}`;
     const reasonRaw = String(input.v2BlockReason ?? "");
     const signalRaw = String(input.v2Signal ?? "");
-    const recheckCandidate =
-      signalRaw === "WAIT_RECHECK" ||
+    const isV2Owner = input.authoritySource === "v2";
+    const finalEngineOwnerUpper = String(input.finalEngineOwner ?? "").toUpperCase();
+    const adoptedEngineUpper = String(input.adoptedEngine ?? "").toUpperCase();
+    const v2EngineOwner = adoptedEngineUpper === "V2" || finalEngineOwnerUpper === "V2";
+    const decisionHold = String(input.authorityDecision ?? "").toUpperCase() === "HOLD";
+    const waitRecheckCandidate =
       reasonRaw === "WAIT_RECHECK" ||
-      reasonRaw === "RANGE_GATE_BLOCK_WAIT_RECHECK" ||
-      reasonRaw === "RANGE_GATE_BLOCK_LOW_CONFIDENCE";
-    if (!recheckCandidate || input.activeEngine !== "RANGE") {
+      signalRaw === "WAIT_RECHECK";
+    const qualityGrade = String(input.authorityEntryQualityGrade ?? "").toUpperCase();
+    const qualityGradeAllowed = qualityGrade === "S" || qualityGrade === "A" || qualityGrade === "B";
+    const serverControlOpen =
+      input.serverTradeEnabled &&
+      !input.closeOnlyMode &&
+      !input.killSwitch &&
+      !input.reconcileSafeMode;
+    const riskNotHalt = String(input.riskMode ?? "").toUpperCase() !== "HALT";
+    const hasCapacity = input.openPositionCount < input.maxSlots;
+    const commonEligible =
+      isV2Owner &&
+      v2EngineOwner &&
+      decisionHold &&
+      waitRecheckCandidate &&
+      qualityGradeAllowed &&
+      serverControlOpen &&
+      riskNotHalt &&
+      !input.dailyLossGuardActive &&
+      hasCapacity;
+    if (!commonEligible) {
       this.rangeRecheckPromotionByKey.delete(key);
-      return { promote: false, reason: "not_range_recheck_candidate", ticks: 0 };
+      return { promote: false, reason: "not_v2_wait_recheck_candidate", ticks: 0 };
     }
-    const rangeConfidence = Math.max(0, input.rangeConfidence ?? 0);
-    if (rangeConfidence < RANGE_CONFIDENCE_HARD_HOLD_MAX) {
+    if (input.side !== "long" && input.side !== "short") {
       this.rangeRecheckPromotionByKey.delete(key);
-      return { promote: false, reason: "hard_hold_low_confidence", ticks: 0 };
+      return { promote: false, reason: "non_directional_side", ticks: 0 };
     }
-    if (typeof input.boxPos !== "number" || !Number.isFinite(input.boxPos)) {
-      this.rangeRecheckPromotionByKey.delete(key);
-      return { promote: false, reason: "range_zone_unknown", ticks: 0 };
-    }
-    const zone = classifyRangeActionZone(input.boxPos);
-    const zoneAligned =
-      (input.side === "short" && zone === "upper") ||
-      (input.side === "long" && zone === "lower");
-    if (!zoneAligned) {
-      this.rangeRecheckPromotionByKey.delete(key);
-      return { promote: false, reason: "range_zone_mismatch", ticks: 0 };
-    }
+    const authorityRegimeUpper = String(input.authorityRegime ?? "").toUpperCase();
+    const regimeAtDecision: "RANGE" | "TREND" =
+      authorityRegimeUpper === "RANGE" || input.activeEngine === "RANGE" ? "RANGE" : "TREND";
     const prev = this.rangeRecheckPromotionByKey.get(key);
     const qualityNotWorse = !prev || input.qualityScore >= prev.lastQualityScore - 2;
     const structureNotBroken = !prev || Math.abs(input.lastPrice - prev.lastPrice) / Math.max(1e-9, prev.lastPrice) <= 0.02;
     const ticks = prev && qualityNotWorse && structureNotBroken ? prev.ticks + 1 : 1;
+    const zone = typeof input.boxPos === "number" && Number.isFinite(input.boxPos)
+      ? classifyRangeActionZone(input.boxPos)
+      : "mid";
     this.rangeRecheckPromotionByKey.set(key, {
       ticks,
       side: input.side,
       zone,
       lastQualityScore: input.qualityScore,
-      lastRangeConfidence: rangeConfidence,
+      lastRangeConfidence: Math.max(0, input.rangeConfidence ?? 0),
       lastPrice: input.lastPrice,
       updatedAt: Date.now()
     });
-    const canPromote =
-      ticks >= RANGE_RECHECK_PROMOTION_TICKS &&
-      rangeConfidence >= RANGE_CONFIDENCE_RECHECK_ALLOW_MIN &&
-      input.entryEvidenceScore >= 55;
-    return {
-      promote: canPromote,
-      reason: canPromote ? "range_recheck_pass_promoted" : "range_recheck_watch",
-      ticks
-    };
+    if (regimeAtDecision === "RANGE") {
+      if (zone === "mid") return { promote: false, reason: "range_mid_wait_not_promotable", ticks };
+      const zoneAligned =
+        (input.side === "short" && zone === "upper") ||
+        (input.side === "long" && zone === "lower");
+      if (!zoneAligned) return { promote: false, reason: "range_side_zone_mismatch", ticks };
+      const rangeConfidence = Math.max(0, input.rangeConfidence ?? 0);
+      const rangeStructureQualified =
+        rangeConfidence >= 0.65 &&
+        (input.boxCohesion01 ?? 0) >= 0.9 &&
+        (input.trendWeaknessScore ?? 0) >= 0.7 &&
+        input.qualityScore >= 70;
+      if (!rangeStructureQualified) {
+        return { promote: false, reason: "range_structure_quality_not_met", ticks };
+      }
+      const promotionTrigger = input.relaxedRangeEntry || input.reversalConfirmed || ticks >= 2;
+      if (!promotionTrigger) {
+        return { promote: false, reason: "range_wait_recheck_needs_confirmation", ticks };
+      }
+      return { promote: true, reason: "range_wait_recheck_promoted_qualified", ticks };
+    }
+    const shock = String(input.directionalShockState ?? "NONE").toUpperCase();
+    const trendDirectionalAligned =
+      shock === "NONE" ||
+      (shock === "UP" && input.side === "long") ||
+      (shock === "DOWN" && input.side === "short");
+    if (!trendDirectionalAligned) {
+      this.rangeRecheckPromotionByKey.delete(key);
+      return { promote: false, reason: "trend_directional_shock_mismatch", ticks: 0 };
+    }
+    const trendQualityOk = input.trendOk === true && input.qualityScore >= 70;
+    if (!trendQualityOk) {
+      return { promote: false, reason: "trend_quality_not_met", ticks };
+    }
+    if (shock === "NONE") {
+      const emaGapAbs = Math.abs(input.emaGap ?? 0);
+      if (emaGapAbs < ENTRY_EVIDENCE_TREND_EMA_GAP_MIN) {
+        return { promote: false, reason: "trend_ema_gap_not_met", ticks };
+      }
+    }
+    if (qualityGrade === "S" || qualityGrade === "A") {
+      return { promote: true, reason: "trend_wait_recheck_promoted_top_grade", ticks };
+    }
+    if (qualityGrade === "B" && ticks >= 2) {
+      return { promote: true, reason: "trend_wait_recheck_promoted_b_after_2ticks", ticks };
+    }
+    return { promote: false, reason: "trend_wait_recheck_watch", ticks };
   }
 
   private toEntryQualityVectorFromSnapshot(
@@ -6345,7 +6419,14 @@ export class PaperEngine {
 
       const v2BlockReason = envelope.selector?.v2_result.risk.blockReason ?? null;
       const v2Signal = envelope.selector?.v2_result.signal ?? null;
+      const exDetailForRecheck = (res.executorDecision?.detail ?? {}) as Record<string, unknown>;
       const activeEngine = this.lastMarketMode?.routing.activeEngine ?? "IDLE";
+      const serverTradeEnabled = this.serverTradeControlState.server_trade_enabled;
+      const closeOnlyMode = this.serverTradeControlState.close_only_mode;
+      const killSwitch = this.serverTradeControlState.kill_switch_active;
+      const reconcileSafeMode = this.reconcileSafetyCloseOnly;
+      const riskModeForPromotion = this.lastRiskExposure?.riskMode ?? null;
+      const dailyLossGuardForPromotion = this.lastRisk?.dailyLossGuardTriggered === true;
       const preEntryEvidenceScore = computeEntryEvidenceScore({
         qualityScore: first.qualityScore ?? null,
         candidateStrength: first.candidateStrength ?? null,
@@ -6361,13 +6442,36 @@ export class PaperEngine {
           ? this.evaluateRangeRecheckPromotion({
             symbol: String(first.symbol),
             side: authority.side,
+            authoritySource: authority.source,
+            authorityDecision: authority.decision,
+            authorityRegime: authority.regime ?? null,
+            authorityEntryQualityGrade: authority.entryQualityGrade ?? null,
+            adoptedEngine,
+            finalEngineOwner: envelope.selector?.adopted_result.engine ?? null,
             activeEngine,
             boxPos: first.boxPos ?? null,
             rangeConfidence: first.rangeConfidence ?? null,
+            boxCohesion01: first.boxCohesion01 ?? null,
+            trendWeaknessScore: first.trendWeaknessScore ?? null,
+            trendOk: first.trendOk === true,
+            emaGap: first.emaGap ?? null,
             qualityScore: first.qualityScore ?? 0,
             lastPrice: first.lastPrice,
             v2BlockReason,
             v2Signal,
+            relaxedRangeEntry:
+              exDetailForRecheck.relaxedRangeEntry === true ||
+              first.rangeSignalKeptByRelax === true,
+            reversalConfirmed: exDetailForRecheck.reversal_confirmed === true,
+            directionalShockState: this.lastRisk?.directionalShockState ?? null,
+            serverTradeEnabled,
+            closeOnlyMode,
+            killSwitch,
+            reconcileSafeMode,
+            riskMode: riskModeForPromotion,
+            dailyLossGuardActive: dailyLossGuardForPromotion,
+            openPositionCount: next.length,
+            maxSlots: max,
             entryEvidenceScore: preEntryEvidenceScore
           })
           : { promote: false, reason: "no_directional_side", ticks: 0 };
@@ -6386,6 +6490,32 @@ export class PaperEngine {
           entry_evidence_score: preEntryEvidenceScore,
           authority_source: authority.source,
           adopted_engine: adoptedEngine
+        });
+        this.logger.info("V2_WAIT_RECHECK_PROMOTED_TO_ENTER", {
+          symbol: first.symbol,
+          side: authority.side,
+          authority_source: authority.source,
+          authority_decision_before: authority.decision,
+          authority_decision_after: authorityDecisionForExecution,
+          v2_reject_reason_before: v2BlockReason,
+          entry_quality_grade: authority.entryQualityGrade ?? null,
+          regime_at_decision: authority.regime ?? null,
+          active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
+          rangeConfidence: first.rangeConfidence ?? null,
+          boxCohesion01: first.boxCohesion01 ?? null,
+          trendWeaknessScore: first.trendWeaknessScore ?? null,
+          qualityScore: first.qualityScore ?? null,
+          boxPos: first.boxPos ?? null,
+          zone: typeof first.boxPos === "number" && Number.isFinite(first.boxPos)
+            ? classifyRangeActionZone(first.boxPos)
+            : "mid",
+          reviewing_ticks: recheckPromotion.ticks,
+          relaxedRangeEntry:
+            exDetailForRecheck.relaxedRangeEntry === true ||
+            first.rangeSignalKeptByRelax === true,
+          reversal_confirmed: exDetailForRecheck.reversal_confirmed === true,
+          directionalShockState: this.lastRisk?.directionalShockState ?? "NONE",
+          promotion_reason: recheckPromotion.reason
         });
       }
       const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(
