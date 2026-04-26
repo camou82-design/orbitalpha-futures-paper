@@ -3,6 +3,7 @@ import {
     EngineV2Decision,
     EngineV2InternalResult,
     EngineV2FinalDecision,
+    EngineV2Side,
     LegacySnapshotAdapter,
     LegacyConfigAdapter,
     LegacyPositionAdapter,
@@ -120,6 +121,112 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         finalReason = `SKIPPED: ${execution.reason}`;
     }
 
+    // TREND authority pre-stage1 promotion:
+    // Only for v2 HOLD + WAIT_RECHECK, directional shock aligned side, and quality-qualified contexts.
+    const v2DecisionBeforePromotion = finalDecision;
+    const v2SideBeforePromotion = execution.side;
+    const v2RejectReasonBeforePromotion = blockReason;
+    let v2DecisionAfterPromotion = finalDecision;
+    let v2SideAfterPromotion: EngineV2Side = execution.side;
+    let v2RejectReasonAfterPromotion: string | null = blockReason;
+    let promotionApplied = false;
+    let promotionReason: string | null = null;
+
+    const shock = input.state.directionalShockState ?? "NONE";
+    const marketMode = String(judgment.regime ?? "UNKNOWN");
+    const activeEngineRouting = String(routing.executor ?? "UNKNOWN");
+    const qualityScore = Number(input.snapshot?.qualityScore ?? 0);
+    const trendWeakness = Number(input.snapshot?.trendWeaknessScore ?? 1);
+    const emaGap = Number(input.snapshot?.emaGap ?? 0);
+    const trendOk =
+        Number.isFinite(emaGap) &&
+        Number.isFinite(trendWeakness) &&
+        Math.abs(emaGap) >= 0.0004 &&
+        trendWeakness < 0.5;
+    const entryQualityGrade = riskSizing.entryQualityGrade ?? "B";
+    const reviewingTicks = Number(input.snapshot?.reviewing_ticks ?? 0);
+    const allowNewLong = Boolean((riskSizing.diagnostics as Record<string, unknown> | undefined)?.allow_new_long ?? input.state.longAllow);
+    const allowNewShort = Boolean((riskSizing.diagnostics as Record<string, unknown> | undefined)?.allow_new_short ?? input.state.shortAllow);
+    const riskLongAllow = input.state.longAllow;
+    const riskShortAllow = input.state.shortAllow;
+    const trendSideCandidate: EngineV2Side =
+        shock === "DOWN" ? "short" :
+            shock === "UP" ? "long" :
+                emaGap < 0 ? "short" :
+                    emaGap > 0 ? "long" : "none";
+    const alignedSignal =
+        trendSideCandidate === "short" ? "paper_short_candidate" :
+            trendSideCandidate === "long" ? "paper_long_candidate" : "none";
+
+    const eligibleWaitRecheckPromotion =
+        v2DecisionBeforePromotion === "HOLD" &&
+        v2RejectReasonBeforePromotion === "WAIT_RECHECK" &&
+        execution.signal === "WAIT_RECHECK" &&
+        (activeEngineRouting === "TREND" || marketMode === "TREND");
+
+    if (eligibleWaitRecheckPromotion) {
+        const directionalAligned =
+            (shock === "DOWN" && trendSideCandidate === "short" && allowNewShort && riskShortAllow) ||
+            (shock === "UP" && trendSideCandidate === "long" && allowNewLong && riskLongAllow);
+
+        if (directionalAligned) {
+            if (entryQualityGrade === "S" || entryQualityGrade === "A") {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = trendSideCandidate;
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = "trend_wait_recheck_aligned_top_grade_enter";
+            } else if (entryQualityGrade === "B") {
+                if (reviewingTicks >= 2) {
+                    v2DecisionAfterPromotion = "ENTER";
+                    v2SideAfterPromotion = trendSideCandidate;
+                    v2RejectReasonAfterPromotion = null;
+                    promotionApplied = true;
+                    promotionReason = "trend_wait_recheck_aligned_grade_b_confirmed_enter";
+                } else {
+                    v2DecisionAfterPromotion = "HOLD";
+                    v2SideAfterPromotion = trendSideCandidate;
+                    v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                    promotionApplied = true;
+                    promotionReason = "trend_wait_recheck_aligned_grade_b_hold_pending";
+                }
+            }
+        }
+    }
+
+    finalDecision = v2DecisionAfterPromotion;
+    blockReason = v2RejectReasonAfterPromotion;
+    if (finalDecision === "ENTER") {
+        finalReason = promotionReason ?? explanation.reason;
+    } else if (finalDecision === "HOLD" && promotionApplied) {
+        finalReason = `HOLD: ${promotionReason ?? "WAIT_RECHECK"}`;
+    }
+
+    console.log("[V2_TREND_AUTHORITY_DIAGNOSTIC_PROOF]", {
+        symbol: String(input.symbol),
+        market_mode: marketMode,
+        active_engine_routing: activeEngineRouting,
+        directional_shock_state: shock,
+        risk_long_allow: riskLongAllow,
+        risk_short_allow: riskShortAllow,
+        allow_new_long: allowNewLong,
+        allow_new_short: allowNewShort,
+        raw_signal: rawSignal,
+        aligned_signal: alignedSignal,
+        trend_side_candidate: trendSideCandidate,
+        entry_quality_grade: entryQualityGrade,
+        quality_score: qualityScore,
+        trendOk,
+        v2_decision_before: v2DecisionBeforePromotion,
+        v2_side_before: v2SideBeforePromotion,
+        v2_reject_reason_before: v2RejectReasonBeforePromotion,
+        promotion_applied: promotionApplied,
+        promotion_reason: promotionReason,
+        v2_decision_after: finalDecision,
+        v2_side_after: v2SideAfterPromotion,
+        v2_reject_reason_after: blockReason
+    });
+
     const decision: EngineV2Decision = {
         symbol: input.symbol,
         ts: input.now,
@@ -127,7 +234,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         confidence: confidence.level,
         confidenceScore: confidence.score,
         signal: execution.signal,
-        side: execution.side,
+        side: v2SideAfterPromotion,
         decision: finalDecision,
         risk: riskSizing,
         explanation: {
