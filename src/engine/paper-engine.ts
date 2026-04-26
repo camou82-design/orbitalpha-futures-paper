@@ -6453,6 +6453,31 @@ export class PaperEngine {
 
       const sym = String(first.symbol);
       const decision = res.executorDecision!;
+      const authorityRegimeUpper = String(authority.regime ?? "").toUpperCase();
+      const activeEngineRouting = this.lastMarketMode?.routing.activeEngine ?? null;
+      let stage1ExecutorLabel = decision.executor;
+      if (
+        authority.source === "v2" &&
+        (authorityRegimeUpper === "RANGE" || activeEngineRouting === "RANGE") &&
+        (authority.decision === "ENTER" || authority.decision === "HOLD") &&
+        stage1ExecutorLabel !== "RANGE"
+      ) {
+        const executorBefore = stage1ExecutorLabel;
+        stage1ExecutorLabel = "RANGE";
+        this.logger.info("V2_EXECUTOR_ROUTING_ALIGNED", {
+          symbol: sym,
+          authority_source: authority.source,
+          authority_regime: authority.regime ?? null,
+          active_engine_routing: activeEngineRouting,
+          executor_before: executorBefore,
+          executor_after: stage1ExecutorLabel,
+          alignment_reason: "v2_range_authority_execution_context_alignment"
+        });
+      }
+      const stage1ExecutionEngine: "RANGE" | "TREND" | "IDLE" =
+        stage1ExecutorLabel === "RANGE" || stage1ExecutorLabel === "TREND"
+          ? stage1ExecutorLabel
+          : activeEngine;
       const adaptive = effectiveAdaptiveResult;
       const entryQualitySizeMultiplier = 1;
 
@@ -6582,11 +6607,11 @@ export class PaperEngine {
       if (otherLeg) {
         if (!this.lastRiskExposure) {
           oppositeLegBlockedReason = "OPPOSITE_LEG_BLOCKED_NON_ACTIVE_ENGINE";
-        } else if (activeEngine === "RANGE" && !this.lastRiskExposure.allowRangeBidirectional) {
+        } else if (stage1ExecutionEngine === "RANGE" && !this.lastRiskExposure.allowRangeBidirectional) {
           oppositeLegBlockedReason = "RANGE_HEDGE_BLOCKED";
-        } else if (activeEngine === "TREND" && this.lastRiskExposure.blockTrendOppositeLeg) {
+        } else if (stage1ExecutionEngine === "TREND" && this.lastRiskExposure.blockTrendOppositeLeg) {
           oppositeLegBlockedReason = "TREND_OPPOSITE_LEG_BLOCKED";
-        } else if (activeEngine !== "RANGE" && activeEngine !== "TREND") {
+        } else if (stage1ExecutionEngine !== "RANGE" && stage1ExecutionEngine !== "TREND") {
           oppositeLegBlockedReason = "OPPOSITE_LEG_BLOCKED_NON_ACTIVE_ENGINE";
         }
       }
@@ -6625,7 +6650,7 @@ export class PaperEngine {
       ) {
         finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE";
         entryEvidenceReason = "weak_candidate_with_low_grade_recheck";
-      } else if (activeEngine === "RANGE") {
+      } else if (stage1ExecutionEngine === "RANGE") {
         if (typeof first.boxPos !== "number" || !Number.isFinite(first.boxPos)) {
           finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_UNKNOWN";
           entryEvidenceReason = "range_zone_unknown_recheck";
@@ -6637,7 +6662,7 @@ export class PaperEngine {
             entryEvidenceReason = "range_zone_mismatch_recheck";
           }
         }
-      } else if (activeEngine === "TREND") {
+      } else if (stage1ExecutionEngine === "TREND") {
         const emaGapAbs = Math.abs(first.emaGap ?? 0);
         const trendWeakness = first.trendWeaknessScore ?? 1;
         const trendEvidenceOk =
@@ -6687,6 +6712,67 @@ export class PaperEngine {
             active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
             final_blocked_reason_before: finalBlockedReasonBefore,
             final_blocked_reason_after: finalBlockedReason
+          });
+        }
+      }
+      if (finalBlockedReason === "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE") {
+        const exDetail = (res.executorDecision?.detail ?? null) as Record<string, unknown> | null;
+        const zone = typeof first.boxPos === "number" && Number.isFinite(first.boxPos) ? classifyRangeActionZone(first.boxPos) : "mid";
+        const reversalConfirmedFromDetail = exDetail?.reversal_confirmed === true;
+        const relaxedRangeEntry =
+          exDetail?.relaxedRangeEntry === true ||
+          first.rangeSignalKeptByRelax === true;
+        const serverControlsOpen =
+          this.serverTradeControlState.server_trade_enabled &&
+          !this.serverTradeControlState.close_only_mode &&
+          !this.serverTradeControlState.kill_switch_active &&
+          !this.reconcileSafetyCloseOnly;
+        const dailyLossGuardActive = this.lastRisk?.dailyLossGuardTriggered === true;
+        const riskModeHalt = this.lastRiskExposure?.riskMode === "HALT";
+        const shock = this.lastRisk?.directionalShockState ?? "NONE";
+        const regimeForAuthority = authorityRegimeUpper === "RANGE" || stage1ExecutionEngine === "RANGE" ? "RANGE" : "TREND";
+        const trendDirectionalAligned =
+          shock === "NONE" ||
+          (shock === "UP" && authority.side === "long") ||
+          (shock === "DOWN" && authority.side === "short");
+        const rangeDirectionalAligned =
+          (authority.side === "long" && zone === "lower") ||
+          (authority.side === "short" && zone === "upper");
+        const rangePreserveAllowed =
+          rangeDirectionalAligned &&
+          (reversalConfirmedFromDetail || relaxedRangeEntry);
+        const weakRecheckV2PreserveEligible =
+          authority.source === "v2" &&
+          (adoptedEngine === "V2" || String(exDetail?.final_engine_owner ?? "").toUpperCase() === "V2") &&
+          authorityDecisionForExecution === "ENTER" &&
+          (authority.side === "long" || authority.side === "short") &&
+          (authority.entryQualityGrade === "S" || authority.entryQualityGrade === "A" || authority.entryQualityGrade === "B") &&
+          serverControlsOpen &&
+          !riskModeHalt &&
+          !dailyLossGuardActive &&
+          (regimeForAuthority === "RANGE" ? rangePreserveAllowed : trendDirectionalAligned);
+        if (weakRecheckV2PreserveEligible) {
+          const before = finalBlockedReason;
+          finalBlockedReason = null;
+          this.logger.info("ENTRY_EVIDENCE_RECHECK_V2_AUTHORITY_PRESERVED", {
+            symbol: sym,
+            side: authority.side,
+            regime: regimeForAuthority,
+            active_engine_routing: activeEngineRouting,
+            authority_source: authority.source,
+            authority_decision: authorityDecisionForExecution,
+            entry_quality_grade: authority.entryQualityGrade ?? null,
+            final_blocked_reason_before: before,
+            final_blocked_reason_after: finalBlockedReason,
+            relaxedRangeEntry,
+            reversal_confirmed: reversalConfirmedFromDetail,
+            rangeConfidence: first.rangeConfidence ?? null,
+            boxPos: first.boxPos ?? null,
+            zone,
+            preserved_reason:
+              regimeForAuthority === "RANGE"
+                ? "v2_range_authority_preserved_weak_candidate"
+                : "v2_trend_authority_preserved_weak_candidate"
           });
         }
       }
@@ -6785,7 +6871,7 @@ export class PaperEngine {
       this.logger.info("STAGE1_ENTER_DECIDED", {
         symbol: sym,
         regime: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
-        executor: decision.executor,
+        executor: stage1ExecutorLabel,
         final_authorized: finalEntryAuthorization,
         final_blocked_reason: finalBlockedReason,
         v2_authority_preserved_after_risk_alignment: v2AuthorityPreservedAfterRiskAlignment,
@@ -7122,25 +7208,58 @@ export class PaperEngine {
             (authority.side === "short" && mPre.shortUsd + entrySizeUsd > riskE.maxShortExposure))
         ) {
           const cap = authority.side === "long" ? riskE.maxLongExposure : riskE.maxShortExposure;
-          const exposureUsd = authority.side === "long" ? mPre.longUsd : mPre.shortUsd;
-          const availableUsd = Math.max(0, cap - exposureUsd);
-          const sizeAfterCapUsd =
-            availableUsd >= MIN_POSITION_SIZE_USD
-              ? Math.max(MIN_POSITION_SIZE_USD, Math.round(Math.min(entrySizeUsd, availableUsd) * 100) / 100)
+          const currentExposureUsd = authority.side === "long" ? mPre.longUsd : mPre.shortUsd;
+          const projectedExposureUsd = currentExposureUsd + entrySizeUsd;
+          const capRemainingUsd = Math.max(0, cap - currentExposureUsd);
+          const reducedSizeUsd =
+            capRemainingUsd >= MIN_POSITION_SIZE_USD
+              ? Math.max(MIN_POSITION_SIZE_USD, Math.round(Math.min(entrySizeUsd, capRemainingUsd) * 100) / 100)
               : 0;
-          const hasNoLiveExposure = next.length === 0 && exposureUsd <= 0;
-          const canProceedWithCap = hasNoLiveExposure && sizeAfterCapUsd >= MIN_POSITION_SIZE_USD;
+          const riskModeNow = this.lastRiskExposure?.riskMode ?? null;
+          const serverControlsBlocked =
+            !this.serverTradeControlState.server_trade_enabled ||
+            this.serverTradeControlState.close_only_mode ||
+            this.serverTradeControlState.kill_switch_active ||
+            this.reconcileSafetyCloseOnly;
+          const canReduceSize =
+            reducedSizeUsd >= MIN_POSITION_SIZE_USD &&
+            riskModeNow !== "HALT" &&
+            !serverControlsBlocked;
+          const blockReason = canReduceSize ? null : "risk_exposure_cap_for_leg";
           this.logger.warn("RISK_EXPOSURE_CAP_PRE_SUBMIT_PROOF", {
-            current_open_positions: next.length,
+            symbol: first.symbol,
+            side: authority.side,
+            authority_source: authority.source,
+            authority_size_usd: authority.sizeUsd ?? null,
+            authority_selector_size_usd: authority.sizeUsd ?? null,
+            applied_leverage: authority.appliedLeverage ?? null,
             exposure_notional_krw: authority.exposureNotionalKrw ?? null,
             equity_multiple: authority.equityMultiple ?? null,
-            cap,
-            requested_size_usd: entrySizeUsd,
-            size_after_cap_usd: canProceedWithCap ? sizeAfterCapUsd : null,
-            abort_reason: canProceedWithCap ? null : "risk_exposure_cap_for_leg"
+            open_position_count: next.length,
+            max_slots: max,
+            current_exposure_usd: currentExposureUsd,
+            projected_exposure_usd: projectedExposureUsd,
+            max_allowed_exposure_usd: cap,
+            cap_remaining_usd: capRemainingUsd,
+            risk_mode: riskModeNow,
+            market_mode: this.lastMarketMode?.marketMode ?? null,
+            active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
+            block_reason: blockReason,
+            can_reduce_size: canReduceSize,
+            reduced_size_usd: canReduceSize ? reducedSizeUsd : null,
+            min_order_size_usd: MIN_POSITION_SIZE_USD
           });
-          if (canProceedWithCap) {
-            entrySizeUsd = sizeAfterCapUsd;
+          if (canReduceSize) {
+            const originalSizeUsd = entrySizeUsd;
+            entrySizeUsd = reducedSizeUsd;
+            this.logger.info("RISK_EXPOSURE_CAP_SIZE_REDUCED", {
+              symbol: first.symbol,
+              side: authority.side,
+              original_size_usd: originalSizeUsd,
+              reduced_size_usd: entrySizeUsd,
+              cap_remaining_usd: capRemainingUsd,
+              reason: "v2_authority_size_reduced_to_fit_cap"
+            });
           } else {
             trace.open_fail_stage = "risk_exposure_cap_pre_submit";
             trace.position_open_final_state = "aborted_pre_exchange";

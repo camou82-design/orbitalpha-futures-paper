@@ -18,6 +18,7 @@ export function executeRangeRegime(input: EngineV2Input): ExecutorOutput {
     let recheckSuggested = false;
     let reason = "Watching mid-zone";
     let relaxedRangeEntry = false;
+    const zone = boxPos >= 0.74 ? "upper" : boxPos <= 0.26 ? "lower" : "mid";
 
     const edgeStructurePromotionQualified =
         rangeConfidence >= 0.65 &&
@@ -77,6 +78,10 @@ export function executeRangeRegime(input: EngineV2Input): ExecutorOutput {
         metadata.boxCohesion01 = boxCohesion01;
         metadata.trendWeaknessScore = trendWeaknessScore;
         metadata.qualityScore = qualityScore;
+        metadata.boxPos = boxPos;
+        metadata.zone = zone;
+        metadata.sideZoneValid = true;
+        metadata.recheckSuggested = false;
         metadata.relaxedRangeEntry = true;
         metadata.reason = "Range edge qualified by structure quality";
     }

@@ -2459,6 +2459,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       detail: {
         crash_lock_bypass_applied: crashLockBypassApplied,
         crash_lock_bypass_reason: crashLockBypassReason,
+        reversal_confirmed: rangeReversalConfirmed,
         crash_lock_bypass_size_mult: crashLockBypassSizeMult,
         range_signal: rangeSignal.signal,
         range_signal_reason: rangeSignal.reason,
