@@ -6906,45 +6906,113 @@ export class PaperEngine {
           });
         }
       }
-      const finalBlockedReasonBeforeV2Preserve = finalBlockedReason;
-      const protectedV2BlockReasons = new Set<string>([
-        "RISK_EXPOSURE_CAP_PRE_SUBMIT",
-        "ORDER_BUILD_FAIL",
-        "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE",
-        "CRASH_ENTRY_GUARD_BLOCK",
-        "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT",
-        "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG",
-        "RANGE_SIDE_ZONE_MISMATCH_MID_WAIT",
-        "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_MISMATCH",
-        "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_UNKNOWN"
-      ]);
-      const serverControlsOpen =
-        this.serverTradeControlState.server_trade_enabled &&
-        !this.serverTradeControlState.close_only_mode &&
-        !this.serverTradeControlState.kill_switch_active &&
-        !this.reconcileSafetyCloseOnly;
-      const dailyLossGuardActive = this.lastRisk?.dailyLossGuardTriggered === true;
-      const riskModeHalt = this.lastRiskExposure?.riskMode === "HALT";
-      const v2AuthorityPreserveEligible =
+      const finalBlockedReasonBeforeV2Finalizer = finalBlockedReason;
+      const finalAuthorizedBeforeV2Finalizer = finalBlockedReasonBeforeV2Finalizer === null;
+      let hardBlockPresent = false;
+      let hardBlockReason: string | null = null;
+      const softBlockWarnings: string[] = [];
+      const v2FinalAuthorizationApplied =
         authority.source === "v2" &&
-        authorityDecisionForExecution === "ENTER" &&
-        serverControlsOpen &&
-        !riskModeHalt &&
-        !dailyLossGuardActive &&
-        finalBlockedReason != null &&
-        !protectedV2BlockReasons.has(finalBlockedReason);
-      let riskAlignmentBlockOverridden = false;
-      let protectedBlockNotOverridden = false;
-      if (v2AuthorityPreserveEligible) {
-        if (finalBlockedReason === "SIDE_NOT_ALLOWED_LONG" || finalBlockedReason === "SIDE_NOT_ALLOWED_SHORT") {
-          finalBlockedReason = null;
-          riskAlignmentBlockOverridden = true;
+        adoptedEngine === "V2" &&
+        authorityDecisionForExecution === "ENTER";
+      const activeEngineRoutingForFinalizer = this.lastMarketMode?.routing.activeEngine ?? null;
+      const stage1ExecutionEngineForFinalizer = stage1ExecutionEngine;
+      const authoritySizeUsdForFinalizer = authority.sizeUsd ?? 0;
+      const riskModeForFinalizer = this.lastRiskExposure?.riskMode ?? null;
+      const dailyLossGuardForFinalizer = this.lastRisk?.dailyLossGuardTriggered === true;
+      if (v2FinalAuthorizationApplied) {
+        const hardReasons = new Set<string>([
+          "RISK_EXPOSURE_CAP_PRE_SUBMIT",
+          "ORDER_BUILD_FAIL",
+          "EXCHANGE_OR_POSITION_WRITE_FAIL",
+          "CRASH_ENTRY_GUARD_BLOCK"
+        ]);
+        const softReasons = new Set<string>([
+          "WAIT_RECHECK",
+          "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE",
+          "SIDE_NOT_ALLOWED_LONG",
+          "SIDE_NOT_ALLOWED_SHORT",
+          "RISK_LONG_DISALLOWED",
+          "RISK_SHORT_DISALLOWED",
+          "ENTRY_EVIDENCE_RECHECK_TREND_WEAK",
+          "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_UNKNOWN",
+          "ADAPTIVE_RESULT_NULL",
+          "AI_POLICY_BLOCKED",
+          "POLICY_PAUSED_OR_FORBIDDEN",
+          "OPPOSITE_LEG_BLOCKED_NON_ACTIVE_ENGINE",
+          "TREND_OPPOSITE_LEG_BLOCKED",
+          "RANGE_HEDGE_BLOCKED",
+          "NGE_STAGE0_UPPER_LONG_BLOCK"
+        ]);
+        if (!this.serverTradeControlState.server_trade_enabled) {
+          hardBlockPresent = true;
+          hardBlockReason = "SERVER_TRADE_DISABLED";
+        } else if (this.serverTradeControlState.close_only_mode) {
+          hardBlockPresent = true;
+          hardBlockReason = "CLOSE_ONLY_MODE";
+        } else if (this.serverTradeControlState.kill_switch_active) {
+          hardBlockPresent = true;
+          hardBlockReason = "KILL_SWITCH";
+        } else if (this.reconcileSafetyCloseOnly) {
+          hardBlockPresent = true;
+          hardBlockReason = "RECONCILE_SAFE_MODE";
+        } else if (riskModeForFinalizer === "HALT") {
+          hardBlockPresent = true;
+          hardBlockReason = "RISK_MODE_HALT";
+        } else if (dailyLossGuardForFinalizer) {
+          hardBlockPresent = true;
+          hardBlockReason = "DAILY_LOSS_GUARD";
+        } else if (isNewEntry && next.length >= max) {
+          hardBlockPresent = true;
+          hardBlockReason = "MAX_SLOTS_REACHED";
+        } else if (authoritySizeUsdForFinalizer > 0 && authoritySizeUsdForFinalizer < MIN_POSITION_SIZE_USD) {
+          hardBlockPresent = true;
+          hardBlockReason = "MIN_ORDER_SIZE_UNDERFLOW";
+        } else if (res.decision.reject_reason === "ORDER_BUILD_FAIL") {
+          hardBlockPresent = true;
+          hardBlockReason = "ORDER_BUILD_FAIL";
+        } else if (finalBlockedReason != null && hardReasons.has(finalBlockedReason)) {
+          hardBlockPresent = true;
+          hardBlockReason = finalBlockedReason;
         }
-      } else if (finalBlockedReason != null && protectedV2BlockReasons.has(finalBlockedReason)) {
-        protectedBlockNotOverridden = true;
+        if (hardBlockPresent) {
+          finalBlockedReason = hardBlockReason;
+        } else {
+          if (finalBlockedReason != null) {
+            softBlockWarnings.push(finalBlockedReason);
+            if (!softReasons.has(finalBlockedReason)) {
+              softBlockWarnings.push(`LEGACY_SOFT_GATE:${finalBlockedReason}`);
+            }
+          }
+          finalBlockedReason = null;
+        }
       }
-      const v2AuthorityPreservedAfterRiskAlignment = finalBlockedReason == null && riskAlignmentBlockOverridden;
-      const finalBlockedReasonAfterV2Preserve = finalBlockedReason;
+      const finalBlockedReasonAfterV2Finalizer = finalBlockedReason;
+      const finalAuthorizedAfterV2Finalizer = finalBlockedReasonAfterV2Finalizer === null;
+      this.logger.info("V2_FINAL_AUTHORIZATION_PROOF", {
+        symbol: sym,
+        authority_source: authority.source,
+        adopted_engine: adoptedEngine,
+        authority_decision_before: authority.decision,
+        authority_decision_after: authorityDecisionForExecution,
+        authority_side: authority.side,
+        hard_block_present: hardBlockPresent,
+        hard_block_reason: hardBlockReason,
+        soft_block_warnings: softBlockWarnings,
+        final_authorized_before: finalAuthorizedBeforeV2Finalizer,
+        final_authorized_after: finalAuthorizedAfterV2Finalizer,
+        final_blocked_reason_before: finalBlockedReasonBeforeV2Finalizer,
+        final_blocked_reason_after: finalBlockedReasonAfterV2Finalizer,
+        size_usd_before: authoritySizeUsdForFinalizer,
+        size_usd_after: authoritySizeUsdForFinalizer,
+        risk_mode: riskModeForFinalizer,
+        active_engine_routing: activeEngineRoutingForFinalizer,
+        stage1_execution_engine: stage1ExecutionEngineForFinalizer,
+        serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+        closeOnlyMode: this.serverTradeControlState.close_only_mode,
+        killSwitch: this.serverTradeControlState.kill_switch_active,
+        reconcileSafeMode: this.reconcileSafetyCloseOnly
+      });
       const regimeNowForInvariant = (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime;
       if ((regimeNowForInvariant === "RANGE" || regimeNowForInvariant === "NO_TRADE") && authority.leverageProfile && authority.leverageProfile !== "BASE") {
         this.logger.error("LEVERAGE_POLICY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
@@ -7004,11 +7072,19 @@ export class PaperEngine {
         executor: stage1ExecutorLabel,
         final_authorized: finalEntryAuthorization,
         final_blocked_reason: finalBlockedReason,
-        v2_authority_preserved_after_risk_alignment: v2AuthorityPreservedAfterRiskAlignment,
-        final_blocked_reason_before_v2_preserve: finalBlockedReasonBeforeV2Preserve,
-        final_blocked_reason_after_v2_preserve: finalBlockedReasonAfterV2Preserve,
-        risk_alignment_block_overridden: riskAlignmentBlockOverridden,
-        protected_block_not_overridden: protectedBlockNotOverridden,
+        v2_final_authorization_applied: v2FinalAuthorizationApplied,
+        hard_block_present: hardBlockPresent,
+        hard_block_reason: hardBlockReason,
+        soft_block_warnings: softBlockWarnings,
+        final_authorized_before_v2_finalizer: finalAuthorizedBeforeV2Finalizer,
+        final_authorized_after_v2_finalizer: finalAuthorizedAfterV2Finalizer,
+        final_blocked_reason_before_v2_finalizer: finalBlockedReasonBeforeV2Finalizer,
+        final_blocked_reason_after_v2_finalizer: finalBlockedReasonAfterV2Finalizer,
+        authority_source: authority.source,
+        authority_side: authority.side,
+        authority_size_usd: authoritySizeUsdForFinalizer,
+        active_engine_routing: activeEngineRoutingForFinalizer,
+        stage1_execution_engine: stage1ExecutionEngineForFinalizer,
         ai_approved: aiExecutionApproved,
         policy_paused: policyPaused,
         allow_long: allowLongGuard,
