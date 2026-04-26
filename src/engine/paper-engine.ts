@@ -6515,6 +6515,35 @@ export class PaperEngine {
         !crashGuardRegimeAwareReleased;
 
       const zone = typeof first.boxPos === "number" && Number.isFinite(first.boxPos) ? classifyBoxZone(first.boxPos) : null;
+      const exDetail = (res.executorDecision?.detail ?? null) as Record<string, unknown> | null;
+      const bypassReason =
+        typeof exDetail?.crash_lock_bypass_reason === "string" && exDetail.crash_lock_bypass_reason.length > 0
+          ? exDetail.crash_lock_bypass_reason
+          : typeof exDetail?.bypass_reason === "string" && exDetail.bypass_reason.length > 0
+            ? exDetail.bypass_reason
+            : null;
+      const overrideReason =
+        typeof exDetail?.override_reason === "string" && exDetail.override_reason.length > 0
+          ? exDetail.override_reason
+          : bypassReason;
+      const preRiskCrashState =
+        typeof exDetail?.pre_risk_crash_state === "string" && exDetail.pre_risk_crash_state.length > 0
+          ? exDetail.pre_risk_crash_state
+          : crashState;
+      const reversalConfirmed =
+        res.executorDecision?.entry_allowed === true &&
+        (res.executorDecision?.blocked_reason == null ||
+          !String(res.executorDecision?.blocked_reason).toLowerCase().includes("reversal_confirm"));
+      const rangeZoneAlignedForCrashBypass =
+        (authority.side === "long" && zone === "lower") ||
+        (authority.side === "short" && zone === "upper");
+      const rangeContextForCrashBypass =
+        activeEngine === "RANGE" || String(authority.regime ?? "").toUpperCase() === "RANGE";
+      const serverControlAllowsEntry =
+        this.serverTradeControlState.server_trade_enabled &&
+        !this.serverTradeControlState.close_only_mode &&
+        !this.serverTradeControlState.kill_switch_active &&
+        !this.reconcileSafetyCloseOnly;
       const ngeStage0UpperLongBlock =
         authority.side === "long" &&
         zone === "upper" &&
@@ -6629,6 +6658,37 @@ export class PaperEngine {
         finalBlockedReason = "AI_POLICY_BLOCKED";
       } else if (isNewEntry && policyPaused) {
         finalBlockedReason = "POLICY_PAUSED_OR_FORBIDDEN";
+      }
+      if (finalBlockedReason === "CRASH_ENTRY_GUARD_BLOCK") {
+        const finalBlockedReasonBefore = finalBlockedReason;
+        const crashBypassEligible =
+          rangeContextForCrashBypass &&
+          authorityDecisionForExecution === "ENTER" &&
+          rangeZoneAlignedForCrashBypass &&
+          reversalConfirmed &&
+          (crashState === "CRASH_LOCK" || crashState === "CRASH_EXIT") &&
+          (bypassReason != null || overrideReason != null) &&
+          serverControlAllowsEntry;
+        if (crashBypassEligible) {
+          finalBlockedReason = null;
+          this.logger.info("CRASH_ENTRY_GUARD_BYPASS_APPLIED", {
+            symbol: sym,
+            side: authority.side,
+            zone,
+            crash_state: crashState,
+            pre_risk_crash_state: preRiskCrashState,
+            crash_lock_until: crashLockUntil,
+            bypass_reason: bypassReason,
+            override_reason: overrideReason,
+            reversal_confirmed: reversalConfirmed,
+            rangeConfidence: first.rangeConfidence ?? null,
+            authority_decision: authorityDecisionForExecution,
+            authority_source: authority.source,
+            active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
+            final_blocked_reason_before: finalBlockedReasonBefore,
+            final_blocked_reason_after: finalBlockedReason
+          });
+        }
       }
       const regimeNowForInvariant = (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime;
       if ((regimeNowForInvariant === "RANGE" || regimeNowForInvariant === "NO_TRADE") && authority.leverageProfile && authority.leverageProfile !== "BASE") {
