@@ -381,7 +381,7 @@ export interface ExecutorOutput {
     baseSizeIntent: number;
     recheckSuggested: boolean;
     isAddOnEligible: boolean;
-    metadata: Record<string, string | number | boolean>;
+    metadata: Record<string, string | number | boolean | null>;
 }
 
 /** Tier 5: Risk Sizing Output */

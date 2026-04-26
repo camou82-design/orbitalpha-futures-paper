@@ -136,6 +136,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let v2RejectReasonAfterPromotion: string | null = blockReason;
     let promotionApplied = false;
     let promotionReason: string | null = null;
+    let promotionBlockReason: string | null = null;
+    let promotionMinConditionPassed = false;
 
     const shock = input.state.directionalShockState ?? "NONE";
     const marketMode = String(judgment.regime ?? "UNKNOWN");
@@ -159,12 +161,52 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             shock === "UP" ? "long" :
                 emaGap < 0 ? "short" :
                     emaGap > 0 ? "long" : "none";
-    const boxPos = Number(input.snapshot?.boxPos ?? 0.5);
-    const zone = boxPos >= 0.74 ? "upper" : boxPos <= 0.26 ? "lower" : "mid";
-    const rangeConfidence = Number(input.snapshot?.rangeConfidence ?? 0);
-    const boxCohesion01 = Number(input.snapshot?.boxCohesion01 ?? 0);
-    const relaxedRangeEntry = execution.metadata?.relaxedRangeEntry === true;
-    const reversalConfirmed = execution.metadata?.reversal_confirmed === true;
+    const execMeta = execution.metadata ?? {};
+    const readNullableNumber = (...values: unknown[]): number | null => {
+        for (const v of values) {
+            if (typeof v === "number" && Number.isFinite(v)) return v;
+        }
+        return null;
+    };
+    const readNullableBoolean = (...values: unknown[]): boolean | null => {
+        for (const v of values) {
+            if (typeof v === "boolean") return v;
+        }
+        return null;
+    };
+    const boxPos = readNullableNumber(execMeta.boxPos, input.snapshot?.boxPos);
+    const zoneFromMeta = typeof execMeta.zone === "string" ? execMeta.zone : null;
+    const zone = zoneFromMeta ?? (boxPos == null ? "mid" : boxPos >= 0.74 ? "upper" : boxPos <= 0.26 ? "lower" : "mid");
+    const rangeConfidence = readNullableNumber(execMeta.rangeConfidence, input.snapshot?.rangeConfidence);
+    const boxCohesion01 = readNullableNumber(execMeta.boxCohesion01, input.snapshot?.boxCohesion01);
+    const trendWeaknessFromMeta = readNullableNumber(execMeta.trendWeaknessScore, input.snapshot?.trendWeaknessScore);
+    const relaxedRangeEntry = readNullableBoolean(execMeta.relaxedRangeEntry) === true;
+    const reversalConfirmed = readNullableBoolean(execMeta.reversal_confirmed) === true;
+    const sideZoneValidMeta = readNullableBoolean(execMeta.sideZoneValid);
+    const sideZoneValid =
+        sideZoneValidMeta != null
+            ? sideZoneValidMeta
+            : ((zone === "lower" && allowNewLong && riskLongAllow) || (zone === "upper" && allowNewShort && riskShortAllow));
+    const rangeMetadataSource =
+        execMeta.rangeConfidence != null ||
+            execMeta.boxCohesion01 != null ||
+            execMeta.trendWeaknessScore != null ||
+            execMeta.boxPos != null ||
+            execMeta.zone != null ||
+            execMeta.reversal_confirmed != null ||
+            execMeta.relaxedRangeEntry != null
+            ? "executor_metadata"
+            : "snapshot_fallback";
+    const rangeMetadataMissingFields = [
+        rangeConfidence == null ? "rangeConfidence" : null,
+        boxCohesion01 == null ? "boxCohesion01" : null,
+        trendWeaknessFromMeta == null ? "trendWeaknessScore" : null,
+        boxPos == null ? "boxPos" : null,
+        zone == null ? "zone" : null
+    ].filter((x): x is string => x != null);
+    const rangeEdgeExtreme =
+        (v2SideAfterPromotion === "long" && (boxPos ?? 0.5) <= 0.08) ||
+            (v2SideAfterPromotion === "short" && (boxPos ?? 0.5) >= 0.92);
     const rangeSideCandidate: EngineV2Side =
         zone === "lower" && allowNewLong && riskLongAllow ? "long" :
             zone === "upper" && allowNewShort && riskShortAllow ? "short" : "none";
@@ -185,9 +227,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         input.state.reconcileSafeModeActive !== true &&
         String(input.state.riskMode ?? "").toUpperCase() !== "HALT" &&
         input.state.dailyLossGuardTriggered !== true;
+    const unpromotableRejectReasons = new Set<string>([
+        "ENTRY_QUALITY_CONTAMINATED_SIMILAR",
+        "CRASH_ENTRY_GUARD_BLOCK",
+        "RISK_EXPOSURE_CAP_PRE_SUBMIT",
+        "ORDER_BUILD_FAIL"
+    ]);
 
     if (hardControlClear) {
+        if (v2RejectReasonAfterPromotion != null && unpromotableRejectReasons.has(v2RejectReasonAfterPromotion)) {
+            promotionBlockReason = v2RejectReasonAfterPromotion;
+        }
         const trendPromotionCandidate =
+            promotionBlockReason == null &&
             (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD" || v2SideAfterPromotion === "none") &&
             (v2RejectReasonAfterPromotion === "WAIT_RECHECK" || v2RejectReasonAfterPromotion == null) &&
             activeEngineRouting === "TREND" &&
@@ -204,31 +256,41 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 v2RejectReasonAfterPromotion = null;
                 promotionApplied = true;
                 promotionReason = "V2_TREND_QUALIFIED_FINAL_PROMOTION";
+                promotionMinConditionPassed = true;
             } else if (entryQualityGrade === "B" && (reviewingTicks >= 2 || qualityScore >= 80)) {
                 v2DecisionAfterPromotion = "ENTER";
                 v2SideAfterPromotion = trendSideCandidate;
                 v2RejectReasonAfterPromotion = null;
                 promotionApplied = true;
                 promotionReason = "V2_TREND_QUALIFIED_FINAL_PROMOTION";
+                promotionMinConditionPassed = true;
             }
         }
 
         const rangePromotionCandidate =
+            promotionBlockReason == null &&
             (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD" || v2SideAfterPromotion === "none") &&
             activeEngineRouting === "RANGE" &&
             rangeSideCandidate !== "none" &&
             zone !== "mid" &&
-            rangeConfidence >= 0.65 &&
-            boxCohesion01 >= 0.9 &&
-            trendWeaknessScore >= 0.7 &&
+            sideZoneValid &&
+            (rangeConfidence ?? 0) >= 0.65 &&
+            (boxCohesion01 ?? 0) >= 0.9 &&
+            (trendWeaknessFromMeta ?? 0) >= 0.7 &&
             qualityScore >= 80 &&
-            (relaxedRangeEntry || reversalConfirmed);
+            (
+                relaxedRangeEntry ||
+                reversalConfirmed ||
+                ((rangeConfidence ?? 0) >= 0.70 && rangeSideCandidate === "long" && (boxPos ?? 1) <= 0.08) ||
+                ((rangeConfidence ?? 0) >= 0.70 && rangeSideCandidate === "short" && (boxPos ?? 0) >= 0.92)
+            );
         if (rangePromotionCandidate) {
             v2DecisionAfterPromotion = "ENTER";
             v2SideAfterPromotion = rangeSideCandidate;
             v2RejectReasonAfterPromotion = null;
             promotionApplied = true;
             promotionReason = "V2_RANGE_QUALIFIED_FINAL_PROMOTION";
+            promotionMinConditionPassed = true;
         }
 
         const saCandidateSide = trendSideCandidate !== "none" ? trendSideCandidate : rangeSideCandidate;
@@ -243,7 +305,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2RejectReasonAfterPromotion = null;
             promotionApplied = true;
             promotionReason = promotionReason ?? "V2_TREND_QUALIFIED_FINAL_PROMOTION";
+            promotionMinConditionPassed = true;
         }
+    } else {
+        promotionBlockReason = "HARD_CONTROL_NOT_CLEAR";
     }
 
     finalDecision = v2DecisionAfterPromotion;
@@ -295,9 +360,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         trendOk,
         rangeConfidence,
         boxCohesion01,
-        trendWeaknessScore: trendWeaknessScore,
+        trendWeaknessScore: trendWeaknessFromMeta,
         boxPos: boxPos,
         zone,
+        range_metadata_source: rangeMetadataSource,
+        range_metadata_missing_fields: rangeMetadataMissingFields.join("|") || null,
+        side_zone_valid: sideZoneValid,
+        range_edge_extreme: rangeEdgeExtreme,
         relaxedRangeEntry,
         reversal_confirmed: reversalConfirmed,
         decision_before: v2DecisionBeforePromotion,
@@ -308,6 +377,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         decision_after: finalDecision,
         side_after: v2SideAfterPromotion,
         reject_reason_after: blockReason,
+        promotion_block_reason: promotionBlockReason,
+        promotion_min_condition_passed: promotionMinConditionPassed,
         hard_block_present: !hardControlClear,
         hard_block_reason: hardControlClear ? null : "HARD_CONTROL_NOT_CLEAR"
     }));
