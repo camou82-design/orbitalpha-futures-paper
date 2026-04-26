@@ -8115,33 +8115,59 @@ export class PaperEngine {
         hasRangeEdge;
       if (rangeSideZoneMismatchReason !== null) {
         const zone = classifyRangeActionZone(boxPos ?? 0.5);
-        const tfHiMismatch = entryGateHigherTimeframe();
-        const limHiMismatch = entryGateHigherTfKlineLimit();
-        const rC5Mismatch = await this.okxPublic.tryGetCandles(symbol, tfHiMismatch, limHiMismatch);
-        symbolDiagnostics.push(toSymbolDiagnostic(symbol, EP.kline, rC5Mismatch.diagnostics));
-        const higherCandlesMismatch = rC5Mismatch.ok ? rC5Mismatch.value : null;
-        const mismatchDiagGate = evaluateEntryCostAndHigherTfGate({
-          entryTimeframeCandles: rC.value,
-          higherTfCandles: higherCandlesMismatch,
-          refPrice: lastPrice,
-          takerFeeRate: this.config.paperTakerFeeRate,
-          fundingRate: rF.value.rate,
-          gateOptions: {
-            minMoveMultiplier: this.config.paperGateMinMoveMultiplier,
-            requireHigherTfAlign: this.config.paperRequireHigherTfAlign
-          },
-          paperBypassExpectedMoveGate: false,
-          entryDirection: entrySide
-        });
-        const gateExpectedMove = mismatchDiagGate.expectedMove;
-        const gateRequiredMove = mismatchDiagGate.requiredMove;
-        const expectedMoveRatio =
-          typeof gateRequiredMove === "number" &&
-          gateRequiredMove > 0 &&
-          Number.isFinite(gateExpectedMove) &&
-          Number.isFinite(gateRequiredMove)
-            ? gateExpectedMove / gateRequiredMove
-            : null;
+        let mismatchDiagnosticSource:
+          | "reused_existing_gate"
+          | "local_entry_tf_only_no_extra_fetch"
+          | "null_no_extra_fetch" = "null_no_extra_fetch";
+        let proofGateExpectedMove: number | null = null;
+        let proofGateRequiredMove: number | null = null;
+        let proofExpectedMoveRatio: number | null = null;
+
+        const reusedGateSnapshot: ReturnType<typeof evaluateEntryCostAndHigherTfGate> | null =
+          gateEval as ReturnType<typeof evaluateEntryCostAndHigherTfGate> | null;
+        if (reusedGateSnapshot !== null) {
+          mismatchDiagnosticSource = "reused_existing_gate";
+          const ge = reusedGateSnapshot.expectedMove;
+          const gr = reusedGateSnapshot.requiredMove;
+          proofGateExpectedMove = Number.isFinite(ge) ? ge : null;
+          proofGateRequiredMove = Number.isFinite(gr) ? gr : null;
+          if (
+            typeof gr === "number" &&
+            gr > 0 &&
+            Number.isFinite(ge) &&
+            Number.isFinite(gr)
+          ) {
+            proofExpectedMoveRatio = ge / gr;
+          }
+        } else if (rC.value.length > 0 && Number.isFinite(lastPrice) && lastPrice > 0) {
+          mismatchDiagnosticSource = "local_entry_tf_only_no_extra_fetch";
+          const localOnlyGate = evaluateEntryCostAndHigherTfGate({
+            entryTimeframeCandles: rC.value,
+            higherTfCandles: null,
+            refPrice: lastPrice,
+            takerFeeRate: this.config.paperTakerFeeRate,
+            fundingRate: rF.value.rate,
+            gateOptions: {
+              minMoveMultiplier: this.config.paperGateMinMoveMultiplier,
+              requireHigherTfAlign: this.config.paperRequireHigherTfAlign
+            },
+            paperBypassExpectedMoveGate: false,
+            entryDirection: entrySide
+          });
+          const ge = localOnlyGate.expectedMove;
+          const gr = localOnlyGate.requiredMove;
+          proofGateExpectedMove = Number.isFinite(ge) ? ge : null;
+          proofGateRequiredMove = Number.isFinite(gr) ? gr : null;
+          if (
+            typeof gr === "number" &&
+            gr > 0 &&
+            Number.isFinite(ge) &&
+            Number.isFinite(gr)
+          ) {
+            proofExpectedMoveRatio = ge / gr;
+          }
+        }
+
         signal = "none";
         entryCandidate = false;
         gateBlockedReason = rangeSideZoneMismatchReason;
@@ -8154,9 +8180,9 @@ export class PaperEngine {
           boxPos: boxPos ?? null,
           zone,
           rangeConfidence: regimeDetected.rangeConfidence ?? null,
-          gateExpectedMove: Number.isFinite(gateExpectedMove) ? gateExpectedMove : null,
-          gateRequiredMove: Number.isFinite(gateRequiredMove) ? gateRequiredMove : null,
-          expectedMoveRatio,
+          gateExpectedMove: proofGateExpectedMove,
+          gateRequiredMove: proofGateRequiredMove,
+          expectedMoveRatio: proofExpectedMoveRatio,
           boxCohesion01: regimeDetected.boxCohesion01 ?? null,
           breakoutFailureRate: regimeDetected.breakoutFailureRate ?? null,
           trendWeaknessScore: regimeDetected.trendWeaknessScore ?? null,
@@ -8165,7 +8191,8 @@ export class PaperEngine {
           qualityScore,
           signalDecisionOrigin,
           finalRejectReason: gateBlockedReason,
-          activeEngine: "RANGE"
+          activeEngine: "RANGE",
+          mismatchDiagnosticSource
         });
       } else if (this.config.paperQualityMinScore > 0 && qualityScore < qualityMinEffective) {
         if (rangeSignalKeepByRelaxCandidate) {
