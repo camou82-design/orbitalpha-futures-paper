@@ -128,8 +128,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         else decisionBeforeReadiness = "ENTER";
     }
 
-    // TREND authority pre-stage1 promotion:
-    // Only for v2 HOLD + WAIT_RECHECK, directional shock aligned side, and quality-qualified contexts.
     const v2DecisionBeforePromotion = finalDecision;
     const v2SideBeforePromotion = execution.side;
     const v2RejectReasonBeforePromotion = blockReason;
@@ -143,13 +141,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const marketMode = String(judgment.regime ?? "UNKNOWN");
     const activeEngineRouting = String(routing.executor ?? "UNKNOWN");
     const qualityScore = Number(input.snapshot?.qualityScore ?? 0);
-    const trendWeakness = Number(input.snapshot?.trendWeaknessScore ?? 1);
+    const trendWeaknessScore = Number(input.snapshot?.trendWeaknessScore ?? 1);
     const emaGap = Number(input.snapshot?.emaGap ?? 0);
     const trendOk =
         Number.isFinite(emaGap) &&
-        Number.isFinite(trendWeakness) &&
+        Number.isFinite(trendWeaknessScore) &&
         Math.abs(emaGap) >= 0.0004 &&
-        trendWeakness < 0.5;
+        trendWeaknessScore < 0.5;
     const entryQualityGrade = riskSizing.entryQualityGrade ?? "B";
     const reviewingTicks = Number(input.snapshot?.reviewing_ticks ?? 0);
     const allowNewLong = Boolean((riskSizing.diagnostics as Record<string, unknown> | undefined)?.allow_new_long ?? input.state.longAllow);
@@ -161,43 +159,90 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             shock === "UP" ? "long" :
                 emaGap < 0 ? "short" :
                     emaGap > 0 ? "long" : "none";
+    const boxPos = Number(input.snapshot?.boxPos ?? 0.5);
+    const zone = boxPos >= 0.74 ? "upper" : boxPos <= 0.26 ? "lower" : "mid";
+    const rangeConfidence = Number(input.snapshot?.rangeConfidence ?? 0);
+    const boxCohesion01 = Number(input.snapshot?.boxCohesion01 ?? 0);
+    const relaxedRangeEntry = execution.metadata?.relaxedRangeEntry === true;
+    const reversalConfirmed = execution.metadata?.reversal_confirmed === true;
+    const rangeSideCandidate: EngineV2Side =
+        zone === "lower" && allowNewLong && riskLongAllow ? "long" :
+            zone === "upper" && allowNewShort && riskShortAllow ? "short" : "none";
     const alignedSignal =
         trendSideCandidate === "short" ? "paper_short_candidate" :
             trendSideCandidate === "long" ? "paper_long_candidate" : "none";
 
-    const eligibleWaitRecheckPromotion =
-        v2DecisionBeforePromotion === "HOLD" &&
-        v2RejectReasonBeforePromotion === "WAIT_RECHECK" &&
-        execution.signal === "WAIT_RECHECK" &&
-        (activeEngineRouting === "TREND" || marketMode === "TREND");
+    const readinessDiag = (riskSizing.diagnostics ?? {}) as Record<string, unknown>;
+    const paperExecutionReady = readinessDiag.paper_execution_ready === true;
+    const signedExecutionReady = readinessDiag.signed_execution_ready === true;
+    const hardControlClear =
+        paperExecutionReady === true &&
+        input.state.serverTradeEnabled !== false &&
+        input.state.closeOnlyMode !== true &&
+        input.state.killSwitch !== true &&
+        input.state.killSwitchActive !== true &&
+        input.state.reconcileSafeMode !== true &&
+        input.state.reconcileSafeModeActive !== true &&
+        String(input.state.riskMode ?? "").toUpperCase() !== "HALT" &&
+        input.state.dailyLossGuardTriggered !== true;
 
-    if (eligibleWaitRecheckPromotion) {
-        const directionalAligned =
-            (shock === "DOWN" && trendSideCandidate === "short" && allowNewShort && riskShortAllow) ||
-            (shock === "UP" && trendSideCandidate === "long" && allowNewLong && riskLongAllow);
-
-        if (directionalAligned) {
+    if (hardControlClear) {
+        const trendPromotionCandidate =
+            (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD" || v2SideAfterPromotion === "none") &&
+            (v2RejectReasonAfterPromotion === "WAIT_RECHECK" || v2RejectReasonAfterPromotion == null) &&
+            activeEngineRouting === "TREND" &&
+            trendSideCandidate !== "none" &&
+            trendOk;
+        const shockAligned =
+            shock === "NONE" ||
+            (shock === "UP" && trendSideCandidate === "long") ||
+            (shock === "DOWN" && trendSideCandidate === "short");
+        if (trendPromotionCandidate && shockAligned) {
             if (entryQualityGrade === "S" || entryQualityGrade === "A") {
                 v2DecisionAfterPromotion = "ENTER";
                 v2SideAfterPromotion = trendSideCandidate;
                 v2RejectReasonAfterPromotion = null;
                 promotionApplied = true;
-                promotionReason = "trend_wait_recheck_aligned_top_grade_enter";
-            } else if (entryQualityGrade === "B") {
-                if (reviewingTicks >= 2) {
-                    v2DecisionAfterPromotion = "ENTER";
-                    v2SideAfterPromotion = trendSideCandidate;
-                    v2RejectReasonAfterPromotion = null;
-                    promotionApplied = true;
-                    promotionReason = "trend_wait_recheck_aligned_grade_b_confirmed_enter";
-                } else {
-                    v2DecisionAfterPromotion = "HOLD";
-                    v2SideAfterPromotion = trendSideCandidate;
-                    v2RejectReasonAfterPromotion = "WAIT_RECHECK";
-                    promotionApplied = true;
-                    promotionReason = "trend_wait_recheck_aligned_grade_b_hold_pending";
-                }
+                promotionReason = "V2_TREND_QUALIFIED_FINAL_PROMOTION";
+            } else if (entryQualityGrade === "B" && (reviewingTicks >= 2 || qualityScore >= 80)) {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = trendSideCandidate;
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = "V2_TREND_QUALIFIED_FINAL_PROMOTION";
             }
+        }
+
+        const rangePromotionCandidate =
+            (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD" || v2SideAfterPromotion === "none") &&
+            activeEngineRouting === "RANGE" &&
+            rangeSideCandidate !== "none" &&
+            zone !== "mid" &&
+            rangeConfidence >= 0.65 &&
+            boxCohesion01 >= 0.9 &&
+            trendWeaknessScore >= 0.7 &&
+            qualityScore >= 80 &&
+            (relaxedRangeEntry || reversalConfirmed);
+        if (rangePromotionCandidate) {
+            v2DecisionAfterPromotion = "ENTER";
+            v2SideAfterPromotion = rangeSideCandidate;
+            v2RejectReasonAfterPromotion = null;
+            promotionApplied = true;
+            promotionReason = "V2_RANGE_QUALIFIED_FINAL_PROMOTION";
+        }
+
+        const saCandidateSide = trendSideCandidate !== "none" ? trendSideCandidate : rangeSideCandidate;
+        const saPromotionNeeded =
+            (entryQualityGrade === "S" || entryQualityGrade === "A") &&
+            saCandidateSide !== "none" &&
+            (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD") &&
+            v2SideAfterPromotion === "none";
+        if (saPromotionNeeded) {
+            v2DecisionAfterPromotion = "ENTER";
+            v2SideAfterPromotion = saCandidateSide;
+            v2RejectReasonAfterPromotion = null;
+            promotionApplied = true;
+            promotionReason = promotionReason ?? "V2_TREND_QUALIFIED_FINAL_PROMOTION";
         }
     }
 
@@ -210,7 +255,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         finalReason = `HOLD: ${promotionReason ?? "WAIT_RECHECK"}`;
     }
 
-    console.log("[V2_TREND_AUTHORITY_DIAGNOSTIC_PROOF]", {
+    console.info(JSON.stringify({
+        event: "V2_TREND_AUTHORITY_DIAGNOSTIC_PROOF",
         symbol: String(input.symbol),
         market_mode: marketMode,
         active_engine_routing: activeEngineRouting,
@@ -233,9 +279,40 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2_decision_after: finalDecision,
         v2_side_after: v2SideAfterPromotion,
         v2_reject_reason_after: blockReason
-    });
-    const readinessDiag = (riskSizing.diagnostics ?? {}) as Record<string, unknown>;
-    console.log("[V2_EXECUTION_READINESS_PROOF]", {
+    }));
+    console.info(JSON.stringify({
+        event: "V2_AUTHORITY_PROMOTION_FINALIZER_PROOF",
+        symbol: String(input.symbol),
+        market_mode: marketMode,
+        active_engine_routing: activeEngineRouting,
+        paper_execution_ready: paperExecutionReady,
+        signed_execution_ready: signedExecutionReady,
+        directional_shock_state: shock,
+        trend_side_candidate: trendSideCandidate,
+        range_side_candidate: rangeSideCandidate,
+        entry_quality_grade: entryQualityGrade,
+        quality_score: qualityScore,
+        trendOk,
+        rangeConfidence,
+        boxCohesion01,
+        trendWeaknessScore: trendWeaknessScore,
+        boxPos: boxPos,
+        zone,
+        relaxedRangeEntry,
+        reversal_confirmed: reversalConfirmed,
+        decision_before: v2DecisionBeforePromotion,
+        side_before: v2SideBeforePromotion,
+        reject_reason_before: v2RejectReasonBeforePromotion,
+        promotion_applied: promotionApplied,
+        promotion_reason: promotionReason,
+        decision_after: finalDecision,
+        side_after: v2SideAfterPromotion,
+        reject_reason_after: blockReason,
+        hard_block_present: !hardControlClear,
+        hard_block_reason: hardControlClear ? null : "HARD_CONTROL_NOT_CLEAR"
+    }));
+    console.info(JSON.stringify({
+        event: "V2_EXECUTION_READINESS_PROOF",
         symbol: String(input.symbol),
         paper_execution_ready: readinessDiag.paper_execution_ready ?? null,
         signed_execution_ready: readinessDiag.signed_execution_ready ?? null,
@@ -252,7 +329,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2_input_ready: readinessDiag.v2_input_ready ?? null,
         decision_before_readiness: decisionBeforeReadiness,
         decision_after_readiness: decisionAfterReadiness
-    });
+    }));
 
     const decision: EngineV2Decision = {
         symbol: input.symbol,
