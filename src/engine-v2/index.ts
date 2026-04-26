@@ -120,6 +120,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     } else {
         finalReason = `SKIPPED: ${execution.reason}`;
     }
+    let decisionBeforeReadiness: EngineV2FinalDecision = finalDecision;
+    if (blockReason === "EXECUTION_READINESS_FALSE") {
+        if (waitingRecheck) decisionBeforeReadiness = "HOLD";
+        else if (invalidNoneSignal || invalidSideForEnter) decisionBeforeReadiness = "SKIP";
+        else if (invalidSize) decisionBeforeReadiness = "REJECT";
+        else decisionBeforeReadiness = "ENTER";
+    }
 
     // TREND authority pre-stage1 promotion:
     // Only for v2 HOLD + WAIT_RECHECK, directional shock aligned side, and quality-qualified contexts.
@@ -196,6 +203,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     finalDecision = v2DecisionAfterPromotion;
     blockReason = v2RejectReasonAfterPromotion;
+    const decisionAfterReadiness: EngineV2FinalDecision = finalDecision;
     if (finalDecision === "ENTER") {
         finalReason = promotionReason ?? explanation.reason;
     } else if (finalDecision === "HOLD" && promotionApplied) {
@@ -225,6 +233,25 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2_decision_after: finalDecision,
         v2_side_after: v2SideAfterPromotion,
         v2_reject_reason_after: blockReason
+    });
+    const readinessDiag = (riskSizing.diagnostics ?? {}) as Record<string, unknown>;
+    console.log("[V2_EXECUTION_READINESS_PROOF]", {
+        symbol: String(input.symbol),
+        paper_execution_ready: readinessDiag.paper_execution_ready ?? null,
+        signed_execution_ready: readinessDiag.signed_execution_ready ?? null,
+        paper_readiness_block_reasons: readinessDiag.paper_readiness_block_reasons ?? null,
+        signed_readiness_block_reason: readinessDiag.signed_readiness_block_reason ?? null,
+        serverTradeEnabled: input.state.serverTradeEnabled ?? null,
+        closeOnlyMode: input.state.closeOnlyMode ?? null,
+        killSwitch: (input.state.killSwitch ?? input.state.killSwitchActive) ?? null,
+        reconcileSafeMode: (input.state.reconcileSafeMode ?? input.state.reconcileSafeModeActive) ?? null,
+        riskMode: readinessDiag.risk_mode ?? input.state.riskMode ?? null,
+        dailyLossGuardTriggered: readinessDiag.daily_loss_guard_triggered ?? input.state.dailyLossGuardTriggered ?? null,
+        market_snapshot_ready: readinessDiag.market_snapshot_ready ?? null,
+        position_state_ready: readinessDiag.position_state_ready ?? null,
+        v2_input_ready: readinessDiag.v2_input_ready ?? null,
+        decision_before_readiness: decisionBeforeReadiness,
+        decision_after_readiness: decisionAfterReadiness
     });
 
     const decision: EngineV2Decision = {
@@ -298,6 +325,8 @@ export function adaptV2Input(
         maxUsableMarginKrw?: number;
         exposureNotionalCapKrw?: number;
         symbolExposureNotionalCapKrw?: number;
+        riskMode?: string | null;
+        dailyLossGuardTriggered?: boolean;
     },
     v1Result: LegacyResultAdapter
 ): EngineV2Input {
@@ -359,6 +388,8 @@ export function adaptV2Input(
             reconcileSafeMode: state.reconcileSafeMode,
             killSwitchActive: state.killSwitchActive,
             reconcileSafeModeActive: state.reconcileSafeModeActive,
+            riskMode: state.riskMode ?? undefined,
+            dailyLossGuardTriggered: state.dailyLossGuardTriggered ?? false,
             accountEquityKrw: state.accountEquityKrw,
             maxUsableMarginKrw: state.maxUsableMarginKrw,
             exposureNotionalCapKrw: state.exposureNotionalCapKrw,

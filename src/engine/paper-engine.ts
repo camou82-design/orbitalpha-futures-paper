@@ -9073,6 +9073,8 @@ function buildV2StateBridge(
     reconcileSafeMode: reconcileSafeModeActive,
     killSwitchActive: serverTradeControlState.kill_switch_active,
     reconcileSafeModeActive,
+    riskMode: lastRisk?.riskStatus ?? undefined,
+    dailyLossGuardTriggered: lastRisk?.dailyLossGuardTriggered ?? false,
     accountEquityKrw: 500_000,
     maxUsableMarginKrw: 420_000,
     exposureNotionalCapKrw: 2_000_000,

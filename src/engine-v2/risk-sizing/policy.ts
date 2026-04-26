@@ -64,13 +64,34 @@ export function calculateRiskSizing(
     const currentSymbolNotional = state.currentPositions
         .filter((p) => p.symbol === input.symbol)
         .reduce((acc, p) => acc + Math.max(0, p.sizeUsd), 0);
+    const marketSnapshotReady =
+        snapshot != null &&
+        Number.isFinite(snapshot.lastPrice) &&
+        snapshot.lastPrice > 0 &&
+        Number.isFinite(snapshot.latestCandleClose);
+    const positionStateReady = Array.isArray(state.currentPositions);
+    const v2InputReady = marketSnapshotReady && positionStateReady;
+    const riskModeUpper = String(state.riskMode ?? "").toUpperCase();
+    const dailyLossGuardTriggered = state.dailyLossGuardTriggered === true;
+    const paperReadinessBlockReasons: string[] = [];
+    if (state.serverTradeEnabled === false) paperReadinessBlockReasons.push("SERVER_TRADE_DISABLED");
+    if (state.closeOnlyMode === true) paperReadinessBlockReasons.push("CLOSE_ONLY_MODE");
+    if (state.killSwitch === true || state.killSwitchActive === true) paperReadinessBlockReasons.push("KILL_SWITCH");
+    if (state.reconcileSafeMode === true || state.reconcileSafeModeActive === true) paperReadinessBlockReasons.push("RECONCILE_SAFE_MODE");
+    if (riskModeUpper === "HALT") paperReadinessBlockReasons.push("RISK_MODE_HALT");
+    if (dailyLossGuardTriggered) paperReadinessBlockReasons.push("DAILY_LOSS_GUARD");
+    if (!marketSnapshotReady) paperReadinessBlockReasons.push("MARKET_SNAPSHOT_NOT_READY");
+    if (!positionStateReady) paperReadinessBlockReasons.push("POSITION_STATE_NOT_READY");
+    if (!v2InputReady) paperReadinessBlockReasons.push("V2_INPUT_NOT_READY");
+    const effectivePaperExecutionReady = paperReadinessBlockReasons.length === 0;
+    const signedReadinessBlockReason = state.signedExecutionReady === false ? "SIGNED_EXECUTION_NOT_READY" : null;
 
     // NO_TRADE: Hard block
     if (judgment.regime === "NO_TRADE") {
         isBlocked = true;
         blockReason = "NO_TRADE_REGIME";
     }
-    else if (!state.executionReadiness) {
+    else if (!effectivePaperExecutionReady) {
         isBlocked = true;
         blockReason = "EXECUTION_READINESS_FALSE";
     }
@@ -260,9 +281,16 @@ export function calculateRiskSizing(
         entry_quality_contaminated_sample_count: contaminatedSampleCount,
         loss_similarity_watch: lossSimilarityWatch,
         loss_similarity_hard_rejected: lossSimilarityHardRejected,
-        execution_readiness: state.executionReadiness,
-        paper_execution_ready: state.paperExecutionReady ?? state.executionReadiness,
+        execution_readiness: effectivePaperExecutionReady,
+        paper_execution_ready: effectivePaperExecutionReady,
         signed_execution_ready: state.signedExecutionReady ?? null,
+        paper_readiness_block_reasons: paperReadinessBlockReasons.join("|") || null,
+        signed_readiness_block_reason: signedReadinessBlockReason,
+        market_snapshot_ready: marketSnapshotReady,
+        position_state_ready: positionStateReady,
+        v2_input_ready: v2InputReady,
+        risk_mode: state.riskMode ?? null,
+        daily_loss_guard_triggered: dailyLossGuardTriggered,
         fresh_tick_barrier_active: state.freshTickBarrierActive,
         fresh_tick_completed_cycles: state.freshTickCompletedCycles,
         fresh_tick_required_cycles: state.freshTickRequiredCycles,
