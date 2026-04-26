@@ -160,9 +160,43 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
 
   const switchSizeMultiplier = clamp(finalLongSizeMult * 0.92 * sess.trendSwitchBoost, 0.18, 1.22);
   const routingPaused = marketMode.routing.newEntryPolicy === "paused";
+  const baseGateBlocked = routingPaused || openPositionCount >= maxSlots || riskMode === "HALT";
 
-  const allowNewLong = risk.longAllow && !routingPaused && openPositionCount < maxSlots && riskMode !== "HALT";
-  const allowNewShort = risk.shortAllow && !routingPaused && openPositionCount < maxSlots && riskMode !== "HALT";
+  const allowNewLongBeforeAlignment = risk.longAllow && !routingPaused && openPositionCount < maxSlots && riskMode !== "HALT";
+  const allowNewShortBeforeAlignment = risk.shortAllow && !routingPaused && openPositionCount < maxSlots && riskMode !== "HALT";
+  let allowNewLong = allowNewLongBeforeAlignment;
+  let allowNewShort = allowNewShortBeforeAlignment;
+  let alignedDirectionAllowApplied = false;
+  let alignedDirection: "long" | "short" | null = null;
+  let alignmentBlockProtectedReason: string | null = null;
+
+  if (risk.directionalShockState === "UP") {
+    alignedDirection = "long";
+    if (baseGateBlocked) {
+      alignmentBlockProtectedReason =
+        routingPaused ? "ROUTING_PAUSED" : openPositionCount >= maxSlots ? "MAX_SLOTS_REACHED" : "RISK_MODE_HALT";
+    } else {
+      // Directional UP: preserve aligned long path, keep short blocked.
+      if (!allowNewLong && risk.longAllow) {
+        allowNewLong = true;
+        alignedDirectionAllowApplied = true;
+      }
+      allowNewShort = false;
+    }
+  } else if (risk.directionalShockState === "DOWN") {
+    alignedDirection = "short";
+    if (baseGateBlocked) {
+      alignmentBlockProtectedReason =
+        routingPaused ? "ROUTING_PAUSED" : openPositionCount >= maxSlots ? "MAX_SLOTS_REACHED" : "RISK_MODE_HALT";
+    } else {
+      // Directional DOWN: preserve aligned short path, keep long blocked.
+      if (!allowNewShort && risk.shortAllow) {
+        allowNewShort = true;
+        alignedDirectionAllowApplied = true;
+      }
+      allowNewLong = false;
+    }
+  }
   const allowNewEntry = allowNewLong || allowNewShort;
 
   const shortReason = shortBlockedReason({
@@ -191,6 +225,13 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
       risk_mode: riskMode,
       open_position_count: openPositionCount,
       max_slots: maxSlots,
+      aligned_direction_allow_applied: alignedDirectionAllowApplied,
+      aligned_direction: alignedDirection,
+      allow_new_long_before_alignment: allowNewLongBeforeAlignment,
+      allow_new_long_after_alignment: allowNewLong,
+      allow_new_short_before_alignment: allowNewShortBeforeAlignment,
+      allow_new_short_after_alignment: allowNewShort,
+      alignment_block_protected_reason: alignmentBlockProtectedReason,
       allow_new_long: allowNewLong,
       allow_new_short: allowNewShort,
       allow_new_entry: allowNewEntry,

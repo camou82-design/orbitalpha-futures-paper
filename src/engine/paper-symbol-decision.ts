@@ -929,18 +929,41 @@ export function applyPaperSignalMarketAlignment<T extends SymbolSnapshotLike>(in
   const { snapshot, risk, signalAlignmentContext: ctx, adaptiveMode, marketSignalProofLogger } = input;
   const raw = snapshot.signal;
   const guardActive = isTrendUpShortSuppressMarketGuard(risk, ctx);
+  const rangeStructureContext =
+    snapshot.regimeStateDiag === "RANGE" &&
+    (raw === "paper_long_candidate" || raw === "paper_short_candidate");
+  const alignedDirectionCandidate: "long" | "short" | null =
+    raw === "paper_long_candidate" ? "long" : raw === "paper_short_candidate" ? "short" : null;
+  const isDirectionalShockUp = risk?.directionalShockState === "UP";
+  const isDirectionalShockDown = risk?.directionalShockState === "DOWN";
+  const suppressByDirectionalShock =
+    (isDirectionalShockUp && raw === "paper_short_candidate") ||
+    (isDirectionalShockDown && raw === "paper_long_candidate");
+  const preserveByRangeStructure =
+    rangeStructureContext &&
+    ((isDirectionalShockUp && raw === "paper_long_candidate") ||
+      (isDirectionalShockDown && raw === "paper_short_candidate"));
 
   let alignmentApplied = false;
-  let alignmentReason: "TREND_UP_SUPPRESS_RANGE_SHORT" | "TREND_UP_KEEP_LONG" | "NO_ALIGNMENT_APPLIED" =
+  let alignmentReason:
+    | "TREND_UP_SUPPRESS_RANGE_SHORT"
+    | "TREND_DOWN_SUPPRESS_RANGE_LONG"
+    | "TREND_UP_KEEP_LONG"
+    | "TREND_DOWN_KEEP_SHORT"
+    | "NO_ALIGNMENT_APPLIED" =
     "NO_ALIGNMENT_APPLIED";
   let out: T = snapshot;
 
-  if (guardActive && raw === "paper_short_candidate") {
+  if (suppressByDirectionalShock) {
     out = { ...snapshot, signal: "none" } as T;
     alignmentApplied = true;
-    alignmentReason = "TREND_UP_SUPPRESS_RANGE_SHORT";
+    alignmentReason = raw === "paper_short_candidate"
+      ? "TREND_UP_SUPPRESS_RANGE_SHORT"
+      : "TREND_DOWN_SUPPRESS_RANGE_LONG";
   } else if (guardActive && raw === "paper_long_candidate") {
     alignmentReason = "TREND_UP_KEEP_LONG";
+  } else if (preserveByRangeStructure) {
+    alignmentReason = raw === "paper_long_candidate" ? "TREND_UP_KEEP_LONG" : "TREND_DOWN_KEEP_SHORT";
   }
 
   const shouldEmit =
@@ -960,7 +983,11 @@ export function applyPaperSignalMarketAlignment<T extends SymbolSnapshotLike>(in
       raw_signal_before_alignment: raw,
       signal_after_alignment: out.signal,
       alignment_applied: alignmentApplied,
-      alignment_reason: alignmentReason
+      alignment_reason: alignmentReason,
+      range_structure_context: rangeStructureContext,
+      aligned_direction_candidate: alignedDirectionCandidate,
+      alignment_preserved_by_range_structure: preserveByRangeStructure,
+      alignment_suppressed_by_directional_shock: suppressByDirectionalShock
     });
   }
 

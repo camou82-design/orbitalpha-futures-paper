@@ -6690,6 +6690,45 @@ export class PaperEngine {
           });
         }
       }
+      const finalBlockedReasonBeforeV2Preserve = finalBlockedReason;
+      const protectedV2BlockReasons = new Set<string>([
+        "RISK_EXPOSURE_CAP_PRE_SUBMIT",
+        "ORDER_BUILD_FAIL",
+        "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE",
+        "CRASH_ENTRY_GUARD_BLOCK",
+        "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT",
+        "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG",
+        "RANGE_SIDE_ZONE_MISMATCH_MID_WAIT",
+        "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_MISMATCH",
+        "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_UNKNOWN"
+      ]);
+      const serverControlsOpen =
+        this.serverTradeControlState.server_trade_enabled &&
+        !this.serverTradeControlState.close_only_mode &&
+        !this.serverTradeControlState.kill_switch_active &&
+        !this.reconcileSafetyCloseOnly;
+      const dailyLossGuardActive = this.lastRisk?.dailyLossGuardTriggered === true;
+      const riskModeHalt = this.lastRiskExposure?.riskMode === "HALT";
+      const v2AuthorityPreserveEligible =
+        authority.source === "v2" &&
+        authorityDecisionForExecution === "ENTER" &&
+        serverControlsOpen &&
+        !riskModeHalt &&
+        !dailyLossGuardActive &&
+        finalBlockedReason != null &&
+        !protectedV2BlockReasons.has(finalBlockedReason);
+      let riskAlignmentBlockOverridden = false;
+      let protectedBlockNotOverridden = false;
+      if (v2AuthorityPreserveEligible) {
+        if (finalBlockedReason === "SIDE_NOT_ALLOWED_LONG" || finalBlockedReason === "SIDE_NOT_ALLOWED_SHORT") {
+          finalBlockedReason = null;
+          riskAlignmentBlockOverridden = true;
+        }
+      } else if (finalBlockedReason != null && protectedV2BlockReasons.has(finalBlockedReason)) {
+        protectedBlockNotOverridden = true;
+      }
+      const v2AuthorityPreservedAfterRiskAlignment = finalBlockedReason == null && riskAlignmentBlockOverridden;
+      const finalBlockedReasonAfterV2Preserve = finalBlockedReason;
       const regimeNowForInvariant = (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime;
       if ((regimeNowForInvariant === "RANGE" || regimeNowForInvariant === "NO_TRADE") && authority.leverageProfile && authority.leverageProfile !== "BASE") {
         this.logger.error("LEVERAGE_POLICY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
@@ -6749,6 +6788,11 @@ export class PaperEngine {
         executor: decision.executor,
         final_authorized: finalEntryAuthorization,
         final_blocked_reason: finalBlockedReason,
+        v2_authority_preserved_after_risk_alignment: v2AuthorityPreservedAfterRiskAlignment,
+        final_blocked_reason_before_v2_preserve: finalBlockedReasonBeforeV2Preserve,
+        final_blocked_reason_after_v2_preserve: finalBlockedReasonAfterV2Preserve,
+        risk_alignment_block_overridden: riskAlignmentBlockOverridden,
+        protected_block_not_overridden: protectedBlockNotOverridden,
         ai_approved: aiExecutionApproved,
         policy_paused: policyPaused,
         allow_long: allowLongGuard,

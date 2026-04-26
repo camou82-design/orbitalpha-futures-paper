@@ -78,6 +78,7 @@ export function executeRangeRegime(input: EngineV2Input): ExecutorOutput {
         metadata.trendWeaknessScore = trendWeaknessScore;
         metadata.qualityScore = qualityScore;
         metadata.relaxedRangeEntry = true;
+        metadata.reason = "Range edge qualified by structure quality";
     }
 
     return {

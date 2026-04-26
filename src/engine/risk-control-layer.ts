@@ -194,7 +194,8 @@ export function evaluateRiskControls(input: Readonly<{
       if (isLatePursuit) shortSizeMult *= 0.35;
     } else if (directionalShockState === "UP") {
       shortAllow = false;
-      longAllow = !isLateChase;
+      // Keep directional long path open; late chase is size control only.
+      longAllow = true;
       if (pumpState === "PUMP_ALERT") shortSizeMult *= 0.55;
       else if (pumpState === "PUMP_REDUCE") shortSizeMult *= 0.22;
       else if (pumpState === "PUMP_EXIT" || pumpState === "PUMP_LOCK") shortSizeMult *= 0.1;
