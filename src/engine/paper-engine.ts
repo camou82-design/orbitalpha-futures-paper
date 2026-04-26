@@ -6689,6 +6689,9 @@ export class PaperEngine {
         res.executorDecision?.entry_allowed === true &&
         (res.executorDecision?.blocked_reason == null ||
           !String(res.executorDecision?.blocked_reason).toLowerCase().includes("reversal_confirm"));
+      const relaxedRangeEntryForCrashBypass =
+        exDetail?.relaxedRangeEntry === true ||
+        first.rangeSignalKeptByRelax === true;
       const rangeZoneAlignedForCrashBypass =
         (authority.side === "long" && zone === "lower") ||
         (authority.side === "short" && zone === "upper");
@@ -6699,6 +6702,10 @@ export class PaperEngine {
         !this.serverTradeControlState.close_only_mode &&
         !this.serverTradeControlState.kill_switch_active &&
         !this.reconcileSafetyCloseOnly;
+      const riskModeHaltForCrashBypass =
+        String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() === "HALT";
+      const dailyLossGuardForCrashBypass =
+        this.lastRisk?.dailyLossGuardTriggered === true;
       const ngeStage0UpperLongBlock =
         authority.side === "long" &&
         zone === "upper" &&
@@ -6820,10 +6827,12 @@ export class PaperEngine {
           rangeContextForCrashBypass &&
           authorityDecisionForExecution === "ENTER" &&
           rangeZoneAlignedForCrashBypass &&
-          reversalConfirmed &&
+          (reversalConfirmed || relaxedRangeEntryForCrashBypass) &&
           (crashState === "CRASH_LOCK" || crashState === "CRASH_EXIT") &&
           (bypassReason != null || overrideReason != null) &&
-          serverControlAllowsEntry;
+          serverControlAllowsEntry &&
+          !riskModeHaltForCrashBypass &&
+          !dailyLossGuardForCrashBypass;
         if (crashBypassEligible) {
           finalBlockedReason = null;
           this.logger.info("CRASH_ENTRY_GUARD_BYPASS_APPLIED", {
@@ -6924,10 +6933,10 @@ export class PaperEngine {
         const hardReasons = new Set<string>([
           "RISK_EXPOSURE_CAP_PRE_SUBMIT",
           "ORDER_BUILD_FAIL",
-          "EXCHANGE_OR_POSITION_WRITE_FAIL",
           "CRASH_ENTRY_GUARD_BLOCK"
         ]);
         const softReasons = new Set<string>([
+          "ENTRY_QUALITY_CONTAMINATED_SIMILAR",
           "WAIT_RECHECK",
           "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE",
           "SIDE_NOT_ALLOWED_LONG",
@@ -7096,6 +7105,34 @@ export class PaperEngine {
         reconcileSafeMode: this.reconcileSafetyCloseOnly,
         ...buildAuthorityEventMeta(authority)
       });
+      const orderBuildReady = res.decision.reject_reason !== "ORDER_BUILD_FAIL";
+      const positionOpenAttempted = finalEntryAuthorization && authorityDecisionForExecution === "ENTER" && orderBuildReady;
+      this.logger.info("V2_FINAL_EXECUTION_DECISION_PROOF", {
+        symbol: sym,
+        authority_source: authority.source,
+        adopted_engine: adoptedEngine,
+        v2_decision: authorityDecisionForExecution,
+        v2_side: authority.side,
+        final_decision: finalEntryAuthorization ? "ENTER" : "SKIP",
+        final_side: finalEntryAuthorization ? authority.side : "none",
+        hard_block_present: hardBlockPresent,
+        hard_block_reason: hardBlockReason,
+        soft_block_warnings: softBlockWarnings,
+        order_build_ready: orderBuildReady,
+        position_open_attempted: positionOpenAttempted
+      });
+      if (positionOpenAttempted) {
+        this.logger.info("STAGE1_POSITION_OPEN_ATTEMPT", {
+          symbol: sym,
+          side: authority.side,
+          authority_source: authority.source,
+          adopted_engine: adoptedEngine,
+          v2_decision: authorityDecisionForExecution,
+          hard_block_present: hardBlockPresent,
+          hard_block_reason: hardBlockReason,
+          soft_block_warnings: softBlockWarnings
+        });
+      }
       if (finalBlockedReason === "CRASH_ENTRY_GUARD_BLOCK") {
         this.logger.warn("CRASH_ENTRY_GUARD_BLOCK", {
           symbol: sym,
