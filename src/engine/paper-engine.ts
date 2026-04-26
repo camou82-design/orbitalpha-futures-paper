@@ -7017,32 +7017,54 @@ export class PaperEngine {
           ((authority.side === "long" && mPre.longUsd + entrySizeUsd > riskE.maxLongExposure) ||
             (authority.side === "short" && mPre.shortUsd + entrySizeUsd > riskE.maxShortExposure))
         ) {
-          trace.open_fail_stage = "risk_exposure_cap_pre_submit";
-          trace.position_open_final_state = "aborted_pre_exchange";
-          trace.order_submit_requested = false;
-          trace.order_submit_ack = null;
-          emitPositionOpenTraceFinal();
-          logPaperPositionOpenFailed();
-          await this.emitPipelineEventsFromDecision(
-            first,
-            {
-              ...envelope,
-              legacy: {
-                ...res,
-                decision: {
-                  ...res.decision,
-                  final_decision: "SKIP",
-                  reject_reason: "EXECUTION_DISABLED",
-                  execution_disabled_reason: "risk_exposure_cap_for_leg"
-                },
-                adaptiveResult: null
-              }
-            },
-            nowTs,
-            entryStage,
-            "risk_exposure_cap_for_leg"
-          );
-          continue;
+          const cap = authority.side === "long" ? riskE.maxLongExposure : riskE.maxShortExposure;
+          const exposureUsd = authority.side === "long" ? mPre.longUsd : mPre.shortUsd;
+          const availableUsd = Math.max(0, cap - exposureUsd);
+          const sizeAfterCapUsd =
+            availableUsd >= MIN_POSITION_SIZE_USD
+              ? Math.max(MIN_POSITION_SIZE_USD, Math.round(Math.min(entrySizeUsd, availableUsd) * 100) / 100)
+              : 0;
+          const hasNoLiveExposure = next.length === 0 && exposureUsd <= 0;
+          const canProceedWithCap = hasNoLiveExposure && sizeAfterCapUsd >= MIN_POSITION_SIZE_USD;
+          this.logger.warn("RISK_EXPOSURE_CAP_PRE_SUBMIT_PROOF", {
+            current_open_positions: next.length,
+            exposure_notional_krw: authority.exposureNotionalKrw ?? null,
+            equity_multiple: authority.equityMultiple ?? null,
+            cap,
+            requested_size_usd: entrySizeUsd,
+            size_after_cap_usd: canProceedWithCap ? sizeAfterCapUsd : null,
+            abort_reason: canProceedWithCap ? null : "risk_exposure_cap_for_leg"
+          });
+          if (canProceedWithCap) {
+            entrySizeUsd = sizeAfterCapUsd;
+          } else {
+            trace.open_fail_stage = "risk_exposure_cap_pre_submit";
+            trace.position_open_final_state = "aborted_pre_exchange";
+            trace.order_submit_requested = false;
+            trace.order_submit_ack = null;
+            emitPositionOpenTraceFinal();
+            logPaperPositionOpenFailed();
+            await this.emitPipelineEventsFromDecision(
+              first,
+              {
+                ...envelope,
+                legacy: {
+                  ...res,
+                  decision: {
+                    ...res.decision,
+                    final_decision: "SKIP",
+                    reject_reason: "EXECUTION_DISABLED",
+                    execution_disabled_reason: "risk_exposure_cap_for_leg"
+                  },
+                  adaptiveResult: null
+                }
+              },
+              nowTs,
+              entryStage,
+              "risk_exposure_cap_for_leg"
+            );
+            continue;
+          }
         }
 
         const lowExpectedMoveRelaxSizeLimited =
@@ -8067,6 +8089,16 @@ export class PaperEngine {
         hasRangeEdge &&
         ((entrySide === "long" && (boxPos ?? 0.5) <= 0.35) ||
           (entrySide === "short" && (boxPos ?? 0.5) >= 0.65));
+      let rangeSideZoneMismatchReason: string | null = null;
+      if (isRangeRegime && typeof boxPos === "number" && Number.isFinite(boxPos)) {
+        if (entrySide === "short" && boxPos <= 0.35) {
+          rangeSideZoneMismatchReason = "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
+        } else if (entrySide === "long" && boxPos >= 0.65) {
+          rangeSideZoneMismatchReason = "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
+        } else if (boxPos > 0.35 && boxPos < 0.65) {
+          rangeSideZoneMismatchReason = "RANGE_SIDE_ZONE_MISMATCH_MID_WAIT";
+        }
+      }
       const rangeStructureStrong =
         isRangeRegime &&
         (regimeDetected.rangeConfidence ?? 0) >= 0.70 &&
@@ -8081,7 +8113,26 @@ export class PaperEngine {
         (regimeDetected.boxCohesion01 ?? 0) >= 0.45 &&
         (regimeDetected.trendWeaknessScore ?? 0) >= 0.5 &&
         hasRangeEdge;
-      if (this.config.paperQualityMinScore > 0 && qualityScore < qualityMinEffective) {
+      if (rangeSideZoneMismatchReason !== null) {
+        const zone = classifyRangeActionZone(boxPos ?? 0.5);
+        signal = "none";
+        entryCandidate = false;
+        gateBlockedReason = rangeSideZoneMismatchReason;
+        signalDecisionOrigin = `entry_gate_blocked_${String(gateBlockedReason).toLowerCase()}`;
+        rangeSignalDowngraded = true;
+        rangeSignalDowngradeReason = gateBlockedReason;
+        this.logger.info("RANGE_SIDE_ZONE_MISMATCH_PROOF", {
+          symbol: String(symbol),
+          side: entrySide,
+          boxPos: boxPos ?? null,
+          zone,
+          rangeConfidence: regimeDetected.rangeConfidence ?? null,
+          expectedMoveRatio: null,
+          signalDecisionOrigin,
+          finalRejectReason: gateBlockedReason,
+          activeEngine: "RANGE"
+        });
+      } else if (this.config.paperQualityMinScore > 0 && qualityScore < qualityMinEffective) {
         if (rangeSignalKeepByRelaxCandidate) {
           signal = entry.signal;
           entryCandidate = true;
