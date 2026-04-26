@@ -138,6 +138,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let promotionReason: string | null = null;
     let promotionBlockReason: string | null = null;
     let promotionMinConditionPassed = false;
+    let contaminationSoftened = false;
+    let contaminationHardReject = false;
+    let contaminationSoftenReason: string | null = null;
 
     const shock = input.state.directionalShockState ?? "NONE";
     const marketMode = String(judgment.regime ?? "UNKNOWN");
@@ -204,12 +207,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         boxPos == null ? "boxPos" : null,
         zone == null ? "zone" : null
     ].filter((x): x is string => x != null);
-    const rangeEdgeExtreme =
-        (v2SideAfterPromotion === "long" && (boxPos ?? 0.5) <= 0.08) ||
-            (v2SideAfterPromotion === "short" && (boxPos ?? 0.5) >= 0.92);
     const rangeSideCandidate: EngineV2Side =
         zone === "lower" && allowNewLong && riskLongAllow ? "long" :
             zone === "upper" && allowNewShort && riskShortAllow ? "short" : "none";
+    const rangeEdgeExtreme =
+        (rangeSideCandidate === "long" && (boxPos ?? 0.5) <= 0.08) ||
+            (rangeSideCandidate === "short" && (boxPos ?? 0.5) >= 0.92);
     const alignedSignal =
         trendSideCandidate === "short" ? "paper_short_candidate" :
             trendSideCandidate === "long" ? "paper_long_candidate" : "none";
@@ -233,31 +236,113 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         "RISK_EXPOSURE_CAP_PRE_SUBMIT",
         "ORDER_BUILD_FAIL"
     ]);
+    const hardBlockReasons = new Set<string>([
+        "CRASH_ENTRY_GUARD_BLOCK",
+        "RISK_EXPOSURE_CAP_PRE_SUBMIT",
+        "ORDER_BUILD_FAIL",
+        "MAX_SLOTS_REACHED",
+        "MIN_ORDER_SIZE_UNDERFLOW",
+        "SERVER_TRADE_DISABLED",
+        "CLOSE_ONLY_MODE",
+        "KILL_SWITCH_ACTIVE",
+        "RECONCILE_SAFE_MODE",
+        "RISK_MODE_HALT",
+        "DAILY_LOSS_GUARD"
+    ]);
+    const hardBlockPresent =
+        !hardControlClear ||
+        (v2RejectReasonAfterPromotion != null && hardBlockReasons.has(v2RejectReasonAfterPromotion));
+    const hardBlockReason =
+        !hardControlClear
+            ? "HARD_CONTROL_NOT_CLEAR"
+            : (v2RejectReasonAfterPromotion != null && hardBlockReasons.has(v2RejectReasonAfterPromotion)
+                ? v2RejectReasonAfterPromotion
+                : null);
+    const entryQualityDiag = (riskSizing.diagnostics ?? {}) as Record<string, unknown>;
+    const profitDistance = typeof entryQualityDiag.entry_quality_distance_profit === "number"
+        ? entryQualityDiag.entry_quality_distance_profit
+        : null;
+    const lossDistance = typeof entryQualityDiag.entry_quality_distance_loss === "number"
+        ? entryQualityDiag.entry_quality_distance_loss
+        : null;
+    const contaminatedDistance = typeof entryQualityDiag.entry_quality_distance_contaminated === "number"
+        ? entryQualityDiag.entry_quality_distance_contaminated
+        : null;
+    const trendShockAligned =
+        shock === "NONE" ||
+        (shock === "UP" && trendSideCandidate === "long") ||
+        (shock === "DOWN" && trendSideCandidate === "short");
+    const rangeSideAligned =
+        (zone === "lower" && rangeSideCandidate === "long") ||
+        (zone === "upper" && rangeSideCandidate === "short");
+    const rangePromotableContext = rangeSideAligned || rangeEdgeExtreme;
 
     if (hardControlClear) {
         if (v2RejectReasonAfterPromotion != null && unpromotableRejectReasons.has(v2RejectReasonAfterPromotion)) {
             promotionBlockReason = v2RejectReasonAfterPromotion;
         }
+        if (v2RejectReasonAfterPromotion === "ENTRY_QUALITY_CONTAMINATED_SIMILAR") {
+            const contaminatedClearlyDominant =
+                profitDistance != null && contaminatedDistance != null
+                    ? contaminatedDistance <= profitDistance * 1.005
+                    : false;
+            const nearlyEqualToLoss =
+                lossDistance != null && contaminatedDistance != null
+                    ? contaminatedDistance <= lossDistance * 1.005
+                    : false;
+            const sideZoneInvalid = activeEngineRouting === "RANGE" && (!sideZoneValid || zone === "mid");
+            const explicitHardContamination =
+                qualityScore < 70 ||
+                sideZoneInvalid ||
+                (contaminatedClearlyDominant && nearlyEqualToLoss);
+            contaminationHardReject = explicitHardContamination;
+            const highQualitySoftenEligible =
+                (entryQualityGrade === "S" || entryQualityGrade === "A") &&
+                qualityScore >= 80 &&
+                paperExecutionReady === true &&
+                !hardBlockPresent &&
+                input.state.serverTradeEnabled !== false &&
+                input.state.closeOnlyMode !== true &&
+                input.state.killSwitch !== true &&
+                input.state.killSwitchActive !== true &&
+                input.state.reconcileSafeMode !== true &&
+                input.state.reconcileSafeModeActive !== true &&
+                ((activeEngineRouting === "TREND" && trendShockAligned && trendSideCandidate !== "none") ||
+                    (activeEngineRouting === "RANGE" && rangePromotableContext));
+            if (highQualitySoftenEligible && !explicitHardContamination) {
+                contaminationSoftened = true;
+                contaminationSoftenReason = "V2_CONTAMINATION_SOFTENED_FOR_HIGH_QUALITY_AUTHORITY";
+                v2DecisionAfterPromotion = "HOLD";
+                v2RejectReasonAfterPromotion = null;
+                promotionBlockReason = null;
+            } else if (entryQualityGrade === "B" && !explicitHardContamination) {
+                contaminationSoftened = true;
+                contaminationSoftenReason = "V2_CONTAMINATION_B_GRADE_REVIEW";
+                v2DecisionAfterPromotion = "HOLD";
+                v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                promotionBlockReason = null;
+            } else if (explicitHardContamination) {
+                promotionBlockReason = "ENTRY_QUALITY_CONTAMINATED_SIMILAR";
+            }
+        }
         const trendPromotionCandidate =
             promotionBlockReason == null &&
             (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD" || v2SideAfterPromotion === "none") &&
-            (v2RejectReasonAfterPromotion === "WAIT_RECHECK" || v2RejectReasonAfterPromotion == null) &&
+            (v2RejectReasonAfterPromotion === "WAIT_RECHECK" || v2RejectReasonAfterPromotion == null || contaminationSoftened) &&
             activeEngineRouting === "TREND" &&
             trendSideCandidate !== "none" &&
             trendOk;
-        const shockAligned =
-            shock === "NONE" ||
-            (shock === "UP" && trendSideCandidate === "long") ||
-            (shock === "DOWN" && trendSideCandidate === "short");
-        if (trendPromotionCandidate && shockAligned) {
+        if (trendPromotionCandidate && trendShockAligned) {
             if (entryQualityGrade === "S" || entryQualityGrade === "A") {
                 v2DecisionAfterPromotion = "ENTER";
                 v2SideAfterPromotion = trendSideCandidate;
                 v2RejectReasonAfterPromotion = null;
                 promotionApplied = true;
-                promotionReason = "V2_TREND_QUALIFIED_FINAL_PROMOTION";
+                promotionReason = contaminationSoftened
+                    ? "V2_CONTAMINATION_SOFTENED_FOR_HIGH_QUALITY_AUTHORITY"
+                    : "V2_TREND_QUALIFIED_FINAL_PROMOTION";
                 promotionMinConditionPassed = true;
-            } else if (entryQualityGrade === "B" && (reviewingTicks >= 2 || qualityScore >= 80)) {
+            } else if (entryQualityGrade === "B" && (reviewingTicks >= 2 || qualityScore >= 78)) {
                 v2DecisionAfterPromotion = "ENTER";
                 v2SideAfterPromotion = trendSideCandidate;
                 v2RejectReasonAfterPromotion = null;
@@ -277,19 +362,33 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             (rangeConfidence ?? 0) >= 0.65 &&
             (boxCohesion01 ?? 0) >= 0.9 &&
             (trendWeaknessFromMeta ?? 0) >= 0.7 &&
-            qualityScore >= 80 &&
             (
-                relaxedRangeEntry ||
-                reversalConfirmed ||
-                ((rangeConfidence ?? 0) >= 0.70 && rangeSideCandidate === "long" && (boxPos ?? 1) <= 0.08) ||
-                ((rangeConfidence ?? 0) >= 0.70 && rangeSideCandidate === "short" && (boxPos ?? 0) >= 0.92)
+                (
+                    qualityScore >= 80 &&
+                    (
+                        relaxedRangeEntry ||
+                        reversalConfirmed ||
+                        ((rangeConfidence ?? 0) >= 0.70 && rangeSideCandidate === "long" && (boxPos ?? 1) <= 0.08) ||
+                        ((rangeConfidence ?? 0) >= 0.70 && rangeSideCandidate === "short" && (boxPos ?? 0) >= 0.92)
+                    )
+                ) ||
+                (
+                    entryQualityGrade === "B" &&
+                    (
+                        qualityScore >= 78 ||
+                        reviewingTicks >= 2 ||
+                        ((rangeConfidence ?? 0) >= 0.70 && sideZoneValid && rangeEdgeExtreme)
+                    )
+                )
             );
         if (rangePromotionCandidate) {
             v2DecisionAfterPromotion = "ENTER";
             v2SideAfterPromotion = rangeSideCandidate;
             v2RejectReasonAfterPromotion = null;
             promotionApplied = true;
-            promotionReason = "V2_RANGE_QUALIFIED_FINAL_PROMOTION";
+            promotionReason = contaminationSoftened
+                ? "V2_CONTAMINATION_SOFTENED_FOR_HIGH_QUALITY_AUTHORITY"
+                : "V2_RANGE_QUALIFIED_FINAL_PROMOTION";
             promotionMinConditionPassed = true;
         }
 
@@ -379,8 +478,28 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         reject_reason_after: blockReason,
         promotion_block_reason: promotionBlockReason,
         promotion_min_condition_passed: promotionMinConditionPassed,
-        hard_block_present: !hardControlClear,
-        hard_block_reason: hardControlClear ? null : "HARD_CONTROL_NOT_CLEAR"
+        contamination_softened: contaminationSoftened,
+        contamination_hard_reject: contaminationHardReject,
+        contamination_soften_reason: contaminationSoftenReason,
+        hard_block_present: hardBlockPresent,
+        hard_block_reason: hardBlockReason
+    }));
+    console.info(JSON.stringify({
+        event: "V2_ENTRY_QUALITY_CONTAMINATION_PROOF",
+        symbol: String(input.symbol),
+        decision_before: v2DecisionBeforePromotion,
+        reject_reason_before: v2RejectReasonBeforePromotion,
+        entry_quality_grade: entryQualityGrade,
+        qualityScore,
+        profitDistance,
+        lossDistance,
+        contaminatedDistance,
+        contamination_hard_reject: contaminationHardReject,
+        contamination_softened: contaminationSoftened,
+        contamination_soften_reason: contaminationSoftenReason,
+        final_decision_after: finalDecision,
+        hard_block_present: hardBlockPresent,
+        hard_block_reason: hardBlockReason
     }));
     console.info(JSON.stringify({
         event: "V2_EXECUTION_READINESS_PROOF",
