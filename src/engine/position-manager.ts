@@ -2,6 +2,16 @@ import type { PaperClosedPositionRecord, PaperOpenPositionRecord } from "../mode
 import type { PaperHealthReport } from "../storage/paper-health";
 import type { JsonStore } from "../storage/json-store";
 
+type PositionSideLower = "long" | "short";
+
+const normalizeSideLower = (side: unknown): PositionSideLower | null => {
+  if (typeof side !== "string") return null;
+  const s = side.trim().toLowerCase();
+  if (s === "long") return "long";
+  if (s === "short") return "short";
+  return null;
+};
+
 export class PositionManager {
   constructor(private readonly store: JsonStore) {}
 
@@ -11,6 +21,58 @@ export class PositionManager {
 
   async saveOpenAll(positions: readonly PaperOpenPositionRecord[]): Promise<string> {
     return await this.store.writePositionsOpenAll(positions);
+  }
+
+  evaluateSymbolPositionMutex(
+    positions: readonly PaperOpenPositionRecord[],
+    symbol: string,
+    authoritySide: string,
+    isScaleIn: boolean,
+    addOnAllowed: boolean
+  ): {
+    sameSymbolOpenCount: number;
+    sameSideOpen: boolean;
+    oppositeSideOpen: boolean;
+    existingSides: PositionSideLower[];
+    existingPositionIds: string[];
+    blocked: boolean;
+    reason: "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | null;
+  } {
+    const authoritySideLower = normalizeSideLower(authoritySide);
+    const sameSymbolOpenPositions = positions.filter((p) => String(p.symbol) === symbol);
+    const sideEntries = sameSymbolOpenPositions
+      .map((p) => {
+        const side = normalizeSideLower(p.side);
+        if (side == null) return null;
+        return {
+          side,
+          id: `${String(p.symbol)}:${side}:${String(p.openedAt)}`
+        };
+      })
+      .filter((x): x is { side: PositionSideLower; id: string } => x != null);
+    const existingSides = sideEntries.map((x) => x.side);
+    const existingPositionIds = sideEntries.map((x) => x.id);
+    const sameSideOpen =
+      authoritySideLower != null &&
+      existingSides.some((side) => side === authoritySideLower);
+    const oppositeSideOpen =
+      authoritySideLower != null &&
+      existingSides.some((side) => side !== authoritySideLower);
+    const blockedReason =
+      oppositeSideOpen
+        ? "SYMBOL_OPPOSITE_POSITION_OPEN"
+        : (sameSideOpen && !(isScaleIn || addOnAllowed)
+          ? "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
+          : null);
+    return {
+      sameSymbolOpenCount: sameSymbolOpenPositions.length,
+      sameSideOpen,
+      oppositeSideOpen,
+      existingSides,
+      existingPositionIds,
+      blocked: blockedReason != null,
+      reason: blockedReason
+    };
   }
 
   async ensureHistoryFile(): Promise<void> {

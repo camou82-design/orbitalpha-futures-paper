@@ -6933,7 +6933,9 @@ export class PaperEngine {
         const hardReasons = new Set<string>([
           "RISK_EXPOSURE_CAP_PRE_SUBMIT",
           "ORDER_BUILD_FAIL",
-          "CRASH_ENTRY_GUARD_BLOCK"
+          "CRASH_ENTRY_GUARD_BLOCK",
+          "SYMBOL_OPPOSITE_POSITION_OPEN",
+          "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
         ]);
         const softReasons = new Set<string>([
           "ENTRY_QUALITY_CONTAMINATED_SIMILAR",
@@ -7055,7 +7057,53 @@ export class PaperEngine {
       }
 
       // Final Authorization Boolean: The ONLY gate that allows execution
-      const finalEntryAuthorization = (finalBlockedReason === null);
+      let finalEntryAuthorization = (finalBlockedReason === null);
+      const finalAuthorizedBeforeMutex = finalEntryAuthorization;
+      const finalBlockedReasonBeforeMutex = finalBlockedReason;
+      const orderBuildReadyBeforeMutex = res.decision.reject_reason !== "ORDER_BUILD_FAIL";
+      const authoritySideLower = normalizePositionSideLower(authority.side);
+      const mutexEval = this.positions.evaluateSymbolPositionMutex(
+        next,
+        sym,
+        authoritySideLower ?? String(authority.side),
+        existingIdx >= 0,
+        authority.addOnAllowed === true
+      );
+      let mutexBlockApplied = false;
+      let mutexBlockReason: "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | null = null;
+      if (finalEntryAuthorization && authorityDecisionForExecution === "ENTER" && mutexEval.blocked) {
+        mutexBlockApplied = true;
+        mutexBlockReason = mutexEval.reason;
+        finalBlockedReason = mutexEval.reason;
+        finalEntryAuthorization = false;
+        hardBlockPresent = true;
+        hardBlockReason = mutexEval.reason;
+      }
+      const orderBuildReadyAfterMutex = orderBuildReadyBeforeMutex && !mutexBlockApplied;
+      const positionOpenAttempted = finalEntryAuthorization && authorityDecisionForExecution === "ENTER" && orderBuildReadyAfterMutex;
+      this.logger.info("SYMBOL_POSITION_MUTEX_PROOF", {
+        symbol: sym,
+        authority_source: authority.source,
+        adopted_engine: adoptedEngine,
+        authority_decision: authorityDecisionForExecution,
+        authority_side: authority.side,
+        same_symbol_open_count: mutexEval.sameSymbolOpenCount,
+        same_side_open: mutexEval.sameSideOpen,
+        opposite_side_open: mutexEval.oppositeSideOpen,
+        existing_sides: mutexEval.existingSides,
+        existing_position_ids: mutexEval.existingPositionIds,
+        is_scale_in: existingIdx >= 0,
+        add_on_allowed: authority.addOnAllowed === true,
+        mutex_block_applied: mutexBlockApplied,
+        mutex_block_reason: mutexBlockReason,
+        final_authorized_before_mutex: finalAuthorizedBeforeMutex,
+        final_authorized_after_mutex: finalEntryAuthorization,
+        final_blocked_reason_before_mutex: finalBlockedReasonBeforeMutex,
+        final_blocked_reason_after_mutex: finalBlockedReason,
+        order_build_ready_before_mutex: orderBuildReadyBeforeMutex,
+        order_build_ready_after_mutex: orderBuildReadyAfterMutex,
+        position_open_attempted: positionOpenAttempted
+      });
       if (finalEntryAuthorization && (!this.serverTradeControlState.server_trade_enabled || this.serverTradeControlState.close_only_mode || this.serverTradeControlState.kill_switch_active || this.reconcileSafetyCloseOnly)) {
         this.logger.error("SERVER_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
           symbol: sym,
@@ -7105,8 +7153,6 @@ export class PaperEngine {
         reconcileSafeMode: this.reconcileSafetyCloseOnly,
         ...buildAuthorityEventMeta(authority)
       });
-      const orderBuildReady = res.decision.reject_reason !== "ORDER_BUILD_FAIL";
-      const positionOpenAttempted = finalEntryAuthorization && authorityDecisionForExecution === "ENTER" && orderBuildReady;
       this.logger.info("V2_FINAL_EXECUTION_DECISION_PROOF", {
         symbol: sym,
         authority_source: authority.source,
@@ -7118,7 +7164,7 @@ export class PaperEngine {
         hard_block_present: hardBlockPresent,
         hard_block_reason: hardBlockReason,
         soft_block_warnings: softBlockWarnings,
-        order_build_ready: orderBuildReady,
+        order_build_ready: orderBuildReadyAfterMutex,
         position_open_attempted: positionOpenAttempted
       });
       if (positionOpenAttempted) {
@@ -7393,6 +7439,41 @@ export class PaperEngine {
 
       let positionOpenTraceRef: MutablePositionOpenTrace | null = null;
       try {
+        const prePersistMutexEval = this.positions.evaluateSymbolPositionMutex(
+          next,
+          sym,
+          authoritySideLower ?? String(authority.side),
+          existingIdx >= 0,
+          authority.addOnAllowed === true
+        );
+        if (prePersistMutexEval.blocked) {
+          const mutexReason = prePersistMutexEval.reason ?? "SYMBOL_OPPOSITE_POSITION_OPEN";
+          this.logger.warn("SYMBOL_POSITION_MUTEX_PRE_PERSIST_BLOCKED", {
+            symbol: sym,
+            side: authority.side,
+            mutex_block_reason: mutexReason,
+            existing_sides: prePersistMutexEval.existingSides,
+            existing_position_ids: prePersistMutexEval.existingPositionIds
+          });
+          await this.emitPipelineEventsFromDecision(
+            first,
+            {
+              ...envelope,
+              legacy: {
+                ...res,
+                decision: {
+                  ...res.decision,
+                  final_decision: "SKIP",
+                  reject_reason: mutexReason
+                }
+              }
+            },
+            nowTs,
+            entryStage,
+            mutexReason
+          );
+          continue;
+        }
         const openTraceId = randomUUID();
         const sampleBtcEth = isBtcEthSampleSymbol(sym);
         const trace: MutablePositionOpenTrace = {

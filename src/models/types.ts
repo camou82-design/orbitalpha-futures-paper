@@ -229,7 +229,11 @@ export type PaperDecisionRejectReason =
   /** RANGE 하단 롱: 완성봉 2개 반전 미충족 */
   | "RANGE_LOWER_LONG_NO_REVERSAL_CONFIRMATION"
   /** RANGE 엣지 stop_loss 직후 동일 맥락 재진입 차단 */
-  | "RANGE_STOP_REENTRY_SAME_CONTEXT_BLOCKED";
+  | "RANGE_STOP_REENTRY_SAME_CONTEXT_BLOCKED"
+  /** Stage1 symbol-level mutex: opposite side position exists */
+  | "SYMBOL_OPPOSITE_POSITION_OPEN"
+  /** Stage1 symbol-level mutex: same side already open without add-on/scale-in */
+  | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN";
 
 export type PaperStage1ResultCode =
   | "STAGE1_ENTERED"
