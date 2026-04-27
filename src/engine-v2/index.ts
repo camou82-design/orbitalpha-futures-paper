@@ -234,7 +234,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         "ENTRY_QUALITY_CONTAMINATED_SIMILAR",
         "CRASH_ENTRY_GUARD_BLOCK",
         "RISK_EXPOSURE_CAP_PRE_SUBMIT",
-        "ORDER_BUILD_FAIL"
+        "ORDER_BUILD_FAIL",
+        "FRESH_TICK_EXECUTION_BLOCKED",
+        "FRESH_TICK_BARRIER_ACTIVE"
     ]);
     const hardBlockReasons = new Set<string>([
         "CRASH_ENTRY_GUARD_BLOCK",
@@ -247,7 +249,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         "KILL_SWITCH_ACTIVE",
         "RECONCILE_SAFE_MODE",
         "RISK_MODE_HALT",
-        "DAILY_LOSS_GUARD"
+        "DAILY_LOSS_GUARD",
+        "FRESH_TICK_EXECUTION_BLOCKED",
+        "FRESH_TICK_BARRIER_ACTIVE"
     ]);
     const hardBlockPresent =
         !hardControlClear ||
