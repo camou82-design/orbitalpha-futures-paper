@@ -7062,10 +7062,14 @@ export class PaperEngine {
       const finalBlockedReasonBeforeMutex = finalBlockedReason;
       const orderBuildReadyBeforeMutex = res.decision.reject_reason !== "ORDER_BUILD_FAIL";
       const authoritySideLower = normalizePositionSideLower(authority.side);
+      const positionOpenAttemptedBeforeMutex =
+        finalAuthorizedBeforeMutex &&
+        authorityDecisionForExecution === "ENTER" &&
+        orderBuildReadyBeforeMutex;
       const mutexEval = this.positions.evaluateSymbolPositionMutex(
-        next,
         sym,
-        authoritySideLower ?? String(authority.side),
+        (authoritySideLower ?? "long") as "long" | "short",
+        next,
         existingIdx >= 0,
         authority.addOnAllowed === true
       );
@@ -7073,36 +7077,35 @@ export class PaperEngine {
       let mutexBlockReason: "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | null = null;
       if (finalEntryAuthorization && authorityDecisionForExecution === "ENTER" && mutexEval.blocked) {
         mutexBlockApplied = true;
-        mutexBlockReason = mutexEval.reason;
-        finalBlockedReason = mutexEval.reason;
+        mutexBlockReason = mutexEval.blockReason;
+        finalBlockedReason = mutexEval.blockReason;
         finalEntryAuthorization = false;
         hardBlockPresent = true;
-        hardBlockReason = mutexEval.reason;
+        hardBlockReason = mutexEval.blockReason;
       }
       const orderBuildReadyAfterMutex = orderBuildReadyBeforeMutex && !mutexBlockApplied;
       const positionOpenAttempted = finalEntryAuthorization && authorityDecisionForExecution === "ENTER" && orderBuildReadyAfterMutex;
       this.logger.info("SYMBOL_POSITION_MUTEX_PROOF", {
         symbol: sym,
-        authority_source: authority.source,
-        adopted_engine: adoptedEngine,
-        authority_decision: authorityDecisionForExecution,
-        authority_side: authority.side,
-        same_symbol_open_count: mutexEval.sameSymbolOpenCount,
-        same_side_open: mutexEval.sameSideOpen,
-        opposite_side_open: mutexEval.oppositeSideOpen,
-        existing_sides: mutexEval.existingSides,
-        existing_position_ids: mutexEval.existingPositionIds,
+        requested_side: authoritySideLower ?? authority.side,
+        existing_same_symbol_position_count: mutexEval.sameSymbolOpenCount,
+        existing_same_symbol_sides: mutexEval.existingSides,
+        opposite_position_exists: mutexEval.oppositeSideOpen,
+        same_side_position_exists: mutexEval.sameSideOpen,
         is_scale_in: existingIdx >= 0,
         add_on_allowed: authority.addOnAllowed === true,
-        mutex_block_applied: mutexBlockApplied,
+        mutex_allowed: !mutexEval.blocked,
         mutex_block_reason: mutexBlockReason,
-        final_authorized_before_mutex: finalAuthorizedBeforeMutex,
-        final_authorized_after_mutex: finalEntryAuthorization,
-        final_blocked_reason_before_mutex: finalBlockedReasonBeforeMutex,
-        final_blocked_reason_after_mutex: finalBlockedReason,
-        order_build_ready_before_mutex: orderBuildReadyBeforeMutex,
-        order_build_ready_after_mutex: orderBuildReadyAfterMutex,
-        position_open_attempted: positionOpenAttempted
+        authority_source: authority.source,
+        adopted_engine: adoptedEngine,
+        active_engine_routing: activeEngineRoutingForFinalizer,
+        final_blocked_reason_before: finalBlockedReasonBeforeMutex,
+        final_blocked_reason_after: finalBlockedReason,
+        order_build_ready_before: orderBuildReadyBeforeMutex,
+        order_build_ready_after: orderBuildReadyAfterMutex,
+        position_open_attempted_before: positionOpenAttemptedBeforeMutex,
+        position_open_attempted_after: positionOpenAttempted,
+        existing_position_ids: mutexEval.existingPositionIds
       });
       if (finalEntryAuthorization && (!this.serverTradeControlState.server_trade_enabled || this.serverTradeControlState.close_only_mode || this.serverTradeControlState.kill_switch_active || this.reconcileSafetyCloseOnly)) {
         this.logger.error("SERVER_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
@@ -7159,6 +7162,9 @@ export class PaperEngine {
         adopted_engine: adoptedEngine,
         v2_decision: authorityDecisionForExecution,
         v2_side: authority.side,
+        symbol_mutex_checked: true,
+        symbol_mutex_allowed: !mutexBlockApplied,
+        symbol_mutex_block_reason: mutexBlockReason,
         final_decision: finalEntryAuthorization ? "ENTER" : "SKIP",
         final_side: finalEntryAuthorization ? authority.side : "none",
         hard_block_present: hardBlockPresent,
@@ -7440,17 +7446,18 @@ export class PaperEngine {
       let positionOpenTraceRef: MutablePositionOpenTrace | null = null;
       try {
         const prePersistMutexEval = this.positions.evaluateSymbolPositionMutex(
-          next,
           sym,
-          authoritySideLower ?? String(authority.side),
+          (authoritySideLower ?? "long") as "long" | "short",
+          next,
           existingIdx >= 0,
           authority.addOnAllowed === true
         );
         if (prePersistMutexEval.blocked) {
-          const mutexReason = prePersistMutexEval.reason ?? "SYMBOL_OPPOSITE_POSITION_OPEN";
+          const mutexReason = prePersistMutexEval.blockReason ?? "SYMBOL_OPPOSITE_POSITION_OPEN";
           this.logger.warn("SYMBOL_POSITION_MUTEX_PRE_PERSIST_BLOCKED", {
             symbol: sym,
             side: authority.side,
+            requested_side: authoritySideLower ?? authority.side,
             mutex_block_reason: mutexReason,
             existing_sides: prePersistMutexEval.existingSides,
             existing_position_ids: prePersistMutexEval.existingPositionIds

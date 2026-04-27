@@ -24,9 +24,9 @@ export class PositionManager {
   }
 
   evaluateSymbolPositionMutex(
-    positions: readonly PaperOpenPositionRecord[],
     symbol: string,
-    authoritySide: string,
+    requestedSide: "long" | "short",
+    openPositions: readonly PaperOpenPositionRecord[],
     isScaleIn: boolean,
     addOnAllowed: boolean
   ): {
@@ -36,10 +36,10 @@ export class PositionManager {
     existingSides: PositionSideLower[];
     existingPositionIds: string[];
     blocked: boolean;
-    reason: "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | null;
+    blockReason: "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | null;
   } {
-    const authoritySideLower = normalizeSideLower(authoritySide);
-    const sameSymbolOpenPositions = positions.filter((p) => String(p.symbol) === symbol);
+    const authoritySideLower = normalizeSideLower(requestedSide);
+    const sameSymbolOpenPositions = openPositions.filter((p) => String(p.symbol) === symbol);
     const sideEntries = sameSymbolOpenPositions
       .map((p) => {
         const side = normalizeSideLower(p.side);
@@ -71,7 +71,7 @@ export class PositionManager {
       existingSides,
       existingPositionIds,
       blocked: blockedReason != null,
-      reason: blockedReason
+      blockReason: blockedReason
     };
   }
 
