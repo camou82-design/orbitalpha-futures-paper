@@ -64,6 +64,7 @@
   };
 
   const MAX_OPEN = 3;
+  let currentTradeControl = null;
 
   function $(id) {
     return document.getElementById(id);
@@ -1205,11 +1206,16 @@
     el.classList.toggle("hidden", !on);
   }
 
-  async function fetchBundle() {
+  function apiBaseAndToken() {
     const base = sessionStorage.getItem(STORAGE_BASE) || "";
     const token = sessionStorage.getItem(STORAGE_TOKEN) || "";
     const origin = window.location.origin.replace(/\/$/, "");
     const apiBase = (base || origin).replace(/\/$/, "");
+    return { apiBase, token };
+  }
+
+  async function fetchBundle() {
+    const { apiBase, token } = apiBaseAndToken();
     const url = apiBase + "/api/futures-paper/data";
     const res = await fetch(url, {
       method: "GET",
@@ -1224,6 +1230,109 @@
     return res.json();
   }
 
+  async function fetchTradeControl() {
+    const { apiBase, token } = apiBaseAndToken();
+    const res = await fetch(apiBase + "/api/futures-paper/control", {
+      method: "GET",
+      headers: {
+        "x-orbitalpha-futures-paper-token": token,
+        Authorization: token ? "Bearer " + token : ""
+      },
+      cache: "no-store"
+    });
+    if (!res.ok) throw new Error("control GET 실패: HTTP " + res.status);
+    return res.json();
+  }
+
+  async function updateTradeControl(patch) {
+    const { apiBase, token } = apiBaseAndToken();
+    const res = await fetch(apiBase + "/api/futures-paper/control", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-orbitalpha-futures-paper-token": token,
+        Authorization: token ? "Bearer " + token : ""
+      },
+      body: JSON.stringify(patch)
+    });
+    if (!res.ok) throw new Error("control POST 실패: HTTP " + res.status);
+    return res.json();
+  }
+
+  function tradeControlStatusLine(control) {
+    if (!control) return { text: "상태 불러오기 실패", cls: "off" };
+    if (control.killSwitch) return { text: "킬스위치", cls: "off" };
+    if (control.closeOnlyMode) return { text: "청산 전용", cls: "warn" };
+    if (control.serverTradeEnabled) return { text: "자동매매 ON", cls: "on" };
+    return { text: "자동매매 OFF", cls: "off" };
+  }
+
+  function renderTradeControlCard() {
+    const wrap = $("trade-control-card");
+    if (!wrap) return;
+    const status = tradeControlStatusLine(currentTradeControl);
+    const c = currentTradeControl;
+    wrap.innerHTML = `
+      <article class="control-card">
+        <p class="control-status ${esc(status.cls)}">${esc(status.text)}</p>
+        <div class="control-actions">
+          <button type="button" class="btn btn-primary" id="btn-control-on">자동매매 ON</button>
+          <button type="button" class="btn btn-ghost" id="btn-control-off">자동매매 OFF</button>
+          <button type="button" class="btn btn-ghost" id="btn-control-closeonly">청산 전용</button>
+          <button type="button" class="btn btn-ghost" id="btn-control-killswitch">킬스위치</button>
+        </div>
+        <p class="control-meta">
+          updatedAt: ${esc(formatKst(c && c.updatedAt))} · updatedBy: ${esc((c && c.updatedBy) || "—")}
+          ${c && c.reason ? " · reason: " + esc(c.reason) : ""}
+        </p>
+      </article>
+    `;
+    $("btn-control-on").addEventListener("click", async () => {
+      try {
+        await updateTradeControl({ serverTradeEnabled: true, closeOnlyMode: false, killSwitch: false, updatedBy: "monitor_ui", reason: "operator_enable" });
+        currentTradeControl = await fetchTradeControl();
+        renderTradeControlCard();
+      } catch (e) {
+        const errEl = $("msg-error");
+        show(errEl, true);
+        errEl.textContent = e instanceof Error ? e.message : String(e);
+      }
+    });
+    $("btn-control-off").addEventListener("click", async () => {
+      try {
+        await updateTradeControl({ serverTradeEnabled: false, closeOnlyMode: false, killSwitch: false, updatedBy: "monitor_ui", reason: "operator_disable" });
+        currentTradeControl = await fetchTradeControl();
+        renderTradeControlCard();
+      } catch (e) {
+        const errEl = $("msg-error");
+        show(errEl, true);
+        errEl.textContent = e instanceof Error ? e.message : String(e);
+      }
+    });
+    $("btn-control-closeonly").addEventListener("click", async () => {
+      try {
+        await updateTradeControl({ serverTradeEnabled: false, closeOnlyMode: true, killSwitch: false, updatedBy: "monitor_ui", reason: "operator_close_only" });
+        currentTradeControl = await fetchTradeControl();
+        renderTradeControlCard();
+      } catch (e) {
+        const errEl = $("msg-error");
+        show(errEl, true);
+        errEl.textContent = e instanceof Error ? e.message : String(e);
+      }
+    });
+    $("btn-control-killswitch").addEventListener("click", async () => {
+      try {
+        await updateTradeControl({ serverTradeEnabled: false, closeOnlyMode: false, killSwitch: true, updatedBy: "monitor_ui", reason: "operator_kill_switch" });
+        currentTradeControl = await fetchTradeControl();
+        renderTradeControlCard();
+      } catch (e) {
+        const errEl = $("msg-error");
+        show(errEl, true);
+        errEl.textContent = e instanceof Error ? e.message : String(e);
+      }
+    });
+  }
+
   async function load() {
     const errEl = $("msg-error");
     const loadEl = $("msg-loading");
@@ -1233,7 +1342,8 @@
     show(loadEl, true);
     $("last-fetch").textContent = "요청 중…";
     try {
-      const bundle = await fetchBundle();
+      const [bundle, control] = await Promise.all([fetchBundle(), fetchTradeControl()]);
+      currentTradeControl = control;
       show(loadEl, false);
       if (!bundle.configured) {
         show(cfgEl, true);
@@ -1241,6 +1351,7 @@
         return;
       }
       renderHero(bundle);
+      renderTradeControlCard();
       renderOperatorContext(bundle);
       renderSymbols(bundle);
       renderPerf(bundle);

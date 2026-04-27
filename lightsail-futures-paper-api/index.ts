@@ -20,6 +20,14 @@ const HEALTH_ROUTE_TIMEOUT_MS = Number(process.env.FUTURES_PAPER_HEALTH_ROUTE_TI
 const PUBLIC_BUNDLE_REL = "data/reports/public-futures-paper-bundle.json";
 
 type DataBundle = Readonly<Record<string, unknown>>;
+type TradeControlState = Readonly<{
+  serverTradeEnabled: boolean;
+  closeOnlyMode: boolean;
+  killSwitch: boolean;
+  updatedAt: number;
+  updatedBy: string;
+  reason: string | null;
+}>;
 
 interface CacheContext {
   bundle: DataBundle;
@@ -143,7 +151,62 @@ async function doLoadBundle(projectRoot: string): Promise<CacheContext> {
 }
 
 app.disable("x-powered-by");
+app.use(express.json({ limit: "32kb" }));
 app.use("/monitor", express.static(monitorDir));
+
+const CONTROL_FILE_REL = "data/control/trade-control.json";
+
+function defaultTradeControlState(nowTs = Date.now()): TradeControlState {
+  return {
+    serverTradeEnabled: false,
+    closeOnlyMode: false,
+    killSwitch: false,
+    updatedAt: nowTs,
+    updatedBy: "bootstrap_default",
+    reason: "default_off_until_operator_enable"
+  };
+}
+
+function controlFilePath(projectRoot: string): string {
+  return path.join(projectRoot, ...CONTROL_FILE_REL.split("/"));
+}
+
+function normalizeTradeControl(raw: unknown): TradeControlState {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const def = defaultTradeControlState();
+  return {
+    serverTradeEnabled: typeof o.serverTradeEnabled === "boolean" ? o.serverTradeEnabled : def.serverTradeEnabled,
+    closeOnlyMode: typeof o.closeOnlyMode === "boolean" ? o.closeOnlyMode : def.closeOnlyMode,
+    killSwitch: typeof o.killSwitch === "boolean" ? o.killSwitch : def.killSwitch,
+    updatedAt: typeof o.updatedAt === "number" && Number.isFinite(o.updatedAt) ? o.updatedAt : def.updatedAt,
+    updatedBy: typeof o.updatedBy === "string" && o.updatedBy.trim() ? o.updatedBy.trim().slice(0, 120) : def.updatedBy,
+    reason: typeof o.reason === "string" ? o.reason.slice(0, 240) : null
+  };
+}
+
+async function readTradeControlState(projectRoot: string): Promise<{ state: TradeControlState; source: "file" | "bootstrap_default"; filePath: string }> {
+  const filePath = controlFilePath(projectRoot);
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    return {
+      state: normalizeTradeControl(JSON.parse(raw)),
+      source: "file",
+      filePath
+    };
+  } catch {
+    const state = defaultTradeControlState();
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, JSON.stringify(state, null, 2), "utf8");
+    return { state, source: "bootstrap_default", filePath };
+  }
+}
+
+async function writeTradeControlState(projectRoot: string, state: TradeControlState): Promise<string> {
+  const filePath = controlFilePath(projectRoot);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(state, null, 2), "utf8");
+  return filePath;
+}
 
 app.get("/health", (_req: Request, res: Response) => {
   const startedAt = Date.now();
@@ -227,9 +290,18 @@ app.get("/api/futures-paper/data", async (req: Request, res: Response) => {
     ]);
     
     const total_ms = Date.now() - startedAt;
+    let controlState: TradeControlState | null = null;
+    if (root) {
+      const control = await readTradeControlState(root);
+      controlState = control.state;
+    }
+    const bundleWithControl = {
+      ...(result.bundle as Record<string, unknown>),
+      tradeControl: controlState
+    };
     res.setHeader("X-Orbitalpha-Futures-Paper-Source", "public-bundle");
     res.setHeader("X-Orbitalpha-Futures-Paper-Read-Files", PUBLIC_BUNDLE_REL);
-    res.json(result.bundle);
+    res.json(bundleWithControl);
     
     logDataRouteLine({
       event: "data_route_success",
@@ -287,6 +359,88 @@ app.get("/api/futures-paper/data", async (req: Request, res: Response) => {
       total_ms
     });
   }
+});
+
+app.get("/api/futures-paper/control", async (req: Request, res: Response) => {
+  const token = requestPaperToken(req);
+  if (!secret || token !== secret) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  if (!root) {
+    res.status(500).json({ error: "ORBITALPHA_FUTURES_PAPER_ROOT not set" });
+    return;
+  }
+  const control = await readTradeControlState(root);
+  res.json({
+    ...control.state,
+    controlSource: control.source,
+    controlFilePath: control.filePath
+  });
+});
+
+app.post("/api/futures-paper/control", async (req: Request, res: Response) => {
+  const token = requestPaperToken(req);
+  if (!secret || token !== secret) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  if (!root) {
+    res.status(500).json({ error: "ORBITALPHA_FUTURES_PAPER_ROOT not set" });
+    return;
+  }
+  const body = req.body as Record<string, unknown> | undefined;
+  if (!body || typeof body !== "object") {
+    res.status(400).json({ error: "invalid_body" });
+    return;
+  }
+  const keys = ["serverTradeEnabled", "closeOnlyMode", "killSwitch"] as const;
+  const hasControlField = keys.some((k) => k in body);
+  if (!hasControlField) {
+    res.status(400).json({ error: "missing_control_fields" });
+    return;
+  }
+  for (const k of keys) {
+    if (k in body && typeof body[k] !== "boolean") {
+      res.status(400).json({ error: `invalid_${k}` });
+      return;
+    }
+  }
+  if ("updatedBy" in body && typeof body.updatedBy !== "string") {
+    res.status(400).json({ error: "invalid_updatedBy" });
+    return;
+  }
+  if ("reason" in body && body.reason != null && typeof body.reason !== "string") {
+    res.status(400).json({ error: "invalid_reason" });
+    return;
+  }
+  const current = await readTradeControlState(root);
+  const next: TradeControlState = {
+    serverTradeEnabled: "serverTradeEnabled" in body ? Boolean(body.serverTradeEnabled) : current.state.serverTradeEnabled,
+    closeOnlyMode: "closeOnlyMode" in body ? Boolean(body.closeOnlyMode) : current.state.closeOnlyMode,
+    killSwitch: "killSwitch" in body ? Boolean(body.killSwitch) : current.state.killSwitch,
+    updatedAt: Date.now(),
+    updatedBy:
+      typeof body.updatedBy === "string" && body.updatedBy.trim()
+        ? body.updatedBy.trim().slice(0, 120)
+        : "api",
+    reason:
+      typeof body.reason === "string"
+        ? body.reason.slice(0, 240)
+        : current.state.reason
+  };
+  const filePath = await writeTradeControlState(root, next);
+  console.info(JSON.stringify({
+    event: "TRADE_CONTROL_UPDATED",
+    serverTradeEnabled: next.serverTradeEnabled,
+    closeOnlyMode: next.closeOnlyMode,
+    killSwitch: next.killSwitch,
+    updatedAt: next.updatedAt,
+    updatedBy: next.updatedBy,
+    reason: next.reason,
+    controlFilePath: filePath
+  }));
+  res.json(next);
 });
 
 app.listen(PORT, () => {

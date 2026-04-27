@@ -319,6 +319,36 @@ body {
   margin-top: 1.5rem;
 }
 
+.control-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: rgba(24, 24, 27, 0.75);
+  padding: 0.9rem 1rem;
+}
+
+.control-status {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0 0 0.55rem;
+}
+
+.control-status.on { color: var(--ok); }
+.control-status.off { color: var(--bad); }
+.control-status.warn { color: var(--warn); }
+
+.control-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.55rem;
+}
+
+.control-meta {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 0.45rem;
+}
+
 .symbol-grid {
   display: grid;
   gap: 0.85rem;

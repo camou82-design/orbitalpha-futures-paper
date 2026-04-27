@@ -879,7 +879,7 @@ export class PaperEngine {
   private entryPipelineReady = false;
   private exitPipelineReady = false;
   private serverTradeControlState: ServerTradeControlState = {
-    server_trade_enabled: true,
+    server_trade_enabled: false,
     close_only_mode: false,
     kill_switch_active: false,
     authority_source: "server_state",
@@ -896,7 +896,7 @@ export class PaperEngine {
   private startupRecoveryBarrierApplied = false;
 
   private tradeControlPath(): string {
-    return path.resolve(this.config.dataDir, "reports/trade-control-state.json");
+    return path.resolve(this.config.dataDir, "control/trade-control.json");
   }
 
   private executionKeysPath(): string {
@@ -908,25 +908,55 @@ export class PaperEngine {
     try {
       const raw = await fs.readFile(p, "utf8");
       const parsed = JSON.parse(raw) as Partial<ServerTradeControlState>;
+      const camel = parsed as {
+        serverTradeEnabled?: unknown;
+        closeOnlyMode?: unknown;
+        killSwitch?: unknown;
+        updatedAt?: unknown;
+        reason?: unknown;
+      };
       this.serverTradeControlState = {
-        server_trade_enabled: parsed.server_trade_enabled !== false,
-        close_only_mode: parsed.close_only_mode === true,
-        kill_switch_active: parsed.kill_switch_active === true,
+        server_trade_enabled:
+          typeof camel.serverTradeEnabled === "boolean"
+            ? camel.serverTradeEnabled
+            : parsed.server_trade_enabled === true,
+        close_only_mode:
+          typeof camel.closeOnlyMode === "boolean"
+            ? camel.closeOnlyMode
+            : parsed.close_only_mode === true,
+        kill_switch_active:
+          typeof camel.killSwitch === "boolean"
+            ? camel.killSwitch
+            : parsed.kill_switch_active === true,
         authority_source: "server_state",
-        updated_at: typeof parsed.updated_at === "number" && Number.isFinite(parsed.updated_at) ? parsed.updated_at : nowTs,
-        reason: typeof parsed.reason === "string" ? parsed.reason : null
+        updated_at:
+          typeof camel.updatedAt === "number" && Number.isFinite(camel.updatedAt)
+            ? camel.updatedAt
+            : (typeof parsed.updated_at === "number" && Number.isFinite(parsed.updated_at) ? parsed.updated_at : nowTs),
+        reason: typeof camel.reason === "string" ? camel.reason : (typeof parsed.reason === "string" ? parsed.reason : null)
       };
     } catch {
       this.serverTradeControlState = {
-        server_trade_enabled: true,
+        server_trade_enabled: false,
         close_only_mode: false,
         kill_switch_active: false,
         authority_source: "server_state",
         updated_at: nowTs,
-        reason: "default_bootstrap_state"
+        reason: "default_off_until_operator_enable"
       };
       await fs.mkdir(path.dirname(p), { recursive: true });
-      await fs.writeFile(p, JSON.stringify(this.serverTradeControlState, null, 2), "utf8");
+      await fs.writeFile(
+        p,
+        JSON.stringify({
+          serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+          closeOnlyMode: this.serverTradeControlState.close_only_mode,
+          killSwitch: this.serverTradeControlState.kill_switch_active,
+          updatedAt: this.serverTradeControlState.updated_at,
+          updatedBy: "engine_bootstrap",
+          reason: this.serverTradeControlState.reason
+        }, null, 2),
+        "utf8"
+      );
     }
   }
 
@@ -1350,6 +1380,14 @@ export class PaperEngine {
     const tickNow = Date.now();
     this.engineLastTickAt = tickNow;
     await this.loadServerTradeControlState(tickNow);
+    this.logger.info("TRADE_CONTROL_STATE_PROOF", {
+      serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+      closeOnlyMode: this.serverTradeControlState.close_only_mode,
+      killSwitch: this.serverTradeControlState.kill_switch_active,
+      control_source: this.serverTradeControlState.authority_source,
+      control_file_path: this.tradeControlPath(),
+      control_updated_at: this.serverTradeControlState.updated_at
+    });
     if (this.runCycleId === 1) {
       this.logger.info("SERVER_TRADE_CONTROL_STATE_RESTORED", {
         serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
