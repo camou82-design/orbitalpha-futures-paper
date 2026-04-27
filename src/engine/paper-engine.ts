@@ -7066,16 +7066,34 @@ export class PaperEngine {
         finalAuthorizedBeforeMutex &&
         authorityDecisionForExecution === "ENTER" &&
         orderBuildReadyBeforeMutex;
-      const mutexEval = this.positions.evaluateSymbolPositionMutex(
-        sym,
-        (authoritySideLower ?? "long") as "long" | "short",
-        next,
-        existingIdx >= 0,
-        authority.addOnAllowed === true
-      );
+      const authoritySideInvalidForEnter =
+        authorityDecisionForExecution === "ENTER" &&
+        authoritySideLower == null;
+      const mutexEval = authoritySideInvalidForEnter
+        ? {
+          sameSymbolOpenCount: 0,
+          sameSideOpen: false,
+          oppositeSideOpen: false,
+          existingSides: [] as ("long" | "short")[],
+          existingPositionIds: [] as string[],
+          blocked: false,
+          blockReason: null as "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | null
+        }
+        : this.positions.evaluateSymbolPositionMutex(
+          sym,
+          authoritySideLower as "long" | "short",
+          next,
+          existingIdx >= 0,
+          authority.addOnAllowed === true
+        );
       let mutexBlockApplied = false;
       let mutexBlockReason: "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | null = null;
-      if (finalEntryAuthorization && authorityDecisionForExecution === "ENTER" && mutexEval.blocked) {
+      if (authoritySideInvalidForEnter) {
+        finalBlockedReason = "ORDER_BUILD_FAIL";
+        finalEntryAuthorization = false;
+        hardBlockPresent = true;
+        hardBlockReason = "ORDER_BUILD_FAIL";
+      } else if (finalEntryAuthorization && authorityDecisionForExecution === "ENTER" && mutexEval.blocked) {
         mutexBlockApplied = true;
         mutexBlockReason = mutexEval.blockReason;
         finalBlockedReason = mutexEval.blockReason;
@@ -7105,6 +7123,7 @@ export class PaperEngine {
         order_build_ready_after: orderBuildReadyAfterMutex,
         position_open_attempted_before: positionOpenAttemptedBeforeMutex,
         position_open_attempted_after: positionOpenAttempted,
+        authority_side_invalid: authoritySideInvalidForEnter,
         existing_position_ids: mutexEval.existingPositionIds
       });
       if (finalEntryAuthorization && (!this.serverTradeControlState.server_trade_enabled || this.serverTradeControlState.close_only_mode || this.serverTradeControlState.kill_switch_active || this.reconcileSafetyCloseOnly)) {
@@ -7163,8 +7182,8 @@ export class PaperEngine {
         v2_decision: authorityDecisionForExecution,
         v2_side: authority.side,
         symbol_mutex_checked: true,
-        symbol_mutex_allowed: !mutexBlockApplied,
-        symbol_mutex_block_reason: mutexBlockReason,
+        symbol_mutex_allowed: !mutexEval.blocked,
+        symbol_mutex_block_reason: mutexEval.blockReason,
         final_decision: finalEntryAuthorization ? "ENTER" : "SKIP",
         final_side: finalEntryAuthorization ? authority.side : "none",
         hard_block_present: hardBlockPresent,
@@ -7445,13 +7464,24 @@ export class PaperEngine {
 
       let positionOpenTraceRef: MutablePositionOpenTrace | null = null;
       try {
-        const prePersistMutexEval = this.positions.evaluateSymbolPositionMutex(
-          sym,
-          (authoritySideLower ?? "long") as "long" | "short",
-          next,
-          existingIdx >= 0,
-          authority.addOnAllowed === true
-        );
+        const latestOpenPositions = await this.positions.loadOpenAll();
+        const prePersistMutexEval = authoritySideLower == null
+          ? {
+            sameSymbolOpenCount: 0,
+            sameSideOpen: false,
+            oppositeSideOpen: false,
+            existingSides: [] as ("long" | "short")[],
+            existingPositionIds: [] as string[],
+            blocked: false,
+            blockReason: null as "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | null
+          }
+          : this.positions.evaluateSymbolPositionMutex(
+            sym,
+            authoritySideLower as "long" | "short",
+            latestOpenPositions,
+            existingIdx >= 0,
+            authority.addOnAllowed === true
+          );
         if (prePersistMutexEval.blocked) {
           const mutexReason = prePersistMutexEval.blockReason ?? "SYMBOL_OPPOSITE_POSITION_OPEN";
           this.logger.warn("SYMBOL_POSITION_MUTEX_PRE_PERSIST_BLOCKED", {
