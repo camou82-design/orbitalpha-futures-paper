@@ -575,6 +575,7 @@ export function adaptV2Input(
         paperExecutionReady?: boolean;
         signedExecutionReady?: boolean;
         freshTickBarrierActive: boolean;
+        freshTickExecutionBlocked?: boolean;
         freshTickCompletedCycles: number;
         freshTickRequiredCycles: number;
         entryQualityProfiles?: {
@@ -646,6 +647,7 @@ export function adaptV2Input(
             paperExecutionReady: state.paperExecutionReady,
             signedExecutionReady: state.signedExecutionReady,
             freshTickBarrierActive: state.freshTickBarrierActive,
+            freshTickExecutionBlocked: state.freshTickExecutionBlocked === true,
             freshTickCompletedCycles: state.freshTickCompletedCycles,
             freshTickRequiredCycles: state.freshTickRequiredCycles,
             entryQualityProfiles: state.entryQualityProfiles,

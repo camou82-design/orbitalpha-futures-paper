@@ -889,6 +889,9 @@ export class PaperEngine {
   private readonly executionKeysConsumed = new Set<string>();
   private executionKeysLoaded = false;
   private lastServerTradeControlSignature: string | null = null;
+  /** When server trade flips disabled→true; stale-gate for authority/snapshot timestamps. */
+  private serverTradeEnabledTrueAt: number | null = null;
+  private lastObservedServerTradeEnabled = false;
   private reconcileSafetyCloseOnly = false;
   private reconcileLastCheckedAt: number | null = null;
   private reconcileLastMismatchReason: string | null = null;
@@ -1035,21 +1038,35 @@ export class PaperEngine {
 
   private evaluateServerTradeControlTransition(nowTs: number): void {
     const nextSig = this.currentServerTradeControlSignature();
+    const enabledNow = this.serverTradeControlState.server_trade_enabled === true;
     if (this.lastServerTradeControlSignature == null) {
       this.lastServerTradeControlSignature = nextSig;
+      this.lastObservedServerTradeEnabled = enabledNow;
       return;
     }
-    if (this.lastServerTradeControlSignature === nextSig) return;
+    if (this.lastServerTradeControlSignature === nextSig) {
+      this.lastObservedServerTradeEnabled = this.serverTradeControlState.server_trade_enabled === true;
+      return;
+    }
+    const enabledBefore = this.lastObservedServerTradeEnabled === true;
     this.lastServerTradeControlSignature = nextSig;
     this.freshTickRequiredAfterReadiness = true;
-    this.clearPendingDecisionState("server_trade_control_transition", nowTs, this.serverTradeControlState.authority_source);
+    const transitionReason =
+      !enabledBefore && enabledNow ? "server_trade_enabled_true" : "server_trade_control_transition";
+    if (!enabledBefore && enabledNow) {
+      this.serverTradeEnabledTrueAt = nowTs;
+    }
+    this.clearPendingDecisionState(transitionReason, nowTs, this.serverTradeControlState.authority_source);
+    this.lastObservedServerTradeEnabled = enabledNow;
     this.logger.warn("SERVER_TRADE_CONTROL_TRANSITION_APPLIED", {
       server_trade_enabled: this.serverTradeControlState.server_trade_enabled,
       close_only_mode: this.serverTradeControlState.close_only_mode,
       kill_switch_active: this.serverTradeControlState.kill_switch_active,
       authority_source: this.serverTradeControlState.authority_source,
       updated_at: this.serverTradeControlState.updated_at,
-      reason: this.serverTradeControlState.reason
+      reason: this.serverTradeControlState.reason,
+      transition_reason: transitionReason,
+      server_trade_enabled_true_at: this.serverTradeEnabledTrueAt
     });
   }
 
@@ -1947,6 +1964,7 @@ export class PaperEngine {
           this.paperExecutionReady,
           this.signedExecutionReady,
           readinessBarrierActive,
+          this.freshTickRequiredAfterReadiness,
           this.readinessFreshTickCompletedCycles,
           this.readinessFreshTickRequiredCycles,
           this.buildEntryQualityProfilesForV2(),
@@ -2147,8 +2165,11 @@ export class PaperEngine {
           decision_funnel_50,
           decision_funnel_50_size,
           reject_reason_counts_tick,
-          symbol_decisions: Object.fromEntries(
-            [...decisionBySymbol.entries()].map(([k, v]) => [k, buildEngineStateSymbolDecision(v)])
+          symbol_decisions: mergeEngineSymbolDecisionsWithOpenLedgerExposure(
+            decisionBySymbol,
+            await this.positions.loadOpenAll(),
+            500_000,
+            this.logger
           ),
           exchange: "okx",
           okx_demo_enabled: this.config.okxDemoEnabled,
@@ -5357,6 +5378,21 @@ export class PaperEngine {
       const signalLostCandidateCount = (posTrail.candidateLostStreak ?? 0) + 1;
       const entryEvidence = open.entryEvidence;
 
+      if (m.pnlPctNet < 0) {
+        this.logger.info("EXIT_PRIORITY_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          pnl_pct_net: m.pnlPctNet,
+          pnl_usd_net: m.pnlUsdNet,
+          skipped_exit: "candidate_lost_watchdog",
+          priority_rule: "risk_sl_trend_break_before_signal_lost_under_loss",
+          candidate_lost_candidate_count: signalLostCandidateCount
+        });
+        remaining.push({ ...posTrail, candidateLostStreak: 0 });
+        continue;
+      }
+
       const trendStructureStillValid =
         open.regimeAtEntry === "TREND"
           ? (snap.trendOk === true &&
@@ -6342,16 +6378,41 @@ export class PaperEngine {
       queued_entries: entryQueue.length,
       readiness_changed_at: input.readinessChangedAt
     });
-    if (input.readinessBarrierActive) {
+    const freshTickHardBlock =
+      input.readinessBarrierActive || this.freshTickRequiredAfterReadiness;
+    if (freshTickHardBlock) {
+      const blockReason = input.readinessBarrierActive
+        ? "fresh_tick_barrier_active"
+        : "fresh_tick_required_pending_clear";
       this.logger.warn("ENTRY_BLOCKED_PREPARED_BUT_NOT_REEVALUATED", {
-        reason: "fresh_tick_barrier_active",
+        reason: blockReason,
         queued_entries: entryQueue.length,
         run_cycle_id: this.runCycleId,
-        readiness_changed_at: input.readinessChangedAt
+        readiness_changed_at: input.readinessChangedAt,
+        readiness_barrier_active: input.readinessBarrierActive,
+        fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness,
+        fresh_tick_completed_cycles: this.readinessFreshTickCompletedCycles,
+        fresh_tick_required_cycles: this.readinessFreshTickRequiredCycles
       });
       this.logger.warn("READINESS_REEVALUATION_BLOCKED", {
-        reason: "fresh_tick_barrier_active",
+        reason: blockReason,
         run_cycle_id: this.runCycleId
+      });
+      this.logger.warn("FRESH_TICK_BARRIER_HARD_BLOCK_PROOF", {
+        run_cycle_id: this.runCycleId,
+        block_reason: blockReason,
+        readiness_barrier_active: input.readinessBarrierActive,
+        fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness,
+        fresh_tick_completed_cycles: this.readinessFreshTickCompletedCycles,
+        fresh_tick_required_cycles: this.readinessFreshTickRequiredCycles,
+        queued_entries: entryQueue.length,
+        paper_position_opened_will_not_run: true
+      });
+      this.logger.warn("V2_FINAL_HARD_BLOCK_PROOF", {
+        gate: "fresh_tick_or_readiness_barrier",
+        block_reason: blockReason,
+        run_cycle_id: this.runCycleId,
+        queued_entries: entryQueue.length
       });
       for (const q of entryQueue) {
         this.contaminatedEntrySamples.push({
@@ -6404,12 +6465,17 @@ export class PaperEngine {
       this.lastEntrySignalFetchedAt = envelope.signalFetchedAt ?? first.fetchedAt ?? null;
 
       const readinessChangedAt = input.readinessChangedAt;
+      const gateTimestamps = [readinessChangedAt, this.serverTradeEnabledTrueAt].filter(
+        (x): x is number => typeof x === "number" && Number.isFinite(x)
+      );
+      const effectiveReadinessGateTs = gateTimestamps.length > 0 ? Math.max(...gateTimestamps) : null;
       const staleReasons: string[] = [];
-      if (readinessChangedAt != null) {
-        if ((envelope.signalFetchedAt ?? first.fetchedAt) < readinessChangedAt) staleReasons.push("signal_fetched_before_readiness_recovered");
-        if (envelope.authorityEvaluatedAt < readinessChangedAt) staleReasons.push("authority_evaluated_before_readiness_recovered");
-        if (envelope.executorDecisionEvaluatedAt < readinessChangedAt) staleReasons.push("executor_decision_before_readiness_recovered");
-        if (first.fetchedAt < readinessChangedAt) staleReasons.push("snapshot_fetched_before_readiness_recovered");
+      if (effectiveReadinessGateTs != null) {
+        const g = effectiveReadinessGateTs;
+        if ((envelope.signalFetchedAt ?? first.fetchedAt) < g) staleReasons.push("signal_fetched_before_readiness_or_trade_enable_gate");
+        if (envelope.authorityEvaluatedAt < g) staleReasons.push("authority_evaluated_before_readiness_or_trade_enable_gate");
+        if (envelope.executorDecisionEvaluatedAt < g) staleReasons.push("executor_decision_before_readiness_or_trade_enable_gate");
+        if (first.fetchedAt < g) staleReasons.push("snapshot_fetched_before_readiness_or_trade_enable_gate");
         if (envelope.decisionCycleId < this.runCycleId) staleReasons.push("order_basis_previous_cycle");
       }
       if (staleReasons.length > 0) {
@@ -6417,6 +6483,8 @@ export class PaperEngine {
           symbol: first.symbol,
           stale_reasons: staleReasons,
           readiness_changed_at: readinessChangedAt,
+          server_trade_enabled_true_at: this.serverTradeEnabledTrueAt,
+          effective_readiness_gate_ts: effectiveReadinessGateTs,
           signal_fetched_at: envelope.signalFetchedAt ?? first.fetchedAt,
           authority_evaluated_at: envelope.authorityEvaluatedAt,
           executor_decision_evaluated_at: envelope.executorDecisionEvaluatedAt,
@@ -6434,18 +6502,13 @@ export class PaperEngine {
         });
         continue;
       }
-      if (this.freshTickRequiredAfterReadiness && authority.decision === "ENTER") {
-        this.logger.warn("RECOVERY_BARRIER_INVARIANT_WARN", this.buildInvariantProofPayload({
-          symbol: String(first.symbol),
-          side: authority.side,
-          authority,
-          adoptedEngine,
-          lifecycleState: null,
-          reason: "entry_attempt_while_fresh_tick_barrier_active"
-        }));
-      }
-      if (readinessChangedAt != null && authority.decision === "ENTER" && envelope.decisionCycleId === this.runCycleId) {
-        this.logger.warn("RECOVERY_BARRIER_INVARIANT_WARN", this.buildInvariantProofPayload({
+      if (
+        readinessChangedAt != null &&
+        authority.decision === "ENTER" &&
+        this.readinessTransitionCycleId != null &&
+        this.readinessTransitionCycleId === this.runCycleId
+      ) {
+        this.logger.error("ENTRY_HARD_BLOCKED", this.buildInvariantProofPayload({
           symbol: String(first.symbol),
           side: authority.side,
           authority,
@@ -6453,6 +6516,13 @@ export class PaperEngine {
           lifecycleState: null,
           reason: "entry_attempt_same_cycle_after_readiness_recovery"
         }));
+        this.logger.warn("V2_FINAL_HARD_BLOCK_PROOF", {
+          gate: "readiness_same_cycle_recovery",
+          symbol: first.symbol,
+          run_cycle_id: this.runCycleId,
+          readiness_transition_cycle_id: this.readinessTransitionCycleId
+        });
+        continue;
       }
 
       const v2BlockReason = envelope.selector?.v2_result.risk.blockReason ?? null;
@@ -6892,64 +6962,26 @@ export class PaperEngine {
           });
         }
       }
-      if (finalBlockedReason === "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE") {
-        const exDetail = (res.executorDecision?.detail ?? null) as Record<string, unknown> | null;
-        const zone = typeof first.boxPos === "number" && Number.isFinite(first.boxPos) ? classifyRangeActionZone(first.boxPos) : "mid";
-        const reversalConfirmedFromDetail = exDetail?.reversal_confirmed === true;
-        const relaxedRangeEntry =
-          exDetail?.relaxedRangeEntry === true ||
-          first.rangeSignalKeptByRelax === true;
-        const serverControlsOpen =
-          this.serverTradeControlState.server_trade_enabled &&
-          !this.serverTradeControlState.close_only_mode &&
-          !this.serverTradeControlState.kill_switch_active &&
-          !this.reconcileSafetyCloseOnly;
-        const dailyLossGuardActive = this.lastRisk?.dailyLossGuardTriggered === true;
-        const riskModeHalt = this.lastRiskExposure?.riskMode === "HALT";
-        const shock = this.lastRisk?.directionalShockState ?? "NONE";
-        const regimeForAuthority = authorityRegimeUpper === "RANGE" || stage1ExecutionEngine === "RANGE" ? "RANGE" : "TREND";
-        const trendDirectionalAligned =
-          shock === "NONE" ||
-          (shock === "UP" && authority.side === "long") ||
-          (shock === "DOWN" && authority.side === "short");
-        const rangeDirectionalAligned =
-          (authority.side === "long" && zone === "lower") ||
-          (authority.side === "short" && zone === "upper");
-        const rangePreserveAllowed =
-          rangeDirectionalAligned &&
-          (reversalConfirmedFromDetail || relaxedRangeEntry);
-        const weakRecheckV2PreserveEligible =
-          authority.source === "v2" &&
-          (adoptedEngine === "V2" || String(exDetail?.final_engine_owner ?? "").toUpperCase() === "V2") &&
-          authorityDecisionForExecution === "ENTER" &&
-          (authority.side === "long" || authority.side === "short") &&
-          (authority.entryQualityGrade === "S" || authority.entryQualityGrade === "A" || authority.entryQualityGrade === "B") &&
-          serverControlsOpen &&
-          !riskModeHalt &&
-          !dailyLossGuardActive &&
-          (regimeForAuthority === "RANGE" ? rangePreserveAllowed : trendDirectionalAligned);
-        if (weakRecheckV2PreserveEligible) {
-          const before = finalBlockedReason;
-          finalBlockedReason = null;
-          this.logger.info("ENTRY_EVIDENCE_RECHECK_V2_AUTHORITY_PRESERVED", {
+      if (finalBlockedReason === null) {
+        const d = adaptive.detail as Record<string, unknown>;
+        const adaptiveConfTierRaw = typeof d?.confidence_tier === "string" ? String(d.confidence_tier).toLowerCase() : "";
+        const adaptiveConfScore =
+          typeof d?.confidence_score === "number" && Number.isFinite(d.confidence_score) ? (d.confidence_score as number) : null;
+        const tierAggressive = adaptiveConfTierRaw === "top" || adaptiveConfTierRaw === "high";
+        const evidenceLow =
+          entryEvidenceScore < 60 ||
+          first.candidateStrength === "weak" ||
+          authority.entryQualityGrade === "B";
+        if (tierAggressive && evidenceLow) {
+          finalBlockedReason = "ENTRY_QUALITY_CONFLICT_BLOCK";
+          entryEvidenceReason = "confidence_evidence_conflict";
+          this.logger.warn("ENTRY_QUALITY_CONFLICT_BLOCK_PROOF", {
             symbol: sym,
-            side: authority.side,
-            regime: regimeForAuthority,
-            active_engine_routing: activeEngineRouting,
-            authority_source: authority.source,
-            authority_decision: authorityDecisionForExecution,
-            entry_quality_grade: authority.entryQualityGrade ?? null,
-            final_blocked_reason_before: before,
-            final_blocked_reason_after: finalBlockedReason,
-            relaxedRangeEntry,
-            reversal_confirmed: reversalConfirmedFromDetail,
-            rangeConfidence: first.rangeConfidence ?? null,
-            boxPos: first.boxPos ?? null,
-            zone,
-            preserved_reason:
-              regimeForAuthority === "RANGE"
-                ? "v2_range_authority_preserved_weak_candidate"
-                : "v2_trend_authority_preserved_weak_candidate"
+            adaptive_confidence_tier: adaptiveConfTierRaw,
+            adaptive_confidence_score: adaptiveConfScore,
+            entry_evidence_score: entryEvidenceScore,
+            candidate_strength: first.candidateStrength ?? null,
+            entry_quality_grade: authority.entryQualityGrade ?? null
           });
         }
       }
@@ -6973,12 +7005,13 @@ export class PaperEngine {
           "ORDER_BUILD_FAIL",
           "CRASH_ENTRY_GUARD_BLOCK",
           "SYMBOL_OPPOSITE_POSITION_OPEN",
-          "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
+          "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN",
+          "ENTRY_QUALITY_CONFLICT_BLOCK",
+          "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE"
         ]);
         const softReasons = new Set<string>([
           "ENTRY_QUALITY_CONTAMINATED_SIMILAR",
           "WAIT_RECHECK",
-          "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE",
           "SIDE_NOT_ALLOWED_LONG",
           "SIDE_NOT_ALLOWED_SHORT",
           "RISK_LONG_DISALLOWED",
@@ -7323,11 +7356,37 @@ export class PaperEngine {
 
       // 3. SCALE-IN BRANCH (final gate passed; max open positions does not apply to scale-in)
       if (existingIdx >= 0) {
-        const targetScaleStage = (next[existingIdx].entryStage ?? 1) + 1;
-        const scaleExecutionKey = `scalein:${sym}:${intentSide}:${next[existingIdx].openedAt}:stage${targetScaleStage}`;
+        const existingRow = next[existingIdx];
+        const pnlPctPreScale =
+          intentSide === "long"
+            ? (first.lastPrice - existingRow.entryPrice) / Math.max(1e-9, existingRow.entryPrice)
+            : (existingRow.entryPrice - first.lastPrice) / Math.max(1e-9, existingRow.entryPrice);
+        if (pnlPctPreScale <= 0) {
+          this.logger.info("ADDON_PRECHECK_BLOCK_PROOF", {
+            symbol: sym,
+            side: intentSide,
+            pnl_pct: pnlPctPreScale,
+            block_reason: "loss_averaging_forbidden",
+            add_on_candidate_suppressed: true
+          });
+          continue;
+        }
+        const struct = this.evaluateAddOnStructureReinforced(existingRow, first, intentSide);
+        if (!struct.ok) {
+          this.logger.info("ADDON_PRECHECK_BLOCK_PROOF", {
+            symbol: sym,
+            side: intentSide,
+            pnl_pct: pnlPctPreScale,
+            block_reason: struct.reason,
+            add_on_candidate_suppressed: true
+          });
+          continue;
+        }
+        const targetScaleStage = (existingRow.entryStage ?? 1) + 1;
+        const scaleExecutionKey = `scalein:${sym}:${intentSide}:${existingRow.openedAt}:stage${targetScaleStage}`;
         const scaleKeyOk = await this.consumeExecutionKey(scaleExecutionKey);
         if (!scaleKeyOk) continue;
-        const scaled = await this.tryPaperPositionScaleIn(next[existingIdx], envelope, first, nowTs, entryQualitySizeMultiplier);
+        const scaled = await this.tryPaperPositionScaleIn(existingRow, envelope, first, nowTs, entryQualitySizeMultiplier);
         if (scaled) {
           next[existingIdx] = scaled;
           openPositionsChanged = true;
@@ -7375,16 +7434,35 @@ export class PaperEngine {
         1,
         Math.round(this.config.leverage * adaptive.leverageMultiplier * 100) / 100
       );
-      const confScore =
+      let confScore =
         typeof adaptive.detail.confidence_score === "number" && Number.isFinite(adaptive.detail.confidence_score)
           ? adaptive.detail.confidence_score
           : undefined;
-      const confTier =
+      let confTier =
         typeof adaptive.detail.confidence_tier === "string" ? adaptive.detail.confidence_tier : undefined;
-      const sizeMult =
+      let sizeMult =
         typeof adaptive.detail.size_multiplier === "number" && Number.isFinite(adaptive.detail.size_multiplier)
           ? adaptive.detail.size_multiplier
           : undefined;
+      const evidenceClamdown =
+        authority.entryQualityGrade === "B" ||
+        first.candidateStrength === "weak" ||
+        entryEvidenceScore < 60;
+      const tierLower = typeof confTier === "string" ? confTier.toLowerCase() : "";
+      if (evidenceClamdown && (tierLower === "top" || tierLower === "high")) {
+        confTier = "mid";
+        confScore = Math.min(typeof confScore === "number" ? confScore : 0.55, 0.55);
+        sizeMult = Math.min(typeof sizeMult === "number" ? sizeMult : 1, 0.75);
+        this.logger.info("ENTRY_QUALITY_CONFIDENCE_CLAMPDOWN_PROOF", {
+          symbol: first.symbol,
+          entry_quality_grade: authority.entryQualityGrade ?? null,
+          candidate_strength: first.candidateStrength ?? null,
+          entry_evidence_score: entryEvidenceScore,
+          stored_confidence_tier: confTier,
+          stored_confidence_score: confScore,
+          stored_size_multiplier: sizeMult
+        });
+      }
 
       this.logger.info("trade_confidence_scored", {
         symbol: first.symbol,
@@ -8079,6 +8157,35 @@ export class PaperEngine {
     }
   }
 
+  private evaluateAddOnStructureReinforced(
+    open: PaperOpenPositionRecord,
+    snap: SymbolSnapshot,
+    intentSide: "long" | "short"
+  ): { ok: boolean; reason: string } {
+    const reg = String(open.regimeAtEntry ?? "").toUpperCase();
+    const exec = String(open.executorAtEntry ?? "").toUpperCase();
+    if (reg === "RANGE" || exec === "RANGE") {
+      if (typeof snap.boxPos !== "number" || !Number.isFinite(snap.boxPos)) {
+        return { ok: false, reason: "addon_range_zone_unknown" };
+      }
+      const rz = classifyRangeActionZone(snap.boxPos);
+      const ok =
+        (intentSide === "long" && rz === "lower") ||
+        (intentSide === "short" && rz === "upper");
+      return ok ? { ok: true, reason: "addon_range_structure_reinforced" } : { ok: false, reason: "addon_range_structure_not_reinforced" };
+    }
+    const trendStructureOk =
+      snap.trendOk === true &&
+      Math.abs(snap.emaGap ?? 0) >= ENTRY_EVIDENCE_TREND_EMA_GAP_MIN &&
+      (snap.trendWeaknessScore ?? 1) <= ENTRY_EVIDENCE_TREND_WEAKNESS_MAX;
+    const dirAligned =
+      (intentSide === "long" && (snap.emaGap ?? 0) >= ENTRY_EVIDENCE_TREND_EMA_GAP_MIN) ||
+      (intentSide === "short" && (snap.emaGap ?? 0) <= -ENTRY_EVIDENCE_TREND_EMA_GAP_MIN);
+    return trendStructureOk && dirAligned
+      ? { ok: true, reason: "addon_trend_structure_reinforced" }
+      : { ok: false, reason: "addon_trend_structure_not_reinforced" };
+  }
+
   private async tryPaperPositionScaleIn(
     existing: PaperOpenPositionRecord,
     envelope: PaperEngineDecisionEnvelope,
@@ -8131,7 +8238,12 @@ export class PaperEngine {
         ? (first.lastPrice - existing.entryPrice) / Math.max(1e-9, existing.entryPrice)
         : (existing.entryPrice - first.lastPrice) / Math.max(1e-9, existing.entryPrice);
     if (pnlPctNow <= 0) {
-      emitScaleInvariantBroken("loss_averaging_forbidden");
+      this.logger.info("ADDON_PRECHECK_BLOCK_PROOF", {
+        symbol: existing.symbol,
+        pnl_pct: pnlPctNow,
+        block_reason: "loss_averaging_forbidden",
+        note: "defense_in_depth_scale_in_path_should_be_prefiltered"
+      });
       this.logger.info("scale_in_blocked_loss_averaging_forbidden", {
         symbol: existing.symbol,
         pnl_pct: pnlPctNow
@@ -9001,6 +9113,50 @@ export class PaperEngine {
 
 }
 
+const PAPER_LEDGER_KRW_NOTIONAL_PER_USD = 1400;
+
+function computeLedgerSymbolExposureNotionalKrw(
+  opens: ReadonlyArray<PaperOpenPositionRecord>,
+  symbol: string
+): number {
+  let sum = 0;
+  for (const o of opens) {
+    if (String(o.symbol) !== symbol || (o.status ?? "open") !== "open") continue;
+    const lev = typeof o.leverage === "number" && Number.isFinite(o.leverage) && o.leverage > 0 ? o.leverage : 1;
+    sum += Math.max(0, o.sizeUsd) * lev * PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
+  }
+  return Math.round(sum);
+}
+
+function mergeEngineSymbolDecisionsWithOpenLedgerExposure(
+  decisionBySymbol: ReadonlyMap<string, PaperEngineDecisionEnvelope>,
+  opens: ReadonlyArray<PaperOpenPositionRecord>,
+  accountEquityKrw: number,
+  proofLogger: Logger
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of decisionBySymbol.entries()) {
+    const base = buildEngineStateSymbolDecision(v);
+    const prev = typeof base.exposure_notional_krw === "number" ? base.exposure_notional_krw : 0;
+    const recon = computeLedgerSymbolExposureNotionalKrw(opens, k);
+    const eqMul = accountEquityKrw > 0 ? recon / accountEquityKrw : 0;
+    proofLogger.info("POSITION_EXPOSURE_RECONCILE_PROOF", {
+      symbol: k,
+      exposure_notional_krw_before_authority: prev,
+      exposure_notional_krw_open_ledger: recon,
+      exposure_notional_krw_after: recon,
+      equity_multiple_after: eqMul,
+      open_leg_count: opens.filter((o) => String(o.symbol) === k && (o.status ?? "open") === "open").length
+    });
+    out[k] = {
+      ...base,
+      exposure_notional_krw: recon,
+      equity_multiple: eqMul
+    };
+  }
+  return out;
+}
+
 /**
  * ENGINE STATE SUMMARY HELPER (Phase 2 Extraction)
  * Promotes authority-first status for terminal/dashboard state.
@@ -9226,6 +9382,7 @@ function buildV2StateBridge(
   paperExecutionReady: boolean,
   signedExecutionReady: boolean,
   freshTickBarrierActive: boolean,
+  freshTickExecutionBlocked: boolean,
   freshTickCompletedCycles: number,
   freshTickRequiredCycles: number,
   entryQualityProfiles: {
@@ -9259,6 +9416,7 @@ function buildV2StateBridge(
     paperExecutionReady,
     signedExecutionReady,
     freshTickBarrierActive,
+    freshTickExecutionBlocked,
     freshTickCompletedCycles,
     freshTickRequiredCycles,
     entryQualityProfiles,

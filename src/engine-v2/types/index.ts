@@ -118,6 +118,8 @@ export interface EngineV2Input {
         paperExecutionReady?: boolean;
         signedExecutionReady?: boolean;
         freshTickBarrierActive: boolean;
+        /** Same tick / post-barrier: execution must not proceed until cleared at end of tick. */
+        freshTickExecutionBlocked?: boolean;
         freshTickCompletedCycles: number;
         freshTickRequiredCycles: number;
         entryQualityProfiles?: {
@@ -255,6 +257,8 @@ export interface V2BridgeState {
     paperExecutionReady?: boolean;
     signedExecutionReady?: boolean;
     freshTickBarrierActive: boolean;
+    /** Paper engine: block V2 ENTER until fresh-tick gate clears (includes same-tick post-cycle race). */
+    freshTickExecutionBlocked?: boolean;
     freshTickCompletedCycles: number;
     freshTickRequiredCycles: number;
     entryQualityProfiles?: {

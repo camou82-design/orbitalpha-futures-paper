@@ -1372,6 +1372,7 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
       shortAllow: input.risk?.shortAllow ?? true,
       executionReadiness: true,
       freshTickBarrierActive: false,
+      freshTickExecutionBlocked: false,
       freshTickCompletedCycles: 2,
       freshTickRequiredCycles: 2,
       serverTradeEnabled: true,

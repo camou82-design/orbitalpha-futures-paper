@@ -147,9 +147,11 @@ export function calculateRiskSizing(
         sizeMultiplier *= 0.4;
     }
 
-    // Fresh-tick barrier is a stabilization signal, not a hard entry kill-switch.
-    if (!isBlocked && state.freshTickBarrierActive) {
-        sizeMultiplier *= 0.7;
+    // Fresh-tick barrier + execution gate: hard block (paper engine final authority).
+    if (!isBlocked && (state.freshTickBarrierActive === true || state.freshTickExecutionBlocked === true)) {
+        isBlocked = true;
+        blockReason =
+            state.freshTickExecutionBlocked === true ? "FRESH_TICK_EXECUTION_BLOCKED" : "FRESH_TICK_BARRIER_ACTIVE";
     }
 
     if (!isBlocked && Number.isFinite(dProfit)) {
@@ -186,6 +188,7 @@ export function calculateRiskSizing(
         trendIsStrongDirection &&
         entryQualityGrade === "S" &&
         !state.freshTickBarrierActive &&
+        state.freshTickExecutionBlocked !== true &&
         Number.isFinite(dProfit) &&
         dProfit <= dLoss &&
         dProfit <= dContaminated &&
