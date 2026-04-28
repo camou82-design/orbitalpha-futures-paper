@@ -1,0 +1,45 @@
+import type { EngineV2Input, EngineV2Position, EngineV2Side } from "../types";
+
+export type V2StateAuthoritySource = "v2_state_authority_from_bridge";
+
+export type V2StateAuthority = Readonly<{
+    symbol: EngineV2Input["symbol"];
+    now: number;
+    currentPositions: EngineV2Position[];
+    symbolPositions: EngineV2Position[];
+    sameSidePosition: EngineV2Position | null;
+    oppositeSidePosition: EngineV2Position | null;
+    hasSameSidePosition: boolean;
+    hasOppositeSidePosition: boolean;
+    currentStage: number;
+    positionStateReady: boolean;
+    marketSnapshotReady: boolean;
+    v2InputReady: boolean;
+    serverTradeEnabled: boolean;
+    closeOnlyMode: boolean;
+    killSwitch: boolean;
+    reconcileSafeMode: boolean;
+    riskMode: string | null;
+    dailyLossGuardTriggered: boolean;
+    freshTickBarrierActive: boolean;
+    freshTickExecutionBlocked: boolean;
+    freshTickCompletedCycles: number;
+    freshTickRequiredCycles: number;
+    paperExecutionReady: boolean;
+    signedExecutionReady: boolean;
+    directionalShockState: "UP" | "DOWN" | "NONE";
+    crashState: string;
+    pumpState: string;
+    longAllow: boolean;
+    shortAllow: boolean;
+    accountEquityKrw: number;
+    maxUsableMarginKrw: number;
+    exposureNotionalCapKrw: number;
+    symbolExposureNotionalCapKrw: number;
+    ledgerExposureNotionalKrw: number;
+    symbolLedgerExposureNotionalKrw: number;
+    lossStreaks: Record<string, number>;
+    entryQualityProfiles: EngineV2Input["state"]["entryQualityProfiles"];
+    stateAuthoritySource: V2StateAuthoritySource;
+    inferredIntentSide: EngineV2Side;
+}>;

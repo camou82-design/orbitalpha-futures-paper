@@ -18,6 +18,7 @@ import { executeTrendRegime } from "./executors/trend-executor";
 import { executeTransitionRegime } from "./executors/transition-executor";
 import { calculateRiskSizing } from "./risk-sizing/policy";
 import { generateExplanation } from "./explain/diagnostic";
+import { deriveV2StateAuthority } from "./state/derive";
 
 /**
  * orchestrator for Engine-V2 5-tier architecture.
@@ -32,6 +33,37 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 3: Engine Router
     const routing = routeToExecutor(judgment, confidence);
+    const v2State = deriveV2StateAuthority(input);
+    console.info(JSON.stringify({
+        event: "V2_STATE_AUTHORITY_PROOF",
+        symbol: String(input.symbol),
+        state_authority_source: v2State.stateAuthoritySource,
+        position_state_ready: v2State.positionStateReady,
+        market_snapshot_ready: v2State.marketSnapshotReady,
+        v2_input_ready: v2State.v2InputReady,
+        serverTradeEnabled: v2State.serverTradeEnabled,
+        closeOnlyMode: v2State.closeOnlyMode,
+        killSwitch: v2State.killSwitch,
+        reconcileSafeMode: v2State.reconcileSafeMode,
+        riskMode: v2State.riskMode,
+        dailyLossGuardTriggered: v2State.dailyLossGuardTriggered,
+        freshTickBarrierActive: v2State.freshTickBarrierActive,
+        freshTickExecutionBlocked: v2State.freshTickExecutionBlocked,
+        directionalShockState: v2State.directionalShockState,
+        crashState: v2State.crashState,
+        pumpState: v2State.pumpState,
+        longAllow: v2State.longAllow,
+        shortAllow: v2State.shortAllow,
+        current_positions_count: v2State.currentPositions.length,
+        symbol_positions_count: v2State.symbolPositions.length,
+        has_same_side_position: v2State.hasSameSidePosition,
+        has_opposite_side_position: v2State.hasOppositeSidePosition,
+        currentStage: v2State.currentStage,
+        accountEquityKrw: v2State.accountEquityKrw,
+        maxUsableMarginKrw: v2State.maxUsableMarginKrw,
+        exposureNotionalCapKrw: v2State.exposureNotionalCapKrw,
+        symbolExposureNotionalCapKrw: v2State.symbolExposureNotionalCapKrw
+    }));
 
     // Tier 4: Executors
     let execution;
@@ -50,8 +82,40 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         };
     }
 
-    // Tier 5: Risk Sizing
-    const riskSizing = calculateRiskSizing(judgment, confidence, execution, input);
+    // Tier 5: Risk Sizing (B안: normalized v2State authority projected into input.state)
+    const authoritativeInput: EngineV2Input = {
+        ...input,
+        state: {
+            ...input.state,
+            currentPositions: v2State.currentPositions,
+            lossStreaks: v2State.lossStreaks,
+            directionalShockState: v2State.directionalShockState,
+            longAllow: v2State.longAllow,
+            shortAllow: v2State.shortAllow,
+            executionReadiness: v2State.paperExecutionReady,
+            paperExecutionReady: v2State.paperExecutionReady,
+            signedExecutionReady: v2State.signedExecutionReady,
+            freshTickBarrierActive: v2State.freshTickBarrierActive,
+            freshTickExecutionBlocked: v2State.freshTickExecutionBlocked,
+            freshTickCompletedCycles: v2State.freshTickCompletedCycles,
+            freshTickRequiredCycles: v2State.freshTickRequiredCycles,
+            entryQualityProfiles: v2State.entryQualityProfiles,
+            serverTradeEnabled: v2State.serverTradeEnabled,
+            closeOnlyMode: v2State.closeOnlyMode,
+            killSwitch: v2State.killSwitch,
+            reconcileSafeMode: v2State.reconcileSafeMode,
+            riskMode: v2State.riskMode ?? undefined,
+            dailyLossGuardTriggered: v2State.dailyLossGuardTriggered,
+            crashState: v2State.crashState,
+            pumpState: v2State.pumpState,
+            pump_state: v2State.pumpState,
+            accountEquityKrw: v2State.accountEquityKrw,
+            maxUsableMarginKrw: v2State.maxUsableMarginKrw,
+            exposureNotionalCapKrw: v2State.exposureNotionalCapKrw,
+            symbolExposureNotionalCapKrw: v2State.symbolExposureNotionalCapKrw
+        }
+    };
+    const riskSizing = calculateRiskSizing(judgment, confidence, execution, authoritativeInput);
 
     // Tier 5: Explanation (Diagnostics)
     const explanation = generateExplanation(judgment, execution, riskSizing);
@@ -150,9 +214,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let contaminationHardReject = false;
     let contaminationSoftenReason: string | null = null;
 
-    const shock = input.state.directionalShockState ?? "NONE";
-    const crashState = String(input.state.crashState ?? "").toUpperCase();
-    const pumpStateResolved = String(input.state.pumpState ?? input.state.pump_state ?? "").toUpperCase();
+    const shock = v2State.directionalShockState ?? "NONE";
+    const crashState = String(v2State.crashState ?? "").toUpperCase();
+    const pumpStateResolved = String(v2State.pumpState ?? "").toUpperCase();
     const marketMode = String(judgment.regime ?? "UNKNOWN");
     const activeEngineRouting = String(routing.executor ?? "UNKNOWN");
     const qualityScore = Number(input.snapshot?.qualityScore ?? 0);
@@ -165,10 +229,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         trendWeaknessScore < 0.5;
     const entryQualityGrade = riskSizing.entryQualityGrade ?? "B";
     const reviewingTicks = Number(input.snapshot?.reviewing_ticks ?? 0);
-    const allowNewLong = Boolean((riskSizing.diagnostics as Record<string, unknown> | undefined)?.allow_new_long ?? input.state.longAllow);
-    const allowNewShort = Boolean((riskSizing.diagnostics as Record<string, unknown> | undefined)?.allow_new_short ?? input.state.shortAllow);
-    const riskLongAllow = input.state.longAllow;
-    const riskShortAllow = input.state.shortAllow;
+    const allowNewLong = Boolean((riskSizing.diagnostics as Record<string, unknown> | undefined)?.allow_new_long ?? v2State.longAllow);
+    const allowNewShort = Boolean((riskSizing.diagnostics as Record<string, unknown> | undefined)?.allow_new_short ?? v2State.shortAllow);
+    const riskLongAllow = v2State.longAllow;
+    const riskShortAllow = v2State.shortAllow;
     const trendSideCandidate: EngineV2Side =
         shock === "DOWN" ? "short" :
             shock === "UP" ? "long" :
@@ -238,14 +302,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const signedExecutionReady = readinessDiag.signed_execution_ready === true;
     const hardControlClear =
         paperExecutionReady === true &&
-        input.state.serverTradeEnabled !== false &&
-        input.state.closeOnlyMode !== true &&
-        input.state.killSwitch !== true &&
-        input.state.killSwitchActive !== true &&
-        input.state.reconcileSafeMode !== true &&
-        input.state.reconcileSafeModeActive !== true &&
-        String(input.state.riskMode ?? "").toUpperCase() !== "HALT" &&
-        input.state.dailyLossGuardTriggered !== true;
+        v2State.serverTradeEnabled === true &&
+        v2State.closeOnlyMode !== true &&
+        v2State.killSwitch !== true &&
+        v2State.reconcileSafeMode !== true &&
+        String(v2State.riskMode ?? "").toUpperCase() !== "HALT" &&
+        v2State.dailyLossGuardTriggered !== true;
     const unpromotableRejectReasons = new Set<string>([
         "ENTRY_QUALITY_CONTAMINATED_SIMILAR",
         "CRASH_ENTRY_GUARD_BLOCK",
@@ -577,12 +639,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 qualityScore >= 80 &&
                 paperExecutionReady === true &&
                 !hardBlockPresent &&
-                input.state.serverTradeEnabled !== false &&
-                input.state.closeOnlyMode !== true &&
-                input.state.killSwitch !== true &&
-                input.state.killSwitchActive !== true &&
-                input.state.reconcileSafeMode !== true &&
-                input.state.reconcileSafeModeActive !== true &&
+                v2State.serverTradeEnabled === true &&
                 ((activeEngineRouting === "TREND" && trendShockAligned && trendSideCandidate !== "none") ||
                     (activeEngineRouting === "RANGE" && rangePromotableContext));
             if (highQualitySoftenEligible && !explicitHardContamination) {
@@ -873,6 +930,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 : shock === "UP"
                     ? "UP_SHOCK_RANGE_FLOW"
                     : "NONE",
+        v2_state_authority_source: v2State.stateAuthoritySource,
+        v2_state_position_ready: v2State.positionStateReady,
+        v2_state_same_side_position: v2State.hasSameSidePosition,
+        v2_state_opposite_side_position: v2State.hasOppositeSidePosition,
+        v2_state_current_stage: v2State.currentStage,
         hard_block_present: hardBlockPresent,
         hard_block_reason: hardBlockReason
     }));
@@ -900,12 +962,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         signed_execution_ready: readinessDiag.signed_execution_ready ?? null,
         paper_readiness_block_reasons: readinessDiag.paper_readiness_block_reasons ?? null,
         signed_readiness_block_reason: readinessDiag.signed_readiness_block_reason ?? null,
-        serverTradeEnabled: input.state.serverTradeEnabled ?? null,
-        closeOnlyMode: input.state.closeOnlyMode ?? null,
-        killSwitch: (input.state.killSwitch ?? input.state.killSwitchActive) ?? null,
-        reconcileSafeMode: (input.state.reconcileSafeMode ?? input.state.reconcileSafeModeActive) ?? null,
-        riskMode: readinessDiag.risk_mode ?? input.state.riskMode ?? null,
-        dailyLossGuardTriggered: readinessDiag.daily_loss_guard_triggered ?? input.state.dailyLossGuardTriggered ?? null,
+        serverTradeEnabled: v2State.serverTradeEnabled,
+        closeOnlyMode: v2State.closeOnlyMode,
+        killSwitch: v2State.killSwitch,
+        reconcileSafeMode: v2State.reconcileSafeMode,
+        riskMode: readinessDiag.risk_mode ?? v2State.riskMode ?? null,
+        dailyLossGuardTriggered: readinessDiag.daily_loss_guard_triggered ?? v2State.dailyLossGuardTriggered,
         market_snapshot_ready: readinessDiag.market_snapshot_ready ?? null,
         position_state_ready: readinessDiag.position_state_ready ?? null,
         v2_input_ready: readinessDiag.v2_input_ready ?? null,
