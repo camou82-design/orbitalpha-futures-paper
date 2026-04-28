@@ -1976,6 +1976,8 @@ export class PaperEngine {
 
       const authority = envelope.authority;
       const selectorResult = envelope.selector;
+      const ledgerExposureNotionalKrw = computeLedgerSymbolExposureNotionalKrw(opensAfterClose, String(sym));
+      const ledgerEquityMultiple = ledgerExposureNotionalKrw / 500_000;
 
       this.logger.info("ENTRY_AUTHORITY_ENVELOPE_PROOF", {
         symbol: sym,
@@ -1993,8 +1995,10 @@ export class PaperEngine {
         applied_leverage: selectorResult?.v2_result.risk.appliedLeverage ?? authority.appliedLeverage ?? 0,
         leverage_reason: selectorResult?.v2_result.risk.leverageReason ?? authority.leverageReason ?? null,
         leverage_block_reason: selectorResult?.v2_result.risk.leverageBlockReason ?? authority.leverageBlockReason ?? null,
-        exposure_notional_krw: selectorResult?.v2_result.risk.exposureNotionalKrw ?? authority.exposureNotionalKrw ?? 0,
-        equity_multiple: selectorResult?.v2_result.risk.equityMultiple ?? authority.equityMultiple ?? 0,
+        exposure_notional_krw: ledgerExposureNotionalKrw,
+        equity_multiple: ledgerEquityMultiple,
+        candidate_exposure_notional_krw: selectorResult?.v2_result.risk.exposureNotionalKrw ?? authority.exposureNotionalKrw ?? 0,
+        candidate_equity_multiple: selectorResult?.v2_result.risk.equityMultiple ?? authority.equityMultiple ?? 0,
         paper_execution_ready: this.paperExecutionReady,
         signed_execution_ready: this.signedExecutionReady,
         signed_submit_mode: this.signedSubmitMode(),
@@ -7689,6 +7693,7 @@ export class PaperEngine {
           const cap = authority.side === "long" ? riskE.maxLongExposure : riskE.maxShortExposure;
           const currentExposureUsd = authority.side === "long" ? mPre.longUsd : mPre.shortUsd;
           const projectedExposureUsd = currentExposureUsd + entrySizeUsd;
+          const ledgerExposureNotionalKrw = computeLedgerSymbolExposureNotionalKrw(next, String(first.symbol));
           const capRemainingUsd = Math.max(0, cap - currentExposureUsd);
           const reducedSizeUsd =
             capRemainingUsd >= MIN_POSITION_SIZE_USD
@@ -7712,7 +7717,8 @@ export class PaperEngine {
             authority_size_usd: authority.sizeUsd ?? null,
             authority_selector_size_usd: authority.sizeUsd ?? null,
             applied_leverage: authority.appliedLeverage ?? null,
-            exposure_notional_krw: authority.exposureNotionalKrw ?? null,
+            exposure_notional_krw: ledgerExposureNotionalKrw,
+            candidate_exposure_notional_krw: authority.exposureNotionalKrw ?? null,
             equity_multiple: authority.equityMultiple ?? null,
             open_position_count: next.length,
             max_slots: max,
