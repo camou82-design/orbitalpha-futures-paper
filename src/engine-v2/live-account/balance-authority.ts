@@ -173,7 +173,7 @@ function parseOkxPositions(
     used_margin: totalMargin, 
     notional: totalNotional, 
     lines, 
-    parse_source: `m:${marginSource}|n:${notionalSource}`
+    parse_source: payload.length === 0 ? "no_open_positions" : `m:${marginSource}|n:${notionalSource}`
   };
 }
 

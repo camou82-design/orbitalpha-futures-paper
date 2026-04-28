@@ -848,6 +848,9 @@ export class PaperEngine {
   private liveBalanceFetchError: string | null = null;
   private lastLiveBalancePayload: Record<string, unknown> | null = null;
   private lastLivePositionsPayload: ReadonlyArray<Record<string, unknown>> | null = null;
+  private lastSignedRestError: string | null = null;
+  private lastSignedRestSuccessAt: number | null = null;
+  private lastSignedRestFailAt: number | null = null;
   private runCycleId = 0;
   private paperExecutionReady = false;
   private paperExecutionReadyChangedAt: number | null = null;
@@ -1224,41 +1227,145 @@ export class PaperEngine {
   }
 
   private async refreshLiveBalanceSnapshot(nowTs: number): Promise<void> {
-    if (this.config.okxAuthMode === "live" && this.okxDemo) {
+    const prevSignedReady = this.signedExecutionReady;
+
+    if (this.config.okxAuthMode !== "disabled" && this.okxDemo) {
+      // 1. If smoke test never performed OR failed last time, try full check (including config)
+      const needsSmokeTest = !this.okxSmokeTestPerformed || !this.okxSignedRestReady;
+      
+      if (needsSmokeTest) {
+        this.okxSmokeTestPerformed = true; // Mark that we attempted at least once
+        try {
+          const ready = await this.okxDemo.checkSignedReady();
+          this.okxAccountConfigOk = ready.configOk;
+          this.okxBalanceOk = ready.balanceOk;
+          this.okxPositionsOk = ready.positionsOk;
+          this.okxSignedRestReady = ready.configOk && ready.balanceOk && ready.positionsOk;
+
+          if (this.okxSignedRestReady) {
+            this.lastSignedRestSuccessAt = nowTs;
+            this.lastSignedRestError = null;
+          } else {
+            this.lastSignedRestFailAt = nowTs;
+            const errs = [];
+            if (!ready.configOk) errs.push(`cfg:${ready.diagnostics.config?.retMsg || "fail"}`);
+            if (!ready.balanceOk) errs.push(`bal:${ready.diagnostics.balance?.retMsg || "fail"}`);
+            if (!ready.positionsOk) errs.push(`pos:${ready.diagnostics.positions?.retMsg || "fail"}`);
+            this.lastSignedRestError = errs.join("|");
+          }
+
+          // Mode-aware logs
+          if (this.okxAccountConfigOk) this.logger.info("OKX_SIGNED_ACCOUNT_CONFIG_OK", { okx_auth_mode: this.config.okxAuthMode });
+          else this.logger.error("OKX_SIGNED_ACCOUNT_CONFIG_FAIL", { ...ready.diagnostics.config, okx_auth_mode: this.config.okxAuthMode });
+
+          if (this.okxBalanceOk) this.logger.info("OKX_SIGNED_BALANCE_OK", { okx_auth_mode: this.config.okxAuthMode });
+          else this.logger.error("OKX_SIGNED_BALANCE_FAIL", { ...ready.diagnostics.balance, okx_auth_mode: this.config.okxAuthMode });
+
+          if (this.okxPositionsOk) this.logger.info("OKX_SIGNED_POSITIONS_OK", { okx_auth_mode: this.config.okxAuthMode });
+          else this.logger.error("OKX_SIGNED_POSITIONS_FAIL", { ...ready.diagnostics.positions, okx_auth_mode: this.config.okxAuthMode });
+
+          if (this.okxSignedRestReady) {
+            this.logger.info("OKX_SIGNED_REST_READY", { okx_auth_mode: this.config.okxAuthMode });
+          } else {
+            this.logger.error("OKX_SIGNED_REST_INCOMPLETE", { okx_auth_mode: this.config.okxAuthMode });
+          }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          this.lastSignedRestError = msg;
+          this.lastSignedRestFailAt = nowTs;
+          this.logger.error("OKX_SIGNED_REST_CRITICAL_ERROR", { error: msg, okx_auth_mode: this.config.okxAuthMode });
+        }
+      }
+
+      // 2. Regular background sync (this might also recover readiness if it was false)
       try {
         const [bal, pos] = await Promise.all([
           this.okxDemo.getBalance("USDT"),
           this.okxDemo.getPositions("SWAP")
         ]);
+
         if (bal.ok) {
           this.lastLiveBalancePayload = (bal.value?.[0] as Record<string, unknown> | undefined) ?? null;
           this.liveBalanceFetchError = null;
+          this.okxBalanceOk = true;
+          this.lastSignedRestSuccessAt = nowTs;
         } else {
           this.lastLiveBalancePayload = null;
           this.liveBalanceFetchError = bal.error || bal.diagnostics.retMsg || "LIVE_BALANCE_FETCH_FAILED";
+          this.okxBalanceOk = false;
+          this.lastSignedRestFailAt = nowTs;
+          this.lastSignedRestError = bal.diagnostics.retCode === "50102" ? "TIMESTAMP_EXPIRED" : (bal.error || "fetch_fail");
         }
+
         if (pos.ok) {
           this.lastLivePositionsPayload = pos.value ?? null;
           this.okxPositionsOk = true;
+          this.lastSignedRestSuccessAt = nowTs;
         } else {
           this.lastLivePositionsPayload = null;
           this.okxPositionsOk = false;
+          this.lastSignedRestFailAt = nowTs;
+          if (!this.lastSignedRestError) {
+             this.lastSignedRestError = pos.diagnostics.retCode === "50102" ? "TIMESTAMP_EXPIRED" : (pos.error || "fetch_fail");
+          }
         }
+
+        // Recover okxSignedRestReady if everything looks good now
+        if (this.okxAccountConfigOk && this.okxBalanceOk && this.okxPositionsOk) {
+          if (!this.okxSignedRestReady) {
+            this.okxSignedRestReady = true;
+            this.lastSignedRestError = null;
+            this.logger.info("OKX_SIGNED_REST_RECOVERED", { okx_auth_mode: this.config.okxAuthMode });
+          }
+        } else if (this.okxSignedRestReady) {
+          // If it was ready but now something failed
+          this.okxSignedRestReady = false;
+          this.logger.warn("OKX_SIGNED_REST_LOST", { 
+            okx_auth_mode: this.config.okxAuthMode,
+            okx_balance_ok: this.okxBalanceOk,
+            okx_positions_ok: this.okxPositionsOk
+          });
+        }
+
       } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
         this.lastLiveBalancePayload = null;
         this.lastLivePositionsPayload = null;
-        this.liveBalanceFetchError = e instanceof Error ? e.message : String(e);
+        this.liveBalanceFetchError = msg;
+        this.lastSignedRestError = msg;
+        this.lastSignedRestFailAt = nowTs;
       }
     } else {
       this.lastLiveBalancePayload = null;
       this.lastLivePositionsPayload = null;
       this.liveBalanceFetchError = this.config.okxAuthMode === "live" ? "LIVE_BALANCE_CLIENT_NOT_READY" : null;
     }
+
+    // Update the engine's internal signedExecutionReady state
+    this.evaluateReadinessTransition(nowTs);
+
     const result = this.buildBalanceDisplayContext(await this.positions.loadOpenAll());
     this.applyLiveBalanceAuthorityResult(result);
 
+    if (this.config.okxAuthMode !== "disabled" && (this.signedExecutionReady !== prevSignedReady || this.runCycleId % 10 === 0)) {
+      this.logger.info("OKX_SIGNED_READINESS_RECOVERY_PROOF", {
+        okx_auth_mode: this.config.okxAuthMode,
+        okx_balance_ok: this.okxBalanceOk,
+        okx_positions_ok: this.okxPositionsOk,
+        okx_order_submit_ok: this.okxOrderSubmitOk,
+        signed_execution_ready_before: prevSignedReady,
+        signed_execution_ready_after: this.signedExecutionReady,
+        signed_submit_mode: this.signedSubmitMode(),
+        signed_submit_block_reason: this.signedSubmitBlockReason(this.signedSubmitMode()),
+        last_signed_rest_error: this.lastSignedRestError,
+        last_signed_rest_success_at: this.lastSignedRestSuccessAt,
+        last_signed_rest_fail_at: this.lastSignedRestFailAt
+      });
+    }
+
     this.logger.info("OKX_RAW_POSITIONS_AUTHORITY_PROOF", {
       ts: nowTs,
+      okx_auth_mode: this.config.okxAuthMode,
       okx_positions_payload_present: !!this.lastLivePositionsPayload,
       okx_positions_count: Array.isArray(this.lastLivePositionsPayload) ? this.lastLivePositionsPayload.length : 0,
       okx_position_parse_source: result.okx_position_parse_source,
@@ -1269,10 +1376,12 @@ export class PaperEngine {
 
     this.logger.info("V2_LIVE_BALANCE_AUTHORITY_PROOF", {
       ts: nowTs,
+      okx_auth_mode: this.config.okxAuthMode,
       ...result
     });
     this.logger.info("OKX_LIVE_BALANCE_PROOF", {
       ts: nowTs,
+      okx_auth_mode: this.config.okxAuthMode,
       balance_source: result.balance_source,
       live_balance_ready: result.live_balance_ready,
       live_balance_block_reason: result.live_balance_block_reason,
@@ -1642,35 +1751,7 @@ export class PaperEngine {
     }
     // --------------------------------------------------------------------------
 
-    if (this.okxDemo && !this.okxSmokeTestPerformed) {
-      this.okxSmokeTestPerformed = true;
-      this.logger.info("performing_okx_signed_smoke_test");
-      try {
-        const ready = await this.okxDemo.checkSignedReady();
-        this.okxAccountConfigOk = ready.configOk;
-        this.okxBalanceOk = ready.balanceOk;
-        this.okxPositionsOk = ready.positionsOk;
-        this.okxSignedRestReady = ready.configOk && ready.balanceOk && ready.positionsOk;
 
-        if (this.okxAccountConfigOk) this.logger.info("OKX_DEMO_ACCOUNT_CONFIG_OK");
-        else this.logger.error("OKX_DEMO_ACCOUNT_CONFIG_FAIL", ready.diagnostics.config);
-
-        if (this.okxBalanceOk) this.logger.info("OKX_DEMO_BALANCE_OK");
-        else this.logger.error("OKX_DEMO_BALANCE_FAIL", ready.diagnostics.balance);
-
-        if (this.okxPositionsOk) this.logger.info("OKX_DEMO_POSITIONS_OK");
-        else this.logger.error("OKX_DEMO_POSITIONS_FAIL", ready.diagnostics.positions);
-
-        if (this.okxSignedRestReady) {
-          this.logger.info("OKX_DEMO_SIGNED_REST_READY");
-        } else {
-          this.logger.error("OKX_DEMO_SIGNED_REST_INCOMPLETE");
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        this.logger.error("okx_smoke_test_error", { error: msg });
-      }
-    }
     await this.refreshLiveBalanceSnapshot(Date.now());
     this.evaluateReadinessTransition(Date.now());
     await this.runPositionStateReconciliation(Date.now());
