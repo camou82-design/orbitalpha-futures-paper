@@ -1376,7 +1376,6 @@ export class PaperEngine {
 
     this.logger.info("V2_LIVE_BALANCE_AUTHORITY_PROOF", {
       ts: nowTs,
-      okx_auth_mode: this.config.okxAuthMode,
       ...result
     });
     this.logger.info("OKX_LIVE_BALANCE_PROOF", {
