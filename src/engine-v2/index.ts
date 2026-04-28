@@ -21,6 +21,7 @@ import { calculateRiskSizing } from "./risk-sizing/policy";
 import { generateExplanation } from "./explain/diagnostic";
 import { deriveV2StateAuthority } from "./state/derive";
 import { evaluateV2AddOnPolicy } from "./addon/policy";
+import { evaluateV2ExitPolicy } from "./exit/policy";
 
 /**
  * orchestrator for Engine-V2 5-tier architecture.
@@ -235,6 +236,51 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             addOnPolicyAction: addOnPolicy.action
         }
     };
+    const exitPolicy = evaluateV2ExitPolicy({
+        symbol: String(input.symbol),
+        v2State,
+        judgment,
+        snapshot: {
+            boxPos: authoritativeInput.snapshot.boxPos,
+            boxBreakSide: authoritativeInput.snapshot.boxBreakSide,
+            emaGap: authoritativeInput.snapshot.emaGap,
+            trendWeaknessScore: authoritativeInput.snapshot.trendWeaknessScore,
+            rangeConfidence: authoritativeInput.snapshot.rangeConfidence,
+            qualityScore: authoritativeInput.snapshot.qualityScore
+        }
+    });
+    if (exitPolicy.hasPosition) {
+        console.info(JSON.stringify({
+            event: "V2_EXIT_POLICY_PROOF",
+            symbol: String(input.symbol),
+            hasPosition: exitPolicy.hasPosition,
+            positionSide: exitPolicy.positionSide,
+            positionSizeUsd: exitPolicy.positionSizeUsd,
+            currentStage: exitPolicy.currentStage,
+            pnlPct: exitPolicy.pnlPct,
+            action: exitPolicy.action,
+            shouldExit: exitPolicy.shouldExit,
+            shouldReduce: exitPolicy.shouldReduce,
+            shouldPartial: exitPolicy.shouldPartial,
+            reason: exitPolicy.reason,
+            reduceRatio: exitPolicy.reduceRatio,
+            exitUrgency: exitPolicy.exitUrgency,
+            exitConfidence: exitPolicy.exitConfidence,
+            marketRegime: exitPolicy.marketRegime,
+            marketSubtype: exitPolicy.marketSubtype,
+            shockPhase: exitPolicy.shockPhase,
+            rangePhase: exitPolicy.rangePhase,
+            trendPhase: exitPolicy.trendPhase,
+            transitionPhase: exitPolicy.transitionPhase,
+            boxPos: exitPolicy.boxPos,
+            boxBreakSide: exitPolicy.boxBreakSide,
+            emaGap: exitPolicy.emaGap,
+            trendWeaknessScore: exitPolicy.trendWeaknessScore,
+            rangeConfidence: exitPolicy.rangeConfidence,
+            qualityScore: exitPolicy.qualityScore,
+            evidence: exitPolicy.evidence
+        }));
+    }
     if (routing.executor === "TRANSITION") {
         const transitionMeta = (execution.metadata ?? {}) as Record<string, unknown>;
         console.info(JSON.stringify({
@@ -1114,6 +1160,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         addon_current_stage: addOnPolicy.currentStage,
         addon_has_same_side_position: addOnPolicy.hasSameSidePosition,
         addon_has_opposite_side_position: addOnPolicy.hasOppositeSidePosition,
+        exit_action: exitPolicy.action,
+        exit_reason: exitPolicy.reason,
+        exit_should_exit: exitPolicy.shouldExit,
+        exit_should_reduce: exitPolicy.shouldReduce,
+        exit_should_partial: exitPolicy.shouldPartial,
+        exit_reduce_ratio: exitPolicy.reduceRatio,
+        exit_urgency: exitPolicy.exitUrgency,
+        exit_confidence: exitPolicy.exitConfidence,
         hard_block_present: hardBlockPresent,
         hard_block_reason: hardBlockReason
     }));
