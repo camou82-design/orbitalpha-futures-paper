@@ -25,15 +25,9 @@ import { deriveV2StateAuthority } from "./state/derive";
  * Produces an independent EngineV2Decision.
  */
 export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision; internal: EngineV2InternalResult } {
-    // Tier 1: Market Judgment
-    const judgment = detectMarketRegime(input);
-
-    // Tier 2: Regime Confidence
-    const confidence = calculateRegimeConfidence(judgment, input);
-
-    // Tier 3: Engine Router
-    const routing = routeToExecutor(judgment, confidence);
+    // Step 1: derive normalized state authority
     const v2State = deriveV2StateAuthority(input);
+    // Step 2: project normalized state into authoritative input
     const authoritativeInput: EngineV2Input = {
         ...input,
         state: {
@@ -66,6 +60,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             symbolExposureNotionalCapKrw: v2State.symbolExposureNotionalCapKrw
         }
     };
+
+    // Tier 1: Market Judgment (authoritative input only)
+    const judgment = detectMarketRegime(authoritativeInput);
+
+    // Tier 2: Regime Confidence (authoritative input only)
+    const confidence = calculateRegimeConfidence(judgment, authoritativeInput);
+
+    // Tier 3: Engine Router
+    const routing = routeToExecutor(judgment, confidence);
     console.info(JSON.stringify({
         event: "V2_STATE_AUTHORITY_PROOF",
         symbol: String(input.symbol),
@@ -105,6 +108,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     console.info(JSON.stringify({
         event: "V2_MARKET_JUDGMENT_PROOF",
         symbol: String(input.symbol),
+        market_judgment_state_source: "authoritative_input",
+        v2_state_authority_source: v2State.stateAuthoritySource,
         judgmentVersion: judgment.judgmentVersion,
         regime: judgment.regime,
         regime_final: judgment.regime_final,
@@ -120,13 +125,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         routingReason: routing.reason,
         rangeScore: judgment.metrics.rangeScore,
         trendScore: judgment.metrics.trendScore,
-        rangeConfidence: input.snapshot?.rangeConfidence ?? null,
-        boxPos: input.snapshot?.boxPos ?? null,
-        boxBreakSide: input.snapshot?.boxBreakSide ?? null,
-        boxCohesion01: input.snapshot?.boxCohesion01 ?? null,
-        breakoutFailureRate: input.snapshot?.breakoutFailureRate ?? null,
-        emaGap: input.snapshot?.emaGap ?? null,
-        trendWeaknessScore: input.snapshot?.trendWeaknessScore ?? null,
+        rangeConfidence: authoritativeInput.snapshot?.rangeConfidence ?? null,
+        boxPos: authoritativeInput.snapshot?.boxPos ?? null,
+        boxBreakSide: authoritativeInput.snapshot?.boxBreakSide ?? null,
+        boxCohesion01: authoritativeInput.snapshot?.boxCohesion01 ?? null,
+        breakoutFailureRate: authoritativeInput.snapshot?.breakoutFailureRate ?? null,
+        emaGap: authoritativeInput.snapshot?.emaGap ?? null,
+        trendWeaknessScore: authoritativeInput.snapshot?.trendWeaknessScore ?? null,
         directionalShockState: v2State.directionalShockState,
         crashState: v2State.crashState,
         pumpState: v2State.pumpState,
@@ -985,6 +990,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         market_trend_phase: judgment.trendPhase,
         market_transition_phase: judgment.transitionPhase,
         market_judgment_version: judgment.judgmentVersion,
+        market_judgment_state_source: "authoritative_input",
         hard_block_present: hardBlockPresent,
         hard_block_reason: hardBlockReason
     }));
