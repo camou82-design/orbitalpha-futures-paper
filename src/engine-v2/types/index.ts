@@ -3,6 +3,25 @@ import { MarketSymbol, PositionSide } from "../../models/types";
 export type EngineV2OpMode = "legacy" | "shadow_v2" | "engine_v2";
 export type EngineV2Regime = "RANGE" | "TREND" | "TRANSITION" | "NO_TRADE";
 export type EngineV2ConfidenceLevel = "HIGH" | "MID" | "LOW";
+export type EngineV2MarketSubtype =
+    | "RANGE_MID_CHOP"
+    | "RANGE_LOWER_REACTION"
+    | "RANGE_UPPER_REACTION"
+    | "RANGE_BREAKDOWN_CANDIDATE"
+    | "RANGE_BREAKOUT_CANDIDATE"
+    | "RANGE_FAKE_BREAKOUT"
+    | "TREND_UP_CONTINUATION"
+    | "TREND_DOWN_CONTINUATION"
+    | "TREND_PULLBACK"
+    | "TREND_EXHAUSTION"
+    | "TRANSITION_RANGE_TO_TREND"
+    | "TRANSITION_TREND_TO_RANGE"
+    | "TRANSITION_CONFLICT"
+    | "SHOCK_REACTION_DOWN"
+    | "SHOCK_REACTION_UP"
+    | "NO_TRADE_DATA_NOT_READY"
+    | "NO_TRADE_DUMP_PROTECTION"
+    | "NO_TRADE_METRICS_INSUFFICIENT";
 export type EngineV2SignalState = "LONG_CANDIDATE" | "SHORT_CANDIDATE" | "WAIT_RECHECK" | "NONE";
 export type EngineV2Side = "long" | "short" | "none" | null;
 export type EngineV2FinalDecision = "ENTER" | "EXIT" | "SKIP" | "HOLD" | "REJECT" | "DISABLED";
@@ -357,6 +376,13 @@ export interface SymbolDecisionEnvelope {
 export interface MarketJudgmentOutput {
     regime: EngineV2Regime;
     regime_final: EngineV2Regime;
+    subtype: EngineV2MarketSubtype;
+    subtypeReason: string;
+    shockPhase: "NONE" | "DOWN_SHOCK" | "UP_SHOCK" | "CRASH_RECOVERY" | "PUMP_RECOVERY";
+    rangePhase: "NONE" | "MID" | "LOWER" | "UPPER" | "BREAKDOWN" | "BREAKOUT" | "FAKE_BREAKOUT";
+    trendPhase: "NONE" | "UP" | "DOWN" | "PULLBACK" | "EXHAUSTION";
+    transitionPhase: "NONE" | "RANGE_TO_TREND" | "TREND_TO_RANGE" | "CONFLICT";
+    judgmentVersion: "v2_market_judgment_subtype_v1";
     no_trade_reason: string | null;
     data_ready: boolean;
     dump_protection_hit: boolean;

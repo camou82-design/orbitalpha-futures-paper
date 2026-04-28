@@ -102,6 +102,38 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         exposureNotionalCapKrw: v2State.exposureNotionalCapKrw,
         symbolExposureNotionalCapKrw: v2State.symbolExposureNotionalCapKrw
     }));
+    console.info(JSON.stringify({
+        event: "V2_MARKET_JUDGMENT_PROOF",
+        symbol: String(input.symbol),
+        judgmentVersion: judgment.judgmentVersion,
+        regime: judgment.regime,
+        regime_final: judgment.regime_final,
+        subtype: judgment.subtype,
+        subtypeReason: judgment.subtypeReason,
+        shockPhase: judgment.shockPhase,
+        rangePhase: judgment.rangePhase,
+        trendPhase: judgment.trendPhase,
+        transitionPhase: judgment.transitionPhase,
+        confidenceScore: confidence.score,
+        confidenceLevel: confidence.level,
+        routerExecutor: routing.executor,
+        routingReason: routing.reason,
+        rangeScore: judgment.metrics.rangeScore,
+        trendScore: judgment.metrics.trendScore,
+        rangeConfidence: input.snapshot?.rangeConfidence ?? null,
+        boxPos: input.snapshot?.boxPos ?? null,
+        boxBreakSide: input.snapshot?.boxBreakSide ?? null,
+        boxCohesion01: input.snapshot?.boxCohesion01 ?? null,
+        breakoutFailureRate: input.snapshot?.breakoutFailureRate ?? null,
+        emaGap: input.snapshot?.emaGap ?? null,
+        trendWeaknessScore: input.snapshot?.trendWeaknessScore ?? null,
+        directionalShockState: v2State.directionalShockState,
+        crashState: v2State.crashState,
+        pumpState: v2State.pumpState,
+        data_ready: judgment.data_ready,
+        dump_protection_hit: judgment.dump_protection_hit,
+        volatility_guard_hit: judgment.volatility_guard_hit
+    }));
 
     // Tier 4: Executors
     let execution;
@@ -946,6 +978,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2_state_has_short_position: v2State.hasShortPosition,
         v2_state_long_stage: v2State.longStage,
         v2_state_short_stage: v2State.shortStage,
+        market_subtype: judgment.subtype,
+        market_subtype_reason: judgment.subtypeReason,
+        market_shock_phase: judgment.shockPhase,
+        market_range_phase: judgment.rangePhase,
+        market_trend_phase: judgment.trendPhase,
+        market_transition_phase: judgment.transitionPhase,
+        market_judgment_version: judgment.judgmentVersion,
         hard_block_present: hardBlockPresent,
         hard_block_reason: hardBlockReason
     }));
