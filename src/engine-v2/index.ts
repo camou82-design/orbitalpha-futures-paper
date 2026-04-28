@@ -314,7 +314,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         shockDownActive ? "DOWN" : shockUpActive ? "UP" : "NONE";
     const shockReactionAllowedPrimarySide: EngineV2Side =
         shockReactionDirection === "DOWN" ? "short" : shockReactionDirection === "UP" ? "long" : "none";
-    const shockEdgeSetupActiveReason: string[] = ["directional_shock_only"];
+    const shockEdgeSetupActiveReason: string[] = [];
+    if (shockReactionDirection !== "NONE") shockEdgeSetupActiveReason.push("directional_shock_only");
     if (isCrashLockish(crashState)) shockEdgeSetupActiveReason.push("crash_lockish_watch");
     if (isPumpLockish(pumpStateResolved)) shockEdgeSetupActiveReason.push("pump_lockish_watch");
     const crashRecoveryHintFromState =
@@ -412,7 +413,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 hard_block_reason: hardBlockReason,
                 shock_reaction_watch_active: shockReactionWatchActive,
                 shock_reaction_reason: "range_mid_requires_reaction_watch",
-                shock_edge_setup_active_reason: shockEdgeSetupActiveReason.join("|"),
+                shock_edge_setup_active_reason: shockEdgeSetupActiveReason.length > 0 ? shockEdgeSetupActiveReason.join("|") : null,
                 shock_reaction_allowed_primary_side: shockReactionAllowedPrimarySide,
                 shock_reaction_blocked_chase_reason: "mid_chase_forbidden",
                 shock_reaction_next_valid_setups:
@@ -547,7 +548,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     shock_reaction_direction: shockReactionDirection,
                     setup_type: setupType,
                     setup_block_reason: setupBlockReason,
-                    shock_edge_setup_active_reason: shockEdgeSetupActiveReason.join("|"),
+                    shock_edge_setup_active_reason: shockEdgeSetupActiveReason.length > 0 ? shockEdgeSetupActiveReason.join("|") : null,
                     allowed_primary_side: allowedPrimarySide,
                     countertrend_exception_used: countertrendUsed
                 }));
@@ -760,7 +761,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     promotion_type: shockReactionPromotionType,
                     setup_type: shockReactionPromotionType,
                     setup_evidence: setupEvidence,
-                    shock_edge_setup_active_reason: shockEdgeSetupActiveReason.join("|"),
+                    shock_edge_setup_active_reason: shockEdgeSetupActiveReason.length > 0 ? shockEdgeSetupActiveReason.join("|") : null,
                     boxBreakSide,
                     emaGap,
                     qualityScore,
@@ -864,7 +865,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         shock_reaction_watch_active: shockReactionWatchActive,
         shock_reaction_direction: shockReactionDirection,
         shock_reaction_promotion_type: shockReactionPromotionType,
-        shock_edge_setup_active_reason: shockEdgeSetupActiveReason.join("|"),
+        shock_edge_setup_active_reason: shockEdgeSetupActiveReason.length > 0 ? shockEdgeSetupActiveReason.join("|") : null,
         shock_reaction_block_reason: shockReactionBlockReason ?? promotionBlockReason,
         shock_reaction_symmetry_case:
             shock === "DOWN"
