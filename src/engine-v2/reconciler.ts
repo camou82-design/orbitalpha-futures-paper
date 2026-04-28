@@ -13,6 +13,8 @@ import {
     LegacyConfigAdapter
 } from "./types";
 import { adaptV2Input, runEngineV2 } from "./index";
+import { buildV2ExecutionAuthorityEnvelope } from "./execution/envelope";
+import type { V2ExecutionAuthorityEnvelope, V2LegacyComparison } from "./execution/types";
 
 /** 
  * LEGACY NORMALIZATION HELPERS (Phase 4 Independence)
@@ -140,6 +142,26 @@ export function deriveExecutionAuthority(
         equityMultiple: useV2 ? v2Risk.equityMultiple : 0,
         entryQualityGrade: useV2 ? v2Risk.entryQualityGrade : "B",
         addOnAllowed: useV2 ? v2Risk.isAddOn === true : false
+    };
+}
+
+export function deriveExecutionAuthorityFromEnvelope(
+    envelope: V2ExecutionAuthorityEnvelope
+): EntryExecutionAuthority {
+    return {
+        decision: envelope.decision,
+        side: envelope.side,
+        sizeUsd: envelope.sizeUsd,
+        regime: envelope.regime,
+        source: envelope.authorityOwner === "V2" ? "v2" : "v1",
+        leverageProfile: envelope.leverageProfile == null ? "BASE" : (envelope.leverageProfile as "BASE" | "BOOST_1" | "BOOST_2"),
+        appliedLeverage: envelope.appliedLeverage,
+        leverageReason: envelope.authorityReason,
+        leverageBlockReason: envelope.hardBlockReason,
+        exposureNotionalKrw: envelope.exposureNotionalKrw,
+        equityMultiple: envelope.equityMultiple,
+        entryQualityGrade: envelope.entryQualityGrade == null ? "B" : (envelope.entryQualityGrade as "S" | "A" | "B"),
+        addOnAllowed: envelope.addOnAllowed ?? false
     };
 }
 
@@ -317,7 +339,26 @@ export function resolveSymbolDecisionEnvelope(
         final_engine: selector.adopted_result.engine,
         final_adoption_reason: adoption_reason
     });
-    const authority = deriveExecutionAuthority(refinedSelector);
+    const legacyComparison: V2LegacyComparison = {
+        legacyDecision: legacyDecision.decision.final_decision as EngineV2FinalDecision,
+        legacySide: legacyDecision.intentSide ?? null,
+        legacySize: legacyDecision.executorDecision?.total_cost ?? 0,
+        v2Decision: v2Res.decision.decision,
+        v2Side: v2Res.decision.side,
+        v2Size: v2Res.decision.risk.finalSizeUsd ?? 0,
+        selectorMismatch: selector.mismatch
+    };
+    const executionEnvelope = buildV2ExecutionAuthorityEnvelope({
+        symbol: String(symbol),
+        mode: v2Mode,
+        v2Decision: v2Res.decision,
+        selector: refinedSelector,
+        legacyComparison
+    });
+    const authority =
+        v2Mode === "engine_v2"
+            ? deriveExecutionAuthorityFromEnvelope(executionEnvelope)
+            : deriveExecutionAuthority(refinedSelector);
 
     const v1Side = legacyDecision.intentSide ?? "none";
     const v2Side = v2Res.decision.side ?? "none";
@@ -328,12 +369,58 @@ export function resolveSymbolDecisionEnvelope(
         v1_dec !== v2_dec ||
         v1Side !== v2Side ||
         Math.abs(v1Size - v2Size) > 0.000001;
+    console.info(JSON.stringify({
+        event: "V2_EXECUTION_AUTHORITY_ENVELOPE_PROOF",
+        symbol: String(symbol),
+        mode: v2Mode,
+        authority_source: executionEnvelope.authoritySource,
+        authority_owner: executionEnvelope.authorityOwner,
+        final_engine_owner: executionEnvelope.finalEngineOwner,
+        adopted_engine: executionEnvelope.adoptedEngine,
+        authority_version: executionEnvelope.authorityVersion,
+        decision: executionEnvelope.decision,
+        side: executionEnvelope.side,
+        sizeUsd: executionEnvelope.sizeUsd,
+        regime: executionEnvelope.regime,
+        market_subtype: executionEnvelope.marketSubtype,
+        entry_quality_grade: executionEnvelope.entryQualityGrade,
+        leverage_profile: executionEnvelope.leverageProfile,
+        applied_leverage: executionEnvelope.appliedLeverage,
+        exposure_notional_krw: executionEnvelope.exposureNotionalKrw,
+        equity_multiple: executionEnvelope.equityMultiple,
+        add_on_allowed: executionEnvelope.addOnAllowed,
+        add_on_policy_action: executionEnvelope.addOnPolicyAction,
+        add_on_policy_reason: executionEnvelope.addOnPolicyReason,
+        exit_policy_action: executionEnvelope.exitPolicyAction,
+        exit_policy_reason: executionEnvelope.exitPolicyReason,
+        paper_execution_ready: executionEnvelope.paperExecutionReady,
+        signed_execution_ready: executionEnvelope.signedExecutionReady,
+        hard_block_present: executionEnvelope.hardBlockPresent,
+        hard_block_reason: executionEnvelope.hardBlockReason,
+        legacy_decision: v1_dec,
+        legacy_side: v1Side,
+        legacy_size: v1Size,
+        v2_decision: v2_dec,
+        v2_side: v2Side,
+        v2_size: v2Size,
+        selector_mismatch: selectorMismatch,
+        legacy_used_for_execution: executionEnvelope.authoritySource === "legacy_execution_envelope",
+        legacy_comparison_only: executionEnvelope.authoritySource !== "legacy_execution_envelope"
+    }));
 
     // 6. Comparison Metrics for Engine-State
     return {
         legacy: legacyDecision,
         selector: refinedSelector,
         authority,
+        execution_authority_source: executionEnvelope.authoritySource,
+        execution_authority_version: executionEnvelope.authorityVersion,
+        v2_execution_envelope: executionEnvelope,
+        legacy_comparison: legacyComparison,
+        runtime_authority_owner: executionEnvelope.authorityOwner,
+        runtime_authority_decision: executionEnvelope.decision,
+        runtime_authority_side: executionEnvelope.side,
+        runtime_authority_size_usd: executionEnvelope.sizeUsd,
         v1_decision: v1_dec,
         v1_side: v1Side,
         v1_size: v1Size,

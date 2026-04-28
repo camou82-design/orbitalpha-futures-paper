@@ -1,4 +1,5 @@
 import { MarketSymbol, PositionSide } from "../../models/types";
+import type { V2ExecutionAuthorityEnvelope, V2LegacyComparison } from "../execution/types";
 
 export type EngineV2OpMode = "legacy" | "shadow_v2" | "engine_v2";
 export type EngineV2Regime = "RANGE" | "TREND" | "TRANSITION" | "NO_TRADE";
@@ -377,6 +378,14 @@ export interface SymbolDecisionEnvelope {
     legacy: LegacyDecisionResult;
     selector: EngineV2SelectorResult | null;
     authority: EntryExecutionAuthority;
+    execution_authority_source?: string;
+    execution_authority_version?: string;
+    v2_execution_envelope?: V2ExecutionAuthorityEnvelope | null;
+    legacy_comparison?: V2LegacyComparison | null;
+    runtime_authority_owner?: string | null;
+    runtime_authority_decision?: string | null;
+    runtime_authority_side?: string | null;
+    runtime_authority_size_usd?: number | null;
     // V1/V2 Comparison Metrics (Phase 5 Summary)
     v1_decision?: string;
     v1_side?: string;
