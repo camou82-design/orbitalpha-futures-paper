@@ -168,6 +168,8 @@ export function calculateRiskSizing(
     }
 
     const trendIsStrongDirection = isTrend && sideAllowed && !shockActive;
+    const isLiveAuth = state.okxAuthMode === "live";
+    const marketSubtype = String(judgment.subtype ?? "").toUpperCase();
     const baseLeverage =
         shockActive ? 2 :
             isTrend ? 4 : 3;
@@ -254,6 +256,52 @@ export function calculateRiskSizing(
         leverageProfile = "BASE";
         leverageBlockReason = "TWO_CONSECUTIVE_LOSSES_RECOVERY_MODE";
         leverageReason = "loss_recovery_mode";
+    }
+
+    if (isLiveAuth) {
+        const requestedLeverage = Math.max(1, appliedLeverage);
+        let maxLiveLeverageAllowed = 3;
+        let liveLeverageReason = "LIVE_BASE_3X";
+        if (judgment.regime === "TREND") {
+            if (entryQualityGrade === "S") {
+                maxLiveLeverageAllowed = 5;
+                liveLeverageReason = "TREND_S_5X_ALLOWED";
+            } else if (entryQualityGrade === "A") {
+                maxLiveLeverageAllowed = 4;
+                liveLeverageReason = "TREND_A_4X_ALLOWED";
+            } else {
+                maxLiveLeverageAllowed = 3;
+                liveLeverageReason = "TREND_NON_A_S_3X";
+            }
+        } else if (judgment.regime === "RANGE") {
+            maxLiveLeverageAllowed = 3;
+            liveLeverageReason = "RANGE_EDGE_FIXED_3X";
+        } else if (judgment.regime === "TRANSITION") {
+            maxLiveLeverageAllowed = 2;
+            liveLeverageReason = "TRANSITION_CONSERVATIVE_2X";
+        } else if (shockActive) {
+            maxLiveLeverageAllowed = 3;
+            liveLeverageReason = "SHOCK_REACTION_CONFIRMED_3X";
+        }
+        if (marketSubtype === "RANGE_MID_CHOP") {
+            maxLiveLeverageAllowed = Math.min(maxLiveLeverageAllowed, 2);
+            liveLeverageReason = `${liveLeverageReason}|RANGE_MID_CHOP_2X_CAP`;
+        }
+        if (
+            marketSubtype === "TREND_EXHAUSTION" ||
+            marketSubtype === "RANGE_MID_CHOP" ||
+            marketSubtype === "TRANSITION_CONFLICT" ||
+            judgment.regime === "TRANSITION"
+        ) {
+            maxLiveLeverageAllowed = Math.min(maxLiveLeverageAllowed, 3);
+            liveLeverageReason = `${liveLeverageReason}|SUBTYPE_4X_FORBIDDEN`;
+        }
+        if (isAddOn) {
+            maxLiveLeverageAllowed = Math.min(maxLiveLeverageAllowed, 3);
+            liveLeverageReason = `${liveLeverageReason}|ADDON_MAX_3X`;
+        }
+        appliedLeverage = Math.max(1, Math.min(requestedLeverage, maxLiveLeverageAllowed));
+        leverageReason = liveLeverageReason;
     }
 
     const proposedNotional = stageMarginKrw * appliedLeverage;

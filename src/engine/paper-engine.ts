@@ -840,6 +840,10 @@ export class PaperEngine {
   private okxPositionsOk = false;
   private okxOrderSubmitOk = false;
   private okxSmokeTestPerformed = false;
+  private okxWalletBalanceUsdt: number | null = null;
+  private okxAvailableBalanceUsdt: number | null = null;
+  private liveBalanceReady = false;
+  private liveBalanceBlockReason: string | null = null;
   private runCycleId = 0;
   private paperExecutionReady = false;
   private paperExecutionReadyChangedAt: number | null = null;
@@ -1193,6 +1197,21 @@ export class PaperEngine {
     return mode === "enabled" ? null : "SIGNED_EXECUTION_NOT_READY";
   }
 
+  private estimateLiquidationPrice(input: {
+    side: "buy" | "sell";
+    entryPrice: number;
+    leverage: number;
+  }): number | null {
+    if (!Number.isFinite(input.entryPrice) || input.entryPrice <= 0) return null;
+    if (!Number.isFinite(input.leverage) || input.leverage <= 0) return null;
+    const mmr = 0.005;
+    const moveFrac = Math.max(0.0001, (1 / input.leverage) - mmr);
+    if (input.side === "buy") {
+      return input.entryPrice * (1 - moveFrac);
+    }
+    return input.entryPrice * (1 + moveFrac);
+  }
+
   private okxAuthProofContext(): {
     okx_auth_mode: "disabled" | "demo" | "live";
     okx_auth_ready: boolean;
@@ -1204,11 +1223,27 @@ export class PaperEngine {
     okx_passphrase_present: boolean;
     okx_simulated_trading_header_enabled: boolean;
     live_max_order_notional_usdt: number;
+    equity_source: "okx_live_wallet" | "paper_config";
+    okx_wallet_balance_usdt: number | null;
+    okx_available_balance_usdt: number | null;
+    account_equity_krw_effective: number;
+    max_usable_margin_krw_effective: number;
+    live_balance_ready: boolean;
+    live_balance_block_reason: string | null;
   } {
     const mode = this.config.okxAuthMode;
     const apiKey = mode === "live" ? this.config.okxApiKey : mode === "demo" ? this.config.okxDemoApiKey : "";
     const apiSecret = mode === "live" ? this.config.okxApiSecret : mode === "demo" ? this.config.okxDemoApiSecret : "";
     const passphrase = mode === "live" ? this.config.okxPassphrase : mode === "demo" ? this.config.okxDemoPassphrase : "";
+    const liveWalletReady =
+      mode === "live" &&
+      this.okxBalanceOk === true &&
+      this.okxWalletBalanceUsdt != null &&
+      this.okxAvailableBalanceUsdt != null &&
+      this.okxWalletBalanceUsdt > 0 &&
+      this.okxAvailableBalanceUsdt >= 0;
+    const accountEquityKrwEffective = liveWalletReady ? (this.okxWalletBalanceUsdt ?? 0) * 1000 : 500_000;
+    const maxUsableMarginKrwEffective = liveWalletReady ? (this.okxAvailableBalanceUsdt ?? 0) * 1000 : 420_000;
     return {
       okx_auth_mode: mode,
       okx_auth_ready: this.config.okxAuthReady,
@@ -1219,7 +1254,14 @@ export class PaperEngine {
       okx_api_secret_present: apiSecret.length > 0,
       okx_passphrase_present: passphrase.length > 0,
       okx_simulated_trading_header_enabled: this.config.okxSimulatedTradingHeaderEnabled,
-      live_max_order_notional_usdt: this.config.okxLiveMaxOrderNotionalUsdt
+      live_max_order_notional_usdt: this.config.okxLiveMaxOrderNotionalUsdt,
+      equity_source: liveWalletReady ? "okx_live_wallet" : "paper_config",
+      okx_wallet_balance_usdt: this.okxWalletBalanceUsdt,
+      okx_available_balance_usdt: this.okxAvailableBalanceUsdt,
+      account_equity_krw_effective: accountEquityKrwEffective,
+      max_usable_margin_krw_effective: maxUsableMarginKrwEffective,
+      live_balance_ready: this.liveBalanceReady,
+      live_balance_block_reason: this.liveBalanceBlockReason
     };
   }
 
@@ -3152,6 +3194,11 @@ export class PaperEngine {
     entryQualityGrade?: string | null;
     leverageProfile?: string | null;
     appliedLeverage?: number | null;
+    marketSubtype?: string | null;
+    marketRegime?: string | null;
+    isAddOn?: boolean;
+    entryPrice?: number | null;
+    stopPrice?: number | null;
     paperExecutionReady?: boolean;
   }): Promise<{
     ok: boolean;
@@ -3206,6 +3253,49 @@ export class PaperEngine {
       const ticker = await this.okxPublic.tryGetTicker(input.symbol);
       const refPrice = ticker.ok ? ticker.value.last : null;
       const liveOrderNotionalUsdt = refPrice != null && Number.isFinite(refPrice) ? Math.max(0, input.qty * refPrice) : null;
+      const requestedLeverage = Math.max(1, input.appliedLeverage ?? 0);
+      const authorityAppliedLeverage = Number.isFinite(input.appliedLeverage) ? Math.max(1, Number(input.appliedLeverage)) : null;
+      const authorityMismatch = authorityAppliedLeverage == null;
+      const stopPrice = Number.isFinite(input.stopPrice) ? Number(input.stopPrice) : null;
+      const entryPrice = Number.isFinite(input.entryPrice)
+        ? Number(input.entryPrice)
+        : (refPrice != null && Number.isFinite(refPrice) ? refPrice : null);
+      const canEvaluateLiquidation = stopPrice != null && entryPrice != null && entryPrice > 0;
+      const appliedLeverage = authorityAppliedLeverage;
+      const maxLiveLeverageAllowed = authorityAppliedLeverage;
+      const leveragePolicyReason = "AUTHORITY_FINAL_APPLIED_LEVERAGE";
+      const estimatedLiquidationPrice =
+        appliedLeverage != null ? this.estimateLiquidationPrice({ side: input.side, entryPrice: entryPrice ?? 0, leverage: appliedLeverage }) : null;
+      let stopDistancePct =
+        canEvaluateLiquidation && stopPrice != null && entryPrice != null
+          ? Math.abs(entryPrice - stopPrice) / Math.max(1e-9, entryPrice)
+          : null;
+      let liquidationDistancePct =
+        canEvaluateLiquidation && estimatedLiquidationPrice != null && entryPrice != null
+          ? Math.abs(entryPrice - estimatedLiquidationPrice) / Math.max(1e-9, entryPrice)
+          : null;
+      let stopBeforeLiquidation =
+        canEvaluateLiquidation && estimatedLiquidationPrice != null && stopPrice != null && entryPrice != null
+          ? (input.side === "buy"
+            ? (entryPrice > stopPrice && stopPrice > estimatedLiquidationPrice)
+            : (entryPrice < stopPrice && stopPrice < estimatedLiquidationPrice))
+          : false;
+      let liquidationBufferRatio =
+        stopDistancePct != null && stopDistancePct > 0 && liquidationDistancePct != null
+          ? liquidationDistancePct / stopDistancePct
+          : null;
+      const liveLeverageAllowed =
+        authorityMismatch !== true &&
+        stopBeforeLiquidation === true &&
+        liquidationBufferRatio != null &&
+        liquidationBufferRatio >= 1.5;
+      const liveLeverageBlockReason = authorityMismatch
+        ? "LIVE_LEVERAGE_AUTHORITY_MISMATCH"
+        : (liveLeverageAllowed ? null : "LIVE_LIQUIDATION_BUFFER_INSUFFICIENT");
+      const effectiveMarginEstimateUsdt =
+        liveOrderNotionalUsdt != null && appliedLeverage != null && appliedLeverage > 0
+          ? liveOrderNotionalUsdt / appliedLeverage
+          : null;
       const liveCapPassed =
         liveOrderNotionalUsdt != null &&
         Number.isFinite(liveOrderNotionalUsdt) &&
@@ -3215,8 +3305,48 @@ export class PaperEngine {
         ...logCtx,
         live_order_notional_usdt: liveOrderNotionalUsdt,
         live_cap_passed: liveCapPassed,
-        live_cap_block_reason: liveCapBlockReason
+        live_cap_block_reason: liveCapBlockReason,
+        leverage_policy_source: "live_mode_guardrail_v1",
+        leverage_policy_reason: leveragePolicyReason,
+        requested_leverage: requestedLeverage,
+        applied_leverage: appliedLeverage,
+        max_live_leverage_allowed: maxLiveLeverageAllowed,
+        live_notional_cap_usdt: this.config.okxLiveMaxOrderNotionalUsdt,
+        effective_margin_estimate_usdt: effectiveMarginEstimateUsdt,
+        entry_price: entryPrice,
+        stop_price: stopPrice,
+        estimated_liquidation_price: estimatedLiquidationPrice,
+        stop_distance_pct: stopDistancePct,
+        liquidation_distance_pct: liquidationDistancePct,
+        liquidation_buffer_ratio: liquidationBufferRatio,
+        stop_before_liquidation: stopBeforeLiquidation,
+        live_leverage_allowed: liveLeverageAllowed,
+        live_leverage_block_reason: liveLeverageBlockReason
       };
+      this.logger.info("LIVE_LEVERAGE_POLICY_PROOF", liveCapCtx);
+      this.logger.info("LIVE_LIQUIDATION_BUFFER_PROOF", liveCapCtx);
+      if (authorityMismatch) {
+        return {
+          ok: false,
+          ordId: null,
+          fillPx: null,
+          errorCode: "live_leverage_authority_mismatch",
+          errorMessage: "Authority leverage missing or invalid",
+          ackCode: "rejected",
+          orderState: null
+        };
+      }
+      if (!liveLeverageAllowed) {
+        return {
+          ok: false,
+          ordId: null,
+          fillPx: null,
+          errorCode: "live_liquidation_buffer_insufficient",
+          errorMessage: "Live liquidation buffer insufficient",
+          ackCode: "rejected",
+          orderState: null
+        };
+      }
       if (!liveCapPassed) {
         this.logger.warn("LIVE_MAX_ORDER_NOTIONAL_CAP", liveCapCtx);
         return {
@@ -7925,6 +8055,11 @@ export class PaperEngine {
             entryQualityGrade: authority.entryQualityGrade ?? null,
             leverageProfile: authority.leverageProfile ?? null,
             appliedLeverage: authority.appliedLeverage ?? null,
+            marketSubtype: null,
+            marketRegime: authority.regime ?? null,
+            isAddOn: false,
+            entryPrice: first.lastPrice,
+            stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : null,
             paperExecutionReady: this.paperExecutionReady
           });
 
