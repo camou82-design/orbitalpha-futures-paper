@@ -58,6 +58,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Final Decision Formulation (Authority Enforcer)
     let finalDecision: EngineV2FinalDecision = "SKIP";
+    const isCrashLockish = (state: string): boolean =>
+        state.includes("CRASH_LOCK") || state.includes("CRASH_EXIT");
+    const isPumpLockish = (state: string): boolean =>
+        state.includes("PUMP_ALERT") || state.includes("PUMP_LOCK");
 
     const rawSignal = input.snapshot?.signal ?? "none";
     const hasRawCandidate =
@@ -140,6 +144,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let promotionMinConditionPassed = false;
     let shockReactionPromotionType: string | null = null;
     let shockReactionBlockReason: string | null = null;
+    let shockReactionSetupEvidence: Record<string, unknown> | null = null;
+    let countertrendExceptionUsed = false;
     let contaminationSoftened = false;
     let contaminationHardReject = false;
     let contaminationSoftenReason: string | null = null;
@@ -182,6 +188,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         return null;
     };
     const boxPos = readNullableNumber(execMeta.boxPos, input.snapshot?.boxPos);
+    const boxBreakSide =
+        typeof execMeta.boxBreakSide === "string"
+            ? String(execMeta.boxBreakSide)
+            : typeof input.snapshot?.boxBreakSide === "string"
+                ? String(input.snapshot.boxBreakSide)
+                : "none";
     const zoneFromMeta = typeof execMeta.zone === "string" ? execMeta.zone : null;
     const zone = zoneFromMeta ?? (boxPos == null ? "mid" : boxPos >= 0.74 ? "upper" : boxPos <= 0.26 ? "lower" : "mid");
     const rangeConfidence = readNullableNumber(execMeta.rangeConfidence, input.snapshot?.rangeConfidence);
@@ -291,15 +303,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         shockDownActive &&
         rangeContextActive &&
         zone === "mid" &&
-        (crashState === "CRASH_LOCK" || crashState === "CRASH_EXIT");
+        isCrashLockish(crashState);
     const shockUpRangeMidWatch =
         shockUpActive &&
         rangeContextActive &&
         zone === "mid" &&
-        (pumpStateResolved === "PUMP_ALERT" || pumpStateResolved === "PUMP_LOCK");
+        isPumpLockish(pumpStateResolved);
     const shockReactionWatchActive = shockDownRangeMidWatch || shockUpRangeMidWatch;
     const shockReactionDirection: "DOWN" | "UP" | "NONE" =
-        shockDownRangeMidWatch ? "DOWN" : shockUpRangeMidWatch ? "UP" : "NONE";
+        shockDownActive ? "DOWN" : shockUpActive ? "UP" : "NONE";
     const shockReactionAllowedPrimarySide: EngineV2Side =
         shockReactionDirection === "DOWN" ? "short" : shockReactionDirection === "UP" ? "long" : "none";
     const shockRecoveryHint =
@@ -308,30 +320,61 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (typeof execMeta.crash_lock_bypass_reason === "string" && execMeta.crash_lock_bypass_reason.length > 0) ||
         (typeof execMeta.override_reason === "string" && execMeta.override_reason.length > 0);
 
-    console.info(JSON.stringify({
-        event: "SHOCK_REACTION_SYMMETRY_PROOF",
-        symbol: String(input.symbol),
-        directional_shock_state: shock,
-        crash_state: crashState || null,
-        pump_state: pumpStateResolved || null,
-        market_mode: marketMode,
-        active_engine_routing: activeEngineRouting,
-        boxPos,
-        zone,
-        down_watch_active: shockDownRangeMidWatch,
-        up_watch_active: shockUpRangeMidWatch,
-        shock_reaction_watch_active: shockReactionWatchActive,
-        shock_reaction_direction: shockReactionDirection
-    }));
+    const edgeUpper = (boxPos ?? 0.5) >= 0.92 || zone === "upper";
+    const edgeLower = (boxPos ?? 0.5) <= 0.08 || zone === "lower";
+    const downUpperFailureShort =
+        shockDownActive &&
+        rangeContextActive &&
+        edgeUpper &&
+        (reversalConfirmed || relaxedRangeEntry || trendSideCandidate === "short");
+    const downLowerBreakdownContinuationShort =
+        shockDownActive &&
+        rangeContextActive &&
+        (zone === "lower" || boxBreakSide === "lower") &&
+        emaGap < 0 &&
+        trendSideCandidate === "short";
+    const downLowerReversalConfirmedLong =
+        shockDownActive &&
+        rangeContextActive &&
+        edgeLower &&
+        reversalConfirmed &&
+        shockRecoveryHint;
+    const upLowerSupportLong =
+        shockUpActive &&
+        rangeContextActive &&
+        edgeLower &&
+        (reversalConfirmed || relaxedRangeEntry || trendSideCandidate === "long");
+    const upUpperBreakoutContinuationLong =
+        shockUpActive &&
+        rangeContextActive &&
+        (zone === "upper" || boxBreakSide === "upper") &&
+        emaGap > 0 &&
+        trendSideCandidate === "long";
+    const upUpperReversalConfirmedShort =
+        shockUpActive &&
+        rangeContextActive &&
+        edgeUpper &&
+        reversalConfirmed &&
+        shockRecoveryHint;
+
+    // Shock reaction watch dry-run matrix (symmetry):
+    // - DOWN + RANGE mid => HOLD/WAIT_RECHECK, no ENTER
+    // - UP + RANGE mid => HOLD/WAIT_RECHECK, no ENTER
+    // - DOWN + upper failure => short candidate setup
+    // - DOWN + lower breakdown => short candidate setup
+    // - DOWN + lower reversal confirmed => limited long exception setup
+    // - UP + lower support => long candidate setup
+    // - UP + upper breakout => long candidate setup
+    // - UP + upper reversal confirmed => limited short exception setup
 
     if (hardControlClear) {
         if (shockReactionWatchActive) {
             shockReactionBlockReason = "SHOCK_REACTION_WATCH_MID_CHASE_BLOCKED";
             if (promotionBlockReason == null) promotionBlockReason = shockReactionBlockReason;
-            if (v2DecisionAfterPromotion === "ENTER") {
+            if (v2DecisionAfterPromotion === "ENTER" || v2DecisionAfterPromotion === "SKIP") {
                 v2DecisionAfterPromotion = "HOLD";
-                v2RejectReasonAfterPromotion = "WAIT_RECHECK";
             }
+            v2RejectReasonAfterPromotion = "WAIT_RECHECK";
             console.info(JSON.stringify({
                 event: "SHOCK_REACTION_WATCH_PROOF",
                 symbol: String(input.symbol),
@@ -377,6 +420,123 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 zone,
                 promotion_block_reason: promotionBlockReason
             }));
+            console.info(JSON.stringify({
+                event: "SHOCK_REACTION_SYMMETRY_PROOF",
+                symbol: String(input.symbol),
+                directional_shock_state: shock,
+                crash_state: crashState || null,
+                pump_state: pumpStateResolved || null,
+                market_mode: marketMode,
+                active_engine_routing: activeEngineRouting,
+                boxPos,
+                zone,
+                down_watch_active: shockDownRangeMidWatch,
+                up_watch_active: shockUpRangeMidWatch,
+                shock_reaction_watch_active: shockReactionWatchActive,
+                shock_reaction_direction: shockReactionDirection,
+                setup_type: null,
+                setup_block_reason: promotionBlockReason,
+                allowed_primary_side: shockReactionAllowedPrimarySide,
+                countertrend_exception_used: false
+            }));
+        }
+
+        // Shock edge setups (independent of generic promotion): no mid chase, edge-only continuation/reversal.
+        if (
+            !shockReactionWatchActive &&
+            shockReactionDirection !== "NONE" &&
+            rangeContextActive &&
+            (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD")
+        ) {
+            let setupType: string | null = null;
+            let setupSide: EngineV2Side = "none";
+            let setupEvidence: Record<string, unknown> = {};
+            let setupBlockReason: string | null = null;
+            let allowedPrimarySide: EngineV2Side = shockReactionAllowedPrimarySide;
+            let countertrendUsed = false;
+
+            if (shockReactionDirection === "DOWN") {
+                if (downUpperFailureShort && (allowNewShort || riskShortAllow)) {
+                    setupType = "upper_failure_short";
+                    setupSide = "short";
+                    setupEvidence = { edgeUpper, reversalConfirmed, relaxedRangeEntry };
+                } else if (downLowerBreakdownContinuationShort && (allowNewShort || riskShortAllow)) {
+                    setupType = "lower_breakdown_continuation_short";
+                    setupSide = "short";
+                    setupEvidence = { boxBreakSide, emaGap, trend_side_candidate: trendSideCandidate };
+                } else if (downLowerReversalConfirmedLong) {
+                    setupType = "lower_reversal_confirmed_long";
+                    setupSide = "long";
+                    countertrendUsed = true;
+                    setupEvidence = { edgeLower, reversalConfirmed, shockRecoveryHint };
+                } else {
+                    setupBlockReason = "SHOCK_REACTION_SETUP_NOT_READY_DOWN";
+                }
+            } else if (shockReactionDirection === "UP") {
+                if (upLowerSupportLong && (allowNewLong || riskLongAllow)) {
+                    setupType = "lower_support_long";
+                    setupSide = "long";
+                    setupEvidence = { edgeLower, reversalConfirmed, relaxedRangeEntry };
+                } else if (upUpperBreakoutContinuationLong && (allowNewLong || riskLongAllow)) {
+                    setupType = "upper_breakout_continuation_long";
+                    setupSide = "long";
+                    setupEvidence = { boxBreakSide, emaGap, trend_side_candidate: trendSideCandidate };
+                } else if (upUpperReversalConfirmedShort) {
+                    setupType = "upper_reversal_confirmed_short";
+                    setupSide = "short";
+                    countertrendUsed = true;
+                    setupEvidence = { edgeUpper, reversalConfirmed, shockRecoveryHint };
+                } else {
+                    setupBlockReason = "SHOCK_REACTION_SETUP_NOT_READY_UP";
+                }
+            }
+
+            if (setupType != null && setupSide !== "none") {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = setupSide;
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = `SHOCK_REACTION_${setupType}`;
+                promotionMinConditionPassed = true;
+                shockReactionPromotionType = setupType;
+                shockReactionSetupEvidence = setupEvidence;
+                countertrendExceptionUsed = countertrendUsed;
+                shockReactionBlockReason = null;
+                promotionBlockReason = null;
+            } else if (setupBlockReason != null) {
+                v2DecisionAfterPromotion = "HOLD";
+                v2SideAfterPromotion = "none";
+                v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                promotionApplied = false;
+                promotionReason = null;
+                promotionMinConditionPassed = false;
+                shockReactionPromotionType = null;
+                shockReactionSetupEvidence = null;
+                countertrendExceptionUsed = false;
+                shockReactionBlockReason = setupBlockReason;
+                if (promotionBlockReason == null) promotionBlockReason = setupBlockReason;
+            }
+            if (setupType != null || setupBlockReason != null) {
+                console.info(JSON.stringify({
+                    event: "SHOCK_REACTION_SYMMETRY_PROOF",
+                    symbol: String(input.symbol),
+                    directional_shock_state: shock,
+                    crash_state: crashState || null,
+                    pump_state: pumpStateResolved || null,
+                    market_mode: marketMode,
+                    active_engine_routing: activeEngineRouting,
+                    boxPos,
+                    zone,
+                    down_watch_active: shockDownRangeMidWatch,
+                    up_watch_active: shockUpRangeMidWatch,
+                    shock_reaction_watch_active: shockReactionWatchActive,
+                    shock_reaction_direction: shockReactionDirection,
+                    setup_type: setupType,
+                    setup_block_reason: setupBlockReason,
+                    allowed_primary_side: allowedPrimarySide,
+                    countertrend_exception_used: countertrendUsed
+                }));
+            }
         }
         if (v2RejectReasonAfterPromotion != null && unpromotableRejectReasons.has(v2RejectReasonAfterPromotion)) {
             promotionBlockReason = v2RejectReasonAfterPromotion;
@@ -525,6 +685,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 promotionMinConditionPassed = false;
                 shockReactionBlockReason = "DOWN_SHOCK_COUNTERTREND_LONG_NOT_CONFIRMED";
                 promotionBlockReason = shockReactionBlockReason;
+                countertrendExceptionUsed = false;
             }
         }
         if (shock === "UP" && v2DecisionAfterPromotion === "ENTER") {
@@ -542,20 +703,30 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 promotionMinConditionPassed = false;
                 shockReactionBlockReason = "UP_SHOCK_COUNTERTREND_SHORT_NOT_CONFIRMED";
                 promotionBlockReason = shockReactionBlockReason;
+                countertrendExceptionUsed = false;
             }
         }
 
         if (promotionApplied) {
-            if (shock === "DOWN") {
+            if (shockReactionPromotionType == null && shock === "DOWN") {
                 if (v2SideAfterPromotion === "short" && zone === "upper") shockReactionPromotionType = "upper_failure_short";
                 else if (v2SideAfterPromotion === "short" && zone === "lower") shockReactionPromotionType = "lower_breakdown_continuation_short";
                 else if (v2SideAfterPromotion === "long" && zone === "lower" && reversalConfirmed) shockReactionPromotionType = "lower_reversal_confirmed_long";
-            } else if (shock === "UP") {
+            } else if (shockReactionPromotionType == null && shock === "UP") {
                 if (v2SideAfterPromotion === "long" && zone === "lower") shockReactionPromotionType = "lower_support_long";
                 else if (v2SideAfterPromotion === "long" && zone === "upper") shockReactionPromotionType = "upper_breakout_continuation_long";
                 else if (v2SideAfterPromotion === "short" && zone === "upper" && reversalConfirmed) shockReactionPromotionType = "upper_reversal_confirmed_short";
             }
             if (shockReactionPromotionType != null) {
+                const setupEvidence = shockReactionSetupEvidence ?? {
+                    boxBreakSide,
+                    emaGap,
+                    trend_side_candidate: trendSideCandidate,
+                    range_side_candidate: rangeSideCandidate,
+                    reversal_confirmed: reversalConfirmed,
+                    relaxedRangeEntry,
+                    shock_recovery_hint: shockRecoveryHint
+                };
                 console.info(JSON.stringify({
                     event: "SHOCK_REACTION_PROMOTION_PROOF",
                     symbol: String(input.symbol),
@@ -572,9 +743,20 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     decision_after: v2DecisionAfterPromotion,
                     promotion_applied: promotionApplied,
                     promotion_type: shockReactionPromotionType,
+                    setup_type: shockReactionPromotionType,
+                    setup_evidence: setupEvidence,
+                    boxBreakSide,
+                    emaGap,
+                    trend_side_candidate: trendSideCandidate,
+                    range_side_candidate: rangeSideCandidate,
                     promotion_block_reason: promotionBlockReason,
                     reversal_confirmed: reversalConfirmed,
                     relaxedRangeEntry,
+                    shock_recovery_hint: shockRecoveryHint,
+                    longAllow: riskLongAllow,
+                    shortAllow: riskShortAllow,
+                    allowed_primary_side: shockReactionAllowedPrimarySide,
+                    countertrend_exception_used: countertrendExceptionUsed,
                     range_edge_extreme: rangeEdgeExtreme,
                     side_zone_valid: sideZoneValid,
                     hard_block_present: hardBlockPresent,
