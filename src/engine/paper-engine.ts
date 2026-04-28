@@ -113,6 +113,7 @@ import {
   normalizePositionSideUpper,
   normalizePositionSideLower
 } from "../engine-v2/reconciler";
+import { deriveLiveBalanceAuthority, type LiveBalanceAuthorityResult } from "../engine-v2/live-account/balance-authority";
 import {
   evaluateRangeEngineForSymbol,
   evaluateRangeStructuralExit,
@@ -844,6 +845,8 @@ export class PaperEngine {
   private okxAvailableBalanceUsdt: number | null = null;
   private liveBalanceReady = false;
   private liveBalanceBlockReason: string | null = null;
+  private liveBalanceFetchError: string | null = null;
+  private lastLiveBalancePayload: Record<string, unknown> | null = null;
   private runCycleId = 0;
   private paperExecutionReady = false;
   private paperExecutionReadyChangedAt: number | null = null;
@@ -1212,6 +1215,48 @@ export class PaperEngine {
     return input.entryPrice * (1 + moveFrac);
   }
 
+  private applyLiveBalanceAuthorityResult(result: LiveBalanceAuthorityResult): void {
+    this.okxWalletBalanceUsdt = result.okx_wallet_balance_usdt;
+    this.okxAvailableBalanceUsdt = result.okx_available_balance_usdt;
+    this.liveBalanceReady = result.live_balance_ready;
+    this.liveBalanceBlockReason = result.live_balance_block_reason;
+  }
+
+  private async refreshLiveBalanceSnapshot(nowTs: number): Promise<void> {
+    if (this.config.okxAuthMode === "live" && this.okxDemo) {
+      try {
+        const bal = await this.okxDemo.getBalance("USDT");
+        if (bal.ok) {
+          this.lastLiveBalancePayload = (bal.value?.[0] as Record<string, unknown> | undefined) ?? null;
+          this.liveBalanceFetchError = null;
+        } else {
+          this.lastLiveBalancePayload = null;
+          this.liveBalanceFetchError = bal.error || bal.diagnostics.retMsg || "LIVE_BALANCE_FETCH_FAILED";
+        }
+      } catch (e) {
+        this.lastLiveBalancePayload = null;
+        this.liveBalanceFetchError = e instanceof Error ? e.message : String(e);
+      }
+    } else {
+      this.lastLiveBalancePayload = null;
+      this.liveBalanceFetchError = this.config.okxAuthMode === "live" ? "LIVE_BALANCE_CLIENT_NOT_READY" : null;
+    }
+    const result = this.buildBalanceDisplayContext(await this.positions.loadOpenAll());
+    this.applyLiveBalanceAuthorityResult(result);
+    this.logger.info("V2_LIVE_BALANCE_AUTHORITY_PROOF", {
+      ts: nowTs,
+      ...result
+    });
+    this.logger.info("OKX_LIVE_BALANCE_PROOF", {
+      ts: nowTs,
+      balance_source: result.balance_source,
+      live_balance_ready: result.live_balance_ready,
+      live_balance_block_reason: result.live_balance_block_reason,
+      okx_wallet_balance_usdt: result.okx_wallet_balance_usdt,
+      okx_available_balance_usdt: result.okx_available_balance_usdt
+    });
+  }
+
   private okxAuthProofContext(): {
     okx_auth_mode: "disabled" | "demo" | "live";
     okx_auth_ready: boolean;
@@ -1223,11 +1268,43 @@ export class PaperEngine {
     okx_passphrase_present: boolean;
     okx_simulated_trading_header_enabled: boolean;
     live_max_order_notional_usdt: number;
-    equity_source: "okx_live_wallet" | "paper_config";
+    balance_source: "okx_live_wallet" | "paper_config" | "unavailable";
     okx_wallet_balance_usdt: number | null;
     okx_available_balance_usdt: number | null;
-    account_equity_krw_effective: number;
-    max_usable_margin_krw_effective: number;
+    okx_used_margin_usdt: number;
+    okx_total_position_notional_usdt: number;
+    okx_effective_leverage_used: number | null;
+    account_equity_display_source: "okx_live_wallet" | "paper_config" | "unavailable";
+    account_equity_krw_display: number | null;
+    account_equity_krw_effective: number | null;
+    max_usable_margin_krw_effective: number | null;
+    live_balance_ready: boolean;
+    live_balance_block_reason: string | null;
+  } {
+    return this.buildBalanceDisplayContext([]);
+  }
+
+  private buildBalanceDisplayContext(opens: ReadonlyArray<PaperOpenPositionRecord>): LiveBalanceAuthorityResult & {
+    okx_auth_mode: "disabled" | "demo" | "live";
+    okx_auth_ready: boolean;
+    okx_exchange_auth_opt_in: boolean;
+    okx_live_enabled: boolean;
+    okx_demo_enabled: boolean;
+    okx_api_key_present: boolean;
+    okx_api_secret_present: boolean;
+    okx_passphrase_present: boolean;
+    okx_simulated_trading_header_enabled: boolean;
+    live_max_order_notional_usdt: number;
+    balance_source: "okx_live_wallet" | "paper_config" | "unavailable";
+    okx_wallet_balance_usdt: number | null;
+    okx_available_balance_usdt: number | null;
+    okx_used_margin_usdt: number;
+    okx_total_position_notional_usdt: number;
+    okx_effective_leverage_used: number | null;
+    account_equity_display_source: "okx_live_wallet" | "paper_config" | "unavailable";
+    account_equity_krw_display: number | null;
+    account_equity_krw_effective: number | null;
+    max_usable_margin_krw_effective: number | null;
     live_balance_ready: boolean;
     live_balance_block_reason: string | null;
   } {
@@ -1235,15 +1312,17 @@ export class PaperEngine {
     const apiKey = mode === "live" ? this.config.okxApiKey : mode === "demo" ? this.config.okxDemoApiKey : "";
     const apiSecret = mode === "live" ? this.config.okxApiSecret : mode === "demo" ? this.config.okxDemoApiSecret : "";
     const passphrase = mode === "live" ? this.config.okxPassphrase : mode === "demo" ? this.config.okxDemoPassphrase : "";
-    const liveWalletReady =
-      mode === "live" &&
-      this.okxBalanceOk === true &&
-      this.okxWalletBalanceUsdt != null &&
-      this.okxAvailableBalanceUsdt != null &&
-      this.okxWalletBalanceUsdt > 0 &&
-      this.okxAvailableBalanceUsdt >= 0;
-    const accountEquityKrwEffective = liveWalletReady ? (this.okxWalletBalanceUsdt ?? 0) * 1000 : 500_000;
-    const maxUsableMarginKrwEffective = liveWalletReady ? (this.okxAvailableBalanceUsdt ?? 0) * 1000 : 420_000;
+    const authority = deriveLiveBalanceAuthority({
+      okxAuthMode: mode,
+      balancePayload: this.lastLiveBalancePayload,
+      balanceFetchError: this.liveBalanceFetchError,
+      positions: opens.map((p) => ({
+        symbol: String(p.symbol),
+        side: String(p.side),
+        sizeUsd: Number.isFinite(p.sizeUsd) ? p.sizeUsd : 0,
+        leverage: Number.isFinite(p.leverage) ? p.leverage : 1
+      }))
+    });
     return {
       okx_auth_mode: mode,
       okx_auth_ready: this.config.okxAuthReady,
@@ -1255,13 +1334,7 @@ export class PaperEngine {
       okx_passphrase_present: passphrase.length > 0,
       okx_simulated_trading_header_enabled: this.config.okxSimulatedTradingHeaderEnabled,
       live_max_order_notional_usdt: this.config.okxLiveMaxOrderNotionalUsdt,
-      equity_source: liveWalletReady ? "okx_live_wallet" : "paper_config",
-      okx_wallet_balance_usdt: this.okxWalletBalanceUsdt,
-      okx_available_balance_usdt: this.okxAvailableBalanceUsdt,
-      account_equity_krw_effective: accountEquityKrwEffective,
-      max_usable_margin_krw_effective: maxUsableMarginKrwEffective,
-      live_balance_ready: this.liveBalanceReady,
-      live_balance_block_reason: this.liveBalanceBlockReason
+      ...authority
     };
   }
 
@@ -1563,6 +1636,7 @@ export class PaperEngine {
         this.logger.error("okx_smoke_test_error", { error: msg });
       }
     }
+    await this.refreshLiveBalanceSnapshot(Date.now());
     this.evaluateReadinessTransition(Date.now());
     await this.runPositionStateReconciliation(Date.now());
     const history = await this.store.readPositionsHistory();
@@ -2213,6 +2287,8 @@ export class PaperEngine {
       try {
         const risk = this.lastRisk!;
         const stateNow = Date.now();
+        const opensForBalanceDisplay = await this.positions.loadOpenAll();
+        const balanceDisplay = this.buildBalanceDisplayContext(opensForBalanceDisplay);
         const regimeBlocked = (risk.blockedRegimes?.[effectiveRegimeForDecision]?.until ?? 0) > fetchedAt;
         const statusRelaxBypass = effectiveRegimeForDecision === "RANGE" &&
           this.config.paperEngineMode === "PAPER_TEST" &&
@@ -2272,7 +2348,7 @@ export class PaperEngine {
           reject_reason_counts_tick,
           symbol_decisions: mergeEngineSymbolDecisionsWithOpenLedgerExposure(
             decisionBySymbol,
-            await this.positions.loadOpenAll(),
+            opensForBalanceDisplay,
             500_000,
             this.logger
           ),
@@ -2335,7 +2411,20 @@ export class PaperEngine {
           okx_balance_ok: this.okxBalanceOk,
           okx_positions_ok: this.okxPositionsOk,
           okx_order_submit_ok: this.okxOrderSubmitOk,
-          ...this.okxAuthProofContext()
+          ...balanceDisplay
+        });
+        this.logger.info("LIVE_LEVERAGE_USAGE_PROOF", {
+          ts: fetchedAt,
+          ...balanceDisplay,
+          position_margin_lines: balanceDisplay.position_margin_lines
+        });
+        this.logger.info("DASHBOARD_BALANCE_SOURCE_PROOF", {
+          ts: fetchedAt,
+          balance_source: balanceDisplay.balance_source,
+          account_equity_display_source: balanceDisplay.account_equity_display_source,
+          account_equity_krw_display: balanceDisplay.account_equity_krw_display,
+          live_balance_ready: balanceDisplay.live_balance_ready,
+          live_balance_block_reason: balanceDisplay.live_balance_block_reason
         });
       } catch (e) {
         this.logger.error("engine_state_write_failed", { error: String(e) });
@@ -2356,6 +2445,7 @@ export class PaperEngine {
 
     try {
       const summary = await this.positions.refreshSummaryReport();
+      const balanceDisplay = this.buildBalanceDisplayContext(openAfterEntries);
       this.bundleLastWrittenAt = Date.now();
       this.bundleWriterReady = true;
       this.evaluateReadinessTransition(Date.now());
@@ -2395,7 +2485,8 @@ export class PaperEngine {
         position_state_ready: this.positionTrackingAlive,
         bundle_writer_ready: this.bundleWriterReady,
         entry_pipeline_ready: this.entryPipelineReady,
-        exit_pipeline_ready: this.exitPipelineReady
+        exit_pipeline_ready: this.exitPipelineReady,
+        ...balanceDisplay
       });
     } catch (e) {
       this.bundleWriterReady = false;

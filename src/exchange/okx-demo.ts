@@ -39,6 +39,19 @@ export type TryResult<T> =
   | Readonly<{ ok: true; value: T; diagnostics: OkxPublicDiagnostics }>
   | Readonly<{ ok: false; error: string; diagnostics: OkxPublicDiagnostics }>;
 
+function parseOptionalFiniteNumber(raw: unknown): number | null {
+  const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
+function selectUsdtDetail(details: ReadonlyArray<Record<string, unknown>>): Record<string, unknown> | null {
+  for (const d of details) {
+    const ccy = String(d.ccy ?? "").toUpperCase();
+    if (ccy === "USDT") return d;
+  }
+  return details.length > 0 ? details[0] : null;
+}
+
 function mustFiniteNumber(raw: unknown, ctx: string): number {
   const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
   if (!Number.isFinite(n)) throw new Error(`Invalid number for ${ctx}: ${String(raw)}`);
@@ -202,6 +215,8 @@ export class OkxDemoClient {
     configOk: boolean;
     balanceOk: boolean;
     positionsOk: boolean;
+    walletBalanceUsdt: number | null;
+    availableBalanceUsdt: number | null;
     diagnostics: Record<string, OkxPublicDiagnostics>;
   }> {
     const [cfg, bal, pos] = await Promise.all([
@@ -210,10 +225,36 @@ export class OkxDemoClient {
       this.getPositions()
     ]);
 
+    const balancePayload = bal.ok ? (bal.value?.[0] as Record<string, unknown> | undefined) : undefined;
+    const details = Array.isArray(balancePayload?.details) ? (balancePayload!.details as Record<string, unknown>[]) : [];
+    const selectedDetail = selectUsdtDetail(details);
+    const walletBalanceUsdt =
+      (balancePayload ? parseOptionalFiniteNumber(balancePayload.totalEq) : null) ??
+      (selectedDetail ? parseOptionalFiniteNumber(selectedDetail.eq) : null);
+    const availableBalanceUsdt = (() => {
+      if (selectedDetail) {
+        const byAvailEq = parseOptionalFiniteNumber(selectedDetail.availEq);
+        if (byAvailEq != null) return byAvailEq;
+        const byAvailBal = parseOptionalFiniteNumber(selectedDetail.availBal);
+        if (byAvailBal != null) return byAvailBal;
+        const byEq = parseOptionalFiniteNumber(selectedDetail.eq);
+        if (byEq != null) return byEq;
+      }
+      for (const d of details) {
+        const byAvailEq = parseOptionalFiniteNumber(d.availEq);
+        if (byAvailEq != null) return byAvailEq;
+        const byAvailBal = parseOptionalFiniteNumber(d.availBal);
+        if (byAvailBal != null) return byAvailBal;
+      }
+      return null;
+    })();
+
     return {
       configOk: cfg.ok,
       balanceOk: bal.ok,
       positionsOk: pos.ok,
+      walletBalanceUsdt,
+      availableBalanceUsdt,
       diagnostics: {
         config: cfg.diagnostics,
         balance: bal.diagnostics,
