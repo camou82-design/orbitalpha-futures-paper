@@ -379,6 +379,78 @@ export function resolveSymbolDecisionEnvelope(
         v1Side !== v2Side ||
         Math.abs(v1Size - v2Size) > 0.000001;
     console.info(JSON.stringify({
+        event: "EXIT_POLICY_DIAGNOSTIC_ONLY_PROOF",
+        symbol: String(symbol),
+        mode: v2Mode,
+        exit_policy_action: executionEnvelope.exitPolicyAction,
+        exit_policy_reason: executionEnvelope.exitPolicyReason,
+        exit_should_exit: executionEnvelope.exitShouldExit,
+        exit_should_reduce: executionEnvelope.exitShouldReduce,
+        exit_should_partial: executionEnvelope.exitShouldPartial,
+        runtime_authority_decision: executionEnvelope.decision,
+        exit_policy_used_for_execution: false,
+        diagnostic_only: true
+    }));
+    const runtimeDecisionMatchesV2 = executionEnvelope.decision === v2_dec;
+    const runtimeSideMatchesV2 = executionEnvelope.side === v2Side;
+    const runtimeSizeMatchesV2 = Math.abs((executionEnvelope.sizeUsd ?? 0) - v2Size) <= 0.000001;
+    const hardBlockEnterConflict = executionEnvelope.hardBlockPresent === true && executionEnvelope.decision === "ENTER";
+    const invariantFailures: string[] = [];
+    if (v2Mode === "engine_v2" && executionEnvelope.authoritySource !== "v2_execution_envelope") invariantFailures.push("AUTHORITY_SOURCE_MISMATCH");
+    if (v2Mode === "engine_v2" && !runtimeDecisionMatchesV2) invariantFailures.push("RUNTIME_DECISION_MISMATCH_V2");
+    if (v2Mode === "engine_v2" && !runtimeSideMatchesV2) invariantFailures.push("RUNTIME_SIDE_MISMATCH_V2");
+    if (v2Mode === "engine_v2" && !runtimeSizeMatchesV2) invariantFailures.push("RUNTIME_SIZE_MISMATCH_V2");
+    if (hardBlockEnterConflict) invariantFailures.push("HARDBLOCK_ENTER_CONFLICT");
+    const invariantPassed = invariantFailures.length === 0;
+    if (hardBlockEnterConflict) {
+        console.warn("[V2_AUTHORITY_INVARIANT_WARN]", {
+            symbol: String(symbol),
+            mode: v2Mode,
+            hard_block_present: executionEnvelope.hardBlockPresent,
+            hard_block_reason: executionEnvelope.hardBlockReason,
+            runtime_authority_decision: executionEnvelope.decision
+        });
+    }
+    const openPositionsCount = Array.isArray(state.currentPositions) ? state.currentPositions.length : 0;
+    const symbolLedgerExposureNotionalKrw = (Array.isArray(state.currentPositions) ? state.currentPositions : [])
+        .filter((p) => String(p.symbol) === String(symbol))
+        .reduce((acc, p) => acc + Math.max(0, Number(p.sizeUsd ?? 0)), 0);
+    const ledgerExposureNotionalKrw = (Array.isArray(state.currentPositions) ? state.currentPositions : [])
+        .reduce((acc, p) => acc + Math.max(0, Number(p.sizeUsd ?? 0)), 0);
+    console.info(JSON.stringify({
+        event: "V2_AUTHORITY_INVARIANT_PROOF",
+        symbol: String(symbol),
+        mode: v2Mode,
+        invariant_passed: invariantPassed,
+        authority_source: executionEnvelope.authoritySource,
+        legacy_used_for_execution: executionEnvelope.authoritySource === "legacy_execution_envelope",
+        legacy_comparison_only: executionEnvelope.authoritySource !== "legacy_execution_envelope",
+        runtime_authority_decision: executionEnvelope.decision,
+        v2_decision: v2_dec,
+        runtime_authority_side: executionEnvelope.side,
+        v2_side: v2Side,
+        runtime_authority_size_usd: executionEnvelope.sizeUsd,
+        v2_size: v2Size,
+        hard_block_present: executionEnvelope.hardBlockPresent,
+        hard_block_reason: executionEnvelope.hardBlockReason,
+        invariant_fail_reason: invariantFailures.join("|") || null
+    }));
+    console.info(JSON.stringify({
+        event: "V2_SIZE_EXPOSURE_SANITY_PROOF",
+        symbol: String(symbol),
+        sizeUsd: executionEnvelope.sizeUsd,
+        finalSizeUsd: v2Size,
+        exposureNotionalKrw: executionEnvelope.exposureNotionalKrw,
+        candidateExposureNotionalKrw: v2Res.decision.risk.exposureNotionalKrw ?? 0,
+        equityMultiple: executionEnvelope.equityMultiple,
+        appliedLeverage: executionEnvelope.appliedLeverage,
+        ledgerExposureNotionalKrw,
+        symbolLedgerExposureNotionalKrw,
+        openPositionsCount,
+        hasPosition: symbolLedgerExposureNotionalKrw > 0,
+        note: "diagnostic_only_size_exposure_sanity"
+    }));
+    console.info(JSON.stringify({
         event: "V2_EXECUTION_AUTHORITY_ENVELOPE_PROOF",
         symbol: String(symbol),
         mode: v2Mode,

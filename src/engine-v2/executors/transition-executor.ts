@@ -38,6 +38,9 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
     let transitionWatchOnly = true;
     let transitionConfirmRequired = true;
     let transitionRejectReason: string | null = "TRANSITION_CONFLICT_NO_TRADE";
+    let transitionConfirmBasis: "box_break" | "ema_gap_only" | "insufficient" = "insufficient";
+    let transitionPreflightSafetyPassed = false;
+    let transitionPreflightBlockReason: string | null = null;
     let transitionEvidence = "transition_default_reject";
 
     if (subtype === "SHOCK_REACTION_DOWN" || directionalShockState === "DOWN") {
@@ -54,20 +57,36 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
             signal = "WAIT_RECHECK";
             reason = "TRANSITION_SHOCK_DOWN_MID_CHASE_FORBIDDEN";
             transitionRejectReason = "MID_CHASE_FORBIDDEN";
-        } else if ((boxBreakSide === "lower" || emaGap < 0) && qualityScore >= 65) {
-            signal = "SHORT_CANDIDATE";
-            side = "short";
-            reason = "TRANSITION_SHOCK_DOWN_REACTION_CONFIRMED";
-            baseSizeIntent = 0.3;
-            recheckSuggested = false;
-            transitionAction = "CONFIRM";
-            transitionWatchOnly = false;
-            transitionConfirmRequired = false;
-            transitionRejectReason = null;
         } else {
-            signal = "WAIT_RECHECK";
-            reason = "TRANSITION_SHOCK_DOWN_REACTION_WATCH";
-            transitionRejectReason = "INSUFFICIENT_CONFIRMATION";
+            const boxBreakConfirm = boxBreakSide === "lower" && qualityScore >= 65;
+            const emaGapOnlyCandidate = boxBreakSide !== "lower" && emaGap < 0 && qualityScore >= 65;
+            const emaGapOnlySafety =
+                qualityScore >= 72 &&
+                reviewingTicks >= 2 &&
+                trendWeaknessScore < 0.45 &&
+                !isMidZone;
+            transitionPreflightSafetyPassed = boxBreakConfirm || (emaGapOnlyCandidate && emaGapOnlySafety);
+            if (boxBreakConfirm || (emaGapOnlyCandidate && emaGapOnlySafety)) {
+                signal = "SHORT_CANDIDATE";
+                side = "short";
+                reason = "TRANSITION_SHOCK_DOWN_REACTION_CONFIRMED";
+                baseSizeIntent = 0.3;
+                recheckSuggested = false;
+                transitionAction = "CONFIRM";
+                transitionWatchOnly = false;
+                transitionConfirmRequired = false;
+                transitionRejectReason = null;
+                transitionConfirmBasis = boxBreakConfirm ? "box_break" : "ema_gap_only";
+                transitionPreflightBlockReason = null;
+            } else {
+                signal = "WAIT_RECHECK";
+                reason = "TRANSITION_SHOCK_DOWN_REACTION_WATCH";
+                transitionRejectReason = "INSUFFICIENT_CONFIRMATION";
+                transitionConfirmBasis = "insufficient";
+                transitionPreflightBlockReason = emaGapOnlyCandidate && !emaGapOnlySafety
+                    ? "EMA_GAP_ONLY_PREFLIGHT_BLOCKED"
+                    : "INSUFFICIENT_CONFIRMATION";
+            }
         }
     } else if (subtype === "SHOCK_REACTION_UP" || directionalShockState === "UP") {
         transitionSetupType = "SHOCK_UP_REACTION";
@@ -83,20 +102,36 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
             signal = "WAIT_RECHECK";
             reason = "TRANSITION_SHOCK_UP_MID_CHASE_FORBIDDEN";
             transitionRejectReason = "MID_CHASE_FORBIDDEN";
-        } else if ((boxBreakSide === "upper" || emaGap > 0) && qualityScore >= 65) {
-            signal = "LONG_CANDIDATE";
-            side = "long";
-            reason = "TRANSITION_SHOCK_UP_REACTION_CONFIRMED";
-            baseSizeIntent = 0.3;
-            recheckSuggested = false;
-            transitionAction = "CONFIRM";
-            transitionWatchOnly = false;
-            transitionConfirmRequired = false;
-            transitionRejectReason = null;
         } else {
-            signal = "WAIT_RECHECK";
-            reason = "TRANSITION_SHOCK_UP_REACTION_WATCH";
-            transitionRejectReason = "INSUFFICIENT_CONFIRMATION";
+            const boxBreakConfirm = boxBreakSide === "upper" && qualityScore >= 65;
+            const emaGapOnlyCandidate = boxBreakSide !== "upper" && emaGap > 0 && qualityScore >= 65;
+            const emaGapOnlySafety =
+                qualityScore >= 72 &&
+                reviewingTicks >= 2 &&
+                trendWeaknessScore < 0.45 &&
+                !isMidZone;
+            transitionPreflightSafetyPassed = boxBreakConfirm || (emaGapOnlyCandidate && emaGapOnlySafety);
+            if (boxBreakConfirm || (emaGapOnlyCandidate && emaGapOnlySafety)) {
+                signal = "LONG_CANDIDATE";
+                side = "long";
+                reason = "TRANSITION_SHOCK_UP_REACTION_CONFIRMED";
+                baseSizeIntent = 0.3;
+                recheckSuggested = false;
+                transitionAction = "CONFIRM";
+                transitionWatchOnly = false;
+                transitionConfirmRequired = false;
+                transitionRejectReason = null;
+                transitionConfirmBasis = boxBreakConfirm ? "box_break" : "ema_gap_only";
+                transitionPreflightBlockReason = null;
+            } else {
+                signal = "WAIT_RECHECK";
+                reason = "TRANSITION_SHOCK_UP_REACTION_WATCH";
+                transitionRejectReason = "INSUFFICIENT_CONFIRMATION";
+                transitionConfirmBasis = "insufficient";
+                transitionPreflightBlockReason = emaGapOnlyCandidate && !emaGapOnlySafety
+                    ? "EMA_GAP_ONLY_PREFLIGHT_BLOCKED"
+                    : "INSUFFICIENT_CONFIRMATION";
+            }
         }
     } else if (transitionPhase === "RANGE_TO_TREND") {
         const upBreak = boxBreakSide === "upper" && emaGap > 0;
@@ -214,6 +249,9 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         transitionWatchOnly,
         transitionConfirmRequired,
         transitionRejectReason,
+        transitionConfirmBasis,
+        transitionPreflightSafetyPassed,
+        transitionPreflightBlockReason,
         transitionEvidence,
         emaGap,
         trendWeaknessScore,

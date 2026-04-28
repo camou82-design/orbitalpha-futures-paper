@@ -455,6 +455,9 @@ export interface TransitionExecutorMetadata extends Record<string, string | numb
     transitionWatchOnly: boolean;
     transitionConfirmRequired: boolean;
     transitionRejectReason: string | null;
+    transitionConfirmBasis: "box_break" | "ema_gap_only" | "insufficient";
+    transitionPreflightSafetyPassed: boolean;
+    transitionPreflightBlockReason: string | null;
     transitionEvidence: string;
     emaGap: number;
     trendWeaknessScore: number;

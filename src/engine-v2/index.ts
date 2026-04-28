@@ -23,6 +23,27 @@ import { deriveV2StateAuthority } from "./state/derive";
 import { evaluateV2AddOnPolicy } from "./addon/policy";
 import { evaluateV2ExitPolicy } from "./exit/policy";
 
+const v2ProofLastKeyByEventSymbol = new Map<string, string>();
+function shouldEmitV2Proof(
+    eventName: string,
+    symbol: string,
+    key: string,
+    highPriority: boolean
+): boolean {
+    const verbose = String(process.env.V2_PROOF_VERBOSE ?? "").toLowerCase() === "true";
+    if (verbose || highPriority) {
+        v2ProofLastKeyByEventSymbol.set(`${eventName}:${symbol}`, key);
+        return true;
+    }
+    const mapKey = `${eventName}:${symbol}`;
+    const prev = v2ProofLastKeyByEventSymbol.get(mapKey);
+    if (prev !== key) {
+        v2ProofLastKeyByEventSymbol.set(mapKey, key);
+        return true;
+    }
+    return false;
+}
+
 /**
  * orchestrator for Engine-V2 5-tier architecture.
  * Produces an independent EngineV2Decision.
@@ -108,40 +129,51 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         exposureNotionalCapKrw: v2State.exposureNotionalCapKrw,
         symbolExposureNotionalCapKrw: v2State.symbolExposureNotionalCapKrw
     }));
-    console.info(JSON.stringify({
-        event: "V2_MARKET_JUDGMENT_PROOF",
-        symbol: String(input.symbol),
-        market_judgment_state_source: "authoritative_input",
-        v2_state_authority_source: v2State.stateAuthoritySource,
-        judgmentVersion: judgment.judgmentVersion,
-        regime: judgment.regime,
-        regime_final: judgment.regime_final,
-        subtype: judgment.subtype,
-        subtypeReason: judgment.subtypeReason,
-        shockPhase: judgment.shockPhase,
-        rangePhase: judgment.rangePhase,
-        trendPhase: judgment.trendPhase,
-        transitionPhase: judgment.transitionPhase,
-        confidenceScore: confidence.score,
-        confidenceLevel: confidence.level,
-        routerExecutor: routing.executor,
-        routingReason: routing.reason,
-        rangeScore: judgment.metrics.rangeScore,
-        trendScore: judgment.metrics.trendScore,
-        rangeConfidence: authoritativeInput.snapshot?.rangeConfidence ?? null,
-        boxPos: authoritativeInput.snapshot?.boxPos ?? null,
-        boxBreakSide: authoritativeInput.snapshot?.boxBreakSide ?? null,
-        boxCohesion01: authoritativeInput.snapshot?.boxCohesion01 ?? null,
-        breakoutFailureRate: authoritativeInput.snapshot?.breakoutFailureRate ?? null,
-        emaGap: authoritativeInput.snapshot?.emaGap ?? null,
-        trendWeaknessScore: authoritativeInput.snapshot?.trendWeaknessScore ?? null,
-        directionalShockState: v2State.directionalShockState,
-        crashState: v2State.crashState,
-        pumpState: v2State.pumpState,
-        data_ready: judgment.data_ready,
-        dump_protection_hit: judgment.dump_protection_hit,
-        volatility_guard_hit: judgment.volatility_guard_hit
-    }));
+    const marketProofKey = [
+        judgment.subtype,
+        judgment.shockPhase,
+        judgment.rangePhase,
+        judgment.trendPhase,
+        judgment.transitionPhase,
+        routing.executor,
+        routing.reason
+    ].join("|");
+    if (shouldEmitV2Proof("V2_MARKET_JUDGMENT_PROOF", String(input.symbol), marketProofKey, false)) {
+        console.info(JSON.stringify({
+            event: "V2_MARKET_JUDGMENT_PROOF",
+            symbol: String(input.symbol),
+            market_judgment_state_source: "authoritative_input",
+            v2_state_authority_source: v2State.stateAuthoritySource,
+            judgmentVersion: judgment.judgmentVersion,
+            regime: judgment.regime,
+            regime_final: judgment.regime_final,
+            subtype: judgment.subtype,
+            subtypeReason: judgment.subtypeReason,
+            shockPhase: judgment.shockPhase,
+            rangePhase: judgment.rangePhase,
+            trendPhase: judgment.trendPhase,
+            transitionPhase: judgment.transitionPhase,
+            confidenceScore: confidence.score,
+            confidenceLevel: confidence.level,
+            routerExecutor: routing.executor,
+            routingReason: routing.reason,
+            rangeScore: judgment.metrics.rangeScore,
+            trendScore: judgment.metrics.trendScore,
+            rangeConfidence: authoritativeInput.snapshot?.rangeConfidence ?? null,
+            boxPos: authoritativeInput.snapshot?.boxPos ?? null,
+            boxBreakSide: authoritativeInput.snapshot?.boxBreakSide ?? null,
+            boxCohesion01: authoritativeInput.snapshot?.boxCohesion01 ?? null,
+            breakoutFailureRate: authoritativeInput.snapshot?.breakoutFailureRate ?? null,
+            emaGap: authoritativeInput.snapshot?.emaGap ?? null,
+            trendWeaknessScore: authoritativeInput.snapshot?.trendWeaknessScore ?? null,
+            directionalShockState: v2State.directionalShockState,
+            crashState: v2State.crashState,
+            pumpState: v2State.pumpState,
+            data_ready: judgment.data_ready,
+            dump_protection_hit: judgment.dump_protection_hit,
+            volatility_guard_hit: judgment.volatility_guard_hit
+        }));
+    }
 
     // Tier 4: Executors
     let execution: ExecutorOutput;
@@ -180,7 +212,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         execution.signal === "LONG_CANDIDATE" ||
         execution.signal === "SHORT_CANDIDATE" ||
         execution.signal === "WAIT_RECHECK";
-    if (shouldEmitAddOnProof) {
+    const addOnProofKey = [
+        addOnPolicy.action,
+        addOnPolicy.reason,
+        addOnPolicy.marketSubtype,
+        addOnPolicy.transitionPhase,
+        execution.signal,
+        execution.side
+    ].join("|");
+    if (shouldEmitAddOnProof && shouldEmitV2Proof("V2_ADDON_POLICY_PROOF", String(input.symbol), addOnProofKey, addOnPolicy.action !== "INITIAL_ONLY")) {
         console.info(JSON.stringify({
             event: "V2_ADDON_POLICY_PROOF",
             symbol: String(input.symbol),
@@ -208,6 +248,29 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             trendWeaknessScore: addOnPolicy.trendWeaknessScore,
             rangeConfidence: addOnPolicy.rangeConfidence,
             evidence: addOnPolicy.evidence
+        }));
+    }
+    if (
+        addOnPolicy.action === "INITIAL_ONLY" &&
+        (execution.signal === "LONG_CANDIDATE" || execution.signal === "SHORT_CANDIDATE" || execution.signal === "WAIT_RECHECK") &&
+        shouldEmitV2Proof(
+            "ADDON_POLICY_INITIAL_BYPASS_PROOF",
+            String(input.symbol),
+            `${execution.signal}|${execution.side}|${addOnPolicy.reason}`,
+            true
+        )
+    ) {
+        console.info(JSON.stringify({
+            event: "ADDON_POLICY_INITIAL_BYPASS_PROOF",
+            symbol: String(input.symbol),
+            side: addOnPolicy.side,
+            action: addOnPolicy.action,
+            reason: addOnPolicy.reason,
+            isInitial: addOnPolicy.isInitial,
+            isAddOn: addOnPolicy.isAddOn,
+            hasSameSidePosition: addOnPolicy.hasSameSidePosition,
+            hasOppositeSidePosition: addOnPolicy.hasOppositeSidePosition,
+            initial_blocked_by_addon_policy: false
         }));
     }
     if (addOnPolicy.isAddOn && addOnPolicy.allowed === false && (execution.signal === "LONG_CANDIDATE" || execution.signal === "SHORT_CANDIDATE")) {
@@ -249,7 +312,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             qualityScore: authoritativeInput.snapshot.qualityScore
         }
     });
-    if (exitPolicy.hasPosition) {
+    if (
+        exitPolicy.hasPosition &&
+        shouldEmitV2Proof(
+            "V2_EXIT_POLICY_PROOF",
+            String(input.symbol),
+            `${exitPolicy.action}|${exitPolicy.reason}|${exitPolicy.positionSide}|${exitPolicy.currentStage}`,
+            true
+        )
+    ) {
         console.info(JSON.stringify({
             event: "V2_EXIT_POLICY_PROOF",
             symbol: String(input.symbol),
@@ -283,34 +354,54 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
     if (routing.executor === "TRANSITION") {
         const transitionMeta = (execution.metadata ?? {}) as Record<string, unknown>;
-        console.info(JSON.stringify({
-            event: "V2_TRANSITION_EXECUTOR_PROOF",
-            symbol: String(input.symbol),
-            market_subtype: judgment.subtype,
-            transitionPhase: transitionMeta.transitionPhase ?? judgment.transitionPhase ?? "NONE",
-            transitionSetupType: transitionMeta.transitionSetupType ?? "NONE",
-            transitionAction: transitionMeta.transitionAction ?? "REJECT",
-            signal: execution.signal,
-            side: execution.side,
-            reason: execution.reason,
-            baseSizeIntent: execution.baseSizeIntent,
-            isAddOnEligible: execution.isAddOnEligible,
-            transitionWatchOnly: transitionMeta.transitionWatchOnly ?? null,
-            transitionConfirmRequired: transitionMeta.transitionConfirmRequired ?? null,
-            transitionRejectReason: transitionMeta.transitionRejectReason ?? null,
-            emaGap: transitionMeta.emaGap ?? authoritativeInput.snapshot?.emaGap ?? null,
-            trendWeaknessScore: transitionMeta.trendWeaknessScore ?? authoritativeInput.snapshot?.trendWeaknessScore ?? null,
-            rangeConfidence: transitionMeta.rangeConfidence ?? authoritativeInput.snapshot?.rangeConfidence ?? null,
-            boxCohesion01: transitionMeta.boxCohesion01 ?? authoritativeInput.snapshot?.boxCohesion01 ?? null,
-            breakoutFailureRate: transitionMeta.breakoutFailureRate ?? authoritativeInput.snapshot?.breakoutFailureRate ?? null,
-            boxPos: transitionMeta.boxPos ?? authoritativeInput.snapshot?.boxPos ?? null,
-            boxBreakSide: transitionMeta.boxBreakSide ?? authoritativeInput.snapshot?.boxBreakSide ?? null,
-            qualityScore: transitionMeta.qualityScore ?? authoritativeInput.snapshot?.qualityScore ?? null,
-            reviewingTicks: transitionMeta.reviewingTicks ?? authoritativeInput.snapshot?.reviewing_ticks ?? null,
-            directionalShockState: transitionMeta.directionalShockState ?? authoritativeInput.state.directionalShockState ?? null,
-            longAllow: transitionMeta.longAllow ?? authoritativeInput.state.longAllow ?? null,
-            shortAllow: transitionMeta.shortAllow ?? authoritativeInput.state.shortAllow ?? null
-        }));
+        const transitionAction = String(transitionMeta.transitionAction ?? "REJECT");
+        const transitionProofKey = [
+            transitionMeta.transitionSetupType ?? "NONE",
+            transitionAction,
+            execution.signal,
+            execution.reason,
+            transitionMeta.transitionRejectReason ?? "none"
+        ].join("|");
+        if (
+            shouldEmitV2Proof(
+                "V2_TRANSITION_EXECUTOR_PROOF",
+                String(input.symbol),
+                transitionProofKey,
+                transitionAction === "CONFIRM" || execution.signal === "WAIT_RECHECK"
+            )
+        ) {
+            console.info(JSON.stringify({
+                event: "V2_TRANSITION_EXECUTOR_PROOF",
+                symbol: String(input.symbol),
+                market_subtype: judgment.subtype,
+                transitionPhase: transitionMeta.transitionPhase ?? judgment.transitionPhase ?? "NONE",
+                transitionSetupType: transitionMeta.transitionSetupType ?? "NONE",
+                transitionAction,
+                signal: execution.signal,
+                side: execution.side,
+                reason: execution.reason,
+                baseSizeIntent: execution.baseSizeIntent,
+                isAddOnEligible: execution.isAddOnEligible,
+                transitionWatchOnly: transitionMeta.transitionWatchOnly ?? null,
+                transitionConfirmRequired: transitionMeta.transitionConfirmRequired ?? null,
+                transitionRejectReason: transitionMeta.transitionRejectReason ?? null,
+                transition_confirm_basis: transitionMeta.transitionConfirmBasis ?? "insufficient",
+                transition_preflight_safety_passed: transitionMeta.transitionPreflightSafetyPassed ?? false,
+                transition_preflight_block_reason: transitionMeta.transitionPreflightBlockReason ?? null,
+                emaGap: transitionMeta.emaGap ?? authoritativeInput.snapshot?.emaGap ?? null,
+                trendWeaknessScore: transitionMeta.trendWeaknessScore ?? authoritativeInput.snapshot?.trendWeaknessScore ?? null,
+                rangeConfidence: transitionMeta.rangeConfidence ?? authoritativeInput.snapshot?.rangeConfidence ?? null,
+                boxCohesion01: transitionMeta.boxCohesion01 ?? authoritativeInput.snapshot?.boxCohesion01 ?? null,
+                breakoutFailureRate: transitionMeta.breakoutFailureRate ?? authoritativeInput.snapshot?.breakoutFailureRate ?? null,
+                boxPos: transitionMeta.boxPos ?? authoritativeInput.snapshot?.boxPos ?? null,
+                boxBreakSide: transitionMeta.boxBreakSide ?? authoritativeInput.snapshot?.boxBreakSide ?? null,
+                qualityScore: transitionMeta.qualityScore ?? authoritativeInput.snapshot?.qualityScore ?? null,
+                reviewingTicks: transitionMeta.reviewingTicks ?? authoritativeInput.snapshot?.reviewing_ticks ?? null,
+                directionalShockState: transitionMeta.directionalShockState ?? authoritativeInput.state.directionalShockState ?? null,
+                longAllow: transitionMeta.longAllow ?? authoritativeInput.state.longAllow ?? null,
+                shortAllow: transitionMeta.shortAllow ?? authoritativeInput.state.shortAllow ?? null
+            }));
+        }
     }
 
     // Tier 5: Risk Sizing (executor/risk-sizing share same authoritative state)
