@@ -196,6 +196,12 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
       : okxDemoEnvRequested && okxExchangeAuthOptIn
         ? "demo"
         : "disabled";
+  const okxSimulatedTradingHeaderEnabled = okxAuthMode === "demo";
+  const okxLiveMaxOrderNotionalUsdt = (() => {
+    const n = parseNumber(env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT, 5);
+    if (!Number.isFinite(n) || n <= 0) return 5;
+    return Math.min(10_000, n);
+  })();
   const okxAuthReady =
     okxExchangeAuthOptIn &&
     (
@@ -268,6 +274,8 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     okxDemoEnabled,
     okxAuthMode,
     okxAuthReady,
+    okxSimulatedTradingHeaderEnabled,
+    okxLiveMaxOrderNotionalUsdt,
     okxBaseUrl,
     okxApiKey,
     okxApiSecret,

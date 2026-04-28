@@ -33,6 +33,16 @@ export type V2StateAuthority = Readonly<{
     freshTickRequiredCycles: number;
     paperExecutionReady: boolean;
     signedExecutionReady: boolean;
+    okxAuthMode: "disabled" | "demo" | "live";
+    okxAuthReady: boolean;
+    okxExchangeAuthOptIn: boolean;
+    okxLiveEnabled: boolean;
+    okxDemoEnabled: boolean;
+    okxApiKeyPresent: boolean;
+    okxApiSecretPresent: boolean;
+    okxPassphrasePresent: boolean;
+    okxSimulatedTradingHeaderEnabled: boolean;
+    liveMaxOrderNotionalUsdt: number;
     directionalShockState: "UP" | "DOWN" | "NONE";
     crashState: string;
     pumpState: string;

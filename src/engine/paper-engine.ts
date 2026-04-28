@@ -1173,7 +1173,7 @@ export class PaperEngine {
   }
 
   private computeSignedExecutionReadiness(): boolean {
-    if (!this.config.okxDemoEnabled) return false;
+    if (!this.config.okxAuthReady) return false;
     return (
       this.okxSignedRestReady === true &&
       this.okxAccountConfigOk === true &&
@@ -1184,7 +1184,8 @@ export class PaperEngine {
   }
 
   private signedSubmitMode(): "enabled" | "skipped_not_ready" | "paper_only" {
-    if (!this.config.okxDemoEnabled) return "paper_only";
+    if (!this.config.okxExchangeAuthOptIn) return "paper_only";
+    if (!this.config.okxAuthReady) return "skipped_not_ready";
     return this.signedExecutionReady ? "enabled" : "skipped_not_ready";
   }
 
@@ -1201,6 +1202,8 @@ export class PaperEngine {
     okx_api_key_present: boolean;
     okx_api_secret_present: boolean;
     okx_passphrase_present: boolean;
+    okx_simulated_trading_header_enabled: boolean;
+    live_max_order_notional_usdt: number;
   } {
     const mode = this.config.okxAuthMode;
     const apiKey = mode === "live" ? this.config.okxApiKey : mode === "demo" ? this.config.okxDemoApiKey : "";
@@ -1214,7 +1217,9 @@ export class PaperEngine {
       okx_demo_enabled: this.config.okxDemoEnvRequested,
       okx_api_key_present: apiKey.length > 0,
       okx_api_secret_present: apiSecret.length > 0,
-      okx_passphrase_present: passphrase.length > 0
+      okx_passphrase_present: passphrase.length > 0,
+      okx_simulated_trading_header_enabled: this.config.okxSimulatedTradingHeaderEnabled,
+      live_max_order_notional_usdt: this.config.okxLiveMaxOrderNotionalUsdt
     };
   }
 
@@ -1356,7 +1361,13 @@ export class PaperEngine {
     private readonly logger: Logger
   ) {
     this.store = new JsonStore(path.resolve(config.dataDir));
-    this.okxPublic = new OkxDemoClient({ baseUrl: "https://www.okx.com", apiKey: "", apiSecret: "", passphrase: "" });
+    this.okxPublic = new OkxDemoClient({
+      baseUrl: "https://www.okx.com",
+      apiKey: "",
+      apiSecret: "",
+      passphrase: "",
+      simulatedTradingHeaderEnabled: config.okxAuthMode === "demo"
+    });
     this.positions = new PositionManager(this.store);
     this.risk = new RiskManager(config);
     if (config.okxAuthMode === "demo" || config.okxAuthMode === "live") {
@@ -1377,7 +1388,8 @@ export class PaperEngine {
           baseUrl: selectedBaseUrl,
           apiKey: selectedApiKey,
           apiSecret: selectedApiSecret,
-          passphrase: selectedPassphrase
+          passphrase: selectedPassphrase,
+          simulatedTradingHeaderEnabled: config.okxSimulatedTradingHeaderEnabled
         });
         this.logger.info("okx_auth_client_initialized", {
           okx_base_url: selectedBaseUrl,
@@ -1989,6 +2001,7 @@ export class PaperEngine {
         state: buildV2StateBridge(
           opensAfterClose,
           this.lastRisk,
+          this.config,
           this.paperExecutionReady,
           this.signedExecutionReady,
           readinessBarrierActive,
@@ -2048,11 +2061,7 @@ export class PaperEngine {
         signed_execution_ready: this.signedExecutionReady,
         signed_submit_mode: this.signedSubmitMode(),
         signed_submit_block_reason: this.signedSubmitBlockReason(this.signedSubmitMode()),
-        okx_auth_mode: this.config.okxAuthMode,
-        okx_auth_ready: this.config.okxAuthReady,
-        okx_exchange_auth_opt_in: this.config.okxExchangeAuthOptIn,
-        okx_live_enabled: this.config.okxLiveEnabled,
-        okx_demo_enabled: this.config.okxDemoEnvRequested,
+        ...this.okxAuthProofContext(),
         serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
         closeOnlyMode: this.serverTradeControlState.close_only_mode,
         killSwitch: this.serverTradeControlState.kill_switch_active,
@@ -3154,7 +3163,7 @@ export class PaperEngine {
     orderState: string | null;
   }> {
     if (!this.okxDemo) {
-      return { ok: false, ordId: null, fillPx: null, errorCode: "no_client", errorMessage: "OKX Demo client not initialized", ackCode: "rejected", orderState: null };
+      return { ok: false, ordId: null, fillPx: null, errorCode: "no_client", errorMessage: "OKX signed client not initialized", ackCode: "rejected", orderState: null };
     }
     const instId = toOkxSwapInstId(input.symbol);
     const logCtx = {
@@ -3174,6 +3183,9 @@ export class PaperEngine {
       applied_leverage: input.appliedLeverage ?? null,
       paper_execution_ready: input.paperExecutionReady ?? this.paperExecutionReady,
       signed_execution_ready: this.signedExecutionReady,
+      live_order_notional_usdt: null as number | null,
+      live_cap_passed: null as boolean | null,
+      live_cap_block_reason: null as string | null,
       ...this.okxAuthProofContext()
     };
 
@@ -3188,6 +3200,36 @@ export class PaperEngine {
       this.logger.warn("SIGNED_EXECUTION_NOT_READY", { ...logCtx, reason });
       this.logger.warn(tag, { ...logCtx, reason });
       return { ok: false, ordId: null, fillPx: null, errorCode: "signed_not_ready", errorMessage: "OKX signed REST smoke test not passed", ackCode: "rejected", orderState: null };
+    }
+
+    if (this.config.okxAuthMode === "live") {
+      const ticker = await this.okxPublic.tryGetTicker(input.symbol);
+      const refPrice = ticker.ok ? ticker.value.last : null;
+      const liveOrderNotionalUsdt = refPrice != null && Number.isFinite(refPrice) ? Math.max(0, input.qty * refPrice) : null;
+      const liveCapPassed =
+        liveOrderNotionalUsdt != null &&
+        Number.isFinite(liveOrderNotionalUsdt) &&
+        liveOrderNotionalUsdt <= this.config.okxLiveMaxOrderNotionalUsdt;
+      const liveCapBlockReason = liveCapPassed ? null : "LIVE_MAX_ORDER_NOTIONAL_CAP";
+      const liveCapCtx = {
+        ...logCtx,
+        live_order_notional_usdt: liveOrderNotionalUsdt,
+        live_cap_passed: liveCapPassed,
+        live_cap_block_reason: liveCapBlockReason
+      };
+      if (!liveCapPassed) {
+        this.logger.warn("LIVE_MAX_ORDER_NOTIONAL_CAP", liveCapCtx);
+        return {
+          ok: false,
+          ordId: null,
+          fillPx: null,
+          errorCode: "live_max_order_notional_cap",
+          errorMessage: "Live order notional exceeds configured cap",
+          ackCode: "rejected",
+          orderState: null
+        };
+      }
+      this.logger.info("LIVE_ORDER_NOTIONAL_CAP_PROOF", liveCapCtx);
     }
     const orderExecutionKey = `order:${input.traceId}:${input.reason}:${input.side}:${input.posSide}:${input.qty}`;
     const orderKeyOk = await this.consumeExecutionKey(orderExecutionKey);
@@ -3273,6 +3315,7 @@ export class PaperEngine {
       signed_execution_ready: this.signedExecutionReady,
       signed_submit_mode: this.signedSubmitMode(),
       signed_submit_block_reason: this.signedSubmitBlockReason(this.signedSubmitMode()),
+      ...this.okxAuthProofContext(),
       serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
       closeOnlyMode: this.serverTradeControlState.close_only_mode,
       killSwitch: this.serverTradeControlState.kill_switch_active,
@@ -7918,7 +7961,8 @@ export class PaperEngine {
             paper_execution_ready: this.paperExecutionReady,
             signed_execution_ready: this.signedExecutionReady,
             signed_submit_mode: signedModeForEntry,
-            reason: this.signedSubmitBlockReason(signedModeForEntry)
+            reason: this.signedSubmitBlockReason(signedModeForEntry),
+            ...this.okxAuthProofContext()
           });
         }
 
@@ -9437,6 +9481,7 @@ function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
 function buildV2StateBridge(
   opensAfterClose: ReadonlyArray<PaperOpenPositionRecord>,
   lastRisk: RiskControlDecision | null,
+  config: EngineConfig,
   paperExecutionReady: boolean,
   signedExecutionReady: boolean,
   freshTickBarrierActive: boolean,
@@ -9473,6 +9518,16 @@ function buildV2StateBridge(
     executionReadiness: paperExecutionReady,
     paperExecutionReady,
     signedExecutionReady,
+    okxAuthMode: config.okxAuthMode,
+    okxAuthReady: config.okxAuthReady,
+    okxExchangeAuthOptIn: config.okxExchangeAuthOptIn,
+    okxLiveEnabled: config.okxLiveEnabled,
+    okxDemoEnabled: config.okxDemoEnvRequested,
+    okxApiKeyPresent: config.okxAuthMode === "live" ? config.okxApiKey.length > 0 : config.okxDemoApiKey.length > 0,
+    okxApiSecretPresent: config.okxAuthMode === "live" ? config.okxApiSecret.length > 0 : config.okxDemoApiSecret.length > 0,
+    okxPassphrasePresent: config.okxAuthMode === "live" ? config.okxPassphrase.length > 0 : config.okxDemoPassphrase.length > 0,
+    okxSimulatedTradingHeaderEnabled: config.okxSimulatedTradingHeaderEnabled,
+    liveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt,
     freshTickBarrierActive,
     freshTickExecutionBlocked,
     freshTickCompletedCycles,

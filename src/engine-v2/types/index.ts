@@ -146,6 +146,16 @@ export interface EngineV2Input {
         executionReadiness: boolean;
         paperExecutionReady?: boolean;
         signedExecutionReady?: boolean;
+        okxAuthMode?: "disabled" | "demo" | "live";
+        okxAuthReady?: boolean;
+        okxExchangeAuthOptIn?: boolean;
+        okxLiveEnabled?: boolean;
+        okxDemoEnabled?: boolean;
+        okxApiKeyPresent?: boolean;
+        okxApiSecretPresent?: boolean;
+        okxPassphrasePresent?: boolean;
+        okxSimulatedTradingHeaderEnabled?: boolean;
+        liveMaxOrderNotionalUsdt?: number;
         freshTickBarrierActive: boolean;
         /** Same tick / post-barrier: execution must not proceed until cleared at end of tick. */
         freshTickExecutionBlocked?: boolean;
@@ -291,6 +301,16 @@ export interface V2BridgeState {
     executionReadiness: boolean;
     paperExecutionReady?: boolean;
     signedExecutionReady?: boolean;
+    okxAuthMode?: "disabled" | "demo" | "live";
+    okxAuthReady?: boolean;
+    okxExchangeAuthOptIn?: boolean;
+    okxLiveEnabled?: boolean;
+    okxDemoEnabled?: boolean;
+    okxApiKeyPresent?: boolean;
+    okxApiSecretPresent?: boolean;
+    okxPassphrasePresent?: boolean;
+    okxSimulatedTradingHeaderEnabled?: boolean;
+    liveMaxOrderNotionalUsdt?: number;
     freshTickBarrierActive: boolean;
     /** Paper engine: block V2 ENTER until fresh-tick gate clears (includes same-tick post-cycle race). */
     freshTickExecutionBlocked?: boolean;

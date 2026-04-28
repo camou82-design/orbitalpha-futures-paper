@@ -9,6 +9,7 @@ export type OkxDemoClientConfig = Readonly<{
   apiKey: string;
   apiSecret: string;
   passphrase: string;
+  simulatedTradingHeaderEnabled?: boolean;
 }>;
 
 type OkxApiEnvelope<T> = Readonly<{
@@ -96,9 +97,11 @@ export class OkxDemoClient {
     const requestUrl = `${this.cfg.baseUrl}${pathWithQuery}`;
 
     const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      "x-simulated-trading": "1"
+      "Content-Type": "application/json"
     };
+    if (this.cfg.simulatedTradingHeaderEnabled === true) {
+      headers["x-simulated-trading"] = "1";
+    }
     if (!this.cfg.apiKey) {
       return {
         ok: false,
@@ -235,7 +238,7 @@ export class OkxDemoClient {
         method,
         headers: {
           "Content-Type": "application/json",
-          "x-simulated-trading": "1"
+          ...(this.cfg.simulatedTradingHeaderEnabled === true ? { "x-simulated-trading": "1" } : {})
         }
       });
     } catch (e) {

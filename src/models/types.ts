@@ -185,6 +185,10 @@ export type EngineConfig = Readonly<{
   okxAuthMode: "disabled" | "demo" | "live";
   /** Effective auth readiness for signed OKX REST. */
   okxAuthReady: boolean;
+  /** Include `x-simulated-trading: 1` for OKX requests (demo only). */
+  okxSimulatedTradingHeaderEnabled: boolean;
+  /** Live signed submit guard: max order notional in USDT. */
+  okxLiveMaxOrderNotionalUsdt: number;
   /** OKX demo REST base URL (default https://www.okx.com). */
   okxDemoBaseUrl: string;
   /** OKX live REST base URL (default https://www.okx.com). */
