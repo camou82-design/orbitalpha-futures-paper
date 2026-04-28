@@ -135,6 +135,9 @@ export interface EngineV2Input {
         reconcileSafeModeActive?: boolean;
         riskMode?: string;
         dailyLossGuardTriggered?: boolean;
+        crashState?: string;
+        pumpState?: string;
+        pump_state?: string;
         accountEquityKrw?: number;
         maxUsableMarginKrw?: number;
         exposureNotionalCapKrw?: number;
@@ -292,6 +295,9 @@ export interface V2BridgeState {
     reconcileSafeModeActive?: boolean;
     riskMode?: string;
     dailyLossGuardTriggered?: boolean;
+    crashState?: string;
+    pumpState?: string;
+    pump_state?: string;
     accountEquityKrw?: number;
     maxUsableMarginKrw?: number;
     exposureNotionalCapKrw?: number;

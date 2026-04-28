@@ -138,11 +138,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let promotionReason: string | null = null;
     let promotionBlockReason: string | null = null;
     let promotionMinConditionPassed = false;
+    let shockReactionPromotionType: string | null = null;
+    let shockReactionBlockReason: string | null = null;
     let contaminationSoftened = false;
     let contaminationHardReject = false;
     let contaminationSoftenReason: string | null = null;
 
     const shock = input.state.directionalShockState ?? "NONE";
+    const crashState = String(input.state.crashState ?? "").toUpperCase();
+    const pumpStateResolved = String(input.state.pumpState ?? input.state.pump_state ?? "").toUpperCase();
     const marketMode = String(judgment.regime ?? "UNKNOWN");
     const activeEngineRouting = String(routing.executor ?? "UNKNOWN");
     const qualityScore = Number(input.snapshot?.qualityScore ?? 0);
@@ -280,8 +284,100 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (zone === "lower" && rangeSideCandidate === "long") ||
         (zone === "upper" && rangeSideCandidate === "short");
     const rangePromotableContext = rangeSideAligned || rangeEdgeExtreme;
+    const rangeContextActive = activeEngineRouting === "RANGE" || marketMode === "RANGE";
+    const shockDownActive = shock === "DOWN";
+    const shockUpActive = shock === "UP";
+    const shockDownRangeMidWatch =
+        shockDownActive &&
+        rangeContextActive &&
+        zone === "mid" &&
+        (crashState === "CRASH_LOCK" || crashState === "CRASH_EXIT");
+    const shockUpRangeMidWatch =
+        shockUpActive &&
+        rangeContextActive &&
+        zone === "mid" &&
+        (pumpStateResolved === "PUMP_ALERT" || pumpStateResolved === "PUMP_LOCK");
+    const shockReactionWatchActive = shockDownRangeMidWatch || shockUpRangeMidWatch;
+    const shockReactionDirection: "DOWN" | "UP" | "NONE" =
+        shockDownRangeMidWatch ? "DOWN" : shockUpRangeMidWatch ? "UP" : "NONE";
+    const shockReactionAllowedPrimarySide: EngineV2Side =
+        shockReactionDirection === "DOWN" ? "short" : shockReactionDirection === "UP" ? "long" : "none";
+    const shockRecoveryHint =
+        relaxedRangeEntry ||
+        reversalConfirmed ||
+        (typeof execMeta.crash_lock_bypass_reason === "string" && execMeta.crash_lock_bypass_reason.length > 0) ||
+        (typeof execMeta.override_reason === "string" && execMeta.override_reason.length > 0);
+
+    console.info(JSON.stringify({
+        event: "SHOCK_REACTION_SYMMETRY_PROOF",
+        symbol: String(input.symbol),
+        directional_shock_state: shock,
+        crash_state: crashState || null,
+        pump_state: pumpStateResolved || null,
+        market_mode: marketMode,
+        active_engine_routing: activeEngineRouting,
+        boxPos,
+        zone,
+        down_watch_active: shockDownRangeMidWatch,
+        up_watch_active: shockUpRangeMidWatch,
+        shock_reaction_watch_active: shockReactionWatchActive,
+        shock_reaction_direction: shockReactionDirection
+    }));
 
     if (hardControlClear) {
+        if (shockReactionWatchActive) {
+            shockReactionBlockReason = "SHOCK_REACTION_WATCH_MID_CHASE_BLOCKED";
+            if (promotionBlockReason == null) promotionBlockReason = shockReactionBlockReason;
+            if (v2DecisionAfterPromotion === "ENTER") {
+                v2DecisionAfterPromotion = "HOLD";
+                v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+            }
+            console.info(JSON.stringify({
+                event: "SHOCK_REACTION_WATCH_PROOF",
+                symbol: String(input.symbol),
+                directional_shock_state: shock,
+                crash_state: crashState || null,
+                pump_state: pumpStateResolved || null,
+                market_mode: marketMode,
+                active_engine_routing: activeEngineRouting,
+                boxPos,
+                zone,
+                side_before: v2SideBeforePromotion,
+                side_after: v2SideAfterPromotion,
+                decision_before: v2DecisionBeforePromotion,
+                decision_after: v2DecisionAfterPromotion,
+                promotion_applied: false,
+                promotion_type: null,
+                promotion_block_reason: promotionBlockReason,
+                reversal_confirmed: reversalConfirmed,
+                relaxedRangeEntry,
+                range_edge_extreme: rangeEdgeExtreme,
+                side_zone_valid: sideZoneValid,
+                hard_block_present: hardBlockPresent,
+                hard_block_reason: hardBlockReason,
+                shock_reaction_watch_active: shockReactionWatchActive,
+                shock_reaction_reason: "range_mid_requires_reaction_watch",
+                shock_reaction_allowed_primary_side: shockReactionAllowedPrimarySide,
+                shock_reaction_blocked_chase_reason: "mid_chase_forbidden",
+                shock_reaction_next_valid_setups:
+                    shockReactionDirection === "DOWN"
+                        ? "upper_failure_short|lower_breakdown_short|lower_reversal_confirmed_long"
+                        : "lower_support_long|upper_breakout_long|upper_reversal_confirmed_short",
+                shock_reaction_promotion_type: null
+            }));
+            console.info(JSON.stringify({
+                event: "SHOCK_REACTION_BLOCKED_MID_CHASE_PROOF",
+                symbol: String(input.symbol),
+                directional_shock_state: shock,
+                crash_state: crashState || null,
+                pump_state: pumpStateResolved || null,
+                market_mode: marketMode,
+                active_engine_routing: activeEngineRouting,
+                boxPos,
+                zone,
+                promotion_block_reason: promotionBlockReason
+            }));
+        }
         if (v2RejectReasonAfterPromotion != null && unpromotableRejectReasons.has(v2RejectReasonAfterPromotion)) {
             promotionBlockReason = v2RejectReasonAfterPromotion;
         }
@@ -331,6 +427,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
         const trendPromotionCandidate =
             promotionBlockReason == null &&
+            !shockReactionWatchActive &&
             (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD" || v2SideAfterPromotion === "none") &&
             (v2RejectReasonAfterPromotion === "WAIT_RECHECK" || v2RejectReasonAfterPromotion == null || contaminationSoftened) &&
             activeEngineRouting === "TREND" &&
@@ -358,6 +455,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
         const rangePromotionCandidate =
             promotionBlockReason == null &&
+            !shockReactionWatchActive &&
             (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD" || v2SideAfterPromotion === "none") &&
             activeEngineRouting === "RANGE" &&
             rangeSideCandidate !== "none" &&
@@ -400,6 +498,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const saPromotionNeeded =
             (entryQualityGrade === "S" || entryQualityGrade === "A") &&
             saCandidateSide !== "none" &&
+            !shockReactionWatchActive &&
             (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD") &&
             v2SideAfterPromotion === "none";
         if (saPromotionNeeded) {
@@ -409,6 +508,79 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotionApplied = true;
             promotionReason = promotionReason ?? "V2_TREND_QUALIFIED_FINAL_PROMOTION";
             promotionMinConditionPassed = true;
+        }
+
+        if (shock === "DOWN" && v2DecisionAfterPromotion === "ENTER") {
+            const downCounterTrendLongAllowed =
+                v2SideAfterPromotion === "long" &&
+                (zone === "lower" || rangeEdgeExtreme) &&
+                reversalConfirmed &&
+                shockRecoveryHint;
+            if (v2SideAfterPromotion !== "short" && !downCounterTrendLongAllowed) {
+                v2DecisionAfterPromotion = "HOLD";
+                v2SideAfterPromotion = "none";
+                v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                promotionApplied = false;
+                promotionReason = null;
+                promotionMinConditionPassed = false;
+                shockReactionBlockReason = "DOWN_SHOCK_COUNTERTREND_LONG_NOT_CONFIRMED";
+                promotionBlockReason = shockReactionBlockReason;
+            }
+        }
+        if (shock === "UP" && v2DecisionAfterPromotion === "ENTER") {
+            const upCounterTrendShortAllowed =
+                v2SideAfterPromotion === "short" &&
+                (zone === "upper" || rangeEdgeExtreme) &&
+                reversalConfirmed &&
+                shockRecoveryHint;
+            if (v2SideAfterPromotion !== "long" && !upCounterTrendShortAllowed) {
+                v2DecisionAfterPromotion = "HOLD";
+                v2SideAfterPromotion = "none";
+                v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                promotionApplied = false;
+                promotionReason = null;
+                promotionMinConditionPassed = false;
+                shockReactionBlockReason = "UP_SHOCK_COUNTERTREND_SHORT_NOT_CONFIRMED";
+                promotionBlockReason = shockReactionBlockReason;
+            }
+        }
+
+        if (promotionApplied) {
+            if (shock === "DOWN") {
+                if (v2SideAfterPromotion === "short" && zone === "upper") shockReactionPromotionType = "upper_failure_short";
+                else if (v2SideAfterPromotion === "short" && zone === "lower") shockReactionPromotionType = "lower_breakdown_continuation_short";
+                else if (v2SideAfterPromotion === "long" && zone === "lower" && reversalConfirmed) shockReactionPromotionType = "lower_reversal_confirmed_long";
+            } else if (shock === "UP") {
+                if (v2SideAfterPromotion === "long" && zone === "lower") shockReactionPromotionType = "lower_support_long";
+                else if (v2SideAfterPromotion === "long" && zone === "upper") shockReactionPromotionType = "upper_breakout_continuation_long";
+                else if (v2SideAfterPromotion === "short" && zone === "upper" && reversalConfirmed) shockReactionPromotionType = "upper_reversal_confirmed_short";
+            }
+            if (shockReactionPromotionType != null) {
+                console.info(JSON.stringify({
+                    event: "SHOCK_REACTION_PROMOTION_PROOF",
+                    symbol: String(input.symbol),
+                    directional_shock_state: shock,
+                    crash_state: crashState || null,
+                    pump_state: pumpStateResolved || null,
+                    market_mode: marketMode,
+                    active_engine_routing: activeEngineRouting,
+                    boxPos,
+                    zone,
+                    side_before: v2SideBeforePromotion,
+                    side_after: v2SideAfterPromotion,
+                    decision_before: v2DecisionBeforePromotion,
+                    decision_after: v2DecisionAfterPromotion,
+                    promotion_applied: promotionApplied,
+                    promotion_type: shockReactionPromotionType,
+                    promotion_block_reason: promotionBlockReason,
+                    reversal_confirmed: reversalConfirmed,
+                    relaxedRangeEntry,
+                    range_edge_extreme: rangeEdgeExtreme,
+                    side_zone_valid: sideZoneValid,
+                    hard_block_present: hardBlockPresent,
+                    hard_block_reason: hardBlockReason
+                }));
+            }
         }
     } else {
         promotionBlockReason = "HARD_CONTROL_NOT_CLEAR";
@@ -485,6 +657,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         contamination_softened: contaminationSoftened,
         contamination_hard_reject: contaminationHardReject,
         contamination_soften_reason: contaminationSoftenReason,
+        shock_reaction_watch_active: shockReactionWatchActive,
+        shock_reaction_direction: shockReactionDirection,
+        shock_reaction_promotion_type: shockReactionPromotionType,
+        shock_reaction_block_reason: shockReactionBlockReason ?? promotionBlockReason,
+        shock_reaction_symmetry_case:
+            shock === "DOWN"
+                ? "DOWN_SHOCK_RANGE_FLOW"
+                : shock === "UP"
+                    ? "UP_SHOCK_RANGE_FLOW"
+                    : "NONE",
         hard_block_present: hardBlockPresent,
         hard_block_reason: hardBlockReason
     }));
@@ -599,6 +781,9 @@ export function adaptV2Input(
         symbolExposureNotionalCapKrw?: number;
         riskMode?: string | null;
         dailyLossGuardTriggered?: boolean;
+        crashState?: string | null;
+        pumpState?: string | null;
+        pump_state?: string | null;
     },
     v1Result: LegacyResultAdapter
 ): EngineV2Input {
@@ -663,6 +848,9 @@ export function adaptV2Input(
             reconcileSafeModeActive: state.reconcileSafeModeActive,
             riskMode: state.riskMode ?? undefined,
             dailyLossGuardTriggered: state.dailyLossGuardTriggered ?? false,
+            crashState: state.crashState ?? undefined,
+            pumpState: state.pumpState ?? undefined,
+            pump_state: state.pump_state ?? undefined,
             accountEquityKrw: state.accountEquityKrw,
             maxUsableMarginKrw: state.maxUsableMarginKrw,
             exposureNotionalCapKrw: state.exposureNotionalCapKrw,
