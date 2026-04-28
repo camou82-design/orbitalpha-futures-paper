@@ -59,6 +59,8 @@ export function calculateRiskSizing(
     const sameSymbolPos = sameSymbolSide[0] ?? null;
     const currentStage = sameSymbolPos ? Math.max(1, sameSymbolPos.entryStage ?? 1) : 0;
     const isAddOn = sameSymbolPos != null;
+    const addOnPolicyAllowed = state.addOnPolicyAllowed;
+    const addOnPolicyReason = state.addOnPolicyReason;
     const currentMarginUsed = state.currentPositions.reduce((acc, p) => acc + Math.max(0, p.sizeUsd), 0);
     const currentNotional = state.currentPositions.reduce((acc, p) => acc + Math.max(0, p.sizeUsd), 0);
     const currentSymbolNotional = state.currentPositions
@@ -133,6 +135,10 @@ export function calculateRiskSizing(
     else if (state.reconcileSafeMode === true || state.reconcileSafeModeActive === true) {
         isBlocked = true;
         blockReason = "RECONCILE_SAFE_MODE";
+    }
+    else if (isAddOn && addOnPolicyAllowed === false) {
+        isBlocked = true;
+        blockReason = addOnPolicyReason ?? "ADDON_POLICY_FORBIDDEN";
     }
 
     // TRANSITION: Force Scouting Mode (Very small size)
@@ -301,6 +307,9 @@ export function calculateRiskSizing(
         close_only_mode: state.closeOnlyMode ?? null,
         kill_switch: (state.killSwitch ?? state.killSwitchActive) ?? null,
         reconcile_safe_mode: (state.reconcileSafeMode ?? state.reconcileSafeModeActive) ?? null,
+        addon_policy_allowed: addOnPolicyAllowed ?? null,
+        addon_policy_reason: addOnPolicyReason ?? null,
+        addon_policy_action: state.addOnPolicyAction ?? null,
         entry_quality_grade: entryQualityGrade,
         leverage_profile: leverageProfile,
         applied_leverage: appliedLeverage,

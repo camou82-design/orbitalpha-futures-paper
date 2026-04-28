@@ -4,6 +4,7 @@ import {
     EngineV2InternalResult,
     EngineV2FinalDecision,
     EngineV2Side,
+    ExecutorOutput,
     LegacySnapshotAdapter,
     LegacyConfigAdapter,
     LegacyPositionAdapter,
@@ -19,6 +20,7 @@ import { executeTransitionRegime } from "./executors/transition-executor";
 import { calculateRiskSizing } from "./risk-sizing/policy";
 import { generateExplanation } from "./explain/diagnostic";
 import { deriveV2StateAuthority } from "./state/derive";
+import { evaluateV2AddOnPolicy } from "./addon/policy";
 
 /**
  * orchestrator for Engine-V2 5-tier architecture.
@@ -28,7 +30,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Step 1: derive normalized state authority
     const v2State = deriveV2StateAuthority(input);
     // Step 2: project normalized state into authoritative input
-    const authoritativeInput: EngineV2Input = {
+    let authoritativeInput: EngineV2Input = {
         ...input,
         state: {
             ...input.state,
@@ -141,7 +143,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }));
 
     // Tier 4: Executors
-    let execution;
+    let execution: ExecutorOutput;
     if (routing.executor === "RANGE") execution = executeRangeRegime(authoritativeInput);
     else if (routing.executor === "TREND") execution = executeTrendRegime(authoritativeInput);
     else if (routing.executor === "TRANSITION") execution = executeTransitionRegime(authoritativeInput, judgment);
@@ -156,8 +158,85 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             metadata: {}
         };
     }
+    const addOnPolicy = evaluateV2AddOnPolicy({
+        symbol: String(input.symbol),
+        side: execution.side,
+        v2State,
+        judgment,
+        execution,
+        snapshot: {
+            qualityScore: authoritativeInput.snapshot.qualityScore,
+            reviewing_ticks: authoritativeInput.snapshot.reviewing_ticks,
+            boxPos: authoritativeInput.snapshot.boxPos,
+            emaGap: authoritativeInput.snapshot.emaGap,
+            trendWeaknessScore: authoritativeInput.snapshot.trendWeaknessScore,
+            rangeConfidence: authoritativeInput.snapshot.rangeConfidence
+        }
+    });
+    const shouldEmitAddOnProof =
+        addOnPolicy.action !== "INITIAL_ONLY" ||
+        addOnPolicy.hasSameSidePosition ||
+        execution.signal === "LONG_CANDIDATE" ||
+        execution.signal === "SHORT_CANDIDATE" ||
+        execution.signal === "WAIT_RECHECK";
+    if (shouldEmitAddOnProof) {
+        console.info(JSON.stringify({
+            event: "V2_ADDON_POLICY_PROOF",
+            symbol: String(input.symbol),
+            side: addOnPolicy.side,
+            action: addOnPolicy.action,
+            allowed: addOnPolicy.allowed,
+            reason: addOnPolicy.reason,
+            addOnEligible: addOnPolicy.addOnEligible,
+            isInitial: addOnPolicy.isInitial,
+            isAddOn: addOnPolicy.isAddOn,
+            currentStage: addOnPolicy.currentStage,
+            hasSameSidePosition: addOnPolicy.hasSameSidePosition,
+            hasOppositeSidePosition: addOnPolicy.hasOppositeSidePosition,
+            marketRegime: addOnPolicy.marketRegime,
+            marketSubtype: addOnPolicy.marketSubtype,
+            shockPhase: addOnPolicy.shockPhase,
+            rangePhase: addOnPolicy.rangePhase,
+            trendPhase: addOnPolicy.trendPhase,
+            transitionPhase: addOnPolicy.transitionPhase,
+            qualityScore: addOnPolicy.qualityScore,
+            reviewingTicks: addOnPolicy.reviewingTicks,
+            pnlPct: addOnPolicy.pnlPct,
+            boxPos: addOnPolicy.boxPos,
+            emaGap: addOnPolicy.emaGap,
+            trendWeaknessScore: addOnPolicy.trendWeaknessScore,
+            rangeConfidence: addOnPolicy.rangeConfidence,
+            evidence: addOnPolicy.evidence
+        }));
+    }
+    if (addOnPolicy.isAddOn && addOnPolicy.allowed === false && (execution.signal === "LONG_CANDIDATE" || execution.signal === "SHORT_CANDIDATE")) {
+        execution = {
+            ...execution,
+            signal: "WAIT_RECHECK" as const,
+            side: "none" as const,
+            reason: `ADDON_POLICY_${addOnPolicy.reason}`,
+            baseSizeIntent: 0,
+            recheckSuggested: true,
+            isAddOnEligible: false,
+            metadata: {
+                ...execution.metadata,
+                addonPolicyAction: addOnPolicy.action,
+                addonPolicyReason: addOnPolicy.reason,
+                addonPolicyAllowed: false
+            }
+        };
+    }
+    authoritativeInput = {
+        ...authoritativeInput,
+        state: {
+            ...authoritativeInput.state,
+            addOnPolicyAllowed: addOnPolicy.allowed,
+            addOnPolicyReason: addOnPolicy.reason,
+            addOnPolicyAction: addOnPolicy.action
+        }
+    };
     if (routing.executor === "TRANSITION") {
-        const transitionMeta = execution.metadata ?? {};
+        const transitionMeta = (execution.metadata ?? {}) as Record<string, unknown>;
         console.info(JSON.stringify({
             event: "V2_TRANSITION_EXECUTOR_PROOF",
             symbol: String(input.symbol),
@@ -1027,6 +1106,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         transition_watch_only: readNullableBoolean(execMeta.transitionWatchOnly),
         transition_confirm_required: readNullableBoolean(execMeta.transitionConfirmRequired),
         transition_reject_reason: typeof execMeta.transitionRejectReason === "string" ? execMeta.transitionRejectReason : null,
+        addon_action: addOnPolicy.action,
+        addon_allowed: addOnPolicy.allowed,
+        addon_reason: addOnPolicy.reason,
+        addon_is_initial: addOnPolicy.isInitial,
+        addon_is_addon: addOnPolicy.isAddOn,
+        addon_current_stage: addOnPolicy.currentStage,
+        addon_has_same_side_position: addOnPolicy.hasSameSidePosition,
+        addon_has_opposite_side_position: addOnPolicy.hasOppositeSidePosition,
         hard_block_present: hardBlockPresent,
         hard_block_reason: hardBlockReason
     }));

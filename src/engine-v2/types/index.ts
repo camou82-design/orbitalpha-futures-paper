@@ -170,6 +170,9 @@ export interface EngineV2Input {
         maxUsableMarginKrw?: number;
         exposureNotionalCapKrw?: number;
         symbolExposureNotionalCapKrw?: number;
+        addOnPolicyAllowed?: boolean;
+        addOnPolicyReason?: string;
+        addOnPolicyAction?: string;
     };
     now: number;
     v1Result: {
@@ -330,6 +333,9 @@ export interface V2BridgeState {
     maxUsableMarginKrw?: number;
     exposureNotionalCapKrw?: number;
     symbolExposureNotionalCapKrw?: number;
+    addOnPolicyAllowed?: boolean;
+    addOnPolicyReason?: string;
+    addOnPolicyAction?: string;
 }
 
 export interface V2BridgeInput {
