@@ -5,7 +5,7 @@ import { composePublicFuturesPaperBundleForWrite } from "../lib/futuresPaperBund
 
 import type { PaperClosedPositionRecord, PaperOpenPositionRecord } from "../models/types";
 import { migrateLegacyExecutorAtEntry } from "../strategy/executors/executor-normalize";
-import { buildPaperDashboard, parseHealthHistoryJsonl } from "./paper-dashboard";
+import { buildPaperDashboard, parseHealthHistoryJsonl, type PaperDashboardTradeControl } from "./paper-dashboard";
 import { buildPaperHealthReport, paperHealthHistoryJsonlLine, type PaperHealthReport } from "./paper-health";
 import type { AiBlockEvaluationCriteria } from "./ai-block-evaluator";
 import {
@@ -81,6 +81,48 @@ export type PaperCandidateRunPayload = Readonly<{
 
 export class JsonStore {
   constructor(private readonly baseDir: string) { }
+
+  private async readTradeControlForDashboard(): Promise<PaperDashboardTradeControl> {
+    const defaults: PaperDashboardTradeControl = {
+      serverTradeEnabled: false,
+      closeOnlyMode: false,
+      killSwitch: false,
+      updatedAt: 0,
+      reason: "control_file_missing_default_off",
+      source: "server_state"
+    };
+    const rel = "control/trade-control.json";
+    const fullPath = path.resolve(this.baseDir, rel);
+    try {
+      const raw = await fs.readFile(fullPath, "utf8");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const serverTradeEnabled =
+        (parsed.serverTradeEnabled === true) || (parsed.server_trade_enabled === true);
+      const closeOnlyMode =
+        (parsed.closeOnlyMode === true) || (parsed.close_only_mode === true);
+      const killSwitch =
+        (parsed.killSwitch === true) || (parsed.kill_switch_active === true) || (parsed.kill_switch === true);
+      const updatedAt =
+        typeof parsed.updatedAt === "number" && Number.isFinite(parsed.updatedAt)
+          ? parsed.updatedAt
+          : typeof parsed.updated_at === "number" && Number.isFinite(parsed.updated_at)
+            ? parsed.updated_at
+            : 0;
+      const reason =
+        typeof parsed.reason === "string" ? parsed.reason :
+          parsed.reason === null ? null :
+            defaults.reason;
+      const source =
+        typeof parsed.source === "string"
+          ? parsed.source
+          : typeof parsed.authority_source === "string"
+            ? parsed.authority_source
+            : defaults.source;
+      return { serverTradeEnabled, closeOnlyMode, killSwitch, updatedAt, reason, source };
+    } catch {
+      return defaults;
+    }
+  }
 
   async writeJson(relativePath: string, data: unknown): Promise<string> {
     const fullPath = path.resolve(this.baseDir, relativePath);
@@ -325,7 +367,8 @@ export class JsonStore {
     const healthPath = await this.writeJson("reports/summary-health.json", health);
     await this.appendJsonlLine("reports/health-history.jsonl", paperHealthHistoryJsonlLine(health));
     const healthHistoryLines = await this.readHealthHistoryJsonlFile();
-    const dashboard = buildPaperDashboard({ summary, window, health, healthHistoryLines });
+    const tradeControl = await this.readTradeControlForDashboard();
+    const dashboard = buildPaperDashboard({ summary, window, health, healthHistoryLines, tradeControl });
     await this.writeJson("reports/dashboard.json", dashboard);
     const projectRoot = path.resolve(this.baseDir, "..");
     const publicBundleRel = "reports/public-futures-paper-bundle.json";

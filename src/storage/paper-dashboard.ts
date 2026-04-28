@@ -52,11 +52,21 @@ export type PaperDashboardRecentTrend = Readonly<{
   previousGeneratedAt: number | null;
 }>;
 
+export type PaperDashboardTradeControl = Readonly<{
+  serverTradeEnabled: boolean;
+  closeOnlyMode: boolean;
+  killSwitch: boolean;
+  updatedAt: number;
+  reason: string | null;
+  source: string;
+}>;
+
 export type PaperDashboardReport = Readonly<{
   generatedAt: number;
   status: PaperHealthStatus;
   reasons: string[];
   headline: string;
+  tradeControl: PaperDashboardTradeControl;
   snapshot: PaperDashboardSnapshot;
   /** gross·fee·net·profit factor 등 (last7d/30d/전체). */
   feeAnalytics: Readonly<{
@@ -178,8 +188,9 @@ export function buildPaperDashboard(input: Readonly<{
   window: PaperWindowSummaryReport;
   health: PaperHealthReport;
   healthHistoryLines: readonly PaperHealthHistoryJsonlLine[];
+  tradeControl: PaperDashboardTradeControl;
 }>): PaperDashboardReport {
-  const { summary, window, health, healthHistoryLines } = input;
+  const { summary, window, health, healthHistoryLines, tradeControl } = input;
   const w = window.windows;
 
   const snapshot: PaperDashboardSnapshot = {
@@ -206,6 +217,7 @@ export function buildPaperDashboard(input: Readonly<{
     status: health.status,
     reasons: [...health.reasons],
     headline: buildHeadline(health, window),
+    tradeControl,
     snapshot,
     feeAnalytics,
     recentTrend: buildRecentTrend(healthHistoryLines),
