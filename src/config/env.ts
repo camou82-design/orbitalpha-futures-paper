@@ -179,12 +179,35 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     if (Number.isFinite(x) && x > 0) paperFixedTotalCostUsd = Math.min(1_000_000, Math.max(0.01, x));
   }
   const okxDemoEnvRequested = parseBool(env.OKX_DEMO_ENABLED, false);
+  const okxLiveEnabled = parseBool(env.OKX_LIVE_ENABLED, false);
   const okxExchangeAuthOptIn = parseBool(env.ORBITALPHA_OKX_EXCHANGE_ENABLED, false);
-  const okxDemoEnabled = okxDemoEnvRequested && okxExchangeAuthOptIn;
+  const okxDemoEnabled = okxDemoEnvRequested && okxExchangeAuthOptIn && !okxLiveEnabled;
+  const okxBaseUrl = (env.OKX_BASE_URL ?? "https://www.okx.com").trim();
+  const okxApiKey = (env.OKX_API_KEY ?? "").trim();
+  const okxApiSecret = (env.OKX_API_SECRET ?? "").trim();
+  const okxPassphrase = (env.OKX_PASSPHRASE ?? "").trim();
   const okxDemoBaseUrl = (env.OKX_DEMO_BASE_URL ?? "https://www.okx.com").trim();
   const okxDemoApiKey = (env.OKX_DEMO_API_KEY ?? "").trim();
   const okxDemoApiSecret = (env.OKX_DEMO_API_SECRET ?? "").trim();
   const okxDemoPassphrase = (env.OKX_DEMO_PASSPHRASE ?? "").trim();
+  const okxAuthMode: EngineConfig["okxAuthMode"] =
+    okxLiveEnabled && okxExchangeAuthOptIn
+      ? "live"
+      : okxDemoEnvRequested && okxExchangeAuthOptIn
+        ? "demo"
+        : "disabled";
+  const okxAuthReady =
+    okxExchangeAuthOptIn &&
+    (
+      (okxAuthMode === "live" &&
+        okxApiKey.length > 0 &&
+        okxApiSecret.length > 0 &&
+        okxPassphrase.length > 0) ||
+      (okxAuthMode === "demo" &&
+        okxDemoApiKey.length > 0 &&
+        okxDemoApiSecret.length > 0 &&
+        okxDemoPassphrase.length > 0)
+    );
 
   return {
     symbols: parseSymbols(env.SYMBOLS),
@@ -240,8 +263,15 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     paperFeeDragBlockShortfallPctMin,
     paperFixedTotalCostUsd,
     okxDemoEnvRequested,
+    okxLiveEnabled,
     okxExchangeAuthOptIn,
     okxDemoEnabled,
+    okxAuthMode,
+    okxAuthReady,
+    okxBaseUrl,
+    okxApiKey,
+    okxApiSecret,
+    okxPassphrase,
     okxDemoBaseUrl,
     okxDemoApiKey,
     okxDemoApiSecret,

@@ -1173,7 +1173,7 @@ export class PaperEngine {
   }
 
   private computeSignedExecutionReadiness(): boolean {
-    if (!this.config.okxDemoEnabled) return false;
+    if (!this.config.okxAuthReady) return false;
     return (
       this.okxSignedRestReady === true &&
       this.okxAccountConfigOk === true &&
@@ -1184,12 +1184,39 @@ export class PaperEngine {
   }
 
   private signedSubmitMode(): "enabled" | "skipped_not_ready" | "paper_only" {
-    if (!this.config.okxDemoEnabled) return "paper_only";
+    if (!this.config.okxExchangeAuthOptIn) return "paper_only";
+    if (!this.config.okxAuthReady) return "skipped_not_ready";
     return this.signedExecutionReady ? "enabled" : "skipped_not_ready";
   }
 
   private signedSubmitBlockReason(mode: "enabled" | "skipped_not_ready" | "paper_only"): string | null {
     return mode === "enabled" ? null : "SIGNED_EXECUTION_NOT_READY";
+  }
+
+  private okxAuthProofContext(): {
+    okx_auth_mode: "disabled" | "demo" | "live";
+    okx_auth_ready: boolean;
+    okx_exchange_auth_opt_in: boolean;
+    okx_live_enabled: boolean;
+    okx_demo_enabled: boolean;
+    okx_api_key_present: boolean;
+    okx_api_secret_present: boolean;
+    okx_passphrase_present: boolean;
+  } {
+    const mode = this.config.okxAuthMode;
+    const apiKey = mode === "live" ? this.config.okxApiKey : mode === "demo" ? this.config.okxDemoApiKey : "";
+    const apiSecret = mode === "live" ? this.config.okxApiSecret : mode === "demo" ? this.config.okxDemoApiSecret : "";
+    const passphrase = mode === "live" ? this.config.okxPassphrase : mode === "demo" ? this.config.okxDemoPassphrase : "";
+    return {
+      okx_auth_mode: mode,
+      okx_auth_ready: this.config.okxAuthReady,
+      okx_exchange_auth_opt_in: this.config.okxExchangeAuthOptIn,
+      okx_live_enabled: this.config.okxLiveEnabled,
+      okx_demo_enabled: this.config.okxDemoEnvRequested,
+      okx_api_key_present: apiKey.length > 0,
+      okx_api_secret_present: apiSecret.length > 0,
+      okx_passphrase_present: passphrase.length > 0
+    };
   }
 
   private dropReadinessStaleState(reason: string, changedAt: number): void {
@@ -1333,31 +1360,30 @@ export class PaperEngine {
     this.okxPublic = new OkxDemoClient({ baseUrl: "https://www.okx.com", apiKey: "", apiSecret: "", passphrase: "" });
     this.positions = new PositionManager(this.store);
     this.risk = new RiskManager(config);
-    if (config.okxDemoEnabled) {
+    if (config.okxAuthMode === "demo" || config.okxAuthMode === "live") {
+      const selectedApiKey = config.okxAuthMode === "live" ? config.okxApiKey : config.okxDemoApiKey;
+      const selectedApiSecret = config.okxAuthMode === "live" ? config.okxApiSecret : config.okxDemoApiSecret;
+      const selectedPassphrase = config.okxAuthMode === "live" ? config.okxPassphrase : config.okxDemoPassphrase;
+      const selectedBaseUrl = config.okxAuthMode === "live" ? config.okxBaseUrl : config.okxDemoBaseUrl;
       this.okxDemoKeysLoaded =
-        config.okxDemoApiKey.length > 0 && config.okxDemoApiSecret.length > 0 && config.okxDemoPassphrase.length > 0;
-      
+        selectedApiKey.length > 0 && selectedApiSecret.length > 0 && selectedPassphrase.length > 0;
+
       if (!this.okxDemoKeysLoaded) {
         this.okxDemo = null;
         this.logger.error("okx_demo_keys_incomplete", {
-          okx_demo_enabled: true,
-          has_api_key: config.okxDemoApiKey.length > 0,
-          has_api_secret: config.okxDemoApiSecret.length > 0,
-          has_passphrase: config.okxDemoPassphrase.length > 0
+          ...this.okxAuthProofContext()
         });
       } else {
         this.okxDemo = new OkxDemoClient({
-          baseUrl: config.okxDemoBaseUrl,
-          apiKey: config.okxDemoApiKey,
-          apiSecret: config.okxDemoApiSecret,
-          passphrase: config.okxDemoPassphrase
+          baseUrl: selectedBaseUrl,
+          apiKey: selectedApiKey,
+          apiSecret: selectedApiSecret,
+          passphrase: selectedPassphrase
         });
-        this.logger.info("okx_demo_client_initialized", {
-          okx_demo_base_url: config.okxDemoBaseUrl,
-          okx_demo_enabled: true,
-          okx_demo_keys_loaded: true,
-          api_key_masked: config.okxDemoApiKey.slice(0, 4) + "****",
-          passphrase_masked: "****"
+        this.logger.info("okx_auth_client_initialized", {
+          okx_base_url: selectedBaseUrl,
+          okx_keys_loaded: true,
+          ...this.okxAuthProofContext()
         });
       }
     } else {
@@ -1365,18 +1391,20 @@ export class PaperEngine {
       this.okxDemoKeysLoaded = false;
     }
 
-    if (config.okxDemoEnvRequested && !config.okxExchangeAuthOptIn) {
+    if ((config.okxDemoEnvRequested || config.okxLiveEnabled) && !config.okxExchangeAuthOptIn) {
       this.logger.info("okx_exchange_auth_disabled", {
+        ...this.okxAuthProofContext(),
         detail:
-          "OKX_DEMO_ENABLED is on but ORBITALPHA_OKX_EXCHANGE_ENABLED is not true — no signed OKX calls; paper execution + public market data only"
+          "OKX auth env is on but ORBITALPHA_OKX_EXCHANGE_ENABLED is not true — no signed OKX calls; paper execution + public market data only"
       });
     }
     this.logger.info("paper_data_and_execution_mode", {
       exchange: "okx",
       market_data: "okx_public_unauthenticated",
-      okx_demo_enabled: config.okxDemoEnabled,
-      okx_signed_rest_active: config.okxDemoEnabled,
-      position_fill_pnl_path: config.okxDemoEnabled ? "paper_json_plus_okx_submit" : "paper_json_only"
+      okx_demo_effective_enabled: config.okxDemoEnabled,
+      okx_signed_rest_active: config.okxAuthReady,
+      position_fill_pnl_path: config.okxAuthReady ? "paper_json_plus_okx_submit" : "paper_json_only",
+      ...this.okxAuthProofContext()
     });
     this.logger.info("paper_entry_gate_config", {
       paper_entry_relaxed: config.paperEntryRelaxed,
@@ -1656,13 +1684,14 @@ export class PaperEngine {
       latestPath,
       engineMode: this.config.paperEngineMode,
       exchange: "okx",
-      okx_demo_enabled: this.config.okxDemoEnabled,
+      okx_demo_effective_enabled: this.config.okxDemoEnabled,
       okx_demo_keys_loaded: this.okxDemoKeysLoaded,
       okx_signed_rest_ready: this.okxSignedRestReady,
       okx_account_config_ok: this.okxAccountConfigOk,
       okx_balance_ok: this.okxBalanceOk,
       okx_positions_ok: this.okxPositionsOk,
       okx_order_submit_ok: this.okxOrderSubmitOk,
+      ...this.okxAuthProofContext(),
       paper_execution_ready: this.paperExecutionReady,
       signed_execution_ready: this.signedExecutionReady,
       signed_submit_mode: signedSubmitMode,
@@ -2193,7 +2222,7 @@ export class PaperEngine {
             this.logger
           ),
           exchange: "okx",
-          okx_demo_enabled: this.config.okxDemoEnabled,
+          okx_demo_effective_enabled: this.config.okxDemoEnabled,
           okx_demo_keys_loaded: this.okxDemoKeysLoaded,
           paper_execution_ready: this.paperExecutionReady,
           paper_execution_ready_changed_at: this.paperExecutionReadyChangedAt,
@@ -2250,7 +2279,8 @@ export class PaperEngine {
           okx_account_config_ok: this.okxAccountConfigOk,
           okx_balance_ok: this.okxBalanceOk,
           okx_positions_ok: this.okxPositionsOk,
-          okx_order_submit_ok: this.okxOrderSubmitOk
+          okx_order_submit_ok: this.okxOrderSubmitOk,
+          ...this.okxAuthProofContext()
         });
       } catch (e) {
         this.logger.error("engine_state_write_failed", { error: String(e) });
@@ -3139,7 +3169,8 @@ export class PaperEngine {
       leverage_profile: input.leverageProfile ?? null,
       applied_leverage: input.appliedLeverage ?? null,
       paper_execution_ready: input.paperExecutionReady ?? this.paperExecutionReady,
-      signed_execution_ready: this.signedExecutionReady
+      signed_execution_ready: this.signedExecutionReady,
+      ...this.okxAuthProofContext()
     };
 
     if (!this.signedExecutionReady) {

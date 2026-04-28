@@ -179,8 +179,22 @@ export type EngineConfig = Readonly<{
    * Effective OKX demo adapter: `okxDemoEnvRequested && okxExchangeAuthOptIn`.
    */
   okxDemoEnabled: boolean;
+  /** Raw `OKX_LIVE_ENABLED` env (diagnostics). */
+  okxLiveEnabled: boolean;
+  /** Effective auth mode for signed OKX REST. */
+  okxAuthMode: "disabled" | "demo" | "live";
+  /** Effective auth readiness for signed OKX REST. */
+  okxAuthReady: boolean;
   /** OKX demo REST base URL (default https://www.okx.com). */
   okxDemoBaseUrl: string;
+  /** OKX live REST base URL (default https://www.okx.com). */
+  okxBaseUrl: string;
+  /** OKX live API key. */
+  okxApiKey: string;
+  /** OKX live API secret. */
+  okxApiSecret: string;
+  /** OKX live passphrase. */
+  okxPassphrase: string;
   /** OKX demo API key. */
   okxDemoApiKey: string;
   /** OKX demo API secret. */
