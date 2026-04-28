@@ -48,6 +48,9 @@ import {
   type DirectionalRoutingOverride
 } from "./directional-routing";
 
+/** Stage0 signal absence proof: 1x per symbol per decision cycle (`input.now`). */
+const stage0SignalAbsenceProofLoggedAtBySymbol = new Map<string, number>();
+
 /** RANGE·Stage0·RISK_FAIL_REENTRY: 부분익절/TP 계열 청산 후 동일 심볼 재진입 대기만 완화(손절·증액 단계 제외). */
 const RANGE_STAGE0_REENTRY_RELAX_MULT = 0.35;
 const RANGE_STAGE0_REENTRY_RELAX_MIN_MS = 25_000;
@@ -2923,10 +2926,72 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         explicitGateReason === "RANGE_DIRECTIONAL_SHOCK_CONFLICT_WAIT_PULLBACK"
         ? ("RANGE_DIRECTIONAL_SHOCK_CONFLICT_WAIT_PULLBACK" as const)
         : null;
+
+    const finalReject = (explicitReason ?? "SIGNAL_NONE") as any;
+    const shouldProof =
+      final_decision === "SKIP" &&
+      (finalReject === "SIGNAL_NONE" || finalReject === "RANGE_DIRECTIONAL_SHOCK_CONFLICT_WAIT_PULLBACK");
+    const symbolKey = String(sym);
+    const nowKey = input.now;
+    if (shouldProof && stage0SignalAbsenceProofLoggedAtBySymbol.get(symbolKey) !== nowKey) {
+      stage0SignalAbsenceProofLoggedAtBySymbol.set(symbolKey, nowKey);
+      const pumpState = (input.risk as any)?.pumpState ?? null;
+      const pump_state = (input.risk as any)?.pump_state ?? null;
+      const resolved_pump_lock = pumpState === "PUMP_LOCK" || pump_state === "PUMP_LOCK";
+      const boxPos = sn?.boxPos ?? null;
+      const zone = typeof boxPos === "number" && Number.isFinite(boxPos) ? classifyBoxZone(boxPos) : null;
+      const range_edge_extreme =
+        typeof boxPos === "number" && Number.isFinite(boxPos) ? (boxPos <= 0.08 || boxPos >= 0.92) : null;
+      const logger = input.logger?.info ? input.logger : null;
+      const payload = {
+        symbol: symbolKey,
+        raw_signal_before_alignment: (sn as any)?.signal ?? null,
+        signal_after_alignment: workingSignal ?? null,
+        signalDecisionOrigin: (sn as any)?.signalDecisionOrigin ?? null,
+        signalMissingReason: (sn as any)?.signalMissingReason ?? null,
+        signalGateBlockedReason: (sn as any)?.signalGateBlockedReason ?? null,
+        reject_reason: finalReject,
+        final_decision,
+        intentSide: null,
+        market_mode: input.regime,
+        active_engine: input.regime,
+        active_engine_routing: input.routingActiveEngine ?? null,
+        directional_shock_state: input.risk?.directionalShockState ?? "NONE",
+        pumpState,
+        pump_state,
+        resolved_pump_lock,
+        crash_state: (input.risk as any)?.crashState ?? "NONE",
+        long_allow: input.risk?.longAllow ?? null,
+        short_allow: input.risk?.shortAllow ?? null,
+        allow_new_long: input.risk?.longAllow ?? null,
+        allow_new_short: input.risk?.shortAllow ?? null,
+        boxPos,
+        zone,
+        rangeConfidence: sn?.rangeConfidence ?? null,
+        trendOk: sn?.trendOk ?? null,
+        emaGap: sn?.emaGap ?? null,
+        trendWeaknessScore: sn?.trendWeaknessScore ?? null,
+        qualityScore: sn?.qualityScore ?? null,
+        candidateStrength: (sn as any)?.candidateStrength ?? null,
+        entryCandidate: (sn as any)?.entryCandidate ?? null,
+        range_side_candidate: null,
+        trend_side_candidate: null,
+        side_zone_valid: null,
+        range_edge_extreme,
+        relaxedRangeEntry: (sn as any)?.rangeSignalKeptByRelax === true || (sn as any)?.relaxedRangeEntry === true,
+        reversal_confirmed: (sn as any)?.reversal_confirmed ?? null,
+        promotion_min_condition_passed: null,
+        promotion_block_reason: null,
+        hard_block_present: null,
+        hard_block_reason: null
+      };
+      if (logger) logger.info("STAGE0_SIGNAL_ABSENCE_PROOF", payload);
+      else console.log("STAGE0_SIGNAL_ABSENCE_PROOF", payload);
+    }
     return ret({
       signal_state: "NONE",
       final_decision: "SKIP",
-      reject_reason: (explicitReason ?? "SIGNAL_NONE") as any,
+      reject_reason: finalReject,
       signal_missing_reason: explicitReason ?? "NO_ENGINE_SIGNAL"
     }, {
       intentSide: null,
