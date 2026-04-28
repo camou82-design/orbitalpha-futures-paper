@@ -193,6 +193,7 @@ export type EngineConfig = Readonly<{
 export type PaperDecisionRejectReason =
   | "DATA_NOT_READY"
   | "SIGNAL_NONE"
+  | "RANGE_DIRECTIONAL_SHOCK_CONFLICT_WAIT_PULLBACK"
   | "REGIME_NO_TRADE"
   | "REGIME_UNKNOWN"
   | "AMBIGUOUS_WATCHING"

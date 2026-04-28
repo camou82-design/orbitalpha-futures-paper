@@ -936,9 +936,13 @@ export function applyPaperSignalMarketAlignment<T extends SymbolSnapshotLike>(in
     raw === "paper_long_candidate" ? "long" : raw === "paper_short_candidate" ? "short" : null;
   const isDirectionalShockUp = risk?.directionalShockState === "UP";
   const isDirectionalShockDown = risk?.directionalShockState === "DOWN";
+  const isPumpLock = (risk as any)?.pumpState === "PUMP_LOCK";
+  // PUMP_LOCK is treated as UP-bias (pump continuation), not a symmetric bias.
+  const treatUpBias = isDirectionalShockUp || isPumpLock;
+  const treatDownBias = isDirectionalShockDown;
   const suppressByDirectionalShock =
-    (isDirectionalShockUp && raw === "paper_short_candidate") ||
-    (isDirectionalShockDown && raw === "paper_long_candidate");
+    (treatUpBias && raw === "paper_short_candidate") ||
+    (treatDownBias && raw === "paper_long_candidate");
   const preserveByRangeStructure =
     rangeStructureContext &&
     ((isDirectionalShockUp && raw === "paper_long_candidate") ||
@@ -955,7 +959,81 @@ export function applyPaperSignalMarketAlignment<T extends SymbolSnapshotLike>(in
   let out: T = snapshot;
 
   if (suppressByDirectionalShock) {
-    out = { ...snapshot, signal: "none" } as T;
+    const emaGap = typeof snapshot.emaGap === "number" && Number.isFinite(snapshot.emaGap) ? snapshot.emaGap : 0;
+    const trendOk = snapshot.trendOk === true;
+    const qualityOk = typeof snapshot.qualityScore === "number" && Number.isFinite(snapshot.qualityScore) && snapshot.qualityScore >= 68;
+    const crashOk = (risk as any)?.crashState !== "CRASH_LOCK";
+    const allowLongNow = ctx.allowNewLong === true && (risk?.longAllow ?? true) === true;
+    const allowShortNow = ctx.allowNewShort === true && (risk?.shortAllow ?? true) === true;
+    const wantLongBreakout = treatUpBias && raw === "paper_short_candidate";
+    const wantShortBreakout = treatDownBias && raw === "paper_long_candidate";
+    const breakoutEligible =
+      (wantLongBreakout && trendOk && emaGap > 0 && allowLongNow && qualityOk && crashOk) ||
+      (wantShortBreakout && trendOk && emaGap < 0 && allowShortNow && qualityOk && crashOk);
+    if (breakoutEligible) {
+      out = {
+        ...(snapshot as any),
+        signal: wantLongBreakout ? "paper_long_candidate" : "paper_short_candidate",
+        signalDecisionOrigin: "directional_shock_breakout_continuation",
+        signalMissingReason: undefined,
+        signalGateBlockedReason: undefined
+      } as T;
+      if (marketSignalProofLogger) {
+        marketSignalProofLogger.info("DIRECTIONAL_SHOCK_BREAKOUT_SIGNAL_PROOF", {
+          symbol: String(snapshot.symbol),
+          raw_signal: raw,
+          promoted_signal: (out as any).signal,
+          pump_state: (risk as any)?.pumpState ?? null,
+          directional_shock_state: risk?.directionalShockState ?? "NONE",
+          trendOk,
+          ema_gap: emaGap,
+          qualityScore: snapshot.qualityScore,
+          allow_new_long: ctx.allowNewLong,
+          allow_new_short: ctx.allowNewShort,
+          long_allow: risk?.longAllow ?? null,
+          short_allow: risk?.shortAllow ?? null,
+          crash_state: (risk as any)?.crashState ?? null,
+          eligibility: {
+            wantLongBreakout,
+            wantShortBreakout,
+            allowLongNow,
+            allowShortNow,
+            qualityOk,
+            crashOk
+          }
+        });
+      }
+    } else {
+      out = {
+        ...(snapshot as any),
+        signal: "none",
+        signalDecisionOrigin: "directional_shock_range_conflict_wait_pullback",
+        signalMissingReason: "RANGE_DIRECTIONAL_SHOCK_CONFLICT_WAIT_PULLBACK",
+        signalGateBlockedReason: "RANGE_DIRECTIONAL_SHOCK_CONFLICT_WAIT_PULLBACK"
+      } as T;
+      if (marketSignalProofLogger) {
+        marketSignalProofLogger.info("RANGE_DIRECTIONAL_SHOCK_CONFLICT_PROOF", {
+          symbol: String(snapshot.symbol),
+          raw_signal: raw,
+          final_signal: "none",
+          pump_state: (risk as any)?.pumpState ?? null,
+          directional_shock_state: risk?.directionalShockState ?? "NONE",
+          active_engine: ctx.activeEngine,
+          market_mode: ctx.marketMode,
+          boxPos: snapshot.boxPos ?? null,
+          rangeConfidence: (snapshot as any).rangeConfidence ?? null,
+          trendOk,
+          ema_gap: emaGap,
+          qualityScore: snapshot.qualityScore,
+          allow_new_long: ctx.allowNewLong,
+          allow_new_short: ctx.allowNewShort,
+          long_allow: risk?.longAllow ?? null,
+          short_allow: risk?.shortAllow ?? null,
+          crash_state: (risk as any)?.crashState ?? null,
+          reject_reason: "RANGE_DIRECTIONAL_SHOCK_CONFLICT_WAIT_PULLBACK"
+        });
+      }
+    }
     alignmentApplied = true;
     alignmentReason = raw === "paper_short_candidate"
       ? "TREND_UP_SUPPRESS_RANGE_SHORT"
@@ -2817,11 +2895,24 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   // Unified Direction Lock Verification
   // This guard only triggers if NO direction was determined by ANY active engine (SIGNAL_NONE)
   if (!intentSide || intentSide === ("none" as any)) {
+    const explicitMissingReason =
+      typeof sn?.signalMissingReason === "string" && sn.signalMissingReason.length > 0
+        ? sn.signalMissingReason
+        : null;
+    const explicitGateReason =
+      typeof (sn as any)?.signalGateBlockedReason === "string" && (sn as any).signalGateBlockedReason.length > 0
+        ? String((sn as any).signalGateBlockedReason)
+        : null;
+    const explicitReason =
+      explicitMissingReason === "RANGE_DIRECTIONAL_SHOCK_CONFLICT_WAIT_PULLBACK" ||
+        explicitGateReason === "RANGE_DIRECTIONAL_SHOCK_CONFLICT_WAIT_PULLBACK"
+        ? ("RANGE_DIRECTIONAL_SHOCK_CONFLICT_WAIT_PULLBACK" as const)
+        : null;
     return ret({
       signal_state: "NONE",
       final_decision: "SKIP",
-      reject_reason: "SIGNAL_NONE",
-      signal_missing_reason: "NO_ENGINE_SIGNAL"
+      reject_reason: (explicitReason ?? "SIGNAL_NONE") as any,
+      signal_missing_reason: explicitReason ?? "NO_ENGINE_SIGNAL"
     }, {
       intentSide: null,
       executorDecision,
