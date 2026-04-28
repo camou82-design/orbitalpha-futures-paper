@@ -847,6 +847,7 @@ export class PaperEngine {
   private liveBalanceBlockReason: string | null = null;
   private liveBalanceFetchError: string | null = null;
   private lastLiveBalancePayload: Record<string, unknown> | null = null;
+  private lastLivePositionsPayload: ReadonlyArray<Record<string, unknown>> | null = null;
   private runCycleId = 0;
   private paperExecutionReady = false;
   private paperExecutionReadyChangedAt: number | null = null;
@@ -1225,7 +1226,10 @@ export class PaperEngine {
   private async refreshLiveBalanceSnapshot(nowTs: number): Promise<void> {
     if (this.config.okxAuthMode === "live" && this.okxDemo) {
       try {
-        const bal = await this.okxDemo.getBalance("USDT");
+        const [bal, pos] = await Promise.all([
+          this.okxDemo.getBalance("USDT"),
+          this.okxDemo.getPositions("SWAP")
+        ]);
         if (bal.ok) {
           this.lastLiveBalancePayload = (bal.value?.[0] as Record<string, unknown> | undefined) ?? null;
           this.liveBalanceFetchError = null;
@@ -1233,16 +1237,36 @@ export class PaperEngine {
           this.lastLiveBalancePayload = null;
           this.liveBalanceFetchError = bal.error || bal.diagnostics.retMsg || "LIVE_BALANCE_FETCH_FAILED";
         }
+        if (pos.ok) {
+          this.lastLivePositionsPayload = pos.value ?? null;
+          this.okxPositionsOk = true;
+        } else {
+          this.lastLivePositionsPayload = null;
+          this.okxPositionsOk = false;
+        }
       } catch (e) {
         this.lastLiveBalancePayload = null;
+        this.lastLivePositionsPayload = null;
         this.liveBalanceFetchError = e instanceof Error ? e.message : String(e);
       }
     } else {
       this.lastLiveBalancePayload = null;
+      this.lastLivePositionsPayload = null;
       this.liveBalanceFetchError = this.config.okxAuthMode === "live" ? "LIVE_BALANCE_CLIENT_NOT_READY" : null;
     }
     const result = this.buildBalanceDisplayContext(await this.positions.loadOpenAll());
     this.applyLiveBalanceAuthorityResult(result);
+
+    this.logger.info("OKX_RAW_POSITIONS_AUTHORITY_PROOF", {
+      ts: nowTs,
+      okx_positions_payload_present: !!this.lastLivePositionsPayload,
+      okx_positions_count: Array.isArray(this.lastLivePositionsPayload) ? this.lastLivePositionsPayload.length : 0,
+      okx_position_parse_source: result.okx_position_parse_source,
+      okx_used_margin_usdt: result.okx_used_margin_usdt,
+      okx_total_position_notional_usdt: result.okx_total_position_notional_usdt,
+      paper_position_estimated_used_margin_usdt: result.paper_position_estimated_used_margin_usdt
+    });
+
     this.logger.info("V2_LIVE_BALANCE_AUTHORITY_PROOF", {
       ts: nowTs,
       ...result
@@ -1269,11 +1293,16 @@ export class PaperEngine {
     okx_simulated_trading_header_enabled: boolean;
     live_max_order_notional_usdt: number;
     balance_source: "okx_live_wallet" | "paper_config" | "unavailable";
+    position_source: "okx_actual" | "paper_estimated" | "unavailable";
     okx_wallet_balance_usdt: number | null;
     okx_available_balance_usdt: number | null;
-    okx_used_margin_usdt: number;
-    okx_total_position_notional_usdt: number;
+    okx_used_margin_usdt: number | null;
+    okx_total_position_notional_usdt: number | null;
     okx_effective_leverage_used: number | null;
+    okx_position_parse_source: string | null;
+    paper_position_estimated_used_margin_usdt: number;
+    paper_position_estimated_notional_usdt: number;
+    paper_position_estimated_effective_leverage_used: number | null;
     account_equity_display_source: "okx_live_wallet" | "paper_config" | "unavailable";
     account_equity_krw_display: number | null;
     account_equity_krw_effective: number | null;
@@ -1296,11 +1325,16 @@ export class PaperEngine {
     okx_simulated_trading_header_enabled: boolean;
     live_max_order_notional_usdt: number;
     balance_source: "okx_live_wallet" | "paper_config" | "unavailable";
+    position_source: "okx_actual" | "paper_estimated" | "unavailable";
     okx_wallet_balance_usdt: number | null;
     okx_available_balance_usdt: number | null;
-    okx_used_margin_usdt: number;
-    okx_total_position_notional_usdt: number;
+    okx_used_margin_usdt: number | null;
+    okx_total_position_notional_usdt: number | null;
     okx_effective_leverage_used: number | null;
+    okx_position_parse_source: string | null;
+    paper_position_estimated_used_margin_usdt: number;
+    paper_position_estimated_notional_usdt: number;
+    paper_position_estimated_effective_leverage_used: number | null;
     account_equity_display_source: "okx_live_wallet" | "paper_config" | "unavailable";
     account_equity_krw_display: number | null;
     account_equity_krw_effective: number | null;
@@ -1316,6 +1350,7 @@ export class PaperEngine {
       okxAuthMode: mode,
       balancePayload: this.lastLiveBalancePayload,
       balanceFetchError: this.liveBalanceFetchError,
+      okxPositionsPayload: this.lastLivePositionsPayload,
       positions: opens.map((p) => ({
         symbol: String(p.symbol),
         side: String(p.side),
