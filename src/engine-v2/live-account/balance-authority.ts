@@ -265,6 +265,7 @@ export function deriveLiveBalanceAuthority(input: LiveBalanceAuthorityInput): Li
     paper_position_estimated_effective_leverage_used: paperUsageWithLiveWallet.leverage,
 
     account_equity_display_source: "okx_live_wallet",
+    // KRW conversion: Fixed 1000 multiplier is used (estimated)
     account_equity_krw_display: (parsedWallet.walletBalanceUsdt ?? 0) * 1000,
     account_equity_krw_effective: (parsedWallet.walletBalanceUsdt ?? 0) * 1000,
     max_usable_margin_krw_effective: (parsedWallet.availableBalanceUsdt ?? 0) * 1000,
