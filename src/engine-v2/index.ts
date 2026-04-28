@@ -144,7 +144,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let execution;
     if (routing.executor === "RANGE") execution = executeRangeRegime(authoritativeInput);
     else if (routing.executor === "TREND") execution = executeTrendRegime(authoritativeInput);
-    else if (routing.executor === "TRANSITION") execution = executeTransitionRegime(authoritativeInput);
+    else if (routing.executor === "TRANSITION") execution = executeTransitionRegime(authoritativeInput, judgment);
     else {
         execution = {
             signal: "NONE" as const,
@@ -155,6 +155,37 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             isAddOnEligible: false,
             metadata: {}
         };
+    }
+    if (routing.executor === "TRANSITION") {
+        const transitionMeta = execution.metadata ?? {};
+        console.info(JSON.stringify({
+            event: "V2_TRANSITION_EXECUTOR_PROOF",
+            symbol: String(input.symbol),
+            market_subtype: judgment.subtype,
+            transitionPhase: transitionMeta.transitionPhase ?? judgment.transitionPhase ?? "NONE",
+            transitionSetupType: transitionMeta.transitionSetupType ?? "NONE",
+            transitionAction: transitionMeta.transitionAction ?? "REJECT",
+            signal: execution.signal,
+            side: execution.side,
+            reason: execution.reason,
+            baseSizeIntent: execution.baseSizeIntent,
+            isAddOnEligible: execution.isAddOnEligible,
+            transitionWatchOnly: transitionMeta.transitionWatchOnly ?? null,
+            transitionConfirmRequired: transitionMeta.transitionConfirmRequired ?? null,
+            transitionRejectReason: transitionMeta.transitionRejectReason ?? null,
+            emaGap: transitionMeta.emaGap ?? authoritativeInput.snapshot?.emaGap ?? null,
+            trendWeaknessScore: transitionMeta.trendWeaknessScore ?? authoritativeInput.snapshot?.trendWeaknessScore ?? null,
+            rangeConfidence: transitionMeta.rangeConfidence ?? authoritativeInput.snapshot?.rangeConfidence ?? null,
+            boxCohesion01: transitionMeta.boxCohesion01 ?? authoritativeInput.snapshot?.boxCohesion01 ?? null,
+            breakoutFailureRate: transitionMeta.breakoutFailureRate ?? authoritativeInput.snapshot?.breakoutFailureRate ?? null,
+            boxPos: transitionMeta.boxPos ?? authoritativeInput.snapshot?.boxPos ?? null,
+            boxBreakSide: transitionMeta.boxBreakSide ?? authoritativeInput.snapshot?.boxBreakSide ?? null,
+            qualityScore: transitionMeta.qualityScore ?? authoritativeInput.snapshot?.qualityScore ?? null,
+            reviewingTicks: transitionMeta.reviewingTicks ?? authoritativeInput.snapshot?.reviewing_ticks ?? null,
+            directionalShockState: transitionMeta.directionalShockState ?? authoritativeInput.state.directionalShockState ?? null,
+            longAllow: transitionMeta.longAllow ?? authoritativeInput.state.longAllow ?? null,
+            shortAllow: transitionMeta.shortAllow ?? authoritativeInput.state.shortAllow ?? null
+        }));
     }
 
     // Tier 5: Risk Sizing (executor/risk-sizing share same authoritative state)
@@ -991,6 +1022,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         market_transition_phase: judgment.transitionPhase,
         market_judgment_version: judgment.judgmentVersion,
         market_judgment_state_source: "authoritative_input",
+        transition_setup_type: typeof execMeta.transitionSetupType === "string" ? execMeta.transitionSetupType : null,
+        transition_action: typeof execMeta.transitionAction === "string" ? execMeta.transitionAction : null,
+        transition_watch_only: readNullableBoolean(execMeta.transitionWatchOnly),
+        transition_confirm_required: readNullableBoolean(execMeta.transitionConfirmRequired),
+        transition_reject_reason: typeof execMeta.transitionRejectReason === "string" ? execMeta.transitionRejectReason : null,
         hard_block_present: hardBlockPresent,
         hard_block_reason: hardBlockReason
     }));

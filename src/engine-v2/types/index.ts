@@ -27,6 +27,15 @@ export type EngineV2Side = "long" | "short" | "none" | null;
 export type EngineV2FinalDecision = "ENTER" | "EXIT" | "SKIP" | "HOLD" | "REJECT" | "DISABLED";
 export type LeverageProfile = "BASE" | "BOOST_1" | "BOOST_2";
 export type EntryQualityGrade = "S" | "A" | "B";
+export type TransitionSetupType =
+    | "RANGE_TO_TREND_UP"
+    | "RANGE_TO_TREND_DOWN"
+    | "TREND_TO_RANGE_WEAKENING"
+    | "CONFLICT_NO_TRADE"
+    | "SHOCK_DOWN_REACTION"
+    | "SHOCK_UP_REACTION"
+    | "NONE";
+export type TransitionAction = "WATCH" | "CONFIRM" | "REJECT";
 
 /** Legacy Result Interface for Bridge (Zero-any policy) */
 export interface LegacyDecisionResult {
@@ -418,6 +427,34 @@ export interface ExecutorOutput {
     recheckSuggested: boolean;
     isAddOnEligible: boolean;
     metadata: Record<string, string | number | boolean | null>;
+}
+
+export interface TransitionExecutorMetadata extends Record<string, string | number | boolean | null> {
+    transitionPhase: MarketJudgmentOutput["transitionPhase"] | "NONE";
+    transitionSetupType: TransitionSetupType;
+    transitionAction: TransitionAction;
+    transitionReason: string;
+    transitionConfidence: number;
+    transitionPrimarySide: EngineV2Side;
+    transitionCounterSide: EngineV2Side;
+    transitionWatchOnly: boolean;
+    transitionConfirmRequired: boolean;
+    transitionRejectReason: string | null;
+    transitionEvidence: string;
+    emaGap: number;
+    trendWeaknessScore: number;
+    rangeConfidence: number;
+    boxCohesion01: number;
+    breakoutFailureRate: number;
+    boxPos: number;
+    boxBreakSide: "upper" | "lower" | "none";
+    qualityScore: number;
+    reviewingTicks: number;
+    directionalShockState: "UP" | "DOWN" | "NONE";
+    longAllow: boolean;
+    shortAllow: boolean;
+    crashState: string;
+    pumpState: string;
 }
 
 /** Tier 5: Risk Sizing Output */
