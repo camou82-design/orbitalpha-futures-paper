@@ -353,7 +353,16 @@ export function resolveSymbolDecisionEnvelope(
         mode: v2Mode,
         v2Decision: v2Res.decision,
         selector: refinedSelector,
-        legacyComparison
+        legacyComparison,
+        marketSubtype: v2Res.internal.judgment.subtype ?? null,
+        exitPolicyAction: v2Res.internal.exitPolicy?.action ?? "HOLD",
+        exitPolicyReason: v2Res.internal.exitPolicy?.reason ?? "NO_POSITION_HOLD",
+        exitShouldExit: v2Res.internal.exitPolicy?.shouldExit ?? false,
+        exitShouldReduce: v2Res.internal.exitPolicy?.shouldReduce ?? false,
+        exitShouldPartial: v2Res.internal.exitPolicy?.shouldPartial ?? false,
+        exitReduceRatio: v2Res.internal.exitPolicy?.reduceRatio ?? 0,
+        exitUrgency: v2Res.internal.exitPolicy?.exitUrgency ?? "LOW",
+        exitConfidence: v2Res.internal.exitPolicy?.exitConfidence ?? 0
     });
     const authority =
         v2Mode === "engine_v2"
@@ -393,6 +402,12 @@ export function resolveSymbolDecisionEnvelope(
         add_on_policy_reason: executionEnvelope.addOnPolicyReason,
         exit_policy_action: executionEnvelope.exitPolicyAction,
         exit_policy_reason: executionEnvelope.exitPolicyReason,
+        exit_should_exit: executionEnvelope.exitShouldExit,
+        exit_should_reduce: executionEnvelope.exitShouldReduce,
+        exit_should_partial: executionEnvelope.exitShouldPartial,
+        exit_reduce_ratio: executionEnvelope.exitReduceRatio,
+        exit_urgency: executionEnvelope.exitUrgency,
+        exit_confidence: executionEnvelope.exitConfidence,
         paper_execution_ready: executionEnvelope.paperExecutionReady,
         signed_execution_ready: executionEnvelope.signedExecutionReady,
         hard_block_present: executionEnvelope.hardBlockPresent,

@@ -33,6 +33,12 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     addOnPolicyReason: string | null;
     exitPolicyAction: string | null;
     exitPolicyReason: string | null;
+    exitShouldExit: boolean | null;
+    exitShouldReduce: boolean | null;
+    exitShouldPartial: boolean | null;
+    exitReduceRatio: number | null;
+    exitUrgency: string | null;
+    exitConfidence: number | null;
     paperExecutionReady: boolean | null;
     signedExecutionReady: boolean | null;
     hardBlockPresent: boolean;
@@ -57,4 +63,13 @@ export type BuildExecutionEnvelopeArgs = Readonly<{
     v2Decision: EngineV2Decision;
     selector: EngineV2SelectorResult;
     legacyComparison: V2LegacyComparison;
+    marketSubtype: string | null;
+    exitPolicyAction?: string | null;
+    exitPolicyReason?: string | null;
+    exitShouldExit?: boolean | null;
+    exitShouldReduce?: boolean | null;
+    exitShouldPartial?: boolean | null;
+    exitReduceRatio?: number | null;
+    exitUrgency?: string | null;
+    exitConfidence?: number | null;
 }>;

@@ -16,7 +16,15 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
     const appliedLeverage = Number(risk.appliedLeverage ?? 0);
     const exposureNotionalKrw = Number(risk.exposureNotionalKrw ?? 0);
     const equityMultiple = Number(risk.equityMultiple ?? 0);
-    const marketSubtype = null;
+    const marketSubtype = args.marketSubtype ?? null;
+    const exitPolicyAction = args.exitPolicyAction ?? "HOLD";
+    const exitPolicyReason = args.exitPolicyReason ?? "NO_POSITION_HOLD";
+    const exitShouldExit = args.exitShouldExit ?? false;
+    const exitShouldReduce = args.exitShouldReduce ?? false;
+    const exitShouldPartial = args.exitShouldPartial ?? false;
+    const exitReduceRatio = args.exitReduceRatio ?? 0;
+    const exitUrgency = args.exitUrgency ?? "LOW";
+    const exitConfidence = args.exitConfidence ?? 0;
 
     if (mode === "engine_v2") {
         return {
@@ -39,8 +47,14 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             addOnAllowed,
             addOnPolicyAction,
             addOnPolicyReason,
-            exitPolicyAction: null,
-            exitPolicyReason: null,
+            exitPolicyAction,
+            exitPolicyReason,
+            exitShouldExit,
+            exitShouldReduce,
+            exitShouldPartial,
+            exitReduceRatio,
+            exitUrgency,
+            exitConfidence,
             paperExecutionReady,
             signedExecutionReady,
             hardBlockPresent,
@@ -70,8 +84,14 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             addOnAllowed: null,
             addOnPolicyAction: null,
             addOnPolicyReason: null,
-            exitPolicyAction: null,
-            exitPolicyReason: null,
+            exitPolicyAction,
+            exitPolicyReason,
+            exitShouldExit,
+            exitShouldReduce,
+            exitShouldPartial,
+            exitReduceRatio,
+            exitUrgency,
+            exitConfidence,
             paperExecutionReady,
             signedExecutionReady,
             hardBlockPresent: false,
@@ -100,8 +120,14 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         addOnAllowed: selector.adopted_result.engine === "V2" ? addOnAllowed : null,
         addOnPolicyAction: selector.adopted_result.engine === "V2" ? addOnPolicyAction : null,
         addOnPolicyReason: selector.adopted_result.engine === "V2" ? addOnPolicyReason : null,
-        exitPolicyAction: null,
-        exitPolicyReason: null,
+        exitPolicyAction,
+        exitPolicyReason,
+        exitShouldExit,
+        exitShouldReduce,
+        exitShouldPartial,
+        exitReduceRatio,
+        exitUrgency,
+        exitConfidence,
         paperExecutionReady,
         signedExecutionReady,
         hardBlockPresent: selector.adopted_result.engine === "V2" ? hardBlockPresent : false,

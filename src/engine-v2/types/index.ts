@@ -506,6 +506,17 @@ export interface ExplanationOutput {
     };
 }
 
+export interface ExitPolicyDiagnosticsSummary {
+    action: string;
+    reason: string;
+    shouldExit: boolean;
+    shouldReduce: boolean;
+    shouldPartial: boolean;
+    reduceRatio: number;
+    exitUrgency: string;
+    exitConfidence: number;
+}
+
 /** Unified Execution Authority (Phase 4 Independence) */
 export type EntryExecutionAuthority = Readonly<{
     decision: EngineV2FinalDecision;
@@ -531,4 +542,5 @@ export interface EngineV2InternalResult {
     execution: ExecutorOutput;
     riskSizing: RiskSizingOutput;
     explanation: ExplanationOutput;
+    exitPolicy: ExitPolicyDiagnosticsSummary | null;
 }

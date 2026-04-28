@@ -1236,7 +1236,17 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         routing,
         execution,
         riskSizing,
-        explanation
+        explanation,
+        exitPolicy: {
+            action: exitPolicy.action,
+            reason: exitPolicy.reason,
+            shouldExit: exitPolicy.shouldExit,
+            shouldReduce: exitPolicy.shouldReduce,
+            shouldPartial: exitPolicy.shouldPartial,
+            reduceRatio: exitPolicy.reduceRatio,
+            exitUrgency: exitPolicy.exitUrgency,
+            exitConfidence: exitPolicy.exitConfidence
+        }
     };
 
     return { decision, internal };
