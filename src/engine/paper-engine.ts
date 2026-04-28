@@ -1173,7 +1173,7 @@ export class PaperEngine {
   }
 
   private computeSignedExecutionReadiness(): boolean {
-    if (!this.config.okxAuthReady) return false;
+    if (!this.config.okxDemoEnabled) return false;
     return (
       this.okxSignedRestReady === true &&
       this.okxAccountConfigOk === true &&
@@ -1184,8 +1184,7 @@ export class PaperEngine {
   }
 
   private signedSubmitMode(): "enabled" | "skipped_not_ready" | "paper_only" {
-    if (!this.config.okxExchangeAuthOptIn) return "paper_only";
-    if (!this.config.okxAuthReady) return "skipped_not_ready";
+    if (!this.config.okxDemoEnabled) return "paper_only";
     return this.signedExecutionReady ? "enabled" : "skipped_not_ready";
   }
 
@@ -2049,6 +2048,11 @@ export class PaperEngine {
         signed_execution_ready: this.signedExecutionReady,
         signed_submit_mode: this.signedSubmitMode(),
         signed_submit_block_reason: this.signedSubmitBlockReason(this.signedSubmitMode()),
+        okx_auth_mode: this.config.okxAuthMode,
+        okx_auth_ready: this.config.okxAuthReady,
+        okx_exchange_auth_opt_in: this.config.okxExchangeAuthOptIn,
+        okx_live_enabled: this.config.okxLiveEnabled,
+        okx_demo_enabled: this.config.okxDemoEnvRequested,
         serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
         closeOnlyMode: this.serverTradeControlState.close_only_mode,
         killSwitch: this.serverTradeControlState.kill_switch_active,
