@@ -7,6 +7,12 @@ export type V2StateAuthority = Readonly<{
     now: number;
     currentPositions: EngineV2Position[];
     symbolPositions: EngineV2Position[];
+    longPosition: EngineV2Position | null;
+    shortPosition: EngineV2Position | null;
+    hasLongPosition: boolean;
+    hasShortPosition: boolean;
+    longStage: number;
+    shortStage: number;
     sameSidePosition: EngineV2Position | null;
     oppositeSidePosition: EngineV2Position | null;
     hasSameSidePosition: boolean;

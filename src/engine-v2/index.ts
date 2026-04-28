@@ -34,55 +34,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Tier 3: Engine Router
     const routing = routeToExecutor(judgment, confidence);
     const v2State = deriveV2StateAuthority(input);
-    console.info(JSON.stringify({
-        event: "V2_STATE_AUTHORITY_PROOF",
-        symbol: String(input.symbol),
-        state_authority_source: v2State.stateAuthoritySource,
-        position_state_ready: v2State.positionStateReady,
-        market_snapshot_ready: v2State.marketSnapshotReady,
-        v2_input_ready: v2State.v2InputReady,
-        serverTradeEnabled: v2State.serverTradeEnabled,
-        closeOnlyMode: v2State.closeOnlyMode,
-        killSwitch: v2State.killSwitch,
-        reconcileSafeMode: v2State.reconcileSafeMode,
-        riskMode: v2State.riskMode,
-        dailyLossGuardTriggered: v2State.dailyLossGuardTriggered,
-        freshTickBarrierActive: v2State.freshTickBarrierActive,
-        freshTickExecutionBlocked: v2State.freshTickExecutionBlocked,
-        directionalShockState: v2State.directionalShockState,
-        crashState: v2State.crashState,
-        pumpState: v2State.pumpState,
-        longAllow: v2State.longAllow,
-        shortAllow: v2State.shortAllow,
-        current_positions_count: v2State.currentPositions.length,
-        symbol_positions_count: v2State.symbolPositions.length,
-        has_same_side_position: v2State.hasSameSidePosition,
-        has_opposite_side_position: v2State.hasOppositeSidePosition,
-        currentStage: v2State.currentStage,
-        accountEquityKrw: v2State.accountEquityKrw,
-        maxUsableMarginKrw: v2State.maxUsableMarginKrw,
-        exposureNotionalCapKrw: v2State.exposureNotionalCapKrw,
-        symbolExposureNotionalCapKrw: v2State.symbolExposureNotionalCapKrw
-    }));
-
-    // Tier 4: Executors
-    let execution;
-    if (routing.executor === "RANGE") execution = executeRangeRegime(input);
-    else if (routing.executor === "TREND") execution = executeTrendRegime(input);
-    else if (routing.executor === "TRANSITION") execution = executeTransitionRegime(input);
-    else {
-        execution = {
-            signal: "NONE" as const,
-            side: "none" as const,
-            reason: "No Routing",
-            baseSizeIntent: 0,
-            recheckSuggested: false,
-            isAddOnEligible: false,
-            metadata: {}
-        };
-    }
-
-    // Tier 5: Risk Sizing (B안: normalized v2State authority projected into input.state)
     const authoritativeInput: EngineV2Input = {
         ...input,
         state: {
@@ -115,6 +66,61 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             symbolExposureNotionalCapKrw: v2State.symbolExposureNotionalCapKrw
         }
     };
+    console.info(JSON.stringify({
+        event: "V2_STATE_AUTHORITY_PROOF",
+        symbol: String(input.symbol),
+        state_authority_source: v2State.stateAuthoritySource,
+        position_state_ready: v2State.positionStateReady,
+        market_snapshot_ready: v2State.marketSnapshotReady,
+        v2_input_ready: v2State.v2InputReady,
+        serverTradeEnabled: v2State.serverTradeEnabled,
+        closeOnlyMode: v2State.closeOnlyMode,
+        killSwitch: v2State.killSwitch,
+        reconcileSafeMode: v2State.reconcileSafeMode,
+        riskMode: v2State.riskMode,
+        dailyLossGuardTriggered: v2State.dailyLossGuardTriggered,
+        freshTickBarrierActive: v2State.freshTickBarrierActive,
+        freshTickExecutionBlocked: v2State.freshTickExecutionBlocked,
+        directionalShockState: v2State.directionalShockState,
+        crashState: v2State.crashState,
+        pumpState: v2State.pumpState,
+        longAllow: v2State.longAllow,
+        shortAllow: v2State.shortAllow,
+        current_positions_count: v2State.currentPositions.length,
+        symbol_positions_count: v2State.symbolPositions.length,
+        has_same_side_position: v2State.hasSameSidePosition,
+        has_opposite_side_position: v2State.hasOppositeSidePosition,
+        currentStage: v2State.currentStage,
+        inferredIntentSide: v2State.inferredIntentSide,
+        hasLongPosition: v2State.hasLongPosition,
+        hasShortPosition: v2State.hasShortPosition,
+        longStage: v2State.longStage,
+        shortStage: v2State.shortStage,
+        position_side_resolution_basis: "inferred_intent_side",
+        accountEquityKrw: v2State.accountEquityKrw,
+        maxUsableMarginKrw: v2State.maxUsableMarginKrw,
+        exposureNotionalCapKrw: v2State.exposureNotionalCapKrw,
+        symbolExposureNotionalCapKrw: v2State.symbolExposureNotionalCapKrw
+    }));
+
+    // Tier 4: Executors
+    let execution;
+    if (routing.executor === "RANGE") execution = executeRangeRegime(authoritativeInput);
+    else if (routing.executor === "TREND") execution = executeTrendRegime(authoritativeInput);
+    else if (routing.executor === "TRANSITION") execution = executeTransitionRegime(authoritativeInput);
+    else {
+        execution = {
+            signal: "NONE" as const,
+            side: "none" as const,
+            reason: "No Routing",
+            baseSizeIntent: 0,
+            recheckSuggested: false,
+            isAddOnEligible: false,
+            metadata: {}
+        };
+    }
+
+    // Tier 5: Risk Sizing (executor/risk-sizing share same authoritative state)
     const riskSizing = calculateRiskSizing(judgment, confidence, execution, authoritativeInput);
 
     // Tier 5: Explanation (Diagnostics)
@@ -935,6 +941,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2_state_same_side_position: v2State.hasSameSidePosition,
         v2_state_opposite_side_position: v2State.hasOppositeSidePosition,
         v2_state_current_stage: v2State.currentStage,
+        v2_state_inferred_intent_side: v2State.inferredIntentSide,
+        v2_state_has_long_position: v2State.hasLongPosition,
+        v2_state_has_short_position: v2State.hasShortPosition,
+        v2_state_long_stage: v2State.longStage,
+        v2_state_short_stage: v2State.shortStage,
         hard_block_present: hardBlockPresent,
         hard_block_reason: hardBlockReason
     }));

@@ -24,22 +24,73 @@ function ledgerNotionalKrw(positions: EngineV2Position[]): number {
     );
 }
 
+export function resolvePositionStateForSide(
+    v2State: V2StateAuthority,
+    side: EngineV2Side
+): Readonly<{
+    side: EngineV2Side;
+    sameSidePosition: EngineV2Position | null;
+    oppositeSidePosition: EngineV2Position | null;
+    hasSameSidePosition: boolean;
+    hasOppositeSidePosition: boolean;
+    currentStage: number;
+}> {
+    const sameSidePosition =
+        side === "long"
+            ? v2State.longPosition
+            : side === "short"
+                ? v2State.shortPosition
+                : null;
+    const oppositeSidePosition =
+        side === "long"
+            ? v2State.shortPosition
+            : side === "short"
+                ? v2State.longPosition
+                : null;
+    const currentStage =
+        side === "long"
+            ? v2State.longStage
+            : side === "short"
+                ? v2State.shortStage
+                : 0;
+    return {
+        side,
+        sameSidePosition,
+        oppositeSidePosition,
+        hasSameSidePosition: sameSidePosition != null,
+        hasOppositeSidePosition: oppositeSidePosition != null,
+        currentStage
+    };
+}
+
 export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
     const rawPositions = Array.isArray(input.state.currentPositions) ? input.state.currentPositions : [];
     const currentPositions = rawPositions.filter((p) => p != null);
     const symbol = input.symbol;
     const symbolPositions = currentPositions.filter((p) => p.symbol === symbol);
     const inferredIntentSide = inferIntentSide(input);
+    const longPosition = symbolPositions.find((p) => toSideLower(p) === "long") ?? null;
+    const shortPosition = symbolPositions.find((p) => toSideLower(p) === "short") ?? null;
+    const longStage = longPosition ? Math.max(1, Number(longPosition.entryStage ?? 1)) : 0;
+    const shortStage = shortPosition ? Math.max(1, Number(shortPosition.entryStage ?? 1)) : 0;
     const sameSidePosition =
-        inferredIntentSide === "long" || inferredIntentSide === "short"
-            ? symbolPositions.find((p) => toSideLower(p) === inferredIntentSide) ?? null
-            : null;
+        inferredIntentSide === "long"
+            ? longPosition
+            : inferredIntentSide === "short"
+                ? shortPosition
+                : null;
     const oppositeSidePosition =
         inferredIntentSide === "long"
-            ? symbolPositions.find((p) => toSideLower(p) === "short") ?? null
+            ? shortPosition
             : inferredIntentSide === "short"
-                ? symbolPositions.find((p) => toSideLower(p) === "long") ?? null
+                ? longPosition
                 : null;
+    const currentStage =
+        inferredIntentSide === "long"
+            ? longStage
+            : inferredIntentSide === "short"
+                ? shortStage
+                : 0;
     const marketSnapshotReady =
         input.snapshot != null &&
         Number.isFinite(input.snapshot.lastPrice) &&
@@ -56,11 +107,17 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
         now: input.now,
         currentPositions,
         symbolPositions,
+        longPosition,
+        shortPosition,
+        hasLongPosition: longPosition != null,
+        hasShortPosition: shortPosition != null,
+        longStage,
+        shortStage,
         sameSidePosition,
         oppositeSidePosition,
         hasSameSidePosition: sameSidePosition != null,
         hasOppositeSidePosition: oppositeSidePosition != null,
-        currentStage: sameSidePosition ? Math.max(1, Number(sameSidePosition.entryStage ?? 1)) : 0,
+        currentStage,
         positionStateReady,
         marketSnapshotReady,
         v2InputReady,
