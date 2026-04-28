@@ -936,9 +936,11 @@ export function applyPaperSignalMarketAlignment<T extends SymbolSnapshotLike>(in
     raw === "paper_long_candidate" ? "long" : raw === "paper_short_candidate" ? "short" : null;
   const isDirectionalShockUp = risk?.directionalShockState === "UP";
   const isDirectionalShockDown = risk?.directionalShockState === "DOWN";
-  const isPumpLock = (risk as any)?.pumpState === "PUMP_LOCK";
+  const pumpState = (risk as any)?.pumpState ?? null;
+  const pump_state = (risk as any)?.pump_state ?? null;
+  const resolved_pump_lock = pumpState === "PUMP_LOCK" || pump_state === "PUMP_LOCK";
   // PUMP_LOCK is treated as UP-bias (pump continuation), not a symmetric bias.
-  const treatUpBias = isDirectionalShockUp || isPumpLock;
+  const treatUpBias = isDirectionalShockUp || resolved_pump_lock;
   const treatDownBias = isDirectionalShockDown;
   const suppressByDirectionalShock =
     (treatUpBias && raw === "paper_short_candidate") ||
@@ -981,26 +983,29 @@ export function applyPaperSignalMarketAlignment<T extends SymbolSnapshotLike>(in
       if (marketSignalProofLogger) {
         marketSignalProofLogger.info("DIRECTIONAL_SHOCK_BREAKOUT_SIGNAL_PROOF", {
           symbol: String(snapshot.symbol),
+          pumpState,
+          pump_state,
+          resolved_pump_lock,
           raw_signal: raw,
-          promoted_signal: (out as any).signal,
-          pump_state: (risk as any)?.pumpState ?? null,
           directional_shock_state: risk?.directionalShockState ?? "NONE",
+          treat_up_bias: treatUpBias,
+          treat_down_bias: treatDownBias,
+          promoted_signal: (out as any).signal,
+          signalDecisionOrigin: (out as any).signalDecisionOrigin ?? null,
+          signalGateBlockedReason: (out as any).signalGateBlockedReason ?? null,
+          signalMissingReason: (out as any).signalMissingReason ?? null,
           trendOk,
           ema_gap: emaGap,
           qualityScore: snapshot.qualityScore,
+          allowLongNow,
+          allowShortNow,
+          crashOk,
           allow_new_long: ctx.allowNewLong,
           allow_new_short: ctx.allowNewShort,
           long_allow: risk?.longAllow ?? null,
           short_allow: risk?.shortAllow ?? null,
           crash_state: (risk as any)?.crashState ?? null,
-          eligibility: {
-            wantLongBreakout,
-            wantShortBreakout,
-            allowLongNow,
-            allowShortNow,
-            qualityOk,
-            crashOk
-          }
+          eligibility: { wantLongBreakout, wantShortBreakout, qualityOk }
         });
       }
     } else {
@@ -1014,10 +1019,17 @@ export function applyPaperSignalMarketAlignment<T extends SymbolSnapshotLike>(in
       if (marketSignalProofLogger) {
         marketSignalProofLogger.info("RANGE_DIRECTIONAL_SHOCK_CONFLICT_PROOF", {
           symbol: String(snapshot.symbol),
+          pumpState,
+          pump_state,
+          resolved_pump_lock,
+          directional_shock_state: risk?.directionalShockState ?? "NONE",
+          treat_up_bias: treatUpBias,
+          treat_down_bias: treatDownBias,
           raw_signal: raw,
           final_signal: "none",
-          pump_state: (risk as any)?.pumpState ?? null,
-          directional_shock_state: risk?.directionalShockState ?? "NONE",
+          signalDecisionOrigin: (out as any).signalDecisionOrigin ?? null,
+          signalGateBlockedReason: (out as any).signalGateBlockedReason ?? null,
+          signalMissingReason: (out as any).signalMissingReason ?? null,
           active_engine: ctx.activeEngine,
           market_mode: ctx.marketMode,
           boxPos: snapshot.boxPos ?? null,
@@ -1025,6 +1037,9 @@ export function applyPaperSignalMarketAlignment<T extends SymbolSnapshotLike>(in
           trendOk,
           ema_gap: emaGap,
           qualityScore: snapshot.qualityScore,
+          allowLongNow,
+          allowShortNow,
+          crashOk,
           allow_new_long: ctx.allowNewLong,
           allow_new_short: ctx.allowNewShort,
           long_allow: risk?.longAllow ?? null,
