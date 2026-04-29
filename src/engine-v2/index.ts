@@ -1329,14 +1329,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         });
         const lifecycleProofKey = [
             lifecycleAuthority.lifecycleStage,
-            lifecycleAuthority.positionStateOwner,
+            lifecycleAuthority.lifecycleAuthorityOwner,
+            lifecycleAuthority.executionOwner,
             lifecycleAuthority.cooldownType,
             lifecycleAuthority.partialAction,
             lifecycleAuthority.exitAction,
             lifecycleAuthority.consistencyPass,
-            lifecycleAuthority.inconsistencyReasons.join(",")
+            lifecycleAuthority.trueInconsistencyReasons.join(",")
         ].join("|");
-        if (shouldEmitV2Proof("V2_TRADE_LIFECYCLE_PROOF", String(input.symbol), lifecycleProofKey, lifecycleAuthority.consistencyPass === false)) {
+        if (shouldEmitV2Proof("V2_TRADE_LIFECYCLE_PROOF", String(input.symbol), lifecycleProofKey, lifecycleAuthority.trueInconsistencyReasons.length > 0)) {
             console.info(JSON.stringify({
                 event: "V2_TRADE_LIFECYCLE_PROOF",
                 symbol: String(input.symbol),
@@ -1352,6 +1353,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 side: v2SideAfterPromotion,
                 v2_decision: finalDecision,
                 v2_side: v2SideAfterPromotion,
+                lifecycle_authority_owner: lifecycleAuthority.lifecycleAuthorityOwner,
+                execution_owner: lifecycleAuthority.executionOwner,
                 position_state_owner: lifecycleAuthority.positionStateOwner,
                 entry_managed_by_v2: lifecycleAuthority.entryManagedByV2,
                 add_on_managed_by_v2: lifecycleAuthority.addOnManagedByV2,
@@ -1366,6 +1369,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 cooldown_reason: lifecycleAuthority.cooldownReason,
                 legacy_intervention_detected: lifecycleAuthority.legacyInterventionDetected,
                 consistency_pass: lifecycleAuthority.consistencyPass,
+                known_shadow_gaps: lifecycleAuthority.knownShadowGaps,
+                true_inconsistency_reasons: lifecycleAuthority.trueInconsistencyReasons,
                 inconsistency_reasons: lifecycleAuthority.inconsistencyReasons,
                 proof_reasons: lifecycleAuthority.proofReasons
             }));

@@ -2,9 +2,6 @@ import type { V2TradeLifecycleAuthorityInput, V2TradeLifecycleAuthorityResult, V
 
 function resolveCooldownType(input: V2TradeLifecycleAuthorityInput): V2CooldownType {
     const reason = String(input.cooldownState.reason ?? "").toLowerCase();
-    if (reason.includes("risk") || reason.includes("halt") || reason.includes("daily_loss")) return "risk_halt";
-    if (reason.includes("reentry_fail") || reason.includes("fail_reentry")) return "fail_reentry";
-    if (input.cooldownState.reentryBlocked || reason.includes("reentry") || reason.includes("cooldown")) return "time_reentry";
     if (
         (input.directionalShockState === "DOWN" && input.side === "long") ||
         (input.directionalShockState === "UP" && input.side === "short") ||
@@ -13,6 +10,9 @@ function resolveCooldownType(input: V2TradeLifecycleAuthorityInput): V2CooldownT
     ) {
         return "direction_block";
     }
+    if (reason.includes("risk") || reason.includes("halt") || reason.includes("daily_loss")) return "risk_halt";
+    if (reason.includes("reentry_fail") || reason.includes("fail_reentry")) return "fail_reentry";
+    if (input.cooldownState.reentryBlocked || reason.includes("reentry") || reason.includes("cooldown")) return "time_reentry";
     return "none";
 }
 
@@ -29,10 +29,18 @@ function resolveLifecycleStage(input: V2TradeLifecycleAuthorityInput): V2Lifecyc
 
 export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityInput): V2TradeLifecycleAuthorityResult {
     const proofReasons: string[] = [];
-    const inconsistencyReasons: string[] = [];
+    const trueInconsistencyReasons: string[] = [];
+    const knownShadowGaps: string[] = [];
     const cooldownType = resolveCooldownType(input);
     const lifecycleStage = resolveLifecycleStage(input);
-    const isV2Owner = input.authoritySource === "v2" && input.adoptedEngine === "V2";
+    const lifecycleAuthorityOwner: V2TradeLifecycleAuthorityResult["lifecycleAuthorityOwner"] =
+        input.authoritySource === "v2" && input.adoptedEngine === "V2"
+            ? "v2"
+            : input.authoritySource === "v1"
+                ? "legacy"
+                : "unknown";
+    const isV2Owner = lifecycleAuthorityOwner === "v2";
+    const executionOwner: V2TradeLifecycleAuthorityResult["executionOwner"] = "paper_engine";
     const partialExecutionOwner = "paper_engine";
     const exitExecutionOwner = "paper_engine";
     const cooldownExecutionOwner = "paper_engine";
@@ -81,16 +89,16 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
     }
 
     if (cooldownType !== "none" && input.v2Decision === "ENTER") {
-        inconsistencyReasons.push("COOLDOWN_ENTER_CONFLICT");
+        trueInconsistencyReasons.push("COOLDOWN_ENTER_CONFLICT");
     }
     if (input.authoritySource !== "v2") {
-        inconsistencyReasons.push("AUTHORITY_SOURCE_NOT_V2");
+        trueInconsistencyReasons.push("AUTHORITY_SOURCE_NOT_V2");
     }
     if (input.adoptedEngine !== "V2") {
-        inconsistencyReasons.push("ADOPTED_ENGINE_NOT_V2");
+        trueInconsistencyReasons.push("ADOPTED_ENGINE_NOT_V2");
     }
     if (input.v2Side !== input.side && input.side !== null && input.v2Side !== null) {
-        inconsistencyReasons.push("SIDE_MISMATCH_V2_SIDE");
+        trueInconsistencyReasons.push("SIDE_MISMATCH_V2_SIDE");
     }
     if (
         input.directionalShockState === "DOWN" &&
@@ -98,26 +106,31 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
         cooldownType === "risk_halt" &&
         String(input.cooldownState.reason ?? "").toLowerCase().includes("direction")
     ) {
-        inconsistencyReasons.push("DIRECTION_BLOCK_MERGED_INTO_RISK_COOLDOWN");
+        trueInconsistencyReasons.push("DIRECTION_BLOCK_MERGED_INTO_RISK_COOLDOWN");
     }
 
-    inconsistencyReasons.push("PARTIAL_EXECUTION_OWNER_NOT_V2");
+    knownShadowGaps.push("PARTIAL_EXECUTION_OWNER_NOT_V2");
     proofReasons.push(`partial_execution_owner=${partialExecutionOwner}`);
-    inconsistencyReasons.push("EXIT_EXECUTION_OWNER_NOT_V2");
+    knownShadowGaps.push("EXIT_EXECUTION_OWNER_NOT_V2");
     proofReasons.push(`exit_execution_owner=${exitExecutionOwner}`);
-    inconsistencyReasons.push("COOLDOWN_OWNER_NOT_V2");
+    knownShadowGaps.push("COOLDOWN_OWNER_NOT_V2");
     proofReasons.push(`cooldown_owner=${cooldownExecutionOwner}`);
-    inconsistencyReasons.push("POSITION_STATE_OWNER_NOT_V2");
+    knownShadowGaps.push("POSITION_STATE_OWNER_NOT_V2");
     proofReasons.push(`position_state_owner=${positionStateExecutionOwner}`);
-    inconsistencyReasons.push("POST_ENTRY_EXECUTION_OWNER_PAPER_ENGINE");
+    knownShadowGaps.push("POST_ENTRY_EXECUTION_OWNER_PAPER_ENGINE");
     proofReasons.push(`post_entry_execution_owner=${postEntryExecutionOwner}`);
     if (isV2Owner && postEntryExecutionOwner === "paper_engine") {
-        inconsistencyReasons.push("V2_LIFECYCLE_WITH_PAPER_EXECUTION_OWNER");
+        knownShadowGaps.push("V2_LIFECYCLE_WITH_PAPER_EXECUTION_OWNER");
         proofReasons.push("lifecycle_authority_v2_execution_owner_paper_engine");
     }
 
-    const legacyInterventionDetected = !isV2Owner || inconsistencyReasons.some((x) => x.includes("LEGACY"));
-    const consistencyPass = inconsistencyReasons.length === 0 && isV2Owner;
+    const inconsistencyReasons = [...trueInconsistencyReasons, ...knownShadowGaps];
+    const legacyInterventionDetected =
+        !isV2Owner ||
+        executionOwner === "paper_engine" ||
+        executionOwner === "legacy" ||
+        executionOwner === "unknown";
+    const consistencyPass = trueInconsistencyReasons.length === 0;
 
     const result: V2TradeLifecycleAuthorityResult = {
         symbol: input.symbol,
@@ -125,13 +138,15 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
         lifecycleStage,
         authoritySource: input.authoritySource,
         adoptedEngine: input.adoptedEngine,
+        lifecycleAuthorityOwner,
+        executionOwner,
         positionStateOwner: isV2Owner ? "v2" : input.authoritySource === "v1" ? "legacy" : "unknown",
         entryManagedByV2: isV2Owner,
-        addOnManagedByV2: isV2Owner,
-        partialManagedByV2: isV2Owner,
-        exitManagedByV2: isV2Owner,
-        cooldownManagedByV2: isV2Owner,
-        positionStateManagedByV2: isV2Owner,
+        addOnManagedByV2: false,
+        partialManagedByV2: false,
+        exitManagedByV2: false,
+        cooldownManagedByV2: false,
+        positionStateManagedByV2: false,
         addOnAllowed,
         partialAction,
         exitAction,
@@ -139,6 +154,8 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
         cooldownReason: input.cooldownState.reason,
         legacyInterventionDetected,
         consistencyPass,
+        knownShadowGaps,
+        trueInconsistencyReasons,
         inconsistencyReasons,
         proofReasons
     };

@@ -572,6 +572,8 @@ export interface V2TradeLifecycleAuthorityResult {
     lifecycleStage: V2LifecycleStage;
     authoritySource: "v2" | "v1";
     adoptedEngine: "V2" | "V1" | "UNKNOWN";
+    lifecycleAuthorityOwner: "v2" | "legacy" | "unknown";
+    executionOwner: "paper_engine" | "v2_executor" | "legacy" | "unknown";
     positionStateOwner: "v2" | "legacy" | "unknown";
     entryManagedByV2: boolean;
     addOnManagedByV2: boolean;
@@ -586,6 +588,8 @@ export interface V2TradeLifecycleAuthorityResult {
     cooldownReason: string | null;
     legacyInterventionDetected: boolean;
     consistencyPass: boolean;
+    knownShadowGaps: string[];
+    trueInconsistencyReasons: string[];
     inconsistencyReasons: string[];
     proofReasons: string[];
 }
