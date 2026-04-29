@@ -4091,8 +4091,9 @@ export class PaperEngine {
       }
       const v2ExitAuthority = envelope.selector?.v2_result.v2ExitAuthority ?? null;
       const lifecycleAuthority = envelope.selector?.v2_result.lifecycleAuthority ?? null;
+      let paperExitProofEmitted = false;
       const emitV2ExitAuthorityProof = (paperExitAction: "none" | "exit", paperExitReason: string | null): void => {
-        if (!v2ExitAuthority) return;
+        if (!v2ExitAuthority || paperExitProofEmitted) return;
         const v2PaperExitAgreement =
           (v2ExitAuthority.shouldExit === true && paperExitAction === "exit") ||
           (v2ExitAuthority.shouldExit !== true && paperExitAction === "none");
@@ -4108,6 +4109,7 @@ export class PaperEngine {
           v2PaperExitAgreement === false ||
           (Array.isArray(v2ExitAuthority.trueInconsistencyReasons) && v2ExitAuthority.trueInconsistencyReasons.length > 0);
         if (!shouldEmitV2Proof("V2_EXIT_AUTHORITY_PROOF", sk, proofKey, highPriority)) return;
+        paperExitProofEmitted = true;
         this.logger.info("V2_EXIT_AUTHORITY_PROOF", {
           symbol: sk,
           position_id: `${sk}:${open.side}:${open.entryStage ?? 1}`,
@@ -4132,7 +4134,6 @@ export class PaperEngine {
           proof_reasons: v2ExitAuthority.proofReasons ?? []
         });
       };
-      emitV2ExitAuthorityProof("none", null);
 
       const closePrice = snap.lastPrice;
       const closedAt = snap.fetchedAt;
@@ -4359,6 +4360,7 @@ export class PaperEngine {
                 realized_pnl: m.pnlUsdNet,
                 ...buildPositionIdentityMeta(open)
               });
+              if (!paperExitProofEmitted) emitV2ExitAuthorityProof("none", null);
               continue;
             }
           }
@@ -4487,6 +4489,7 @@ export class PaperEngine {
                 realized_pnl: m.pnlUsdNet,
                 ...buildPositionIdentityMeta(open)
               });
+              if (!paperExitProofEmitted) emitV2ExitAuthorityProof("none", null);
               continue;
             }
           }
@@ -4702,6 +4705,7 @@ export class PaperEngine {
             realized_pnl: m.pnlUsdNet,
             ...buildPositionIdentityMeta(open)
           });
+          if (!paperExitProofEmitted) emitV2ExitAuthorityProof("none", null);
           continue;
         }
 
@@ -4910,6 +4914,7 @@ export class PaperEngine {
             realized_pnl: m.pnlUsdNet,
             ...buildPositionIdentityMeta(open)
           });
+          if (!paperExitProofEmitted) emitV2ExitAuthorityProof("none", null);
           continue;
         }
       }
@@ -5848,7 +5853,8 @@ export class PaperEngine {
             realized_pnl: m.pnlUsdNet,
             ...buildPositionIdentityMeta(open)
           });
-          continue;
+        if (!paperExitProofEmitted) emitV2ExitAuthorityProof("none", null);
+        continue;
         }
         // mid: 무조건 유지 금지 → 아래 minHold / candidate_lost 로 진행
       } else {
