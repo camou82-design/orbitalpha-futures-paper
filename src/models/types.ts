@@ -917,6 +917,7 @@ export type PaperExitType =
   | "EXIT_SHORT_MOMENTUM_TRAIL"
   | "EXIT_CRASH_FORCE"
   | "EXIT_CRASH_REDUCE"
+  | "EXIT_V2_AUTHORITY"
   | "EXIT_UNKNOWN";
 
 /** 종료 저장·API용 카테고리(SL/TP/…). */
@@ -937,6 +938,7 @@ export type PaperCloseSource =
   | "CRASH_LONG_DEFENSE"
   | "CRASH_SHORT_MOMENTUM"
   | "CRASH"
+  | "V2_AUTHORITY"
   | "UNKNOWN";
 
 /** Market Mode Selector 단일 출력(틱 단위). */
@@ -1237,7 +1239,8 @@ export type PaperClosedPositionRecord = Readonly<{
   | "EXIT_LONG_CRASH_REDUCE"
   | "EXIT_SHORT_MOMENTUM_TRAIL"
   | "EXIT_CRASH_FORCE"
-  | "EXIT_CRASH_REDUCE";
+  | "EXIT_CRASH_REDUCE"
+  | "v2_exit_authority";
   /** 표준 종료 유형 (내부 코드). */
   exitType: PaperExitType;
   /** 사용자·리포트용 종료 사유 문구. */

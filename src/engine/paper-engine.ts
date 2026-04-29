@@ -850,6 +850,8 @@ export class PaperEngine {
    * Key: `${symbol}:${side}:${openedAt}`
    */
   private readonly terminalExitConsumedByFlow = new Set<string>();
+  /** Deduplication for V2 exit authority proof logs. Key: `${symbol}_${side}` */
+  private lastV2ExitAuthorityProofBySymbol = new Map<string, string>();
 
   private readonly okxDemo: OkxDemoClient | null;
   private okxAccountConfigLoaded = false;
@@ -4111,6 +4113,7 @@ export class PaperEngine {
       if (t === "EXIT_PARTIAL_TP" || t === "EXIT_TP_1" || t === "EXIT_TP_2") return "EXIT_TP";
       if (t === "EXIT_TIME_STOP") return "EXIT_TIME_STOP";
       if (t === "EXIT_SL") return "EXIT_SL";
+      if (r === "v2_exit_authority") return "EXIT_V2_AUTHORITY";
       if (t === "EXIT_TRAILING" || t === "EXIT_REGIME") return "EXIT_REGIME";
       if (t === "EXIT_REGIME_BREAK") return "EXIT_TREND_BREAK";
       return t;
@@ -4287,11 +4290,16 @@ export class PaperEngine {
       let paperPartialProofHandled = false;
       const handleV2ExitAuthorityProof = (paperExitAction: "none" | "exit", paperExitReason: string | null): void => {
         if (!v2ExitAuthority || paperExitProofHandled) return;
-        // Outcome handling is per-position/per-loop and must be independent from log dedupe.
         paperExitProofHandled = true;
+
         const v2PaperExitAgreement =
           (v2ExitAuthority.shouldExit === true && paperExitAction === "exit") ||
           (v2ExitAuthority.shouldExit !== true && paperExitAction === "none");
+
+        const highPriority =
+          v2PaperExitAgreement === false ||
+          (Array.isArray(v2ExitAuthority.trueInconsistencyReasons) && v2ExitAuthority.trueInconsistencyReasons.length > 0);
+
         const proofKey = [
           v2ExitAuthority.exitAction,
           v2ExitAuthority.shouldExit,
@@ -4300,33 +4308,49 @@ export class PaperEngine {
           paperExitReason ?? "none",
           v2PaperExitAgreement
         ].join("|");
-        const highPriority =
-          v2PaperExitAgreement === false ||
-          (Array.isArray(v2ExitAuthority.trueInconsistencyReasons) && v2ExitAuthority.trueInconsistencyReasons.length > 0);
-        if (!shouldEmitV2Proof("V2_EXIT_AUTHORITY_PROOF", sk, proofKey, highPriority)) return;
-        this.logger.info("V2_EXIT_AUTHORITY_PROOF", {
-          symbol: sk,
-          position_id: `${sk}:${open.side}:${open.entryStage ?? 1}`,
-          side: open.side,
-          regime: open.regimeAtEntry ?? "NO_TRADE",
-          market_mode: input.marketMode.marketMode,
-          directional_shock_state: this.lastRisk?.directionalShockState ?? "NONE",
-          lifecycle_authority_owner: lifecycleAuthority?.lifecycleAuthorityOwner ?? "unknown",
-          exit_authority_owner: v2ExitAuthority.exitAuthorityOwner,
-          exit_execution_owner: v2ExitAuthority.exitExecutionOwner,
-          v2_exit_action: v2ExitAuthority.exitAction,
-          v2_should_exit: v2ExitAuthority.shouldExit,
-          v2_exit_reason: v2ExitAuthority.exitReason,
-          v2_exit_urgency: v2ExitAuthority.exitUrgency,
-          v2_exit_confidence: v2ExitAuthority.exitConfidence,
-          v2_reduce_ratio: v2ExitAuthority.reduceRatio,
-          paper_exit_action: paperExitAction,
-          paper_exit_reason: paperExitReason,
-          v2_paper_exit_agreement: v2PaperExitAgreement,
-          known_shadow_gaps: v2ExitAuthority.knownShadowGaps ?? [],
-          true_inconsistency_reasons: v2ExitAuthority.trueInconsistencyReasons ?? [],
-          proof_reasons: v2ExitAuthority.proofReasons ?? []
-        });
+
+        // Use V2_EXIT_AUTHORITY_PROOF for detailed internal state (deduped by shouldEmitV2Proof)
+        if (shouldEmitV2Proof("V2_EXIT_AUTHORITY_PROOF", sk, proofKey, highPriority)) {
+          this.logger.info("V2_EXIT_AUTHORITY_PROOF", {
+            symbol: sk,
+            position_id: `${sk}:${open.side}:${open.entryStage ?? 1}`,
+            side: open.side,
+            regime: open.regimeAtEntry ?? "NO_TRADE",
+            market_mode: input.marketMode.marketMode,
+            directional_shock_state: this.lastRisk?.directionalShockState ?? "NONE",
+            lifecycle_authority_owner: lifecycleAuthority?.lifecycleAuthorityOwner ?? "unknown",
+            exit_authority_owner: v2ExitAuthority.exitAuthorityOwner,
+            exit_execution_owner: v2ExitAuthority.exitExecutionOwner,
+            v2_exit_action: v2ExitAuthority.exitAction,
+            v2_should_exit: v2ExitAuthority.shouldExit,
+            v2_exit_reason: v2ExitAuthority.exitReason,
+            v2_exit_urgency: v2ExitAuthority.exitUrgency,
+            v2_exit_confidence: v2ExitAuthority.exitConfidence,
+            v2_reduce_ratio: v2ExitAuthority.reduceRatio,
+            paper_exit_action: paperExitAction,
+            paper_exit_reason: paperExitReason,
+            v2_paper_exit_agreement: v2PaperExitAgreement,
+            known_shadow_gaps: v2ExitAuthority.knownShadowGaps ?? [],
+            true_inconsistency_reasons: v2ExitAuthority.trueInconsistencyReasons ?? [],
+            proof_reasons: v2ExitAuthority.proofReasons ?? []
+          });
+        }
+
+        // Use V2_EXIT_EXECUTION_AUTHORITY_PROOF for authority transfer traceability (deduped)
+        const execProofKey = `${v2ExitAuthority.shouldExit}|${paperExitAction}|${v2ExitAuthority.exitReason}|${paperExitReason}`;
+        if (shouldEmitV2Proof("V2_EXIT_EXECUTION_AUTHORITY_PROOF", sk, execProofKey, highPriority)) {
+          this.logger.info("V2_EXIT_EXECUTION_AUTHORITY_PROOF", {
+            symbol: sk,
+            side: open.side,
+            v2_should_exit: v2ExitAuthority.shouldExit,
+            v2_exit_reason: v2ExitAuthority.exitReason,
+            v2_exit_urgency: v2ExitAuthority.exitUrgency,
+            v2_exit_action: v2ExitAuthority.exitAction,
+            paper_exit_action: paperExitAction,
+            paper_exit_reason: paperExitReason,
+            agreement: v2PaperExitAgreement
+          });
+        }
       };
       const handleV2PartialAuthorityProof = (
         paperPartialAction: "none" | "partial" | "reduce" | "superseded_by_exit",
@@ -5578,6 +5602,34 @@ export class PaperEngine {
             ema20: snap.ema20,
             ema60: snap.ema60
           });
+      
+      // --- V2 EXIT AUTHORITY TAKEOVER ---
+      const v2TakeoverPotential = v2ExitAuthority?.shouldExit === true && exitEval.action !== "close";
+      if (v2TakeoverPotential) {
+        const takeoverProofKey = `${v2ExitAuthority?.exitReason}|${v2ExitAuthority?.exitUrgency}|${exitEval.action}|${exitEval.reason}`;
+        if (shouldEmitV2Proof("V2_EXIT_TAKEOVER_PROOF", sk, takeoverProofKey, true)) {
+          this.logger.info("V2_EXIT_TAKEOVER_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            v2_exit_reason: v2ExitAuthority?.exitReason,
+            v2_exit_urgency: v2ExitAuthority?.exitUrgency,
+            original_engine_action: exitEval.action,
+            original_engine_reason: exitEval.reason,
+            note: "V2 Authority takeover triggered: Engine action overridden to 'close'"
+          });
+        }
+        exitEval = {
+          ...exitEval,
+          action: "close",
+          reason: "v2_exit_authority",
+          detail: {
+            ...(exitEval.detail ?? {}),
+            v2_takeover_applied: true,
+            v2_exit_reason: v2ExitAuthority?.exitReason,
+            v2_exit_urgency: v2ExitAuthority?.exitUrgency
+          }
+        };
+      }
 
       if (
         exitLane === "RANGE" &&
@@ -5740,7 +5792,7 @@ export class PaperEngine {
 
         finalCloseReason = cr;
         confirmedExitType = exitEventJsonlType(cr);
-        confirmedCloseSource = "executor_close_action";
+        confirmedCloseSource = cr === "v2_exit_authority" ? "V2_AUTHORITY" : "executor_close_action";
         const exDetail = (exitEval.detail ?? {}) as Record<string, unknown>;
         const closedRow = toClosed(cr, m, open.sizeUsd);
         handleV2ExitAuthorityProof("exit", cr);
@@ -5836,6 +5888,10 @@ export class PaperEngine {
             cr === "regime_exit")
         ) {
           this.trendCooldownUntilBySymbol.set(String(open.symbol), Date.now() + 12 * 60_000);
+        }
+
+        if (cr === "v2_exit_authority") {
+          this.lastExitReasonLabel = `V2 우선 권한 청산 (${v2ExitAuthority?.exitReason ?? "N/A"})`;
         }
         continue;
       }
@@ -6107,9 +6163,7 @@ export class PaperEngine {
             realized_pnl: m.pnlUsdNet,
             ...buildPositionIdentityMeta(open)
           });
-        handleV2ExitAuthorityProof("none", null);
-        handleV2PartialAuthorityProof("none", null);
-        continue;
+          continue;
         }
         // mid: 무조건 유지 금지 → 아래 minHold / candidate_lost 로 진행
       } else {
@@ -6339,6 +6393,10 @@ export class PaperEngine {
       });
 
       if ((finalCloseReason as any) === "none") {
+        // Every tick authority tracking (deduped internally via shouldEmitV2Proof)
+        handleV2ExitAuthorityProof("none", null);
+        handleV2PartialAuthorityProof("none", null);
+
         remaining.push(posTrail);
       }
     }

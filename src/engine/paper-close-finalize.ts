@@ -66,6 +66,8 @@ export function defaultLabelForExitType(t: PaperExitType): string {
       return "급락 보호 강제 청산";
     case "EXIT_CRASH_REDUCE":
       return "급락 위험 비중 축소";
+    case "EXIT_V2_AUTHORITY":
+      return "V2 우선 권한 청산";
     case "EXIT_UNKNOWN":
       return "미분류 청산";
     default: {
@@ -115,6 +117,8 @@ export function inferPaperCloseSourceFromExitType(et: PaperExitType): PaperClose
     case "EXIT_CRASH_FORCE":
     case "EXIT_CRASH_REDUCE":
       return "CRASH";
+    case "EXIT_V2_AUTHORITY":
+      return "V2_AUTHORITY";
     case "EXIT_UNKNOWN":
     default:
       return "UNKNOWN";
@@ -129,6 +133,7 @@ export function derivePaperCloseSource(
   if (exitType === "EXIT_LONG_CRASH_FORCE" || exitType === "EXIT_LONG_CRASH_REDUCE") return "CRASH_LONG_DEFENSE";
   if (exitType === "EXIT_SHORT_MOMENTUM_TRAIL") return "CRASH_SHORT_MOMENTUM";
   if (exitType === "EXIT_CRASH_FORCE" || exitType === "EXIT_CRASH_REDUCE") return "CRASH";
+  if (exitType === "EXIT_V2_AUTHORITY") return "V2_AUTHORITY";
 
   switch (closeReason) {
     case "EXIT_LONG_CRASH_FORCE":
@@ -164,6 +169,8 @@ export function derivePaperCloseSource(
       return "SWITCH";
     case "candidate_lost":
       return "SIGNAL_LOST";
+    case "v2_exit_authority":
+      return "V2_AUTHORITY";
     default:
       if (exitType !== "EXIT_UNKNOWN") return inferPaperCloseSourceFromExitType(exitType);
       return "UNKNOWN";
@@ -297,6 +304,8 @@ export function paperExitDisplayMeta(
       return { exitType: "EXIT_REGIME_BREAK", closeReasonLabel: "구조적 추세 전환" };
     case "trend_switch":
       return { exitType: "EXIT_TREND_SWITCH", closeReasonLabel: defaultLabelForExitType("EXIT_TREND_SWITCH") };
+    case "v2_exit_authority":
+      return { exitType: "EXIT_V2_AUTHORITY", closeReasonLabel: defaultLabelForExitType("EXIT_V2_AUTHORITY") };
     default: {
       const coerced = coerceCanonicalPaperCloseReason(closeReason);
       if (coerced !== closeReason) {

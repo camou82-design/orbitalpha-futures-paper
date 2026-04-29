@@ -29,7 +29,8 @@ const VALID_CLOSE_REASONS = new Set<string>([
   "EXIT_LONG_CRASH_REDUCE",
   "EXIT_SHORT_MOMENTUM_TRAIL",
   "EXIT_CRASH_FORCE",
-  "EXIT_CRASH_REDUCE"
+  "EXIT_CRASH_REDUCE",
+  "v2_exit_authority"
 ]);
 
 const VALID_EXIT_TYPES = new Set<PaperExitType>([
@@ -54,6 +55,7 @@ const VALID_EXIT_TYPES = new Set<PaperExitType>([
   "EXIT_SHORT_MOMENTUM_TRAIL",
   "EXIT_CRASH_FORCE",
   "EXIT_CRASH_REDUCE",
+  "EXIT_V2_AUTHORITY",
   "EXIT_UNKNOWN"
 ]);
 
