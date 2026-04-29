@@ -4091,9 +4091,11 @@ export class PaperEngine {
       }
       const v2ExitAuthority = envelope.selector?.v2_result.v2ExitAuthority ?? null;
       const lifecycleAuthority = envelope.selector?.v2_result.lifecycleAuthority ?? null;
-      let paperExitProofEmitted = false;
-      const emitV2ExitAuthorityProof = (paperExitAction: "none" | "exit", paperExitReason: string | null): void => {
-        if (!v2ExitAuthority || paperExitProofEmitted) return;
+      let paperExitProofHandled = false;
+      const handleV2ExitAuthorityProof = (paperExitAction: "none" | "exit", paperExitReason: string | null): void => {
+        if (!v2ExitAuthority || paperExitProofHandled) return;
+        // Outcome handling is per-position/per-loop and must be independent from log dedupe.
+        paperExitProofHandled = true;
         const v2PaperExitAgreement =
           (v2ExitAuthority.shouldExit === true && paperExitAction === "exit") ||
           (v2ExitAuthority.shouldExit !== true && paperExitAction === "none");
@@ -4109,7 +4111,6 @@ export class PaperEngine {
           v2PaperExitAgreement === false ||
           (Array.isArray(v2ExitAuthority.trueInconsistencyReasons) && v2ExitAuthority.trueInconsistencyReasons.length > 0);
         if (!shouldEmitV2Proof("V2_EXIT_AUTHORITY_PROOF", sk, proofKey, highPriority)) return;
-        paperExitProofEmitted = true;
         this.logger.info("V2_EXIT_AUTHORITY_PROOF", {
           symbol: sk,
           position_id: `${sk}:${open.side}:${open.entryStage ?? 1}`,
@@ -4297,7 +4298,7 @@ export class PaperEngine {
                 closeReasonLabelOverride: "상단 반전 구간: 롱 정리(숏 평가 우선)",
                 ...snapPaths
               });
-              emitV2ExitAuthorityProof("exit", cr);
+              handleV2ExitAuthorityProof("exit", cr);
               await this.dispatchOkxClose({
                 symbol: open.symbol,
                 side: open.side,
@@ -4360,7 +4361,7 @@ export class PaperEngine {
                 realized_pnl: m.pnlUsdNet,
                 ...buildPositionIdentityMeta(open)
               });
-              if (!paperExitProofEmitted) emitV2ExitAuthorityProof("none", null);
+              handleV2ExitAuthorityProof("none", null);
               continue;
             }
           }
@@ -4426,7 +4427,7 @@ export class PaperEngine {
                 closeReasonLabelOverride: "하단 반전 구간: 숏 정리(롱 평가 우선)",
                 ...snapPaths
               });
-              emitV2ExitAuthorityProof("exit", cr);
+              handleV2ExitAuthorityProof("exit", cr);
               await this.dispatchOkxClose({
                 symbol: open.symbol,
                 side: open.side,
@@ -4489,7 +4490,7 @@ export class PaperEngine {
                 realized_pnl: m.pnlUsdNet,
                 ...buildPositionIdentityMeta(open)
               });
-              if (!paperExitProofEmitted) emitV2ExitAuthorityProof("none", null);
+              handleV2ExitAuthorityProof("none", null);
               continue;
             }
           }
@@ -4658,7 +4659,7 @@ export class PaperEngine {
           finalCloseReason = crTrail;
           confirmedExitType = exitEventJsonlType(crTrail);
           confirmedCloseSource = "range_profit_trail_executor";
-          emitV2ExitAuthorityProof("exit", crTrail);
+          handleV2ExitAuthorityProof("exit", crTrail);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -4705,7 +4706,7 @@ export class PaperEngine {
             realized_pnl: m.pnlUsdNet,
             ...buildPositionIdentityMeta(open)
           });
-          if (!paperExitProofEmitted) emitV2ExitAuthorityProof("none", null);
+          handleV2ExitAuthorityProof("none", null);
           continue;
         }
 
@@ -4861,7 +4862,7 @@ export class PaperEngine {
                 ...snapPaths
               })
               : toClosed(cr, m, open.sizeUsd);
-          emitV2ExitAuthorityProof("exit", cr);
+          handleV2ExitAuthorityProof("exit", cr);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -4914,7 +4915,7 @@ export class PaperEngine {
             realized_pnl: m.pnlUsdNet,
             ...buildPositionIdentityMeta(open)
           });
-          if (!paperExitProofEmitted) emitV2ExitAuthorityProof("none", null);
+          handleV2ExitAuthorityProof("none", null);
           continue;
         }
       }
@@ -4941,7 +4942,7 @@ export class PaperEngine {
           finalCloseReason = cr;
           confirmedExitType = "EXIT_TREND_SWITCH";
           confirmedCloseSource = "trend_engine_switch";
-          emitV2ExitAuthorityProof("exit", cr);
+          handleV2ExitAuthorityProof("exit", cr);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -5087,7 +5088,7 @@ export class PaperEngine {
         confirmedExitType = "EXIT_SL";
         confirmedCloseSource = "hard_stop_loss_gate";
         const closedRow = toClosed(cr, m, open.sizeUsd);
-        emitV2ExitAuthorityProof("exit", cr);
+        handleV2ExitAuthorityProof("exit", cr);
         await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
@@ -5245,7 +5246,7 @@ export class PaperEngine {
               ? "trend_gate_upper_regime_lane_exit"
               : "trend_regime_shift_gate_upper_opposing_trend_confirmed";
           const closedRow = toClosed(cr, m, open.sizeUsd);
-          emitV2ExitAuthorityProof("exit", cr);
+          handleV2ExitAuthorityProof("exit", cr);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -5491,7 +5492,7 @@ export class PaperEngine {
         confirmedCloseSource = "executor_close_action";
         const exDetail = (exitEval.detail ?? {}) as Record<string, unknown>;
         const closedRow = toClosed(cr, m, open.sizeUsd);
-        emitV2ExitAuthorityProof("exit", cr);
+        handleV2ExitAuthorityProof("exit", cr);
         await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
@@ -5853,7 +5854,7 @@ export class PaperEngine {
             realized_pnl: m.pnlUsdNet,
             ...buildPositionIdentityMeta(open)
           });
-        if (!paperExitProofEmitted) emitV2ExitAuthorityProof("none", null);
+        handleV2ExitAuthorityProof("none", null);
         continue;
         }
         // mid: 무조건 유지 금지 → 아래 minHold / candidate_lost 로 진행
