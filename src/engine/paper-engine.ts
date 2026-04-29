@@ -1443,7 +1443,6 @@ export class PaperEngine {
   }
 
   private buildBalanceDisplayContext(opens: ReadonlyArray<PaperOpenPositionRecord>): LiveBalanceAuthorityResult & {
-    okx_auth_mode: "disabled" | "demo" | "live";
     okx_auth_ready: boolean;
     okx_exchange_auth_opt_in: boolean;
     okx_live_enabled: boolean;
@@ -1453,23 +1452,6 @@ export class PaperEngine {
     okx_passphrase_present: boolean;
     okx_simulated_trading_header_enabled: boolean;
     live_max_order_notional_usdt: number;
-    balance_source: "okx_live_wallet" | "paper_config" | "unavailable";
-    position_source: "okx_actual" | "paper_estimated" | "unavailable";
-    okx_wallet_balance_usdt: number | null;
-    okx_available_balance_usdt: number | null;
-    okx_used_margin_usdt: number | null;
-    okx_total_position_notional_usdt: number | null;
-    okx_effective_leverage_used: number | null;
-    okx_position_parse_source: string | null;
-    paper_position_estimated_used_margin_usdt: number;
-    paper_position_estimated_notional_usdt: number;
-    paper_position_estimated_effective_leverage_used: number | null;
-    account_equity_display_source: "okx_live_wallet" | "paper_config" | "unavailable";
-    account_equity_krw_display: number | null;
-    account_equity_krw_effective: number | null;
-    max_usable_margin_krw_effective: number | null;
-    live_balance_ready: boolean;
-    live_balance_block_reason: string | null;
   } {
     const mode = this.config.okxAuthMode;
     const apiKey = mode === "live" ? this.config.okxApiKey : mode === "demo" ? this.config.okxDemoApiKey : "";
@@ -1488,7 +1470,7 @@ export class PaperEngine {
       }))
     });
     return {
-      okx_auth_mode: mode,
+      ...authority,
       okx_auth_ready: this.config.okxAuthReady,
       okx_exchange_auth_opt_in: this.config.okxExchangeAuthOptIn,
       okx_live_enabled: this.config.okxLiveEnabled,
@@ -1497,8 +1479,7 @@ export class PaperEngine {
       okx_api_secret_present: apiSecret.length > 0,
       okx_passphrase_present: passphrase.length > 0,
       okx_simulated_trading_header_enabled: this.config.okxSimulatedTradingHeaderEnabled,
-      live_max_order_notional_usdt: this.config.okxLiveMaxOrderNotionalUsdt,
-      ...authority
+      live_max_order_notional_usdt: this.config.okxLiveMaxOrderNotionalUsdt
     };
   }
 

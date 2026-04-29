@@ -23,6 +23,20 @@ export type LiveBalanceAuthorityResult = Readonly<{
   okx_effective_leverage_used: number | null;
   okx_position_parse_source: string | null;
 
+  // Proof fields for diagnostics
+  okx_auth_mode: "disabled" | "demo" | "live";
+  balance_source_raw: string | null;
+  wallet_field_source: string | null;
+  available_field_source: string | null;
+  raw_total_eq: number | null;
+  raw_adj_eq: number | null;
+  usdt_eq: number | null;
+  usdt_cash_bal: number | null;
+  usdt_avail_bal: number | null;
+  usdt_avail_eq: number | null;
+  usdt_frozen_bal: number | null;
+  usdt_ord_frozen: number | null;
+
   // 로컬 paper positions 기준 추정치 필드 분리
   paper_position_estimated_used_margin_usdt: number;
   paper_position_estimated_notional_usdt: number;
@@ -58,16 +72,71 @@ function selectUsdtDetail(details: ReadonlyArray<Record<string, unknown>>): Reco
 function parseWalletFromPayload(payload: Record<string, unknown> | null): {
   walletBalanceUsdt: number | null;
   availableBalanceUsdt: number | null;
+  raw_total_eq: number | null;
+  raw_adj_eq: number | null;
+  usdt_eq: number | null;
+  usdt_cash_bal: number | null;
+  usdt_avail_bal: number | null;
+  usdt_avail_eq: number | null;
+  usdt_frozen_bal: number | null;
+  usdt_ord_frozen: number | null;
+  wallet_field_source: string | null;
+  available_field_source: string | null;
 } {
-  if (!payload) return { walletBalanceUsdt: null, availableBalanceUsdt: null };
+  const out = {
+    walletBalanceUsdt: null as number | null,
+    availableBalanceUsdt: null as number | null,
+    raw_total_eq: null as number | null,
+    raw_adj_eq: null as number | null,
+    usdt_eq: null as number | null,
+    usdt_cash_bal: null as number | null,
+    usdt_avail_bal: null as number | null,
+    usdt_avail_eq: null as number | null,
+    usdt_frozen_bal: null as number | null,
+    usdt_ord_frozen: null as number | null,
+    wallet_field_source: null as string | null,
+    available_field_source: null as string | null,
+  };
+
+  if (!payload) return out;
+
+  out.raw_total_eq = toFiniteNumber(payload.totalEq);
+  out.raw_adj_eq = toFiniteNumber(payload.adjEq);
+
   const details = Array.isArray(payload.details) ? (payload.details as Record<string, unknown>[]) : [];
   const selected = selectUsdtDetail(details);
-  const walletBalanceUsdt = toFiniteNumber(payload.totalEq) ?? (selected ? toFiniteNumber(selected.eq) : null);
-  const availableBalanceUsdt =
-    (selected ? toFiniteNumber(selected.availEq) : null) ??
-    (selected ? toFiniteNumber(selected.availBal) : null) ??
-    (selected ? toFiniteNumber(selected.eq) : null);
-  return { walletBalanceUsdt, availableBalanceUsdt };
+
+  if (selected) {
+    out.usdt_eq = toFiniteNumber(selected.eq);
+    out.usdt_cash_bal = toFiniteNumber(selected.cashBal);
+    out.usdt_avail_bal = toFiniteNumber(selected.availBal);
+    out.usdt_avail_eq = toFiniteNumber(selected.availEq);
+    out.usdt_frozen_bal = toFiniteNumber(selected.frozenBal);
+    out.usdt_ord_frozen = toFiniteNumber(selected.ordFrozen);
+
+    // Wallet source selection
+    if (out.raw_total_eq != null) {
+      out.walletBalanceUsdt = out.raw_total_eq;
+      out.wallet_field_source = "payload.totalEq";
+    } else if (out.usdt_eq != null) {
+      out.walletBalanceUsdt = out.usdt_eq;
+      out.wallet_field_source = "selected.eq";
+    }
+
+    // Available source selection
+    if (out.usdt_avail_eq != null) {
+      out.availableBalanceUsdt = out.usdt_avail_eq;
+      out.available_field_source = "selected.availEq";
+    } else if (out.usdt_avail_bal != null) {
+      out.availableBalanceUsdt = out.usdt_avail_bal;
+      out.available_field_source = "selected.availBal";
+    } else if (out.usdt_eq != null) {
+      out.availableBalanceUsdt = out.usdt_eq;
+      out.available_field_source = "selected.eq_fallback";
+    }
+  }
+
+  return out;
 }
 
 function computePaperEstimatedUsage(
@@ -195,6 +264,19 @@ export function deriveLiveBalanceAuthority(input: LiveBalanceAuthorityInput): Li
       okx_effective_leverage_used: usage.leverage,
       okx_position_parse_source: "paper_estimated",
 
+      okx_auth_mode: input.okxAuthMode,
+      balance_source_raw: "paper_config",
+      wallet_field_source: null,
+      available_field_source: null,
+      raw_total_eq: null,
+      raw_adj_eq: null,
+      usdt_eq: null,
+      usdt_cash_bal: null,
+      usdt_avail_bal: null,
+      usdt_avail_eq: null,
+      usdt_frozen_bal: null,
+      usdt_ord_frozen: null,
+
       paper_position_estimated_used_margin_usdt: paperUsage.used_margin,
       paper_position_estimated_notional_usdt: paperUsage.notional,
       paper_position_estimated_effective_leverage_used: paperUsage.leverage,
@@ -227,6 +309,19 @@ export function deriveLiveBalanceAuthority(input: LiveBalanceAuthorityInput): Li
       okx_effective_leverage_used: null,
       okx_position_parse_source: null,
 
+      okx_auth_mode: input.okxAuthMode,
+      balance_source_raw: "unavailable",
+      wallet_field_source: parsedWallet.wallet_field_source,
+      available_field_source: parsedWallet.available_field_source,
+      raw_total_eq: parsedWallet.raw_total_eq,
+      raw_adj_eq: parsedWallet.raw_adj_eq,
+      usdt_eq: parsedWallet.usdt_eq,
+      usdt_cash_bal: parsedWallet.usdt_cash_bal,
+      usdt_avail_bal: parsedWallet.usdt_avail_bal,
+      usdt_avail_eq: parsedWallet.usdt_avail_eq,
+      usdt_frozen_bal: parsedWallet.usdt_frozen_bal,
+      usdt_ord_frozen: parsedWallet.usdt_ord_frozen,
+
       paper_position_estimated_used_margin_usdt: paperUsage.used_margin,
       paper_position_estimated_notional_usdt: paperUsage.notional,
       paper_position_estimated_effective_leverage_used: paperUsage.leverage,
@@ -248,17 +343,41 @@ export function deriveLiveBalanceAuthority(input: LiveBalanceAuthorityInput): Li
 
   const paperUsageWithLiveWallet = computePaperEstimatedUsage(input.positions, parsedWallet.walletBalanceUsdt);
 
-  return {
+  let live_balance_block_reason: string | null = null;
+  if (parsedWallet.availableBalanceUsdt === 0 && (parsedWallet.walletBalanceUsdt ?? 0) > 0) {
+    if (parsedWallet.usdt_avail_eq === 0) {
+      live_balance_block_reason = "AVAILABLE_BALANCE_ZERO_WITH_POSITIVE_WALLET";
+    } else if (parsedWallet.usdt_avail_eq == null) {
+      live_balance_block_reason = "OKX_AVAILABLE_FIELD_MISSING";
+    } else {
+      live_balance_block_reason = "OKX_AVAILABLE_FIELD_ZERO";
+    }
+  }
+
+  const result: LiveBalanceAuthorityResult = {
     balance_source: "okx_live_wallet",
     position_source: input.okxPositionsPayload ? "okx_actual" : "unavailable",
     live_balance_ready: true,
-    live_balance_block_reason: null,
+    live_balance_block_reason,
     okx_wallet_balance_usdt: parsedWallet.walletBalanceUsdt,
     okx_available_balance_usdt: parsedWallet.availableBalanceUsdt,
     okx_used_margin_usdt: input.okxPositionsPayload ? okxUsage.used_margin : null,
     okx_total_position_notional_usdt: input.okxPositionsPayload ? okxUsage.notional : null,
     okx_effective_leverage_used: input.okxPositionsPayload ? okxEffectiveLeverage : null,
     okx_position_parse_source: input.okxPositionsPayload ? okxUsage.parse_source : null,
+
+    okx_auth_mode: input.okxAuthMode,
+    balance_source_raw: "okx_live_wallet",
+    wallet_field_source: parsedWallet.wallet_field_source,
+    available_field_source: parsedWallet.available_field_source,
+    raw_total_eq: parsedWallet.raw_total_eq,
+    raw_adj_eq: parsedWallet.raw_adj_eq,
+    usdt_eq: parsedWallet.usdt_eq,
+    usdt_cash_bal: parsedWallet.usdt_cash_bal,
+    usdt_avail_bal: parsedWallet.usdt_avail_bal,
+    usdt_avail_eq: parsedWallet.usdt_avail_eq,
+    usdt_frozen_bal: parsedWallet.usdt_frozen_bal,
+    usdt_ord_frozen: parsedWallet.usdt_ord_frozen,
 
     paper_position_estimated_used_margin_usdt: paperUsage.used_margin,
     paper_position_estimated_notional_usdt: paperUsage.notional,
@@ -271,4 +390,25 @@ export function deriveLiveBalanceAuthority(input: LiveBalanceAuthorityInput): Li
     max_usable_margin_krw_effective: (parsedWallet.availableBalanceUsdt ?? 0) * 1000,
     position_margin_lines: okxUsage.lines
   };
+
+  console.info(JSON.stringify({
+    event: "OKX_LIVE_BALANCE_RAW_FIELD_PROOF",
+    okx_auth_mode: result.okx_auth_mode,
+    balance_source: result.balance_source,
+    wallet_field_source: result.wallet_field_source,
+    available_field_source: result.available_field_source,
+    raw_total_eq: result.raw_total_eq,
+    raw_adj_eq: result.raw_adj_eq,
+    usdt_eq: result.usdt_eq,
+    usdt_cash_bal: result.usdt_cash_bal,
+    usdt_avail_bal: result.usdt_avail_bal,
+    usdt_avail_eq: result.usdt_avail_eq,
+    usdt_frozen_bal: result.usdt_frozen_bal,
+    usdt_ord_frozen: result.usdt_ord_frozen,
+    parsed_wallet_balance_usdt: result.okx_wallet_balance_usdt,
+    parsed_available_balance_usdt: result.okx_available_balance_usdt,
+    live_balance_block_reason: result.live_balance_block_reason
+  }));
+
+  return result;
 }

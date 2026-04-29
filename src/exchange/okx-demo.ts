@@ -228,9 +228,30 @@ export class OkxDemoClient {
     const balancePayload = bal.ok ? (bal.value?.[0] as Record<string, unknown> | undefined) : undefined;
     const details = Array.isArray(balancePayload?.details) ? (balancePayload!.details as Record<string, unknown>[]) : [];
     const selectedDetail = selectUsdtDetail(details);
-    const walletBalanceUsdt =
-      (balancePayload ? parseOptionalFiniteNumber(balancePayload.totalEq) : null) ??
-      (selectedDetail ? parseOptionalFiniteNumber(selectedDetail.eq) : null);
+
+    if (balancePayload) {
+      const proof = {
+        event: "OKX_CHECK_SIGNED_READY_BALANCE_PROOF",
+        totalEq: balancePayload.totalEq,
+        adjEq: balancePayload.adjEq,
+        usdt_eq: selectedDetail?.eq,
+        usdt_cashBal: selectedDetail?.cashBal,
+        usdt_availBal: selectedDetail?.availBal,
+        usdt_availEq: selectedDetail?.availEq,
+        usdt_frozenBal: selectedDetail?.frozenBal,
+        usdt_ordFrozen: selectedDetail?.ordFrozen,
+      };
+      console.info(JSON.stringify(proof));
+    }
+
+    const walletBalanceUsdt = (() => {
+      const fromTotalEq = balancePayload ? parseOptionalFiniteNumber(balancePayload.totalEq) : null;
+      if (fromTotalEq != null) return fromTotalEq;
+      const fromEq = selectedDetail ? parseOptionalFiniteNumber(selectedDetail.eq) : null;
+      if (fromEq != null) return fromEq;
+      return null;
+    })();
+
     const availableBalanceUsdt = (() => {
       if (selectedDetail) {
         const byAvailEq = parseOptionalFiniteNumber(selectedDetail.availEq);
