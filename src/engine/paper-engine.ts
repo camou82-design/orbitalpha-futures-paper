@@ -82,7 +82,7 @@ import {
 import { evaluateMarketModeSelector } from "./mode-selector";
 import { evaluateRiskExposure } from "./risk-exposure";
 import { buildPaperExplanation } from "./explanation-layer";
-import { runEngineV2, adaptV2Input } from "../engine-v2/index";
+import { runEngineV2, adaptV2Input, shouldEmitV2Proof } from "../engine-v2/index";
 import {
   EngineV2Input,
   EngineV2OpMode,
@@ -198,39 +198,6 @@ const ENTRY_EVIDENCE_TREND_WEAKNESS_MAX = 0.65;
 const RANGE_RECHECK_PROMOTION_TICKS = 3;
 const RANGE_CONFIDENCE_HARD_HOLD_MAX = 0.45;
 const RANGE_CONFIDENCE_RECHECK_ALLOW_MIN = 0.55;
-const PAPER_V2_PROOF_KEY_TTL_MS = 60 * 60 * 1000;
-const PAPER_V2_PROOF_KEY_MAX_SIZE = 5000;
-const paperV2ProofLastKeyByEventSymbol = new Map<string, { key: string; updatedAtMs: number }>();
-
-function prunePaperV2ProofKeyMap(nowMs: number): void {
-  for (const [k, v] of paperV2ProofLastKeyByEventSymbol.entries()) {
-    if (nowMs - v.updatedAtMs > PAPER_V2_PROOF_KEY_TTL_MS) {
-      paperV2ProofLastKeyByEventSymbol.delete(k);
-    }
-  }
-  while (paperV2ProofLastKeyByEventSymbol.size > PAPER_V2_PROOF_KEY_MAX_SIZE) {
-    const oldest = paperV2ProofLastKeyByEventSymbol.keys().next();
-    if (oldest.done) break;
-    paperV2ProofLastKeyByEventSymbol.delete(oldest.value);
-  }
-}
-
-function shouldEmitV2Proof(eventName: string, symbol: string, key: string, highPriority: boolean): boolean {
-  const nowMs = Date.now();
-  prunePaperV2ProofKeyMap(nowMs);
-  const mapKey = `${eventName}:${symbol}`;
-  if (highPriority) {
-    paperV2ProofLastKeyByEventSymbol.set(mapKey, { key, updatedAtMs: nowMs });
-    return true;
-  }
-  const prev = paperV2ProofLastKeyByEventSymbol.get(mapKey)?.key;
-  if (prev !== key) {
-    paperV2ProofLastKeyByEventSymbol.set(mapKey, { key, updatedAtMs: nowMs });
-    return true;
-  }
-  paperV2ProofLastKeyByEventSymbol.set(mapKey, { key, updatedAtMs: nowMs });
-  return false;
-}
 
 function computeEntryEvidenceScore(input: {
   qualityScore: number | null;
@@ -2338,33 +2305,41 @@ export class PaperEngine {
         return true;
       })();
 
+      let cooldownProofHandled = false;
       if (v2CooldownAuthority) {
-        this.logger.info("V2_COOLDOWN_AUTHORITY_PROOF", {
-          symbol: sym,
-          side: v2CooldownAuthority.side,
-          regime: selectorResult?.v2_result.regime ?? null,
-          market_mode: selectorResult?.v2_result.regime ?? null,
-          directional_shock_state: (selectorResult?.v2_result.rawMetrics as any)?.directionalShockState ?? "NONE",
-          cooldown_authority_owner: v2CooldownAuthority.cooldownAuthorityOwner,
-          cooldown_execution_owner: v2CooldownAuthority.cooldownExecutionOwner,
-          v2_cooldown_action: v2CooldownAuthority.cooldownAction,
-          v2_should_cooldown: v2CooldownAuthority.shouldCooldown,
-          v2_cooldown_type: v2CooldownAuthority.cooldownType,
-          v2_cooldown_reason: v2CooldownAuthority.cooldownReason,
-          v2_cooldown_urgency: v2CooldownAuthority.cooldownUrgency,
-          v2_cooldown_remaining_ms: v2CooldownAuthority.cooldownRemainingMs,
-          direction_blocked: v2CooldownAuthority.directionBlocked,
-          paper_cooldown_action: paperCooldownAction,
-          paper_cooldown_type: paperCooldownType,
-          paper_cooldown_reason: paperRejectReason,
-          paper_reject_reason: paperRejectReason,
-          paper_risk_cooldown_subreason: paperRiskCooldownSubreason,
-          cooldown_superseded_by_server_authority,
-          v2_paper_cooldown_agreement,
-          known_shadow_gaps: v2CooldownAuthority.knownShadowGaps,
-          true_inconsistency_reasons: v2CooldownAuthority.trueInconsistencyReasons,
-          proof_reasons: v2CooldownAuthority.proofReasons
-        });
+        const v2Should = v2CooldownAuthority.shouldCooldown;
+        const proofKey = `${v2Should}:${paperCooldownAction}:${v2CooldownAuthority.cooldownType}:${paperCooldownType}:${paperRejectReason}:${v2_paper_cooldown_agreement}`;
+        const highPriority = v2_paper_cooldown_agreement === false || (v2CooldownAuthority.trueInconsistencyReasons?.length ?? 0) > 0;
+
+        if (shouldEmitV2Proof("V2_COOLDOWN_AUTHORITY_PROOF", String(sym), proofKey, highPriority)) {
+          this.logger.info("V2_COOLDOWN_AUTHORITY_PROOF", {
+            symbol: sym,
+            side: v2CooldownAuthority.side,
+            regime: selectorResult?.v2_result.regime ?? null,
+            market_mode: marketModeOut.marketMode ?? null,
+            directional_shock_state: (selectorResult?.v2_result.rawMetrics as any)?.directionalShockState ?? "UNKNOWN",
+            cooldown_authority_owner: v2CooldownAuthority.cooldownAuthorityOwner,
+            cooldown_execution_owner: v2CooldownAuthority.cooldownExecutionOwner,
+            v2_cooldown_action: v2CooldownAuthority.cooldownAction,
+            v2_should_cooldown: v2CooldownAuthority.shouldCooldown,
+            v2_cooldown_type: v2CooldownAuthority.cooldownType,
+            v2_cooldown_reason: v2CooldownAuthority.cooldownReason,
+            v2_cooldown_urgency: v2CooldownAuthority.cooldownUrgency,
+            v2_cooldown_remaining_ms: v2CooldownAuthority.cooldownRemainingMs,
+            direction_blocked: v2CooldownAuthority.directionBlocked,
+            paper_cooldown_action: paperCooldownAction,
+            paper_cooldown_type: paperCooldownType,
+            paper_cooldown_reason: paperRejectReason,
+            paper_reject_reason: paperRejectReason,
+            paper_risk_cooldown_subreason: paperRiskCooldownSubreason,
+            cooldown_superseded_by_server_authority,
+            v2_paper_cooldown_agreement,
+            known_shadow_gaps: v2CooldownAuthority.knownShadowGaps,
+            true_inconsistency_reasons: v2CooldownAuthority.trueInconsistencyReasons,
+            proof_reasons: v2CooldownAuthority.proofReasons
+          });
+        }
+        cooldownProofHandled = true;
       }
 
       envelope.v2_paper_cooldown_agreement = v2_paper_cooldown_agreement;
@@ -10142,7 +10117,7 @@ function buildV2StateBridge(
       .filter((x): x is V2BridgePosition => x !== null),
     globalRiskScore: 0.5,
     lossStreaks: lastRisk?.recentLossStreakByMode ?? {},
-    directionalShockState: lastRisk?.directionalShockState ?? "NONE",
+    directionalShockState: (lastRisk?.directionalShockState ?? "UNKNOWN") as "UP" | "DOWN" | "NONE" | "UNKNOWN",
     longAllow: lastRisk?.longAllow ?? true,
     shortAllow: lastRisk?.shortAllow ?? true,
     executionReadiness: paperExecutionReady,

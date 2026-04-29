@@ -140,7 +140,7 @@ export interface EngineV2Input {
         currentPositions: EngineV2Position[];
         lossStreaks: Record<string, number>;
         globalRiskScore: number;
-        directionalShockState: "UP" | "DOWN" | "NONE";
+        directionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
         longAllow: boolean;
         shortAllow: boolean;
         executionReadiness: boolean;
@@ -245,7 +245,7 @@ export interface EngineV2Decision {
     v2ExitAuthority?: V2ExitAuthorityResult;
     v2PartialAuthority?: V2PartialAuthorityResult;
     v2CooldownAuthority?: V2CooldownAuthorityResult;
-    rawMetrics: Record<string, number | boolean>;
+    rawMetrics: Record<string, number | boolean | string | null>;
 }
 
 /** 
@@ -300,7 +300,7 @@ export interface V2BridgeState {
     currentPositions: V2BridgePosition[];
     globalRiskScore: number;
     lossStreaks: Record<string, number>;
-    directionalShockState: "UP" | "DOWN" | "NONE";
+    directionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
     longAllow: boolean;
     shortAllow: boolean;
     executionReadiness: boolean;
@@ -502,7 +502,7 @@ export interface TransitionExecutorMetadata extends Record<string, string | numb
     boxBreakSide: "upper" | "lower" | "none";
     qualityScore: number;
     reviewingTicks: number;
-    directionalShockState: "UP" | "DOWN" | "NONE";
+    directionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
     longAllow: boolean;
     shortAllow: boolean;
     crashState: string;
@@ -600,7 +600,7 @@ export interface V2TradeLifecycleAuthorityInput {
     side: EngineV2Side;
     regime: EngineV2Regime;
     marketMode: EngineV2Regime;
-    directionalShockState: "UP" | "DOWN" | "NONE";
+    directionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
     v2Decision: EngineV2FinalDecision;
     v2Side: EngineV2Side;
     authoritySource: "v2" | "v1";

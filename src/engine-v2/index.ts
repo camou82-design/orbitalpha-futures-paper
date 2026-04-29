@@ -55,7 +55,7 @@ function pruneV2ProofKeyMap(nowMs: number): void {
         v2ProofLastKeyByEventSymbol.delete(oldest.value);
     }
 }
-function shouldEmitV2Proof(
+export function shouldEmitV2Proof(
     eventName: string,
     symbol: string,
     key: string,
@@ -1773,6 +1773,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2CooldownAuthority: v2CooldownAuthority ?? undefined,
         rawMetrics: {
             ...judgment.metrics,
+            qualityScore: input.snapshot.qualityScore ?? 0,
+            directionalShockState: v2State.directionalShockState,
             confidenceScore: confidence.score,
             sizingMultiplier: riskSizing.sizeMultiplier,
             microExecutionScore: microExecution?.score ?? 0,
@@ -1824,7 +1826,7 @@ export function adaptV2Input(
         currentPositions: LegacyPositionAdapter[];
         globalRiskScore: number;
         lossStreaks: Record<string, number>;
-        directionalShockState: "UP" | "DOWN" | "NONE";
+        directionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
         longAllow: boolean;
         shortAllow: boolean;
         executionReadiness: boolean;

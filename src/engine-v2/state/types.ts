@@ -43,7 +43,7 @@ export type V2StateAuthority = Readonly<{
     okxPassphrasePresent: boolean;
     okxSimulatedTradingHeaderEnabled: boolean;
     liveMaxOrderNotionalUsdt: number;
-    directionalShockState: "UP" | "DOWN" | "NONE";
+    directionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
     crashState: string;
     pumpState: string;
     longAllow: boolean;
