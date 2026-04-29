@@ -94,6 +94,8 @@ function parseWalletFromPayload(payload: Record<string, unknown> | null): {
   usdt_upl: number | null;
   wallet_field_source: string | null;
   available_field_source: string | null;
+  available_fallback_used: boolean;
+  available_fallback_reason: string | null;
 } {
   const out = {
     walletBalanceUsdt: null as number | null,
@@ -109,6 +111,8 @@ function parseWalletFromPayload(payload: Record<string, unknown> | null): {
     usdt_upl: null as number | null,
     wallet_field_source: null as string | null,
     available_field_source: null as string | null,
+    available_fallback_used: false,
+    available_fallback_reason: null as string | null,
   };
 
   if (!payload) return out;
@@ -137,16 +141,36 @@ function parseWalletFromPayload(payload: Record<string, unknown> | null): {
       out.wallet_field_source = "selected.eq";
     }
 
-    // Available source selection
-    if (out.usdt_avail_eq != null) {
+    // Available source selection:
+    // 1) availEq > 0
+    // 2) availEq is 0/null and availBal > 0
+    // 3) availBal unavailable/non-positive and cashBal > 0
+    if (out.usdt_avail_eq != null && out.usdt_avail_eq > 0) {
+      out.availableBalanceUsdt = out.usdt_avail_eq;
+      out.available_field_source = "selected.availEq";
+    } else if (out.usdt_avail_bal != null && out.usdt_avail_bal > 0) {
+      out.availableBalanceUsdt = out.usdt_avail_bal;
+      out.available_field_source = "selected.availBal_fallback";
+      out.available_fallback_used = true;
+      out.available_fallback_reason = "availEq_non_positive_or_missing";
+    } else if (out.usdt_cash_bal != null && out.usdt_cash_bal > 0) {
+      out.availableBalanceUsdt = out.usdt_cash_bal;
+      out.available_field_source = "selected.cashBal_fallback";
+      out.available_fallback_used = true;
+      out.available_fallback_reason = "availEq_availBal_non_positive_or_missing";
+    } else if (out.usdt_avail_eq != null) {
       out.availableBalanceUsdt = out.usdt_avail_eq;
       out.available_field_source = "selected.availEq";
     } else if (out.usdt_avail_bal != null) {
       out.availableBalanceUsdt = out.usdt_avail_bal;
-      out.available_field_source = "selected.availBal";
-    } else if (out.usdt_eq != null) {
-      out.availableBalanceUsdt = out.usdt_eq;
-      out.available_field_source = "selected.eq_fallback";
+      out.available_field_source = "selected.availBal_fallback";
+      out.available_fallback_used = true;
+      out.available_fallback_reason = "availEq_missing_no_positive_fallback";
+    } else if (out.usdt_cash_bal != null) {
+      out.availableBalanceUsdt = out.usdt_cash_bal;
+      out.available_field_source = "selected.cashBal_fallback";
+      out.available_fallback_used = true;
+      out.available_fallback_reason = "availEq_availBal_missing_no_positive_fallback";
     }
   }
 
@@ -377,16 +401,19 @@ export function deriveLiveBalanceAuthority(input: LiveBalanceAuthorityInput): Li
 
   const paperUsageWithLiveWallet = computePaperEstimatedUsage(input.positions, parsedWallet.walletBalanceUsdt);
 
+  const walletEq = parsedWallet.walletBalanceUsdt ?? 0;
+  const cashBal = parsedWallet.usdt_cash_bal ?? 0;
+  const availableBal = parsedWallet.availableBalanceUsdt ?? 0;
+  const allBalanceFieldsZero = walletEq === 0 && cashBal === 0 && availableBal === 0;
+
   let live_balance_block_reason: string | null = null;
-  if (parsedWallet.availableBalanceUsdt === 0 && (parsedWallet.walletBalanceUsdt ?? 0) > 0) {
-    if (parsedWallet.usdt_avail_eq === 0) {
-      live_balance_block_reason = "AVAILABLE_BALANCE_ZERO_WITH_POSITIVE_WALLET";
-    } else if (parsedWallet.usdt_avail_eq == null) {
-      live_balance_block_reason = "OKX_AVAILABLE_FIELD_MISSING";
-    } else {
-      live_balance_block_reason = "OKX_AVAILABLE_FIELD_ZERO";
-    }
+  if (allBalanceFieldsZero) {
+    live_balance_block_reason = "AVAILABLE_BALANCE_ZERO";
   }
+
+  const okxBalanceError =
+    live_balance_block_reason ??
+    (parsedWallet.available_fallback_used ? "AVAILABLE_FIELD_FALLBACK_USED" : null);
 
   const result: LiveBalanceAuthorityResult = {
     balance_source: "okx_live_wallet",
@@ -425,7 +452,7 @@ export function deriveLiveBalanceAuthority(input: LiveBalanceAuthorityInput): Li
     okx_balance_updated_at: Date.now(),
     okx_balance_age_ms: 0, // Calculated at engine level if needed, but 0 is fine here as it's fresh
     okx_balance_fresh: true,
-    okx_balance_error: live_balance_block_reason,
+    okx_balance_error: okxBalanceError,
 
     account_equity_display_source: "okx_live_wallet",
     // KRW conversion: Fixed 1000 multiplier is used (estimated)
@@ -462,6 +489,10 @@ export function deriveLiveBalanceAuthority(input: LiveBalanceAuthorityInput): Li
     usdt_cash_bal: result.usdt_cash_bal,
     usdt_avail_bal: result.usdt_avail_bal,
     usdt_avail_eq: result.usdt_avail_eq,
+    selected_available_balance_usdt: result.okx_available_balance_usdt,
+    selected_available_field_source: result.available_field_source,
+    available_fallback_used: parsedWallet.available_fallback_used,
+    available_fallback_reason: parsedWallet.available_fallback_reason,
     usdt_frozen_bal: result.usdt_frozen_bal,
     usdt_ord_frozen: result.usdt_ord_frozen,
     parsed_wallet_balance_usdt: result.okx_wallet_balance_usdt,
