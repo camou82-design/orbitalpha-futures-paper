@@ -240,6 +240,8 @@ export interface EngineV2Decision {
         uiLabelRegime: string;
         uiLabelStatus: string;
     };
+    microExecution?: MicroExecutionScoreSummary;
+    lifecycleAuthority?: V2TradeLifecycleAuthorityResult;
     rawMetrics: Record<string, number | boolean>;
 }
 
@@ -512,6 +514,82 @@ export interface RiskSizingOutput {
     equityMultiple: number;
 }
 
+export interface MicroExecutionScoreSummary {
+    score: number;
+    grade: "strong" | "normal" | "weak" | "danger";
+    sizeMultiplier: 1 | 0.75 | 0.5;
+    delayMs: 0 | 500 | 1000 | 2000;
+    deferOnce: boolean;
+    hardBlockReason: null | "EXTREME_SPREAD" | "EMPTY_LIQUIDITY" | "OPPOSITE_FLOW_SPIKE";
+    reasons: string[];
+    dataFreshnessMs: number | null;
+    usedOrderbook: boolean;
+    usedRecentTrades: boolean;
+    fallbackNeutral: boolean;
+    authoritySource: "v2";
+}
+
+export type V2LifecycleStage = "entry" | "add_on" | "partial" | "exit" | "cooldown" | "position_state";
+export type V2CooldownType = "none" | "direction_block" | "time_reentry" | "risk_halt" | "fail_reentry";
+export type V2LifecyclePartialAction = "none" | "prepare" | "reduce" | "protect_profit";
+export type V2LifecycleExitAction = "none" | "watch" | "exit";
+
+export interface V2TradeLifecycleAuthorityInput {
+    symbol: string;
+    side: EngineV2Side;
+    regime: EngineV2Regime;
+    marketMode: EngineV2Regime;
+    directionalShockState: "UP" | "DOWN" | "NONE";
+    v2Decision: EngineV2FinalDecision;
+    v2Side: EngineV2Side;
+    authoritySource: "v2" | "v1";
+    adoptedEngine: "V2" | "V1" | "UNKNOWN";
+    position: EngineV2Position | null;
+    unrealizedPnl: number | null;
+    unrealizedPnlPct: number | null;
+    holdMs: number | null;
+    entryPrice: number | null;
+    markPrice: number | null;
+    riskState: string | null;
+    cooldownState: {
+        reason: string | null;
+        remainingMs: number | null;
+        reentryBlocked: boolean;
+    };
+    microExecution: MicroExecutionScoreSummary | null;
+    reversalQuality: number | null;
+    rawMetricsSummary: {
+        qualityScore: number;
+        rangeConfidence: number;
+        trendWeaknessScore: number;
+        boxPos: number | null;
+    };
+}
+
+export interface V2TradeLifecycleAuthorityResult {
+    symbol: string;
+    side: EngineV2Side;
+    lifecycleStage: V2LifecycleStage;
+    authoritySource: "v2" | "v1";
+    adoptedEngine: "V2" | "V1" | "UNKNOWN";
+    positionStateOwner: "v2" | "legacy" | "unknown";
+    entryManagedByV2: boolean;
+    addOnManagedByV2: boolean;
+    partialManagedByV2: boolean;
+    exitManagedByV2: boolean;
+    cooldownManagedByV2: boolean;
+    positionStateManagedByV2: boolean;
+    addOnAllowed: boolean | null;
+    partialAction: V2LifecyclePartialAction;
+    exitAction: V2LifecycleExitAction;
+    cooldownType: V2CooldownType;
+    cooldownReason: string | null;
+    legacyInterventionDetected: boolean;
+    consistencyPass: boolean;
+    inconsistencyReasons: string[];
+    proofReasons: string[];
+}
+
 /** Tier 5: Add-on Policy Output */
 export interface AddonPolicyOutput {
     allowed: boolean;
@@ -565,5 +643,7 @@ export interface EngineV2InternalResult {
     execution: ExecutorOutput;
     riskSizing: RiskSizingOutput;
     explanation: ExplanationOutput;
+    microExecution: MicroExecutionScoreSummary | null;
+    lifecycleAuthority: V2TradeLifecycleAuthorityResult | null;
     exitPolicy: ExitPolicyDiagnosticsSummary | null;
 }

@@ -22,25 +22,59 @@ import { generateExplanation } from "./explain/diagnostic";
 import { deriveV2StateAuthority } from "./state/derive";
 import { evaluateV2AddOnPolicy } from "./addon/policy";
 import { evaluateV2ExitPolicy } from "./exit/policy";
+import { deriveMicroExecutionScore } from "./execution/micro-execution-score";
+import { deriveTradeLifecycleAuthority } from "./lifecycle/trade-lifecycle-authority";
+import type { MicroExecutionScoreSummary, V2TradeLifecycleAuthorityResult } from "./types";
 
-const v2ProofLastKeyByEventSymbol = new Map<string, string>();
+const V2_PROOF_KEY_TTL_MS = 60 * 60 * 1000;
+const V2_PROOF_KEY_MAX_SIZE = 5000;
+const MICRO_EXECUTION_PERF_LOG_INTERVAL_MS = 5 * 60 * 1000;
+const v2ProofLastKeyByEventSymbol = new Map<string, { key: string; updatedAtMs: number }>();
+const microPerfStats = {
+    calculatedCount: 0,
+    totalCalcMs: 0,
+    maxCalcMs: 0,
+    fallbackNeutralCount: 0,
+    usedOrderbookCount: 0,
+    usedRecentTradesCount: 0,
+    appliedCount: 0,
+    deferredCount: 0,
+    sizeReducedCount: 0,
+    hardBlockedCount: 0,
+    lastLoggedAtMs: Date.now()
+};
+function pruneV2ProofKeyMap(nowMs: number): void {
+    for (const [k, v] of v2ProofLastKeyByEventSymbol.entries()) {
+        if (nowMs - v.updatedAtMs > V2_PROOF_KEY_TTL_MS) {
+            v2ProofLastKeyByEventSymbol.delete(k);
+        }
+    }
+    while (v2ProofLastKeyByEventSymbol.size > V2_PROOF_KEY_MAX_SIZE) {
+        const oldest = v2ProofLastKeyByEventSymbol.keys().next();
+        if (oldest.done) break;
+        v2ProofLastKeyByEventSymbol.delete(oldest.value);
+    }
+}
 function shouldEmitV2Proof(
     eventName: string,
     symbol: string,
     key: string,
     highPriority: boolean
 ): boolean {
+    const nowMs = Date.now();
+    pruneV2ProofKeyMap(nowMs);
     const verbose = String(process.env.V2_PROOF_VERBOSE ?? "").toLowerCase() === "true";
-    if (verbose || highPriority) {
-        v2ProofLastKeyByEventSymbol.set(`${eventName}:${symbol}`, key);
-        return true;
-    }
     const mapKey = `${eventName}:${symbol}`;
-    const prev = v2ProofLastKeyByEventSymbol.get(mapKey);
-    if (prev !== key) {
-        v2ProofLastKeyByEventSymbol.set(mapKey, key);
+    if (verbose || highPriority) {
+        v2ProofLastKeyByEventSymbol.set(mapKey, { key, updatedAtMs: nowMs });
         return true;
     }
+    const prev = v2ProofLastKeyByEventSymbol.get(mapKey)?.key;
+    if (prev !== key) {
+        v2ProofLastKeyByEventSymbol.set(mapKey, { key, updatedAtMs: nowMs });
+        return true;
+    }
+    v2ProofLastKeyByEventSymbol.set(mapKey, { key, updatedAtMs: nowMs });
     return false;
 }
 
@@ -1141,10 +1175,201 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     finalDecision = v2DecisionAfterPromotion;
     blockReason = v2RejectReasonAfterPromotion;
     const decisionAfterReadiness: EngineV2FinalDecision = finalDecision;
+    let microExecution: MicroExecutionScoreSummary | null = null;
+    let lifecycleAuthority: V2TradeLifecycleAuthorityResult | null = null;
     if (finalDecision === "ENTER") {
         finalReason = promotionReason ?? explanation.reason;
     } else if (finalDecision === "HOLD" && promotionApplied) {
         finalReason = `HOLD: ${promotionReason ?? "WAIT_RECHECK"}`;
+    }
+
+    const isV2EnterCandidate =
+        finalDecision === "ENTER" &&
+        (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short");
+    if (isV2EnterCandidate) {
+        const microStartedAt = Date.now();
+        try {
+            const rawDataFreshness = Number((judgment.metrics as Record<string, unknown>).dataFreshnessMs);
+            const dataFreshnessMs =
+                Number.isFinite(rawDataFreshness) && rawDataFreshness >= 0 ? rawDataFreshness : null;
+            microExecution = deriveMicroExecutionScore({
+                symbol: String(input.symbol),
+                side: v2SideAfterPromotion,
+                regime: judgment.regime,
+                v2Decision: finalDecision,
+                lastPrice: input.snapshot.lastPrice,
+                volatilityProxy: Math.max(0, input.snapshot.volatilityProxy ?? 0),
+                rangeConfidence: Math.max(0, input.snapshot.rangeConfidence ?? 0),
+                breakoutFailureRate: Math.max(0, input.snapshot.breakoutFailureRate ?? 0),
+                trendWeaknessScore: Math.max(0, input.snapshot.trendWeaknessScore ?? 0),
+                qualityScore: Math.max(0, input.snapshot.qualityScore ?? 0),
+                dataFreshnessMs
+            });
+        } catch {
+            microExecution = deriveMicroExecutionScore({
+                symbol: String(input.symbol),
+                side: v2SideAfterPromotion,
+                regime: judgment.regime,
+                v2Decision: finalDecision,
+                lastPrice: 0,
+                volatilityProxy: 0,
+                rangeConfidence: 0,
+                breakoutFailureRate: 0,
+                trendWeaknessScore: 0,
+                qualityScore: 0,
+                dataFreshnessMs: null
+            });
+        }
+        const calcMs = Date.now() - microStartedAt;
+        microPerfStats.calculatedCount += 1;
+        microPerfStats.totalCalcMs += calcMs;
+        microPerfStats.maxCalcMs = Math.max(microPerfStats.maxCalcMs, calcMs);
+        if (microExecution.fallbackNeutral) microPerfStats.fallbackNeutralCount += 1;
+        if (microExecution.usedOrderbook) microPerfStats.usedOrderbookCount += 1;
+        if (microExecution.usedRecentTrades) microPerfStats.usedRecentTradesCount += 1;
+
+        const microProofKey = [
+            finalDecision,
+            v2SideAfterPromotion,
+            microExecution.score,
+            microExecution.grade,
+            microExecution.deferOnce,
+            microExecution.hardBlockReason ?? "NONE"
+        ].join("|");
+        if (shouldEmitV2Proof("MICRO_EXECUTION_SCORE_PROOF", String(input.symbol), microProofKey, false)) {
+            console.info(JSON.stringify({
+                event: "MICRO_EXECUTION_SCORE_PROOF",
+                symbol: String(input.symbol),
+                side: v2SideAfterPromotion,
+                regime: judgment.regime,
+                v2_decision: finalDecision,
+                score: microExecution.score,
+                grade: microExecution.grade,
+                sizeMultiplier: microExecution.sizeMultiplier,
+                delayMs: microExecution.delayMs,
+                deferOnce: microExecution.deferOnce,
+                hardBlockReason: microExecution.hardBlockReason,
+                reasons: microExecution.reasons,
+                dataFreshnessMs: microExecution.dataFreshnessMs,
+                usedOrderbook: microExecution.usedOrderbook,
+                usedRecentTrades: microExecution.usedRecentTrades,
+                fallbackNeutral: microExecution.fallbackNeutral,
+                authority_source: microExecution.authoritySource
+            }));
+        }
+        const shouldEmitCountSummary = microPerfStats.calculatedCount % 25 === 0;
+        const shouldEmitTimeSummary =
+            Date.now() - microPerfStats.lastLoggedAtMs >= MICRO_EXECUTION_PERF_LOG_INTERVAL_MS;
+        if (shouldEmitCountSummary || shouldEmitTimeSummary) {
+            const avgCalcMs = microPerfStats.calculatedCount > 0
+                ? Number((microPerfStats.totalCalcMs / microPerfStats.calculatedCount).toFixed(3))
+                : 0;
+            const fallbackNeutralRate = microPerfStats.calculatedCount > 0
+                ? Number((microPerfStats.fallbackNeutralCount / microPerfStats.calculatedCount).toFixed(4))
+                : 0;
+            console.info(JSON.stringify({
+                event: "MICRO_EXECUTION_PERF_PROOF",
+                calculatedCount: microPerfStats.calculatedCount,
+                avgCalcMs,
+                maxCalcMs: microPerfStats.maxCalcMs,
+                fallbackNeutralCount: microPerfStats.fallbackNeutralCount,
+                fallbackNeutralRate,
+                usedOrderbookCount: microPerfStats.usedOrderbookCount,
+                usedRecentTradesCount: microPerfStats.usedRecentTradesCount,
+                appliedCount: microPerfStats.appliedCount,
+                deferredCount: microPerfStats.deferredCount,
+                sizeReducedCount: microPerfStats.sizeReducedCount,
+                hardBlockedCount: microPerfStats.hardBlockedCount
+            }));
+            microPerfStats.lastLoggedAtMs = Date.now();
+        }
+    }
+
+    const sameSidePosition =
+        v2SideAfterPromotion === "long" ? v2State.longPosition
+            : v2SideAfterPromotion === "short" ? v2State.shortPosition
+                : null;
+    const hasLifecycleCandidate =
+        sameSidePosition != null ||
+        finalDecision === "ENTER" ||
+        riskSizing.blockReason != null;
+    if (hasLifecycleCandidate) {
+        const cooldownReasonRaw = (riskSizing.diagnostics as Record<string, unknown> | undefined)?.risk_cooldown_subreason;
+        const cooldownRemainingRaw = (riskSizing.diagnostics as Record<string, unknown> | undefined)?.cooldown_remaining_ms;
+        lifecycleAuthority = deriveTradeLifecycleAuthority({
+            symbol: String(input.symbol),
+            side: v2SideAfterPromotion,
+            regime: judgment.regime,
+            marketMode: judgment.regime,
+            directionalShockState: v2State.directionalShockState,
+            v2Decision: finalDecision,
+            v2Side: v2SideAfterPromotion,
+            authoritySource: "v2",
+            adoptedEngine: "V2",
+            position: sameSidePosition,
+            unrealizedPnl: sameSidePosition != null ? sameSidePosition.sizeUsd * sameSidePosition.pnlPct : null,
+            unrealizedPnlPct: sameSidePosition?.pnlPct ?? null,
+            holdMs: null,
+            entryPrice: sameSidePosition?.entryPrice ?? null,
+            markPrice: input.snapshot.lastPrice ?? null,
+            riskState: v2State.riskMode,
+            cooldownState: {
+                reason: typeof cooldownReasonRaw === "string" ? cooldownReasonRaw : null,
+                remainingMs: typeof cooldownRemainingRaw === "number" && Number.isFinite(cooldownRemainingRaw) ? cooldownRemainingRaw : null,
+                reentryBlocked: typeof cooldownReasonRaw === "string" && cooldownReasonRaw.length > 0
+            },
+            microExecution,
+            reversalQuality: input.snapshot.qualityScore ?? null,
+            rawMetricsSummary: {
+                qualityScore: input.snapshot.qualityScore ?? 0,
+                rangeConfidence: input.snapshot.rangeConfidence ?? 0,
+                trendWeaknessScore: input.snapshot.trendWeaknessScore ?? 0,
+                boxPos: input.snapshot.boxPos ?? null
+            }
+        });
+        const lifecycleProofKey = [
+            lifecycleAuthority.lifecycleStage,
+            lifecycleAuthority.positionStateOwner,
+            lifecycleAuthority.cooldownType,
+            lifecycleAuthority.partialAction,
+            lifecycleAuthority.exitAction,
+            lifecycleAuthority.consistencyPass,
+            lifecycleAuthority.inconsistencyReasons.join(",")
+        ].join("|");
+        if (shouldEmitV2Proof("V2_TRADE_LIFECYCLE_PROOF", String(input.symbol), lifecycleProofKey, lifecycleAuthority.consistencyPass === false)) {
+            console.info(JSON.stringify({
+                event: "V2_TRADE_LIFECYCLE_PROOF",
+                symbol: String(input.symbol),
+                position_id: sameSidePosition != null
+                    ? `${String(input.symbol)}:${sameSidePosition.side}:${sameSidePosition.entryStage}`
+                    : `${String(input.symbol)}:none`,
+                lifecycle_stage: lifecycleAuthority.lifecycleStage,
+                authority_source: lifecycleAuthority.authoritySource,
+                adopted_engine: lifecycleAuthority.adoptedEngine,
+                regime: judgment.regime,
+                market_mode: judgment.regime,
+                directional_shock_state: v2State.directionalShockState,
+                side: v2SideAfterPromotion,
+                v2_decision: finalDecision,
+                v2_side: v2SideAfterPromotion,
+                position_state_owner: lifecycleAuthority.positionStateOwner,
+                entry_managed_by_v2: lifecycleAuthority.entryManagedByV2,
+                add_on_managed_by_v2: lifecycleAuthority.addOnManagedByV2,
+                partial_managed_by_v2: lifecycleAuthority.partialManagedByV2,
+                exit_managed_by_v2: lifecycleAuthority.exitManagedByV2,
+                cooldown_managed_by_v2: lifecycleAuthority.cooldownManagedByV2,
+                position_state_managed_by_v2: lifecycleAuthority.positionStateManagedByV2,
+                add_on_allowed: lifecycleAuthority.addOnAllowed,
+                partial_action: lifecycleAuthority.partialAction,
+                exit_action: lifecycleAuthority.exitAction,
+                cooldown_type: lifecycleAuthority.cooldownType,
+                cooldown_reason: lifecycleAuthority.cooldownReason,
+                legacy_intervention_detected: lifecycleAuthority.legacyInterventionDetected,
+                consistency_pass: lifecycleAuthority.consistencyPass,
+                inconsistency_reasons: lifecycleAuthority.inconsistencyReasons,
+                proof_reasons: lifecycleAuthority.proofReasons
+            }));
+        }
     }
 
     console.info(JSON.stringify({
@@ -1324,10 +1549,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             uiLabelRegime: judgment.regime,
             uiLabelStatus: finalDecision === "ENTER" ? "ACTIVE" : "IDLE"
         },
+        microExecution: microExecution ?? undefined,
+        lifecycleAuthority: lifecycleAuthority ?? undefined,
         rawMetrics: {
             ...judgment.metrics,
             confidenceScore: confidence.score,
-            sizingMultiplier: riskSizing.sizeMultiplier
+            sizingMultiplier: riskSizing.sizeMultiplier,
+            microExecutionScore: microExecution?.score ?? 0,
+            microExecutionFallbackNeutral: microExecution?.fallbackNeutral ?? false,
+            lifecycleConsistencyPass: lifecycleAuthority?.consistencyPass ?? false,
+            lifecycleLegacyInterventionDetected: lifecycleAuthority?.legacyInterventionDetected ?? false
         }
     };
 
@@ -1338,6 +1569,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         execution,
         riskSizing,
         explanation,
+        microExecution,
+        lifecycleAuthority,
         exitPolicy: {
             action: exitPolicy.action,
             reason: exitPolicy.reason,
