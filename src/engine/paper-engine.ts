@@ -198,6 +198,39 @@ const ENTRY_EVIDENCE_TREND_WEAKNESS_MAX = 0.65;
 const RANGE_RECHECK_PROMOTION_TICKS = 3;
 const RANGE_CONFIDENCE_HARD_HOLD_MAX = 0.45;
 const RANGE_CONFIDENCE_RECHECK_ALLOW_MIN = 0.55;
+const PAPER_V2_PROOF_KEY_TTL_MS = 60 * 60 * 1000;
+const PAPER_V2_PROOF_KEY_MAX_SIZE = 5000;
+const paperV2ProofLastKeyByEventSymbol = new Map<string, { key: string; updatedAtMs: number }>();
+
+function prunePaperV2ProofKeyMap(nowMs: number): void {
+  for (const [k, v] of paperV2ProofLastKeyByEventSymbol.entries()) {
+    if (nowMs - v.updatedAtMs > PAPER_V2_PROOF_KEY_TTL_MS) {
+      paperV2ProofLastKeyByEventSymbol.delete(k);
+    }
+  }
+  while (paperV2ProofLastKeyByEventSymbol.size > PAPER_V2_PROOF_KEY_MAX_SIZE) {
+    const oldest = paperV2ProofLastKeyByEventSymbol.keys().next();
+    if (oldest.done) break;
+    paperV2ProofLastKeyByEventSymbol.delete(oldest.value);
+  }
+}
+
+function shouldEmitV2Proof(eventName: string, symbol: string, key: string, highPriority: boolean): boolean {
+  const nowMs = Date.now();
+  prunePaperV2ProofKeyMap(nowMs);
+  const mapKey = `${eventName}:${symbol}`;
+  if (highPriority) {
+    paperV2ProofLastKeyByEventSymbol.set(mapKey, { key, updatedAtMs: nowMs });
+    return true;
+  }
+  const prev = paperV2ProofLastKeyByEventSymbol.get(mapKey)?.key;
+  if (prev !== key) {
+    paperV2ProofLastKeyByEventSymbol.set(mapKey, { key, updatedAtMs: nowMs });
+    return true;
+  }
+  paperV2ProofLastKeyByEventSymbol.set(mapKey, { key, updatedAtMs: nowMs });
+  return false;
+}
 
 function computeEntryEvidenceScore(input: {
   qualityScore: number | null;
@@ -4056,6 +4089,50 @@ export class PaperEngine {
         remaining.push(open);
         continue;
       }
+      const v2ExitAuthority = envelope.selector?.v2_result.v2ExitAuthority ?? null;
+      const lifecycleAuthority = envelope.selector?.v2_result.lifecycleAuthority ?? null;
+      const emitV2ExitAuthorityProof = (paperExitAction: "none" | "exit", paperExitReason: string | null): void => {
+        if (!v2ExitAuthority) return;
+        const v2PaperExitAgreement =
+          (v2ExitAuthority.shouldExit === true && paperExitAction === "exit") ||
+          (v2ExitAuthority.shouldExit !== true && paperExitAction === "none");
+        const proofKey = [
+          v2ExitAuthority.exitAction,
+          v2ExitAuthority.shouldExit,
+          v2ExitAuthority.exitUrgency,
+          paperExitAction,
+          paperExitReason ?? "none",
+          v2PaperExitAgreement
+        ].join("|");
+        const highPriority =
+          v2PaperExitAgreement === false ||
+          (Array.isArray(v2ExitAuthority.trueInconsistencyReasons) && v2ExitAuthority.trueInconsistencyReasons.length > 0);
+        if (!shouldEmitV2Proof("V2_EXIT_AUTHORITY_PROOF", sk, proofKey, highPriority)) return;
+        this.logger.info("V2_EXIT_AUTHORITY_PROOF", {
+          symbol: sk,
+          position_id: `${sk}:${open.side}:${open.entryStage ?? 1}`,
+          side: open.side,
+          regime: open.regimeAtEntry ?? "NO_TRADE",
+          market_mode: input.marketMode.marketMode,
+          directional_shock_state: this.lastRisk?.directionalShockState ?? "NONE",
+          lifecycle_authority_owner: lifecycleAuthority?.lifecycleAuthorityOwner ?? "unknown",
+          exit_authority_owner: v2ExitAuthority.exitAuthorityOwner,
+          exit_execution_owner: v2ExitAuthority.exitExecutionOwner,
+          v2_exit_action: v2ExitAuthority.exitAction,
+          v2_should_exit: v2ExitAuthority.shouldExit,
+          v2_exit_reason: v2ExitAuthority.exitReason,
+          v2_exit_urgency: v2ExitAuthority.exitUrgency,
+          v2_exit_confidence: v2ExitAuthority.exitConfidence,
+          v2_reduce_ratio: v2ExitAuthority.reduceRatio,
+          paper_exit_action: paperExitAction,
+          paper_exit_reason: paperExitReason,
+          v2_paper_exit_agreement: v2PaperExitAgreement,
+          known_shadow_gaps: v2ExitAuthority.knownShadowGaps ?? [],
+          true_inconsistency_reasons: v2ExitAuthority.trueInconsistencyReasons ?? [],
+          proof_reasons: v2ExitAuthority.proofReasons ?? []
+        });
+      };
+      emitV2ExitAuthorityProof("none", null);
 
       const closePrice = snap.lastPrice;
       const closedAt = snap.fetchedAt;
@@ -4219,6 +4296,7 @@ export class PaperEngine {
                 closeReasonLabelOverride: "상단 반전 구간: 롱 정리(숏 평가 우선)",
                 ...snapPaths
               });
+              emitV2ExitAuthorityProof("exit", cr);
               await this.dispatchOkxClose({
                 symbol: open.symbol,
                 side: open.side,
@@ -4346,6 +4424,7 @@ export class PaperEngine {
                 closeReasonLabelOverride: "하단 반전 구간: 숏 정리(롱 평가 우선)",
                 ...snapPaths
               });
+              emitV2ExitAuthorityProof("exit", cr);
               await this.dispatchOkxClose({
                 symbol: open.symbol,
                 side: open.side,
@@ -4576,6 +4655,7 @@ export class PaperEngine {
           finalCloseReason = crTrail;
           confirmedExitType = exitEventJsonlType(crTrail);
           confirmedCloseSource = "range_profit_trail_executor";
+          emitV2ExitAuthorityProof("exit", crTrail);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -4777,6 +4857,7 @@ export class PaperEngine {
                 ...snapPaths
               })
               : toClosed(cr, m, open.sizeUsd);
+          emitV2ExitAuthorityProof("exit", cr);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -4855,6 +4936,7 @@ export class PaperEngine {
           finalCloseReason = cr;
           confirmedExitType = "EXIT_TREND_SWITCH";
           confirmedCloseSource = "trend_engine_switch";
+          emitV2ExitAuthorityProof("exit", cr);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -5000,6 +5082,7 @@ export class PaperEngine {
         confirmedExitType = "EXIT_SL";
         confirmedCloseSource = "hard_stop_loss_gate";
         const closedRow = toClosed(cr, m, open.sizeUsd);
+        emitV2ExitAuthorityProof("exit", cr);
         await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
@@ -5157,6 +5240,7 @@ export class PaperEngine {
               ? "trend_gate_upper_regime_lane_exit"
               : "trend_regime_shift_gate_upper_opposing_trend_confirmed";
           const closedRow = toClosed(cr, m, open.sizeUsd);
+          emitV2ExitAuthorityProof("exit", cr);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -5402,6 +5486,7 @@ export class PaperEngine {
         confirmedCloseSource = "executor_close_action";
         const exDetail = (exitEval.detail ?? {}) as Record<string, unknown>;
         const closedRow = toClosed(cr, m, open.sizeUsd);
+        emitV2ExitAuthorityProof("exit", cr);
         await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
@@ -9642,7 +9727,16 @@ function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): 
     v2_lifecycle_stage: selector?.v2_result.lifecycleAuthority?.lifecycleStage ?? null,
     v2_position_state_owner: selector?.v2_result.lifecycleAuthority?.positionStateOwner ?? null,
     v2_partial_action: selector?.v2_result.lifecycleAuthority?.partialAction ?? null,
-    v2_exit_action: selector?.v2_result.lifecycleAuthority?.exitAction ?? null,
+    v2_exit_action:
+      selector?.v2_result.v2ExitAuthority?.exitAction ??
+      selector?.v2_result.lifecycleAuthority?.exitAction ??
+      null,
+    v2_exit_reason: selector?.v2_result.v2ExitAuthority?.exitReason ?? null,
+    v2_exit_urgency: selector?.v2_result.v2ExitAuthority?.exitUrgency ?? null,
+    v2_exit_confidence: selector?.v2_result.v2ExitAuthority?.exitConfidence ?? null,
+    v2_paper_exit_agreement: null,
+    exit_authority_owner: selector?.v2_result.v2ExitAuthority?.exitAuthorityOwner ?? null,
+    exit_execution_owner: selector?.v2_result.v2ExitAuthority?.exitExecutionOwner ?? null,
     v2_cooldown_type: selector?.v2_result.lifecycleAuthority?.cooldownType ?? null,
     v2_lifecycle_consistency_pass: selector?.v2_result.lifecycleAuthority?.consistencyPass ?? null,
     v2_lifecycle_inconsistency_reasons: selector?.v2_result.lifecycleAuthority?.inconsistencyReasons ?? null,

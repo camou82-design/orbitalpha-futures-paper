@@ -24,7 +24,7 @@ import { evaluateV2AddOnPolicy } from "./addon/policy";
 import { evaluateV2ExitPolicy } from "./exit/policy";
 import { deriveMicroExecutionScore } from "./execution/micro-execution-score";
 import { deriveTradeLifecycleAuthority } from "./lifecycle/trade-lifecycle-authority";
-import type { MicroExecutionScoreSummary, V2TradeLifecycleAuthorityResult } from "./types";
+import type { MicroExecutionScoreSummary, V2ExitAuthorityResult, V2TradeLifecycleAuthorityResult } from "./types";
 
 const V2_PROOF_KEY_TTL_MS = 60 * 60 * 1000;
 const V2_PROOF_KEY_MAX_SIZE = 5000;
@@ -1177,6 +1177,42 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const decisionAfterReadiness: EngineV2FinalDecision = finalDecision;
     let microExecution: MicroExecutionScoreSummary | null = null;
     let lifecycleAuthority: V2TradeLifecycleAuthorityResult | null = null;
+    let v2ExitAuthority: V2ExitAuthorityResult | null = null;
+    const exitActionMap: Record<string, V2ExitAuthorityResult["exitAction"]> = {
+        HOLD: "none",
+        WATCH: "watch",
+        PARTIAL_TAKE_PROFIT: "partial_candidate",
+        REDUCE: "partial_candidate",
+        FULL_EXIT: "exit"
+    };
+    const exitUrgencyMap: Record<string, V2ExitAuthorityResult["exitUrgency"]> = {
+        LOW: "low",
+        MID: "medium",
+        HIGH: "high",
+        CRITICAL: "emergency"
+    };
+    const exitTrueInconsistencyReasons: string[] = [];
+    const exitKnownShadowGaps: string[] = ["EXIT_EXECUTION_OWNER_NOT_V2"];
+    const exitProofReasons = [
+        `exit_policy_action:${exitPolicy.action}`,
+        `exit_policy_reason:${exitPolicy.reason}`,
+        `exit_policy_evidence:${exitPolicy.evidence}`
+    ];
+    v2ExitAuthority = {
+        symbol: String(input.symbol),
+        side: exitPolicy.positionSide === "none" ? "none" : exitPolicy.positionSide,
+        exitAuthorityOwner: "v2",
+        exitExecutionOwner: "paper_engine",
+        exitAction: exitActionMap[exitPolicy.action] ?? "none",
+        shouldExit: exitPolicy.shouldExit === true,
+        exitReason: exitPolicy.hasPosition ? exitPolicy.reason : null,
+        exitUrgency: exitUrgencyMap[exitPolicy.exitUrgency] ?? "none",
+        exitConfidence: exitPolicy.exitConfidence,
+        reduceRatio: exitPolicy.reduceRatio > 0 ? exitPolicy.reduceRatio : null,
+        proofReasons: exitProofReasons,
+        trueInconsistencyReasons: exitTrueInconsistencyReasons,
+        knownShadowGaps: exitKnownShadowGaps
+    };
     if (finalDecision === "ENTER") {
         finalReason = promotionReason ?? explanation.reason;
     } else if (finalDecision === "HOLD" && promotionApplied) {
@@ -1564,6 +1600,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         },
         microExecution: microExecution ?? undefined,
         lifecycleAuthority: lifecycleAuthority ?? undefined,
+        v2ExitAuthority: v2ExitAuthority ?? undefined,
         rawMetrics: {
             ...judgment.metrics,
             confidenceScore: confidence.score,
@@ -1571,7 +1608,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             microExecutionScore: microExecution?.score ?? 0,
             microExecutionFallbackNeutral: microExecution?.fallbackNeutral ?? false,
             lifecycleConsistencyPass: lifecycleAuthority?.consistencyPass ?? false,
-            lifecycleLegacyInterventionDetected: lifecycleAuthority?.legacyInterventionDetected ?? false
+            lifecycleLegacyInterventionDetected: lifecycleAuthority?.legacyInterventionDetected ?? false,
+            v2ExitShouldExit: v2ExitAuthority?.shouldExit ?? false
         }
     };
 
@@ -1584,6 +1622,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         explanation,
         microExecution,
         lifecycleAuthority,
+        v2ExitAuthority,
         exitPolicy: {
             action: exitPolicy.action,
             reason: exitPolicy.reason,
