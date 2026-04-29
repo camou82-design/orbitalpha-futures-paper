@@ -363,6 +363,15 @@ type PaperEngineDecisionEnvelope = {
   v2_side?: string;
   v2_size?: number;
   selector_mismatch?: boolean;
+  v2_paper_cooldown_agreement?: boolean | null;
+  v2_cooldown_action?: string | null;
+  v2_cooldown_type?: string | null;
+  v2_cooldown_reason?: string | null;
+  v2_cooldown_urgency?: string | null;
+  v2_cooldown_remaining_ms?: number | null;
+  v2_direction_blocked?: string | null;
+  cooldown_authority_owner?: string | null;
+  cooldown_execution_owner?: string | null;
 };
 
 type EntryQualityFeatureVector = Readonly<{
@@ -2281,6 +2290,93 @@ export class PaperEngine {
 
       const authority = envelope.authority;
       const selectorResult = envelope.selector;
+
+      const v2CooldownAuthority = selectorResult?.v2_result.v2CooldownAuthority;
+      const paperRejectReason = res.decision.reject_reason as string;
+      const paperRiskCooldownSubreason = (res.decision as any).risk_cooldown_subreason ?? null;
+
+      const paperCooldownAction: "none" | "watch" | "block_entry" | "block_direction" | "halt" = (() => {
+        if (!paperRejectReason) return "none";
+        if (paperRejectReason === "DIRECTIONAL_LONG_BLOCK" || paperRejectReason === "DIRECTIONAL_SHORT_BLOCK" || paperRejectReason === "DIRECTION_BLOCK") {
+          return "block_direction";
+        }
+        if (paperRejectReason === "RISK_HALT") return "halt";
+        if (paperRejectReason.includes("COOLDOWN") || paperRejectReason === "RANGE_GATE_BLOCK_REENTRY" || paperRejectReason === "RANGE_STOP_REENTRY_SAME_CONTEXT_BLOCKED") {
+          return "block_entry";
+        }
+        return "none";
+      })();
+
+      const paperCooldownType: "none" | "direction_block" | "time_reentry" | "risk_halt" | "fail_reentry" = (() => {
+        if (!paperRejectReason) return "none";
+        if (paperRejectReason === "DIRECTIONAL_LONG_BLOCK" || paperRejectReason === "DIRECTIONAL_SHORT_BLOCK" || paperRejectReason === "DIRECTION_BLOCK") {
+          return "direction_block";
+        }
+        if (paperRejectReason === "RISK_HALT") return "risk_halt";
+        if (paperRejectReason.includes("COOLDOWN") || paperRejectReason === "RANGE_GATE_BLOCK_REENTRY" || paperRejectReason === "RANGE_STOP_REENTRY_SAME_CONTEXT_BLOCKED") {
+          return "time_reentry";
+        }
+        return "none";
+      })();
+
+      const cooldown_superseded_by_server_authority =
+        !this.serverTradeControlState.server_trade_enabled ||
+        this.serverTradeControlState.kill_switch_active ||
+        this.serverTradeControlState.close_only_mode ||
+        this.reconcileSafetyCloseOnly;
+
+      const v2_paper_cooldown_agreement = (() => {
+        if (!v2CooldownAuthority) return true;
+        if (cooldown_superseded_by_server_authority) return true;
+        const v2Should = v2CooldownAuthority.shouldCooldown;
+        const paperShould = paperCooldownAction !== "none";
+        if (v2Should !== paperShould) return false;
+        if (v2Should && v2CooldownAuthority.cooldownType !== paperCooldownType) {
+          if (v2CooldownAuthority.cooldownAction === "block_entry" && paperCooldownAction === "block_entry") return true;
+          return false;
+        }
+        return true;
+      })();
+
+      if (v2CooldownAuthority) {
+        this.logger.info("V2_COOLDOWN_AUTHORITY_PROOF", {
+          symbol: sym,
+          side: v2CooldownAuthority.side,
+          regime: selectorResult?.v2_result.regime ?? null,
+          market_mode: selectorResult?.v2_result.regime ?? null,
+          directional_shock_state: (selectorResult?.v2_result.rawMetrics as any)?.directionalShockState ?? "NONE",
+          cooldown_authority_owner: v2CooldownAuthority.cooldownAuthorityOwner,
+          cooldown_execution_owner: v2CooldownAuthority.cooldownExecutionOwner,
+          v2_cooldown_action: v2CooldownAuthority.cooldownAction,
+          v2_should_cooldown: v2CooldownAuthority.shouldCooldown,
+          v2_cooldown_type: v2CooldownAuthority.cooldownType,
+          v2_cooldown_reason: v2CooldownAuthority.cooldownReason,
+          v2_cooldown_urgency: v2CooldownAuthority.cooldownUrgency,
+          v2_cooldown_remaining_ms: v2CooldownAuthority.cooldownRemainingMs,
+          direction_blocked: v2CooldownAuthority.directionBlocked,
+          paper_cooldown_action: paperCooldownAction,
+          paper_cooldown_type: paperCooldownType,
+          paper_cooldown_reason: paperRejectReason,
+          paper_reject_reason: paperRejectReason,
+          paper_risk_cooldown_subreason: paperRiskCooldownSubreason,
+          cooldown_superseded_by_server_authority,
+          v2_paper_cooldown_agreement,
+          known_shadow_gaps: v2CooldownAuthority.knownShadowGaps,
+          true_inconsistency_reasons: v2CooldownAuthority.trueInconsistencyReasons,
+          proof_reasons: v2CooldownAuthority.proofReasons
+        });
+      }
+
+      envelope.v2_paper_cooldown_agreement = v2_paper_cooldown_agreement;
+      envelope.v2_cooldown_action = v2CooldownAuthority?.cooldownAction ?? null;
+      envelope.v2_cooldown_type = v2CooldownAuthority?.cooldownType ?? null;
+      envelope.v2_cooldown_reason = v2CooldownAuthority?.cooldownReason ?? null;
+      envelope.v2_cooldown_urgency = v2CooldownAuthority?.cooldownUrgency ?? null;
+      envelope.v2_cooldown_remaining_ms = v2CooldownAuthority?.cooldownRemainingMs ?? null;
+      envelope.v2_direction_blocked = v2CooldownAuthority?.directionBlocked ?? null;
+      envelope.cooldown_authority_owner = v2CooldownAuthority?.cooldownAuthorityOwner ?? null;
+      envelope.cooldown_execution_owner = v2CooldownAuthority?.cooldownExecutionOwner ?? null;
+
       const ledgerExposureNotionalKrw = computeLedgerSymbolExposureNotionalKrw(opensAfterClose, String(sym));
       const ledgerEquityMultiple = ledgerExposureNotionalKrw / 500_000;
 
@@ -9816,7 +9912,15 @@ function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): 
     v2_paper_exit_agreement: null,
     exit_authority_owner: selector?.v2_result.v2ExitAuthority?.exitAuthorityOwner ?? null,
     exit_execution_owner: selector?.v2_result.v2ExitAuthority?.exitExecutionOwner ?? null,
-    v2_cooldown_type: selector?.v2_result.lifecycleAuthority?.cooldownType ?? null,
+    v2_cooldown_action: envelope.v2_cooldown_action ?? null,
+    v2_cooldown_type: envelope.v2_cooldown_type ?? null,
+    v2_cooldown_reason: envelope.v2_cooldown_reason ?? null,
+    v2_cooldown_urgency: envelope.v2_cooldown_urgency ?? null,
+    v2_cooldown_remaining_ms: envelope.v2_cooldown_remaining_ms ?? null,
+    v2_direction_blocked: envelope.v2_direction_blocked ?? null,
+    v2_paper_cooldown_agreement: envelope.v2_paper_cooldown_agreement ?? null,
+    cooldown_authority_owner: envelope.cooldown_authority_owner ?? null,
+    cooldown_execution_owner: envelope.cooldown_execution_owner ?? null,
     v2_lifecycle_consistency_pass: selector?.v2_result.lifecycleAuthority?.consistencyPass ?? null,
     v2_lifecycle_inconsistency_reasons: selector?.v2_result.lifecycleAuthority?.inconsistencyReasons ?? null,
     v2_legacy_intervention_detected: selector?.v2_result.lifecycleAuthority?.legacyInterventionDetected ?? null,

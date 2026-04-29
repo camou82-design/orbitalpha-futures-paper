@@ -24,7 +24,7 @@ import { evaluateV2AddOnPolicy } from "./addon/policy";
 import { evaluateV2ExitPolicy } from "./exit/policy";
 import { deriveMicroExecutionScore } from "./execution/micro-execution-score";
 import { deriveTradeLifecycleAuthority } from "./lifecycle/trade-lifecycle-authority";
-import type { MicroExecutionScoreSummary, V2ExitAuthorityResult, V2PartialAuthorityResult, V2TradeLifecycleAuthorityResult } from "./types";
+import type { MicroExecutionScoreSummary, V2ExitAuthorityResult, V2PartialAuthorityResult, V2TradeLifecycleAuthorityResult, V2CooldownAuthorityResult } from "./types";
 
 const V2_PROOF_KEY_TTL_MS = 60 * 60 * 1000;
 const V2_PROOF_KEY_MAX_SIZE = 5000;
@@ -1179,6 +1179,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let lifecycleAuthority: V2TradeLifecycleAuthorityResult | null = null;
     let v2ExitAuthority: V2ExitAuthorityResult | null = null;
     let v2PartialAuthority: V2PartialAuthorityResult | null = null;
+    let v2CooldownAuthority: V2CooldownAuthorityResult | null = null;
     const exitActionMap: Record<string, V2ExitAuthorityResult["exitAction"]> = {
         HOLD: "none",
         WATCH: "watch",
@@ -1438,6 +1439,106 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 boxPos: input.snapshot.boxPos ?? null
             }
         });
+
+        // Cooldown authority is computed as an independent proof/comparison layer.
+        // It does NOT change any actual cooldown application logic (paper engine remains the executor).
+        const cooldownType = lifecycleAuthority.cooldownType;
+        const shouldCooldown = cooldownType !== "none";
+
+        const cooldownAction: V2CooldownAuthorityResult["cooldownAction"] =
+            cooldownType === "none"
+                ? "none"
+                : cooldownType === "direction_block"
+                    ? "block_direction"
+                    : cooldownType === "time_reentry"
+                        ? "block_entry"
+                        : cooldownType === "risk_halt"
+                            ? "halt"
+                            : "block_entry";
+
+        const cooldownUrgency: V2CooldownAuthorityResult["cooldownUrgency"] =
+            cooldownType === "none"
+                ? "none"
+                : cooldownType === "direction_block"
+                    ? "medium"
+                    : cooldownType === "time_reentry"
+                        ? "low"
+                        : cooldownType === "risk_halt"
+                            ? "high"
+                            : "medium";
+
+        const directionBlocked: V2CooldownAuthorityResult["directionBlocked"] =
+            cooldownType !== "direction_block"
+                ? "none"
+                : v2State.directionalShockState === "DOWN"
+                    ? "long"
+                    : v2State.directionalShockState === "UP"
+                        ? "short"
+                        : lifecycleSide === "long"
+                            ? "long"
+                            : lifecycleSide === "short"
+                                ? "short"
+                                : "none";
+
+        v2CooldownAuthority = {
+            symbol: String(input.symbol),
+            side: lifecycleSide,
+            cooldownAuthorityOwner: "v2",
+            cooldownExecutionOwner: "paper_engine",
+            cooldownAction,
+            shouldCooldown,
+            cooldownType,
+            cooldownReason: lifecycleAuthority.cooldownReason,
+            cooldownUrgency,
+            cooldownRemainingMs:
+                shouldCooldown && typeof cooldownRemainingRaw === "number" && Number.isFinite(cooldownRemainingRaw)
+                    ? cooldownRemainingRaw
+                    : null,
+            directionBlocked,
+            proofReasons: lifecycleAuthority.proofReasons,
+            trueInconsistencyReasons: lifecycleAuthority.trueInconsistencyReasons,
+            knownShadowGaps: lifecycleAuthority.knownShadowGaps
+        };
+
+        const cooldownProofKey = [
+            v2CooldownAuthority.cooldownAction,
+            v2CooldownAuthority.shouldCooldown,
+            v2CooldownAuthority.cooldownType,
+            v2CooldownAuthority.cooldownReason ?? "none",
+            v2CooldownAuthority.cooldownUrgency,
+            v2CooldownAuthority.directionBlocked
+        ].join("|");
+
+        const cooldownHighPriority = v2CooldownAuthority.trueInconsistencyReasons.length > 0;
+
+        if (
+            shouldEmitV2Proof(
+                "V2_COOLDOWN_AUTHORITY_STATE_PROOF",
+                String(input.symbol),
+                cooldownProofKey,
+                cooldownHighPriority
+            )
+        ) {
+            console.info(JSON.stringify({
+                event: "V2_COOLDOWN_AUTHORITY_STATE_PROOF",
+                symbol: String(input.symbol),
+                side: v2CooldownAuthority.side,
+                regime: judgment.regime,
+                directional_shock_state: v2State.directionalShockState,
+                cooldown_authority_owner: v2CooldownAuthority.cooldownAuthorityOwner,
+                cooldown_execution_owner: v2CooldownAuthority.cooldownExecutionOwner,
+                v2_cooldown_action: v2CooldownAuthority.cooldownAction,
+                v2_should_cooldown: v2CooldownAuthority.shouldCooldown,
+                v2_cooldown_type: v2CooldownAuthority.cooldownType,
+                v2_cooldown_reason: v2CooldownAuthority.cooldownReason,
+                v2_cooldown_urgency: v2CooldownAuthority.cooldownUrgency,
+                v2_cooldown_remaining_ms: v2CooldownAuthority.cooldownRemainingMs,
+                direction_blocked: v2CooldownAuthority.directionBlocked,
+                known_shadow_gaps: v2CooldownAuthority.knownShadowGaps,
+                true_inconsistency_reasons: v2CooldownAuthority.trueInconsistencyReasons,
+                proof_reasons: v2CooldownAuthority.proofReasons
+            }));
+        }
         const lifecycleProofKey = [
             lifecycleAuthority.lifecycleStage,
             lifecycleAuthority.lifecycleAuthorityOwner,
@@ -1669,6 +1770,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         lifecycleAuthority: lifecycleAuthority ?? undefined,
         v2ExitAuthority: v2ExitAuthority ?? undefined,
         v2PartialAuthority: v2PartialAuthority ?? undefined,
+        v2CooldownAuthority: v2CooldownAuthority ?? undefined,
         rawMetrics: {
             ...judgment.metrics,
             confidenceScore: confidence.score,
@@ -1693,6 +1795,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         lifecycleAuthority,
         v2ExitAuthority,
         v2PartialAuthority,
+        v2CooldownAuthority,
         exitPolicy: {
             action: exitPolicy.action,
             reason: exitPolicy.reason,

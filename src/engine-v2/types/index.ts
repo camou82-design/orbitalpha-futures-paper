@@ -244,6 +244,7 @@ export interface EngineV2Decision {
     lifecycleAuthority?: V2TradeLifecycleAuthorityResult;
     v2ExitAuthority?: V2ExitAuthorityResult;
     v2PartialAuthority?: V2PartialAuthorityResult;
+    v2CooldownAuthority?: V2CooldownAuthorityResult;
     rawMetrics: Record<string, number | boolean>;
 }
 
@@ -418,6 +419,15 @@ export interface SymbolDecisionEnvelope {
     v2_side?: string;
     v2_size?: number;
     selector_mismatch?: boolean;
+    v2_paper_cooldown_agreement?: boolean | null;
+    v2_cooldown_action?: string | null;
+    v2_cooldown_type?: string | null;
+    v2_cooldown_reason?: string | null;
+    v2_cooldown_urgency?: string | null;
+    v2_cooldown_remaining_ms?: number | null;
+    v2_direction_blocked?: string | null;
+    cooldown_authority_owner?: string | null;
+    cooldown_execution_owner?: string | null;
 }
 
 /** Tier 1: Market Judgment */
@@ -563,6 +573,23 @@ export interface V2PartialAuthorityResult {
     knownShadowGaps: string[];
 }
 
+export interface V2CooldownAuthorityResult {
+    symbol: string;
+    side: EngineV2Side;
+    cooldownAuthorityOwner: "v2";
+    cooldownExecutionOwner: "paper_engine";
+    cooldownAction: "none" | "watch" | "block_entry" | "block_direction" | "halt";
+    shouldCooldown: boolean;
+    cooldownType: V2CooldownType;
+    cooldownReason: string | null;
+    cooldownUrgency: "none" | "low" | "medium" | "high";
+    cooldownRemainingMs: number | null;
+    directionBlocked: "none" | "long" | "short";
+    proofReasons: string[];
+    trueInconsistencyReasons: string[];
+    knownShadowGaps: string[];
+}
+
 export type V2LifecycleStage = "entry" | "add_on" | "partial" | "exit" | "cooldown" | "position_state";
 export type V2CooldownType = "none" | "direction_block" | "time_reentry" | "risk_halt" | "fail_reentry";
 export type V2LifecyclePartialAction = "none" | "prepare" | "reduce" | "protect_profit";
@@ -685,5 +712,6 @@ export interface EngineV2InternalResult {
     lifecycleAuthority: V2TradeLifecycleAuthorityResult | null;
     v2ExitAuthority: V2ExitAuthorityResult | null;
     v2PartialAuthority: V2PartialAuthorityResult | null;
+    v2CooldownAuthority: V2CooldownAuthorityResult | null;
     exitPolicy: ExitPolicyDiagnosticsSummary | null;
 }
