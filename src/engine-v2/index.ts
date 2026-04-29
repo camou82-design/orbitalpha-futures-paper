@@ -1289,8 +1289,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2SideAfterPromotion === "long" ? v2State.longPosition
             : v2SideAfterPromotion === "short" ? v2State.shortPosition
                 : null;
+    const heldPosition = v2State.longPosition ?? v2State.shortPosition ?? null;
+    const lifecyclePosition = sameSidePosition ?? heldPosition;
+    const lifecycleSide: EngineV2Side =
+        v2SideAfterPromotion === "none" || v2SideAfterPromotion == null
+            ? lifecyclePosition != null
+                ? (lifecyclePosition.side === "LONG" ? "long" : "short")
+                : "none"
+            : v2SideAfterPromotion;
     const hasLifecycleCandidate =
-        sameSidePosition != null ||
+        lifecyclePosition != null ||
         finalDecision === "ENTER" ||
         riskSizing.blockReason != null;
     if (hasLifecycleCandidate) {
@@ -1298,7 +1306,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const cooldownRemainingRaw = (riskSizing.diagnostics as Record<string, unknown> | undefined)?.cooldown_remaining_ms;
         lifecycleAuthority = deriveTradeLifecycleAuthority({
             symbol: String(input.symbol),
-            side: v2SideAfterPromotion,
+            side: lifecycleSide,
             regime: judgment.regime,
             marketMode: judgment.regime,
             directionalShockState: v2State.directionalShockState,
@@ -1306,11 +1314,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2Side: v2SideAfterPromotion,
             authoritySource: "v2",
             adoptedEngine: "V2",
-            position: sameSidePosition,
-            unrealizedPnl: sameSidePosition != null ? sameSidePosition.sizeUsd * sameSidePosition.pnlPct : null,
-            unrealizedPnlPct: sameSidePosition?.pnlPct ?? null,
+            position: lifecyclePosition,
+            unrealizedPnl: lifecyclePosition != null ? lifecyclePosition.sizeUsd * lifecyclePosition.pnlPct : null,
+            unrealizedPnlPct: lifecyclePosition?.pnlPct ?? null,
             holdMs: null,
-            entryPrice: sameSidePosition?.entryPrice ?? null,
+            entryPrice: lifecyclePosition?.entryPrice ?? null,
             markPrice: input.snapshot.lastPrice ?? null,
             riskState: v2State.riskMode,
             cooldownState: {
@@ -1341,8 +1349,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             console.info(JSON.stringify({
                 event: "V2_TRADE_LIFECYCLE_PROOF",
                 symbol: String(input.symbol),
-                position_id: sameSidePosition != null
-                    ? `${String(input.symbol)}:${sameSidePosition.side}:${sameSidePosition.entryStage}`
+                position_id: lifecyclePosition != null
+                    ? `${String(input.symbol)}:${lifecyclePosition.side}:${lifecyclePosition.entryStage}`
                     : `${String(input.symbol)}:none`,
                 lifecycle_stage: lifecycleAuthority.lifecycleStage,
                 authority_source: lifecycleAuthority.authoritySource,
@@ -1350,7 +1358,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 regime: judgment.regime,
                 market_mode: judgment.regime,
                 directional_shock_state: v2State.directionalShockState,
-                side: v2SideAfterPromotion,
+                side: lifecycleSide,
                 v2_decision: finalDecision,
                 v2_side: v2SideAfterPromotion,
                 lifecycle_authority_owner: lifecycleAuthority.lifecycleAuthorityOwner,

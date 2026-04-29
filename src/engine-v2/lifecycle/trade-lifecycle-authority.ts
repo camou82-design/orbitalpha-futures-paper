@@ -44,7 +44,7 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
     const partialExecutionOwner = "paper_engine";
     const exitExecutionOwner = "paper_engine";
     const cooldownExecutionOwner = "paper_engine";
-    const positionStateExecutionOwner = "paper_engine";
+    const positionStateExecutionOwner: V2TradeLifecycleAuthorityResult["positionStateOwner"] = "paper_engine";
     const postEntryExecutionOwner = "paper_engine";
 
     if (input.directionalShockState === "DOWN" && input.side === "long") {
@@ -140,7 +140,7 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
         adoptedEngine: input.adoptedEngine,
         lifecycleAuthorityOwner,
         executionOwner,
-        positionStateOwner: isV2Owner ? "v2" : input.authoritySource === "v1" ? "legacy" : "unknown",
+        positionStateOwner: positionStateExecutionOwner,
         entryManagedByV2: isV2Owner,
         addOnManagedByV2: false,
         partialManagedByV2: false,
