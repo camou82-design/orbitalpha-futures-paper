@@ -4138,12 +4138,13 @@ export class PaperEngine {
         });
       };
       const handleV2PartialAuthorityProof = (
-        paperPartialAction: "none" | "partial" | "reduce",
+        paperPartialAction: "none" | "partial" | "reduce" | "superseded_by_exit",
         paperPartialReason: string | null
       ): void => {
         if (!v2PartialAuthority || paperPartialProofHandled) return;
         paperPartialProofHandled = true;
         const v2PaperPartialAgreement =
+          paperPartialAction === "superseded_by_exit" ||
           (v2PartialAuthority.shouldPartial === true && (paperPartialAction === "partial" || paperPartialAction === "reduce")) ||
           (v2PartialAuthority.shouldPartial !== true && paperPartialAction === "none");
         const proofKey = [
@@ -4175,6 +4176,7 @@ export class PaperEngine {
           v2_partial_confidence: v2PartialAuthority.partialConfidence,
           v2_reduce_ratio: v2PartialAuthority.reduceRatio,
           paper_partial_action: paperPartialAction,
+          partial_superseded_by_exit: paperPartialAction === "superseded_by_exit",
           paper_partial_reason: paperPartialReason,
           v2_paper_partial_agreement: v2PaperPartialAgreement,
           known_shadow_gaps: v2PartialAuthority.knownShadowGaps ?? [],
@@ -4346,7 +4348,7 @@ export class PaperEngine {
                 ...snapPaths
               });
               handleV2ExitAuthorityProof("exit", cr);
-              handleV2PartialAuthorityProof("none", null);
+              handleV2PartialAuthorityProof("superseded_by_exit", null);
               await this.dispatchOkxClose({
                 symbol: open.symbol,
                 side: open.side,
@@ -4477,7 +4479,7 @@ export class PaperEngine {
                 ...snapPaths
               });
               handleV2ExitAuthorityProof("exit", cr);
-              handleV2PartialAuthorityProof("none", null);
+              handleV2PartialAuthorityProof("superseded_by_exit", null);
               await this.dispatchOkxClose({
                 symbol: open.symbol,
                 side: open.side,
@@ -4711,7 +4713,7 @@ export class PaperEngine {
           confirmedExitType = exitEventJsonlType(crTrail);
           confirmedCloseSource = "range_profit_trail_executor";
           handleV2ExitAuthorityProof("exit", crTrail);
-          handleV2PartialAuthorityProof("none", null);
+          handleV2PartialAuthorityProof("superseded_by_exit", null);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -4916,7 +4918,7 @@ export class PaperEngine {
               })
               : toClosed(cr, m, open.sizeUsd);
           handleV2ExitAuthorityProof("exit", cr);
-          handleV2PartialAuthorityProof("none", null);
+          handleV2PartialAuthorityProof("superseded_by_exit", null);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -4998,7 +5000,7 @@ export class PaperEngine {
           confirmedExitType = "EXIT_TREND_SWITCH";
           confirmedCloseSource = "trend_engine_switch";
           handleV2ExitAuthorityProof("exit", cr);
-          handleV2PartialAuthorityProof("none", null);
+          handleV2PartialAuthorityProof("superseded_by_exit", null);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -5145,7 +5147,7 @@ export class PaperEngine {
         confirmedCloseSource = "hard_stop_loss_gate";
         const closedRow = toClosed(cr, m, open.sizeUsd);
         handleV2ExitAuthorityProof("exit", cr);
-        handleV2PartialAuthorityProof("none", null);
+        handleV2PartialAuthorityProof("superseded_by_exit", null);
         await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
@@ -5304,7 +5306,7 @@ export class PaperEngine {
               : "trend_regime_shift_gate_upper_opposing_trend_confirmed";
           const closedRow = toClosed(cr, m, open.sizeUsd);
           handleV2ExitAuthorityProof("exit", cr);
-          handleV2PartialAuthorityProof("none", null);
+          handleV2PartialAuthorityProof("superseded_by_exit", null);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -5551,7 +5553,7 @@ export class PaperEngine {
         const exDetail = (exitEval.detail ?? {}) as Record<string, unknown>;
         const closedRow = toClosed(cr, m, open.sizeUsd);
         handleV2ExitAuthorityProof("exit", cr);
-        handleV2PartialAuthorityProof("none", null);
+        handleV2PartialAuthorityProof("superseded_by_exit", null);
         await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,

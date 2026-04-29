@@ -1257,14 +1257,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     if (
         exitPolicy.hasPosition &&
         shouldEmitV2Proof(
-            "V2_PARTIAL_AUTHORITY_PROOF",
+            "V2_PARTIAL_AUTHORITY_STATE_PROOF",
             String(input.symbol),
             `${v2PartialAuthority.partialAction}|${v2PartialAuthority.partialReason}|${v2PartialAuthority.partialUrgency}|${v2PartialAuthority.reduceRatio ?? 0}`,
             v2PartialAuthority.trueInconsistencyReasons.length > 0
         )
     ) {
         console.info(JSON.stringify({
-            event: "V2_PARTIAL_AUTHORITY_PROOF",
+            event: "V2_PARTIAL_AUTHORITY_STATE_PROOF",
             symbol: String(input.symbol),
             side: v2PartialAuthority.side,
             partial_authority_owner: v2PartialAuthority.partialAuthorityOwner,
@@ -1485,12 +1485,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 inconsistency_reasons: lifecycleAuthority.inconsistencyReasons,
                 proof_reasons: lifecycleAuthority.proofReasons
             }));
-        }
-        if (v2PartialAuthority.shouldPartial) {
-            lifecycleAuthority.partialAction =
-                v2PartialAuthority.partialAction === "protect_profit"
-                    ? "protect_profit"
-                    : "reduce";
         }
     }
 
