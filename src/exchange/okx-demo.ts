@@ -90,7 +90,7 @@ export class OkxDemoClient {
   private readonly candleCache = new Map<string, { expiresAt: number; value: TryResult<Candle[]> }>();
   private readonly fundingCache = new Map<string, { expiresAt: number; value: TryResult<FundingRate> }>();
 
-  constructor(private readonly cfg: OkxDemoClientConfig) {}
+  constructor(private readonly cfg: OkxDemoClientConfig) { }
 
   private sign(ts: string, method: string, requestPath: string, body: string): string {
     const prehash = `${ts}${method}${requestPath}${body}`;
@@ -188,6 +188,23 @@ export class OkxDemoClient {
     const q = new URLSearchParams();
     q.set("instType", instType);
     return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/account/positions", q, null);
+  }
+
+  getLeverage(instId: string, mgnMode = "isolated"): Promise<TryResult<Record<string, unknown>[]>> {
+    const q = new URLSearchParams();
+    q.set("instId", instId);
+    q.set("mgnMode", mgnMode);
+    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/account/leverage-info", q, null);
+  }
+
+  setLeverage(input: { instId: string; lever: string; mgnMode?: string; posSide?: string }): Promise<TryResult<Record<string, unknown>[]>> {
+    const payload = {
+      instId: input.instId,
+      lever: input.lever,
+      mgnMode: input.mgnMode ?? "isolated",
+      posSide: input.posSide
+    };
+    return this.signedRequest<Record<string, unknown>>("POST", "/api/v5/account/set-leverage", null, payload);
   }
 
   submitOrder(input: OkxOrderSubmitInput): Promise<TryResult<Record<string, unknown>[]>> {
@@ -292,7 +309,7 @@ export class OkxDemoClient {
     const q = query && Array.from(query.keys()).length > 0 ? `?${query.toString()}` : "";
     const pathWithQuery = `${requestPath}${q}`;
     const requestUrl = `${this.cfg.baseUrl}${pathWithQuery}`;
-    
+
     let res: Response;
     try {
       await this.acquireRateLimitSlot();
@@ -367,7 +384,7 @@ export class OkxDemoClient {
     const q = new URLSearchParams();
     q.set("instId", instId);
     const res = await this.publicRequest<Record<string, unknown>>("GET", "/api/v5/market/ticker", q);
-    
+
     if (!res.success || !res.json) {
       return { ok: false, error: res.error || "unknown_error", diagnostics: res.diagnostics };
     }

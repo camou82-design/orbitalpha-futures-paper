@@ -3667,70 +3667,119 @@ export class PaperEngine {
       const ticker = await this.okxPublic.tryGetTicker(input.symbol);
       const refPrice = ticker.ok ? ticker.value.last : null;
 
-      // 1. Mandatory Available Balance Guard
-      if (this.okxAvailableBalanceUsdt === 0) {
-        const failReason = "AVAILABLE_BALANCE_ZERO";
-        this.logger.warn("RISK_EXPOSURE_CAP_PRE_SUBMIT", { ...logCtx, reason: failReason, available_balance_usdt: 0 });
+      // 1. V2 Intended Metrics (Decision Basis)
+      const v2_intended_qty = input.qty;
+      const v2_intended_notional_usdt = refPrice != null && Number.isFinite(refPrice) ? v2_intended_qty * refPrice : null;
+      // v2_risk_cap_usdt is the same as intended notional in this context as it represents the V2's sizing decision.
+      const v2_risk_cap_usdt = v2_intended_notional_usdt;
+
+      // 2. OKX Reality Context (Exchange State)
+      const okxLeverage = await this.okxDemo.getLeverage(instId);
+      const okx_confirmed_leverage = okxLeverage.ok ? Number(okxLeverage.value?.[0]?.lever ?? 0) : null;
+      const okx_available_balance_usdt = this.okxAvailableBalanceUsdt;
+
+      // 3. Dynamic Capping (Execution Reality)
+      const static_safety_cap = this.config.okxLiveMaxOrderNotionalUsdt;
+      const okx_dynamic_notional_cap_usdt = 
+        okx_available_balance_usdt != null && okx_confirmed_leverage != null
+          ? (okx_available_balance_usdt * (this.config.okxLiveUsableBalanceRatio ?? 0.95)) * okx_confirmed_leverage
+          : 0;
+
+      // 4. Final Sizing Logic (Strict "Min" Policy)
+      // Rule: Never expand beyond what V2 intended.
+      let final_size_source: "v2_risk" | "okx_dynamic_cap" | "static_safety_cap" | "min_order_block" = "v2_risk";
+      let final_submitted_notional_usdt = v2_intended_notional_usdt ?? 0;
+
+      // Constraint: Dynamic Cap (Exchange liquidity)
+      if (final_submitted_notional_usdt > okx_dynamic_notional_cap_usdt) {
+        final_submitted_notional_usdt = okx_dynamic_notional_cap_usdt;
+        final_size_source = "okx_dynamic_cap";
+      }
+
+      // Constraint: Static Cap (Optional safety override)
+      if (this.config.okxLiveStaticNotionalCapEnabled && final_submitted_notional_usdt > static_safety_cap) {
+        final_submitted_notional_usdt = static_safety_cap;
+        final_size_source = "static_safety_cap";
+      }
+
+      // Calculate final qty based on constrained notional
+      let final_submitted_qty = refPrice != null && refPrice > 0 
+        ? Math.floor((final_submitted_notional_usdt / refPrice) * 1000000) / 1000000
+        : 0;
+
+      // Constraint: Min order size (hard floor)
+      if (final_submitted_qty < 0.001 && v2_intended_qty >= 0.001) {
+        final_size_source = "min_order_block";
+      }
+
+      const logCtxReality = {
+        ...logCtx,
+        v2_intended_qty,
+        v2_intended_notional_usdt,
+        v2_risk_cap_usdt,
+        okx_available_balance_usdt,
+        okx_confirmed_leverage,
+        okx_dynamic_notional_cap_usdt,
+        final_submitted_qty,
+        final_submitted_notional_usdt,
+        final_size_source,
+        static_safety_cap,
+        static_cap_enabled: this.config.okxLiveStaticNotionalCapEnabled,
+        ref_price: refPrice
+      };
+
+      // 5. Execution Reality Proofs
+      this.logger.info("OKX_EXECUTION_REALITY_PROOF", logCtxReality);
+      this.logger.info("LIVE_LEVERAGE_AVAILABILITY_PROOF", {
+        ...logCtxReality,
+        okx_leverage_payload: okxLeverage.ok ? okxLeverage.value : null
+      });
+
+      // 6. Hard Execution Blocks
+      // Guard: Verification Failure
+      if (!okxLeverage.ok || okx_confirmed_leverage == null || okx_confirmed_leverage === 0 || okx_available_balance_usdt == null) {
+        const reject_reason = "OKX_BALANCE_OR_LEVERAGE_UNCONFIRMED";
+        this.logger.warn("EXCHANGE_REALITY_BLOCK", { ...logCtxReality, reject_reason });
         return {
-          ok: false,
-          ordId: null,
-          fillPx: null,
-          errorCode: "risk_exposure_cap_pre_submit",
-          errorMessage: "Account available balance is zero; submission blocked.",
-          ackCode: "rejected",
-          orderState: null
+          ok: false, ordId: null, fillPx: null, 
+          errorCode: "okx_reality_unconfirmed", 
+          errorMessage: "Exchange balance or leverage could not be verified", 
+          ackCode: "rejected", orderState: null
         };
       }
 
-      // 2. Strict Notional Capping
-      const maxNotional = this.config.okxLiveMaxOrderNotionalUsdt;
-      let currentQty = input.qty;
-      let requestedNotional = refPrice != null && Number.isFinite(refPrice) ? Math.max(0, currentQty * refPrice) : null;
-
-      if (requestedNotional != null && requestedNotional > maxNotional && refPrice != null && refPrice > 0) {
-        const originalQty = currentQty;
-        currentQty = Math.floor((maxNotional / refPrice) * 1000000) / 1000000;
-        requestedNotional = currentQty * refPrice;
-        this.logger.info("LIVE_ORDER_SIZE_CONSTRAINED_TO_CAP", {
-          symbol: input.symbol,
-          original_qty: originalQty,
-          capped_qty: currentQty,
-          original_notional: input.qty * refPrice,
-          capped_notional: requestedNotional,
-          cap_usdt: maxNotional,
-          ref_price: refPrice
-        });
-      }
-
-      // MIN_ORDER_SIZE_UNDERFLOW check
-      if (currentQty < 0.001) {
-        this.logger.warn("MIN_ORDER_SIZE_UNDERFLOW", { ...logCtx, symbol: input.symbol, qty: currentQty, min_qty: 0.001 });
+      // Guard: Leverage Mismatch
+      if (input.appliedLeverage != null && okx_confirmed_leverage !== input.appliedLeverage) {
+        const reject_reason = "EXCHANGE_REALITY_BLOCK";
+        this.logger.warn("EXCHANGE_REALITY_BLOCK", { ...logCtxReality, reject_reason, detail: "leverage_mismatch" });
         return {
-          ok: false,
-          ordId: null,
-          fillPx: null,
-          errorCode: "min_order_size_underflow",
-          errorMessage: `Order quantity ${currentQty} below minimum limit 0.001`,
-          ackCode: "rejected",
-          orderState: null
+          ok: false, ordId: null, fillPx: null, 
+          errorCode: "leverage_mismatch", 
+          errorMessage: `Leverage mismatch: Engine=${input.appliedLeverage}, OKX=${okx_confirmed_leverage}`, 
+          ackCode: "rejected", orderState: null
         };
       }
 
-      const finalQty = currentQty;
-      const liveOrderNotionalUsdt = requestedNotional;
+      // Guard: Min Order Size
+      if (final_submitted_qty < 0.001) {
+        const reject_reason = "EXCHANGE_REALITY_BLOCK";
+        this.logger.warn("EXCHANGE_REALITY_BLOCK", { ...logCtxReality, reject_reason, detail: "min_order_size_underflow" });
+        return {
+          ok: false, ordId: null, fillPx: null, 
+          errorCode: "min_order_size_underflow", 
+          errorMessage: `Final quantity ${final_submitted_qty} below 0.001`, 
+          ackCode: "rejected", orderState: null
+        };
+      }
 
-      const requestedLeverage = Math.max(1, input.appliedLeverage ?? 0);
-      const authorityAppliedLeverage = Number.isFinite(input.appliedLeverage) ? Math.max(1, Number(input.appliedLeverage)) : null;
-      const authorityMismatch = authorityAppliedLeverage == null;
+      // Final Liquidation Buffer Verification (Safety Layer)
       const stopPrice = Number.isFinite(input.stopPrice) ? Number(input.stopPrice) : null;
       const entryPrice = Number.isFinite(input.entryPrice)
         ? Number(input.entryPrice)
         : (refPrice != null && Number.isFinite(refPrice) ? refPrice : null);
       
       const canEvaluateLiquidation = stopPrice != null && entryPrice != null && entryPrice > 0;
-      const appliedLeverage = authorityAppliedLeverage;
-      const maxLiveLeverageAllowed = authorityAppliedLeverage;
-      const leveragePolicyReason = "AUTHORITY_FINAL_APPLIED_LEVERAGE";
+      const appliedLeverage = okx_confirmed_leverage;
       const estimatedLiquidationPrice =
         appliedLeverage != null ? this.estimateLiquidationPrice({ side: input.side, entryPrice: entryPrice ?? 0, leverage: appliedLeverage }) : null;
       
@@ -3755,93 +3804,25 @@ export class PaperEngine {
       
       const requiredBufferRatio = 1.5;
       const liveLeverageAllowed =
-        authorityMismatch !== true &&
         stopBeforeLiquidation === true &&
         liquidationBufferRatio != null &&
         liquidationBufferRatio >= requiredBufferRatio;
       
-      const liveLeverageBlockReason = authorityMismatch
-        ? "LIVE_LEVERAGE_AUTHORITY_MISMATCH"
-        : (liveLeverageAllowed ? null : "LIVE_LIQUIDATION_BUFFER_INSUFFICIENT");
-      
-      const effectiveMarginEstimateUsdt =
-        liveOrderNotionalUsdt != null && appliedLeverage != null && appliedLeverage > 0
-          ? liveOrderNotionalUsdt / appliedLeverage
-          : null;
-      
-      const liveCapPassed =
-        liveOrderNotionalUsdt != null &&
-        Number.isFinite(liveOrderNotionalUsdt) &&
-        liveOrderNotionalUsdt <= this.config.okxLiveMaxOrderNotionalUsdt + 0.01; // Allow small float margin
-
-      const liveCapBlockReason = liveCapPassed ? null : "LIVE_MAX_ORDER_NOTIONAL_CAP";
-      
-      const liveOrderSizeProof = {
-        ...logCtx,
-        qty_requested: input.qty,
-        qty_submitted: finalQty,
-        ref_price: refPrice,
-        live_order_notional_usdt: liveOrderNotionalUsdt,
-        live_notional_cap_usdt: maxNotional,
-        live_cap_passed: liveCapPassed,
-        live_cap_block_reason: liveCapBlockReason,
-        available_balance_usdt: this.okxAvailableBalanceUsdt,
-        leverage_policy_reason: leveragePolicyReason,
-        applied_leverage: appliedLeverage,
-        effective_margin_estimate_usdt: effectiveMarginEstimateUsdt,
-        entry_price: entryPrice,
-        stop_price: stopPrice,
-        estimated_liquidation_price: estimatedLiquidationPrice,
-        stop_distance_pct: stopDistancePct,
-        liquidation_distance_pct: liquidationDistancePct,
-        liquidation_buffer_ratio: liquidationBufferRatio,
-        required_liquidation_buffer_ratio: requiredBufferRatio,
-        stop_before_liquidation: stopBeforeLiquidation,
-        live_leverage_allowed: liveLeverageAllowed,
-        live_leverage_block_reason: liveLeverageBlockReason
-      };
-
-      this.logger.info("LIVE_ORDER_SIZE_PROOF", liveOrderSizeProof);
-
-      if (authorityMismatch) {
-        return {
-          ok: false,
-          ordId: null,
-          fillPx: null,
-          errorCode: "live_leverage_authority_mismatch",
-          errorMessage: "Authority leverage missing or invalid",
-          ackCode: "rejected",
-          orderState: null
-        };
-      }
       if (!liveLeverageAllowed) {
+        const reject_reason = "EXCHANGE_REALITY_BLOCK";
+        const detail = "LIVE_LIQUIDATION_BUFFER_INSUFFICIENT";
         const errorMsg = `Live liquidation buffer insufficient (Required: ${requiredBufferRatio}, Available: ${liquidationBufferRatio?.toFixed(2) ?? "N/A"})`;
-        this.logger.warn("LIVE_LIQUIDATION_BUFFER_INSUFFICIENT", { ...liveOrderSizeProof, error: errorMsg });
+        this.logger.warn("EXCHANGE_REALITY_BLOCK", { ...logCtxReality, reject_reason, detail, error: errorMsg });
         return {
-          ok: false,
-          ordId: null,
-          fillPx: null,
-          errorCode: "live_liquidation_buffer_insufficient",
-          errorMessage: errorMsg,
-          ackCode: "rejected",
-          orderState: null
-        };
-      }
-      if (!liveCapPassed) {
-        this.logger.warn("LIVE_MAX_ORDER_NOTIONAL_CAP", liveOrderSizeProof);
-        return {
-          ok: false,
-          ordId: null,
-          fillPx: null,
-          errorCode: "live_max_order_notional_cap",
-          errorMessage: `Live order notional ${liveOrderNotionalUsdt?.toFixed(2)} exceeds configured cap ${maxNotional}`,
-          ackCode: "rejected",
-          orderState: null
+          ok: false, ordId: null, fillPx: null, 
+          errorCode: "live_liquidation_buffer_insufficient", 
+          errorMessage: errorMsg, 
+          ackCode: "rejected", orderState: null
         };
       }
 
-      // Ensure input.qty reflects the final capped quantity for the rest of the function
-      input.qty = finalQty;
+      // Apply final quantity to the order submission
+      input.qty = final_submitted_qty;
     }
     const orderExecutionKey = `order:${input.traceId}:${input.reason}:${input.side}:${input.posSide}:${input.qty}`;
     const orderKeyOk = await this.consumeExecutionKey(orderExecutionKey);

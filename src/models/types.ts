@@ -189,6 +189,10 @@ export type EngineConfig = Readonly<{
   okxSimulatedTradingHeaderEnabled: boolean;
   /** Live signed submit guard: max order notional in USDT. */
   okxLiveMaxOrderNotionalUsdt: number;
+  /** Whether to use static 5 USDT cap or dynamic balance-based cap (default true). */
+  okxLiveStaticNotionalCapEnabled: boolean;
+  /** Fraction of available balance to use for dynamic capping (default 0.95). */
+  okxLiveUsableBalanceRatio: number;
   /** OKX demo REST base URL (default https://www.okx.com). */
   okxDemoBaseUrl: string;
   /** OKX live REST base URL (default https://www.okx.com). */

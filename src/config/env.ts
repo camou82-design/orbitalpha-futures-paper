@@ -202,6 +202,12 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     if (!Number.isFinite(n) || n <= 0) return 5;
     return Math.min(10_000, n);
   })();
+  const okxLiveStaticNotionalCapEnabled = parseBool(env.OKX_LIVE_STATIC_NOTIONAL_CAP_ENABLED, true);
+  const okxLiveUsableBalanceRatio = (() => {
+    const n = parseNumber(env.OKX_LIVE_USABLE_BALANCE_RATIO, 0.95);
+    if (!Number.isFinite(n) || n <= 0) return 0.95;
+    return Math.min(1, n);
+  })();
   const okxAuthReady =
     okxExchangeAuthOptIn &&
     (
@@ -276,6 +282,8 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     okxAuthReady,
     okxSimulatedTradingHeaderEnabled,
     okxLiveMaxOrderNotionalUsdt,
+    okxLiveStaticNotionalCapEnabled,
+    okxLiveUsableBalanceRatio,
     okxBaseUrl,
     okxApiKey,
     okxApiSecret,
