@@ -103,7 +103,7 @@ export function reconcileV2Decision(
         adopted_decision: useV2 ? v2.decision : legacy_result.decision,
         adopted_regime: useV2 ? v2.regime : legacy_result.regime,
         adopted_side: useV2 ? v2.side : legacy_result.side,
-        adopted_size_usd: useV2 ? v2.risk.finalSizeUsd : legacy_result.size,
+        adopted_size_usd: useV2 ? v2.risk.stageMarginKrw : legacy_result.size,
         adoption_reason: useV2 ? v2.explanation.reason : "v1_fallback"
     };
 
@@ -114,7 +114,7 @@ export function reconcileV2Decision(
         mismatch:
             legacy_result.decision !== v2.decision ||
             legacy_result.side !== v2.side ||
-            Math.abs(legacy_result.size - v2.risk.finalSizeUsd) > 0.000001
+            Math.abs(legacy_result.size - v2.risk.stageMarginKrw) > 0.000001
     };
 }
 
@@ -131,7 +131,7 @@ export function deriveExecutionAuthority(
     return {
         decision: res.adopted_decision,
         side: res.adopted_side,
-        sizeUsd: res.adopted_size_usd,
+        stageMarginKrw: res.adopted_size_usd,
         regime: res.adopted_regime,
         source: useV2 ? "v2" : "v1",
         leverageProfile: useV2 ? v2Risk.leverageProfile : "BASE",
@@ -151,7 +151,8 @@ export function deriveExecutionAuthorityFromEnvelope(
     return {
         decision: envelope.decision,
         side: envelope.side,
-        sizeUsd: envelope.sizeUsd,
+        stageMarginKrw: envelope.stageMarginKrw,
+        baseStageMarginKrw: envelope.baseStageMarginKrw,
         regime: envelope.regime,
         source: envelope.authorityOwner === "V2" ? "v2" : "v1",
         leverageProfile: envelope.leverageProfile == null ? "BASE" : (envelope.leverageProfile as "BASE" | "BOOST_1" | "BOOST_2"),
@@ -184,7 +185,7 @@ export function buildV2ShadowParityPayload(
         side_v1: selectorResult.legacy_result.side,
         side_v2: selectorResult.v2_result.side,
         size_v1: selectorResult.legacy_result.size,
-        size_v2: selectorResult.v2_result.risk.finalSizeUsd,
+        size_v2: selectorResult.v2_result.risk.stageMarginKrw,
         adopted_engine: selectorResult.adopted_result.engine,
         adopted_decision: selectorResult.adopted_result.adopted_decision,
         adopted_regime: selectorResult.adopted_result.adopted_regime,
@@ -270,7 +271,7 @@ export function resolveSymbolDecisionEnvelope(
                         ...v2ResRaw.decision.risk,
                         isBlocked: true,
                         blockReason: "RECONCILE_SAFE_MODE_BLOCKED",
-                        finalSizeUsd: 0,
+                        stageMarginKrw: 0,
                         leverageProfile: "BASE" as const,
                         appliedLeverage: 0,
                         leverageReason: "reconcile_safe_mode_blocked",
@@ -310,7 +311,7 @@ export function resolveSymbolDecisionEnvelope(
 
     const v2FinalDecision = v2Res.decision.decision;
     const v2FinalSide = v2Res.decision.side ?? "none";
-    const v2FinalSize = v2Res.decision.risk.finalSizeUsd ?? 0;
+    const v2FinalSize = v2Res.decision.risk.stageMarginKrw ?? 0;
 
     const allowV2Override = false;
 
@@ -345,7 +346,7 @@ export function resolveSymbolDecisionEnvelope(
         legacySize: legacyDecision.executorDecision?.total_cost ?? 0,
         v2Decision: v2Res.decision.decision,
         v2Side: v2Res.decision.side,
-        v2Size: v2Res.decision.risk.finalSizeUsd ?? 0,
+        v2Size: v2Res.decision.risk.stageMarginKrw ?? 0,
         selectorMismatch: selector.mismatch
     };
     const executionEnvelope = buildV2ExecutionAuthorityEnvelope({
@@ -371,8 +372,8 @@ export function resolveSymbolDecisionEnvelope(
 
     const v1Side = legacyDecision.intentSide ?? "none";
     const v2Side = v2Res.decision.side ?? "none";
-    const v1Size = legacyDecision.executorDecision?.total_cost ?? 0;
-    const v2Size = v2Res.decision.risk.finalSizeUsd ?? 0;
+    const v1Size = (legacyDecision.executorDecision?.total_cost ?? 0) * 1400;
+    const v2Size = v2Res.decision.risk.stageMarginKrw ?? 0;
 
     const selectorMismatch =
         v1_dec !== v2_dec ||
@@ -393,7 +394,7 @@ export function resolveSymbolDecisionEnvelope(
     }));
     const runtimeDecisionMatchesV2 = executionEnvelope.decision === v2_dec;
     const runtimeSideMatchesV2 = executionEnvelope.side === v2Side;
-    const runtimeSizeMatchesV2 = Math.abs((executionEnvelope.sizeUsd ?? 0) - v2Size) <= 0.000001;
+    const runtimeSizeMatchesV2 = Math.abs((executionEnvelope.stageMarginKrw ?? 0) - v2Size) <= 0.000001;
     const hardBlockEnterConflict = executionEnvelope.hardBlockPresent === true && executionEnvelope.decision === "ENTER";
     const invariantFailures: string[] = [];
     if (v2Mode === "engine_v2" && executionEnvelope.authoritySource !== "v2_execution_envelope") invariantFailures.push("AUTHORITY_SOURCE_MISMATCH");
@@ -429,7 +430,9 @@ export function resolveSymbolDecisionEnvelope(
         v2_decision: v2_dec,
         runtime_authority_side: executionEnvelope.side,
         v2_side: v2Side,
-        runtime_authority_size_usd: executionEnvelope.sizeUsd,
+        runtime_authority_stage_margin_krw: executionEnvelope.stageMarginKrw,
+        runtime_authority_base_stage_margin_krw: executionEnvelope.baseStageMarginKrw,
+        runtime_authority_size_usdt: executionEnvelope.stageMarginKrw / 1400,
         v2_size: v2Size,
         hard_block_present: executionEnvelope.hardBlockPresent,
         hard_block_reason: executionEnvelope.hardBlockReason,
@@ -438,8 +441,9 @@ export function resolveSymbolDecisionEnvelope(
     console.info(JSON.stringify({
         event: "V2_SIZE_EXPOSURE_SANITY_PROOF",
         symbol: String(symbol),
-        sizeUsd: executionEnvelope.sizeUsd,
-        finalSizeUsd: v2Size,
+        stageMarginKrw: executionEnvelope.stageMarginKrw,
+        sizeUsdt: executionEnvelope.stageMarginKrw / 1400,
+        finalStageMarginKrw: v2Size,
         exposureNotionalKrw: executionEnvelope.exposureNotionalKrw,
         candidateExposureNotionalKrw: v2Res.decision.risk.exposureNotionalKrw ?? 0,
         equityMultiple: executionEnvelope.equityMultiple,
@@ -461,7 +465,8 @@ export function resolveSymbolDecisionEnvelope(
         authority_version: executionEnvelope.authorityVersion,
         decision: executionEnvelope.decision,
         side: executionEnvelope.side,
-        sizeUsd: executionEnvelope.sizeUsd,
+        stage_margin_krw: executionEnvelope.stageMarginKrw,
+        size_usdt: executionEnvelope.stageMarginKrw / 1400,
         regime: executionEnvelope.regime,
         market_subtype: executionEnvelope.marketSubtype,
         entry_quality_grade: executionEnvelope.entryQualityGrade,
@@ -507,7 +512,8 @@ export function resolveSymbolDecisionEnvelope(
         runtime_authority_owner: executionEnvelope.authorityOwner,
         runtime_authority_decision: executionEnvelope.decision,
         runtime_authority_side: executionEnvelope.side,
-        runtime_authority_size_usd: executionEnvelope.sizeUsd,
+        runtime_authority_stage_margin_krw: executionEnvelope.stageMarginKrw,
+        runtime_authority_size_usdt: executionEnvelope.stageMarginKrw / 1400,
         v1_decision: v1_dec,
         v1_side: v1Side,
         v1_size: v1Size,

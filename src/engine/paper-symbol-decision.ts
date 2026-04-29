@@ -1425,7 +1425,7 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
   const v2Mode = rangeLaneForcesV2 ? "engine_v2" : configuredV2Mode;
   const sn = input.snapshot;
   if (!sn) {
-    return { decision: "HOLD", source: "v2", side: "none", sizeUsd: 0, regime: "UNKNOWN" };
+    return { decision: "HOLD", source: "v2", side: "none", stageMarginKrw: 0, regime: "UNKNOWN" };
   }
 
   const v2Env = resolveSymbolDecisionEnvelope({
@@ -1529,7 +1529,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     authority.decision === "ENTER" &&
     authority.source === "v2" &&
     (authority.side === "long" || authority.side === "short") &&
-    (authority.sizeUsd ?? 0) > 0;
+    (authority.stageMarginKrw ?? 0) > 0;
 
   // --- 4. Decision State Accumulators (Hoisted to avoid scoping/TDZ issues) ---
   let em: number | null = null;
@@ -1847,7 +1847,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         authority_decision: extra.authority_decision ?? (authority?.decision || "HOLD"),
         authority_source: extra.authority_source ?? (authority?.source || "unknown"),
         authority_side: extra.authority_side ?? (authority?.side || "none"),
-        authority_size_usd: extra.authority_size_usd ?? (authority?.sizeUsd || 0),
+        authority_stage_margin_krw: extra.authority_stage_margin_krw ?? (authority?.stageMarginKrw || 0),
+        authority_size_usdt: extra.authority_size_usdt ?? ((authority?.stageMarginKrw || 0) / 1400),
         entry_quality_grade: extra.entry_quality_grade ?? (authority?.entryQualityGrade ?? null),
         leverage_profile: extra.leverage_profile ?? (authority?.leverageProfile ?? "BASE"),
         applied_leverage: extra.applied_leverage ?? (authority?.appliedLeverage ?? null),
@@ -2108,7 +2109,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       authority_decision: authority.decision,
       authority_source: authority.source,
       authority_side: authority.side,
-      authority_size_usd: authority.sizeUsd,
+      authority_stage_margin_krw: authority.stageMarginKrw,
+      authority_size_usdt: (authority.stageMarginKrw ?? 0) / 1400,
       useRangeStage0Engine,
       classify: v2AuthorityOwnsExecution
         ? "range_stage0_blocked_by_v2_authority"
@@ -3661,7 +3663,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     const authorityExpectancySoftPassEligible =
       hasAuthorityEnterFromV2 &&
       !severeRiskLock &&
-      (authority.sizeUsd ?? 0) > 0 &&
+      (authority.stageMarginKrw ?? 0) > 0 &&
       (authority.side === "long" || authority.side === "short");
 
     if (reject_reason === "EDGE_FAIL_EXPECTANCY" && authorityExpectancySoftPassEligible) {
@@ -3671,7 +3673,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         authority_decision: authority.decision,
         authority_source: authority.source,
         authority_side: authority.side,
-        authority_size_usd: authority.sizeUsd,
+        authority_stage_margin_krw: authority.stageMarginKrw,
+        authority_size_usdt: (authority.stageMarginKrw ?? 0) / 1400,
         expectancy_failed: true,
         allow_authority_expectancy_soft_pass: true,
         reject_reason: "AUTHORITY_EXPECTANCY_SOFT_PASS",
@@ -4109,7 +4112,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       authority_decision: authority?.decision ?? null,
       authority_source: authority?.source ?? null,
       authority_side: authority?.side ?? null,
-      authority_size_usd: authority?.sizeUsd ?? null,
+      authority_stage_margin_krw: authority?.stageMarginKrw ?? null,
+      authority_size_usdt: (authority?.stageMarginKrw ?? 0) / 1400,
       adaptive_ok: adaptive?.ok ?? null,
       fail_stage: (adaptive && !adaptive.ok) ? (adaptive as any).failStage ?? null : null,
       fail_reason: (adaptive && !adaptive.ok) ? (adaptive as any).orderBuildFailReason ?? null : null,
@@ -4129,7 +4133,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     authority.decision === "ENTER" &&
     authority.source === "v2" &&
     (authority.side === "long" || authority.side === "short") &&
-    (authority.sizeUsd ?? 0) > 0;
+    (authority.stageMarginKrw ?? 0) > 0;
 
   const hardBlockedForExecution =
     !!severeRiskLock ||
@@ -4154,16 +4158,16 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           : intentSide === "long" || intentSide === "short"
             ? intentSide
             : null;
-      const authUsd =
-        typeof authority.sizeUsd === "number" && Number.isFinite(authority.sizeUsd) && authority.sizeUsd > 0
-          ? authority.sizeUsd
+      const authUsdt =
+        typeof authority.stageMarginKrw === "number" && Number.isFinite(authority.stageMarginKrw) && authority.stageMarginKrw > 0
+          ? (authority.stageMarginKrw / 1400)
           : 0;
       const anchorMult = computePaperSizingAnchorUsd(input.config) * dynamicSizeMult;
       if (bypassSide != null) {
         adaptive = {
           ok: true,
           direction: bypassSide,
-          sizeUsd: Math.max(MIN_POSITION_SIZE_USD, authUsd > 0 ? authUsd : anchorMult),
+          sizeUsd: Math.max(MIN_POSITION_SIZE_USD, authUsdt > 0 ? authUsdt : anchorMult),
           leverageMultiplier: 1,
           detail: {
             source: "v2_authority_policy_bypass_synthetic_adaptive",
@@ -4178,7 +4182,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         authority_decision: authority.decision,
         authority_source: authority.source,
         authority_side: authority.side,
-        authority_size_usd: authority.sizeUsd,
+        authority_stage_margin_krw: authority.stageMarginKrw,
+        authority_size_usdt: (authority.stageMarginKrw ?? 0) / 1400,
         parked_fail_stage: af.failStage,
         parked_fail_reason: af.orderBuildFailReason,
         final_block_owner: null,
@@ -4203,7 +4208,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         authority_decision: authority?.decision ?? null,
         authority_source: authority?.source ?? null,
         authority_side: authority?.side ?? null,
-        authority_size_usd: authority?.sizeUsd ?? null,
+        authority_stage_margin_krw: authority?.stageMarginKrw ?? null,
+        authority_size_usdt: (authority?.stageMarginKrw ?? 0) / 1400,
         authority_owner: authority?.source ?? null,
         adaptive_ok: false,
         fail_stage: af.failStage ?? null,
@@ -4319,7 +4325,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       authority_decision: authority?.decision ?? null,
       authority_source: authority?.source ?? null,
       authority_side: authority?.side ?? null,
-      authority_size_usd: authority?.sizeUsd ?? null,
+      authority_stage_margin_krw: authority?.stageMarginKrw ?? null,
+      authority_size_usdt: (authority?.stageMarginKrw ?? 0) / 1400,
       dynamic_size_mult: dynamicSizeMult,
       range_soft_pass_size_mult: rangeSoftPassSizeMult,
       authority_expectancy_soft_pass_size_mult: authorityExpectancySoftPassSizeMult,

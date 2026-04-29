@@ -20,7 +20,8 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     adoptedEngine: "V1" | "V2";
     decision: EngineV2FinalDecision;
     side: EngineV2Side;
-    sizeUsd: number;
+    stageMarginKrw: number;
+    baseStageMarginKrw: number;
     regime: string;
     marketSubtype: string | null;
     entryQualityGrade: string | null;

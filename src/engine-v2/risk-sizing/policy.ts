@@ -12,7 +12,7 @@ export function calculateRiskSizing(
 ): RiskSizingOutput & { diagnostics?: Record<string, number | string | boolean | null> } {
     const { config } = input;
     const { snapshot, state } = input;
-    const baseSizeUsd = config.baseSizeUsd;
+    const baseStageMarginKrw = config.baseSizeUsd;
     let sizeMultiplier = executor.baseSizeIntent;
     let isBlocked = false;
     let blockReason: string | undefined;
@@ -174,7 +174,7 @@ export function calculateRiskSizing(
         shockActive ? 2 :
             isTrend ? 4 : 3;
     let appliedLeverage = baseLeverage;
-    let stageMarginKrw = Math.max(0, baseSizeUsd * sizeMultiplier);
+    let stageMarginKrw = Math.max(0, baseStageMarginKrw * sizeMultiplier);
     if (judgment.regime === "RANGE") {
         stageMarginKrw = currentStage <= 0 ? 140_000 : currentStage === 1 ? 80_000 : 40_000;
         leverageReason = "range_fixed_3x";
@@ -235,11 +235,14 @@ export function calculateRiskSizing(
     }
     if (entryQualityGrade === "A" && appliedLeverage > 5) {
         appliedLeverage = 5;
-        leverageProfile = appliedLeverage === 5 ? "BOOST_1" : "BASE";
+        leverageProfile = "BOOST_1";
         leverageBlockReason = "A_GRADE_MAX_5X";
         leverageReason = "a_grade_cap_5x";
     }
-    if (entryQualityGrade !== "S" && (leverageProfile === "BOOST_1" || leverageProfile === "BOOST_2")) {
+    const isAGradeBoostActive = entryQualityGrade === "A" && (leverageReason === "trend_a_grade_limited_boost" || leverageReason === "a_grade_cap_5x");
+
+    // NON_S_GRADE_BOOST_FORBIDDEN hardening
+    if ((leverageProfile === "BOOST_1" || leverageProfile === "BOOST_2") && entryQualityGrade !== "S" && !isAGradeBoostActive) {
         leverageProfile = "BASE";
         appliedLeverage = baseLeverage;
         leverageBlockReason = "NON_S_GRADE_BOOST_FORBIDDEN";
@@ -327,7 +330,7 @@ export function calculateRiskSizing(
 
     const effectiveMargin = isBlocked ? 0 : stageMarginKrw;
     const effectiveNotional = effectiveMargin * appliedLeverage;
-    sizeMultiplier = baseSizeUsd > 0 ? effectiveMargin / baseSizeUsd : 0;
+    sizeMultiplier = baseStageMarginKrw > 0 ? effectiveMargin / baseStageMarginKrw : 0;
 
     const diagnostics = {
         entry_quality_distance_profit: Number.isFinite(dProfit) ? dProfit : null,
@@ -379,9 +382,9 @@ export function calculateRiskSizing(
         equity_multiple: accountEquityKrw > 0 ? effectiveNotional / accountEquityKrw : 0
     };
     return {
-        baseSizeUsd,
+        baseStageMarginKrw,
         sizeMultiplier,
-        finalSizeUsd: effectiveMargin,
+        stageMarginKrw: effectiveMargin,
         isBlocked,
         blockReason: blockReason || null,
         isAddOn,

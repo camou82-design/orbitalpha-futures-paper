@@ -470,7 +470,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const invalidNoneSignal = execution.signal === "NONE";
     const waitingRecheck = execution.signal === "WAIT_RECHECK";
     const invalidSideForEnter = execution.side === "none";
-    const invalidSize = riskSizing.finalSizeUsd <= 0;
+    const invalidSize = riskSizing.stageMarginKrw <= 0;
     let blockReason = riskSizing.blockReason ?? null;
 
     if (hardNoTrade) {

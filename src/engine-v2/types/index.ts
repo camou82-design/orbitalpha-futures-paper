@@ -411,7 +411,9 @@ export interface SymbolDecisionEnvelope {
     runtime_authority_owner?: string | null;
     runtime_authority_decision?: string | null;
     runtime_authority_side?: string | null;
-    runtime_authority_size_usd?: number | null;
+    runtime_authority_stage_margin_krw?: number | null;
+    runtime_authority_base_stage_margin_krw?: number | null;
+    runtime_authority_size_usdt?: number | null;
     // V1/V2 Comparison Metrics (Phase 5 Summary)
     v1_decision?: string;
     v1_side?: string;
@@ -522,9 +524,9 @@ export interface TransitionExecutorMetadata extends Record<string, string | numb
 
 /** Tier 5: Risk Sizing Output */
 export interface RiskSizingOutput {
-    baseSizeUsd: number;
+    baseStageMarginKrw: number;
     sizeMultiplier: number;
-    finalSizeUsd: number;
+    stageMarginKrw: number;
     isBlocked: boolean;
     blockReason: string | null;
     isAddOn: boolean;
@@ -690,7 +692,7 @@ export interface V2TradeLifecycleAuthorityResult {
 /** Tier 5: Add-on Policy Output */
 export interface AddonPolicyOutput {
     allowed: boolean;
-    addOnSizeUsd: number;
+    addOnStageMarginKrw: number;
     reason: string;
 }
 
@@ -719,7 +721,8 @@ export interface ExitPolicyDiagnosticsSummary {
 export type EntryExecutionAuthority = Readonly<{
     decision: EngineV2FinalDecision;
     side: EngineV2Side;
-    sizeUsd: number;
+    stageMarginKrw: number;
+    baseStageMarginKrw?: number;
     regime: string;
     source: "v1" | "v2";
     leverageProfile?: LeverageProfile;

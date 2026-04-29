@@ -14,7 +14,7 @@ export function evaluateAddonPolicy(
     const hasOpen = state.currentPositions.length > 0;
 
     let allowed = false;
-    let addOnSizeUsd = 0;
+    let addOnStageMarginKrw = 0;
     let reason = "Add-on conditions not met";
 
     // Standard 8: State-based Add-on Policy
@@ -44,23 +44,23 @@ export function evaluateAddonPolicy(
         reason = "Add-on blocked: Existing position underwater (>1.5%)";
     } else if (maxAddonsReached) {
         reason = "Add-on blocked: Max position count (3) reached";
-    } else if (regime === "RANGE" && riskSizing.finalSizeUsd > 0) {
+    } else if (regime === "RANGE" && riskSizing.stageMarginKrw > 0) {
         if (riskSizing.sizeMultiplier > 0.8 && avgPriceImprovement) {
             allowed = true;
-            addOnSizeUsd = riskSizing.baseSizeUsd * 0.5;
+            addOnStageMarginKrw = riskSizing.baseStageMarginKrw * 0.5;
             reason = "RANGE state-based add-on allowed (Price Improved + High Multiplier)";
         } else {
             reason = "RANGE add-on skipped: Size multiplier low or price not improved";
         }
-    } else if (regime === "TREND" && riskSizing.finalSizeUsd > 0) {
+    } else if (regime === "TREND" && riskSizing.stageMarginKrw > 0) {
         if (avgPriceImprovement) {
             allowed = true;
-            addOnSizeUsd = riskSizing.baseSizeUsd * 0.3;
+            addOnStageMarginKrw = riskSizing.baseStageMarginKrw * 0.3;
             reason = "TREND pyramid add-on allowed (Price Improved)";
         } else {
             reason = "TREND add-on skipped: Price worsening (No averaging down in trend)";
         }
     }
 
-    return { allowed, addOnSizeUsd, reason };
+    return { allowed, addOnStageMarginKrw, reason };
 }

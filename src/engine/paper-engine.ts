@@ -2459,7 +2459,8 @@ export class PaperEngine {
         runtime_authority_owner: envelope.runtime_authority_owner ?? null,
         runtime_authority_decision: envelope.runtime_authority_decision ?? null,
         runtime_authority_side: envelope.runtime_authority_side ?? null,
-        runtime_authority_size_usd: envelope.runtime_authority_size_usd ?? null,
+        runtime_authority_stage_margin_krw: envelope.runtime_authority_stage_margin_krw ?? null,
+        runtime_authority_size_usdt: envelope.runtime_authority_size_usdt ?? null,
         market_subtype: envelope.v2_execution_envelope?.marketSubtype ?? null,
         exit_policy_action: envelope.v2_execution_envelope?.exitPolicyAction ?? null,
         exit_policy_reason: envelope.v2_execution_envelope?.exitPolicyReason ?? null,
@@ -3625,6 +3626,7 @@ export class PaperEngine {
     entryPrice?: number | null;
     stopPrice?: number | null;
     paperExecutionReady?: boolean;
+    stageMarginKrw?: number | null;
   }): Promise<{
     ok: boolean;
     ordId: string | null;
@@ -3675,9 +3677,13 @@ export class PaperEngine {
       return { ok: false, ordId: null, fillPx: null, errorCode: "signed_not_ready", errorMessage: "OKX signed REST smoke test not passed", ackCode: "rejected", orderState: null };
     }
 
+    let refPrice: number | null = null;
+    let final_submitted_notional_usdt: number | null = null;
+    let final_submitted_qty: number | null = null;
+
     if (this.config.okxAuthMode === "live") {
       const ticker = await this.okxPublic.tryGetTicker(input.symbol);
-      const refPrice = ticker.ok ? ticker.value.last : null;
+      refPrice = ticker.ok ? ticker.value.last : null;
 
       // 1. V2 Intended Metrics (Decision Basis)
       const v2_intended_qty = input.qty;
@@ -3700,7 +3706,7 @@ export class PaperEngine {
       // 4. Final Sizing Logic (Strict "Min" Policy)
       // Rule: Never expand beyond what V2 intended.
       let final_size_source: "v2_risk" | "okx_dynamic_cap" | "static_safety_cap" | "min_order_block" = "v2_risk";
-      let final_submitted_notional_usdt = v2_intended_notional_usdt ?? 0;
+      final_submitted_notional_usdt = v2_intended_notional_usdt ?? 0;
 
       // Constraint: Dynamic Cap (Exchange liquidity)
       if (final_submitted_notional_usdt > okx_dynamic_notional_cap_usdt) {
@@ -3715,7 +3721,7 @@ export class PaperEngine {
       }
 
       // Calculate final qty based on constrained notional
-      let final_submitted_qty = refPrice != null && refPrice > 0 
+      final_submitted_qty = refPrice != null && refPrice > 0 
         ? Math.floor((final_submitted_notional_usdt / refPrice) * 1000000) / 1000000
         : 0;
 
@@ -3836,6 +3842,33 @@ export class PaperEngine {
       // Apply final quantity to the order submission
       input.qty = final_submitted_qty;
     }
+    const stageMarginKrw = input.stageMarginKrw ?? 0;
+    const stageMarginUsdt = stageMarginKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
+    const authoritySizeUsdt = stageMarginUsdt; // V2 decision anchor
+    const finalOrderNotionalUsdt = (final_submitted_notional_usdt ?? (Number(input.qty) * (input.entryPrice ?? 0))) || 0;
+    const formulaNotionalUsdt = (stageMarginKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD) * (input.appliedLeverage ?? 1);
+
+    this.logger.info("LIVE_ORDER_SIZE_PROOF", {
+      ...logCtx,
+      symbol: input.symbol,
+      side: input.side,
+      posSide: input.posSide,
+      applied_leverage: input.appliedLeverage ?? null,
+      leverage_profile: input.leverageProfile ?? null,
+      leverage_reason: null, // authority object not available here, but we have profile
+      leverage_block_reason: null,
+      entry_quality_grade: input.entryQualityGrade ?? null,
+      size_unit_source: "stageMarginKrw",
+      stage_margin_krw: stageMarginKrw,
+      stage_margin_usdt: stageMarginUsdt,
+      authority_size_usdt: authoritySizeUsdt,
+      final_order_notional_usdt: finalOrderNotionalUsdt,
+      formula_notional_usdt: formulaNotionalUsdt,
+      formula_match: Math.abs(finalOrderNotionalUsdt - formulaNotionalUsdt) < 0.01,
+      final_submitted_qty: final_submitted_qty ?? input.qty,
+      ref_price: refPrice ?? input.entryPrice ?? null
+    });
+
     const orderExecutionKey = `order:${input.traceId}:${input.reason}:${input.side}:${input.posSide}:${input.qty}`;
     const orderKeyOk = await this.consumeExecutionKey(orderExecutionKey);
     if (!orderKeyOk) {
@@ -6573,15 +6606,16 @@ export class PaperEngine {
     const side = authority.side;
     if (side !== "long" && side !== "short") return null;
 
-    const sizeUsd =
-      (authority.sizeUsd ?? 0) > 0
-        ? (authority.sizeUsd ?? 0)
+    const stageMarginKrw =
+      (authority.stageMarginKrw ?? 0) > 0
+        ? (authority.stageMarginKrw ?? 0)
         : forceEnter
           ? Math.max(
-            MIN_POSITION_SIZE_USD,
-            Math.round(computePaperSizingAnchorUsd(this.config) * 0.35 * 100) / 100
+            MIN_POSITION_SIZE_USD * PAPER_LEDGER_KRW_NOTIONAL_PER_USD,
+            Math.round(computePaperSizingAnchorUsd(this.config) * 0.35 * PAPER_LEDGER_KRW_NOTIONAL_PER_USD * 100) / 100
           )
           : 0;
+    const sizeUsd = Math.round((stageMarginKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD) * 100) / 100;
     if (sizeUsd <= 0) return null;
 
     const bridgeSizeUsd = sizeUsd;
@@ -7522,7 +7556,8 @@ export class PaperEngine {
         authority_decision_for_execution: authorityDecisionForExecution,
         authority_source: authority.source,
         authority_side: authority.side,
-        authority_selector_size_usd: authority.sizeUsd ?? 0,
+        authority_stage_margin_krw: authority.stageMarginKrw ?? 0,
+        authority_selector_size_krw: authority.stageMarginKrw ?? 0,
         authority_size_usd: effectiveAdaptiveResult.sizeUsd,
         authority_owns_execution: authority.source === "v2",
         recheck_promotion_applied: recheckPromotion.promote,
@@ -7878,7 +7913,7 @@ export class PaperEngine {
         authorityDecisionForExecution === "ENTER";
       const activeEngineRoutingForFinalizer = this.lastMarketMode?.routing.activeEngine ?? null;
       const stage1ExecutionEngineForFinalizer = stage1ExecutionEngine;
-      const authoritySizeUsdForFinalizer = authority.sizeUsd ?? 0;
+      const authorityStageMarginKrwForFinalizer = authority.stageMarginKrw ?? 0;
       const riskModeForFinalizer = this.lastRiskExposure?.riskMode ?? null;
       const dailyLossGuardForFinalizer = this.lastRisk?.dailyLossGuardTriggered === true;
       if (v2FinalAuthorizationApplied) {
@@ -7929,7 +7964,7 @@ export class PaperEngine {
         } else if (isNewEntry && next.length >= max) {
           hardBlockPresent = true;
           hardBlockReason = "MAX_SLOTS_REACHED";
-        } else if (authoritySizeUsdForFinalizer > 0 && authoritySizeUsdForFinalizer < MIN_POSITION_SIZE_USD) {
+        } else if (authorityStageMarginKrwForFinalizer > 0 && (authorityStageMarginKrwForFinalizer / PAPER_LEDGER_KRW_NOTIONAL_PER_USD) < MIN_POSITION_SIZE_USD) {
           hardBlockPresent = true;
           hardBlockReason = "MIN_ORDER_SIZE_UNDERFLOW";
         } else if (res.decision.reject_reason === "ORDER_BUILD_FAIL") {
@@ -7967,8 +8002,8 @@ export class PaperEngine {
         final_authorized_after: finalAuthorizedAfterV2Finalizer,
         final_blocked_reason_before: finalBlockedReasonBeforeV2Finalizer,
         final_blocked_reason_after: finalBlockedReasonAfterV2Finalizer,
-        size_usd_before: authoritySizeUsdForFinalizer,
-        size_usd_after: authoritySizeUsdForFinalizer,
+        size_krw_before: authorityStageMarginKrwForFinalizer,
+        size_krw_after: authorityStageMarginKrwForFinalizer,
         risk_mode: riskModeForFinalizer,
         active_engine_routing: activeEngineRoutingForFinalizer,
         stage1_execution_engine: stage1ExecutionEngineForFinalizer,
@@ -8114,7 +8149,8 @@ export class PaperEngine {
         final_blocked_reason_after_v2_finalizer: finalBlockedReasonAfterV2Finalizer,
         authority_source: authority.source,
         authority_side: authority.side,
-        authority_size_usd: authoritySizeUsdForFinalizer,
+        authority_size_krw: authorityStageMarginKrwForFinalizer,
+        authority_size_usdt: authorityStageMarginKrwForFinalizer / 1400,
         active_engine_routing: activeEngineRoutingForFinalizer,
         stage1_execution_engine: stage1ExecutionEngineForFinalizer,
         ai_approved: aiExecutionApproved,
@@ -8592,25 +8628,26 @@ export class PaperEngine {
             symbol: first.symbol,
             side: authority.side,
             authority_source: authority.source,
-            authority_size_usd: authority.sizeUsd ?? null,
-            authority_selector_size_usd: authority.sizeUsd ?? null,
+            authority_stage_margin_krw: authority.stageMarginKrw ?? null,
+            authority_size_usdt: (authority.stageMarginKrw ?? 0) / PAPER_LEDGER_KRW_NOTIONAL_PER_USD,
+            authority_selector_size_krw: authority.stageMarginKrw ?? null,
             applied_leverage: authority.appliedLeverage ?? null,
             exposure_notional_krw: ledgerExposureNotionalKrw,
             candidate_exposure_notional_krw: authority.exposureNotionalKrw ?? null,
             equity_multiple: authority.equityMultiple ?? null,
             open_position_count: next.length,
             max_slots: max,
-            current_exposure_usd: currentExposureUsd,
-            projected_exposure_usd: projectedExposureUsd,
-            max_allowed_exposure_usd: cap,
-            cap_remaining_usd: capRemainingUsd,
+            current_exposure_usdt: currentExposureUsd,
+            projected_exposure_usdt: projectedExposureUsd,
+            max_allowed_exposure_usdt: cap,
+            cap_remaining_usdt: capRemainingUsd,
             risk_mode: riskModeNow,
             market_mode: this.lastMarketMode?.marketMode ?? null,
             active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
             block_reason: blockReason,
             can_reduce_size: canReduceSize,
-            reduced_size_usd: canReduceSize ? reducedSizeUsd : null,
-            min_order_size_usd: MIN_POSITION_SIZE_USD
+            reduced_size_usdt: canReduceSize ? reducedSizeUsd : null,
+            min_order_size_usdt: MIN_POSITION_SIZE_USD
           });
           if (canReduceSize) {
             const originalSizeUsd = entrySizeUsd;
@@ -8618,9 +8655,9 @@ export class PaperEngine {
             this.logger.info("RISK_EXPOSURE_CAP_SIZE_REDUCED", {
               symbol: first.symbol,
               side: authority.side,
-              original_size_usd: originalSizeUsd,
-              reduced_size_usd: entrySizeUsd,
-              cap_remaining_usd: capRemainingUsd,
+              original_size_usdt: originalSizeUsd,
+              reduced_size_usdt: entrySizeUsd,
+              cap_remaining_usdt: capRemainingUsd,
               reason: "v2_authority_size_reduced_to_fit_cap"
             });
           } else {
@@ -8713,7 +8750,8 @@ export class PaperEngine {
             isAddOn: false,
             entryPrice: first.lastPrice,
             stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : null,
-            paperExecutionReady: this.paperExecutionReady
+            paperExecutionReady: this.paperExecutionReady,
+            stageMarginKrw: authority.stageMarginKrw ?? null
           });
 
           trace.order_submit_ack = submit.ackCode;
@@ -9196,7 +9234,7 @@ export class PaperEngine {
         symbol: existing.symbol,
         side: existing.side,
         target_stage: targetStage,
-        authority_size_usd: authority.sizeUsd ?? null,
+        authority_stage_margin_krw: authority.stageMarginKrw ?? null,
         adaptive_size_usd: adaptive.sizeUsd,
         final_incremental_usd: incrementalSizeUsd
       });
@@ -10066,7 +10104,8 @@ function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): 
 
     authority_decision: authority.decision,
     authority_side: authority.side,
-    authority_size_usd: authority.decision === "ENTER" ? authority.sizeUsd : 0,
+    authority_stage_margin_krw: authority.decision === "ENTER" ? authority.stageMarginKrw : 0,
+    authority_size_usdt: authority.decision === "ENTER" ? (authority.stageMarginKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD) : 0,
     authority_source: authority.source,
     authority_owner: authority.source,
     final_engine_owner: adopted ?? authority.source,
@@ -10081,7 +10120,7 @@ function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): 
 
     v2_decision: envelope.v2_decision ?? selector?.v2_result.decision ?? "SKIP",
     v2_side: envelope.v2_side ?? selector?.v2_result.side ?? "none",
-    v2_size: envelope.v2_size ?? selector?.v2_result.risk.finalSizeUsd ?? 0,
+    v2_size: envelope.v2_size ?? selector?.v2_result.risk.stageMarginKrw ?? 0,
     micro_execution_score: selector?.v2_result.microExecution?.score ?? null,
     micro_execution_grade: selector?.v2_result.microExecution?.grade ?? null,
     micro_execution_delay_ms: selector?.v2_result.microExecution?.delayMs ?? null,
@@ -10149,7 +10188,8 @@ function buildAuthorityEventMeta(
   return {
     authority_decision: authority.decision,
     authority_side: authority.side,
-    authority_size_usd: useExecuted ? executedEntrySizeUsd : authority.decision === "ENTER" ? authority.sizeUsd : 0,
+    authority_stage_margin_krw: useExecuted ? (executedEntrySizeUsd * PAPER_LEDGER_KRW_NOTIONAL_PER_USD) : authority.decision === "ENTER" ? authority.stageMarginKrw : 0,
+    authority_size_usdt: useExecuted ? executedEntrySizeUsd : authority.decision === "ENTER" ? (authority.stageMarginKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD) : 0,
     authority_source: authority.source,
     authority_regime: authority.regime,
     entry_quality_grade: authority.entryQualityGrade ?? null,
