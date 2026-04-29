@@ -3607,6 +3607,51 @@ export class PaperEngine {
     });
   }
 
+  private buildLiveLimitOrderPrice(input: {
+    symbol: string;
+    side: "buy" | "sell";
+    bid: number;
+    ask: number;
+    tickSize: number;
+    priceBufferTicks: number;
+    purpose: string;
+  }): number {
+    const { side, bid, ask, tickSize, priceBufferTicks, symbol, purpose } = input;
+    
+    if (ask < bid) {
+      this.logger.error("LIVE_LIMIT_PRICE_BUILD_FAIL", { symbol, purpose, reason: "ask_below_bid", ask, bid });
+      throw new Error("LIVE_LIMIT_PRICE_BUILD_FAIL: ask < bid");
+    }
+
+    let finalPx: number;
+    if (side === "buy") {
+      finalPx = ask + (tickSize * priceBufferTicks);
+    } else {
+      finalPx = bid - (tickSize * priceBufferTicks);
+    }
+    
+    const precision = Math.max(0, -Math.floor(Math.log10(tickSize) + 0.0001));
+    const normalizedPx = Number(finalPx.toFixed(precision));
+
+    if (normalizedPx <= 0) {
+      this.logger.error("LIVE_LIMIT_PRICE_BUILD_FAIL", { symbol, purpose, reason: "price_not_positive", normalizedPx });
+      throw new Error("LIVE_LIMIT_PRICE_BUILD_FAIL: px <= 0");
+    }
+
+    this.logger.info("LIVE_LIMIT_ORDER_PRICE_PROOF", {
+      symbol,
+      purpose,
+      side,
+      bid,
+      ask,
+      tick_size: tickSize,
+      buffer_ticks: priceBufferTicks,
+      final_px: normalizedPx
+    });
+
+    return normalizedPx;
+  }
+
   private async submitOkxOrder(input: {
     symbol: MarketSymbol;
     side: "buy" | "sell";
@@ -3680,10 +3725,39 @@ export class PaperEngine {
     let refPrice: number | null = null;
     let final_submitted_notional_usdt: number | null = null;
     let final_submitted_qty: number | null = null;
+    let limitPrice: number | null = null;
 
     if (this.config.okxAuthMode === "live") {
-      const ticker = await this.okxPublic.tryGetTicker(input.symbol);
-      refPrice = ticker.ok ? ticker.value.last : null;
+      const tickerTry = await this.okxPublic.tryGetTicker(input.symbol);
+      if (!tickerTry.ok || tickerTry.value.bid == null || tickerTry.value.ask == null) {
+        const reason = "LIVE_LIMIT_PRICE_BUILD_FAIL";
+        this.logger.error(reason, { ...logCtx, detail: "ticker_missing_bid_ask" });
+        return { ok: false, ordId: null, fillPx: null, errorCode: "ticker_error", errorMessage: "Failed to get bid/ask for limit order", ackCode: "rejected", orderState: null };
+      }
+      const ticker = tickerTry.value;
+      refPrice = ticker.last;
+
+      const instTry = await this.okxDemo.tryGetInstrument(instId);
+      if (!instTry.ok || !instTry.value.tickSz) {
+        const reason = "LIVE_LIMIT_PRICE_BUILD_FAIL";
+        this.logger.error(reason, { ...logCtx, detail: "instrument_missing_tick_size" });
+        return { ok: false, ordId: null, fillPx: null, errorCode: "instrument_error", errorMessage: "Failed to get tick size for limit order", ackCode: "rejected", orderState: null };
+      }
+      const tickSize = Number(instTry.value.tickSz);
+
+      try {
+        limitPrice = this.buildLiveLimitOrderPrice({
+          symbol: input.symbol,
+          side: input.side,
+          bid: ticker.bid!,
+          ask: ticker.ask!,
+          tickSize,
+          priceBufferTicks: 1,
+          purpose: input.reason
+        });
+      } catch (e) {
+        return { ok: false, ordId: null, fillPx: null, errorCode: "price_build_fail", errorMessage: String(e), ackCode: "rejected", orderState: null };
+      }
 
       // 1. V2 Intended Metrics (Decision Basis)
       const v2_intended_qty = input.qty;
@@ -3866,7 +3940,8 @@ export class PaperEngine {
       formula_notional_usdt: formulaNotionalUsdt,
       formula_match: Math.abs(finalOrderNotionalUsdt - formulaNotionalUsdt) < 0.01,
       final_submitted_qty: final_submitted_qty ?? input.qty,
-      ref_price: refPrice ?? input.entryPrice ?? null
+      ref_price: refPrice ?? input.entryPrice ?? null,
+      limit_price: limitPrice
     });
 
     const orderExecutionKey = `order:${input.traceId}:${input.reason}:${input.side}:${input.posSide}:${input.qty}`;
@@ -3883,7 +3958,8 @@ export class PaperEngine {
         sz: String(input.qty),
         clOrdId: input.clOrdId,
         tdMode: "isolated",
-        ordType: "market"
+        ordType: this.config.okxAuthMode === "live" ? "limit" : "market",
+        px: limitPrice ? String(limitPrice) : undefined
       });
 
       if (!submit.ok) {

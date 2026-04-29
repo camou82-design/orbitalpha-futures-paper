@@ -25,6 +25,7 @@ export type OkxOrderSubmitInput = Readonly<{
   sz: string;
   tdMode?: "isolated" | "cross";
   ordType?: "market" | "limit";
+  px?: string;
   clOrdId?: string;
 }>;
 
@@ -89,6 +90,7 @@ export class OkxDemoClient {
   private readonly tickerCache = new Map<string, { expiresAt: number; value: TryResult<Ticker> }>();
   private readonly candleCache = new Map<string, { expiresAt: number; value: TryResult<Candle[]> }>();
   private readonly fundingCache = new Map<string, { expiresAt: number; value: TryResult<FundingRate> }>();
+  private readonly instrumentCache = new Map<string, { expiresAt: number; value: TryResult<Record<string, any>> }>();
 
   constructor(private readonly cfg: OkxDemoClientConfig) { }
 
@@ -215,8 +217,16 @@ export class OkxDemoClient {
       posSide: input.posSide,
       ordType: input.ordType ?? "market",
       sz: input.sz,
+      ...(input.px ? { px: input.px } : {}),
       ...(input.clOrdId ? { clOrdId: input.clOrdId } : {})
     };
+    if (payload.ordType === "limit" && !payload.px) {
+      return Promise.resolve({
+        ok: false,
+        error: "limit_price_missing",
+        diagnostics: { httpStatus: 0, requestUrl: "/api/v5/trade/order", retMsg: "px is required for limit orders" }
+      });
+    }
     return this.signedRequest<Record<string, unknown>>("POST", "/api/v5/trade/order", null, payload);
   }
 
@@ -489,5 +499,32 @@ export class OkxDemoClient {
       await new Promise((resolve) => setTimeout(resolve, this.nextRequestAtMs - now));
     }
     this.nextRequestAtMs = Date.now() + this.minRequestIntervalMs;
+  }
+
+  async tryGetInstrument(instId: string): Promise<TryResult<Record<string, any>>> {
+    const cacheKey = instId;
+    const hit = this.instrumentCache.get(cacheKey);
+    if (hit && hit.expiresAt > Date.now()) return hit.value;
+
+    const q = new URLSearchParams();
+    q.set("instType", "SWAP");
+    q.set("instId", instId);
+    const res = await this.publicRequest<Record<string, any>>("GET", "/api/v5/public/instruments", q);
+
+    if (!res.success || !res.json) {
+      return { ok: false, error: res.error || "unknown_error", diagnostics: res.diagnostics };
+    }
+
+    try {
+      const item = res.json.data?.[0];
+      if (!item) throw new Error(`OKX instrument not found: ${instId}`);
+
+      const out: TryResult<Record<string, any>> = { ok: true, value: item, diagnostics: res.diagnostics };
+      this.instrumentCache.set(cacheKey, { expiresAt: Date.now() + 3600_000, value: out }); // Cache for 1 hour
+      return out;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return { ok: false, error: msg, diagnostics: res.diagnostics };
+    }
   }
 }
