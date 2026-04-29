@@ -4090,8 +4090,10 @@ export class PaperEngine {
         continue;
       }
       const v2ExitAuthority = envelope.selector?.v2_result.v2ExitAuthority ?? null;
+      const v2PartialAuthority = envelope.selector?.v2_result.v2PartialAuthority ?? null;
       const lifecycleAuthority = envelope.selector?.v2_result.lifecycleAuthority ?? null;
       let paperExitProofHandled = false;
+      let paperPartialProofHandled = false;
       const handleV2ExitAuthorityProof = (paperExitAction: "none" | "exit", paperExitReason: string | null): void => {
         if (!v2ExitAuthority || paperExitProofHandled) return;
         // Outcome handling is per-position/per-loop and must be independent from log dedupe.
@@ -4133,6 +4135,51 @@ export class PaperEngine {
           known_shadow_gaps: v2ExitAuthority.knownShadowGaps ?? [],
           true_inconsistency_reasons: v2ExitAuthority.trueInconsistencyReasons ?? [],
           proof_reasons: v2ExitAuthority.proofReasons ?? []
+        });
+      };
+      const handleV2PartialAuthorityProof = (
+        paperPartialAction: "none" | "partial" | "reduce",
+        paperPartialReason: string | null
+      ): void => {
+        if (!v2PartialAuthority || paperPartialProofHandled) return;
+        paperPartialProofHandled = true;
+        const v2PaperPartialAgreement =
+          (v2PartialAuthority.shouldPartial === true && (paperPartialAction === "partial" || paperPartialAction === "reduce")) ||
+          (v2PartialAuthority.shouldPartial !== true && paperPartialAction === "none");
+        const proofKey = [
+          v2PartialAuthority.partialAction,
+          v2PartialAuthority.shouldPartial,
+          v2PartialAuthority.partialUrgency,
+          paperPartialAction,
+          paperPartialReason ?? "none",
+          v2PaperPartialAgreement
+        ].join("|");
+        const highPriority =
+          v2PaperPartialAgreement === false ||
+          (Array.isArray(v2PartialAuthority.trueInconsistencyReasons) && v2PartialAuthority.trueInconsistencyReasons.length > 0);
+        if (!shouldEmitV2Proof("V2_PARTIAL_AUTHORITY_PROOF", sk, proofKey, highPriority)) return;
+        this.logger.info("V2_PARTIAL_AUTHORITY_PROOF", {
+          symbol: sk,
+          position_id: `${sk}:${open.side}:${open.entryStage ?? 1}`,
+          side: open.side,
+          regime: open.regimeAtEntry ?? "NO_TRADE",
+          market_mode: input.marketMode.marketMode,
+          directional_shock_state: this.lastRisk?.directionalShockState ?? "NONE",
+          lifecycle_authority_owner: lifecycleAuthority?.lifecycleAuthorityOwner ?? "unknown",
+          partial_authority_owner: v2PartialAuthority.partialAuthorityOwner,
+          partial_execution_owner: v2PartialAuthority.partialExecutionOwner,
+          v2_partial_action: v2PartialAuthority.partialAction,
+          v2_should_partial: v2PartialAuthority.shouldPartial,
+          v2_partial_reason: v2PartialAuthority.partialReason,
+          v2_partial_urgency: v2PartialAuthority.partialUrgency,
+          v2_partial_confidence: v2PartialAuthority.partialConfidence,
+          v2_reduce_ratio: v2PartialAuthority.reduceRatio,
+          paper_partial_action: paperPartialAction,
+          paper_partial_reason: paperPartialReason,
+          v2_paper_partial_agreement: v2PaperPartialAgreement,
+          known_shadow_gaps: v2PartialAuthority.knownShadowGaps ?? [],
+          true_inconsistency_reasons: v2PartialAuthority.trueInconsistencyReasons ?? [],
+          proof_reasons: v2PartialAuthority.proofReasons ?? []
         });
       };
 
@@ -4299,6 +4346,7 @@ export class PaperEngine {
                 ...snapPaths
               });
               handleV2ExitAuthorityProof("exit", cr);
+              handleV2PartialAuthorityProof("none", null);
               await this.dispatchOkxClose({
                 symbol: open.symbol,
                 side: open.side,
@@ -4362,6 +4410,7 @@ export class PaperEngine {
                 ...buildPositionIdentityMeta(open)
               });
               handleV2ExitAuthorityProof("none", null);
+              handleV2PartialAuthorityProof("none", null);
               continue;
             }
           }
@@ -4428,6 +4477,7 @@ export class PaperEngine {
                 ...snapPaths
               });
               handleV2ExitAuthorityProof("exit", cr);
+              handleV2PartialAuthorityProof("none", null);
               await this.dispatchOkxClose({
                 symbol: open.symbol,
                 side: open.side,
@@ -4491,6 +4541,7 @@ export class PaperEngine {
                 ...buildPositionIdentityMeta(open)
               });
               handleV2ExitAuthorityProof("none", null);
+              handleV2PartialAuthorityProof("none", null);
               continue;
             }
           }
@@ -4660,6 +4711,7 @@ export class PaperEngine {
           confirmedExitType = exitEventJsonlType(crTrail);
           confirmedCloseSource = "range_profit_trail_executor";
           handleV2ExitAuthorityProof("exit", crTrail);
+          handleV2PartialAuthorityProof("none", null);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -4707,6 +4759,7 @@ export class PaperEngine {
             ...buildPositionIdentityMeta(open)
           });
           handleV2ExitAuthorityProof("none", null);
+          handleV2PartialAuthorityProof("none", null);
           continue;
         }
 
@@ -4863,6 +4916,7 @@ export class PaperEngine {
               })
               : toClosed(cr, m, open.sizeUsd);
           handleV2ExitAuthorityProof("exit", cr);
+          handleV2PartialAuthorityProof("none", null);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -4916,6 +4970,7 @@ export class PaperEngine {
             ...buildPositionIdentityMeta(open)
           });
           handleV2ExitAuthorityProof("none", null);
+          handleV2PartialAuthorityProof("none", null);
           continue;
         }
       }
@@ -4943,6 +4998,7 @@ export class PaperEngine {
           confirmedExitType = "EXIT_TREND_SWITCH";
           confirmedCloseSource = "trend_engine_switch";
           handleV2ExitAuthorityProof("exit", cr);
+          handleV2PartialAuthorityProof("none", null);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -5089,6 +5145,7 @@ export class PaperEngine {
         confirmedCloseSource = "hard_stop_loss_gate";
         const closedRow = toClosed(cr, m, open.sizeUsd);
         handleV2ExitAuthorityProof("exit", cr);
+        handleV2PartialAuthorityProof("none", null);
         await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
@@ -5247,6 +5304,7 @@ export class PaperEngine {
               : "trend_regime_shift_gate_upper_opposing_trend_confirmed";
           const closedRow = toClosed(cr, m, open.sizeUsd);
           handleV2ExitAuthorityProof("exit", cr);
+          handleV2PartialAuthorityProof("none", null);
           await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -5493,6 +5551,7 @@ export class PaperEngine {
         const exDetail = (exitEval.detail ?? {}) as Record<string, unknown>;
         const closedRow = toClosed(cr, m, open.sizeUsd);
         handleV2ExitAuthorityProof("exit", cr);
+        handleV2PartialAuthorityProof("none", null);
         await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
@@ -5613,6 +5672,7 @@ export class PaperEngine {
           const stage = (open.partialExitStage ?? 0) + 1;
           const pReason = stage === 1 ? ("partial_exit_1" as const) : ("partial_exit_2" as const);
           const pLog = stage === 1 ? "partial_exit_first" : "partial_exit_second";
+          handleV2PartialAuthorityProof("partial", pReason);
           const mp = leg(partialMargin);
 
           // [FIX: history-ledger] Partial exits (partial_exit_1, partial_exit_2) are
@@ -5855,6 +5915,7 @@ export class PaperEngine {
             ...buildPositionIdentityMeta(open)
           });
         handleV2ExitAuthorityProof("none", null);
+        handleV2PartialAuthorityProof("none", null);
         continue;
         }
         // mid: 무조건 유지 금지 → 아래 minHold / candidate_lost 로 진행
@@ -9733,7 +9794,16 @@ function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): 
     micro_execution_fallback_neutral: selector?.v2_result.microExecution?.fallbackNeutral ?? null,
     v2_lifecycle_stage: selector?.v2_result.lifecycleAuthority?.lifecycleStage ?? null,
     v2_position_state_owner: selector?.v2_result.lifecycleAuthority?.positionStateOwner ?? null,
-    v2_partial_action: selector?.v2_result.lifecycleAuthority?.partialAction ?? null,
+    v2_partial_action:
+      selector?.v2_result.v2PartialAuthority?.partialAction ??
+      selector?.v2_result.lifecycleAuthority?.partialAction ??
+      null,
+    v2_partial_reason: selector?.v2_result.v2PartialAuthority?.partialReason ?? null,
+    v2_partial_urgency: selector?.v2_result.v2PartialAuthority?.partialUrgency ?? null,
+    v2_partial_confidence: selector?.v2_result.v2PartialAuthority?.partialConfidence ?? null,
+    v2_paper_partial_agreement: null,
+    partial_authority_owner: selector?.v2_result.v2PartialAuthority?.partialAuthorityOwner ?? null,
+    partial_execution_owner: selector?.v2_result.v2PartialAuthority?.partialExecutionOwner ?? null,
     v2_exit_action:
       selector?.v2_result.v2ExitAuthority?.exitAction ??
       selector?.v2_result.lifecycleAuthority?.exitAction ??

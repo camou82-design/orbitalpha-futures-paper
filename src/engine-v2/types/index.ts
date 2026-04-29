@@ -243,6 +243,7 @@ export interface EngineV2Decision {
     microExecution?: MicroExecutionScoreSummary;
     lifecycleAuthority?: V2TradeLifecycleAuthorityResult;
     v2ExitAuthority?: V2ExitAuthorityResult;
+    v2PartialAuthority?: V2PartialAuthorityResult;
     rawMetrics: Record<string, number | boolean>;
 }
 
@@ -546,6 +547,22 @@ export interface V2ExitAuthorityResult {
     knownShadowGaps: string[];
 }
 
+export interface V2PartialAuthorityResult {
+    symbol: string;
+    side: EngineV2Side;
+    partialAuthorityOwner: "v2";
+    partialExecutionOwner: "paper_engine" | "v2_executor" | "legacy" | "unknown";
+    partialAction: "none" | "watch" | "protect_profit" | "reduce_candidate";
+    shouldPartial: boolean;
+    partialReason: string | null;
+    partialUrgency: "none" | "low" | "medium" | "high";
+    partialConfidence: number;
+    reduceRatio: number | null;
+    proofReasons: string[];
+    trueInconsistencyReasons: string[];
+    knownShadowGaps: string[];
+}
+
 export type V2LifecycleStage = "entry" | "add_on" | "partial" | "exit" | "cooldown" | "position_state";
 export type V2CooldownType = "none" | "direction_block" | "time_reentry" | "risk_halt" | "fail_reentry";
 export type V2LifecyclePartialAction = "none" | "prepare" | "reduce" | "protect_profit";
@@ -667,5 +684,6 @@ export interface EngineV2InternalResult {
     microExecution: MicroExecutionScoreSummary | null;
     lifecycleAuthority: V2TradeLifecycleAuthorityResult | null;
     v2ExitAuthority: V2ExitAuthorityResult | null;
+    v2PartialAuthority: V2PartialAuthorityResult | null;
     exitPolicy: ExitPolicyDiagnosticsSummary | null;
 }

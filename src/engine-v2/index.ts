@@ -24,7 +24,7 @@ import { evaluateV2AddOnPolicy } from "./addon/policy";
 import { evaluateV2ExitPolicy } from "./exit/policy";
 import { deriveMicroExecutionScore } from "./execution/micro-execution-score";
 import { deriveTradeLifecycleAuthority } from "./lifecycle/trade-lifecycle-authority";
-import type { MicroExecutionScoreSummary, V2ExitAuthorityResult, V2TradeLifecycleAuthorityResult } from "./types";
+import type { MicroExecutionScoreSummary, V2ExitAuthorityResult, V2PartialAuthorityResult, V2TradeLifecycleAuthorityResult } from "./types";
 
 const V2_PROOF_KEY_TTL_MS = 60 * 60 * 1000;
 const V2_PROOF_KEY_MAX_SIZE = 5000;
@@ -1178,6 +1178,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let microExecution: MicroExecutionScoreSummary | null = null;
     let lifecycleAuthority: V2TradeLifecycleAuthorityResult | null = null;
     let v2ExitAuthority: V2ExitAuthorityResult | null = null;
+    let v2PartialAuthority: V2PartialAuthorityResult | null = null;
     const exitActionMap: Record<string, V2ExitAuthorityResult["exitAction"]> = {
         HOLD: "none",
         WATCH: "watch",
@@ -1213,6 +1214,72 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         trueInconsistencyReasons: exitTrueInconsistencyReasons,
         knownShadowGaps: exitKnownShadowGaps
     };
+    const partialActionMap: Record<string, V2PartialAuthorityResult["partialAction"]> = {
+        HOLD: "none",
+        WATCH: "watch",
+        PARTIAL_TAKE_PROFIT: "protect_profit",
+        REDUCE: "reduce_candidate",
+        FULL_EXIT: "none"
+    };
+    const partialUrgencyMap: Record<string, V2PartialAuthorityResult["partialUrgency"]> = {
+        LOW: "low",
+        MID: "medium",
+        HIGH: "high",
+        CRITICAL: "high"
+    };
+    const partialProofReasons = [
+        `exit_policy_action:${exitPolicy.action}`,
+        `exit_policy_should_partial:${exitPolicy.shouldPartial}`,
+        `exit_policy_should_reduce:${exitPolicy.shouldReduce}`,
+        `exit_policy_reason:${exitPolicy.reason}`
+    ];
+    v2PartialAuthority = {
+        symbol: String(input.symbol),
+        side: exitPolicy.positionSide === "none" ? "none" : exitPolicy.positionSide,
+        partialAuthorityOwner: "v2",
+        partialExecutionOwner: "paper_engine",
+        partialAction: partialActionMap[exitPolicy.action] ?? "none",
+        shouldPartial: exitPolicy.shouldPartial === true || exitPolicy.shouldReduce === true,
+        partialReason: exitPolicy.hasPosition ? exitPolicy.reason : null,
+        partialUrgency:
+            (exitPolicy.shouldPartial === true || exitPolicy.shouldReduce === true)
+                ? (partialUrgencyMap[exitPolicy.exitUrgency] ?? "none")
+                : "none",
+        partialConfidence:
+            (exitPolicy.shouldPartial === true || exitPolicy.shouldReduce === true)
+                ? exitPolicy.exitConfidence
+                : Math.max(0, Math.min(1, exitPolicy.exitConfidence * 0.6)),
+        reduceRatio: exitPolicy.reduceRatio > 0 ? exitPolicy.reduceRatio : null,
+        proofReasons: partialProofReasons,
+        trueInconsistencyReasons: [],
+        knownShadowGaps: ["PARTIAL_EXECUTION_OWNER_NOT_V2"]
+    };
+    if (
+        exitPolicy.hasPosition &&
+        shouldEmitV2Proof(
+            "V2_PARTIAL_AUTHORITY_PROOF",
+            String(input.symbol),
+            `${v2PartialAuthority.partialAction}|${v2PartialAuthority.partialReason}|${v2PartialAuthority.partialUrgency}|${v2PartialAuthority.reduceRatio ?? 0}`,
+            v2PartialAuthority.trueInconsistencyReasons.length > 0
+        )
+    ) {
+        console.info(JSON.stringify({
+            event: "V2_PARTIAL_AUTHORITY_PROOF",
+            symbol: String(input.symbol),
+            side: v2PartialAuthority.side,
+            partial_authority_owner: v2PartialAuthority.partialAuthorityOwner,
+            partial_execution_owner: v2PartialAuthority.partialExecutionOwner,
+            v2_partial_action: v2PartialAuthority.partialAction,
+            v2_should_partial: v2PartialAuthority.shouldPartial,
+            v2_partial_reason: v2PartialAuthority.partialReason,
+            v2_partial_urgency: v2PartialAuthority.partialUrgency,
+            v2_partial_confidence: v2PartialAuthority.partialConfidence,
+            v2_reduce_ratio: v2PartialAuthority.reduceRatio,
+            known_shadow_gaps: v2PartialAuthority.knownShadowGaps,
+            true_inconsistency_reasons: v2PartialAuthority.trueInconsistencyReasons,
+            proof_reasons: v2PartialAuthority.proofReasons
+        }));
+    }
     if (finalDecision === "ENTER") {
         finalReason = promotionReason ?? explanation.reason;
     } else if (finalDecision === "HOLD" && promotionApplied) {
@@ -1419,6 +1486,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 proof_reasons: lifecycleAuthority.proofReasons
             }));
         }
+        if (v2PartialAuthority.shouldPartial) {
+            lifecycleAuthority.partialAction =
+                v2PartialAuthority.partialAction === "protect_profit"
+                    ? "protect_profit"
+                    : "reduce";
+        }
     }
 
     console.info(JSON.stringify({
@@ -1601,6 +1674,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         microExecution: microExecution ?? undefined,
         lifecycleAuthority: lifecycleAuthority ?? undefined,
         v2ExitAuthority: v2ExitAuthority ?? undefined,
+        v2PartialAuthority: v2PartialAuthority ?? undefined,
         rawMetrics: {
             ...judgment.metrics,
             confidenceScore: confidence.score,
@@ -1609,7 +1683,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             microExecutionFallbackNeutral: microExecution?.fallbackNeutral ?? false,
             lifecycleConsistencyPass: lifecycleAuthority?.consistencyPass ?? false,
             lifecycleLegacyInterventionDetected: lifecycleAuthority?.legacyInterventionDetected ?? false,
-            v2ExitShouldExit: v2ExitAuthority?.shouldExit ?? false
+            v2ExitShouldExit: v2ExitAuthority?.shouldExit ?? false,
+            v2PartialShouldPartial: v2PartialAuthority?.shouldPartial ?? false
         }
     };
 
@@ -1623,6 +1698,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         microExecution,
         lifecycleAuthority,
         v2ExitAuthority,
+        v2PartialAuthority,
         exitPolicy: {
             action: exitPolicy.action,
             reason: exitPolicy.reason,
