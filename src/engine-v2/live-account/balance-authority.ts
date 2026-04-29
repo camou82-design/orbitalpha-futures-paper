@@ -42,6 +42,17 @@ export type LiveBalanceAuthorityResult = Readonly<{
   paper_position_estimated_notional_usdt: number;
   paper_position_estimated_effective_leverage_used: number | null;
 
+  // New fields for dashboard and reporting
+  okx_balance_mode?: string;
+  okx_balance_source?: string;
+  okx_total_equity_usdt: number | null;
+  okx_cash_balance_usdt: number | null;
+  okx_unrealized_pnl_usdt: number | null;
+  okx_balance_updated_at: number;
+  okx_balance_age_ms: number | null;
+  okx_balance_fresh: boolean;
+  okx_balance_error: string | null;
+
   account_equity_display_source: "okx_live_wallet" | "paper_config" | "unavailable";
   account_equity_krw_display: number | null;
   account_equity_krw_effective: number | null;
@@ -80,6 +91,7 @@ function parseWalletFromPayload(payload: Record<string, unknown> | null): {
   usdt_avail_eq: number | null;
   usdt_frozen_bal: number | null;
   usdt_ord_frozen: number | null;
+  usdt_upl: number | null;
   wallet_field_source: string | null;
   available_field_source: string | null;
 } {
@@ -94,6 +106,7 @@ function parseWalletFromPayload(payload: Record<string, unknown> | null): {
     usdt_avail_eq: null as number | null,
     usdt_frozen_bal: null as number | null,
     usdt_ord_frozen: null as number | null,
+    usdt_upl: null as number | null,
     wallet_field_source: null as string | null,
     available_field_source: null as string | null,
   };
@@ -113,6 +126,7 @@ function parseWalletFromPayload(payload: Record<string, unknown> | null): {
     out.usdt_avail_eq = toFiniteNumber(selected.availEq);
     out.usdt_frozen_bal = toFiniteNumber(selected.frozenBal);
     out.usdt_ord_frozen = toFiniteNumber(selected.ordFrozen);
+    out.usdt_upl = toFiniteNumber(selected.upl);
 
     // Wallet source selection
     if (out.raw_total_eq != null) {
@@ -281,6 +295,16 @@ export function deriveLiveBalanceAuthority(input: LiveBalanceAuthorityInput): Li
       paper_position_estimated_notional_usdt: paperUsage.notional,
       paper_position_estimated_effective_leverage_used: paperUsage.leverage,
 
+      okx_balance_mode: input.okxAuthMode,
+      okx_balance_source: "paper_config",
+      okx_total_equity_usdt: null,
+      okx_cash_balance_usdt: null,
+      okx_unrealized_pnl_usdt: null,
+      okx_balance_updated_at: Date.now(),
+      okx_balance_age_ms: null,
+      okx_balance_fresh: false,
+      okx_balance_error: null,
+
       account_equity_display_source: "paper_config",
       account_equity_krw_display: 500_000,
       account_equity_krw_effective: 500_000,
@@ -325,6 +349,16 @@ export function deriveLiveBalanceAuthority(input: LiveBalanceAuthorityInput): Li
       paper_position_estimated_used_margin_usdt: paperUsage.used_margin,
       paper_position_estimated_notional_usdt: paperUsage.notional,
       paper_position_estimated_effective_leverage_used: paperUsage.leverage,
+
+      okx_balance_mode: input.okxAuthMode,
+      okx_balance_source: "unavailable",
+      okx_total_equity_usdt: null,
+      okx_cash_balance_usdt: null,
+      okx_unrealized_pnl_usdt: null,
+      okx_balance_updated_at: Date.now(),
+      okx_balance_age_ms: null,
+      okx_balance_fresh: false,
+      okx_balance_error: input.balanceFetchError ?? "LIVE_BALANCE_UNAVAILABLE",
 
       account_equity_display_source: "unavailable",
       account_equity_krw_display: null,
@@ -383,6 +417,16 @@ export function deriveLiveBalanceAuthority(input: LiveBalanceAuthorityInput): Li
     paper_position_estimated_notional_usdt: paperUsage.notional,
     paper_position_estimated_effective_leverage_used: paperUsageWithLiveWallet.leverage,
 
+    okx_balance_mode: input.okxAuthMode,
+    okx_balance_source: "okx_live_wallet",
+    okx_total_equity_usdt: parsedWallet.walletBalanceUsdt,
+    okx_cash_balance_usdt: parsedWallet.usdt_cash_bal,
+    okx_unrealized_pnl_usdt: parsedWallet.usdt_upl,
+    okx_balance_updated_at: Date.now(),
+    okx_balance_age_ms: 0, // Calculated at engine level if needed, but 0 is fine here as it's fresh
+    okx_balance_fresh: true,
+    okx_balance_error: live_balance_block_reason,
+
     account_equity_display_source: "okx_live_wallet",
     // KRW conversion: Fixed 1000 multiplier is used (estimated)
     account_equity_krw_display: (parsedWallet.walletBalanceUsdt ?? 0) * 1000,
@@ -390,6 +434,21 @@ export function deriveLiveBalanceAuthority(input: LiveBalanceAuthorityInput): Li
     max_usable_margin_krw_effective: (parsedWallet.availableBalanceUsdt ?? 0) * 1000,
     position_margin_lines: okxUsage.lines
   };
+
+  console.info(JSON.stringify({
+    event: "OKX_LIVE_BALANCE_DISPLAY_PROOF",
+    okx_balance_mode: result.okx_balance_mode,
+    okx_balance_source: result.okx_balance_source,
+    okx_available_balance_usdt: result.okx_available_balance_usdt,
+    okx_total_equity_usdt: result.okx_total_equity_usdt,
+    okx_cash_balance_usdt: result.okx_cash_balance_usdt,
+    okx_margin_used_usdt: result.okx_used_margin_usdt,
+    okx_unrealized_pnl_usdt: result.okx_unrealized_pnl_usdt,
+    okx_balance_updated_at: result.okx_balance_updated_at,
+    okx_balance_age_ms: result.okx_balance_age_ms,
+    okx_balance_fresh: result.okx_balance_fresh,
+    okx_balance_error: result.okx_balance_error
+  }));
 
   console.info(JSON.stringify({
     event: "OKX_LIVE_BALANCE_RAW_FIELD_PROOF",

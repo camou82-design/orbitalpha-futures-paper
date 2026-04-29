@@ -2766,8 +2766,20 @@ export class PaperEngine {
     });
 
     try {
-      const summary = await this.positions.refreshSummaryReport();
       const balanceDisplay = this.buildBalanceDisplayContext(openAfterEntries);
+      const summary = await this.positions.refreshSummaryReport({
+        okx_balance_mode: balanceDisplay.okx_balance_mode,
+        okx_balance_source: balanceDisplay.okx_balance_source,
+        okx_available_balance_usdt: balanceDisplay.okx_available_balance_usdt,
+        okx_total_equity_usdt: balanceDisplay.okx_total_equity_usdt,
+        okx_cash_balance_usdt: balanceDisplay.okx_cash_balance_usdt,
+        okx_margin_used_usdt: balanceDisplay.okx_used_margin_usdt,
+        okx_unrealized_pnl_usdt: balanceDisplay.okx_unrealized_pnl_usdt,
+        okx_balance_updated_at: balanceDisplay.okx_balance_updated_at,
+        okx_balance_age_ms: balanceDisplay.okx_balance_age_ms,
+        okx_balance_fresh: balanceDisplay.okx_balance_fresh,
+        okx_balance_error: balanceDisplay.okx_balance_error
+      });
       this.bundleLastWrittenAt = Date.now();
       this.bundleWriterReady = true;
       this.evaluateReadinessTransition(Date.now());

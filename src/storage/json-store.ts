@@ -5,7 +5,7 @@ import { composePublicFuturesPaperBundleForWrite } from "../lib/futuresPaperBund
 
 import type { PaperClosedPositionRecord, PaperOpenPositionRecord } from "../models/types";
 import { migrateLegacyExecutorAtEntry } from "../strategy/executors/executor-normalize";
-import { buildPaperDashboard, parseHealthHistoryJsonl, type PaperDashboardTradeControl } from "./paper-dashboard";
+import { buildPaperDashboard, parseHealthHistoryJsonl, type PaperDashboardTradeControl, type OkxLiveBalance } from "./paper-dashboard";
 import { buildPaperHealthReport, paperHealthHistoryJsonlLine, type PaperHealthReport } from "./paper-health";
 import type { AiBlockEvaluationCriteria } from "./ai-block-evaluator";
 import {
@@ -334,7 +334,7 @@ export class JsonStore {
   }
 
   /** Regenerate summary reports from current history (shared `generatedAt`). */
-  async writePaperSummaryReport(): Promise<{
+  async writePaperSummaryReport(okxBalance?: OkxLiveBalance): Promise<{
     summaryPath: string;
     dailyPath: string;
     windowPath: string;
@@ -368,7 +368,7 @@ export class JsonStore {
     await this.appendJsonlLine("reports/health-history.jsonl", paperHealthHistoryJsonlLine(health));
     const healthHistoryLines = await this.readHealthHistoryJsonlFile();
     const tradeControl = await this.readTradeControlForDashboard();
-    const dashboard = buildPaperDashboard({ summary, window, health, healthHistoryLines, tradeControl });
+    const dashboard = buildPaperDashboard({ summary, window, health, healthHistoryLines, tradeControl, okx_balance: okxBalance });
     await this.writeJson("reports/dashboard.json", dashboard);
     const projectRoot = path.resolve(this.baseDir, "..");
     const publicBundleRel = "reports/public-futures-paper-bundle.json";

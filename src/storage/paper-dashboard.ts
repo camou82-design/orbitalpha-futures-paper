@@ -61,12 +61,27 @@ export type PaperDashboardTradeControl = Readonly<{
   source: string;
 }>;
 
+export type OkxLiveBalance = Readonly<{
+  okx_balance_mode?: string;
+  okx_balance_source?: string;
+  okx_available_balance_usdt: number | null;
+  okx_total_equity_usdt: number | null;
+  okx_cash_balance_usdt: number | null;
+  okx_margin_used_usdt: number | null;
+  okx_unrealized_pnl_usdt: number | null;
+  okx_balance_updated_at: number;
+  okx_balance_age_ms: number | null;
+  okx_balance_fresh: boolean;
+  okx_balance_error: string | null;
+}>;
+
 export type PaperDashboardReport = Readonly<{
   generatedAt: number;
   status: PaperHealthStatus;
   reasons: string[];
   headline: string;
   tradeControl: PaperDashboardTradeControl;
+  okx_balance?: OkxLiveBalance;
   snapshot: PaperDashboardSnapshot;
   /** gross·fee·net·profit factor 등 (last7d/30d/전체). */
   feeAnalytics: Readonly<{
@@ -189,8 +204,9 @@ export function buildPaperDashboard(input: Readonly<{
   health: PaperHealthReport;
   healthHistoryLines: readonly PaperHealthHistoryJsonlLine[];
   tradeControl: PaperDashboardTradeControl;
+  okx_balance?: OkxLiveBalance;
 }>): PaperDashboardReport {
-  const { summary, window, health, healthHistoryLines, tradeControl } = input;
+  const { summary, window, health, healthHistoryLines, tradeControl, okx_balance } = input;
   const w = window.windows;
 
   const snapshot: PaperDashboardSnapshot = {
@@ -218,6 +234,7 @@ export function buildPaperDashboard(input: Readonly<{
     reasons: [...health.reasons],
     headline: buildHeadline(health, window),
     tradeControl,
+    okx_balance,
     snapshot,
     feeAnalytics,
     recentTrend: buildRecentTrend(healthHistoryLines),

@@ -1,6 +1,7 @@
 import type { PaperClosedPositionRecord, PaperOpenPositionRecord } from "../models/types";
 import type { PaperHealthReport } from "../storage/paper-health";
 import type { JsonStore } from "../storage/json-store";
+import type { OkxLiveBalance } from "../storage/paper-dashboard";
 
 type PositionSideLower = "long" | "short";
 
@@ -88,13 +89,13 @@ export class PositionManager {
   }
 
   /** Rewrite summary reports under `data/reports/` from `positions/history.json`. */
-  async refreshSummaryReport(): Promise<{
+  async refreshSummaryReport(okxBalance?: OkxLiveBalance): Promise<{
     summaryPath: string;
     dailyPath: string;
     windowPath: string;
     healthPath: string;
     health: PaperHealthReport;
   }> {
-    return await this.store.writePaperSummaryReport();
+    return await this.store.writePaperSummaryReport(okxBalance);
   }
 }
