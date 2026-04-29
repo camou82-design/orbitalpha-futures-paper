@@ -24,7 +24,7 @@ import { evaluateV2AddOnPolicy } from "./addon/policy";
 import { evaluateV2ExitPolicy } from "./exit/policy";
 import { deriveMicroExecutionScore } from "./execution/micro-execution-score";
 import { deriveTradeLifecycleAuthority } from "./lifecycle/trade-lifecycle-authority";
-import type { MicroExecutionScoreSummary, V2ExitAuthorityResult, V2PartialAuthorityResult, V2TradeLifecycleAuthorityResult, V2CooldownAuthorityResult } from "./types";
+import type { MicroExecutionScoreSummary, V2ExitAuthorityResult, V2PartialAuthorityResult, V2TradeLifecycleAuthorityResult, V2CooldownAuthorityResult, V2PositionStateAuthorityResult } from "./types";
 
 const V2_PROOF_KEY_TTL_MS = 60 * 60 * 1000;
 const V2_PROOF_KEY_MAX_SIZE = 5000;
@@ -1180,6 +1180,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let v2ExitAuthority: V2ExitAuthorityResult | null = null;
     let v2PartialAuthority: V2PartialAuthorityResult | null = null;
     let v2CooldownAuthority: V2CooldownAuthorityResult | null = null;
+    let v2PositionStateAuthority: V2PositionStateAuthorityResult | null = null;
     const exitActionMap: Record<string, V2ExitAuthorityResult["exitAction"]> = {
         HOLD: "none",
         WATCH: "watch",
@@ -1405,8 +1406,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         lifecyclePosition != null ||
         finalDecision === "ENTER" ||
         riskSizing.blockReason != null;
-    if (hasLifecycleCandidate) {
-        const cooldownReasonRaw = (riskSizing.diagnostics as Record<string, unknown> | undefined)?.risk_cooldown_subreason;
+        if (hasLifecycleCandidate) {
+        const cooldownReasonRaw = (riskSizing.diagnostics as Record<string, unknown> | undefined)?.cooldown_reason;
         const cooldownRemainingRaw = (riskSizing.diagnostics as Record<string, unknown> | undefined)?.cooldown_remaining_ms;
         lifecycleAuthority = deriveTradeLifecycleAuthority({
             symbol: String(input.symbol),
@@ -1585,6 +1586,80 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 true_inconsistency_reasons: lifecycleAuthority.trueInconsistencyReasons,
                 inconsistency_reasons: lifecycleAuthority.inconsistencyReasons,
                 proof_reasons: lifecycleAuthority.proofReasons
+            }));
+        }
+
+        // --- V2 Position State Authority (Step 4) ---
+        const hasPosition = lifecyclePosition != null;
+        const positionLifecycleState: V2PositionStateAuthorityResult["positionLifecycleState"] = (() => {
+            if (!hasPosition) return "none";
+            if (lifecycleAuthority.exitAction === "exit") return "closing";
+            if (lifecycleAuthority.partialAction === "reduce" || lifecycleAuthority.partialAction === "protect_profit") return "reducing";
+            if (lifecycleAuthority.addOnAllowed) return "scaling";
+            return "open";
+        })();
+
+        const positionRiskState: V2PositionStateAuthorityResult["positionRiskState"] = (() => {
+            if (!hasPosition) return "none";
+            const v2RiskMode = v2State.riskMode;
+            if (v2RiskMode === "danger") return "danger";
+            if (v2RiskMode === "drawdown_watch") return "drawdown_watch";
+            if (lifecycleAuthority.partialAction === "protect_profit") return "profit_protect";
+            return "normal";
+        })();
+
+        const pnlState: V2PositionStateAuthorityResult["pnlState"] = (() => {
+            if (!hasPosition) return "none";
+            const pct = lifecyclePosition?.pnlPct ?? 0;
+            if (pct > 0.001) return "profit";
+            if (pct < -0.001) return "loss";
+            return "flat";
+        })();
+
+        v2PositionStateAuthority = {
+            symbol: String(input.symbol),
+            side: lifecycleSide,
+            positionStateAuthorityOwner: "v2",
+            positionStateExecutionOwner: "paper_engine",
+            positionStateAction: hasPosition ? "track" : "none",
+            hasPosition,
+            positionLifecycleState,
+            positionRiskState,
+            positionStage: lifecyclePosition?.entryStage ?? null,
+            holdMs: null,
+            pnlState,
+            unrealizedPnlKrw: lifecyclePosition != null ? lifecyclePosition.sizeUsd * lifecyclePosition.pnlPct : null, // USD fallback
+            unrealizedPnlPct: lifecyclePosition?.pnlPct ?? null,
+            stateReason: lifecycleAuthority.cooldownReason || null,
+            proofReasons: [],
+            trueInconsistencyReasons: [],
+            knownShadowGaps: ["position_state_execution_owner_is_paper_engine"]
+        };
+
+        const positionStateProofKey = [
+            v2PositionStateAuthority.hasPosition,
+            v2PositionStateAuthority.positionLifecycleState,
+            v2PositionStateAuthority.positionRiskState,
+            v2PositionStateAuthority.positionStage,
+            v2PositionStateAuthority.pnlState,
+            v2PositionStateAuthority.side
+        ].join("|");
+
+        const positionStateHighPriority = v2PositionStateAuthority.trueInconsistencyReasons.length > 0;
+
+        if (shouldEmitV2Proof("V2_POSITION_STATE_AUTHORITY_STATE_PROOF", String(input.symbol), positionStateProofKey, positionStateHighPriority)) {
+            console.info(JSON.stringify({
+                event: "V2_POSITION_STATE_AUTHORITY_STATE_PROOF",
+                symbol: String(input.symbol),
+                side: v2PositionStateAuthority.side,
+                has_position: v2PositionStateAuthority.hasPosition,
+                lifecycle_state: v2PositionStateAuthority.positionLifecycleState,
+                risk_state: v2PositionStateAuthority.positionRiskState,
+                stage: v2PositionStateAuthority.positionStage,
+                pnl_state: v2PositionStateAuthority.pnlState,
+                unrealized_pnl_pct: lifecyclePosition?.pnlPct ?? null,
+                state_reason: v2PositionStateAuthority.stateReason,
+                hold_ms: v2PositionStateAuthority.holdMs
             }));
         }
     }
@@ -1771,6 +1846,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2ExitAuthority: v2ExitAuthority ?? undefined,
         v2PartialAuthority: v2PartialAuthority ?? undefined,
         v2CooldownAuthority: v2CooldownAuthority ?? undefined,
+        v2PositionStateAuthority: v2PositionStateAuthority ?? undefined,
         rawMetrics: {
             ...judgment.metrics,
             qualityScore: input.snapshot.qualityScore ?? 0,
@@ -1798,6 +1874,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2ExitAuthority,
         v2PartialAuthority,
         v2CooldownAuthority,
+        v2PositionStateAuthority,
         exitPolicy: {
             action: exitPolicy.action,
             reason: exitPolicy.reason,

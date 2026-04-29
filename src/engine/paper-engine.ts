@@ -2342,6 +2342,103 @@ export class PaperEngine {
         cooldownProofHandled = true;
       }
 
+      // --- V2 Position State Authority Proof (Step 4) ---
+      const v2PositionStateAuthority = selectorResult?.v2_result.v2PositionStateAuthority;
+      let v2_paper_position_state_agreement = true;
+      let positionStateProofHandled = false;
+
+      if (v2PositionStateAuthority) {
+        const paperPos = opensAfterClose.find(p => p.symbol === sym);
+        const paperHasPosition = !!paperPos;
+        const v2HasPosition = v2PositionStateAuthority.hasPosition;
+
+        const trueInconsistencyReasons: string[] = [];
+        const proofReasons: string[] = [];
+        const knownShadowGaps: string[] = [...v2PositionStateAuthority.knownShadowGaps];
+
+        if (v2HasPosition !== paperHasPosition) {
+          v2_paper_position_state_agreement = false;
+          trueInconsistencyReasons.push("POSITION_EXISTENCE_MISMATCH");
+        }
+
+        if (paperHasPosition && v2HasPosition && paperPos && v2PositionStateAuthority) {
+          if (paperPos.side.toLowerCase() !== v2PositionStateAuthority.side?.toLowerCase()) {
+            v2_paper_position_state_agreement = false;
+            trueInconsistencyReasons.push("SIDE_MISMATCH");
+          }
+          
+          if (paperPos!.entryStage !== v2PositionStateAuthority.positionStage) {
+            proofReasons.push("STAGE_DIFF");
+          }
+
+          const pnlDiff = Math.abs((paperPos!.unrealizedPnlPct ?? 0) - (v2PositionStateAuthority.unrealizedPnlPct ?? 0));
+          if (pnlDiff > 0.05) { // 5% diff
+            trueInconsistencyReasons.push("LARGE_PNL_DIFF");
+          } else if (pnlDiff > 0.01) {
+            proofReasons.push("MINOR_PNL_DIFF");
+          }
+        }
+
+        if (v2PositionStateAuthority.positionStateExecutionOwner === "paper_engine") {
+          knownShadowGaps.push("EXECUTION_OWNER_IS_PAPER_ENGINE");
+        }
+
+        const positionStateProofKey = [
+          v2_paper_position_state_agreement,
+          v2PositionStateAuthority.hasPosition,
+          paperHasPosition,
+          v2PositionStateAuthority.positionLifecycleState,
+          v2PositionStateAuthority.positionRiskState,
+          v2PositionStateAuthority.positionStage,
+          paperPos?.entryStage ?? null
+        ].join("|");
+
+        const positionStateHighPriority = !v2_paper_position_state_agreement || trueInconsistencyReasons.length > 0;
+
+        if (shouldEmitV2Proof("V2_POSITION_STATE_AUTHORITY_PROOF", String(sym), positionStateProofKey, positionStateHighPriority)) {
+          this.logger.info("V2_POSITION_STATE_AUTHORITY_PROOF", {
+            symbol: sym,
+            side: v2PositionStateAuthority.side,
+            regime: effectiveRegimeForDecision,
+            market_mode: marketModeOut.marketMode,
+            directional_shock_state: (selectorResult?.v2_result.rawMetrics as any)?.directionalShockState ?? "UNKNOWN",
+            position_state_authority_owner: v2PositionStateAuthority.positionStateAuthorityOwner,
+            position_state_execution_owner: v2PositionStateAuthority.positionStateExecutionOwner,
+            v2_position_state_action: v2PositionStateAuthority.positionStateAction,
+            v2_has_position: v2HasPosition,
+            v2_position_lifecycle_state: v2PositionStateAuthority.positionLifecycleState,
+            v2_position_risk_state: v2PositionStateAuthority.positionRiskState,
+            v2_position_stage: v2PositionStateAuthority.positionStage,
+            v2_hold_ms: v2PositionStateAuthority.holdMs,
+            v2_pnl_state: v2PositionStateAuthority.pnlState,
+            v2_unrealized_pnl_krw: v2PositionStateAuthority.unrealizedPnlKrw,
+            v2_unrealized_pnl_pct: v2PositionStateAuthority.unrealizedPnlPct,
+            paper_has_position: paperHasPosition,
+            paper_position_side: paperPos?.side ?? null,
+            paper_position_stage: paperPos?.entryStage ?? null,
+            paper_hold_ms: paperPos ? (Date.now() - paperPos.openedAt) : null,
+            paper_unrealized_pnl_krw: paperPos?.unrealizedPnl ?? null,
+            paper_unrealized_pnl_pct: paperPos?.unrealizedPnlPct ?? null,
+            paper_position_state: paperHasPosition ? "open" : "none",
+            v2_paper_position_state_agreement,
+            known_shadow_gaps: knownShadowGaps,
+            true_inconsistency_reasons: trueInconsistencyReasons,
+            proof_reasons: proofReasons
+          });
+        }
+        positionStateProofHandled = true;
+
+        envelope.v2_position_state_action = v2PositionStateAuthority.positionStateAction;
+        envelope.v2_position_lifecycle_state = v2PositionStateAuthority.positionLifecycleState;
+        envelope.v2_position_risk_state = v2PositionStateAuthority.positionRiskState;
+        envelope.v2_position_stage = v2PositionStateAuthority.positionStage;
+        envelope.v2_position_pnl_state = v2PositionStateAuthority.pnlState;
+        envelope.v2_position_hold_ms = v2PositionStateAuthority.holdMs;
+        envelope.v2_paper_position_state_agreement = v2_paper_position_state_agreement;
+        envelope.position_state_authority_owner = v2PositionStateAuthority.positionStateAuthorityOwner;
+        envelope.position_state_execution_owner = v2PositionStateAuthority.positionStateExecutionOwner;
+      }
+
       envelope.v2_paper_cooldown_agreement = v2_paper_cooldown_agreement;
       envelope.v2_cooldown_action = v2CooldownAuthority?.cooldownAction ?? null;
       envelope.v2_cooldown_type = v2CooldownAuthority?.cooldownType ?? null;
@@ -2379,6 +2476,15 @@ export class PaperEngine {
         final_engine_owner: selectorResult?.adopted_result.engine ?? null,
         adopted_engine: selectorResult?.adopted_result.engine ?? null,
         adoption_reason: selectorResult?.adopted_result.adoption_reason ?? null,
+        v2_position_state_action: envelope.v2_position_state_action ?? null,
+        v2_position_lifecycle_state: envelope.v2_position_lifecycle_state ?? null,
+        v2_position_risk_state: envelope.v2_position_risk_state ?? null,
+        v2_position_stage: envelope.v2_position_stage ?? null,
+        v2_position_pnl_state: envelope.v2_position_pnl_state ?? null,
+        v2_position_hold_ms: envelope.v2_position_hold_ms ?? null,
+        v2_paper_position_state_agreement: envelope.v2_paper_position_state_agreement ?? null,
+        position_state_authority_owner: envelope.position_state_authority_owner ?? null,
+        position_state_execution_owner: envelope.position_state_execution_owner ?? null,
         authority_decision: authority.decision,
         v2_decision: selectorResult?.v2_result.decision ?? null,
         v2_side: selectorResult?.v2_result.side ?? null,

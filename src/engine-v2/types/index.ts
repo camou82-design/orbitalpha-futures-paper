@@ -245,6 +245,7 @@ export interface EngineV2Decision {
     v2ExitAuthority?: V2ExitAuthorityResult;
     v2PartialAuthority?: V2PartialAuthorityResult;
     v2CooldownAuthority?: V2CooldownAuthorityResult;
+    v2PositionStateAuthority?: V2PositionStateAuthorityResult;
     rawMetrics: Record<string, number | boolean | string | null>;
 }
 
@@ -426,6 +427,15 @@ export interface SymbolDecisionEnvelope {
     v2_cooldown_urgency?: string | null;
     v2_cooldown_remaining_ms?: number | null;
     v2_direction_blocked?: string | null;
+    v2_position_state_action?: string | null;
+    v2_position_lifecycle_state?: string | null;
+    v2_position_risk_state?: string | null;
+    v2_position_stage?: number | null;
+    v2_position_pnl_state?: string | null;
+    v2_position_hold_ms?: number | null;
+    v2_paper_position_state_agreement?: boolean | null;
+    position_state_authority_owner?: string | null;
+    position_state_execution_owner?: string | null;
     cooldown_authority_owner?: string | null;
     cooldown_execution_owner?: string | null;
 }
@@ -590,6 +600,26 @@ export interface V2CooldownAuthorityResult {
     knownShadowGaps: string[];
 }
 
+export interface V2PositionStateAuthorityResult {
+    symbol: string;
+    side: EngineV2Side;
+    positionStateAuthorityOwner: "v2";
+    positionStateExecutionOwner: "paper_engine";
+    positionStateAction: "none" | "track" | "watch" | "protect" | "stale" | "closed";
+    hasPosition: boolean;
+    positionLifecycleState: "none" | "opening" | "open" | "scaling" | "reducing" | "closing" | "closed" | "unknown";
+    positionRiskState: "none" | "normal" | "profit_protect" | "drawdown_watch" | "danger" | "unknown";
+    positionStage: number | null;
+    holdMs: number | null;
+    pnlState: "none" | "profit" | "loss" | "flat" | "unknown";
+    unrealizedPnlKrw: number | null;
+    unrealizedPnlPct: number | null;
+    stateReason: string | null;
+    proofReasons: string[];
+    trueInconsistencyReasons: string[];
+    knownShadowGaps: string[];
+}
+
 export type V2LifecycleStage = "entry" | "add_on" | "partial" | "exit" | "cooldown" | "position_state";
 export type V2CooldownType = "none" | "direction_block" | "time_reentry" | "risk_halt" | "fail_reentry";
 export type V2LifecyclePartialAction = "none" | "prepare" | "reduce" | "protect_profit";
@@ -713,5 +743,6 @@ export interface EngineV2InternalResult {
     v2ExitAuthority: V2ExitAuthorityResult | null;
     v2PartialAuthority: V2PartialAuthorityResult | null;
     v2CooldownAuthority: V2CooldownAuthorityResult | null;
+    v2PositionStateAuthority: V2PositionStateAuthorityResult | null;
     exitPolicy: ExitPolicyDiagnosticsSummary | null;
 }
