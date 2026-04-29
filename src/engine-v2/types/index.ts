@@ -433,6 +433,7 @@ export interface SymbolDecisionEnvelope {
     v2_position_stage?: number | null;
     v2_position_pnl_state?: string | null;
     v2_position_hold_ms?: number | null;
+    v2_unrealized_pnl_usd_estimate?: number | null;
     v2_paper_position_state_agreement?: boolean | null;
     position_state_authority_owner?: string | null;
     position_state_execution_owner?: string | null;
@@ -613,6 +614,7 @@ export interface V2PositionStateAuthorityResult {
     holdMs: number | null;
     pnlState: "none" | "profit" | "loss" | "flat" | "unknown";
     unrealizedPnlKrw: number | null;
+    unrealizedPnlUsdEstimate: number | null;
     unrealizedPnlPct: number | null;
     stateReason: string | null;
     proofReasons: string[];

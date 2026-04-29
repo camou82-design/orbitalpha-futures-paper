@@ -1407,7 +1407,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         finalDecision === "ENTER" ||
         riskSizing.blockReason != null;
         if (hasLifecycleCandidate) {
-        const cooldownReasonRaw = (riskSizing.diagnostics as Record<string, unknown> | undefined)?.cooldown_reason;
+        const cooldownReasonRaw = (riskSizing.diagnostics as Record<string, unknown> | undefined)?.risk_cooldown_subreason;
         const cooldownRemainingRaw = (riskSizing.diagnostics as Record<string, unknown> | undefined)?.cooldown_remaining_ms;
         lifecycleAuthority = deriveTradeLifecycleAuthority({
             symbol: String(input.symbol),
@@ -1628,7 +1628,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             positionStage: lifecyclePosition?.entryStage ?? null,
             holdMs: null,
             pnlState,
-            unrealizedPnlKrw: lifecyclePosition != null ? lifecyclePosition.sizeUsd * lifecyclePosition.pnlPct : null, // USD fallback
+            unrealizedPnlKrw: null,
+            unrealizedPnlUsdEstimate: lifecyclePosition != null ? lifecyclePosition.sizeUsd * lifecyclePosition.pnlPct : null,
             unrealizedPnlPct: lifecyclePosition?.pnlPct ?? null,
             stateReason: lifecycleAuthority.cooldownReason || null,
             proofReasons: [],
@@ -1657,6 +1658,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 risk_state: v2PositionStateAuthority.positionRiskState,
                 stage: v2PositionStateAuthority.positionStage,
                 pnl_state: v2PositionStateAuthority.pnlState,
+                unrealized_pnl_usd_estimate: v2PositionStateAuthority.unrealizedPnlUsdEstimate,
                 unrealized_pnl_pct: lifecyclePosition?.pnlPct ?? null,
                 state_reason: v2PositionStateAuthority.stateReason,
                 hold_ms: v2PositionStateAuthority.holdMs

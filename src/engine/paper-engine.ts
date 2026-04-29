@@ -339,6 +339,16 @@ type PaperEngineDecisionEnvelope = {
   v2_direction_blocked?: string | null;
   cooldown_authority_owner?: string | null;
   cooldown_execution_owner?: string | null;
+  v2_position_state_action?: string | null;
+  v2_position_lifecycle_state?: string | null;
+  v2_position_risk_state?: string | null;
+  v2_position_stage?: number | null;
+  v2_position_pnl_state?: string | null;
+  v2_position_hold_ms?: number | null;
+  v2_unrealized_pnl_usd_estimate?: number | null;
+  v2_paper_position_state_agreement?: boolean | null;
+  position_state_authority_owner?: string | null;
+  position_state_execution_owner?: string | null;
 };
 
 type EntryQualityFeatureVector = Readonly<{
@@ -2371,8 +2381,9 @@ export class PaperEngine {
             proofReasons.push("STAGE_DIFF");
           }
 
-          const pnlDiff = Math.abs((paperPos!.unrealizedPnlPct ?? 0) - (v2PositionStateAuthority.unrealizedPnlPct ?? 0));
+          const pnlDiff = Math.abs((paperPos.unrealizedPnlPct ?? 0) - (v2PositionStateAuthority.unrealizedPnlPct ?? 0));
           if (pnlDiff > 0.05) { // 5% diff
+            v2_paper_position_state_agreement = false;
             trueInconsistencyReasons.push("LARGE_PNL_DIFF");
           } else if (pnlDiff > 0.01) {
             proofReasons.push("MINOR_PNL_DIFF");
@@ -2412,6 +2423,7 @@ export class PaperEngine {
             v2_hold_ms: v2PositionStateAuthority.holdMs,
             v2_pnl_state: v2PositionStateAuthority.pnlState,
             v2_unrealized_pnl_krw: v2PositionStateAuthority.unrealizedPnlKrw,
+            v2_unrealized_pnl_usd_estimate: v2PositionStateAuthority.unrealizedPnlUsdEstimate,
             v2_unrealized_pnl_pct: v2PositionStateAuthority.unrealizedPnlPct,
             paper_has_position: paperHasPosition,
             paper_position_side: paperPos?.side ?? null,
@@ -2434,6 +2446,7 @@ export class PaperEngine {
         envelope.v2_position_stage = v2PositionStateAuthority.positionStage;
         envelope.v2_position_pnl_state = v2PositionStateAuthority.pnlState;
         envelope.v2_position_hold_ms = v2PositionStateAuthority.holdMs;
+        envelope.v2_unrealized_pnl_usd_estimate = v2PositionStateAuthority.unrealizedPnlUsdEstimate;
         envelope.v2_paper_position_state_agreement = v2_paper_position_state_agreement;
         envelope.position_state_authority_owner = v2PositionStateAuthority.positionStateAuthorityOwner;
         envelope.position_state_execution_owner = v2PositionStateAuthority.positionStateExecutionOwner;
@@ -2482,6 +2495,7 @@ export class PaperEngine {
         v2_position_stage: envelope.v2_position_stage ?? null,
         v2_position_pnl_state: envelope.v2_position_pnl_state ?? null,
         v2_position_hold_ms: envelope.v2_position_hold_ms ?? null,
+        v2_unrealized_pnl_usd_estimate: envelope.v2_unrealized_pnl_usd_estimate ?? null,
         v2_paper_position_state_agreement: envelope.v2_paper_position_state_agreement ?? null,
         position_state_authority_owner: envelope.position_state_authority_owner ?? null,
         position_state_execution_owner: envelope.position_state_execution_owner ?? null,
