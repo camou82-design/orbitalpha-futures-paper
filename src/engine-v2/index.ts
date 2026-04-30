@@ -1224,6 +1224,39 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
 
+        // 수정 4. RANGE_MID_CHOP 전용 micro probe ENTER 경로 추가
+        const isRangeMidChop = judgment.regime === "RANGE" && judgment.subtype === "RANGE_MID_CHOP";
+        const microProbeCommonOk = 
+            isRangeMidChop &&
+            shock === "NONE" &&
+            hardControlClear === true &&
+            hardBlockPresent === false &&
+            paperExecutionReady === true &&
+            signedExecutionReady === true &&
+            !hasSameSidePosition &&
+            !hasOppositeSidePosition &&
+            (rangeConfidence ?? 0) >= 0.75 &&
+            (entryQualityGrade === "S" || entryQualityGrade === "A" || entryQualityGrade === "B") &&
+            qualityScore >= 64 &&
+            trendOk === true &&
+            (trendSideCandidate === "long" || trendSideCandidate === "short") &&
+            (readinessDiag.live_balance_block == null || readinessDiag.live_balance_ready === true) &&
+            !pumpStateResolved.includes("ULTRA") && !pumpStateResolved.includes("CRITICAL") &&
+            !crashState.includes("ULTRA") && !crashState.includes("CRITICAL");
+
+        if (microProbeCommonOk && (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "REJECT")) {
+            const sideAllowed = trendSideCandidate === "long" ? (riskLongAllow && allowNewLong) : (riskShortAllow && allowNewShort);
+            if (sideAllowed) {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = trendSideCandidate;
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = "V2_RANGE_MID_MICRO_PROBE_CONFIRMED";
+                promotionBlockReason = null;
+                shockReactionBlockReason = null;
+            }
+        }
+
 
         if (promotionApplied) {
             if (shockReactionPromotionType == null && shock === "DOWN") {
@@ -1299,13 +1332,37 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // 수정 3. stage margin 0 방지 및 프로브 마진 보장
     let stageMarginKrwAfter = riskSizing.stageMarginKrw;
-    if (finalDecision === "ENTER" && (promotionReason === "V2_PROBE_ENTRY_CONFIRMED" || (promotionApplied && promotionReason != null))) {
+    if (finalDecision === "ENTER" && (promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" || promotionReason === "V2_PROBE_ENTRY_CONFIRMED" || (promotionApplied && promotionReason != null))) {
         const minProbeMarginKrw = 14000; // 약 20 USDT (14,000 KRW * leverage 2 기준)
         if (stageMarginKrwAfter < minProbeMarginKrw) {
             stageMarginKrwAfter = minProbeMarginKrw;
         }
         
-        if (promotionReason === "V2_PROBE_ENTRY_CONFIRMED") {
+        if (promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED") {
+            console.info(JSON.stringify({
+                event: "V2_RANGE_MID_MICRO_PROBE_PROOF",
+                symbol: String(input.symbol),
+                market_subtype: judgment.subtype,
+                rangeConfidence,
+                boxPos,
+                zone,
+                trendSideCandidate,
+                qualityScore,
+                trendOk,
+                paperExecutionReady,
+                signedExecutionReady,
+                hardBlockPresent,
+                hardControlClear,
+                decision_before: v2DecisionBeforePromotion,
+                decision_after: finalDecision,
+                side_after: v2SideAfterPromotion,
+                stageMarginKrwBefore: riskSizing.stageMarginKrw,
+                stageMarginKrwAfter: stageMarginKrwAfter,
+                promotionReason
+            }));
+        }
+
+        if (promotionReason === "V2_PROBE_ENTRY_CONFIRM_PROOF" || promotionReason === "V2_PROBE_ENTRY_CONFIRMED") {
             console.info(JSON.stringify({
                 event: "V2_PROBE_ENTRY_CONFIRM_PROOF",
                 symbol: String(input.symbol),
