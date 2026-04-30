@@ -479,7 +479,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         finalDecision = "HOLD";
     } else if (softNoTrade) {
         finalDecision = "DISABLED";
-    } else if (waitingRecheck) {
+    } else if (waitingRecheck && invalidSideForEnter) {
         finalDecision = "HOLD";
     } else if (isBlocked && blockReason === "NO_TRADE_REGIME") {
         finalDecision = "DISABLED";

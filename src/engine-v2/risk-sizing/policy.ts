@@ -95,12 +95,11 @@ export function calculateRiskSizing(
     }
     else if (!effectivePaperExecutionReady) {
         isBlocked = true;
-        blockReason = "EXECUTION_READINESS_FALSE";
+        blockReason = paperReadinessBlockReasons[0] || "EXECUTION_READINESS_FALSE";
     }
-    // WAIT_RECHECK: Block but diagnostic handled via explanation
+    // WAIT_RECHECK: Soft warning / diagnostic only (No longer a hard block)
     else if (executor.signal === "WAIT_RECHECK") {
-        isBlocked = true;
-        blockReason = "WAIT_RECHECK";
+        // Soft warning handled via diagnostics
     }
     else if (Number.isFinite(dContaminated) && dContaminated < dProfit) {
         isBlocked = true;
@@ -379,7 +378,9 @@ export function calculateRiskSizing(
         executor_side: executor.side ?? "none",
         executor_side_none_diagnostic: hasDirectionalSide ? null : "EXECUTOR_SIDE_NONE_DIAGNOSTIC",
         exposure_notional_krw: effectiveNotional,
-        equity_multiple: accountEquityKrw > 0 ? effectiveNotional / accountEquityKrw : 0
+        equity_multiple: accountEquityKrw > 0 ? effectiveNotional / accountEquityKrw : 0,
+        wait_recheck: executor.signal === "WAIT_RECHECK",
+        soft_warning_reason: executor.signal === "WAIT_RECHECK" ? "WAIT_RECHECK" : null
     };
     return {
         baseStageMarginKrw,
