@@ -11,6 +11,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
     const addOnPolicyAction = typeof diagnostics["addon_policy_action"] === "string" ? String(diagnostics["addon_policy_action"]) : null;
     const addOnPolicyReason = typeof diagnostics["addon_policy_reason"] === "string" ? String(diagnostics["addon_policy_reason"]) : null;
     const addOnAllowed = typeof diagnostics["addon_policy_allowed"] === "boolean" ? Boolean(diagnostics["addon_policy_allowed"]) : null;
+    
+    const originalDecision = typeof diagnostics["original_v2_decision"] === "string" ? String(diagnostics["original_v2_decision"]) : undefined;
+    const originalSide = typeof diagnostics["original_v2_side"] === "string" ? String(diagnostics["original_v2_side"]) : undefined;
+    const originalStageMarginKrw = typeof diagnostics["original_stage_margin_krw"] === "number" ? Number(diagnostics["original_stage_margin_krw"]) : undefined;
+
     const entryQualityGrade = risk.entryQualityGrade ?? null;
     const leverageProfile = risk.leverageProfile ?? null;
     const appliedLeverage = Number(risk.appliedLeverage ?? 0);
@@ -61,7 +66,10 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             hardBlockPresent,
             hardBlockReason,
             authorityReason: "engine_v2_mode_uses_v2_execution_envelope",
-            authorityVersion: "v2_execution_authority_envelope_v1"
+            authorityVersion: "v2_execution_authority_envelope_v1",
+            originalDecision,
+            originalSide,
+            originalStageMarginKrw
         };
     }
     if (mode === "legacy") {
@@ -99,7 +107,10 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             hardBlockPresent: false,
             hardBlockReason: null,
             authorityReason: "legacy_mode_uses_v1_execution",
-            authorityVersion: "v2_execution_authority_envelope_v1"
+            authorityVersion: "v2_execution_authority_envelope_v1",
+            originalDecision,
+            originalSide,
+            originalStageMarginKrw
         };
     }
     return {
@@ -136,6 +147,9 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         hardBlockPresent: selector.adopted_result.engine === "V2" ? hardBlockPresent : false,
         hardBlockReason: selector.adopted_result.engine === "V2" ? hardBlockReason : null,
         authorityReason: "shadow_mode_runtime_preserved_compare_only",
-        authorityVersion: "v2_execution_authority_envelope_v1"
+        authorityVersion: "v2_execution_authority_envelope_v1",
+        originalDecision,
+        originalSide,
+        originalStageMarginKrw
     };
 }

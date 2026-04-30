@@ -46,6 +46,11 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     hardBlockReason: string | null;
     authorityReason: string;
     authorityVersion: "v2_execution_authority_envelope_v1";
+
+    // -- Added for Bridge V2 Original Intent --
+    originalDecision?: string;
+    originalSide?: string;
+    originalStageMarginKrw?: number;
 }>;
 
 export type V2LegacyComparison = Readonly<{

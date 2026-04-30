@@ -734,6 +734,14 @@ export type EntryExecutionAuthority = Readonly<{
     equityMultiple?: number;
     entryQualityGrade?: EntryQualityGrade;
     addOnAllowed?: boolean;
+
+    // -- Added for V2 Bridge Hardening --
+    originalDecision?: string;
+    originalSide?: string;
+    originalStageMarginKrw?: number;
+    hardBlockPresent?: boolean;
+    hardBlockReason?: string | null;
+    nonBypassableHardBlockPresent?: boolean;
 }>;
 
 /** Internal Pipeline Result */

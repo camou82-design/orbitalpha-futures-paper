@@ -7474,14 +7474,14 @@ export class PaperEngine {
 
       const auth = env.authority;
       const adoptedEngine = env.selector?.adopted_result.engine;
-      const stageMarginKrw = auth.stageMarginKrw ?? 0;
+      const stageMarginKrw = auth.originalStageMarginKrw ?? auth.stageMarginKrw ?? 0;
       const sizeUsdt = stageMarginKrw / 1400; // rough estimate for proof
-      const hardBlockPresent = env.hard_block_present === true;
+      const nonBypassableHardBlockPresent = auth.nonBypassableHardBlockPresent === true;
 
       const conditionsMet = 
         adoptedEngine === "V2" &&
-        auth.decision === "ENTER" &&
-        (auth.side === "long" || auth.side === "short") &&
+        (auth.originalDecision === "ENTER" || auth.decision === "ENTER") &&
+        (auth.originalSide === "long" || auth.originalSide === "short" || auth.side === "long" || auth.side === "short") &&
         stageMarginKrw > 0 &&
         input.paperExecutionReady === true &&
         this.signedExecutionReady === true &&
@@ -7489,7 +7489,7 @@ export class PaperEngine {
         input.closeOnlyMode === false &&
         input.killSwitchActive === false &&
         this.reconcileSafetyCloseOnly === false &&
-        hardBlockPresent === false;
+        nonBypassableHardBlockPresent === false;
 
       if (conditionsMet) {
         v2AuthoritativeEnterPresent = true;
@@ -7501,7 +7501,7 @@ export class PaperEngine {
           size_usdt: sizeUsdt,
           signed_execution_ready: this.signedExecutionReady,
           paper_execution_ready: input.paperExecutionReady,
-          hard_block_present: hardBlockPresent,
+          non_bypassable_hard_block_present: nonBypassableHardBlockPresent,
           serverTradeEnabled: input.serverTradeEnabled,
           closeOnlyMode: input.closeOnlyMode,
           killSwitch: input.killSwitchActive,
@@ -8178,10 +8178,10 @@ export class PaperEngine {
           "CRASH_ENTRY_GUARD_BLOCK",
           "SYMBOL_OPPOSITE_POSITION_OPEN",
           "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
-          // "ENTRY_QUALITY_CONFLICT_BLOCK" -> Removed for V2 connection
-          // "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE" -> Removed for V2 connection
         ]);
         const softReasons = new Set<string>([
+          "ENTRY_QUALITY_CONFLICT_BLOCK", // Demoted for V2
+          "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE", // Demoted for V2
           "ENTRY_QUALITY_CONTAMINATED_SIMILAR",
           "WAIT_RECHECK",
           "SIDE_NOT_ALLOWED_LONG",

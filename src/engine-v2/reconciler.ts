@@ -141,7 +141,25 @@ export function deriveExecutionAuthority(
         exposureNotionalKrw: useV2 ? v2Risk.exposureNotionalKrw : 0,
         equityMultiple: useV2 ? v2Risk.equityMultiple : 0,
         entryQualityGrade: useV2 ? v2Risk.entryQualityGrade : "B",
-        addOnAllowed: useV2 ? v2Risk.isAddOn === true : false
+        addOnAllowed: useV2 ? v2Risk.isAddOn === true : false,
+        originalDecision: useV2 ? ((v2Risk as any).diagnostics?.original_v2_decision as string) : undefined,
+        originalSide: useV2 ? ((v2Risk as any).diagnostics?.original_v2_side as string) : undefined,
+        originalStageMarginKrw: useV2 ? ((v2Risk as any).diagnostics?.original_stage_margin_krw as number) : undefined,
+        hardBlockPresent: useV2 ? v2Risk.isBlocked === true : undefined,
+        hardBlockReason: useV2 ? (v2Risk.blockReason ?? null) : undefined,
+        nonBypassableHardBlockPresent: useV2 && v2Risk.blockReason != null ? new Set<string>([
+            "KILL_SWITCH_ACTIVE",
+            "SERVER_TRADE_DISABLED",
+            "CLOSE_ONLY_MODE",
+            "RISK_MODE_HALT",
+            "DAILY_LOSS_GUARD",
+            "RECONCILE_SAFE_MODE",
+            "MAX_SLOTS_REACHED",
+            "MIN_ORDER_SIZE_UNDERFLOW",
+            "ORDER_BUILD_FAIL",
+            "CRASH_ENTRY_GUARD_BLOCK",
+            "RISK_EXPOSURE_CAP_PRE_SUBMIT"
+        ]).has(v2Risk.blockReason) : undefined
     };
 }
 
@@ -162,7 +180,25 @@ export function deriveExecutionAuthorityFromEnvelope(
         exposureNotionalKrw: envelope.exposureNotionalKrw,
         equityMultiple: envelope.equityMultiple,
         entryQualityGrade: envelope.entryQualityGrade == null ? "B" : (envelope.entryQualityGrade as "S" | "A" | "B"),
-        addOnAllowed: envelope.addOnAllowed ?? false
+        addOnAllowed: envelope.addOnAllowed ?? false,
+        originalDecision: envelope.originalDecision,
+        originalSide: envelope.originalSide,
+        originalStageMarginKrw: envelope.originalStageMarginKrw,
+        hardBlockPresent: envelope.hardBlockPresent,
+        hardBlockReason: envelope.hardBlockReason,
+        nonBypassableHardBlockPresent: envelope.hardBlockReason != null && new Set<string>([
+            "KILL_SWITCH_ACTIVE",
+            "SERVER_TRADE_DISABLED",
+            "CLOSE_ONLY_MODE",
+            "RISK_MODE_HALT",
+            "DAILY_LOSS_GUARD",
+            "RECONCILE_SAFE_MODE",
+            "MAX_SLOTS_REACHED",
+            "MIN_ORDER_SIZE_UNDERFLOW",
+            "ORDER_BUILD_FAIL",
+            "CRASH_ENTRY_GUARD_BLOCK",
+            "RISK_EXPOSURE_CAP_PRE_SUBMIT"
+        ]).has(envelope.hardBlockReason)
     };
 }
 
