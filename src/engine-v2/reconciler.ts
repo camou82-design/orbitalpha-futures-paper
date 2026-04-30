@@ -509,6 +509,7 @@ export function resolveSymbolDecisionEnvelope(
         execution_authority_version: executionEnvelope.authorityVersion,
         v2_execution_envelope: executionEnvelope,
         legacy_comparison: legacyComparison,
+        hard_block_present: executionEnvelope.hardBlockPresent,
         runtime_authority_owner: executionEnvelope.authorityOwner,
         runtime_authority_decision: executionEnvelope.decision,
         runtime_authority_side: executionEnvelope.side,

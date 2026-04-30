@@ -102,6 +102,7 @@ import {
   EngineV2Side,
   EntryExecutionAuthority
 } from "../engine-v2/types";
+import type { V2ExecutionAuthorityEnvelope } from "../engine-v2/execution/types";
 import {
   reconcileV2Decision,
   resolveSymbolDecisionEnvelope,
@@ -349,7 +350,8 @@ type PaperEngineDecisionEnvelope = {
   v2_paper_position_state_agreement?: boolean | null;
   position_state_authority_owner?: string | null;
   position_state_execution_owner?: string | null;
-  v2_execution_envelope?: any;
+  v2_execution_envelope?: V2ExecutionAuthorityEnvelope | null;
+  hard_block_present?: boolean;
 };
 
 type EntryQualityFeatureVector = Readonly<{
@@ -7473,7 +7475,7 @@ export class PaperEngine {
       const adoptedEngine = env.selector?.adopted_result.engine;
       const stageMarginKrw = auth.stageMarginKrw ?? 0;
       const sizeUsdt = stageMarginKrw / 1400; // rough estimate for proof
-      const hardBlockPresent = env.v2_execution_envelope?.hardBlockPresent === true;
+      const hardBlockPresent = env.hard_block_present === true;
 
       const conditionsMet = 
         adoptedEngine === "V2" &&
@@ -7555,7 +7557,7 @@ export class PaperEngine {
 
     if (freshTickHardBlock && v2AuthoritativeEnterPresent) {
       this.logger.info("V2_AUTHORITY_BYPASS_FRESH_TICK_BARRIER", {
-        symbol: "BTCUSDT", // Primary focus for the bridge
+        symbol: entryQueue.length > 0 ? String(entryQueue[0].symbol) : "UNKNOWN",
         run_cycle_id: this.runCycleId,
         readiness_barrier_active: input.readinessBarrierActive,
         fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness
@@ -7613,7 +7615,20 @@ export class PaperEngine {
         if (first.fetchedAt < g) staleReasons.push("snapshot_fetched_before_readiness_or_trade_enable_gate");
         if (envelope.decisionCycleId < this.runCycleId) staleReasons.push("order_basis_previous_cycle");
       }
-      if (staleReasons.length > 0 && authority.source !== "v2") {
+      const v2BypassConditionsMet = 
+        envelope.selector?.adopted_result.engine === "V2" &&
+        authority.decision === "ENTER" &&
+        (authority.side === "long" || authority.side === "short") &&
+        (authority.stageMarginKrw ?? 0) > 0 &&
+        this.paperExecutionReady === true &&
+        this.signedExecutionReady === true &&
+        this.serverTradeControlState.server_trade_enabled === true &&
+        this.serverTradeControlState.close_only_mode === false &&
+        this.serverTradeControlState.kill_switch_active === false &&
+        this.reconcileSafetyCloseOnly === false &&
+        envelope.hard_block_present === false;
+
+      if (staleReasons.length > 0 && !v2BypassConditionsMet) {
         this.logger.warn("ENTRY_BLOCKED_STALE_SIGNAL", {
           symbol: first.symbol,
           stale_reasons: staleReasons,
@@ -7638,50 +7653,45 @@ export class PaperEngine {
         continue;
       }
       
-      if (staleReasons.length > 0 && authority.source === "v2") {
+      if (staleReasons.length > 0 && v2BypassConditionsMet) {
         this.logger.info("V2_AUTHORITY_STALE_SIGNAL_BYPASS_PROOF", {
           symbol: first.symbol,
           stale_reasons: staleReasons,
           authority_source: authority.source,
-          authority_decision: authority.decision
+          authority_decision: authority.decision,
+          v2_bypass_conditions_met: true
         });
       }
       if (
         readinessChangedAt != null &&
         authority.decision === "ENTER" &&
         this.readinessTransitionCycleId != null &&
-        this.readinessTransitionCycleId === this.runCycleId &&
-        authority.source !== "v2"
+        this.readinessTransitionCycleId === this.runCycleId
       ) {
-        this.logger.error("ENTRY_HARD_BLOCKED", this.buildInvariantProofPayload({
-          symbol: String(first.symbol),
-          side: authority.side,
-          authority,
-          adoptedEngine,
-          lifecycleState: null,
-          reason: "entry_attempt_same_cycle_after_readiness_recovery"
-        }));
-        this.logger.warn("V2_FINAL_HARD_BLOCK_PROOF", {
-          gate: "readiness_same_cycle_recovery",
-          symbol: first.symbol,
-          run_cycle_id: this.runCycleId,
-          readiness_transition_cycle_id: this.readinessTransitionCycleId
-        });
-        continue;
-      }
-
-      if (
-        readinessChangedAt != null &&
-        authority.decision === "ENTER" &&
-        this.readinessTransitionCycleId != null &&
-        this.readinessTransitionCycleId === this.runCycleId &&
-        authority.source === "v2"
-      ) {
-        this.logger.info("V2_AUTHORITY_RECOVERY_CYCLE_BYPASS_PROOF", {
-          symbol: first.symbol,
-          run_cycle_id: this.runCycleId,
-          readiness_transition_cycle_id: this.readinessTransitionCycleId
-        });
+        if (!v2BypassConditionsMet) {
+          this.logger.error("ENTRY_HARD_BLOCKED", this.buildInvariantProofPayload({
+            symbol: String(first.symbol),
+            side: authority.side,
+            authority,
+            adoptedEngine,
+            lifecycleState: null,
+            reason: "entry_attempt_same_cycle_after_readiness_recovery"
+          }));
+          this.logger.warn("V2_FINAL_HARD_BLOCK_PROOF", {
+            gate: "readiness_same_cycle_recovery",
+            symbol: first.symbol,
+            run_cycle_id: this.runCycleId,
+            readiness_transition_cycle_id: this.readinessTransitionCycleId
+          });
+          continue;
+        } else {
+          this.logger.info("V2_AUTHORITY_RECOVERY_CYCLE_BYPASS_PROOF", {
+            symbol: first.symbol,
+            run_cycle_id: this.runCycleId,
+            readiness_transition_cycle_id: this.readinessTransitionCycleId,
+            v2_bypass_conditions_met: true
+          });
+        }
       }
 
       const v2BlockReason = envelope.selector?.v2_result.risk.blockReason ?? null;

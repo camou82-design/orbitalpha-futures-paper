@@ -408,6 +408,7 @@ export interface SymbolDecisionEnvelope {
     execution_authority_version?: string;
     v2_execution_envelope?: V2ExecutionAuthorityEnvelope | null;
     legacy_comparison?: V2LegacyComparison | null;
+    hard_block_present?: boolean;
     runtime_authority_owner?: string | null;
     runtime_authority_decision?: string | null;
     runtime_authority_side?: string | null;
