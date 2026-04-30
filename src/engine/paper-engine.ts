@@ -7466,6 +7466,7 @@ export class PaperEngine {
     // V2 Execution Bridge Optimization: Only return early if NO V2 authoritative entries are present.
     // This ensures V2-sourced signals can bypass the legacy fresh_tick_barrier.
     let v2AuthoritativeEnterPresent = false;
+    const v2AuthoritativeSymbols: string[] = [];
     for (const q of entryQueue) {
       const sym = String(q.symbol);
       const env = input.decisionBySymbol.get(sym);
@@ -7492,6 +7493,7 @@ export class PaperEngine {
 
       if (conditionsMet) {
         v2AuthoritativeEnterPresent = true;
+        v2AuthoritativeSymbols.push(sym);
         this.logger.info("V2_ENTER_EXECUTION_BRIDGE_PROOF", {
           symbol: sym,
           side: auth.side,
@@ -7557,7 +7559,7 @@ export class PaperEngine {
 
     if (freshTickHardBlock && v2AuthoritativeEnterPresent) {
       this.logger.info("V2_AUTHORITY_BYPASS_FRESH_TICK_BARRIER", {
-        symbol: entryQueue.length > 0 ? String(entryQueue[0].symbol) : "UNKNOWN",
+        bypass_symbols: v2AuthoritativeSymbols,
         run_cycle_id: this.runCycleId,
         readiness_barrier_active: input.readinessBarrierActive,
         fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness
