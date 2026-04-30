@@ -632,6 +632,35 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2State.reconcileSafeMode !== true &&
         String(v2State.riskMode ?? "").toUpperCase() !== "HALT" &&
         v2State.dailyLossGuardTriggered !== true;
+
+    // 수정 1. stale FRESH_TICK block 정리
+    if (v2RejectReasonAfterPromotion === "FRESH_TICK_EXECUTION_BLOCKED" || v2RejectReasonAfterPromotion === "FRESH_TICK_BARRIER_ACTIVE") {
+        const isActuallyBlocked = 
+            v2State.freshTickExecutionBlocked === true || 
+            v2State.freshTickBarrierActive === true || 
+            paperExecutionReady !== true;
+        
+        const canClear = 
+            paperExecutionReady === true && 
+            signedExecutionReady === true && 
+            v2State.freshTickBarrierActive !== true && 
+            v2State.freshTickExecutionBlocked !== true;
+
+        if (canClear && !isActuallyBlocked) {
+            const reasonBefore = v2RejectReasonAfterPromotion;
+            v2RejectReasonAfterPromotion = null;
+            console.info(JSON.stringify({
+                event: "FRESH_TICK_STALE_BLOCK_CLEARED_PROOF",
+                symbol: String(input.symbol),
+                reason_before: reasonBefore,
+                paper_execution_ready: paperExecutionReady,
+                signed_execution_ready: signedExecutionReady,
+                barrier_active: v2State.freshTickBarrierActive,
+                execution_blocked: v2State.freshTickExecutionBlocked
+            }));
+        }
+    }
+
     const unpromotableRejectReasons = new Set<string>([
         "ENTRY_QUALITY_CONTAMINATED_SIMILAR",
         "CRASH_ENTRY_GUARD_BLOCK",
@@ -1149,6 +1178,53 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
 
+        // 수정 2. 공통 V2 probe ENTER 경로 추가
+        const hasSameSidePosition = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === trendSideCandidate);
+        const hasOppositeSidePosition = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() !== trendSideCandidate);
+        
+        const probeCommonOk = 
+            hardControlClear === true &&
+            hardBlockPresent === false &&
+            paperExecutionReady === true &&
+            signedExecutionReady === true &&
+            !hasSameSidePosition &&
+            !hasOppositeSidePosition &&
+            qualityScore >= 67 &&
+            trendOk === true &&
+            (entryQualityGrade === "S" || entryQualityGrade === "A" || entryQualityGrade === "B") &&
+            (readinessDiag.live_balance_block == null || readinessDiag.live_balance_ready === true);
+
+        if (probeCommonOk && (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "REJECT")) {
+            const probeDownOk = 
+                shock === "DOWN" &&
+                trendSideCandidate === "short" &&
+                riskShortAllow === true &&
+                allowNewShort === true &&
+                emaGap < 0 &&
+                !crashState.includes("ULTRA") &&
+                !crashState.includes("CRITICAL");
+
+            const probeUpOk = 
+                shock === "UP" &&
+                trendSideCandidate === "long" &&
+                riskLongAllow === true &&
+                allowNewLong === true &&
+                emaGap > 0 &&
+                !pumpStateResolved.includes("ULTRA") &&
+                !pumpStateResolved.includes("CRITICAL");
+
+            if (probeDownOk || probeUpOk) {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = trendSideCandidate;
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = "V2_PROBE_ENTRY_CONFIRMED";
+                promotionBlockReason = null;
+                shockReactionBlockReason = null;
+            }
+        }
+
+
         if (promotionApplied) {
             if (shockReactionPromotionType == null && shock === "DOWN") {
                 if (v2SideAfterPromotion === "short" && zone === "upper") shockReactionPromotionType = "upper_failure_short";
@@ -1220,6 +1296,39 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     finalDecision = v2DecisionAfterPromotion;
     blockReason = v2RejectReasonAfterPromotion;
     const decisionAfterReadiness: EngineV2FinalDecision = finalDecision;
+
+    // 수정 3. stage margin 0 방지 및 프로브 마진 보장
+    let stageMarginKrwAfter = riskSizing.stageMarginKrw;
+    if (finalDecision === "ENTER" && (promotionReason === "V2_PROBE_ENTRY_CONFIRMED" || (promotionApplied && promotionReason != null))) {
+        const minProbeMarginKrw = 14000; // 약 20 USDT (14,000 KRW * leverage 2 기준)
+        if (stageMarginKrwAfter < minProbeMarginKrw) {
+            stageMarginKrwAfter = minProbeMarginKrw;
+        }
+        
+        if (promotionReason === "V2_PROBE_ENTRY_CONFIRMED") {
+            console.info(JSON.stringify({
+                event: "V2_PROBE_ENTRY_CONFIRM_PROOF",
+                symbol: String(input.symbol),
+                shock,
+                trendSideCandidate,
+                decision_before: v2DecisionBeforePromotion,
+                decision_after: finalDecision,
+                side_after: v2SideAfterPromotion,
+                qualityScore,
+                trendOk,
+                emaGap,
+                trendWeaknessScore,
+                paperExecutionReady,
+                signedExecutionReady,
+                hardBlockPresent,
+                hardControlClear,
+                stageMarginKrwBefore: riskSizing.stageMarginKrw,
+                stageMarginKrwAfter: stageMarginKrwAfter,
+                promotionReason
+            }));
+        }
+    }
+
     let microExecution: MicroExecutionScoreSummary | null = null;
     let lifecycleAuthority: V2TradeLifecycleAuthorityResult | null = null;
     let v2ExitAuthority: V2ExitAuthorityResult | null = null;
@@ -1882,7 +1991,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         signal: execution.signal,
         side: v2SideAfterPromotion,
         decision: finalDecision,
-        risk: riskSizing,
+        risk: {
+            ...riskSizing,
+            isBlocked: hardBlockPresent,
+            blockReason: hardBlockReason,
+            stageMarginKrw: v2DecisionAfterPromotion === "ENTER" ? stageMarginKrwAfter : 0,
+            exposureNotionalKrw: (v2DecisionAfterPromotion === "ENTER" ? stageMarginKrwAfter : 0) * riskSizing.appliedLeverage
+        },
         explanation: {
             reason: finalReason,
             uiLabelRegime: judgment.regime,

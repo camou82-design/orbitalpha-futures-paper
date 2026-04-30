@@ -198,8 +198,8 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
         : "disabled";
   const okxSimulatedTradingHeaderEnabled = okxAuthMode === "demo";
   const okxLiveMaxOrderNotionalUsdt = (() => {
-    const n = parseNumber(env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT, 5);
-    if (!Number.isFinite(n) || n <= 0) return 5;
+    const n = parseNumber(env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT, 25);
+    if (!Number.isFinite(n) || n <= 0) return 25;
     return Math.min(10_000, n);
   })();
   const okxLiveStaticNotionalCapEnabled = parseBool(env.OKX_LIVE_STATIC_NOTIONAL_CAP_ENABLED, true);
