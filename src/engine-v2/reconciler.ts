@@ -142,9 +142,9 @@ export function deriveExecutionAuthority(
         equityMultiple: useV2 ? v2Risk.equityMultiple : 0,
         entryQualityGrade: useV2 ? v2Risk.entryQualityGrade : "B",
         addOnAllowed: useV2 ? v2Risk.isAddOn === true : false,
-        originalDecision: useV2 ? ((v2Risk as any).diagnostics?.original_v2_decision as string) : undefined,
-        originalSide: useV2 ? ((v2Risk as any).diagnostics?.original_v2_side as string) : undefined,
-        originalStageMarginKrw: useV2 ? ((v2Risk as any).diagnostics?.original_stage_margin_krw as number) : undefined,
+        originalDecision: useV2 ? v2Risk.diagnostics?.original_v2_decision : undefined,
+        originalSide: useV2 ? v2Risk.diagnostics?.original_v2_side : undefined,
+        originalStageMarginKrw: useV2 ? (typeof v2Risk.diagnostics?.original_stage_margin_krw === "number" ? v2Risk.diagnostics.original_stage_margin_krw : undefined) : undefined,
         hardBlockPresent: useV2 ? v2Risk.isBlocked === true : undefined,
         hardBlockReason: useV2 ? (v2Risk.blockReason ?? null) : undefined,
         nonBypassableHardBlockPresent: useV2 && v2Risk.blockReason != null ? new Set<string>([

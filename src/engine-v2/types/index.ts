@@ -524,6 +524,13 @@ export interface TransitionExecutorMetadata extends Record<string, string | numb
 }
 
 /** Tier 5: Risk Sizing Output */
+export interface RiskSizingDiagnostics {
+    original_v2_decision?: string;
+    original_v2_side?: string;
+    original_stage_margin_krw?: number;
+    [key: string]: unknown;
+}
+
 export interface RiskSizingOutput {
     baseStageMarginKrw: number;
     sizeMultiplier: number;
@@ -538,6 +545,7 @@ export interface RiskSizingOutput {
     entryQualityGrade: EntryQualityGrade;
     exposureNotionalKrw: number;
     equityMultiple: number;
+    diagnostics?: RiskSizingDiagnostics;
 }
 
 export interface MicroExecutionScoreSummary {

@@ -3584,6 +3584,14 @@ export class PaperEngine {
     lastPrice: number;
     flowId: string;
     reason: string;
+    closeSource?: string;
+    authorityOwner?: string;
+    executionOwner?: string;
+    isV2Authority?: boolean;
+    isStopLoss?: boolean;
+    isTakeProfit?: boolean;
+    isTrailingStop?: boolean;
+    isPartial?: boolean;
   }): Promise<void> {
     if (!this.okxDemo || !this.okxSignedRestReady) {
       this.logger.info("okx_close_dispatch_skipped", {
@@ -3598,14 +3606,45 @@ export class PaperEngine {
     const side = input.side === "long" ? "sell" : "buy";
     const posSide = input.side === "long" ? "long" : "short";
     const qty = Math.max(0.001, Math.round((input.sizeUsd / Math.max(1e-9, input.lastPrice)) * 1_000_000) / 1_000_000);
+    const clOrdId = `close-${input.symbol}-${Date.now()}`;
 
-    this.logger.info("V2_EXIT_ORDER_PATH_PROOF", {
+    const closeReason = input.reason;
+    const isStopLoss = input.isStopLoss ?? (closeReason === "stop_loss" || closeReason.includes("stop_loss"));
+    const isTakeProfit = input.isTakeProfit ?? (closeReason === "take_profit" || closeReason.includes("take_profit"));
+    const isTrailingStop = input.isTrailingStop ?? (closeReason === "trailing_stop" || closeReason.includes("trailing_stop") || closeReason.includes("range_profit_trail"));
+
+    if (isStopLoss) {
+      this.logger.info("STOP_LOSS_ORDER_PATH_PROOF", { symbol: input.symbol, side, qty, close_reason: closeReason, flowId: input.flowId, clOrdId });
+    } else if (isTakeProfit) {
+      this.logger.info("TAKE_PROFIT_ORDER_PATH_PROOF", { symbol: input.symbol, side, qty, close_reason: closeReason, flowId: input.flowId, clOrdId });
+    } else if (isTrailingStop) {
+      this.logger.info("TRAILING_STOP_ORDER_PATH_PROOF", { symbol: input.symbol, side, qty, close_reason: closeReason, flowId: input.flowId, clOrdId });
+    } else if (closeReason === "range_profit_trail") {
+      this.logger.info("RANGE_PROFIT_TRAIL_ORDER_PATH_PROOF", { symbol: input.symbol, side, qty, close_reason: closeReason, flowId: input.flowId, clOrdId });
+    } else if (closeReason.includes("regime_exit") || closeReason.includes("regime")) {
+      this.logger.info("REGIME_EXIT_ORDER_PATH_PROOF", { symbol: input.symbol, side, qty, close_reason: closeReason, flowId: input.flowId, clOrdId });
+    } else if (closeReason.includes("trend_break")) {
+      this.logger.info("TREND_BREAK_ORDER_PATH_PROOF", { symbol: input.symbol, side, qty, close_reason: closeReason, flowId: input.flowId, clOrdId });
+    }
+
+    this.logger.info("CLOSE_ORDER_PATH_PROOF", {
       symbol: input.symbol,
       side,
+      close_side_order: side,
       qty,
-      clOrdId: `close-${input.symbol}-${Date.now()}`,
-      traceId: input.flowId,
-      reason: input.reason
+      sizeUsd: input.sizeUsd,
+      lastPrice: input.lastPrice,
+      close_reason: closeReason,
+      close_source: input.closeSource ?? "unknown",
+      authority_owner: input.authorityOwner ?? "unknown",
+      execution_owner: input.executionOwner ?? "paper_engine",
+      is_v2_authority: input.isV2Authority ?? false,
+      is_stop_loss: isStopLoss,
+      is_take_profit: isTakeProfit,
+      is_trailing_stop: isTrailingStop,
+      is_partial: input.isPartial ?? false,
+      flowId: input.flowId,
+      clOrdId
     });
 
     await this.submitOkxOrder({
@@ -3613,7 +3652,7 @@ export class PaperEngine {
       side,
       posSide,
       qty,
-      clOrdId: `close-${input.symbol}-${Date.now()}`,
+      clOrdId,
       traceId: input.flowId,
       reason: input.reason
     });
@@ -4457,10 +4496,29 @@ export class PaperEngine {
 
       if (v2ExitAuthority?.shouldExit === true) {
         v2TakeoverAction = "close";
-        v2TakeoverReason = "v2_exit_authority";
+        // Map V2 exit reason to standard closeReason
+        const rawExitReason = v2ExitAuthority.exitReason ?? "";
+        let mappedCloseReason: string;
+        if (/stop[_\s]?loss/i.test(rawExitReason)) {
+          mappedCloseReason = "stop_loss";
+        } else if (/take[_\s]?profit/i.test(rawExitReason)) {
+          mappedCloseReason = "take_profit";
+        } else if (/trail/i.test(rawExitReason)) {
+          mappedCloseReason = "trailing_stop";
+        } else if (/trend[_\s]?break/i.test(rawExitReason)) {
+          mappedCloseReason = "trend_break_exit";
+        } else if (/regime[_\s]?exit/i.test(rawExitReason)) {
+          mappedCloseReason = "regime_exit";
+        } else if (/range[_\s]?box[_\s]?break/i.test(rawExitReason)) {
+          mappedCloseReason = "range_box_break";
+        } else {
+          mappedCloseReason = "v2_exit_authority";
+        }
+        v2TakeoverReason = mappedCloseReason;
         v2TakeoverDetail = {
           v2_exit_takeover_applied: true,
-          v2_exit_reason: v2ExitAuthority.exitReason,
+          v2_raw_exit_reason: rawExitReason,
+          v2_mapped_close_reason: mappedCloseReason,
           v2_exit_urgency: v2ExitAuthority.exitUrgency
         };
       } else if (v2PartialAuthority?.shouldPartial === true) {
@@ -4638,9 +4696,20 @@ export class PaperEngine {
         this.logger.info("V2_EXIT_EXECUTION_EARLY_TAKEOVER_PROOF", {
           symbol: open.symbol,
           side: open.side,
-          v2_reason: v2TakeoverReason,
+          v2_raw_exit_reason: v2ExitAuthority?.exitReason ?? null,
+          v2_mapped_close_reason: v2TakeoverReason,
           takeover_applied: true,
           path: "early_exit"
+        });
+        // V2_EXIT_REASON_MAPPING_PROOF
+        this.logger.info("V2_EXIT_REASON_MAPPING_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          v2_raw_exit_reason: v2ExitAuthority?.exitReason ?? null,
+          mapped_close_reason: v2TakeoverReason,
+          v2_exit_urgency: v2ExitAuthority?.exitUrgency ?? null,
+          v2_exit_confidence: v2ExitAuthority?.exitConfidence ?? null,
+          close_source: "V2_AUTHORITY"
         });
         const cr = v2TakeoverReason as PaperClosedPositionRecord["closeReason"];
         const metricsV2 = leg(open.sizeUsd);
@@ -4649,13 +4718,23 @@ export class PaperEngine {
         handleV2ExitAuthorityProof("exit", cr);
         handleV2PartialAuthorityProof("superseded_by_exit", null);
         
+        const isStopLossClose = cr === "stop_loss" || String(cr).includes("stop_loss");
+        const isTakeProfitClose = cr === "take_profit" || String(cr).includes("take_profit");
+        const isTrailingClose = cr === "trailing_stop" || String(cr).includes("trail");
         await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
           lastPrice: closePrice,
           flowId,
-          reason: `v2_authority_${cr}`
+          reason: cr,
+          closeSource: "V2_AUTHORITY",
+          authorityOwner: "V2",
+          executionOwner: "paper_engine",
+          isV2Authority: true,
+          isStopLoss: isStopLossClose,
+          isTakeProfit: isTakeProfitClose,
+          isTrailingStop: isTrailingClose
         });
         
         const routedClosed = await this.appendClosedWithStandardRouting({
@@ -5845,8 +5924,11 @@ export class PaperEngine {
           });
       
       // --- V2 AUTHORITY TAKEOVER (Hoisted & Hardened) ---
-      if ((v2TakeoverAction as string) !== "none") {
-        this.logger.info((v2TakeoverAction as string) === "close" ? "V2_EXIT_EXECUTION_BRIDGE_PROOF" : "V2_PARTIAL_EXECUTION_BRIDGE_PROOF", {
+      // V2 EXIT는 위에서 이미 early return했으므로 여기는 partial_close 신호만 남음.
+      // partial_close는 exitEval에 억지로 주입하지 않고 독립 경로로 처리한다.
+      if ((v2TakeoverAction as string) !== "none" && (v2TakeoverAction as string) !== "partial_close") {
+        // V2 EXIT_BRIDGE_PROOF (이 경로는 위 early takeover에서 처리됨, 방어용만 남김)
+        this.logger.info("V2_EXIT_EXECUTION_BRIDGE_PROOF", {
           symbol: open.symbol,
           side: open.side,
           v2_action: v2TakeoverAction,
@@ -5854,15 +5936,96 @@ export class PaperEngine {
           original_action: exitEval.action,
           takeover_applied: true
         });
-        exitEval = {
-          ...exitEval,
-          action: v2TakeoverAction as any,
-          reason: v2TakeoverReason as any,
-          detail: {
-            ...(exitEval.detail ?? {}),
-            ...v2TakeoverDetail
-          }
+      }
+
+      // V2 PARTIAL: 독립 early takeover 경로. exitEval 오염 없이 직접 실행.
+      if ((v2TakeoverAction as string) === "partial_close" && v2PartialAuthority?.shouldPartial === true) {
+        const reduceRatio = v2PartialAuthority.reduceRatio ?? 0.5;
+        const partialSizeUsd = open.sizeUsd * reduceRatio;
+        const MIN_PARTIAL_NOTIONAL = 5; // minimum $5 partial
+        if (partialSizeUsd < MIN_PARTIAL_NOTIONAL) {
+          this.logger.warn("V2_PARTIAL_SIZE_BUILD_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            reduce_ratio: reduceRatio,
+            full_size_usd: open.sizeUsd,
+            partial_size_usd: partialSizeUsd,
+            min_notional: MIN_PARTIAL_NOTIONAL,
+            blocked: true,
+            block_reason: "partial_size_below_min_notional"
+          });
+          remaining.push(open);
+          continue;
+        }
+
+        this.logger.info("V2_PARTIAL_EXECUTION_EARLY_TAKEOVER_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          v2_partial_reason: v2PartialAuthority.partialReason,
+          v2_partial_urgency: v2PartialAuthority.partialUrgency,
+          v2_reduce_ratio: reduceRatio,
+          takeover_applied: true,
+          path: "early_partial"
+        });
+        this.logger.info("V2_PARTIAL_SIZE_BUILD_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          reduce_ratio: reduceRatio,
+          full_size_usd: open.sizeUsd,
+          partial_size_usd: partialSizeUsd,
+          min_notional: MIN_PARTIAL_NOTIONAL,
+          blocked: false
+        });
+
+        const pSide = open.side === "long" ? "sell" : "buy";
+        const pPosSide = open.side;
+        this.logger.info("V2_PARTIAL_ORDER_PATH_PROOF", {
+          symbol: open.symbol,
+          side: pSide,
+          pos_side: pPosSide,
+          partial_size_usd: partialSizeUsd,
+          last_price: closePrice,
+          v2_partial_reason: v2PartialAuthority.partialReason,
+          flowId
+        });
+
+        await this.dispatchOkxClose({
+          symbol: open.symbol,
+          side: open.side,
+          sizeUsd: partialSizeUsd,
+          lastPrice: closePrice,
+          flowId,
+          reason: v2PartialAuthority.partialReason ?? "v2_partial_exit",
+          closeSource: "V2_PARTIAL_AUTHORITY",
+          authorityOwner: "V2",
+          executionOwner: "paper_engine",
+          isV2Authority: true,
+          isPartial: true
+        });
+
+        // Partial position update - reduce size, do NOT prune full position
+        const remainingSizeUsd = Math.max(0, open.sizeUsd - partialSizeUsd);
+        const updatedOpen: typeof open = {
+          ...open,
+          sizeUsd: remainingSizeUsd,
+          partialExitStage: (open.partialExitStage ?? 0) + 1,
+          lastPartialAt: closedAt
         };
+        this.logger.info("V2_PARTIAL_POSITION_UPDATE_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          size_before_usd: open.sizeUsd,
+          partial_size_executed_usd: partialSizeUsd,
+          size_after_usd: remainingSizeUsd,
+          partial_exit_stage_after: updatedOpen.partialExitStage,
+          full_close_prevented: true,
+          open_ledger_pruned: false
+        });
+
+        handleV2PartialAuthorityProof("partial", v2PartialAuthority.partialReason);
+        handleV2ExitAuthorityProof("none", null);
+        remaining.push(updatedOpen);
+        continue;
       }
 
       if (
@@ -7797,10 +7960,74 @@ export class PaperEngine {
           promotion_reason: recheckPromotion.reason
         });
       }
+      // V2 ENTRY REHYDRATION: originalDecision/originalSide/originalStageMarginKrw 기반으로
+      // readiness 재평가로 REJECT로 바뀐 authority를 강제 복원한다.
+      // 절대 우회 불가 블록(KILL_SWITCH 등)이 없을 때만 적용.
+      const NON_BYPASSABLE_HARD_BLOCKS = new Set<string>([
+        "SERVER_TRADE_DISABLED", "CLOSE_ONLY_MODE", "KILL_SWITCH", "RECONCILE_SAFE_MODE",
+        "RISK_MODE_HALT", "DAILY_LOSS_GUARD", "MAX_SLOTS_REACHED", "MIN_ORDER_SIZE_UNDERFLOW",
+        "ORDER_BUILD_FAIL", "RISK_EXPOSURE_CAP_PRE_SUBMIT", "CRASH_ENTRY_GUARD_BLOCK",
+        "SYMBOL_OPPOSITE_POSITION_OPEN", "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN",
+        "AUTHORITY_SIDE_INVALID"
+      ]);
+      const isV2Source = authority.source === "v2" && adoptedEngine === "V2";
+      const hasOriginalEnterIntent =
+        (authority.originalDecision === "ENTER" || authority.decision === "ENTER") &&
+        (authority.originalSide === "long" || authority.originalSide === "short" ||
+         authority.side === "long" || authority.side === "short") &&
+        (authority.originalStageMarginKrw ?? authority.stageMarginKrw ?? 0) > 0;
+      const nonBypassableActive =
+        authority.nonBypassableHardBlockPresent === true ||
+        (authority.hardBlockReason != null && NON_BYPASSABLE_HARD_BLOCKS.has(authority.hardBlockReason));
+      const safetyGatesOk =
+        input.serverTradeEnabled === true &&
+        input.closeOnlyMode === false &&
+        input.killSwitchActive === false &&
+        this.reconcileSafetyCloseOnly === false &&
+        this.paperExecutionReady === true &&
+        this.signedExecutionReady === true;
+
+      let rehydratedDecisionForExecution = authorityDecisionForExecution;
+      let rehydratedSide = authority.side;
+      let rehydratedStageMarginKrw = authority.stageMarginKrw ?? 0;
+      let rehydrationApplied = false;
+      let bypassed_reason: string | null = null;
+
+      if (isV2Source && hasOriginalEnterIntent && !nonBypassableActive && safetyGatesOk &&
+          authorityDecisionForExecution !== "ENTER") {
+        bypassed_reason = authority.hardBlockReason ?? "readiness_barrier_overrode_v2_enter";
+        rehydratedDecisionForExecution = "ENTER";
+        rehydratedSide = (authority.originalSide ?? authority.side) as "long" | "short";
+        rehydratedStageMarginKrw = authority.originalStageMarginKrw ?? authority.stageMarginKrw ?? 0;
+        rehydrationApplied = true;
+      }
+
+      if (isV2Source && hasOriginalEnterIntent) {
+        this.logger.info("V2_ENTRY_AUTHORITY_REHYDRATED_PROOF", {
+          symbol: first.symbol,
+          original_decision: authority.originalDecision ?? authority.decision,
+          original_side: authority.originalSide ?? authority.side,
+          original_stage_margin_krw: authority.originalStageMarginKrw ?? authority.stageMarginKrw ?? 0,
+          decision_before: authorityDecisionForExecution,
+          side_before: authority.side,
+          stage_margin_before: authority.stageMarginKrw ?? 0,
+          decision_after: rehydratedDecisionForExecution,
+          side_after: rehydratedSide,
+          stage_margin_after: rehydratedStageMarginKrw,
+          bypassed_reason,
+          non_bypassable_hard_block_present: nonBypassableActive,
+          final_blocked_reason: rehydratedDecisionForExecution === "ENTER" ? null : (authority.hardBlockReason ?? null),
+          rehydration_applied: rehydrationApplied
+        });
+      }
+
+      const effectiveAuthorityDecision = rehydratedDecisionForExecution;
+      const effectiveSideForExecution = rehydrationApplied ? rehydratedSide : (authority.side as "long" | "short");
+
       const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(
-        authority,
+        { ...authority, decision: effectiveAuthorityDecision as typeof authority.decision, side: effectiveSideForExecution },
         res.adaptiveResult,
-        authorityDecisionForExecution === "ENTER" && authority.decision !== "ENTER"
+        effectiveAuthorityDecision === "ENTER" && authority.decision !== "ENTER"
       );
 
       if (effectiveAdaptiveResult == null) continue;

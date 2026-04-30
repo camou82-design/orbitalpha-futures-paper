@@ -1330,9 +1330,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     blockReason = v2RejectReasonAfterPromotion;
     const decisionAfterReadiness: EngineV2FinalDecision = finalDecision;
 
-    (riskSizing.diagnostics as any).original_v2_decision = decisionBeforeReadiness;
-    (riskSizing.diagnostics as any).original_v2_side = execution.side;
-    (riskSizing.diagnostics as any).original_stage_margin_krw = execution.baseSizeIntent * 1400;
+    if (!riskSizing.diagnostics) {
+        (riskSizing as { diagnostics?: import("./types").RiskSizingDiagnostics }).diagnostics = {};
+    }
+    riskSizing.diagnostics!.original_v2_decision = decisionBeforeReadiness;
+    riskSizing.diagnostics!.original_v2_side = execution.side != null ? String(execution.side) : undefined;
+    riskSizing.diagnostics!.original_stage_margin_krw = execution.baseSizeIntent * 1400;
 
     // 수정 3. stage margin 0 방지 및 프로브 마진 보장
     let stageMarginKrwAfter = riskSizing.stageMarginKrw;
