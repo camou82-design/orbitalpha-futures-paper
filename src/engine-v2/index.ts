@@ -768,12 +768,57 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     if (hardControlClear) {
         if (shockReactionWatchActive) {
-            shockReactionBlockReason = "SHOCK_REACTION_WATCH_MID_CHASE_BLOCKED";
-            if (promotionBlockReason == null) promotionBlockReason = shockReactionBlockReason;
-            if (v2DecisionAfterPromotion === "ENTER" || v2DecisionAfterPromotion === "SKIP") {
-                v2DecisionAfterPromotion = "HOLD";
+            const shockUpMidMomentumConfirmed =
+                shock === "UP" &&
+                trendSideCandidate === "long" &&
+                riskLongAllow === true &&
+                allowNewLong === true &&
+                emaGap > 0 &&
+                qualityScore >= 70 &&
+                trendWeaknessScore < 0.65 &&
+                !pumpStateResolved.includes("ULTRA") &&
+                !pumpStateResolved.includes("CRITICAL") &&
+                hardBlockPresent === false;
+
+            const shockDownMidMomentumConfirmed =
+                shock === "DOWN" &&
+                trendSideCandidate === "short" &&
+                riskShortAllow === true &&
+                allowNewShort === true &&
+                emaGap < 0 &&
+                qualityScore >= 70 &&
+                trendWeaknessScore < 0.65 &&
+                !crashState.includes("ULTRA") &&
+                !crashState.includes("CRITICAL") &&
+                hardBlockPresent === false;
+
+            if (shockUpMidMomentumConfirmed) {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = "long";
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = "SHOCK_REACTION_UP_MID_MOMENTUM_CONFIRMED";
+                shockReactionPromotionType = "MID_MOMENTUM_CONFIRMED";
+                shockReactionBlockReason = null;
+                promotionBlockReason = null;
+            } else if (shockDownMidMomentumConfirmed) {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = "short";
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = "SHOCK_REACTION_DOWN_MID_MOMENTUM_CONFIRMED";
+                shockReactionPromotionType = "MID_MOMENTUM_CONFIRMED";
+                shockReactionBlockReason = null;
+                promotionBlockReason = null;
+            } else {
+                shockReactionBlockReason = "SHOCK_REACTION_WATCH_MID_CHASE_BLOCKED";
+                if (promotionBlockReason == null) promotionBlockReason = shockReactionBlockReason;
+                if (v2DecisionAfterPromotion === "ENTER" || v2DecisionAfterPromotion === "SKIP") {
+                    v2DecisionAfterPromotion = "HOLD";
+                }
+                v2RejectReasonAfterPromotion = "WAIT_RECHECK";
             }
-            v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+
             console.info(JSON.stringify({
                 event: "SHOCK_REACTION_WATCH_PROOF",
                 symbol: String(input.symbol),
@@ -788,8 +833,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 side_after: v2SideAfterPromotion,
                 decision_before: v2DecisionBeforePromotion,
                 decision_after: v2DecisionAfterPromotion,
-                promotion_applied: false,
-                promotion_type: null,
+                promotion_applied: promotionApplied,
+                promotion_type: shockReactionPromotionType,
                 promotion_block_reason: promotionBlockReason,
                 reversal_confirmed: reversalConfirmed,
                 relaxedRangeEntry,
@@ -798,15 +843,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 hard_block_present: hardBlockPresent,
                 hard_block_reason: hardBlockReason,
                 shock_reaction_watch_active: shockReactionWatchActive,
-                shock_reaction_reason: "range_mid_requires_reaction_watch",
+                shock_reaction_reason: promotionApplied ? promotionReason : "range_mid_requires_reaction_watch",
                 shock_edge_setup_active_reason: shockEdgeSetupActiveReason.length > 0 ? shockEdgeSetupActiveReason.join("|") : null,
                 shock_reaction_allowed_primary_side: shockReactionAllowedPrimarySide,
-                shock_reaction_blocked_chase_reason: "mid_chase_forbidden",
+                shock_reaction_blocked_chase_reason: promotionApplied ? null : "mid_chase_forbidden",
                 shock_reaction_next_valid_setups:
                     shockReactionDirection === "DOWN"
                         ? "upper_failure_short|lower_breakdown_short|lower_reversal_confirmed_long"
                         : "lower_support_long|upper_breakout_long|upper_reversal_confirmed_short",
-                shock_reaction_promotion_type: null
+                shock_reaction_promotion_type: shockReactionPromotionType
             }));
             console.info(JSON.stringify({
                 event: "SHOCK_REACTION_BLOCKED_MID_CHASE_PROOF",
