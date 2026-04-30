@@ -54,9 +54,30 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
             reason = "TRANSITION_SHOCK_DOWN_SHORT_NOT_ALLOWED";
             transitionRejectReason = "SHORT_NOT_ALLOWED";
         } else if (isMidZone) {
-            signal = "WAIT_RECHECK";
-            reason = "TRANSITION_SHOCK_DOWN_MID_CHASE_FORBIDDEN";
-            transitionRejectReason = "MID_CHASE_FORBIDDEN";
+            const downMomentumConfirmed =
+                shortAllow &&
+                emaGap < 0 &&
+                qualityScore >= 70 &&
+                trendWeaknessScore < 0.65 &&
+                !crashState.includes("ULTRA") && !crashState.includes("CRITICAL");
+
+            if (downMomentumConfirmed) {
+                signal = "SHORT_CANDIDATE";
+                side = "short";
+                reason = "TRANSITION_SHOCK_DOWN_MID_MOMENTUM_CONFIRMED";
+                baseSizeIntent = 0.25;
+                recheckSuggested = false;
+                transitionAction = "CONFIRM";
+                transitionWatchOnly = false;
+                transitionConfirmRequired = false;
+                transitionRejectReason = null;
+                transitionConfirmBasis = "ema_gap_only";
+                transitionPreflightSafetyPassed = true;
+            } else {
+                signal = "WAIT_RECHECK";
+                reason = "TRANSITION_SHOCK_DOWN_MID_CHASE_FORBIDDEN";
+                transitionRejectReason = "MID_CHASE_FORBIDDEN";
+            }
         } else {
             const boxBreakConfirm = boxBreakSide === "lower" && qualityScore >= 65;
             const emaGapOnlyCandidate = boxBreakSide !== "lower" && emaGap < 0 && qualityScore >= 65;
@@ -99,9 +120,30 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
             reason = "TRANSITION_SHOCK_UP_LONG_NOT_ALLOWED";
             transitionRejectReason = "LONG_NOT_ALLOWED";
         } else if (isMidZone) {
-            signal = "WAIT_RECHECK";
-            reason = "TRANSITION_SHOCK_UP_MID_CHASE_FORBIDDEN";
-            transitionRejectReason = "MID_CHASE_FORBIDDEN";
+            const upMomentumConfirmed =
+                longAllow &&
+                emaGap > 0 &&
+                qualityScore >= 70 &&
+                trendWeaknessScore < 0.65 &&
+                !pumpState.includes("ULTRA") && !pumpState.includes("CRITICAL");
+
+            if (upMomentumConfirmed) {
+                signal = "LONG_CANDIDATE";
+                side = "long";
+                reason = "TRANSITION_SHOCK_UP_MID_MOMENTUM_CONFIRMED";
+                baseSizeIntent = 0.25;
+                recheckSuggested = false;
+                transitionAction = "CONFIRM";
+                transitionWatchOnly = false;
+                transitionConfirmRequired = false;
+                transitionRejectReason = null;
+                transitionConfirmBasis = "ema_gap_only";
+                transitionPreflightSafetyPassed = true;
+            } else {
+                signal = "WAIT_RECHECK";
+                reason = "TRANSITION_SHOCK_UP_MID_CHASE_FORBIDDEN";
+                transitionRejectReason = "MID_CHASE_FORBIDDEN";
+            }
         } else {
             const boxBreakConfirm = boxBreakSide === "upper" && qualityScore >= 65;
             const emaGapOnlyCandidate = boxBreakSide !== "upper" && emaGap > 0 && qualityScore >= 65;
