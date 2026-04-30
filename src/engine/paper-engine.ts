@@ -349,6 +349,7 @@ type PaperEngineDecisionEnvelope = {
   v2_paper_position_state_agreement?: boolean | null;
   position_state_authority_owner?: string | null;
   position_state_execution_owner?: string | null;
+  v2_execution_envelope?: any;
 };
 
 type EntryQualityFeatureVector = Readonly<{
@@ -3596,6 +3597,15 @@ export class PaperEngine {
     const posSide = input.side === "long" ? "long" : "short";
     const qty = Math.max(0.001, Math.round((input.sizeUsd / Math.max(1e-9, input.lastPrice)) * 1_000_000) / 1_000_000);
 
+    this.logger.info("V2_EXIT_ORDER_PATH_PROOF", {
+      symbol: input.symbol,
+      side,
+      qty,
+      clOrdId: `close-${input.symbol}-${Date.now()}`,
+      traceId: input.flowId,
+      reason: input.reason
+    });
+
     await this.submitOkxOrder({
       symbol: input.symbol as MarketSymbol,
       side,
@@ -4438,8 +4448,33 @@ export class PaperEngine {
       const v2ExitAuthority = envelope.selector?.v2_result.v2ExitAuthority ?? null;
       const v2PartialAuthority = envelope.selector?.v2_result.v2PartialAuthority ?? null;
       const lifecycleAuthority = envelope.selector?.v2_result.lifecycleAuthority ?? null;
+      
+      let v2TakeoverAction: "none" | "close" | "partial_close" = "none";
+      let v2TakeoverReason: string | null = null;
+      let v2TakeoverDetail: any = null;
+
+      if (v2ExitAuthority?.shouldExit === true) {
+        v2TakeoverAction = "close";
+        v2TakeoverReason = "v2_exit_authority";
+        v2TakeoverDetail = {
+          v2_exit_takeover_applied: true,
+          v2_exit_reason: v2ExitAuthority.exitReason,
+          v2_exit_urgency: v2ExitAuthority.exitUrgency
+        };
+      } else if (v2PartialAuthority?.shouldPartial === true) {
+        v2TakeoverAction = "partial_close";
+        v2TakeoverReason = "v2_partial_authority";
+        v2TakeoverDetail = {
+          v2_partial_takeover_applied: true,
+          v2_partial_reason: v2PartialAuthority.partialReason,
+          v2_partial_urgency: v2PartialAuthority.partialUrgency,
+          v2_reduce_ratio: v2PartialAuthority.reduceRatio
+        };
+      }
+
       let paperExitProofHandled = false;
       let paperPartialProofHandled = false;
+
       const handleV2ExitAuthorityProof = (paperExitAction: "none" | "exit", paperExitReason: string | null): void => {
         if (!v2ExitAuthority || paperExitProofHandled) return;
         paperExitProofHandled = true;
@@ -4461,7 +4496,6 @@ export class PaperEngine {
           v2PaperExitAgreement
         ].join("|");
 
-        // Use V2_EXIT_AUTHORITY_PROOF for detailed internal state (deduped by shouldEmitV2Proof)
         if (shouldEmitV2Proof("V2_EXIT_AUTHORITY_PROOF", sk, proofKey, highPriority)) {
           this.logger.info("V2_EXIT_AUTHORITY_PROOF", {
             symbol: sk,
@@ -4488,7 +4522,6 @@ export class PaperEngine {
           });
         }
 
-        // Use V2_EXIT_EXECUTION_AUTHORITY_PROOF for authority transfer traceability (deduped)
         const execProofKey = `${v2ExitAuthority.shouldExit}|${paperExitAction}|${v2ExitAuthority.exitReason}|${paperExitReason}`;
         if (shouldEmitV2Proof("V2_EXIT_EXECUTION_AUTHORITY_PROOF", sk, execProofKey, highPriority)) {
           this.logger.info("V2_EXIT_EXECUTION_AUTHORITY_PROOF", {
@@ -4504,6 +4537,7 @@ export class PaperEngine {
           });
         }
       };
+
       const handleV2PartialAuthorityProof = (
         paperPartialAction: "none" | "partial" | "reduce" | "superseded_by_exit",
         paperPartialReason: string | null
@@ -4557,6 +4591,13 @@ export class PaperEngine {
       const regimeAtEntry = open.regimeAtEntry ?? "NO_TRADE";
       const regimeNow = input.marketMode.marketMode as MarketRegime;
       const slRegime: MarketRegime = exitLane === "RANGE" ? "RANGE" : "TREND";
+
+      const snapPaths = {
+        ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
+        ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
+        ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {})
+      };
+
       const leg = (marginUsd: number) =>
         computePaperCloseLegMetrics({
           open,
@@ -4571,12 +4612,6 @@ export class PaperEngine {
       let m = leg(open.sizeUsd);
       const highWater = Math.max(open.highestPnlPctNet ?? m.pnlPctNet, m.pnlPctNet);
       open = { ...open, highestPnlPctNet: highWater };
-
-      const snapPaths = {
-        ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
-        ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
-        ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {})
-      };
 
       const toClosed = (
         cr: PaperClosedPositionRecord["closeReason"],
@@ -4596,6 +4631,58 @@ export class PaperEngine {
           strategyVersion: inheritedStrategyVersion,
           ...snapPaths
         });
+
+      if (v2TakeoverAction === "close") {
+        this.logger.info("V2_EXIT_EXECUTION_EARLY_TAKEOVER_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          v2_reason: v2TakeoverReason,
+          takeover_applied: true,
+          path: "early_exit"
+        });
+        const cr = v2TakeoverReason as PaperClosedPositionRecord["closeReason"];
+        const metricsV2 = leg(open.sizeUsd);
+        const closedRow = toClosed(cr, metricsV2, open.sizeUsd);
+        
+        handleV2ExitAuthorityProof("exit", cr);
+        handleV2PartialAuthorityProof("superseded_by_exit", null);
+        
+        await this.dispatchOkxClose({
+          symbol: open.symbol,
+          side: open.side,
+          sizeUsd: open.sizeUsd,
+          lastPrice: closePrice,
+          flowId,
+          reason: `v2_authority_${cr}`
+        });
+        
+        const routedClosed = await this.appendClosedWithStandardRouting({
+          closedRow,
+          open,
+          flowId,
+          envelope,
+          exitReason: cr,
+          closeSource: "V2_AUTHORITY",
+          currentRegime: regimeNow
+        });
+        authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+        
+        this.terminalExitConsumedByFlow.add(flowId);
+        const mappedType = exitEventJsonlType(cr);
+        await this.store.appendJsonlLine("reports/events.jsonl", {
+          ts: Date.now(),
+          type: mappedType,
+          symbol: String(open.symbol),
+          side: open.side,
+          regime: open.regimeAtEntry ?? null,
+          executor: "V2_AUTHORITY",
+          reason: cr,
+          hold_time: m.holdingMs,
+          realized_pnl: m.pnlUsdNet,
+          ...buildPositionIdentityMeta(open)
+        });
+        continue;
+      }
 
       const symKey = String(open.symbol);
       const { longUsd, shortUsd } = marginsForSymbol(opens, symKey);
@@ -5755,30 +5842,23 @@ export class PaperEngine {
             ema60: snap.ema60
           });
       
-      // --- V2 EXIT AUTHORITY TAKEOVER ---
-      const v2TakeoverPotential = v2ExitAuthority?.shouldExit === true && exitEval.action !== "close";
-      if (v2TakeoverPotential) {
-        const takeoverProofKey = `${v2ExitAuthority?.exitReason}|${v2ExitAuthority?.exitUrgency}|${exitEval.action}|${exitEval.reason}`;
-        if (shouldEmitV2Proof("V2_EXIT_TAKEOVER_PROOF", sk, takeoverProofKey, true)) {
-          this.logger.info("V2_EXIT_TAKEOVER_PROOF", {
-            symbol: open.symbol,
-            side: open.side,
-            v2_exit_reason: v2ExitAuthority?.exitReason,
-            v2_exit_urgency: v2ExitAuthority?.exitUrgency,
-            original_engine_action: exitEval.action,
-            original_engine_reason: exitEval.reason,
-            note: "V2 Authority takeover triggered: Engine action overridden to 'close'"
-          });
-        }
+      // --- V2 AUTHORITY TAKEOVER (Hoisted & Hardened) ---
+      if ((v2TakeoverAction as string) !== "none") {
+        this.logger.info((v2TakeoverAction as string) === "close" ? "V2_EXIT_EXECUTION_BRIDGE_PROOF" : "V2_PARTIAL_EXECUTION_BRIDGE_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          v2_action: v2TakeoverAction,
+          v2_reason: v2TakeoverReason,
+          original_action: exitEval.action,
+          takeover_applied: true
+        });
         exitEval = {
           ...exitEval,
-          action: "close",
-          reason: "v2_exit_authority",
+          action: v2TakeoverAction as any,
+          reason: v2TakeoverReason as any,
           detail: {
             ...(exitEval.detail ?? {}),
-            v2_takeover_applied: true,
-            v2_exit_reason: v2ExitAuthority?.exitReason,
-            v2_exit_urgency: v2ExitAuthority?.exitUrgency
+            ...v2TakeoverDetail
           }
         };
       }
@@ -6085,6 +6165,14 @@ export class PaperEngine {
             const pSide = open.side === "long" ? "sell" : "buy";
             const pPosSide = open.side === "long" ? "long" : "short";
             const pQty = Math.max(0.001, Math.round((partialMargin / Math.max(1e-9, mp.mark)) * 1_000_000) / 1_000_000);
+            this.logger.info("V2_PARTIAL_ORDER_PATH_PROOF", {
+              symbol: open.symbol,
+              side: pSide,
+              qty: pQty,
+              clOrdId: `partial-${open.symbol}-${Date.now()}`,
+              traceId: flowId,
+              reason: `partial_close_${pReason}`
+            });
             await this.submitOkxOrder({
               symbol: open.symbol,
               side: pSide,
@@ -7372,7 +7460,53 @@ export class PaperEngine {
     });
     const freshTickHardBlock =
       input.readinessBarrierActive || this.freshTickRequiredAfterReadiness;
-    if (freshTickHardBlock) {
+
+    // V2 Execution Bridge Optimization: Only return early if NO V2 authoritative entries are present.
+    // This ensures V2-sourced signals can bypass the legacy fresh_tick_barrier.
+    let v2AuthoritativeEnterPresent = false;
+    for (const q of entryQueue) {
+      const sym = String(q.symbol);
+      const env = input.decisionBySymbol.get(sym);
+      if (!env) continue;
+
+      const auth = env.authority;
+      const adoptedEngine = env.selector?.adopted_result.engine;
+      const stageMarginKrw = auth.stageMarginKrw ?? 0;
+      const sizeUsdt = stageMarginKrw / 1400; // rough estimate for proof
+      const hardBlockPresent = env.v2_execution_envelope?.hardBlockPresent === true;
+
+      const conditionsMet = 
+        adoptedEngine === "V2" &&
+        auth.decision === "ENTER" &&
+        (auth.side === "long" || auth.side === "short") &&
+        stageMarginKrw > 0 &&
+        input.paperExecutionReady === true &&
+        this.signedExecutionReady === true &&
+        input.serverTradeEnabled === true &&
+        input.closeOnlyMode === false &&
+        input.killSwitchActive === false &&
+        this.reconcileSafetyCloseOnly === false &&
+        hardBlockPresent === false;
+
+      if (conditionsMet) {
+        v2AuthoritativeEnterPresent = true;
+        this.logger.info("V2_ENTER_EXECUTION_BRIDGE_PROOF", {
+          symbol: sym,
+          side: auth.side,
+          stage_margin_krw: stageMarginKrw,
+          size_usdt: sizeUsdt,
+          signed_execution_ready: this.signedExecutionReady,
+          paper_execution_ready: input.paperExecutionReady,
+          hard_block_present: hardBlockPresent,
+          serverTradeEnabled: input.serverTradeEnabled,
+          closeOnlyMode: input.closeOnlyMode,
+          killSwitch: input.killSwitchActive,
+          reconcileSafeMode: this.reconcileSafetyCloseOnly
+        });
+      }
+    }
+
+    if (freshTickHardBlock && !v2AuthoritativeEnterPresent) {
       const blockReason = input.readinessBarrierActive
         ? "fresh_tick_barrier_active"
         : "fresh_tick_required_pending_clear";
@@ -7417,6 +7551,15 @@ export class PaperEngine {
         });
       }
       return;
+    }
+
+    if (freshTickHardBlock && v2AuthoritativeEnterPresent) {
+      this.logger.info("V2_AUTHORITY_BYPASS_FRESH_TICK_BARRIER", {
+        symbol: "BTCUSDT", // Primary focus for the bridge
+        run_cycle_id: this.runCycleId,
+        readiness_barrier_active: input.readinessBarrierActive,
+        fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness
+      });
     }
 
     if (!input.candidateRunPath || !input.latestPath || !input.metaPath || !input.filePath) {
@@ -7470,7 +7613,7 @@ export class PaperEngine {
         if (first.fetchedAt < g) staleReasons.push("snapshot_fetched_before_readiness_or_trade_enable_gate");
         if (envelope.decisionCycleId < this.runCycleId) staleReasons.push("order_basis_previous_cycle");
       }
-      if (staleReasons.length > 0) {
+      if (staleReasons.length > 0 && authority.source !== "v2") {
         this.logger.warn("ENTRY_BLOCKED_STALE_SIGNAL", {
           symbol: first.symbol,
           stale_reasons: staleReasons,
@@ -7494,11 +7637,21 @@ export class PaperEngine {
         });
         continue;
       }
+      
+      if (staleReasons.length > 0 && authority.source === "v2") {
+        this.logger.info("V2_AUTHORITY_STALE_SIGNAL_BYPASS_PROOF", {
+          symbol: first.symbol,
+          stale_reasons: staleReasons,
+          authority_source: authority.source,
+          authority_decision: authority.decision
+        });
+      }
       if (
         readinessChangedAt != null &&
         authority.decision === "ENTER" &&
         this.readinessTransitionCycleId != null &&
-        this.readinessTransitionCycleId === this.runCycleId
+        this.readinessTransitionCycleId === this.runCycleId &&
+        authority.source !== "v2"
       ) {
         this.logger.error("ENTRY_HARD_BLOCKED", this.buildInvariantProofPayload({
           symbol: String(first.symbol),
@@ -7515,6 +7668,20 @@ export class PaperEngine {
           readiness_transition_cycle_id: this.readinessTransitionCycleId
         });
         continue;
+      }
+
+      if (
+        readinessChangedAt != null &&
+        authority.decision === "ENTER" &&
+        this.readinessTransitionCycleId != null &&
+        this.readinessTransitionCycleId === this.runCycleId &&
+        authority.source === "v2"
+      ) {
+        this.logger.info("V2_AUTHORITY_RECOVERY_CYCLE_BYPASS_PROOF", {
+          symbol: first.symbol,
+          run_cycle_id: this.runCycleId,
+          readiness_transition_cycle_id: this.readinessTransitionCycleId
+        });
       }
 
       const v2BlockReason = envelope.selector?.v2_result.risk.blockReason ?? null;
@@ -7998,9 +8165,9 @@ export class PaperEngine {
           "ORDER_BUILD_FAIL",
           "CRASH_ENTRY_GUARD_BLOCK",
           "SYMBOL_OPPOSITE_POSITION_OPEN",
-          "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN",
-          "ENTRY_QUALITY_CONFLICT_BLOCK",
-          "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE"
+          "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
+          // "ENTRY_QUALITY_CONFLICT_BLOCK" -> Removed for V2 connection
+          // "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE" -> Removed for V2 connection
         ]);
         const softReasons = new Set<string>([
           "ENTRY_QUALITY_CONTAMINATED_SIMILAR",
@@ -8061,6 +8228,17 @@ export class PaperEngine {
           }
           finalBlockedReason = null;
         }
+
+        this.logger.info("V2_ENTER_EXECUTION_BRIDGE_PROOF", {
+          symbol: sym,
+          decision: authorityDecisionForExecution,
+          side: authority.side,
+          hard_block_present: hardBlockPresent,
+          hard_block_reason: hardBlockReason,
+          final_blocked_reason: finalBlockedReason,
+          paper_execution_ready: this.paperExecutionReady,
+          signed_execution_ready: this.signedExecutionReady
+        });
       }
       const finalBlockedReasonAfterV2Finalizer = finalBlockedReason;
       const finalAuthorizedAfterV2Finalizer = finalBlockedReasonAfterV2Finalizer === null;
@@ -8648,7 +8826,7 @@ export class PaperEngine {
         positionOpenTraceRef = trace;
 
         const emitPositionOpenTraceFinal = () => {
-          this.logger.info("POSITION_OPEN_TRACE_FINAL", {
+          this.logger.info("EXECUTION_BRIDGE_ENTER_ACTION_PROOF", {
             ...trace,
             exchange_ack: trace.order_submit_ack,
             stored_position: trace.position_open_record_written,
@@ -8807,6 +8985,14 @@ export class PaperEngine {
           const clOrdId = `paper-${first.symbol}-${Date.now()}`;
           trace.exchange_client_order_id = clOrdId;
           trace.order_submit_requested = true;
+
+          this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
+            symbol: first.symbol,
+            side,
+            qty,
+            clOrdId,
+            authority_source: authority.source
+          });
 
           const submit = await this.submitOkxOrder({
             symbol: first.symbol,

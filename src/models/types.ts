@@ -1244,7 +1244,8 @@ export type PaperClosedPositionRecord = Readonly<{
   | "EXIT_SHORT_MOMENTUM_TRAIL"
   | "EXIT_CRASH_FORCE"
   | "EXIT_CRASH_REDUCE"
-  | "v2_exit_authority";
+  | "v2_exit_authority"
+  | "v2_partial_authority";
   /** 표준 종료 유형 (내부 코드). */
   exitType: PaperExitType;
   /** 사용자·리포트용 종료 사유 문구. */
