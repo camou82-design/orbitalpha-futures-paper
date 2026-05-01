@@ -1123,24 +1123,21 @@ export class PaperEngine {
     this.reconcileLastCheckedAt = nowTs;
     if (!this.okxDemo || !this.signedExecutionReady) return;
 
-    const localOpen = await this.positions.loadOpenAll();
-    const remote = await this.okxDemo.getPositions("SWAP");
-    
-    if (!remote.ok) {
+    const rawOpens = await this.positions.loadOpenAll();
+    const okxPosRes = await this.okxDemo.getPositions("SWAP");
+    if (!okxPosRes.ok) {
       this.reconcileSafetyCloseOnly = true;
-      this.reconcileLastMismatchReason = `remote_positions_unavailable:${remote.error}`;
-      this.logger.error("POSITION_RECONCILE_MISMATCH_SAFE_MODE", {
-        reason: this.reconcileLastMismatchReason,
-        authority_source: "server_state_reconcile"
-      });
+      this.reconcileLastMismatchReason = `remote_positions_unavailable:${okxPosRes.error}`;
+      this.logger.error("POSITION_RECONCILE_MISMATCH_SAFE_MODE", { error: okxPosRes.error });
       return;
     }
 
+    const okxPositions = okxPosRes.value;
     const remoteMap = new Map<string, { size: number; instId: string; posSide: string }>();
-    for (const row of remote.value) {
-      const inst = String((row as { instId?: unknown }).instId ?? "");
-      const posSideRaw = String((row as { posSide?: unknown }).posSide ?? "").toLowerCase();
-      const posRaw = (row as { pos?: unknown }).pos;
+    for (const row of okxPositions) {
+      const inst = String((row as any).instId ?? "");
+      const posSideRaw = String((row as any).posSide ?? "").toLowerCase();
+      const posRaw = (row as any).pos;
       const sizeNum = typeof posRaw === "number" ? posRaw : typeof posRaw === "string" ? Number(posRaw) : NaN;
       if (!Number.isFinite(sizeNum) || Math.abs(sizeNum) <= 0) continue;
       
@@ -1149,70 +1146,118 @@ export class PaperEngine {
       remoteMap.set(`${symbol}:${side}`, { size: sizeNum, instId: inst, posSide: posSideRaw });
     }
 
+    const next: PaperOpenPositionRecord[] = [];
+    let ledgerModified = false;
     let mismatchCount = 0;
-    const updatedLocal = [...localOpen];
     const RECONCILE_GRACE_PERIOD_MS = 30_000;
 
-    for (let i = 0; i < updatedLocal.length; i++) {
-      const pos = updatedLocal[i];
-      const key = `${pos.symbol}:${pos.side}`;
-      const remotePos = remoteMap.get(key);
-      const isNew = nowTs - pos.openedAt < RECONCILE_GRACE_PERIOD_MS;
-      const isPending = pos.lifecycleState === "PENDING_EXCHANGE_CONFIRM";
-
-      let reconcileState: PaperOpenPositionRecord["reconcileState"] = "MATCHED";
+    for (const open of rawOpens) {
+      const isNew = nowTs - open.openedAt < RECONCILE_GRACE_PERIOD_MS;
+      const isPending = open.lifecycleState === "PENDING_EXCHANGE_CONFIRM";
+      const isClosePending = open.lifecycleState === "CLOSE_PENDING";
+      const isPartialPending = open.lifecycleState === "PARTIAL_PENDING";
       
-      if (remotePos) {
-        // Matched
-        if (isPending) {
-          this.logger.info("POSITION_OPEN_RECONCILE_PROOF", {
-            symbol: pos.symbol,
-            side: pos.side,
-            ord_id: pos.exchangeOrdId,
-            status: "CONFIRMED_VIA_POSITION",
-            prev_lifecycle: pos.lifecycleState,
-            now_lifecycle: "OPEN"
-          });
-          updatedLocal[i] = { ...pos, lifecycleState: "OPEN", reconcileState: "MATCHED", lastCheckedAt: nowTs };
-        } else {
-          updatedLocal[i] = { ...pos, reconcileState: "MATCHED", lastCheckedAt: nowTs };
-        }
-      } else {
-        // Mismatch: Local has it, Remote doesn't
-        if (isNew || isPending) {
-          reconcileState = "PENDING";
-          updatedLocal[i] = { ...pos, reconcileState: "PENDING", lastCheckedAt: nowTs };
-        } else {
-          reconcileState = "FAILED";
+      const key = `${open.symbol}:${open.side}`;
+      const remotePos = remoteMap.get(key);
+
+      // 1. Handle Entry Pending States
+      if (isPending || open.lifecycleState === "INITIAL" || open.lifecycleState === undefined) {
+        if (remotePos) {
+          open.lifecycleState = "OPEN";
+          open.reconcileState = "MATCHED";
+          open.lastCheckedAt = nowTs;
+          ledgerModified = true;
+          this.logger.info("POSITION_OPEN_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, status: "confirmed" });
+        } else if (!isNew) {
+          open.lifecycleState = "FAILED";
+          open.reconcileState = "FAILED";
+          open.lastCheckedAt = nowTs;
+          ledgerModified = true;
           mismatchCount++;
-          updatedLocal[i] = { ...pos, reconcileState: "FAILED", lastCheckedAt: nowTs };
-          
           this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
-            symbol: pos.symbol,
-            side: pos.side,
-            opened_at: pos.openedAt,
-            elapsed_ms: nowTs - pos.openedAt,
-            exchange_ord_id: pos.exchangeOrdId,
-            reason: "position_missing_on_exchange",
-            lifecycle_state: pos.lifecycleState
+            symbol: open.symbol,
+            side: open.side,
+            detail: "PENDING_TIMEOUT_NO_EXCHANGE_POSITION",
+            action: "MARK_FAILED"
           });
+          continue; 
+        } else {
+          open.lifecycleState = "PENDING_EXCHANGE_CONFIRM";
+          open.reconcileState = "PENDING";
+          open.lastCheckedAt = nowTs;
+          next.push(open);
+          continue;
         }
       }
+
+      // 2. Handle Exit/Partial Pending States
+      if (isClosePending || isPartialPending) {
+        const ordId = isClosePending ? open.closePendingOrdId : open.partialPendingOrdId;
+        const clOrdId = isClosePending ? open.closePendingClOrdId : open.partialPendingClOrdId;
+
+        if (ordId || clOrdId) {
+          const ordRes = await this.okxDemo.getOrder(toOkxSwapInstId(open.symbol), ordId, clOrdId);
+          if (ordRes.ok && ordRes.value.length > 0) {
+            const ord = (ordRes.value[0] as any);
+            if (ord.state === "filled") {
+              if (isClosePending) {
+                this.logger.info("V2_CLOSE_PENDING_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, ordId, state: "filled" });
+                ledgerModified = true;
+                continue; 
+              } else {
+                this.logger.info("V2_PARTIAL_PENDING_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, ordId, state: "filled" });
+                open.lifecycleState = "OPEN";
+                open.sizeUsd -= open.partialPendingSizeUsd ?? 0;
+                open.partialPendingOrdId = undefined;
+                open.partialPendingSizeUsd = undefined;
+                ledgerModified = true;
+              }
+            } else if (ord.state === "canceled" || ord.state === "rejected") {
+              this.logger.warn("V2_PENDING_ORDER_FAILED_PROOF", { symbol: open.symbol, side: open.side, ordId, state: ord.state });
+              open.lifecycleState = "OPEN";
+              open.closePendingOrdId = undefined;
+              open.partialPendingOrdId = undefined;
+              ledgerModified = true;
+            } else {
+              next.push(open);
+              continue;
+            }
+          } else {
+             next.push(open);
+             continue;
+          }
+        }
+      }
+
+      // 3. Regular Open Position Reconciliation
+      if (open.lifecycleState === "OPEN") {
+        if (!remotePos) {
+          this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            detail: "OPEN_LEDGER_MISSING_ON_EXCHANGE"
+          });
+          open.lifecycleState = "FAILED";
+          open.reconcileState = "FAILED";
+          mismatchCount++;
+          ledgerModified = true;
+          continue; 
+        }
+        open.reconcileState = "MATCHED";
+        open.lastCheckedAt = nowTs;
+      }
+
+      next.push(open);
     }
 
-    // Check for Remote positions not in Local
+    // 4. Remote-Only Ghost Positions (Strict matching, no skips)
     for (const [key, remoteVal] of remoteMap.entries()) {
-      if (!localOpen.some(p => `${p.symbol}:${p.side}` === key)) {
-        // Skip common benchmark coins if not traded
-        const [symbol] = key.split(":");
-        if (symbol === "BTCUSDT" || symbol === "ETHUSDT") continue;
-
+      if (!rawOpens.some(p => `${p.symbol}:${p.side}` === key)) {
         mismatchCount++;
         this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
-          symbol,
-          key,
-          reason: "ghost_position_on_exchange",
-          exchange_size: remoteVal.size
+          symbol: key.split(":")[0],
+          side: key.split(":")[1],
+          detail: "EXCHANGE_POSITION_MISSING_IN_LEDGER"
         });
       }
     }
@@ -1222,16 +1267,17 @@ export class PaperEngine {
       this.reconcileLastMismatchReason = "position_state_mismatch";
     } else {
       if (this.reconcileSafetyCloseOnly) {
-        this.logger.info("POSITION_RECONCILE_RECOVERED_SAFE_MODE_OFF", {
-          authority_source: "server_state_reconcile"
-        });
+        this.logger.info("POSITION_RECONCILE_RECOVERED_SAFE_MODE_OFF", {});
       }
       this.reconcileSafetyCloseOnly = false;
       this.reconcileLastMismatchReason = null;
     }
 
-    await this.positions.saveOpenAll(updatedLocal);
+    if (ledgerModified) {
+      await this.positions.saveOpenAll(next);
+    }
   }
+
 
   private computePaperExecutionReadiness(): boolean {
     const previousPaperExecutionReady = this.paperExecutionReady;
@@ -4439,6 +4485,13 @@ export class PaperEngine {
       // Unique flow identifier for one-shot terminal exit deduplication
       const flowId = `${openRaw.symbol}:${openRaw.side}:${openRaw.openedAt}`;
 
+      // Problem 3: Exclude pending states from exit/partial management
+      const isManaged = openRaw.lifecycleState === "OPEN" || openRaw.lifecycleState === undefined || openRaw.lifecycleState === null || openRaw.lifecycleState === "ADDON_ACTIVE" || openRaw.lifecycleState === "PARTIAL_ACTIVE";
+      if (!isManaged) {
+        remaining.push(openRaw);
+        continue;
+      }
+
       if (this.terminalExitConsumedByFlow.has(flowId)) {
         openLedgerPruned = true;
         this.logger.info("EXIT_TERMINAL_DEDUP_PROOF", {
@@ -4839,7 +4892,13 @@ export class PaperEngine {
         const closeConfirmed = !isExchangeEnabled || (closeSubmit?.fillConfirmed === true);
 
         if (isExchangeEnabled && !closeConfirmed) {
-          const updatedOpen = { ...open, lifecycleState: "CLOSE_PENDING" as const };
+          const updatedOpen: PaperOpenPositionRecord = { 
+            ...open, 
+            lifecycleState: "CLOSE_PENDING",
+            closePendingOrdId: closeSubmit?.ordId ?? undefined,
+            closePendingAt: Date.now(),
+            closePendingReason: cr
+          };
           this.logger.info("V2_CLOSE_PENDING_EXCHANGE_CONFIRM", {
             symbol: updatedOpen.symbol,
             side: updatedOpen.side,
@@ -6129,13 +6188,20 @@ export class PaperEngine {
         const partialConfirmed = !isExchangeEnabled || (partialSubmit?.fillConfirmed === true);
 
         if (isExchangeEnabled && !partialConfirmed) {
+          const updatedOpen: PaperOpenPositionRecord = {
+            ...open,
+            lifecycleState: "PARTIAL_PENDING",
+            partialPendingOrdId: partialSubmit?.ordId ?? undefined,
+            partialPendingSizeUsd: partialSizeUsd,
+            partialPendingAt: Date.now()
+          };
           this.logger.info("V2_PARTIAL_EXCHANGE_PENDING_PROOF", {
             symbol: open.symbol,
             side: open.side,
             ord_id: partialSubmit?.ordId,
             partial_size_usd: partialSizeUsd
           });
-          remaining.push(open);
+          remaining.push(updatedOpen);
           continue;
         }
 
@@ -8727,7 +8793,7 @@ export class PaperEngine {
           existingSides: [] as ("long" | "short")[],
           existingPositionIds: [] as string[],
           blocked: false,
-          blockReason: null as "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | null
+          blockReason: null as "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | "PENDING_EXCHANGE_CONFIRM_LOCK" | null
         }
         : this.positions.evaluateSymbolPositionMutex(
           sym,
@@ -8749,7 +8815,7 @@ export class PaperEngine {
         });
       }
       let mutexBlockApplied = false;
-      let mutexBlockReason: "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | null = null;
+      let mutexBlockReason: "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | "PENDING_EXCHANGE_CONFIRM_LOCK" | null = null;
       if (authoritySideInvalidForEnter) {
         finalBlockedReason = "ORDER_BUILD_FAIL";
         finalEntryAuthorization = false;

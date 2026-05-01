@@ -37,7 +37,7 @@ export class PositionManager {
     existingSides: PositionSideLower[];
     existingPositionIds: string[];
     blocked: boolean;
-    blockReason: "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | null;
+    blockReason: "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | "PENDING_EXCHANGE_CONFIRM_LOCK" | null;
   } {
     const authoritySideLower = normalizeSideLower(requestedSide);
     const sameSymbolOpenPositions = openPositions.filter((p) => String(p.symbol) === symbol);
@@ -59,12 +59,18 @@ export class PositionManager {
     const oppositeSideOpen =
       authoritySideLower != null &&
       existingSides.some((side) => side !== authoritySideLower);
+
+    const pendingConfirmPresent = sameSymbolOpenPositions.some(p => p.lifecycleState === "PENDING_EXCHANGE_CONFIRM");
+
     const blockedReason =
-      oppositeSideOpen
-        ? "SYMBOL_OPPOSITE_POSITION_OPEN"
-        : (sameSideOpen && !(isScaleIn || addOnAllowed)
-          ? "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
-          : null);
+      pendingConfirmPresent
+        ? "PENDING_EXCHANGE_CONFIRM_LOCK"
+        : (oppositeSideOpen
+          ? "SYMBOL_OPPOSITE_POSITION_OPEN"
+          : (sameSideOpen && !(isScaleIn || addOnAllowed)
+            ? "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
+            : null));
+
     return {
       sameSymbolOpenCount: sameSymbolOpenPositions.length,
       sameSideOpen,

@@ -804,12 +804,28 @@ export type PaperOpenPositionRecord = Readonly<{
     | "PENDING_EXCHANGE_CONFIRM" 
     | "OPEN" 
     | "CLOSE_PENDING" 
+    | "PARTIAL_PENDING"
     | "ADDON_ACTIVE" 
     | "PARTIAL_ACTIVE" 
-    | "CLOSE_ONLY_MANAGED";
+    | "CLOSE_ONLY_MANAGED"
+    | "FAILED";
   exchangeOrdId?: string;
   exchangeClOrdId?: string;
   exchangeFilledSize?: number;
+  
+  // Close Pending Tracking
+  closePendingOrdId?: string;
+  closePendingClOrdId?: string;
+  closePendingAt?: number;
+  closePendingReason?: string;
+
+  // Partial Pending Tracking
+  partialPendingOrdId?: string;
+  partialPendingClOrdId?: string;
+  partialPendingSizeUsd?: number;
+  partialPendingAt?: number;
+  partialPendingReduceRatio?: number;
+
   lastCheckedAt?: number;
   reconcileState?: "PENDING" | "MATCHED" | "FAILED";
   /** 진입 직후 보호구간 종료 시각(ms) */
