@@ -1122,9 +1122,10 @@ export class PaperEngine {
     if (this.reconcileLastCheckedAt != null && nowTs - this.reconcileLastCheckedAt < this.reconcileCheckIntervalMs) return;
     this.reconcileLastCheckedAt = nowTs;
     if (!this.okxDemo || !this.signedExecutionReady) return;
+
     const localOpen = await this.positions.loadOpenAll();
-    const localKeys = new Set(localOpen.map((p) => `${String(p.symbol)}:${String(p.side)}`));
     const remote = await this.okxDemo.getPositions("SWAP");
+    
     if (!remote.ok) {
       this.reconcileSafetyCloseOnly = true;
       this.reconcileLastMismatchReason = `remote_positions_unavailable:${remote.error}`;
@@ -1134,37 +1135,102 @@ export class PaperEngine {
       });
       return;
     }
-    const remoteKeys = new Set<string>();
+
+    const remoteMap = new Map<string, { size: number; instId: string; posSide: string }>();
     for (const row of remote.value) {
       const inst = String((row as { instId?: unknown }).instId ?? "");
       const posSideRaw = String((row as { posSide?: unknown }).posSide ?? "").toLowerCase();
       const posRaw = (row as { pos?: unknown }).pos;
       const sizeNum = typeof posRaw === "number" ? posRaw : typeof posRaw === "string" ? Number(posRaw) : NaN;
       if (!Number.isFinite(sizeNum) || Math.abs(sizeNum) <= 0) continue;
+      
       const side: "long" | "short" = posSideRaw === "short" ? "short" : "long";
       const symbol = inst.endsWith("-USDT-SWAP") ? `${inst.slice(0, -"-USDT-SWAP".length)}USDT` : inst;
-      if (symbol === "BTCUSDT" || symbol === "ETHUSDT") remoteKeys.add(`${symbol}:${side}`);
+      remoteMap.set(`${symbol}:${side}`, { size: sizeNum, instId: inst, posSide: posSideRaw });
     }
-    const localOnly = Array.from(localKeys).filter((k) => !remoteKeys.has(k));
-    const remoteOnly = Array.from(remoteKeys).filter((k) => !localKeys.has(k));
-    if (localOnly.length > 0 || remoteOnly.length > 0) {
+
+    let mismatchCount = 0;
+    const updatedLocal = [...localOpen];
+    const RECONCILE_GRACE_PERIOD_MS = 30_000;
+
+    for (let i = 0; i < updatedLocal.length; i++) {
+      const pos = updatedLocal[i];
+      const key = `${pos.symbol}:${pos.side}`;
+      const remotePos = remoteMap.get(key);
+      const isNew = nowTs - pos.openedAt < RECONCILE_GRACE_PERIOD_MS;
+      const isPending = pos.lifecycleState === "PENDING_EXCHANGE_CONFIRM";
+
+      let reconcileState: PaperOpenPositionRecord["reconcileState"] = "MATCHED";
+      
+      if (remotePos) {
+        // Matched
+        if (isPending) {
+          this.logger.info("POSITION_OPEN_RECONCILE_PROOF", {
+            symbol: pos.symbol,
+            side: pos.side,
+            ord_id: pos.exchangeOrdId,
+            status: "CONFIRMED_VIA_POSITION",
+            prev_lifecycle: pos.lifecycleState,
+            now_lifecycle: "OPEN"
+          });
+          updatedLocal[i] = { ...pos, lifecycleState: "OPEN", reconcileState: "MATCHED", lastCheckedAt: nowTs };
+        } else {
+          updatedLocal[i] = { ...pos, reconcileState: "MATCHED", lastCheckedAt: nowTs };
+        }
+      } else {
+        // Mismatch: Local has it, Remote doesn't
+        if (isNew || isPending) {
+          reconcileState = "PENDING";
+          updatedLocal[i] = { ...pos, reconcileState: "PENDING", lastCheckedAt: nowTs };
+        } else {
+          reconcileState = "FAILED";
+          mismatchCount++;
+          updatedLocal[i] = { ...pos, reconcileState: "FAILED", lastCheckedAt: nowTs };
+          
+          this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
+            symbol: pos.symbol,
+            side: pos.side,
+            opened_at: pos.openedAt,
+            elapsed_ms: nowTs - pos.openedAt,
+            exchange_ord_id: pos.exchangeOrdId,
+            reason: "position_missing_on_exchange",
+            lifecycle_state: pos.lifecycleState
+          });
+        }
+      }
+    }
+
+    // Check for Remote positions not in Local
+    for (const [key, remoteVal] of remoteMap.entries()) {
+      if (!localOpen.some(p => `${p.symbol}:${p.side}` === key)) {
+        // Skip common benchmark coins if not traded
+        const [symbol] = key.split(":");
+        if (symbol === "BTCUSDT" || symbol === "ETHUSDT") continue;
+
+        mismatchCount++;
+        this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
+          symbol,
+          key,
+          reason: "ghost_position_on_exchange",
+          exchange_size: remoteVal.size
+        });
+      }
+    }
+
+    if (mismatchCount > 0) {
       this.reconcileSafetyCloseOnly = true;
       this.reconcileLastMismatchReason = "position_state_mismatch";
-      this.logger.error("POSITION_RECONCILE_MISMATCH_SAFE_MODE", {
-        reason: "position_state_mismatch",
-        authority_source: "server_state_reconcile",
-        local_only: localOnly,
-        remote_only: remoteOnly
-      });
-      return;
+    } else {
+      if (this.reconcileSafetyCloseOnly) {
+        this.logger.info("POSITION_RECONCILE_RECOVERED_SAFE_MODE_OFF", {
+          authority_source: "server_state_reconcile"
+        });
+      }
+      this.reconcileSafetyCloseOnly = false;
+      this.reconcileLastMismatchReason = null;
     }
-    if (this.reconcileSafetyCloseOnly) {
-      this.logger.info("POSITION_RECONCILE_RECOVERED_SAFE_MODE_OFF", {
-        authority_source: "server_state_reconcile"
-      });
-    }
-    this.reconcileSafetyCloseOnly = false;
-    this.reconcileLastMismatchReason = null;
+
+    await this.positions.saveOpenAll(updatedLocal);
   }
 
   private computePaperExecutionReadiness(): boolean {
@@ -3318,9 +3384,11 @@ export class PaperEngine {
     );
   }
 
-  private isEntryPostOpenRegimeLaneProtectActive(openedAt: number, evalAtMs: number): boolean {
+  private isEntryPostOpenRegimeLaneProtectActive(openedAt: number, evalAtMs: number, record?: PaperOpenPositionRecord): boolean {
     const elapsed = evalAtMs - openedAt;
-    return elapsed >= 0 && elapsed < ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS;
+    const baseProtect = elapsed >= 0 && elapsed < ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS;
+    const explicitProtect = record?.entryProtectionUntil != null && evalAtMs < record.entryProtectionUntil;
+    return baseProtect || explicitProtect;
   }
 
   private isV2AuthorityPosition(open: PaperOpenPositionRecord): boolean {
@@ -3335,7 +3403,7 @@ export class PaperEngine {
     closeReason: PaperClosedPositionRecord["closeReason"] | "highway_ema60_break_long" | "highway_ema60_break_short",
     postPartialProtectActive?: boolean
   ): boolean {
-    if (!this.isEntryPostOpenRegimeLaneProtectActive(open.openedAt, evalAtMs)) {
+    if (!this.isEntryPostOpenRegimeLaneProtectActive(open.openedAt, evalAtMs, open)) {
       // 진입 직후 포지션 보호 없지만, 부분청산 직후 보호는 여전히 상태일 수 있다.
       if (postPartialProtectActive === true) {
         switch (closeReason) {
@@ -3370,6 +3438,16 @@ export class PaperEngine {
       case "trend_switch":
       case "highway_ema60_break_long":
       case "highway_ema60_break_short":
+        this.logger.info("ENTRY_POST_OPEN_PROTECTION_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          opened_at: open.openedAt,
+          eval_at: evalAtMs,
+          elapsed_ms: evalAtMs - open.openedAt,
+          protection_until: open.entryProtectionUntil ?? (open.openedAt + 120_000),
+          close_reason: closeReason,
+          status: "PROTECTION_ACTIVE_DEFERRING_EXIT"
+        });
         return true;
       default:
         return false;
@@ -3592,7 +3670,7 @@ export class PaperEngine {
     isTakeProfit?: boolean;
     isTrailingStop?: boolean;
     isPartial?: boolean;
-  }): Promise<void> {
+  }): Promise<Awaited<ReturnType<typeof this.submitOkxOrder>> | null> {
     if (!this.okxDemo || !this.okxSignedRestReady) {
       this.logger.info("okx_close_dispatch_skipped", {
         symbol: input.symbol,
@@ -3600,7 +3678,7 @@ export class PaperEngine {
         okx_demo_active: !!this.okxDemo,
         okx_signed_ready: this.okxSignedRestReady
       });
-      return;
+      return null;
     }
 
     const side = input.side === "long" ? "sell" : "buy";
@@ -3647,7 +3725,7 @@ export class PaperEngine {
       clOrdId
     });
 
-    await this.submitOkxOrder({
+    return await this.submitOkxOrder({
       symbol: input.symbol as MarketSymbol,
       side,
       posSide,
@@ -3727,13 +3805,15 @@ export class PaperEngine {
     ok: boolean;
     ordId: string | null;
     fillPx: string | number | null;
+    fillSize: number;
     errorCode: string | null;
     errorMessage: string | null;
     ackCode: "accepted" | "rejected";
     orderState: string | null;
+    fillConfirmed: boolean;
   }> {
     if (!this.okxDemo) {
-      return { ok: false, ordId: null, fillPx: null, errorCode: "no_client", errorMessage: "OKX signed client not initialized", ackCode: "rejected", orderState: null };
+      return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "no_client", errorMessage: "OKX signed client not initialized", ackCode: "rejected", orderState: null, fillConfirmed: false };
     }
     const instId = toOkxSwapInstId(input.symbol);
     const logCtx = {
@@ -3770,7 +3850,7 @@ export class PaperEngine {
             : "SIGNED_ORDER_SUBMIT_SKIPPED_NOT_READY";
       this.logger.warn("SIGNED_EXECUTION_NOT_READY", { ...logCtx, reason });
       this.logger.warn(tag, { ...logCtx, reason });
-      return { ok: false, ordId: null, fillPx: null, errorCode: "signed_not_ready", errorMessage: "OKX signed REST smoke test not passed", ackCode: "rejected", orderState: null };
+      return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "signed_not_ready", errorMessage: "OKX signed REST smoke test not passed", ackCode: "rejected", orderState: null, fillConfirmed: false };
     }
 
     let refPrice: number | null = null;
@@ -3783,7 +3863,7 @@ export class PaperEngine {
       if (!tickerTry.ok || tickerTry.value.bid == null || tickerTry.value.ask == null) {
         const reason = "LIVE_LIMIT_PRICE_BUILD_FAIL";
         this.logger.error(reason, { ...logCtx, detail: "ticker_missing_bid_ask" });
-        return { ok: false, ordId: null, fillPx: null, errorCode: "ticker_error", errorMessage: "Failed to get bid/ask for limit order", ackCode: "rejected", orderState: null };
+        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "ticker_error", errorMessage: "Failed to get bid/ask for limit order", ackCode: "rejected", orderState: null, fillConfirmed: false };
       }
       const ticker = tickerTry.value;
       refPrice = ticker.last;
@@ -3792,7 +3872,7 @@ export class PaperEngine {
       if (!instTry.ok || !instTry.value.tickSz) {
         const reason = "LIVE_LIMIT_PRICE_BUILD_FAIL";
         this.logger.error(reason, { ...logCtx, detail: "instrument_missing_tick_size" });
-        return { ok: false, ordId: null, fillPx: null, errorCode: "instrument_error", errorMessage: "Failed to get tick size for limit order", ackCode: "rejected", orderState: null };
+        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "instrument_error", errorMessage: "Failed to get tick size for limit order", ackCode: "rejected", orderState: null, fillConfirmed: false };
       }
       const tickSize = Number(instTry.value.tickSz);
 
@@ -3807,7 +3887,7 @@ export class PaperEngine {
           purpose: input.reason
         });
       } catch (e) {
-        return { ok: false, ordId: null, fillPx: null, errorCode: "price_build_fail", errorMessage: String(e), ackCode: "rejected", orderState: null };
+        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "price_build_fail", errorMessage: String(e), ackCode: "rejected", orderState: null, fillConfirmed: false };
       }
 
       // 1. V2 Intended Metrics (Decision Basis)
@@ -3884,10 +3964,10 @@ export class PaperEngine {
         const reject_reason = "OKX_BALANCE_OR_LEVERAGE_UNCONFIRMED";
         this.logger.warn("EXCHANGE_REALITY_BLOCK", { ...logCtxReality, reject_reason });
         return {
-          ok: false, ordId: null, fillPx: null, 
+          ok: false, ordId: null, fillPx: null, fillSize: 0,
           errorCode: "okx_reality_unconfirmed", 
           errorMessage: "Exchange balance or leverage could not be verified", 
-          ackCode: "rejected", orderState: null
+          ackCode: "rejected", orderState: null, fillConfirmed: false
         };
       }
 
@@ -3899,7 +3979,7 @@ export class PaperEngine {
           ok: false, ordId: null, fillPx: null, 
           errorCode: "leverage_mismatch", 
           errorMessage: `Leverage mismatch: Engine=${input.appliedLeverage}, OKX=${okx_confirmed_leverage}`, 
-          ackCode: "rejected", orderState: null
+          ackCode: "rejected", orderState: null, fillSize: 0, fillConfirmed: false
         };
       }
 
@@ -3908,10 +3988,10 @@ export class PaperEngine {
         const reject_reason = "EXCHANGE_REALITY_BLOCK";
         this.logger.warn("EXCHANGE_REALITY_BLOCK", { ...logCtxReality, reject_reason, detail: "min_order_size_underflow" });
         return {
-          ok: false, ordId: null, fillPx: null, 
+          ok: false, ordId: null, fillPx: null, fillSize: 0,
           errorCode: "min_order_size_underflow", 
           errorMessage: `Final quantity ${final_submitted_qty} below 0.001`, 
-          ackCode: "rejected", orderState: null
+          ackCode: "rejected", orderState: null, fillConfirmed: false
         };
       }
 
@@ -3957,10 +4037,10 @@ export class PaperEngine {
         const errorMsg = `Live liquidation buffer insufficient (Required: ${requiredBufferRatio}, Available: ${liquidationBufferRatio?.toFixed(2) ?? "N/A"})`;
         this.logger.warn("EXCHANGE_REALITY_BLOCK", { ...logCtxReality, reject_reason, detail, error: errorMsg });
         return {
-          ok: false, ordId: null, fillPx: null, 
+          ok: false, ordId: null, fillPx: null, fillSize: 0,
           errorCode: "live_liquidation_buffer_insufficient", 
           errorMessage: errorMsg, 
-          ackCode: "rejected", orderState: null
+          ackCode: "rejected", orderState: null, fillConfirmed: false
         };
       }
 
@@ -3998,7 +4078,7 @@ export class PaperEngine {
     const orderExecutionKey = `order:${input.traceId}:${input.reason}:${input.side}:${input.posSide}:${input.qty}`;
     const orderKeyOk = await this.consumeExecutionKey(orderExecutionKey);
     if (!orderKeyOk) {
-      return { ok: false, ordId: null, fillPx: null, errorCode: "duplicate_execution_key", errorMessage: "Duplicate order execution key blocked", ackCode: "rejected", orderState: null };
+      return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "duplicate_execution_key", errorMessage: "Duplicate order execution key blocked", ackCode: "rejected", orderState: null, fillConfirmed: false };
     }
 
     try {
@@ -4017,7 +4097,7 @@ export class PaperEngine {
         const errorCode = submit.diagnostics.retCode || "submit_error";
         const errorMessage = submit.diagnostics.retMsg || submit.error || "order_level_ack_failed";
         this.logger.error("okx_order_submit_rejected", { ...logCtx, order_submit_ack: "rejected", order_error_code: errorCode, order_error_msg: errorMessage });
-        return { ok: false, ordId: null, fillPx: null, errorCode, errorMessage, ackCode: "rejected", orderState: null };
+        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode, errorMessage, ackCode: "rejected", orderState: null, fillConfirmed: false };
       }
 
       this.okxOrderSubmitOk = true;
@@ -4028,35 +4108,53 @@ export class PaperEngine {
       const status = await this.okxDemo.getOrder(instId, ordId || undefined, input.clOrdId);
       if (!status.ok) {
         this.logger.warn("okx_order_poll_failed", { ...logCtx, ordId, order_submit_ack: "accepted", error: status.error });
-        return { ok: true, ordId, fillPx: null, errorCode: null, errorMessage: status.error || "poll_failed", ackCode: "accepted", orderState: null };
+        return { ok: true, ordId, fillPx: null, fillSize: 0, errorCode: null, errorMessage: status.error || "poll_failed", ackCode: "accepted", orderState: null, fillConfirmed: false };
       }
 
       const st0 = status.value?.[0];
       const fillPx = st0?.fillPx ?? null;
+      const fillSize = st0?.fillSz != null ? Number(st0.fillSz) : 0;
       const orderState = st0?.state != null ? String(st0.state) : null;
+      const fillConfirmed = orderState === "filled" || orderState === "partially_filled" || fillSize > 0;
 
       this.logger.info("okx_order_submit_accepted", {
         ...logCtx,
         ordId,
         order_submit_ack: "accepted",
         order_state: orderState,
-        order_fill_px: fillPx
+        order_fill_px: fillPx,
+        order_fill_size: fillSize
+      });
+
+      this.logger.info("OKX_ORDER_FILL_STATUS_PROOF", {
+        symbol: input.symbol,
+        side: input.side,
+        ord_id: ordId,
+        client_order_id: input.clOrdId,
+        order_state: orderState,
+        fill_px: fillPx,
+        fill_size: fillSize,
+        accepted_at: Date.now(),
+        checked_at: Date.now(),
+        fill_confirmed: fillConfirmed
       });
 
       return {
         ok: true,
         ordId,
         fillPx: typeof fillPx === "string" || typeof fillPx === "number" ? fillPx : (fillPx != null ? String(fillPx) : null),
+        fillSize,
         errorCode: null,
         errorMessage: null,
-        ackCode: "accepted",
-        orderState
+        ackCode: "accepted" as const,
+        orderState,
+        fillConfirmed
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const parsed = parseOkxSubmitErrorMessage(msg);
       this.logger.error("okx_order_submit_exception", { ...logCtx, errorCode: parsed.code, errorMessage: parsed.message });
-      return { ok: false, ordId: null, fillPx: null, errorCode: parsed.code, errorMessage: parsed.message, ackCode: "rejected", orderState: null };
+      return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: parsed.code, errorMessage: parsed.message, ackCode: "rejected", orderState: null, fillConfirmed: false };
     }
   }
 
@@ -4721,7 +4819,7 @@ export class PaperEngine {
         const isStopLossClose = cr === "stop_loss" || String(cr).includes("stop_loss");
         const isTakeProfitClose = cr === "take_profit" || String(cr).includes("take_profit");
         const isTrailingClose = cr === "trailing_stop" || String(cr).includes("trail");
-        await this.dispatchOkxClose({
+        const closeSubmit = await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
@@ -4736,7 +4834,22 @@ export class PaperEngine {
           isTakeProfit: isTakeProfitClose,
           isTrailingStop: isTrailingClose
         });
-        
+
+        const isExchangeEnabled = this.okxDemo && this.signedSubmitMode() === "enabled";
+        const closeConfirmed = !isExchangeEnabled || (closeSubmit?.fillConfirmed === true);
+
+        if (isExchangeEnabled && !closeConfirmed) {
+          const updatedOpen = { ...open, lifecycleState: "CLOSE_PENDING" as const };
+          this.logger.info("V2_CLOSE_PENDING_EXCHANGE_CONFIRM", {
+            symbol: updatedOpen.symbol,
+            side: updatedOpen.side,
+            ord_id: closeSubmit?.ordId,
+            reason: cr
+          });
+          remaining.push(updatedOpen);
+          continue;
+        }
+
         const routedClosed = await this.appendClosedWithStandardRouting({
           closedRow,
           open,
@@ -4746,6 +4859,15 @@ export class PaperEngine {
           closeSource: "V2_AUTHORITY",
           currentRegime: regimeNow
         });
+
+        this.logger.info("V2_CLOSE_EXCHANGE_CONFIRM_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          ord_id: closeSubmit?.ordId,
+          fill_confirmed: true,
+          close_reason: cr
+        });
+
         authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
         
         this.terminalExitConsumedByFlow.add(flowId);
@@ -5989,7 +6111,7 @@ export class PaperEngine {
           flowId
         });
 
-        await this.dispatchOkxClose({
+        const partialSubmit = await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
           sizeUsd: partialSizeUsd,
@@ -6001,6 +6123,28 @@ export class PaperEngine {
           executionOwner: "paper_engine",
           isV2Authority: true,
           isPartial: true
+        });
+
+        const isExchangeEnabled = this.okxDemo && this.signedSubmitMode() === "enabled";
+        const partialConfirmed = !isExchangeEnabled || (partialSubmit?.fillConfirmed === true);
+
+        if (isExchangeEnabled && !partialConfirmed) {
+          this.logger.info("V2_PARTIAL_EXCHANGE_PENDING_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            ord_id: partialSubmit?.ordId,
+            partial_size_usd: partialSizeUsd
+          });
+          remaining.push(open);
+          continue;
+        }
+
+        this.logger.info("V2_PARTIAL_EXCHANGE_CONFIRM_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          ord_id: partialSubmit?.ordId,
+          fill_confirmed: true,
+          partial_size_usd: partialSizeUsd
         });
 
         // Partial position update - reduce size, do NOT prune full position
@@ -8592,6 +8736,18 @@ export class PaperEngine {
           existingIdx >= 0,
           authority.addOnAllowed === true
         );
+
+      if (authorityDecisionForExecution === "ENTER") {
+        this.logger.info("SYMBOL_POSITION_MUTEX_PROOF", {
+          symbol: sym,
+          requested_side: authoritySideLower,
+          existing_count: mutexEval.sameSymbolOpenCount,
+          existing_sides: mutexEval.existingSides,
+          blocked: mutexEval.blocked,
+          reason: mutexEval.blockReason,
+          pending_confirm_present: next.some(p => p.symbol === sym && p.lifecycleState === "PENDING_EXCHANGE_CONFIRM")
+        });
+      }
       let mutexBlockApplied = false;
       let mutexBlockReason: "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | null = null;
       if (authoritySideInvalidForEnter) {
@@ -9239,6 +9395,8 @@ export class PaperEngine {
         }
 
         const signedModeForEntry = this.signedSubmitMode();
+        let submit: Awaited<ReturnType<typeof this.submitOkxOrder>> | undefined;
+
         if (this.okxDemo && signedModeForEntry === "enabled") {
           const instId = toOkxSwapInstId(first.symbol);
           trace.inst_id = instId;
@@ -9258,7 +9416,7 @@ export class PaperEngine {
             authority_source: authority.source
           });
 
-          const submit = await this.submitOkxOrder({
+          submit = await this.submitOkxOrder({
             symbol: first.symbol,
             side,
             posSide,
@@ -9318,6 +9476,24 @@ export class PaperEngine {
           });
         }
 
+        const isExchangeEnabled = this.okxDemo && signedModeForEntry === "enabled";
+        const isPendingConfirm = isExchangeEnabled && submit?.fillConfirmed !== true;
+        const lifecycleState: PaperOpenPositionRecord["lifecycleState"] = isExchangeEnabled
+          ? (isPendingConfirm ? "PENDING_EXCHANGE_CONFIRM" : "OPEN")
+          : "INITIAL";
+
+        if (isPendingConfirm) {
+          this.logger.info("POSITION_OPEN_PENDING_EXCHANGE_CONFIRM", {
+            symbol: first.symbol,
+            side: authority.side,
+            ord_id: submit?.ordId,
+            cl_ord_id: trace.exchange_client_order_id,
+            entry_price: first.lastPrice,
+            size_usd: entrySizeUsd,
+            accepted_at: Date.now()
+          });
+        }
+
         const record: PaperOpenPositionRecord = {
           openedAt: Date.now(),
           symbol: first.symbol,
@@ -9327,7 +9503,11 @@ export class PaperEngine {
           sizeUsd: entrySizeUsd,
           initialSizeUsd: entrySizeUsd,
           partialExitStage: 0,
-          lifecycleState: "INITIAL",
+          lifecycleState,
+          exchangeOrdId: submit?.ordId ?? undefined,
+          exchangeClOrdId: trace.exchange_client_order_id ?? undefined,
+          exchangeFilledSize: submit?.fillSize ?? 0,
+          entryProtectionUntil: Date.now() + 120_000,
           realizedPnl: 0,
           stopPrice: (() => {
             const val = typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : undefined;

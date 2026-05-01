@@ -798,8 +798,22 @@ export type PaperOpenPositionRecord = Readonly<{
   totalCostAtEntry?: number;
   /** 분할 청산 단계 (0=없음, 1=1차 완료, 2=2차 완료·잔여만). 하위 호환: 미설정은 0. */
   partialExitStage?: number;
-  /** Engine-v2 aligned position lifecycle state machine. */
-  lifecycleState?: "INITIAL" | "ADDON_ACTIVE" | "PARTIAL_ACTIVE" | "CLOSE_ONLY_MANAGED";
+  /** Lifecycle status for exchange confirmation hardening and engine state. */
+  lifecycleState?: 
+    | "INITIAL" 
+    | "PENDING_EXCHANGE_CONFIRM" 
+    | "OPEN" 
+    | "CLOSE_PENDING" 
+    | "ADDON_ACTIVE" 
+    | "PARTIAL_ACTIVE" 
+    | "CLOSE_ONLY_MANAGED";
+  exchangeOrdId?: string;
+  exchangeClOrdId?: string;
+  exchangeFilledSize?: number;
+  lastCheckedAt?: number;
+  reconcileState?: "PENDING" | "MATCHED" | "FAILED";
+  /** 진입 직후 보호구간 종료 시각(ms) */
+  entryProtectionUntil?: number;
   /** 최초 진입 마진(USD). 미설정 시 `sizeUsd`만 사용(레거시). */
   initialSizeUsd?: number;
   /** 진입 후 관측한 최고 순이익률(순손익/마진). 분할·트레일 참고. */
