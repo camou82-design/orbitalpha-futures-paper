@@ -819,6 +819,8 @@ export type PaperOpenPositionRecord = {
   closePendingClOrdId?: string;
   closePendingAt?: number;
   closePendingReason?: string;
+  closePendingPrice?: number;
+  closePendingFundingRate?: number;
 
   // Partial Pending Tracking
   partialPendingOrdId?: string;
@@ -826,6 +828,9 @@ export type PaperOpenPositionRecord = {
   partialPendingSizeUsd?: number;
   partialPendingAt?: number;
   partialPendingReduceRatio?: number;
+  partialPendingReason?: string;
+  partialPendingPrice?: number;
+  partialPendingFundingRate?: number;
 
   lastCheckedAt?: number;
   reconcileState?: "PENDING" | "MATCHED" | "FAILED";

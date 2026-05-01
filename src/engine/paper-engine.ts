@@ -1160,8 +1160,8 @@ export class PaperEngine {
       const key = `${open.symbol}:${open.side}`;
       const remotePos = remoteMap.get(key);
 
-      // 1. Handle Entry Pending States
-      if (isPending || open.lifecycleState === "INITIAL" || open.lifecycleState === undefined) {
+      // 1. Handle Entry Pending States (Normalization)
+      if (isPending || open.lifecycleState === "INITIAL" || !open.lifecycleState) {
         if (remotePos) {
           open.lifecycleState = "OPEN";
           open.reconcileState = "MATCHED";
@@ -1174,7 +1174,7 @@ export class PaperEngine {
           open.lastCheckedAt = nowTs;
           ledgerModified = true;
           mismatchCount++;
-          this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
+          this.logger.error("POSITION_OPEN_CONFIRM_FAILED", {
             symbol: open.symbol,
             side: open.side,
             detail: "PENDING_TIMEOUT_NO_EXCHANGE_POSITION",
@@ -1190,7 +1190,7 @@ export class PaperEngine {
         }
       }
 
-      // 2. Handle Exit/Partial Pending States
+      // 2. Handle Exit/Partial Pending States (Atomic Reconciliation)
       if (isClosePending || isPartialPending) {
         const ordId = isClosePending ? open.closePendingOrdId : open.partialPendingOrdId;
         const clOrdId = isClosePending ? open.closePendingClOrdId : open.partialPendingClOrdId;
@@ -1200,23 +1200,117 @@ export class PaperEngine {
           if (ordRes.ok && ordRes.value.length > 0) {
             const ord = (ordRes.value[0] as any);
             if (ord.state === "filled") {
+              const fillPx = Number(ord.fillPx) || (isClosePending ? open.closePendingPrice : open.partialPendingPrice) || 0;
+              const fillTime = Number(ord.fillTime) || nowTs;
+              const flowId = `${open.symbol}:${open.side}:${open.openedAt}`;
+              const snap = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
+              const fundingRate = (isClosePending ? open.closePendingFundingRate : open.partialPendingFundingRate) || snap?.fundingRate || 0;
+              
               if (isClosePending) {
-                this.logger.info("V2_CLOSE_PENDING_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, ordId, state: "filled" });
+                this.logger.info("V2_CLOSE_PENDING_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, ordId, state: "filled", fillPx });
+                
+                const metrics = computePaperCloseLegMetrics({
+                  open,
+                  closePrice: fillPx,
+                  closedAt: fillTime,
+                  snapFundingRate: fundingRate,
+                  marginUsd: open.sizeUsd,
+                  paperTakerFeeRate: this.config.paperTakerFeeRate,
+                  paperFundingIntervalHours: this.config.paperFundingIntervalHours
+                });
+                
+                const closedRow = finalizePaperClosedRecord({
+                  open,
+                  symbol: open.symbol as MarketSymbol,
+                  closePrice: fillPx,
+                  closedAt: fillTime,
+                  closeReason: (open.closePendingReason as any) || "v2_exit_authority",
+                  legMarginUsd: open.sizeUsd,
+                  metrics,
+                  feeRate: this.config.paperTakerFeeRate,
+                  fundingIntervalHours: this.config.paperFundingIntervalHours,
+                  strategyVersion: open.strategyVersion ?? "paper-v2"
+                });
+                
+                await this.appendClosedWithStandardRouting({
+                  closedRow,
+                  open,
+                  flowId,
+                  exitReason: open.closePendingReason || "v2_exit_authority",
+                  closeSource: "V2_RECONCILE",
+                  currentRegime: this.lastRegime.regime || "NO_TRADE"
+                });
+                
+                this.logger.info("PAPER_POSITION_CLOSED_PROOF", { 
+                  symbol: open.symbol, 
+                  side: open.side, 
+                  reason: open.closePendingReason, 
+                  pnl: metrics.pnlUsdNet,
+                  path: "reconcile_filled"
+                });
+                
                 ledgerModified = true;
-                continue; 
+                continue; // Pruned from open ledger
               } else {
-                this.logger.info("V2_PARTIAL_PENDING_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, ordId, state: "filled" });
+                this.logger.info("V2_PARTIAL_PENDING_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, ordId, state: "filled", fillPx });
+                
+                const partialSizeUsd = open.partialPendingSizeUsd ?? 0;
+                const metrics = computePaperCloseLegMetrics({
+                  open,
+                  closePrice: fillPx,
+                  closedAt: fillTime,
+                  snapFundingRate: fundingRate,
+                  marginUsd: partialSizeUsd,
+                  paperTakerFeeRate: this.config.paperTakerFeeRate,
+                  paperFundingIntervalHours: this.config.paperFundingIntervalHours
+                });
+                
                 open.lifecycleState = "OPEN";
-                open.sizeUsd -= open.partialPendingSizeUsd ?? 0;
+                open.sizeUsd = Math.max(0, open.sizeUsd - partialSizeUsd);
+                open.realizedPnl = (open.realizedPnl ?? 0) + metrics.pnlUsdNet;
+                open.partialExitStage = (open.partialExitStage ?? 0) + 1;
+                
+                // Clear pending fields
                 open.partialPendingOrdId = undefined;
+                open.partialPendingClOrdId = undefined;
                 open.partialPendingSizeUsd = undefined;
+                open.partialPendingAt = undefined;
+                open.partialPendingReduceRatio = undefined;
+                open.partialPendingReason = undefined;
+                open.partialPendingPrice = undefined;
+                open.partialPendingFundingRate = undefined;
+                
+                this.logger.info("V2_PARTIAL_POSITION_UPDATE_PROOF", {
+                  symbol: open.symbol,
+                  side: open.side,
+                  reduced_usd: partialSizeUsd,
+                  remaining_usd: open.sizeUsd,
+                  realized_pnl: metrics.pnlUsdNet,
+                  total_realized_pnl: open.realizedPnl
+                });
+                
                 ledgerModified = true;
               }
             } else if (ord.state === "canceled" || ord.state === "rejected") {
               this.logger.warn("V2_PENDING_ORDER_FAILED_PROOF", { symbol: open.symbol, side: open.side, ordId, state: ord.state });
               open.lifecycleState = "OPEN";
+              // Clear all pending fields
               open.closePendingOrdId = undefined;
+              open.closePendingClOrdId = undefined;
+              open.closePendingAt = undefined;
+              open.closePendingReason = undefined;
+              open.closePendingPrice = undefined;
+              open.closePendingFundingRate = undefined;
+              
               open.partialPendingOrdId = undefined;
+              open.partialPendingClOrdId = undefined;
+              open.partialPendingSizeUsd = undefined;
+              open.partialPendingAt = undefined;
+              open.partialPendingReduceRatio = undefined;
+              open.partialPendingReason = undefined;
+              open.partialPendingPrice = undefined;
+              open.partialPendingFundingRate = undefined;
+              
               ledgerModified = true;
             } else {
               next.push(open);
@@ -1235,7 +1329,8 @@ export class PaperEngine {
           this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
             symbol: open.symbol,
             side: open.side,
-            detail: "OPEN_LEDGER_MISSING_ON_EXCHANGE"
+            detail: "OPEN_LEDGER_MISSING_ON_EXCHANGE",
+            action: "MARK_FAILED"
           });
           open.lifecycleState = "FAILED";
           open.reconcileState = "FAILED";
@@ -1257,7 +1352,8 @@ export class PaperEngine {
         this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
           symbol: key.split(":")[0],
           side: key.split(":")[1],
-          detail: "EXCHANGE_POSITION_MISSING_IN_LEDGER"
+          detail: "EXCHANGE_POSITION_MISSING_IN_LEDGER",
+          action: "FORCE_SAFETY_CLOSE_ONLY"
         });
       }
     }
@@ -4897,7 +4993,9 @@ export class PaperEngine {
             lifecycleState: "CLOSE_PENDING",
             closePendingOrdId: closeSubmit?.ordId ?? undefined,
             closePendingAt: Date.now(),
-            closePendingReason: cr
+            closePendingReason: cr,
+            closePendingPrice: closePrice,
+            closePendingFundingRate: snap.fundingRate
           };
           this.logger.info("V2_CLOSE_PENDING_EXCHANGE_CONFIRM", {
             symbol: updatedOpen.symbol,
@@ -6193,7 +6291,11 @@ export class PaperEngine {
             lifecycleState: "PARTIAL_PENDING",
             partialPendingOrdId: partialSubmit?.ordId ?? undefined,
             partialPendingSizeUsd: partialSizeUsd,
-            partialPendingAt: Date.now()
+            partialPendingAt: Date.now(),
+            partialPendingReduceRatio: reduceRatio,
+            partialPendingReason: v2PartialAuthority.partialReason ?? "v2_partial_exit",
+            partialPendingPrice: closePrice,
+            partialPendingFundingRate: snap.fundingRate
           };
           this.logger.info("V2_PARTIAL_EXCHANGE_PENDING_PROOF", {
             symbol: open.symbol,
