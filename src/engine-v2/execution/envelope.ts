@@ -32,6 +32,24 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
     const exitConfidence = args.exitConfidence ?? 0;
 
     if (mode === "engine_v2") {
+        const signedReadyBlocked = v2Decision.decision === "ENTER" && signedExecutionReady !== true;
+
+        let finalDecision = v2Decision.decision;
+        let finalSide = v2Decision.side;
+        let finalStageMarginKrw = Number(v2Decision.risk.stageMarginKrw ?? 0);
+        let finalHardBlockPresent = hardBlockPresent;
+        let finalHardBlockReason = hardBlockReason;
+        let finalAuthorityReason = "engine_v2_mode_uses_v2_execution_envelope";
+
+        if (signedReadyBlocked) {
+            finalDecision = "REJECT";
+            finalSide = "none";
+            finalStageMarginKrw = 0;
+            finalHardBlockPresent = true;
+            finalHardBlockReason = "SIGNED_EXECUTION_NOT_READY";
+            finalAuthorityReason = "signed_execution_not_ready_blocks_enter";
+        }
+
         return {
             symbol,
             mode,
@@ -39,9 +57,9 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             authorityOwner: "V2",
             finalEngineOwner: "V2",
             adoptedEngine: selector.adopted_result.engine,
-            decision: v2Decision.decision,
-            side: v2Decision.side,
-            stageMarginKrw: Number(v2Decision.risk.stageMarginKrw ?? 0),
+            decision: finalDecision,
+            side: finalSide as any,
+            stageMarginKrw: finalStageMarginKrw,
             baseStageMarginKrw: Number(v2Decision.risk.baseStageMarginKrw ?? 0),
             regime: String(v2Decision.regime),
             marketSubtype,
@@ -63,9 +81,9 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             exitConfidence,
             paperExecutionReady,
             signedExecutionReady,
-            hardBlockPresent,
-            hardBlockReason,
-            authorityReason: "engine_v2_mode_uses_v2_execution_envelope",
+            hardBlockPresent: finalHardBlockPresent,
+            hardBlockReason: finalHardBlockReason,
+            authorityReason: finalAuthorityReason,
             authorityVersion: "v2_execution_authority_envelope_v1",
             originalDecision,
             originalSide,

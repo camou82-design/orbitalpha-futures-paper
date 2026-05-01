@@ -7670,6 +7670,31 @@ export class PaperEngine {
           killSwitch: input.killSwitchActive,
           reconcileSafeMode: this.reconcileSafetyCloseOnly
         });
+      } else if (adoptedEngine === "V2" && (auth.originalDecision === "ENTER" || auth.decision === "ENTER")) {
+        const blockReasons = [];
+        if (!(stageMarginKrw > 0)) blockReasons.push("STAGE_MARGIN_0");
+        if (!input.paperExecutionReady) blockReasons.push("PAPER_EXECUTION_NOT_READY");
+        if (!this.signedExecutionReady) blockReasons.push("SIGNED_EXECUTION_NOT_READY");
+        if (!input.serverTradeEnabled) blockReasons.push("SERVER_TRADE_DISABLED");
+        if (input.closeOnlyMode) blockReasons.push("CLOSE_ONLY_MODE");
+        if (input.killSwitchActive) blockReasons.push("KILL_SWITCH_ACTIVE");
+        if (this.reconcileSafetyCloseOnly) blockReasons.push("RECONCILE_SAFE_MODE");
+        if (nonBypassableHardBlockPresent) blockReasons.push("NON_BYPASSABLE_HARD_BLOCK");
+        
+        this.logger.info("V2_ENTER_POST_AUTHORITY_BLOCK_PROOF", {
+          symbol: sym,
+          authority_decision: auth.decision,
+          authority_side: auth.side,
+          authority_stage_margin_krw: stageMarginKrw,
+          signed_execution_ready: this.signedExecutionReady,
+          paper_execution_ready: input.paperExecutionReady,
+          serverTradeEnabled: input.serverTradeEnabled,
+          closeOnlyMode: input.closeOnlyMode,
+          killSwitch: input.killSwitchActive,
+          reconcileSafeMode: this.reconcileSafetyCloseOnly,
+          fresh_tick_blocked: freshTickHardBlock,
+          block_reason: blockReasons.join("|") || "UNKNOWN_BRIDGE_BLOCK"
+        });
       }
     }
 

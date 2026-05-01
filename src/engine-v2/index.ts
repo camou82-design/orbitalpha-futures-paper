@@ -1379,18 +1379,24 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         let transitionWatchShortPromotionPassed = false;
         let transitionWatchShortFailReason: string | null = null;
 
-        if (isTransitionWatchShortEligibleContext) {
-            if (!transitionWatchShortZoneOk) transitionWatchShortFailReason = "ZONE_NOT_UPPER_OR_RANGE_SHORT";
+        if (!isTransitionWatchShortEligibleContext) {
+            if (activeEngineRouting !== "TRANSITION") transitionWatchShortFailReason = "NOT_TRANSITION_WATCH";
+            else if (shock !== "DOWN") transitionWatchShortFailReason = "NOT_DOWN_SHOCK";
+            else if (!(transitionWatchShortSetupType === "SHOCK_DOWN_REACTION" || judgment.subtype === "SHOCK_REACTION_DOWN")) transitionWatchShortFailReason = "NOT_SHOCK_REACTION_SETUP";
+            else if (transitionWatchShortAction !== "WATCH") transitionWatchShortFailReason = "ACTION_NOT_WATCH";
+            else transitionWatchShortFailReason = "NOT_ELIGIBLE_CONTEXT_OTHER";
+        } else {
+            if (!transitionWatchShortZoneOk) transitionWatchShortFailReason = "ZONE_NOT_UPPER";
             else if (trendSideCandidate !== "short") transitionWatchShortFailReason = "TREND_SIDE_NOT_SHORT";
             else if (!riskShortAllow || !allowNewShort) transitionWatchShortFailReason = "SHORT_NOT_ALLOWED";
-            else if (qualityScore < 60) transitionWatchShortFailReason = `QUALITY_BELOW_60:${qualityScore}`;
-            else if (emaGap >= 0) transitionWatchShortFailReason = `EMA_GAP_NOT_NEGATIVE:${emaGap}`;
+            else if (qualityScore < 60) transitionWatchShortFailReason = "QUALITY_TOO_LOW";
+            else if (emaGap >= 0) transitionWatchShortFailReason = "EMA_GAP_NOT_NEGATIVE";
             else if (hardBlockPresent) transitionWatchShortFailReason = "HARD_BLOCK_PRESENT";
             else if (!hardControlClear) transitionWatchShortFailReason = "HARD_CONTROL_NOT_CLEAR";
             else if (!paperExecutionReady) transitionWatchShortFailReason = "PAPER_EXECUTION_NOT_READY";
             else if (!signedExecutionReady) transitionWatchShortFailReason = "SIGNED_EXECUTION_NOT_READY";
-            else if (hasSameSidePosition) transitionWatchShortFailReason = "SAME_SIDE_POSITION_EXISTS";
-            else if (hasOppositeSidePosition) transitionWatchShortFailReason = "OPPOSITE_POSITION_EXISTS";
+            else if (hasSameSidePosition || hasOppositeSidePosition) transitionWatchShortFailReason = "HAS_POSITION";
+            else if (crashState.includes("ULTRA") || crashState.includes("CRITICAL")) transitionWatchShortFailReason = "CRASH_STATE_ACTIVE";
             else if (v2DecisionAfterPromotion === "ENTER") transitionWatchShortFailReason = "ALREADY_PROMOTED";
             else transitionWatchShortPromotionPassed = transitionWatchShortConditionsMet;
         }
@@ -1426,7 +1432,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotionBlockReason = null;
             shockReactionBlockReason = null;
             console.info(JSON.stringify({
-                event: "V2_SHOCK_REACTION_SHORT_PROMOTION_PROOF",
+                event: "V2_SHOCK_REACTION_PROMOTION_PROOF",
                 symbol: String(input.symbol),
                 shock_state: shock,
                 side: "short",
@@ -1510,6 +1516,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // 수정 3. stage margin 0 방지 및 프로브 마진 보장 + micro/probe cap 적용
     let stageMarginKrwAfter = riskSizing.stageMarginKrw;
+    let cap_applied = false;
+    let cap_reason: string | null = null;
+    let min_order_check_passed = true;
+    let min_order_block_reason: string | null = null;
+    const liveMaxNotionalUsdt = Number(v2State.liveMaxOrderNotionalUsdt ?? 0);
+    const liveMaxNotionalKrw = liveMaxNotionalUsdt > 0 ? liveMaxNotionalUsdt * 1400 : null;
+
     const isMicroProbe = 
         promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" || 
         promotionReason === "V2_PROBE_ENTRY_CONFIRMED" || 
@@ -1517,22 +1530,20 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionReason === "SHOCK_REACTION_DOWN_MID_MOMENTUM_CONFIRMED" ||
         promotionReason === "V2_TRANSITION_WATCH_SHORT_PROBE";
 
-    if (finalDecision === "ENTER" && (isMicroProbe || (promotionApplied && promotionReason != null))) {
-        const minProbeMarginKrw = 14000; // 약 20 USDT (14,000 KRW * leverage 2 기준)
-        const liveMaxNotionalKrw = (v2State.liveMaxOrderNotionalUsdt ?? 25) * 1400;
-        const maxProbeMarginKrw = Math.min(35000, liveMaxNotionalKrw); // 상한선 설정
+    if (finalDecision === "ENTER") {
+        const minProbeMarginKrw = 14000;
         
-        if (stageMarginKrwAfter < minProbeMarginKrw) {
-            stageMarginKrwAfter = minProbeMarginKrw;
-        }
-        
-        // micro/probe인 경우 상한선 강제 적용
-        if (isMicroProbe && stageMarginKrwAfter > maxProbeMarginKrw) {
-            stageMarginKrwAfter = maxProbeMarginKrw;
-        }
-
-        // side_zone_valid, range_edge_extreme, reversal_confirmed 미충족 시 추가 감액 (확신도 하락 반영)
         if (isMicroProbe) {
+            const maxProbeMarginKrw = liveMaxNotionalKrw != null ? Math.min(35000, liveMaxNotionalKrw) : 35000;
+            if (stageMarginKrwAfter < minProbeMarginKrw) {
+                stageMarginKrwAfter = minProbeMarginKrw;
+            }
+            if (stageMarginKrwAfter > maxProbeMarginKrw) {
+                stageMarginKrwAfter = maxProbeMarginKrw;
+                cap_applied = true;
+                cap_reason = "MICRO_PROBE_CAP";
+            }
+            
             let reductionMultiplier = 1.0;
             if (!sideZoneValid) reductionMultiplier *= 0.8;
             if (!rangeEdgeExtreme && activeEngineRouting === "RANGE") reductionMultiplier *= 0.9;
@@ -1544,8 +1555,33 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
         
-        // 명시적으로 riskSizing에 결과 반영 (authority bridge로 전달 위함)
-        riskSizing.stageMarginKrw = stageMarginKrwAfter;
+        // live max cap 전역 적용
+        if (liveMaxNotionalKrw != null && stageMarginKrwAfter > liveMaxNotionalKrw) {
+            stageMarginKrwAfter = liveMaxNotionalKrw;
+            cap_applied = true;
+            cap_reason = cap_reason ?? "LIVE_MAX_ORDER_NOTIONAL_CAP";
+        }
+        
+        // 최소 주문 underflow 처리
+        if (stageMarginKrwAfter < minProbeMarginKrw) {
+            min_order_check_passed = false;
+            if (liveMaxNotionalKrw != null && liveMaxNotionalKrw < minProbeMarginKrw) {
+                min_order_block_reason = "LIVE_MAX_NOTIONAL_UNDER_MIN_PROBE";
+            } else {
+                min_order_block_reason = "MIN_ORDER_SIZE_UNDERFLOW";
+            }
+            
+            finalDecision = "REJECT";
+            v2DecisionAfterPromotion = "REJECT";
+            v2SideAfterPromotion = "none";
+            riskSizing.isBlocked = true;
+            riskSizing.blockReason = min_order_block_reason;
+            riskSizing.stageMarginKrw = 0;
+            stageMarginKrwAfter = 0;
+            blockReason = min_order_block_reason;
+        } else {
+            riskSizing.stageMarginKrw = stageMarginKrwAfter;
+        }
     }
 
     if (!riskSizing.diagnostics) {
@@ -1557,7 +1593,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     riskSizing.diagnostics!.original_v2_side = v2SideAfterPromotion != null ? String(v2SideAfterPromotion) : undefined;
     riskSizing.diagnostics!.original_stage_margin_krw = stageMarginKrwAfter;
 
-    if (promotionApplied) {
+    if (promotionApplied || min_order_block_reason != null) {
         console.info(JSON.stringify({
             event: "V2_PROMOTION_STATE_COMMIT_PROOF",
             symbol: String(input.symbol),
@@ -1568,11 +1604,17 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             block_reason: blockReason,
             stage_margin_krw_after: stageMarginKrwAfter,
             is_micro_probe: isMicroProbe,
-            promotion_reason: promotionReason
+            promotion_reason: promotionReason,
+            live_max_notional_usdt: liveMaxNotionalUsdt,
+            live_max_notional_krw: liveMaxNotionalKrw,
+            cap_applied,
+            cap_reason,
+            min_order_check_passed,
+            min_order_block_reason
         }));
     }
 
-    if (finalDecision === "ENTER" && (isMicroProbe || (promotionApplied && promotionReason != null))) {
+    if (finalDecision === "ENTER" || min_order_block_reason != null) {
         console.info(JSON.stringify({
             event: "LIVE_ORDER_SIZE_PROOF",
             symbol: String(input.symbol),
@@ -1582,7 +1624,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             stage_margin_krw_before: riskSizing.stageMarginKrw, // This is technically now the updated one, but the user expects the log. Actually, wait, let's just log it.
             stage_margin_krw_after: stageMarginKrwAfter,
             is_micro_probe: isMicroProbe,
-            live_max_notional_usdt: v2State.liveMaxOrderNotionalUsdt,
+            live_max_notional_usdt: liveMaxNotionalUsdt,
+            live_max_notional_krw: liveMaxNotionalKrw,
+            cap_applied,
+            cap_reason,
+            min_order_check_passed,
+            min_order_block_reason,
             side_zone_valid: sideZoneValid,
             range_edge_extreme: rangeEdgeExtreme,
             reversal_confirmed: reversalConfirmed
