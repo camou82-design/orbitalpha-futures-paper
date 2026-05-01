@@ -821,6 +821,8 @@ export type PaperOpenPositionRecord = {
   closePendingReason?: string;
   closePendingPrice?: number;
   closePendingFundingRate?: number;
+  closePendingFilledSize?: number;
+  closePendingRemainingSize?: number;
 
   // Partial Pending Tracking
   partialPendingOrdId?: string;
