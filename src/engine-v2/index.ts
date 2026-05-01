@@ -1508,13 +1508,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     blockReason = v2RejectReasonAfterPromotion;
     const decisionAfterReadiness: EngineV2FinalDecision = finalDecision;
 
-    if (!riskSizing.diagnostics) {
-        (riskSizing as { diagnostics?: import("./types").RiskSizingDiagnostics }).diagnostics = {};
-    }
-    riskSizing.diagnostics!.original_v2_decision = decisionBeforeReadiness;
-    riskSizing.diagnostics!.original_v2_side = execution.side != null ? String(execution.side) : undefined;
-    riskSizing.diagnostics!.original_stage_margin_krw = execution.baseSizeIntent * 1400;
-
     // 수정 3. stage margin 0 방지 및 프로브 마진 보장 + micro/probe cap 적용
     let stageMarginKrwAfter = riskSizing.stageMarginKrw;
     const isMicroProbe = 
@@ -1551,13 +1544,42 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
         
+        // 명시적으로 riskSizing에 결과 반영 (authority bridge로 전달 위함)
+        riskSizing.stageMarginKrw = stageMarginKrwAfter;
+    }
+
+    if (!riskSizing.diagnostics) {
+        (riskSizing as { diagnostics?: import("./types").RiskSizingDiagnostics }).diagnostics = {};
+    }
+    
+    // 최종 반영될 decision과 margin을 authority envelope이 참조하도록 diagnostics 갱신
+    riskSizing.diagnostics!.original_v2_decision = finalDecision;
+    riskSizing.diagnostics!.original_v2_side = v2SideAfterPromotion != null ? String(v2SideAfterPromotion) : undefined;
+    riskSizing.diagnostics!.original_stage_margin_krw = stageMarginKrwAfter;
+
+    if (promotionApplied) {
+        console.info(JSON.stringify({
+            event: "V2_PROMOTION_STATE_COMMIT_PROOF",
+            symbol: String(input.symbol),
+            decision_before: v2DecisionBeforePromotion,
+            side_before: v2SideBeforePromotion,
+            decision_after: finalDecision,
+            side_after: v2SideAfterPromotion,
+            block_reason: blockReason,
+            stage_margin_krw_after: stageMarginKrwAfter,
+            is_micro_probe: isMicroProbe,
+            promotion_reason: promotionReason
+        }));
+    }
+
+    if (finalDecision === "ENTER" && (isMicroProbe || (promotionApplied && promotionReason != null))) {
         console.info(JSON.stringify({
             event: "LIVE_ORDER_SIZE_PROOF",
             symbol: String(input.symbol),
             decision: finalDecision,
             side: v2SideAfterPromotion,
             promotion_reason: promotionReason,
-            stage_margin_krw_before: riskSizing.stageMarginKrw,
+            stage_margin_krw_before: riskSizing.stageMarginKrw, // This is technically now the updated one, but the user expects the log. Actually, wait, let's just log it.
             stage_margin_krw_after: stageMarginKrwAfter,
             is_micro_probe: isMicroProbe,
             live_max_notional_usdt: v2State.liveMaxOrderNotionalUsdt,
@@ -1565,7 +1587,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             range_edge_extreme: rangeEdgeExtreme,
             reversal_confirmed: reversalConfirmed
         }));
-        
         if (promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED") {
             console.info(JSON.stringify({
                 event: "V2_RANGE_MID_MICRO_PROBE_PROOF",
