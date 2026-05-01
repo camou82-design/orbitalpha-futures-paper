@@ -1525,8 +1525,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const minProbeMarginKrw = 14000;
     const minNotionalUsdtRequiredAtFixed10x = 100;
     const rawEnvLiveMaxNotionalUsdt = process.env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT ?? null;
-    const liveMaxNotionalUsdtFinal = Number(v2State.liveMaxOrderNotionalUsdt ?? 0);
-    const liveMaxNotionalSource = "env:OKX_LIVE_MAX_ORDER_NOTIONAL_USDT";
+    const stateLiveMaxOrderNotionalUsdt = Number(v2State.liveMaxOrderNotionalUsdt);
+    const liveMaxNotionalSource = "process.env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT";
+    let envParsed = NaN;
+    let liveMaxNotionalUsdtFinal = 0;
+    if (rawEnvLiveMaxNotionalUsdt != null && rawEnvLiveMaxNotionalUsdt.trim() !== "") {
+        envParsed = Number(rawEnvLiveMaxNotionalUsdt.trim());
+        if (Number.isFinite(envParsed) && envParsed > 0) {
+            liveMaxNotionalUsdtFinal = Math.min(10_000, envParsed);
+        }
+    }
     const liveMaxNotionalKrwFinal = liveMaxNotionalUsdtFinal > 0 ? liveMaxNotionalUsdtFinal * 1400 : null;
     const appliedLeverage = 10;
     const leverageSource = "v2_fixed";
@@ -1544,7 +1552,25 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         riskSizing.appliedLeverage = appliedLeverage;
         riskSizing.leverageReason = leverageReason;
         const envMissing = rawEnvLiveMaxNotionalUsdt == null || rawEnvLiveMaxNotionalUsdt.trim() === "";
-        const envInvalid = !envMissing && (!Number.isFinite(liveMaxNotionalUsdtFinal) || liveMaxNotionalUsdtFinal <= 0);
+        const envInvalid =
+            !envMissing && (!Number.isFinite(envParsed) || envParsed <= 0);
+        if (
+            liveMaxNotionalUsdtFinal > 0 &&
+            (!Number.isFinite(stateLiveMaxOrderNotionalUsdt) ||
+                stateLiveMaxOrderNotionalUsdt !== liveMaxNotionalUsdtFinal)
+        ) {
+            console.info(JSON.stringify({
+                event: "LIVE_MAX_NOTIONAL_STATE_MISMATCH_PROOF",
+                symbol: String(input.symbol),
+                raw_env_OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: rawEnvLiveMaxNotionalUsdt,
+                live_max_notional_usdt_final: liveMaxNotionalUsdtFinal,
+                state_live_max_order_notional_usdt: Number.isFinite(v2State.liveMaxOrderNotionalUsdt)
+                    ? v2State.liveMaxOrderNotionalUsdt
+                    : null,
+                promotion_reason: promotionReason,
+                decision_before_promotion: v2DecisionBeforePromotion
+            }));
+        }
         if (envMissing || envInvalid) {
             min_order_check_passed = false;
             min_order_block_reason = envMissing
@@ -1636,6 +1662,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotion_reason: promotionReason,
             raw_env_OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: rawEnvLiveMaxNotionalUsdt,
             live_max_notional_source: liveMaxNotionalSource,
+            state_live_max_order_notional_usdt: Number.isFinite(stateLiveMaxOrderNotionalUsdt)
+                ? stateLiveMaxOrderNotionalUsdt
+                : null,
             live_max_notional_usdt: liveMaxNotionalUsdtFinal,
             live_max_notional_krw: liveMaxNotionalKrwFinal,
             live_max_notional_usdt_final: liveMaxNotionalUsdtFinal,
@@ -1665,6 +1694,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             is_micro_probe: isMicroProbe,
             raw_env_OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: rawEnvLiveMaxNotionalUsdt,
             live_max_notional_source: liveMaxNotionalSource,
+            state_live_max_order_notional_usdt: Number.isFinite(stateLiveMaxOrderNotionalUsdt)
+                ? stateLiveMaxOrderNotionalUsdt
+                : null,
             live_max_notional_usdt: liveMaxNotionalUsdtFinal,
             live_max_notional_krw: liveMaxNotionalKrwFinal,
             live_max_notional_usdt_final: liveMaxNotionalUsdtFinal,

@@ -11405,6 +11405,7 @@ function buildV2StateBridge(
     okxApiSecretPresent: config.okxAuthMode === "live" ? config.okxApiSecret.length > 0 : config.okxDemoApiSecret.length > 0,
     okxPassphrasePresent: config.okxAuthMode === "live" ? config.okxPassphrase.length > 0 : config.okxDemoPassphrase.length > 0,
     okxSimulatedTradingHeaderEnabled: config.okxSimulatedTradingHeaderEnabled,
+    // Snapshot from EngineConfig at process start; may be 0 if env was unset at load time. V2 live cap proof uses process.env in runEngineV2.
     liveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt,
     freshTickBarrierActive,
     freshTickExecutionBlocked,
