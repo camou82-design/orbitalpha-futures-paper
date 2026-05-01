@@ -256,7 +256,8 @@ export type PaperDecisionRejectReason =
   /** Stage1 symbol-level mutex: opposite side position exists */
   | "SYMBOL_OPPOSITE_POSITION_OPEN"
   /** Stage1 symbol-level mutex: same side already open without add-on/scale-in */
-  | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN";
+  | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
+  | "PENDING_EXCHANGE_CONFIRM_LOCK";
 
 export type PaperStage1ResultCode =
   | "STAGE1_ENTERED"
@@ -767,7 +768,7 @@ export type PaperEngineState = Readonly<{
 }>;
 
 /** One leg in `positions/open.json` (JSON array of up to `paperMaxOpenPositions` records). */
-export type PaperOpenPositionRecord = Readonly<{
+export type PaperOpenPositionRecord = {
   openedAt: number;
   symbol: MarketSymbol;
   side: "long" | "short";
@@ -925,7 +926,7 @@ export type PaperOpenPositionRecord = Readonly<{
     entry_evidence_score: number;
     entry_evidence_reason: string;
   }>;
-}>;
+};
 
 /** 종료 레코드·이벤트에 함께 쓰는 종료 유형 코드(레저·로그 공통). */
 export type PaperExitType =
