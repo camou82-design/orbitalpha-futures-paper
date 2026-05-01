@@ -2,13 +2,23 @@ import type { EngineV2Input, EngineV2Position, EngineV2Side } from "../types";
 import type { V2StateAuthority } from "./types";
 
 function inferIntentSide(input: EngineV2Input): EngineV2Side {
+    const shock = input.state.directionalShockState ?? "NONE";
     const s = input.snapshot?.signal ?? "none";
-    if (s === "paper_long_candidate") return "long";
-    if (s === "paper_short_candidate") return "short";
-    const emaGap = Number(input.snapshot?.emaGap ?? 0);
-    if (emaGap > 0) return "long";
-    if (emaGap < 0) return "short";
-    return "none";
+    let side: EngineV2Side = "none";
+    
+    if (s === "paper_long_candidate") side = "long";
+    else if (s === "paper_short_candidate") side = "short";
+    else {
+        const emaGap = Number(input.snapshot?.emaGap ?? 0);
+        if (emaGap > 0) side = "long";
+        else if (emaGap < 0) side = "short";
+    }
+
+    // DOWN shock에서는 long 배제, UP shock에서는 short 배제
+    if (shock === "DOWN" && side === "long") return "none";
+    if (shock === "UP" && side === "short") return "none";
+    
+    return side;
 }
 
 function toSideLower(p: EngineV2Position): "long" | "short" | "none" {

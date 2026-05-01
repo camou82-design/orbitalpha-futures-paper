@@ -163,6 +163,25 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         exposureNotionalCapKrw: v2State.exposureNotionalCapKrw,
         symbolExposureNotionalCapKrw: v2State.symbolExposureNotionalCapKrw
     }));
+
+    if (v2State.directionalShockState === "DOWN" && v2State.inferredIntentSide === "long") {
+        console.warn(JSON.stringify({
+            event: "V2_INTENT_SIDE_ALIGNMENT_PROOF",
+            symbol: String(input.symbol),
+            directional_shock_state: v2State.directionalShockState,
+            inferred_intent_side_before: v2State.inferredIntentSide,
+            fixed: true,
+            reason: "DOWN_SHOCK_EXCLUDES_LONG_INTENT"
+        }));
+    } else {
+        console.info(JSON.stringify({
+            event: "V2_INTENT_SIDE_ALIGNMENT_PROOF",
+            symbol: String(input.symbol),
+            directional_shock_state: v2State.directionalShockState,
+            inferred_intent_side: v2State.inferredIntentSide,
+            fixed: false
+        }));
+    }
     const marketProofKey = [
         judgment.subtype,
         judgment.shockPhase,
@@ -815,8 +834,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 riskShortAllow === true &&
                 allowNewShort === true &&
                 emaGap < 0 &&
-                qualityScore >= 70 &&
-                trendWeaknessScore < 0.65 &&
+                qualityScore >= 60 && // 수정: 70 -> 60으로 완화
+                trendOk === true &&   // 수정: trendOk 조건 명시
+                paperExecutionReady === true && // 수정: execution ready 조건 명시
+                trendWeaknessScore < 0.75 && // 수정: 조금 더 완화 (0.65 -> 0.75)
                 !crashState.includes("ULTRA") &&
                 !crashState.includes("CRITICAL") &&
                 hardBlockPresent === false;
@@ -830,6 +851,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 shockReactionPromotionType = "MID_MOMENTUM_CONFIRMED";
                 shockReactionBlockReason = null;
                 promotionBlockReason = null;
+                console.info(JSON.stringify({
+                    event: "V2_SHOCK_REACTION_SHORT_PROMOTION_PROOF",
+                    symbol: String(input.symbol),
+                    shock_state: shock,
+                    side: "long",
+                    zone: zone,
+                    quality_score: qualityScore,
+                    promotion_reason: "SHOCK_REACTION_UP_MID_MOMENTUM_CONFIRMED"
+                }));
             } else if (shockDownMidMomentumConfirmed) {
                 v2DecisionAfterPromotion = "ENTER";
                 v2SideAfterPromotion = "short";
@@ -839,6 +869,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 shockReactionPromotionType = "MID_MOMENTUM_CONFIRMED";
                 shockReactionBlockReason = null;
                 promotionBlockReason = null;
+                console.info(JSON.stringify({
+                    event: "V2_SHOCK_REACTION_SHORT_PROMOTION_PROOF",
+                    symbol: String(input.symbol),
+                    shock_state: shock,
+                    side: "short",
+                    zone: zone,
+                    quality_score: qualityScore,
+                    promotion_reason: "SHOCK_REACTION_DOWN_MID_MOMENTUM_CONFIRMED"
+                }));
             } else {
                 shockReactionBlockReason = "SHOCK_REACTION_WATCH_MID_CHASE_BLOCKED";
                 if (promotionBlockReason == null) promotionBlockReason = shockReactionBlockReason;
@@ -939,7 +978,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     setupType = "lower_breakdown_continuation_short";
                     setupSide = "short";
                     setupEvidence = { boxBreakSide, emaGap, trend_side_candidate: trendSideCandidate };
-                } else if (downLowerReversalConfirmedLong) {
+                } else if (downLowerReversalConfirmedLong && false) { // 수정: SHOCK_REACTION_DOWN에서 long 배제
                     setupType = "lower_reversal_confirmed_long";
                     setupSide = "long";
                     countertrendUsed = true;
@@ -978,6 +1017,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 countertrendExceptionUsed = countertrendUsed;
                 shockReactionBlockReason = null;
                 promotionBlockReason = null;
+
+                if (shock === "DOWN" && setupSide === "short") {
+                    console.info(JSON.stringify({
+                        event: "V2_SHOCK_REACTION_SHORT_PROMOTION_PROOF",
+                        symbol: String(input.symbol),
+                        shock_state: shock,
+                        side: "short",
+                        zone: zone,
+                        quality_score: qualityScore,
+                        promotion_reason: promotionReason
+                    }));
+                }
             } else if (setupBlockReason != null) {
                 v2DecisionAfterPromotion = "HOLD";
                 v2SideAfterPromotion = "none";
@@ -1146,7 +1197,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 v2SideAfterPromotion === "long" &&
                 (zone === "lower" || rangeEdgeExtreme) &&
                 reversalConfirmed &&
-                shockRecoveryHint;
+                shockRecoveryHint &&
+                false; // 수정: DOWN shock에서는 long 무조건 차단
             if (v2SideAfterPromotion !== "short" && !downCounterTrendLongAllowed) {
                 v2DecisionAfterPromotion = "HOLD";
                 v2SideAfterPromotion = "none";
@@ -1257,6 +1309,37 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
 
+        // 수정 5. WAIT_RECHECK 반복 승격 경로 추가 (recheck promotion path)
+        const recheckPromotionEligible = 
+            v2RejectReasonAfterPromotion === "WAIT_RECHECK" &&
+            reviewingTicks >= 2 && // 2~3회 반복
+            hardControlClear === true &&
+            hardBlockPresent === false &&
+            paperExecutionReady === true &&
+            signedExecutionReady === true &&
+            !hasSameSidePosition &&
+            !hasOppositeSidePosition &&
+            qualityScore >= 60;
+
+        if (recheckPromotionEligible && (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP")) {
+            const sideAllowed = trendSideCandidate === "long" ? (riskLongAllow && allowNewLong) : (riskShortAllow && allowNewShort);
+            if (sideAllowed && trendSideCandidate !== "none" && trendOk) {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = trendSideCandidate;
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = "V2_WAIT_RECHECK_QUALIFIED_PROMOTION";
+                promotionBlockReason = null;
+                console.info(JSON.stringify({
+                    event: "V2_WAIT_RECHECK_PROMOTION_PROOF",
+                    symbol: String(input.symbol),
+                    reviewing_ticks: reviewingTicks,
+                    side: trendSideCandidate,
+                    quality_score: qualityScore,
+                    promotion_reason: "V2_WAIT_RECHECK_QUALIFIED_PROMOTION"
+                }));
+            }
+        }
 
         if (promotionApplied) {
             if (shockReactionPromotionType == null && shock === "DOWN") {
@@ -1337,13 +1420,55 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     riskSizing.diagnostics!.original_v2_side = execution.side != null ? String(execution.side) : undefined;
     riskSizing.diagnostics!.original_stage_margin_krw = execution.baseSizeIntent * 1400;
 
-    // 수정 3. stage margin 0 방지 및 프로브 마진 보장
+    // 수정 3. stage margin 0 방지 및 프로브 마진 보장 + micro/probe cap 적용
     let stageMarginKrwAfter = riskSizing.stageMarginKrw;
-    if (finalDecision === "ENTER" && (promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" || promotionReason === "V2_PROBE_ENTRY_CONFIRMED" || (promotionApplied && promotionReason != null))) {
+    const isMicroProbe = 
+        promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" || 
+        promotionReason === "V2_PROBE_ENTRY_CONFIRMED" || 
+        promotionReason === "V2_WAIT_RECHECK_QUALIFIED_PROMOTION" ||
+        promotionReason === "SHOCK_REACTION_DOWN_MID_MOMENTUM_CONFIRMED";
+
+    if (finalDecision === "ENTER" && (isMicroProbe || (promotionApplied && promotionReason != null))) {
         const minProbeMarginKrw = 14000; // 약 20 USDT (14,000 KRW * leverage 2 기준)
+        const liveMaxNotionalKrw = (v2State.liveMaxOrderNotionalUsdt ?? 25) * 1400;
+        const maxProbeMarginKrw = Math.min(35000, liveMaxNotionalKrw); // 상한선 설정
+        
         if (stageMarginKrwAfter < minProbeMarginKrw) {
             stageMarginKrwAfter = minProbeMarginKrw;
         }
+        
+        // micro/probe인 경우 상한선 강제 적용
+        if (isMicroProbe && stageMarginKrwAfter > maxProbeMarginKrw) {
+            stageMarginKrwAfter = maxProbeMarginKrw;
+        }
+
+        // side_zone_valid, range_edge_extreme, reversal_confirmed 미충족 시 추가 감액 (확신도 하락 반영)
+        if (isMicroProbe) {
+            let reductionMultiplier = 1.0;
+            if (!sideZoneValid) reductionMultiplier *= 0.8;
+            if (!rangeEdgeExtreme && activeEngineRouting === "RANGE") reductionMultiplier *= 0.9;
+            if (!reversalConfirmed && shock !== "NONE") reductionMultiplier *= 0.85;
+            
+            if (reductionMultiplier < 1.0) {
+                stageMarginKrwAfter = Math.round(stageMarginKrwAfter * reductionMultiplier);
+                if (stageMarginKrwAfter < minProbeMarginKrw) stageMarginKrwAfter = minProbeMarginKrw;
+            }
+        }
+        
+        console.info(JSON.stringify({
+            event: "LIVE_ORDER_SIZE_PROOF",
+            symbol: String(input.symbol),
+            decision: finalDecision,
+            side: v2SideAfterPromotion,
+            promotion_reason: promotionReason,
+            stage_margin_krw_before: riskSizing.stageMarginKrw,
+            stage_margin_krw_after: stageMarginKrwAfter,
+            is_micro_probe: isMicroProbe,
+            live_max_notional_usdt: v2State.liveMaxOrderNotionalUsdt,
+            side_zone_valid: sideZoneValid,
+            range_edge_extreme: rangeEdgeExtreme,
+            reversal_confirmed: reversalConfirmed
+        }));
         
         if (promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED") {
             console.info(JSON.stringify({
