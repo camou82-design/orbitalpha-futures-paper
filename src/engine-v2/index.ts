@@ -1341,6 +1341,101 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
 
+        // 수정 6. TRANSITION WATCH + SHOCK_REACTION_DOWN + upper short valid => micro/probe short probe
+        // reviewingTicks=0이어도 1회차부터 허용. full size 금지, micro/probe cap 강제.
+        const transitionWatchShortMeta = (execution.metadata ?? {}) as Record<string, unknown>;
+        const transitionWatchShortSetupType = String(transitionWatchShortMeta.transitionSetupType ?? "NONE");
+        const transitionWatchShortAction = String(transitionWatchShortMeta.transitionAction ?? "REJECT");
+        const transitionWatchShortRejectReason = transitionWatchShortMeta.transitionRejectReason as string | null ?? null;
+
+        const isTransitionWatchShortEligibleContext =
+            activeEngineRouting === "TRANSITION" &&
+            shock === "DOWN" &&
+            (transitionWatchShortSetupType === "SHOCK_DOWN_REACTION" || judgment.subtype === "SHOCK_REACTION_DOWN") &&
+            transitionWatchShortAction === "WATCH" &&
+            (transitionWatchShortRejectReason === "INSUFFICIENT_CONFIRMATION" || transitionWatchShortRejectReason === "EMA_GAP_ONLY_PREFLIGHT_BLOCKED");
+
+        const transitionWatchShortZoneOk =
+            zone === "upper" || rangeSideCandidate === "short";
+
+        const transitionWatchShortConditionsMet =
+            isTransitionWatchShortEligibleContext &&
+            transitionWatchShortZoneOk &&
+            trendSideCandidate === "short" &&
+            riskShortAllow === true &&
+            allowNewShort === true &&
+            qualityScore >= 60 &&
+            emaGap < 0 &&
+            hardBlockPresent === false &&
+            hardControlClear === true &&
+            paperExecutionReady === true &&
+            signedExecutionReady === true &&
+            !hasSameSidePosition &&
+            !hasOppositeSidePosition &&
+            !crashState.includes("ULTRA") &&
+            !crashState.includes("CRITICAL") &&
+            (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "REJECT");
+
+        let transitionWatchShortPromotionPassed = false;
+        let transitionWatchShortFailReason: string | null = null;
+
+        if (isTransitionWatchShortEligibleContext) {
+            if (!transitionWatchShortZoneOk) transitionWatchShortFailReason = "ZONE_NOT_UPPER_OR_RANGE_SHORT";
+            else if (trendSideCandidate !== "short") transitionWatchShortFailReason = "TREND_SIDE_NOT_SHORT";
+            else if (!riskShortAllow || !allowNewShort) transitionWatchShortFailReason = "SHORT_NOT_ALLOWED";
+            else if (qualityScore < 60) transitionWatchShortFailReason = `QUALITY_BELOW_60:${qualityScore}`;
+            else if (emaGap >= 0) transitionWatchShortFailReason = `EMA_GAP_NOT_NEGATIVE:${emaGap}`;
+            else if (hardBlockPresent) transitionWatchShortFailReason = "HARD_BLOCK_PRESENT";
+            else if (!hardControlClear) transitionWatchShortFailReason = "HARD_CONTROL_NOT_CLEAR";
+            else if (!paperExecutionReady) transitionWatchShortFailReason = "PAPER_EXECUTION_NOT_READY";
+            else if (!signedExecutionReady) transitionWatchShortFailReason = "SIGNED_EXECUTION_NOT_READY";
+            else if (hasSameSidePosition) transitionWatchShortFailReason = "SAME_SIDE_POSITION_EXISTS";
+            else if (hasOppositeSidePosition) transitionWatchShortFailReason = "OPPOSITE_POSITION_EXISTS";
+            else if (v2DecisionAfterPromotion === "ENTER") transitionWatchShortFailReason = "ALREADY_PROMOTED";
+            else transitionWatchShortPromotionPassed = transitionWatchShortConditionsMet;
+        }
+
+        if (shouldEmitV2Proof(
+            "V2_TRANSITION_WATCH_SHORT_PROMOTION_PROOF",
+            String(input.symbol),
+            `${transitionWatchShortSetupType}|${transitionWatchShortAction}|${transitionWatchShortRejectReason}|${zone}|${qualityScore}|${transitionWatchShortPromotionPassed}`,
+            isTransitionWatchShortEligibleContext
+        )) {
+            console.info(JSON.stringify({
+                event: "V2_TRANSITION_WATCH_SHORT_PROMOTION_PROOF",
+                symbol: String(input.symbol),
+                transition_action: transitionWatchShortAction,
+                transition_reject_reason: transitionWatchShortRejectReason,
+                zone,
+                range_side_candidate: rangeSideCandidate,
+                trend_side_candidate: trendSideCandidate,
+                short_allow: riskShortAllow && allowNewShort,
+                quality_score: qualityScore,
+                ema_gap: emaGap,
+                promotion_passed: transitionWatchShortPromotionPassed,
+                promotion_fail_reason: transitionWatchShortFailReason
+            }));
+        }
+
+        if (transitionWatchShortConditionsMet) {
+            v2DecisionAfterPromotion = "ENTER";
+            v2SideAfterPromotion = "short";
+            v2RejectReasonAfterPromotion = null;
+            promotionApplied = true;
+            promotionReason = "V2_TRANSITION_WATCH_SHORT_PROBE";
+            promotionBlockReason = null;
+            shockReactionBlockReason = null;
+            console.info(JSON.stringify({
+                event: "V2_SHOCK_REACTION_SHORT_PROMOTION_PROOF",
+                symbol: String(input.symbol),
+                shock_state: shock,
+                side: "short",
+                zone,
+                quality_score: qualityScore,
+                promotion_reason: "V2_TRANSITION_WATCH_SHORT_PROBE"
+            }));
+        }
+
         if (promotionApplied) {
             if (shockReactionPromotionType == null && shock === "DOWN") {
                 if (v2SideAfterPromotion === "short" && zone === "upper") shockReactionPromotionType = "upper_failure_short";
@@ -1426,7 +1521,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" || 
         promotionReason === "V2_PROBE_ENTRY_CONFIRMED" || 
         promotionReason === "V2_WAIT_RECHECK_QUALIFIED_PROMOTION" ||
-        promotionReason === "SHOCK_REACTION_DOWN_MID_MOMENTUM_CONFIRMED";
+        promotionReason === "SHOCK_REACTION_DOWN_MID_MOMENTUM_CONFIRMED" ||
+        promotionReason === "V2_TRANSITION_WATCH_SHORT_PROBE";
 
     if (finalDecision === "ENTER" && (isMicroProbe || (promotionApplied && promotionReason != null))) {
         const minProbeMarginKrw = 14000; // 약 20 USDT (14,000 KRW * leverage 2 기준)
