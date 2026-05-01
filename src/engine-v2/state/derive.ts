@@ -153,7 +153,7 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
         okxPassphrasePresent: input.state.okxPassphrasePresent === true,
         okxSimulatedTradingHeaderEnabled: input.state.okxSimulatedTradingHeaderEnabled === true,
         liveMaxOrderNotionalUsdt:
-            Number.isFinite(input.state.liveMaxOrderNotionalUsdt) ? Number(input.state.liveMaxOrderNotionalUsdt) : 5,
+            Number.isFinite(input.state.liveMaxOrderNotionalUsdt) ? Number(input.state.liveMaxOrderNotionalUsdt) : 0,
         directionalShockState: input.state.directionalShockState ?? "NONE",
         crashState,
         pumpState,

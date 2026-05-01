@@ -1514,14 +1514,24 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     blockReason = v2RejectReasonAfterPromotion;
     const decisionAfterReadiness: EngineV2FinalDecision = finalDecision;
 
-    // 수정 3. stage margin 0 방지 및 프로브 마진 보장 + micro/probe cap 적용
-    let stageMarginKrwAfter = riskSizing.stageMarginKrw;
+    // Live order size authority: fixed 10x leverage + strict env notional cap.
+    const stageMarginKrwBefore = riskSizing.stageMarginKrw;
+    let stageMarginKrwAfter = stageMarginKrwBefore;
     let cap_applied = false;
     let cap_reason: string | null = null;
+    let cap_kind: string | null = null;
     let min_order_check_passed = true;
     let min_order_block_reason: string | null = null;
-    const liveMaxNotionalUsdt = Number(v2State.liveMaxOrderNotionalUsdt ?? 0);
-    const liveMaxNotionalKrw = liveMaxNotionalUsdt > 0 ? liveMaxNotionalUsdt * 1400 : null;
+    const minProbeMarginKrw = 14000;
+    const minNotionalUsdtRequiredAtFixed10x = 100;
+    const rawEnvLiveMaxNotionalUsdt = process.env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT ?? null;
+    const liveMaxNotionalUsdtFinal = Number(v2State.liveMaxOrderNotionalUsdt ?? 0);
+    const liveMaxNotionalSource = "env:OKX_LIVE_MAX_ORDER_NOTIONAL_USDT";
+    const liveMaxNotionalKrwFinal = liveMaxNotionalUsdtFinal > 0 ? liveMaxNotionalUsdtFinal * 1400 : null;
+    const appliedLeverage = 10;
+    const leverageSource = "v2_fixed";
+    const leverageReason = "v2_fixed_10x";
+    const liveMaxStageMarginKrwCap = liveMaxNotionalKrwFinal != null ? Math.floor(liveMaxNotionalKrwFinal / appliedLeverage) : null;
 
     const isMicroProbe = 
         promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" || 
@@ -1531,10 +1541,27 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionReason === "V2_TRANSITION_WATCH_SHORT_PROBE";
 
     if (finalDecision === "ENTER") {
-        const minProbeMarginKrw = 14000;
-        
-        if (isMicroProbe) {
-            const maxProbeMarginKrw = liveMaxNotionalKrw != null ? Math.min(35000, liveMaxNotionalKrw) : 35000;
+        riskSizing.appliedLeverage = appliedLeverage;
+        riskSizing.leverageReason = leverageReason;
+        const envMissing = rawEnvLiveMaxNotionalUsdt == null || rawEnvLiveMaxNotionalUsdt.trim() === "";
+        const envInvalid = !envMissing && (!Number.isFinite(liveMaxNotionalUsdtFinal) || liveMaxNotionalUsdtFinal <= 0);
+        if (envMissing || envInvalid) {
+            min_order_check_passed = false;
+            min_order_block_reason = envMissing
+                ? "LIVE_MAX_NOTIONAL_CONFIG_MISSING"
+                : "LIVE_MAX_NOTIONAL_CONFIG_INVALID";
+            finalDecision = "REJECT";
+            v2DecisionAfterPromotion = "REJECT";
+            v2SideAfterPromotion = "none";
+            riskSizing.isBlocked = true;
+            riskSizing.blockReason = min_order_block_reason;
+            riskSizing.stageMarginKrw = 0;
+            stageMarginKrwAfter = 0;
+            blockReason = min_order_block_reason;
+        }
+
+        if (finalDecision === "ENTER" && isMicroProbe) {
+            const maxProbeMarginKrw = liveMaxStageMarginKrwCap != null ? Math.min(35000, liveMaxStageMarginKrwCap) : 35000;
             if (stageMarginKrwAfter < minProbeMarginKrw) {
                 stageMarginKrwAfter = minProbeMarginKrw;
             }
@@ -1542,6 +1569,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 stageMarginKrwAfter = maxProbeMarginKrw;
                 cap_applied = true;
                 cap_reason = "MICRO_PROBE_CAP";
+                cap_kind = "probe_margin_cap";
             }
             
             let reductionMultiplier = 1.0;
@@ -1556,16 +1584,17 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
         
         // live max cap 전역 적용
-        if (liveMaxNotionalKrw != null && stageMarginKrwAfter > liveMaxNotionalKrw) {
-            stageMarginKrwAfter = liveMaxNotionalKrw;
+        if (finalDecision === "ENTER" && liveMaxStageMarginKrwCap != null && stageMarginKrwAfter > liveMaxStageMarginKrwCap) {
+            stageMarginKrwAfter = liveMaxStageMarginKrwCap;
             cap_applied = true;
             cap_reason = cap_reason ?? "LIVE_MAX_ORDER_NOTIONAL_CAP";
+            cap_kind = "live_max_notional_margin_cap_at_fixed_10x";
         }
         
         // 최소 주문 underflow 처리
-        if (stageMarginKrwAfter < minProbeMarginKrw) {
+        if (finalDecision === "ENTER" && stageMarginKrwAfter < minProbeMarginKrw) {
             min_order_check_passed = false;
-            if (liveMaxNotionalKrw != null && liveMaxNotionalKrw < minProbeMarginKrw) {
+            if (liveMaxNotionalUsdtFinal > 0 && liveMaxNotionalUsdtFinal < minNotionalUsdtRequiredAtFixed10x) {
                 min_order_block_reason = "LIVE_MAX_NOTIONAL_UNDER_MIN_PROBE";
             } else {
                 min_order_block_reason = "MIN_ORDER_SIZE_UNDERFLOW";
@@ -1579,7 +1608,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             riskSizing.stageMarginKrw = 0;
             stageMarginKrwAfter = 0;
             blockReason = min_order_block_reason;
-        } else {
+        } else if (finalDecision === "ENTER") {
             riskSizing.stageMarginKrw = stageMarginKrwAfter;
         }
     }
@@ -1605,8 +1634,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             stage_margin_krw_after: stageMarginKrwAfter,
             is_micro_probe: isMicroProbe,
             promotion_reason: promotionReason,
-            live_max_notional_usdt: liveMaxNotionalUsdt,
-            live_max_notional_krw: liveMaxNotionalKrw,
+            raw_env_OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: rawEnvLiveMaxNotionalUsdt,
+            live_max_notional_source: liveMaxNotionalSource,
+            live_max_notional_usdt: liveMaxNotionalUsdtFinal,
+            live_max_notional_krw: liveMaxNotionalKrwFinal,
+            live_max_notional_usdt_final: liveMaxNotionalUsdtFinal,
+            live_max_notional_krw_final: liveMaxNotionalKrwFinal,
+            applied_leverage: appliedLeverage,
+            leverage_source: leverageSource,
+            leverage_reason: leverageReason,
+            cap_kind,
+            min_margin_krw_required: minProbeMarginKrw,
+            min_notional_usdt_required_at_fixed_10x: minNotionalUsdtRequiredAtFixed10x,
             cap_applied,
             cap_reason,
             min_order_check_passed,
@@ -1621,11 +1660,21 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             decision: finalDecision,
             side: v2SideAfterPromotion,
             promotion_reason: promotionReason,
-            stage_margin_krw_before: riskSizing.stageMarginKrw, // This is technically now the updated one, but the user expects the log. Actually, wait, let's just log it.
+            stage_margin_krw_before: stageMarginKrwBefore,
             stage_margin_krw_after: stageMarginKrwAfter,
             is_micro_probe: isMicroProbe,
-            live_max_notional_usdt: liveMaxNotionalUsdt,
-            live_max_notional_krw: liveMaxNotionalKrw,
+            raw_env_OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: rawEnvLiveMaxNotionalUsdt,
+            live_max_notional_source: liveMaxNotionalSource,
+            live_max_notional_usdt: liveMaxNotionalUsdtFinal,
+            live_max_notional_krw: liveMaxNotionalKrwFinal,
+            live_max_notional_usdt_final: liveMaxNotionalUsdtFinal,
+            live_max_notional_krw_final: liveMaxNotionalKrwFinal,
+            applied_leverage: appliedLeverage,
+            leverage_source: leverageSource,
+            leverage_reason: leverageReason,
+            cap_kind,
+            min_margin_krw_required: minProbeMarginKrw,
+            min_notional_usdt_required_at_fixed_10x: minNotionalUsdtRequiredAtFixed10x,
             cap_applied,
             cap_reason,
             min_order_check_passed,

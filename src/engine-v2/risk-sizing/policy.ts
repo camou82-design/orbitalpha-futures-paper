@@ -166,20 +166,13 @@ export function calculateRiskSizing(
         }
     }
 
-    const trendIsStrongDirection = isTrend && sideAllowed && !shockActive;
-    const isLiveAuth = state.okxAuthMode === "live";
-    const marketSubtype = String(judgment.subtype ?? "").toUpperCase();
-    const baseLeverage =
-        shockActive ? 2 :
-            isTrend ? 4 : 3;
-    let appliedLeverage = baseLeverage;
+    const FIXED_LEVERAGE_10X = 10;
+    let appliedLeverage = FIXED_LEVERAGE_10X;
     let stageMarginKrw = Math.max(0, baseStageMarginKrw * sizeMultiplier);
     if (judgment.regime === "RANGE") {
         stageMarginKrw = currentStage <= 0 ? 140_000 : currentStage === 1 ? 80_000 : 40_000;
-        leverageReason = "range_fixed_3x";
     } else if (shockActive) {
         stageMarginKrw = currentStage <= 0 ? 108_000 : 0;
-        leverageReason = "shock_fixed_2x";
         if (currentStage > 0) {
             isBlocked = true;
             blockReason = blockReason ?? "SHOCK_ADDON_FORBIDDEN";
@@ -190,120 +183,14 @@ export function calculateRiskSizing(
         stageMarginKrw = currentStage <= 0 ? 135_000 : currentStage === 1 ? 82_000 : 45_000;
     }
 
-    const canBoostBase =
-        !isBlocked &&
-        trendIsStrongDirection &&
-        entryQualityGrade === "S" &&
-        !state.freshTickBarrierActive &&
-        state.freshTickExecutionBlocked !== true &&
-        Number.isFinite(dProfit) &&
-        dProfit <= dLoss &&
-        dProfit <= dContaminated &&
-        symbolFlowLossStreak < 2;
-    if (canBoostBase && isAddOn && currentStage >= 1) {
-        leverageProfile = "BOOST_1";
-        appliedLeverage = 5;
-        leverageReason = "trend_s_grade_addon_revalidated";
-    } else {
-        leverageProfile = "BASE";
-    }
-    const pnlFavorable = (sameSymbolPos?.pnlPct ?? 0) > 0.003;
-    const canBoost2 =
-        canBoostBase &&
-        isAddOn &&
-        currentStage >= 2 &&
-        pnlFavorable;
-    if (canBoost2) {
-        leverageProfile = "BOOST_2";
-        appliedLeverage = 6;
-        leverageReason = "trend_s_grade_profit_confirmed";
-    }
-    const canAGradeBoost =
-        !isBlocked &&
-        isTrend &&
-        entryQualityGrade === "A" &&
-        isAddOn &&
-        currentStage >= 2 &&
-        pnlFavorable &&
-        !shockActive &&
-        symbolFlowLossStreak < 2;
-    if (canAGradeBoost) {
-        leverageProfile = "BOOST_1";
-        appliedLeverage = 5;
-        leverageReason = "trend_a_grade_limited_boost";
-    }
-    if (entryQualityGrade === "A" && appliedLeverage > 5) {
-        appliedLeverage = 5;
-        leverageProfile = "BOOST_1";
-        leverageBlockReason = "A_GRADE_MAX_5X";
-        leverageReason = "a_grade_cap_5x";
-    }
-    const isAGradeBoostActive = entryQualityGrade === "A" && (leverageReason === "trend_a_grade_limited_boost" || leverageReason === "a_grade_cap_5x");
+    leverageProfile = "BASE";
+    leverageReason = "v2_fixed_10x";
 
-    // NON_S_GRADE_BOOST_FORBIDDEN hardening
-    if ((leverageProfile === "BOOST_1" || leverageProfile === "BOOST_2") && entryQualityGrade !== "S" && !isAGradeBoostActive) {
-        leverageProfile = "BASE";
-        appliedLeverage = baseLeverage;
-        leverageBlockReason = "NON_S_GRADE_BOOST_FORBIDDEN";
-        leverageReason = "boost_reverted_non_s_grade";
-    }
-    if (!isTrend || shockActive) {
-        if (leverageProfile !== "BASE") leverageBlockReason = !isTrend ? "BOOST_TREND_ONLY" : "BOOST_FORBIDDEN_IN_SHOCK";
-        leverageProfile = "BASE";
-        appliedLeverage = baseLeverage;
-    }
     if (symbolFlowLossStreak >= 2) {
         stageMarginKrw *= 0.5;
-        appliedLeverage = Math.min(appliedLeverage, baseLeverage);
         leverageProfile = "BASE";
         leverageBlockReason = "TWO_CONSECUTIVE_LOSSES_RECOVERY_MODE";
-        leverageReason = "loss_recovery_mode";
-    }
-
-    if (isLiveAuth) {
-        const requestedLeverage = Math.max(1, appliedLeverage);
-        let maxLiveLeverageAllowed = 3;
-        let liveLeverageReason = "LIVE_BASE_3X";
-        if (judgment.regime === "TREND") {
-            if (entryQualityGrade === "S") {
-                maxLiveLeverageAllowed = 5;
-                liveLeverageReason = "TREND_S_5X_ALLOWED";
-            } else if (entryQualityGrade === "A") {
-                maxLiveLeverageAllowed = 4;
-                liveLeverageReason = "TREND_A_4X_ALLOWED";
-            } else {
-                maxLiveLeverageAllowed = 3;
-                liveLeverageReason = "TREND_NON_A_S_3X";
-            }
-        } else if (judgment.regime === "RANGE") {
-            maxLiveLeverageAllowed = 3;
-            liveLeverageReason = "RANGE_EDGE_FIXED_3X";
-        } else if (judgment.regime === "TRANSITION") {
-            maxLiveLeverageAllowed = 2;
-            liveLeverageReason = "TRANSITION_CONSERVATIVE_2X";
-        } else if (shockActive) {
-            maxLiveLeverageAllowed = 3;
-            liveLeverageReason = "SHOCK_REACTION_CONFIRMED_3X";
-        }
-        if (marketSubtype === "RANGE_MID_CHOP") {
-            maxLiveLeverageAllowed = Math.min(maxLiveLeverageAllowed, 2);
-            liveLeverageReason = `${liveLeverageReason}|RANGE_MID_CHOP_2X_CAP`;
-        }
-        if (
-            marketSubtype === "TREND_EXHAUSTION" ||
-            marketSubtype === "RANGE_MID_CHOP" ||
-            marketSubtype === "TRANSITION_CONFLICT" ||
-            judgment.regime === "TRANSITION"
-        ) {
-            maxLiveLeverageAllowed = Math.min(maxLiveLeverageAllowed, 3);
-            liveLeverageReason = `${liveLeverageReason}|SUBTYPE_4X_FORBIDDEN`;
-        }
-        if (isAddOn) {
-            maxLiveLeverageAllowed = Math.min(maxLiveLeverageAllowed, 3);
-            liveLeverageReason = `${liveLeverageReason}|ADDON_MAX_3X`;
-        }
-        appliedLeverage = Math.max(1, Math.min(requestedLeverage, maxLiveLeverageAllowed));
-        leverageReason = liveLeverageReason;
+        leverageReason = "v2_fixed_10x";
     }
 
     const proposedNotional = stageMarginKrw * appliedLeverage;
