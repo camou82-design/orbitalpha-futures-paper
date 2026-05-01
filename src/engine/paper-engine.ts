@@ -1217,10 +1217,8 @@ export class PaperEngine {
           const ordRes = await this.okxDemo.getOrder(toOkxSwapInstId(open.symbol), ordId, clOrdId);
           if (ordRes.ok && ordRes.value.length > 0) {
             const ord = (ordRes.value[0] as any);
-            const fillSzRaw = Number(ord.fillSz) || 0;
-            const requestedQty = Number(ord.sz) || 1; // avoid div zero
-            const fillRatio = Math.min(1, fillSzRaw / requestedQty);
             const orderState = ord.state;
+            const fillSzRaw = Number(ord.fillSz) || 0;
 
             if (orderState === "filled" || (orderState === "partially_filled" && fillSzRaw > 0)) {
               const fillPx = Number(ord.fillPx) || (isClosePending ? open.closePendingPrice : open.partialPendingPrice) || 0;
@@ -1229,9 +1227,39 @@ export class PaperEngine {
               const snap = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
               const fundingRate = (isClosePending ? open.closePendingFundingRate : open.partialPendingFundingRate) || snap?.fundingRate || 0;
               
-              const basePendingUsd = isClosePending ? open.sizeUsd : (open.partialPendingSizeUsd ?? 0);
-              const filledUsdComputed = basePendingUsd * fillRatio;
-              const unitConversionOk = Number.isFinite(filledUsdComputed) && filledUsdComputed > 0;
+              const requestedQty = Number(ord.sz);
+              const cumulativeFillSz = fillSzRaw;
+              const previousProcessedFillSz = isPartialPending ? (open.partialPendingProcessedFillSz ?? 0) : (open.closePendingProcessedFillSz ?? 0);
+              const deltaFillSz = Math.max(0, cumulativeFillSz - previousProcessedFillSz);
+
+              if (!requestedQty || requestedQty <= 0) {
+                 this.logger.warn("V2_PENDING_RECONCILE_UNIT_ERROR", { symbol: open.symbol, ordId, state: orderState, sz: ord.sz });
+                 next.push(open); 
+                 continue;
+              }
+
+              if (deltaFillSz <= 0 && orderState === "partially_filled") {
+                 this.logger.info("V2_PARTIAL_PENDING_RECONCILE_PROOF", { 
+                    symbol: open.symbol, 
+                    side: open.side, 
+                    ordId, 
+                    state: orderState, 
+                    delta_fill_sz: deltaFillSz, 
+                    previous_processed_fill_sz: previousProcessedFillSz, 
+                    cumulative_fill_sz: cumulativeFillSz, 
+                    ledger_update_applied: false, 
+                    reason: "NO_NEW_FILL_DELTA" 
+                 });
+                 next.push(open); 
+                 continue;
+              }
+
+              const deltaFillRatio = deltaFillSz / requestedQty;
+              const totalFillRatio = cumulativeFillSz / requestedQty;
+              const baseOriginalPendingUsd = isPartialPending ? (open.partialPendingOriginalSizeUsd ?? open.partialPendingSizeUsd ?? 0) : open.sizeUsd;
+              const deltaFilledUsd = baseOriginalPendingUsd * deltaFillRatio;
+              const totalFilledUsdComputed = baseOriginalPendingUsd * totalFillRatio;
+              const unitConversionOk = Number.isFinite(deltaFilledUsd) && deltaFilledUsd >= 0;
 
               if (isClosePending) {
                 if (orderState === "filled") {
@@ -1281,35 +1309,37 @@ export class PaperEngine {
                   continue; // Pruned from open ledger
                 } else {
                   // CLOSE_PENDING partially_filled
-                  open.closePendingFilledSize = fillSzRaw;
-                  open.closePendingRemainingSize = requestedQty - fillSzRaw;
+                  open.closePendingFilledSize = cumulativeFillSz;
+                  open.closePendingRemainingSize = Math.max(0, requestedQty - cumulativeFillSz);
+                  open.closePendingProcessedFillSz = cumulativeFillSz;
+
                   this.logger.info("V2_CLOSE_PENDING_PARTIAL_FILL_PROOF", {
                     symbol: open.symbol,
                     side: open.side,
                     ord_id: ordId,
                     remote_size: remotePos?.size ?? 0,
                     ledger_size: open.sizeUsd,
-                    filled_qty_raw: fillSzRaw,
-                    fill_ratio: fillRatio,
-                    filled_usd_computed: filledUsdComputed
+                    filled_qty_raw: cumulativeFillSz,
+                    delta_fill_sz: deltaFillSz,
+                    total_filled_usd: totalFilledUsdComputed
                   });
                   ledgerModified = true;
                   next.push(open);
                   continue;
                 }
               } else if (isPartialPending) {
-                if (unitConversionOk) {
+                if (unitConversionOk && deltaFillSz > 0) {
                   this.logger.info("V2_PARTIAL_PENDING_RECONCILE_PROOF", { 
                     symbol: open.symbol, 
                     side: open.side, 
                     ordId, 
                     state: orderState, 
                     fillPx, 
-                    fill_sz_raw: fillSzRaw,
+                    delta_fill_sz: deltaFillSz,
+                    cumulative_fill_sz: cumulativeFillSz,
                     requested_qty: requestedQty,
-                    fill_ratio: fillRatio,
-                    filled_usd_computed: filledUsdComputed,
-                    size_unit_source: "proportional_ratio",
+                    delta_fill_ratio: deltaFillRatio,
+                    delta_filled_usd: deltaFilledUsd,
                     unit_conversion_ok: true
                   });
                   
@@ -1318,14 +1348,18 @@ export class PaperEngine {
                     closePrice: fillPx,
                     closedAt: fillTime,
                     snapFundingRate: fundingRate,
-                    marginUsd: filledUsdComputed,
+                    marginUsd: deltaFilledUsd,
                     paperTakerFeeRate: this.config.paperTakerFeeRate,
                     paperFundingIntervalHours: this.config.paperFundingIntervalHours
                   });
                   
-                  open.sizeUsd = Math.max(0, open.sizeUsd - filledUsdComputed);
+                  open.sizeUsd = Math.max(0, open.sizeUsd - deltaFilledUsd);
                   open.realizedPnl = (open.realizedPnl ?? 0) + metrics.pnlUsdNet;
                   
+                  // Update processed counters
+                  open.partialPendingProcessedFillSz = cumulativeFillSz;
+                  open.partialPendingProcessedUsd = (open.partialPendingProcessedUsd ?? 0) + deltaFilledUsd;
+
                   if (orderState === "filled") {
                     open.lifecycleState = "OPEN";
                     open.partialExitStage = (open.partialExitStage ?? 0) + 1;
@@ -1333,23 +1367,27 @@ export class PaperEngine {
                     open.partialPendingOrdId = undefined;
                     open.partialPendingClOrdId = undefined;
                     open.partialPendingSizeUsd = undefined;
+                    open.partialPendingOriginalSizeUsd = undefined;
+                    open.partialPendingProcessedFillSz = undefined;
+                    open.partialPendingProcessedUsd = undefined;
                     open.partialPendingAt = undefined;
                     open.partialPendingReduceRatio = undefined;
                     open.partialPendingReason = undefined;
                     open.partialPendingPrice = undefined;
                     open.partialPendingFundingRate = undefined;
                   } else {
-                    // partially_filled: update remaining pending size
+                    // partially_filled: update remaining pending size using delta
                     if (open.partialPendingSizeUsd) {
-                      open.partialPendingSizeUsd = Math.max(0, open.partialPendingSizeUsd - filledUsdComputed);
+                      open.partialPendingSizeUsd = Math.max(0, open.partialPendingSizeUsd - deltaFilledUsd);
                     }
                   }
                   
                   this.logger.info("V2_PARTIAL_POSITION_UPDATE_PROOF", {
                     symbol: open.symbol,
                     side: open.side,
-                    reduced_usd: filledUsdComputed,
-                    remaining_usd: open.sizeUsd,
+                    delta_reduced_usd: deltaFilledUsd,
+                    total_processed_usd: open.partialPendingProcessedUsd,
+                    remaining_size_usd: open.sizeUsd,
                     realized_pnl: metrics.pnlUsdNet,
                     total_realized_pnl: open.realizedPnl,
                     is_final: orderState === "filled"
@@ -1362,8 +1400,9 @@ export class PaperEngine {
                     side: open.side, 
                     ordId, 
                     state: orderState,
-                    unit_conversion_ok: false,
-                    detail: "CANNOT_COMPUTE_USD_VAL_SKIPPING_LEDGER_UPDATE"
+                    unit_conversion_ok: unitConversionOk,
+                    delta_fill_sz: deltaFillSz,
+                    detail: "SKIPPING_LEDGER_UPDATE"
                   });
                   next.push(open);
                   continue;
@@ -6387,6 +6426,9 @@ export class PaperEngine {
             lifecycleState: "PARTIAL_PENDING",
             partialPendingOrdId: partialSubmit?.ordId ?? undefined,
             partialPendingSizeUsd: partialSizeUsd,
+            partialPendingOriginalSizeUsd: partialSizeUsd,
+            partialPendingProcessedFillSz: 0,
+            partialPendingProcessedUsd: 0,
             partialPendingAt: Date.now(),
             partialPendingReduceRatio: reduceRatio,
             partialPendingReason: v2PartialAuthority.partialReason ?? "v2_partial_exit",
