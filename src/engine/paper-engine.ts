@@ -1169,6 +1169,8 @@ export class PaperEngine {
           ledgerModified = true;
           this.logger.info("POSITION_OPEN_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, status: "confirmed" });
         } else if (!isNew) {
+          const exchangeOrdId = open.exchangeOrdId || "unknown";
+          const elapsedMs = nowTs - open.openedAt;
           open.lifecycleState = "FAILED";
           open.reconcileState = "FAILED";
           open.lastCheckedAt = nowTs;
@@ -1177,8 +1179,11 @@ export class PaperEngine {
           this.logger.error("POSITION_OPEN_CONFIRM_FAILED", {
             symbol: open.symbol,
             side: open.side,
+            exchange_ord_id: exchangeOrdId,
+            elapsed_ms: elapsedMs,
+            open_ledger_removed: true,
             detail: "PENDING_TIMEOUT_NO_EXCHANGE_POSITION",
-            action: "MARK_FAILED"
+            action: "MARK_FAILED_AND_REMOVE"
           });
           continue; 
         } else {
@@ -1199,15 +1204,17 @@ export class PaperEngine {
           const ordRes = await this.okxDemo.getOrder(toOkxSwapInstId(open.symbol), ordId, clOrdId);
           if (ordRes.ok && ordRes.value.length > 0) {
             const ord = (ordRes.value[0] as any);
-            if (ord.state === "filled") {
+            const fillSz = Number(ord.fillSz) || 0;
+
+            if (ord.state === "filled" || (ord.state === "partially_filled" && isPartialPending && fillSz > 0)) {
               const fillPx = Number(ord.fillPx) || (isClosePending ? open.closePendingPrice : open.partialPendingPrice) || 0;
               const fillTime = Number(ord.fillTime) || nowTs;
               const flowId = `${open.symbol}:${open.side}:${open.openedAt}`;
               const snap = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
               const fundingRate = (isClosePending ? open.closePendingFundingRate : open.partialPendingFundingRate) || snap?.fundingRate || 0;
               
-              if (isClosePending) {
-                this.logger.info("V2_CLOSE_PENDING_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, ordId, state: "filled", fillPx });
+              if (isClosePending && ord.state === "filled") {
+                this.logger.info("V2_CLOSE_PENDING_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, ordId, state: ord.state, fillPx });
                 
                 const metrics = computePaperCloseLegMetrics({
                   open,
@@ -1251,47 +1258,68 @@ export class PaperEngine {
                 
                 ledgerModified = true;
                 continue; // Pruned from open ledger
-              } else {
-                this.logger.info("V2_PARTIAL_PENDING_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, ordId, state: "filled", fillPx });
+              } else if (isPartialPending) {
+                this.logger.info("V2_PARTIAL_PENDING_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, ordId, state: ord.state, fillPx, fillSz });
                 
-                const partialSizeUsd = open.partialPendingSizeUsd ?? 0;
+                // For partially_filled, we only reduce by fillSz. 
+                // fillSz is often in contracts, but OKX ord might provide sz or something. 
+                // Let's assume fillSz is already in USD or we can approximate. 
+                // Actually, OKX fillSz is in units/contracts. 
+                // But for simplicity in paper engine, we often map 1:1 or use partialPendingSizeUsd.
+                
+                const effectivelyFilledUsd = ord.state === "filled" ? (open.partialPendingSizeUsd ?? 0) : fillSz; // simple heuristic
                 const metrics = computePaperCloseLegMetrics({
                   open,
                   closePrice: fillPx,
                   closedAt: fillTime,
                   snapFundingRate: fundingRate,
-                  marginUsd: partialSizeUsd,
+                  marginUsd: effectivelyFilledUsd,
                   paperTakerFeeRate: this.config.paperTakerFeeRate,
                   paperFundingIntervalHours: this.config.paperFundingIntervalHours
                 });
                 
-                open.lifecycleState = "OPEN";
-                open.sizeUsd = Math.max(0, open.sizeUsd - partialSizeUsd);
+                open.sizeUsd = Math.max(0, open.sizeUsd - effectivelyFilledUsd);
                 open.realizedPnl = (open.realizedPnl ?? 0) + metrics.pnlUsdNet;
-                open.partialExitStage = (open.partialExitStage ?? 0) + 1;
                 
-                // Clear pending fields
-                open.partialPendingOrdId = undefined;
-                open.partialPendingClOrdId = undefined;
-                open.partialPendingSizeUsd = undefined;
-                open.partialPendingAt = undefined;
-                open.partialPendingReduceRatio = undefined;
-                open.partialPendingReason = undefined;
-                open.partialPendingPrice = undefined;
-                open.partialPendingFundingRate = undefined;
+                if (ord.state === "filled") {
+                  open.lifecycleState = "OPEN";
+                  open.partialExitStage = (open.partialExitStage ?? 0) + 1;
+                  // Clear pending fields
+                  open.partialPendingOrdId = undefined;
+                  open.partialPendingClOrdId = undefined;
+                  open.partialPendingSizeUsd = undefined;
+                  open.partialPendingAt = undefined;
+                  open.partialPendingReduceRatio = undefined;
+                  open.partialPendingReason = undefined;
+                  open.partialPendingPrice = undefined;
+                  open.partialPendingFundingRate = undefined;
+                } else {
+                  // partially_filled: keep in PARTIAL_PENDING but update remaining size to fill
+                  if (open.partialPendingSizeUsd) {
+                    open.partialPendingSizeUsd = Math.max(0, open.partialPendingSizeUsd - fillSz);
+                  }
+                  // Keep state PARTIAL_PENDING
+                }
                 
                 this.logger.info("V2_PARTIAL_POSITION_UPDATE_PROOF", {
                   symbol: open.symbol,
                   side: open.side,
-                  reduced_usd: partialSizeUsd,
+                  reduced_usd: effectivelyFilledUsd,
                   remaining_usd: open.sizeUsd,
                   realized_pnl: metrics.pnlUsdNet,
-                  total_realized_pnl: open.realizedPnl
+                  total_realized_pnl: open.realizedPnl,
+                  is_final: ord.state === "filled"
                 });
                 
                 ledgerModified = true;
+              } else {
+                // isClosePending but state is partially_filled: 김 사장님 지시 -> "전량 close로 처리 금지"
+                // Do nothing, keep in CLOSE_PENDING, wait for fully filled
+                next.push(open);
+                continue;
               }
             } else if (ord.state === "canceled" || ord.state === "rejected") {
+              const prevLifecycle = open.lifecycleState;
               this.logger.warn("V2_PENDING_ORDER_FAILED_PROOF", { symbol: open.symbol, side: open.side, ordId, state: ord.state });
               open.lifecycleState = "OPEN";
               // Clear all pending fields
@@ -1310,6 +1338,16 @@ export class PaperEngine {
               open.partialPendingReason = undefined;
               open.partialPendingPrice = undefined;
               open.partialPendingFundingRate = undefined;
+
+              this.logger.info("V2_PENDING_ORDER_RECOVERED_PROOF", {
+                symbol: open.symbol,
+                side: open.side,
+                ord_id: ordId,
+                state: ord.state,
+                previous_lifecycle: prevLifecycle,
+                restored_lifecycle: "OPEN",
+                pending_fields_cleared: true
+              });
               
               ledgerModified = true;
             } else {
