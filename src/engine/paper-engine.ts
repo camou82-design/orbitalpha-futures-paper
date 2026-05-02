@@ -282,6 +282,7 @@ type SymbolSnapshot = Readonly<{
   candidateStrength: PaperCandidateStrength | null;
   emaGap: number | null;
   volumeRatioProxy: number;
+  authoritySource?: "v1" | "v2";
   /** RANGE/TREND 판단용 박스(최근 1m) */
   boxHigh: number | null;
   boxLow: number | null;
@@ -8176,30 +8177,41 @@ export class PaperEngine {
     }
     const entryQueue: SymbolSnapshot[] = [];
     input.decisionBySymbol.forEach((envelope, symKey) => {
-      const { authority } = envelope;
+      const { authority, snapshot } = envelope;
 
+      let enqueue_block_reason: string | null = null;
       const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(authority, envelope.legacy.adaptiveResult);
-      if (effectiveAdaptiveResult == null) return;
+      if (effectiveAdaptiveResult == null) enqueue_block_reason = "adaptive_bridge_null";
 
-      const base = snapshotBySymbol.get(symKey) ?? envelope.snapshot;
-      if (!base) return;
+      const base = snapshotBySymbol.get(symKey) ?? snapshot;
+      if (!base && !enqueue_block_reason) enqueue_block_reason = "snapshot_missing";
 
-      let sig: PaperSignal = authority.side === "long" ? "paper_long_candidate" : "paper_short_candidate";
-      if (authority.source === "v2") {
-        sig = authority.side === "long" ? "v2_long_candidate" : "v2_short_candidate";
-      }
-      entryQueue.push({ ...base, signal: sig });
+      const isV2EntryIntent = authority.source === "v2" && (authority.decision === "ENTER" || (authority as any).originalDecision === "ENTER");
 
-      if (authority.source === "v2" && authority.decision === "ENTER") {
+      if (isV2EntryIntent) {
         this.logger.info("V2_ENTER_CANDIDATE_ENQUEUE_PROOF", {
           symbol: symKey,
-          side: authority.side,
+          authority_decision: authority.decision,
+          original_decision: (authority as any).originalDecision ?? null,
+          authority_side: authority.side,
+          original_side: (authority as any).originalSide ?? null,
           stage_margin_krw: authority.stageMarginKrw ?? 0,
-          exposure_notional_krw: authority.exposureNotionalKrw ?? 0,
+          original_stage_margin_krw: (authority as any).originalStageMarginKrw ?? 0,
+          hard_block_present: authority.hardBlockPresent === true,
+          hard_block_reason: authority.hardBlockReason ?? null,
+          signed_execution_ready: executionSnapshot.signedReady,
+          paper_execution_ready: executionSnapshot.paperReady,
+          enqueued: enqueue_block_reason === null,
+          enqueue_block_reason,
           run_cycle_id: executionSnapshot.runCycleId,
           decision_id: (authority as any).decision_id ?? null
         });
       }
+
+      if (enqueue_block_reason) return;
+
+      const sig: PaperSignal = authority.side === "long" ? "paper_long_candidate" : "paper_short_candidate";
+      entryQueue.push({ ...base!, signal: sig, authoritySource: authority.source as "v1" | "v2" });
     });
     entryQueue.sort((a, b) => {
       const aMajor = a.symbol === "BTCUSDT" || a.symbol === "ETHUSDT";
@@ -8231,14 +8243,13 @@ export class PaperEngine {
         if (!envelope) return false;
         const { authority } = envelope;
         const adoptedEngine = envelope.selector?.adopted_result.engine ?? null;
-        const hasEnterIntent = (authority.originalDecision === "ENTER" || authority.decision === "ENTER") &&
-          (authority.originalSide === "long" || authority.originalSide === "short" || authority.side === "long" || authority.side === "short") &&
-          (authority.originalStageMarginKrw ?? authority.stageMarginKrw ?? 0) > 0;
-
+        
         return adoptedEngine === "V2" &&
           envelope.v2_execution_envelope?.authoritySource === "v2_execution_envelope" &&
           authority.source === "v2" &&
-          hasEnterIntent &&
+          authority.decision === "ENTER" &&
+          (authority.side === "long" || authority.side === "short") &&
+          (authority.stageMarginKrw ?? 0) > 0 &&
           executionSnapshot.paperReady === true &&
           executionSnapshot.signedReady === true &&
           executionSnapshot.tradeEnabled === true &&
@@ -8247,6 +8258,7 @@ export class PaperEngine {
           executionSnapshot.reconcileSafe === false &&
           executionSnapshot.dailyLossGuard === false &&
           executionSnapshot.riskModeHalt === false &&
+          authority.hardBlockPresent !== true &&
           authority.nonBypassableHardBlockPresent !== true;
       });
 

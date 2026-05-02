@@ -1,6 +1,6 @@
 import type { MarketSymbol } from "../models/types";
 
-export type PaperSignal = "paper_long_candidate" | "paper_short_candidate" | "v2_long_candidate" | "v2_short_candidate" | "none";
+export type PaperSignal = "paper_long_candidate" | "paper_short_candidate" | "none";
 
 /** Strong = clear EMA20 vs EMA60 separation; weak = sideways band (|emaGap| small) + close vs EMA20. */
 export type PaperCandidateStrength = "strong" | "weak";
