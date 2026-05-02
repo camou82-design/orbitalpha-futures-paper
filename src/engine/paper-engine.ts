@@ -8921,15 +8921,56 @@ export class PaperEngine {
         } else if (isNewEntry && next.length >= max) {
           hardBlockPresent = true;
           hardBlockReason = "MAX_SLOTS_REACHED";
-        } else if (authorityStageMarginKrwForFinalizer > 0 && (authorityStageMarginKrwForFinalizer / PAPER_LEDGER_KRW_NOTIONAL_PER_USD) < MIN_POSITION_SIZE_USD) {
-          hardBlockPresent = true;
-          hardBlockReason = "MIN_ORDER_SIZE_UNDERFLOW";
-        } else if (res.decision.reject_reason === "ORDER_BUILD_FAIL") {
-          hardBlockPresent = true;
-          hardBlockReason = "ORDER_BUILD_FAIL";
-        } else if (finalBlockedReason != null && hardReasons.has(finalBlockedReason)) {
-          hardBlockPresent = true;
-          hardBlockReason = finalBlockedReason;
+        } else {
+          // --- V2-Aware Min Order Size Check (Final Authorization Gate) ---
+          const marginUsdt = authorityStageMarginKrwForFinalizer / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
+          const appliedLev = authority.appliedLeverage ?? (authority.source === "v2" ? 10 : 1);
+          const computedNotionalUsdt = marginUsdt * appliedLev;
+          const minReqNotional = authority.source === "v2" ? 100 : MIN_POSITION_SIZE_USD;
+
+          let minOrderUnderflow = false;
+          let underflowBasis = "margin_only_legacy";
+
+          if (authority.source === "v2") {
+            underflowBasis = "v2_notional_10x_aware";
+            // V2 10배 고정 원칙: 마진 10 USDT * 10배 = 100 USDT 이상이면 통과.
+            // notional_usdt >= 100이면 underflow로 막지 않는다.
+            if (authorityStageMarginKrwForFinalizer > 0 && computedNotionalUsdt < 100) {
+              minOrderUnderflow = true;
+            }
+          } else {
+            // Legacy/V1: 마진 기준 (15 USD)
+            if (authorityStageMarginKrwForFinalizer > 0 && marginUsdt < MIN_POSITION_SIZE_USD) {
+              minOrderUnderflow = true;
+            }
+          }
+
+          if (authority.source === "v2") {
+            this.logger.info("V2_FINAL_MIN_ORDER_CHECK_PROOF", {
+              symbol: sym,
+              authority_source: authority.source,
+              authority_size_krw: authorityStageMarginKrwForFinalizer,
+              authority_size_usdt: marginUsdt,
+              applied_leverage: appliedLev,
+              computed_order_notional_usdt: computedNotionalUsdt,
+              min_required_notional_usdt: minReqNotional,
+              min_order_underflow: minOrderUnderflow,
+              underflow_basis: underflowBasis,
+              final_blocked_reason_before: finalBlockedReason,
+              final_blocked_reason_after: minOrderUnderflow ? "MIN_ORDER_SIZE_UNDERFLOW" : finalBlockedReason
+            });
+          }
+
+          if (minOrderUnderflow) {
+            hardBlockPresent = true;
+            hardBlockReason = "MIN_ORDER_SIZE_UNDERFLOW";
+          } else if (res.decision.reject_reason === "ORDER_BUILD_FAIL") {
+            hardBlockPresent = true;
+            hardBlockReason = "ORDER_BUILD_FAIL";
+          } else if (finalBlockedReason != null && hardReasons.has(finalBlockedReason)) {
+            hardBlockPresent = true;
+            hardBlockReason = finalBlockedReason;
+          }
         }
         if (hardBlockPresent) {
           finalBlockedReason = hardBlockReason;
