@@ -8215,10 +8215,11 @@ export class PaperEngine {
         if (!envelope) return false;
         const { authority } = envelope;
         const adoptedEngine = envelope.selector?.adopted_result.engine ?? null;
-        const decisionForExecution = (authority.decision as any === "ENTER" || authority.decision as any === "WAIT_RECHECK") ? "ENTER" : authority.decision;
+        const authoritySource = (authority as any).authoritySource;
         
         return adoptedEngine === "V2" &&
-          decisionForExecution === "ENTER" &&
+          authoritySource === "v2_execution_envelope" &&
+          authority.decision === "ENTER" &&
           (authority.side === "long" || authority.side === "short") &&
           (authority.stageMarginKrw ?? 0) > 0 &&
           executionSnapshot.paperReady === true &&

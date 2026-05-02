@@ -152,11 +152,10 @@ export function calculateRiskSizing(
         sizeMultiplier *= 0.4;
     }
 
-    // Fresh-tick barrier + execution gate: hard block (paper engine final authority).
+    // Fresh-tick barrier + execution gate: Soft warning / diagnostic only in V2 decision stage.
+    // Hard block is handled exclusively at the paper-engine final authority gate.
     if (!isBlocked && (state.freshTickBarrierActive === true || state.freshTickExecutionBlocked === true)) {
-        isBlocked = true;
-        blockReason =
-            state.freshTickExecutionBlocked === true ? "FRESH_TICK_EXECUTION_BLOCKED" : "FRESH_TICK_BARRIER_ACTIVE";
+        // Diagnostic only, no hard block here.
     }
 
     if (!isBlocked && Number.isFinite(dProfit)) {
