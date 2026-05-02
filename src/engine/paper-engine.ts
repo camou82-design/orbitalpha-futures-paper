@@ -8869,6 +8869,20 @@ export class PaperEngine {
       } else if (isNewEntry && policyPaused) {
         finalBlockedReason = "POLICY_PAUSED_OR_FORBIDDEN";
       }
+
+      // --- ATOMIC READINESS SNAPSHOT FOR V2 AUTHORITATIVE EXECUTION ---
+      const executionSnapshot = {
+        paperReady: this.paperExecutionReady,
+        signedReady: this.signedExecutionReady,
+        tradeEnabled: this.serverTradeControlState.server_trade_enabled,
+        closeOnly: this.serverTradeControlState.close_only_mode,
+        killSwitch: this.serverTradeControlState.kill_switch_active,
+        reconcileSafe: this.reconcileSafetyCloseOnly,
+        dailyLossGuard: this.lastRisk?.dailyLossGuardTriggered === true,
+        riskModeHalt: String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() === "HALT",
+        freshTickBlocked: authority.hardBlockReason === "FRESH_TICK_EXECUTION_BLOCKED"
+      };
+
       // [CRASH ENTRY GUARD EVALUATION]
       if (finalBlockedReason === "CRASH_ENTRY_GUARD_BLOCK") {
         const finalBlockedReasonBefore = finalBlockedReason;
@@ -8970,15 +8984,15 @@ export class PaperEngine {
       // 1. V2_FINAL_AUTHORIZATION_PROOF (System Level)
       if (v2AuthorityCandidate) {
         let systemHardBlock: string | null = null;
-        if (!this.serverTradeControlState.server_trade_enabled) systemHardBlock = "SERVER_TRADE_DISABLED";
-        else if (this.serverTradeControlState.kill_switch_active) systemHardBlock = "KILL_SWITCH";
-        else if (this.serverTradeControlState.close_only_mode) systemHardBlock = "CLOSE_ONLY_MODE";
-        else if (this.reconcileSafetyCloseOnly) systemHardBlock = "RECONCILE_SAFE_MODE";
-        else if (!this.paperExecutionReady) systemHardBlock = "PAPER_EXECUTION_NOT_READY";
-        else if (!this.signedExecutionReady) systemHardBlock = "SIGNED_EXECUTION_NOT_READY";
-        else if (String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() === "HALT") systemHardBlock = "RISK_MODE_HALT";
-        else if (this.lastRisk?.dailyLossGuardTriggered === true) systemHardBlock = "DAILY_LOSS_GUARD";
-        else if (authority.hardBlockReason === "FRESH_TICK_EXECUTION_BLOCKED") systemHardBlock = "FRESH_TICK_EXECUTION_BLOCKED";
+        if (!executionSnapshot.tradeEnabled) systemHardBlock = "SERVER_TRADE_DISABLED";
+        else if (executionSnapshot.killSwitch) systemHardBlock = "KILL_SWITCH";
+        else if (executionSnapshot.closeOnly) systemHardBlock = "CLOSE_ONLY_MODE";
+        else if (executionSnapshot.reconcileSafe) systemHardBlock = "RECONCILE_SAFE_MODE";
+        else if (!executionSnapshot.paperReady) systemHardBlock = "PAPER_EXECUTION_NOT_READY";
+        else if (!executionSnapshot.signedReady) systemHardBlock = "SIGNED_EXECUTION_NOT_READY";
+        else if (executionSnapshot.riskModeHalt) systemHardBlock = "RISK_MODE_HALT";
+        else if (executionSnapshot.dailyLossGuard) systemHardBlock = "DAILY_LOSS_GUARD";
+        else if (executionSnapshot.freshTickBlocked) systemHardBlock = "FRESH_TICK_EXECUTION_BLOCKED";
 
         this.logger.info("V2_FINAL_AUTHORIZATION_PROOF", {
           symbol: sym,
@@ -8986,8 +9000,8 @@ export class PaperEngine {
           decision_id: (authority as any).decision_id ?? null,
           system_ready: systemHardBlock == null,
           hard_block_reason: systemHardBlock,
-          paper_execution_ready: this.paperExecutionReady,
-          signed_execution_ready: this.signedExecutionReady,
+          paper_execution_ready: executionSnapshot.paperReady,
+          signed_execution_ready: executionSnapshot.signedReady,
           envelope_hard_block_reason: authority.hardBlockReason ?? null,
           ...buildAuthorityEventMeta(authority)
         });
