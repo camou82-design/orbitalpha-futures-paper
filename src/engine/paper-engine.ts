@@ -327,6 +327,7 @@ type PaperEngineDecisionEnvelope = {
   legacy: EvaluatePaperSymbolEntryResult;
   selector: EngineV2SelectorResult | null;
   authority: EntryExecutionAuthority;
+  snapshot: SymbolSnapshot | null;
   authorityEvaluatedAt: number;
   executorDecisionEvaluatedAt: number;
   signalFetchedAt: number;
@@ -2884,6 +2885,7 @@ export class PaperEngine {
         legacy: res,
         selector: selectorResult,
         authority,
+        snapshot: snapForDecision ?? snap ?? null,
         authorityEvaluatedAt: fetchedAt,
         executorDecisionEvaluatedAt: fetchedAt,
         signalFetchedAt: snapForDecision?.fetchedAt ?? snap?.fetchedAt ?? fetchedAt,
@@ -8179,11 +8181,25 @@ export class PaperEngine {
       const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(authority, envelope.legacy.adaptiveResult);
       if (effectiveAdaptiveResult == null) return;
 
-      const base = snapshotBySymbol.get(symKey);
+      const base = snapshotBySymbol.get(symKey) ?? envelope.snapshot;
       if (!base) return;
 
-      const sig: PaperSignal = authority.side === "long" ? "paper_long_candidate" : "paper_short_candidate";
+      let sig: PaperSignal = authority.side === "long" ? "paper_long_candidate" : "paper_short_candidate";
+      if (authority.source === "v2") {
+        sig = authority.side === "long" ? "v2_long_candidate" : "v2_short_candidate";
+      }
       entryQueue.push({ ...base, signal: sig });
+
+      if (authority.source === "v2" && authority.decision === "ENTER") {
+        this.logger.info("V2_ENTER_CANDIDATE_ENQUEUE_PROOF", {
+          symbol: symKey,
+          side: authority.side,
+          stage_margin_krw: authority.stageMarginKrw ?? 0,
+          exposure_notional_krw: authority.exposureNotionalKrw ?? 0,
+          run_cycle_id: executionSnapshot.runCycleId,
+          decision_id: (authority as any).decision_id ?? null
+        });
+      }
     });
     entryQueue.sort((a, b) => {
       const aMajor = a.symbol === "BTCUSDT" || a.symbol === "ETHUSDT";
@@ -8215,14 +8231,14 @@ export class PaperEngine {
         if (!envelope) return false;
         const { authority } = envelope;
         const adoptedEngine = envelope.selector?.adopted_result.engine ?? null;
-        const authoritySource = envelope.v2_execution_envelope?.authoritySource;
-        
+        const hasEnterIntent = (authority.originalDecision === "ENTER" || authority.decision === "ENTER") &&
+          (authority.originalSide === "long" || authority.originalSide === "short" || authority.side === "long" || authority.side === "short") &&
+          (authority.originalStageMarginKrw ?? authority.stageMarginKrw ?? 0) > 0;
+
         return adoptedEngine === "V2" &&
-          authoritySource === "v2_execution_envelope" &&
+          envelope.v2_execution_envelope?.authoritySource === "v2_execution_envelope" &&
           authority.source === "v2" &&
-          authority.decision === "ENTER" &&
-          (authority.side === "long" || authority.side === "short") &&
-          (authority.stageMarginKrw ?? 0) > 0 &&
+          hasEnterIntent &&
           executionSnapshot.paperReady === true &&
           executionSnapshot.signedReady === true &&
           executionSnapshot.tradeEnabled === true &&
