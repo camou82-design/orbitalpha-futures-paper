@@ -9381,7 +9381,7 @@ export class PaperEngine {
               authoritySourceAtEntry: authority.source,
               authoritySideAtEntry: String(authority.side)
             };
-            this.positions.openPositions.push(record);
+            next.push(record);
             openPositionsChanged = true;
             this.logger.info("paper_position_opened", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
             await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(sym, authority, record));
