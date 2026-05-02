@@ -8215,10 +8215,11 @@ export class PaperEngine {
         if (!envelope) return false;
         const { authority } = envelope;
         const adoptedEngine = envelope.selector?.adopted_result.engine ?? null;
-        const authoritySource = (authority as any).authoritySource;
+        const authoritySource = envelope.v2_execution_envelope?.authoritySource;
         
         return adoptedEngine === "V2" &&
           authoritySource === "v2_execution_envelope" &&
+          authority.source === "v2" &&
           authority.decision === "ENTER" &&
           (authority.side === "long" || authority.side === "short") &&
           (authority.stageMarginKrw ?? 0) > 0 &&
