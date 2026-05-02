@@ -4384,9 +4384,11 @@ export class PaperEngine {
       
       if (!liveLeverageAllowed) {
         const isV2NewEntry = input.isNewEntry === true && input.authoritySource === "v2";
-        
-        // V2 New Entry Hardening: If no position exists (isNewEntry), don't block on missing liquidation price
-        if (isV2NewEntry) {
+        const isLiqDataMissing = liquidationBufferRatio == null || estimatedLiquidationPrice == null || entryPriceVal == null;
+
+        // V2 New Entry Hardening: Only allow warning if data is truly missing (N/A).
+        // If data is present but buffer is insufficient, it's a hard block.
+        if (isV2NewEntry && isLiqDataMissing) {
           this.logger.warn("LIQUIDATION_BUFFER_PREOPEN_UNAVAILABLE_WARNING", {
             symbol: input.symbol,
             liquidationBufferRatio,
@@ -4395,7 +4397,7 @@ export class PaperEngine {
             authoritySource: "v2",
             notionalUsdt: v2_intended_notional_usdt,
             appliedLeverage: okx_confirmed_leverage,
-            reason: "new_probe_entry_allowed_without_liq_buffer"
+            reason: "new_probe_entry_allowed_due_to_missing_liq_calc_data"
           });
         } else {
           const reject_reason = "EXCHANGE_REALITY_BLOCK";
@@ -8206,47 +8208,80 @@ export class PaperEngine {
       const blockReason = input.readinessBarrierActive
         ? "fresh_tick_barrier_active"
         : "fresh_tick_required_pending_clear";
-      this.logger.warn("ENTRY_BLOCKED_PREPARED_BUT_NOT_REEVALUATED", {
-        reason: blockReason,
-        queued_entries: entryQueue.length,
-        run_cycle_id: this.runCycleId,
-        readiness_changed_at: input.readinessChangedAt,
-        readiness_barrier_active: input.readinessBarrierActive,
-        fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness,
-        fresh_tick_completed_cycles: this.readinessFreshTickCompletedCycles,
-        fresh_tick_required_cycles: this.readinessFreshTickRequiredCycles
+
+      // V2 Bypass: If all V2 authoritative criteria are met, bypass the fresh tick barrier.
+      const v2BypassReady = entryQueue.some(q => {
+        const envelope = input.decisionBySymbol.get(String(q.symbol));
+        if (!envelope) return false;
+        const { authority } = envelope;
+        const adoptedEngine = envelope.selector?.adopted_result.engine ?? null;
+        const decisionForExecution = (authority.decision as any === "ENTER" || authority.decision as any === "WAIT_RECHECK") ? "ENTER" : authority.decision;
+        
+        return adoptedEngine === "V2" &&
+          decisionForExecution === "ENTER" &&
+          (authority.side === "long" || authority.side === "short") &&
+          (authority.stageMarginKrw ?? 0) > 0 &&
+          executionSnapshot.paperReady === true &&
+          executionSnapshot.signedReady === true &&
+          executionSnapshot.tradeEnabled === true &&
+          executionSnapshot.closeOnly === false &&
+          executionSnapshot.killSwitch === false &&
+          executionSnapshot.reconcileSafe === false &&
+          executionSnapshot.dailyLossGuard === false &&
+          executionSnapshot.riskModeHalt === false &&
+          authority.nonBypassableHardBlockPresent !== true;
       });
-      this.logger.warn("READINESS_REEVALUATION_BLOCKED", {
-        reason: blockReason,
-        run_cycle_id: this.runCycleId
-      });
-      this.logger.warn("FRESH_TICK_BARRIER_HARD_BLOCK_PROOF", {
-        run_cycle_id: this.runCycleId,
-        block_reason: blockReason,
-        readiness_barrier_active: input.readinessBarrierActive,
-        fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness,
-        fresh_tick_completed_cycles: this.readinessFreshTickCompletedCycles,
-        fresh_tick_required_cycles: this.readinessFreshTickRequiredCycles,
-        queued_entries: entryQueue.length,
-        paper_position_opened_will_not_run: true
-      });
-      this.logger.warn("V2_FINAL_HARD_BLOCK_PROOF", {
-        gate: "fresh_tick_or_readiness_barrier",
-        block_reason: blockReason,
-        run_cycle_id: this.runCycleId,
-        queued_entries: entryQueue.length
-      });
-      for (const q of entryQueue) {
-        this.contaminatedEntrySamples.push({
-          ts: Date.now(),
-          symbol: String(q.symbol),
-          side: q.signal === "paper_short_candidate" ? "short" : "long",
-          source: "contaminated",
-          vector: this.toEntryQualityVectorFromSnapshot(q, q.signal === "paper_short_candidate" ? "short" : "long"),
-          reason: "blocked_by_readiness_fresh_tick_barrier"
+
+      if (v2BypassReady) {
+        this.logger.info("V2_AUTHORITY_BYPASS_FRESH_TICK_BARRIER", {
+          run_cycle_id: this.runCycleId,
+          barrier_reason: blockReason,
+          readiness_barrier_active: input.readinessBarrierActive,
+          fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness
         });
+      } else {
+        this.logger.warn("ENTRY_BLOCKED_PREPARED_BUT_NOT_REEVALUATED", {
+          reason: blockReason,
+          queued_entries: entryQueue.length,
+          run_cycle_id: this.runCycleId,
+          readiness_changed_at: input.readinessChangedAt,
+          readiness_barrier_active: input.readinessBarrierActive,
+          fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness,
+          fresh_tick_completed_cycles: this.readinessFreshTickCompletedCycles,
+          fresh_tick_required_cycles: this.readinessFreshTickRequiredCycles
+        });
+        this.logger.warn("READINESS_REEVALUATION_BLOCKED", {
+          reason: blockReason,
+          run_cycle_id: this.runCycleId
+        });
+        this.logger.warn("FRESH_TICK_BARRIER_HARD_BLOCK_PROOF", {
+          run_cycle_id: this.runCycleId,
+          block_reason: blockReason,
+          readiness_barrier_active: input.readinessBarrierActive,
+          fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness,
+          fresh_tick_completed_cycles: this.readinessFreshTickCompletedCycles,
+          fresh_tick_required_cycles: this.readinessFreshTickRequiredCycles,
+          queued_entries: entryQueue.length,
+          paper_position_opened_will_not_run: true
+        });
+        this.logger.warn("V2_FINAL_HARD_BLOCK_PROOF", {
+          gate: "fresh_tick_or_readiness_barrier",
+          block_reason: blockReason,
+          run_cycle_id: this.runCycleId,
+          queued_entries: entryQueue.length
+        });
+        for (const q of entryQueue) {
+          this.contaminatedEntrySamples.push({
+            ts: Date.now(),
+            symbol: String(q.symbol),
+            side: q.signal === "paper_short_candidate" ? "short" : "long",
+            source: "contaminated",
+            vector: this.toEntryQualityVectorFromSnapshot(q, q.signal === "paper_short_candidate" ? "short" : "long"),
+            reason: "blocked_by_readiness_fresh_tick_barrier"
+          });
+        }
+        return;
       }
-      return;
     }
 
     // V2 Bypass logic moved to main loop
