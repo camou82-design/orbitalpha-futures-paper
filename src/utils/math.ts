@@ -24,3 +24,18 @@ export function emaLastFromCloses(closes: number[], period: number): number | nu
   return ema;
 }
 
+/**
+ * Rounds a quantity according to the instrument's step size.
+ * If step is not provided, defaults to 0.000001 (standard micro-probe resolution).
+ * Ensure it doesn't zero out if the input was positive.
+ */
+export function roundQtyByInstrumentStep(qty: number, step: number = 0.000001): number {
+  if (qty <= 0 || !Number.isFinite(qty)) return 0;
+  if (step <= 0) return qty;
+  const inv = 1 / step;
+  let rounded = Math.round(qty * inv) / inv;
+  if (rounded <= 0 && qty > 0) {
+    rounded = step; // Minimum allowed size
+  }
+  return rounded;
+}

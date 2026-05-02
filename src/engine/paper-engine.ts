@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { roundQtyByInstrumentStep } from "../utils/math";
 
 import type {
   EngineConfig,
@@ -4017,7 +4018,8 @@ export class PaperEngine {
       qty,
       clOrdId,
       traceId: input.flowId,
-      reason: input.reason
+      reason: input.reason,
+      isNewEntry: false
     });
   }
 
@@ -4086,6 +4088,9 @@ export class PaperEngine {
     stopPrice?: number | null;
     paperExecutionReady?: boolean;
     stageMarginKrw?: number | null;
+    exposureNotionalKrw?: number | null;
+    isNewEntry: boolean;
+    orderNotionalUsdt?: number | null;
   }): Promise<{
     ok: boolean;
     ordId: string | null;
@@ -4177,8 +4182,13 @@ export class PaperEngine {
 
       // 1. V2 Intended Metrics (Decision Basis)
       const v2_intended_qty = input.qty;
-      const v2_intended_notional_usdt = refPrice != null && Number.isFinite(refPrice) ? v2_intended_qty * refPrice : null;
-      // v2_risk_cap_usdt is the same as intended notional in this context as it represents the V2's sizing decision.
+      let v2_intended_notional_usdt = (input.orderNotionalUsdt ?? 0) > 0
+        ? input.orderNotionalUsdt!
+        : ((input.exposureNotionalKrw ?? 0) > 0 
+          ? (input.exposureNotionalKrw! / PAPER_LEDGER_KRW_NOTIONAL_PER_USD)
+          : (refPrice != null && Number.isFinite(refPrice) ? v2_intended_qty * refPrice : null));
+      
+      // v2_risk_cap_usdt represents the V2's sizing decision.
       const v2_risk_cap_usdt = v2_intended_notional_usdt;
 
       // 2. OKX Reality Context (Exchange State)
@@ -4321,28 +4331,45 @@ export class PaperEngine {
 
       // Final Liquidation Buffer Verification (Safety Layer)
       const stopPrice = Number.isFinite(input.stopPrice) ? Number(input.stopPrice) : null;
-      const entryPrice = Number.isFinite(input.entryPrice)
+      const entryPriceVal = Number.isFinite(input.entryPrice)
         ? Number(input.entryPrice)
         : (refPrice != null && Number.isFinite(refPrice) ? refPrice : null);
-      
-      const canEvaluateLiquidation = stopPrice != null && entryPrice != null && entryPrice > 0;
+
       const appliedLeverage = okx_confirmed_leverage;
-      const estimatedLiquidationPrice =
-        appliedLeverage != null ? this.estimateLiquidationPrice({ side: input.side, entryPrice: entryPrice ?? 0, leverage: appliedLeverage }) : null;
+      let estimatedLiquidationPrice =
+        appliedLeverage != null && entryPriceVal != null ? this.estimateLiquidationPrice({ side: input.side, entryPrice: entryPriceVal, leverage: appliedLeverage }) : null;
+
+      // Reinforced Liquidation Estimation for New Entries (using Wallet Balance as additional buffer)
+      if (input.isNewEntry && estimatedLiquidationPrice !== null && entryPriceVal !== null && (this.okxAvailableBalanceUsdt ?? 0) > 0) {
+        const marginUsdt = (input.stageMarginKrw ?? 0) / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
+        const entryPriceSafe: number = entryPriceVal;
+        const notionalUsdt = (marginUsdt > 0 ? marginUsdt : (Number(input.qty) * entryPriceSafe)) * (appliedLeverage ?? 10);
+        if (notionalUsdt > 0) {
+          const mmr = 0.005;
+          const moveFrac = Math.max(0.0001, ((this.okxAvailableBalanceUsdt ?? 0) / notionalUsdt) - mmr);
+          const walletBasedLiqPrice = input.side === "buy" 
+            ? entryPriceSafe * (1 - moveFrac)
+            : entryPriceSafe * (1 + moveFrac);
+          
+          estimatedLiquidationPrice = walletBasedLiqPrice;
+        }
+      }
+      
+      const canEvaluateLiquidation = stopPrice !== null && entryPriceVal !== null && entryPriceVal > 0 && estimatedLiquidationPrice !== null;
       
       let stopDistancePct =
-        canEvaluateLiquidation && stopPrice != null && entryPrice != null
-          ? Math.abs(entryPrice - stopPrice) / Math.max(1e-9, entryPrice)
+        canEvaluateLiquidation && stopPrice !== null && entryPriceVal !== null
+          ? Math.abs(entryPriceVal - stopPrice) / Math.max(1e-9, entryPriceVal)
           : null;
       let liquidationDistancePct =
-        canEvaluateLiquidation && estimatedLiquidationPrice != null && entryPrice != null
-          ? Math.abs(entryPrice - estimatedLiquidationPrice) / Math.max(1e-9, entryPrice)
+        canEvaluateLiquidation && estimatedLiquidationPrice !== null && entryPriceVal !== null
+          ? Math.abs(entryPriceVal - estimatedLiquidationPrice) / Math.max(1e-9, entryPriceVal)
           : null;
       let stopBeforeLiquidation =
-        canEvaluateLiquidation && estimatedLiquidationPrice != null && stopPrice != null && entryPrice != null
+        canEvaluateLiquidation && estimatedLiquidationPrice !== null && stopPrice !== null && entryPriceVal !== null
           ? (input.side === "buy"
-            ? (entryPrice > stopPrice && stopPrice > estimatedLiquidationPrice)
-            : (entryPrice < stopPrice && stopPrice < estimatedLiquidationPrice))
+            ? (entryPriceVal > stopPrice && stopPrice > estimatedLiquidationPrice)
+            : (entryPriceVal < stopPrice && stopPrice < estimatedLiquidationPrice))
           : false;
       let liquidationBufferRatio =
         stopDistancePct != null && stopDistancePct > 0 && liquidationDistancePct != null
@@ -4356,16 +4383,49 @@ export class PaperEngine {
         liquidationBufferRatio >= requiredBufferRatio;
       
       if (!liveLeverageAllowed) {
-        const reject_reason = "EXCHANGE_REALITY_BLOCK";
-        const detail = "LIVE_LIQUIDATION_BUFFER_INSUFFICIENT";
-        const errorMsg = `Live liquidation buffer insufficient (Required: ${requiredBufferRatio}, Available: ${liquidationBufferRatio?.toFixed(2) ?? "N/A"})`;
-        this.logger.warn("EXCHANGE_REALITY_BLOCK", { ...logCtxReality, reject_reason, detail, error: errorMsg });
-        return {
-          ok: false, ordId: null, fillPx: null, fillSize: 0,
-          errorCode: "live_liquidation_buffer_insufficient", 
-          errorMessage: errorMsg, 
-          ackCode: "rejected", orderState: null, fillConfirmed: false
-        };
+        const isV2NewEntry = input.isNewEntry === true && input.authoritySource === "v2";
+        
+        // V2 New Entry Hardening: If no position exists (isNewEntry), don't block on missing liquidation price
+        if (isV2NewEntry) {
+          this.logger.warn("LIQUIDATION_BUFFER_PREOPEN_UNAVAILABLE_WARNING", {
+            symbol: input.symbol,
+            liquidationBufferRatio,
+            stopBeforeLiquidation,
+            isNewEntry: true,
+            authoritySource: "v2",
+            notionalUsdt: v2_intended_notional_usdt,
+            appliedLeverage: okx_confirmed_leverage,
+            reason: "new_probe_entry_allowed_without_liq_buffer"
+          });
+        } else {
+          const reject_reason = "EXCHANGE_REALITY_BLOCK";
+          const detail = "LIVE_LIQUIDATION_BUFFER_INSUFFICIENT";
+          const missingFields = [];
+          if (stopPrice === null) missingFields.push("stopPrice");
+          if (entryPriceVal === null) missingFields.push("entryPrice");
+          if (estimatedLiquidationPrice === null) missingFields.push("estimatedLiquidationPrice");
+          
+          const errorMsg = `Live liquidation buffer insufficient (Required: ${requiredBufferRatio}, Available: ${liquidationBufferRatio?.toFixed(2) ?? "N/A"}${missingFields.length > 0 ? ", Missing: " + missingFields.join("|") : ""})`;
+          this.logger.warn("EXCHANGE_REALITY_BLOCK", { 
+            ...logCtxReality, 
+            reject_reason, 
+            detail, 
+            error: errorMsg,
+            stopPrice,
+            entryPrice: entryPriceVal,
+            estimatedLiquidationPrice,
+            isNewEntry: input.isNewEntry,
+            walletBalance: this.okxAvailableBalanceUsdt,
+            stopBeforeLiquidation,
+            liquidationBufferRatio
+          });
+          return {
+            ok: false, ordId: null, fillPx: null, fillSize: 0,
+            errorCode: "live_liquidation_buffer_insufficient", 
+            errorMessage: errorMsg, 
+            ackCode: "rejected", orderState: null, fillConfirmed: false
+          };
+        }
       }
 
       // Apply final quantity to the order submission
@@ -6021,7 +6081,8 @@ export class PaperEngine {
               qty: oQty,
               clOrdId: `open-rev-${open.symbol}-${Date.now()}`,
               traceId: flowId,
-              reason: "trend_switch_open"
+              reason: "trend_switch_open",
+              isNewEntry: true
             });
           }
 
@@ -6842,7 +6903,8 @@ export class PaperEngine {
               qty: pQty,
               clOrdId: `partial-${open.symbol}-${Date.now()}`,
               traceId: flowId,
-              reason: `partial_close_${pReason}`
+              reason: `partial_close_${pReason}`,
+              isNewEntry: false
             });
           }
           const closedPartial = toClosed(pReason, mp, partialMargin);
@@ -8098,7 +8160,10 @@ export class PaperEngine {
       killSwitch: this.serverTradeControlState.kill_switch_active,
       reconcileSafe: this.reconcileSafetyCloseOnly,
       dailyLossGuard: this.lastRisk?.dailyLossGuardTriggered === true,
-      riskModeHalt: String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() === "HALT"
+      riskModeHalt: String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() === "HALT",
+      runCycleId: this.runCycleId,
+      readinessChangedAt: input.readinessChangedAt,
+      serverTradeEnabledTrueAt: this.serverTradeEnabledTrueAt
     };
 
     const snapshotBySymbol = new Map<string, SymbolSnapshot>();
@@ -8134,79 +8199,10 @@ export class PaperEngine {
     const freshTickHardBlock =
       input.readinessBarrierActive || this.freshTickRequiredAfterReadiness;
 
-    // V2 Execution Bridge Optimization: Only return early if NO V2 authoritative entries are present.
-    // This ensures V2-sourced signals can bypass the legacy fresh_tick_barrier.
-    let v2AuthoritativeEnterPresent = false;
-    const v2AuthoritativeSymbols: string[] = [];
-    for (const q of entryQueue) {
-      const sym = String(q.symbol);
-      const env = input.decisionBySymbol.get(sym);
-      if (!env) continue;
+    // V2 Execution Bridge logic now integrated into the main entry loop to ensure atomic diagnostic chains
+    // and deterministic execution path logging.
 
-      const auth = env.authority;
-      const adoptedEngine = env.selector?.adopted_result.engine;
-      const stageMarginKrw = auth.originalStageMarginKrw ?? auth.stageMarginKrw ?? 0;
-      const sizeUsdt = stageMarginKrw / 1400; // rough estimate for proof
-      const nonBypassableHardBlockPresent = auth.nonBypassableHardBlockPresent === true;
-
-      const conditionsMet = 
-        adoptedEngine === "V2" &&
-        (auth.originalDecision === "ENTER" || auth.decision === "ENTER") &&
-        (auth.originalSide === "long" || auth.originalSide === "short" || auth.side === "long" || auth.side === "short") &&
-        stageMarginKrw > 0 &&
-        executionSnapshot.paperReady === true &&
-        executionSnapshot.signedReady === true &&
-        executionSnapshot.tradeEnabled === true &&
-        executionSnapshot.closeOnly === false &&
-        executionSnapshot.killSwitch === false &&
-        executionSnapshot.reconcileSafe === false &&
-        nonBypassableHardBlockPresent === false;
-
-      if (conditionsMet) {
-        v2AuthoritativeEnterPresent = true;
-        v2AuthoritativeSymbols.push(sym);
-        this.logger.info("V2_ENTER_EXECUTION_BRIDGE_PROOF", {
-          symbol: sym,
-          side: auth.side,
-          stage_margin_krw: stageMarginKrw,
-          size_usdt: sizeUsdt,
-          signed_execution_ready: executionSnapshot.signedReady,
-          paper_execution_ready: executionSnapshot.paperReady,
-          non_bypassable_hard_block_present: nonBypassableHardBlockPresent,
-          serverTradeEnabled: executionSnapshot.tradeEnabled,
-          closeOnlyMode: executionSnapshot.closeOnly,
-          killSwitch: executionSnapshot.killSwitch,
-          reconcileSafeMode: executionSnapshot.reconcileSafe
-        });
-      } else if (adoptedEngine === "V2" && (auth.originalDecision === "ENTER" || auth.decision === "ENTER")) {
-        const blockReasons = [];
-        if (!(stageMarginKrw > 0)) blockReasons.push("STAGE_MARGIN_0");
-        if (!input.paperExecutionReady) blockReasons.push("PAPER_EXECUTION_NOT_READY");
-        if (!this.signedExecutionReady) blockReasons.push("SIGNED_EXECUTION_NOT_READY");
-        if (!input.serverTradeEnabled) blockReasons.push("SERVER_TRADE_DISABLED");
-        if (input.closeOnlyMode) blockReasons.push("CLOSE_ONLY_MODE");
-        if (input.killSwitchActive) blockReasons.push("KILL_SWITCH_ACTIVE");
-        if (this.reconcileSafetyCloseOnly) blockReasons.push("RECONCILE_SAFE_MODE");
-        if (nonBypassableHardBlockPresent) blockReasons.push("NON_BYPASSABLE_HARD_BLOCK");
-        
-        this.logger.info("V2_ENTER_POST_AUTHORITY_BLOCK_PROOF", {
-          symbol: sym,
-          authority_decision: auth.decision,
-          authority_side: auth.side,
-          authority_stage_margin_krw: stageMarginKrw,
-          signed_execution_ready: this.signedExecutionReady,
-          paper_execution_ready: input.paperExecutionReady,
-          serverTradeEnabled: input.serverTradeEnabled,
-          closeOnlyMode: input.closeOnlyMode,
-          killSwitch: input.killSwitchActive,
-          reconcileSafeMode: this.reconcileSafetyCloseOnly,
-          fresh_tick_blocked: freshTickHardBlock,
-          block_reason: blockReasons.join("|") || "UNKNOWN_BRIDGE_BLOCK"
-        });
-      }
-    }
-
-    if (freshTickHardBlock && !v2AuthoritativeEnterPresent) {
+    if (freshTickHardBlock) {
       const blockReason = input.readinessBarrierActive
         ? "fresh_tick_barrier_active"
         : "fresh_tick_required_pending_clear";
@@ -8253,14 +8249,7 @@ export class PaperEngine {
       return;
     }
 
-    if (freshTickHardBlock && v2AuthoritativeEnterPresent) {
-      this.logger.info("V2_AUTHORITY_BYPASS_FRESH_TICK_BARRIER", {
-        bypass_symbols: v2AuthoritativeSymbols,
-        run_cycle_id: this.runCycleId,
-        readiness_barrier_active: input.readinessBarrierActive,
-        fresh_tick_required_after_readiness: this.freshTickRequiredAfterReadiness
-      });
-    }
+    // V2 Bypass logic moved to main loop
 
     if (!input.candidateRunPath || !input.latestPath || !input.metaPath || !input.filePath) {
       return;
@@ -8288,6 +8277,7 @@ export class PaperEngine {
     });
     const before = opens.length;
     const next = [...opens];
+    const isNewEntry = next.length === 0;
     const nowTs = Date.now();
     this.lastEntryDecision = null;
 
@@ -8299,8 +8289,8 @@ export class PaperEngine {
       this.lastEntryEvaluatedAt = nowTs;
       this.lastEntrySignalFetchedAt = envelope.signalFetchedAt ?? first.fetchedAt ?? null;
 
-      const readinessChangedAt = input.readinessChangedAt;
-      const gateTimestamps = [readinessChangedAt, this.serverTradeEnabledTrueAt].filter(
+      const readinessChangedAt = executionSnapshot.readinessChangedAt;
+      const gateTimestamps = [readinessChangedAt, executionSnapshot.serverTradeEnabledTrueAt].filter(
         (x): x is number => typeof x === "number" && Number.isFinite(x)
       );
       const effectiveReadinessGateTs = gateTimestamps.length > 0 ? Math.max(...gateTimestamps) : null;
@@ -8311,7 +8301,7 @@ export class PaperEngine {
         if (envelope.authorityEvaluatedAt < g) staleReasons.push("authority_evaluated_before_readiness_or_trade_enable_gate");
         if (envelope.executorDecisionEvaluatedAt < g) staleReasons.push("executor_decision_before_readiness_or_trade_enable_gate");
         if (first.fetchedAt < g) staleReasons.push("snapshot_fetched_before_readiness_or_trade_enable_gate");
-        if (envelope.decisionCycleId < this.runCycleId) staleReasons.push("order_basis_previous_cycle");
+        if (envelope.decisionCycleId < executionSnapshot.runCycleId) staleReasons.push("order_basis_previous_cycle");
       }
       const v2BypassConditionsMet = 
         envelope.selector?.adopted_result.engine === "V2" &&
@@ -8565,7 +8555,7 @@ export class PaperEngine {
 
       if (effectiveAdaptiveResult == null) continue;
 
-      this.logger.info("V2_EXECUTION_BRIDGE_PROOF", {
+      this.logger.info("V2_EXECUTION_BRIDGE_LOG_ADAPTIVE", {
         symbol: first.symbol,
         authority_decision: authority.decision,
         authority_decision_for_execution: authorityDecisionForExecution,
@@ -8617,8 +8607,8 @@ export class PaperEngine {
         adoptedEngine === "V2" &&
         authorityDecisionForExecution === "ENTER" &&
         !absHardBlockPresent &&
-        this.paperExecutionReady === true &&
-        this.signedExecutionReady === true;
+        executionSnapshot.paperReady === true &&
+        executionSnapshot.signedReady === true;
       const legacyRangeRejectIgnoredForV2 =
         v2EnterSignedPaperReadyHandoff &&
         existingIdx < 0 &&
@@ -8756,10 +8746,10 @@ export class PaperEngine {
       const rangeContextForCrashBypass =
         activeEngine === "RANGE" || String(authority.regime ?? "").toUpperCase() === "RANGE";
       const serverControlAllowsEntry =
-        this.serverTradeControlState.server_trade_enabled &&
-        !this.serverTradeControlState.close_only_mode &&
-        !this.serverTradeControlState.kill_switch_active &&
-        !this.reconcileSafetyCloseOnly;
+        executionSnapshot.tradeEnabled &&
+        !executionSnapshot.closeOnly &&
+        !executionSnapshot.killSwitch &&
+        !executionSnapshot.reconcileSafe;
       const riskModeHaltForCrashBypass =
         String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() === "HALT";
       const dailyLossGuardForCrashBypass =
@@ -9136,12 +9126,13 @@ export class PaperEngine {
 
       // 4. V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF
       if (v2AuthorityCandidate) {
+        const handoffSkipReason = finalEntryAuthorization ? "NONE" : (hardBlockReason || finalBlockedReason || "AUTHORITY_PIPELINE_BLOCKED");
         this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
           symbol: sym,
-          run_cycle_id: this.runCycleId,
+          run_cycle_id: executionSnapshot.runCycleId,
           decision_id: (authority as any).decision_id ?? null,
           order_path_allowed: finalEntryAuthorization,
-          skip_reason: finalEntryAuthorization ? "NONE" : (hardBlockReason || finalBlockedReason || "AUTHORITY_PIPELINE_BLOCKED"),
+          skip_reason: handoffSkipReason,
           legacy_range_reject_ignored_for_v2: legacyRangeRejectIgnoredForV2,
           ...buildAuthorityEventMeta(authority)
         });
@@ -9163,16 +9154,8 @@ export class PaperEngine {
       }
 
       if (v2FinalAuthorizationApplied) {
-        this.logger.info("V2_ENTER_EXECUTION_BRIDGE_PROOF", {
-          symbol: sym,
-          decision: authorityDecisionForExecution,
-          side: authority.side,
-          hard_block_present: hardBlockPresent,
-          hard_block_reason: hardBlockReason,
-          final_blocked_reason: finalBlockedReason,
-          paper_execution_ready: this.paperExecutionReady,
-          signed_execution_ready: this.signedExecutionReady
-        });
+        // V2_ENTER_EXECUTION_BRIDGE_PROOF now correctly represents the gate pass just before submission.
+        // If it's skipped after this, a subsequent skip_reason log will be issued.
       }
       this.logger.info("STAGE1_ENTER_DECIDED", {
         symbol: sym,
@@ -9312,29 +9295,31 @@ export class PaperEngine {
       if (v2AuthorityCandidate && positionOpenAttempted) {
         // 1. Slot Check (Hard Block)
         if (next.length >= max) {
+          const skip_reason = "V2_EXECUTION_BLOCKED_MAX_SLOTS";
           this.logger.info("V2_EXECUTION_BLOCKED_MAX_SLOTS", { symbol: sym, count: next.length, max });
           this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
             symbol: sym,
-            run_cycle_id: this.runCycleId,
+            run_cycle_id: executionSnapshot.runCycleId,
             decision_id: (authority as any).decision_id ?? null,
             order_path_allowed: false,
-            skip_reason: "V2_EXECUTION_BLOCKED_MAX_SLOTS",
+            skip_reason,
             ...buildAuthorityEventMeta(authority)
           });
           continue;
         }
 
         // 2. Execution Key (Race Protection)
-        const v2EntryKey = `v2entry:${sym}:${intentSide}:${this.runCycleId}`;
+        const v2EntryKey = `v2entry:${sym}:${intentSide}:${executionSnapshot.runCycleId}`;
         const v2KeyOk = await this.consumeExecutionKey(v2EntryKey);
         if (!v2KeyOk) {
+          const skip_reason = "V2_EXECUTION_DUPLICATE_KEY_BLOCKED";
           this.logger.warn("V2_EXECUTION_DUPLICATE_KEY_BLOCKED", { symbol: sym, key: v2EntryKey });
           this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
             symbol: sym,
-            run_cycle_id: this.runCycleId,
+            run_cycle_id: executionSnapshot.runCycleId,
             decision_id: (authority as any).decision_id ?? null,
             order_path_allowed: false,
-            skip_reason: "V2_EXECUTION_DUPLICATE_KEY_BLOCKED",
+            skip_reason,
             ...buildAuthorityEventMeta(authority)
           });
           continue;
@@ -9344,20 +9329,33 @@ export class PaperEngine {
         const latestPositions = await this.positions.loadOpenAll();
         const v2Mutex = this.positions.evaluateSymbolPositionMutex(sym, intentSide, latestPositions, false, authority.addOnAllowed === true);
         if (v2Mutex.blocked) {
+          const skip_reason = "V2_EXECUTION_MUTEX_FINAL_BLOCKED";
           this.logger.warn("V2_EXECUTION_MUTEX_FINAL_BLOCKED", { symbol: sym, side: intentSide, reason: v2Mutex.blockReason });
           this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
             symbol: sym,
-            run_cycle_id: this.runCycleId,
+            run_cycle_id: executionSnapshot.runCycleId,
             decision_id: (authority as any).decision_id ?? null,
             order_path_allowed: false,
-            skip_reason: "V2_EXECUTION_MUTEX_FINAL_BLOCKED",
+            skip_reason,
             ...buildAuthorityEventMeta(authority)
           });
           continue;
         }
 
-        // 4. Sizing (Respect V2 Authority)
-        let v2EntrySizeUsd = entrySizeUsd;
+        // 4. Sizing (Respect V2 Authority - Prioritize Notional)
+        const marginUsdt = (authority.stageMarginKrw ?? 0) / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
+        const authorityNotionalUsdt =
+          typeof authority.exposureNotionalKrw === "number" && authority.exposureNotionalKrw > 0
+            ? authority.exposureNotionalKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD
+            : marginUsdt * (authority.appliedLeverage ?? 10);
+
+        const liveMaxOrderNotionalUsdt =
+          typeof this.config.okxLiveMaxOrderNotionalUsdt === "number" && this.config.okxLiveMaxOrderNotionalUsdt > 0
+            ? this.config.okxLiveMaxOrderNotionalUsdt
+            : authorityNotionalUsdt;
+
+        const v2OrderNotionalUsdt = Math.min(authorityNotionalUsdt, liveMaxOrderNotionalUsdt);
+        let v2EntrySizeUsd = v2OrderNotionalUsdt;
         const symS = String(first.symbol);
         const mPreV2 = marginsForSymbol(next, symS);
         if (riskE) {
@@ -9366,13 +9364,14 @@ export class PaperEngine {
           if (currentUsd + v2EntrySizeUsd > cap) {
             v2EntrySizeUsd = Math.max(0, cap - currentUsd);
             if (v2EntrySizeUsd < MIN_POSITION_SIZE_USD) {
+              const skip_reason = "V2_EXECUTION_EXPOSURE_CAP_BLOCKED";
               this.logger.warn("V2_EXECUTION_EXPOSURE_CAP_BLOCKED", { symbol: sym, cap, currentUsd, intended: entrySizeUsd });
               this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
                 symbol: sym,
-                run_cycle_id: this.runCycleId,
+                run_cycle_id: executionSnapshot.runCycleId,
                 decision_id: (authority as any).decision_id ?? null,
                 order_path_allowed: false,
-                skip_reason: "V2_EXECUTION_EXPOSURE_CAP_BLOCKED",
+                skip_reason,
                 ...buildAuthorityEventMeta(authority)
               });
               continue;
@@ -9384,6 +9383,37 @@ export class PaperEngine {
         const openTraceId = randomUUID();
         const sampleBtcEth = isBtcEthSampleSymbol(sym);
         const signedMode = this.signedSubmitMode();
+
+        this.logger.info("V2_ENTER_EXECUTION_BRIDGE_PROOF", {
+          symbol: sym,
+          decision: authorityDecisionForExecution,
+          side: authority.side,
+          stage_margin_krw: authority.stageMarginKrw ?? 0,
+          exposure_notional_krw: authority.exposureNotionalKrw ?? 0,
+          size_usdt: v2EntrySizeUsd,
+          paper_execution_ready: executionSnapshot.paperReady,
+          signed_execution_ready: executionSnapshot.signedReady,
+          run_cycle_id: executionSnapshot.runCycleId
+        });
+
+        // Mandatory Diagnostic Proof Chain for V2 Candidates reaching the bridge
+        this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
+          symbol: sym,
+          run_cycle_id: executionSnapshot.runCycleId,
+          decision_id: (authority as any).decision_id ?? null,
+          order_path_allowed: true,
+          skip_reason: null,
+          ...buildAuthorityEventMeta(authority)
+        });
+
+        this.logger.info("V2_FINAL_EXECUTION_DECISION_PROOF", {
+          symbol: sym,
+          run_cycle_id: executionSnapshot.runCycleId,
+          decision_id: (authority as any).decision_id ?? null,
+          decision: "EXECUTE",
+          notional_usdt: v2EntrySizeUsd,
+          ...buildAuthorityEventMeta(authority)
+        });
 
         this.logger.info("STAGE1_POSITION_OPEN_ATTEMPT", {
           open_trace_id: openTraceId,
@@ -9398,7 +9428,9 @@ export class PaperEngine {
           const instId = toOkxSwapInstId(sym);
           const side = authority.side === "long" ? "buy" : "sell";
           const posSide = authority.side === "long" ? "long" : "short";
-          const qty = Math.max(0.001, Math.round((v2EntrySizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
+          
+          // Use normalized sizing and rounding
+          const qty = roundQtyByInstrumentStep(v2EntrySizeUsd / Math.max(1e-9, first.lastPrice));
           const clOrdId = `paper-${sym}-${Date.now()}`;
 
           this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
@@ -9408,8 +9440,23 @@ export class PaperEngine {
             side,
             qty,
             clOrdId,
-            v2_fast_path: true
+            v2_fast_path: true,
+            // Mandatory diagnostic fields for V2 Order Path
+            stage_margin_krw: authority.stageMarginKrw ?? 0,
+            margin_usdt: marginUsdt,
+            applied_leverage: authority.appliedLeverage ?? 10,
+            authority_exposure_notional_krw: authority.exposureNotionalKrw ?? 0,
+            authority_notional_usdt: authorityNotionalUsdt,
+            order_notional_usdt: v2EntrySizeUsd,
+            live_max_order_notional_usdt: liveMaxOrderNotionalUsdt,
+            min_order_notional_usdt: MIN_POSITION_SIZE_USD,
+            notional_ok: v2EntrySizeUsd >= MIN_POSITION_SIZE_USD,
+            entry_price: first.lastPrice
           });
+
+          const stopPrice = typeof res.decision.stopLoss === "number" 
+            ? res.decision.stopLoss 
+            : (intentSide === "long" ? first.lastPrice * 0.95 : first.lastPrice * 1.05);
 
           const submit = await this.submitOkxOrder({
             symbol: first.symbol,
@@ -9426,8 +9473,12 @@ export class PaperEngine {
             appliedLeverage: authority.appliedLeverage ?? null,
             marketRegime: authority.regime ?? null,
             entryPrice: first.lastPrice,
-            paperExecutionReady: this.paperExecutionReady,
-            stageMarginKrw: authority.stageMarginKrw ?? null
+            stopPrice,
+            paperExecutionReady: executionSnapshot.paperReady,
+            stageMarginKrw: authority.stageMarginKrw ?? null,
+            exposureNotionalKrw: authority.exposureNotionalKrw ?? null,
+            isNewEntry: true,
+            orderNotionalUsdt: v2EntrySizeUsd
           });
 
           if (submit.ok) {
@@ -9463,7 +9514,17 @@ export class PaperEngine {
           }
           continue; // End of V2 fast-path
         } else {
-          this.logger.warn("SIGNED_ORDER_SUBMIT_SKIPPED_PAPER_ONLY", { symbol: sym, signedMode });
+          // Closed legacy bypass: If signed mode is disabled, log explicit skip and continue
+          const skip_reason = !this.okxDemo ? "OKX_CLIENT_NOT_READY" : "SIGNED_MODE_NOT_ENABLED";
+          this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
+            symbol: sym,
+            run_cycle_id: executionSnapshot.runCycleId,
+            decision_id: (authority as any).decision_id ?? null,
+            order_path_allowed: false,
+            skip_reason,
+            ...buildAuthorityEventMeta(authority)
+          });
+          continue;
         }
       }
 
@@ -9948,7 +10009,8 @@ export class PaperEngine {
             entryPrice: first.lastPrice,
             stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : null,
             paperExecutionReady: this.paperExecutionReady,
-            stageMarginKrw: authority.stageMarginKrw ?? null
+            stageMarginKrw: authority.stageMarginKrw ?? null,
+            isNewEntry
           });
 
           trace.order_submit_ack = submit.ackCode;
@@ -10787,7 +10849,8 @@ export class PaperEngine {
         entryQualityGrade: authority.entryQualityGrade ?? null,
         leverageProfile: authority.leverageProfile ?? null,
         appliedLeverage: authority.appliedLeverage ?? null,
-        paperExecutionReady: this.paperExecutionReady
+        paperExecutionReady: this.paperExecutionReady,
+        isNewEntry: false
       });
     }
 
