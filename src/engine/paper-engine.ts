@@ -9269,7 +9269,132 @@ export class PaperEngine {
         adopted_engine: adoptedEngine
       });
 
-      // --- EXECUTION BRANCHING (Scale-In vs New Entry) ---
+      // --- V2 AUTHORITATIVE EXECUTION FAST-PATH ---
+      if (v2AuthorityCandidate && positionOpenAttempted) {
+        // 1. Slot Check (Hard Block)
+        if (next.length >= max) {
+          this.logger.info("V2_EXECUTION_BLOCKED_MAX_SLOTS", { symbol: sym, count: next.length, max });
+          continue;
+        }
+
+        // 2. Execution Key (Race Protection)
+        const v2EntryKey = `v2entry:${sym}:${intentSide}:${this.runCycleId}`;
+        const v2KeyOk = await this.consumeExecutionKey(v2EntryKey);
+        if (!v2KeyOk) {
+          this.logger.warn("V2_EXECUTION_DUPLICATE_KEY_BLOCKED", { symbol: sym, key: v2EntryKey });
+          continue;
+        }
+
+        // 3. Mutex Re-check (Pre-persist Safety)
+        const latestPositions = await this.positions.loadOpenAll();
+        const v2Mutex = this.positions.evaluateSymbolPositionMutex(sym, intentSide, latestPositions, false, authority.addOnAllowed === true);
+        if (v2Mutex.blocked) {
+          this.logger.warn("V2_EXECUTION_MUTEX_FINAL_BLOCKED", { symbol: sym, side: intentSide, reason: v2Mutex.blockReason });
+          continue;
+        }
+
+        // 4. Sizing (Respect V2 Authority)
+        let v2EntrySizeUsd = entrySizeUsd;
+        const symS = String(first.symbol);
+        const mPreV2 = marginsForSymbol(next, symS);
+        if (riskE) {
+          const cap = authority.side === "long" ? riskE.maxLongExposure : riskE.maxShortExposure;
+          const currentUsd = authority.side === "long" ? mPreV2.longUsd : mPreV2.shortUsd;
+          if (currentUsd + v2EntrySizeUsd > cap) {
+            v2EntrySizeUsd = Math.max(0, cap - currentUsd);
+            if (v2EntrySizeUsd < MIN_POSITION_SIZE_USD) {
+              this.logger.warn("V2_EXECUTION_EXPOSURE_CAP_BLOCKED", { symbol: sym, cap, currentUsd, intended: entrySizeUsd });
+              continue;
+            }
+          }
+        }
+
+        // 5. Execution Handoff
+        const openTraceId = randomUUID();
+        const sampleBtcEth = isBtcEthSampleSymbol(sym);
+        const signedMode = this.signedSubmitMode();
+
+        this.logger.info("STAGE1_POSITION_OPEN_ATTEMPT", {
+          open_trace_id: openTraceId,
+          symbol: sym,
+          side: authority.side,
+          sizeUsd: v2EntrySizeUsd,
+          authority_source: authority.source,
+          v2_fast_path: true
+        });
+
+        if (this.okxDemo && signedMode === "enabled") {
+          const instId = toOkxSwapInstId(sym);
+          const side = authority.side === "long" ? "buy" : "sell";
+          const posSide = authority.side === "long" ? "long" : "short";
+          const qty = Math.max(0.001, Math.round((v2EntrySizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
+          const clOrdId = `paper-${sym}-${Date.now()}`;
+
+          this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
+            symbol: sym,
+            run_cycle_id: this.runCycleId,
+            decision_id: (authority as any).decision_id ?? null,
+            side,
+            qty,
+            clOrdId,
+            v2_fast_path: true
+          });
+
+          const submit = await this.submitOkxOrder({
+            symbol: first.symbol,
+            side,
+            posSide,
+            qty,
+            clOrdId,
+            traceId: openTraceId,
+            reason: "v2_authorized_fast_path",
+            authoritySource: authority.source,
+            adoptedEngine,
+            entryQualityGrade: authority.entryQualityGrade ?? null,
+            leverageProfile: authority.leverageProfile ?? null,
+            appliedLeverage: authority.appliedLeverage ?? null,
+            marketRegime: authority.regime ?? null,
+            entryPrice: first.lastPrice,
+            paperExecutionReady: this.paperExecutionReady,
+            stageMarginKrw: authority.stageMarginKrw ?? null
+          });
+
+          if (submit.ok) {
+            const isPending = submit.fillConfirmed !== true;
+            const record: PaperOpenPositionRecord = {
+              openedAt: Date.now(),
+              symbol: sym,
+              side: intentSide,
+              entryPrice: first.lastPrice,
+              leverage: levScaled,
+              sizeUsd: v2EntrySizeUsd,
+              initialSizeUsd: v2EntrySizeUsd,
+              lifecycleState: isPending ? "PENDING_EXCHANGE_CONFIRM" : "OPEN",
+              exchangeOrdId: submit.ordId ?? undefined,
+              exchangeClOrdId: clOrdId,
+              exchangeFilledSize: submit.fillSize ?? 0,
+              entryProtectionUntil: Date.now() + 120_000,
+              realizedPnl: 0,
+              stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : (intentSide === "long" ? first.lastPrice * 0.95 : first.lastPrice * 1.05),
+              strategyVersion: entryIdentity.effectiveStrategyVersion,
+              sourceSignal: entryIdentity.effectiveSourceSignal,
+              authoritySourceAtEntry: authority.source,
+              authoritySideAtEntry: String(authority.side)
+            };
+            this.positions.openPositions.push(record);
+            openPositionsChanged = true;
+            this.logger.info("paper_position_opened", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
+            await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(sym, authority, record));
+          } else {
+            this.logger.error("paper_position_open_failed", { symbol: sym, error: submit.errorMessage });
+          }
+          continue; // End of V2 fast-path
+        } else {
+          this.logger.warn("SIGNED_ORDER_SUBMIT_SKIPPED_PAPER_ONLY", { symbol: sym, signedMode });
+        }
+      }
+
+      // --- LEGACY EXECUTION BRANCHING (Scale-In vs New Entry) ---
 
       // 3. SCALE-IN BRANCH (final gate passed; max open positions does not apply to scale-in)
       if (existingIdx >= 0) {
