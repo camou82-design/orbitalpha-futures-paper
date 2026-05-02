@@ -8090,6 +8090,17 @@ export class PaperEngine {
       return;
     }
 
+    const executionSnapshot = {
+      paperReady: this.paperExecutionReady,
+      signedReady: this.signedExecutionReady,
+      tradeEnabled: this.serverTradeControlState.server_trade_enabled,
+      closeOnly: this.serverTradeControlState.close_only_mode,
+      killSwitch: this.serverTradeControlState.kill_switch_active,
+      reconcileSafe: this.reconcileSafetyCloseOnly,
+      dailyLossGuard: this.lastRisk?.dailyLossGuardTriggered === true,
+      riskModeHalt: String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() === "HALT"
+    };
+
     const snapshotBySymbol = new Map<string, SymbolSnapshot>();
     for (const s of input.snapshots) {
       snapshotBySymbol.set(String(s.symbol), s);
@@ -8143,12 +8154,12 @@ export class PaperEngine {
         (auth.originalDecision === "ENTER" || auth.decision === "ENTER") &&
         (auth.originalSide === "long" || auth.originalSide === "short" || auth.side === "long" || auth.side === "short") &&
         stageMarginKrw > 0 &&
-        input.paperExecutionReady === true &&
-        this.signedExecutionReady === true &&
-        input.serverTradeEnabled === true &&
-        input.closeOnlyMode === false &&
-        input.killSwitchActive === false &&
-        this.reconcileSafetyCloseOnly === false &&
+        executionSnapshot.paperReady === true &&
+        executionSnapshot.signedReady === true &&
+        executionSnapshot.tradeEnabled === true &&
+        executionSnapshot.closeOnly === false &&
+        executionSnapshot.killSwitch === false &&
+        executionSnapshot.reconcileSafe === false &&
         nonBypassableHardBlockPresent === false;
 
       if (conditionsMet) {
@@ -8159,13 +8170,14 @@ export class PaperEngine {
           side: auth.side,
           stage_margin_krw: stageMarginKrw,
           size_usdt: sizeUsdt,
-          signed_execution_ready: this.signedExecutionReady,
-          paper_execution_ready: input.paperExecutionReady,
+          size_usdt: sizeUsd,
+          signed_execution_ready: executionSnapshot.signedReady,
+          paper_execution_ready: executionSnapshot.paperReady,
           non_bypassable_hard_block_present: nonBypassableHardBlockPresent,
-          serverTradeEnabled: input.serverTradeEnabled,
-          closeOnlyMode: input.closeOnlyMode,
-          killSwitch: input.killSwitchActive,
-          reconcileSafeMode: this.reconcileSafetyCloseOnly
+          serverTradeEnabled: executionSnapshot.tradeEnabled,
+          closeOnlyMode: executionSnapshot.closeOnly,
+          killSwitch: executionSnapshot.killSwitch,
+          reconcileSafeMode: executionSnapshot.reconcileSafe
         });
       } else if (adoptedEngine === "V2" && (auth.originalDecision === "ENTER" || auth.decision === "ENTER")) {
         const blockReasons = [];
@@ -8307,13 +8319,12 @@ export class PaperEngine {
         authority.decision === "ENTER" &&
         (authority.side === "long" || authority.side === "short") &&
         (authority.stageMarginKrw ?? 0) > 0 &&
-        this.paperExecutionReady === true &&
-        this.signedExecutionReady === true &&
-        this.serverTradeControlState.server_trade_enabled === true &&
-        this.serverTradeControlState.close_only_mode === false &&
-        this.serverTradeControlState.kill_switch_active === false &&
-        this.reconcileSafetyCloseOnly === false &&
-        envelope.hard_block_present !== true;
+        executionSnapshot.paperReady === true &&
+        executionSnapshot.signedReady === true &&
+        executionSnapshot.tradeEnabled === true &&
+        executionSnapshot.closeOnly === false &&
+        executionSnapshot.killSwitch === false &&
+        executionSnapshot.reconcileSafe === false;
 
       if (staleReasons.length > 0 && !v2BypassConditionsMet) {
         this.logger.warn("ENTRY_BLOCKED_STALE_SIGNAL", {
@@ -8870,19 +8881,6 @@ export class PaperEngine {
         finalBlockedReason = "POLICY_PAUSED_OR_FORBIDDEN";
       }
 
-      // --- ATOMIC READINESS SNAPSHOT FOR V2 AUTHORITATIVE EXECUTION ---
-      const executionSnapshot = {
-        paperReady: this.paperExecutionReady,
-        signedReady: this.signedExecutionReady,
-        tradeEnabled: this.serverTradeControlState.server_trade_enabled,
-        closeOnly: this.serverTradeControlState.close_only_mode,
-        killSwitch: this.serverTradeControlState.kill_switch_active,
-        reconcileSafe: this.reconcileSafetyCloseOnly,
-        dailyLossGuard: this.lastRisk?.dailyLossGuardTriggered === true,
-        riskModeHalt: String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() === "HALT",
-        freshTickBlocked: authority.hardBlockReason === "FRESH_TICK_EXECUTION_BLOCKED"
-      };
-
       // [CRASH ENTRY GUARD EVALUATION]
       if (finalBlockedReason === "CRASH_ENTRY_GUARD_BLOCK") {
         const finalBlockedReasonBefore = finalBlockedReason;
@@ -8981,18 +8979,23 @@ export class PaperEngine {
         "POLICY_PAUSED_OR_FORBIDDEN"
       ]);
 
+      const localSnapshot = {
+        ...executionSnapshot,
+        freshTickBlocked: authority.hardBlockReason === "FRESH_TICK_EXECUTION_BLOCKED"
+      };
+
       // 1. V2_FINAL_AUTHORIZATION_PROOF (System Level)
       if (v2AuthorityCandidate) {
         let systemHardBlock: string | null = null;
-        if (!executionSnapshot.tradeEnabled) systemHardBlock = "SERVER_TRADE_DISABLED";
-        else if (executionSnapshot.killSwitch) systemHardBlock = "KILL_SWITCH";
-        else if (executionSnapshot.closeOnly) systemHardBlock = "CLOSE_ONLY_MODE";
-        else if (executionSnapshot.reconcileSafe) systemHardBlock = "RECONCILE_SAFE_MODE";
-        else if (!executionSnapshot.paperReady) systemHardBlock = "PAPER_EXECUTION_NOT_READY";
-        else if (!executionSnapshot.signedReady) systemHardBlock = "SIGNED_EXECUTION_NOT_READY";
-        else if (executionSnapshot.riskModeHalt) systemHardBlock = "RISK_MODE_HALT";
-        else if (executionSnapshot.dailyLossGuard) systemHardBlock = "DAILY_LOSS_GUARD";
-        else if (executionSnapshot.freshTickBlocked) systemHardBlock = "FRESH_TICK_EXECUTION_BLOCKED";
+        if (!localSnapshot.tradeEnabled) systemHardBlock = "SERVER_TRADE_DISABLED";
+        else if (localSnapshot.killSwitch) systemHardBlock = "KILL_SWITCH";
+        else if (localSnapshot.closeOnly) systemHardBlock = "CLOSE_ONLY_MODE";
+        else if (localSnapshot.reconcileSafe) systemHardBlock = "RECONCILE_SAFE_MODE";
+        else if (!localSnapshot.paperReady) systemHardBlock = "PAPER_EXECUTION_NOT_READY";
+        else if (!localSnapshot.signedReady) systemHardBlock = "SIGNED_EXECUTION_NOT_READY";
+        else if (localSnapshot.riskModeHalt) systemHardBlock = "RISK_MODE_HALT";
+        else if (localSnapshot.dailyLossGuard) systemHardBlock = "DAILY_LOSS_GUARD";
+        else if (localSnapshot.freshTickBlocked) systemHardBlock = "FRESH_TICK_EXECUTION_BLOCKED";
 
         this.logger.info("V2_FINAL_AUTHORIZATION_PROOF", {
           symbol: sym,
@@ -9000,8 +9003,8 @@ export class PaperEngine {
           decision_id: (authority as any).decision_id ?? null,
           system_ready: systemHardBlock == null,
           hard_block_reason: systemHardBlock,
-          paper_execution_ready: executionSnapshot.paperReady,
-          signed_execution_ready: executionSnapshot.signedReady,
+          paper_execution_ready: localSnapshot.paperReady,
+          signed_execution_ready: localSnapshot.signedReady,
           envelope_hard_block_reason: authority.hardBlockReason ?? null,
           ...buildAuthorityEventMeta(authority)
         });
@@ -9121,7 +9124,14 @@ export class PaperEngine {
         validSideGate === true &&
         orderBuildReady === true &&
         !mutexEval.blocked &&
-        minOrderOk === true;
+        minOrderOk === true &&
+        localSnapshot.paperReady === true &&
+        localSnapshot.signedReady === true &&
+        localSnapshot.tradeEnabled === true &&
+        localSnapshot.closeOnly === false &&
+        localSnapshot.killSwitch === false &&
+        localSnapshot.reconcileSafe === false &&
+        localSnapshot.freshTickBlocked === false;
 
       const positionOpenAttempted = finalEntryAuthorization && authorityDecisionForExecution === "ENTER";
 
@@ -9132,7 +9142,7 @@ export class PaperEngine {
           run_cycle_id: this.runCycleId,
           decision_id: (authority as any).decision_id ?? null,
           order_path_allowed: finalEntryAuthorization,
-          skip_reason: finalEntryAuthorization ? "NONE" : (hardBlockReason || finalBlockedReason || "UNKNOWN_BLOCK"),
+          skip_reason: finalEntryAuthorization ? "NONE" : (hardBlockReason || finalBlockedReason || "AUTHORITY_PIPELINE_BLOCKED"),
           legacy_range_reject_ignored_for_v2: legacyRangeRejectIgnoredForV2,
           ...buildAuthorityEventMeta(authority)
         });
@@ -9304,6 +9314,14 @@ export class PaperEngine {
         // 1. Slot Check (Hard Block)
         if (next.length >= max) {
           this.logger.info("V2_EXECUTION_BLOCKED_MAX_SLOTS", { symbol: sym, count: next.length, max });
+          this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
+            symbol: sym,
+            run_cycle_id: this.runCycleId,
+            decision_id: (authority as any).decision_id ?? null,
+            order_path_allowed: false,
+            skip_reason: "V2_EXECUTION_BLOCKED_MAX_SLOTS",
+            ...buildAuthorityEventMeta(authority)
+          });
           continue;
         }
 
@@ -9312,6 +9330,14 @@ export class PaperEngine {
         const v2KeyOk = await this.consumeExecutionKey(v2EntryKey);
         if (!v2KeyOk) {
           this.logger.warn("V2_EXECUTION_DUPLICATE_KEY_BLOCKED", { symbol: sym, key: v2EntryKey });
+          this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
+            symbol: sym,
+            run_cycle_id: this.runCycleId,
+            decision_id: (authority as any).decision_id ?? null,
+            order_path_allowed: false,
+            skip_reason: "V2_EXECUTION_DUPLICATE_KEY_BLOCKED",
+            ...buildAuthorityEventMeta(authority)
+          });
           continue;
         }
 
@@ -9320,6 +9346,14 @@ export class PaperEngine {
         const v2Mutex = this.positions.evaluateSymbolPositionMutex(sym, intentSide, latestPositions, false, authority.addOnAllowed === true);
         if (v2Mutex.blocked) {
           this.logger.warn("V2_EXECUTION_MUTEX_FINAL_BLOCKED", { symbol: sym, side: intentSide, reason: v2Mutex.blockReason });
+          this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
+            symbol: sym,
+            run_cycle_id: this.runCycleId,
+            decision_id: (authority as any).decision_id ?? null,
+            order_path_allowed: false,
+            skip_reason: "V2_EXECUTION_MUTEX_FINAL_BLOCKED",
+            ...buildAuthorityEventMeta(authority)
+          });
           continue;
         }
 
@@ -9334,6 +9368,14 @@ export class PaperEngine {
             v2EntrySizeUsd = Math.max(0, cap - currentUsd);
             if (v2EntrySizeUsd < MIN_POSITION_SIZE_USD) {
               this.logger.warn("V2_EXECUTION_EXPOSURE_CAP_BLOCKED", { symbol: sym, cap, currentUsd, intended: entrySizeUsd });
+              this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
+                symbol: sym,
+                run_cycle_id: this.runCycleId,
+                decision_id: (authority as any).decision_id ?? null,
+                order_path_allowed: false,
+                skip_reason: "V2_EXECUTION_EXPOSURE_CAP_BLOCKED",
+                ...buildAuthorityEventMeta(authority)
+              });
               continue;
             }
           }
