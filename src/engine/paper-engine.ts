@@ -8878,7 +8878,6 @@ export class PaperEngine {
           rangeZoneAlignedForCrashBypass &&
           (reversalConfirmed || relaxedRangeEntryForCrashBypass) &&
           (crashState === "CRASH_LOCK" || crashState === "CRASH_EXIT") &&
-          (bypassReason != null || overrideReason != null) &&
           serverControlAllowsEntry &&
           !riskModeHaltForCrashBypass &&
           !dailyLossGuardForCrashBypass;
@@ -8999,9 +8998,13 @@ export class PaperEngine {
       // 2. Mutex Evaluation & SYMBOL_POSITION_MUTEX_PROOF
       const authoritySideLower = normalizePositionSideLower(authority.side);
       const authoritySideInvalidForEnter = authorityDecisionForExecution === "ENTER" && authoritySideLower == null;
-      const mutexEval = (authoritySideInvalidForEnter || hardBlockPresent)
-        ? { blocked: false, blockReason: null as any, sameSymbolOpenCount: 0, existingSides: [], existingPositionIds: [] }
-        : this.positions.evaluateSymbolPositionMutex(sym, authoritySideLower as "long" | "short", next, existingIdx >= 0, authority.addOnAllowed === true);
+      
+      const mutexEvaluated = !authoritySideInvalidForEnter && !hardBlockPresent;
+      const mutexSkippedReason = hardBlockPresent ? "PRIOR_HARD_BLOCK" : (authoritySideInvalidForEnter ? "AUTHORITY_SIDE_INVALID" : null);
+      
+      const mutexEval = mutexEvaluated
+        ? this.positions.evaluateSymbolPositionMutex(sym, authoritySideLower as "long" | "short", next, existingIdx >= 0, authority.addOnAllowed === true)
+        : { blocked: false, blockReason: null as any, sameSymbolOpenCount: 0, existingSides: [], existingPositionIds: [] };
 
       if (v2AuthorityCandidate) {
         this.logger.info("SYMBOL_POSITION_MUTEX_PROOF", {
@@ -9009,7 +9012,9 @@ export class PaperEngine {
           run_cycle_id: this.runCycleId,
           decision_id: (authority as any).decision_id ?? null,
           requested_side: authoritySideLower ?? authority.side,
-          mutex_allowed: !mutexEval.blocked,
+          mutex_evaluated: mutexEvaluated,
+          mutex_skipped_reason: mutexSkippedReason,
+          mutex_allowed: mutexEvaluated ? !mutexEval.blocked : null,
           mutex_block_reason: mutexEval.blockReason,
           pending_confirm_present: next.some(p => p.symbol === sym && p.lifecycleState === "PENDING_EXCHANGE_CONFIRM"),
           ...buildAuthorityEventMeta(authority)
@@ -9025,34 +9030,36 @@ export class PaperEngine {
       }
 
       // 3. V2_FINAL_MIN_ORDER_CHECK_PROOF
-      let minOrderOk = true;
-      if (!hardBlockPresent) {
-        const marginUsdt = (authority.stageMarginKrw ?? 0) / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
-        const appliedLev = authority.appliedLeverage ?? (authority.source === "v2" ? 10 : 1);
-        const computedNotionalUsdt = marginUsdt * appliedLev;
-        const minReqNotional = authority.source === "v2" ? 100 : MIN_POSITION_SIZE_USD;
-        
-        if (authority.source === "v2") {
-          if ((authority.stageMarginKrw ?? 0) > 0 && computedNotionalUsdt < 100) minOrderOk = false;
-        } else if ((authority.stageMarginKrw ?? 0) > 0 && marginUsdt < MIN_POSITION_SIZE_USD) {
-          minOrderOk = false;
-        }
+      const marginUsdt = (authority.stageMarginKrw ?? 0) / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
+      const appliedLev = authority.appliedLeverage ?? (authority.source === "v2" ? 10 : 1);
+      const computedNotionalUsdt = marginUsdt * appliedLev;
+      const minReqNotional = authority.source === "v2" ? 100 : MIN_POSITION_SIZE_USD;
+      
+      let minOrderUnderflow = false;
+      if (authority.source === "v2") {
+        if ((authority.stageMarginKrw ?? 0) > 0 && computedNotionalUsdt < 100) minOrderUnderflow = true;
+      } else if ((authority.stageMarginKrw ?? 0) > 0 && marginUsdt < MIN_POSITION_SIZE_USD) {
+        minOrderUnderflow = true;
+      }
+      const minOrderOk = !minOrderUnderflow;
 
-        if (v2AuthorityCandidate) {
-          this.logger.info("V2_FINAL_MIN_ORDER_CHECK_PROOF", {
-            symbol: sym,
-            run_cycle_id: this.runCycleId,
-            decision_id: (authority as any).decision_id ?? null,
-            notional_usdt: computedNotionalUsdt,
-            min_req_notional: minReqNotional,
-            min_order_ok: minOrderOk,
-            ...buildAuthorityEventMeta(authority)
-          });
-        }
-        if (!minOrderOk) {
-          hardBlockPresent = true;
-          hardBlockReason = "MIN_ORDER_SIZE_UNDERFLOW";
-        }
+      if (v2AuthorityCandidate) {
+        this.logger.info("V2_FINAL_MIN_ORDER_CHECK_PROOF", {
+          symbol: sym,
+          run_cycle_id: this.runCycleId,
+          decision_id: (authority as any).decision_id ?? null,
+          authority_size_usdt: marginUsdt,
+          applied_leverage: appliedLev,
+          computed_order_notional_usdt: computedNotionalUsdt,
+          min_required_notional_usdt: minReqNotional,
+          min_order_ok: minOrderOk,
+          min_order_underflow: minOrderUnderflow,
+          ...buildAuthorityEventMeta(authority)
+        });
+      }
+      if (!hardBlockPresent && !minOrderOk) {
+        hardBlockPresent = true;
+        hardBlockReason = "MIN_ORDER_SIZE_UNDERFLOW";
       }
 
       // Final Readiness & Taxonomy Consolidation
