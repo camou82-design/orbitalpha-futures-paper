@@ -9269,6 +9269,20 @@ export class PaperEngine {
         adopted_engine: adoptedEngine
       });
 
+      const levScaled = Math.max(
+        1,
+        Math.round(this.config.leverage * adaptive.leverageMultiplier * 100) / 100
+      );
+      const liveRegimeForEntryIdentity = (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as PaperRegimeState;
+      const entryIdentity = this.resolveEntryIdentity(authority, decision, liveRegimeForEntryIdentity);
+
+      let entrySizeUsd = adaptive.sizeUsd;
+      if (authority.source !== "v2") {
+        entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(entrySizeUsd * entryQualitySizeMultiplier * 100) / 100);
+      } else {
+        entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(entrySizeUsd * 100) / 100);
+      }
+
       // --- V2 AUTHORITATIVE EXECUTION FAST-PATH ---
       if (v2AuthorityCandidate && positionOpenAttempted) {
         // 1. Slot Check (Hard Block)
@@ -9472,10 +9486,6 @@ export class PaperEngine {
       await this.store.appendJsonlLine("reports/events.jsonl", buildEntryAllowedEventPayload(sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime, decision, authority));
 
       const sourceSignal = first.signal;
-      const levScaled = Math.max(
-        1,
-        Math.round(this.config.leverage * adaptive.leverageMultiplier * 100) / 100
-      );
       let confScore =
         typeof adaptive.detail.confidence_score === "number" && Number.isFinite(adaptive.detail.confidence_score)
           ? adaptive.detail.confidence_score
@@ -9538,19 +9548,11 @@ export class PaperEngine {
         this.logger.info("position_size_reduced_risk_off", { symbol: first.symbol, finalPositionSize: adaptive.sizeUsd });
       }
 
-      const liveRegimeForEntryIdentity = (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as PaperRegimeState;
-      const entryIdentity = this.resolveEntryIdentity(authority, decision, liveRegimeForEntryIdentity);
       const isRangeCampaignNewEntry =
         entryIdentity.effectiveExecutorAtEntry === "RANGE" && entryIdentity.effectiveRegimeAtEntry === "RANGE";
 
       const riskE = this.lastRiskExposure;
       const adaptiveSizeUsdBefore = adaptive.sizeUsd;
-      let entrySizeUsd = adaptive.sizeUsd;
-      if (authority.source !== "v2") {
-        entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(entrySizeUsd * entryQualitySizeMultiplier * 100) / 100);
-      } else {
-        entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(entrySizeUsd * 100) / 100);
-      }
       if (authority.source === "v2" && entryQualitySizeMultiplier !== 1) {
         this.logger.error("SIZING_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
           symbol: sym,
