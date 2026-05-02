@@ -8974,10 +8974,11 @@ export class PaperEngine {
         else if (this.serverTradeControlState.kill_switch_active) systemHardBlock = "KILL_SWITCH";
         else if (this.serverTradeControlState.close_only_mode) systemHardBlock = "CLOSE_ONLY_MODE";
         else if (this.reconcileSafetyCloseOnly) systemHardBlock = "RECONCILE_SAFE_MODE";
+        else if (!this.paperExecutionReady) systemHardBlock = "PAPER_EXECUTION_NOT_READY";
+        else if (!this.signedExecutionReady) systemHardBlock = "SIGNED_EXECUTION_NOT_READY";
         else if (String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() === "HALT") systemHardBlock = "RISK_MODE_HALT";
         else if (this.lastRisk?.dailyLossGuardTriggered === true) systemHardBlock = "DAILY_LOSS_GUARD";
         else if (authority.hardBlockReason === "FRESH_TICK_EXECUTION_BLOCKED") systemHardBlock = "FRESH_TICK_EXECUTION_BLOCKED";
-        else if (authority.hardBlockReason === "SIGNED_EXECUTION_NOT_READY") systemHardBlock = "SIGNED_EXECUTION_NOT_READY";
 
         this.logger.info("V2_FINAL_AUTHORIZATION_PROOF", {
           symbol: sym,
@@ -8987,6 +8988,7 @@ export class PaperEngine {
           hard_block_reason: systemHardBlock,
           paper_execution_ready: this.paperExecutionReady,
           signed_execution_ready: this.signedExecutionReady,
+          envelope_hard_block_reason: authority.hardBlockReason ?? null,
           ...buildAuthorityEventMeta(authority)
         });
         if (systemHardBlock) {
@@ -9083,7 +9085,10 @@ export class PaperEngine {
           } else {
             softBlockWarnings.push(`LEGACY_SOFT_GATE:${finalBlockedReason}`);
           }
-          finalBlockedReason = null;
+          // V2 Authoritative ENTER: Clear any legacy non-hard blocks
+          if (v2AuthorityCandidate && authorityDecisionForExecution === "ENTER") {
+            finalBlockedReason = null;
+          }
         }
       }
 
