@@ -4179,7 +4179,42 @@ export class PaperEngine {
       const okx_available_balance_usdt = this.okxAvailableBalanceUsdt;
 
       // 3. Dynamic Capping (Execution Reality)
-      const static_safety_cap = this.config.okxLiveMaxOrderNotionalUsdt;
+      // 3. Dynamic Capping (Execution Reality)
+      let static_safety_cap = this.config.okxLiveMaxOrderNotionalUsdt;
+      
+      // V2 EXCEPTION: V2 authoritative signals bypass legacy static caps to allow 100 USDT probes
+      if (input.authoritySource === "v2") {
+        static_safety_cap = Math.max(static_safety_cap, 500); 
+      }
+
+      // 3.5 Leverage Sync for V2
+      if (input.authoritySource === "v2" && input.appliedLeverage != null && okx_confirmed_leverage != null && okx_confirmed_leverage !== input.appliedLeverage) {
+        this.logger.info("V2_LEVERAGE_SYNC_ATTEMPT", {
+          symbol: input.symbol,
+          intended_leverage: input.appliedLeverage,
+          current_okx_leverage: okx_confirmed_leverage
+        });
+        const setLevRes = await this.okxDemo.setLeverage({ 
+          instId, 
+          lever: String(input.appliedLeverage),
+          mgnMode: "isolated"
+        });
+        if (setLevRes.ok) {
+          this.logger.info("V2_LEVERAGE_SYNC_PROOF", {
+            symbol: input.symbol,
+            synced_leverage: input.appliedLeverage,
+            prev_leverage: okx_confirmed_leverage
+          });
+          okx_confirmed_leverage = input.appliedLeverage;
+        } else {
+          this.logger.error("V2_LEVERAGE_SYNC_FAIL", {
+            symbol: input.symbol,
+            error: setLevRes.error,
+            diagnostics: setLevRes.diagnostics
+          });
+        }
+      }
+
       const okx_dynamic_notional_cap_usdt = 
         okx_available_balance_usdt != null && okx_confirmed_leverage != null
           ? (okx_available_balance_usdt * (this.config.okxLiveUsableBalanceRatio ?? 0.95)) * okx_confirmed_leverage
@@ -4208,7 +4243,9 @@ export class PaperEngine {
         : 0;
 
       // Constraint: Min order size (hard floor)
-      if (final_submitted_qty < 0.001 && v2_intended_qty >= 0.001) {
+      // V2 EXCEPTION: Allow small quantities for close/partial reasons to avoid "EXCHANGE_REALITY_BLOCK" on exits
+      const isExitReason = input.reason.includes("close") || input.reason.includes("partial");
+      if (!isExitReason && final_submitted_qty < 0.001 && v2_intended_qty >= 0.001) {
         final_size_source = "min_order_block";
       }
 
@@ -4248,7 +4285,7 @@ export class PaperEngine {
         };
       }
 
-      // Guard: Leverage Mismatch
+      // Guard: Leverage Mismatch (Still needed if sync failed or was skipped)
       if (input.appliedLeverage != null && okx_confirmed_leverage !== input.appliedLeverage) {
         const reject_reason = "EXCHANGE_REALITY_BLOCK";
         this.logger.warn("EXCHANGE_REALITY_BLOCK", { ...logCtxReality, reject_reason, detail: "leverage_mismatch" });
@@ -4260,8 +4297,10 @@ export class PaperEngine {
         };
       }
 
+
       // Guard: Min Order Size
-      if (final_submitted_qty < 0.001) {
+      // V2 EXCEPTION: Close/partial orders are allowed to be smaller than the 0.001 entry floor
+      if (!isExitReason && final_submitted_qty < 0.001) {
         const reject_reason = "EXCHANGE_REALITY_BLOCK";
         this.logger.warn("EXCHANGE_REALITY_BLOCK", { ...logCtxReality, reject_reason, detail: "min_order_size_underflow" });
         return {
@@ -10282,7 +10321,9 @@ export class PaperEngine {
       targetStage = Math.min(3, (existing.entryStage ?? 1) + 1);
       scalingWeights = existing.scalingWeights ?? [0.5, 0.5];
       rangeAddOnSizeMultApplied = 1;
-      incrementalSizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(adaptive.sizeUsd * 100) / 100);
+      incrementalSizeUsd = authority.source === "v2"
+        ? Math.max(10, Math.round(adaptive.sizeUsd * 100) / 100)
+        : Math.max(MIN_POSITION_SIZE_USD, Math.round(adaptive.sizeUsd * 100) / 100);
       this.logger.info("V2_POLICY_SCALE_IN_SIZING_APPLIED", {
         symbol: existing.symbol,
         side: existing.side,
