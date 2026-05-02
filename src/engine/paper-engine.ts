@@ -114,6 +114,12 @@ import {
   normalizePositionSideUpper,
   normalizePositionSideLower
 } from "../engine-v2/reconciler";
+
+/** RANGE 1m edge reversal candle 레거시 게이트 — V2 실행 봉투가 ENTER·무하드블록일 때 최종 실행 경로를 막지 않도록 분리한다. */
+const LEGACY_RANGE_EDGE_NO_REVERSAL_REJECTS = new Set<string>([
+  "RANGE_LOWER_LONG_NO_REVERSAL_CONFIRMATION",
+  "RANGE_UPPER_SHORT_NO_REVERSAL_CONFIRMATION"
+]);
 import { deriveLiveBalanceAuthority, type LiveBalanceAuthorityResult } from "../engine-v2/live-account/balance-authority";
 import {
   evaluateRangeEngineForSymbol,
@@ -2887,7 +2893,9 @@ export class PaperEngine {
         v2_decision: envelope.v2_decision,
         v2_side: envelope.v2_side,
         v2_size: envelope.v2_size,
-        selector_mismatch: envelope.selector_mismatch
+        selector_mismatch: envelope.selector_mismatch,
+        hard_block_present: envelope.hard_block_present,
+        v2_execution_envelope: envelope.v2_execution_envelope ?? undefined
       });
     } // End of sym loop
     this.v2JudgmentReady = decisionBySymbol.size > 0;
@@ -8305,7 +8313,7 @@ export class PaperEngine {
         this.serverTradeControlState.close_only_mode === false &&
         this.serverTradeControlState.kill_switch_active === false &&
         this.reconcileSafetyCloseOnly === false &&
-        envelope.hard_block_present === false;
+        envelope.hard_block_present !== true;
 
       if (staleReasons.length > 0 && !v2BypassConditionsMet) {
         this.logger.warn("ENTRY_BLOCKED_STALE_SIGNAL", {
@@ -8435,6 +8443,7 @@ export class PaperEngine {
         authority.decision === "ENTER" || recheckPromotion.promote
           ? "ENTER"
           : authority.decision;
+
       if (recheckPromotion.promote) {
         this.logger.info("ENTRY_EVIDENCE_RECHECK_PASS", {
           symbol: first.symbol,
@@ -8590,6 +8599,22 @@ export class PaperEngine {
       const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === intentSide);
       const otherLeg = next.some((o) => o.symbol === first.symbol && o.side !== intentSide);
 
+      const absHardBlockPresent =
+        authority.hardBlockPresent === true || envelope.hard_block_present === true;
+      /** 신규 진입(existingIdx<0) 전용: 스케일인·애드온 경로에서는 레거시 RANGE no-reversal 무시를 적용하지 않는다. */
+      const v2EnterSignedPaperReadyHandoff =
+        authority.source === "v2" &&
+        adoptedEngine === "V2" &&
+        authorityDecisionForExecution === "ENTER" &&
+        !absHardBlockPresent &&
+        this.paperExecutionReady === true &&
+        this.signedExecutionReady === true;
+      const legacyRangeRejectIgnoredForV2 =
+        v2EnterSignedPaperReadyHandoff &&
+        existingIdx < 0 &&
+        res.decision.reject_reason != null &&
+        LEGACY_RANGE_EDGE_NO_REVERSAL_REJECTS.has(String(res.decision.reject_reason));
+
       this.lastEntryDecision = res.executorDecision ?? null;
 
       if (res.decision.reject_reason === "ORDER_BUILD_FAIL" && res.executorDecision?.entry_allowed) {
@@ -8706,10 +8731,12 @@ export class PaperEngine {
         typeof exDetail?.pre_risk_crash_state === "string" && exDetail.pre_risk_crash_state.length > 0
           ? exDetail.pre_risk_crash_state
           : crashState;
-      const reversalConfirmed =
+      const reversalConfirmedFromLegacyExecutor =
         res.executorDecision?.entry_allowed === true &&
         (res.executorDecision?.blocked_reason == null ||
           !String(res.executorDecision?.blocked_reason).toLowerCase().includes("reversal_confirm"));
+      const reversalConfirmed =
+        legacyRangeRejectIgnoredForV2 || reversalConfirmedFromLegacyExecutor;
       const relaxedRangeEntryForCrashBypass =
         exDetail?.relaxedRangeEntry === true ||
         first.rangeSignalKeptByRelax === true;
@@ -9022,17 +9049,6 @@ export class PaperEngine {
           }
           finalBlockedReason = null;
         }
-
-        this.logger.info("V2_ENTER_EXECUTION_BRIDGE_PROOF", {
-          symbol: sym,
-          decision: authorityDecisionForExecution,
-          side: authority.side,
-          hard_block_present: hardBlockPresent,
-          hard_block_reason: hardBlockReason,
-          final_blocked_reason: finalBlockedReason,
-          paper_execution_ready: this.paperExecutionReady,
-          signed_execution_ready: this.signedExecutionReady
-        });
       }
       const finalBlockedReasonAfterV2Finalizer = finalBlockedReason;
       const finalAuthorizedAfterV2Finalizer = finalBlockedReasonAfterV2Finalizer === null;
@@ -9174,6 +9190,19 @@ export class PaperEngine {
         authority_side_invalid: authoritySideInvalidForEnter,
         existing_position_ids: mutexEval.existingPositionIds
       });
+      if (authority.source === "v2" && adoptedEngine === "V2" && authorityDecisionForExecution === "ENTER") {
+        this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
+          symbol: sym,
+          side: authority.side,
+          authority_decision: authority.decision,
+          hard_block_present: absHardBlockPresent,
+          initial_v2_new_entry_only: existingIdx < 0,
+          final_blocked_reason_before: finalBlockedReasonBeforeMutex,
+          final_blocked_reason_after: finalBlockedReason,
+          legacy_range_reject_ignored_for_v2: legacyRangeRejectIgnoredForV2,
+          order_path_called: positionOpenAttempted
+        });
+      }
       if (finalEntryAuthorization && (!this.serverTradeControlState.server_trade_enabled || this.serverTradeControlState.close_only_mode || this.serverTradeControlState.kill_switch_active || this.reconcileSafetyCloseOnly)) {
         this.logger.error("SERVER_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
           symbol: sym,
@@ -9192,7 +9221,38 @@ export class PaperEngine {
         await this.store.appendJsonlLine("reports/events.jsonl", buildAiEventPayload(aiEventType, sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane), aiIn, aiOutput, authority));
       }
 
-      // 2. Final Decision Log & ENTRY_ALLOWED (Strictly Gated)
+      // 2. V2_FINAL_EXECUTION_DECISION_PROOF (STAGE1_ENTER_DECIDED 앞에 둠 — 운영 로그 최소 순서: POST_BRIDGE → FINAL → …)
+      this.logger.info("V2_FINAL_EXECUTION_DECISION_PROOF", {
+        symbol: sym,
+        authority_source: authority.source,
+        adopted_engine: adoptedEngine,
+        v2_decision: authorityDecisionForExecution,
+        v2_side: authority.side,
+        symbol_mutex_checked: true,
+        symbol_mutex_allowed: !authoritySideInvalidForEnter && !mutexEval.blocked,
+        symbol_mutex_block_reason: mutexEval.blockReason,
+        authority_side_invalid: authoritySideInvalidForEnter,
+        authority_side_invalid_block_reason: authoritySideInvalidForEnter ? "ORDER_BUILD_FAIL" : null,
+        final_decision: finalEntryAuthorization ? "ENTER" : "SKIP",
+        final_side: finalEntryAuthorization ? authority.side : "none",
+        hard_block_present: hardBlockPresent,
+        hard_block_reason: hardBlockReason,
+        soft_block_warnings: softBlockWarnings,
+        order_build_ready: orderBuildReadyAfterMutex,
+        position_open_attempted: positionOpenAttempted
+      });
+      if (v2FinalAuthorizationApplied) {
+        this.logger.info("V2_ENTER_EXECUTION_BRIDGE_PROOF", {
+          symbol: sym,
+          decision: authorityDecisionForExecution,
+          side: authority.side,
+          hard_block_present: hardBlockPresent,
+          hard_block_reason: hardBlockReason,
+          final_blocked_reason: finalBlockedReason,
+          paper_execution_ready: this.paperExecutionReady,
+          signed_execution_ready: this.signedExecutionReady
+        });
+      }
       this.logger.info("STAGE1_ENTER_DECIDED", {
         symbol: sym,
         regime: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
@@ -9223,25 +9283,6 @@ export class PaperEngine {
         killSwitch: this.serverTradeControlState.kill_switch_active,
         reconcileSafeMode: this.reconcileSafetyCloseOnly,
         ...buildAuthorityEventMeta(authority)
-      });
-      this.logger.info("V2_FINAL_EXECUTION_DECISION_PROOF", {
-        symbol: sym,
-        authority_source: authority.source,
-        adopted_engine: adoptedEngine,
-        v2_decision: authorityDecisionForExecution,
-        v2_side: authority.side,
-        symbol_mutex_checked: true,
-        symbol_mutex_allowed: !authoritySideInvalidForEnter && !mutexEval.blocked,
-        symbol_mutex_block_reason: mutexEval.blockReason,
-        authority_side_invalid: authoritySideInvalidForEnter,
-        authority_side_invalid_block_reason: authoritySideInvalidForEnter ? "ORDER_BUILD_FAIL" : null,
-        final_decision: finalEntryAuthorization ? "ENTER" : "SKIP",
-        final_side: finalEntryAuthorization ? authority.side : "none",
-        hard_block_present: hardBlockPresent,
-        hard_block_reason: hardBlockReason,
-        soft_block_warnings: softBlockWarnings,
-        order_build_ready: orderBuildReadyAfterMutex,
-        position_open_attempted: positionOpenAttempted
       });
       if (positionOpenAttempted) {
         this.logger.info("STAGE1_POSITION_OPEN_ATTEMPT", {
