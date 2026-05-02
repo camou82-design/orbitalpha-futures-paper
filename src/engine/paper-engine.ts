@@ -9283,6 +9283,8 @@ export class PaperEngine {
         entrySizeUsd = Math.max(MIN_POSITION_SIZE_USD, Math.round(entrySizeUsd * 100) / 100);
       }
 
+      const riskE = this.lastRiskExposure;
+
       // --- V2 AUTHORITATIVE EXECUTION FAST-PATH ---
       if (v2AuthorityCandidate && positionOpenAttempted) {
         // 1. Slot Check (Hard Block)
@@ -9393,7 +9395,9 @@ export class PaperEngine {
               strategyVersion: entryIdentity.effectiveStrategyVersion,
               sourceSignal: entryIdentity.effectiveSourceSignal,
               authoritySourceAtEntry: authority.source,
-              authoritySideAtEntry: String(authority.side)
+              authoritySideAtEntry: String(authority.side),
+              sourceRunPath: input.candidateRunPath,
+              status: "open"
             };
             next.push(record);
             openPositionsChanged = true;
@@ -9551,7 +9555,6 @@ export class PaperEngine {
       const isRangeCampaignNewEntry =
         entryIdentity.effectiveExecutorAtEntry === "RANGE" && entryIdentity.effectiveRegimeAtEntry === "RANGE";
 
-      const riskE = this.lastRiskExposure;
       const adaptiveSizeUsdBefore = adaptive.sizeUsd;
       if (authority.source === "v2" && entryQualitySizeMultiplier !== 1) {
         this.logger.error("SIZING_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
