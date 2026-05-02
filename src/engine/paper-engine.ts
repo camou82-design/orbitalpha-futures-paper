@@ -4175,7 +4175,7 @@ export class PaperEngine {
 
       // 2. OKX Reality Context (Exchange State)
       const okxLeverage = await this.okxDemo.getLeverage(instId);
-      const okx_confirmed_leverage = okxLeverage.ok ? Number(okxLeverage.value?.[0]?.lever ?? 0) : null;
+      let okx_confirmed_leverage = okxLeverage.ok ? Number(okxLeverage.value?.[0]?.lever ?? 0) : null;
       const okx_available_balance_usdt = this.okxAvailableBalanceUsdt;
 
       // 3. Dynamic Capping (Execution Reality)
