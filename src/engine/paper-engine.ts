@@ -8598,18 +8598,6 @@ export class PaperEngine {
       const entryStage = existingOpen?.entryStage ?? 0;
       const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === intentSide);
       const otherLeg = next.some((o) => o.symbol === first.symbol && o.side !== intentSide);
-      const entryEvidenceScore = computeEntryEvidenceScore({
-        qualityScore: first.qualityScore ?? null,
-        candidateStrength: first.candidateStrength ?? null,
-        activeEngine,
-        side: authority.side as "long" | "short",
-        boxPos: first.boxPos ?? null,
-        trendOk: first.trendOk === true,
-        emaGap: first.emaGap ?? null,
-        trendWeaknessScore: first.trendWeaknessScore ?? null
-      });
-      let entryEvidenceReason = "ENTRY_EVIDENCE_ACCEPTED";
-      let v2Snapshot: any = null;
 
       const absHardBlockPresent =
         authority.hardBlockPresent === true || envelope.hard_block_present === true;
@@ -8691,17 +8679,27 @@ export class PaperEngine {
       const policyPaused = !this.lastRiskExposure?.allowNewEntry || this.lastMarketMode?.routing.newEntryPolicy === "paused";
       const isNewEntry = existingIdx < 0;
 
+      // Reinforced Side Validation & Allow-Guards
       const validSide = authority.side === "long" || authority.side === "short";
-      const allowLongGuard = this.lastRiskExposure?.allowNewLong !== false;
-      const allowShortGuard = this.lastRiskExposure?.allowNewShort !== false;
-      const authoritySideLower = normalizePositionSideLower(authority.side);
+      const allowLongGuard = this.lastRiskExposure?.allowNewLong !== false; // default true if undefined
+      const allowShortGuard = this.lastRiskExposure?.allowNewShort !== false; // default true if undefined
+
       const sideAllowedByGuard =
         authority.side === "long" ? allowLongGuard :
           authority.side === "short" ? allowShortGuard : false;
 
+      let finalBlockedReason: string | null = null;
       const crashState = this.lastRisk?.crashState ?? "NONE";
       const crashLockUntil = this.lastRisk?.crashLockUntil ?? 0;
       const nowForCrash = Date.now();
+
+      // [CRASH GUARD REDESIGN]
+      // CRASH_REDUCE: 사이즈 축소/공격성 약화 전용 → 진입 자체는 차단하지 않는다.
+      //   longAllow=false 를 통해 risk-exposure 레이어에서 이미 억제됨.
+      // CRASH_EXIT/LOCK: 강한 no-entry 허용. 단 아래 조건이 모두 충족되면 자동 해제:
+      //   (a) 현재 activeEngine 이 RANGE (시장판단이 이미 바뀐 상태)
+      //   (b) crashLockUntil 이 만료됐거나(=0) CRASH_GUARD_REGIME_AWARE_RELEASE_MS 경과
+      // 목표: crash guard 가 시장판단 변경 후에도 무기한 전체 진입을 얼리지 않게.
       const crashLockExpiredOrSoon =
         crashLockUntil === 0 ||
         nowForCrash >= crashLockUntil ||
@@ -8710,19 +8708,86 @@ export class PaperEngine {
         (crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK") &&
         activeEngine === "RANGE" &&
         crashLockExpiredOrSoon;
+
+      // CRASH_REDUCE 는 더 이상 롱 진입 전면 차단하지 않음 (size 축소 레이어로 대체)
       const crashEntryGuardApplies =
         authority.side === "long" &&
         (crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK") &&
         !crashGuardRegimeAwareReleased;
 
       const zone = typeof first.boxPos === "number" && Number.isFinite(first.boxPos) ? classifyBoxZone(first.boxPos) : null;
-      const riskModeHaltForCrashBypass = String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() === "HALT";
-      const dailyLossGuardForCrashBypass = this.lastRisk?.dailyLossGuardTriggered === true;
+      const exDetail = (res.executorDecision?.detail ?? null) as Record<string, unknown> | null;
+      const bypassReason =
+        typeof exDetail?.crash_lock_bypass_reason === "string" && exDetail.crash_lock_bypass_reason.length > 0
+          ? exDetail.crash_lock_bypass_reason
+          : typeof exDetail?.bypass_reason === "string" && exDetail.bypass_reason.length > 0
+            ? exDetail.bypass_reason
+            : null;
+      const overrideReason =
+        typeof exDetail?.override_reason === "string" && exDetail.override_reason.length > 0
+          ? exDetail.override_reason
+          : bypassReason;
+      const preRiskCrashState =
+        typeof exDetail?.pre_risk_crash_state === "string" && exDetail.pre_risk_crash_state.length > 0
+          ? exDetail.pre_risk_crash_state
+          : crashState;
+      const reversalConfirmedFromLegacyExecutor =
+        res.executorDecision?.entry_allowed === true &&
+        (res.executorDecision?.blocked_reason == null ||
+          !String(res.executorDecision?.blocked_reason).toLowerCase().includes("reversal_confirm"));
+      const reversalConfirmed =
+        legacyRangeRejectIgnoredForV2 || reversalConfirmedFromLegacyExecutor;
+      const relaxedRangeEntryForCrashBypass =
+        exDetail?.relaxedRangeEntry === true ||
+        first.rangeSignalKeptByRelax === true;
+      const rangeZoneAlignedForCrashBypass =
+        (authority.side === "long" && zone === "lower") ||
+        (authority.side === "short" && zone === "upper");
+      const rangeContextForCrashBypass =
+        activeEngine === "RANGE" || String(authority.regime ?? "").toUpperCase() === "RANGE";
+      const serverControlAllowsEntry =
+        this.serverTradeControlState.server_trade_enabled &&
+        !this.serverTradeControlState.close_only_mode &&
+        !this.serverTradeControlState.kill_switch_active &&
+        !this.reconcileSafetyCloseOnly;
+      const riskModeHaltForCrashBypass =
+        String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() === "HALT";
+      const dailyLossGuardForCrashBypass =
+        this.lastRisk?.dailyLossGuardTriggered === true;
       const ngeStage0UpperLongBlock =
         authority.side === "long" &&
         zone === "upper" &&
         res.decision.range_stage0_engine_taken === true;
+      const entryEvidenceScore = computeEntryEvidenceScore({
+        qualityScore: first.qualityScore ?? null,
+        candidateStrength: first.candidateStrength ?? null,
+        activeEngine,
+        side: authority.side as "long" | "short",
+        boxPos: first.boxPos ?? null,
+        trendOk: first.trendOk === true,
+        emaGap: first.emaGap ?? null,
+        trendWeaknessScore: first.trendWeaknessScore ?? null
+      });
+      let entryEvidenceReason = "ENTRY_EVIDENCE_ACCEPTED";
+      this.logger.info("ENTRY_EVIDENCE_SNAPSHOT", {
+        symbol: first.symbol,
+        regime_at_entry: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
+        active_engine_at_entry: activeEngine,
+        entry_signal: first.signal,
+        entry_quality_grade: authority.entryQualityGrade ?? null,
+        entry_quality_score: first.qualityScore ?? null,
+        side: authority.side,
+        boxPos: first.boxPos ?? null,
+        rangeConfidence: first.rangeConfidence ?? null,
+        emaGap: first.emaGap ?? null,
+        trendWeaknessScore: first.trendWeaknessScore ?? null,
+        candidateStrength: first.candidateStrength ?? null,
+        authority_source: authority.source,
+        adopted_engine: adoptedEngine,
+        entry_evidence_score: entryEvidenceScore
+      });
 
+      // Opposite-leg / hedge: part of final gate (single blocked_reason source).
       let oppositeLegBlockedReason: string | null = null;
       if (otherLeg) {
         if (!this.lastRiskExposure) {
@@ -8736,208 +8801,368 @@ export class PaperEngine {
         }
       }
 
-      let hardBlockPresent = false;
-      let hardBlockReason: string | null = null;
-      let finalBlockedReason: string | null = null;
-      let finalEntryAuthorization = false;
-      let positionOpenAttempted = false;
-      let softBlockWarnings: string[] = [];
-
-      // [HARD BLOCK TAXONOMY EVALUATION]
-      const v2AuthorityCandidate = authority.source === "v2" && adoptedEngine === "V2";
-      const v2InitialEnterCandidateForSnapshot = v2AuthorityCandidate && isNewEntry && authorityDecisionForExecution === "ENTER";
-
-      if (!this.serverTradeControlState.server_trade_enabled) {
-        hardBlockReason = "SERVER_TRADE_DISABLED";
-      } else if (this.serverTradeControlState.kill_switch_active) {
-        hardBlockReason = "KILL_SWITCH";
-      } else if (this.serverTradeControlState.close_only_mode) {
-        hardBlockReason = "CLOSE_ONLY_MODE";
-      } else if (this.reconcileSafetyCloseOnly) {
-        hardBlockReason = "RECONCILE_SAFE_MODE";
-      } else if (!this.paperExecutionReady) {
-        hardBlockReason = "PAPER_EXECUTION_NOT_READY";
-      } else if (!this.signedExecutionReady) {
-        hardBlockReason = "SIGNED_EXECUTION_NOT_READY";
-      } else if (riskModeHaltForCrashBypass) {
-        hardBlockReason = "RISK_MODE_HALT";
-      } else if (dailyLossGuardForCrashBypass) {
-        hardBlockReason = "DAILY_LOSS_GUARD";
-      } else if (authority.hardBlockReason === "FRESH_TICK_EXECUTION_BLOCKED") {
-        hardBlockReason = "FRESH_TICK_EXECUTION_BLOCKED";
-      } else if (authority.hardBlockReason === "SIGNED_EXECUTION_NOT_READY") {
-        hardBlockReason = "SIGNED_EXECUTION_NOT_READY";
-      }
-
-      // V2_FINAL_AUTHORIZATION_PROOF (1/6)
-      if (v2InitialEnterCandidateForSnapshot) {
-        this.logger.info("V2_FINAL_AUTHORIZATION_PROOF", {
+      if (authority.source !== "v2") {
+        this.logger.error("ENTRY_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
           symbol: sym,
-          system_ready: hardBlockReason == null,
-          hard_block_reason: hardBlockReason,
-          paper_execution_ready: this.paperExecutionReady,
-          signed_execution_ready: this.signedExecutionReady,
-          ...buildAuthorityEventMeta(authority)
-        });
-      }
-
-      // [MUTEX & SLOT GATE]
-      if (!hardBlockReason) {
-        if (isNewEntry && next.length >= max) {
-          hardBlockReason = "MAX_SLOTS_REACHED";
+          side: authority.side,
+          authority,
+          adoptedEngine,
+          lifecycleState: existingOpen?.lifecycleState ?? null,
+          reason: "authority_source_not_v2"
+        }));
+        finalBlockedReason = "AUTHORITY_SOURCE_NOT_V2";
+      } else if (adoptedEngine !== "V2") {
+        this.logger.error("ENTRY_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
+          symbol: sym,
+          side: authority.side,
+          authority,
+          adoptedEngine,
+          lifecycleState: existingOpen?.lifecycleState ?? null,
+          reason: "adopted_engine_not_v2"
+        }));
+        finalBlockedReason = "ADOPTED_ENGINE_NOT_V2";
+      } else if (authorityDecisionForExecution !== "ENTER") {
+        finalBlockedReason = "AUTHORITY_DECISION_NOT_ENTER";
+      } else if (crashEntryGuardApplies) {
+        finalBlockedReason = "CRASH_ENTRY_GUARD_BLOCK";
+      } else if (!validSide) {
+        finalBlockedReason = "AUTHORITY_ENTER_WITH_INVALID_SIDE";
+      } else if (ngeStage0UpperLongBlock) {
+        finalBlockedReason = "NGE_STAGE0_UPPER_LONG_BLOCK";
+      } else if (
+        first.candidateStrength === "weak" &&
+        (authority.entryQualityGrade == null || authority.entryQualityGrade === "B")
+      ) {
+        finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE";
+        entryEvidenceReason = "weak_candidate_with_low_grade_recheck";
+      } else if (stage1ExecutionEngine === "RANGE") {
+        if (typeof first.boxPos !== "number" || !Number.isFinite(first.boxPos)) {
+          finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_UNKNOWN";
+          entryEvidenceReason = "range_zone_unknown_recheck";
         } else {
-          const sideLower = normalizePositionSideLower(authority.side);
-          if (sideLower == null) {
-            hardBlockReason = "AUTHORITY_SIDE_INVALID";
-          } else {
-            const mutexEval = this.positions.evaluateSymbolPositionMutex(
-              sym,
-              sideLower as "long" | "short",
-              next,
-              false,
-              authority.addOnAllowed === true
-            );
-            if (mutexEval.blocked) {
-              hardBlockReason = mutexEval.blockReason;
-            }
-            // SYMBOL_POSITION_MUTEX_PROOF (2/6)
-            if (v2InitialEnterCandidateForSnapshot) {
-              this.logger.info("SYMBOL_POSITION_MUTEX_PROOF", {
-                symbol: sym,
-                mutex_allowed: !mutexEval.blocked,
-                mutex_block_reason: mutexEval.blockReason,
-                ...buildAuthorityEventMeta(authority)
-              });
-            }
+          const rz = classifyRangeActionZone(first.boxPos);
+          const rangeSideOk = (authority.side === "short" && rz === "upper") || (authority.side === "long" && rz === "lower");
+          if (!rangeSideOk) {
+            finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_MISMATCH";
+            entryEvidenceReason = "range_zone_mismatch_recheck";
           }
         }
-      }
-
-      // [MIN ORDER SIZE GATE]
-      if (!hardBlockReason) {
-        const appliedLev = authority.appliedLeverage ?? 10;
-        const sizeUsdt = (authority.stageMarginKrw ?? 0) / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
-        const computedNotionalUsdt = sizeUsdt * appliedLev;
-        const minOrderOk = !(authority.stageMarginKrw > 0 && computedNotionalUsdt < 100);
-        if (!minOrderOk) {
-          hardBlockReason = "MIN_ORDER_SIZE_UNDERFLOW";
+      } else if (stage1ExecutionEngine === "TREND") {
+        const emaGapAbs = Math.abs(first.emaGap ?? 0);
+        const trendWeakness = first.trendWeaknessScore ?? 1;
+        const trendEvidenceOk =
+          first.trendOk === true &&
+          emaGapAbs >= ENTRY_EVIDENCE_TREND_EMA_GAP_MIN &&
+          trendWeakness <= ENTRY_EVIDENCE_TREND_WEAKNESS_MAX;
+        if (!trendEvidenceOk) {
+          finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_TREND_WEAK";
+          entryEvidenceReason = "trend_structure_insufficient_recheck";
         }
-        // V2_FINAL_MIN_ORDER_CHECK_PROOF (3/6)
-        if (v2InitialEnterCandidateForSnapshot) {
-          this.logger.info("V2_FINAL_MIN_ORDER_CHECK_PROOF", {
+      } else if (!sideAllowedByGuard) {
+        finalBlockedReason = authority.side === "long" ? "SIDE_NOT_ALLOWED_LONG" : "SIDE_NOT_ALLOWED_SHORT";
+      } else if (oppositeLegBlockedReason) {
+        finalBlockedReason = oppositeLegBlockedReason;
+      } else if (effectiveAdaptiveResult == null) {
+        finalBlockedReason = "ADAPTIVE_RESULT_NULL";
+      } else if (!aiExecutionApproved) {
+        finalBlockedReason = "AI_POLICY_BLOCKED";
+      } else if (isNewEntry && policyPaused) {
+        finalBlockedReason = "POLICY_PAUSED_OR_FORBIDDEN";
+      }
+      // [CRASH ENTRY GUARD EVALUATION]
+      if (finalBlockedReason === "CRASH_ENTRY_GUARD_BLOCK") {
+        const finalBlockedReasonBefore = finalBlockedReason;
+        const crashBypassEligible =
+          rangeContextForCrashBypass &&
+          authorityDecisionForExecution === "ENTER" &&
+          rangeZoneAlignedForCrashBypass &&
+          (reversalConfirmed || relaxedRangeEntryForCrashBypass) &&
+          (crashState === "CRASH_LOCK" || crashState === "CRASH_EXIT") &&
+          (bypassReason != null || overrideReason != null) &&
+          serverControlAllowsEntry &&
+          !riskModeHaltForCrashBypass &&
+          !dailyLossGuardForCrashBypass;
+
+        if (crashBypassEligible) {
+          finalBlockedReason = null;
+          this.logger.info("CRASH_ENTRY_GUARD_BYPASS_APPLIED", {
             symbol: sym,
-            notional_usdt: computedNotionalUsdt,
-            min_order_ok: minOrderOk,
-            ...buildAuthorityEventMeta(authority)
+            side: authority.side,
+            zone,
+            crash_state: crashState,
+            pre_risk_crash_state: preRiskCrashState,
+            crash_lock_until: crashLockUntil,
+            bypass_reason: bypassReason,
+            override_reason: overrideReason,
+            reversal_confirmed: reversalConfirmed,
+            rangeConfidence: first.rangeConfidence ?? null,
+            authority_decision: authorityDecisionForExecution,
+            authority_source: authority.source,
+            active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
+            final_blocked_reason_before: finalBlockedReasonBefore,
+            final_blocked_reason_after: finalBlockedReason
           });
         }
       }
 
-      // [ORDER BUILD & CRASH GATES]
-      if (!hardBlockReason) {
-        if (res.decision.reject_reason === "ORDER_BUILD_FAIL") {
-          hardBlockReason = "ORDER_BUILD_FAIL";
-        } else if (crashEntryGuardApplies) {
-          hardBlockReason = "CRASH_ENTRY_GUARD_BLOCK";
+      // [SOFT BLOCK CONFLICT CHECK]
+      if (finalBlockedReason === null) {
+        const d = adaptive.detail as Record<string, unknown>;
+        const adaptiveConfTierRaw = typeof d?.confidence_tier === "string" ? String(d.confidence_tier).toLowerCase() : "";
+        const adaptiveConfScore =
+          typeof d?.confidence_score === "number" && Number.isFinite(d.confidence_score) ? (d.confidence_score as number) : null;
+        const tierAggressive = adaptiveConfTierRaw === "top" || adaptiveConfTierRaw === "high";
+        const evidenceLow =
+          entryEvidenceScore < 60 ||
+          first.candidateStrength === "weak" ||
+          authority.entryQualityGrade === "B";
+        if (tierAggressive && evidenceLow) {
+          finalBlockedReason = "ENTRY_QUALITY_CONFLICT_BLOCK";
+          entryEvidenceReason = "confidence_evidence_conflict";
+          this.logger.warn("ENTRY_QUALITY_CONFLICT_BLOCK_PROOF", {
+            symbol: sym,
+            adaptive_confidence_tier: adaptiveConfTierRaw,
+            adaptive_confidence_score: adaptiveConfScore,
+            entry_evidence_score: entryEvidenceScore,
+            candidate_strength: first.candidateStrength ?? null,
+            entry_quality_grade: authority.entryQualityGrade ?? null
+          });
         }
       }
 
-      // [SOFT BLOCK / LEGACY EVALUATION]
-      if (!hardBlockReason) {
-        if (authority.source !== "v2") {
-          finalBlockedReason = "AUTHORITY_SOURCE_NOT_V2";
-        } else if (adoptedEngine !== "V2") {
-          finalBlockedReason = "ADOPTED_ENGINE_NOT_V2";
-        } else if (authorityDecisionForExecution !== "ENTER") {
-          finalBlockedReason = "AUTHORITY_DECISION_NOT_ENTER";
-        } else if (!validSide) {
-          finalBlockedReason = "AUTHORITY_ENTER_WITH_INVALID_SIDE";
-        } else if (ngeStage0UpperLongBlock) {
-          finalBlockedReason = "NGE_STAGE0_UPPER_LONG_BLOCK";
-        } else if (
-          first.candidateStrength === "weak" &&
-          (authority.entryQualityGrade == null || authority.entryQualityGrade === "B")
-        ) {
-          finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE";
-        } else if (!sideAllowedByGuard) {
-          finalBlockedReason = authority.side === "long" ? "SIDE_NOT_ALLOWED_LONG" : "SIDE_NOT_ALLOWED_SHORT";
-        } else if (oppositeLegBlockedReason) {
-          finalBlockedReason = oppositeLegBlockedReason;
-        } else if (effectiveAdaptiveResult == null) {
-          finalBlockedReason = "ADAPTIVE_RESULT_NULL";
-        } else if (!aiExecutionApproved) {
-          finalBlockedReason = "AI_POLICY_BLOCKED";
-        } else if (isNewEntry && policyPaused) {
-          finalBlockedReason = "POLICY_PAUSED_OR_FORBIDDEN";
-        }
-      }
+      const finalBlockedReasonBeforeV2Finalizer = finalBlockedReason;
+      const finalAuthorizedBeforeV2Finalizer = finalBlockedReasonBeforeV2Finalizer === null;
 
-      hardBlockPresent = hardBlockReason != null;
-      finalEntryAuthorization = !hardBlockPresent && finalBlockedReason == null;
-      positionOpenAttempted = finalEntryAuthorization;
+      // [UNIFIED V2 FINALIZER & PROOF CHAIN]
+      let hardBlockPresent = false;
+      let hardBlockReason: string | null = null;
+      const softBlockWarnings: string[] = [];
+      const v2AuthorityCandidate =
+        authority.source === "v2" &&
+        adoptedEngine === "V2" &&
+        isNewEntry;
+      const v2FinalAuthorizationApplied = v2AuthorityCandidate && authorityDecisionForExecution === "ENTER";
 
-      // [V2 DIAGNOSTIC PROOF CHAIN]
-      if (v2InitialEnterCandidateForSnapshot) {
-        v2Snapshot = {
+      const activeEngineRoutingForFinalizer = this.lastMarketMode?.routing.activeEngine ?? null;
+      const stage1ExecutionEngineForFinalizer = stage1ExecutionEngine;
+      const authorityStageMarginKrwForFinalizer = authority.stageMarginKrw ?? 0;
+
+      const hardReasons = new Set<string>([
+        "SERVER_TRADE_DISABLED", "CLOSE_ONLY_MODE", "KILL_SWITCH", "RECONCILE_SAFE_MODE",
+        "RISK_MODE_HALT", "DAILY_LOSS_GUARD", "MAX_SLOTS_REACHED", "MIN_ORDER_SIZE_UNDERFLOW",
+        "ORDER_BUILD_FAIL", "RISK_EXPOSURE_CAP_PRE_SUBMIT", "CRASH_ENTRY_GUARD_BLOCK",
+        "SYMBOL_OPPOSITE_POSITION_OPEN", "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN",
+        "AUTHORITY_SIDE_INVALID", "FRESH_TICK_EXECUTION_BLOCKED", "SIGNED_EXECUTION_NOT_READY"
+      ]);
+      const softReasons = new Set<string>([
+        "WAIT_RECHECK",
+        "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE",
+        "SIDE_NOT_ALLOWED_LONG",
+        "SIDE_NOT_ALLOWED_SHORT",
+        "RISK_LONG_DISALLOWED",
+        "RISK_SHORT_DISALLOWED",
+        "ENTRY_QUALITY_CONTAMINATED_SIMILAR",
+        "ENTRY_QUALITY_CONFLICT_BLOCK",
+        "ADAPTIVE_RESULT_NULL",
+        "AI_POLICY_BLOCKED",
+        "POLICY_PAUSED_OR_FORBIDDEN"
+      ]);
+
+      // 1. V2_FINAL_AUTHORIZATION_PROOF (System Level)
+      if (v2AuthorityCandidate) {
+        let systemHardBlock: string | null = null;
+        if (!this.serverTradeControlState.server_trade_enabled) systemHardBlock = "SERVER_TRADE_DISABLED";
+        else if (this.serverTradeControlState.kill_switch_active) systemHardBlock = "KILL_SWITCH";
+        else if (this.serverTradeControlState.close_only_mode) systemHardBlock = "CLOSE_ONLY_MODE";
+        else if (this.reconcileSafetyCloseOnly) systemHardBlock = "RECONCILE_SAFE_MODE";
+        else if (String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() === "HALT") systemHardBlock = "RISK_MODE_HALT";
+        else if (this.lastRisk?.dailyLossGuardTriggered === true) systemHardBlock = "DAILY_LOSS_GUARD";
+        else if (authority.hardBlockReason === "FRESH_TICK_EXECUTION_BLOCKED") systemHardBlock = "FRESH_TICK_EXECUTION_BLOCKED";
+        else if (authority.hardBlockReason === "SIGNED_EXECUTION_NOT_READY") systemHardBlock = "SIGNED_EXECUTION_NOT_READY";
+
+        this.logger.info("V2_FINAL_AUTHORIZATION_PROOF", {
+          symbol: sym,
           run_cycle_id: this.runCycleId,
           decision_id: (authority as any).decision_id ?? null,
-          symbol: sym,
-          authority_source: authority.source,
-          adopted_engine: adoptedEngine,
-          authority_decision: authorityDecisionForExecution,
-          authority_side: authority.side,
-          stage_margin_krw: authority.stageMarginKrw ?? 0,
+          system_ready: systemHardBlock == null,
+          hard_block_reason: systemHardBlock,
           paper_execution_ready: this.paperExecutionReady,
           signed_execution_ready: this.signedExecutionReady,
+          ...buildAuthorityEventMeta(authority)
+        });
+        if (systemHardBlock) {
+          hardBlockPresent = true;
+          hardBlockReason = systemHardBlock;
+        }
+      }
+
+      // 2. Mutex Evaluation & SYMBOL_POSITION_MUTEX_PROOF
+      const authoritySideLower = normalizePositionSideLower(authority.side);
+      const authoritySideInvalidForEnter = authorityDecisionForExecution === "ENTER" && authoritySideLower == null;
+      const mutexEval = (authoritySideInvalidForEnter || hardBlockPresent)
+        ? { blocked: false, blockReason: null as any, sameSymbolOpenCount: 0, existingSides: [], existingPositionIds: [] }
+        : this.positions.evaluateSymbolPositionMutex(sym, authoritySideLower as "long" | "short", next, existingIdx >= 0, authority.addOnAllowed === true);
+
+      if (v2AuthorityCandidate) {
+        this.logger.info("SYMBOL_POSITION_MUTEX_PROOF", {
+          symbol: sym,
+          run_cycle_id: this.runCycleId,
+          decision_id: (authority as any).decision_id ?? null,
+          requested_side: authoritySideLower ?? authority.side,
+          mutex_allowed: !mutexEval.blocked,
+          mutex_block_reason: mutexEval.blockReason,
+          pending_confirm_present: next.some(p => p.symbol === sym && p.lifecycleState === "PENDING_EXCHANGE_CONFIRM"),
+          ...buildAuthorityEventMeta(authority)
+        });
+        if (!hardBlockPresent && mutexEval.blocked) {
+          hardBlockPresent = true;
+          hardBlockReason = mutexEval.blockReason;
+        }
+        if (!hardBlockPresent && authoritySideInvalidForEnter) {
+          hardBlockPresent = true;
+          hardBlockReason = "AUTHORITY_SIDE_INVALID";
+        }
+      }
+
+      // 3. V2_FINAL_MIN_ORDER_CHECK_PROOF
+      let minOrderOk = true;
+      if (!hardBlockPresent) {
+        const marginUsdt = (authority.stageMarginKrw ?? 0) / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
+        const appliedLev = authority.appliedLeverage ?? (authority.source === "v2" ? 10 : 1);
+        const computedNotionalUsdt = marginUsdt * appliedLev;
+        const minReqNotional = authority.source === "v2" ? 100 : MIN_POSITION_SIZE_USD;
+        
+        if (authority.source === "v2") {
+          if ((authority.stageMarginKrw ?? 0) > 0 && computedNotionalUsdt < 100) minOrderOk = false;
+        } else if ((authority.stageMarginKrw ?? 0) > 0 && marginUsdt < MIN_POSITION_SIZE_USD) {
+          minOrderOk = false;
+        }
+
+        if (v2AuthorityCandidate) {
+          this.logger.info("V2_FINAL_MIN_ORDER_CHECK_PROOF", {
+            symbol: sym,
+            run_cycle_id: this.runCycleId,
+            decision_id: (authority as any).decision_id ?? null,
+            notional_usdt: computedNotionalUsdt,
+            min_req_notional: minReqNotional,
+            min_order_ok: minOrderOk,
+            ...buildAuthorityEventMeta(authority)
+          });
+        }
+        if (!minOrderOk) {
+          hardBlockPresent = true;
+          hardBlockReason = "MIN_ORDER_SIZE_UNDERFLOW";
+        }
+      }
+
+      // Final Readiness & Taxonomy Consolidation
+      if (!hardBlockPresent) {
+        if (isNewEntry && next.length >= max) {
+          hardBlockReason = "MAX_SLOTS_REACHED";
+        } else if (res.decision.reject_reason === "ORDER_BUILD_FAIL") {
+          hardBlockReason = "ORDER_BUILD_FAIL";
+        } else if (finalBlockedReason != null && hardReasons.has(finalBlockedReason)) {
+          hardBlockReason = finalBlockedReason;
+        }
+        if (hardBlockReason) hardBlockPresent = true;
+      }
+
+      if (hardBlockPresent) {
+        finalBlockedReason = hardBlockReason;
+      } else {
+        if (finalBlockedReason != null) {
+          if (softReasons.has(finalBlockedReason)) {
+            softBlockWarnings.push(finalBlockedReason);
+          } else {
+            softBlockWarnings.push(`LEGACY_SOFT_GATE:${finalBlockedReason}`);
+          }
+          finalBlockedReason = null;
+        }
+      }
+
+      const finalBlockedReasonAfterV2Finalizer = finalBlockedReason;
+      const finalAuthorizedAfterV2Finalizer = finalBlockedReasonAfterV2Finalizer === null;
+
+      const nonBypassableHardBlockPresent = authority.nonBypassableHardBlockPresent === true;
+      const orderBuildReady = res.decision.reject_reason !== "ORDER_BUILD_FAIL";
+      const validSideGate = validSide && !authoritySideInvalidForEnter;
+
+      const finalEntryAuthorization = 
+        authorityDecisionForExecution === "ENTER" &&
+        hardBlockPresent === false &&
+        nonBypassableHardBlockPresent === false &&
+        finalBlockedReason === null &&
+        validSideGate === true &&
+        orderBuildReady === true &&
+        !mutexEval.blocked &&
+        minOrderOk === true;
+
+      const positionOpenAttempted = finalEntryAuthorization && authorityDecisionForExecution === "ENTER";
+
+      // 4. V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF
+      if (v2AuthorityCandidate) {
+        this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
+          symbol: sym,
+          run_cycle_id: this.runCycleId,
+          decision_id: (authority as any).decision_id ?? null,
+          order_path_allowed: finalEntryAuthorization,
+          skip_reason: finalEntryAuthorization ? "NONE" : (hardBlockReason || finalBlockedReason || "UNKNOWN_BLOCK"),
+          legacy_range_reject_ignored_for_v2: legacyRangeRejectIgnoredForV2,
+          ...buildAuthorityEventMeta(authority)
+        });
+      }
+
+      // 5. V2_FINAL_EXECUTION_DECISION_PROOF
+      if (v2AuthorityCandidate) {
+        this.logger.info("V2_FINAL_EXECUTION_DECISION_PROOF", {
+          symbol: sym,
+          run_cycle_id: this.runCycleId,
+          decision_id: (authority as any).decision_id ?? null,
+          authority_source: authority.source,
+          final_authorized: finalEntryAuthorization,
+          hard_block_reason: hardBlockReason,
+          final_blocked_reason: finalBlockedReason,
+          order_path_called: positionOpenAttempted,
+          ...buildAuthorityEventMeta(authority)
+        });
+      }
+
+      if (v2FinalAuthorizationApplied) {
+        this.logger.info("V2_ENTER_EXECUTION_BRIDGE_PROOF", {
+          symbol: sym,
+          decision: authorityDecisionForExecution,
+          side: authority.side,
           hard_block_present: hardBlockPresent,
           hard_block_reason: hardBlockReason,
           final_blocked_reason: finalBlockedReason,
-          order_path_allowed: finalEntryAuthorization,
-          order_path_called: false,
-          position_open_attempted: false
-        };
-
-        // V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF (4/6)
-        this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
-          symbol: sym,
-          order_path_allowed: finalEntryAuthorization,
-          skip_reason: hardBlockReason || finalBlockedReason || "NONE",
-          run_cycle_id: v2Snapshot.run_cycle_id,
-          decision_id: v2Snapshot.decision_id,
-          ...buildAuthorityEventMeta(authority)
-        });
-
-        // V2_FINAL_EXECUTION_DECISION_PROOF (5/6)
-        this.logger.info("V2_FINAL_EXECUTION_DECISION_PROOF", {
-          symbol: sym,
-          decision_id: v2Snapshot.decision_id,
-          run_cycle_id: v2Snapshot.run_cycle_id,
-          final_authorized: finalEntryAuthorization,
-          order_path_allowed: finalEntryAuthorization,
-          hard_block_reason: hardBlockReason,
-          final_blocked_reason: finalBlockedReason,
-          ...buildAuthorityEventMeta(authority)
+          paper_execution_ready: this.paperExecutionReady,
+          signed_execution_ready: this.signedExecutionReady
         });
       }
-
-      // [LEGACY LOGGING & EVENT EMISSION]
       this.logger.info("STAGE1_ENTER_DECIDED", {
         symbol: sym,
         regime: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
         executor: stage1ExecutorLabel,
         final_authorized: finalEntryAuthorization,
         final_blocked_reason: finalBlockedReason,
-        v2_final_authorization_applied: v2Snapshot != null,
+        v2_final_authorization_applied: v2FinalAuthorizationApplied,
         hard_block_present: hardBlockPresent,
         hard_block_reason: hardBlockReason,
         soft_block_warnings: softBlockWarnings,
+        final_authorized_before_v2_finalizer: finalAuthorizedBeforeV2Finalizer,
+        final_authorized_after_v2_finalizer: finalAuthorizedAfterV2Finalizer,
+        final_blocked_reason_before_v2_finalizer: finalBlockedReasonBeforeV2Finalizer,
+        final_blocked_reason_after_v2_finalizer: finalBlockedReasonAfterV2Finalizer,
         authority_source: authority.source,
         authority_side: authority.side,
-        authority_size_krw: (authority.stageMarginKrw ?? 0),
-        active_engine_routing: (this.lastMarketMode?.routing.activeEngine ?? null),
-        stage1_execution_engine: stage1ExecutionEngine,
+        authority_size_krw: authorityStageMarginKrwForFinalizer,
+        authority_size_usdt: authorityStageMarginKrwForFinalizer / 1400,
+        active_engine_routing: activeEngineRoutingForFinalizer,
+        stage1_execution_engine: stage1ExecutionEngineForFinalizer,
         ai_approved: aiExecutionApproved,
         policy_paused: policyPaused,
+        allow_long: allowLongGuard,
+        allow_short: allowShortGuard,
         is_scale_in: existingIdx >= 0,
         serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
         closeOnlyMode: this.serverTradeControlState.close_only_mode,
@@ -8945,18 +9170,6 @@ export class PaperEngine {
         reconcileSafeMode: this.reconcileSafetyCloseOnly,
         ...buildAuthorityEventMeta(authority)
       });
-
-      // AI Event Recovery
-      if (aiIn && aiOutput) {
-        const aiEventType = aiExecutionApproved ? "AI_APPROVED" : "AI_BLOCKED";
-        await this.store.appendJsonlLine("reports/events.jsonl", buildAiEventPayload(aiEventType, sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane), aiIn, aiOutput, authority));
-      }
-
-      // Final Invariant Check
-      if (finalEntryAuthorization && (!this.serverTradeControlState.server_trade_enabled || this.serverTradeControlState.close_only_mode || this.serverTradeControlState.kill_switch_active || this.reconcileSafetyCloseOnly)) {
-        this.logger.error("SERVER_AUTHORITY_INVARIANT_BROKEN", { symbol: sym, reason: "authorized_under_block" });
-      }
-
       if (positionOpenAttempted) {
         this.logger.info("STAGE1_POSITION_OPEN_ATTEMPT", {
           symbol: sym,
@@ -8969,7 +9182,31 @@ export class PaperEngine {
           soft_block_warnings: softBlockWarnings
         });
       }
-
+      if (finalBlockedReason === "CRASH_ENTRY_GUARD_BLOCK") {
+        this.logger.warn("CRASH_ENTRY_GUARD_BLOCK", {
+          symbol: sym,
+          crash_state: crashState,
+          crash_lock_until: crashLockUntil,
+          crash_guard_regime_aware_released: crashGuardRegimeAwareReleased,
+          crash_lock_expired_or_soon: crashLockExpiredOrSoon,
+          final_decision: "SKIP",
+          reject_reason: finalBlockedReason,
+          authority_owner: authority.source,
+          active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
+          note: "CRASH_REDUCE no longer blocks entry — only CRASH_EXIT/LOCK when regime still in shock"
+        });
+      }
+      if (finalBlockedReason === "NGE_STAGE0_UPPER_LONG_BLOCK") {
+        this.logger.warn("NGE_STAGE0_UPPER_LONG_BLOCK", {
+          symbol: sym,
+          zone,
+          range_stage0_engine_taken: res.decision.range_stage0_engine_taken ?? false,
+          final_decision: "SKIP",
+          reject_reason: finalBlockedReason,
+          authority_owner: authority.source,
+          active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null
+        });
+      }
 
       if (!finalEntryAuthorization) {
         this.logger.info("ENTRY_EVIDENCE_RECHECK", {
@@ -9483,19 +9720,17 @@ export class PaperEngine {
           const clOrdId = `paper-${first.symbol}-${Date.now()}`;
           trace.exchange_client_order_id = clOrdId;
           trace.order_submit_requested = true;
-          
-          if (v2Snapshot) {
-            v2Snapshot.order_path_called = true;
-            this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
-              symbol: v2Snapshot.symbol,
-              side: v2Snapshot.authority_side,
-              decision_id: v2Snapshot.decision_id,
-              run_cycle_id: v2Snapshot.run_cycle_id,
-              authority_source: v2Snapshot.authority_source,
-              order_path_called: v2Snapshot.order_path_called,
-              note: "V2 authoritative decision accepted; entering exchange submission"
-            });
-          }
+
+          this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
+            symbol: first.symbol,
+            run_cycle_id: this.runCycleId,
+            decision_id: (authority as any).decision_id ?? null,
+            side,
+            qty,
+            clOrdId,
+            authority_source: authority.source,
+            note: "Authoritative V2 entry decision handed off to exchange submission"
+          });
 
           submit = await this.submitOkxOrder({
             symbol: first.symbol,
@@ -9671,8 +9906,6 @@ export class PaperEngine {
 
         next.push(record);
         openPositionsChanged = true;
-        
-        if (v2Snapshot) v2Snapshot.position_open_attempted = true;
 
         this.logger.info("STOP_STATE_PROOF", {
           symbol: record.symbol,
