@@ -8683,6 +8683,15 @@ export class PaperEngine {
       const validSide = authority.side === "long" || authority.side === "short";
       const allowLongGuard = this.lastRiskExposure?.allowNewLong !== false; // default true if undefined
       const allowShortGuard = this.lastRiskExposure?.allowNewShort !== false; // default true if undefined
+      
+      let v2Snapshot: any = null;
+      let hardBlockPresent = false;
+      let hardBlockReason: string | null = null;
+      let positionOpenAttempted = false;
+      let finalEntryAuthorization = false;
+      let softBlockWarnings: string[] = [];
+
+      const authoritySideLower = normalizePositionSideLower(authority.side);
 
       const sideAllowedByGuard =
         authority.side === "long" ? allowLongGuard :
@@ -8869,414 +8878,146 @@ export class PaperEngine {
       } else if (isNewEntry && policyPaused) {
         finalBlockedReason = "POLICY_PAUSED_OR_FORBIDDEN";
       }
-      if (finalBlockedReason === "CRASH_ENTRY_GUARD_BLOCK") {
-        const finalBlockedReasonBefore = finalBlockedReason;
-        const crashBypassEligible =
-          rangeContextForCrashBypass &&
-          authorityDecisionForExecution === "ENTER" &&
-          rangeZoneAlignedForCrashBypass &&
-          (reversalConfirmed || relaxedRangeEntryForCrashBypass) &&
-          (crashState === "CRASH_LOCK" || crashState === "CRASH_EXIT") &&
-          (bypassReason != null || overrideReason != null) &&
-          serverControlAllowsEntry &&
-          !riskModeHaltForCrashBypass &&
-          !dailyLossGuardForCrashBypass;
-        if (crashBypassEligible) {
-          finalBlockedReason = null;
-          this.logger.info("CRASH_ENTRY_GUARD_BYPASS_APPLIED", {
-            symbol: sym,
-            side: authority.side,
-            zone,
-            crash_state: crashState,
-            pre_risk_crash_state: preRiskCrashState,
-            crash_lock_until: crashLockUntil,
-            bypass_reason: bypassReason,
-            override_reason: overrideReason,
-            reversal_confirmed: reversalConfirmed,
-            rangeConfidence: first.rangeConfidence ?? null,
-            authority_decision: authorityDecisionForExecution,
-            authority_source: authority.source,
-            active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
-            final_blocked_reason_before: finalBlockedReasonBefore,
-            final_blocked_reason_after: finalBlockedReason
-          });
-        }
-      }
-      if (finalBlockedReason === null) {
-        const d = adaptive.detail as Record<string, unknown>;
-        const adaptiveConfTierRaw = typeof d?.confidence_tier === "string" ? String(d.confidence_tier).toLowerCase() : "";
-        const adaptiveConfScore =
-          typeof d?.confidence_score === "number" && Number.isFinite(d.confidence_score) ? (d.confidence_score as number) : null;
-        const tierAggressive = adaptiveConfTierRaw === "top" || adaptiveConfTierRaw === "high";
-        const evidenceLow =
-          entryEvidenceScore < 60 ||
-          first.candidateStrength === "weak" ||
-          authority.entryQualityGrade === "B";
-        if (tierAggressive && evidenceLow) {
-          finalBlockedReason = "ENTRY_QUALITY_CONFLICT_BLOCK";
-          entryEvidenceReason = "confidence_evidence_conflict";
-          this.logger.warn("ENTRY_QUALITY_CONFLICT_BLOCK_PROOF", {
-            symbol: sym,
-            adaptive_confidence_tier: adaptiveConfTierRaw,
-            adaptive_confidence_score: adaptiveConfScore,
-            entry_evidence_score: entryEvidenceScore,
-            candidate_strength: first.candidateStrength ?? null,
-            entry_quality_grade: authority.entryQualityGrade ?? null
-          });
-        }
-      }
-      const finalBlockedReasonBeforeV2Finalizer = finalBlockedReason;
-      const finalAuthorizedBeforeV2Finalizer = finalBlockedReasonBeforeV2Finalizer === null;
-      let hardBlockPresent = false;
-      let hardBlockReason: string | null = null;
-      const softBlockWarnings: string[] = [];
-      const v2FinalAuthorizationApplied =
-        authority.source === "v2" &&
-        adoptedEngine === "V2" &&
-        authorityDecisionForExecution === "ENTER";
-      const activeEngineRoutingForFinalizer = this.lastMarketMode?.routing.activeEngine ?? null;
-      const stage1ExecutionEngineForFinalizer = stage1ExecutionEngine;
-      const authorityStageMarginKrwForFinalizer = authority.stageMarginKrw ?? 0;
-      const riskModeForFinalizer = this.lastRiskExposure?.riskMode ?? null;
-      const dailyLossGuardForFinalizer = this.lastRisk?.dailyLossGuardTriggered === true;
-      if (v2FinalAuthorizationApplied) {
-        const hardReasons = new Set<string>([
-          "RISK_EXPOSURE_CAP_PRE_SUBMIT",
-          "ORDER_BUILD_FAIL",
-          "CRASH_ENTRY_GUARD_BLOCK",
-          "SYMBOL_OPPOSITE_POSITION_OPEN",
-          "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
-        ]);
-        const softReasons = new Set<string>([
-          "ENTRY_QUALITY_CONFLICT_BLOCK", // Demoted for V2
-          "ENTRY_EVIDENCE_RECHECK_WEAK_CANDIDATE", // Demoted for V2
-          "ENTRY_QUALITY_CONTAMINATED_SIMILAR",
-          "WAIT_RECHECK",
-          "SIDE_NOT_ALLOWED_LONG",
-          "SIDE_NOT_ALLOWED_SHORT",
-          "RISK_LONG_DISALLOWED",
-          "RISK_SHORT_DISALLOWED",
-          "ENTRY_EVIDENCE_RECHECK_TREND_WEAK",
-          "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_UNKNOWN",
-          "ADAPTIVE_RESULT_NULL",
-          "AI_POLICY_BLOCKED",
-          "POLICY_PAUSED_OR_FORBIDDEN",
-          "OPPOSITE_LEG_BLOCKED_NON_ACTIVE_ENGINE",
-          "TREND_OPPOSITE_LEG_BLOCKED",
-          "RANGE_HEDGE_BLOCKED",
-          "NGE_STAGE0_UPPER_LONG_BLOCK"
-        ]);
-        if (!this.serverTradeControlState.server_trade_enabled) {
-          hardBlockPresent = true;
-          hardBlockReason = "SERVER_TRADE_DISABLED";
-        } else if (this.serverTradeControlState.close_only_mode) {
-          hardBlockPresent = true;
-          hardBlockReason = "CLOSE_ONLY_MODE";
-        } else if (this.serverTradeControlState.kill_switch_active) {
-          hardBlockPresent = true;
-          hardBlockReason = "KILL_SWITCH";
-        } else if (this.reconcileSafetyCloseOnly) {
-          hardBlockPresent = true;
-          hardBlockReason = "RECONCILE_SAFE_MODE";
-        } else if (riskModeForFinalizer === "HALT") {
-          hardBlockPresent = true;
-          hardBlockReason = "RISK_MODE_HALT";
-        } else if (dailyLossGuardForFinalizer) {
-          hardBlockPresent = true;
-          hardBlockReason = "DAILY_LOSS_GUARD";
-        } else if (isNewEntry && next.length >= max) {
-          hardBlockPresent = true;
-          hardBlockReason = "MAX_SLOTS_REACHED";
-        } else {
-          // --- V2-Aware Min Order Size Check (Final Authorization Gate) ---
-          const marginUsdt = authorityStageMarginKrwForFinalizer / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
-          const appliedLev = authority.appliedLeverage ?? (authority.source === "v2" ? 10 : 1);
-          const computedNotionalUsdt = marginUsdt * appliedLev;
-          const minReqNotional = authority.source === "v2" ? 100 : MIN_POSITION_SIZE_USD;
 
-          let minOrderUnderflow = false;
-          let underflowBasis = "margin_only_legacy";
-
-          if (authority.source === "v2") {
-            underflowBasis = "v2_notional_10x_aware";
-            // V2 10배 고정 원칙: 마진 10 USDT * 10배 = 100 USDT 이상이면 통과.
-            // notional_usdt >= 100이면 underflow로 막지 않는다.
-            if (authorityStageMarginKrwForFinalizer > 0 && computedNotionalUsdt < 100) {
-              minOrderUnderflow = true;
-            }
-          } else {
-            // Legacy/V1: 마진 기준 (15 USD)
-            if (authorityStageMarginKrwForFinalizer > 0 && marginUsdt < MIN_POSITION_SIZE_USD) {
-              minOrderUnderflow = true;
-            }
-          }
-
-          if (authority.source === "v2") {
-            this.logger.info("V2_FINAL_MIN_ORDER_CHECK_PROOF", {
-              symbol: sym,
-              authority_source: authority.source,
-              authority_size_krw: authorityStageMarginKrwForFinalizer,
-              authority_size_usdt: marginUsdt,
-              applied_leverage: appliedLev,
-              computed_order_notional_usdt: computedNotionalUsdt,
-              min_required_notional_usdt: minReqNotional,
-              min_order_underflow: minOrderUnderflow,
-              underflow_basis: underflowBasis,
-              final_blocked_reason_before: finalBlockedReason,
-              final_blocked_reason_after: minOrderUnderflow ? "MIN_ORDER_SIZE_UNDERFLOW" : finalBlockedReason
-            });
-          }
-
-          if (minOrderUnderflow) {
-            hardBlockPresent = true;
-            hardBlockReason = "MIN_ORDER_SIZE_UNDERFLOW";
-          } else if (res.decision.reject_reason === "ORDER_BUILD_FAIL") {
-            hardBlockPresent = true;
-            hardBlockReason = "ORDER_BUILD_FAIL";
-          } else if (finalBlockedReason != null && hardReasons.has(finalBlockedReason)) {
-            hardBlockPresent = true;
-            hardBlockReason = finalBlockedReason;
-          }
-        }
-        if (hardBlockPresent) {
-          finalBlockedReason = hardBlockReason;
-        } else {
-          if (finalBlockedReason != null) {
-            softBlockWarnings.push(finalBlockedReason);
-            if (!softReasons.has(finalBlockedReason)) {
-              softBlockWarnings.push(`LEGACY_SOFT_GATE:${finalBlockedReason}`);
-            }
-          }
-          finalBlockedReason = null;
-        }
-      }
-      const finalBlockedReasonAfterV2Finalizer = finalBlockedReason;
-      const finalAuthorizedAfterV2Finalizer = finalBlockedReasonAfterV2Finalizer === null;
-      this.logger.info("V2_FINAL_AUTHORIZATION_PROOF", {
-        symbol: sym,
-        authority_source: authority.source,
-        adopted_engine: adoptedEngine,
-        authority_decision_before: authority.decision,
-        authority_decision_after: authorityDecisionForExecution,
-        authority_side: authority.side,
-        hard_block_present: hardBlockPresent,
-        hard_block_reason: hardBlockReason,
-        soft_block_warnings: softBlockWarnings,
-        final_authorized_before: finalAuthorizedBeforeV2Finalizer,
-        final_authorized_after: finalAuthorizedAfterV2Finalizer,
-        final_blocked_reason_before: finalBlockedReasonBeforeV2Finalizer,
-        final_blocked_reason_after: finalBlockedReasonAfterV2Finalizer,
-        size_krw_before: authorityStageMarginKrwForFinalizer,
-        size_krw_after: authorityStageMarginKrwForFinalizer,
-        risk_mode: riskModeForFinalizer,
-        active_engine_routing: activeEngineRoutingForFinalizer,
-        stage1_execution_engine: stage1ExecutionEngineForFinalizer,
-        serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
-        closeOnlyMode: this.serverTradeControlState.close_only_mode,
-        killSwitch: this.serverTradeControlState.kill_switch_active,
-        reconcileSafeMode: this.reconcileSafetyCloseOnly
-      });
-      const regimeNowForInvariant = (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane) as MarketRegime;
-      if ((regimeNowForInvariant === "RANGE" || regimeNowForInvariant === "NO_TRADE") && authority.leverageProfile && authority.leverageProfile !== "BASE") {
-        this.logger.error("LEVERAGE_POLICY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
-          symbol: sym,
-          side: authority.side,
-          authority,
-          adoptedEngine,
-          lifecycleState: existingOpen?.lifecycleState ?? null,
-          reason: "boost_not_allowed_in_range_or_no_trade"
-        }));
-      }
-      if (this.lastRisk?.directionalShockState && this.lastRisk.directionalShockState !== "NONE" && authority.leverageProfile && authority.leverageProfile !== "BASE") {
-        this.logger.error("LEVERAGE_POLICY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
-          symbol: sym,
-          side: authority.side,
-          authority,
-          adoptedEngine,
-          lifecycleState: existingOpen?.lifecycleState ?? null,
-          reason: "boost_not_allowed_during_shock"
-        }));
-      }
-      if (authority.entryQualityGrade === "A" && (authority.appliedLeverage ?? 0) >= 6) {
-        this.logger.error("LEVERAGE_POLICY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
-          symbol: sym,
-          side: authority.side,
-          authority,
-          adoptedEngine,
-          lifecycleState: existingOpen?.lifecycleState ?? null,
-          reason: "a_grade_6x_not_allowed"
-        }));
-      }
-
-      // Final Authorization Boolean: The ONLY gate that allows execution
-      let finalEntryAuthorization = (finalBlockedReason === null);
-      const finalAuthorizedBeforeMutex = finalEntryAuthorization;
-      const finalBlockedReasonBeforeMutex = finalBlockedReason;
-      const orderBuildReadyBeforeMutex = res.decision.reject_reason !== "ORDER_BUILD_FAIL";
-      const authoritySideLower = normalizePositionSideLower(authority.side);
-      const positionOpenAttemptedBeforeMutex =
-        finalAuthorizedBeforeMutex &&
+      // --- UNIFIED V2 EXECUTION AUTHORIZATION PIPELINE (ATOMIC SNAPSHOT) ---
+      // This section overwrites legacy gating if candidate is V2 initial ENTER to ensure transactional atomicity.
+      const v2InitialEnterCandidateForSnapshot = 
+        authority.source === "v2" && 
+        adoptedEngine === "V2" && 
         authorityDecisionForExecution === "ENTER" &&
-        orderBuildReadyBeforeMutex;
-      const authoritySideInvalidForEnter =
-        authorityDecisionForExecution === "ENTER" &&
-        authoritySideLower == null;
-      const mutexEval = authoritySideInvalidForEnter
-        ? {
-          sameSymbolOpenCount: 0,
-          sameSideOpen: false,
-          oppositeSideOpen: false,
-          existingSides: [] as ("long" | "short")[],
-          existingPositionIds: [] as string[],
-          blocked: false,
-          blockReason: null as "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | "PENDING_EXCHANGE_CONFIRM_LOCK" | null
-        }
-        : this.positions.evaluateSymbolPositionMutex(
-          sym,
-          authoritySideLower as "long" | "short",
-          next,
-          existingIdx >= 0,
-          authority.addOnAllowed === true
-        );
+        existingIdx < 0;
 
-      if (authorityDecisionForExecution === "ENTER") {
-        this.logger.info("SYMBOL_POSITION_MUTEX_PROOF", {
+      if (v2InitialEnterCandidateForSnapshot) {
+        v2Snapshot = {
+          run_cycle_id: this.runCycleId,
+          decision_id: (authority as any).decision_id ?? null,
           symbol: sym,
-          requested_side: authoritySideLower,
-          existing_count: mutexEval.sameSymbolOpenCount,
-          existing_sides: mutexEval.existingSides,
-          blocked: mutexEval.blocked,
-          reason: mutexEval.blockReason,
-          pending_confirm_present: next.some(p => p.symbol === sym && p.lifecycleState === "PENDING_EXCHANGE_CONFIRM")
-        });
-      }
-      let mutexBlockApplied = false;
-      let mutexBlockReason: "SYMBOL_OPPOSITE_POSITION_OPEN" | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN" | "PENDING_EXCHANGE_CONFIRM_LOCK" | null = null;
-      if (authoritySideInvalidForEnter) {
-        finalBlockedReason = "ORDER_BUILD_FAIL";
-        finalEntryAuthorization = false;
-        hardBlockPresent = true;
-        hardBlockReason = "ORDER_BUILD_FAIL";
-      } else if (finalEntryAuthorization && authorityDecisionForExecution === "ENTER" && mutexEval.blocked) {
-        mutexBlockApplied = true;
-        mutexBlockReason = mutexEval.blockReason;
-        finalBlockedReason = mutexEval.blockReason;
-        finalEntryAuthorization = false;
-        hardBlockPresent = true;
-        hardBlockReason = mutexEval.blockReason;
-      }
-      const orderBuildReadyAfterMutex = orderBuildReadyBeforeMutex && !mutexBlockApplied;
-      const positionOpenAttempted = finalEntryAuthorization && authorityDecisionForExecution === "ENTER" && orderBuildReadyAfterMutex;
-      this.logger.info("SYMBOL_POSITION_MUTEX_PROOF", {
-        symbol: sym,
-        requested_side: authoritySideLower ?? authority.side,
-        existing_same_symbol_position_count: mutexEval.sameSymbolOpenCount,
-        existing_same_symbol_sides: mutexEval.existingSides,
-        opposite_position_exists: mutexEval.oppositeSideOpen,
-        same_side_position_exists: mutexEval.sameSideOpen,
-        is_scale_in: existingIdx >= 0,
-        add_on_allowed: authority.addOnAllowed === true,
-        mutex_allowed: !mutexEval.blocked,
-        mutex_block_reason: mutexBlockReason,
-        authority_source: authority.source,
-        adopted_engine: adoptedEngine,
-        active_engine_routing: activeEngineRoutingForFinalizer,
-        final_blocked_reason_before: finalBlockedReasonBeforeMutex,
-        final_blocked_reason_after: finalBlockedReason,
-        order_build_ready_before: orderBuildReadyBeforeMutex,
-        order_build_ready_after: orderBuildReadyAfterMutex,
-        position_open_attempted_before: positionOpenAttemptedBeforeMutex,
-        position_open_attempted_after: positionOpenAttempted,
-        authority_side_invalid: authoritySideInvalidForEnter,
-        existing_position_ids: mutexEval.existingPositionIds
-      });
-      if (authority.source === "v2" && adoptedEngine === "V2" && authorityDecisionForExecution === "ENTER") {
-        this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
-          symbol: sym,
-          side: authority.side,
-          authority_decision: authority.decision,
-          hard_block_present: absHardBlockPresent,
-          initial_v2_new_entry_only: existingIdx < 0,
-          final_blocked_reason_before: finalBlockedReasonBeforeMutex,
-          final_blocked_reason_after: finalBlockedReason,
-          legacy_range_reject_ignored_for_v2: legacyRangeRejectIgnoredForV2,
-          order_path_called: positionOpenAttempted
-        });
-      }
-      if (finalEntryAuthorization && (!this.serverTradeControlState.server_trade_enabled || this.serverTradeControlState.close_only_mode || this.serverTradeControlState.kill_switch_active || this.reconcileSafetyCloseOnly)) {
-        this.logger.error("SERVER_AUTHORITY_INVARIANT_BROKEN", this.buildInvariantProofPayload({
-          symbol: sym,
-          side: authority.side,
-          authority,
-          adoptedEngine,
-          lifecycleState: existingOpen?.lifecycleState ?? null,
-          reason: "entry_authorized_under_server_authority_block"
-        }));
-      }
-
-      // --- PIEPLINE EVENT EMISSION ---
-      // 1. AI Event (Report BLOCKED if AI rejected)
-      if (aiIn && aiOutput) {
-        const aiEventType = aiExecutionApproved ? "AI_APPROVED" : "AI_BLOCKED";
-        await this.store.appendJsonlLine("reports/events.jsonl", buildAiEventPayload(aiEventType, sym, (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane), aiIn, aiOutput, authority));
-      }
-
-      // 2. V2_FINAL_EXECUTION_DECISION_PROOF (STAGE1_ENTER_DECIDED 앞에 둠 — 운영 로그 최소 순서: POST_BRIDGE → FINAL → …)
-      this.logger.info("V2_FINAL_EXECUTION_DECISION_PROOF", {
-        symbol: sym,
-        authority_source: authority.source,
-        adopted_engine: adoptedEngine,
-        v2_decision: authorityDecisionForExecution,
-        v2_side: authority.side,
-        symbol_mutex_checked: true,
-        symbol_mutex_allowed: !authoritySideInvalidForEnter && !mutexEval.blocked,
-        symbol_mutex_block_reason: mutexEval.blockReason,
-        authority_side_invalid: authoritySideInvalidForEnter,
-        authority_side_invalid_block_reason: authoritySideInvalidForEnter ? "ORDER_BUILD_FAIL" : null,
-        final_decision: finalEntryAuthorization ? "ENTER" : "SKIP",
-        final_side: finalEntryAuthorization ? authority.side : "none",
-        hard_block_present: hardBlockPresent,
-        hard_block_reason: hardBlockReason,
-        soft_block_warnings: softBlockWarnings,
-        order_build_ready: orderBuildReadyAfterMutex,
-        position_open_attempted: positionOpenAttempted
-      });
-      if (v2FinalAuthorizationApplied) {
-        this.logger.info("V2_ENTER_EXECUTION_BRIDGE_PROOF", {
-          symbol: sym,
-          decision: authorityDecisionForExecution,
-          side: authority.side,
-          hard_block_present: hardBlockPresent,
-          hard_block_reason: hardBlockReason,
-          final_blocked_reason: finalBlockedReason,
+          authority_source: authority.source,
+          adopted_engine: adoptedEngine,
+          authority_decision: authorityDecisionForExecution,
+          authority_side: authority.side,
+          stage_margin_krw: authority.stageMarginKrw ?? 0,
+          size_usdt: (authority.stageMarginKrw ?? 0) / PAPER_LEDGER_KRW_NOTIONAL_PER_USD,
           paper_execution_ready: this.paperExecutionReady,
-          signed_execution_ready: this.signedExecutionReady
+          signed_execution_ready: this.signedExecutionReady,
+          serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+          closeOnlyMode: this.serverTradeControlState.close_only_mode,
+          killSwitch: this.serverTradeControlState.kill_switch_active,
+          reconcileSafeMode: this.reconcileSafetyCloseOnly,
+          max_slots: max,
+          current_slots: next.length,
+          risk_mode: this.lastRiskExposure?.riskMode ?? null,
+          daily_loss_guard: this.lastRisk?.dailyLossGuardTriggered === true,
+          hard_block_present: false,
+          hard_block_reason: null,
+          final_blocked_reason: null,
+          order_path_allowed: false,
+          order_path_called: false,
+          position_open_attempted: false
+        };
+
+        // Execution Gating using Snapshot (Strict Consistency)
+        if (!v2Snapshot.serverTradeEnabled) {
+          v2Snapshot.hard_block_reason = "SERVER_TRADE_DISABLED";
+        } else if (v2Snapshot.killSwitch) {
+          v2Snapshot.hard_block_reason = "KILL_SWITCH";
+        } else if (v2Snapshot.closeOnlyMode) {
+          v2Snapshot.hard_block_reason = "CLOSE_ONLY_MODE";
+        } else if (v2Snapshot.reconcileSafeMode) {
+          v2Snapshot.hard_block_reason = "RECONCILE_SAFE_MODE";
+        } else if (!v2Snapshot.paper_execution_ready) {
+          v2Snapshot.hard_block_reason = "PAPER_EXECUTION_NOT_READY";
+        } else if (!v2Snapshot.signed_execution_ready) {
+          v2Snapshot.hard_block_reason = "SIGNED_EXECUTION_NOT_READY";
+        } else if (v2Snapshot.risk_mode === "HALT") {
+          v2Snapshot.hard_block_reason = "RISK_MODE_HALT";
+        } else if (v2Snapshot.daily_loss_guard) {
+          v2Snapshot.hard_block_reason = "DAILY_LOSS_GUARD";
+        } else if (v2Snapshot.current_slots >= v2Snapshot.max_slots) {
+          v2Snapshot.hard_block_reason = "MAX_SLOTS_REACHED";
+        } else {
+          const sideLower = normalizePositionSideLower(v2Snapshot.authority_side);
+          if (sideLower == null) {
+            v2Snapshot.hard_block_reason = "AUTHORITY_SIDE_INVALID";
+          } else {
+            const mutexEval = this.positions.evaluateSymbolPositionMutex(
+              sym,
+              sideLower as "long" | "short",
+              next,
+              false,
+              authority.addOnAllowed === true
+            );
+            if (mutexEval.blocked) {
+              v2Snapshot.hard_block_reason = "SYMBOL_MUTEX_BLOCKED";
+            } else {
+              const appliedLev = authority.appliedLeverage ?? 10;
+              const computedNotionalUsdt = v2Snapshot.size_usdt * appliedLev;
+              if (v2Snapshot.stage_margin_krw > 0 && computedNotionalUsdt < 100) {
+                v2Snapshot.hard_block_reason = "MIN_ORDER_SIZE_UNDERFLOW";
+              }
+            }
+          }
+        }
+
+        if (v2Snapshot.hard_block_reason) {
+          v2Snapshot.hard_block_present = true;
+          v2Snapshot.final_blocked_reason = v2Snapshot.hard_block_reason;
+          hardBlockPresent = true;
+          hardBlockReason = v2Snapshot.hard_block_reason;
+          finalBlockedReason = v2Snapshot.hard_block_reason;
+        } else {
+          v2Snapshot.final_blocked_reason = null;
+          finalBlockedReason = null;
+          hardBlockPresent = false;
+          hardBlockReason = null;
+        }
+
+        v2Snapshot.order_path_allowed = !v2Snapshot.hard_block_present;
+        positionOpenAttempted = v2Snapshot.order_path_allowed;
+        finalEntryAuthorization = v2Snapshot.order_path_allowed;
+
+        // V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF (Mandatory)
+        this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
+          symbol: v2Snapshot.symbol,
+          side: v2Snapshot.authority_side,
+          order_path_allowed: v2Snapshot.order_path_allowed,
+          skip_reason: v2Snapshot.order_path_allowed ? null : (v2Snapshot.final_blocked_reason || "HARD_BLOCK_PRESENT"),
+          run_cycle_id: v2Snapshot.run_cycle_id,
+          decision_id: v2Snapshot.decision_id,
+          ...buildAuthorityEventMeta(authority)
+        });
+
+        // V2_FINAL_EXECUTION_DECISION_PROOF (Mandatory)
+        this.logger.info("V2_FINAL_EXECUTION_DECISION_PROOF", {
+          symbol: v2Snapshot.symbol,
+          decision_id: v2Snapshot.decision_id,
+          run_cycle_id: v2Snapshot.run_cycle_id,
+          order_path_allowed: v2Snapshot.order_path_allowed,
+          final_authorized: finalEntryAuthorization,
+          order_path_called: v2Snapshot.order_path_called,
+          position_open_attempted: v2Snapshot.position_open_attempted,
+          ...buildAuthorityEventMeta(authority)
         });
       }
+
+      // Legacy decision update for backward compatibility
       this.logger.info("STAGE1_ENTER_DECIDED", {
         symbol: sym,
         regime: (this.lastEffectiveLane === "IDLE" ? "NO_TRADE" : this.lastEffectiveLane),
         executor: stage1ExecutorLabel,
         final_authorized: finalEntryAuthorization,
         final_blocked_reason: finalBlockedReason,
-        v2_final_authorization_applied: v2FinalAuthorizationApplied,
+        v2_final_authorization_applied: v2Snapshot != null,
         hard_block_present: hardBlockPresent,
         hard_block_reason: hardBlockReason,
         soft_block_warnings: softBlockWarnings,
-        final_authorized_before_v2_finalizer: finalAuthorizedBeforeV2Finalizer,
-        final_authorized_after_v2_finalizer: finalAuthorizedAfterV2Finalizer,
-        final_blocked_reason_before_v2_finalizer: finalBlockedReasonBeforeV2Finalizer,
-        final_blocked_reason_after_v2_finalizer: finalBlockedReasonAfterV2Finalizer,
         authority_source: authority.source,
         authority_side: authority.side,
-        authority_size_krw: authorityStageMarginKrwForFinalizer,
-        authority_size_usdt: authorityStageMarginKrwForFinalizer / 1400,
-        active_engine_routing: activeEngineRoutingForFinalizer,
-        stage1_execution_engine: stage1ExecutionEngineForFinalizer,
+        authority_size_krw: (authority.stageMarginKrw ?? 0),
+        active_engine_routing: (this.lastMarketMode?.routing.activeEngine ?? null),
+        stage1_execution_engine: stage1ExecutionEngine,
         ai_approved: aiExecutionApproved,
         policy_paused: policyPaused,
-        allow_long: allowLongGuard,
-        allow_short: allowShortGuard,
         is_scale_in: existingIdx >= 0,
         serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
         closeOnlyMode: this.serverTradeControlState.close_only_mode,
@@ -9284,6 +9025,12 @@ export class PaperEngine {
         reconcileSafeMode: this.reconcileSafetyCloseOnly,
         ...buildAuthorityEventMeta(authority)
       });
+
+      // Final Invariant Check
+      if (finalEntryAuthorization && (!this.serverTradeControlState.server_trade_enabled || this.serverTradeControlState.close_only_mode || this.serverTradeControlState.kill_switch_active || this.reconcileSafetyCloseOnly)) {
+        this.logger.error("SERVER_AUTHORITY_INVARIANT_BROKEN", { symbol: sym, reason: "authorized_under_block" });
+      }
+
       if (positionOpenAttempted) {
         this.logger.info("STAGE1_POSITION_OPEN_ATTEMPT", {
           symbol: sym,
@@ -9294,31 +9041,6 @@ export class PaperEngine {
           hard_block_present: hardBlockPresent,
           hard_block_reason: hardBlockReason,
           soft_block_warnings: softBlockWarnings
-        });
-      }
-      if (finalBlockedReason === "CRASH_ENTRY_GUARD_BLOCK") {
-        this.logger.warn("CRASH_ENTRY_GUARD_BLOCK", {
-          symbol: sym,
-          crash_state: crashState,
-          crash_lock_until: crashLockUntil,
-          crash_guard_regime_aware_released: crashGuardRegimeAwareReleased,
-          crash_lock_expired_or_soon: crashLockExpiredOrSoon,
-          final_decision: "SKIP",
-          reject_reason: finalBlockedReason,
-          authority_owner: authority.source,
-          active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
-          note: "CRASH_REDUCE no longer blocks entry — only CRASH_EXIT/LOCK when regime still in shock"
-        });
-      }
-      if (finalBlockedReason === "NGE_STAGE0_UPPER_LONG_BLOCK") {
-        this.logger.warn("NGE_STAGE0_UPPER_LONG_BLOCK", {
-          symbol: sym,
-          zone,
-          range_stage0_engine_taken: res.decision.range_stage0_engine_taken ?? false,
-          final_decision: "SKIP",
-          reject_reason: finalBlockedReason,
-          authority_owner: authority.source,
-          active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null
         });
       }
 
@@ -9834,14 +9556,19 @@ export class PaperEngine {
           const clOrdId = `paper-${first.symbol}-${Date.now()}`;
           trace.exchange_client_order_id = clOrdId;
           trace.order_submit_requested = true;
-
-          this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
-            symbol: first.symbol,
-            side,
-            qty,
-            clOrdId,
-            authority_source: authority.source
-          });
+          
+          if (v2Snapshot) {
+            v2Snapshot.order_path_called = true;
+            this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
+              symbol: v2Snapshot.symbol,
+              side: v2Snapshot.authority_side,
+              decision_id: v2Snapshot.decision_id,
+              run_cycle_id: v2Snapshot.run_cycle_id,
+              authority_source: v2Snapshot.authority_source,
+              order_path_called: v2Snapshot.order_path_called,
+              note: "V2 authoritative decision accepted; entering exchange submission"
+            });
+          }
 
           submit = await this.submitOkxOrder({
             symbol: first.symbol,
@@ -10017,6 +9744,8 @@ export class PaperEngine {
 
         next.push(record);
         openPositionsChanged = true;
+        
+        if (v2Snapshot) v2Snapshot.position_open_attempted = true;
 
         this.logger.info("STOP_STATE_PROOF", {
           symbol: record.symbol,
