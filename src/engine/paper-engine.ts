@@ -8178,17 +8178,67 @@ export class PaperEngine {
     const entryQueue: SymbolSnapshot[] = [];
     input.decisionBySymbol.forEach((envelope, symKey) => {
       const { authority, snapshot } = envelope;
-
-      let enqueue_block_reason: string | null = null;
-      const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(authority, envelope.legacy.adaptiveResult);
-      if (effectiveAdaptiveResult == null) enqueue_block_reason = "adaptive_bridge_null";
-
       const base = snapshotBySymbol.get(symKey) ?? snapshot;
-      if (!base && !enqueue_block_reason) enqueue_block_reason = "snapshot_missing";
 
-      const isV2EntryIntent = authority.source === "v2" && (authority.decision === "ENTER" || (authority as any).originalDecision === "ENTER");
+      if (authority.source === "v2") {
+        const v2QueueAllowed =
+          envelope.v2_execution_envelope?.authoritySource === "v2_execution_envelope" &&
+          authority.decision === "ENTER" &&
+          (authority.side === "long" || authority.side === "short") &&
+          (authority.stageMarginKrw ?? 0) > 0 &&
+          authority.hardBlockPresent !== true &&
+          authority.nonBypassableHardBlockPresent !== true &&
+          executionSnapshot.paperReady === true &&
+          executionSnapshot.signedReady === true &&
+          executionSnapshot.tradeEnabled === true &&
+          executionSnapshot.closeOnly === false &&
+          executionSnapshot.killSwitch === false &&
+          executionSnapshot.reconcileSafe === false &&
+          executionSnapshot.dailyLossGuard === false &&
+          executionSnapshot.riskModeHalt === false;
 
-      if (isV2EntryIntent) {
+        if (!v2QueueAllowed) {
+          if (authority.decision === "ENTER" || (authority as any).originalDecision === "ENTER") {
+            let blockReason = "v2_hard_safety_block";
+            if (authority.decision !== "ENTER") blockReason = "authority_decision_not_enter";
+            else if (authority.hardBlockPresent === true) blockReason = "hard_block_present";
+            else if (authority.nonBypassableHardBlockPresent === true) blockReason = "non_bypassable_hard_block";
+            else if (!executionSnapshot.signedReady) blockReason = "signed_not_ready";
+            else if (!executionSnapshot.tradeEnabled) blockReason = "trade_disabled";
+            else if (executionSnapshot.dailyLossGuard) blockReason = "daily_loss_guard";
+
+            this.logger.info("V2_ENTER_CANDIDATE_ENQUEUE_PROOF", {
+              symbol: symKey,
+              authority_decision: authority.decision,
+              original_decision: (authority as any).originalDecision ?? null,
+              authority_side: authority.side,
+              original_side: (authority as any).originalSide ?? null,
+              stage_margin_krw: authority.stageMarginKrw ?? 0,
+              original_stage_margin_krw: (authority as any).originalStageMarginKrw ?? 0,
+              hard_block_present: authority.hardBlockPresent === true,
+              hard_block_reason: authority.hardBlockReason ?? null,
+              signed_execution_ready: executionSnapshot.signedReady,
+              paper_execution_ready: executionSnapshot.paperReady,
+              enqueued: false,
+              enqueue_block_reason: blockReason,
+              run_cycle_id: executionSnapshot.runCycleId,
+              decision_id: (authority as any).decision_id ?? null
+            });
+          }
+          return;
+        }
+
+        if (!base) {
+          this.logger.info("V2_ENTER_CANDIDATE_ENQUEUE_PROOF", {
+            symbol: symKey,
+            authority_decision: authority.decision,
+            enqueued: false,
+            enqueue_block_reason: "snapshot_missing",
+            run_cycle_id: executionSnapshot.runCycleId
+          });
+          return;
+        }
+
         this.logger.info("V2_ENTER_CANDIDATE_ENQUEUE_PROOF", {
           symbol: symKey,
           authority_decision: authority.decision,
@@ -8201,17 +8251,25 @@ export class PaperEngine {
           hard_block_reason: authority.hardBlockReason ?? null,
           signed_execution_ready: executionSnapshot.signedReady,
           paper_execution_ready: executionSnapshot.paperReady,
-          enqueued: enqueue_block_reason === null,
-          enqueue_block_reason,
+          enqueued: true,
+          enqueue_block_reason: null,
           run_cycle_id: executionSnapshot.runCycleId,
           decision_id: (authority as any).decision_id ?? null
         });
+
+        const sig: PaperSignal = authority.side === "long" ? "paper_long_candidate" : "paper_short_candidate";
+        entryQueue.push({ ...base, signal: sig, authoritySource: "v2" });
+        return;
       }
 
-      if (enqueue_block_reason) return;
+      if (authority.source === "v1") {
+        const effectiveAdaptiveResult = this.buildAuthorityAdaptiveBridge(authority, envelope.legacy.adaptiveResult);
+        if (effectiveAdaptiveResult == null) return;
+        if (!base) return;
 
-      const sig: PaperSignal = authority.side === "long" ? "paper_long_candidate" : "paper_short_candidate";
-      entryQueue.push({ ...base!, signal: sig, authoritySource: authority.source as "v1" | "v2" });
+        const sig: PaperSignal = authority.side === "long" ? "paper_long_candidate" : "paper_short_candidate";
+        entryQueue.push({ ...base, signal: sig, authoritySource: "v1" });
+      }
     });
     entryQueue.sort((a, b) => {
       const aMajor = a.symbol === "BTCUSDT" || a.symbol === "ETHUSDT";
