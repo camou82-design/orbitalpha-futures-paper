@@ -8170,7 +8170,6 @@ export class PaperEngine {
           side: auth.side,
           stage_margin_krw: stageMarginKrw,
           size_usdt: sizeUsdt,
-          size_usdt: sizeUsd,
           signed_execution_ready: executionSnapshot.signedReady,
           paper_execution_ready: executionSnapshot.paperReady,
           non_bypassable_hard_block_present: nonBypassableHardBlockPresent,
