@@ -8404,10 +8404,27 @@ export class PaperEngine {
     const nowTs = Date.now();
     this.lastEntryDecision = null;
 
+    let consumeIdx = 0;
     for (const first of entryQueue) {
       const envelope = input.decisionBySymbol.get(String(first.symbol))!;
-      const res = envelope.legacy;
       const authority = envelope.authority;
+      this.logger.info("ENTRY_QUEUE_CONSUME_PROOF", {
+        run_cycle_id: this.runCycleId,
+        queue_length: entryQueue.length,
+        index: consumeIdx,
+        symbol: first.symbol,
+        signal: first.signal,
+        authoritySource: first.authoritySource,
+        has_decision_envelope: !!envelope,
+        authority_decision: authority?.decision,
+        authority_side: authority?.side,
+        stage_margin_krw: authority?.stageMarginKrw,
+        signed_execution_ready: executionSnapshot.signedReady,
+        paper_execution_ready: executionSnapshot.paperReady
+      });
+      consumeIdx++;
+
+      const res = envelope.legacy;
       const adoptedEngine = envelope.selector?.adopted_result.engine ?? null;
       this.lastEntryEvaluatedAt = nowTs;
       this.lastEntrySignalFetchedAt = envelope.signalFetchedAt ?? first.fetchedAt ?? null;
@@ -9247,6 +9264,33 @@ export class PaperEngine {
         localSnapshot.killSwitch === false &&
         localSnapshot.reconcileSafe === false &&
         localSnapshot.freshTickBlocked === false;
+
+      if (v2AuthorityCandidate) {
+        const skip_reason = finalEntryAuthorization ? "NONE" : (hardBlockReason || finalBlockedReason || "AUTHORITY_PIPELINE_BLOCKED");
+        this.logger.info("V2_QUEUE_CONSUME_PROOF", {
+          symbol: sym,
+          signal: first.signal,
+          authoritySource: first.authoritySource,
+          authority_decision: authority.decision,
+          authority_side: authority.side,
+          stage_margin_krw: authority.stageMarginKrw ?? 0,
+          v2AuthorityCandidate,
+          authorityDecisionForExecution,
+          finalEntryAuthorization,
+          skip_reason,
+          source_v2: authority.source === "v2",
+          engine_v2: adoptedEngine === "V2",
+          decision_enter: authorityDecisionForExecution === "ENTER",
+          signed_ready: executionSnapshot.signedReady,
+          paper_ready: executionSnapshot.paperReady,
+          trade_enabled: executionSnapshot.tradeEnabled,
+          close_only: executionSnapshot.closeOnly,
+          kill_switch: executionSnapshot.killSwitch,
+          daily_loss: executionSnapshot.dailyLossGuard,
+          risk_halt: executionSnapshot.riskModeHalt,
+          mutex_allowed: !mutexEval.blocked
+        });
+      }
 
       const positionOpenAttempted = finalEntryAuthorization && authorityDecisionForExecution === "ENTER";
 
