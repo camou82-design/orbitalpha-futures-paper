@@ -8436,7 +8436,9 @@ export class PaperEngine {
         executionSnapshot.tradeEnabled === true &&
         executionSnapshot.closeOnly === false &&
         executionSnapshot.killSwitch === false &&
-        executionSnapshot.reconcileSafe === false;
+        executionSnapshot.reconcileSafe === false &&
+        executionSnapshot.dailyLossGuard === false &&
+        executionSnapshot.riskModeHalt === false;
 
       if (staleReasons.length > 0 && !v2BypassConditionsMet) {
         this.logger.warn("ENTRY_BLOCKED_STALE_SIGNAL", {
@@ -8563,9 +8565,11 @@ export class PaperEngine {
           })
           : { promote: false, reason: "no_directional_side", ticks: 0 };
       const authorityDecisionForExecution =
-        authority.decision === "ENTER" || recheckPromotion.promote
-          ? "ENTER"
-          : authority.decision;
+        (authority.source === "v2" && adoptedEngine === "V2")
+          ? authority.decision
+          : (authority.decision === "ENTER" || recheckPromotion.promote
+            ? "ENTER"
+            : authority.decision);
 
       if (recheckPromotion.promote) {
         this.logger.info("ENTRY_EVIDENCE_RECHECK_PASS", {
@@ -9062,8 +9066,7 @@ export class PaperEngine {
       const softBlockWarnings: string[] = [];
       const v2AuthorityCandidate =
         authority.source === "v2" &&
-        adoptedEngine === "V2" &&
-        isNewEntry;
+        adoptedEngine === "V2";
       const v2FinalAuthorizationApplied = v2AuthorityCandidate && authorityDecisionForExecution === "ENTER";
 
       const activeEngineRoutingForFinalizer = this.lastMarketMode?.routing.activeEngine ?? null;
@@ -9415,7 +9418,27 @@ export class PaperEngine {
       const riskE = this.lastRiskExposure;
 
       // --- V2 AUTHORITATIVE EXECUTION FAST-PATH ---
-      if (v2AuthorityCandidate && positionOpenAttempted) {
+      if (v2AuthorityCandidate && authorityDecisionForExecution === "ENTER") {
+        // 0. V2_ENTER_EXECUTION_BRIDGE_PROOF (Mandatory visibility for all authoritative ENTER signals)
+        this.logger.info("V2_ENTER_EXECUTION_BRIDGE_PROOF", {
+          symbol: sym,
+          decision: authorityDecisionForExecution,
+          side: authority.side,
+          stage_margin_krw: authority.stageMarginKrw ?? 0,
+          exposure_notional_krw: authority.exposureNotionalKrw ?? 0,
+          size_usdt: entrySizeUsd,
+          paper_execution_ready: executionSnapshot.paperReady,
+          signed_execution_ready: executionSnapshot.signedReady,
+          run_cycle_id: executionSnapshot.runCycleId,
+          final_authorized: finalEntryAuthorization
+        });
+
+        if (!finalEntryAuthorization) {
+          const skip_reason = hardBlockReason || finalBlockedReason || "AUTHORITY_PIPELINE_BLOCKED";
+          this.logger.warn("V2_EXECUTION_FAST_PATH_SKIPPED", { symbol: sym, skip_reason });
+          continue;
+        }
+
         // 1. Slot Check (Hard Block)
         if (next.length >= max) {
           const skip_reason = "V2_EXECUTION_BLOCKED_MAX_SLOTS";
@@ -9504,20 +9527,7 @@ export class PaperEngine {
 
         // 5. Execution Handoff
         const openTraceId = randomUUID();
-        const sampleBtcEth = isBtcEthSampleSymbol(sym);
         const signedMode = this.signedSubmitMode();
-
-        this.logger.info("V2_ENTER_EXECUTION_BRIDGE_PROOF", {
-          symbol: sym,
-          decision: authorityDecisionForExecution,
-          side: authority.side,
-          stage_margin_krw: authority.stageMarginKrw ?? 0,
-          exposure_notional_krw: authority.exposureNotionalKrw ?? 0,
-          size_usdt: v2EntrySizeUsd,
-          paper_execution_ready: executionSnapshot.paperReady,
-          signed_execution_ready: executionSnapshot.signedReady,
-          run_cycle_id: executionSnapshot.runCycleId
-        });
 
         // Mandatory Diagnostic Proof Chain for V2 Candidates reaching the bridge
         this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
