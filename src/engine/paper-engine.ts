@@ -683,6 +683,31 @@ function parseOkxSubmitErrorMessage(msg: string): { code: string | null; message
   return { code: null, message: msg };
 }
 
+/** OKX `clOrdId`: letters/digits only, max length 32 (hyphens and underscores rejected by API). */
+function okxClOrdIdSideCode(side: "buy" | "sell" | "long" | "short"): string {
+  switch (side) {
+    case "buy":
+      return "b";
+    case "sell":
+      return "s";
+    case "long":
+      return "l";
+    case "short":
+      return "h";
+    default:
+      return "x";
+  }
+}
+
+function buildOkxClOrdId(rawSymbol: string, sideForCode: "buy" | "sell" | "long" | "short"): string {
+  const sym = String(rawSymbol).replace(/[^A-Za-z0-9]/g, "");
+  const sideCode = okxClOrdIdSideCode(sideForCode);
+  const ts36 = Date.now().toString(36);
+  const suffix = randomUUID().replace(/-/g, "").slice(0, 8);
+  const built = `p${sym}${sideCode}${ts36}${suffix}`;
+  return built.length <= 32 ? built : built.slice(0, 32);
+}
+
 function isBtcEthSampleSymbol(symbol: string): boolean {
   const s = String(symbol).toUpperCase();
   return s === "BTCUSDT" || s === "ETHUSDT";
@@ -3973,7 +3998,7 @@ export class PaperEngine {
     const side = input.side === "long" ? "sell" : "buy";
     const posSide = input.side === "long" ? "long" : "short";
     const qty = Math.max(0.001, Math.round((input.sizeUsd / Math.max(1e-9, input.lastPrice)) * 1_000_000) / 1_000_000);
-    const clOrdId = `close-${input.symbol}-${Date.now()}`;
+    const clOrdId = buildOkxClOrdId(input.symbol, side);
 
     const closeReason = input.reason;
     const isStopLoss = input.isStopLoss ?? (closeReason === "stop_loss" || closeReason.includes("stop_loss"));
@@ -4132,6 +4157,42 @@ export class PaperEngine {
       available_balance_usdt: this.okxAvailableBalanceUsdt,
       ...this.okxAuthProofContext()
     };
+
+    const rawSymbolStr = String(input.symbol);
+    const clOrdId_alnum_only = /^[A-Za-z0-9]+$/.test(input.clOrdId);
+    const clOrdId_max32 = input.clOrdId.length <= 32;
+    this.logger.info("OKX_CLIENT_ORDER_ID_PROOF", {
+      symbol: input.symbol,
+      side: input.side,
+      raw_symbol: rawSymbolStr,
+      clOrdId: input.clOrdId,
+      clOrdId_length: input.clOrdId.length,
+      clOrdId_alnum_only,
+      clOrdId_max32
+    });
+    if (!clOrdId_alnum_only || !clOrdId_max32) {
+      this.logger.info("ORDER_BUILD_FAIL", {
+        order_build_fail_reason: "OKX_CLIENT_ORDER_ID_INVALID",
+        symbol: input.symbol,
+        side: input.side,
+        raw_symbol: rawSymbolStr,
+        clOrdId: input.clOrdId,
+        clOrdId_length: input.clOrdId.length,
+        clOrdId_alnum_only,
+        clOrdId_max32
+      });
+      return {
+        ok: false,
+        ordId: null,
+        fillPx: null,
+        fillSize: 0,
+        errorCode: "OKX_CLIENT_ORDER_ID_INVALID",
+        errorMessage: "clOrdId must be alphanumeric ASCII only and length <= 32",
+        ackCode: "rejected",
+        orderState: null,
+        fillConfirmed: false
+      };
+    }
 
     if (!this.signedExecutionReady) {
       const reason = "SIGNED_EXECUTION_NOT_READY";
@@ -6108,7 +6169,7 @@ export class PaperEngine {
               side: oSide,
               posSide: oPosSide,
               qty: oQty,
-              clOrdId: `open-rev-${open.symbol}-${Date.now()}`,
+              clOrdId: buildOkxClOrdId(open.symbol, oSide),
               traceId: flowId,
               reason: "trend_switch_open",
               isNewEntry: true
@@ -6917,11 +6978,12 @@ export class PaperEngine {
             const pSide = open.side === "long" ? "sell" : "buy";
             const pPosSide = open.side === "long" ? "long" : "short";
             const pQty = Math.max(0.001, Math.round((partialMargin / Math.max(1e-9, mp.mark)) * 1_000_000) / 1_000_000);
+            const partialClOrdId = buildOkxClOrdId(open.symbol, pSide);
             this.logger.info("V2_PARTIAL_ORDER_PATH_PROOF", {
               symbol: open.symbol,
               side: pSide,
               qty: pQty,
-              clOrdId: `partial-${open.symbol}-${Date.now()}`,
+              clOrdId: partialClOrdId,
               traceId: flowId,
               reason: `partial_close_${pReason}`
             });
@@ -6930,7 +6992,7 @@ export class PaperEngine {
               side: pSide,
               posSide: pPosSide,
               qty: pQty,
-              clOrdId: `partial-${open.symbol}-${Date.now()}`,
+              clOrdId: partialClOrdId,
               traceId: flowId,
               reason: `partial_close_${pReason}`,
               isNewEntry: false
@@ -9728,7 +9790,7 @@ export class PaperEngine {
           
           // Use normalized sizing and rounding
           const qty = roundQtyByInstrumentStep(v2EntrySizeUsd / Math.max(1e-9, first.lastPrice));
-          const clOrdId = `paper-${sym}-${Date.now()}`;
+          const clOrdId = buildOkxClOrdId(sym, side);
 
           this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
             symbol: sym,
@@ -10272,7 +10334,7 @@ export class PaperEngine {
           const posSide = authority.side === "long" ? "long" : "short";
           const qty = Math.max(0.001, Math.round((entrySizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
           trace.qty_submitted = qty;
-          const clOrdId = `paper-${first.symbol}-${Date.now()}`;
+          const clOrdId = buildOkxClOrdId(first.symbol, side);
           trace.exchange_client_order_id = clOrdId;
           trace.order_submit_requested = true;
 
@@ -11138,7 +11200,7 @@ export class PaperEngine {
         side: sSide,
         posSide: sPosSide,
         qty: sQty,
-        clOrdId: `scalein-${existing.symbol}-${Date.now()}`,
+        clOrdId: buildOkxClOrdId(existing.symbol, sSide),
         traceId: `${existing.symbol}:${existing.side}:${existing.openedAt}`,
         reason: "scale_in_authorized",
         authoritySource: authority.source,
