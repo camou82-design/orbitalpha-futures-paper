@@ -21,7 +21,8 @@ type OkxApiEnvelope<T> = Readonly<{
 export type OkxOrderSubmitInput = Readonly<{
   instId: string;
   side: OkxDemoOrderSide;
-  posSide: OkxDemoPositionSide;
+  /** Omit for `net_mode` accounts (OKX 51010 if sent incorrectly). */
+  posSide?: OkxDemoPositionSide;
   sz: string;
   tdMode?: "isolated" | "cross";
   ordType?: "market" | "limit";
@@ -178,6 +179,7 @@ export class OkxDemoClient {
     }
   }
 
+  /** Signed GET /api/v5/account/config — `acctLv`, `posMode`, etc. */
   getAccountConfig(): Promise<TryResult<Record<string, unknown>[]>> {
     return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/account/config", null, null);
   }
@@ -216,7 +218,7 @@ export class OkxDemoClient {
       instId: input.instId,
       tdMode: input.tdMode ?? "isolated",
       side: input.side,
-      posSide: input.posSide,
+      ...(input.posSide !== undefined ? { posSide: input.posSide } : {}),
       ordType: input.ordType ?? "market",
       sz: input.sz,
       ...(input.px ? { px: input.px } : {}),

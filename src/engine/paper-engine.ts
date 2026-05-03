@@ -4384,6 +4384,66 @@ export class PaperEngine {
       };
     }
 
+    const cfgTry = await this.okxDemo.getAccountConfig();
+    if (!cfgTry.ok || !cfgTry.value?.[0]) {
+      this.logger.info("ORDER_BUILD_FAIL", {
+        order_build_fail_reason: "OKX_ACCOUNT_CONFIG_FETCH_FAILED",
+        symbol: input.symbol,
+        instId,
+        error: cfgTry.ok ? "empty_data" : cfgTry.error
+      });
+      return {
+        ok: false,
+        ordId: null,
+        fillPx: null,
+        fillSize: 0,
+        errorCode: "OKX_ACCOUNT_CONFIG_FETCH_FAILED",
+        errorMessage: cfgTry.ok ? "OKX account/config empty" : cfgTry.error,
+        ackCode: "rejected",
+        orderState: null,
+        fillConfirmed: false
+      };
+    }
+    const cfgRow0 = cfgTry.value[0] as Record<string, unknown>;
+    const okxAcctLv = String(cfgRow0.acctLv ?? "").trim();
+    const okxPosMode = String(cfgRow0.posMode ?? "").trim();
+
+    this.logger.info("OKX_ACCOUNT_MODE_PROOF", {
+      symbol: input.symbol,
+      instId,
+      acctLv: okxAcctLv,
+      posMode: okxPosMode,
+      order_trace_id: input.traceId,
+      order_reason: input.reason
+    });
+
+    if (okxAcctLv === "1") {
+      this.logger.info("ORDER_BUILD_FAIL", {
+        order_build_fail_reason: "OKX_ACCOUNT_MODE_INCOMPATIBLE",
+        detail: "acctLv_spot_mode_derivatives",
+        acctLv: okxAcctLv,
+        posMode: okxPosMode,
+        symbol: input.symbol,
+        instId
+      });
+      return {
+        ok: false,
+        ordId: null,
+        fillPx: null,
+        fillSize: 0,
+        errorCode: "OKX_ACCOUNT_MODE_INCOMPATIBLE",
+        errorMessage: "OKX account is Spot mode (acctLv=1); SWAP orders are incompatible",
+        ackCode: "rejected",
+        orderState: null,
+        fillConfirmed: false
+      };
+    }
+
+    const orderTdMode: "isolated" | "cross" =
+      okxAcctLv === "3" || okxAcctLv === "4" ? "cross" : "isolated";
+    const payloadPosSide: "long" | "short" | undefined =
+      okxPosMode === "long_short_mode" ? input.posSide : undefined;
+
     let refPrice: number | null = null;
     let final_submitted_notional_usdt: number | null = null;
     let limitPrice: number | null = null;
@@ -4438,7 +4498,7 @@ export class PaperEngine {
       const v2_risk_cap_usdt = v2_intended_notional_usdt;
 
       // 2. OKX Reality Context (Exchange State)
-      const okxLeverage = await this.okxDemo.getLeverage(instId);
+      const okxLeverage = await this.okxDemo.getLeverage(instId, orderTdMode);
       let okx_confirmed_leverage = okxLeverage.ok ? Number(okxLeverage.value?.[0]?.lever ?? 0) : null;
       const okx_available_balance_usdt = this.okxAvailableBalanceUsdt;
 
@@ -4458,10 +4518,11 @@ export class PaperEngine {
           intended_leverage: input.appliedLeverage,
           current_okx_leverage: okx_confirmed_leverage
         });
-        const setLevRes = await this.okxDemo.setLeverage({ 
-          instId, 
+        const setLevRes = await this.okxDemo.setLeverage({
+          instId,
           lever: String(input.appliedLeverage),
-          mgnMode: "isolated"
+          mgnMode: orderTdMode,
+          ...(okxPosMode === "long_short_mode" ? { posSide: input.posSide } : {})
         });
         if (setLevRes.ok) {
           this.logger.info("V2_LEVERAGE_SYNC_PROOF", {
@@ -4792,13 +4853,15 @@ export class PaperEngine {
     this.logger.info("OKX_ORDER_SIZE_PROOF", {
       symbol: input.symbol,
       instId,
+      order_trace_id: input.traceId,
       side: input.side,
       posSide: input.posSide,
       req_sz: submitSzStr,
       lotSz: sizingMeta.lotSz,
       minSz: sizingMeta.minSz,
       sz_lot_multiple_ok: norm.sz_lot_multiple_ok,
-      min_size_ok: norm.min_size_ok
+      min_size_ok: norm.min_size_ok,
+      chain_hint: "after_OKX_ACCOUNT_MODE_PROOF_before_OKX_ORDER_PAYLOAD_MODE_PROOF"
     });
 
     const stageMarginKrw = input.stageMarginKrw ?? 0;
@@ -4836,14 +4899,31 @@ export class PaperEngine {
       return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "duplicate_execution_key", errorMessage: "Duplicate order execution key blocked", ackCode: "rejected", orderState: null, fillConfirmed: false };
     }
 
+    this.logger.info("OKX_ORDER_PAYLOAD_MODE_PROOF", {
+      symbol: input.symbol,
+      instId,
+      order_trace_id: input.traceId,
+      order_reason: input.reason,
+      acctLv: okxAcctLv,
+      posMode: okxPosMode,
+      engine_pos_side: input.posSide,
+      payload_td_mode: orderTdMode,
+      payload_pos_side_omitted: payloadPosSide === undefined,
+      payload_pos_side: payloadPosSide ?? null,
+      req_sz: submitSzStr,
+      req_side: input.side,
+      req_ordType: this.config.okxAuthMode === "live" ? "limit" : "market",
+      chain_hint: "after_OKX_ACCOUNT_MODE_PROOF_and_OKX_ORDER_SIZE_PROOF_before_submit"
+    });
+
     try {
       const submit = await this.okxDemo.submitOrder({
         instId,
         side: input.side,
-        posSide: input.posSide,
+        ...(payloadPosSide !== undefined ? { posSide: payloadPosSide } : {}),
         sz: submitSzStr,
         clOrdId: input.clOrdId,
-        tdMode: "isolated",
+        tdMode: orderTdMode,
         ordType: this.config.okxAuthMode === "live" ? "limit" : "market",
         px: limitPrice ? String(limitPrice) : undefined
       });
@@ -4860,17 +4940,20 @@ export class PaperEngine {
           resp_ordId: row0?.ordId,
           resp_clOrdId: row0?.clOrdId,
           req_instId: instId,
-          req_tdMode: "isolated",
+          req_tdMode: orderTdMode,
           req_side: input.side,
-          req_posSide: input.posSide,
+          req_posSide: payloadPosSide ?? null,
+          req_pos_side_omitted: payloadPosSide === undefined,
           req_ordType: this.config.okxAuthMode === "live" ? "limit" : "market",
           req_sz: submitSzStr,
           req_px: limitPrice ? String(limitPrice) : undefined,
           req_reduceOnly: undefined,
           req_clOrdId: input.clOrdId,
           applied_leverage: input.appliedLeverage ?? null,
-          margin_mode: "isolated",
-          position_mode: "long_short"
+          margin_mode: orderTdMode,
+          okx_pos_mode: okxPosMode,
+          okx_acct_lv: okxAcctLv,
+          chain_hint: "after_OKX_ORDER_PAYLOAD_MODE_PROOF"
         });
 
         const errorCode = submit.diagnostics.retCode || "submit_error";
