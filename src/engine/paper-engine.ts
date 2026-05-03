@@ -8278,7 +8278,58 @@ export class PaperEngine {
       if (!aMajor && bMajor) return +1;
       return 0;
     });
-    if (entryQueue.length === 0) return;
+    if (entryQueue.length === 0) {
+      this.logger.warn("ENTRY_QUEUE_PRE_CONSUME_BLOCKED_PROOF", {
+        run_cycle_id: this.runCycleId,
+        entry_queue_length: 0,
+        block_reason: "entry_queue_empty",
+        return_point: "entry_queue_empty_return",
+        fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness,
+        readiness_barrier_active: input.readinessBarrierActive,
+        v2_bypass_ready: false,
+        has_v2_authority_enter: false,
+        has_v2_enqueued: false
+      });
+      return;
+    }
+
+    const hasV2Enqueued = entryQueue.some(q => q.authoritySource === "v2");
+    const v2BypassReadyValue = entryQueue.some(q => {
+      const envelope = input.decisionBySymbol.get(String(q.symbol));
+      if (!envelope) return false;
+      const { authority } = envelope;
+      const adoptedEngine = envelope.selector?.adopted_result.engine ?? null;
+      return adoptedEngine === "V2" &&
+        envelope.v2_execution_envelope?.authoritySource === "v2_execution_envelope" &&
+        authority.source === "v2" &&
+        authority.decision === "ENTER" &&
+        (authority.side === "long" || authority.side === "short") &&
+        (authority.stageMarginKrw ?? 0) > 0 &&
+        executionSnapshot.paperReady === true &&
+        executionSnapshot.signedReady === true &&
+        executionSnapshot.tradeEnabled === true &&
+        executionSnapshot.closeOnly === false &&
+        executionSnapshot.killSwitch === false &&
+        executionSnapshot.reconcileSafe === false &&
+        executionSnapshot.dailyLossGuard === false &&
+        executionSnapshot.riskModeHalt === false &&
+        authority.hardBlockPresent !== true &&
+        authority.nonBypassableHardBlockPresent !== true;
+    });
+
+    this.logger.info("ENTRY_QUEUE_BUILD_COMPLETE_PROOF", {
+      run_cycle_id: this.runCycleId,
+      entry_queue_length: entryQueue.length,
+      symbols: entryQueue.map(q => q.symbol),
+      v2_count: entryQueue.filter(q => q.authoritySource === "v2").length,
+      v1_count: entryQueue.filter(q => q.authoritySource === "v1").length,
+      has_v2_enqueued: hasV2Enqueued,
+      fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness,
+      readiness_barrier_active: input.readinessBarrierActive,
+      candidate_run_path: input.candidateRunPath,
+      will_enter_consume_loop: !((input.readinessBarrierActive || this.freshTickRequiredAfterReadiness) && !v2BypassReadyValue) && !!(input.candidateRunPath && input.latestPath && input.metaPath && input.filePath)
+    });
+
     this.logger.info("READINESS_REEVALUATION_STARTED", {
       run_cycle_id: this.runCycleId,
       queued_entries: entryQueue.length,
@@ -8296,29 +8347,7 @@ export class PaperEngine {
         : "fresh_tick_required_pending_clear";
 
       // V2 Bypass: If all V2 authoritative criteria are met, bypass the fresh tick barrier.
-      const v2BypassReady = entryQueue.some(q => {
-        const envelope = input.decisionBySymbol.get(String(q.symbol));
-        if (!envelope) return false;
-        const { authority } = envelope;
-        const adoptedEngine = envelope.selector?.adopted_result.engine ?? null;
-        
-        return adoptedEngine === "V2" &&
-          envelope.v2_execution_envelope?.authoritySource === "v2_execution_envelope" &&
-          authority.source === "v2" &&
-          authority.decision === "ENTER" &&
-          (authority.side === "long" || authority.side === "short") &&
-          (authority.stageMarginKrw ?? 0) > 0 &&
-          executionSnapshot.paperReady === true &&
-          executionSnapshot.signedReady === true &&
-          executionSnapshot.tradeEnabled === true &&
-          executionSnapshot.closeOnly === false &&
-          executionSnapshot.killSwitch === false &&
-          executionSnapshot.reconcileSafe === false &&
-          executionSnapshot.dailyLossGuard === false &&
-          executionSnapshot.riskModeHalt === false &&
-          authority.hardBlockPresent !== true &&
-          authority.nonBypassableHardBlockPresent !== true;
-      });
+      const v2BypassReady = v2BypassReadyValue;
 
       if (v2BypassReady) {
         this.logger.info("V2_AUTHORITY_BYPASS_FRESH_TICK_BARRIER", {
@@ -8368,6 +8397,17 @@ export class PaperEngine {
             reason: "blocked_by_readiness_fresh_tick_barrier"
           });
         }
+        this.logger.warn("ENTRY_QUEUE_PRE_CONSUME_BLOCKED_PROOF", {
+          run_cycle_id: this.runCycleId,
+          entry_queue_length: entryQueue.length,
+          block_reason: blockReason,
+          return_point: "fresh_tick_barrier_return",
+          fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness,
+          readiness_barrier_active: input.readinessBarrierActive,
+          v2_bypass_ready: v2BypassReady,
+          has_v2_authority_enter: entryQueue.some(q => q.authoritySource === "v2"),
+          has_v2_enqueued: hasV2Enqueued
+        });
         return;
       }
     }
@@ -8375,6 +8415,21 @@ export class PaperEngine {
     // V2 Bypass logic moved to main loop
 
     if (!input.candidateRunPath || !input.latestPath || !input.metaPath || !input.filePath) {
+      this.logger.warn("ENTRY_QUEUE_PRE_CONSUME_BLOCKED_PROOF", {
+        run_cycle_id: this.runCycleId,
+        entry_queue_length: entryQueue.length,
+        block_reason: "mandatory_paths_missing",
+        return_point: "path_check_return",
+        fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness,
+        readiness_barrier_active: input.readinessBarrierActive,
+        v2_bypass_ready: v2BypassReadyValue,
+        has_v2_authority_enter: entryQueue.some(q => q.authoritySource === "v2"),
+        has_v2_enqueued: hasV2Enqueued,
+        candidate_run_path: input.candidateRunPath,
+        latest_path: input.latestPath,
+        meta_path: input.metaPath,
+        file_path: input.filePath
+      });
       return;
     }
 
