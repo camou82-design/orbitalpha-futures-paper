@@ -8284,11 +8284,12 @@ export class PaperEngine {
         entry_queue_length: 0,
         block_reason: "entry_queue_empty",
         return_point: "entry_queue_empty_return",
-        fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness,
-        readiness_barrier_active: input.readinessBarrierActive,
+        candidate_run_path: input.candidateRunPath,
         v2_bypass_ready: false,
         has_v2_authority_enter: false,
-        has_v2_enqueued: false
+        has_v2_enqueued: false,
+        fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness,
+        readiness_barrier_active: input.readinessBarrierActive
       });
       return;
     }
@@ -8402,11 +8403,12 @@ export class PaperEngine {
           entry_queue_length: entryQueue.length,
           block_reason: blockReason,
           return_point: "fresh_tick_barrier_return",
-          fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness,
-          readiness_barrier_active: input.readinessBarrierActive,
+          candidate_run_path: input.candidateRunPath,
           v2_bypass_ready: v2BypassReady,
           has_v2_authority_enter: entryQueue.some(q => q.authoritySource === "v2"),
-          has_v2_enqueued: hasV2Enqueued
+          has_v2_enqueued: hasV2Enqueued,
+          fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness,
+          readiness_barrier_active: input.readinessBarrierActive
         });
         return;
       }
