@@ -8295,6 +8295,7 @@ export class PaperEngine {
     }
 
     const hasV2Enqueued = entryQueue.some(q => q.authoritySource === "v2");
+    const hasV2AuthorityEnter = entryQueue.some(q => q.authoritySource === "v2");
     const v2BypassReadyValue = entryQueue.some(q => {
       const envelope = input.decisionBySymbol.get(String(q.symbol));
       if (!envelope) return false;
@@ -8318,6 +8319,17 @@ export class PaperEngine {
         authority.nonBypassableHardBlockPresent !== true;
     });
 
+    const storagePathsReady = Boolean(input.latestPath && input.metaPath && input.filePath);
+    const onlyCandidateRunPathMissing = !input.candidateRunPath && storagePathsReady;
+    const shouldBypassPathCheckForV2 =
+      hasV2Enqueued === true &&
+      hasV2AuthorityEnter === true &&
+      v2BypassReadyValue === true &&
+      storagePathsReady === true;
+
+    const mandatoryPathsMissing = !input.candidateRunPath || !storagePathsReady;
+    const freshTickBlocked = (input.readinessBarrierActive || this.freshTickRequiredAfterReadiness);
+
     this.logger.info("ENTRY_QUEUE_BUILD_COMPLETE_PROOF", {
       run_cycle_id: this.runCycleId,
       entry_queue_length: entryQueue.length,
@@ -8328,7 +8340,10 @@ export class PaperEngine {
       fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness,
       readiness_barrier_active: input.readinessBarrierActive,
       candidate_run_path: input.candidateRunPath,
-      will_enter_consume_loop: !((input.readinessBarrierActive || this.freshTickRequiredAfterReadiness) && !v2BypassReadyValue) && !!(input.candidateRunPath && input.latestPath && input.metaPath && input.filePath)
+      will_enter_consume_loop:
+        entryQueue.length > 0 &&
+        (!mandatoryPathsMissing || shouldBypassPathCheckForV2) &&
+        (!freshTickBlocked || v2BypassReadyValue)
     });
 
     this.logger.info("READINESS_REEVALUATION_STARTED", {
@@ -8416,16 +8431,22 @@ export class PaperEngine {
 
     // V2 Bypass logic moved to main loop
 
-    if (!input.candidateRunPath || !input.latestPath || !input.metaPath || !input.filePath) {
+    if (mandatoryPathsMissing && !shouldBypassPathCheckForV2) {
       this.logger.warn("ENTRY_QUEUE_PRE_CONSUME_BLOCKED_PROOF", {
         run_cycle_id: this.runCycleId,
         entry_queue_length: entryQueue.length,
         block_reason: "mandatory_paths_missing",
         return_point: "path_check_return",
+        missing_paths: {
+          candidateRunPath: !input.candidateRunPath,
+          latestPath: !input.latestPath,
+          metaPath: !input.metaPath,
+          filePath: !input.filePath
+        },
         fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness,
         readiness_barrier_active: input.readinessBarrierActive,
         v2_bypass_ready: v2BypassReadyValue,
-        has_v2_authority_enter: entryQueue.some(q => q.authoritySource === "v2"),
+        has_v2_authority_enter: hasV2AuthorityEnter,
         has_v2_enqueued: hasV2Enqueued,
         candidate_run_path: input.candidateRunPath,
         latest_path: input.latestPath,
@@ -8433,6 +8454,24 @@ export class PaperEngine {
         file_path: input.filePath
       });
       return;
+    }
+
+    if (shouldBypassPathCheckForV2 && !input.candidateRunPath) {
+      this.logger.warn("ENTRY_QUEUE_PATH_FALLBACK_PROOF", {
+        run_cycle_id: this.runCycleId,
+        entry_queue_length: entryQueue.length,
+        has_v2_enqueued: hasV2Enqueued,
+        has_v2_authority_enter: hasV2AuthorityEnter,
+        v2_bypass_ready: v2BypassReadyValue,
+        storage_paths_ready: storagePathsReady,
+        missing_paths: {
+          candidateRunPath: !input.candidateRunPath,
+          latestPath: !input.latestPath,
+          metaPath: !input.metaPath,
+          filePath: !input.filePath
+        },
+        fallback_reason: "candidate_run_path_missing_but_v2_authority_ready"
+      });
     }
 
     const max = this.config.paperMaxOpenPositions;
@@ -9736,7 +9775,7 @@ export class PaperEngine {
               sourceSignal: entryIdentity.effectiveSourceSignal,
               authoritySourceAtEntry: authority.source,
               authoritySideAtEntry: String(authority.side),
-              sourceRunPath: input.candidateRunPath,
+              sourceRunPath: input.candidateRunPath ?? input.filePath ?? input.latestPath ?? "",
               status: "open"
             };
             next.push(record);
@@ -10334,7 +10373,7 @@ export class PaperEngine {
           ...(authority.side == null
             ? {}
             : { authoritySideAtEntry: String(authority.side) }),
-          sourceRunPath: input.candidateRunPath,
+          sourceRunPath: input.candidateRunPath ?? input.filePath ?? input.latestPath ?? "",
           latestSnapshotPath: input.latestPath,
           latestMetaPath: input.metaPath,
           timestampSnapshotPath: input.filePath,
