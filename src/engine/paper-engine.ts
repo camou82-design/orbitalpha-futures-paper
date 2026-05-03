@@ -8247,7 +8247,7 @@ export class PaperEngine {
           original_side: (authority as any).originalSide ?? null,
           stage_margin_krw: authority.stageMarginKrw ?? 0,
           original_stage_margin_krw: (authority as any).originalStageMarginKrw ?? 0,
-          hard_block_present: authority.hardBlockPresent === true,
+          hard_block_present: !!authority.hardBlockPresent,
           hard_block_reason: authority.hardBlockReason ?? null,
           signed_execution_ready: executionSnapshot.signedReady,
           paper_execution_ready: executionSnapshot.paperReady,
