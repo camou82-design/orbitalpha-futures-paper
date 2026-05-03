@@ -25,6 +25,9 @@ import type { Logger } from "../logs/logger";
 import { JsonStore } from "../storage/json-store";
 import type { OkxPublicDiagnostics } from "../exchange/okx-demo";
 import { OkxDemoClient, toOkxSwapInstId } from "../exchange/okx-demo";
+import { buildLedgerOkxPositionSyncSnapshot, okxSwapRowToLedgerKey } from "../exchange/okx-position-sync";
+import { buildPositionOpsSurface } from "./position-ops-monitor";
+import type { PositionOpsSurface } from "./position-ops-monitor";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
 import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
 import type { PaperCandidateStrength, PaperSignal } from "../strategy/entry-signal";
@@ -1041,6 +1044,16 @@ export class PaperEngine {
   private readonly reconcileCheckIntervalMs = 30_000;
   private startupRecoveryBarrierApplied = false;
 
+  /** OKX swap pending orders cache — diagnostics only; never auto-submits protective orders (stage 1). */
+  private lastOpsOrdersScanAtMs = 0;
+  private readonly opsOrdersScanMinIntervalMs = 10_000;
+  private opsOrdersScanEverDone = false;
+  private cachedOpsPending: Record<string, unknown>[] = [];
+  private cachedOpsAlgos: Record<string, unknown>[] = [];
+  private cachedOpsFetchErrors: string[] = [];
+  private lastPositionOpsSurface: PositionOpsSurface | null = null;
+  private positionExitProofThrottleByFlow = new Map<string, number>();
+
   private tradeControlPath(): string {
     return path.resolve(this.config.dataDir, "control/trade-control.json");
   }
@@ -1226,6 +1239,124 @@ export class PaperEngine {
     });
   }
 
+  /**
+   * Post-entry watch only: OKX positions vs ledger, protective reduce-only order diagnostics, proofs.
+   * Does not modify entry/exit decisions or submit protective orders (stage 1 = logs only).
+   */
+  private async runPositionOperationsWatch(nowTs: number, paperOpens: ReadonlyArray<PaperOpenPositionRecord>): Promise<void> {
+    const syncSnap = buildLedgerOkxPositionSyncSnapshot(paperOpens, this.lastLivePositionsPayload);
+
+    const canScan =
+      Boolean(this.okxDemo && this.signedExecutionReady) &&
+      nowTs - this.lastOpsOrdersScanAtMs >= this.opsOrdersScanMinIntervalMs;
+
+    if (canScan && this.okxDemo) {
+      this.lastOpsOrdersScanAtMs = nowTs;
+      this.opsOrdersScanEverDone = true;
+      this.cachedOpsFetchErrors = [];
+
+      const [pendRes, algoRes] = await Promise.all([
+        this.okxDemo.getOrdersPending({ instType: "SWAP" }),
+        this.okxDemo.getOrdersAlgoPending({ instType: "SWAP" })
+      ]);
+
+      if (pendRes.ok) this.cachedOpsPending = pendRes.value ?? [];
+      else {
+        this.cachedOpsPending = [];
+        this.cachedOpsFetchErrors.push(`orders_pending:${pendRes.error}`);
+      }
+      if (algoRes.ok) this.cachedOpsAlgos = algoRes.value ?? [];
+      else {
+        this.cachedOpsAlgos = [];
+        this.cachedOpsFetchErrors.push(`orders_algos_pending:${algoRes.error}`);
+      }
+
+      const okxActualFlat: Record<string, unknown>[] = [];
+      if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
+        for (const row of this.lastLivePositionsPayload) {
+          const hit = okxSwapRowToLedgerKey(row as Record<string, unknown>);
+          if (!hit) continue;
+          const avgPxRaw = (row as Record<string, unknown>).avgPx;
+          const avgPx =
+            typeof avgPxRaw === "number"
+              ? avgPxRaw
+              : typeof avgPxRaw === "string"
+                ? Number(avgPxRaw)
+                : NaN;
+          okxActualFlat.push({
+            instId: hit.instId,
+            symbol: hit.symbol,
+            side: hit.side,
+            pos: hit.posSigned,
+            avgPx: Number.isFinite(avgPx) ? avgPx : null
+          });
+        }
+      }
+
+      this.logger.info("LEDGER_OKX_POSITION_SYNC_PROOF", {
+        ts: nowTs,
+        ...syncSnap
+      });
+
+      this.logger.info("OKX_ACTUAL_POSITION_PROOF", {
+        ts: nowTs,
+        okx_positions_payload_count: Array.isArray(this.lastLivePositionsPayload)
+          ? this.lastLivePositionsPayload.length
+          : 0,
+        nonzero_positions: okxActualFlat
+      });
+
+      const surfaceScan = buildPositionOpsSurface({
+        now: nowTs,
+        paperOpens,
+        okxPayload: this.lastLivePositionsPayload,
+        pendingOrders: this.cachedOpsPending,
+        algoOrders: this.cachedOpsAlgos,
+        ordersScanPerformed: true,
+        ordersScanErrors: this.cachedOpsFetchErrors
+      });
+
+      this.logger.info("POSITION_PROTECTION_STATE_PROOF", {
+        ts: nowTs,
+        rows: surfaceScan.rows
+      });
+
+      this.logger.info("EMERGENCY_STOP_ORDER_STATUS_PROOF", {
+        ts: nowTs,
+        pending_swap_orders_count: this.cachedOpsPending.length,
+        pending_algo_orders_count: this.cachedOpsAlgos.length,
+        fetch_errors: this.cachedOpsFetchErrors,
+        diag_note: "reduce_only_protective_detection_best_effort_stage1_no_auto_submit"
+      });
+
+      for (const r of surfaceScan.rows) {
+        if (!r.reduce_only_protective_found) {
+          this.logger.warn("EMERGENCY_STOP_ORDER_MISSING_WARN", {
+            ts: nowTs,
+            symbol: r.symbol,
+            side: r.side,
+            inst_id: r.inst_id,
+            reference_entry_px: r.reference_entry_px,
+            initial_stop_px_engine_mirror: r.initial_stop_px_engine_mirror,
+            ledger_stop_px: r.ledger_stop_px,
+            detail:
+              "No reduce-only conditional/trigger-style pending order matched this instId (exchange diagnostic only)."
+          });
+        }
+      }
+    }
+
+    this.lastPositionOpsSurface = buildPositionOpsSurface({
+      now: nowTs,
+      paperOpens,
+      okxPayload: this.lastLivePositionsPayload,
+      pendingOrders: this.cachedOpsPending,
+      algoOrders: this.cachedOpsAlgos,
+      ordersScanPerformed: this.opsOrdersScanEverDone,
+      ordersScanErrors: [...this.cachedOpsFetchErrors]
+    });
+  }
+
   private async runPositionStateReconciliation(nowTs: number): Promise<void> {
     if (this.reconcileLastCheckedAt != null && nowTs - this.reconcileLastCheckedAt < this.reconcileCheckIntervalMs) return;
     this.reconcileLastCheckedAt = nowTs;
@@ -1243,15 +1374,10 @@ export class PaperEngine {
     const okxPositions = okxPosRes.value;
     const remoteMap = new Map<string, { size: number; instId: string; posSide: string }>();
     for (const row of okxPositions) {
-      const inst = String((row as any).instId ?? "");
+      const hit = okxSwapRowToLedgerKey(row as Record<string, unknown>);
+      if (!hit) continue;
       const posSideRaw = String((row as any).posSide ?? "").toLowerCase();
-      const posRaw = (row as any).pos;
-      const sizeNum = typeof posRaw === "number" ? posRaw : typeof posRaw === "string" ? Number(posRaw) : NaN;
-      if (!Number.isFinite(sizeNum) || Math.abs(sizeNum) <= 0) continue;
-      
-      const side: "long" | "short" = posSideRaw === "short" ? "short" : "long";
-      const symbol = inst.endsWith("-USDT-SWAP") ? `${inst.slice(0, -"-USDT-SWAP".length)}USDT` : inst;
-      remoteMap.set(`${symbol}:${side}`, { size: sizeNum, instId: inst, posSide: posSideRaw });
+      remoteMap.set(hit.key, { size: Math.abs(hit.posSigned), instId: hit.instId, posSide: posSideRaw });
     }
 
     const next: PaperOpenPositionRecord[] = [];
@@ -3069,6 +3195,7 @@ export class PaperEngine {
         const stateNow = Date.now();
         const opensForBalanceDisplay = await this.positions.loadOpenAll();
         const balanceDisplay = this.buildBalanceDisplayContext(opensForBalanceDisplay);
+        await this.runPositionOperationsWatch(stateNow, opensForBalanceDisplay);
         const regimeBlocked = (risk.blockedRegimes?.[effectiveRegimeForDecision]?.until ?? 0) > fetchedAt;
         const statusRelaxBypass = effectiveRegimeForDecision === "RANGE" &&
           this.config.paperEngineMode === "PAPER_TEST" &&
@@ -3191,6 +3318,11 @@ export class PaperEngine {
           okx_balance_ok: this.okxBalanceOk,
           okx_positions_ok: this.okxPositionsOk,
           okx_order_submit_ok: this.okxOrderSubmitOk,
+          ledger_okx_position_sync: buildLedgerOkxPositionSyncSnapshot(
+            opensForBalanceDisplay,
+            this.lastLivePositionsPayload
+          ),
+          position_ops_surface: this.lastPositionOpsSurface,
           ...balanceDisplay
         });
         this.logger.info("LIVE_LEVERAGE_USAGE_PROOF", {
@@ -6936,7 +7068,57 @@ export class PaperEngine {
             ema20: snap.ema20,
             ema60: snap.ema60
           });
-      
+
+      const regimeExitSnap = evaluateRegimeExitPolicy({
+        regime: slRegime,
+        side: open.side,
+        pnlPctNet: m.pnlPctNet,
+        holdingMs: m.holdingMs,
+        mark: closePrice,
+        trailingExtreme: open.trailingExtremePrice,
+        partialExitStage: open.partialExitStage ?? 0
+      });
+      const partialPol = evaluatePartialExitPolicy({
+        mode: open.adaptiveModeAtEntry ?? this.lastAdaptiveMode.mode,
+        direction: open.side,
+        pnlPctNet: m.pnlPctNet,
+        highestPnlPctNet: open.highestPnlPctNet ?? m.pnlPctNet,
+        holdingMs: m.holdingMs,
+        partialExitStage: open.partialExitStage ?? 0
+      });
+      const diagTs = Date.now();
+      const lastExitPf = this.positionExitProofThrottleByFlow.get(flowId) ?? 0;
+      if (diagTs - lastExitPf >= 15_000) {
+        this.positionExitProofThrottleByFlow.set(flowId, diagTs);
+        this.logger.info("POSITION_EXIT_POLICY_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          regime_at_entry: open.regimeAtEntry ?? null,
+          exit_lane_sl_regime: slRegime,
+          mark: closePrice,
+          holding_ms: m.holdingMs,
+          pnl_pct_net: m.pnlPctNet,
+          stop_price_ledger: open.stopPrice ?? null,
+          stop_loss_pct_gate: stopLossPctForRegime(slRegime),
+          regime_exit_snapshot: regimeExitSnap,
+          executor_exit_eval_action: exitEval.action,
+          executor_exit_eval_reason:
+            exitEval && typeof (exitEval as { reason?: unknown }).reason === "string"
+              ? (exitEval as { reason: string }).reason
+              : null
+        });
+        this.logger.info("POSITION_PARTIAL_POLICY_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          adaptive_mode: open.adaptiveModeAtEntry ?? this.lastAdaptiveMode.mode,
+          partial_stage: open.partialExitStage ?? 0,
+          partial_policy: partialPol,
+          executor_partial_signal: exitEval.action === "partial_close"
+        });
+      }
+
       // --- V2 AUTHORITY TAKEOVER (Hoisted & Hardened) ---
       // V2 EXIT는 위에서 이미 early return했으므로 여기는 partial_close 신호만 남음.
       // partial_close는 exitEval에 억지로 주입하지 않고 독립 경로로 처리한다.

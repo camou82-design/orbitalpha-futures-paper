@@ -1,3 +1,5 @@
+import { okxSwapRowToLedgerKey } from "../../exchange/okx-position-sync";
+
 export type LiveBalanceAuthorityInput = Readonly<{
   okxAuthMode: "disabled" | "demo" | "live";
   balancePayload: Record<string, unknown> | null;
@@ -224,8 +226,9 @@ function parseOkxPositions(
   let notionalSource = "none";
 
   for (const p of payload) {
-    const pos = toFiniteNumber(p.pos);
-    if (pos === null || pos === 0) continue;
+    const parsedKey = okxSwapRowToLedgerKey(p as Record<string, unknown>);
+    if (!parsedKey) continue;
+    const pos = parsedKey.posSigned;
 
     // Notional Priority: notionalUsd -> notional -> abs(pos * markPx)
     let nVal = toFiniteNumber(p.notionalUsd);
@@ -267,8 +270,8 @@ function parseOkxPositions(
     totalNotional += Math.abs(finalNotional);
 
     lines.push({
-      symbol: String(p.instId ?? "unknown"),
-      side: String(p.posSide ?? "none"),
+      symbol: parsedKey.symbol,
+      side: parsedKey.side,
       notional_usdt: Math.abs(finalNotional),
       applied_leverage: toFiniteNumber(p.lever) ?? 1,
       estimated_margin_usdt: finalMargin,
@@ -276,11 +279,11 @@ function parseOkxPositions(
     });
   }
 
-  return { 
-    used_margin: totalMargin, 
-    notional: totalNotional, 
-    lines, 
-    parse_source: payload.length === 0 ? "no_open_positions" : `m:${marginSource}|n:${notionalSource}`
+  return {
+    used_margin: totalMargin,
+    notional: totalNotional,
+    lines,
+    parse_source: lines.length === 0 ? "no_open_positions" : `m:${marginSource}|n:${notionalSource}`
   };
 }
 

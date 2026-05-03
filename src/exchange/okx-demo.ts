@@ -242,6 +242,27 @@ export class OkxDemoClient {
     return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/order", q, null);
   }
 
+  /** Pending ordinary swap orders (incl. limit/market working). Diagnostics only unless paired with algo. */
+  getOrdersPending(args: { instType: string; instId?: string }): Promise<TryResult<Record<string, unknown>[]>> {
+    const q = new URLSearchParams();
+    q.set("instType", args.instType);
+    if (args.instId) q.set("instId", args.instId);
+    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/orders-pending", q, null);
+  }
+
+  /** Pending TP/SL / conditional / trigger algos — reduce-only protective stops live here. */
+  getOrdersAlgoPending(args: {
+    instType: string;
+    instId?: string;
+    ordType?: string;
+  }): Promise<TryResult<Record<string, unknown>[]>> {
+    const q = new URLSearchParams();
+    q.set("instType", args.instType);
+    if (args.instId) q.set("instId", args.instId);
+    if (args.ordType) q.set("ordType", args.ordType);
+    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/orders-algos-pending", q, null);
+  }
+
   async checkSignedReady(): Promise<{
     configOk: boolean;
     balanceOk: boolean;

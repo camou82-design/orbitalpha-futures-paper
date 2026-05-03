@@ -247,8 +247,49 @@
     return Array.isArray(o) ? o.filter((x) => x && x.status === "open") : [];
   }
 
+  function ledgerOkxSync(bundle) {
+    const es = bundle.engineState;
+    if (!es || typeof es !== "object") return null;
+    const s = es.ledger_okx_position_sync;
+    return s && typeof s === "object" ? s : null;
+  }
+
+  function okxExchangePositionForSymbol(bundle, sym) {
+    const sync = ledgerOkxSync(bundle);
+    const prev = sync && Array.isArray(sync.okx_positions_preview) ? sync.okx_positions_preview : [];
+    return prev.find((x) => x && x.symbol === sym) || null;
+  }
+
   function openForSymbol(bundle, sym) {
     return getOpenPositions(bundle).find((p) => p.symbol === sym) || null;
+  }
+
+  /** OKX 감시·보호 주문·리컨실 표면 (`engine-state.position_ops_surface`). */
+  function positionOpsSummary(bundle) {
+    const es = bundle.engineState;
+    const surf = es && es.position_ops_surface;
+    if (!surf || typeof surf !== "object") return "";
+    const sync = ledgerOkxSync(bundle);
+    const st = sync && typeof sync.sync_status === "string" ? sync.sync_status : "";
+    const lines = [];
+    const main = typeof surf.surface_banner_ko === "string" ? surf.surface_banner_ko : "";
+    if (main) lines.push(main);
+    if (st && st !== "ALIGNED" && st !== "REMOTE_UNAVAILABLE") lines.push("리컨실 " + st);
+    const rows = Array.isArray(surf.rows) ? surf.rows : [];
+    if (surf.orders_scan_performed === true && rows.length > 0) {
+      const miss = rows.filter((r) => r && r.reduce_only_protective_found === false);
+      if (miss.length > 0)
+        lines.push(
+          "보호 주문 없음: " +
+          miss
+            .map((r) => {
+              const sd = r.side === "long" ? "롱" : r.side === "short" ? "숏" : r.side;
+              return String(r.symbol) + " " + sd;
+            })
+            .join(", ")
+        );
+    }
+    return lines.join(" · ");
   }
 
   function estimatePnlUsd(pos, mark) {
@@ -480,24 +521,70 @@
 
   function positionHeroLine(bundle) {
     const opens = getOpenPositions(bundle);
+    const sync = ledgerOkxSync(bundle);
+    const st = sync && typeof sync.sync_status === "string" ? sync.sync_status : null;
+    const detail = sync && typeof sync.detail === "string" && sync.detail.trim().length > 0 ? sync.detail : "";
+    const mismatch = st === "OKX_ONLY" || st === "LEDGER_ONLY" || st === "KEY_MISMATCH";
+    function subMismatch(extra) {
+      let s = "RECONCILE_MISMATCH";
+      if (extra) s += " · " + extra;
+      if (detail) s += " · " + detail;
+      return s;
+    }
+
     if (opens.length === 0) {
+      if (st === "OKX_ONLY") {
+        return {
+          title: "실거래소 포지션 보유 중",
+          sub: subMismatch("페이퍼 원장 미반영"),
+          badge: "badge-warn",
+          cardClass: "hero-card--warn"
+        };
+      }
+      if (st === "LEDGER_ONLY") {
+        return {
+          title: "거래소 포지션 없음(원장 불일치)",
+          sub: subMismatch("원장 오픈 행은 있으나 OKX 스왑 스냅샷 없음"),
+          badge: "badge-warn",
+          cardClass: "hero-card--warn"
+        };
+      }
+      if (st === "KEY_MISMATCH") {
+        return {
+          title: "RECONCILE_MISMATCH",
+          sub: subMismatch("심볼·방향 키 불일치"),
+          badge: "badge-warn",
+          cardClass: "hero-card--warn"
+        };
+      }
       return {
         title: "포지션 없음",
         sub: "모든 심볼 관망",
         badge: "badge-neutral"
       };
     }
+
     const sides = opens.map((o) => {
       const sym = o.symbol || "?";
       const side = o.side === "long" ? "롱" : o.side === "short" ? "숏" : o.side;
       return sym + " " + side;
     });
-    const title = opens.length === 1 ? sides[0] + " 보유 중" : opens.length + "개 포지션 보유 · " + sides.join(", ");
+    const title =
+      opens.length === 1 ? sides[0] + " 보유 중" : opens.length + "개 포지션 보유 · " + sides.join(", ");
+    if (mismatch) {
+      return {
+        title,
+        sub: subMismatch(st || ""),
+        badge: "badge-warn",
+        cardClass: "hero-card--warn"
+      };
+    }
     return { title, sub: "종목별 손익은 카드에서 확인", badge: "badge-ok" };
   }
 
   function symbolHeadline(sym, bundle) {
     const pos = openForSymbol(bundle, sym);
+    const okxRow = okxExchangePositionForSymbol(bundle, sym);
     const s = snapBySymbol(bundle, sym) || {};
     const es = bundle.engineState;
     const pip =
@@ -510,6 +597,16 @@
       const pnl = estimateNetPnlUsd(pos, mark);
       const pnlStr = pnl !== null ? " · 추정 손익 " + formatUsd(pnl) : "";
       return sym + " · " + sideK + " 포지션 보유 중" + pnlStr;
+    }
+    if (!pos && okxRow) {
+      const sideK = okxRow.side === "long" ? "롱" : okxRow.side === "short" ? "숏" : okxRow.side;
+      const syn = ledgerOkxSync(bundle);
+      const st = syn && syn.sync_status;
+      const mm =
+        st && st !== "ALIGNED" && st !== "REMOTE_UNAVAILABLE"
+          ? " · RECONCILE_MISMATCH"
+          : "";
+      return sym + " · 실거래소 " + sideK + " 포지션 보유 중" + mm;
     }
     if (pip && String(pip.regime) === "RANGE") {
       if (pip.range_cost_warning_applied === true) return sym + " · 비용 경고로 보수 관찰 중";
@@ -530,6 +627,7 @@
 
   function symbolOneLiner(sym, bundle) {
     const pos = openForSymbol(bundle, sym);
+    const okxRow = okxExchangePositionForSymbol(bundle, sym);
     const s = snapBySymbol(bundle, sym) || {};
     const es = bundle.engineState;
     const pip =
@@ -545,6 +643,20 @@
         " · 레버 " +
         String(pos.leverage ?? "—") +
         "x"
+      );
+    }
+    if (!pos && okxRow) {
+      const syn = ledgerOkxSync(bundle);
+      const st = syn && syn.sync_status;
+      const mm =
+        st && st !== "ALIGNED" && st !== "REMOTE_UNAVAILABLE"
+          ? " · RECONCILE_MISMATCH"
+          : "";
+      return (
+        "실거래소 포지션(페이퍼 원장 미연동) · 방향 " +
+        (okxRow.side === "long" ? "롱" : okxRow.side === "short" ? "숏" : String(okxRow.side)) +
+        mm +
+        " · 상세는 거래소 확인"
       );
     }
     if (pip && String(pip.regime) === "RANGE") {
@@ -680,10 +792,11 @@
           <p class="hero-sub muted">${esc(entryGateLine)}</p>
           <p class="hero-sub muted">${esc(nar.sub)}</p>
         </article>
-        <article class="hero-card hero-card--accent" style="margin:0">
+        <article class="hero-card hero-card--accent ${esc(pos.cardClass || "")}" style="margin:0">
           <p class="hero-label">포지션 요약</p>
           <p class="hero-value" style="font-size:0.9rem">${esc(pos.title)}</p>
           <p class="hero-sub">${esc(pos.sub)}</p>
+          <p class="hero-sub muted">${esc(positionOpsSummary(bundle))}</p>
         </article>
         <article class="hero-card" style="margin:0">
           <p class="hero-label">신규 진입 문구</p>
