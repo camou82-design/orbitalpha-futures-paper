@@ -4483,7 +4483,7 @@ export class PaperEngine {
       });
 
       if (!submit.ok) {
-        const fullResponse = submit.diagnostics.fullResponse;
+        const fullResponse = submit.diagnostics.fullResponse as any;
         const row0 = fullResponse?.data?.[0];
         this.logger.info("OKX_ORDER_REJECT_DETAIL_PROOF", {
           resp_code: fullResponse?.code,
