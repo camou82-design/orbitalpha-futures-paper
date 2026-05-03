@@ -4483,6 +4483,30 @@ export class PaperEngine {
       });
 
       if (!submit.ok) {
+        const fullResponse = submit.diagnostics.fullResponse;
+        const row0 = fullResponse?.data?.[0];
+        this.logger.info("OKX_ORDER_REJECT_DETAIL_PROOF", {
+          resp_code: fullResponse?.code,
+          resp_msg: fullResponse?.msg,
+          resp_data: fullResponse?.data,
+          resp_sCode: row0?.sCode,
+          resp_sMsg: row0?.sMsg,
+          resp_ordId: row0?.ordId,
+          resp_clOrdId: row0?.clOrdId,
+          req_instId: instId,
+          req_tdMode: "isolated",
+          req_side: input.side,
+          req_posSide: input.posSide,
+          req_ordType: this.config.okxAuthMode === "live" ? "limit" : "market",
+          req_sz: String(input.qty),
+          req_px: limitPrice ? String(limitPrice) : undefined,
+          req_reduceOnly: undefined,
+          req_clOrdId: input.clOrdId,
+          applied_leverage: input.appliedLeverage ?? null,
+          margin_mode: "isolated",
+          position_mode: "long_short"
+        });
+
         const errorCode = submit.diagnostics.retCode || "submit_error";
         const errorMessage = submit.diagnostics.retMsg || submit.error || "order_level_ack_failed";
         this.logger.error("okx_order_submit_rejected", { ...logCtx, order_submit_ack: "rejected", order_error_code: errorCode, order_error_msg: errorMessage });

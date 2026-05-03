@@ -34,6 +34,7 @@ export type OkxPublicDiagnostics = Readonly<{
   requestUrl: string;
   retCode?: string;
   retMsg?: string;
+  fullResponse?: unknown;
 }>;
 
 export type TryResult<T> =
@@ -155,7 +156,8 @@ export class OkxDemoClient {
         httpStatus,
         requestUrl,
         retCode: json?.code,
-        retMsg: json?.msg
+        retMsg: json?.msg,
+        fullResponse: json
       };
 
       if (!res.ok) {
