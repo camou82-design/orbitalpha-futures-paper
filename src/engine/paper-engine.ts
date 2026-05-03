@@ -1,7 +1,6 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { roundQtyByInstrumentStep } from "../utils/math";
 
 import type {
   EngineConfig,
@@ -706,6 +705,81 @@ function buildOkxClOrdId(rawSymbol: string, sideForCode: "buy" | "sell" | "long"
   const suffix = randomUUID().replace(/-/g, "").slice(0, 8);
   const built = `p${sym}${sideCode}${ts36}${suffix}`;
   return built.length <= 32 ? built : built.slice(0, 32);
+}
+
+type OkxSwapInstrumentSizing = Readonly<{
+  lotSz: number;
+  minSz: number;
+  ctVal: number;
+  ctValCcy: string;
+}>;
+
+function parseOkxSwapInstrumentSizing(inst: Record<string, unknown>): OkxSwapInstrumentSizing | null {
+  const lotSz = Number(inst.lotSz);
+  const minSz = Number(inst.minSz);
+  const ctVal = Number(inst.ctVal);
+  const ctValCcy = String(inst.ctValCcy ?? "");
+  if (!Number.isFinite(lotSz) || lotSz <= 0) return null;
+  if (!Number.isFinite(minSz) || minSz <= 0) return null;
+  if (!Number.isFinite(ctVal) || ctVal <= 0) return null;
+  return { lotSz, minSz, ctVal, ctValCcy };
+}
+
+function okxInstrumentSzDecimals(n: number): number {
+  if (!Number.isFinite(n)) return 0;
+  const s = String(n);
+  if (/e/i.test(s)) {
+    const x = Number.parseFloat(s);
+    const t = x.toFixed(12);
+    const i = t.indexOf(".");
+    return i < 0 ? 0 : Math.min(12, t.replace(/0+$/, "").length - i - 1);
+  }
+  const i = s.indexOf(".");
+  return i < 0 ? 0 : Math.min(12, s.length - i - 1);
+}
+
+function formatOkxSwapContractSzString(n: number, lotSz: number): string {
+  const d = Math.max(okxInstrumentSzDecimals(lotSz), okxInstrumentSzDecimals(n));
+  let out = n.toFixed(Math.min(Math.max(d, 0), 12));
+  if (out.includes(".")) out = out.replace(/\.?0+$/, "");
+  return out.length > 0 ? out : "0";
+}
+
+/** Linear USDT-margined SWAP: contracts ≈ notionalUSDT / (lastPrice * ctVal); sz must be lotSz multiple and ≥ minSz. */
+function normalizeOkxSwapContractsFromNotional(args: {
+  desiredNotionalUsdt: number;
+  lastPrice: number;
+  sizing: OkxSwapInstrumentSizing;
+}): {
+  raw_contracts: number;
+  normalized_contracts: number;
+  normalized_sz: string;
+  sz_lot_multiple_ok: boolean;
+  min_size_ok: boolean;
+} {
+  const { sizing } = args;
+  const denom = args.lastPrice * sizing.ctVal;
+  const raw_contracts = denom > 1e-24 ? args.desiredNotionalUsdt / denom : 0;
+  const lot = sizing.lotSz;
+  const steps = Math.floor(raw_contracts / lot + 1e-12);
+  let normalized_contracts = steps * lot;
+  normalized_contracts = Number(
+    normalized_contracts.toFixed(Math.min(12, Math.max(okxInstrumentSzDecimals(lot), okxInstrumentSzDecimals(normalized_contracts))))
+  );
+  const normalized_sz = formatOkxSwapContractSzString(normalized_contracts, lot);
+  const roundTol = Math.max(1e-10, Math.abs(normalized_contracts) * 1e-9);
+  const sz_lot_multiple_ok =
+    steps >= 0 &&
+    Number.isFinite(normalized_contracts) &&
+    Math.abs(normalized_contracts - steps * lot) <= roundTol + 1e-12;
+  const min_size_ok = normalized_contracts + 1e-12 >= sizing.minSz;
+  return {
+    raw_contracts,
+    normalized_contracts,
+    normalized_sz,
+    sz_lot_multiple_ok,
+    min_size_ok
+  };
 }
 
 function isBtcEthSampleSymbol(symbol: string): boolean {
@@ -3973,6 +4047,8 @@ export class PaperEngine {
     symbol: string;
     side: "long" | "short";
     sizeUsd: number;
+    /** Position leverage at margin `sizeUsd` (paper margin × lev → OKX notional). */
+    appliedLeverage: number;
     lastPrice: number;
     flowId: string;
     reason: string;
@@ -3997,7 +4073,9 @@ export class PaperEngine {
 
     const side = input.side === "long" ? "sell" : "buy";
     const posSide = input.side === "long" ? "long" : "short";
-    const qty = Math.max(0.001, Math.round((input.sizeUsd / Math.max(1e-9, input.lastPrice)) * 1_000_000) / 1_000_000);
+    const lev = typeof input.appliedLeverage === "number" && Number.isFinite(input.appliedLeverage) && input.appliedLeverage > 0 ? input.appliedLeverage : 1;
+    const qtyLegacyEst = Math.max(0.001, Math.round((input.sizeUsd / Math.max(1e-9, input.lastPrice)) * 1_000_000) / 1_000_000);
+    const desiredNotionalUsdt = Math.max(0, input.sizeUsd) * lev;
     const clOrdId = buildOkxClOrdId(input.symbol, side);
 
     const closeReason = input.reason;
@@ -4006,24 +4084,74 @@ export class PaperEngine {
     const isTrailingStop = input.isTrailingStop ?? (closeReason === "trailing_stop" || closeReason.includes("trailing_stop") || closeReason.includes("range_profit_trail"));
 
     if (isStopLoss) {
-      this.logger.info("STOP_LOSS_ORDER_PATH_PROOF", { symbol: input.symbol, side, qty, close_reason: closeReason, flowId: input.flowId, clOrdId });
+      this.logger.info("STOP_LOSS_ORDER_PATH_PROOF", {
+        symbol: input.symbol,
+        side,
+        qty_legacy_base_estimate: qtyLegacyEst,
+        desired_notional_usdt: desiredNotionalUsdt,
+        close_reason: closeReason,
+        flowId: input.flowId,
+        clOrdId
+      });
     } else if (isTakeProfit) {
-      this.logger.info("TAKE_PROFIT_ORDER_PATH_PROOF", { symbol: input.symbol, side, qty, close_reason: closeReason, flowId: input.flowId, clOrdId });
+      this.logger.info("TAKE_PROFIT_ORDER_PATH_PROOF", {
+        symbol: input.symbol,
+        side,
+        qty_legacy_base_estimate: qtyLegacyEst,
+        desired_notional_usdt: desiredNotionalUsdt,
+        close_reason: closeReason,
+        flowId: input.flowId,
+        clOrdId
+      });
     } else if (isTrailingStop) {
-      this.logger.info("TRAILING_STOP_ORDER_PATH_PROOF", { symbol: input.symbol, side, qty, close_reason: closeReason, flowId: input.flowId, clOrdId });
+      this.logger.info("TRAILING_STOP_ORDER_PATH_PROOF", {
+        symbol: input.symbol,
+        side,
+        qty_legacy_base_estimate: qtyLegacyEst,
+        desired_notional_usdt: desiredNotionalUsdt,
+        close_reason: closeReason,
+        flowId: input.flowId,
+        clOrdId
+      });
     } else if (closeReason === "range_profit_trail") {
-      this.logger.info("RANGE_PROFIT_TRAIL_ORDER_PATH_PROOF", { symbol: input.symbol, side, qty, close_reason: closeReason, flowId: input.flowId, clOrdId });
+      this.logger.info("RANGE_PROFIT_TRAIL_ORDER_PATH_PROOF", {
+        symbol: input.symbol,
+        side,
+        qty_legacy_base_estimate: qtyLegacyEst,
+        desired_notional_usdt: desiredNotionalUsdt,
+        close_reason: closeReason,
+        flowId: input.flowId,
+        clOrdId
+      });
     } else if (closeReason.includes("regime_exit") || closeReason.includes("regime")) {
-      this.logger.info("REGIME_EXIT_ORDER_PATH_PROOF", { symbol: input.symbol, side, qty, close_reason: closeReason, flowId: input.flowId, clOrdId });
+      this.logger.info("REGIME_EXIT_ORDER_PATH_PROOF", {
+        symbol: input.symbol,
+        side,
+        qty_legacy_base_estimate: qtyLegacyEst,
+        desired_notional_usdt: desiredNotionalUsdt,
+        close_reason: closeReason,
+        flowId: input.flowId,
+        clOrdId
+      });
     } else if (closeReason.includes("trend_break")) {
-      this.logger.info("TREND_BREAK_ORDER_PATH_PROOF", { symbol: input.symbol, side, qty, close_reason: closeReason, flowId: input.flowId, clOrdId });
+      this.logger.info("TREND_BREAK_ORDER_PATH_PROOF", {
+        symbol: input.symbol,
+        side,
+        qty_legacy_base_estimate: qtyLegacyEst,
+        desired_notional_usdt: desiredNotionalUsdt,
+        close_reason: closeReason,
+        flowId: input.flowId,
+        clOrdId
+      });
     }
 
     this.logger.info("CLOSE_ORDER_PATH_PROOF", {
       symbol: input.symbol,
       side,
       close_side_order: side,
-      qty,
+      qty_legacy_base_estimate: qtyLegacyEst,
+      desired_notional_usdt: desiredNotionalUsdt,
+      applied_leverage: lev,
       sizeUsd: input.sizeUsd,
       lastPrice: input.lastPrice,
       close_reason: closeReason,
@@ -4043,7 +4171,10 @@ export class PaperEngine {
       symbol: input.symbol as MarketSymbol,
       side,
       posSide,
-      qty,
+      qty: qtyLegacyEst,
+      desiredNotionalUsdt,
+      pricingReferencePx: input.lastPrice,
+      appliedLeverage: lev,
       clOrdId,
       traceId: input.flowId,
       reason: input.reason,
@@ -4119,6 +4250,10 @@ export class PaperEngine {
     exposureNotionalKrw?: number | null;
     isNewEntry: boolean;
     orderNotionalUsdt?: number | null;
+    /** Explicit USDT notional for SWAP contract sizing (e.g. close margin × leverage). */
+    desiredNotionalUsdt?: number | null;
+    /** Mark/last price for `notional / (price × ctVal)` when ticker not yet loaded here. */
+    pricingReferencePx?: number | null;
   }): Promise<{
     ok: boolean;
     ordId: string | null;
@@ -4129,6 +4264,7 @@ export class PaperEngine {
     ackCode: "accepted" | "rejected";
     orderState: string | null;
     fillConfirmed: boolean;
+    submittedContractSz?: string | null;
   }> {
     if (!this.okxDemo) {
       return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "no_client", errorMessage: "OKX signed client not initialized", ackCode: "rejected", orderState: null, fillConfirmed: false };
@@ -4207,9 +4343,49 @@ export class PaperEngine {
       return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "signed_not_ready", errorMessage: "OKX signed REST smoke test not passed", ackCode: "rejected", orderState: null, fillConfirmed: false };
     }
 
+    const instTryAll = await this.okxDemo.tryGetInstrument(instId);
+    if (!instTryAll.ok || !instTryAll.value) {
+      this.logger.info("ORDER_BUILD_FAIL", {
+        order_build_fail_reason: "OKX_INSTRUMENT_FETCH_FAILED",
+        symbol: input.symbol,
+        instId,
+        error: instTryAll.ok ? null : instTryAll.error
+      });
+      return {
+        ok: false,
+        ordId: null,
+        fillPx: null,
+        fillSize: 0,
+        errorCode: "OKX_INSTRUMENT_FETCH_FAILED",
+        errorMessage: instTryAll.ok ? "empty_instrument" : instTryAll.error,
+        ackCode: "rejected",
+        orderState: null,
+        fillConfirmed: false
+      };
+    }
+    const sizingMeta = parseOkxSwapInstrumentSizing(instTryAll.value as Record<string, unknown>);
+    if (!sizingMeta) {
+      this.logger.info("ORDER_BUILD_FAIL", {
+        order_build_fail_reason: "OKX_INSTRUMENT_SIZING_METADATA_INVALID",
+        symbol: input.symbol,
+        instId,
+        instrument_keys: Object.keys(instTryAll.value as object)
+      });
+      return {
+        ok: false,
+        ordId: null,
+        fillPx: null,
+        fillSize: 0,
+        errorCode: "OKX_INSTRUMENT_SIZING_METADATA_INVALID",
+        errorMessage: "instrument lotSz/minSz/ctVal missing or invalid",
+        ackCode: "rejected",
+        orderState: null,
+        fillConfirmed: false
+      };
+    }
+
     let refPrice: number | null = null;
     let final_submitted_notional_usdt: number | null = null;
-    let final_submitted_qty: number | null = null;
     let limitPrice: number | null = null;
 
     if (this.config.okxAuthMode === "live") {
@@ -4222,13 +4398,12 @@ export class PaperEngine {
       const ticker = tickerTry.value;
       refPrice = ticker.last;
 
-      const instTry = await this.okxDemo.tryGetInstrument(instId);
-      if (!instTry.ok || !instTry.value.tickSz) {
+      if (!instTryAll.value.tickSz) {
         const reason = "LIVE_LIMIT_PRICE_BUILD_FAIL";
         this.logger.error(reason, { ...logCtx, detail: "instrument_missing_tick_size" });
         return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "instrument_error", errorMessage: "Failed to get tick size for limit order", ackCode: "rejected", orderState: null, fillConfirmed: false };
       }
-      const tickSize = Number(instTry.value.tickSz);
+      const tickSize = Number(instTryAll.value.tickSz);
 
       try {
         limitPrice = this.buildLiveLimitOrderPrice({
@@ -4246,11 +4421,18 @@ export class PaperEngine {
 
       // 1. V2 Intended Metrics (Decision Basis)
       const v2_intended_qty = input.qty;
-      let v2_intended_notional_usdt = (input.orderNotionalUsdt ?? 0) > 0
-        ? input.orderNotionalUsdt!
-        : ((input.exposureNotionalKrw ?? 0) > 0 
-          ? (input.exposureNotionalKrw! / PAPER_LEDGER_KRW_NOTIONAL_PER_USD)
-          : (refPrice != null && Number.isFinite(refPrice) ? v2_intended_qty * refPrice : null));
+      let v2_intended_notional_usdt: number | null = null;
+      if ((input.orderNotionalUsdt ?? 0) > 0) v2_intended_notional_usdt = input.orderNotionalUsdt!;
+      else if ((input.desiredNotionalUsdt ?? 0) > 0) v2_intended_notional_usdt = input.desiredNotionalUsdt!;
+      else if ((input.exposureNotionalKrw ?? 0) > 0)
+        v2_intended_notional_usdt = input.exposureNotionalKrw! / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
+      else {
+        const marginUsdt = (input.stageMarginKrw ?? 0) / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
+        const lev = input.appliedLeverage ?? 1;
+        if (marginUsdt > 0 && lev > 0) v2_intended_notional_usdt = marginUsdt * lev;
+        else if (refPrice != null && Number.isFinite(refPrice) && v2_intended_qty > 0)
+          v2_intended_notional_usdt = v2_intended_qty * refPrice;
+      }
       
       // v2_risk_cap_usdt represents the V2's sizing decision.
       const v2_risk_cap_usdt = v2_intended_notional_usdt;
@@ -4319,18 +4501,6 @@ export class PaperEngine {
         final_size_source = "static_safety_cap";
       }
 
-      // Calculate final qty based on constrained notional
-      final_submitted_qty = refPrice != null && refPrice > 0 
-        ? Math.floor((final_submitted_notional_usdt / refPrice) * 1000000) / 1000000
-        : 0;
-
-      // Constraint: Min order size (hard floor)
-      // V2 EXCEPTION: Allow small quantities for close/partial reasons to avoid "EXCHANGE_REALITY_BLOCK" on exits
-      const isExitReason = input.reason.includes("close") || input.reason.includes("partial");
-      if (!isExitReason && final_submitted_qty < 0.001 && v2_intended_qty >= 0.001) {
-        final_size_source = "min_order_block";
-      }
-
       const logCtxReality = {
         ...logCtx,
         v2_intended_qty,
@@ -4339,7 +4509,6 @@ export class PaperEngine {
         okx_available_balance_usdt,
         okx_confirmed_leverage,
         okx_dynamic_notional_cap_usdt,
-        final_submitted_qty,
         final_submitted_notional_usdt,
         final_size_source,
         static_safety_cap,
@@ -4376,20 +4545,6 @@ export class PaperEngine {
           errorCode: "leverage_mismatch", 
           errorMessage: `Leverage mismatch: Engine=${input.appliedLeverage}, OKX=${okx_confirmed_leverage}`, 
           ackCode: "rejected", orderState: null, fillSize: 0, fillConfirmed: false
-        };
-      }
-
-
-      // Guard: Min Order Size
-      // V2 EXCEPTION: Close/partial orders are allowed to be smaller than the 0.001 entry floor
-      if (!isExitReason && final_submitted_qty < 0.001) {
-        const reject_reason = "EXCHANGE_REALITY_BLOCK";
-        this.logger.warn("EXCHANGE_REALITY_BLOCK", { ...logCtxReality, reject_reason, detail: "min_order_size_underflow" });
-        return {
-          ok: false, ordId: null, fillPx: null, fillSize: 0,
-          errorCode: "min_order_size_underflow", 
-          errorMessage: `Final quantity ${final_submitted_qty} below 0.001`, 
-          ackCode: "rejected", orderState: null, fillConfirmed: false
         };
       }
 
@@ -4493,14 +4648,163 @@ export class PaperEngine {
           };
         }
       }
-
-      // Apply final quantity to the order submission
-      input.qty = final_submitted_qty;
     }
+
+    let pricingLast: number | null = refPrice;
+    let effectiveNotionalUsdt: number | null =
+      this.config.okxAuthMode === "live" ? final_submitted_notional_usdt : null;
+
+    if (this.config.okxAuthMode !== "live") {
+      pricingLast = input.pricingReferencePx ?? input.entryPrice ?? null;
+      if (pricingLast == null || !Number.isFinite(pricingLast)) {
+        const tickerDemo = await this.okxPublic.tryGetTicker(input.symbol);
+        if (!tickerDemo.ok || !Number.isFinite(tickerDemo.value.last)) {
+          this.logger.error("ORDER_BUILD_FAIL", {
+            order_build_fail_reason: "OKX_TICKER_FOR_SIZE_UNAVAILABLE",
+            symbol: input.symbol,
+            instId
+          });
+          return {
+            ok: false,
+            ordId: null,
+            fillPx: null,
+            fillSize: 0,
+            errorCode: "ticker_error",
+            errorMessage: "Failed to get last price for OKX contract sizing",
+            ackCode: "rejected",
+            orderState: null,
+            fillConfirmed: false
+          };
+        }
+        pricingLast = tickerDemo.value.last;
+      }
+      if ((input.orderNotionalUsdt ?? 0) > 0) effectiveNotionalUsdt = input.orderNotionalUsdt!;
+      else if ((input.desiredNotionalUsdt ?? 0) > 0) effectiveNotionalUsdt = input.desiredNotionalUsdt!;
+      else if ((input.exposureNotionalKrw ?? 0) > 0)
+        effectiveNotionalUsdt = input.exposureNotionalKrw! / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
+      else {
+        const marginUsdt = (input.stageMarginKrw ?? 0) / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
+        const lev = input.appliedLeverage ?? 1;
+        if (marginUsdt > 0 && lev > 0) effectiveNotionalUsdt = marginUsdt * lev;
+        else if (pricingLast != null && Number.isFinite(pricingLast) && input.qty > 0)
+          effectiveNotionalUsdt = input.qty * pricingLast;
+      }
+    }
+
+    if (
+      effectiveNotionalUsdt == null ||
+      !Number.isFinite(effectiveNotionalUsdt) ||
+      effectiveNotionalUsdt <= 0 ||
+      pricingLast == null ||
+      !Number.isFinite(pricingLast) ||
+      pricingLast <= 0
+    ) {
+      this.logger.info("ORDER_BUILD_FAIL", {
+        order_build_fail_reason: "OKX_ORDER_NOTIONAL_OR_PRICE_INVALID",
+        symbol: input.symbol,
+        instId,
+        effectiveNotionalUsdt,
+        pricingLast
+      });
+      return {
+        ok: false,
+        ordId: null,
+        fillPx: null,
+        fillSize: 0,
+        errorCode: "OKX_ORDER_NOTIONAL_OR_PRICE_INVALID",
+        errorMessage: "Cannot derive positive USDT notional and reference price for SWAP sizing",
+        ackCode: "rejected",
+        orderState: null,
+        fillConfirmed: false
+      };
+    }
+
+    const previousBaseQty = input.qty;
+    const norm = normalizeOkxSwapContractsFromNotional({
+      desiredNotionalUsdt: effectiveNotionalUsdt,
+      lastPrice: pricingLast,
+      sizing: sizingMeta
+    });
+
+    this.logger.info("OKX_ORDER_SIZE_NORMALIZATION_PROOF", {
+      symbol: input.symbol,
+      instId,
+      side: input.side,
+      posSide: input.posSide,
+      desired_notional_usdt: effectiveNotionalUsdt,
+      last_price: pricingLast,
+      ctVal: sizingMeta.ctVal,
+      ctValCcy: sizingMeta.ctValCcy,
+      lotSz: sizingMeta.lotSz,
+      minSz: sizingMeta.minSz,
+      raw_contracts: norm.raw_contracts,
+      normalized_contracts: norm.normalized_contracts,
+      normalized_sz: norm.normalized_sz,
+      sz_lot_multiple_ok: norm.sz_lot_multiple_ok,
+      min_size_ok: norm.min_size_ok,
+      previous_base_qty_if_any: previousBaseQty
+    });
+
+    if (!norm.sz_lot_multiple_ok) {
+      this.logger.info("ORDER_BUILD_FAIL", {
+        order_build_fail_reason: "OKX_ORDER_SIZE_NOT_LOT_MULTIPLE",
+        symbol: input.symbol,
+        instId,
+        normalized_sz: norm.normalized_sz,
+        lotSz: sizingMeta.lotSz
+      });
+      return {
+        ok: false,
+        ordId: null,
+        fillPx: null,
+        fillSize: 0,
+        errorCode: "OKX_ORDER_SIZE_NOT_LOT_MULTIPLE",
+        errorMessage: "OKX SWAP sz is not a multiple of lotSz after normalization",
+        ackCode: "rejected",
+        orderState: null,
+        fillConfirmed: false
+      };
+    }
+    if (!norm.min_size_ok) {
+      this.logger.info("ORDER_BUILD_FAIL", {
+        order_build_fail_reason: "OKX_ORDER_SIZE_UNDER_MIN",
+        symbol: input.symbol,
+        instId,
+        normalized_contracts: norm.normalized_contracts,
+        minSz: sizingMeta.minSz
+      });
+      return {
+        ok: false,
+        ordId: null,
+        fillPx: null,
+        fillSize: 0,
+        errorCode: "OKX_ORDER_SIZE_UNDER_MIN",
+        errorMessage: `Normalized contract size ${norm.normalized_contracts} below instrument minSz ${sizingMeta.minSz}`,
+        ackCode: "rejected",
+        orderState: null,
+        fillConfirmed: false
+      };
+    }
+
+    const submitSzStr = norm.normalized_sz;
+    input.qty = norm.normalized_contracts;
+
+    this.logger.info("OKX_ORDER_SIZE_PROOF", {
+      symbol: input.symbol,
+      instId,
+      side: input.side,
+      posSide: input.posSide,
+      req_sz: submitSzStr,
+      lotSz: sizingMeta.lotSz,
+      minSz: sizingMeta.minSz,
+      sz_lot_multiple_ok: norm.sz_lot_multiple_ok,
+      min_size_ok: norm.min_size_ok
+    });
+
     const stageMarginKrw = input.stageMarginKrw ?? 0;
     const stageMarginUsdt = stageMarginKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
-    const authoritySizeUsdt = stageMarginUsdt; // V2 decision anchor
-    const finalOrderNotionalUsdt = (final_submitted_notional_usdt ?? (Number(input.qty) * (input.entryPrice ?? 0))) || 0;
+    const authoritySizeUsdt = stageMarginUsdt;
+    const finalOrderNotionalUsdt = effectiveNotionalUsdt;
     const formulaNotionalUsdt = (stageMarginKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD) * (input.appliedLeverage ?? 1);
 
     this.logger.info("LIVE_ORDER_SIZE_PROOF", {
@@ -4510,7 +4814,7 @@ export class PaperEngine {
       posSide: input.posSide,
       applied_leverage: input.appliedLeverage ?? null,
       leverage_profile: input.leverageProfile ?? null,
-      leverage_reason: null, // authority object not available here, but we have profile
+      leverage_reason: null,
       leverage_block_reason: null,
       entry_quality_grade: input.entryQualityGrade ?? null,
       size_unit_source: "stageMarginKrw",
@@ -4520,12 +4824,13 @@ export class PaperEngine {
       final_order_notional_usdt: finalOrderNotionalUsdt,
       formula_notional_usdt: formulaNotionalUsdt,
       formula_match: Math.abs(finalOrderNotionalUsdt - formulaNotionalUsdt) < 0.01,
-      final_submitted_qty: final_submitted_qty ?? input.qty,
-      ref_price: refPrice ?? input.entryPrice ?? null,
+      final_submitted_contracts: norm.normalized_contracts,
+      req_sz: submitSzStr,
+      ref_price: pricingLast ?? refPrice ?? input.entryPrice ?? null,
       limit_price: limitPrice
     });
 
-    const orderExecutionKey = `order:${input.traceId}:${input.reason}:${input.side}:${input.posSide}:${input.qty}`;
+    const orderExecutionKey = `order:${input.traceId}:${input.reason}:${input.side}:${input.posSide}:${submitSzStr}`;
     const orderKeyOk = await this.consumeExecutionKey(orderExecutionKey);
     if (!orderKeyOk) {
       return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "duplicate_execution_key", errorMessage: "Duplicate order execution key blocked", ackCode: "rejected", orderState: null, fillConfirmed: false };
@@ -4536,7 +4841,7 @@ export class PaperEngine {
         instId,
         side: input.side,
         posSide: input.posSide,
-        sz: String(input.qty),
+        sz: submitSzStr,
         clOrdId: input.clOrdId,
         tdMode: "isolated",
         ordType: this.config.okxAuthMode === "live" ? "limit" : "market",
@@ -4559,7 +4864,7 @@ export class PaperEngine {
           req_side: input.side,
           req_posSide: input.posSide,
           req_ordType: this.config.okxAuthMode === "live" ? "limit" : "market",
-          req_sz: String(input.qty),
+          req_sz: submitSzStr,
           req_px: limitPrice ? String(limitPrice) : undefined,
           req_reduceOnly: undefined,
           req_clOrdId: input.clOrdId,
@@ -4622,7 +4927,8 @@ export class PaperEngine {
         errorMessage: null,
         ackCode: "accepted" as const,
         orderState,
-        fillConfirmed
+        fillConfirmed,
+        submittedContractSz: submitSzStr
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -4791,6 +5097,7 @@ export class PaperEngine {
               symbol: op.symbol,
               side: op.side,
               sizeUsd: marginToClose,
+              appliedLeverage: Math.max(1, op.leverage ?? 1),
               lastPrice: snap.lastPrice,
               flowId: `${op.symbol}:${op.side}:${op.openedAt}`,
               reason: et
@@ -5304,6 +5611,7 @@ export class PaperEngine {
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
+          appliedLeverage: Math.max(1, open.leverage ?? 1),
           lastPrice: closePrice,
           flowId,
           reason: cr,
@@ -5499,6 +5807,7 @@ export class PaperEngine {
                 symbol: open.symbol,
                 side: open.side,
                 sizeUsd: open.sizeUsd,
+                appliedLeverage: Math.max(1, open.leverage ?? 1),
                 lastPrice: closePrice,
                 flowId,
                 reason: "range_long_upper_reversal"
@@ -5630,6 +5939,7 @@ export class PaperEngine {
                 symbol: open.symbol,
                 side: open.side,
                 sizeUsd: open.sizeUsd,
+                appliedLeverage: Math.max(1, open.leverage ?? 1),
                 lastPrice: closePrice,
                 flowId,
                 reason: "range_short_lower_reversal"
@@ -5864,6 +6174,7 @@ export class PaperEngine {
             symbol: open.symbol,
             side: open.side,
             sizeUsd: open.sizeUsd,
+            appliedLeverage: Math.max(1, open.leverage ?? 1),
             lastPrice: closePrice,
             flowId,
             reason: "range_profit_trail"
@@ -6069,6 +6380,7 @@ export class PaperEngine {
             symbol: open.symbol,
             side: open.side,
             sizeUsd: open.sizeUsd,
+            appliedLeverage: Math.max(1, open.leverage ?? 1),
             lastPrice: closePrice,
             flowId,
             reason: st.reason ?? cr
@@ -6151,6 +6463,7 @@ export class PaperEngine {
             symbol: open.symbol,
             side: open.side,
             sizeUsd: open.sizeUsd,
+            appliedLeverage: Math.max(1, open.leverage ?? 1),
             lastPrice: closePrice,
             flowId,
             reason: "trend_switch_close"
@@ -6163,12 +6476,16 @@ export class PaperEngine {
           if (this.okxDemo) {
             const oSide = plan.openSide === "long" ? "buy" : "sell";
             const oPosSide = plan.openSide === "long" ? "long" : "short";
-            const oQty = Math.max(0.001, Math.round((newSz / Math.max(1e-9, closePrice)) * 1_000_000) / 1_000_000);
+            const oQtyLegacy = Math.max(0.001, Math.round((newSz / Math.max(1e-9, closePrice)) * 1_000_000) / 1_000_000);
+            const oLev = Math.max(1, open.leverage ?? 1);
             await this.submitOkxOrder({
               symbol: open.symbol,
               side: oSide,
               posSide: oPosSide,
-              qty: oQty,
+              qty: oQtyLegacy,
+              desiredNotionalUsdt: newSz * oLev,
+              pricingReferencePx: closePrice,
+              appliedLeverage: oLev,
               clOrdId: buildOkxClOrdId(open.symbol, oSide),
               traceId: flowId,
               reason: "trend_switch_open",
@@ -6299,6 +6616,7 @@ export class PaperEngine {
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
+          appliedLeverage: Math.max(1, open.leverage ?? 1),
           lastPrice: closePrice,
           flowId,
           reason: "stop_loss_close"
@@ -6458,6 +6776,7 @@ export class PaperEngine {
             symbol: open.symbol,
             side: open.side,
             sizeUsd: open.sizeUsd,
+            appliedLeverage: Math.max(1, open.leverage ?? 1),
             lastPrice: closePrice,
             flowId,
             reason: `regime_shift_${cr}`
@@ -6605,6 +6924,7 @@ export class PaperEngine {
           symbol: open.symbol,
           side: open.side,
           sizeUsd: partialSizeUsd,
+          appliedLeverage: Math.max(1, open.leverage ?? 1),
           lastPrice: closePrice,
           flowId,
           reason: v2PartialAuthority.partialReason ?? "v2_partial_exit",
@@ -6846,6 +7166,7 @@ export class PaperEngine {
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
+          appliedLeverage: Math.max(1, open.leverage ?? 1),
           lastPrice: closePrice,
           flowId,
           reason: `executor_${cr}`
@@ -6977,12 +7298,14 @@ export class PaperEngine {
           if (this.okxDemo) {
             const pSide = open.side === "long" ? "sell" : "buy";
             const pPosSide = open.side === "long" ? "long" : "short";
-            const pQty = Math.max(0.001, Math.round((partialMargin / Math.max(1e-9, mp.mark)) * 1_000_000) / 1_000_000);
+            const pQtyLegacy = Math.max(0.001, Math.round((partialMargin / Math.max(1e-9, mp.mark)) * 1_000_000) / 1_000_000);
+            const pLev = Math.max(1, open.leverage ?? 1);
             const partialClOrdId = buildOkxClOrdId(open.symbol, pSide);
             this.logger.info("V2_PARTIAL_ORDER_PATH_PROOF", {
               symbol: open.symbol,
               side: pSide,
-              qty: pQty,
+              qty_legacy_base_estimate: pQtyLegacy,
+              desired_notional_usdt: partialMargin * pLev,
               clOrdId: partialClOrdId,
               traceId: flowId,
               reason: `partial_close_${pReason}`
@@ -6991,7 +7314,10 @@ export class PaperEngine {
               symbol: open.symbol,
               side: pSide,
               posSide: pPosSide,
-              qty: pQty,
+              qty: pQtyLegacy,
+              desiredNotionalUsdt: partialMargin * pLev,
+              pricingReferencePx: mp.mark,
+              appliedLeverage: pLev,
               clOrdId: partialClOrdId,
               traceId: flowId,
               reason: `partial_close_${pReason}`,
@@ -7163,6 +7489,7 @@ export class PaperEngine {
             symbol: open.symbol,
             side: open.side,
             sizeUsd: open.sizeUsd,
+            appliedLeverage: Math.max(1, open.leverage ?? 1),
             lastPrice: closePrice,
             flowId,
             reason: "safety_net_alignment"
@@ -7400,6 +7727,7 @@ export class PaperEngine {
         symbol: open.symbol,
         side: open.side,
         sizeUsd: open.sizeUsd,
+        appliedLeverage: Math.max(1, open.leverage ?? 1),
         lastPrice: closePrice,
         flowId,
         reason: "candidate_lost"
@@ -9784,34 +10112,10 @@ export class PaperEngine {
         });
 
         if (this.okxDemo && signedMode === "enabled") {
-          const instId = toOkxSwapInstId(sym);
           const side = authority.side === "long" ? "buy" : "sell";
           const posSide = authority.side === "long" ? "long" : "short";
-          
-          // Use normalized sizing and rounding
-          const qty = roundQtyByInstrumentStep(v2EntrySizeUsd / Math.max(1e-9, first.lastPrice));
+          const qtyLegacyEst = Math.max(0.001, v2EntrySizeUsd / Math.max(1e-9, first.lastPrice));
           const clOrdId = buildOkxClOrdId(sym, side);
-
-          this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
-            symbol: sym,
-            run_cycle_id: this.runCycleId,
-            decision_id: (authority as any).decision_id ?? null,
-            side,
-            qty,
-            clOrdId,
-            v2_fast_path: true,
-            // Mandatory diagnostic fields for V2 Order Path
-            stage_margin_krw: authority.stageMarginKrw ?? 0,
-            margin_usdt: marginUsdt,
-            applied_leverage: authority.appliedLeverage ?? 10,
-            authority_exposure_notional_krw: authority.exposureNotionalKrw ?? 0,
-            authority_notional_usdt: authorityNotionalUsdt,
-            order_notional_usdt: v2EntrySizeUsd,
-            live_max_order_notional_usdt: liveMaxOrderNotionalUsdt,
-            min_order_notional_usdt: MIN_POSITION_SIZE_USD,
-            notional_ok: v2EntrySizeUsd >= MIN_POSITION_SIZE_USD,
-            entry_price: first.lastPrice
-          });
 
           const stopPrice = typeof res.decision.stopLoss === "number" 
             ? res.decision.stopLoss 
@@ -9821,7 +10125,7 @@ export class PaperEngine {
             symbol: first.symbol,
             side,
             posSide,
-            qty,
+            qty: qtyLegacyEst,
             clOrdId,
             traceId: openTraceId,
             reason: "v2_authorized_fast_path",
@@ -9838,6 +10142,31 @@ export class PaperEngine {
             exposureNotionalKrw: authority.exposureNotionalKrw ?? null,
             isNewEntry: true,
             orderNotionalUsdt: v2EntrySizeUsd
+          });
+
+          this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
+            symbol: sym,
+            run_cycle_id: this.runCycleId,
+            decision_id: (authority as any).decision_id ?? null,
+            side,
+            posSide,
+            req_sz: submit.submittedContractSz ?? null,
+            qty_legacy_base_estimate: qtyLegacyEst,
+            clOrdId,
+            v2_fast_path: true,
+            stage_margin_krw: authority.stageMarginKrw ?? 0,
+            margin_usdt: marginUsdt,
+            applied_leverage: authority.appliedLeverage ?? 10,
+            authority_exposure_notional_krw: authority.exposureNotionalKrw ?? 0,
+            authority_notional_usdt: authorityNotionalUsdt,
+            order_notional_usdt: v2EntrySizeUsd,
+            live_max_order_notional_usdt: liveMaxOrderNotionalUsdt,
+            min_order_notional_usdt: MIN_POSITION_SIZE_USD,
+            notional_ok: v2EntrySizeUsd >= MIN_POSITION_SIZE_USD,
+            entry_price: first.lastPrice,
+            submit_ok: submit.ok,
+            submit_error_code: submit.errorCode,
+            submit_error_message: submit.errorMessage
           });
 
           if (submit.ok) {
@@ -10332,28 +10661,18 @@ export class PaperEngine {
           trace.inst_id = instId;
           const side = authority.side === "long" ? "buy" : "sell";
           const posSide = authority.side === "long" ? "long" : "short";
-          const qty = Math.max(0.001, Math.round((entrySizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
-          trace.qty_submitted = qty;
+          const entryOrderNotionalUsdt = entrySizeUsd * (authority.appliedLeverage ?? 1);
+          const qtyLegacyEst = Math.max(0.001, Math.round((entrySizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
+          trace.qty_submitted = qtyLegacyEst;
           const clOrdId = buildOkxClOrdId(first.symbol, side);
           trace.exchange_client_order_id = clOrdId;
           trace.order_submit_requested = true;
-
-          this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
-            symbol: first.symbol,
-            run_cycle_id: this.runCycleId,
-            decision_id: (authority as any).decision_id ?? null,
-            side,
-            qty,
-            clOrdId,
-            authority_source: authority.source,
-            note: "Authoritative V2 entry decision handed off to exchange submission"
-          });
 
           submit = await this.submitOkxOrder({
             symbol: first.symbol,
             side,
             posSide,
-            qty,
+            qty: qtyLegacyEst,
             clOrdId,
             traceId: openTraceId,
             reason: "entry_authorized",
@@ -10369,7 +10688,25 @@ export class PaperEngine {
             stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : null,
             paperExecutionReady: this.paperExecutionReady,
             stageMarginKrw: authority.stageMarginKrw ?? null,
-            isNewEntry
+            isNewEntry,
+            orderNotionalUsdt: entryOrderNotionalUsdt
+          });
+
+          this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
+            symbol: first.symbol,
+            run_cycle_id: this.runCycleId,
+            decision_id: (authority as any).decision_id ?? null,
+            side,
+            posSide,
+            req_sz: submit.submittedContractSz ?? null,
+            qty_legacy_base_estimate: qtyLegacyEst,
+            clOrdId,
+            authority_source: authority.source,
+            order_notional_usdt: entryOrderNotionalUsdt,
+            note: "Authoritative V2 entry decision handed off to exchange submission",
+            submit_ok: submit.ok,
+            submit_error_code: submit.errorCode,
+            submit_error_message: submit.errorMessage
           });
 
           trace.order_submit_ack = submit.ackCode;
@@ -11194,12 +11531,16 @@ export class PaperEngine {
     if (this.okxDemo) {
       const sSide = existing.side === "long" ? "buy" : "sell";
       const sPosSide = existing.side === "long" ? "long" : "short";
-      const sQty = Math.max(0.001, Math.round((incrementalSizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
+      const sQtyLegacy = Math.max(0.001, Math.round((incrementalSizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
+      const sLev = Math.max(1, existing.leverage ?? authority.appliedLeverage ?? 1);
       await this.submitOkxOrder({
         symbol: existing.symbol,
         side: sSide,
         posSide: sPosSide,
-        qty: sQty,
+        qty: sQtyLegacy,
+        desiredNotionalUsdt: incrementalSizeUsd * sLev,
+        pricingReferencePx: first.lastPrice,
+        appliedLeverage: authority.appliedLeverage ?? existing.leverage ?? null,
         clOrdId: buildOkxClOrdId(existing.symbol, sSide),
         traceId: `${existing.symbol}:${existing.side}:${existing.openedAt}`,
         reason: "scale_in_authorized",
@@ -11207,7 +11548,6 @@ export class PaperEngine {
         adoptedEngine: envelope.selector?.adopted_result.engine ?? null,
         entryQualityGrade: authority.entryQualityGrade ?? null,
         leverageProfile: authority.leverageProfile ?? null,
-        appliedLeverage: authority.appliedLeverage ?? null,
         paperExecutionReady: this.paperExecutionReady,
         isNewEntry: false
       });
