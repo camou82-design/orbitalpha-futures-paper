@@ -218,6 +218,98 @@ export type FuturesPaperHealthHistoryItem = Readonly<{
   reasons?: string[];
 }>;
 
+function isPaperLedgerPositionOpen(x: unknown): boolean {
+  if (!x || typeof x !== "object") return false;
+  const st = (x as Record<string, unknown>).status;
+  return st === undefined || st === "open";
+}
+
+/**
+ * UI `/futures-paper` current-positions path: ledger `open.json` first; if empty,
+ * read-only rows from `engineState.ledger_okx_position_sync` + `position_ops_surface`
+ * (OKX-only / mismatch diagnostics — does not submit orders).
+ */
+export function deriveCurrentPositionsForDisplay(engineState: unknown, openPositions: unknown[]): unknown[] {
+  const ledgerOpen = Array.isArray(openPositions) ? openPositions.filter(isPaperLedgerPositionOpen) : [];
+  if (ledgerOpen.length > 0) return ledgerOpen;
+
+  if (!engineState || typeof engineState !== "object") return [];
+  const es = engineState as Record<string, unknown>;
+  const sync = es.ledger_okx_position_sync;
+  const ops = es.position_ops_surface;
+
+  const previews =
+    sync && typeof sync === "object" && Array.isArray((sync as Record<string, unknown>).okx_positions_preview)
+      ? ((sync as Record<string, unknown>).okx_positions_preview as Record<string, unknown>[])
+      : [];
+
+  const opRows =
+    ops && typeof ops === "object" && Array.isArray((ops as Record<string, unknown>).rows)
+      ? ((ops as Record<string, unknown>).rows as Record<string, unknown>[])
+      : [];
+
+  const tsFallback = typeof es.generatedAt === "number" && Number.isFinite(es.generatedAt) ? es.generatedAt : Date.now();
+
+  function surfaceRowFor(sym: string, side: string): Record<string, unknown> | undefined {
+    return opRows.find((r) => String(r.symbol ?? "") === sym && String(r.side ?? "") === side);
+  }
+
+  function rowDisplayPayload(match: Record<string, unknown> | undefined): { entryPrice: number | null } {
+    if (!match) return { entryPrice: null };
+    const ref = match.reference_entry_px;
+    const avg = match.okx_avg_px;
+    const entryPrice =
+      typeof ref === "number" && Number.isFinite(ref)
+        ? ref
+        : typeof avg === "number" && Number.isFinite(avg)
+          ? avg
+          : null;
+    return { entryPrice };
+  }
+
+  if (previews.length > 0) {
+    return previews.map((p) => {
+      const sym = String(p.symbol ?? "");
+      const side = p.side === "short" ? "short" : "long";
+      const match = surfaceRowFor(sym, side);
+      const { entryPrice } = rowDisplayPayload(match);
+      return {
+        symbol: sym,
+        side,
+        status: "open",
+        entryPrice,
+        openedAt: tsFallback,
+        displaySource: "ledger_okx_sync_preview",
+        okxPositionContracts: typeof p.pos === "number" && Number.isFinite(p.pos) ? p.pos : null,
+        instId: typeof p.instId === "string" ? p.instId : null,
+        reduce_only_protective_found:
+          typeof match?.reduce_only_protective_found === "boolean" ? match.reduce_only_protective_found : undefined
+      };
+    });
+  }
+
+  if (opRows.length > 0) {
+    return opRows.map((row) => {
+      const sym = String(row.symbol ?? "");
+      const side = row.side === "short" ? "short" : "long";
+      const { entryPrice } = rowDisplayPayload(row);
+      return {
+        symbol: sym,
+        side,
+        status: "open",
+        entryPrice,
+        openedAt: tsFallback,
+        displaySource: "position_ops_surface",
+        inst_id: typeof row.inst_id === "string" ? row.inst_id : null,
+        reduce_only_protective_found:
+          typeof row.reduce_only_protective_found === "boolean" ? row.reduce_only_protective_found : undefined
+      };
+    });
+  }
+
+  return [];
+}
+
 export type FuturesPaperDataBundle = Readonly<{
   configured: boolean;
   configHint: string | null;
@@ -237,6 +329,8 @@ export type FuturesPaperDataBundle = Readonly<{
   healthHistoryRecent: FuturesPaperHealthHistoryItem[];
   ledgerPerformance: FuturesPaperLedgerPerformance | null;
   openPositions: unknown[];
+  /** Ledger opens, or read-only OKX sync / ops-surface fallback for homepage current-positions UI */
+  currentPositions: unknown[];
   positionsHistory: unknown[];
   eventsRecent: unknown[];
   generatedAt: number;
@@ -429,6 +523,7 @@ export async function composePublicFuturesPaperBundleForWrite(
   const generatedAt = Date.now();
   const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt);
   const paperOperational = paperOperationalFromEngineState(engineState);
+  const currentPositions = deriveCurrentPositionsForDisplay(engineState, openPositions);
 
   return {
     configured: true,
@@ -448,6 +543,7 @@ export async function composePublicFuturesPaperBundleForWrite(
     healthHistoryRecent,
     ledgerPerformance,
     openPositions,
+    currentPositions,
     positionsHistory,
     eventsRecent,
     generatedAt
@@ -500,6 +596,7 @@ async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): P
   const generatedAt = Date.now();
   const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt);
   const paperOperational = paperOperationalFromEngineState(engineState);
+  const currentPositions = deriveCurrentPositionsForDisplay(engineState, openPositions);
 
   return {
     configured: true,
@@ -519,6 +616,7 @@ async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): P
     healthHistoryRecent,
     ledgerPerformance,
     openPositions,
+    currentPositions,
     positionsHistory,
     eventsRecent,
     generatedAt
@@ -531,6 +629,13 @@ async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): P
  */
 export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): Promise<FuturesPaperDataBundle> {
   const published = await tryReadPublishedPublicBundle(projectRoot);
-  if (published) return published;
+  if (published) {
+    const openPositions = Array.isArray(published.openPositions) ? published.openPositions : [];
+    return {
+      ...published,
+      openPositions,
+      currentPositions: deriveCurrentPositionsForDisplay(published.engineState, openPositions)
+    };
+  }
   return assembleFuturesPaperBundleFromDiskSources(projectRoot);
 }

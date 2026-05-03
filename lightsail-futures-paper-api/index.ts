@@ -5,6 +5,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express, { Request, Response } from "express";
+import { deriveCurrentPositionsForDisplay } from "../src/lib/futuresPaperBundleCore.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const monitorDir = path.join(__dirname, "..", "monitor");
@@ -138,8 +139,16 @@ async function doLoadBundle(projectRoot: string): Promise<CacheContext> {
     throw new Error("public_bundle_invalid_shape");
   }
 
+  const o = parsed as Record<string, unknown>;
+  const openPositions = Array.isArray(o.openPositions) ? o.openPositions : [];
+  const bundleHydrated = {
+    ...o,
+    openPositions,
+    currentPositions: deriveCurrentPositionsForDisplay(o.engineState ?? null, openPositions)
+  } as DataBundle;
+
   return {
-    bundle: parsed as DataBundle,
+    bundle: bundleHydrated,
     mtimeMs: stat.mtimeMs,
     cachedAt: Date.now(),
     metrics: {

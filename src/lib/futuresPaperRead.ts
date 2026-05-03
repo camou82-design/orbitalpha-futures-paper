@@ -1,5 +1,6 @@
 import type { FuturesPaperDataBundle } from "./futuresPaperBundleCore";
 import {
+  deriveCurrentPositionsForDisplay,
   loadFuturesPaperBundleFromDiskRoot,
   normalizePositionsHistoryArray,
   paperOperationalFromEngineState
@@ -15,6 +16,7 @@ export type {
   NormalizedPaperClosedRow
 } from "./futuresPaperBundleCore";
 export {
+  deriveCurrentPositionsForDisplay,
   displayFieldsForClosedRow,
   normalizeClosedHistoryRow,
   normalizePositionsHistoryArray,
@@ -43,6 +45,7 @@ function emptyBundle(configHint: string): FuturesPaperDataBundle {
     healthHistoryRecent: [],
     ledgerPerformance: null,
     openPositions: [],
+    currentPositions: [],
     positionsHistory: [],
     eventsRecent: [],
     generatedAt: now
@@ -125,10 +128,12 @@ async function loadFromRemoteApi(baseUrl: string, secret: string): Promise<Futur
     : buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt);
   const paperOperational =
     isServerPaperOperational(b.paperOperational) ? b.paperOperational : paperOperationalFromEngineState(b.engineState) ?? null;
+  const openPositions = Array.isArray(b.openPositions) ? b.openPositions : [];
   const withDefaults: FuturesPaperDataBundle = {
     ...b,
     ledgerPerformance,
-    openPositions: Array.isArray(b.openPositions) ? b.openPositions : [],
+    openPositions,
+    currentPositions: deriveCurrentPositionsForDisplay(b.engineState, openPositions),
     positionsHistory,
     paperOperational,
     generatedAt
