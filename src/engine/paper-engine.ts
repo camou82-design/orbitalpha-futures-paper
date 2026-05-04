@@ -13143,7 +13143,11 @@ function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapshot {
     emaGap: snap.emaGap ?? 0,
     atr: snap.atr ?? 0,
     signal: snap.signal ?? "NONE",
-    qualityScore: snap.qualityScore ?? 0
+    qualityScore: snap.qualityScore ?? 0,
+    entryCandidate: snap.entryCandidate ?? false,
+    signalGateBlockedReason: snap.signalGateBlockedReason ?? null,
+    rangeSignalDowngraded: snap.rangeSignalDowngraded ?? false,
+    rangeSignalKeptByRelax: snap.rangeSignalKeptByRelax ?? false
   };
 }
 

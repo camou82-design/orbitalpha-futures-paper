@@ -101,6 +101,9 @@ export interface LegacySnapshotAdapter {
     dump_protection_hit?: boolean;
     volatility_guard_hit?: boolean;
     entryCandidate?: boolean;
+    signalGateBlockedReason?: string | null;
+    rangeSignalDowngraded?: boolean;
+    rangeSignalKeptByRelax?: boolean;
 }
 
 export interface LegacyConfigAdapter {
@@ -216,6 +219,9 @@ export interface EngineV2SnapshotAdapter {
     dump_protection_hit: boolean;
     volatility_guard_hit: boolean;
     entryCandidate: boolean;
+    signalGateBlockedReason?: string | null;
+    rangeSignalDowngraded?: boolean;
+    rangeSignalKeptByRelax?: boolean;
 }
 
 export interface EngineV2ConfigAdapter {
@@ -269,6 +275,10 @@ export interface V2BridgeSnapshot {
     atr: number;
     signal: string;
     qualityScore: number;
+    entryCandidate?: boolean;
+    signalGateBlockedReason?: string | null;
+    rangeSignalDowngraded?: boolean;
+    rangeSignalKeptByRelax?: boolean;
 }
 
 export interface V2BridgeLegacyDecision {

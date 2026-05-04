@@ -253,7 +253,11 @@ export function resolveSymbolDecisionEnvelope(
         emaGapDiag: snapshot.emaGap,
         volatilityProxyDiag: snapshot.atr,
         signal: String(snapshot.signal),
-        qualityScore: snapshot.qualityScore
+        qualityScore: snapshot.qualityScore,
+        entryCandidate: snapshot.entryCandidate ?? false,
+        signalGateBlockedReason: snapshot.signalGateBlockedReason ?? null,
+        rangeSignalDowngraded: snapshot.rangeSignalDowngraded ?? false,
+        rangeSignalKeptByRelax: snapshot.rangeSignalKeptByRelax ?? false
     };
 
     // 2. Config Mapping

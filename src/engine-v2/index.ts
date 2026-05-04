@@ -595,6 +595,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         return null;
     };
     const boxPos = readNullableNumber(execMeta.boxPos, input.snapshot?.boxPos);
+    const rangeLowerThreshold = 0.26;
+    const rangeUpperThreshold = 0.74;
     const boxBreakSide =
         typeof execMeta.boxBreakSide === "string"
             ? String(execMeta.boxBreakSide)
@@ -602,7 +604,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 ? String(input.snapshot.boxBreakSide)
                 : "none";
     const zoneFromMeta = typeof execMeta.zone === "string" ? execMeta.zone : null;
-    const zone = zoneFromMeta ?? (boxPos == null ? "mid" : boxPos >= 0.74 ? "upper" : boxPos <= 0.26 ? "lower" : "mid");
+    const zone = zoneFromMeta ?? (boxPos == null ? "mid" : boxPos >= rangeUpperThreshold ? "upper" : boxPos <= rangeLowerThreshold ? "lower" : "mid");
     const rangeConfidence = readNullableNumber(execMeta.rangeConfidence, input.snapshot?.rangeConfidence);
     const boxCohesion01 = readNullableNumber(execMeta.boxCohesion01, input.snapshot?.boxCohesion01);
     const trendWeaknessFromMeta = readNullableNumber(execMeta.trendWeaknessScore, input.snapshot?.trendWeaknessScore);
@@ -630,6 +632,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         boxPos == null ? "boxPos" : null,
         zone == null ? "zone" : null
     ].filter((x): x is string => x != null);
+    const signalGateBlockedReason =
+        typeof input.snapshot?.signalGateBlockedReason === "string"
+            ? input.snapshot.signalGateBlockedReason
+            : null;
+    const rangeSignalDowngraded = input.snapshot?.rangeSignalDowngraded === true;
+    const rangeSignalKeptByRelax = input.snapshot?.rangeSignalKeptByRelax === true;
+    const entryCandidate = input.snapshot?.entryCandidate === true;
     const rangeSideCandidate: EngineV2Side =
         zone === "lower" && allowNewLong && riskLongAllow ? "long" :
             zone === "upper" && allowNewShort && riskShortAllow ? "short" : "none";
@@ -1508,6 +1517,67 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     } else {
         promotionBlockReason = "HARD_CONTROL_NOT_CLEAR";
+    }
+
+    const finalDecisionBeforeVeto = v2DecisionAfterPromotion;
+    const sideCandidateBeforeVeto = v2SideAfterPromotion;
+    let vetoReason: string | null = null;
+    const rangeLowerShortMismatchByReason = signalGateBlockedReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
+    const rangeUpperLongMismatchByReason = signalGateBlockedReason === "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
+    const rangeLowerShortMismatchByBox = sideCandidateBeforeVeto === "short" && (boxPos ?? 0.5) <= rangeLowerThreshold;
+    const rangeUpperLongMismatchByBox = sideCandidateBeforeVeto === "long" && (boxPos ?? 0.5) >= rangeUpperThreshold;
+    const rangeDowngradedHardBlock = rangeSignalDowngraded && !rangeSignalKeptByRelax;
+    const entryCandidateHardBlock = !entryCandidate;
+    const trendPromotionHardBlock = activeEngineRouting === "TREND" && trendOk !== true && sideCandidateBeforeVeto !== "none";
+    const rangeMidConservativeBlock =
+        rangeContextActive &&
+        zone === "mid" &&
+        sideCandidateBeforeVeto !== "none" &&
+        !reversalConfirmed &&
+        !relaxedRangeEntry &&
+        !rangeEdgeExtreme &&
+        !shockRecoveryHint;
+
+    if (v2DecisionAfterPromotion === "ENTER") {
+        if (rangeLowerShortMismatchByReason || rangeLowerShortMismatchByBox) {
+            vetoReason = "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
+        } else if (rangeUpperLongMismatchByReason || rangeUpperLongMismatchByBox) {
+            vetoReason = "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
+        } else if (rangeDowngradedHardBlock) {
+            vetoReason = "RANGE_SIGNAL_DOWNGRADED_NOT_RELAXED";
+        } else if (entryCandidateHardBlock) {
+            vetoReason = "ENTRY_CANDIDATE_FALSE_VETO";
+        } else if (trendPromotionHardBlock) {
+            vetoReason = "TREND_PROMOTION_BLOCKED_TREND_NOT_OK";
+        } else if (rangeMidConservativeBlock) {
+            vetoReason = "RANGE_MID_CONSERVATIVE_VETO";
+        }
+    }
+
+    if (vetoReason != null) {
+        v2DecisionAfterPromotion = "SKIP";
+        v2SideAfterPromotion = "none";
+        v2RejectReasonAfterPromotion = vetoReason;
+        promotionApplied = false;
+        promotionReason = null;
+        console.info(JSON.stringify({
+            event: "V2_RANGE_SIDE_ZONE_VETO_PROOF",
+            symbol: String(input.symbol),
+            regime: marketMode,
+            boxPos,
+            rangeZone: zone,
+            sideCandidate: sideCandidateBeforeVeto,
+            signalGateBlockedReason,
+            rangeSignalDowngraded,
+            rangeSignalKeptByRelax,
+            entryCandidate,
+            trendOk,
+            long_allow: allowNewLong,
+            short_allow: allowNewShort,
+            finalDecisionBeforeVeto,
+            finalDecisionAfterVeto: v2DecisionAfterPromotion,
+            vetoReason
+        }));
     }
 
     finalDecision = v2DecisionAfterPromotion;
@@ -2556,7 +2626,10 @@ export function adaptV2Input(
             data_ready: snapshot.data_ready ?? true,
             dump_protection_hit: snapshot.dump_protection_hit ?? false,
             volatility_guard_hit: snapshot.volatility_guard_hit ?? false,
-            entryCandidate: snapshot.entryCandidate ?? false
+            entryCandidate: snapshot.entryCandidate ?? false,
+            signalGateBlockedReason: snapshot.signalGateBlockedReason ?? null,
+            rangeSignalDowngraded: snapshot.rangeSignalDowngraded ?? false,
+            rangeSignalKeptByRelax: snapshot.rangeSignalKeptByRelax ?? false
         },
         config: {
             paperMaxOpenPositions: config.paperMaxOpenPositions,

@@ -148,6 +148,7 @@ export type SymbolSnapshotLike = Readonly<{
   lastPrice: number;
   latestCandleClose: number;
   signal: PaperSignal;
+  entryCandidate?: boolean;
   gateExpectedMove: number | null;
   gateRequiredMove: number | null;
   qualityScore: number;
@@ -162,6 +163,9 @@ export type SymbolSnapshotLike = Readonly<{
   boxLow: number | null;
   atr: number | null;
   signalMissingReason?: string;
+  signalGateBlockedReason?: string | null;
+  rangeSignalDowngraded?: boolean;
+  rangeSignalKeptByRelax?: boolean;
   /** 하이웨이: 횡보 확신도 */
   rangeConfidence?: number;
   /** 하이웨이: 박스 응집도 */
