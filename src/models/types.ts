@@ -813,6 +813,8 @@ export type PaperOpenPositionRecord = {
   exchangeOrdId?: string;
   exchangeClOrdId?: string;
   exchangeFilledSize?: number;
+
+  
   
   // Close Pending Tracking
   closePendingOrdId?: string;
@@ -924,7 +926,7 @@ export type PaperOpenPositionRecord = {
   sync_status?: string;
   marginMode?: string;
   notional?: number;
-  pos?: number;
+  pos: number;
   instId?: string;
   /** Entry-time evidence snapshot for entry/exit consistency checks. */
   entryEvidence?: Readonly<{

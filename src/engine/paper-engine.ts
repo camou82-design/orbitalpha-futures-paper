@@ -1246,10 +1246,16 @@ export class PaperEngine {
   private async runPositionOperationsWatch(nowTs: number, paperOpens: ReadonlyArray<PaperOpenPositionRecord>): Promise<void> {
     const syncSnap = buildLedgerOkxPositionSyncSnapshot(paperOpens, this.lastLivePositionsPayload);
 
-    if (syncSnap.sync_status === "OKX_ONLY" || syncSnap.sync_status === "KEY_MISMATCH") {
+    const criticalMismatch = 
+      syncSnap.sync_status !== "ALIGNED" && 
+      syncSnap.sync_status !== "REMOTE_UNAVAILABLE" && 
+      syncSnap.sync_status !== "LEDGER_ONLY";
+
+    if (criticalMismatch) {
       this.reconcileSafetyCloseOnly = true;
       this.reconcileLastMismatchReason = `sync_watch_${syncSnap.sync_status}`;
     }
+
 
     const canScan =
       Boolean(this.okxDemo && this.signedExecutionReady) &&
@@ -1377,12 +1383,18 @@ export class PaperEngine {
     }
 
     const okxPositions = okxPosRes.value;
-    const remoteMap = new Map<string, { size: number; instId: string; posSide: string }>();
+    const remoteMap = new Map<string, { size: number; instId: string; posSide: string; avgPx: number; notionalUsd: number }>();
     for (const row of okxPositions) {
       const hit = okxSwapRowToLedgerKey(row as Record<string, unknown>);
       if (!hit) continue;
       const posSideRaw = String((row as any).posSide ?? "").toLowerCase();
-      remoteMap.set(hit.key, { size: Math.abs(hit.posSigned), instId: hit.instId, posSide: posSideRaw });
+      remoteMap.set(hit.key, { 
+        size: Math.abs(hit.posSigned), 
+        instId: hit.instId, 
+        posSide: posSideRaw,
+        avgPx: hit.avgPx,
+        notionalUsd: hit.notionalUsd
+      });
     }
 
     const next: PaperOpenPositionRecord[] = [];
@@ -1704,8 +1716,8 @@ export class PaperEngine {
         }
       }
 
-      // 3. Regular Open Position Reconciliation
-      if (open.lifecycleState === "OPEN") {
+      // 3. Regular Open Position Reconciliation (Deep Comparison)
+      if (open.lifecycleState === "OPEN" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
         if (!remotePos) {
           this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
             symbol: open.symbol,
@@ -1719,7 +1731,66 @@ export class PaperEngine {
           ledgerModified = true;
           continue; 
         }
-        open.reconcileState = "MATCHED";
+
+        // Deep Comparison Logic
+        const isAdoptedOrManaged = open.reconcileState === "ADOPTED" || open.lifecycleState === "CLOSE_ONLY_MANAGED";
+        const sizeDiff = Math.abs(open.pos - remotePos.size);
+        const priceDiffRatio = Math.abs(open.entryPrice - remotePos.avgPx) / (open.entryPrice || 1);
+        const notionalDiff = Math.abs(open.sizeUsd - remotePos.notionalUsd);
+
+        let mismatchDetected = false;
+        let mismatchType: string = "MATCHED";
+
+        if (sizeDiff > 0.00000001) {
+          mismatchDetected = true;
+          mismatchType = "SIZE_MISMATCH";
+        } else if (priceDiffRatio > 0.0005) {
+          mismatchDetected = true;
+          mismatchType = "AVG_PRICE_MISMATCH";
+        } else if (notionalDiff > 1.0) {
+          mismatchDetected = true;
+          mismatchType = "NOTIONAL_MISMATCH";
+        }
+
+        if (mismatchDetected) {
+          if (isAdoptedOrManaged) {
+            this.logger.warn("MANUAL_PARTIAL_RECONCILED_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              mismatch_type: mismatchType,
+              prev_pos: open.pos,
+              new_pos: remotePos.size,
+              prev_size_usd: open.sizeUsd,
+              new_size_usd: remotePos.notionalUsd,
+              prev_entry_px: open.entryPrice,
+              new_entry_px: remotePos.avgPx,
+              detail: "ORPHANED_POSITION_AUTO_RECONCILED_TO_EXCHANGE_ACTUAL"
+            });
+            // Priority 6/7: Update ledger to match OKX actuals for adopted/managed positions
+            open.pos = remotePos.size;
+            open.sizeUsd = remotePos.notionalUsd;
+            open.entryPrice = remotePos.avgPx;
+            open.reconcileState = "MATCHED"; // Force matched after update
+            ledgerModified = true;
+          } else {
+            // Standard mismatch reporting
+            open.reconcileState = "FAILED"; // Keep legacy FAILED for ledger, sync_status will show details
+            mismatchCount++;
+            this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              detail: mismatchType,
+              okx_pos: remotePos.size,
+              paper_pos: open.pos,
+              okx_avg_px: remotePos.avgPx,
+              paper_entry_px: open.entryPrice,
+              okx_notional: remotePos.notionalUsd,
+              paper_notional: open.sizeUsd
+            });
+          }
+        } else {
+          open.reconcileState = "MATCHED";
+        }
         open.lastCheckedAt = nowTs;
       }
 
@@ -2721,7 +2792,9 @@ export class PaperEngine {
     const lastCloseMetaBySymbolForDecision =
       this.config.paperReentryCooldownMs > 0 ? latestCloseMetaBySymbol(await this.store.readPositionsHistory()) : null;
     const regimeUnknown = btc5.length < MIN_BTC_5M_BARS_REGIME;
-    const polledSymbols = this.config.symbols;
+    const openSymbols = opensAfterClose.map(o => String(o.symbol));
+    const polledSymbols = Array.from(new Set([...this.config.symbols, ...openSymbols]));
+
     const decisionBySymbol = new Map<string, PaperEngineDecisionEnvelope>();
     const effectiveLane = routingOverride.effectiveExecutionLane;
     const effectiveRegimeForDecision = (effectiveLane === "IDLE" ? "NO_TRADE" : effectiveLane) as MarketRegime;
@@ -2837,6 +2910,9 @@ export class PaperEngine {
           logger: this.logger
         });
 
+
+
+
         this.logger.info(
           "PAPER_TRADE_BLOCK_DECOMPOSITION",
           this.paperTradeBlockDecompositionPayload(sym, null, resNull, {
@@ -2884,6 +2960,25 @@ export class PaperEngine {
         routingActiveEngine: marketModeOut.routing.activeEngine,
         logger: this.logger
       });
+
+      // --- Adopted / Close-Only Entry Block ---
+      const isAdoptedOrCloseOnly = 
+        existingPos?.reconcileState === "ADOPTED" || 
+        existingPos?.lifecycleState === "CLOSE_ONLY_MANAGED";
+      
+      if (isAdoptedOrCloseOnly && res.decision.final_signal_state !== "NONE") {
+        this.logger.info("ADOPTED_POSITION_ENTRY_BLOCKED_PROOF", {
+          symbol: sym,
+          side: existingPos?.side,
+          reconcileState: existingPos?.reconcileState,
+          lifecycleState: existingPos?.lifecycleState,
+          original_entry_signal: res.decision.final_signal_state,
+          action: "forced_no_trade"
+        });
+        // We override the signal to NONE to block entry/add-on for adopted/close-only positions.
+        (res as any).decision.final_signal_state = "NONE";
+      }
+
 
       /** Engine-V2 Execution Path (Standard 2: Selector Bridge) */
       // Entry authority is fully transferred to engine-v2.
@@ -5328,7 +5423,9 @@ export class PaperEngine {
     riskExposure: RiskExposureOutput;
     decisionBySymbol: ReadonlyMap<string, PaperEngineDecisionEnvelope>;
   }>): Promise<void> {
-    if (input.errorsCount > 0) return;
+    // Remove aggressive errorsCount check to ensure exit evaluation for successful symbols
+    // if (input.errorsCount > 0) return;
+
 
     const rawOpens = await this.positions.loadOpenAll();
     if (rawOpens.length === 0) return;
@@ -5523,7 +5620,14 @@ export class PaperEngine {
       const flowId = `${openRaw.symbol}:${openRaw.side}:${openRaw.openedAt}`;
 
       // Problem 3: Exclude pending states from exit/partial management
-      const isManaged = openRaw.lifecycleState === "OPEN" || openRaw.lifecycleState === undefined || openRaw.lifecycleState === null || openRaw.lifecycleState === "ADDON_ACTIVE" || openRaw.lifecycleState === "PARTIAL_ACTIVE";
+      const isManaged = 
+        openRaw.lifecycleState === "OPEN" || 
+        openRaw.lifecycleState === undefined || 
+        openRaw.lifecycleState === null || 
+        openRaw.lifecycleState === "ADDON_ACTIVE" || 
+        openRaw.lifecycleState === "PARTIAL_ACTIVE" ||
+        openRaw.lifecycleState === "CLOSE_ONLY_MANAGED";
+      
       if (!isManaged) {
         remaining.push(openRaw);
         continue;
@@ -5664,6 +5768,138 @@ export class PaperEngine {
       const snap = input.snapshots.find((s) => s.symbol === openRaw.symbol);
       if (!snap) {
         remaining.push(openRaw);
+        continue;
+      }
+
+      const closePrice = snap.lastPrice;
+      const closedAt = snap.fetchedAt;
+      const regimeNow = input.marketMode.marketMode as MarketRegime;
+      const slRegime: MarketRegime = exitLane === "RANGE" ? "RANGE" : "TREND";
+
+      const snapPaths = {
+        ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
+        ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
+        ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {})
+      };
+
+      const leg = (marginUsd: number) =>
+        computePaperCloseLegMetrics({
+          open,
+          closePrice,
+          closedAt,
+          snapFundingRate: snap.fundingRate,
+          marginUsd,
+          paperTakerFeeRate: this.config.paperTakerFeeRate,
+          paperFundingIntervalHours: this.config.paperFundingIntervalHours
+        });
+
+      let m = leg(open.sizeUsd);
+      const highWater = Math.max(open.highestPnlPctNet ?? m.pnlPctNet, m.pnlPctNet);
+      open = { ...open, highestPnlPctNet: highWater };
+
+      // --- Mandatory Diagnostic Log for Adopted/Close-Only positions ---
+      if (open.reconcileState === "ADOPTED" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
+        this.logger.info("POSITION_CLOSE_EVALUATION_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          sourceSignal: open.sourceSignal,
+          lifecycleState: open.lifecycleState,
+          reconcileState: open.reconcileState,
+          markPrice: closePrice,
+          stopPrice: open.stopPrice,
+          targetPrice1: open.targetPrice1,
+          trailingStopPrice: open.trailingStopPrice,
+          pnlPctNet: m.pnlPctNet,
+          isManaged: true,
+          flowId
+        });
+      }
+
+      // --- 1. Hard SL check (Safety Gate) ---
+      let isSlTriggered = false;
+      if (typeof open.stopPrice === "number" && Number.isFinite(open.stopPrice)) {
+        isSlTriggered = open.side === "long" ? closePrice <= open.stopPrice : closePrice >= open.stopPrice;
+      } else {
+        const slThresh = stopLossPctForRegime(slRegime);
+        isSlTriggered = m.pnlPctNet <= slThresh;
+      }
+
+      // --- 2. Hard TP check (Safety Gate) ---
+      let isTpTriggered = false;
+      if (typeof open.targetPrice1 === "number" && Number.isFinite(open.targetPrice1)) {
+        isTpTriggered = open.side === "long" ? closePrice >= open.targetPrice1 : closePrice <= open.targetPrice1;
+      }
+
+      // --- 3. Hard Trailing Stop check (Safety Gate) ---
+      let isTrailingTriggered = false;
+      if (typeof open.trailingStopPrice === "number" && Number.isFinite(open.trailingStopPrice)) {
+        isTrailingTriggered = open.side === "long" ? closePrice <= open.trailingStopPrice : closePrice >= open.trailingStopPrice;
+      }
+
+      if (isSlTriggered || isTpTriggered || isTrailingTriggered) {
+        const cr = isSlTriggered ? "stop_loss" : isTpTriggered ? "take_profit" : ("trailing_stop" as const);
+        finalCloseReason = cr;
+        confirmedExitType = isSlTriggered ? "EXIT_SL" : isTpTriggered ? "EXIT_TP" : "EXIT_TRAILING";
+        confirmedCloseSource = isSlTriggered ? "hard_stop_loss_gate_primary" : isTpTriggered ? "hard_tp_gate_primary" : "hard_trailing_gate_primary";
+        
+        const feeRate = this.config.paperTakerFeeRate;
+        const intervalH = this.config.paperFundingIntervalHours;
+        const toClosedLocal = (crLoc: PaperClosedPositionRecord["closeReason"], metricsLoc: PaperCloseLegMetrics, legMarginUsdLoc: number) => 
+            finalizePaperClosedRecord({
+                open,
+                symbol: open.symbol,
+                closePrice,
+                closedAt,
+                closeReason: crLoc,
+                legMarginUsd: legMarginUsdLoc,
+                metrics: metricsLoc,
+                feeRate,
+                fundingIntervalHours: intervalH,
+                strategyVersion: inheritedStrategyVersion,
+                ...snapPaths
+            });
+
+        const closedRow = toClosedLocal(cr, m, open.sizeUsd);
+        
+        if (open.reconcileState === "ADOPTED" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
+          this.logger.info("ADOPTED_EXIT_TRIGGERED_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            reconcileState: open.reconcileState,
+            lifecycleState: open.lifecycleState,
+            triggerReason: cr,
+            stopPrice: open.stopPrice,
+            targetPrice1: open.targetPrice1,
+            trailingStopPrice: open.trailingStopPrice,
+            closePrice,
+            flowId
+          });
+        }
+
+        await this.dispatchOkxClose({
+          symbol: open.symbol,
+          side: open.side,
+          sizeUsd: open.sizeUsd,
+          appliedLeverage: Math.max(1, open.leverage ?? 1),
+          lastPrice: closePrice,
+          flowId,
+          reason: `${cr}_close`,
+          isStopLoss: isSlTriggered,
+          isTakeProfit: isTpTriggered,
+          isTrailingStop: isTrailingTriggered
+        });
+
+        const routedClosed = await this.appendClosedWithStandardRouting({
+          closedRow,
+          open,
+          flowId,
+          envelope: null as any, 
+          exitReason: cr,
+          closeSource: confirmedCloseSource,
+          currentRegime: regimeNow
+        });
+        authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+        this.terminalExitConsumedByFlow.add(flowId);
         continue;
       }
 
@@ -5834,32 +6070,7 @@ export class PaperEngine {
         });
       };
 
-      const closePrice = snap.lastPrice;
-      const closedAt = snap.fetchedAt;
       const regimeAtEntry = open.regimeAtEntry ?? "NO_TRADE";
-      const regimeNow = input.marketMode.marketMode as MarketRegime;
-      const slRegime: MarketRegime = exitLane === "RANGE" ? "RANGE" : "TREND";
-
-      const snapPaths = {
-        ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
-        ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
-        ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {})
-      };
-
-      const leg = (marginUsd: number) =>
-        computePaperCloseLegMetrics({
-          open,
-          closePrice,
-          closedAt,
-          snapFundingRate: snap.fundingRate,
-          marginUsd,
-          paperTakerFeeRate: this.config.paperTakerFeeRate,
-          paperFundingIntervalHours: this.config.paperFundingIntervalHours
-        });
-
-      let m = leg(open.sizeUsd);
-      const highWater = Math.max(open.highestPnlPctNet ?? m.pnlPctNet, m.pnlPctNet);
-      open = { ...open, highestPnlPctNet: highWater };
 
       const toClosed = (
         cr: PaperClosedPositionRecord["closeReason"],
@@ -5985,6 +6196,7 @@ export class PaperEngine {
         });
         continue;
       }
+
 
       const symKey = String(open.symbol);
       const { longUsd, shortUsd } = marginsForSymbol(opens, symKey);
@@ -6897,116 +7109,7 @@ export class PaperEngine {
         }
       }
 
-      // 1. Hard SL check
-      let isSlTriggered = false;
-      if (typeof open.stopPrice === "number" && Number.isFinite(open.stopPrice)) {
-        isSlTriggered = open.side === "long" ? closePrice <= open.stopPrice : closePrice >= open.stopPrice;
-      } else {
-        const slThresh = stopLossPctForRegime(slRegime);
-        isSlTriggered = m.pnlPctNet <= slThresh;
-      }
 
-      if (isSlTriggered) {
-        const cr = "stop_loss" as const;
-        finalCloseReason = cr;
-        confirmedExitType = "EXIT_SL";
-        confirmedCloseSource = "hard_stop_loss_gate";
-        const closedRow = toClosed(cr, m, open.sizeUsd);
-        handleV2ExitAuthorityProof("exit", cr);
-        handleV2PartialAuthorityProof("superseded_by_exit", null);
-        await this.dispatchOkxClose({
-          symbol: open.symbol,
-          side: open.side,
-          sizeUsd: open.sizeUsd,
-          appliedLeverage: Math.max(1, open.leverage ?? 1),
-          lastPrice: closePrice,
-          flowId,
-          reason: "stop_loss_close"
-        });
-        const routedClosed = await this.appendClosedWithStandardRouting({
-          closedRow,
-          open,
-          flowId,
-          envelope,
-          exitReason: cr,
-          closeSource: String(closedRow.closeSource ?? "executor_close_action"),
-          currentRegime: regimeNow
-        });
-        authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
-        this.lastExitReasonLabel = "손절 청산";
-        this.logger.info(exitFullLogKey(cr), {
-          ...exitDetailBase(open, m),
-          exitReason: cr
-        });
-        this.logger.info("paper_position_closed", { symbol: open.symbol, side: open.side, pnlUsdNet: m.pnlUsdNet, closeReason: cr });
-
-        const mappedType = exitEventJsonlType(cr);
-        this.terminalExitConsumedByFlow.add(flowId);
-        this.logger.info("EXIT_CLASSIFICATION_PROOF", {
-          symbol: open.symbol,
-          side: open.side,
-          openedAt: open.openedAt,
-          raw_reason: cr,
-          mapped_exit_type: mappedType,
-          regime_dedup_set: false,
-          flowId
-        });
-
-        await this.store.appendJsonlLine("reports/events.jsonl", {
-          ts: Date.now(),
-          type: mappedType,
-          symbol: String(open.symbol),
-          side: open.side,
-          regime: open.regimeAtEntry ?? null,
-          executor: executorForExitEventPayload(open.executorAtEntry, open.regimeAtEntry),
-          reason: cr,
-          expected_move: open.expectedMoveAtEntry ?? null,
-          total_cost: open.totalCostAtEntry ?? null,
-          hold_time: m.holdingMs,
-          realized_pnl: m.pnlUsdNet,
-          fee: m.feeUsd,
-          ...buildPositionIdentityMeta(open)
-        });
-
-        if (open.regimeAtEntry === "RANGE") {
-          this.recordRangeRoundTripOutcome(symKey, false);
-          const k = `${String(open.symbol)}:${open.side}`;
-          const prev = this.rangeFailCountByKey.get(k) ?? 0;
-          const nextFail = prev + 1;
-          this.rangeFailCountByKey.set(k, nextFail);
-          if (nextFail >= 2) {
-            this.rangeCooldownUntilByKey.set(k, Date.now() + 20 * 60_000);
-            this.rangeFailCountByKey.set(k, 0);
-          } else {
-            this.rangeCooldownUntilByKey.set(k, Date.now() + 8 * 60_000);
-          }
-
-          // [ARM RANGE STOP REENTRY BLOCK]
-          const entryZone = open.rangeEntryZone;
-          const isEdgeStop = (open.side === "short" && entryZone === "upper") || (open.side === "long" && entryZone === "lower");
-          if (isEdgeStop && entryZone && (entryZone === "upper" || entryZone === "lower")) {
-            const armedAt = Date.now();
-            this.rangeStopReentryBlockedBySymbol.set(symKey, {
-              side: open.side,
-              zone: entryZone,
-              armedAt,
-              reason: "stop_loss",
-              regime: "RANGE"
-            });
-            this.logger.info("RANGE_STOP_REENTRY_BLOCK_ARMED", {
-              symbol: open.symbol,
-              side: open.side,
-              zone: entryZone,
-              armed_at: armedAt,
-              close_reason: cr,
-              openedAt: open.openedAt,
-              regimeAtEntry: open.regimeAtEntry ?? null,
-              executorAtEntry: open.executorAtEntry ?? null
-            });
-          }
-        }
-        continue;
-      }
 
       // 2. Regime Flip / Trend Break check (하위 트리거 → 상위 exit authority 재판정 후에만 전량 청산)
       if (regimeAtEntry === "TREND") {
@@ -7175,7 +7278,43 @@ export class PaperEngine {
       });
       const diagTs = Date.now();
       const lastExitPf = this.positionExitProofThrottleByFlow.get(flowId) ?? 0;
+
+      // --- Adopted / Close-Only Policy Enforcement ---
+      if (open.reconcileState === "ADOPTED" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
+        const policyAction = regimeExitSnap.action;
+        
+        if (policyAction === "close") {
+          const policyReason = regimeExitSnap.reason;
+          this.logger.info("ADOPTED_POLICY_EXIT_OVERRIDE_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            policy_reason: policyReason,
+            original_executor_action: exitEval.action,
+            action: "override_to_close"
+          });
+          exitEval = {
+            ...exitEval,
+            action: "close",
+            reason: policyReason as any
+          };
+        } else if (partialPol.shouldExitPartial && exitEval.action === "hold") {
+          this.logger.info("ADOPTED_POLICY_PARTIAL_OVERRIDE_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            partial_reason: partialPol.reason,
+            action: "override_to_partial"
+          });
+          exitEval = {
+            ...exitEval,
+            action: "partial_close",
+            reason: partialPol.reason as any
+          };
+        }
+      }
+
+
       if (diagTs - lastExitPf >= 15_000) {
+
         this.positionExitProofThrottleByFlow.set(flowId, diagTs);
         this.logger.info("POSITION_EXIT_POLICY_PROOF", {
           symbol: open.symbol,
