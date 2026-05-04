@@ -26,7 +26,7 @@ import { JsonStore } from "../storage/json-store";
 import type { OkxPublicDiagnostics } from "../exchange/okx-demo";
 import { OkxDemoClient, toOkxSwapInstId } from "../exchange/okx-demo";
 import { buildLedgerOkxPositionSyncSnapshot, okxSwapRowToLedgerKey } from "../exchange/okx-position-sync";
-import { buildPositionOpsSurface, engineMirrorStopPrice } from "./position-ops-monitor";
+import { buildPositionOpsSurface } from "./position-ops-monitor";
 import type { PositionOpsSurface } from "./position-ops-monitor";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
 import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
@@ -1749,8 +1749,19 @@ export class PaperEngine {
 
         const avgPx = Number(okxRow?.avgPx) || 0;
         const leverage = Number(okxRow?.lever) || 10;
-        const notional = Number(okxRow?.notionalUsd) || (remoteVal.size * avgPx * 0.01); 
+        const notional = Number(okxRow?.notionalUsd) || 0;
         const marginMode = String(okxRow?.mgnMode || "cross");
+
+        if (notional <= 0) {
+          this.logger.error("POSITION_LEDGER_ADOPTION_BLOCKED_PROOF", {
+            symbol,
+            side,
+            instId: remoteVal.instId,
+            reason: "NOTIONAL_USD_MISSING",
+            detail: "Cannot safely adopt position without explicit OKX notionalUsd value"
+          });
+          continue;
+        }
 
         const adopted: PaperOpenPositionRecord = {
           openedAt: nowTs,
@@ -1763,7 +1774,7 @@ export class PaperEngine {
           sourceSignal: "okx_reconcile_adopted",
           sourceRunPath: "manual_adoption",
           lifecycleState: "OPEN",
-          reconcileState: "MATCHED",
+          reconcileState: "ADOPTED",
           lastCheckedAt: nowTs,
           initialSizeUsd: notional,
           status: "open",
@@ -1773,7 +1784,7 @@ export class PaperEngine {
           // Adoption specific fields (USER priority 6)
           adoptedAt: nowTs,
           detectedAt: nowTs,
-          sync_status: "OKX_ONLY",
+          sync_status: "ADOPTED_FROM_OKX",
           marginMode,
           notional,
           pos: remoteVal.size,
