@@ -5799,6 +5799,7 @@ export class PaperEngine {
 
       // --- Mandatory Diagnostic Log for Adopted/Close-Only positions ---
       if (open.reconcileState === "ADOPTED" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
+        const tpMissing = open.targetPrice1 === undefined || open.targetPrice1 === null;
         this.logger.info("POSITION_CLOSE_EVALUATION_PROOF", {
           symbol: open.symbol,
           side: open.side,
@@ -5808,11 +5809,26 @@ export class PaperEngine {
           markPrice: closePrice,
           stopPrice: open.stopPrice,
           targetPrice1: open.targetPrice1,
+          tp_status: tpMissing ? "TP 미설정" : "TP 설정됨",
           trailingStopPrice: open.trailingStopPrice,
           pnlPctNet: m.pnlPctNet,
           isManaged: true,
+          reduce_only: true,
+          current_position_size: open.sizeUsd,
+          requested_close_size: open.sizeUsd,
+          remaining_position_size: 0,
+          ledger_update_required: true,
           flowId
         });
+
+        if (tpMissing) {
+          this.logger.info("POSITION_TAKE_PROFIT_EVALUATION_PROOF", {
+            symbol: open.symbol,
+            tp_triggered: false,
+            status: "익절 미설정",
+            flowId
+          });
+        }
       }
 
       // --- 1. Hard SL check (Safety Gate) ---
@@ -5837,6 +5853,16 @@ export class PaperEngine {
       }
 
       if (isSlTriggered || isTpTriggered || isTrailingTriggered) {
+        if (isTpTriggered) {
+          this.logger.info("POSITION_TAKE_PROFIT_EVALUATION_PROOF", {
+            symbol: open.symbol,
+            tp_triggered: true,
+            target_price: open.targetPrice1,
+            close_price: closePrice,
+            flowId
+          });
+        }
+
         const cr = isSlTriggered ? "stop_loss" : isTpTriggered ? "take_profit" : ("trailing_stop" as const);
         finalCloseReason = cr;
         confirmedExitType = isSlTriggered ? "EXIT_SL" : isTpTriggered ? "EXIT_TP" : "EXIT_TRAILING";
@@ -5868,6 +5894,8 @@ export class PaperEngine {
             reconcileState: open.reconcileState,
             lifecycleState: open.lifecycleState,
             triggerReason: cr,
+            tp_triggered: isTpTriggered,
+            trailing_triggered: isTrailingTriggered,
             stopPrice: open.stopPrice,
             targetPrice1: open.targetPrice1,
             trailingStopPrice: open.trailingStopPrice,
@@ -7462,11 +7490,26 @@ export class PaperEngine {
           partial_size_usd: partialSizeUsd
         });
 
-        // Partial position update - reduce size, do NOT prune full position
+        this.logger.info("POSITION_PARTIAL_CLOSE_EVALUATION_PROOF", {
+          symbol: open.symbol,
+          partial_triggered: true,
+          reduce_only: true,
+          current_position_size: open.sizeUsd,
+          requested_close_size: partialSizeUsd,
+          remaining_position_size: Math.max(0, open.sizeUsd - partialSizeUsd),
+          ledger_update_required: true,
+          flowId
+        });
+
+        // Partial position update - reduce size, pos, notional
         const remainingSizeUsd = Math.max(0, open.sizeUsd - partialSizeUsd);
+        const ratioRemaining = open.sizeUsd > 0 ? (remainingSizeUsd / open.sizeUsd) : 0;
         const updatedOpen: typeof open = {
           ...open,
           sizeUsd: remainingSizeUsd,
+          pos: (open.pos ?? 0) * ratioRemaining,
+          notional: (open.notional ?? 0) * ratioRemaining,
+          initialSizeUsd: (open.initialSizeUsd ?? open.sizeUsd) * ratioRemaining,
           partialExitStage: (open.partialExitStage ?? 0) + 1,
           lastPartialAt: closedAt
         };
@@ -7852,9 +7895,24 @@ export class PaperEngine {
             ...buildPositionIdentityMeta(open)
           });
 
+          this.logger.info("POSITION_PARTIAL_CLOSE_EVALUATION_PROOF", {
+            symbol: open.symbol,
+            partial_triggered: true,
+            reduce_only: true,
+            current_position_size: open.sizeUsd,
+            requested_close_size: partialMargin,
+            remaining_position_size: newMargin,
+            ledger_update_required: true,
+            flowId
+          });
+
+          const ratioRemaining = open.sizeUsd > 0 ? (newMargin / open.sizeUsd) : 0;
           open = {
             ...open,
             sizeUsd: newMargin,
+            pos: (open.pos ?? 0) * ratioRemaining,
+            notional: (open.notional ?? 0) * ratioRemaining,
+            initialSizeUsd: (open.initialSizeUsd ?? open.sizeUsd) * ratioRemaining,
             partialExitStage: stage,
             lifecycleState: "PARTIAL_ACTIVE",
             lastPartialAt: closedAt,
@@ -11279,13 +11337,15 @@ export class PaperEngine {
           stopPrice: (() => {
             const val = typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : undefined;
             if (val !== undefined) return val;
-            // Fallback calculation if decision lacks stopLoss
-            const slThresh = 0.05; // 5% hard fallback
+            const slThresh = 0.05;
             const fallback = (authority.side === "long")
               ? first.lastPrice * (1 - slThresh)
               : first.lastPrice * (1 + slThresh);
             return fallback;
           })(),
+          targetPrice1: typeof res.decision.takeProfit === "number" ? res.decision.takeProfit : undefined,
+          pos: submit?.fillSize ?? (entrySizeUsd / first.lastPrice),
+          notional: entrySizeUsd,
           strategyVersion: entryIdentity.effectiveStrategyVersion,
           sourceSignal: entryIdentity.effectiveSourceSignal,
           authoritySourceAtEntry: authority.source,
