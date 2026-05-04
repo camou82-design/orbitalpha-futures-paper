@@ -14,7 +14,19 @@ export type OkxSwapLedgerKeyParts = Readonly<{
 }>;
 
 export type LedgerOkxPositionSyncSnapshot = Readonly<{
-  sync_status: "ALIGNED" | "OKX_ONLY" | "LEDGER_ONLY" | "KEY_MISMATCH" | "SIZE_MISMATCH" | "NOTIONAL_MISMATCH" | "AVG_PRICE_MISMATCH" | "REMOTE_UNAVAILABLE";
+  sync_status: 
+    | "ALIGNED" 
+    | "OKX_ONLY" 
+    | "LEDGER_ONLY" 
+    | "KEY_MISMATCH" 
+    | "SIZE_MISMATCH" 
+    | "NOTIONAL_MISMATCH" 
+    | "AVG_PRICE_MISMATCH" 
+    | "REMOTE_UNAVAILABLE"
+    | "MANUAL_PARTIAL_DETECTED"
+    | "MANUAL_FULL_CLOSE_DETECTED"
+    | "ADOPTED_POSITION_SIZE_MISMATCH"
+    | "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED";
   okx_nonzero_position_count: number;
   paper_open_position_count: number;
   okx_positions_preview: ReadonlyArray<{
@@ -31,6 +43,7 @@ export type LedgerOkxPositionSyncSnapshot = Readonly<{
     pos: number;
     entryPrice: number;
     sizeUsd: number;
+    reconcileState?: string;
   }>;
   detail: string | null;
 }>;
@@ -70,7 +83,8 @@ export function buildLedgerOkxPositionSyncSnapshot(
     entryPrice: number; 
     sizeUsd: number;
     status?: string; 
-    lifecycleState?: string 
+    lifecycleState?: string;
+    reconcileState?: string;
   }>,
   okxPayload: ReadonlyArray<Record<string, unknown>> | null | undefined
 ): LedgerOkxPositionSyncSnapshot {
@@ -81,6 +95,7 @@ export function buildLedgerOkxPositionSyncSnapshot(
     pos: number;
     entryPrice: number;
     sizeUsd: number;
+    reconcileState?: string;
   }> = [];
 
   for (const p of paperOpens) {
@@ -94,7 +109,8 @@ export function buildLedgerOkxPositionSyncSnapshot(
       side,
       pos: p.pos ?? (p.sizeUsd / (p.entryPrice || 1)),
       entryPrice: p.entryPrice,
-      sizeUsd: p.sizeUsd
+      sizeUsd: p.sizeUsd,
+      reconcileState: p.reconcileState
     });
   }
 
@@ -129,7 +145,7 @@ export function buildLedgerOkxPositionSyncSnapshot(
       symbol: hit.symbol,
       side: hit.side,
       instId: hit.instId,
-      pos: Math.abs(hit.posSigned), // okx pos can be signed, paper is absolute with side
+      pos: Math.abs(hit.posSigned),
       avgPx: hit.avgPx,
       notionalUsd: hit.notionalUsd
     });
@@ -146,8 +162,8 @@ export function buildLedgerOkxPositionSyncSnapshot(
     sync_status = "OKX_ONLY";
     detail = "Exchange reports open SWAP positions but paper ledger has no active rows";
   } else if (okx_nonzero_position_count === 0 && paper_open_position_count > 0) {
-    sync_status = "LEDGER_ONLY";
-    detail = "Paper ledger lists open positions but OKX SWAP snapshot shows none";
+    sync_status = "MANUAL_FULL_CLOSE_DETECTED";
+    detail = "Paper ledger lists open positions but OKX SWAP snapshot shows none (Manual full close suspected)";
   } else {
     // Key-level comparison
     const okxKeys = Array.from(okxMap.keys());
@@ -161,10 +177,11 @@ export function buildLedgerOkxPositionSyncSnapshot(
       for (const [key, okxPos] of okxMap.entries()) {
         const paperPosData = paperMap.get(key)!;
         const paperPosQty = paperPosData.pos ?? (paperPosData.sizeUsd / (paperPosData.entryPrice || 1));
+        const isAdoptedOrManaged = paperPosData.reconcileState === "ADOPTED" || paperPosData.lifecycleState === "CLOSE_ONLY_MANAGED";
         
         // 1. Size Mismatch (absolute quantity)
         if (Math.abs(Math.abs(okxPos.posSigned) - Math.abs(paperPosQty)) > 0.00000001) {
-          sync_status = "SIZE_MISMATCH";
+          sync_status = isAdoptedOrManaged ? "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED" : "MANUAL_PARTIAL_DETECTED";
           detail = `Size mismatch on ${key}: OKX=${Math.abs(okxPos.posSigned)}, Paper=${Math.abs(paperPosQty)}`;
           break;
         }
@@ -172,7 +189,7 @@ export function buildLedgerOkxPositionSyncSnapshot(
         // 2. Avg Price Mismatch
         const priceDiffRatio = Math.abs(okxPos.avgPx - paperPosData.entryPrice) / (paperPosData.entryPrice || 1);
         if (priceDiffRatio > PRICE_TOLERANCE_RATIO) {
-          sync_status = "AVG_PRICE_MISMATCH";
+          sync_status = isAdoptedOrManaged ? "AVG_PRICE_MISMATCH" : "AVG_PRICE_MISMATCH"; // Can refine if needed
           detail = `Price mismatch on ${key}: OKX=${okxPos.avgPx}, Paper=${paperPosData.entryPrice} (diff=${(priceDiffRatio * 100).toFixed(4)}%)`;
           break;
         }

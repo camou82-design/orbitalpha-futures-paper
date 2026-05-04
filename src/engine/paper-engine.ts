@@ -1248,7 +1248,7 @@ export class PaperEngine {
 
     const criticalMismatch = 
       syncSnap.sync_status !== "ALIGNED" && 
-      syncSnap.sync_status !== "REMOTE_UNAVAILABLE" && 
+      syncSnap.sync_status !== "REMOTE_UNAVAILABLE" &&
       syncSnap.sync_status !== "LEDGER_ONLY";
 
     if (criticalMismatch) {
@@ -1716,20 +1716,21 @@ export class PaperEngine {
         }
       }
 
-      // 3. Regular Open Position Reconciliation (Deep Comparison)
+      // 3. Regular Open Position Reconciliation (Deep Comparison & Repair)
       if (open.lifecycleState === "OPEN" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
         if (!remotePos) {
-          this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
+          this.logger.warn("MANUAL_FULL_CLOSE_RECONCILE_PROOF", {
             symbol: open.symbol,
             side: open.side,
-            detail: "OPEN_LEDGER_MISSING_ON_EXCHANGE",
-            action: "MARK_FAILED"
+            prev_lifecycle: open.lifecycleState,
+            prev_reconcile: open.reconcileState,
+            detail: "OPEN_LEDGER_MISSING_ON_EXCHANGE_REPAIRING",
+            action: "PRUNE_LEDGER_ROW"
           });
-          open.lifecycleState = "FAILED";
-          open.reconcileState = "FAILED";
-          mismatchCount++;
+          // Repair: OKX reports zero, but ledger has it. Prune it.
           ledgerModified = true;
-          continue; 
+          mismatchCount++;
+          continue; // Do not push to 'next'
         }
 
         // Deep Comparison Logic
@@ -1743,7 +1744,7 @@ export class PaperEngine {
 
         if (sizeDiff > 0.00000001) {
           mismatchDetected = true;
-          mismatchType = "SIZE_MISMATCH";
+          mismatchType = isAdoptedOrManaged ? "MANUAL_PARTIAL_DETECTED" : "SIZE_MISMATCH";
         } else if (priceDiffRatio > 0.0005) {
           mismatchDetected = true;
           mismatchType = "AVG_PRICE_MISMATCH";
@@ -1752,9 +1753,24 @@ export class PaperEngine {
           mismatchType = "NOTIONAL_MISMATCH";
         }
 
+        // Mandatory Deep Reconcile Proof
+        this.logger.info("LEDGER_OKX_DEEP_RECONCILE_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          ledger_pos: open.pos,
+          okx_pos: remotePos.size,
+          ledger_entry_px: open.entryPrice,
+          okx_avg_px: remotePos.avgPx,
+          ledger_notional: open.sizeUsd,
+          okx_notional: remotePos.notionalUsd,
+          mismatch_detected: mismatchDetected,
+          mismatch_type: mismatchType,
+          is_adopted_or_managed: isAdoptedOrManaged
+        });
+
         if (mismatchDetected) {
           if (isAdoptedOrManaged) {
-            this.logger.warn("MANUAL_PARTIAL_RECONCILED_PROOF", {
+            this.logger.warn("MANUAL_PARTIAL_RECONCILE_PROOF", {
               symbol: open.symbol,
               side: open.side,
               mismatch_type: mismatchType,
@@ -1764,17 +1780,17 @@ export class PaperEngine {
               new_size_usd: remotePos.notionalUsd,
               prev_entry_px: open.entryPrice,
               new_entry_px: remotePos.avgPx,
-              detail: "ORPHANED_POSITION_AUTO_RECONCILED_TO_EXCHANGE_ACTUAL"
+              detail: "ADOPTED_OR_MANAGED_POSITION_AUTO_REPAIRED_TO_EXCHANGE_ACTUAL"
             });
-            // Priority 6/7: Update ledger to match OKX actuals for adopted/managed positions
+            // Repair path for Adopted/Managed: Force update ledger to match OKX
             open.pos = remotePos.size;
             open.sizeUsd = remotePos.notionalUsd;
             open.entryPrice = remotePos.avgPx;
-            open.reconcileState = "MATCHED"; // Force matched after update
+            open.reconcileState = "MATCHED"; // Reset to MATCHED after repair
             ledgerModified = true;
           } else {
-            // Standard mismatch reporting
-            open.reconcileState = "FAILED"; // Keep legacy FAILED for ledger, sync_status will show details
+            // Standard mismatch reporting (No auto-repair for normal positions to prevent unintended changes)
+            open.reconcileState = "FAILED";
             mismatchCount++;
             this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
               symbol: open.symbol,
@@ -7099,6 +7115,8 @@ export class PaperEngine {
             leverage: open.leverage,
             sizeUsd: newSz,
             initialSizeUsd: newSz,
+            pos: newSz / (closePrice || 1),
+            notional: newSz,
             partialExitStage: 0,
             realizedPnl: 0,
             strategyVersion: inheritedStrategyVersion,
@@ -10733,6 +10751,8 @@ export class PaperEngine {
               leverage: levScaled,
               sizeUsd: v2EntrySizeUsd,
               initialSizeUsd: v2EntrySizeUsd,
+              pos: v2EntrySizeUsd / (first.lastPrice || 1),
+              notional: v2EntrySizeUsd,
               lifecycleState: isPending ? "PENDING_EXCHANGE_CONFIRM" : "OPEN",
               exchangeOrdId: submit.ordId ?? undefined,
               exchangeClOrdId: clOrdId,
