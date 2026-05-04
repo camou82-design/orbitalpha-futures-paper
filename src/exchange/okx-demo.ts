@@ -552,4 +552,19 @@ export class OkxDemoClient {
       return { ok: false, error: msg, diagnostics: res.diagnostics };
     }
   }
+
+  /** Bulk instruments (e.g. SWAP) for ctVal / ctValCcy hydration. */
+  async getInstruments(instType: "SPOT" | "MARGIN" | "SWAP" | "FUTURES" | "OPTION"): Promise<TryResult<Record<string, unknown>[]>> {
+    const q = new URLSearchParams();
+    q.set("instType", instType);
+    const res = await this.publicRequest<Record<string, unknown>>("GET", "/api/v5/public/instruments", q);
+    if (!res.success || !res.json) {
+      return { ok: false, error: res.error || "unknown_error", diagnostics: res.diagnostics };
+    }
+    const data = res.json.data;
+    if (!Array.isArray(data)) {
+      return { ok: false, error: "invalid_instruments_payload", diagnostics: res.diagnostics };
+    }
+    return { ok: true, value: data as Record<string, unknown>[], diagnostics: res.diagnostics };
+  }
 }

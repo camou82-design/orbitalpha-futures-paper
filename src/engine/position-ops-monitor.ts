@@ -4,6 +4,7 @@ import type { PaperOpenPositionRecord } from "../models/types";
 import {
   buildLedgerOkxPositionSyncSnapshot,
   okxSwapRowToLedgerKey,
+  type InstrumentSizing,
   type LedgerOkxPositionSyncSnapshot
 } from "../exchange/okx-position-sync";
 
@@ -45,7 +46,7 @@ function toFinite(raw: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-function regimeForSl(raw: unknown): MarketRegime {
+export function regimeForSl(raw: unknown): MarketRegime {
   return raw === "RANGE" || raw === "TREND" || raw === "NO_TRADE" ? raw : "NO_TRADE";
 }
 
@@ -145,8 +146,14 @@ export function buildPositionOpsSurface(input: Readonly<{
   algoOrders: ReadonlyArray<Record<string, unknown>> | null;
   ordersScanPerformed: boolean;
   ordersScanErrors: string[];
+  /** When set, ledger↔OKX sync uses ctVal to separate contracts from base qty. */
+  instrumentByInstId?: ReadonlyMap<string, InstrumentSizing> | null;
 }>): PositionOpsSurface {
-  const sync = buildLedgerOkxPositionSyncSnapshot(input.paperOpens, input.okxPayload);
+  const instMap =
+    input.instrumentByInstId && input.instrumentByInstId.size > 0
+      ? new Map(input.instrumentByInstId)
+      : undefined;
+  const sync = buildLedgerOkxPositionSyncSnapshot(input.paperOpens, input.okxPayload, instMap);
   const pending = input.pendingOrders ?? [];
   const algos = input.algoOrders ?? [];
 

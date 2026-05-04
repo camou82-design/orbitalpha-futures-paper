@@ -928,6 +928,13 @@ export type PaperOpenPositionRecord = {
   notional?: number;
   pos: number;
   instId?: string;
+
+  /** OKX reporting fields (reconcile metadata) */
+  okxContracts?: number;
+  baseQty?: number;
+  notionalUsd?: number;
+  avgPx?: number;
+
   /** Entry-time evidence snapshot for entry/exit consistency checks. */
   entryEvidence?: Readonly<{
     capturedAt: number;

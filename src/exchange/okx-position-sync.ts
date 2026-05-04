@@ -33,17 +33,25 @@ export type LedgerOkxPositionSyncSnapshot = Readonly<{
     symbol: string;
     side: "long" | "short";
     instId: string;
-    pos: number;
+    /** OKX SWAP `pos`: signed contract count magnitude (not base coin). */
+    okxContracts: number;
     avgPx: number;
     notionalUsd: number;
-  }>;
-  paper_positions_preview: ReadonlyArray<{ 
-    symbol: string; 
-    side: "long" | "short";
+    baseQty?: number;
+    /** @deprecated Prefer okxContracts — legacy dashboards. */
     pos: number;
+  }>;
+  paper_positions_preview: ReadonlyArray<{
+    symbol: string;
+    side: "long" | "short";
+    okxContracts?: number;
+    baseQty: number;
+    notionalUsd: number;
     entryPrice: number;
     sizeUsd: number;
     reconcileState?: string;
+    /** @deprecated Legacy alias for base coin qty — equals baseQty. */
+    pos: number;
   }>;
   detail: string | null;
 }>;
@@ -75,6 +83,11 @@ export function okxSwapRowToLedgerKey(row: Record<string, unknown>): OkxSwapLedg
   return { key: `${symbol}:${side}`, symbol, side, posSigned: posNum, avgPx, notionalUsd, instId };
 }
 
+export type InstrumentSizing = {
+  ctVal: number;
+  ctValCcy: string;
+};
+
 export function buildLedgerOkxPositionSyncSnapshot(
   paperOpens: ReadonlyArray<{ 
     symbol: string; 
@@ -85,18 +98,16 @@ export function buildLedgerOkxPositionSyncSnapshot(
     status?: string; 
     lifecycleState?: string;
     reconcileState?: string;
+    okxContracts?: number;
+    baseQty?: number;
+    notionalUsd?: number;
+    avgPx?: number;
   }>,
-  okxPayload: ReadonlyArray<Record<string, unknown>> | null | undefined
+  okxPayload: ReadonlyArray<Record<string, unknown>> | null | undefined,
+  instrumentMap?: Map<string, InstrumentSizing>
 ): LedgerOkxPositionSyncSnapshot {
   const paperMap = new Map<string, typeof paperOpens[0]>();
-  const paper_positions_preview: Array<{ 
-    symbol: string; 
-    side: "long" | "short";
-    pos: number;
-    entryPrice: number;
-    sizeUsd: number;
-    reconcileState?: string;
-  }> = [];
+  const paper_positions_preview: Array<LedgerOkxPositionSyncSnapshot["paper_positions_preview"][number]> = [];
 
   for (const p of paperOpens) {
     if ((p.status ?? "open") !== "open") continue;
@@ -104,13 +115,24 @@ export function buildLedgerOkxPositionSyncSnapshot(
     const side: "long" | "short" = String(p.side).toLowerCase() === "short" ? "short" : "long";
     const key = `${String(p.symbol)}:${side}`;
     paperMap.set(key, p);
+
+    const paperBaseQty =
+      typeof p.baseQty === "number" && Number.isFinite(p.baseQty) && p.baseQty > 0
+        ? p.baseQty
+        : p.sizeUsd / Math.max(1e-12, p.entryPrice || 1);
+    const paperNotional =
+      typeof p.notionalUsd === "number" && Number.isFinite(p.notionalUsd) ? p.notionalUsd : p.sizeUsd;
+
     paper_positions_preview.push({
       symbol: String(p.symbol),
       side,
-      pos: p.pos ?? (p.sizeUsd / (p.entryPrice || 1)),
+      okxContracts: typeof p.okxContracts === "number" && Number.isFinite(p.okxContracts) ? p.okxContracts : undefined,
+      baseQty: paperBaseQty,
+      notionalUsd: paperNotional,
       entryPrice: p.entryPrice,
       sizeUsd: p.sizeUsd,
-      reconcileState: p.reconcileState
+      reconcileState: p.reconcileState,
+      pos: paperBaseQty
     });
   }
 
@@ -131,23 +153,37 @@ export function buildLedgerOkxPositionSyncSnapshot(
     symbol: string;
     side: "long" | "short";
     instId: string;
-    pos: number;
+    okxContracts: number;
     avgPx: number;
     notionalUsd: number;
+    baseQty?: number;
+    pos: number;
   }> = [];
-  const okxMap = new Map<string, OkxSwapLedgerKeyParts>();
+  const okxMap = new Map<string, OkxSwapLedgerKeyParts & { baseQty?: number; okxContracts: number; notionalUsd: number }>();
 
   for (const row of okxPayload) {
     const hit = okxSwapRowToLedgerKey(row as Record<string, unknown>);
     if (!hit) continue;
-    okxMap.set(hit.key, hit);
+
+    const inst = instrumentMap?.get(hit.instId);
+    const contractsAbs = Math.abs(hit.posSigned);
+    const baseQty = inst ? contractsAbs * inst.ctVal : undefined;
+    let nu = hit.notionalUsd;
+    if ((!Number.isFinite(nu) || nu === 0) && inst && hit.avgPx > 0 && baseQty !== undefined) {
+      nu = baseQty * hit.avgPx;
+    }
+
+    const enriched = { ...hit, notionalUsd: nu, baseQty, okxContracts: contractsAbs };
+    okxMap.set(hit.key, enriched);
     okx_positions_preview.push({
       symbol: hit.symbol,
       side: hit.side,
       instId: hit.instId,
-      pos: Math.abs(hit.posSigned),
+      okxContracts: contractsAbs,
       avgPx: hit.avgPx,
-      notionalUsd: hit.notionalUsd
+      notionalUsd: nu,
+      baseQty,
+      pos: contractsAbs
     });
   }
 
@@ -176,29 +212,41 @@ export function buildLedgerOkxPositionSyncSnapshot(
       // Deep comparison for each key
       for (const [key, okxPos] of okxMap.entries()) {
         const paperPosData = paperMap.get(key)!;
-        const paperPosQty = paperPosData.pos ?? (paperPosData.sizeUsd / (paperPosData.entryPrice || 1));
         const isAdoptedOrManaged = paperPosData.reconcileState === "ADOPTED" || paperPosData.lifecycleState === "CLOSE_ONLY_MANAGED";
-        
-        // 1. Size Mismatch (absolute quantity)
-        if (Math.abs(Math.abs(okxPos.posSigned) - Math.abs(paperPosQty)) > 0.00000001) {
-          sync_status = isAdoptedOrManaged ? "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED" : "MANUAL_PARTIAL_DETECTED";
-          detail = `Size mismatch on ${key}: OKX=${Math.abs(okxPos.posSigned)}, Paper=${Math.abs(paperPosQty)}`;
-          break;
-        }
 
-        // 2. Avg Price Mismatch
+        const paperNotional =
+          typeof paperPosData.notionalUsd === "number" && Number.isFinite(paperPosData.notionalUsd)
+            ? paperPosData.notionalUsd
+            : paperPosData.sizeUsd;
+
+        // 1. Avg price (primary)
         const priceDiffRatio = Math.abs(okxPos.avgPx - paperPosData.entryPrice) / (paperPosData.entryPrice || 1);
         if (priceDiffRatio > PRICE_TOLERANCE_RATIO) {
-          sync_status = isAdoptedOrManaged ? "AVG_PRICE_MISMATCH" : "AVG_PRICE_MISMATCH"; // Can refine if needed
+          sync_status = "AVG_PRICE_MISMATCH";
           detail = `Price mismatch on ${key}: OKX=${okxPos.avgPx}, Paper=${paperPosData.entryPrice} (diff=${(priceDiffRatio * 100).toFixed(4)}%)`;
           break;
         }
 
-        // 3. Notional Mismatch
-        const notionalDiff = Math.abs(Math.abs(okxPos.notionalUsd) - Math.abs(paperPosData.sizeUsd));
+        // 2. Notional USD (primary) — do not compare OKX contracts to paper `pos`.
+        const notionalDiff = Math.abs(Math.abs(okxPos.notionalUsd) - Math.abs(paperNotional));
         if (notionalDiff > NOTIONAL_TOLERANCE_USD) {
           sync_status = "NOTIONAL_MISMATCH";
-          detail = `Notional mismatch on ${key}: OKX=${Math.abs(okxPos.notionalUsd)}, Paper=${Math.abs(paperPosData.sizeUsd)} (diff=${notionalDiff.toFixed(2)} USD)`;
+          detail = `Notional mismatch on ${key}: OKX=${Math.abs(okxPos.notionalUsd)}, Paper=${Math.abs(paperNotional)} (diff=${notionalDiff.toFixed(2)} USD)`;
+          break;
+        }
+
+        // 3. Base-coin audit only when paper carries explicit exchange-derived baseQty (never derived sizeUsd/entry here — avoids contract vs coin false positives).
+        const okxBaseQty = okxPos.baseQty;
+        const paperBaseLedger = paperPosData.baseQty;
+        const hasExplicitPaperBase =
+          typeof paperBaseLedger === "number" && Number.isFinite(paperBaseLedger) && paperBaseLedger > 0;
+        if (
+          okxBaseQty !== undefined &&
+          hasExplicitPaperBase &&
+          Math.abs(okxBaseQty - paperBaseLedger) > Math.max(1e-8, 0.002 * Math.max(okxBaseQty, paperBaseLedger))
+        ) {
+          sync_status = isAdoptedOrManaged ? "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED" : "MANUAL_PARTIAL_DETECTED";
+          detail = `Base quantity mismatch on ${key}: OKX=${okxBaseQty.toFixed(8)}, Paper=${paperBaseLedger.toFixed(8)}`;
           break;
         }
       }
