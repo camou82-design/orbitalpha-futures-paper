@@ -918,6 +918,14 @@ export type PaperOpenPositionRecord = {
   invalidation_reason?: string;
   /** REGIME_EXIT 후보 연속성 검증을 위한 최근 평가 시각 */
   regime_exit_last_eval_ms?: number;
+  /** Adoption metadata */
+  adoptedAt?: number;
+  detectedAt?: number;
+  sync_status?: string;
+  marginMode?: string;
+  notional?: number;
+  pos?: number;
+  instId?: string;
   /** Entry-time evidence snapshot for entry/exit consistency checks. */
   entryEvidence?: Readonly<{
     capturedAt: number;

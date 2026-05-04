@@ -26,7 +26,7 @@ import { JsonStore } from "../storage/json-store";
 import type { OkxPublicDiagnostics } from "../exchange/okx-demo";
 import { OkxDemoClient, toOkxSwapInstId } from "../exchange/okx-demo";
 import { buildLedgerOkxPositionSyncSnapshot, okxSwapRowToLedgerKey } from "../exchange/okx-position-sync";
-import { buildPositionOpsSurface } from "./position-ops-monitor";
+import { buildPositionOpsSurface, engineMirrorStopPrice } from "./position-ops-monitor";
 import type { PositionOpsSurface } from "./position-ops-monitor";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
 import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
@@ -1246,6 +1246,11 @@ export class PaperEngine {
   private async runPositionOperationsWatch(nowTs: number, paperOpens: ReadonlyArray<PaperOpenPositionRecord>): Promise<void> {
     const syncSnap = buildLedgerOkxPositionSyncSnapshot(paperOpens, this.lastLivePositionsPayload);
 
+    if (syncSnap.sync_status === "OKX_ONLY" || syncSnap.sync_status === "KEY_MISMATCH") {
+      this.reconcileSafetyCloseOnly = true;
+      this.reconcileLastMismatchReason = `sync_watch_${syncSnap.sync_status}`;
+    }
+
     const canScan =
       Boolean(this.okxDemo && this.signedExecutionReady) &&
       nowTs - this.lastOpsOrdersScanAtMs >= this.opsOrdersScanMinIntervalMs;
@@ -1402,6 +1407,13 @@ export class PaperEngine {
           open.lastCheckedAt = nowTs;
           ledgerModified = true;
           this.logger.info("POSITION_OPEN_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, status: "confirmed" });
+          this.logger.info("paper_position_opened", {
+            symbol: open.symbol,
+            side: open.side,
+            source: open.sourceSignal,
+            reconcile_confirmed: true,
+            detected_at: nowTs
+          });
         } else if (!isNew) {
           const exchangeOrdId = open.exchangeOrdId || "unknown";
           const elapsedMs = nowTs - open.openedAt;
@@ -1714,22 +1726,85 @@ export class PaperEngine {
       next.push(open);
     }
 
-    // 4. Remote-Only Ghost Positions (Strict matching, no skips)
+    // 4. Remote-Only Ghost Positions (Adopt/Repair Path)
     for (const [key, remoteVal] of remoteMap.entries()) {
       if (!rawOpens.some(p => `${p.symbol}:${p.side}` === key)) {
         mismatchCount++;
-        this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
-          symbol: key.split(":")[0],
-          side: key.split(":")[1],
-          detail: "EXCHANGE_POSITION_MISSING_IN_LEDGER",
-          action: "FORCE_SAFETY_CLOSE_ONLY"
+        const [symbol, sideToken] = key.split(":");
+        const side: "long" | "short" = sideToken === "short" ? "short" : "long";
+
+        this.logger.warn("POSITION_LEDGER_ADOPTION_START_PROOF", {
+          symbol,
+          side,
+          instId: remoteVal.instId,
+          size: remoteVal.size,
+          detail: "EXCHANGE_POSITION_MISSING_IN_LEDGER_ADOPTING"
+        });
+
+        // Search for the raw row in lastLivePositionsPayload to get more details
+        const okxRow = (this.lastLivePositionsPayload as any[] || []).find(r => 
+          String(r.instId) === remoteVal.instId && 
+          String(r.posSide ?? "").toLowerCase() === remoteVal.posSide
+        );
+
+        const avgPx = Number(okxRow?.avgPx) || 0;
+        const leverage = Number(okxRow?.lever) || 10;
+        const notional = Number(okxRow?.notionalUsd) || (remoteVal.size * avgPx * 0.01); 
+        const marginMode = String(okxRow?.mgnMode || "cross");
+
+        const adopted: PaperOpenPositionRecord = {
+          openedAt: nowTs,
+          symbol: symbol as MarketSymbol,
+          side,
+          entryPrice: avgPx,
+          leverage,
+          sizeUsd: notional,
+          strategyVersion: "paper-v2",
+          sourceSignal: "okx_reconcile_adopted",
+          sourceRunPath: "manual_adoption",
+          lifecycleState: "OPEN",
+          reconcileState: "MATCHED",
+          lastCheckedAt: nowTs,
+          initialSizeUsd: notional,
+          status: "open",
+          regimeAtEntry: this.lastRegime.regime || "NO_TRADE",
+          executorAtEntry: "IDLE",
+          
+          // Adoption specific fields (USER priority 6)
+          adoptedAt: nowTs,
+          detectedAt: nowTs,
+          sync_status: "OKX_ONLY",
+          marginMode,
+          notional,
+          pos: remoteVal.size,
+          instId: remoteVal.instId
+        };
+
+        next.push(adopted);
+        ledgerModified = true;
+
+        this.logger.info("POSITION_OPEN_RECONCILE_PROOF", { 
+          symbol, 
+          side, 
+          status: "adopted", 
+          source: "okx_reconcile_adopted" 
+        });
+
+        this.logger.info("paper_position_opened", {
+          symbol,
+          side,
+          source: "okx_reconcile_adopted",
+          adopted_at: nowTs,
+          size_usd: notional,
+          is_repair: true
         });
       }
     }
 
-    if (mismatchCount > 0) {
+    const hasAdopted = next.some(p => p.sourceSignal === "okx_reconcile_adopted");
+    if (mismatchCount > 0 || hasAdopted) {
       this.reconcileSafetyCloseOnly = true;
-      this.reconcileLastMismatchReason = "position_state_mismatch";
+      this.reconcileLastMismatchReason = mismatchCount > 0 ? "position_state_mismatch" : "adopted_position_active_safety_block";
     } else {
       if (this.reconcileSafetyCloseOnly) {
         this.logger.info("POSITION_RECONCILE_RECOVERED_SAFE_MODE_OFF", {});
@@ -3162,6 +3237,7 @@ export class PaperEngine {
       closeOnlyMode: effectiveCloseOnlyMode,
       killSwitchActive: this.serverTradeControlState.kill_switch_active
     });
+
     if (this.freshTickRequiredAfterReadiness && !readinessBarrierActive) {
       this.freshTickRequiredAfterReadiness = false;
       this.logger.info("READINESS_REEVALUATION_PASSED", {
@@ -8781,6 +8857,11 @@ export class PaperEngine {
       contaminated: avg(this.lastEntryQualitySamples.contaminated)
     };
   }
+
+  /**
+   * RANGE 역방향 물타기(water-entry) 전용 레이어 — V2 ENTER 큐·초기 진입 로직과 분리.
+   * 포지션 보유 시에만 평가·실행된다.
+   */
 
   private async processPaperSymbolEntries(input: Readonly<{
     snapshots: SymbolSnapshot[];
