@@ -243,7 +243,7 @@
   }
 
   function getOpenPositions(bundle) {
-    const o = bundle.openPositions;
+    const o = bundle.currentPositions || bundle.openPositions;
     return Array.isArray(o) ? o.filter((x) => x && x.status === "open") : [];
   }
 
@@ -580,6 +580,21 @@
       };
     }
     return { title, sub: "종목별 손익은 카드에서 확인", badge: "badge-ok" };
+  }
+
+  function getRegimeBadge(pos) {
+    if (!pos) return null;
+    if (pos.sourceSignal === "okx_reconcile_adopted" || pos.lifecycleState === "CLOSE_ONLY_MANAGED") {
+      if (pos.lifecycleState === "CLOSE_ONLY_MANAGED") return { text: "Close-only 관리", cls: "badge-warn" };
+      return { text: "복구 관리", cls: "badge-warn" };
+    }
+    const r = pos.regimeAtEntry || pos.executorAtEntry || pos.strategy;
+    if (r === "RANGE" || r === "R") return { text: "R", cls: "badge-range" };
+    if (r === "TREND" || r === "T") return { text: "T", cls: "badge-trend" };
+    if (r === "TRANSITION" || r === "TR") return { text: "TR", cls: "badge-transition" };
+    if (r === "SHOCK" || r === "S") return { text: "S", cls: "badge-shock" };
+    if (r === "NO_TRADE") return { text: "관리", cls: "badge-neutral" };
+    return null;
   }
 
   function symbolHeadline(sym, bundle) {
@@ -1019,6 +1034,33 @@
           n && n.entryPrice !== null ? formatPrice(n.entryPrice) : "N/A";
         const markDisp = mark !== null ? formatPrice(mark) : "N/A";
 
+        const rb = getRegimeBadge(pos);
+        const badgeHtml = rb ? `<span class="badge ${rb.cls}" style="margin-top:0; margin-left:0.5rem; vertical-align:middle;">${esc(rb.text)}</span>` : "";
+
+        const isTrend = (pos.regimeAtEntry || pos.executorAtEntry || pos.strategy) === "TREND";
+        const isRange = (pos.regimeAtEntry || pos.executorAtEntry || pos.strategy) === "RANGE";
+
+        let exitTargetLabel = "익절가";
+        let exitTargetValue = "익절가 미설정";
+        if (isTrend) {
+          exitTargetLabel = "추세 청산 기준";
+          const trail = coerceFinite(pos.trailingStopPrice);
+          const inv = coerceFinite(pos.trendInvalidationPrice);
+          if (trail !== null || inv !== null) {
+            exitTargetValue = trail !== null ? formatPrice(trail) : formatPrice(inv);
+          } else {
+            exitTargetValue = "추세 청산 기준 미설정";
+          }
+        } else if (isRange) {
+          const tp1 = coerceFinite(pos.targetPrice1);
+          const tp = coerceFinite(pos.takeProfit);
+          if (tp1 !== null || tp !== null) {
+            exitTargetValue = formatPrice(tp1 ?? tp);
+          } else {
+            exitTargetValue = "익절가 미설정";
+          }
+        }
+
         return `
         <article class="${cardClass}">
           <div class="pos-money-strip pos-money-strip--primary" aria-label="포지션 손익 5항목">
@@ -1044,22 +1086,31 @@
             </div>
           </div>
           <header class="pos-card-head pos-card-head--compact">
-            <span class="pos-card-titleline"><span class="pos-card-ticker">${esc(sym)}</span> <span class="pos-card-side pos-card-side--${pos.side === "short" ? "short" : "long"}">${esc(sideK)}</span></span>
+            <span class="pos-card-titleline">
+              <span class="pos-card-ticker">${esc(sym)}</span> 
+              <span class="pos-card-side pos-card-side--${pos.side === "short" ? "short" : "long"}">${esc(sideK)}</span>
+              ${badgeHtml}
+            </span>
           </header>
           <div class="pos-sub-strip">
-            <div class="pos-sub-item"><span class="pos-sub-k">평균 진입가</span><span class="pos-sub-v tabular-nums">${esc(entryDisp)}</span></div>
-            <div class="pos-sub-item"><span class="pos-sub-k">Mark</span><span class="pos-sub-v tabular-nums">${esc(markDisp)}</span></div>
-            <div class="pos-sub-item"><span class="pos-sub-k">누적 실현</span><span class="pos-sub-v tabular-nums ${rClass}">${esc(fmtRealizedLabel(realized))}</span></div>
-            <div class="pos-sub-item"><span class="pos-sub-k">익절 진행</span><span class="pos-sub-v tabular-nums">${esc(String(pes))}/3 · 진입 ${esc(String(esN))}/3</span></div>
-            <div class="pos-sub-item"><span class="pos-sub-k">손절 시 순손익</span><span class="pos-sub-v tabular-nums">${esc(fmtSignedUsdPos(stopNet))}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">진입가</span><span class="pos-sub-v tabular-nums">${esc(entryDisp)}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">현재가(Mark)</span><span class="pos-sub-v tabular-nums">${esc(markDisp)}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">손익(USD)</span><span class="pos-sub-v tabular-nums ${uClass}">${esc(formatUsd(uPnL))}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">수익률</span><span class="pos-sub-v tabular-nums ${uClass}">${esc(uPct)}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">손절가</span><span class="pos-sub-v tabular-nums">${esc(fmtStopLabel(stopPx))}</span></div>
+            <div class="pos-sub-item"><span class="pos-sub-k">${esc(exitTargetLabel)}</span><span class="pos-sub-v tabular-nums">${esc(exitTargetValue)}</span></div>
           </div>
           <details class="sym-details">
-            <summary>레버리지·파이프라인·펀딩 상세</summary>
+            <summary>레버리지·파이프라인·운용 상세</summary>
             <dl class="sym-meta">
               <dt>레버리지</dt><dd>${esc(String(lev))}×</dd>
-              <dt>평균 진입가</dt><dd>${esc(entryDisp)}</dd>
+              <dt>진입가</dt><dd>${esc(entryDisp)}</dd>
               <dt>현재가(Mark)</dt><dd>${esc(markDisp)}</dd>
               <dt>손절가</dt><dd>${esc(fmtStopLabel(stopPx))}</dd>
+              <dt>${esc(exitTargetLabel)}</dt><dd>${esc(exitTargetValue)}</dd>
+              <dt>누적 실현</dt><dd class="${rClass}">${esc(fmtRealizedLabel(realized))}</dd>
+              <dt>익절 진행</dt><dd>${esc(String(pes))}/3</dd>
+              <dt>진입 단계</dt><dd>${esc(String(esN))}/3</dd>
               <dt>손절 시 순손익</dt><dd>${esc(fmtSignedUsdPos(stopNet))}</dd>
               ${typeof pos.unrealizedPnlPct === "number" ? `<dt>엔진 uPnL%</dt><dd>${esc(String(pos.unrealizedPnlPct.toFixed(2)))}%</dd>` : ""}
               ${pip ? `<dt>파이프라인</dt><dd>v${esc(pipVer)}</dd>` : ""}
