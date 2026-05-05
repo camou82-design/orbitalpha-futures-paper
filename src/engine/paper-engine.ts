@@ -2181,8 +2181,11 @@ export class PaperEngine {
         }
 
         // --- Manual Quarantine Transition ---
-        if (isAdoptedOrManaged && (mismatchDetected || open.lifecycleState !== "EXTERNAL_MANUAL_POSITION")) {
-          if (open.lifecycleState !== "EXTERNAL_MANUAL_POSITION") {
+        // Note: open.lifecycleState is narrowed to "OPEN" | "CLOSE_ONLY_MANAGED" here.
+        // ADOPTED positions (from OKX) or mismatched CLOSE_ONLY_MANAGED positions are transitioned to EXTERNAL_MANUAL_POSITION.
+        if (isAdoptedOrManaged) {
+          const shouldQuarantine = open.reconcileState === "ADOPTED" || mismatchDetected;
+          if (shouldQuarantine) {
             this.logger.warn("POSITION_QUARANTINED_EXTERNAL_MANUAL", {
               symbol: open.symbol,
               side: open.side,
