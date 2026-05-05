@@ -187,7 +187,17 @@ export function paperOperationalFromEngineState(engineState: unknown): PaperOper
     reconcile_safe_mode_active: !!o.reconcile_safe_mode_active,
     reconcile_last_mismatch_reason:
       typeof o.reconcile_last_mismatch_reason === "string" ? o.reconcile_last_mismatch_reason : null,
-    symbol_decisions: (o.symbol_decisions as Record<string, { decision: PaperSymbolDecisionRecord; adaptiveOk: boolean }>) || {}
+    symbol_decisions: (o.symbol_decisions as Record<string, { decision: PaperSymbolDecisionRecord; adaptiveOk: boolean }>) || {},
+
+    // OKX Real-time Balance Fields Mapping
+    okx_wallet_balance_usdt: typeof o.okx_wallet_balance_usdt === "number" ? o.okx_wallet_balance_usdt : null,
+    okx_available_balance_usdt: typeof o.okx_available_balance_usdt === "number" ? o.okx_available_balance_usdt : null,
+    okx_used_margin_usdt: typeof o.okx_used_margin_usdt === "number" ? o.okx_used_margin_usdt : null,
+    okx_total_position_notional_usdt: typeof o.okx_total_position_notional_usdt === "number" ? o.okx_total_position_notional_usdt : null,
+    okx_unrealized_pnl_usdt: typeof o.okx_unrealized_pnl_usdt === "number" ? o.okx_unrealized_pnl_usdt : null,
+    okx_total_equity_usdt: typeof o.okx_total_equity_usdt === "number" ? o.okx_total_equity_usdt : null,
+    usdt_frozen_bal: typeof o.usdt_frozen_bal === "number" ? o.usdt_frozen_bal : null,
+    okx_balance_updated_at: typeof o.okx_balance_updated_at === "number" ? o.okx_balance_updated_at : undefined
   };
 }
 

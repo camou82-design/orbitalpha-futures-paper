@@ -757,6 +757,43 @@
     `;
   }
 
+  function renderOkxHero(bundle) {
+    const hero = $("hero-okx");
+    if (!hero) return;
+    const es = bundle.engineState;
+    if (!es) {
+      hero.innerHTML = '<p class="muted">엔진 상태 데이터 없음</p>';
+      return;
+    }
+
+    const totalEquity = es.okx_total_equity_usdt ?? es.okx_wallet_balance_usdt;
+    const avail = es.okx_available_balance_usdt;
+    const frozen = es.okx_used_margin_usdt ?? es.usdt_frozen_bal;
+    const unreal = es.okx_unrealized_pnl_usdt;
+
+    const unrealClass = pnlToneClass(unreal);
+    const updated = es.okx_balance_updated_at ? ` (갱신: ${new Date(es.okx_balance_updated_at).toLocaleTimeString()})` : "";
+
+    hero.innerHTML = `
+      <article class="hero-card hero-card--accent hero-card--numfirst">
+        <p class="hero-metric-xl tabular-nums">${esc(formatUsd(totalEquity))}</p>
+        <p class="hero-label">총 평가자산 (Live)</p>
+      </article>
+      <article class="hero-card hero-card--accent hero-card--numfirst">
+        <p class="hero-metric-xl tabular-nums">${esc(formatUsd(avail))}</p>
+        <p class="hero-label">사용 가능 잔고 (Live)</p>
+      </article>
+      <article class="hero-card hero-card--accent hero-card--numfirst">
+        <p class="hero-metric-xl tabular-nums">${esc(formatUsd(frozen))}</p>
+        <p class="hero-label">포지션 점유·동결 (Live)</p>
+      </article>
+      <article class="hero-card hero-card--accent hero-card--numfirst">
+        <p class="hero-metric-xl tabular-nums ${unrealClass}">${esc(formatSignedUsd(unreal))}</p>
+        <p class="hero-label">미실현 손익 (Live)</p>
+      </article>
+    `;
+  }
+
   function renderOperatorContext(bundle) {
     const el = $("operator-context-body");
     if (!el) return;
@@ -1515,6 +1552,7 @@
         return;
       }
       renderHero(bundle);
+      renderOkxHero(bundle);
       renderTradeControlCard();
       renderOperatorContext(bundle);
       renderSymbols(bundle);

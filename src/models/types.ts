@@ -1231,6 +1231,16 @@ export type PaperOperationalSnapshot = Readonly<{
   reconcile_safe_mode_active?: boolean;
   reconcile_last_mismatch_reason?: string | null;
   symbol_decisions: Record<string, { decision: PaperSymbolDecisionRecord; adaptiveOk: boolean }>;
+
+  /** OKX Real-time Balance Fields */
+  okx_wallet_balance_usdt?: number | null;
+  okx_available_balance_usdt?: number | null;
+  okx_used_margin_usdt?: number | null;
+  okx_total_position_notional_usdt?: number | null;
+  okx_unrealized_pnl_usdt?: number | null;
+  okx_total_equity_usdt?: number | null;
+  usdt_frozen_bal?: number | null;
+  okx_balance_updated_at?: number;
 }>;
 
 /** Appended to `data/positions/history.json` when a paper position is closed. */
