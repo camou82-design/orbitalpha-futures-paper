@@ -1343,7 +1343,8 @@ export class PaperEngine {
       syncSnap.sync_status !== "MANUAL_FULL_CLOSE_DETECTED" &&
       syncSnap.sync_status !== "ADOPTED_POSITION_SIZE_MISMATCH" &&
       syncSnap.sync_status !== "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED" &&
-      syncSnap.sync_status !== "EXTERNAL_MANUAL_LARGE_DRIFT";
+      syncSnap.sync_status !== "EXTERNAL_MANUAL_LARGE_DRIFT" &&
+      syncSnap.sync_status !== "EXTERNAL_MANUAL_MISMATCH_IGNORED";
 
     if (criticalMismatch) {
       this.reconcileSafetyCloseOnly = true;

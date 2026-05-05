@@ -26,10 +26,12 @@ export type LedgerOkxPositionSyncSnapshot = Readonly<{
     | "MANUAL_PARTIAL_DETECTED"
     | "MANUAL_FULL_CLOSE_DETECTED"
     | "ADOPTED_POSITION_SIZE_MISMATCH"
-    | "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED";
+    | "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED"
+    | "EXTERNAL_MANUAL_MISMATCH_IGNORED";
   okx_nonzero_position_count: number;
   paper_open_position_count: number;
   mismatched_keys: string[];
+  ignored_external_manual_keys: string[];
   okx_positions_preview: ReadonlyArray<{
     symbol: string;
     side: "long" | "short";
@@ -145,6 +147,7 @@ export function buildLedgerOkxPositionSyncSnapshot(
       okx_nonzero_position_count: 0,
       paper_open_position_count,
       mismatched_keys: [],
+      ignored_external_manual_keys: [],
       okx_positions_preview: [],
       paper_positions_preview,
       detail: "OKX positions payload unavailable for sync comparison"
@@ -194,6 +197,7 @@ export function buildLedgerOkxPositionSyncSnapshot(
   let sync_status: LedgerOkxPositionSyncSnapshot["sync_status"] = "ALIGNED";
   let detail: string | null = null;
   const mismatched_keys: string[] = [];
+  const ignored_external_manual_keys: string[] = [];
 
   if (okx_nonzero_position_count === 0 && paper_open_position_count === 0) {
     sync_status = "ALIGNED";
@@ -277,7 +281,18 @@ export function buildLedgerOkxPositionSyncSnapshot(
 
       if (mismatchAtThisKey) {
         if (!mismatched_keys.includes(key)) mismatched_keys.push(key);
+        if (isExternalManual) {
+          if (!ignored_external_manual_keys.includes(key)) ignored_external_manual_keys.push(key);
+        }
       }
+    }
+
+    // Final status resolution: if we have mismatches but they are ALL external manual, 
+    // use the specific IGNORED status instead of ALIGNED or error statuses.
+    const nonManualMismatches = mismatched_keys.filter(k => !ignored_external_manual_keys.includes(k));
+    if (mismatched_keys.length > 0 && nonManualMismatches.length === 0) {
+      sync_status = "EXTERNAL_MANUAL_MISMATCH_IGNORED";
+      detail = "Mismatch exists only on EXTERNAL_MANUAL_POSITION keys and was ignored for global readiness.";
     }
   }
 
@@ -286,6 +301,7 @@ export function buildLedgerOkxPositionSyncSnapshot(
     okx_nonzero_position_count,
     paper_open_position_count,
     mismatched_keys,
+    ignored_external_manual_keys,
     okx_positions_preview,
     paper_positions_preview,
     detail
