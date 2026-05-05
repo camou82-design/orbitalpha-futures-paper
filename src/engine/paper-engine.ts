@@ -1309,12 +1309,41 @@ export class PaperEngine {
       }
     }
 
+    // Also include keys from sync mismatch in symbol-level block
+    for (const mk of syncSnap.mismatched_keys) {
+      if (!this.symbolExternalManualBlocked.has(mk)) {
+        this.symbolExternalManualBlocked.add(mk);
+        const [msym, mside] = mk.split(":");
+        this.logger.warn("SYMBOL_EXTERNAL_MANUAL_POSITION_BLOCK", {
+          symbol: msym,
+          side: mside,
+          sync_mismatch: true,
+          sync_status: syncSnap.sync_status,
+          action: "BLOCK_THIS_SYMBOL_ONLY",
+          global_trade_blocked: false,
+          detail: `Sync mismatch (${syncSnap.sync_status}) detected. Localizing block to this symbol:side.`
+        });
+      }
+    }
+
+    const unblockedMismatches = syncSnap.mismatched_keys.filter(mk => !this.symbolExternalManualBlocked.has(mk));
+    const hasUnblockedMismatch = unblockedMismatches.length > 0;
+
     const criticalMismatch = 
+      hasUnblockedMismatch &&
       syncSnap.sync_status !== "ALIGNED" && 
       syncSnap.sync_status !== "REMOTE_UNAVAILABLE" &&
       syncSnap.sync_status !== "LEDGER_ONLY" &&
       syncSnap.sync_status !== "OKX_ONLY" &&
-      syncSnap.sync_status !== "KEY_MISMATCH"; // Extra positions on OKX are handled by symbol-level block
+      syncSnap.sync_status !== "KEY_MISMATCH" &&
+      syncSnap.sync_status !== "NOTIONAL_MISMATCH" &&
+      syncSnap.sync_status !== "AVG_PRICE_MISMATCH" &&
+      syncSnap.sync_status !== "SIZE_MISMATCH" &&
+      syncSnap.sync_status !== "MANUAL_PARTIAL_DETECTED" &&
+      syncSnap.sync_status !== "MANUAL_FULL_CLOSE_DETECTED" &&
+      syncSnap.sync_status !== "ADOPTED_POSITION_SIZE_MISMATCH" &&
+      syncSnap.sync_status !== "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED" &&
+      syncSnap.sync_status !== "EXTERNAL_MANUAL_LARGE_DRIFT";
 
     if (criticalMismatch) {
       this.reconcileSafetyCloseOnly = true;
@@ -1542,7 +1571,9 @@ export class PaperEngine {
       });
 
       ledgerModified = true;
-      mismatchCount++;
+      if (open.lifecycleState !== "EXTERNAL_MANUAL_POSITION") {
+        mismatchCount++;
+      }
     };
 
     for (const open of rawOpens) {
@@ -2149,6 +2180,23 @@ export class PaperEngine {
           mismatchType = isAdoptedOrManaged ? "MANUAL_PARTIAL_DETECTED" : "SIZE_MISMATCH";
         }
 
+        // --- Manual Quarantine Transition ---
+        if (isAdoptedOrManaged && (mismatchDetected || open.lifecycleState !== "EXTERNAL_MANUAL_POSITION")) {
+          if (open.lifecycleState !== "EXTERNAL_MANUAL_POSITION") {
+            this.logger.warn("POSITION_QUARANTINED_EXTERNAL_MANUAL", {
+              symbol: open.symbol,
+              side: open.side,
+              prev_lifecycle: open.lifecycleState,
+              reconcile_state: open.reconcileState,
+              mismatch_detected: mismatchDetected,
+              mismatch_type: mismatchDetected ? mismatchType : "quarantine_enforcement",
+              action: "TRANSITION_TO_EXTERNAL_MANUAL_POSITION"
+            });
+            open.lifecycleState = "EXTERNAL_MANUAL_POSITION";
+            ledgerModified = true;
+          }
+        }
+
         if (mismatchDetected) {
           this.logger.warn("MANUAL_POSITION_REPRICE_RECONCILE_PROOF", {
             symbol: open.symbol,
@@ -2187,7 +2235,7 @@ export class PaperEngine {
             open.stopPrice = newStop;
           }
 
-          open.reconcileState = "MATCHED"; // Reset to MATCHED after repair
+          open.reconcileState = "MATCHED";
           ledgerModified = true;
         } else {
           open.reconcileState = "MATCHED";
@@ -2287,12 +2335,13 @@ export class PaperEngine {
 
     const hasSeriousAdopted = next.some(p => 
       p.sourceSignal === "okx_reconcile_adopted" && 
-      p.lifecycleState !== "EXTERNAL_MANUAL_POSITION"
+      p.lifecycleState !== "EXTERNAL_MANUAL_POSITION" &&
+      p.lifecycleState !== "CLOSE_ONLY_MANAGED"
     );
 
     if (mismatchCount > 0 || hasSeriousAdopted) {
       this.reconcileSafetyCloseOnly = true;
-      this.reconcileLastMismatchReason = mismatchCount > 0 ? "position_state_mismatch" : "adopted_position_active_safety_block";
+      this.reconcileLastMismatchReason = mismatchCount > 0 ? "position_state_mismatch" : "unquarantined_adopted_position_block";
     } else {
       if (this.reconcileSafetyCloseOnly) {
         this.logger.info("POSITION_RECONCILE_RECOVERED_SAFE_MODE_OFF", {});
@@ -6145,6 +6194,19 @@ export class PaperEngine {
       // Unique flow identifier for one-shot terminal exit deduplication
       const flowId = `${openRaw.symbol}:${openRaw.side}:${openRaw.openedAt}`;
 
+      // Skip evaluation if this symbol:side is explicitly blocked (external/manual)
+      const symSideKey = `${openRaw.symbol}:${openRaw.side}`;
+      if (this.symbolExternalManualBlocked.has(symSideKey)) {
+        this.logger.info("EXIT_EVAL_SKIPPED_EXTERNAL_MANUAL_BLOCK", {
+          symbol: openRaw.symbol,
+          side: openRaw.side,
+          flowId,
+          reason: "symbol_level_external_manual_block_active"
+        });
+        remaining.push(openRaw);
+        continue;
+      }
+
       // Problem 3: Exclude pending states from exit/partial management
       const isManaged = 
         openRaw.lifecycleState === "OPEN" || 
@@ -9674,6 +9736,22 @@ export class PaperEngine {
     input.decisionBySymbol.forEach((envelope, symKey) => {
       const { authority, snapshot } = envelope;
       const base = snapshotBySymbol.get(symKey) ?? snapshot;
+
+      // Local Symbol Block for External Manual Positions
+      const symBlocked = this.symbolExternalManualBlocked.has(`${symKey}:long`) || 
+                         this.symbolExternalManualBlocked.has(`${symKey}:short`);
+      if (symBlocked) {
+        if (authority.decision === "ENTER") {
+          this.logger.warn("ENTRY_BLOCKED_EXTERNAL_MANUAL_SYMBOL", {
+            symbol: symKey,
+            decision: authority.decision,
+            side: authority.side,
+            reason: "symbol_level_external_manual_block_active",
+            detail: "Entry blocked because this symbol has an external manual position or sync mismatch."
+          });
+        }
+        return;
+      }
 
       if (authority.source === "v2") {
         const v2QueueAllowed =

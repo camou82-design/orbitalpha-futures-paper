@@ -29,6 +29,7 @@ export type LedgerOkxPositionSyncSnapshot = Readonly<{
     | "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED";
   okx_nonzero_position_count: number;
   paper_open_position_count: number;
+  mismatched_keys: string[];
   okx_positions_preview: ReadonlyArray<{
     symbol: string;
     side: "long" | "short";
@@ -143,6 +144,7 @@ export function buildLedgerOkxPositionSyncSnapshot(
       sync_status: "REMOTE_UNAVAILABLE",
       okx_nonzero_position_count: 0,
       paper_open_position_count,
+      mismatched_keys: [],
       okx_positions_preview: [],
       paper_positions_preview,
       detail: "OKX positions payload unavailable for sync comparison"
@@ -191,64 +193,90 @@ export function buildLedgerOkxPositionSyncSnapshot(
 
   let sync_status: LedgerOkxPositionSyncSnapshot["sync_status"] = "ALIGNED";
   let detail: string | null = null;
+  const mismatched_keys: string[] = [];
 
   if (okx_nonzero_position_count === 0 && paper_open_position_count === 0) {
     sync_status = "ALIGNED";
   } else if (okx_nonzero_position_count > 0 && paper_open_position_count === 0) {
     sync_status = "OKX_ONLY";
     detail = "Exchange reports open SWAP positions but paper ledger has no active rows";
+    for (const k of okxMap.keys()) mismatched_keys.push(k);
   } else if (okx_nonzero_position_count === 0 && paper_open_position_count > 0) {
     sync_status = "MANUAL_FULL_CLOSE_DETECTED";
     detail = "Paper ledger lists open positions but OKX SWAP snapshot shows none (Manual full close suspected)";
+    for (const k of paperMap.keys()) mismatched_keys.push(k);
   } else {
     // Key-level comparison
     const okxKeys = Array.from(okxMap.keys());
     const paperKeys = Array.from(paperMap.keys());
     
-    if (okxKeys.length !== paperKeys.length || !okxKeys.every(k => paperMap.has(k)) || !paperKeys.every(k => okxMap.has(k))) {
+    const onlyOkx = okxKeys.filter(k => !paperMap.has(k));
+    const onlyPaper = paperKeys.filter(k => !okxMap.has(k));
+
+    if (onlyOkx.length > 0 || onlyPaper.length > 0) {
       sync_status = "KEY_MISMATCH";
       detail = "Paper ledger keys differ from OKX position keys (symbol/side)";
-    } else {
-      // Deep comparison for each key
-      for (const [key, okxPos] of okxMap.entries()) {
-        const paperPosData = paperMap.get(key)!;
-        const isAdoptedOrManaged = paperPosData.reconcileState === "ADOPTED" || paperPosData.lifecycleState === "CLOSE_ONLY_MANAGED";
+      for (const k of onlyOkx) mismatched_keys.push(k);
+      for (const k of onlyPaper) mismatched_keys.push(k);
+    } 
 
-        const paperNotional =
-          typeof paperPosData.notionalUsd === "number" && Number.isFinite(paperPosData.notionalUsd)
-            ? paperPosData.notionalUsd
-            : paperPosData.sizeUsd;
+    // Deep comparison for each key (even if key mismatch, we want to check others)
+    for (const [key, okxPos] of okxMap.entries()) {
+      const paperPosData = paperMap.get(key);
+      if (!paperPosData) continue;
 
-        // 1. Avg price (primary)
-        const priceDiffRatio = Math.abs(okxPos.avgPx - paperPosData.entryPrice) / (paperPosData.entryPrice || 1);
-        if (priceDiffRatio > PRICE_TOLERANCE_RATIO) {
-          sync_status = "AVG_PRICE_MISMATCH";
-          detail = `Price mismatch on ${key}: OKX=${okxPos.avgPx}, Paper=${paperPosData.entryPrice} (diff=${(priceDiffRatio * 100).toFixed(4)}%)`;
-          break;
+      const isAdoptedOrManaged = paperPosData.reconcileState === "ADOPTED" || paperPosData.lifecycleState === "CLOSE_ONLY_MANAGED";
+      const isExternalManual = paperPosData.lifecycleState === "EXTERNAL_MANUAL_POSITION";
+
+      const paperNotional =
+        typeof paperPosData.notionalUsd === "number" && Number.isFinite(paperPosData.notionalUsd)
+          ? paperPosData.notionalUsd
+          : paperPosData.sizeUsd;
+
+      let mismatchAtThisKey = false;
+
+      // 1. Avg price (primary)
+      const priceDiffRatio = Math.abs(okxPos.avgPx - paperPosData.entryPrice) / (paperPosData.entryPrice || 1);
+      if (priceDiffRatio > PRICE_TOLERANCE_RATIO) {
+        if (sync_status === "ALIGNED" || sync_status === "KEY_MISMATCH") {
+           // Only promote to global status if NOT external manual
+           if (!isExternalManual) sync_status = "AVG_PRICE_MISMATCH";
         }
+        detail = detail || `Price mismatch on ${key}: OKX=${okxPos.avgPx}, Paper=${paperPosData.entryPrice} (diff=${(priceDiffRatio * 100).toFixed(4)}%)`;
+        mismatchAtThisKey = true;
+      }
 
-        // 2. Notional USD (primary) — do not compare OKX contracts to paper `pos`.
-        const notionalDiff = Math.abs(Math.abs(okxPos.notionalUsd) - Math.abs(paperNotional));
-        if (notionalDiff > NOTIONAL_TOLERANCE_USD) {
-          sync_status = "NOTIONAL_MISMATCH";
-          detail = `Notional mismatch on ${key}: OKX=${Math.abs(okxPos.notionalUsd)}, Paper=${Math.abs(paperNotional)} (diff=${notionalDiff.toFixed(2)} USD)`;
-          break;
+      // 2. Notional USD (primary)
+      const notionalDiff = Math.abs(Math.abs(okxPos.notionalUsd) - Math.abs(paperNotional));
+      if (notionalDiff > NOTIONAL_TOLERANCE_USD) {
+        if (sync_status === "ALIGNED" || sync_status === "KEY_MISMATCH" || sync_status === "AVG_PRICE_MISMATCH") {
+           if (!isExternalManual) sync_status = "NOTIONAL_MISMATCH";
         }
+        detail = detail || `Notional mismatch on ${key}: OKX=${Math.abs(okxPos.notionalUsd)}, Paper=${Math.abs(paperNotional)} (diff=${notionalDiff.toFixed(2)} USD)`;
+        mismatchAtThisKey = true;
+      }
 
-        // 3. Base-coin audit only when paper carries explicit exchange-derived baseQty (never derived sizeUsd/entry here — avoids contract vs coin false positives).
-        const okxBaseQty = okxPos.baseQty;
-        const paperBaseLedger = paperPosData.baseQty;
-        const hasExplicitPaperBase =
-          typeof paperBaseLedger === "number" && Number.isFinite(paperBaseLedger) && paperBaseLedger > 0;
-        if (
-          okxBaseQty !== undefined &&
-          hasExplicitPaperBase &&
-          Math.abs(okxBaseQty - paperBaseLedger) > Math.max(1e-8, 0.002 * Math.max(okxBaseQty, paperBaseLedger))
-        ) {
-          sync_status = isAdoptedOrManaged ? "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED" : "MANUAL_PARTIAL_DETECTED";
-          detail = `Base quantity mismatch on ${key}: OKX=${okxBaseQty.toFixed(8)}, Paper=${paperBaseLedger.toFixed(8)}`;
-          break;
+      // 3. Base-coin audit
+      const okxBaseQty = okxPos.baseQty;
+      const paperBaseLedger = paperPosData.baseQty;
+      const hasExplicitPaperBase =
+        typeof paperBaseLedger === "number" && Number.isFinite(paperBaseLedger) && paperBaseLedger > 0;
+      if (
+        okxBaseQty !== undefined &&
+        hasExplicitPaperBase &&
+        Math.abs(okxBaseQty - paperBaseLedger) > Math.max(1e-8, 0.002 * Math.max(okxBaseQty, paperBaseLedger))
+      ) {
+        if (sync_status === "ALIGNED" || sync_status === "KEY_MISMATCH" || sync_status === "AVG_PRICE_MISMATCH" || sync_status === "NOTIONAL_MISMATCH") {
+           if (!isExternalManual) {
+             sync_status = isAdoptedOrManaged ? "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED" : "MANUAL_PARTIAL_DETECTED";
+           }
         }
+        detail = detail || `Base quantity mismatch on ${key}: OKX=${okxBaseQty.toFixed(8)}, Paper=${paperBaseLedger.toFixed(8)}`;
+        mismatchAtThisKey = true;
+      }
+
+      if (mismatchAtThisKey) {
+        if (!mismatched_keys.includes(key)) mismatched_keys.push(key);
       }
     }
   }
@@ -257,8 +285,10 @@ export function buildLedgerOkxPositionSyncSnapshot(
     sync_status,
     okx_nonzero_position_count,
     paper_open_position_count,
+    mismatched_keys,
     okx_positions_preview,
     paper_positions_preview,
     detail
   };
 }
+
