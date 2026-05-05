@@ -281,9 +281,14 @@ export function buildLedgerOkxPositionSyncSnapshot(
 
       if (mismatchAtThisKey) {
         if (!mismatched_keys.includes(key)) mismatched_keys.push(key);
-        if (isExternalManual) {
-          if (!ignored_external_manual_keys.includes(key)) ignored_external_manual_keys.push(key);
-        }
+      }
+    }
+
+    // Populate ignored_external_manual_keys for ALL mismatched keys that are manual
+    for (const k of mismatched_keys) {
+      const p = paperMap.get(k);
+      if (p?.lifecycleState === "EXTERNAL_MANUAL_POSITION") {
+        if (!ignored_external_manual_keys.includes(k)) ignored_external_manual_keys.push(k);
       }
     }
 
