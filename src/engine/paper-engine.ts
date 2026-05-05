@@ -1417,6 +1417,7 @@ export class PaperEngine {
     }
 
     const okxPositions = okxPosRes.value;
+    const effectiveCloseOnlyMode = this.serverTradeControlState.close_only_mode || this.reconcileSafetyCloseOnly;
     const remoteMap = new Map<string, { size: number; instId: string; posSide: string; avgPx: number; notionalUsd: number }>();
     for (const row of okxPositions) {
       const hit = okxSwapRowToLedgerKey(row as Record<string, unknown>);
@@ -1899,6 +1900,46 @@ export class PaperEngine {
             }
 
             if (
+              isClosePending &&
+              ordRes.ok && ordRes.value.length === 0 &&
+              remotePos &&
+              pendingAt != null &&
+              nowTs - pendingAt > PENDING_TIMEOUT_MS
+            ) {
+              this.logger.warn("STALE_CLOSE_PENDING_REPAIRED_PROOF", {
+                symbol: open.symbol,
+                side: open.side,
+                ord_id: ordId,
+                pending_elapsed_ms: nowTs - pendingAt,
+                detail: "CLOSE_ORDER_NOT_FOUND_BUT_POSITION_EXISTS_STALE_PENDING_RESTORED"
+              });
+              open.lifecycleState = effectiveCloseOnlyMode ? "CLOSE_ONLY_MANAGED" : "OPEN";
+              open.reconcileState = "MATCHED";
+              open.lastCheckedAt = nowTs;
+              open.closePendingOrdId = undefined;
+              open.closePendingClOrdId = undefined;
+              open.closePendingAt = undefined;
+              open.closePendingReason = undefined;
+              open.closePendingPrice = undefined;
+              open.closePendingFundingRate = undefined;
+              open.closePendingFilledSize = undefined;
+              open.closePendingRemainingSize = undefined;
+
+              // stopPrice correction based on actual avgPx after recovery
+              if (remotePos && remotePos.avgPx > 0) {
+                const slReg = regimeForSl(open.regimeAtEntry);
+                const newStop = engineMirrorStopPrice(remotePos.avgPx, open.side, slReg);
+                if (newStop != null && Number.isFinite(newStop)) {
+                  open.stopPrice = newStop;
+                }
+              }
+
+              ledgerModified = true;
+              next.push(open);
+              continue;
+            }
+
+            if (
               isPartialPending &&
               pendingAt != null &&
               nowTs - pendingAt > PENDING_TIMEOUT_MS
@@ -1944,6 +1985,13 @@ export class PaperEngine {
                 }
                 open.avgPx = remotePos.avgPx;
                 open.entryPrice = remotePos.avgPx;
+
+                // stopPrice correction based on actual avgPx after recovery
+                const slReg = regimeForSl(open.regimeAtEntry);
+                const newStop = engineMirrorStopPrice(remotePos.avgPx, open.side, slReg);
+                if (newStop != null && Number.isFinite(newStop)) {
+                  open.stopPrice = newStop;
+                }
               }
               ledgerModified = true;
               next.push(open);
@@ -1994,64 +2042,46 @@ export class PaperEngine {
           mismatchType = isAdoptedOrManaged ? "MANUAL_PARTIAL_DETECTED" : "SIZE_MISMATCH";
         }
 
-        // Mandatory Deep Reconcile Proof
-        this.logger.info("LEDGER_OKX_DEEP_RECONCILE_PROOF", {
-          symbol: open.symbol,
-          side: open.side,
-          ledger_base_qty: paperBaseForCompare,
-          okx_base_qty: remotePos.size,
-          ledger_pos_field: open.pos,
-          ledger_entry_px: open.entryPrice,
-          okx_avg_px: remotePos.avgPx,
-          ledger_notional_usd: paperNotional,
-          okx_notional_usd: remotePos.notionalUsd,
-          mismatch_detected: mismatchDetected,
-          mismatch_type: mismatchType,
-          is_adopted_or_managed: isAdoptedOrManaged
-        });
-
         if (mismatchDetected) {
-          if (isAdoptedOrManaged) {
-            this.logger.warn("MANUAL_PARTIAL_RECONCILE_PROOF", {
-              symbol: open.symbol,
-              side: open.side,
-              mismatch_type: mismatchType,
-              prev_pos: open.pos,
-              new_pos: remotePos.size,
-              prev_size_usd: open.sizeUsd,
-              new_size_usd: remotePos.notionalUsd,
-              prev_entry_px: open.entryPrice,
-              new_entry_px: remotePos.avgPx,
-              detail: "ADOPTED_OR_MANAGED_POSITION_AUTO_REPAIRED_TO_EXCHANGE_ACTUAL"
-            });
-            // Repair path for Adopted/Managed: Force update ledger to match OKX (base qty + notionals; margin sizeUsd unchanged).
-            const instIdAd = toOkxSwapInstId(open.symbol);
-            const instAd = this.instrumentCache.get(instIdAd);
-            const ctAd = instAd?.ctVal ?? 1;
-            open.pos = remotePos.size;
-            open.baseQty = remotePos.size;
-            open.notionalUsd = Math.abs(remotePos.notionalUsd);
-            if (ctAd > 0) open.okxContracts = remotePos.size / ctAd;
-            open.entryPrice = remotePos.avgPx;
-            open.avgPx = remotePos.avgPx;
-            open.reconcileState = "MATCHED"; // Reset to MATCHED after repair
-            ledgerModified = true;
-          } else {
-            // Standard mismatch reporting (No auto-repair for normal positions to prevent unintended changes)
-            open.reconcileState = "FAILED";
-            mismatchCount++;
-            this.logger.error("POSITION_LEDGER_EXCHANGE_MISMATCH_PROOF", {
-              symbol: open.symbol,
-              side: open.side,
-              detail: mismatchType,
-              okx_base_qty: remotePos.size,
-              paper_base_qty: paperBaseForCompare,
-              okx_avg_px: remotePos.avgPx,
-              paper_entry_px: open.entryPrice,
-              okx_notional: remotePos.notionalUsd,
-              paper_notional: paperNotional
-            });
+          this.logger.warn("MANUAL_POSITION_REPRICE_RECONCILE_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            mismatch_type: mismatchType,
+            is_adopted_or_managed: isAdoptedOrManaged,
+            prev_pos: open.pos,
+            new_pos: remotePos.size,
+            prev_entry_px: open.entryPrice,
+            new_entry_px: remotePos.avgPx,
+            prev_notional: paperNotional,
+            new_notional: remotePos.notionalUsd,
+            detail: "POSITION_AUTO_REPAIRED_TO_EXCHANGE_ACTUAL"
+          });
+
+          // Unified Repair path: Force update ledger to match OKX (base qty + notionals; margin sizeUsd unchanged).
+          const instIdRepair = toOkxSwapInstId(open.symbol);
+          const instRepair = this.instrumentCache.get(instIdRepair);
+          const ctRepair = instRepair?.ctVal ?? 1;
+
+          open.pos = remotePos.size;
+          open.baseQty = remotePos.size;
+          open.notionalUsd = Math.abs(remotePos.notionalUsd);
+          if (ctRepair > 0) {
+            const contracts = remotePos.size / ctRepair;
+            open.okxContracts = contracts;
+            open.exchangeFilledSize = contracts;
           }
+          open.entryPrice = remotePos.avgPx;
+          open.avgPx = remotePos.avgPx;
+
+          // stopPrice correction based on new avgPx
+          const slReg = regimeForSl(open.regimeAtEntry);
+          const newStop = engineMirrorStopPrice(remotePos.avgPx, open.side, slReg);
+          if (newStop != null && Number.isFinite(newStop)) {
+            open.stopPrice = newStop;
+          }
+
+          open.reconcileState = "MATCHED"; // Reset to MATCHED after repair
+          ledgerModified = true;
         } else {
           open.reconcileState = "MATCHED";
         }
