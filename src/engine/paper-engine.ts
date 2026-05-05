@@ -1446,6 +1446,58 @@ export class PaperEngine {
     let mismatchCount = 0;
     const RECONCILE_GRACE_PERIOD_MS = 30_000;
 
+    const reconcileManualFullClose = async (open: PaperOpenPositionRecord, source: string) => {
+      const snap = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
+      const closePrice = snap?.lastPrice || open.entryPrice;
+      const closedAt = nowTs;
+      
+      this.logger.warn("MANUAL_FULL_CLOSE_RECONCILE_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        lifecycle_state: open.lifecycleState,
+        reconcile_state: open.reconcileState,
+        close_price: closePrice,
+        source,
+        detail: "OPEN_LEDGER_MISSING_ON_EXCHANGE_REPAIRING",
+        action: "RECORD_HISTORY_AND_PRUNE"
+      });
+
+      const metrics = computePaperCloseLegMetrics({
+        open,
+        closePrice,
+        closedAt,
+        snapFundingRate: snap?.fundingRate || 0,
+        marginUsd: open.sizeUsd,
+        paperTakerFeeRate: this.config.paperTakerFeeRate,
+        paperFundingIntervalHours: this.config.paperFundingIntervalHours
+      });
+
+      const closedRow = finalizePaperClosedRecord({
+        open,
+        symbol: open.symbol as MarketSymbol,
+        closePrice,
+        closedAt,
+        closeReason: "manual_full_close_reconciled",
+        legMarginUsd: open.sizeUsd,
+        metrics,
+        feeRate: this.config.paperTakerFeeRate,
+        fundingIntervalHours: this.config.paperFundingIntervalHours,
+        strategyVersion: open.strategyVersion ?? "paper-v2"
+      });
+
+      await this.appendClosedWithStandardRouting({
+        closedRow,
+        open,
+        flowId: `${open.symbol}:${open.side}:${open.openedAt}`,
+        exitReason: "manual_full_close_reconciled",
+        closeSource: source,
+        currentRegime: this.lastRegime.regime || "NO_TRADE"
+      });
+
+      ledgerModified = true;
+      mismatchCount++;
+    };
+
     for (const open of rawOpens) {
       const isNew = nowTs - open.openedAt < RECONCILE_GRACE_PERIOD_MS;
       const isPending = open.lifecycleState === "PENDING_EXCHANGE_CONFIRM";
@@ -1536,6 +1588,10 @@ export class PaperEngine {
         }
 
         if (!(ordId || clOrdId)) {
+          if (!remotePos && !isNew) {
+            await reconcileManualFullClose(open, "RECONCILE_ABSENT_PENDING_NO_ID");
+            continue;
+          }
           if (isPartialPending) {
             this.logger.warn("V2_PARTIAL_PENDING_MISSING_ORDER_IDS_RECOVER", {
               symbol: open.symbol,
@@ -1836,6 +1892,12 @@ export class PaperEngine {
               continue;
             }
           } else {
+            // ordRes.ok but value is empty (Order not found in OKX)
+            if (ordRes.ok && ordRes.value.length === 0 && !remotePos && !isNew) {
+              await reconcileManualFullClose(open, "RECONCILE_ABSENT_PENDING_NOT_FOUND");
+              continue;
+            }
+
             if (
               isPartialPending &&
               pendingAt != null &&
@@ -1895,18 +1957,8 @@ export class PaperEngine {
       // 3. Regular Open Position Reconciliation (Deep Comparison & Repair)
       if (open.lifecycleState === "OPEN" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
         if (!remotePos) {
-          this.logger.warn("MANUAL_FULL_CLOSE_RECONCILE_PROOF", {
-            symbol: open.symbol,
-            side: open.side,
-            prev_lifecycle: open.lifecycleState,
-            prev_reconcile: open.reconcileState,
-            detail: "OPEN_LEDGER_MISSING_ON_EXCHANGE_REPAIRING",
-            action: "PRUNE_LEDGER_ROW"
-          });
-          // Repair: OKX reports zero, but ledger has it. Prune it.
-          ledgerModified = true;
-          mismatchCount++;
-          continue; // Do not push to 'next'
+          await reconcileManualFullClose(open, "RECONCILE_ABSENT");
+          continue; // Pruned
         }
 
         // Deep comparison: avgPx + notional first; base size only when paper.baseQty is explicit (exchange-derived).
