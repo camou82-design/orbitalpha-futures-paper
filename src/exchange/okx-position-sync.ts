@@ -27,6 +27,7 @@ export type LedgerOkxPositionSyncSnapshot = Readonly<{
     | "MANUAL_FULL_CLOSE_DETECTED"
     | "ADOPTED_POSITION_SIZE_MISMATCH"
     | "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED"
+    | "EXTERNAL_MANUAL_LARGE_DRIFT"
     | "EXTERNAL_MANUAL_MISMATCH_IGNORED";
   okx_nonzero_position_count: number;
   paper_open_position_count: number;

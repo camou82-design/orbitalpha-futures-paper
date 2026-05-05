@@ -1329,22 +1329,26 @@ export class PaperEngine {
     const unblockedMismatches = syncSnap.mismatched_keys.filter(mk => !this.symbolExternalManualBlocked.has(mk));
     const hasUnblockedMismatch = unblockedMismatches.length > 0;
 
+    const ignoredStatuses = new Set<string>([
+      "ALIGNED", 
+      "REMOTE_UNAVAILABLE", 
+      "LEDGER_ONLY", 
+      "OKX_ONLY", 
+      "KEY_MISMATCH", 
+      "NOTIONAL_MISMATCH", 
+      "AVG_PRICE_MISMATCH", 
+      "SIZE_MISMATCH", 
+      "MANUAL_PARTIAL_DETECTED", 
+      "MANUAL_FULL_CLOSE_DETECTED", 
+      "ADOPTED_POSITION_SIZE_MISMATCH", 
+      "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED", 
+      "EXTERNAL_MANUAL_LARGE_DRIFT", 
+      "EXTERNAL_MANUAL_MISMATCH_IGNORED"
+    ]);
+
     const criticalMismatch = 
       hasUnblockedMismatch &&
-      syncSnap.sync_status !== "ALIGNED" && 
-      syncSnap.sync_status !== "REMOTE_UNAVAILABLE" &&
-      syncSnap.sync_status !== "LEDGER_ONLY" &&
-      syncSnap.sync_status !== "OKX_ONLY" &&
-      syncSnap.sync_status !== "KEY_MISMATCH" &&
-      syncSnap.sync_status !== "NOTIONAL_MISMATCH" &&
-      syncSnap.sync_status !== "AVG_PRICE_MISMATCH" &&
-      syncSnap.sync_status !== "SIZE_MISMATCH" &&
-      syncSnap.sync_status !== "MANUAL_PARTIAL_DETECTED" &&
-      syncSnap.sync_status !== "MANUAL_FULL_CLOSE_DETECTED" &&
-      syncSnap.sync_status !== "ADOPTED_POSITION_SIZE_MISMATCH" &&
-      syncSnap.sync_status !== "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED" &&
-      syncSnap.sync_status !== "EXTERNAL_MANUAL_LARGE_DRIFT" &&
-      syncSnap.sync_status !== "EXTERNAL_MANUAL_MISMATCH_IGNORED";
+      !ignoredStatuses.has(syncSnap.sync_status);
 
     if (criticalMismatch) {
       this.reconcileSafetyCloseOnly = true;
