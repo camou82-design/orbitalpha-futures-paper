@@ -1319,6 +1319,18 @@ export class PaperEngine {
     if (criticalMismatch) {
       this.reconcileSafetyCloseOnly = true;
       this.reconcileLastMismatchReason = `sync_watch_${syncSnap.sync_status}`;
+    } else {
+      // If we previously set safe mode via sync_watch but it's now recovered to a non-critical state,
+      // allow clearing it. Serious mismatches from runPositionStateReconciliation (auth check) 
+      // will still persist until the next 30s auth-check runs.
+      if (this.reconcileSafetyCloseOnly && this.reconcileLastMismatchReason?.startsWith("sync_watch_")) {
+        this.logger.info("POSITION_RECONCILE_WATCH_RECOVERED", { 
+          sync_status: syncSnap.sync_status,
+          prev_reason: this.reconcileLastMismatchReason 
+        });
+        this.reconcileSafetyCloseOnly = false;
+        this.reconcileLastMismatchReason = null;
+      }
     }
 
 
@@ -2297,37 +2309,41 @@ export class PaperEngine {
 
   private computePaperExecutionReadiness(): boolean {
     const previousPaperExecutionReady = this.paperExecutionReady;
-    const serverAuthorityOk =
-      this.serverTradeControlState.server_trade_enabled === true &&
-      this.serverTradeControlState.close_only_mode === false &&
-      this.serverTradeControlState.kill_switch_active === false &&
-      this.reconcileSafetyCloseOnly === false;
+    
+    const serverTradeEnabled = this.serverTradeControlState.server_trade_enabled === true;
+    const closeOnlyMode = this.serverTradeControlState.close_only_mode === true;
+    const killSwitch = this.serverTradeControlState.kill_switch_active === true;
+    const reconcileSafe = this.reconcileSafetyCloseOnly === true;
+
+    const serverAuthorityOk = serverTradeEnabled && !closeOnlyMode && !killSwitch && !reconcileSafe;
     const engineLoopHealthy = this.engineLastTickAt != null;
     const pipelineReady = this.entryPipelineReady && this.exitPipelineReady;
     const marketReady = this.publicMarketDataReady === true;
     const writerReady = this.bundleWriterReady === true;
     const positionStateReady = this.positionTrackingAlive === true;
+    
     const currentPaper = serverAuthorityOk && engineLoopHealthy && pipelineReady && marketReady && writerReady && positionStateReady;
 
     if (!currentPaper) {
+      const reasons: string[] = [];
+      if (!serverTradeEnabled) reasons.push("SERVER_TRADE_DISABLED");
+      if (closeOnlyMode) reasons.push("CLOSE_ONLY_MODE");
+      if (killSwitch) reasons.push("KILL_SWITCH");
+      if (reconcileSafe) reasons.push("RECONCILE_SAFE_MODE");
+      if (!engineLoopHealthy) reasons.push("ENGINE_LOOP_NOT_HEALTHY");
+      if (!marketReady) reasons.push("MARKET_DATA_NOT_READY");
+      if (!positionStateReady) reasons.push("POSITION_TRACKING_NOT_ALIVE");
+      if (!writerReady) reasons.push("BUNDLE_WRITER_NOT_READY");
+      if (!pipelineReady) reasons.push("PIPELINE_NOT_READY");
+
       this.logger.warn("PAPER_EXECUTION_READINESS_BREAKDOWN", {
-        currentPaper,
-        previousPaperExecutionReady,
-        serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
-        closeOnlyMode: this.serverTradeControlState.close_only_mode,
-        killSwitch: this.serverTradeControlState.kill_switch_active,
-        reconcileSafeMode: this.reconcileSafetyCloseOnly,
-        engineLoopHealthy,
-        publicMarketDataReady: this.publicMarketDataReady,
-        positionTrackingAlive: this.positionTrackingAlive,
-        bundleWriterReady: this.bundleWriterReady,
-        entryPipelineReady: this.entryPipelineReady,
-        exitPipelineReady: this.exitPipelineReady,
-        signedExecutionReady: this.signedExecutionReady,
-        freshTickRequiredAfterReadiness: this.freshTickRequiredAfterReadiness,
-        readinessFreshTickCompletedCycles: this.readinessFreshTickCompletedCycles,
-        readinessFreshTickRequiredCycles: this.readinessFreshTickRequiredCycles,
-        paperExecutionReadyChangedAt: this.paperExecutionReadyChangedAt,
+        ready: false,
+        reasons,
+        serverTradeEnabled,
+        closeOnlyMode,
+        killSwitch,
+        reconcileSafeMode: reconcileSafe,
+        reconcileLastMismatchReason: this.reconcileLastMismatchReason,
         run_cycle_id: this.runCycleId
       });
     }
@@ -2682,44 +2698,41 @@ export class PaperEngine {
   private evaluateReadinessTransition(nowTs: number): void {
     const currentPaper = this.computePaperExecutionReadiness();
     const currentSigned = this.computeSignedExecutionReadiness();
+
+    this.logger.info("V2_READINESS_AUTHORITY_STATE_PROOF", {
+      ts: nowTs,
+      paper_execution_ready: currentPaper,
+      signed_execution_ready: currentSigned,
+      reconcile_safe_mode: this.reconcileSafetyCloseOnly,
+      reconcile_last_mismatch_reason: this.reconcileLastMismatchReason,
+      server_trade_enabled: this.serverTradeControlState.server_trade_enabled,
+      close_only_mode: this.serverTradeControlState.close_only_mode
+    });
+
     if (!this.paperExecutionReady && currentPaper) {
       this.paperExecutionReadyChangedAt = nowTs;
       this.freshTickRequiredAfterReadiness = true;
       this.readinessTransitionCycleId = this.runCycleId;
-      this.logger.info("READINESS_TRANSITION_DETECTED", {
-        from: false,
-        to: true,
-        paper_execution_ready_changed_at: nowTs,
-        run_cycle_id: this.runCycleId
-      });
       this.logger.info("PAPER_EXECUTION_READINESS_CHANGED", {
         from: false,
         to: true,
-        paper_execution_ready_changed_at: nowTs,
         run_cycle_id: this.runCycleId
       });
       this.dropReadinessStaleState("false_to_true_transition", nowTs);
     } else if (this.paperExecutionReady !== currentPaper) {
       this.paperExecutionReadyChangedAt = nowTs;
-      this.logger.info("READINESS_TRANSITION_DETECTED", {
-        from: this.paperExecutionReady,
-        to: currentPaper,
-        paper_execution_ready_changed_at: nowTs,
-        run_cycle_id: this.runCycleId
-      });
       this.logger.info("PAPER_EXECUTION_READINESS_CHANGED", {
         from: this.paperExecutionReady,
         to: currentPaper,
-        paper_execution_ready_changed_at: nowTs,
         run_cycle_id: this.runCycleId
       });
     }
+    
     if (this.signedExecutionReady !== currentSigned) {
       this.signedExecutionReadyChangedAt = nowTs;
       this.logger.info("SIGNED_EXECUTION_READINESS_TRANSITION", {
         from: this.signedExecutionReady,
         to: currentSigned,
-        signed_execution_ready_changed_at: nowTs,
         run_cycle_id: this.runCycleId
       });
     }
@@ -2885,8 +2898,8 @@ export class PaperEngine {
 
 
     await this.refreshLiveBalanceSnapshot(Date.now());
-    this.evaluateReadinessTransition(Date.now());
     await this.runPositionStateReconciliation(Date.now());
+    this.evaluateReadinessTransition(Date.now());
     const history = await this.store.readPositionsHistory();
     await this.refreshEntryQualitySamples(history as PaperClosedPositionRecord[]);
 
