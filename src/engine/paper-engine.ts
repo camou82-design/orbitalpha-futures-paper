@@ -1285,17 +1285,24 @@ export class PaperEngine {
         const hit = okxSwapRowToLedgerKey(row as Record<string, unknown>);
         if (!hit) continue;
         const key = hit.key; // symbol:side
-        const inLedger = paperOpens.some(p => `${p.symbol}:${p.side}` === key);
-        if (!inLedger) {
+        
+        // Block if not in ledger OR if in ledger as EXTERNAL_MANUAL_POSITION
+        const isNormalInLedger = paperOpens.some(p => 
+          `${p.symbol}:${p.side}` === key && 
+          p.lifecycleState !== "EXTERNAL_MANUAL_POSITION"
+        );
+
+        if (!isNormalInLedger) {
           if (!this.symbolExternalManualBlocked.has(key)) {
             this.symbolExternalManualBlocked.add(key);
-            this.logger.info("SYMBOL_EXTERNAL_MANUAL_POSITION_BLOCK", {
+            this.logger.warn("SYMBOL_EXTERNAL_MANUAL_POSITION_BLOCK", {
               symbol: hit.symbol,
               side: hit.side,
               okx_position_exists: true,
-              source: "okx_actual",
+              source: "okx_actual_or_external_manual",
               action: "BLOCK_THIS_SYMBOL_ONLY",
-              global_trade_blocked: false
+              global_trade_blocked: false,
+              detail: "Position exists on OKX but is not a normal paper-ledger position. Blocking entries for this symbol:side."
             });
           }
         }
@@ -2182,7 +2189,8 @@ export class PaperEngine {
     // 4. Remote-Only Ghost Positions (Adopt/Repair Path)
     for (const [key, remoteVal] of remoteMap.entries()) {
       if (!rawOpens.some(p => `${p.symbol}:${p.side}` === key)) {
-        mismatchCount++;
+        // We do NOT increment mismatchCount for Remote-Only Ghost positions anymore.
+        // Instead, we adopt them as EXTERNAL_MANUAL_POSITION which only blocks that symbol.
         const [symbol, sideToken] = key.split(":");
         const side: "long" | "short" = sideToken === "short" ? "short" : "long";
 
@@ -2226,7 +2234,7 @@ export class PaperEngine {
           strategyVersion: "paper-v2",
           sourceSignal: "okx_reconcile_adopted",
           sourceRunPath: "manual_adoption",
-          lifecycleState: "OPEN",
+          lifecycleState: "EXTERNAL_MANUAL_POSITION",
           reconcileState: "ADOPTED",
           lastCheckedAt: nowTs,
           initialSizeUsd: notional,
@@ -2265,8 +2273,12 @@ export class PaperEngine {
       }
     }
 
-    const hasAdopted = next.some(p => p.sourceSignal === "okx_reconcile_adopted");
-    if (mismatchCount > 0 || hasAdopted) {
+    const hasSeriousAdopted = next.some(p => 
+      p.sourceSignal === "okx_reconcile_adopted" && 
+      p.lifecycleState !== "EXTERNAL_MANUAL_POSITION"
+    );
+
+    if (mismatchCount > 0 || hasSeriousAdopted) {
       this.reconcileSafetyCloseOnly = true;
       this.reconcileLastMismatchReason = mismatchCount > 0 ? "position_state_mismatch" : "adopted_position_active_safety_block";
     } else {
