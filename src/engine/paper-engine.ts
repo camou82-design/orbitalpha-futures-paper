@@ -1635,6 +1635,64 @@ export class PaperEngine {
               open.entryPrice = remotePos.avgPx;
             }
             ledgerModified = true;
+          } else if (isClosePending && pendingAt && nowTs - pendingAt > PENDING_TIMEOUT_MS && remotePos) {
+            const prevEntryPx = open.entryPrice;
+            const prevNotional = open.notionalUsd;
+            const prevLifecycle = open.lifecycleState;
+            const nextLifecycle = effectiveCloseOnlyMode ? "CLOSE_ONLY_MANAGED" : "OPEN";
+
+            this.logger.warn("STALE_CLOSE_PENDING_REPAIRED_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              pending_elapsed_ms: nowTs - pendingAt,
+              had_close_order_id: false,
+              prev_entry_px: prevEntryPx,
+              new_entry_px: remotePos.avgPx,
+              prev_notional: prevNotional,
+              new_notional: Math.abs(remotePos.notionalUsd),
+              prev_lifecycle: prevLifecycle,
+              next_lifecycle: nextLifecycle,
+              detail: "CLOSE_PENDING_WITHOUT_ORDER_ID_BUT_POSITION_EXISTS_RESTORED"
+            });
+
+            open.lifecycleState = nextLifecycle;
+            open.reconcileState = "MATCHED";
+            open.lastCheckedAt = nowTs;
+
+            // Clear pending fields
+            open.closePendingAt = undefined;
+            open.closePendingReason = undefined;
+            open.closePendingPrice = undefined;
+            open.closePendingFundingRate = undefined;
+            open.closePendingFilledSize = undefined;
+            open.closePendingRemainingSize = undefined;
+            open.closePendingOrdId = undefined;
+            open.closePendingClOrdId = undefined;
+
+            // Update to OKX actual
+            open.entryPrice = remotePos.avgPx;
+            open.avgPx = remotePos.avgPx;
+            open.baseQty = remotePos.size;
+            open.pos = remotePos.size;
+            open.notionalUsd = Math.abs(remotePos.notionalUsd);
+
+            const instIdR = toOkxSwapInstId(open.symbol);
+            const instR = this.instrumentCache.get(instIdR);
+            const ctValR = instR?.ctVal ?? 1;
+            if (ctValR > 0) {
+              const cAbs = remotePos.size / ctValR;
+              open.okxContracts = cAbs;
+              open.exchangeFilledSize = cAbs;
+            }
+
+            // stopPrice recalculation
+            const slReg = regimeForSl(open.regimeAtEntry);
+            const newStop = engineMirrorStopPrice(remotePos.avgPx, open.side, slReg);
+            if (newStop != null && Number.isFinite(newStop)) {
+              open.stopPrice = newStop;
+            }
+
+            ledgerModified = true;
           }
           next.push(open);
           continue;
