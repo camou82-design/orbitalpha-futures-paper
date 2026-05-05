@@ -964,6 +964,8 @@ export class PaperEngine {
    * Key: `${symbol}:${side}:${openedAt}`
    */
   private readonly terminalExitConsumedByFlow = new Set<string>();
+  /** symbol:side -> true if OKX actual position exists but not in paper ledger. */
+  private readonly symbolExternalManualBlocked = new Set<string>();
   /** Deduplication for V2 exit authority proof logs. Key: `${symbol}_${side}` */
   private lastV2ExitAuthorityProofBySymbol = new Map<string, string>();
   private instrumentCache = new Map<string, { ctVal: number; ctValCcy: string }>();
@@ -1277,10 +1279,35 @@ export class PaperEngine {
     await this.updateInstrumentCache();
     const syncSnap = buildLedgerOkxPositionSyncSnapshot(paperOpens, this.lastLivePositionsPayload, this.instrumentCache);
 
+    this.symbolExternalManualBlocked.clear();
+    if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
+      for (const row of this.lastLivePositionsPayload) {
+        const hit = okxSwapRowToLedgerKey(row as Record<string, unknown>);
+        if (!hit) continue;
+        const key = hit.key; // symbol:side
+        const inLedger = paperOpens.some(p => `${p.symbol}:${p.side}` === key);
+        if (!inLedger) {
+          if (!this.symbolExternalManualBlocked.has(key)) {
+            this.symbolExternalManualBlocked.add(key);
+            this.logger.info("SYMBOL_EXTERNAL_MANUAL_POSITION_BLOCK", {
+              symbol: hit.symbol,
+              side: hit.side,
+              okx_position_exists: true,
+              source: "okx_actual",
+              action: "BLOCK_THIS_SYMBOL_ONLY",
+              global_trade_blocked: false
+            });
+          }
+        }
+      }
+    }
+
     const criticalMismatch = 
       syncSnap.sync_status !== "ALIGNED" && 
       syncSnap.sync_status !== "REMOTE_UNAVAILABLE" &&
-      syncSnap.sync_status !== "LEDGER_ONLY";
+      syncSnap.sync_status !== "LEDGER_ONLY" &&
+      syncSnap.sync_status !== "OKX_ONLY" &&
+      syncSnap.sync_status !== "KEY_MISMATCH"; // Extra positions on OKX are handled by symbol-level block
 
     if (criticalMismatch) {
       this.reconcileSafetyCloseOnly = true;
@@ -1637,9 +1664,7 @@ export class PaperEngine {
             ledgerModified = true;
           } else if (isClosePending && pendingAt && nowTs - pendingAt > PENDING_TIMEOUT_MS && remotePos) {
             const prevEntryPx = open.entryPrice;
-            const prevNotional = open.notionalUsd;
-            const prevLifecycle = open.lifecycleState;
-            const nextLifecycle = effectiveCloseOnlyMode ? "CLOSE_ONLY_MANAGED" : "OPEN";
+            const nextLifecycle = "EXTERNAL_MANUAL_POSITION";
 
             this.logger.warn("STALE_CLOSE_PENDING_REPAIRED_PROOF", {
               symbol: open.symbol,
@@ -1648,11 +1673,16 @@ export class PaperEngine {
               had_close_order_id: false,
               prev_entry_px: prevEntryPx,
               new_entry_px: remotePos.avgPx,
-              prev_notional: prevNotional,
-              new_notional: Math.abs(remotePos.notionalUsd),
-              prev_lifecycle: prevLifecycle,
-              next_lifecycle: nextLifecycle,
-              detail: "CLOSE_PENDING_WITHOUT_ORDER_ID_BUT_POSITION_EXISTS_RESTORED"
+              action: "KEEP_POSITION_NO_HISTORY_APPEND_SYMBOL_BLOCK_ONLY"
+            });
+
+            this.logger.info("STALE_CLOSE_PENDING_EXTERNAL_POSITION_HELD_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              pending_elapsed_ms: nowTs - pendingAt,
+              close_order_id_present: false,
+              okx_position_exists: true,
+              action: "KEEP_POSITION_NO_HISTORY_APPEND_SYMBOL_BLOCK_ONLY"
             });
 
             open.lifecycleState = nextLifecycle;
@@ -3232,9 +3262,38 @@ export class PaperEngine {
 
       const existingPos = opensAfterClose.find((o) => o.symbol === sym);
 
+      const symbolBlocked = this.symbolExternalManualBlocked.has(`${sym}:long`) || 
+                           this.symbolExternalManualBlocked.has(`${sym}:short`);
+
+      const blockRes: EvaluatePaperSymbolEntryResult | null = symbolBlocked ? {
+        decision: {
+          ts: fetchedAt,
+          timestamp: new Date(fetchedAt).toISOString(),
+          symbol: sym,
+          engine_mode: this.config.paperEngineMode,
+          signal_state: "NONE",
+          regime_state: effectiveRegimeForDecision as PaperRegimeState,
+          edge_state: "PASS",
+          risk_state: "HARD_BLOCK",
+          execution_state: "DISABLED",
+          final_decision: "REJECT",
+          strategy_executor: "IDLE",
+          reject_reason: "EXTERNAL_MANUAL_POSITION_BLOCK",
+          final_block_owner: "external_manual_gate",
+          guidance: "Symbol blocked due to external manual position on OKX",
+          next_action: "Wait for manual position to close on OKX"
+        },
+        intentSide: null,
+        executorDecision: null,
+        adaptiveOk: false,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      } : null;
+
       // 1. Snapshot-Check & Preliminary Block Logging
       if (!snap) {
-        const resNull = evaluatePaperSymbolEntry({
+        const resNull = blockRes || evaluatePaperSymbolEntry({
           config: this.config,
           snapshot: null,
           dataReady: regimeUnknown === false,
@@ -3284,7 +3343,7 @@ export class PaperEngine {
       }
 
       // 2. Decision Logic
-      let res = evaluatePaperSymbolEntry({
+      let res = blockRes || evaluatePaperSymbolEntry({
         config: this.config,
         snapshot: snapForDecision!,
         dataReady: regimeUnknown === false,
@@ -5743,6 +5802,24 @@ export class PaperEngine {
     };
   }
 
+  private async isHistoryDuplicate(record: PaperClosedPositionRecord): Promise<boolean> {
+    try {
+      const history = await this.store.readPositionsHistory();
+      if (!Array.isArray(history)) return false;
+      return history.some((h: any) =>
+        h &&
+        h.symbol === record.symbol &&
+        h.side === record.side &&
+        h.openedAt === record.openedAt &&
+        h.entryPrice === record.entryPrice &&
+        h.exitType === record.exitType &&
+        h.closeReason === record.closeReason
+      );
+    } catch {
+      return false;
+    }
+  }
+
   private async appendClosedWithStandardRouting(input: Readonly<{
     closedRow: PaperClosedPositionRecord;
     open: PaperOpenPositionRecord;
@@ -5770,6 +5847,52 @@ export class PaperEngine {
       ...(authoritySource != null ? { authority: authoritySource } : {}),
       ...(input.open.authoritySideAtEntry != null ? { authoritySide: input.open.authoritySideAtEntry } : {})
     };
+
+    // --- History Append Guard ---
+    const okxPos = this.lastLivePositionsPayload?.find((p: any) => {
+      const hit = okxSwapRowToLedgerKey(p);
+      return hit && hit.symbol === input.open.symbol && hit.side === input.open.side;
+    });
+
+    const isDuplicate = await this.isHistoryDuplicate(normalized);
+    if (isDuplicate) {
+      this.logger.warn("HISTORY_APPEND_DUPLICATE_BLOCKED", {
+        symbol: normalized.symbol,
+        side: normalized.side,
+        openedAt: normalized.openedAt,
+        entryPrice: normalized.entryPrice,
+        exitType: normalized.exitType,
+        closeReason: normalized.closeReason
+      });
+      return normalized;
+    }
+
+    const okxPositionExists = !!okxPos;
+    const invalidPrice = !normalized.closePrice || !Number.isFinite(normalized.closePrice) || normalized.closePrice <= 0;
+
+    const blockReason = 
+        invalidPrice ? "INVALID_CLOSE_PRICE" :
+        (okxPositionExists ? "OKX_POSITION_STILL_EXISTS_NO_CLOSE_FILL" : null);
+
+    if (blockReason) {
+      this.logger.warn("HISTORY_APPEND_BLOCKED_EXTERNAL_MANUAL_POSITION", {
+        symbol: normalized.symbol,
+        side: normalized.side,
+        sourceSignal: input.open.sourceSignal,
+        lifecycleState: input.open.lifecycleState,
+        closeReason: normalized.closeReason,
+        exitType: normalized.exitType,
+        closePrice: normalized.closePrice,
+        okx_position_exists: okxPositionExists,
+        okx_avg_px: okxPos ? (okxPos as any).avgPx : null,
+        okx_base_qty: okxPos ? (okxPos as any).baseQty : null,
+        okx_contracts: okxPos ? (okxPos as any).pos : null,
+        reason: blockReason,
+        action: "SKIP_HISTORY_APPEND_KEEP_EXTERNAL_POSITION"
+      });
+      return normalized;
+    }
+
     await this.positions.appendClosed(normalized);
     this.logger.info("EXIT_STANDARD_ROUTING_PROOF", {
       symbol: input.open.symbol,

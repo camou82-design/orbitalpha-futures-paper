@@ -257,7 +257,8 @@ export type PaperDecisionRejectReason =
   | "SYMBOL_OPPOSITE_POSITION_OPEN"
   /** Stage1 symbol-level mutex: same side already open without add-on/scale-in */
   | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
-  | "PENDING_EXCHANGE_CONFIRM_LOCK";
+  | "PENDING_EXCHANGE_CONFIRM_LOCK"
+  | "EXTERNAL_MANUAL_POSITION_BLOCK";
 
 export type PaperStage1ResultCode =
   | "STAGE1_ENTERED"
@@ -809,6 +810,7 @@ export type PaperOpenPositionRecord = {
     | "ADDON_ACTIVE" 
     | "PARTIAL_ACTIVE" 
     | "CLOSE_ONLY_MANAGED"
+    | "EXTERNAL_MANUAL_POSITION"
     | "FAILED";
   exchangeOrdId?: string;
   exchangeClOrdId?: string;
@@ -1298,6 +1300,7 @@ export type PaperClosedPositionRecord = Readonly<{
   | "range_profit_trail"
   | "structural_regime_shift"
   | "trend_switch"
+  | "manual_full_close_reconciled"
   | "EXIT_LONG_CRASH_FORCE"
   | "EXIT_LONG_CRASH_REDUCE"
   | "EXIT_SHORT_MOMENTUM_TRAIL"
