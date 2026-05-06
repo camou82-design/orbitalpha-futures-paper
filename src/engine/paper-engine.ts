@@ -6886,6 +6886,26 @@ export class PaperEngine {
       const v2ExitAuthority = envelope.selector?.v2_result.v2ExitAuthority ?? null;
       const v2PartialAuthority = envelope.selector?.v2_result.v2PartialAuthority ?? null;
       const lifecycleAuthority = envelope.selector?.v2_result.lifecycleAuthority ?? null;
+
+      const isV2Pos = this.isV2AuthorityPosition(open);
+      const exitManagedByV2 = isV2Pos && (lifecycleAuthority?.exitManagedByV2 === true);
+      const partialManagedByV2 = isV2Pos && (lifecycleAuthority?.partialManagedByV2 === true);
+
+      // [V2_LIFECYCLE_AUTHORITY_PROOF]
+      if (isV2Pos) {
+        this.logger.info("V2_LIFECYCLE_AUTHORITY_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          openedAt: open.openedAt,
+          exitManaged: exitManagedByV2,
+          partialManaged: partialManagedByV2,
+          cooldownManaged: lifecycleAuthority?.cooldownManagedByV2 ?? false,
+          stateManaged: lifecycleAuthority?.positionStateManagedByV2 ?? false,
+          authorityOwner: lifecycleAuthority?.lifecycleAuthorityOwner ?? "unknown",
+          executionOwner: lifecycleAuthority?.executionOwner ?? "unknown",
+          stage: lifecycleAuthority?.lifecycleStage ?? "unknown"
+        });
+      }
       
       let v2TakeoverAction: "none" | "close" | "partial_close" = "none";
       let v2TakeoverReason: string | null = null;
@@ -7204,7 +7224,8 @@ export class PaperEngine {
       };
 
       let rangeState = null as ReturnType<typeof evaluateRangeEngineForSymbol> | null;
-      if (rangeManagedPosition) {
+      // [V2_EXIT_SOVEREIGNTY_GATE] Skip legacy RANGE exit logic if V2 is managing
+      if (rangeManagedPosition && !exitManagedByV2) {
         rangeState = evaluateRangeEngineForSymbol({
           symbol: symKey,
           lastPrice: closePrice,
@@ -7496,7 +7517,8 @@ export class PaperEngine {
       const symKeyStr = String(open.symbol);
       const priorBr = this.trendBreakoutBySymbol.get(symKeyStr) ?? "none";
       let trendState = null as ReturnType<typeof evaluateTrendEngineForSymbol> | null;
-      if (exitLane === "TREND" || regimeAtEntry === "TREND") {
+      // [V2_EXIT_SOVEREIGNTY_GATE] Skip legacy TREND switch logic if V2 is managing
+      if ((exitLane === "TREND" || regimeAtEntry === "TREND") && !exitManagedByV2) {
         trendState = evaluateTrendEngineForSymbol({
           mark: closePrice,
           entryPrice: open.entryPrice,
@@ -8087,7 +8109,8 @@ export class PaperEngine {
 
 
       // 2. Regime Flip / Trend Break check (하위 트리거 → 상위 exit authority 재판정 후에만 전량 청산)
-      if (regimeAtEntry === "TREND") {
+      // [V2_EXIT_SOVEREIGNTY_GATE] Skip legacy TREND break logic if V2 is managing
+      if (regimeAtEntry === "TREND" && !exitManagedByV2) {
         const trendOkNow = snap.trendOk === true;
         if (regimeNow !== "TREND" || !trendOkNow) {
           if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, "trend_break_exit", postPartialProtectActive)) {
@@ -8210,8 +8233,12 @@ export class PaperEngine {
       }
 
       // 3. RANGE / TREND 실행기 분리(포지션 레짐·상위 모드로 레인 선택)
-      let exitEval =
-        exitLane === "RANGE"
+      // [V2_EXIT_SOVEREIGNTY_GATE] Skip legacy executor evaluation if V2 is managing exit/partial
+      let exitEval: { action: "hold" | "close" | "partial_close"; reason?: string | null; detail?: any; [key: string]: any } = { action: "hold" };
+
+      if (!exitManagedByV2 && !partialManagedByV2) {
+        exitEval =
+          exitLane === "RANGE"
           ? rangeExecutorEvaluateExit({
             side: open.side,
             pnlPctNet: m.pnlPctNet,
@@ -8233,6 +8260,7 @@ export class PaperEngine {
             ema20: snap.ema20,
             ema60: snap.ema60
           });
+      }
 
       const regimeExitSnap = evaluateRegimeExitPolicy({
         regime: slRegime,
@@ -8484,7 +8512,8 @@ export class PaperEngine {
           (open.side === "long" && open.rangeEntryZone === "lower")) &&
         (open.partialExitStage ?? 0) === 0 &&
         open.rangeFirstProfitLocked !== true &&
-        exitEval.action === "hold"
+        exitEval.action === "hold" &&
+        !partialManagedByV2 // [V2_PARTIAL_SOVEREIGNTY_GATE]
       ) {
         const firstProfitLockThreshold = 0.00035;
         const profitLockSymmetryBranch = open.side === "short" ? "upper_short" : "lower_long";
