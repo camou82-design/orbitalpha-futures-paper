@@ -830,6 +830,10 @@ export type PaperOpenPositionRecord = {
   closePendingRemainingSize?: number;
   closePendingProcessedFillSz?: number;
 
+  // Protective Stop Order Tracking
+  protectiveStopAlgoId?: string;
+  isProtectiveStopRegistered?: boolean;
+
   // Partial Pending Tracking
   partialPendingOrdId?: string;
   partialPendingClOrdId?: string;

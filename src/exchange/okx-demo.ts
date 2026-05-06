@@ -244,6 +244,39 @@ export class OkxDemoClient {
     return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/order", q, null);
   }
 
+  submitAlgoOrder(input: {
+    instId: string;
+    tdMode: string;
+    side: string;
+    posSide?: string;
+    ordType: string;
+    sz: string;
+    reduceOnly?: boolean;
+    slTriggerPx?: string;
+    slOrdPx?: string;
+    tpTriggerPx?: string;
+    tpOrdPx?: string;
+  }): Promise<TryResult<Record<string, unknown>[]>> {
+    const payload = {
+      instId: input.instId,
+      tdMode: input.tdMode,
+      side: input.side,
+      ...(input.posSide ? { posSide: input.posSide } : {}),
+      ordType: input.ordType,
+      sz: input.sz,
+      ...(input.reduceOnly === true ? { reduceOnly: "true" } : {}),
+      ...(input.slTriggerPx ? { slTriggerPx: input.slTriggerPx } : {}),
+      ...(input.slOrdPx ? { slOrdPx: input.slOrdPx } : {}),
+      ...(input.tpTriggerPx ? { tpTriggerPx: input.tpTriggerPx } : {}),
+      ...(input.tpOrdPx ? { tpOrdPx: input.tpOrdPx } : {})
+    };
+    return this.signedRequest<Record<string, unknown>>("POST", "/api/v5/trade/order-algo", null, payload);
+  }
+
+  cancelAlgoOrder(args: Array<{ instId: string; algoId: string }>): Promise<TryResult<Record<string, unknown>[]>> {
+    return this.signedRequest<Record<string, unknown>>("POST", "/api/v5/trade/cancel-algos", null, args as any);
+  }
+
   /** Pending ordinary swap orders (incl. limit/market working). Diagnostics only unless paired with algo. */
   getOrdersPending(args: { instType: string; instId?: string }): Promise<TryResult<Record<string, unknown>[]>> {
     const q = new URLSearchParams();

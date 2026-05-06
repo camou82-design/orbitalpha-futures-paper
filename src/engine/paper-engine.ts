@@ -966,6 +966,8 @@ export class PaperEngine {
   private readonly terminalExitConsumedByFlow = new Set<string>();
   /** symbol:side -> true if OKX actual position exists but not in paper ledger. */
   private readonly symbolExternalManualBlocked = new Set<string>();
+  /** symbol -> true if protective stop order failed to register; block further entries. */
+  private readonly symbolProtectionFailedBlocked = new Set<string>();
   /** Deduplication for V2 exit authority proof logs. Key: `${symbol}_${side}` */
   private lastV2ExitAuthorityProofBySymbol = new Map<string, string>();
   private instrumentCache = new Map<string, { ctVal: number; ctValCcy: string }>();
@@ -1280,6 +1282,20 @@ export class PaperEngine {
     const syncSnap = buildLedgerOkxPositionSyncSnapshot(paperOpens, this.lastLivePositionsPayload, this.instrumentCache);
 
     this.symbolExternalManualBlocked.clear();
+    const currentRunBlockedSymbols = new Set<string>();
+    
+    // Clear protection block for symbols that are now clean (no ledger pos AND no exchange pos)
+    for (const sym of this.symbolProtectionFailedBlocked) {
+      const inLedger = paperOpens.some(p => p.symbol === sym);
+      const inExchange = (this.lastLivePositionsPayload as any[] ?? []).some(r => {
+        const hit = okxSwapRowToLedgerKey(r);
+        return hit && hit.symbol === sym;
+      });
+      if (!inLedger && !inExchange) {
+        this.logger.info("PROTECTION_FAILURE_BLOCK_CLEARED", { symbol: sym, reason: "position_zeroed" });
+        this.symbolProtectionFailedBlocked.delete(sym);
+      }
+    }
     if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
       for (const row of this.lastLivePositionsPayload) {
         const hit = okxSwapRowToLedgerKey(row as Record<string, unknown>);
@@ -1582,7 +1598,7 @@ export class PaperEngine {
       }
     };
 
-    for (const open of rawOpens) {
+    for (let open of rawOpens) {
       const isNew = nowTs - open.openedAt < RECONCILE_GRACE_PERIOD_MS;
       const isPending = open.lifecycleState === "PENDING_EXCHANGE_CONFIRM";
       const isClosePending = open.lifecycleState === "CLOSE_PENDING";
@@ -1647,12 +1663,19 @@ export class PaperEngine {
           }
           ledgerModified = true;
           this.logger.info("POSITION_OPEN_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, status: "confirmed" });
+          
+          const protectRes = await this.ensureProtectiveStopOrder(open, `${open.symbol}:${open.side}:${open.openedAt}`);
+          if (protectRes.modified) {
+            open = protectRes.record;
+          }
+          
           this.logger.info("paper_position_opened", {
             symbol: open.symbol,
             side: open.side,
             source: open.sourceSignal,
             reconcile_confirmed: true,
-            detected_at: nowTs
+            detected_at: nowTs,
+            protected: open.isProtectiveStopRegistered === true
           });
         } else if (!isNew) {
           const exchangeOrdId = open.exchangeOrdId || "unknown";
@@ -1968,6 +1991,19 @@ export class PaperEngine {
                   open.partialPendingProcessedFillSz = cumulativeFillSz;
                   open.partialPendingProcessedUsd = (open.partialPendingProcessedUsd ?? 0) + deltaFilledUsd;
 
+                  // Force protective stop re-registration on size change
+                  if (open.protectiveStopAlgoId && open.isProtectiveStopRegistered) {
+                    this.logger.info("PROTECTIVE_STOP_UPDATE_REQUIRED_PARTIAL_FILL", { 
+                      symbol: open.symbol, 
+                      oldAlgoId: open.protectiveStopAlgoId,
+                      newSize: open.okxContracts,
+                      flowId
+                    });
+                    await this.cancelProtectiveStopOrder(open.symbol, open.protectiveStopAlgoId, flowId);
+                    open.protectiveStopAlgoId = undefined;
+                    open.isProtectiveStopRegistered = false;
+                  }
+
                   if (orderState === "filled") {
                     open.lifecycleState = "OPEN";
                     open.partialExitStage = (open.partialExitStage ?? 0) + 1;
@@ -2278,6 +2314,13 @@ export class PaperEngine {
           open.reconcileState = "MATCHED";
         }
         open.lastCheckedAt = nowTs;
+
+        // Periodic check for protection or size update for OPEN positions
+        const protectRes = await this.ensureProtectiveStopOrder(open, `tick:${this.runCycleId}:${open.symbol}`);
+        if (protectRes.modified) {
+          open = protectRes.record;
+          ledgerModified = true;
+        }
       }
 
       next.push(open);
@@ -2580,7 +2623,6 @@ export class PaperEngine {
             okx_positions_ok: this.okxPositionsOk
           });
         }
-
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         this.lastLiveBalancePayload = null;
@@ -5068,6 +5110,124 @@ export class PaperEngine {
     return normalizedPx;
   }
 
+  private async cancelProtectiveStopOrder(symbol: string, algoId: string, flowId: string): Promise<boolean> {
+    if (!this.okxDemo) return false;
+    this.logger.info("OKX_PROTECTIVE_STOP_ORDER_CANCEL_SUBMIT", { symbol, algoId, flowId });
+    const res = await this.okxDemo.cancelAlgoOrder([{ instId: toOkxSwapInstId(symbol as MarketSymbol), algoId }]);
+    if (res.ok) {
+      this.logger.info("OKX_PROTECTIVE_STOP_ORDER_CANCEL_ACCEPTED", { symbol, algoId, flowId });
+      return true;
+    } else {
+      const error = (res as any).error || "unknown_error";
+      this.logger.error("OKX_PROTECTIVE_STOP_ORDER_CANCEL_FAILED", { symbol, algoId, error, flowId });
+      return false;
+    }
+  }
+
+  private async ensureProtectiveStopOrder(
+    open: PaperOpenPositionRecord,
+    flowId: string
+  ): Promise<{ modified: boolean; success: boolean; record: PaperOpenPositionRecord }> {
+    if (!this.okxDemo) return { modified: false, success: false, record: open };
+
+    const symSideKey = `${open.symbol}:${open.side}`;
+    const isOperatorManaged = 
+      this.symbolExternalManualBlocked.has(symSideKey) ||
+      open.lifecycleState === "EXTERNAL_MANUAL_POSITION" || 
+      open.lifecycleState === "OPERATOR_MANAGED" || 
+      open.lifecycleState === "CLOSE_ONLY_MANAGED" || 
+      (open as any).isOperatorManaged === true;
+
+    // EXCLUDE: ETHUSDT if manual residue was detected
+    if (isOperatorManaged) {
+      this.logger.info("OPERATOR_MANAGED_PROTECTION_SKIPPED", {
+        symbol: open.symbol,
+        side: open.side,
+        lifecycle: open.lifecycleState,
+        flowId
+      });
+      return { modified: false, success: true, record: open };
+    }
+
+    if (!open.stopPrice || !Number.isFinite(open.stopPrice)) {
+      return { modified: false, success: true, record: open };
+    }
+
+    if (open.isProtectiveStopRegistered && open.protectiveStopAlgoId) {
+      this.logger.info("POSITION_PROTECTION_STATE_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        reduce_only_protective_found: true,
+        algoId: open.protectiveStopAlgoId,
+        flowId
+      });
+      return { modified: false, success: true, record: open };
+    }
+
+    // Attempt to register
+    this.logger.info("OKX_PROTECTIVE_STOP_ORDER_SUBMIT", {
+      symbol: open.symbol,
+      side: open.side,
+      stopPrice: open.stopPrice,
+      size: open.baseQty,
+      flowId
+    });
+
+    const instId = toOkxSwapInstId(open.symbol);
+    const side = open.side === "long" ? "sell" : "buy";
+    const posSide = open.side === "long" ? "long" : "short";
+    
+    // Contract size based on exchange-derived quantity or baseQty
+    const sz = open.okxContracts != null ? Math.round(open.okxContracts) : 0;
+    if (sz <= 0) {
+      this.logger.warn("PROTECTIVE_STOP_SUBMIT_INVALID_SIZE", { symbol: open.symbol, sz, flowId });
+      return { modified: false, success: false, record: open };
+    }
+
+    const submit = await this.okxDemo.submitAlgoOrder({
+      instId,
+      tdMode: "cross",
+      side,
+      posSide,
+      ordType: "stop",
+      sz: String(sz),
+      reduceOnly: true,
+      slTriggerPx: String(open.stopPrice),
+      slOrdPx: "-1" // Market
+    });
+
+    if (submit.ok && submit.value?.[0]?.algoId) {
+      const algoId = String(submit.value[0].algoId);
+      this.logger.info("OKX_PROTECTIVE_STOP_ORDER_ACCEPTED", { symbol: open.symbol, algoId, flowId });
+      this.logger.info("OKX_PROTECTIVE_STOP_ORDER_CONFIRMED", { symbol: open.symbol, algoId, flowId });
+      
+      const updated: PaperOpenPositionRecord = {
+        ...open,
+        protectiveStopAlgoId: algoId,
+        isProtectiveStopRegistered: true
+      };
+      
+      this.logger.info("POSITION_PROTECTION_STATE_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        reduce_only_protective_found: true,
+        algoId,
+        flowId
+      });
+      
+      return { modified: true, success: true, record: updated };
+    } else {
+      const error = (submit as any).error || (submit as any).diagnostics?.retMsg || "unknown_error";
+      this.logger.error("OKX_PROTECTIVE_STOP_ORDER_CREATE_FAILED", { symbol: open.symbol, error, flowId });
+      this.logger.warn("PROTECTIVE_STOP_ORDER_MISSING", { symbol: open.symbol, flowId });
+      
+      // Block new entries for this symbol
+      this.symbolProtectionFailedBlocked.add(open.symbol);
+      
+      return { modified: false, success: false, record: open };
+    }
+  }
+
   private async submitOkxOrder(input: {
     symbol: MarketSymbol;
     side: "buy" | "sell";
@@ -5986,6 +6146,16 @@ export class PaperEngine {
       const hit = okxSwapRowToLedgerKey(p);
       return hit && hit.symbol === input.open.symbol && hit.side === input.open.side;
     });
+
+    if (input.open.protectiveStopAlgoId && input.open.isProtectiveStopRegistered) {
+      this.logger.info("PROTECTIVE_STOP_CLEANUP_REQUIRED", {
+        symbol: input.open.symbol,
+        algoId: input.open.protectiveStopAlgoId,
+        reason: input.exitReason,
+        flowId: input.flowId
+      });
+      await this.cancelProtectiveStopOrder(input.open.symbol, input.open.protectiveStopAlgoId, input.flowId);
+    }
 
     const isDuplicate = await this.isHistoryDuplicate(normalized);
     if (isDuplicate) {
@@ -9936,6 +10106,20 @@ export class PaperEngine {
             side: authority.side,
             reason: "symbol_level_external_manual_block_active",
             detail: "Entry blocked because this symbol has an external manual position or sync mismatch."
+          });
+        }
+        return;
+      }
+
+      // Local Symbol Block for Protection Registration Failures
+      if (this.symbolProtectionFailedBlocked.has(symKey)) {
+        if (authority.decision === "ENTER") {
+          this.logger.error("ENTRY_BLOCKED_PROTECTION_REGISTRATION_FAILURE", {
+            symbol: symKey,
+            decision: authority.decision,
+            side: authority.side,
+            reason: "protective_stop_registration_failed_in_prior_cycle",
+            detail: "Entry blocked because OKX server-side protection failed to register for this symbol. Operational safety violation."
           });
         }
         return;
