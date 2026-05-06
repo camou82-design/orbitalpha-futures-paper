@@ -1590,7 +1590,35 @@ export class PaperEngine {
       const key = `${open.symbol}:${open.side}`;
       const remotePos = remoteMap.get(key);
 
+      // --- EXTERNAL MANUAL RESIDUE PRUNING (Quiet) ---
+      // If OKX actual position is zero and paper open position exists as manual residue, prune it quietly.
+      if (!remotePos && !isNew) {
+        const isManualFlagged = open.lifecycleState === "EXTERNAL_MANUAL_POSITION";
+        const isManualBlocked = this.symbolExternalManualBlocked.has(key);
+        
+        if (isManualFlagged || isManualBlocked) {
+          const beforeCount = rawOpens.length;
+          const afterCount = rawOpens.length - 1;
+
+          this.logger.warn("EXTERNAL_MANUAL_POSITION_LEDGER_RESIDUE_PRUNED", {
+            symbol: open.symbol,
+            side: open.side,
+            flowId: `${open.symbol}:${open.side}:${open.openedAt}`,
+            reason: "okx_actual_position_zero_external_manual_residue",
+            history_appended: false,
+            okx_order_submitted: false,
+            before_open_count: beforeCount,
+            after_open_count: Math.max(0, afterCount)
+          });
+          ledgerModified = true;
+          // Clear the block for this symbol to allow immediate re-entry if strategy permits
+          this.symbolExternalManualBlocked.delete(key);
+          continue; // Skip pushing to next, effectively pruning it.
+        }
+      }
+
       // 1. Handle Entry Pending States (Normalization)
+
       if (isPending || open.lifecycleState === "INITIAL" || !open.lifecycleState) {
         if (remotePos) {
           const instIdR = toOkxSwapInstId(open.symbol);
