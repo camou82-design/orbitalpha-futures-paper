@@ -1538,8 +1538,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let vetoReason: string | null = null;
     const rangeLowerShortMismatchByReason = signalGateBlockedReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
     const rangeUpperLongMismatchByReason = signalGateBlockedReason === "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
-    const rangeLowerShortMismatch = sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
-    const rangeUpperLongMismatch = sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
+    const isRangeRouting = activeEngineRouting === "RANGE";
+    const rangeLowerShortMismatch = isRangeRouting && sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
+    const rangeUpperLongMismatch = isRangeRouting && sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
     const rangeDowngradedHardBlock = rangeSignalDowngraded && !rangeSignalKeptByRelax;
     const entryCandidateHardBlock = !entryCandidate && !promotionApplied;
     const trendPromotionHardBlock = activeEngineRouting === "TREND" && trendOk !== true && sideCandidateBeforeVeto !== "none";
@@ -2088,11 +2089,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const heldPosition = v2State.longPosition ?? v2State.shortPosition ?? null;
     const lifecyclePosition = sameSidePosition ?? heldPosition;
     const lifecycleSide: EngineV2Side =
-        v2SideAfterPromotion === "none" || v2SideAfterPromotion == null
-            ? lifecyclePosition != null
-                ? (lifecyclePosition.side === "LONG" ? "long" : "short")
-                : "none"
-            : v2SideAfterPromotion;
+        lifecyclePosition != null
+            ? (lifecyclePosition.side === "LONG" ? "long" : "short")
+            : (v2SideAfterPromotion !== "none" && v2SideAfterPromotion != null)
+                ? v2SideAfterPromotion
+                : "none";
     const hasLifecycleCandidate =
         lifecyclePosition != null ||
         finalDecision === "ENTER" ||

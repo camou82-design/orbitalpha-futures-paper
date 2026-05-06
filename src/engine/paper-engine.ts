@@ -1289,7 +1289,8 @@ export class PaperEngine {
         // Block if not in ledger OR if in ledger as EXTERNAL_MANUAL_POSITION
         const isNormalInLedger = paperOpens.some(p => 
           `${p.symbol}:${p.side}` === key && 
-          p.lifecycleState !== "EXTERNAL_MANUAL_POSITION"
+          (p.lifecycleState !== "EXTERNAL_MANUAL_POSITION" || 
+           (p.reconcileState === "MATCHED" && syncSnap.sync_status === "ALIGNED"))
         );
 
         if (!isNormalInLedger) {
