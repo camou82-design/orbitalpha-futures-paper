@@ -811,6 +811,7 @@ export type PaperOpenPositionRecord = {
     | "PARTIAL_ACTIVE" 
     | "CLOSE_ONLY_MANAGED"
     | "EXTERNAL_MANUAL_POSITION"
+    | "OPERATOR_MANAGED"
     | "FAILED";
   exchangeOrdId?: string;
   exchangeClOrdId?: string;

@@ -6440,10 +6440,12 @@ export class PaperEngine {
       if (open.lifecycleState === "CLOSE_PENDING" && open.closePendingClOrdId) {
         if (!this.okxDemo) continue;
         const ordId = open.closePendingOrdId;
-        const status = await this.okxDemo.getOrder(open.symbol, ordId || undefined, open.closePendingClOrdId);
+        const instId = toOkxSwapInstId(open.symbol);
+        const status = await this.okxDemo.getOrder(instId, ordId || undefined, open.closePendingClOrdId);
         
         this.logger.info("OKX_ORDER_FILL_STATUS_PROOF", {
           symbol: open.symbol,
+          instId,
           ordId,
           clOrdId: open.closePendingClOrdId,
           ok: status.ok,
@@ -6457,7 +6459,9 @@ export class PaperEngine {
           const isFilled = st.state === "filled";
           const fillSize = st.fillSz != null ? Number(st.fillSz) : 0;
           
-          if (isFilled || fillSize > 0) {
+          const isActuallyClosedOnOkx = isFilled;
+          
+          if (isActuallyClosedOnOkx) {
             this.logger.info("STOP_LOSS_POSITION_CLOSED", { symbol: open.symbol, flowId, fillSize });
             
             const metrics = leg(open.sizeUsd);
@@ -6489,6 +6493,10 @@ export class PaperEngine {
             openLedgerPruned = true;
             this.logger.info("STOP_LOSS_LEDGER_PRUNE_AFTER_FILL", { symbol: open.symbol, flowId });
             continue; 
+          } else if (fillSize > 0) {
+            this.logger.info("STOP_LOSS_CLOSE_PARTIAL_FILLED", { symbol: open.symbol, flowId, fillSize, state: st.state });
+            remaining.push(posTrail);
+            continue;
           } else {
             this.logger.info("STOP_LOSS_CLOSE_PENDING", { symbol: open.symbol, flowId, state: st.state });
             remaining.push(posTrail);
@@ -6512,8 +6520,14 @@ export class PaperEngine {
         }
 
         if (isSlTriggered) {
-          // EXCLUDE: EXTERNAL_MANUAL_POSITION and OPERATOR_MANAGED
-          const isOperatorManaged = open.lifecycleState === "EXTERNAL_MANUAL_POSITION" || open.lifecycleState === "CLOSE_ONLY_MANAGED" || (open as any).isOperatorManaged === true;
+          // EXCLUDE: symbolExternalManualBlocked, EXTERNAL_MANUAL_POSITION, OPERATOR_MANAGED
+          const isOperatorManaged = 
+            this.symbolExternalManualBlocked.has(symSideKey) ||
+            open.lifecycleState === "EXTERNAL_MANUAL_POSITION" || 
+            open.lifecycleState === "OPERATOR_MANAGED" || 
+            open.lifecycleState === "CLOSE_ONLY_MANAGED" || 
+            (open as any).isOperatorManaged === true;
+            
           if (isOperatorManaged) {
             this.logger.info("OPERATOR_MANAGED_STOP_LOSS_SKIPPED", { symbol: open.symbol, side: open.side, flowId });
             remaining.push(posTrail);
