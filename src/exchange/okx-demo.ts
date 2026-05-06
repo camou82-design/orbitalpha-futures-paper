@@ -28,6 +28,7 @@ export type OkxOrderSubmitInput = Readonly<{
   ordType?: "market" | "limit";
   px?: string;
   clOrdId?: string;
+  reduceOnly?: boolean;
 }>;
 
 export type OkxPublicDiagnostics = Readonly<{
@@ -222,7 +223,8 @@ export class OkxDemoClient {
       ordType: input.ordType ?? "market",
       sz: input.sz,
       ...(input.px ? { px: input.px } : {}),
-      ...(input.clOrdId ? { clOrdId: input.clOrdId } : {})
+      ...(input.clOrdId ? { clOrdId: input.clOrdId } : {}),
+      ...(input.reduceOnly === true ? { reduceOnly: "true" } : {})
     };
     if (payload.ordType === "limit" && !payload.px) {
       return Promise.resolve({

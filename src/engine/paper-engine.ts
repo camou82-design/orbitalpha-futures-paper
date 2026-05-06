@@ -5015,7 +5015,8 @@ export class PaperEngine {
       clOrdId,
       traceId: input.flowId,
       reason: input.reason,
-      isNewEntry: false
+      isNewEntry: false,
+      reduceOnly: true
     });
   }
 
@@ -5091,6 +5092,7 @@ export class PaperEngine {
     desiredNotionalUsdt?: number | null;
     /** Mark/last price for `notional / (price × ctVal)` when ticker not yet loaded here. */
     pricingReferencePx?: number | null;
+    reduceOnly?: boolean;
   }): Promise<{
     ok: boolean;
     ordId: string | null;
@@ -5766,7 +5768,8 @@ export class PaperEngine {
         clOrdId: input.clOrdId,
         tdMode: orderTdMode,
         ordType: this.config.okxAuthMode === "live" ? "limit" : "market",
-        px: limitPrice ? String(limitPrice) : undefined
+        px: limitPrice ? String(limitPrice) : undefined,
+        reduceOnly: input.reduceOnly
       });
 
       if (!submit.ok) {
@@ -5788,7 +5791,7 @@ export class PaperEngine {
           req_ordType: this.config.okxAuthMode === "live" ? "limit" : "market",
           req_sz: submitSzStr,
           req_px: limitPrice ? String(limitPrice) : undefined,
-          req_reduceOnly: undefined,
+          req_reduceOnly: input.reduceOnly,
           req_clOrdId: input.clOrdId,
           applied_leverage: input.appliedLeverage ?? null,
           margin_mode: orderTdMode,
@@ -6230,56 +6233,9 @@ export class PaperEngine {
       const posKey = `${openRaw.symbol}:${openRaw.openedAt}`;
       // Unique flow identifier for one-shot terminal exit deduplication
       const flowId = `${openRaw.symbol}:${openRaw.side}:${openRaw.openedAt}`;
-
-      // Skip evaluation if this symbol:side is explicitly blocked (external/manual)
       const symSideKey = `${openRaw.symbol}:${openRaw.side}`;
-      if (this.symbolExternalManualBlocked.has(symSideKey)) {
-        this.logger.info("EXIT_EVAL_SKIPPED_EXTERNAL_MANUAL_BLOCK", {
-          symbol: openRaw.symbol,
-          side: openRaw.side,
-          flowId,
-          reason: "symbol_level_external_manual_block_active"
-        });
-        remaining.push(openRaw);
-        continue;
-      }
 
-      // Problem 3: Exclude pending states from exit/partial management
-      const isManaged = 
-        openRaw.lifecycleState === "OPEN" || 
-        openRaw.lifecycleState === undefined || 
-        openRaw.lifecycleState === null || 
-        openRaw.lifecycleState === "ADDON_ACTIVE" || 
-        openRaw.lifecycleState === "PARTIAL_ACTIVE" ||
-        openRaw.lifecycleState === "CLOSE_ONLY_MANAGED";
-      
-      if (!isManaged) {
-        remaining.push(openRaw);
-        continue;
-      }
-
-      if (this.terminalExitConsumedByFlow.has(flowId)) {
-        openLedgerPruned = true;
-        this.logger.info("EXIT_TERMINAL_DEDUP_PROOF", {
-          symbol: openRaw.symbol,
-          side: openRaw.side,
-          openedAt: openRaw.openedAt,
-          flowId,
-          terminal_exit_already_consumed: true,
-          action: "blocking_repetitive_exit",
-          note: "이 포지션 흐름은 이미 터미널 종료가 발생했으므로 중복 이벤트를 차단함"
-        });
-        this.logger.info("TERMINAL_FLOW_PRUNED_FROM_OPEN_LEDGER", {
-          symbol: openRaw.symbol,
-          side: openRaw.side,
-          openedAt: openRaw.openedAt,
-          flowId,
-          prune_reason: "terminal_exit_already_consumed",
-          action: "excluded_from_remaining"
-        });
-        continue;
-      }
-
+      // 1. Normalization & Backfill StopPrice (Moved up for priority SL check)
       const nStage = normalizeEntryStageFromSizeEvidence(openRaw);
       const nRange = normalizeRangeManagementState(nStage.normalized);
       const finalNorm = nRange.normalized;
@@ -6297,7 +6253,6 @@ export class PaperEngine {
         crashPositionsModified = true;
       }
 
-      // Backfill stopPrice if missing for existing positions
       if (open.status === "open" && (open.stopPrice === undefined || open.stopPrice === null || !Number.isFinite(open.stopPrice))) {
         const ep = open.entryPrice;
         const slReg = regimeForSl(open.regimeAtEntry);
@@ -6308,7 +6263,7 @@ export class PaperEngine {
             ...open,
             stopPrice: newStop
           };
-          crashPositionsModified = true; // Trigger saveOpenAll
+          crashPositionsModified = true;
           this.logger.info("STOP_BACKFILL_APPLIED", {
             symbol: open.symbol,
             side: open.side,
@@ -6327,42 +6282,19 @@ export class PaperEngine {
         }
       }
 
-      const inheritedStrategyVersion = open.strategyVersion ?? "paper-v1";
-      const trendManagedPosition = this.isTrendManagedPosition(open);
-      const rangeManagedPosition =
-        open.regimeAtEntry === "RANGE" &&
-        open.executorAtEntry !== "TREND" &&
-        !trendManagedPosition;
+      if (this.terminalExitConsumedByFlow.has(flowId)) {
+        openLedgerPruned = true;
+        this.logger.info("EXIT_TERMINAL_DEDUP_PROOF", {
+          symbol: openRaw.symbol,
+          side: openRaw.side,
+          openedAt: openRaw.openedAt,
+          flowId,
+          terminal_exit_already_consumed: true
+        });
+        continue;
+      }
 
-      const blockedByExecutorMismatch =
-        open.regimeAtEntry === "RANGE" &&
-        trendManagedPosition;
-
-      const exitLane: "RANGE" | "TREND" =
-        trendManagedPosition ? "TREND" : "RANGE";
-
-      let finalCloseReason: PaperClosedPositionRecord["closeReason"] | "none" = "none";
-      let confirmedExitType: string | null = null;
-      let confirmedCloseSource: string | null = null;
-      let posTrail: PaperOpenPositionRecord = { ...open };
-
-      this.logger.info("REGIME_EXIT_GUARD_PROOF", {
-        symbol: open.symbol,
-        strategyVersion: open.strategyVersion,
-        sourceSignal: open.sourceSignal,
-        executorAtEntry: open.executorAtEntry,
-        regimeAtEntry: open.regimeAtEntry,
-        trendManagedPosition,
-        rangeManagedPosition,
-        exitLane,
-        blockedByExecutorMismatch,
-        requestedRangePath: rangeManagedPosition === true,
-        requestedTrendPath: trendManagedPosition === true,
-        finalCloseAction: "evaluating",
-        finalCloseReason
-      });
-
-      // A. FORCE CLOSED Short-Circuit: Absolutely exclude from "remaining" to prevent re-entry.
+      // A. FORCE CLOSED Short-Circuit
       if (crashForceClosedKeys.has(posKey)) {
         this.logger.info("force_closed_position_excluded_from_open_ledger", {
           symbol: openRaw.symbol,
@@ -6372,14 +6304,13 @@ export class PaperEngine {
         continue;
       }
 
-      // B. REDUCE Short-Circuit: Skip general pipeline, push reduced object, and continue.
+      // B. REDUCE Short-Circuit
       if (crashReducedThisTickKeys.has(posKey)) {
         remaining.push(openRaw);
         this.logger.info("crash_close_short_circuit_applied", {
           symbol: openRaw.symbol,
           openedAt: openRaw.openedAt,
           crash_action: "CRASH_REDUCE",
-          skipped_general_close_pipeline: true,
           remaining_size_usd_after_crash: openRaw.sizeUsd
         });
         continue;
@@ -6389,23 +6320,128 @@ export class PaperEngine {
         continue;
       }
 
+      // --- [PRIORITY STOP LOSS DECOUPLING] ---
       const snap = input.snapshots.find((s) => s.symbol === openRaw.symbol);
-      if (!snap) {
+      const trendManagedPosition = this.isTrendManagedPosition(open);
+      const exitLane: "RANGE" | "TREND" = trendManagedPosition ? "TREND" : "RANGE";
+      const slRegime: MarketRegime = exitLane === "RANGE" ? "RANGE" : "TREND";
+      const inheritedStrategyVersion = open.strategyVersion ?? "paper-v1";
+
+      // 4. Snapshot & Metrics (Consolidated for priority SL and managed evaluation)
+      let m: PaperCloseLegMetrics | null = null;
+      let closePrice: number | null = null;
+      if (snap) {
+        closePrice = snap.lastPrice;
+        m = computePaperCloseLegMetrics({
+          open,
+          closePrice,
+          closedAt: snap.fetchedAt,
+          snapFundingRate: snap.fundingRate,
+          marginUsd: open.sizeUsd,
+          paperTakerFeeRate: this.config.paperTakerFeeRate,
+          paperFundingIntervalHours: this.config.paperFundingIntervalHours
+        });
+        const highWater = Math.max(open.highestPnlPctNet ?? m.pnlPctNet, m.pnlPctNet);
+        open = { ...open, highestPnlPctNet: highWater };
+      }
+
+      // --- [PRIORITY STOP LOSS DECOUPLING] ---
+      // Goal: Priority execution even if manually blocked or not managed.
+      let isSlTriggered = false;
+      if (snap && m && closePrice != null) {
+        if (typeof open.stopPrice === "number" && Number.isFinite(open.stopPrice)) {
+          isSlTriggered = open.side === "long" ? closePrice <= open.stopPrice : closePrice >= open.stopPrice;
+        } else {
+          isSlTriggered = m.pnlPctNet <= stopLossPctForRegime(slRegime);
+        }
+
+        if (isSlTriggered) {
+          const isActuallyOpenOnOkx = open.reconcileState === "MATCHED" || open.reconcileState === "ADOPTED" || open.lifecycleState === "EXTERNAL_MANUAL_POSITION";
+          if (isActuallyOpenOnOkx) {
+            this.logger.info("STOP_LOSS_TRIGGER_DETECTED", {
+              symbol: open.symbol,
+              side: open.side,
+              markPrice: closePrice,
+              stopPrice: open.stopPrice,
+              pnlPctNet: m.pnlPctNet,
+              reconcileState: open.reconcileState,
+              flowId
+            });
+
+            await this.dispatchOkxClose({
+              symbol: open.symbol,
+              side: open.side,
+              sizeUsd: open.sizeUsd,
+              appliedLeverage: Math.max(1, open.leverage ?? 1),
+              lastPrice: closePrice,
+              flowId,
+              reason: `stop_loss_priority_close`,
+              isStopLoss: true
+            });
+
+            const snapPaths = {
+              ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
+              ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
+              ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {})
+            };
+
+            const closedRow = finalizePaperClosedRecord({
+              open,
+              symbol: open.symbol,
+              closePrice,
+              closedAt: snap.fetchedAt,
+              closeReason: "stop_loss",
+              legMarginUsd: open.sizeUsd,
+              metrics: m,
+              feeRate: this.config.paperTakerFeeRate,
+              fundingIntervalHours: this.config.paperFundingIntervalHours,
+              strategyVersion: inheritedStrategyVersion,
+              ...snapPaths
+            });
+
+            const routedClosed = await this.appendClosedWithStandardRouting({
+              closedRow,
+              open,
+              flowId,
+              envelope: null as any,
+              exitReason: "stop_loss",
+              closeSource: "priority_stop_loss_gate",
+              currentRegime: input.marketMode.marketMode as MarketRegime
+            });
+            authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+            this.terminalExitConsumedByFlow.add(flowId);
+            this.logger.info("STOP_LOSS_CLOSE_ORDER_ACCEPTED", { symbol: open.symbol, flowId });
+            continue; 
+          }
+        }
+      }
+
+      // --- [STANDARD BLOCKS] ---
+      if (this.symbolExternalManualBlocked.has(symSideKey)) {
+        this.logger.info("EXIT_EVAL_SKIPPED_EXTERNAL_MANUAL_BLOCK", { symbol: open.symbol, side: open.side, flowId });
         remaining.push(openRaw);
         continue;
       }
 
-      const closePrice = snap.lastPrice;
+      const isManaged = 
+        open.lifecycleState === "OPEN" || 
+        open.lifecycleState === undefined || 
+        open.lifecycleState === null || 
+        open.lifecycleState === "ADDON_ACTIVE" || 
+        open.lifecycleState === "PARTIAL_ACTIVE" ||
+        open.lifecycleState === "CLOSE_ONLY_MANAGED";
+      
+      if (!isManaged) {
+        remaining.push(openRaw);
+        continue;
+      }
+
+      if (!snap || !m || closePrice == null) {
+        remaining.push(openRaw);
+        continue;
+      }
+
       const closedAt = snap.fetchedAt;
-      const regimeNow = input.marketMode.marketMode as MarketRegime;
-      const slRegime: MarketRegime = exitLane === "RANGE" ? "RANGE" : "TREND";
-
-      const snapPaths = {
-        ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
-        ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
-        ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {})
-      };
-
       const leg = (marginUsd: number) =>
         computePaperCloseLegMetrics({
           open,
@@ -6417,9 +6453,38 @@ export class PaperEngine {
           paperFundingIntervalHours: this.config.paperFundingIntervalHours
         });
 
-      let m = leg(open.sizeUsd);
-      const highWater = Math.max(open.highestPnlPctNet ?? m.pnlPctNet, m.pnlPctNet);
-      open = { ...open, highestPnlPctNet: highWater };
+
+
+      const rangeManagedPosition =
+        open.regimeAtEntry === "RANGE" &&
+        open.executorAtEntry !== "TREND" &&
+        !trendManagedPosition;
+
+      const blockedByExecutorMismatch =
+        open.regimeAtEntry === "RANGE" &&
+        trendManagedPosition;
+
+      let finalCloseReason: PaperClosedPositionRecord["closeReason"] | "none" = "none";
+      let confirmedExitType: string | null = null;
+      let confirmedCloseSource: string | null = null;
+      let posTrail: PaperOpenPositionRecord = { ...open };
+
+      this.logger.info("REGIME_EXIT_GUARD_PROOF", {
+        symbol: open.symbol,
+        strategyVersion: open.strategyVersion,
+        trendManagedPosition,
+        rangeManagedPosition,
+        exitLane,
+        blockedByExecutorMismatch,
+        flowId
+      });
+
+      const regimeNow = input.marketMode.marketMode as MarketRegime;
+      const snapPaths = {
+        ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
+        ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
+        ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {})
+      };
 
       // --- Mandatory Diagnostic Log for Adopted/Close-Only positions ---
       if (open.reconcileState === "ADOPTED" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
@@ -6455,14 +6520,6 @@ export class PaperEngine {
         }
       }
 
-      // --- 1. Hard SL check (Safety Gate) ---
-      let isSlTriggered = false;
-      if (typeof open.stopPrice === "number" && Number.isFinite(open.stopPrice)) {
-        isSlTriggered = open.side === "long" ? closePrice <= open.stopPrice : closePrice >= open.stopPrice;
-      } else {
-        const slThresh = stopLossPctForRegime(slRegime);
-        isSlTriggered = m.pnlPctNet <= slThresh;
-      }
 
       // --- 2. Hard TP check (Safety Gate) ---
       let isTpTriggered = false;
