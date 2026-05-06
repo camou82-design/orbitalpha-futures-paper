@@ -5004,6 +5004,8 @@ export class PaperEngine {
       clOrdId
     });
 
+    const finalIsStopLoss = input.isStopLoss === true || isStopLoss;
+
     return await this.submitOkxOrder({
       symbol: input.symbol as MarketSymbol,
       side,
@@ -5016,7 +5018,8 @@ export class PaperEngine {
       traceId: input.flowId,
       reason: input.reason,
       isNewEntry: false,
-      reduceOnly: true
+      reduceOnly: true,
+      ordType: finalIsStopLoss ? "market" : undefined
     });
   }
 
@@ -5093,6 +5096,7 @@ export class PaperEngine {
     /** Mark/last price for `notional / (price × ctVal)` when ticker not yet loaded here. */
     pricingReferencePx?: number | null;
     reduceOnly?: boolean;
+    ordType?: "market" | "limit";
   }): Promise<{
     ok: boolean;
     ordId: string | null;
@@ -5108,9 +5112,10 @@ export class PaperEngine {
     baseQty?: number;
     notionalUsd?: number;
     avgPx?: number;
+    clOrdId: string;
   }> {
     if (!this.okxDemo) {
-      return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "no_client", errorMessage: "OKX signed client not initialized", ackCode: "rejected", orderState: null, fillConfirmed: false };
+      return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "no_client", errorMessage: "OKX signed client not initialized", ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
     }
     const instId = toOkxSwapInstId(input.symbol);
     const logCtx = {
@@ -5169,7 +5174,8 @@ export class PaperEngine {
         errorMessage: "clOrdId must be alphanumeric ASCII only and length <= 32",
         ackCode: "rejected",
         orderState: null,
-        fillConfirmed: false
+        fillConfirmed: false,
+        clOrdId: input.clOrdId
       };
     }
 
@@ -5183,7 +5189,7 @@ export class PaperEngine {
             : "SIGNED_ORDER_SUBMIT_SKIPPED_NOT_READY";
       this.logger.warn("SIGNED_EXECUTION_NOT_READY", { ...logCtx, reason });
       this.logger.warn(tag, { ...logCtx, reason });
-      return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "signed_not_ready", errorMessage: "OKX signed REST smoke test not passed", ackCode: "rejected", orderState: null, fillConfirmed: false };
+      return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "signed_not_ready", errorMessage: "OKX signed REST smoke test not passed", ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
     }
 
     const instTryAll = await this.okxDemo.tryGetInstrument(instId);
@@ -5192,7 +5198,7 @@ export class PaperEngine {
         order_build_fail_reason: "OKX_INSTRUMENT_FETCH_FAILED",
         symbol: input.symbol,
         instId,
-        error: instTryAll.ok ? null : instTryAll.error
+        error: instTryAll.ok ? null : (instTryAll as any).error
       });
       return {
         ok: false,
@@ -5200,10 +5206,11 @@ export class PaperEngine {
         fillPx: null,
         fillSize: 0,
         errorCode: "OKX_INSTRUMENT_FETCH_FAILED",
-        errorMessage: instTryAll.ok ? "empty_instrument" : instTryAll.error,
+        errorMessage: instTryAll.ok ? "empty_instrument" : (instTryAll as any).error,
         ackCode: "rejected",
         orderState: null,
-        fillConfirmed: false
+        fillConfirmed: false,
+        clOrdId: input.clOrdId
       };
     }
     const sizingMeta = parseOkxSwapInstrumentSizing(instTryAll.value as Record<string, unknown>);
@@ -5223,7 +5230,8 @@ export class PaperEngine {
         errorMessage: "instrument lotSz/minSz/ctVal missing or invalid",
         ackCode: "rejected",
         orderState: null,
-        fillConfirmed: false
+        fillConfirmed: false,
+        clOrdId: input.clOrdId
       };
     }
 
@@ -5233,7 +5241,7 @@ export class PaperEngine {
         order_build_fail_reason: "OKX_ACCOUNT_CONFIG_FETCH_FAILED",
         symbol: input.symbol,
         instId,
-        error: cfgTry.ok ? "empty_data" : cfgTry.error
+        error: cfgTry.ok ? "empty_data" : (cfgTry as any).error
       });
       return {
         ok: false,
@@ -5241,10 +5249,11 @@ export class PaperEngine {
         fillPx: null,
         fillSize: 0,
         errorCode: "OKX_ACCOUNT_CONFIG_FETCH_FAILED",
-        errorMessage: cfgTry.ok ? "OKX account/config empty" : cfgTry.error,
+        errorMessage: cfgTry.ok ? "OKX account/config empty" : (cfgTry as any).error,
         ackCode: "rejected",
         orderState: null,
-        fillConfirmed: false
+        fillConfirmed: false,
+        clOrdId: input.clOrdId
       };
     }
     const cfgRow0 = cfgTry.value[0] as Record<string, unknown>;
@@ -5278,7 +5287,8 @@ export class PaperEngine {
         errorMessage: "OKX account is Spot mode (acctLv=1); SWAP orders are incompatible",
         ackCode: "rejected",
         orderState: null,
-        fillConfirmed: false
+        fillConfirmed: false,
+        clOrdId: input.clOrdId
       };
     }
 
@@ -5296,7 +5306,7 @@ export class PaperEngine {
       if (!tickerTry.ok || tickerTry.value.bid == null || tickerTry.value.ask == null) {
         const reason = "LIVE_LIMIT_PRICE_BUILD_FAIL";
         this.logger.error(reason, { ...logCtx, detail: "ticker_missing_bid_ask" });
-        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "ticker_error", errorMessage: "Failed to get bid/ask for limit order", ackCode: "rejected", orderState: null, fillConfirmed: false };
+        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "ticker_error", errorMessage: "Failed to get bid/ask for limit order", ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
       }
       const ticker = tickerTry.value;
       refPrice = ticker.last;
@@ -5304,7 +5314,7 @@ export class PaperEngine {
       if (!instTryAll.value.tickSz) {
         const reason = "LIVE_LIMIT_PRICE_BUILD_FAIL";
         this.logger.error(reason, { ...logCtx, detail: "instrument_missing_tick_size" });
-        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "instrument_error", errorMessage: "Failed to get tick size for limit order", ackCode: "rejected", orderState: null, fillConfirmed: false };
+        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "instrument_error", errorMessage: "Failed to get tick size for limit order", ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
       }
       const tickSize = Number(instTryAll.value.tickSz);
 
@@ -5319,7 +5329,7 @@ export class PaperEngine {
           purpose: input.reason
         });
       } catch (e) {
-        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "price_build_fail", errorMessage: String(e), ackCode: "rejected", orderState: null, fillConfirmed: false };
+        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "price_build_fail", errorMessage: String(e), ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
       }
 
       // 1. V2 Intended Metrics (Decision Basis)
@@ -5377,7 +5387,7 @@ export class PaperEngine {
         } else {
           this.logger.error("V2_LEVERAGE_SYNC_FAIL", {
             symbol: input.symbol,
-            error: setLevRes.error,
+            error: (setLevRes as any).error,
             diagnostics: setLevRes.diagnostics
           });
         }
@@ -5436,7 +5446,8 @@ export class PaperEngine {
           ok: false, ordId: null, fillPx: null, fillSize: 0,
           errorCode: "okx_reality_unconfirmed", 
           errorMessage: "Exchange balance or leverage could not be verified", 
-          ackCode: "rejected", orderState: null, fillConfirmed: false
+          ackCode: "rejected", orderState: null, fillConfirmed: false,
+          clOrdId: input.clOrdId
         };
       }
 
@@ -5448,7 +5459,8 @@ export class PaperEngine {
           ok: false, ordId: null, fillPx: null, 
           errorCode: "leverage_mismatch", 
           errorMessage: `Leverage mismatch: Engine=${input.appliedLeverage}, OKX=${okx_confirmed_leverage}`, 
-          ackCode: "rejected", orderState: null, fillSize: 0, fillConfirmed: false
+          ackCode: "rejected", orderState: null, fillSize: 0, fillConfirmed: false,
+          clOrdId: input.clOrdId
         };
       }
 
@@ -5548,7 +5560,8 @@ export class PaperEngine {
             ok: false, ordId: null, fillPx: null, fillSize: 0,
             errorCode: "live_liquidation_buffer_insufficient", 
             errorMessage: errorMsg, 
-            ackCode: "rejected", orderState: null, fillConfirmed: false
+            ackCode: "rejected", orderState: null, fillConfirmed: false,
+            clOrdId: input.clOrdId
           };
         }
       }
@@ -5577,7 +5590,8 @@ export class PaperEngine {
             errorMessage: "Failed to get last price for OKX contract sizing",
             ackCode: "rejected",
             orderState: null,
-            fillConfirmed: false
+            fillConfirmed: false,
+            clOrdId: input.clOrdId
           };
         }
         pricingLast = tickerDemo.value.last;
@@ -5619,7 +5633,8 @@ export class PaperEngine {
         errorMessage: "Cannot derive positive USDT notional and reference price for SWAP sizing",
         ackCode: "rejected",
         orderState: null,
-        fillConfirmed: false
+        fillConfirmed: false,
+        clOrdId: input.clOrdId
       };
     }
 
@@ -5666,7 +5681,8 @@ export class PaperEngine {
         errorMessage: "OKX SWAP sz is not a multiple of lotSz after normalization",
         ackCode: "rejected",
         orderState: null,
-        fillConfirmed: false
+        fillConfirmed: false,
+        clOrdId: input.clOrdId
       };
     }
     if (!norm.min_size_ok) {
@@ -5686,7 +5702,8 @@ export class PaperEngine {
         errorMessage: `Normalized contract size ${norm.normalized_contracts} below instrument minSz ${sizingMeta.minSz}`,
         ackCode: "rejected",
         orderState: null,
-        fillConfirmed: false
+        fillConfirmed: false,
+        clOrdId: input.clOrdId
       };
     }
 
@@ -5739,7 +5756,7 @@ export class PaperEngine {
     const orderExecutionKey = `order:${input.traceId}:${input.reason}:${input.side}:${input.posSide}:${submitSzStr}`;
     const orderKeyOk = await this.consumeExecutionKey(orderExecutionKey);
     if (!orderKeyOk) {
-      return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "duplicate_execution_key", errorMessage: "Duplicate order execution key blocked", ackCode: "rejected", orderState: null, fillConfirmed: false };
+      return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "duplicate_execution_key", errorMessage: "Duplicate order execution key blocked", ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
     }
 
     this.logger.info("OKX_ORDER_PAYLOAD_MODE_PROOF", {
@@ -5755,7 +5772,7 @@ export class PaperEngine {
       payload_pos_side: payloadPosSide ?? null,
       req_sz: submitSzStr,
       req_side: input.side,
-      req_ordType: this.config.okxAuthMode === "live" ? "limit" : "market",
+      req_ordType: input.ordType ?? (this.config.okxAuthMode === "live" ? "limit" : "market"),
       chain_hint: "after_OKX_ACCOUNT_MODE_PROOF_and_OKX_ORDER_SIZE_PROOF_before_submit"
     });
 
@@ -5767,7 +5784,7 @@ export class PaperEngine {
         sz: submitSzStr,
         clOrdId: input.clOrdId,
         tdMode: orderTdMode,
-        ordType: this.config.okxAuthMode === "live" ? "limit" : "market",
+        ordType: input.ordType ?? (this.config.okxAuthMode === "live" ? "limit" : "market"),
         px: limitPrice ? String(limitPrice) : undefined,
         reduceOnly: input.reduceOnly
       });
@@ -5788,7 +5805,7 @@ export class PaperEngine {
           req_side: input.side,
           req_posSide: payloadPosSide ?? null,
           req_pos_side_omitted: payloadPosSide === undefined,
-          req_ordType: this.config.okxAuthMode === "live" ? "limit" : "market",
+          req_ordType: input.ordType ?? (this.config.okxAuthMode === "live" ? "limit" : "market"),
           req_sz: submitSzStr,
           req_px: limitPrice ? String(limitPrice) : undefined,
           req_reduceOnly: input.reduceOnly,
@@ -5800,10 +5817,10 @@ export class PaperEngine {
           chain_hint: "after_OKX_ORDER_PAYLOAD_MODE_PROOF"
         });
 
-        const errorCode = submit.diagnostics.retCode || "submit_error";
-        const errorMessage = submit.diagnostics.retMsg || submit.error || "order_level_ack_failed";
+        const errorCode = (submit as any).diagnostics?.retCode || "submit_error";
+        const errorMessage = (submit as any).diagnostics?.retMsg || (submit as any).error || "order_level_ack_failed";
         this.logger.error("okx_order_submit_rejected", { ...logCtx, order_submit_ack: "rejected", order_error_code: errorCode, order_error_msg: errorMessage });
-        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode, errorMessage, ackCode: "rejected", orderState: null, fillConfirmed: false };
+        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode, errorMessage, ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
       }
 
       this.okxOrderSubmitOk = true;
@@ -5813,8 +5830,9 @@ export class PaperEngine {
       // Poll for status/fill
       const status = await this.okxDemo.getOrder(instId, ordId || undefined, input.clOrdId);
       if (!status.ok) {
-        this.logger.warn("okx_order_poll_failed", { ...logCtx, ordId, order_submit_ack: "accepted", error: status.error });
-        return { ok: true, ordId, fillPx: null, fillSize: 0, errorCode: null, errorMessage: status.error || "poll_failed", ackCode: "accepted", orderState: null, fillConfirmed: false };
+        const pollError = (status as any).error || "poll_failed";
+        this.logger.warn("okx_order_poll_failed", { ...logCtx, ordId, order_submit_ack: "accepted", error: pollError });
+        return { ok: true, ordId, fillPx: null, fillSize: 0, errorCode: null, errorMessage: pollError, ackCode: "accepted", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
       }
 
       let st0 = status.value?.[0];
@@ -5876,13 +5894,14 @@ export class PaperEngine {
         notionalUsd: (fillPx != null && Number.isFinite(Number(fillPx))) 
           ? (norm.normalized_contracts * sizingMeta.ctVal * Number(fillPx)) 
           : finalOrderNotionalUsdt,
-        avgPx: fillPx != null ? Number(fillPx) : (pricingLast ?? undefined)
+        avgPx: fillPx != null ? Number(fillPx) : (pricingLast ?? undefined),
+        clOrdId: input.clOrdId
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const parsed = parseOkxSubmitErrorMessage(msg);
       this.logger.error("okx_order_submit_exception", { ...logCtx, errorCode: parsed.code, errorMessage: parsed.message });
-      return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: parsed.code, errorMessage: parsed.message, ackCode: "rejected", orderState: null, fillConfirmed: false };
+      return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: parsed.code, errorMessage: parsed.message, ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
     }
   }
 
@@ -6345,76 +6364,6 @@ export class PaperEngine {
         open = { ...open, highestPnlPctNet: highWater };
       }
 
-      // --- [PRIORITY STOP LOSS DECOUPLING] ---
-      // Goal: Priority execution even if manually blocked or not managed.
-      let isSlTriggered = false;
-      if (snap && m && closePrice != null) {
-        if (typeof open.stopPrice === "number" && Number.isFinite(open.stopPrice)) {
-          isSlTriggered = open.side === "long" ? closePrice <= open.stopPrice : closePrice >= open.stopPrice;
-        } else {
-          isSlTriggered = m.pnlPctNet <= stopLossPctForRegime(slRegime);
-        }
-
-        if (isSlTriggered) {
-          const isActuallyOpenOnOkx = open.reconcileState === "MATCHED" || open.reconcileState === "ADOPTED" || open.lifecycleState === "EXTERNAL_MANUAL_POSITION";
-          if (isActuallyOpenOnOkx) {
-            this.logger.info("STOP_LOSS_TRIGGER_DETECTED", {
-              symbol: open.symbol,
-              side: open.side,
-              markPrice: closePrice,
-              stopPrice: open.stopPrice,
-              pnlPctNet: m.pnlPctNet,
-              reconcileState: open.reconcileState,
-              flowId
-            });
-
-            await this.dispatchOkxClose({
-              symbol: open.symbol,
-              side: open.side,
-              sizeUsd: open.sizeUsd,
-              appliedLeverage: Math.max(1, open.leverage ?? 1),
-              lastPrice: closePrice,
-              flowId,
-              reason: `stop_loss_priority_close`,
-              isStopLoss: true
-            });
-
-            const snapPaths = {
-              ...(input.latestPath ? { latestSnapshotPath: input.latestPath } : {}),
-              ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
-              ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {})
-            };
-
-            const closedRow = finalizePaperClosedRecord({
-              open,
-              symbol: open.symbol,
-              closePrice,
-              closedAt: snap.fetchedAt,
-              closeReason: "stop_loss",
-              legMarginUsd: open.sizeUsd,
-              metrics: m,
-              feeRate: this.config.paperTakerFeeRate,
-              fundingIntervalHours: this.config.paperFundingIntervalHours,
-              strategyVersion: inheritedStrategyVersion,
-              ...snapPaths
-            });
-
-            const routedClosed = await this.appendClosedWithStandardRouting({
-              closedRow,
-              open,
-              flowId,
-              envelope: null as any,
-              exitReason: "stop_loss",
-              closeSource: "priority_stop_loss_gate",
-              currentRegime: input.marketMode.marketMode as MarketRegime
-            });
-            authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
-            this.terminalExitConsumedByFlow.add(flowId);
-            this.logger.info("STOP_LOSS_CLOSE_ORDER_ACCEPTED", { symbol: open.symbol, flowId });
-            continue; 
-          }
-        }
-      }
 
       // --- [STANDARD BLOCKS] ---
       if (this.symbolExternalManualBlocked.has(symSideKey)) {
@@ -6485,6 +6434,137 @@ export class PaperEngine {
         ...(input.metaPath ? { latestMetaPath: input.metaPath } : {}),
         ...(input.filePath ? { timestampSnapshotPath: input.filePath } : {})
       };
+
+      // 3. [PENDING ORDER REVIEW]
+      // Before evaluating new exits, check if there's an in-flight close order.
+      if (open.lifecycleState === "CLOSE_PENDING" && open.closePendingClOrdId) {
+        if (!this.okxDemo) continue;
+        const ordId = open.closePendingOrdId;
+        const status = await this.okxDemo.getOrder(open.symbol, ordId || undefined, open.closePendingClOrdId);
+        
+        this.logger.info("OKX_ORDER_FILL_STATUS_PROOF", {
+          symbol: open.symbol,
+          ordId,
+          clOrdId: open.closePendingClOrdId,
+          ok: status.ok,
+          state: (status as any).value?.[0]?.state,
+          fillSz: (status as any).value?.[0]?.fillSz,
+          flowId
+        });
+
+        if (status.ok && (status as any).value?.[0]) {
+          const st = (status as any).value[0];
+          const isFilled = st.state === "filled";
+          const fillSize = st.fillSz != null ? Number(st.fillSz) : 0;
+          
+          if (isFilled || fillSize > 0) {
+            this.logger.info("STOP_LOSS_POSITION_CLOSED", { symbol: open.symbol, flowId, fillSize });
+            
+            const metrics = leg(open.sizeUsd);
+            const closedRow = finalizePaperClosedRecord({
+              open,
+              symbol: open.symbol,
+              closePrice,
+              closedAt: snap!.fetchedAt,
+              closeReason: (open as any).closePendingReason || "stop_loss",
+              legMarginUsd: open.sizeUsd,
+              metrics,
+              feeRate: this.config.paperTakerFeeRate,
+              fundingIntervalHours: this.config.paperFundingIntervalHours,
+              strategyVersion: inheritedStrategyVersion,
+              ...snapPaths
+            });
+            const routedClosed = await this.appendClosedWithStandardRouting({
+              closedRow,
+              open,
+              flowId,
+              envelope: null as any,
+              exitReason: (open as any).closePendingReason || "stop_loss",
+              closeSource: "priority_stop_loss_gate_fill_confirmed",
+              currentRegime: input.marketMode.marketMode as MarketRegime
+            });
+            
+            authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+            this.terminalExitConsumedByFlow.add(flowId);
+            openLedgerPruned = true;
+            this.logger.info("STOP_LOSS_LEDGER_PRUNE_AFTER_FILL", { symbol: open.symbol, flowId });
+            continue; 
+          } else {
+            this.logger.info("STOP_LOSS_CLOSE_PENDING", { symbol: open.symbol, flowId, state: st.state });
+            remaining.push(posTrail);
+            continue;
+          }
+        } else {
+          this.logger.warn("STOP_LOSS_CLOSE_PENDING_RETRY", { symbol: open.symbol, flowId, error: (status as any).error });
+          remaining.push(posTrail);
+          continue;
+        }
+      }
+
+      // 4. [PRIORITY STOP LOSS DECOUPLING]
+      // Goal: Priority execution with strict fill verification and manual position protection.
+      let isSlTriggered = false;
+      if (snap && m && closePrice != null) {
+        if (typeof open.stopPrice === "number" && Number.isFinite(open.stopPrice)) {
+          isSlTriggered = open.side === "long" ? closePrice <= open.stopPrice : closePrice >= open.stopPrice;
+        } else {
+          isSlTriggered = m.pnlPctNet <= stopLossPctForRegime(slRegime);
+        }
+
+        if (isSlTriggered) {
+          // EXCLUDE: EXTERNAL_MANUAL_POSITION and OPERATOR_MANAGED
+          const isOperatorManaged = open.lifecycleState === "EXTERNAL_MANUAL_POSITION" || open.lifecycleState === "CLOSE_ONLY_MANAGED" || (open as any).isOperatorManaged === true;
+          if (isOperatorManaged) {
+            this.logger.info("OPERATOR_MANAGED_STOP_LOSS_SKIPPED", { symbol: open.symbol, side: open.side, flowId });
+            remaining.push(posTrail);
+            continue;
+          }
+
+          const isActuallyOpenOnOkx = open.reconcileState === "MATCHED" || open.reconcileState === "ADOPTED";
+          if (isActuallyOpenOnOkx) {
+            this.logger.info("STOP_LOSS_TRIGGER_DETECTED", {
+              symbol: open.symbol,
+              side: open.side,
+              markPrice: closePrice,
+              stopPrice: open.stopPrice,
+              pnlPctNet: m.pnlPctNet,
+              reconcileState: open.reconcileState,
+              flowId
+            });
+
+            this.logger.info("STOP_LOSS_CLOSE_ORDER_SUBMIT", { symbol: open.symbol, flowId });
+            const closeResult = await this.dispatchOkxClose({
+              symbol: open.symbol,
+              side: open.side,
+              sizeUsd: open.sizeUsd,
+              appliedLeverage: Math.max(1, open.leverage ?? 1),
+              lastPrice: closePrice,
+              flowId,
+              reason: `stop_loss_priority_close`,
+              isStopLoss: true
+            });
+
+            if (closeResult && closeResult.ok) {
+              this.logger.info("STOP_LOSS_CLOSE_ORDER_ACCEPTED", { symbol: open.symbol, flowId, ordId: closeResult.ordId });
+              
+              // Transition to PENDING, do NOT prune yet.
+              posTrail = {
+                ...posTrail,
+                lifecycleState: "CLOSE_PENDING",
+                closePendingClOrdId: closeResult.clOrdId,
+                closePendingOrdId: closeResult.ordId || undefined,
+                closePendingAt: Date.now(),
+                closePendingReason: "stop_loss"
+              };
+              crashPositionsModified = true;
+              remaining.push(posTrail);
+              continue;
+            } else {
+              this.logger.error("STOP_LOSS_CLOSE_ORDER_FAILED", { symbol: open.symbol, flowId, error: closeResult?.errorMessage || "unknown_error" });
+            }
+          }
+        }
+      }
 
       // --- Mandatory Diagnostic Log for Adopted/Close-Only positions ---
       if (open.reconcileState === "ADOPTED" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
