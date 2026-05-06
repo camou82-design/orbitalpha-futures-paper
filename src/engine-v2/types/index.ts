@@ -92,6 +92,8 @@ export interface LegacySnapshotAdapter {
     breakoutFailureRateDiag?: number;
     trendWeaknessScore?: number;
     trendWeaknessDiag?: number;
+    rangeOscillationScore?: number;
+    rangeOscillationDiag?: number;
     reviewing_ticks?: number;
     regimeExitRisk?: number;
     boxBreakSide?: "upper" | "lower" | "none";
@@ -210,6 +212,7 @@ export interface EngineV2SnapshotAdapter {
     boxCohesion01: number;
     breakoutFailureRate: number;
     trendWeaknessScore: number;
+    rangeOscillationScore: number;
     reviewing_ticks: number;
     regimeExitRisk: number;
     boxBreakSide: "upper" | "lower" | "none";
@@ -270,6 +273,9 @@ export interface V2BridgeSnapshot {
     boxLow: number;
     boxPos: number;
     rangeConfidence: number;
+    breakoutFailureRate: number;
+    trendWeaknessScore: number;
+    rangeOscillationScore: number;
     ema20: number;
     emaGap: number;
     atr: number;

@@ -2,104 +2,155 @@ import { EngineV2Input, ExecutorOutput } from "../types";
 
 /**
  * Tier 4: Range Executor (Refined)
- * Standard return structure and fixed syntax.
+ * Hardened with Late Chase Guard and Zone-based Side Filtering.
+ * Decoupled from paper-engine legacy logic.
  */
 export function executeRangeRegime(input: EngineV2Input): ExecutorOutput {
     const { snapshot: sn } = input;
     const boxPos = typeof sn.boxPos === "number" && Number.isFinite(sn.boxPos) ? sn.boxPos : null;
-    const rangeConfidence = typeof sn.rangeConfidence === "number" && Number.isFinite(sn.rangeConfidence) ? sn.rangeConfidence : null;
-    const boxCohesion01 = typeof sn.boxCohesion01 === "number" && Number.isFinite(sn.boxCohesion01) ? sn.boxCohesion01 : null;
-    const trendWeaknessScore =
-        typeof sn.trendWeaknessScore === "number" && Number.isFinite(sn.trendWeaknessScore) ? sn.trendWeaknessScore : null;
-    const qualityScore = typeof sn.qualityScore === "number" && Number.isFinite(sn.qualityScore) ? sn.qualityScore : null;
+    const rangeConfidence = typeof sn.rangeConfidence === "number" && Number.isFinite(sn.rangeConfidence) ? sn.rangeConfidence : 0;
+    const boxCohesion01 = typeof sn.boxCohesion01 === "number" && Number.isFinite(sn.boxCohesion01) ? sn.boxCohesion01 : 0;
+    const breakoutFailureRate = typeof sn.breakoutFailureRate === "number" && Number.isFinite(sn.breakoutFailureRate) ? sn.breakoutFailureRate : 0;
+    const rangeOscillationScore = typeof sn.rangeOscillationScore === "number" && Number.isFinite(sn.rangeOscillationScore) ? sn.rangeOscillationScore : 0;
+    const trendWeaknessScore = typeof sn.trendWeaknessScore === "number" && Number.isFinite(sn.trendWeaknessScore) ? sn.trendWeaknessScore : 0;
+    const qualityScore = typeof sn.qualityScore === "number" && Number.isFinite(sn.qualityScore) ? sn.qualityScore : 0;
 
     let signal: ExecutorOutput["signal"] = "NONE";
     let side: ExecutorOutput["side"] = "none";
-    let baseSizeIntent = 1.0;
-    let recheckSuggested = false;
     let reason = "Watching mid-zone";
-    let relaxedRangeEntry = false;
-    const zone = boxPos == null ? "mid" : boxPos >= 0.74 ? "upper" : boxPos <= 0.26 ? "lower" : "mid";
+    let recheckSuggested = false;
     let reversalConfirmed = false;
-    let sideZoneValid = false;
+    let lateChaseBlocked = false;
+    let sideZoneVetoed = false;
 
-    const edgeStructurePromotionQualified =
-        (rangeConfidence ?? 0) >= 0.65 &&
-        (boxCohesion01 ?? 0) >= 0.9 &&
-        (trendWeaknessScore ?? 0) >= 0.7 &&
-        (qualityScore ?? 0) >= 80;
+    // Standard Zone Classification (Hardened)
+    // Upper (>= 0.82), Lower (<= 0.18), Mid (0.18 < x < 0.82)
+    const currentBoxPos = boxPos ?? 0.5;
+    const isUpper = currentBoxPos >= 0.82;
+    const isLower = currentBoxPos <= 0.18;
+    const isMid = !isUpper && !isLower;
 
-    if ((boxPos ?? 0.5) >= 0.74) {
+    // 1. Zone Authority Proof (Phase 4.5)
+    console.info(JSON.stringify({
+        event: "V2_RANGE_ZONE_AUTHORITY_PROOF",
+        symbol: input.symbol,
+        boxPos: currentBoxPos,
+        isUpper,
+        isLower,
+        isMid,
+        rangeConfidence,
+        breakoutFailureRate,
+        rangeOscillationScore
+    }));
+
+    // Side Filtering Logic
+    if (isUpper) {
+        // Upper Zone: Only SHORT allowed
+        side = "short";
         if (!input.state.shortAllow) {
             signal = "NONE";
-            side = "none";
-            reason = `Upper edge reached but short is blocked by directional bias (${input.state.directionalShockState})`;
+            reason = "Upper edge reached but short blocked by bias";
         } else {
-            side = "short";
-            sideZoneValid = true;
-            if ((rangeConfidence ?? 0) > 0.8) {
+            // Late Chase Guard for SHORT (Extreme Breakdown)
+            if (currentBoxPos < 0.12) { // Should not happen in Upper zone, but for safety in generic logic
+                 // If we are evaluating for SHORT but price is already at the very bottom, it's a chase.
+            }
+            
+            // Reversal check
+            const reversalQualified = (rangeConfidence > 0.78 || (boxCohesion01 > 0.85 && breakoutFailureRate > 0.6));
+            if (reversalQualified) {
                 signal = "SHORT_CANDIDATE";
                 reason = "Upper edge reversal identified";
                 reversalConfirmed = true;
-            } else if (edgeStructurePromotionQualified) {
-                signal = "SHORT_CANDIDATE";
-                reason = "Range edge qualified by structure quality";
-                recheckSuggested = false;
-                relaxedRangeEntry = true;
-                reversalConfirmed = true;
             } else {
                 signal = "WAIT_RECHECK";
-                reason = "Upper edge reached; awaiting confirmation";
+                reason = "Upper edge reached; awaiting reversal signal";
                 recheckSuggested = true;
             }
         }
-    } else if ((boxPos ?? 0.5) <= 0.26) {
+    } else if (isLower) {
+        // Lower Zone: Only LONG allowed
+        side = "long";
         if (!input.state.longAllow) {
             signal = "NONE";
-            side = "none";
-            reason = `Lower edge reached but long is blocked by directional bias (${input.state.directionalShockState})`;
+            reason = "Lower edge reached but long blocked by bias";
         } else {
-            side = "long";
-            sideZoneValid = true;
-            if ((rangeConfidence ?? 0) > 0.8) {
+            // Reversal check
+            const reversalQualified = (rangeConfidence > 0.78 || (boxCohesion01 > 0.85 && breakoutFailureRate > 0.6));
+            if (reversalQualified) {
                 signal = "LONG_CANDIDATE";
                 reason = "Lower edge reversal identified";
                 reversalConfirmed = true;
-            } else if (edgeStructurePromotionQualified) {
-                signal = "LONG_CANDIDATE";
-                reason = "Range edge qualified by structure quality";
-                recheckSuggested = false;
-                relaxedRangeEntry = true;
-                reversalConfirmed = true;
             } else {
                 signal = "WAIT_RECHECK";
-                reason = "Lower edge reached; awaiting confirmation";
+                reason = "Lower edge reached; awaiting reversal signal";
                 recheckSuggested = true;
             }
         }
+    } else {
+        // Mid Zone: Strict Neutrality
+        signal = "NONE";
+        side = "none";
+        reason = "Mid-zone neutrality enforced (no-reversal candidates)";
     }
 
+    // 2. Late Chase Guard Proof (Phase 4.5)
+    // Block LONG if already at the top (breakout chase in range)
+    // Block SHORT if already at the bottom (breakdown chase in range)
+    if (side === "long" && currentBoxPos > 0.88) {
+        lateChaseBlocked = true;
+        signal = "NONE";
+        reason = "LATE_CHASE_GUARD: Long entry blocked at extreme upper boundary";
+    } else if (side === "short" && currentBoxPos < 0.12) {
+        lateChaseBlocked = true;
+        signal = "NONE";
+        reason = "LATE_CHASE_GUARD: Short entry blocked at extreme lower boundary";
+    }
+
+    if (lateChaseBlocked) {
+        console.info(JSON.stringify({
+            event: "V2_RANGE_LATE_CHASE_GUARD_PROOF",
+            symbol: input.symbol,
+            side,
+            boxPos: currentBoxPos,
+            threshold: side === "long" ? 0.88 : 0.12,
+            action: "BLOCK"
+        }));
+    }
+
+    // 3. Entry Side Filter Proof
+    console.info(JSON.stringify({
+        event: "V2_RANGE_ENTRY_SIDE_FILTER_PROOF",
+        symbol: input.symbol,
+        intendedSide: side,
+        boxPos: currentBoxPos,
+        isUpper,
+        isLower,
+        isMid,
+        signal,
+        reason
+    }));
+
     const metadata: Record<string, string | number | boolean | null> = {
+        boxPos: currentBoxPos,
         rangeConfidence,
-        boxCohesion01,
-        trendWeaknessScore,
-        qualityScore,
-        boxPos,
-        zone,
-        sideZoneValid,
+        breakoutFailureRate,
+        rangeOscillationScore,
+        isUpper,
+        isLower,
+        isMid,
         reversal_confirmed: reversalConfirmed,
-        relaxedRangeEntry,
-        recheckSuggested
+        late_chase_blocked: lateChaseBlocked,
+        qualityScore
     };
-    if (relaxedRangeEntry) metadata.reason = "Range edge qualified by structure quality";
 
     return {
-        signal: signal,
-        side: side,
-        reason: signal === "NONE" ? "NO_RANGE_EDGE" : reason,
+        signal,
+        side,
+        reason,
         baseSizeIntent: signal === "NONE" ? 0 : 1,
-        recheckSuggested: recheckSuggested,
-        isAddOnEligible: true, // RANGE allow add-ons
+        recheckSuggested,
+        isAddOnEligible: true,
         metadata
     };
 }

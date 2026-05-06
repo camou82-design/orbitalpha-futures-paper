@@ -2652,6 +2652,7 @@ export function adaptV2Input(
             boxCohesion01: snapshot.boxCohesion01 ?? snapshot.boxCohesionDiag ?? 0,
             breakoutFailureRate: snapshot.breakoutFailureRate ?? snapshot.breakoutFailureRateDiag ?? 0,
             trendWeaknessScore: snapshot.trendWeaknessScore ?? snapshot.trendWeaknessDiag ?? 0,
+            rangeOscillationScore: snapshot.rangeOscillationScore ?? snapshot.rangeOscillationDiag ?? 0,
             reviewing_ticks: snapshot.reviewing_ticks ?? 0,
             regimeExitRisk: snapshot.regimeExitRisk ?? 0,
             boxBreakSide: snapshot.boxBreakSide ?? "none",
