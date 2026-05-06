@@ -1185,7 +1185,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotionMinConditionPassed = true;
         }
 
-        const saCandidateSide = trendSideCandidate !== "none" ? trendSideCandidate : rangeSideCandidate;
+        const saCandidateSide: EngineV2Side = 
+            activeEngineRouting === "RANGE" ? rangeSideCandidate :
+            activeEngineRouting === "TREND" ? trendSideCandidate :
+            (trendSideCandidate !== "none" ? trendSideCandidate : rangeSideCandidate);
         const saPromotionNeeded =
             (entryQualityGrade === "S" || entryQualityGrade === "A") &&
             saCandidateSide !== "none" &&
@@ -1519,15 +1522,26 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionBlockReason = "HARD_CONTROL_NOT_CLEAR";
     }
 
+    // Tier 5+: Side Consistency Enforcer (Authoritative)
+    const sideCandidateBeforeVetoEnforced = v2SideAfterPromotion;
+    const selectedSideFinal: EngineV2Side = 
+        activeEngineRouting === "RANGE" ? rangeSideCandidate :
+        activeEngineRouting === "TREND" ? trendSideCandidate :
+        v2SideAfterPromotion;
+
+    if (v2DecisionAfterPromotion === "ENTER") {
+        v2SideAfterPromotion = selectedSideFinal;
+    }
+
     const finalDecisionBeforeVeto = v2DecisionAfterPromotion;
     const sideCandidateBeforeVeto = v2SideAfterPromotion;
     let vetoReason: string | null = null;
     const rangeLowerShortMismatchByReason = signalGateBlockedReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
     const rangeUpperLongMismatchByReason = signalGateBlockedReason === "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
-    const rangeLowerShortMismatchByBox = sideCandidateBeforeVeto === "short" && (boxPos ?? 0.5) <= rangeLowerThreshold;
-    const rangeUpperLongMismatchByBox = sideCandidateBeforeVeto === "long" && (boxPos ?? 0.5) >= rangeUpperThreshold;
+    const rangeLowerShortMismatch = sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
+    const rangeUpperLongMismatch = sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
     const rangeDowngradedHardBlock = rangeSignalDowngraded && !rangeSignalKeptByRelax;
-    const entryCandidateHardBlock = !entryCandidate;
+    const entryCandidateHardBlock = !entryCandidate && !promotionApplied;
     const trendPromotionHardBlock = activeEngineRouting === "TREND" && trendOk !== true && sideCandidateBeforeVeto !== "none";
     const rangeMidConservativeBlock =
         rangeContextActive &&
@@ -1539,9 +1553,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         !shockRecoveryHint;
 
     if (v2DecisionAfterPromotion === "ENTER") {
-        if (rangeLowerShortMismatchByReason || rangeLowerShortMismatchByBox) {
+        if (rangeLowerShortMismatch) {
             vetoReason = "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
-        } else if (rangeUpperLongMismatchByReason || rangeUpperLongMismatchByBox) {
+        } else if (rangeUpperLongMismatch) {
             vetoReason = "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
         } else if (rangeDowngradedHardBlock) {
             vetoReason = "RANGE_SIGNAL_DOWNGRADED_NOT_RELAXED";
@@ -1579,6 +1593,25 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             vetoReason
         }));
     }
+
+    // Tier 5+: Selected Side Consistency Log
+    console.info(JSON.stringify({
+        event: "V2_SELECTED_SIDE_CONSISTENCY_PROOF",
+        symbol: String(input.symbol),
+        active_engine_routing: activeEngineRouting,
+        market_subtype: judgment.subtype,
+        range_zone: zone,
+        range_side_candidate: rangeSideCandidate,
+        trend_side_candidate: trendSideCandidate,
+        aligned_signal: alignedSignal,
+        selected_side_before_veto: sideCandidateBeforeVetoEnforced,
+        selected_side_after_veto: v2SideAfterPromotion,
+        side_zone_valid: sideZoneValid,
+        entryCandidate: entryCandidate,
+        vetoReason: vetoReason,
+        finalDecisionBeforeVeto: finalDecisionBeforeVeto,
+        finalDecisionAfterVeto: v2DecisionAfterPromotion
+    }));
 
     finalDecision = v2DecisionAfterPromotion;
     blockReason = v2RejectReasonAfterPromotion;
