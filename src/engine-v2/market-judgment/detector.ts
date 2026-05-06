@@ -16,6 +16,17 @@ function classifyRangePhase(sn: EngineV2Input["snapshot"]): MarketJudgmentOutput
     const boxBreakSide = sn.boxBreakSide ?? "none";
     const emaGap = Number(sn.emaGap ?? 0);
     const breakoutFailureRate = Number(sn.breakoutFailureRate ?? 0);
+    const rangeOscillationScore = Number(sn.rangeOscillationScore ?? 0);
+    const boxCohesion = Number(sn.boxCohesion01 ?? 0);
+    const trendWeakness = Number(sn.trendWeaknessScore ?? 1);
+
+    // Phase 5: Advanced Compression & Squeeze Detection
+    if (rangeOscillationScore >= 0.75 && breakoutFailureRate >= 0.6) return "COMPRESSION";
+    if (boxCohesion >= 0.85 && trendWeakness >= 0.7 && rangeOscillationScore >= 0.5) return "TRIANGLE_SQUEEZE";
+    
+    // Breakout Observation (Pre-Confirmation)
+    if (boxBreakSide !== "none" && breakoutFailureRate < 0.4 && (sn.reviewing_ticks ?? 0) < 12) return "BREAKOUT_OBSERVATION";
+
     if (breakoutFailureRate >= 0.6) return "FAKE_BREAKOUT";
     if (boxBreakSide === "lower" && emaGap < 0) return "BREAKDOWN";
     if (boxBreakSide === "upper" && emaGap > 0) return "BREAKOUT";
@@ -39,14 +50,22 @@ function classifyTransitionPhase(
     trendScore: number,
     boxCohesionCollapse: boolean,
     mixedBreakoutState: boolean,
-    trendWeaknessScore: number
+    trendWeaknessScore: number,
+    input: EngineV2Input
 ): MarketJudgmentOutput["transitionPhase"] {
+    const sn = input.snapshot;
     const rangeToTrend =
         rangeScore > 0.4 &&
         rangeScore < 0.7 &&
         trendScore >= 0.6 &&
         boxCohesionCollapse;
     const trendToRange = trendWeaknessScore > 0.6 && rangeScore >= 0.6;
+
+    // Phase 5: Breakout Retest Confirmation (Standard 12-tick rule)
+    if (sn.boxBreakSide !== "none" && (sn.reviewing_ticks ?? 0) >= 12) {
+        return "RETEST_CONFIRMED";
+    }
+
     if (rangeToTrend) return "RANGE_TO_TREND";
     if (trendToRange) return "TREND_TO_RANGE";
     if (mixedBreakoutState || boxCohesionCollapse) return "CONFLICT";
@@ -70,6 +89,9 @@ function selectSubtype(args: {
     if (shockPhase === "DOWN_SHOCK") return { subtype: "SHOCK_REACTION_DOWN", subtypeReason: "directional_shock_down" };
     if (shockPhase === "UP_SHOCK") return { subtype: "SHOCK_REACTION_UP", subtypeReason: "directional_shock_up" };
     if (regimeFinal === "RANGE") {
+        if (rangePhase === "COMPRESSION") return { subtype: "RANGE_COMPRESSION", subtypeReason: "range_oscillation_high_compression" };
+        if (rangePhase === "TRIANGLE_SQUEEZE") return { subtype: "TRIANGLE_SQUEEZE_CANDIDATE", subtypeReason: "triangle_squeeze_cohesion_high" };
+        if (rangePhase === "BREAKOUT_OBSERVATION") return { subtype: "BREAKOUT_OBSERVATION", subtypeReason: "breakout_observation_ticks_low" };
         if (rangePhase === "FAKE_BREAKOUT") return { subtype: "RANGE_FAKE_BREAKOUT", subtypeReason: "range_fake_breakout_failure_rate_high" };
         if (rangePhase === "BREAKDOWN") return { subtype: "RANGE_BREAKDOWN_CANDIDATE", subtypeReason: "range_breakdown_candidate" };
         if (rangePhase === "BREAKOUT") return { subtype: "RANGE_BREAKOUT_CANDIDATE", subtypeReason: "range_breakout_candidate" };
@@ -78,6 +100,7 @@ function selectSubtype(args: {
         return { subtype: "RANGE_MID_CHOP", subtypeReason: "range_mid_chop" };
     }
     if (regimeFinal === "TREND") {
+        if (transitionPhase === "RETEST_CONFIRMED") return { subtype: "BREAKOUT_RETEST_CONFIRMED", subtypeReason: "breakout_retest_confirmed_ticks_met" };
         if (trendPhase === "EXHAUSTION") return { subtype: "TREND_EXHAUSTION", subtypeReason: "trend_exhaustion" };
         if (trendPhase === "PULLBACK") return { subtype: "TREND_PULLBACK", subtypeReason: "trend_pullback" };
         if (trendPhase === "DOWN") return { subtype: "TREND_DOWN_CONTINUATION", subtypeReason: "trend_down_continuation" };
@@ -125,7 +148,8 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         trendScore,
         boxCohesionCollapse,
         mixedBreakoutState,
-        Number(sn.trendWeaknessScore ?? 1)
+        Number(sn.trendWeaknessScore ?? 1),
+        input
     );
 
     if (data_ready === false) {

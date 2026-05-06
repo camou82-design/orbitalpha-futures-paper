@@ -20,6 +20,10 @@ export type EngineV2MarketSubtype =
     | "TRANSITION_CONFLICT"
     | "SHOCK_REACTION_DOWN"
     | "SHOCK_REACTION_UP"
+    | "RANGE_COMPRESSION"
+    | "TRIANGLE_SQUEEZE_CANDIDATE"
+    | "BREAKOUT_OBSERVATION"
+    | "BREAKOUT_RETEST_CONFIRMED"
     | "NO_TRADE_DATA_NOT_READY"
     | "NO_TRADE_DUMP_PROTECTION"
     | "NO_TRADE_METRICS_INSUFFICIENT";
@@ -467,9 +471,9 @@ export interface MarketJudgmentOutput {
     subtype: EngineV2MarketSubtype;
     subtypeReason: string;
     shockPhase: "NONE" | "DOWN_SHOCK" | "UP_SHOCK" | "CRASH_RECOVERY" | "PUMP_RECOVERY";
-    rangePhase: "NONE" | "MID" | "LOWER" | "UPPER" | "BREAKDOWN" | "BREAKOUT" | "FAKE_BREAKOUT";
+    rangePhase: "NONE" | "MID" | "LOWER" | "UPPER" | "BREAKDOWN" | "BREAKOUT" | "FAKE_BREAKOUT" | "COMPRESSION" | "TRIANGLE_SQUEEZE" | "BREAKOUT_OBSERVATION";
     trendPhase: "NONE" | "UP" | "DOWN" | "PULLBACK" | "EXHAUSTION";
-    transitionPhase: "NONE" | "RANGE_TO_TREND" | "TREND_TO_RANGE" | "CONFLICT";
+    transitionPhase: "NONE" | "RANGE_TO_TREND" | "TREND_TO_RANGE" | "CONFLICT" | "RETEST_CONFIRMED";
     judgmentVersion: "v2_market_judgment_subtype_v1";
     no_trade_reason: string | null;
     data_ready: boolean;

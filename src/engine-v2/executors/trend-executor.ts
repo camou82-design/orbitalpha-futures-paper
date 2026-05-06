@@ -1,10 +1,10 @@
-import { EngineV2Input, ExecutorOutput, EngineV2SignalState, EngineV2Side } from "../types";
+import { EngineV2Input, ExecutorOutput, EngineV2SignalState, EngineV2Side, MarketJudgmentOutput } from "../types";
 
 /**
  * Tier 4: Trend Executor (Refined)
  * Trend followers only; counter-trend prohibited.
  */
-export function executeTrendRegime(input: EngineV2Input): ExecutorOutput {
+export function executeTrendRegime(input: EngineV2Input, judgment: MarketJudgmentOutput): ExecutorOutput {
     const { snapshot: sn } = input;
     const emaGap = sn.emaGap ?? 0;
     const trendWeakness = sn.trendWeaknessScore ?? 0;
@@ -37,6 +37,36 @@ export function executeTrendRegime(input: EngineV2Input): ExecutorOutput {
         signal = "WAIT_RECHECK";
         side = "none";
         reason = "Momentum forming, awaiting confirmation";
+    }
+
+    // Phase 5: Breakout Observation Suppression & Retest Confirmation
+    if (judgment.subtype === "BREAKOUT_OBSERVATION") {
+        signal = "NONE";
+        side = "none";
+        reason = "SUPPRESSED: Initial breakout candle detected; awaiting retest for TREND validation";
+        console.info(JSON.stringify({
+            event: "V2_BREAKOUT_OBSERVATION_SUPPRESSION_PROOF",
+            symbol: input.symbol,
+            subtype: judgment.subtype,
+            action: "SUPPRESS_ENTRY"
+        }));
+    } else if (judgment.subtype === "BREAKOUT_RETEST_CONFIRMED") {
+        // If we were already in a candidate state, keep it. 
+        // If not, we might want to force a candidate if momentum is still there.
+        if (signal === "NONE" || signal === "WAIT_RECHECK") {
+            if (Math.abs(emaGap) > 0.0005) {
+                signal = emaGap > 0 ? "LONG_CANDIDATE" : "SHORT_CANDIDATE";
+                side = emaGap > 0 ? "long" : "short";
+                reason = "TREND_CONFIRMED: Breakout retest validated; entering trend phase";
+            }
+        }
+        console.info(JSON.stringify({
+            event: "V2_BREAKOUT_RETEST_CONFIRM_PROOF",
+            symbol: input.symbol,
+            subtype: judgment.subtype,
+            action: "ALLOW_ENTRY",
+            emaGap
+        }));
     }
 
     return {

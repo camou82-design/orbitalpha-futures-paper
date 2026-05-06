@@ -1,11 +1,11 @@
-import { EngineV2Input, ExecutorOutput } from "../types";
+import { EngineV2Input, ExecutorOutput, MarketJudgmentOutput } from "../types";
 
 /**
  * Tier 4: Range Executor (Refined)
  * Hardened with Late Chase Guard and Zone-based Side Filtering.
  * Decoupled from paper-engine legacy logic.
  */
-export function executeRangeRegime(input: EngineV2Input): ExecutorOutput {
+export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmentOutput): ExecutorOutput {
     const { snapshot: sn } = input;
     const boxPos = typeof sn.boxPos === "number" && Number.isFinite(sn.boxPos) ? sn.boxPos : null;
     const rangeConfidence = typeof sn.rangeConfidence === "number" && Number.isFinite(sn.rangeConfidence) ? sn.rangeConfidence : 0;
@@ -88,10 +88,28 @@ export function executeRangeRegime(input: EngineV2Input): ExecutorOutput {
             }
         }
     } else {
-        // Mid Zone: Strict Neutrality
-        signal = "NONE";
-        side = "none";
         reason = "Mid-zone neutrality enforced (no-reversal candidates)";
+    }
+
+    // Phase 5: Range Compression & Squeeze Suppression
+    if (judgment.subtype === "RANGE_COMPRESSION" || judgment.subtype === "TRIANGLE_SQUEEZE_CANDIDATE") {
+        signal = "NONE";
+        reason = `SUPPRESSED: Market in ${judgment.subtype} (low quality consolidation)`;
+        console.info(JSON.stringify({
+            event: "V2_RANGE_COMPRESSION_SUPPRESSION_PROOF",
+            symbol: input.symbol,
+            subtype: judgment.subtype,
+            action: "SUPPRESS_ENTRY"
+        }));
+    } else if (judgment.subtype === "BREAKOUT_OBSERVATION") {
+        signal = "NONE";
+        reason = "SUPPRESSED: Initial breakout observation period; awaiting retest confirmation";
+        console.info(JSON.stringify({
+            event: "V2_BREAKOUT_OBSERVATION_SUPPRESSION_PROOF",
+            symbol: input.symbol,
+            subtype: judgment.subtype,
+            action: "SUPPRESS_ENTRY"
+        }));
     }
 
     // 2. Late Chase Guard Proof (Phase 4.5)

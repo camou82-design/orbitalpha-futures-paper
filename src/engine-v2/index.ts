@@ -230,8 +230,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 4: Executors
     let execution: ExecutorOutput;
-    if (routing.executor === "RANGE") execution = executeRangeRegime(authoritativeInput);
-    else if (routing.executor === "TREND") execution = executeTrendRegime(authoritativeInput);
+    if (routing.executor === "RANGE") execution = executeRangeRegime(authoritativeInput, judgment);
+    else if (routing.executor === "TREND") execution = executeTrendRegime(authoritativeInput, judgment);
     else if (routing.executor === "TRANSITION") execution = executeTransitionRegime(authoritativeInput, judgment);
     else {
         execution = {
