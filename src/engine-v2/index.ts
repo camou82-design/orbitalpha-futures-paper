@@ -2257,8 +2257,38 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             finalAddonNotionalUsdt: finalAddonNotionalUsdt,
             peakUnrealizedPnlPct: lifecyclePosition_latest?.peakUnrealizedPnlPct,
             peakUnrealizedPnlUsd: lifecyclePosition_latest?.peakUnrealizedPnlUsd,
-            peakPnlUpdatedAt: lifecyclePosition_latest?.peakPnlUpdatedAt
+            peakPnlUpdatedAt: lifecyclePosition_latest?.peakPnlUpdatedAt,
+            takeProfitPlan: lifecyclePosition_latest?.takeProfitPlan,
+            tp1Triggered: lifecyclePosition_latest?.tp1Triggered,
+            tp2Triggered: lifecyclePosition_latest?.tp2Triggered
         });
+
+        if (lifecycleAuthority.tp1Triggered && lifecyclePosition_latest) {
+            lifecyclePosition_latest.tp1Triggered = true;
+        }
+        if (lifecycleAuthority.tp2Triggered && lifecyclePosition_latest) {
+            lifecyclePosition_latest.tp2Triggered = true;
+        }
+
+        // Bridge back to v2ExitAuthority and v2PartialAuthority if managed by V2
+        if (lifecycleAuthority.exitManagedByV2 && lifecycleAuthority.exitAction === "exit") {
+            v2ExitAuthority = {
+                ...v2ExitAuthority,
+                exitAction: "exit",
+                shouldExit: true,
+                exitReason: lifecycleAuthority.exitReason || v2ExitAuthority.exitReason,
+                exitUrgency: "medium"
+            };
+        }
+        if (lifecycleAuthority.partialManagedByV2 && lifecycleAuthority.partialAction === "reduce") {
+            v2PartialAuthority = {
+                ...v2PartialAuthority,
+                partialAction: "protect_profit",
+                shouldPartial: true,
+                partialReason: lifecycleAuthority.partialReason || v2PartialAuthority.partialReason,
+                reduceRatio: lifecycleAuthority.reduceRatio || v2PartialAuthority.reduceRatio
+            };
+        }
 
         // Cooldown authority is computed as an independent proof/comparison layer.
         // It does NOT change any actual cooldown application logic (paper engine remains the executor).
@@ -2849,7 +2879,10 @@ export function adaptV2Input(
                 ledger_stop_px: p.ledger_stop_px,
                 peakUnrealizedPnlPct: p.peakUnrealizedPnlPct,
                 peakUnrealizedPnlUsd: p.peakUnrealizedPnlUsd,
-                peakPnlUpdatedAt: p.peakPnlUpdatedAt
+                peakPnlUpdatedAt: p.peakPnlUpdatedAt,
+                takeProfitPlan: p.takeProfitPlan,
+                tp1Triggered: p.tp1Triggered,
+                tp2Triggered: p.tp2Triggered
             })),
             globalRiskScore: state.globalRiskScore,
             lossStreaks: state.lossStreaks,

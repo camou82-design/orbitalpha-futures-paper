@@ -70,7 +70,15 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
     let newStopPrice: number | undefined;
     let nextAddonNotional: number | undefined;
     let partialAction: V2TradeLifecycleAuthorityResult["partialAction"] = "none";
+    let partialReason: string | null = null;
     let exitAction: V2TradeLifecycleAuthorityResult["exitAction"] = "none";
+    let exitReason: string | null = null;
+    let reduceRatio: number | null = null;
+    
+    let tp1TriggeredResult: boolean | undefined;
+    let tp2TriggeredResult: boolean | undefined;
+    let tp1PxResult: number | undefined;
+    let tp2PxResult: number | undefined;
 
     if (input.position != null) {
         if (input.regime === "RANGE") {
@@ -96,6 +104,45 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
                 if (swingLSlope < -0.0005 || atrExp > 2.0) {
                     structuralReversalDetected = true;
                     structuralReversalReason = `SHARP_DOWNWARD_REVERSAL_IN_DRIFT_UP (swingLSlope: ${swingLSlope.toFixed(5)}, atrExp: ${atrExp.toFixed(2)})`;
+                }
+            }
+
+            // [HARDENED] RANGE TP Plan Execution
+            const tpPlan = input.takeProfitPlan;
+            if (tpPlan && input.position != null) {
+                const lastPx = input.markPrice || 0;
+                if (input.side === "long") {
+                    if (lastPx >= tpPlan.tp1 && !input.tp1Triggered) {
+                        proofReasons.push("V2_RANGE_TP1_TRIGGER_PROOF");
+                        tp1TriggeredResult = true;
+                        tp1PxResult = tpPlan.tp1;
+                        partialAction = "reduce";
+                        partialReason = "V2_RANGE_TAKE_PROFIT_1_REDUCE";
+                        reduceRatio = 0.5;
+                    }
+                    if (lastPx >= tpPlan.tp2 && !input.tp2Triggered) {
+                        proofReasons.push("V2_RANGE_TP2_TRIGGER_PROOF");
+                        tp2TriggeredResult = true;
+                        tp2PxResult = tpPlan.tp2;
+                        exitAction = "exit";
+                        exitReason = "V2_RANGE_TAKE_PROFIT_2_EXIT";
+                    }
+                } else if (input.side === "short") {
+                    if (lastPx <= tpPlan.tp1 && !input.tp1Triggered) {
+                        proofReasons.push("V2_RANGE_TP1_TRIGGER_PROOF");
+                        tp1TriggeredResult = true;
+                        tp1PxResult = tpPlan.tp1;
+                        partialAction = "reduce";
+                        partialReason = "V2_RANGE_TAKE_PROFIT_1_REDUCE";
+                        reduceRatio = 0.5;
+                    }
+                    if (lastPx <= tpPlan.tp2 && !input.tp2Triggered) {
+                        proofReasons.push("V2_RANGE_TP2_TRIGGER_PROOF");
+                        tp2TriggeredResult = true;
+                        tp2PxResult = tpPlan.tp2;
+                        exitAction = "exit";
+                        exitReason = "V2_RANGE_TAKE_PROFIT_2_EXIT";
+                    }
                 }
             }
 
@@ -485,10 +532,13 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
         exitManagedByV2: isV2Owner,
         cooldownManagedByV2: isV2Owner,
         positionStateManagedByV2: isV2Owner,
-        addOnAllowed,
+        addOnAllowed: addOnAllowed ?? false,
         nextAddonNotional,
         partialAction,
+        partialReason,
         exitAction,
+        exitReason,
+        reduceRatio,
         newStopPrice,
         givebackPct: result_givebackPct,
         guardThresholdPct: result_guardThresholdPct,
@@ -500,7 +550,11 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
         knownShadowGaps,
         trueInconsistencyReasons,
         inconsistencyReasons,
-        proofReasons
+        proofReasons,
+        tp1Triggered: tp1TriggeredResult,
+        tp2Triggered: tp2TriggeredResult,
+        takeProfit1Px: tp1PxResult,
+        takeProfit2Px: tp2PxResult
     };
     return result;
 }

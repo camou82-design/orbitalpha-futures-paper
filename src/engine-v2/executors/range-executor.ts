@@ -32,18 +32,16 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     let firstBreakoutChaseBlocked = false;
     const qualityScore = sn.qualityScore ?? 0;
 
-    // --- BOX QUALITY GUARD ---
-    if ((isDistorted || isDrifting) && currentStage === 0) {
-        return {
-            signal: "NONE",
-            side: "none",
-            reason: `V2_RANGE_BOX_DISTORTED: ${isDistorted ? "HEIGHT" : "SLOPE"} distortion detected`,
-            baseSizeIntent: 0,
-            recheckSuggested: true,
-            isAddOnEligible: false,
-            metadata: { isDistorted, isDrifting, distortionFactor }
-        };
-    }
+    // --- BOX QUALITY GUARD (Refined) ---
+    // Distorted box blocks only mean-reversion entries.
+    // Drifting box allows continuation but blocks counter-drift entries.
+    const isMeanReversionBlockedByDistortion = isDistorted && currentStage === 0;
+
+    // [HARDENED] Drifting box side bias for continuation
+    const isDriftDown = judgment.subtype === "RANGE_DRIFT_DOWN" || judgment.subtype === "DESCENDING_CHANNEL";
+    const isDriftUp = judgment.subtype === "RANGE_DRIFT_UP" || judgment.subtype === "ASCENDING_CHANNEL";
+    
+    // Note: Early return for distorted box is removed to allow side-filtering and continuation.
 
     // Standard Zone Classification (Hardened)
     // Upper (>= 0.82), Lower (<= 0.18), Mid (0.18 < x < 0.82)
@@ -99,15 +97,33 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             signal = "NONE";
             reason = "Upper edge reached but short blocked by bias";
         } else {
-            // Reversal check
-            const reversalQualified = (rangeConfidence > 0.78 || (boxCohesion01 > 0.85 && breakoutFailureRate > 0.6));
-            if (reversalQualified) {
+            // Reversal check (Hardened Price Action Confirmation)
+            const candles = input.recentCandles ?? [];
+            const lastCandles = candles.slice(-5);
+            const entryPx = sn.boxHigh ?? 0;
+            const lastPx = sn.lastPrice ?? 0;
+            const atr = sn.atr ?? 0;
+
+            let touchDetected = false;
+            let overshot = false;
+
+            for (const c of lastCandles) {
+                if (c.high >= entryPx) touchDetected = true;
+                if (c.high > entryPx + (atr * 0.15)) overshot = true;
+            }
+
+            // Reaction check: current price must be below the touch high
+            const reactionDetected = touchDetected && lastPx < entryPx * 0.9997;
+            reversalConfirmed = touchDetected && !overshot && reactionDetected;
+
+            if (reversalConfirmed) {
                 signal = "SHORT_CANDIDATE";
-                reason = "Upper edge reversal identified";
-                reversalConfirmed = true;
+                reason = "Upper edge reversal identified by price reaction";
             } else {
                 signal = "WAIT_RECHECK";
-                reason = "Upper edge reached; awaiting reversal signal";
+                reason = touchDetected 
+                    ? (overshot ? "Upper edge overshot; reversal invalidated" : "Upper edge touched; awaiting reaction")
+                    : "Upper edge reached; awaiting touch and reaction";
                 recheckSuggested = true;
             }
         }
@@ -118,15 +134,32 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             signal = "NONE";
             reason = "Lower edge reached but long blocked by bias";
         } else {
-            // Reversal check
-            const reversalQualified = (rangeConfidence > 0.78 || (boxCohesion01 > 0.85 && breakoutFailureRate > 0.6));
-            if (reversalQualified) {
+            // Reversal check (Hardened Price Action Confirmation)
+            const candles = input.recentCandles ?? [];
+            const lastCandles = candles.slice(-5);
+            const entryPx = sn.boxLow ?? 0;
+            const lastPx = sn.lastPrice ?? 0;
+            const atr = sn.atr ?? 0;
+
+            let touchDetected = false;
+            let overshot = false;
+
+            for (const c of lastCandles) {
+                if (c.low <= entryPx) touchDetected = true;
+                if (c.low < entryPx - (atr * 0.15)) overshot = true;
+            }
+
+            const reactionDetected = touchDetected && lastPx > entryPx * 1.0003;
+            reversalConfirmed = touchDetected && !overshot && reactionDetected;
+
+            if (reversalConfirmed) {
                 signal = "LONG_CANDIDATE";
-                reason = "Lower edge reversal identified";
-                reversalConfirmed = true;
+                reason = "Lower edge reversal identified by price reaction";
             } else {
                 signal = "WAIT_RECHECK";
-                reason = "Lower edge reached; awaiting reversal signal";
+                reason = touchDetected 
+                    ? (overshot ? "Lower edge overshot; reversal invalidated" : "Lower edge touched; awaiting reaction")
+                    : "Lower edge reached; awaiting touch and reaction";
                 recheckSuggested = true;
             }
         }
@@ -302,6 +335,38 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         tp1 = boxMid;
         tp2 = boxLow * 1.002;
         inv = boxHigh + Math.max(atr * 0.5, boxHigh * 0.0015);
+    }
+
+    // --- INVALID TP PLAN GUARD (Hardened) ---
+    const boxHeight = boxHigh - boxLow;
+    const boxHeightPct = boxLow > 0 ? boxHeight / boxLow : 0;
+    const isPlanInconsistent = side === "long" ? (tp1 >= tp2 || tp1 <= inv) : (tp1 <= tp2 || tp1 >= inv);
+    const isPlanInvalid = tp1 <= 0 || tp2 <= 0 || inv <= 0 || isPlanInconsistent || boxHeightPct < 0.0008;
+
+    if (isPlanInvalid && signal !== "NONE" && currentStage === 0) {
+        console.warn(JSON.stringify({
+            event: "V2_RANGE_ENTRY_BLOCKED_INVALID_TP_PLAN_PROOF",
+            symbol: input.symbol,
+            side,
+            tp1,
+            tp2,
+            inv,
+            boxHigh,
+            boxLow,
+            boxHeightPct,
+            reason: isPlanInconsistent ? "plan_inconsistent" : "zero_or_narrow_box"
+        }));
+        signal = "NONE";
+        reason = `V2_RANGE_ENTRY_BLOCKED: Invalid TP plan (${isPlanInconsistent ? "inconsistent" : "quality"})`;
+    }
+
+    // Block mean-reversion if distortion is active, but allow if it's a continuation
+    if (isMeanReversionBlockedByDistortion && signal !== "NONE" && currentStage === 0) {
+        const isContinuation = (isDriftDown && side === "short") || (isDriftUp && side === "long");
+        if (!isContinuation) {
+            signal = "NONE";
+            reason = "V2_RANGE_MEAN_REVERSION_BLOCKED: Box distortion active";
+        }
     }
 
     const takeProfitPlan = (tp1 > 0 && tp2 > 0 && inv > 0) ? {

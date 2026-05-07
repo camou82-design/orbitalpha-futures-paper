@@ -93,6 +93,13 @@ export interface EngineV2Position {
     peakUnrealizedPnlPct?: number;
     peakUnrealizedPnlUsd?: number;
     peakPnlUpdatedAt?: number;
+    takeProfitPlan?: {
+        tp1: number;
+        tp2: number;
+        inv: number;
+    } | null;
+    tp1Triggered?: boolean;
+    tp2Triggered?: boolean;
 }
 
 /** 
@@ -160,6 +167,13 @@ export interface LegacyPositionAdapter {
     peakUnrealizedPnlPct?: number;
     peakUnrealizedPnlUsd?: number;
     peakPnlUpdatedAt?: number;
+    takeProfitPlan?: {
+        tp1: number;
+        tp2: number;
+        inv: number;
+    } | null;
+    tp1Triggered?: boolean;
+    tp2Triggered?: boolean;
 }
 
 export interface LegacyResultAdapter {
@@ -785,6 +799,13 @@ export interface V2TradeLifecycleAuthorityInput {
     peakUnrealizedPnlPct?: number;
     peakUnrealizedPnlUsd?: number;
     peakPnlUpdatedAt?: number;
+    takeProfitPlan?: {
+        tp1: number;
+        tp2: number;
+        inv: number;
+    } | null;
+    tp1Triggered?: boolean;
+    tp2Triggered?: boolean;
 }
 
 export interface V2TradeLifecycleAuthorityResult {
@@ -804,8 +825,11 @@ export interface V2TradeLifecycleAuthorityResult {
     positionStateManagedByV2: boolean;
     addOnAllowed: boolean | null;
     nextAddonNotional?: number;
-    partialAction: V2LifecyclePartialAction;
     exitAction: V2LifecycleExitAction;
+    exitReason?: string | null;
+    partialAction: V2LifecyclePartialAction;
+    partialReason?: string | null;
+    reduceRatio?: number | null;
     newStopPrice?: number;
     givebackPct?: number;
     guardThresholdPct?: number;
@@ -818,6 +842,10 @@ export interface V2TradeLifecycleAuthorityResult {
     trueInconsistencyReasons: string[];
     inconsistencyReasons: string[];
     proofReasons: string[];
+    tp1Triggered?: boolean;
+    tp2Triggered?: boolean;
+    takeProfit1Px?: number;
+    takeProfit2Px?: number;
 }
 
 /** Tier 5: Add-on Policy Output */

@@ -5593,6 +5593,15 @@ export class PaperEngine {
         });
         sz = norm.normalized_contracts;
         szStr = norm.normalized_sz;
+
+        this.logger.info("V2_PROTECTIVE_STOP_SIZE_UNIT_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          input_contracts: open.okxContracts,
+          normalized_contracts: sz,
+          normalized_sz: szStr,
+          flowId
+        });
       } else {
         sz = open.okxContracts; // No-op fallback if instrument metadata missing
         szStr = String(sz);
@@ -7779,6 +7788,16 @@ export class PaperEngine {
           isTrailingStop: isTrailingClose
         });
 
+        if (cr === "take_profit" && String(v2ExitAuthority?.exitReason).startsWith("V2_RANGE")) {
+          this.logger.info("V2_RANGE_TP2_CLOSE_ORDER_SUBMIT_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            ord_id: closeSubmit?.ordId,
+            target_price: closePrice,
+            reason: v2ExitAuthority?.exitReason ?? "take_profit"
+          });
+        }
+
         const isExchangeEnabled = this.okxDemo && this.signedSubmitMode() === "enabled";
         const closeConfirmed = !isExchangeEnabled || (closeSubmit?.ordId != null && closeSubmit?.fillConfirmed === true);
 
@@ -9107,6 +9126,16 @@ export class PaperEngine {
           fill_confirmed: partialSubmit?.fillConfirmed,
           reason: v2PartialAuthority.partialReason ?? "v2_partial_exit"
         });
+
+        if (String(v2PartialAuthority.partialReason).startsWith("V2_RANGE_TAKE_PROFIT")) {
+          this.logger.info("V2_RANGE_TP1_REDUCE_ORDER_SUBMIT_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            ord_id: partialSubmit?.ordId,
+            target_price: closePrice,
+            reason: v2PartialAuthority.partialReason
+          });
+        }
 
         const isExchangeEnabled = this.okxDemo && this.signedSubmitMode() === "enabled";
         const partialConfirmed = !isExchangeEnabled || (partialSubmit?.ordId != null && partialSubmit?.fillConfirmed === true);
