@@ -21,6 +21,9 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
   qualityScore: number;
   boxPos: number | null;
   boxRel: number | null;
+  boxHigh: number | null;
+  boxLow: number | null;
+  boxMid: number | null;
   expectedMove: number | null;
   totalCost: number | null;
   atr: number | null;
@@ -43,13 +46,42 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
   rangeReasonLabel?: string;
   rangeCycleCount?: number;
   boxBreakConfirmed?: boolean;
-} & Record<string, unknown>>): RangeEntryDecision {
+
+  // --- V2 Hardening Additions ---
+  shockPhase?: string;
+  trendPhase?: string;
+  emaGap?: number;
+  reversalConfirmed?: boolean;
+  isDistorted?: boolean;
+  isDrifting?: boolean;
+  distortionFactor?: number;
+  bhSlope?: number;
+  blSlope?: number;
+} & Record<string, unknown>>): RangeEntryDecision & { 
+    takeProfitPlan?: any; 
+    takeProfit1Px?: number; 
+    takeProfit2Px?: number; 
+    partialExitRatio?: number; 
+    invalidationPx?: number;
+    rangeBoxHighAtEntry?: number;
+    rangeBoxLowAtEntry?: number;
+    rangeBoxMidAtEntry?: number;
+    rangeBoxQuality?: number;
+    rangeBoxSlope?: number;
+    rangeBoxDistorted?: boolean;
+} {
   const dir = intentDirection(input.signal);
   const boxPos = input.boxPos;
   const boxRel = input.boxRel;
   const currentStage = input.currentStage ?? 0;
   const rangeCycleCount = input.rangeCycleCount ?? 0;
   const rangeConfidence = input.rangeConfidence ?? 0.5;
+  const shockPhase = input.shockPhase ?? "NONE";
+  const trendPhase = input.trendPhase ?? "NONE";
+  const emaGap = input.emaGap ?? 0;
+  const reversalConfirmed = input.reversalConfirmed === true;
+  const isDistorted = input.isDistorted === true;
+  const isDrifting = input.isDrifting === true;
 
   const box_position =
     boxPos === null || !Number.isFinite(boxPos)
@@ -72,6 +104,56 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
       risk_state: input.risk_state,
       detail: { symbol: input.symbol }
     };
+  }
+
+  // --- BOX QUALITY GUARD ---
+  if ((isDistorted || isDrifting) && currentStage === 0) {
+    console.warn(JSON.stringify({
+        event: "V2_RANGE_MEAN_REVERSION_DISABLED_BY_BOX_DISTORTION_PROOF",
+        symbol: input.symbol,
+        isDistorted,
+        isDrifting,
+        distortionFactor: input.distortionFactor
+    }));
+    return {
+      regime: input.regime,
+      executor: "RANGE",
+      entry_allowed: false,
+      blocked_reason: "range_box_distorted",
+      box_position,
+      expected_move: input.expectedMove,
+      total_cost: input.totalCost,
+      risk_state: input.risk_state,
+      guidance: "박스 품질 불량: 평균회귀 신뢰도 부족으로 진입 차단",
+      detail: { isDistorted, isDrifting, distortionFactor: input.distortionFactor }
+    };
+  }
+
+  // --- SHOCK & TREND GUARD ---
+  if (dir === "long" && box_position === "lower" && currentStage === 0) {
+    const isBearishRegime = shockPhase === "DOWN_SHOCK" || trendPhase === "DOWN" || emaGap < 0;
+    if (isBearishRegime && !reversalConfirmed) {
+        console.warn(JSON.stringify({
+            event: "V2_RANGE_LOWER_LONG_BLOCKED_BY_DOWN_SHOCK_PROOF",
+            symbol: input.symbol,
+            shockPhase,
+            trendPhase,
+            emaGap,
+            reversalConfirmed
+        }));
+        return {
+            regime: input.regime,
+            executor: "RANGE",
+            entry_allowed: false,
+            blocked_reason: "range_lower_long_blocked_by_bearish_shock",
+            box_position,
+            expected_move: input.expectedMove,
+            total_cost: input.totalCost,
+            risk_state: input.risk_state,
+            guidance: "하락 충격/추세 중 하단 롱 차단 (반전 확인 필요)",
+            detail: { shockPhase, trendPhase, emaGap }
+        };
+    }
   }
 
   if (input.risk_state === "BLOCKED") {
@@ -196,6 +278,46 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
     }
   }
 
+  // --- EXIT PLAN GENERATION (Mandatory for RANGE) ---
+  const boxHigh = input.boxHigh ?? 0;
+  const boxLow = input.boxLow ?? 0;
+  const boxMid = input.boxMid ?? (boxHigh + boxLow) / 2;
+  const atr = input.atr ?? 0;
+
+  let tp1 = 0;
+  let tp2 = 0;
+  let inv = 0;
+
+  if (dir === "long") {
+    tp1 = boxMid;
+    tp2 = boxHigh * 0.998;
+    inv = boxLow - Math.max(atr * 0.5, boxLow * 0.0015);
+  } else {
+    tp1 = boxMid;
+    tp2 = boxLow * 1.002;
+    inv = boxHigh + Math.max(atr * 0.5, boxHigh * 0.0015);
+  }
+
+  const takeProfitPlan = {
+    tp1,
+    tp2,
+    invalidation: inv,
+    partialRatio: 0.5,
+    version: "v2_range_fixed_plan_v1"
+  };
+
+  console.info(JSON.stringify({
+    event: "V2_RANGE_TAKE_PROFIT_PLAN_PROOF",
+    symbol: input.symbol,
+    side: dir,
+    tp1,
+    tp2,
+    invalidation: inv,
+    boxMid,
+    boxHigh,
+    boxLow
+  }));
+
   // 1차 탐색 진입 (Highway Probe - Ladder 1)
   const probeEdgeThreshold = 0.30;
   const inProbeZone = dir === "long" ? (boxPos ?? 0) <= probeEdgeThreshold : (boxPos ?? 1) >= (1 - probeEdgeThreshold);
@@ -246,7 +368,18 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
       entryConfirmationState: "unconfirmed",
       guidance: `Highway Stage 1 (Probe ${dir === "long" ? "Support" : "Resistance"})`,
       entry_progress: 20,
-      detail: { stage: 1, cycle: rangeCycleCount }
+      detail: { stage: 1, cycle: rangeCycleCount },
+      takeProfitPlan,
+      takeProfit1Px: tp1,
+      takeProfit2Px: tp2,
+      partialExitRatio: 0.5,
+      invalidationPx: inv,
+      rangeBoxHighAtEntry: boxHigh,
+      rangeBoxLowAtEntry: boxLow,
+      rangeBoxMidAtEntry: boxMid,
+      rangeBoxQuality: input.qualityScore,
+      rangeBoxSlope: input.rcSlope as number,
+      rangeBoxDistorted: isDistorted
     };
   }
 
@@ -290,7 +423,18 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
         scalingPermission: true,
         guidance: "Highway Stage 2 (Standard - Reaction Confirmed)",
         entry_progress: 55,
-        detail: { stage: 2 }
+        detail: { stage: 2 },
+        takeProfitPlan,
+        takeProfit1Px: tp1,
+        takeProfit2Px: tp2,
+        partialExitRatio: 0.5,
+        invalidationPx: inv,
+        rangeBoxHighAtEntry: boxHigh,
+        rangeBoxLowAtEntry: boxLow,
+        rangeBoxMidAtEntry: boxMid,
+        rangeBoxQuality: input.qualityScore,
+        rangeBoxSlope: input.rcSlope as number,
+        rangeBoxDistorted: isDistorted
       };
     } else {
       return {
@@ -326,7 +470,18 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
         entryConfirmationState: "confirmed",
         guidance: "Highway Stage 3 (Scale - Acceleration towards Median)",
         entry_progress: 100,
-        detail: { stage: 3 }
+        detail: { stage: 3 },
+        takeProfitPlan,
+        takeProfit1Px: tp1,
+        takeProfit2Px: tp2,
+        partialExitRatio: 0.5,
+        invalidationPx: inv,
+        rangeBoxHighAtEntry: boxHigh,
+        rangeBoxLowAtEntry: boxLow,
+        rangeBoxMidAtEntry: boxMid,
+        rangeBoxQuality: input.qualityScore,
+        rangeBoxSlope: input.rcSlope as number,
+        rangeBoxDistorted: isDistorted
       };
     }
   }

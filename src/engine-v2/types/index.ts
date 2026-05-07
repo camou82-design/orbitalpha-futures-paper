@@ -311,6 +311,7 @@ export interface EngineV2Decision {
     v2CooldownAuthority?: V2CooldownAuthorityResult;
     v2PositionStateAuthority?: V2PositionStateAuthorityResult;
     rawMetrics: Record<string, number | boolean | string | null>;
+    metadata?: Record<string, any>;
 }
 
 /** 
@@ -557,6 +558,7 @@ export interface MarketJudgmentOutput {
         mixedBreakoutState: boolean;
         emaExpansionWeak: boolean;
     };
+    metadata?: Record<string, any>;
 }
 
 /** Tier 2: Regime Confidence */
@@ -871,6 +873,18 @@ export type EntryExecutionAuthority = Readonly<{
     hardBlockReason?: string | null;
     nonBypassableHardBlockPresent?: boolean;
     newStopPrice?: number;
+    // --- RANGE Box & Exit Plan (V2 Hardening) ---
+    rangeBoxHighAtEntry?: number;
+    rangeBoxLowAtEntry?: number;
+    rangeBoxMidAtEntry?: number;
+    rangeBoxQuality?: number;
+    rangeBoxSlope?: number;
+    rangeBoxDistorted?: boolean;
+    takeProfitPlan?: any;
+    takeProfit1Px?: number;
+    takeProfit2Px?: number;
+    partialExitRatio?: number;
+    invalidationPx?: number;
 }>;
 
 /** Internal Pipeline Result */

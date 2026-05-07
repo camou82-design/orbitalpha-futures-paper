@@ -13,15 +13,37 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const breakoutFailureRate = typeof sn.breakoutFailureRate === "number" && Number.isFinite(sn.breakoutFailureRate) ? sn.breakoutFailureRate : 0;
     const rangeOscillationScore = typeof sn.rangeOscillationScore === "number" && Number.isFinite(sn.rangeOscillationScore) ? sn.rangeOscillationScore : 0;
     const trendWeaknessScore = typeof sn.trendWeaknessScore === "number" && Number.isFinite(sn.trendWeaknessScore) ? sn.trendWeaknessScore : 0;
-    const qualityScore = typeof sn.qualityScore === "number" && Number.isFinite(sn.qualityScore) ? sn.qualityScore : 0;
+    const currentStage = input.state.currentPositions.find(p => p.symbol === input.symbol)?.entryStage ?? 0;
+    const isDistorted = (judgment.metadata as any)?.isDistorted === true;
+    const isDrifting = (judgment.metadata as any)?.isDrifting === true;
+    const distortionFactor = (judgment.metadata as any)?.distortionFactor ?? 0;
+    const bhSlope = (judgment.metadata as any)?.bhSlope ?? 0;
+    const blSlope = (judgment.metadata as any)?.blSlope ?? 0;
 
-    let signal: ExecutorOutput["signal"] = "NONE";
-    let side: ExecutorOutput["side"] = "none";
-    let reason = "Watching mid-zone";
+    let signal: any = "NONE";
+    let side: EngineV2Side = "none";
+    let reason = "Initial state";
     let recheckSuggested = false;
     let reversalConfirmed = false;
+    let sideOverrideApplied = false;
     let lateChaseBlocked = false;
-    let sideZoneVetoed = false;
+    let retestRequired = false;
+    let retestPassed = false;
+    let firstBreakoutChaseBlocked = false;
+    const qualityScore = sn.qualityScore ?? 0;
+
+    // --- BOX QUALITY GUARD ---
+    if ((isDistorted || isDrifting) && currentStage === 0) {
+        return {
+            signal: "NONE",
+            side: "none",
+            reason: `V2_RANGE_BOX_DISTORTED: ${isDistorted ? "HEIGHT" : "SLOPE"} distortion detected`,
+            baseSizeIntent: 0,
+            recheckSuggested: true,
+            isAddOnEligible: false,
+            metadata: { isDistorted, isDrifting, distortionFactor }
+        };
+    }
 
     // Standard Zone Classification (Hardened)
     // Upper (>= 0.82), Lower (<= 0.18), Mid (0.18 < x < 0.82)
@@ -29,6 +51,32 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const isUpper = currentBoxPos >= 0.82;
     const isLower = currentBoxPos <= 0.18;
     const isMid = !isUpper && !isLower;
+
+    // --- SHOCK & TREND GUARD ---
+    const emaGap = sn.emaGap ?? 0;
+    if (isLower && currentStage === 0) {
+        const isBearishRegime = judgment.shockPhase === "DOWN_SHOCK" || judgment.trendPhase === "DOWN" || emaGap < 0;
+        // reversalConfirmed check is simplified here as we don't have candle history in this scope easily, 
+        // but let's assume it from judgment or metadata if available.
+        if (isBearishRegime) {
+            console.warn(JSON.stringify({
+                event: "V2_RANGE_LOWER_LONG_BLOCKED_BY_DOWN_SHOCK_PROOF",
+                symbol: input.symbol,
+                shockPhase: judgment.shockPhase,
+                trendPhase: judgment.trendPhase,
+                emaGap
+            }));
+            return {
+                signal: "NONE",
+                side: "none",
+                reason: "V2_RANGE_LOWER_LONG_BLOCKED_BY_BEARISH_SHOCK",
+                baseSizeIntent: 0,
+                recheckSuggested: true,
+                isAddOnEligible: false,
+                metadata: { shockPhase: judgment.shockPhase, trendPhase: judgment.trendPhase }
+            };
+        }
+    }
 
     // 1. Zone Authority Proof (Phase 4.5)
     console.info(JSON.stringify({
@@ -51,11 +99,6 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             signal = "NONE";
             reason = "Upper edge reached but short blocked by bias";
         } else {
-            // Late Chase Guard for SHORT (Extreme Breakdown)
-            if (currentBoxPos < 0.12) { // Should not happen in Upper zone, but for safety in generic logic
-                 // If we are evaluating for SHORT but price is already at the very bottom, it's a chase.
-            }
-            
             // Reversal check
             const reversalQualified = (rangeConfidence > 0.78 || (boxCohesion01 > 0.85 && breakoutFailureRate > 0.6));
             if (reversalQualified) {
@@ -157,10 +200,9 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         const isFake = judgment.subtype === "FAKE_VOLUME_BREAKDOWN" || judgment.subtype === "FAKE_VOLUME_BREAKOUT";
 
         const preVolumeSide = side;
-        let sideOverrideApplied = false;
-        let firstBreakoutChaseBlocked = false;
-        let retestRequired = isObservation || isShock;
-        let retestPassed = isRetestSuccess;
+        firstBreakoutChaseBlocked = false;
+        retestRequired = isObservation || isShock;
+        retestPassed = isRetestSuccess;
 
         if (side === blockedSide && !isRetestSuccess) {
             signal = "NONE";
@@ -202,18 +244,6 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             sideOverrideApplied,
             symmetryCase
         }));
-
-        if (isFake) {
-            console.info(JSON.stringify({
-                event: "V2_FAKE_VOLUME_BREAKOUT_GUARD_PROOF",
-                symbol: input.symbol,
-                direction,
-                boxBreakSide: sn.boxBreakSide,
-                breakoutFailureRate,
-                returnedInsideBox: true,
-                action: "BLOCK_ENTRY"
-            }));
-        }
     }
 
     // Phase 7: Volume Shock Entry Filtering (Symmetrical)
@@ -254,41 +284,50 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         }));
     }
 
-    if (judgment.subtype === "RANGE_FAKE_BREAKOUT") {
-        signal = "NONE";
-        reason = "FAKE_BREAKOUT_GUARD: Suppressing entry due to high failure rate observation";
-        console.info(JSON.stringify({
-            event: "V2_FAKE_BREAKOUT_GUARD_PROOF",
-            symbol: input.symbol,
-            boxBreakSide: sn.boxBreakSide,
-            breakoutFailureRate,
-            action: "BLOCK_ENTRY",
-            symmetryCase: sn.boxBreakSide === "upper" ? "FAKE_BREAKOUT_UP" : "FAKE_BREAKOUT_DOWN"
-        }));
+    // --- EXIT PLAN GENERATION (Mandatory for RANGE) ---
+    const boxHigh = Number(sn.boxHigh ?? 0);
+    const boxLow = Number(sn.boxLow ?? 0);
+    const boxMid = (boxHigh + boxLow) / 2;
+    const atr = Number(sn.atr ?? 0);
+
+    let tp1 = 0;
+    let tp2 = 0;
+    let inv = 0;
+
+    if (side === "long") {
+        tp1 = boxMid;
+        tp2 = boxHigh * 0.998;
+        inv = boxLow - Math.max(atr * 0.5, boxLow * 0.0015);
+    } else if (side === "short") {
+        tp1 = boxMid;
+        tp2 = boxLow * 1.002;
+        inv = boxHigh + Math.max(atr * 0.5, boxHigh * 0.0015);
     }
 
-    // Phase 5: Range Compression & Squeeze Suppression
-    if (judgment.subtype === "RANGE_COMPRESSION" || judgment.subtype === "TRIANGLE_SQUEEZE_CANDIDATE") {
-        signal = "NONE";
-        reason = `SUPPRESSED: Market in ${judgment.subtype} (low quality consolidation)`;
+    const takeProfitPlan = (tp1 > 0 && tp2 > 0 && inv > 0) ? {
+        tp1,
+        tp2,
+        invalidation: inv,
+        partialRatio: 0.5,
+        version: "v2_range_fixed_plan_v1"
+    } : null;
+
+    if (takeProfitPlan && (signal === "LONG_CANDIDATE" || signal === "SHORT_CANDIDATE")) {
         console.info(JSON.stringify({
-            event: "V2_RANGE_COMPRESSION_SUPPRESSION_PROOF",
+            event: "V2_RANGE_TAKE_PROFIT_PLAN_PROOF",
             symbol: input.symbol,
-            subtype: judgment.subtype,
-            action: "SUPPRESS_ENTRY"
-        }));
-    } else if (judgment.subtype === "BREAKOUT_OBSERVATION") {
-        signal = "NONE";
-        reason = "SUPPRESSED: Initial breakout observation period; awaiting retest confirmation";
-        console.info(JSON.stringify({
-            event: "V2_BREAKOUT_OBSERVATION_SUPPRESSION_PROOF",
-            symbol: input.symbol,
-            subtype: judgment.subtype,
-            action: "SUPPRESS_ENTRY"
+            side,
+            tp1,
+            tp2,
+            invalidation: inv,
+            boxMid,
+            boxHigh,
+            boxLow
         }));
     }
 
     // 2. Late Chase Guard Proof (Phase 4.5)
+    lateChaseBlocked = false;
     if (side === "long" && currentBoxPos > 0.88) {
         lateChaseBlocked = true;
         signal = "NONE";
@@ -324,7 +363,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         reason
     }));
 
-    const metadata: Record<string, string | number | boolean | null> = {
+    const metadata: Record<string, string | number | boolean | null | any> = {
         boxPos: currentBoxPos,
         rangeConfidence,
         breakoutFailureRate,
@@ -334,7 +373,22 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         isMid,
         reversal_confirmed: reversalConfirmed,
         late_chase_blocked: lateChaseBlocked,
-        qualityScore
+        sideOverrideApplied,
+        qualityScore,
+        isDistorted,
+        isDrifting,
+        distortionFactor,
+        takeProfitPlan,
+        takeProfit1Px: tp1,
+        takeProfit2Px: tp2,
+        partialExitRatio: 0.5,
+        invalidationPx: inv,
+        rangeBoxHighAtEntry: boxHigh,
+        rangeBoxLowAtEntry: boxLow,
+        rangeBoxMidAtEntry: boxMid,
+        rangeBoxQuality: qualityScore,
+        rangeBoxSlope: bhSlope, // Approximate
+        rangeBoxDistorted: isDistorted
     };
 
     return {

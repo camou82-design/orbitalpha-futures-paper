@@ -401,6 +401,7 @@ export function resolveSymbolDecisionEnvelope(
         v2Size: v2Res.decision.risk.stageMarginKrw ?? 0,
         selectorMismatch: selector.mismatch
     };
+    const execMeta = v2Res.decision.metadata ?? {};
     const executionEnvelope = buildV2ExecutionAuthorityEnvelope({
         symbol: String(symbol),
         mode: v2Mode,
@@ -416,7 +417,18 @@ export function resolveSymbolDecisionEnvelope(
         exitReduceRatio: v2Res.internal.exitPolicy?.reduceRatio ?? 0,
         exitUrgency: v2Res.internal.exitPolicy?.exitUrgency ?? "LOW",
         exitConfidence: v2Res.internal.exitPolicy?.exitConfidence ?? 0,
-        newStopPrice: v2Res.internal.lifecycleAuthority?.newStopPrice
+        newStopPrice: v2Res.internal.lifecycleAuthority?.newStopPrice,
+        rangeBoxHighAtEntry: typeof execMeta.rangeBoxHighAtEntry === "number" ? execMeta.rangeBoxHighAtEntry : undefined,
+        rangeBoxLowAtEntry: typeof execMeta.rangeBoxLowAtEntry === "number" ? execMeta.rangeBoxLowAtEntry : undefined,
+        rangeBoxMidAtEntry: typeof execMeta.rangeBoxMidAtEntry === "number" ? execMeta.rangeBoxMidAtEntry : undefined,
+        rangeBoxQuality: typeof execMeta.rangeBoxQuality === "number" ? execMeta.rangeBoxQuality : undefined,
+        rangeBoxSlope: typeof execMeta.rangeBoxSlope === "number" ? execMeta.rangeBoxSlope : undefined,
+        rangeBoxDistorted: typeof execMeta.rangeBoxDistorted === "boolean" ? execMeta.rangeBoxDistorted : undefined,
+        takeProfitPlan: execMeta.takeProfitPlan ?? undefined,
+        takeProfit1Px: typeof execMeta.takeProfit1Px === "number" ? execMeta.takeProfit1Px : undefined,
+        takeProfit2Px: typeof execMeta.takeProfit2Px === "number" ? execMeta.takeProfit2Px : undefined,
+        partialExitRatio: typeof execMeta.partialExitRatio === "number" ? execMeta.partialExitRatio : undefined,
+        invalidationPx: typeof execMeta.invalidationPx === "number" ? execMeta.invalidationPx : undefined
     });
     const authority =
         v2Mode === "engine_v2"

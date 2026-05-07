@@ -1617,9 +1617,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         !shockRecoveryHint;
 
     if (v2DecisionAfterPromotion === "ENTER") {
-        if (rangeLowerShortMismatch) {
+        if (rangeLowerShortMismatch && !execMeta.sideOverrideApplied) {
             vetoReason = "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
-        } else if (rangeUpperLongMismatch) {
+        } else if (rangeUpperLongMismatch && !execMeta.sideOverrideApplied) {
             vetoReason = "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
         } else if (rangeDowngradedHardBlock) {
             vetoReason = "RANGE_SIGNAL_DOWNGRADED_NOT_RELAXED";
@@ -1627,7 +1627,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             vetoReason = "ENTRY_CANDIDATE_FALSE_VETO";
         } else if (trendPromotionHardBlock) {
             vetoReason = "TREND_PROMOTION_BLOCKED_TREND_NOT_OK";
-        } else if (rangeMidConservativeBlock) {
+        } else if (rangeMidConservativeBlock && !execMeta.sideOverrideApplied) {
             vetoReason = "RANGE_MID_CONSERVATIVE_VETO";
         }
     }
@@ -1675,6 +1675,22 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         vetoReason: vetoReason,
         finalDecisionBeforeVeto: finalDecisionBeforeVeto,
         finalDecisionAfterVeto: v2DecisionAfterPromotion
+    }));
+
+    console.info(JSON.stringify({
+        event: "V2_ENTRY_CANDIDATE_PROMOTION_PROOF",
+        symbol: String(input.symbol),
+        judgment_regime: judgment.regime,
+        judgment_subtype: judgment.subtype,
+        range_phase: judgment.rangePhase,
+        range_side_candidate: rangeSideCandidate,
+        trend_side_candidate: trendSideCandidate,
+        selected_side_before_veto: sideCandidateBeforeVetoEnforced,
+        selected_side_after_veto: v2SideAfterPromotion,
+        promotion_applied: promotionApplied,
+        promotion_reason: promotionReason,
+        final_decision: v2DecisionAfterPromotion,
+        side_override_applied: !!execMeta.sideOverrideApplied
     }));
 
     finalDecision = v2DecisionAfterPromotion;
@@ -2681,6 +2697,22 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2PartialShouldPartial: v2PartialAuthority?.shouldPartial ?? false
         }
     };
+
+    console.info(JSON.stringify({
+        event: "V2_ENTRY_EXECUTION_BRIDGE_PROOF",
+        symbol: String(input.symbol),
+        final_decision: decision.decision,
+        final_side: decision.side,
+        final_signal: decision.signal,
+        stage_margin_krw: decision.risk.stageMarginKrw,
+        applied_leverage: decision.risk.appliedLeverage,
+        exposure_notional_krw: decision.risk.exposureNotionalKrw,
+        stop_price: decision.lifecycleAuthority?.newStopPrice ?? null,
+        risk_blocked: decision.risk.isBlocked,
+        risk_block_reason: decision.risk.blockReason,
+        promotion_reason: promotionReason,
+        judgment_subtype: judgment.subtype
+    }));
 
     const internal: EngineV2InternalResult = {
         judgment,

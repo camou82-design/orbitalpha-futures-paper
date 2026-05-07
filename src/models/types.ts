@@ -211,6 +211,7 @@ export type EngineConfig = Readonly<{
   okxDemoPassphrase: string;
 }>;
 
+
 /** Standard paper entry decision reject codes (see `evaluatePaperSymbolEntry`). */
 export type PaperDecisionRejectReason =
   | "DATA_NOT_READY"
@@ -319,6 +320,7 @@ export interface AiHighwayQualityScores {
 
 export type PaperFinalDecision = "ENTER" | "REJECT" | "SKIP" | "DISABLED";
 export type PaperStrategyExecutor = "TREND" | "RANGE" | "IDLE";
+
 
 /**
  * One symbol’s pipeline result (JSON-serializable; also written to `reports/decisions.jsonl`).
@@ -816,6 +818,19 @@ export type PaperOpenPositionRecord = {
   exchangeOrdId?: string;
   exchangeClOrdId?: string;
   exchangeFilledSize?: number;
+  
+  // --- RANGE Box & Exit Plan (V2 Hardening) ---
+  rangeBoxHighAtEntry?: number;
+  rangeBoxLowAtEntry?: number;
+  rangeBoxMidAtEntry?: number;
+  rangeBoxQuality?: number;
+  rangeBoxSlope?: number;
+  rangeBoxDistorted?: boolean;
+  takeProfitPlan?: any;
+  takeProfit1Px?: number;
+  takeProfit2Px?: number;
+  partialExitRatio?: number;
+  invalidationPx?: number;
 
   
   
@@ -963,6 +978,24 @@ export type PaperOpenPositionRecord = {
     entry_evidence_score: number;
     entry_evidence_reason: string;
   }>;
+
+  // --- OKX Actual Hydration (Manual Size Change Tracking) ---
+  /** OKX 실제 계약 수 (lot 정규화 완료) */
+  actualContracts?: number;
+  /** OKX 실제 노셔널 (USD) */
+  actualNotionalUsd?: number;
+  /** OKX 실제 마진 (USD) */
+  actualMarginUsd?: number;
+  /** OKX 실제 수량 (Signed) */
+  actualPos?: number;
+  /** OKX 실제 평단가 */
+  actualAvgPx?: number;
+  /** OKX 실제 미실현 손익 */
+  actualUnrealizedPnl?: number;
+  /** OKX 실제 미실현 수익률 */
+  actualUnrealizedPnlPct?: number;
+  /** 최초 진입 대비 잔여 수량 비율 (0~1) */
+  remainingSizeRatio?: number;
 };
 
 /** 종료 레코드·이벤트에 함께 쓰는 종료 유형 코드(레저·로그 공통). */
@@ -1011,6 +1044,7 @@ export type PaperCloseSource =
   | "CRASH_SHORT_MOMENTUM"
   | "CRASH"
   | "V2_AUTHORITY"
+  | "V2_AUTOMATED_TP_GATE"
   | "UNKNOWN";
 
 /** Market Mode Selector 단일 출력(틱 단위). */

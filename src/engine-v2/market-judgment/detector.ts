@@ -127,38 +127,109 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
         return { phase: volumeExpansion >= 3.0 ? "VOLUME_SHOCK_UP" : "VOLUME_BREAKOUT_OBSERVATION", metadata: slopeMetadata };
     }
 
-    // --- DRIFT & CHANNEL DETECTION (Priority 2) ---
+    // --- BOX QUALITY & DISTORTION VALIDATION (Hardening) ---
+    const boxHigh = Number(sn.boxHigh ?? 0);
+    const boxLow = Number(sn.boxLow ?? 0);
+    const boxMid = (boxHigh + boxLow) / 2;
+    const boxHeight = boxHigh - boxLow;
+    const atr = Number(sn.atr ?? 0);
+    
+    // 1. Height Distortion: Box height should not be excessively larger than recent volatility
+    const distortionFactor = atr > 0 ? boxHeight / atr : 0;
+    const isDistorted = distortionFactor > 15.0; // ATR 대비 15배 이상이면 박스 신뢰도 하락 (왜곡 판정)
+    
+    if (isDistorted) {
+        console.warn(JSON.stringify({
+            event: "V2_RANGE_BOX_HEIGHT_DISTORTION_PROOF",
+            symbol,
+            boxHeight,
+            atr,
+            distortionFactor,
+            detail: "Box height is excessively large compared to ATR. Mean reversion reliability is LOW."
+        }));
+    }
+
+    // 2. Slope Distortion: Drifting boxes
+    const slopeMagnitude = Math.max(Math.abs(bhSlope), Math.abs(blSlope));
+    const isDrifting = slopeMagnitude > 0.00015; // 기울기가 과도하면 횡보가 아니라 채널링/드리프트
+
+    // 3. Quality Proof
+    console.info(JSON.stringify({
+        event: "V2_RANGE_BOX_QUALITY_PROOF",
+        symbol,
+        boxHigh,
+        boxLow,
+        boxMid,
+        boxHeight,
+        distortionFactor,
+        bhSlope,
+        blSlope,
+        isDistorted,
+        isDrifting
+    }));
+
+    if (isDistorted || isDrifting) {
+        console.warn(JSON.stringify({
+            event: "V2_RANGE_MEAN_REVERSION_DISABLED_BY_BOX_DISTORTION_PROOF",
+            symbol,
+            reason: isDistorted ? "HEIGHT_DISTORTION" : "SLOPE_DISTORTION",
+            distortionFactor,
+            slopeMagnitude
+        }));
+    }
+
+    // --- PHASE CLASSIFICATION ---
     const driftDown = bhSlope < -0.00005 && blSlope < -0.00005 && e20Slope < -0.00005;
     const driftUp = bhSlope > 0.00005 && blSlope > 0.00005 && e20Slope > 0.00005;
     const channelDown = driftDown && rcSlope < -0.0001;
     const channelUp = driftUp && rcSlope > 0.0001;
 
+    let phase: MarketJudgmentOutput["rangePhase"] = "MID";
+
     if ((driftDown || channelDown) && (sn.lastPrice > (sn.boxHigh ?? 0) || (sn.swingHighSlope ?? 0) > 0.0005 || atrExp > 1.5)) {
-        return { phase: "REVERSAL_UP_WATCH", metadata: slopeMetadata };
+        phase = "REVERSAL_UP_WATCH";
+    } else if ((driftUp || channelUp) && (sn.lastPrice < (sn.boxLow ?? 0) || (sn.swingLowSlope ?? 0) < -0.0005 || atrExp > 1.5)) {
+        phase = "REVERSAL_DOWN_WATCH";
+    } else if (channelDown) {
+        phase = "DESCENDING_CHANNEL";
+    } else if (channelUp) {
+        phase = "ASCENDING_CHANNEL";
+    } else if (driftDown) {
+        phase = "DRIFT_DOWN";
+    } else if (driftUp) {
+        phase = "DRIFT_UP";
+    } else if (rangeOscillationScore >= 0.75 && breakoutFailureRate >= 0.6) {
+        phase = "COMPRESSION";
+    } else if (boxCohesion >= 0.85 && trendWeakness >= 0.7 && rangeOscillationScore >= 0.5) {
+        phase = "TRIANGLE_SQUEEZE";
+    } else if (boxBreakSide !== "none" && breakoutFailureRate < 0.4 && reviewingTicks < 12) {
+        phase = "BREAKOUT_OBSERVATION";
+    } else if (breakoutFailureRate >= 0.6) {
+        phase = "FAKE_BREAKOUT";
+    } else if (boxBreakSide === "lower" && emaGap < 0) {
+        phase = "BREAKDOWN";
+    } else if (boxBreakSide === "upper" && emaGap > 0) {
+        phase = "BREAKOUT";
+    } else if (Math.abs(bhSlope) < 0.00003 && Math.abs(blSlope) < 0.00003) {
+        phase = "FLAT";
+    } else if (boxPos <= 0.26) {
+        phase = "LOWER";
+    } else if (boxPos >= 0.74) {
+        phase = "UPPER";
     }
-    if ((driftUp || channelUp) && (sn.lastPrice < (sn.boxLow ?? 0) || (sn.swingLowSlope ?? 0) < -0.0005 || atrExp > 1.5)) {
-        return { phase: "REVERSAL_DOWN_WATCH", metadata: slopeMetadata };
-    }
 
-    if (channelDown) return { phase: "DESCENDING_CHANNEL", metadata: slopeMetadata };
-    if (channelUp) return { phase: "ASCENDING_CHANNEL", metadata: slopeMetadata };
-    if (driftDown) return { phase: "DRIFT_DOWN", metadata: slopeMetadata };
-    if (driftUp) return { phase: "DRIFT_UP", metadata: slopeMetadata };
-    
-    if (rangeOscillationScore >= 0.75 && breakoutFailureRate >= 0.6) return { phase: "COMPRESSION", metadata: slopeMetadata };
-    if (boxCohesion >= 0.85 && trendWeakness >= 0.7 && rangeOscillationScore >= 0.5) return { phase: "TRIANGLE_SQUEEZE", metadata: slopeMetadata };
-    
-    if (boxBreakSide !== "none" && breakoutFailureRate < 0.4 && reviewingTicks < 12) return { phase: "BREAKOUT_OBSERVATION", metadata: slopeMetadata };
-    if (breakoutFailureRate >= 0.6) return { phase: "FAKE_BREAKOUT", metadata: slopeMetadata };
-    if (boxBreakSide === "lower" && emaGap < 0) return { phase: "BREAKDOWN", metadata: slopeMetadata };
-    if (boxBreakSide === "upper" && emaGap > 0) return { phase: "BREAKOUT", metadata: slopeMetadata };
-
-    if (Math.abs(bhSlope) < 0.00003 && Math.abs(blSlope) < 0.00003) return { phase: "FLAT", metadata: slopeMetadata };
-
-    if (boxPos <= 0.26) return { phase: "LOWER", metadata: slopeMetadata };
-    if (boxPos >= 0.74) return { phase: "UPPER", metadata: slopeMetadata };
-
-    return { phase: "MID", metadata: slopeMetadata };
+    return { 
+        phase, 
+        metadata: { 
+            ...slopeMetadata, 
+            isDistorted, 
+            isDrifting, 
+            distortionFactor,
+            boxHigh,
+            boxLow,
+            boxMid
+        } 
+    };
 }
 
 function classifyTrendPhase(sn: EngineV2Input["snapshot"]): MarketJudgmentOutput["trendPhase"] {

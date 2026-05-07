@@ -785,6 +785,7 @@ function normalizeOkxSwapContractsFromNotional(args: {
   };
 }
 
+
 function isBtcEthSampleSymbol(symbol: string): boolean {
   const s = String(symbol).toUpperCase();
   return s === "BTCUSDT" || s === "ETHUSDT";
@@ -974,7 +975,7 @@ export class PaperEngine {
   private manualCloseCooldownBySymbol = new Map<string, { side: "long" | "short"; until: number }>();
   /** Cached active algo orders from exchange for auto-repair logic. */
   private cachedOpsAlgos: any[] = [];
-  private instrumentCache = new Map<string, { ctVal: number; ctValCcy: string }>();
+  private instrumentCache = new Map<string, OkxSwapInstrumentSizing>();
   private lastInstrumentCacheUpdateAt = 0;
   private readonly instrumentCacheTTL = 3600_000; // 1 hour
 
@@ -1260,12 +1261,9 @@ export class PaperEngine {
         for (const inst of res.value) {
           const row = inst as Record<string, unknown>;
           const iid = row.instId != null ? String(row.instId) : "";
-          const ct = row.ctVal != null ? Number(row.ctVal) : NaN;
-          if (iid && Number.isFinite(ct) && ct > 0) {
-            this.instrumentCache.set(iid, {
-              ctVal: ct,
-              ctValCcy: String(row.ctValCcy || "")
-            });
+          const sizing = parseOkxSwapInstrumentSizing(row);
+          if (iid && sizing) {
+            this.instrumentCache.set(iid, sizing);
           }
         }
         this.lastInstrumentCacheUpdateAt = now;
@@ -2373,69 +2371,85 @@ export class PaperEngine {
           mismatchType = isAdoptedOrManaged ? "MANUAL_PARTIAL_DETECTED" : "SIZE_MISMATCH";
         }
 
-        // --- Manual Quarantine Transition ---
-        // Note: open.lifecycleState is narrowed to "OPEN" | "CLOSE_ONLY_MANAGED" here.
-        // ADOPTED positions (from OKX) or mismatched CLOSE_ONLY_MANAGED positions are transitioned to EXTERNAL_MANUAL_POSITION.
-        if (isAdoptedOrManaged) {
-          const shouldQuarantine = open.reconcileState === "ADOPTED" || mismatchDetected;
-          if (shouldQuarantine) {
-            this.logger.warn("POSITION_QUARANTINED_EXTERNAL_MANUAL", {
-              symbol: open.symbol,
-              side: open.side,
-              prev_lifecycle: open.lifecycleState,
-              reconcile_state: open.reconcileState,
-              mismatch_detected: mismatchDetected,
-              mismatch_type: mismatchDetected ? mismatchType : "quarantine_enforcement",
-              action: "TRANSITION_TO_EXTERNAL_MANUAL_POSITION"
-            });
-            open.lifecycleState = "EXTERNAL_MANUAL_POSITION";
-            ledgerModified = true;
-          }
-        }
+        // --- Mandatory Hydration from OKX Actual ---
+        const instIdHydrate = toOkxSwapInstId(open.symbol);
+        const instHydrate = this.instrumentCache.get(instIdHydrate);
+        const ctHydrate = instHydrate?.ctVal ?? 1;
 
-        if (mismatchDetected) {
-          this.logger.warn("MANUAL_POSITION_REPRICE_RECONCILE_PROOF", {
+        const actualContracts = remotePos.size / ctHydrate;
+        const actualNotionalUsd = Math.abs(remotePos.notionalUsd);
+        const actualMarginUsd = actualNotionalUsd / (open.leverage || 10);
+        const remainingSizeRatio = open.initialSizeUsd ? (actualMarginUsd / open.initialSizeUsd) : 1;
+
+        // Detect manual size change (excluding active partial/close pending states)
+        const sizeDiffAbs = Math.abs((open.okxContracts ?? 0) - actualContracts);
+        const isSizeMismatched = sizeDiffAbs > Math.max(1e-8, 0.001 * (open.okxContracts ?? actualContracts));
+
+        if (isSizeMismatched && !isPartialPending && !isClosePending) {
+          this.logger.warn("MANUAL_SIZE_CHANGE_DETECTED_PROOF", {
             symbol: open.symbol,
             side: open.side,
+            prev_contracts: open.okxContracts,
+            new_contracts: actualContracts,
+            prev_size_usd: open.sizeUsd,
+            new_size_usd: actualMarginUsd,
             mismatch_type: mismatchType,
-            is_adopted_or_managed: isAdoptedOrManaged,
-            prev_pos: open.pos,
-            new_pos: remotePos.size,
-            prev_entry_px: open.entryPrice,
-            new_entry_px: remotePos.avgPx,
-            prev_notional: paperNotional,
-            new_notional: remotePos.notionalUsd,
-            detail: "POSITION_AUTO_REPAIRED_TO_EXCHANGE_ACTUAL"
+            detail: "OKX_ACTUAL_SIZE_DIFFERS_FROM_LEDGER_HYDRATING"
           });
-
-          // Unified Repair path: Force update ledger to match OKX (base qty + notionals; margin sizeUsd unchanged).
-          const instIdRepair = toOkxSwapInstId(open.symbol);
-          const instRepair = this.instrumentCache.get(instIdRepair);
-          const ctRepair = instRepair?.ctVal ?? 1;
-
-          open.pos = remotePos.size;
-          open.baseQty = remotePos.size;
-          open.notionalUsd = Math.abs(remotePos.notionalUsd);
-          if (ctRepair > 0) {
-            const contracts = remotePos.size / ctRepair;
-            open.okxContracts = contracts;
-            open.exchangeFilledSize = contracts;
+          
+          if (actualContracts < (open.okxContracts ?? 0)) {
+            this.logger.info("MANUAL_PARTIAL_SIZE_RECONCILE_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              reduced_contracts: (open.okxContracts ?? 0) - actualContracts,
+              remaining_contracts: actualContracts
+            });
           }
-          open.entryPrice = remotePos.avgPx;
-          open.avgPx = remotePos.avgPx;
-
-          // stopPrice correction based on new avgPx
-          const slReg = regimeForSl(open.regimeAtEntry);
-          const newStop = engineMirrorStopPrice(remotePos.avgPx, open.side, slReg);
-          if (newStop != null && Number.isFinite(newStop)) {
-            open.stopPrice = newStop;
-          }
-
-          open.reconcileState = "MATCHED";
-          ledgerModified = true;
-        } else {
-          open.reconcileState = "MATCHED";
         }
+
+        // Hydrate all fields (Always run for MATCHED/ALIGNED positions as requested)
+        open.actualContracts = actualContracts;
+        open.actualNotionalUsd = actualNotionalUsd;
+        open.actualMarginUsd = actualMarginUsd;
+        open.actualPos = remotePos.size;
+        open.actualAvgPx = remotePos.avgPx;
+        open.actualUnrealizedPnl = 0; 
+        open.actualUnrealizedPnlPct = 0;
+        open.remainingSizeRatio = remainingSizeRatio;
+
+        // Update legacy fields to match actuals
+        open.okxContracts = actualContracts;
+        open.pos = remotePos.size;
+        open.baseQty = remotePos.size;
+        open.notionalUsd = actualNotionalUsd;
+        open.avgPx = remotePos.avgPx;
+        open.entryPrice = remotePos.avgPx;
+        open.sizeUsd = actualMarginUsd; // sizeUsd now represents current margin
+
+        this.logger.info("POSITION_CARD_HYDRATE_FROM_OKX_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          actualContracts: open.actualContracts,
+          actualNotionalUsd: open.actualNotionalUsd,
+          actualMarginUsd: open.actualMarginUsd,
+          initialSizeUsd: open.initialSizeUsd,
+          remainingSizeRatio: open.remainingSizeRatio
+        });
+
+        if (mismatchDetected || isSizeMismatched) {
+           this.logger.info("LEDGER_ACTUAL_SIZE_RECONCILE_PROOF", {
+             symbol: open.symbol,
+             side: open.side,
+             actual_contracts: actualContracts,
+             actual_notional: actualNotionalUsd,
+             actual_margin: actualMarginUsd,
+             initial_margin: open.initialSizeUsd,
+             remaining_ratio: remainingSizeRatio
+           });
+           ledgerModified = true;
+        }
+
+        open.reconcileState = "MATCHED";
         open.lastCheckedAt = nowTs;
 
         // Periodic check for protection or size update for OPEN positions
@@ -2494,13 +2508,13 @@ export class PaperEngine {
           entryPrice: avgPx,
           leverage,
           sizeUsd: notional / (leverage || 1),
+          initialSizeUsd: notional / (leverage || 1),
           strategyVersion: "paper-v2",
           sourceSignal: "okx_reconcile_adopted",
           sourceRunPath: "manual_adoption",
           lifecycleState: "EXTERNAL_MANUAL_POSITION",
           reconcileState: "ADOPTED",
           lastCheckedAt: nowTs,
-          initialSizeUsd: notional / (leverage || 1),
           status: "open",
           regimeAtEntry: this.lastRegime.regime || "NO_TRADE",
           executorAtEntry: "IDLE",
@@ -5072,6 +5086,54 @@ export class PaperEngine {
   /**
    * Helper to dispatch an OKX order to close (fully or partially) a paper position.
    */
+  /** 
+   * Unified OKX Contract Size Normalizer for REDUCE-ONLY orders.
+   * Respects lotSz/minSz and supports fractional contracts (0.43, 0.12).
+   * Prioritizes ledger/exchange contract counts over USD estimates.
+   */
+  private normalizeOkxReduceOrderSize(args: {
+    symbol: string;
+    okxContracts: number;
+    sizing: OkxSwapInstrumentSizing;
+    flowId: string;
+    reason: string;
+  }): {
+    raw_contracts: number;
+    normalized_contracts: number;
+    normalized_sz: string;
+    ok: boolean;
+  } {
+    const { okxContracts, sizing, flowId, reason, symbol } = args;
+    const lot = sizing.lotSz;
+    const minSz = sizing.minSz;
+
+    // Floor to ensure we don't attempt to close more than we have (reduce-only safety)
+    const steps = Math.floor(okxContracts / lot + 1e-12);
+    let normalized_contracts = steps * lot;
+
+    // Floating point hygiene: use instrument-specific precision
+    normalized_contracts = Number(
+      normalized_contracts.toFixed(Math.min(12, okxInstrumentSzDecimals(lot)))
+    );
+
+    const normalized_sz = formatOkxSwapContractSzString(normalized_contracts, lot);
+    const ok = normalized_contracts > 0 && normalized_contracts + 1e-12 >= minSz;
+
+    this.logger.info("V2_REDUCE_ORDER_SIZE_UNIT_PROOF", {
+      symbol,
+      reason,
+      input_contracts: okxContracts,
+      lotSz: lot,
+      minSz,
+      normalized_contracts,
+      normalized_sz,
+      ok,
+      flowId
+    });
+
+    return { raw_contracts: okxContracts, normalized_contracts, normalized_sz, ok };
+  }
+
   private async dispatchOkxClose(input: {
     symbol: string;
     side: "long" | "short";
@@ -5089,6 +5151,8 @@ export class PaperEngine {
     isTakeProfit?: boolean;
     isTrailingStop?: boolean;
     isPartial?: boolean;
+    /** Explicit contract count for accurate reduction (0.43, 0.12 etc) */
+    okxContracts?: number;
   }): Promise<{ 
     ok: boolean; 
     ordId?: string; 
@@ -5110,8 +5174,35 @@ export class PaperEngine {
     const side = input.side === "long" ? "sell" : "buy";
     const posSide = input.side === "long" ? "long" : "short";
     const lev = typeof input.appliedLeverage === "number" && Number.isFinite(input.appliedLeverage) && input.appliedLeverage > 0 ? input.appliedLeverage : 1;
-    const qtyLegacyEst = Math.max(0.001, Math.round((input.sizeUsd / Math.max(1e-9, input.lastPrice)) * 1_000_000) / 1_000_000);
-    // [TASK_3] Fix unit scaling: reduce/close orders should not remultiply leverage
+
+    const instId = toOkxSwapInstId(input.symbol);
+    const inst = this.instrumentCache.get(instId);
+    let finalQty = 0;
+    let finalSzStr = "0";
+
+    if (inst) {
+      // Use explicit okxContracts if provided, fallback to estimation from sizeUsd
+      let sourceContracts = input.okxContracts;
+      if (sourceContracts == null || sourceContracts <= 0) {
+        sourceContracts = (input.sizeUsd / Math.max(1e-9, input.lastPrice)) / (inst.ctVal || 1);
+      }
+
+      const norm = this.normalizeOkxReduceOrderSize({
+        symbol: input.symbol,
+        okxContracts: sourceContracts,
+        sizing: inst,
+        flowId: input.flowId,
+        reason: input.reason
+      });
+
+      finalQty = norm.normalized_contracts;
+      finalSzStr = norm.normalized_sz;
+    } else {
+      // Legacy fallback (should rarely happen if instrumentCache is warm)
+      finalQty = Math.max(0.001, Math.round((input.sizeUsd / Math.max(1e-9, input.lastPrice)) * 1_000_000) / 1_000_000);
+      finalSzStr = String(finalQty);
+    }
+
     const desiredNotionalUsdt = Math.max(0, input.sizeUsd);
     this.logger.info("V2_CLOSE_SIZE_UNIT_PROOF", {
       symbol: input.symbol,
@@ -5130,7 +5221,7 @@ export class PaperEngine {
       this.logger.info("STOP_LOSS_ORDER_PATH_PROOF", {
         symbol: input.symbol,
         side,
-        qty_legacy_base_estimate: qtyLegacyEst,
+        qty_legacy_base_estimate: finalQty,
         desired_notional_usdt: desiredNotionalUsdt,
         close_reason: closeReason,
         flowId: input.flowId,
@@ -5140,7 +5231,7 @@ export class PaperEngine {
       this.logger.info("TAKE_PROFIT_ORDER_PATH_PROOF", {
         symbol: input.symbol,
         side,
-        qty_legacy_base_estimate: qtyLegacyEst,
+        qty_legacy_base_estimate: finalQty,
         desired_notional_usdt: desiredNotionalUsdt,
         close_reason: closeReason,
         flowId: input.flowId,
@@ -5150,7 +5241,7 @@ export class PaperEngine {
       this.logger.info("TRAILING_STOP_ORDER_PATH_PROOF", {
         symbol: input.symbol,
         side,
-        qty_legacy_base_estimate: qtyLegacyEst,
+        qty_legacy_base_estimate: finalQty,
         desired_notional_usdt: desiredNotionalUsdt,
         close_reason: closeReason,
         flowId: input.flowId,
@@ -5160,7 +5251,7 @@ export class PaperEngine {
       this.logger.info("RANGE_PROFIT_TRAIL_ORDER_PATH_PROOF", {
         symbol: input.symbol,
         side,
-        qty_legacy_base_estimate: qtyLegacyEst,
+        qty_legacy_base_estimate: finalQty,
         desired_notional_usdt: desiredNotionalUsdt,
         close_reason: closeReason,
         flowId: input.flowId,
@@ -5170,7 +5261,7 @@ export class PaperEngine {
       this.logger.info("REGIME_EXIT_ORDER_PATH_PROOF", {
         symbol: input.symbol,
         side,
-        qty_legacy_base_estimate: qtyLegacyEst,
+        qty_legacy_base_estimate: finalQty,
         desired_notional_usdt: desiredNotionalUsdt,
         close_reason: closeReason,
         flowId: input.flowId,
@@ -5180,7 +5271,7 @@ export class PaperEngine {
       this.logger.info("TREND_BREAK_ORDER_PATH_PROOF", {
         symbol: input.symbol,
         side,
-        qty_legacy_base_estimate: qtyLegacyEst,
+        qty_legacy_base_estimate: finalQty,
         desired_notional_usdt: desiredNotionalUsdt,
         close_reason: closeReason,
         flowId: input.flowId,
@@ -5192,7 +5283,7 @@ export class PaperEngine {
       symbol: input.symbol,
       side,
       close_side_order: side,
-      qty_legacy_base_estimate: qtyLegacyEst,
+      qty_legacy_base_estimate: finalQty,
       desired_notional_usdt: desiredNotionalUsdt,
       applied_leverage: lev,
       sizeUsd: input.sizeUsd,
@@ -5216,7 +5307,8 @@ export class PaperEngine {
       symbol: input.symbol as MarketSymbol,
       side,
       posSide,
-      qty: qtyLegacyEst,
+      qty: finalQty,
+      okxContracts: finalQty,
       desiredNotionalUsdt,
       pricingReferencePx: input.lastPrice,
       appliedLeverage: lev,
@@ -5348,19 +5440,36 @@ export class PaperEngine {
     if (open.isProtectiveStopRegistered && open.protectiveStopAlgoId) {
       const algo = (this as any).cachedOpsAlgos?.find((a: any) => String(a.algoId) === open.protectiveStopAlgoId);
       const currentSlPx = algo ? Number(algo.slTriggerPx) : null;
+      const currentSz = algo ? Number(algo.sz) : null;
       const priceMatches = typeof currentSlPx === "number" && Number.isFinite(currentSlPx) && Math.abs(currentSlPx - activeStopPrice) < 1e-8;
+      
+      const contractsToProtect = open.okxContracts ?? 0;
+      const sizeMatches = typeof currentSz === "number" && Number.isFinite(currentSz) && Math.abs(currentSz - contractsToProtect) < 1e-8;
 
-      if (priceMatches) {
+      if (priceMatches && sizeMatches) {
         this.logger.info("POSITION_PROTECTION_STATE_PROOF", {
           symbol: open.symbol,
           side: open.side,
           reduce_only_protective_found: true,
           algoId: open.protectiveStopAlgoId,
           price_match: true,
+          size_match: true,
           flowId
         });
         return { modified: false, success: true, record: open };
       } else {
+        const mismatchReason = !priceMatches ? "PRICE_MISMATCH" : "SIZE_MISMATCH";
+        if (!sizeMatches && algo) {
+           this.logger.warn("V2_PROTECTIVE_STOP_SIZE_MISMATCH_REPAIR_PROOF", {
+             symbol: open.symbol,
+             side: open.side,
+             oldAlgoId: open.protectiveStopAlgoId,
+             oldSize: currentSz,
+             newSize: contractsToProtect,
+             reason: "actual_position_size_changed",
+             flowId
+           });
+        }
         this.logger.warn("PROTECTIVE_STOP_SYNC_MISMATCH", {
           symbol: open.symbol,
           side: open.side,
@@ -5468,9 +5577,28 @@ export class PaperEngine {
     const side = open.side === "long" ? "sell" : "buy";
     const posSide = open.side === "long" ? "long" : "short";
     
-    // Contract size based on exchange-derived quantity or baseQty
-    // Use the contract count from the ledger if available, otherwise fallback to baseQty normalization
-    let sz = open.okxContracts != null ? Math.round(open.okxContracts) : 0;
+    // [HARDENED] Unified OKX Contract Size Normalizer for PROTECTIVE STOP
+    let sz = 0;
+    let szStr = "0";
+    
+    if (open.okxContracts != null && open.okxContracts > 0) {
+      const inst = this.instrumentCache.get(instId);
+      if (inst) {
+        const norm = this.normalizeOkxReduceOrderSize({
+          symbol: open.symbol,
+          okxContracts: open.okxContracts,
+          sizing: inst,
+          flowId,
+          reason: "protective_stop_registration"
+        });
+        sz = norm.normalized_contracts;
+        szStr = norm.normalized_sz;
+      } else {
+        sz = open.okxContracts; // No-op fallback if instrument metadata missing
+        szStr = String(sz);
+      }
+    }
+
     if (sz <= 0 && open.notionalUsd != null && pricingLast > 0) {
       // Fallback: try to derive contracts from notional if okxContracts is missing
       const inst = this.instrumentCache.get(instId);
@@ -5478,9 +5606,10 @@ export class PaperEngine {
         const norm = normalizeOkxSwapContractsFromNotional({
            desiredNotionalUsdt: open.notionalUsd,
            lastPrice: pricingLast,
-           sizing: { ...inst, lotSz: 1, minSz: 1 } // Heuristic for fallback
+           sizing: inst
         });
         sz = norm.normalized_contracts;
+        szStr = norm.normalized_sz;
       }
     }
 
@@ -5501,7 +5630,7 @@ export class PaperEngine {
       side,
       posSide,
       ordType: "stop",
-      sz: String(sz),
+      sz: szStr,
       reduceOnly: true,
       slTriggerPx: String(activeStopPrice),
       slOrdPx: "-1" // Market
@@ -5571,6 +5700,8 @@ export class PaperEngine {
     pricingReferencePx?: number | null;
     reduceOnly?: boolean;
     ordType?: "market" | "limit";
+    /** Explicit contract count for accurate reduction/close */
+    okxContracts?: number;
   }): Promise<{
     ok: boolean;
     ordId: string | null;
@@ -6113,11 +6244,36 @@ export class PaperEngine {
     }
 
     const previousBaseQty = input.qty;
-    const norm = normalizeOkxSwapContractsFromNotional({
-      desiredNotionalUsdt: effectiveNotionalUsdt,
-      lastPrice: pricingLast,
-      sizing: sizingMeta
-    });
+    let norm: { 
+      raw_contracts: number; 
+      normalized_contracts: number; 
+      normalized_sz: string; 
+      sz_lot_multiple_ok: boolean; 
+      min_size_ok: boolean 
+    };
+
+    if (input.reduceOnly) {
+      // Prioritize explicit contracts or fall back to estimated qty
+      const sourceContracts = input.okxContracts ?? input.qty;
+      const res = this.normalizeOkxReduceOrderSize({
+        symbol: input.symbol,
+        okxContracts: sourceContracts,
+        sizing: sizingMeta,
+        flowId: input.traceId,
+        reason: input.reason
+      });
+      norm = {
+        ...res,
+        sz_lot_multiple_ok: true, // normalizeOkxReduceOrderSize already ensures this
+        min_size_ok: res.ok
+      };
+    } else {
+      norm = normalizeOkxSwapContractsFromNotional({
+        desiredNotionalUsdt: effectiveNotionalUsdt,
+        lastPrice: pricingLast,
+        sizing: sizingMeta
+      });
+    }
 
     this.logger.info("OKX_ORDER_SIZE_NORMALIZATION_PROOF", {
       symbol: input.symbol,
@@ -7099,6 +7255,137 @@ export class PaperEngine {
       }
 
 
+      // --- 1. V2 RANGE Hardened TP1/TP2 Monitoring ---
+      if (open.isV2Authority && open.takeProfit1Px != null) {
+        const tp1 = open.takeProfit1Px;
+        const tp2 = open.takeProfit2Px;
+        const ratio = open.partialExitRatio ?? 0.5;
+        const stage = open.partialExitStage ?? 0;
+
+        // TP1: Partial Exit
+        if (stage < 1 && typeof tp1 === "number" && Number.isFinite(tp1)) {
+          const tp1Hit = open.side === "long" ? closePrice >= tp1 : closePrice <= tp1;
+          if (tp1Hit) {
+            this.logger.info("V2_TP1_TRIGGERED_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              tp1_px: tp1,
+              close_price: closePrice,
+              ratio,
+              flowId
+            });
+            
+            const partialSizeUsd = open.sizeUsd * ratio;
+            const metricsP = leg(partialSizeUsd);
+            const closedRowP = finalizePaperClosedRecord({
+              open,
+              symbol: open.symbol,
+              closePrice,
+              closedAt,
+              closeReason: "take_profit_1" as any,
+              legMarginUsd: partialSizeUsd,
+              metrics: metricsP,
+              feeRate,
+              fundingIntervalHours: intervalH,
+              strategyVersion: inheritedStrategyVersion,
+              exitTypeOverride: "EXIT_TP_1",
+              closeSourceOverride: "V2_AUTOMATED_TP_GATE",
+              ...snapPaths
+            });
+
+            await this.dispatchOkxClose({
+              symbol: open.symbol,
+              side: open.side,
+              sizeUsd: partialSizeUsd,
+              okxContracts: open.okxContracts != null ? open.okxContracts * ratio : undefined,
+              appliedLeverage: Math.max(1, open.leverage ?? 1),
+              lastPrice: closePrice,
+              flowId,
+              reason: "v2_tp1_automated",
+              isTakeProfit: true
+            });
+
+            await this.appendClosedWithStandardRouting({
+              closedRow: closedRowP,
+              open,
+              flowId,
+              envelope: null as any,
+              exitReason: "take_profit_1" as any,
+              closeSource: "V2_AUTOMATED_TP_GATE",
+              currentRegime: regimeNow
+            });
+
+            open.sizeUsd -= partialSizeUsd;
+            open.partialExitStage = 1;
+            open.lastPartialAt = closedAt;
+            crashPositionsModified = true;
+            
+            this.logger.info("V2_TP1_PARTIAL_EXIT_EXECUTED", {
+              symbol: open.symbol,
+              remaining_size: open.sizeUsd,
+              flowId
+            });
+          }
+        }
+
+        // TP2: Final Exit (or next stage)
+        if (stage < 2 && typeof tp2 === "number" && Number.isFinite(tp2)) {
+          const tp2Hit = open.side === "long" ? closePrice >= tp2 : closePrice <= tp2;
+          if (tp2Hit) {
+            this.logger.info("V2_TP2_TRIGGERED_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              tp2_px: tp2,
+              close_price: closePrice,
+              flowId
+            });
+
+            const metricsF = leg(open.sizeUsd);
+            const closedRowF = finalizePaperClosedRecord({
+              open,
+              symbol: open.symbol,
+              closePrice,
+              closedAt,
+              closeReason: "take_profit_2" as any,
+              legMarginUsd: open.sizeUsd,
+              metrics: metricsF,
+              feeRate,
+              fundingIntervalHours: intervalH,
+              strategyVersion: inheritedStrategyVersion,
+              exitTypeOverride: "EXIT_TP_2",
+              closeSourceOverride: "V2_AUTOMATED_TP_GATE",
+              ...snapPaths
+            });
+
+            await this.dispatchOkxClose({
+              symbol: open.symbol,
+              side: open.side,
+              sizeUsd: open.sizeUsd,
+              okxContracts: open.okxContracts ?? undefined,
+              appliedLeverage: Math.max(1, open.leverage ?? 1),
+              lastPrice: closePrice,
+              flowId,
+              reason: "v2_tp2_automated",
+              isTakeProfit: true
+            });
+
+            const routedClosed = await this.appendClosedWithStandardRouting({
+              closedRow: closedRowF,
+              open,
+              flowId,
+              envelope: null as any,
+              exitReason: "take_profit_2" as any,
+              closeSource: "V2_AUTOMATED_TP_GATE",
+              currentRegime: regimeNow
+            });
+
+            authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+            this.terminalExitConsumedByFlow.add(flowId);
+            continue; // Full exit
+          }
+        }
+      }
+
       // --- 2. Hard TP check (Safety Gate) ---
       let isTpTriggered = false;
       if (typeof open.targetPrice1 === "number" && Number.isFinite(open.targetPrice1)) {
@@ -7167,6 +7454,7 @@ export class PaperEngine {
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
+          okxContracts: open.okxContracts ?? undefined,
           appliedLeverage: Math.max(1, open.leverage ?? 1),
           lastPrice: closePrice,
           flowId,
@@ -7477,6 +7765,7 @@ export class PaperEngine {
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
+          okxContracts: open.okxContracts ?? undefined,
           appliedLeverage: Math.max(1, open.leverage ?? 1),
           lastPrice: closePrice,
           flowId,
@@ -7675,6 +7964,7 @@ export class PaperEngine {
                 symbol: open.symbol,
                 side: open.side,
                 sizeUsd: open.sizeUsd,
+                okxContracts: open.okxContracts ?? undefined,
                 appliedLeverage: Math.max(1, open.leverage ?? 1),
                 lastPrice: closePrice,
                 flowId,
@@ -7807,6 +8097,7 @@ export class PaperEngine {
                 symbol: open.symbol,
                 side: open.side,
                 sizeUsd: open.sizeUsd,
+                okxContracts: open.okxContracts ?? undefined,
                 appliedLeverage: Math.max(1, open.leverage ?? 1),
                 lastPrice: closePrice,
                 flowId,
@@ -8043,6 +8334,7 @@ export class PaperEngine {
             symbol: open.symbol,
             side: open.side,
             sizeUsd: open.sizeUsd,
+            okxContracts: open.okxContracts ?? undefined,
             appliedLeverage: Math.max(1, open.leverage ?? 1),
             lastPrice: closePrice,
             flowId,
@@ -12242,7 +12534,7 @@ export class PaperEngine {
               : null;
           const stopMirrored =
             entryPxForSl > 0 ? engineMirrorStopPrice(entryPxForSl, intentSide, slReg) : null;
-          const stopPrice = stopFromDecision ?? stopMirrored ?? null;
+          const stopPrice = authority.invalidationPx ?? stopFromDecision ?? stopMirrored ?? null;
           if (stopPrice == null || !Number.isFinite(stopPrice)) {
             this.logger.warn("ENTRY_BLOCKED_STOP_MISSING", {
               symbol: sym,
@@ -12355,7 +12647,19 @@ export class PaperEngine {
               authoritySourceAtEntry: authority.source,
               authoritySideAtEntry: String(authority.side),
               sourceRunPath: input.candidateRunPath ?? input.filePath ?? input.latestPath ?? "",
-              status: "open"
+              status: "open",
+              // V2 RANGE Hardening: Persistent Box Quality & Exit Plan
+              rangeBoxHighAtEntry: authority.rangeBoxHighAtEntry,
+              rangeBoxLowAtEntry: authority.rangeBoxLowAtEntry,
+              rangeBoxMidAtEntry: authority.rangeBoxMidAtEntry,
+              rangeBoxQuality: authority.rangeBoxQuality,
+              rangeBoxSlope: authority.rangeBoxSlope,
+              rangeBoxDistorted: authority.rangeBoxDistorted,
+              takeProfitPlan: authority.takeProfitPlan,
+              takeProfit1Px: authority.takeProfit1Px,
+              takeProfit2Px: authority.takeProfit2Px,
+              partialExitRatio: authority.partialExitRatio,
+              invalidationPx: authority.invalidationPx
             };
             if (isPending) {
               this.logger.info("PAPER_OPEN_BLOCKED_UNFILLED_ORDER_PROOF", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
@@ -13043,6 +13347,7 @@ export class PaperEngine {
           entryProtectionUntil: Date.now() + 120_000,
           realizedPnl: 0,
           stopPrice: (() => {
+            if (authority.invalidationPx != null) return authority.invalidationPx;
             const val = typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : undefined;
             if (val !== undefined) return val;
             // No safety fallback. If stopLoss is missing, it remains undefined.
@@ -13108,7 +13413,19 @@ export class PaperEngine {
             entry_evidence_score: entryEvidenceScore,
             entry_evidence_reason: entryEvidenceReason
           },
-          status: "open"
+          status: "open",
+          // V2 RANGE Hardening: Persistent Box Quality & Exit Plan
+          rangeBoxHighAtEntry: authority.rangeBoxHighAtEntry,
+          rangeBoxLowAtEntry: authority.rangeBoxLowAtEntry,
+          rangeBoxMidAtEntry: authority.rangeBoxMidAtEntry,
+          rangeBoxQuality: authority.rangeBoxQuality,
+          rangeBoxSlope: authority.rangeBoxSlope,
+          rangeBoxDistorted: authority.rangeBoxDistorted,
+          takeProfitPlan: authority.takeProfitPlan,
+          takeProfit1Px: authority.takeProfit1Px,
+          takeProfit2Px: authority.takeProfit2Px,
+          partialExitRatio: authority.partialExitRatio,
+          invalidationPx: authority.invalidationPx
         };
 
         this.logger.info("POSITION_ENGINE_IDENTITY_PROOF", {

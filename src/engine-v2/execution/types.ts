@@ -52,6 +52,19 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     originalDecision?: string;
     originalSide?: string;
     originalStageMarginKrw?: number;
+
+    // --- RANGE Box & Exit Plan (V2 Hardening) ---
+    rangeBoxHighAtEntry?: number;
+    rangeBoxLowAtEntry?: number;
+    rangeBoxMidAtEntry?: number;
+    rangeBoxQuality?: number;
+    rangeBoxSlope?: number;
+    rangeBoxDistorted?: boolean;
+    takeProfitPlan?: any;
+    takeProfit1Px?: number;
+    takeProfit2Px?: number;
+    partialExitRatio?: number;
+    invalidationPx?: number;
 }>;
 
 export type V2LegacyComparison = Readonly<{
@@ -80,4 +93,17 @@ export type BuildExecutionEnvelopeArgs = Readonly<{
     exitUrgency?: string | null;
     exitConfidence?: number | null;
     newStopPrice?: number;
+
+    // --- RANGE Box & Exit Plan (V2 Hardening) ---
+    rangeBoxHighAtEntry?: number;
+    rangeBoxLowAtEntry?: number;
+    rangeBoxMidAtEntry?: number;
+    rangeBoxQuality?: number;
+    rangeBoxSlope?: number;
+    rangeBoxDistorted?: boolean;
+    takeProfitPlan?: any;
+    takeProfit1Px?: number;
+    takeProfit2Px?: number;
+    partialExitRatio?: number;
+    invalidationPx?: number;
 }>;

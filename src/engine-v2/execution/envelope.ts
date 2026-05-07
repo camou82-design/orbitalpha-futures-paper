@@ -89,7 +89,18 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             originalDecision,
             originalSide,
             originalStageMarginKrw,
-            newStopPrice
+            newStopPrice,
+            rangeBoxHighAtEntry: args.rangeBoxHighAtEntry,
+            rangeBoxLowAtEntry: args.rangeBoxLowAtEntry,
+            rangeBoxMidAtEntry: args.rangeBoxMidAtEntry,
+            rangeBoxQuality: args.rangeBoxQuality,
+            rangeBoxSlope: args.rangeBoxSlope,
+            rangeBoxDistorted: args.rangeBoxDistorted,
+            takeProfitPlan: args.takeProfitPlan,
+            takeProfit1Px: args.takeProfit1Px,
+            takeProfit2Px: args.takeProfit2Px,
+            partialExitRatio: args.partialExitRatio,
+            invalidationPx: args.invalidationPx
         };
     }
     if (mode === "legacy") {
