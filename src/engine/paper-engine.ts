@@ -7337,30 +7337,47 @@ export class PaperEngine {
           });
 
           const isExchangeEnabledTp2 = this.okxDemo && this.signedSubmitMode() === "enabled";
-          const tp2Confirmed = !isExchangeEnabledTp2 || (tp2Submit?.ordId != null && tp2Submit?.fillConfirmed === true);
 
-          if (isExchangeEnabledTp2 && !tp2Confirmed) {
-            // Not fill-confirmed: transition to CLOSE_PENDING, do NOT prune or write history
-            const updatedOpen: PaperOpenPositionRecord = {
-              ...open,
-              lifecycleState: "CLOSE_PENDING",
-              closePendingOrdId: tp2Submit?.ordId ?? undefined,
-              closePendingClOrdId: tp2Submit?.clOrdId ?? undefined,
-              closePendingAt: Date.now(),
-              closePendingReason: "v2_tp2_automated",
-              closePendingPrice: closePrice,
-              closePendingFundingRate: snap?.fundingRate
-            };
-            this.logger.info("V2_RANGE_TP2_CLOSE_PENDING_PROOF", {
-              symbol: open.symbol,
-              side: open.side,
-              ord_id: tp2Submit?.ordId ?? null,
-              pending_reason: "fill_not_confirmed",
-              flowId
-            });
-            crashPositionsModified = true;
-            remaining.push(updatedOpen);
-            continue;
+          if (isExchangeEnabledTp2) {
+            if (tp2Submit?.ordId == null) {
+              // ord_id null = submit failed: retain open position for next-tick retry
+              this.logger.info("V2_RANGE_TP2_CLOSE_ORDER_SUBMIT_FAIL_PROOF", {
+                symbol: open.symbol,
+                side: open.side,
+                ord_id: null,
+                error_code: tp2Submit?.errorCode ?? null,
+                error_message: tp2Submit?.errorMessage ?? null,
+                close_price: closePrice,
+                size_usd: open.sizeUsd,
+                flowId
+              });
+              remaining.push({ ...open });
+              continue;
+            }
+
+            if (tp2Submit.fillConfirmed !== true) {
+              // ord_id present but not yet filled: transition to CLOSE_PENDING
+              const updatedOpen: PaperOpenPositionRecord = {
+                ...open,
+                lifecycleState: "CLOSE_PENDING",
+                closePendingOrdId: tp2Submit.ordId,
+                closePendingClOrdId: tp2Submit?.clOrdId ?? undefined,
+                closePendingAt: Date.now(),
+                closePendingReason: "v2_tp2_automated",
+                closePendingPrice: closePrice,
+                closePendingFundingRate: snap?.fundingRate
+              };
+              this.logger.info("V2_RANGE_TP2_CLOSE_PENDING_PROOF", {
+                symbol: open.symbol,
+                side: open.side,
+                ord_id: tp2Submit.ordId,
+                pending_reason: "fill_not_confirmed",
+                flowId
+              });
+              crashPositionsModified = true;
+              remaining.push(updatedOpen);
+              continue;
+            }
           }
 
           // Fill confirmed (or exchange disabled): commit all ledger mutations
@@ -7459,36 +7476,53 @@ export class PaperEngine {
           });
 
           const isExchangeEnabledTp1 = this.okxDemo && this.signedSubmitMode() === "enabled";
-          const tp1Confirmed = !isExchangeEnabledTp1 || (tp1Submit?.ordId != null && tp1Submit?.fillConfirmed === true);
 
-          if (isExchangeEnabledTp1 && !tp1Confirmed) {
-            // Not fill-confirmed: transition to PARTIAL_PENDING, do NOT mutate sizeUsd or stage
-            const updatedOpen: PaperOpenPositionRecord = {
-              ...open,
-              lifecycleState: "PARTIAL_PENDING",
-              partialPendingOrdId: tp1Submit?.ordId ?? undefined,
-              partialPendingClOrdId: tp1Submit?.clOrdId ?? undefined,
-              partialPendingSizeUsd: partialSizeUsd,
-              partialPendingOriginalSizeUsd: partialSizeUsd,
-              partialPendingProcessedFillSz: 0,
-              partialPendingProcessedUsd: 0,
-              partialPendingAt: Date.now(),
-              partialPendingReduceRatio: ratio,
-              partialPendingReason: "v2_tp1_automated",
-              partialPendingPrice: closePrice,
-              partialPendingFundingRate: snap?.fundingRate
-            };
-            this.logger.info("V2_RANGE_TP1_REDUCE_PENDING_PROOF", {
-              symbol: open.symbol,
-              side: open.side,
-              ord_id: tp1Submit?.ordId ?? null,
-              pending_reason: "fill_not_confirmed",
-              partial_size_usd: partialSizeUsd,
-              flowId
-            });
-            crashPositionsModified = true;
-            remaining.push(updatedOpen);
-            continue;
+          if (isExchangeEnabledTp1) {
+            if (tp1Submit?.ordId == null) {
+              // ord_id null = submit failed: retain open position for next-tick retry
+              this.logger.info("V2_RANGE_TP1_REDUCE_ORDER_SUBMIT_FAIL_PROOF", {
+                symbol: open.symbol,
+                side: open.side,
+                ord_id: null,
+                error_code: tp1Submit?.errorCode ?? null,
+                error_message: tp1Submit?.errorMessage ?? null,
+                partial_size_usd: partialSizeUsd,
+                close_price: closePrice,
+                flowId
+              });
+              remaining.push({ ...open });
+              continue;
+            }
+
+            if (tp1Submit.fillConfirmed !== true) {
+              // ord_id present but not yet filled: transition to PARTIAL_PENDING
+              const updatedOpen: PaperOpenPositionRecord = {
+                ...open,
+                lifecycleState: "PARTIAL_PENDING",
+                partialPendingOrdId: tp1Submit.ordId,
+                partialPendingClOrdId: tp1Submit?.clOrdId ?? undefined,
+                partialPendingSizeUsd: partialSizeUsd,
+                partialPendingOriginalSizeUsd: partialSizeUsd,
+                partialPendingProcessedFillSz: 0,
+                partialPendingProcessedUsd: 0,
+                partialPendingAt: Date.now(),
+                partialPendingReduceRatio: ratio,
+                partialPendingReason: "v2_tp1_automated",
+                partialPendingPrice: closePrice,
+                partialPendingFundingRate: snap?.fundingRate
+              };
+              this.logger.info("V2_RANGE_TP1_REDUCE_PENDING_PROOF", {
+                symbol: open.symbol,
+                side: open.side,
+                ord_id: tp1Submit.ordId,
+                pending_reason: "fill_not_confirmed",
+                partial_size_usd: partialSizeUsd,
+                flowId
+              });
+              crashPositionsModified = true;
+              remaining.push(updatedOpen);
+              continue;
+            }
           }
 
           // Fill confirmed (or exchange disabled): commit all ledger mutations
