@@ -805,7 +805,7 @@ type MutablePositionOpenTrace = {
   exchange_ack_s_code: string | null;
   exchange_ack_s_msg: string | null;
   position_open_record_written: boolean;
-  position_open_final_state: "opened" | "failed" | "aborted_pre_exchange";
+  position_open_final_state: "opened" | "failed" | "aborted_pre_exchange" | "ENTRY_ORDER_PENDING";
   open_fail_stage: string;
   qty_submitted: number | null;
   inst_id: string | null;
@@ -12186,20 +12186,25 @@ export class PaperEngine {
               sourceRunPath: input.candidateRunPath ?? input.filePath ?? input.latestPath ?? "",
               status: "open"
             };
-            next.push(record);
-            
-            // [V2_PROTECTIVE_STOP_AUTO_REGISTRATION]
-            // Immediately attempt to register protective stop order to avoid 1-cycle delay
-            await this.ensureProtectiveStopOrder(record, `v2_fast_entry_auto:${record.symbol}:${record.openedAt}`);
-            
-            openPositionsChanged = true;
             if (isPending) {
               this.logger.info("PAPER_OPEN_BLOCKED_UNFILLED_ORDER_PROOF", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
               this.logger.info("LIMIT_ENTRY_PENDING_STATE_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
-            } else {
-              this.logger.info("LIMIT_ENTRY_FILLED_TO_PAPER_OPEN_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
-              this.logger.info("paper_position_opened", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
+              continue;
             }
+
+            next.push(record);
+            
+            // [V2_PROTECTIVE_STOP_AUTO_REGISTRATION]
+            const protectRes = await this.ensureProtectiveStopOrder(record, `v2_fast_entry_auto:${record.symbol}:${record.openedAt}`);
+            if (protectRes.modified) {
+              record.isProtectiveStopRegistered = protectRes.record.isProtectiveStopRegistered;
+              record.protectiveStopAlgoId = protectRes.record.protectiveStopAlgoId;
+            }
+            
+            openPositionsChanged = true;
+            this.logger.info("LIMIT_ENTRY_FILLED_TO_PAPER_OPEN_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
+            this.logger.info("paper_position_opened", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
+            
             await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(sym, authority, record));
           } else {
             this.logger.error("paper_position_open_failed", { symbol: sym, error: submit.errorMessage });
@@ -12750,9 +12755,6 @@ export class PaperEngine {
 
         const isExchangeEnabled = this.okxDemo && signedModeForEntry === "enabled";
         const isPendingConfirm = isExchangeEnabled && submit?.fillConfirmed !== true;
-        const lifecycleState: PaperOpenPositionRecord["lifecycleState"] = isExchangeEnabled
-          ? (isPendingConfirm ? "PENDING_EXCHANGE_CONFIRM" : "OPEN")
-          : "INITIAL";
 
         if (isPendingConfirm) {
           this.logger.info("POSITION_OPEN_PENDING_EXCHANGE_CONFIRM", {
@@ -12764,7 +12766,15 @@ export class PaperEngine {
             size_usd: entrySizeUsd,
             accepted_at: Date.now()
           });
+          this.logger.info("PAPER_OPEN_BLOCKED_UNFILLED_ORDER_PROOF", { open_trace_id: trace.open_trace_id, symbol: first.symbol, side: authority.side, fast_path: false });
+          this.logger.info("LIMIT_ENTRY_PENDING_STATE_PROOF", { symbol: first.symbol, side: authority.side, ord_id: trace.exchange_ord_id });
+          
+          trace.position_open_final_state = "ENTRY_ORDER_PENDING";
+          emitPositionOpenTraceFinal();
+          continue;
         }
+
+        const lifecycleState: PaperOpenPositionRecord["lifecycleState"] = isExchangeEnabled ? "OPEN" : "INITIAL";
 
         const record: PaperOpenPositionRecord = {
           openedAt: Date.now(),
@@ -12867,8 +12877,11 @@ export class PaperEngine {
         next.push(record);
         
         // [V2_PROTECTIVE_STOP_AUTO_REGISTRATION]
-        // Immediately attempt to register protective stop order to avoid 1-cycle delay
-        await this.ensureProtectiveStopOrder(record, `v2_legacy_entry_auto:${record.symbol}:${record.openedAt}`);
+        const protectRes = await this.ensureProtectiveStopOrder(record, `v2_legacy_entry_auto:${record.symbol}:${record.openedAt}`);
+        if (protectRes.modified) {
+          record.isProtectiveStopRegistered = protectRes.record.isProtectiveStopRegistered;
+          record.protectiveStopAlgoId = protectRes.record.protectiveStopAlgoId;
+        }
         
         openPositionsChanged = true;
 
@@ -12983,34 +12996,29 @@ export class PaperEngine {
           total_cost_at_entry: record.totalCostAtEntry ?? null,
           ...buildAuthorityEventMeta(authority, entrySizeUsd)
         });
-        if (isPendingConfirm) {
-          this.logger.info("PAPER_OPEN_BLOCKED_UNFILLED_ORDER_PROOF", { open_trace_id: trace.open_trace_id, symbol: record.symbol, side: record.side, fast_path: false });
-          this.logger.info("LIMIT_ENTRY_PENDING_STATE_PROOF", { symbol: record.symbol, side: record.side, ord_id: trace.exchange_ord_id });
-        } else {
-          this.logger.info("LIMIT_ENTRY_FILLED_TO_PAPER_OPEN_PROOF", { symbol: record.symbol, side: record.side, ord_id: trace.exchange_ord_id });
-          this.logger.info("paper_position_opened", {
-            open_trace_id: trace.open_trace_id,
-            sample_symbol_btc_eth: trace.sample_symbol_btc_eth,
-            order_submit_requested: trace.order_submit_requested,
-            order_submit_ack: trace.order_submit_ack,
-            order_submit_error_code: trace.order_submit_error_code,
-            order_submit_error_message: trace.order_submit_error_message,
-            position_open_record_written: trace.position_open_record_written,
-            low_expected_move_relax_size_limited:
-              first.rangeSignalKeptByRelax === true &&
-              first.rangeSignalDowngradeReason === "low_expected_move_relaxed_by_range_structure",
-            position_open_final_state: trace.position_open_final_state,
-            open_fail_stage: trace.open_fail_stage,
-            exchange_client_order_id: trace.exchange_client_order_id,
-            stored_position: "queued_in_memory_before_saveOpenAll",
-            symbol: record.symbol,
-            side: record.side,
-            path: "positions/open.json",
-            size_usd: record.sizeUsd,
-            total_cost_at_entry: record.totalCostAtEntry ?? null,
-            ...buildAuthorityEventMeta(authority, entrySizeUsd)
-          });
-        }
+        this.logger.info("LIMIT_ENTRY_FILLED_TO_PAPER_OPEN_PROOF", { symbol: record.symbol, side: record.side, ord_id: trace.exchange_ord_id });
+        this.logger.info("paper_position_opened", {
+          open_trace_id: trace.open_trace_id,
+          sample_symbol_btc_eth: trace.sample_symbol_btc_eth,
+          order_submit_requested: trace.order_submit_requested,
+          order_submit_ack: trace.order_submit_ack,
+          order_submit_error_code: trace.order_submit_error_code,
+          order_submit_error_message: trace.order_submit_error_message,
+          position_open_record_written: trace.position_open_record_written,
+          low_expected_move_relax_size_limited:
+            first.rangeSignalKeptByRelax === true &&
+            first.rangeSignalDowngradeReason === "low_expected_move_relaxed_by_range_structure",
+          position_open_final_state: trace.position_open_final_state,
+          open_fail_stage: trace.open_fail_stage,
+          exchange_client_order_id: trace.exchange_client_order_id,
+          stored_position: "queued_in_memory_before_saveOpenAll",
+          symbol: record.symbol,
+          side: record.side,
+          path: "positions/open.json",
+          size_usd: record.sizeUsd,
+          total_cost_at_entry: record.totalCostAtEntry ?? null,
+          ...buildAuthorityEventMeta(authority, entrySizeUsd)
+        });
         try {
           await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(sym, authority, record));
         } catch (appendErr) {
