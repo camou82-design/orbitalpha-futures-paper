@@ -11897,6 +11897,11 @@ export class PaperEngine {
       }
 
       const sym = String(first.symbol);
+      // Resolve market subtype: authority wins, fallback to v2_execution_envelope
+      const effectiveMarketSubtype: string =
+        authority.marketSubtype != null
+          ? String(authority.marketSubtype)
+          : String(envelope.v2_execution_envelope?.marketSubtype ?? "");
       const decision = res.executorDecision!;
       const authorityRegimeUpper = String(authority.regime ?? "").toUpperCase();
       const activeEngineRouting = this.lastMarketMode?.routing.activeEngine ?? null;
@@ -12586,6 +12591,56 @@ export class PaperEngine {
 
       const riskE = this.lastRiskExposure;
 
+      // --- [GUARD-1] V2 Entry-to-Fill Pre-Submit Audit ---
+      if (v2AuthorityCandidate && authorityDecisionForExecution === "ENTER") {
+        const auditSide = authority.side;
+        const auditNotional = entrySizeUsd;
+        const auditStopOk = typeof authority.invalidationPx === "number" && Number.isFinite(authority.invalidationPx) && authority.invalidationPx > 0;
+        const auditNotionalOk = typeof auditNotional === "number" && auditNotional > 0;
+        const auditSideOk = auditSide === "long" || auditSide === "short";
+        const auditReadyOk = executionSnapshot.paperReady === true && executionSnapshot.signedReady === true;
+        const auditFail = !auditSideOk || !auditNotionalOk || !auditReadyOk;
+
+        this.logger.info("V2_ENTRY_ORDER_BUILD_AUDIT_PROOF", {
+          symbol: sym,
+          side: auditSide,
+          order_notional_usdt: auditNotional,
+          stop_price_present: auditStopOk,
+          invalidation_px: authority.invalidationPx ?? null,
+          paper_execution_ready: executionSnapshot.paperReady,
+          signed_execution_ready: executionSnapshot.signedReady,
+          side_ok: auditSideOk,
+          notional_ok: auditNotionalOk,
+          readiness_ok: auditReadyOk,
+          authority_source: authority.source,
+          market_subtype: effectiveMarketSubtype || null,
+          regime: authority.regime ?? null
+        });
+
+        if (auditFail) {
+          this.logger.warn("V2_ENTRY_TO_FILL_AUDIT_FAIL_HARD_BLOCK", {
+            symbol: sym,
+            side: auditSide,
+            order_notional_usdt: auditNotional,
+            fail_reason: !auditSideOk ? "INVALID_SIDE" : !auditNotionalOk ? "NOTIONAL_ZERO_OR_NEGATIVE" : "READINESS_NOT_MET",
+            paper_execution_ready: executionSnapshot.paperReady,
+            signed_execution_ready: executionSnapshot.signedReady
+          });
+          continue;
+        }
+
+        this.logger.info("V2_ENTRY_TO_FILL_AUDIT_PROOF", {
+          symbol: sym,
+          side: auditSide,
+          order_notional_usdt: auditNotional,
+          stop_present: auditStopOk,
+          paper_execution_ready: executionSnapshot.paperReady,
+          signed_execution_ready: executionSnapshot.signedReady,
+          audit_passed: true,
+          market_subtype: effectiveMarketSubtype || null
+        });
+      }
+
       // --- V2 AUTHORITATIVE EXECUTION FAST-PATH ---
       if (v2AuthorityCandidate && authorityDecisionForExecution === "ENTER") {
         // 0. V2_ENTER_EXECUTION_BRIDGE_PROOF (Mandatory visibility for all authoritative ENTER signals)
@@ -12732,6 +12787,158 @@ export class PaperEngine {
           const qtyLegacyEst = Math.max(0.001, v2EntrySizeUsd / Math.max(1e-9, first.lastPrice));
           const clOrdId = buildOkxClOrdId(sym, side);
 
+          // --- [GUARD-2] Market Chase Guard: first-candle shock/breakdown → WAIT_RECHECK ---
+          const chaseBlockSubtypes = new Set([
+            "VOLUME_BREAKDOWN_OBSERVATION",
+            "VOLUME_SHOCK_DOWN",
+            "VOLUME_BREAKOUT_OBSERVATION",
+            "VOLUME_SHOCK_UP",
+            "BREAKOUT_OBSERVATION"
+          ]);
+          const retestReadySubtypes = new Set([
+            "BREAKDOWN_RETEST_FAILED",
+            "BREAKOUT_RETEST_CONFIRMED_VOLUME",
+            "BREAKOUT_RETEST_CONFIRMED"
+          ]);
+          const currentSubtype = effectiveMarketSubtype;
+          const isChaseBlock = chaseBlockSubtypes.has(currentSubtype);
+          const isRetestReady = retestReadySubtypes.has(currentSubtype);
+
+          if (isChaseBlock && !isRetestReady) {
+            this.logger.info("V2_MARKET_CHASE_BLOCKED_RETEST_REQUIRED_PROOF", {
+              symbol: sym,
+              side: authority.side,
+              market_subtype: currentSubtype,
+              action: "WAIT_RECHECK",
+              reason: "first_candle_shock_or_breakdown_no_retest_confirmation",
+              retest_required: true
+            });
+            this.logger.info("V2_RETEST_REQUIRED_NO_MARKET_ORDER_PROOF", {
+              symbol: sym,
+              side: authority.side,
+              market_subtype: currentSubtype,
+              blocked_decision: "ENTER",
+              required_subtypes_for_entry: [...retestReadySubtypes]
+            });
+            continue;
+          }
+
+          if (isRetestReady) {
+            if (currentSubtype === "BREAKDOWN_RETEST_FAILED") {
+              this.logger.info("V2_BREAKDOWN_RETEST_SHORT_READY_PROOF", {
+                symbol: sym,
+                side: authority.side,
+                market_subtype: currentSubtype,
+                chase_guard_passed: true
+              });
+            } else {
+              this.logger.info("V2_BREAKOUT_RETEST_LONG_READY_PROOF", {
+                symbol: sym,
+                side: authority.side,
+                market_subtype: currentSubtype,
+                chase_guard_passed: true
+              });
+            }
+          }
+
+          // --- [GUARD-3] Macro Bias Risk Filter ---
+          // Daily/H4 bias proxy via marketSubtype + regime (no direct D/H4 candle ingestion yet)
+          // 1D/4H는 confidence/sizeMultiplier/counterTrendRisk 조정만; ENTER 직접 생성 금지.
+          const macroUpSubtypes = new Set([
+            "VOLUME_BREAKOUT_OBSERVATION",
+            "VOLUME_SHOCK_UP",
+            "BREAKOUT_RETEST_CONFIRMED_VOLUME",
+            "BREAKOUT_RETEST_CONFIRMED",
+            "ASCENDING_CHANNEL"
+          ]);
+          const macroDownSubtypes = new Set([
+            "VOLUME_BREAKDOWN_OBSERVATION",
+            "VOLUME_SHOCK_DOWN",
+            "BREAKDOWN_RETEST_FAILED",
+            "DESCENDING_CHANNEL"
+          ]);
+          const macroNeutralSubtypes = new Set([
+            "RANGE_FLAT", "RANGE_MID_CHOP", "RANGE_LOWER_REACTION", "RANGE_UPPER_REACTION",
+            "RANGE_DRIFT_DOWN", "RANGE_DRIFT_UP", "DRIFT_REVERSAL_UP_WATCH", "DRIFT_REVERSAL_DOWN_WATCH"
+          ]);
+
+          type MacroBiasDir = "DAILY_BULLISH" | "DAILY_NEUTRAL_RANGE" | "DAILY_LOWER_HIGH_RISK" | "DAILY_BEARISH";
+          const intendedSide = authority.side as "long" | "short";
+          let macroBias: MacroBiasDir = "DAILY_NEUTRAL_RANGE";
+          let macroCounterTrend = false;
+          let macroSizeMultiplier = 1.0;
+
+          if (macroUpSubtypes.has(currentSubtype)) {
+            macroBias = "DAILY_BULLISH";
+            if (intendedSide === "short") { macroCounterTrend = true; macroSizeMultiplier = 0.6; }
+          } else if (macroDownSubtypes.has(currentSubtype)) {
+            macroBias = "DAILY_BEARISH";
+            if (intendedSide === "long") { macroCounterTrend = true; macroSizeMultiplier = 0.6; }
+          } else if (macroNeutralSubtypes.has(currentSubtype)) {
+            macroBias = "DAILY_NEUTRAL_RANGE";
+          }
+
+          this.logger.info("V2_MACRO_BIAS_PROOF", {
+            symbol: sym,
+            side: intendedSide,
+            market_subtype: currentSubtype,
+            macro_bias: macroBias,
+            is_counter_trend: macroCounterTrend,
+            macro_size_multiplier: macroSizeMultiplier,
+            note: "macro_bias_is_risk_filter_only_not_enter_generator"
+          });
+
+          if (macroCounterTrend) {
+            // Validate counter-trend entry requires strong regime confirmation
+            const isStrongCounterTrendSignal =
+              currentSubtype === "BREAKDOWN_RETEST_FAILED" ||
+              currentSubtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" ||
+              currentSubtype === "BREAKOUT_RETEST_CONFIRMED";
+
+            if (!isStrongCounterTrendSignal) {
+              this.logger.warn("V2_MACRO_COUNTER_TREND_RISK_PROOF", {
+                symbol: sym,
+                side: intendedSide,
+                macro_bias: macroBias,
+                market_subtype: currentSubtype,
+                counter_trend_risk: true,
+                strong_signal_required: true,
+                action: "COUNTER_TREND_WEAK_SIGNAL_BLOCKED"
+              });
+              this.logger.info("V2_MACRO_DIRECT_ENTER_FORBIDDEN_PROOF", {
+                symbol: sym,
+                side: intendedSide,
+                macro_bias: macroBias,
+                detail: "1D_4H_bias_does_not_generate_ENTER_only_filters_weak_counter_trend"
+              });
+              continue;
+            }
+
+            this.logger.warn("V2_MACRO_COUNTER_TREND_CONFIRM_REQUIRED_PROOF", {
+              symbol: sym,
+              side: intendedSide,
+              macro_bias: macroBias,
+              market_subtype: currentSubtype,
+              counter_trend: true,
+              strong_signal_confirmed: true,
+              size_multiplier: macroSizeMultiplier
+            });
+
+            // Apply size reduction for confirmed but risky counter-trend entries
+            v2EntrySizeUsd = Math.max(
+              MIN_POSITION_SIZE_USD,
+              Math.round(v2EntrySizeUsd * macroSizeMultiplier * 100) / 100
+            );
+            this.logger.warn("V2_MACRO_COUNTER_TREND_SIZE_REDUCED_PROOF", {
+              symbol: sym,
+              side: intendedSide,
+              original_size_usd: v2OrderNotionalUsdt,
+              reduced_size_usd: v2EntrySizeUsd,
+              size_multiplier: macroSizeMultiplier,
+              macro_bias: macroBias
+            });
+          }
+
           const entryPxForSl = first.lastPrice;
           const slReg = regimeForSl(authority.regime);
           const stopFromDecision =
@@ -12808,6 +13015,20 @@ export class PaperEngine {
             submit_ok: submit.ok,
             submit_error_code: submit.errorCode,
             submit_error_message: submit.errorMessage
+          });
+
+          // [V2_ENTRY_TO_FILL] OKX Fill Status Proof
+          this.logger.info("OKX_ORDER_FILL_STATUS_PROOF", {
+            symbol: sym,
+            side: authority.side,
+            ord_id: submit.ordId ?? null,
+            submit_ok: submit.ok,
+            fill_confirmed: submit.fillConfirmed ?? false,
+            fill_px: submit.fillPx ?? null,
+            fill_size: submit.fillSize ?? null,
+            error_code: submit.errorCode ?? null,
+            error_message: submit.errorMessage ?? null,
+            order_notional_usdt: v2EntrySizeUsd
           });
 
           if (submit.ok) {
@@ -12912,6 +13133,53 @@ export class PaperEngine {
             openPositionsChanged = true;
             this.logger.info("LIMIT_ENTRY_FILLED_TO_PAPER_OPEN_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
             this.logger.info("paper_position_opened", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
+
+            // [V2_ENTRY_TO_FILL] Post-open ledger open proof
+            this.logger.info("V2_POST_FILL_LEDGER_OPEN_PROOF", {
+              symbol: sym,
+              side: intentSide,
+              ord_id: submit.ordId ?? null,
+              entry_price: record.entryPrice,
+              size_usd: record.sizeUsd,
+              lifecycle_state: record.lifecycleState,
+              stop_price: record.stopPrice ?? null,
+              open_trace_id: openTraceId
+            });
+
+            // [V2_ENTRY_TO_FILL] Post-fill protective stop audit
+            this.logger.info("V2_POST_FILL_PROTECTIVE_STOP_AUDIT_PROOF", {
+              symbol: sym,
+              side: intentSide,
+              reduce_only_protective_found: record.isProtectiveStopRegistered === true,
+              protective_stop_algo_id: record.protectiveStopAlgoId ?? null,
+              stop_price: record.stopPrice ?? null,
+              protective_stop_registration_ok: record.isProtectiveStopRegistered === true
+            });
+
+            // [V2_ENTRY_TO_FILL] Post-fill actual position reconcile check
+            const actualPosReconcile = this.lastLivePositionsPayload?.find?.((p: any) =>
+              p.instId === toOkxSwapInstId(sym as MarketSymbol) &&
+              String(p.posSide).toLowerCase() === intentSide
+            );
+            this.logger.info("V2_POST_FILL_ACTUAL_POSITION_RECONCILE_PROOF", {
+              symbol: sym,
+              side: intentSide,
+              paper_size_usd: record.sizeUsd,
+              actual_pos_found: actualPosReconcile != null,
+              actual_pos_usd: actualPosReconcile ? Math.abs(Number(actualPosReconcile.notionalUsd ?? 0)) : null,
+              ledger_actual_match: actualPosReconcile != null,
+              note: actualPosReconcile == null ? "actual_position_not_yet_visible_will_reconcile_next_cycle" : "reconciled"
+            });
+
+            if (record.isProtectiveStopRegistered !== true) {
+              this.logger.error("V2_POST_FILL_PROTECTIVE_STOP_MISSING_BLOCK_PROOF", {
+                symbol: sym,
+                side: intentSide,
+                stop_price: record.stopPrice ?? null,
+                action: "symbol_level_protection_failure_flagged"
+              });
+              this.symbolProtectionFailedBlocked.add(`${sym}:${intentSide}`);
+            }
             
             await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(sym, authority, record));
           } else {

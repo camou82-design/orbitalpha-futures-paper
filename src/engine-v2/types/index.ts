@@ -894,6 +894,7 @@ export type EntryExecutionAuthority = Readonly<{
     addOnAllowed?: boolean;
 
     // -- Added for V2 Bridge Hardening --
+    marketSubtype?: string | null;
     originalDecision?: string;
     originalSide?: string;
     originalStageMarginKrw?: number;
