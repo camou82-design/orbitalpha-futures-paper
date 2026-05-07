@@ -99,7 +99,7 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
     if (input.adoptedEngine !== "V2") {
         trueInconsistencyReasons.push("ADOPTED_ENGINE_NOT_V2");
     }
-    if (input.v2Side !== input.side && input.side !== null && input.v2Side !== null) {
+    if (input.v2Side !== input.side && input.side !== null && input.v2Side !== null && input.v2Side !== "none") {
         trueInconsistencyReasons.push("SIDE_MISMATCH_V2_SIDE");
     }
     if (

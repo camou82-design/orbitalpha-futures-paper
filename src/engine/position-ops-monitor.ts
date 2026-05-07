@@ -65,7 +65,7 @@ function stringifyHints(o: Record<string, unknown>): string {
   const id = o.algoId ?? o.ordId ?? "?";
   const typ = o.ordType ?? o.orderType ?? "?";
   const ro = o.reduceOnly;
-  const trig = o.slTriggerPx ?? o.tpTriggerPx ?? o.triggerPx ?? "";
+  const trig = o.slTriggerPx ?? o.tpTriggerPx ?? o.triggerPx ?? o.stopPx ?? o.trigPx ?? "";
   return `${String(id)}|${String(typ)}|ro=${String(ro)}|tr=${String(trig)}`;
 }
 
@@ -77,12 +77,19 @@ export function orderLooksReduceOnlyProtective(o: Record<string, unknown>): bool
   if (
     typ.includes("conditional") ||
     typ === "trigger" ||
+    typ === "stop" ||
     typ.includes("oco") ||
     typ.includes("move_order_stop")
   ) {
     return true;
   }
-  if (o.slTriggerPx != null || o.tpTriggerPx != null || o.triggerPx != null) return true;
+  if (
+    o.slTriggerPx != null || 
+    o.tpTriggerPx != null || 
+    o.triggerPx != null || 
+    o.stopPx != null || 
+    o.trigPx != null
+  ) return true;
   return false;
 }
 

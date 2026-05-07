@@ -1482,6 +1482,21 @@ export class PaperEngine {
             detail:
               "No reduce-only conditional/trigger-style pending order matched this instId (exchange diagnostic only)."
           });
+          
+          // [PROTECTIVE_STOP_MISSING_PROOF] Task 1: Explicit proof for missing protective orders
+          if (r.ledger_stop_px != null) {
+            this.logger.info("PROTECTIVE_STOP_MISSING_PROOF", {
+              ts: nowTs,
+              symbol: r.symbol,
+              side: r.side,
+              inst_id: r.inst_id,
+              ledger_stop_px: r.ledger_stop_px,
+              mirror_stop_px: r.initial_stop_px_engine_mirror,
+              reduce_only_protective_found: false,
+              consistency_check: "FAIL",
+              action_suggested: "MANUAL_STOP_VERIFICATION_REQUIRED"
+            });
+          }
         }
       }
     }
@@ -8367,6 +8382,20 @@ export class PaperEngine {
       if ((v2TakeoverAction as string) === "partial_close" && v2PartialAuthority?.shouldPartial === true) {
         const reduceRatio = v2PartialAuthority.reduceRatio ?? 0.5;
         const partialSizeUsd = open.sizeUsd * reduceRatio;
+        
+        // [PARTIAL_EXECUTION_PROOF] Task 5: Detailed partial execution log for V2 authority
+        this.logger.info("PARTIAL_EXECUTION_PROOF", {
+          ts: Date.now(),
+          symbol: open.symbol,
+          side: open.side,
+          partial_ratio: reduceRatio,
+          partial_size_usd: partialSizeUsd,
+          remaining_size_usd: open.sizeUsd - partialSizeUsd,
+          reason: v2PartialAuthority.partialReason,
+          urgency: v2PartialAuthority.partialUrgency,
+          authority_owner: "V2"
+        });
+
         const MIN_PARTIAL_NOTIONAL = 5; // minimum $5 partial
         if (partialSizeUsd < MIN_PARTIAL_NOTIONAL) {
           this.logger.warn("V2_PARTIAL_SIZE_BUILD_PROOF", {

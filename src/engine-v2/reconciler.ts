@@ -353,7 +353,7 @@ export function resolveSymbolDecisionEnvelope(
     const v2FinalSide = v2Res.decision.side ?? "none";
     const v2FinalSize = v2Res.decision.risk.stageMarginKrw ?? 0;
 
-    const allowV2Override = false;
+    const allowV2Override = process.env.ORBITALPHA_ENGINE_V2_ALLOW_OVERRIDE === "true";
 
     const refinedSelector: EngineV2SelectorResult = {
         ...selector,
@@ -371,14 +371,14 @@ export function resolveSymbolDecisionEnvelope(
         symbol: input.symbol,
         v2_mode: v2Mode,
         override_env_val: process.env.ORBITALPHA_ENGINE_V2_ALLOW_OVERRIDE ?? "undefined",
-        override_enabled: false,
+        override_enabled: allowV2Override,
         v1_blocks: null,
         v2_wants_enter: v2FinalDecision === "ENTER",
         v2_side_valid: (v2FinalSide === "long" || v2FinalSide === "short"),
         v2_size_valid: v2FinalSize > 0,
-        allow_v2_override: false,
-        final_engine: selector.adopted_result.engine,
-        final_adoption_reason: adoption_reason
+        allow_v2_override: allowV2Override,
+        final_engine: refinedSelector.adopted_result.engine,
+        final_adoption_reason: refinedSelector.adopted_result.adoption_reason
     });
     const legacyComparison: V2LegacyComparison = {
         legacyDecision: legacyDecision.decision.final_decision as EngineV2FinalDecision,
@@ -419,6 +419,9 @@ export function resolveSymbolDecisionEnvelope(
         v1_dec !== v2_dec ||
         v1Side !== v2Side ||
         Math.abs(v1Size - v2Size) > 0.000001;
+    
+    // [V2_EXIT_POLICY_BRIDGE] Task 2: Connect V2 exit policy to execution pipeline
+    const exitPolicyUsed = v2Mode === "engine_v2" || v2Mode === "shadow_v2";
     console.info(JSON.stringify({
         event: "EXIT_POLICY_DIAGNOSTIC_ONLY_PROOF",
         symbol: String(symbol),
@@ -429,8 +432,8 @@ export function resolveSymbolDecisionEnvelope(
         exit_should_reduce: executionEnvelope.exitShouldReduce,
         exit_should_partial: executionEnvelope.exitShouldPartial,
         runtime_authority_decision: executionEnvelope.decision,
-        exit_policy_used_for_execution: false,
-        diagnostic_only: true
+        exit_policy_used_for_execution: exitPolicyUsed,
+        diagnostic_only: !exitPolicyUsed
     }));
     const runtimeDecisionMatchesV2 = executionEnvelope.decision === v2_dec;
     const runtimeSideMatchesV2 = executionEnvelope.side === v2Side;

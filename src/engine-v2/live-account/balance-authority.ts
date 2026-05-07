@@ -248,19 +248,29 @@ function parseOkxPositions(
     }
     const finalNotional = nVal ?? 0;
 
-    // Margin Priority: imr -> margin -> notional/leverage
+    // Margin Priority: imr -> mgnVal -> margin -> mmr -> notional/leverage
     let mVal = toFiniteNumber(p.imr);
-    if (mVal !== null) {
+    if (mVal !== null && mVal > 0) {
       if (marginSource === "none") marginSource = "imr";
     } else {
-      mVal = toFiniteNumber(p.margin);
-      if (mVal !== null) {
-        if (marginSource === "none" || marginSource === "imr") marginSource = "margin";
+      mVal = toFiniteNumber(p.mgnVal);
+      if (mVal !== null && mVal > 0) {
+        if (marginSource === "none" || marginSource === "imr") marginSource = "mgnVal";
       } else {
-        const lever = toFiniteNumber(p.lever);
-        if (lever !== null && lever > 0) {
-          mVal = finalNotional / lever;
-          if (marginSource === "none" || marginSource === "imr" || marginSource === "margin") marginSource = "leverage_est";
+        mVal = toFiniteNumber(p.margin);
+        if (mVal !== null && mVal > 0) {
+          if (marginSource === "none" || marginSource === "imr" || marginSource === "mgnVal") marginSource = "margin";
+        } else {
+          mVal = toFiniteNumber(p.mmr);
+          if (mVal !== null && mVal > 0) {
+            if (marginSource === "none" || marginSource === "imr" || marginSource === "mgnVal" || marginSource === "margin") marginSource = "mmr";
+          } else {
+            const lever = toFiniteNumber(p.lever);
+            if (lever !== null && lever > 0) {
+              mVal = finalNotional / lever;
+              if (marginSource === "none" || marginSource === "imr" || marginSource === "mgnVal" || marginSource === "margin" || marginSource === "mmr") marginSource = "leverage_est";
+            }
+          }
         }
       }
     }
