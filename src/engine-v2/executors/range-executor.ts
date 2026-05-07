@@ -372,7 +372,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const takeProfitPlan = (tp1 > 0 && tp2 > 0 && inv > 0) ? {
         tp1,
         tp2,
-        invalidation: inv,
+        invalidationPx: inv,
         partialRatio: 0.5,
         version: "v2_range_fixed_plan_v1"
     } : null;
@@ -384,7 +384,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             side,
             tp1,
             tp2,
-            invalidation: inv,
+            invalidationPx: inv,
             boxMid,
             boxHigh,
             boxLow

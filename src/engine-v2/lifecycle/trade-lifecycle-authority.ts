@@ -112,36 +112,88 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
             if (tpPlan && input.position != null) {
                 const lastPx = input.markPrice || 0;
                 if (input.side === "long") {
-                    if (lastPx >= tpPlan.tp1 && !input.tp1Triggered) {
-                        proofReasons.push("V2_RANGE_TP1_TRIGGER_PROOF");
+                    // TP2 check first (Full close priority)
+                    if (lastPx >= tpPlan.tp2 && !input.tp2Triggered) {
+                        tp2TriggeredResult = true;
+                        tp2PxResult = tpPlan.tp2;
+                        exitAction = "exit";
+                        exitReason = "V2_RANGE_TAKE_PROFIT_2_EXIT";
+                        
+                        console.info(JSON.stringify({
+                            event: "V2_RANGE_TP2_TRIGGER_PROOF",
+                            symbol: input.symbol,
+                            side: input.side,
+                            markPrice: lastPx,
+                            targetPrice: tpPlan.tp2
+                        }));
+                    }
+                    
+                    // TP1 check (only if TP2 not triggered in this tick)
+                    if (!tp2TriggeredResult && lastPx >= tpPlan.tp1 && !input.tp1Triggered) {
                         tp1TriggeredResult = true;
                         tp1PxResult = tpPlan.tp1;
                         partialAction = "reduce";
                         partialReason = "V2_RANGE_TAKE_PROFIT_1_REDUCE";
                         reduceRatio = 0.5;
-                    }
-                    if (lastPx >= tpPlan.tp2 && !input.tp2Triggered) {
-                        proofReasons.push("V2_RANGE_TP2_TRIGGER_PROOF");
-                        tp2TriggeredResult = true;
-                        tp2PxResult = tpPlan.tp2;
-                        exitAction = "exit";
-                        exitReason = "V2_RANGE_TAKE_PROFIT_2_EXIT";
+                        
+                        console.info(JSON.stringify({
+                            event: "V2_RANGE_TP1_TRIGGER_PROOF",
+                            symbol: input.symbol,
+                            side: input.side,
+                            markPrice: lastPx,
+                            targetPrice: tpPlan.tp1
+                        }));
+                    } else if (tp2TriggeredResult && lastPx >= tpPlan.tp1 && !input.tp1Triggered) {
+                        console.info(JSON.stringify({
+                            event: "V2_RANGE_TP2_SUPPRESS_TP1_SAME_TICK_PROOF",
+                            symbol: input.symbol,
+                            side: input.side,
+                            markPrice: lastPx,
+                            tp1: tpPlan.tp1,
+                            tp2: tpPlan.tp2
+                        }));
                     }
                 } else if (input.side === "short") {
-                    if (lastPx <= tpPlan.tp1 && !input.tp1Triggered) {
-                        proofReasons.push("V2_RANGE_TP1_TRIGGER_PROOF");
+                    // TP2 check first
+                    if (lastPx <= tpPlan.tp2 && !input.tp2Triggered) {
+                        tp2TriggeredResult = true;
+                        tp2PxResult = tpPlan.tp2;
+                        exitAction = "exit";
+                        exitReason = "V2_RANGE_TAKE_PROFIT_2_EXIT";
+                        
+                        console.info(JSON.stringify({
+                            event: "V2_RANGE_TP2_TRIGGER_PROOF",
+                            symbol: input.symbol,
+                            side: input.side,
+                            markPrice: lastPx,
+                            targetPrice: tpPlan.tp2
+                        }));
+                    }
+                    
+                    // TP1 check
+                    if (!tp2TriggeredResult && lastPx <= tpPlan.tp1 && !input.tp1Triggered) {
                         tp1TriggeredResult = true;
                         tp1PxResult = tpPlan.tp1;
                         partialAction = "reduce";
                         partialReason = "V2_RANGE_TAKE_PROFIT_1_REDUCE";
                         reduceRatio = 0.5;
-                    }
-                    if (lastPx <= tpPlan.tp2 && !input.tp2Triggered) {
-                        proofReasons.push("V2_RANGE_TP2_TRIGGER_PROOF");
-                        tp2TriggeredResult = true;
-                        tp2PxResult = tpPlan.tp2;
-                        exitAction = "exit";
-                        exitReason = "V2_RANGE_TAKE_PROFIT_2_EXIT";
+                        
+                        console.info(JSON.stringify({
+                            event: "V2_RANGE_TP1_TRIGGER_PROOF",
+                            symbol: input.symbol,
+                            side: input.side,
+                            markPrice: lastPx,
+                            targetPrice: tpPlan.tp1
+                        }));
+                    } else if (tp2TriggeredResult && lastPx <= tpPlan.tp1 && !input.tp1Triggered) {
+                        console.info(JSON.stringify({
+                            event: "V2_RANGE_TP2_SUPPRESS_TP1_SAME_TICK_PROOF",
+                            symbol: input.symbol,
+                            side: input.side,
+                            markPrice: lastPx,
+                            tp1: tpPlan.tp1,
+                            tp2: tpPlan.tp2
+                        }));
                     }
                 }
             }

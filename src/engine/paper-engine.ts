@@ -7270,128 +7270,155 @@ export class PaperEngine {
         const tp2 = open.takeProfit2Px;
         const ratio = open.partialExitRatio ?? 0.5;
         const stage = open.partialExitStage ?? 0;
+        
+        const tp1Hit = typeof tp1 === "number" && (open.side === "long" ? closePrice >= tp1 : closePrice <= tp1);
+        const tp2Hit = typeof tp2 === "number" && (open.side === "long" ? closePrice >= tp2 : closePrice <= tp2);
 
-        // TP1: Partial Exit
-        if (stage < 1 && typeof tp1 === "number" && Number.isFinite(tp1)) {
-          const tp1Hit = open.side === "long" ? closePrice >= tp1 : closePrice <= tp1;
-          if (tp1Hit) {
-            this.logger.info("V2_TP1_TRIGGERED_PROOF", {
+        // TP2: Final Exit (High Priority)
+        if (stage < 2 && !open.v2RangeTp2Triggered && tp2Hit) {
+          // Check for same-tick TP1 suppression
+          if (tp1Hit && !open.v2RangeTp1Triggered) {
+            this.logger.info("V2_RANGE_TP2_SUPPRESS_TP1_SAME_TICK_PROOF", {
               symbol: open.symbol,
               side: open.side,
               tp1_px: tp1,
-              close_price: closePrice,
-              ratio,
-              flowId
-            });
-            
-            const partialSizeUsd = open.sizeUsd * ratio;
-            const metricsP = leg(partialSizeUsd);
-            const closedRowP = finalizePaperClosedRecord({
-              open,
-              symbol: open.symbol,
-              closePrice,
-              closedAt,
-              closeReason: "take_profit_1" as any,
-              legMarginUsd: partialSizeUsd,
-              metrics: metricsP,
-              feeRate,
-              fundingIntervalHours: intervalH,
-              strategyVersion: inheritedStrategyVersion,
-              exitTypeOverride: "EXIT_TP_1",
-              closeSourceOverride: "V2_AUTOMATED_TP_GATE",
-              ...snapPaths
-            });
-
-            await this.dispatchOkxClose({
-              symbol: open.symbol,
-              side: open.side,
-              sizeUsd: partialSizeUsd,
-              okxContracts: open.okxContracts != null ? open.okxContracts * ratio : undefined,
-              appliedLeverage: Math.max(1, open.leverage ?? 1),
-              lastPrice: closePrice,
-              flowId,
-              reason: "v2_tp1_automated",
-              isTakeProfit: true
-            });
-
-            await this.appendClosedWithStandardRouting({
-              closedRow: closedRowP,
-              open,
-              flowId,
-              envelope: null as any,
-              exitReason: "take_profit_1" as any,
-              closeSource: "V2_AUTOMATED_TP_GATE",
-              currentRegime: regimeNow
-            });
-
-            open.sizeUsd -= partialSizeUsd;
-            open.partialExitStage = 1;
-            open.lastPartialAt = closedAt;
-            crashPositionsModified = true;
-            
-            this.logger.info("V2_TP1_PARTIAL_EXIT_EXECUTED", {
-              symbol: open.symbol,
-              remaining_size: open.sizeUsd,
-              flowId
-            });
-          }
-        }
-
-        // TP2: Final Exit (or next stage)
-        if (stage < 2 && typeof tp2 === "number" && Number.isFinite(tp2)) {
-          const tp2Hit = open.side === "long" ? closePrice >= tp2 : closePrice <= tp2;
-          if (tp2Hit) {
-            this.logger.info("V2_TP2_TRIGGERED_PROOF", {
-              symbol: open.symbol,
-              side: open.side,
               tp2_px: tp2,
               close_price: closePrice,
               flowId
             });
-
-            const metricsF = leg(open.sizeUsd);
-            const closedRowF = finalizePaperClosedRecord({
-              open,
-              symbol: open.symbol,
-              closePrice,
-              closedAt,
-              closeReason: "take_profit_2" as any,
-              legMarginUsd: open.sizeUsd,
-              metrics: metricsF,
-              feeRate,
-              fundingIntervalHours: intervalH,
-              strategyVersion: inheritedStrategyVersion,
-              exitTypeOverride: "EXIT_TP_2",
-              closeSourceOverride: "V2_AUTOMATED_TP_GATE",
-              ...snapPaths
-            });
-
-            await this.dispatchOkxClose({
-              symbol: open.symbol,
-              side: open.side,
-              sizeUsd: open.sizeUsd,
-              okxContracts: open.okxContracts ?? undefined,
-              appliedLeverage: Math.max(1, open.leverage ?? 1),
-              lastPrice: closePrice,
-              flowId,
-              reason: "v2_tp2_automated",
-              isTakeProfit: true
-            });
-
-            const routedClosed = await this.appendClosedWithStandardRouting({
-              closedRow: closedRowF,
-              open,
-              flowId,
-              envelope: null as any,
-              exitReason: "take_profit_2" as any,
-              closeSource: "V2_AUTOMATED_TP_GATE",
-              currentRegime: regimeNow
-            });
-
-            authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
-            this.terminalExitConsumedByFlow.add(flowId);
-            continue; // Full exit
           }
+
+          this.logger.info("V2_RANGE_TP2_TRIGGER_PROOF", {
+            event: "V2_RANGE_TP2_TRIGGER_PROOF",
+            symbol: open.symbol,
+            side: open.side,
+            tp2_px: tp2,
+            close_price: closePrice,
+            flowId
+          });
+
+          open.v2RangeTp2Triggered = true;
+          this.logger.info("V2_RANGE_TP_TRIGGER_LEDGER_SAVE_PROOF", {
+            symbol: open.symbol,
+            tp1Triggered: open.v2RangeTp1Triggered ?? false,
+            tp2Triggered: true,
+            flowId
+          });
+
+          const metricsF = leg(open.sizeUsd);
+          const closedRowF = finalizePaperClosedRecord({
+            open,
+            symbol: open.symbol,
+            closePrice,
+            closedAt,
+            closeReason: "take_profit_2" as any,
+            legMarginUsd: open.sizeUsd,
+            metrics: metricsF,
+            feeRate: this.config.paperTakerFeeRate,
+            fundingIntervalHours: this.config.paperFundingIntervalHours,
+            strategyVersion: inheritedStrategyVersion,
+            exitTypeOverride: "EXIT_TP_2",
+            closeSourceOverride: "V2_AUTOMATED_TP_GATE",
+            ...snapPaths
+          });
+
+          await this.dispatchOkxClose({
+            symbol: open.symbol,
+            side: open.side,
+            sizeUsd: open.sizeUsd,
+            okxContracts: open.okxContracts ?? undefined,
+            appliedLeverage: Math.max(1, open.leverage ?? 1),
+            lastPrice: closePrice,
+            flowId,
+            reason: "v2_tp2_automated",
+            isTakeProfit: true
+          });
+
+          const routedClosed = await this.appendClosedWithStandardRouting({
+            closedRow: closedRowF,
+            open,
+            flowId,
+            envelope: null as any,
+            exitReason: "take_profit_2" as any,
+            closeSource: "V2_AUTOMATED_TP_GATE",
+            currentRegime: regimeNow
+          });
+
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+          this.terminalExitConsumedByFlow.add(flowId);
+          continue; // Full exit
+        }
+
+        // TP1: Partial Exit (Lower Priority)
+        if (stage < 1 && !open.v2RangeTp1Triggered && tp1Hit) {
+          this.logger.info("V2_RANGE_TP1_TRIGGER_PROOF", {
+            event: "V2_RANGE_TP1_TRIGGER_PROOF",
+            symbol: open.symbol,
+            side: open.side,
+            tp1_px: tp1,
+            close_price: closePrice,
+            ratio,
+            flowId
+          });
+
+          open.v2RangeTp1Triggered = true;
+          this.logger.info("V2_RANGE_TP_TRIGGER_LEDGER_SAVE_PROOF", {
+            symbol: open.symbol,
+            tp1Triggered: true,
+            tp2Triggered: open.v2RangeTp2Triggered ?? false,
+            flowId
+          });
+          
+          const partialSizeUsd = open.sizeUsd * ratio;
+          const metricsP = leg(partialSizeUsd);
+          const closedRowP = finalizePaperClosedRecord({
+            open,
+            symbol: open.symbol,
+            closePrice,
+            closedAt,
+            closeReason: "take_profit_1" as any,
+            legMarginUsd: partialSizeUsd,
+            metrics: metricsP,
+            feeRate: this.config.paperTakerFeeRate,
+            fundingIntervalHours: this.config.paperFundingIntervalHours,
+            strategyVersion: inheritedStrategyVersion,
+            exitTypeOverride: "EXIT_TP_1",
+            closeSourceOverride: "V2_AUTOMATED_TP_GATE",
+            ...snapPaths
+          });
+
+          await this.dispatchOkxClose({
+            symbol: open.symbol,
+            side: open.side,
+            sizeUsd: partialSizeUsd,
+            okxContracts: open.okxContracts != null ? open.okxContracts * ratio : undefined,
+            appliedLeverage: Math.max(1, open.leverage ?? 1),
+            lastPrice: closePrice,
+            flowId,
+            reason: "v2_tp1_automated",
+            isTakeProfit: true
+          });
+
+          await this.appendClosedWithStandardRouting({
+            closedRow: closedRowP,
+            open,
+            flowId,
+            envelope: null as any,
+            exitReason: "take_profit_1" as any,
+            closeSource: "V2_AUTOMATED_TP_GATE",
+            currentRegime: regimeNow
+          });
+
+          open.sizeUsd -= partialSizeUsd;
+          open.partialExitStage = 1;
+          open.lastPartialAt = closedAt;
+          crashPositionsModified = true;
+          
+          this.logger.info("V2_TP1_PARTIAL_EXIT_EXECUTED", {
+            symbol: open.symbol,
+            remaining_size: open.sizeUsd,
+            flowId
+          });
         }
       }
 

@@ -96,7 +96,7 @@ export interface EngineV2Position {
     takeProfitPlan?: {
         tp1: number;
         tp2: number;
-        inv: number;
+        invalidationPx: number;
     } | null;
     tp1Triggered?: boolean;
     tp2Triggered?: boolean;
@@ -170,7 +170,7 @@ export interface LegacyPositionAdapter {
     takeProfitPlan?: {
         tp1: number;
         tp2: number;
-        inv: number;
+        invalidationPx: number;
     } | null;
     tp1Triggered?: boolean;
     tp2Triggered?: boolean;
@@ -802,7 +802,7 @@ export interface V2TradeLifecycleAuthorityInput {
     takeProfitPlan?: {
         tp1: number;
         tp2: number;
-        inv: number;
+        invalidationPx: number;
     } | null;
     tp1Triggered?: boolean;
     tp2Triggered?: boolean;

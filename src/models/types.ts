@@ -831,6 +831,9 @@ export type PaperOpenPositionRecord = {
   takeProfit2Px?: number;
   partialExitRatio?: number;
   invalidationPx?: number;
+  /** Persistence for V2 Range TP */
+  v2RangeTp1Triggered?: boolean;
+  v2RangeTp2Triggered?: boolean;
 
   
   
