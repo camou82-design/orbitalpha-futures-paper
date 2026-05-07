@@ -10873,14 +10873,21 @@ export class PaperEngine {
       const liveOrder = this.cachedOpsPending.find(o => String(o.ordId) === ordId);
       
       if (shouldCancelPending) {
-        if (liveOrder && this.okxDemo) {
+        let cancelSuccess = false;
+        if (this.okxDemo) {
           try {
-            await this.okxDemo.cancelOrder(pending.instId, ordId);
-            this.logger.info("OKX_STALE_ENTRY_ORDER_CANCEL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "global_trade_disabled_or_kill_switch" });
+            const res = await this.okxDemo.cancelOrder(pending.instId, ordId);
+            if (res.ok) cancelSuccess = true;
           } catch (e) {}
         }
-        this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "canceled_due_to_global_flags" });
-        pendingRegistryModified = true;
+        if (cancelSuccess) {
+          this.logger.info("OKX_STALE_ENTRY_ORDER_CANCEL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "global_trade_disabled_or_kill_switch" });
+          this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "canceled_due_to_global_flags" });
+          pendingRegistryModified = true;
+        } else {
+          this.logger.warn("OKX_STALE_ENTRY_ORDER_CANCEL_FAIL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "cancel_failed_or_network_error" });
+          activePendingEntryOrders.push(pending);
+        }
         continue;
       }
 
@@ -10889,21 +10896,60 @@ export class PaperEngine {
         activePendingEntryOrders.push(pending);
       } else {
         let orderState = "unknown";
+        let ordResRef: any = null;
         if (this.okxDemo) {
           try {
             const res = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId);
             if (res.ok && res.value && res.value.length > 0) {
-              orderState = String((res.value[0] as any).state).toLowerCase();
+              ordResRef = res.value[0];
+              orderState = String(ordResRef.state).toLowerCase();
             }
           } catch (e) {}
         }
         
         if (orderState === "filled") {
-           this.logger.info("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId });
+           // Snapshot Guard
+           if (!pending.paperRecordSnapshot || typeof pending.paperRecordSnapshot !== "object") {
+             this.logger.error("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_FAIL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "null_or_invalid_snapshot" });
+             activePendingEntryOrders.push(pending);
+             continue;
+           }
+
+           // OKX Actual Position Reconcile
+           const actualPos = this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload) 
+             ? this.lastLivePositionsPayload.find((p: any) => p.instId === pending.instId && String(p.posSide).toLowerCase() === pending.side)
+             : null;
            
+           if (!actualPos) {
+             this.logger.error("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_FAIL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "actual_position_not_found" });
+             activePendingEntryOrders.push(pending);
+             continue;
+           }
+
+           const actualAvgPx = Number(actualPos.avgPx);
+           const actualBase = Number(actualPos.pos);
+           const instR = this.instrumentCache.get(pending.instId);
+           const ctValR = instR?.ctVal ?? 1;
+           const baseQtyAbs = Math.abs(actualBase);
+
            const record = pending.paperRecordSnapshot;
            record.openedAt = Date.now();
            record.lifecycleState = "OPEN";
+           record.avgPx = actualAvgPx;
+           record.entryPrice = actualAvgPx;
+           record.pos = actualBase;
+           record.baseQty = baseQtyAbs;
+           record.okxContracts = ctValR > 0 ? baseQtyAbs / ctValR : baseQtyAbs;
+           record.exchangeFilledSize = record.okxContracts;
+           
+           let nuR = Number(actualPos.notionalUsd);
+           if ((!Number.isFinite(nuR) || nuR === 0) && actualAvgPx > 0 && baseQtyAbs > 0) {
+             nuR = baseQtyAbs * actualAvgPx;
+           }
+           record.notionalUsd = Math.abs(nuR);
+           record.sizeUsd = record.notionalUsd;
+
+           this.logger.info("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId });
            
            next.push(record);
            openPositionsChanged = true;
@@ -10928,9 +10974,12 @@ export class PaperEngine {
            } catch(e) {}
            
            pendingRegistryModified = true;
-        } else if (orderState === "canceled" || orderState === "mmp_canceled" || orderState === "rejected" || orderState === "unknown") {
+        } else if (orderState === "canceled" || orderState === "mmp_canceled" || orderState === "rejected" || orderState === "expired") {
            this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: orderState });
            pendingRegistryModified = true;
+        } else if (orderState === "unknown") {
+           this.logger.warn("PENDING_ENTRY_ORDER_FILL_CHECK_FAIL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "get_order_failed_or_unknown" });
+           activePendingEntryOrders.push(pending);
         } else {
            this.logger.info("PENDING_ENTRY_ORDER_FILL_CHECK_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, status: orderState });
            activePendingEntryOrders.push(pending);
@@ -12295,9 +12344,15 @@ export class PaperEngine {
                 openTraceId: openTraceId
               };
               const currentPending = await this.store.readPendingEntryOrders();
-              currentPending.push(pendingReg);
+              const existingIdx = currentPending.findIndex(p => p.ordId === pendingReg.ordId || p.clOrdId === pendingReg.clOrdId || (p.symbol === pendingReg.symbol && p.side === pendingReg.side));
+              if (existingIdx >= 0) {
+                this.logger.info("PENDING_ENTRY_ORDER_UPSERT_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
+                currentPending[existingIdx] = pendingReg;
+              } else {
+                currentPending.push(pendingReg);
+                this.logger.info("PENDING_ENTRY_ORDER_REGISTERED_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
+              }
               await this.store.writePendingEntryOrders(currentPending);
-              this.logger.info("PENDING_ENTRY_ORDER_REGISTERED_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
               
               continue;
             }
@@ -12921,9 +12976,15 @@ export class PaperEngine {
           legacyPendingReg.paperRecordSnapshot = tempRecord;
           
           const currentPending = await this.store.readPendingEntryOrders();
-          currentPending.push(legacyPendingReg);
+          const existingIdx = currentPending.findIndex(p => p.ordId === legacyPendingReg.ordId || p.clOrdId === legacyPendingReg.clOrdId || (p.symbol === legacyPendingReg.symbol && p.side === legacyPendingReg.side));
+          if (existingIdx >= 0) {
+            this.logger.info("PENDING_ENTRY_ORDER_UPSERT_PROOF", { symbol: first.symbol, side: authority.side, ord_id: legacyPendingReg.ordId });
+            currentPending[existingIdx] = legacyPendingReg;
+          } else {
+            currentPending.push(legacyPendingReg);
+            this.logger.info("PENDING_ENTRY_ORDER_REGISTERED_PROOF", { symbol: first.symbol, side: authority.side, ord_id: legacyPendingReg.ordId });
+          }
           await this.store.writePendingEntryOrders(currentPending);
-          this.logger.info("PENDING_ENTRY_ORDER_REGISTERED_PROOF", { symbol: first.symbol, side: authority.side, ord_id: legacyPendingReg.ordId });
           
           trace.position_open_final_state = "ENTRY_ORDER_PENDING";
           emitPositionOpenTraceFinal();
