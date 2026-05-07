@@ -176,6 +176,29 @@ export function calculateRiskSizing(
             isBlocked = true;
             blockReason = blockReason ?? "SHOCK_ADDON_FORBIDDEN";
         }
+    } else if (isTrend && isAddOn && addOnPolicyAllowed) {
+        // --- TREND Profit-Funded Pyramid Sizing ---
+        const addonMaxNotionalUsdt = state.addonMaxNotionalUsdt ?? 0;
+        const addonStageMarginUsdt = addonMaxNotionalUsdt / appliedLeverage;
+        
+        // Convert to KRW (using 1400 fixed for consistency with other KRW-based limits)
+        stageMarginKrw = addonStageMarginUsdt * 1400;
+
+        console.info(JSON.stringify({
+            event: "V2_TREND_PROFIT_FUNDED_PYRAMID_PROOF",
+            symbol: input.symbol,
+            lockedProfitUsdt: state.lockedProfitUsdt,
+            availableRiskBudgetUsdt: state.availableRiskBudgetUsdt,
+            addonMaxNotionalUsdt: addonMaxNotionalUsdt,
+            stageMarginKrw: stageMarginKrw,
+            currentStage: currentStage,
+            appliedLeverage: appliedLeverage
+        }));
+
+        if (stageMarginKrw < 10000) { // Minimum 10,000 KRW for add-on
+             isBlocked = true;
+             blockReason = "PROFIT_FUNDED_SIZE_TOO_SMALL";
+        }
     } else if (isTrend && entryQualityGrade === "S") {
         stageMarginKrw = currentStage <= 0 ? 180_000 : currentStage === 1 ? 110_000 : 60_000;
     } else if (isTrend && entryQualityGrade === "A") {

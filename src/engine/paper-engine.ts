@@ -5169,14 +5169,46 @@ export class PaperEngine {
     }
 
     if (open.isProtectiveStopRegistered && open.protectiveStopAlgoId) {
-      this.logger.info("POSITION_PROTECTION_STATE_PROOF", {
-        symbol: open.symbol,
-        side: open.side,
-        reduce_only_protective_found: true,
-        algoId: open.protectiveStopAlgoId,
-        flowId
-      });
-      return { modified: false, success: true, record: open };
+      const algo = (this as any).cachedOpsAlgos?.find((a: any) => String(a.algoId) === open.protectiveStopAlgoId);
+      const currentSlPx = algo ? Number(algo.slTriggerPx) : null;
+      const priceMatches = typeof currentSlPx === "number" && Number.isFinite(currentSlPx) && Math.abs(currentSlPx - open.stopPrice) < 1e-8;
+
+      if (priceMatches) {
+        this.logger.info("POSITION_PROTECTION_STATE_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          reduce_only_protective_found: true,
+          algoId: open.protectiveStopAlgoId,
+          price_match: true,
+          flowId
+        });
+        return { modified: false, success: true, record: open };
+      } else {
+        this.logger.warn("PROTECTIVE_STOP_SYNC_MISMATCH", {
+          symbol: open.symbol,
+          side: open.side,
+          algoId: open.protectiveStopAlgoId,
+          ledgerStop: open.stopPrice,
+          exchangeStop: currentSlPx,
+          reason: algo ? "PRICE_MISMATCH" : "ALGO_NOT_FOUND_IN_CACHE",
+          action: "CANCEL_FOR_RESUBMIT",
+          flowId
+        });
+        
+        // Attempt cancel
+        try {
+          await this.okxDemo.cancelAlgoOrder([{ instId: toOkxSwapInstId(open.symbol), algoId: open.protectiveStopAlgoId }]);
+        } catch (e) {
+          this.logger.error("PROTECTIVE_STOP_CANCEL_FAIL", { symbol: open.symbol, algoId: open.protectiveStopAlgoId, error: String(e) });
+        }
+
+        // Fall through to register new one
+        open = {
+          ...open,
+          isProtectiveStopRegistered: false,
+          protectiveStopAlgoId: undefined
+        };
+      }
     }
 
     // Attempt to register
@@ -6901,6 +6933,42 @@ export class PaperEngine {
       const v2ExitAuthority = envelope.selector?.v2_result.v2ExitAuthority ?? null;
       const v2PartialAuthority = envelope.selector?.v2_result.v2PartialAuthority ?? null;
       const lifecycleAuthority = envelope.selector?.v2_result.lifecycleAuthority ?? null;
+
+      const v2NewStop = lifecycleAuthority?.newStopPrice;
+      if (typeof v2NewStop === "number" && Number.isFinite(v2NewStop) && v2NewStop > 0) {
+        const oldStop = posTrail.stopPrice;
+        let validUpdate = false;
+        if (oldStop == null || !Number.isFinite(oldStop)) {
+          validUpdate = true;
+        } else {
+          // Enforce only favorable direction: long -> up, short -> down
+          if (posTrail.side === "long") {
+            if (v2NewStop > oldStop + 1e-8) validUpdate = true;
+          } else {
+            if (v2NewStop < oldStop - 1e-8) validUpdate = true;
+          }
+        }
+
+        if (validUpdate) {
+          posTrail.stopPrice = v2NewStop;
+          crashPositionsModified = true;
+          this.logger.info("V2_TREND_STOP_RAISE_PROOF", {
+            symbol: sk,
+            side: posTrail.side,
+            oldStop: oldStop ?? 0,
+            newStop: v2NewStop,
+            flowId
+          });
+        } else if (Math.abs((oldStop ?? 0) - v2NewStop) > 1e-8) {
+          this.logger.warn("V2_STOP_UPDATE_REJECTED_UNFAVORABLE", {
+            symbol: sk,
+            side: posTrail.side,
+            oldStop,
+            newStop: v2NewStop,
+            flowId
+          });
+        }
+      }
 
       const isV2Pos = this.isV2AuthorityPosition(open);
       const exitManagedByV2 = isV2Pos && (lifecycleAuthority?.exitManagedByV2 === true);

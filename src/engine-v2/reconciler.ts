@@ -403,7 +403,8 @@ export function resolveSymbolDecisionEnvelope(
         exitShouldPartial: v2Res.internal.exitPolicy?.shouldPartial ?? false,
         exitReduceRatio: v2Res.internal.exitPolicy?.reduceRatio ?? 0,
         exitUrgency: v2Res.internal.exitPolicy?.exitUrgency ?? "LOW",
-        exitConfidence: v2Res.internal.exitPolicy?.exitConfidence ?? 0
+        exitConfidence: v2Res.internal.exitPolicy?.exitConfidence ?? 0,
+        newStopPrice: v2Res.internal.lifecycleAuthority?.newStopPrice
     });
     const authority =
         v2Mode === "engine_v2"
@@ -558,6 +559,7 @@ export function resolveSymbolDecisionEnvelope(
         runtime_authority_side: executionEnvelope.side,
         runtime_authority_stage_margin_krw: executionEnvelope.stageMarginKrw,
         runtime_authority_size_usdt: executionEnvelope.stageMarginKrw / 1400,
+        runtime_authority_new_stop_px: executionEnvelope.newStopPrice,
         v1_decision: v1_dec,
         v1_side: v1Side,
         v1_size: v1Size,

@@ -201,34 +201,8 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             evidence: "range_mid_forbidden"
         };
     }
-    if (currentStage >= 3) {
-        return {
-            action: "ADDON_FORBIDDEN",
-            allowed: false,
-            reason: "CURRENT_STAGE_LIMIT",
-            addOnEligible: false,
-            isInitial,
-            isAddOn,
-            side,
-            currentStage,
-            hasSameSidePosition,
-            hasOppositeSidePosition,
-            marketRegime: judgment.regime_final,
-            marketSubtype: judgment.subtype,
-            shockPhase: judgment.shockPhase,
-            rangePhase: judgment.rangePhase,
-            trendPhase: judgment.trendPhase,
-            transitionPhase: judgment.transitionPhase,
-            qualityScore,
-            reviewingTicks,
-            pnlPct,
-            boxPos,
-            emaGap,
-            trendWeaknessScore,
-            rangeConfidence,
-            evidence: "stage_limit_reached"
-        };
-    }
+    // Stage limit removed to allow Profit-Funded Pyramid in TREND
+    // Non-TREND stage limits will be handled within their respective sections if needed
     if (qualityScore < 70 || pnlPct <= 0) {
         return {
             action: "ADDON_WATCH",
@@ -347,14 +321,101 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
                 evidence: "trend_exhaustion_forbidden"
             };
         }
+
         const trendSideAligned =
             (side === "long" && (judgment.trendPhase === "UP" || judgment.trendPhase === "PULLBACK")) ||
             (side === "short" && (judgment.trendPhase === "DOWN" || judgment.trendPhase === "PULLBACK"));
-        if (trendSideAligned && trendWeaknessScore < 0.55 && (qualityScore >= 80) && currentStage <= 2 && pnlPct >= 0) {
+
+        if (!trendSideAligned) {
+             return {
+                action: "ADDON_FORBIDDEN",
+                allowed: false,
+                reason: "SIDE_MISMATCH_FORBIDDEN",
+                addOnEligible: false,
+                isInitial,
+                isAddOn,
+                side,
+                currentStage,
+                hasSameSidePosition,
+                hasOppositeSidePosition,
+                marketRegime: judgment.regime_final,
+                marketSubtype: judgment.subtype,
+                shockPhase: judgment.shockPhase,
+                rangePhase: judgment.rangePhase,
+                trendPhase: judgment.trendPhase,
+                transitionPhase: judgment.transitionPhase,
+                qualityScore,
+                reviewingTicks,
+                pnlPct,
+                boxPos,
+                emaGap,
+                trendWeaknessScore,
+                rangeConfidence,
+                evidence: "trend_side_mismatch"
+            };
+        }
+
+        // --- TREND Profit-Funded Pyramid Implementation ---
+        const MIN_PROTECTED_PROFIT_USD = 15.0;
+        const ADDON_LOSS_PCT_TO_STOP = 0.022; // 2.2% ATR-based equivalent
+        const ADDON_RISK_CAP_PCT = 0.15; // 15% of equity
+
+        const sizeUsd = sameSidePosition?.sizeUsd ?? 0;
+        const lockedProfitUsdt = pnlPct * sizeUsd;
+        const availableRiskBudgetUsdt = lockedProfitUsdt - MIN_PROTECTED_PROFIT_USD;
+
+        const equityUsdEstimate = (v2State.accountEquityKrw || 1400000) / 1400; 
+        const equityRiskCapUsdt = equityUsdEstimate * ADDON_RISK_CAP_PCT;
+
+        const addonMaxNotionalUsdt = availableRiskBudgetUsdt > 0 
+            ? Math.min(availableRiskBudgetUsdt / ADDON_LOSS_PCT_TO_STOP, equityRiskCapUsdt)
+            : 0;
+
+        // Implementation of worst-case PNL check after add-on
+        const currentPrice = Number(snapshot.lastPrice);
+        const atr = Number(snapshot.atr || (snapshot.volatilityProxyDiag ?? 0));
+        const stopDistance = atr * 2.2;
+        const newStopPrice = side === "long" ? currentPrice - stopDistance : currentPrice + stopDistance;
+        
+        // Simplified worst case check: if we add 'addonMaxNotionalUsdt' at 'currentPrice'
+        // and stop hits 'newStopPrice', what is the total PNL?
+        const entryPrice = sameSidePosition?.entryPrice ?? currentPrice;
+        const existingPosPnlAtStop = side === "long" 
+            ? sizeUsd * (newStopPrice - entryPrice) / entryPrice 
+            : sizeUsd * (entryPrice - newStopPrice) / entryPrice;
+        const newPosPnlAtStop = side === "long"
+            ? addonMaxNotionalUsdt * (newStopPrice - currentPrice) / currentPrice
+            : addonMaxNotionalUsdt * (currentPrice - newStopPrice) / currentPrice;
+        
+        const worstCasePnlAfterNewStop = existingPosPnlAtStop + newPosPnlAtStop;
+
+        const pyramidAllowed = 
+            availableRiskBudgetUsdt > 0 && 
+            qualityScore >= 80 && 
+            trendWeaknessScore < 0.55 && 
+            pnlPct >= 0.002 && // Require at least 0.2% pnl for cushion
+            worstCasePnlAfterNewStop >= 0;
+
+        if (pyramidAllowed) {
+            console.info(JSON.stringify({
+                event: "V2_TREND_PROFIT_FUNDED_PYRAMID_PROOF",
+                symbol: String(args.symbol),
+                side,
+                current_size_usd: sizeUsd,
+                pnl_pct: pnlPct,
+                locked_profit_usdt: lockedProfitUsdt,
+                available_risk_budget_usdt: availableRiskBudgetUsdt,
+                addon_max_notional_usdt: addonMaxNotionalUsdt,
+                worst_case_pnl_after_stop: worstCasePnlAfterNewStop,
+                atr,
+                stop_distance: stopDistance,
+                new_stop_price: newStopPrice
+            }));
+
             return {
                 action: "ADDON_ALLOWED",
                 allowed: true,
-                reason: judgment.trendPhase === "PULLBACK" ? "TREND_PULLBACK_ADDON_ALLOWED" : "TREND_CONTINUATION_ADDON_ALLOWED",
+                reason: "TREND_PYRAMID_PROFIT_FUNDED_ALLOWED",
                 addOnEligible: true,
                 isInitial,
                 isAddOn,
@@ -375,7 +436,40 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
                 emaGap,
                 trendWeaknessScore,
                 rangeConfidence,
-                evidence: "trend_addon_allowed"
+                lockedProfitUsdt,
+                availableRiskBudgetUsdt,
+                addonMaxNotionalUsdt,
+                evidence: "trend_pyramid_allowed"
+            };
+        } else {
+             return {
+                action: "ADDON_WATCH",
+                allowed: false,
+                reason: availableRiskBudgetUsdt <= 0 ? "PROFIT_BUFFER_INSUFFICIENT" : "PNL_NOT_FAVORABLE",
+                addOnEligible: false,
+                isInitial,
+                isAddOn,
+                side,
+                currentStage,
+                hasSameSidePosition,
+                hasOppositeSidePosition,
+                marketRegime: judgment.regime_final,
+                marketSubtype: judgment.subtype,
+                shockPhase: judgment.shockPhase,
+                rangePhase: judgment.rangePhase,
+                trendPhase: judgment.trendPhase,
+                transitionPhase: judgment.transitionPhase,
+                qualityScore,
+                reviewingTicks,
+                pnlPct,
+                boxPos,
+                emaGap,
+                trendWeaknessScore,
+                rangeConfidence,
+                lockedProfitUsdt,
+                availableRiskBudgetUsdt,
+                addonMaxNotionalUsdt,
+                evidence: "profit_funded_pyramid_insufficient_buffer_or_low_quality"
             };
         }
     }

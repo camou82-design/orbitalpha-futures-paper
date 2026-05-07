@@ -18,9 +18,12 @@ export type V2AddOnReason =
     | "RANGE_EDGE_REATTACK_ALLOWED"
     | "TREND_PULLBACK_ADDON_ALLOWED"
     | "TREND_CONTINUATION_ADDON_ALLOWED"
+    | "TREND_PYRAMID_PROFIT_FUNDED_ALLOWED"
     | "QUALITY_TOO_LOW_FOR_ADDON"
     | "CURRENT_STAGE_LIMIT"
     | "PNL_NOT_FAVORABLE"
+    | "PROFIT_BUFFER_INSUFFICIENT"
+    | "SIDE_MISMATCH_FORBIDDEN"
     | "SIDE_NONE_FORBIDDEN";
 
 export type V2AddOnPolicyResult = Readonly<{
@@ -47,6 +50,10 @@ export type V2AddOnPolicyResult = Readonly<{
     emaGap: number;
     trendWeaknessScore: number;
     rangeConfidence: number;
+    lockedProfitUsdt?: number;
+    availableRiskBudgetUsdt?: number;
+    addonMaxNotionalUsdt?: number;
+    equityRiskCapUsdt?: number;
     evidence: string;
 }>;
 
@@ -63,5 +70,8 @@ export type EvaluateV2AddOnPolicyArgs = Readonly<{
         emaGap: number | null;
         trendWeaknessScore: number;
         rangeConfidence: number | null;
+        lastPrice?: number;
+        atr?: number;
+        volatilityProxyDiag?: number | null;
     };
 }>;

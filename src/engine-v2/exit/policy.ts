@@ -114,11 +114,16 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
             }
         }
     } else if (args.judgment.regime_final === "TREND") {
-        if (args.judgment.trendPhase === "EXHAUSTION") {
-            action = "REDUCE";
-            reason = "TREND_EXHAUSTION_REDUCE";
-            reduceRatio = 0.35;
-            evidence += "|trend_exhaustion";
+        if (args.judgment.trendPhase === "EXHAUSTION" || tw >= 0.65) {
+            action = "PARTIAL_TAKE_PROFIT";
+            reason = "TREND_EXHAUSTION_REDUCE_50PCT";
+            reduceRatio = 0.5; // 50% on exhaustion
+            evidence += "|trend_exhaustion_50";
+        } else if (tw >= 0.55) {
+            action = "PARTIAL_TAKE_PROFIT";
+            reason = "TREND_WEAKNESS_REDUCE_30PCT";
+            reduceRatio = 0.3; // 30% on weakness
+            evidence += "|trend_weakness_30";
         } else if ((side === "long" && emaGap < 0) || (side === "short" && emaGap > 0) || tw >= 0.75) {
             action = "FULL_EXIT";
             reason = "TREND_FULL_EXIT_EMA60_INVALID";

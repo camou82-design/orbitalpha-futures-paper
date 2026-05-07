@@ -74,6 +74,7 @@ export interface EngineV2Position {
     sizeUsd: number;
     entryStage: number;
     pnlPct: number;
+    ledger_stop_px?: number;
 }
 
 /** 
@@ -110,6 +111,7 @@ export interface LegacySnapshotAdapter {
     signalGateBlockedReason?: string | null;
     rangeSignalDowngraded?: boolean;
     rangeSignalKeptByRelax?: boolean;
+    atr?: number;
 }
 
 export interface LegacyConfigAdapter {
@@ -125,6 +127,7 @@ export interface LegacyPositionAdapter {
     sizeUsd: number;
     entryStage?: number;
     pnlPct?: number;
+    ledger_stop_px?: number;
 }
 
 export interface LegacyResultAdapter {
@@ -193,6 +196,9 @@ export interface EngineV2Input {
         addOnPolicyAllowed?: boolean;
         addOnPolicyReason?: string;
         addOnPolicyAction?: string;
+        lockedProfitUsdt?: number;
+        availableRiskBudgetUsdt?: number;
+        addonMaxNotionalUsdt?: number;
     };
     now: number;
     v1Result: {
@@ -226,6 +232,7 @@ export interface EngineV2SnapshotAdapter {
     dump_protection_hit: boolean;
     volatility_guard_hit: boolean;
     entryCandidate: boolean;
+    atr?: number;
     signalGateBlockedReason?: string | null;
     rangeSignalDowngraded?: boolean;
     rangeSignalKeptByRelax?: boolean;
@@ -383,6 +390,9 @@ export interface V2BridgeState {
     addOnPolicyAllowed?: boolean;
     addOnPolicyReason?: string;
     addOnPolicyAction?: string;
+    lockedProfitUsdt?: number;
+    availableRiskBudgetUsdt?: number;
+    addonMaxNotionalUsdt?: number;
 }
 
 export interface V2BridgeInput {
@@ -435,6 +445,7 @@ export interface SymbolDecisionEnvelope {
     runtime_authority_stage_margin_krw?: number | null;
     runtime_authority_base_stage_margin_krw?: number | null;
     runtime_authority_size_usdt?: number | null;
+    runtime_authority_new_stop_px?: number | null;
     // V1/V2 Comparison Metrics (Phase 5 Summary)
     v1_decision?: string;
     v1_side?: string;
@@ -688,6 +699,8 @@ export interface V2TradeLifecycleAuthorityInput {
         trendWeaknessScore: number;
         boxPos: number | null;
     };
+    atr?: number;
+    currentStopPrice?: number;
 }
 
 export interface V2TradeLifecycleAuthorityResult {
@@ -708,6 +721,7 @@ export interface V2TradeLifecycleAuthorityResult {
     addOnAllowed: boolean | null;
     partialAction: V2LifecyclePartialAction;
     exitAction: V2LifecycleExitAction;
+    newStopPrice?: number;
     cooldownType: V2CooldownType;
     cooldownReason: string | null;
     legacyInterventionDetected: boolean;
@@ -770,6 +784,7 @@ export type EntryExecutionAuthority = Readonly<{
     hardBlockPresent?: boolean;
     hardBlockReason?: string | null;
     nonBypassableHardBlockPresent?: boolean;
+    newStopPrice?: number;
 }>;
 
 /** Internal Pipeline Result */

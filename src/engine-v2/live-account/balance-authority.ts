@@ -232,43 +232,53 @@ function parseOkxPositions(
 
     // Notional Priority: notionalUsd -> notional -> abs(pos * markPx)
     let nVal = toFiniteNumber(p.notionalUsd);
-    if (nVal !== null) {
+    if (nVal !== null && Math.abs(nVal) > 0) {
       if (notionalSource === "none") notionalSource = "notionalUsd";
     } else {
       nVal = toFiniteNumber(p.notional);
-      if (nVal !== null) {
+      if (nVal !== null && Math.abs(nVal) > 0) {
         if (notionalSource === "none" || notionalSource === "notionalUsd") notionalSource = "notional";
       } else {
         const markPx = toFiniteNumber(p.markPx);
-        if (markPx !== null) {
+        if (markPx !== null && markPx > 0) {
           nVal = Math.abs(pos * markPx);
           if (notionalSource === "none" || notionalSource === "notionalUsd" || notionalSource === "notional") notionalSource = "markPx_calc";
         }
       }
     }
-    const finalNotional = nVal ?? 0;
+    const finalNotional = Math.abs(nVal ?? 0);
 
-    // Margin Priority: imr -> mgnVal -> margin -> mmr -> notional/leverage
+    // Margin Priority: imr -> mgnVal -> margin -> mmr -> liab -> notional/leverage
     let mVal = toFiniteNumber(p.imr);
-    if (mVal !== null && mVal > 0) {
+    if (mVal !== null && Math.abs(mVal) > 0) {
+      mVal = Math.abs(mVal);
       if (marginSource === "none") marginSource = "imr";
     } else {
       mVal = toFiniteNumber(p.mgnVal);
-      if (mVal !== null && mVal > 0) {
+      if (mVal !== null && Math.abs(mVal) > 0) {
+        mVal = Math.abs(mVal);
         if (marginSource === "none" || marginSource === "imr") marginSource = "mgnVal";
       } else {
         mVal = toFiniteNumber(p.margin);
-        if (mVal !== null && mVal > 0) {
+        if (mVal !== null && Math.abs(mVal) > 0) {
+          mVal = Math.abs(mVal);
           if (marginSource === "none" || marginSource === "imr" || marginSource === "mgnVal") marginSource = "margin";
         } else {
           mVal = toFiniteNumber(p.mmr);
-          if (mVal !== null && mVal > 0) {
+          if (mVal !== null && Math.abs(mVal) > 0) {
+            mVal = Math.abs(mVal);
             if (marginSource === "none" || marginSource === "imr" || marginSource === "mgnVal" || marginSource === "margin") marginSource = "mmr";
           } else {
-            const lever = toFiniteNumber(p.lever);
-            if (lever !== null && lever > 0) {
-              mVal = finalNotional / lever;
-              if (marginSource === "none" || marginSource === "imr" || marginSource === "mgnVal" || marginSource === "margin" || marginSource === "mmr") marginSource = "leverage_est";
+            const liab = toFiniteNumber(p.liab);
+            if (liab !== null && Math.abs(liab) > 0) {
+              mVal = Math.abs(liab);
+              if (marginSource === "none" || marginSource === "imr" || marginSource === "mgnVal" || marginSource === "margin" || marginSource === "mmr") marginSource = "liab";
+            } else {
+              const lever = toFiniteNumber(p.lever);
+              if (lever !== null && lever > 0) {
+                mVal = finalNotional / lever;
+                if (marginSource === "none" || marginSource === "imr" || marginSource === "mgnVal" || marginSource === "margin" || marginSource === "mmr" || marginSource === "liab") marginSource = "leverage_est";
+              }
             }
           }
         }
@@ -277,12 +287,12 @@ function parseOkxPositions(
     const finalMargin = mVal ?? 0;
 
     totalMargin += finalMargin;
-    totalNotional += Math.abs(finalNotional);
+    totalNotional += finalNotional;
 
     lines.push({
       symbol: parsedKey.symbol,
       side: parsedKey.side,
-      notional_usdt: Math.abs(finalNotional),
+      notional_usdt: finalNotional,
       applied_leverage: toFiniteNumber(p.lever) ?? 1,
       estimated_margin_usdt: finalMargin,
       source: "okx_actual"

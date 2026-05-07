@@ -46,6 +46,7 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     hardBlockReason: string | null;
     authorityReason: string;
     authorityVersion: "v2_execution_authority_envelope_v1";
+    newStopPrice?: number;
 
     // -- Added for Bridge V2 Original Intent --
     originalDecision?: string;
@@ -78,4 +79,5 @@ export type BuildExecutionEnvelopeArgs = Readonly<{
     exitReduceRatio?: number | null;
     exitUrgency?: string | null;
     exitConfidence?: number | null;
+    newStopPrice?: number;
 }>;

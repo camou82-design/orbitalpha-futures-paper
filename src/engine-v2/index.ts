@@ -256,7 +256,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             boxPos: authoritativeInput.snapshot.boxPos,
             emaGap: authoritativeInput.snapshot.emaGap,
             trendWeaknessScore: authoritativeInput.snapshot.trendWeaknessScore,
-            rangeConfidence: authoritativeInput.snapshot.rangeConfidence
+            rangeConfidence: authoritativeInput.snapshot.rangeConfidence,
+            lastPrice: authoritativeInput.snapshot.lastPrice,
+            atr: authoritativeInput.snapshot.atr,
+            volatilityProxyDiag: authoritativeInput.snapshot.volatilityProxy
         }
     });
     const shouldEmitAddOnProof =
@@ -349,7 +352,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             ...authoritativeInput.state,
             addOnPolicyAllowed: addOnPolicy.allowed,
             addOnPolicyReason: addOnPolicy.reason,
-            addOnPolicyAction: addOnPolicy.action
+            addOnPolicyAction: addOnPolicy.action,
+            lockedProfitUsdt: addOnPolicy.lockedProfitUsdt,
+            availableRiskBudgetUsdt: addOnPolicy.availableRiskBudgetUsdt,
+            addonMaxNotionalUsdt: addOnPolicy.addonMaxNotionalUsdt
         }
     };
     const exitPolicy = evaluateV2ExitPolicy({
@@ -2130,7 +2136,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 rangeConfidence: input.snapshot.rangeConfidence ?? 0,
                 trendWeaknessScore: input.snapshot.trendWeaknessScore ?? 0,
                 boxPos: input.snapshot.boxPos ?? null
-            }
+            },
+            atr: input.snapshot.atr,
+            currentStopPrice: lifecyclePosition?.ledger_stop_px ?? undefined
         });
 
         // Cooldown authority is computed as an independent proof/comparison layer.
@@ -2664,7 +2672,8 @@ export function adaptV2Input(
             entryCandidate: snapshot.entryCandidate ?? false,
             signalGateBlockedReason: snapshot.signalGateBlockedReason ?? null,
             rangeSignalDowngraded: snapshot.rangeSignalDowngraded ?? false,
-            rangeSignalKeptByRelax: snapshot.rangeSignalKeptByRelax ?? false
+            rangeSignalKeptByRelax: snapshot.rangeSignalKeptByRelax ?? false,
+            atr: snapshot.atr ?? snapshot.volatilityProxyDiag ?? 0
         },
         config: {
             paperMaxOpenPositions: config.paperMaxOpenPositions,
@@ -2678,7 +2687,8 @@ export function adaptV2Input(
                 entryPrice: p.entryPrice,
                 sizeUsd: p.sizeUsd,
                 entryStage: p.entryStage ?? 0,
-                pnlPct: p.pnlPct ?? 0
+                pnlPct: p.pnlPct ?? 0,
+                ledger_stop_px: p.ledger_stop_px
             })),
             globalRiskScore: state.globalRiskScore,
             lossStreaks: state.lossStreaks,

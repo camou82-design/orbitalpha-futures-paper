@@ -30,6 +30,7 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
     const exitReduceRatio = args.exitReduceRatio ?? 0;
     const exitUrgency = args.exitUrgency ?? "LOW";
     const exitConfidence = args.exitConfidence ?? 0;
+    const newStopPrice = args.newStopPrice;
 
     if (mode === "engine_v2") {
         const signedReadyBlocked = v2Decision.decision === "ENTER" && signedExecutionReady !== true;
@@ -87,7 +88,8 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             authorityVersion: "v2_execution_authority_envelope_v1",
             originalDecision,
             originalSide,
-            originalStageMarginKrw
+            originalStageMarginKrw,
+            newStopPrice
         };
     }
     if (mode === "legacy") {
@@ -128,7 +130,8 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             authorityVersion: "v2_execution_authority_envelope_v1",
             originalDecision,
             originalSide,
-            originalStageMarginKrw
+            originalStageMarginKrw,
+            newStopPrice
         };
     }
     return {
@@ -168,6 +171,7 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         authorityVersion: "v2_execution_authority_envelope_v1",
         originalDecision,
         originalSide,
-        originalStageMarginKrw
+        originalStageMarginKrw,
+        newStopPrice
     };
 }
