@@ -1467,7 +1467,8 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
       ema20Slope: sn.ema20Slope ?? 0,
       ema60Slope: sn.ema60Slope ?? 0,
       atrExpansion: sn.atrExpansion ?? 0,
-      volumeExpansion: sn.volumeExpansion ?? 0
+      volumeExpansion: sn.volumeExpansion ?? 0,
+      candles: sn.candles ?? []
     },
     legacy: {
       regime: input.regime,

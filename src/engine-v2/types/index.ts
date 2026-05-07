@@ -131,6 +131,7 @@ export interface LegacySnapshotAdapter {
     ema60Slope?: number;
     atrExpansion?: number;
     volumeExpansion?: number;
+    candles?: import("../../models/types").Candle[];
 }
 
 export interface LegacyConfigAdapter {
@@ -231,6 +232,7 @@ export interface EngineV2Input {
         side: string;
         isBlocked: boolean;
     };
+    recentCandles?: import("../../models/types").Candle[];
 }
 
 export interface EngineV2SnapshotAdapter {
@@ -339,6 +341,7 @@ export interface V2BridgeSnapshot {
     signalGateBlockedReason?: string | null;
     rangeSignalDowngraded?: boolean;
     rangeSignalKeptByRelax?: boolean;
+    candles?: import("../../models/types").Candle[];
 }
 
 export interface V2BridgeLegacyDecision {

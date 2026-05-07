@@ -266,7 +266,8 @@ export function resolveSymbolDecisionEnvelope(
         ema20Slope: snapshot.ema20Slope,
         ema60Slope: snapshot.ema60Slope,
         atrExpansion: snapshot.atrExpansion,
-        volumeExpansion: snapshot.volumeExpansion
+        volumeExpansion: snapshot.volumeExpansion,
+        candles: snapshot.candles
     };
 
     // 2. Config Mapping
@@ -305,7 +306,8 @@ export function resolveSymbolDecisionEnvelope(
         snapshotAdapter,
         configAdapter,
         state,
-        buildV2LegacyAdapter(legacyDecision)
+        buildV2LegacyAdapter(legacyDecision),
+        snapshotAdapter.candles
     );
 
     const v2ResRaw = runEngineV2(v2Input);

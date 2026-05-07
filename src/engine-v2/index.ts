@@ -2756,11 +2756,13 @@ export function adaptV2Input(
         pumpState?: string | null;
         pump_state?: string | null;
     },
-    v1Result: LegacyResultAdapter
+    v1Result: LegacyResultAdapter,
+    recentCandles?: import("../models/types").Candle[]
 ): EngineV2Input {
     return {
         symbol,
         now,
+        recentCandles,
         snapshot: {
             lastPrice: snapshot.lastPrice,
             latestCandleClose: snapshot.latestCandleClose,

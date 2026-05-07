@@ -1,4 +1,5 @@
 import { EngineV2Input, EngineV2MarketSubtype, MarketJudgmentOutput } from "../types";
+import { Candle } from "../../models/types";
 
 function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPhase"] {
     const shock = input.state.directionalShockState ?? "NONE";
@@ -11,7 +12,40 @@ function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPh
     return "NONE";
 }
 
-function classifyRangePhase(sn: EngineV2Input["snapshot"], symbol: string): MarketJudgmentOutput["rangePhase"] {
+function computeSlopesFromCandles(candles: Candle[]) {
+    if (!candles || candles.length < 40) return null;
+
+    // Use two windows: recent 20 vs previous 20 (total 40)
+    // Or scale up to 60 vs 60 if available.
+    const fullSize = Math.min(120, candles.length);
+    const halfSize = Math.floor(fullSize / 2);
+    
+    const recent = candles.slice(-halfSize);
+    const older = candles.slice(-2 * halfSize, -halfSize);
+
+    if (recent.length < 20 || older.length < 20) return null;
+
+    const recentAvgHigh = recent.reduce((sum, c) => sum + c.high, 0) / recent.length;
+    const recentAvgLow = recent.reduce((sum, c) => sum + c.low, 0) / recent.length;
+    const recentAvgClose = recent.reduce((sum, c) => sum + c.close, 0) / recent.length;
+    const recentAvgCenter = (recentAvgHigh + recentAvgLow) / 2;
+
+    const olderAvgHigh = older.reduce((sum, c) => sum + c.high, 0) / older.length;
+    const olderAvgLow = older.reduce((sum, c) => sum + c.low, 0) / older.length;
+    const olderAvgClose = older.reduce((sum, c) => sum + c.close, 0) / older.length;
+    const olderAvgCenter = (olderAvgHigh + olderAvgLow) / 2;
+
+    // Scale to "per candle" roughly to match engine expectations
+    const bhSlope = ((recentAvgHigh - olderAvgHigh) / olderAvgHigh) / halfSize;
+    const blSlope = ((recentAvgLow - olderAvgLow) / olderAvgLow) / halfSize;
+    const rcSlope = ((recentAvgCenter - olderAvgCenter) / olderAvgCenter) / halfSize;
+    const e20Slope = ((recentAvgClose - olderAvgClose) / olderAvgClose) / halfSize;
+
+    return { bhSlope, blSlope, rcSlope, e20Slope, windowSize: halfSize };
+}
+
+function classifyRangePhase(input: EngineV2Input, symbol: string): MarketJudgmentOutput["rangePhase"] {
+    const sn = input.snapshot;
     const boxPos = Number(sn.boxPos ?? 0.5);
     const boxBreakSide = sn.boxBreakSide ?? "none";
     const emaGap = Number(sn.emaGap ?? 0);
@@ -21,12 +55,25 @@ function classifyRangePhase(sn: EngineV2Input["snapshot"], symbol: string): Mark
     const trendWeakness = Number(sn.trendWeaknessScore ?? 1);
 
     // Phase 6: Drift & Channel Detection (PRIORITY 1: STRUCTURE)
-    const bhSlope = typeof sn.boxHighSlope === "number" ? sn.boxHighSlope : 0;
-    const blSlope = typeof sn.boxLowSlope === "number" ? sn.boxLowSlope : 0;
-    const rcSlope = typeof sn.rangeCenterSlope === "number" ? sn.rangeCenterSlope : 0;
-    const e20Slope = typeof sn.ema20Slope === "number" ? sn.ema20Slope : 0;
+    let bhSlope = typeof sn.boxHighSlope === "number" ? sn.boxHighSlope : 0;
+    let blSlope = typeof sn.boxLowSlope === "number" ? sn.boxLowSlope : 0;
+    let rcSlope = typeof sn.rangeCenterSlope === "number" ? sn.rangeCenterSlope : 0;
+    let e20Slope = typeof sn.ema20Slope === "number" ? sn.ema20Slope : 0;
+    let source = "snapshot";
+
+    // Fallback if snapshot slopes are zero or null
+    if (bhSlope === 0 && blSlope === 0 && input.recentCandles && input.recentCandles.length >= 40) {
+        const computed = computeSlopesFromCandles(input.recentCandles);
+        if (computed) {
+            bhSlope = computed.bhSlope;
+            blSlope = computed.blSlope;
+            rcSlope = computed.rcSlope;
+            e20Slope = computed.e20Slope;
+            source = `computed_from_candles_${computed.windowSize}`;
+        }
+    }
+
     const atrExp = typeof sn.atrExpansion === "number" ? sn.atrExpansion : 0;
-    const volExp = typeof sn.volumeExpansion === "number" ? sn.volumeExpansion : 0;
 
     console.info(JSON.stringify({
         event: "V2_RANGE_SLOPE_SOURCE_PROOF",
@@ -35,14 +82,16 @@ function classifyRangePhase(sn: EngineV2Input["snapshot"], symbol: string): Mark
         blSlope,
         rcSlope,
         e20Slope,
-        source: (sn.boxHighSlope != null) ? "snapshot" : "fallback_neutral"
+        source,
+        ts: Date.now()
     }));
 
-    const driftDown = bhSlope < -0.0001 && blSlope < -0.0001 && e20Slope < -0.0001;
-    const driftUp = bhSlope > 0.0001 && blSlope > 0.0001 && e20Slope > 0.0001;
+    // Refined Classification Criteria
+    const driftDown = bhSlope < -0.00005 && blSlope < -0.00005 && e20Slope < -0.00005;
+    const driftUp = bhSlope > 0.00005 && blSlope > 0.00005 && e20Slope > 0.00005;
 
-    const channelDown = driftDown && rcSlope < -0.0002;
-    const channelUp = driftUp && rcSlope > 0.0002;
+    const channelDown = driftDown && rcSlope < -0.0001;
+    const channelUp = driftUp && rcSlope > 0.0001;
 
     // Reversal Detection (Structural Watch)
     if ((driftDown || channelDown) && (sn.lastPrice > (sn.boxHigh ?? 0) || (sn.swingHighSlope ?? 0) > 0.0005 || atrExp > 1.5)) {
@@ -68,7 +117,7 @@ function classifyRangePhase(sn: EngineV2Input["snapshot"], symbol: string): Mark
     if (boxBreakSide === "upper" && emaGap > 0) return "BREAKOUT";
 
     // Flat check
-    if (Math.abs(bhSlope) < 0.00005 && Math.abs(blSlope) < 0.00005) return "FLAT";
+    if (Math.abs(bhSlope) < 0.00003 && Math.abs(blSlope) < 0.00003) return "FLAT";
 
     // PRIORITY 2: ZONE (ONLY IF NO DOMINANT STRUCTURE)
     if (boxPos <= 0.26) return "LOWER";
@@ -190,7 +239,7 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     const data_ready = sn.data_ready;
     const dump_protection_hit = sn.dump_protection_hit;
     const shockPhase = classifyShockPhase(input);
-    const rangePhase = classifyRangePhase(sn, input.symbol);
+    const rangePhase = classifyRangePhase(input, input.symbol);
     const trendPhase = classifyTrendPhase(sn);
     
     console.info(JSON.stringify({
