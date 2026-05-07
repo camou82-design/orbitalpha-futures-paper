@@ -74,13 +74,14 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
 
     if (input.position != null) {
         if (input.regime === "RANGE") {
-            // --- DRIFT_REVERSAL_GUARD (V2 Structure-Aware) ---
+            // --- DRIFT_REVERSAL_GUARD (V2 Structure-Aware & Symmetrical) ---
+            const isReversalUpWatch = input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_UP_WATCH";
+            const isReversalDownWatch = input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_DOWN_WATCH";
             const isDriftDownRegime = input.rawMetricsSummary.subtype === "RANGE_DRIFT_DOWN" || input.rawMetricsSummary.subtype === "DESCENDING_CHANNEL";
             const isDriftUpRegime = input.rawMetricsSummary.subtype === "RANGE_DRIFT_UP" || input.rawMetricsSummary.subtype === "ASCENDING_CHANNEL";
-            const isReversalWatch = input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_UP_WATCH" || input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_DOWN_WATCH";
             
-            let driftReversalDetected = false;
-            let driftReversalReason = "";
+            let structuralReversalDetected = false;
+            let structuralReversalReason = "";
 
             const swingHSlope = input.rawMetricsSummary.swingHighSlope ?? 0;
             const swingLSlope = input.rawMetricsSummary.swingLowSlope ?? 0;
@@ -88,38 +89,51 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
 
             if (isDriftDownRegime && input.side === "short") {
                 if (swingHSlope > 0.0005 || atrExp > 2.0) {
-                    driftReversalDetected = true;
-                    driftReversalReason = `SHARP_UPWARD_REVERSAL_IN_DRIFT_DOWN (swingHSlope: ${swingHSlope.toFixed(5)}, atrExp: ${atrExp.toFixed(2)})`;
+                    structuralReversalDetected = true;
+                    structuralReversalReason = `SHARP_UPWARD_REVERSAL_IN_DRIFT_DOWN (swingHSlope: ${swingHSlope.toFixed(5)}, atrExp: ${atrExp.toFixed(2)})`;
                 }
             } else if (isDriftUpRegime && input.side === "long") {
                 if (swingLSlope < -0.0005 || atrExp > 2.0) {
-                    driftReversalDetected = true;
-                    driftReversalReason = `SHARP_DOWNWARD_REVERSAL_IN_DRIFT_UP (swingLSlope: ${swingLSlope.toFixed(5)}, atrExp: ${atrExp.toFixed(2)})`;
+                    structuralReversalDetected = true;
+                    structuralReversalReason = `SHARP_DOWNWARD_REVERSAL_IN_DRIFT_UP (swingLSlope: ${swingLSlope.toFixed(5)}, atrExp: ${atrExp.toFixed(2)})`;
                 }
             }
 
-            if (isReversalWatch || driftReversalDetected) {
+            if (isReversalUpWatch || isReversalDownWatch || structuralReversalDetected) {
+                const reversalDirection = (isReversalUpWatch || (structuralReversalDetected && isDriftDownRegime)) ? "up" : "down";
+                const protectedSide = reversalDirection === "up" ? "short" : "long";
+                const blockedNewSide = reversalDirection === "up" ? "long" : "short";
+                const symmetryCase = reversalDirection === "up" ? "REVERSAL_UP_SYMMETRY" : "REVERSAL_DOWN_SYMMETRY";
+
                 addOnAllowed = false;
-                const reversalThreatened = (input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_UP_WATCH" && input.side === "short") ||
-                                           (input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_DOWN_WATCH" && input.side === "long") ||
-                                           driftReversalDetected;
+                const isPositionThreatened = input.side === protectedSide;
                 
-                if (reversalThreatened) {
+                if (isPositionThreatened) {
                     exitAction = "exit"; 
                     proofReasons.push("DRIFT_REVERSAL_POSITION_PROTECT_EXIT");
                     
+                    // Tighten stop as a fail-safe even if exit is pending
+                    const tightStopAtr = 0.5;
+                    const sideMultiplier = input.side === "long" ? -1 : 1;
+                    const tightStop = (input.markPrice ?? input.position.entryPrice) + (sideMultiplier * tightStopAtr * (input.atr ?? 0));
+                    newStopPrice = input.side === "long" 
+                        ? Math.max(input.currentStopPrice ?? 0, tightStop)
+                        : Math.min(input.currentStopPrice ?? Infinity, tightStop);
+
                     console.info(JSON.stringify({
                         event: "V2_DRIFT_REVERSAL_GUARD_PROOF",
                         symbol: input.symbol,
-                        side: input.side,
-                        subtype: input.rawMetricsSummary.subtype,
-                        swingHSlope,
-                        swingLSlope,
-                        atrExp,
-                        reason: driftReversalReason || "WATCH_THREATENED",
+                        reversalDirection,
+                        protectedSide,
+                        blockedNewSide,
+                        stopTightened: newStopPrice !== input.currentStopPrice,
+                        partialOrFullExitSuggested: "FULL",
+                        symmetryCase,
+                        reason: structuralReversalReason || "WATCH_THREATENED",
                         action: "PROTECT_EXIT"
                     }));
                 } else {
+                    // Position is aligned with reversal or neutral
                     exitAction = "watch";
                     proofReasons.push("DRIFT_REVERSAL_WATCH_ACTIVE");
                 }

@@ -1,4 +1,4 @@
-import { EngineV2Input, ExecutorOutput, MarketJudgmentOutput } from "../types";
+import { EngineV2Input, EngineV2Side, ExecutorOutput, MarketJudgmentOutput } from "../types";
 
 /**
  * Tier 4: Range Executor (Refined)
@@ -91,75 +91,91 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         reason = "Mid-zone neutrality enforced (no-reversal candidates)";
     }
 
-    // Phase 6: Drift & Channel Entry Filtering (Hardened)
-    const isDriftDown = judgment.subtype === "RANGE_DRIFT_DOWN" || judgment.subtype === "DESCENDING_CHANNEL";
-    const isDriftUp = judgment.subtype === "RANGE_DRIFT_UP" || judgment.subtype === "ASCENDING_CHANNEL";
+    // Phase 6: Drift & Channel Entry Filtering (Symmetrical & Hardened)
+    const isDownStructure = judgment.subtype === "RANGE_DRIFT_DOWN" || judgment.subtype === "DESCENDING_CHANNEL";
+    const isUpStructure = judgment.subtype === "RANGE_DRIFT_UP" || judgment.subtype === "ASCENDING_CHANNEL";
 
-    if (judgment.subtype === "DESCENDING_CHANNEL") {
-        console.info(JSON.stringify({
-            event: "V2_DESCENDING_CHANNEL_PROOF",
-            symbol: input.symbol,
-            boxPos: currentBoxPos,
-            side,
-            action: "RESTRICT_TO_UPPER_SHORT"
-        }));
-    } else if (judgment.subtype === "ASCENDING_CHANNEL") {
-        console.info(JSON.stringify({
-            event: "V2_ASCENDING_CHANNEL_PROOF",
-            symbol: input.symbol,
-            boxPos: currentBoxPos,
-            side,
-            action: "RESTRICT_TO_LOWER_LONG"
-        }));
-    }
+    if (isDownStructure || isUpStructure) {
+        const direction = isDownStructure ? "down" : "up";
+        const primarySide: EngineV2Side = isDownStructure ? "short" : "long";
+        const blockedSide: EngineV2Side = isDownStructure ? "long" : "short";
+        const badChaseZone = isDownStructure ? "lower" : "upper";
+        const validEntryZone = isDownStructure ? "upper" : "lower";
+        const symmetryCase = isDownStructure ? "DRIFT_DOWN_SYMMETRY" : "DRIFT_UP_SYMMETRY";
 
-    if (isDriftDown) {
-        // Bias: SHORT. Block Longs. Block Mid entries.
         console.info(JSON.stringify({
             event: "V2_RANGE_DRIFT_SIDE_BIAS_PROOF",
             symbol: input.symbol,
-            subtype: judgment.subtype,
-            bias: "SHORT",
-            intendedSide: side
+            direction,
+            primarySide,
+            blockedSide,
+            zone: isUpper ? "upper" : (isLower ? "lower" : "mid"),
+            biasReason: `Dominant ${direction} structure (${judgment.subtype})`,
+            symmetryCase
         }));
 
-        if (side === "long") {
+        if (side === blockedSide) {
             signal = "NONE";
-            reason = `SUPPRESSED: Long blocked in ${judgment.subtype} (downward drift bias)`;
-        } else if (isMid || isLower) {
-            // In DRIFT_DOWN, only UPPER edge shorts are safe. LOWER shorts are "late chase".
-            signal = "NONE";
-            reason = `SUPPRESSED: ${isMid ? "Mid" : "Lower"} entry blocked in ${judgment.subtype} (only upper-edge shorts allowed)`;
+            reason = `SUPPRESSED: ${side} blocked in ${judgment.subtype} (${direction} bias)`;
+        } else if (side === primarySide) {
+            if (isMid) {
+                signal = "NONE";
+                reason = `SUPPRESSED: Mid entry blocked in ${judgment.subtype} (central neutrality enforced)`;
+            } else if ((isDownStructure && isLower) || (isUpStructure && isUpper)) {
+                // Bad Chase Zone
+                signal = "NONE";
+                reason = `SUPPRESSED: ${badChaseZone} chase blocked in ${judgment.subtype} (only ${validEntryZone} entries allowed)`;
+            }
         }
-    } else if (isDriftUp) {
-        // Bias: LONG. Block Shorts. Block Mid entries.
+
         console.info(JSON.stringify({
-            event: "V2_RANGE_DRIFT_SIDE_BIAS_PROOF",
+            event: "V2_RANGE_DRIFT_ENTRY_FILTER_PROOF",
             symbol: input.symbol,
-            subtype: judgment.subtype,
-            bias: "LONG",
-            intendedSide: side
+            direction,
+            intendedSide: side,
+            allowed: signal !== "NONE",
+            blockReason: signal === "NONE" ? reason : null,
+            validEntryZone,
+            badChaseZone,
+            symmetryCase
         }));
-
-        if (side === "short") {
-            signal = "NONE";
-            reason = `SUPPRESSED: Short blocked in ${judgment.subtype} (upward drift bias)`;
-        } else if (isMid || isUpper) {
-            // In DRIFT_UP, only LOWER edge longs are safe. UPPER longs are "late chase".
-            signal = "NONE";
-            reason = `SUPPRESSED: ${isMid ? "Mid" : "Upper"} entry blocked in ${judgment.subtype} (only lower-edge longs allowed)`;
-        }
     }
 
-    if (isDriftDown || isDriftUp) {
+    // Phase 7: Volume Shock Entry Filtering (Symmetrical)
+    if (judgment.shockPhase === "DOWN_SHOCK" || judgment.shockPhase === "UP_SHOCK") {
+        const shockDirection = judgment.shockPhase === "DOWN_SHOCK" ? "down" : "up";
+        const primarySide: EngineV2Side = judgment.shockPhase === "DOWN_SHOCK" ? "short" : "long";
+        const blockedSide: EngineV2Side = judgment.shockPhase === "DOWN_SHOCK" ? "long" : "short";
+        const symmetryCase = judgment.shockPhase === "DOWN_SHOCK" ? "SHOCK_DOWN_SYMMETRY" : "SHOCK_UP_SYMMETRY";
+
         console.info(JSON.stringify({
-            event: "V2_RANGE_DRIFT_STATE_PROOF",
+            event: "V2_RANGE_SHOCK_BIAS_PROOF",
             symbol: input.symbol,
-            subtype: judgment.subtype,
-            side,
-            is_mid: isMid,
-            signal_final: signal,
-            reason
+            shockDirection,
+            primarySide,
+            blockedSide,
+            symmetryCase
+        }));
+
+        if (side === blockedSide) {
+            signal = "NONE";
+            reason = `SUPPRESSED: ${side} blocked in ${judgment.shockPhase} (directional shock bias)`;
+        } else if (side === primarySide) {
+             // Block chase in shock as well
+             if ((judgment.shockPhase === "DOWN_SHOCK" && isLower) || (judgment.shockPhase === "UP_SHOCK" && isUpper)) {
+                signal = "NONE";
+                reason = `SUPPRESSED: ${side} chase blocked during ${judgment.shockPhase}`;
+             }
+        }
+
+        console.info(JSON.stringify({
+            event: "V2_RANGE_SHOCK_ENTRY_FILTER_PROOF",
+            symbol: input.symbol,
+            shockDirection,
+            intendedSide: side,
+            allowed: signal !== "NONE",
+            blockReason: signal === "NONE" ? reason : null,
+            symmetryCase
         }));
     }
 
@@ -171,23 +187,12 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             symbol: input.symbol,
             boxBreakSide: sn.boxBreakSide,
             breakoutFailureRate,
-            action: "BLOCK_ENTRY"
+            action: "BLOCK_ENTRY",
+            symmetryCase: sn.boxBreakSide === "upper" ? "FAKE_BREAKOUT_UP" : "FAKE_BREAKOUT_DOWN"
         }));
     }
 
-    if (isDriftDown || isDriftUp) {
-        console.info(JSON.stringify({
-            event: "V2_RANGE_DRIFT_ENTRY_FILTER_PROOF",
-            symbol: input.symbol,
-            subtype: judgment.subtype,
-            intendedSide: side,
-            isMid,
-            finalSignal: signal,
-            action: signal === "NONE" ? "FILTERED" : "ALLOWED"
-        }));
-    }
-
-    // Phase 5: Range Compression & Squeeze Suppression (moved after drift filtering)
+    // Phase 5: Range Compression & Squeeze Suppression
     if (judgment.subtype === "RANGE_COMPRESSION" || judgment.subtype === "TRIANGLE_SQUEEZE_CANDIDATE") {
         signal = "NONE";
         reason = `SUPPRESSED: Market in ${judgment.subtype} (low quality consolidation)`;
@@ -209,8 +214,6 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     }
 
     // 2. Late Chase Guard Proof (Phase 4.5)
-    // Block LONG if already at the top (breakout chase in range)
-    // Block SHORT if already at the bottom (breakdown chase in range)
     if (side === "long" && currentBoxPos > 0.88) {
         lateChaseBlocked = true;
         signal = "NONE";
@@ -228,7 +231,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             side,
             boxPos: currentBoxPos,
             threshold: side === "long" ? 0.88 : 0.12,
-            action: "BLOCK"
+            action: "BLOCK",
+            symmetryCase: side === "long" ? "UPPER_LONG_CHASE" : "LOWER_SHORT_CHASE"
         }));
     }
 
