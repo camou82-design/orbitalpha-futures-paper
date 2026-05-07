@@ -273,7 +273,8 @@ export function resolveSymbolDecisionEnvelope(
     const configAdapter: LegacyConfigAdapter = {
         baseSizeUsd: config.baseSizeUsd,
         paperMaxOpenPositions: config.maxOpenPositions,
-        paperReentryCooldownMs: config.reentryCooldownMs
+        paperReentryCooldownMs: config.reentryCooldownMs,
+        okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt
     };
 
     // 3. Legacy Decision Mapping

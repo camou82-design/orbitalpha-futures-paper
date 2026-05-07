@@ -1,6 +1,8 @@
 import type { EngineV2Input, EngineV2Position, EngineV2Side } from "../types";
 import type { V2StateAuthority } from "./types";
 
+const DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT = 100;
+
 function inferIntentSide(input: EngineV2Input): EngineV2Side {
     const shock = input.state.directionalShockState ?? "NONE";
     const s = input.snapshot?.signal ?? "none";
@@ -152,8 +154,13 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
         okxApiSecretPresent: input.state.okxApiSecretPresent === true,
         okxPassphrasePresent: input.state.okxPassphrasePresent === true,
         okxSimulatedTradingHeaderEnabled: input.state.okxSimulatedTradingHeaderEnabled === true,
-        liveMaxOrderNotionalUsdt:
-            Number.isFinite(input.state.liveMaxOrderNotionalUsdt) ? Number(input.state.liveMaxOrderNotionalUsdt) : 0,
+        liveMaxOrderNotionalUsdt: ((): number => {
+            const raw = input.state.liveMaxOrderNotionalUsdt;
+            if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
+            const configFallback = input.config.okxLiveMaxOrderNotionalUsdt;
+            if (typeof configFallback === "number" && Number.isFinite(configFallback) && configFallback > 0) return configFallback;
+            return DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT;
+        })(),
         directionalShockState: input.state.directionalShockState ?? "NONE",
         crashState,
         pumpState,

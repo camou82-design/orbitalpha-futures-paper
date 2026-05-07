@@ -14065,7 +14065,8 @@ function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
   return {
     baseSizeUsd: computePaperSizingAnchorUsd(config),
     maxOpenPositions: config.paperMaxOpenPositions,
-    reentryCooldownMs: config.paperReentryCooldownMs
+    reentryCooldownMs: config.paperReentryCooldownMs,
+    okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt
   };
 }
 

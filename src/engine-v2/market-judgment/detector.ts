@@ -11,7 +11,7 @@ function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPh
     return "NONE";
 }
 
-function classifyRangePhase(sn: EngineV2Input["snapshot"]): MarketJudgmentOutput["rangePhase"] {
+function classifyRangePhase(sn: EngineV2Input["snapshot"], symbol: string): MarketJudgmentOutput["rangePhase"] {
     const boxPos = Number(sn.boxPos ?? 0.5);
     const boxBreakSide = sn.boxBreakSide ?? "none";
     const emaGap = Number(sn.emaGap ?? 0);
@@ -20,26 +20,23 @@ function classifyRangePhase(sn: EngineV2Input["snapshot"]): MarketJudgmentOutput
     const boxCohesion = Number(sn.boxCohesion01 ?? 0);
     const trendWeakness = Number(sn.trendWeaknessScore ?? 1);
 
-    // Phase 5: Advanced Compression & Squeeze Detection
-    if (rangeOscillationScore >= 0.75 && breakoutFailureRate >= 0.6) return "COMPRESSION";
-    if (boxCohesion >= 0.85 && trendWeakness >= 0.7 && rangeOscillationScore >= 0.5) return "TRIANGLE_SQUEEZE";
-    
-    // Breakout Observation (Pre-Confirmation)
-    if (boxBreakSide !== "none" && breakoutFailureRate < 0.4 && (sn.reviewing_ticks ?? 0) < 12) return "BREAKOUT_OBSERVATION";
+    // Phase 6: Drift & Channel Detection (PRIORITY 1: STRUCTURE)
+    const bhSlope = typeof sn.boxHighSlope === "number" ? sn.boxHighSlope : 0;
+    const blSlope = typeof sn.boxLowSlope === "number" ? sn.boxLowSlope : 0;
+    const rcSlope = typeof sn.rangeCenterSlope === "number" ? sn.rangeCenterSlope : 0;
+    const e20Slope = typeof sn.ema20Slope === "number" ? sn.ema20Slope : 0;
+    const atrExp = typeof sn.atrExpansion === "number" ? sn.atrExpansion : 0;
+    const volExp = typeof sn.volumeExpansion === "number" ? sn.volumeExpansion : 0;
 
-    if (breakoutFailureRate >= 0.6) return "FAKE_BREAKOUT";
-    if (boxBreakSide === "lower" && emaGap < 0) return "BREAKDOWN";
-    if (boxBreakSide === "upper" && emaGap > 0) return "BREAKOUT";
-    if (boxPos <= 0.26) return "LOWER";
-    if (boxPos >= 0.74) return "UPPER";
-
-    // Phase 6: Drift & Channel Detection
-    const bhSlope = Number(sn.boxHighSlope ?? 0);
-    const blSlope = Number(sn.boxLowSlope ?? 0);
-    const rcSlope = Number(sn.rangeCenterSlope ?? 0);
-    const e20Slope = Number(sn.ema20Slope ?? 0);
-    const atrExp = Number(sn.atrExpansion ?? 0);
-    const volExp = Number(sn.volumeExpansion ?? 0);
+    console.info(JSON.stringify({
+        event: "V2_RANGE_SLOPE_SOURCE_PROOF",
+        symbol,
+        bhSlope,
+        blSlope,
+        rcSlope,
+        e20Slope,
+        source: (sn.boxHighSlope != null) ? "snapshot" : "fallback_neutral"
+    }));
 
     const driftDown = bhSlope < -0.0001 && blSlope < -0.0001 && e20Slope < -0.0001;
     const driftUp = bhSlope > 0.0001 && blSlope > 0.0001 && e20Slope > 0.0001;
@@ -47,11 +44,11 @@ function classifyRangePhase(sn: EngineV2Input["snapshot"]): MarketJudgmentOutput
     const channelDown = driftDown && rcSlope < -0.0002;
     const channelUp = driftUp && rcSlope > 0.0002;
 
-    // Reversal Detection
-    if ((driftDown || channelDown) && (sn.lastPrice > (sn.boxHigh ?? 0) || atrExp > 1.5)) {
+    // Reversal Detection (Structural Watch)
+    if ((driftDown || channelDown) && (sn.lastPrice > (sn.boxHigh ?? 0) || (sn.swingHighSlope ?? 0) > 0.0005 || atrExp > 1.5)) {
         return "REVERSAL_UP_WATCH";
     }
-    if ((driftUp || channelUp) && (sn.lastPrice < (sn.boxLow ?? 0) || atrExp > 1.5)) {
+    if ((driftUp || channelUp) && (sn.lastPrice < (sn.boxLow ?? 0) || (sn.swingLowSlope ?? 0) < -0.0005 || atrExp > 1.5)) {
         return "REVERSAL_DOWN_WATCH";
     }
 
@@ -60,7 +57,22 @@ function classifyRangePhase(sn: EngineV2Input["snapshot"]): MarketJudgmentOutput
     if (driftDown) return "DRIFT_DOWN";
     if (driftUp) return "DRIFT_UP";
     
+    // Compression & Squeeze
+    if (rangeOscillationScore >= 0.75 && breakoutFailureRate >= 0.6) return "COMPRESSION";
+    if (boxCohesion >= 0.85 && trendWeakness >= 0.7 && rangeOscillationScore >= 0.5) return "TRIANGLE_SQUEEZE";
+    
+    // Breakout States
+    if (boxBreakSide !== "none" && breakoutFailureRate < 0.4 && (sn.reviewing_ticks ?? 0) < 12) return "BREAKOUT_OBSERVATION";
+    if (breakoutFailureRate >= 0.6) return "FAKE_BREAKOUT";
+    if (boxBreakSide === "lower" && emaGap < 0) return "BREAKDOWN";
+    if (boxBreakSide === "upper" && emaGap > 0) return "BREAKOUT";
+
+    // Flat check
     if (Math.abs(bhSlope) < 0.00005 && Math.abs(blSlope) < 0.00005) return "FLAT";
+
+    // PRIORITY 2: ZONE (ONLY IF NO DOMINANT STRUCTURE)
+    if (boxPos <= 0.26) return "LOWER";
+    if (boxPos >= 0.74) return "UPPER";
 
     return "MID";
 }
@@ -178,8 +190,18 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     const data_ready = sn.data_ready;
     const dump_protection_hit = sn.dump_protection_hit;
     const shockPhase = classifyShockPhase(input);
-    const rangePhase = classifyRangePhase(sn);
+    const rangePhase = classifyRangePhase(sn, input.symbol);
     const trendPhase = classifyTrendPhase(sn);
+    
+    console.info(JSON.stringify({
+        event: "V2_RANGE_STRUCTURE_CLASSIFICATION_PROOF",
+        symbol: input.symbol,
+        rangePhase,
+        boxPos: sn.boxPos,
+        boxHighSlope: sn.boxHighSlope,
+        boxLowSlope: sn.boxLowSlope,
+        ema20Slope: sn.ema20Slope
+    }));
     const transitionPhase = classifyTransitionPhase(
         rangeScore,
         trendScore,

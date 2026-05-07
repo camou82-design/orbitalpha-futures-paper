@@ -74,37 +74,55 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
 
     if (input.position != null) {
         if (input.regime === "RANGE") {
-            // DRIFT_REVERSAL_GUARD
+            // --- DRIFT_REVERSAL_GUARD (V2 Structure-Aware) ---
+            const isDriftDownRegime = input.rawMetricsSummary.subtype === "RANGE_DRIFT_DOWN" || input.rawMetricsSummary.subtype === "DESCENDING_CHANNEL";
+            const isDriftUpRegime = input.rawMetricsSummary.subtype === "RANGE_DRIFT_UP" || input.rawMetricsSummary.subtype === "ASCENDING_CHANNEL";
             const isReversalWatch = input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_UP_WATCH" || input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_DOWN_WATCH";
-            if (isReversalWatch) {
+            
+            let driftReversalDetected = false;
+            let driftReversalReason = "";
+
+            const swingHSlope = input.rawMetricsSummary.swingHighSlope ?? 0;
+            const swingLSlope = input.rawMetricsSummary.swingLowSlope ?? 0;
+            const atrExp = input.rawMetricsSummary.atrExpansion ?? 0;
+
+            if (isDriftDownRegime && input.side === "short") {
+                if (swingHSlope > 0.0005 || atrExp > 2.0) {
+                    driftReversalDetected = true;
+                    driftReversalReason = `SHARP_UPWARD_REVERSAL_IN_DRIFT_DOWN (swingHSlope: ${swingHSlope.toFixed(5)}, atrExp: ${atrExp.toFixed(2)})`;
+                }
+            } else if (isDriftUpRegime && input.side === "long") {
+                if (swingLSlope < -0.0005 || atrExp > 2.0) {
+                    driftReversalDetected = true;
+                    driftReversalReason = `SHARP_DOWNWARD_REVERSAL_IN_DRIFT_UP (swingLSlope: ${swingLSlope.toFixed(5)}, atrExp: ${atrExp.toFixed(2)})`;
+                }
+            }
+
+            if (isReversalWatch || driftReversalDetected) {
                 addOnAllowed = false;
                 const reversalThreatened = (input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_UP_WATCH" && input.side === "short") ||
-                                           (input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_DOWN_WATCH" && input.side === "long");
+                                           (input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_DOWN_WATCH" && input.side === "long") ||
+                                           driftReversalDetected;
                 
                 if (reversalThreatened) {
-                    exitAction = "exit"; // Prioritize full exit on sharp reversal
+                    exitAction = "exit"; 
                     proofReasons.push("DRIFT_REVERSAL_POSITION_PROTECT_EXIT");
                     
                     console.info(JSON.stringify({
-                        event: "V2_DRIFT_REVERSAL_POSITION_PROTECT_PROOF",
+                        event: "V2_DRIFT_REVERSAL_GUARD_PROOF",
                         symbol: input.symbol,
                         side: input.side,
                         subtype: input.rawMetricsSummary.subtype,
-                        action: "FULL_EXIT",
-                        reason: "reversal_guard_threatened"
+                        swingHSlope,
+                        swingLSlope,
+                        atrExp,
+                        reason: driftReversalReason || "WATCH_THREATENED",
+                        action: "PROTECT_EXIT"
                     }));
                 } else {
                     exitAction = "watch";
                     proofReasons.push("DRIFT_REVERSAL_WATCH_ACTIVE");
                 }
-
-                console.info(JSON.stringify({
-                    event: "V2_DRIFT_REVERSAL_GUARD_PROOF",
-                    symbol: input.symbol,
-                    subtype: input.rawMetricsSummary.subtype,
-                    side: input.side,
-                    action: "BLOCK_ADDON_WATCH_EXIT"
-                }));
             } else {
                 addOnAllowed = rangeEdge && !rangeMid;
                 partialAction = (input.unrealizedPnlPct ?? 0) >= 0.003 && rangeEdge ? "protect_profit" : "prepare";

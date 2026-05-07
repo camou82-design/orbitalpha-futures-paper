@@ -169,6 +169,20 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         symbolExposureNotionalCapKrw: v2State.symbolExposureNotionalCapKrw
     }));
 
+    if (shouldEmitV2Proof("V2_LIVE_MAX_ORDER_NOTIONAL_RESOLVE_PROOF", String(input.symbol), `${v2State.liveMaxOrderNotionalUsdt}`, false)) {
+        console.info(JSON.stringify({
+            event: "V2_LIVE_MAX_ORDER_NOTIONAL_RESOLVE_PROOF",
+            symbol: String(input.symbol),
+            input_state_val: input.state.liveMaxOrderNotionalUsdt,
+            input_config_val: input.config.okxLiveMaxOrderNotionalUsdt,
+            resolved_val: v2State.liveMaxOrderNotionalUsdt,
+            is_fallback_applied: v2State.liveMaxOrderNotionalUsdt !== input.state.liveMaxOrderNotionalUsdt,
+            fallback_source: v2State.liveMaxOrderNotionalUsdt === input.config.okxLiveMaxOrderNotionalUsdt ? "config" : 
+                             v2State.liveMaxOrderNotionalUsdt === 100 ? "default_100" : "none",
+            ts: Date.now()
+        }));
+    }
+
     if (v2State.directionalShockState === "DOWN" && v2State.inferredIntentSide === "long") {
         console.warn(JSON.stringify({
             event: "V2_INTENT_SIDE_ALIGNMENT_PROOF",
@@ -2205,7 +2219,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 rangeConfidence: input.snapshot.rangeConfidence ?? 0,
                 trendWeaknessScore: input.snapshot.trendWeaknessScore ?? 0,
                 boxPos: input.snapshot.boxPos ?? null,
-                subtype: judgment.subtype
+                subtype: judgment.subtype,
+                boxHigh: input.snapshot.boxHigh ?? undefined,
+                boxLow: input.snapshot.boxLow ?? undefined,
+                boxHighSlope: input.snapshot.boxHighSlope,
+                boxLowSlope: input.snapshot.boxLowSlope,
+                swingHighSlope: input.snapshot.swingHighSlope,
+                swingLowSlope: input.snapshot.swingLowSlope,
+                ema20: input.snapshot.ema20 ?? undefined,
+                ema20Slope: input.snapshot.ema20Slope,
+                atrExpansion: input.snapshot.atrExpansion,
+                volumeExpansion: input.snapshot.volumeExpansion,
+                breakoutFailureRate: input.snapshot.breakoutFailureRate
             },
             atr: input.snapshot.atr,
             currentStopPrice: lifecyclePosition_latest?.ledger_stop_px ?? undefined,
@@ -2776,7 +2801,8 @@ export function adaptV2Input(
         config: {
             paperMaxOpenPositions: config.paperMaxOpenPositions,
             paperReentryCooldownMs: config.paperReentryCooldownMs,
-            baseSizeUsd: config.baseSizeUsd
+            baseSizeUsd: config.baseSizeUsd,
+            okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt
         },
         state: {
             currentPositions: state.currentPositions.map((p: LegacyPositionAdapter) => ({

@@ -137,6 +137,7 @@ export interface LegacyConfigAdapter {
     paperMaxOpenPositions: number;
     paperReentryCooldownMs: number;
     baseSizeUsd: number;
+    okxLiveMaxOrderNotionalUsdt: number;
 }
 
 export interface LegacyPositionAdapter {
@@ -274,6 +275,7 @@ export interface EngineV2ConfigAdapter {
     paperMaxOpenPositions: number;
     paperReentryCooldownMs: number;
     baseSizeUsd: number;
+    okxLiveMaxOrderNotionalUsdt: number;
 }
 
 /** Final V2 Decision Object - Completely Independent Output */
@@ -355,6 +357,7 @@ export interface V2BridgeConfig {
     baseSizeUsd: number;
     maxOpenPositions: number;
     reentryCooldownMs: number;
+    okxLiveMaxOrderNotionalUsdt: number;
 }
 
 export interface V2BridgePosition {
@@ -747,6 +750,17 @@ export interface V2TradeLifecycleAuthorityInput {
         trendWeaknessScore: number;
         boxPos: number | null;
         subtype?: EngineV2MarketSubtype;
+        boxHigh?: number;
+        boxLow?: number;
+        boxHighSlope?: number;
+        boxLowSlope?: number;
+        swingHighSlope?: number;
+        swingLowSlope?: number;
+        ema20?: number;
+        ema20Slope?: number;
+        atrExpansion?: number;
+        volumeExpansion?: number;
+        breakoutFailureRate?: number;
     };
     atr?: number;
     currentStopPrice?: number;

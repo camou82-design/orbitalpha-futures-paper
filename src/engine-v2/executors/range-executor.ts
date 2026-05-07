@@ -91,28 +91,88 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         reason = "Mid-zone neutrality enforced (no-reversal candidates)";
     }
 
-    // Phase 6: Drift & Channel Entry Filtering
+    // Phase 6: Drift & Channel Entry Filtering (Hardened)
     const isDriftDown = judgment.subtype === "RANGE_DRIFT_DOWN" || judgment.subtype === "DESCENDING_CHANNEL";
     const isDriftUp = judgment.subtype === "RANGE_DRIFT_UP" || judgment.subtype === "ASCENDING_CHANNEL";
 
+    if (judgment.subtype === "DESCENDING_CHANNEL") {
+        console.info(JSON.stringify({
+            event: "V2_DESCENDING_CHANNEL_PROOF",
+            symbol: input.symbol,
+            boxPos: currentBoxPos,
+            side,
+            action: "RESTRICT_TO_UPPER_SHORT"
+        }));
+    } else if (judgment.subtype === "ASCENDING_CHANNEL") {
+        console.info(JSON.stringify({
+            event: "V2_ASCENDING_CHANNEL_PROOF",
+            symbol: input.symbol,
+            boxPos: currentBoxPos,
+            side,
+            action: "RESTRICT_TO_LOWER_LONG"
+        }));
+    }
+
     if (isDriftDown) {
         // Bias: SHORT. Block Longs. Block Mid entries.
+        console.info(JSON.stringify({
+            event: "V2_RANGE_DRIFT_SIDE_BIAS_PROOF",
+            symbol: input.symbol,
+            subtype: judgment.subtype,
+            bias: "SHORT",
+            intendedSide: side
+        }));
+
         if (side === "long") {
             signal = "NONE";
             reason = `SUPPRESSED: Long blocked in ${judgment.subtype} (downward drift bias)`;
-        } else if (isMid) {
+        } else if (isMid || isLower) {
+            // In DRIFT_DOWN, only UPPER edge shorts are safe. LOWER shorts are "late chase".
             signal = "NONE";
-            reason = `SUPPRESSED: Mid entry blocked in ${judgment.subtype} (awaiting upper edge)`;
+            reason = `SUPPRESSED: ${isMid ? "Mid" : "Lower"} entry blocked in ${judgment.subtype} (only upper-edge shorts allowed)`;
         }
     } else if (isDriftUp) {
         // Bias: LONG. Block Shorts. Block Mid entries.
+        console.info(JSON.stringify({
+            event: "V2_RANGE_DRIFT_SIDE_BIAS_PROOF",
+            symbol: input.symbol,
+            subtype: judgment.subtype,
+            bias: "LONG",
+            intendedSide: side
+        }));
+
         if (side === "short") {
             signal = "NONE";
             reason = `SUPPRESSED: Short blocked in ${judgment.subtype} (upward drift bias)`;
-        } else if (isMid) {
+        } else if (isMid || isUpper) {
+            // In DRIFT_UP, only LOWER edge longs are safe. UPPER longs are "late chase".
             signal = "NONE";
-            reason = `SUPPRESSED: Mid entry blocked in ${judgment.subtype} (awaiting lower edge)`;
+            reason = `SUPPRESSED: ${isMid ? "Mid" : "Upper"} entry blocked in ${judgment.subtype} (only lower-edge longs allowed)`;
         }
+    }
+
+    if (isDriftDown || isDriftUp) {
+        console.info(JSON.stringify({
+            event: "V2_RANGE_DRIFT_STATE_PROOF",
+            symbol: input.symbol,
+            subtype: judgment.subtype,
+            side,
+            is_mid: isMid,
+            signal_final: signal,
+            reason
+        }));
+    }
+
+    if (judgment.subtype === "RANGE_FAKE_BREAKOUT") {
+        signal = "NONE";
+        reason = "FAKE_BREAKOUT_GUARD: Suppressing entry due to high failure rate observation";
+        console.info(JSON.stringify({
+            event: "V2_FAKE_BREAKOUT_GUARD_PROOF",
+            symbol: input.symbol,
+            boxBreakSide: sn.boxBreakSide,
+            breakoutFailureRate,
+            action: "BLOCK_ENTRY"
+        }));
     }
 
     if (isDriftDown || isDriftUp) {
