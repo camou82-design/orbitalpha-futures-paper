@@ -44,6 +44,13 @@ function computeSlopesFromCandles(candles: Candle[]) {
     return { bhSlope, blSlope, rcSlope, e20Slope, windowSize: halfSize };
 }
 
+function computeMedian(values: number[]): number {
+    if (values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
 function classifyRangePhase(input: EngineV2Input, symbol: string): MarketJudgmentOutput["rangePhase"] {
     const sn = input.snapshot;
     const boxPos = Number(sn.boxPos ?? 0.5);
@@ -53,6 +60,20 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): MarketJudgmen
     const rangeOscillationScore = Number(sn.rangeOscillationScore ?? 0);
     const boxCohesion = Number(sn.boxCohesion01 ?? 0);
     const trendWeakness = Number(sn.trendWeaknessScore ?? 1);
+    const reviewingTicks = sn.reviewing_ticks ?? 0;
+
+    // --- Volume Analysis ---
+    let volumeMedian60 = 0;
+    let volumeExpansion = 1;
+    if (input.recentCandles && input.recentCandles.length > 0) {
+        const volWindow = input.recentCandles.slice(-60).map(c => c.volume);
+        volumeMedian60 = computeMedian(volWindow);
+        if (volumeMedian60 > 0) {
+            volumeExpansion = (input.recentCandles[input.recentCandles.length - 1].volume) / volumeMedian60;
+        }
+    }
+
+    const atrExp = typeof sn.atrExpansion === "number" ? sn.atrExpansion : 0;
 
     // Phase 6: Drift & Channel Detection (PRIORITY 1: STRUCTURE)
     let bhSlope = typeof sn.boxHighSlope === "number" ? sn.boxHighSlope : 0;
@@ -73,8 +94,6 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): MarketJudgmen
         }
     }
 
-    const atrExp = typeof sn.atrExpansion === "number" ? sn.atrExpansion : 0;
-
     console.info(JSON.stringify({
         event: "V2_RANGE_SLOPE_SOURCE_PROOF",
         symbol,
@@ -86,7 +105,94 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): MarketJudgmen
         ts: Date.now()
     }));
 
-    // Refined Classification Criteria
+    // --- VOLUME-BASED BREAKOUT / BREAKDOWN (Priority 1) ---
+    const isVolumeExpansionValid = volumeExpansion >= 2.0;
+    const isAtrExpansionValid = atrExp >= 1.2;
+    const isStructuralCohesionValid = boxCohesion >= 0.7 || rangeOscillationScore >= 0.6;
+
+    if (boxBreakSide === "lower" && isVolumeExpansionValid && isAtrExpansionValid && isStructuralCohesionValid) {
+        const closeOutsideBox = sn.lastPrice < (sn.boxLow ?? 0);
+        
+        console.info(JSON.stringify({
+            event: "V2_VOLUME_BREAKOUT_STATE_PROOF",
+            symbol,
+            direction: "down",
+            volumeExpansion,
+            volumeMedian60,
+            currentVolume: input.recentCandles?.[input.recentCandles.length-1]?.volume ?? 0,
+            atrExpansion: atrExp,
+            boxBreakSide,
+            closeOutsideBox,
+            subtype: volumeExpansion >= 3.0 ? "VOLUME_SHOCK_DOWN" : "VOLUME_BREAKDOWN_OBSERVATION",
+            action: "WATCH_RETEST"
+        }));
+
+        if (reviewingTicks >= 12) {
+             if (sn.lastPrice > (sn.boxLow ?? 0)) {
+                 return "FAKE_VOLUME_BREAKDOWN";
+             }
+             if (sn.lastPrice <= (sn.boxLow ?? 0) * 1.001 && sn.lastPrice >= (sn.boxLow ?? 0) * 0.999) {
+                 // Retest zone
+                 if (rcSlope > 0 || emaGap > 0) return "FAKE_VOLUME_BREAKDOWN"; // Re-entry attempt
+                 
+                 console.info(JSON.stringify({
+                     event: "V2_VOLUME_RETEST_STATE_PROOF",
+                     symbol,
+                     direction: "down",
+                     lastPrice: sn.lastPrice,
+                     boxLow: sn.boxLow,
+                     reviewingTicks,
+                     subtype: "BREAKDOWN_RETEST_FAILED"
+                 }));
+
+                 return "BREAKDOWN_RETEST_FAILED";
+             }
+        }
+        return volumeExpansion >= 3.0 ? "VOLUME_SHOCK_DOWN" : "VOLUME_BREAKDOWN_OBSERVATION";
+    }
+
+    if (boxBreakSide === "upper" && isVolumeExpansionValid && isAtrExpansionValid && isStructuralCohesionValid) {
+        const closeOutsideBox = sn.lastPrice > (sn.boxHigh ?? 0);
+
+        console.info(JSON.stringify({
+            event: "V2_VOLUME_BREAKOUT_STATE_PROOF",
+            symbol,
+            direction: "up",
+            volumeExpansion,
+            volumeMedian60,
+            currentVolume: input.recentCandles?.[input.recentCandles.length-1]?.volume ?? 0,
+            atrExpansion: atrExp,
+            boxBreakSide,
+            closeOutsideBox,
+            subtype: volumeExpansion >= 3.0 ? "VOLUME_SHOCK_UP" : "VOLUME_BREAKOUT_OBSERVATION",
+            action: "WATCH_RETEST"
+        }));
+
+        if (reviewingTicks >= 12) {
+             if (sn.lastPrice < (sn.boxHigh ?? 0)) {
+                 return "FAKE_VOLUME_BREAKOUT";
+             }
+             if (sn.lastPrice >= (sn.boxHigh ?? 0) * 0.999 && sn.lastPrice <= (sn.boxHigh ?? 0) * 1.001) {
+                 // Retest zone
+                 if (rcSlope < 0 || emaGap < 0) return "FAKE_VOLUME_BREAKOUT"; // Re-entry attempt
+                 
+                 console.info(JSON.stringify({
+                    event: "V2_VOLUME_RETEST_STATE_PROOF",
+                    symbol,
+                    direction: "up",
+                    lastPrice: sn.lastPrice,
+                    boxHigh: sn.boxHigh,
+                    reviewingTicks,
+                    subtype: "BREAKOUT_RETEST_CONFIRMED_VOLUME"
+                }));
+
+                 return "BREAKOUT_RETEST_CONFIRMED_VOLUME";
+             }
+        }
+        return volumeExpansion >= 3.0 ? "VOLUME_SHOCK_UP" : "VOLUME_BREAKOUT_OBSERVATION";
+    }
+
+    // --- DRIFT & CHANNEL DETECTION (Priority 2) ---
     const driftDown = bhSlope < -0.00005 && blSlope < -0.00005 && e20Slope < -0.00005;
     const driftUp = bhSlope > 0.00005 && blSlope > 0.00005 && e20Slope > 0.00005;
 
@@ -111,7 +217,7 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): MarketJudgmen
     if (boxCohesion >= 0.85 && trendWeakness >= 0.7 && rangeOscillationScore >= 0.5) return "TRIANGLE_SQUEEZE";
     
     // Breakout States
-    if (boxBreakSide !== "none" && breakoutFailureRate < 0.4 && (sn.reviewing_ticks ?? 0) < 12) return "BREAKOUT_OBSERVATION";
+    if (boxBreakSide !== "none" && breakoutFailureRate < 0.4 && reviewingTicks < 12) return "BREAKOUT_OBSERVATION";
     if (breakoutFailureRate >= 0.6) return "FAKE_BREAKOUT";
     if (boxBreakSide === "lower" && emaGap < 0) return "BREAKDOWN";
     if (boxBreakSide === "upper" && emaGap > 0) return "BREAKOUT";
@@ -195,6 +301,14 @@ function selectSubtype(args: {
         if (rangePhase === "ASCENDING_CHANNEL") return { subtype: "ASCENDING_CHANNEL", subtypeReason: "ascending_channel_structure" };
         if (rangePhase === "REVERSAL_UP_WATCH") return { subtype: "DRIFT_REVERSAL_UP_WATCH", subtypeReason: "drift_reversal_up_detected" };
         if (rangePhase === "REVERSAL_DOWN_WATCH") return { subtype: "DRIFT_REVERSAL_DOWN_WATCH", subtypeReason: "drift_reversal_down_detected" };
+        if (rangePhase === "VOLUME_BREAKDOWN_OBSERVATION") return { subtype: "VOLUME_BREAKDOWN_OBSERVATION", subtypeReason: "volume_breakdown_observation" };
+        if (rangePhase === "VOLUME_SHOCK_DOWN") return { subtype: "VOLUME_SHOCK_DOWN", subtypeReason: "volume_shock_down" };
+        if (rangePhase === "BREAKDOWN_RETEST_FAILED") return { subtype: "BREAKDOWN_RETEST_FAILED", subtypeReason: "breakdown_retest_failed_volume" };
+        if (rangePhase === "FAKE_VOLUME_BREAKDOWN") return { subtype: "FAKE_VOLUME_BREAKDOWN", subtypeReason: "fake_volume_breakdown_detected" };
+        if (rangePhase === "VOLUME_BREAKOUT_OBSERVATION") return { subtype: "VOLUME_BREAKOUT_OBSERVATION", subtypeReason: "volume_breakout_observation" };
+        if (rangePhase === "VOLUME_SHOCK_UP") return { subtype: "VOLUME_SHOCK_UP", subtypeReason: "volume_shock_up" };
+        if (rangePhase === "BREAKOUT_RETEST_CONFIRMED_VOLUME") return { subtype: "BREAKOUT_RETEST_CONFIRMED_VOLUME", subtypeReason: "breakout_retest_confirmed_volume" };
+        if (rangePhase === "FAKE_VOLUME_BREAKOUT") return { subtype: "FAKE_VOLUME_BREAKOUT", subtypeReason: "fake_volume_breakout_detected" };
         return { subtype: "RANGE_MID_CHOP", subtypeReason: "range_mid_chop" };
     }
     if (regimeFinal === "TREND") {

@@ -141,6 +141,72 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         }));
     }
 
+    // Phase 6.5: Volume-Based Breakout / Shock Entry Filtering (Symmetrical)
+    const isVolDown = judgment.subtype === "VOLUME_BREAKDOWN_OBSERVATION" || judgment.subtype === "VOLUME_SHOCK_DOWN" || judgment.subtype === "BREAKDOWN_RETEST_FAILED" || judgment.subtype === "FAKE_VOLUME_BREAKDOWN";
+    const isVolUp = judgment.subtype === "VOLUME_BREAKOUT_OBSERVATION" || judgment.subtype === "VOLUME_SHOCK_UP" || judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" || judgment.subtype === "FAKE_VOLUME_BREAKOUT";
+
+    if (isVolDown || isVolUp) {
+        const direction = isVolDown ? "down" : "up";
+        const primarySide: EngineV2Side = isVolDown ? "short" : "long";
+        const blockedSide: EngineV2Side = isVolDown ? "long" : "short";
+        const symmetryCase = isVolDown ? "VOLUME_BREAKDOWN_SYMMETRY" : "VOLUME_BREAKOUT_SYMMETRY";
+
+        const isObservation = judgment.subtype === "VOLUME_BREAKDOWN_OBSERVATION" || judgment.subtype === "VOLUME_BREAKOUT_OBSERVATION";
+        const isShock = judgment.subtype === "VOLUME_SHOCK_DOWN" || judgment.subtype === "VOLUME_SHOCK_UP";
+        const isRetestSuccess = judgment.subtype === "BREAKDOWN_RETEST_FAILED" || judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME";
+        const isFake = judgment.subtype === "FAKE_VOLUME_BREAKDOWN" || judgment.subtype === "FAKE_VOLUME_BREAKOUT";
+
+        let firstBreakoutChaseBlocked = false;
+        let retestRequired = isObservation || isShock;
+        let retestPassed = isRetestSuccess;
+
+        if (side === blockedSide) {
+            signal = "NONE";
+            reason = `SUPPRESSED: ${side} blocked in ${judgment.subtype} (${direction} bias)`;
+        } else if (side === primarySide) {
+            if (isObservation || isShock) {
+                // First breakout candle chase blocked
+                signal = "NONE";
+                reason = `SUPPRESSED: First ${direction} breakout candle chase blocked; awaiting retest`;
+                firstBreakoutChaseBlocked = true;
+            } else if (isRetestSuccess) {
+                // Allow after retest
+                // signal remains CANDIDATE from upper/lower check
+            } else if (isFake) {
+                signal = "NONE";
+                reason = `SUPPRESSED: Market returned inside box (${judgment.subtype})`;
+            }
+        } else if (isFake) {
+            signal = "NONE";
+            reason = `SUPPRESSED: Market indecision after fake breakout`;
+        }
+
+        console.info(JSON.stringify({
+            event: "V2_VOLUME_SHOCK_ENTRY_FILTER_PROOF",
+            symbol: input.symbol,
+            direction,
+            intendedSide: side,
+            allowed: signal !== "NONE",
+            blockReason: signal === "NONE" ? reason : null,
+            firstBreakoutChaseBlocked,
+            retestRequired,
+            retestPassed,
+            symmetryCase
+        }));
+
+        if (isFake) {
+            console.info(JSON.stringify({
+                event: "V2_FAKE_VOLUME_BREAKOUT_GUARD_PROOF",
+                symbol: input.symbol,
+                direction,
+                boxBreakSide: sn.boxBreakSide,
+                breakoutFailureRate,
+                returnedInsideBox: true,
+                action: "BLOCK_ENTRY"
+            }));
+        }
+    }
+
     // Phase 7: Volume Shock Entry Filtering (Symmetrical)
     if (judgment.shockPhase === "DOWN_SHOCK" || judgment.shockPhase === "UP_SHOCK") {
         const shockDirection = judgment.shockPhase === "DOWN_SHOCK" ? "down" : "up";

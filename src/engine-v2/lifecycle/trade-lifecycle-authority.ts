@@ -99,6 +99,44 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
                 }
             }
 
+            // --- VOLUME_SHOCK_GUARD (V2 Symmetrical Protection) ---
+            const subtype = input.rawMetricsSummary.subtype;
+            const isVolDownShock = subtype === "VOLUME_SHOCK_DOWN" || subtype === "VOLUME_BREAKDOWN_OBSERVATION";
+            const isVolUpShock = subtype === "VOLUME_SHOCK_UP" || subtype === "VOLUME_BREAKOUT_OBSERVATION";
+
+            if (isVolDownShock || isVolUpShock) {
+                const shockDirection = isVolDownShock ? "down" : "up";
+                const threatenedSide = shockDirection === "down" ? "long" : "short";
+                const isPositionThreatened = input.side === threatenedSide;
+
+                if (isPositionThreatened) {
+                    addOnAllowed = false;
+                    const isSevere = subtype.includes("SHOCK");
+                    exitAction = isSevere ? "exit" : "watch";
+                    
+                    const tightStopAtr = 0.4;
+                    const sideMultiplier = input.side === "long" ? -1 : 1;
+                    const tightStop = (input.markPrice ?? input.position.entryPrice) + (sideMultiplier * tightStopAtr * (input.atr ?? 0));
+                    
+                    newStopPrice = input.side === "long"
+                        ? Math.max(input.currentStopPrice ?? 0, tightStop)
+                        : Math.min(input.currentStopPrice ?? Infinity, tightStop);
+
+                    proofReasons.push(`VOLUME_${shockDirection.toUpperCase()}_SHOCK_POSITION_PROTECT`);
+                    
+                    console.info(JSON.stringify({
+                        event: "V2_VOLUME_SHOCK_POSITION_PROTECT_PROOF",
+                        symbol: input.symbol,
+                        shockDirection,
+                        threatenedSide,
+                        isSevere,
+                        stopTightened: newStopPrice !== input.currentStopPrice,
+                        action: exitAction,
+                        subtype
+                    }));
+                }
+            }
+
             if (isReversalUpWatch || isReversalDownWatch || structuralReversalDetected) {
                 const reversalDirection = (isReversalUpWatch || (structuralReversalDetected && isDriftDownRegime)) ? "up" : "down";
                 const protectedSide = reversalDirection === "up" ? "short" : "long";
