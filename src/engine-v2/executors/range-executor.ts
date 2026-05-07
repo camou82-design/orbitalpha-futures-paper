@@ -156,22 +156,27 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         const isRetestSuccess = judgment.subtype === "BREAKDOWN_RETEST_FAILED" || judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME";
         const isFake = judgment.subtype === "FAKE_VOLUME_BREAKDOWN" || judgment.subtype === "FAKE_VOLUME_BREAKOUT";
 
+        const preVolumeSide = side;
+        let sideOverrideApplied = false;
         let firstBreakoutChaseBlocked = false;
         let retestRequired = isObservation || isShock;
         let retestPassed = isRetestSuccess;
 
-        if (side === blockedSide) {
+        if (side === blockedSide && !isRetestSuccess) {
             signal = "NONE";
             reason = `SUPPRESSED: ${side} blocked in ${judgment.subtype} (${direction} bias)`;
-        } else if (side === primarySide) {
+        } else if (side === primarySide || isRetestSuccess) {
             if (isObservation || isShock) {
                 // First breakout candle chase blocked
                 signal = "NONE";
                 reason = `SUPPRESSED: First ${direction} breakout candle chase blocked; awaiting retest`;
                 firstBreakoutChaseBlocked = true;
             } else if (isRetestSuccess) {
-                // Allow after retest
-                // signal remains CANDIDATE from upper/lower check
+                // FORCE SIDE OVERRIDE: Retest success must use the breakout direction side
+                side = primarySide;
+                signal = primarySide === "short" ? "SHORT_CANDIDATE" : "LONG_CANDIDATE";
+                reason = `VOLUME_RETEST_SUCCESS: Forcing ${side} entry after retest validation`;
+                sideOverrideApplied = true;
             } else if (isFake) {
                 signal = "NONE";
                 reason = `SUPPRESSED: Market returned inside box (${judgment.subtype})`;
@@ -185,12 +190,16 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             event: "V2_VOLUME_SHOCK_ENTRY_FILTER_PROOF",
             symbol: input.symbol,
             direction,
-            intendedSide: side,
+            intendedSide: preVolumeSide,
+            preVolumeSide,
+            finalVolumeSide: side,
+            finalSignal: signal,
             allowed: signal !== "NONE",
             blockReason: signal === "NONE" ? reason : null,
             firstBreakoutChaseBlocked,
             retestRequired,
             retestPassed,
+            sideOverrideApplied,
             symmetryCase
         }));
 

@@ -51,7 +51,7 @@ function computeMedian(values: number[]): number {
     return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
-function classifyRangePhase(input: EngineV2Input, symbol: string): MarketJudgmentOutput["rangePhase"] {
+function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: MarketJudgmentOutput["rangePhase"], metadata: any } {
     const sn = input.snapshot;
     const boxPos = Number(sn.boxPos ?? 0.5);
     const boxBreakSide = sn.boxBreakSide ?? "none";
@@ -94,16 +94,7 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): MarketJudgmen
         }
     }
 
-    console.info(JSON.stringify({
-        event: "V2_RANGE_SLOPE_SOURCE_PROOF",
-        symbol,
-        bhSlope,
-        blSlope,
-        rcSlope,
-        e20Slope,
-        source,
-        ts: Date.now()
-    }));
+    const slopeMetadata = { bhSlope, blSlope, rcSlope, e20Slope, source };
 
     // --- VOLUME-BASED BREAKOUT / BREAKDOWN (Priority 1) ---
     const isVolumeExpansionValid = volumeExpansion >= 2.0;
@@ -111,125 +102,63 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): MarketJudgmen
     const isStructuralCohesionValid = boxCohesion >= 0.7 || rangeOscillationScore >= 0.6;
 
     if (boxBreakSide === "lower" && isVolumeExpansionValid && isAtrExpansionValid && isStructuralCohesionValid) {
-        const closeOutsideBox = sn.lastPrice < (sn.boxLow ?? 0);
-        
-        console.info(JSON.stringify({
-            event: "V2_VOLUME_BREAKOUT_STATE_PROOF",
-            symbol,
-            direction: "down",
-            volumeExpansion,
-            volumeMedian60,
-            currentVolume: input.recentCandles?.[input.recentCandles.length-1]?.volume ?? 0,
-            atrExpansion: atrExp,
-            boxBreakSide,
-            closeOutsideBox,
-            subtype: volumeExpansion >= 3.0 ? "VOLUME_SHOCK_DOWN" : "VOLUME_BREAKDOWN_OBSERVATION",
-            action: "WATCH_RETEST"
-        }));
-
         if (reviewingTicks >= 12) {
              if (sn.lastPrice > (sn.boxLow ?? 0)) {
-                 return "FAKE_VOLUME_BREAKDOWN";
+                 return { phase: "FAKE_VOLUME_BREAKDOWN", metadata: slopeMetadata };
              }
              if (sn.lastPrice <= (sn.boxLow ?? 0) * 1.001 && sn.lastPrice >= (sn.boxLow ?? 0) * 0.999) {
-                 // Retest zone
-                 if (rcSlope > 0 || emaGap > 0) return "FAKE_VOLUME_BREAKDOWN"; // Re-entry attempt
-                 
-                 console.info(JSON.stringify({
-                     event: "V2_VOLUME_RETEST_STATE_PROOF",
-                     symbol,
-                     direction: "down",
-                     lastPrice: sn.lastPrice,
-                     boxLow: sn.boxLow,
-                     reviewingTicks,
-                     subtype: "BREAKDOWN_RETEST_FAILED"
-                 }));
-
-                 return "BREAKDOWN_RETEST_FAILED";
+                 if (rcSlope > 0 || emaGap > 0) return { phase: "FAKE_VOLUME_BREAKDOWN", metadata: slopeMetadata };
+                 return { phase: "BREAKDOWN_RETEST_FAILED", metadata: slopeMetadata };
              }
         }
-        return volumeExpansion >= 3.0 ? "VOLUME_SHOCK_DOWN" : "VOLUME_BREAKDOWN_OBSERVATION";
+        return { phase: volumeExpansion >= 3.0 ? "VOLUME_SHOCK_DOWN" : "VOLUME_BREAKDOWN_OBSERVATION", metadata: slopeMetadata };
     }
 
     if (boxBreakSide === "upper" && isVolumeExpansionValid && isAtrExpansionValid && isStructuralCohesionValid) {
-        const closeOutsideBox = sn.lastPrice > (sn.boxHigh ?? 0);
-
-        console.info(JSON.stringify({
-            event: "V2_VOLUME_BREAKOUT_STATE_PROOF",
-            symbol,
-            direction: "up",
-            volumeExpansion,
-            volumeMedian60,
-            currentVolume: input.recentCandles?.[input.recentCandles.length-1]?.volume ?? 0,
-            atrExpansion: atrExp,
-            boxBreakSide,
-            closeOutsideBox,
-            subtype: volumeExpansion >= 3.0 ? "VOLUME_SHOCK_UP" : "VOLUME_BREAKOUT_OBSERVATION",
-            action: "WATCH_RETEST"
-        }));
-
         if (reviewingTicks >= 12) {
              if (sn.lastPrice < (sn.boxHigh ?? 0)) {
-                 return "FAKE_VOLUME_BREAKOUT";
+                 return { phase: "FAKE_VOLUME_BREAKOUT", metadata: slopeMetadata };
              }
              if (sn.lastPrice >= (sn.boxHigh ?? 0) * 0.999 && sn.lastPrice <= (sn.boxHigh ?? 0) * 1.001) {
-                 // Retest zone
-                 if (rcSlope < 0 || emaGap < 0) return "FAKE_VOLUME_BREAKOUT"; // Re-entry attempt
-                 
-                 console.info(JSON.stringify({
-                    event: "V2_VOLUME_RETEST_STATE_PROOF",
-                    symbol,
-                    direction: "up",
-                    lastPrice: sn.lastPrice,
-                    boxHigh: sn.boxHigh,
-                    reviewingTicks,
-                    subtype: "BREAKOUT_RETEST_CONFIRMED_VOLUME"
-                }));
-
-                 return "BREAKOUT_RETEST_CONFIRMED_VOLUME";
+                 if (rcSlope < 0 || emaGap < 0) return { phase: "FAKE_VOLUME_BREAKOUT", metadata: slopeMetadata };
+                 return { phase: "BREAKOUT_RETEST_CONFIRMED_VOLUME", metadata: slopeMetadata };
              }
         }
-        return volumeExpansion >= 3.0 ? "VOLUME_SHOCK_UP" : "VOLUME_BREAKOUT_OBSERVATION";
+        return { phase: volumeExpansion >= 3.0 ? "VOLUME_SHOCK_UP" : "VOLUME_BREAKOUT_OBSERVATION", metadata: slopeMetadata };
     }
 
     // --- DRIFT & CHANNEL DETECTION (Priority 2) ---
     const driftDown = bhSlope < -0.00005 && blSlope < -0.00005 && e20Slope < -0.00005;
     const driftUp = bhSlope > 0.00005 && blSlope > 0.00005 && e20Slope > 0.00005;
-
     const channelDown = driftDown && rcSlope < -0.0001;
     const channelUp = driftUp && rcSlope > 0.0001;
 
-    // Reversal Detection (Structural Watch)
     if ((driftDown || channelDown) && (sn.lastPrice > (sn.boxHigh ?? 0) || (sn.swingHighSlope ?? 0) > 0.0005 || atrExp > 1.5)) {
-        return "REVERSAL_UP_WATCH";
+        return { phase: "REVERSAL_UP_WATCH", metadata: slopeMetadata };
     }
     if ((driftUp || channelUp) && (sn.lastPrice < (sn.boxLow ?? 0) || (sn.swingLowSlope ?? 0) < -0.0005 || atrExp > 1.5)) {
-        return "REVERSAL_DOWN_WATCH";
+        return { phase: "REVERSAL_DOWN_WATCH", metadata: slopeMetadata };
     }
 
-    if (channelDown) return "DESCENDING_CHANNEL";
-    if (channelUp) return "ASCENDING_CHANNEL";
-    if (driftDown) return "DRIFT_DOWN";
-    if (driftUp) return "DRIFT_UP";
+    if (channelDown) return { phase: "DESCENDING_CHANNEL", metadata: slopeMetadata };
+    if (channelUp) return { phase: "ASCENDING_CHANNEL", metadata: slopeMetadata };
+    if (driftDown) return { phase: "DRIFT_DOWN", metadata: slopeMetadata };
+    if (driftUp) return { phase: "DRIFT_UP", metadata: slopeMetadata };
     
-    // Compression & Squeeze
-    if (rangeOscillationScore >= 0.75 && breakoutFailureRate >= 0.6) return "COMPRESSION";
-    if (boxCohesion >= 0.85 && trendWeakness >= 0.7 && rangeOscillationScore >= 0.5) return "TRIANGLE_SQUEEZE";
+    if (rangeOscillationScore >= 0.75 && breakoutFailureRate >= 0.6) return { phase: "COMPRESSION", metadata: slopeMetadata };
+    if (boxCohesion >= 0.85 && trendWeakness >= 0.7 && rangeOscillationScore >= 0.5) return { phase: "TRIANGLE_SQUEEZE", metadata: slopeMetadata };
     
-    // Breakout States
-    if (boxBreakSide !== "none" && breakoutFailureRate < 0.4 && reviewingTicks < 12) return "BREAKOUT_OBSERVATION";
-    if (breakoutFailureRate >= 0.6) return "FAKE_BREAKOUT";
-    if (boxBreakSide === "lower" && emaGap < 0) return "BREAKDOWN";
-    if (boxBreakSide === "upper" && emaGap > 0) return "BREAKOUT";
+    if (boxBreakSide !== "none" && breakoutFailureRate < 0.4 && reviewingTicks < 12) return { phase: "BREAKOUT_OBSERVATION", metadata: slopeMetadata };
+    if (breakoutFailureRate >= 0.6) return { phase: "FAKE_BREAKOUT", metadata: slopeMetadata };
+    if (boxBreakSide === "lower" && emaGap < 0) return { phase: "BREAKDOWN", metadata: slopeMetadata };
+    if (boxBreakSide === "upper" && emaGap > 0) return { phase: "BREAKOUT", metadata: slopeMetadata };
 
-    // Flat check
-    if (Math.abs(bhSlope) < 0.00003 && Math.abs(blSlope) < 0.00003) return "FLAT";
+    if (Math.abs(bhSlope) < 0.00003 && Math.abs(blSlope) < 0.00003) return { phase: "FLAT", metadata: slopeMetadata };
 
-    // PRIORITY 2: ZONE (ONLY IF NO DOMINANT STRUCTURE)
-    if (boxPos <= 0.26) return "LOWER";
-    if (boxPos >= 0.74) return "UPPER";
+    if (boxPos <= 0.26) return { phase: "LOWER", metadata: slopeMetadata };
+    if (boxPos >= 0.74) return { phase: "UPPER", metadata: slopeMetadata };
 
-    return "MID";
+    return { phase: "MID", metadata: slopeMetadata };
 }
 
 function classifyTrendPhase(sn: EngineV2Input["snapshot"]): MarketJudgmentOutput["trendPhase"] {
@@ -353,18 +282,11 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     const data_ready = sn.data_ready;
     const dump_protection_hit = sn.dump_protection_hit;
     const shockPhase = classifyShockPhase(input);
-    const rangePhase = classifyRangePhase(input, input.symbol);
+    const rangeResult = classifyRangePhase(input, input.symbol);
+    const rangePhase = rangeResult.phase;
+    const m = rangeResult.metadata;
     const trendPhase = classifyTrendPhase(sn);
     
-    console.info(JSON.stringify({
-        event: "V2_RANGE_STRUCTURE_CLASSIFICATION_PROOF",
-        symbol: input.symbol,
-        rangePhase,
-        boxPos: sn.boxPos,
-        boxHighSlope: sn.boxHighSlope,
-        boxLowSlope: sn.boxLowSlope,
-        ema20Slope: sn.ema20Slope
-    }));
     const transitionPhase = classifyTransitionPhase(
         rangeScore,
         trendScore,
@@ -389,6 +311,62 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         trendPhase,
         transitionPhase
     });
+
+    // Mandatory Structure Classification Proof (Enhanced)
+    console.info(JSON.stringify({
+        event: "V2_RANGE_STRUCTURE_CLASSIFICATION_PROOF",
+        symbol: input.symbol,
+        slopeSource: m.source,
+        finalBoxHighSlope: m.bhSlope,
+        finalBoxLowSlope: m.blSlope,
+        finalRangeCenterSlope: m.rcSlope,
+        finalEma20Slope: m.e20Slope,
+        rangePhase,
+        subtype: subtypeDecision.subtype,
+        classificationReason: subtypeDecision.subtypeReason
+    }));
+
+    // Re-emit slopes source for historical consistency if needed
+    console.info(JSON.stringify({
+        event: "V2_RANGE_SLOPE_SOURCE_PROOF",
+        symbol: input.symbol,
+        bhSlope: m.bhSlope,
+        blSlope: m.blSlope,
+        rcSlope: m.rcSlope,
+        e20Slope: m.e20Slope,
+        source: m.source,
+        ts: Date.now()
+    }));
+
+    // Re-emit Volume Proofs based on detected phase
+    if (rangePhase.includes("VOLUME") || rangePhase.includes("BREAKDOWN") || rangePhase.includes("BREAKOUT")) {
+        const isShock = rangePhase.includes("SHOCK");
+        const isRetest = rangePhase.includes("RETEST");
+        const direction = (rangePhase.includes("BREAKOUT") || rangePhase.includes("UP")) ? "up" : "down";
+        
+        if (isRetest) {
+            console.info(JSON.stringify({
+                event: "V2_VOLUME_RETEST_STATE_PROOF",
+                symbol: input.symbol,
+                direction,
+                lastPrice: sn.lastPrice,
+                boxBoundary: direction === "up" ? sn.boxHigh : sn.boxLow,
+                reviewingTicks: sn.reviewing_ticks,
+                subtype: subtypeDecision.subtype
+            }));
+        } else {
+            console.info(JSON.stringify({
+                event: "V2_VOLUME_BREAKOUT_STATE_PROOF",
+                symbol: input.symbol,
+                direction,
+                volumeExpansion: sn.volumeExpansion, // Assuming sn has it or calculate again
+                atrExpansion: sn.atrExpansion,
+                boxBreakSide: sn.boxBreakSide,
+                subtype: subtypeDecision.subtype,
+                action: "WATCH_RETEST"
+            }));
+        }
+    }
 
     return {
         regime,
