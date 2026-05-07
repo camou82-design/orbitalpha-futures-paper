@@ -297,6 +297,23 @@ export class JsonStore {
     return await this.writeJson("positions/open.json", dedup);
   }
 
+  // --- PENDING ENTRY REGISTRY ---
+  async readPendingEntryOrders(): Promise<import("../models/types").PendingEntryOrderRecord[]> {
+    const rel = "runtime/pending-entry-orders.json";
+    const fullPath = path.resolve(this.baseDir, rel);
+    try {
+      const raw = await fs.readFile(fullPath, "utf8");
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e: unknown) {
+      return [];
+    }
+  }
+
+  async writePendingEntryOrders(list: readonly import("../models/types").PendingEntryOrderRecord[]): Promise<string> {
+    return await this.writeJson("runtime/pending-entry-orders.json", list);
+  }
+
   /** Ensure `positions/history.json` exists as an empty array. */
   async ensurePositionsHistoryEmpty(): Promise<void> {
     const rel = "positions/history.json";

@@ -1341,4 +1341,23 @@ export type PaperClosedPositionRecord = Readonly<{
   outcomeStatus?: "win" | "loss" | "flat";
 }>;
 
+// --- PENDING ENTRY REGISTRY ---
+export interface PendingEntryOrderRecord {
+  symbol: string;
+  side: "long" | "short";
+  ordId: string;
+  clOrdId: string;
+  instId: string;
+  authority_source: string;
+  intended_notional_usdt: number;
+  stopPrice?: number;
+  createdAt: number;
+  status: "ENTRY_ORDER_PENDING";
+  
+  /** To recreate the full open position and events once filled */
+  paperRecordSnapshot: any;
+  authoritySnapshot: any;
+  openTraceId: string;
+}
+
 // --- EOF ---

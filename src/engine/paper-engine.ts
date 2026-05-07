@@ -10861,9 +10861,98 @@ export class PaperEngine {
     this.lastEntryDecision = null;
 
     let consumeIdx = 0;
+    
+    // [PENDING ENTRY REGISTRY PROCESSING]
+    let pendingRegistryModified = false;
+    let pendingEntryOrders = await this.store.readPendingEntryOrders();
+    const activePendingEntryOrders: import("../models/types").PendingEntryOrderRecord[] = [];
+    const shouldCancelPending = !executionSnapshot.tradeEnabled || executionSnapshot.closeOnly || executionSnapshot.killSwitch;
+
+    for (const pending of pendingEntryOrders) {
+      const ordId = pending.ordId;
+      const liveOrder = this.cachedOpsPending.find(o => String(o.ordId) === ordId);
+      
+      if (shouldCancelPending) {
+        if (liveOrder && this.okxDemo) {
+          try {
+            await this.okxDemo.cancelOrder(pending.instId, ordId);
+            this.logger.info("OKX_STALE_ENTRY_ORDER_CANCEL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "global_trade_disabled_or_kill_switch" });
+          } catch (e) {}
+        }
+        this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "canceled_due_to_global_flags" });
+        pendingRegistryModified = true;
+        continue;
+      }
+
+      if (liveOrder) {
+        this.logger.info("PENDING_ENTRY_ORDER_FILL_CHECK_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, status: "still_pending" });
+        activePendingEntryOrders.push(pending);
+      } else {
+        let orderState = "unknown";
+        if (this.okxDemo) {
+          try {
+            const res = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId);
+            if (res.ok && res.value && res.value.length > 0) {
+              orderState = String((res.value[0] as any).state).toLowerCase();
+            }
+          } catch (e) {}
+        }
+        
+        if (orderState === "filled") {
+           this.logger.info("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId });
+           
+           const record = pending.paperRecordSnapshot;
+           record.openedAt = Date.now();
+           record.lifecycleState = "OPEN";
+           
+           next.push(record);
+           openPositionsChanged = true;
+           
+           const protectRes = await this.ensureProtectiveStopOrder(record, `v2_pending_filled_auto:${record.symbol}:${record.openedAt}`);
+           if (protectRes.modified) {
+             record.isProtectiveStopRegistered = protectRes.record.isProtectiveStopRegistered;
+             record.protectiveStopAlgoId = protectRes.record.protectiveStopAlgoId;
+           }
+           
+           this.logger.info("paper_position_opened", {
+             ...pending.authoritySnapshot,
+             open_trace_id: pending.openTraceId,
+             symbol: pending.symbol,
+             side: pending.side,
+             ord_id: ordId,
+             path: "positions/open.json",
+             size_usd: record.sizeUsd
+           });
+           try {
+             await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(pending.symbol, pending.authoritySnapshot as any, record));
+           } catch(e) {}
+           
+           pendingRegistryModified = true;
+        } else if (orderState === "canceled" || orderState === "mmp_canceled" || orderState === "rejected" || orderState === "unknown") {
+           this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: orderState });
+           pendingRegistryModified = true;
+        } else {
+           this.logger.info("PENDING_ENTRY_ORDER_FILL_CHECK_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, status: orderState });
+           activePendingEntryOrders.push(pending);
+        }
+      }
+    }
+    
+    if (pendingRegistryModified) {
+      await this.store.writePendingEntryOrders(activePendingEntryOrders);
+      pendingEntryOrders = activePendingEntryOrders;
+    }
+
     for (const first of entryQueue) {
       const envelope = input.decisionBySymbol.get(String(first.symbol))!;
       const authority = envelope.authority;
+
+      if (activePendingEntryOrders.some(p => p.symbol === String(first.symbol) && p.side === authority.side)) {
+        this.logger.warn("V2_DUPLICATE_PENDING_ENTRY_BLOCK_PROOF", { symbol: first.symbol, side: authority.side });
+        consumeIdx++;
+        continue;
+      }
+
       this.logger.info("ENTRY_QUEUE_CONSUME_PROOF", {
         run_cycle_id: this.runCycleId,
         queue_length: entryQueue.length,
@@ -12189,6 +12278,27 @@ export class PaperEngine {
             if (isPending) {
               this.logger.info("PAPER_OPEN_BLOCKED_UNFILLED_ORDER_PROOF", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
               this.logger.info("LIMIT_ENTRY_PENDING_STATE_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
+              
+              const pendingReg: import("../models/types").PendingEntryOrderRecord = {
+                symbol: sym,
+                side: intentSide,
+                ordId: String(submit.ordId),
+                clOrdId: submit.clOrdId ?? "",
+                instId: toOkxSwapInstId(sym as MarketSymbol),
+                authority_source: authority.source,
+                intended_notional_usdt: v2EntrySizeUsd,
+                stopPrice: authority.newStopPrice ?? undefined,
+                createdAt: Date.now(),
+                status: "ENTRY_ORDER_PENDING",
+                paperRecordSnapshot: record,
+                authoritySnapshot: authority,
+                openTraceId: openTraceId
+              };
+              const currentPending = await this.store.readPendingEntryOrders();
+              currentPending.push(pendingReg);
+              await this.store.writePendingEntryOrders(currentPending);
+              this.logger.info("PENDING_ENTRY_ORDER_REGISTERED_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
+              
               continue;
             }
 
@@ -12768,6 +12878,52 @@ export class PaperEngine {
           });
           this.logger.info("PAPER_OPEN_BLOCKED_UNFILLED_ORDER_PROOF", { open_trace_id: trace.open_trace_id, symbol: first.symbol, side: authority.side, fast_path: false });
           this.logger.info("LIMIT_ENTRY_PENDING_STATE_PROOF", { symbol: first.symbol, side: authority.side, ord_id: trace.exchange_ord_id });
+          
+          const symStr = String(first.symbol);
+          const legacyPendingReg: import("../models/types").PendingEntryOrderRecord = {
+            symbol: symStr,
+            side: authority.side as "long" | "short",
+            ordId: String(submit!.ordId),
+            clOrdId: trace.exchange_client_order_id ?? "",
+            instId: toOkxSwapInstId(symStr as MarketSymbol),
+            authority_source: authority.source,
+            intended_notional_usdt: entrySizeUsd,
+            stopPrice: authority.newStopPrice ?? undefined,
+            createdAt: Date.now(),
+            status: "ENTRY_ORDER_PENDING",
+            paperRecordSnapshot: null, // Legacy delays record build. Let's build a temporary one.
+            authoritySnapshot: authority,
+            openTraceId: trace.open_trace_id
+          };
+          
+          const tempRecord: PaperOpenPositionRecord = {
+            openedAt: legacyPendingReg.createdAt,
+            lastCheckedAt: legacyPendingReg.createdAt,
+            symbol: symStr as MarketSymbol,
+            side: legacyPendingReg.side,
+            entryPrice: first.lastPrice,
+            avgPx: first.lastPrice,
+            baseQty: entrySizeUsd / first.lastPrice,
+            pos: (authority.side === "short" ? -1 : 1) * (entrySizeUsd / first.lastPrice),
+            notionalUsd: entrySizeUsd,
+            sizeUsd: entrySizeUsd,
+            lifecycleState: "OPEN",
+            reconcileState: "PENDING",
+            sourceSignal: "v2",
+            strategyVersion: "paper-v2",
+            exchangeOrdId: legacyPendingReg.ordId,
+            exchangeClOrdId: legacyPendingReg.clOrdId,
+            leverage: levScaled,
+            sourceRunPath: input.candidateRunPath ?? input.filePath ?? input.latestPath ?? "",
+            status: "open",
+            ...buildAuthorityEventMeta(authority, entrySizeUsd)
+          };
+          legacyPendingReg.paperRecordSnapshot = tempRecord;
+          
+          const currentPending = await this.store.readPendingEntryOrders();
+          currentPending.push(legacyPendingReg);
+          await this.store.writePendingEntryOrders(currentPending);
+          this.logger.info("PENDING_ENTRY_ORDER_REGISTERED_PROOF", { symbol: first.symbol, side: authority.side, ord_id: legacyPendingReg.ordId });
           
           trace.position_open_final_state = "ENTRY_ORDER_PENDING";
           emitPositionOpenTraceFinal();
