@@ -62,8 +62,13 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
         typeof boxPos === "number" && Number.isFinite(boxPos) && boxPos > 0.35 && boxPos < 0.65;
     const trendHealthy = input.rawMetricsSummary.trendWeaknessScore <= 0.55;
 
+    let result_givebackPct: number | undefined;
+    let result_guardThresholdPct: number | undefined;
+    let result_guardAction: string | undefined;
+
     let addOnAllowed: boolean | null = null;
     let newStopPrice: number | undefined;
+    let nextAddonNotional: number | undefined;
     let partialAction: V2TradeLifecycleAuthorityResult["partialAction"] = "none";
     let exitAction: V2TradeLifecycleAuthorityResult["exitAction"] = "none";
 
@@ -133,7 +138,7 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
             const remainingGlobalRoom = Math.max(0, globalMaxNotional - currentGlobalNotional);
             const liveMaxOrderNotional = input.liveMaxOrderNotionalUsdt ?? 500;
 
-            const nextAddonNotional = Math.min(
+            nextAddonNotional = input.finalAddonNotionalUsdt ?? Math.min(
                 remainingSymbolRoom,
                 remainingGlobalRoom,
                 addonMaxByProfit,
@@ -159,7 +164,7 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
                 : (entryPrice - effectiveNewStop) / entryPrice * sizeUsd;
             
             // Loss on the new add-on if stopped at effectiveNewStop
-            const addonWorstCase = -nextAddonNotional * addonLossPctToStop;
+            const addonWorstCase = -(nextAddonNotional ?? 0) * addonLossPctToStop;
             const worstCasePnlAfterNewStop = originalWorstCase + addonWorstCase;
 
             console.info(JSON.stringify({
@@ -175,12 +180,96 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
                 trendHealthy && 
                 pnlPct >= 0.002 && 
                 lockedProfitUsd > minimumProtectedProfitUsd && // Must have locked profit buffer
-                nextAddonNotional >= 10 && // Minimum viable add-on size reduced to 10 for smaller accounts
+                (nextAddonNotional ?? 0) >= 10 && // Minimum viable add-on size reduced to 10 for smaller accounts
                 worstCasePnlAfterNewStop >= minimumProtectedProfitUsd;
 
-            addOnAllowed = pyramidPass;
+            // --- TREND_GIVEBACK_GUARD (NEW) ---
+            const peakPnlPct = input.peakUnrealizedPnlPct ?? 0;
+            let givebackPct = 0;
+            if (peakPnlPct > 0) {
+                const pnlDrawdown = peakPnlPct - pnlPct;
+                givebackPct = (pnlDrawdown / peakPnlPct) * 100;
+            }
+
+            let guardAction = "none";
+            let guardThresholdPct = 0;
+            let guardTriggered = false;
+
+            if (peakPnlPct >= 0.005) {
+                if (peakPnlPct >= 0.018 && givebackPct >= 30) {
+                    guardAction = "FULL_EXIT_GIVEBACK_PROTECT";
+                    guardThresholdPct = 30;
+                    guardTriggered = true;
+                } else if (peakPnlPct >= 0.010 && givebackPct >= 40) {
+                    guardAction = "PARTIAL_50_GIVEBACK_PROTECT";
+                    guardThresholdPct = 40;
+                    guardTriggered = true;
+                } else if (peakPnlPct >= 0.005 && givebackPct >= 50) {
+                    guardAction = "PARTIAL_30_GIVEBACK_PROTECT";
+                    guardThresholdPct = 50;
+                    guardTriggered = true;
+                }
+            }
+
+            // Trend Invalidation Guard
+            if (!trendHealthy) {
+                if (pnlPct >= 0.003) {
+                    guardAction = "TREND_PROFIT_FULL_TAKE_ON_INVALIDATION";
+                    guardTriggered = true;
+                } else if (pnlPct < -0.01) { // Example threshold for defensive
+                    guardAction = "TREND_DEFENSIVE_FULL_EXIT_ON_INVALIDATION";
+                    guardTriggered = true;
+                }
+            }
+
+            if (guardTriggered) {
+                console.info(JSON.stringify({
+                    event: "V2_TREND_GIVEBACK_GUARD_PROOF",
+                    symbol: input.symbol,
+                    side,
+                    current_pnl_pct: pnlPct,
+                    peak_pnl_pct: peakPnlPct,
+                    giveback_pct: givebackPct,
+                    guard_threshold_pct: guardThresholdPct,
+                    guard_action: guardAction
+                }));
+
+                // Guard overrides Add-on
+                addOnAllowed = false;
+                proofReasons.push(`TREND_GIVEBACK_GUARD_${guardAction}`);
+
+                if (guardAction.includes("FULL_EXIT")) {
+                    exitAction = "exit";
+                } else if (guardAction.includes("PARTIAL_50")) {
+                    partialAction = "reduce";
+                    // reduceRatio logic would go here if handled by result
+                } else if (guardAction.includes("PARTIAL_30")) {
+                    partialAction = "protect_profit";
+                }
+
+                // Never-worsen stop tightening
+                const tightStopAtr = guardAction.includes("PARTIAL") ? 1.2 : 0.8;
+                const potentialTightStop = markPrice + (sideMultiplier * tightStopAtr * atr);
+                const tightStop = side === "long"
+                    ? Math.max(effectiveNewStop, potentialTightStop)
+                    : Math.min(effectiveNewStop, potentialTightStop);
+                
+                if (tightStop !== effectiveNewStop) {
+                    newStopPrice = tightStop;
+                    console.info(JSON.stringify({
+                        event: "V2_TREND_GUARD_STOP_TIGHTEN_PROOF",
+                        symbol: input.symbol,
+                        side,
+                        base_stop: effectiveNewStop,
+                        tight_stop: tightStop,
+                        guard_action: guardAction
+                    }));
+                }
+            }
+
+            addOnAllowed = pyramidPass && !guardTriggered;
             
-            if (pyramidPass) {
+            if (pyramidPass && !guardTriggered) {
                 console.info(JSON.stringify({
                     event: "V2_TREND_ADDON_BUDGET_PROOF",
                     symbol: input.symbol,
@@ -191,22 +280,30 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
                 }));
             }
 
-            // 7. Stop Management
-            if (effectiveNewStop !== currentStop) {
+            // 7. Stop Management (Finalized)
+            if (newStopPrice == null && effectiveNewStop !== currentStop) {
                 newStopPrice = effectiveNewStop;
+            }
+
+            if (newStopPrice != null && newStopPrice !== currentStop) {
                 console.info(JSON.stringify({
                     event: "V2_TREND_STOP_PROPAGATION_PROOF",
                     symbol: input.symbol,
                     oldStop: currentStop,
-                    newStop: effectiveNewStop,
-                    reason: "TRAILING_ATR_PROTECTION"
+                    newStop: newStopPrice,
+                    reason: guardTriggered ? "GIVEBACK_GUARD_TIGHTENING" : "TRAILING_ATR_PROTECTION"
                 }));
             }
 
-            partialAction = trendHealthy ? "none" : "prepare";
-            exitAction = trendHealthy ? "none" : "watch";
+            // Update result metadata
+            result_givebackPct = givebackPct;
+            result_guardThresholdPct = guardThresholdPct;
+            result_guardAction = guardAction;
+
+            partialAction = (guardTriggered && partialAction !== "none") ? partialAction : (trendHealthy ? "none" : "prepare");
+            exitAction = (guardTriggered && exitAction !== "none") ? exitAction : (trendHealthy ? "none" : "watch");
             proofReasons.push(trendHealthy ? "TREND_CONTINUATION_HOLD" : "TREND_WEAKNESS_EXIT_WATCH");
-            if (pyramidPass) proofReasons.push("PROFIT_LOCKED_PYRAMID_ACTIVE");
+            if (pyramidPass && !guardTriggered) proofReasons.push("PROFIT_LOCKED_PYRAMID_ACTIVE");
         } else {
             addOnAllowed = false;
             partialAction = "none";
@@ -286,9 +383,13 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
         cooldownManagedByV2: isV2Owner,
         positionStateManagedByV2: isV2Owner,
         addOnAllowed,
+        nextAddonNotional,
         partialAction,
         exitAction,
         newStopPrice,
+        givebackPct: result_givebackPct,
+        guardThresholdPct: result_guardThresholdPct,
+        guardAction: result_guardAction,
         cooldownType,
         cooldownReason: input.cooldownState.reason,
         legacyInterventionDetected,

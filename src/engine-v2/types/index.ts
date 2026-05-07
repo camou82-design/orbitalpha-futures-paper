@@ -75,6 +75,9 @@ export interface EngineV2Position {
     entryStage: number;
     pnlPct: number;
     ledger_stop_px?: number;
+    peakUnrealizedPnlPct?: number;
+    peakUnrealizedPnlUsd?: number;
+    peakPnlUpdatedAt?: number;
 }
 
 /** 
@@ -128,6 +131,9 @@ export interface LegacyPositionAdapter {
     entryStage?: number;
     pnlPct?: number;
     ledger_stop_px?: number;
+    peakUnrealizedPnlPct?: number;
+    peakUnrealizedPnlUsd?: number;
+    peakPnlUpdatedAt?: number;
 }
 
 export interface LegacyResultAdapter {
@@ -199,6 +205,7 @@ export interface EngineV2Input {
         lockedProfitUsdt?: number;
         availableRiskBudgetUsdt?: number;
         addonMaxNotionalUsdt?: number;
+        finalAddonNotionalUsdt?: number;
     };
     now: number;
     v1Result: {
@@ -322,6 +329,9 @@ export interface V2BridgePosition {
     entryPrice: number;
     sizeUsd: number;
     entryStage: number;
+    peakUnrealizedPnlPct?: number;
+    peakUnrealizedPnlUsd?: number;
+    peakPnlUpdatedAt?: number;
 }
 
 export interface V2BridgeState {
@@ -658,6 +668,9 @@ export interface V2PositionStateAuthorityResult {
     unrealizedPnlKrw: number | null;
     unrealizedPnlUsdEstimate: number | null;
     unrealizedPnlPct: number | null;
+    peakUnrealizedPnlPct: number | null;
+    peakUnrealizedPnlUsd: number | null;
+    givebackPct: number | null;
     stateReason: string | null;
     proofReasons: string[];
     trueInconsistencyReasons: string[];
@@ -705,6 +718,10 @@ export interface V2TradeLifecycleAuthorityInput {
     currentSymbolNotionalUsd?: number;
     currentGlobalNotionalUsd?: number;
     liveMaxOrderNotionalUsdt?: number;
+    finalAddonNotionalUsdt?: number;
+    peakUnrealizedPnlPct?: number;
+    peakUnrealizedPnlUsd?: number;
+    peakPnlUpdatedAt?: number;
 }
 
 export interface V2TradeLifecycleAuthorityResult {
@@ -723,9 +740,13 @@ export interface V2TradeLifecycleAuthorityResult {
     cooldownManagedByV2: boolean;
     positionStateManagedByV2: boolean;
     addOnAllowed: boolean | null;
+    nextAddonNotional?: number;
     partialAction: V2LifecyclePartialAction;
     exitAction: V2LifecycleExitAction;
     newStopPrice?: number;
+    givebackPct?: number;
+    guardThresholdPct?: number;
+    guardAction?: string;
     cooldownType: V2CooldownType;
     cooldownReason: string | null;
     legacyInterventionDetected: boolean;

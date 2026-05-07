@@ -359,6 +359,30 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         };
     }
+    // --- Unified finalAddonNotionalUsdt Calculation (Pyramid Sizing Source of Truth) ---
+    const symbolMaxNotionalUsdt = accountEquityUsd * 0.8;
+    const globalMaxNotionalUsdt = accountEquityUsd * 1.5;
+    const remainingSymbolRoom = Math.max(0, symbolMaxNotionalUsdt - currentSymbolNotionalUsd);
+    const remainingGlobalRoom = Math.max(0, globalMaxNotionalUsdt - currentGlobalNotionalUsd);
+    const liveMaxOrderNotionalUsdt = v2State.liveMaxOrderNotionalUsdt ?? 500;
+
+    const finalAddonNotionalUsdt = Math.min(
+        addOnPolicy.addonMaxNotionalUsdt ?? 0,
+        liveMaxOrderNotionalUsdt,
+        remainingSymbolRoom,
+        remainingGlobalRoom
+    );
+
+    console.info(JSON.stringify({
+        event: "V2_TREND_FINAL_ADDON_NOTIONAL_PROOF",
+        symbol: String(input.symbol),
+        addonPolicyMax: addOnPolicy.addonMaxNotionalUsdt,
+        liveMaxOrder: liveMaxOrderNotionalUsdt,
+        remainingSymbolRoom,
+        remainingGlobalRoom,
+        finalAddonNotionalUsdt
+    }));
+
     authoritativeInput = {
         ...authoritativeInput,
         state: {
@@ -368,7 +392,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             addOnPolicyAction: addOnPolicy.action,
             lockedProfitUsdt: addOnPolicy.lockedProfitUsdt,
             availableRiskBudgetUsdt: addOnPolicy.availableRiskBudgetUsdt,
-            addonMaxNotionalUsdt: addOnPolicy.addonMaxNotionalUsdt
+            addonMaxNotionalUsdt: addOnPolicy.addonMaxNotionalUsdt,
+            finalAddonNotionalUsdt: finalAddonNotionalUsdt
         }
     };
     const exitPolicy = evaluateV2ExitPolicy({
@@ -2117,7 +2142,33 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         lifecyclePosition_latest != null ||
         finalDecision === "ENTER" ||
         riskSizing.blockReason != null;
-        if (hasLifecycleCandidate) {
+
+    if (lifecyclePosition_latest != null) {
+        const currentPnlPct = lifecyclePosition_latest.pnlPct;
+        const currentPnlUsd = lifecyclePosition_latest.sizeUsd * currentPnlPct;
+        const oldPeakPct = lifecyclePosition_latest.peakUnrealizedPnlPct ?? -Infinity;
+        const isNewPeak = currentPnlPct > oldPeakPct || lifecyclePosition_latest.peakUnrealizedPnlPct == null;
+
+        if (isNewPeak) {
+            lifecyclePosition_latest.peakUnrealizedPnlPct = currentPnlPct;
+            lifecyclePosition_latest.peakUnrealizedPnlUsd = currentPnlUsd;
+            lifecyclePosition_latest.peakPnlUpdatedAt = Date.now();
+        }
+
+        if (shouldEmitV2Proof("V2_TREND_PEAK_PNL_TRACK_PROOF", String(input.symbol), `${lifecyclePosition_latest.peakUnrealizedPnlPct}|${isNewPeak}`, false)) {
+            console.info(JSON.stringify({
+                event: "V2_TREND_PEAK_PNL_TRACK_PROOF",
+                symbol: String(input.symbol),
+                side: lifecyclePosition_latest.side,
+                current_pnl_pct: currentPnlPct,
+                peak_pnl_pct: lifecyclePosition_latest.peakUnrealizedPnlPct,
+                peak_pnl_usd: lifecyclePosition_latest.peakUnrealizedPnlUsd,
+                updated: isNewPeak
+            }));
+        }
+    }
+
+    if (hasLifecycleCandidate) {
         const cooldownReasonRaw = (riskSizing.diagnostics as Record<string, unknown> | undefined)?.risk_cooldown_subreason;
         const cooldownRemainingRaw = (riskSizing.diagnostics as Record<string, unknown> | undefined)?.cooldown_remaining_ms;
         lifecycleAuthority = deriveTradeLifecycleAuthority({
@@ -2155,7 +2206,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             accountEquityUsd: v2State.accountEquityKrw / 1400,
             currentSymbolNotionalUsd: v2State.symbolLedgerExposureNotionalKrw / 1400,
             currentGlobalNotionalUsd: v2State.ledgerExposureNotionalKrw / 1400,
-            liveMaxOrderNotionalUsdt: v2State.liveMaxOrderNotionalUsdt
+            liveMaxOrderNotionalUsdt: v2State.liveMaxOrderNotionalUsdt,
+            finalAddonNotionalUsdt: finalAddonNotionalUsdt,
+            peakUnrealizedPnlPct: lifecyclePosition_latest?.peakUnrealizedPnlPct,
+            peakUnrealizedPnlUsd: lifecyclePosition_latest?.peakUnrealizedPnlUsd,
+            peakPnlUpdatedAt: lifecyclePosition_latest?.peakPnlUpdatedAt
         });
 
         // Cooldown authority is computed as an independent proof/comparison layer.
@@ -2302,7 +2357,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 known_shadow_gaps: lifecycleAuthority.knownShadowGaps,
                 true_inconsistency_reasons: lifecycleAuthority.trueInconsistencyReasons,
                 inconsistency_reasons: lifecycleAuthority.inconsistencyReasons,
-                proof_reasons: lifecycleAuthority.proofReasons
+                proof_reasons: lifecycleAuthority.proofReasons,
+                giveback_pct: lifecycleAuthority.givebackPct,
+                guard_threshold_pct: lifecycleAuthority.guardThresholdPct,
+                guard_action: lifecycleAuthority.guardAction
             }));
         }
 
@@ -2348,6 +2406,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             unrealizedPnlKrw: null,
             unrealizedPnlUsdEstimate: lifecyclePosition_latest != null ? lifecyclePosition_latest.sizeUsd * lifecyclePosition_latest.pnlPct : null,
             unrealizedPnlPct: lifecyclePosition_latest?.pnlPct ?? null,
+            peakUnrealizedPnlPct: lifecyclePosition_latest?.peakUnrealizedPnlPct ?? null,
+            peakUnrealizedPnlUsd: lifecyclePosition_latest?.peakUnrealizedPnlUsd ?? null,
+            givebackPct: lifecycleAuthority.givebackPct ?? null,
             stateReason: lifecycleAuthority.cooldownReason || null,
             proofReasons: [],
             trueInconsistencyReasons: [],
@@ -2377,6 +2438,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 pnl_state: v2PositionStateAuthority.pnlState,
                 unrealized_pnl_usd_estimate: v2PositionStateAuthority.unrealizedPnlUsdEstimate,
                 unrealized_pnl_pct: lifecyclePosition_latest?.pnlPct ?? null,
+                peak_pnl_pct: v2PositionStateAuthority.peakUnrealizedPnlPct,
+                peak_pnl_usd: v2PositionStateAuthority.peakUnrealizedPnlUsd,
+                giveback_pct: v2PositionStateAuthority.givebackPct,
                 state_reason: v2PositionStateAuthority.stateReason,
                 hold_ms: v2PositionStateAuthority.holdMs
             }));
@@ -2705,7 +2769,10 @@ export function adaptV2Input(
                 sizeUsd: p.sizeUsd,
                 entryStage: p.entryStage ?? 0,
                 pnlPct: p.pnlPct ?? 0,
-                ledger_stop_px: p.ledger_stop_px
+                ledger_stop_px: p.ledger_stop_px,
+                peakUnrealizedPnlPct: p.peakUnrealizedPnlPct,
+                peakUnrealizedPnlUsd: p.peakUnrealizedPnlUsd,
+                peakPnlUpdatedAt: p.peakPnlUpdatedAt
             })),
             globalRiskScore: state.globalRiskScore,
             lossStreaks: state.lossStreaks,
