@@ -7297,14 +7297,6 @@ export class PaperEngine {
             flowId
           });
 
-          open.v2RangeTp2Triggered = true;
-          this.logger.info("V2_RANGE_TP_TRIGGER_LEDGER_SAVE_PROOF", {
-            symbol: open.symbol,
-            tp1Triggered: open.v2RangeTp1Triggered ?? false,
-            tp2Triggered: true,
-            flowId
-          });
-
           const metricsF = leg(open.sizeUsd);
           const closedRowF = finalizePaperClosedRecord({
             open,
@@ -7322,7 +7314,7 @@ export class PaperEngine {
             ...snapPaths
           });
 
-          await this.dispatchOkxClose({
+          const tp2Submit = await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
             sizeUsd: open.sizeUsd,
@@ -7334,7 +7326,63 @@ export class PaperEngine {
             isTakeProfit: true
           });
 
-          const routedClosed = await this.appendClosedWithStandardRouting({
+          this.logger.info("V2_RANGE_TP2_CLOSE_ORDER_SUBMIT_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            ord_id: tp2Submit?.ordId ?? null,
+            fill_confirmed: tp2Submit?.fillConfirmed ?? false,
+            close_price: closePrice,
+            size_usd: open.sizeUsd,
+            flowId
+          });
+
+          const isExchangeEnabledTp2 = this.okxDemo && this.signedSubmitMode() === "enabled";
+          const tp2Confirmed = !isExchangeEnabledTp2 || (tp2Submit?.ordId != null && tp2Submit?.fillConfirmed === true);
+
+          if (isExchangeEnabledTp2 && !tp2Confirmed) {
+            // Not fill-confirmed: transition to CLOSE_PENDING, do NOT prune or write history
+            const updatedOpen: PaperOpenPositionRecord = {
+              ...open,
+              lifecycleState: "CLOSE_PENDING",
+              closePendingOrdId: tp2Submit?.ordId ?? undefined,
+              closePendingClOrdId: tp2Submit?.clOrdId ?? undefined,
+              closePendingAt: Date.now(),
+              closePendingReason: "v2_tp2_automated",
+              closePendingPrice: closePrice,
+              closePendingFundingRate: snap?.fundingRate
+            };
+            this.logger.info("V2_RANGE_TP2_CLOSE_PENDING_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              ord_id: tp2Submit?.ordId ?? null,
+              pending_reason: "fill_not_confirmed",
+              flowId
+            });
+            crashPositionsModified = true;
+            remaining.push(updatedOpen);
+            continue;
+          }
+
+          // Fill confirmed (or exchange disabled): commit all ledger mutations
+          this.logger.info("V2_RANGE_TP2_CLOSE_FILL_STATUS_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            ord_id: tp2Submit?.ordId ?? null,
+            fill_confirmed: true,
+            close_price: closePrice,
+            flowId
+          });
+
+          // Persist trigger flag only after fill confirmed
+          open.v2RangeTp2Triggered = true;
+          this.logger.info("V2_RANGE_TP_TRIGGER_LEDGER_SAVE_PROOF", {
+            symbol: open.symbol,
+            tp1Triggered: open.v2RangeTp1Triggered ?? false,
+            tp2Triggered: true,
+            flowId
+          });
+
+          const routedClosedF = await this.appendClosedWithStandardRouting({
             closedRow: closedRowF,
             open,
             flowId,
@@ -7344,7 +7392,16 @@ export class PaperEngine {
             currentRegime: regimeNow
           });
 
-          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+          this.logger.info("V2_RANGE_TP2_CLOSE_LEDGER_UPDATE_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            ord_id: tp2Submit?.ordId ?? null,
+            history_appended: true,
+            ledger_pruned: true,
+            flowId
+          });
+
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosedF);
           this.terminalExitConsumedByFlow.add(flowId);
           continue; // Full exit
         }
@@ -7361,14 +7418,6 @@ export class PaperEngine {
             flowId
           });
 
-          open.v2RangeTp1Triggered = true;
-          this.logger.info("V2_RANGE_TP_TRIGGER_LEDGER_SAVE_PROOF", {
-            symbol: open.symbol,
-            tp1Triggered: true,
-            tp2Triggered: open.v2RangeTp2Triggered ?? false,
-            flowId
-          });
-          
           const partialSizeUsd = open.sizeUsd * ratio;
           const metricsP = leg(partialSizeUsd);
           const closedRowP = finalizePaperClosedRecord({
@@ -7387,7 +7436,7 @@ export class PaperEngine {
             ...snapPaths
           });
 
-          await this.dispatchOkxClose({
+          const tp1Submit = await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
             sizeUsd: partialSizeUsd,
@@ -7397,6 +7446,69 @@ export class PaperEngine {
             flowId,
             reason: "v2_tp1_automated",
             isTakeProfit: true
+          });
+
+          this.logger.info("V2_RANGE_TP1_REDUCE_ORDER_SUBMIT_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            ord_id: tp1Submit?.ordId ?? null,
+            fill_confirmed: tp1Submit?.fillConfirmed ?? false,
+            partial_size_usd: partialSizeUsd,
+            close_price: closePrice,
+            flowId
+          });
+
+          const isExchangeEnabledTp1 = this.okxDemo && this.signedSubmitMode() === "enabled";
+          const tp1Confirmed = !isExchangeEnabledTp1 || (tp1Submit?.ordId != null && tp1Submit?.fillConfirmed === true);
+
+          if (isExchangeEnabledTp1 && !tp1Confirmed) {
+            // Not fill-confirmed: transition to PARTIAL_PENDING, do NOT mutate sizeUsd or stage
+            const updatedOpen: PaperOpenPositionRecord = {
+              ...open,
+              lifecycleState: "PARTIAL_PENDING",
+              partialPendingOrdId: tp1Submit?.ordId ?? undefined,
+              partialPendingClOrdId: tp1Submit?.clOrdId ?? undefined,
+              partialPendingSizeUsd: partialSizeUsd,
+              partialPendingOriginalSizeUsd: partialSizeUsd,
+              partialPendingProcessedFillSz: 0,
+              partialPendingProcessedUsd: 0,
+              partialPendingAt: Date.now(),
+              partialPendingReduceRatio: ratio,
+              partialPendingReason: "v2_tp1_automated",
+              partialPendingPrice: closePrice,
+              partialPendingFundingRate: snap?.fundingRate
+            };
+            this.logger.info("V2_RANGE_TP1_REDUCE_PENDING_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              ord_id: tp1Submit?.ordId ?? null,
+              pending_reason: "fill_not_confirmed",
+              partial_size_usd: partialSizeUsd,
+              flowId
+            });
+            crashPositionsModified = true;
+            remaining.push(updatedOpen);
+            continue;
+          }
+
+          // Fill confirmed (or exchange disabled): commit all ledger mutations
+          this.logger.info("V2_RANGE_TP1_REDUCE_FILL_STATUS_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            ord_id: tp1Submit?.ordId ?? null,
+            fill_confirmed: true,
+            partial_size_usd: partialSizeUsd,
+            close_price: closePrice,
+            flowId
+          });
+
+          // Persist trigger flag only after fill confirmed
+          open.v2RangeTp1Triggered = true;
+          this.logger.info("V2_RANGE_TP_TRIGGER_LEDGER_SAVE_PROOF", {
+            symbol: open.symbol,
+            tp1Triggered: true,
+            tp2Triggered: open.v2RangeTp2Triggered ?? false,
+            flowId
           });
 
           await this.appendClosedWithStandardRouting({
@@ -7413,10 +7525,14 @@ export class PaperEngine {
           open.partialExitStage = 1;
           open.lastPartialAt = closedAt;
           crashPositionsModified = true;
-          
-          this.logger.info("V2_TP1_PARTIAL_EXIT_EXECUTED", {
+
+          this.logger.info("V2_RANGE_TP1_REDUCE_LEDGER_UPDATE_PROOF", {
             symbol: open.symbol,
-            remaining_size: open.sizeUsd,
+            side: open.side,
+            ord_id: tp1Submit?.ordId ?? null,
+            history_appended: true,
+            size_after_usd: open.sizeUsd,
+            partial_exit_stage: open.partialExitStage,
             flowId
           });
         }
