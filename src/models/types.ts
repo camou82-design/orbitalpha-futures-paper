@@ -255,10 +255,10 @@ export type PaperDecisionRejectReason =
   | "RANGE_STOP_REENTRY_SAME_CONTEXT_BLOCKED"
   /** Stage1 symbol-level mutex: opposite side position exists */
   | "SYMBOL_OPPOSITE_POSITION_OPEN"
-  /** Stage1 symbol-level mutex: same side already open without add-on/scale-in */
   | "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
   | "PENDING_EXCHANGE_CONFIRM_LOCK"
-  | "EXTERNAL_MANUAL_POSITION_BLOCK";
+  | "EXTERNAL_MANUAL_POSITION_BLOCK"
+  | "MANUAL_CLOSE_COOLDOWN_ACTIVE";
 
 export type PaperStage1ResultCode =
   | "STAGE1_ENTERED"
@@ -833,6 +833,8 @@ export type PaperOpenPositionRecord = {
   // Protective Stop Order Tracking
   protectiveStopAlgoId?: string;
   isProtectiveStopRegistered?: boolean;
+  /** Whether the position was opened by V2 authority. Used for unit scaling logic. */
+  isV2Authority?: boolean;
 
   // Partial Pending Tracking
   partialPendingOrdId?: string;

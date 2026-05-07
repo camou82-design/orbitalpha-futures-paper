@@ -190,14 +190,19 @@ function computePaperEstimatedUsage(
 } {
   const lines: LiveBalanceAuthorityResult["position_margin_lines"] = positions.map((p) => {
     const lev = Number.isFinite(p.leverage) && p.leverage > 0 ? p.leverage : 1;
-    const margin = Math.max(0, p.sizeUsd);
-    const notional = margin * lev;
+    const isV2 = (p as any).isV2Authority === true;
+    
+    // V2 Notional Alignment: sizeUsd is already Notional.
+    // Legacy: sizeUsd is Margin, Notional = Margin * Leverage.
+    const notional = Math.max(0, p.sizeUsd);
+    const margin = lev > 0 ? notional / lev : notional;
+
     return {
       symbol: String(p.symbol),
       side: String(p.side),
       notional_usdt: notional,
       applied_leverage: lev,
-      estimated_margin_usdt: lev > 0 ? notional / lev : margin,
+      estimated_margin_usdt: margin,
       source: "paper_estimated"
     };
   });

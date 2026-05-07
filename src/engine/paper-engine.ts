@@ -970,6 +970,10 @@ export class PaperEngine {
   private readonly symbolProtectionFailedBlocked = new Set<string>();
   /** Deduplication for V2 exit authority proof logs. Key: `${symbol}_${side}` */
   private lastV2ExitAuthorityProofBySymbol = new Map<string, string>();
+  /** Manual close cooldown to prevent immediate re-entry. Key: symbol */
+  private manualCloseCooldownBySymbol = new Map<string, { side: "long" | "short"; until: number }>();
+  /** Cached active algo orders from exchange for auto-repair logic. */
+  private cachedOpsAlgos: any[] = [];
   private instrumentCache = new Map<string, { ctVal: number; ctValCcy: string }>();
   private lastInstrumentCacheUpdateAt = 0;
   private readonly instrumentCacheTTL = 3600_000; // 1 hour
@@ -1056,7 +1060,6 @@ export class PaperEngine {
   private readonly opsOrdersScanMinIntervalMs = 10_000;
   private opsOrdersScanEverDone = false;
   private cachedOpsPending: Record<string, unknown>[] = [];
-  private cachedOpsAlgos: Record<string, unknown>[] = [];
   private cachedOpsFetchErrors: string[] = [];
   private lastPositionOpsSurface: PositionOpsSurface | null = null;
   private positionExitProofThrottleByFlow = new Map<string, number>();
@@ -1479,9 +1482,23 @@ export class PaperEngine {
             reference_entry_px: r.reference_entry_px,
             initial_stop_px_engine_mirror: r.initial_stop_px_engine_mirror,
             ledger_stop_px: r.ledger_stop_px,
-            detail:
-              "No reduce-only conditional/trigger-style pending order matched this instId (exchange diagnostic only)."
+            detail: "No reduce-only conditional/trigger-style pending order matched this instId (exchange diagnostic only)."
           });
+          
+          // [TASK_1] Auto-repair missing protective stop
+          const ledgerPos = paperOpens.find(p => p.symbol === r.symbol && p.side === r.side);
+          if (ledgerPos && ledgerPos.stopPrice) {
+            const pricingLast = r.okx_avg_px || ledgerPos.entryPrice;
+            const res = await this.ensureProtectiveStopOrder(ledgerPos, `ops_watch_repair:${r.symbol}`, pricingLast);
+            if (res.modified) {
+              const idx = paperOpens.findIndex(p => p.symbol === r.symbol && p.side === r.side);
+              if (idx >= 0) {
+                 const nextArray = [...paperOpens];
+                 nextArray[idx] = res.record;
+                 await this.positions.saveOpenAll(nextArray);
+              }
+            }
+          }
           
           // [PROTECTIVE_STOP_MISSING_PROOF] Task 1: Explicit proof for missing protective orders
           if (r.ledger_stop_px != null) {
@@ -1494,8 +1511,62 @@ export class PaperEngine {
               mirror_stop_px: r.initial_stop_px_engine_mirror,
               reduce_only_protective_found: false,
               consistency_check: "FAIL",
-              action_suggested: "MANUAL_STOP_VERIFICATION_REQUIRED"
+              action_suggested: "REPAIR_ATTEMPTED_BY_OPS_WATCH"
             });
+          }
+        }
+
+        // [TASK_4 & TASK_7] Open order purpose classification and stale entry auto-cancel
+        const algoForSymbol = this.cachedOpsAlgos.filter((a: any) => a.instId === r.inst_id);
+        const swapForSymbol = this.cachedOpsPending.filter((a: any) => a.instId === r.inst_id);
+        const allOpenOrders = [...algoForSymbol, ...swapForSymbol];
+        
+        if (allOpenOrders.length > 0) {
+          for (const ord of allOpenOrders) {
+            const isReduceOnly = ord.reduceOnly === "true" || ord.reduceOnly === true;
+            const hasEngineClOrdId = ord.clOrdId && String(ord.clOrdId).length > 0;
+            
+            let purpose = "unknown";
+            if (!isReduceOnly && hasEngineClOrdId) purpose = "entry-purpose";
+            else if (isReduceOnly && hasEngineClOrdId) purpose = "protective-purpose";
+            else if (isReduceOnly && !hasEngineClOrdId) purpose = "manual-reduce-purpose";
+            else purpose = "manual-entry-purpose";
+
+            this.logger.info("OKX_OPEN_ORDER_PURPOSE_CLASSIFY_PROOF", {
+              symbol: r.symbol,
+              ordId: ord.ordId,
+              algoId: ord.algoId,
+              clOrdId: ord.clOrdId,
+              side: ord.side,
+              posSide: ord.posSide,
+              reduceOnly: isReduceOnly,
+              purpose
+            });
+
+            if (purpose === "manual-reduce-purpose") {
+              this.logger.info("MANUAL_REDUCE_ORDER_DETECTED_PROOF", { symbol: r.symbol, ordId: ord.ordId, side: ord.side });
+            }
+
+            // Cancel stale entry orders if position already exists
+            if (!isReduceOnly && (ord.ordId || ord.algoId) && Math.abs((r as any).okx_pos ?? 0) > 0) {
+              this.logger.info("OKX_STALE_ENTRY_ORDER_CANCEL_ATTEMPT_PROOF", { symbol: r.symbol, ordId: ord.ordId, algoId: ord.algoId });
+              try {
+                if (ord.algoId) {
+                  await this.okxDemo?.cancelAlgoOrder([{ instId: toOkxSwapInstId(r.symbol), algoId: ord.algoId }]);
+                } else if (ord.ordId) {
+                  await this.okxDemo?.cancelOrder(toOkxSwapInstId(r.symbol), ord.ordId);
+                }
+                this.logger.info("OKX_STALE_ENTRY_ORDER_CANCEL_PROOF", {
+                  symbol: r.symbol,
+                  ordId: ord.ordId,
+                  algoId: ord.algoId,
+                  side: ord.side,
+                  reason: "position_already_exists_cancelling_stale_entry"
+                });
+              } catch (err) {
+                this.logger.error("OKX_STALE_ENTRY_ORDER_CANCEL_FAIL_PROOF", { symbol: r.symbol, ordId: ord.ordId, algoId: ord.algoId, error: String(err) });
+              }
+            }
           }
         }
       }
@@ -1606,6 +1677,43 @@ export class PaperEngine {
         closeSource: source,
         currentRegime: this.lastRegime.regime || "NO_TRADE"
       });
+
+      // [HARDENING] Manual close cooldown (5 min) to prevent immediate re-entry
+      this.manualCloseCooldownBySymbol.set(String(open.symbol), {
+        side: open.side,
+        until: nowTs + 300_000
+      });
+
+      this.logger.info("MANUAL_CLOSE_REENTRY_GUARD_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        cooldown_until: nowTs + 300_000,
+        reason: "manual_full_close_reconciled"
+      });
+
+      // Also cancel any stale entry-purpose open orders for this symbol to prevent unwanted re-entry
+      if (this.okxDemo) {
+         try {
+             const instId = toOkxSwapInstId(open.symbol as MarketSymbol);
+             const pendRes = await this.okxDemo.getOrdersPending({ instType: "SWAP", instId });
+             if (pendRes.ok && pendRes.value) {
+                 for (const ord of pendRes.value) {
+                    const isReduceOnly = ord.reduceOnly === "true" || (ord as any).reduceOnly === true;
+                    if (!isReduceOnly && ord.ordId) {
+                        this.logger.info("OKX_STALE_ENTRY_ORDER_CANCEL_AFTER_MANUAL_CLOSE_PROOF", {
+                            symbol: open.symbol,
+                            ordId: ord.ordId,
+                            side: ord.side,
+                            posSide: ord.posSide
+                        });
+                        await this.okxDemo?.cancelOrder(toOkxSwapInstId(open.symbol as MarketSymbol), String(ord.ordId));
+                    }
+                 }
+             }
+         } catch (err) {
+             this.logger.error("STALE_ENTRY_CANCEL_FAIL_AFTER_MANUAL_CLOSE", { symbol: open.symbol, error: String(err) });
+         }
+      }
 
       ledgerModified = true;
       if (open.lifecycleState !== "EXTERNAL_MANUAL_POSITION") {
@@ -2385,14 +2493,14 @@ export class PaperEngine {
           side,
           entryPrice: avgPx,
           leverage,
-          sizeUsd: notional,
+          sizeUsd: notional / (leverage || 1),
           strategyVersion: "paper-v2",
           sourceSignal: "okx_reconcile_adopted",
           sourceRunPath: "manual_adoption",
           lifecycleState: "EXTERNAL_MANUAL_POSITION",
           reconcileState: "ADOPTED",
           lastCheckedAt: nowTs,
-          initialSizeUsd: notional,
+          initialSizeUsd: notional / (leverage || 1),
           status: "open",
           regimeAtEntry: this.lastRegime.regime || "NO_TRADE",
           executorAtEntry: "IDLE",
@@ -3433,6 +3541,9 @@ export class PaperEngine {
       const symbolBlocked = this.symbolExternalManualBlocked.has(`${sym}:long`) || 
                            this.symbolExternalManualBlocked.has(`${sym}:short`);
 
+      const manualCooldown = this.manualCloseCooldownBySymbol.get(symKeyEarly);
+      const isManualCooldownActive = manualCooldown && fetchedAt < manualCooldown.until;
+
       const blockRes: EvaluatePaperSymbolEntryResult | null = symbolBlocked ? {
         decision: {
           ts: fetchedAt,
@@ -3457,7 +3568,31 @@ export class PaperEngine {
         adaptiveDetail: null,
         adaptiveResult: null,
         aiGatePassed: false
-      } : null;
+      } : (isManualCooldownActive ? {
+        decision: {
+          ts: fetchedAt,
+          timestamp: new Date(fetchedAt).toISOString(),
+          symbol: sym,
+          engine_mode: this.config.paperEngineMode,
+          signal_state: "NONE",
+          regime_state: effectiveRegimeForDecision as PaperRegimeState,
+          edge_state: "PASS",
+          risk_state: "COOLDOWN",
+          execution_state: "DISABLED",
+          final_decision: "REJECT",
+          strategy_executor: "IDLE",
+          reject_reason: "MANUAL_CLOSE_COOLDOWN_ACTIVE",
+          final_block_owner: "manual_close_gate",
+          guidance: `Symbol in manual close cooldown until ${new Date(manualCooldown!.until).toISOString()}`,
+          next_action: "Wait for cooldown to expire"
+        },
+        intentSide: null,
+        executorDecision: null,
+        adaptiveOk: false,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      } : null);
 
       // 1. Snapshot-Check & Preliminary Block Logging
       if (!snap) {
@@ -4954,22 +5089,36 @@ export class PaperEngine {
     isTakeProfit?: boolean;
     isTrailingStop?: boolean;
     isPartial?: boolean;
-  }): Promise<Awaited<ReturnType<typeof this.submitOkxOrder>> | null> {
-    if (!this.okxDemo || !this.okxSignedRestReady) {
+  }): Promise<{ 
+    ok: boolean; 
+    ordId?: string; 
+    fillConfirmed?: boolean;
+    clOrdId?: string;
+    errorCode?: string | null;
+    errorMessage?: string | null;
+  }> {
+    if (!this.okxDemo || this.signedSubmitMode() !== "enabled") {
       this.logger.info("okx_close_dispatch_skipped", {
         symbol: input.symbol,
         reason: input.reason,
         okx_demo_active: !!this.okxDemo,
         okx_signed_ready: this.okxSignedRestReady
       });
-      return null;
+      return { ok: false, errorMessage: "okx_client_or_mode_not_ready" };
     }
 
     const side = input.side === "long" ? "sell" : "buy";
     const posSide = input.side === "long" ? "long" : "short";
     const lev = typeof input.appliedLeverage === "number" && Number.isFinite(input.appliedLeverage) && input.appliedLeverage > 0 ? input.appliedLeverage : 1;
     const qtyLegacyEst = Math.max(0.001, Math.round((input.sizeUsd / Math.max(1e-9, input.lastPrice)) * 1_000_000) / 1_000_000);
-    const desiredNotionalUsdt = Math.max(0, input.sizeUsd) * lev;
+    // [TASK_3] Fix unit scaling: reduce/close orders should not remultiply leverage
+    const desiredNotionalUsdt = Math.max(0, input.sizeUsd);
+    this.logger.info("V2_CLOSE_SIZE_UNIT_PROOF", {
+      symbol: input.symbol,
+      size_usd: input.sizeUsd,
+      desired_notional_usdt: desiredNotionalUsdt,
+      applied_leverage: lev
+    });
     const clOrdId = buildOkxClOrdId(input.symbol, side);
 
     const closeReason = input.reason;
@@ -5063,7 +5212,7 @@ export class PaperEngine {
 
     const finalIsStopLoss = input.isStopLoss === true || isStopLoss;
 
-    return await this.submitOkxOrder({
+    const result = await this.submitOkxOrder({
       symbol: input.symbol as MarketSymbol,
       side,
       posSide,
@@ -5078,6 +5227,15 @@ export class PaperEngine {
       reduceOnly: true,
       ordType: finalIsStopLoss ? "market" : undefined
     });
+
+    return { 
+      ok: result.ok, 
+      ordId: result.ordId ?? undefined, 
+      fillConfirmed: result.fillConfirmed,
+      clOrdId: result.clOrdId,
+      errorCode: result.errorCode,
+      errorMessage: result.errorMessage
+    };
   }
 
   private buildLiveLimitOrderPrice(input: {
@@ -5141,7 +5299,8 @@ export class PaperEngine {
 
   private async ensureProtectiveStopOrder(
     open: PaperOpenPositionRecord,
-    flowId: string
+    flowId: string,
+    pricingLastInput?: number
   ): Promise<{ modified: boolean; success: boolean; record: PaperOpenPositionRecord }> {
     if (!this.okxDemo) return { modified: false, success: false, record: open };
 
@@ -5166,6 +5325,20 @@ export class PaperEngine {
 
     if (!open.stopPrice || !Number.isFinite(open.stopPrice)) {
       return { modified: false, success: true, record: open };
+    }
+
+    // [TASK_1] Pricing fallback for contract count normalization
+    let pricingLast = pricingLastInput;
+    if (!pricingLast || pricingLast <= 0) {
+      pricingLast = open.avgPx || open.entryPrice;
+    }
+    if (!pricingLast || pricingLast <= 0) {
+      const ticker = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
+      pricingLast = ticker?.lastPrice;
+    }
+    if (!pricingLast || pricingLast <= 0) {
+      const okxPos = this.lastLivePositionsPayload?.find(p => p.instId === toOkxSwapInstId(open.symbol));
+      pricingLast = okxPos ? Number(okxPos.avgPx || okxPos.last || 0) : 0;
     }
 
     if (open.isProtectiveStopRegistered && open.protectiveStopAlgoId) {
@@ -5205,7 +5378,7 @@ export class PaperEngine {
           flowId
         });
         
-        // Attempt cancel
+        // [HARDENED] Attempt cancel
         try {
           await this.okxDemo.cancelAlgoOrder([{ instId: toOkxSwapInstId(open.symbol), algoId: open.protectiveStopAlgoId }]);
         } catch (e) {
@@ -5221,6 +5394,45 @@ export class PaperEngine {
       }
     }
 
+    // [AUTO-REPAIR] If not registered or missing from cache, search for orphaned stop orders
+    if (this.opsOrdersScanEverDone && this.okxDemo) {
+      const candidate = (this.cachedOpsAlgos ?? []).find((a: any) => 
+        a.instId === toOkxSwapInstId(open.symbol) &&
+        String(a.posSide).toLowerCase() === (open.side === "long" ? "long" : "short") &&
+        (a.ordType === "conditional" || a.ordType === "oco") &&
+        a.reduceOnly === "true"
+      );
+
+      if (candidate) {
+        const candidateSlPx = Number(candidate.slTriggerPx);
+        const candidatePriceMatches = Math.abs(candidateSlPx - (open.stopPrice ?? 0)) < 1e-8;
+        
+        if (candidatePriceMatches) {
+          this.logger.info("PROTECTIVE_STOP_AUTO_REPAIR_SUCCESS", {
+            symbol: open.symbol,
+            side: open.side,
+            algoId: candidate.algoId,
+            stopPrice: candidateSlPx,
+            detail: "Orphaned stop order found and linked to ledger position"
+          });
+          const repaired: PaperOpenPositionRecord = {
+            ...open,
+            isProtectiveStopRegistered: true,
+            protectiveStopAlgoId: candidate.algoId
+          };
+          return { modified: true, success: true, record: repaired };
+        }
+      }
+    }
+
+    this.logger.info("PROTECTIVE_STOP_MISSING_PROOF", {
+      symbol: open.symbol,
+      side: open.side,
+      consistency_check: "FAIL",
+      action: "REGISTER_NEW_STOP",
+      flowId
+    });
+
     // Attempt to register
     this.logger.info("OKX_PROTECTIVE_STOP_ORDER_SUBMIT", {
       symbol: open.symbol,
@@ -5235,9 +5447,29 @@ export class PaperEngine {
     const posSide = open.side === "long" ? "long" : "short";
     
     // Contract size based on exchange-derived quantity or baseQty
-    const sz = open.okxContracts != null ? Math.round(open.okxContracts) : 0;
+    // Use the contract count from the ledger if available, otherwise fallback to baseQty normalization
+    let sz = open.okxContracts != null ? Math.round(open.okxContracts) : 0;
+    if (sz <= 0 && open.notionalUsd != null && pricingLast > 0) {
+      // Fallback: try to derive contracts from notional if okxContracts is missing
+      const inst = this.instrumentCache.get(instId);
+      if (inst) {
+        const norm = normalizeOkxSwapContractsFromNotional({
+           desiredNotionalUsdt: open.notionalUsd,
+           lastPrice: pricingLast,
+           sizing: { ...inst, lotSz: 1, minSz: 1 } // Heuristic for fallback
+        });
+        sz = norm.normalized_contracts;
+      }
+    }
+
     if (sz <= 0) {
-      this.logger.warn("PROTECTIVE_STOP_SUBMIT_INVALID_SIZE", { symbol: open.symbol, sz, flowId });
+      this.logger.warn("PROTECTIVE_STOP_SUBMIT_INVALID_SIZE", { 
+        symbol: open.symbol, 
+        sz, 
+        okxContracts: open.okxContracts,
+        notionalUsd: open.notionalUsd,
+        flowId 
+      });
       return { modified: false, success: false, record: open };
     }
 
@@ -7234,7 +7466,7 @@ export class PaperEngine {
         });
 
         const isExchangeEnabled = this.okxDemo && this.signedSubmitMode() === "enabled";
-        const closeConfirmed = !isExchangeEnabled || (closeSubmit?.fillConfirmed === true);
+        const closeConfirmed = !isExchangeEnabled || (closeSubmit?.ordId != null && closeSubmit?.fillConfirmed === true);
 
         if (isExchangeEnabled && !closeConfirmed) {
           const updatedOpen: PaperOpenPositionRecord = { 
@@ -8546,8 +8778,21 @@ export class PaperEngine {
           isPartial: true
         });
 
+        this.logger.info("PARTIAL_EXECUTION_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          requested_ratio: reduceRatio,
+          partial_size_usd: partialSizeUsd,
+          lev: open.leverage,
+          desired_notional_usdt: partialSizeUsd,
+          submit_ok: partialSubmit?.ok,
+          ord_id: partialSubmit?.ordId,
+          fill_confirmed: partialSubmit?.fillConfirmed,
+          reason: v2PartialAuthority.partialReason ?? "v2_partial_exit"
+        });
+
         const isExchangeEnabled = this.okxDemo && this.signedSubmitMode() === "enabled";
-        const partialConfirmed = !isExchangeEnabled || (partialSubmit?.fillConfirmed === true);
+        const partialConfirmed = !isExchangeEnabled || (partialSubmit?.ordId != null && partialSubmit?.fillConfirmed === true);
 
         if (isExchangeEnabled && !partialConfirmed) {
           const updatedOpen: PaperOpenPositionRecord = {
@@ -8789,15 +9034,39 @@ export class PaperEngine {
         const closedRow = toClosed(cr, m, open.sizeUsd);
         handleV2ExitAuthorityProof("exit", cr);
         handleV2PartialAuthorityProof("superseded_by_exit", null);
-        await this.dispatchOkxClose({
+        const exitSubmit = await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
           appliedLeverage: Math.max(1, open.leverage ?? 1),
           lastPrice: closePrice,
           flowId,
-          reason: `executor_${cr}`
+          reason: `executor_${cr}`,
+          isV2Authority: true
         });
+
+        const isExchangeEnabled = this.okxDemo && this.signedSubmitMode() === "enabled";
+        const closeConfirmed = !isExchangeEnabled || (exitSubmit?.ordId != null && exitSubmit?.fillConfirmed === true);
+
+        if (isExchangeEnabled && !closeConfirmed) {
+          const updatedOpen: PaperOpenPositionRecord = {
+            ...open,
+            lifecycleState: "CLOSE_PENDING",
+            closePendingOrdId: exitSubmit?.ordId ?? undefined,
+            closePendingAt: Date.now(),
+            closePendingReason: cr,
+            closePendingPrice: closePrice
+          };
+          this.logger.info("V2_CLOSE_EXCHANGE_PENDING_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            ord_id: exitSubmit?.ordId,
+            reason: cr
+          });
+          remaining.push(updatedOpen);
+          continue;
+        }
+
         const routedClosed = await this.appendClosedWithStandardRouting({
           closedRow,
           open,
@@ -11889,6 +12158,7 @@ export class PaperEngine {
               leverage: levScaled,
               sizeUsd: v2EntrySizeUsd,
               initialSizeUsd: v2EntrySizeUsd,
+              isV2Authority: true,
               pos: baseQtyOpen,
               baseQty: baseQtyOpen,
               okxContracts: submit.okxContracts,
@@ -11917,8 +12187,19 @@ export class PaperEngine {
               status: "open"
             };
             next.push(record);
+            
+            // [V2_PROTECTIVE_STOP_AUTO_REGISTRATION]
+            // Immediately attempt to register protective stop order to avoid 1-cycle delay
+            await this.ensureProtectiveStopOrder(record, `v2_fast_entry_auto:${record.symbol}:${record.openedAt}`);
+            
             openPositionsChanged = true;
-            this.logger.info("paper_position_opened", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
+            if (isPending) {
+              this.logger.info("PAPER_OPEN_BLOCKED_UNFILLED_ORDER_PROOF", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
+              this.logger.info("LIMIT_ENTRY_PENDING_STATE_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
+            } else {
+              this.logger.info("LIMIT_ENTRY_FILLED_TO_PAPER_OPEN_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
+              this.logger.info("paper_position_opened", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
+            }
             await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(sym, authority, record));
           } else {
             this.logger.error("paper_position_open_failed", { symbol: sym, error: submit.errorMessage });
@@ -12301,9 +12582,6 @@ export class PaperEngine {
             market_mode: this.lastMarketMode?.marketMode ?? null,
             active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
             block_reason: blockReason,
-            can_reduce_size: canReduceSize,
-            reduced_size_usdt: canReduceSize ? reducedSizeUsd : null,
-            min_order_size_usdt: MIN_POSITION_SIZE_USD
           });
           if (canReduceSize) {
             const originalSizeUsd = entrySizeUsd;
@@ -12384,7 +12662,7 @@ export class PaperEngine {
           trace.inst_id = instId;
           const side = authority.side === "long" ? "buy" : "sell";
           const posSide = authority.side === "long" ? "long" : "short";
-          const entryOrderNotionalUsdt = entrySizeUsd * (authority.appliedLeverage ?? 1);
+          const entryOrderNotionalUsdt = entrySizeUsd;
           const qtyLegacyEst = Math.max(0.001, Math.round((entrySizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
           trace.qty_submitted = qtyLegacyEst;
           const clOrdId = buildOkxClOrdId(first.symbol, side);
@@ -12494,8 +12772,9 @@ export class PaperEngine {
           side: authority.side as "long" | "short",
           entryPrice: first.lastPrice,
           leverage: levScaled,
-          sizeUsd: entrySizeUsd,
-          initialSizeUsd: entrySizeUsd,
+          sizeUsd: (authority.source === "v2") ? entrySizeUsd : entrySizeUsd / (levScaled || 1),
+          initialSizeUsd: (authority.source === "v2") ? entrySizeUsd : entrySizeUsd / (levScaled || 1),
+          isV2Authority: (authority.source === "v2"),
           partialExitStage: 0,
           lifecycleState,
           exchangeOrdId: submit?.ordId ?? undefined,
@@ -12586,6 +12865,11 @@ export class PaperEngine {
         });
 
         next.push(record);
+        
+        // [V2_PROTECTIVE_STOP_AUTO_REGISTRATION]
+        // Immediately attempt to register protective stop order to avoid 1-cycle delay
+        await this.ensureProtectiveStopOrder(record, `v2_legacy_entry_auto:${record.symbol}:${record.openedAt}`);
+        
         openPositionsChanged = true;
 
         this.logger.info("STOP_STATE_PROOF", {
@@ -12699,28 +12983,34 @@ export class PaperEngine {
           total_cost_at_entry: record.totalCostAtEntry ?? null,
           ...buildAuthorityEventMeta(authority, entrySizeUsd)
         });
-        this.logger.info("paper_position_opened", {
-          open_trace_id: trace.open_trace_id,
-          sample_symbol_btc_eth: trace.sample_symbol_btc_eth,
-          order_submit_requested: trace.order_submit_requested,
-          order_submit_ack: trace.order_submit_ack,
-          order_submit_error_code: trace.order_submit_error_code,
-          order_submit_error_message: trace.order_submit_error_message,
-          position_open_record_written: trace.position_open_record_written,
-          low_expected_move_relax_size_limited:
-            first.rangeSignalKeptByRelax === true &&
-            first.rangeSignalDowngradeReason === "low_expected_move_relaxed_by_range_structure",
-          position_open_final_state: trace.position_open_final_state,
-          open_fail_stage: trace.open_fail_stage,
-          exchange_client_order_id: trace.exchange_client_order_id,
-          stored_position: "queued_in_memory_before_saveOpenAll",
-          symbol: record.symbol,
-          side: record.side,
-          path: "positions/open.json",
-          size_usd: record.sizeUsd,
-          total_cost_at_entry: record.totalCostAtEntry ?? null,
-          ...buildAuthorityEventMeta(authority, entrySizeUsd)
-        });
+        if (isPendingConfirm) {
+          this.logger.info("PAPER_OPEN_BLOCKED_UNFILLED_ORDER_PROOF", { open_trace_id: trace.open_trace_id, symbol: record.symbol, side: record.side, fast_path: false });
+          this.logger.info("LIMIT_ENTRY_PENDING_STATE_PROOF", { symbol: record.symbol, side: record.side, ord_id: trace.exchange_ord_id });
+        } else {
+          this.logger.info("LIMIT_ENTRY_FILLED_TO_PAPER_OPEN_PROOF", { symbol: record.symbol, side: record.side, ord_id: trace.exchange_ord_id });
+          this.logger.info("paper_position_opened", {
+            open_trace_id: trace.open_trace_id,
+            sample_symbol_btc_eth: trace.sample_symbol_btc_eth,
+            order_submit_requested: trace.order_submit_requested,
+            order_submit_ack: trace.order_submit_ack,
+            order_submit_error_code: trace.order_submit_error_code,
+            order_submit_error_message: trace.order_submit_error_message,
+            position_open_record_written: trace.position_open_record_written,
+            low_expected_move_relax_size_limited:
+              first.rangeSignalKeptByRelax === true &&
+              first.rangeSignalDowngradeReason === "low_expected_move_relaxed_by_range_structure",
+            position_open_final_state: trace.position_open_final_state,
+            open_fail_stage: trace.open_fail_stage,
+            exchange_client_order_id: trace.exchange_client_order_id,
+            stored_position: "queued_in_memory_before_saveOpenAll",
+            symbol: record.symbol,
+            side: record.side,
+            path: "positions/open.json",
+            size_usd: record.sizeUsd,
+            total_cost_at_entry: record.totalCostAtEntry ?? null,
+            ...buildAuthorityEventMeta(authority, entrySizeUsd)
+          });
+        }
         try {
           await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(sym, authority, record));
         } catch (appendErr) {
@@ -12734,7 +13024,7 @@ export class PaperEngine {
           });
         }
         emitPositionOpenTraceFinal();
-      } catch (e) {
+    } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         const tr = positionOpenTraceRef;
         if (tr) {
@@ -13264,7 +13554,7 @@ export class PaperEngine {
         side: sSide,
         posSide: sPosSide,
         qty: sQtyLegacy,
-        desiredNotionalUsdt: incrementalSizeUsd * sLev,
+        desiredNotionalUsdt: (existing as any).isV2Authority === true ? incrementalSizeUsd : (incrementalSizeUsd * sLev),
         pricingReferencePx: first.lastPrice,
         appliedLeverage: authority.appliedLeverage ?? existing.leverage ?? null,
         clOrdId: buildOkxClOrdId(existing.symbol, sSide),
@@ -13747,7 +14037,6 @@ export class PaperEngine {
 
     return { ok: true, snapshot, symbolDiagnostics };
   }
-
 }
 
 const PAPER_LEDGER_KRW_NOTIONAL_PER_USD = 1400;

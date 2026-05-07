@@ -244,6 +244,13 @@ export class OkxDemoClient {
     return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/order", q, null);
   }
 
+  cancelOrder(instId: string, ordId?: string, clOrdId?: string): Promise<TryResult<Record<string, unknown>[]>> {
+    const payload: Record<string, string> = { instId };
+    if (ordId) payload.ordId = ordId;
+    if (clOrdId) payload.clOrdId = clOrdId;
+    return this.signedRequest<Record<string, unknown>>("POST", "/api/v5/trade/cancel-order", null, payload);
+  }
+
   submitAlgoOrder(input: {
     instId: string;
     tdMode: string;
