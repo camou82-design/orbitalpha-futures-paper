@@ -91,7 +91,43 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         reason = "Mid-zone neutrality enforced (no-reversal candidates)";
     }
 
-    // Phase 5: Range Compression & Squeeze Suppression
+    // Phase 6: Drift & Channel Entry Filtering
+    const isDriftDown = judgment.subtype === "RANGE_DRIFT_DOWN" || judgment.subtype === "DESCENDING_CHANNEL";
+    const isDriftUp = judgment.subtype === "RANGE_DRIFT_UP" || judgment.subtype === "ASCENDING_CHANNEL";
+
+    if (isDriftDown) {
+        // Bias: SHORT. Block Longs. Block Mid entries.
+        if (side === "long") {
+            signal = "NONE";
+            reason = `SUPPRESSED: Long blocked in ${judgment.subtype} (downward drift bias)`;
+        } else if (isMid) {
+            signal = "NONE";
+            reason = `SUPPRESSED: Mid entry blocked in ${judgment.subtype} (awaiting upper edge)`;
+        }
+    } else if (isDriftUp) {
+        // Bias: LONG. Block Shorts. Block Mid entries.
+        if (side === "short") {
+            signal = "NONE";
+            reason = `SUPPRESSED: Short blocked in ${judgment.subtype} (upward drift bias)`;
+        } else if (isMid) {
+            signal = "NONE";
+            reason = `SUPPRESSED: Mid entry blocked in ${judgment.subtype} (awaiting lower edge)`;
+        }
+    }
+
+    if (isDriftDown || isDriftUp) {
+        console.info(JSON.stringify({
+            event: "V2_RANGE_DRIFT_ENTRY_FILTER_PROOF",
+            symbol: input.symbol,
+            subtype: judgment.subtype,
+            intendedSide: side,
+            isMid,
+            finalSignal: signal,
+            action: signal === "NONE" ? "FILTERED" : "ALLOWED"
+        }));
+    }
+
+    // Phase 5: Range Compression & Squeeze Suppression (moved after drift filtering)
     if (judgment.subtype === "RANGE_COMPRESSION" || judgment.subtype === "TRIANGLE_SQUEEZE_CANDIDATE") {
         signal = "NONE";
         reason = `SUPPRESSED: Market in ${judgment.subtype} (low quality consolidation)`;

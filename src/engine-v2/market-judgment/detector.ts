@@ -32,6 +32,36 @@ function classifyRangePhase(sn: EngineV2Input["snapshot"]): MarketJudgmentOutput
     if (boxBreakSide === "upper" && emaGap > 0) return "BREAKOUT";
     if (boxPos <= 0.26) return "LOWER";
     if (boxPos >= 0.74) return "UPPER";
+
+    // Phase 6: Drift & Channel Detection
+    const bhSlope = Number(sn.boxHighSlope ?? 0);
+    const blSlope = Number(sn.boxLowSlope ?? 0);
+    const rcSlope = Number(sn.rangeCenterSlope ?? 0);
+    const e20Slope = Number(sn.ema20Slope ?? 0);
+    const atrExp = Number(sn.atrExpansion ?? 0);
+    const volExp = Number(sn.volumeExpansion ?? 0);
+
+    const driftDown = bhSlope < -0.0001 && blSlope < -0.0001 && e20Slope < -0.0001;
+    const driftUp = bhSlope > 0.0001 && blSlope > 0.0001 && e20Slope > 0.0001;
+
+    const channelDown = driftDown && rcSlope < -0.0002;
+    const channelUp = driftUp && rcSlope > 0.0002;
+
+    // Reversal Detection
+    if ((driftDown || channelDown) && (sn.lastPrice > (sn.boxHigh ?? 0) || atrExp > 1.5)) {
+        return "REVERSAL_UP_WATCH";
+    }
+    if ((driftUp || channelUp) && (sn.lastPrice < (sn.boxLow ?? 0) || atrExp > 1.5)) {
+        return "REVERSAL_DOWN_WATCH";
+    }
+
+    if (channelDown) return "DESCENDING_CHANNEL";
+    if (channelUp) return "ASCENDING_CHANNEL";
+    if (driftDown) return "DRIFT_DOWN";
+    if (driftUp) return "DRIFT_UP";
+    
+    if (Math.abs(bhSlope) < 0.00005 && Math.abs(blSlope) < 0.00005) return "FLAT";
+
     return "MID";
 }
 
@@ -97,6 +127,13 @@ function selectSubtype(args: {
         if (rangePhase === "BREAKOUT") return { subtype: "RANGE_BREAKOUT_CANDIDATE", subtypeReason: "range_breakout_candidate" };
         if (rangePhase === "LOWER") return { subtype: "RANGE_LOWER_REACTION", subtypeReason: "range_lower_reaction" };
         if (rangePhase === "UPPER") return { subtype: "RANGE_UPPER_REACTION", subtypeReason: "range_upper_reaction" };
+        if (rangePhase === "FLAT") return { subtype: "RANGE_FLAT", subtypeReason: "range_flat_structure" };
+        if (rangePhase === "DRIFT_DOWN") return { subtype: "RANGE_DRIFT_DOWN", subtypeReason: "range_drift_down_structure" };
+        if (rangePhase === "DRIFT_UP") return { subtype: "RANGE_DRIFT_UP", subtypeReason: "range_drift_up_structure" };
+        if (rangePhase === "DESCENDING_CHANNEL") return { subtype: "DESCENDING_CHANNEL", subtypeReason: "descending_channel_structure" };
+        if (rangePhase === "ASCENDING_CHANNEL") return { subtype: "ASCENDING_CHANNEL", subtypeReason: "ascending_channel_structure" };
+        if (rangePhase === "REVERSAL_UP_WATCH") return { subtype: "DRIFT_REVERSAL_UP_WATCH", subtypeReason: "drift_reversal_up_detected" };
+        if (rangePhase === "REVERSAL_DOWN_WATCH") return { subtype: "DRIFT_REVERSAL_DOWN_WATCH", subtypeReason: "drift_reversal_down_detected" };
         return { subtype: "RANGE_MID_CHOP", subtypeReason: "range_mid_chop" };
     }
     if (regimeFinal === "TREND") {
@@ -193,4 +230,19 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
             emaExpansionWeak
         }
     };
+}
+
+export function emitRangeDriftStateProof(symbol: string, judgment: MarketJudgmentOutput, sn: EngineV2Input["snapshot"]) {
+    console.info(JSON.stringify({
+        event: "V2_RANGE_DRIFT_STATE_PROOF",
+        symbol,
+        regime: judgment.regime_final,
+        subtype: judgment.subtype,
+        rangePhase: judgment.rangePhase,
+        boxHighSlope: sn.boxHighSlope,
+        boxLowSlope: sn.boxLowSlope,
+        ema20Slope: sn.ema20Slope,
+        atrExpansion: sn.atrExpansion,
+        volumeExpansion: sn.volumeExpansion
+    }));
 }

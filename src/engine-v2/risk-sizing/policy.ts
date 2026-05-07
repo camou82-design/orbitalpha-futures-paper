@@ -177,19 +177,18 @@ export function calculateRiskSizing(
             blockReason = blockReason ?? "SHOCK_ADDON_FORBIDDEN";
         }
     } else if (isTrend && isAddOn && addOnPolicyAllowed) {
-        // --- TREND Profit-Funded Pyramid Sizing ---
-        const addonMaxNotionalUsdt = state.addonMaxNotionalUsdt ?? 0;
-        const addonStageMarginUsdt = addonMaxNotionalUsdt / appliedLeverage;
+        // --- TREND Profit-Funded Pyramid Sizing (Unified Source of Truth) ---
+        const finalAddonNotionalUsdt = state.finalAddonNotionalUsdt ?? 0;
         
         // Convert to KRW (using 1400 fixed for consistency with other KRW-based limits)
-        stageMarginKrw = addonStageMarginUsdt * 1400;
+        stageMarginKrw = (finalAddonNotionalUsdt / appliedLeverage) * 1400;
 
         console.info(JSON.stringify({
             event: "V2_TREND_PROFIT_FUNDED_PYRAMID_PROOF",
             symbol: input.symbol,
             lockedProfitUsdt: state.lockedProfitUsdt,
             availableRiskBudgetUsdt: state.availableRiskBudgetUsdt,
-            addonMaxNotionalUsdt: addonMaxNotionalUsdt,
+            finalAddonNotionalUsdt: finalAddonNotionalUsdt,
             stageMarginKrw: stageMarginKrw,
             currentStage: currentStage,
             appliedLeverage: appliedLeverage

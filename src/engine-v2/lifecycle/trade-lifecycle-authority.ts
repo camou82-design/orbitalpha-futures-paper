@@ -74,11 +74,44 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
 
     if (input.position != null) {
         if (input.regime === "RANGE") {
-            addOnAllowed = rangeEdge && !rangeMid;
-            partialAction = (input.unrealizedPnlPct ?? 0) >= 0.003 && rangeEdge ? "protect_profit" : "prepare";
-            exitAction = rangeMid && (input.unrealizedPnlPct ?? 0) >= 0.002 ? "watch" : "none";
-            proofReasons.push(rangeEdge ? "RANGE_EDGE_MANAGEMENT" : "RANGE_MID_CONSERVATIVE_MANAGEMENT");
-        } else if (input.regime === "TREND" && input.position != null) {
+            // DRIFT_REVERSAL_GUARD
+            const isReversalWatch = input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_UP_WATCH" || input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_DOWN_WATCH";
+            if (isReversalWatch) {
+                addOnAllowed = false;
+                const reversalThreatened = (input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_UP_WATCH" && input.side === "short") ||
+                                           (input.rawMetricsSummary.subtype === "DRIFT_REVERSAL_DOWN_WATCH" && input.side === "long");
+                
+                if (reversalThreatened) {
+                    exitAction = "exit"; // Prioritize full exit on sharp reversal
+                    proofReasons.push("DRIFT_REVERSAL_POSITION_PROTECT_EXIT");
+                    
+                    console.info(JSON.stringify({
+                        event: "V2_DRIFT_REVERSAL_POSITION_PROTECT_PROOF",
+                        symbol: input.symbol,
+                        side: input.side,
+                        subtype: input.rawMetricsSummary.subtype,
+                        action: "FULL_EXIT",
+                        reason: "reversal_guard_threatened"
+                    }));
+                } else {
+                    exitAction = "watch";
+                    proofReasons.push("DRIFT_REVERSAL_WATCH_ACTIVE");
+                }
+
+                console.info(JSON.stringify({
+                    event: "V2_DRIFT_REVERSAL_GUARD_PROOF",
+                    symbol: input.symbol,
+                    subtype: input.rawMetricsSummary.subtype,
+                    side: input.side,
+                    action: "BLOCK_ADDON_WATCH_EXIT"
+                }));
+            } else {
+                addOnAllowed = rangeEdge && !rangeMid;
+                partialAction = (input.unrealizedPnlPct ?? 0) >= 0.003 && rangeEdge ? "protect_profit" : "prepare";
+                exitAction = rangeMid && (input.unrealizedPnlPct ?? 0) >= 0.002 ? "watch" : "none";
+                proofReasons.push(rangeEdge ? "RANGE_EDGE_MANAGEMENT" : "RANGE_MID_CONSERVATIVE_MANAGEMENT");
+            }
+        } else if (input.regime === "TREND") {
             const side = input.side;
             const entryPrice = input.position.entryPrice;
             const sizeUsd = input.position.sizeUsd;

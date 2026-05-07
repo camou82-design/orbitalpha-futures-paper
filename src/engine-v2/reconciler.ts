@@ -257,7 +257,16 @@ export function resolveSymbolDecisionEnvelope(
         entryCandidate: snapshot.entryCandidate ?? false,
         signalGateBlockedReason: snapshot.signalGateBlockedReason ?? null,
         rangeSignalDowngraded: snapshot.rangeSignalDowngraded ?? false,
-        rangeSignalKeptByRelax: snapshot.rangeSignalKeptByRelax ?? false
+        rangeSignalKeptByRelax: snapshot.rangeSignalKeptByRelax ?? false,
+        swingHighSlope: snapshot.swingHighSlope,
+        swingLowSlope: snapshot.swingLowSlope,
+        rangeCenterSlope: snapshot.rangeCenterSlope,
+        boxHighSlope: snapshot.boxHighSlope,
+        boxLowSlope: snapshot.boxLowSlope,
+        ema20Slope: snapshot.ema20Slope,
+        ema60Slope: snapshot.ema60Slope,
+        atrExpansion: snapshot.atrExpansion,
+        volumeExpansion: snapshot.volumeExpansion
     };
 
     // 2. Config Mapping

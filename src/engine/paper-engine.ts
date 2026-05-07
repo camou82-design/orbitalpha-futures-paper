@@ -5195,6 +5195,16 @@ export class PaperEngine {
           flowId
         });
         
+        this.logger.info("V2_TREND_OKX_PROTECTIVE_REPLACE_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          oldAlgoId: open.protectiveStopAlgoId,
+          oldStopPrice: currentSlPx,
+          newStopPrice: open.stopPrice,
+          reason: "stop_price_mismatch_detected",
+          flowId
+        });
+        
         // Attempt cancel
         try {
           await this.okxDemo.cancelAlgoOrder([{ instId: toOkxSwapInstId(open.symbol), algoId: open.protectiveStopAlgoId }]);
@@ -6950,6 +6960,7 @@ export class PaperEngine {
         }
 
         if (validUpdate) {
+          const prevStop = posTrail.stopPrice;
           posTrail.stopPrice = v2NewStop;
           crashPositionsModified = true;
           this.logger.info("V2_TREND_STOP_RAISE_PROOF", {
@@ -6957,6 +6968,15 @@ export class PaperEngine {
             side: posTrail.side,
             oldStop: oldStop ?? 0,
             newStop: v2NewStop,
+            flowId
+          });
+          this.logger.info("V2_TREND_LEDGER_STOP_UPDATE_PROOF", {
+            symbol: sk,
+            side: posTrail.side,
+            prevStop: prevStop ?? 0,
+            newStop: v2NewStop,
+            openedAt: posTrail.openedAt,
+            reason: "lifecycle_authority_propagation",
             flowId
           });
         } else if (Math.abs((oldStop ?? 0) - v2NewStop) > 1e-8) {
@@ -14014,7 +14034,16 @@ function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapshot {
     entryCandidate: snap.entryCandidate ?? false,
     signalGateBlockedReason: snap.signalGateBlockedReason ?? null,
     rangeSignalDowngraded: snap.rangeSignalDowngraded ?? false,
-    rangeSignalKeptByRelax: snap.rangeSignalKeptByRelax ?? false
+    rangeSignalKeptByRelax: snap.rangeSignalKeptByRelax ?? false,
+    swingHighSlope: snap.swingHighSlope ?? 0,
+    swingLowSlope: snap.swingLowSlope ?? 0,
+    rangeCenterSlope: snap.rangeCenterSlope ?? 0,
+    boxHighSlope: snap.boxHighSlope ?? 0,
+    boxLowSlope: snap.boxLowSlope ?? 0,
+    ema20Slope: snap.ema20Slope ?? 0,
+    ema60Slope: snap.ema60Slope ?? 0,
+    atrExpansion: snap.atrExpansion ?? 0,
+    volumeExpansion: snap.volumeExpansion ?? 0
   };
 }
 

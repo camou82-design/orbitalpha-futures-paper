@@ -197,6 +197,15 @@ export type SymbolSnapshotLike = Readonly<{
   /** Highway 진입용 1m 요청 limit (기본 120) */
   highwayKlineLimitRequested?: number;
   highwayEntryTf?: string;
+  swingHighSlope?: number;
+  swingLowSlope?: number;
+  rangeCenterSlope?: number;
+  boxHighSlope?: number;
+  boxLowSlope?: number;
+  ema20Slope?: number;
+  ema60Slope?: number;
+  atrExpansion?: number;
+  volumeExpansion?: number;
 }>;
 
 export function paperTradeBlockDecompositionPayload(
@@ -1449,7 +1458,16 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
       emaGap: sn.emaGap ?? 0,
       atr: sn.atr ?? 0,
       signal: sn.signal ?? "NONE",
-      qualityScore: sn.qualityScore ?? 0
+      qualityScore: sn.qualityScore ?? 0,
+      swingHighSlope: sn.swingHighSlope ?? 0,
+      swingLowSlope: sn.swingLowSlope ?? 0,
+      rangeCenterSlope: sn.rangeCenterSlope ?? 0,
+      boxHighSlope: sn.boxHighSlope ?? 0,
+      boxLowSlope: sn.boxLowSlope ?? 0,
+      ema20Slope: sn.ema20Slope ?? 0,
+      ema60Slope: sn.ema60Slope ?? 0,
+      atrExpansion: sn.atrExpansion ?? 0,
+      volumeExpansion: sn.volumeExpansion ?? 0
     },
     legacy: {
       regime: input.regime,

@@ -24,6 +24,13 @@ export type EngineV2MarketSubtype =
     | "TRIANGLE_SQUEEZE_CANDIDATE"
     | "BREAKOUT_OBSERVATION"
     | "BREAKOUT_RETEST_CONFIRMED"
+    | "RANGE_FLAT"
+    | "RANGE_DRIFT_DOWN"
+    | "RANGE_DRIFT_UP"
+    | "DESCENDING_CHANNEL"
+    | "ASCENDING_CHANNEL"
+    | "DRIFT_REVERSAL_UP_WATCH"
+    | "DRIFT_REVERSAL_DOWN_WATCH"
     | "NO_TRADE_DATA_NOT_READY"
     | "NO_TRADE_DUMP_PROTECTION"
     | "NO_TRADE_METRICS_INSUFFICIENT";
@@ -115,6 +122,15 @@ export interface LegacySnapshotAdapter {
     rangeSignalDowngraded?: boolean;
     rangeSignalKeptByRelax?: boolean;
     atr?: number;
+    swingHighSlope?: number;
+    swingLowSlope?: number;
+    rangeCenterSlope?: number;
+    boxHighSlope?: number;
+    boxLowSlope?: number;
+    ema20Slope?: number;
+    ema60Slope?: number;
+    atrExpansion?: number;
+    volumeExpansion?: number;
 }
 
 export interface LegacyConfigAdapter {
@@ -243,6 +259,15 @@ export interface EngineV2SnapshotAdapter {
     signalGateBlockedReason?: string | null;
     rangeSignalDowngraded?: boolean;
     rangeSignalKeptByRelax?: boolean;
+    swingHighSlope?: number;
+    swingLowSlope?: number;
+    rangeCenterSlope?: number;
+    boxHighSlope?: number;
+    boxLowSlope?: number;
+    ema20Slope?: number;
+    ema60Slope?: number;
+    atrExpansion?: number;
+    volumeExpansion?: number;
 }
 
 export interface EngineV2ConfigAdapter {
@@ -299,6 +324,15 @@ export interface V2BridgeSnapshot {
     atr: number;
     signal: string;
     qualityScore: number;
+    swingHighSlope: number;
+    swingLowSlope: number;
+    rangeCenterSlope: number;
+    boxHighSlope: number;
+    boxLowSlope: number;
+    ema20Slope: number;
+    ema60Slope: number;
+    atrExpansion: number;
+    volumeExpansion: number;
     entryCandidate?: boolean;
     signalGateBlockedReason?: string | null;
     rangeSignalDowngraded?: boolean;
@@ -403,6 +437,7 @@ export interface V2BridgeState {
     lockedProfitUsdt?: number;
     availableRiskBudgetUsdt?: number;
     addonMaxNotionalUsdt?: number;
+    finalAddonNotionalUsdt?: number;
 }
 
 export interface V2BridgeInput {
@@ -492,7 +527,7 @@ export interface MarketJudgmentOutput {
     subtype: EngineV2MarketSubtype;
     subtypeReason: string;
     shockPhase: "NONE" | "DOWN_SHOCK" | "UP_SHOCK" | "CRASH_RECOVERY" | "PUMP_RECOVERY";
-    rangePhase: "NONE" | "MID" | "LOWER" | "UPPER" | "BREAKDOWN" | "BREAKOUT" | "FAKE_BREAKOUT" | "COMPRESSION" | "TRIANGLE_SQUEEZE" | "BREAKOUT_OBSERVATION";
+    rangePhase: "NONE" | "MID" | "LOWER" | "UPPER" | "BREAKDOWN" | "BREAKOUT" | "FAKE_BREAKOUT" | "COMPRESSION" | "TRIANGLE_SQUEEZE" | "BREAKOUT_OBSERVATION" | "FLAT" | "DRIFT_DOWN" | "DRIFT_UP" | "DESCENDING_CHANNEL" | "ASCENDING_CHANNEL" | "REVERSAL_UP_WATCH" | "REVERSAL_DOWN_WATCH";
     trendPhase: "NONE" | "UP" | "DOWN" | "PULLBACK" | "EXHAUSTION";
     transitionPhase: "NONE" | "RANGE_TO_TREND" | "TREND_TO_RANGE" | "CONFLICT" | "RETEST_CONFIRMED";
     judgmentVersion: "v2_market_judgment_subtype_v1";
@@ -711,6 +746,7 @@ export interface V2TradeLifecycleAuthorityInput {
         rangeConfidence: number;
         trendWeaknessScore: number;
         boxPos: number | null;
+        subtype?: EngineV2MarketSubtype;
     };
     atr?: number;
     currentStopPrice?: number;

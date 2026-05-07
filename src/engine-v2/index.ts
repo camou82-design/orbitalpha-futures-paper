@@ -11,7 +11,7 @@ import {
     LegacyResultAdapter
 } from "./types";
 import type { MarketSymbol } from "../models/types";
-import { detectMarketRegime } from "./market-judgment/detector";
+import { detectMarketRegime, emitRangeDriftStateProof } from "./market-judgment/detector";
 import { calculateRegimeConfidence } from "./regime-confidence/scorer";
 import { routeToExecutor } from "./engine-router/selector";
 import { executeRangeRegime } from "./executors/range-executor";
@@ -121,6 +121,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 1: Market Judgment (authoritative input only)
     const judgment = detectMarketRegime(authoritativeInput);
+    
+    // Phase 6 Proof: Range Drift Analysis
+    if (judgment.regime === "RANGE") {
+        emitRangeDriftStateProof(String(input.symbol), judgment, authoritativeInput.snapshot);
+    }
 
     // Tier 2: Regime Confidence (authoritative input only)
     const confidence = calculateRegimeConfidence(judgment, authoritativeInput);
@@ -2199,7 +2204,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 qualityScore: input.snapshot.qualityScore ?? 0,
                 rangeConfidence: input.snapshot.rangeConfidence ?? 0,
                 trendWeaknessScore: input.snapshot.trendWeaknessScore ?? 0,
-                boxPos: input.snapshot.boxPos ?? null
+                boxPos: input.snapshot.boxPos ?? null,
+                subtype: judgment.subtype
             },
             atr: input.snapshot.atr,
             currentStopPrice: lifecyclePosition_latest?.ledger_stop_px ?? undefined,
@@ -2717,6 +2723,8 @@ export function adaptV2Input(
         maxUsableMarginKrw?: number;
         exposureNotionalCapKrw?: number;
         symbolExposureNotionalCapKrw?: number;
+        finalAddonNotionalUsdt?: number;
+        addonMaxNotionalUsdt?: number;
         riskMode?: string | null;
         dailyLossGuardTriggered?: boolean;
         crashState?: string | null;
@@ -2754,7 +2762,16 @@ export function adaptV2Input(
             signalGateBlockedReason: snapshot.signalGateBlockedReason ?? null,
             rangeSignalDowngraded: snapshot.rangeSignalDowngraded ?? false,
             rangeSignalKeptByRelax: snapshot.rangeSignalKeptByRelax ?? false,
-            atr: snapshot.atr ?? snapshot.volatilityProxyDiag ?? 0
+            atr: snapshot.atr ?? snapshot.volatilityProxyDiag ?? 0,
+            swingHighSlope: snapshot.swingHighSlope ?? 0,
+            swingLowSlope: snapshot.swingLowSlope ?? 0,
+            rangeCenterSlope: snapshot.rangeCenterSlope ?? 0,
+            boxHighSlope: snapshot.boxHighSlope ?? 0,
+            boxLowSlope: snapshot.boxLowSlope ?? 0,
+            ema20Slope: snapshot.ema20Slope ?? 0,
+            ema60Slope: snapshot.ema60Slope ?? 0,
+            atrExpansion: snapshot.atrExpansion ?? 0,
+            volumeExpansion: snapshot.volumeExpansion ?? 0
         },
         config: {
             paperMaxOpenPositions: config.paperMaxOpenPositions,
@@ -2801,7 +2818,9 @@ export function adaptV2Input(
             accountEquityKrw: state.accountEquityKrw,
             maxUsableMarginKrw: state.maxUsableMarginKrw,
             exposureNotionalCapKrw: state.exposureNotionalCapKrw,
-            symbolExposureNotionalCapKrw: state.symbolExposureNotionalCapKrw
+            symbolExposureNotionalCapKrw: state.symbolExposureNotionalCapKrw,
+            finalAddonNotionalUsdt: (state as any).finalAddonNotionalUsdt,
+            addonMaxNotionalUsdt: (state as any).addonMaxNotionalUsdt
         },
         v1Result: {
             regime: v1Result.decision?.regime_state ?? "UNDEFINED",
