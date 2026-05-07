@@ -195,7 +195,7 @@ export function calculateRiskSizing(
             appliedLeverage: appliedLeverage
         }));
 
-        if (stageMarginKrw < 10000) { // Minimum 10,000 KRW for add-on
+        if (stageMarginKrw < 1000) { // Minimum 1,000 KRW for add-on to support profit-funded scaling
              isBlocked = true;
              blockReason = "PROFIT_FUNDED_SIZE_TOO_SMALL";
         }

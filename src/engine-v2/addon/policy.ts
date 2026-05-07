@@ -355,34 +355,57 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             };
         }
 
-        // --- TREND Profit-Funded Pyramid Implementation ---
-        const MIN_PROTECTED_PROFIT_USD = 15.0;
-        const ADDON_LOSS_PCT_TO_STOP = 0.022; // 2.2% ATR-based equivalent
-        const ADDON_RISK_CAP_PCT = 0.15; // 15% of equity
+        // --- TREND Profit-Funded Pyramid Implementation (Refined) ---
+        const accountEquityUsd = args.accountEquityUsd || (v2State.accountEquityKrw || 1400000) / 1400;
+        const minimumProtectedProfitUsd = Math.max(0.5, accountEquityUsd * 0.0015);
+        const symbolMaxNotional = accountEquityUsd * 0.8;
+        const globalMaxNotional = accountEquityUsd * 1.5;
+
+        const currentSymbolNotionalUsd = args.currentSymbolNotionalUsd || (sameSidePosition?.sizeUsd ?? 0);
+        const currentGlobalNotionalUsd = args.currentGlobalNotionalUsd || currentSymbolNotionalUsd;
 
         const sizeUsd = sameSidePosition?.sizeUsd ?? 0;
-        const lockedProfitUsdt = pnlPct * sizeUsd;
-        const availableRiskBudgetUsdt = lockedProfitUsdt - MIN_PROTECTED_PROFIT_USD;
+        const entryPrice = sameSidePosition?.entryPrice ?? 0;
+        const currentStopPrice = args.currentStopPrice || 0;
 
-        const equityUsdEstimate = (v2State.accountEquityKrw || 1400000) / 1400; 
-        const equityRiskCapUsdt = equityUsdEstimate * ADDON_RISK_CAP_PCT;
+        // 1. lockedProfitUsd: Profit guaranteed if stopped out at current stop
+        let lockedProfitUsdt = 0;
+        if (args.currentStopPrice != null && args.currentStopPrice > 0 && sameSidePosition != null) {
+            if (args.side === "long") {
+                lockedProfitUsdt = sameSidePosition.sizeUsd * (args.currentStopPrice - sameSidePosition.entryPrice) / sameSidePosition.entryPrice;
+            } else if (args.side === "short") {
+                lockedProfitUsdt = sameSidePosition.sizeUsd * (sameSidePosition.entryPrice - args.currentStopPrice) / sameSidePosition.entryPrice;
+            }
+        }
 
-        const addonMaxNotionalUsdt = availableRiskBudgetUsdt > 0 
-            ? Math.min(availableRiskBudgetUsdt / ADDON_LOSS_PCT_TO_STOP, equityRiskCapUsdt)
-            : 0;
+        const availableRiskBudgetUsdt = lockedProfitUsdt - minimumProtectedProfitUsd;
 
         // Implementation of worst-case PNL check after add-on
         const currentPrice = Number(snapshot.lastPrice);
         const atr = Number(snapshot.atr || (snapshot.volatilityProxyDiag ?? 0));
         const stopDistance = atr * 2.2;
         const newStopPrice = side === "long" ? currentPrice - stopDistance : currentPrice + stopDistance;
+
+        const addonLossPctToStop = currentPrice > 0 ? Math.abs(currentPrice - newStopPrice) / currentPrice : 0.022;
         
-        // Simplified worst case check: if we add 'addonMaxNotionalUsdt' at 'currentPrice'
-        // and stop hits 'newStopPrice', what is the total PNL?
-        const entryPrice = sameSidePosition?.entryPrice ?? currentPrice;
-        const existingPosPnlAtStop = side === "long" 
+        let addonMaxNotionalUsdt = availableRiskBudgetUsdt > 0 && addonLossPctToStop > 0
+            ? availableRiskBudgetUsdt / addonLossPctToStop
+            : 0;
+
+        // Enforce notional caps
+        if (currentSymbolNotionalUsd + addonMaxNotionalUsdt > symbolMaxNotional) {
+            addonMaxNotionalUsdt = Math.max(0, symbolMaxNotional - currentSymbolNotionalUsd);
+        }
+        if (currentGlobalNotionalUsd + addonMaxNotionalUsdt > globalMaxNotional) {
+            addonMaxNotionalUsdt = Math.max(0, globalMaxNotional - currentGlobalNotionalUsd);
+        }
+
+        const existingPosPnlAtStop = (side === "long" && entryPrice > 0)
             ? sizeUsd * (newStopPrice - entryPrice) / entryPrice 
-            : sizeUsd * (entryPrice - newStopPrice) / entryPrice;
+            : (side === "short" && entryPrice > 0)
+                ? sizeUsd * (entryPrice - newStopPrice) / entryPrice
+                : -sizeUsd; // Conservative fallback
+
         const newPosPnlAtStop = side === "long"
             ? addonMaxNotionalUsdt * (newStopPrice - currentPrice) / currentPrice
             : addonMaxNotionalUsdt * (currentPrice - newStopPrice) / currentPrice;
@@ -393,8 +416,9 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             availableRiskBudgetUsdt > 0 && 
             qualityScore >= 80 && 
             trendWeaknessScore < 0.55 && 
-            pnlPct >= 0.002 && // Require at least 0.2% pnl for cushion
-            worstCasePnlAfterNewStop >= 0;
+            pnlPct >= 0.002 && 
+            worstCasePnlAfterNewStop >= minimumProtectedProfitUsd &&
+            addonMaxNotionalUsdt > 0;
 
         if (pyramidAllowed) {
             console.info(JSON.stringify({
@@ -404,12 +428,13 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
                 current_size_usd: sizeUsd,
                 pnl_pct: pnlPct,
                 locked_profit_usdt: lockedProfitUsdt,
+                min_protected_profit_usd: minimumProtectedProfitUsd,
                 available_risk_budget_usdt: availableRiskBudgetUsdt,
                 addon_max_notional_usdt: addonMaxNotionalUsdt,
                 worst_case_pnl_after_stop: worstCasePnlAfterNewStop,
-                atr,
-                stop_distance: stopDistance,
-                new_stop_price: newStopPrice
+                new_stop_price: newStopPrice,
+                symbol_max_notional: symbolMaxNotional,
+                global_max_notional: globalMaxNotional
             }));
 
             return {
@@ -442,7 +467,7 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
                 evidence: "trend_pyramid_allowed"
             };
         } else {
-             return {
+            return {
                 action: "ADDON_WATCH",
                 allowed: false,
                 reason: availableRiskBudgetUsdt <= 0 ? "PROFIT_BUFFER_INSUFFICIENT" : "PNL_NOT_FAVORABLE",

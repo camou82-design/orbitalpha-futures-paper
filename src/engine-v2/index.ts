@@ -244,6 +244,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             metadata: {}
         };
     }
+    const USD_PER_KRW = 1 / 1400;
+    const accountEquityUsd = (v2State.accountEquityKrw ?? 0) * USD_PER_KRW;
+    const currentSymbolNotionalUsd = (v2State.symbolLedgerExposureNotionalKrw ?? 0) * USD_PER_KRW;
+    const currentGlobalNotionalUsd = (v2State.ledgerExposureNotionalKrw ?? 0) * USD_PER_KRW;
+
+    const preAddOnPosition = v2State.currentPositions.find(
+        p => p.symbol === input.symbol && String(p.side).toLowerCase() === execution.side
+    );
+
     const addOnPolicy = evaluateV2AddOnPolicy({
         symbol: String(input.symbol),
         side: execution.side,
@@ -260,7 +269,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             lastPrice: authoritativeInput.snapshot.lastPrice,
             atr: authoritativeInput.snapshot.atr,
             volatilityProxyDiag: authoritativeInput.snapshot.volatilityProxy
-        }
+        },
+        accountEquityUsd,
+        currentSymbolNotionalUsd,
+        currentGlobalNotionalUsd,
+        currentStopPrice: preAddOnPosition?.ledger_stop_px ?? undefined
     });
     const shouldEmitAddOnProof =
         addOnPolicy.action !== "INITIAL_ONLY" ||
@@ -2088,20 +2101,20 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
-    const sameSidePosition =
+    const sameSidePosition_latest =
         v2SideAfterPromotion === "long" ? v2State.longPosition
             : v2SideAfterPromotion === "short" ? v2State.shortPosition
                 : null;
     const heldPosition = v2State.longPosition ?? v2State.shortPosition ?? null;
-    const lifecyclePosition = sameSidePosition ?? heldPosition;
+    const lifecyclePosition_latest = sameSidePosition_latest ?? heldPosition;
     const lifecycleSide: EngineV2Side =
-        lifecyclePosition != null
-            ? (lifecyclePosition.side === "LONG" ? "long" : "short")
+        lifecyclePosition_latest != null
+            ? (lifecyclePosition_latest.side === "LONG" ? "long" : "short")
             : (v2SideAfterPromotion !== "none" && v2SideAfterPromotion != null)
                 ? v2SideAfterPromotion
                 : "none";
     const hasLifecycleCandidate =
-        lifecyclePosition != null ||
+        lifecyclePosition_latest != null ||
         finalDecision === "ENTER" ||
         riskSizing.blockReason != null;
         if (hasLifecycleCandidate) {
@@ -2117,11 +2130,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2Side: v2SideAfterPromotion,
             authoritySource: "v2",
             adoptedEngine: "V2",
-            position: lifecyclePosition,
-            unrealizedPnl: lifecyclePosition != null ? lifecyclePosition.sizeUsd * lifecyclePosition.pnlPct : null,
-            unrealizedPnlPct: lifecyclePosition?.pnlPct ?? null,
+            position: lifecyclePosition_latest,
+            unrealizedPnl: lifecyclePosition_latest != null ? lifecyclePosition_latest.sizeUsd * lifecyclePosition_latest.pnlPct : null,
+            unrealizedPnlPct: lifecyclePosition_latest?.pnlPct ?? null,
             holdMs: null,
-            entryPrice: lifecyclePosition?.entryPrice ?? null,
+            entryPrice: lifecyclePosition_latest?.entryPrice ?? null,
             markPrice: input.snapshot.lastPrice ?? null,
             riskState: v2State.riskMode,
             cooldownState: {
@@ -2138,7 +2151,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 boxPos: input.snapshot.boxPos ?? null
             },
             atr: input.snapshot.atr,
-            currentStopPrice: lifecyclePosition?.ledger_stop_px ?? undefined
+            currentStopPrice: lifecyclePosition_latest?.ledger_stop_px ?? undefined,
+            accountEquityUsd: v2State.accountEquityKrw / 1400,
+            currentSymbolNotionalUsd: v2State.symbolLedgerExposureNotionalKrw / 1400,
+            currentGlobalNotionalUsd: v2State.ledgerExposureNotionalKrw / 1400,
+            liveMaxOrderNotionalUsdt: v2State.liveMaxOrderNotionalUsdt
         });
 
         // Cooldown authority is computed as an independent proof/comparison layer.
@@ -2254,8 +2271,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             console.info(JSON.stringify({
                 event: "V2_TRADE_LIFECYCLE_PROOF",
                 symbol: String(input.symbol),
-                position_id: lifecyclePosition != null
-                    ? `${String(input.symbol)}:${lifecyclePosition.side}:${lifecyclePosition.entryStage}`
+                position_id: lifecyclePosition_latest != null
+                    ? `${String(input.symbol)}:${lifecyclePosition_latest.side}:${lifecyclePosition_latest.entryStage}`
                     : `${String(input.symbol)}:none`,
                 lifecycle_stage: lifecycleAuthority.lifecycleStage,
                 authority_source: lifecycleAuthority.authoritySource,
@@ -2290,7 +2307,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
 
         // --- V2 Position State Authority (Step 4) ---
-        const hasPosition = lifecyclePosition != null;
+        const hasPosition = lifecyclePosition_latest != null;
         const positionLifecycleState: V2PositionStateAuthorityResult["positionLifecycleState"] = (() => {
             if (!hasPosition) return "none";
             if (lifecycleAuthority.exitAction === "exit") return "closing";
@@ -2310,7 +2327,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
         const pnlState: V2PositionStateAuthorityResult["pnlState"] = (() => {
             if (!hasPosition) return "none";
-            const pct = lifecyclePosition?.pnlPct ?? 0;
+            const pct = lifecyclePosition_latest?.pnlPct ?? 0;
             if (pct > 0.001) return "profit";
             if (pct < -0.001) return "loss";
             return "flat";
@@ -2325,12 +2342,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             hasPosition,
             positionLifecycleState,
             positionRiskState,
-            positionStage: lifecyclePosition?.entryStage ?? null,
+            positionStage: lifecyclePosition_latest?.entryStage ?? null,
             holdMs: null,
             pnlState,
             unrealizedPnlKrw: null,
-            unrealizedPnlUsdEstimate: lifecyclePosition != null ? lifecyclePosition.sizeUsd * lifecyclePosition.pnlPct : null,
-            unrealizedPnlPct: lifecyclePosition?.pnlPct ?? null,
+            unrealizedPnlUsdEstimate: lifecyclePosition_latest != null ? lifecyclePosition_latest.sizeUsd * lifecyclePosition_latest.pnlPct : null,
+            unrealizedPnlPct: lifecyclePosition_latest?.pnlPct ?? null,
             stateReason: lifecycleAuthority.cooldownReason || null,
             proofReasons: [],
             trueInconsistencyReasons: [],
@@ -2359,7 +2376,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 stage: v2PositionStateAuthority.positionStage,
                 pnl_state: v2PositionStateAuthority.pnlState,
                 unrealized_pnl_usd_estimate: v2PositionStateAuthority.unrealizedPnlUsdEstimate,
-                unrealized_pnl_pct: lifecyclePosition?.pnlPct ?? null,
+                unrealized_pnl_pct: lifecyclePosition_latest?.pnlPct ?? null,
                 state_reason: v2PositionStateAuthority.stateReason,
                 hold_ms: v2PositionStateAuthority.holdMs
             }));

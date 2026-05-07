@@ -63,6 +63,7 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
     const trendHealthy = input.rawMetricsSummary.trendWeaknessScore <= 0.55;
 
     let addOnAllowed: boolean | null = null;
+    let newStopPrice: number | undefined;
     let partialAction: V2TradeLifecycleAuthorityResult["partialAction"] = "none";
     let exitAction: V2TradeLifecycleAuthorityResult["exitAction"] = "none";
 
@@ -73,71 +74,139 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
             exitAction = rangeMid && (input.unrealizedPnlPct ?? 0) >= 0.002 ? "watch" : "none";
             proofReasons.push(rangeEdge ? "RANGE_EDGE_MANAGEMENT" : "RANGE_MID_CONSERVATIVE_MANAGEMENT");
         } else if (input.regime === "TREND" && input.position != null) {
-            const MIN_PROTECTED_PROFIT = 15; // USDT
+            const side = input.side;
             const entryPrice = input.position.entryPrice;
             const sizeUsd = input.position.sizeUsd;
             const markPrice = input.markPrice ?? entryPrice;
-            const side = input.side;
-
-            // lockedProfit is the profit we'd have if we closed NOW
-            const lockedProfit = side === "long" 
-                ? (markPrice - entryPrice) / entryPrice * sizeUsd
-                : (entryPrice - markPrice) / entryPrice * sizeUsd;
+            const currentStop = input.currentStopPrice;
             
-            const availableRiskBudget = Math.max(0, lockedProfit - MIN_PROTECTED_PROFIT);
+            const accountEquityUsd = input.accountEquityUsd ?? 500;
+            const minimumProtectedProfitUsd = Math.max(0.5, accountEquityUsd * 0.0015);
+            
+            // 1. lockedProfitUsd: Profit guaranteed if stopped out at current stop
+            // Requirement: currentStop must exist and be better than entryPrice
+            let lockedProfitUsd = 0;
+            if (currentStop != null && Number.isFinite(currentStop) && currentStop > 0) {
+                if (side === "long") {
+                    lockedProfitUsd = sizeUsd * (currentStop - entryPrice) / entryPrice;
+                } else if (side === "short") {
+                    lockedProfitUsd = sizeUsd * (entryPrice - currentStop) / entryPrice;
+                }
+            }
+
+            console.info(JSON.stringify({
+                event: "V2_TREND_LOCKED_PROFIT_PROOF",
+                symbol: input.symbol,
+                side,
+                entryPrice,
+                currentStop,
+                lockedProfitUsd,
+                minimumProtectedProfitUsd
+            }));
+
+            // 2. Risk Budget Calculation
+            const availableRiskBudget = Math.max(0, lockedProfitUsd - minimumProtectedProfitUsd);
             const pnlPct = input.unrealizedPnlPct ?? 0;
             
-            // For add-on check, we need to know the newStopPrice (calculated later in original code, but we can pre-calculate it)
+            // 3. Potential New Stop (Trailing 2.2x ATR)
             const atr = input.atr ?? 0;
             const sideMultiplier = side === "long" ? -1 : 1;
             const potentialStop = markPrice + (sideMultiplier * 2.2 * atr);
-            const currentStop = input.currentStopPrice ?? potentialStop;
-            const effectiveNewStop = side === "long" ? Math.max(currentStop, potentialStop) : Math.min(currentStop, potentialStop);
+            const effectiveNewStop = side === "long" 
+                ? Math.max(currentStop ?? 0, potentialStop) 
+                : Math.min(currentStop ?? Infinity, potentialStop);
 
+            // 4. Add-on Sizing based on Profit Buffer
             const addonLossPctToStop = side === "long"
                 ? (markPrice - effectiveNewStop) / markPrice
                 : (effectiveNewStop - markPrice) / markPrice;
 
-            const addonMaxNotional = addonLossPctToStop > 0 ? availableRiskBudget / addonLossPctToStop : 0;
+            const addonMaxByProfit = addonLossPctToStop > 0 ? availableRiskBudget / addonLossPctToStop : 0;
             
-            // Enforce worst-case check: PNL after add-on if stopped out at new stop
-            // originalSize * (newStop - entryPrice)/entryPrice + addonSize * (newStop - markPrice)/markPrice >= 0
+            // 5. Total Exposure Pyramid Limits
+            const symbolMaxNotional = accountEquityUsd * 0.8;
+            const globalMaxNotional = accountEquityUsd * 1.5;
+            const currentSymbolNotional = input.currentSymbolNotionalUsd ?? sizeUsd;
+            const currentGlobalNotional = input.currentGlobalNotionalUsd ?? currentSymbolNotional;
+            
+            const remainingSymbolRoom = Math.max(0, symbolMaxNotional - currentSymbolNotional);
+            const remainingGlobalRoom = Math.max(0, globalMaxNotional - currentGlobalNotional);
+            const liveMaxOrderNotional = input.liveMaxOrderNotionalUsdt ?? 500;
+
+            const nextAddonNotional = Math.min(
+                remainingSymbolRoom,
+                remainingGlobalRoom,
+                addonMaxByProfit,
+                liveMaxOrderNotional
+            );
+
+            console.info(JSON.stringify({
+                event: "V2_TREND_TOTAL_EXPOSURE_PYRAMID_PROOF",
+                symbol: input.symbol,
+                symbolMaxNotional,
+                globalMaxNotional,
+                currentSymbolNotional,
+                currentGlobalNotional,
+                remainingSymbolRoom,
+                remainingGlobalRoom,
+                nextAddonNotional
+            }));
+
+            // 6. worstCasePnlAfterNewStop verification
+            // Calculate total PnL if stopped at effectiveNewStop after adding nextAddonNotional
             const originalWorstCase = side === "long"
                 ? (effectiveNewStop - entryPrice) / entryPrice * sizeUsd
                 : (entryPrice - effectiveNewStop) / entryPrice * sizeUsd;
             
-            // Since addonSize * addonLossPctToStop = availableRiskBudget (at max), 
-            // the addon loss at newStop will be -availableRiskBudget.
-            // So total worst case = originalWorstCase - availableRiskBudget.
-            // We want this to be >= 0.
-            const worstCasePnlAfterNewStop = originalWorstCase - availableRiskBudget;
+            // Loss on the new add-on if stopped at effectiveNewStop
+            const addonWorstCase = -nextAddonNotional * addonLossPctToStop;
+            const worstCasePnlAfterNewStop = originalWorstCase + addonWorstCase;
+
+            console.info(JSON.stringify({
+                event: "V2_TREND_WORST_CASE_PNL_PROOF",
+                symbol: input.symbol,
+                originalWorstCase,
+                addonWorstCase,
+                worstCasePnlAfterNewStop,
+                requiredMin: minimumProtectedProfitUsd
+            }));
 
             const pyramidPass = 
                 trendHealthy && 
                 pnlPct >= 0.002 && 
-                availableRiskBudget > 0 && 
-                addonMaxNotional >= 50 && // Minimum viable add-on
-                worstCasePnlAfterNewStop >= -0.01; // Allow tiny epsilon
+                lockedProfitUsd > minimumProtectedProfitUsd && // Must have locked profit buffer
+                nextAddonNotional >= 10 && // Minimum viable add-on size reduced to 10 for smaller accounts
+                worstCasePnlAfterNewStop >= minimumProtectedProfitUsd;
 
             addOnAllowed = pyramidPass;
             
             if (pyramidPass) {
                 console.info(JSON.stringify({
-                    event: "V2_TREND_PROFIT_FUNDED_PYRAMID_PROOF",
+                    event: "V2_TREND_ADDON_BUDGET_PROOF",
                     symbol: input.symbol,
-                    lockedProfit,
                     availableRiskBudget,
-                    addonMaxNotional,
-                    worstCasePnlAfterNewStop,
-                    pnlPct,
+                    addonMaxByProfit,
+                    nextAddonNotional,
                     addonLossPctToStop
+                }));
+            }
+
+            // 7. Stop Management
+            if (effectiveNewStop !== currentStop) {
+                newStopPrice = effectiveNewStop;
+                console.info(JSON.stringify({
+                    event: "V2_TREND_STOP_PROPAGATION_PROOF",
+                    symbol: input.symbol,
+                    oldStop: currentStop,
+                    newStop: effectiveNewStop,
+                    reason: "TRAILING_ATR_PROTECTION"
                 }));
             }
 
             partialAction = trendHealthy ? "none" : "prepare";
             exitAction = trendHealthy ? "none" : "watch";
             proofReasons.push(trendHealthy ? "TREND_CONTINUATION_HOLD" : "TREND_WEAKNESS_EXIT_WATCH");
-            if (pyramidPass) proofReasons.push("PROFIT_FUNDED_PYRAMID_ACTIVE");
+            if (pyramidPass) proofReasons.push("PROFIT_LOCKED_PYRAMID_ACTIVE");
         } else {
             addOnAllowed = false;
             partialAction = "none";
@@ -200,34 +269,6 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
         (executionOwner as string) === "unknown";
     const consistencyPass = trueInconsistencyReasons.length === 0;
 
-    let newStopPrice: number | undefined = undefined;
-    if (input.position != null && input.atr != null && input.markPrice != null && input.regime === "TREND") {
-        const sideMultiplier = input.side === "long" ? -1 : 1;
-        const potentialStop = input.markPrice + (sideMultiplier * 2.2 * input.atr);
-        
-        if (input.currentStopPrice != null) {
-            if (input.side === "long") {
-                newStopPrice = Math.max(input.currentStopPrice, potentialStop);
-            } else {
-                newStopPrice = Math.min(input.currentStopPrice, potentialStop);
-            }
-            
-            if (newStopPrice !== input.currentStopPrice) {
-                console.info(JSON.stringify({
-                    event: "V2_TREND_STOP_RAISE_PROOF",
-                    symbol: input.symbol,
-                    side: input.side,
-                    oldStop: input.currentStopPrice,
-                    newStop: newStopPrice,
-                    markPrice: input.markPrice,
-                    atr: input.atr
-                }));
-                proofReasons.push("STOP_IMPROVEMENT_DETECTED");
-            }
-        } else {
-            newStopPrice = potentialStop;
-        }
-    }
 
     const result: V2TradeLifecycleAuthorityResult = {
         symbol: input.symbol,

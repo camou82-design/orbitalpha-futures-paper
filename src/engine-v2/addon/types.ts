@@ -74,4 +74,8 @@ export type EvaluateV2AddOnPolicyArgs = Readonly<{
         atr?: number;
         volatilityProxyDiag?: number | null;
     };
+    accountEquityUsd?: number;
+    currentSymbolNotionalUsd?: number;
+    currentGlobalNotionalUsd?: number;
+    currentStopPrice?: number;
 }>;

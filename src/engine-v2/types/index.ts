@@ -701,6 +701,10 @@ export interface V2TradeLifecycleAuthorityInput {
     };
     atr?: number;
     currentStopPrice?: number;
+    accountEquityUsd?: number;
+    currentSymbolNotionalUsd?: number;
+    currentGlobalNotionalUsd?: number;
+    liveMaxOrderNotionalUsdt?: number;
 }
 
 export interface V2TradeLifecycleAuthorityResult {
