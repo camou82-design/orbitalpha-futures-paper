@@ -5305,15 +5305,18 @@ export class PaperEngine {
     if (!this.okxDemo) return { modified: false, success: false, record: open };
 
     const symSideKey = `${open.symbol}:${open.side}`;
-    const isOperatorManaged = 
-      this.symbolExternalManualBlocked.has(symSideKey) ||
-      open.lifecycleState === "EXTERNAL_MANUAL_POSITION" || 
-      open.lifecycleState === "OPERATOR_MANAGED" || 
-      open.lifecycleState === "CLOSE_ONLY_MANAGED" || 
-      (open as any).isOperatorManaged === true;
+    const paperOpensForSync = await this.positions.loadOpenAll();
+    const syncSnap = buildLedgerOkxPositionSyncSnapshot(paperOpensForSync, this.lastLivePositionsPayload, this.instrumentCache);
+    const isTrueExternalManual = syncSnap.ignored_external_manual_keys.includes(symSideKey);
 
-    // EXCLUDE: ETHUSDT if manual residue was detected
-    if (isOperatorManaged) {
+    // 진성 외부 수동 포지션인 경우에만 보호 주문 생성을 건너뛴다.
+    if (isTrueExternalManual) {
+      this.logger.info("V2_PROTECTIVE_STOP_SKIP_TRUE_EXTERNAL_MANUAL_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        lifecycle: open.lifecycleState,
+        flowId
+      });
       this.logger.info("OPERATOR_MANAGED_PROTECTION_SKIPPED", {
         symbol: open.symbol,
         side: open.side,
@@ -5323,7 +5326,8 @@ export class PaperEngine {
       return { modified: false, success: true, record: open };
     }
 
-    if (!open.stopPrice || !Number.isFinite(open.stopPrice)) {
+    const activeStopPrice = open.stopPrice ?? (open as any).ledger_stop_px;
+    if (!activeStopPrice || !Number.isFinite(activeStopPrice)) {
       return { modified: false, success: true, record: open };
     }
 
@@ -5344,7 +5348,7 @@ export class PaperEngine {
     if (open.isProtectiveStopRegistered && open.protectiveStopAlgoId) {
       const algo = (this as any).cachedOpsAlgos?.find((a: any) => String(a.algoId) === open.protectiveStopAlgoId);
       const currentSlPx = algo ? Number(algo.slTriggerPx) : null;
-      const priceMatches = typeof currentSlPx === "number" && Number.isFinite(currentSlPx) && Math.abs(currentSlPx - open.stopPrice) < 1e-8;
+      const priceMatches = typeof currentSlPx === "number" && Number.isFinite(currentSlPx) && Math.abs(currentSlPx - activeStopPrice) < 1e-8;
 
       if (priceMatches) {
         this.logger.info("POSITION_PROTECTION_STATE_PROOF", {
@@ -5361,7 +5365,7 @@ export class PaperEngine {
           symbol: open.symbol,
           side: open.side,
           algoId: open.protectiveStopAlgoId,
-          ledgerStop: open.stopPrice,
+          ledgerStop: activeStopPrice,
           exchangeStop: currentSlPx,
           reason: algo ? "PRICE_MISMATCH" : "ALGO_NOT_FOUND_IN_CACHE",
           action: "CANCEL_FOR_RESUBMIT",
@@ -5373,7 +5377,7 @@ export class PaperEngine {
           side: open.side,
           oldAlgoId: open.protectiveStopAlgoId,
           oldStopPrice: currentSlPx,
-          newStopPrice: open.stopPrice,
+          newStopPrice: activeStopPrice,
           reason: "stop_price_mismatch_detected",
           flowId
         });
@@ -5405,7 +5409,7 @@ export class PaperEngine {
 
       if (candidate) {
         const candidateSlPx = Number(candidate.slTriggerPx);
-        const candidatePriceMatches = Math.abs(candidateSlPx - (open.stopPrice ?? 0)) < 1e-8;
+        const candidatePriceMatches = Math.abs(candidateSlPx - activeStopPrice) < 1e-8;
         
         if (candidatePriceMatches) {
           this.logger.info("PROTECTIVE_STOP_AUTO_REPAIR_SUCCESS", {
@@ -5417,9 +5421,20 @@ export class PaperEngine {
           });
           const repaired: PaperOpenPositionRecord = {
             ...open,
+            stopPrice: activeStopPrice,
             isProtectiveStopRegistered: true,
             protectiveStopAlgoId: candidate.algoId
           };
+          
+          this.logger.info("POSITION_PROTECTION_STATE_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            reduce_only_protective_found: true,
+            algoId: candidate.algoId,
+            price_match: true,
+            flowId
+          });
+          
           return { modified: true, success: true, record: repaired };
         }
       }
@@ -5433,11 +5448,18 @@ export class PaperEngine {
       flowId
     });
 
-    // Attempt to register
-    this.logger.info("OKX_PROTECTIVE_STOP_ORDER_SUBMIT", {
+    this.logger.info("V2_PROTECTIVE_STOP_REGISTER_ATTEMPT", {
       symbol: open.symbol,
       side: open.side,
-      stopPrice: open.stopPrice,
+      stopPrice: activeStopPrice,
+      flowId
+    });
+
+    // Attempt to register
+    this.logger.info("OKX_PROTECTIVE_STOP_SUBMIT_PROOF", {
+      symbol: open.symbol,
+      side: open.side,
+      stopPrice: activeStopPrice,
       size: open.baseQty,
       flowId
     });
@@ -5481,7 +5503,7 @@ export class PaperEngine {
       ordType: "stop",
       sz: String(sz),
       reduceOnly: true,
-      slTriggerPx: String(open.stopPrice),
+      slTriggerPx: String(activeStopPrice),
       slOrdPx: "-1" // Market
     });
 
@@ -5489,9 +5511,11 @@ export class PaperEngine {
       const algoId = String(submit.value[0].algoId);
       this.logger.info("OKX_PROTECTIVE_STOP_ORDER_ACCEPTED", { symbol: open.symbol, algoId, flowId });
       this.logger.info("OKX_PROTECTIVE_STOP_ORDER_CONFIRMED", { symbol: open.symbol, algoId, flowId });
+      this.logger.info("V2_PROTECTIVE_STOP_REGISTERED_PROOF", { symbol: open.symbol, algoId, flowId });
       
       const updated: PaperOpenPositionRecord = {
         ...open,
+        stopPrice: activeStopPrice,
         protectiveStopAlgoId: algoId,
         isProtectiveStopRegistered: true
       };
@@ -5508,6 +5532,7 @@ export class PaperEngine {
     } else {
       const error = (submit as any).error || (submit as any).diagnostics?.retMsg || "unknown_error";
       this.logger.error("OKX_PROTECTIVE_STOP_ORDER_CREATE_FAILED", { symbol: open.symbol, error, flowId });
+      this.logger.error("V2_PROTECTIVE_STOP_REGISTER_FAIL_PROOF", { symbol: open.symbol, error, flowId });
       this.logger.warn("PROTECTIVE_STOP_ORDER_MISSING", { symbol: open.symbol, flowId });
       
       // Block new entries for this symbol
