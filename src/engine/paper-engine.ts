@@ -10915,10 +10915,18 @@ export class PaperEngine {
              continue;
            }
 
-           // OKX Actual Position Reconcile
-           const actualPos = this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload) 
-             ? this.lastLivePositionsPayload.find((p: any) => p.instId === pending.instId && String(p.posSide).toLowerCase() === pending.side)
-             : null;
+           let actualPos = null;
+           if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
+             actualPos = this.lastLivePositionsPayload.find((p: any) => p.instId === pending.instId && String(p.posSide).toLowerCase() === pending.side);
+             if (!actualPos) {
+               actualPos = this.lastLivePositionsPayload.find((p: any) => {
+                 if (p.instId !== pending.instId) return false;
+                 const posNum = Number(p.pos) || 0;
+                 const deducedSide = posNum > 0 ? "long" : (posNum < 0 ? "short" : null);
+                 return deducedSide === pending.side;
+               });
+             }
+           }
            
            if (!actualPos) {
              this.logger.error("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_FAIL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "actual_position_not_found" });
@@ -12344,7 +12352,7 @@ export class PaperEngine {
                 openTraceId: openTraceId
               };
               const currentPending = await this.store.readPendingEntryOrders();
-              const existingIdx = currentPending.findIndex(p => p.ordId === pendingReg.ordId || p.clOrdId === pendingReg.clOrdId || (p.symbol === pendingReg.symbol && p.side === pendingReg.side));
+              const existingIdx = currentPending.findIndex(p => p.ordId === pendingReg.ordId || (p.clOrdId === pendingReg.clOrdId && p.clOrdId !== "") || (p.symbol === pendingReg.symbol && p.side === pendingReg.side));
               if (existingIdx >= 0) {
                 this.logger.info("PENDING_ENTRY_ORDER_UPSERT_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
                 currentPending[existingIdx] = pendingReg;
@@ -12976,7 +12984,7 @@ export class PaperEngine {
           legacyPendingReg.paperRecordSnapshot = tempRecord;
           
           const currentPending = await this.store.readPendingEntryOrders();
-          const existingIdx = currentPending.findIndex(p => p.ordId === legacyPendingReg.ordId || p.clOrdId === legacyPendingReg.clOrdId || (p.symbol === legacyPendingReg.symbol && p.side === legacyPendingReg.side));
+          const existingIdx = currentPending.findIndex(p => p.ordId === legacyPendingReg.ordId || (p.clOrdId === legacyPendingReg.clOrdId && p.clOrdId !== "") || (p.symbol === legacyPendingReg.symbol && p.side === legacyPendingReg.side));
           if (existingIdx >= 0) {
             this.logger.info("PENDING_ENTRY_ORDER_UPSERT_PROOF", { symbol: first.symbol, side: authority.side, ord_id: legacyPendingReg.ordId });
             currentPending[existingIdx] = legacyPendingReg;
