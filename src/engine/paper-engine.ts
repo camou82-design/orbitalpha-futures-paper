@@ -12599,7 +12599,8 @@ export class PaperEngine {
         const auditNotionalOk = typeof auditNotional === "number" && auditNotional > 0;
         const auditSideOk = auditSide === "long" || auditSide === "short";
         const auditReadyOk = executionSnapshot.paperReady === true && executionSnapshot.signedReady === true;
-        const auditFail = !auditSideOk || !auditNotionalOk || !auditReadyOk;
+        // auditStopOk 반드시 포함 — stop 없는 ENTER는 OKX submit 전 차단
+        const auditFail = !auditSideOk || !auditNotionalOk || !auditReadyOk || !auditStopOk;
 
         this.logger.info("V2_ENTRY_ORDER_BUILD_AUDIT_PROOF", {
           symbol: sym,
@@ -12611,6 +12612,7 @@ export class PaperEngine {
           signed_execution_ready: executionSnapshot.signedReady,
           side_ok: auditSideOk,
           notional_ok: auditNotionalOk,
+          stop_ok: auditStopOk,
           readiness_ok: auditReadyOk,
           authority_source: authority.source,
           market_subtype: effectiveMarketSubtype || null,
@@ -12618,11 +12620,18 @@ export class PaperEngine {
         });
 
         if (auditFail) {
+          const auditFailReason =
+            !auditSideOk ? "INVALID_SIDE" :
+            !auditNotionalOk ? "NOTIONAL_ZERO_OR_NEGATIVE" :
+            !auditStopOk ? "STOP_PRICE_MISSING" :
+            "READINESS_NOT_MET";
           this.logger.warn("V2_ENTRY_TO_FILL_AUDIT_FAIL_HARD_BLOCK", {
             symbol: sym,
             side: auditSide,
             order_notional_usdt: auditNotional,
-            fail_reason: !auditSideOk ? "INVALID_SIDE" : !auditNotionalOk ? "NOTIONAL_ZERO_OR_NEGATIVE" : "READINESS_NOT_MET",
+            fail_reason: auditFailReason,
+            invalidation_px: authority.invalidationPx ?? null,
+            stop_price_present: auditStopOk,
             paper_execution_ready: executionSnapshot.paperReady,
             signed_execution_ready: executionSnapshot.signedReady
           });
@@ -12885,6 +12894,10 @@ export class PaperEngine {
             macro_bias: macroBias,
             is_counter_trend: macroCounterTrend,
             macro_size_multiplier: macroSizeMultiplier,
+            // 실제 1D/H4 캔들 기반이 아닌 marketSubtype proxy임을 명시
+            macro_source: "market_subtype_proxy",
+            daily_bias_actual: null,
+            h4_bias_actual: null,
             note: "macro_bias_is_risk_filter_only_not_enter_generator"
           });
 
@@ -13157,19 +13170,55 @@ export class PaperEngine {
             });
 
             // [V2_ENTRY_TO_FILL] Post-fill actual position reconcile check
-            const actualPosReconcile = this.lastLivePositionsPayload?.find?.((p: any) =>
-              p.instId === toOkxSwapInstId(sym as MarketSymbol) &&
-              String(p.posSide).toLowerCase() === intentSide
-            );
+            // posSide 우선, 불일치 시 pos 부호로 side fallback
+            const instIdTarget = toOkxSwapInstId(sym as MarketSymbol);
+            let actualPosReconcile: any = null;
+            let reconcileMatchMethod: "posSide" | "pos_sign" | "none" = "none";
+            if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
+              // 1차: posSide 직접 매칭
+              actualPosReconcile = this.lastLivePositionsPayload.find((p: any) =>
+                p.instId === instIdTarget &&
+                String(p.posSide).toLowerCase() === intentSide
+              );
+              if (actualPosReconcile) {
+                reconcileMatchMethod = "posSide";
+              } else {
+                // 2차: instId 매칭 후 pos 부호로 side fallback
+                const samePosInstId = this.lastLivePositionsPayload.filter((p: any) => p.instId === instIdTarget);
+                for (const p of samePosInstId) {
+                  const posNum = Number(p.pos);
+                  const deducedSide = posNum > 0 ? "long" : posNum < 0 ? "short" : null;
+                  if (deducedSide === intentSide) {
+                    actualPosReconcile = p;
+                    reconcileMatchMethod = "pos_sign";
+                    break;
+                  }
+                }
+              }
+            }
+            const reconcileFound = actualPosReconcile != null;
             this.logger.info("V2_POST_FILL_ACTUAL_POSITION_RECONCILE_PROOF", {
               symbol: sym,
               side: intentSide,
               paper_size_usd: record.sizeUsd,
-              actual_pos_found: actualPosReconcile != null,
-              actual_pos_usd: actualPosReconcile ? Math.abs(Number(actualPosReconcile.notionalUsd ?? 0)) : null,
-              ledger_actual_match: actualPosReconcile != null,
-              note: actualPosReconcile == null ? "actual_position_not_yet_visible_will_reconcile_next_cycle" : "reconciled"
+              actual_pos_found: reconcileFound,
+              actual_pos_usd: reconcileFound ? Math.abs(Number(actualPosReconcile.notionalUsd ?? 0)) : null,
+              ledger_actual_match: reconcileFound,
+              match_method: reconcileMatchMethod,
+              note: !reconcileFound ? "actual_position_not_yet_visible_will_reconcile_next_cycle" : "reconciled"
             });
+
+            // [수정 4] actual position 미확인 → 신규 진입 차단 플래그
+            if (!reconcileFound) {
+              this.logger.error("V2_POST_FILL_ACTUAL_POSITION_RECONCILE_FAIL_BLOCK_PROOF", {
+                symbol: sym,
+                side: intentSide,
+                paper_size_usd: record.sizeUsd,
+                action: "symbol_level_new_entry_blocked_pending_actual_reconcile",
+                reason: "filled_but_actual_position_not_found_in_live_payload"
+              });
+              this.symbolProtectionFailedBlocked.add(`${sym}:${intentSide}`);
+            }
 
             if (record.isProtectiveStopRegistered !== true) {
               this.logger.error("V2_POST_FILL_PROTECTIVE_STOP_MISSING_BLOCK_PROOF", {
