@@ -428,7 +428,14 @@ export function resolveSymbolDecisionEnvelope(
         takeProfit1Px: typeof execMeta.takeProfit1Px === "number" ? execMeta.takeProfit1Px : undefined,
         takeProfit2Px: typeof execMeta.takeProfit2Px === "number" ? execMeta.takeProfit2Px : undefined,
         partialExitRatio: typeof execMeta.partialExitRatio === "number" ? execMeta.partialExitRatio : undefined,
-        invalidationPx: typeof execMeta.invalidationPx === "number" ? execMeta.invalidationPx : undefined
+        invalidationPx: typeof execMeta.invalidationPx === "number" ? execMeta.invalidationPx : undefined,
+        alignedSignal: execMeta.alignedSignal ?? null,
+        selectedSideAfterVeto: execMeta.selectedSideAfterVeto ?? null,
+        promotionApplied: execMeta.promotionApplied ?? null,
+        promotionReason: execMeta.promotionReason ?? null,
+        promotionBlockReason: execMeta.promotionBlockReason ?? null,
+        shockReactionBlockReason: execMeta.shockReactionBlockReason ?? null,
+        qualityScore: typeof execMeta.qualityScore === "number" ? execMeta.qualityScore : null
     });
     const authority =
         v2Mode === "engine_v2"

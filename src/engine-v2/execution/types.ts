@@ -65,6 +65,15 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     takeProfit2Px?: number;
     partialExitRatio?: number;
     invalidationPx?: number;
+
+    // --- Diagnostic Audit Fields (V2 Hardening) ---
+    aligned_signal?: string | null;
+    selected_side_after_veto?: string | null;
+    promotion_applied?: boolean | null;
+    promotion_reason?: string | null;
+    promotion_block_reason?: string | null;
+    shock_reaction_block_reason?: string | null;
+    quality_score?: number | null;
 }>;
 
 export type V2LegacyComparison = Readonly<{
@@ -106,4 +115,13 @@ export type BuildExecutionEnvelopeArgs = Readonly<{
     takeProfit2Px?: number;
     partialExitRatio?: number;
     invalidationPx?: number;
+
+    // --- Diagnostic Audit Fields (V2 Hardening) ---
+    alignedSignal?: string | null;
+    selectedSideAfterVeto?: string | null;
+    promotionApplied?: boolean | null;
+    promotionReason?: string | null;
+    promotionBlockReason?: string | null;
+    shockReactionBlockReason?: string | null;
+    qualityScore?: number | null;
 }>;

@@ -100,7 +100,14 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             takeProfit1Px: args.takeProfit1Px,
             takeProfit2Px: args.takeProfit2Px,
             partialExitRatio: args.partialExitRatio,
-            invalidationPx: args.invalidationPx
+            invalidationPx: args.invalidationPx,
+            aligned_signal: args.alignedSignal,
+            selected_side_after_veto: args.selectedSideAfterVeto,
+            promotion_applied: args.promotionApplied,
+            promotion_reason: args.promotionReason,
+            promotion_block_reason: args.promotionBlockReason,
+            shock_reaction_block_reason: args.shockReactionBlockReason,
+            quality_score: args.qualityScore
         };
     }
     if (mode === "legacy") {
@@ -142,7 +149,14 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             originalDecision,
             originalSide,
             originalStageMarginKrw,
-            newStopPrice
+            newStopPrice,
+            aligned_signal: args.alignedSignal,
+            selected_side_after_veto: args.selectedSideAfterVeto,
+            promotion_applied: args.promotionApplied,
+            promotion_reason: args.promotionReason,
+            promotion_block_reason: args.promotionBlockReason,
+            shock_reaction_block_reason: args.shockReactionBlockReason,
+            quality_score: args.qualityScore
         };
     }
     return {
@@ -183,6 +197,13 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         originalDecision,
         originalSide,
         originalStageMarginKrw,
-        newStopPrice
+        newStopPrice,
+        aligned_signal: args.alignedSignal,
+        selected_side_after_veto: args.selectedSideAfterVeto,
+        promotion_applied: args.promotionApplied,
+        promotion_reason: args.promotionReason,
+        promotion_block_reason: args.promotionBlockReason,
+        shock_reaction_block_reason: args.shockReactionBlockReason,
+        quality_score: args.qualityScore
     };
 }

@@ -102,12 +102,15 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
     const isStructuralCohesionValid = boxCohesion >= 0.7 || rangeOscillationScore >= 0.6;
 
     if (boxBreakSide === "lower" && isVolumeExpansionValid && isAtrExpansionValid && isStructuralCohesionValid) {
-        if (reviewingTicks >= 12) {
-             if (sn.lastPrice > (sn.boxLow ?? 0)) {
+        if (reviewingTicks >= 6) { // Reduce from 12 to 6 for faster retest recognition
+             const retestLevel = (sn.boxLow ?? 0);
+             const isNearRetest = sn.lastPrice >= retestLevel * 0.999 && sn.lastPrice <= retestLevel * 1.001;
+             const isFailedRecovery = sn.lastPrice <= retestLevel * 1.001 && (rcSlope < 0 || emaGap < 0);
+             
+             if (sn.lastPrice > retestLevel * 1.005) {
                  return { phase: "FAKE_VOLUME_BREAKDOWN", metadata: slopeMetadata };
              }
-             if (sn.lastPrice <= (sn.boxLow ?? 0) * 1.001 && sn.lastPrice >= (sn.boxLow ?? 0) * 0.999) {
-                 if (rcSlope > 0 || emaGap > 0) return { phase: "FAKE_VOLUME_BREAKDOWN", metadata: slopeMetadata };
+             if (isNearRetest || isFailedRecovery) {
                  return { phase: "BREAKDOWN_RETEST_FAILED", metadata: slopeMetadata };
              }
         }
@@ -115,12 +118,15 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
     }
 
     if (boxBreakSide === "upper" && isVolumeExpansionValid && isAtrExpansionValid && isStructuralCohesionValid) {
-        if (reviewingTicks >= 12) {
-             if (sn.lastPrice < (sn.boxHigh ?? 0)) {
+        if (reviewingTicks >= 6) {
+             const retestLevel = (sn.boxHigh ?? 0);
+             const isNearRetest = sn.lastPrice >= retestLevel * 0.999 && sn.lastPrice <= retestLevel * 1.001;
+             const isConfirmedBreakout = sn.lastPrice >= retestLevel * 0.999 && (rcSlope > 0 || emaGap > 0);
+
+             if (sn.lastPrice < retestLevel * 0.995) {
                  return { phase: "FAKE_VOLUME_BREAKOUT", metadata: slopeMetadata };
              }
-             if (sn.lastPrice >= (sn.boxHigh ?? 0) * 0.999 && sn.lastPrice <= (sn.boxHigh ?? 0) * 1.001) {
-                 if (rcSlope < 0 || emaGap < 0) return { phase: "FAKE_VOLUME_BREAKOUT", metadata: slopeMetadata };
+             if (isNearRetest || isConfirmedBreakout) {
                  return { phase: "BREAKOUT_RETEST_CONFIRMED_VOLUME", metadata: slopeMetadata };
              }
         }

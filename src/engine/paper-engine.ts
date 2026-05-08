@@ -12563,6 +12563,25 @@ export class PaperEngine {
             reject_reason: (finalBlockedReason as any) || "FINAL_GATE_BLOCKED"
           }
         };
+
+        if (authority.source === "v2") {
+          this.logger.info("V2_NO_ENTRY_REASON_AUDIT_PROOF", {
+            symbol: sym,
+            runtime_authority_decision: authority.decision || "SKIP",
+            runtime_authority_side: authority.side || "none",
+            final_decision: "SKIP",
+            reject_reason: finalBlockedReason || "FINAL_GATE_BLOCKED",
+            aligned_signal: envelope.v2_execution_envelope?.aligned_signal ?? null,
+            selected_side_after_veto: envelope.v2_execution_envelope?.selected_side_after_veto ?? null,
+            promotion_applied: envelope.v2_execution_envelope?.promotion_applied ?? false,
+            promotion_reason: envelope.v2_execution_envelope?.promotion_reason ?? null,
+            promotion_block_reason: envelope.v2_execution_envelope?.promotion_block_reason ?? null,
+            shock_reaction_block_reason: envelope.v2_execution_envelope?.shock_reaction_block_reason ?? null,
+            quality_score: envelope.v2_execution_envelope?.quality_score ?? null,
+            active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
+            market_subtype: effectiveMarketSubtype || null
+          });
+        }
         await this.emitPipelineEventsFromDecision(first, refinedEnvelope, nowTs, entryStage, finalBlockedReason);
         continue;
       }

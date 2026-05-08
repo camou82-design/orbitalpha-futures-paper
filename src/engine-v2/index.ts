@@ -1498,6 +1498,44 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }));
         }
 
+        // 수정 7. Retest Recognition Layer (Breakdown/Breakout Retest Promotion)
+        const isRetestEligiblePhase = judgment.subtype === "BREAKDOWN_RETEST_FAILED" || judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME";
+        const retestCommonOk = 
+            isRetestEligiblePhase &&
+            hardControlClear === true &&
+            hardBlockPresent === false &&
+            paperExecutionReady === true &&
+            signedExecutionReady === true &&
+            !hasSameSidePosition &&
+            !hasOppositeSidePosition &&
+            qualityScore >= 55; // Retest requires slightly lower quality but clear structural confirmation
+
+        if (retestCommonOk && (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "REJECT")) {
+            const isShortRetest = judgment.subtype === "BREAKDOWN_RETEST_FAILED" && trendSideCandidate === "short" && riskShortAllow && allowNewShort && emaGap <= 0;
+            const isLongRetest = judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" && trendSideCandidate === "long" && riskLongAllow && allowNewLong && emaGap >= 0;
+
+            if (isShortRetest || isLongRetest) {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = trendSideCandidate;
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = judgment.subtype === "BREAKDOWN_RETEST_FAILED" ? "V2_RETEST_SHORT_CONFIRMED" : "V2_RETEST_LONG_CONFIRMED";
+                promotionBlockReason = null;
+                promotionMinConditionPassed = true;
+                
+                console.info(JSON.stringify({
+                    event: "V2_BREAKDOWN_RETEST_RECOGNITION_PROOF",
+                    symbol: String(input.symbol),
+                    phase: judgment.subtype,
+                    side: trendSideCandidate,
+                    ema_gap: emaGap,
+                    quality_score: qualityScore,
+                    reviewing_ticks: reviewingTicks,
+                    promotion_reason: promotionReason
+                }));
+            }
+        }
+
         if (transitionWatchShortConditionsMet) {
             v2DecisionAfterPromotion = "ENTER";
             v2SideAfterPromotion = "short";
@@ -2709,6 +2747,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         },
         microExecution: microExecution ?? undefined,
         lifecycleAuthority: lifecycleAuthority ?? undefined,
+        metadata: {
+            ...execMeta,
+            alignedSignal,
+            selectedSideAfterVeto: selectedSideFinal,
+            promotionApplied,
+            promotionReason,
+            promotionBlockReason,
+            shockReactionBlockReason,
+            qualityScore
+        },
         v2ExitAuthority: v2ExitAuthority ?? undefined,
         v2PartialAuthority: v2PartialAuthority ?? undefined,
         v2CooldownAuthority: v2CooldownAuthority ?? undefined,
