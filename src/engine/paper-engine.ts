@@ -3937,72 +3937,69 @@ export class PaperEngine {
       const ledgerExposureNotionalKrw = computeLedgerSymbolExposureNotionalKrw(opensAfterClose, String(sym));
       const ledgerEquityMultiple = ledgerExposureNotionalKrw / 500_000;
 
-      this.logger.info("ENTRY_AUTHORITY_ENVELOPE_PROOF", {
-        symbol: sym,
-        v2_mode_runtime: v2Mode,
-        authority_owner: authority.source,
-        execution_authority_source: envelope.execution_authority_source ?? null,
-        execution_authority_version: envelope.execution_authority_version ?? null,
-        legacy_used_for_execution: envelope.execution_authority_source === "legacy_execution_envelope",
-        legacy_comparison_only: envelope.execution_authority_source !== "legacy_execution_envelope",
-        runtime_authority_owner: envelope.runtime_authority_owner ?? null,
-        runtime_authority_decision: envelope.runtime_authority_decision ?? null,
-        runtime_authority_side: envelope.runtime_authority_side ?? null,
-        runtime_authority_stage_margin_krw: envelope.runtime_authority_stage_margin_krw ?? null,
-        runtime_authority_size_usdt: envelope.runtime_authority_size_usdt ?? null,
-        market_subtype: envelope.v2_execution_envelope?.marketSubtype ?? null,
-        exit_policy_action: envelope.v2_execution_envelope?.exitPolicyAction ?? null,
-        exit_policy_reason: envelope.v2_execution_envelope?.exitPolicyReason ?? null,
-        exit_should_exit: envelope.v2_execution_envelope?.exitShouldExit ?? null,
-        exit_should_reduce: envelope.v2_execution_envelope?.exitShouldReduce ?? null,
-        exit_should_partial: envelope.v2_execution_envelope?.exitShouldPartial ?? null,
-        exit_reduce_ratio: envelope.v2_execution_envelope?.exitReduceRatio ?? null,
-        exit_urgency: envelope.v2_execution_envelope?.exitUrgency ?? null,
-        exit_confidence: envelope.v2_execution_envelope?.exitConfidence ?? null,
-        final_engine_owner: selectorResult?.adopted_result.engine ?? null,
-        adopted_engine: selectorResult?.adopted_result.engine ?? null,
-        adoption_reason: selectorResult?.adopted_result.adoption_reason ?? null,
-        v2_position_state_action: envelope.v2_position_state_action ?? null,
-        v2_position_lifecycle_state: envelope.v2_position_lifecycle_state ?? null,
-        v2_position_risk_state: envelope.v2_position_risk_state ?? null,
-        v2_position_stage: envelope.v2_position_stage ?? null,
-        v2_position_pnl_state: envelope.v2_position_pnl_state ?? null,
-        v2_position_hold_ms: envelope.v2_position_hold_ms ?? null,
-        v2_unrealized_pnl_usd_estimate: envelope.v2_unrealized_pnl_usd_estimate ?? null,
-        v2_paper_position_state_agreement: envelope.v2_paper_position_state_agreement ?? null,
-        position_state_authority_owner: envelope.position_state_authority_owner ?? null,
-        position_state_execution_owner: envelope.position_state_execution_owner ?? null,
-        authority_decision: authority.decision,
-        v2_decision: selectorResult?.v2_result.decision ?? null,
-        v2_side: selectorResult?.v2_result.side ?? null,
-        v2_reject_reason: selectorResult?.v2_result.risk.blockReason ?? null,
-        entry_quality_grade: selectorResult?.v2_result.risk.entryQualityGrade ?? authority.entryQualityGrade ?? null,
-        leverage_profile: selectorResult?.v2_result.risk.leverageProfile ?? authority.leverageProfile ?? "BASE",
-        applied_leverage: selectorResult?.v2_result.risk.appliedLeverage ?? authority.appliedLeverage ?? 0,
-        leverage_reason: selectorResult?.v2_result.risk.leverageReason ?? authority.leverageReason ?? null,
-        leverage_block_reason: selectorResult?.v2_result.risk.leverageBlockReason ?? authority.leverageBlockReason ?? null,
-        exposure_notional_krw: ledgerExposureNotionalKrw,
-        equity_multiple: ledgerEquityMultiple,
-        candidate_exposure_notional_krw: selectorResult?.v2_result.risk.exposureNotionalKrw ?? authority.exposureNotionalKrw ?? 0,
-        candidate_equity_multiple: selectorResult?.v2_result.risk.equityMultiple ?? authority.equityMultiple ?? 0,
-        paper_execution_ready: this.paperExecutionReady,
-        signed_execution_ready: this.signedExecutionReady,
-        signed_submit_mode: this.signedSubmitMode(),
-        signed_submit_block_reason: this.signedSubmitBlockReason(this.signedSubmitMode()),
-        ...this.okxAuthProofContext(),
-        serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
-        closeOnlyMode: this.serverTradeControlState.close_only_mode,
-        killSwitch: this.serverTradeControlState.kill_switch_active,
-        reconcileSafeMode: this.reconcileSafetyCloseOnly,
-        v2_entry_quality_profit_distance:
-          (selectorResult?.v2_result.risk as { diagnostics?: Record<string, unknown> } | undefined)?.diagnostics?.["entry_quality_distance_profit"] ?? null,
-        v2_entry_quality_loss_distance:
-          (selectorResult?.v2_result.risk as { diagnostics?: Record<string, unknown> } | undefined)?.diagnostics?.["entry_quality_distance_loss"] ?? null,
-        v2_entry_quality_contaminated_distance:
-          (selectorResult?.v2_result.risk as { diagnostics?: Record<string, unknown> } | undefined)?.diagnostics?.["entry_quality_distance_contaminated"] ?? null,
-        regime_at_decision: effectiveRegimeForDecision,
-        active_engine_routing: marketModeOut.routing.activeEngine
-      });
+      // 5. V2 No-Entry Audit (Required by USER - Consolidated location)
+      if (
+        (envelope.runtime_authority_owner === "V2" || authority.source === "v2") &&
+        envelope.runtime_authority_decision !== "ENTER"
+      ) {
+        const v2 = selectorResult?.v2_result;
+        const v2Env = envelope.v2_execution_envelope;
+        const v2Risk = v2?.risk;
+
+        // Refine expected_missing_condition
+        let refinedMissingCondition = v2Env?.expected_missing_condition || null;
+        if (!refinedMissingCondition) {
+          if (v2?.decision === "HOLD") {
+            refinedMissingCondition = "V2_HOLD_NO_ENTRY_SIDE";
+          } else if (v2Risk?.blockReason === "SHOCK_REACTION_RETEST_NOT_CONFIRMED") {
+            refinedMissingCondition = "SHOCK_REACTION_RETEST_NOT_CONFIRMED";
+          } else if (v2Risk?.blockReason === "RETEST_NOT_CONFIRMED") {
+            refinedMissingCondition = "RETEST_NOT_CONFIRMED";
+          } else if (v2Risk?.blockReason === "QUALITY_DISTANCE_CONTAMINATED") {
+            refinedMissingCondition = "QUALITY_DISTANCE_CONTAMINATED";
+          } else if (v2Risk?.blockReason === "TWO_CONSECUTIVE_LOSSES_RECOVERY_MODE") {
+            refinedMissingCondition = "TWO_CONSECUTIVE_LOSSES_RECOVERY_MODE";
+          } else if (v2Env?.selected_side_after_veto === "none") {
+            refinedMissingCondition = "SIDE_NONE_AFTER_VETO";
+          } else if (marketModeOut.routing.activeEngine === "TREND" && v2Env?.promotion_applied === false) {
+            refinedMissingCondition = "TREND_ENTRY_NOT_PROMOTED";
+          }
+        }
+
+        this.logger.info("V2_NO_ENTRY_REASON_AUDIT_PROOF", {
+          symbol: sym,
+          market_subtype: v2Env?.marketSubtype ?? null,
+          active_engine_routing: marketModeOut.routing.activeEngine,
+          runtime_authority_decision: envelope.runtime_authority_decision,
+          runtime_authority_side: envelope.runtime_authority_side,
+          v2_decision: v2?.decision ?? null,
+          v2_side: v2?.side ?? null,
+          v2_reject_reason: v2Risk?.blockReason ?? null,
+          range_side_candidate: v2Env?.range_side_candidate ?? null,
+          trend_side_candidate: v2Env?.trend_side_candidate ?? null,
+          selected_side_after_veto: v2Env?.selected_side_after_veto ?? null,
+          promotion_applied: v2Env?.promotion_applied ?? false,
+          promotion_reason: v2Env?.promotion_reason ?? null,
+          promotion_block_reason: v2Env?.promotion_block_reason ?? null,
+          shock_reaction_block_reason: v2Env?.shock_reaction_block_reason ?? null,
+          quality_score: v2Env?.quality_score ?? null,
+          entry_quality_grade: v2Risk?.entryQualityGrade ?? null,
+          reversal_confirmed: v2Env?.reversal_confirmed ?? null,
+          side_zone_valid: v2Env?.side_zone_valid ?? null,
+          expected_missing_condition: refinedMissingCondition,
+          expected_next_action: v2Env?.expected_next_action ?? null,
+          paper_execution_ready: this.paperExecutionReady,
+          signed_execution_ready: this.signedExecutionReady,
+          serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+          closeOnlyMode: this.serverTradeControlState.close_only_mode,
+          killSwitch: this.serverTradeControlState.kill_switch_active,
+          riskMode: this.config.paperEngineMode,
+          leverage_block_reason: v2Risk?.leverageBlockReason ?? null,
+          v2_entry_quality_profit_distance: (v2Risk as any)?.diagnostics?.["entry_quality_distance_profit"] ?? null,
+          v2_entry_quality_loss_distance: (v2Risk as any)?.diagnostics?.["entry_quality_distance_loss"] ?? null,
+        });
+      }
+
 
       if (selectorResult) {
         await this.store.appendJsonlLine("reports/v2_shadow_parity.jsonl", {
@@ -12564,30 +12561,9 @@ export class PaperEngine {
           }
         };
 
-        if (authority.source === "v2") {
-          const v2 = envelope.v2_execution_envelope;
-          this.logger.info("V2_NO_ENTRY_REASON_AUDIT_PROOF", {
-            symbol: sym,
-            market_subtype: effectiveMarketSubtype || null,
-            runtime_authority_decision: authority.decision || "SKIP",
-            v2_decision: v2?.v2_decision ?? null,
-            v2_side: v2?.v2_side ?? null,
-            range_side_candidate: v2?.range_side_candidate ?? null,
-            trend_side_candidate: v2?.trend_side_candidate ?? null,
-            selected_side_after_veto: v2?.selected_side_after_veto ?? null,
-            promotion_applied: v2?.promotion_applied ?? false,
-            promotion_reason: v2?.promotion_reason ?? null,
-            promotion_block_reason: v2?.promotion_block_reason ?? null,
-            shock_reaction_block_reason: v2?.shock_reaction_block_reason ?? null,
-            quality_score: v2?.quality_score ?? null,
-            reversal_confirmed: v2?.reversal_confirmed ?? null,
-            side_zone_valid: v2?.side_zone_valid ?? null,
-            expected_missing_condition: v2?.expected_missing_condition ?? null,
-            expected_next_action: v2?.expected_next_action ?? null,
-            active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null
-          });
-        }
-        await this.emitPipelineEventsFromDecision(first, refinedEnvelope, nowTs, entryStage, finalBlockedReason);
+        // V2_NO_ENTRY_REASON_AUDIT_PROOF removed from here and moved to runOnce for global coverage
+
+        await this.emitPipelineEventsFromDecision(first, refinedEnvelope, Date.now(), entryStage, finalBlockedReason);
         continue;
       }
       this.logger.info("ENTRY_EVIDENCE_ACCEPTED", {
@@ -12640,7 +12616,10 @@ export class PaperEngine {
           readiness_ok: auditReadyOk,
           authority_source: authority.source,
           market_subtype: effectiveMarketSubtype || null,
-          regime: authority.regime ?? null
+          regime: authority.regime ?? null,
+          macro_source: envelope.v2_execution_envelope?.macro_source ?? null,
+          daily_bias_actual: envelope.v2_execution_envelope?.daily_bias_actual ?? null,
+          h4_bias_actual: envelope.v2_execution_envelope?.h4_bias_actual ?? null
         });
 
         if (auditFail) {

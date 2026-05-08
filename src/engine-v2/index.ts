@@ -248,6 +248,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
 
     // Tier 4: Executors
+    let v2CalculatedInvalidationPx: number | null = null;
+    let expectedMissingCondition: string | null = null;
+    let expectedNextAction: string | null = null;
     let execution: ExecutorOutput;
     if (routing.executor === "RANGE") execution = executeRangeRegime(authoritativeInput, judgment);
     else if (routing.executor === "TREND") execution = executeTrendRegime(authoritativeInput, judgment);
@@ -1499,40 +1502,21 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
 
         // 수정 7. Retest Recognition Layer (Breakdown/Breakout Retest Promotion)
-        const isRetestEligiblePhase = judgment.subtype === "BREAKDOWN_RETEST_FAILED" || judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME";
+        const isRetestEligiblePhase = judgment.subtype === "BREAKDOWN_RETEST_FAILED" || 
+                                     judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" ||
+                                     judgment.subtype === "BREAKOUT_RETEST_CONFIRMED";
         
-        // Retest Metrics Calculation
-        const retestLevel = judgment.subtype === "BREAKDOWN_RETEST_FAILED" ? (input.snapshot.boxLow ?? 0) : (input.snapshot.boxHigh ?? 0);
+        const m = (judgment.metadata as any) ?? {};
+        const retestLevel = m.retestLevel ?? (judgment.subtype === "BREAKDOWN_RETEST_FAILED" ? (input.snapshot.boxLow ?? 0) : (input.snapshot.boxHigh ?? 0));
         const lastPrice = input.snapshot.lastPrice;
-        const distanceFromRetestPct = retestLevel > 0 ? Math.abs(lastPrice - retestLevel) / retestLevel : 0;
-        
-        // Price proximity and retracement evidence
-        const retestTouched = distanceFromRetestPct <= 0.001; // 0.1% 내 접근
+        const retestTouched = m.retestTouched ?? false;
+        const retestRejected = m.retestRejected ?? false;
+        const retestConfirmed = m.retestConfirmed ?? false;
+        const distanceFromRetestPct = m.distanceFromRetestPct ?? 0;
+        const chaseDistanceBlocked = m.chaseDistanceBlocked ?? (isRetestEligiblePhase && distanceFromRetestPct > 0.015);
+
         const isShortRetestPhase = judgment.subtype === "BREAKDOWN_RETEST_FAILED";
         
-        const retestRejected = isShortRetestPhase 
-            ? (lastPrice <= retestLevel * 1.001) // 하방 돌파 후 상방 회복 실패
-            : (lastPrice >= retestLevel * 0.999); // 상방 돌파 후 하방 이탈 실패
-            
-        const retestConfirmed = isShortRetestPhase 
-            ? (lastPrice < retestLevel && emaGap < 0) 
-            : (lastPrice > retestLevel && emaGap > 0);
-
-        // Chase Block: Price moved too far from the retest level (0.5% 초과 시 차단)
-        const chaseDistanceBlocked = isRetestEligiblePhase && (distanceFromRetestPct > 0.005);
-
-        if (chaseDistanceBlocked) {
-            console.warn(JSON.stringify({
-                event: "V2_RETEST_RECOGNITION_BLOCKED_CHASE_DISTANCE_PROOF",
-                symbol: String(input.symbol),
-                phase: judgment.subtype,
-                retestLevel,
-                lastPrice,
-                distanceFromRetestPct,
-                limitPct: 0.005
-            }));
-        }
-
         const retestCommonOk = 
             isRetestEligiblePhase &&
             hardControlClear === true &&
@@ -1543,57 +1527,127 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             !hasOppositeSidePosition &&
             qualityScore >= 55 &&
             !chaseDistanceBlocked &&
+            retestTouched &&
             retestRejected &&
             retestConfirmed;
 
+        if (isRetestEligiblePhase && !retestCommonOk) {
+            if (!retestTouched) expectedMissingCondition = "RETEST_TOUCH";
+            else if (!retestRejected) expectedMissingCondition = "RETEST_REJECTION";
+            else if (!retestConfirmed) expectedMissingCondition = "RETEST_CONFIRMATION";
+            else if (chaseDistanceBlocked) expectedMissingCondition = "CHASE_DISTANCE_LIMIT";
+            
+            expectedNextAction = "WATCH_FOR_RETEST_REJECTION";
+        }
+
         if (retestCommonOk && (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "REJECT")) {
             const isShortRetest = isShortRetestPhase && trendSideCandidate === "short" && riskShortAllow && allowNewShort && emaGap <= 0;
-            const isLongRetest = judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" && trendSideCandidate === "long" && riskLongAllow && allowNewLong && emaGap >= 0;
+            const isLongRetest = (judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" || judgment.subtype === "BREAKOUT_RETEST_CONFIRMED") && 
+                                trendSideCandidate === "long" && riskLongAllow && allowNewLong && emaGap >= 0;
 
             if (isShortRetest || isLongRetest) {
-                v2DecisionAfterPromotion = "ENTER";
-                v2SideAfterPromotion = trendSideCandidate;
-                v2RejectReasonAfterPromotion = null;
-                promotionApplied = true;
-                promotionReason = isShortRetest ? "V2_RETEST_SHORT_CONFIRMED" : "V2_RETEST_LONG_CONFIRMED";
-                promotionBlockReason = null;
-                promotionMinConditionPassed = true;
-                
-                console.info(JSON.stringify({
-                    event: isShortRetest ? "V2_BREAKDOWN_RETEST_RECOGNITION_PROOF" : "V2_BREAKOUT_RETEST_RECOGNITION_PROOF",
-                    symbol: String(input.symbol),
-                    phase: judgment.subtype,
-                    side: trendSideCandidate,
-                    retestLevel,
-                    distanceFromRetestPct,
-                    retestTouched,
-                    retestRejected,
-                    retestConfirmed,
-                    ema_gap: emaGap,
-                    quality_score: qualityScore,
-                    reviewing_ticks: reviewingTicks,
-                    promotion_reason: promotionReason
-                }));
+                const atr = Number(input.snapshot.atr ?? 0);
+                const side = isShortRetest ? "short" : "long";
+                let retestInvalidationPx = 0;
+
+                if (side === "short") {
+                    retestInvalidationPx = retestLevel + Math.max(retestLevel * 0.002, atr * 0.35);
+                } else {
+                    retestInvalidationPx = retestLevel - Math.max(retestLevel * 0.002, atr * 0.35);
+                }
+
+                let stopPriceValid = retestInvalidationPx > 0 && !isNaN(retestInvalidationPx);
+                if (stopPriceValid) {
+                    if (side === "short" && retestInvalidationPx <= lastPrice) stopPriceValid = false;
+                    if (side === "long" && retestInvalidationPx >= lastPrice) stopPriceValid = false;
+                }
+
+                if (!stopPriceValid) {
+                    console.warn(JSON.stringify({
+                        event: "V2_RETEST_STOP_PRICE_INVALID_BLOCK_PROOF",
+                        symbol: String(input.symbol),
+                        side,
+                        lastPrice,
+                        calculatedInvalidationPx: retestInvalidationPx,
+                        retestLevel
+                    }));
+                } else {
+                    v2DecisionAfterPromotion = "ENTER";
+                    v2SideAfterPromotion = trendSideCandidate;
+                    v2RejectReasonAfterPromotion = null;
+                    promotionApplied = true;
+                    promotionReason = isShortRetest ? "V2_RETEST_SHORT_CONFIRMED" : "V2_RETEST_LONG_CONFIRMED";
+                    promotionBlockReason = null;
+                    promotionMinConditionPassed = true;
+
+                    // Store for later metadata population
+                    v2CalculatedInvalidationPx = retestInvalidationPx;
+
+                    console.info(JSON.stringify({
+                        event: "V2_RETEST_STOP_PRICE_PLAN_PROOF",
+                        symbol: String(input.symbol),
+                        side,
+                        retestLevel,
+                        lastPrice,
+                        invalidationPx: retestInvalidationPx,
+                        buffer_used: Math.abs(retestInvalidationPx - retestLevel)
+                    }));
+
+                    console.info(JSON.stringify({
+                        event: isShortRetest ? "V2_BREAKDOWN_RETEST_RECOGNITION_PROOF" : "V2_BREAKOUT_RETEST_RECOGNITION_PROOF",
+                        symbol: String(input.symbol),
+                        phase: judgment.subtype,
+                        side: trendSideCandidate,
+                        retestLevel,
+                        distanceFromRetestPct,
+                        retestTouched,
+                        retestRejected,
+                        retestConfirmed,
+                        ema_gap: emaGap,
+                        quality_score: qualityScore,
+                        reviewing_ticks: reviewingTicks,
+                        promotion_reason: promotionReason,
+                        invalidationPx: retestInvalidationPx
+                    }));
+                }
             }
         }
 
         if (transitionWatchShortConditionsMet) {
-            v2DecisionAfterPromotion = "ENTER";
-            v2SideAfterPromotion = "short";
-            v2RejectReasonAfterPromotion = null;
-            promotionApplied = true;
-            promotionReason = "V2_TRANSITION_WATCH_SHORT_PROBE";
-            promotionBlockReason = null;
-            shockReactionBlockReason = null;
-            console.info(JSON.stringify({
-                event: "V2_SHOCK_REACTION_PROMOTION_PROOF",
-                symbol: String(input.symbol),
-                shock_state: shock,
-                side: "short",
-                zone,
-                quality_score: qualityScore,
-                promotion_reason: "V2_TRANSITION_WATCH_SHORT_PROBE"
-            }));
+            const atr = Number(input.snapshot.atr ?? 0);
+            const transitionInvalidationPx = lastPrice + Math.max(lastPrice * 0.002, atr * 0.35);
+            
+            let stopPriceValid = transitionInvalidationPx > lastPrice && !isNaN(transitionInvalidationPx);
+            
+            if (!stopPriceValid) {
+                 console.warn(JSON.stringify({
+                    event: "V2_TRANSITION_STOP_PRICE_INVALID_BLOCK_PROOF",
+                    symbol: String(input.symbol),
+                    side: "short",
+                    lastPrice,
+                    calculatedInvalidationPx: transitionInvalidationPx
+                }));
+            } else {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = "short";
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = "V2_TRANSITION_WATCH_SHORT_PROBE";
+                promotionBlockReason = null;
+                shockReactionBlockReason = null;
+                v2CalculatedInvalidationPx = transitionInvalidationPx;
+
+                console.info(JSON.stringify({
+                    event: "V2_SHOCK_REACTION_PROMOTION_PROOF",
+                    symbol: String(input.symbol),
+                    shock_state: shock,
+                    side: "short",
+                    zone,
+                    quality_score: qualityScore,
+                    promotion_reason: "V2_TRANSITION_WATCH_SHORT_PROBE",
+                    invalidationPx: transitionInvalidationPx
+                }));
+            }
         }
 
         if (promotionApplied) {
@@ -2803,8 +2857,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             trendSideCandidate,
             reversalConfirmed,
             sideZoneValid,
-            expectedMissingCondition: v2DecisionAfterPromotion === "SKIP" ? (v2RejectReasonAfterPromotion || "MIN_QUALITY_NOT_MET") : null,
-            expectedNextAction: v2DecisionAfterPromotion === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY"
+            invalidationPx: v2CalculatedInvalidationPx ?? execMeta.invalidationPx ?? undefined,
+            expectedMissingCondition: expectedMissingCondition ?? (v2DecisionAfterPromotion === "SKIP" ? (v2RejectReasonAfterPromotion || "MIN_QUALITY_NOT_MET") : null),
+            expectedNextAction: expectedNextAction ?? (v2DecisionAfterPromotion === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY"),
+            macro_source: "market_subtype_proxy",
+            daily_bias_actual: null,
+            h4_bias_actual: null
         },
         v2ExitAuthority: v2ExitAuthority ?? undefined,
         v2PartialAuthority: v2PartialAuthority ?? undefined,

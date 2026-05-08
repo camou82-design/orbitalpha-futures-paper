@@ -82,6 +82,9 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     side_zone_valid: boolean | null;
     expected_missing_condition: string | null;
     expected_next_action: string | null;
+    macro_source?: string | null;
+    daily_bias_actual?: string | null;
+    h4_bias_actual?: string | null;
 }>;
 
 export type V2LegacyComparison = Readonly<{
@@ -140,4 +143,7 @@ export type BuildExecutionEnvelopeArgs = Readonly<{
     sideZoneValid?: boolean | null;
     expectedMissingCondition?: string | null;
     expectedNextAction?: string | null;
+    macro_source?: string | null;
+    daily_bias_actual?: string | null;
+    h4_bias_actual?: string | null;
 }>;

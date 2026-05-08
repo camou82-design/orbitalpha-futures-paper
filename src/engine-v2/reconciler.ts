@@ -443,7 +443,10 @@ export function resolveSymbolDecisionEnvelope(
         reversalConfirmed: execMeta.reversalConfirmed ?? null,
         sideZoneValid: execMeta.sideZoneValid ?? null,
         expectedMissingCondition: execMeta.expectedMissingCondition ?? null,
-        expectedNextAction: execMeta.expectedNextAction ?? null
+        expectedNextAction: execMeta.expectedNextAction ?? null,
+        macro_source: execMeta.macro_source ?? null,
+        daily_bias_actual: execMeta.daily_bias_actual ?? null,
+        h4_bias_actual: execMeta.h4_bias_actual ?? null
     });
     const authority =
         v2Mode === "engine_v2"

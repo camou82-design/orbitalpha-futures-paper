@@ -102,17 +102,44 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
     const isStructuralCohesionValid = boxCohesion >= 0.7 || rangeOscillationScore >= 0.6;
 
     if (boxBreakSide === "lower" && isVolumeExpansionValid && isAtrExpansionValid && isStructuralCohesionValid) {
-        if (reviewingTicks >= 6) { // Reduce from 12 to 6 for faster retest recognition
+        if (reviewingTicks >= 6) { 
              const retestLevel = (sn.boxLow ?? 0);
-             const isNearRetest = sn.lastPrice >= retestLevel * 0.999 && sn.lastPrice <= retestLevel * 1.001;
-             const isFailedRecovery = sn.lastPrice <= retestLevel * 1.001 && (rcSlope < 0 || emaGap < 0);
+             const candles = input.recentCandles ?? [];
+             const recentWindow = candles.slice(-12);
              
+             // 1. Retest Touched: Price approached the retestLevel (boxLow) from below
+             const retestTouched = recentWindow.some(c => c.high >= retestLevel * 0.998);
+             
+             // 2. Retest Rejected: Price failed to close back above retestLevel * 1.001
+             const retestRejected = sn.lastPrice <= retestLevel * 1.001;
+             
+             // 3. Retest Confirmed: Price is showing weakness (slopes down or emaGap negative)
+             const retestConfirmed = (rcSlope < 0 || emaGap < 0);
+
+             // 4. Chase Distance: Don't enter if price is too far below retestLevel
+             const distanceFromRetestPct = (retestLevel - sn.lastPrice) / retestLevel;
+             const chaseDistanceBlocked = distanceFromRetestPct > 0.015; // 1.5% 이상 떨어지면 추격 금지
+
+             const retestMetadata = {
+                 ...slopeMetadata,
+                 retestLevel,
+                 retestTouched,
+                 retestRejected,
+                 retestConfirmed,
+                 distanceFromRetestPct,
+                 chaseDistanceBlocked
+             };
+
              if (sn.lastPrice > retestLevel * 1.005) {
-                 return { phase: "FAKE_VOLUME_BREAKDOWN", metadata: slopeMetadata };
+                 return { phase: "FAKE_VOLUME_BREAKDOWN", metadata: retestMetadata };
              }
-             if (isNearRetest || isFailedRecovery) {
-                 return { phase: "BREAKDOWN_RETEST_FAILED", metadata: slopeMetadata };
+             
+             if (retestTouched && retestRejected && retestConfirmed && !chaseDistanceBlocked) {
+                 return { phase: "BREAKDOWN_RETEST_FAILED", metadata: retestMetadata };
              }
+
+             // If not fully confirmed, return observation phase with metadata
+             return { phase: "VOLUME_BREAKDOWN_OBSERVATION", metadata: retestMetadata };
         }
         return { phase: volumeExpansion >= 3.0 ? "VOLUME_SHOCK_DOWN" : "VOLUME_BREAKDOWN_OBSERVATION", metadata: slopeMetadata };
     }
@@ -120,15 +147,41 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
     if (boxBreakSide === "upper" && isVolumeExpansionValid && isAtrExpansionValid && isStructuralCohesionValid) {
         if (reviewingTicks >= 6) {
              const retestLevel = (sn.boxHigh ?? 0);
-             const isNearRetest = sn.lastPrice >= retestLevel * 0.999 && sn.lastPrice <= retestLevel * 1.001;
-             const isConfirmedBreakout = sn.lastPrice >= retestLevel * 0.999 && (rcSlope > 0 || emaGap > 0);
+             const candles = input.recentCandles ?? [];
+             const recentWindow = candles.slice(-12);
+
+             // 1. Retest Touched: Price approached the retestLevel (boxHigh) from above
+             const retestTouched = recentWindow.some(c => c.low <= retestLevel * 1.002);
+             
+             // 2. Retest Rejected: Price failed to break back down into the box
+             const retestRejected = sn.lastPrice >= retestLevel * 0.999;
+
+             // 3. Retest Confirmed: Price is showing strength (slopes up or emaGap positive)
+             const retestConfirmed = (rcSlope > 0 || emaGap > 0);
+
+             // 4. Chase Distance: Don't enter if price is too far above retestLevel
+             const distanceFromRetestPct = (sn.lastPrice - retestLevel) / retestLevel;
+             const chaseDistanceBlocked = distanceFromRetestPct > 0.015;
+
+             const retestMetadata = {
+                 ...slopeMetadata,
+                 retestLevel,
+                 retestTouched,
+                 retestRejected,
+                 retestConfirmed,
+                 distanceFromRetestPct,
+                 chaseDistanceBlocked
+             };
 
              if (sn.lastPrice < retestLevel * 0.995) {
-                 return { phase: "FAKE_VOLUME_BREAKOUT", metadata: slopeMetadata };
+                 return { phase: "FAKE_VOLUME_BREAKOUT", metadata: retestMetadata };
              }
-             if (isNearRetest || isConfirmedBreakout) {
-                 return { phase: "BREAKOUT_RETEST_CONFIRMED_VOLUME", metadata: slopeMetadata };
+
+             if (retestTouched && retestRejected && retestConfirmed && !chaseDistanceBlocked) {
+                 return { phase: "BREAKOUT_RETEST_CONFIRMED_VOLUME", metadata: retestMetadata };
              }
+
+             return { phase: "VOLUME_BREAKOUT_OBSERVATION", metadata: retestMetadata };
         }
         return { phase: volumeExpansion >= 3.0 ? "VOLUME_SHOCK_UP" : "VOLUME_BREAKOUT_OBSERVATION", metadata: slopeMetadata };
     }

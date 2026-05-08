@@ -115,7 +115,10 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             reversal_confirmed: args.reversalConfirmed ?? null,
             side_zone_valid: args.sideZoneValid ?? null,
             expected_missing_condition: args.expectedMissingCondition ?? null,
-            expected_next_action: args.expectedNextAction ?? null
+            expected_next_action: args.expectedNextAction ?? null,
+            macro_source: args.macro_source ?? null,
+            daily_bias_actual: args.daily_bias_actual ?? null,
+            h4_bias_actual: args.h4_bias_actual ?? null
         };
     }
     if (mode === "legacy") {
@@ -172,7 +175,10 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             reversal_confirmed: args.reversalConfirmed ?? null,
             side_zone_valid: args.sideZoneValid ?? null,
             expected_missing_condition: args.expectedMissingCondition ?? null,
-            expected_next_action: args.expectedNextAction ?? null
+            expected_next_action: args.expectedNextAction ?? null,
+            macro_source: args.macro_source ?? null,
+            daily_bias_actual: args.daily_bias_actual ?? null,
+            h4_bias_actual: args.h4_bias_actual ?? null
         };
     }
     return {
@@ -228,6 +234,9 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         reversal_confirmed: args.reversalConfirmed ?? null,
         side_zone_valid: args.sideZoneValid ?? null,
         expected_missing_condition: args.expectedMissingCondition ?? null,
-        expected_next_action: args.expectedNextAction ?? null
+        expected_next_action: args.expectedNextAction ?? null,
+        macro_source: args.macro_source ?? null,
+        daily_bias_actual: args.daily_bias_actual ?? null,
+        h4_bias_actual: args.h4_bias_actual ?? null
     };
 }
