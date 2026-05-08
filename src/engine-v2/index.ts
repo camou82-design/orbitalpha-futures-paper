@@ -1500,6 +1500,39 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
         // 수정 7. Retest Recognition Layer (Breakdown/Breakout Retest Promotion)
         const isRetestEligiblePhase = judgment.subtype === "BREAKDOWN_RETEST_FAILED" || judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME";
+        
+        // Retest Metrics Calculation
+        const retestLevel = judgment.subtype === "BREAKDOWN_RETEST_FAILED" ? (input.snapshot.boxLow ?? 0) : (input.snapshot.boxHigh ?? 0);
+        const lastPrice = input.snapshot.lastPrice;
+        const distanceFromRetestPct = retestLevel > 0 ? Math.abs(lastPrice - retestLevel) / retestLevel : 0;
+        
+        // Price proximity and retracement evidence
+        const retestTouched = distanceFromRetestPct <= 0.001; // 0.1% 내 접근
+        const isShortRetestPhase = judgment.subtype === "BREAKDOWN_RETEST_FAILED";
+        
+        const retestRejected = isShortRetestPhase 
+            ? (lastPrice <= retestLevel * 1.001) // 하방 돌파 후 상방 회복 실패
+            : (lastPrice >= retestLevel * 0.999); // 상방 돌파 후 하방 이탈 실패
+            
+        const retestConfirmed = isShortRetestPhase 
+            ? (lastPrice < retestLevel && emaGap < 0) 
+            : (lastPrice > retestLevel && emaGap > 0);
+
+        // Chase Block: Price moved too far from the retest level (0.5% 초과 시 차단)
+        const chaseDistanceBlocked = isRetestEligiblePhase && (distanceFromRetestPct > 0.005);
+
+        if (chaseDistanceBlocked) {
+            console.warn(JSON.stringify({
+                event: "V2_RETEST_RECOGNITION_BLOCKED_CHASE_DISTANCE_PROOF",
+                symbol: String(input.symbol),
+                phase: judgment.subtype,
+                retestLevel,
+                lastPrice,
+                distanceFromRetestPct,
+                limitPct: 0.005
+            }));
+        }
+
         const retestCommonOk = 
             isRetestEligiblePhase &&
             hardControlClear === true &&
@@ -1508,10 +1541,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             signedExecutionReady === true &&
             !hasSameSidePosition &&
             !hasOppositeSidePosition &&
-            qualityScore >= 55; // Retest requires slightly lower quality but clear structural confirmation
+            qualityScore >= 55 &&
+            !chaseDistanceBlocked &&
+            retestRejected &&
+            retestConfirmed;
 
         if (retestCommonOk && (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "REJECT")) {
-            const isShortRetest = judgment.subtype === "BREAKDOWN_RETEST_FAILED" && trendSideCandidate === "short" && riskShortAllow && allowNewShort && emaGap <= 0;
+            const isShortRetest = isShortRetestPhase && trendSideCandidate === "short" && riskShortAllow && allowNewShort && emaGap <= 0;
             const isLongRetest = judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" && trendSideCandidate === "long" && riskLongAllow && allowNewLong && emaGap >= 0;
 
             if (isShortRetest || isLongRetest) {
@@ -1519,15 +1555,20 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 v2SideAfterPromotion = trendSideCandidate;
                 v2RejectReasonAfterPromotion = null;
                 promotionApplied = true;
-                promotionReason = judgment.subtype === "BREAKDOWN_RETEST_FAILED" ? "V2_RETEST_SHORT_CONFIRMED" : "V2_RETEST_LONG_CONFIRMED";
+                promotionReason = isShortRetest ? "V2_RETEST_SHORT_CONFIRMED" : "V2_RETEST_LONG_CONFIRMED";
                 promotionBlockReason = null;
                 promotionMinConditionPassed = true;
                 
                 console.info(JSON.stringify({
-                    event: "V2_BREAKDOWN_RETEST_RECOGNITION_PROOF",
+                    event: isShortRetest ? "V2_BREAKDOWN_RETEST_RECOGNITION_PROOF" : "V2_BREAKOUT_RETEST_RECOGNITION_PROOF",
                     symbol: String(input.symbol),
                     phase: judgment.subtype,
                     side: trendSideCandidate,
+                    retestLevel,
+                    distanceFromRetestPct,
+                    retestTouched,
+                    retestRejected,
+                    retestConfirmed,
                     ema_gap: emaGap,
                     quality_score: qualityScore,
                     reviewing_ticks: reviewingTicks,
@@ -2755,7 +2796,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotionReason,
             promotionBlockReason,
             shockReactionBlockReason,
-            qualityScore
+            qualityScore,
+            v2DecisionFinal: finalDecision,
+            v2SideFinal: v2SideAfterPromotion,
+            rangeSideCandidate,
+            trendSideCandidate,
+            reversalConfirmed,
+            sideZoneValid,
+            expectedMissingCondition: v2DecisionAfterPromotion === "SKIP" ? (v2RejectReasonAfterPromotion || "MIN_QUALITY_NOT_MET") : null,
+            expectedNextAction: v2DecisionAfterPromotion === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY"
         },
         v2ExitAuthority: v2ExitAuthority ?? undefined,
         v2PartialAuthority: v2PartialAuthority ?? undefined,

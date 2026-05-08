@@ -72,8 +72,16 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     promotion_applied?: boolean | null;
     promotion_reason?: string | null;
     promotion_block_reason?: string | null;
-    shock_reaction_block_reason?: string | null;
-    quality_score?: number | null;
+    shock_reaction_block_reason: string | null;
+    quality_score: number | null;
+    v2_decision: string | null;
+    v2_side: string | null;
+    range_side_candidate: string | null;
+    trend_side_candidate: string | null;
+    reversal_confirmed: boolean | null;
+    side_zone_valid: boolean | null;
+    expected_missing_condition: string | null;
+    expected_next_action: string | null;
 }>;
 
 export type V2LegacyComparison = Readonly<{
@@ -124,4 +132,12 @@ export type BuildExecutionEnvelopeArgs = Readonly<{
     promotionBlockReason?: string | null;
     shockReactionBlockReason?: string | null;
     qualityScore?: number | null;
+    v2DecisionFinal?: string | null;
+    v2SideFinal?: string | null;
+    rangeSideCandidate?: string | null;
+    trendSideCandidate?: string | null;
+    reversalConfirmed?: boolean | null;
+    sideZoneValid?: boolean | null;
+    expectedMissingCondition?: string | null;
+    expectedNextAction?: string | null;
 }>;

@@ -106,8 +106,16 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             promotion_applied: args.promotionApplied,
             promotion_reason: args.promotionReason,
             promotion_block_reason: args.promotionBlockReason,
-            shock_reaction_block_reason: args.shockReactionBlockReason,
-            quality_score: args.qualityScore
+            shock_reaction_block_reason: args.shockReactionBlockReason ?? null,
+            quality_score: args.qualityScore ?? null,
+            v2_decision: args.v2DecisionFinal ?? null,
+            v2_side: args.v2SideFinal ?? null,
+            range_side_candidate: args.rangeSideCandidate ?? null,
+            trend_side_candidate: args.trendSideCandidate ?? null,
+            reversal_confirmed: args.reversalConfirmed ?? null,
+            side_zone_valid: args.sideZoneValid ?? null,
+            expected_missing_condition: args.expectedMissingCondition ?? null,
+            expected_next_action: args.expectedNextAction ?? null
         };
     }
     if (mode === "legacy") {
@@ -150,13 +158,21 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             originalSide,
             originalStageMarginKrw,
             newStopPrice,
-            aligned_signal: args.alignedSignal,
-            selected_side_after_veto: args.selectedSideAfterVeto,
-            promotion_applied: args.promotionApplied,
-            promotion_reason: args.promotionReason,
-            promotion_block_reason: args.promotionBlockReason,
-            shock_reaction_block_reason: args.shockReactionBlockReason,
-            quality_score: args.qualityScore
+            aligned_signal: args.alignedSignal ?? null,
+            selected_side_after_veto: args.selectedSideAfterVeto ?? null,
+            promotion_applied: args.promotionApplied ?? null,
+            promotion_reason: args.promotionReason ?? null,
+            promotion_block_reason: args.promotionBlockReason ?? null,
+            shock_reaction_block_reason: args.shockReactionBlockReason ?? null,
+            quality_score: args.qualityScore ?? null,
+            v2_decision: args.v2DecisionFinal ?? null,
+            v2_side: args.v2SideFinal ?? null,
+            range_side_candidate: args.rangeSideCandidate ?? null,
+            trend_side_candidate: args.trendSideCandidate ?? null,
+            reversal_confirmed: args.reversalConfirmed ?? null,
+            side_zone_valid: args.sideZoneValid ?? null,
+            expected_missing_condition: args.expectedMissingCondition ?? null,
+            expected_next_action: args.expectedNextAction ?? null
         };
     }
     return {
@@ -198,12 +214,20 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         originalSide,
         originalStageMarginKrw,
         newStopPrice,
-        aligned_signal: args.alignedSignal,
-        selected_side_after_veto: args.selectedSideAfterVeto,
-        promotion_applied: args.promotionApplied,
-        promotion_reason: args.promotionReason,
-        promotion_block_reason: args.promotionBlockReason,
-        shock_reaction_block_reason: args.shockReactionBlockReason,
-        quality_score: args.qualityScore
+        aligned_signal: args.alignedSignal ?? null,
+        selected_side_after_veto: args.selectedSideAfterVeto ?? null,
+        promotion_applied: args.promotionApplied ?? null,
+        promotion_reason: args.promotionReason ?? null,
+        promotion_block_reason: args.promotionBlockReason ?? null,
+        shock_reaction_block_reason: args.shockReactionBlockReason ?? null,
+        quality_score: args.qualityScore ?? null,
+        v2_decision: args.v2DecisionFinal ?? null,
+        v2_side: args.v2SideFinal ?? null,
+        range_side_candidate: args.rangeSideCandidate ?? null,
+        trend_side_candidate: args.trendSideCandidate ?? null,
+        reversal_confirmed: args.reversalConfirmed ?? null,
+        side_zone_valid: args.sideZoneValid ?? null,
+        expected_missing_condition: args.expectedMissingCondition ?? null,
+        expected_next_action: args.expectedNextAction ?? null
     };
 }

@@ -12565,21 +12565,26 @@ export class PaperEngine {
         };
 
         if (authority.source === "v2") {
+          const v2 = envelope.v2_execution_envelope;
           this.logger.info("V2_NO_ENTRY_REASON_AUDIT_PROOF", {
             symbol: sym,
+            market_subtype: effectiveMarketSubtype || null,
             runtime_authority_decision: authority.decision || "SKIP",
-            runtime_authority_side: authority.side || "none",
-            final_decision: "SKIP",
-            reject_reason: finalBlockedReason || "FINAL_GATE_BLOCKED",
-            aligned_signal: envelope.v2_execution_envelope?.aligned_signal ?? null,
-            selected_side_after_veto: envelope.v2_execution_envelope?.selected_side_after_veto ?? null,
-            promotion_applied: envelope.v2_execution_envelope?.promotion_applied ?? false,
-            promotion_reason: envelope.v2_execution_envelope?.promotion_reason ?? null,
-            promotion_block_reason: envelope.v2_execution_envelope?.promotion_block_reason ?? null,
-            shock_reaction_block_reason: envelope.v2_execution_envelope?.shock_reaction_block_reason ?? null,
-            quality_score: envelope.v2_execution_envelope?.quality_score ?? null,
-            active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
-            market_subtype: effectiveMarketSubtype || null
+            v2_decision: v2?.v2_decision ?? null,
+            v2_side: v2?.v2_side ?? null,
+            range_side_candidate: v2?.range_side_candidate ?? null,
+            trend_side_candidate: v2?.trend_side_candidate ?? null,
+            selected_side_after_veto: v2?.selected_side_after_veto ?? null,
+            promotion_applied: v2?.promotion_applied ?? false,
+            promotion_reason: v2?.promotion_reason ?? null,
+            promotion_block_reason: v2?.promotion_block_reason ?? null,
+            shock_reaction_block_reason: v2?.shock_reaction_block_reason ?? null,
+            quality_score: v2?.quality_score ?? null,
+            reversal_confirmed: v2?.reversal_confirmed ?? null,
+            side_zone_valid: v2?.side_zone_valid ?? null,
+            expected_missing_condition: v2?.expected_missing_condition ?? null,
+            expected_next_action: v2?.expected_next_action ?? null,
+            active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null
           });
         }
         await this.emitPipelineEventsFromDecision(first, refinedEnvelope, nowTs, entryStage, finalBlockedReason);
