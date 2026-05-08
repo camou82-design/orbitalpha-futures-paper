@@ -1513,7 +1513,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const retestRejected = m.retestRejected ?? false;
         const retestConfirmed = m.retestConfirmed ?? false;
         const distanceFromRetestPct = m.distanceFromRetestPct ?? 0;
-        const chaseDistanceBlocked = m.chaseDistanceBlocked ?? (isRetestEligiblePhase && distanceFromRetestPct > 0.015);
+        const chaseDistanceBlocked = m.chaseDistanceBlocked ?? (isRetestEligiblePhase && distanceFromRetestPct > 0.005);
 
         const isShortRetestPhase = judgment.subtype === "BREAKDOWN_RETEST_FAILED";
         

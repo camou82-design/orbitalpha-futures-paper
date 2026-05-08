@@ -118,7 +118,7 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
 
              // 4. Chase Distance: Don't enter if price is too far below retestLevel
              const distanceFromRetestPct = (retestLevel - sn.lastPrice) / retestLevel;
-             const chaseDistanceBlocked = distanceFromRetestPct > 0.015; // 1.5% 이상 떨어지면 추격 금지
+             const chaseDistanceBlocked = distanceFromRetestPct > 0.005; // 0.5% 이상 떨어지면 추격 금지
 
              const retestMetadata = {
                  ...slopeMetadata,
@@ -127,7 +127,8 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
                  retestRejected,
                  retestConfirmed,
                  distanceFromRetestPct,
-                 chaseDistanceBlocked
+                 chaseDistanceBlocked,
+                 limitPct: 0.005
              };
 
              if (sn.lastPrice > retestLevel * 1.005) {
@@ -161,7 +162,7 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
 
              // 4. Chase Distance: Don't enter if price is too far above retestLevel
              const distanceFromRetestPct = (sn.lastPrice - retestLevel) / retestLevel;
-             const chaseDistanceBlocked = distanceFromRetestPct > 0.015;
+             const chaseDistanceBlocked = distanceFromRetestPct > 0.005;
 
              const retestMetadata = {
                  ...slopeMetadata,
@@ -170,7 +171,8 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
                  retestRejected,
                  retestConfirmed,
                  distanceFromRetestPct,
-                 chaseDistanceBlocked
+                 chaseDistanceBlocked,
+                 limitPct: 0.005
              };
 
              if (sn.lastPrice < retestLevel * 0.995) {

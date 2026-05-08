@@ -3937,6 +3937,27 @@ export class PaperEngine {
       const ledgerExposureNotionalKrw = computeLedgerSymbolExposureNotionalKrw(opensAfterClose, String(sym));
       const ledgerEquityMultiple = ledgerExposureNotionalKrw / 500_000;
 
+      const v2Env = envelope.v2_execution_envelope;
+      const v2Res = selectorResult?.v2_result;
+
+      // 4.5 Entry Authority Envelope Proof (Restored Legacy Block)
+      this.logger.info("ENTRY_AUTHORITY_ENVELOPE_PROOF", {
+        symbol: sym,
+        authority_owner: envelope.runtime_authority_owner,
+        runtime_authority_decision: envelope.runtime_authority_decision,
+        runtime_authority_side: envelope.runtime_authority_side,
+        v2_decision: v2Res?.decision ?? null,
+        v2_side: v2Res?.side ?? null,
+        market_subtype: v2Env?.marketSubtype ?? null,
+        active_engine_routing: marketModeOut.routing.activeEngine,
+        paper_execution_ready: this.paperExecutionReady,
+        signed_execution_ready: this.signedExecutionReady,
+        serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
+        closeOnlyMode: this.serverTradeControlState.close_only_mode,
+        ledger_exposure_notional_krw: ledgerExposureNotionalKrw,
+        ledger_equity_multiple: ledgerEquityMultiple
+      });
+
       // 5. V2 No-Entry Audit (Required by USER - Consolidated location)
       if (
         (envelope.runtime_authority_owner === "V2" || authority.source === "v2") &&
