@@ -3967,7 +3967,7 @@ export class PaperEngine {
         const v2Env = envelope.v2_execution_envelope;
         const v2Risk = v2?.risk;
 
-        // Refine expected_missing_condition (Priority: shock -> promo -> reject -> side_none -> engine specific -> default)
+        // Refine expected_missing_condition (Priority: shock -> promo -> reject -> shock_retest -> side_none -> default)
         let refinedMissingCondition = null;
         if (v2Env?.shock_reaction_block_reason) {
           refinedMissingCondition = v2Env.shock_reaction_block_reason;
@@ -3975,14 +3975,14 @@ export class PaperEngine {
           refinedMissingCondition = v2Env.promotion_block_reason;
         } else if (v2Risk?.blockReason) {
           refinedMissingCondition = v2Risk.blockReason;
+        } else if (v2Env?.marketSubtype === "SHOCK_REACTION_UP" && v2Env?.trend_side_candidate === "long" && v2?.decision === "HOLD") {
+          refinedMissingCondition = "SHOCK_REACTION_UP_RETEST_NOT_CONFIRMED";
+        } else if (v2Env?.marketSubtype === "SHOCK_REACTION_DOWN" && v2Env?.trend_side_candidate === "short" && v2?.decision === "HOLD") {
+          refinedMissingCondition = "SHOCK_REACTION_DOWN_RETEST_NOT_CONFIRMED";
         } else if (v2Env?.selected_side_after_veto === "none" && v2Env?.trend_side_candidate && v2Env?.trend_side_candidate !== "none") {
           refinedMissingCondition = "SIDE_NONE_AFTER_VETO";
         } else if (marketModeOut.routing.activeEngine === "TREND" && v2Env?.promotion_applied === false) {
           refinedMissingCondition = "TREND_ENTRY_NOT_PROMOTED";
-        } else if (v2Env?.marketSubtype === "SHOCK_REACTION_UP" && v2?.decision === "HOLD") {
-          refinedMissingCondition = "SHOCK_REACTION_UP_RETEST_NOT_CONFIRMED";
-        } else if (v2Env?.marketSubtype === "SHOCK_REACTION_DOWN" && v2?.decision === "HOLD") {
-          refinedMissingCondition = "SHOCK_REACTION_DOWN_RETEST_NOT_CONFIRMED";
         } else if (v2?.decision === "HOLD") {
           refinedMissingCondition = "V2_HOLD_NO_ENTRY_SIDE";
         } else {
