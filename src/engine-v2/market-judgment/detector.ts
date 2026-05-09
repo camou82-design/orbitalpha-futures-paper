@@ -515,6 +515,8 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     }
 
     const htfPack = input.htf_candles ?? input.snapshot.htf_candles ?? {};
+    const inputHtf = input.htf_candles;
+    const snapHtf = input.snapshot?.htf_candles;
     console.info(
         JSON.stringify({
             event: "HTF_CANDLE_FETCH_PROOF",
@@ -527,8 +529,28 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
                 "4h": { candle_count: (htfPack["4h"] ?? []).length },
                 "1d": { candle_count: (htfPack["1d"] ?? []).length }
             },
-            input_htf_candles_keys: input.htf_candles ? Object.keys(input.htf_candles) : [],
-            snapshot_htf_candles_keys: input.snapshot?.htf_candles ? Object.keys(input.snapshot.htf_candles) : []
+            input_htf_candles_keys: inputHtf ? Object.keys(inputHtf) : [],
+            snapshot_htf_candles_keys: snapHtf ? Object.keys(snapHtf) : [],
+            input_htf_per_tf_counts: inputHtf
+                ? {
+                      "5m": (inputHtf["5m"] ?? []).length,
+                      "15m": (inputHtf["15m"] ?? []).length,
+                      "1h": (inputHtf["1h"] ?? []).length,
+                      "4h": (inputHtf["4h"] ?? []).length,
+                      "1d": (inputHtf["1d"] ?? []).length
+                  }
+                : null,
+            snapshot_htf_per_tf_counts: snapHtf
+                ? {
+                      "5m": (snapHtf["5m"] ?? []).length,
+                      "15m": (snapHtf["15m"] ?? []).length,
+                      "1h": (snapHtf["1h"] ?? []).length,
+                      "4h": (snapHtf["4h"] ?? []).length,
+                      "1d": (snapHtf["1d"] ?? []).length
+                  }
+                : null,
+            effective_htf_pack_same_reference:
+                inputHtf != null && snapHtf != null ? inputHtf === snapHtf : null
         })
     );
 

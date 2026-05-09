@@ -3175,10 +3175,11 @@ export function adaptV2Input(
     v1Result: LegacyResultAdapter,
     recentCandles?: import("../models/types").Candle[]
 ): EngineV2Input {
+    const htfCandlesRef = snapshot.htf_candles;
     return {
         symbol,
         now,
-        htf_candles: snapshot.htf_candles,
+        htf_candles: htfCandlesRef,
         snapshot: {
             lastPrice: snapshot.lastPrice,
             latestCandleClose: snapshot.latestCandleClose,
@@ -3219,7 +3220,7 @@ export function adaptV2Input(
             atrExpansion: snapshot.atrExpansion ?? 0,
             volumeExpansion: snapshot.volumeExpansion ?? 0,
             candles: recentCandles,
-            htf_candles: snapshot.htf_candles
+            htf_candles: htfCandlesRef
         },
         config: {
             paperMaxOpenPositions: config.paperMaxOpenPositions,

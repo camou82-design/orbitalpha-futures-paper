@@ -267,7 +267,8 @@ export function resolveSymbolDecisionEnvelope(
         ema60Slope: snapshot.ema60Slope,
         atrExpansion: snapshot.atrExpansion,
         volumeExpansion: snapshot.volumeExpansion,
-        candles: snapshot.candles
+        candles: snapshot.candles,
+        htf_candles: snapshot.htf_candles
     };
 
     // 2. Config Mapping
