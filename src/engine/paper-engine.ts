@@ -14888,8 +14888,16 @@ export class PaperEngine {
 
     const htf_candles: Record<string, import("../models/types").Candle[]> = {};
     const htfTimeframes = ["5m", "15m", "1h", "4h", "1d"] as const;
+    const htf_diagnostics: Record<string, any> = {};
+
     for (const tf of htfTimeframes) {
       const res = await this.okxPublic.tryGetCandles(symbol, tf, 120);
+      htf_diagnostics[tf] = {
+        ok: res.ok,
+        candle_count: res.ok ? res.value.length : 0,
+        last_ts: res.ok && res.value.length > 0 ? res.value[res.value.length - 1].ts : null,
+        error: res.ok ? null : res.error
+      };
       if (res.ok) {
         htf_candles[tf] = res.value;
       }
@@ -14898,11 +14906,7 @@ export class PaperEngine {
     console.info(JSON.stringify({
       event: "HTF_CANDLE_FETCH_PROOF",
       symbol: String(symbol),
-      htf_5m_count: htf_candles["5m"]?.length ?? 0,
-      htf_15m_count: htf_candles["15m"]?.length ?? 0,
-      htf_1h_count: htf_candles["1h"]?.length ?? 0,
-      htf_4h_count: htf_candles["4h"]?.length ?? 0,
-      htf_1d_count: htf_candles["1d"]?.length ?? 0,
+      htf_diagnostics
     }));
 
     if (!rT.ok || !rC.ok || !rF.ok) {

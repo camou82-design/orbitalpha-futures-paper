@@ -502,7 +502,7 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         no_trade_reason = "DUMP_PROTECTION";
     }
 
-    const htfResult = calculateMacroBias(input.htf_candles || {});
+    const htfResult = calculateMacroBias(input.htf_candles ?? input.snapshot.htf_candles ?? {});
     const htfBias = htfResult.biases;
     const htfConflict = htfResult.conflict;
 
