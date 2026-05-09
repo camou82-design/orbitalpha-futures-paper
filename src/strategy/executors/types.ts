@@ -41,7 +41,7 @@ export type EntryDecisionBase = Readonly<{
 export type RangeEntryDecision = Readonly<
   EntryDecisionBase & {
     executor: "RANGE";
-    box_position: "upper" | "lower" | "middle" | "unknown";
+    box_position: "upper" | "lower" | "mid";
   }
 >;
 

@@ -58,9 +58,9 @@ export type AiApprovalInput = Readonly<{
   executor_direction: "long" | "short";
   expected_move: number | null;
   total_cost: number | null;
-  box_position?: "upper" | "lower" | "middle" | "unknown";
-  breakout_state?: "breakout_up" | "breakout_down" | "none" | "unknown";
-  pullback_state?: "pullback_ok" | "pullback_bad" | "unknown";
+  box_position?: "upper" | "lower" | "mid";
+  breakout_state?: "breakout_up" | "breakout_down" | "none";
+  pullback_state?: "pullback_ok" | "pullback_bad";
   loss_streak: number;
   last_10_net: number;
   risk_state: "NORMAL" | "LIMITED" | "BLOCKED";
@@ -384,7 +384,7 @@ export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
   );
 
   if (gate_mode === "RANGE") {
-    if (input.box_position === "middle") {
+    if (input.box_position === "mid") {
       return attach({ action: "NO_ENTRY", reason: "박스 중앙", confidence: 0.99 }, costTrace);
     }
   }

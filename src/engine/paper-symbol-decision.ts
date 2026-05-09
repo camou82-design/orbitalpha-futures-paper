@@ -40,8 +40,8 @@ import { evaluateAiHighwayQuality } from "../engine/ai-highway-filter";
 import type { PaperSignal } from "../strategy/entry-signal";
 import type { PaperCandidateStrength } from "../strategy/entry-signal";
 import { PIPELINE_VERSION } from "./decision-funnel";
-import { classifyBoxZone, RANGE_ZONE_ACTION_POLICY } from "./range-engine";
-import type { Candle, RangeBoxZone } from "../models/types";
+import { RANGE_ZONE_ACTION_POLICY } from "./range-engine";
+import { classifyRangeZone, type Candle, type RangeBoxZone } from "../models/types";
 import {
   evaluateDirectionalTrendEntryGuard,
   deriveDirectionalRoutingOverride,
@@ -51,7 +51,7 @@ import {
 /** Stage0 signal absence proof: 1x per symbol per decision cycle (`input.now`). */
 const stage0SignalAbsenceProofLoggedAtBySymbol = new Map<string, number>();
 
-/** RANGE·Stage0·RISK_FAIL_REENTRY: 부분익절/TP 계열 청산 후 동일 심볼 재진입 대기만 완화(손절·증액 단계 제외). */
+/** RANGE쨌Stage0쨌RISK_FAIL_REENTRY: 遺遺꾩씡??TP 怨꾩뿴 泥?궛 ???숈씪 ?щ낵 ?ъ쭊???湲곕쭔 ?꾪솕(?먯젅쨌利앹븸 ?④퀎 ?쒖쇅). */
 const RANGE_STAGE0_REENTRY_RELAX_MULT = 0.35;
 const RANGE_STAGE0_REENTRY_RELAX_MIN_MS = 25_000;
 const RANGE_RISK_LIMIT_RELAX_WINDOW_MS = 3 * 60 * 60 * 1000;
@@ -79,7 +79,7 @@ export type RangeStopReentryBlock = Readonly<{
   regime: "RANGE";
 }>;
 
-/** 진행 중 1m 봉 제외: 완성봉만으로 최근 2개(직전·최근) OHLC */
+/** 吏꾪뻾 以?1m 遊??쒖쇅: ?꾩꽦遊됰쭔?쇰줈 理쒓렐 2媛?吏곸쟾쨌理쒓렐) OHLC */
 function getLastTwoCompletedOneMinuteBars(
   candles: readonly Candle[] | null | undefined
 ): { latest: Pick<Candle, "high" | "low" | "close">; prev: Pick<Candle, "high" | "low" | "close"> } | null {
@@ -166,35 +166,35 @@ export type SymbolSnapshotLike = Readonly<{
   signalGateBlockedReason?: string | null;
   rangeSignalDowngraded?: boolean;
   rangeSignalKeptByRelax?: boolean;
-  /** 하이웨이: 횡보 확신도 */
+  /** ?섏씠?⑥씠: ?〓낫 ?뺤떊??*/
   rangeConfidence?: number;
-  /** 하이웨이: 박스 응집도 */
+  /** ?섏씠?⑥씠: 諛뺤뒪 ?묒쭛??*/
   boxCohesion01?: number;
-  /** 하이웨이: 돌파 실패율 */
+  /** ?섏씠?⑥씠: ?뚰뙆 ?ㅽ뙣??*/
   breakoutFailureRate?: number;
-  /** 하이웨이: 왕복 빈도 */
+  /** ?섏씠?⑥씠: ?뺣났 鍮덈룄 */
   rangeOscillationScore?: number;
-  /** 하이웨이: 추세 약성 */
+  /** ?섏씠?⑥씠: 異붿꽭 ?쎌꽦 */
   trendWeaknessScore?: number;
-  /** 하이웨이: 횡보 판단 근거 라벨 */
+  /** ?섏씠?⑥씠: ?〓낫 ?먮떒 洹쇨굅 ?쇰꺼 */
   rangeReasonLabel?: string;
-  /** 하이웨이: 박스 왕복 누적 횟수 */
+  /** ?섏씠?⑥씠: 諛뺤뒪 ?뺣났 ?꾩쟻 ?잛닔 */
   rangeCycleCount?: number;
-  /** 하이웨이: 박스 내 분할 진입 단계 */
+  /** ?섏씠?⑥씠: 諛뺤뒪 ??遺꾪븷 吏꾩엯 ?④퀎 */
   rangeLadderLevel?: number;
-  /** 하이웨이: RANGE 해제 위험도 */
+  /** ?섏씠?⑥씠: RANGE ?댁젣 ?꾪뿕??*/
   regimeExitRisk?: number;
-  /** 하이웨이: 박스 붕괴 방향 */
+  /** ?섏씠?⑥씠: 諛뺤뒪 遺뺢눼 諛⑺뼢 */
   boxBreakSide?: "upper" | "lower" | "none";
   signal_strength?: "strong" | "ok" | "weak";
   trendOk?: boolean;
-  /** 하이웨이: 현재 레짐 상태 */
+  /** ?섏씠?⑥씠: ?꾩옱 ?덉쭚 ?곹깭 */
   regimeStateDiag?: PaperRegimeState;
   /** Raw candles fetched from OKX */
   candles?: import("../models/types").Candle[];
-  /** pollSymbol 1m kline 배열 길이(엔진 스냅샷) */
+  /** pollSymbol 1m kline 諛곗뿴 湲몄씠(?붿쭊 ?ㅻ깄?? */
   recentCandlesCount?: number;
-  /** Highway 진입용 1m 요청 limit (기본 120) */
+  /** Highway 吏꾩엯??1m ?붿껌 limit (湲곕낯 120) */
   highwayKlineLimitRequested?: number;
   highwayEntryTf?: string;
   swingHighSlope?: number;
@@ -349,7 +349,7 @@ export function evaluateDirectionalTrendAddOnGuard(args: {
 }
 
 
-/** Stage 1 소액 탐색: RANGE·모호 맥락에서만 허용(쿨다운·데이터 결손 등은 제외). */
+/** Stage 1 ?뚯븸 ?먯깋: RANGE쨌紐⑦샇 留λ씫?먯꽌留??덉슜(荑⑤떎?는룸뜲?댄꽣 寃곗넀 ?깆? ?쒖쇅). */
 const STAGE1_SOFT_EXPLORE_BLOCKS = new Set([
   "range_not_in_interest_zone",
   "range_center_forbidden",
@@ -360,14 +360,14 @@ const STAGE1_SOFT_EXPLORE_BLOCKS = new Set([
   "trend_volume_too_thin"
 ]);
 
-/** RANGE 박스 폭·상단 에지 — Stage 1만 소프트 허용 + 추가 사이즈 축소. */
+/** RANGE 諛뺤뒪 ??룹긽???먯? ??Stage 1留??뚰봽???덉슜 + 異붽? ?ъ씠利?異뺤냼. */
 const STAGE1_RANGE_EDGE_SOFT_TAGS: Readonly<Record<string, string>> = {
   range_box_too_narrow: "STAGE1_EXPLORE_RANGE_BOX_NARROW",
   range_not_upper_edge: "STAGE1_EXPLORE_RANGE_EDGE_RELAXED",
   range_not_lower_edge: "STAGE1_EXPLORE_RANGE_EDGE_RELAXED"
 };
 
-/** 기존 Stage1 탐색 배수 위에 한 번 더 곱함(아주 소액). */
+/** 湲곗〈 Stage1 ?먯깋 諛곗닔 ?꾩뿉 ??踰???怨깊븿(?꾩＜ ?뚯븸). */
 const STAGE1_RANGE_POSITION_SOFT_MULT = 0.42;
 
 type RangeSignalState = "RANGE_LONG_CANDIDATE" | "RANGE_SHORT_CANDIDATE" | "RANGE_SIGNAL_NONE" | "RANGE_SIGNAL_WAIT_RECHECK";
@@ -495,10 +495,10 @@ function buildRangeUpperLongSuppressBranchProof(args: {
     edge.oscillation >= relaxedOscMin;
 
   const branch_order_upper = [
-    "0. reversalImmediate (Manual Override) → strong_reversal",
-    "1. paper_short_candidate (Base Signal) → strong_reversal",
-    "2. 3-Tier Reversal Confidence (Scoring Tier: Strong/Watch/Suppress) → tiered_decision",
-    "3. fallback → suppress"
+    "0. reversalImmediate (Manual Override) ??strong_reversal",
+    "1. paper_short_candidate (Base Signal) ??strong_reversal",
+    "2. 3-Tier Reversal Confidence (Scoring Tier: Strong/Watch/Suppress) ??tiered_decision",
+    "3. fallback ??suppress"
   ];
   const reversalShortUpperArmed =
     reversalImmediate != null &&
@@ -546,23 +546,23 @@ function buildRangeUpperLongSuppressBranchProof(args: {
       `inner RANGE_SIGNAL_NONE from long suppress: (edgeStructureOk=${edge.ok}) and (upperExtremeEdge=${boxPos >= 0.74}) so step 2 did not return SHORT; step 3 matched raw long but reinterpretation failed; entryResult=${entryResult}`;
   } else if (rangeSignal.signal === "RANGE_SIGNAL_NONE" && rangeSignal.reason === "range_upper_short_structure_not_ready") {
     range_upper_short_priority_false_because =
-      "edgeStructureOk false and raw not long candidate path → structure_not_ready; short priority branch skipped";
+      "edgeStructureOk false and raw not long candidate path ??structure_not_ready; short priority branch skipped";
   } else if (rangeSignal.signal === "RANGE_SHORT_CANDIDATE" && gateResult !== "RANGE_GATE_PASS") {
     range_upper_short_priority_false_because = `inner short candidate (${rangeSignal.reason}) but gate blocked: ${gateResult} / ${gateReason}`;
   } else if (rangeSignal.signal === "RANGE_SHORT_CANDIDATE" && lowConfidence && !rangeReversalSwitchMatches) {
     range_upper_short_priority_false_because =
-      "inner short candidate but range score gate: lowConfidence && !rangeReversalSwitchMatches → range_score_below_threshold";
+      "inner short candidate but range score gate: lowConfidence && !rangeReversalSwitchMatches ??range_score_below_threshold";
   } else {
     range_upper_short_priority_false_because = `entryResult=${entryResult}, inner=${rangeSignal.signal}/${rangeSignal.reason}, gate=${gateResult}/${gateReason}, edgeOk=${edge.ok}, extreme=${boxPos >= 0.74}`;
   }
   const failedParts = edge_subconditions.filter((r) => !r.pass).map((r) => `${r.id}=${r.value_clamped_01.toFixed(3)}<${r.threshold_min}`);
   const one_line_summary =
     (!edge.ok && !relaxedEdgeStructureOk && rangeSignal.reason === "range_upper_suppress_long_candidate_no_inertia")
-      ? `upper+raw_long: structure weak and not extreme_edge → step3 suppress [${failedParts.join(", ") || edge.failed_checks.join(",")}]`
+      ? `upper+raw_long: structure weak and not extreme_edge ??step3 suppress [${failedParts.join(", ") || edge.failed_checks.join(",")}]`
       : rangeSignal.signal === "RANGE_SHORT_CANDIDATE" && gateResult !== "RANGE_GATE_PASS"
-        ? `upper: edgeStructureOk=true → inner SHORT (${rangeSignal.reason}) but gate ${gateResult}: ${gateReason} → short_priority_flag false`
+        ? `upper: edgeStructureOk=true ??inner SHORT (${rangeSignal.reason}) but gate ${gateResult}: ${gateReason} ??short_priority_flag false`
         : rangeSignal.signal === "RANGE_SHORT_CANDIDATE" && lowConfidence && !rangeReversalSwitchMatches
-          ? `upper: inner SHORT but lowConfidence scores blocked gate → short_priority_flag false`
+          ? `upper: inner SHORT but lowConfidence scores blocked gate ??short_priority_flag false`
           : `upper: ${range_upper_short_priority_false_because}`;
   return {
     proof_version: 2,
@@ -672,7 +672,7 @@ function evaluateRangeStage0Signal(
   };
 } {
   const boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
-  const zone: RangeBoxZone = classifyBoxZone(boxPos);
+  const zone: RangeBoxZone = classifyRangeZone(boxPos);
   const interpretation: NonNullable<ReturnType<typeof evaluateRangeStage0Signal>["interpretation"]> = {
     checked: false,
     passed: false,
@@ -858,17 +858,17 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   config: EngineConfig;
   snapshot: SymbolSnapshotLike | null;
   dataReady: boolean;
-  /** 현재 열린 포지션 방향(반전 청산 분기·proof용). 없으면 null */
+  /** ?꾩옱 ?대┛ ?ъ???諛⑺뼢(諛섏쟾 泥?궛 遺꾧린쨌proof??. ?놁쑝硫?null */
   openPositionSide?: "long" | "short" | null;
   /**
-   * 구간 반전 청산 직후 같은 틱·pending 구간에서 반대 방향 재진입을 허용(쿨다운·저신뢰 게이트 완화).
+   * 援ш컙 諛섏쟾 泥?궛 吏곹썑 媛숈? ?굿톚ending 援ш컙?먯꽌 諛섎? 諛⑺뼢 ?ъ쭊?낆쓣 ?덉슜(荑⑤떎?는룹??좊ː 寃뚯씠???꾪솕).
    */
   rangeReversalImmediateSwitch?: Readonly<{
     preferredSide: "long" | "short";
     reason: "upper_flatten_to_short" | "lower_flatten_to_long" | "upper_flatten_to_short_pending" | "lower_flatten_to_long_pending";
   }> | null;
   regime: MarketRegime;
-  /** BTC 레짐 `detail` (NO_TRADE 사유·marginal_history 등). */
+  /** BTC ?덉쭚 `detail` (NO_TRADE ?ъ쑀쨌marginal_history ??. */
   regimeDetail?: Readonly<Record<string, unknown>>;
   regimeUnknown: boolean;
   isAmbiguous: boolean;
@@ -895,21 +895,21 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   maxPositionsReached: boolean;
   reviewingTicks?: number;
   autoEntryTriggered?: boolean;
-  /** RANGE 익절 후 재진입 — RANGE 쿨다운 우회(엔진 판단). */
+  /** RANGE ?듭젅 ???ъ쭊????RANGE 荑⑤떎???고쉶(?붿쭊 ?먮떒). */
   rangeReopenCooldownBypass?: boolean;
-  /** V2 Engine Authority — expectancy bypass 결정용. */
+  /** V2 Engine Authority ??expectancy bypass 寃곗젙?? */
   authority?: EntryExecutionAuthority;
-  /** 장세 부적합 종료(EXIT_REGIME) 소모 이력 (one-shot). */
+  /** ?μ꽭 遺?곹빀 醫낅즺(EXIT_REGIME) ?뚮え ?대젰 (one-shot). */
   regimeExitConsumed?: { side: "long" | "short"; ts: number } | null;
-  /** RANGE edge stop_loss 재진입 차단(엔진 메모리 → 판단 레이어 전달). */
+  /** RANGE edge stop_loss ?ъ쭊??李⑤떒(?붿쭊 硫붾え由????먮떒 ?덉씠???꾨떖). */
   rangeStopReentryBlock?: RangeStopReentryBlock | null;
-  /** 진단용 로거 (Proof logging). */
+  /** 吏꾨떒??濡쒓굅 (Proof logging). */
   logger?: { info: (event: string, payload?: any) => void };
-  /** `paper-engine` 라우팅 activeEngine — internal V2 MODE를 envelope과 동기(RANGE 강제 engine_v2). */
+  /** `paper-engine` ?쇱슦??activeEngine ??internal V2 MODE瑜?envelope怨??숆린(RANGE 媛뺤젣 engine_v2). */
   routingActiveEngine?: PaperEngineRoutingKind | null;
 }>;
 
-/** 상위 시장 모드·엔진·신규 방향 허용 — 시그널 레이어 TREND-UP 정렬(숏 후보 억제)용 */
+/** ?곸쐞 ?쒖옣 紐⑤뱶쨌?붿쭊쨌?좉퇋 諛⑺뼢 ?덉슜 ???쒓렇???덉씠??TREND-UP ?뺣젹(???꾨낫 ?듭젣)??*/
 export type PaperSignalMarketAlignmentContext = Readonly<{
   marketMode: PaperMarketMode;
   activeEngine: PaperEngineRoutingKind;
@@ -933,8 +933,8 @@ function isTrendUpShortSuppressMarketGuard(
 }
 
 /**
- * 상위 TREND-UP + 롱 허용·숏 신규 금지일 때 하위 `paper_short_candidate`만 `none`으로 맞춘다.
- * 숏→롱 강제 변환은 하지 않으며, 예외는 상위 shock/모드/allow 플래그가 바뀐 경우뿐이다.
+ * ?곸쐞 TREND-UP + 濡??덉슜쨌???좉퇋 湲덉??????섏쐞 `paper_short_candidate`留?`none`?쇰줈 留욎텣??
+ * ?뤴넂濡?媛뺤젣 蹂?섏? ?섏? ?딆쑝硫? ?덉쇅???곸쐞 shock/紐⑤뱶/allow ?뚮옒洹멸? 諛붾?寃쎌슦肉먯씠??
  */
 export function applyPaperSignalMarketAlignment<T extends SymbolSnapshotLike>(input: Readonly<{
   snapshot: T;
@@ -1111,13 +1111,13 @@ export type EvaluatePaperSymbolEntryResult = Readonly<{
   adaptiveOk: boolean;
   adaptiveDetail: Record<string, unknown> | null;
   adaptiveResult: Extract<FuturesAdaptiveEntryResult, { ok: true }> | null;
-  /** `runFuturesAdaptiveEntry` 실패 시 상세(정책/사이즈 단계). */
+  /** `runFuturesAdaptiveEntry` ?ㅽ뙣 ???곸꽭(?뺤콉/?ъ씠利??④퀎). */
   adaptiveFailure?: Extract<FuturesAdaptiveEntryResult, { ok: false }>;
   /** True once the pipeline reaches adaptive (after AI approval). */
   aiGatePassed: boolean;
 }>;
 
-/** TREND adaptive 직전: 볼륨 하한 완화 적용 여부·미적용 사유를 proof로 고정. */
+/** TREND adaptive 吏곸쟾: 蹂쇰ⅷ ?섑븳 ?꾪솕 ?곸슜 ?щ?쨌誘몄쟻???ъ쑀瑜?proof濡?怨좎젙. */
 function computeTrendVolumeRelaxForAdaptive(input: Readonly<{
   adaptiveMode: FuturesMarketMode;
   currentStage: number;
@@ -1517,7 +1517,7 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
 }
 
 /**
- * Pipeline: DATA → SIGNAL → REGIME → EDGE → RISK → EXECUTION → AI → ADAPTIVE.
+ * Pipeline: DATA ??SIGNAL ??REGIME ??EDGE ??RISK ??EXECUTION ??AI ??ADAPTIVE.
  */
 export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): EvaluatePaperSymbolEntryResult {
   const slipFrac = (Math.max(0, input.config.paperSlippageBps) / 10_000) * 2;
@@ -2075,7 +2075,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         stage1_result_code: "STAGE1_BLOCKED_DATA",
         required_move_pct,
         shortfall_pct,
-        /** 신호 부재와 구분: 시세/캔들 등 시장 데이터 미준비만 */
+        /** ?좏샇 遺?ъ? 援щ텇: ?쒖꽭/罹붾뱾 ???쒖옣 ?곗씠??誘몄?鍮꾨쭔 */
         signal_missing_reason: "MARKET_DATA_NOT_READY",
         box_position_diag: null,
         ema_gap_diag: null,
@@ -2171,7 +2171,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_risk_limit_relax_expired = !range_risk_limit_relax_active;
     }
     boxPos = typeof sn.boxPos === "number" ? sn.boxPos : 0.5;
-    zone = classifyBoxZone(boxPos);
+    zone = classifyRangeZone(boxPos);
 
     riskEngineHardBlocked = input.risk?.crashState !== undefined && input.risk.crashState !== "NONE";
     riskEngineBlockedBySuspendOnly =
@@ -2322,7 +2322,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       });
     }
 
-    // [STOP REENTRY BLOCK] 동일 symbol / side / zone / RANGE + base signal 방향 일치 시 재진입 금지
+    // [STOP REENTRY BLOCK] ?숈씪 symbol / side / zone / RANGE + base signal 諛⑺뼢 ?쇱튂 ???ъ쭊??湲덉?
     if (input.rangeStopReentryBlock && input.regime === "RANGE") {
       const blk = input.rangeStopReentryBlock;
       const snSigSide =
@@ -2454,7 +2454,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       gateReason = "range_gate_pass";
     }
 
-    // Capture interpretation results for scaling and proofs (tier/mult must stay consistent — avoid undefined.toUpperCase downstream).
+    // Capture interpretation results for scaling and proofs (tier/mult must stay consistent ??avoid undefined.toUpperCase downstream).
     if (rangeSignal.interpretation) {
       const interp = rangeSignal.interpretation;
       const rawTier = interp.tier;
@@ -2477,7 +2477,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           ? "RANGE_LONG_ENTRY"
           : "RANGE_SHORT_ENTRY";
 
-    // [RANGE EDGE REVERSAL CONFIRMATION] 완성 1m 봉 2개(close/high 또는 close/low) — 진행 봉 제외
+    // [RANGE EDGE REVERSAL CONFIRMATION] ?꾩꽦 1m 遊?2媛?close/high ?먮뒗 close/low) ??吏꾪뻾 遊??쒖쇅
     let rangeReversalConfirmed = true;
     if (entryResult === "RANGE_SHORT_ENTRY" && zone === "upper") {
       const conf = computeRangeEdgeReversalConfirmation({
@@ -2559,7 +2559,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reversal_immediate_switch_applied = true;
       range_reversal_immediate_switch_reason = input.rangeReversalImmediateSwitch?.reason ?? null;
     }
-    // [DIRECTION LOCK] RANGE Engine Sets Intent (반전 미확인 시 entryResult 기준으로 시그널 소거)
+    // [DIRECTION LOCK] RANGE Engine Sets Intent (諛섏쟾 誘명솗????entryResult 湲곗??쇰줈 ?쒓렇???뚭굅)
     workingSignal = (
       entryResult === "RANGE_LONG_ENTRY"
         ? "paper_long_candidate"
@@ -2839,7 +2839,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       _aiResult.state === HighwayTrendState.INVALID &&
       _aiResult.invalidTier === "hard_invalid";
     if (trendBoxEdgeBufferEligible) {
-      z = classifyBoxZone(sn.boxPos as number);
+      z = classifyRangeZone(sn.boxPos as number);
       const atBoxEdge = z === "upper" || z === "lower";
       if (atBoxEdge) {
         const rangeRescore = evaluateAiHighwayQuality(input.snapshot?.candles ?? [], sym, {
@@ -2880,7 +2880,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             breakout_state: "none",
             pullback_state: "unknown",
             guidance:
-              "박스 상·하단 근처 TREND: Highway 코어 과경직 — RANGE 재점수도 무효. 약추세 관망(HIGHWAY_BOX_EDGE_WATCH).",
+              "諛뺤뒪 ?겶룻븯??洹쇱쿂 TREND: Highway 肄붿뼱 怨쇨꼍吏???RANGE ?ъ젏?섎룄 臾댄슚. ?쎌텛??愿留?HIGHWAY_BOX_EDGE_WATCH).",
             detail: {
               highway_state: "INVALID",
               highway_invalid_tier: "hard_invalid",
@@ -2969,7 +2969,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       const pump_state = (input.risk as any)?.pump_state ?? null;
       const resolved_pump_lock = pumpState === "PUMP_LOCK" || pump_state === "PUMP_LOCK";
       const boxPos = sn?.boxPos ?? null;
-      const zone = typeof boxPos === "number" && Number.isFinite(boxPos) ? classifyBoxZone(boxPos) : null;
+      const zone = typeof boxPos === "number" && Number.isFinite(boxPos) ? classifyRangeZone(boxPos) : null;
       const range_edge_extreme =
         typeof boxPos === "number" && Number.isFinite(boxPos) ? (boxPos <= 0.08 || boxPos >= 0.92) : null;
       const logger = input.logger?.info ? input.logger : null;
@@ -3044,17 +3044,17 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   }
 
   /**
-   * regimeUnknown: BTC 5m 최소 봉 미만 → regime_state UNKNOWN.
+   * regimeUnknown: BTC 5m 理쒖냼 遊?誘몃쭔 ??regime_state UNKNOWN.
    */
 
   /**
-   * regimeUnknown: BTC 5m 최소 봉 미만 → regime_state UNKNOWN.
+   * regimeUnknown: BTC 5m 理쒖냼 遊?誘몃쭔 ??regime_state UNKNOWN.
    */
 
   if (regime_state === "UNKNOWN" && input.currentStage === 0 && stage1SignalRelaxed) {
     // Stage 1 soft candidate + UNKNOWN regime -> Fallback to RANGE if safety criteria met
     boxPos = sn?.boxPos ?? 0.5;
-    const zoneFb = classifyBoxZone(boxPos);
+    const zoneFb = classifyRangeZone(boxPos);
     const boxNotCentered = boxPos < 0.45 || boxPos > 0.55;
     const qualityHighEnough = sn.qualityScore >= 35;
 
@@ -3069,12 +3069,12 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   }
 
   /**
-   * Stage 2+ 는 항상 차단. Stage 1 + isAmbiguous 일 때만 통과(레거시 완화).
+   * Stage 2+ ????긽 李⑤떒. Stage 1 + isAmbiguous ???뚮쭔 ?듦낵(?덇굅???꾪솕).
    */
   const unknownBlocksEntry =
     regime_state === "UNKNOWN" &&
     (input.currentStage >= 1 || !(input.currentStage === 0 && input.isAmbiguous));
-  /** 쿨다운 체크(RISK_FAIL_REENTRY) 완화 (RANGE Stage 1 한정) */
+  /** 荑⑤떎??泥댄겕(RISK_FAIL_REENTRY) ?꾪솕 (RANGE Stage 1 ?쒖젙) */
   if ((risk_state as string) === "COOLDOWN" && input.currentStage === 0 && input.regime === "RANGE") {
     const lastMeta = input.lastCloseMetaBySymbol?.get(String(sym));
     const closeReason = lastMeta?.closeReason;
@@ -3120,7 +3120,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         execution_state: "PAPER_READY",
         ai_decision: "N/A",
         adaptive_decision: "N/A",
-        guidance: input.isAmbiguous ? "애매한 장세 관망 중" : "적합한 레짐 없음",
+        guidance: input.isAmbiguous ? "?좊ℓ???μ꽭 愿留?以? : "?곹빀???덉쭚 ?놁쓬",
         stage1_result_code: stage1ResultCodeOverride ?? "STAGE1_BLOCKED_REGIME",
         required_move_pct: null,
         shortfall_pct: 0
@@ -3136,7 +3136,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     );
   }
 
-  /** NO_TRADE 는 감지기에서 위험/오류·필수 데이터 부족만 — 모호·약추세 등은 NO_TRADE 로 내리지 않음 */
+  /** NO_TRADE ??媛먯?湲곗뿉???꾪뿕/?ㅻ쪟쨌?꾩닔 ?곗씠??遺議깅쭔 ??紐⑦샇쨌?쎌텛???깆? NO_TRADE 濡??대━吏 ?딆쓬 */
   if (input.regime === "NO_TRADE") {
     stage1_block_origin = "regime_no_trade_gate";
     reject_reason = "REGIME_NO_TRADE";
@@ -3174,7 +3174,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   rr = rrFromRegime(input.regime);
 
   stage1LoosenedEntry = false;
-  /** Stage 1만: 기대이동이 완화 비용 이하여도 탐색 진입 허용(하드 REJECT 안 함) */
+  /** Stage 1留? 湲곕??대룞???꾪솕 鍮꾩슜 ?댄븯?щ룄 ?먯깋 吏꾩엯 ?덉슜(?섎뱶 REJECT ???? */
   costWarningStage1 = false;
 
   const costGateComparable =
@@ -3209,7 +3209,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
   }
 
-  /** Stage 2+ 증액: 비용 대비 기대이동 여유를 Stage 1(초기 틱)보다 엄격히 요구 */
+  /** Stage 2+ 利앹븸: 鍮꾩슜 ?鍮?湲곕??대룞 ?ъ쑀瑜?Stage 1(珥덇린 ??蹂대떎 ?꾧꺽???붽뎄 */
   const stage2plusFeeHeadroomMult = input.currentStage >= 2 ? 1.15 : 1.1;
   if (
     input.currentStage >= 1 &&
@@ -3226,7 +3226,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   }
 
   const minVol = input.config.paperMinEdgeVolatilityMove;
-  /** Stage 1만 기대 변동(게이트 expected move) 하한 추가 완화; Stage 2+는 기본 대비 강화 */
+  /** Stage 1留?湲곕? 蹂??寃뚯씠??expected move) ?섑븳 異붽? ?꾪솕; Stage 2+??湲곕낯 ?鍮?媛뺥솕 */
   const effectiveMinVol =
     input.currentStage === 0 ? minVol * 0.52 : input.currentStage === 1 ? minVol * 1.1 : minVol * 1.18;
   if (typeof em === "number" && em < effectiveMinVol) {
@@ -3338,8 +3338,8 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     input.currentStage === 0 &&
     sn != null &&
     typeof sn.boxPos === "number" &&
-    ((input.rangeReversalImmediateSwitch.preferredSide === "short" && classifyBoxZone(sn.boxPos) === "upper") ||
-      (input.rangeReversalImmediateSwitch.preferredSide === "long" && classifyBoxZone(sn.boxPos) === "lower"));
+    ((input.rangeReversalImmediateSwitch.preferredSide === "short" && classifyRangeZone(sn.boxPos) === "upper") ||
+      (input.rangeReversalImmediateSwitch.preferredSide === "long" && classifyRangeZone(sn.boxPos) === "lower"));
 
   if (input.lastCloseMetaBySymbol && input.reentryCooldownMs > 0 && intentSide) {
     meta = input.lastCloseMetaBySymbol.get(String(sym));
@@ -3471,7 +3471,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         execution_state: "IDLE",
         ai_decision: "N/A",
         adaptive_decision: "N/A",
-        guidance: "최대 포지션 도달",
+        guidance: "理쒕? ?ъ????꾨떖",
         target_stage: null,
         supplemental_reasons,
         stage1_result_code: "STAGE1_BLOCKED_LIMIT",
@@ -3829,7 +3829,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             final_decision: "REJECT",
             ai_decision: "REJECT",
             adaptive_decision: "N/A",
-            guidance: `AI 품질 미달 거부 (Floor: ${effectiveFloor})`,
+            guidance: `AI ?덉쭏 誘몃떖 嫄곕? (Floor: ${effectiveFloor})`,
             target_stage: null,
             supplemental_reasons,
             ai_floor_relaxed: aiFloorRelaxed,
@@ -3957,9 +3957,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
 
     /**
-     * Fee-drag (STAGE1_COST_WARNING 후처리만): 비용 경고 꼬리에서 추가 사이즈 축소만.
-     * `return ret(...)`로 REJECT 금지 · `fee_drag_blocked`는 항상 false(호환 필드).
-     * `range_lower_long_priority_applied` / `range_upper_short_priority_applied` true면 fee-drag 전체 스킵.
+     * Fee-drag (STAGE1_COST_WARNING ?꾩쿂由щ쭔): 鍮꾩슜 寃쎄퀬 瑗щ━?먯꽌 異붽? ?ъ씠利?異뺤냼留?
+     * `return ret(...)`濡?REJECT 湲덉? 쨌 `fee_drag_blocked`????긽 false(?명솚 ?꾨뱶).
+     * `range_lower_long_priority_applied` / `range_upper_short_priority_applied` true硫?fee-drag ?꾩껜 ?ㅽ궢.
      */
     const feeDragRangePriorityProtected =
       input.regime === "RANGE" &&
@@ -4037,7 +4037,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     stage1SizeMultFinal = input.currentStage === 0 ? dynamicSizeMult : null;
 
-    /** Stage1 RANGE 탐색: 소프트 탐색·에지·자동진입 소프트, 또는 실행기 자연 허용(소프트 없음). */
+    /** Stage1 RANGE ?먯깋: ?뚰봽???먯깋쨌?먯?쨌?먮룞吏꾩엯 ?뚰봽?? ?먮뒗 ?ㅽ뻾湲??먯뿰 ?덉슜(?뚰봽???놁쓬). */
     const stage1RangeExplorePath =
       stage1ExploreSoftExec ||
       stage1RangeEdgeSoftApplied ||
@@ -4045,9 +4045,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         input.autoEntryTriggered === true &&
         (executorBlockReasonOriginal === "trend_not_in_pullback" ||
           executorBlockReasonOriginal === "range_not_in_interest_zone"));
-    /** 실행기가 별도 소프트 없이 RANGE에서 허용한 경우(에지 충족 등). */
+    /** ?ㅽ뻾湲곌? 蹂꾨룄 ?뚰봽???놁씠 RANGE?먯꽌 ?덉슜??寃쎌슦(?먯? 異⑹” ??. */
     const naturalRangeStage1EntryAllowed = input.regime === "RANGE" && input.currentStage === 0 && !stage1SoftExecOverrideFlag;
-    /** EXEC_BLOCKED_RANGE_NOT_LOWER_EDGE 소프트는 본 완화 대상 아님 — 원인 블록이면 adaptive 소프트 비적용. */
+    /** EXEC_BLOCKED_RANGE_NOT_LOWER_EDGE ?뚰봽?몃뒗 蹂??꾪솕 ????꾨떂 ???먯씤 釉붾줉?대㈃ adaptive ?뚰봽??鍮꾩쟻?? */
     const stage1RangeAdaptiveSoftExplore =
       input.currentStage === 0 &&
       input.regime === "RANGE" &&
@@ -4326,7 +4326,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         execution_state: "DISABLED",
         ai_decision: "APPROVE",
         adaptive_decision: "REJECT",
-        guidance: "Long Only 제한으로 숏 진입 차단",
+        guidance: "Long Only ?쒗븳?쇰줈 ??吏꾩엯 李⑤떒",
         target_stage: null,
         supplemental_reasons,
         stage1_result_code: "STAGE1_BLOCKED_RISK",
@@ -4375,7 +4375,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         execution_state: "ORDER_BUILD_FAIL",
         ai_decision: "APPROVE",
         adaptive_decision: "REJECT",
-        guidance: "진입 수량 0",
+        guidance: "吏꾩엯 ?섎웾 0",
         target_stage: null,
         supplemental_reasons,
         stage1_result_code: "STAGE1_BLOCKED_DATA",
@@ -4408,7 +4408,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   // Round 4 & 5: Stage 1 Execution Pending prioritize
   if (input.currentStage === 0 && input.autoEntryTriggered) {
     execution_state = "STAGE1_EXEC_PENDING";
-    guidanceOut = "Stage 1 실행 대기 (검토 조건 유지)";
+    guidanceOut = "Stage 1 ?ㅽ뻾 ?湲?(寃??議곌굔 ?좎?)";
   }
 
 

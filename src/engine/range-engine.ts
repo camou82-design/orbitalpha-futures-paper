@@ -1,4 +1,4 @@
-import type { MarketModeSelectorOutput, PaperMarketMode, PaperOpenPositionRecord, RangeBoxZone, RangeEngineState } from "../models/types";
+import { classifyRangeZone, type MarketModeSelectorOutput, type PaperMarketMode, type PaperOpenPositionRecord, type RangeBoxZone, type RangeEngineState } from "../models/types";
 
 export type RangeEngineInput = Readonly<{
   symbol: string;
@@ -11,7 +11,7 @@ export type RangeEngineInput = Readonly<{
   shortMarginUsd: number;
   rangeCycleCountPrior: number;
   rangeLadderLevelPrior: number;
-  /** 직전 틱 구간(상태머신). */
+  /** 吏곸쟾 ??援ш컙(?곹깭癒몄떊). */
   lastZone: RangeBoxZone | null;
 }>;
 
@@ -27,14 +27,8 @@ function clamp01(n: number): number {
 export const RANGE_ZONE_ACTION_POLICY =
   "range_reversal_switch_engine_upper_short_lower_long_mid_wait_v2" as const;
 
-export function classifyBoxZone(boxPosition: number): RangeBoxZone {
-  if (boxPosition >= 0.62) return "upper";
-  if (boxPosition <= 0.38) return "lower";
-  return "mid";
-}
-
 /**
- * 구간 전이 시 사이클·래더 갱신. 왕복(중앙↔극단) 카운트.
+ * 援ш컙 ?꾩씠 ???ъ씠?는룸옒??媛깆떊. ?뺣났(以묒븰?붽레?? 移댁슫??
  */
 export function stepRangeZoneMachine(input: Readonly<{
   lastZone: RangeBoxZone | null;
@@ -63,12 +57,12 @@ export function stepRangeZoneMachine(input: Readonly<{
 export type RangeStructuralExitResult = Readonly<{
   shouldExit: boolean;
   reason: "range_box_break" | "structural_regime_shift" | "risk_exposure_breach" | null;
-  /** True iff price is outside box ± structural buffer (before any hold/confirm gating in the engine). */
+  /** True iff price is outside box 짹 structural buffer (before any hold/confirm gating in the engine). */
   rangeBoxBreakRaw: boolean;
 }>;
 
 /**
- * RANGE 핵심 청산: 박스 붕괴·구조적 레짐 전환·노출 한도. candidate_lost 아님.
+ * RANGE ?듭떖 泥?궛: 諛뺤뒪 遺뺢눼쨌援ъ“???덉쭚 ?꾪솚쨌?몄텧 ?쒕룄. candidate_lost ?꾨떂.
  */
 export function evaluateRangeStructuralExit(input: Readonly<{
   lastPrice: number;
@@ -80,7 +74,7 @@ export function evaluateRangeStructuralExit(input: Readonly<{
   maxShortExposure: number;
   marketMode: PaperMarketMode;
   trendConfidence: number;
-  /** 포지션 진입 시 RANGE였는데 글로벌 모드가 추세로 강하게 기운 경우 */
+  /** ?ъ???吏꾩엯 ??RANGE??붾뜲 湲濡쒕쾶 紐⑤뱶媛 異붿꽭濡?媛뺥븯寃?湲곗슫 寃쎌슦 */
   structuralTrendShift: boolean;
 }>): RangeStructuralExitResult {
   const span = input.boxUpper - input.boxLower;
@@ -107,8 +101,8 @@ export type RangeProfitTrailState = Readonly<{
 }>;
 
 /**
- * RANGE 수익권: 일정 이익 구간 진입 후에는 `range_box_break` 리밸런스를 즉시 허용하지 않고,
- * 본전 이상 확보(locked) 뒤 피크 대비 되돌림이 임계를 넘을 때만 청산(trailExit).
+ * RANGE ?섏씡沅? ?쇱젙 ?댁씡 援ш컙 吏꾩엯 ?꾩뿉??`range_box_break` 由щ갭?곗뒪瑜?利됱떆 ?덉슜?섏? ?딄퀬,
+ * 蹂몄쟾 ?댁긽 ?뺣낫(locked) ???쇳겕 ?鍮??섎룎由쇱씠 ?꾧퀎瑜??섏쓣 ?뚮쭔 泥?궛(trailExit).
  */
 export function computeRangeProfitTrailStep(input: Readonly<{
   side: "long" | "short";
@@ -191,7 +185,7 @@ export function computeRangeProfitTrailStep(input: Readonly<{
 }
 
 /**
- * 횡보 전용 상태 산출. 후보 소멸 청산은 RANGE 핵심 사유에서 제외(candidateLostExitAllowed=false).
+ * ?〓낫 ?꾩슜 ?곹깭 ?곗텧. ?꾨낫 ?뚮㈇ 泥?궛? RANGE ?듭떖 ?ъ쑀?먯꽌 ?쒖쇅(candidateLostExitAllowed=false).
  */
 export function evaluateRangeEngineForSymbol(input: RangeEngineInput): RangeEngineState {
   const hi = input.boxHigh;
@@ -223,7 +217,7 @@ export function evaluateRangeEngineForSymbol(input: RangeEngineInput): RangeEngi
       ? Math.min(1, Math.max(0, posFromSnap))
       : boxPosition;
 
-  const boxZone = classifyBoxZone(boxPositionFinal);
+  const boxZone = classifyRangeZone(boxPositionFinal);
   const stepped = stepRangeZoneMachine({
     lastZone: input.lastZone,
     currentZone: boxZone,
@@ -266,13 +260,13 @@ export function evaluateRangeEngineForSymbol(input: RangeEngineInput): RangeEngi
   };
 }
 
-/** 짧은 시간 내 RANGE 재진입 과다 방지(창 길이·최대 횟수). */
+/** 吏㏃? ?쒓컙 ??RANGE ?ъ쭊??怨쇰떎 諛⑹?(李?湲몄씠쨌理쒕? ?잛닔). */
 export const RANGE_REOPEN_WINDOW_MS = 30 * 60_000;
 export const RANGE_REOPEN_MAX_PER_WINDOW = 2;
 const REOPEN_HEDGE_MAX_ABS = 0.52;
 const EXPOSURE_HEADROOM = 0.92;
 
-/** 가장자리 재접근 강도(0–1). */
+/** 媛?μ옄由??ъ젒洹?媛뺣룄(0??). */
 export function computeRangeEdgeIntensity01(boxPosition: number, boxZone: RangeBoxZone): number {
   if (boxZone === "mid") return 0;
   if (boxZone === "upper") return clamp01((boxPosition - 0.62) / 0.38 + 0.32);
@@ -295,7 +289,7 @@ export function rangeReopenOpportunityScore(m: RangeReopenSoftMetrics): number {
 }
 
 export type RangeReopenGateInput = Readonly<{
-  /** TP 후 재진입 ARM이 유효할 것. */
+  /** TP ???ъ쭊??ARM???좏슚??寃? */
   armed: boolean;
   state: RangeEngineState;
   intentSide: "long" | "short";
@@ -303,33 +297,33 @@ export type RangeReopenGateInput = Readonly<{
   maxShortExposure: number;
   longUsd: number;
   shortUsd: number;
-  /** 헤드룸 검사용 의도 크기(USD). */
+  /** ?ㅻ뱶猷?寃?ъ슜 ?섎룄 ?ш린(USD). */
   proposedEntryUsd: number;
-  /** `RANGE_REOPEN_WINDOW_MS` 안의 재진입 성공 횟수. */
+  /** `RANGE_REOPEN_WINDOW_MS` ?덉쓽 ?ъ쭊???깃났 ?잛닔. */
   reopenCountInWindow: number;
-  /** 좋은 왕복 기회 시 게이트 완화(과잉 방지 하드 조건은 유지). */
+  /** 醫뗭? ?뺣났 湲고쉶 ??寃뚯씠???꾪솕(怨쇱엵 諛⑹? ?섎뱶 議곌굔? ?좎?). */
   soft?: RangeReopenSoftMetrics;
 }>;
 
 /**
- * 익절 ARM + 박스·헤지·노출·반복 + (선택) 기회 점수로 재오픈.
+ * ?듭젅 ARM + 諛뺤뒪쨌?ㅼ?쨌?몄텧쨌諛섎났 + (?좏깮) 湲고쉶 ?먯닔濡??ъ삤??
  */
 export function evaluateRangeReopenAllowed(input: RangeReopenGateInput): Readonly<{
   allowed: boolean;
   blockReason: string;
 }> {
   if (!input.armed) {
-    return { allowed: false, blockReason: "재진입 ARM 없음" };
+    return { allowed: false, blockReason: "?ъ쭊??ARM ?놁쓬" };
   }
   const st = input.state;
   if (!st.reopenEligible) {
-    return { allowed: false, blockReason: "모드상 재진입 비허용" };
+    return { allowed: false, blockReason: "紐⑤뱶???ъ쭊??鍮꾪뿀?? };
   }
   if (st.boxBreakout) {
-    return { allowed: false, blockReason: "박스 이탈(붕괴) 구간" };
+    return { allowed: false, blockReason: "諛뺤뒪 ?댄깉(遺뺢눼) 援ш컙" };
   }
   if (st.boxZone === "mid") {
-    return { allowed: false, blockReason: "중앙대 — 왕복 가장자리 아님" };
+    return { allowed: false, blockReason: "以묒븰? ???뺣났 媛?μ옄由??꾨떂" };
   }
 
   const opp = input.soft ? rangeReopenOpportunityScore(input.soft) : 0;
@@ -337,24 +331,24 @@ export function evaluateRangeReopenAllowed(input: RangeReopenGateInput): Readonl
   const maxReopens = opp >= 0.68 ? 3 : RANGE_REOPEN_MAX_PER_WINDOW;
 
   if (Math.abs(st.hedgeBalance) > hedgeLimit) {
-    return { allowed: false, blockReason: "헤지 편중 과다" };
+    return { allowed: false, blockReason: "?ㅼ? ?몄쨷 怨쇰떎" };
   }
   if (input.reopenCountInWindow >= maxReopens) {
-    return { allowed: false, blockReason: "재진입 빈도 상한" };
+    return { allowed: false, blockReason: "?ъ쭊??鍮덈룄 ?곹븳" };
   }
   const addL = input.intentSide === "long" ? input.proposedEntryUsd : 0;
   const addS = input.intentSide === "short" ? input.proposedEntryUsd : 0;
   if (input.longUsd + addL > input.maxLongExposure * EXPOSURE_HEADROOM) {
-    return { allowed: false, blockReason: "롱 노출 여유 부족" };
+    return { allowed: false, blockReason: "濡??몄텧 ?ъ쑀 遺議? };
   }
   if (input.shortUsd + addS > input.maxShortExposure * EXPOSURE_HEADROOM) {
-    return { allowed: false, blockReason: "숏 노출 여유 부족" };
+    return { allowed: false, blockReason: "???몄텧 ?ъ쑀 遺議? };
   }
   return { allowed: true, blockReason: "" };
 }
 
 /**
- * 왕복 사이클·헤지 안정 시 크기 상향(과도한 누적 시엔 여전히 감쇠).
+ * ?뺣났 ?ъ씠?는룻뿤吏 ?덉젙 ???ш린 ?곹뼢(怨쇰룄???꾩쟻 ?쒖뿏 ?ъ쟾??媛먯뇿).
  */
 export function rangeCycleSizePolicy(rangeCycleCount: number, hedgeBalance: number): number {
   const c = Math.min(12, Math.max(0, rangeCycleCount));
@@ -364,13 +358,13 @@ export function rangeCycleSizePolicy(rangeCycleCount: number, hedgeBalance: numb
   return Math.max(0.6, Math.min(1.14, m));
 }
 
-/** @deprecated rangeCycleSizePolicy 권장 */
+/** @deprecated rangeCycleSizePolicy 沅뚯옣 */
 export function rangeCycleEntryMultiplier(rangeCycleCount: number): number {
   return rangeCycleSizePolicy(rangeCycleCount, 0);
 }
 
 /**
- * 반대 레그로 편중 완화 시 회수·누적 보정.
+ * 諛섎? ?덇렇濡??몄쨷 ?꾪솕 ???뚯닔쨌?꾩쟻 蹂댁젙.
  */
 export function rangeAccumulationRecoveryMultiplier(
   hedgeBalance: number,
@@ -385,7 +379,7 @@ export function rangeAccumulationRecoveryMultiplier(
 }
 
 /**
- * 레더·헤지 누적에 따른 반대 레그/추가 진입 축소.
+ * ?덈뜑쨌?ㅼ? ?꾩쟻???곕Ⅸ 諛섎? ?덇렇/異붽? 吏꾩엯 異뺤냼.
  */
 export function rangeLadderLegMultiplier(rangeLadderLevel: number, hedgeBalance: number): number {
   const ladder = Math.min(5, Math.max(0, rangeLadderLevel));
@@ -395,7 +389,7 @@ export function rangeLadderLegMultiplier(rangeLadderLevel: number, hedgeBalance:
   return Math.max(0.45, Math.min(1, ladderPart * hedgePart));
 }
 
-/** 동일 심볼 오픈 배열에서 롱/숏 마진 합산. */
+/** ?숈씪 ?щ낵 ?ㅽ뵂 諛곗뿴?먯꽌 濡???留덉쭊 ?⑹궛. */
 export function marginsForSymbol(
   opens: readonly PaperOpenPositionRecord[],
   symbol: string
