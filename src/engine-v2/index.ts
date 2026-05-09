@@ -1613,6 +1613,39 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
 
+        // --- Hardening 2026-05-10: Detailed Trend Promotion Block Reasons & RANGE Zone Safety ---
+        if (activeEngineRouting === "TREND" && trendSideCandidate !== "none" && !promotionApplied) {
+            if (judgment.no_trade_reason === "DATA_NOT_READY") {
+                promotionBlockReason = "TREND_PROMOTION_BLOCKED_HTF_DATA_NOT_READY";
+                expectedNextAction = "WAIT_FOR_HTF_DATA_READY";
+                expectedMissingCondition = "HTF_DATA_STABILITY";
+            } else if (qualityScore < 70) {
+                promotionBlockReason = "TREND_PROMOTION_BLOCKED_QUALITY";
+                expectedNextAction = "WAIT_FOR_QUALITY_IMPROVEMENT";
+                expectedMissingCondition = "QUALITY_THRESHOLD_70";
+            } else if (zone === "upper" && trendSideCandidate === "long") {
+                promotionBlockReason = "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKOUT_CONFIRMED";
+                v2DecisionAfterPromotion = "HOLD";
+                v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                expectedNextAction = "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM";
+                expectedMissingCondition = "BREAKOUT_SUPPORT_RETEST_CONFIRM";
+            } else if (zone === "lower" && trendSideCandidate === "short") {
+                promotionBlockReason = "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED";
+                v2DecisionAfterPromotion = "HOLD";
+                v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                expectedNextAction = "WAIT_FOR_BREAKDOWN_RETEST_RESISTANCE_CONFIRM";
+                expectedMissingCondition = "BREAKDOWN_RESISTANCE_RETEST_CONFIRM";
+            } else if (marketMode === "RANGE" && (boxBreakSide === "none" || boxBreakSide === "UNKNOWN")) {
+                promotionBlockReason = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
+                expectedNextAction = "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM";
+                expectedMissingCondition = "RETEST_STABILITY";
+            } else {
+                promotionBlockReason = "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED";
+                expectedNextAction = "WAIT_FOR_RECHECK_OR_RETEST";
+                expectedMissingCondition = "TREND_CONFIRMATION_TICK";
+            }
+        }
+
         if (transitionWatchShortConditionsMet) {
             const atr = Number(input.snapshot.atr ?? 0);
             const transitionInvalidationPx = lastPrice + Math.max(lastPrice * 0.002, atr * 0.35);

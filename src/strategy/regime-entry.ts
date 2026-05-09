@@ -1,5 +1,6 @@
 import type { PaperCandidateStrength, PaperSignal } from "./entry-signal";
 import type { MarketRegime } from "./market-regime-detector";
+import { classifyRangeZone } from "../models/types";
 
 export type RegimeEntryDecision =
   | Readonly<{ ok: true; direction: "long" | "short"; detail: Record<string, unknown> }>
@@ -56,21 +57,23 @@ export function evaluateRegimeEntry(ctx: RegimeEntryContext): RegimeEntryDecisio
       return { ok: false, reason: "range_box_too_narrow", detail: { box_rel: ctx.boxRel, min: 0.0045 } };
     }
 
+    const zone = classifyRangeZone(ctx.boxPos);
+
     // Middle forbidden.
-    if (ctx.boxPos > 0.33 && ctx.boxPos < 0.67) {
+    if (zone === "mid") {
       return { ok: false, reason: "range_center_forbidden", detail: { box_pos: ctx.boxPos } };
     }
 
     // Edge-only directional mapping.
     if (dir === "long") {
-      if (ctx.boxPos > 0.22) {
-        return { ok: false, reason: "range_not_at_lower_edge", detail: { box_pos: ctx.boxPos, max: 0.22 } };
+      if (zone !== "lower") {
+        return { ok: false, reason: "range_not_at_lower_edge", detail: { box_pos: ctx.boxPos, max: 0.38 } };
       }
       return { ok: true, direction: "long", detail: { edge: "lower", box_pos: ctx.boxPos, box_rel: ctx.boxRel } };
     }
     if (dir === "short") {
-      if (ctx.boxPos < 0.78) {
-        return { ok: false, reason: "range_not_at_upper_edge", detail: { box_pos: ctx.boxPos, min: 0.78 } };
+      if (zone !== "upper") {
+        return { ok: false, reason: "range_not_at_upper_edge", detail: { box_pos: ctx.boxPos, min: 0.62 } };
       }
       return { ok: true, direction: "short", detail: { edge: "upper", box_pos: ctx.boxPos, box_rel: ctx.boxRel } };
     }

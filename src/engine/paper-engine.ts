@@ -18,7 +18,8 @@ import type {
   TrendBreakoutDirection,
   PaperSignalState,
   PaperMarketMode,
-  PaperCloseSource
+  PaperCloseSource,
+  classifyRangeZone
 } from "../models/types";
 
 import type { Logger } from "../logs/logger";
@@ -195,11 +196,7 @@ type RangeReversalImmediateSwitchArg = Readonly<{
 }>;
 
 /** RANGE 청산·유지 정책용 박스 위치 구간 (상단 ≥0.62, 하단 ≤0.38). */
-function classifyRangeActionZone(boxPos: number): RangeBoxZone {
-  if (boxPos >= 0.62) return "upper";
-  if (boxPos <= 0.38) return "lower";
-  return "mid";
-}
+
 
 const ENTRY_SIGNAL_LOST_PROTECT_MS = 10 * 60_000;
 const ENTRY_SIGNAL_LOST_CONFIRM_TICKS = 3;
@@ -3975,7 +3972,7 @@ export class PaperEngine {
         const trendWeaknessScore = snapForDecision?.trendWeaknessScore ?? raw.trendWeaknessScore ?? 0;
         const emaGap = snapForDecision?.emaGap ?? raw.emaGap ?? 0;
         const trendOk = snapForDecision?.trendOk ?? raw.trendOk ?? false;
-        const zone = classifyRangeActionZone(boxPos);
+        const zone = classifyRangeZone(boxPos);
         
         const recovery_mode_active = v2Risk?.blockReason === "TWO_CONSECUTIVE_LOSSES_RECOVERY_MODE";
         const size_suppressed_by_recovery = recovery_mode_active && ((v2Risk?.equityMultiple ?? 0) === 0 || (v2Env?.exposureNotionalKrw ?? 0) === 0);
@@ -4000,7 +3997,7 @@ export class PaperEngine {
           } else if (range_trend_conflict) {
             side_veto_detail = "RANGE_TREND_SIDE_CONFLICT";
           } else if ((!v2Env?.range_side_candidate || v2Env?.range_side_candidate === "none") && v2Env?.trend_side_candidate && v2Env?.trend_side_candidate !== "none" && v2Env?.promotion_applied === false) {
-            side_veto_detail = "TREND_CANDIDATE_NOT_PROMOTED_DETAIL";
+            side_veto_detail = v2Env?.promotion_block_reason || "TREND_CANDIDATE_NOT_PROMOTED_DETAIL";
           } else if (size_suppressed_by_recovery) {
             side_veto_detail = "RECOVERY_MODE_SIZE_SUPPRESSED";
           }

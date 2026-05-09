@@ -81,6 +81,12 @@
     MIN_QUALITY_NOT_MET: "진입 품질 점수 부족",
     TREND_ENTRY_NOT_PROMOTED: "추세 후보는 있으나 V2 승격 조건 미충족",
     TREND_CANDIDATE_NOT_PROMOTED_DETAIL: "추세 후보 미승격(세부 진행 중)",
+    TREND_PROMOTION_BLOCKED_HTF_DATA_NOT_READY: "HTF 데이터 준비 부족(60틱 미만)",
+    TREND_PROMOTION_BLOCKED_QUALITY: "진입 품질 점수 미달",
+    TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKOUT_CONFIRMED: "박스 상단: 돌파 후 지지 재확인 필요",
+    TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED: "박스 하단: 이탈 후 저항 재확인 필요",
+    TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED: "돌파 후 리테스트 확인 미완료",
+    TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED: "지지 구간 재확인 필요",
     RECOVERY_MODE_SIZE_SUPPRESSED: "연속 손실 복구 모드로 신규 진입 사이즈 억제",
     TWO_CONSECUTIVE_LOSSES_RECOVERY_MODE: "연속 손실 이후 복구 모드 적용 중",
     SIDE_NONE_AFTER_VETO: "후처리 거부 후 유효 방향 없음",
@@ -101,6 +107,9 @@
     EXECUTE_V2_AUTHORITY: "V2 권위 실행 단계",
     PLAN_TO_ENTER: "진입 검토 계획",
     PLAN_TO_HOLD: "보유 유지 검토",
+    WAIT_FOR_HTF_DATA_READY: "HTF 데이터 안정 대기",
+    WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM: "돌파 후 지지 전환 확인 대기",
+    WAIT_FOR_BREAKDOWN_RETEST_RESISTANCE_CONFIRM: "이탈 후 저항 전환 확인 대기",
     NONE: "—"
   };
 

@@ -1,5 +1,5 @@
 import { EngineV2Input, EngineV2MarketSubtype, MarketJudgmentOutput } from "../types";
-import { Candle } from "../../models/types";
+import { Candle, classifyRangeZone } from "../../models/types";
 import { emaLastFromCloses } from "../../utils/math";
 
 function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPhase"] {
@@ -274,10 +274,8 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
         phase = "BREAKOUT";
     } else if (Math.abs(bhSlope) < 0.00003 && Math.abs(blSlope) < 0.00003) {
         phase = "FLAT";
-    } else if (boxPos <= 0.26) {
-        phase = "LOWER";
-    } else if (boxPos >= 0.74) {
-        phase = "UPPER";
+    } else {
+        phase = classifyRangeZone(boxPos).toUpperCase() as MarketJudgmentOutput["rangePhase"];
     }
 
     return { 

@@ -1112,6 +1112,19 @@ export type MarketModeSelectorOutput = Readonly<{
 
 export type RangeBoxZone = "upper" | "lower" | "mid";
 
+/**
+ * Standardized RANGE zone classification logic.
+ * Criteria: lower <= 0.38, upper >= 0.62, else mid.
+ * Ref: USER instruction 2026-05-10
+ */
+export function classifyRangeZone(boxPos: number | null | undefined): RangeBoxZone {
+  if (boxPos === null || boxPos === undefined || !Number.isFinite(boxPos)) return "mid";
+  if (boxPos >= 0.62) return "upper";
+  if (boxPos <= 0.38) return "lower";
+  return "mid";
+}
+
+
 /** RANGE 엔진이 심볼·틱마다 유지하는 상태(양방향·박스 기준). */
 export type RangeEngineState = Readonly<{
   boxUpper: number;

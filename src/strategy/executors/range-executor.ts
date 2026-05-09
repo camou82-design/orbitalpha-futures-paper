@@ -1,6 +1,7 @@
 import type { PaperSignal } from "../entry-signal";
 import type { MarketRegime } from "../market-regime-detector";
 import type { RangeEntryDecision, RangeExitDecision, RiskState } from "./types";
+import { classifyRangeZone } from "../../models/types";
 
 function intentDirection(signal: PaperSignal): "long" | "short" | null {
   if (signal === "paper_long_candidate") return "long";
@@ -83,14 +84,7 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
   const isDistorted = input.isDistorted === true;
   const isDrifting = input.isDrifting === true;
 
-  const box_position =
-    boxPos === null || !Number.isFinite(boxPos)
-      ? "unknown"
-      : boxPos < 0.35
-        ? "lower"
-        : boxPos > 0.65
-          ? "upper"
-          : "middle";
+  const box_position = classifyRangeZone(boxPos);
 
   if (input.regime !== "RANGE" && currentStage === 0) {
     return {
@@ -259,7 +253,7 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
   }
 
   // Highway Mid-zone Restriction
-  if (box_position === "middle" && currentStage === 0) {
+  if (box_position === "mid" && currentStage === 0) {
     // Only allow very high quality signals or probe_only if rangeConfidence is exceptionally high
     const midZoneAllowed = input.qualityScore >= 75 && rangeConfidence >= 0.85;
     if (!midZoneAllowed) {
