@@ -261,6 +261,10 @@ export class JsonStore {
     return await this.writeJson("snapshots/latest-meta.json", data);
   }
 
+  async writeLightweightStatus(data: unknown): Promise<string> {
+    return await this.writeJson("runtime/status.json", data);
+  }
+
   /** Only call when at least one snapshot is a long or short candidate; writes `runs/{timestamp}.json`. */
   async writePaperCandidateRun(timestamp: number, payload: PaperCandidateRunPayload): Promise<string> {
     return await this.writeJson(`runs/${timestamp}.json`, payload);

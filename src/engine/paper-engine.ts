@@ -1047,6 +1047,12 @@ export class PaperEngine {
     reason: null
   };
   private readonly executionKeysConsumed = new Set<string>();
+  private historyDirty = true;
+  private bundleDirty = true;
+  private lastHistoryRefreshAt = 0;
+  private lastBundleWriteAt = 0;
+  private cachedHistory: PaperClosedPositionRecord[] = [];
+
   private executionKeysLoaded = false;
   private lastServerTradeControlSignature: string | null = null;
   /** When server trade flips disabled?뭪rue; stale-gate for authority/snapshot timestamps. */
@@ -1496,6 +1502,8 @@ export class PaperEngine {
                  const nextArray = [...paperOpens];
                  nextArray[idx] = res.record;
                  await this.positions.saveOpenAll(nextArray);
+                 this.bundleDirty = true;
+
               }
             }
           }
@@ -2571,6 +2579,8 @@ export class PaperEngine {
 
     if (ledgerModified) {
       await this.positions.saveOpenAll(next);
+      this.bundleDirty = true;
+
     }
   }
 
@@ -3173,6 +3183,8 @@ export class PaperEngine {
 
     if (ledgeChanged) {
       await this.positions.saveOpenAll(allOpensForNormalization);
+      this.bundleDirty = true;
+
       this.logger.info("paper_position_ledger_normalized", {
         changed_count: normalizedSymbols.length,
         changed_symbols: normalizedSymbols,
@@ -3190,10 +3202,24 @@ export class PaperEngine {
     await this.runPositionStateReconciliation(Date.now());
     okx_position_reconcile_ms = Date.now() - tRec0;
     this.evaluateReadinessTransition(Date.now());
+    let history_write_skipped = false;
+    let history_write_skip_reason = "";
+    const fiveMinMs = 5 * 60_000;
     const tHist0 = Date.now();
-    const history = await this.store.readPositionsHistory();
-    await this.refreshEntryQualitySamples(history as PaperClosedPositionRecord[]);
-    history_write_ms = Date.now() - tHist0; // naming it history_write_ms for convention, though it's read+refresh here
+    let history: unknown[] = this.cachedHistory;
+    if (this.historyDirty || (tHist0 - this.lastHistoryRefreshAt > fiveMinMs) || this.cachedHistory.length === 0) {
+      history = await this.store.readPositionsHistory();
+      this.cachedHistory = history as PaperClosedPositionRecord[];
+      await this.refreshEntryQualitySamples(this.cachedHistory);
+      this.lastHistoryRefreshAt = tHist0;
+      this.historyDirty = false;
+      history_write_ms = Date.now() - tHist0;
+    } else {
+      history_write_skipped = true;
+      history_write_skip_reason = "no_history_change_within_5min";
+      history_write_ms = 0;
+    }
+
 
     const allowed = new Set<MarketSymbol>(["BTCUSDT", "ETHUSDT"]);
     const symbols = this.config.symbols.filter((s) => allowed.has(s));
@@ -4509,28 +4535,60 @@ export class PaperEngine {
       dashboard_bundle_prepare_ms = Date.now() - tBundle0;
 
       const tBundleFile0 = Date.now();
-      const summary = await this.positions.refreshSummaryReport({
-        okx_balance_mode: balanceDisplay.okx_balance_mode,
-        okx_balance_source: balanceDisplay.okx_balance_source,
-        okx_available_balance_usdt: balanceDisplay.okx_available_balance_usdt,
-        okx_total_equity_usdt: balanceDisplay.okx_total_equity_usdt,
-        okx_cash_balance_usdt: balanceDisplay.okx_cash_balance_usdt,
-        okx_margin_used_usdt: balanceDisplay.okx_used_margin_usdt,
-        okx_unrealized_pnl_usdt: balanceDisplay.okx_unrealized_pnl_usdt,
-        okx_balance_updated_at: balanceDisplay.okx_balance_updated_at,
-        okx_balance_age_ms: balanceDisplay.okx_balance_age_ms,
-        okx_balance_fresh: balanceDisplay.okx_balance_fresh,
-        okx_balance_error: balanceDisplay.okx_balance_error
-      });
-      bundle_file_write_ms = Date.now() - tBundleFile0;
-      bundle_write_ms = Date.now() - tBundle0;
-      this.bundleLastWrittenAt = Date.now();
-      this.bundleWriterReady = true;
+      let bundle_write_skipped = false;
+      let bundle_write_skip_reason = "";
+      let lightweight_status_write_ms = 0;
+
+      if (this.bundleDirty || (Date.now() - this.lastBundleWriteAt > fiveMinMs)) {
+        const summary = await this.positions.refreshSummaryReport({
+          okx_balance_mode: balanceDisplay.okx_balance_mode,
+          okx_balance_source: balanceDisplay.okx_balance_source,
+          okx_available_balance_usdt: balanceDisplay.okx_available_balance_usdt,
+          okx_total_equity_usdt: balanceDisplay.okx_total_equity_usdt,
+          okx_cash_balance_usdt: balanceDisplay.okx_cash_balance_usdt,
+          okx_margin_used_usdt: balanceDisplay.okx_used_margin_usdt,
+          okx_unrealized_pnl_usdt: balanceDisplay.okx_unrealized_pnl_usdt,
+          okx_balance_updated_at: balanceDisplay.okx_balance_updated_at,
+          okx_balance_age_ms: balanceDisplay.okx_balance_age_ms,
+          okx_balance_fresh: balanceDisplay.okx_balance_fresh,
+          okx_balance_error: balanceDisplay.okx_balance_error
+        });
+        bundle_file_write_ms = Date.now() - tBundleFile0;
+        bundle_write_ms = Date.now() - tBundle0;
+        this.bundleLastWrittenAt = Date.now();
+        this.bundleWriterReady = true;
+        this.bundleDirty = false;
+        this.lastBundleWriteAt = this.bundleLastWrittenAt;
+
+        this.logger.info("summary_report_refreshed", {
+          summaryPath: summary.summaryPath,
+          health: summary.health.status
+        });
+      } else {
+        bundle_write_skipped = true;
+        bundle_write_skip_reason = "no_core_data_change_within_5min";
+        const tLight0 = Date.now();
+        await this.store.writeLightweightStatus({
+          generatedAt: Date.now(),
+          heartbeat: true,
+          ...balanceDisplay
+        });
+        lightweight_status_write_ms = Date.now() - tLight0;
+        bundle_file_write_ms = 0;
+        bundle_write_ms = Date.now() - tBundle0;
+      }
+
       this.evaluateReadinessTransition(Date.now());
-      this.logger.info("summary_report_refreshed", {
-        summaryPath: summary.summaryPath,
-        health: summary.health.status
-      });
+
+      const nextLoopTiming = getPaperLoopIntervalMs(process.env);
+      this.loopIntervalTargetMs = nextLoopTiming.intervalMs;
+      this.loopDelayReason = nextLoopTiming.delayReason;
+
+      // Update timing before logging status
+      const total_loop_ms = Date.now() - loopWallStart;
+      this.lastLoopFinishedAt = Date.now();
+      this.lastLoopDurationMs = total_loop_ms;
+
       this.logger.info("ENGINE_24H_RUNTIME_STATUS", {
         engine_loop_alive: true,
         engine_last_tick_at: this.engineLastTickAt,
@@ -4571,66 +4629,66 @@ export class PaperEngine {
         loop_delay_reason: this.loopDelayReason,
         ...balanceDisplay
       });
+
+      const measured_sum = market_data_fetch_ms + htf_fetch_ms + v2_decision_ms + snapshot_write_ms + bundle_write_ms + okx_balance_ms + okx_position_reconcile_ms + entry_queue_consume_ms + pre_tick_setup_ms + report_write_ms + history_write_ms + post_tick_cleanup_ms + lightweight_status_write_ms;
+      const unmeasured_ms = Math.max(0, total_loop_ms - measured_sum);
+
+      const phaseRows: [string, number][] = [
+        ["market_data_fetch_ms", market_data_fetch_ms],
+        ["htf_fetch_ms", htf_fetch_ms],
+        ["v2_decision_ms", v2_decision_ms],
+        ["snapshot_write_ms", snapshot_write_ms],
+        ["bundle_write_ms", bundle_write_ms],
+        ["okx_balance_ms", okx_balance_ms],
+        ["okx_position_reconcile_ms", okx_position_reconcile_ms],
+        ["entry_queue_consume_ms", entry_queue_consume_ms],
+        ["pre_tick_setup_ms", pre_tick_setup_ms],
+        ["report_write_ms", report_write_ms],
+        ["history_write_ms", history_write_ms],
+        ["post_tick_cleanup_ms", post_tick_cleanup_ms],
+        ["lightweight_status_write_ms", lightweight_status_write_ms],
+        ["unmeasured_ms", unmeasured_ms]
+      ];
+      const longestPhase = phaseRows.reduce(
+        (best, cur) => (cur[1] > best[1] ? cur : best),
+        ["none", 0] as [string, number]
+      );
+
+      this.logger.info("V2_LOOP_PHASE_TIMING_PROOF", {
+        run_cycle_id: this.runCycleId,
+        market_data_fetch_ms,
+        htf_fetch_ms,
+        v2_decision_ms,
+        snapshot_write_ms,
+        bundle_write_ms,
+        bundle_prepare_ms: dashboard_bundle_prepare_ms,
+        bundle_file_write_ms,
+        bundle_write_skipped,
+        bundle_write_skip_reason,
+        lightweight_status_write_ms,
+        okx_balance_ms,
+        okx_position_reconcile_ms,
+        entry_queue_consume_ms,
+        pre_tick_setup_ms,
+        report_write_ms,
+        history_write_ms,
+        history_write_skipped,
+        history_write_skip_reason,
+        post_tick_cleanup_ms,
+        unmeasured_ms,
+        total_loop_ms,
+        next_loop_delay_ms: this.loopIntervalTargetMs,
+        longest_phase_key: longestPhase[0],
+        longest_phase_ms: longestPhase[1],
+        loop_delay_reason: this.loopDelayReason
+      });
+
     } catch (e) {
       this.bundleWriterReady = false;
       this.evaluateReadinessTransition(Date.now());
       this.logger.error("summary_report_refresh_failed", { error: String(e) });
     }
 
-    const { intervalMs: nextLoopDelayMs, delayReason: loopDelayReasonResolved } = getPaperLoopIntervalMs(process.env);
-    this.loopIntervalTargetMs = nextLoopDelayMs;
-    this.loopDelayReason = loopDelayReasonResolved;
-    const total_loop_ms = Date.now() - loopWallStart;
-    this.lastLoopDurationMs = total_loop_ms;
-
-    const measured_sum = market_data_fetch_ms + htf_fetch_ms + v2_decision_ms + snapshot_write_ms + bundle_write_ms + okx_balance_ms + okx_position_reconcile_ms + entry_queue_consume_ms + pre_tick_setup_ms + report_write_ms + history_write_ms + post_tick_cleanup_ms;
-    const unmeasured_ms = Math.max(0, total_loop_ms - measured_sum);
-
-    const phaseRows: [string, number][] = [
-      ["market_data_fetch_ms", market_data_fetch_ms],
-      ["htf_fetch_ms", htf_fetch_ms],
-      ["v2_decision_ms", v2_decision_ms],
-      ["snapshot_write_ms", snapshot_write_ms],
-      ["bundle_write_ms", bundle_write_ms],
-      ["okx_balance_ms", okx_balance_ms],
-      ["okx_position_reconcile_ms", okx_position_reconcile_ms],
-      ["entry_queue_consume_ms", entry_queue_consume_ms],
-      ["pre_tick_setup_ms", pre_tick_setup_ms],
-      ["report_write_ms", report_write_ms],
-      ["history_write_ms", history_write_ms],
-      ["post_tick_cleanup_ms", post_tick_cleanup_ms],
-      ["unmeasured_ms", unmeasured_ms]
-    ];
-    const longestPhase = phaseRows.reduce(
-      (best, cur) => (cur[1] > best[1] ? cur : best),
-      ["none", 0] as [string, number]
-    );
-
-    this.logger.info("V2_LOOP_PHASE_TIMING_PROOF", {
-      run_cycle_id: this.runCycleId,
-      market_data_fetch_ms,
-      htf_fetch_ms,
-      v2_decision_ms,
-      snapshot_write_ms,
-      bundle_write_ms,
-      bundle_prepare_ms: dashboard_bundle_prepare_ms,
-      bundle_file_write_ms,
-      okx_balance_ms,
-      okx_position_reconcile_ms,
-      entry_queue_consume_ms,
-      pre_tick_setup_ms,
-      report_write_ms,
-      history_write_ms,
-      post_tick_cleanup_ms,
-      unmeasured_ms,
-      total_loop_ms,
-      next_loop_delay_ms: nextLoopDelayMs,
-      longest_phase_key: longestPhase[0],
-      longest_phase_ms: longestPhase[1],
-      loop_delay_reason: loopDelayReasonResolved
-    });
-
-    this.lastLoopFinishedAt = Date.now();
 
     if (errors.length > 0) {
       throw new Error(`runOnce failed for ${errors.length} symbol(s)`);
@@ -6979,6 +7037,9 @@ export class PaperEngine {
     }
 
     await this.positions.appendClosed(normalized);
+    this.historyDirty = true;
+    this.bundleDirty = true;
+
     this.logger.info("EXIT_STANDARD_ROUTING_PROOF", {
       symbol: input.open.symbol,
       side: input.open.side,
@@ -10593,6 +10654,8 @@ export class PaperEngine {
 
     if (shouldSaveOpenLedger) {
       await this.positions.saveOpenAll(remaining);
+      this.bundleDirty = true;
+
       const removedFlowIds = removedFlows.map((x) => x.flowId);
       const reloaded = await this.positions.loadOpenAll();
       const reloadedIds = new Set(reloaded.map((r) => `${r.symbol}:${r.side}:${r.openedAt}`));
@@ -14479,6 +14542,8 @@ export class PaperEngine {
     if (openPositionsChanged || next.length !== before) {
       try {
         await this.positions.saveOpenAll(next);
+        this.bundleDirty = true;
+
         this.logger.info("paper_positions_persist_open_batch_ok", { added: next.length - before });
       } catch (persistErr) {
         const pm = persistErr instanceof Error ? persistErr.message : String(persistErr);
