@@ -3967,24 +3967,62 @@ export class PaperEngine {
         const v2Env = envelope.v2_execution_envelope;
         const v2Risk = v2?.risk;
 
-        // Refine expected_missing_condition
-        let refinedMissingCondition = v2Env?.expected_missing_condition || null;
-        if (!refinedMissingCondition) {
-          if (v2?.decision === "HOLD") {
-            refinedMissingCondition = "V2_HOLD_NO_ENTRY_SIDE";
-          } else if (v2Risk?.blockReason === "SHOCK_REACTION_RETEST_NOT_CONFIRMED") {
-            refinedMissingCondition = "SHOCK_REACTION_RETEST_NOT_CONFIRMED";
-          } else if (v2Risk?.blockReason === "RETEST_NOT_CONFIRMED") {
-            refinedMissingCondition = "RETEST_NOT_CONFIRMED";
-          } else if (v2Risk?.blockReason === "QUALITY_DISTANCE_CONTAMINATED") {
-            refinedMissingCondition = "QUALITY_DISTANCE_CONTAMINATED";
+        // Refine expected_missing_condition (Priority: shock -> promo -> reject -> side_none -> engine specific -> default)
+        let refinedMissingCondition = null;
+        if (v2Env?.shock_reaction_block_reason) {
+          refinedMissingCondition = v2Env.shock_reaction_block_reason;
+        } else if (v2Env?.promotion_block_reason) {
+          refinedMissingCondition = v2Env.promotion_block_reason;
+        } else if (v2Risk?.blockReason) {
+          refinedMissingCondition = v2Risk.blockReason;
+        } else if (v2Env?.selected_side_after_veto === "none" && v2Env?.trend_side_candidate && v2Env?.trend_side_candidate !== "none") {
+          refinedMissingCondition = "SIDE_NONE_AFTER_VETO";
+        } else if (marketModeOut.routing.activeEngine === "TREND" && v2Env?.promotion_applied === false) {
+          refinedMissingCondition = "TREND_ENTRY_NOT_PROMOTED";
+        } else if (v2Env?.marketSubtype === "SHOCK_REACTION_UP" && v2?.decision === "HOLD") {
+          refinedMissingCondition = "SHOCK_REACTION_UP_RETEST_NOT_CONFIRMED";
+        } else if (v2Env?.marketSubtype === "SHOCK_REACTION_DOWN" && v2?.decision === "HOLD") {
+          refinedMissingCondition = "SHOCK_REACTION_DOWN_RETEST_NOT_CONFIRMED";
+        } else if (v2?.decision === "HOLD") {
+          refinedMissingCondition = "V2_HOLD_NO_ENTRY_SIDE";
+        } else {
+          refinedMissingCondition = v2Env?.expected_missing_condition || "UNKNOWN_HOLD_REASON";
+        }
+
+        // Refine expected_next_action
+        let refinedNextAction = v2Env?.expected_next_action || null;
+        const sideNoneFinal = v2Env?.selected_side_after_veto === "none";
+
+        if (envelope.runtime_authority_decision !== "ENTER" || v2?.side === "none" || !v2?.side) {
+          if (v2Env?.marketSubtype === "SHOCK_REACTION_UP" && v2Env?.trend_side_candidate === "long" && v2?.decision === "HOLD") {
+            refinedNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
+          } else if (v2Env?.marketSubtype === "SHOCK_REACTION_DOWN" && v2Env?.trend_side_candidate === "short" && v2?.decision === "HOLD") {
+            refinedNextAction = "WAIT_FOR_BREAKDOWN_RETEST_FAILURE";
+          } else if (sideNoneFinal) {
+            refinedNextAction = "WAIT_FOR_VALID_SIDE_CONFIRMATION";
           } else if (v2Risk?.blockReason === "TWO_CONSECUTIVE_LOSSES_RECOVERY_MODE") {
-            refinedMissingCondition = "TWO_CONSECUTIVE_LOSSES_RECOVERY_MODE";
-          } else if (v2Env?.selected_side_after_veto === "none") {
-            refinedMissingCondition = "SIDE_NONE_AFTER_VETO";
-          } else if (marketModeOut.routing.activeEngine === "TREND" && v2Env?.promotion_applied === false) {
-            refinedMissingCondition = "TREND_ENTRY_NOT_PROMOTED";
+            refinedNextAction = "WAIT_FOR_RECOVERY_MODE_CLEAR_OR_HIGH_CONFIDENCE_RETEST";
+          } else if (refinedNextAction === "EXECUTE_V2_AUTHORITY") {
+            // Absolute prohibition: HOLD cannot have EXECUTE_V2_AUTHORITY
+            refinedNextAction = "WAIT_FOR_VALID_ENTRY_SIGNAL";
           }
+        }
+
+        // SHOCK_REACTION specifics
+        let chase_blocked = false;
+        let retest_required = false;
+        let reclaim_required = false;
+        let expected_retest_direction: string | null = null;
+
+        if (v2Env?.marketSubtype === "SHOCK_REACTION_UP") {
+          chase_blocked = !!v2Env?.shock_reaction_block_reason?.includes("CHASE");
+          retest_required = true;
+          reclaim_required = true;
+          expected_retest_direction = "breakout_retest_support_or_reclaim";
+        } else if (v2Env?.marketSubtype === "SHOCK_REACTION_DOWN") {
+          chase_blocked = !!v2Env?.shock_reaction_block_reason?.includes("CHASE");
+          retest_required = true;
+          expected_retest_direction = "breakdown_retest_resistance";
         }
 
         this.logger.info("V2_NO_ENTRY_REASON_AUDIT_PROOF", {
@@ -4003,12 +4041,16 @@ export class PaperEngine {
           promotion_reason: v2Env?.promotion_reason ?? null,
           promotion_block_reason: v2Env?.promotion_block_reason ?? null,
           shock_reaction_block_reason: v2Env?.shock_reaction_block_reason ?? null,
+          chase_blocked,
+          retest_required,
+          reclaim_required,
+          expected_retest_direction,
           quality_score: v2Env?.quality_score ?? null,
           entry_quality_grade: v2Risk?.entryQualityGrade ?? null,
           reversal_confirmed: v2Env?.reversal_confirmed ?? null,
           side_zone_valid: v2Env?.side_zone_valid ?? null,
           expected_missing_condition: refinedMissingCondition,
-          expected_next_action: v2Env?.expected_next_action ?? null,
+          expected_next_action: refinedNextAction,
           paper_execution_ready: this.paperExecutionReady,
           signed_execution_ready: this.signedExecutionReady,
           serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
