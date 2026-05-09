@@ -323,42 +323,70 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const boxLow = Number(sn.boxLow ?? 0);
     const boxMid = (boxHigh + boxLow) / 2;
     const atr = Number(sn.atr ?? 0);
+    const entryPx = Number(sn.lastPrice ?? 0);
+    const minProfitDistance = Math.max(atr * 0.35, entryPx * 0.001);
+    const minStopDistance = Math.max(atr * 0.5, entryPx * 0.0015);
 
     let tp1 = 0;
     let tp2 = 0;
     let inv = 0;
 
     if (side === "long") {
-        tp1 = boxMid;
-        tp2 = boxHigh * 0.998;
-        inv = boxLow - Math.max(atr * 0.5, boxLow * 0.0015);
+        inv = Math.min(boxLow - minStopDistance, entryPx - minStopDistance);
+        tp1 = Math.max(boxMid, entryPx + minProfitDistance);
+        if (tp1 <= entryPx) tp1 = entryPx + minProfitDistance;
+        tp2 = Math.max(boxHigh, tp1 + minProfitDistance);
+        if (tp2 <= tp1) tp2 = tp1 + minProfitDistance;
     } else if (side === "short") {
-        tp1 = boxMid;
-        tp2 = boxLow * 1.002;
-        inv = boxHigh + Math.max(atr * 0.5, boxHigh * 0.0015);
+        inv = Math.max(boxHigh + minStopDistance, entryPx + minStopDistance);
+        tp1 = Math.min(boxMid, entryPx - minProfitDistance);
+        if (tp1 >= entryPx) tp1 = entryPx - minProfitDistance;
+        tp2 = Math.min(boxLow, tp1 - minProfitDistance);
+        if (tp2 >= tp1) tp2 = tp1 - minProfitDistance;
     }
 
     // --- INVALID TP PLAN GUARD (Hardened) ---
     const boxHeight = boxHigh - boxLow;
     const boxHeightPct = boxLow > 0 ? boxHeight / boxLow : 0;
-    const isPlanInconsistent = side === "long" ? (tp1 >= tp2 || tp1 <= inv) : (tp1 <= tp2 || tp1 >= inv);
-    const isPlanInvalid = tp1 <= 0 || tp2 <= 0 || inv <= 0 || isPlanInconsistent || boxHeightPct < 0.0008;
+    const longOrderOk = inv < entryPx && entryPx < tp1 && tp1 < tp2;
+    const shortOrderOk = tp2 < tp1 && tp1 < entryPx && entryPx < inv;
+    const validationOk = side === "long" ? longOrderOk : side === "short" ? shortOrderOk : false;
+    let invalidTpReason: string;
+    if (!Number.isFinite(entryPx) || entryPx <= 0 || !Number.isFinite(tp1) || !Number.isFinite(tp2) || !Number.isFinite(inv)) {
+        invalidTpReason = "non_finite_or_non_positive_entry";
+    } else if (tp1 <= 0 || tp2 <= 0 || inv <= 0) {
+        invalidTpReason = "zero_or_negative_levels";
+    } else if (boxHeightPct < 0.0008) {
+        invalidTpReason = "narrow_box";
+    } else if (!validationOk) {
+        invalidTpReason = side === "long" ? "long_validation_failed" : "short_validation_failed";
+    } else {
+        invalidTpReason = "";
+    }
+    const isPlanInvalid = invalidTpReason !== "";
 
     if (isPlanInvalid && signal !== "NONE" && currentStage === 0) {
         console.warn(JSON.stringify({
             event: "V2_RANGE_ENTRY_BLOCKED_INVALID_TP_PLAN_PROOF",
             symbol: input.symbol,
             side,
+            entryPx,
             tp1,
             tp2,
-            inv,
+            stopPx: inv,
+            invalidationPx: inv,
             boxHigh,
             boxLow,
+            boxMid,
+            boxPos: currentBoxPos,
+            atr,
+            minProfitDistance,
+            minStopDistance,
             boxHeightPct,
-            reason: isPlanInconsistent ? "plan_inconsistent" : "zero_or_narrow_box"
+            reason: invalidTpReason
         }));
         signal = "NONE";
-        reason = `V2_RANGE_ENTRY_BLOCKED: Invalid TP plan (${isPlanInconsistent ? "inconsistent" : "quality"})`;
+        reason = `V2_RANGE_ENTRY_BLOCKED: Invalid TP plan (${invalidTpReason})`;
     }
 
     // Block mean-reversion if distortion is active, but allow if it's a continuation

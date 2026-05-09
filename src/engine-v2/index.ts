@@ -1664,28 +1664,35 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 const boxMid = (boxHigh + boxLow) / 2;
                 const atrProbe = Number(authoritativeInput.snapshot.atr ?? 0);
                 const lastPriceProbe = Number(authoritativeInput.snapshot.lastPrice ?? 0);
-                const probeTp1 = boxMid;
-                const probeTp2 = boxHigh * 0.998;
-                const probeInv = boxLow - Math.max(atrProbe * 0.5, boxLow * 0.0015);
+                const entryPxProbe = lastPriceProbe;
+                const minProfitDistProbe = Math.max(atrProbe * 0.35, entryPxProbe * 0.001);
+                const minStopDistProbe = Math.max(atrProbe * 0.5, entryPxProbe * 0.0015);
+                let probeInv = Math.min(boxLow - minStopDistProbe, entryPxProbe - minStopDistProbe);
+                let probeTp1 = Math.max(boxMid, entryPxProbe + minProfitDistProbe);
+                if (probeTp1 <= entryPxProbe) probeTp1 = entryPxProbe + minProfitDistProbe;
+                let probeTp2 = Math.max(boxHigh, probeTp1 + minProfitDistProbe);
+                if (probeTp2 <= probeTp1) probeTp2 = probeTp1 + minProfitDistProbe;
                 const boxHeight = boxHigh - boxLow;
                 const boxHeightPct = boxLow > 0 ? boxHeight / boxLow : 0;
-                const longPlanInconsistent = probeTp1 >= probeTp2 || probeTp1 <= probeInv;
+                const longOrderOkProbe =
+                    probeInv < entryPxProbe && entryPxProbe < probeTp1 && probeTp1 < probeTp2;
                 const longPlanGeomInvalid =
+                    !Number.isFinite(entryPxProbe) ||
+                    entryPxProbe <= 0 ||
+                    !Number.isFinite(probeTp1) ||
+                    !Number.isFinite(probeTp2) ||
+                    !Number.isFinite(probeInv) ||
                     probeTp1 <= 0 ||
                     probeTp2 <= 0 ||
                     probeInv <= 0 ||
-                    longPlanInconsistent ||
-                    boxHeightPct < 0.0008;
+                    boxHeightPct < 0.0008 ||
+                    !longOrderOkProbe;
                 const stopValidLong =
                     probeInv > 0 &&
                     Number.isFinite(probeInv) &&
                     Number.isFinite(lastPriceProbe) &&
                     probeInv < lastPriceProbe;
-                const tpValidLong =
-                    !longPlanGeomInvalid &&
-                    probeTp2 > probeTp1 &&
-                    probeTp1 > lastPriceProbe &&
-                    probeTp2 > lastPriceProbe;
+                const tpValidLong = !longPlanGeomInvalid;
 
                 type UpperLongGate = string | null;
                 let upperLongGate: UpperLongGate = null;
