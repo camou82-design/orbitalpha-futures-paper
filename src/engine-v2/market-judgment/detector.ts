@@ -1,5 +1,6 @@
 import { EngineV2Input, EngineV2MarketSubtype, MarketJudgmentOutput } from "../types";
 import { Candle } from "../../models/types";
+import { emaLastFromCloses } from "../../utils/math";
 
 function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPhase"] {
     const shock = input.state.directionalShockState ?? "NONE";
@@ -65,11 +66,11 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
     // --- Volume Analysis ---
     let volumeMedian60 = 0;
     let volumeExpansion = 1;
-    if (input.recentCandles && input.recentCandles.length > 0) {
-        const volWindow = input.recentCandles.slice(-60).map(c => c.volume);
+    if (sn.candles && sn.candles.length > 0) {
+        const volWindow = sn.candles.slice(-60).map((c: Candle) => c.volume);
         volumeMedian60 = computeMedian(volWindow);
         if (volumeMedian60 > 0) {
-            volumeExpansion = (input.recentCandles[input.recentCandles.length - 1].volume) / volumeMedian60;
+            volumeExpansion = (sn.candles[sn.candles.length - 1].volume) / volumeMedian60;
         }
     }
 
@@ -83,8 +84,8 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
     let source = "snapshot";
 
     // Fallback if snapshot slopes are zero or null
-    if (bhSlope === 0 && blSlope === 0 && input.recentCandles && input.recentCandles.length >= 40) {
-        const computed = computeSlopesFromCandles(input.recentCandles);
+    if (bhSlope === 0 && blSlope === 0 && sn.candles && sn.candles.length >= 40) {
+        const computed = computeSlopesFromCandles(sn.candles);
         if (computed) {
             bhSlope = computed.bhSlope;
             blSlope = computed.blSlope;
@@ -104,11 +105,11 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
     if (boxBreakSide === "lower" && isVolumeExpansionValid && isAtrExpansionValid && isStructuralCohesionValid) {
         if (reviewingTicks >= 6) { 
              const retestLevel = (sn.boxLow ?? 0);
-             const candles = input.recentCandles ?? [];
+             const candles = sn.candles ?? [];
              const recentWindow = candles.slice(-12);
              
              // 1. Retest Touched: Price approached the retestLevel (boxLow) from below
-             const retestTouched = recentWindow.some(c => c.high >= retestLevel * 0.998);
+             const retestTouched = recentWindow.some((c: Candle) => c.high >= retestLevel * 0.998);
              
              // 2. Retest Rejected: Price failed to close back above retestLevel * 1.001
              const retestRejected = sn.lastPrice <= retestLevel * 1.001;
@@ -148,11 +149,11 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
     if (boxBreakSide === "upper" && isVolumeExpansionValid && isAtrExpansionValid && isStructuralCohesionValid) {
         if (reviewingTicks >= 6) {
              const retestLevel = (sn.boxHigh ?? 0);
-             const candles = input.recentCandles ?? [];
+             const candles = sn.candles ?? [];
              const recentWindow = candles.slice(-12);
 
              // 1. Retest Touched: Price approached the retestLevel (boxHigh) from above
-             const retestTouched = recentWindow.some(c => c.low <= retestLevel * 1.002);
+             const retestTouched = recentWindow.some((c: Candle) => c.low <= retestLevel * 1.002);
              
              // 2. Retest Rejected: Price failed to break back down into the box
              const retestRejected = sn.lastPrice >= retestLevel * 0.999;
@@ -384,6 +385,70 @@ function selectSubtype(args: {
     return { subtype: "TRANSITION_CONFLICT", subtypeReason: "transition_conflict" };
 }
 
+function calculateSingleTimeframeBias(candles: Candle[]): string {
+    if (!candles || candles.length < 60) return "DATA_NOT_READY";
+
+    const closes = candles.map((c: Candle) => c.close);
+    const ema20 = emaLastFromCloses(closes, 20);
+    const ema60 = emaLastFromCloses(closes, 60);
+
+    if (ema20 === null || ema60 === null) return "DATA_NOT_READY";
+
+    // Recent structure (High/Low)
+    const recent30 = candles.slice(-30);
+    const high30 = Math.max(...recent30.map(c => c.high));
+    const low30 = Math.min(...recent30.map(c => c.low));
+    
+    // Slopes
+    const prevEma20 = emaLastFromCloses(closes.slice(0, -1), 20);
+    const ema20Slope = prevEma20 ? (ema20 - prevEma20) / prevEma20 : 0;
+
+    const lastPrice = closes[closes.length - 1];
+
+    // Simple bias logic
+    const isBullish = lastPrice > ema20 && ema20 > ema60 && ema20Slope > 0.00005;
+    const isBearish = lastPrice < ema20 && ema20 < ema60 && ema20Slope < -0.00005;
+    
+    if (isBullish) return "BULLISH";
+    if (isBearish) return "BEARISH";
+    
+    // Range if between EMAs or flat
+    if (Math.abs(ema20Slope) < 0.0001 || (lastPrice > Math.min(ema20, ema60) && lastPrice < Math.max(ema20, ema60))) {
+        return "RANGE";
+    }
+
+    return "CONFLICT";
+}
+
+function calculateMacroBias(htfCandles: Record<string, Candle[]>): { 
+    biases: { m5: string, m15: string, h1: string, h4: string, d1: string },
+    source: MarketJudgmentOutput["macro_source"],
+    conflict: boolean
+} {
+    const biases = {
+        m5: calculateSingleTimeframeBias(htfCandles["5m"] || []),
+        m15: calculateSingleTimeframeBias(htfCandles["15m"] || []),
+        h1: calculateSingleTimeframeBias(htfCandles["1h"] || []),
+        h4: calculateSingleTimeframeBias(htfCandles["4h"] || []),
+        d1: calculateSingleTimeframeBias(htfCandles["1d"] || [])
+    };
+
+    let readyCount = 0;
+    if (biases.m5 !== "DATA_NOT_READY") readyCount++;
+    if (biases.m15 !== "DATA_NOT_READY") readyCount++;
+    if (biases.h1 !== "DATA_NOT_READY") readyCount++;
+    if (biases.h4 !== "DATA_NOT_READY") readyCount++;
+    if (biases.d1 !== "DATA_NOT_READY") readyCount++;
+
+    let source: MarketJudgmentOutput["macro_source"] = "data_not_ready";
+    if (readyCount === 5) source = "actual_candles";
+    else if (readyCount > 0) source = "partial_actual_candles";
+
+    const conflict = (biases.m5 === "BULLISH" && biases.m15 === "BEARISH") || (biases.m5 === "BEARISH" && biases.m15 === "BULLISH");
+
+    return { biases, source, conflict };
+}
+
 export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     const { snapshot: sn } = input;
 
@@ -500,7 +565,100 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         }
     }
 
-    return {
+    const htfResult = calculateMacroBias(input.htf_candles || {});
+    const htfBias = htfResult.biases;
+    const htfConflict = htfResult.conflict;
+    let counterTrendRisk = false;
+    let htfSizeMultiplier = 1.0;
+    let htfRequiresStrongerConfirmation = false;
+    let htfPolicyReason = "HTF_ALIGNED";
+    let htfHardBlockReason = "";
+
+    // HTF Entry Policy Logic
+    let htfEntryPolicy = "ALLOW";
+    let expectedNextAction = "PROCEED_TO_EXECUTION";
+
+    const isBearish = (tf: keyof typeof htfBias) => htfBias[tf] === "BEARISH";
+    const isBullish = (tf: keyof typeof htfBias) => htfBias[tf] === "BULLISH";
+
+    if (htfBias.m5 === "BULLISH") {
+        let oppositeCount = 0;
+        if (isBearish("m15")) oppositeCount++;
+        if (isBearish("h1")) oppositeCount++;
+
+        const is1hStrongOpposite = isBearish("h1");
+        const isLowerWeakOrOpposite = (isBearish("m15") || htfBias.m15 === "RANGE" || htfBias.m15 === "CONFLICT");
+        const h4d1Opposite = isBearish("h4") && isBearish("d1");
+
+        if (oppositeCount >= 2 || (is1hStrongOpposite && isLowerWeakOrOpposite) || (h4d1Opposite && is1hStrongOpposite)) {
+            htfEntryPolicy = "HOLD";
+            expectedNextAction = "WAIT_FOR_HTF_ALIGNMENT";
+            htfHardBlockReason = "STRONG_BEARISH_HTF_ALIGNMENT";
+        } else if (htfBias.h1 === "CONFLICT" || htfBias.h1 === "RANGE") {
+            htfEntryPolicy = "PROBE_ONLY";
+            expectedNextAction = "SMALL_SIZE_PROBE_ALLOWED";
+            htfSizeMultiplier = 0.5;
+            htfPolicyReason = "H1_CONSOLIDATION";
+        }
+
+        if (isBearish("h4") || isBearish("d1")) {
+            counterTrendRisk = true;
+            if (htfEntryPolicy !== "HOLD") {
+                htfEntryPolicy = "PROBE_ONLY";
+                expectedNextAction = "REQUIRE_STRONG_RETEST_CONFIRMATION_AGAINST_MACRO";
+                htfSizeMultiplier = 0.5;
+                htfRequiresStrongerConfirmation = true;
+                htfPolicyReason = "MACRO_BEARISH_RISK";
+            }
+        }
+    } else if (htfBias.m5 === "BEARISH") {
+        let oppositeCount = 0;
+        if (isBullish("m15")) oppositeCount++;
+        if (isBullish("h1")) oppositeCount++;
+
+        const is1hStrongOpposite = isBullish("h1");
+        const isLowerWeakOrOpposite = (isBullish("m15") || htfBias.m15 === "RANGE" || htfBias.m15 === "CONFLICT");
+        const h4d1Opposite = isBullish("h4") && isBullish("d1");
+
+        if (oppositeCount >= 2 || (is1hStrongOpposite && isLowerWeakOrOpposite) || (h4d1Opposite && is1hStrongOpposite)) {
+            htfEntryPolicy = "HOLD";
+            expectedNextAction = "WAIT_FOR_HTF_ALIGNMENT";
+            htfHardBlockReason = "STRONG_BULLISH_HTF_ALIGNMENT";
+        } else if (htfBias.h1 === "CONFLICT" || htfBias.h1 === "RANGE") {
+            htfEntryPolicy = "PROBE_ONLY";
+            expectedNextAction = "SMALL_SIZE_PROBE_ALLOWED";
+            htfSizeMultiplier = 0.5;
+            htfPolicyReason = "H1_CONSOLIDATION";
+        }
+
+        if (isBullish("h4") || isBullish("d1")) {
+            counterTrendRisk = true;
+            if (htfEntryPolicy !== "HOLD") {
+                htfEntryPolicy = "PROBE_ONLY";
+                expectedNextAction = "REQUIRE_STRONG_RETEST_CONFIRMATION_AGAINST_MACRO";
+                htfSizeMultiplier = 0.5;
+                htfRequiresStrongerConfirmation = true;
+                htfPolicyReason = "MACRO_BULLISH_RISK";
+            }
+        }
+    }
+
+    // RANGE override: box/retest/reversal priority
+    if (regime_final === "RANGE") {
+        if (htfEntryPolicy === "HOLD" && !htfConflict) {
+             htfEntryPolicy = "ALLOW"; // Range prioritization
+             expectedNextAction = "RANGE_STRUCTURE_PRIORITY";
+        }
+    }
+
+    // Shock Reaction policy
+    if (shockPhase === "UP_SHOCK") {
+        htfEntryPolicy = "LONG_ONLY_OR_NONE";
+    } else if (shockPhase === "DOWN_SHOCK") {
+        htfEntryPolicy = "SHORT_ONLY_OR_NONE";
+    }
+
+    const output: MarketJudgmentOutput = {
         regime,
         regime_final,
         subtype: subtypeDecision.subtype,
@@ -523,8 +681,65 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
             boxCohesionCollapse,
             mixedBreakoutState,
             emaExpansionWeak
-        }
+        },
+        htf_bias: htfBias,
+        macro_source: htfResult.source,
+        daily_bias_actual: htfBias.d1,
+        h4_bias_actual: htfBias.h4,
+        h1_bias_actual: htfBias.h1,
+        m15_bias_actual: htfBias.m15,
+        m5_bias_actual: htfBias.m5,
+        htf_conflict: htfConflict,
+        counter_trend_risk: counterTrendRisk,
+        htf_entry_policy: htfEntryPolicy,
+        expected_next_action: expectedNextAction,
+        htf_size_multiplier: htfSizeMultiplier,
+        htf_requires_stronger_confirmation: htfRequiresStrongerConfirmation,
+        htf_policy_reason: htfPolicyReason,
+        htf_hard_block_reason: htfHardBlockReason
     };
+
+    // Logging new events
+    console.info(JSON.stringify({
+        event: "V2_HTF_CANDLE_BIAS_PROOF",
+        symbol: input.symbol,
+        htf_5m_bias: htfBias.m5,
+        htf_15m_bias: htfBias.m15,
+        htf_1h_bias: htfBias.h1,
+        htf_4h_bias: htfBias.h4,
+        htf_1d_bias: htfBias.d1,
+        macro_source: htfResult.source,
+        daily_bias_actual: htfBias.d1,
+        h4_bias_actual: htfBias.h4,
+        h1_bias_actual: htfBias.h1,
+        m15_bias_actual: htfBias.m15,
+        m5_bias_actual: htfBias.m5,
+        htf_conflict: htfConflict,
+        counter_trend_risk: counterTrendRisk,
+        htf_entry_policy: htfEntryPolicy,
+        expected_next_action: expectedNextAction,
+        htf_size_multiplier: htfSizeMultiplier,
+        htf_requires_stronger_confirmation: htfRequiresStrongerConfirmation,
+        htf_policy_reason: htfPolicyReason,
+        htf_hard_block_reason: htfHardBlockReason
+    }));
+
+    if (htfResult.source === "actual_candles") {
+        console.info(JSON.stringify({
+            event: "V2_MACRO_BIAS_ACTUAL_CANDLES_PROOF",
+            symbol: input.symbol,
+            daily_bias_actual: htfBias.d1,
+            h4_bias_actual: htfBias.h4,
+            macro_source: htfResult.source,
+            htf_entry_policy: htfEntryPolicy,
+            counter_trend_risk: counterTrendRisk,
+            htf_size_multiplier: htfSizeMultiplier,
+            htf_requires_stronger_confirmation: htfRequiresStrongerConfirmation,
+            htf_hard_block_reason: htfHardBlockReason
+        }));
+    }
+
+    return output;
 }
 
 export function emitRangeDriftStateProof(symbol: string, judgment: MarketJudgmentOutput, sn: EngineV2Input["snapshot"]) {

@@ -147,6 +147,7 @@ export interface LegacySnapshotAdapter {
     atrExpansion?: number;
     volumeExpansion?: number;
     candles?: import("../../models/types").Candle[];
+    htf_candles?: Record<string, import("../../models/types").Candle[]>;
 }
 
 export interface LegacyConfigAdapter {
@@ -254,7 +255,8 @@ export interface EngineV2Input {
         side: string;
         isBlocked: boolean;
     };
-    recentCandles?: import("../../models/types").Candle[];
+    candles?: import("../../models/types").Candle[];
+    htf_candles?: Record<string, import("../../models/types").Candle[]>;
 }
 
 export interface EngineV2SnapshotAdapter {
@@ -293,6 +295,8 @@ export interface EngineV2SnapshotAdapter {
     ema60Slope?: number;
     atrExpansion?: number;
     volumeExpansion?: number;
+    candles?: import("../../models/types").Candle[];
+    htf_candles?: Record<string, import("../../models/types").Candle[]>;
 }
 
 export interface EngineV2ConfigAdapter {
@@ -365,6 +369,7 @@ export interface V2BridgeSnapshot {
     rangeSignalDowngraded?: boolean;
     rangeSignalKeptByRelax?: boolean;
     candles?: import("../../models/types").Candle[];
+    htf_candles?: Record<string, import("../../models/types").Candle[]>;
 }
 
 export interface V2BridgeLegacyDecision {
@@ -572,6 +577,27 @@ export interface MarketJudgmentOutput {
         mixedBreakoutState: boolean;
         emaExpansionWeak: boolean;
     };
+    htf_bias?: {
+        m5: string;
+        m15: string;
+        h1: string;
+        h4: string;
+        d1: string;
+    };
+    macro_source?: "actual_candles" | "partial_actual_candles" | "market_subtype_proxy_fallback" | "data_not_ready";
+    daily_bias_actual?: string;
+    h4_bias_actual?: string;
+    h1_bias_actual?: string;
+    m15_bias_actual?: string;
+    m5_bias_actual?: string;
+    htf_conflict?: boolean;
+    counter_trend_risk?: boolean;
+    htf_entry_policy?: string;
+    expected_next_action?: string;
+    htf_size_multiplier?: number;
+    htf_requires_stronger_confirmation?: boolean;
+    htf_policy_reason?: string;
+    htf_hard_block_reason?: string;
     metadata?: Record<string, any>;
 }
 

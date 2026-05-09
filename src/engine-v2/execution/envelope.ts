@@ -118,7 +118,17 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             expected_next_action: args.expectedNextAction ?? null,
             macro_source: args.macro_source ?? null,
             daily_bias_actual: args.daily_bias_actual ?? null,
-            h4_bias_actual: args.h4_bias_actual ?? null
+            h4_bias_actual: args.h4_bias_actual ?? null,
+            h1_bias_actual: args.h1_bias_actual ?? null,
+            m15_bias_actual: args.m15_bias_actual ?? null,
+            m5_bias_actual: args.m5_bias_actual ?? null,
+            htf_bias: args.htf_bias ?? null,
+            htf_entry_policy: args.htf_entry_policy ?? null,
+            counter_trend_risk: args.counter_trend_risk ?? null,
+            htf_size_multiplier: args.htf_size_multiplier ?? null,
+            htf_requires_stronger_confirmation: args.htf_requires_stronger_confirmation ?? null,
+            htf_policy_reason: args.htf_policy_reason ?? null,
+            htf_hard_block_reason: args.htf_hard_block_reason ?? null
         };
     }
     if (mode === "legacy") {
@@ -178,7 +188,17 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             expected_next_action: args.expectedNextAction ?? null,
             macro_source: args.macro_source ?? null,
             daily_bias_actual: args.daily_bias_actual ?? null,
-            h4_bias_actual: args.h4_bias_actual ?? null
+            h4_bias_actual: args.h4_bias_actual ?? null,
+            h1_bias_actual: args.h1_bias_actual ?? null,
+            m15_bias_actual: args.m15_bias_actual ?? null,
+            m5_bias_actual: args.m5_bias_actual ?? null,
+            htf_bias: args.htf_bias ?? null,
+            htf_entry_policy: args.htf_entry_policy ?? null,
+            counter_trend_risk: args.counter_trend_risk ?? null,
+            htf_size_multiplier: args.htf_size_multiplier ?? null,
+            htf_requires_stronger_confirmation: args.htf_requires_stronger_confirmation ?? null,
+            htf_policy_reason: args.htf_policy_reason ?? null,
+            htf_hard_block_reason: args.htf_hard_block_reason ?? null
         };
     }
     return {
@@ -237,6 +257,16 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         expected_next_action: args.expectedNextAction ?? null,
         macro_source: args.macro_source ?? null,
         daily_bias_actual: args.daily_bias_actual ?? null,
-        h4_bias_actual: args.h4_bias_actual ?? null
+        h4_bias_actual: args.h4_bias_actual ?? null,
+        h1_bias_actual: args.h1_bias_actual ?? null,
+        m15_bias_actual: args.m15_bias_actual ?? null,
+        m5_bias_actual: args.m5_bias_actual ?? null,
+        htf_bias: args.htf_bias ?? null,
+        htf_entry_policy: args.htf_entry_policy ?? null,
+        counter_trend_risk: args.counter_trend_risk ?? null,
+        htf_size_multiplier: args.htf_size_multiplier ?? null,
+        htf_requires_stronger_confirmation: args.htf_requires_stronger_confirmation ?? null,
+        htf_policy_reason: args.htf_policy_reason ?? null,
+        htf_hard_block_reason: args.htf_hard_block_reason ?? null
     };
 }

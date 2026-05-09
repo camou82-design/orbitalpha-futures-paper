@@ -73,7 +73,7 @@ import {
   evaluatePaperSymbolEntry,
   type EvaluatePaperSymbolEntryResult,
   type SymbolSnapshotLike,
-  type RangeStopReentryBlock,
+  type RangeStopReentryBlock
 } from "./paper-symbol-decision";
 import { deriveDirectionalRoutingOverride } from "./directional-routing";
 import {
@@ -315,6 +315,7 @@ type SymbolSnapshot = Readonly<{
   highwayKlineLimitRequested?: number;
   highwayEntryTf?: string;
   reviewing_ticks?: number;
+  htf_candles?: Record<string, import("../models/types").Candle[]>;
 }>;
 
 export type SymbolDiagnostic = Readonly<{
@@ -4139,8 +4140,18 @@ export class PaperEngine {
           emaGap,
           trendWeaknessScore,
           rangeConfidence,
-          v2_entry_quality_profit_distance: (v2Risk as any)?.diagnostics?.["entry_quality_distance_profit"] ?? null,
           v2_entry_quality_loss_distance: (v2Risk as any)?.diagnostics?.["entry_quality_distance_loss"] ?? null,
+          htf_entry_policy: v2Env?.htf_entry_policy ?? null,
+          counter_trend_risk: v2Env?.counter_trend_risk ?? null,
+          htf_size_multiplier: v2Env?.htf_size_multiplier ?? null,
+          htf_requires_stronger_confirmation: v2Env?.htf_requires_stronger_confirmation ?? null,
+          htf_hard_block_reason: v2Env?.htf_hard_block_reason ?? null,
+          macro_source: v2Env?.macro_source ?? null,
+          htf_5m_bias: v2Env?.m5_bias_actual ?? null,
+          htf_15m_bias: v2Env?.m15_bias_actual ?? null,
+          htf_1h_bias: v2Env?.h1_bias_actual ?? null,
+          htf_4h_bias: v2Env?.h4_bias_actual ?? null,
+          htf_1d_bias: v2Env?.daily_bias_actual ?? null,
         });
 
         const noEntryAuditRow: Record<string, unknown> = {
@@ -4166,7 +4177,18 @@ export class PaperEngine {
           expected_retest_direction,
           leverage_block_reason: (v2Risk as any)?.legacy_block_reason ?? v2Risk?.blockReason ?? null,
           recovery_mode_active,
-          size_suppressed_by_recovery
+          size_suppressed_by_recovery,
+          htf_entry_policy: v2Env?.htf_entry_policy ?? null,
+          counter_trend_risk: v2Env?.counter_trend_risk ?? null,
+          htf_size_multiplier: v2Env?.htf_size_multiplier ?? null,
+          htf_requires_stronger_confirmation: v2Env?.htf_requires_stronger_confirmation ?? null,
+          htf_hard_block_reason: v2Env?.htf_hard_block_reason ?? null,
+          macro_source: v2Env?.macro_source ?? null,
+          htf_5m_bias: v2Env?.m5_bias_actual ?? null,
+          htf_15m_bias: v2Env?.m15_bias_actual ?? null,
+          htf_1h_bias: v2Env?.h1_bias_actual ?? null,
+          htf_4h_bias: v2Env?.h4_bias_actual ?? null,
+          htf_1d_bias: v2Env?.daily_bias_actual ?? null,
         };
         await this.store.mergeNoEntryAuditSnapshot(String(sym), noEntryAuditRow);
       }
@@ -14864,6 +14886,15 @@ export class PaperEngine {
     const rF = await this.okxPublic.tryGetFundingRate(symbol);
     symbolDiagnostics.push(toSymbolDiagnostic(symbol, EP.funding, rF.diagnostics));
 
+    const htf_candles: Record<string, import("../models/types").Candle[]> = {};
+    const htfTimeframes = ["5m", "15m", "1h", "4h", "1d"] as const;
+    for (const tf of htfTimeframes) {
+      const res = await this.okxPublic.tryGetCandles(symbol, tf, 120);
+      if (res.ok) {
+        htf_candles[tf] = res.value;
+      }
+    }
+
     if (!rT.ok || !rC.ok || !rF.ok) {
       const parts: string[] = [];
       if (!rT.ok) parts.push(rT.error);
@@ -15277,7 +15308,8 @@ export class PaperEngine {
       regimeStateDiag: regimeDetected.regimeState,
       candles: rC.value,
       highwayKlineLimitRequested: klineLimit,
-      highwayEntryTf: "1m"
+      highwayEntryTf: "1m",
+      htf_candles
     };
 
     this.logHighwayCandlePipelineProof("snapshot_before_return", {
@@ -15604,7 +15636,8 @@ function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapshot {
     ema20Slope: snap.ema20Slope ?? 0,
     ema60Slope: snap.ema60Slope ?? 0,
     atrExpansion: snap.atrExpansion ?? 0,
-    volumeExpansion: snap.volumeExpansion ?? 0
+    volumeExpansion: snap.volumeExpansion ?? 0,
+    htf_candles: snap.htf_candles
   };
 }
 

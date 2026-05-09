@@ -85,6 +85,16 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     macro_source?: string | null;
     daily_bias_actual?: string | null;
     h4_bias_actual?: string | null;
+    h1_bias_actual?: string | null;
+    m15_bias_actual?: string | null;
+    m5_bias_actual?: string | null;
+    htf_bias?: any | null;
+    htf_entry_policy?: string | null;
+    counter_trend_risk?: boolean | null;
+    htf_size_multiplier?: number | null;
+    htf_requires_stronger_confirmation?: boolean | null;
+    htf_policy_reason?: string | null;
+    htf_hard_block_reason?: string | null;
 }>;
 
 export type V2LegacyComparison = Readonly<{
@@ -146,4 +156,14 @@ export type BuildExecutionEnvelopeArgs = Readonly<{
     macro_source?: string | null;
     daily_bias_actual?: string | null;
     h4_bias_actual?: string | null;
+    h1_bias_actual?: string | null;
+    m15_bias_actual?: string | null;
+    m5_bias_actual?: string | null;
+    htf_bias?: any | null;
+    htf_entry_policy?: string | null;
+    counter_trend_risk?: boolean | null;
+    htf_size_multiplier?: number | null;
+    htf_requires_stronger_confirmation?: boolean | null;
+    htf_policy_reason?: string | null;
+    htf_hard_block_reason?: string | null;
 }>;

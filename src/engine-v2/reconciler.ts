@@ -402,7 +402,7 @@ export function resolveSymbolDecisionEnvelope(
         selectorMismatch: selector.mismatch
     };
     const execMeta = v2Res.decision.metadata ?? {};
-    const executionEnvelope = buildV2ExecutionAuthorityEnvelope({
+    let executionEnvelope = buildV2ExecutionAuthorityEnvelope({
         symbol: String(symbol),
         mode: v2Mode,
         v2Decision: v2Res.decision,
@@ -446,8 +446,54 @@ export function resolveSymbolDecisionEnvelope(
         expectedNextAction: execMeta.expectedNextAction ?? null,
         macro_source: execMeta.macro_source ?? null,
         daily_bias_actual: execMeta.daily_bias_actual ?? null,
-        h4_bias_actual: execMeta.h4_bias_actual ?? null
+        h4_bias_actual: execMeta.h4_bias_actual ?? null,
+        h1_bias_actual: execMeta.h1_bias_actual ?? null,
+        m15_bias_actual: execMeta.m15_bias_actual ?? null,
+        m5_bias_actual: execMeta.m5_bias_actual ?? null,
+        htf_bias: execMeta.htf_bias ?? null,
+        htf_entry_policy: execMeta.htf_entry_policy ?? null,
+        counter_trend_risk: execMeta.counter_trend_risk ?? null,
+        htf_size_multiplier: execMeta.htf_size_multiplier ?? null,
+        htf_requires_stronger_confirmation: execMeta.htf_requires_stronger_confirmation ?? null,
+        htf_policy_reason: execMeta.htf_policy_reason ?? null,
+        htf_hard_block_reason: execMeta.htf_hard_block_reason ?? null
     });
+
+    const htfPolicy = v2Res.internal.judgment.htf_entry_policy ?? "ALLOW";
+    if (executionEnvelope.decision === "ENTER") {
+        if (htfPolicy === "HOLD" || htfPolicy === "NONE" || htfPolicy === "WAIT_FOR_HTF_ALIGNMENT") {
+            executionEnvelope = {
+                ...executionEnvelope,
+                decision: "REJECT",
+                side: "none",
+                stageMarginKrw: 0,
+                hardBlockPresent: true,
+                hardBlockReason: `HTF_POLICY_BLOCK: ${v2Res.internal.judgment.htf_hard_block_reason || v2Res.internal.judgment.expected_next_action || htfPolicy}`,
+                authorityReason: `HTF_POLICY_BLOCK: ${v2Res.internal.judgment.htf_hard_block_reason || htfPolicy}`
+            };
+        } else if (htfPolicy === "LONG_ONLY_OR_NONE" && executionEnvelope.side === "short") {
+            executionEnvelope = {
+                ...executionEnvelope,
+                decision: "REJECT",
+                side: "none",
+                stageMarginKrw: 0,
+                hardBlockPresent: true,
+                hardBlockReason: "HTF_SHOCK_LONG_ONLY_BLOCK",
+                authorityReason: "shock_reaction_direction_block"
+            };
+        } else if (htfPolicy === "SHORT_ONLY_OR_NONE" && executionEnvelope.side === "long") {
+            executionEnvelope = {
+                ...executionEnvelope,
+                decision: "REJECT",
+                side: "none",
+                stageMarginKrw: 0,
+                hardBlockPresent: true,
+                hardBlockReason: "HTF_SHOCK_SHORT_ONLY_BLOCK",
+                authorityReason: "shock_reaction_direction_block"
+            };
+        }
+    }
+
     const authority =
         v2Mode === "engine_v2"
             ? deriveExecutionAuthorityFromEnvelope(executionEnvelope)
@@ -583,7 +629,19 @@ export function resolveSymbolDecisionEnvelope(
         v2_size: v2Size,
         selector_mismatch: selectorMismatch,
         legacy_used_for_execution: executionEnvelope.authoritySource === "legacy_execution_envelope",
-        legacy_comparison_only: executionEnvelope.authoritySource !== "legacy_execution_envelope"
+        legacy_comparison_only: executionEnvelope.authoritySource !== "legacy_execution_envelope",
+        htf_entry_policy: executionEnvelope.htf_entry_policy,
+        counter_trend_risk: executionEnvelope.counter_trend_risk,
+        htf_size_multiplier: executionEnvelope.htf_size_multiplier,
+        htf_requires_stronger_confirmation: executionEnvelope.htf_requires_stronger_confirmation,
+        htf_policy_reason: executionEnvelope.htf_policy_reason,
+        htf_hard_block_reason: executionEnvelope.htf_hard_block_reason,
+        macro_source: executionEnvelope.macro_source,
+        htf_5m_bias: executionEnvelope.m5_bias_actual,
+        htf_15m_bias: executionEnvelope.m15_bias_actual,
+        htf_1h_bias: executionEnvelope.h1_bias_actual,
+        htf_4h_bias: executionEnvelope.h4_bias_actual,
+        htf_1d_bias: executionEnvelope.daily_bias_actual
     }));
 
     // 6. Comparison Metrics for Engine-State
