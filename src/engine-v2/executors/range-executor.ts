@@ -98,7 +98,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             reason = "Upper edge reached but short blocked by bias";
         } else {
             // Reversal check (Hardened Price Action Confirmation)
-            const candles = input.recentCandles ?? [];
+            const candles = sn.candles ?? [];
             const lastCandles = candles.slice(-5);
             const entryPx = sn.boxHigh ?? 0;
             const lastPx = sn.lastPrice ?? 0;
@@ -135,7 +135,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             reason = "Lower edge reached but long blocked by bias";
         } else {
             // Reversal check (Hardened Price Action Confirmation)
-            const candles = input.recentCandles ?? [];
+            const candles = sn.candles ?? [];
             const lastCandles = candles.slice(-5);
             const entryPx = sn.boxLow ?? 0;
             const lastPx = sn.lastPrice ?? 0;

@@ -641,7 +641,11 @@ export function resolveSymbolDecisionEnvelope(
         htf_15m_bias: executionEnvelope.m15_bias_actual,
         htf_1h_bias: executionEnvelope.h1_bias_actual,
         htf_4h_bias: executionEnvelope.h4_bias_actual,
-        htf_1d_bias: executionEnvelope.daily_bias_actual
+        htf_1d_bias: executionEnvelope.daily_bias_actual,
+        regime_final: executionEnvelope.regime,
+        reject_reason: executionEnvelope.hardBlockReason,
+        expected_missing_condition: executionEnvelope.expected_missing_condition,
+        expected_next_action: executionEnvelope.expected_next_action
     }));
 
     // 6. Comparison Metrics for Engine-State

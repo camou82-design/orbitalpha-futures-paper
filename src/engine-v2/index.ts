@@ -2860,9 +2860,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             invalidationPx: v2CalculatedInvalidationPx ?? execMeta.invalidationPx ?? undefined,
             expectedMissingCondition: expectedMissingCondition ?? (v2DecisionAfterPromotion === "SKIP" ? (v2RejectReasonAfterPromotion || "MIN_QUALITY_NOT_MET") : null),
             expectedNextAction: expectedNextAction ?? (v2DecisionAfterPromotion === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY"),
-            macro_source: "market_subtype_proxy",
-            daily_bias_actual: null,
-            h4_bias_actual: null
+            macro_source: judgment.macro_source ?? "market_subtype_proxy",
+            daily_bias_actual: judgment.daily_bias_actual ?? null,
+            h4_bias_actual: judgment.h4_bias_actual ?? null,
+            h1_bias_actual: judgment.h1_bias_actual ?? null,
+            m15_bias_actual: judgment.m15_bias_actual ?? null,
+            m5_bias_actual: judgment.m5_bias_actual ?? null,
+            htf_bias: judgment.htf_bias ?? null,
+            htf_entry_policy: judgment.htf_entry_policy ?? null,
+            htf_policy_reason: judgment.htf_policy_reason ?? null,
+            htf_hard_block_reason: judgment.htf_hard_block_reason ?? null,
+            counter_trend_risk: judgment.counter_trend_risk ?? null,
+            htf_size_multiplier: judgment.htf_size_multiplier ?? null,
+            htf_requires_stronger_confirmation: judgment.htf_requires_stronger_confirmation ?? null
         },
         v2ExitAuthority: v2ExitAuthority ?? undefined,
         v2PartialAuthority: v2PartialAuthority ?? undefined,
@@ -2979,7 +2989,6 @@ export function adaptV2Input(
     return {
         symbol,
         now,
-        recentCandles,
         snapshot: {
             lastPrice: snapshot.lastPrice,
             latestCandleClose: snapshot.latestCandleClose,
@@ -3015,7 +3024,9 @@ export function adaptV2Input(
             ema20Slope: snapshot.ema20Slope ?? 0,
             ema60Slope: snapshot.ema60Slope ?? 0,
             atrExpansion: snapshot.atrExpansion ?? 0,
-            volumeExpansion: snapshot.volumeExpansion ?? 0
+            volumeExpansion: snapshot.volumeExpansion ?? 0,
+            candles: recentCandles,
+            htf_candles: snapshot.htf_candles
         },
         config: {
             paperMaxOpenPositions: config.paperMaxOpenPositions,

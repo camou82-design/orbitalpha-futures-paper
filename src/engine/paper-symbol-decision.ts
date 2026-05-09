@@ -206,6 +206,7 @@ export type SymbolSnapshotLike = Readonly<{
   ema60Slope?: number;
   atrExpansion?: number;
   volumeExpansion?: number;
+  htf_candles?: Record<string, import("../models/types").Candle[]>;
 }>;
 
 export function paperTradeBlockDecompositionPayload(

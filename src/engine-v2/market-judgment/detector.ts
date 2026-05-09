@@ -443,6 +443,7 @@ function calculateMacroBias(htfCandles: Record<string, Candle[]>): {
     let source: MarketJudgmentOutput["macro_source"] = "data_not_ready";
     if (readyCount === 5) source = "actual_candles";
     else if (readyCount > 0) source = "partial_actual_candles";
+    else source = "data_not_ready";
 
     const conflict = (biases.m5 === "BULLISH" && biases.m15 === "BEARISH") || (biases.m5 === "BEARISH" && biases.m15 === "BULLISH");
 
@@ -500,6 +501,11 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         regime_final = "NO_TRADE";
         no_trade_reason = "DUMP_PROTECTION";
     }
+
+    const htfResult = calculateMacroBias(input.htf_candles || {});
+    const htfBias = htfResult.biases;
+    const htfConflict = htfResult.conflict;
+
     const subtypeDecision = selectSubtype({
         regimeFinal: regime_final,
         noTradeReason: no_trade_reason,
@@ -565,9 +571,6 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         }
     }
 
-    const htfResult = calculateMacroBias(input.htf_candles || {});
-    const htfBias = htfResult.biases;
-    const htfConflict = htfResult.conflict;
     let counterTrendRisk = false;
     let htfSizeMultiplier = 1.0;
     let htfRequiresStrongerConfirmation = false;
@@ -581,7 +584,13 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     const isBearish = (tf: keyof typeof htfBias) => htfBias[tf] === "BEARISH";
     const isBullish = (tf: keyof typeof htfBias) => htfBias[tf] === "BULLISH";
 
-    if (htfBias.m5 === "BULLISH") {
+    if (htfResult.source === "data_not_ready") {
+        htfEntryPolicy = "NEUTRAL_HTF_DATA_WAIT";
+        expectedNextAction = "WAIT_FOR_HTF_CANDLE_ACCUMULATION";
+        htfPolicyReason = "HTF_DATA_NOT_READY";
+        htfSizeMultiplier = 0.75; 
+        htfRequiresStrongerConfirmation = true;
+    } else if (htfBias.m5 === "BULLISH") {
         let oppositeCount = 0;
         if (isBearish("m15")) oppositeCount++;
         if (isBearish("h1")) oppositeCount++;

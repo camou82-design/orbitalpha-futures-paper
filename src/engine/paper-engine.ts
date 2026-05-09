@@ -14895,6 +14895,16 @@ export class PaperEngine {
       }
     }
 
+    console.info(JSON.stringify({
+      event: "HTF_CANDLE_FETCH_PROOF",
+      symbol: String(symbol),
+      htf_5m_count: htf_candles["5m"]?.length ?? 0,
+      htf_15m_count: htf_candles["15m"]?.length ?? 0,
+      htf_1h_count: htf_candles["1h"]?.length ?? 0,
+      htf_4h_count: htf_candles["4h"]?.length ?? 0,
+      htf_1d_count: htf_candles["1d"]?.length ?? 0,
+    }));
+
     if (!rT.ok || !rC.ok || !rF.ok) {
       const parts: string[] = [];
       if (!rT.ok) parts.push(rT.error);
