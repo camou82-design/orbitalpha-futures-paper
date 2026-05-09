@@ -98,6 +98,27 @@ function logDataRouteLine(payload: Record<string, unknown>): void {
   }
 }
 
+const NO_ENTRY_AUDIT_REL = "data/runtime/latest-no-entry-audit.json";
+
+/** Fresh no-entry audit (small file); merged every data response so UI can poll faster than bundle writes. */
+async function attachNoEntryAudit(projectRoot: string, bundle: DataBundle): Promise<DataBundle> {
+  const auditPath = path.join(projectRoot, ...NO_ENTRY_AUDIT_REL.split("/"));
+  try {
+    const raw = await fs.readFile(auditPath, "utf8");
+    const ne = JSON.parse(raw) as Record<string, unknown>;
+    if (!ne || typeof ne !== "object") return bundle;
+    const bySym = ne.bySymbol;
+    return {
+      ...bundle,
+      noEntryAudit: ne,
+      noEntryAuditBySymbol:
+        bySym && typeof bySym === "object" && !Array.isArray(bySym) ? (bySym as Record<string, unknown>) : null
+    };
+  } catch {
+    return bundle;
+  }
+}
+
 async function doLoadBundle(projectRoot: string): Promise<CacheContext> {
   const fullPath = path.join(projectRoot, ...PUBLIC_BUNDLE_REL.split("/"));
   
@@ -304,12 +325,13 @@ app.get("/api/futures-paper/data", async (req: Request, res: Response) => {
       const control = await readTradeControlState(root);
       controlState = control.state;
     }
+    const mergedAudit = await attachNoEntryAudit(root, result.bundle);
     const bundleWithControl = {
-      ...(result.bundle as Record<string, unknown>),
+      ...(mergedAudit as Record<string, unknown>),
       tradeControl: controlState
     };
     res.setHeader("X-Orbitalpha-Futures-Paper-Source", "public-bundle");
-    res.setHeader("X-Orbitalpha-Futures-Paper-Read-Files", PUBLIC_BUNDLE_REL);
+    res.setHeader("X-Orbitalpha-Futures-Paper-Read-Files", [PUBLIC_BUNDLE_REL, NO_ENTRY_AUDIT_REL].join(","));
     res.json(bundleWithControl);
     
     logDataRouteLine({
@@ -333,9 +355,13 @@ app.get("/api/futures-paper/data", async (req: Request, res: Response) => {
     const message = e instanceof Error ? e.message : "bundle_failed";
     const total_ms = Date.now() - startedAt;
     
-    if (memoryCache) {
+    if (memoryCache && root) {
       res.setHeader("X-Orbitalpha-Futures-Paper-Source", "memory-last-known-safe");
-      res.json(memoryCache.bundle);
+      const fallback = await attachNoEntryAudit(root, memoryCache.bundle);
+      res.json({
+        ...(fallback as Record<string, unknown>),
+        tradeControl: (await readTradeControlState(root)).state
+      });
       logDataRouteLine({
         event: "data_route_fail",
         reason: message,

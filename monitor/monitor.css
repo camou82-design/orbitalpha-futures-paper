@@ -460,6 +460,39 @@ body {
   font-weight: 500;
 }
 
+.sym-state-v--danger {
+  color: #fb7185;
+}
+
+.sym-state-v--ok {
+  color: #86efac;
+}
+
+.sym-state-v--neutral {
+  color: var(--muted);
+}
+
+.sym-state-lead {
+  color: #e4e4e7;
+  font-weight: 600;
+}
+
+.sym-audit-stale-banner {
+  font-size: 0.78rem;
+  color: #fbbf24;
+  padding: 0.35rem 0.55rem;
+  border-radius: 6px;
+  background: rgba(251, 191, 36, 0.08);
+  margin-bottom: 0.35rem;
+}
+
+.sym-audit-meta {
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+  opacity: 0.88;
+  color: var(--dim);
+}
+
 /* 포지션 보유: 손익 스트립 (숫자 5열이 카드 최상단·최대) */
 .pos-card-head {
   display: flex;

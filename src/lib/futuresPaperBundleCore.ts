@@ -344,6 +344,10 @@ export type FuturesPaperDataBundle = Readonly<{
   positionsHistory: unknown[];
   eventsRecent: unknown[];
   generatedAt: number;
+  /** Latest `V2_NO_ENTRY_REASON_AUDIT_PROOF` snapshot file (`data/runtime/latest-no-entry-audit.json`). */
+  noEntryAudit: FuturesPaperNoEntryAuditDoc | null;
+  /** Same as `noEntryAudit.bySymbol` when present. */
+  noEntryAuditBySymbol: Readonly<Record<string, Record<string, unknown>>> | null;
 }>;
 
 async function readJsonFile(filePath: string): Promise<unknown | null> {
@@ -353,6 +357,35 @@ async function readJsonFile(filePath: string): Promise<unknown | null> {
   } catch {
     return null;
   }
+}
+
+export type FuturesPaperNoEntryAuditDoc = Readonly<{
+  updatedAt: number;
+  bySymbol: Readonly<Record<string, Record<string, unknown>>>;
+}>;
+
+async function readNoEntryAuditFromDataDir(dataDir: string): Promise<FuturesPaperNoEntryAuditDoc | null> {
+  const parsed = await readJsonFile(path.join(dataDir, "runtime", "latest-no-entry-audit.json"));
+  if (!parsed || typeof parsed !== "object") return null;
+  const o = parsed as Record<string, unknown>;
+  const updatedAt = typeof o.updatedAt === "number" && Number.isFinite(o.updatedAt) ? o.updatedAt : 0;
+  const rawBy = o.bySymbol;
+  const bySymbol: Record<string, Record<string, unknown>> = {};
+  if (rawBy && typeof rawBy === "object" && !Array.isArray(rawBy)) {
+    for (const [k, v] of Object.entries(rawBy)) {
+      if (!v || typeof v !== "object" || Array.isArray(v)) continue;
+      bySymbol[k] = v as Record<string, unknown>;
+    }
+  }
+  return { updatedAt, bySymbol };
+}
+
+function bundleNoEntryAuditFields(doc: FuturesPaperNoEntryAuditDoc | null): {
+  noEntryAudit: FuturesPaperNoEntryAuditDoc | null;
+  noEntryAuditBySymbol: Readonly<Record<string, Record<string, unknown>>> | null;
+} {
+  if (!doc) return { noEntryAudit: null, noEntryAuditBySymbol: null };
+  return { noEntryAudit: doc, noEntryAuditBySymbol: doc.bySymbol };
 }
 
 function pickSymbolRows(latest: unknown): FuturesPaperSymbolRow[] {
@@ -534,6 +567,8 @@ export async function composePublicFuturesPaperBundleForWrite(
   const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt);
   const paperOperational = paperOperationalFromEngineState(engineState);
   const currentPositions = deriveCurrentPositionsForDisplay(engineState, openPositions);
+  const noEntryAuditDoc = await readNoEntryAuditFromDataDir(dataDir);
+  const { noEntryAudit, noEntryAuditBySymbol } = bundleNoEntryAuditFields(noEntryAuditDoc);
 
   return {
     configured: true,
@@ -556,7 +591,9 @@ export async function composePublicFuturesPaperBundleForWrite(
     currentPositions,
     positionsHistory,
     eventsRecent,
-    generatedAt
+    generatedAt,
+    noEntryAudit,
+    noEntryAuditBySymbol
   };
 }
 
@@ -607,6 +644,8 @@ async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): P
   const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt);
   const paperOperational = paperOperationalFromEngineState(engineState);
   const currentPositions = deriveCurrentPositionsForDisplay(engineState, openPositions);
+  const noEntryAuditDoc = await readNoEntryAuditFromDataDir(dataDir);
+  const { noEntryAudit, noEntryAuditBySymbol } = bundleNoEntryAuditFields(noEntryAuditDoc);
 
   return {
     configured: true,
@@ -629,7 +668,9 @@ async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): P
     currentPositions,
     positionsHistory,
     eventsRecent,
-    generatedAt
+    generatedAt,
+    noEntryAudit,
+    noEntryAuditBySymbol
   };
 }
 
@@ -638,13 +679,19 @@ async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): P
  * When `data/reports/public-futures-paper-bundle.json` exists, returns it with a single read.
  */
 export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): Promise<FuturesPaperDataBundle> {
+  const root = path.resolve(projectRoot.trim());
+  const dataDir = path.join(root, "data");
   const published = await tryReadPublishedPublicBundle(projectRoot);
+  const noEntryAuditDoc = await readNoEntryAuditFromDataDir(dataDir);
+  const { noEntryAudit, noEntryAuditBySymbol } = bundleNoEntryAuditFields(noEntryAuditDoc);
   if (published) {
     const openPositions = Array.isArray(published.openPositions) ? published.openPositions : [];
     return {
       ...published,
       openPositions,
-      currentPositions: deriveCurrentPositionsForDisplay(published.engineState, openPositions)
+      currentPositions: deriveCurrentPositionsForDisplay(published.engineState, openPositions),
+      noEntryAudit,
+      noEntryAuditBySymbol
     };
   }
   return assembleFuturesPaperBundleFromDiskSources(projectRoot);

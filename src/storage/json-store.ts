@@ -140,6 +140,35 @@ export class JsonStore {
     return fullPath;
   }
 
+  /**
+   * Persist latest `V2_NO_ENTRY_REASON_AUDIT_PROOF` rows for ops monitor (`data/runtime/latest-no-entry-audit.json`).
+   * Per-symbol merge only; does not alter trading logic.
+   */
+  async mergeNoEntryAuditSnapshot(
+    symbol: string,
+    row: Record<string, unknown>
+  ): Promise<void> {
+    const rel = "runtime/latest-no-entry-audit.json";
+    const fullPath = path.resolve(this.baseDir, rel);
+    const now = Date.now();
+    let bySymbol: Record<string, unknown> = {};
+    try {
+      const raw = await fs.readFile(fullPath, "utf8");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const prior = parsed.bySymbol;
+      if (prior && typeof prior === "object" && !Array.isArray(prior)) {
+        bySymbol = { ...(prior as Record<string, unknown>) };
+      }
+    } catch {
+      /* start fresh */
+    }
+    const symKey = String(symbol).trim().toUpperCase() || symbol;
+    bySymbol[symKey] = { ...row, symbol: symKey, ts: now };
+    const doc = { updatedAt: now, bySymbol };
+    await fs.mkdir(path.dirname(fullPath), { recursive: true });
+    await fs.writeFile(fullPath, JSON.stringify(doc, null, 2), "utf8");
+  }
+
   /** Read `reports/health-history.jsonl` (empty if missing). Tails last 2000 lines. */
   async readHealthHistoryJsonlFile(): Promise<ReturnType<typeof parseHealthHistoryJsonl>> {
     const fullPath = path.resolve(this.baseDir, "reports/health-history.jsonl");

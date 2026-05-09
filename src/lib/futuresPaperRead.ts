@@ -48,7 +48,9 @@ function emptyBundle(configHint: string): FuturesPaperDataBundle {
     currentPositions: [],
     positionsHistory: [],
     eventsRecent: [],
-    generatedAt: now
+    generatedAt: now,
+    noEntryAudit: null,
+    noEntryAuditBySymbol: null
   };
 }
 

@@ -4048,6 +4048,35 @@ export class PaperEngine {
           }
         }
 
+        // Audit/log only: align expected_next_action with concrete missing / veto tokens (operational readability).
+        const noEntryAuditNextByVetoOrMissing: Record<string, string> = {
+          SHOCK_UP_RECLAIM_NOT_CONFIRMED: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
+          SHOCK_UP_MID_RETEST_REQUIRED: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
+          SHOCK_UP_TREND_CONFIRMATION_WEAK: "WAIT_FOR_TREND_CONFIRMATION",
+          SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED: "WAIT_FOR_BREAKDOWN_RETEST_FAILURE",
+          SHOCK_DOWN_MID_RETEST_REQUIRED: "WAIT_FOR_BREAKDOWN_RETEST_FAILURE",
+          SHOCK_DOWN_TREND_CONFIRMATION_WEAK: "WAIT_FOR_TREND_CONFIRMATION",
+          RANGE_TREND_SIDE_CONFLICT: "WAIT_FOR_RANGE_TREND_ALIGNMENT",
+          TREND_CANDIDATE_NOT_PROMOTED_DETAIL: "WAIT_FOR_PROMOTION_CONFIRMATION",
+          RECOVERY_MODE_SIZE_SUPPRESSED: "WAIT_FOR_RECOVERY_MODE_CLEAR_OR_HIGH_CONFIDENCE_RETEST"
+        };
+        const vetoKey = side_veto_detail != null ? String(side_veto_detail) : "";
+        const missingKey =
+          refinedMissingCondition != null && typeof refinedMissingCondition === "string" ? refinedMissingCondition : "";
+        const nextFromAuditKey =
+          (vetoKey && noEntryAuditNextByVetoOrMissing[vetoKey]) ||
+          (missingKey && noEntryAuditNextByVetoOrMissing[missingKey]) ||
+          null;
+        if (nextFromAuditKey != null) {
+          refinedNextAction = nextFromAuditKey;
+        }
+        if (
+          (envelope.runtime_authority_decision !== "ENTER" || v2?.side === "none" || !v2?.side) &&
+          refinedNextAction === "EXECUTE_V2_AUTHORITY"
+        ) {
+          refinedNextAction = "WAIT_FOR_VALID_ENTRY_SIGNAL";
+        }
+
         // SHOCK_REACTION specifics
         let chase_blocked = false;
         let retest_required = false;
@@ -4113,6 +4142,33 @@ export class PaperEngine {
           v2_entry_quality_profit_distance: (v2Risk as any)?.diagnostics?.["entry_quality_distance_profit"] ?? null,
           v2_entry_quality_loss_distance: (v2Risk as any)?.diagnostics?.["entry_quality_distance_loss"] ?? null,
         });
+
+        const noEntryAuditRow: Record<string, unknown> = {
+          expected_missing_condition: refinedMissingCondition,
+          raw_missing_condition: v2Env?.expected_missing_condition ?? null,
+          expected_next_action: refinedNextAction,
+          market_subtype: v2Env?.marketSubtype ?? null,
+          active_engine_routing: marketModeOut.routing.activeEngine,
+          trend_side_candidate: v2Env?.trend_side_candidate ?? null,
+          range_side_candidate: v2Env?.range_side_candidate ?? null,
+          selected_side_after_veto: v2Env?.selected_side_after_veto ?? null,
+          side_veto_detail: side_veto_detail,
+          boxPos,
+          zone,
+          trendOk,
+          quality_score: v2Env?.quality_score ?? null,
+          entry_quality_grade: v2Risk?.entryQualityGrade ?? null,
+          reversal_confirmed: v2Env?.reversal_confirmed ?? null,
+          side_zone_valid: v2Env?.side_zone_valid ?? null,
+          chase_blocked,
+          retest_required,
+          reclaim_required,
+          expected_retest_direction,
+          leverage_block_reason: (v2Risk as any)?.legacy_block_reason ?? v2Risk?.blockReason ?? null,
+          recovery_mode_active,
+          size_suppressed_by_recovery
+        };
+        await this.store.mergeNoEntryAuditSnapshot(String(sym), noEntryAuditRow);
       }
 
 

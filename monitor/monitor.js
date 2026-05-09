@@ -63,6 +63,66 @@
     LEGACY_BLOCKED: "기타 차단"
   };
 
+  /** V2 무진입 감사 한글 레이블 (로그 코드 → 운영자용 문장). */
+  const NO_ENTRY_STALE_MS = 3 * 60 * 1000;
+
+  const NO_ENTRY_EXPECTED_MISSING_KO = {
+    SHOCK_REACTION_WATCH_MID_CHASE_BLOCKED: "상승/하락 충격 후 중간 구간 추격 진입 차단",
+    CHASE_BLOCKED_RANGE_MID_ZONE: "횡보 중단 구간에서 추격 진입 차단",
+    CHASE_BLOCKED_SHOCK_WATCH: "충격 감시 구간 추격 차단",
+    SHOCK_UP_MID_RETEST_REQUIRED: "상승 충격 후 중간 구간이라 리테스트 확인 대기",
+    SHOCK_DOWN_MID_RETEST_REQUIRED: "하락 충격 후 중간 구간이라 리테스트 확인 대기",
+    SHOCK_UP_RECLAIM_NOT_CONFIRMED: "상승 재돌파 후 지지 재확인 미완료",
+    SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED: "하락 이탈 후 리테스트 실패 확인 미완료",
+    SHOCK_REACTION_UP_RETEST_NOT_CONFIRMED: "상승 충격 후 리테스트 미확인",
+    SHOCK_REACTION_DOWN_RETEST_NOT_CONFIRMED: "하락 충격 후 리테스트 미확인",
+    SHOCK_UP_TREND_CONFIRMATION_WEAK: "상승 충격 대응 후 추세 확인이 아직 약함",
+    SHOCK_DOWN_TREND_CONFIRMATION_WEAK: "하락 충격 대응 후 추세 확인이 아직 약함",
+    MIN_QUALITY_NOT_MET: "진입 품질 점수 부족",
+    TREND_ENTRY_NOT_PROMOTED: "추세 후보는 있으나 V2 승격 조건 미충족",
+    TREND_CANDIDATE_NOT_PROMOTED_DETAIL: "추세 후보 미승격(세부 진행 중)",
+    RECOVERY_MODE_SIZE_SUPPRESSED: "연속 손실 복구 모드로 신규 진입 사이즈 억제",
+    TWO_CONSECUTIVE_LOSSES_RECOVERY_MODE: "연속 손실 이후 복구 모드 적용 중",
+    SIDE_NONE_AFTER_VETO: "후처리 거부 후 유효 방향 없음",
+    RANGE_TREND_SIDE_CONFLICT: "레인지 후보와 추세 후보 방향 충돌",
+    STOP_PRICE_MISSING: "보호 스톱 가격 미충족(차단)",
+    V2_HOLD_NO_ENTRY_SIDE: "V2 HOLD — 진입 방향 미확정",
+    UNKNOWN_HOLD_REASON: "세부 무진입 원인 불명(HOLD)",
+    ALL_GATES_HEALTHY_NO_ENTER: "게이트는 통과했으나 진입 확정 신호 부족"
+  };
+
+  const NO_ENTRY_NEXT_ACTION_KO = {
+    WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION: "리테스트 / 지지 재확인 대기",
+    WAIT_FOR_BREAKDOWN_RETEST_FAILURE: "하락 이탈 후 리테스트 결과 대기",
+    WAIT_FOR_VALID_SIDE_CONFIRMATION: "유효 방향 재확인 대기",
+    WAIT_FOR_RECOVERY_MODE_CLEAR_OR_HIGH_CONFIDENCE_RETEST:
+      "복구 모드 해제 또는 고신뢰 리테스트 대기",
+    WAIT_FOR_VALID_ENTRY_SIGNAL: "진입 신호 재확인 대기",
+    EXECUTE_V2_AUTHORITY: "V2 권위 실행 단계",
+    PLAN_TO_ENTER: "진입 검토 계획",
+    PLAN_TO_HOLD: "보유 유지 검토",
+    NONE: "—"
+  };
+
+  const NO_ENTRY_SIDE_VETO_KO = {
+    SHOCK_UP_MID_RETEST_REQUIRED: "상승 충격 후 중간 구간이라 리테스트 확인 대기",
+    SHOCK_DOWN_MID_RETEST_REQUIRED: "하락 충격 후 중간 구간이라 리테스트 확인 대기",
+    SHOCK_UP_RECLAIM_NOT_CONFIRMED: "상승 재돌파 후 지지 재확인 미완료",
+    SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED: "하락 이탈 후 리테스트 실패 확인 미완료",
+    TREND_CANDIDATE_NOT_PROMOTED_DETAIL: "추세 후보 미승격(세부)",
+    RECOVERY_MODE_SIZE_SUPPRESSED: "복구 모드로 사이즈 억제",
+    RANGE_TREND_SIDE_CONFLICT: "레인지·추세 방향 충돌"
+  };
+
+  const NO_ENTRY_MARKET_SUBTYPE_KO = {
+    SHOCK_REACTION_UP: "상승 충격 반응",
+    SHOCK_REACTION_DOWN: "하락 충격 반응",
+    SHOCK_REACTION_SIDEWAYS: "횡보 충격 반응",
+    DEFAULT: "기본 장세",
+    TREND_PERSISTENCE_LONG: "상승 추세 지속",
+    TREND_PERSISTENCE_SHORT: "하락 추세 지속"
+  };
+
   const MAX_OPEN = 3;
   let currentTradeControl = null;
 
@@ -944,6 +1004,183 @@
       .replace(/"/g, "&quot;");
   }
 
+  function pickNoEntryAuditRow(bundle, sym) {
+    const rootBy =
+      bundle.noEntryAuditBySymbol ||
+      (bundle.noEntryAudit && typeof bundle.noEntryAudit === "object"
+        ? bundle.noEntryAudit.bySymbol
+        : null);
+    if (!rootBy || typeof rootBy !== "object") return null;
+    const u = String(sym).trim().toUpperCase();
+    return rootBy[sym] || rootBy[u] || null;
+  }
+
+  function noEntryAuditAgeMs(row) {
+    if (!row || typeof row !== "object") return null;
+    const ts = typeof row.ts === "number" && Number.isFinite(row.ts) ? row.ts : null;
+    if (ts === null) return null;
+    return Date.now() - ts;
+  }
+
+  function koNoEntryMissing(code) {
+    if (code === null || code === undefined || code === "") return "—";
+    const k = String(code);
+    return NO_ENTRY_EXPECTED_MISSING_KO[k] || NO_ENTRY_SIDE_VETO_KO[k] || k;
+  }
+
+  function koNoEntryNext(code) {
+    if (code === null || code === undefined || code === "") return "—";
+    const k = String(code);
+    return NO_ENTRY_NEXT_ACTION_KO[k] || k;
+  }
+
+  function koNoEntryLeverage(code) {
+    if (code === null || code === undefined || code === "") return "—";
+    const k = String(code);
+    return NO_ENTRY_EXPECTED_MISSING_KO[k] || k;
+  }
+
+  function koNoEntrySideVeto(code) {
+    if (code === null || code === undefined || code === "") return "—";
+    const k = String(code);
+    return NO_ENTRY_SIDE_VETO_KO[k] || koNoEntryMissing(k);
+  }
+
+  function koNoEntryMarketSubtype(code) {
+    if (code === null || code === undefined || code === "") return "—";
+    const k = String(code);
+    return NO_ENTRY_MARKET_SUBTYPE_KO[k] || k;
+  }
+
+  function fmtSideEnShort(x) {
+    if (x === "long") return "Long";
+    if (x === "short") return "Short";
+    if (x === null || x === undefined || x === "") return "none";
+    if (String(x).toLowerCase() === "none") return "none";
+    return String(x);
+  }
+
+  function fmtAuditBool(v) {
+    if (v === true) return "예";
+    if (v === false) return "아니오";
+    return "—";
+  }
+
+  function noEntryCardState(bundle, snap) {
+    const tc = bundle.tradeControl;
+    const engine = bundle.engineState;
+    if (tc && tc.killSwitch === true) return { label: "차단 중", cls: "sym-state-v--danger" };
+    if (engine && engine.entryAllowed === false) return { label: "차단 중", cls: "sym-state-v--danger" };
+    const sig = snap && snap.signal ? snap.signal : "none";
+    if (sig === "paper_long_candidate" || sig === "paper_short_candidate") return { label: "진입 대기", cls: "sym-state-v--ok" };
+    return { label: "관망 중", cls: "sym-state-v--neutral" };
+  }
+
+  function noEntryAuditDetailHtml(sym, bundle) {
+    const audit = pickNoEntryAuditRow(bundle, sym);
+    const ageMs = audit ? noEntryAuditAgeMs(audit) : null;
+    const stale = !audit || (typeof ageMs === "number" && ageMs > NO_ENTRY_STALE_MS);
+    function ddt(label, ddInner) {
+      return `<dt>${esc(label)}</dt><dd>${ddInner}</dd>`;
+    }
+    function strField(key) {
+      if (stale || !audit) return `<span class="muted">—</span>`;
+      const v = audit[key];
+      if (v === undefined || v === null || v === "") return `<span class="muted">—</span>`;
+      return esc(String(v));
+    }
+
+    const tsLine =
+      !audit || typeof audit.ts !== "number"
+        ? `<span class="muted">—</span>`
+        : `${esc(formatKst(audit.ts))} (${esc(String(audit.ts))})`;
+    const ageLine =
+      ageMs !== null && Number.isFinite(ageMs)
+        ? esc(String(Math.max(0, Math.round(ageMs))))
+        : `<span class="muted">—</span>`;
+
+    return [
+      ddt(
+        "무진입 요약 상태",
+        stale ? `<span class="muted">${esc("최근 판단 갱신 대기 · 스냅샷 없음 또는 만료")}</span>` : esc("실시간 V2 무진입 감사")
+      ),
+      ddt(
+        "expected_missing_condition (표시 문장)",
+        stale ? `<span class="muted">—</span>` : esc(koNoEntryMissing(audit.expected_missing_condition))
+      ),
+      ddt(
+        "raw_missing_condition",
+        stale ? `<span class="muted">—</span>` : strField("raw_missing_condition")
+      ),
+      ddt(
+        "expected_next_action (표시 문장)",
+        stale ? `<span class="muted">—</span>` : esc(koNoEntryNext(audit.expected_next_action))
+      ),
+      ddt(
+        "trend_side_candidate / range_side_candidate",
+        stale
+          ? `<span class="muted">—</span>`
+          : esc(`${fmtSideEnShort(audit.trend_side_candidate)} · ${fmtSideEnShort(audit.range_side_candidate)}`)
+      ),
+      ddt(
+        "selected_side_after_veto",
+        stale ? `<span class="muted">—</span>` : esc(fmtSideEnShort(audit.selected_side_after_veto))
+      ),
+      ddt(
+        "side_veto_detail (표시 문장)",
+        stale ? `<span class="muted">—</span>` : esc(koNoEntrySideVeto(audit.side_veto_detail))
+      ),
+      ddt(
+        "market_subtype",
+        stale
+          ? `<span class="muted">—</span>`
+          : `${esc(koNoEntryMarketSubtype(audit.market_subtype))} <span class="muted text-xs">(${esc(String(audit.market_subtype ?? "—"))})</span>`
+      ),
+      ddt("active_engine_routing", strField("active_engine_routing")),
+      ddt(
+        "boxPos / zone",
+        stale
+          ? `<span class="muted">—</span>`
+          : esc(`${String(audit.boxPos ?? "—")} · ${String(audit.zone ?? "—")}`)
+      ),
+      ddt(
+        "trendOk · quality_score · grade",
+        stale
+          ? `<span class="muted">—</span>`
+          : esc(
+              `${fmtAuditBool(audit.trendOk)} · ${audit.quality_score != null ? String(audit.quality_score) : "—"} · ${audit.entry_quality_grade != null ? String(audit.entry_quality_grade) : "—"}`
+            )
+      ),
+      ddt(
+        "reversal_confirmed / side_zone_valid",
+        stale
+          ? `<span class="muted">—</span>`
+          : esc(`${fmtAuditBool(audit.reversal_confirmed)} · ${fmtAuditBool(audit.side_zone_valid)}`)
+      ),
+      ddt(
+        "chase_blocked / retest_required / reclaim_required",
+        stale
+          ? `<span class="muted">—</span>`
+          : esc(
+              `${fmtAuditBool(audit.chase_blocked)} · ${fmtAuditBool(audit.retest_required)} · ${fmtAuditBool(audit.reclaim_required)}`
+            )
+      ),
+      ddt("expected_retest_direction", strField("expected_retest_direction")),
+      ddt(
+        "leverage_block_reason (표시 문장)",
+        stale ? `<span class="muted">—</span>` : esc(koNoEntryLeverage(audit.leverage_block_reason))
+      ),
+      ddt(
+        "recovery_mode_active · size_suppressed_by_recovery",
+        stale
+          ? `<span class="muted">—</span>`
+          : esc(`${fmtAuditBool(audit.recovery_mode_active)} · ${fmtAuditBool(audit.size_suppressed_by_recovery)}`)
+      ),
+      ddt("updated_at (ts)", tsLine),
+      ddt("age_ms", ageLine)
+    ].join("");
+  }
+
   function renderSymbols(bundle) {
     const grid = $("symbol-grid");
     const want = ["BTCUSDT", "ETHUSDT"];
@@ -990,34 +1227,70 @@
 
     function noPositionStateBlock(sym, bundle) {
       const s = snapBySymbol(bundle, sym) || {};
-      const headline = symbolHeadline(sym, bundle);
-      const line = symbolOneLiner(sym, bundle);
-      const sig = s.signal || "none";
-      const 방향 =
-        sig === "paper_long_candidate"
-          ? "롱 방향 감지"
-          : sig === "paper_short_candidate"
-            ? "숏 방향 감지"
-            : "방향 후보 없음(중립)";
+      const audit = pickNoEntryAuditRow(bundle, sym);
+      const ageMs = audit ? noEntryAuditAgeMs(audit) : null;
+      const stale = audit == null || (typeof ageMs === "number" && ageMs > NO_ENTRY_STALE_MS);
+      const st = noEntryCardState(bundle, s);
       const 가격 = formatPrice(s.lastPrice);
+
+      let bannerHtml = "";
+      if (stale) {
+        bannerHtml = `<div class="sym-audit-stale-banner">${esc(
+          "최근 판단 갱신 대기 · 아래 무진입 사유는 새 스냅샷까지 표시하지 않습니다"
+        )}</div>`;
+      }
+
+      const lineMiss = stale ? "—" : koNoEntryMissing(audit.expected_missing_condition);
+      const lineNext = stale ? "—" : koNoEntryNext(audit.expected_next_action);
+      const qualPart = stale
+        ? ""
+        : `${audit.entry_quality_grade != null ? String(audit.entry_quality_grade) : "—"}${
+            typeof audit.quality_score === "number" ? "(" + audit.quality_score + ")" : ""
+          }`;
+      const lineCand = stale
+        ? "—"
+        : `후보 ${fmtSideEnShort(audit.trend_side_candidate)} · 구간 ${audit.zone != null ? String(audit.zone) : "—"} · 품질 ${qualPart}`;
+      const metaHtml =
+        !stale && audit && typeof audit.ts === "number"
+          ? `<p class="sym-audit-meta">${esc("갱신 " + formatKst(audit.ts) + " · age " + Math.max(0, Math.round(ageMs ?? 0)) + " ms")}</p>`
+          : "";
+
+      const sig = s.signal || "none";
+      const 방향Brief =
+        sig === "paper_long_candidate"
+          ? "롱 후보"
+          : sig === "paper_short_candidate"
+            ? "숏 후보"
+            : "중립";
+
       return `
         <div class="sym-state-block">
+          ${bannerHtml}
           <div class="sym-state-row">
-            <span class="sym-state-k">현재 판단</span>
-            <span class="sym-state-v">${esc(headline)}</span>
+            <span class="sym-state-k">현재 상태</span>
+            <span class="sym-state-v ${st.cls}">${esc(st.label)}</span>
           </div>
           <div class="sym-state-row">
-            <span class="sym-state-k">방향 감지</span>
-            <span class="sym-state-v">${esc(방향)}</span>
+            <span class="sym-state-k">무진입 요약</span>
+            <span class="sym-state-v sym-state-lead">${esc(lineMiss)}</span>
           </div>
           <div class="sym-state-row">
-            <span class="sym-state-k">진입 가능성</span>
-            <span class="sym-state-v">${esc(line)}</span>
+            <span class="sym-state-k">다음 대기</span>
+            <span class="sym-state-v">${esc(lineNext)}</span>
+          </div>
+          <div class="sym-state-row">
+            <span class="sym-state-k">후보·구간·품질</span>
+            <span class="sym-state-v">${esc(lineCand)}</span>
+          </div>
+          <div class="sym-state-row">
+            <span class="sym-state-k">스냅 방향 힌트</span>
+            <span class="sym-state-v">${esc(방향Brief)} · ${esc(symbolHeadline(sym, bundle))}</span>
           </div>
           <div class="sym-state-row">
             <span class="sym-state-k">현재 가격</span>
             <span class="sym-state-v tabular-nums">${esc(가격)}</span>
           </div>
+          ${metaHtml}
         </div>`;
     }
 
@@ -1140,6 +1413,7 @@
           <details class="sym-details">
             <summary>레버리지·파이프라인·운용 상세</summary>
             <dl class="sym-meta">
+              ${noEntryAuditDetailHtml(sym, bundle)}
               <dt>레버리지</dt><dd>${esc(String(lev))}×</dd>
               <dt>진입가</dt><dd>${esc(entryDisp)}</dd>
               <dt>현재가(Mark)</dt><dd>${esc(markDisp)}</dd>
@@ -1181,6 +1455,7 @@
           <details class="sym-details">
             <summary>스냅샷·파이프라인·차단 상세</summary>
             <dl class="sym-meta">
+            ${noEntryAuditDetailHtml(sym, bundle)}
             <dt>방향</dt><dd>${esc(dir)}</dd>
             <dt>컨텍스트</dt><dd>${esc(ctx.ctx)}${ctx.reason ? " · " + esc(ctx.reason) : ""}</dd>
             ${pip ? `<dt>파이프라인</dt><dd>v${esc(pipVer)}</dd>` : ""}
@@ -1582,5 +1857,6 @@
     initAuth();
     $("btn-refresh").addEventListener("click", () => load());
     load();
+    setInterval(() => void load(), 5000);
   });
 })();
