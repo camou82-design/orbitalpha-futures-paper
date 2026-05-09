@@ -1,4 +1,5 @@
 import { EngineV2Input, EngineV2Side, ExecutorOutput, MarketJudgmentOutput } from "../types";
+import { classifyRangeZone } from "../../models/types";
 
 /**
  * Tier 4: Range Executor (Refined)
@@ -43,12 +44,12 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     
     // Note: Early return for distorted box is removed to allow side-filtering and continuation.
 
-    // Standard Zone Classification (Hardened)
-    // Upper (>= 0.82), Lower (<= 0.18), Mid (0.18 < x < 0.82)
+    // Standard Zone Classification: global classifyRangeZone (upper>=0.62, lower<=0.38, else mid)
     const currentBoxPos = boxPos ?? 0.5;
-    const isUpper = currentBoxPos >= 0.82;
-    const isLower = currentBoxPos <= 0.18;
-    const isMid = !isUpper && !isLower;
+    const boxZone = classifyRangeZone(currentBoxPos);
+    const isUpper = boxZone === "upper";
+    const isLower = boxZone === "lower";
+    const isMid = boxZone === "mid";
 
     // --- SHOCK & TREND GUARD ---
     const emaGap = sn.emaGap ?? 0;

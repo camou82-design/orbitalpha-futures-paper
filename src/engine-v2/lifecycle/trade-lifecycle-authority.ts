@@ -1,4 +1,5 @@
 import type { V2TradeLifecycleAuthorityInput, V2TradeLifecycleAuthorityResult, V2CooldownType, V2LifecycleStage } from "../types";
+import { classifyRangeZone } from "../../models/types";
 
 function resolveCooldownType(input: V2TradeLifecycleAuthorityInput): V2CooldownType {
     const reason = String(input.cooldownState.reason ?? "").toLowerCase();
@@ -58,8 +59,7 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
     const boxPos = input.rawMetricsSummary.boxPos;
     const rangeEdge =
         typeof boxPos === "number" && Number.isFinite(boxPos) && (boxPos <= 0.15 || boxPos >= 0.85);
-    const rangeMid =
-        typeof boxPos === "number" && Number.isFinite(boxPos) && boxPos > 0.35 && boxPos < 0.65;
+    const rangeMid = typeof boxPos === "number" && Number.isFinite(boxPos) && classifyRangeZone(boxPos) === "mid";
     const trendHealthy = input.rawMetricsSummary.trendWeaknessScore <= 0.55;
 
     let result_givebackPct: number | undefined;

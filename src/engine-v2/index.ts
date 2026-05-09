@@ -10,7 +10,7 @@ import {
     LegacyPositionAdapter,
     LegacyResultAdapter
 } from "./types";
-import type { MarketSymbol } from "../models/types";
+import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
 import { detectMarketRegime, emitRangeDriftStateProof } from "./market-judgment/detector";
 import { calculateRegimeConfidence } from "./regime-confidence/scorer";
 import { routeToExecutor } from "./engine-router/selector";
@@ -669,8 +669,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             : typeof input.snapshot?.boxBreakSide === "string"
                 ? String(input.snapshot.boxBreakSide)
                 : "none";
-    const zoneFromMeta = typeof execMeta.zone === "string" ? execMeta.zone : null;
-    const zone = zoneFromMeta ?? (boxPos == null ? "mid" : boxPos >= rangeUpperThreshold ? "upper" : boxPos <= rangeLowerThreshold ? "lower" : "mid");
+    // Canonical RANGE zone: 단일 classifyRangeZone(boxPos). Executor metadata의 legacy zone은 덮어쓰지 않음(V2 불일치 방지).
+    const zone = boxPos == null || !Number.isFinite(boxPos) ? ("mid" as const) : classifyRangeZone(boxPos);
     const rangeConfidence = readNullableNumber(execMeta.rangeConfidence, input.snapshot?.rangeConfidence);
     const boxCohesion01 = readNullableNumber(execMeta.boxCohesion01, input.snapshot?.boxCohesion01);
     const trendWeaknessFromMeta = readNullableNumber(execMeta.trendWeaknessScore, input.snapshot?.trendWeaknessScore);
@@ -686,7 +686,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             execMeta.boxCohesion01 != null ||
             execMeta.trendWeaknessScore != null ||
             execMeta.boxPos != null ||
-            execMeta.zone != null ||
             execMeta.reversal_confirmed != null ||
             execMeta.relaxedRangeEntry != null
             ? "executor_metadata"
@@ -695,8 +694,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         rangeConfidence == null ? "rangeConfidence" : null,
         boxCohesion01 == null ? "boxCohesion01" : null,
         trendWeaknessFromMeta == null ? "trendWeaknessScore" : null,
-        boxPos == null ? "boxPos" : null,
-        zone == null ? "zone" : null
+        boxPos == null ? "boxPos" : null
     ].filter((x): x is string => x != null);
     const signalGateBlockedReason =
         typeof input.snapshot?.signalGateBlockedReason === "string"
@@ -1614,13 +1612,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
 
         // --- Hardening 2026-05-10: Detailed Trend Promotion Block Reasons & RANGE Zone Safety ---
-        if (activeEngineRouting === "TREND" && trendSideCandidate !== "none" && !promotionApplied) {
-            if (judgment.no_trade_reason === "DATA_NOT_READY") {
+        const regimeLabel = String(judgment.regime ?? "");
+        const trendPromotionBlockApplies =
+            trendSideCandidate !== "none" &&
+            !promotionApplied &&
+            (activeEngineRouting === "TREND" || regimeLabel === "RANGE" || regimeLabel === "TRANSITION");
+
+        if (trendPromotionBlockApplies) {
+            if (judgment.htf_policy_reason === "HTF_DATA_NOT_READY") {
                 promotionBlockReason = "TREND_PROMOTION_BLOCKED_HTF_DATA_NOT_READY";
                 expectedNextAction = "WAIT_FOR_HTF_DATA_READY";
                 expectedMissingCondition = "HTF_DATA_STABILITY";
             } else if (qualityScore < 70) {
-                promotionBlockReason = "TREND_PROMOTION_BLOCKED_QUALITY";
+                promotionBlockReason = "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD";
                 expectedNextAction = "WAIT_FOR_QUALITY_IMPROVEMENT";
                 expectedMissingCondition = "QUALITY_THRESHOLD_70";
             } else if (zone === "upper" && trendSideCandidate === "long") {
@@ -2733,6 +2737,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         trendWeaknessScore: trendWeaknessFromMeta,
         boxPos: boxPos,
         zone,
+        range_zone_lower_extreme: rangeZoneLowerExtreme(boxPos),
+        range_zone_upper_extreme: rangeZoneUpperExtreme(boxPos),
         range_metadata_source: rangeMetadataSource,
         range_metadata_missing_fields: rangeMetadataMissingFields.join("|") || null,
         side_zone_valid: sideZoneValid,
@@ -3028,7 +3034,10 @@ export function adaptV2Input(
             latestCandleClose: snapshot.latestCandleClose,
             boxHigh: snapshot.boxHigh ?? 0,
             boxLow: snapshot.boxLow ?? 0,
-            boxPos: snapshot.boxPosDiag ?? 0,
+            boxPos:
+                typeof snapshot.boxPosDiag === "number" && Number.isFinite(snapshot.boxPosDiag)
+                    ? snapshot.boxPosDiag
+                    : 0.5,
             rangeConfidence: snapshot.rangeConfidenceDiag ?? 0,
             ema20: snapshot.ema20 ?? 0,
             emaGap: snapshot.emaGapDiag ?? 0,

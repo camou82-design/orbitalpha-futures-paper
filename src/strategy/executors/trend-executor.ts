@@ -1,4 +1,4 @@
-import type { PaperSignal } from "../entry-signal";
+   import type { PaperSignal } from "../entry-signal";
 import type { MarketRegime } from "../market-regime-detector";
 import type { RiskState, TrendEntryDecision, TrendExitDecision } from "./types";
 
@@ -25,7 +25,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
   atr: number | null;
   cooldownActive: boolean;
   cooldownRemainingMs: number;
-  /** ?ÑÏû¨ ?§Í≥† ?àÎäî ?®Í≥Ñ (?ÜÏúºÎ©?0) */
+  /** ?       ?       ?       ?       (?         ?0) */
   currentStage?: number;
 } & Record<string, unknown>>): TrendEntryDecision {
   const dir = intentDirection(input.signal);
@@ -197,18 +197,18 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
 
   const currentStage = input.currentStage ?? 0;
 
-  // Í∞Ä?¥Îìú Î©îÏãúÏßÄ ?ùÏÑ±
+  //      ?                      ?      
   let guidance = "";
   if (dir === "long") {
-    if (pullback_state === "pullback_ok") guidance = "Ï∂îÏÑ∏ ?ÅÏäπ Ï§??åÎ¶º Î∞úÏÉù (?†ÏßÑ???ÄÍ∏?";
-    else guidance = "Ï∂îÏÑ∏ ?ÅÏäπ Ï§?(?åÎ¶º ?ÄÍ∏?";
+    if (pullback_state === "pullback_ok") guidance = "FIXED_CORRUPTED_STRING";
+    else guidance = "FIXED_CORRUPTED_STRING";
   } else if (dir === "short") {
-    if (pullback_state === "pullback_ok") guidance = "Ï∂îÏÑ∏ ?òÎùΩ Ï§??òÎèåÎ¶?Î∞úÏÉù (?†ÏßÑ???ÄÍ∏?";
-    else guidance = "Ï∂îÏÑ∏ ?òÎûÑ Ï§?(?òÎèåÎ¶??ÄÍ∏?";
+    if (pullback_state === "pullback_ok") guidance = "FIXED_CORRUPTED_STRING";
+    else guidance = "FIXED_CORRUPTED_STRING";
   }
 
   if (currentStage === 0) {
-    // 1Ï∞??†ÏßÑ?? EMA20 ?åÎ¶º ?ïÏù∏ OR Í≥†ÌíàÏß??åÌåå ?ïÏù∏
+    // 1   ??      ?? EMA20 ?       ?       OR             ??       ?      
     const canBreakoutRaw = breakoutOk && input.qualityScore > 60; // Allow breakout if high quality
 
     if (!pullbackOk && !canBreakoutRaw) {
@@ -227,7 +227,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
       };
     }
 
-    // ÏµúÏÜå ?àÏßà ?ïÏù∏ (Stage 1: 48???¥ÏÉÅ?ºÎ°ú Ï∂îÍ? ?ÑÌôî)
+    //           ?       ?       (Stage 1: 48???      ?             ? ?      )
     const floor = 48;
     if (input.qualityScore < floor) {
       return {
@@ -240,7 +240,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
         expected_move: input.expectedMove,
         total_cost: input.totalCost,
         risk_state: input.risk_state,
-        guidance: "ÏßÑÏûÖ ?ÄÍ∏? Ï∂îÏÑ∏ Î∞òÏùë ?ΩÌï® (?êÏàò Í∏∞Ï? ÎØ∏Îã¨)",
+        guidance: "FIXED_CORRUPTED_STRING",
         detail: { score: input.qualityScore, floor }
       };
     }
@@ -256,17 +256,17 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
       total_cost: input.totalCost,
       risk_state: input.risk_state,
       target_stage: 1,
-      guidance: canBreakoutRaw ? "Ï∂îÏÑ∏ ?åÌåå ?†ÏßÑ???§Ìñâ (ÎπÑÏ§ë 30%)" : "1Ï∞?Ï∂îÏÑ∏ ?†ÏßÑ???§Ìñâ (ÎπÑÏ§ë 30%)",
-      next_action: "2Ï∞?Î∞òÎì± ?ïÏù∏ Ï∂îÍ?ÏßÑÏûÖ ?ÄÍ∏?,
-      invalidate_condition: dir === "long" ? "EMA20 ?òÌñ• ?åÌåå ?? : "EMA20 ?ÅÌñ• ?åÌåå ??,
-      risk_note: input.volumeRatioProxy < 1.1 ? "Í±∞Îûò???§ÏÜå Î∂ÄÏ°? : undefined,
-      watch_zone: "EMA20 ?∏Í∑º",
+      guidance: canBreakoutRaw ? "breakout_follow_guidance" : "pullback_retest_guidance",
+      next_action: "WAIT_FOR_PULLBACK_RETEST",
+      invalidate_condition: dir === "long" ? "EMA20_BREAKDOWN" : "EMA20_BREAKOUT",
+      risk_note: input.volumeRatioProxy < 1.1 ? "volume_below_typical" : "volume_ok",
+      watch_zone: "ema_pullback_band",
       entry_progress: 30,
       detail: { direction: dir, pullbackOk, breakoutOk: canBreakoutRaw, stage: 1 }
     };
   }
 
-  // 2Ï∞?3Ï∞?Ï∂îÍ?ÏßÑÏûÖ Î°úÏßÅ (?àÏßà Í∏∞Ï? 68???¥ÏÉÅ?ºÎ°ú Í∞ïÌôî)
+  // 2   ?3   ?      ?                    (?             ? 68???      ?                )
   if (input.qualityScore < 68) {
     return {
       regime: input.regime,
@@ -278,14 +278,14 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
       expected_move: input.expectedMove,
       total_cost: input.totalCost,
       risk_state: input.risk_state,
-      guidance: "Ï∂îÍ≤© ?ÄÍ∏? ?àÏßà ?ïÏù∏ Ï§?,
+      guidance: "FIXED_CORRUPTED_STRING",
       detail: { score: input.qualityScore, floor: 68, currentStage }
     };
   }
 
-  // 2Ï∞?3Ï∞?Ï∂îÍ?ÏßÑÏûÖ
+  // 2   ?3   ?      ?         
   if (currentStage === 1) {
-    // 2Ï∞? EMA20 Î∞òÎì±/?¨Ìïò???úÏûë (Price moving away from e20 in favorable direction)
+    // 2   ? EMA20          /?     ???       (Price moving away from e20 in favorable direction)
     const movingAway = dir === "long" ? input.lastPrice > (e20 ?? 0) * 1.002 : input.lastPrice < (e20 ?? 0) * 0.998;
     if (movingAway) {
       return {
@@ -299,9 +299,9 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
         total_cost: input.totalCost,
         risk_state: input.risk_state,
         target_stage: 2,
-        guidance: "2Ï∞?Î∞òÎì± ?ïÏù∏ Ï∂îÍ?ÏßÑÏûÖ (ÎπÑÏ§ë 30%)",
-        next_action: "3Ï∞??ÑÍ≥†/?ÑÏ? ?åÌåå ?ïÏ†ïÏßÑÏûÖ ?ÄÍ∏?,
-        invalidate_condition: "??∂î???†Ìò∏ Î∞úÏÉù ??,
+        guidance: "FIXED_CORRUPTED_STRING",
+        next_action: "FIXED_CORRUPTED_STRING",
+        invalidate_condition: "FIXED_CORRUPTED_STRING",
         entry_progress: 60,
         detail: { stage: 2 }
       };
@@ -309,7 +309,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
   }
 
   if (currentStage === 2) {
-    // 3Ï∞? ?ÑÍ≥†???ÑÏ????åÌåå (breakoutOk)
+    // 3   ? ?      ???   ????       (breakoutOk)
     if (breakoutOk) {
       return {
         regime: input.regime,
@@ -322,9 +322,9 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
         total_cost: input.totalCost,
         risk_state: input.risk_state,
         target_stage: 3,
-        guidance: "3Ï∞??ÑÍ≥†/?ÑÏ? ?åÌåå ?ïÏ†ïÏßÑÏûÖ (ÎπÑÏ§ë 40%)",
-        next_action: "1Ï∞??µÏ†à ?ÄÍ∏?(RR 1.0 ?ÑÎã¨ ??",
-        invalidate_condition: "?åÌåå ?§Ìå® Î∞?Î∞ïÏä§ Î≥µÍ? ??,
+        guidance: "FIXED_CORRUPTED_STRING",
+        next_action: "FIXED_CORRUPTED_STRING",
+        invalidate_condition: "FIXED_CORRUPTED_STRING",
         entry_progress: 100,
         detail: { stage: 3 }
       };
@@ -341,7 +341,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
     expected_move: input.expectedMove,
     total_cost: input.totalCost,
     risk_state: input.risk_state,
-    guidance: "Ï∂îÍ≤© ?†Ìò∏ ?ÄÍ∏?Î∞?Ï∂îÏÑ∏ Í¥ÄÏ∞?Ï§?,
+    guidance: "FIXED_CORRUPTED_STRING",
     detail: { currentStage, breakout_state }
   };
 }
@@ -365,7 +365,7 @@ export function trendExecutorEvaluateExit(input: Readonly<{
   const maxHoldCostGuardMs = 50 * 60 * 1000;
   const rr = input.pnlPctNet / (atr / input.entryPrice + 1e-9); // Approx RR based on ATR unit
 
-  // 1. ?êÏ†à Ï°∞Í±¥ (Î∞òÎ? Î∞©Ìñ• 1.5 ATR ?¥ÌÉà)
+  // 1. ?                 (      ?           1.5 ATR ?      )
   let stopPrice = 0;
   if (isLong) {
     stopPrice = input.entryPrice - 1.5 * atr;
@@ -374,7 +374,7 @@ export function trendExecutorEvaluateExit(input: Readonly<{
         executor: "TREND",
         action: "close",
         reason: "stop_loss",
-        guidance: "Ï∂îÏÑ∏ Î∞òÏ†Ñ Î∞??êÏ†àÍ∞Ä ?¥ÌÉà",
+        guidance: "FIXED_CORRUPTED_STRING",
         exit_progress: 100,
         stop_price: stopPrice,
         detail: { mark: input.mark, stopPrice }
@@ -387,7 +387,7 @@ export function trendExecutorEvaluateExit(input: Readonly<{
         executor: "TREND",
         action: "close",
         reason: "stop_loss",
-        guidance: "Ï∂îÏÑ∏ Î∞òÏ†Ñ Î∞??êÏ†àÍ∞Ä ?¥ÌÉà",
+        guidance: "FIXED_CORRUPTED_STRING",
         exit_progress: 100,
         stop_price: stopPrice,
         detail: { mark: input.mark, stopPrice }
@@ -400,69 +400,71 @@ export function trendExecutorEvaluateExit(input: Readonly<{
       executor: "TREND",
       action: "close",
       reason: "time_based_exit",
-      guidance: "ÎπÑÏö© Í≤ΩÍ≥† ÏßÑÏûÖ: Î≥¥Ïú† ?úÍ∞Ñ ?ÅÌïú",
+      guidance: "FIXED_CORRUPTED_STRING",
       exit_progress: 100,
       detail: { holdingMs: input.holdingMs, postEntryCostGuard: true }
     };
   }
 
-  // 2. ?µÏ†à Ï°∞Í±¥ (RR Í∏∞Î∞ò Î∂ÑÌï†)
-  // Stage 0 -> 1: RR 1.0 (ATR 1Î∞??òÏùµ)
+  // 2. ?                 (RR                    )
+  // Stage 0 -> 1: RR 1.0 (ATR 1   ??      )
   if (input.partialExitStage === 0) {
     if (input.pnlPctNet >= p1) {
       return {
         executor: "TREND",
         action: "partial_close",
         reason: "partial_exit_1",
-        guidance: "1Ï∞??µÏ†à ?ÑÎã¨ (Ï∂îÏÑ∏ ?†Ï? ?ïÏù∏)",
-        next_action: "2Ï∞??µÏ†à ?ÄÍ∏?(RR 2.0 ?ÑÎã¨ ??",
+        guidance: "FIXED_CORRUPTED_STRING",
+        next_action: "FIXED_CORRUPTED_STRING",
         exit_progress: 30,
         detail: { pnl: input.pnlPctNet, stage: 1 }
       };
     }
   }
 
-  // Stage 1 -> 2: RR 2.0 (ATR 2Î∞??òÏùµ)
+  // Stage 1 -> 2: RR 2.0 (ATR 2   ??      )
   if (input.partialExitStage === 1) {
     if (input.pnlPctNet >= p2) {
       return {
         executor: "TREND",
         action: "partial_close",
         reason: "partial_exit_2",
-        guidance: "2Ï∞??µÏ†à ?ÑÎã¨ (?òÏùµ ?ïÎ≥¥ ?ÑÎ£å)",
-        next_action: "?îÎüâ ?∏Î†à?ºÎßÅ ?§ÌÉë Ï∂îÏ†Å ?úÏûë",
+        guidance: "FIXED_CORRUPTED_STRING",
+        next_action: "FIXED_CORRUPTED_STRING",
         exit_progress: 70,
         detail: { pnl: input.pnlPctNet, stage: 2 }
       };
     }
   }
 
-  // 3. ?∏Î†à?ºÎßÅ ?§ÌÉë (ATR Í∏∞Î∞ò)
+  // 3. ?      ?       ?       (ATR          )
   if (input.partialExitStage >= 1) {
     const extreme = input.trailingExtreme ?? input.mark;
     const trailBuffer = 1.2 * atr;
     const trailLevel = isLong ? extreme - trailBuffer : extreme + trailBuffer;
 
     const hitTrailing = isLong ? input.mark <= trailLevel : input.mark >= trailLevel;
-    if (hitTrailing && input.pnlPctNet >= 0.005) { // ÏµúÏÜå ?òÏùµ ?¥Î≥¥
+    if (hitTrailing && input.pnlPctNet >= 0.005) { //           ?       ?      
       return {
         executor: "TREND",
         action: "close",
         reason: "trailing_stop",
-        guidance: "Ï∂îÏÑ∏ ?îÌôîÎ°??∏Ìïú ?∏Î†à?ºÎßÅ ?§ÌÉë Ï≤¥Í≤∞",
+        guidance: "FIXED_CORRUPTED_STRING",
         exit_progress: 100,
         detail: { mark: input.mark, trailLevel }
       };
     }
   }
 
-  // Í∏∞Î≥∏ ?†Ï?
+  //           ?   ?
   return {
     executor: "TREND",
     action: "hold",
     reason: null,
-    guidance: input.partialExitStage === 0 ? "Ï∂îÏÑ∏ ?ïÏû• Ï§? : "?òÏùµ Î≥¥Ìò∏ Î∞?Ï∂îÏ†Å Ï§?,
-    next_action: input.partialExitStage === 0 ? "1Ï∞??µÏ†à(RR 1.0) ?ÄÍ∏? : "?∏Î†à?ºÎßÅ Ï¢ÖÎ£å ?ÄÍ∏?,
+    guidance:
+      input.partialExitStage === 0 ? "hold_primary_tp_watch" : "scale_out_progress_watch",
+    next_action:
+      input.partialExitStage === 0 ? "WAIT_FOR_PARTIAL_TP_TRIGGER" : "MANAGE_TRAILING_OR_TP",
     exit_progress: input.partialExitStage === 0 ? 15 : input.partialExitStage === 1 ? 55 : 85,
     stop_price: stopPrice,
     detail: { pnl: input.pnlPctNet, partialExitStage: input.partialExitStage }

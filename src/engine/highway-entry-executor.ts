@@ -40,7 +40,7 @@ export function highwayExecutorEvaluateEntry(input: Readonly<{
                 regime: "TREND",
                 executor: "TREND",
                 breakout_state: "none",
-                pullback_state: "unknown",
+                pullback_state: "none",
                 guidance: "Highway: 1m 캔들 부족(워밍업/응답 단축) — hard_invalid 대신 관망",
                 detail: {
                     highway_state: "INVALID",
@@ -70,7 +70,7 @@ export function highwayExecutorEvaluateEntry(input: Readonly<{
                 regime: "TREND",
                 executor: "TREND",
                 breakout_state: "none",
-                pullback_state: "unknown",
+                pullback_state: "none",
                 guidance: "soft-invalid highway: stage1 probe allowed",
                 detail: {
                     highway_state: "INVALID",
@@ -91,7 +91,7 @@ export function highwayExecutorEvaluateEntry(input: Readonly<{
             regime: "TREND",
             executor: "TREND",
             breakout_state: "none",
-            pullback_state: "unknown",
+            pullback_state: "none",
             detail: {
                 highway_state: "INVALID",
                 highway_invalid_tier: invalidTier ?? "hard_invalid",
@@ -154,7 +154,7 @@ export function highwayExecutorEvaluateEntry(input: Readonly<{
         regime: "TREND",
         executor: "TREND",
         breakout_state: "none",
-        pullback_state: "unknown",
+        pullback_state: "none",
         detail: {
             highwayValidity: input.aiScores?.highwayValidityScore,
             intent: input.intentType,

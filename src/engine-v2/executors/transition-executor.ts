@@ -1,4 +1,5 @@
 import { EngineV2Input, ExecutorOutput, MarketJudgmentOutput, TransitionExecutorMetadata, TransitionSetupType } from "../types";
+import { classifyRangeZone } from "../../models/types";
 
 /**
  * Tier 4: Transition Executor (Refined)
@@ -21,7 +22,7 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
     const shortAllow = st.shortAllow !== false;
     const crashState = String(st.crashState ?? "NONE").toUpperCase();
     const pumpState = String(st.pumpState ?? st.pump_state ?? "NONE").toUpperCase();
-    const isMidZone = boxPos > 0.26 && boxPos < 0.74;
+    const isMidZone = classifyRangeZone(boxPos) === "mid";
     const breakoutConfirm = qualityScore >= 65 || reviewingTicks >= 1;
     const transitionPhase = judgment?.transitionPhase ?? "NONE";
     const subtype = judgment?.subtype ?? "TRANSITION_CONFLICT";

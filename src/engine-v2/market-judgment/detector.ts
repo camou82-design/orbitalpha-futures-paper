@@ -383,14 +383,28 @@ function selectSubtype(args: {
     return { subtype: "TRANSITION_CONFLICT", subtypeReason: "transition_conflict" };
 }
 
-function calculateSingleTimeframeBias(candles: Candle[]): string {
+function calculateSingleTimeframeBias(candles: Candle[], symbol: string, tfLabel: string): string {
     if (!candles || candles.length < 60) return "DATA_NOT_READY";
 
     const closes = candles.map((c: Candle) => c.close);
     const ema20 = emaLastFromCloses(closes, 20);
     const ema60 = emaLastFromCloses(closes, 60);
 
-    if (ema20 === null || ema60 === null) return "DATA_NOT_READY";
+    if (ema20 === null || ema60 === null) {
+        if (candles.length >= 60) {
+            console.warn(
+                JSON.stringify({
+                    event: "HTF_BIAS_UNEXPECTED_DATA_NOT_READY_PROOF",
+                    symbol,
+                    tf: tfLabel,
+                    candle_count: candles.length,
+                    ema20_null: ema20 === null,
+                    ema60_null: ema60 === null
+                })
+            );
+        }
+        return "DATA_NOT_READY";
+    }
 
     // Recent structure (High/Low)
     const recent30 = candles.slice(-30);
@@ -418,17 +432,17 @@ function calculateSingleTimeframeBias(candles: Candle[]): string {
     return "CONFLICT";
 }
 
-function calculateMacroBias(htfCandles: Record<string, Candle[]>): { 
+function calculateMacroBias(htfCandles: Record<string, Candle[]>, symbol: string): { 
     biases: { m5: string, m15: string, h1: string, h4: string, d1: string },
     source: MarketJudgmentOutput["macro_source"],
     conflict: boolean
 } {
     const biases = {
-        m5: calculateSingleTimeframeBias(htfCandles["5m"] || []),
-        m15: calculateSingleTimeframeBias(htfCandles["15m"] || []),
-        h1: calculateSingleTimeframeBias(htfCandles["1h"] || []),
-        h4: calculateSingleTimeframeBias(htfCandles["4h"] || []),
-        d1: calculateSingleTimeframeBias(htfCandles["1d"] || [])
+        m5: calculateSingleTimeframeBias(htfCandles["5m"] || [], symbol, "5m"),
+        m15: calculateSingleTimeframeBias(htfCandles["15m"] || [], symbol, "15m"),
+        h1: calculateSingleTimeframeBias(htfCandles["1h"] || [], symbol, "1h"),
+        h4: calculateSingleTimeframeBias(htfCandles["4h"] || [], symbol, "4h"),
+        d1: calculateSingleTimeframeBias(htfCandles["1d"] || [], symbol, "1d")
     };
 
     let readyCount = 0;
@@ -500,7 +514,25 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         no_trade_reason = "DUMP_PROTECTION";
     }
 
-    const htfResult = calculateMacroBias(input.htf_candles ?? input.snapshot.htf_candles ?? {});
+    const htfPack = input.htf_candles ?? input.snapshot.htf_candles ?? {};
+    console.info(
+        JSON.stringify({
+            event: "HTF_CANDLE_FETCH_PROOF",
+            stage: "detector_input",
+            symbol: input.symbol,
+            htf_diagnostics: {
+                "5m": { candle_count: (htfPack["5m"] ?? []).length },
+                "15m": { candle_count: (htfPack["15m"] ?? []).length },
+                "1h": { candle_count: (htfPack["1h"] ?? []).length },
+                "4h": { candle_count: (htfPack["4h"] ?? []).length },
+                "1d": { candle_count: (htfPack["1d"] ?? []).length }
+            },
+            input_htf_candles_keys: input.htf_candles ? Object.keys(input.htf_candles) : [],
+            snapshot_htf_candles_keys: input.snapshot?.htf_candles ? Object.keys(input.snapshot.htf_candles) : []
+        })
+    );
+
+    const htfResult = calculateMacroBias(htfPack, input.symbol);
     const htfBias = htfResult.biases;
     const htfConflict = htfResult.conflict;
 

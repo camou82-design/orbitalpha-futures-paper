@@ -2581,7 +2581,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       risk_state: (input.risk?.riskStatus ?? "NORMAL") as any,
       regime: "RANGE",
       executor: "RANGE",
-      box_position: boxPos <= 0.34 ? "lower" : boxPos >= 0.66 ? "upper" : "middle",
+      box_position: classifyRangeZone(boxPos),
       entryIntentType: entryResult === "RANGE_ENTRY_NONE" ? "probe" : "standard",
       detail: {
         crash_lock_bypass_applied: crashLockBypassApplied,
@@ -2878,7 +2878,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             regime: "TREND",
             executor: "TREND",
             breakout_state: "none",
-            pullback_state: "unknown",
+            pullback_state: "none",
             guidance:
               "諛뺤뒪 ?겶룻븯??洹쇱쿂 TREND: Highway 肄붿뼱 怨쇨꼍吏???RANGE ?ъ젏?섎룄 臾댄슚. ?쎌텛??愿留?HIGHWAY_BOX_EDGE_WATCH).",
             detail: {
@@ -3120,7 +3120,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         execution_state: "PAPER_READY",
         ai_decision: "N/A",
         adaptive_decision: "N/A",
-        guidance: input.isAmbiguous ? "?좊ℓ???μ꽭 愿留?以? : "?곹빀???덉쭚 ?놁쓬",
+        guidance: input.isAmbiguous ? "애매한 장세 관망 중" : "적합한 레짐 없음",
         stage1_result_code: stage1ResultCodeOverride ?? "STAGE1_BLOCKED_REGIME",
         required_move_pct: null,
         shortfall_pct: 0
@@ -3136,7 +3136,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     );
   }
 
-  /** NO_TRADE ??媛먯?湲곗뿉???꾪뿕/?ㅻ쪟쨌?꾩닔 ?곗씠??遺議깅쭔 ??紐⑦샇쨌?쎌텛???깆? NO_TRADE 濡??대━吏 ?딆쓬 */
+  /** NO_TRADE는 감지기에서 위험/오류나 필수 데이터 부족만; 모호함/약세 신호 등은 NO_TRADE로 내리지 않음 */
   if (input.regime === "NO_TRADE") {
     stage1_block_origin = "regime_no_trade_gate";
     reject_reason = "REGIME_NO_TRADE";
@@ -3174,9 +3174,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   rr = rrFromRegime(input.regime);
 
   stage1LoosenedEntry = false;
-  /** Stage 1留? 湲곕??대룞???꾪솕 鍮꾩슜 ?댄븯?щ룄 ?먯깋 吏꾩엯 ?덉슜(?섎뱶 REJECT ???? */
+  /** Stage 1만 기대이동이 완화 비용 이하라도 탐색 진입 허용 (하드 REJECT 우회) */
   costWarningStage1 = false;
 
+  /** Stage 2+ 증액: 비용 대비 기대이동 여유를 Stage 1(초기 진입)보다 엄격하게 요구 */
   const costGateComparable =
     typeof em === "number" &&
     effectiveTotalCost !== null &&
@@ -3190,6 +3191,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_cost_warning_shortfall = em < costThreshold ? costThreshold - em : 0;
     }
     const feeWouldBlock = em <= costThreshold;
+    /** Stage 1만 기대 변동성 게이트 (expected move) 하한 추가 완화; Stage 2+는 기본 대비 강화 */
     if (feeWouldBlock) {
       if (input.currentStage === 0) {
         costWarningStage1 = true;
@@ -3209,7 +3211,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
   }
 
-  /** Stage 2+ 利앹븸: 鍮꾩슜 ?鍮?湲곕??대룞 ?ъ쑀瑜?Stage 1(珥덇린 ??蹂대떎 ?꾧꺽???붽뎄 */
+  /** Stage 2+ 증액: 비용 대비 기대이동 여유를 Stage 1(초기 진입)보다 엄격하게 요구 */
   const stage2plusFeeHeadroomMult = input.currentStage >= 2 ? 1.15 : 1.1;
   if (
     input.currentStage >= 1 &&
@@ -3226,7 +3228,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   }
 
   const minVol = input.config.paperMinEdgeVolatilityMove;
-  /** Stage 1留?湲곕? 蹂??寃뚯씠??expected move) ?섑븳 異붽? ?꾪솕; Stage 2+??湲곕낯 ?鍮?媛뺥솕 */
+  /** Stage 1만 기대 변동성 게이트(expected move) 하한 추가 완화; Stage 2+는 기본 대비 강화 */
   const effectiveMinVol =
     input.currentStage === 0 ? minVol * 0.52 : input.currentStage === 1 ? minVol * 1.1 : minVol * 1.18;
   if (typeof em === "number" && em < effectiveMinVol) {
@@ -3471,7 +3473,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         execution_state: "IDLE",
         ai_decision: "N/A",
         adaptive_decision: "N/A",
-        guidance: "理쒕? ?ъ????꾨떖",
+        guidance: "최대 포지션 달성",
         target_stage: null,
         supplemental_reasons,
         stage1_result_code: "STAGE1_BLOCKED_LIMIT",
@@ -3829,7 +3831,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
             final_decision: "REJECT",
             ai_decision: "REJECT",
             adaptive_decision: "N/A",
-            guidance: `AI ?덉쭏 誘몃떖 嫄곕? (Floor: ${effectiveFloor})`,
+            guidance: `AI 품질 미달 거절 (Floor: ${effectiveFloor})`,
             target_stage: null,
             supplemental_reasons,
             ai_floor_relaxed: aiFloorRelaxed,
@@ -3957,9 +3959,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
 
     /**
-     * Fee-drag (STAGE1_COST_WARNING ?꾩쿂由щ쭔): 鍮꾩슜 寃쎄퀬 瑗щ━?먯꽌 異붽? ?ъ씠利?異뺤냼留?
-     * `return ret(...)`濡?REJECT 湲덉? 쨌 `fee_drag_blocked`????긽 false(?명솚 ?꾨뱶).
-     * `range_lower_long_priority_applied` / `range_upper_short_priority_applied` true硫?fee-drag ?꾩껜 ?ㅽ궢.
+     * Fee-drag (STAGE1_COST_WARNING 처리만): 비용 경고 구역에서 추가 사이즈 축소만
+     * `return ret(...)`로 REJECT 금지; `fee_drag_blocked`항상 false(전환 확인).
+     * `range_lower_long_priority_applied` / `range_upper_short_priority_applied` true이면 fee-drag 전체 스킵.
      */
     const feeDragRangePriorityProtected =
       input.regime === "RANGE" &&
@@ -4037,7 +4039,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
 
     stage1SizeMultFinal = input.currentStage === 0 ? dynamicSizeMult : null;
 
-    /** Stage1 RANGE ?먯깋: ?뚰봽???먯깋쨌?먯?쨌?먮룞吏꾩엯 ?뚰봽?? ?먮뒗 ?ㅽ뻾湲??먯뿰 ?덉슜(?뚰봽???놁쓬). */
+    /** Stage1 RANGE 탐색: 소프트 탐색/자동진입 소프트; 또는 실행기 자체 허용(소프트 없음). */
     const stage1RangeExplorePath =
       stage1ExploreSoftExec ||
       stage1RangeEdgeSoftApplied ||
@@ -4045,9 +4047,9 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         input.autoEntryTriggered === true &&
         (executorBlockReasonOriginal === "trend_not_in_pullback" ||
           executorBlockReasonOriginal === "range_not_in_interest_zone"));
-    /** ?ㅽ뻾湲곌? 蹂꾨룄 ?뚰봽???놁씠 RANGE?먯꽌 ?덉슜??寃쎌슦(?먯? 異⑹” ??. */
+    /** 실행기가 별도 소프트 없이 RANGE에서 허용된 경우(조건 충족 시). */
     const naturalRangeStage1EntryAllowed = input.regime === "RANGE" && input.currentStage === 0 && !stage1SoftExecOverrideFlag;
-    /** EXEC_BLOCKED_RANGE_NOT_LOWER_EDGE ?뚰봽?몃뒗 蹂??꾪솕 ????꾨떂 ???먯씤 釉붾줉?대㈃ adaptive ?뚰봽??鍮꾩쟻?? */
+    /** EXEC_BLOCKED_RANGE_NOT_LOWER_EDGE 소프트는 별도 확인 아니고 엔진 블록이면 adaptive 소프트 탐색 */
     const stage1RangeAdaptiveSoftExplore =
       input.currentStage === 0 &&
       input.regime === "RANGE" &&
@@ -4326,7 +4328,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         execution_state: "DISABLED",
         ai_decision: "APPROVE",
         adaptive_decision: "REJECT",
-        guidance: "Long Only ?쒗븳?쇰줈 ??吏꾩엯 李⑤떒",
+        guidance: "Long Only 제한으로 숏 진입 차단",
         target_stage: null,
         supplemental_reasons,
         stage1_result_code: "STAGE1_BLOCKED_RISK",
@@ -4375,7 +4377,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         execution_state: "ORDER_BUILD_FAIL",
         ai_decision: "APPROVE",
         adaptive_decision: "REJECT",
-        guidance: "吏꾩엯 ?섎웾 0",
+        guidance: "진입 수량 0",
         target_stage: null,
         supplemental_reasons,
         stage1_result_code: "STAGE1_BLOCKED_DATA",
@@ -4408,7 +4410,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   // Round 4 & 5: Stage 1 Execution Pending prioritize
   if (input.currentStage === 0 && input.autoEntryTriggered) {
     execution_state = "STAGE1_EXEC_PENDING";
-    guidanceOut = "Stage 1 ?ㅽ뻾 ?湲?(寃??議곌굔 ?좎?)";
+    guidanceOut = "Stage 1 실행 대기 (검토 조건 유지)";
   }
 
 

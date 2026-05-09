@@ -137,7 +137,6 @@ import {
   rangeAccumulationRecoveryMultiplier,
   RANGE_REOPEN_WINDOW_MS,
   RANGE_ZONE_ACTION_POLICY,
-  classifyBoxZone,
   type RangeProfitTrailState,
   type RangeReopenSoftMetrics
 } from "./range-engine";
@@ -3511,7 +3510,7 @@ export class PaperEngine {
         const sig = snapForDecision.signal;
         const sigSide = sig === "paper_long_candidate" ? "long" : sig === "paper_short_candidate" ? "short" : "none";
         const bp = typeof snapForDecision.boxPos === "number" ? snapForDecision.boxPos : 0.5;
-        const curZone = classifyBoxZone(bp);
+        const curZone = classifyRangeZone(bp);
         let releaseReason: string | null = null;
         if (effectiveRegimeForDecision !== "RANGE") releaseReason = "regime_not_range";
         else if (sigSide === "none") releaseReason = "signal_none";
@@ -3995,7 +3994,7 @@ export class PaperEngine {
           } else if (range_trend_conflict) {
             side_veto_detail = "RANGE_TREND_SIDE_CONFLICT";
           } else if ((!v2Env?.range_side_candidate || v2Env?.range_side_candidate === "none") && v2Env?.trend_side_candidate && v2Env?.trend_side_candidate !== "none" && v2Env?.promotion_applied === false) {
-            side_veto_detail = v2Env?.promotion_block_reason || "TREND_CANDIDATE_NOT_PROMOTED_DETAIL";
+            side_veto_detail = v2Env?.promotion_block_reason || "TREND_PROMOTION_VETOED";
           } else if (size_suppressed_by_recovery) {
             side_veto_detail = "RECOVERY_MODE_SIZE_SUPPRESSED";
           }
@@ -4053,7 +4052,12 @@ export class PaperEngine {
           SHOCK_DOWN_MID_RETEST_REQUIRED: "WAIT_FOR_BREAKDOWN_RETEST_FAILURE",
           SHOCK_DOWN_TREND_CONFIRMATION_WEAK: "WAIT_FOR_TREND_CONFIRMATION",
           RANGE_TREND_SIDE_CONFLICT: "WAIT_FOR_RANGE_TREND_ALIGNMENT",
-          TREND_CANDIDATE_NOT_PROMOTED_DETAIL: "WAIT_FOR_PROMOTION_CONFIRMATION",
+          TREND_PROMOTION_BLOCKED_HTF_DATA_NOT_READY: "WAIT_FOR_HTF_DATA_READY",
+          TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD: "WAIT_FOR_QUALITY_IMPROVEMENT",
+          TREND_PROMOTION_BLOCKED_QUALITY: "WAIT_FOR_QUALITY_IMPROVEMENT",
+          TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED: "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM",
+          TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED: "WAIT_FOR_RECHECK_OR_RETEST",
+          TREND_PROMOTION_VETOED: "WAIT_FOR_PROMOTION_CONFIRMATION",
           RECOVERY_MODE_SIZE_SUPPRESSED: "WAIT_FOR_RECOVERY_MODE_CLEAR_OR_HIGH_CONFIDENCE_RETEST"
         };
         const vetoKey = side_veto_detail != null ? String(side_veto_detail) : "";
@@ -4620,7 +4624,7 @@ export class PaperEngine {
       this.rangeReversalSwitchPendingBySymbol.delete(symKey);
       return;
     }
-    if (snap != null && typeof snap.boxPos === "number" && classifyBoxZone(snap.boxPos) !== p.zone) {
+    if (snap != null && typeof snap.boxPos === "number" && classifyRangeZone(snap.boxPos) !== p.zone) {
       this.rangeReversalSwitchPendingBySymbol.delete(symKey);
     }
   }
@@ -4643,7 +4647,7 @@ export class PaperEngine {
     }
     const pend = this.rangeReversalSwitchPendingBySymbol.get(symKey);
     if (!pend || nowMs > pend.untilMs) return undefined;
-    const z = classifyBoxZone(snap.boxPos);
+    const z = classifyRangeZone(snap.boxPos);
     if (z !== pend.zone) return undefined;
     if (pend.preferredSide === "short" && z === "upper") {
       return { preferredSide: "short", reason: "upper_flatten_to_short_pending" };
@@ -5200,7 +5204,7 @@ export class PaperEngine {
   ): Record<string, unknown> {
     const d = res.decision;
     const boxPos = snap?.boxPos ?? null;
-    const zone = typeof boxPos === "number" && Number.isFinite(boxPos) ? classifyBoxZone(boxPos) : null;
+    const zone = typeof boxPos === "number" && Number.isFinite(boxPos) ? classifyRangeZone(boxPos) : null;
     const sup = d.supplemental_reasons ?? [];
     const raw = snap?.signal ?? null;
     const upperLongRaw = zone === "upper" && raw === "paper_long_candidate";
@@ -7426,7 +7430,7 @@ export class PaperEngine {
           markPrice: closePrice,
           stopPrice: open.stopPrice,
           targetPrice1: open.targetPrice1,
-          tp_status: tpMissing ? "TP 誘몄꽕?? : "TP ?ㅼ젙??,
+          tp_status: tpMissing ? "TP_NOT_SET" : "TP_CONFIGURED",
           trailingStopPrice: open.trailingStopPrice,
           pnlPctNet: m.pnlPctNet,
           isManaged: true,
@@ -7442,7 +7446,7 @@ export class PaperEngine {
           this.logger.info("POSITION_TAKE_PROFIT_EVALUATION_PROOF", {
             symbol: open.symbol,
             tp_triggered: false,
-            status: "?듭젅 誘몄꽕??,
+            status: "tp_not_configured",
             flowId
           });
         }
@@ -10169,7 +10173,7 @@ export class PaperEngine {
         // mid: 臾댁“嫄??좎? 湲덉? ???꾨옒 minHold / candidate_lost 濡?吏꾪뻾
       } else {
         const zk =
-          typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos) ? classifyBoxZone(snap.boxPos) : ("mid" as const);
+          typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos) ? classifyRangeZone(snap.boxPos) : ("mid" as const);
         const keep =
           (open.side === "long" &&
             snap.signal === "paper_long_candidate" &&
@@ -12028,7 +12032,7 @@ export class PaperEngine {
 
       if (this.lastEffectiveLane === "RANGE") {
         const origSnap = input.snapshots.find((s) => s.symbol === first.symbol);
-        const qz = typeof first.boxPos === "number" ? classifyBoxZone(first.boxPos) : null;
+        const qz = typeof first.boxPos === "number" ? classifyRangeZone(first.boxPos) : null;
 
         this.logger.info("RANGE_OPEN_QUEUE_PROOF", {
           symbol: first.symbol,
@@ -12174,7 +12178,7 @@ export class PaperEngine {
         (crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK") &&
         !crashGuardRegimeAwareReleased;
 
-      const zone = typeof first.boxPos === "number" && Number.isFinite(first.boxPos) ? classifyBoxZone(first.boxPos) : null;
+      const zone = typeof first.boxPos === "number" && Number.isFinite(first.boxPos) ? classifyRangeZone(first.boxPos) : null;
       const exDetail = (res.executorDecision?.detail ?? null) as Record<string, unknown> | null;
       const bypassReason =
         typeof exDetail?.crash_lock_bypass_reason === "string" && exDetail.crash_lock_bypass_reason.length > 0
@@ -13399,7 +13403,8 @@ export class PaperEngine {
               note: !reconcileFound ? "actual_position_not_yet_visible_will_reconcile_next_cycle" : "reconciled"
             });
 
-            // [?섏젙 4] actual position 誘명솗?????좉퇋 吏꾩엯 李⑤떒 ?뚮옒洹?            if (!reconcileFound) {
+            // Post-fill: block symbol until live reconcile sees actual position (when payload available).
+            if (!reconcileFound) {
               this.logger.error("V2_POST_FILL_ACTUAL_POSITION_RECONCILE_FAIL_BLOCK_PROOF", {
                 symbol: sym,
                 side: intentSide,
@@ -14096,7 +14101,7 @@ export class PaperEngine {
           ...(res.decision.post_entry_cost_guard === true ? { postEntryCostGuard: true } : {}),
           ...(entryIdentity.attachRangeMetadata
             ? {
-              ...(typeof first.boxPos === "number" ? { rangeEntryBoxPos: first.boxPos, rangeEntryZone: classifyBoxZone(first.boxPos) } : {}),
+              ...(typeof first.boxPos === "number" ? { rangeEntryBoxPos: first.boxPos, rangeEntryZone: classifyRangeZone(first.boxPos) } : {}),
               rangeManagementState: "INIT" as RangeManagementState,
               rangeAddOnUsed: false,
               rangeFirstProfitLocked: false,
@@ -14168,7 +14173,7 @@ export class PaperEngine {
         this.logger.info("STOP_STATE_PROOF", {
           symbol: record.symbol,
           side: record.side,
-          stopPrice_at_entry: record.stopPrice ?? "誘몄꽕??,
+          stopPrice_at_entry: record.stopPrice ?? null,
           entryPrice: record.entryPrice,
           source: typeof res.decision.stopLoss === "number" ? "executor_decision" : "engine_fallback"
         });
@@ -14177,7 +14182,7 @@ export class PaperEngine {
           this.rangeReversalSwitchPendingBySymbol.delete(sym);
         }
         if (this.lastEffectiveLane === "RANGE") {
-          const fillZone = typeof first.boxPos === "number" ? classifyBoxZone(first.boxPos) : null;
+          const fillZone = typeof first.boxPos === "number" ? classifyRangeZone(first.boxPos) : null;
           const origOpen = input.snapshots.find((s) => s.symbol === first.symbol);
           const fillProof = {
             symbol: record.symbol,
@@ -14751,7 +14756,7 @@ export class PaperEngine {
         adaptive_direction: adaptive.direction,
         incremental_usd: incrementalSizeUsd,
         target_stage: targetStage,
-        note: "?곷떒 濡?利앹븸? 蹂꾨룄 釉붾줉?먯꽌 李⑤떒??????濡쒓렇???듦낵??利앹븸留?
+        note: "range_scale_in_long_upper_blocked_logged_separately"
       });
     }
 
@@ -14826,8 +14831,8 @@ export class PaperEngine {
       this.logger.info("STOP_STATE_PROOF", {
         symbol: existing.symbol,
         side: existing.side,
-        stopPrice_before: existing.stopPrice ?? "誘몄꽕??,
-        stopPrice_after: updatedRecord.stopPrice ?? "誘몄꽕??,
+        stopPrice_before: existing.stopPrice ?? null,
+        stopPrice_after: updatedRecord.stopPrice ?? null,
         source: typeof res.decision.stopLoss === "number" ? "executor_decision" : "persisted_value"
       });
     }
@@ -14976,7 +14981,8 @@ export class PaperEngine {
     let rangeSignalKeptByRelax = false;
     if (symbol === "BTCUSDT" && regimeDetected.regime === "RANGE" && entry.signal === "none") {
       if (boxPos !== null && boxRel !== null && boxRel >= 0.0035) {
-        // 媛?μ옄由?湲곗? ?뚰룺 ?뺣?(0.28/0.72 ??0.26/0.74): ?꾨낫 ?몄텧留?        if (boxPos <= 0.26) {
+        // RANGE edge soft candidates use deep box thresholds (0.26 / 0.74).
+        if (boxPos <= 0.26) {
           entry = {
             ...entry,
             signal: "paper_long_candidate",
@@ -15057,18 +15063,18 @@ export class PaperEngine {
 
     if (entrySide !== null) {
       const isRangeRegime = regimeDetected.regime === "RANGE";
-      const hasRangeEdge = boxPos !== null && (boxPos <= 0.35 || boxPos >= 0.65);
+      const hasRangeEdge = boxPos !== null && (boxPos <= 0.38 || boxPos >= 0.62);
       const sideEdgeAligned =
         hasRangeEdge &&
-        ((entrySide === "long" && (boxPos ?? 0.5) <= 0.35) ||
-          (entrySide === "short" && (boxPos ?? 0.5) >= 0.65));
+        ((entrySide === "long" && (boxPos ?? 0.5) <= 0.38) ||
+          (entrySide === "short" && (boxPos ?? 0.5) >= 0.62));
       let rangeSideZoneMismatchReason: string | null = null;
       if (isRangeRegime && typeof boxPos === "number" && Number.isFinite(boxPos)) {
-        if (entrySide === "short" && boxPos <= 0.35) {
+        if (entrySide === "short" && boxPos <= 0.38) {
           rangeSideZoneMismatchReason = "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
-        } else if (entrySide === "long" && boxPos >= 0.65) {
+        } else if (entrySide === "long" && boxPos >= 0.62) {
           rangeSideZoneMismatchReason = "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
-        } else if (boxPos > 0.35 && boxPos < 0.65) {
+        } else if (boxPos > 0.38 && boxPos < 0.62) {
           rangeSideZoneMismatchReason = "RANGE_SIDE_ZONE_MISMATCH_MID_WAIT";
         }
       }

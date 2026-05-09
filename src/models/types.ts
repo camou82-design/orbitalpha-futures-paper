@@ -1124,6 +1124,21 @@ export function classifyRangeZone(boxPos: number | null | undefined): RangeBoxZo
   return "mid";
 }
 
+/**
+ * 보조 진단 전용: 박스 하단/상단 “깊은” 극단. `classifyRangeZone` Primary 밴드(0.38/0.62)와 별개로
+ * 기존 리버설·게이트 휴리스틱(0.26/0.74)과 맞춘다.
+ */
+export const RANGE_ZONE_LOWER_EXTREME_MAX = 0.26;
+export const RANGE_ZONE_UPPER_EXTREME_MIN = 0.74;
+
+export function rangeZoneLowerExtreme(boxPos: number | null | undefined): boolean {
+  return typeof boxPos === "number" && Number.isFinite(boxPos) && boxPos <= RANGE_ZONE_LOWER_EXTREME_MAX;
+}
+
+export function rangeZoneUpperExtreme(boxPos: number | null | undefined): boolean {
+  return typeof boxPos === "number" && Number.isFinite(boxPos) && boxPos >= RANGE_ZONE_UPPER_EXTREME_MIN;
+}
+
 
 /** RANGE 엔진이 심볼·틱마다 유지하는 상태(양방향·박스 기준). */
 export type RangeEngineState = Readonly<{

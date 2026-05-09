@@ -1,4 +1,16 @@
-import { classifyRangeZone, type MarketModeSelectorOutput, type PaperMarketMode, type PaperOpenPositionRecord, type RangeBoxZone, type RangeEngineState } from "../models/types";
+import {
+  classifyRangeZone,
+  type MarketModeSelectorOutput,
+  type PaperMarketMode,
+  type PaperOpenPositionRecord,
+  type RangeBoxZone,
+  type RangeEngineState
+} from "../models/types";
+
+/** @deprecated Use classifyRangeZone — 단일 박스 구간 판정. */
+export function classifyBoxZone(boxPos: number | null | undefined): RangeBoxZone {
+  return classifyRangeZone(boxPos);
+}
 
 export type RangeEngineInput = Readonly<{
   symbol: string;
@@ -317,7 +329,7 @@ export function evaluateRangeReopenAllowed(input: RangeReopenGateInput): Readonl
   }
   const st = input.state;
   if (!st.reopenEligible) {
-    return { allowed: false, blockReason: "紐⑤뱶???ъ쭊??鍮꾪뿀?? };
+    return { allowed: false, blockReason: "mode_reopen_not_eligible" };
   }
   if (st.boxBreakout) {
     return { allowed: false, blockReason: "諛뺤뒪 ?댄깉(遺뺢눼) 援ш컙" };
@@ -339,10 +351,10 @@ export function evaluateRangeReopenAllowed(input: RangeReopenGateInput): Readonl
   const addL = input.intentSide === "long" ? input.proposedEntryUsd : 0;
   const addS = input.intentSide === "short" ? input.proposedEntryUsd : 0;
   if (input.longUsd + addL > input.maxLongExposure * EXPOSURE_HEADROOM) {
-    return { allowed: false, blockReason: "濡??몄텧 ?ъ쑀 遺議? };
+    return { allowed: false, blockReason: "long_exposure_headroom" };
   }
   if (input.shortUsd + addS > input.maxShortExposure * EXPOSURE_HEADROOM) {
-    return { allowed: false, blockReason: "???몄텧 ?ъ쑀 遺議? };
+    return { allowed: false, blockReason: "short_exposure_headroom" };
   }
   return { allowed: true, blockReason: "" };
 }

@@ -82,6 +82,7 @@
     TREND_ENTRY_NOT_PROMOTED: "추세 후보는 있으나 V2 승격 조건 미충족",
     TREND_CANDIDATE_NOT_PROMOTED_DETAIL: "추세 후보 미승격(세부 진행 중)",
     TREND_PROMOTION_BLOCKED_HTF_DATA_NOT_READY: "HTF 데이터 준비 부족(60틱 미만)",
+    TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD: "추세 승격 차단: 진입 품질 점수가 기준 미만",
     TREND_PROMOTION_BLOCKED_QUALITY: "진입 품질 점수 미달",
     TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKOUT_CONFIRMED: "박스 상단: 돌파 후 지지 재확인 필요",
     TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED: "박스 하단: 이탈 후 저항 재확인 필요",
@@ -118,6 +119,7 @@
     SHOCK_DOWN_MID_RETEST_REQUIRED: "하락 충격 후 중간 구간이라 리테스트 확인 대기",
     SHOCK_UP_RECLAIM_NOT_CONFIRMED: "상승 재돌파 후 지지 재확인 미완료",
     SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED: "하락 이탈 후 리테스트 실패 확인 미완료",
+    TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD: "추세 승격 차단: 품질 미달",
     TREND_CANDIDATE_NOT_PROMOTED_DETAIL: "추세 후보 미승격(세부)",
     RECOVERY_MODE_SIZE_SUPPRESSED: "복구 모드로 사이즈 억제",
     RANGE_TREND_SIDE_CONFLICT: "레인지·추세 방향 충돌"
