@@ -25,7 +25,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
   atr: number | null;
   cooldownActive: boolean;
   cooldownRemainingMs: number;
-  /** 현재 들고 있는 단계 (없으면 0) */
+  /** ?�재 ?�고 ?�는 ?�계 (?�으�?0) */
   currentStage?: number;
 } & Record<string, unknown>>): TrendEntryDecision {
   const dir = intentDirection(input.signal);
@@ -36,13 +36,13 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
   const breakoutUp = hasBox ? input.lastPrice >= (input.boxHigh as number) * 1.0006 : null;
   const breakoutDown = hasBox ? input.lastPrice <= (input.boxLow as number) * 0.9994 : null;
   const breakout_state =
-    breakoutUp === null || breakoutDown === null ? "unknown" : breakoutUp ? "breakout_up" : breakoutDown ? "breakout_down" : "none";
+    breakoutUp === null || breakoutDown === null ? "none" : breakoutUp ? "breakout_up" : breakoutDown ? "breakout_down" : "none";
 
   const pullbackLong = e20 !== null ? input.lastPrice <= e20 * 1.006 && input.lastPrice >= e20 * 0.994 : null;
   const pullbackShort = e20 !== null ? input.lastPrice >= e20 * 0.994 && input.lastPrice <= e20 * 1.006 : null;
   const pullback_state =
     pullbackLong === null || pullbackShort === null
-      ? "unknown"
+      ? "none"
       : dir === "long"
         ? pullbackLong
           ? "pullback_ok"
@@ -51,7 +51,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
           ? pullbackShort
             ? "pullback_ok"
             : "pullback_bad"
-          : "unknown";
+          : "none";
 
   if (input.regime !== "TREND" && (input.currentStage ?? 0) !== 0) {
     return {
@@ -197,18 +197,18 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
 
   const currentStage = input.currentStage ?? 0;
 
-  // 가이드 메시지 생성
+  // 가?�드 메시지 ?�성
   let guidance = "";
   if (dir === "long") {
-    if (pullback_state === "pullback_ok") guidance = "추세 상승 중 눌림 발생 (선진입 대기)";
-    else guidance = "추세 상승 중 (눌림 대기)";
+    if (pullback_state === "pullback_ok") guidance = "추세 ?�승 �??�림 발생 (?�진???��?";
+    else guidance = "추세 ?�승 �?(?�림 ?��?";
   } else if (dir === "short") {
-    if (pullback_state === "pullback_ok") guidance = "추세 하락 중 되돌림 발생 (선진입 대기)";
-    else guidance = "추세 하랄 중 (되돌림 대기)";
+    if (pullback_state === "pullback_ok") guidance = "추세 ?�락 �??�돌�?발생 (?�진???��?";
+    else guidance = "추세 ?�랄 �?(?�돌�??��?";
   }
 
   if (currentStage === 0) {
-    // 1차 선진입: EMA20 눌림 확인 OR 고품질 돌파 확인
+    // 1�??�진?? EMA20 ?�림 ?�인 OR 고품�??�파 ?�인
     const canBreakoutRaw = breakoutOk && input.qualityScore > 60; // Allow breakout if high quality
 
     if (!pullbackOk && !canBreakoutRaw) {
@@ -227,7 +227,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
       };
     }
 
-    // 최소 품질 확인 (Stage 1: 48점 이상으로 추가 완화)
+    // 최소 ?�질 ?�인 (Stage 1: 48???�상?�로 추�? ?�화)
     const floor = 48;
     if (input.qualityScore < floor) {
       return {
@@ -240,7 +240,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
         expected_move: input.expectedMove,
         total_cost: input.totalCost,
         risk_state: input.risk_state,
-        guidance: "진입 대기: 추세 반응 약함 (점수 기준 미달)",
+        guidance: "진입 ?��? 추세 반응 ?�함 (?�수 기�? 미달)",
         detail: { score: input.qualityScore, floor }
       };
     }
@@ -256,17 +256,17 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
       total_cost: input.totalCost,
       risk_state: input.risk_state,
       target_stage: 1,
-      guidance: canBreakoutRaw ? "추세 돌파 선진입 실행 (비중 30%)" : "1차 추세 선진입 실행 (비중 30%)",
-      next_action: "2차 반등 확인 추가진입 대기",
-      invalidate_condition: dir === "long" ? "EMA20 하향 돌파 시" : "EMA20 상향 돌파 시",
-      risk_note: input.volumeRatioProxy < 1.1 ? "거래량 다소 부족" : undefined,
-      watch_zone: "EMA20 인근",
+      guidance: canBreakoutRaw ? "추세 ?�파 ?�진???�행 (비중 30%)" : "1�?추세 ?�진???�행 (비중 30%)",
+      next_action: "2�?반등 ?�인 추�?진입 ?��?,
+      invalidate_condition: dir === "long" ? "EMA20 ?�향 ?�파 ?? : "EMA20 ?�향 ?�파 ??,
+      risk_note: input.volumeRatioProxy < 1.1 ? "거래???�소 부�? : undefined,
+      watch_zone: "EMA20 ?�근",
       entry_progress: 30,
       detail: { direction: dir, pullbackOk, breakoutOk: canBreakoutRaw, stage: 1 }
     };
   }
 
-  // 2차/3차 추가진입 로직 (품질 기준 68점 이상으로 강화)
+  // 2�?3�?추�?진입 로직 (?�질 기�? 68???�상?�로 강화)
   if (input.qualityScore < 68) {
     return {
       regime: input.regime,
@@ -278,14 +278,14 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
       expected_move: input.expectedMove,
       total_cost: input.totalCost,
       risk_state: input.risk_state,
-      guidance: "추격 대기: 품질 확인 중",
+      guidance: "추격 ?��? ?�질 ?�인 �?,
       detail: { score: input.qualityScore, floor: 68, currentStage }
     };
   }
 
-  // 2차/3차 추가진입
+  // 2�?3�?추�?진입
   if (currentStage === 1) {
-    // 2차: EMA20 반등/재하락 시작 (Price moving away from e20 in favorable direction)
+    // 2�? EMA20 반등/?�하???�작 (Price moving away from e20 in favorable direction)
     const movingAway = dir === "long" ? input.lastPrice > (e20 ?? 0) * 1.002 : input.lastPrice < (e20 ?? 0) * 0.998;
     if (movingAway) {
       return {
@@ -299,9 +299,9 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
         total_cost: input.totalCost,
         risk_state: input.risk_state,
         target_stage: 2,
-        guidance: "2차 반등 확인 추가진입 (비중 30%)",
-        next_action: "3차 전고/전저 돌파 확정진입 대기",
-        invalidate_condition: "역추세 신호 발생 시",
+        guidance: "2�?반등 ?�인 추�?진입 (비중 30%)",
+        next_action: "3�??�고/?��? ?�파 ?�정진입 ?��?,
+        invalidate_condition: "??��???�호 발생 ??,
         entry_progress: 60,
         detail: { stage: 2 }
       };
@@ -309,7 +309,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
   }
 
   if (currentStage === 2) {
-    // 3차: 전고점/전저점 돌파 (breakoutOk)
+    // 3�? ?�고???��????�파 (breakoutOk)
     if (breakoutOk) {
       return {
         regime: input.regime,
@@ -322,9 +322,9 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
         total_cost: input.totalCost,
         risk_state: input.risk_state,
         target_stage: 3,
-        guidance: "3차 전고/전저 돌파 확정진입 (비중 40%)",
-        next_action: "1차 익절 대기 (RR 1.0 도달 시)",
-        invalidate_condition: "돌파 실패 및 박스 복귀 시",
+        guidance: "3�??�고/?��? ?�파 ?�정진입 (비중 40%)",
+        next_action: "1�??�절 ?��?(RR 1.0 ?�달 ??",
+        invalidate_condition: "?�파 ?�패 �?박스 복�? ??,
         entry_progress: 100,
         detail: { stage: 3 }
       };
@@ -341,7 +341,7 @@ export function trendExecutorEvaluateEntry(input: Readonly<{
     expected_move: input.expectedMove,
     total_cost: input.totalCost,
     risk_state: input.risk_state,
-    guidance: "추격 신호 대기 및 추세 관찰 중",
+    guidance: "추격 ?�호 ?��?�?추세 관�?�?,
     detail: { currentStage, breakout_state }
   };
 }
@@ -365,7 +365,7 @@ export function trendExecutorEvaluateExit(input: Readonly<{
   const maxHoldCostGuardMs = 50 * 60 * 1000;
   const rr = input.pnlPctNet / (atr / input.entryPrice + 1e-9); // Approx RR based on ATR unit
 
-  // 1. 손절 조건 (반대 방향 1.5 ATR 이탈)
+  // 1. ?�절 조건 (반�? 방향 1.5 ATR ?�탈)
   let stopPrice = 0;
   if (isLong) {
     stopPrice = input.entryPrice - 1.5 * atr;
@@ -374,7 +374,7 @@ export function trendExecutorEvaluateExit(input: Readonly<{
         executor: "TREND",
         action: "close",
         reason: "stop_loss",
-        guidance: "추세 반전 및 손절가 이탈",
+        guidance: "추세 반전 �??�절가 ?�탈",
         exit_progress: 100,
         stop_price: stopPrice,
         detail: { mark: input.mark, stopPrice }
@@ -387,7 +387,7 @@ export function trendExecutorEvaluateExit(input: Readonly<{
         executor: "TREND",
         action: "close",
         reason: "stop_loss",
-        guidance: "추세 반전 및 손절가 이탈",
+        guidance: "추세 반전 �??�절가 ?�탈",
         exit_progress: 100,
         stop_price: stopPrice,
         detail: { mark: input.mark, stopPrice }
@@ -400,69 +400,69 @@ export function trendExecutorEvaluateExit(input: Readonly<{
       executor: "TREND",
       action: "close",
       reason: "time_based_exit",
-      guidance: "비용 경고 진입: 보유 시간 상한",
+      guidance: "비용 경고 진입: 보유 ?�간 ?�한",
       exit_progress: 100,
       detail: { holdingMs: input.holdingMs, postEntryCostGuard: true }
     };
   }
 
-  // 2. 익절 조건 (RR 기반 분할)
-  // Stage 0 -> 1: RR 1.0 (ATR 1배 수익)
+  // 2. ?�절 조건 (RR 기반 분할)
+  // Stage 0 -> 1: RR 1.0 (ATR 1�??�익)
   if (input.partialExitStage === 0) {
     if (input.pnlPctNet >= p1) {
       return {
         executor: "TREND",
         action: "partial_close",
         reason: "partial_exit_1",
-        guidance: "1차 익절 도달 (추세 유지 확인)",
-        next_action: "2차 익절 대기 (RR 2.0 도달 시)",
+        guidance: "1�??�절 ?�달 (추세 ?��? ?�인)",
+        next_action: "2�??�절 ?��?(RR 2.0 ?�달 ??",
         exit_progress: 30,
         detail: { pnl: input.pnlPctNet, stage: 1 }
       };
     }
   }
 
-  // Stage 1 -> 2: RR 2.0 (ATR 2배 수익)
+  // Stage 1 -> 2: RR 2.0 (ATR 2�??�익)
   if (input.partialExitStage === 1) {
     if (input.pnlPctNet >= p2) {
       return {
         executor: "TREND",
         action: "partial_close",
         reason: "partial_exit_2",
-        guidance: "2차 익절 도달 (수익 확보 완료)",
-        next_action: "잔량 트레일링 스탑 추적 시작",
+        guidance: "2�??�절 ?�달 (?�익 ?�보 ?�료)",
+        next_action: "?�량 ?�레?�링 ?�탑 추적 ?�작",
         exit_progress: 70,
         detail: { pnl: input.pnlPctNet, stage: 2 }
       };
     }
   }
 
-  // 3. 트레일링 스탑 (ATR 기반)
+  // 3. ?�레?�링 ?�탑 (ATR 기반)
   if (input.partialExitStage >= 1) {
     const extreme = input.trailingExtreme ?? input.mark;
     const trailBuffer = 1.2 * atr;
     const trailLevel = isLong ? extreme - trailBuffer : extreme + trailBuffer;
 
     const hitTrailing = isLong ? input.mark <= trailLevel : input.mark >= trailLevel;
-    if (hitTrailing && input.pnlPctNet >= 0.005) { // 최소 수익 담보
+    if (hitTrailing && input.pnlPctNet >= 0.005) { // 최소 ?�익 ?�보
       return {
         executor: "TREND",
         action: "close",
         reason: "trailing_stop",
-        guidance: "추세 둔화로 인한 트레일링 스탑 체결",
+        guidance: "추세 ?�화�??�한 ?�레?�링 ?�탑 체결",
         exit_progress: 100,
         detail: { mark: input.mark, trailLevel }
       };
     }
   }
 
-  // 기본 유지
+  // 기본 ?��?
   return {
     executor: "TREND",
     action: "hold",
     reason: null,
-    guidance: input.partialExitStage === 0 ? "추세 확장 중" : "수익 보호 및 추적 중",
-    next_action: input.partialExitStage === 0 ? "1차 익절(RR 1.0) 대기" : "트레일링 종료 대기",
+    guidance: input.partialExitStage === 0 ? "추세 ?�장 �? : "?�익 보호 �?추적 �?,
+    next_action: input.partialExitStage === 0 ? "1�??�절(RR 1.0) ?��? : "?�레?�링 종료 ?��?,
     exit_progress: input.partialExitStage === 0 ? 15 : input.partialExitStage === 1 ? 55 : 85,
     stop_price: stopPrice,
     detail: { pnl: input.pnlPctNet, partialExitStage: input.partialExitStage }

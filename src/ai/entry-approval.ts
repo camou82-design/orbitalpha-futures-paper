@@ -60,7 +60,7 @@ export type AiApprovalInput = Readonly<{
   total_cost: number | null;
   box_position?: "upper" | "lower" | "mid";
   breakout_state?: "breakout_up" | "breakout_down" | "none";
-  pullback_state?: "pullback_ok" | "pullback_bad";
+  pullback_state?: "pullback_ok" | "pullback_bad" | "none";
   loss_streak: number;
   last_10_net: number;
   risk_state: "NORMAL" | "LIMITED" | "BLOCKED";
@@ -334,21 +334,17 @@ export function aiApproveEntry(input: AiApprovalInput): AiApprovalOutput {
   let pullback_state: string | null = null;
 
   if (gate_mode === "TREND") {
-    const bs = input.breakout_state ?? "unknown";
-    const ps = input.pullback_state ?? "unknown";
+    const bs = input.breakout_state ?? "none";
+    const ps = input.pullback_state ?? "none";
     breakout_state = bs;
     pullback_state = ps;
     trend_state_gate_applied = true;
 
-    const unknownish = bs === "unknown" || ps === "unknown";
-    const weakish = bs === "none" && ps !== "pullback_ok";
+    const weakish = bs === "none" || ps !== "pullback_ok";
 
-    if (unknownish) {
+    if (weakish) {
       trend_state_gate_mode = "soft_penalty";
-      trend_state_penalty = bs === "unknown" && ps === "unknown" ? 0.65 : 0.72;
-    } else if (weakish) {
-      trend_state_gate_mode = "soft_penalty";
-      trend_state_penalty = 0.78;
+      trend_state_penalty = bs === "none" && ps === "none" ? 0.65 : 0.78;
     }
   }
 

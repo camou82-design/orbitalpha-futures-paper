@@ -48,8 +48,8 @@ export type RangeEntryDecision = Readonly<
 export type TrendEntryDecision = Readonly<
   EntryDecisionBase & {
     executor: "TREND";
-    breakout_state: "breakout_up" | "breakout_down" | "none" | "unknown";
-    pullback_state: "pullback_ok" | "pullback_bad" | "unknown";
+    breakout_state: "breakout_up" | "breakout_down" | "none";
+    pullback_state: "pullback_ok" | "pullback_bad" | "none";
   }
 >;
 
