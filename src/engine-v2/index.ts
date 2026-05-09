@@ -1777,6 +1777,127 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         })
                     );
                 }
+            } else if (
+                !promotionApplied &&
+                (rangeSideCandidate === "long" || trendSideCandidate === "long") &&
+                zone === "lower" &&
+                sideZoneValid === true &&
+                (judgment.htf_entry_policy === "LONG_ONLY_OR_NONE" || judgment.htf_entry_policy === "ALLOW") &&
+                (judgment.macro_source === "actual_candles" || judgment.macro_source === "partial_actual_candles") &&
+                qualityScore >= 60 &&
+                (v2DecisionAfterPromotion === "SKIP" ||
+                    v2DecisionAfterPromotion === "HOLD" ||
+                    v2DecisionAfterPromotion === "REJECT")
+            ) {
+                const macroSrc = judgment.macro_source ?? "data_not_ready";
+                const htfPol = judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT";
+                const chaseBlockedLower = (execMeta as Record<string, unknown>).late_chase_blocked === true;
+                const retestReqLower = (execMeta as Record<string, unknown>).retest_required === true;
+                const reclaimReqLower = (execMeta as Record<string, unknown>).reclaim_required === true;
+
+                const boxHighL = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+                const boxLowL = Number(authoritativeInput.snapshot.boxLow ?? 0);
+                const boxMidL = (boxHighL + boxLowL) / 2;
+                const atrL = Number(authoritativeInput.snapshot.atr ?? 0);
+                const entryPxL = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+                const minProfitL = Math.max(atrL * 0.35, entryPxL * 0.001);
+                const minStopL = Math.max(atrL * 0.5, entryPxL * 0.0015);
+                let stopPxL = Math.min(boxLowL - minStopL, entryPxL - minStopL);
+                let tp1L = Math.max(boxMidL, entryPxL + minProfitL);
+                if (tp1L <= entryPxL) tp1L = entryPxL + minProfitL;
+                let tp2L = Math.max(boxHighL, tp1L + minProfitL);
+                if (tp2L <= tp1L) tp2L = tp1L + minProfitL;
+                const boxHeightL = boxHighL - boxLowL;
+                const boxHeightPctL = boxLowL > 0 ? boxHeightL / boxLowL : 0;
+                const longOrderOkL =
+                    stopPxL < entryPxL && entryPxL < tp1L && tp1L < tp2L;
+                const planInvalidL =
+                    !Number.isFinite(entryPxL) ||
+                    entryPxL <= 0 ||
+                    !Number.isFinite(tp1L) ||
+                    !Number.isFinite(tp2L) ||
+                    !Number.isFinite(stopPxL) ||
+                    tp1L <= 0 ||
+                    tp2L <= 0 ||
+                    stopPxL <= 0 ||
+                    boxHeightPctL < 0.0008 ||
+                    !longOrderOkL;
+
+                type LowerLongGate = string | null;
+                let lowerLongGate: LowerLongGate = null;
+                if (chaseBlockedLower) lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_CHASE_BLOCKED";
+                else if (!(riskLongAllow && allowNewLong)) {
+                    lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_LONG_NOT_ALLOWED";
+                } else if (!paperExecutionReady || !signedExecutionReady) {
+                    lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_EXECUTION_READINESS";
+                } else if (hasSameSidePosition || hasOppositeSidePosition) {
+                    lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_POSITION_CONFLICT";
+                } else if (hardBlockPresent) lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_HARD_BLOCK";
+                else if (!(stopPxL > 0 && stopPxL < entryPxL)) {
+                    lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_STOP_PRICE_MISSING";
+                } else if (planInvalidL) lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_TP_SL_PLAN_INVALID";
+
+                if (lowerLongGate != null) {
+                    promotionBlockReason = lowerLongGate;
+                    expectedMissingCondition = lowerLongGate;
+                    expectedNextAction = "WAIT_FOR_LOWER_LONG_REACTION_PROBE_GATE";
+                    console.info(
+                        JSON.stringify({
+                            event: "V2_LOWER_LONG_REACTION_PROBE_GATE_SKIP_PROOF",
+                            symbol: String(input.symbol),
+                            gate_reason: lowerLongGate,
+                            zone,
+                            qualityScore,
+                            range_side_candidate: rangeSideCandidate,
+                            trend_side_candidate: trendSideCandidate,
+                            side_zone_valid: sideZoneValid,
+                            htf_entry_policy: htfPol,
+                            macro_source: macroSrc,
+                            chase_blocked: chaseBlockedLower,
+                            retest_required: retestReqLower,
+                            reclaim_required: reclaimReqLower,
+                            paper_execution_ready: paperExecutionReady,
+                            signed_execution_ready: signedExecutionReady,
+                            decision_before_gate: v2DecisionAfterPromotion
+                        })
+                    );
+                } else {
+                    v2DecisionAfterPromotion = "ENTER";
+                    v2SideAfterPromotion = "long";
+                    v2RejectReasonAfterPromotion = null;
+                    promotionApplied = true;
+                    promotionReason = "V2_LOWER_LONG_REACTION_PROBE_PROMOTION";
+                    promotionBlockReason = null;
+                    promotionMinConditionPassed = true;
+                    v2CalculatedInvalidationPx = stopPxL;
+
+                    console.info(
+                        JSON.stringify({
+                            event: "V2_TREND_PROMOTION_TO_ENTER_PROOF",
+                            symbol: String(input.symbol),
+                            side: "long",
+                            zone,
+                            qualityScore,
+                            htf_entry_policy: htfPol,
+                            htf_size_multiplier:
+                                typeof judgment.htf_size_multiplier === "number"
+                                    ? judgment.htf_size_multiplier
+                                    : null,
+                            htf_requires_stronger_confirmation: judgment.htf_requires_stronger_confirmation ?? false,
+                            entryPx: entryPxL,
+                            stopPrice: stopPxL,
+                            tp1: tp1L,
+                            tp2: tp2L,
+                            finalDecision: "ENTER",
+                            promotion_reason: promotionReason,
+                            macro_source: macroSrc,
+                            retest_required: retestReqLower,
+                            reclaim_required: reclaimReqLower,
+                            micro_probe_cap_forced: retestReqLower || reclaimReqLower,
+                            side_zone_valid: sideZoneValid
+                        })
+                    );
+                }
             } else if (qualityScore < 70) {
                 promotionBlockReason = "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD";
                 expectedNextAction = "WAIT_FOR_QUALITY_IMPROVEMENT";
@@ -1911,7 +2032,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2SideAfterPromotion;
 
     const upperLongProbePromotion = promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
-    if (v2DecisionAfterPromotion === "ENTER" && !upperLongProbePromotion) {
+    const lowerLongProbePromotion = promotionReason === "V2_LOWER_LONG_REACTION_PROBE_PROMOTION";
+    if (v2DecisionAfterPromotion === "ENTER" && !upperLongProbePromotion && !lowerLongProbePromotion) {
         v2SideAfterPromotion = selectedSideFinal;
     }
 
@@ -1942,7 +2064,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             vetoReason = "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
         } else if (rangeDowngradedHardBlock) {
             vetoReason = "RANGE_SIGNAL_DOWNGRADED_NOT_RELAXED";
-        } else if (entryCandidateHardBlock && !upperLongProbePromotion) {
+        } else if (entryCandidateHardBlock && !upperLongProbePromotion && !lowerLongProbePromotion) {
             vetoReason = "ENTRY_CANDIDATE_FALSE_VETO";
         } else if (trendPromotionHardBlock) {
             vetoReason = "TREND_PROMOTION_BLOCKED_TREND_NOT_OK";
@@ -2049,7 +2171,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionReason === "V2_WAIT_RECHECK_QUALIFIED_PROMOTION" ||
         promotionReason === "SHOCK_REACTION_DOWN_MID_MOMENTUM_CONFIRMED" ||
         promotionReason === "V2_TRANSITION_WATCH_SHORT_PROBE" ||
-        promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
+        promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION" ||
+        promotionReason === "V2_LOWER_LONG_REACTION_PROBE_PROMOTION";
 
     if (finalDecision === "ENTER") {
         riskSizing.appliedLeverage = appliedLeverage;
