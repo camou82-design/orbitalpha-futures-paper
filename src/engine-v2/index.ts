@@ -2134,8 +2134,30 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         side_override_applied: !!execMeta.sideOverrideApplied
     }));
 
+    // Polarity Check V2: Strict suppression for HTF mismatch
+    if (judgment.polarityMismatch && (v2DecisionAfterPromotion === "ENTER" || promotionApplied)) {
+        const macroPol = judgment.macroPolarity;
+        const finalSide = v2SideAfterPromotion;
+        if (macroPol === "BULLISH" && finalSide === "short") {
+            v2DecisionAfterPromotion = "HOLD";
+            v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
+            promotionApplied = false;
+            promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
+            expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
+            expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+        } else if (macroPol === "BEARISH" && finalSide === "long") {
+            v2DecisionAfterPromotion = "HOLD";
+            v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
+            promotionApplied = false;
+            promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
+            expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
+            expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+        }
+    }
+
     finalDecision = v2DecisionAfterPromotion;
     blockReason = v2RejectReasonAfterPromotion;
+
     const decisionAfterReadiness: EngineV2FinalDecision = finalDecision;
 
     // Live order size authority: fixed 10x leverage + strict env notional cap.
@@ -3184,7 +3206,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             htf_hard_block_reason: judgment.htf_hard_block_reason ?? null,
             counter_trend_risk: judgment.counter_trend_risk ?? false,
             htf_size_multiplier: judgment.htf_size_multiplier ?? 1.0,
-            htf_requires_stronger_confirmation: judgment.htf_requires_stronger_confirmation ?? false
+            htf_requires_stronger_confirmation: judgment.htf_requires_stronger_confirmation ?? false,
+            macro_polarity: judgment.macroPolarity ?? "NEUTRAL",
+            polarity_mismatch: judgment.polarityMismatch ?? false
         },
         v2ExitAuthority: v2ExitAuthority ?? undefined,
         v2PartialAuthority: v2PartialAuthority ?? undefined,
@@ -3204,6 +3228,29 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2PartialShouldPartial: v2PartialAuthority?.shouldPartial ?? false
         }
     };
+    
+    // Audit Coverage for all suppression paths
+    if (finalDecision !== "ENTER") {
+        console.info(JSON.stringify({
+            event: "V2_NO_ENTER_PATH_AUDIT_PROOF",
+            symbol: String(input.symbol),
+            final_decision: finalDecision,
+            regime: judgment.regime,
+            subtype: judgment.subtype,
+            side_candidate: v2SideAfterPromotion || v2SideBeforePromotion || "none",
+            macro_polarity: judgment.macroPolarity ?? "NEUTRAL",
+            htf_policy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+            polarity_mismatch: judgment.polarityMismatch ?? false,
+            promotion_applied: promotionApplied,
+            promotion_reason: promotionReason,
+            promotion_block_reason: promotionBlockReason,
+            expected_missing_condition: expectedMissingCondition ?? (v2DecisionAfterPromotion === "SKIP" ? (v2RejectReasonAfterPromotion || "MIN_QUALITY_NOT_MET") : null),
+            expected_next_action: expectedNextAction ?? (v2DecisionAfterPromotion === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY"),
+            quality_score: qualityScore,
+            counter_trend_risk: judgment.counter_trend_risk ?? false
+        }));
+    }
+
 
     console.info(JSON.stringify({
         event: "V2_ENTRY_EXECUTION_BRIDGE_PROOF",

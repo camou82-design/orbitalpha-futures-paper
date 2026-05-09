@@ -585,6 +585,8 @@ export interface MarketJudgmentOutput {
         d1: string;
     };
     macro_source?: "actual_candles" | "partial_actual_candles" | "market_subtype_proxy_fallback" | "data_not_ready";
+    macroPolarity?: "BULLISH" | "BEARISH" | "NEUTRAL";
+    polarityMismatch?: boolean;
     daily_bias_actual?: string;
     h4_bias_actual?: string;
     h1_bias_actual?: string;

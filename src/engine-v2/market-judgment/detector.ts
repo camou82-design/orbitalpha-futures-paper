@@ -432,10 +432,38 @@ function calculateSingleTimeframeBias(candles: Candle[], symbol: string, tfLabel
     return "CONFLICT";
 }
 
+function deriveMacroPolarity(biases: { m5: string, m15: string, h1: string, h4: string, d1: string }): "BULLISH" | "BEARISH" | "NEUTRAL" {
+    let bullishScore = 0;
+    let bearishScore = 0;
+    
+    // Weighting: 1H(2), 4H(3), 1D(3) are more authoritative for macro polarity
+    const weights: Record<string, number> = {
+        m5: 1,
+        m15: 1,
+        h1: 2,
+        h4: 3,
+        d1: 3
+    };
+
+    for (const [tf, bias] of Object.entries(biases)) {
+        const w = weights[tf] || 1;
+        if (bias === "BULLISH") bullishScore += w;
+        else if (bias === "BEARISH") bearishScore += w;
+    }
+
+    // Total possible score = 1+1+2+3+3 = 10
+    // Threshold 5 ensures it's not just a minor noise
+    if (bullishScore >= 5 && bullishScore > bearishScore) return "BULLISH";
+    if (bearishScore >= 5 && bearishScore > bullishScore) return "BEARISH";
+    
+    return "NEUTRAL";
+}
+
 function calculateMacroBias(htfCandles: Record<string, Candle[]>, symbol: string): { 
     biases: { m5: string, m15: string, h1: string, h4: string, d1: string },
     source: MarketJudgmentOutput["macro_source"],
-    conflict: boolean
+    conflict: boolean,
+    macroPolarity: "BULLISH" | "BEARISH" | "NEUTRAL"
 } {
     const biases = {
         m5: calculateSingleTimeframeBias(htfCandles["5m"] || [], symbol, "5m"),
@@ -458,8 +486,9 @@ function calculateMacroBias(htfCandles: Record<string, Candle[]>, symbol: string
     else source = "data_not_ready";
 
     const conflict = (biases.m5 === "BULLISH" && biases.m15 === "BEARISH") || (biases.m5 === "BEARISH" && biases.m15 === "BULLISH");
+    const macroPolarity = deriveMacroPolarity(biases);
 
-    return { biases, source, conflict };
+    return { biases, source, conflict, macroPolarity };
 }
 
 export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
@@ -719,6 +748,36 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         htfEntryPolicy = "SHORT_ONLY_OR_NONE";
     }
 
+    // Polarity Invariant Check: Ensure policy doesn't hard-contradict macro trend
+    const macroPolarity = htfResult.macroPolarity;
+    let polarity_mismatch = false;
+    
+    if (macroPolarity === "BULLISH" && htfEntryPolicy === "SHORT_ONLY_OR_NONE") {
+        polarity_mismatch = true;
+        htfEntryPolicy = "HOLD"; // Downgrade absolute short-only to HOLD if macro is BULLISH
+        htfPolicyReason = "POLARITY_MISMATCH_BULLISH_MACRO_LIMITS_SHORT_SHOCK";
+        expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+    } else if (macroPolarity === "BEARISH" && htfEntryPolicy === "LONG_ONLY_OR_NONE") {
+        polarity_mismatch = true;
+        htfEntryPolicy = "HOLD"; // Downgrade absolute long-only to HOLD if macro is BEARISH
+        htfPolicyReason = "POLARITY_MISMATCH_BEARISH_MACRO_LIMITS_LONG_SHOCK";
+        expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+    }
+
+    console.info(JSON.stringify({
+        event: "V2_HTF_POLICY_POLARITY_INVARIANT_PROOF",
+        symbol: String(input.symbol),
+        macro_polarity: macroPolarity,
+        raw_policy_before_invariant: shockPhase === "UP_SHOCK" ? "LONG_ONLY_OR_NONE" : (shockPhase === "DOWN_SHOCK" ? "SHORT_ONLY_OR_NONE" : "ALLOW"),
+        final_policy: htfEntryPolicy,
+        polarity_mismatch,
+        shock_phase: shockPhase,
+        h1_bias: htfBias.h1,
+        h4_bias: htfBias.h4,
+        d1_bias: htfBias.d1,
+        counter_trend_risk: counterTrendRisk
+    }));
+
     const output: MarketJudgmentOutput = {
         regime,
         regime_final,
@@ -745,6 +804,8 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         },
         htf_bias: htfBias,
         macro_source: htfResult.source,
+        macroPolarity,
+        polarityMismatch: polarity_mismatch,
         daily_bias_actual: htfBias.d1,
         h4_bias_actual: htfBias.h4,
         h1_bias_actual: htfBias.h1,
