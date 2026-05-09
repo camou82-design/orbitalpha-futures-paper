@@ -40,11 +40,16 @@ async function main(): Promise<void> {
     }
   };
 
-  await runOnceSafe("initial");
+  const scheduleNext = () => {
+    const { intervalMs: currentInterval } = getPaperLoopIntervalMs(process.env);
+    setTimeout(async () => {
+      await runOnceSafe("interval");
+      scheduleNext();
+    }, currentInterval);
+  };
 
-  setInterval(() => {
-    void runOnceSafe("interval");
-  }, intervalMs);
+  await runOnceSafe("initial");
+  scheduleNext();
 }
 
 main().catch((err) => {

@@ -3115,7 +3115,15 @@ export class PaperEngine {
     let v2_decision_ms = 0;
     let entry_queue_consume_ms = 0;
     let bundle_write_ms = 0;
+
+    let pre_tick_setup_ms = 0;
+    let report_write_ms = 0;
+    let history_write_ms = 0;
+    let dashboard_bundle_prepare_ms = 0;
+    let bundle_file_write_ms = 0;
+    let post_tick_cleanup_ms = 0;
     this.engineLastTickAt = tickNow;
+    const tPre0 = Date.now();
     await this.loadServerTradeControlState(tickNow);
     this.logger.info("TRADE_CONTROL_STATE_PROOF", {
       serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
@@ -3142,6 +3150,7 @@ export class PaperEngine {
     this.rangeReversalExitThisTickBySymbol.clear();
     await this.positions.ensureHistoryFile();
     this.positionTrackingAlive = true;
+    pre_tick_setup_ms = Date.now() - tPre0;
 
     // --- 1. Ledger Integrity: High-Fidelity Position Normalization Promotion ---
     const allOpensForNormalization = await this.positions.loadOpenAll();
@@ -3181,8 +3190,10 @@ export class PaperEngine {
     await this.runPositionStateReconciliation(Date.now());
     okx_position_reconcile_ms = Date.now() - tRec0;
     this.evaluateReadinessTransition(Date.now());
+    const tHist0 = Date.now();
     const history = await this.store.readPositionsHistory();
     await this.refreshEntryQualitySamples(history as PaperClosedPositionRecord[]);
+    history_write_ms = Date.now() - tHist0; // naming it history_write_ms for convention, though it's read+refresh here
 
     const allowed = new Set<MarketSymbol>(["BTCUSDT", "ETHUSDT"]);
     const symbols = this.config.symbols.filter((s) => allowed.has(s));
@@ -4345,6 +4356,7 @@ export class PaperEngine {
           : null;
         const statusBlockedReasonFinal = statusRelaxBypass ? null : statusBlockedReasonOriginal;
 
+        const tRep0 = Date.now();
         await this.store.writeJson("reports/engine-state.json", {
           generatedAt: fetchedAt,
           market_mode_selector: this.lastMarketMode,
@@ -4459,6 +4471,7 @@ export class PaperEngine {
           position_ops_surface: this.lastPositionOpsSurface,
           ...balanceDisplay
         });
+        report_write_ms = Date.now() - tRep0;
         this.logger.info("LIVE_LEVERAGE_USAGE_PROOF", {
           ts: fetchedAt,
           ...balanceDisplay,
@@ -4480,18 +4493,22 @@ export class PaperEngine {
     // Cleanup memory for stale symbols
     const openAfterEntries = await this.positions.loadOpenAll();
     const openSyms = new Set(openAfterEntries.map(o => String(o.symbol)));
+    const tCleanup0 = Date.now();
     this.rangeRuntimeBySymbol.forEach((_, symKey) => {
       if (!openSyms.has(symKey)) {
         this.trendHoldMemoryBySymbol.delete(symKey);
         this.trendPyramidLevelBySymbol.delete(symKey);
-        // ... other prune logic
         this.regimeExitConsumedBySymbol.delete(symKey);
       }
     });
+    post_tick_cleanup_ms = Date.now() - tCleanup0;
 
     try {
       const tBundle0 = Date.now();
       const balanceDisplay = this.buildBalanceDisplayContext(openAfterEntries);
+      dashboard_bundle_prepare_ms = Date.now() - tBundle0;
+
+      const tBundleFile0 = Date.now();
       const summary = await this.positions.refreshSummaryReport({
         okx_balance_mode: balanceDisplay.okx_balance_mode,
         okx_balance_source: balanceDisplay.okx_balance_source,
@@ -4505,6 +4522,8 @@ export class PaperEngine {
         okx_balance_fresh: balanceDisplay.okx_balance_fresh,
         okx_balance_error: balanceDisplay.okx_balance_error
       });
+      bundle_file_write_ms = Date.now() - tBundleFile0;
+      bundle_write_ms = Date.now() - tBundle0;
       this.bundleLastWrittenAt = Date.now();
       this.bundleWriterReady = true;
       this.evaluateReadinessTransition(Date.now());
@@ -4552,7 +4571,6 @@ export class PaperEngine {
         loop_delay_reason: this.loopDelayReason,
         ...balanceDisplay
       });
-      bundle_write_ms = Date.now() - tBundle0;
     } catch (e) {
       this.bundleWriterReady = false;
       this.evaluateReadinessTransition(Date.now());
@@ -4563,8 +4581,10 @@ export class PaperEngine {
     this.loopIntervalTargetMs = nextLoopDelayMs;
     this.loopDelayReason = loopDelayReasonResolved;
     const total_loop_ms = Date.now() - loopWallStart;
-    this.lastLoopFinishedAt = Date.now();
     this.lastLoopDurationMs = total_loop_ms;
+
+    const measured_sum = market_data_fetch_ms + htf_fetch_ms + v2_decision_ms + snapshot_write_ms + bundle_write_ms + okx_balance_ms + okx_position_reconcile_ms + entry_queue_consume_ms + pre_tick_setup_ms + report_write_ms + history_write_ms + post_tick_cleanup_ms;
+    const unmeasured_ms = Math.max(0, total_loop_ms - measured_sum);
 
     const phaseRows: [string, number][] = [
       ["market_data_fetch_ms", market_data_fetch_ms],
@@ -4574,7 +4594,12 @@ export class PaperEngine {
       ["bundle_write_ms", bundle_write_ms],
       ["okx_balance_ms", okx_balance_ms],
       ["okx_position_reconcile_ms", okx_position_reconcile_ms],
-      ["entry_queue_consume_ms", entry_queue_consume_ms]
+      ["entry_queue_consume_ms", entry_queue_consume_ms],
+      ["pre_tick_setup_ms", pre_tick_setup_ms],
+      ["report_write_ms", report_write_ms],
+      ["history_write_ms", history_write_ms],
+      ["post_tick_cleanup_ms", post_tick_cleanup_ms],
+      ["unmeasured_ms", unmeasured_ms]
     ];
     const longestPhase = phaseRows.reduce(
       (best, cur) => (cur[1] > best[1] ? cur : best),
@@ -4588,15 +4613,24 @@ export class PaperEngine {
       v2_decision_ms,
       snapshot_write_ms,
       bundle_write_ms,
+      bundle_prepare_ms: dashboard_bundle_prepare_ms,
+      bundle_file_write_ms,
       okx_balance_ms,
       okx_position_reconcile_ms,
       entry_queue_consume_ms,
+      pre_tick_setup_ms,
+      report_write_ms,
+      history_write_ms,
+      post_tick_cleanup_ms,
+      unmeasured_ms,
       total_loop_ms,
       next_loop_delay_ms: nextLoopDelayMs,
       longest_phase_key: longestPhase[0],
       longest_phase_ms: longestPhase[1],
       loop_delay_reason: loopDelayReasonResolved
     });
+
+    this.lastLoopFinishedAt = Date.now();
 
     if (errors.length > 0) {
       throw new Error(`runOnce failed for ${errors.length} symbol(s)`);
