@@ -2,6 +2,7 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 
+import { classifyRangeZone } from "../models/types";
 import type {
   EngineConfig,
   MarketSymbol,
@@ -18,8 +19,7 @@ import type {
   TrendBreakoutDirection,
   PaperSignalState,
   PaperMarketMode,
-  PaperCloseSource,
-  classifyRangeZone
+  PaperCloseSource
 } from "../models/types";
 
 import type { Logger } from "../logs/logger";
@@ -119,7 +119,7 @@ import {
   normalizePositionSideLower
 } from "../engine-v2/reconciler";
 
-/** RANGE 1m edge reversal candle 레거시 게이트 — V2 실행 봉투가 ENTER·무하드블록일 때 최종 실행 경로를 막지 않도록 분리한다. */
+/** RANGE 1m edge reversal candle ?덇굅??寃뚯씠????V2 ?ㅽ뻾 遊됲닾媛 ENTER쨌臾댄븯?쒕툝濡앹씪 ??理쒖쥌 ?ㅽ뻾 寃쎈줈瑜?留됱? ?딅룄濡?遺꾨━?쒕떎. */
 const LEGACY_RANGE_EDGE_NO_REVERSAL_REJECTS = new Set<string>([
   "RANGE_LOWER_LONG_NO_REVERSAL_CONFIRMATION",
   "RANGE_UPPER_SHORT_NO_REVERSAL_CONFIRMATION"
@@ -157,24 +157,22 @@ const EP = {
 const SAME_DIR_REENTRY_COOLDOWN_MULT = 1.35;
 const RANGE_REVERSAL_SWITCH_PENDING_MS = 90_000;
 
-/** 진입 직후 entry identity 레인 유지: 장세·레인 전환성 전량 청산만 이 구간에서 금지(손절·노출 한도 등은 허용). */
+/** 吏꾩엯 吏곹썑 entry identity ?덉씤 ?좎?: ?μ꽭쨌?덉씤 ?꾪솚???꾨웾 泥?궛留???援ш컙?먯꽌 湲덉?(?먯젅쨌?몄텧 ?쒕룄 ?깆? ?덉슜). */
 const ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS = 120_000;
 
 /**
- * Partial 이후 잔여 포지션 보호 구간(ms).
- * 부분청산(TP_PARTIAL / PARTIAL_SPLIT) 직후 SIGNAL_LOST / REGIME_EXIT 과민 청산 차단.
- * STRUCTURAL / TREND_BREAK / CRASH_FORCE 는 이 구간에서도 예외적으로 청산 허용.
+ * Partial ?댄썑 ?붿뿬 ?ъ???蹂댄샇 援ш컙(ms).
+ * 遺遺꾩껌??TP_PARTIAL / PARTIAL_SPLIT) 吏곹썑 SIGNAL_LOST / REGIME_EXIT 怨쇰? 泥?궛 李⑤떒.
+ * STRUCTURAL / TREND_BREAK / CRASH_FORCE ????援ш컙?먯꽌???덉쇅?곸쑝濡?泥?궛 ?덉슜.
  */
-const POST_PARTIAL_REGIME_PROTECT_MS = 3 * 60_000; // 3분
-
+const POST_PARTIAL_REGIME_PROTECT_MS = 3 * 60_000; // 3遺?
 /**
- * Crash guard 자동 해제 유예 시간(ms): CRASH_EXIT/LOCK 발생 후 이 시간이 지나고
- * activeEngine 이 RANGE 로 전환돼 있으면 롱 진입 차단을 해제한다.
- * 극단 크래시 직후 무기한 block 방지.
+ * Crash guard ?먮룞 ?댁젣 ?좎삁 ?쒓컙(ms): CRASH_EXIT/LOCK 諛쒖깮 ?????쒓컙??吏?섍퀬
+ * activeEngine ??RANGE 濡??꾪솚???덉쑝硫?濡?吏꾩엯 李⑤떒???댁젣?쒕떎.
+ * 洹밸떒 ?щ옒??吏곹썑 臾닿린??block 諛⑹?.
  */
-const CRASH_GUARD_REGIME_AWARE_RELEASE_MS = 5 * 60_000; // 5분
-
-/** RANGE 캠페인: 심볼 1회전당 총 배정의 80%만 사용(초기 40% + 추가 40%, 보류 20%). */
+const CRASH_GUARD_REGIME_AWARE_RELEASE_MS = 5 * 60_000; // 5遺?
+/** RANGE 罹좏럹?? ?щ낵 1?뚯쟾??珥?諛곗젙??80%留??ъ슜(珥덇린 40% + 異붽? 40%, 蹂대쪟 20%). */
 const RANGE_CAMPAIGN_TOTAL_RATIO = 0.8;
 const RANGE_INITIAL_RATIO = 0.4;
 const RANGE_ADD_ON_RATIO = 0.4;
@@ -195,7 +193,7 @@ type RangeReversalImmediateSwitchArg = Readonly<{
   | "lower_flatten_to_long_pending";
 }>;
 
-/** RANGE 청산·유지 정책용 박스 위치 구간 (상단 ≥0.62, 하단 ≤0.38). */
+/** RANGE 泥?궛쨌?좎? ?뺤콉??諛뺤뒪 ?꾩튂 援ш컙 (?곷떒 ??.62, ?섎떒 ??.38). */
 
 
 const ENTRY_SIGNAL_LOST_PROTECT_MS = 10 * 60_000;
@@ -222,7 +220,7 @@ function computeEntryEvidenceScore(input: {
   if (input.candidateStrength === "strong") score += 20;
   else if (input.candidateStrength === "weak") score += 8;
   if (input.activeEngine === "RANGE" && typeof input.boxPos === "number") {
-    const zone = classifyRangeActionZone(input.boxPos);
+    const zone = classifyRangeZone(input.boxPos);
     if ((input.side === "short" && zone === "upper") || (input.side === "long" && zone === "lower")) score += 20;
   }
   if (input.activeEngine === "TREND") {
@@ -282,7 +280,7 @@ type SymbolSnapshot = Readonly<{
   emaGap: number | null;
   volumeRatioProxy: number;
   authoritySource?: "v1" | "v2";
-  /** RANGE/TREND 판단용 박스(최근 1m) */
+  /** RANGE/TREND ?먮떒??諛뺤뒪(理쒓렐 1m) */
   boxHigh: number | null;
   boxLow: number | null;
   boxPos: number | null;
@@ -519,7 +517,7 @@ function buildRequestDiagnosticsBySymbol(diags: SymbolDiagnostic[]): Record<stri
   return bySymbol;
 }
 
-/** Latest close per symbol: time + side + 청산 사유·단계 (재진입 쿨다운·완화 판단용). */
+/** Latest close per symbol: time + side + 泥?궛 ?ъ쑀쨌?④퀎 (?ъ쭊??荑⑤떎?는룹셿???먮떒??. */
 function latestCloseMetaBySymbol(
   history: readonly unknown[]
 ): Map<
@@ -674,7 +672,7 @@ function orderBuildFailureStructuredPayload(
   };
 }
 
-/** OKX `submitOrder`/`getOrder` throw 또는 envelope 실패 메시지 파싱 */
+/** OKX `submitOrder`/`getOrder` throw ?먮뒗 envelope ?ㅽ뙣 硫붿떆吏 ?뚯떛 */
 function parseOkxSubmitErrorMessage(msg: string): { code: string | null; message: string } {
   const mApi = /^okx_api_([^:]+):([\s\S]*)$/.exec(msg);
   if (mApi) return { code: mApi[1].trim(), message: (mApi[2] ?? "").trim() || "request_failed" };
@@ -746,7 +744,7 @@ function formatOkxSwapContractSzString(n: number, lotSz: number): string {
   return out.length > 0 ? out : "0";
 }
 
-/** Linear USDT-margined SWAP: contracts ≈ notionalUSDT / (lastPrice * ctVal); sz must be lotSz multiple and ≥ minSz. */
+/** Linear USDT-margined SWAP: contracts ??notionalUSDT / (lastPrice * ctVal); sz must be lotSz multiple and ??minSz. */
 function normalizeOkxSwapContractsFromNotional(args: {
   desiredNotionalUsdt: number;
   lastPrice: number;
@@ -905,9 +903,9 @@ export class PaperEngine {
   private rangeCooldownUntilByKey = new Map<string, number>();
   private rangeFailCountByKey = new Map<string, number>();
   private trendCooldownUntilBySymbol = new Map<string, number>();
-  /** 비영속: 최근 틱별 `decision_funnel_tick` 스냅샷 (최대 DECISION_FUNNEL_RING_MAX). */
+  /** 鍮꾩쁺?? 理쒓렐 ?깅퀎 `decision_funnel_tick` ?ㅻ깄??(理쒕? DECISION_FUNNEL_RING_MAX). */
   private decisionFunnelTickRing: DecisionFunnelTick[] = [];
-  /** 비영속: Stage 1 진입 검토(SKIP) 중인 심볼의 체류 시간 및 품질 추적 */
+  /** 鍮꾩쁺?? Stage 1 吏꾩엯 寃??SKIP) 以묒씤 ?щ낵??泥대쪟 ?쒓컙 諛??덉쭏 異붿쟻 */
   private reviewingState = new Map<string, { ticks: number; initialQuality: number; lastQuality: number }>();
   private lastMarketMode: MarketModeSelectorOutput | null = null;
   private lastRiskExposure: RiskExposureOutput | null = null;
@@ -925,34 +923,34 @@ export class PaperEngine {
     lastPrice: number;
     updatedAt: number;
   }>();
-  /** RANGE 익절 후 재진입 쿨다운 우회 판단용(만료 시각). */
+  /** RANGE ?듭젅 ???ъ쭊??荑⑤떎???고쉶 ?먮떒??留뚮즺 ?쒓컖). */
   private rangeReopenArmedUntilBySymbol = new Map<string, number>();
-  /** 직전 틱 `evaluateRangeEngineForSymbol` 결과(진입 크기·래더 연동). */
+  /** 吏곸쟾 ??`evaluateRangeEngineForSymbol` 寃곌낵(吏꾩엯 ?ш린쨌?섎뜑 ?곕룞). */
   private lastTickRangeEvalBySymbol = new Map<string, ReturnType<typeof evaluateRangeEngineForSymbol>>();
   private lastTickSymbolSnapshotBySymbol = new Map<string, SymbolSnapshot | null>();
   private rangeReversalImmediateSwitchForSymbol = new Map<string, RangeReversalImmediateSwitchArg>();
   private rangeReversalSwitchPendingBySymbol = new Map<string, RangeReversalSwitchPending>();
-  /** TREND 스위칭 시각(1h 카운트 → selector). */
+  /** TREND ?ㅼ쐞移??쒓컖(1h 移댁슫????selector). */
   private trendSwitchTimestampsMs: number[] = [];
-  /** RANGE 재진입 성공 시각(윈도 내 횟수 제한). */
+  /** RANGE ?ъ쭊???깃났 ?쒓컖(?덈룄 ???잛닔 ?쒗븳). */
   private rangeReopenTimestampsBySymbol = new Map<string, number[]>();
   private trendFollowScoreBySymbol = new Map<string, number>();
   private trendBreakoutConfidenceBySymbol = new Map<string, number>();
   private rangeRoundTripStreakBySymbol = new Map<string, number>();
   /** Consecutive close-eval ticks with raw box break (for EXIT_RANGE_REBALANCE debounce). */
   private rangeBoxBreakConsecutiveBySymbol = new Map<string, number>();
-  /** RANGE 수익권 추종: 심볼:openedAt → 피크·잠금 (박스 이탈 리밸런스 지연용). */
+  /** RANGE ?섏씡沅?異붿쥌: ?щ낵:openedAt ???쇳겕쨌?좉툑 (諛뺤뒪 ?댄깉 由щ갭?곗뒪 吏?곗슜). */
   private rangeProfitTrailByKey = new Map<string, RangeProfitTrailState>();
   /** RANGE upper short add-on: per-position one-shot guard (symbol:openedAt -> count). */
   private rangeUpperShortAddOnCountByKey = new Map<string, number>();
   private rangeRecentOutcomeScoresBySymbol = new Map<string, number[]>();
-  /** 장세 부적합 종료(EXIT_REGIME) 소모 이력. 동일 흐름 내 반복 진입/종료 방지. */
+  /** ?μ꽭 遺?곹빀 醫낅즺(EXIT_REGIME) ?뚮え ?대젰. ?숈씪 ?먮쫫 ??諛섎났 吏꾩엯/醫낅즺 諛⑹?. */
   private regimeExitConsumedBySymbol = new Map<string, { side: "long" | "short"; ts: number }>();
-  /** RANGE edge stop_loss 재진입 차단용 메모리 맵. */
+  /** RANGE edge stop_loss ?ъ쭊??李⑤떒??硫붾え由?留? */
   private rangeStopReentryBlockedBySymbol = new Map<string, RangeStopReentryBlock>();
   private lastExitReasonLabel = "";
   private lastSwitchReasonLabel = "";
-  /** 직전 틱 구간 반전 청산 적용(PEL proof용) */
+  /** 吏곸쟾 ??援ш컙 諛섏쟾 泥?궛 ?곸슜(PEL proof?? */
   private rangeReversalExitThisTickBySymbol = new Map<
     string,
     { range_existing_long_reversal_exit_applied?: boolean; range_existing_short_reversal_exit_applied?: boolean }
@@ -1045,7 +1043,7 @@ export class PaperEngine {
   private readonly executionKeysConsumed = new Set<string>();
   private executionKeysLoaded = false;
   private lastServerTradeControlSignature: string | null = null;
-  /** When server trade flips disabled→true; stale-gate for authority/snapshot timestamps. */
+  /** When server trade flips disabled?뭪rue; stale-gate for authority/snapshot timestamps. */
   private serverTradeEnabledTrueAt: number | null = null;
   private lastObservedServerTradeEnabled = false;
   private reconcileSafetyCloseOnly = false;
@@ -1054,7 +1052,7 @@ export class PaperEngine {
   private readonly reconcileCheckIntervalMs = 30_000;
   private startupRecoveryBarrierApplied = false;
 
-  /** OKX swap pending orders cache — diagnostics only; never auto-submits protective orders (stage 1). */
+  /** OKX swap pending orders cache ??diagnostics only; never auto-submits protective orders (stage 1). */
   private lastOpsOrdersScanAtMs = 0;
   private readonly opsOrdersScanMinIntervalMs = 10_000;
   private opsOrdersScanEverDone = false;
@@ -3073,7 +3071,7 @@ export class PaperEngine {
       this.logger.info("okx_exchange_auth_disabled", {
         ...this.okxAuthProofContext(),
         detail:
-          "OKX auth env is on but ORBITALPHA_OKX_EXCHANGE_ENABLED is not true — no signed OKX calls; paper execution + public market data only"
+          "OKX auth env is on but ORBITALPHA_OKX_EXCHANGE_ENABLED is not true ??no signed OKX calls; paper execution + public market data only"
       });
     }
     this.logger.info("paper_data_and_execution_mode", {
@@ -3489,7 +3487,7 @@ export class PaperEngine {
             : currentSnap?.signal === "paper_short_candidate"
               ? "short"
               : "none";
-        // 시그널 방향이 바뀌거나 소멸하면 기존 장세 부적합 종료 소모 기록 초기화 (새로운 흐름 허용)
+        // ?쒓렇??諛⑺뼢??諛붾뚭굅???뚮㈇?섎㈃ 湲곗〈 ?μ꽭 遺?곹빀 醫낅즺 ?뚮え 湲곕줉 珥덇린??(?덈줈???먮쫫 ?덉슜)
         if (currentSignalSide !== consumed.side) {
           this.regimeExitConsumedBySymbol.delete(symKeyEarly);
         }
@@ -4528,7 +4526,7 @@ export class PaperEngine {
     entryStage = 0,
     /**
      * When set (final gate, capacity limit, risk cap, etc.), legacy `executorDecision.entry_allowed`
-     * must not emit ENTRY_ALLOWED — avoids re-logging after ENTRY_BLOCKED_FINAL_GATE.
+     * must not emit ENTRY_ALLOWED ??avoids re-logging after ENTRY_BLOCKED_FINAL_GATE.
      */
     suppressLegacyEntryAllowedReason: string | null | undefined = undefined
   ): Promise<void> {
@@ -4657,14 +4655,14 @@ export class PaperEngine {
   }
 
   /**
-   * 1m kline: OKX 응답 → 스냅샷 객체 → evaluatePaperSymbolEntry 입력까지 캔들 배열 길이 추적.
-   * fetch 빈값 / 스냅샷 누락 / 평가 직전 누락(과거 버그) 구분용.
+   * 1m kline: OKX ?묐떟 ???ㅻ깄??媛앹껜 ??evaluatePaperSymbolEntry ?낅젰源뚯? 罹붾뱾 諛곗뿴 湲몄씠 異붿쟻.
+   * fetch 鍮덇컪 / ?ㅻ깄???꾨씫 / ?됯? 吏곸쟾 ?꾨씫(怨쇨굅 踰꾧렇) 援щ텇??
    */
   private logHighwayCandlePipelineProof(stage: string, payload: Record<string, unknown>): void {
     this.logger.info("HIGHWAY_CANDLE_PIPELINE_PROOF", { pipeline_stage: stage, ...payload });
   }
 
-  /** HIGHWAY_CORE Stage1 과경직: alignment/spacing/volume 붕괴 원인을 executor 단에서 최상위로 남김. */
+  /** HIGHWAY_CORE Stage1 怨쇨꼍吏? alignment/spacing/volume 遺뺢눼 ?먯씤??executor ?⑥뿉??理쒖긽?꾨줈 ?④?. */
   private logHighwayCoreStiffnessProofIfNeeded(sym: MarketSymbol, res: EvaluatePaperSymbolEntryResult): void {
     const br = res.executorDecision?.blocked_reason;
     const det = res.executorDecision?.detail as Record<string, unknown> | undefined;
@@ -4712,8 +4710,8 @@ export class PaperEngine {
   }
 
   /**
-   * 최종 decision + 모니터 UI가 쓰는 스냅/판정 필드 + 리스크·재진입 활성 값을 한 로그에 묶어
-   * “왜 이번 틱에 체결이 더 안 나오는지” 분해한다.
+   * 理쒖쥌 decision + 紐⑤땲??UI媛 ?곕뒗 ?ㅻ깄/?먯젙 ?꾨뱶 + 由ъ뒪??룹옱吏꾩엯 ?쒖꽦 媛믪쓣 ??濡쒓렇??臾띠뼱
+   * ?쒖솢 ?대쾲 ?깆뿉 泥닿껐???????섏삤?붿???遺꾪빐?쒕떎.
    */
   private paperTradeBlockDecompositionPayload(
     sym: MarketSymbol,
@@ -4822,9 +4820,9 @@ export class PaperEngine {
 
     let oneLineWhyNoEnter: string;
     if (!ctx.dataReady) {
-      oneLineWhyNoEnter = "DATA_NOT_READY: symbol snapshot missing → entry pipeline short-circuited";
+      oneLineWhyNoEnter = "DATA_NOT_READY: symbol snapshot missing ??entry pipeline short-circuited";
     } else if (ctx.maxPositionsReached && !ctx.hasOpenForSymbol) {
-      oneLineWhyNoEnter = `CAPACITY: open_slots_full (total=${ctx.openPositionsTotal} max=${ctx.paperMaxOpenPositions}) and this symbol has no position → new entry blocked`;
+      oneLineWhyNoEnter = `CAPACITY: open_slots_full (total=${ctx.openPositionsTotal} max=${ctx.paperMaxOpenPositions}) and this symbol has no position ??new entry blocked`;
     } else if (risk?.engineBlocked === true) {
       oneLineWhyNoEnter = `RISK_ENGINE_BLOCKED: ${risk.engineBlockReasons?.[0] ?? "no_reason"}`;
     } else if (ctx.effectiveLane === "IDLE") {
@@ -4834,7 +4832,7 @@ export class PaperEngine {
     } else if (rexp && !rexp.allowNewEntry) {
       oneLineWhyNoEnter = `EXPOSURE_NEW_ENTRY_OFF: ${rexp.riskReasonLabel}`;
     } else if (d.final_decision === "ENTER" && res.adaptiveOk !== true) {
-      oneLineWhyNoEnter = "FINAL_ENTER but adaptiveOk=false → adaptive sizing / build did not complete ok";
+      oneLineWhyNoEnter = "FINAL_ENTER but adaptiveOk=false ??adaptive sizing / build did not complete ok";
     } else if (d.final_decision === "ENTER") {
       oneLineWhyNoEnter = "FINAL_ENTER with adaptiveOk=true (if still no fill, check order path / exchange sim)";
     } else {
@@ -5014,7 +5012,7 @@ export class PaperEngine {
     return authSrc === "v2";
   }
 
-  /** true → 전량 청산을 이번 틱에서 하지 않고 유지(장세/레인 전환성). 손절·리스크 한도 등은 호출부에서 별도 허용. */
+  /** true ???꾨웾 泥?궛???대쾲 ?깆뿉???섏? ?딄퀬 ?좎?(?μ꽭/?덉씤 ?꾪솚??. ?먯젅쨌由ъ뒪???쒕룄 ?깆? ?몄텧遺?먯꽌 蹂꾨룄 ?덉슜. */
   private shouldDeferRegimeLaneTransitionClose(
     open: PaperOpenPositionRecord,
     evalAtMs: number,
@@ -5022,7 +5020,7 @@ export class PaperEngine {
     postPartialProtectActive?: boolean
   ): boolean {
     if (!this.isEntryPostOpenRegimeLaneProtectActive(open.openedAt, evalAtMs, open)) {
-      // 진입 직후 포지션 보호 없지만, 부분청산 직후 보호는 여전히 상태일 수 있다.
+      // 吏꾩엯 吏곹썑 ?ъ???蹂댄샇 ?놁?留? 遺遺꾩껌??吏곹썑 蹂댄샇???ъ쟾???곹깭?????덈떎.
       if (postPartialProtectActive === true) {
         switch (closeReason) {
           case "regime_exit":
@@ -5037,7 +5035,7 @@ export class PaperEngine {
               side: open.side,
               closeReason,
               postPartialProtectActive: true,
-              note: "부분청산 직후 보호 구간: 지정된 신호/레징 쫐출 청산 일시 유예"
+              note: "遺遺꾩껌??吏곹썑 蹂댄샇 援ш컙: 吏?뺣맂 ?좏샇/?덉쭠 已먯텧 泥?궛 ?쇱떆 ?좎삁"
             });
             return true;
           default:
@@ -5073,9 +5071,9 @@ export class PaperEngine {
   }
 
   /**
-   * REGIME_EXIT 후보 판정 및 확정 구조 (V2)
-   * 단순 레짐 라벨 변경만으로 전량 청산하는 것을 막고,
-   * 후보 상태가 일정 틱 연속되거나 확정된 구조적 무효화가 누적될 때만 최종 청산 승격.
+   * REGIME_EXIT ?꾨낫 ?먯젙 諛??뺤젙 援ъ“ (V2)
+   * ?⑥닚 ?덉쭚 ?쇰꺼 蹂寃쎈쭔?쇰줈 ?꾨웾 泥?궛?섎뒗 寃껋쓣 留됯퀬,
+   * ?꾨낫 ?곹깭媛 ?쇱젙 ???곗냽?섍굅???뺤젙??援ъ“??臾댄슚?붽? ?꾩쟻???뚮쭔 理쒖쥌 泥?궛 ?밴꺽.
    */
   private evaluateRegimeExitConfirmation(
     open: PaperOpenPositionRecord,
@@ -5152,7 +5150,7 @@ export class PaperEngine {
   }
 
   /**
-   * MIXED/TRANSITION·구조 흔들림만으로는 DE_RISK, TREND 레인+반대 ENTER 확정 시에만 EXIT.
+   * MIXED/TRANSITION쨌援ъ“ ?붾뱾由쇰쭔?쇰줈??DE_RISK, TREND ?덉씤+諛섎? ENTER ?뺤젙 ?쒖뿉留?EXIT.
    */
   private classifyUpperExitAuthorityTrendBreakTrigger(input: Readonly<{
     marketMode: PaperMarketMode;
@@ -5191,7 +5189,7 @@ export class PaperEngine {
   }
 
   /**
-   * RANGE 구간·반전 스위치·적응형까지 한 틱에서 추적(상단 롱 편향·숏 미체결 원인 증명용).
+   * RANGE 援ш컙쨌諛섏쟾 ?ㅼ쐞移샕룹쟻?묓삎源뚯? ???깆뿉??異붿쟻(?곷떒 濡??명뼢쨌??誘몄껜寃??먯씤 利앸챸??.
    */
   private rangeZoneEvalProofPayload(
     sym: MarketSymbol,
@@ -5222,7 +5220,7 @@ export class PaperEngine {
       raw_snapshot_signal: raw,
       signal_decision_origin: snap?.signalDecisionOrigin ?? null,
       range_signal_kept_by_relax: snap?.rangeSignalKeptByRelax ?? false,
-      /** (1) 상단에서 raw long 후보가 들어와도 stage0가 무력화하는지 */
+      /** (1) ?곷떒?먯꽌 raw long ?꾨낫媛 ?ㅼ뼱???stage0媛 臾대젰?뷀븯?붿? */
       upper_zone_long_candidate_received: upperLongRaw,
       range_stage0_inner_signal_reason: rangeSigReason,
       range_stage0_inner_signal_state: rangeSigState,
@@ -5243,23 +5241,23 @@ export class PaperEngine {
       final_decision: d.final_decision,
       reject_reason: d.reject_reason ?? null,
       intent_side: res.intentSide,
-      /** (2)(4) short 평가 이후 적응형·게이트 */
+      /** (2)(4) short ?됯? ?댄썑 ?곸쓳?빧룰쾶?댄듃 */
       adaptive_ok: res.adaptiveOk,
       adaptive_direction: null,
       ai_gate_passed: res.aiGatePassed,
       stage1_result_code: d.stage1_result_code ?? null,
       entry_blocked: d.entry_blocked ?? null,
-      /** 소프트 롱 승격(하단 전용이나 UNKNOWN 경로에서 롱 편향 재기동 여부) */
+      /** ?뚰봽??濡??밴꺽(?섎떒 ?꾩슜?대굹 UNKNOWN 寃쎈줈?먯꽌 濡??명뼢 ?ш린???щ?) */
       soft_long_v2_path: sup.some((x) => x.includes("STAGE1_SIGNAL_RELAXED_SOFT_CANDIDATE_V2")),
       unknown_regime_range_fallback: sup.some((x) => x.includes("STAGE1_UNKNOWN_REGIME_RANGE_FALLBACK")),
-      /** (3) 반전 스위치가 켜졌는데도 ENTER/adaptive 미도달 */
+      /** (3) 諛섏쟾 ?ㅼ쐞移섍? 耳쒖죱?붾뜲??ENTER/adaptive 誘몃룄??*/
       reversal_switch_stalled: stalled,
-      /** stage0가 아닌 경로(레거시 하이웨이 등)에서 상단 롱 의도 — 편향 재기동 추적 */
+      /** stage0媛 ?꾨땶 寃쎈줈(?덇굅???섏씠?⑥씠 ???먯꽌 ?곷떒 濡??섎룄 ???명뼢 ?ш린??異붿쟻 */
       long_intent_upper_without_range_stage0:
         d.range_stage0_engine_taken !== true &&
         zone === "upper" &&
         res.intentSide === "long",
-      /** 정책 위반 의심: stage0인데 상단·롱 의도 */
+      /** ?뺤콉 ?꾨컲 ?섏떖: stage0?몃뜲 ?곷떒쨌濡??섎룄 */
       range_stage0_upper_long_intent_anomaly:
         d.range_stage0_engine_taken === true &&
         zone === "upper" &&
@@ -5325,7 +5323,7 @@ export class PaperEngine {
     symbol: string;
     side: "long" | "short";
     sizeUsd: number;
-    /** Position leverage at margin `sizeUsd` (paper margin × lev → OKX notional). */
+    /** Position leverage at margin `sizeUsd` (paper margin 횞 lev ??OKX notional). */
     appliedLeverage: number;
     lastPrice: number;
     flowId: string;
@@ -5588,7 +5586,7 @@ export class PaperEngine {
     const syncSnap = buildLedgerOkxPositionSyncSnapshot(paperOpensForSync, this.lastLivePositionsPayload, this.instrumentCache);
     const isTrueExternalManual = syncSnap.ignored_external_manual_keys.includes(symSideKey);
 
-    // 진성 외부 수동 포지션인 경우에만 보호 주문 생성을 건너뛴다.
+    // 吏꾩꽦 ?몃? ?섎룞 ?ъ??섏씤 寃쎌슦?먮쭔 蹂댄샇 二쇰Ц ?앹꽦??嫄대꼫?대떎.
     if (isTrueExternalManual) {
       this.logger.info("V2_PROTECTIVE_STOP_SKIP_TRUE_EXTERNAL_MANUAL_PROOF", {
         symbol: open.symbol,
@@ -5890,9 +5888,9 @@ export class PaperEngine {
     exposureNotionalKrw?: number | null;
     isNewEntry: boolean;
     orderNotionalUsdt?: number | null;
-    /** Explicit USDT notional for SWAP contract sizing (e.g. close margin × leverage). */
+    /** Explicit USDT notional for SWAP contract sizing (e.g. close margin 횞 leverage). */
     desiredNotionalUsdt?: number | null;
-    /** Mark/last price for `notional / (price × ctVal)` when ticker not yet loaded here. */
+    /** Mark/last price for `notional / (price 횞 ctVal)` when ticker not yet loaded here. */
     pricingReferencePx?: number | null;
     reduceOnly?: boolean;
     ordType?: "market" | "limit";
@@ -6988,7 +6986,7 @@ export class PaperEngine {
             });
 
             // [FIX: history-ledger] CRASH_REDUCE is a partial defense event (50% reduction).
-            // Only full-liquidation (forceExit → EXIT_LONG_CRASH_FORCE) goes into history.json.
+            // Only full-liquidation (forceExit ??EXIT_LONG_CRASH_FORCE) goes into history.json.
             // CRASH_REDUCE is recorded to events.jsonl only (see below).
             if (forceExit) {
               const routedClosed = await this.appendClosedWithStandardRouting({
@@ -7006,7 +7004,7 @@ export class PaperEngine {
                 symbol: op.symbol,
                 state: risk.crashState,
                 type: et,
-                note: "CRASH_REDUCE is a partial defense event — not appended to history.json ledger"
+                note: "CRASH_REDUCE is a partial defense event ??not appended to history.json ledger"
               });
             }
             this.logger.warn("crash_long_defense", { symbol: op.symbol, state: risk.crashState, type: et });
@@ -7034,9 +7032,9 @@ export class PaperEngine {
         }
 
         // 2. Short Opportunity (Trailing Protection)
-        // 숏은 강제 종료하지 않되, 급락 상태에서는 수익 보호를 위해 트레일링 로직 개입 여부만 여기서 플래그 세팅하거나 
-        // 하단 일반 로직에서 risk.crashState를 참고하도록 설계.
-        // 여기서는 '급락 중 숏 수익보호 모드' 진입 로깅만 남김.
+        // ?륁? 媛뺤젣 醫낅즺?섏? ?딅릺, 湲됰씫 ?곹깭?먯꽌???섏씡 蹂댄샇瑜??꾪빐 ?몃젅?쇰쭅 濡쒖쭅 媛쒖엯 ?щ?留??ш린???뚮옒洹??명똿?섍굅??
+        // ?섎떒 ?쇰컲 濡쒖쭅?먯꽌 risk.crashState瑜?李멸퀬?섎룄濡??ㅺ퀎.
+        // ?ш린?쒕뒗 '湲됰씫 以????섏씡蹂댄샇 紐⑤뱶' 吏꾩엯 濡쒓퉭留??④?.
         if (isShort && (risk.crashState === "CRASH_EXIT" || risk.crashState === "CRASH_REDUCE")) {
           this.logger.info("crash_short_opportunity", { symbol: op.symbol, state: risk.crashState, latePursuit: risk.isLatePursuit });
         }
@@ -7055,7 +7053,7 @@ export class PaperEngine {
     const feeRate = this.config.paperTakerFeeRate;
     const intervalH = this.config.paperFundingIntervalHours;
 
-    /** events.jsonl `type` — 레거시 호환(부분익절·트레일 등은 기존과 동일 계열로 유지). */
+    /** events.jsonl `type` ???덇굅???명솚(遺遺꾩씡?댟룻듃?덉씪 ?깆? 湲곗〈怨??숈씪 怨꾩뿴濡??좎?). */
     const exitEventJsonlType = (r: PaperClosedPositionRecord["closeReason"]): "EXIT_TP" | "EXIT_REGIME" | "EXIT_TREND_BREAK" | "EXIT_SL" | "EXIT_TIME_STOP" | string => {
       if (r === "time_based_exit") return "EXIT_TIME_STOP";
       if (r === "stop_loss") return "EXIT_SL";
@@ -7428,7 +7426,7 @@ export class PaperEngine {
           markPrice: closePrice,
           stopPrice: open.stopPrice,
           targetPrice1: open.targetPrice1,
-          tp_status: tpMissing ? "TP 미설정" : "TP 설정됨",
+          tp_status: tpMissing ? "TP 誘몄꽕?? : "TP ?ㅼ젙??,
           trailingStopPrice: open.trailingStopPrice,
           pnlPctNet: m.pnlPctNet,
           isManaged: true,
@@ -7444,7 +7442,7 @@ export class PaperEngine {
           this.logger.info("POSITION_TAKE_PROFIT_EVALUATION_PROOF", {
             symbol: open.symbol,
             tp_triggered: false,
-            status: "익절 미설정",
+            status: "?듭젅 誘몄꽕??,
             flowId
           });
         }
@@ -8227,10 +8225,10 @@ export class PaperEngine {
       const { longUsd, shortUsd } = marginsForSymbol(opens, symKey);
 
       // [PARTIAL EXIT PROTECTION]
-      // 부분청산(TP_PARTIAL / PARTIAL_SPLIT) 직후 잔여 포지션은 POST_PARTIAL_REGIME_PROTECT_MS 동안
-      // 주요 레징/신호 소멸 청산(regime_exit, candidate_lost, trend_switch) 일시 차단.
-      // 단 STRUCTURAL, CRASH_FORCE, STOP_LOSS, TRAILING 은 허용한다(안전망 연소).
-      // 이 플래그는 shouldDeferRegimeLaneTransitionClose 안에서 참조된다.
+      // 遺遺꾩껌??TP_PARTIAL / PARTIAL_SPLIT) 吏곹썑 ?붿뿬 ?ъ??섏? POST_PARTIAL_REGIME_PROTECT_MS ?숈븞
+      // 二쇱슂 ?덉쭠/?좏샇 ?뚮㈇ 泥?궛(regime_exit, candidate_lost, trend_switch) ?쇱떆 李⑤떒.
+      // ??STRUCTURAL, CRASH_FORCE, STOP_LOSS, TRAILING ? ?덉슜?쒕떎(?덉쟾留??곗냼).
+      // ???뚮옒洹몃뒗 shouldDeferRegimeLaneTransitionClose ?덉뿉??李몄“?쒕떎.
       const postPartialProtectActive: boolean = (
         (open.partialExitStage ?? 0) >= 1 &&
         open.lastPartialAt !== undefined &&
@@ -8245,7 +8243,7 @@ export class PaperEngine {
           lastPartialAt: open.lastPartialAt,
           elapsed_since_partial_ms: open.lastPartialAt ? closedAt - open.lastPartialAt : null,
           protect_window_ms: POST_PARTIAL_REGIME_PROTECT_MS,
-          note: "regime_exit/candidate_lost 종류 대상 업도 일시 차단"
+          note: "regime_exit/candidate_lost 醫낅쪟 ????낅룄 ?쇱떆 李⑤떒"
         });
       }
 
@@ -8280,7 +8278,7 @@ export class PaperEngine {
 
         if (rangeState) {
           if (open.side === "long" && typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos)) {
-            const raZone = classifyRangeActionZone(snap.boxPos);
+            const raZone = classifyRangeZone(snap.boxPos);
             if (raZone === "upper") {
               this.logger.info("REGIME_EXIT_GUARD_PROOF", {
                 symbol: open.symbol,
@@ -8338,7 +8336,7 @@ export class PaperEngine {
                 feeRate,
                 fundingIntervalHours: intervalH,
                 strategyVersion: inheritedStrategyVersion,
-                closeReasonLabelOverride: "상단 반전 구간: 롱 정리(숏 평가 우선)",
+                closeReasonLabelOverride: "?곷떒 諛섏쟾 援ш컙: 濡??뺣━(???됯? ?곗꽑)",
                 ...snapPaths
               });
               handleV2ExitAuthorityProof("exit", cr);
@@ -8381,7 +8379,7 @@ export class PaperEngine {
                 preferredSide: "short",
                 zone: "upper"
               });
-              this.lastExitReasonLabel = "상단 반전 구간 롱 정리";
+              this.lastExitReasonLabel = "?곷떒 諛섏쟾 援ш컙 濡??뺣━";
 
               const mappedType = exitEventJsonlType(cr);
               this.terminalExitConsumedByFlow.add(flowId);
@@ -8413,7 +8411,7 @@ export class PaperEngine {
             }
           }
           if (open.side === "short" && typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos)) {
-            const raZone = classifyRangeActionZone(snap.boxPos);
+            const raZone = classifyRangeZone(snap.boxPos);
             if (raZone === "lower") {
               this.logger.info("REGIME_EXIT_GUARD_PROOF", {
                 symbol: open.symbol,
@@ -8471,7 +8469,7 @@ export class PaperEngine {
                 feeRate,
                 fundingIntervalHours: intervalH,
                 strategyVersion: inheritedStrategyVersion,
-                closeReasonLabelOverride: "하단 반전 구간: 숏 정리(롱 평가 우선)",
+                closeReasonLabelOverride: "?섎떒 諛섏쟾 援ш컙: ???뺣━(濡??됯? ?곗꽑)",
                 ...snapPaths
               });
               handleV2ExitAuthorityProof("exit", cr);
@@ -8514,7 +8512,7 @@ export class PaperEngine {
                 preferredSide: "long",
                 zone: "lower"
               });
-              this.lastExitReasonLabel = "하단 반전 구간 숏 정리";
+              this.lastExitReasonLabel = "?섎떒 諛섏쟾 援ш컙 ???뺣━";
 
               const mappedType = exitEventJsonlType(cr);
               this.terminalExitConsumedByFlow.add(flowId);
@@ -8574,7 +8572,7 @@ export class PaperEngine {
       if (rangeManagedPosition && rangeState) {
         const liveZone =
           typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos)
-            ? classifyRangeActionZone(snap.boxPos)
+            ? classifyRangeZone(snap.boxPos)
             : ("mid" as const);
         const rangeReattackEligibleNow =
           open.rangeFirstProfitLocked !== true &&
@@ -8690,7 +8688,7 @@ export class PaperEngine {
             feeRate,
             fundingIntervalHours: intervalH,
             strategyVersion: inheritedStrategyVersion,
-            closeReasonLabelOverride: "수익권 되돌림 추종 청산",
+            closeReasonLabelOverride: "?섏씡沅??섎룎由?異붿쥌 泥?궛",
             ...snapPaths
           });
           this.logger.info("REGIME_EXIT_GUARD_PROOF", {
@@ -8733,7 +8731,7 @@ export class PaperEngine {
             currentRegime: regimeNow
           });
           authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosedTrail);
-          this.lastExitReasonLabel = "수익권 되돌림 추종 청산";
+          this.lastExitReasonLabel = "?섏씡沅??섎룎由?異붿쥌 泥?궛";
 
           const mappedType = exitEventJsonlType(crTrail);
           this.terminalExitConsumedByFlow.add(flowId);
@@ -8782,7 +8780,7 @@ export class PaperEngine {
           const minHold = this.config.rangeRebalanceMinHoldMs;
           const needTicks = this.config.rangeRebalanceBoxBreakConfirmTicks;
           const boxZoneNow =
-            typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos) ? classifyRangeActionZone(snap.boxPos) : ("mid" as const);
+            typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos) ? classifyRangeZone(snap.boxPos) : ("mid" as const);
           const addOnKey = `${symKey}:${open.openedAt}`;
           const addOnCount = this.rangeUpperShortAddOnCountByKey.get(addOnKey) ?? 0;
           const addOnUsed = open.rangeAddOnUsed === true || addOnCount >= 1;
@@ -8914,7 +8912,7 @@ export class PaperEngine {
                 fundingIntervalHours: intervalH,
                 strategyVersion: inheritedStrategyVersion,
                 exitTypeOverride: "EXIT_RISK",
-                closeReasonLabelOverride: "리스크 노출 한도 초과",
+                closeReasonLabelOverride: "由ъ뒪???몄텧 ?쒕룄 珥덇낵",
                 ...snapPaths
               })
               : toClosed(cr, m, open.sizeUsd);
@@ -8941,10 +8939,10 @@ export class PaperEngine {
           authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
           this.lastExitReasonLabel =
             st.reason === "range_box_break"
-              ? "박스 붕괴 청산"
+              ? "諛뺤뒪 遺뺢눼 泥?궛"
               : st.reason === "structural_regime_shift"
-                ? "구조적 추세 전환 청산"
-                : "노출 한도 청산";
+                ? "援ъ“??異붿꽭 ?꾪솚 泥?궛"
+                : "?몄텧 ?쒕룄 泥?궛";
 
           const mappedType = exitEventJsonlType(cr);
           this.terminalExitConsumedByFlow.add(flowId);
@@ -9060,13 +9058,13 @@ export class PaperEngine {
             currentRegime: regimeNow
           });
           authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
-          this.lastExitReasonLabel = "추세 반대 돌파로 청산";
+          this.lastExitReasonLabel = "異붿꽭 諛섎? ?뚰뙆濡?泥?궛";
           this.lastSwitchReasonLabel = trendState.trendSwitchReasonLabel;
           this.trendSwitchTimestampsMs.push(Date.now());
           const mappedType = exitEventJsonlType(cr);
           this.terminalExitConsumedByFlow.add(flowId);
           if (mappedType === "EXIT_TREND_SWITCH") {
-            // 스위칭은 반대 방향으로 열리므로 Dedup이 새 진입을 막지 않음 (방향이 다름)
+            // ?ㅼ쐞移?? 諛섎? 諛⑺뼢?쇰줈 ?대━誘濡?Dedup????吏꾩엯??留됱? ?딆쓬 (諛⑺뼢???ㅻ쫫)
             this.regimeExitConsumedBySymbol.set(symKey, { side: open.side, ts: Date.now() });
           }
 
@@ -9143,7 +9141,7 @@ export class PaperEngine {
 
 
 
-      // 2. Regime Flip / Trend Break check (하위 트리거 → 상위 exit authority 재판정 후에만 전량 청산)
+      // 2. Regime Flip / Trend Break check (?섏쐞 ?몃━嫄????곸쐞 exit authority ?ы뙋???꾩뿉留??꾨웾 泥?궛)
       // [V2_EXIT_SOVEREIGNTY_GATE] Skip legacy TREND break logic if V2 is managing
       if (regimeAtEntry === "TREND" && !exitManagedByV2) {
         const trendOkNow = snap.trendOk === true;
@@ -9267,7 +9265,7 @@ export class PaperEngine {
         }
       }
 
-      // 3. RANGE / TREND 실행기 분리(포지션 레짐·상위 모드로 레인 선택)
+      // 3. RANGE / TREND ?ㅽ뻾湲?遺꾨━(?ъ????덉쭚쨌?곸쐞 紐⑤뱶濡??덉씤 ?좏깮)
       // [V2_EXIT_SOVEREIGNTY_GATE] Skip legacy executor evaluation if V2 is managing exit/partial
       let exitEval: { action: "hold" | "close" | "partial_close"; reason?: string | null; detail?: any; [key: string]: any } = { action: "hold" };
 
@@ -9384,10 +9382,10 @@ export class PaperEngine {
       }
 
       // --- V2 AUTHORITY TAKEOVER (Hoisted & Hardened) ---
-      // V2 EXIT는 위에서 이미 early return했으므로 여기는 partial_close 신호만 남음.
-      // partial_close는 exitEval에 억지로 주입하지 않고 독립 경로로 처리한다.
+      // V2 EXIT???꾩뿉???대? early return?덉쑝誘濡??ш린??partial_close ?좏샇留??⑥쓬.
+      // partial_close??exitEval???듭?濡?二쇱엯?섏? ?딄퀬 ?낅┰ 寃쎈줈濡?泥섎━?쒕떎.
       if ((v2TakeoverAction as string) !== "none" && (v2TakeoverAction as string) !== "partial_close") {
-        // V2 EXIT_BRIDGE_PROOF (이 경로는 위 early takeover에서 처리됨, 방어용만 남김)
+        // V2 EXIT_BRIDGE_PROOF (??寃쎈줈????early takeover?먯꽌 泥섎━?? 諛⑹뼱?⑸쭔 ?④?)
         this.logger.info("V2_EXIT_EXECUTION_BRIDGE_PROOF", {
           symbol: open.symbol,
           side: open.side,
@@ -9398,7 +9396,7 @@ export class PaperEngine {
         });
       }
 
-      // V2 PARTIAL: 독립 early takeover 경로. exitEval 오염 없이 직접 실행.
+      // V2 PARTIAL: ?낅┰ early takeover 寃쎈줈. exitEval ?ㅼ뿼 ?놁씠 吏곸젒 ?ㅽ뻾.
       if ((v2TakeoverAction as string) === "partial_close" && v2PartialAuthority?.shouldPartial === true) {
         const reduceRatio = v2PartialAuthority.reduceRatio ?? 0.5;
         const partialSizeUsd = open.sizeUsd * reduceRatio;
@@ -9599,7 +9597,7 @@ export class PaperEngine {
             ...exitEval,
             action: "partial_close",
             reason: "partial_exit_1",
-            guidance: open.side === "short" ? "RANGE upper short 첫 수익권 미세 잠금" : "RANGE lower long 첫 수익권 미세 잠금",
+            guidance: open.side === "short" ? "RANGE upper short 泥??섏씡沅?誘몄꽭 ?좉툑" : "RANGE lower long 泥??섏씡沅?誘몄꽭 ?좉툑",
             exit_progress: Math.max(35, exitEval.exit_progress ?? 0),
             detail: {
               ...detail,
@@ -9626,10 +9624,10 @@ export class PaperEngine {
 
       // --- CRASH MOMENTUM TRAILING OVERRIDE for SHORTS ---
       if (open.side === "short" && risk && (risk.crashState === "CRASH_EXIT" || risk.crashState === "CRASH_REDUCE")) {
-        if (m.pnlPctNet > 0.005) { // 0.5% 이상 수익권이면 타이트하게 보호
+        if (m.pnlPctNet > 0.005) { // 0.5% ?댁긽 ?섏씡沅뚯씠硫???댄듃?섍쾶 蹂댄샇
           const trailGap = (snap.atr ?? 0) * 0.48;
           const crashTrailStop = (open.trailingExtremePrice ?? open.entryPrice) + trailGap;
-          // 숏이므로 가격이 상승하여 이 지점을 터치하면 청산
+          // ?륁씠誘濡?媛寃⑹씠 ?곸듅?섏뿬 ??吏?먯쓣 ?곗튂?섎㈃ 泥?궛
           if (closePrice >= crashTrailStop) {
             exitEval = {
               ...exitEval,
@@ -9863,7 +9861,7 @@ export class PaperEngine {
         }
 
         if (cr === "v2_exit_authority") {
-          this.lastExitReasonLabel = `V2 우선 권한 청산 (${v2ExitAuthority?.exitReason ?? "N/A"})`;
+          this.lastExitReasonLabel = `V2 ?곗꽑 沅뚰븳 泥?궛 (${v2ExitAuthority?.exitReason ?? "N/A"})`;
         }
         continue;
       }
@@ -9897,7 +9895,7 @@ export class PaperEngine {
           const mp = leg(partialMargin);
 
           // [FIX: history-ledger] Partial exits (partial_exit_1, partial_exit_2) are
-          // intermediate sub-events within a position lifecycle — NOT final position closes.
+          // intermediate sub-events within a position lifecycle ??NOT final position closes.
           // They must NOT be appended to positions/history.json.
           // The position identity is preserved; only the final full-close goes to the ledger.
           // Sub-events are recorded to events.jsonl only (below).
@@ -10023,7 +10021,7 @@ export class PaperEngine {
       if (rangeManagedPosition) {
         const raZone =
           typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos)
-            ? classifyRangeActionZone(snap.boxPos)
+            ? classifyRangeZone(snap.boxPos)
             : ("mid" as const);
         const aligned =
           (open.side === "long" && raZone === "lower") || (open.side === "short" && raZone === "upper");
@@ -10102,8 +10100,8 @@ export class PaperEngine {
             strategyVersion: inheritedStrategyVersion,
             closeReasonLabelOverride:
               open.side === "long"
-                ? "RANGE 정합성: 상단 롱 강제 청산"
-                : "RANGE 정합성: 하단 숏 강제 청산",
+                ? "RANGE ?뺥빀?? ?곷떒 濡?媛뺤젣 泥?궛"
+                : "RANGE ?뺥빀?? ?섎떒 ??媛뺤젣 泥?궛",
             ...snapPaths
           });
           await this.dispatchOkxClose({
@@ -10134,7 +10132,7 @@ export class PaperEngine {
             box_pos: snap.boxPos ?? null,
             phase: "default_persistence_regime_exit_safety_net"
           });
-          this.lastExitReasonLabel = open.side === "long" ? "RANGE 상단 롱 정합성 청산" : "RANGE 하단 숏 정합성 청산";
+          this.lastExitReasonLabel = open.side === "long" ? "RANGE ?곷떒 濡??뺥빀??泥?궛" : "RANGE ?섎떒 ???뺥빀??泥?궛";
           const mappedType = exitEventJsonlType(cr);
           this.terminalExitConsumedByFlow.add(flowId);
 
@@ -10168,7 +10166,7 @@ export class PaperEngine {
           });
           continue;
         }
-        // mid: 무조건 유지 금지 → 아래 minHold / candidate_lost 로 진행
+        // mid: 臾댁“嫄??좎? 湲덉? ???꾨옒 minHold / candidate_lost 濡?吏꾪뻾
       } else {
         const zk =
           typeof snap.boxPos === "number" && Number.isFinite(snap.boxPos) ? classifyBoxZone(snap.boxPos) : ("mid" as const);
@@ -10185,7 +10183,7 @@ export class PaperEngine {
         }
       }
 
-      /** 증액(스테이지 2+)·규모 확대 포지션: 신호 소멸 후 시간 청산·유예를 더 짧게 (RANGE 포지션은 상단에서 이미 분기됨) */
+      /** 利앹븸(?ㅽ뀒?댁? 2+)쨌洹쒕え ?뺣? ?ъ??? ?좏샇 ?뚮㈇ ???쒓컙 泥?궛쨌?좎삁瑜???吏㏐쾶 (RANGE ?ъ??섏? ?곷떒?먯꽌 ?대? 遺꾧린?? */
       const stagedOrScaled =
         (open.entryStage ?? 1) >= 2 ||
         (typeof open.initialSizeUsd === "number" &&
@@ -10198,8 +10196,8 @@ export class PaperEngine {
 
       const zoneMismatch =
         typeof snap.boxPos === "number" &&
-        ((open.side === "long" && classifyRangeActionZone(snap.boxPos) !== "lower") ||
-          (open.side === "short" && classifyRangeActionZone(snap.boxPos) !== "upper"));
+        ((open.side === "long" && classifyRangeZone(snap.boxPos) !== "lower") ||
+          (open.side === "short" && classifyRangeZone(snap.boxPos) !== "upper"));
 
       const tightHold = open.regimeAtEntry === "RANGE" && opposingSignal && zoneMismatch;
       const isImmatureRange = !stagedOrScaled && open.rangeFirstProfitLocked !== true;
@@ -10240,8 +10238,8 @@ export class PaperEngine {
       const rangeStructureStillValid =
         open.regimeAtEntry === "RANGE"
           ? (typeof snap.boxPos === "number" &&
-            ((open.side === "short" && classifyRangeActionZone(snap.boxPos) === "upper") ||
-              (open.side === "long" && classifyRangeActionZone(snap.boxPos) === "lower")))
+            ((open.side === "short" && classifyRangeZone(snap.boxPos) === "upper") ||
+              (open.side === "long" && classifyRangeZone(snap.boxPos) === "lower")))
           : false;
       const entryEvidenceStillValid =
         entryEvidence == null
@@ -10659,7 +10657,7 @@ export class PaperEngine {
     const structureNotBroken = !prev || Math.abs(input.lastPrice - prev.lastPrice) / Math.max(1e-9, prev.lastPrice) <= 0.02;
     const ticks = prev && qualityNotWorse && structureNotBroken ? prev.ticks + 1 : 1;
     const zone = typeof input.boxPos === "number" && Number.isFinite(input.boxPos)
-      ? classifyRangeActionZone(input.boxPos)
+      ? classifyRangeZone(input.boxPos)
       : "mid";
     this.rangeRecheckPromotionByKey.set(key, {
       ticks,
@@ -11139,8 +11137,8 @@ export class PaperEngine {
   }
 
   /**
-   * RANGE 역방향 물타기(water-entry) 전용 레이어 — V2 ENTER 큐·초기 진입 로직과 분리.
-   * 포지션 보유 시에만 평가·실행된다.
+   * RANGE ??갑??臾쇳?湲?water-entry) ?꾩슜 ?덉씠????V2 ENTER ?먃룹큹湲?吏꾩엯 濡쒖쭅怨?遺꾨━.
+   * ?ъ???蹂댁쑀 ?쒖뿉留??됯?쨌?ㅽ뻾?쒕떎.
    */
 
   private async processPaperSymbolEntries(input: Readonly<{
@@ -11928,7 +11926,7 @@ export class PaperEngine {
           qualityScore: first.qualityScore ?? null,
           boxPos: first.boxPos ?? null,
           zone: typeof first.boxPos === "number" && Number.isFinite(first.boxPos)
-            ? classifyRangeActionZone(first.boxPos)
+            ? classifyRangeZone(first.boxPos)
             : "mid",
           reviewing_ticks: recheckPromotion.ticks,
           relaxedRangeEntry:
@@ -11939,9 +11937,9 @@ export class PaperEngine {
           promotion_reason: recheckPromotion.reason
         });
       }
-      // V2 ENTRY REHYDRATION: originalDecision/originalSide/originalStageMarginKrw 기반으로
-      // readiness 재평가로 REJECT로 바뀐 authority를 강제 복원한다.
-      // 절대 우회 불가 블록(KILL_SWITCH 등)이 없을 때만 적용.
+      // V2 ENTRY REHYDRATION: originalDecision/originalSide/originalStageMarginKrw 湲곕컲?쇰줈
+      // readiness ?ы룊媛濡?REJECT濡?諛붾?authority瑜?媛뺤젣 蹂듭썝?쒕떎.
+      // ?덈? ?고쉶 遺덇? 釉붾줉(KILL_SWITCH ?????놁쓣 ?뚮쭔 ?곸슜.
       const NON_BYPASSABLE_HARD_BLOCKS = new Set<string>([
         "SERVER_TRADE_DISABLED", "CLOSE_ONLY_MODE", "KILL_SWITCH", "RECONCILE_SAFE_MODE",
         "RISK_MODE_HALT", "DAILY_LOSS_GUARD", "MAX_SLOTS_REACHED", "MIN_ORDER_SIZE_UNDERFLOW",
@@ -12057,7 +12055,7 @@ export class PaperEngine {
 
       const absHardBlockPresent =
         authority.hardBlockPresent === true || envelope.hard_block_present === true;
-      /** 신규 진입(existingIdx<0) 전용: 스케일인·애드온 경로에서는 레거시 RANGE no-reversal 무시를 적용하지 않는다. */
+      /** ?좉퇋 吏꾩엯(existingIdx<0) ?꾩슜: ?ㅼ??쇱씤쨌?좊뱶??寃쎈줈?먯꽌???덇굅??RANGE no-reversal 臾댁떆瑜??곸슜?섏? ?딅뒗?? */
       const v2EnterSignedPaperReadyHandoff =
         authority.source === "v2" &&
         adoptedEngine === "V2" &&
@@ -12155,12 +12153,12 @@ export class PaperEngine {
       const nowForCrash = Date.now();
 
       // [CRASH GUARD REDESIGN]
-      // CRASH_REDUCE: 사이즈 축소/공격성 약화 전용 → 진입 자체는 차단하지 않는다.
-      //   longAllow=false 를 통해 risk-exposure 레이어에서 이미 억제됨.
-      // CRASH_EXIT/LOCK: 강한 no-entry 허용. 단 아래 조건이 모두 충족되면 자동 해제:
-      //   (a) 현재 activeEngine 이 RANGE (시장판단이 이미 바뀐 상태)
-      //   (b) crashLockUntil 이 만료됐거나(=0) CRASH_GUARD_REGIME_AWARE_RELEASE_MS 경과
-      // 목표: crash guard 가 시장판단 변경 후에도 무기한 전체 진입을 얼리지 않게.
+      // CRASH_REDUCE: ?ъ씠利?異뺤냼/怨듦꺽???쏀솕 ?꾩슜 ??吏꾩엯 ?먯껜??李⑤떒?섏? ?딅뒗??
+      //   longAllow=false 瑜??듯빐 risk-exposure ?덉씠?댁뿉???대? ?듭젣??
+      // CRASH_EXIT/LOCK: 媛뺥븳 no-entry ?덉슜. ???꾨옒 議곌굔??紐⑤몢 異⑹”?섎㈃ ?먮룞 ?댁젣:
+      //   (a) ?꾩옱 activeEngine ??RANGE (?쒖옣?먮떒???대? 諛붾??곹깭)
+      //   (b) crashLockUntil ??留뚮즺?먭굅??=0) CRASH_GUARD_REGIME_AWARE_RELEASE_MS 寃쎄낵
+      // 紐⑺몴: crash guard 媛 ?쒖옣?먮떒 蹂寃??꾩뿉??臾닿린???꾩껜 吏꾩엯???쇰━吏 ?딄쾶.
       const crashLockExpiredOrSoon =
         crashLockUntil === 0 ||
         nowForCrash >= crashLockUntil ||
@@ -12170,7 +12168,7 @@ export class PaperEngine {
         activeEngine === "RANGE" &&
         crashLockExpiredOrSoon;
 
-      // CRASH_REDUCE 는 더 이상 롱 진입 전면 차단하지 않음 (size 축소 레이어로 대체)
+      // CRASH_REDUCE ?????댁긽 濡?吏꾩엯 ?꾨㈃ 李⑤떒?섏? ?딆쓬 (size 異뺤냼 ?덉씠?대줈 ?泥?
       const crashEntryGuardApplies =
         authority.side === "long" &&
         (crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK") &&
@@ -12301,7 +12299,7 @@ export class PaperEngine {
           finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_UNKNOWN";
           entryEvidenceReason = "range_zone_unknown_recheck";
         } else {
-          const rz = classifyRangeActionZone(first.boxPos);
+          const rz = classifyRangeZone(first.boxPos);
           const rangeSideOk = (authority.side === "short" && rz === "upper") || (authority.side === "long" && rz === "lower");
           if (!rangeSideOk) {
             finalBlockedReason = "ENTRY_EVIDENCE_RECHECK_RANGE_ZONE_MISMATCH";
@@ -12698,7 +12696,7 @@ export class PaperEngine {
           reject_reason: finalBlockedReason,
           authority_owner: authority.source,
           active_engine_routing: this.lastMarketMode?.routing.activeEngine ?? null,
-          note: "CRASH_REDUCE no longer blocks entry — only CRASH_EXIT/LOCK when regime still in shock"
+          note: "CRASH_REDUCE no longer blocks entry ??only CRASH_EXIT/LOCK when regime still in shock"
         });
       }
       if (finalBlockedReason === "NGE_STAGE0_UPPER_LONG_BLOCK") {
@@ -12789,7 +12787,7 @@ export class PaperEngine {
         const auditNotionalOk = typeof auditNotional === "number" && auditNotional > 0;
         const auditSideOk = auditSide === "long" || auditSide === "short";
         const auditReadyOk = executionSnapshot.paperReady === true && executionSnapshot.signedReady === true;
-        // auditStopOk 반드시 포함 — stop 없는 ENTER는 OKX submit 전 차단
+        // auditStopOk 諛섎뱶???ы븿 ??stop ?녿뒗 ENTER??OKX submit ??李⑤떒
         const auditFail = !auditSideOk || !auditNotionalOk || !auditReadyOk || !auditStopOk;
 
         this.logger.info("V2_ENTRY_ORDER_BUILD_AUDIT_PROOF", {
@@ -12989,7 +12987,7 @@ export class PaperEngine {
           const qtyLegacyEst = Math.max(0.001, v2EntrySizeUsd / Math.max(1e-9, first.lastPrice));
           const clOrdId = buildOkxClOrdId(sym, side);
 
-          // --- [GUARD-2] Market Chase Guard: first-candle shock/breakdown → WAIT_RECHECK ---
+          // --- [GUARD-2] Market Chase Guard: first-candle shock/breakdown ??WAIT_RECHECK ---
           const chaseBlockSubtypes = new Set([
             "VOLUME_BREAKDOWN_OBSERVATION",
             "VOLUME_SHOCK_DOWN",
@@ -13045,7 +13043,7 @@ export class PaperEngine {
 
           // --- [GUARD-3] Macro Bias Risk Filter ---
           // Daily/H4 bias proxy via marketSubtype + regime (no direct D/H4 candle ingestion yet)
-          // 1D/4H는 confidence/sizeMultiplier/counterTrendRisk 조정만; ENTER 직접 생성 금지.
+          // 1D/4H??confidence/sizeMultiplier/counterTrendRisk 議곗젙留? ENTER 吏곸젒 ?앹꽦 湲덉?.
           const macroUpSubtypes = new Set([
             "VOLUME_BREAKOUT_OBSERVATION",
             "VOLUME_SHOCK_UP",
@@ -13087,7 +13085,7 @@ export class PaperEngine {
             macro_bias: macroBias,
             is_counter_trend: macroCounterTrend,
             macro_size_multiplier: macroSizeMultiplier,
-            // 실제 1D/H4 캔들 기반이 아닌 marketSubtype proxy임을 명시
+            // ?ㅼ젣 1D/H4 罹붾뱾 湲곕컲???꾨땶 marketSubtype proxy?꾩쓣 紐낆떆
             macro_source: "market_subtype_proxy",
             daily_bias_actual: null,
             h4_bias_actual: null,
@@ -13363,12 +13361,12 @@ export class PaperEngine {
             });
 
             // [V2_ENTRY_TO_FILL] Post-fill actual position reconcile check
-            // posSide 우선, 불일치 시 pos 부호로 side fallback
+            // posSide ?곗꽑, 遺덉씪移???pos 遺?몃줈 side fallback
             const instIdTarget = toOkxSwapInstId(sym as MarketSymbol);
             let actualPosReconcile: any = null;
             let reconcileMatchMethod: "posSide" | "pos_sign" | "none" = "none";
             if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
-              // 1차: posSide 직접 매칭
+              // 1李? posSide 吏곸젒 留ㅼ묶
               actualPosReconcile = this.lastLivePositionsPayload.find((p: any) =>
                 p.instId === instIdTarget &&
                 String(p.posSide).toLowerCase() === intentSide
@@ -13376,7 +13374,7 @@ export class PaperEngine {
               if (actualPosReconcile) {
                 reconcileMatchMethod = "posSide";
               } else {
-                // 2차: instId 매칭 후 pos 부호로 side fallback
+                // 2李? instId 留ㅼ묶 ??pos 遺?몃줈 side fallback
                 const samePosInstId = this.lastLivePositionsPayload.filter((p: any) => p.instId === instIdTarget);
                 for (const p of samePosInstId) {
                   const posNum = Number(p.pos);
@@ -13401,8 +13399,7 @@ export class PaperEngine {
               note: !reconcileFound ? "actual_position_not_yet_visible_will_reconcile_next_cycle" : "reconciled"
             });
 
-            // [수정 4] actual position 미확인 → 신규 진입 차단 플래그
-            if (!reconcileFound) {
+            // [?섏젙 4] actual position 誘명솗?????좉퇋 吏꾩엯 李⑤떒 ?뚮옒洹?            if (!reconcileFound) {
               this.logger.error("V2_POST_FILL_ACTUAL_POSITION_RECONCILE_FAIL_BLOCK_PROOF", {
                 symbol: sym,
                 side: intentSide,
@@ -13481,7 +13478,7 @@ export class PaperEngine {
         if (scaled) {
           next[existingIdx] = scaled;
           openPositionsChanged = true;
-          // Scale-in: POSITION_SCALE_IN_SUCCESS only — no ENTRY_OPENED here (initial entry records ENTRY_OPENED).
+          // Scale-in: POSITION_SCALE_IN_SUCCESS only ??no ENTRY_OPENED here (initial entry records ENTRY_OPENED).
           await this.store.appendJsonlLine("reports/events.jsonl", {
             ts: Date.now(),
             type: "POSITION_SCALE_IN_SUCCESS",
@@ -13496,7 +13493,7 @@ export class PaperEngine {
         continue;
       }
 
-      // 4. Max open positions (new entry only — single check after final gate, after scale-in branch)
+      // 4. Max open positions (new entry only ??single check after final gate, after scale-in branch)
       if (next.length >= max) {
         if (authority.decision === "ENTER") {
           const limitBlockedEnvelope: PaperEngineDecisionEnvelope = {
@@ -14171,7 +14168,7 @@ export class PaperEngine {
         this.logger.info("STOP_STATE_PROOF", {
           symbol: record.symbol,
           side: record.side,
-          stopPrice_at_entry: record.stopPrice ?? "미설정",
+          stopPrice_at_entry: record.stopPrice ?? "誘몄꽕??,
           entryPrice: record.entryPrice,
           source: typeof res.decision.stopLoss === "number" ? "executor_decision" : "engine_fallback"
         });
@@ -14203,9 +14200,9 @@ export class PaperEngine {
               (adaptive.detail as { stage1_adaptive_soft_explore?: string | null })?.stage1_adaptive_soft_explore ?? null
           };
           this.logger.info("RANGE_FILL_PATH_PROOF", fillProof);
-          // [ENTRY IDENTITY FIX] RANGE anomaly 판정은 반드시 진입 시점에 기록된 rangeEntryZone 기준이어야 한다.
-          // fillZone(현재 스냅샷 boxPos)으로 판정하면 TREND로 열린 포지션이 나중에 박스 상단에 있을 때 오탐이 발생한다.
-          // executorAtEntry가 TREND인 포지션은 RANGE anomaly 판정 대상이 아니다.
+          // [ENTRY IDENTITY FIX] RANGE anomaly ?먯젙? 諛섎뱶??吏꾩엯 ?쒖젏??湲곕줉??rangeEntryZone 湲곗??댁뼱???쒕떎.
+          // fillZone(?꾩옱 ?ㅻ깄??boxPos)?쇰줈 ?먯젙?섎㈃ TREND濡??대┛ ?ъ??섏씠 ?섏쨷??諛뺤뒪 ?곷떒???덉쓣 ???ㅽ깘??諛쒖깮?쒕떎.
+          // executorAtEntry媛 TREND???ъ??섏? RANGE anomaly ?먯젙 ??곸씠 ?꾨땲??
           const entryZoneForAnomaly = record.rangeEntryZone ?? fillZone;
           const isRangeOriginPosition = record.executorAtEntry === "RANGE" || record.regimeAtEntry === "RANGE";
           if (entryZoneForAnomaly === "upper" && record.side === "long" && isRangeOriginPosition) {
@@ -14214,7 +14211,7 @@ export class PaperEngine {
               entry_zone_for_anomaly: entryZoneForAnomaly,
               anomaly_source: record.rangeEntryZone ? "rangeEntryZone_stored" : "fillZone_fallback",
               anomaly_note:
-                "RANGE stage0 상단에서는 롱 진입이 나오면 안 됨 — 레거시 하이웨이·테스트 바이패스·히스토리 zone 라벨 불일치 등을 의심"
+                "RANGE stage0 ?곷떒?먯꽌??濡?吏꾩엯???섏삤硫????????덇굅???섏씠?⑥씠쨌?뚯뒪??諛붿씠?⑥뒪쨌?덉뒪?좊━ zone ?쇰꺼 遺덉씪移??깆쓣 ?섏떖"
             });
             try {
               await this.store.appendJsonlLine("reports/events.jsonl", {
@@ -14380,7 +14377,7 @@ export class PaperEngine {
       if (typeof snap.boxPos !== "number" || !Number.isFinite(snap.boxPos)) {
         return { ok: false, reason: "addon_range_zone_unknown" };
       }
-      const rz = classifyRangeActionZone(snap.boxPos);
+      const rz = classifyRangeZone(snap.boxPos);
       const ok =
         (intentSide === "long" && rz === "lower") ||
         (intentSide === "short" && rz === "upper");
@@ -14610,7 +14607,7 @@ export class PaperEngine {
         existing.side === "short" &&
         existing.rangeEntryZone === "upper" &&
         typeof first.boxPos === "number" &&
-        classifyRangeActionZone(first.boxPos) === "upper" &&
+        classifyRangeZone(first.boxPos) === "upper" &&
         res.decision.range_upper_short_priority_applied === true &&
         edgeStructureOk === true;
       const lowerLongAddOnCandidate =
@@ -14618,7 +14615,7 @@ export class PaperEngine {
         existing.side === "long" &&
         existing.rangeEntryZone === "lower" &&
         typeof first.boxPos === "number" &&
-        classifyRangeActionZone(first.boxPos) === "lower" &&
+        classifyRangeZone(first.boxPos) === "lower" &&
         res.decision.range_lower_long_priority_applied === true &&
         edgeStructureOk === true;
       rangeAddOnCandidate = upperShortAddOnCandidate || lowerLongAddOnCandidate;
@@ -14642,7 +14639,7 @@ export class PaperEngine {
         return null;
       }
       if (existing.regimeAtEntry === "RANGE" && typeof first.boxPos === "number") {
-        const zz = classifyRangeActionZone(first.boxPos);
+        const zz = classifyRangeZone(first.boxPos);
         if (existing.side === "long" && zz === "upper" && adaptive.direction === "long") {
           this.logger.info("scale_in_blocked_range_upper_long_add", { symbol: existing.symbol, box_zone: zz });
           return null;
@@ -14748,13 +14745,13 @@ export class PaperEngine {
       this.logger.info("RANGE_SCALE_IN_SUCCESS_PROOF", {
         symbol: existing.symbol,
         side: existing.side,
-        box_zone: classifyRangeActionZone(first.boxPos),
+        box_zone: classifyRangeZone(first.boxPos),
         box_pos: first.boxPos,
         snapshot_signal: first.signal,
         adaptive_direction: adaptive.direction,
         incremental_usd: incrementalSizeUsd,
         target_stage: targetStage,
-        note: "상단 롱 증액은 별도 블록에서 차단됨 — 이 로그는 통과한 증액만"
+        note: "?곷떒 濡?利앹븸? 蹂꾨룄 釉붾줉?먯꽌 李⑤떒??????濡쒓렇???듦낵??利앹븸留?
       });
     }
 
@@ -14829,8 +14826,8 @@ export class PaperEngine {
       this.logger.info("STOP_STATE_PROOF", {
         symbol: existing.symbol,
         side: existing.side,
-        stopPrice_before: existing.stopPrice ?? "미설정",
-        stopPrice_after: updatedRecord.stopPrice ?? "미설정",
+        stopPrice_before: existing.stopPrice ?? "誘몄꽕??,
+        stopPrice_after: updatedRecord.stopPrice ?? "誘몄꽕??,
         source: typeof res.decision.stopLoss === "number" ? "executor_decision" : "persisted_value"
       });
     }
@@ -14970,7 +14967,7 @@ export class PaperEngine {
       sidewaysEmaGapThreshold: this.config.paperSidewaysEmaGapThreshold
     });
 
-    // BTC-specific candidate signal relaxation for RANGE regime (후보만; 체결은 기존 게이트 유지)
+    // BTC-specific candidate signal relaxation for RANGE regime (?꾨낫留? 泥닿껐? 湲곗〈 寃뚯씠???좎?)
     let signalDecisionOrigin = "entry_signal_raw";
     let signal_missing_reason = "NONE";
     let rangeSignalOrigin = "entry_signal_raw";
@@ -14979,8 +14976,7 @@ export class PaperEngine {
     let rangeSignalKeptByRelax = false;
     if (symbol === "BTCUSDT" && regimeDetected.regime === "RANGE" && entry.signal === "none") {
       if (boxPos !== null && boxRel !== null && boxRel >= 0.0035) {
-        // 가장자리 기준 소폭 확대(0.28/0.72 → 0.26/0.74): 후보 노출만
-        if (boxPos <= 0.26) {
+        // 媛?μ옄由?湲곗? ?뚰룺 ?뺣?(0.28/0.72 ??0.26/0.74): ?꾨낫 ?몄텧留?        if (boxPos <= 0.26) {
           entry = {
             ...entry,
             signal: "paper_long_candidate",
@@ -15091,7 +15087,7 @@ export class PaperEngine {
         (regimeDetected.trendWeaknessScore ?? 0) >= 0.5 &&
         hasRangeEdge;
       if (rangeSideZoneMismatchReason !== null) {
-        const zone = classifyRangeActionZone(boxPos ?? 0.5);
+        const zone = classifyRangeZone(boxPos ?? 0.5);
         let mismatchDiagnosticSource:
           | "reused_existing_gate"
           | "local_entry_tf_only_no_extra_fetch"
@@ -15337,7 +15333,7 @@ export class PaperEngine {
             : "snapshot_candles_consistent"
     });
 
-    /** ENTRY_LINE은 runTick 루프에서 의사결정 결과(Intent 등)와 합쳐서 로깅하기 위해 여기서는 생략 */
+    /** ENTRY_LINE? runTick 猷⑦봽?먯꽌 ?섏궗寃곗젙 寃곌낵(Intent ??? ?⑹퀜??濡쒓퉭?섍린 ?꾪빐 ?ш린?쒕뒗 ?앸왂 */
     this.logger.info("symbol_snapshot", snapshot);
     this.logger.info("symbol_signal", {
       symbol,
