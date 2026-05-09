@@ -87,6 +87,7 @@ import { evaluateMarketModeSelector } from "./mode-selector";
 import { evaluateRiskExposure } from "./risk-exposure";
 import { buildPaperExplanation } from "./explanation-layer";
 import { runEngineV2, adaptV2Input, shouldEmitV2Proof } from "../engine-v2/index";
+import { getPaperLoopIntervalMs } from "../config/env";
 import {
   EngineV2Input,
   EngineV2OpMode,
@@ -1025,6 +1026,12 @@ export class PaperEngine {
   private marketDataLastUpdateAt: number | null = null;
   private v2LastDecisionAt: number | null = null;
   private bundleLastWrittenAt: number | null = null;
+  /** Main loop scheduling (mirrors `src/loop.ts` + ORBITALPHA_PAPER_LOOP_INTERVAL_MS). */
+  private loopIntervalTargetMs = 10_000;
+  private lastLoopDurationMs: number | null = null;
+  private lastLoopStartedAt: number | null = null;
+  private lastLoopFinishedAt: number | null = null;
+  private loopDelayReason: string | null = null;
   private publicMarketDataReady = false;
   private v2JudgmentReady = false;
   private positionTrackingAlive = false;
@@ -3098,6 +3105,16 @@ export class PaperEngine {
   async runOnce(): Promise<void> {
     this.runCycleId += 1;
     const tickNow = Date.now();
+    const loopWallStart = tickNow;
+    this.lastLoopStartedAt = loopWallStart;
+    let okx_balance_ms = 0;
+    let okx_position_reconcile_ms = 0;
+    let market_data_fetch_ms = 0;
+    let htf_fetch_ms = 0;
+    let snapshot_write_ms = 0;
+    let v2_decision_ms = 0;
+    let entry_queue_consume_ms = 0;
+    let bundle_write_ms = 0;
     this.engineLastTickAt = tickNow;
     await this.loadServerTradeControlState(tickNow);
     this.logger.info("TRADE_CONTROL_STATE_PROOF", {
@@ -3157,8 +3174,12 @@ export class PaperEngine {
     // --------------------------------------------------------------------------
 
 
+    const tBal0 = Date.now();
     await this.refreshLiveBalanceSnapshot(Date.now());
+    okx_balance_ms = Date.now() - tBal0;
+    const tRec0 = Date.now();
     await this.runPositionStateReconciliation(Date.now());
+    okx_position_reconcile_ms = Date.now() - tRec0;
     this.evaluateReadinessTransition(Date.now());
     const history = await this.store.readPositionsHistory();
     await this.refreshEntryQualitySamples(history as PaperClosedPositionRecord[]);
@@ -3171,6 +3192,7 @@ export class PaperEngine {
     const klineLimit = 120;
     const category = "SWAP";
 
+    const tMarketWall0 = Date.now();
     const btc5r = await this.okxPublic.tryGetCandles("BTCUSDT", "5m", 120);
     const btc5 = btc5r.ok ? btc5r.value : [];
     const prevRegime = this.lastRegime.regime;
@@ -3260,18 +3282,25 @@ export class PaperEngine {
     const snapshots: SymbolSnapshot[] = [];
     const errors: { symbol: MarketSymbol; error: string; failedEndpoint: FailureEndpointKey }[] = [];
     const allSymbolDiagnostics: SymbolDiagnostic[] = [];
+    let sumBasePollMs = 0;
+    let sumHtfPollMs = 0;
 
     for (const symbol of symbols) {
       const result = await this.pollSymbol(symbol, fetchedAt, klineLimit, regimeDetected);
       allSymbolDiagnostics.push(...result.symbolDiagnostics);
       if (result.ok) {
         snapshots.push(result.snapshot);
+        sumBasePollMs += result.basePollMs;
+        sumHtfPollMs += result.htfFetchMs;
       } else {
         errors.push({ symbol, error: result.error, failedEndpoint: result.failedEndpoint });
         this.logger.error("paper_poll_symbol_failed", { symbol, error: result.error });
       }
     }
+    htf_fetch_ms = sumHtfPollMs;
+    market_data_fetch_ms = Math.max(0, Date.now() - tMarketWall0 - sumHtfPollMs);
 
+    const tSnapWrite0 = Date.now();
     const run = { fetchedAt, snapshots, errors };
     const filePath = await this.store.writeJson(`snapshots/${fetchedAt}.json`, run);
     this.logger.info("snapshot_saved", { filePath, symbols: snapshots.map((s) => s.symbol), errorCount: errors.length });
@@ -3399,6 +3428,7 @@ export class PaperEngine {
         this.logger.error("paper_candidate_run_save_failed", { error: msg });
       }
     }
+    snapshot_write_ms = Date.now() - tSnapWrite0;
 
     const opensBeforeClose = await this.positions.loadOpenAll();
     let volatilityProxy = 0.5;
@@ -3462,6 +3492,7 @@ export class PaperEngine {
     const openSymbols = opensAfterClose.map(o => String(o.symbol));
     const polledSymbols = Array.from(new Set([...this.config.symbols, ...openSymbols]));
 
+    const tV2Decision0 = Date.now();
     const decisionBySymbol = new Map<string, PaperEngineDecisionEnvelope>();
     const effectiveLane = routingOverride.effectiveExecutionLane;
     const effectiveRegimeForDecision = (effectiveLane === "IDLE" ? "NO_TRADE" : effectiveLane) as MarketRegime;
@@ -4230,6 +4261,7 @@ export class PaperEngine {
     this.entryPipelineReady = this.publicMarketDataReady && this.v2JudgmentReady;
     this.exitPipelineReady = this.publicMarketDataReady && snapshots.length > 0;
     this.evaluateReadinessTransition(Date.now());
+    v2_decision_ms = Date.now() - tV2Decision0;
 
     // 1. First closing (including reversals)
     await this.tryPaperPositionClose({
@@ -4245,6 +4277,7 @@ export class PaperEngine {
 
     // 2. Then entries/scale-ins
     const effectiveCloseOnlyMode = this.serverTradeControlState.close_only_mode || this.reconcileSafetyCloseOnly;
+    const tEntryQ0 = Date.now();
     await this.processPaperSymbolEntries({
       snapshots,
       errorsCount: errors.length,
@@ -4260,6 +4293,7 @@ export class PaperEngine {
       closeOnlyMode: effectiveCloseOnlyMode,
       killSwitchActive: this.serverTradeControlState.kill_switch_active
     });
+    entry_queue_consume_ms = Date.now() - tEntryQ0;
 
     if (this.freshTickRequiredAfterReadiness && !readinessBarrierActive) {
       this.freshTickRequiredAfterReadiness = false;
@@ -4456,6 +4490,7 @@ export class PaperEngine {
     });
 
     try {
+      const tBundle0 = Date.now();
       const balanceDisplay = this.buildBalanceDisplayContext(openAfterEntries);
       const summary = await this.positions.refreshSummaryReport({
         okx_balance_mode: balanceDisplay.okx_balance_mode,
@@ -4510,13 +4545,58 @@ export class PaperEngine {
         bundle_writer_ready: this.bundleWriterReady,
         entry_pipeline_ready: this.entryPipelineReady,
         exit_pipeline_ready: this.exitPipelineReady,
+        loop_interval_target_ms: this.loopIntervalTargetMs,
+        last_loop_duration_ms: this.lastLoopDurationMs,
+        last_loop_started_at: this.lastLoopStartedAt,
+        last_loop_finished_at: this.lastLoopFinishedAt,
+        loop_delay_reason: this.loopDelayReason,
         ...balanceDisplay
       });
+      bundle_write_ms = Date.now() - tBundle0;
     } catch (e) {
       this.bundleWriterReady = false;
       this.evaluateReadinessTransition(Date.now());
       this.logger.error("summary_report_refresh_failed", { error: String(e) });
     }
+
+    const { intervalMs: nextLoopDelayMs, delayReason: loopDelayReasonResolved } = getPaperLoopIntervalMs(process.env);
+    this.loopIntervalTargetMs = nextLoopDelayMs;
+    this.loopDelayReason = loopDelayReasonResolved;
+    const total_loop_ms = Date.now() - loopWallStart;
+    this.lastLoopFinishedAt = Date.now();
+    this.lastLoopDurationMs = total_loop_ms;
+
+    const phaseRows: [string, number][] = [
+      ["market_data_fetch_ms", market_data_fetch_ms],
+      ["htf_fetch_ms", htf_fetch_ms],
+      ["v2_decision_ms", v2_decision_ms],
+      ["snapshot_write_ms", snapshot_write_ms],
+      ["bundle_write_ms", bundle_write_ms],
+      ["okx_balance_ms", okx_balance_ms],
+      ["okx_position_reconcile_ms", okx_position_reconcile_ms],
+      ["entry_queue_consume_ms", entry_queue_consume_ms]
+    ];
+    const longestPhase = phaseRows.reduce(
+      (best, cur) => (cur[1] > best[1] ? cur : best),
+      ["none", 0] as [string, number]
+    );
+
+    this.logger.info("V2_LOOP_PHASE_TIMING_PROOF", {
+      run_cycle_id: this.runCycleId,
+      market_data_fetch_ms,
+      htf_fetch_ms,
+      v2_decision_ms,
+      snapshot_write_ms,
+      bundle_write_ms,
+      okx_balance_ms,
+      okx_position_reconcile_ms,
+      entry_queue_consume_ms,
+      total_loop_ms,
+      next_loop_delay_ms: nextLoopDelayMs,
+      longest_phase_key: longestPhase[0],
+      longest_phase_ms: longestPhase[1],
+      loop_delay_reason: loopDelayReasonResolved
+    });
 
     if (errors.length > 0) {
       throw new Error(`runOnce failed for ${errors.length} symbol(s)`);
@@ -11351,7 +11431,8 @@ export class PaperEngine {
       return 0;
     });
     if (entryQueue.length === 0) {
-      this.logger.warn("ENTRY_QUEUE_PRE_CONSUME_BLOCKED_PROOF", {
+      const barrierActive = this.freshTickRequiredAfterReadiness === true || input.readinessBarrierActive === true;
+      const emptyPayload = {
         run_cycle_id: this.runCycleId,
         entry_queue_length: 0,
         block_reason: "entry_queue_empty",
@@ -11362,7 +11443,12 @@ export class PaperEngine {
         has_v2_enqueued: false,
         fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness,
         readiness_barrier_active: input.readinessBarrierActive
-      });
+      };
+      if (barrierActive) {
+        this.logger.warn("ENTRY_QUEUE_PRE_CONSUME_BLOCKED_PROOF", emptyPayload);
+      } else {
+        this.logger.info("ENTRY_QUEUE_PRE_CONSUME_BLOCKED_PROOF", emptyPayload);
+      }
       return;
     }
 
@@ -14871,11 +14957,13 @@ export class PaperEngine {
     klineLimit: number,
     regimeDetected: MarketRegimeDetection
   ): Promise<
-    | Readonly<{ ok: true; snapshot: SymbolSnapshot; symbolDiagnostics: SymbolDiagnostic[] }>
-    | Readonly<{ ok: false; error: string; symbolDiagnostics: SymbolDiagnostic[]; failedEndpoint: FailureEndpointKey }>
+    | Readonly<{ ok: true; snapshot: SymbolSnapshot; symbolDiagnostics: SymbolDiagnostic[]; basePollMs: number; htfFetchMs: number }>
+    | Readonly<{ ok: false; error: string; symbolDiagnostics: SymbolDiagnostic[]; failedEndpoint: FailureEndpointKey; basePollMs: number; htfFetchMs: number }>
   > {
     const symbolDiagnostics: SymbolDiagnostic[] = [];
+    const HTF_TF_DEADLINE_MS = 12_000;
 
+    const tBasePoll0 = Date.now();
     const rT = await this.okxPublic.tryGetTicker(symbol);
     symbolDiagnostics.push(toSymbolDiagnostic(symbol, EP.ticker, rT.diagnostics));
 
@@ -14884,13 +14972,43 @@ export class PaperEngine {
 
     const rF = await this.okxPublic.tryGetFundingRate(symbol);
     symbolDiagnostics.push(toSymbolDiagnostic(symbol, EP.funding, rF.diagnostics));
+    const basePollMs = Date.now() - tBasePoll0;
+
+    if (!rT.ok || !rC.ok || !rF.ok) {
+      const parts: string[] = [];
+      if (!rT.ok) parts.push(rT.error);
+      if (!rC.ok) parts.push(rC.error);
+      if (!rF.ok) parts.push(rF.error ?? "unknown");
+      const failedEndpoint: FailureEndpointKey = !rT.ok ? "ticker" : (!rC.ok ? "kline" : (!rF.ok ? "funding" : "unknown"));
+      return { ok: false, error: parts.join("; "), symbolDiagnostics, failedEndpoint, basePollMs, htfFetchMs: 0 };
+    }
 
     const htf_candles: Record<string, import("../models/types").Candle[]> = {};
     const htfTimeframes = ["5m", "15m", "1h", "4h", "1d"] as const;
     const htf_diagnostics: Record<string, any> = {};
 
+    const tHtf0 = Date.now();
     for (const tf of htfTimeframes) {
-      const res = await this.okxPublic.tryGetCandles(symbol, tf, 120);
+      const res = await Promise.race([
+        this.okxPublic.tryGetCandles(symbol, tf, 120),
+        new Promise<"__htf_timeout__">((resolve) => {
+          setTimeout(() => resolve("__htf_timeout__"), HTF_TF_DEADLINE_MS);
+        })
+      ]);
+      if (res === "__htf_timeout__") {
+        htf_diagnostics[tf] = {
+          ok: false,
+          candle_count: 0,
+          last_ts: null,
+          error: "htf_fetch_timeout"
+        };
+        this.logger.warn("V2_HTF_CANDLE_FETCH_TIMEOUT_PROOF", {
+          symbol: String(symbol),
+          tf,
+          deadline_ms: HTF_TF_DEADLINE_MS
+        });
+        continue;
+      }
       htf_diagnostics[tf] = {
         ok: res.ok,
         candle_count: res.ok ? res.value.length : 0,
@@ -14901,6 +15019,7 @@ export class PaperEngine {
         htf_candles[tf] = res.value;
       }
     }
+    const htfFetchMs = Date.now() - tHtf0;
 
     console.info(JSON.stringify({
       event: "HTF_CANDLE_FETCH_PROOF",
@@ -14908,29 +15027,20 @@ export class PaperEngine {
       htf_diagnostics
     }));
 
-    if (!rT.ok || !rC.ok || !rF.ok) {
-      const parts: string[] = [];
-      if (!rT.ok) parts.push(rT.error);
-      if (!rC.ok) parts.push(rC.error);
-      if (!rF.ok) parts.push(rF.error ?? "unknown");
-      const failedEndpoint: FailureEndpointKey = !rT.ok ? "ticker" : (!rC.ok ? "kline" : (!rF.ok ? "funding" : "unknown"));
-      return { ok: false, error: parts.join("; "), symbolDiagnostics, failedEndpoint };
-    }
-
     const lastPrice = rT.value.last;
     const recentCandlesCount = rC.value.length;
     const latestCandleClose = rC.value.length > 0 ? rC.value[rC.value.length - 1].close : undefined;
     if (!Number.isFinite(lastPrice)) {
-      return { ok: false, error: `Invalid lastPrice for ${symbol}`, symbolDiagnostics, failedEndpoint: "ticker" };
+      return { ok: false, error: `Invalid lastPrice for ${symbol}`, symbolDiagnostics, failedEndpoint: "ticker", basePollMs, htfFetchMs };
     }
     if (!Number.isFinite(recentCandlesCount)) {
-      return { ok: false, error: `Invalid candles count for ${symbol}`, symbolDiagnostics, failedEndpoint: "kline" };
+      return { ok: false, error: `Invalid candles count for ${symbol}`, symbolDiagnostics, failedEndpoint: "kline", basePollMs, htfFetchMs };
     }
     if (latestCandleClose === undefined || !Number.isFinite(latestCandleClose)) {
-      return { ok: false, error: `Invalid latestCandleClose for ${symbol}`, symbolDiagnostics, failedEndpoint: "kline" };
+      return { ok: false, error: `Invalid latestCandleClose for ${symbol}`, symbolDiagnostics, failedEndpoint: "kline", basePollMs, htfFetchMs };
     }
     if (!Number.isFinite(rF.value.rate)) {
-      return { ok: false, error: `Invalid fundingRate for ${symbol}`, symbolDiagnostics, failedEndpoint: "funding" };
+      return { ok: false, error: `Invalid fundingRate for ${symbol}`, symbolDiagnostics, failedEndpoint: "funding", basePollMs, htfFetchMs };
     }
 
     const okxKlineLen = rC.value.length;
@@ -15352,7 +15462,7 @@ export class PaperEngine {
       trendOk: trend.trendOk
     });
 
-    return { ok: true, snapshot, symbolDiagnostics };
+    return { ok: true, snapshot, symbolDiagnostics, basePollMs, htfFetchMs };
   }
 }
 

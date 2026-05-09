@@ -56,6 +56,31 @@ export function loadEnv(envFilePath?: string): void {
   dotenv.config({ path: p });
 }
 
+/** Paper engine main loop target: 5s–15s (clamped). Default 10s when env unset. */
+const PAPER_LOOP_INTERVAL_DEFAULT_MS = 10_000;
+const PAPER_LOOP_INTERVAL_MIN_MS = 5_000;
+const PAPER_LOOP_INTERVAL_MAX_MS = 15_000;
+
+export function getPaperLoopIntervalMs(env: EnvInput = process.env): { intervalMs: number; delayReason: string } {
+  const raw = env.ORBITALPHA_PAPER_LOOP_INTERVAL_MS;
+  const parsedDefault =
+    raw === undefined || raw === "" ? PAPER_LOOP_INTERVAL_DEFAULT_MS : Number(raw);
+  const parsed = !Number.isFinite(parsedDefault) ? PAPER_LOOP_INTERVAL_DEFAULT_MS : Math.floor(parsedDefault);
+  const clamped = Math.min(
+    PAPER_LOOP_INTERVAL_MAX_MS,
+    Math.max(PAPER_LOOP_INTERVAL_MIN_MS, parsed)
+  );
+  let delayReason: string;
+  if (raw === undefined || raw === "") {
+    delayReason = "default_10s_range_5_15s";
+  } else if (clamped !== parsed) {
+    delayReason = `env_parsed_${parsed}_ms_clamped_to_${clamped}_ms_in_5_15s`;
+  } else {
+    delayReason = `env_${clamped}_ms`;
+  }
+  return { intervalMs: clamped, delayReason };
+}
+
 export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
   const dataDir = (env.DATA_DIR ?? "./data").trim();
   const paperTakerFeeRaw = env.ORBITALPHA_PAPER_FUTURES_TAKER_FEE_RATE ?? env.TAKER_FEE_RATE;
