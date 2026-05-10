@@ -3396,7 +3396,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         dashboardNextAction = "WAIT_FOR_BREAKDOWN_RETEST_FAILURE";
     } else if (sideVetoDetail === "SHOCK_DOWN_TREND_CONFIRMATION_WEAK") {
         dashboardNextAction = "WAIT_FOR_TREND_CONFIRMATION";
+    } else if (
+        primaryMissingCondition === "SHOCK_REACTION_WATCH_MID_CHASE_BLOCKED" ||
+        primaryMissingCondition === "SHOCK_REACTION_SETUP_NOT_READY_UP" ||
+        sideVetoDetail === "SHOCK_UP_MID_RETEST_REQUIRED"
+    ) {
+        dashboardNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
     }
+
 
     const decision: EngineV2Decision = {
         symbol: input.symbol,
