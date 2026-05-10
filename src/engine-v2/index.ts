@@ -3387,7 +3387,17 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             : null;
 
     const dashboardMissingCondition = primaryMissingCondition;
-    const dashboardNextAction = expectedNextAction || (finalDecision === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY");
+    let dashboardNextAction = expectedNextAction || (finalDecision === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY");
+
+    // Fix: align expected_next_action with primary_missing_condition (Requirement 2026-05-10)
+    if (primaryMissingCondition === "POLARITY_MISMATCH_BULLISH_MACRO_LIMITS_SHORT_SHOCK") {
+        dashboardNextAction = "WAIT_FOR_HTF_POLARITY_ALIGNMENT";
+    } else if (sideVetoDetail === "SHOCK_DOWN_MID_RETEST_REQUIRED" || primaryMissingCondition === "SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED") {
+        dashboardNextAction = "WAIT_FOR_BREAKDOWN_RETEST_FAILURE";
+    } else if (sideVetoDetail === "SHOCK_DOWN_TREND_CONFIRMATION_WEAK") {
+        dashboardNextAction = "WAIT_FOR_TREND_CONFIRMATION";
+    }
+
     const decision: EngineV2Decision = {
         symbol: input.symbol,
         ts: input.now,

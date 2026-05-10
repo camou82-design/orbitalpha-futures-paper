@@ -4134,8 +4134,10 @@ export class PaperEngine {
           TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED: "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM",
           TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED: "WAIT_FOR_RECHECK_OR_RETEST",
           TREND_PROMOTION_VETOED: "WAIT_FOR_PROMOTION_CONFIRMATION",
-          RECOVERY_MODE_SIZE_SUPPRESSED: "WAIT_FOR_RECOVERY_MODE_CLEAR_OR_HIGH_CONFIDENCE_RETEST"
+          RECOVERY_MODE_SIZE_SUPPRESSED: "WAIT_FOR_RECOVERY_MODE_CLEAR_OR_HIGH_CONFIDENCE_RETEST",
+          POLARITY_MISMATCH_BULLISH_MACRO_LIMITS_SHORT_SHOCK: "WAIT_FOR_HTF_POLARITY_ALIGNMENT"
         };
+
         const vetoKey = side_veto_detail != null ? String(side_veto_detail) : "";
         const missingKey =
           refinedMissingCondition != null && typeof refinedMissingCondition === "string" ? refinedMissingCondition : "";
