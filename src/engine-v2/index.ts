@@ -2249,6 +2249,29 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         side_override_applied: !!execMeta.sideOverrideApplied
     }));
 
+    // Side Veto Detail Calculation (Diagnostic)
+    const rangeTrendConflict =
+        rangeSideCandidate && trendSideCandidate &&
+        rangeSideCandidate !== "none" && trendSideCandidate !== "none" &&
+        rangeSideCandidate !== trendSideCandidate;
+
+    let sideVetoDetail: string | null = null;
+    if (v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP") {
+        if (judgment.subtype === "SHOCK_REACTION_UP" && trendSideCandidate === "long") {
+            if (zone === "mid") sideVetoDetail = "SHOCK_UP_MID_RETEST_REQUIRED";
+            else if (trendOk === false) sideVetoDetail = "SHOCK_UP_TREND_CONFIRMATION_WEAK";
+            else if (reversalConfirmed === false) sideVetoDetail = "SHOCK_UP_RECLAIM_NOT_CONFIRMED";
+        } else if (judgment.subtype === "SHOCK_REACTION_DOWN" && trendSideCandidate === "short") {
+            if (zone === "mid") sideVetoDetail = "SHOCK_DOWN_MID_RETEST_REQUIRED";
+            else if (trendOk === false) sideVetoDetail = "SHOCK_DOWN_TREND_CONFIRMATION_WEAK";
+            else if (reversalConfirmed === false) sideVetoDetail = "SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED";
+        } else if (rangeTrendConflict) {
+            sideVetoDetail = "RANGE_TREND_SIDE_CONFLICT";
+        } else if ((!rangeSideCandidate || rangeSideCandidate === "none") && trendSideCandidate && trendSideCandidate !== "none" && promotionApplied === false) {
+            sideVetoDetail = promotionBlockReason || "TREND_PROMOTION_VETOED";
+        }
+    }
+
     // Polarity Check V2: Strict suppression for HTF mismatch
     if (judgment.polarityMismatch && (v2DecisionAfterPromotion === "ENTER" || promotionApplied)) {
         const macroPol = judgment.macroPolarity;
@@ -3347,11 +3370,22 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 6: Unify diagnostic suppression reasons for audit-ready transparency
     const auditRawMissingCondition = promotionBlockReason || v2RejectReasonAfterPromotion || expectedMissingCondition || (finalDecision === "SKIP" ? "MIN_QUALITY_NOT_MET" : "NONE");
-    const primaryMissingCondition = shockReactionBlockReason || auditRawMissingCondition;
+    
+    // Priority Logic for primary_missing_condition (Requirement 3 & 4)
+    const htfPolarityMismatch = (judgment.htf_policy_reason || "").includes("POLARITY_MISMATCH");
+    const shockDownRetestNotConfirmed = sideVetoDetail === "SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED";
+    
+    const primaryMissingCondition = 
+        (htfPolarityMismatch ? judgment.htf_policy_reason : null) ||
+        (shockDownRetestNotConfirmed ? sideVetoDetail : null) ||
+        shockReactionBlockReason || 
+        auditRawMissingCondition;
+
     const secondaryMissingCondition =
         auditRawMissingCondition && auditRawMissingCondition !== primaryMissingCondition
             ? auditRawMissingCondition
             : null;
+
     const dashboardMissingCondition = primaryMissingCondition;
     const dashboardNextAction = expectedNextAction || (finalDecision === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY");
     const decision: EngineV2Decision = {
@@ -3397,7 +3431,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             expectedNextAction: dashboardNextAction,
             primary_missing_condition: primaryMissingCondition,
             secondary_missing_condition: secondaryMissingCondition,
-            raw_missing_condition: primaryMissingCondition,
+            raw_missing_condition: auditRawMissingCondition,
+            side_veto_detail: sideVetoDetail,
             macro_source: judgment.macro_source ?? "data_not_ready",
             daily_bias_actual: judgment.daily_bias_actual ?? "DATA_NOT_READY",
             h4_bias_actual: judgment.h4_bias_actual ?? "DATA_NOT_READY",
@@ -3451,8 +3486,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             primary_missing_condition: primaryMissingCondition,
             secondary_missing_condition: secondaryMissingCondition,
             expected_missing_condition: dashboardMissingCondition,
-            raw_missing_condition: primaryMissingCondition,
+            raw_missing_condition: auditRawMissingCondition,
             expected_next_action: dashboardNextAction,
+            htf_policy_reason: judgment.htf_policy_reason ?? "HTF_DATA_NOT_READY",
+            macro_source: judgment.macro_source ?? "data_not_ready",
+            side_veto_detail: sideVetoDetail,
             shock_reaction_block_reason: shockReactionBlockReason,
             quality_score: qualityScore,
             counter_trend_risk: judgment.counter_trend_risk ?? false

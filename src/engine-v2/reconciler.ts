@@ -445,6 +445,10 @@ export function resolveSymbolDecisionEnvelope(
         sideZoneValid: execMeta.sideZoneValid ?? null,
         expectedMissingCondition: execMeta.expectedMissingCondition ?? null,
         expectedNextAction: execMeta.expectedNextAction ?? null,
+        primaryMissingCondition: execMeta.primary_missing_condition ?? null,
+        secondaryMissingCondition: execMeta.secondary_missing_condition ?? null,
+        rawMissingCondition: execMeta.raw_missing_condition ?? null,
+        sideVetoDetail: execMeta.side_veto_detail ?? null,
         macro_source: execMeta.macro_source ?? null,
         daily_bias_actual: execMeta.daily_bias_actual ?? null,
         h4_bias_actual: execMeta.h4_bias_actual ?? null,
@@ -646,7 +650,11 @@ export function resolveSymbolDecisionEnvelope(
         regime_final: executionEnvelope.regime,
         reject_reason: executionEnvelope.hardBlockReason,
         expected_missing_condition: executionEnvelope.expected_missing_condition,
-        expected_next_action: executionEnvelope.expected_next_action
+        expected_next_action: executionEnvelope.expected_next_action,
+        primary_missing_condition: executionEnvelope.primary_missing_condition,
+        secondary_missing_condition: executionEnvelope.secondary_missing_condition,
+        raw_missing_condition: executionEnvelope.raw_missing_condition,
+        side_veto_detail: executionEnvelope.side_veto_detail
     }));
 
     // 6. Comparison Metrics for Engine-State
