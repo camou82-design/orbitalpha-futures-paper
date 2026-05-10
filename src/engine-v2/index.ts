@@ -2291,16 +2291,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
         let mismatchReason: string | null = null;
         if (sideFinal === "short" && zone === "lower") {
-            const htfAllowsShort = htfPol === "SHORT_ONLY_OR_NONE" || htfPol.includes("BEARISH");
-            const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown || htfAllowsShort;
+            const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown;
             const htfStrongBullish = htfHardBlockReason === "STRONG_BULLISH_HTF_ALIGNMENT";
 
             if (!shortException || htfStrongBullish) {
                 mismatchReason = "SIDE_ZONE_MISMATCH_LOWER_SHORT";
             }
         } else if (sideFinal === "long" && zone === "upper") {
-            const htfAllowsLong = htfPol === "LONG_ONLY_OR_NONE" || htfPol.includes("BULLISH");
-            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp || htfAllowsLong;
+            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp;
             const htfStrongBearish = htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT";
 
             if (!longException || htfStrongBearish) {
