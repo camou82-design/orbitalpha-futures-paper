@@ -133,8 +133,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             htf_requires_stronger_confirmation: args.htf_requires_stronger_confirmation ?? false,
             htf_policy_reason: args.htf_policy_reason ?? "HTF_DATA_NOT_READY",
             htf_hard_block_reason: args.htf_hard_block_reason ?? null,
-            trend_ok: args.trendOk ?? null
+            trend_ok: args.trendOk ?? null,
+            display_retest_required: args.displayRetestRequired ?? null,
+            display_support_recheck_required: args.displaySupportRecheckRequired ?? null
         };
+
     }
     if (mode === "legacy") {
         return {

@@ -3404,6 +3404,22 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         dashboardNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
     }
 
+    const displayRetestRequired =
+        primaryMissingCondition === "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED" ||
+        primaryMissingCondition === "TREND_PROMOTION_BLOCKED_BREAKDOWN_RETEST_NOT_CONFIRMED" ||
+        primaryMissingCondition === "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKOUT_CONFIRMED" ||
+        primaryMissingCondition === "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED" ||
+        sideVetoDetail === "SHOCK_UP_MID_RETEST_REQUIRED" ||
+        sideVetoDetail === "SHOCK_DOWN_MID_RETEST_REQUIRED" ||
+        sideVetoDetail === "SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED" ||
+        sideVetoDetail === "SHOCK_REACTION_UP_RETEST_NOT_CONFIRMED" ||
+        sideVetoDetail === "SHOCK_REACTION_DOWN_RETEST_NOT_CONFIRMED" ||
+        (execMeta as any).retest_required === true;
+
+    const displaySupportRecheckRequired =
+        primaryMissingCondition === "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED" ||
+        sideVetoDetail === "SHOCK_UP_RECLAIM_NOT_CONFIRMED" ||
+        (execMeta as any).support_recheck_required === true;
 
     const decision: EngineV2Decision = {
         symbol: input.symbol,
@@ -3449,6 +3465,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             primary_missing_condition: primaryMissingCondition,
             secondary_missing_condition: secondaryMissingCondition,
             raw_missing_condition: primaryMissingCondition,
+            retest_required: displayRetestRequired,
+            reclaim_required: displaySupportRecheckRequired,
+            display_retest_required: displayRetestRequired,
+            display_support_recheck_required: displaySupportRecheckRequired,
             side_veto_detail: sideVetoDetail,
             macro_source: judgment.macro_source ?? "data_not_ready",
             daily_bias_actual: judgment.daily_bias_actual ?? "DATA_NOT_READY",

@@ -1169,11 +1169,11 @@
           : esc(`${fmtAuditBool(audit.reversal_confirmed)} · ${fmtAuditBool(audit.side_zone_valid)}`)
       ),
       ddt(
-        "chase_blocked / retest_required / reclaim_required",
+        "chase_blocked / retest / reclaim",
         stale
           ? `<span class="muted">—</span>`
           : esc(
-              `${fmtAuditBool(audit.chase_blocked)} · ${fmtAuditBool(audit.retest_required)} · ${fmtAuditBool(audit.reclaim_required)}`
+              `${fmtAuditBool(audit.chase_blocked)} · ${fmtAuditBool(audit.display_retest_required || audit.retest_required)} · ${fmtAuditBool(audit.display_support_recheck_required || audit.reclaim_required)}`
             )
       ),
       ddt("expected_retest_direction", strField("expected_retest_direction")),
@@ -1258,9 +1258,13 @@
         : `${audit.entry_quality_grade != null ? String(audit.entry_quality_grade) : "—"}${
             typeof audit.quality_score === "number" ? "(" + audit.quality_score + ")" : ""
           }`;
+      const retestInfo = stale ? "" :
+        (audit.display_retest_required || audit.retest_required === true ? ' <span class="badge badge-warn" style="margin-top:0; margin-left:0.4rem; border:1px solid var(--warn);">리테스트 필요</span>' : "") +
+        (audit.display_support_recheck_required || audit.reclaim_required === true ? ' <span class="badge badge-warn" style="margin-top:0; margin-left:0.4rem; border:1px solid var(--warn);">지지 재확인 필요</span>' : "");
+
       const lineCand = stale
         ? "—"
-        : `후보 ${fmtSideEnShort(audit.trend_side_candidate)} · 구간 ${audit.zone != null ? String(audit.zone) : "—"} · 품질 ${qualPart}`;
+        : `후보 ${fmtSideEnShort(audit.trend_side_candidate)} · 구간 ${audit.zone != null ? String(audit.zone) : "—"} · 품질 ${qualPart}${retestInfo}`;
       const metaHtml =
         !stale && audit && typeof audit.ts === "number"
           ? `<p class="sym-audit-meta">${esc("갱신 " + formatKst(audit.ts) + " · age " + Math.max(0, Math.round(ageMs ?? 0)) + " ms")}</p>`
