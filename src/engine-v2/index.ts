@@ -3346,9 +3346,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }));
 
     // Tier 6: Unify diagnostic suppression reasons for audit-ready transparency
-    const auditRawMissingCondition = expectedMissingCondition || promotionBlockReason || v2RejectReasonAfterPromotion || (finalDecision === "SKIP" ? "MIN_QUALITY_NOT_MET" : "NONE");
+    const auditRawMissingCondition = promotionBlockReason || v2RejectReasonAfterPromotion || expectedMissingCondition || (finalDecision === "SKIP" ? "MIN_QUALITY_NOT_MET" : "NONE");
     const primaryMissingCondition = shockReactionBlockReason || auditRawMissingCondition;
-    const secondaryMissingCondition = shockReactionBlockReason ? auditRawMissingCondition : null;
+    const secondaryMissingCondition =
+        auditRawMissingCondition && auditRawMissingCondition !== primaryMissingCondition
+            ? auditRawMissingCondition
+            : null;
     const dashboardMissingCondition = primaryMissingCondition;
     const dashboardNextAction = expectedNextAction || (finalDecision === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY");
     const decision: EngineV2Decision = {
