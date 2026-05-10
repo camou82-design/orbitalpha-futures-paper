@@ -132,7 +132,8 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             htf_size_multiplier: args.htf_size_multiplier ?? 1.0,
             htf_requires_stronger_confirmation: args.htf_requires_stronger_confirmation ?? false,
             htf_policy_reason: args.htf_policy_reason ?? "HTF_DATA_NOT_READY",
-            htf_hard_block_reason: args.htf_hard_block_reason ?? null
+            htf_hard_block_reason: args.htf_hard_block_reason ?? null,
+            trend_ok: args.trendOk ?? null
         };
     }
     if (mode === "legacy") {
@@ -206,7 +207,8 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             htf_size_multiplier: args.htf_size_multiplier ?? 1.0,
             htf_requires_stronger_confirmation: args.htf_requires_stronger_confirmation ?? false,
             htf_policy_reason: args.htf_policy_reason ?? "HTF_DATA_NOT_READY",
-            htf_hard_block_reason: args.htf_hard_block_reason ?? null
+            htf_hard_block_reason: args.htf_hard_block_reason ?? null,
+            trend_ok: args.trendOk ?? null
         };
     }
     return {
@@ -279,6 +281,7 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         htf_size_multiplier: args.htf_size_multiplier ?? 1.0,
         htf_requires_stronger_confirmation: args.htf_requires_stronger_confirmation ?? false,
         htf_policy_reason: args.htf_policy_reason ?? "HTF_DATA_NOT_READY",
-        htf_hard_block_reason: args.htf_hard_block_reason ?? null
+        htf_hard_block_reason: args.htf_hard_block_reason ?? null,
+        trend_ok: args.trendOk ?? null
     };
 }

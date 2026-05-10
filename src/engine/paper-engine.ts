@@ -4200,8 +4200,8 @@ export class PaperEngine {
           primary_missing_condition: v2Env?.primary_missing_condition || null,
           secondary_missing_condition: v2Env?.secondary_missing_condition || null,
           expected_next_action: refinedNextAction,
-          paper_execution_ready: this.paperExecutionReady,
-          signed_execution_ready: this.signedExecutionReady,
+          paper_execution_ready: v2Env?.paperExecutionReady ?? this.paperExecutionReady,
+          signed_execution_ready: v2Env?.signedExecutionReady ?? this.signedExecutionReady,
           serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
           closeOnlyMode: this.serverTradeControlState.close_only_mode,
           killSwitch: this.serverTradeControlState.kill_switch_active,
@@ -4213,7 +4213,7 @@ export class PaperEngine {
           range_trend_conflict,
           boxPos,
           zone,
-          trendOk,
+          trendOk: v2Env?.trend_ok ?? trendOk,
           emaGap,
           trendWeaknessScore,
           rangeConfidence,
@@ -4229,6 +4229,8 @@ export class PaperEngine {
           htf_1h_bias: v2Env?.h1_bias_actual ?? null,
           htf_4h_bias: v2Env?.h4_bias_actual ?? null,
           htf_1d_bias: v2Env?.daily_bias_actual ?? null,
+          audit_source: "v2_execution_envelope",
+          audit_cycle_consistent: true
         });
 
         const noEntryAuditRow: Record<string, unknown> = {
@@ -4245,7 +4247,7 @@ export class PaperEngine {
           side_veto_detail: side_veto_detail,
           boxPos,
           zone,
-          trendOk,
+          trendOk: v2Env?.trend_ok ?? trendOk,
           quality_score: v2Env?.quality_score ?? null,
           entry_quality_grade: v2Risk?.entryQualityGrade ?? null,
           reversal_confirmed: v2Env?.reversal_confirmed ?? null,

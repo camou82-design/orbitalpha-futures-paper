@@ -3447,7 +3447,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             htf_size_multiplier: judgment.htf_size_multiplier ?? 1.0,
             htf_requires_stronger_confirmation: judgment.htf_requires_stronger_confirmation ?? false,
             macro_polarity: judgment.macroPolarity ?? "NEUTRAL",
-            polarity_mismatch: judgment.polarityMismatch ?? false
+            polarity_mismatch: judgment.polarityMismatch ?? false,
+            trend_ok: trendOk
         },
         v2ExitAuthority: v2ExitAuthority ?? undefined,
         v2PartialAuthority: v2PartialAuthority ?? undefined,
@@ -3493,7 +3494,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             side_veto_detail: sideVetoDetail,
             shock_reaction_block_reason: shockReactionBlockReason,
             quality_score: qualityScore,
-            counter_trend_risk: judgment.counter_trend_risk ?? false
+            counter_trend_risk: judgment.counter_trend_risk ?? false,
+            trend_ok: trendOk
         }));
     }
 

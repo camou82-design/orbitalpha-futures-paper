@@ -461,7 +461,8 @@ export function resolveSymbolDecisionEnvelope(
         htf_size_multiplier: execMeta.htf_size_multiplier ?? null,
         htf_requires_stronger_confirmation: execMeta.htf_requires_stronger_confirmation ?? null,
         htf_policy_reason: execMeta.htf_policy_reason ?? null,
-        htf_hard_block_reason: execMeta.htf_hard_block_reason ?? null
+        htf_hard_block_reason: execMeta.htf_hard_block_reason ?? null,
+        trendOk: execMeta.trendOk ?? null
     });
 
     const htfPolicy = v2Res.internal.judgment.htf_entry_policy ?? "ALLOW";
@@ -654,7 +655,8 @@ export function resolveSymbolDecisionEnvelope(
         primary_missing_condition: executionEnvelope.primary_missing_condition,
         secondary_missing_condition: executionEnvelope.secondary_missing_condition,
         raw_missing_condition: executionEnvelope.raw_missing_condition,
-        side_veto_detail: executionEnvelope.side_veto_detail
+        side_veto_detail: executionEnvelope.side_veto_detail,
+        trend_ok: executionEnvelope.trend_ok
     }));
 
     // 6. Comparison Metrics for Engine-State

@@ -99,6 +99,7 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     htf_requires_stronger_confirmation?: boolean | null;
     htf_policy_reason?: string | null;
     htf_hard_block_reason?: string | null;
+    trend_ok?: boolean | null;
 }>;
 
 export type V2LegacyComparison = Readonly<{
@@ -174,4 +175,5 @@ export type BuildExecutionEnvelopeArgs = Readonly<{
     htf_requires_stronger_confirmation?: boolean | null;
     htf_policy_reason?: string | null;
     htf_hard_block_reason?: string | null;
+    trendOk?: boolean | null;
 }>;
