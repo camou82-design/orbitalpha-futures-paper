@@ -1507,7 +1507,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }));
         }
 
-        // ?섏젙 7. Retest Recognition Layer (Breakdown/Breakout Retest Promotion)
+        // Step 7. Retest Recognition Layer (Breakdown/Breakout Retest Promotion)
         const isRetestEligiblePhase = judgment.subtype === "BREAKDOWN_RETEST_FAILED" ||
                                      judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" ||
                                      judgment.subtype === "BREAKOUT_RETEST_CONFIRMED";
@@ -3371,15 +3371,36 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Tier 6: Unify diagnostic suppression reasons for audit-ready transparency
     const auditRawMissingCondition = promotionBlockReason || v2RejectReasonAfterPromotion || expectedMissingCondition || (finalDecision === "SKIP" ? "MIN_QUALITY_NOT_MET" : "NONE");
     
-    // Priority Logic for primary_missing_condition (Requirement 3 & 4)
-    const htfPolarityMismatch = (judgment.htf_policy_reason || "").includes("POLARITY_MISMATCH");
-    const shockDownRetestNotConfirmed = sideVetoDetail === "SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED";
+    // Priority Logic for primary_missing_condition (Requirement 2 & 3 & 4)
+    const htfPolarityMismatchReason = (judgment.htf_policy_reason || "").includes("POLARITY_MISMATCH") ? judgment.htf_policy_reason : null;
     
-    const primaryMissingCondition = 
-        (htfPolarityMismatch ? judgment.htf_policy_reason : null) ||
-        (shockDownRetestNotConfirmed ? sideVetoDetail : null) ||
-        shockReactionBlockReason || 
+    // Requirement 4: Shock/Retest/Reclaim check
+    const isShockRetestBlock =
+        sideVetoDetail === "SHOCK_UP_RECLAIM_NOT_CONFIRMED" ||
+        sideVetoDetail === "SHOCK_UP_MID_RETEST_REQUIRED" ||
+        sideVetoDetail === "SHOCK_DOWN_MID_RETEST_REQUIRED" ||
+        sideVetoDetail === "SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED" ||
+        shockReactionBlockReason === "SHOCK_REACTION_WATCH_MID_CHASE_BLOCKED" ||
+        shockReactionBlockReason === "SHOCK_REACTION_SETUP_NOT_READY_UP" ||
+        sideVetoDetail === "SHOCK_REACTION_UP_RETEST_NOT_CONFIRMED" ||
+        sideVetoDetail === "SHOCK_REACTION_DOWN_RETEST_NOT_CONFIRMED";
+
+    const shockRetestReason = isShockRetestBlock ? (sideVetoDetail || shockReactionBlockReason) : null;
+
+    // Requirement 3: Handle SIGNED_EXECUTION_NOT_READY priority
+    const signedReadyBlocked = (finalDecision === "REJECT" || finalDecision === "HOLD") && hardBlockReason === "SIGNED_EXECUTION_NOT_READY";
+
+    let primaryMissingCondition =
+        (signedReadyBlocked ? "SIGNED_EXECUTION_NOT_READY" : null) ||
+        (hardBlockReason ? hardBlockReason : null) ||
+        htfPolarityMismatchReason ||
+        shockRetestReason ||
         auditRawMissingCondition;
+
+    // Force alignment for shock/retest cases (Requirement 4)
+    if (isShockRetestBlock && !signedReadyBlocked && !hardBlockReason) {
+        primaryMissingCondition = shockRetestReason || primaryMissingCondition;
+    }
 
     const secondaryMissingCondition =
         auditRawMissingCondition && auditRawMissingCondition !== primaryMissingCondition
@@ -3389,37 +3410,40 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const dashboardMissingCondition = primaryMissingCondition;
     let dashboardNextAction = expectedNextAction || (finalDecision === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY");
 
-    // Fix: align expected_next_action with primary_missing_condition (Requirement 2026-05-10)
-    if (primaryMissingCondition === "POLARITY_MISMATCH_BULLISH_MACRO_LIMITS_SHORT_SHOCK") {
+    // Requirement 3 & 4: align expected_next_action
+    if (primaryMissingCondition === "SIGNED_EXECUTION_NOT_READY") {
+        dashboardNextAction = "WAIT_FOR_SIGNED_EXECUTION_READY";
+    } else if (primaryMissingCondition && (primaryMissingCondition.includes("POLARITY_MISMATCH") || primaryMissingCondition.includes("HTF_BIAS_MISMATCH"))) {
         dashboardNextAction = "WAIT_FOR_HTF_POLARITY_ALIGNMENT";
-    } else if (sideVetoDetail === "SHOCK_DOWN_MID_RETEST_REQUIRED" || primaryMissingCondition === "SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED") {
-        dashboardNextAction = "WAIT_FOR_BREAKDOWN_RETEST_FAILURE";
+    } else if (isShockRetestBlock) {
+        dashboardNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
     } else if (sideVetoDetail === "SHOCK_DOWN_TREND_CONFIRMATION_WEAK") {
         dashboardNextAction = "WAIT_FOR_TREND_CONFIRMATION";
-    } else if (
-        primaryMissingCondition === "SHOCK_REACTION_WATCH_MID_CHASE_BLOCKED" ||
-        primaryMissingCondition === "SHOCK_REACTION_SETUP_NOT_READY_UP" ||
-        sideVetoDetail === "SHOCK_UP_MID_RETEST_REQUIRED"
-    ) {
-        dashboardNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
+    }
+
+    // Requirement 5: If primary is retest/shock/hard-block, do not overwrite WAIT_FOR_QUALITY_IMPROVEMENT
+    if (dashboardNextAction === "WAIT_FOR_QUALITY_IMPROVEMENT" && (isShockRetestBlock || hardBlockReason || htfPolarityMismatchReason)) {
+        // Keep the more specific wait state if it was already set
+        if (isShockRetestBlock) dashboardNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
+        else if (hardBlockReason) dashboardNextAction = "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST"; // Fallback for general hard block
     }
 
     const displayRetestRequired =
+        isShockRetestBlock ||
         primaryMissingCondition === "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED" ||
         primaryMissingCondition === "TREND_PROMOTION_BLOCKED_BREAKDOWN_RETEST_NOT_CONFIRMED" ||
         primaryMissingCondition === "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKOUT_CONFIRMED" ||
         primaryMissingCondition === "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED" ||
-        sideVetoDetail === "SHOCK_UP_MID_RETEST_REQUIRED" ||
-        sideVetoDetail === "SHOCK_DOWN_MID_RETEST_REQUIRED" ||
-        sideVetoDetail === "SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED" ||
-        sideVetoDetail === "SHOCK_REACTION_UP_RETEST_NOT_CONFIRMED" ||
-        sideVetoDetail === "SHOCK_REACTION_DOWN_RETEST_NOT_CONFIRMED" ||
         (execMeta as any).retest_required === true;
 
     const displaySupportRecheckRequired =
-        primaryMissingCondition === "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED" ||
         sideVetoDetail === "SHOCK_UP_RECLAIM_NOT_CONFIRMED" ||
-        (execMeta as any).support_recheck_required === true;
+        primaryMissingCondition === "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED" ||
+        (execMeta as any).support_recheck_required === true ||
+        (isShockRetestBlock && sideVetoDetail?.includes("SHOCK_UP"));
+
+    // Requirement 7: decision이 ENTER가 아니면 최종 실행 side는 none으로 정규화
+    const normalizedV2Side = finalDecision === "ENTER" ? v2SideAfterPromotion : "none";
 
     const decision: EngineV2Decision = {
         symbol: input.symbol,
@@ -3428,14 +3452,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         confidence: confidence.level,
         confidenceScore: confidence.score,
         signal: execution.signal,
-        side: v2SideAfterPromotion,
+        side: normalizedV2Side as any,
         decision: finalDecision,
         risk: {
             ...riskSizing,
             isBlocked: hardBlockPresent,
             blockReason: hardBlockReason,
-            stageMarginKrw: v2DecisionAfterPromotion === "ENTER" ? stageMarginKrwAfter : 0,
-            exposureNotionalKrw: (v2DecisionAfterPromotion === "ENTER" ? stageMarginKrwAfter : 0) * riskSizing.appliedLeverage
+            stageMarginKrw: finalDecision === "ENTER" ? stageMarginKrwAfter : 0,
+            exposureNotionalKrw: (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) * riskSizing.appliedLeverage
         },
         explanation: {
             reason: finalReason,
@@ -3454,7 +3478,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             shockReactionBlockReason,
             qualityScore,
             v2DecisionFinal: finalDecision,
-            v2SideFinal: v2SideAfterPromotion,
+            v2SideFinal: normalizedV2Side,
             rangeSideCandidate,
             trendSideCandidate,
             reversalConfirmed,

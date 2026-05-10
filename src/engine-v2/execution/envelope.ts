@@ -42,6 +42,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         let finalHardBlockReason = hardBlockReason;
         let finalAuthorityReason = "engine_v2_mode_uses_v2_execution_envelope";
 
+        let finalPrimaryMissingCondition = args.primaryMissingCondition;
+        let finalRawMissingCondition = args.rawMissingCondition;
+        let finalExpectedMissingCondition = args.expectedMissingCondition;
+        let finalExpectedNextAction = args.expectedNextAction;
+
         if (signedReadyBlocked) {
             finalDecision = "REJECT";
             finalSide = "none";
@@ -49,6 +54,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             finalHardBlockPresent = true;
             finalHardBlockReason = "SIGNED_EXECUTION_NOT_READY";
             finalAuthorityReason = "signed_execution_not_ready_blocks_enter";
+
+            finalPrimaryMissingCondition = "SIGNED_EXECUTION_NOT_READY";
+            finalRawMissingCondition = "SIGNED_EXECUTION_NOT_READY";
+            finalExpectedMissingCondition = "SIGNED_EXECUTION_NOT_READY";
+            finalExpectedNextAction = "WAIT_FOR_SIGNED_EXECUTION_READY";
         }
 
         return {
@@ -114,11 +124,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             trend_side_candidate: args.trendSideCandidate ?? null,
             reversal_confirmed: args.reversalConfirmed ?? null,
             side_zone_valid: args.sideZoneValid ?? null,
-            expected_missing_condition: args.expectedMissingCondition ?? null,
-            expected_next_action: args.expectedNextAction ?? null,
-            primary_missing_condition: args.primaryMissingCondition ?? null,
+            expected_missing_condition: finalExpectedMissingCondition ?? null,
+            expected_next_action: finalExpectedNextAction ?? null,
+            primary_missing_condition: finalPrimaryMissingCondition ?? null,
             secondary_missing_condition: args.secondaryMissingCondition ?? null,
-            raw_missing_condition: args.rawMissingCondition ?? null,
+            raw_missing_condition: finalRawMissingCondition ?? null,
             side_veto_detail: args.sideVetoDetail ?? null,
             macro_source: args.macro_source ?? "data_not_ready",
             daily_bias_actual: args.daily_bias_actual ?? "DATA_NOT_READY",
@@ -134,8 +144,8 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             htf_policy_reason: args.htf_policy_reason ?? "HTF_DATA_NOT_READY",
             htf_hard_block_reason: args.htf_hard_block_reason ?? null,
             trend_ok: args.trendOk ?? null,
-            display_retest_required: args.displayRetestRequired ?? null,
-            display_support_recheck_required: args.displaySupportRecheckRequired ?? null
+            display_retest_required: args.displayRetestRequired === true,
+            display_support_recheck_required: args.displaySupportRecheckRequired === true
         };
 
     }
@@ -211,7 +221,9 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             htf_requires_stronger_confirmation: args.htf_requires_stronger_confirmation ?? false,
             htf_policy_reason: args.htf_policy_reason ?? "HTF_DATA_NOT_READY",
             htf_hard_block_reason: args.htf_hard_block_reason ?? null,
-            trend_ok: args.trendOk ?? null
+            trend_ok: args.trendOk ?? null,
+            display_retest_required: args.displayRetestRequired === true,
+            display_support_recheck_required: args.displaySupportRecheckRequired === true
         };
     }
     return {
@@ -285,6 +297,8 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         htf_requires_stronger_confirmation: args.htf_requires_stronger_confirmation ?? false,
         htf_policy_reason: args.htf_policy_reason ?? "HTF_DATA_NOT_READY",
         htf_hard_block_reason: args.htf_hard_block_reason ?? null,
-        trend_ok: args.trendOk ?? null
+        trend_ok: args.trendOk ?? null,
+        display_retest_required: args.displayRetestRequired === true,
+        display_support_recheck_required: args.displaySupportRecheckRequired === true
     };
 }

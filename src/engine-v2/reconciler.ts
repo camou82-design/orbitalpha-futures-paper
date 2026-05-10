@@ -471,14 +471,18 @@ export function resolveSymbolDecisionEnvelope(
     const htfPolicy = v2Res.internal.judgment.htf_entry_policy ?? "ALLOW";
     if (executionEnvelope.decision === "ENTER") {
         if (htfPolicy === "HOLD" || htfPolicy === "NONE" || htfPolicy === "WAIT_FOR_HTF_ALIGNMENT") {
+            const htfReason = v2Res.internal.judgment.htf_hard_block_reason || v2Res.internal.judgment.expected_next_action || htfPolicy;
             executionEnvelope = {
                 ...executionEnvelope,
                 decision: "REJECT",
                 side: "none",
                 stageMarginKrw: 0,
                 hardBlockPresent: true,
-                hardBlockReason: `HTF_POLICY_BLOCK: ${v2Res.internal.judgment.htf_hard_block_reason || v2Res.internal.judgment.expected_next_action || htfPolicy}`,
-                authorityReason: `HTF_POLICY_BLOCK: ${v2Res.internal.judgment.htf_hard_block_reason || htfPolicy}`
+                hardBlockReason: `HTF_POLICY_BLOCK: ${htfReason}`,
+                authorityReason: `HTF_POLICY_BLOCK: ${v2Res.internal.judgment.htf_hard_block_reason || htfPolicy}`,
+                primary_missing_condition: htfReason,
+                raw_missing_condition: htfReason,
+                expected_next_action: "WAIT_FOR_HTF_POLARITY_ALIGNMENT"
             };
         } else if (htfPolicy === "LONG_ONLY_OR_NONE" && executionEnvelope.side === "short") {
             executionEnvelope = {
@@ -488,7 +492,10 @@ export function resolveSymbolDecisionEnvelope(
                 stageMarginKrw: 0,
                 hardBlockPresent: true,
                 hardBlockReason: "HTF_SHOCK_LONG_ONLY_BLOCK",
-                authorityReason: "shock_reaction_direction_block"
+                authorityReason: "shock_reaction_direction_block",
+                primary_missing_condition: "HTF_SHOCK_LONG_ONLY_BLOCK",
+                raw_missing_condition: "HTF_SHOCK_LONG_ONLY_BLOCK",
+                expected_next_action: "WAIT_FOR_HTF_POLARITY_ALIGNMENT"
             };
         } else if (htfPolicy === "SHORT_ONLY_OR_NONE" && executionEnvelope.side === "long") {
             executionEnvelope = {
@@ -498,7 +505,10 @@ export function resolveSymbolDecisionEnvelope(
                 stageMarginKrw: 0,
                 hardBlockPresent: true,
                 hardBlockReason: "HTF_SHOCK_SHORT_ONLY_BLOCK",
-                authorityReason: "shock_reaction_direction_block"
+                authorityReason: "shock_reaction_direction_block",
+                primary_missing_condition: "HTF_SHOCK_SHORT_ONLY_BLOCK",
+                raw_missing_condition: "HTF_SHOCK_SHORT_ONLY_BLOCK",
+                expected_next_action: "WAIT_FOR_HTF_POLARITY_ALIGNMENT"
             };
         }
     }
@@ -658,6 +668,8 @@ export function resolveSymbolDecisionEnvelope(
         primary_missing_condition: executionEnvelope.primary_missing_condition,
         secondary_missing_condition: executionEnvelope.secondary_missing_condition,
         raw_missing_condition: executionEnvelope.raw_missing_condition,
+        display_retest_required: executionEnvelope.display_retest_required,
+        display_support_recheck_required: executionEnvelope.display_support_recheck_required,
         side_veto_detail: executionEnvelope.side_veto_detail,
         trend_ok: executionEnvelope.trend_ok
     }));

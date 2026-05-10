@@ -100,8 +100,8 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     htf_policy_reason?: string | null;
     htf_hard_block_reason?: string | null;
     trend_ok?: boolean | null;
-    display_retest_required?: boolean | null;
-    display_support_recheck_required?: boolean | null;
+    display_retest_required: boolean;
+    display_support_recheck_required: boolean;
 }>;
 export type V2LegacyComparison = Readonly<{
     legacyDecision: EngineV2FinalDecision;
