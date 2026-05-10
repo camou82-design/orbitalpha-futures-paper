@@ -954,6 +954,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             } else {
                 shockReactionBlockReason = "SHOCK_REACTION_WATCH_MID_CHASE_BLOCKED";
                 if (promotionBlockReason == null) promotionBlockReason = shockReactionBlockReason;
+
+                expectedMissingCondition = shockReactionBlockReason;
+                if (shock === "DOWN") {
+                    expectedNextAction = "WAIT_FOR_BREAKDOWN_RETEST_FAILURE";
+                } else if (shock === "UP") {
+                    expectedNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
+                }
+
                 if (v2DecisionAfterPromotion === "ENTER" || v2DecisionAfterPromotion === "SKIP") {
                     v2DecisionAfterPromotion = "HOLD";
                 }
@@ -3337,6 +3345,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         decision_after_readiness: decisionAfterReadiness
     }));
 
+    // Tier 6: Unify diagnostic suppression reasons for audit-ready transparency
+    const auditRawMissingCondition = expectedMissingCondition || promotionBlockReason || v2RejectReasonAfterPromotion || (finalDecision === "SKIP" ? "MIN_QUALITY_NOT_MET" : "NONE");
+    const primaryMissingCondition = shockReactionBlockReason || auditRawMissingCondition;
+    const secondaryMissingCondition = shockReactionBlockReason ? auditRawMissingCondition : null;
+    const dashboardMissingCondition = primaryMissingCondition;
+    const dashboardNextAction = expectedNextAction || (finalDecision === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY");
     const decision: EngineV2Decision = {
         symbol: input.symbol,
         ts: input.now,
@@ -3376,8 +3390,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             reversalConfirmed,
             sideZoneValid,
             invalidationPx: v2CalculatedInvalidationPx ?? execMeta.invalidationPx ?? undefined,
-            expectedMissingCondition: expectedMissingCondition ?? (v2DecisionAfterPromotion === "SKIP" ? (v2RejectReasonAfterPromotion || "MIN_QUALITY_NOT_MET") : null),
-            expectedNextAction: expectedNextAction ?? (v2DecisionAfterPromotion === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY"),
+            expectedMissingCondition: dashboardMissingCondition,
+            expectedNextAction: dashboardNextAction,
+            primary_missing_condition: primaryMissingCondition,
+            secondary_missing_condition: secondaryMissingCondition,
+            raw_missing_condition: primaryMissingCondition,
             macro_source: judgment.macro_source ?? "data_not_ready",
             daily_bias_actual: judgment.daily_bias_actual ?? "DATA_NOT_READY",
             h4_bias_actual: judgment.h4_bias_actual ?? "DATA_NOT_READY",
@@ -3428,8 +3445,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotion_applied: promotionApplied,
             promotion_reason: promotionReason,
             promotion_block_reason: promotionBlockReason,
-            expected_missing_condition: expectedMissingCondition ?? (v2DecisionAfterPromotion === "SKIP" ? (v2RejectReasonAfterPromotion || "MIN_QUALITY_NOT_MET") : null),
-            expected_next_action: expectedNextAction ?? (v2DecisionAfterPromotion === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY"),
+            primary_missing_condition: primaryMissingCondition,
+            secondary_missing_condition: secondaryMissingCondition,
+            expected_missing_condition: dashboardMissingCondition,
+            raw_missing_condition: primaryMissingCondition,
+            expected_next_action: dashboardNextAction,
+            shock_reaction_block_reason: shockReactionBlockReason,
             quality_score: qualityScore,
             counter_trend_risk: judgment.counter_trend_risk ?? false
         }));
