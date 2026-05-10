@@ -1,4 +1,4 @@
-import {
+﻿import {
     EngineV2Input,
     EngineV2Decision,
     EngineV2InternalResult,
@@ -121,7 +121,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 1: Market Judgment (authoritative input only)
     const judgment = detectMarketRegime(authoritativeInput);
-    
+
     // Phase 6 Proof: Range Drift Analysis
     if (judgment.regime === "RANGE") {
         emitRangeDriftStateProof(String(input.symbol), judgment, authoritativeInput.snapshot);
@@ -177,7 +177,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             input_config_val: input.config.okxLiveMaxOrderNotionalUsdt,
             resolved_val: v2State.liveMaxOrderNotionalUsdt,
             is_fallback_applied: v2State.liveMaxOrderNotionalUsdt !== input.state.liveMaxOrderNotionalUsdt,
-            fallback_source: v2State.liveMaxOrderNotionalUsdt === input.config.okxLiveMaxOrderNotionalUsdt ? "config" : 
+            fallback_source: v2State.liveMaxOrderNotionalUsdt === input.config.okxLiveMaxOrderNotionalUsdt ? "config" :
                              v2State.liveMaxOrderNotionalUsdt === 100 ? "default_100" : "none",
             ts: Date.now()
         }));
@@ -582,7 +582,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     if (softNoTrade && hasRawCandidate && !hardNoTrade) {
         explanation.reason = "SOFT_NO_TRADE_DOWNGRADED_TO_HOLD";
-        explanation.summary = "신호는 있으나 상위 시장판단이 보수적으로 작동해 즉시 진입 대신 재확인 대기";
+        explanation.summary = "신호는 존재하나 하위 시장 판단이 보수적이므로 즉시 진입 유보 및 확증 대기";
     }
 
     let finalReason: string;
@@ -669,7 +669,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             : typeof input.snapshot?.boxBreakSide === "string"
                 ? String(input.snapshot.boxBreakSide)
                 : "none";
-    // Canonical RANGE zone: 단일 classifyRangeZone(boxPos). Executor metadata의 legacy zone은 덮어쓰지 않음(V2 불일치 방지).
+    // Canonical RANGE zone: ?⑥씪 classifyRangeZone(boxPos). Executor metadata??legacy zone? ??뼱?곗? ?딆쓬(V2 遺덉씪移?諛⑹?).
     const zone = boxPos == null || !Number.isFinite(boxPos) ? ("mid" as const) : classifyRangeZone(boxPos);
     const rangeConfidence = readNullableNumber(execMeta.rangeConfidence, input.snapshot?.rangeConfidence);
     const boxCohesion01 = readNullableNumber(execMeta.boxCohesion01, input.snapshot?.boxCohesion01);
@@ -725,17 +725,17 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         String(v2State.riskMode ?? "").toUpperCase() !== "HALT" &&
         v2State.dailyLossGuardTriggered !== true;
 
-    // 수정 1. stale FRESH_TICK block 정리
+    // ?섏젙 1. stale FRESH_TICK block ?뺣━
     if (v2RejectReasonAfterPromotion === "FRESH_TICK_EXECUTION_BLOCKED" || v2RejectReasonAfterPromotion === "FRESH_TICK_BARRIER_ACTIVE") {
-        const isActuallyBlocked = 
-            v2State.freshTickExecutionBlocked === true || 
-            v2State.freshTickBarrierActive === true || 
+        const isActuallyBlocked =
+            v2State.freshTickExecutionBlocked === true ||
+            v2State.freshTickBarrierActive === true ||
             paperExecutionReady !== true;
-        
-        const canClear = 
-            paperExecutionReady === true && 
-            signedExecutionReady === true && 
-            v2State.freshTickBarrierActive !== true && 
+
+        const canClear =
+            paperExecutionReady === true &&
+            signedExecutionReady === true &&
+            v2State.freshTickBarrierActive !== true &&
             v2State.freshTickExecutionBlocked !== true;
 
         if (canClear && !isActuallyBlocked) {
@@ -907,10 +907,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 riskShortAllow === true &&
                 allowNewShort === true &&
                 emaGap < 0 &&
-                qualityScore >= 60 && // 수정: 70 -> 60으로 완화
-                trendOk === true &&   // 수정: trendOk 조건 명시
-                paperExecutionReady === true && // 수정: execution ready 조건 명시
-                trendWeaknessScore < 0.75 && // 수정: 조금 더 완화 (0.65 -> 0.75)
+                qualityScore >= 60 && // ?섏젙: 70 -> 60?쇰줈 ?꾪솕
+                trendOk === true &&   // ?섏젙: trendOk 議곌굔 紐낆떆
+                paperExecutionReady === true && // ?섏젙: execution ready 議곌굔 紐낆떆
+                trendWeaknessScore < 0.75 && // ?섏젙: 議곌툑 ???꾪솕 (0.65 -> 0.75)
                 !crashState.includes("ULTRA") &&
                 !crashState.includes("CRITICAL") &&
                 hardBlockPresent === false;
@@ -1051,7 +1051,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     setupType = "lower_breakdown_continuation_short";
                     setupSide = "short";
                     setupEvidence = { boxBreakSide, emaGap, trend_side_candidate: trendSideCandidate };
-                } else if (downLowerReversalConfirmedLong && false) { // 수정: SHOCK_REACTION_DOWN에서 long 배제
+                } else if (downLowerReversalConfirmedLong && false) { // ?섏젙: SHOCK_REACTION_DOWN?먯꽌 long 諛곗젣
                     setupType = "lower_reversal_confirmed_long";
                     setupSide = "long";
                     countertrendUsed = true;
@@ -1249,7 +1249,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotionMinConditionPassed = true;
         }
 
-        const saCandidateSide: EngineV2Side = 
+        const saCandidateSide: EngineV2Side =
             activeEngineRouting === "RANGE" ? rangeSideCandidate :
             activeEngineRouting === "TREND" ? trendSideCandidate :
             (trendSideCandidate !== "none" ? trendSideCandidate : rangeSideCandidate);
@@ -1274,7 +1274,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 (zone === "lower" || rangeEdgeExtreme) &&
                 reversalConfirmed &&
                 shockRecoveryHint &&
-                false; // 수정: DOWN shock에서는 long 무조건 차단
+                false; // ?섏젙: DOWN shock?먯꽌??long 臾댁“嫄?李⑤떒
             if (v2SideAfterPromotion !== "short" && !downCounterTrendLongAllowed) {
                 v2DecisionAfterPromotion = "HOLD";
                 v2SideAfterPromotion = "none";
@@ -1306,11 +1306,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
 
-        // 수정 2. 공통 V2 probe ENTER 경로 추가
+        // ?섏젙 2. 怨듯넻 V2 probe ENTER 寃쎈줈 異붽?
         const hasSameSidePosition = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === trendSideCandidate);
         const hasOppositeSidePosition = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() !== trendSideCandidate);
-        
-        const probeCommonOk = 
+
+        const probeCommonOk =
             hardControlClear === true &&
             hardBlockPresent === false &&
             paperExecutionReady === true &&
@@ -1323,7 +1323,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             (readinessDiag.live_balance_block == null || readinessDiag.live_balance_ready === true);
 
         if (probeCommonOk && (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "REJECT")) {
-            const probeDownOk = 
+            const probeDownOk =
                 shock === "DOWN" &&
                 trendSideCandidate === "short" &&
                 riskShortAllow === true &&
@@ -1332,7 +1332,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 !crashState.includes("ULTRA") &&
                 !crashState.includes("CRITICAL");
 
-            const probeUpOk = 
+            const probeUpOk =
                 shock === "UP" &&
                 trendSideCandidate === "long" &&
                 riskLongAllow === true &&
@@ -1352,9 +1352,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
 
-        // 수정 4. RANGE_MID_CHOP 전용 micro probe ENTER 경로 추가
+        // ?섏젙 4. RANGE_MID_CHOP ?꾩슜 micro probe ENTER 寃쎈줈 異붽?
         const isRangeMidChop = judgment.regime === "RANGE" && judgment.subtype === "RANGE_MID_CHOP";
-        const microProbeCommonOk = 
+        const microProbeCommonOk =
             isRangeMidChop &&
             shock === "NONE" &&
             hardControlClear === true &&
@@ -1385,10 +1385,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
 
-        // 수정 5. WAIT_RECHECK 반복 승격 경로 추가 (recheck promotion path)
-        const recheckPromotionEligible = 
+        // ?섏젙 5. WAIT_RECHECK 諛섎났 ?밴꺽 寃쎈줈 異붽? (recheck promotion path)
+        const recheckPromotionEligible =
             v2RejectReasonAfterPromotion === "WAIT_RECHECK" &&
-            reviewingTicks >= 2 && // 2~3회 반복
+            reviewingTicks >= 2 && // 2~3??諛섎났
             hardControlClear === true &&
             hardBlockPresent === false &&
             paperExecutionReady === true &&
@@ -1417,8 +1417,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
 
-        // 수정 6. TRANSITION WATCH + SHOCK_REACTION_DOWN + upper short valid => micro/probe short probe
-        // reviewingTicks=0이어도 1회차부터 허용. full size 금지, micro/probe cap 강제.
+        // ?섏젙 6. TRANSITION WATCH + SHOCK_REACTION_DOWN + upper short valid => micro/probe short probe
+        // reviewingTicks=0?댁뼱??1?뚯감遺???덉슜. full size 湲덉?, micro/probe cap 媛뺤젣.
         const transitionWatchShortMeta = (execution.metadata ?? {}) as Record<string, unknown>;
         const transitionWatchShortSetupType = String(transitionWatchShortMeta.transitionSetupType ?? "NONE");
         const transitionWatchShortAction = String(transitionWatchShortMeta.transitionAction ?? "REJECT");
@@ -1499,11 +1499,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }));
         }
 
-        // 수정 7. Retest Recognition Layer (Breakdown/Breakout Retest Promotion)
-        const isRetestEligiblePhase = judgment.subtype === "BREAKDOWN_RETEST_FAILED" || 
+        // ?섏젙 7. Retest Recognition Layer (Breakdown/Breakout Retest Promotion)
+        const isRetestEligiblePhase = judgment.subtype === "BREAKDOWN_RETEST_FAILED" ||
                                      judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" ||
                                      judgment.subtype === "BREAKOUT_RETEST_CONFIRMED";
-        
+
         const m = (judgment.metadata as any) ?? {};
         const retestLevel = m.retestLevel ?? (judgment.subtype === "BREAKDOWN_RETEST_FAILED" ? (input.snapshot.boxLow ?? 0) : (input.snapshot.boxHigh ?? 0));
         const lastPrice = input.snapshot.lastPrice;
@@ -1514,8 +1514,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const chaseDistanceBlocked = m.chaseDistanceBlocked ?? (isRetestEligiblePhase && distanceFromRetestPct > 0.005);
 
         const isShortRetestPhase = judgment.subtype === "BREAKDOWN_RETEST_FAILED";
-        
-        const retestCommonOk = 
+
+        const retestCommonOk =
             isRetestEligiblePhase &&
             hardControlClear === true &&
             hardBlockPresent === false &&
@@ -1534,13 +1534,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             else if (!retestRejected) expectedMissingCondition = "RETEST_REJECTION";
             else if (!retestConfirmed) expectedMissingCondition = "RETEST_CONFIRMATION";
             else if (chaseDistanceBlocked) expectedMissingCondition = "CHASE_DISTANCE_LIMIT";
-            
+
             expectedNextAction = "WATCH_FOR_RETEST_REJECTION";
         }
 
         if (retestCommonOk && (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "REJECT")) {
             const isShortRetest = isShortRetestPhase && trendSideCandidate === "short" && riskShortAllow && allowNewShort && emaGap <= 0;
-            const isLongRetest = (judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" || judgment.subtype === "BREAKOUT_RETEST_CONFIRMED") && 
+            const isLongRetest = (judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" || judgment.subtype === "BREAKOUT_RETEST_CONFIRMED") &&
                                 trendSideCandidate === "long" && riskLongAllow && allowNewLong && emaGap >= 0;
 
             if (isShortRetest || isLongRetest) {
@@ -1898,6 +1898,112 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         })
                     );
                 }
+            } else if (
+                !promotionApplied &&
+                (judgment.subtype === "SHOCK_REACTION_DOWN" || judgment.shockPhase === "DOWN_SHOCK") &&
+                (trendSideCandidate === "short" || rangeSideCandidate === "short") &&
+                (zone === "upper" || (judgment.subtype === "BREAKDOWN_RETEST_FAILED" && zone === "mid")) &&
+                (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "REJECT")
+            ) {
+                const htfPol = judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT";
+                const chaseBlocked = (execMeta as Record<string, unknown>).late_chase_blocked === true;
+                const breakdownRetestFailure = judgment.subtype === "BREAKDOWN_RETEST_FAILED" || (judgment.metadata?.retestConfirmed === true);
+
+                const boxHighS = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+                const boxLowS = Number(authoritativeInput.snapshot.boxLow ?? 0);
+                const boxMidS = (boxHighS + boxLowS) / 2;
+                const atrS = Number(authoritativeInput.snapshot.atr ?? 0);
+                const entryPxS = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+                const minProfitS = Math.max(atrS * 0.35, entryPxS * 0.001);
+                const minStopS = Math.max(atrS * 0.5, entryPxS * 0.0015);
+
+                let stopPxS = Math.max(boxHighS + minStopS, entryPxS + minStopS);
+                let tp1S = Math.min(boxMidS, entryPxS - minProfitS);
+                if (tp1S >= entryPxS) tp1S = entryPxS - minProfitS;
+                let tp2S = Math.min(boxLowS, tp1S - minProfitS);
+                if (tp2S >= tp1S) tp2S = tp1S - minProfitS;
+
+                const boxHeightS = boxHighS - boxLowS;
+                const boxHeightPctS = boxLowS > 0 ? boxHeightS / boxLowS : 0;
+
+                const shortOrderOkS = tp2S < tp1S && tp1S < entryPxS && entryPxS < stopPxS;
+                const planInvalidS =
+                    !Number.isFinite(entryPxS) || entryPxS <= 0 ||
+                    !Number.isFinite(tp1S) || !Number.isFinite(tp2S) || !Number.isFinite(stopPxS) ||
+                    tp1S <= 0 || tp2S <= 0 || stopPxS <= 0 ||
+                    boxHeightPctS < 0.0008 ||
+                    !shortOrderOkS;
+
+                let gate: string | null = null;
+
+                const htfLongOnly = htfPol === "LONG_ONLY_OR_NONE";
+                const htfHold = htfPol === "HOLD";
+                const isShockReactionDown = judgment.subtype === "SHOCK_REACTION_DOWN";
+
+                let htfBlocked = htfLongOnly;
+                if (htfHold) {
+                    if (isShockReactionDown && breakdownRetestFailure) {
+                        htfBlocked = false;
+                    } else {
+                        htfBlocked = true;
+                    }
+                }
+
+                if (htfBlocked) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_HTF_LONG_ONLY";
+                else if (chaseBlocked && !breakdownRetestFailure) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_CHASE_NOT_RETESTED";
+                else if (qualityScore < 60) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_QUALITY_BELOW_60";
+                else if (!(riskShortAllow && allowNewShort)) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_SHORT_NOT_ALLOWED";
+                else if (!paperExecutionReady || !signedExecutionReady) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_EXECUTION_NOT_READY";
+                else if (hasSameSidePosition || hasOppositeSidePosition) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_OPEN_POSITION_CONFLICT";
+                else if (hardBlockPresent) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_HARD_BLOCK_PRESENT";
+                else if (!(stopPxS > 0 && stopPxS > entryPxS)) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_STOP_PRICE_MISSING";
+                else if (planInvalidS) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_TP_SL_PLAN_INVALID";
+                else if (!(zone === "upper" || (breakdownRetestFailure && zone === "mid"))) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_ZONE_NOT_VALID";
+
+                if (gate != null) {
+                    promotionBlockReason = gate;
+                    expectedMissingCondition = gate;
+                    expectedNextAction = "WAIT_FOR_UPPER_SHORT_REACTION_PROBE_GATE";
+                    console.info(JSON.stringify({
+                        event: "V2_UPPER_SHORT_REACTION_PROBE_GATE_SKIP_PROOF",
+                        symbol: String(input.symbol),
+                        gate_reason: gate,
+                        zone,
+                        qualityScore,
+                        market_subtype: judgment.subtype,
+                        htf_entry_policy: htfPol,
+                        chase_blocked: chaseBlocked,
+                        breakdown_retest_failure: breakdownRetestFailure
+                    }));
+                } else {
+                    v2DecisionAfterPromotion = "ENTER";
+                    v2SideAfterPromotion = "short";
+                    v2RejectReasonAfterPromotion = null;
+                    promotionApplied = true;
+                    promotionReason = "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION";
+                    promotionBlockReason = null;
+                    promotionMinConditionPassed = true;
+                    v2CalculatedInvalidationPx = stopPxS;
+
+                    console.info(JSON.stringify({
+                        event: "V2_TREND_PROMOTION_TO_ENTER_PROOF",
+                        symbol: String(input.symbol),
+                        promotion_reason: "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION",
+                        side: "short",
+                        entryPx: entryPxS,
+                        stopPrice: stopPxS,
+                        tp1: tp1S,
+                        tp2: tp2S,
+                        qualityScore,
+                        zone,
+                        market_subtype: judgment.subtype,
+                        htf_entry_policy: htfPol,
+                        macro_source: judgment.macro_source ?? "unknown",
+                        retest_required: (execMeta as any).retest_required ?? false,
+                        breakdown_retest_failure: breakdownRetestFailure,
+                        micro_probe_cap_forced: true
+                    }));
+                }
             } else if (qualityScore < 70) {
                 promotionBlockReason = "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD";
                 expectedNextAction = "WAIT_FOR_QUALITY_IMPROVEMENT";
@@ -1922,9 +2028,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         if (transitionWatchShortConditionsMet) {
             const atr = Number(input.snapshot.atr ?? 0);
             const transitionInvalidationPx = lastPrice + Math.max(lastPrice * 0.002, atr * 0.35);
-            
+
             let stopPriceValid = transitionInvalidationPx > lastPrice && !isNaN(transitionInvalidationPx);
-            
+
             if (!stopPriceValid) {
                  console.warn(JSON.stringify({
                     event: "V2_TRANSITION_STOP_PRICE_INVALID_BLOCK_PROOF",
@@ -2026,14 +2132,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 5+: Side Consistency Enforcer (Authoritative)
     const sideCandidateBeforeVetoEnforced = v2SideAfterPromotion;
-    const selectedSideFinal: EngineV2Side = 
+    const selectedSideFinal: EngineV2Side =
         activeEngineRouting === "RANGE" ? rangeSideCandidate :
         activeEngineRouting === "TREND" ? trendSideCandidate :
         v2SideAfterPromotion;
 
     const upperLongProbePromotion = promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
     const lowerLongProbePromotion = promotionReason === "V2_LOWER_LONG_REACTION_PROBE_PROMOTION";
-    if (v2DecisionAfterPromotion === "ENTER" && !upperLongProbePromotion && !lowerLongProbePromotion) {
+    const upperShortProbePromotion = promotionReason === "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION";
+    if (v2DecisionAfterPromotion === "ENTER" && !upperLongProbePromotion && !lowerLongProbePromotion && !upperShortProbePromotion) {
         v2SideAfterPromotion = selectedSideFinal;
     }
 
@@ -2058,13 +2165,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         !shockRecoveryHint;
 
     if (v2DecisionAfterPromotion === "ENTER") {
-        if (rangeLowerShortMismatch && !execMeta.sideOverrideApplied) {
+        if (rangeLowerShortMismatch && !execMeta.sideOverrideApplied && !upperShortProbePromotion) {
             vetoReason = "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
         } else if (rangeUpperLongMismatch && !execMeta.sideOverrideApplied && !upperLongProbePromotion) {
             vetoReason = "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
         } else if (rangeDowngradedHardBlock) {
             vetoReason = "RANGE_SIGNAL_DOWNGRADED_NOT_RELAXED";
-        } else if (entryCandidateHardBlock && !upperLongProbePromotion && !lowerLongProbePromotion) {
+        } else if (entryCandidateHardBlock && !upperLongProbePromotion && !lowerLongProbePromotion && !upperShortProbePromotion) {
             vetoReason = "ENTRY_CANDIDATE_FALSE_VETO";
         } else if (trendPromotionHardBlock) {
             vetoReason = "TREND_PROMOTION_BLOCKED_TREND_NOT_OK";
@@ -2187,14 +2294,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const leverageReason = "v2_fixed_10x";
     const liveMaxStageMarginKrwCap = liveMaxNotionalKrwFinal != null ? Math.floor(liveMaxNotionalKrwFinal / appliedLeverage) : null;
 
-    const isMicroProbe = 
-        promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" || 
-        promotionReason === "V2_PROBE_ENTRY_CONFIRMED" || 
+    const isMicroProbe =
+        promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" ||
+        promotionReason === "V2_PROBE_ENTRY_CONFIRMED" ||
         promotionReason === "V2_WAIT_RECHECK_QUALIFIED_PROMOTION" ||
         promotionReason === "SHOCK_REACTION_DOWN_MID_MOMENTUM_CONFIRMED" ||
         promotionReason === "V2_TRANSITION_WATCH_SHORT_PROBE" ||
         promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION" ||
-        promotionReason === "V2_LOWER_LONG_REACTION_PROBE_PROMOTION";
+        promotionReason === "V2_LOWER_LONG_REACTION_PROBE_PROMOTION" ||
+        promotionReason === "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION";
 
     if (finalDecision === "ENTER") {
         riskSizing.appliedLeverage = appliedLeverage;
@@ -2245,27 +2353,27 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 cap_reason = "MICRO_PROBE_CAP";
                 cap_kind = "probe_margin_cap";
             }
-            
+
             let reductionMultiplier = 1.0;
             if (!sideZoneValid) reductionMultiplier *= 0.8;
             if (!rangeEdgeExtreme && activeEngineRouting === "RANGE") reductionMultiplier *= 0.9;
             if (!reversalConfirmed && shock !== "NONE") reductionMultiplier *= 0.85;
-            
+
             if (reductionMultiplier < 1.0) {
                 stageMarginKrwAfter = Math.round(stageMarginKrwAfter * reductionMultiplier);
                 if (stageMarginKrwAfter < minProbeMarginKrw) stageMarginKrwAfter = minProbeMarginKrw;
             }
         }
-        
-        // live max cap 전역 적용
+
+        // live max cap ?꾩뿭 ?곸슜
         if (finalDecision === "ENTER" && liveMaxStageMarginKrwCap != null && stageMarginKrwAfter > liveMaxStageMarginKrwCap) {
             stageMarginKrwAfter = liveMaxStageMarginKrwCap;
             cap_applied = true;
             cap_reason = cap_reason ?? "LIVE_MAX_ORDER_NOTIONAL_CAP";
             cap_kind = "live_max_notional_margin_cap_at_fixed_10x";
         }
-        
-        // 최소 주문 underflow 처리
+
+        // 理쒖냼 二쇰Ц underflow 泥섎━
         if (finalDecision === "ENTER" && stageMarginKrwAfter < minProbeMarginKrw) {
             min_order_check_passed = false;
             if (liveMaxNotionalUsdtFinal > 0 && liveMaxNotionalUsdtFinal < minNotionalUsdtRequiredAtFixed10x) {
@@ -2273,7 +2381,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             } else {
                 min_order_block_reason = "MIN_ORDER_SIZE_UNDERFLOW";
             }
-            
+
             finalDecision = "REJECT";
             v2DecisionAfterPromotion = "REJECT";
             v2SideAfterPromotion = "none";
@@ -2290,8 +2398,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     if (!riskSizing.diagnostics) {
         (riskSizing as { diagnostics?: import("./types").RiskSizingDiagnostics }).diagnostics = {};
     }
-    
-    // 최종 반영될 decision과 margin을 authority envelope이 참조하도록 diagnostics 갱신
+
+    // 理쒖쥌 諛섏쁺??decision怨?margin??authority envelope??李몄“?섎룄濡?diagnostics 媛깆떊
     riskSizing.diagnostics!.original_v2_decision = finalDecision;
     riskSizing.diagnostics!.original_v2_side = v2SideAfterPromotion != null ? String(v2SideAfterPromotion) : undefined;
     riskSizing.diagnostics!.original_stage_margin_krw = stageMarginKrwAfter;
@@ -3228,7 +3336,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2PartialShouldPartial: v2PartialAuthority?.shouldPartial ?? false
         }
     };
-    
+
     // Audit Coverage for all suppression paths
     if (finalDecision !== "ENTER") {
         console.info(JSON.stringify({
@@ -3296,7 +3404,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     return { decision, internal };
 }
 
-/** 
+/**
  * Legacy-to-V2 Input Adapter (Zero Any).
  * Maps legacy complex objects through strict adapter interfaces.
  */
