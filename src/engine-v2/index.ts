@@ -1,4 +1,4 @@
-﻿import {
+import {
     EngineV2Input,
     EngineV2Decision,
     EngineV2InternalResult,
@@ -669,7 +669,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             : typeof input.snapshot?.boxBreakSide === "string"
                 ? String(input.snapshot.boxBreakSide)
                 : "none";
-    // Canonical RANGE zone: ?⑥씪 classifyRangeZone(boxPos). Executor metadata??legacy zone? ??뼱?곗? ?딆쓬(V2 遺덉씪移?諛⑹?).
+    // Canonical RANGE zone: classifyRangeZone(boxPos). Executor metadata may not match legacy zone (V2 inconsistency prevention).
     const zone = boxPos == null || !Number.isFinite(boxPos) ? ("mid" as const) : classifyRangeZone(boxPos);
     const rangeConfidence = readNullableNumber(execMeta.rangeConfidence, input.snapshot?.rangeConfidence);
     const boxCohesion01 = readNullableNumber(execMeta.boxCohesion01, input.snapshot?.boxCohesion01);
@@ -725,7 +725,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         String(v2State.riskMode ?? "").toUpperCase() !== "HALT" &&
         v2State.dailyLossGuardTriggered !== true;
 
-    // ?섏젙 1. stale FRESH_TICK block ?뺣━
+    // Fix 1. stale FRESH_TICK block cleanup
     if (v2RejectReasonAfterPromotion === "FRESH_TICK_EXECUTION_BLOCKED" || v2RejectReasonAfterPromotion === "FRESH_TICK_BARRIER_ACTIVE") {
         const isActuallyBlocked =
             v2State.freshTickExecutionBlocked === true ||
@@ -907,10 +907,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 riskShortAllow === true &&
                 allowNewShort === true &&
                 emaGap < 0 &&
-                qualityScore >= 60 && // ?섏젙: 70 -> 60?쇰줈 ?꾪솕
-                trendOk === true &&   // ?섏젙: trendOk 議곌굔 紐낆떆
-                paperExecutionReady === true && // ?섏젙: execution ready 議곌굔 紐낆떆
-                trendWeaknessScore < 0.75 && // ?섏젙: 議곌툑 ???꾪솕 (0.65 -> 0.75)
+                qualityScore >= 60 && // Adjust: 70 -> 60 softened
+                trendOk === true &&   // Adjust: trendOk condition specified
+                paperExecutionReady === true && // Adjust: execution ready condition specified
+                trendWeaknessScore < 0.75 && // Adjust: slightly softened (0.65 -> 0.75)
                 !crashState.includes("ULTRA") &&
                 !crashState.includes("CRITICAL") &&
                 hardBlockPresent === false;
@@ -2259,6 +2259,84 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
             expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
             expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+        }
+    }
+
+    // Tier 5.5: Side-Zone Mismatch Hard Guard (V2 Hard Protection)
+    if (v2DecisionAfterPromotion === "ENTER") {
+        const sideFinal = v2SideAfterPromotion;
+        const htfPol = judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT";
+        const htfHardBlockReason = judgment.htf_hard_block_reason ?? "";
+
+        const boxBreakSideFinal =
+            typeof authoritativeInput.snapshot?.boxBreakSide === "string"
+                ? String(authoritativeInput.snapshot.boxBreakSide)
+                : "none";
+
+        const isShockReactionDown = judgment.subtype === "SHOCK_REACTION_DOWN" || judgment.shockPhase === "DOWN_SHOCK";
+        const isShockReactionUp = judgment.subtype === "SHOCK_REACTION_UP" || judgment.shockPhase === "UP_SHOCK";
+
+        const breakdownRetestFailure =
+            judgment.subtype === "BREAKDOWN_RETEST_FAILED" ||
+            judgment.metadata?.breakdownRetestFailure === true ||
+            judgment.metadata?.breakdown_retest_failure === true ||
+            (judgment.metadata?.retestRejected === true && judgment.metadata?.retestConfirmed === true && sideFinal === "short");
+
+        const breakoutRetestConfirmation =
+            judgment.subtype === "BREAKOUT_RETEST_CONFIRMED" ||
+            judgment.subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" ||
+            judgment.metadata?.breakoutRetestConfirmed === true ||
+            judgment.metadata?.breakout_retest_confirmed === true ||
+            (judgment.metadata?.retestRejected === false && judgment.metadata?.retestConfirmed === true && sideFinal === "long");
+
+        let mismatchReason: string | null = null;
+        if (sideFinal === "short" && zone === "lower") {
+            const htfAllowsShort = htfPol === "SHORT_ONLY_OR_NONE" || htfPol.includes("BEARISH");
+            const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown || htfAllowsShort;
+            const htfStrongBullish = htfHardBlockReason === "STRONG_BULLISH_HTF_ALIGNMENT";
+
+            if (!shortException || htfStrongBullish) {
+                mismatchReason = "SIDE_ZONE_MISMATCH_LOWER_SHORT";
+            }
+        } else if (sideFinal === "long" && zone === "upper") {
+            const htfAllowsLong = htfPol === "LONG_ONLY_OR_NONE" || htfPol.includes("BULLISH");
+            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp || htfAllowsLong;
+            const htfStrongBearish = htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT";
+
+            if (!longException || htfStrongBearish) {
+                mismatchReason = "SIDE_ZONE_MISMATCH_UPPER_LONG";
+            }
+        }
+
+        if (mismatchReason != null) {
+            const decisionBeforeMismatchBlock = v2DecisionAfterPromotion;
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = mismatchReason;
+            promotionApplied = false;
+            promotionReason = null;
+            expectedMissingCondition = mismatchReason;
+            expectedNextAction = sideFinal === "short"
+                ? "WAIT_FOR_UPPER_REJECTION_OR_BREAKDOWN_RETEST"
+                : "WAIT_FOR_LOWER_REJECTION_OR_BREAKOUT_RETEST";
+
+            console.info(JSON.stringify({
+                event: "V2_SIDE_ZONE_MISMATCH_BLOCK_PROOF",
+                symbol: String(input.symbol),
+                side: sideFinal,
+                zone,
+                boxPos,
+                boxBreakSide: boxBreakSideFinal,
+                market_subtype: judgment.subtype,
+                shockPhase: judgment.shockPhase,
+                htf_entry_policy: htfPol,
+                htf_hard_block_reason: htfHardBlockReason,
+                macro_source: judgment.macro_source ?? "unknown",
+                qualityScore,
+                finalDecisionBefore: decisionBeforeMismatchBlock,
+                finalDecisionAfter: v2DecisionAfterPromotion,
+                reason: mismatchReason
+            }));
         }
     }
 
