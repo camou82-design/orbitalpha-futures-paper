@@ -462,7 +462,7 @@ export function resolveSymbolDecisionEnvelope(
         htf_requires_stronger_confirmation: execMeta.htf_requires_stronger_confirmation ?? null,
         htf_policy_reason: execMeta.htf_policy_reason ?? null,
         htf_hard_block_reason: execMeta.htf_hard_block_reason ?? null,
-        trendOk: execMeta.trendOk ?? null
+        trendOk: execMeta.trend_ok ?? execMeta.trendOk ?? null
     });
 
     const htfPolicy = v2Res.internal.judgment.htf_entry_policy ?? "ALLOW";
