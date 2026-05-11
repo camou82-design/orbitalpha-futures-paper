@@ -13495,7 +13495,7 @@ export class PaperEngine {
               takeProfit1Px: authority.takeProfit1Px,
               takeProfit2Px: authority.takeProfit2Px,
               partialExitRatio: authority.partialExitRatio,
-              invalidationPx: authority.invalidationPx
+              invalidationPx: authority.invalidationPx ?? undefined
             };
             if (isPending) {
               this.logger.info("PAPER_OPEN_BLOCKED_UNFILLED_ORDER_PROOF", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
@@ -14344,7 +14344,7 @@ export class PaperEngine {
           takeProfit1Px: authority.takeProfit1Px,
           takeProfit2Px: authority.takeProfit2Px,
           partialExitRatio: authority.partialExitRatio,
-          invalidationPx: authority.invalidationPx
+          invalidationPx: authority.invalidationPx ?? undefined
         };
 
         this.logger.info("POSITION_ENGINE_IDENTITY_PROOF", {

@@ -1439,7 +1439,7 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
   const v2Mode = rangeLaneForcesV2 ? "engine_v2" : configuredV2Mode;
   const sn = input.snapshot;
   if (!sn) {
-    return { decision: "HOLD", source: "v2", side: "none", stageMarginKrw: 0, regime: "UNKNOWN" };
+    return { decision: "HOLD", source: "v2", side: "none", stageMarginKrw: 0, regime: "UNKNOWN", stopPrice: null, invalidationPx: null };
   }
 
   const v2Env = resolveSymbolDecisionEnvelope({
