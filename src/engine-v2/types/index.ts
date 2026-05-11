@@ -525,6 +525,7 @@ export interface SymbolDecisionEnvelope {
     runtime_authority_base_stage_margin_krw?: number | null;
     runtime_authority_size_usdt?: number | null;
     runtime_authority_new_stop_px?: number | null;
+    runtime_authority_invalidation_px?: number | null;
     // V1/V2 Comparison Metrics (Phase 5 Summary)
     v1_decision?: string;
     v1_side?: string;
@@ -623,6 +624,8 @@ export interface ExecutorOutput {
     baseSizeIntent: number;
     recheckSuggested: boolean;
     isAddOnEligible: boolean;
+    stopPrice: number | null;
+    invalidationPx: number | null;
     metadata: Record<string, string | number | boolean | null>;
 }
 
@@ -834,6 +837,8 @@ export interface V2TradeLifecycleAuthorityInput {
     } | null;
     tp1Triggered?: boolean;
     tp2Triggered?: boolean;
+    suggestedStopPrice?: number | null;
+    suggestedInvalidationPx?: number | null;
 }
 
 export interface V2TradeLifecycleAuthorityResult {
@@ -874,6 +879,7 @@ export interface V2TradeLifecycleAuthorityResult {
     tp2Triggered?: boolean;
     takeProfit1Px?: number;
     takeProfit2Px?: number;
+    invalidationPx?: number | null;
 }
 
 /** Tier 5: Add-on Policy Output */
@@ -941,7 +947,8 @@ export type EntryExecutionAuthority = Readonly<{
     takeProfit1Px?: number;
     takeProfit2Px?: number;
     partialExitRatio?: number;
-    invalidationPx?: number;
+    invalidationPx: number | null;
+    stopPrice: number | null;
 }>;
 
 /** Internal Pipeline Result */

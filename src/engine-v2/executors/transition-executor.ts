@@ -43,6 +43,7 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
     let transitionPreflightSafetyPassed = false;
     let transitionPreflightBlockReason: string | null = null;
     let transitionEvidence = "transition_default_reject";
+    let transitionConfidence = 0.5;
 
     if (subtype === "SHOCK_REACTION_DOWN" || directionalShockState === "DOWN") {
         transitionSetupType = "SHOCK_DOWN_REACTION";
@@ -280,7 +281,24 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         transitionRejectReason = "TRANSITION_CONFLICT_NO_TRADE";
     }
 
-    const transitionConfidence = Math.max(0, Math.min(1, (qualityScore / 100) * (breakoutConfirm ? 1 : 0.7)));
+    const entryPx = Number(sn.lastPrice ?? 0);
+    const atr = Number(sn.atr ?? (entryPx * 0.01));
+    const boxHigh = Number(sn.boxHigh ?? 0);
+    const boxLow = Number(sn.boxLow ?? 0);
+
+    let stopPrice: number | null = null;
+    let invalidationPx: number | null = null;
+
+    if (side === "long") {
+        const baseInv = boxLow > 0 ? boxLow : entryPx - atr * 1.5;
+        stopPrice = Math.min(baseInv - atr * 0.2, entryPx - atr * 1.0);
+        invalidationPx = Math.min(baseInv - atr * 0.5, entryPx - atr * 1.5);
+    } else if (side === "short") {
+        const baseInv = boxHigh > 0 ? boxHigh : entryPx + atr * 1.5;
+        stopPrice = Math.max(baseInv + atr * 0.2, entryPx + atr * 1.0);
+        invalidationPx = Math.max(baseInv + atr * 0.5, entryPx + atr * 1.5);
+    }
+
     const metadata: TransitionExecutorMetadata = {
         transitionPhase,
         transitionSetupType,
@@ -309,7 +327,9 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         longAllow,
         shortAllow,
         crashState,
-        pumpState
+        pumpState,
+        stopPrice,
+        invalidationPx
     };
     return {
         signal,
@@ -318,6 +338,8 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         baseSizeIntent: Math.max(0, Math.min(0.4, baseSizeIntent)),
         recheckSuggested,
         isAddOnEligible: false,
+        stopPrice,
+        invalidationPx,
         metadata
     };
 }

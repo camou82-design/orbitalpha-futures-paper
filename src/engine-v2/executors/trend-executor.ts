@@ -69,6 +69,21 @@ export function executeTrendRegime(input: EngineV2Input, judgment: MarketJudgmen
         }));
     }
 
+    const entryPx = sn.lastPrice ?? 0;
+    const atr = sn.atr ?? (entryPx * 0.01);
+    const ema20 = sn.ema20 && sn.ema20 > 0 ? sn.ema20 : entryPx / (1 + emaGap);
+
+    let stopPrice: number | null = null;
+    let invalidationPx: number | null = null;
+
+    if (side === "long") {
+        stopPrice = Math.min(ema20 - atr * 0.5, entryPx - atr * 1.5);
+        invalidationPx = Math.min(ema20 - atr * 1.0, entryPx - atr * 2.0);
+    } else if (side === "short") {
+        stopPrice = Math.max(ema20 + atr * 0.5, entryPx + atr * 1.5);
+        invalidationPx = Math.max(ema20 + atr * 1.0, entryPx + atr * 2.0);
+    }
+
     return {
         signal,
         side,
@@ -76,9 +91,13 @@ export function executeTrendRegime(input: EngineV2Input, judgment: MarketJudgmen
         baseSizeIntent: signal !== "NONE" ? 1 : 0,
         recheckSuggested: signal === "WAIT_RECHECK",
         isAddOnEligible: true,
+        stopPrice,
+        invalidationPx,
         metadata: {
             emaGap,
-            trendWeakness
+            trendWeakness,
+            stopPrice,
+            invalidationPx
         }
     };
 }

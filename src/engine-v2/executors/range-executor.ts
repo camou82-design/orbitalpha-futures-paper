@@ -72,6 +72,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                 baseSizeIntent: 0,
                 recheckSuggested: true,
                 isAddOnEligible: false,
+                stopPrice: null,
+                invalidationPx: null,
                 metadata: { shockPhase: judgment.shockPhase, trendPhase: judgment.trendPhase }
             };
         }
@@ -492,6 +494,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         baseSizeIntent: signal === "NONE" ? 0 : 1,
         recheckSuggested,
         isAddOnEligible: true,
+        stopPrice: inv || null,
+        invalidationPx: inv || null,
         metadata
     };
 }

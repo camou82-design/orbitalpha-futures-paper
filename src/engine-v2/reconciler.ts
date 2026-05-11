@@ -158,8 +158,13 @@ export function deriveExecutionAuthority(
             "MIN_ORDER_SIZE_UNDERFLOW",
             "ORDER_BUILD_FAIL",
             "CRASH_ENTRY_GUARD_BLOCK",
-            "RISK_EXPOSURE_CAP_PRE_SUBMIT"
-        ]).has(v2Risk.blockReason) : undefined
+            "RISK_EXPOSURE_CAP_PRE_SUBMIT",
+            "STOP_PRICE_MISSING",
+            "LONG_INVALIDATION_ABOVE_ENTRY",
+            "SHORT_INVALIDATION_BELOW_ENTRY"
+        ]).has(v2Risk.blockReason) : undefined,
+        stopPrice: useV2 ? (selector.v2_result.lifecycleAuthority?.newStopPrice ?? null) : null,
+        invalidationPx: useV2 ? (selector.v2_result.lifecycleAuthority?.invalidationPx ?? null) : null
     };
 }
 
@@ -197,8 +202,13 @@ export function deriveExecutionAuthorityFromEnvelope(
             "MIN_ORDER_SIZE_UNDERFLOW",
             "ORDER_BUILD_FAIL",
             "CRASH_ENTRY_GUARD_BLOCK",
-            "RISK_EXPOSURE_CAP_PRE_SUBMIT"
-        ]).has(envelope.hardBlockReason)
+            "RISK_EXPOSURE_CAP_PRE_SUBMIT",
+            "STOP_PRICE_MISSING",
+            "LONG_INVALIDATION_ABOVE_ENTRY",
+            "SHORT_INVALIDATION_BELOW_ENTRY"
+        ]).has(envelope.hardBlockReason),
+        stopPrice: envelope.newStopPrice ?? null,
+        invalidationPx: envelope.invalidationPx ?? null
     };
 }
 
@@ -429,7 +439,9 @@ export function resolveSymbolDecisionEnvelope(
         takeProfit1Px: typeof execMeta.takeProfit1Px === "number" ? execMeta.takeProfit1Px : undefined,
         takeProfit2Px: typeof execMeta.takeProfit2Px === "number" ? execMeta.takeProfit2Px : undefined,
         partialExitRatio: typeof execMeta.partialExitRatio === "number" ? execMeta.partialExitRatio : undefined,
-        invalidationPx: typeof execMeta.invalidationPx === "number" ? execMeta.invalidationPx : undefined,
+        invalidationPx: typeof v2Res.internal.lifecycleAuthority?.invalidationPx === "number" 
+            ? v2Res.internal.lifecycleAuthority.invalidationPx 
+            : (typeof execMeta.invalidationPx === "number" ? execMeta.invalidationPx : undefined),
         alignedSignal: execMeta.alignedSignal ?? null,
         selectedSideAfterVeto: execMeta.selectedSideAfterVeto ?? null,
         promotionApplied: execMeta.promotionApplied ?? null,
@@ -690,6 +702,7 @@ export function resolveSymbolDecisionEnvelope(
         runtime_authority_stage_margin_krw: executionEnvelope.stageMarginKrw,
         runtime_authority_size_usdt: executionEnvelope.stageMarginKrw / 1400,
         runtime_authority_new_stop_px: executionEnvelope.newStopPrice,
+        runtime_authority_invalidation_px: executionEnvelope.invalidationPx,
         v1_decision: v1_dec,
         v1_side: v1Side,
         v1_size: v1Size,

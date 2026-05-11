@@ -263,9 +263,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             baseSizeIntent: 0,
             recheckSuggested: false,
             isAddOnEligible: false,
+            stopPrice: null,
+            invalidationPx: null,
             metadata: {}
         };
     }
+    v2CalculatedInvalidationPx = execution.invalidationPx;
     const USD_PER_KRW = 1 / 1400;
     const accountEquityUsd = (v2State.accountEquityKrw ?? 0) * USD_PER_KRW;
     const currentSymbolNotionalUsd = (v2State.symbolLedgerExposureNotionalKrw ?? 0) * USD_PER_KRW;
@@ -2502,6 +2505,64 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
+    if (finalDecision === "ENTER") {
+        const structuralStopPx = execution.stopPrice;
+        const structuralInvalidationPx = execution.invalidationPx;
+        const lastPrice = authoritativeInput.snapshot.lastPrice ?? 0;
+        const sideFinal = v2SideAfterPromotion;
+
+        let riskAuditFailed = false;
+        let riskAuditReason: string | null = null;
+
+        if (structuralStopPx == null || structuralInvalidationPx == null || isNaN(structuralStopPx) || isNaN(structuralInvalidationPx)) {
+            riskAuditFailed = true;
+            riskAuditReason = "STOP_PRICE_MISSING";
+        } else {
+            // Directional Safety Check
+            if (sideFinal === "long" && (structuralInvalidationPx >= lastPrice || (structuralStopPx >= lastPrice && Math.abs(structuralStopPx - lastPrice) > 0.00000001))) {
+                riskAuditFailed = true;
+                riskAuditReason = "LONG_INVALIDATION_ABOVE_ENTRY";
+            } else if (sideFinal === "short" && (structuralInvalidationPx <= lastPrice || (structuralStopPx <= lastPrice && Math.abs(structuralStopPx - lastPrice) > 0.00000001))) {
+                riskAuditFailed = true;
+                riskAuditReason = "SHORT_INVALIDATION_BELOW_ENTRY";
+            }
+        }
+
+        if (riskAuditFailed) {
+            console.error(JSON.stringify({
+                event: "V2_ENTRY_PLAN_RISK_PROOF",
+                symbol: String(input.symbol),
+                side: sideFinal,
+                lastPrice,
+                stopPrice: structuralStopPx,
+                invalidationPx: structuralInvalidationPx,
+                audit_passed: false,
+                fail_reason: riskAuditReason,
+                action: "HARD_BLOCK_ENTRY"
+            }));
+
+            finalDecision = "REJECT";
+            v2DecisionAfterPromotion = "REJECT";
+            v2SideAfterPromotion = "none";
+            blockReason = riskAuditReason;
+            stageMarginKrwAfter = 0;
+            expectedMissingCondition = riskAuditReason;
+            expectedNextAction = "FIX_EXECUTOR_RISK_PLAN";
+        } else {
+             console.info(JSON.stringify({
+                event: "V2_ENTRY_PLAN_RISK_PROOF",
+                symbol: String(input.symbol),
+                side: sideFinal,
+                lastPrice,
+                stopPrice: structuralStopPx,
+                invalidationPx: structuralInvalidationPx,
+                audit_passed: true,
+                action: "ALLOW_ENTRY"
+            }));
+        }
+    }
+
     if (!riskSizing.diagnostics) {
         (riskSizing as { diagnostics?: import("./types").RiskSizingDiagnostics }).diagnostics = {};
     }
@@ -2940,7 +3001,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             peakPnlUpdatedAt: lifecyclePosition_latest?.peakPnlUpdatedAt,
             takeProfitPlan: lifecyclePosition_latest?.takeProfitPlan,
             tp1Triggered: lifecyclePosition_latest?.tp1Triggered,
-            tp2Triggered: lifecyclePosition_latest?.tp2Triggered
+            tp2Triggered: lifecyclePosition_latest?.tp2Triggered,
+            suggestedStopPrice: execution.stopPrice,
+            suggestedInvalidationPx: execution.invalidationPx
         });
 
         if (lifecycleAuthority.tp1Triggered && lifecyclePosition_latest) {
