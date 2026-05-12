@@ -34,6 +34,12 @@ export type PositionOpsRow = Readonly<{
   ledger_tp_px: number | null;
   exchange_tp_px: number | null;
   tp_px_source: "engine_calculated" | "ledger_stored" | "exchange_order" | "none";
+  /** OKX SWAP `pos` (signed contracts) for this row; nonzero means live exposure. */
+  okx_pos_signed: number;
+  /** Reduce-only protective algo/pending rows for this instId + posSide (diagnostics). */
+  matching_protective_pending_count: number;
+  /** Engine expects a TP leg on the exchange (ledger or mirrored policy TP). */
+  tp_required_for_exchange_protection: boolean;
   reduce_only_protective_found: boolean;
   protective_match_hints: string[];
   reconcile_state: string;
@@ -108,14 +114,30 @@ export function orderLooksReduceOnlyProtective(o: Record<string, unknown>): bool
   return false;
 }
 
+function orderMatchesPositionSide(o: Record<string, unknown>, positionSide: "long" | "short"): boolean {
+  const ps = String(o.posSide ?? "").trim().toLowerCase();
+  if (!ps || ps === "net") return true;
+  return ps === positionSide;
+}
+
 export function findProtectiveHintsForInst(
   instId: string,
+  positionSide: "long" | "short",
   pending: readonly Record<string, unknown>[],
-  algos: readonly Record<string, unknown>[]
-): { found: boolean; hints: string[]; slPrice: number | null; tpPrice: number | null } {
+  algos: readonly Record<string, unknown>[],
+  tpRequired: boolean
+): {
+  protectionSatisfied: boolean;
+  hints: string[];
+  slPrice: number | null;
+  tpPrice: number | null;
+  matchingProtectiveOrderCount: number;
+} {
   const hints: string[] = [];
   let foundSlPrice: number | null = null;
   let foundTpPrice: number | null = null;
+  let matchingProtectiveOrderCount = 0;
+  let protectionSatisfied = false;
 
   const extractSlPx = (o: Record<string, unknown>): number | null => {
     const val = o.slTriggerPx ?? o.triggerPx ?? o.stopPx ?? o.trigPx;
@@ -128,23 +150,36 @@ export function findProtectiveHintsForInst(
     return Number.isFinite(n) && n > 0 ? n : null;
   };
 
-  for (const o of algos) {
-    if (!instIdMatchesRow(instId, String(o.instId ?? ""))) continue;
-    if (orderLooksReduceOnlyProtective(o)) {
-      hints.push(`algo:${stringifyHints(o)}`);
-      if (foundSlPrice == null) foundSlPrice = extractSlPx(o);
-      if (foundTpPrice == null) foundTpPrice = extractTpPx(o);
+  const consider = (o: Record<string, unknown>, prefix: "algo" | "pend") => {
+    if (!instIdMatchesRow(instId, String(o.instId ?? ""))) return;
+    if (!orderMatchesPositionSide(o, positionSide)) return;
+    if (!orderLooksReduceOnlyProtective(o)) return;
+    hints.push(`${prefix}:${stringifyHints(o)}`);
+    matchingProtectiveOrderCount += 1;
+    const slPx = extractSlPx(o);
+    const tpPx = extractTpPx(o);
+    const slOk = slPx != null;
+    const tpOk = !tpRequired || (tpPx != null && tpPx > 0);
+    if (slOk && tpOk) {
+      protectionSatisfied = true;
+      if (foundSlPrice == null && slPx != null) foundSlPrice = slPx;
+      if (foundTpPrice == null && tpPx != null) foundTpPrice = tpPx;
+    } else {
+      if (foundSlPrice == null && slPx != null) foundSlPrice = slPx;
+      if (foundTpPrice == null && tpPx != null) foundTpPrice = tpPx;
     }
-  }
-  for (const o of pending) {
-    if (!instIdMatchesRow(instId, String(o.instId ?? ""))) continue;
-    if (orderLooksReduceOnlyProtective(o)) {
-      hints.push(`pend:${stringifyHints(o)}`);
-      if (foundSlPrice == null) foundSlPrice = extractSlPx(o);
-      if (foundTpPrice == null) foundTpPrice = extractTpPx(o);
-    }
-  }
-  return { found: hints.length > 0, hints, slPrice: foundSlPrice, tpPrice: foundTpPrice };
+  };
+
+  for (const o of algos) consider(o, "algo");
+  for (const o of pending) consider(o, "pend");
+
+  return {
+    protectionSatisfied,
+    hints,
+    slPrice: foundSlPrice,
+    tpPrice: foundTpPrice,
+    matchingProtectiveOrderCount
+  };
 }
 
 function matchLedgerRow(
@@ -217,9 +252,18 @@ export function buildPositionOpsSurface(input: Readonly<{
       const slNet = stopLossPctForRegime(regime);
       const stopPx = refPx != null && refPx > 0 ? engineMirrorStopPrice(refPx, hit.side, regime) : null;
       const tpPx = refPx != null && refPx > 0 ? engineMirrorTpPrice(refPx, hit.side, regime) : null;
-      const { found, hints, slPrice: exchStopPx, tpPrice: exchTpPx } = findProtectiveHintsForInst(hit.instId, pending, algos);
       const ledgerStop = typeof ledger?.stopPrice === "number" && Number.isFinite(ledger.stopPrice) ? ledger.stopPrice : null;
       const ledgerTp = typeof ledger?.targetPrice1 === "number" && Number.isFinite(ledger.targetPrice1) ? ledger.targetPrice1 : null;
+      const tpRequired =
+        (ledgerTp != null && ledgerTp > 0) || (tpPx != null && tpPx > 0 && Number.isFinite(tpPx));
+
+      const {
+        protectionSatisfied,
+        hints,
+        slPrice: exchStopPx,
+        tpPrice: exchTpPx,
+        matchingProtectiveOrderCount
+      } = findProtectiveHintsForInst(hit.instId, hit.side, pending, algos, tpRequired);
 
       let pxSource: PositionOpsRow["stop_px_source"] = "none";
       if (exchStopPx != null) pxSource = "exchange_order";
@@ -248,7 +292,10 @@ export function buildPositionOpsSurface(input: Readonly<{
         ledger_tp_px: ledgerTp,
         exchange_tp_px: exchTpPx,
         tp_px_source: tpSource,
-        reduce_only_protective_found: found,
+        okx_pos_signed: hit.posSigned,
+        matching_protective_pending_count: matchingProtectiveOrderCount,
+        tp_required_for_exchange_protection: tpRequired,
+        reduce_only_protective_found: protectionSatisfied,
         protective_match_hints: hints,
         reconcile_state: ledger?.reconcileState ?? "NONE",
         sync_status: ledger ? (sync.sync_status === "ALIGNED" ? "ALIGNED" : sync.sync_status) : "OKX_GHOST",
