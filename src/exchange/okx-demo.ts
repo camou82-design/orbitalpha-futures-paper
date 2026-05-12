@@ -34,8 +34,18 @@ export type OkxOrderSubmitInput = Readonly<{
 export type OkxPublicDiagnostics = Readonly<{
   httpStatus: number;
   requestUrl: string;
+  /** HTTP verb used for the OKX call. */
+  method?: "GET" | "POST";
+  /** Path only, e.g. `/api/v5/trade/order-algo` (no origin, no query). */
+  endpointPath?: string;
+  /** Request body (POST JSON) or query key/values (GET). */
+  requestPayload?: unknown;
+  /** Raw response body when JSON parse fails (truncated). */
+  responseBodyText?: string;
   retCode?: string;
   retMsg?: string;
+  /** OKX envelope `data` field when present. */
+  okxData?: unknown;
   fullResponse?: unknown;
 }>;
 
@@ -113,6 +123,12 @@ export class OkxDemoClient {
     const bodyRaw = body ? JSON.stringify(body) : "";
     const ts = new Date().toISOString();
     const requestUrl = `${this.cfg.baseUrl}${pathWithQuery}`;
+    const requestPayloadForLog: unknown =
+      method === "POST"
+        ? body
+        : query && Array.from(query.keys()).length > 0
+          ? Object.fromEntries(query.entries())
+          : null;
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json"
@@ -124,7 +140,14 @@ export class OkxDemoClient {
       return {
         ok: false,
         error: "apiKey_missing",
-        diagnostics: { httpStatus: 0, requestUrl, retMsg: "No API key configured for signed request" }
+        diagnostics: {
+          httpStatus: 0,
+          requestUrl,
+          method,
+          endpointPath: requestPath,
+          requestPayload: requestPayloadForLog ?? undefined,
+          retMsg: "No API key configured for signed request"
+        }
       };
     }
 
@@ -150,23 +173,55 @@ export class OkxDemoClient {
         return {
           ok: false,
           error: `invalid_json_http_${httpStatus}`,
-          diagnostics: { httpStatus, requestUrl, retMsg: "Failed to parse JSON response" }
+          diagnostics: {
+            httpStatus,
+            requestUrl,
+            method,
+            endpointPath: requestPath,
+            requestPayload: requestPayloadForLog ?? undefined,
+            responseBodyText: text.length > 16_000 ? `${text.slice(0, 16_000)}…(truncated)` : text,
+            retMsg: "Failed to parse JSON response"
+          }
         };
       }
 
       const diagnostics: OkxPublicDiagnostics = {
         httpStatus,
         requestUrl,
-        retCode: json?.code,
-        retMsg: json?.msg,
+        method,
+        endpointPath: requestPath,
+        requestPayload: requestPayloadForLog ?? undefined,
+        retCode: json?.code != null ? String(json.code) : undefined,
+        retMsg: json?.msg != null ? String(json.msg) : undefined,
+        okxData: json?.data,
         fullResponse: json
       };
 
       if (!res.ok) {
-        return { ok: false, error: `okx_http_${httpStatus}:${json?.msg || "request_failed"}`, diagnostics };
+        const detail =
+          diagnostics.retMsg && diagnostics.retMsg.length > 0
+            ? diagnostics.retMsg
+            : diagnostics.retCode && String(diagnostics.retCode).length > 0
+              ? String(diagnostics.retCode)
+              : text.length > 0 && text.length <= 500
+                ? text
+                : "request_failed";
+        return { ok: false, error: `okx_http_${httpStatus}:${detail}`, diagnostics };
       }
       if (json?.code !== "0") {
-        return { ok: false, error: `okx_api_${json?.code}:${json?.msg || "request_failed"}`, diagnostics };
+        const codeStr = json?.code != null ? String(json.code) : "unknown";
+        const msgStr =
+          json?.msg != null && String(json.msg).trim().length > 0
+            ? String(json.msg)
+            : (() => {
+                try {
+                  const s = JSON.stringify(json);
+                  return s.length > 800 ? `${s.slice(0, 800)}…` : s;
+                } catch {
+                  return "request_failed";
+                }
+              })();
+        return { ok: false, error: `okx_api_${codeStr}:${msgStr}`, diagnostics };
       }
 
       return { ok: true, value: json.data as T[], diagnostics };
@@ -175,7 +230,14 @@ export class OkxDemoClient {
       return {
         ok: false,
         error: `signed_request_network_error: ${msg}`,
-        diagnostics: { httpStatus: 0, requestUrl, retMsg: msg }
+        diagnostics: {
+          httpStatus: 0,
+          requestUrl,
+          method,
+          endpointPath: requestPath,
+          requestPayload: requestPayloadForLog ?? undefined,
+          retMsg: msg
+        }
       };
     }
   }

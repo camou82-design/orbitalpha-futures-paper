@@ -6468,6 +6468,37 @@ export class PaperEngine {
       return { modified: true, success: true, record: updated };
     } else {
       const error = (submit as any).error || (submit as any).diagnostics?.retMsg || "unknown_error";
+      const d = submit.diagnostics;
+      const req = (d.requestPayload ?? {}) as Record<string, unknown>;
+      this.logger.error("OKX_PROTECTIVE_ORDER_SUBMIT_HTTP_DIAGNOSTICS", {
+        flowId,
+        symbol: open.symbol,
+        ledger_side: open.side,
+        endpoint: d.endpointPath ?? null,
+        method: d.method ?? null,
+        request_payload: d.requestPayload ?? null,
+        http_status: d.httpStatus,
+        request_url: d.requestUrl,
+        response_body_text: d.responseBodyText ?? null,
+        okx_code: d.retCode ?? null,
+        okx_msg: d.retMsg ?? null,
+        okx_data: d.okxData ?? null,
+        okx_full_response: d.fullResponse ?? null,
+        instId: req.instId ?? null,
+        side: req.side ?? null,
+        posSide: req.posSide ?? null,
+        reduceOnly: req.reduceOnly ?? null,
+        sz: req.sz ?? null,
+        ordType: req.ordType ?? null,
+        tdMode: req.tdMode ?? null,
+        triggerPx: req.triggerPx ?? null,
+        orderPx: req.orderPx ?? null,
+        tpTriggerPx: req.tpTriggerPx ?? null,
+        slTriggerPx: req.slTriggerPx ?? null,
+        tpOrdPx: req.tpOrdPx ?? null,
+        slOrdPx: req.slOrdPx ?? null,
+        try_error: String(error)
+      });
       this.logger.error("PROTECTIVE_ORDER_SUBMIT_FAILED", {
         symbol: open.symbol,
         side: open.side,
@@ -6479,10 +6510,10 @@ export class PaperEngine {
       if (activeTpPrice != null && activeTpPrice > 0) {
         this.logger.error("TAKE_PROFIT_SUBMIT_RESULT", { symbol: open.symbol, success: false, error, flowId });
       }
-      
+
       // Block new entries for this symbol
       this.symbolProtectionFailedBlocked.add(open.symbol);
-      
+
       return { modified: false, success: false, record: open };
     }
   }
