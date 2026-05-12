@@ -283,6 +283,24 @@ export function deriveCurrentPositionsForDisplay(engineState: unknown, openPosit
       const side = p.side === "short" ? "short" : "long";
       const match = surfaceRowFor(sym, side);
       const { entryPrice } = rowDisplayPayload(match);
+      const ledgerSl =
+        match && typeof match.ledger_stop_px === "number" && Number.isFinite(match.ledger_stop_px)
+          ? match.ledger_stop_px
+          : null;
+      const mirrorSl =
+        match &&
+        typeof match.initial_stop_px_engine_mirror === "number" &&
+        Number.isFinite(match.initial_stop_px_engine_mirror)
+          ? match.initial_stop_px_engine_mirror
+          : null;
+      const ledgerTp =
+        match && typeof match.ledger_tp_px === "number" && Number.isFinite(match.ledger_tp_px) ? match.ledger_tp_px : null;
+      const mirrorTp =
+        match &&
+        typeof match.initial_tp_px_engine_mirror === "number" &&
+        Number.isFinite(match.initial_tp_px_engine_mirror)
+          ? match.initial_tp_px_engine_mirror
+          : null;
       return {
         symbol: sym,
         side,
@@ -292,6 +310,10 @@ export function deriveCurrentPositionsForDisplay(engineState: unknown, openPosit
         displaySource: "ledger_okx_sync_preview",
         okxPositionContracts: typeof p.pos === "number" && Number.isFinite(p.pos) ? p.pos : null,
         instId: typeof p.instId === "string" ? p.instId : null,
+        stopPrice: ledgerSl ?? undefined,
+        takeProfit: ledgerTp ?? undefined,
+        policy_mirror_stop_px_fallback: ledgerSl == null && mirrorSl != null ? mirrorSl : undefined,
+        policy_mirror_tp_px_fallback: ledgerTp == null && mirrorTp != null ? mirrorTp : undefined,
         reduce_only_protective_found:
           typeof match?.reduce_only_protective_found === "boolean" ? match.reduce_only_protective_found : undefined
       };
@@ -303,6 +325,18 @@ export function deriveCurrentPositionsForDisplay(engineState: unknown, openPosit
       const sym = String(row.symbol ?? "");
       const side = row.side === "short" ? "short" : "long";
       const { entryPrice } = rowDisplayPayload(row);
+      const ledgerSl =
+        typeof row.ledger_stop_px === "number" && Number.isFinite(row.ledger_stop_px) ? row.ledger_stop_px : null;
+      const mirrorSl =
+        typeof row.initial_stop_px_engine_mirror === "number" && Number.isFinite(row.initial_stop_px_engine_mirror)
+          ? row.initial_stop_px_engine_mirror
+          : null;
+      const ledgerTp =
+        typeof row.ledger_tp_px === "number" && Number.isFinite(row.ledger_tp_px) ? row.ledger_tp_px : null;
+      const mirrorTp =
+        typeof row.initial_tp_px_engine_mirror === "number" && Number.isFinite(row.initial_tp_px_engine_mirror)
+          ? row.initial_tp_px_engine_mirror
+          : null;
       return {
         symbol: sym,
         side,
@@ -311,6 +345,10 @@ export function deriveCurrentPositionsForDisplay(engineState: unknown, openPosit
         openedAt: tsFallback,
         displaySource: "position_ops_surface",
         inst_id: typeof row.inst_id === "string" ? row.inst_id : null,
+        stopPrice: ledgerSl ?? undefined,
+        takeProfit: ledgerTp ?? undefined,
+        policy_mirror_stop_px_fallback: ledgerSl == null && mirrorSl != null ? mirrorSl : undefined,
+        policy_mirror_tp_px_fallback: ledgerTp == null && mirrorTp != null ? mirrorTp : undefined,
         reduce_only_protective_found:
           typeof row.reduce_only_protective_found === "boolean" ? row.reduce_only_protective_found : undefined
       };

@@ -317,7 +317,10 @@ export class OkxDemoClient {
     instId: string;
     tdMode: string;
     side: string;
+    /** Used only when `accountPosMode` is `long_short_mode` (hedge). Omit on `net_mode` to avoid OKX 51000. */
     posSide?: string;
+    /** From GET /api/v5/account/config `posMode` (e.g. `net_mode`, `long_short_mode`). */
+    accountPosMode?: string;
     ordType: string;
     sz: string;
     reduceOnly?: boolean;
@@ -326,11 +329,13 @@ export class OkxDemoClient {
     tpTriggerPx?: string;
     tpOrdPx?: string;
   }): Promise<TryResult<Record<string, unknown>[]>> {
-    const payload = {
+    const mode = String(input.accountPosMode ?? "").trim().toLowerCase();
+    const isLongShortMode = mode === "long_short_mode";
+    const payload: Record<string, unknown> = {
       instId: input.instId,
       tdMode: input.tdMode,
       side: input.side,
-      ...(input.posSide ? { posSide: input.posSide } : {}),
+      ...(isLongShortMode && input.posSide ? { posSide: input.posSide } : {}),
       ordType: input.ordType,
       sz: input.sz,
       ...(input.reduceOnly === true ? { reduceOnly: "true" } : {}),
