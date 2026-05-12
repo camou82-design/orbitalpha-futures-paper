@@ -637,6 +637,10 @@ export interface MarketJudgmentOutput {
     htf_requires_stronger_confirmation?: boolean;
     htf_policy_reason?: string;
     htf_hard_block_reason?: string;
+    diagnostics?: {
+        structural_hit_count: number;
+        confirmation_wait_reasons: string[];
+    };
     metadata?: Record<string, any>;
 }
 

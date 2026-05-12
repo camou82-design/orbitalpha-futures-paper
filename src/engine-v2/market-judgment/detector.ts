@@ -406,6 +406,9 @@ function evaluateWhipsawShockRecheck(args: {
     reverseSwingDetected: boolean;
     recentSwingDirection: "up" | "down" | "flat";
     boxOrbitChop: boolean;
+    structuralHitCount: number;
+    confirmationWaitReasons: string[];
+    recheckTicks: number;
 } {
     const { input, shockPhase, rangePhase, transitionPhase, mixedBreakoutState, rangeMetadata, regimeFinal, noTradeReason } = args;
     if (regimeFinal === "NO_TRADE" && (noTradeReason === "DATA_NOT_READY" || noTradeReason === "DUMP_PROTECTION")) {
@@ -418,7 +421,10 @@ function evaluateWhipsawShockRecheck(args: {
             internalTransitionPhase: transitionPhase,
             reverseSwingDetected: false,
             recentSwingDirection: "flat",
-            boxOrbitChop: false
+            boxOrbitChop: false,
+            structuralHitCount: 0,
+            confirmationWaitReasons: [],
+            recheckTicks: 0
         };
     }
 
@@ -448,39 +454,53 @@ function evaluateWhipsawShockRecheck(args: {
         breakoutFailureRate >= 0.35;
 
     // --- Activation Logic Refinement ---
-    const structuralHits: string[] = [];
-    if (micro.downThenRebound) structuralHits.push("micro_down_then_rebound");
-    if (micro.upThenDrop) structuralHits.push("micro_up_then_drop");
-    if (directional === "UP" || directional === "DOWN") structuralHits.push("directional_shock_state");
-    if (boxOrbitChop) structuralHits.push("box_orbit_chop");
-    if (volExp >= 2.0) structuralHits.push("volume_expansion_ge_2");
-    if (breakoutFailureRate >= 0.4) structuralHits.push("breakout_failure_rate_ge_0_4");
-    if (mixedBreakoutState) structuralHits.push("mixed_breakout_state");
+    const microHits: string[] = [];
+    if (micro.downThenRebound) microHits.push("micro_down_then_rebound");
+    if (micro.upThenDrop) microHits.push("micro_up_then_drop");
 
-    const missingHits: string[] = [];
-    if (!retestConfirmed) missingHits.push("retest_not_confirmed");
-    if (!reclaimConfirmed) missingHits.push("reclaim_not_confirmed");
-    if (reviewingTicks < 6) missingHits.push("reviewing_ticks_insufficient");
+    const otherStructuralHits: string[] = [];
+    if (directional === "UP" || directional === "DOWN") otherStructuralHits.push("directional_shock_state");
+    if (boxOrbitChop) otherStructuralHits.push("box_orbit_chop");
+    if (sn.boxBreakSide !== "none") otherStructuralHits.push("box_break_detected");
+    if (volExp >= 2.0) otherStructuralHits.push("volume_expansion_ge_2");
+    if (breakoutFailureRate >= 0.4) otherStructuralHits.push("breakout_failure_rate_ge_0_4");
+    if (mixedBreakoutState) otherStructuralHits.push("mixed_breakout_state");
+    if (Number(sn.atrExpansion ?? 0) >= 1.5) otherStructuralHits.push("atr_expansion_ge_1_5");
 
-    const structuralHitCount = structuralHits.length;
-    const missingHitCount = missingHits.length;
+    const structuralHits = [...microHits, ...otherStructuralHits];
+    
+    const confirmationWaitReasons: string[] = [];
+    if (!retestConfirmed) confirmationWaitReasons.push("retest_not_confirmed");
+    if (!reclaimConfirmed) confirmationWaitReasons.push("reclaim_not_confirmed");
+    if (reviewingTicks < 6) confirmationWaitReasons.push("reviewing_ticks_insufficient");
 
-    let active = (structuralHitCount >= 1 && missingHitCount >= 1) || structuralHitCount >= 2;
+    const microHitCount = microHits.length;
+    const otherStructuralHitCount = otherStructuralHits.length;
+
+    // RULE: At least 1 micro reversal AND at least 1 other structural evidence
+    let active = microHitCount >= 1 && otherStructuralHitCount >= 1;
 
     // --- Deactivation (Release) Conditions ---
-    if (active && reviewingTicks >= 6) {
-        const releasedBySwing = !micro.reverseSwingDetected;
-        const releasedByVol = volExp < 1.8; // Easing from 2.0 threshold
-        const releasedByFailRate = breakoutFailureRate < 0.35; // Easing from 0.4 threshold
-        const releasedByConfirmation = retestConfirmed || reclaimConfirmed;
+    if (active) {
+        if (reviewingTicks >= 6) {
+            const structuralVanished = structuralHits.length === 0;
+            const releasedBySwing = !micro.reverseSwingDetected;
+            const releasedByVol = volExp < 1.7; // Easing from 2.0 threshold
+            const releasedByFailRate = breakoutFailureRate < 0.32; // Easing from 0.4 threshold
+            const releasedByConfirmation = retestConfirmed || reclaimConfirmed;
 
-        if (releasedBySwing || releasedByVol || releasedByFailRate || releasedByConfirmation) {
+            if (structuralVanished || releasedBySwing || releasedByVol || releasedByFailRate || releasedByConfirmation) {
+                active = false;
+            }
+        }
+        // Force release if structural evidence disappears entirely regardless of ticks
+        if (structuralHits.length === 0) {
             active = false;
         }
     }
 
-    const hits = [...structuralHits, ...missingHits];
-    const hitCount = hits.length;
+    const hitCount = structuralHits.length;
+    const hits = structuralHits;
 
     let internalTransitionPhase: MarketJudgmentOutput["transitionPhase"] = "WHIPSAW_RECHECK";
     if (!retestConfirmed) internalTransitionPhase = "SHOCK_RETEST_UNCONFIRMED";
@@ -490,12 +510,15 @@ function evaluateWhipsawShockRecheck(args: {
         active,
         hitCount,
         hits,
+        confirmationWaitReasons,
         retestConfirmed,
         reclaimConfirmed,
         internalTransitionPhase,
         reverseSwingDetected: micro.reverseSwingDetected,
         recentSwingDirection: micro.recentSwingDirection,
-        boxOrbitChop
+        boxOrbitChop,
+        structuralHitCount: hitCount,
+        recheckTicks: reviewingTicks
     };
 }
 
@@ -998,6 +1021,8 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
                 expected_next_action: expectedNextActionOut,
                 whipsaw_hit_count: whipsaw.hitCount,
                 whipsaw_hits: whipsaw.hits,
+                recheck_ticks: whipsaw.recheckTicks,
+                confirmation_wait_reasons: whipsaw.confirmationWaitReasons,
                 transition_phase: transitionPhaseOut
             })
         );
@@ -1011,6 +1036,10 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         shockPhase,
         rangePhase,
         trendPhase,
+        diagnostics: {
+            structural_hit_count: whipsaw.structuralHitCount,
+            confirmation_wait_reasons: whipsaw.confirmationWaitReasons
+        },
         transitionPhase: transitionPhaseOut,
         judgmentVersion: "v2_market_judgment_subtype_v1",
         no_trade_reason,

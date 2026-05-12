@@ -581,6 +581,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         finalDecision = "DISABLED";
     } else if (isBlocked && blockReason === "WHIPSAW_SHOCK_RECHECK") {
         finalDecision = "REJECT";
+        if (shouldEmitV2Proof("V2_WHIPSAW_SHOCK_RECHECK_PROOF", String(input.symbol), judgment.subtype, true)) {
+            console.info(JSON.stringify({
+                event: "V2_WHIPSAW_SHOCK_RECHECK_PROOF",
+                symbol: String(input.symbol),
+                market_subtype: judgment.subtype,
+                structural_hit_count: judgment.diagnostics?.structural_hit_count ?? 0,
+                confirmation_wait_reasons: judgment.diagnostics?.confirmation_wait_reasons || []
+            }));
+        }
     } else if (waitingRecheck && invalidSideForEnter) {
         finalDecision = "HOLD";
     } else if (isBlocked && blockReason === "NO_TRADE_REGIME") {
@@ -1449,7 +1458,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
 
         // ?섏젙 6. TRANSITION WATCH + SHOCK_REACTION_DOWN + upper short valid => micro/probe short probe
-        // reviewingTicks=0?댁뼱??1?뚯감遺???덉슜. full size 湲덉?, micro/probe cap 媛뺤젣.
+        // reviewingTicks=0?댁뼱??1?뚯감遺€???덉슜. full size 湲덉?, micro/probe cap 媛뺤젣.
         const transitionWatchShortMeta = (execution.metadata ?? {}) as Record<string, unknown>;
         const transitionWatchShortSetupType = String(transitionWatchShortMeta.transitionSetupType ?? "NONE");
         const transitionWatchShortAction = String(transitionWatchShortMeta.transitionAction ?? "REJECT");
