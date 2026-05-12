@@ -96,3 +96,7 @@ export function stopLossPctForRegime(regime: MarketRegime): number {
   return thresholds(regime).sl;
 }
 
+export function takeProfitPctForRegime(regime: MarketRegime): number {
+  return thresholds(regime).tp;
+}
+

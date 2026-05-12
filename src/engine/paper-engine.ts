@@ -27,7 +27,7 @@ import { JsonStore } from "../storage/json-store";
 import type { OkxPublicDiagnostics } from "../exchange/okx-demo";
 import { OkxDemoClient, toOkxSwapInstId } from "../exchange/okx-demo";
 import { buildLedgerOkxPositionSyncSnapshot, okxSwapRowToLedgerKey } from "../exchange/okx-position-sync";
-import { buildPositionOpsSurface, engineMirrorStopPrice, regimeForSl } from "./position-ops-monitor";
+import { buildPositionOpsSurface, engineMirrorStopPrice, engineMirrorTpPrice, regimeForSl } from "./position-ops-monitor";
 import type { PositionOpsSurface } from "./position-ops-monitor";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
 import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
@@ -1504,7 +1504,7 @@ export class PaperEngine {
         pending_swap_orders_count: this.cachedOpsPending.length,
         pending_algo_orders_count: this.cachedOpsAlgos.length,
         fetch_errors: this.cachedOpsFetchErrors,
-        diag_note: "reduce_only_protective_detection_best_effort_stage1_no_auto_submit"
+        diag_note: "reduce_only_protective_detection_auto_submit_enabled_via_reconcile"
       });
 
       for (const r of surfaceScan.rows) {
@@ -2498,13 +2498,6 @@ export class PaperEngine {
           });
         }
 
-        // Periodic check for protection or size update for OPEN positions
-        const protectRes = await this.ensureProtectiveStopOrder(open, `tick:${this.runCycleId}:${open.symbol}`);
-        if (protectRes.modified) {
-          open = protectRes.record;
-          ledgerModified = true;
-        }
-
         // --- V2 Risk Integrity Hardening (Hydrate & Prove) ---
         const hydration = this.hydrateRiskPlan(open);
         if (hydration.modified) {
@@ -2512,17 +2505,27 @@ export class PaperEngine {
           ledgerModified = true;
         }
 
+        // Periodic check for protection or size update for OPEN positions
+        const protectRes = await this.ensureProtectiveStopOrder(open, `tick:${this.runCycleId}:${open.symbol}`);
+        if (protectRes.modified) {
+          open = protectRes.record;
+          ledgerModified = true;
+        }
+
         const riskSafe = open.stopPrice != null && Number.isFinite(open.stopPrice);
-        if (!riskSafe) {
+        const reconcileSafe = open.reconcileState !== "RECONCILE_MISMATCH";
+        
+        if (!riskSafe || !reconcileSafe) {
           this.logger.error("V2_OPEN_POSITION_RISK_STATE_PROOF", {
             symbol: open.symbol,
             side: open.side,
             lifecycleState: open.lifecycleState,
+            reconcileState: open.reconcileState,
             stopPrice: open.stopPrice ?? null,
             invalidationPx: open.invalidationPx ?? null,
             safety_check: "FAILED",
             action: "FORCE_CLOSE_ONLY_MANAGED",
-            audit_flag: "RECOVERY_POSITION_STOP_MISSING"
+            audit_flag: !riskSafe ? "RECOVERY_POSITION_STOP_MISSING" : "RECOVERY_POSITION_RECONCILE_MISMATCH"
           });
           open.lifecycleState = "CLOSE_ONLY_MANAGED";
           ledgerModified = true;
@@ -5964,15 +5967,41 @@ export class PaperEngine {
       return { modified: false, success: true, record: open };
     }
 
-    const activeStopPrice = open.stopPrice ?? (open as any).ledger_stop_px;
+    // 0. Proactive Hydration for immediate submission after entry
+    let activeStopPrice = open.stopPrice ?? (open as any).ledger_stop_px;
+    let activeTpPrice = open.targetPrice1;
+    
+    const regime = regimeForSl(open.regimeAtEntry);
+    const refPx = open.avgPx || open.entryPrice;
+
     if (!activeStopPrice || !Number.isFinite(activeStopPrice)) {
+       const mirroredSl = engineMirrorStopPrice(refPx, open.side, regime);
+       if (mirroredSl != null && Number.isFinite(mirroredSl)) {
+         activeStopPrice = mirroredSl;
+       }
+    }
+    if (!activeTpPrice || !Number.isFinite(activeTpPrice)) {
+       const mirroredTp = engineMirrorTpPrice(refPx, open.side, regime);
+       if (mirroredTp != null && Number.isFinite(mirroredTp)) {
+         activeTpPrice = mirroredTp;
+       }
+    }
+
+    if (!activeStopPrice || !Number.isFinite(activeStopPrice)) {
+      this.logger.warn("PROTECTIVE_STOP_SUBMIT_SKIPPED_NO_PRICE", { 
+        symbol: open.symbol, 
+        side: open.side,
+        entryPrice: refPx,
+        regime,
+        flowId 
+      });
       return { modified: false, success: true, record: open };
     }
 
     // [TASK_1] Pricing fallback for contract count normalization
     let pricingLast = pricingLastInput;
     if (!pricingLast || pricingLast <= 0) {
-      pricingLast = open.avgPx || open.entryPrice;
+      pricingLast = refPx;
     }
     if (!pricingLast || pricingLast <= 0) {
       const ticker = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
@@ -5986,33 +6015,48 @@ export class PaperEngine {
     if (open.isProtectiveStopRegistered && open.protectiveStopAlgoId) {
       const algo = (this as any).cachedOpsAlgos?.find((a: any) => String(a.algoId) === open.protectiveStopAlgoId);
       const currentSlPx = algo ? Number(algo.slTriggerPx) : null;
+      const currentTpPx = algo ? Number(algo.tpTriggerPx) : null;
       const currentSz = algo ? Number(algo.sz) : null;
-      const priceMatches = typeof currentSlPx === "number" && Number.isFinite(currentSlPx) && Math.abs(currentSlPx - activeStopPrice) < 1e-8;
+      const currentType = algo ? String(algo.ordType) : null;
+
+      const priceMatchesSl = typeof currentSlPx === "number" && Number.isFinite(currentSlPx) && Math.abs(currentSlPx - activeStopPrice) < 1e-8;
+      const priceMatchesTp = (activeTpPrice == null) || (typeof currentTpPx === "number" && Number.isFinite(currentTpPx) && Math.abs(currentTpPx - activeTpPrice) < 1e-8);
       
       const contractsToProtect = open.okxContracts ?? 0;
       const sizeMatches = typeof currentSz === "number" && Number.isFinite(currentSz) && Math.abs(currentSz - contractsToProtect) < 1e-8;
+      const typeMatches = (activeTpPrice != null && activeTpPrice > 0) ? currentType === "oco" : (currentType === "stop" || currentType === "conditional");
 
-      if (priceMatches && sizeMatches) {
+      if (priceMatchesSl && priceMatchesTp && sizeMatches && typeMatches) {
         this.logger.info("POSITION_PROTECTION_STATE_PROOF", {
           symbol: open.symbol,
           side: open.side,
           reduce_only_protective_found: true,
           algoId: open.protectiveStopAlgoId,
-          price_match: true,
+          price_match_sl: true,
+          price_match_tp: activeTpPrice != null,
           size_match: true,
+          type_match: true,
+          exchange_stop_px: currentSlPx,
+          exchange_tp_px: currentTpPx,
+          pending_algo_orders_count: (this as any).cachedOpsAlgos?.length ?? 0,
           flowId
         });
         return { modified: false, success: true, record: open };
       } else {
-        const mismatchReason = !priceMatches ? "PRICE_MISMATCH" : "SIZE_MISMATCH";
-        if (!sizeMatches && algo) {
-           this.logger.warn("V2_PROTECTIVE_STOP_SIZE_MISMATCH_REPAIR_PROOF", {
+        const mismatchReason = !priceMatchesSl ? "SL_PRICE_MISMATCH" : (!priceMatchesTp ? "TP_PRICE_MISMATCH" : (!sizeMatches ? "SIZE_MISMATCH" : "TYPE_MISMATCH"));
+        if (algo) {
+           this.logger.warn("V2_PROTECTIVE_STOP_MISMATCH_REPAIR_PROOF", {
              symbol: open.symbol,
              side: open.side,
              oldAlgoId: open.protectiveStopAlgoId,
+             reason: mismatchReason,
+             oldSl: currentSlPx,
+             newSl: activeStopPrice,
+             oldTp: currentTpPx,
+             newTp: activeTpPrice,
              oldSize: currentSz,
              newSize: contractsToProtect,
-             reason: "actual_position_size_changed",
+             oldType: currentType,
              flowId
            });
         }
@@ -6022,7 +6066,7 @@ export class PaperEngine {
           algoId: open.protectiveStopAlgoId,
           ledgerStop: activeStopPrice,
           exchangeStop: currentSlPx,
-          reason: algo ? "PRICE_MISMATCH" : "ALGO_NOT_FOUND_IN_CACHE",
+          reason: algo ? mismatchReason : "ALGO_NOT_FOUND_IN_CACHE",
           action: "CANCEL_FOR_RESUBMIT",
           flowId
         });
@@ -6058,25 +6102,29 @@ export class PaperEngine {
       const candidate = (this.cachedOpsAlgos ?? []).find((a: any) => 
         a.instId === toOkxSwapInstId(open.symbol) &&
         String(a.posSide).toLowerCase() === (open.side === "long" ? "long" : "short") &&
-        (a.ordType === "conditional" || a.ordType === "oco") &&
+        (a.ordType === "conditional" || a.ordType === "oco" || a.ordType === "stop") &&
         a.reduceOnly === "true"
       );
 
       if (candidate) {
         const candidateSlPx = Number(candidate.slTriggerPx);
-        const candidatePriceMatches = Math.abs(candidateSlPx - activeStopPrice) < 1e-8;
+        const candidateTpPx = Number(candidate.tpTriggerPx);
+        const candidatePriceMatchesSl = Math.abs(candidateSlPx - activeStopPrice) < 1e-8;
+        const candidatePriceMatchesTp = activeTpPrice == null || Math.abs(candidateTpPx - activeTpPrice) < 1e-8;
         
-        if (candidatePriceMatches) {
+        if (candidatePriceMatchesSl && candidatePriceMatchesTp) {
           this.logger.info("PROTECTIVE_STOP_AUTO_REPAIR_SUCCESS", {
             symbol: open.symbol,
             side: open.side,
             algoId: candidate.algoId,
             stopPrice: candidateSlPx,
-            detail: "Orphaned stop order found and linked to ledger position"
+            tpPrice: candidateTpPx,
+            detail: "Orphaned stop/oco order found and linked to ledger position"
           });
           const repaired: PaperOpenPositionRecord = {
             ...open,
             stopPrice: activeStopPrice,
+            targetPrice1: activeTpPrice,
             isProtectiveStopRegistered: true,
             protectiveStopAlgoId: candidate.algoId
           };
@@ -6086,7 +6134,8 @@ export class PaperEngine {
             side: open.side,
             reduce_only_protective_found: true,
             algoId: candidate.algoId,
-            price_match: true,
+            price_match_sl: true,
+            price_match_tp: activeTpPrice != null,
             flowId
           });
           
@@ -6095,33 +6144,27 @@ export class PaperEngine {
       }
     }
 
-    this.logger.info("PROTECTIVE_STOP_MISSING_PROOF", {
-      symbol: open.symbol,
-      side: open.side,
-      consistency_check: "FAIL",
-      action: "REGISTER_NEW_STOP",
-      flowId
-    });
-
-    this.logger.info("V2_PROTECTIVE_STOP_REGISTER_ATTEMPT", {
+    this.logger.info("PROTECTIVE_STOP_SUBMIT_ATTEMPT", {
       symbol: open.symbol,
       side: open.side,
       stopPrice: activeStopPrice,
+      pending_algo_orders_count: (this as any).cachedOpsAlgos?.length ?? 0,
       flowId
     });
-
-    // Attempt to register
-    this.logger.info("OKX_PROTECTIVE_STOP_SUBMIT_PROOF", {
-      symbol: open.symbol,
-      side: open.side,
-      stopPrice: activeStopPrice,
-      size: open.baseQty,
-      flowId
-    });
+    if (activeTpPrice != null) {
+      this.logger.info("TAKE_PROFIT_SUBMIT_ATTEMPT", {
+        symbol: open.symbol,
+        side: open.side,
+        tpPrice: activeTpPrice,
+        pending_algo_orders_count: (this as any).cachedOpsAlgos?.length ?? 0,
+        flowId
+      });
+    }
 
     const instId = toOkxSwapInstId(open.symbol);
     const side = open.side === "long" ? "sell" : "buy";
     const posSide = open.side === "long" ? "long" : "short";
+    const ordType = activeTpPrice != null && activeTpPrice > 0 ? "oco" : "stop";
     
     // [HARDENED] Unified OKX Contract Size Normalizer for PROTECTIVE STOP
     let sz = 0;
@@ -6184,22 +6227,39 @@ export class PaperEngine {
       tdMode: "cross",
       side,
       posSide,
-      ordType: "stop",
+      ordType,
       sz: szStr,
       reduceOnly: true,
       slTriggerPx: String(activeStopPrice),
-      slOrdPx: "-1" // Market
+      slOrdPx: "-1",
+      ...(ordType === "oco" ? { tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1" } : {})
     });
 
     if (submit.ok && submit.value?.[0]?.algoId) {
       const algoId = String(submit.value[0].algoId);
-      this.logger.info("OKX_PROTECTIVE_STOP_ORDER_ACCEPTED", { symbol: open.symbol, algoId, flowId });
-      this.logger.info("OKX_PROTECTIVE_STOP_ORDER_CONFIRMED", { symbol: open.symbol, algoId, flowId });
-      this.logger.info("V2_PROTECTIVE_STOP_REGISTERED_PROOF", { symbol: open.symbol, algoId, flowId });
+      this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { 
+        symbol: open.symbol, 
+        success: true, 
+        algoId, 
+        exchange_stop_px: activeStopPrice,
+        pending_algo_orders_count: (this as any).cachedOpsAlgos?.length ?? 0,
+        flowId 
+      });
+      if (activeTpPrice != null) {
+        this.logger.info("TAKE_PROFIT_SUBMIT_RESULT", { 
+          symbol: open.symbol, 
+          success: true, 
+          algoId, 
+          exchange_tp_px: activeTpPrice,
+          pending_algo_orders_count: (this as any).cachedOpsAlgos?.length ?? 0,
+          flowId 
+        });
+      }
       
       const updated: PaperOpenPositionRecord = {
         ...open,
         stopPrice: activeStopPrice,
+        targetPrice1: activeTpPrice,
         protectiveStopAlgoId: algoId,
         isProtectiveStopRegistered: true
       };
@@ -6209,15 +6269,18 @@ export class PaperEngine {
         side: open.side,
         reduce_only_protective_found: true,
         algoId,
+        exchange_stop_px: activeStopPrice,
+        exchange_tp_px: activeTpPrice,
         flowId
       });
       
       return { modified: true, success: true, record: updated };
     } else {
       const error = (submit as any).error || (submit as any).diagnostics?.retMsg || "unknown_error";
-      this.logger.error("OKX_PROTECTIVE_STOP_ORDER_CREATE_FAILED", { symbol: open.symbol, error, flowId });
-      this.logger.error("V2_PROTECTIVE_STOP_REGISTER_FAIL_PROOF", { symbol: open.symbol, error, flowId });
-      this.logger.warn("PROTECTIVE_STOP_ORDER_MISSING", { symbol: open.symbol, flowId });
+      this.logger.error("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: false, error, flowId });
+      if (activeTpPrice != null) {
+        this.logger.error("TAKE_PROFIT_SUBMIT_RESULT", { symbol: open.symbol, success: false, error, flowId });
+      }
       
       // Block new entries for this symbol
       this.symbolProtectionFailedBlocked.add(open.symbol);
@@ -15785,7 +15848,24 @@ export class PaperEngine {
       }
     }
 
-    // 2. Mandatory invalidationPx hydration (aliased to stopPrice if missing)
+    // 2. Mandatory targetPrice1 hydration
+    if (record.targetPrice1 == null || !Number.isFinite(record.targetPrice1)) {
+      const mirroredTp = engineMirrorTpPrice(record.entryPrice, record.side, regime);
+      if (mirroredTp != null && Number.isFinite(mirroredTp)) {
+        record.targetPrice1 = mirroredTp;
+        modified = true;
+        this.logger.info("V2_OPEN_POSITION_RISK_HYDRATION_PROOF", {
+          symbol: record.symbol,
+          side: record.side,
+          entryPrice: record.entryPrice,
+          regime,
+          hydrated_targetPrice1: mirroredTp,
+          reason: "LEGACY_OR_MISSING_TARGET_PLAN"
+        });
+      }
+    }
+
+    // 3. Mandatory invalidationPx hydration (aliased to stopPrice if missing)
     if (record.invalidationPx == null || !Number.isFinite(record.invalidationPx)) {
        if (record.stopPrice != null && Number.isFinite(record.stopPrice)) {
          record.invalidationPx = record.stopPrice;

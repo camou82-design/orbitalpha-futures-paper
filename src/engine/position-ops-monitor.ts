@@ -1,5 +1,5 @@
 import type { MarketRegime } from "../strategy/market-regime-detector";
-import { stopLossPctForRegime } from "../strategy/regime-exit";
+import { stopLossPctForRegime, takeProfitPctForRegime } from "../strategy/regime-exit";
 import type { PaperOpenPositionRecord } from "../models/types";
 import {
   buildLedgerOkxPositionSyncSnapshot,
@@ -27,9 +27,13 @@ export type PositionOpsRow = Readonly<{
   regime_for_sl: MarketRegime;
   policy_sl_net_frac: number;
   initial_stop_px_engine_mirror: number | null;
+  initial_tp_px_engine_mirror: number | null;
   ledger_stop_px: number | null;
   exchange_stop_px: number | null;
   stop_px_source: "engine_calculated" | "ledger_stored" | "exchange_order" | "none";
+  ledger_tp_px: number | null;
+  exchange_tp_px: number | null;
+  tp_px_source: "engine_calculated" | "ledger_stored" | "exchange_order" | "none";
   reduce_only_protective_found: boolean;
   protective_match_hints: string[];
   reconcile_state: string;
@@ -56,11 +60,16 @@ export function regimeForSl(raw: unknown): MarketRegime {
   return raw === "RANGE" || raw === "TREND" || raw === "NO_TRADE" ? raw : "NO_TRADE";
 }
 
-/** Mirror engine STOP_BACKFILL / hard-SL gate: `stopLossPctForRegime` is negative pnl fraction; price stop uses same multiplicative shape as ledger backfill. */
 export function engineMirrorStopPrice(entryPx: number, side: "long" | "short", regime: MarketRegime): number | null {
   if (!(entryPx > 0)) return null;
   const slPct = stopLossPctForRegime(regime);
   return side === "long" ? entryPx * (1 + slPct) : entryPx * (1 - slPct);
+}
+
+export function engineMirrorTpPrice(entryPx: number, side: "long" | "short", regime: MarketRegime): number | null {
+  if (!(entryPx > 0)) return null;
+  const tpPct = takeProfitPctForRegime(regime);
+  return side === "long" ? entryPx * (1 + tpPct) : entryPx * (1 - tpPct);
 }
 
 function instIdMatchesRow(instId: string, rowInst: string): boolean {
@@ -103,12 +112,18 @@ export function findProtectiveHintsForInst(
   instId: string,
   pending: readonly Record<string, unknown>[],
   algos: readonly Record<string, unknown>[]
-): { found: boolean; hints: string[]; price: number | null } {
+): { found: boolean; hints: string[]; slPrice: number | null; tpPrice: number | null } {
   const hints: string[] = [];
-  let foundPrice: number | null = null;
+  let foundSlPrice: number | null = null;
+  let foundTpPrice: number | null = null;
 
-  const extractPx = (o: Record<string, unknown>): number | null => {
-    const val = o.slTriggerPx ?? o.tpTriggerPx ?? o.triggerPx ?? o.stopPx ?? o.trigPx;
+  const extractSlPx = (o: Record<string, unknown>): number | null => {
+    const val = o.slTriggerPx ?? o.triggerPx ?? o.stopPx ?? o.trigPx;
+    const n = typeof val === "number" ? val : typeof val === "string" ? Number(val) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const extractTpPx = (o: Record<string, unknown>): number | null => {
+    const val = o.tpTriggerPx;
     const n = typeof val === "number" ? val : typeof val === "string" ? Number(val) : NaN;
     return Number.isFinite(n) && n > 0 ? n : null;
   };
@@ -117,17 +132,19 @@ export function findProtectiveHintsForInst(
     if (!instIdMatchesRow(instId, String(o.instId ?? ""))) continue;
     if (orderLooksReduceOnlyProtective(o)) {
       hints.push(`algo:${stringifyHints(o)}`);
-      if (foundPrice == null) foundPrice = extractPx(o);
+      if (foundSlPrice == null) foundSlPrice = extractSlPx(o);
+      if (foundTpPrice == null) foundTpPrice = extractTpPx(o);
     }
   }
   for (const o of pending) {
     if (!instIdMatchesRow(instId, String(o.instId ?? ""))) continue;
     if (orderLooksReduceOnlyProtective(o)) {
       hints.push(`pend:${stringifyHints(o)}`);
-      if (foundPrice == null) foundPrice = extractPx(o);
+      if (foundSlPrice == null) foundSlPrice = extractSlPx(o);
+      if (foundTpPrice == null) foundTpPrice = extractTpPx(o);
     }
   }
-  return { found: hints.length > 0, hints, price: foundPrice };
+  return { found: hints.length > 0, hints, slPrice: foundSlPrice, tpPrice: foundTpPrice };
 }
 
 function matchLedgerRow(
@@ -199,12 +216,20 @@ export function buildPositionOpsSurface(input: Readonly<{
       const regime = regimeForSl(ledger?.regimeAtEntry);
       const slNet = stopLossPctForRegime(regime);
       const stopPx = refPx != null && refPx > 0 ? engineMirrorStopPrice(refPx, hit.side, regime) : null;
-      const { found, hints, price: exchStopPx } = findProtectiveHintsForInst(hit.instId, pending, algos);
+      const tpPx = refPx != null && refPx > 0 ? engineMirrorTpPrice(refPx, hit.side, regime) : null;
+      const { found, hints, slPrice: exchStopPx, tpPrice: exchTpPx } = findProtectiveHintsForInst(hit.instId, pending, algos);
+      const ledgerStop = typeof ledger?.stopPrice === "number" && Number.isFinite(ledger.stopPrice) ? ledger.stopPrice : null;
+      const ledgerTp = typeof ledger?.targetPrice1 === "number" && Number.isFinite(ledger.targetPrice1) ? ledger.targetPrice1 : null;
 
       let pxSource: PositionOpsRow["stop_px_source"] = "none";
-      if (found) pxSource = "exchange_order";
-      else if (typeof ledger?.stopPrice === "number" && Number.isFinite(ledger.stopPrice)) pxSource = "ledger_stored";
+      if (exchStopPx != null) pxSource = "exchange_order";
+      else if (ledgerStop != null) pxSource = "ledger_stored";
       else if (stopPx != null) pxSource = "engine_calculated";
+
+      let tpSource: PositionOpsRow["tp_px_source"] = "none";
+      if (exchTpPx != null) tpSource = "exchange_order";
+      else if (ledgerTp != null) tpSource = "ledger_stored";
+      else if (tpPx != null) tpSource = "engine_calculated";
 
       rows.push({
         symbol: hit.symbol,
@@ -216,9 +241,13 @@ export function buildPositionOpsSurface(input: Readonly<{
         regime_for_sl: regime,
         policy_sl_net_frac: slNet,
         initial_stop_px_engine_mirror: stopPx,
-        ledger_stop_px: typeof ledger?.stopPrice === "number" && Number.isFinite(ledger.stopPrice) ? ledger.stopPrice : null,
+        initial_tp_px_engine_mirror: tpPx,
+        ledger_stop_px: ledgerStop,
         exchange_stop_px: exchStopPx,
         stop_px_source: pxSource,
+        ledger_tp_px: ledgerTp,
+        exchange_tp_px: exchTpPx,
+        tp_px_source: tpSource,
         reduce_only_protective_found: found,
         protective_match_hints: hints,
         reconcile_state: ledger?.reconcileState ?? "NONE",
