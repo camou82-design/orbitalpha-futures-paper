@@ -378,6 +378,13 @@ type EntryQualitySample = Readonly<{
   reason: string;
 }>;
 
+type OperatorInstruction = {
+  type: "ADOPT_EXCHANGE_STATE";
+  symbol: MarketSymbol;
+  side: "long" | "short";
+  reason: string;
+};
+
 type ServerTradeControlState = Readonly<{
   server_trade_enabled: boolean;
   close_only_mode: boolean;
@@ -385,6 +392,7 @@ type ServerTradeControlState = Readonly<{
   authority_source: "server_state";
   updated_at: number;
   reason: string | null;
+  instructions?: OperatorInstruction[];
 }>;
 
 function toSymbolDiagnostic(symbol: MarketSymbol, endpoint: string, d: OkxPublicDiagnostics): SymbolDiagnostic {
@@ -1111,7 +1119,8 @@ export class PaperEngine {
           typeof camel.updatedAt === "number" && Number.isFinite(camel.updatedAt)
             ? camel.updatedAt
             : (typeof parsed.updated_at === "number" && Number.isFinite(parsed.updated_at) ? parsed.updated_at : nowTs),
-        reason: typeof camel.reason === "string" ? camel.reason : (typeof parsed.reason === "string" ? parsed.reason : null)
+        reason: typeof camel.reason === "string" ? camel.reason : (typeof parsed.reason === "string" ? parsed.reason : null),
+        instructions: Array.isArray(parsed.instructions) ? parsed.instructions : undefined
       };
     } catch {
       this.serverTradeControlState = {
@@ -1337,19 +1346,39 @@ export class PaperEngine {
 
     // Also include keys from sync mismatch in symbol-level block
     for (const mk of syncSnap.mismatched_keys) {
+      const [msym, mside] = mk.split(":");
+      const paperRow = paperOpens.find(p => `${p.symbol}:${p.side}` === mk);
+      const okxRow = syncSnap.okx_positions_preview.find(rv => `${rv.symbol}:${rv.side}` === mk);
+
       if (!this.symbolExternalManualBlocked.has(mk)) {
         this.symbolExternalManualBlocked.add(mk);
-        const [msym, mside] = mk.split(":");
-        this.logger.warn("SYMBOL_EXTERNAL_MANUAL_POSITION_BLOCK", {
+        this.logger.warn("SYMBOL_EXTERNAL_MANUAL_POSITION_BLOCK_INITIAL", {
           symbol: msym,
           side: mside,
-          sync_mismatch: true,
           sync_status: syncSnap.sync_status,
-          action: "BLOCK_THIS_SYMBOL_ONLY",
-          global_trade_blocked: false,
-          detail: `Sync mismatch (${syncSnap.sync_status}) detected. Localizing block to this symbol:side.`
+          action: "BLOCK_AUTOMATED_MANAGEMENT",
+          detail: `Sync mismatch (${syncSnap.sync_status}) detected. Enforcing initial manual reconciliation block for ${mk}.`
         });
       }
+
+      // Per-tick audit log for mismatched state
+      this.logger.warn("V2_POSITION_INTEGRITY_MISMATCH_TICK_AUDIT", {
+        symbol: msym,
+        side: mside,
+        sync_status: syncSnap.sync_status,
+        delta: {
+          paper_notional: paperRow?.notionalUsd ?? paperRow?.sizeUsd ?? 0,
+          okx_notional: okxRow?.notionalUsd ?? 0,
+          paper_price: paperRow?.entryPrice ?? 0,
+          okx_price: okxRow?.avgPx ?? 0,
+          paper_contracts: paperRow?.okxContracts ?? 0,
+          okx_contracts: okxRow?.okxContracts ?? 0,
+          notional_diff: (okxRow?.notionalUsd ?? 0) - (paperRow?.notionalUsd ?? paperRow?.sizeUsd ?? 0),
+          price_diff_ratio: paperRow?.entryPrice ? ((okxRow?.avgPx ?? 0) - paperRow.entryPrice) / paperRow.entryPrice : 0
+        },
+        reconcile_state: paperRow?.reconcileState ?? "unknown",
+        lifecycle_state: paperRow?.lifecycleState ?? "unknown"
+      });
     }
 
     const unblockedMismatches = syncSnap.mismatched_keys.filter(mk => !this.symbolExternalManualBlocked.has(mk));
@@ -2417,56 +2446,95 @@ export class PaperEngine {
           }
         }
 
-        // Hydrate all fields (Always run for MATCHED/ALIGNED positions as requested)
-        open.actualContracts = actualContracts;
-        open.actualNotionalUsd = actualNotionalUsd;
-        open.actualMarginUsd = actualMarginUsd;
-        open.actualPos = remotePos.size;
-        open.actualAvgPx = remotePos.avgPx;
-        open.actualUnrealizedPnl = 0; 
-        open.actualUnrealizedPnlPct = 0;
-        open.remainingSizeRatio = remainingSizeRatio;
-
-        // Update legacy fields to match actuals
-        open.okxContracts = actualContracts;
-        open.pos = remotePos.size;
-        open.baseQty = remotePos.size;
-        open.notionalUsd = actualNotionalUsd;
-        open.avgPx = remotePos.avgPx;
-        open.entryPrice = remotePos.avgPx;
-        open.sizeUsd = actualMarginUsd; // sizeUsd now represents current margin
-
-        this.logger.info("POSITION_CARD_HYDRATE_FROM_OKX_PROOF", {
-          symbol: open.symbol,
-          side: open.side,
-          actualContracts: open.actualContracts,
-          actualNotionalUsd: open.actualNotionalUsd,
-          actualMarginUsd: open.actualMarginUsd,
-          initialSizeUsd: open.initialSizeUsd,
-          remainingSizeRatio: open.remainingSizeRatio
-        });
-
+        // --- Zero-Trust Reconciliation Hardening ---
         if (mismatchDetected || isSizeMismatched) {
-           this.logger.info("LEDGER_ACTUAL_SIZE_RECONCILE_PROOF", {
+           this.logger.warn("V2_POSITION_RECONCILE_MISMATCH_BLOCK_PROOF", {
              symbol: open.symbol,
              side: open.side,
+             mismatch_type: mismatchType,
              actual_contracts: actualContracts,
              actual_notional: actualNotionalUsd,
              actual_margin: actualMarginUsd,
-             initial_margin: open.initialSizeUsd,
-             remaining_ratio: remainingSizeRatio
+             ledger_notional: paperNotional,
+             ledger_margin: open.sizeUsd,
+             action: "BLOCK_HYDRATION_AND_KEEP_ORIGINAL_LEDGER"
            });
+           
+           open.reconcileState = "RECONCILE_MISMATCH";
+           open.lastCheckedAt = nowTs;
            ledgerModified = true;
-        }
+           // Do NOT proceed to hydration - keep original ledger values for audit visibility
+        } else {
+          // Hydrate all fields (Only for MATCHED/ALIGNED positions)
+          open.actualContracts = actualContracts;
+          open.actualNotionalUsd = actualNotionalUsd;
+          open.actualMarginUsd = actualMarginUsd;
+          open.actualPos = remotePos.size;
+          open.actualAvgPx = remotePos.avgPx;
+          open.actualUnrealizedPnl = 0; 
+          open.actualUnrealizedPnlPct = 0;
+          open.remainingSizeRatio = remainingSizeRatio;
 
-        open.reconcileState = "MATCHED";
-        open.lastCheckedAt = nowTs;
+          // Update legacy fields to match actuals
+          open.okxContracts = actualContracts;
+          open.pos = remotePos.size;
+          open.baseQty = remotePos.size;
+          open.notionalUsd = actualNotionalUsd;
+          open.avgPx = remotePos.avgPx;
+          open.entryPrice = remotePos.avgPx;
+          open.sizeUsd = actualMarginUsd; // sizeUsd now represents current margin
+
+          open.reconcileState = "MATCHED";
+          open.lastCheckedAt = nowTs;
+
+          this.logger.info("POSITION_CARD_HYDRATE_FROM_OKX_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            actualContracts: open.actualContracts,
+            actualNotionalUsd: open.actualNotionalUsd,
+            actualMarginUsd: open.actualMarginUsd,
+            initialSizeUsd: open.initialSizeUsd,
+            remainingSizeRatio: open.remainingSizeRatio
+          });
+        }
 
         // Periodic check for protection or size update for OPEN positions
         const protectRes = await this.ensureProtectiveStopOrder(open, `tick:${this.runCycleId}:${open.symbol}`);
         if (protectRes.modified) {
           open = protectRes.record;
           ledgerModified = true;
+        }
+
+        // --- V2 Risk Integrity Hardening (Hydrate & Prove) ---
+        const hydration = this.hydrateRiskPlan(open);
+        if (hydration.modified) {
+          open = hydration.record;
+          ledgerModified = true;
+        }
+
+        const riskSafe = open.stopPrice != null && Number.isFinite(open.stopPrice);
+        if (!riskSafe) {
+          this.logger.error("V2_OPEN_POSITION_RISK_STATE_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            lifecycleState: open.lifecycleState,
+            stopPrice: open.stopPrice ?? null,
+            invalidationPx: open.invalidationPx ?? null,
+            safety_check: "FAILED",
+            action: "FORCE_CLOSE_ONLY_MANAGED",
+            audit_flag: "RECOVERY_POSITION_STOP_MISSING"
+          });
+          open.lifecycleState = "CLOSE_ONLY_MANAGED";
+          ledgerModified = true;
+        } else {
+          this.logger.info("V2_OPEN_POSITION_RISK_STATE_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            lifecycleState: open.lifecycleState,
+            stopPrice: open.stopPrice,
+            invalidationPx: open.invalidationPx ?? null,
+            safety_check: "PASSED"
+          });
         }
       }
 
@@ -2538,6 +2606,25 @@ export class PaperEngine {
           pos: remoteVal.size,
           instId: remoteVal.instId
         };
+
+        // --- V2 Risk Integrity Hardening for Adopted ---
+        const hydration = this.hydrateRiskPlan(adopted);
+        if (hydration.modified) {
+          // record updated in-place by hydrateRiskPlan as it's not a read-only object here
+        }
+        
+        if (adopted.stopPrice == null || !Number.isFinite(adopted.stopPrice)) {
+          adopted.lifecycleState = "CLOSE_ONLY_MANAGED";
+          this.logger.error("V2_OPEN_POSITION_RISK_STATE_PROOF", {
+            symbol: adopted.symbol,
+            side: adopted.side,
+            lifecycleState: adopted.lifecycleState,
+            stopPrice: null,
+            safety_check: "FAILED",
+            audit_flag: "RECOVERY_POSITION_STOP_MISSING",
+            reason: "ADOPTED_POSITION_STOP_MISSING"
+          });
+        }
 
         next.push(adopted);
         ledgerModified = true;
@@ -3017,6 +3104,85 @@ export class PaperEngine {
     this.signedExecutionReady = currentSigned;
   }
 
+  private async processOperatorInstructions(nowTs: number): Promise<void> {
+    if (!this.serverTradeControlState.instructions || this.serverTradeControlState.instructions.length === 0) return;
+
+    let ledgerModified = false;
+    const opens = await this.positions.loadOpenAll();
+    const nextOpens = [...opens];
+
+    for (const inst of this.serverTradeControlState.instructions) {
+      if (inst.type === "ADOPT_EXCHANGE_STATE") {
+        const { symbol, side } = inst;
+        const key = `${symbol}:${side}`;
+        const okxPos = (this.lastLivePositionsPayload as any[])?.find(p => {
+          const k = okxSwapRowToLedgerKey(p)?.key;
+          return k === key;
+        });
+
+        if (!okxPos) {
+          this.logger.error("OPERATOR_INSTRUCTION_FAILED", { inst, reason: "OKX_POSITION_NOT_FOUND" });
+          continue;
+        }
+
+        const instId = toOkxSwapInstId(symbol);
+        const instInfo = this.instrumentCache.get(instId);
+        const ctVal = instInfo?.ctVal ?? 1;
+        const baseQty = Math.abs(Number(okxPos.pos)) * ctVal;
+        
+        let foundIdx = nextOpens.findIndex(p => p.symbol === symbol && p.side === side);
+
+        const adoptedRecord: PaperOpenPositionRecord = {
+          ...(foundIdx >= 0 ? nextOpens[foundIdx] : {
+            openedAt: nowTs,
+            symbol: symbol as MarketSymbol,
+            side: side as "long" | "short",
+            leverage: 10,
+            sizeUsd: Math.abs(Number(okxPos.notionalUsd || 0)) / 10,
+            initialSizeUsd: Math.abs(Number(okxPos.notionalUsd || 0)) / 10,
+            strategyVersion: "paper-v2",
+            sourceSignal: "OPERATOR_ADOPTED",
+            sourceRunPath: "operator",
+            status: "open",
+            isV2Authority: true
+          }),
+          lifecycleState: "OPEN",
+          reconcileState: "ADOPTED",
+          lastCheckedAt: nowTs,
+          entryPrice: Number(okxPos.avgPx),
+          avgPx: Number(okxPos.avgPx),
+          baseQty: baseQty,
+          pos: baseQty,
+          notionalUsd: Math.abs(Number(okxPos.notionalUsd || 0)),
+          okxContracts: Math.abs(Number(okxPos.pos)),
+          exchangeFilledSize: Math.abs(Number(okxPos.pos)),
+          adoptedAt: nowTs,
+          sync_status: "ALIGNED"
+        };
+
+        if (foundIdx >= 0) {
+          nextOpens[foundIdx] = adoptedRecord;
+        } else {
+          nextOpens.push(adoptedRecord);
+        }
+        ledgerModified = true;
+        this.logger.info("OPERATOR_INSTRUCTION_SUCCESS", { 
+          inst, 
+          detail: "POSITION_ADOPTED", 
+          new_size: baseQty, 
+          new_price: okxPos.avgPx 
+        });
+      }
+    }
+
+    if (ledgerModified) {
+      await this.positions.saveOpenAll(nextOpens);
+      this.bundleDirty = true;
+      // Note: We don't clear the instructions from the file here because ServerTradeControlState 
+      // is usually managed by an external UI/process that writes the control file.
+    }
+  }
+
   private pruneTrendSwitches1h(now: number): number {
     const cutoff = now - 3_600_000;
     this.trendSwitchTimestampsMs = this.trendSwitchTimestampsMs.filter((t) => t > cutoff);
@@ -3200,6 +3366,7 @@ export class PaperEngine {
     okx_balance_ms = Date.now() - tBal0;
     const tRec0 = Date.now();
     await this.runPositionStateReconciliation(Date.now());
+    await this.processOperatorInstructions(Date.now());
     okx_position_reconcile_ms = Date.now() - tRec0;
     this.evaluateReadinessTransition(Date.now());
     let history_write_skipped = false;
@@ -9579,6 +9746,17 @@ export class PaperEngine {
       }
 
       // --- V2 AUTHORITY TAKEOVER (Hoisted & Hardened) ---
+      // [BLOCK_FIRST_POLICY] Skip all automated V2 takeover actions if symbol is blocked (KEY_MISMATCH)
+      if (this.symbolExternalManualBlocked.has(symSideKey)) {
+        this.logger.info("V2_TAKEOVER_SKIPPED_SYNC_BLOCK", {
+          symbol: open.symbol,
+          side: open.side,
+          v2_action: v2TakeoverAction,
+          reason: "KEY_MISMATCH_OR_EXTERNAL_MANUAL_BLOCK"
+        });
+        remaining.push(openRaw);
+        continue;
+      }
       // V2 EXIT???꾩뿉???대? early return?덉쑝誘濡??ш린??partial_close ?좏샇留??⑥쓬.
       // partial_close??exitEval???듭?濡?二쇱엯?섏? ?딄퀬 ?낅┰ 寃쎈줈濡?泥섎━?쒕떎.
       if ((v2TakeoverAction as string) !== "none" && (v2TakeoverAction as string) !== "partial_close") {
@@ -15580,6 +15758,42 @@ export class PaperEngine {
     });
 
     return { ok: true, snapshot, symbolDiagnostics, basePollMs, htfFetchMs };
+  }
+
+  /**
+   * [V2_POSITION_RISK_HYDRATION]
+   * Retroactively populate missing risk metadata for legacy or adopted positions.
+   */
+  private hydrateRiskPlan(record: PaperOpenPositionRecord): { modified: boolean; record: PaperOpenPositionRecord } {
+    let modified = false;
+    const regime = regimeForSl(record.regimeAtEntry);
+    
+    // 1. Mandatory stopPrice hydration
+    if (record.stopPrice == null || !Number.isFinite(record.stopPrice)) {
+      const mirrored = engineMirrorStopPrice(record.entryPrice, record.side, regime);
+      if (mirrored != null && Number.isFinite(mirrored)) {
+        record.stopPrice = mirrored;
+        modified = true;
+        this.logger.info("V2_OPEN_POSITION_RISK_HYDRATION_PROOF", {
+          symbol: record.symbol,
+          side: record.side,
+          entryPrice: record.entryPrice,
+          regime,
+          hydrated_stopPrice: mirrored,
+          reason: "LEGACY_OR_MISSING_RISK_PLAN"
+        });
+      }
+    }
+
+    // 2. Mandatory invalidationPx hydration (aliased to stopPrice if missing)
+    if (record.invalidationPx == null || !Number.isFinite(record.invalidationPx)) {
+       if (record.stopPrice != null && Number.isFinite(record.stopPrice)) {
+         record.invalidationPx = record.stopPrice;
+         modified = true;
+       }
+    }
+
+    return { modified, record };
   }
 }
 

@@ -868,7 +868,7 @@ export type PaperOpenPositionRecord = {
   partialPendingFundingRate?: number;
 
   lastCheckedAt?: number;
-  reconcileState?: "PENDING" | "MATCHED" | "FAILED" | "ADOPTED";
+  reconcileState?: "PENDING" | "MATCHED" | "FAILED" | "ADOPTED" | "RECONCILE_MISMATCH";
   /** 진입 직후 보호구간 종료 시각(ms) */
   entryProtectionUntil?: number;
   /** 최초 진입 마진(USD). 미설정 시 `sizeUsd`만 사용(레거시). */

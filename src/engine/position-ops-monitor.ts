@@ -13,6 +13,7 @@ export type PositionOpsBanner =
   | "REMOTE_UNAVAILABLE"
   | "RECONCILE_MISMATCH"
   | "MONITORING_NO_PROTECT_WARNING"
+  | "MONITORING_RISK_PLAN_MISSING_WARNING"
   | "MONITORING_PROTECT_DETECTED"
   | "MONITORING_SCAN_PENDING";
 
@@ -27,8 +28,13 @@ export type PositionOpsRow = Readonly<{
   policy_sl_net_frac: number;
   initial_stop_px_engine_mirror: number | null;
   ledger_stop_px: number | null;
+  exchange_stop_px: number | null;
+  stop_px_source: "engine_calculated" | "ledger_stored" | "exchange_order" | "none";
   reduce_only_protective_found: boolean;
   protective_match_hints: string[];
+  reconcile_state: string;
+  sync_status: LedgerOkxPositionSyncSnapshot["sync_status"] | "OKX_GHOST";
+  can_adopt: boolean;
 }>;
 
 export type PositionOpsSurface = Readonly<{
@@ -97,17 +103,31 @@ export function findProtectiveHintsForInst(
   instId: string,
   pending: readonly Record<string, unknown>[],
   algos: readonly Record<string, unknown>[]
-): { found: boolean; hints: string[] } {
+): { found: boolean; hints: string[]; price: number | null } {
   const hints: string[] = [];
+  let foundPrice: number | null = null;
+
+  const extractPx = (o: Record<string, unknown>): number | null => {
+    const val = o.slTriggerPx ?? o.tpTriggerPx ?? o.triggerPx ?? o.stopPx ?? o.trigPx;
+    const n = typeof val === "number" ? val : typeof val === "string" ? Number(val) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
   for (const o of algos) {
     if (!instIdMatchesRow(instId, String(o.instId ?? ""))) continue;
-    if (orderLooksReduceOnlyProtective(o)) hints.push(`algo:${stringifyHints(o)}`);
+    if (orderLooksReduceOnlyProtective(o)) {
+      hints.push(`algo:${stringifyHints(o)}`);
+      if (foundPrice == null) foundPrice = extractPx(o);
+    }
   }
   for (const o of pending) {
     if (!instIdMatchesRow(instId, String(o.instId ?? ""))) continue;
-    if (orderLooksReduceOnlyProtective(o)) hints.push(`pend:${stringifyHints(o)}`);
+    if (orderLooksReduceOnlyProtective(o)) {
+      hints.push(`pend:${stringifyHints(o)}`);
+      if (foundPrice == null) foundPrice = extractPx(o);
+    }
   }
-  return { found: hints.length > 0, hints };
+  return { found: hints.length > 0, hints, price: foundPrice };
 }
 
 function matchLedgerRow(
@@ -133,9 +153,11 @@ function bannerKo(b: PositionOpsBanner): string {
     case "REMOTE_UNAVAILABLE":
       return "OKX 포지션 스냅샷 없음 · 감시 제한";
     case "RECONCILE_MISMATCH":
-      return "리컨실 불일치 · 원장·거래소 대조 필요";
+      return "실거래소 포지션 / 장부 불일치 / 자동관리 제한";
     case "MONITORING_NO_PROTECT_WARNING":
       return "감시 중 · 보호(reduce-only) 주문 없음";
+    case "MONITORING_RISK_PLAN_MISSING_WARNING":
+      return "보호값 없음 / 조치 필요";
     case "MONITORING_PROTECT_DETECTED":
       return "감시 중 · 보호 주문 확인됨";
     case "MONITORING_SCAN_PENDING":
@@ -177,7 +199,13 @@ export function buildPositionOpsSurface(input: Readonly<{
       const regime = regimeForSl(ledger?.regimeAtEntry);
       const slNet = stopLossPctForRegime(regime);
       const stopPx = refPx != null && refPx > 0 ? engineMirrorStopPrice(refPx, hit.side, regime) : null;
-      const { found, hints } = findProtectiveHintsForInst(hit.instId, pending, algos);
+      const { found, hints, price: exchStopPx } = findProtectiveHintsForInst(hit.instId, pending, algos);
+
+      let pxSource: PositionOpsRow["stop_px_source"] = "none";
+      if (found) pxSource = "exchange_order";
+      else if (typeof ledger?.stopPrice === "number" && Number.isFinite(ledger.stopPrice)) pxSource = "ledger_stored";
+      else if (stopPx != null) pxSource = "engine_calculated";
+
       rows.push({
         symbol: hit.symbol,
         side: hit.side,
@@ -189,8 +217,13 @@ export function buildPositionOpsSurface(input: Readonly<{
         policy_sl_net_frac: slNet,
         initial_stop_px_engine_mirror: stopPx,
         ledger_stop_px: typeof ledger?.stopPrice === "number" && Number.isFinite(ledger.stopPrice) ? ledger.stopPrice : null,
+        exchange_stop_px: exchStopPx,
+        stop_px_source: pxSource,
         reduce_only_protective_found: found,
-        protective_match_hints: hints
+        protective_match_hints: hints,
+        reconcile_state: ledger?.reconcileState ?? "NONE",
+        sync_status: ledger ? (sync.sync_status === "ALIGNED" ? "ALIGNED" : sync.sync_status) : "OKX_GHOST",
+        can_adopt: ledger?.reconcileState === "RECONCILE_MISMATCH"
       });
     }
   }
@@ -209,8 +242,13 @@ export function buildPositionOpsSurface(input: Readonly<{
   } else if (!input.ordersScanPerformed) {
     surface_banner = "MONITORING_SCAN_PENDING";
   } else {
-    const anyMissing = rows.some((r) => !r.reduce_only_protective_found);
-    surface_banner = anyMissing ? "MONITORING_NO_PROTECT_WARNING" : "MONITORING_PROTECT_DETECTED";
+    const anyRiskMissing = rows.some(r => r.ledger_stop_px == null || !Number.isFinite(r.ledger_stop_px));
+    if (anyRiskMissing) {
+      surface_banner = "MONITORING_RISK_PLAN_MISSING_WARNING";
+    } else {
+      const anyMissingProtect = rows.some((r) => !r.reduce_only_protective_found);
+      surface_banner = anyMissingProtect ? "MONITORING_NO_PROTECT_WARNING" : "MONITORING_PROTECT_DETECTED";
+    }
   }
 
   return {
@@ -223,3 +261,4 @@ export function buildPositionOpsSurface(input: Readonly<{
     rows
   };
 }
+
