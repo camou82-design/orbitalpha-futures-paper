@@ -474,6 +474,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             evidence: exitPolicy.evidence
         }));
     }
+
+    if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK" && exitPolicy.hasPosition && (exitPolicy.shouldExit || exitPolicy.shouldReduce || exitPolicy.shouldPartial)) {
+        console.info(JSON.stringify({
+            event: "V2_WHIPSAW_EXIT_PASSTHROUGH_PROOF",
+            symbol: String(input.symbol),
+            subtype: judgment.subtype,
+            exit_action: exitPolicy.action,
+            exit_reason: exitPolicy.reason,
+            pnl_pct: exitPolicy.pnlPct,
+            detail: "WHIPSAW state active but existing position exit/reduction is allowed and passed through."
+        }));
+    }
     if (routing.executor === "TRANSITION") {
         const transitionMeta = (execution.metadata ?? {}) as Record<string, unknown>;
         const transitionAction = String(transitionMeta.transitionAction ?? "REJECT");
@@ -3547,8 +3559,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         },
         explanation: {
             reason: finalReason,
-            uiLabelRegime: judgment.regime,
-            uiLabelStatus: finalDecision === "ENTER" ? "ACTIVE" : "IDLE"
+            uiLabelRegime: judgment.subtype === "WHIPSAW_SHOCK_RECHECK" ? "WHIPSAW" : judgment.regime,
+            uiLabelStatus: explanation.uiLabels.status
         },
         microExecution: microExecution ?? undefined,
         lifecycleAuthority: lifecycleAuthority ?? undefined,

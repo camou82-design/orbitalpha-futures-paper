@@ -447,20 +447,40 @@ function evaluateWhipsawShockRecheck(args: {
         sn.boxBreakSide !== "none" &&
         breakoutFailureRate >= 0.35;
 
-    const hits: string[] = [];
-    if (micro.downThenRebound) hits.push("micro_down_then_rebound_1m_or_5m");
-    if (micro.upThenDrop) hits.push("micro_up_then_drop_1m_or_5m");
-    if (directional === "UP" || directional === "DOWN") hits.push("directional_shock_state");
-    if (boxOrbitChop) hits.push("box_orbit_chop");
-    if (volExp >= 2.0) hits.push("volume_expansion_ge_2");
-    if (breakoutFailureRate >= 0.4) hits.push("breakout_failure_rate_ge_0_4");
-    if (mixedBreakoutState) hits.push("mixed_breakout_state");
-    if (!retestConfirmed) hits.push("retest_not_confirmed");
-    if (!reclaimConfirmed) hits.push("reclaim_not_confirmed");
-    if (reviewingTicks < 6) hits.push("reviewing_ticks_insufficient");
+    // --- Activation Logic Refinement ---
+    const structuralHits: string[] = [];
+    if (micro.downThenRebound) structuralHits.push("micro_down_then_rebound");
+    if (micro.upThenDrop) structuralHits.push("micro_up_then_drop");
+    if (directional === "UP" || directional === "DOWN") structuralHits.push("directional_shock_state");
+    if (boxOrbitChop) structuralHits.push("box_orbit_chop");
+    if (volExp >= 2.0) structuralHits.push("volume_expansion_ge_2");
+    if (breakoutFailureRate >= 0.4) structuralHits.push("breakout_failure_rate_ge_0_4");
+    if (mixedBreakoutState) structuralHits.push("mixed_breakout_state");
 
+    const missingHits: string[] = [];
+    if (!retestConfirmed) missingHits.push("retest_not_confirmed");
+    if (!reclaimConfirmed) missingHits.push("reclaim_not_confirmed");
+    if (reviewingTicks < 6) missingHits.push("reviewing_ticks_insufficient");
+
+    const structuralHitCount = structuralHits.length;
+    const missingHitCount = missingHits.length;
+
+    let active = (structuralHitCount >= 1 && missingHitCount >= 1) || structuralHitCount >= 2;
+
+    // --- Deactivation (Release) Conditions ---
+    if (active && reviewingTicks >= 6) {
+        const releasedBySwing = !micro.reverseSwingDetected;
+        const releasedByVol = volExp < 1.8; // Easing from 2.0 threshold
+        const releasedByFailRate = breakoutFailureRate < 0.35; // Easing from 0.4 threshold
+        const releasedByConfirmation = retestConfirmed || reclaimConfirmed;
+
+        if (releasedBySwing || releasedByVol || releasedByFailRate || releasedByConfirmation) {
+            active = false;
+        }
+    }
+
+    const hits = [...structuralHits, ...missingHits];
     const hitCount = hits.length;
-    const active = hitCount >= WHIPSAW_RECHECK_MIN_SIGNALS;
 
     let internalTransitionPhase: MarketJudgmentOutput["transitionPhase"] = "WHIPSAW_RECHECK";
     if (!retestConfirmed) internalTransitionPhase = "SHOCK_RETEST_UNCONFIRMED";

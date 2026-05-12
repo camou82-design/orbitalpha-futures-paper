@@ -13,8 +13,11 @@ export function generateExplanation(
     const { signal } = executor;
 
     let status = "진입 대기";
+    const { subtype } = judgment;
 
-    if (signal === "WAIT_RECHECK") {
+    if (subtype === "WHIPSAW_SHOCK_RECHECK") {
+        status = "휩쏘 쇼크 재확인 / 신규 진입 보류";
+    } else if (signal === "WAIT_RECHECK") {
         status = "반전 후보 재확인 중 · 다음 틱 판단 대기";
     } else if (regime === "NO_TRADE") {
         status = "진입 보류 · 현재 시장 부적합";
