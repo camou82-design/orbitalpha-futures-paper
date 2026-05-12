@@ -387,6 +387,105 @@ function microReversalAggregate(
     return hit ?? candidates[0] ?? { downThenRebound: false, upThenDrop: false, recentSwingDirection: "flat", reverseSwingDetected: false };
 }
 
+function evaluateEarlyLongProbe(args: {
+    input: EngineV2Input;
+    htfEntryPolicy: string;
+    htfBias: any;
+    shockPhase: string;
+    crashState: string;
+    regimeFinal: string;
+}): {
+    allowed: boolean;
+    reason: string;
+    block_reason: string;
+    hits: string[];
+    metrics: any;
+} {
+    const { input, htfEntryPolicy, htfBias, shockPhase, crashState, regimeFinal } = args;
+    const { snapshot: sn, state, candles } = input;
+    const lastPrice = sn.lastPrice;
+
+    // A. 방향 조건
+    if (!state.longAllow) return { allowed: false, reason: "", block_reason: "LONG_NOT_ALLOWED", hits: [], metrics: {} };
+    if (state.directionalShockState === "DOWN" || shockPhase === "DOWN_SHOCK") {
+        return { allowed: false, reason: "", block_reason: "DOWN_SHOCK_ACTIVE", hits: [], metrics: {} };
+    }
+    const crashS = String(crashState ?? "").toUpperCase();
+    if (crashS.includes("BLOCK") || crashS.includes("EXTREME") || crashS.includes("SUSPEND")) {
+         return { allowed: false, reason: "", block_reason: "CRASH_BLOCK_ACTIVE", hits: [], metrics: {} };
+    }
+
+    // B. 단기 구조 조건
+    const hits: string[] = [];
+    const metrics: any = {};
+
+    if (!candles || candles.length < 10) {
+         return { allowed: false, reason: "", block_reason: "CANDLES_INSUFFICIENT", hits: [], metrics: {} };
+    }
+
+    const recent = candles.slice(-5);
+    const prev = candles.slice(-10, -5);
+
+    const lastCandle = recent[recent.length - 1];
+    const prevCandle = recent[recent.length - 2];
+    const p3Candle = recent[recent.length - 3];
+    
+    // 1. 최근 1m 캔들에서 급락 후 강한 반등 발생
+    const isVRebound = lastCandle.close > lastCandle.open && lastCandle.close > prevCandle.high && (prevCandle.close < prevCandle.open || p3Candle.close < p3Candle.open);
+    if (isVRebound) hits.push("micro_v_rebound");
+
+    // 2. 최근 저점이 직전 저점보다 높아짐 (Higher Low)
+    const recentLow = Math.min(...recent.map(c => c.low));
+    const prevLow = Math.min(...prev.map(c => c.low));
+    if (recentLow > prevLow) hits.push("higher_low");
+    metrics.recentLow = recentLow;
+    metrics.prevLow = prevLow;
+
+    // 3. 최근 고점이 직전 고점보다 높아짐 (Higher High)
+    const recentHigh = Math.max(...recent.map(c => c.high));
+    const prevHigh = Math.max(...prev.map(c => c.high));
+    if (recentHigh > prevHigh) hits.push("higher_high");
+    metrics.recentHigh = recentHigh;
+    metrics.prevHigh = prevHigh;
+
+    // 4. 박스 중단 이상 회복
+    const boxMid = (sn.boxHigh && sn.boxLow) ? (sn.boxHigh + sn.boxLow) / 2 : null;
+    if (boxMid && lastPrice > boxMid) hits.push("box_mid_reclaimed");
+
+    // 5. 박스 상단 돌파 또는 상단 추종 흐름
+    if (sn.boxHigh && lastPrice >= sn.boxHigh * 0.998) {
+         if (sn.boxPos && sn.boxPos >= 0.85) hits.push("upper_follow_through");
+    }
+
+    // 6. 매도 추격 실패 후 양봉 연속 회복 (최근 3캔들 중 2개 이상 양봉)
+    const recent3 = candles.slice(-3);
+    const greenCount = recent3.filter(c => c.close > c.open).length;
+    if (greenCount >= 2 && lastCandle.close > lastCandle.open) hits.push("green_candles_recovery");
+
+    // 7. volumeExpansion 또는 회복 캔들 거래량 우위
+    if ((sn.volumeExpansion || 0) >= 1.5) hits.push("volume_expansion_recovery");
+
+    const structureConditionMet = hits.length >= 2;
+
+    // C. 상위봉 조건
+    const htfPolicyOk = ["ALLOW", "PROBE_ONLY", "LONG_ONLY_OR_NONE"].includes(htfEntryPolicy);
+    if (!htfPolicyOk) return { allowed: false, reason: "", block_reason: `HTF_POLICY_REJECT: ${htfEntryPolicy}`, hits, metrics };
+
+    const allBearishLower = htfBias.m5 === "BEARISH" && htfBias.m15 === "BEARISH" && htfBias.h1 === "BEARISH" && htfBias.h4 === "BEARISH";
+    const d1Weak = htfBias.d1 === "BEARISH" || htfBias.d1 === "CONFLICT";
+    if (allBearishLower && d1Weak) return { allowed: false, reason: "", block_reason: "TOTAL_BEARISH_HTF", hits, metrics };
+
+    if (!structureConditionMet) return { allowed: false, reason: "", block_reason: "STRUCTURE_HITS_INSUFFICIENT", hits, metrics };
+
+    return {
+        allowed: true,
+        reason: hits.join("|"),
+        block_reason: "",
+        hits,
+        metrics
+    };
+}
+
 function evaluateWhipsawShockRecheck(args: {
     input: EngineV2Input;
     shockPhase: MarketJudgmentOutput["shockPhase"];
@@ -1000,8 +1099,35 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         noTradeReason: no_trade_reason
     });
 
+    const earlyProbe = evaluateEarlyLongProbe({
+        input,
+        htfEntryPolicy,
+        htfBias,
+        shockPhase,
+        crashState: String(input.state.crashState || ""),
+        regimeFinal: regime_final
+    });
+
     let finalSubtype: EngineV2MarketSubtype = subtypeDecision.subtype;
     let finalSubtypeReason = subtypeDecision.subtypeReason;
+
+    // Early Probe override logic
+    if (earlyProbe.allowed && finalSubtype !== "WHIPSAW_SHOCK_RECHECK") {
+        const isStandardBlocked = 
+            finalSubtypeReason.includes("QUALITY_BELOW_THRESHOLD") || 
+            finalSubtypeReason.includes("UPPER_REACTION") ||
+            finalSubtypeReason.includes("SIDE_ZONE_MISMATCH") ||
+            finalSubtypeReason.includes("WAIT_RETEST") ||
+            finalSubtype === "RANGE_UPPER_REACTION" ||
+            finalSubtype === "RANGE_MID_CHOP";
+
+        if (isStandardBlocked || regime_final === "RANGE" || regime_final === "TRANSITION") {
+            finalSubtype = "EARLY_LONG_PROBE";
+            finalSubtypeReason = `EARLY_PROBE: ${earlyProbe.reason}`;
+            expectedNextAction = "SMALL_SIZE_PROBE_ALLOWED";
+        }
+    }
+
     let transitionPhaseOut: MarketJudgmentOutput["transitionPhase"] = transitionPhase;
     let expectedNextActionOut = expectedNextAction;
 
@@ -1066,7 +1192,14 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
             context_hit_count: whipsaw.contextHitCount,
             structural_hits: whipsaw.hits,
             context_hits: whipsaw.contextHits,
-            confirmation_wait_reasons: whipsaw.confirmationWaitReasons
+            confirmation_wait_reasons: whipsaw.confirmationWaitReasons,
+            early_probe: {
+                allowed: earlyProbe.allowed,
+                reason: earlyProbe.reason,
+                block_reason: earlyProbe.block_reason,
+                hits: earlyProbe.hits,
+                counter_trend_risk: counterTrendRisk
+            }
         },
         transitionPhase: transitionPhaseOut,
         judgmentVersion: "v2_market_judgment_subtype_v1",
@@ -1076,7 +1209,7 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         volatility_guard_hit: sn.volatility_guard_hit,
         reason: regime_final === "NO_TRADE"
             ? `NO_TRADE: ${no_trade_reason ?? "METRICS_INSUFFICIENT"}`
-            : `Market detected as ${regime_final} based on score analysis`,
+            : (finalSubtype === "EARLY_LONG_PROBE" ? `EARLY_PROBE: ${earlyProbe.reason}` : `Market detected as ${regime_final} based on score analysis`),
         metrics: {
             rangeScore,
             trendScore,
@@ -1105,9 +1238,42 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
             whipsaw_shock_recheck_active: whipsaw.active,
             whipsaw_hit_count: whipsaw.hitCount,
             whipsaw_hits: whipsaw.hits,
-            whipsaw_box_orbit_chop: whipsaw.boxOrbitChop
+            whipsaw_box_orbit_chop: whipsaw.boxOrbitChop,
+            early_probe_allowed: earlyProbe.allowed,
+            early_probe_hits: earlyProbe.hits
         }
     };
+
+    console.info(JSON.stringify({
+        event: "V2_EARLY_LONG_PROBE_PROOF",
+        symbol: input.symbol,
+        regime,
+        market_subtype: finalSubtype,
+        boxPos: sn.boxPos,
+        zone: classifyRangeZone(Number(sn.boxPos ?? 0.5)),
+        htf_entry_policy: htfEntryPolicy,
+        htf_5m_bias: htfBias.m5,
+        htf_15m_bias: htfBias.m15,
+        htf_1h_bias: htfBias.h1,
+        htf_4h_bias: htfBias.h4,
+        htf_1d_bias: htfBias.d1,
+        directional_shock_state: input.state.directionalShockState ?? "NONE",
+        longAllow: input.state.longAllow,
+        shortAllow: input.state.shortAllow,
+        early_probe_candidate: true,
+        early_probe_allowed: earlyProbe.allowed,
+        early_probe_reason: earlyProbe.reason,
+        early_probe_block_reason: earlyProbe.block_reason,
+        micro_recovery_hits: earlyProbe.hits,
+        higher_low_detected: earlyProbe.hits.includes("higher_low"),
+        higher_high_detected: earlyProbe.hits.includes("higher_high"),
+        box_mid_reclaimed: earlyProbe.hits.includes("box_mid_reclaimed"),
+        upper_follow_through: earlyProbe.hits.includes("upper_follow_through"),
+        counter_trend_risk: counterTrendRisk,
+        size_multiplier: htfSizeMultiplier,
+        baseSizeIntent: finalSubtype === "EARLY_LONG_PROBE" ? 0.3 : 0,
+        stop_basis: "conservative_probe_basis"
+    }));
 
     // Logging new events
     console.info(JSON.stringify({

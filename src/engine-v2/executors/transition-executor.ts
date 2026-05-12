@@ -73,6 +73,41 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         };
     }
 
+    if (subtype === "EARLY_LONG_PROBE") {
+        const lastPrice = sn.lastPrice;
+        const boxHigh = sn.boxHigh ?? lastPrice;
+        const boxLow = sn.boxLow ?? lastPrice;
+        const boxMid = (boxHigh + boxLow) / 2;
+        const atr = sn.atr ?? (lastPrice * 0.01);
+        
+        const recentCandles = input.candles ?? [];
+        const swingLow = recentCandles.length >= 10 
+            ? Math.min(...recentCandles.slice(-10).map(c => c.low)) 
+            : lastPrice * 0.99;
+        
+        const stopBasisMid = boxMid * 0.998; 
+        const stopBasisAtr = lastPrice - (atr * 2.0);
+        const stopPrice = Math.min(swingLow, stopBasisMid, stopBasisAtr);
+
+        return {
+            signal: "LONG_CANDIDATE",
+            side: "long",
+            reason: judgment?.subtypeReason ?? "EARLY_LONG_PROBE",
+            baseSizeIntent: 0.32,
+            recheckSuggested: true,
+            isAddOnEligible: false,
+            stopPrice,
+            invalidationPx: stopPrice,
+            metadata: { 
+                early_probe: true,
+                stop_basis: "conservative_probe_basis",
+                swing_low: swingLow,
+                box_mid: boxMid,
+                atr_stop: stopBasisAtr
+            } as any
+        };
+    }
+
     let signal: ExecutorOutput["signal"] = "NONE";
     let side: ExecutorOutput["side"] = "none";
     let reason = "TRANSITION_CONFLICT_NO_TRADE";

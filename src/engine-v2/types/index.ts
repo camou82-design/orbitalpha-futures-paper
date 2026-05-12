@@ -44,7 +44,8 @@ export type EngineV2MarketSubtype =
     | "NO_TRADE_METRICS_INSUFFICIENT"
     /** Protective / wait umbrella: shock chop, volume spike, unconfirmed retest-reclaim (not an entry mode). */
     | "WHIPSAW_SHOCK_RECHECK"
-    | "WHIPSAW_SOFT_WATCH";
+    | "WHIPSAW_SOFT_WATCH"
+    | "EARLY_LONG_PROBE";
 export type EngineV2SignalState = "LONG_CANDIDATE" | "SHORT_CANDIDATE" | "WAIT_RECHECK" | "NONE";
 export type EngineV2Side = "long" | "short" | "none" | null;
 export type EngineV2FinalDecision = "ENTER" | "EXIT" | "SKIP" | "HOLD" | "REJECT" | "DISABLED";
@@ -644,6 +645,13 @@ export interface MarketJudgmentOutput {
         structural_hits: string[];
         context_hits: string[];
         confirmation_wait_reasons: string[];
+        early_probe?: {
+            allowed: boolean;
+            reason: string;
+            block_reason: string;
+            hits: string[];
+            counter_trend_risk: boolean;
+        };
     };
     metadata?: Record<string, any>;
 }

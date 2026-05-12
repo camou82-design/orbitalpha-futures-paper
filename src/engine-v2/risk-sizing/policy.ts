@@ -95,6 +95,9 @@ export function calculateRiskSizing(
     } else if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
         isBlocked = true;
         blockReason = "WHIPSAW_SHOCK_RECHECK";
+    } else if (judgment.subtype === "EARLY_LONG_PROBE") {
+        // Explicitly allow probe subtype
+        isBlocked = false;
     }
     else if (!effectivePaperExecutionReady) {
         isBlocked = true;
@@ -146,6 +149,10 @@ export function calculateRiskSizing(
     // TRANSITION: Force Scouting Mode (Very small size)
     if (judgment.regime === "TRANSITION") {
         sizeMultiplier *= 0.1; // Scouting mode is forced to 10% size
+    }
+
+    if (judgment.subtype === "EARLY_LONG_PROBE") {
+        sizeMultiplier = judgment.counter_trend_risk ? 0.22 : 0.32;
     }
 
     // Confidence adjustment
