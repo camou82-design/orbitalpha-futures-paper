@@ -398,8 +398,10 @@ function evaluateWhipsawShockRecheck(args: {
     noTradeReason: string | null;
 }): {
     active: boolean;
+    isSoftWatch: boolean;
     hitCount: number;
     hits: string[];
+    contextHits: string[];
     retestConfirmed: boolean;
     reclaimConfirmed: boolean;
     internalTransitionPhase: MarketJudgmentOutput["transitionPhase"];
@@ -407,6 +409,7 @@ function evaluateWhipsawShockRecheck(args: {
     recentSwingDirection: "up" | "down" | "flat";
     boxOrbitChop: boolean;
     structuralHitCount: number;
+    contextHitCount: number;
     confirmationWaitReasons: string[];
     recheckTicks: number;
 } {
@@ -414,8 +417,10 @@ function evaluateWhipsawShockRecheck(args: {
     if (regimeFinal === "NO_TRADE" && (noTradeReason === "DATA_NOT_READY" || noTradeReason === "DUMP_PROTECTION")) {
         return {
             active: false,
+            isSoftWatch: false,
             hitCount: 0,
             hits: [],
+            contextHits: [],
             retestConfirmed: true,
             reclaimConfirmed: true,
             internalTransitionPhase: transitionPhase,
@@ -423,6 +428,7 @@ function evaluateWhipsawShockRecheck(args: {
             recentSwingDirection: "flat",
             boxOrbitChop: false,
             structuralHitCount: 0,
+            contextHitCount: 0,
             confirmationWaitReasons: [],
             recheckTicks: 0
         };
@@ -458,27 +464,32 @@ function evaluateWhipsawShockRecheck(args: {
     if (micro.downThenRebound) microHits.push("micro_down_then_rebound");
     if (micro.upThenDrop) microHits.push("micro_up_then_drop");
 
+    const contextHits: string[] = [];
+    if (directional === "UP" || directional === "DOWN") contextHits.push("directional_shock_state");
+    // Add other context info if needed (e.g., pump_alert)
+    if (pumpS.includes("ALERT") || crashS.includes("ALERT")) contextHits.push("pump_crash_alert");
+
     const otherStructuralHits: string[] = [];
-    if (directional === "UP" || directional === "DOWN") otherStructuralHits.push("directional_shock_state");
     if (boxOrbitChop) otherStructuralHits.push("box_orbit_chop");
-    if (sn.boxBreakSide !== "none") otherStructuralHits.push("box_break_detected");
+    if (sn.boxBreakSide !== "none" && (!retestConfirmed || !reclaimConfirmed)) otherStructuralHits.push("box_break_unconfirmed");
     if (volExp >= 2.0) otherStructuralHits.push("volume_expansion_ge_2");
     if (breakoutFailureRate >= 0.4) otherStructuralHits.push("breakout_failure_rate_ge_0_4");
     if (mixedBreakoutState) otherStructuralHits.push("mixed_breakout_state");
     if (Number(sn.atrExpansion ?? 0) >= 1.5) otherStructuralHits.push("atr_expansion_ge_1_5");
-
-    const structuralHits = [...microHits, ...otherStructuralHits];
-    
-    const confirmationWaitReasons: string[] = [];
-    if (!retestConfirmed) confirmationWaitReasons.push("retest_not_confirmed");
-    if (!reclaimConfirmed) confirmationWaitReasons.push("reclaim_not_confirmed");
-    if (reviewingTicks < 6) confirmationWaitReasons.push("reviewing_ticks_insufficient");
+    if (reviewingTicks >= 2) otherStructuralHits.push("recheck_repetition");
 
     const microHitCount = microHits.length;
     const otherStructuralHitCount = otherStructuralHits.length;
+    const contextHitCount = contextHits.length;
 
-    // RULE: At least 1 micro reversal AND at least 1 other structural evidence
+    const structuralHits = [...microHits, ...otherStructuralHits];
+    const hitCount = structuralHits.length;
+
+    // RULE: Hard Block requires at least 1 micro reversal AND at least 1 other structural evidence
     let active = microHitCount >= 1 && otherStructuralHitCount >= 1;
+
+    // Soft Watch: Micro reversal + context (directional shock) without heavy structural evidence
+    const isSoftWatch = !active && microHitCount >= 1 && contextHitCount >= 1;
 
     // --- Deactivation (Release) Conditions ---
     if (active) {
@@ -499,7 +510,11 @@ function evaluateWhipsawShockRecheck(args: {
         }
     }
 
-    const hitCount = structuralHits.length;
+    const confirmationWaitReasons: string[] = [];
+    if (!retestConfirmed) confirmationWaitReasons.push("retest_not_confirmed");
+    if (!reclaimConfirmed) confirmationWaitReasons.push("reclaim_not_confirmed");
+    if (reviewingTicks < 6) confirmationWaitReasons.push("reviewing_ticks_insufficient");
+
     const hits = structuralHits;
 
     let internalTransitionPhase: MarketJudgmentOutput["transitionPhase"] = "WHIPSAW_RECHECK";
@@ -508,8 +523,10 @@ function evaluateWhipsawShockRecheck(args: {
 
     return {
         active,
+        isSoftWatch,
         hitCount,
         hits,
+        contextHits,
         confirmationWaitReasons,
         retestConfirmed,
         reclaimConfirmed,
@@ -517,7 +534,8 @@ function evaluateWhipsawShockRecheck(args: {
         reverseSwingDetected: micro.reverseSwingDetected,
         recentSwingDirection: micro.recentSwingDirection,
         boxOrbitChop,
-        structuralHitCount: hitCount,
+        structuralHitCount: otherStructuralHitCount,
+        contextHitCount,
         recheckTicks: reviewingTicks
     };
 }
@@ -989,15 +1007,20 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
 
     if (whipsaw.active) {
         finalSubtype = "WHIPSAW_SHOCK_RECHECK";
-        finalSubtypeReason = `whipsaw_shock_recheck:${whipsaw.hits.join("+")}`;
+        finalSubtypeReason = `HARD_BLOCK: ${whipsaw.hits.join("|")}`;
         transitionPhaseOut = whipsaw.internalTransitionPhase;
         expectedNextActionOut = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
+    } else if (whipsaw.isSoftWatch) {
+        finalSubtype = "WHIPSAW_SOFT_WATCH";
+        finalSubtypeReason = `SOFT_WATCH: ${whipsaw.hits.join("|")} (context: ${whipsaw.contextHits.join("|")})`;
+        transitionPhaseOut = whipsaw.internalTransitionPhase;
+        expectedNextActionOut = "WAIT_RECHECK_SOFT_WATCH";
     }
 
     const volExpResolved = volumeExpansionResolved(sn);
     const atrExpResolved = typeof sn.atrExpansion === "number" && Number.isFinite(sn.atrExpansion) ? sn.atrExpansion : null;
 
-    if (whipsaw.active) {
+    if (whipsaw.active || whipsaw.isSoftWatch) {
         console.info(
             JSON.stringify({
                 event: "V2_WHIPSAW_SHOCK_RECHECK_PROOF",
@@ -1016,11 +1039,13 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
                 retestConfirmed: whipsaw.retestConfirmed,
                 reclaimConfirmed: whipsaw.reclaimConfirmed,
                 reviewingTicks: sn.reviewing_ticks,
-                decision: "BLOCK_NEW_ENTRY_AND_ADDON",
+                decision: whipsaw.active ? "BLOCK_NEW_ENTRY_AND_ADDON" : "WAIT_SOFT_WATCH",
                 reason: finalSubtypeReason,
                 expected_next_action: expectedNextActionOut,
                 whipsaw_hit_count: whipsaw.hitCount,
                 whipsaw_hits: whipsaw.hits,
+                context_hit_count: whipsaw.contextHitCount,
+                context_hits: whipsaw.contextHits,
                 recheck_ticks: whipsaw.recheckTicks,
                 confirmation_wait_reasons: whipsaw.confirmationWaitReasons,
                 transition_phase: transitionPhaseOut
@@ -1038,6 +1063,9 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         trendPhase,
         diagnostics: {
             structural_hit_count: whipsaw.structuralHitCount,
+            context_hit_count: whipsaw.contextHitCount,
+            structural_hits: whipsaw.hits,
+            context_hits: whipsaw.contextHits,
             confirmation_wait_reasons: whipsaw.confirmationWaitReasons
         },
         transitionPhase: transitionPhaseOut,

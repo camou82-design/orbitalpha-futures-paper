@@ -27,22 +27,22 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
     const transitionPhase = judgment?.transitionPhase ?? "NONE";
     const subtype = judgment?.subtype ?? "TRANSITION_CONFLICT";
 
-    if (subtype === "WHIPSAW_SHOCK_RECHECK") {
+    if (subtype === "WHIPSAW_SHOCK_RECHECK" || subtype === "WHIPSAW_SOFT_WATCH") {
         const meta: TransitionExecutorMetadata = {
             transitionPhase: judgment?.transitionPhase ?? "WHIPSAW_RECHECK",
             transitionSetupType: "NONE",
             transitionAction: "REJECT",
-            transitionReason: "WHIPSAW_SHOCK_RECHECK",
+            transitionReason: subtype,
             transitionConfidence: 0,
             transitionPrimarySide: "none",
             transitionCounterSide: "none",
             transitionWatchOnly: true,
             transitionConfirmRequired: true,
-            transitionRejectReason: "WHIPSAW_SHOCK_RECHECK",
+            transitionRejectReason: subtype,
             transitionConfirmBasis: "insufficient",
             transitionPreflightSafetyPassed: false,
-            transitionPreflightBlockReason: "WHIPSAW_SHOCK_RECHECK",
-            transitionEvidence: "whipsaw_shock_recheck_no_transition_scout",
+            transitionPreflightBlockReason: subtype,
+            transitionEvidence: "whipsaw_recheck_no_transition_scout",
             emaGap,
             trendWeaknessScore,
             rangeConfidence,
@@ -63,7 +63,7 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         return {
             signal: "WAIT_RECHECK",
             side: "none",
-            reason: "WHIPSAW_SHOCK_RECHECK_TRANSITION_HOLD",
+            reason: `${subtype}_TRANSITION_HOLD`,
             baseSizeIntent: 0,
             recheckSuggested: true,
             isAddOnEligible: false,
