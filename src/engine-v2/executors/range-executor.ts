@@ -8,6 +8,19 @@ import { classifyRangeZone } from "../../models/types";
  */
 export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmentOutput): ExecutorOutput {
     const { snapshot: sn } = input;
+    if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
+        return {
+            signal: "WAIT_RECHECK",
+            side: "none",
+            reason: "WHIPSAW_SHOCK_RECHECK_RANGE_HOLD",
+            baseSizeIntent: 0,
+            recheckSuggested: true,
+            isAddOnEligible: false,
+            stopPrice: null,
+            invalidationPx: null,
+            metadata: { whipsaw_shock_recheck: true }
+        };
+    }
     const boxPos = typeof sn.boxPos === "number" && Number.isFinite(sn.boxPos) ? sn.boxPos : null;
     const rangeConfidence = typeof sn.rangeConfidence === "number" && Number.isFinite(sn.rangeConfidence) ? sn.rangeConfidence : 0;
     const boxCohesion01 = typeof sn.boxCohesion01 === "number" && Number.isFinite(sn.boxCohesion01) ? sn.boxCohesion01 : 0;

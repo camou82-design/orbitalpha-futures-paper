@@ -567,6 +567,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         finalDecision = "HOLD";
     } else if (softNoTrade) {
         finalDecision = "DISABLED";
+    } else if (isBlocked && blockReason === "WHIPSAW_SHOCK_RECHECK") {
+        finalDecision = "REJECT";
     } else if (waitingRecheck && invalidSideForEnter) {
         finalDecision = "HOLD";
     } else if (isBlocked && blockReason === "NO_TRADE_REGIME") {
@@ -627,6 +629,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let contaminationSoftenReason: string | null = null;
 
     const shock = v2State.directionalShockState ?? "NONE";
+    const whipsawShockRecheckActive = judgment.subtype === "WHIPSAW_SHOCK_RECHECK";
     const crashState = String(v2State.crashState ?? "").toUpperCase();
     const pumpStateResolved = String(v2State.pumpState ?? "").toUpperCase();
     const marketMode = String(judgment.regime ?? "UNKNOWN");
@@ -762,7 +765,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         "RISK_EXPOSURE_CAP_PRE_SUBMIT",
         "ORDER_BUILD_FAIL",
         "FRESH_TICK_EXECUTION_BLOCKED",
-        "FRESH_TICK_BARRIER_ACTIVE"
+        "FRESH_TICK_BARRIER_ACTIVE",
+        "WHIPSAW_SHOCK_RECHECK"
     ]);
     const hardBlockReasons = new Set<string>([
         "CRASH_ENTRY_GUARD_BLOCK",
@@ -777,7 +781,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         "RISK_MODE_HALT",
         "DAILY_LOSS_GUARD",
         "FRESH_TICK_EXECUTION_BLOCKED",
-        "FRESH_TICK_BARRIER_ACTIVE"
+        "FRESH_TICK_BARRIER_ACTIVE",
+        "WHIPSAW_SHOCK_RECHECK"
     ]);
     const hardBlockPresent =
         !hardControlClear ||
@@ -1322,6 +1327,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const hasOppositeSidePosition = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() !== trendSideCandidate);
 
         const probeCommonOk =
+            !whipsawShockRecheckActive &&
             hardControlClear === true &&
             hardBlockPresent === false &&
             paperExecutionReady === true &&
@@ -1366,6 +1372,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         // ?섏젙 4. RANGE_MID_CHOP ?꾩슜 micro probe ENTER 寃쎈줈 異붽?
         const isRangeMidChop = judgment.regime === "RANGE" && judgment.subtype === "RANGE_MID_CHOP";
         const microProbeCommonOk =
+            !whipsawShockRecheckActive &&
             isRangeMidChop &&
             shock === "NONE" &&
             hardControlClear === true &&
@@ -1398,6 +1405,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
         // ?섏젙 5. WAIT_RECHECK 諛섎났 ?밴꺽 寃쎈줈 異붽? (recheck promotion path)
         const recheckPromotionEligible =
+            !whipsawShockRecheckActive &&
             v2RejectReasonAfterPromotion === "WAIT_RECHECK" &&
             reviewingTicks >= 2 && // 2~3??諛섎났
             hardControlClear === true &&
@@ -1446,6 +1454,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             zone === "upper" || rangeSideCandidate === "short";
 
         const transitionWatchShortConditionsMet =
+            !whipsawShockRecheckActive &&
             isTransitionWatchShortEligibleContext &&
             transitionWatchShortZoneOk &&
             trendSideCandidate === "short" &&
@@ -1527,6 +1536,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const isShortRetestPhase = judgment.subtype === "BREAKDOWN_RETEST_FAILED";
 
         const retestCommonOk =
+            !whipsawShockRecheckActive &&
             isRetestEligiblePhase &&
             hardControlClear === true &&
             hardBlockPresent === false &&
@@ -1625,6 +1635,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         // --- Hardening 2026-05-10: Detailed Trend Promotion Block Reasons & RANGE Zone Safety ---
         const regimeLabel = String(judgment.regime ?? "");
         const trendPromotionBlockApplies =
+            !whipsawShockRecheckActive &&
             trendSideCandidate !== "none" &&
             !promotionApplied &&
             (activeEngineRouting === "TREND" || regimeLabel === "RANGE" || regimeLabel === "TRANSITION");
@@ -2259,7 +2270,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         rangeSideCandidate !== trendSideCandidate;
 
     let sideVetoDetail: string | null = null;
-    if (v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP") {
+    if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
+        sideVetoDetail = "WHIPSAW_SHOCK_RECHECK_ACTIVE";
+    } else if (v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP") {
         if (judgment.subtype === "SHOCK_REACTION_UP" && trendSideCandidate === "long") {
             if (zone === "mid") sideVetoDetail = "SHOCK_UP_MID_RETEST_REQUIRED";
             else if (trendOk === false) sideVetoDetail = "SHOCK_UP_TREND_CONFIRMATION_WEAK";
@@ -3432,6 +3445,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }));
 
     // Tier 6: Unify diagnostic suppression reasons for audit-ready transparency
+    const whipsawBlocking = judgment.subtype === "WHIPSAW_SHOCK_RECHECK";
     const auditRawMissingCondition = promotionBlockReason || v2RejectReasonAfterPromotion || expectedMissingCondition || (finalDecision === "SKIP" ? "MIN_QUALITY_NOT_MET" : "NONE");
     
     // Priority Logic for primary_missing_condition (Requirement 2 & 3 & 4)
@@ -3439,6 +3453,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     
     // Requirement 4: Shock/Retest/Reclaim check
     const isShockRetestBlock =
+        judgment.subtype === "WHIPSAW_SHOCK_RECHECK" ||
+        sideVetoDetail === "WHIPSAW_SHOCK_RECHECK_ACTIVE" ||
         sideVetoDetail === "SHOCK_UP_RECLAIM_NOT_CONFIRMED" ||
         sideVetoDetail === "SHOCK_UP_MID_RETEST_REQUIRED" ||
         sideVetoDetail === "SHOCK_DOWN_MID_RETEST_REQUIRED" ||
@@ -3454,6 +3470,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const signedReadyBlocked = (finalDecision === "REJECT" || finalDecision === "HOLD") && hardBlockReason === "SIGNED_EXECUTION_NOT_READY";
 
     let primaryMissingCondition =
+        (whipsawBlocking ? "WHIPSAW_RECHECK_NOT_CONFIRMED" : null) ||
         (signedReadyBlocked ? "SIGNED_EXECUTION_NOT_READY" : null) ||
         (hardBlockReason ? hardBlockReason : null) ||
         htfPolarityMismatchReason ||
@@ -3472,6 +3489,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     const dashboardMissingCondition = primaryMissingCondition;
     let dashboardNextAction = expectedNextAction || (finalDecision === "SKIP" ? "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST" : "EXECUTE_V2_AUTHORITY");
+
+    if (whipsawBlocking) {
+        dashboardNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
+    }
 
     // Requirement 3 & 4: align expected_next_action
     if (primaryMissingCondition === "SIGNED_EXECUTION_NOT_READY") {

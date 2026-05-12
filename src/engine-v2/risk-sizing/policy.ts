@@ -92,6 +92,9 @@ export function calculateRiskSizing(
     if (judgment.regime === "NO_TRADE") {
         isBlocked = true;
         blockReason = "NO_TRADE_REGIME";
+    } else if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
+        isBlocked = true;
+        blockReason = "WHIPSAW_SHOCK_RECHECK";
     }
     else if (!effectivePaperExecutionReady) {
         isBlocked = true;

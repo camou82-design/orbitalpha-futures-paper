@@ -4412,7 +4412,9 @@ export class PaperEngine {
         }
 
         let side_veto_detail = v2Env?.side_veto_detail || null;
-        if (!side_veto_detail && v2Env?.selected_side_after_veto === "none") {
+        if (v2Env?.marketSubtype === "WHIPSAW_SHOCK_RECHECK") {
+          side_veto_detail = "WHIPSAW_SHOCK_RECHECK_ACTIVE";
+        } else if (!side_veto_detail && v2Env?.selected_side_after_veto === "none") {
           if (v2Env?.marketSubtype === "SHOCK_REACTION_UP" && v2Env?.trend_side_candidate === "long") {
             if (zone === "mid") side_veto_detail = "SHOCK_UP_MID_RETEST_REQUIRED";
             else if (trendOk === false) side_veto_detail = "SHOCK_UP_TREND_CONFIRMATION_WEAK";
@@ -4439,7 +4441,9 @@ export class PaperEngine {
           null;
 
         if (!refinedMissingCondition) {
-          if (v2Env?.shock_reaction_block_reason) {
+          if (v2Env?.marketSubtype === "WHIPSAW_SHOCK_RECHECK") {
+            refinedMissingCondition = "WHIPSAW_RECHECK_NOT_CONFIRMED";
+          } else if (v2Env?.shock_reaction_block_reason) {
             refinedMissingCondition = v2Env.shock_reaction_block_reason;
           } else if (v2Env?.promotion_block_reason) {
             refinedMissingCondition = v2Env.promotion_block_reason;
@@ -4467,7 +4471,9 @@ export class PaperEngine {
         const sideNoneFinal = v2Env?.selected_side_after_veto === "none";
 
         if (envelope.runtime_authority_decision !== "ENTER" || v2?.side === "none" || !v2?.side) {
-          if (v2Env?.marketSubtype === "SHOCK_REACTION_UP" && v2Env?.trend_side_candidate === "long" && v2?.decision === "HOLD") {
+          if (v2Env?.marketSubtype === "WHIPSAW_SHOCK_RECHECK") {
+            refinedNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
+          } else if (v2Env?.marketSubtype === "SHOCK_REACTION_UP" && v2Env?.trend_side_candidate === "long" && v2?.decision === "HOLD") {
             refinedNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
           } else if (v2Env?.marketSubtype === "SHOCK_REACTION_DOWN" && v2Env?.trend_side_candidate === "short" && v2?.decision === "HOLD") {
             refinedNextAction = "WAIT_FOR_BREAKDOWN_RETEST_FAILURE";
@@ -4483,6 +4489,8 @@ export class PaperEngine {
 
         // Audit/log only: align expected_next_action with concrete missing / veto tokens (operational readability).
         const noEntryAuditNextByVetoOrMissing: Record<string, string> = {
+          WHIPSAW_SHOCK_RECHECK_ACTIVE: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
+          WHIPSAW_RECHECK_NOT_CONFIRMED: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
           SHOCK_UP_RECLAIM_NOT_CONFIRMED: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
           SHOCK_UP_MID_RETEST_REQUIRED: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
           SHOCK_UP_TREND_CONFIRMATION_WEAK: "WAIT_FOR_TREND_CONFIRMATION",
@@ -4523,7 +4531,12 @@ export class PaperEngine {
         let reclaim_required = false;
         let expected_retest_direction: string | null = null;
 
-        if (v2Env?.marketSubtype === "SHOCK_REACTION_UP") {
+        if (v2Env?.marketSubtype === "WHIPSAW_SHOCK_RECHECK") {
+          chase_blocked = true;
+          retest_required = true;
+          reclaim_required = true;
+          expected_retest_direction = "whipsaw_recheck_structural";
+        } else if (v2Env?.marketSubtype === "SHOCK_REACTION_UP") {
           chase_blocked = !!v2Env?.shock_reaction_block_reason?.includes("CHASE");
           retest_required = true;
           reclaim_required = true;

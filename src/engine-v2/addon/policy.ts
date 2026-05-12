@@ -60,6 +60,34 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             evidence: "side_none_forbidden"
         };
     }
+    if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
+        return {
+            action: "ADDON_FORBIDDEN",
+            allowed: false,
+            reason: "WHIPSAW_SHOCK_RECHECK_ADDON_FORBIDDEN",
+            addOnEligible: false,
+            isInitial,
+            isAddOn,
+            side,
+            currentStage,
+            hasSameSidePosition,
+            hasOppositeSidePosition,
+            marketRegime: judgment.regime_final,
+            marketSubtype: judgment.subtype,
+            shockPhase: judgment.shockPhase,
+            rangePhase: judgment.rangePhase,
+            trendPhase: judgment.trendPhase,
+            transitionPhase: judgment.transitionPhase,
+            qualityScore,
+            reviewingTicks,
+            pnlPct,
+            boxPos,
+            emaGap,
+            trendWeaknessScore,
+            rangeConfidence,
+            evidence: "whipsaw_shock_recheck_blocks_addon"
+        };
+    }
     if (hasOppositeSidePosition) {
         return {
             action: "ADDON_FORBIDDEN",

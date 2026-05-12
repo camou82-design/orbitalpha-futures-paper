@@ -41,7 +41,9 @@ export type EngineV2MarketSubtype =
     | "FAKE_VOLUME_BREAKOUT"
     | "NO_TRADE_DATA_NOT_READY"
     | "NO_TRADE_DUMP_PROTECTION"
-    | "NO_TRADE_METRICS_INSUFFICIENT";
+    | "NO_TRADE_METRICS_INSUFFICIENT"
+    /** Protective / wait umbrella: shock chop, volume spike, unconfirmed retest-reclaim (not an entry mode). */
+    | "WHIPSAW_SHOCK_RECHECK";
 export type EngineV2SignalState = "LONG_CANDIDATE" | "SHORT_CANDIDATE" | "WAIT_RECHECK" | "NONE";
 export type EngineV2Side = "long" | "short" | "none" | null;
 export type EngineV2FinalDecision = "ENTER" | "EXIT" | "SKIP" | "HOLD" | "REJECT" | "DISABLED";
@@ -562,9 +564,43 @@ export interface MarketJudgmentOutput {
     subtype: EngineV2MarketSubtype;
     subtypeReason: string;
     shockPhase: "NONE" | "DOWN_SHOCK" | "UP_SHOCK" | "CRASH_RECOVERY" | "PUMP_RECOVERY";
-    rangePhase: "NONE" | "MID" | "LOWER" | "UPPER" | "BREAKDOWN" | "BREAKOUT" | "FAKE_BREAKOUT" | "COMPRESSION" | "TRIANGLE_SQUEEZE" | "BREAKOUT_OBSERVATION" | "FLAT" | "DRIFT_DOWN" | "DRIFT_UP" | "DESCENDING_CHANNEL" | "ASCENDING_CHANNEL" | "REVERSAL_UP_WATCH" | "REVERSAL_DOWN_WATCH" | "VOLUME_BREAKDOWN_OBSERVATION" | "VOLUME_SHOCK_DOWN" | "BREAKDOWN_RETEST_FAILED" | "FAKE_VOLUME_BREAKDOWN" | "VOLUME_BREAKOUT_OBSERVATION" | "VOLUME_SHOCK_UP" | "BREAKOUT_RETEST_CONFIRMED_VOLUME" | "FAKE_VOLUME_BREAKOUT";
+    rangePhase:
+        | "NONE"
+        | "MID"
+        | "LOWER"
+        | "UPPER"
+        | "BREAKDOWN"
+        | "BREAKOUT"
+        | "FAKE_BREAKOUT"
+        | "COMPRESSION"
+        | "TRIANGLE_SQUEEZE"
+        | "BREAKOUT_OBSERVATION"
+        | "FLAT"
+        | "DRIFT_DOWN"
+        | "DRIFT_UP"
+        | "DESCENDING_CHANNEL"
+        | "ASCENDING_CHANNEL"
+        | "REVERSAL_UP_WATCH"
+        | "REVERSAL_DOWN_WATCH"
+        | "VOLUME_BREAKDOWN_OBSERVATION"
+        | "VOLUME_SHOCK_DOWN"
+        | "BREAKDOWN_RETEST_FAILED"
+        | "FAKE_VOLUME_BREAKDOWN"
+        | "VOLUME_BREAKOUT_OBSERVATION"
+        | "VOLUME_SHOCK_UP"
+        | "BREAKOUT_RETEST_CONFIRMED_VOLUME"
+        | "FAKE_VOLUME_BREAKOUT";
     trendPhase: "NONE" | "UP" | "DOWN" | "PULLBACK" | "EXHAUSTION";
-    transitionPhase: "NONE" | "RANGE_TO_TREND" | "TREND_TO_RANGE" | "CONFLICT" | "RETEST_CONFIRMED";
+    transitionPhase:
+        | "NONE"
+        | "RANGE_TO_TREND"
+        | "TREND_TO_RANGE"
+        | "CONFLICT"
+        | "RETEST_CONFIRMED"
+        /** Internal whipsaw / shock-recheck markers (orthogonal to range↔trend transition). */
+        | "WHIPSAW_RECHECK"
+        | "SHOCK_RECLAIM_RECHECK"
+        | "SHOCK_RETEST_UNCONFIRMED";
     judgmentVersion: "v2_market_judgment_subtype_v1";
     no_trade_reason: string | null;
     data_ready: boolean;

@@ -24,6 +24,9 @@ export function calculateRegimeConfidence(
     if (judgment.subtype === "SHOCK_REACTION_DOWN" || judgment.subtype === "SHOCK_REACTION_UP") {
         score = Math.min(score, 62);
     }
+    if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
+        score = Math.min(score, 48);
+    }
     score = Math.max(0, Math.min(100, score));
 
     let level: RegimeConfidenceOutput["level"] = "MID";

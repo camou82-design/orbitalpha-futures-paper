@@ -24,7 +24,8 @@ export type V2AddOnReason =
     | "PNL_NOT_FAVORABLE"
     | "PROFIT_BUFFER_INSUFFICIENT"
     | "SIDE_MISMATCH_FORBIDDEN"
-    | "SIDE_NONE_FORBIDDEN";
+    | "SIDE_NONE_FORBIDDEN"
+    | "WHIPSAW_SHOCK_RECHECK_ADDON_FORBIDDEN";
 
 export type V2AddOnPolicyResult = Readonly<{
     action: V2AddOnAction;

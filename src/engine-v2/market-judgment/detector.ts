@@ -329,6 +329,156 @@ function classifyTransitionPhase(
     return "NONE";
 }
 
+const WHIPSAW_RECHECK_MIN_SIGNALS = 2;
+
+function volumeExpansionResolved(sn: EngineV2Input["snapshot"]): number {
+    const direct = Number(sn.volumeExpansion);
+    if (Number.isFinite(direct) && direct > 0) return direct;
+    if (!sn.candles || sn.candles.length === 0) return 1;
+    const volWindow = sn.candles.slice(-60).map((c: Candle) => c.volume);
+    const median = computeMedian(volWindow.filter((v) => v > 0));
+    const last = sn.candles[sn.candles.length - 1]?.volume ?? 0;
+    return median > 0 ? last / median : 1;
+}
+
+function microReversalFromWindow(candles: Candle[], bars: number) {
+    if (candles.length < bars) {
+        return {
+            downThenRebound: false,
+            upThenDrop: false,
+            recentSwingDirection: "flat" as const,
+            reverseSwingDetected: false
+        };
+    }
+    const w = candles.slice(-bars);
+    const lows = w.map((c) => c.low);
+    const highs = w.map((c) => c.high);
+    const minL = Math.min(...lows);
+    const maxH = Math.max(...highs);
+    const range = maxH - minL;
+    const thr = range > 0 ? 0.22 * range : 0;
+    const minI = lows.indexOf(minL);
+    const maxI = highs.indexOf(maxH);
+    const last = w[w.length - 1].close;
+    const first = w[0].open;
+    const downThenRebound = minI < Math.floor(w.length / 2) && last > minL + thr;
+    const upThenDrop = maxI < Math.floor(w.length / 2) && last < maxH - thr;
+    const recentSwingDirection: "up" | "down" | "flat" =
+        last > first * 1.0003 ? "up" : last < first * 0.9997 ? "down" : "flat";
+    return {
+        downThenRebound,
+        upThenDrop,
+        recentSwingDirection,
+        reverseSwingDetected: downThenRebound || upThenDrop
+    };
+}
+
+function microReversalAggregate(
+    htf: Record<string, Candle[]> | undefined,
+    snapCandles: Candle[] | undefined
+): { downThenRebound: boolean; upThenDrop: boolean; recentSwingDirection: "up" | "down" | "flat"; reverseSwingDetected: boolean } {
+    const pack = htf ?? {};
+    const candidates = [
+        microReversalFromWindow(pack["5m"] ?? [], 6),
+        microReversalFromWindow(pack["1m"] ?? [], 8),
+        microReversalFromWindow(snapCandles ?? [], 8)
+    ];
+    const hit = candidates.find((c) => c.reverseSwingDetected);
+    return hit ?? candidates[0] ?? { downThenRebound: false, upThenDrop: false, recentSwingDirection: "flat", reverseSwingDetected: false };
+}
+
+function evaluateWhipsawShockRecheck(args: {
+    input: EngineV2Input;
+    shockPhase: MarketJudgmentOutput["shockPhase"];
+    rangePhase: MarketJudgmentOutput["rangePhase"];
+    transitionPhase: MarketJudgmentOutput["transitionPhase"];
+    mixedBreakoutState: boolean;
+    rangeMetadata: Record<string, unknown> | undefined;
+    regimeFinal: MarketJudgmentOutput["regime_final"];
+    noTradeReason: string | null;
+}): {
+    active: boolean;
+    hitCount: number;
+    hits: string[];
+    retestConfirmed: boolean;
+    reclaimConfirmed: boolean;
+    internalTransitionPhase: MarketJudgmentOutput["transitionPhase"];
+    reverseSwingDetected: boolean;
+    recentSwingDirection: "up" | "down" | "flat";
+    boxOrbitChop: boolean;
+} {
+    const { input, shockPhase, rangePhase, transitionPhase, mixedBreakoutState, rangeMetadata, regimeFinal, noTradeReason } = args;
+    if (regimeFinal === "NO_TRADE" && (noTradeReason === "DATA_NOT_READY" || noTradeReason === "DUMP_PROTECTION")) {
+        return {
+            active: false,
+            hitCount: 0,
+            hits: [],
+            retestConfirmed: true,
+            reclaimConfirmed: true,
+            internalTransitionPhase: transitionPhase,
+            reverseSwingDetected: false,
+            recentSwingDirection: "flat",
+            boxOrbitChop: false
+        };
+    }
+
+    const sn = input.snapshot;
+    const htf = input.htf_candles ?? input.snapshot.htf_candles ?? {};
+    const micro = microReversalAggregate(htf, sn.candles);
+    const directional = input.state.directionalShockState ?? "NONE";
+    const boxPos = Number(sn.boxPos ?? 0.5);
+    const volExp = volumeExpansionResolved(sn);
+    const breakoutFailureRate = Number(sn.breakoutFailureRate ?? 0);
+    const reviewingTicks = Number(sn.reviewing_ticks ?? 0);
+    const retestMeta = typeof rangeMetadata?.retestConfirmed === "boolean" ? rangeMetadata.retestConfirmed : undefined;
+    const retestConfirmed = transitionPhase === "RETEST_CONFIRMED" || retestMeta === true;
+    const crashS = String(input.state.crashState ?? "").toUpperCase();
+    const pumpS = String(input.state.pumpState ?? input.state.pump_state ?? "").toUpperCase();
+    const reclaimConfirmed =
+        shockPhase === "NONE" &&
+        (directional === "NONE" || directional === "UNKNOWN") &&
+        !crashS.includes("RECOVERY") &&
+        !pumpS.includes("RECOVERY");
+
+    const zone = classifyRangeZone(boxPos);
+    const boxOrbitChop =
+        Number(sn.rangeOscillationScore ?? 0) >= 0.72 &&
+        zone === "mid" &&
+        sn.boxBreakSide !== "none" &&
+        breakoutFailureRate >= 0.35;
+
+    const hits: string[] = [];
+    if (micro.downThenRebound) hits.push("micro_down_then_rebound_1m_or_5m");
+    if (micro.upThenDrop) hits.push("micro_up_then_drop_1m_or_5m");
+    if (directional === "UP" || directional === "DOWN") hits.push("directional_shock_state");
+    if (boxOrbitChop) hits.push("box_orbit_chop");
+    if (volExp >= 2.0) hits.push("volume_expansion_ge_2");
+    if (breakoutFailureRate >= 0.4) hits.push("breakout_failure_rate_ge_0_4");
+    if (mixedBreakoutState) hits.push("mixed_breakout_state");
+    if (!retestConfirmed) hits.push("retest_not_confirmed");
+    if (!reclaimConfirmed) hits.push("reclaim_not_confirmed");
+    if (reviewingTicks < 6) hits.push("reviewing_ticks_insufficient");
+
+    const hitCount = hits.length;
+    const active = hitCount >= WHIPSAW_RECHECK_MIN_SIGNALS;
+
+    let internalTransitionPhase: MarketJudgmentOutput["transitionPhase"] = "WHIPSAW_RECHECK";
+    if (!retestConfirmed) internalTransitionPhase = "SHOCK_RETEST_UNCONFIRMED";
+    else if (!reclaimConfirmed) internalTransitionPhase = "SHOCK_RECLAIM_RECHECK";
+
+    return {
+        active,
+        hitCount,
+        hits,
+        retestConfirmed,
+        reclaimConfirmed,
+        internalTransitionPhase,
+        reverseSwingDetected: micro.reverseSwingDetected,
+        recentSwingDirection: micro.recentSwingDirection,
+        boxOrbitChop
+    };
+}
+
 function selectSubtype(args: {
     regimeFinal: MarketJudgmentOutput["regime_final"];
     noTradeReason: string | null;
@@ -778,15 +928,70 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         counter_trend_risk: counterTrendRisk
     }));
 
+    const whipsaw = evaluateWhipsawShockRecheck({
+        input,
+        shockPhase,
+        rangePhase,
+        transitionPhase,
+        mixedBreakoutState,
+        rangeMetadata: m as Record<string, unknown> | undefined,
+        regimeFinal: regime_final,
+        noTradeReason: no_trade_reason
+    });
+
+    let finalSubtype: EngineV2MarketSubtype = subtypeDecision.subtype;
+    let finalSubtypeReason = subtypeDecision.subtypeReason;
+    let transitionPhaseOut: MarketJudgmentOutput["transitionPhase"] = transitionPhase;
+    let expectedNextActionOut = expectedNextAction;
+
+    if (whipsaw.active) {
+        finalSubtype = "WHIPSAW_SHOCK_RECHECK";
+        finalSubtypeReason = `whipsaw_shock_recheck:${whipsaw.hits.join("+")}`;
+        transitionPhaseOut = whipsaw.internalTransitionPhase;
+        expectedNextActionOut = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
+    }
+
+    const volExpResolved = volumeExpansionResolved(sn);
+    const atrExpResolved = typeof sn.atrExpansion === "number" && Number.isFinite(sn.atrExpansion) ? sn.atrExpansion : null;
+
+    if (whipsaw.active) {
+        console.info(
+            JSON.stringify({
+                event: "V2_WHIPSAW_SHOCK_RECHECK_PROOF",
+                symbol: input.symbol,
+                market_subtype: finalSubtype,
+                directional_shock_state: input.state.directionalShockState ?? "NONE",
+                shock_phase: shockPhase,
+                boxPos: sn.boxPos,
+                boxBreakSide: sn.boxBreakSide,
+                rangeConfidence: sn.rangeConfidence,
+                breakoutFailureRate: sn.breakoutFailureRate,
+                volumeExpansion: volExpResolved,
+                atrExpansion: atrExpResolved,
+                recentSwingDirection: whipsaw.recentSwingDirection,
+                reverseSwingDetected: whipsaw.reverseSwingDetected,
+                retestConfirmed: whipsaw.retestConfirmed,
+                reclaimConfirmed: whipsaw.reclaimConfirmed,
+                reviewingTicks: sn.reviewing_ticks,
+                decision: "BLOCK_NEW_ENTRY_AND_ADDON",
+                reason: finalSubtypeReason,
+                expected_next_action: expectedNextActionOut,
+                whipsaw_hit_count: whipsaw.hitCount,
+                whipsaw_hits: whipsaw.hits,
+                transition_phase: transitionPhaseOut
+            })
+        );
+    }
+
     const output: MarketJudgmentOutput = {
         regime,
         regime_final,
-        subtype: subtypeDecision.subtype,
-        subtypeReason: subtypeDecision.subtypeReason,
+        subtype: finalSubtype,
+        subtypeReason: finalSubtypeReason,
         shockPhase,
         rangePhase,
         trendPhase,
-        transitionPhase,
+        transitionPhase: transitionPhaseOut,
         judgmentVersion: "v2_market_judgment_subtype_v1",
         no_trade_reason,
         data_ready,
@@ -814,11 +1019,17 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         htf_conflict: htfConflict,
         counter_trend_risk: counterTrendRisk,
         htf_entry_policy: htfEntryPolicy,
-        expected_next_action: expectedNextAction,
+        expected_next_action: expectedNextActionOut,
         htf_size_multiplier: htfSizeMultiplier,
         htf_requires_stronger_confirmation: htfRequiresStrongerConfirmation,
         htf_policy_reason: htfPolicyReason,
-        htf_hard_block_reason: htfHardBlockReason
+        htf_hard_block_reason: htfHardBlockReason,
+        metadata: {
+            whipsaw_shock_recheck_active: whipsaw.active,
+            whipsaw_hit_count: whipsaw.hitCount,
+            whipsaw_hits: whipsaw.hits,
+            whipsaw_box_orbit_chop: whipsaw.boxOrbitChop
+        }
     };
 
     // Logging new events
@@ -839,7 +1050,7 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         htf_conflict: htfConflict,
         counter_trend_risk: counterTrendRisk,
         htf_entry_policy: htfEntryPolicy,
-        expected_next_action: expectedNextAction,
+        expected_next_action: expectedNextActionOut,
         htf_size_multiplier: htfSizeMultiplier,
         htf_requires_stronger_confirmation: htfRequiresStrongerConfirmation,
         htf_policy_reason: htfPolicyReason,

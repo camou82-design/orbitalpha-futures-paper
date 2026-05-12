@@ -6,6 +6,19 @@ import { EngineV2Input, ExecutorOutput, EngineV2SignalState, EngineV2Side, Marke
  */
 export function executeTrendRegime(input: EngineV2Input, judgment: MarketJudgmentOutput): ExecutorOutput {
     const { snapshot: sn } = input;
+    if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
+        return {
+            signal: "WAIT_RECHECK",
+            side: "none",
+            reason: "WHIPSAW_SHOCK_RECHECK_TREND_HOLD",
+            baseSizeIntent: 0,
+            recheckSuggested: true,
+            isAddOnEligible: false,
+            stopPrice: null,
+            invalidationPx: null,
+            metadata: { whipsaw_shock_recheck: true }
+        };
+    }
     const emaGap = sn.emaGap ?? 0;
     const trendWeakness = sn.trendWeaknessScore ?? 0;
 
