@@ -256,12 +256,13 @@ export function detectMarketRegime(input: Readonly<{
 
   const volTooHigh = atrRel > 0.0105 || boxRel > 0.035;
   const dumpRisk = drop5 < -0.013 || drop12 < -0.022;
+  const shockDownRisk = drop5 < -0.008 || drop12 < -0.015;
 
   // Highway Exclusion Conditions: Block RANGE if volume + EMA gap expansion occurs
   const emaGapGrowing = emaSepRel > 0.0055 && Math.abs(slopeRel) > 0.0012;
   const forceTrendBias = emaGapGrowing && !dumpRisk;
 
-  if (dumpRisk || volTooHigh || forceTrendBias) {
+  if (dumpRisk || volTooHigh) {
     const reason = dumpRisk ? "dump_risk" : volTooHigh ? "vol_too_high" : "ema_expansion_trend";
     return {
       regime: "NO_TRADE",
@@ -380,6 +381,20 @@ export function detectMarketRegime(input: Readonly<{
       volHit: false
     }),
     boxBreakSide: "none",
-    regimeState: regimeOut as PaperRegimeState
+    regimeState: (() => {
+      if (regimeOut === "NO_TRADE") return "NO_TRADE";
+      
+      // [V2 HARDENING] Directional Shock / Trend State Overrides
+      if (shockDownRisk) {
+        if (regimeOut === "RANGE") return "DOWN_SHOCK_CONSOLIDATION";
+        if (regimeOut === "TREND") return "TREND_DOWN";
+        return "SHOCK_DOWN";
+      }
+      
+      if (bias === "down" && regimeOut === "TREND") return "TREND_DOWN";
+      if (bias === "up" && regimeOut === "TREND") return "TREND_UP";
+      
+      return regimeOut as PaperRegimeState;
+    })()
   };
 }

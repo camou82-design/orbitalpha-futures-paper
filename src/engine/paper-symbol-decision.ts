@@ -1567,6 +1567,27 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const originalRegimeState = regime_state;
   let overrideRegime: MarketRegime = input.regime;
 
+  // --- [V2 HARDENING] Directional Shock Regime Override ---
+  // If we are in a directional shock state, we must override the generic "RANGE" or "TREND"
+  // to descriptive directional states to prevent misclassification and ensure directional safety.
+  if (input.risk?.directionalShockState === "DOWN") {
+    if (regime_state === "RANGE") {
+      regime_state = "DOWN_SHOCK_CONSOLIDATION";
+    } else if (regime_state === "TREND") {
+      regime_state = "TREND_DOWN";
+    } else if (regime_state === "UNKNOWN") {
+      regime_state = "SHOCK_DOWN";
+    }
+  } else if (input.risk?.directionalShockState === "UP") {
+    if (regime_state === "TREND") {
+      regime_state = "TREND_UP";
+    } else if (regime_state === "UNKNOWN") {
+      regime_state = "SHOCK_UP";
+    }
+    // Note: UP-bias in RANGE is often still just RANGE or handled by breakout continuation,
+    // but we can add SHOCK_UP if needed for transparency.
+  }
+
   let regimeFallbackApplied = false;
   let regimeFallbackReason: string | null = null;
   let stage1ResultCodeOverride: import("../models/types").PaperStage1ResultCode | null = null;
@@ -3499,8 +3520,54 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const effectiveRangeUntil = rangeCooldownBypass ? 0 : rangeUntil;
   const trendUntil = input.trendCooldownUntilBySymbol.get(String(sym)) ?? 0;
 
+  // --- [V2 HARDENING] Strict RANGE Veto Rules ---
+  // 1. Forbid SHORT entries in RANGE lower zones (veto against catching falling knives or invalid range shorts).
+  // 2. Forbid LONG entries in RANGE upper zones (veto against chasing breakouts without reversal confirmation).
+  if (input.regime === "RANGE" && input.currentStage === 0) {
+    const boxPos = sn?.boxPos ?? 0.5;
+    const zone = classifyRangeZone(boxPos);
+    
+    if (zone === "lower" && intentSide === "short") {
+      return ret({
+        signal_state: signalToState(sn.signal),
+        regime_state,
+        final_decision: "REJECT",
+        reject_reason: "RANGE_LOWER_ZONE_SHORT_VETO",
+        guidance: "RANGE 하단부 숏 진입 금지 (Veto)",
+        stage1_result_code: "STAGE1_BLOCKED_RISK",
+        final_fail_reason: "RANGE_LOWER_SHORT_VETO"
+      }, {
+        intentSide: "short",
+        executorDecision,
+        adaptiveOk: false,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      });
+    }
+
+    if (zone === "upper" && intentSide === "long" && !input.rangeReopenCooldownBypass) {
+      // Basic protection against range-top long chasing.
+      return ret({
+        signal_state: signalToState(sn.signal),
+        regime_state,
+        final_decision: "REJECT",
+        reject_reason: "RANGE_UPPER_ZONE_LONG_VETO",
+        guidance: "RANGE 상단부 롱 추격 금지 (Veto)",
+        stage1_result_code: "STAGE1_BLOCKED_RISK",
+        final_fail_reason: "RANGE_UPPER_LONG_VETO"
+      }, {
+        intentSide: "long",
+        executorDecision,
+        adaptiveOk: false,
+        adaptiveDetail: null,
+        adaptiveResult: null,
+        aiGatePassed: false
+      });
+    }
+  }
+
   // Highway Engine Universal Evaluation - Regime is only secondary veto logic
-  // Highway Engine Universal Evaluation already performed earlier to preserve metrics
 
   // Auxiliary RANGE Veto / Downgrade Logic (executed only if Highway returns some valid intent but score is weak-ish)
   if (!useRangeStage0Engine && executorDecision?.entry_allowed && _aiResult.highwayValidityScore < 0.6) {
@@ -4520,7 +4587,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       return ret(
         {
           signal_state: signalToState(sn?.signal as any),
-          regime_state: regimeToState(input.regime, input.regimeUnknown),
+          regime_state: regime_state,
           edge_state: "FAIL_EXPECTANCY",
           risk_state: "DIRECTIONAL_SHOCK",
           execution_state: "DISABLED",

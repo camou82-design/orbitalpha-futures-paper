@@ -280,7 +280,7 @@ export type PaperStage1ResultCode =
   | "STAGE1_UNKNOWN_REGIME_RANGE_FALLBACK";
 
 export type PaperSignalState = "NONE" | "LONG_CANDIDATE" | "SHORT_CANDIDATE";
-export type PaperRegimeState = "TREND" | "RANGE" | "NO_TRADE" | "UNKNOWN";
+export type PaperRegimeState = "TREND" | "RANGE" | "NO_TRADE" | "UNKNOWN" | "SHOCK_UP" | "SHOCK_DOWN" | "TREND_UP" | "TREND_DOWN" | "DOWN_SHOCK_CONSOLIDATION";
 export type PaperEdgeState = "PASS" | "FAIL_FEE" | "FAIL_RR" | "FAIL_LOW_VOL" | "FAIL_EXPECTANCY";
 export type PaperRiskState =
   | "PASS"
