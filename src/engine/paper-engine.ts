@@ -6221,6 +6221,21 @@ export class PaperEngine {
       return { modified: false, success: true, record: open };
     }
 
+    // [VALIDATOR] Mandatory Account Config Check for posSide/accountPosMode safety
+    const cfgTry = await this.okxDemo.getAccountConfig();
+    if (!cfgTry.ok || !cfgTry.value?.[0]) {
+      this.logger.error("PROTECTIVE_ORDER_ACCOUNT_CONFIG_FAILED_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        error: cfgTry.ok ? "empty_data" : (cfgTry as any).error,
+        diag: cfgTry.diagnostics
+      });
+      this.symbolProtectionFailedBlocked.add(open.symbol);
+      return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
+    }
+    const okxPosMode = String((cfgTry.value[0] as any)?.posMode ?? "").trim().toLowerCase();
+
     let activeStopPrice = open.stopPrice ?? (open as any).ledger_stop_px;
     let activeTpPrice = open.targetPrice1;
     
@@ -6253,7 +6268,7 @@ export class PaperEngine {
         detail: "Cannot derive SL for OKX protective submit; treating as protection failure."
       });
       this.symbolProtectionFailedBlocked.add(open.symbol);
-      return { modified: false, success: false, record: open };
+      return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
     }
 
     let pricingLast = pricingLastInput;
@@ -6261,99 +6276,158 @@ export class PaperEngine {
     if (!pricingLast || pricingLast <= 0) pricingLast = this.lastTickSymbolSnapshotBySymbol.get(open.symbol)?.lastPrice;
     if (!pricingLast || pricingLast <= 0) pricingLast = 0;
 
-    if (open.isProtectiveStopRegistered && open.protectiveStopAlgoId) {
-      const algo = (this as any).cachedOpsAlgos?.find((a: any) => String(a.algoId) === open.protectiveStopAlgoId);
-      const currentSlPx = algo ? Number(algo.slTriggerPx) : null;
-      const currentTpPx = algo ? Number(algo.tpTriggerPx) : null;
-      const currentSz = algo ? Number(algo.sz) : null;
-      const currentType = algo ? String(algo.ordType) : null;
-
-      const wantsTp = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0;
-      const priceMatchesSl = typeof currentSlPx === "number" && Number.isFinite(currentSlPx) && Math.abs(currentSlPx - activeStopPrice) < 1e-8;
-      const priceMatchesTp = !wantsTp || (typeof currentTpPx === "number" && Number.isFinite(currentTpPx) && Math.abs(currentTpPx - Number(activeTpPrice)) < 1e-8);
-      const contractsToProtect = open.okxContracts ?? 0;
-      const sizeMatches = typeof currentSz === "number" && Number.isFinite(currentSz) && Math.abs(currentSz - contractsToProtect) < 1e-8;
-      const typeMatches = wantsTp ? currentType === "oco" : (currentType === "stop" || currentType === "conditional");
-
-      if (priceMatchesSl && priceMatchesTp && sizeMatches && typeMatches) {
-        this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId: open.protectiveStopAlgoId, exchange_stop_px: currentSlPx, reconciled: true, flowId });
-        if (wantsTp) this.logger.info("TAKE_PROFIT_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId: open.protectiveStopAlgoId, exchange_tp_px: currentTpPx, reconciled: true, flowId });
-        return { modified: false, success: true, record: open };
-      } else {
-        try {
-          await this.okxDemo.cancelAlgoOrder([{ instId: toOkxSwapInstId(open.symbol), algoId: open.protectiveStopAlgoId }]);
-        } catch (e) {}
-        open = { ...open, isProtectiveStopRegistered: false, protectiveStopAlgoId: undefined };
-      }
-    }
-
-    if (this.opsOrdersScanEverDone && this.okxDemo) {
-      const candidate = (this.cachedOpsAlgos ?? []).find((a: any) => {
-        if (a.instId !== toOkxSwapInstId(open.symbol)) return false;
-        const ps = String(a.posSide ?? "").trim().toLowerCase();
-        const sideOk = !ps || ps === "net" || ps === (open.side === "long" ? "long" : "short");
-        return sideOk && (a.ordType === "conditional" || a.ordType === "oco" || a.ordType === "stop") && a.reduceOnly === "true";
-      });
-
-      if (candidate) {
-        const candidateSlPx = Number(candidate.slTriggerPx);
-        const candidateTpPx = Number(candidate.tpTriggerPx);
-        if (Math.abs(candidateSlPx - activeStopPrice) < 1e-8 && (activeTpPrice == null || activeTpPrice <= 0 || Math.abs(candidateTpPx - activeTpPrice) < 1e-8)) {
-          return { modified: true, success: true, record: { ...open, stopPrice: activeStopPrice, targetPrice1: activeTpPrice, isProtectiveStopRegistered: true, protectiveStopAlgoId: candidate.algoId } };
-        }
-      }
-    }
-
     const instId = toOkxSwapInstId(open.symbol);
+    const contractsToProtect = open.okxContracts ?? 0;
+    const tickerTry = await this.okxDemo.tryGetTicker(open.symbol);
+    const lastPxForOkx = tickerTry.ok ? tickerTry.value.last : pricingLast;
+
+    const wantsTp = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0;
+
+    // [RECONCILE] Check existing granular tracking
+    let currentSlAlgo: any = null;
+    let currentTpAlgo: any = null;
+
+    if (open.protectiveSlAlgoId) {
+      currentSlAlgo = this.cachedOpsAlgos?.find((a: any) => String(a.algoId) === open.protectiveSlAlgoId);
+    }
+    if (open.protectiveTpAlgoId) {
+      currentTpAlgo = this.cachedOpsAlgos?.find((a: any) => String(a.algoId) === open.protectiveTpAlgoId);
+    }
+
+    // Fallback for legacy single-ID tracking (OCO or SL-only)
+    if (!currentSlAlgo && open.protectiveStopAlgoId) {
+      const legacyAlgo = this.cachedOpsAlgos?.find((a: any) => String(a.algoId) === open.protectiveStopAlgoId);
+      if (legacyAlgo && (legacyAlgo.ordType === "oco" || legacyAlgo.ordType === "conditional" || legacyAlgo.ordType === "stop")) {
+        currentSlAlgo = legacyAlgo;
+        if (legacyAlgo.ordType === "oco") currentTpAlgo = legacyAlgo;
+      }
+    }
+
+    const slOk = currentSlAlgo && 
+                Math.abs(Number(currentSlAlgo.slTriggerPx) - activeStopPrice) < 1e-8 &&
+                Math.abs(Number(currentSlAlgo.sz) - contractsToProtect) < 1e-8;
+    
+    const tpOkSplit = !wantsTp || (currentTpAlgo && 
+                      Math.abs(Number(currentTpAlgo.slTriggerPx) - activeTpPrice!) < 1e-8 &&
+                      Math.abs(Number(currentTpAlgo.sz) - contractsToProtect) < 1e-8);
+
+    const isOco = currentSlAlgo && currentSlAlgo.ordType === "oco";
+    const tpOkOco = isOco && Math.abs(Number(currentSlAlgo.tpTriggerPx) - Number(activeTpPrice)) < 1e-8;
+
+    const reconciled = slOk && (isOco ? tpOkOco : tpOkSplit);
+
+    if (reconciled && open.isProtectiveStopRegistered && (!wantsTp || open.isTakeProfitRegistered)) {
+      this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId: open.protectiveSlAlgoId || open.protectiveStopAlgoId, exchange_stop_px: activeStopPrice, reconciled: true, flowId });
+      if (wantsTp) this.logger.info("TAKE_PROFIT_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId: open.protectiveTpAlgoId || open.protectiveStopAlgoId, exchange_tp_px: activeTpPrice, reconciled: true, flowId });
+      return { modified: false, success: true, record: open };
+    }
+
+    // If not reconciled or missing legs, re-register atomically
+    if (open.protectiveSlAlgoId || open.protectiveTpAlgoId || open.protectiveStopAlgoId) {
+      const idsToCancel = new Set<string>();
+      if (open.protectiveSlAlgoId) idsToCancel.add(open.protectiveSlAlgoId);
+      if (open.protectiveTpAlgoId) idsToCancel.add(open.protectiveTpAlgoId);
+      if (open.protectiveStopAlgoId) idsToCancel.add(open.protectiveStopAlgoId);
+      for (const id of idsToCancel) {
+        try { await this.okxDemo.cancelAlgoOrder([{ instId, algoId: id }]); } catch (e) {}
+      }
+      open = { ...open, isProtectiveStopRegistered: false, isTakeProfitRegistered: false, protectiveStopAlgoId: undefined, protectiveSlAlgoId: undefined, protectiveTpAlgoId: undefined };
+    }
+
+    // [VALIDATOR] Trigger price layout check
+    if (!this.validateProtectiveOkxTriggerLayout({ positionSide: open.side, lastPx: lastPxForOkx, slTriggerPx: activeStopPrice, tpTriggerPx: wantsTp ? activeTpPrice : null }).ok) {
+      this.symbolProtectionFailedBlocked.add(open.symbol);
+      return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
+    }
+
     const side = open.side === "long" ? "sell" : "buy";
     const hedgePosSide = open.side === "long" ? "long" : "short";
-    let ordType = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0 ? "oco" : "conditional";
     
-    let szStr = "0";
-    if (open.okxContracts != null && open.okxContracts > 0) {
-      const inst = this.instrumentCache.get(instId);
-      szStr = inst ? this.normalizeOkxReduceOrderSize({ symbol: open.symbol, okxContracts: open.okxContracts, sizing: inst, flowId, reason: "protective_stop_registration" }).normalized_sz : String(open.okxContracts);
-    }
+    const inst = this.instrumentCache.get(instId);
+    const szStr = inst ? this.normalizeOkxReduceOrderSize({ symbol: open.symbol, okxContracts: contractsToProtect, sizing: inst, flowId, reason: "protective_stop_registration" }).normalized_sz : String(contractsToProtect);
 
     if (Number(szStr) <= 0) {
       this.symbolProtectionFailedBlocked.add(open.symbol);
       return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
     }
 
-    const cfgTry = await this.okxDemo.getAccountConfig();
-    const okxPosMode = cfgTry.ok ? String((cfgTry.value as any)?.[0]?.posMode ?? "").trim() : "";
-    const tickerTry = await this.okxDemo.tryGetTicker(open.symbol);
-    const lastPxForOkx = tickerTry.ok ? tickerTry.value.last : pricingLast;
+    // [REGISTRATION] OCO -> Fallback to Split Conditional
+    let finalSlAlgoId: string | undefined;
+    let finalTpAlgoId: string | undefined;
+    let protectionSuccess = false;
 
-    if (!this.validateProtectiveOkxTriggerLayout({ positionSide: open.side, lastPx: lastPxForOkx, slTriggerPx: activeStopPrice, tpTriggerPx: ordType === "oco" ? activeTpPrice : null }).ok) {
-      return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
-    }
+    if (wantsTp) {
+      const ocoRes = await this.okxDemo.submitAlgoOrder({
+        instId, tdMode: "cross", side, posSide: hedgePosSide, accountPosMode: okxPosMode, ordType: "oco", sz: szStr, reduceOnly: true,
+        slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last",
+        tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1", tpTriggerPxType: "last"
+      });
 
-    let submit = await this.okxDemo.submitAlgoOrder({
-      instId, tdMode: "cross", side, posSide: hedgePosSide, accountPosMode: okxPosMode, ordType, sz: szStr, reduceOnly: true,
-      slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last",
-      ...(ordType === "oco" ? { tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1", tpTriggerPxType: "last" } : {})
-    });
-
-    if (!submit.ok && ordType === "oco") {
-      const rowCodes = this.extractOkxOrderAlgoRowCodes(submit.diagnostics);
-      if (rowCodes.sCode === "51000" || rowCodes.sMsg?.includes("ordType")) {
-        ordType = "conditional";
-        submit = await this.okxDemo.submitAlgoOrder({
-          instId, tdMode: "cross", side, posSide: hedgePosSide, accountPosMode: okxPosMode, ordType: "conditional", sz: szStr, reduceOnly: true,
-          slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last"
+      if (ocoRes.ok && ocoRes.value?.[0]?.algoId) {
+        finalSlAlgoId = String(ocoRes.value[0].algoId);
+        finalTpAlgoId = finalSlAlgoId;
+        protectionSuccess = true;
+        this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId: finalSlAlgoId, exchange_stop_px: activeStopPrice, flowId });
+        this.logger.info("TAKE_PROFIT_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId: finalTpAlgoId, exchange_tp_px: activeTpPrice, flowId });
+      } else {
+        const rowCodes = this.extractOkxOrderAlgoRowCodes(ocoRes.diagnostics);
+        const isOrdTypeError = rowCodes.sCode === "51000" || rowCodes.sMsg?.includes("ordType");
+        
+        this.logger.info("OKX_PROTECTIVE_ORDER_SUBMIT_HTTP_DIAGNOSTICS", {
+          symbol: open.symbol, flowId, ordType: "oco", sCode: rowCodes.sCode, sMsg: rowCodes.sMsg, diag: ocoRes.diagnostics
         });
+
+        if (isOrdTypeError) {
+          this.logger.warn("PROTECTIVE_OCO_FALLBACK_TO_CONDITIONAL_PROOF", { symbol: open.symbol, flowId, reason: "oco_rejected_falling_back_to_split" });
+          
+          // Split: SL (Conditional)
+          const slRes = await this.okxDemo.submitAlgoOrder({
+            instId, tdMode: "cross", side, posSide: hedgePosSide, accountPosMode: okxPosMode, ordType: "conditional", sz: szStr, reduceOnly: true,
+            slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last"
+          });
+          
+          // Split: TP (Conditional triggering at target price)
+          const tpRes = await this.okxDemo.submitAlgoOrder({
+            instId, tdMode: "cross", side, posSide: hedgePosSide, accountPosMode: okxPosMode, ordType: "conditional", sz: szStr, reduceOnly: true,
+            slTriggerPx: String(activeTpPrice), slOrdPx: "-1", slTriggerPxType: "last"
+          });
+
+          if (slRes.ok && slRes.value?.[0]?.algoId && tpRes.ok && tpRes.value?.[0]?.algoId) {
+            finalSlAlgoId = String(slRes.value[0].algoId);
+            finalTpAlgoId = String(tpRes.value[0].algoId);
+            protectionSuccess = true;
+            this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId: finalSlAlgoId, exchange_stop_px: activeStopPrice, flowId, type: "split_sl" });
+            this.logger.info("TAKE_PROFIT_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId: finalTpAlgoId, exchange_tp_px: activeTpPrice, flowId, type: "split_tp" });
+          } else {
+            this.logger.error("PROTECTIVE_SPLIT_SUBMIT_FAILED", {
+              symbol: open.symbol, sl_ok: slRes.ok, tp_ok: tpRes.ok, flowId
+            });
+          }
+        }
+      }
+    } else {
+      // SL only
+      const slRes = await this.okxDemo.submitAlgoOrder({
+        instId, tdMode: "cross", side, posSide: hedgePosSide, accountPosMode: okxPosMode, ordType: "conditional", sz: szStr, reduceOnly: true,
+        slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last"
+      });
+      if (slRes.ok && slRes.value?.[0]?.algoId) {
+        finalSlAlgoId = String(slRes.value[0].algoId);
+        protectionSuccess = true;
+        this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId: finalSlAlgoId, exchange_stop_px: activeStopPrice, flowId });
       }
     }
 
-    if (submit.ok && submit.value?.[0]?.algoId) {
-      const algoId = String(submit.value[0].algoId);
-      this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId, exchange_stop_px: activeStopPrice, flowId });
-      if (ordType === "oco") this.logger.info("TAKE_PROFIT_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId, exchange_tp_px: activeTpPrice, flowId });
-      return { modified: true, success: true, record: { ...open, stopPrice: activeStopPrice, targetPrice1: ordType === "oco" ? activeTpPrice : undefined, protectiveStopAlgoId: algoId, isProtectiveStopRegistered: true, isProtectionFailed: false } };
+    if (protectionSuccess) {
+      return {
+        modified: true, success: true,
+        record: {
+          ...open, stopPrice: activeStopPrice, targetPrice1: wantsTp ? activeTpPrice : undefined,
+          protectiveSlAlgoId: finalSlAlgoId, protectiveTpAlgoId: finalTpAlgoId,
+          isProtectiveStopRegistered: true, isTakeProfitRegistered: wantsTp, isProtectionFailed: false
+        }
+      };
     } else {
-      const error = (submit as any).error || (submit as any).diagnostics?.retMsg || "unknown_error";
-      this.logger.error("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: false, protection_source: protectionSource, error, flowId });
       this.symbolProtectionFailedBlocked.add(open.symbol);
       return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
     }
