@@ -6374,35 +6374,69 @@ export class PaperEngine {
         const isOrdTypeError = rowCodes.sCode === "51000" || rowCodes.sMsg?.includes("ordType");
         
         this.logger.info("OKX_PROTECTIVE_ORDER_SUBMIT_HTTP_DIAGNOSTICS", {
-          symbol: open.symbol, flowId, ordType: "oco", sCode: rowCodes.sCode, sMsg: rowCodes.sMsg, diag: ocoRes.diagnostics
+          symbol: open.symbol, flowId, ordType: "oco",
+          instId, side, posSide: hedgePosSide, tdMode: "cross", sz: szStr, reduceOnly: true,
+          slTriggerPx: activeStopPrice, tpTriggerPx: activeTpPrice, slOrdPx: "-1", tpOrdPx: "-1",
+          sCode: rowCodes.sCode, sMsg: rowCodes.sMsg, fullResponse: ocoRes.diagnostics
         });
 
         if (isOrdTypeError) {
-          this.logger.warn("PROTECTIVE_OCO_FALLBACK_TO_CONDITIONAL_PROOF", { symbol: open.symbol, flowId, reason: "oco_rejected_falling_back_to_split" });
-          
+          let slSubmitSuccess = false;
+          let tpSubmitSuccess = false;
+          let rollbackAttempted = false;
+          let rollbackSuccess = false;
+          let slAlgoId: string | undefined;
+          let tpAlgoId: string | undefined;
+
           // Split: SL (Conditional)
           const slRes = await this.okxDemo.submitAlgoOrder({
             instId, tdMode: "cross", side, posSide: hedgePosSide, accountPosMode: okxPosMode, ordType: "conditional", sz: szStr, reduceOnly: true,
             slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last"
           });
-          
-          // Split: TP (Conditional triggering at target price)
+          if (slRes.ok && slRes.value?.[0]?.algoId) {
+            slSubmitSuccess = true;
+            slAlgoId = String(slRes.value[0].algoId);
+          }
+
+          // Split: TP (Conditional)
           const tpRes = await this.okxDemo.submitAlgoOrder({
             instId, tdMode: "cross", side, posSide: hedgePosSide, accountPosMode: okxPosMode, ordType: "conditional", sz: szStr, reduceOnly: true,
-            slTriggerPx: String(activeTpPrice), slOrdPx: "-1", slTriggerPxType: "last"
+            tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1", tpTriggerPxType: "last"
           });
+          if (tpRes.ok && tpRes.value?.[0]?.algoId) {
+            tpSubmitSuccess = true;
+            tpAlgoId = String(tpRes.value[0].algoId);
+          }
 
-          if (slRes.ok && slRes.value?.[0]?.algoId && tpRes.ok && tpRes.value?.[0]?.algoId) {
-            finalSlAlgoId = String(slRes.value[0].algoId);
-            finalTpAlgoId = String(tpRes.value[0].algoId);
+          if (slSubmitSuccess && tpSubmitSuccess) {
+            finalSlAlgoId = slAlgoId;
+            finalTpAlgoId = tpAlgoId;
             protectionSuccess = true;
             this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId: finalSlAlgoId, exchange_stop_px: activeStopPrice, flowId, type: "split_sl" });
             this.logger.info("TAKE_PROFIT_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId: finalTpAlgoId, exchange_tp_px: activeTpPrice, flowId, type: "split_tp" });
           } else {
+            // ROLLBACK: If SL succeeded but TP failed, cancel SL
+            if (slSubmitSuccess && !tpSubmitSuccess && slAlgoId) {
+              rollbackAttempted = true;
+              const cancelRes = await this.okxDemo.cancelAlgoOrder([{ instId, algoId: slAlgoId }]);
+              rollbackSuccess = !!cancelRes.ok;
+            }
             this.logger.error("PROTECTIVE_SPLIT_SUBMIT_FAILED", {
-              symbol: open.symbol, sl_ok: slRes.ok, tp_ok: tpRes.ok, flowId
+              symbol: open.symbol, sl_ok: slSubmitSuccess, tp_ok: tpSubmitSuccess, rollbackAttempted, rollbackSuccess, flowId
             });
           }
+
+          this.logger.info("PROTECTIVE_OCO_FALLBACK_TO_CONDITIONAL_PROOF", {
+            symbol: open.symbol, side, flowId,
+            oco_error: `${rowCodes.sCode}:${rowCodes.sMsg}`,
+            sl_submit_success: slSubmitSuccess,
+            tp_submit_success: tpSubmitSuccess,
+            sl_algo_id: slAlgoId,
+            tp_algo_id: tpAlgoId,
+            rollback_attempted: rollbackAttempted,
+            rollback_success: rollbackSuccess,
+            final_protection_state: protectionSuccess ? "SUCCESS" : "FAILED_ATOMicity_REJECTED"
+          });
         }
       }
     } else {
@@ -6415,6 +6449,14 @@ export class PaperEngine {
         finalSlAlgoId = String(slRes.value[0].algoId);
         protectionSuccess = true;
         this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: true, protection_source: protectionSource, algoId: finalSlAlgoId, exchange_stop_px: activeStopPrice, flowId });
+      } else {
+        const rowCodes = this.extractOkxOrderAlgoRowCodes(slRes.diagnostics);
+        this.logger.info("OKX_PROTECTIVE_ORDER_SUBMIT_HTTP_DIAGNOSTICS", {
+          symbol: open.symbol, flowId, ordType: "conditional_sl",
+          instId, side, posSide: hedgePosSide, tdMode: "cross", sz: szStr, reduceOnly: true,
+          slTriggerPx: activeStopPrice, slOrdPx: "-1",
+          sCode: rowCodes.sCode, sMsg: rowCodes.sMsg, fullResponse: slRes.diagnostics
+        });
       }
     }
 
