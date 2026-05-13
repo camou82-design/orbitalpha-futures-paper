@@ -419,7 +419,7 @@ export class OkxDemoClient {
     q.set("instType", args.instType);
     if (args.instId) q.set("instId", args.instId);
     if (args.ordType) q.set("ordType", args.ordType);
-    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/orders-algos-pending", q, null);
+    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/orders-algo-pending", q, null);
   }
 
   async checkSignedReady(): Promise<{
