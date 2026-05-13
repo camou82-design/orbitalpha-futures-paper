@@ -852,6 +852,8 @@ export type PaperOpenPositionRecord = {
   // Protective Stop Order Tracking
   protectiveStopAlgoId?: string;
   isProtectiveStopRegistered?: boolean;
+  /** Whether OKX protective order registration failed and requires repair. */
+  isProtectionFailed?: boolean;
   /** Whether the position was opened by V2 authority. Used for unit scaling logic. */
   isV2Authority?: boolean;
 

@@ -45,7 +45,9 @@ export type EngineV2MarketSubtype =
     /** Protective / wait umbrella: shock chop, volume spike, unconfirmed retest-reclaim (not an entry mode). */
     | "WHIPSAW_SHOCK_RECHECK"
     | "WHIPSAW_SOFT_WATCH"
-    | "EARLY_LONG_PROBE";
+    | "EARLY_LONG_PROBE"
+    | "EARLY_SHORT_PROBE"
+    | "FAST_TREND_SHIFT";
 export type EngineV2SignalState = "LONG_CANDIDATE" | "SHORT_CANDIDATE" | "WAIT_RECHECK" | "NONE";
 export type EngineV2Side = "long" | "short" | "none" | null;
 export type EngineV2FinalDecision = "ENTER" | "EXIT" | "SKIP" | "HOLD" | "REJECT" | "DISABLED";
@@ -651,6 +653,28 @@ export interface MarketJudgmentOutput {
             block_reason: string;
             hits: string[];
             counter_trend_risk: boolean;
+        };
+        fastTrendShift?: {
+            active: boolean;
+            direction: "long" | "short" | "none";
+            candidate: boolean;
+            allowed: boolean;
+            side: "long" | "short" | "none";
+            reason: string;
+            block_reason: string;
+            higher_low_detected: boolean;
+            higher_high_detected: boolean;
+            lower_high_detected: boolean;
+            lower_low_detected: boolean;
+            box_mid_reclaimed: boolean;
+            box_mid_lost: boolean;
+            box_upper_breakout_hold: boolean;
+            box_lower_breakdown_hold: boolean;
+            ema_slope_shift: boolean;
+            volume_expansion: boolean;
+            baseSizeIntent: number;
+            stop_price: number | null;
+            stop_basis: string;
         };
     };
     metadata?: Record<string, any>;

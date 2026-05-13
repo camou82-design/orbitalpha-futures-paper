@@ -95,9 +95,21 @@ export function calculateRiskSizing(
     } else if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
         isBlocked = true;
         blockReason = "WHIPSAW_SHOCK_RECHECK";
-    } else if (judgment.subtype === "EARLY_LONG_PROBE") {
-        // Explicitly allow probe subtype
+    } else if (judgment.subtype === "EARLY_LONG_PROBE" || judgment.subtype === "EARLY_SHORT_PROBE" || judgment.subtype === "FAST_TREND_SHIFT") {
+        // Explicitly allow probe subtypes but enforce structural safety
         isBlocked = false;
+
+        const stopPrice = executor.stopPrice;
+        if (!stopPrice || stopPrice <= 0) {
+            isBlocked = true;
+            blockReason = "ENTRY_BLOCKED_NO_STRUCTURAL_STOP";
+        }
+
+        const probeBlockReason = judgment.diagnostics?.early_probe?.block_reason || judgment.diagnostics?.fastTrendShift?.block_reason;
+        if (probeBlockReason === "TOTAL_BEARISH_HTF" || probeBlockReason === "TOTAL_BULLISH_HTF") {
+            isBlocked = true;
+            blockReason = probeBlockReason;
+        }
     }
     else if (!effectivePaperExecutionReady) {
         isBlocked = true;
@@ -151,7 +163,7 @@ export function calculateRiskSizing(
         sizeMultiplier *= 0.1; // Scouting mode is forced to 10% size
     }
 
-    if (judgment.subtype === "EARLY_LONG_PROBE") {
+    if (judgment.subtype === "EARLY_LONG_PROBE" || judgment.subtype === "EARLY_SHORT_PROBE") {
         sizeMultiplier = judgment.counter_trend_risk ? 0.22 : 0.32;
     }
 

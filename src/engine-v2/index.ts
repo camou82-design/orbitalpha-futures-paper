@@ -243,7 +243,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             pumpState: v2State.pumpState,
             data_ready: judgment.data_ready,
             dump_protection_hit: judgment.dump_protection_hit,
-            volatility_guard_hit: judgment.volatility_guard_hit
+            volatility_guard_hit: judgment.volatility_guard_hit,
+            fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null
         }));
     }
 

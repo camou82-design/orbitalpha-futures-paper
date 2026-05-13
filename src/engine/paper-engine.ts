@@ -4429,6 +4429,12 @@ export class PaperEngine {
             side_veto_detail = v2Env?.promotion_block_reason || "TREND_PROMOTION_VETOED";
           } else if (size_suppressed_by_recovery) {
             side_veto_detail = "RECOVERY_MODE_SIZE_SUPPRESSED";
+          } else if (v2Env?.marketSubtype === "FAST_TREND_SHIFT" || v2Env?.marketSubtype === "EARLY_LONG_PROBE" || v2Env?.marketSubtype === "EARLY_SHORT_PROBE") {
+            if (v2Env?.raw_missing_condition === "ENTRY_BLOCKED_NO_STRUCTURAL_STOP") {
+              side_veto_detail = "PROBE_BLOCKED_MISSING_STRUCTURAL_STOP";
+            } else if (v2Env?.raw_missing_condition === "TOTAL_BEARISH_HTF" || v2Env?.raw_missing_condition === "TOTAL_BULLISH_HTF") {
+              side_veto_detail = "PROBE_HTF_ALIGNMENT_VETOED";
+            }
           }
         }
 
@@ -6482,7 +6488,7 @@ export class PaperEngine {
     const instId = toOkxSwapInstId(open.symbol);
     const side = open.side === "long" ? "sell" : "buy";
     const hedgePosSide = open.side === "long" ? "long" : "short";
-    const ordType = activeTpPrice != null && activeTpPrice > 0 ? "oco" : "stop";
+    const ordType = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0 ? "oco" : "conditional";
     
     // [HARDENED] Unified OKX Contract Size Normalizer for PROTECTIVE STOP
     let sz = 0;
@@ -6545,7 +6551,7 @@ export class PaperEngine {
         reason: "invalid_or_zero_contract_size_for_protective_submit"
       });
       this.symbolProtectionFailedBlocked.add(open.symbol);
-      return { modified: false, success: false, record: open };
+      return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
     }
 
     const cfgTry = await this.okxDemo.getAccountConfig();
@@ -6558,7 +6564,7 @@ export class PaperEngine {
         error: cfgTry.ok ? "empty_config" : String((cfgTry as { error?: string }).error ?? "unknown")
       });
       this.symbolProtectionFailedBlocked.add(open.symbol);
-      return { modified: false, success: false, record: open };
+      return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
     }
     const okxPosMode = String((cfgTry.value[0] as Record<string, unknown>).posMode ?? "").trim();
 
@@ -6577,7 +6583,7 @@ export class PaperEngine {
       tpTriggerPx: ordType === "oco" ? activeTpPrice : null
     });
     if (!layout.ok) {
-      this.logger.warn("PROTECTIVE_ORDER_PRICE_INVALID_PROOF", {
+      this.logger.warn("PROTECTIVE_ORDER_PAYLOAD_INVALID_PROOF", {
         symbol: open.symbol,
         side: open.side,
         flowId,
@@ -6589,7 +6595,7 @@ export class PaperEngine {
         violations: layout.violations,
         okx_pos_mode: okxPosMode
       });
-      return { modified: false, success: false, record: open };
+      return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
     }
 
     const submit = await this.okxDemo.submitAlgoOrder({
@@ -6603,7 +6609,8 @@ export class PaperEngine {
       reduceOnly: true,
       slTriggerPx: String(activeStopPrice),
       slOrdPx: "-1",
-      ...(ordType === "oco" ? { tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1" } : {})
+      slTriggerPxType: "last",
+      ...(ordType === "oco" ? { tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1", tpTriggerPxType: "last" } : {})
     });
 
     if (submit.ok && submit.value?.[0]?.algoId) {
@@ -6710,7 +6717,7 @@ export class PaperEngine {
       // Block new entries for this symbol
       this.symbolProtectionFailedBlocked.add(open.symbol);
 
-      return { modified: false, success: false, record: open };
+      return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
     }
   }
 
@@ -6732,6 +6739,7 @@ export class PaperEngine {
     isAddOn?: boolean;
     entryPrice?: number | null;
     stopPrice?: number | null;
+    takeProfitPrice?: number | null;
     paperExecutionReady?: boolean;
     stageMarginKrw?: number | null;
     exposureNotionalKrw?: number | null;
@@ -7487,6 +7495,27 @@ export class PaperEngine {
       chain_hint: "after_OKX_ACCOUNT_MODE_PROOF_and_OKX_ORDER_SIZE_PROOF_before_submit"
     });
 
+    // [V2_PROTECTION_HARDENING] Build attachAlgoOrds for mandatory entry-time protection
+    const attachAlgoOrds: any[] = [];
+    if (input.isNewEntry && (input.stopPrice || input.takeProfitPrice)) {
+      const ordType = input.takeProfitPrice && input.takeProfitPrice > 0 ? "oco" : "conditional";
+      const slTriggerPx = input.stopPrice ? String(input.stopPrice) : undefined;
+      const tpTriggerPx = (ordType === "oco" && input.takeProfitPrice) ? String(input.takeProfitPrice) : undefined;
+
+      if (slTriggerPx) {
+        attachAlgoOrds.push({
+          attachAlgoOrdId: `sl_${input.clOrdId}`,
+          ordType,
+          sz: submitSzStr,
+          slTriggerPx,
+          slOrdPx: "-1",
+          slTriggerPxType: "last",
+          ...(ordType === "oco" ? { tpTriggerPx, tpOrdPx: "-1", tpTriggerPxType: "last" } : {}),
+          reduceOnly: true
+        });
+      }
+    }
+
     try {
       const submit = await this.okxDemo.submitOrder({
         instId,
@@ -7497,7 +7526,8 @@ export class PaperEngine {
         tdMode: orderTdMode,
         ordType: input.ordType ?? (this.config.okxAuthMode === "live" ? "limit" : "market"),
         px: limitPrice ? String(limitPrice) : undefined,
-        reduceOnly: input.reduceOnly
+        reduceOnly: input.reduceOnly,
+        attachAlgoOrds: attachAlgoOrds.length > 0 ? attachAlgoOrds : undefined
       });
 
       if (!submit.ok) {
@@ -14138,6 +14168,7 @@ export class PaperEngine {
             marketRegime: authority.regime ?? null,
             entryPrice: first.lastPrice,
             stopPrice,
+            takeProfitPrice: initialTpForRecord,
             paperExecutionReady: executionSnapshot.paperReady,
             stageMarginKrw: authority.stageMarginKrw ?? null,
             exposureNotionalKrw: authority.exposureNotionalKrw ?? null,
@@ -14217,6 +14248,8 @@ export class PaperEngine {
               notional: v2EntrySizeUsd,
               regimeAtEntry: slReg,
               lifecycleState: isPending ? "PENDING_EXCHANGE_CONFIRM" : "OPEN",
+              isProtectiveStopRegistered: submit.ok === true,
+              isProtectionFailed: submit.ok !== true,
               exchangeOrdId: submit.ordId ?? undefined,
               exchangeClOrdId: clOrdId,
               exchangeFilledSize: submit.fillSize ?? 0,
@@ -14889,6 +14922,13 @@ export class PaperEngine {
                 ? res.decision.stopLoss
                 : null;
 
+          const committedTpForSubmit =
+            authority.source === "v2" && v2CommittedRiskPlan?.initial_tp_price != null
+              ? v2CommittedRiskPlan.initial_tp_price
+              : typeof res.decision.takeProfit === "number" && Number.isFinite(res.decision.takeProfit) && res.decision.takeProfit !== 0
+                ? res.decision.takeProfit
+                : null;
+
           submit = await this.submitOkxOrder({
             symbol: first.symbol,
             side,
@@ -14907,6 +14947,7 @@ export class PaperEngine {
             isAddOn: false,
             entryPrice: first.lastPrice,
             stopPrice: committedStopForSubmit,
+            takeProfitPrice: committedTpForSubmit,
             paperExecutionReady: this.paperExecutionReady,
             stageMarginKrw: authority.stageMarginKrw ?? null,
             isNewEntry,

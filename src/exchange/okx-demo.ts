@@ -18,6 +18,15 @@ type OkxApiEnvelope<T> = Readonly<{
   data: T[];
 }>;
 
+export type OkxAttachAlgoOrd = {
+  tpTriggerPx?: string;
+  tpOrdPx?: string;
+  slTriggerPx?: string;
+  slOrdPx?: string;
+  tpTriggerPxType?: string;
+  slTriggerPxType?: string;
+};
+
 export type OkxOrderSubmitInput = Readonly<{
   instId: string;
   side: OkxDemoOrderSide;
@@ -29,6 +38,7 @@ export type OkxOrderSubmitInput = Readonly<{
   px?: string;
   clOrdId?: string;
   reduceOnly?: boolean;
+  attachAlgoOrds?: OkxAttachAlgoOrd[];
 }>;
 
 export type OkxPublicDiagnostics = Readonly<{
@@ -286,7 +296,8 @@ export class OkxDemoClient {
       sz: input.sz,
       ...(input.px ? { px: input.px } : {}),
       ...(input.clOrdId ? { clOrdId: input.clOrdId } : {}),
-      ...(input.reduceOnly === true ? { reduceOnly: "true" } : {})
+      ...(input.reduceOnly === true ? { reduceOnly: "true" } : {}),
+      ...(input.attachAlgoOrds ? { attachAlgoOrds: input.attachAlgoOrds } : {})
     };
     if (payload.ordType === "limit" && !payload.px) {
       return Promise.resolve({
@@ -328,9 +339,46 @@ export class OkxDemoClient {
     slOrdPx?: string;
     tpTriggerPx?: string;
     tpOrdPx?: string;
+    slTriggerPxType?: string;
+    tpTriggerPxType?: string;
   }): Promise<TryResult<Record<string, unknown>[]>> {
     const mode = String(input.accountPosMode ?? "").trim().toLowerCase();
     const isLongShortMode = mode === "long_short_mode";
+
+    // [VALIDATOR] Mandatory field check before calling OKX
+    const missing = [];
+    if (!input.instId) missing.push("instId");
+    if (!input.side) missing.push("side");
+    if (!input.tdMode) missing.push("tdMode");
+    if (!input.ordType) missing.push("ordType");
+    if (!input.sz) missing.push("sz");
+
+    // ordType validation
+    const allowedAlgoTypes = ["conditional", "oco", "trigger", "move_order_stop", "twap"];
+    if (input.ordType && !allowedAlgoTypes.includes(input.ordType)) {
+      return Promise.resolve({
+        ok: false,
+        error: "PROTECTIVE_ORDER_PAYLOAD_INVALID_PROOF",
+        diagnostics: {
+          httpStatus: 0,
+          requestUrl: "/api/v5/trade/order-algo",
+          retMsg: `Invalid ordType: ${input.ordType}. Must be one of ${allowedAlgoTypes.join(", ")}`
+        }
+      });
+    }
+
+    if (missing.length > 0) {
+      return Promise.resolve({
+        ok: false,
+        error: "PROTECTIVE_ORDER_PAYLOAD_INVALID_PROOF",
+        diagnostics: {
+          httpStatus: 0,
+          requestUrl: "/api/v5/trade/order-algo",
+          retMsg: `Missing required fields: ${missing.join(", ")}`
+        }
+      });
+    }
+
     const payload: Record<string, unknown> = {
       instId: input.instId,
       tdMode: input.tdMode,
@@ -342,7 +390,9 @@ export class OkxDemoClient {
       ...(input.slTriggerPx ? { slTriggerPx: input.slTriggerPx } : {}),
       ...(input.slOrdPx ? { slOrdPx: input.slOrdPx } : {}),
       ...(input.tpTriggerPx ? { tpTriggerPx: input.tpTriggerPx } : {}),
-      ...(input.tpOrdPx ? { tpOrdPx: input.tpOrdPx } : {})
+      ...(input.tpOrdPx ? { tpOrdPx: input.tpOrdPx } : {}),
+      ...(input.slTriggerPxType ? { slTriggerPxType: input.slTriggerPxType } : {}),
+      ...(input.tpTriggerPxType ? { tpTriggerPxType: input.tpTriggerPxType } : {})
     };
     return this.signedRequest<Record<string, unknown>>("POST", "/api/v5/trade/order-algo", null, payload);
   }

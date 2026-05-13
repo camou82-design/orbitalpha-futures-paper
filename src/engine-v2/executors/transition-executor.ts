@@ -73,7 +73,7 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         };
     }
 
-    if (subtype === "EARLY_LONG_PROBE") {
+    if (subtype === "EARLY_LONG_PROBE" || (subtype === "FAST_TREND_SHIFT" && judgment?.diagnostics?.fastTrendShift?.direction === "long")) {
         const lastPrice = sn.lastPrice;
         const boxHigh = sn.boxHigh ?? lastPrice;
         const boxLow = sn.boxLow ?? lastPrice;
@@ -89,19 +89,60 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         const stopBasisAtr = lastPrice - (atr * 2.0);
         const stopPrice = Math.min(swingLow, stopBasisMid, stopBasisAtr);
 
+        const baseSizeIntent = judgment?.diagnostics?.fastTrendShift?.baseSizeIntent ?? 0.32;
+
         return {
             signal: "LONG_CANDIDATE",
             side: "long",
             reason: judgment?.subtypeReason ?? "EARLY_LONG_PROBE",
-            baseSizeIntent: 0.32,
+            baseSizeIntent,
             recheckSuggested: true,
             isAddOnEligible: false,
             stopPrice,
             invalidationPx: stopPrice,
             metadata: { 
                 early_probe: true,
+                fast_trend_shift: judgment?.subtype === "FAST_TREND_SHIFT",
                 stop_basis: "conservative_probe_basis",
                 swing_low: swingLow,
+                box_mid: boxMid,
+                atr_stop: stopBasisAtr
+            } as any
+        };
+    }
+
+    if (subtype === "EARLY_SHORT_PROBE" || (subtype === "FAST_TREND_SHIFT" && judgment?.diagnostics?.fastTrendShift?.direction === "short")) {
+        const lastPrice = sn.lastPrice;
+        const boxHigh = sn.boxHigh ?? lastPrice;
+        const boxLow = sn.boxLow ?? lastPrice;
+        const boxMid = (boxHigh + boxLow) / 2;
+        const atr = sn.atr ?? (lastPrice * 0.01);
+        
+        const recentCandles = input.candles ?? [];
+        const swingHigh = recentCandles.length >= 10 
+            ? Math.max(...recentCandles.slice(-10).map(c => c.high)) 
+            : lastPrice * 1.01;
+        
+        const stopBasisMid = boxMid * 1.002; 
+        const stopBasisAtr = lastPrice + (atr * 2.0);
+        const stopPrice = Math.max(swingHigh, stopBasisMid, stopBasisAtr);
+
+        const baseSizeIntent = judgment?.diagnostics?.fastTrendShift?.baseSizeIntent ?? 0.32;
+
+        return {
+            signal: "SHORT_CANDIDATE",
+            side: "short",
+            reason: judgment?.subtypeReason ?? "EARLY_SHORT_PROBE",
+            baseSizeIntent,
+            recheckSuggested: true,
+            isAddOnEligible: false,
+            stopPrice,
+            invalidationPx: stopPrice,
+            metadata: { 
+                early_probe: true,
+                fast_trend_shift: judgment?.subtype === "FAST_TREND_SHIFT",
+                stop_basis: "conservative_probe_basis",
+                swing_high: swingHigh,
                 box_mid: boxMid,
                 atr_stop: stopBasisAtr
             } as any
