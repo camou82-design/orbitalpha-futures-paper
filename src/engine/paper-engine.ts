@@ -6149,6 +6149,87 @@ export class PaperEngine {
     }
   }
 
+  /**
+   * [CENTRALIZED] Cleans up all engine-owned protective algo orders for a closed position.
+   * Scans OKX for algo orders prefixed with 'oap' + position-specific openedAt base36.
+   */
+  private async cancelProtectionOrdersForClosedPosition(
+    symbol: string,
+    posSide: "long" | "short",
+    openedAt: number,
+    reason: string
+  ): Promise<void> {
+    if (!this.okxDemo) return;
+    const instId = toOkxSwapInstId(symbol);
+    const openedAt36 = openedAt.toString(36);
+    // Unique but identifiable prefix for this specific position instance
+    const engineOwnedPrefix = `oap${symbol.slice(0, 5)}${posSide[0]}${openedAt36}`;
+
+    try {
+      const pendingTry = await this.okxDemo.getOrdersAlgoPending({ instType: "SWAP", instId });
+      if (!pendingTry.ok) {
+        this.logger.error("PROTECTIVE_ORDER_CANCEL_QUERY_FAILED", { symbol, openedAt, error: pendingTry.error });
+        return;
+      }
+
+      const cancelTargets = pendingTry.value.filter(algo => {
+        const clOrdId = String(algo.algoClOrdId || "");
+        return clOrdId.startsWith(engineOwnedPrefix);
+      });
+
+      if (cancelTargets.length === 0) {
+        this.logger.info("PROTECTIVE_ORDER_CLOSE_CLEANUP_SKIPPED_NO_TARGETS", { symbol, openedAt, reason });
+        return;
+      }
+
+      this.logger.info("PROTECTIVE_ORDER_CLOSE_CLEANUP_PLAN_PROOF", {
+        symbol,
+        posSide,
+        openedAt,
+        target_count: cancelTargets.length,
+        algo_ids: cancelTargets.map(t => t.algoId),
+        cl_ord_ids: cancelTargets.map(t => t.algoClOrdId),
+        reason
+      });
+
+      const results: Array<{ algoId: string; success: boolean; error?: string }> = [];
+      for (const target of cancelTargets) {
+        const res = await this.okxDemo.cancelAlgoOrder([{ instId, algoId: String(target.algoId) }]);
+        results.push({ 
+          algoId: String(target.algoId), 
+          success: res.ok, 
+          error: res.ok ? undefined : (res as any).error || "unknown" 
+        });
+      }
+
+      const allSuccess = results.every(r => r.success);
+      this.logger.info("PROTECTIVE_ORDER_CLOSE_CLEANUP_RESULT", {
+        symbol,
+        posSide,
+        openedAt,
+        all_success: allSuccess,
+        results
+      });
+
+      if (!allSuccess) {
+        // [HARDENING] Block symbol if cleanup failed to prevent orphan mess in next cycle
+        this.symbolProtectionFailedBlocked.add(symbol);
+        this.logger.error("PROTECTIVE_ORDER_CLEANUP_FAILED_BLOCKING_SYMBOL", { 
+          symbol, 
+          reason: "cleanup_not_fully_successful",
+          failed_count: results.filter(r => !r.success).length
+        });
+      }
+
+    } catch (e) {
+      this.logger.error("PROTECTIVE_ORDER_CLOSE_CLEANUP_CRASH", {
+        symbol,
+        openedAt,
+        error: e instanceof Error ? e.message : String(e)
+      });
+    }
+  }
+
   private extractOkxOrderAlgoRowCodes(diagnostics: OkxPublicDiagnostics | undefined): {
     sCode: string | null;
     sMsg: string | null;
@@ -7548,7 +7629,7 @@ export class PaperEngine {
     });
 
     if (input.open.protectiveStopAlgoId && input.open.isProtectiveStopRegistered) {
-      this.logger.info("PROTECTIVE_STOP_CLEANUP_REQUIRED", {
+      this.logger.info("PROTECTIVE_STOP_CLEANUP_REQUIRED_V1", {
         symbol: input.open.symbol,
         algoId: input.open.protectiveStopAlgoId,
         reason: input.exitReason,
@@ -7556,6 +7637,15 @@ export class PaperEngine {
       });
       await this.cancelProtectiveStopOrder(input.open.symbol, input.open.protectiveStopAlgoId, input.flowId);
     }
+
+    // [V2 CENTRALIZED CLEANUP] 
+    // This handles both SL and TP legs by scanning for the position-specific 'oap' prefix
+    await this.cancelProtectionOrdersForClosedPosition(
+      String(input.open.symbol),
+      input.open.side,
+      input.open.openedAt,
+      input.exitReason
+    );
 
     const isDuplicate = await this.isHistoryDuplicate(normalized);
     if (isDuplicate) {
