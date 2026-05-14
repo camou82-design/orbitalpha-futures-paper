@@ -882,6 +882,9 @@ export type PaperOpenPositionRecord = {
   initialSizeUsd?: number;
   /** 진입 후 관측한 최고 순이익률(순손익/마진). 분할·트레일 참고. */
   highestPnlPctNet?: number;
+  /** 진입 후 관측한 최고 미실현 수익률(%). V2 Profit Protection용. */
+  peakUnrealizedPnlPct?: number;
+  peakPnlUpdatedAt?: number;
   /** 트레일링 기준으로 마지막으로 잠근 가격/레벨(옵션). */
   lastTrailLevel?: number;
   /** 진입 시 신뢰도(로그·분석용, 옵션). */

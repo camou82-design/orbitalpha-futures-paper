@@ -20,6 +20,9 @@ export type V2ExitReason =
     | "SHOCK_PROTECTIVE_REDUCE"
     | "SHOCK_FULL_EXIT_AGAINST_POSITION"
     | "PNL_STOP_PROTECT"
+    | "PROFIT_PROTECTION_BREAKEVEN_EXIT"
+    | "PROFIT_PROTECTION_PARTIAL_TP"
+    | "PROFIT_PROTECTION_TRAILING_STOP"
     | "NO_EXIT_SIGNAL";
 
 export type V2ExitUrgency = "LOW" | "MID" | "HIGH" | "CRITICAL";
@@ -51,6 +54,8 @@ export type V2ExitPolicyResult = Readonly<{
     exitConfidence: number;
     evidence: string;
     hasPosition: boolean;
+    peakUnrealizedPnlPct: number;
+    profitProtectionActive: boolean;
 }>;
 
 export type EvaluateV2ExitPolicyArgs = Readonly<{

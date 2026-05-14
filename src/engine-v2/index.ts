@@ -475,6 +475,23 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             evidence: exitPolicy.evidence
         }));
     }
+    
+    // --- V2 PROFIT PROTECTION STATE PROOF ---
+    if (exitPolicy.reason.startsWith("PROFIT_PROTECTION_") && 
+        shouldEmitV2Proof("V2_PROFIT_PROTECTION_STATE_PROOF", String(input.symbol), exitPolicy.reason, true)) {
+        console.info(JSON.stringify({
+            event: "V2_PROFIT_PROTECTION_STATE_PROOF",
+            symbol: String(input.symbol),
+            side: exitPolicy.positionSide,
+            pnlPct: exitPolicy.pnlPct,
+            peakPnlPct: exitPolicy.peakUnrealizedPnlPct,
+            profit_protection_active: exitPolicy.profitProtectionActive,
+            action: exitPolicy.action,
+            reason: exitPolicy.reason,
+            reduceRatio: exitPolicy.reduceRatio,
+            evidence: exitPolicy.evidence
+        }));
+    }
 
     if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK" && exitPolicy.hasPosition && (exitPolicy.shouldExit || exitPolicy.shouldReduce || exitPolicy.shouldPartial)) {
         console.info(JSON.stringify({

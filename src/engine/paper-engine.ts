@@ -8092,7 +8092,13 @@ export class PaperEngine {
           paperFundingIntervalHours: this.config.paperFundingIntervalHours
         });
         const highWater = Math.max(open.highestPnlPctNet ?? m.pnlPctNet, m.pnlPctNet);
-        open = { ...open, highestPnlPctNet: highWater };
+        const peakUnrealized = Math.max(open.peakUnrealizedPnlPct ?? m.pnlPctNet, m.pnlPctNet);
+        open = { 
+          ...open, 
+          highestPnlPctNet: highWater, 
+          peakUnrealizedPnlPct: peakUnrealized,
+          peakPnlUpdatedAt: peakUnrealized > (open.peakUnrealizedPnlPct ?? -999) ? Date.now() : open.peakPnlUpdatedAt
+        };
       }
 
 
