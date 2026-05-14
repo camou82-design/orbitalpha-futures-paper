@@ -292,11 +292,11 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             (side === "long" && judgment.rangePhase === "LOWER") ||
             (side === "short" && judgment.rangePhase === "UPPER");
         const canReattack = sideAtEdge && rangeConfidence >= 0.65 && (qualityScore >= 75 || reviewingTicks >= 2) && currentStage <= 2 && pnlPct > -0.0015;
-        if (canReattack && breakevenStopRequired && !breakevenStopConfirmed) {
+        if (canReattack && !breakevenStopConfirmed) {
              return {
                 action: "ADDON_WATCH",
                 allowed: false,
-                reason: "BREAKEVEN_STOP_UPDATE_REQUIRED",
+                reason: "BREAKEVEN_STOP_NOT_CONFIRMED",
                 addOnEligible: false,
                 isInitial,
                 isAddOn,
@@ -540,11 +540,11 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
         worstCasePnlAfterNewStop >= minimumProtectedProfitUsd &&
         addonMaxNotionalUsdt > 0;
 
-    if (breakevenStopRequired && !breakevenStopConfirmed) {
+    if (!breakevenStopConfirmed) {
         return {
             action: "ADDON_WATCH",
             allowed: false,
-            reason: "BREAKEVEN_STOP_UPDATE_REQUIRED",
+            reason: "BREAKEVEN_STOP_NOT_CONFIRMED",
             addOnEligible: false,
             isInitial,
             isAddOn,
@@ -569,8 +569,8 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             breakevenStopConfirmed,
             breakevenStopPrice,
             lockedProfitUsdt: 0,
-            addonBlockedReason: "BREAKEVEN_STOP_UPDATE_REQUIRED",
-            evidence: "breakeven_stop_required_before_addon"
+            addonBlockedReason: "BREAKEVEN_STOP_NOT_CONFIRMED",
+            evidence: "breakeven_stop_not_confirmed_before_addon"
         };
     }
 
