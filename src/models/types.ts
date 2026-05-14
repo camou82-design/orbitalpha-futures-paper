@@ -885,6 +885,14 @@ export type PaperOpenPositionRecord = {
   /** 진입 후 관측한 최고 미실현 수익률(%). V2 Profit Protection용. */
   peakUnrealizedPnlPct?: number;
   peakPnlUpdatedAt?: number;
+  breakevenStopRequired?: boolean;
+  breakevenStopPrice?: number;
+  breakevenStopConfirmed?: boolean;
+  breakevenStopConfirmedAt?: number;
+  breakevenStopAlgoId?: string;
+  breakevenStopConfirmSource?: "okx_pending_algo" | "ledger" | "none";
+  addonBlockedReason?: string;
+  addonRebuildRequired?: boolean;
   /** 트레일링 기준으로 마지막으로 잠근 가격/레벨(옵션). */
   lastTrailLevel?: number;
   /** 진입 시 신뢰도(로그·분석용, 옵션). */

@@ -106,6 +106,9 @@ export interface EngineV2Position {
     } | null;
     tp1Triggered?: boolean;
     tp2Triggered?: boolean;
+    breakevenStopRequired?: boolean;
+    breakevenStopConfirmed?: boolean;
+    breakevenStopPrice?: number;
 }
 
 /** 
@@ -181,6 +184,9 @@ export interface LegacyPositionAdapter {
     } | null;
     tp1Triggered?: boolean;
     tp2Triggered?: boolean;
+    breakevenStopRequired?: boolean;
+    breakevenStopConfirmed?: boolean;
+    breakevenStopPrice?: number;
 }
 
 export interface LegacyResultAdapter {
@@ -406,6 +412,9 @@ export interface V2BridgePosition {
     peakUnrealizedPnlPct?: number;
     peakUnrealizedPnlUsd?: number;
     peakPnlUpdatedAt?: number;
+    breakevenStopRequired?: boolean;
+    breakevenStopConfirmed?: boolean;
+    breakevenStopPrice?: number;
 }
 
 export interface V2BridgeState {
@@ -913,6 +922,9 @@ export interface V2TradeLifecycleAuthorityInput {
     } | null;
     tp1Triggered?: boolean;
     tp2Triggered?: boolean;
+    breakevenStopRequired?: boolean;
+    breakevenStopConfirmed?: boolean;
+    breakevenStopPrice?: number;
     suggestedStopPrice?: number | null;
     suggestedInvalidationPx?: number | null;
 }
@@ -953,6 +965,9 @@ export interface V2TradeLifecycleAuthorityResult {
     proofReasons: string[];
     tp1Triggered?: boolean;
     tp2Triggered?: boolean;
+    breakevenStopRequired?: boolean;
+    breakevenStopConfirmed?: boolean;
+    breakevenStopPrice?: number;
     takeProfit1Px?: number;
     takeProfit2Px?: number;
     invalidationPx?: number | null;

@@ -26,6 +26,9 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
     const isInitial = !isAddOn;
     const currentStage = sameSidePosition ? Math.max(1, Number(sameSidePosition.entryStage ?? 1)) : 0;
     const pnlPct = Number(sameSidePosition?.pnlPct ?? 0);
+    const breakevenStopRequired = sameSidePosition?.breakevenStopRequired ?? false;
+    const breakevenStopConfirmed = sameSidePosition?.breakevenStopConfirmed ?? false;
+    const breakevenStopPrice = sameSidePosition?.breakevenStopPrice;
     const shockLockish =
         judgment.shockPhase === "DOWN_SHOCK" ||
         judgment.shockPhase === "UP_SHOCK" ||
@@ -57,6 +60,9 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             emaGap,
             trendWeaknessScore,
             rangeConfidence,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
             evidence: "side_none_forbidden"
         };
     }
@@ -85,6 +91,9 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             emaGap,
             trendWeaknessScore,
             rangeConfidence,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
             evidence: "whipsaw_shock_recheck_blocks_addon"
         };
     }
@@ -113,6 +122,9 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             emaGap,
             trendWeaknessScore,
             rangeConfidence,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
             evidence: "opposite_position_exists"
         };
     }
@@ -141,6 +153,9 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             emaGap,
             trendWeaknessScore,
             rangeConfidence,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
             evidence: "no_existing_position_initial_only"
         };
     }
@@ -170,6 +185,9 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             emaGap,
             trendWeaknessScore,
             rangeConfidence,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
             evidence: "shock_or_lockish_state"
         };
     }
@@ -198,7 +216,10 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             emaGap,
             trendWeaknessScore,
             rangeConfidence,
-            evidence: "transition_regime_or_phase"
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
+            evidence: "transition_addon_forbidden"
         };
     }
     if (judgment.rangePhase === "MID") {
@@ -226,6 +247,9 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             emaGap,
             trendWeaknessScore,
             rangeConfidence,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
             evidence: "range_mid_forbidden"
         };
     }
@@ -256,7 +280,10 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             emaGap,
             trendWeaknessScore,
             rangeConfidence,
-            evidence: qualityScore < 70 ? "quality_under_70" : "pnl_not_favorable"
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
+            evidence: "quality_score_too_low_or_pnl_not_favorable"
         };
     }
 
@@ -289,6 +316,9 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
                 emaGap,
                 trendWeaknessScore,
                 rangeConfidence,
+                breakevenStopRequired,
+                breakevenStopConfirmed,
+                breakevenStopPrice,
                 evidence: "range_edge_reattack_allowed"
             };
         }
@@ -316,6 +346,9 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             emaGap,
             trendWeaknessScore,
             rangeConfidence,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
             evidence: "range_addon_watch_recheck"
         };
     }
@@ -346,7 +379,10 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
                 emaGap,
                 trendWeaknessScore,
                 rangeConfidence,
-                evidence: "trend_exhaustion_forbidden"
+                breakevenStopRequired,
+                breakevenStopConfirmed,
+                breakevenStopPrice,
+                evidence: "trend_exhaustion_blocks_addon"
             };
         }
 
@@ -379,152 +415,202 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
                 emaGap,
                 trendWeaknessScore,
                 rangeConfidence,
+                breakevenStopRequired,
+                breakevenStopConfirmed,
+                breakevenStopPrice,
                 evidence: "trend_side_mismatch"
             };
         }
 
         // --- TREND Profit-Funded Pyramid Implementation (Refined) ---
-        const accountEquityUsd = args.accountEquityUsd || (v2State.accountEquityKrw || 1400000) / 1400;
-        const minimumProtectedProfitUsd = Math.max(0.5, accountEquityUsd * 0.0015);
-        const symbolMaxNotional = accountEquityUsd * 0.8;
-        const globalMaxNotional = accountEquityUsd * 1.5;
+    // --- TREND Profit-Funded Pyramid Implementation (Refined with Locked Profit Verification) ---
+    const accountEquityUsd = args.accountEquityUsd || (v2State.accountEquityKrw || 1400000) / 1400;
+    const minimumProtectedProfitUsd = Math.max(0.5, accountEquityUsd * 0.0015);
+    const symbolMaxNotional = accountEquityUsd * 0.8;
+    const globalMaxNotional = accountEquityUsd * 1.5;
 
-        const currentSymbolNotionalUsd = args.currentSymbolNotionalUsd || (sameSidePosition?.sizeUsd ?? 0);
-        const currentGlobalNotionalUsd = args.currentGlobalNotionalUsd || currentSymbolNotionalUsd;
+    const currentSymbolNotionalUsd = args.currentSymbolNotionalUsd || (sameSidePosition?.sizeUsd ?? 0);
+    const currentGlobalNotionalUsd = args.currentGlobalNotionalUsd || currentSymbolNotionalUsd;
 
-        const sizeUsd = sameSidePosition?.sizeUsd ?? 0;
-        const entryPrice = sameSidePosition?.entryPrice ?? 0;
-        const currentStopPrice = args.currentStopPrice || 0;
+    const sizeUsd = sameSidePosition?.sizeUsd ?? 0;
+    const entryPrice = sameSidePosition?.entryPrice ?? 0;
+    
+    // 1. Breakeven Stop Check (Already initialized at top)
+    const currentBreakevenStopPrice = breakevenStopPrice ?? 0;
+    const isBreakevenStopConfirmed = breakevenStopConfirmed;
+    const isBreakevenStopRequired = breakevenStopRequired;
+    const confirmedStopPrice = Number(sameSidePosition?.breakevenStopPrice ?? 0);
 
-        // 1. lockedProfitUsd: Profit guaranteed if stopped out at current stop
-        let lockedProfitUsdt = 0;
-        if (args.currentStopPrice != null && args.currentStopPrice > 0 && sameSidePosition != null) {
-            if (args.side === "long") {
-                lockedProfitUsdt = sameSidePosition.sizeUsd * (args.currentStopPrice - sameSidePosition.entryPrice) / sameSidePosition.entryPrice;
-            } else if (args.side === "short") {
-                lockedProfitUsdt = sameSidePosition.sizeUsd * (sameSidePosition.entryPrice - args.currentStopPrice) / sameSidePosition.entryPrice;
+    // 2. lockedProfitUsd: Profit guaranteed only if breakeven stop is confirmed and valid
+    let lockedProfitUsdt = 0;
+    let addonBlockedReason = "";
+
+    if (breakevenStopConfirmed && confirmedStopPrice > 0) {
+        const currentBreakevenStopPrice = breakevenStopPrice ?? 0;
+        const isStopValid = side === "long" 
+            ? confirmedStopPrice >= currentBreakevenStopPrice
+            : confirmedStopPrice <= currentBreakevenStopPrice;
+
+        if (isStopValid) {
+            if (side === "long") {
+                lockedProfitUsdt = sizeUsd * (confirmedStopPrice - entryPrice) / entryPrice;
+            } else {
+                lockedProfitUsdt = sizeUsd * (entryPrice - confirmedStopPrice) / entryPrice;
             }
-        }
-
-        const availableRiskBudgetUsdt = lockedProfitUsdt - minimumProtectedProfitUsd;
-
-        // Implementation of worst-case PNL check after add-on
-        const currentPrice = Number(snapshot.lastPrice);
-        const atr = Number(snapshot.atr || (snapshot.volatilityProxyDiag ?? 0));
-        const stopDistance = atr * 2.2;
-        const newStopPrice = side === "long" ? currentPrice - stopDistance : currentPrice + stopDistance;
-
-        const addonLossPctToStop = currentPrice > 0 ? Math.abs(currentPrice - newStopPrice) / currentPrice : 0.022;
-        
-        let addonMaxNotionalUsdt = availableRiskBudgetUsdt > 0 && addonLossPctToStop > 0
-            ? availableRiskBudgetUsdt / addonLossPctToStop
-            : 0;
-
-        // Enforce notional caps
-        if (currentSymbolNotionalUsd + addonMaxNotionalUsdt > symbolMaxNotional) {
-            addonMaxNotionalUsdt = Math.max(0, symbolMaxNotional - currentSymbolNotionalUsd);
-        }
-        if (currentGlobalNotionalUsd + addonMaxNotionalUsdt > globalMaxNotional) {
-            addonMaxNotionalUsdt = Math.max(0, globalMaxNotional - currentGlobalNotionalUsd);
-        }
-
-        const existingPosPnlAtStop = (side === "long" && entryPrice > 0)
-            ? sizeUsd * (newStopPrice - entryPrice) / entryPrice 
-            : (side === "short" && entryPrice > 0)
-                ? sizeUsd * (entryPrice - newStopPrice) / entryPrice
-                : -sizeUsd; // Conservative fallback
-
-        const newPosPnlAtStop = side === "long"
-            ? addonMaxNotionalUsdt * (newStopPrice - currentPrice) / currentPrice
-            : addonMaxNotionalUsdt * (currentPrice - newStopPrice) / currentPrice;
-        
-        const worstCasePnlAfterNewStop = existingPosPnlAtStop + newPosPnlAtStop;
-
-        const pyramidAllowed = 
-            availableRiskBudgetUsdt > 0 && 
-            qualityScore >= 80 && 
-            trendWeaknessScore < 0.55 && 
-            pnlPct >= 0.002 && 
-            worstCasePnlAfterNewStop >= minimumProtectedProfitUsd &&
-            addonMaxNotionalUsdt > 0;
-
-        if (pyramidAllowed) {
-            console.info(JSON.stringify({
-                event: "V2_TREND_PROFIT_FUNDED_PYRAMID_PROOF",
-                symbol: String(args.symbol),
-                side,
-                current_size_usd: sizeUsd,
-                pnl_pct: pnlPct,
-                locked_profit_usdt: lockedProfitUsdt,
-                min_protected_profit_usd: minimumProtectedProfitUsd,
-                available_risk_budget_usdt: availableRiskBudgetUsdt,
-                addon_max_notional_usdt: addonMaxNotionalUsdt,
-                worst_case_pnl_after_stop: worstCasePnlAfterNewStop,
-                new_stop_price: newStopPrice,
-                symbol_max_notional: symbolMaxNotional,
-                global_max_notional: globalMaxNotional
-            }));
-
-            return {
-                action: "ADDON_ALLOWED",
-                allowed: true,
-                reason: "TREND_PYRAMID_PROFIT_FUNDED_ALLOWED",
-                addOnEligible: true,
-                isInitial,
-                isAddOn,
-                side,
-                currentStage,
-                hasSameSidePosition,
-                hasOppositeSidePosition,
-                marketRegime: judgment.regime_final,
-                marketSubtype: judgment.subtype,
-                shockPhase: judgment.shockPhase,
-                rangePhase: judgment.rangePhase,
-                trendPhase: judgment.trendPhase,
-                transitionPhase: judgment.transitionPhase,
-                qualityScore,
-                reviewingTicks,
-                pnlPct,
-                boxPos,
-                emaGap,
-                trendWeaknessScore,
-                rangeConfidence,
-                lockedProfitUsdt,
-                availableRiskBudgetUsdt,
-                addonMaxNotionalUsdt,
-                evidence: "trend_pyramid_allowed"
-            };
         } else {
-            return {
-                action: "ADDON_WATCH",
-                allowed: false,
-                reason: availableRiskBudgetUsdt <= 0 ? "PROFIT_BUFFER_INSUFFICIENT" : "PNL_NOT_FAVORABLE",
-                addOnEligible: false,
-                isInitial,
-                isAddOn,
-                side,
-                currentStage,
-                hasSameSidePosition,
-                hasOppositeSidePosition,
-                marketRegime: judgment.regime_final,
-                marketSubtype: judgment.subtype,
-                shockPhase: judgment.shockPhase,
-                rangePhase: judgment.rangePhase,
-                trendPhase: judgment.trendPhase,
-                transitionPhase: judgment.transitionPhase,
-                qualityScore,
-                reviewingTicks,
-                pnlPct,
-                boxPos,
-                emaGap,
-                trendWeaknessScore,
-                rangeConfidence,
-                lockedProfitUsdt,
-                availableRiskBudgetUsdt,
-                addonMaxNotionalUsdt,
-                evidence: "profit_funded_pyramid_insufficient_buffer_or_low_quality"
-            };
+            addonBlockedReason = "CONFIRMED_STOP_NOT_AT_BREAKEVEN";
         }
+    } else if (breakevenStopRequired) {
+        addonBlockedReason = "BREAKEVEN_STOP_NOT_CONFIRMED";
+    }
+
+    const availableRiskBudgetUsdt = lockedProfitUsdt - minimumProtectedProfitUsd;
+
+    // 3. Risk Projection for Add-on
+    const currentPrice = Number(snapshot.lastPrice);
+    const atr = Number(snapshot.atr || (snapshot.volatilityProxyDiag ?? 0));
+    const stopDistance = atr * 2.2;
+    const newStopPrice = side === "long" ? currentPrice - stopDistance : currentPrice + stopDistance;
+    const addonLossPctToStop = currentPrice > 0 ? Math.abs(currentPrice - newStopPrice) / currentPrice : 0.022;
+    
+    let addonMaxNotionalUsdt = availableRiskBudgetUsdt > 0 && addonLossPctToStop > 0
+        ? availableRiskBudgetUsdt / addonLossPctToStop
+        : 0;
+
+    // Enforce notional caps
+    if (currentSymbolNotionalUsd + addonMaxNotionalUsdt > symbolMaxNotional) {
+        addonMaxNotionalUsdt = Math.max(0, symbolMaxNotional - currentSymbolNotionalUsd);
+    }
+    if (currentGlobalNotionalUsd + addonMaxNotionalUsdt > globalMaxNotional) {
+        addonMaxNotionalUsdt = Math.max(0, globalMaxNotional - currentGlobalNotionalUsd);
+    }
+
+    const existingPosPnlAtStop = (side === "long" && entryPrice > 0)
+        ? sizeUsd * (newStopPrice - entryPrice) / entryPrice 
+        : (side === "short" && entryPrice > 0)
+            ? sizeUsd * (entryPrice - newStopPrice) / entryPrice
+            : -sizeUsd;
+
+    const newPosPnlAtStop = side === "long"
+        ? addonMaxNotionalUsdt * (newStopPrice - currentPrice) / currentPrice
+        : addonMaxNotionalUsdt * (currentPrice - newStopPrice) / currentPrice;
+    
+    const worstCasePnlAfterNewStop = existingPosPnlAtStop + newPosPnlAtStop;
+
+    // 4. Final Decision Gate
+    const pyramidAllowed = 
+        breakevenStopConfirmed &&
+        availableRiskBudgetUsdt > 0 && 
+        qualityScore >= 80 && 
+        trendWeaknessScore < 0.55 && 
+        pnlPct >= 0.002 && 
+        worstCasePnlAfterNewStop >= minimumProtectedProfitUsd &&
+        addonMaxNotionalUsdt > 0;
+
+    if (breakevenStopRequired && !breakevenStopConfirmed) {
+        return {
+            action: "ADDON_WATCH",
+            allowed: false,
+            reason: "BREAKEVEN_STOP_UPDATE_REQUIRED",
+            addOnEligible: false,
+            isInitial,
+            isAddOn,
+            side,
+            currentStage,
+            hasSameSidePosition,
+            hasOppositeSidePosition,
+            marketRegime: judgment.regime_final,
+            marketSubtype: judgment.subtype,
+            shockPhase: judgment.shockPhase,
+            rangePhase: judgment.rangePhase,
+            trendPhase: judgment.trendPhase,
+            transitionPhase: judgment.transitionPhase,
+            qualityScore,
+            reviewingTicks,
+            pnlPct,
+            boxPos,
+            emaGap,
+            trendWeaknessScore,
+            rangeConfidence,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
+            lockedProfitUsdt: 0,
+            addonBlockedReason: "BREAKEVEN_STOP_UPDATE_REQUIRED",
+            evidence: "breakeven_stop_required_before_addon"
+        };
+    }
+
+    if (pyramidAllowed) {
+        return {
+            action: "ADDON_ALLOWED",
+            allowed: true,
+            reason: "TREND_PYRAMID_PROFIT_FUNDED_ALLOWED",
+            addOnEligible: true,
+            isInitial,
+            isAddOn,
+            side,
+            currentStage,
+            hasSameSidePosition,
+            hasOppositeSidePosition,
+            marketRegime: judgment.regime_final,
+            marketSubtype: judgment.subtype,
+            shockPhase: judgment.shockPhase,
+            rangePhase: judgment.rangePhase,
+            trendPhase: judgment.trendPhase,
+            transitionPhase: judgment.transitionPhase,
+            qualityScore,
+            reviewingTicks,
+            pnlPct,
+            boxPos,
+            emaGap,
+            trendWeaknessScore,
+            rangeConfidence,
+            lockedProfitUsdt,
+            availableRiskBudgetUsdt,
+            addonMaxNotionalUsdt,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
+            evidence: "trend_pyramid_allowed_with_locked_profit"
+        };
+    } else {
+        const failReason = !breakevenStopConfirmed ? "BREAKEVEN_STOP_NOT_CONFIRMED" : 
+                          availableRiskBudgetUsdt <= 0 ? "PROFIT_BUFFER_INSUFFICIENT" : "PNL_NOT_FAVORABLE";
+        return {
+            action: "ADDON_WATCH",
+            allowed: false,
+            reason: failReason as any,
+            addOnEligible: false,
+            isInitial,
+            isAddOn,
+            side,
+            currentStage,
+            hasSameSidePosition,
+            hasOppositeSidePosition,
+            marketRegime: judgment.regime_final,
+            marketSubtype: judgment.subtype,
+            shockPhase: judgment.shockPhase,
+            rangePhase: judgment.rangePhase,
+            trendPhase: judgment.trendPhase,
+            transitionPhase: judgment.transitionPhase,
+            qualityScore,
+            reviewingTicks,
+            pnlPct,
+            boxPos,
+            emaGap,
+            trendWeaknessScore,
+            rangeConfidence,
+            lockedProfitUsdt,
+            availableRiskBudgetUsdt,
+            addonMaxNotionalUsdt,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
+            addonBlockedReason: addonBlockedReason || failReason,
+            evidence: "profit_funded_pyramid_insufficient_buffer_or_stop_not_confirmed"
+        };
+    }
     }
 
     return {
@@ -551,6 +637,9 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
         emaGap,
         trendWeaknessScore,
         rangeConfidence,
+        breakevenStopRequired,
+        breakevenStopConfirmed,
+        breakevenStopPrice,
         evidence: "same_side_position_watch_recheck"
     };
 }

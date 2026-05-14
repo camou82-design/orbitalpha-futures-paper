@@ -6432,6 +6432,16 @@ export class PaperEngine {
     // 2. Derive Target Prices
     let activeStopPrice = open.stopPrice ?? (open as any).ledger_stop_px;
     let activeTpPrice = open.targetPrice1;
+
+    // V2 Breakeven Promotion: If BE is required and better than current SL, use BE
+    if (open.breakevenStopRequired === true && open.breakevenStopPrice != null) {
+      const isBetter = open.side === "long"
+        ? open.breakevenStopPrice > (activeStopPrice ?? -999999)
+        : open.breakevenStopPrice < (activeStopPrice ?? 999999);
+      if (isBetter) {
+        activeStopPrice = open.breakevenStopPrice;
+      }
+    }
     
     const regime = regimeForSl(open.regimeAtEntry);
     const refPx = Number(actualPos.avgPx) || open.avgPx || open.entryPrice;
@@ -6574,6 +6584,51 @@ export class PaperEngine {
         }
       }
     }
+    
+    // V2 Breakeven Confirmation
+    if (engineOwnedSl && open.breakevenStopRequired === true && open.breakevenStopPrice != null) {
+      const confirmedPx = Number(engineOwnedSl.slTriggerPx);
+      const isConfirmed = open.side === "long"
+        ? confirmedPx >= open.breakevenStopPrice - 1e-8
+        : confirmedPx <= open.breakevenStopPrice + 1e-8;
+      
+      open.breakevenStopConfirmed = isConfirmed;
+      if (isConfirmed) {
+        open.breakevenStopConfirmedAt = Date.now();
+        open.breakevenStopAlgoId = engineOwnedSl.algoId;
+        open.breakevenStopConfirmSource = "okx_pending_algo";
+      }
+
+      this.logger.info("V2_BREAKEVEN_STOP_CONFIRM_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        requiredBreakevenStopPrice: open.breakevenStopPrice,
+        confirmedStopPrice: confirmedPx,
+        confirmed: isConfirmed,
+        algoId: engineOwnedSl.algoId,
+        pendingAlgoCount: pendingAlgos.length
+      });
+    } else if (!open.breakevenStopRequired) {
+      open.breakevenStopConfirmed = false; // Reset if not required
+    }
+
+    // [V2_ADDON_GATING] Atomic Rebuild Trigger
+    if (open.addonRebuildRequired === true) {
+      this.logger.info("V2_ADDON_POST_FILL_PROTECTION_REBUILD_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        reason: "addon_fill_detected",
+        old_sl_algo_id: engineOwnedSl?.algoId,
+        old_tp_algo_id: engineOwnedTp?.algoId
+      });
+      // Force cleanup by treating them as duplicates/wrong
+      if (engineOwnedSl && !cancelTargets.some(t => t.algoId === engineOwnedSl.algoId)) cancelTargets.push({ instId, algoId: engineOwnedSl.algoId });
+      if (engineOwnedTp && !cancelTargets.some(t => t.algoId === engineOwnedTp.algoId)) cancelTargets.push({ instId, algoId: engineOwnedTp.algoId });
+      
+      engineOwnedSl = null;
+      engineOwnedTp = null;
+      open.addonRebuildRequired = false; // Clear once we initiate rebuild
+    }
 
     this.logger.info("PROTECTIVE_ORDER_PENDING_ALGO_SCAN_PROOF", {
       symbol: open.symbol,
@@ -6586,7 +6641,8 @@ export class PaperEngine {
       wrongTdModeCount,
       wrongSizeCount,
       wrongSideCount,
-      wrongPriceCount
+      wrongPriceCount,
+      breakevenStopConfirmed: open.breakevenStopConfirmed ?? false
     });
 
     // 4. Reconcile Plan
@@ -8093,11 +8149,36 @@ export class PaperEngine {
         });
         const highWater = Math.max(open.highestPnlPctNet ?? m.pnlPctNet, m.pnlPctNet);
         const peakUnrealized = Math.max(open.peakUnrealizedPnlPct ?? m.pnlPctNet, m.pnlPctNet);
+        const currentPnlPct = m.pnlPctNet;
+
+        // V2 Breakeven logic: PnL >= 0.4% or Peak >= 0.6%
+        const beRequired = currentPnlPct >= 0.004 || peakUnrealized >= 0.006;
+        const feeBuffer = 0.0008; // 0.08% buffer for fees and slippage
+        const bePrice = open.side === "long"
+          ? open.entryPrice * (1 + feeBuffer)
+          : open.entryPrice * (1 - feeBuffer);
+
+        if (beRequired && !open.breakevenStopRequired) {
+          this.logger.info("V2_BREAKEVEN_STOP_REQUIRED_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            entryPrice: open.entryPrice,
+            markPrice: closePrice,
+            pnlPct: currentPnlPct,
+            peakUnrealizedPnlPct: peakUnrealized,
+            currentStopPrice: open.stopPrice,
+            requiredBreakevenStopPrice: bePrice,
+            reason: "pnl_threshold_met"
+          });
+        }
+
         open = { 
           ...open, 
           highestPnlPctNet: highWater, 
           peakUnrealizedPnlPct: peakUnrealized,
-          peakPnlUpdatedAt: peakUnrealized > (open.peakUnrealizedPnlPct ?? -999) ? Date.now() : open.peakPnlUpdatedAt
+          peakPnlUpdatedAt: peakUnrealized > (open.peakUnrealizedPnlPct ?? -999) ? Date.now() : open.peakPnlUpdatedAt,
+          breakevenStopRequired: beRequired,
+          breakevenStopPrice: bePrice
         };
       }
 
@@ -15884,6 +15965,7 @@ export class PaperEngine {
       rangeManagementState: (targetStage >= 2 || rangeAddOnCandidate || rangeCampaignScaleInPath)
         ? ("REATTACK_USED" as RangeManagementState)
         : (existing.rangeManagementState ?? "INIT"),
+      addonRebuildRequired: true, // Trigger protection rebuild on next reconciliation
       stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : existing.stopPrice,
       trailingExtremePrice: existing.side === "long"
         ? Math.max(existing.trailingExtremePrice ?? 0, first.lastPrice)

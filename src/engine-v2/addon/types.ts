@@ -25,7 +25,9 @@ export type V2AddOnReason =
     | "PROFIT_BUFFER_INSUFFICIENT"
     | "SIDE_MISMATCH_FORBIDDEN"
     | "SIDE_NONE_FORBIDDEN"
-    | "WHIPSAW_SHOCK_RECHECK_ADDON_FORBIDDEN";
+    | "WHIPSAW_SHOCK_RECHECK_ADDON_FORBIDDEN"
+    | "BREAKEVEN_STOP_UPDATE_REQUIRED"
+    | "BREAKEVEN_STOP_NOT_CONFIRMED";
 
 export type V2AddOnPolicyResult = Readonly<{
     action: V2AddOnAction;
@@ -55,6 +57,10 @@ export type V2AddOnPolicyResult = Readonly<{
     availableRiskBudgetUsdt?: number;
     addonMaxNotionalUsdt?: number;
     equityRiskCapUsdt?: number;
+    breakevenStopRequired: boolean;
+    breakevenStopConfirmed: boolean;
+    breakevenStopPrice?: number;
+    addonBlockedReason?: string;
     evidence: string;
 }>;
 
@@ -79,4 +85,5 @@ export type EvaluateV2AddOnPolicyArgs = Readonly<{
     currentSymbolNotionalUsd?: number;
     currentGlobalNotionalUsd?: number;
     currentStopPrice?: number;
+    peakUnrealizedPnlPct?: number;
 }>;
