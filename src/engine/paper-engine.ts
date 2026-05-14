@@ -2855,7 +2855,38 @@ export class PaperEngine {
     if (ledgerModified) {
       await this.positions.saveOpenAll(next);
       this.bundleDirty = true;
+    }
 
+    // --- [NEW] Orphan Protective Order Cleanup (Offline) ---
+    // Requirement: OKX position=0 + paper open=0 + engine-owned pending algo 존재 시 자동 취소.
+    // Scan all pending algo orders for symbols we manage and prune any that are engine-owned but have no matching ledger position.
+    for (const symbol of this.config.symbols) {
+      const instId = toOkxSwapInstId(symbol);
+      const key = `${symbol}:long`; // simplified check as remoteMap covers both
+      const keyShort = `${symbol}:short`;
+      
+      const hasRemote = remoteMap.has(key) || remoteMap.has(keyShort);
+      const hasLedger = next.some(p => p.symbol === symbol);
+
+      if (!hasRemote && !hasLedger) {
+        const pendTry = await this.okxDemo.getOrdersAlgoPending({ instType: "SWAP", instId });
+        if (pendTry.ok && pendTry.value) {
+          for (const algo of pendTry.value) {
+            const clOrdId = String(algo.algoClOrdId || "");
+            // Ownership verification: Must start with "oap"
+            if (clOrdId.startsWith("oap")) {
+              this.logger.warn("PROTECTIVE_ORDER_ORPHAN_CLEANUP_PROOF", {
+                symbol,
+                algoId: algo.algoId,
+                algoClOrdId: clOrdId,
+                reason: "no_matching_position_on_exchange_or_ledger",
+                action: "FORCE_CANCEL_ORPHAN"
+              });
+              await this.okxDemo.cancelAlgoOrder([{ instId, algoId: String(algo.algoId) }]);
+            }
+          }
+        }
+      }
     }
   }
 
@@ -6202,13 +6233,24 @@ export class PaperEngine {
         });
       }
 
+      // [HARDENING] Post-cancellation verification
+      // Wait a short moment for OKX state propagation
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const verifyTry = await this.okxDemo.getOrdersAlgoPending({ instType: "SWAP", instId });
+      let remainingCount = 0;
+      if (verifyTry.ok && verifyTry.value) {
+        remainingCount = verifyTry.value.filter(algo => String(algo.algoClOrdId || "").startsWith(engineOwnedPrefix)).length;
+      }
+
       const allSuccess = results.every(r => r.success);
       this.logger.info("PROTECTIVE_ORDER_CLOSE_CLEANUP_RESULT", {
         symbol,
         posSide,
         openedAt,
         all_success: allSuccess,
-        results
+        results,
+        remaining_engine_owned_count: remainingCount,
+        final_orphan_clean: remainingCount === 0
       });
 
       if (!allSuccess) {
