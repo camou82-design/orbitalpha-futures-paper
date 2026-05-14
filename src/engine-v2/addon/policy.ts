@@ -291,7 +291,40 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
         const sideAtEdge =
             (side === "long" && judgment.rangePhase === "LOWER") ||
             (side === "short" && judgment.rangePhase === "UPPER");
-        if (sideAtEdge && rangeConfidence >= 0.65 && (qualityScore >= 75 || reviewingTicks >= 2) && currentStage <= 2 && pnlPct > -0.0015) {
+        const canReattack = sideAtEdge && rangeConfidence >= 0.65 && (qualityScore >= 75 || reviewingTicks >= 2) && currentStage <= 2 && pnlPct > -0.0015;
+        if (canReattack && breakevenStopRequired && !breakevenStopConfirmed) {
+             return {
+                action: "ADDON_WATCH",
+                allowed: false,
+                reason: "BREAKEVEN_STOP_UPDATE_REQUIRED",
+                addOnEligible: false,
+                isInitial,
+                isAddOn,
+                side,
+                currentStage,
+                hasSameSidePosition,
+                hasOppositeSidePosition,
+                marketRegime: judgment.regime_final,
+                marketSubtype: judgment.subtype,
+                shockPhase: judgment.shockPhase,
+                rangePhase: judgment.rangePhase,
+                trendPhase: judgment.trendPhase,
+                transitionPhase: judgment.transitionPhase,
+                qualityScore,
+                reviewingTicks,
+                pnlPct,
+                boxPos,
+                emaGap,
+                trendWeaknessScore,
+                rangeConfidence,
+                breakevenStopRequired,
+                breakevenStopConfirmed,
+                breakevenStopPrice,
+                addonBlockedReason: "BREAKEVEN_STOP_NOT_CONFIRMED",
+                evidence: "range_reattack_breakeven_gate_block"
+            };
+        }
+        if (canReattack) {
             return {
                 action: "ADDON_ALLOWED",
                 allowed: true,

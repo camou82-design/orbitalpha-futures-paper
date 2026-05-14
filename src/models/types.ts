@@ -893,6 +893,15 @@ export type PaperOpenPositionRecord = {
   breakevenStopConfirmSource?: "okx_pending_algo" | "ledger" | "none";
   addonBlockedReason?: string;
   addonRebuildRequired?: boolean;
+  addonRebuildPendingConfirmation?: boolean;
+  addonRebuildMetrics?: {
+    oldSize?: number;
+    newSize?: number;
+    oldAvgEntry?: number;
+    newAvgEntry?: number;
+    rebuildStartedAt?: number;
+    fillConfirmed?: boolean;
+  };
   /** 트레일링 기준으로 마지막으로 잠근 가격/레벨(옵션). */
   lastTrailLevel?: number;
   /** 진입 시 신뢰도(로그·분석용, 옵션). */

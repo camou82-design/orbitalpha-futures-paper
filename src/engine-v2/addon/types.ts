@@ -61,6 +61,7 @@ export type V2AddOnPolicyResult = Readonly<{
     breakevenStopConfirmed: boolean;
     breakevenStopPrice?: number;
     addonBlockedReason?: string;
+    breakevenGateProof?: Record<string, any>;
     evidence: string;
 }>;
 

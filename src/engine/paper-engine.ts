@@ -6608,26 +6608,43 @@ export class PaperEngine {
         algoId: engineOwnedSl.algoId,
         pendingAlgoCount: pendingAlgos.length
       });
-    } else if (!open.breakevenStopRequired) {
+    } else if (open.breakevenStopRequired === false || open.breakevenStopRequired === undefined) {
       open.breakevenStopConfirmed = false; // Reset if not required
     }
 
     // [V2_ADDON_GATING] Atomic Rebuild Trigger
     if (open.addonRebuildRequired === true) {
-      this.logger.info("V2_ADDON_POST_FILL_PROTECTION_REBUILD_PROOF", {
+      // Capture pre-rebuild state
+      open.addonRebuildMetrics = {
+        oldSize: open.initialSizeUsd ?? open.sizeUsd, 
+        newSize: actualSz, 
+        oldAvgEntry: open.entryPrice,
+        newAvgEntry: Number(actualPos.avgPx) || open.entryPrice,
+        rebuildStartedAt: Date.now(),
+        fillConfirmed: true
+      };
+
+      this.logger.info("V2_ADDON_POST_FILL_PROTECTION_REBUILD_START_PROOF", {
         symbol: open.symbol,
         side: open.side,
         reason: "addon_fill_detected",
         old_sl_algo_id: engineOwnedSl?.algoId,
-        old_tp_algo_id: engineOwnedTp?.algoId
+        old_tp_algo_id: engineOwnedTp?.algoId,
+        ...open.addonRebuildMetrics
       });
+
       // Force cleanup by treating them as duplicates/wrong
-      if (engineOwnedSl && !cancelTargets.some(t => t.algoId === engineOwnedSl.algoId)) cancelTargets.push({ instId, algoId: engineOwnedSl.algoId });
-      if (engineOwnedTp && !cancelTargets.some(t => t.algoId === engineOwnedTp.algoId)) cancelTargets.push({ instId, algoId: engineOwnedTp.algoId });
+      if (engineOwnedSl && !cancelTargets.some(t => t.algoId === engineOwnedSl.algoId)) {
+        cancelTargets.push({ instId, algoId: engineOwnedSl.algoId });
+      }
+      if (engineOwnedTp && !cancelTargets.some(t => t.algoId === engineOwnedTp.algoId)) {
+        cancelTargets.push({ instId, algoId: engineOwnedTp.algoId });
+      }
       
       engineOwnedSl = null;
       engineOwnedTp = null;
-      open.addonRebuildRequired = false; // Clear once we initiate rebuild
+      open.addonRebuildRequired = false; 
+      open.addonRebuildPendingConfirmation = true;
     }
 
     this.logger.info("PROTECTIVE_ORDER_PENDING_ALGO_SCAN_PROOF", {
@@ -6678,6 +6695,16 @@ export class PaperEngine {
     }).normalized_sz : String(contractsToProtect);
 
     if (needSubmitSl) {
+      if (open.breakevenStopRequired === true) {
+        this.logger.info("V2_BREAKEVEN_STOP_UPDATE_SUBMIT_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          requiredBreakevenStopPrice: open.breakevenStopPrice,
+          activeStopPrice,
+          flowId,
+          ts: Date.now()
+        });
+      }
       const slRes = await this.okxDemo.submitAlgoOrder({
         instId, tdMode: tdModeUsed, side: expectedSide, posSide: hedgePosSide, accountPosMode: okxPosMode,
         ordType: "conditional", sz: szStr, reduceOnly: true,
@@ -6721,9 +6748,28 @@ export class PaperEngine {
       slAlgoId: engineOwnedSl?.algoId,
       tpAlgoId: engineOwnedTp?.algoId,
       protectionSuccess,
-      isProtectionFailed: !protectionSuccess,
-      blockedNewEntry: !protectionSuccess
+      isProtectionFailed: !protectionSuccess
     });
+    
+    // Final Atomic Rebuild Completion Gate
+    if (open.addonRebuildPendingConfirmation === true && protectionSuccess === true) {
+      this.logger.info("V2_ADDON_POST_FILL_PROTECTION_REBUILD_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        fillConfirmed: open.addonRebuildMetrics?.fillConfirmed ?? true,
+        oldSize: open.addonRebuildMetrics?.oldSize,
+        newSize: open.addonRebuildMetrics?.newSize,
+        oldAvgEntry: open.addonRebuildMetrics?.oldAvgEntry,
+        newAvgEntry: open.addonRebuildMetrics?.newAvgEntry,
+        slRebuilt: slRegistered,
+        tpRebuilt: tpRegistered,
+        pendingConfirmed: true,
+        protectionSuccess: true,
+        ts: Date.now()
+      });
+      open.addonRebuildPendingConfirmation = false;
+      open.addonRebuildMetrics = undefined;
+    }
 
     const updatedRecord: PaperOpenPositionRecord = {
       ...open,

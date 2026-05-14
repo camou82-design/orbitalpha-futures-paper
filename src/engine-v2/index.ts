@@ -301,6 +301,31 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         currentGlobalNotionalUsd,
         currentStopPrice: preAddOnPosition?.ledger_stop_px ?? undefined
     });
+
+    // --- V2_ADDON_BREAKEVEN_GATE_PROOF (Common Hard Gate) ---
+    const breakevenGateBlocked = addOnPolicy.allowed && addOnPolicy.breakevenStopRequired && !addOnPolicy.breakevenStopConfirmed;
+    if (breakevenGateBlocked) {
+        if (shouldEmitV2Proof("V2_ADDON_BREAKEVEN_GATE_PROOF", String(input.symbol), `${addOnPolicy.side}|${addOnPolicy.reason}`, true)) {
+            console.info(JSON.stringify({
+                event: "V2_ADDON_BREAKEVEN_GATE_PROOF",
+                symbol: String(input.symbol),
+                side: addOnPolicy.side,
+                action: addOnPolicy.action,
+                reason: addOnPolicy.reason,
+                breakevenStopRequired: addOnPolicy.breakevenStopRequired,
+                breakevenStopConfirmed: addOnPolicy.breakevenStopConfirmed,
+                breakevenStopPrice: addOnPolicy.breakevenStopPrice,
+                lockedProfitUsdt: addOnPolicy.lockedProfitUsdt,
+                gate_blocked: true,
+                ts: Date.now()
+            }));
+        }
+        
+        // Forced Override
+        (addOnPolicy as any).allowed = false;
+        (addOnPolicy as any).action = "ADDON_WATCH";
+        (addOnPolicy as any).reason = "BREAKEVEN_STOP_UPDATE_REQUIRED";
+    }
     const shouldEmitAddOnProof =
         addOnPolicy.action !== "INITIAL_ONLY" ||
         addOnPolicy.hasSameSidePosition ||
