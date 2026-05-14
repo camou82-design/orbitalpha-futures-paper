@@ -341,6 +341,7 @@ export class OkxDemoClient {
     tpOrdPx?: string;
     slTriggerPxType?: string;
     tpTriggerPxType?: string;
+    algoClOrdId?: string;
   }): Promise<TryResult<Record<string, unknown>[]>> {
     const mode = String(input.accountPosMode ?? "").trim().toLowerCase();
     const isLongShortMode = mode === "long_short_mode";
@@ -392,7 +393,8 @@ export class OkxDemoClient {
       ...(input.tpTriggerPx ? { tpTriggerPx: input.tpTriggerPx } : {}),
       ...(input.tpOrdPx ? { tpOrdPx: input.tpOrdPx } : {}),
       ...(input.slTriggerPxType ? { slTriggerPxType: input.slTriggerPxType } : {}),
-      ...(input.tpTriggerPxType ? { tpTriggerPxType: input.tpTriggerPxType } : {})
+      ...(input.tpTriggerPxType ? { tpTriggerPxType: input.tpTriggerPxType } : {}),
+      ...(input.algoClOrdId ? { algoClOrdId: input.algoClOrdId } : {})
     };
     return this.signedRequest<Record<string, unknown>>("POST", "/api/v5/trade/order-algo", null, payload);
   }
