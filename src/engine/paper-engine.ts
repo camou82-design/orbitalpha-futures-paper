@@ -2871,18 +2871,37 @@ export class PaperEngine {
       if (!hasRemote && !hasLedger) {
         const pendTry = await this.okxDemo.getOrdersAlgoPending({ instType: "SWAP", instId });
         if (pendTry.ok && pendTry.value) {
+          let cancelledCount = 0;
           for (const algo of pendTry.value) {
             const clOrdId = String(algo.algoClOrdId || "");
-            // Ownership verification: Must start with "oap"
             if (clOrdId.startsWith("oap")) {
-              this.logger.warn("PROTECTIVE_ORDER_ORPHAN_CLEANUP_PROOF", {
-                symbol,
-                algoId: algo.algoId,
-                algoClOrdId: clOrdId,
-                reason: "no_matching_position_on_exchange_or_ledger",
-                action: "FORCE_CANCEL_ORPHAN"
-              });
               await this.okxDemo.cancelAlgoOrder([{ instId, algoId: String(algo.algoId) }]);
+              cancelledCount++;
+            }
+          }
+
+          if (cancelledCount > 0) {
+            // Post-cancellation verification for orphan sweeper
+            await new Promise(resolve => setTimeout(resolve, 500));
+            const verifyTry = await this.okxDemo.getOrdersAlgoPending({ instType: "SWAP", instId });
+            let remainingOrphanCount = 0;
+            if (verifyTry.ok && verifyTry.value) {
+              remainingOrphanCount = verifyTry.value.filter(algo => String(algo.algoClOrdId || "").startsWith("oap")).length;
+            } else if (!verifyTry.ok) {
+              remainingOrphanCount = -1; // Unknown
+            }
+
+            const finalOrphanClean = remainingOrphanCount === 0;
+            this.logger.warn("PROTECTIVE_ORDER_ORPHAN_CLEANUP_PROOF", {
+              symbol,
+              cancelled_count: cancelledCount,
+              remaining_orphan_count: remainingOrphanCount,
+              final_orphan_clean: finalOrphanClean,
+              action: "FORCE_CANCEL_ORPHAN_AND_VERIFY"
+            });
+
+            if (!finalOrphanClean) {
+              this.symbolProtectionFailedBlocked.add(symbol);
             }
           }
         }
@@ -6234,15 +6253,21 @@ export class PaperEngine {
       }
 
       // [HARDENING] Post-cancellation verification
-      // Wait a short moment for OKX state propagation
       await new Promise(resolve => setTimeout(resolve, 500));
       const verifyTry = await this.okxDemo.getOrdersAlgoPending({ instType: "SWAP", instId });
       let remainingCount = 0;
+      let finalOrphanClean = false;
+
       if (verifyTry.ok && verifyTry.value) {
         remainingCount = verifyTry.value.filter(algo => String(algo.algoClOrdId || "").startsWith(engineOwnedPrefix)).length;
+        finalOrphanClean = remainingCount === 0;
+      } else if (!verifyTry.ok) {
+        remainingCount = -1; // unknown
+        finalOrphanClean = false; // Query failed, cannot confirm clean
       }
 
-      const allSuccess = results.every(r => r.success);
+      const allSuccess = results.every(r => r.success) && finalOrphanClean;
+
       this.logger.info("PROTECTIVE_ORDER_CLOSE_CLEANUP_RESULT", {
         symbol,
         posSide,
@@ -6250,16 +6275,17 @@ export class PaperEngine {
         all_success: allSuccess,
         results,
         remaining_engine_owned_count: remainingCount,
-        final_orphan_clean: remainingCount === 0
+        final_orphan_clean: finalOrphanClean
       });
 
-      if (!allSuccess) {
-        // [HARDENING] Block symbol if cleanup failed to prevent orphan mess in next cycle
+      if (!allSuccess || remainingCount > 0) {
+        // [HARDENING] Block symbol if cleanup failed or residue remains
         this.symbolProtectionFailedBlocked.add(symbol);
         this.logger.error("PROTECTIVE_ORDER_CLEANUP_FAILED_BLOCKING_SYMBOL", { 
           symbol, 
-          reason: "cleanup_not_fully_successful",
-          failed_count: results.filter(r => !r.success).length
+          reason: remainingCount > 0 ? "residue_detected_after_cleanup" : "cleanup_call_failed",
+          failed_count: results.filter(r => !r.success).length,
+          remaining_count: remainingCount
         });
       }
 
