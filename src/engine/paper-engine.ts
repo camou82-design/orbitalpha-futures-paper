@@ -14340,7 +14340,7 @@ export class PaperEngine {
               const chaseBps = Math.abs(currentPrice - originalPrice) / originalPrice * 10000;
               
               // Strict Condition Check
-              const hasPosition = this.currentPositions.has(sym);
+              const hasPosition = this.positions.getOpenPositions().some(p => p.symbol === sym);
               const signedReady = this.signedExecutionReady === true;
               const protectionBlocked = this.symbolProtectionFailedBlocked.has(sym);
               
