@@ -373,14 +373,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }));
     }
 
-    if (judgment.marketSubtype?.includes("FAST_TREND_SHIFT") || judgment.reason?.includes("FAST_TREND_SHIFT")) {
-        if (shouldEmitV2Proof("V2_FAST_TREND_SHIFT_PROBE_PROOF", String(input.symbol), execution.side, true)) {
+    if (judgment.subtype?.includes("FAST_TREND_SHIFT") || judgment.reason?.includes("FAST_TREND_SHIFT")) {
+        if (shouldEmitV2Proof("V2_FAST_TREND_SHIFT_PROBE_PROOF", String(input.symbol), String(execution.side), true)) {
             console.info(JSON.stringify({
                 event: "V2_FAST_TREND_SHIFT_PROBE_PROOF",
                 symbol: String(input.symbol),
                 side: execution.side,
                 reason: judgment.reason,
-                subtype: judgment.marketSubtype,
+                subtype: judgment.subtype,
                 quality: authoritativeInput.snapshot.qualityScore,
                 lastPrice: authoritativeInput.snapshot.lastPrice,
                 baseSizeIntent: execution.baseSizeIntent,
