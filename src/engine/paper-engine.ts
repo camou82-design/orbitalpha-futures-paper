@@ -14322,35 +14322,60 @@ export class PaperEngine {
           });
 
           const recoveryInfo = this.v2RecoveryActiveBySymbol.get(sym);
-          const isRecovery = recoveryInfo && recoveryInfo.side === side && (Date.now() - recoveryInfo.ts < 60_000);
-
-          if (isRecovery) {
+          const maxChaseBps = 12; // 8~15bps range per instruction
+          
+          let isRecovery = !!(recoveryInfo && recoveryInfo.side === side && (Date.now() - recoveryInfo.ts < 60_000));
+          
+          if (isRecovery && recoveryInfo) {
               const currentPrice = first.lastPrice;
               const originalPrice = recoveryInfo.originalLimitPrice ?? currentPrice;
               const chaseBps = Math.abs(currentPrice - originalPrice) / originalPrice * 10000;
-              const maxChaseBps = 100; // 1%
+              
+              // Strict Condition Check
+              const hasPosition = this.currentPositions.has(sym);
+              const signedReady = this.signedExecutionReady === true;
+              const protectionBlocked = this.symbolProtectionFailedBlocked.has(sym);
+              
+              const conditionsPassed = 
+                  !hasPosition && 
+                  !!stopPrice && 
+                  signedReady && 
+                  !protectionBlocked && 
+                  chaseBps <= maxChaseBps;
 
-              if (chaseBps > maxChaseBps) {
+              if (!conditionsPassed) {
                   this.logger.warn("MISSED_LIMIT_FILL_RECOVERY_SKIPPED", {
                       symbol: sym,
                       side,
                       chaseBps,
                       maxChaseBps,
-                      reason: "CHASE_DISTANCE_EXCEEDED"
+                      hasPosition,
+                      hasStopPrice: !!stopPrice,
+                      signedReady,
+                      protectionBlocked,
+                      reason: chaseBps > maxChaseBps ? "CHASE_DISTANCE_EXCEEDED" : "STRICT_CONDITION_NOT_MET"
                   });
                   this.v2RecoveryActiveBySymbol.delete(sym);
-                  continue;
+                  isRecovery = false;
+                  continue; 
               }
 
               this.logger.info("V2_RECOVERY_ENTRY_TRIGGER_PROOF", {
                   symbol: sym,
                   side,
                   reason: "missed_limit_fill_recovery",
-                  action: "USE_MARKETABLE_ORDER",
+                  action: "USE_MARKETABLE_LIMIT_ORDER",
                   missedLimitFillCount: recoveryInfo.missedLimitFillCount,
-                  lastEntryIntentSide: recoveryInfo.lastEntryIntentSide
+                  lastEntryIntentSide: recoveryInfo.lastEntryIntentSide,
+                  chaseBps
               });
           }
+
+          // Marketable Limit Pricing for Recovery (5bps buffer)
+          const recoveryPriceOffset = 0.0005;
+          const finalEntryPrice = isRecovery 
+              ? (side === "buy" ? first.lastPrice * (1 + recoveryPriceOffset) : first.lastPrice * (1 - recoveryPriceOffset))
+              : first.lastPrice;
 
           const submit = await this.submitOkxOrder({
             symbol: first.symbol,
@@ -14359,7 +14384,7 @@ export class PaperEngine {
             qty: qtyLegacyEst,
             clOrdId,
             traceId: openTraceId,
-            ordType: isRecovery ? "market" : "limit",
+            ordType: "limit", // Explicit marketable limit
             reason: isRecovery ? "v2_authorized_recovery_path" : "v2_authorized_fast_path",
             authoritySource: authority.source,
             adoptedEngine,
@@ -14367,7 +14392,7 @@ export class PaperEngine {
             leverageProfile: authority.leverageProfile ?? null,
             appliedLeverage: authority.appliedLeverage ?? null,
             marketRegime: authority.regime ?? null,
-            entryPrice: first.lastPrice,
+            entryPrice: finalEntryPrice,
             stopPrice,
             takeProfitPrice: initialTpForRecord,
             paperExecutionReady: executionSnapshot.paperReady,
@@ -14387,10 +14412,6 @@ export class PaperEngine {
                   ts: Date.now()
               });
               if (submit.ok) this.v2RecoveryActiveBySymbol.delete(sym);
-          }
-
-          if (submit.ok && isRecovery) {
-              this.v2RecoveryActiveBySymbol.delete(sym);
           }
 
           this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
