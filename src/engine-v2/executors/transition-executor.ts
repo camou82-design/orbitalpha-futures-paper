@@ -1,6 +1,42 @@
 import { EngineV2Input, ExecutorOutput, MarketJudgmentOutput, TransitionExecutorMetadata, TransitionSetupType } from "../types";
 import { classifyRangeZone } from "../../models/types";
 
+// Transition Failure Layer Constants
+const FAILURE_LOOKBACK_BARS = 12;
+const MIN_OVEREXTENSION_ATR = 1.20;
+const LATE_CHASE_ATR = 0.80;
+const LATE_CHASE_PCT = 0.0035;
+const STOP_BUFFER_ATR = 0.25;
+const MIN_FAILURE_CONFIRMATIONS = 2;
+
+function calculateRSI(closes: number[], period: number = 14): number {
+    if (closes.length <= period) return 50;
+    const slice = closes.slice(-(period + 1));
+    let gains = 0;
+    let losses = 0;
+    for (let i = 1; i < slice.length; i++) {
+        const diff = slice[i] - slice[i - 1];
+        if (diff > 0) gains += diff;
+        else losses -= diff;
+    }
+    if (losses === 0) return 100;
+    const rs = (gains / period) / (losses / period);
+    return 100 - (100 / (1 + rs));
+}
+
+function calculateBB(closes: number[], period: number = 20, stdDev: number = 2) {
+    if (closes.length < period) return null;
+    const slice = closes.slice(-period);
+    const mean = slice.reduce((a, b) => a + b, 0) / period;
+    const variance = slice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / period;
+    const sd = Math.sqrt(variance);
+    return {
+        upper: mean + stdDev * sd,
+        lower: mean - stdDev * sd,
+        mean
+    };
+}
+
 /**
  * Tier 4: Transition Executor (Refined)
  * Passive scouting and exploration only.
@@ -26,6 +62,181 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
     const breakoutConfirm = qualityScore >= 65 || reviewingTicks >= 1;
     const transitionPhase = judgment?.transitionPhase ?? "NONE";
     const subtype = judgment?.subtype ?? "TRANSITION_CONFLICT";
+
+    // --- V2 TRANSITION FAILURE PROBE LAYER (NO_POSITION ONLY) ---
+    const hasPosition = st.currentPositions && st.currentPositions.length > 0;
+    const isTransitionRegime = judgment?.regime_final === "TRANSITION" || judgment?.regime_final === "NO_TRADE" || subtype === "TRANSITION_CONFLICT";
+
+    if (!hasPosition && isTransitionRegime) {
+        const candles = input.candles || sn.candles || [];
+        if (candles.length >= 20) {
+            const closes = candles.map(c => c.close);
+            const rsi = calculateRSI(closes);
+            const bb = calculateBB(closes);
+            const atr = sn.atr || (sn.lastPrice * 0.01);
+            const lastPrice = sn.lastPrice;
+            const lastCandle = candles[candles.length - 1];
+            const prevCandle = candles[candles.length - 2];
+            
+            const window12 = candles.slice(-FAILURE_LOOKBACK_BARS);
+            const swingHigh = Math.max(...window12.map(c => c.high));
+            const swingLow = Math.min(...window12.map(c => c.low));
+
+            // 1. TOP FAILURE WATCH (SHORT)
+            const topOverextended = (bb && (lastPrice >= bb.upper * 0.999 || prevCandle.high >= bb.upper)) || rsi >= 65 || (lastPrice >= swingLow + (atr * MIN_OVEREXTENSION_ATR));
+            
+            if (topOverextended && shortAllow && directionalShockState !== "UP") {
+                const shortConfirms = [];
+                if (lastPrice < swingHigh) shortConfirms.push("failed_high");
+                if (lastCandle.high - Math.max(lastCandle.open, lastCandle.close) > (Math.max(lastCandle.open, lastCandle.close) - Math.min(lastCandle.open, lastCandle.close))) shortConfirms.push("upper_wick");
+                if (lastCandle.close < prevCandle.low) shortConfirms.push("break_prev_low");
+                if (sn.ema20 && lastPrice < sn.ema20) shortConfirms.push("below_ema20");
+                if (rsi < calculateRSI(closes.slice(0, -1))) shortConfirms.push("rsi_turn");
+                if (bb && prevCandle.high > bb.upper && lastPrice < bb.upper) shortConfirms.push("bb_reentry");
+
+                const dropFromHigh = swingHigh - lastPrice;
+                const lateChaseBlocked = dropFromHigh > (atr * LATE_CHASE_ATR) || dropFromHigh > (swingHigh * LATE_CHASE_PCT);
+                
+                // Pullback Retest Logic
+                const retraceToEma = lastPrice >= (sn.ema20 || 0) * 0.999 && lastPrice <= (sn.ema20 || 0) * 1.002;
+                const retestConfirmed = retraceToEma && lastCandle.close < lastCandle.open && shortConfirms.length >= 1;
+
+                if (shortConfirms.length >= MIN_FAILURE_CONFIRMATIONS && !lateChaseBlocked) {
+                    const stopPrice = swingHigh + (atr * STOP_BUFFER_ATR);
+                    
+                    // Final pre-flight: ensure we aren't filling against a renewed breakout
+                    if (lastPrice < swingHigh * 1.0005) {
+                        console.info(JSON.stringify({
+                            event: "V2_TRANSITION_FAILURE_LAYER_PROOF",
+                            symbol: input.symbol,
+                            side: "short",
+                            type: "EARLY_REVERSAL_SHORT_PROBE",
+                            confirms: shortConfirms.join("|"),
+                            price: lastPrice,
+                            stopPrice
+                        }));
+
+                        return {
+                            signal: "SHORT_CANDIDATE",
+                            side: "short",
+                            reason: "V2_TRANSITION_TOP_FAILURE_PROBE",
+                            baseSizeIntent: 0.25,
+                            recheckSuggested: false,
+                            isAddOnEligible: false,
+                            stopPrice,
+                            invalidationPx: stopPrice,
+                            metadata: { failure_layer: "top_failure", confirms: shortConfirms.length, rsi } as any
+                        };
+                    }
+                } else if (lateChaseBlocked && retestConfirmed) {
+                    const stopPrice = Math.max(swingHigh, lastCandle.high) + (atr * STOP_BUFFER_ATR);
+                    console.info(JSON.stringify({
+                        event: "V2_TRANSITION_FAILURE_LAYER_PROOF",
+                        symbol: input.symbol,
+                        side: "short",
+                        type: "PULLBACK_RETEST_SHORT_CONFIRM",
+                        price: lastPrice,
+                        stopPrice
+                    }));
+                    return {
+                        signal: "SHORT_CANDIDATE",
+                        side: "short",
+                        reason: "V2_TRANSITION_RETEST_FAILURE_PROBE",
+                        baseSizeIntent: 0.25,
+                        recheckSuggested: false,
+                        isAddOnEligible: false,
+                        stopPrice,
+                        invalidationPx: stopPrice,
+                        metadata: { failure_layer: "retest_failure", type: "short" } as any
+                    };
+                } else if (lateChaseBlocked) {
+                    console.info(JSON.stringify({
+                        event: "V2_TRANSITION_FAILURE_LAYER_PROOF",
+                        symbol: input.symbol,
+                        side: "short",
+                        type: "LATE_SHORT_CHASE_BLOCK",
+                        reason: "too_far_from_high"
+                    }));
+                }
+            }
+
+            // 2. BOTTOM FAILURE WATCH (LONG)
+            const bottomOverextended = (bb && (lastPrice <= bb.lower * 1.001 || prevCandle.low <= bb.lower)) || rsi <= 35 || (lastPrice <= swingHigh - (atr * MIN_OVEREXTENSION_ATR));
+
+            if (bottomOverextended && longAllow && directionalShockState !== "DOWN") {
+                const longConfirms = [];
+                if (lastPrice > swingLow) longConfirms.push("failed_low");
+                if (Math.min(lastCandle.open, lastCandle.close) - lastCandle.low > (Math.max(lastCandle.open, lastCandle.close) - Math.min(lastCandle.open, lastCandle.close))) longConfirms.push("lower_wick");
+                if (lastCandle.close > prevCandle.high) longConfirms.push("break_prev_high");
+                if (sn.ema20 && lastPrice > sn.ema20) longConfirms.push("above_ema20");
+                if (rsi > calculateRSI(closes.slice(0, -1))) longConfirms.push("rsi_turn");
+                if (bb && prevCandle.low < bb.lower && lastPrice > bb.lower) longConfirms.push("bb_reentry");
+
+                const riseFromLow = lastPrice - swingLow;
+                const lateChaseBlocked = riseFromLow > (atr * LATE_CHASE_ATR) || riseFromLow > (swingLow * LATE_CHASE_PCT);
+
+                const retraceToEma = lastPrice <= (sn.ema20 || 0) * 1.001 && lastPrice >= (sn.ema20 || 0) * 0.998;
+                const retestConfirmed = retraceToEma && lastCandle.close > lastCandle.open && longConfirms.length >= 1;
+
+                if (longConfirms.length >= MIN_FAILURE_CONFIRMATIONS && !lateChaseBlocked) {
+                    const stopPrice = swingLow - (atr * STOP_BUFFER_ATR);
+                    
+                    if (lastPrice > swingLow * 0.9995) {
+                        console.info(JSON.stringify({
+                            event: "V2_TRANSITION_FAILURE_LAYER_PROOF",
+                            symbol: input.symbol,
+                            side: "long",
+                            type: "EARLY_REVERSAL_LONG_PROBE",
+                            confirms: longConfirms.join("|"),
+                            price: lastPrice,
+                            stopPrice
+                        }));
+
+                        return {
+                            signal: "LONG_CANDIDATE",
+                            side: "long",
+                            reason: "V2_TRANSITION_BOTTOM_FAILURE_PROBE",
+                            baseSizeIntent: 0.25,
+                            recheckSuggested: false,
+                            isAddOnEligible: false,
+                            stopPrice,
+                            invalidationPx: stopPrice,
+                            metadata: { failure_layer: "bottom_failure", confirms: longConfirms.length, rsi } as any
+                        };
+                    }
+                } else if (lateChaseBlocked && retestConfirmed) {
+                    const stopPrice = Math.min(swingLow, lastCandle.low) - (atr * STOP_BUFFER_ATR);
+                    console.info(JSON.stringify({
+                        event: "V2_TRANSITION_FAILURE_LAYER_PROOF",
+                        symbol: input.symbol,
+                        side: "long",
+                        type: "PULLBACK_RETEST_LONG_CONFIRM",
+                        price: lastPrice,
+                        stopPrice
+                    }));
+                    return {
+                        signal: "LONG_CANDIDATE",
+                        side: "long",
+                        reason: "V2_TRANSITION_RETEST_FAILURE_PROBE",
+                        baseSizeIntent: 0.25,
+                        recheckSuggested: false,
+                        isAddOnEligible: false,
+                        stopPrice,
+                        invalidationPx: stopPrice,
+                        metadata: { failure_layer: "retest_failure", type: "long" } as any
+                    };
+                } else if (lateChaseBlocked) {
+                    console.info(JSON.stringify({
+                        event: "V2_TRANSITION_FAILURE_LAYER_PROOF",
+                        symbol: input.symbol,
+                        side: "long",
+                        type: "LATE_LONG_CHASE_BLOCK",
+                        reason: "too_far_from_low"
+                    }));
+                }
+            }
+        }
+    }
 
     if (subtype === "WHIPSAW_SHOCK_RECHECK" || subtype === "WHIPSAW_SOFT_WATCH") {
         const meta: TransitionExecutorMetadata = {
