@@ -838,6 +838,23 @@ export type PaperOpenPositionRecord = {
   v2RangeTp1Triggered?: boolean;
   v2RangeTp2Triggered?: boolean;
 
+  /** V2 probe 진입 사유 (EARLY_REVERSAL_SHORT_PROBE 등) - exit/partial 단계에서 읽음. */
+  v2EntryReason?: string;
+  /** Probe TP1 주문 제출 완료 여부 (요청 ≠ 체결 분리). */
+  probeTP1Submitted?: boolean;
+  /** Probe TP1 체결 완료 여부. */
+  probeTP1Filled?: boolean;
+  /** Probe TP1 체결 평균 가격. */
+  probeTP1AvgFillPrice?: number;
+  /** Probe TP1 체결 수량. */
+  probeTP1FilledQty?: number;
+  /** Probe TP1 체결 후 남은 수량. */
+  probeRemainingQty?: number;
+  /** Probe 진입 bar 기준 시각 (ms) - 5분봉 time stop 계산용. */
+  probeEntryBarTime?: number;
+  /** Probe 5분봉 홀드 카운트 (마지막 확인 시점). */
+  probeHeld5mBars?: number;
+
   
   
   // Close Pending Tracking

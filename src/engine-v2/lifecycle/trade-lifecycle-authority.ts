@@ -1,5 +1,14 @@
 import type { V2TradeLifecycleAuthorityInput, V2TradeLifecycleAuthorityResult, V2CooldownType, V2LifecycleStage } from "../types";
 import { classifyRangeZone } from "../../models/types";
+import {
+    isProbeEntryReason,
+    calculateProbeTpPlan,
+    evaluateProbeTP1Submit,
+    processProbeTP1Fill,
+    evaluateProbeBreakevenStop,
+    evaluateProbeProtectionRealign,
+    evaluateProbeTimeStop,
+} from "../exit/probe-tp-policy";
 
 function resolveCooldownType(input: V2TradeLifecycleAuthorityInput): V2CooldownType {
     const reason = String(input.cooldownState.reason ?? "").toLowerCase();
@@ -79,6 +88,121 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
     let tp2TriggeredResult: boolean | undefined;
     let tp1PxResult: number | undefined;
     let tp2PxResult: number | undefined;
+
+    // --- V2 PROBE TP LAYER (EARLY_REVERSAL / PULLBACK_RETEST) ---
+    // 기존 RANGE/TREND 로직과 완전히 분리. probe 포지션에만 적용.
+    const v2EntryReason = input.v2EntryReason ?? input.position?.v2EntryReason;
+    const isProbe = isProbeEntryReason(v2EntryReason);
+
+    if (isProbe && input.position != null && input.markPrice != null) {
+        const pos = input.position;
+        const side = input.side as "long" | "short";
+        const stopPx = input.currentStopPrice ?? pos.ledger_stop_px ?? 0;
+
+        if (stopPx > 0) {
+            const probePlan = calculateProbeTpPlan(
+                input.symbol,
+                side,
+                v2EntryReason,
+                pos.entryPrice,
+                stopPx
+            );
+
+            if (probePlan != null) {
+                const alreadySubmitted = input.probeTP1Submitted ?? pos.probeTP1Submitted ?? false;
+                const alreadyFilled = input.probeTP1Filled ?? pos.probeTP1Filled ?? false;
+                const barsHeld = input.probeHeld5mBars ?? pos.probeHeld5mBars ?? 0;
+                const totalQty = pos.sizeUsd / pos.entryPrice; // 수량 추정
+                const remainingQty = input.probeRemainingQty ?? pos.probeRemainingQty ?? totalQty;
+
+                // 1. Time Stop 평가 (TP1 체결 전에만)
+                if (!alreadyFilled) {
+                    const timeStop = evaluateProbeTimeStop(
+                        input.symbol,
+                        side,
+                        probePlan,
+                        input.markPrice,
+                        barsHeld,
+                        alreadyFilled
+                    );
+                    if (timeStop?.isTimeStopCandidate) {
+                        exitAction = "exit";
+                        exitReason = "V2_PROBE_TIME_STOP";
+                        proofReasons.push(`PROBE_TIME_STOP_CANDIDATE|bars=${barsHeld}|R=${timeStop.currentR.toFixed(3)}`);
+                    }
+                }
+
+                // 2. TP1 체결 감지 (submitted but not filled: fill check)
+                if (alreadySubmitted && !alreadyFilled && exitAction === "none") {
+                    // markPrice가 TP1 price를 통과했는지 확인
+                    const tp1Hit = side === "long"
+                        ? input.markPrice >= probePlan.tp1Price
+                        : input.markPrice <= probePlan.tp1Price;
+
+                    if (tp1Hit) {
+                        const fillResult = processProbeTP1Fill(
+                            input.symbol,
+                            side,
+                            probePlan,
+                            totalQty,
+                            totalQty * probePlan.tp1CloseRatio,
+                            input.markPrice
+                        );
+                        if (fillResult != null) {
+                            tp1TriggeredResult = true;
+                            tp1PxResult = input.markPrice;
+                            partialAction = "reduce";
+                            partialReason = "V2_PROBE_TP1_FILL_CONFIRMED";
+                            reduceRatio = probePlan.tp1CloseRatio;
+                            proofReasons.push(`PROBE_TP1_FILL_CONFIRMED|filledQty=${fillResult.filledQty.toFixed(6)}|remaining=${fillResult.remainingQty.toFixed(6)}|pnl=${fillResult.realizedPnl.toFixed(4)}`);
+
+                            // 3. TP1 fill 후 본절 이동
+                            const breakevenResult = evaluateProbeBreakevenStop(
+                                input.symbol,
+                                side,
+                                probePlan,
+                                stopPx,
+                                true,
+                                fillResult.remainingQty
+                            );
+                            if (breakevenResult?.shouldMove) {
+                                newStopPrice = breakevenResult.newStopPrice;
+                                proofReasons.push(`PROBE_BREAKEVEN_STOP_MOVED|old=${breakevenResult.oldStopPrice.toFixed(4)}|new=${breakevenResult.newStopPrice.toFixed(4)}`);
+
+                                // 4. 남은 수량 기준 SL/TP 보호주문 재정렬
+                                const realignResult = evaluateProbeProtectionRealign(
+                                    input.symbol,
+                                    side,
+                                    probePlan,
+                                    fillResult.remainingQty,
+                                    breakevenResult.newStopPrice
+                                );
+                                if (realignResult?.shouldRealign) {
+                                    proofReasons.push(`PROBE_PROTECTION_REALIGNED|qty=${realignResult.remainingQty.toFixed(6)}|finalTp=${realignResult.finalTpPrice.toFixed(4)}`);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 5. TP1 미제출 상태: 제출 결정
+                if (!alreadySubmitted && !alreadyFilled && exitAction === "none" && partialAction === "none") {
+                    const submitDecision = evaluateProbeTP1Submit(
+                        input.symbol,
+                        side,
+                        probePlan,
+                        totalQty,
+                        alreadySubmitted,
+                        alreadyFilled
+                    );
+                    if (submitDecision?.shouldSubmit) {
+                        tp1PxResult = submitDecision.tp1Price;
+                        proofReasons.push(`PROBE_TP1_SUBMIT_QUEUED|qty=${submitDecision.qty.toFixed(6)}|tp1=${submitDecision.tp1Price.toFixed(4)}|reduceOnly=true`);
+                    }
+                }
+            }
+        }
+    }
 
     if (input.position != null) {
         if (input.regime === "RANGE") {

@@ -109,6 +109,22 @@ export interface EngineV2Position {
     breakevenStopRequired?: boolean;
     breakevenStopConfirmed?: boolean;
     breakevenStopPrice?: number;
+    /** V2 진입 사유 - probe TP/exit 단계에서 진입 유형 판별에 사용. */
+    v2EntryReason?: string;
+    /** Probe TP1 주문 제출 완료 여부 (요청 ≠ 체결 분리). */
+    probeTP1Submitted?: boolean;
+    /** Probe TP1 체결 완료 여부. */
+    probeTP1Filled?: boolean;
+    /** Probe TP1 체결 평균 가격. */
+    probeTP1AvgFillPrice?: number;
+    /** Probe TP1 체결 수량. */
+    probeTP1FilledQty?: number;
+    /** Probe TP1 체결 후 남은 수량. */
+    probeRemainingQty?: number;
+    /** Probe time stop 기준: 5분봉 bar 카운트 시작 시각 (ms). */
+    probeEntryBarTime?: number;
+    /** Probe 5분봉 홀드 카운트 (마지막 확인 시점). */
+    probeHeld5mBars?: number;
 }
 
 /** 
@@ -927,6 +943,20 @@ export interface V2TradeLifecycleAuthorityInput {
     breakevenStopPrice?: number;
     suggestedStopPrice?: number | null;
     suggestedInvalidationPx?: number | null;
+    /** V2 probe 진입 사유 (EARLY_REVERSAL_* / PULLBACK_RETEST_*) — probe TP 정책 분기에 사용. */
+    v2EntryReason?: string;
+    /** Probe TP1 주문 제출 완료 여부. */
+    probeTP1Submitted?: boolean;
+    /** Probe TP1 체결 완료 여부. */
+    probeTP1Filled?: boolean;
+    /** Probe TP1 체결 후 남은 수량. */
+    probeRemainingQty?: number;
+    /** Probe 진입 bar 기준 시각 (5분봉 time stop 계산용). */
+    probeEntryBarTime?: number;
+    /** 현재까지 경과한 5분봉 bar 수 (engine tick 시점 기준). */
+    probeHeld5mBars?: number;
+    /** 현재 mark price 기준 R 값 (probe TP plan 생성에 활용). */
+    currentRFromEntry?: number;
 }
 
 export interface V2TradeLifecycleAuthorityResult {
