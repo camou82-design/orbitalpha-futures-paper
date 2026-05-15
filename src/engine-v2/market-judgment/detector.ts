@@ -1322,9 +1322,9 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         );
     }
 
-    // Detailed Fast Trend Shift Proof
+    // Detailed Fast Trend Shift Probe Proof
     console.info(JSON.stringify({
-        event: "V2_FAST_TREND_SHIFT_PROOF",
+        event: "V2_FAST_TREND_SHIFT_PROBE_PROOF",
         symbol: input.symbol,
         regime: regime_final,
         market_subtype: finalSubtype,

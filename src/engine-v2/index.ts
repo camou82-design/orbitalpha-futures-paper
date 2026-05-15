@@ -302,7 +302,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         currentStopPrice: preAddOnPosition?.ledger_stop_px ?? undefined
     });
 
-    // --- V2_ADDON_BREAKEVEN_GATE_PROOF (Common Hard Gate) ---
+    // --- V2_ADDON_BREAKEVEN_GATE_PROOF (Universal Hard Gate) ---
     const breakevenGateBlocked = addOnPolicy.allowed && !addOnPolicy.breakevenStopConfirmed;
     if (breakevenGateBlocked) {
         if (shouldEmitV2Proof("V2_ADDON_BREAKEVEN_GATE_PROOF", String(input.symbol), `${addOnPolicy.side}|${addOnPolicy.reason}`, true)) {
@@ -317,6 +317,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 breakevenStopPrice: addOnPolicy.breakevenStopPrice,
                 lockedProfitUsdt: addOnPolicy.lockedProfitUsdt,
                 gate_blocked: true,
+                mandatory_safety_gate_active: true,
+                detail: addOnPolicy.breakevenStopRequired === false ? "safety_gate_enforced_despite_required_false" : "confirmation_pending",
                 ts: Date.now()
             }));
         }
@@ -370,6 +372,24 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             evidence: addOnPolicy.evidence
         }));
     }
+
+    if (judgment.marketSubtype?.includes("FAST_TREND_SHIFT") || judgment.reason?.includes("FAST_TREND_SHIFT")) {
+        if (shouldEmitV2Proof("V2_FAST_TREND_SHIFT_PROBE_PROOF", String(input.symbol), execution.side, true)) {
+            console.info(JSON.stringify({
+                event: "V2_FAST_TREND_SHIFT_PROBE_PROOF",
+                symbol: String(input.symbol),
+                side: execution.side,
+                reason: judgment.reason,
+                subtype: judgment.marketSubtype,
+                quality: authoritativeInput.snapshot.qualityScore,
+                lastPrice: authoritativeInput.snapshot.lastPrice,
+                baseSizeIntent: execution.baseSizeIntent,
+                invalidationPx: execution.invalidationPx,
+                ts: Date.now()
+            }));
+        }
+    }
+
     if (
         addOnPolicy.action === "INITIAL_ONLY" &&
         (execution.signal === "LONG_CANDIDATE" || execution.signal === "SHORT_CANDIDATE" || execution.signal === "WAIT_RECHECK") &&

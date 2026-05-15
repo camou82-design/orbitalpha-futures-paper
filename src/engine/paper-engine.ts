@@ -984,6 +984,7 @@ export class PaperEngine {
   /** 鍮꾩쁺?? 理쒓렐 ?깅퀎 `decision_funnel_tick` ?ㅻ깄??(理쒕? DECISION_FUNNEL_RING_MAX). */
   private decisionFunnelTickRing: DecisionFunnelTick[] = [];
   /** 鍮꾩쁺?? Stage 1 吏꾩엯 寃??SKIP) 以묒씤 ?щ낵??泥대쪟 ?쒓컙 諛??덉쭏 異붿쟻 */
+  /** 鍮꾩쁺?? Stage 1 吏꾩엯 寃€??SKIP) 以묒씤 ?щ낵??泥대쪟 ?쒓컙 諛??덉쭏 異붿쟻 */
   private reviewingState = new Map<string, { ticks: number; initialQuality: number; lastQuality: number }>();
   private lastMarketMode: MarketModeSelectorOutput | null = null;
   private lastRiskExposure: RiskExposureOutput | null = null;
@@ -1000,6 +1001,13 @@ export class PaperEngine {
     lastRangeConfidence: number;
     lastPrice: number;
     updatedAt: number;
+  }>();
+  private v2RecoveryActiveBySymbol = new Map<string, { 
+    side: string; 
+    ts: number; 
+    missedLimitFillCount: number; 
+    lastEntryIntentSide: string; 
+    originalLimitPrice?: number;
   }>();
   /** RANGE ?듭젅 ???ъ쭊??荑⑤떎???고쉶 ?먮떒??留뚮즺 ?쒓컖). */
   private rangeReopenArmedUntilBySymbol = new Map<string, number>();
@@ -12650,6 +12658,57 @@ export class PaperEngine {
 
       if (liveOrder) {
         this.logger.info("PENDING_ENTRY_ORDER_FILL_CHECK_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, status: "still_pending" });
+        
+        // --- V2 Missed Limit Fill Recovery Trigger ---
+        const ageMs = Date.now() - pending.createdAt;
+        if (pending.authority_source === "v2" && ageMs > 20_000) {
+            this.logger.warn("V2_MISSED_LIMIT_FILL_PROOF", {
+                symbol: pending.symbol,
+                side: pending.side,
+                ord_id: ordId,
+                age_ms: ageMs,
+                status: "stale_unfilled",
+                action: "CANCEL_AND_RECOVER"
+            });
+            
+            let cancelSuccess = false;
+            if (this.okxDemo) {
+                try {
+                    const res = await this.okxDemo.cancelOrder(pending.instId, ordId);
+                    if (res.ok) cancelSuccess = true;
+                    else {
+                        const getRes = await this.okxDemo.getOrder(pending.instId, ordId);
+                        if (getRes.ok && getRes.value?.[0]?.state === "filled") {
+                            activePendingEntryOrders.push(pending);
+                            continue;
+                        }
+                    }
+                } catch (e) {}
+            }
+            
+            if (cancelSuccess) {
+                const newCount = (pending.missedLimitFillCount ?? 0) + 1;
+                this.logger.info("V2_MISSED_LIMIT_FILL_RECOVERY_PROOF", {
+                    symbol: pending.symbol,
+                    side: pending.side,
+                    missedLimitFillCount: newCount,
+                    lastEntryIntentSide: pending.side,
+                    originalLimitPrice: pending.originalLimitPrice,
+                    ts: Date.now()
+                });
+                
+                this.v2RecoveryActiveBySymbol.set(pending.symbol, { 
+                    side: pending.side, 
+                    ts: Date.now(),
+                    missedLimitFillCount: newCount,
+                    lastEntryIntentSide: pending.side,
+                    originalLimitPrice: pending.originalLimitPrice
+                });
+                pendingRegistryModified = true;
+                continue; 
+            }
+        }
+        
         activePendingEntryOrders.push(pending);
       } else {
         let orderState = "unknown";
@@ -13008,7 +13067,7 @@ export class PaperEngine {
         });
       }
       // V2 ENTRY REHYDRATION: originalDecision/originalSide/originalStageMarginKrw 湲곕컲?쇰줈
-      // readiness ?ы룊媛濡?REJECT濡?諛붾?authority瑜?媛뺤젣 蹂듭썝?쒕떎.
+      // readiness ?ы룊媛€濡?REJECT濡?諛붾€?authority瑜?媛뺤젣 蹂듭썝?쒕떎.
       // ?덈? ?고쉶 遺덇? 釉붾줉(KILL_SWITCH ?????놁쓣 ?뚮쭔 ?곸슜.
       const NON_BYPASSABLE_HARD_BLOCKS = new Set<string>([
         "SERVER_TRADE_DISABLED", "CLOSE_ONLY_MODE", "KILL_SWITCH", "RECONCILE_SAFE_MODE",
@@ -13225,11 +13284,11 @@ export class PaperEngine {
 
       // [CRASH GUARD REDESIGN]
       // CRASH_REDUCE: ?ъ씠利?異뺤냼/怨듦꺽???쏀솕 ?꾩슜 ??吏꾩엯 ?먯껜??李⑤떒?섏? ?딅뒗??
-      //   longAllow=false 瑜??듯빐 risk-exposure ?덉씠?댁뿉???대? ?듭젣??
-      // CRASH_EXIT/LOCK: 媛뺥븳 no-entry ?덉슜. ???꾨옒 議곌굔??紐⑤몢 異⑹”?섎㈃ ?먮룞 ?댁젣:
-      //   (a) ?꾩옱 activeEngine ??RANGE (?쒖옣?먮떒???대? 諛붾??곹깭)
+      //   longAllow=false 瑜??듯빐 risk-exposure ?덉씠?댁뿉???대? ?듭ெ??
+      // CRASH_EXIT/LOCK: 媛뺥븳 no-entry ?덉슜. ???꾨옒 議곌꾨뱾??紐⑤몢 異⑹”?섎㈃ ?먮룞 ?댁젣:
+      //   (a) ?꾩옱 activeEngine ??RANGE (?쒖옣?먮떒???대? 諛붾€??곹깭)
       //   (b) crashLockUntil ??留뚮즺?먭굅??=0) CRASH_GUARD_REGIME_AWARE_RELEASE_MS 寃쎄낵
-      // 紐⑺몴: crash guard 媛 ?쒖옣?먮떒 蹂寃??꾩뿉??臾닿린???꾩껜 吏꾩엯???쇰━吏 ?딄쾶.
+      // 紐⑺몴: crash guard 媛€ ?쒖옣?먮떒 蹂€寃??꾩뿉??臾닿린???꾩껜 吏꾩엯???쇰━吏€ ?딄쾶.
       const crashLockExpiredOrSoon =
         crashLockUntil === 0 ||
         nowForCrash >= crashLockUntil ||
@@ -13239,7 +13298,7 @@ export class PaperEngine {
         activeEngine === "RANGE" &&
         crashLockExpiredOrSoon;
 
-      // CRASH_REDUCE ?????댁긽 濡?吏꾩엯 ?꾨㈃ 李⑤떒?섏? ?딆쓬 (size 異뺤냼 ?덉씠?대줈 ?泥?
+      // CRASH_REDUCE ?????댁긽 濡?吏꾩엯 ?꾨㈃ 李⑤떒?섏? ?딆쓬 (size 異뺤냼 ?덉씠?대줈 ?€泥?
       const crashEntryGuardApplies =
         authority.side === "long" &&
         (crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK") &&
@@ -14141,7 +14200,7 @@ export class PaperEngine {
 
           // --- [GUARD-3] Macro Bias Risk Filter ---
           // Daily/H4 bias proxy via marketSubtype + regime (no direct D/H4 candle ingestion yet)
-          // 1D/4H??confidence/sizeMultiplier/counterTrendRisk 議곗젙留? ENTER 吏곸젒 ?앹꽦 湲덉?.
+          // 1D/4H??confidence/sizeMultiplier/counterTrendRisk 議곗젙留? ENTER 吏곸옒 ?앹꽦 湲덉?.
           const macroUpSubtypes = new Set([
             "VOLUME_BREAKOUT_OBSERVATION",
             "VOLUME_SHOCK_UP",
@@ -14262,6 +14321,37 @@ export class PaperEngine {
             ...v2CommittedRiskPlan
           });
 
+          const recoveryInfo = this.v2RecoveryActiveBySymbol.get(sym);
+          const isRecovery = recoveryInfo && recoveryInfo.side === side && (Date.now() - recoveryInfo.ts < 60_000);
+
+          if (isRecovery) {
+              const currentPrice = first.lastPrice;
+              const originalPrice = recoveryInfo.originalLimitPrice ?? currentPrice;
+              const chaseBps = Math.abs(currentPrice - originalPrice) / originalPrice * 10000;
+              const maxChaseBps = 100; // 1%
+
+              if (chaseBps > maxChaseBps) {
+                  this.logger.warn("MISSED_LIMIT_FILL_RECOVERY_SKIPPED", {
+                      symbol: sym,
+                      side,
+                      chaseBps,
+                      maxChaseBps,
+                      reason: "CHASE_DISTANCE_EXCEEDED"
+                  });
+                  this.v2RecoveryActiveBySymbol.delete(sym);
+                  continue;
+              }
+
+              this.logger.info("V2_RECOVERY_ENTRY_TRIGGER_PROOF", {
+                  symbol: sym,
+                  side,
+                  reason: "missed_limit_fill_recovery",
+                  action: "USE_MARKETABLE_ORDER",
+                  missedLimitFillCount: recoveryInfo.missedLimitFillCount,
+                  lastEntryIntentSide: recoveryInfo.lastEntryIntentSide
+              });
+          }
+
           const submit = await this.submitOkxOrder({
             symbol: first.symbol,
             side,
@@ -14269,7 +14359,8 @@ export class PaperEngine {
             qty: qtyLegacyEst,
             clOrdId,
             traceId: openTraceId,
-            reason: "v2_authorized_fast_path",
+            ordType: isRecovery ? "market" : "limit",
+            reason: isRecovery ? "v2_authorized_recovery_path" : "v2_authorized_fast_path",
             authoritySource: authority.source,
             adoptedEngine,
             entryQualityGrade: authority.entryQualityGrade ?? null,
@@ -14285,6 +14376,22 @@ export class PaperEngine {
             isNewEntry: true,
             orderNotionalUsdt: v2EntrySizeUsd
           });
+
+          if (isRecovery) {
+              this.logger.info("V2_ENTRY_RECOVERY_ORDER_RESULT_PROOF", {
+                  symbol: sym,
+                  side,
+                  success: submit.ok,
+                  ordId: submit.ordId,
+                  errorCode: submit.errorCode,
+                  ts: Date.now()
+              });
+              if (submit.ok) this.v2RecoveryActiveBySymbol.delete(sym);
+          }
+
+          if (submit.ok && isRecovery) {
+              this.v2RecoveryActiveBySymbol.delete(sym);
+          }
 
           this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
             symbol: sym,

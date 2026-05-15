@@ -1450,6 +1450,14 @@ export interface PendingEntryOrderRecord {
   paperRecordSnapshot: any;
   authoritySnapshot: any;
   openTraceId: string;
+
+  /** V2 Recovery Pipeline Metrics */
+  recoveryAttemptCount?: number;
+  lastRecoveryAt?: number;
+  originalLimitPrice?: number;
+  missedFillReason?: "stale" | "price_moved" | "cancel_requested";
+  missedLimitFillCount?: number;
+  lastEntryIntentSide?: string;
 }
 
 // --- EOF ---
