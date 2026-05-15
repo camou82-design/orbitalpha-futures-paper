@@ -4,7 +4,8 @@ import {
     isProbeEntryReason,
     calculateProbeTpPlan,
     evaluateProbeTP1Submit,
-    processProbeTP1Fill,
+    detectProbeTP1Trigger,
+    detectProbePendingStale,
     evaluateProbeBreakevenStop,
     evaluateProbeProtectionRealign,
     evaluateProbeTimeStop,
@@ -91,6 +92,12 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
 
     // --- V2 PROBE TP LAYER (EARLY_REVERSAL / PULLBACK_RETEST) ---
     // 기존 RANGE/TREND 로직과 완전히 분리. probe 포지션에만 적용.
+    // [실행 단계 분리 원칙]
+    //   Stage 1: TP1 주문 제출 결정 (evaluateProbeTP1Submit)
+    //   Stage 2: markPrice TP1 도달 감지 → TRIGGER만 기록. fill 처리 금지.
+    //   Stage 3: OKX fill 데이터 주입 → lifecycle 밖 caller(executor)가 담당
+    //   Stage 4: 본절 이동, Stage 5: 재정렬 → 마찬가지로 caller 담당
+    //   Stage 7: pending stale 경보
     const v2EntryReason = input.v2EntryReason ?? input.position?.v2EntryReason;
     const isProbe = isProbeEntryReason(v2EntryReason);
 
@@ -101,105 +108,67 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
 
         if (stopPx > 0) {
             const probePlan = calculateProbeTpPlan(
-                input.symbol,
-                side,
-                v2EntryReason,
-                pos.entryPrice,
-                stopPx
+                input.symbol, side, v2EntryReason, pos.entryPrice, stopPx
             );
 
             if (probePlan != null) {
                 const alreadySubmitted = input.probeTP1Submitted ?? pos.probeTP1Submitted ?? false;
-                const alreadyFilled = input.probeTP1Filled ?? pos.probeTP1Filled ?? false;
-                const barsHeld = input.probeHeld5mBars ?? pos.probeHeld5mBars ?? 0;
-                const totalQty = pos.sizeUsd / pos.entryPrice; // 수량 추정
-                const remainingQty = input.probeRemainingQty ?? pos.probeRemainingQty ?? totalQty;
+                const alreadyFilled   = input.probeTP1Filled   ?? pos.probeTP1Filled   ?? false;
+                const barsHeld        = input.probeHeld5mBars  ?? pos.probeHeld5mBars  ?? 0;
+                const totalQty = pos.sizeUsd / pos.entryPrice;
 
-                // 1. Time Stop 평가 (TP1 체결 전에만)
+                // Stage 6: Time Stop 평가 (TP1 체결 전에만)
                 if (!alreadyFilled) {
                     const timeStop = evaluateProbeTimeStop(
-                        input.symbol,
-                        side,
-                        probePlan,
-                        input.markPrice,
-                        barsHeld,
-                        alreadyFilled
+                        input.symbol, side, probePlan, input.markPrice, barsHeld, alreadyFilled
                     );
                     if (timeStop?.isTimeStopCandidate) {
                         exitAction = "exit";
                         exitReason = "V2_PROBE_TIME_STOP";
-                        proofReasons.push(`PROBE_TIME_STOP_CANDIDATE|bars=${barsHeld}|R=${timeStop.currentR.toFixed(3)}`);
+                        proofReasons.push(`PROBE_TIME_STOP|bars=${barsHeld}|R=${timeStop.currentR.toFixed(3)}`);
                     }
                 }
 
-                // 2. TP1 체결 감지 (submitted but not filled: fill check)
+                // Stage 2: markPrice TP1 도달 감지
+                // → TRIGGER만 기록. fill/ledger/보호주문 재정렬은 lifecycle 밖 caller가 담당.
                 if (alreadySubmitted && !alreadyFilled && exitAction === "none") {
-                    // markPrice가 TP1 price를 통과했는지 확인
-                    const tp1Hit = side === "long"
-                        ? input.markPrice >= probePlan.tp1Price
-                        : input.markPrice <= probePlan.tp1Price;
-
-                    if (tp1Hit) {
-                        const fillResult = processProbeTP1Fill(
-                            input.symbol,
-                            side,
-                            probePlan,
-                            totalQty,
-                            totalQty * probePlan.tp1CloseRatio,
-                            input.markPrice
+                    const trigger = detectProbeTP1Trigger(
+                        input.symbol, side, probePlan, input.markPrice, alreadySubmitted, alreadyFilled
+                    );
+                    if (trigger?.triggered) {
+                        // triggered=true: TP1 가격 도달 감지.
+                        // fill 확인/ledger 반영/본절 이동/재정렬은 executor가 OKX fill API 확인 후 수행.
+                        tp1PxResult = probePlan.tp1Price;
+                        proofReasons.push(
+                            `PROBE_TP1_TRIGGERED|markPx=${input.markPrice.toFixed(4)}|tp1Px=${probePlan.tp1Price.toFixed(4)}|fillConfirmed=false|AWAIT_OKX_FILL_API`
                         );
-                        if (fillResult != null) {
-                            tp1TriggeredResult = true;
-                            tp1PxResult = input.markPrice;
-                            partialAction = "reduce";
-                            partialReason = "V2_PROBE_TP1_FILL_CONFIRMED";
-                            reduceRatio = probePlan.tp1CloseRatio;
-                            proofReasons.push(`PROBE_TP1_FILL_CONFIRMED|filledQty=${fillResult.filledQty.toFixed(6)}|remaining=${fillResult.remainingQty.toFixed(6)}|pnl=${fillResult.realizedPnl.toFixed(4)}`);
-
-                            // 3. TP1 fill 후 본절 이동
-                            const breakevenResult = evaluateProbeBreakevenStop(
-                                input.symbol,
-                                side,
-                                probePlan,
-                                stopPx,
-                                true,
-                                fillResult.remainingQty
-                            );
-                            if (breakevenResult?.shouldMove) {
-                                newStopPrice = breakevenResult.newStopPrice;
-                                proofReasons.push(`PROBE_BREAKEVEN_STOP_MOVED|old=${breakevenResult.oldStopPrice.toFixed(4)}|new=${breakevenResult.newStopPrice.toFixed(4)}`);
-
-                                // 4. 남은 수량 기준 SL/TP 보호주문 재정렬
-                                const realignResult = evaluateProbeProtectionRealign(
-                                    input.symbol,
-                                    side,
-                                    probePlan,
-                                    fillResult.remainingQty,
-                                    breakevenResult.newStopPrice
-                                );
-                                if (realignResult?.shouldRealign) {
-                                    proofReasons.push(`PROBE_PROTECTION_REALIGNED|qty=${realignResult.remainingQty.toFixed(6)}|finalTp=${realignResult.finalTpPrice.toFixed(4)}`);
-                                }
-                            }
-                        }
                     }
                 }
 
-                // 5. TP1 미제출 상태: 제출 결정
+                // Stage 7: TP1 submitted 장시간 미체결 경보
+                if (alreadySubmitted && !alreadyFilled) {
+                    detectProbePendingStale(
+                        input.symbol, side, probePlan, alreadySubmitted, alreadyFilled, barsHeld
+                    );
+                }
+
+                // Stage 1: TP1 미제출 상태 → 제출 결정
                 if (!alreadySubmitted && !alreadyFilled && exitAction === "none" && partialAction === "none") {
                     const submitDecision = evaluateProbeTP1Submit(
-                        input.symbol,
-                        side,
-                        probePlan,
-                        totalQty,
-                        alreadySubmitted,
-                        alreadyFilled
+                        input.symbol, side, probePlan, totalQty, alreadySubmitted, alreadyFilled
                     );
                     if (submitDecision?.shouldSubmit) {
                         tp1PxResult = submitDecision.tp1Price;
-                        proofReasons.push(`PROBE_TP1_SUBMIT_QUEUED|qty=${submitDecision.qty.toFixed(6)}|tp1=${submitDecision.tp1Price.toFixed(4)}|reduceOnly=true`);
+                        proofReasons.push(
+                            `PROBE_TP1_SUBMIT_QUEUED|qty=${submitDecision.qty.toFixed(6)}|tp1=${submitDecision.tp1Price.toFixed(4)}|reduceOnly=true`
+                        );
                     }
                 }
+
+                // [NOTE] Stage 3~5 (OKX fill 확인 / ledger update / breakeven stop / realign)는
+                // lifecycle authority 범위 밖. executor가 OKX fill API 결과를 받은 후
+                // processProbeTP1Fill() → evaluateProbeBreakevenStop() → evaluateProbeProtectionRealign()
+                // 순서로 호출하고 각 PROOF 로그를 별도 발행해야 함.
             }
         }
     }
