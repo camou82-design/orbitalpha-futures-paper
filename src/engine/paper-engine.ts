@@ -714,6 +714,15 @@ function buildOkxClOrdId(rawSymbol: string, sideForCode: "buy" | "sell" | "long"
   return built.length <= 32 ? built : built.slice(0, 32);
 }
 
+/**
+ * Identifies if an order was originated by this engine.
+ * Pattern: "p" prefix + symbol + sideCode + ts36 + suffix.
+ */
+function isOrderEngineOwned(ord: { clOrdId?: string; ordId?: string }): boolean {
+  if (!ord.clOrdId) return false;
+  return ord.clOrdId.startsWith("p");
+}
+
 type OkxSwapInstrumentSizing = Readonly<{
   lotSz: number;
   minSz: number;
@@ -1824,6 +1833,8 @@ export class PaperEngine {
     const next: PaperOpenPositionRecord[] = [];
     let ledgerModified = false;
     let mismatchCount = 0;
+    const mismatchDetails: string[] = [];
+    const untrackedFills: string[] = [];
     const RECONCILE_GRACE_PERIOD_MS = 30_000;
 
     const reconcileManualFullClose = async (open: PaperOpenPositionRecord, source: string) => {
@@ -2775,6 +2786,9 @@ export class PaperEngine {
           continue;
         }
 
+        const isEngineOwned = isOrderEngineOwned({ clOrdId: okxRow?.clOrdId, ordId: okxRow?.ordId });
+        const lifecycleState = isEngineOwned ? "UNTRACKED_AUTO_ORIGIN" : "OKX_UNTRACKED_FILL";
+        
         const adopted: PaperOpenPositionRecord = {
           openedAt: nowTs,
           symbol: symbol as MarketSymbol,
@@ -2784,9 +2798,9 @@ export class PaperEngine {
           sizeUsd: notional / (leverage || 1),
           initialSizeUsd: notional / (leverage || 1),
           strategyVersion: "paper-v2",
-          sourceSignal: "okx_reconcile_adopted",
-          sourceRunPath: "manual_adoption",
-          lifecycleState: "EXTERNAL_MANUAL_POSITION",
+          sourceSignal: isEngineOwned ? "okx_reconcile_untracked_auto" : "okx_reconcile_adopted",
+          sourceRunPath: isEngineOwned ? "auto_adoption_untracked" : "manual_adoption",
+          lifecycleState,
           reconcileState: "ADOPTED",
           lastCheckedAt: nowTs,
           status: "open",
@@ -2835,11 +2849,31 @@ export class PaperEngine {
         this.logger.info("paper_position_opened", {
           symbol,
           side,
-          source: "okx_reconcile_adopted",
+          source: adopted.sourceSignal,
+          lifecycleState: adopted.lifecycleState,
           adopted_at: nowTs,
           size_usd: notional,
-          is_repair: true
+          is_repair: true,
+          clOrdId: okxRow?.clOrdId,
+          ordId: okxRow?.ordId,
+          isEngineOwned
         });
+
+        if (lifecycleState === "UNTRACKED_AUTO_ORIGIN" || lifecycleState === "OKX_UNTRACKED_FILL") {
+          untrackedFills.push(`${symbol}:${side}:${lifecycleState}`);
+          this.logger.warn("OKX_UNTRACKED_FILL_AUDIT_LOG", {
+            symbol,
+            side,
+            lifecycleState,
+            clOrdId: okxRow?.clOrdId,
+            ordId: okxRow?.ordId,
+            fillPx: avgPx,
+            fillSz: remoteVal.size,
+            fee: okxRow?.fee ?? 0,
+            posSide: okxRow?.posSide,
+            source: "reconcile_ghost_path"
+          });
+        }
       }
     }
 
@@ -2849,9 +2883,17 @@ export class PaperEngine {
       p.lifecycleState !== "CLOSE_ONLY_MANAGED"
     );
 
-    if (mismatchCount > 0 || hasSeriousAdopted) {
+    const hasUntrackedFills = next.some(p => 
+      p.lifecycleState === "UNTRACKED_AUTO_ORIGIN" || 
+      p.lifecycleState === "OKX_UNTRACKED_FILL"
+    );
+
+    if (mismatchCount > 0 || hasSeriousAdopted || hasUntrackedFills || untrackedFills.length > 0) {
       this.reconcileSafetyCloseOnly = true;
-      this.reconcileLastMismatchReason = mismatchCount > 0 ? "position_state_mismatch" : "unquarantined_adopted_position_block";
+      let reason = "position_state_mismatch";
+      if (hasUntrackedFills || untrackedFills.length > 0) reason = `untracked_fills_detected_gate_blocked:${untrackedFills.join(",")}`;
+      else if (hasSeriousAdopted) reason = "unquarantined_adopted_position_block";
+      this.reconcileLastMismatchReason = reason;
     } else {
       if (this.reconcileSafetyCloseOnly) {
         this.logger.info("POSITION_RECONCILE_RECOVERED_SAFE_MODE_OFF", {});
@@ -14575,18 +14617,47 @@ export class PaperEngine {
               continue;
             }
 
-            next.push(record);
-            
-            // [V2_PROTECTIVE_STOP_AUTO_REGISTRATION]
-            const protectRes = await this.ensureProtectiveStopOrder(record, `v2_fast_entry_auto:${record.symbol}:${record.openedAt}`);
-            if (protectRes.modified) {
-              record.isProtectiveStopRegistered = protectRes.record.isProtectiveStopRegistered;
-              record.protectiveStopAlgoId = protectRes.record.protectiveStopAlgoId;
-            }
-            
-            openPositionsChanged = true;
-            this.logger.info("LIMIT_ENTRY_FILLED_TO_PAPER_OPEN_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
-            this.logger.info("paper_position_opened", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
+            try {
+              next.push(record);
+              
+              // [V2_PROTECTIVE_STOP_AUTO_REGISTRATION]
+              const protectRes = await this.ensureProtectiveStopOrder(record, `v2_fast_entry_auto:${record.symbol}:${record.openedAt}`);
+              if (protectRes.modified) {
+                record.isProtectiveStopRegistered = protectRes.record.isProtectiveStopRegistered;
+                record.protectiveStopAlgoId = protectRes.record.protectiveStopAlgoId;
+              }
+              
+              openPositionsChanged = true;
+              this.logger.info("LIMIT_ENTRY_FILLED_TO_PAPER_OPEN_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
+              this.logger.info("paper_position_opened", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
+          } catch (err) {
+            this.logger.error("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_FAIL_PROOF", {
+              symbol: sym,
+              side: intentSide,
+              ordId: submit.ordId,
+              clOrdId,
+              fillPx: submit.fillPx,
+              fillSz: submit.fillSize,
+              error: String(err)
+            });
+            // Task 5 & 6: Don't prune or manual-flag. Move to failed-entry-audit.
+            await this.store.appendJsonlLine("reports/failed-entry-audit.jsonl", {
+              ts: Date.now(),
+              symbol: sym,
+              side: intentSide,
+              ordId: submit.ordId,
+              clOrdId,
+              fillPx: submit.fillPx,
+              fillSz: submit.fillSize,
+              error: String(err),
+              note: "Filled but failed to initialize in ledger. Stored for operator investigation."
+            });
+            // Remove from pending to stop retry loops
+            const currentPending = await this.store.readPendingEntryOrders();
+            const filtered = currentPending.filter(p => p.ordId !== submit.ordId);
+            await this.store.writePendingEntryOrders(filtered);
+            continue;
+          }
 
             // [V2_ENTRY_TO_FILL] Post-open ledger open proof
             this.logger.info("V2_POST_FILL_LEDGER_OPEN_PROOF", {
