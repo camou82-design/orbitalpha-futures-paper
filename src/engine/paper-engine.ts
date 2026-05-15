@@ -7053,15 +7053,19 @@ export class PaperEngine {
       const tickSize = Number(instTryAll.value.tickSz);
 
       try {
-        limitPrice = this.buildLiveLimitOrderPrice({
-          symbol: input.symbol,
-          side: input.side,
-          bid: ticker.bid!,
-          ask: ticker.ask!,
-          tickSize,
-          priceBufferTicks: 1,
-          purpose: input.reason
-        });
+        if (input.entryPrice && input.reason.includes("recovery")) {
+          limitPrice = input.entryPrice;
+        } else {
+          limitPrice = this.buildLiveLimitOrderPrice({
+            symbol: input.symbol,
+            side: input.side,
+            bid: ticker.bid!,
+            ask: ticker.ask!,
+            tickSize,
+            priceBufferTicks: 1,
+            purpose: input.reason
+          });
+        }
       } catch (e) {
         return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "price_build_fail", errorMessage: String(e), ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
       }
@@ -7488,6 +7492,10 @@ export class PaperEngine {
     const authoritySizeUsdt = stageMarginUsdt;
     const finalOrderNotionalUsdt = effectiveNotionalUsdt;
     const formulaNotionalUsdt = (stageMarginKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD) * (input.appliedLeverage ?? 1);
+    
+    if (input.ordType === "limit" && limitPrice == null) {
+      limitPrice = input.entryPrice ?? pricingLast ?? null;
+    }
 
     this.logger.info("LIVE_ORDER_SIZE_PROOF", {
       ...logCtx,
