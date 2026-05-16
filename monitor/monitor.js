@@ -726,6 +726,18 @@
         next: next
       };
     } else {
+      const ageMs = audit ? noEntryAuditAgeMs(audit) : null;
+      const stale = !audit || (typeof ageMs === "number" && ageMs > NO_ENTRY_STALE_MS);
+
+      if (stale) {
+        return {
+          main: "관망 중 · 최신 판단 대기",
+          trend: "최신 데이터 확인 중",
+          risk: "—",
+          next: "다음 스냅샷 갱신 대기"
+        };
+      }
+
       let reason = "진입 대기";
       if (audit && audit.expected_missing_condition) {
         reason = koNoEntryMissing(audit.expected_missing_condition);
@@ -757,12 +769,12 @@
     const pos = openForSymbol(bundle, sym);
     const okxRow = okxExchangePositionForSymbol(bundle, sym);
     const s = snapBySymbol(bundle, sym) || {};
-    const es = bundle.engineState;
-    const pip =
-      es && es.symbol_decisions && es.symbol_decisions[sym] && es.symbol_decisions[sym].decision
-        ? es.symbol_decisions[sym].decision
-        : null;
-    const mark = typeof s.lastPrice === "number" ? s.lastPrice : null;
+    
+    if (!pos && okxRow) {
+      const sideK = okxRow.side === "long" ? "롱" : okxRow.side === "short" ? "숏" : okxRow.side;
+      return sym + " · 실거래소 " + sideK + " 포지션 감지 · 장부 정합성 확인 필요";
+    }
+
     const est = calculateEnhancedStatus(sym, bundle, pos, s);
     return sym + " · " + est.main;
   }
