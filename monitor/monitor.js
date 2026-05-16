@@ -668,6 +668,91 @@
     return null;
   }
 
+  function calculateEnhancedStatus(sym, bundle, pos, snap) {
+    const side = pos ? pos.side : "none";
+    const sideK = side === "long" ? "롱" : side === "short" ? "숏" : "관망 중";
+    const mark = snap && typeof snap.lastPrice === "number" ? snap.lastPrice : null;
+    const entry = pos ? coerceFinite(pos.entryPrice) : null;
+    const stop = pos ? coerceFinite(pos.stopPrice) : null;
+    const pnlPct = pos ? coerceFinite(pos.unrealizedPnlPct) : null;
+    const regime = pos ? (pos.regimeAtEntry || pos.executorAtEntry || pos.strategy) : (bundle.engineState ? bundle.engineState.regime : null);
+    
+    const audit = pickNoEntryAuditRow(bundle, sym);
+    const pip = bundle.engineState && bundle.engineState.symbol_decisions && bundle.engineState.symbol_decisions[sym] 
+      ? bundle.engineState.symbol_decisions[sym].decision 
+      : null;
+
+    if (pos) {
+      let pressure = "추세 유지";
+      if (pnlPct !== null) {
+        if (pnlPct > 2) pressure = "수익권 확대";
+        else if (pnlPct > 0) pressure = "수익권 유지";
+        else if (pnlPct < -1.5) pressure = side === "long" ? "하락 압력" : "상승 압력";
+        else if (pnlPct < -0.5) pressure = "추세 약화";
+      }
+
+      let trend = [];
+      if (mark !== null && entry !== null) {
+        if (side === "long") {
+          trend.push(mark < entry ? "진입가 이탈" : "진입가 상회");
+        } else {
+          trend.push(mark > entry ? "진입가 이탈" : "진입가 상회");
+        }
+      }
+      if (pnlPct !== null && pnlPct < 0) trend.push("손실권 확대");
+      if (stop !== null && mark !== null) {
+        const dist = Math.abs(mark - stop) / mark;
+        if (dist < 0.015) trend.push("손절가 근접");
+      }
+      if (trend.length === 0) trend.push("데이터 확인 중");
+
+      let risk = "정상";
+      if (stop !== null && mark !== null) {
+        const dist = Math.abs(mark - stop) / mark;
+        if (dist < 0.01) risk = "손절가 근접 (위험)";
+        else if (dist < 0.02) risk = "손절가 가시권";
+      }
+      if (pnlPct !== null && pnlPct < -2) risk = "손실 확대 주의";
+
+      let next = "추세 지속 확인";
+      if (risk.includes("위험")) next = "반등 확인 전까지 방어 우선";
+      else if (pressure === "추세 약화") next = "반전 경계 및 보호주문 확인";
+      else if (regime === "RANGE") next = "박스권 상/하단 이탈 확인";
+
+      return {
+        main: `${sideK} 보유 · ${pressure}`,
+        trend: trend.join(" / "),
+        risk: risk,
+        next: next
+      };
+    } else {
+      let reason = "진입 대기";
+      if (audit && audit.expected_missing_condition) {
+        reason = koNoEntryMissing(audit.expected_missing_condition);
+      } else if (pip && pip.reject_reason) {
+        reason = mapBlockReason(pip.reject_reason);
+      }
+
+      let trend = "추세 정렬 미흡";
+      if (audit && audit.quality_score !== null) {
+        if (audit.quality_score < 50) trend = "진입 품질 부족";
+        else trend = `품질 점수(${audit.quality_score}) 대기`;
+      }
+
+      let next = "레인지·추세 정렬 재확인 대기";
+      if (audit && audit.expected_next_action) {
+        next = koNoEntryNext(audit.expected_next_action);
+      }
+
+      return {
+        main: `관망 중 · ${reason}`,
+        trend: trend,
+        risk: "—",
+        next: next
+      };
+    }
+  }
+
   function symbolHeadline(sym, bundle) {
     const pos = openForSymbol(bundle, sym);
     const okxRow = okxExchangePositionForSymbol(bundle, sym);
@@ -678,37 +763,8 @@
         ? es.symbol_decisions[sym].decision
         : null;
     const mark = typeof s.lastPrice === "number" ? s.lastPrice : null;
-    if (pos) {
-      const sideK = pos.side === "long" ? "롱" : pos.side === "short" ? "숏" : pos.side;
-      const pnl = estimateNetPnlUsd(pos, mark);
-      const pnlStr = pnl !== null ? " · 추정 손익 " + formatUsd(pnl) : "";
-      return sym + " · " + sideK + " 포지션 보유 중" + pnlStr;
-    }
-    if (!pos && okxRow) {
-      const sideK = okxRow.side === "long" ? "롱" : okxRow.side === "short" ? "숏" : okxRow.side;
-      const syn = ledgerOkxSync(bundle);
-      const st = syn && syn.sync_status;
-      const mm =
-        st && st !== "ALIGNED" && st !== "REMOTE_UNAVAILABLE"
-          ? " · RECONCILE_MISMATCH"
-          : "";
-      return sym + " · 실거래소 " + sideK + " 포지션 보유 중" + mm;
-    }
-    if (pip && String(pip.regime) === "RANGE") {
-      if (pip.range_cost_warning_applied === true) return sym + " · 비용 경고로 보수 관찰 중";
-      if (pip.range_zone_detected === "mid" || pip.range_mid_wait_applied === true)
-        return sym + " · 박스 중단 대기(진입보다 관망)";
-      if (pip.range_zone_detected === "upper") return sym + " · 박스 상단: 숏 우선 평가";
-      if (pip.range_zone_detected === "lower") return sym + " · 박스 하단: 롱 우선 평가";
-      if (pip.range_center_wait === true) return sym + " · 박스 중단 대기";
-      if (pip.range_upper_edge_near === true && pip.range_short_allowed === true) return sym + " · 박스 상단 근접";
-      if (String(pip.range_short_allowed_reason || "") === "range_lower_zone_short_forbidden") return sym + " · 신규 롱 대기";
-      return sym + " · 기대값 애매 구간 대기";
-    }
-    const sig = s.signal || "none";
-    if (sig === "paper_long_candidate") return sym + " · 롱 후보 감지";
-    if (sig === "paper_short_candidate") return sym + " · 숏 후보 감지";
-    return sym + " · 신규 진입 없음(중립)";
+    const est = calculateEnhancedStatus(sym, bundle, pos, s);
+    return sym + " · " + est.main;
   }
 
   function symbolOneLiner(sym, bundle) {
@@ -1238,11 +1294,13 @@
 
     function noPositionStateBlock(sym, bundle) {
       const s = snapBySymbol(bundle, sym) || {};
+      const st = noEntryCardState(bundle, s);
+      const 가격 = formatPrice(s.lastPrice);
+      const est = calculateEnhancedStatus(sym, bundle, null, s);
+
       const audit = pickNoEntryAuditRow(bundle, sym);
       const ageMs = audit ? noEntryAuditAgeMs(audit) : null;
       const stale = audit == null || (typeof ageMs === "number" && ageMs > NO_ENTRY_STALE_MS);
-      const st = noEntryCardState(bundle, s);
-      const 가격 = formatPrice(s.lastPrice);
 
       let bannerHtml = "";
       if (stale) {
@@ -1251,55 +1309,25 @@
         )}</div>`;
       }
 
-      const lineMiss = stale ? "—" : koNoEntryMissing(audit.expected_missing_condition);
-      const lineNext = stale ? "—" : koNoEntryNext(audit.expected_next_action);
-      const qualPart = stale
-        ? ""
-        : `${audit.entry_quality_grade != null ? String(audit.entry_quality_grade) : "—"}${
-            typeof audit.quality_score === "number" ? "(" + audit.quality_score + ")" : ""
-          }`;
-      const retestInfo = stale ? "" :
-        (audit.display_retest_required || audit.retest_required === true ? ' <span class="badge badge-warn" style="margin-top:0; margin-left:0.4rem; border:1px solid var(--warn);">리테스트 필요</span>' : "") +
-        (audit.display_support_recheck_required || audit.reclaim_required === true ? ' <span class="badge badge-warn" style="margin-top:0; margin-left:0.4rem; border:1px solid var(--warn);">지지 재확인 필요</span>' : "");
-
-      const lineCand = stale
-        ? "—"
-        : `후보 ${fmtSideEnShort(audit.trend_side_candidate)} · 구간 ${audit.zone != null ? String(audit.zone) : "—"} · 품질 ${qualPart}${retestInfo}`;
       const metaHtml =
         !stale && audit && typeof audit.ts === "number"
           ? `<p class="sym-audit-meta">${esc("갱신 " + formatKst(audit.ts) + " · age " + Math.max(0, Math.round(ageMs ?? 0)) + " ms")}</p>`
           : "";
 
-      const sig = s.signal || "none";
-      const 방향Brief =
-        sig === "paper_long_candidate"
-          ? "롱 후보"
-          : sig === "paper_short_candidate"
-            ? "숏 후보"
-            : "중립";
-
       return `
         <div class="sym-state-block">
           ${bannerHtml}
           <div class="sym-state-row">
-            <span class="sym-state-k">현재 상태</span>
-            <span class="sym-state-v ${st.cls}">${esc(st.label)}</span>
+            <span class="sym-state-k">상태</span>
+            <span class="sym-state-v ${st.cls}">${esc(est.main)}</span>
           </div>
           <div class="sym-state-row">
-            <span class="sym-state-k">무진입 요약</span>
-            <span class="sym-state-v sym-state-lead">${esc(lineMiss)}</span>
+            <span class="sym-state-k">현재 추세</span>
+            <span class="sym-state-v sym-state-lead">${esc(est.trend)}</span>
           </div>
           <div class="sym-state-row">
             <span class="sym-state-k">다음 대기</span>
-            <span class="sym-state-v">${esc(lineNext)}</span>
-          </div>
-          <div class="sym-state-row">
-            <span class="sym-state-k">후보·구간·품질</span>
-            <span class="sym-state-v">${esc(lineCand)}</span>
-          </div>
-          <div class="sym-state-row">
-            <span class="sym-state-k">스냅 방향 힌트</span>
-            <span class="sym-state-v">${esc(방향Brief)} · ${esc(symbolHeadline(sym, bundle))}</span>
+            <span class="sym-state-v">${esc(est.next)}</span>
           </div>
           <div class="sym-state-row">
             <span class="sym-state-k">현재 가격</span>
@@ -1417,6 +1445,26 @@
               ${badgeHtml}
             </span>
           </header>
+
+          <div class="sym-state-block" style="border-top:1px solid rgba(255,255,255,0.05); padding-top:0.8rem; margin-bottom:0.8rem;">
+            <div class="sym-state-row">
+              <span class="sym-state-k">상태</span>
+              <span class="sym-state-v sym-state-held">${esc(est.main)}</span>
+            </div>
+            <div class="sym-state-row">
+              <span class="sym-state-k">현재 추세</span>
+              <span class="sym-state-v sym-state-lead">${esc(est.trend)}</span>
+            </div>
+            <div class="sym-state-row">
+              <span class="sym-state-k">위험 상태</span>
+              <span class="sym-state-v">${esc(est.risk)}</span>
+            </div>
+            <div class="sym-state-row">
+              <span class="sym-state-k">다음 판단</span>
+              <span class="sym-state-v">${esc(est.next)}</span>
+            </div>
+          </div>
+
           <div class="pos-sub-strip">
             <div class="pos-sub-item"><span class="pos-sub-k">진입가</span><span class="pos-sub-v tabular-nums">${esc(entryDisp)}</span></div>
             <div class="pos-sub-item"><span class="pos-sub-k">현재가(Mark)</span><span class="pos-sub-v tabular-nums">${esc(markDisp)}</span></div>
