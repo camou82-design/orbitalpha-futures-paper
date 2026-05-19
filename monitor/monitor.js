@@ -1260,7 +1260,154 @@
     ].join("");
   }
 
+  /** V2 포지션 상세 섹션 렌더링.
+   *  pos 객체에서 V2 전용 필드들을 읽어 "보유 포지션 상세" 블록으로 반환.
+   *  데이터가 없으면 "API 응답에 없습니다" 경고 표시.
+   */
+  function renderV2PositionDetail(pos, mark, bundle, sym) {
+    if (!pos) return "";
+
+    // ── V2 필드 수집 ──────────────────────────────────────────────
+    const side       = pos.side === "long" ? "LONG" : pos.side === "short" ? "SHORT" : String(pos.side || "—");
+    const entryPrice = coerceFinite(pos.entryPrice);
+    const markPrice  = mark !== null ? mark : coerceFinite(pos.currentPrice ?? pos.markPrice);
+    const size       = coerceFinite(pos.sizeUsd) ?? coerceFinite(pos.notional);
+    const leverage   = coerceFinite(pos.leverage);
+
+    const unrealUsd  = coerceFinite(pos.unrealizedPnlUsd ?? pos.unrealizedPnl);
+    const unrealPct  = coerceFinite(pos.unrealizedPnlPct);
+    const stopPrice  = coerceFinite(pos.stopPrice);
+    const tp1Price   = coerceFinite(pos.tp1Price ?? pos.targetPrice1 ?? pos.takeProfit1);
+    const finalTp    = coerceFinite(pos.finalTpPrice ?? pos.finalTakeProfit ?? pos.targetPrice ?? pos.takeProfit);
+
+    // V2 메타
+    const entryReason = pos.v2EntryReason ?? pos.entryReason ?? pos.sourceSignal ?? null;
+    const openedAt    = coerceFinite(pos.openedAt ?? pos.firstOpenedAt);
+    const holdMinutes = openedAt !== null ? Math.floor((Date.now() - openedAt) / 60000) : null;
+
+    // 보호 주문 / 동기화 상태
+    const protectionStatus  = pos.protectionStatus  ?? pos.protectiveStatus  ?? pos.protective_status  ?? null;
+    const probeTP1Submitted = pos.probeTP1Submitted ?? pos.probe_tp1_submitted ?? null;
+    const probeTP1Filled    = pos.probeTP1Filled    ?? pos.probe_tp1_filled    ?? null;
+
+    // 장부 / OKX 동기화 — pos 직접 필드 우선, 없으면 engineState ledger 참조
+    let ledgerSyncStatus = pos.ledgerSyncStatus ?? pos.ledger_sync_status ?? null;
+    let okxSyncStatus    = pos.okxSyncStatus    ?? pos.okx_sync_status    ?? null;
+    if (!ledgerSyncStatus || !okxSyncStatus) {
+      const sync = ledgerOkxSync(bundle);
+      if (sync) {
+        ledgerSyncStatus = ledgerSyncStatus ?? sync.sync_status ?? null;
+        // OKX 동기화는 preview에서 해당 심볼 찾기
+        const okxRow = okxExchangePositionForSymbol(bundle, sym);
+        okxSyncStatus = okxSyncStatus ?? (okxRow ? "SYNCED" : sync.sync_status ?? null);
+      }
+    }
+
+    // ── 데이터 존재 여부 체크 ──────────────────────────────────────
+    const hasAnyV2Detail = entryPrice !== null || markPrice !== null || stopPrice !== null
+      || tp1Price !== null || finalTp !== null || entryReason !== null
+      || protectionStatus !== null || ledgerSyncStatus !== null || okxSyncStatus !== null;
+
+    // ── 보호 주문 상태 레이블 ─────────────────────────────────────
+    function fmtProtection(v) {
+      if (v === null || v === undefined) return "—";
+      const s = String(v).toLowerCase();
+      if (s === "confirmed" || s === "active" || s === "ok" || s === "filled") return "정상";
+      if (s === "pending" || s === "submitted" || s === "open") return "대기";
+      if (s === "missing" || s === "none" || s === "failed") return "미확인";
+      return esc(String(v));
+    }
+
+    // ── 장부 정합성 레이블 ────────────────────────────────────────
+    function fmtSync(v) {
+      if (v === null || v === undefined) return "—";
+      const s = String(v).toUpperCase();
+      if (s === "ALIGNED" || s === "SYNCED") return "ALIGNED";
+      if (s === "REMOTE_UNAVAILABLE") return "확인 불가(원격 응답 없음)";
+      if (s === "OKX_ONLY") return "OKX에만 있음 (장부 누락)";
+      if (s === "LEDGER_ONLY") return "장부에만 있음 (OKX 없음)";
+      if (s === "KEY_MISMATCH") return "키 불일치";
+      return esc(String(v));
+    }
+
+    // ── 미실현 손익 색상 ──────────────────────────────────────────
+    const pnlCls = unrealUsd !== null ? pnlToneClass(unrealUsd) : "";
+
+    // ── 진입 사유 한글 매핑 ───────────────────────────────────────
+    const V2_REASON_KO = {
+      EARLY_REVERSAL_SHORT_PROBE: "조기 반전 숏 프로브",
+      EARLY_REVERSAL_LONG_PROBE:  "조기 반전 롱 프로브",
+      FAST_TREND_SHIFT_SHORT:     "빠른 추세 전환 숏",
+      FAST_TREND_SHIFT_LONG:      "빠른 추세 전환 롱",
+      RANGE_REVERSAL_SHORT:       "레인지 반전 숏",
+      RANGE_REVERSAL_LONG:        "레인지 반전 롱",
+      TREND_CONTINUATION_LONG:    "추세 지속 롱",
+      TREND_CONTINUATION_SHORT:   "추세 지속 숏",
+      CORE_TREND_CONTINUATION:    "코어 추세 지속",
+      CORE_PULLBACK_REVERSAL:     "코어 눌림 반전",
+      CORE_BREAKOUT_VOLUME:       "코어 돌파 볼륨",
+      paper_long_candidate:       "롱 후보 (레거시)",
+      paper_short_candidate:      "숏 후보 (레거시)"
+    };
+    const reasonLabel = entryReason
+      ? (V2_REASON_KO[entryReason] ? `${V2_REASON_KO[entryReason]} (${esc(entryReason)})` : esc(String(entryReason)))
+      : "—";
+
+    if (!hasAnyV2Detail) {
+      return `
+        <div class="v2-pos-detail v2-pos-detail--warn">
+          <p class="v2-pos-detail-title">보유 포지션 상세</p>
+          <p class="v2-pos-detail-empty">포지션 보유 중이나 상세 데이터가 API 응답에 없습니다.</p>
+        </div>`;
+    }
+
+    function row(label, valHtml) {
+      return `<div class="v2-pos-row"><span class="v2-pos-k">${label}</span><span class="v2-pos-v">${valHtml}</span></div>`;
+    }
+
+    const unrealDisplay = unrealUsd !== null
+      ? `<span class="${pnlCls}">${esc(formatSignedUsd(unrealUsd))}${unrealPct !== null ? " (" + esc(formatSignedPctOnMargin(unrealUsd, unrealUsd / Math.max(unrealPct / 100, 0.0001))) + ")" : ""}</span>`
+      : `<span class="muted">—</span>`;
+
+    const unrealPctDisplay = unrealPct !== null
+      ? `<span class="${pnlCls}">${unrealPct > 0 ? "+" : ""}${esc(unrealPct.toFixed(3))}%</span>`
+      : `<span class="muted">—</span>`;
+
+    const protColor = protectionStatus
+      ? (String(protectionStatus).toLowerCase().match(/confirmed|active|ok|filled/) ? "v2-ok" : "v2-warn")
+      : "";
+
+    const syncColor = ledgerSyncStatus
+      ? (String(ledgerSyncStatus).toUpperCase() === "ALIGNED" ? "v2-ok" : "v2-warn")
+      : "";
+
+    return `
+      <div class="v2-pos-detail">
+        <p class="v2-pos-detail-title">보유 포지션 상세</p>
+        <div class="v2-pos-grid">
+          ${row("방향",     `<strong class="pos-card-side pos-card-side--${pos.side === 'short' ? 'short' : 'long'}">${esc(side)}</strong>`)}
+          ${row("진입가",   `<span class="tabular-nums">${entryPrice !== null ? esc(formatPrice(entryPrice)) : '<span class="muted">—</span>'}</span>`)}
+          ${row("현재가",   `<span class="tabular-nums">${markPrice !== null ? esc(formatPrice(markPrice)) : '<span class="muted">—</span>'}</span>`)}
+          ${row("수량(USD)", `<span class="tabular-nums">${size !== null ? esc(fmtUsdPosNoDecimal(size)) : '<span class="muted">—</span>'}</span>`)}
+          ${row("레버리지", `<span class="tabular-nums">${leverage !== null ? esc(String(leverage)) + "×" : '<span class="muted">—</span>'}</span>`)}
+          ${row("미실현 손익", unrealDisplay)}
+          ${row("미실현 손익%", unrealPctDisplay)}
+          ${row("손절가",   stopPrice !== null ? `<span class="tabular-nums v2-warn">${esc(formatPrice(stopPrice))}</span>` : '<span class="muted">미설정</span>')}
+          ${row("TP1",      tp1Price  !== null ? `<span class="tabular-nums">${esc(formatPrice(tp1Price))}</span>`  : '<span class="muted">—</span>')}
+          ${row("Final TP", finalTp   !== null ? `<span class="tabular-nums">${esc(formatPrice(finalTp))}</span>`   : '<span class="muted">—</span>')}
+          ${row("진입 사유", reasonLabel)}
+          ${row("보유 시간", holdMinutes !== null ? `<span class="tabular-nums">${esc(String(holdMinutes))}분</span>` : '<span class="muted">—</span>')}
+          ${row("보호 주문", `<span class="${protColor}">${fmtProtection(protectionStatus)}</span>`)}
+          ${probeTP1Submitted !== null ? row("Probe TP1 제출", `<span>${probeTP1Submitted === true || probeTP1Submitted === "true" ? "예" : "아니오"}</span>`) : ""}
+          ${probeTP1Filled !== null    ? row("Probe TP1 체결", `<span>${probeTP1Filled    === true || probeTP1Filled    === "true" ? "예" : "아니오"}</span>`) : ""}
+          ${row("장부 정합성", `<span class="${syncColor}">${fmtSync(ledgerSyncStatus)}</span>`)}
+          ${row("OKX 동기화", `<span class="${okxSyncStatus ? (String(okxSyncStatus).toUpperCase() === 'SYNCED' || String(okxSyncStatus).toUpperCase() === 'ALIGNED' ? 'v2-ok' : 'v2-warn') : ''}">${okxSyncStatus ? esc(String(okxSyncStatus)) : '<span class="muted">—</span>'}</span>`)}
+        </div>
+      </div>`;
+  }
+
   function renderSymbols(bundle) {
+
     const grid = $("symbol-grid");
     const want = ["BTCUSDT", "ETHUSDT"];
     const es = bundle.engineState;
@@ -1485,6 +1632,7 @@
             <div class="pos-sub-item"><span class="pos-sub-k">손절가</span><span class="pos-sub-v tabular-nums">${esc(fmtStopLabel(stopPx))}</span></div>
             <div class="pos-sub-item"><span class="pos-sub-k">${esc(exitTargetLabel)}</span><span class="pos-sub-v tabular-nums">${esc(exitTargetValue)}</span></div>
           </div>
+          ${renderV2PositionDetail(pos, mark, bundle, sym)}
           <details class="sym-details">
             <summary>레버리지·파이프라인·운용 상세</summary>
             <dl class="sym-meta">

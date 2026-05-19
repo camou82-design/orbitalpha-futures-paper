@@ -1030,3 +1030,80 @@ details[open] .details-summary::before {
 .sym-details[open] > summary {
   margin-bottom: 0.5rem;
 }
+
+/* ── V2 포지션 상세 섹션 ──────────────────────────────────── */
+.v2-pos-detail {
+  margin: 0.65rem 0 0.75rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  background: rgba(251, 191, 36, 0.04);
+}
+
+.v2-pos-detail--warn {
+  border-color: rgba(250, 204, 21, 0.35);
+  background: rgba(120, 53, 15, 0.15);
+}
+
+.v2-pos-detail-title {
+  margin: 0 0 0.55rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--amber-dim);
+}
+
+.v2-pos-detail-empty {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--warn);
+}
+
+.v2-pos-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.4rem 0.75rem;
+}
+
+@media (max-width: 480px) {
+  .v2-pos-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.v2-pos-row {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr;
+  gap: 0.25rem 0.5rem;
+  align-items: baseline;
+  font-size: 0.8rem;
+  padding: 0.22rem 0;
+  border-bottom: 1px solid rgba(63, 63, 70, 0.35);
+}
+
+.v2-pos-k {
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+.v2-pos-v {
+  font-weight: 500;
+  color: var(--muted);
+  word-break: break-word;
+  font-variant-numeric: tabular-nums;
+}
+
+.v2-ok {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.v2-warn {
+  color: var(--warn);
+  font-weight: 600;
+}
