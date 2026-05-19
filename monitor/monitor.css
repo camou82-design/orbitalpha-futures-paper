@@ -1031,6 +1031,22 @@ details[open] .details-summary::before {
   margin-bottom: 0.5rem;
 }
 
+/* ── OKX 폴백 카드 (레저 없음, displaySource=okx_sync_preview) ── */
+.sym-card--unconfirmed {
+  border-color: rgba(251, 146, 60, 0.5) !important;
+}
+
+.v2-pos-fallback-banner {
+  margin: 0 0 0.65rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: rgba(120, 53, 15, 0.35);
+  border: 1px solid rgba(251, 146, 60, 0.45);
+  color: #fed7aa;
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+
 /* ── V2 포지션 상세 섹션 ──────────────────────────────────── */
 .v2-pos-detail {
   margin: 0.65rem 0 0.75rem;

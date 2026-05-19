@@ -1500,9 +1500,16 @@
       const s = snapBySymbol(bundle, sym);
       const pos = openForSymbol(bundle, sym);
       const ctx = contextFor(sym, s || {});
+
+      // pos 소스 조기 판별 — cardClass 결정에 사용
+      const posIsOkxFallback = pos
+        && (pos.displaySource === "ledger_okx_sync_preview" || pos.displaySource === "position_ops_surface");
+
       let cardClass = "sym-card";
-      if (pos) cardClass += " sym-card--hold";
+      if (pos && !posIsOkxFallback) cardClass += " sym-card--hold";
+      else if (pos && posIsOkxFallback) cardClass += " sym-card--hold sym-card--unconfirmed";
       else if (s && s.signal && s.signal !== "none") cardClass += " sym-card--block";
+
 
       const dir =
         s && s.signal === "paper_long_candidate"
@@ -1525,6 +1532,12 @@
       const ambigTag = es && es.is_ambiguous ? " <small style='color:var(--warn)'>(모호)</small>" : "";
 
       if (pos) {
+        // ── pos 소스 판별 ─────────────────────────────────────────
+        // displaySource가 ledger_okx_sync_preview 또는 position_ops_surface이면
+        // 실제 레저 포지션이 아닌 OKX 스냅샷 폴백이다 (openPositions=[]인 상태에서 파생).
+        const isOkxFallback = pos.displaySource === "ledger_okx_sync_preview"
+          || pos.displaySource === "position_ops_surface";
+
         const n = normalizeOpenPos(pos);
         const lev = n ? n.leverage : 1;
         const mark = n ? markForOpen(bundle, sym, pos, s) : null;
@@ -1540,6 +1553,7 @@
         const esN = pos.entryStage != null && pos.entryStage > 0 ? pos.entryStage : 1;
         const pes = pos.partialExitStage ?? 0;
         const sideK = pos.side === "long" ? "LONG" : pos.side === "short" ? "SHORT" : String(pos.side);
+
         const stopPx = n ? n.stopPx : null;
         const stopNet = stopPx !== null ? estimateNetPnlUsd(pos, stopPx) : null;
         const entryDisp =
@@ -1573,8 +1587,20 @@
           }
         }
 
+        // ── est: 포지션 상태 텍스트 ────────────────────────────────
+        // OKX 폴백(레저 없음)이면 calculateEnhancedStatus 대신 명시적 경고 텍스트 사용.
+        const est = isOkxFallback
+          ? {
+              main: "원격 확인 불가 / 상태 확인 필요",
+              trend: "OKX 응답 없음 — 레저 포지션 없음",
+              risk: "장부에 포지션 없음 (displaySource: " + esc(String(pos.displaySource)) + ")",
+              next: "엔진 재동기화 대기"
+            }
+          : calculateEnhancedStatus(sym, bundle, pos, s);
+
         return `
         <article class="${cardClass}">
+          ${isOkxFallback ? `<div class="v2-pos-fallback-banner">⚠ 레저 포지션 미확인 — OKX 스냅샷 폴백 데이터입니다. 실제 포지션 여부를 직접 확인하세요.</div>` : ""}
           <div class="pos-money-strip pos-money-strip--primary" aria-label="포지션 손익 5항목">
             <div class="pos-money-cell">
               <span class="pos-money-num tabular-nums">${esc(fmtUsdPosNoDecimal(sizeUsd))}</span>
