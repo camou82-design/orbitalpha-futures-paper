@@ -44,6 +44,21 @@ export type LedgerOkxPositionSyncSnapshot = Readonly<{
     baseQty?: number;
     /** @deprecated Prefer okxContracts — legacy dashboards. */
     pos: number;
+    // OKX 공식 실시간 필드 — 없으면 undefined
+    markPx?: number;
+    upl?: number;
+    uplRatio?: number;
+    liqPx?: number;
+    mgnMode?: string;
+    lever?: number;
+    margin?: number;
+    imr?: number;
+    mmr?: number;
+    posCcy?: string;
+    ccy?: string;
+    instType?: string;
+    /** OKX 응답 수신 시각 (epoch ms, 서버 측 기록) */
+    okxFetchedAt?: number;
   }>;
   paper_positions_preview: ReadonlyArray<{
     symbol: string;
@@ -164,6 +179,20 @@ export function buildLedgerOkxPositionSyncSnapshot(
     notionalUsd: number;
     baseQty?: number;
     pos: number;
+    // OKX 공식 실시간 필드
+    markPx?: number;
+    upl?: number;
+    uplRatio?: number;
+    liqPx?: number;
+    mgnMode?: string;
+    lever?: number;
+    margin?: number;
+    imr?: number;
+    mmr?: number;
+    posCcy?: string;
+    ccy?: string;
+    instType?: string;
+    okxFetchedAt?: number;
   }> = [];
   const okxMap = new Map<string, OkxSwapLedgerKeyParts & { baseQty?: number; okxContracts: number; notionalUsd: number }>();
 
@@ -181,6 +210,19 @@ export function buildLedgerOkxPositionSyncSnapshot(
 
     const enriched = { ...hit, notionalUsd: nu, baseQty, okxContracts: contractsAbs };
     okxMap.set(hit.key, enriched);
+
+    // OKX raw 필드에서 공식 실시간 값 추출 (문자열 → number, NaN 방어)
+    const safeNum = (v: unknown): number | undefined => {
+      if (typeof v === "number" && Number.isFinite(v)) return v;
+      if (typeof v === "string" && v.trim() !== "") {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : undefined;
+      }
+      return undefined;
+    };
+    const safeStr = (v: unknown): string | undefined =>
+      typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
+
     okx_positions_preview.push({
       symbol: hit.symbol,
       side: hit.side,
@@ -189,7 +231,21 @@ export function buildLedgerOkxPositionSyncSnapshot(
       avgPx: hit.avgPx,
       notionalUsd: nu,
       baseQty,
-      pos: contractsAbs
+      pos: contractsAbs,
+      // OKX 공식 실시간 필드 — OKX가 내려주지 않으면 undefined
+      markPx: safeNum(row.markPx),
+      upl: safeNum(row.upl),
+      uplRatio: safeNum(row.uplRatio),
+      liqPx: safeNum(row.liqPx),
+      mgnMode: safeStr(row.mgnMode),
+      lever: safeNum(row.lever),
+      margin: safeNum(row.margin),
+      imr: safeNum(row.imr),
+      mmr: safeNum(row.mmr),
+      posCcy: safeStr(row.posCcy),
+      ccy: safeStr(row.ccy),
+      instType: safeStr(row.instType),
+      okxFetchedAt: Date.now(),
     });
   }
 
