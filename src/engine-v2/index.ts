@@ -2110,24 +2110,38 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         micro_probe_cap_forced: true
                     }));
                 }
-            } else if (qualityScore < 70) {
-                promotionBlockReason = "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD";
-                expectedNextAction = "WAIT_FOR_QUALITY_IMPROVEMENT";
-                expectedMissingCondition = "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD";
-            } else if (zone === "lower" && trendSideCandidate === "short") {
-                promotionBlockReason = "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED";
-                v2DecisionAfterPromotion = "HOLD";
-                v2RejectReasonAfterPromotion = "WAIT_RECHECK";
-                expectedNextAction = "WAIT_FOR_BREAKDOWN_RETEST_RESISTANCE_CONFIRM";
-                expectedMissingCondition = "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED";
-            } else if (marketMode === "RANGE" && (boxBreakSide === "none" || boxBreakSide === "UNKNOWN")) {
-                promotionBlockReason = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
-                expectedNextAction = "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM";
-                expectedMissingCondition = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
             } else {
-                promotionBlockReason = "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED";
-                expectedNextAction = "WAIT_FOR_RECHECK_OR_RETEST";
-                expectedMissingCondition = "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED";
+                const isBypassRangeUpperShort =
+                    shock === "DOWN" &&
+                    (judgment.htf_entry_policy === "SHORT_ONLY_OR_NONE" || judgment.htf_entry_policy === "SHORT_ONLY") &&
+                    (riskShortAllow === true || allowNewShort === true) &&
+                    zone === "upper" &&
+                    (v2SideAfterPromotion === "short" || rangeSideCandidate === "short") &&
+                    trendSideCandidate === "short" &&
+                    sideZoneValid === true &&
+                    hardBlockPresent === false &&
+                    qualityScore >= 65 &&
+                    (entryQualityGrade === "S" || entryQualityGrade === "A" || entryQualityGrade === "B");
+
+                if (qualityScore < 70 && !isBypassRangeUpperShort) {
+                    promotionBlockReason = "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD";
+                    expectedNextAction = "WAIT_FOR_QUALITY_IMPROVEMENT";
+                    expectedMissingCondition = "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD";
+                } else if (zone === "lower" && trendSideCandidate === "short") {
+                    promotionBlockReason = "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED";
+                    v2DecisionAfterPromotion = "HOLD";
+                    v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                    expectedNextAction = "WAIT_FOR_BREAKDOWN_RETEST_RESISTANCE_CONFIRM";
+                    expectedMissingCondition = "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED";
+                } else if (marketMode === "RANGE" && (boxBreakSide === "none" || boxBreakSide === "UNKNOWN")) {
+                    promotionBlockReason = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
+                    expectedNextAction = "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM";
+                    expectedMissingCondition = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
+                } else {
+                    promotionBlockReason = "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED";
+                    expectedNextAction = "WAIT_FOR_RECHECK_OR_RETEST";
+                    expectedMissingCondition = "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED";
+                }
             }
         }
 
@@ -2297,6 +2311,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (sideCandidateBeforeVeto === "short" || v2SideAfterPromotion === "short") &&
         hardBlockPresent === false;
 
+    const isBypassRangeUpperShort =
+        vetoReason != null &&
+        shock === "DOWN" &&
+        (judgment.htf_entry_policy === "SHORT_ONLY_OR_NONE" || judgment.htf_entry_policy === "SHORT_ONLY") &&
+        (riskShortAllow === true || allowNewShort === true) &&
+        zone === "upper" &&
+        (v2SideAfterPromotion === "short" || rangeSideCandidate === "short" || sideCandidateBeforeVeto === "short") &&
+        trendSideCandidate === "short" &&
+        sideZoneValid === true &&
+        hardBlockPresent === false &&
+        qualityScore >= 65 &&
+        (entryQualityGrade === "S" || entryQualityGrade === "A" || entryQualityGrade === "B");
+
     if (vetoReason != null) {
         if (isBypassRangeVeto) {
             v2DecisionAfterPromotion = finalDecisionBeforeVeto; // "ENTER"
@@ -2375,6 +2402,82 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 validStop,
                 reason: "shock_reaction_continuation_short_stop_plan"
             }));
+        } else if (isBypassRangeUpperShort) {
+            v2DecisionAfterPromotion = finalDecisionBeforeVeto; // "ENTER"
+            v2SideAfterPromotion = "short";
+            v2RejectReasonAfterPromotion = null;
+
+            // stopPrice 보수적 계산
+            const entryPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+            const atrVal = Number(authoritativeInput.snapshot.atr ?? 0);
+            
+            const candles = authoritativeInput.snapshot.candles;
+            let swingHighVal = 0;
+            if (Array.isArray(candles) && candles.length > 0) {
+                const recentHighs = candles.slice(-20).map(c => Number(c.high ?? (c as any).h ?? 0));
+                swingHighVal = Math.max(...recentHighs);
+            }
+
+            const boxHighVal = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+            const boxLowVal = Number(authoritativeInput.snapshot.boxLow ?? 0);
+            const boxMidVal = boxHighVal > 0 && boxLowVal > 0 ? (boxHighVal + boxLowVal) / 2 : 0;
+            
+            const minStopDist = Math.max(atrVal * 0.5, entryPrice * 0.0015);
+            const atrStopCandidate = entryPrice + Math.max(atrVal * 1.5, entryPrice * 0.005);
+            
+            const candidates = [
+                swingHighVal,
+                boxHighVal,
+                boxMidVal,
+                atrStopCandidate
+            ].filter(v => Number.isFinite(v) && v > entryPrice + minStopDist);
+            
+            let calculatedStopPrice = candidates.length > 0 ? Math.max(...candidates) : (entryPrice + minStopDist);
+            if (!Number.isFinite(calculatedStopPrice) || calculatedStopPrice <= entryPrice) {
+                calculatedStopPrice = entryPrice + minStopDist;
+            }
+
+            execution.stopPrice = calculatedStopPrice;
+            execution.invalidationPx = calculatedStopPrice;
+            
+            const riskDistance = calculatedStopPrice - entryPrice;
+            const validStop = calculatedStopPrice > entryPrice;
+
+            console.info(JSON.stringify({
+                event: "V2_RANGE_UPPER_SHORT_BYPASS_PROOF",
+                symbol: String(input.symbol),
+                rangeZone: zone,
+                selected_side_before_veto: sideCandidateBeforeVeto,
+                selected_side_after_veto: v2SideAfterPromotion,
+                range_side_candidate: rangeSideCandidate,
+                trend_side_candidate: trendSideCandidate,
+                side_zone_valid: sideZoneValid,
+                quality_score: qualityScore,
+                entry_quality_grade: entryQualityGrade,
+                htf_entry_policy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+                directional_shock_state: shock,
+                finalDecisionBeforeVeto,
+                finalDecisionAfterVeto: v2DecisionAfterPromotion,
+                bypass_reason: "RANGE_UPPER_SHORT_HTF_ALIGNED_BYPASS"
+            }));
+
+            console.info(JSON.stringify({
+                event: "V2_RANGE_UPPER_SHORT_RISK_PLAN_PROOF",
+                symbol: String(input.symbol),
+                side: "short",
+                entryPrice,
+                stopPrice: calculatedStopPrice,
+                stopBasis: calculatedStopPrice === swingHighVal ? "swingHigh" :
+                           calculatedStopPrice === boxHighVal ? "boxHigh" :
+                           calculatedStopPrice === boxMidVal ? "boxMid" :
+                           calculatedStopPrice === atrStopCandidate ? "atrBuffer" : "fallback",
+                atr: atrVal,
+                swingHigh: swingHighVal,
+                boxHigh: boxHighVal,
+                riskDistance,
+                validStop,
+                reason: "range_upper_short_stop_plan"
+            }));
         } else {
             v2DecisionAfterPromotion = "SKIP";
             v2SideAfterPromotion = "none";
@@ -2446,6 +2549,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let sideVetoDetail: string | null = null;
     if (isBypassRangeVeto) {
         sideVetoDetail = "SHOCK_REACTION_PROMOTION_BYPASS_RANGE_SIDE_VETO";
+    } else if (isBypassRangeUpperShort) {
+        sideVetoDetail = "RANGE_UPPER_SHORT_HTF_ALIGNED_BYPASS";
     } else if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
         sideVetoDetail = "WHIPSAW_SHOCK_RECHECK_ACTIVE";
     } else if (v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP") {
