@@ -2286,30 +2286,120 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    const isBypassRangeVeto = 
+        vetoReason != null &&
+        shock === "DOWN" &&
+        (judgment.htf_entry_policy === "SHORT_ONLY_OR_NONE" || judgment.htf_entry_policy === "SHORT_ONLY") &&
+        (shockReactionAllowedPrimarySide === "short" || riskShortAllow === true) &&
+        shockReactionPromotionType === "lower_breakdown_continuation_short" &&
+        promotionApplied === true &&
+        finalDecisionBeforeVeto === "ENTER" &&
+        (sideCandidateBeforeVeto === "short" || v2SideAfterPromotion === "short") &&
+        hardBlockPresent === false;
+
     if (vetoReason != null) {
-        v2DecisionAfterPromotion = "SKIP";
-        v2SideAfterPromotion = "none";
-        v2RejectReasonAfterPromotion = vetoReason;
-        promotionApplied = false;
-        promotionReason = null;
-        console.info(JSON.stringify({
-            event: "V2_RANGE_SIDE_ZONE_VETO_PROOF",
-            symbol: String(input.symbol),
-            regime: marketMode,
-            boxPos,
-            rangeZone: zone,
-            sideCandidate: sideCandidateBeforeVeto,
-            signalGateBlockedReason,
-            rangeSignalDowngraded,
-            rangeSignalKeptByRelax,
-            entryCandidate,
-            trendOk,
-            long_allow: allowNewLong,
-            short_allow: allowNewShort,
-            finalDecisionBeforeVeto,
-            finalDecisionAfterVeto: v2DecisionAfterPromotion,
-            vetoReason
-        }));
+        if (isBypassRangeVeto) {
+            v2DecisionAfterPromotion = finalDecisionBeforeVeto; // "ENTER"
+            v2SideAfterPromotion = "short";
+            v2RejectReasonAfterPromotion = null;
+
+            // stopPrice 보수적 계산
+            const entryPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+            const atrVal = Number(authoritativeInput.snapshot.atr ?? 0);
+            
+            const candles = authoritativeInput.snapshot.candles;
+            let swingHighVal = 0;
+            if (Array.isArray(candles) && candles.length > 0) {
+                const recentHighs = candles.slice(-20).map(c => Number(c.high ?? (c as any).h ?? 0));
+                swingHighVal = Math.max(...recentHighs);
+            }
+
+            const boxHighVal = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+            const boxLowVal = Number(authoritativeInput.snapshot.boxLow ?? 0);
+            const boxMidVal = boxHighVal > 0 && boxLowVal > 0 ? (boxHighVal + boxLowVal) / 2 : 0;
+            
+            const minStopDist = Math.max(atrVal * 0.5, entryPrice * 0.0015);
+            const atrStopCandidate = entryPrice + Math.max(atrVal * 1.5, entryPrice * 0.005);
+            
+            const candidates = [
+                swingHighVal,
+                boxHighVal,
+                boxMidVal,
+                atrStopCandidate
+            ].filter(v => Number.isFinite(v) && v > entryPrice + minStopDist);
+            
+            let calculatedStopPrice = candidates.length > 0 ? Math.max(...candidates) : (entryPrice + minStopDist);
+            if (!Number.isFinite(calculatedStopPrice) || calculatedStopPrice <= entryPrice) {
+                calculatedStopPrice = entryPrice + minStopDist;
+            }
+
+            execution.stopPrice = calculatedStopPrice;
+            execution.invalidationPx = calculatedStopPrice;
+            
+            const riskDistance = calculatedStopPrice - entryPrice;
+            const validStop = calculatedStopPrice > entryPrice;
+
+            console.info(JSON.stringify({
+                event: "V2_RANGE_SIDE_ZONE_VETO_BYPASS_PROOF",
+                symbol: String(input.symbol),
+                regime: marketMode,
+                market_subtype: judgment.subtype,
+                directional_shock_state: shock,
+                htf_policy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+                rangeZone: zone,
+                promotion_type: shockReactionPromotionType,
+                promotion_reason: promotionReason,
+                selected_side_before_veto: sideCandidateBeforeVeto,
+                selected_side_after_veto: v2SideAfterPromotion,
+                finalDecisionBeforeVeto,
+                finalDecisionAfterVeto: v2DecisionAfterPromotion,
+                bypass_reason: "SHOCK_REACTION_PROMOTION_BYPASS_RANGE_SIDE_VETO",
+                hard_block_present: hardBlockPresent,
+                hard_block_reason: hardBlockReason
+            }));
+
+            console.info(JSON.stringify({
+                event: "V2_SHOCK_REACTION_RISK_PLAN_PROOF",
+                symbol: String(input.symbol),
+                side: "short",
+                entryPrice,
+                stopPrice: calculatedStopPrice,
+                stopBasis: calculatedStopPrice === swingHighVal ? "swingHigh" :
+                           calculatedStopPrice === boxHighVal ? "boxHigh" :
+                           calculatedStopPrice === boxMidVal ? "boxMid" :
+                           calculatedStopPrice === atrStopCandidate ? "atrBuffer" : "fallback",
+                atr: atrVal,
+                swingHigh: swingHighVal,
+                boxHigh: boxHighVal,
+                riskDistance,
+                validStop,
+                reason: "shock_reaction_continuation_short_stop_plan"
+            }));
+        } else {
+            v2DecisionAfterPromotion = "SKIP";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = vetoReason;
+            promotionApplied = false;
+            promotionReason = null;
+            console.info(JSON.stringify({
+                event: "V2_RANGE_SIDE_ZONE_VETO_PROOF",
+                symbol: String(input.symbol),
+                regime: marketMode,
+                boxPos,
+                rangeZone: zone,
+                sideCandidate: sideCandidateBeforeVeto,
+                signalGateBlockedReason,
+                rangeSignalDowngraded,
+                rangeSignalKeptByRelax,
+                entryCandidate,
+                trendOk,
+                long_allow: allowNewLong,
+                short_allow: allowNewShort,
+                finalDecisionBeforeVeto,
+                finalDecisionAfterVeto: v2DecisionAfterPromotion,
+                vetoReason
+            }));
+        }
     }
 
     // Tier 5+: Selected Side Consistency Log
@@ -2354,7 +2444,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         rangeSideCandidate !== trendSideCandidate;
 
     let sideVetoDetail: string | null = null;
-    if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
+    if (isBypassRangeVeto) {
+        sideVetoDetail = "SHOCK_REACTION_PROMOTION_BYPASS_RANGE_SIDE_VETO";
+    } else if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
         sideVetoDetail = "WHIPSAW_SHOCK_RECHECK_ACTIVE";
     } else if (v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP") {
         if (judgment.subtype === "SHOCK_REACTION_UP" && trendSideCandidate === "long") {
