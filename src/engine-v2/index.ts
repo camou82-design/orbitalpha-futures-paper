@@ -2801,10 +2801,70 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
     if (finalDecision === "ENTER") {
+        const lastPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+        const sideFinal = v2SideAfterPromotion;
+
+        // stopPrice 패치 로직 (특히 short 진입 시)
+        if (sideFinal === "short" && (execution.stopPrice == null || execution.invalidationPx == null || execution.stopPrice <= lastPrice)) {
+            const atrVal = Number(authoritativeInput.snapshot.atr ?? 0);
+            
+            const candles = authoritativeInput.snapshot.candles;
+            let swingHighVal = 0;
+            if (Array.isArray(candles) && candles.length > 0) {
+                const recentHighs = candles.slice(-20).map(c => Number(c.high ?? (c as any).h ?? 0));
+                swingHighVal = Math.max(...recentHighs);
+            }
+
+            const boxHighVal = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+            const boxLowVal = Number(authoritativeInput.snapshot.boxLow ?? 0);
+            const boxMidVal = boxHighVal > 0 && boxLowVal > 0 ? (boxHighVal + boxLowVal) / 2 : 0;
+            
+            const minStopDist = Math.max(atrVal * 0.5, lastPrice * 0.0015);
+            const atrStopCandidate = lastPrice + Math.max(atrVal * 1.5, lastPrice * 0.005);
+            
+            const candidates = [
+                swingHighVal,
+                boxHighVal,
+                boxMidVal,
+                atrStopCandidate
+            ].filter(v => Number.isFinite(v) && v > lastPrice + minStopDist);
+            
+            let calculatedStopPrice = candidates.length > 0 ? Math.max(...candidates) : (lastPrice + minStopDist);
+            if (!Number.isFinite(calculatedStopPrice) || calculatedStopPrice <= lastPrice) {
+                calculatedStopPrice = lastPrice + minStopDist;
+            }
+
+            // 실제 plan 및 execution bridge에 주입
+            execution.stopPrice = calculatedStopPrice;
+            execution.invalidationPx = calculatedStopPrice;
+            v2CalculatedInvalidationPx = calculatedStopPrice;
+
+            const riskDistance = calculatedStopPrice - lastPrice;
+            const validStop = calculatedStopPrice > lastPrice;
+
+            console.info(JSON.stringify({
+                event: "V2_ENTRY_STOP_PLAN_PATCH_PROOF",
+                symbol: String(input.symbol),
+                side: sideFinal,
+                lastPrice,
+                stopPrice: calculatedStopPrice,
+                invalidationPx: calculatedStopPrice,
+                stopBasis: calculatedStopPrice === swingHighVal ? "swingHigh" :
+                           calculatedStopPrice === boxHighVal ? "boxHigh" :
+                           calculatedStopPrice === boxMidVal ? "boxMid" :
+                           calculatedStopPrice === atrStopCandidate ? "atrBuffer" : "fallback",
+                swingHigh: swingHighVal,
+                boxHigh: boxHighVal,
+                atr: atrVal,
+                riskDistance,
+                validStop,
+                injectedToEntryPlan: true,
+                injectedToAuthorityEnvelope: true
+            }));
+        }
+
         const structuralStopPx = execution.stopPrice;
         const structuralInvalidationPx = execution.invalidationPx;
-        const lastPrice = authoritativeInput.snapshot.lastPrice ?? 0;
-        const sideFinal = v2SideAfterPromotion;
 
         let riskAuditFailed = false;
         let riskAuditReason: string | null = null;
