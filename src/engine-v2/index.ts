@@ -30,6 +30,189 @@ const V2_PROOF_KEY_TTL_MS = 60 * 60 * 1000;
 const V2_PROOF_KEY_MAX_SIZE = 5000;
 const MICRO_EXECUTION_PERF_LOG_INTERVAL_MS = 5 * 60 * 1000;
 const v2ProofLastKeyByEventSymbol = new Map<string, { key: string; updatedAtMs: number }>();
+
+export interface DeadlockHistoryItem {
+    timestamp: number;
+    decision: string;
+    side: string;
+    qualityScore: number;
+    grade: string;
+    softBlockReason: string | null;
+    hardBlockPresent: boolean;
+    readinessOk: boolean;
+    stopPlanOk: boolean;
+    htfPolicy: string;
+    zone: string;
+    sideZoneValid: boolean;
+}
+
+const symbolHistoryMap = new Map<string, DeadlockHistoryItem[]>();
+const symbolLastV2EnterDecisionAtMap = new Map<string, number>();
+const symbolLastPositionOpenedAtMap = new Map<string, number>();
+const symbolCyclesSinceLastEnterMap = new Map<string, number>();
+const symbolLastProbeAtMap = new Map<string, number>();
+const symbolLastProbeSideMap = new Map<string, string>();
+const symbolLastProbeQualityMap = new Map<string, number>();
+const symbolLastProbeStructureMap = new Map<string, string>();
+const symbolHasPositionMap = new Map<string, boolean>();
+
+let isHistoryLoaded = false;
+
+function loadLastEnterAtFromHistory(): void {
+    if (isHistoryLoaded) return;
+    try {
+        const fs = require("fs");
+        const path = require("path");
+        const cwd = process.cwd();
+        const possiblePaths = [
+            path.join(cwd, "data/positions/history.json"),
+            path.join(__dirname, "../../data/positions/history.json"),
+            path.join(__dirname, "../data/positions/history.json"),
+            "E:/antigravity/homepage/orbitalpha-futures-paper/data/positions/history.json"
+        ];
+        
+        let fileContent = "";
+        for (const p of possiblePaths) {
+            if (fs.existsSync(p)) {
+                fileContent = fs.readFileSync(p, "utf8");
+                break;
+            }
+        }
+        
+        if (fileContent) {
+            const history = JSON.parse(fileContent);
+            if (Array.isArray(history)) {
+                for (let i = history.length - 1; i >= 0; i--) {
+                    const item = history[i];
+                    if (item && item.symbol && typeof item.openedAt === "number") {
+                        if (!symbolLastPositionOpenedAtMap.has(item.symbol)) {
+                            symbolLastPositionOpenedAtMap.set(item.symbol, item.openedAt);
+                            console.info(`V2_DEADLOCK_RESOLVER: Restored lastPositionOpenedAt for ${item.symbol} = ${item.openedAt}`);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.error("V2_DEADLOCK_RESOLVER: Failed to load lastPositionOpenedAt from history", e);
+    }
+    isHistoryLoaded = true;
+}
+
+const engineStartTime = Date.now();
+
+function aggregateDeadlockMetrics(symbol: string, now: number): {
+    lastPositionOpenedAt: number | null;
+    lastV2EnterDecisionAt: number | null;
+    minutesSinceLastPositionOpened: number;
+    minutesSinceLastV2EnterDecision: number;
+    cyclesSinceLastEnter: number;
+    repeatedCandidateSide: string;
+    repeatedCandidateCount: number;
+    repeatedSoftBlockReasons: string[];
+    hardBlockCount: number;
+    readinessOkCount: number;
+    stopPlanOkCount: number;
+    htfPolicyHistory: string[];
+    zoneHistory: string[];
+    qualityScoreAvg: number;
+    qualityScoreMax: number;
+    sameDirectionPersistence: number;
+} {
+    const history = symbolHistoryMap.get(symbol) ?? [];
+    const cutoff = now - 30 * 60 * 1000;
+    let filtered = history.filter(h => h.timestamp >= cutoff);
+    if (filtered.length > 200) {
+        filtered = filtered.slice(-200);
+    }
+    symbolHistoryMap.set(symbol, filtered);
+
+    const lastPositionOpenedAt = symbolLastPositionOpenedAtMap.get(symbol) ?? null;
+    const lastV2EnterDecisionAt = symbolLastV2EnterDecisionAtMap.get(symbol) ?? null;
+    const effectiveLastPositionOpenedAt = lastPositionOpenedAt ?? engineStartTime;
+    const minutesSinceLastPositionOpened = (now - effectiveLastPositionOpenedAt) / (60 * 1000);
+    const minutesSinceLastV2EnterDecision = lastV2EnterDecisionAt ? (now - lastV2EnterDecisionAt) / (60 * 1000) : NaN;
+    const cyclesSinceLastEnter = symbolCyclesSinceLastEnterMap.get(symbol) ?? 0;
+
+    let repeatedCandidateSide = "none";
+    let repeatedCandidateCount = 0;
+    let longCount = 0;
+    let shortCount = 0;
+    
+    const softBlockReasonsSet = new Set<string>();
+    let hardBlockCount = 0;
+    let readinessOkCount = 0;
+    let stopPlanOkCount = 0;
+    const htfPolicyHistory: string[] = [];
+    const zoneHistory: string[] = [];
+    let qualitySum = 0;
+    let qualityScoreMax = 0;
+
+    for (const h of filtered) {
+        if (h.side === "long") longCount++;
+        else if (h.side === "short") shortCount++;
+
+        if (h.softBlockReason) {
+            softBlockReasonsSet.add(h.softBlockReason);
+        }
+        if (h.hardBlockPresent) hardBlockCount++;
+        if (h.readinessOk) readinessOkCount++;
+        if (h.stopPlanOk) stopPlanOkCount++;
+        htfPolicyHistory.push(h.htfPolicy);
+        zoneHistory.push(h.zone);
+        qualitySum += h.qualityScore;
+        if (h.qualityScore > qualityScoreMax) {
+            qualityScoreMax = h.qualityScore;
+        }
+    }
+
+    if (longCount > 0 || shortCount > 0) {
+        if (longCount >= shortCount) {
+            repeatedCandidateSide = "long";
+            repeatedCandidateCount = longCount;
+        } else {
+            repeatedCandidateSide = "short";
+            repeatedCandidateCount = shortCount;
+        }
+    }
+
+    const qualityScoreAvg = filtered.length > 0 ? qualitySum / filtered.length : 0;
+    const repeatedSoftBlockReasons = Array.from(softBlockReasonsSet);
+
+    let sameDirectionPersistence = 0;
+    if (filtered.length > 0) {
+        const lastSide = filtered[filtered.length - 1].side;
+        if (lastSide !== "none") {
+            for (let i = filtered.length - 1; i >= 0; i--) {
+                if (filtered[i].side === lastSide) {
+                    sameDirectionPersistence++;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    return {
+        lastPositionOpenedAt,
+        lastV2EnterDecisionAt,
+        minutesSinceLastPositionOpened,
+        minutesSinceLastV2EnterDecision,
+        cyclesSinceLastEnter,
+        repeatedCandidateSide,
+        repeatedCandidateCount,
+        repeatedSoftBlockReasons,
+        hardBlockCount,
+        readinessOkCount,
+        stopPlanOkCount,
+        htfPolicyHistory,
+        zoneHistory,
+        qualityScoreAvg,
+        qualityScoreMax,
+        sameDirectionPersistence
+    };
+}
+
 const microPerfStats = {
     calculatedCount: 0,
     totalCalcMs: 0,
@@ -83,6 +266,7 @@ export function shouldEmitV2Proof(
  * Produces an independent EngineV2Decision.
  */
 export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision; internal: EngineV2InternalResult } {
+    loadLastEnterAtFromHistory();
     // Step 1: derive normalized state authority
     const v2State = deriveV2StateAuthority(input);
     // Step 2: project normalized state into authoritative input
@@ -2671,9 +2855,368 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     const decisionAfterReadiness: EngineV2FinalDecision = finalDecision;
 
+    // V2_NO_ENTER_DEADLOCK_RESOLVER
+    let deadlockDetected = false;
+    let promotedDecision: EngineV2FinalDecision | null = null;
+    let promotedSide: EngineV2Side = "none";
+    let isDeadlockProbe = false;
+    let deadlockBlockReason: string | null = null;
+
+    const deadlockMetrics = aggregateDeadlockMetrics(String(input.symbol), input.now);
+    const hasActivePosition = v2State.currentPositions.some(p => p.symbol === input.symbol);
+    const isControlClearForDeadlock =
+        v2State.serverTradeEnabled === true &&
+        v2State.closeOnlyMode !== true &&
+        v2State.killSwitch !== true &&
+        v2State.reconcileSafeMode !== true &&
+        String(v2State.riskMode ?? "").toUpperCase() !== "HALT" &&
+        v2State.dailyLossGuardTriggered !== true;
+
+    // deadlock 후보 판정
+    const repeatedCandidateSide = deadlockMetrics.repeatedCandidateSide as EngineV2Side;
+    const sameSidePersistence = deadlockMetrics.sameDirectionPersistence;
+    const repeatedCount = deadlockMetrics.repeatedCandidateCount;
+    const qualityAvg = deadlockMetrics.qualityScoreAvg;
+
+    if (
+        !hasActivePosition &&
+        isControlClearForDeadlock &&
+        !hardBlockPresent &&
+        !isNaN(deadlockMetrics.minutesSinceLastPositionOpened) &&
+        deadlockMetrics.minutesSinceLastPositionOpened >= 600 &&
+        repeatedCandidateSide !== "none" &&
+        repeatedCount >= 10 &&
+        (qualityAvg >= 65 || entryQualityGrade === "B" || entryQualityGrade === "A" || entryQualityGrade === "S")
+    ) {
+        deadlockDetected = true;
+    }
+
+    if (deadlockDetected) {
+        console.info(JSON.stringify({
+            event: "V2_NO_ENTER_DEADLOCK_AUDIT_PROOF",
+            symbol: String(input.symbol),
+            minutesSinceLastEnter: deadlockMetrics.minutesSinceLastPositionOpened,
+            cyclesSinceLastEnter: deadlockMetrics.cyclesSinceLastEnter,
+            repeatedCandidateSide,
+            repeatedCandidateCount: repeatedCount,
+            repeatedSoftBlockReasons: deadlockMetrics.repeatedSoftBlockReasons,
+            hardBlockPresent,
+            readinessOk: paperExecutionReady && signedExecutionReady,
+            htfPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+            qualityScoreAvg: qualityAvg,
+            qualityScoreMax: deadlockMetrics.qualityScoreMax,
+            zone,
+            sideZoneValid,
+            stopPlanValid: execution.stopPrice != null && !isNaN(execution.stopPrice),
+            lastV2EnterDecisionAt: deadlockMetrics.lastV2EnterDecisionAt,
+            lastPositionOpenedAt: deadlockMetrics.lastPositionOpenedAt,
+            deadlockDetected: true
+        }));
+    }
+
+    if (deadlockDetected && finalDecision !== "ENTER") {
+        // Promotion 시도
+        const auditEnabled = String(process.env.V2_DEADLOCK_RESOLVER_AUDIT_ENABLED ?? "true").toLowerCase() === "true";
+        const promotionEnabled = String(process.env.V2_DEADLOCK_PROBE_PROMOTION_ENABLED ?? "false").toLowerCase() === "true";
+
+        let blockProbe = false;
+        let blockedReason = "";
+
+        const symbolStr = String(input.symbol);
+        const lastPositionOpenedAt = symbolLastPositionOpenedAtMap.get(symbolStr) ?? null;
+        const isLastPositionOpenedAtUnknown = lastPositionOpenedAt === null;
+
+        // 1. promotionEnabled env 검사
+        if (!promotionEnabled) {
+            blockProbe = true;
+            blockedReason = "PROMOTION_ENV_DISABLED";
+        }
+        // 2. lastPositionOpenedAt 복원 여부 검사 (복원 불가 시 unknown 상태로 promotion 금지)
+        else if (isLastPositionOpenedAtUnknown) {
+            blockProbe = true;
+            blockedReason = "LAST_POSITION_OPENED_AT_UNKNOWN";
+        }
+        // 3. execution readiness 검사
+        else if (!paperExecutionReady || !signedExecutionReady) {
+            blockProbe = true;
+            blockedReason = "EXECUTION_NOT_READY";
+        }
+        // 4. mid-zone probe 금지 검사
+        else if (zone === "mid" && shock === "NONE") {
+            blockProbe = true;
+            blockedReason = "MID_ZONE_PROBE_EXCLUDED";
+        }
+        // 5. POLARITY_MISMATCH 검사
+        else if (judgment.polarityMismatch === true || (judgment.htf_entry_policy === "HOLD" && judgment.polarityMismatch)) {
+            blockProbe = true;
+            blockedReason = "POLARITY_MISMATCH";
+        }
+        // 6. SIDE_NOT_ALLOWED 검사
+        else if ((repeatedCandidateSide === "long" && (!allowNewLong || !riskLongAllow)) ||
+                 (repeatedCandidateSide === "short" && (!allowNewShort || !riskShortAllow))) {
+            blockProbe = true;
+            blockedReason = "SIDE_NOT_ALLOWED";
+        }
+        // 7. position conflict 검사
+        else if (hasActivePosition || v2State.hasSameSidePosition === true || v2State.hasOppositeSidePosition === true) {
+            blockProbe = true;
+            blockedReason = "POSITION_CONFLICT";
+        }
+        // 8. hard block 관련 환경/제어 검사 (serverTradeEnabled, closeOnlyMode, killSwitch, reconcileSafeMode 등)
+        else if (!isControlClearForDeadlock || hardBlockPresent) {
+            blockProbe = true;
+            blockedReason = hardBlockReason || "HARD_BLOCK_ACTIVE";
+        }
+
+        // 6시간 재probe 제한 검사
+        if (!blockProbe) {
+            const lastProbeAt = symbolLastProbeAtMap.get(String(input.symbol)) ?? 0;
+            if (input.now - lastProbeAt < 6 * 3600 * 1000) {
+                blockProbe = true;
+                blockedReason = "PROBE_COOLDOWN_ACTIVE";
+                console.info(JSON.stringify({
+                    event: "V2_DEADLOCK_PROBE_COOLDOWN_PROOF",
+                    symbol: String(input.symbol),
+                    candidateSide: repeatedCandidateSide,
+                    lastProbeAt,
+                    cooldownRemainingMs: 6 * 3600 * 1000 - (input.now - lastProbeAt),
+                    lastV2EnterDecisionAt: deadlockMetrics.lastV2EnterDecisionAt,
+                    lastPositionOpenedAt: deadlockMetrics.lastPositionOpenedAt
+                }));
+            }
+        }
+
+        // 동일 방향 재probe 품질 개선/구조 변화 검사
+        if (!blockProbe) {
+            const lastProbeSide = symbolLastProbeSideMap.get(String(input.symbol));
+            if (lastProbeSide === repeatedCandidateSide) {
+                const lastProbeQuality = symbolLastProbeQualityMap.get(String(input.symbol)) ?? 0;
+                const lastProbeStructure = symbolLastProbeStructureMap.get(String(input.symbol)) ?? "";
+                const currentStructure = `${judgment.regime}|${judgment.subtype}|${zone}`;
+                
+                const qualityImproved = qualityScore > lastProbeQuality;
+                const structureChanged = currentStructure !== lastProbeStructure;
+
+                if (!qualityImproved && !structureChanged) {
+                    blockProbe = true;
+                    blockedReason = "SAME_DIRECTION_REPROBE_FORBIDDEN_NO_IMPROVEMENT";
+                }
+            }
+        }
+
+        // 허용 구조 검사
+        if (!blockProbe) {
+            let structureAllowed = false;
+            if (zone === "lower" && repeatedCandidateSide === "long") {
+                structureAllowed = true;
+            } else if (zone === "upper" && repeatedCandidateSide === "short") {
+                structureAllowed = true;
+            } else if (shock === "DOWN" && repeatedCandidateSide === "short") {
+                structureAllowed = true;
+            } else if (shock === "UP" && repeatedCandidateSide === "long") {
+                if (judgment.htf_entry_policy === "ALLOW" || judgment.htf_entry_policy === "LONG_ONLY_OR_NONE") {
+                    structureAllowed = true;
+                }
+            }
+
+            if (!structureAllowed) {
+                blockProbe = true;
+                blockedReason = "STRUCTURE_NOT_ALLOWED";
+            }
+        }
+
+        // stopPrice 보장 및 패치
+        let targetStopPrice = execution.stopPrice;
+        let targetInvalidationPx = execution.invalidationPx;
+        if (!blockProbe) {
+            const entryPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+            const lastPrice = entryPrice;
+            const atrVal = Number(authoritativeInput.snapshot.atr ?? 0);
+            const minStopDist = Math.max(atrVal * 0.5, lastPrice * 0.0015);
+
+            if (repeatedCandidateSide === "short") {
+                if (targetStopPrice == null || isNaN(targetStopPrice) || targetStopPrice <= lastPrice) {
+                    // 패치 시도
+                    const candles = authoritativeInput.snapshot.candles;
+                    let swingHighVal = 0;
+                    if (Array.isArray(candles) && candles.length > 0) {
+                        const recentHighs = candles.slice(-20).map(c => Number(c.high ?? (c as any).h ?? 0));
+                        swingHighVal = Math.max(...recentHighs);
+                    }
+                    const boxHighVal = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+                    const boxLowVal = Number(authoritativeInput.snapshot.boxLow ?? 0);
+                    const boxMidVal = boxHighVal > 0 && boxLowVal > 0 ? (boxHighVal + boxLowVal) / 2 : 0;
+                    const atrStopCandidate = lastPrice + Math.max(atrVal * 1.5, lastPrice * 0.005);
+
+                    const candidates = [
+                        swingHighVal,
+                        boxHighVal,
+                        boxMidVal,
+                        atrStopCandidate
+                    ].filter(v => Number.isFinite(v) && v > lastPrice + minStopDist);
+
+                    let calculatedStopPrice = candidates.length > 0 ? Math.max(...candidates) : (lastPrice + minStopDist);
+                    if (!Number.isFinite(calculatedStopPrice) || calculatedStopPrice <= lastPrice) {
+                        calculatedStopPrice = lastPrice + minStopDist;
+                    }
+                    targetStopPrice = calculatedStopPrice;
+                }
+
+                if (targetStopPrice == null || isNaN(targetStopPrice) || targetStopPrice <= lastPrice) {
+                    blockProbe = true;
+                    blockedReason = "STOP_PRICE_MISSING_OR_INVALID";
+                }
+            } else if (repeatedCandidateSide === "long") {
+                if (targetStopPrice == null || isNaN(targetStopPrice) || targetStopPrice >= lastPrice) {
+                    // 패치 시도
+                    const candles = authoritativeInput.snapshot.candles;
+                    let swingLowVal = 0;
+                    if (Array.isArray(candles) && candles.length > 0) {
+                        const recentLows = candles.slice(-20).map(c => Number(c.low ?? (c as any).l ?? 0));
+                        swingLowVal = Math.min(...recentLows);
+                    }
+                    const boxHighVal = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+                    const boxLowVal = Number(authoritativeInput.snapshot.boxLow ?? 0);
+                    const boxMidVal = boxHighVal > 0 && boxLowVal > 0 ? (boxHighVal + boxLowVal) / 2 : 0;
+                    const atrStopCandidate = lastPrice - Math.max(atrVal * 1.5, lastPrice * 0.005);
+
+                    const candidates = [
+                        swingLowVal,
+                        boxLowVal,
+                        boxMidVal,
+                        atrStopCandidate
+                    ].filter(v => Number.isFinite(v) && v < lastPrice - minStopDist);
+
+                    let calculatedStopPrice = candidates.length > 0 ? Math.min(...candidates) : (lastPrice - minStopDist);
+                    if (!Number.isFinite(calculatedStopPrice) || calculatedStopPrice >= lastPrice) {
+                        calculatedStopPrice = lastPrice - minStopDist;
+                    }
+                    targetStopPrice = calculatedStopPrice;
+                }
+
+                if (targetStopPrice == null || isNaN(targetStopPrice) || targetStopPrice >= lastPrice) {
+                    blockProbe = true;
+                    blockedReason = "STOP_PRICE_MISSING_OR_INVALID";
+                }
+            }
+
+            if (!blockProbe) {
+                targetInvalidationPx = targetStopPrice;
+                if (targetInvalidationPx == null || isNaN(targetInvalidationPx)) {
+                    blockProbe = true;
+                    blockedReason = "STOP_PRICE_MISSING_OR_INVALID";
+                }
+            }
+        }
+
+        // stageMarginKrwAfterTemp 계산 및 min order size / margin / exposure cap 검사
+        if (!blockProbe) {
+            let baseMargin = riskSizing.baseStageMarginKrw;
+            if (!baseMargin || baseMargin <= 0) {
+                baseMargin = input.config.baseSizeUsd ? input.config.baseSizeUsd * 1400 : 140000;
+            } else if (baseMargin < 1000) {
+                baseMargin = baseMargin * 1400;
+            }
+            const stageMarginKrwAfterTemp = Math.round(baseMargin * 0.25);
+            const minProbeMarginKrw = 14000;
+
+            const maxUsable = v2State.maxUsableMarginKrw ?? 0;
+            const exposureCap = v2State.exposureNotionalCapKrw ?? 0;
+            const symbolExposureCap = v2State.symbolExposureNotionalCapKrw ?? 0;
+            
+            const currentGlobalNotionalKrw = v2State.ledgerExposureNotionalKrw ?? 0;
+            const currentSymbolNotionalKrw = v2State.symbolLedgerExposureNotionalKrw ?? 0;
+            
+            const orderNotionalKrw = stageMarginKrwAfterTemp * 10;
+
+            if (stageMarginKrwAfterTemp <= 0) {
+                blockProbe = true;
+                blockedReason = "STAGE_MARGIN_ZERO";
+            } else if (stageMarginKrwAfterTemp < minProbeMarginKrw) {
+                blockProbe = true;
+                blockedReason = "MIN_ORDER_SIZE_UNDERFLOW";
+            } else if (stageMarginKrwAfterTemp > maxUsable) {
+                blockProbe = true;
+                blockedReason = "INSUFFICIENT_MARGIN";
+            } else if (exposureCap > 0 && (currentGlobalNotionalKrw + orderNotionalKrw > exposureCap)) {
+                blockProbe = true;
+                blockedReason = "EXPOSURE_CAP_EXCEEDED";
+            } else if (symbolExposureCap > 0 && (currentSymbolNotionalKrw + orderNotionalKrw > symbolExposureCap)) {
+                blockProbe = true;
+                blockedReason = "EXPOSURE_CAP_EXCEEDED";
+            }
+        }
+
+        if (blockProbe) {
+            deadlockBlockReason = blockedReason;
+            console.warn(JSON.stringify({
+                event: "V2_DEADLOCK_PROBE_BLOCKED_PROOF",
+                symbol: String(input.symbol),
+                candidateSide: repeatedCandidateSide,
+                blockedReason,
+                htfPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+                hardBlockReason: blockedReason,
+                stopPrice: targetStopPrice,
+                qualityScore,
+                sideZoneValid,
+                lastV2EnterDecisionAt: deadlockMetrics.lastV2EnterDecisionAt,
+                lastPositionOpenedAt: deadlockMetrics.lastPositionOpenedAt
+            }));
+        } else {
+            // 승격 수행
+            promotedDecision = "ENTER";
+            promotedSide = repeatedCandidateSide;
+            isDeadlockProbe = true;
+
+            finalDecision = "ENTER";
+            v2SideAfterPromotion = promotedSide;
+            v2DecisionAfterPromotion = "ENTER";
+            v2RejectReasonAfterPromotion = null;
+            blockReason = null;
+
+            execution.signal = promotedSide === "long" ? "LONG_CANDIDATE" : "SHORT_CANDIDATE";
+            execution.side = promotedSide;
+            execution.stopPrice = targetStopPrice;
+            execution.invalidationPx = targetStopPrice;
+            v2CalculatedInvalidationPx = targetStopPrice;
+
+            // metadata 주입
+            if (!execution.metadata) execution.metadata = {};
+            execution.metadata.maxHoldBars5m = 12;
+            execution.metadata.timeStop = true;
+            execution.metadata.entryReason = "V2_DEADLOCK_SMALL_PROBE";
+            execution.metadata.probeTp = true;
+
+            console.info(JSON.stringify({
+                event: "V2_DEADLOCK_PROBE_PROMOTION_PROOF",
+                symbol: String(input.symbol),
+                side: promotedSide,
+                previousDecision: decisionAfterReadiness,
+                promotedDecision: "ENTER",
+                sizeMultiplier: 0.25,
+                entryReason: "V2_DEADLOCK_SMALL_PROBE",
+                stopPrice: targetStopPrice,
+                invalidationPx: targetStopPrice,
+                qualityScore,
+                reason: "V2_NO_ENTER_DEADLOCK_RESOLVER_PROMOTION",
+                lastV2EnterDecisionAt: deadlockMetrics.lastV2EnterDecisionAt,
+                lastPositionOpenedAt: deadlockMetrics.lastPositionOpenedAt
+            }));
+        }
+    }
+
     // Live order size authority: fixed 10x leverage + strict env notional cap.
     const stageMarginKrwBefore = riskSizing.stageMarginKrw;
     let stageMarginKrwAfter = stageMarginKrwBefore;
+    if (isDeadlockProbe) {
+        let baseMargin = riskSizing.baseStageMarginKrw;
+        if (!baseMargin || baseMargin <= 0) {
+            baseMargin = input.config.baseSizeUsd ? input.config.baseSizeUsd * 1400 : 140000;
+        } else if (baseMargin < 1000) {
+            baseMargin = baseMargin * 1400;
+        }
+        stageMarginKrwAfter = Math.round(baseMargin * 0.25);
+    }
     let cap_applied = false;
     let cap_reason: string | null = null;
     let cap_kind: string | null = null;
@@ -2797,6 +3340,23 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         } else if (finalDecision === "ENTER") {
             riskSizing.stageMarginKrw = stageMarginKrwAfter;
         }
+    }
+
+    if (isDeadlockProbe && finalDecision !== "ENTER") {
+        console.warn(JSON.stringify({
+            event: "V2_DEADLOCK_PROBE_BLOCKED_PROOF",
+            symbol: String(input.symbol),
+            candidateSide: repeatedCandidateSide,
+            blockedReason: min_order_block_reason || riskSizing.blockReason || "MIN_ORDER_SIZE_UNDERFLOW",
+            htfPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+            hardBlockReason: min_order_block_reason || riskSizing.blockReason,
+            stopPrice: execution.stopPrice,
+            qualityScore,
+            sideZoneValid
+        }));
+        isDeadlockProbe = false;
+        promotedDecision = null;
+        promotedSide = "none";
     }
 
     // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
@@ -4026,6 +4586,53 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             exitConfidence: exitPolicy.exitConfidence
         }
     };
+
+    // V2_NO_ENTER_DEADLOCK_RESOLVER: Update history and maps
+    const symbolStr = String(input.symbol);
+    const hasPosition = v2State.currentPositions.some(p => p.symbol === input.symbol);
+    if (!symbolHasPositionMap.has(symbolStr)) {
+        symbolHasPositionMap.set(symbolStr, hasPosition);
+    } else {
+        const hadPosition = symbolHasPositionMap.get(symbolStr) ?? false;
+        symbolHasPositionMap.set(symbolStr, hasPosition);
+
+        if (!hadPosition && hasPosition) {
+            symbolLastPositionOpenedAtMap.set(symbolStr, input.now);
+        }
+    }
+
+    if (finalDecision === "ENTER") {
+        symbolLastV2EnterDecisionAtMap.set(symbolStr, input.now);
+        symbolCyclesSinceLastEnterMap.set(symbolStr, 0);
+
+        if (isDeadlockProbe) {
+            symbolLastProbeAtMap.set(symbolStr, input.now);
+            symbolLastProbeSideMap.set(symbolStr, promotedSide ?? "none");
+            symbolLastProbeQualityMap.set(symbolStr, qualityScore);
+            symbolLastProbeStructureMap.set(symbolStr, `${judgment.regime}|${judgment.subtype ?? "none"}|${zone}`);
+        }
+    } else {
+        symbolCyclesSinceLastEnterMap.set(symbolStr, (symbolCyclesSinceLastEnterMap.get(symbolStr) ?? 0) + 1);
+    }
+
+    const histItem: DeadlockHistoryItem = {
+        timestamp: input.now,
+        decision: finalDecision,
+        side: (v2SideAfterPromotion && v2SideAfterPromotion !== "none" ? v2SideAfterPromotion : selectedSideFinal) as string,
+        qualityScore,
+        grade: entryQualityGrade,
+        softBlockReason: (finalDecision !== "ENTER" && !hardBlockPresent) ? (blockReason || vetoReason) : null,
+        hardBlockPresent,
+        readinessOk: paperExecutionReady && signedExecutionReady,
+        stopPlanOk: execution.stopPrice != null && !isNaN(execution.stopPrice),
+        htfPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+        zone,
+        sideZoneValid
+    };
+
+    const currentHistory = symbolHistoryMap.get(symbolStr) ?? [];
+    currentHistory.push(histItem);
+    symbolHistoryMap.set(symbolStr, currentHistory);
 
     return { decision, internal };
 }
