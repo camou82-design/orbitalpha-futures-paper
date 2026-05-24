@@ -55,6 +55,8 @@ const symbolLastProbeSideMap = new Map<string, string>();
 const symbolLastProbeQualityMap = new Map<string, number>();
 const symbolLastProbeStructureMap = new Map<string, string>();
 const symbolHasPositionMap = new Map<string, boolean>();
+const symbolLastDeadlockAuditLoggedAtMap = new Map<string, number>();
+const symbolDeadlockAuditCycleMap = new Map<string, number>();
 
 let isHistoryLoaded = false;
 
@@ -117,6 +119,7 @@ function aggregateDeadlockMetrics(symbol: string, now: number): {
     qualityScoreAvg: number;
     qualityScoreMax: number;
     sameDirectionPersistence: number;
+    historyCount: number;
 } {
     const history = symbolHistoryMap.get(symbol) ?? [];
     const cutoff = now - 30 * 60 * 1000;
@@ -208,7 +211,8 @@ function aggregateDeadlockMetrics(symbol: string, now: number): {
         zoneHistory,
         qualityScoreAvg,
         qualityScoreMax,
-        sameDirectionPersistence
+        sameDirectionPersistence,
+        historyCount: filtered.length
     };
 }
 
@@ -2866,6 +2870,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const auditEnabled = String(process.env.V2_DEADLOCK_RESOLVER_AUDIT_ENABLED ?? "true").toLowerCase() === "true";
     const promotionEnabled = String(process.env.V2_DEADLOCK_PROBE_PROMOTION_ENABLED ?? "false").toLowerCase() === "true";
 
+    let blockedBeforeDetectionReason: string | null = null;
+
     if (auditEnabled) {
         deadlockMetrics = aggregateDeadlockMetrics(String(input.symbol), input.now);
         const hasActivePosition = v2State.currentPositions.some(p => p.symbol === input.symbol);
@@ -2883,6 +2889,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const repeatedCount = deadlockMetrics.repeatedCandidateCount;
         const qualityAvg = deadlockMetrics.qualityScoreAvg;
 
+        const symbolStr = String(input.symbol);
+        const lastPositionOpenedAtVal = symbolLastPositionOpenedAtMap.get(symbolStr) ?? null;
+        const isLastPositionOpenedAtUnknown = lastPositionOpenedAtVal === null;
+
         if (
             !hasActivePosition &&
             isControlClearForDeadlock &&
@@ -2896,26 +2906,72 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             deadlockDetected = true;
         }
 
-        if (deadlockDetected) {
+        // 데드락 조건 미달 사유 연산
+        if (!deadlockDetected) {
+            if (hasActivePosition) {
+                blockedBeforeDetectionReason = "HAS_ACTIVE_POSITION";
+            } else if (!isControlClearForDeadlock) {
+                blockedBeforeDetectionReason = "CONTROL_NOT_CLEAR";
+            } else if (hardBlockPresent) {
+                blockedBeforeDetectionReason = "HARD_BLOCK_PRESENT";
+            } else if (isLastPositionOpenedAtUnknown) {
+                blockedBeforeDetectionReason = "LAST_POSITION_OPENED_AT_UNKNOWN";
+            } else if (deadlockMetrics.historyCount < 10) {
+                blockedBeforeDetectionReason = "HISTORY_NOT_ENOUGH";
+            } else if (deadlockMetrics.minutesSinceLastPositionOpened < 600) {
+                blockedBeforeDetectionReason = "MINUTES_SINCE_LAST_ENTER_LT_600";
+            } else if (repeatedCandidateSide === "none") {
+                blockedBeforeDetectionReason = "REPEATED_CANDIDATE_SIDE_NONE";
+            } else if (repeatedCount < 10) {
+                blockedBeforeDetectionReason = "REPEATED_CANDIDATE_COUNT_LT_10";
+            } else if (
+                qualityAvg < 65 &&
+                entryQualityGrade !== "B" &&
+                entryQualityGrade !== "A" &&
+                entryQualityGrade !== "S"
+            ) {
+                blockedBeforeDetectionReason = "QUALITY_AVG_BELOW_THRESHOLD";
+            } else {
+                blockedBeforeDetectionReason = "UNKNOWN_BLOCKED";
+            }
+        }
+
+        // 주기적 audit proof 로그 출력 (deadlockDetected === true 이거나 마지막 로깅 시각 대비 1분 경과 또는 N사이클 경과 시)
+        const lastLoggedAt = symbolLastDeadlockAuditLoggedAtMap.get(symbolStr) ?? 0;
+        const currentCycles = symbolDeadlockAuditCycleMap.get(symbolStr) ?? 0;
+        const nextCycles = currentCycles + 1;
+        symbolDeadlockAuditCycleMap.set(symbolStr, nextCycles);
+
+        const isTimeElapsed = input.now - lastLoggedAt >= 60 * 1000;
+        const isCycleElapsed = nextCycles >= 100; // 매 100사이클마다 출력
+
+        const shouldLogAudit = deadlockDetected || isTimeElapsed || isCycleElapsed;
+
+        if (shouldLogAudit) {
+            symbolLastDeadlockAuditLoggedAtMap.set(symbolStr, input.now);
+            symbolDeadlockAuditCycleMap.set(symbolStr, 0); // 사이클 카운트 초기화
             console.info(JSON.stringify({
                 event: "V2_NO_ENTER_DEADLOCK_AUDIT_PROOF",
-                symbol: String(input.symbol),
-                minutesSinceLastEnter: deadlockMetrics.minutesSinceLastPositionOpened,
-                cyclesSinceLastEnter: deadlockMetrics.cyclesSinceLastEnter,
+                symbol: symbolStr,
+                auditEnabled,
+                promotionEnabled,
+                deadlockDetected,
+                blockedBeforeDetectionReason: blockedBeforeDetectionReason ?? "NONE",
+                minutesSinceLastPositionOpened: deadlockMetrics.minutesSinceLastPositionOpened,
+                lastPositionOpenedAt: deadlockMetrics.lastPositionOpenedAt,
+                lastV2EnterDecisionAt: deadlockMetrics.lastV2EnterDecisionAt,
                 repeatedCandidateSide,
                 repeatedCandidateCount: repeatedCount,
-                repeatedSoftBlockReasons: deadlockMetrics.repeatedSoftBlockReasons,
-                hardBlockPresent,
-                readinessOk: paperExecutionReady && signedExecutionReady,
-                htfPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+                sameDirectionPersistence: sameSidePersistence,
                 qualityScoreAvg: qualityAvg,
                 qualityScoreMax: deadlockMetrics.qualityScoreMax,
+                latestQualityScore: qualityScore,
                 zone,
                 sideZoneValid,
-                stopPlanValid: execution.stopPrice != null && !isNaN(execution.stopPrice),
-                lastV2EnterDecisionAt: deadlockMetrics.lastV2EnterDecisionAt,
-                lastPositionOpenedAt: deadlockMetrics.lastPositionOpenedAt,
-                deadlockDetected: true
+                htfPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+                hardBlockPresent,
+                readinessOk: paperExecutionReady && signedExecutionReady,
+                stopPlanValid: execution.stopPrice != null && !isNaN(execution.stopPrice)
             }));
         }
 
