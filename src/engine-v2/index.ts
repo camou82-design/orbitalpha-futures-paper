@@ -746,6 +746,65 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             execution.reason,
             transitionMeta.transitionRejectReason ?? "none"
         ].join("|");
+
+        // --- V2_TRANSITION_SHORT_SETUP_DIAGNOSTIC_PROOF (DOWN shock + TRANSITION) ---
+        // DOWN shock + TRANSITION 상황에서 short setup의 진단 결과를 로그로 남긴다.
+        if (v2State.directionalShockState === "DOWN") {
+            const retestConfirmed = transitionMeta.retestConfirmed === true;
+            const reclaimConfirmed = transitionMeta.reclaimConfirmed === true;
+            
+            // setup이 통과되었는지 여부
+            const setup_passed = transitionMeta.transitionPreflightSafetyPassed === true;
+            const setup_fail_reason = transitionMeta.transitionPreflightBlockReason as string | null ?? transitionMeta.transitionRejectReason as string | null ?? "none";
+
+            const localSnapshot = input.snapshot;
+            const localBoxPos = localSnapshot.boxPos ?? 0.5;
+            const localZone = classifyRangeZone(localBoxPos);
+            const localEmaGap = localSnapshot.emaGap ?? 0;
+            const localTrendWeaknessScore = localSnapshot.trendWeaknessScore ?? 1;
+
+            const localTrendSideCandidate: EngineV2Side =
+                v2State.directionalShockState === "DOWN" ? "short" :
+                v2State.directionalShockState === "UP" ? "long" :
+                localEmaGap < 0 ? "short" :
+                localEmaGap > 0 ? "long" : "none";
+
+            const localRangeSideCandidate: EngineV2Side =
+                localZone === "lower" && v2State.longAllow ? "long" :
+                localZone === "upper" && v2State.shortAllow ? "short" : "none";
+
+            const localTrendOk =
+                Number.isFinite(localEmaGap) &&
+                Number.isFinite(localTrendWeaknessScore) &&
+                Math.abs(localEmaGap) >= 0.0004 &&
+                localTrendWeaknessScore < 0.5;
+
+            console.info(JSON.stringify({
+                event: "V2_TRANSITION_SHORT_SETUP_DIAGNOSTIC_PROOF",
+                symbol: String(input.symbol),
+                directionalShockState: v2State.directionalShockState ?? "NONE",
+                market_subtype: judgment.subtype,
+                transitionPhase: judgment.transitionPhase ?? "NONE",
+                zone: localZone,
+                boxPos: localBoxPos,
+                trend_side_candidate: localTrendSideCandidate,
+                range_side_candidate: localRangeSideCandidate,
+                shortAllow: v2State.shortAllow,
+                htf_entry_policy: judgment.htf_entry_policy ?? "NONE",
+                trendOk: localTrendOk,
+                qualityScore: localSnapshot.qualityScore ?? 0,
+                emaGap: localEmaGap,
+                retestConfirmed,
+                reclaimConfirmed,
+                reviewingTicks: localSnapshot.reviewing_ticks ?? 0,
+                setup_passed,
+                setup_fail_reason,
+                entryCandidate: localSnapshot.entryCandidate === true,
+                stopPrice: execution.stopPrice,
+                signed_execution_ready: v2State.signedExecutionReady === true
+            }));
+        }
+
         if (
             shouldEmitV2Proof(
                 "V2_TRANSITION_EXECUTOR_PROOF",

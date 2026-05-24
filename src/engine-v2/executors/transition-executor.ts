@@ -44,6 +44,10 @@ function calculateBB(closes: number[], period: number = 20, stdDev: number = 2) 
 export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJudgmentOutput): ExecutorOutput {
     const sn = input.snapshot;
     const st = input.state;
+    // [V2 short setup diagnostic 용 변수 선언]
+    let retestConfirmedShort = false;
+    let reclaimConfirmedShort = false;
+
     const emaGap = Number(sn.emaGap ?? 0);
     const trendWeaknessScore = Number(sn.trendWeaknessScore ?? 1);
     const rangeConfidence = Number(sn.rangeConfidence ?? 0);
@@ -100,6 +104,7 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
                 // Pullback Retest Logic
                 const retraceToEma = lastPrice >= (sn.ema20 || 0) * 0.999 && lastPrice <= (sn.ema20 || 0) * 1.002;
                 const retestConfirmed = retraceToEma && lastCandle.close < lastCandle.open && shortConfirms.length >= 1;
+                retestConfirmedShort = retestConfirmed;
 
                 if (shortConfirms.length >= MIN_FAILURE_CONFIRMATIONS && !lateChaseBlocked) {
                     const stopPrice = swingHigh + (atr * STOP_BUFFER_ATR);
@@ -238,7 +243,27 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         }
     }
 
-    if (subtype === "WHIPSAW_SHOCK_RECHECK" || subtype === "WHIPSAW_SOFT_WATCH") {
+    // [Whipsaw Exempt 로직 추가 - V2 transition short setup 연동]
+    const isWhipsawExempt = (() => {
+        if (subtype === "WHIPSAW_SOFT_WATCH") {
+            const isShockDownTarget =
+                directionalShockState === "DOWN" &&
+                shortAllow &&
+                emaGap < 0 &&
+                classifyRangeZone(boxPos) === "lower";
+
+            if (isShockDownTarget) {
+                // 강력한 숏 셋업 충족 여부: boxBreakSide === "lower" && qualityScore >= 65
+                const boxBreakConfirm = boxBreakSide === "lower" && qualityScore >= 65;
+                if (boxBreakConfirm) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    })();
+
+    if ((subtype === "WHIPSAW_SHOCK_RECHECK" || subtype === "WHIPSAW_SOFT_WATCH") && !isWhipsawExempt) {
         const meta: TransitionExecutorMetadata = {
             transitionPhase: judgment?.transitionPhase ?? "WHIPSAW_RECHECK",
             transitionSetupType: "NONE",
@@ -269,7 +294,9 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
             crashState,
             pumpState,
             stopPrice: null,
-            invalidationPx: null
+            invalidationPx: null,
+            retestConfirmed: retestConfirmedShort,
+            reclaimConfirmed: reclaimConfirmedShort
         };
         return {
             signal: "WAIT_RECHECK",
@@ -662,7 +689,9 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         crashState,
         pumpState,
         stopPrice,
-        invalidationPx
+        invalidationPx,
+        retestConfirmed: retestConfirmedShort,
+        reclaimConfirmed: reclaimConfirmedShort
     };
     return {
         signal,
