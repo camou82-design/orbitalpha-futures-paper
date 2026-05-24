@@ -1097,8 +1097,8 @@ export class PaperEngine {
   private freshTickRequiredAfterReadiness = false;
   private readinessTransitionCycleId: number | null = null;
   private staleEntryDroppedCount = 0;
-  /** barrier hit 시 V2 ENTER 후보를 다음 사이클 재검증까지 보존하는 deferred queue */
-  private v2DeferredEntryQueue: Array<{
+  /** barrier hit 시 V2 ENTER 후보를 다음 사이클 재검증까지 보존 (심볼별 1개, Map dedupe) */
+  private v2DeferredEntryQueue: Map<string, {
     snapshot: SymbolSnapshot;
     deferredAtCycleId: number;
     deferredAtMs: number;
@@ -1109,7 +1109,7 @@ export class PaperEngine {
     stopPriceValid: boolean;
     decisionId: string | null;
     barrierReason: string;
-  }> = [];
+  }> = new Map();
   private lastEntryEvaluatedAt: number | null = null;
   private lastEntrySignalFetchedAt: number | null = null;
   private readinessFreshTickCompletedCycles = 0;
@@ -12337,10 +12337,18 @@ export class PaperEngine {
     const currentFreshTickOk = !this.freshTickRequiredAfterReadiness;
     const currentReadinessOk = !input.readinessBarrierActive;
 
-    if (this.v2DeferredEntryQueue.length > 0) {
-      const remaining: typeof this.v2DeferredEntryQueue = [];
+    if (this.v2DeferredEntryQueue.size > 0) {
+      // position mutex 확인용 최신 포지션 로드 (async이므로 가능)
+      let deferredCheckPositions: Awaited<ReturnType<typeof this.positions.loadOpenAll>> = [];
+      try {
+        deferredCheckPositions = await this.positions.loadOpenAll();
+      } catch {
+        deferredCheckPositions = [];
+      }
 
-      for (const deferred of this.v2DeferredEntryQueue) {
+      const toDelete: string[] = [];
+
+      for (const [symKey, deferred] of this.v2DeferredEntryQueue) {
         const cycleAge = this.runCycleId - deferred.deferredAtCycleId;
         const symbolStr = deferred.symbol;
 
@@ -12354,19 +12362,37 @@ export class PaperEngine {
             cycle_age: cycleAge,
             deferred_at_ms: deferred.deferredAtMs
           });
+          toDelete.push(symKey);
           continue;
         }
 
         // barrier 아직 활성이면 보존 유지 (재검증 생략)
         if (currentBarrierActive) {
-          remaining.push(deferred);
           continue;
         }
 
         // barrier 해제 → 재검증 시작
         const freshTickOk = currentFreshTickOk;
         const readinessOk = currentReadinessOk;
-        const stopPriceValid = deferred.stopPrice != null && Number.isFinite(deferred.stopPrice);
+
+        // [수정4] stopPrice 방향 유효성 검증
+        const lastPrice = Number(deferred.snapshot.lastPrice ?? 0);
+        const sp = deferred.stopPrice;
+        let stopPriceValid = sp != null && Number.isFinite(sp);
+        let stopDirectionValid = false;
+        if (stopPriceValid && lastPrice > 0) {
+          if (deferred.side === "short") {
+            stopDirectionValid = sp! > lastPrice;
+          } else {
+            stopDirectionValid = sp! < lastPrice;
+          }
+        } else if (stopPriceValid) {
+          stopDirectionValid = true; // lastPrice 미확인 시 방향 검증 스킵
+        }
+        if (stopPriceValid && lastPrice > 0 && !stopDirectionValid) {
+          stopPriceValid = false;
+        }
+
         const serverTradeEnabledOk = this.serverTradeControlState.server_trade_enabled === true;
         const signedExecutionReadyOk = this.signedExecutionReady === true;
         const paperExecutionReadyOk = this.paperExecutionReady === true;
@@ -12376,23 +12402,25 @@ export class PaperEngine {
         const dailyLossGuardOk = this.lastRisk?.dailyLossGuardTriggered !== true;
         const riskModeOk = String(this.lastRiskExposure?.riskMode ?? "").toUpperCase() !== "HALT";
 
-        const stillValid =
-          freshTickOk &&
-          readinessOk &&
-          stopPriceValid &&
-          serverTradeEnabledOk &&
-          signedExecutionReadyOk &&
-          paperExecutionReadyOk &&
-          closeOnlyOk &&
-          killSwitchOk &&
-          reconcileSafeOk &&
-          dailyLossGuardOk &&
-          riskModeOk;
+        // [수정3] symbol position mutex 검사
+        const symPositions = deferredCheckPositions.filter(p => String(p.symbol) === symbolStr);
+        const sameSideOpen = symPositions.some(p => String(p.side).toLowerCase() === deferred.side);
+        const oppositeSideOpen = symPositions.some(p => {
+          const ps = String(p.side).toLowerCase();
+          return ps !== deferred.side && (ps === "long" || ps === "short");
+        });
+        const positionConflict = sameSideOpen || oppositeSideOpen;
+        const positionConflictReason = oppositeSideOpen
+          ? "SYMBOL_OPPOSITE_POSITION_OPEN"
+          : sameSideOpen
+            ? "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
+            : null;
 
         let invalidReason: string | null = null;
         if (!freshTickOk) invalidReason = "FRESH_TICK_NOT_OK";
         else if (!readinessOk) invalidReason = "READINESS_NOT_OK";
-        else if (!stopPriceValid) invalidReason = "STOP_PRICE_INVALID";
+        else if (positionConflict) invalidReason = positionConflictReason ?? "SYMBOL_POSITION_CONFLICT";
+        else if (!stopPriceValid) invalidReason = lastPrice > 0 && !stopDirectionValid ? "STOP_PRICE_DIRECTION_INVALID" : "STOP_PRICE_INVALID";
         else if (!serverTradeEnabledOk) invalidReason = "SERVER_TRADE_DISABLED";
         else if (!signedExecutionReadyOk) invalidReason = "SIGNED_EXECUTION_NOT_READY";
         else if (!paperExecutionReadyOk) invalidReason = "PAPER_EXECUTION_NOT_READY";
@@ -12401,6 +12429,8 @@ export class PaperEngine {
         else if (!reconcileSafeOk) invalidReason = "RECONCILE_SAFE_MODE";
         else if (!dailyLossGuardOk) invalidReason = "DAILY_LOSS_GUARD";
         else if (!riskModeOk) invalidReason = "RISK_MODE_HALT";
+
+        const stillValid = invalidReason === null;
 
         this.logger.info("V2_ENTRY_QUEUE_REVALIDATE_PROOF", {
           previous_run_cycle_id: deferred.deferredAtCycleId,
@@ -12414,7 +12444,12 @@ export class PaperEngine {
           fresh_tick_ok: freshTickOk,
           readiness_ok: readinessOk,
           stop_price_valid: stopPriceValid,
+          stop_price_direction_valid: stopDirectionValid,
           stop_price: deferred.stopPrice,
+          last_price: lastPrice,
+          symbol_position_conflict: positionConflict,
+          same_side_open: sameSideOpen,
+          opposite_side_open: oppositeSideOpen,
           serverTradeEnabled: serverTradeEnabledOk,
           signed_execution_ready: signedExecutionReadyOk,
           paper_execution_ready: paperExecutionReadyOk,
@@ -12422,7 +12457,7 @@ export class PaperEngine {
         });
 
         if (stillValid) {
-          // 재검증 통과 → entryQueue에 주입 (fresh tick 기준이므로 stale 아님)
+          // 재검증 통과 → entryQueue에 주입
           entryQueue.push(deferred.snapshot);
           this.logger.info("V2_ENTRY_QUEUE_CONSUME_AFTER_BARRIER_PROOF", {
             symbol: symbolStr,
@@ -12434,7 +12469,6 @@ export class PaperEngine {
             current_run_cycle_id: this.runCycleId,
             decision_id: deferred.decisionId
           });
-          // 소비 완료, remaining에 추가하지 않음
         } else {
           // 재검증 실패 → 폐기
           this.logger.warn("V2_ENTRY_QUEUE_DROPPED_PROOF", {
@@ -12446,13 +12480,18 @@ export class PaperEngine {
             fresh_tick_ok: freshTickOk,
             readiness_ok: readinessOk,
             stop_price_valid: stopPriceValid,
+            stop_price_direction_valid: stopDirectionValid,
+            symbol_position_conflict: positionConflict,
             serverTradeEnabled: serverTradeEnabledOk,
             signed_execution_ready: signedExecutionReadyOk
           });
         }
+        toDelete.push(symKey);
       }
 
-      this.v2DeferredEntryQueue = remaining;
+      for (const k of toDelete) {
+        this.v2DeferredEntryQueue.delete(k);
+      }
     }
     // --- deferred queue 재검증 종료 ---
 
@@ -12720,19 +12759,38 @@ export class PaperEngine {
           queued_entries: entryQueue.length
         });
         for (const q of entryQueue) {
-          const qSide: "long" | "short" = q.signal === "paper_short_candidate" ? "short" : "long";
           if (q.authoritySource === "v2") {
-            // V2 후보는 deferred queue에 보존 (다음 사이클 재검증용)
-            const envelope = input.decisionBySymbol.get(String(q.symbol));
+            // V2 후보는 deferred queue에 보존 (다음 사이클 재검증용, 심볼별 1개 Map upsert)
+            const symStr = String(q.symbol);
+            const envelope = input.decisionBySymbol.get(symStr);
             const authority = envelope?.authority;
+
+            // [수정1] side: authority.side 우선, runtime/v2_side 참조, 최후 fallback만 q.signal
+            const authSide = (
+              authority?.side ??
+              (authority as any)?.runtime_authority_side ??
+              (authority as any)?.v2_side ??
+              (authority as any)?.final_side ??
+              null
+            );
+            const resolvedSide: "long" | "short" =
+              authSide === "long" || authSide === "short"
+                ? authSide
+                : q.signal === "paper_short_candidate" ? "short" : "long";
+
             const stopPx = (authority as any)?.stopPrice ?? null;
             const stopPxNum = typeof stopPx === "number" ? stopPx : null;
-            this.v2DeferredEntryQueue.push({
+
+            const existingDeferred = this.v2DeferredEntryQueue.get(symStr);
+            const isReplacing = existingDeferred !== undefined;
+
+            // [수정2] Map.set → 심볼별 1개, 최신 후보로 대체
+            this.v2DeferredEntryQueue.set(symStr, {
               snapshot: q,
               deferredAtCycleId: this.runCycleId,
               deferredAtMs: Date.now(),
-              symbol: String(q.symbol),
-              side: qSide,
+              symbol: symStr,
+              side: resolvedSide,
               stageMarginKrw: authority?.stageMarginKrw ?? 0,
               stopPrice: stopPxNum,
               stopPriceValid: stopPxNum != null && Number.isFinite(stopPxNum),
@@ -12741,28 +12799,32 @@ export class PaperEngine {
             });
             this.logger.info("V2_ENTRY_QUEUE_DEFERRED_BY_BARRIER_PROOF", {
               run_cycle_id: this.runCycleId,
-              symbol: String(q.symbol),
-              side: qSide,
+              symbol: symStr,
+              side: resolvedSide,
+              side_source: authSide != null ? "authority.side" : "q.signal_fallback",
               stage_margin_krw: authority?.stageMarginKrw ?? 0,
               stop_price: stopPxNum,
               reason: blockReason,
               fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness,
               readiness_barrier_active: input.readinessBarrierActive,
               preserved: true,
+              replaced_existing: isReplacing,
               decision_id: (authority as any)?.decision_id ?? null
             });
           } else {
             // V1 후보는 오염 샘플로만 기록
+            const v1Side: "long" | "short" = q.signal === "paper_short_candidate" ? "short" : "long";
             this.contaminatedEntrySamples.push({
               ts: Date.now(),
               symbol: String(q.symbol),
-              side: qSide,
+              side: v1Side,
               source: "contaminated",
-              vector: this.toEntryQualityVectorFromSnapshot(q, qSide),
+              vector: this.toEntryQualityVectorFromSnapshot(q, v1Side),
               reason: "blocked_by_readiness_fresh_tick_barrier"
             });
           }
         }
+
         this.logger.warn("ENTRY_QUEUE_PRE_CONSUME_BLOCKED_PROOF", {
           run_cycle_id: this.runCycleId,
           entry_queue_length: entryQueue.length,
