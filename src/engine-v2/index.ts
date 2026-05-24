@@ -2950,6 +2950,128 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         if (shouldLogAudit) {
             symbolLastDeadlockAuditLoggedAtMap.set(symbolStr, input.now);
             symbolDeadlockAuditCycleMap.set(symbolStr, 0); // 사이클 카운트 초기화
+
+            // --- promotionWouldBlockReason dry-run (읽기 전용 시뮬레이션) ---
+            // promotionEnabled 여부와 무관하게 promotion 체인 전체를 시뮬레이션하여
+            // 최초 blocking reason을 계산한다. 실제 상태를 변경하지 않는다.
+            let _dryBlockReason: string = "PROMOTION_WOULD_PASS";
+
+            // 1. promotionEnabled env 검사
+            if (!promotionEnabled) {
+                _dryBlockReason = "PROMOTION_ENV_DISABLED";
+            }
+            // 2. deadlock 미탐지 시: 조건 미충족 상태
+            else if (!deadlockDetected) {
+                _dryBlockReason = `DEADLOCK_NOT_DETECTED|${blockedBeforeDetectionReason ?? "UNKNOWN"}`;
+            }
+            // 3. lastPositionOpenedAt 복원 불가
+            else if (isLastPositionOpenedAtUnknown) {
+                _dryBlockReason = "LAST_POSITION_OPENED_AT_UNKNOWN";
+            }
+            // 4. execution readiness
+            else if (!paperExecutionReady || !signedExecutionReady) {
+                _dryBlockReason = "EXECUTION_NOT_READY";
+            }
+            // 5. mid-zone probe 금지
+            else if (zone === "mid" && shock === "NONE") {
+                _dryBlockReason = "MID_ZONE_PROBE_EXCLUDED";
+            }
+            // 6. POLARITY_MISMATCH
+            else if (judgment.polarityMismatch === true) {
+                _dryBlockReason = "POLARITY_MISMATCH";
+            }
+            // 7. SIDE_NOT_ALLOWED
+            else if (
+                (repeatedCandidateSide === "long" && (!allowNewLong || !riskLongAllow)) ||
+                (repeatedCandidateSide === "short" && (!allowNewShort || !riskShortAllow))
+            ) {
+                _dryBlockReason = "SIDE_NOT_ALLOWED";
+            }
+            // 8. position conflict
+            else if (hasActivePosition || v2State.hasSameSidePosition === true || v2State.hasOppositeSidePosition === true) {
+                _dryBlockReason = "POSITION_CONFLICT";
+            }
+            // 9. hard block / control 검사
+            else if (!isControlClearForDeadlock || hardBlockPresent) {
+                _dryBlockReason = hardBlockReason || "HARD_BLOCK_ACTIVE";
+            }
+            // 10. 6시간 재probe 제한
+            else if ((() => {
+                const lastProbeAt = symbolLastProbeAtMap.get(symbolStr) ?? 0;
+                return (input.now - lastProbeAt) < 6 * 3600 * 1000;
+            })()) {
+                _dryBlockReason = "PROBE_COOLDOWN_ACTIVE";
+            }
+            // 11. 동일 방향 reprobe 품질/구조 개선 없음
+            else if ((() => {
+                const lastProbeSide = symbolLastProbeSideMap.get(symbolStr);
+                if (lastProbeSide === repeatedCandidateSide) {
+                    const lastProbeQuality = symbolLastProbeQualityMap.get(symbolStr) ?? 0;
+                    const lastProbeStructure = symbolLastProbeStructureMap.get(symbolStr) ?? "";
+                    const currentStructure = `${judgment.regime}|${judgment.subtype}|${zone}`;
+                    return !( qualityScore > lastProbeQuality || currentStructure !== lastProbeStructure );
+                }
+                return false;
+            })()) {
+                _dryBlockReason = "SAME_DIRECTION_REPROBE_FORBIDDEN_NO_IMPROVEMENT";
+            }
+            // 12. 허용 구조 검사 (lower+long, upper+short, DOWN shock+short, UP shock+long w/ HTF)
+            else if ((() => {
+                if (zone === "lower" && repeatedCandidateSide === "long") return false;
+                if (zone === "upper" && repeatedCandidateSide === "short") return false;
+                if (shock === "DOWN" && repeatedCandidateSide === "short") return false;
+                if (shock === "UP" && repeatedCandidateSide === "long" &&
+                    (judgment.htf_entry_policy === "ALLOW" || judgment.htf_entry_policy === "LONG_ONLY_OR_NONE")) return false;
+                return true; // 허용 구조 없음 → 블록
+            })()) {
+                // 구체적인 사유 세분화
+                if (zone === "lower" && repeatedCandidateSide === "short") {
+                    _dryBlockReason = "STRUCTURE_NOT_ALLOWED_LOWER_SHORT";
+                } else if (zone === "upper" && repeatedCandidateSide === "long") {
+                    _dryBlockReason = "STRUCTURE_NOT_ALLOWED_UPPER_LONG";
+                } else {
+                    _dryBlockReason = "STRUCTURE_NOT_ALLOWED";
+                }
+            }
+            // 13. range/trend side conflict (repeatedCandidateSide 기준 보조 검사)
+            else if ((() => {
+                const rangeSide = deadlockMetrics?.repeatedCandidateSide ?? "none";
+                const trendSideCand = (judgment as any).trend_side_candidate ?? (judgment as any).trendSide ?? null;
+                return trendSideCand && trendSideCand !== "none" && trendSideCand !== rangeSide && rangeSide !== "none";
+            })()) {
+                _dryBlockReason = "RANGE_TREND_SIDE_CONFLICT";
+            }
+            // 14. stopPlan 유효성 검사 (dry-run, 패치 불포함)
+            else if (execution.stopPrice == null || isNaN(execution.stopPrice as number)) {
+                _dryBlockReason = "STOP_PLAN_INVALID";
+            }
+            // 15. margin / exposure 검사 (dry-run)
+            else if ((() => {
+                let baseMargin = riskSizing.baseStageMarginKrw;
+                if (!baseMargin || baseMargin <= 0) {
+                    baseMargin = input.config.baseSizeUsd ? input.config.baseSizeUsd * 1400 : 140000;
+                } else if (baseMargin < 1000) {
+                    baseMargin = baseMargin * 1400;
+                }
+                const stageMarginKrwAfterTemp = Math.round(baseMargin * 0.25);
+                const minProbeMarginKrw = 14000;
+                const maxUsable = v2State.maxUsableMarginKrw ?? 0;
+                if (stageMarginKrwAfterTemp <= 0) { _dryBlockReason = "STAGE_MARGIN_ZERO"; return true; }
+                if (stageMarginKrwAfterTemp < minProbeMarginKrw) { _dryBlockReason = "MIN_ORDER_SIZE_UNDERFLOW"; return true; }
+                if (stageMarginKrwAfterTemp > maxUsable) { _dryBlockReason = "INSUFFICIENT_MARGIN"; return true; }
+                const orderNotionalKrw = stageMarginKrwAfterTemp * 10;
+                const exposureCap = v2State.exposureNotionalCapKrw ?? 0;
+                const symbolExposureCap = v2State.symbolExposureNotionalCapKrw ?? 0;
+                const currentGlobalNotionalKrw = v2State.ledgerExposureNotionalKrw ?? 0;
+                const currentSymbolNotionalKrw = v2State.symbolLedgerExposureNotionalKrw ?? 0;
+                if (exposureCap > 0 && (currentGlobalNotionalKrw + orderNotionalKrw > exposureCap)) { _dryBlockReason = "EXPOSURE_CAP_EXCEEDED"; return true; }
+                if (symbolExposureCap > 0 && (currentSymbolNotionalKrw + orderNotionalKrw > symbolExposureCap)) { _dryBlockReason = "EXPOSURE_CAP_EXCEEDED"; return true; }
+                return false;
+            })()) {
+                // _dryBlockReason은 내부 IIFE에서 이미 세팅됨
+            }
+            // --- dry-run 종료 ---
+
             console.info(JSON.stringify({
                 event: "V2_NO_ENTER_DEADLOCK_AUDIT_PROOF",
                 symbol: symbolStr,
@@ -2971,7 +3093,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 htfPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
                 hardBlockPresent,
                 readinessOk: paperExecutionReady && signedExecutionReady,
-                stopPlanValid: execution.stopPrice != null && !isNaN(execution.stopPrice)
+                stopPlanValid: execution.stopPrice != null && !isNaN(execution.stopPrice as number),
+                promotionWouldBlockReason: _dryBlockReason
             }));
         }
 
