@@ -2439,10 +2439,119 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 5+: Side Consistency Enforcer (Authoritative)
     const sideCandidateBeforeVetoEnforced = v2SideAfterPromotion;
-    const selectedSideFinal: EngineV2Side =
+
+    const selectedSideFinalRaw: EngineV2Side =
         activeEngineRouting === "RANGE" ? rangeSideCandidate :
         activeEngineRouting === "TREND" ? trendSideCandidate :
         v2SideAfterPromotion;
+
+    // --- V2 Side Selection Sanitization (V2_SIDE_SELECTION_SANITIZE_PROOF) ---
+    // selected side 산정 직전, 상위 정책 및 shock state를 바탕으로 side 오염을 정화한다.
+    const selected_side_before_sanitize: EngineV2Side = v2SideAfterPromotion;
+    let selected_side_after_sanitize = selected_side_before_sanitize;
+    let selected_side_final_after_sanitize = selectedSideFinalRaw;
+    let sanitize_reason: string | null = null;
+    let sanitizeTriggered = false;
+
+    const directionalShockState = v2State.directionalShockState ?? "NONE";
+    const htf_entry_policy = judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT";
+    const longAllow = v2State.longAllow;
+    const shortAllow = v2State.shortAllow;
+
+    // 롱 진입 확인 여부 검증 (충분히 강한지)
+    const isLongQualified = 
+        trendSideCandidate === "long" && 
+        longAllow === true && 
+        trendOk === true && 
+        qualityScore >= 70;
+
+    const sanitizeCandidateSide = (side: EngineV2Side): { side: EngineV2Side; reason: string | null } => {
+        if (side === "short") {
+            // 원칙 1: directionalShockState=UP이면 short 후보 제거
+            if (directionalShockState === "UP") {
+                // 원칙 3: trend_side_candidate=long 이고 longAllow=true 이면 long 또는 none
+                if (trendSideCandidate === "long" && longAllow) {
+                    if (isLongQualified) {
+                        return { side: "long", reason: "SHOCK_UP_SAN_LONG_QUALIFIED" };
+                    } else {
+                        return { side: "none", reason: "SHOCK_UP_TREND_CONFIRMATION_WEAK" };
+                    }
+                }
+                return { side: "none", reason: "SHOCK_UP_EXCLUDES_SHORT" };
+            }
+
+            // 원칙 2: htf_entry_policy=LONG_ONLY_OR_NONE이면 short selected side를 none 또는 long 후보로 재해석
+            if (htf_entry_policy === "LONG_ONLY_OR_NONE") {
+                if (trendSideCandidate === "long" && longAllow) {
+                    if (isLongQualified) {
+                        return { side: "long", reason: "LONG_ONLY_POLICY_SAN_LONG_QUALIFIED" };
+                    } else {
+                        return { side: "none", reason: "WAIT_FOR_TREND_CONFIRMATION" };
+                    }
+                }
+                return { side: "none", reason: "LONG_ONLY_POLICY_EXCLUDES_SHORT" };
+            }
+
+            // risk shortAllow=false 이면 당연히 short 배제
+            if (!shortAllow) {
+                if (trendSideCandidate === "long" && longAllow) {
+                    if (isLongQualified) {
+                        return { side: "long", reason: "SHORT_DISALLOWED_SAN_LONG_QUALIFIED" };
+                    } else {
+                        return { side: "none", reason: "WAIT_FOR_TREND_CONFIRMATION" };
+                    }
+                }
+                return { side: "none", reason: "SHORT_DISALLOWED_EXCLUDES_SHORT" };
+            }
+        }
+        return { side, reason: null };
+    };
+
+    const resSan1 = sanitizeCandidateSide(selected_side_before_sanitize);
+    if (resSan1.reason) {
+        selected_side_after_sanitize = resSan1.side;
+        sanitize_reason = resSan1.reason;
+        sanitizeTriggered = true;
+    }
+
+    const resSan2 = sanitizeCandidateSide(selectedSideFinalRaw);
+    if (resSan2.reason) {
+        selected_side_final_after_sanitize = resSan2.side;
+        if (!sanitize_reason) {
+            sanitize_reason = resSan2.reason;
+        }
+        sanitizeTriggered = true;
+    }
+
+    if (sanitizeTriggered) {
+        v2SideAfterPromotion = selected_side_after_sanitize;
+        
+        if (v2SideAfterPromotion === "none" && v2DecisionAfterPromotion === "ENTER") {
+            v2DecisionAfterPromotion = "HOLD";
+            v2RejectReasonAfterPromotion = sanitize_reason ?? "WAIT_RECHECK";
+        }
+        if (v2SideAfterPromotion === "long" && v2DecisionAfterPromotion === "ENTER" && !longAllow) {
+            v2DecisionAfterPromotion = "HOLD";
+            v2RejectReasonAfterPromotion = "LONG_NOT_ALLOWED";
+        }
+
+        console.info(JSON.stringify({
+            event: "V2_SIDE_SELECTION_SANITIZE_PROOF",
+            symbol: String(input.symbol),
+            directionalShockState,
+            htf_entry_policy,
+            longAllow,
+            shortAllow,
+            range_side_candidate: rangeSideCandidate,
+            trend_side_candidate: trendSideCandidate,
+            selected_side_before_sanitize,
+            selected_side_after_sanitize,
+            sanitize_reason
+        }));
+    }
+
+    const selectedSideFinal: EngineV2Side = selected_side_final_after_sanitize;
+
 
     const upperLongProbePromotion = promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
     const lowerLongProbePromotion = promotionReason === "V2_LOWER_LONG_REACTION_PROBE_PROMOTION";
