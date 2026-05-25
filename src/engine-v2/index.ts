@@ -2496,6 +2496,90 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionBlockReason = "HARD_CONTROL_NOT_CLEAR";
     }
 
+    // --- V2_RANGE_TREND_CONFLICT_RESOLUTION_PROOF ---
+    const localConflict =
+        rangeSideCandidate && trendSideCandidate &&
+        rangeSideCandidate !== "none" && trendSideCandidate !== "none" &&
+        rangeSideCandidate !== trendSideCandidate;
+
+    let conflictResolvedUpperShort = false;
+    let conflictResolvedTrendLong = false;
+    let conflictResolutionAction = "none";
+    let conflictResolutionReason = "no_conflict_or_conditions_unmet";
+
+    if (localConflict && zone === "upper") {
+        const stopPrice = execution.stopPrice;
+        if (stopPrice == null || isNaN(stopPrice) || stopPrice <= 0) {
+            conflictResolutionAction = "skip";
+            conflictResolutionReason = "stop_price_invalid_or_null";
+            v2DecisionAfterPromotion = "SKIP";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = "CONFLICT_STOP_PRICE_NULL";
+            promotionApplied = false;
+            promotionReason = null;
+        } else {
+            // upper zone short
+            if (rangeSideCandidate === "short") {
+                if (reversalConfirmed === true && qualityScore >= 65) {
+                    v2DecisionAfterPromotion = "ENTER";
+                    v2SideAfterPromotion = "short";
+                    promotionApplied = true;
+                    promotionReason = "V2_CONFLICT_RESOLVED_UPPER_SHORT";
+                    v2RejectReasonAfterPromotion = null;
+                    conflictResolvedUpperShort = true;
+                    conflictResolutionAction = "enter_short";
+                    conflictResolutionReason = "upper_zone_short_reversal_confirmed";
+                    
+                    execMeta.entryReason = "V2_CONFLICT_RESOLVED_UPPER_SHORT";
+                }
+            }
+            
+            // trend long
+            if (!conflictResolvedUpperShort && trendSideCandidate === "long") {
+                const upperBreakoutHold = judgment.metadata?.box_upper_breakout_hold === true || judgment.metadata?.upper_breakout_hold === true;
+                const reclaimConfirmedVal = judgment.metadata?.reclaimConfirmed === true;
+                if ((upperBreakoutHold || reclaimConfirmedVal) && qualityScore >= 67) {
+                    v2DecisionAfterPromotion = "ENTER";
+                    v2SideAfterPromotion = "long";
+                    promotionApplied = true;
+                    promotionReason = "V2_CONFLICT_RESOLVED_TREND_LONG";
+                    v2RejectReasonAfterPromotion = null;
+                    conflictResolvedTrendLong = true;
+                    conflictResolutionAction = "enter_long_probe";
+                    conflictResolutionReason = "trend_long_breakout_hold_or_reclaim_confirmed";
+                    
+                    execMeta.entryReason = "V2_CONFLICT_RESOLVED_TREND_LONG";
+                }
+            }
+
+            // 단순 upper/mid chase long 금지.
+            if (!conflictResolvedUpperShort && !conflictResolvedTrendLong && trendSideCandidate === "long") {
+                conflictResolutionAction = "skip";
+                conflictResolutionReason = "chase_long_disallowed_in_upper_zone";
+                v2DecisionAfterPromotion = "SKIP";
+                v2SideAfterPromotion = "none";
+                v2RejectReasonAfterPromotion = "CHASE_LONG_DISALLOWED_UPPER";
+                promotionApplied = false;
+                promotionReason = null;
+            }
+        }
+
+        console.info(JSON.stringify({
+            event: "V2_RANGE_TREND_CONFLICT_RESOLUTION_PROOF",
+            symbol: String(input.symbol),
+            range_side_candidate: rangeSideCandidate,
+            trend_side_candidate: trendSideCandidate,
+            zone,
+            reversal_confirmed: reversalConfirmed,
+            upper_breakout_hold: judgment.metadata?.box_upper_breakout_hold === true || judgment.metadata?.upper_breakout_hold === true,
+            reclaim_confirmed: judgment.metadata?.reclaimConfirmed === true,
+            quality_score: qualityScore,
+            stop_price: stopPrice,
+            action: conflictResolutionAction,
+            reason: conflictResolutionReason
+        }));
+    }
+
     // Tier 5+: Side Consistency Enforcer (Authoritative)
     const sideCandidateBeforeVetoEnforced = v2SideAfterPromotion;
 
@@ -2615,7 +2699,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const upperLongProbePromotion = promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
     const lowerLongProbePromotion = promotionReason === "V2_LOWER_LONG_REACTION_PROBE_PROMOTION";
     const upperShortProbePromotion = promotionReason === "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION";
-    if (v2DecisionAfterPromotion === "ENTER" && !upperLongProbePromotion && !lowerLongProbePromotion && !upperShortProbePromotion) {
+    const isConflictResolvedUpperShort = promotionReason === "V2_CONFLICT_RESOLVED_UPPER_SHORT";
+    const isConflictResolvedTrendLong = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
+    if (v2DecisionAfterPromotion === "ENTER" && 
+        !upperLongProbePromotion && 
+        !lowerLongProbePromotion && 
+        !upperShortProbePromotion &&
+        !isConflictResolvedUpperShort &&
+        !isConflictResolvedTrendLong) {
         v2SideAfterPromotion = selectedSideFinal;
     }
 
@@ -3558,7 +3649,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Live order size authority: fixed 10x leverage + strict env notional cap.
     const stageMarginKrwBefore = riskSizing.stageMarginKrw;
     let stageMarginKrwAfter = stageMarginKrwBefore;
-    if (isDeadlockProbe) {
+    if (isDeadlockProbe || promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG") {
         let baseMargin = riskSizing.baseStageMarginKrw;
         if (!baseMargin || baseMargin <= 0) {
             baseMargin = input.config.baseSizeUsd ? input.config.baseSizeUsd * 1400 : 140000;
@@ -3599,7 +3690,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionReason === "V2_TRANSITION_WATCH_SHORT_PROBE" ||
         promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION" ||
         promotionReason === "V2_LOWER_LONG_REACTION_PROBE_PROMOTION" ||
-        promotionReason === "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION";
+        promotionReason === "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION" ||
+        promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
 
     if (finalDecision === "ENTER") {
         riskSizing.appliedLeverage = appliedLeverage;
@@ -4895,6 +4987,39 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }));
     }
 
+
+    // --- V2_STOP_PLAN_PROPAGATION_PROOF ---
+    let stopPriceValidFinal = true;
+    const stopPriceFinal = decision.lifecycleAuthority?.newStopPrice ?? null;
+    if (decision.decision === "ENTER") {
+        if (stopPriceFinal == null || isNaN(stopPriceFinal) || stopPriceFinal <= 0) {
+            stopPriceValidFinal = false;
+        }
+        
+        console.info(JSON.stringify({
+            event: "V2_STOP_PLAN_PROPAGATION_PROOF",
+            symbol: String(input.symbol),
+            decision: decision.decision,
+            side: decision.side,
+            stop_price: stopPriceFinal,
+            stop_price_valid: stopPriceValidFinal,
+            action: stopPriceValidFinal ? "PROPAGATE_TO_BRIDGE" : "FORCE_SKIP_DUE_TO_INVALID_STOP"
+        }));
+
+        if (!stopPriceValidFinal) {
+            decision.decision = "SKIP";
+            decision.side = "none";
+            decision.signal = "NONE";
+            decision.risk.stageMarginKrw = 0;
+            decision.risk.exposureNotionalKrw = 0;
+            if (decision.metadata) {
+                decision.metadata.v2DecisionFinal = "SKIP";
+                decision.metadata.v2SideFinal = "none";
+                decision.metadata.expectedMissingCondition = "INVALID_STOP_PRICE_PROPAGATION";
+                decision.metadata.expectedNextAction = "WAIT_FOR_VALID_STOP_PRICE";
+            }
+        }
+    }
 
     console.info(JSON.stringify({
         event: "V2_ENTRY_EXECUTION_BRIDGE_PROOF",

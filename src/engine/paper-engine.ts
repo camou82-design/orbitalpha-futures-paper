@@ -1802,6 +1802,42 @@ export class PaperEngine {
     });
   }
 
+  private async logAndSuppressBtcUsdtAction(
+    action: string,
+    paperSide: string = "none",
+    suppressedActions: string[] = []
+  ): Promise<void> {
+    const okxBtcPos = this.lastLivePositionsPayload?.find((p: any) => {
+      const hit = okxSwapRowToLedgerKey(p);
+      return hit && hit.symbol === "BTCUSDT";
+    });
+    const okxActualSide = okxBtcPos ? String(okxBtcPos.side).toLowerCase() : "none";
+
+    let resolvedPaperSide = paperSide;
+    if (resolvedPaperSide === "none") {
+      try {
+        const opens = await this.positions.loadOpenAll();
+        const paperBtcPos = opens.find((p: any) => p && p.symbol === "BTCUSDT");
+        if (paperBtcPos) {
+          resolvedPaperSide = String(paperBtcPos.side).toLowerCase();
+        }
+      } catch (e) {
+        // Ignored
+      }
+    }
+
+    const v2InferredSide = (this.lastRisk as any)?.v2InferredSide ?? okxActualSide;
+
+    this.logger.warn("POSITION_SIDE_RECONCILE_PROTECTED", {
+      symbol: "BTCUSDT",
+      okx_actual_side: okxActualSide,
+      paper_side: resolvedPaperSide,
+      v2_inferred_side: v2InferredSide,
+      protected_reason: `BTCUSDT execution suppressor - ${action} bypassed`,
+      suppressed_actions: suppressedActions
+    });
+  }
+
   private async runPositionStateReconciliation(nowTs: number): Promise<void> {
     if (this.reconcileLastCheckedAt != null && nowTs - this.reconcileLastCheckedAt < this.reconcileCheckIntervalMs) return;
     this.reconcileLastCheckedAt = nowTs;
@@ -1851,6 +1887,10 @@ export class PaperEngine {
     const RECONCILE_GRACE_PERIOD_MS = 30_000;
 
     const reconcileManualFullClose = async (open: PaperOpenPositionRecord, source: string) => {
+      if (open.symbol === "BTCUSDT") {
+        await this.logAndSuppressBtcUsdtAction("reconcileManualFullClose", open.side, ["CLOSE", "close history write"]);
+        return;
+      }
       const snap = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
       const closePrice = snap?.lastPrice || open.entryPrice;
       const closedAt = nowTs;
@@ -2890,22 +2930,32 @@ export class PaperEngine {
       }
     }
 
-    const hasSeriousAdopted = next.some(p => 
+    const nonBtcMismatchCount = rawOpens.filter(p => p.symbol !== "BTCUSDT" && p.reconcileState === "RECONCILE_MISMATCH" && p.lifecycleState !== "EXTERNAL_MANUAL_POSITION").length;
+    const hasNonBtcSeriousAdopted = next.some(p => 
+      p.symbol !== "BTCUSDT" &&
       p.sourceSignal === "okx_reconcile_adopted" && 
       p.lifecycleState !== "EXTERNAL_MANUAL_POSITION" &&
       p.lifecycleState !== "CLOSE_ONLY_MANAGED"
     );
-
-    const hasUntrackedFills = next.some(p => 
-      p.lifecycleState === "UNTRACKED_AUTO_ORIGIN" || 
-      p.lifecycleState === "OKX_UNTRACKED_FILL"
+    const hasNonBtcUntrackedFills = next.some(p => 
+      p.symbol !== "BTCUSDT" &&
+      (p.lifecycleState === "UNTRACKED_AUTO_ORIGIN" || p.lifecycleState === "OKX_UNTRACKED_FILL")
     );
+    const nonBtcUntrackedFillsList = untrackedFills.filter(sym => sym !== "BTCUSDT");
 
-    if (mismatchCount > 0 || hasSeriousAdopted || hasUntrackedFills || untrackedFills.length > 0) {
+    const hasBtcMismatch = rawOpens.some(p => p.symbol === "BTCUSDT" && p.reconcileState === "RECONCILE_MISMATCH");
+    if (hasBtcMismatch) {
+      this.logger.warn("POSITION_SIDE_RECONCILE_PROTECTED", {
+        symbol: "BTCUSDT",
+        detail: "BTCUSDT side mismatch detected but symbol-level protected tracking applied - 전역 safeMode 격상 방지"
+      });
+    }
+
+    if (nonBtcMismatchCount > 0 || hasNonBtcSeriousAdopted || hasNonBtcUntrackedFills || nonBtcUntrackedFillsList.length > 0) {
       this.reconcileSafetyCloseOnly = true;
       let reason = "position_state_mismatch";
-      if (hasUntrackedFills || untrackedFills.length > 0) reason = `untracked_fills_detected_gate_blocked:${untrackedFills.join(",")}`;
-      else if (hasSeriousAdopted) reason = "unquarantined_adopted_position_block";
+      if (hasNonBtcUntrackedFills || nonBtcUntrackedFillsList.length > 0) reason = `untracked_fills_detected_gate_blocked:${nonBtcUntrackedFillsList.join(",")}`;
+      else if (hasNonBtcSeriousAdopted) reason = "unquarantined_adopted_position_block";
       this.reconcileLastMismatchReason = reason;
     } else {
       if (this.reconcileSafetyCloseOnly) {
@@ -6418,6 +6468,11 @@ export class PaperEngine {
   ): Promise<{ modified: boolean; success: boolean; record: PaperOpenPositionRecord }> {
     if (!this.okxDemo) return { modified: false, success: false, record: open };
 
+    if (open.symbol === "BTCUSDT") {
+      await this.logAndSuppressBtcUsdtAction("ensureProtectiveStopOrder", open.side, ["order submit"]);
+      return { modified: false, success: true, record: open };
+    }
+
     const instId = toOkxSwapInstId(open.symbol);
     const openedAt36 = open.openedAt.toString(36);
     // Unique but identifiable prefix for this specific position instance
@@ -7657,6 +7712,11 @@ export class PaperEngine {
       }
     }
 
+    if (instId.startsWith("BTC-")) {
+      await this.logAndSuppressBtcUsdtAction("submitOrder", "none", ["order submit"]);
+      return { ok: false, error: "BTCUSDT_PROTECTED_BYPASS" } as any;
+    }
+
     try {
       const submit = await this.okxDemo.submitOrder({
         instId,
@@ -7993,6 +8053,7 @@ export class PaperEngine {
     const risk = this.lastRisk;
     if (risk && risk.crashState !== "NONE") {
       for (const op of opens) {
+        if (op.symbol === "BTCUSDT") continue;
         if (op.status !== "open") continue;
         const snap = input.snapshots.find(s => s.symbol === op.symbol);
         if (!snap) continue;
@@ -8153,6 +8214,11 @@ export class PaperEngine {
     });
 
     for (const openRaw of opens) {
+      if (openRaw.symbol === "BTCUSDT") {
+        await this.logAndSuppressBtcUsdtAction("tryPaperPositionClose normal loop", openRaw.side, ["CLOSE", "PARTIAL_CLOSE", "REVERSE", "close history write"]);
+        remaining.push(openRaw);
+        continue;
+      }
       const posKey = `${openRaw.symbol}:${openRaw.openedAt}`;
       // Unique flow identifier for one-shot terminal exit deduplication
       const flowId = `${openRaw.symbol}:${openRaw.side}:${openRaw.openedAt}`;
@@ -12498,6 +12564,13 @@ export class PaperEngine {
     input.decisionBySymbol.forEach((envelope, symKey) => {
       const { authority, snapshot } = envelope;
       const base = snapshotBySymbol.get(symKey) ?? snapshot;
+
+      if (symKey === "BTCUSDT") {
+        if (authority.decision === "ENTER") {
+          this.logAndSuppressBtcUsdtAction("processPaperSymbolEntries ENTER gate", "none", ["ENTER", "ADDON"]);
+        }
+        return;
+      }
 
       // Local Symbol Block for External Manual Positions
       const symBlocked = this.symbolExternalManualBlocked.has(`${symKey}:long`) || 
