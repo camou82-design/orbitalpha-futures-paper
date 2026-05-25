@@ -5076,29 +5076,54 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     };
 
+    // --- BTC POSITION PROTECTION GUARD ---
+    // CRITICAL: This guard must NOT depend on currentPositions.side, which may be polluted.
+    // Condition: symbol===BTCUSDT AND okxActualSide===long -> ALWAYS suppress, regardless of paper ledger side.
     const isBtcProtected = (() => {
         if (String(input.symbol) !== "BTCUSDT") return false;
+        // Primary guard: OKX actual long position exists -> protect unconditionally.
+        // Do NOT check currentPositions.side here; it may be short-polluted.
+        const okxActualSide = input.state.okxActualSide;
+        if (okxActualSide === "long") return true;
+        // Fallback: if okxActualSide is unavailable, check paper ledger (best-effort only).
         const hasPaperLong = Array.isArray(input.state.currentPositions) &&
             input.state.currentPositions.some(p => p && p.symbol === "BTCUSDT" && String(p.side).toLowerCase() === "long");
-        const okxActualSide = input.state.okxActualSide;
-        return hasPaperLong && okxActualSide === "long";
+        return hasPaperLong;
     })();
 
     if (isBtcProtected) {
-        if (decision.decision === "ENTER") {
-            decision.decision = "SKIP";
-        } else {
-            decision.decision = "HOLD";
-        }
+        const suppressedActions = ["ENTER", "ADDON", "CLOSE", "PARTIAL", "REDUCE", "REVERSE", "ORDER_SUBMIT", "HISTORY_WRITE", "LEDGER_PRUNE", "PROTECTIVE_ENSURE"];
+        console.info(JSON.stringify({
+            event: "POSITION_SIDE_RECONCILE_PROTECTED",
+            symbol: String(input.symbol),
+            reason: "BTCUSDT_OKX_ACTUAL_LONG_GUARD",
+            okxActualSide: input.state.okxActualSide,
+            paperLedgerSideCheck: Array.isArray(input.state.currentPositions)
+                ? (input.state.currentPositions.find(p => p && p.symbol === "BTCUSDT") as any)?.side ?? "not_found"
+                : "no_positions",
+            suppressed_actions: suppressedActions,
+            pre_suppress_decision: decision.decision,
+            pre_suppress_side: decision.side,
+            ts: Date.now()
+        }));
+
+        // Force decision and side to safe values
+        decision.decision = decision.decision === "ENTER" ? "SKIP" : "HOLD";
         decision.side = "none";
         decision.signal = "NONE";
+
+        // Zero out all sizing
         if (decision.risk) {
             decision.risk.stageMarginKrw = 0;
             decision.risk.exposureNotionalKrw = 0;
         }
+
+        // Suppress add-on
         if (decision.lifecycleAuthority) {
             decision.lifecycleAuthority.addOnAllowed = false;
         }
+
+        // Suppress exit/partial/reduce policy
         if (internal.exitPolicy) {
             internal.exitPolicy.action = "SUPPRESSED";
             internal.exitPolicy.shouldExit = false;
@@ -5106,14 +5131,20 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             internal.exitPolicy.shouldPartial = false;
             internal.exitPolicy.reduceRatio = 0;
         }
+
+        // Suppress v2 exit authority
         if (internal.v2ExitAuthority) {
-            internal.v2ExitAuthority.exitAction = "none";
-            internal.v2ExitAuthority.shouldExit = false;
+            (internal.v2ExitAuthority as any).exitAction = "none";
+            (internal.v2ExitAuthority as any).shouldExit = false;
         }
+
+        // Suppress v2 partial authority
         if (internal.v2PartialAuthority) {
-            internal.v2PartialAuthority.partialAction = "none";
-            internal.v2PartialAuthority.shouldPartial = false;
+            (internal.v2PartialAuthority as any).partialAction = "none";
+            (internal.v2PartialAuthority as any).shouldPartial = false;
         }
+
+        // Suppress execution output
         if (internal.execution) {
             internal.execution.signal = "NONE";
             internal.execution.side = "none";

@@ -525,6 +525,30 @@ export function resolveSymbolDecisionEnvelope(
         }
     }
 
+    // --- BTCUSDT EXECUTION ENVELOPE PROTECTION GUARD ---
+    // CRITICAL: Applied BEFORE authority derivation so authority reflects suppressed state.
+    // Do NOT depend on currentPositions.side (may be polluted). Only okxActualSide matters.
+    const btcEnvelopeSuppressed = String(symbol) === "BTCUSDT" && state.okxActualSide === "long";
+    if (btcEnvelopeSuppressed) {
+        executionEnvelope = {
+            ...executionEnvelope,
+            decision: executionEnvelope.decision === "ENTER" ? "REJECT" : executionEnvelope.decision,
+            side: "none",
+            stageMarginKrw: 0,
+            baseStageMarginKrw: 0,
+            exposureNotionalKrw: 0,
+            addOnAllowed: false,
+            exitPolicyAction: "SUPPRESSED",
+            exitShouldExit: false,
+            exitShouldReduce: false,
+            exitShouldPartial: false,
+            exitReduceRatio: 0,
+            hardBlockPresent: true,
+            hardBlockReason: "BTCUSDT_OKX_LONG_POSITION_PROTECTED",
+            authorityReason: "btc_position_protected_suppress"
+        } as typeof executionEnvelope;
+    }
+
     const authority =
         v2Mode === "engine_v2"
             ? deriveExecutionAuthorityFromEnvelope(executionEnvelope)
