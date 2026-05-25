@@ -270,6 +270,27 @@ export function shouldEmitV2Proof(
  */
 export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision; internal: EngineV2InternalResult } {
     loadLastEnterAtFromHistory();
+    if (input.symbol === "BTCUSDT") {
+        const hasPaperLong = Array.isArray(input.state.currentPositions) &&
+            input.state.currentPositions.some(p => p && p.symbol === "BTCUSDT" && String(p.side).toUpperCase() === "LONG");
+        const okxActualSide = input.state.okxActualSide;
+        if (hasPaperLong && okxActualSide === "long") {
+            input = {
+                ...input,
+                state: {
+                    ...input.state,
+                    currentPositions: Array.isArray(input.state.currentPositions)
+                        ? input.state.currentPositions.map(p => {
+                            if (p && p.symbol === "BTCUSDT") {
+                                return { ...p, side: "LONG" };
+                            }
+                            return p;
+                        })
+                        : []
+                }
+            };
+        }
+    }
     // Step 1: derive normalized state authority
     const v2State = deriveV2StateAuthority(input);
     // Step 2: project normalized state into authoritative input
@@ -4316,10 +4337,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     let finalLifecycleSide = lifecycleSide;
     if (String(input.symbol) === "BTCUSDT") {
-        const hasPaperLong = v2State.longPosition != null;
+        const hasPaperLong = v2State.longPosition != null || (Array.isArray(input.state.currentPositions) &&
+            input.state.currentPositions.some(p => p && p.symbol === "BTCUSDT" && String(p.side).toUpperCase() === "LONG"));
         const okxActualSide = input.state.okxActualSide;
         if (hasPaperLong && okxActualSide === "long") {
             finalLifecycleSide = "long";
+            v2SideAfterPromotion = "long";
         }
     }
 
@@ -4414,6 +4437,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             suggestedStopPrice: execution.stopPrice,
             suggestedInvalidationPx: execution.invalidationPx
         });
+
+        if (String(input.symbol) === "BTCUSDT") {
+            const hasPaperLong = Array.isArray(input.state.currentPositions) &&
+                input.state.currentPositions.some(p => p && p.symbol === "BTCUSDT" && String(p.side).toUpperCase() === "LONG");
+            const okxActualSide = input.state.okxActualSide;
+            if (hasPaperLong && okxActualSide === "long") {
+                lifecycleAuthority.side = "long";
+            }
+        }
 
         if (lifecycleAuthority.tp1Triggered && lifecyclePosition_latest) {
             lifecyclePosition_latest.tp1Triggered = true;

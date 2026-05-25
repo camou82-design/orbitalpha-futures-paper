@@ -1730,7 +1730,9 @@ export class PaperEngine {
 
         const ledgerPos = paperOpens.find((p) => p.symbol === r.symbol && p.side === r.side);
         let ensureOutcome: { success: boolean; modified: boolean } | null = null;
-        if (
+        if (r.symbol === "BTCUSDT" && this.isBtcSuppressionTarget()) {
+          await this.logAndSuppressBtcUsdtAction("ops_watch_protect_cycle", r.side, ["PROTECTIVE_ENSURE", "REDUCE", "PARTIAL"]);
+        } else if (
           ledgerPos &&
           liveExposure &&
           ledgerPos.lifecycleState !== "FAILED" &&
