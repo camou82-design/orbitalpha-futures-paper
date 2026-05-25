@@ -1807,7 +1807,7 @@ export class PaperEngine {
   private async logAndSuppressBtcUsdtAction(
     action: string,
     paperSide: string = "none",
-    suppressedActions: string[] = []
+    extraSuppressedActions: string[] = []
   ): Promise<void> {
     const okxBtcPos = this.lastLivePositionsPayload?.find((p: any) => {
       const hit = okxSwapRowToLedgerKey(p);
@@ -1830,6 +1830,20 @@ export class PaperEngine {
 
     const v2InferredSide = (this.lastRisk as any)?.v2InferredSide ?? okxActualSide;
 
+    const baseSuppressed = [
+      "ENTER",
+      "ADDON",
+      "CLOSE",
+      "PARTIAL",
+      "REDUCE",
+      "REVERSE",
+      "ORDER_SUBMIT",
+      "HISTORY_WRITE",
+      "LEDGER_PRUNE",
+      "PROTECTIVE_ENSURE"
+    ];
+    const suppressedActions = Array.from(new Set([...baseSuppressed, ...extraSuppressedActions]));
+
     this.logger.warn("POSITION_SIDE_RECONCILE_PROTECTED", {
       symbol: "BTCUSDT",
       okx_actual_side: okxActualSide,
@@ -1841,12 +1855,7 @@ export class PaperEngine {
   }
 
   private isBtcSuppressionTarget(): boolean {
-    if (!this.lastLivePositionsPayload) return false;
-    const okxBtcPos = this.lastLivePositionsPayload.find((p: any) => {
-      const hit = okxSwapRowToLedgerKey(p);
-      return hit && hit.symbol === "BTCUSDT" && Math.abs(hit.posSigned) > 0;
-    });
-    return !!okxBtcPos;
+    return true;
   }
 
   private async runPositionStateReconciliation(nowTs: number): Promise<void> {
