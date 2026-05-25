@@ -2770,6 +2770,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         qualityScore >= 65 &&
         (entryQualityGrade === "S" || entryQualityGrade === "A" || entryQualityGrade === "B");
 
+    const isBypassWhipsawSoftWatchDownMidShortRetest =
+        vetoReason != null &&
+        judgment.subtype === "WHIPSAW_SOFT_WATCH" &&
+        shock === "DOWN" &&
+        zone === "mid" &&
+        (sideCandidateBeforeVeto === "short" || v2SideAfterPromotion === "short") &&
+        hardBlockPresent === false;
+
     if (vetoReason != null) {
         if (isBypassRangeVeto) {
             v2DecisionAfterPromotion = finalDecisionBeforeVeto; // "ENTER"
@@ -2924,7 +2932,40 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 validStop,
                 reason: "range_upper_short_stop_plan"
             }));
-        } else {
+        } else if (isBypassWhipsawSoftWatchDownMidShortRetest) {
+            v2DecisionAfterPromotion = finalDecisionBeforeVeto; // "ENTER"
+            v2SideAfterPromotion = "short";
+            v2RejectReasonAfterPromotion = null;
+
+            const stopPriceVal = execution.stopPrice;
+            if (stopPriceVal == null || isNaN(stopPriceVal)) {
+                v2DecisionAfterPromotion = "SKIP";
+                v2SideAfterPromotion = "none";
+                v2RejectReasonAfterPromotion = "STOP_PRICE_NULL_HOLD";
+            } else {
+                execution.stopPrice = stopPriceVal;
+                execution.invalidationPx = stopPriceVal;
+                v2CalculatedInvalidationPx = stopPriceVal;
+            }
+
+            console.info(JSON.stringify({
+                event: "V2_WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST_BYPASS_PROOF",
+                symbol: String(input.symbol),
+                rangeZone: zone,
+                selected_side_before_veto: sideCandidateBeforeVeto,
+                selected_side_after_veto: v2SideAfterPromotion,
+                range_side_candidate: rangeSideCandidate,
+                trend_side_candidate: trendSideCandidate,
+                side_zone_valid: sideZoneValid,
+                quality_score: qualityScore,
+                entry_quality_grade: entryQualityGrade,
+                htf_entry_policy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+                directional_shock_state: shock,
+                finalDecisionBeforeVeto,
+                finalDecisionAfterVeto: v2DecisionAfterPromotion,
+                stopPrice: stopPriceVal,
+                bypass_reason: "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST_BYPASS"
+            }));
             v2DecisionAfterPromotion = "SKIP";
             v2SideAfterPromotion = "none";
             v2RejectReasonAfterPromotion = vetoReason;
@@ -3649,7 +3690,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Live order size authority: fixed 10x leverage + strict env notional cap.
     const stageMarginKrwBefore = riskSizing.stageMarginKrw;
     let stageMarginKrwAfter = stageMarginKrwBefore;
-    if (isDeadlockProbe || promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG") {
+    if (isDeadlockProbe || promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG" || promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" || execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST") {
         let baseMargin = riskSizing.baseStageMarginKrw;
         if (!baseMargin || baseMargin <= 0) {
             baseMargin = input.config.baseSizeUsd ? input.config.baseSizeUsd * 1400 : 140000;
@@ -3691,7 +3732,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION" ||
         promotionReason === "V2_LOWER_LONG_REACTION_PROBE_PROMOTION" ||
         promotionReason === "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION" ||
-        promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
+        promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG" ||
+        promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" ||
+        execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST";
 
     if (finalDecision === "ENTER") {
         riskSizing.appliedLeverage = appliedLeverage;
@@ -4266,10 +4309,20 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const lifecyclePosition_latest = sameSidePosition_latest ?? heldPosition;
     const lifecycleSide: EngineV2Side =
         lifecyclePosition_latest != null
-            ? (lifecyclePosition_latest.side === "LONG" ? "long" : "short")
+            ? (String(lifecyclePosition_latest.side).toUpperCase() === "LONG" ? "long" : "short")
             : (v2SideAfterPromotion !== "none" && v2SideAfterPromotion != null)
                 ? v2SideAfterPromotion
                 : "none";
+
+    let finalLifecycleSide = lifecycleSide;
+    if (String(input.symbol) === "BTCUSDT") {
+        const hasPaperLong = v2State.longPosition != null;
+        const okxActualSide = input.state.okxActualSide;
+        if (hasPaperLong && okxActualSide === "long") {
+            finalLifecycleSide = "long";
+        }
+    }
+
     const hasLifecycleCandidate =
         lifecyclePosition_latest != null ||
         finalDecision === "ENTER" ||
@@ -4305,7 +4358,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const cooldownRemainingRaw = (riskSizing.diagnostics as Record<string, unknown> | undefined)?.cooldown_remaining_ms;
         lifecycleAuthority = deriveTradeLifecycleAuthority({
             symbol: String(input.symbol),
-            side: lifecycleSide,
+            side: finalLifecycleSide,
             regime: judgment.regime,
             marketMode: judgment.regime,
             directionalShockState: v2State.directionalShockState,
@@ -4569,7 +4622,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
         v2PositionStateAuthority = {
             symbol: String(input.symbol),
-            side: lifecycleSide,
+            side: finalLifecycleSide,
             positionStateAuthorityOwner: "v2",
             positionStateExecutionOwner: "paper_engine",
             positionStateAction: hasPosition ? "track" : "none",

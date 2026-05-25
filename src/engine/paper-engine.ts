@@ -1838,6 +1838,15 @@ export class PaperEngine {
     });
   }
 
+  private isBtcSuppressionTarget(): boolean {
+    if (!this.lastLivePositionsPayload) return false;
+    const okxBtcPos = this.lastLivePositionsPayload.find((p: any) => {
+      const hit = okxSwapRowToLedgerKey(p);
+      return hit && hit.symbol === "BTCUSDT" && Math.abs(hit.posSigned) > 0;
+    });
+    return !!okxBtcPos;
+  }
+
   private async runPositionStateReconciliation(nowTs: number): Promise<void> {
     if (this.reconcileLastCheckedAt != null && nowTs - this.reconcileLastCheckedAt < this.reconcileCheckIntervalMs) return;
     this.reconcileLastCheckedAt = nowTs;
@@ -1888,8 +1897,10 @@ export class PaperEngine {
 
     const reconcileManualFullClose = async (open: PaperOpenPositionRecord, source: string) => {
       if (open.symbol === "BTCUSDT") {
-        await this.logAndSuppressBtcUsdtAction("reconcileManualFullClose", open.side, ["CLOSE", "close history write"]);
-        return;
+        if (this.isBtcSuppressionTarget()) {
+          await this.logAndSuppressBtcUsdtAction("reconcileManualFullClose", open.side, ["CLOSE", "close history write", "ledger prune"]);
+          return;
+        }
       }
       const snap = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
       const closePrice = snap?.lastPrice || open.entryPrice;
@@ -4320,7 +4331,8 @@ export class PaperEngine {
           this.readinessFreshTickRequiredCycles,
           this.buildEntryQualityProfilesForV2(),
           this.serverTradeControlState,
-          this.reconcileSafetyCloseOnly
+          this.reconcileSafetyCloseOnly,
+          this.lastLivePositionsPayload
         ),
         v2Mode
       });
@@ -6469,8 +6481,10 @@ export class PaperEngine {
     if (!this.okxDemo) return { modified: false, success: false, record: open };
 
     if (open.symbol === "BTCUSDT") {
-      await this.logAndSuppressBtcUsdtAction("ensureProtectiveStopOrder", open.side, ["order submit"]);
-      return { modified: false, success: true, record: open };
+      if (this.isBtcSuppressionTarget()) {
+        await this.logAndSuppressBtcUsdtAction("ensureProtectiveStopOrder", open.side, ["order submit", "PROTECTIVE_ENSURE"]);
+        return { modified: false, success: true, record: open };
+      }
     }
 
     const instId = toOkxSwapInstId(open.symbol);
@@ -7713,8 +7727,10 @@ export class PaperEngine {
     }
 
     if (instId.startsWith("BTC-")) {
-      await this.logAndSuppressBtcUsdtAction("submitOrder", "none", ["order submit"]);
-      return { ok: false, error: "BTCUSDT_PROTECTED_BYPASS" } as any;
+      if (this.isBtcSuppressionTarget()) {
+        await this.logAndSuppressBtcUsdtAction("submitOrder", "none", ["order submit"]);
+        return { ok: false, error: "BTCUSDT_PROTECTED_BYPASS" } as any;
+      }
     }
 
     try {
@@ -8215,9 +8231,11 @@ export class PaperEngine {
 
     for (const openRaw of opens) {
       if (openRaw.symbol === "BTCUSDT") {
-        await this.logAndSuppressBtcUsdtAction("tryPaperPositionClose normal loop", openRaw.side, ["CLOSE", "PARTIAL_CLOSE", "REVERSE", "close history write"]);
-        remaining.push(openRaw);
-        continue;
+        if (this.isBtcSuppressionTarget()) {
+          await this.logAndSuppressBtcUsdtAction("tryPaperPositionClose normal loop", openRaw.side, ["CLOSE", "PARTIAL", "PARTIAL_CLOSE", "REVERSE", "close history write", "ledger prune"]);
+          remaining.push(openRaw);
+          continue;
+        }
       }
       const posKey = `${openRaw.symbol}:${openRaw.openedAt}`;
       // Unique flow identifier for one-shot terminal exit deduplication
@@ -12566,10 +12584,12 @@ export class PaperEngine {
       const base = snapshotBySymbol.get(symKey) ?? snapshot;
 
       if (symKey === "BTCUSDT") {
-        if (authority.decision === "ENTER") {
-          this.logAndSuppressBtcUsdtAction("processPaperSymbolEntries ENTER gate", "none", ["ENTER", "ADDON"]);
+        if (this.isBtcSuppressionTarget()) {
+          if (authority.decision === "ENTER") {
+            this.logAndSuppressBtcUsdtAction("processPaperSymbolEntries ENTER gate", "none", ["ENTER", "ADDON"]);
+          }
+          return;
         }
-        return;
       }
 
       // Local Symbol Block for External Manual Positions
@@ -17515,8 +17535,15 @@ function buildV2StateBridge(
     contaminated: { qualityScoreAvg: number; emaGapAvg: number; atrPctAvg: number; volumeRatioAvg: number; count: number };
   },
   serverTradeControlState: ServerTradeControlState,
-  reconcileSafeModeActive: boolean
+  reconcileSafeModeActive: boolean,
+  lastLivePositionsPayload?: ReadonlyArray<Record<string, unknown>> | null
 ): V2BridgeState {
+  const okxBtcPos = lastLivePositionsPayload?.find((p: any) => {
+    const hit = okxSwapRowToLedgerKey(p);
+    return hit && hit.symbol === "BTCUSDT";
+  });
+  const okxActualSide = okxBtcPos ? String(okxBtcPos.side).toLowerCase() : "none";
+
   return {
     currentPositions: opensAfterClose
       .map((p): V2BridgePosition | null => {
@@ -17569,7 +17596,8 @@ function buildV2StateBridge(
     accountEquityKrw: 500_000,
     maxUsableMarginKrw: 420_000,
     exposureNotionalCapKrw: 2_000_000,
-    symbolExposureNotionalCapKrw: 1_400_000
+    symbolExposureNotionalCapKrw: 1_400_000,
+    okxActualSide
   };
 }
 

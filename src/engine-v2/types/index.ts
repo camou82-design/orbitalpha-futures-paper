@@ -275,6 +275,7 @@ export interface EngineV2Input {
         availableRiskBudgetUsdt?: number;
         addonMaxNotionalUsdt?: number;
         finalAddonNotionalUsdt?: number;
+        okxActualSide?: string;
     };
     now: number;
     v1Result: {
@@ -503,6 +504,7 @@ export interface V2BridgeState {
     availableRiskBudgetUsdt?: number;
     addonMaxNotionalUsdt?: number;
     finalAddonNotionalUsdt?: number;
+    okxActualSide?: string;
 }
 
 export interface V2BridgeInput {

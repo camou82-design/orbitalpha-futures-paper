@@ -259,6 +259,42 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
                     return true;
                 }
             }
+
+            // WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST 분기
+            const isMidShockDownTarget =
+                directionalShockState === "DOWN" &&
+                shortAllow &&
+                classifyRangeZone(boxPos) === "mid";
+
+            if (isMidShockDownTarget) {
+                const breakdownRetestFailure =
+                    judgment?.subtype === "BREAKDOWN_RETEST_FAILED" ||
+                    judgment?.metadata?.retestConfirmed === true ||
+                    judgment?.metadata?.breakdownRetestFailure === true ||
+                    judgment?.diagnostics?.early_probe?.hits?.includes("retest_failure") ||
+                    judgment?.diagnostics?.fastTrendShift?.reason?.includes("retest_failure");
+
+                const boxMidLost =
+                    judgment?.diagnostics?.fastTrendShift?.box_mid_lost === true ||
+                    judgment?.diagnostics?.early_probe?.hits?.includes("box_mid_lost") ||
+                    (sn.boxHigh != null && sn.boxLow != null && sn.lastPrice < (sn.boxHigh + sn.boxLow) / 2 && (sn.candles && sn.candles.length >= 2 && sn.candles[sn.candles.length - 2].close >= (sn.boxHigh + sn.boxLow) / 2));
+
+                const lowerBreakdownHold =
+                    judgment?.diagnostics?.fastTrendShift?.box_lower_breakdown_hold === true ||
+                    judgment?.diagnostics?.early_probe?.hits?.includes("lower_hold") ||
+                    judgment?.diagnostics?.early_probe?.hits?.includes("lower_breakdown_hold");
+
+                const fastStopPrice = judgment?.diagnostics?.fastTrendShift?.stop_price;
+                const earlyStopPrice = judgment?.diagnostics?.early_probe?.allowed ? (judgment.diagnostics.early_probe as any).stopPrice : null;
+                const stopPriceVal = fastStopPrice != null && Number.isFinite(fastStopPrice) ? fastStopPrice :
+                                     (earlyStopPrice != null && Number.isFinite(earlyStopPrice) ? earlyStopPrice : null);
+
+                const hasCondition = breakdownRetestFailure || boxMidLost || lowerBreakdownHold;
+
+                if (hasCondition && stopPriceVal != null && Number.isFinite(stopPriceVal) && stopPriceVal > sn.lastPrice) {
+                    return true;
+                }
+            }
         }
         return false;
     })();
@@ -416,6 +452,35 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
             reason = "TRANSITION_SHOCK_DOWN_SHORT_NOT_ALLOWED";
             transitionRejectReason = "SHORT_NOT_ALLOWED";
         } else if (isMidZone) {
+            const isMidWhipsawRetest =
+                subtype === "WHIPSAW_SOFT_WATCH" &&
+                directionalShockState === "DOWN" &&
+                shortAllow;
+
+            const breakdownRetestFailure =
+                judgment?.subtype === "BREAKDOWN_RETEST_FAILED" ||
+                judgment?.metadata?.retestConfirmed === true ||
+                judgment?.metadata?.breakdownRetestFailure === true ||
+                judgment?.diagnostics?.early_probe?.hits?.includes("retest_failure") ||
+                judgment?.diagnostics?.fastTrendShift?.reason?.includes("retest_failure");
+
+            const boxMidLost =
+                judgment?.diagnostics?.fastTrendShift?.box_mid_lost === true ||
+                judgment?.diagnostics?.early_probe?.hits?.includes("box_mid_lost") ||
+                (sn.boxHigh != null && sn.boxLow != null && sn.lastPrice < (sn.boxHigh + sn.boxLow) / 2 && (sn.candles && sn.candles.length >= 2 && sn.candles[sn.candles.length - 2].close >= (sn.boxHigh + sn.boxLow) / 2));
+
+            const lowerBreakdownHold =
+                judgment?.diagnostics?.fastTrendShift?.box_lower_breakdown_hold === true ||
+                judgment?.diagnostics?.early_probe?.hits?.includes("lower_hold") ||
+                judgment?.diagnostics?.early_probe?.hits?.includes("lower_breakdown_hold");
+
+            const fastStopPrice = judgment?.diagnostics?.fastTrendShift?.stop_price;
+            const earlyStopPrice = judgment?.diagnostics?.early_probe?.allowed ? (judgment.diagnostics.early_probe as any).stopPrice : null;
+            const stopPriceVal = fastStopPrice != null && Number.isFinite(fastStopPrice) ? fastStopPrice :
+                                 (earlyStopPrice != null && Number.isFinite(earlyStopPrice) ? earlyStopPrice : null);
+
+            const hasCondition = breakdownRetestFailure || boxMidLost || lowerBreakdownHold;
+
             const downMomentumConfirmed =
                 shortAllow &&
                 emaGap < 0 &&
@@ -423,7 +488,19 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
                 trendWeaknessScore < 0.65 &&
                 !crashState.includes("ULTRA") && !crashState.includes("CRITICAL");
 
-            if (downMomentumConfirmed) {
+            if (isMidWhipsawRetest && hasCondition && stopPriceVal != null && Number.isFinite(stopPriceVal) && stopPriceVal > sn.lastPrice) {
+                signal = "SHORT_CANDIDATE";
+                side = "short";
+                reason = "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST";
+                baseSizeIntent = 0.25;
+                recheckSuggested = false;
+                transitionAction = "CONFIRM";
+                transitionWatchOnly = false;
+                transitionConfirmRequired = false;
+                transitionRejectReason = null;
+                transitionConfirmBasis = "box_break";
+                transitionPreflightSafetyPassed = true;
+            } else if (downMomentumConfirmed) {
                 signal = "SHORT_CANDIDATE";
                 side = "short";
                 reason = "TRANSITION_SHOCK_DOWN_MID_MOMENTUM_CONFIRMED";
@@ -649,7 +726,14 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
     let stopPrice: number | null = null;
     let invalidationPx: number | null = null;
 
-    if (side === "long") {
+    if (reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST") {
+        const fastStopPrice = judgment?.diagnostics?.fastTrendShift?.stop_price;
+        const earlyStopPrice = judgment?.diagnostics?.early_probe?.allowed ? (judgment.diagnostics.early_probe as any).stopPrice : null;
+        const stopPriceVal = fastStopPrice != null && Number.isFinite(fastStopPrice) ? fastStopPrice :
+                             (earlyStopPrice != null && Number.isFinite(earlyStopPrice) ? earlyStopPrice : null);
+        stopPrice = stopPriceVal;
+        invalidationPx = stopPriceVal;
+    } else if (side === "long") {
         const baseInv = boxLow > 0 ? boxLow : entryPx - atr * 1.5;
         stopPrice = Math.min(baseInv - atr * 0.2, entryPx - atr * 1.0);
         invalidationPx = Math.min(baseInv - atr * 0.5, entryPx - atr * 1.5);
@@ -657,6 +741,16 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         const baseInv = boxHigh > 0 ? boxHigh : entryPx + atr * 1.5;
         stopPrice = Math.max(baseInv + atr * 0.2, entryPx + atr * 1.0);
         invalidationPx = Math.max(baseInv + atr * 0.5, entryPx + atr * 1.5);
+    }
+
+    if (reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" && (stopPrice == null || isNaN(stopPrice))) {
+        signal = "NONE";
+        side = "none";
+        reason = "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST_STOP_PRICE_NULL_HOLD";
+        baseSizeIntent = 0;
+        recheckSuggested = true;
+        stopPrice = null;
+        invalidationPx = null;
     }
 
     const metadata: TransitionExecutorMetadata = {
@@ -693,6 +787,12 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         retestConfirmed: retestConfirmedShort,
         reclaimConfirmed: reclaimConfirmedShort
     };
+
+    if (reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST") {
+        const fastStopBasis = judgment?.diagnostics?.fastTrendShift?.stop_basis ?? "whipsaw_mid_stop";
+        metadata.stop_basis = fastStopBasis;
+    }
+
     return {
         signal,
         side,

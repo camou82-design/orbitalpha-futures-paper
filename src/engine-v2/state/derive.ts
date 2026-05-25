@@ -4,6 +4,20 @@ import type { V2StateAuthority } from "./types";
 const DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT = 100;
 
 function inferIntentSide(input: EngineV2Input): EngineV2Side {
+    if (input.symbol === "BTCUSDT") {
+        const rawPositions = Array.isArray(input.state.currentPositions) ? input.state.currentPositions : [];
+        const btcPositions = rawPositions.filter(p => p != null && p.symbol === "BTCUSDT");
+        const hasLong = btcPositions.some(p => String(p.side).toLowerCase() === "long");
+        const hasShort = btcPositions.some(p => String(p.side).toLowerCase() === "short");
+        if (hasLong && !hasShort) return "long";
+        if (hasShort && !hasLong) return "short";
+        if (hasLong && hasShort) {
+            const first = btcPositions[0];
+            return String(first.side).toLowerCase() === "long" ? "long" : "short";
+        }
+        return "none";
+    }
+
     const shock = input.state.directionalShockState ?? "NONE";
     const s = input.snapshot?.signal ?? "none";
     let side: EngineV2Side = "none";
