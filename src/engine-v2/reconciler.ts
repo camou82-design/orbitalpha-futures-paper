@@ -529,6 +529,32 @@ export function resolveSymbolDecisionEnvelope(
     // CRITICAL: Applied BEFORE authority derivation so authority reflects suppressed state.
     // Do NOT depend on currentPositions.side (may be polluted). Only okxActualSide matters.
     const btcEnvelopeSuppressed = String(symbol) === "BTCUSDT" && state.okxActualSide === "long";
+
+    // --- V2_BTC_PROTECTED_SUPPRESSOR_PRE_AUTHORITY_AUDIT_PROOF (reconciler layer) ---
+    // Emitted ALWAYS for BTCUSDT regardless of killSwitch/serverTradeEnabled.
+    // This is the final layer before authority is derived from the envelope.
+    if (String(symbol) === "BTCUSDT") {
+        console.info(JSON.stringify({
+            event: "V2_BTC_PROTECTED_SUPPRESSOR_PRE_AUTHORITY_AUDIT_PROOF",
+            layer: "reconciler_envelope",
+            symbol: "BTCUSDT",
+            okxActualSide: state.okxActualSide ?? null,
+            hasOkxActualLong: state.okxActualSide === "long",
+            isBtcProtected: btcEnvelopeSuppressed,
+            decisionBefore: executionEnvelope.decision,
+            sideBefore: executionEnvelope.side,
+            decisionAfter: btcEnvelopeSuppressed
+                ? (executionEnvelope.decision === "ENTER" ? "REJECT" : executionEnvelope.decision)
+                : executionEnvelope.decision,
+            sideAfter: btcEnvelopeSuppressed ? "none" : executionEnvelope.side,
+            hardBlockReason: btcEnvelopeSuppressed ? "BTCUSDT_OKX_LONG_POSITION_PROTECTED" : null,
+            exitPolicyActionBefore: executionEnvelope.exitPolicyAction ?? null,
+            exitShouldReduceBefore: executionEnvelope.exitShouldReduce ?? null,
+            stageMarginKrwBefore: executionEnvelope.stageMarginKrw ?? null,
+            ts: Date.now()
+        }));
+    }
+
     if (btcEnvelopeSuppressed) {
         executionEnvelope = {
             ...executionEnvelope,

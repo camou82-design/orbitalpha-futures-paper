@@ -5091,8 +5091,39 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         return hasPaperLong;
     })();
 
+    // --- V2_BTC_PROTECTED_SUPPRESSOR_PRE_AUTHORITY_AUDIT_PROOF ---
+    // Emitted ALWAYS (regardless of killSwitch/serverTradeEnabled) for runtime verification.
+    // Captures decision/side before and after suppression for audit under any control state.
+    if (String(input.symbol) === "BTCUSDT") {
+        const decisionBefore = decision.decision;
+        const sideBefore = decision.side;
+        const decisionAfter = isBtcProtected
+            ? (decision.decision === "ENTER" ? "SKIP" : "HOLD")
+            : decision.decision;
+        const sideAfter = isBtcProtected ? "none" : decision.side;
+        console.info(JSON.stringify({
+            event: "V2_BTC_PROTECTED_SUPPRESSOR_PRE_AUTHORITY_AUDIT_PROOF",
+            symbol: "BTCUSDT",
+            okxActualSide: input.state.okxActualSide ?? null,
+            hasOkxActualLong: input.state.okxActualSide === "long",
+            isBtcProtected,
+            decisionBefore,
+            sideBefore,
+            decisionAfter,
+            sideAfter,
+            hardBlockReason: isBtcProtected ? "BTCUSDT_OKX_LONG_POSITION_PROTECTED" : null,
+            paperLedgerSideCheck: Array.isArray(input.state.currentPositions)
+                ? (input.state.currentPositions.find(p => p && (p as any).symbol === "BTCUSDT") as any)?.side ?? "not_found"
+                : "no_positions",
+            exitPolicyActionBefore: internal.exitPolicy?.action ?? null,
+            exitShouldReduceBefore: internal.exitPolicy?.shouldReduce ?? null,
+            ts: Date.now()
+        }));
+    }
+
     if (isBtcProtected) {
         const suppressedActions = ["ENTER", "ADDON", "CLOSE", "PARTIAL", "REDUCE", "REVERSE", "ORDER_SUBMIT", "HISTORY_WRITE", "LEDGER_PRUNE", "PROTECTIVE_ENSURE"];
+
         console.info(JSON.stringify({
             event: "POSITION_SIDE_RECONCILE_PROTECTED",
             symbol: String(input.symbol),
