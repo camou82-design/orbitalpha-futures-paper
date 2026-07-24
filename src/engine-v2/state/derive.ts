@@ -5,6 +5,9 @@ const DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT = 100;
 
 function inferIntentSide(input: EngineV2Input): EngineV2Side {
     if (input.symbol === "BTCUSDT") {
+        if (input.state.okxActualSide === "long") return "long";
+        if (input.state.okxActualSide === "short") return "short";
+
         const rawPositions = Array.isArray(input.state.currentPositions) ? input.state.currentPositions : [];
         const btcPositions = rawPositions.filter(p => p != null && p.symbol === "BTCUSDT");
         const hasLong = btcPositions.some(p => String(p.side).toLowerCase() === "long");

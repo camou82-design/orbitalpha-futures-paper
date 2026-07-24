@@ -1809,11 +1809,16 @@ export class PaperEngine {
     paperSide: string = "none",
     extraSuppressedActions: string[] = []
   ): Promise<void> {
-    const okxBtcPos = this.lastLivePositionsPayload?.find((p: any) => {
-      const hit = okxSwapRowToLedgerKey(p);
-      return hit && hit.symbol === "BTCUSDT";
-    });
-    const okxActualSide = okxBtcPos ? String(okxBtcPos.side).toLowerCase() : "none";
+    let okxActualSide = "none";
+    if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
+      for (const p of this.lastLivePositionsPayload) {
+        const hit = okxSwapRowToLedgerKey(p as Record<string, unknown>);
+        if (hit && hit.symbol === "BTCUSDT") {
+          okxActualSide = hit.side;
+          break;
+        }
+      }
+    }
 
     let resolvedPaperSide = paperSide;
     if (resolvedPaperSide === "none") {
@@ -2011,6 +2016,29 @@ export class PaperEngine {
       
       const key = `${open.symbol}:${open.side}`;
       const remotePos = remoteMap.get(key);
+
+      // --- ADOPTED & OPEN POSITION METADATA SYNC (Notional Alignment) ---
+      if (remotePos && remotePos.notionalUsd > 0) {
+        const remoteNotional = Math.abs(remotePos.notionalUsd);
+        if (Math.abs(open.sizeUsd - remoteNotional) > 0.5 || !open.notionalUsd || Math.abs(open.notionalUsd - remoteNotional) > 0.5) {
+          open.sizeUsd = remoteNotional;
+          open.initialSizeUsd = remoteNotional;
+          open.notional = remoteNotional;
+          open.notionalUsd = remoteNotional;
+          if (remotePos.size > 0) {
+            open.pos = remotePos.size;
+            open.baseQty = remotePos.size;
+          }
+          ledgerModified = true;
+          this.logger.info("LEDGER_OKX_POSITION_NOTIONAL_SYNCED_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            sync_reason: "notional_mismatch_metadata_correction",
+            okxNotionalUsd: remoteNotional,
+            okxBaseQty: remotePos.size
+          });
+        }
+      }
 
       // --- EXTERNAL MANUAL RESIDUE PRUNING (Quiet) ---
       // If OKX actual position is zero and paper open position exists as manual residue, prune it quietly.
@@ -2870,8 +2898,8 @@ export class PaperEngine {
           side,
           entryPrice: avgPx,
           leverage,
-          sizeUsd: notional / (leverage || 1),
-          initialSizeUsd: notional / (leverage || 1),
+          sizeUsd: notional,
+          initialSizeUsd: notional,
           strategyVersion: "paper-v2",
           sourceSignal: isEngineOwned ? "okx_reconcile_untracked_auto" : "okx_reconcile_adopted",
           sourceRunPath: isEngineOwned ? "auto_adoption_untracked" : "manual_adoption",
@@ -3511,8 +3539,8 @@ export class PaperEngine {
             symbol: symbol as MarketSymbol,
             side: side as "long" | "short",
             leverage: 10,
-            sizeUsd: Math.abs(Number(okxPos.notionalUsd || 0)) / 10,
-            initialSizeUsd: Math.abs(Number(okxPos.notionalUsd || 0)) / 10,
+            sizeUsd: Math.abs(Number(okxPos.notionalUsd || 0)),
+            initialSizeUsd: Math.abs(Number(okxPos.notionalUsd || 0)),
             strategyVersion: "paper-v2",
             sourceSignal: "OPERATOR_ADOPTED",
             sourceRunPath: "operator",
@@ -17549,11 +17577,16 @@ function buildV2StateBridge(
   reconcileSafeModeActive: boolean,
   lastLivePositionsPayload?: ReadonlyArray<Record<string, unknown>> | null
 ): V2BridgeState {
-  const okxBtcPos = lastLivePositionsPayload?.find((p: any) => {
-    const hit = okxSwapRowToLedgerKey(p);
-    return hit && hit.symbol === "BTCUSDT";
-  });
-  const okxActualSide = okxBtcPos ? String(okxBtcPos.side).toLowerCase() : "none";
+  let okxActualSide = "none";
+  if (lastLivePositionsPayload && Array.isArray(lastLivePositionsPayload)) {
+    for (const p of lastLivePositionsPayload) {
+      const hit = okxSwapRowToLedgerKey(p as Record<string, unknown>);
+      if (hit && hit.symbol === "BTCUSDT") {
+        okxActualSide = hit.side;
+        break;
+      }
+    }
+  }
 
   return {
     currentPositions: opensAfterClose

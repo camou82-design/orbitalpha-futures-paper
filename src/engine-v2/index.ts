@@ -5340,6 +5340,7 @@ export function adaptV2Input(
         crashState?: string | null;
         pumpState?: string | null;
         pump_state?: string | null;
+        okxActualSide?: string;
     },
     v1Result: LegacyResultAdapter,
     recentCandles?: import("../models/types").Candle[]
@@ -5398,21 +5399,24 @@ export function adaptV2Input(
             okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt
         },
         state: {
-            currentPositions: state.currentPositions.map((p: LegacyPositionAdapter) => ({
-                symbol: p.symbol,
-                side: p.side === "long" ? "LONG" : "SHORT" as const,
-                entryPrice: p.entryPrice,
-                sizeUsd: p.sizeUsd,
-                entryStage: p.entryStage ?? 0,
-                pnlPct: p.pnlPct ?? 0,
-                ledger_stop_px: p.ledger_stop_px,
-                peakUnrealizedPnlPct: p.peakUnrealizedPnlPct,
-                peakUnrealizedPnlUsd: p.peakUnrealizedPnlUsd,
-                peakPnlUpdatedAt: p.peakPnlUpdatedAt,
-                takeProfitPlan: p.takeProfitPlan,
-                tp1Triggered: p.tp1Triggered,
-                tp2Triggered: p.tp2Triggered
-            })),
+            currentPositions: state.currentPositions.map((p: LegacyPositionAdapter) => {
+                const s = String(p.side ?? "").toUpperCase();
+                return {
+                    symbol: p.symbol,
+                    side: s === "LONG" ? "LONG" : s === "SHORT" ? "SHORT" : ("NONE" as any),
+                    entryPrice: p.entryPrice,
+                    sizeUsd: p.sizeUsd,
+                    entryStage: p.entryStage ?? 0,
+                    pnlPct: p.pnlPct ?? 0,
+                    ledger_stop_px: p.ledger_stop_px,
+                    peakUnrealizedPnlPct: p.peakUnrealizedPnlPct,
+                    peakUnrealizedPnlUsd: p.peakUnrealizedPnlUsd,
+                    peakPnlUpdatedAt: p.peakPnlUpdatedAt,
+                    takeProfitPlan: p.takeProfitPlan,
+                    tp1Triggered: p.tp1Triggered,
+                    tp2Triggered: p.tp2Triggered
+                };
+            }),
             globalRiskScore: state.globalRiskScore,
             lossStreaks: state.lossStreaks,
             directionalShockState: state.directionalShockState,
@@ -5442,7 +5446,8 @@ export function adaptV2Input(
             exposureNotionalCapKrw: state.exposureNotionalCapKrw,
             symbolExposureNotionalCapKrw: state.symbolExposureNotionalCapKrw,
             finalAddonNotionalUsdt: (state as any).finalAddonNotionalUsdt,
-            addonMaxNotionalUsdt: (state as any).addonMaxNotionalUsdt
+            addonMaxNotionalUsdt: (state as any).addonMaxNotionalUsdt,
+            okxActualSide: state.okxActualSide
         },
         v1Result: {
             regime: v1Result.decision?.regime_state ?? "UNDEFINED",
