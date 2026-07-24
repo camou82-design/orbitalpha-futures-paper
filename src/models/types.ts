@@ -995,6 +995,7 @@ export type PaperOpenPositionRecord = {
   regime_exit_last_eval_ms?: number;
   /** Adoption metadata */
   adoptedAt?: number;
+  adoptedMetadataSyncedAt?: number;
   detectedAt?: number;
   sync_status?: string;
   marginMode?: string;

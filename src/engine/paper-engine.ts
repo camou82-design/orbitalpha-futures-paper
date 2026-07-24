@@ -2017,25 +2017,47 @@ export class PaperEngine {
       const key = `${open.symbol}:${open.side}`;
       const remotePos = remoteMap.get(key);
 
-      // --- ADOPTED & OPEN POSITION METADATA SYNC (Notional Alignment) ---
-      if (remotePos && remotePos.notionalUsd > 0) {
+      // --- ADOPTED FAMILY POSITION METADATA SYNC (Notional Alignment) ---
+      const isAdoptedFamily =
+        open.reconcileState === "ADOPTED" ||
+        open.lifecycleState === "OKX_UNTRACKED_FILL" ||
+        open.sourceSignal === "okx_reconcile_adopted" ||
+        open.sourceSignal === "OPERATOR_ADOPTED";
+
+      if (isAdoptedFamily && remotePos && remotePos.notionalUsd > 0) {
         const remoteNotional = Math.abs(remotePos.notionalUsd);
-        if (Math.abs(open.sizeUsd - remoteNotional) > 0.5 || !open.notionalUsd || Math.abs(open.notionalUsd - remoteNotional) > 0.5) {
+        const needsCurrentNotionalSync =
+          Math.abs(open.sizeUsd - remoteNotional) > 0.5 ||
+          !open.notionalUsd ||
+          Math.abs(open.notionalUsd - remoteNotional) > 0.5;
+
+        // Check if initialSizeUsd has not been synced yet (first-time correction for legacy/incorrect adoption)
+        const isFirstTimeSync = !open.adoptedMetadataSyncedAt;
+
+        if (needsCurrentNotionalSync || isFirstTimeSync) {
           open.sizeUsd = remoteNotional;
-          open.initialSizeUsd = remoteNotional;
           open.notional = remoteNotional;
           open.notionalUsd = remoteNotional;
           if (remotePos.size > 0) {
             open.pos = remotePos.size;
             open.baseQty = remotePos.size;
           }
+
+          // Fix initialSizeUsd ONLY on the very first sync
+          if (isFirstTimeSync) {
+            open.initialSizeUsd = remoteNotional;
+            open.adoptedMetadataSyncedAt = nowTs;
+          }
+
           ledgerModified = true;
           this.logger.info("LEDGER_OKX_POSITION_NOTIONAL_SYNCED_PROOF", {
             symbol: open.symbol,
             side: open.side,
-            sync_reason: "notional_mismatch_metadata_correction",
+            sync_reason: isFirstTimeSync ? "initial_and_current_notional_first_sync" : "current_notional_sync",
             okxNotionalUsd: remoteNotional,
-            okxBaseQty: remotePos.size
+            okxBaseQty: remotePos.size,
+            initialSizeUsd: open.initialSizeUsd,
+            adoptedMetadataSyncedAt: open.adoptedMetadataSyncedAt
           });
         }
       }
