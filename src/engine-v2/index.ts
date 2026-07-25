@@ -3745,6 +3745,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const maxDataSkewMs = 10000;
     const nowMs = input.now ?? Date.now();
 
+    const balanceAge = nowMs - balanceFetchedAt;
+    const positionsAge = nowMs - positionsFetchedAt;
+    const pendingOrdersAge = nowMs - pendingOrdersFetchedAt;
+
     const timestampsPresent =
         typeof balanceFetchedAt === "number" && Number.isFinite(balanceFetchedAt) && balanceFetchedAt > 0 &&
         typeof positionsFetchedAt === "number" && Number.isFinite(positionsFetchedAt) && positionsFetchedAt > 0 &&
@@ -3752,9 +3756,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     const dataFresh =
         timestampsPresent &&
-        (nowMs - balanceFetchedAt) <= maxDataAgeMs &&
-        (nowMs - positionsFetchedAt) <= maxDataAgeMs &&
-        (nowMs - pendingOrdersFetchedAt) <= maxDataAgeMs;
+        balanceAge >= 0 && balanceAge <= maxDataAgeMs &&
+        positionsAge >= 0 && positionsAge <= maxDataAgeMs &&
+        pendingOrdersAge >= 0 && pendingOrdersAge <= maxDataAgeMs;
 
     const dataSynced =
         timestampsPresent &&
@@ -3776,23 +3780,40 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 okxPositionsValid = false;
                 break;
             }
+            const notional = Math.abs(rawNotional);
             const rawSide = String(p.side ?? "").toUpperCase();
-            if (rawSide !== "LONG" && rawSide !== "SHORT" && rawSide !== "BUY" && rawSide !== "SELL" && rawSide !== "NONE") {
-                okxPositionsValid = false;
-                break;
+            const normalizedSide = rawSide === "BUY" ? "LONG" : rawSide === "SELL" ? "SHORT" : rawSide;
+
+            if (notional > 0) {
+                if (normalizedSide !== "LONG" && normalizedSide !== "SHORT") {
+                    okxPositionsValid = false;
+                    break;
+                }
+            } else {
+                if (normalizedSide !== "LONG" && normalizedSide !== "SHORT" && normalizedSide !== "NONE") {
+                    okxPositionsValid = false;
+                    break;
+                }
             }
-            validPositionsList.push({
-                symbol: p.symbol,
-                sizeUsd: Math.abs(rawNotional),
-                side: rawSide === "BUY" ? "LONG" : rawSide === "SELL" ? "SHORT" : rawSide
-            });
+
+            if (notional > 0) {
+                validPositionsList.push({
+                    symbol: p.symbol,
+                    sizeUsd: notional,
+                    side: normalizedSide
+                });
+            }
         }
     }
 
     const pendingOrdersValid =
-        okxPendingOrdersReady &&
-        (pendingOrdersNotionalRaw == null || (typeof pendingOrdersNotionalRaw === "number" && Number.isFinite(pendingOrdersNotionalRaw) && pendingOrdersNotionalRaw >= 0)) &&
-        (pendingSymbolNotionalRaw == null || (typeof pendingSymbolNotionalRaw === "number" && Number.isFinite(pendingSymbolNotionalRaw) && pendingSymbolNotionalRaw >= 0));
+        okxPendingOrdersReady === true &&
+        typeof pendingOrdersNotionalRaw === "number" &&
+        Number.isFinite(pendingOrdersNotionalRaw) &&
+        pendingOrdersNotionalRaw >= 0 &&
+        typeof pendingSymbolNotionalRaw === "number" &&
+        Number.isFinite(pendingSymbolNotionalRaw) &&
+        pendingSymbolNotionalRaw >= 0;
 
     // Ledger vs OKX Actual Position Matching (Add-on Authority)
     const normSide = (s?: string) => {
@@ -3801,23 +3822,36 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     };
     const currentPositions = Array.isArray(v2State.currentPositions) ? v2State.currentPositions : [];
     const ledgerPos = currentPositions.find((p) => p && p.symbol === input.symbol) ?? null;
-    const actualPos = validPositionsList.find((p) => p && p.symbol === input.symbol && p.sizeUsd > 0) ?? null;
+
+    // Inspect ALL OKX actual positions for input.symbol
+    const symbolActualPositions = validPositionsList.filter((p) => p.symbol === input.symbol);
+    const hasLongActual = symbolActualPositions.some((p) => p.side === "LONG");
+    const hasShortActual = symbolActualPositions.some((p) => p.side === "SHORT");
 
     let isAddOn = false;
     let positionMismatch = false;
 
-    if (ledgerPos != null && actualPos != null) {
-        if (normSide(ledgerPos.side) === normSide(actualPos.side)) {
-            isAddOn = true;
-        } else {
+    if (hasLongActual && hasShortActual) {
+        // Dual LONG and SHORT positions exist for symbol -> MISMATCH
+        positionMismatch = true;
+    } else if (ledgerPos != null) {
+        const ledgerSide = normSide(ledgerPos.side);
+        if (symbolActualPositions.length === 0) {
             positionMismatch = true;
+        } else {
+            const anyMismatch = symbolActualPositions.some((p) => p.side !== ledgerSide);
+            if (anyMismatch) {
+                positionMismatch = true;
+            } else {
+                isAddOn = true;
+            }
         }
-    } else if (ledgerPos != null && actualPos == null) {
-        positionMismatch = true;
-    } else if (actualPos != null && ledgerPos == null) {
-        positionMismatch = true;
     } else {
-        isAddOn = false;
+        if (symbolActualPositions.length > 0) {
+            positionMismatch = true;
+        } else {
+            isAddOn = false;
+        }
     }
 
     const sameSymbolPos = ledgerPos;
@@ -3832,11 +3866,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const okxAuthMode = (v2State as any).okxAuthMode ?? input.state.okxAuthMode;
     const okxExchangeAuthOptIn = (v2State as any).okxExchangeAuthOptIn === true || input.state.okxExchangeAuthOptIn === true;
 
+    const isOrderAttemptAction = finalDecision === "ENTER" || (isAddOn && addOnPolicy.allowed === true);
+
     const isLiveSignedOrderAttempt =
         okxAuthMode === "live" &&
         okxExchangeAuthOptIn === true &&
         okxLiveEnabled === true &&
-        (finalDecision === "ENTER" || isAddOn);
+        isOrderAttemptAction;
 
     const isMicroProbe =
         promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" ||

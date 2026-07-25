@@ -3568,9 +3568,11 @@ export class PaperEngine {
 
   constructor(
     private readonly config: EngineConfig,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    okxClientOverride?: any,
+    storeOverride?: any
   ) {
-    this.store = new JsonStore(path.resolve(config.dataDir));
+    this.store = storeOverride ?? new JsonStore(path.resolve(config.dataDir));
     this.okxPublic = new OkxDemoClient({
       baseUrl: "https://www.okx.com",
       apiKey: "",
@@ -3580,7 +3582,10 @@ export class PaperEngine {
     });
     this.positions = new PositionManager(this.store);
     this.risk = new RiskManager(config);
-    if (config.okxAuthMode === "demo" || config.okxAuthMode === "live") {
+    if (okxClientOverride != null) {
+      this.okxDemo = okxClientOverride;
+      this.okxDemoKeysLoaded = true;
+    } else if (config.okxAuthMode === "demo" || config.okxAuthMode === "live") {
       const selectedApiKey = config.okxAuthMode === "live" ? config.okxApiKey : config.okxDemoApiKey;
       const selectedApiSecret = config.okxAuthMode === "live" ? config.okxApiSecret : config.okxDemoApiSecret;
       const selectedPassphrase = config.okxAuthMode === "live" ? config.okxPassphrase : config.okxDemoPassphrase;
@@ -6483,7 +6488,7 @@ export class PaperEngine {
     return violations.length === 0 ? { ok: true } : { ok: false, violations };
   }
 
-  private async ensureProtectiveStopOrder(
+  public async ensureProtectiveStopOrder(
     open: PaperOpenPositionRecord,
     flowId: string,
     pricingLastInput?: number,
@@ -6934,7 +6939,7 @@ export class PaperEngine {
     return { modified, success: protectionSuccess, record: updatedRecord };
   }
 
-  private async submitOkxOrder(input: {
+  public async submitOkxOrder(input: {
     symbol: MarketSymbol;
     side: "buy" | "sell";
     posSide: "long" | "short";
@@ -8038,7 +8043,7 @@ export class PaperEngine {
     return normalized;
   }
 
-  private async tryPaperPositionClose(input: Readonly<{
+  public async tryPaperPositionClose(input: Readonly<{
     snapshots: SymbolSnapshot[];
     errorsCount: number;
     latestPath: string | undefined;
@@ -17207,6 +17212,96 @@ export class PaperEngine {
 
     return { modified, record };
   }
+
+  public async writeOpenPositions(positions: PaperOpenPositionRecord[]): Promise<void> {
+    await this.positions.saveOpenAll(positions);
+  }
+
+  public async writeClosedPositions(positions: PaperClosedPositionRecord[]): Promise<void> {
+    for (const p of positions) {
+      await this.positions.appendClosed(p);
+    }
+  }
+
+  public async cancelOrder(symbol: string, ordId: string, algoId?: string): Promise<boolean> {
+    if (!this.okxDemo) return false;
+    if (algoId) {
+      const res = await this.okxDemo.cancelAlgoOrder([{ instId: toOkxSwapInstId(symbol as MarketSymbol), algoId }]);
+      return res.ok;
+    }
+    const res = await this.okxDemo.cancelOrder(toOkxSwapInstId(symbol as MarketSymbol), ordId);
+    return res.ok;
+  }
+
+  public async executeV2SignedExecutionBridge(args: {
+    symbol: MarketSymbol;
+    v2Decision: EngineV2Decision;
+    lastPrice: number;
+  }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null }> {
+    const { symbol, v2Decision, lastPrice } = args;
+
+    // BTC Protected Long Suppressor
+    if (symbol === "BTCUSDT" && Array.isArray(this.lastLivePositionsPayload) && this.lastLivePositionsPayload.some((p: any) => p && String(p.symbol ?? p.instId).includes("BTC") && String(p.side ?? p.posSide).toLowerCase() === "long")) {
+      await this.logAndSuppressBtcUsdtAction("v2_signed_execution_bridge", "LONG", ["ENTER", "ADDON", "ORDER_SUBMIT"]);
+      return { executed: false, blockReason: "BTCUSDT_OKX_LONG_POSITION_PROTECTED" };
+    }
+
+    if (v2Decision.decision !== "ENTER") {
+      return { executed: false, blockReason: v2Decision.risk.blockReason ?? (v2Decision as any).promotionReason ?? "NOT_ENTER" };
+    }
+
+    if (!this.okxDemo || this.signedSubmitMode() !== "enabled") {
+      return { executed: false, blockReason: "SIGNED_EXECUTION_NOT_READY" };
+    }
+
+    const side = v2Decision.side === "long" ? "buy" : "sell";
+    const posSide = v2Decision.side === "long" ? "long" : "short";
+    const clOrdId = buildOkxClOrdId(symbol, side);
+    const traceId = `v2_test_${Date.now()}`;
+    const desiredNotionalUsdt = v2Decision.risk.finalOrderNotionalUsdt ?? 40;
+
+    const submitRes = await this.submitOkxOrder({
+      symbol,
+      side,
+      posSide,
+      qty: Math.max(0.001, desiredNotionalUsdt / Math.max(1, lastPrice)),
+      clOrdId,
+      traceId,
+      reason: "v2_authorized_signed_bridge",
+      authoritySource: "v2",
+      adoptedEngine: "V2",
+      entryQualityGrade: "S",
+      appliedLeverage: v2Decision.risk.appliedLeverage ?? 10,
+      marketRegime: v2Decision.regime,
+      entryPrice: lastPrice,
+      stopPrice: (v2Decision.risk as any).stopPrice ?? lastPrice * (v2Decision.side === "long" ? 0.95 : 1.05),
+      isNewEntry: true,
+      desiredNotionalUsdt,
+      pricingReferencePx: lastPrice
+    });
+
+    if (submitRes.ok) {
+      const openRecord: PaperOpenPositionRecord = {
+        symbol,
+        side: v2Decision.side === "long" ? "long" : "short",
+        entryPrice: lastPrice,
+        sizeUsd: desiredNotionalUsdt,
+        leverage: v2Decision.risk.appliedLeverage ?? 10,
+        openedAt: Date.now(),
+        entryStage: 1,
+        stopPrice: lastPrice * (v2Decision.side === "long" ? 0.95 : 1.05),
+        strategyVersion: "paper-v2",
+        sourceSignal: "V2",
+        sourceRunPath: "",
+        status: "open",
+        pos: 1
+      };
+      await this.ensureProtectiveStopOrder(openRecord, `v2_bridge_auto:${symbol}:${openRecord.openedAt}`);
+      await this.writeOpenPositions([openRecord]);
+    }
+
+    return { executed: submitRes.ok, submitResult: submitRes };
+  }
 }
 
 const PAPER_LEDGER_KRW_NOTIONAL_PER_USD = 1400;
@@ -17521,7 +17616,7 @@ function buildV2LegacyBridge(res: EvaluatePaperSymbolEntryResult): V2BridgeLegac
   };
 }
 
-function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
+export function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
   return {
     baseSizeUsd: computePaperSizingAnchorUsd(config),
     maxOpenPositions: config.paperMaxOpenPositions,
@@ -17534,7 +17629,7 @@ function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
   };
 }
 
-function buildV2StateBridge(
+export function buildV2StateBridge(
   opensAfterClose: ReadonlyArray<PaperOpenPositionRecord>,
   lastRisk: RiskControlDecision | null,
   config: EngineConfig,
@@ -17577,12 +17672,14 @@ function buildV2StateBridge(
   const okxActualPositions = Array.isArray(lastLivePositionsPayload)
     ? lastLivePositionsPayload.map((p) => {
         const hit = okxSwapRowToLedgerKey(p as Record<string, unknown>);
-        const symbol = hit?.symbol ?? String((p as any).instId ?? "").replace("-SWAP", "");
-        const side = hit?.side ?? String((p as any).posSide ?? "").toLowerCase();
+        const symbol = hit?.symbol ?? (p as any).symbol ?? String((p as any).instId ?? "").replace("-SWAP", "").replace("-USDT", "USDT");
+        const rawSide = hit?.side ?? (p as any).side ?? (p as any).posSide ?? "";
+        const sideStr = String(rawSide).toLowerCase();
+        const normSideStr = sideStr === "buy" ? "long" : sideStr === "sell" ? "short" : sideStr;
         const rawNotional = Number((p as any).notionalUsd ?? (p as any).notionalUSDT ?? (p as any).sizeUsd ?? 0);
         return {
           symbol,
-          side: side === "long" ? "LONG" : side === "short" ? "SHORT" : side.toUpperCase(),
+          side: normSideStr === "long" ? "LONG" : normSideStr === "short" ? "SHORT" : normSideStr.toUpperCase(),
           sizeUsd: Math.abs(rawNotional),
           notionalUsd: Math.abs(rawNotional)
         };
@@ -17637,8 +17734,8 @@ function buildV2StateBridge(
     actualAccountNotionalUsdtReady: okxPositionsOk ?? Array.isArray(lastLivePositionsPayload),
     okxActualPositions,
     okxPendingOrdersReady: okxPendingOrdersReady ?? true,
-    okxPendingOrdersNotionalUsdt: pendingOrdersNotionalUsdt ?? 0,
-    okxPendingSymbolNotionalUsdt: pendingSymbolNotionalUsdt ?? 0,
+    okxPendingOrdersNotionalUsdt: pendingOrdersNotionalUsdt,
+    okxPendingSymbolNotionalUsdt: pendingSymbolNotionalUsdt,
     balanceFetchedAt,
     positionsFetchedAt,
     pendingOrdersFetchedAt,
