@@ -1486,7 +1486,7 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
       baseSizeUsd: computePaperSizingAnchorUsd(input.config),
       maxOpenPositions: input.config.paperMaxOpenPositions,
       reentryCooldownMs: input.config.paperReentryCooldownMs,
-      okxLiveMaxOrderNotionalUsdt: input.config.okxLiveMaxOrderNotionalUsdt
+      okxLiveMaxOrderNotionalUsdt: input.config.okxLiveMaxOrderNotionalUsdt ?? 0
     },
     state: {
       currentPositions: [], // Dry run only

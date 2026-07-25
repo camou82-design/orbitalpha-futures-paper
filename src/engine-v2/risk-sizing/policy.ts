@@ -55,8 +55,8 @@ export function calculateRiskSizing(
     const sideAllowed = executor.side === "long" ? state.longAllow : executor.side === "short" ? state.shortAllow : true;
     const trendLossStreak = Math.max(0, Number(state.lossStreaks?.TREND ?? 0));
     const symbolFlowLossStreak = trendLossStreak;
-    const sameSymbolSide = state.currentPositions.filter((p) => p.symbol === input.symbol && String(p.side).toLowerCase() === executor.side);
-    const sameSymbolPos = sameSymbolSide[0] ?? null;
+    const sameSymbolSide = state.currentPositions.filter((p) => p && p.symbol === input.symbol && String(p.side).toLowerCase() === String(executor.side ?? "").toLowerCase());
+    const sameSymbolPos = sameSymbolSide[0] ?? state.currentPositions.find((p) => p && p.symbol === input.symbol) ?? null;
     const currentStage = sameSymbolPos ? Math.max(1, sameSymbolPos.entryStage ?? 1) : 0;
     const isAddOn = sameSymbolPos != null;
     const addOnPolicyAllowed = state.addOnPolicyAllowed;
@@ -88,8 +88,23 @@ export function calculateRiskSizing(
     const effectivePaperExecutionReady = paperReadinessBlockReasons.length === 0;
     const signedReadinessBlockReason = state.signedExecutionReady === false ? "SIGNED_EXECUTION_NOT_READY" : null;
 
-    // NO_TRADE: Hard block
-    if (judgment.regime === "NO_TRADE") {
+    const maxOrderNotionalUsdt = config.okxLiveMaxOrderNotionalUsdt ?? ((state as any).liveMaxOrderNotionalUsdt != null ? Number((state as any).liveMaxOrderNotionalUsdt) : null);
+    const maxAddonNotionalUsdt = config.okxLiveMaxAddonNotionalUsdt ?? ((state as any).liveMaxAddonNotionalUsdt != null ? Number((state as any).liveMaxAddonNotionalUsdt) : null);
+    const maxSymbolNotionalUsdt = config.okxLiveMaxSymbolNotionalUsdt ?? ((state as any).liveMaxSymbolNotionalUsdt != null ? Number((state as any).liveMaxSymbolNotionalUsdt) : null);
+    const maxAccountNotionalUsdt = config.okxLiveMaxAccountNotionalUsdt ?? ((state as any).liveMaxAccountNotionalUsdt != null ? Number((state as any).liveMaxAccountNotionalUsdt) : null);
+    const maxAddonCount = config.okxLiveMaxAddonCount ?? ((state as any).liveMaxAddonCount != null ? Number((state as any).liveMaxAddonCount) : null);
+
+    const limitsConfigured =
+        maxOrderNotionalUsdt != null && maxOrderNotionalUsdt > 0 &&
+        maxAddonNotionalUsdt != null && maxAddonNotionalUsdt > 0 &&
+        maxSymbolNotionalUsdt != null && maxSymbolNotionalUsdt > 0 &&
+        maxAccountNotionalUsdt != null && maxAccountNotionalUsdt > 0 &&
+        maxAddonCount != null && maxAddonCount >= 0;
+
+    if (!limitsConfigured) {
+        isBlocked = true;
+        blockReason = "LIVE_SIZING_LIMITS_NOT_CONFIGURED";
+    } else if (judgment.regime === "NO_TRADE") {
         isBlocked = true;
         blockReason = "NO_TRADE_REGIME";
     } else if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
@@ -236,18 +251,25 @@ export function calculateRiskSizing(
         leverageReason = "v2_fixed_10x";
     }
 
+    const currentMarginUsedKrw = currentMarginUsed * 1400;
+    const currentNotionalKrw = currentNotional * 1400;
+    const currentSymbolNotionalKrw = currentSymbolNotional * 1400;
     const proposedNotional = stageMarginKrw * appliedLeverage;
-    if (!isBlocked && currentMarginUsed + stageMarginKrw > maxUsableMarginKrw) {
-        isBlocked = true;
-        blockReason = "MAX_USABLE_MARGIN_EXCEEDED";
-    }
-    if (!isBlocked && currentNotional + proposedNotional > exposureNotionalCapKrw) {
-        isBlocked = true;
-        blockReason = "EXPOSURE_NOTIONAL_CAP_EXCEEDED";
-    }
-    if (!isBlocked && currentSymbolNotional + proposedNotional > symbolExposureNotionalCapKrw) {
-        isBlocked = true;
-        blockReason = "SYMBOL_EXPOSURE_NOTIONAL_CAP_EXCEEDED";
+
+    // Legacy KRW limits are used ONLY as diagnostic checks when USDT live limits are not present
+    if (!limitsConfigured) {
+        if (!isBlocked && currentMarginUsedKrw + stageMarginKrw > maxUsableMarginKrw) {
+            isBlocked = true;
+            blockReason = "MAX_USABLE_MARGIN_EXCEEDED";
+        }
+        if (!isBlocked && currentNotionalKrw + proposedNotional > exposureNotionalCapKrw) {
+            isBlocked = true;
+            blockReason = "EXPOSURE_NOTIONAL_CAP_EXCEEDED";
+        }
+        if (!isBlocked && currentSymbolNotionalKrw + proposedNotional > symbolExposureNotionalCapKrw) {
+            isBlocked = true;
+            blockReason = "SYMBOL_EXPOSURE_NOTIONAL_CAP_EXCEEDED";
+        }
     }
     if (!isBlocked && hasDirectionalSide && !sideAllowed) {
         isBlocked = true;

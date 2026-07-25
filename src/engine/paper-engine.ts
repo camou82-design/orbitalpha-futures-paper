@@ -3413,7 +3413,7 @@ export class PaperEngine {
       okx_api_secret_present: apiSecret.length > 0,
       okx_passphrase_present: passphrase.length > 0,
       okx_simulated_trading_header_enabled: this.config.okxSimulatedTradingHeaderEnabled,
-      live_max_order_notional_usdt: this.config.okxLiveMaxOrderNotionalUsdt
+      live_max_order_notional_usdt: this.config.okxLiveMaxOrderNotionalUsdt ?? 0
     };
   }
 
@@ -7284,7 +7284,7 @@ export class PaperEngine {
       
       // V2 EXCEPTION: V2 authoritative signals bypass legacy static caps to allow 100 USDT probes
       if (input.authoritySource === "v2") {
-        static_safety_cap = Math.max(static_safety_cap, 500); 
+        static_safety_cap = Math.max(static_safety_cap ?? 0, 500); 
       }
 
       // 3.5 Leverage Sync for V2
@@ -7333,7 +7333,7 @@ export class PaperEngine {
       }
 
       // Constraint: Static Cap (Optional safety override)
-      if (this.config.okxLiveStaticNotionalCapEnabled && final_submitted_notional_usdt > static_safety_cap) {
+      if (this.config.okxLiveStaticNotionalCapEnabled && static_safety_cap != null && final_submitted_notional_usdt > static_safety_cap) {
         final_submitted_notional_usdt = static_safety_cap;
         final_size_source = "static_safety_cap";
       }
@@ -17576,7 +17576,7 @@ function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
     baseSizeUsd: computePaperSizingAnchorUsd(config),
     maxOpenPositions: config.paperMaxOpenPositions,
     reentryCooldownMs: config.paperReentryCooldownMs,
-    okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt
+    okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt ?? 0
   };
 }
 
@@ -17642,7 +17642,7 @@ function buildV2StateBridge(
     okxPassphrasePresent: config.okxAuthMode === "live" ? config.okxPassphrase.length > 0 : config.okxDemoPassphrase.length > 0,
     okxSimulatedTradingHeaderEnabled: config.okxSimulatedTradingHeaderEnabled,
     // Snapshot from EngineConfig at process start; may be 0 if env was unset at load time. V2 live cap proof uses process.env in runEngineV2.
-    liveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt,
+    liveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt ?? 0,
     freshTickBarrierActive,
     freshTickExecutionBlocked,
     freshTickCompletedCycles,

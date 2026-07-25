@@ -3705,23 +3705,33 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let min_order_check_passed = true;
     let min_order_block_reason: string | null = null;
     const minProbeMarginKrw = 14000;
-    const minNotionalUsdtRequiredAtFixed10x = 100;
-    const rawEnvLiveMaxNotionalUsdt = process.env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT ?? null;
-    const stateLiveMaxOrderNotionalUsdt = Number(v2State.liveMaxOrderNotionalUsdt);
-    const liveMaxNotionalSource = "process.env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT";
-    let envParsed = NaN;
-    let liveMaxNotionalUsdtFinal = 0;
-    if (rawEnvLiveMaxNotionalUsdt != null && rawEnvLiveMaxNotionalUsdt.trim() !== "") {
-        envParsed = Number(rawEnvLiveMaxNotionalUsdt.trim());
-        if (Number.isFinite(envParsed) && envParsed > 0) {
-            liveMaxNotionalUsdtFinal = Math.min(10_000, envParsed);
-        }
-    }
-    const liveMaxNotionalKrwFinal = liveMaxNotionalUsdtFinal > 0 ? liveMaxNotionalUsdtFinal * 1400 : null;
     const appliedLeverage = 10;
     const leverageSource = "v2_fixed";
     const leverageReason = "v2_fixed_10x";
-    const liveMaxStageMarginKrwCap = liveMaxNotionalKrwFinal != null ? Math.floor(liveMaxNotionalKrwFinal / appliedLeverage) : null;
+    const rawEnvLiveMaxNotionalUsdt = process.env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT ?? null;
+    const liveMaxNotionalSource = "process.env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT";
+
+    // Read live limit envs strictly without implicit fallback defaults
+    const maxOrderNotionalUsdt = input.config.okxLiveMaxOrderNotionalUsdt ?? ((v2State as any).liveMaxOrderNotionalUsdt != null ? Number((v2State as any).liveMaxOrderNotionalUsdt) : null);
+    const maxAddonNotionalUsdt = input.config.okxLiveMaxAddonNotionalUsdt ?? ((v2State as any).liveMaxAddonNotionalUsdt != null ? Number((v2State as any).liveMaxAddonNotionalUsdt) : null);
+    const maxSymbolNotionalUsdt = input.config.okxLiveMaxSymbolNotionalUsdt ?? ((v2State as any).liveMaxSymbolNotionalUsdt != null ? Number((v2State as any).liveMaxSymbolNotionalUsdt) : null);
+    const maxAccountNotionalUsdt = input.config.okxLiveMaxAccountNotionalUsdt ?? ((v2State as any).liveMaxAccountNotionalUsdt != null ? Number((v2State as any).liveMaxAccountNotionalUsdt) : null);
+    const maxAddonCount = input.config.okxLiveMaxAddonCount ?? ((v2State as any).liveMaxAddonCount != null ? Number((v2State as any).liveMaxAddonCount) : null);
+
+    const accountEquityUsdt = (v2State as any).accountEquityUsdt ?? 69;
+    const availableBalanceUsdt = (v2State as any).availableBalanceUsdt ?? 69;
+    const currentPositions = Array.isArray(v2State.currentPositions) ? v2State.currentPositions : [];
+    const existingAccountNotionalUsdt = (v2State as any).existingAccountNotionalUsdt ?? currentPositions.reduce((acc, p) => acc + Math.max(0, p?.sizeUsd ?? 0), 0);
+    const existingSymbolNotionalUsdt = (v2State as any).existingSymbolNotionalUsdt ?? currentPositions
+        .filter((p) => p && p.symbol === input.symbol)
+        .reduce((acc, p) => acc + Math.max(0, p?.sizeUsd ?? 0), 0);
+
+    const sameSymbolPos = currentPositions.find((p) => p && p.symbol === input.symbol) ?? null;
+    const isAddOn = sameSymbolPos != null;
+    const currentAddonCount = isAddOn ? ((sameSymbolPos as any).addonCount ?? Math.max(0, ((sameSymbolPos.entryStage ?? 1) - 1))) : 0;
+
+    let requestedOrderNotionalUsdt = 0;
+    let finalOrderNotionalUsdt = 0;
 
     const isMicroProbe =
         promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" ||
@@ -3736,34 +3746,69 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" ||
         execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST";
 
-    if (finalDecision === "ENTER") {
+    if (riskSizing.isBlocked || finalDecision === "ENTER") {
         riskSizing.appliedLeverage = appliedLeverage;
         riskSizing.leverageReason = leverageReason;
-        const envMissing = rawEnvLiveMaxNotionalUsdt == null || rawEnvLiveMaxNotionalUsdt.trim() === "";
-        const envInvalid =
-            !envMissing && (!Number.isFinite(envParsed) || envParsed <= 0);
-        if (
-            liveMaxNotionalUsdtFinal > 0 &&
-            (!Number.isFinite(stateLiveMaxOrderNotionalUsdt) ||
-                stateLiveMaxOrderNotionalUsdt !== liveMaxNotionalUsdtFinal)
-        ) {
-            console.info(JSON.stringify({
-                event: "LIVE_MAX_NOTIONAL_STATE_MISMATCH_PROOF",
-                symbol: String(input.symbol),
-                raw_env_OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: rawEnvLiveMaxNotionalUsdt,
-                live_max_notional_usdt_final: liveMaxNotionalUsdtFinal,
-                state_live_max_order_notional_usdt: Number.isFinite(v2State.liveMaxOrderNotionalUsdt)
-                    ? v2State.liveMaxOrderNotionalUsdt
-                    : null,
-                promotion_reason: promotionReason,
-                decision_before_promotion: v2DecisionBeforePromotion
-            }));
-        }
-        if (envMissing || envInvalid) {
+
+        // Mandatory check: If any sizing limit env is missing or invalid, block with LIVE_SIZING_LIMITS_NOT_CONFIGURED
+        const limitsConfigured =
+            maxOrderNotionalUsdt != null && maxOrderNotionalUsdt > 0 &&
+            maxAddonNotionalUsdt != null && maxAddonNotionalUsdt > 0 &&
+            maxSymbolNotionalUsdt != null && maxSymbolNotionalUsdt > 0 &&
+            maxAccountNotionalUsdt != null && maxAccountNotionalUsdt > 0 &&
+            maxAddonCount != null && maxAddonCount >= 0;
+
+        if (!limitsConfigured || riskSizing.isBlocked) {
             min_order_check_passed = false;
-            min_order_block_reason = envMissing
-                ? "LIVE_MAX_NOTIONAL_CONFIG_MISSING"
-                : "LIVE_MAX_NOTIONAL_CONFIG_INVALID";
+            min_order_block_reason = !limitsConfigured ? "LIVE_SIZING_LIMITS_NOT_CONFIGURED" : (riskSizing.blockReason ?? "RISK_SIZING_BLOCKED");
+        } else {
+            // Determine allowed order cap based on whether it's an initial entry or add-on
+            const orderCap = isAddOn ? maxAddonNotionalUsdt : maxOrderNotionalUsdt;
+
+            if (isAddOn) {
+                if (currentAddonCount >= maxAddonCount) {
+                    min_order_check_passed = false;
+                    min_order_block_reason = "MAX_ADDON_COUNT_EXCEEDED";
+                } else if ((v2State as any).addOnPolicyAllowed === false) {
+                    min_order_check_passed = false;
+                    min_order_block_reason = (v2State as any).addOnPolicyReason ?? "ADDON_POLICY_FORBIDDEN";
+                }
+            }
+
+            if (min_order_check_passed) {
+                // Calculate raw requested order notional from sizing algorithm
+                const rawNotionalUsdt = (stageMarginKrwAfter / 1400) * appliedLeverage;
+                // Apply cap: do not force size up to cap if algorithm calculated a smaller size
+                requestedOrderNotionalUsdt = Math.min(orderCap, Math.round(rawNotionalUsdt * 100) / 100);
+                if (requestedOrderNotionalUsdt <= 0) requestedOrderNotionalUsdt = orderCap;
+
+                // Enforce Symbol Exposure Cap (maxSymbolNotionalUsdt)
+                const remainingSymbolCap = Math.max(0, maxSymbolNotionalUsdt - existingSymbolNotionalUsdt);
+                if (existingSymbolNotionalUsdt >= maxSymbolNotionalUsdt) {
+                    min_order_check_passed = false;
+                    min_order_block_reason = "MAX_SYMBOL_NOTIONAL_EXCEEDED";
+                }
+
+                // Enforce Account Exposure Cap (maxAccountNotionalUsdt)
+                const remainingAccountCap = Math.max(0, maxAccountNotionalUsdt - existingAccountNotionalUsdt);
+                if (existingAccountNotionalUsdt >= maxAccountNotionalUsdt) {
+                    min_order_check_passed = false;
+                    min_order_block_reason = "MAX_ACCOUNT_NOTIONAL_EXCEEDED";
+                }
+
+                if (min_order_check_passed) {
+                    const notionalAfterSymbolCap = Math.min(requestedOrderNotionalUsdt, remainingSymbolCap);
+                    finalOrderNotionalUsdt = Math.min(notionalAfterSymbolCap, remainingAccountCap);
+
+                    if (finalOrderNotionalUsdt < 1.0) { // Minimum 1 USDT required for valid order
+                        min_order_check_passed = false;
+                        min_order_block_reason = "MIN_ORDER_SIZE_UNDERFLOW";
+                    }
+                }
+            }
+        }
+
+        if (!min_order_check_passed) {
             finalDecision = "REJECT";
             v2DecisionAfterPromotion = "REJECT";
             v2SideAfterPromotion = "none";
@@ -3772,60 +3817,31 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             riskSizing.stageMarginKrw = 0;
             stageMarginKrwAfter = 0;
             blockReason = min_order_block_reason;
-        }
-
-        if (finalDecision === "ENTER" && isMicroProbe) {
-            const maxProbeMarginKrw = liveMaxStageMarginKrwCap != null ? Math.min(35000, liveMaxStageMarginKrwCap) : 35000;
-            if (stageMarginKrwAfter < minProbeMarginKrw) {
-                stageMarginKrwAfter = minProbeMarginKrw;
-            }
-            if (stageMarginKrwAfter > maxProbeMarginKrw) {
-                stageMarginKrwAfter = maxProbeMarginKrw;
-                cap_applied = true;
-                cap_reason = "MICRO_PROBE_CAP";
-                cap_kind = "probe_margin_cap";
-            }
-
-            let reductionMultiplier = 1.0;
-            if (!sideZoneValid) reductionMultiplier *= 0.8;
-            if (!rangeEdgeExtreme && activeEngineRouting === "RANGE") reductionMultiplier *= 0.9;
-            if (!reversalConfirmed && shock !== "NONE") reductionMultiplier *= 0.85;
-
-            if (reductionMultiplier < 1.0) {
-                stageMarginKrwAfter = Math.round(stageMarginKrwAfter * reductionMultiplier);
-                if (stageMarginKrwAfter < minProbeMarginKrw) stageMarginKrwAfter = minProbeMarginKrw;
-            }
-        }
-
-        // live max cap ?꾩뿭 ?곸슜
-        if (finalDecision === "ENTER" && liveMaxStageMarginKrwCap != null && stageMarginKrwAfter > liveMaxStageMarginKrwCap) {
-            stageMarginKrwAfter = liveMaxStageMarginKrwCap;
-            cap_applied = true;
-            cap_reason = cap_reason ?? "LIVE_MAX_ORDER_NOTIONAL_CAP";
-            cap_kind = "live_max_notional_margin_cap_at_fixed_10x";
-        }
-
-        // 理쒖냼 二쇰Ц underflow 泥섎━
-        if (finalDecision === "ENTER" && stageMarginKrwAfter < minProbeMarginKrw) {
-            min_order_check_passed = false;
-            if (liveMaxNotionalUsdtFinal > 0 && liveMaxNotionalUsdtFinal < minNotionalUsdtRequiredAtFixed10x) {
-                min_order_block_reason = "LIVE_MAX_NOTIONAL_UNDER_MIN_PROBE";
-            } else {
-                min_order_block_reason = "MIN_ORDER_SIZE_UNDERFLOW";
-            }
-
-            finalDecision = "REJECT";
-            v2DecisionAfterPromotion = "REJECT";
-            v2SideAfterPromotion = "none";
-            riskSizing.isBlocked = true;
-            riskSizing.blockReason = min_order_block_reason;
-            riskSizing.stageMarginKrw = 0;
-            stageMarginKrwAfter = 0;
-            blockReason = min_order_block_reason;
-        } else if (finalDecision === "ENTER") {
+        } else {
+            stageMarginKrwAfter = Math.round((finalOrderNotionalUsdt / appliedLeverage) * 1400);
             riskSizing.stageMarginKrw = stageMarginKrwAfter;
         }
     }
+
+    // Required Proof Log: LIVE_ORDER_SIZING_AUTHORITY_PROOF
+    console.info(JSON.stringify({
+        event: "LIVE_ORDER_SIZING_AUTHORITY_PROOF",
+        symbol: String(input.symbol),
+        accountEquityUsdt,
+        availableBalanceUsdt,
+        existingAccountNotionalUsdt,
+        existingSymbolNotionalUsdt,
+        requestedOrderNotionalUsdt,
+        finalOrderNotionalUsdt,
+        maxOrderNotionalUsdt: maxOrderNotionalUsdt ?? null,
+        maxAddonNotionalUsdt: maxAddonNotionalUsdt ?? null,
+        maxSymbolNotionalUsdt: maxSymbolNotionalUsdt ?? null,
+        maxAccountNotionalUsdt: maxAccountNotionalUsdt ?? null,
+        currentAddonCount,
+        isAddon: isAddOn,
+        blocked: finalDecision !== "ENTER",
+        blockReason: blockReason ?? null
+    }));
 
     if (isDeadlockProbe && finalDecision !== "ENTER") {
         console.warn(JSON.stringify({
@@ -3985,21 +4001,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotion_reason: promotionReason,
             raw_env_OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: rawEnvLiveMaxNotionalUsdt,
             live_max_notional_source: liveMaxNotionalSource,
-            state_live_max_order_notional_usdt: Number.isFinite(stateLiveMaxOrderNotionalUsdt)
-                ? stateLiveMaxOrderNotionalUsdt
-                : null,
-            live_max_notional_usdt: liveMaxNotionalUsdtFinal,
-            live_max_notional_krw: liveMaxNotionalKrwFinal,
-            live_max_notional_usdt_final: liveMaxNotionalUsdtFinal,
-            live_max_notional_krw_final: liveMaxNotionalKrwFinal,
+            max_order_notional_usdt: maxOrderNotionalUsdt,
+            max_addon_notional_usdt: maxAddonNotionalUsdt,
+            max_symbol_notional_usdt: maxSymbolNotionalUsdt,
+            max_account_notional_usdt: maxAccountNotionalUsdt,
+            final_order_notional_usdt: finalOrderNotionalUsdt,
             applied_leverage: appliedLeverage,
             leverage_source: leverageSource,
             leverage_reason: leverageReason,
-            cap_kind,
+            cap_kind: cap_kind ?? "usdt_live_sizing_cap",
             min_margin_krw_required: minProbeMarginKrw,
-            min_notional_usdt_required_at_fixed_10x: minNotionalUsdtRequiredAtFixed10x,
-            cap_applied,
-            cap_reason,
+            cap_applied: cap_applied ?? false,
+            cap_reason: cap_reason ?? null,
             min_order_check_passed,
             min_order_block_reason
         }));
@@ -4017,21 +4030,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             is_micro_probe: isMicroProbe,
             raw_env_OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: rawEnvLiveMaxNotionalUsdt,
             live_max_notional_source: liveMaxNotionalSource,
-            state_live_max_order_notional_usdt: Number.isFinite(stateLiveMaxOrderNotionalUsdt)
-                ? stateLiveMaxOrderNotionalUsdt
-                : null,
-            live_max_notional_usdt: liveMaxNotionalUsdtFinal,
-            live_max_notional_krw: liveMaxNotionalKrwFinal,
-            live_max_notional_usdt_final: liveMaxNotionalUsdtFinal,
-            live_max_notional_krw_final: liveMaxNotionalKrwFinal,
+            max_order_notional_usdt: maxOrderNotionalUsdt,
+            max_addon_notional_usdt: maxAddonNotionalUsdt,
+            max_symbol_notional_usdt: maxSymbolNotionalUsdt,
+            max_account_notional_usdt: maxAccountNotionalUsdt,
+            final_order_notional_usdt: finalOrderNotionalUsdt,
             applied_leverage: appliedLeverage,
             leverage_source: leverageSource,
             leverage_reason: leverageReason,
-            cap_kind,
+            cap_kind: cap_kind ?? "usdt_live_sizing_cap",
             min_margin_krw_required: minProbeMarginKrw,
-            min_notional_usdt_required_at_fixed_10x: minNotionalUsdtRequiredAtFixed10x,
-            cap_applied,
-            cap_reason,
+            cap_applied: cap_applied ?? false,
+            cap_reason: cap_reason ?? null,
             min_order_check_passed,
             min_order_block_reason,
             side_zone_valid: sideZoneValid,
@@ -4946,8 +4956,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         decision: finalDecision,
         risk: {
             ...riskSizing,
-            isBlocked: hardBlockPresent,
-            blockReason: hardBlockReason,
+            isBlocked: hardBlockPresent || riskSizing.isBlocked || finalDecision === "REJECT",
+            blockReason: hardBlockReason ?? riskSizing.blockReason ?? blockReason ?? null,
             stageMarginKrw: finalDecision === "ENTER" ? stageMarginKrwAfter : 0,
             exposureNotionalKrw: (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) * riskSizing.appliedLeverage
         },

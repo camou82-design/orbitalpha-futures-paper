@@ -224,11 +224,44 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
   const okxSimulatedTradingHeaderEnabled = okxAuthMode === "demo";
   const okxLiveMaxOrderNotionalUsdt = (() => {
     const raw = env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT;
-    if (raw === undefined || raw.trim() === "") return 0;
+    if (raw === undefined || raw.trim() === "") return null;
     const n = Number(raw);
-    if (!Number.isFinite(n) || n <= 0) return 0;
+    if (!Number.isFinite(n) || n <= 0) return null;
     return Math.min(10_000, n);
   })();
+
+  const okxLiveMaxAddonNotionalUsdt = (() => {
+    const raw = env.OKX_LIVE_MAX_ADDON_NOTIONAL_USDT;
+    if (raw === undefined || raw.trim() === "") return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return Math.min(10_000, n);
+  })();
+
+  const okxLiveMaxSymbolNotionalUsdt = (() => {
+    const raw = env.OKX_LIVE_MAX_SYMBOL_NOTIONAL_USDT;
+    if (raw === undefined || raw.trim() === "") return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return Math.min(10_000, n);
+  })();
+
+  const okxLiveMaxAccountNotionalUsdt = (() => {
+    const raw = env.OKX_LIVE_MAX_ACCOUNT_NOTIONAL_USDT;
+    if (raw === undefined || raw.trim() === "") return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return Math.min(10_000, n);
+  })();
+
+  const okxLiveMaxAddonCount = (() => {
+    const raw = env.OKX_LIVE_MAX_ADDON_COUNT;
+    if (raw === undefined || raw.trim() === "") return null;
+    const n = parseInt(raw, 10);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return n;
+  })();
+
   const okxLiveStaticNotionalCapEnabled = parseBool(env.OKX_LIVE_STATIC_NOTIONAL_CAP_ENABLED, true);
   const okxLiveUsableBalanceRatio = (() => {
     const n = parseNumber(env.OKX_LIVE_USABLE_BALANCE_RATIO, 0.95);
@@ -309,6 +342,10 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     okxAuthReady,
     okxSimulatedTradingHeaderEnabled,
     okxLiveMaxOrderNotionalUsdt,
+    okxLiveMaxAddonNotionalUsdt,
+    okxLiveMaxSymbolNotionalUsdt,
+    okxLiveMaxAccountNotionalUsdt,
+    okxLiveMaxAddonCount,
     okxLiveStaticNotionalCapEnabled,
     okxLiveUsableBalanceRatio,
     okxBaseUrl,

@@ -179,7 +179,11 @@ export interface LegacyConfigAdapter {
     paperMaxOpenPositions: number;
     paperReentryCooldownMs: number;
     baseSizeUsd: number;
-    okxLiveMaxOrderNotionalUsdt: number;
+    okxLiveMaxOrderNotionalUsdt: number | null;
+    okxLiveMaxAddonNotionalUsdt?: number | null;
+    okxLiveMaxSymbolNotionalUsdt?: number | null;
+    okxLiveMaxAccountNotionalUsdt?: number | null;
+    okxLiveMaxAddonCount?: number | null;
 }
 
 export interface LegacyPositionAdapter {
@@ -242,7 +246,15 @@ export interface EngineV2Input {
         okxApiSecretPresent?: boolean;
         okxPassphrasePresent?: boolean;
         okxSimulatedTradingHeaderEnabled?: boolean;
-        liveMaxOrderNotionalUsdt?: number;
+        liveMaxOrderNotionalUsdt?: number | null;
+        liveMaxAddonNotionalUsdt?: number | null;
+        liveMaxSymbolNotionalUsdt?: number | null;
+        liveMaxAccountNotionalUsdt?: number | null;
+        liveMaxAddonCount?: number | null;
+        accountEquityUsdt?: number;
+        availableBalanceUsdt?: number;
+        existingAccountNotionalUsdt?: number;
+        existingSymbolNotionalUsdt?: number;
         freshTickBarrierActive: boolean;
         /** Same tick / post-barrier: execution must not proceed until cleared at end of tick. */
         freshTickExecutionBlocked?: boolean;
@@ -332,7 +344,11 @@ export interface EngineV2ConfigAdapter {
     paperMaxOpenPositions: number;
     paperReentryCooldownMs: number;
     baseSizeUsd: number;
-    okxLiveMaxOrderNotionalUsdt: number;
+    okxLiveMaxOrderNotionalUsdt: number | null;
+    okxLiveMaxAddonNotionalUsdt?: number | null;
+    okxLiveMaxSymbolNotionalUsdt?: number | null;
+    okxLiveMaxAccountNotionalUsdt?: number | null;
+    okxLiveMaxAddonCount?: number | null;
 }
 
 /** Final V2 Decision Object - Completely Independent Output */

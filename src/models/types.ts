@@ -187,9 +187,17 @@ export type EngineConfig = Readonly<{
   okxAuthReady: boolean;
   /** Include `x-simulated-trading: 1` for OKX requests (demo only). */
   okxSimulatedTradingHeaderEnabled: boolean;
-  /** Live signed submit guard: max order notional in USDT. */
-  okxLiveMaxOrderNotionalUsdt: number;
-  /** Whether to use static 5 USDT cap or dynamic balance-based cap (default true). */
+  /** Live signed submit guard: max order notional in USDT (null if not explicitly configured). */
+  okxLiveMaxOrderNotionalUsdt: number | null;
+  /** Live signed submit guard: max add-on order notional in USDT (null if not explicitly configured). */
+  okxLiveMaxAddonNotionalUsdt: number | null;
+  /** Live signed submit guard: max total symbol notional exposure in USDT (null if not explicitly configured). */
+  okxLiveMaxSymbolNotionalUsdt: number | null;
+  /** Live signed submit guard: max total account notional exposure in USDT (null if not explicitly configured). */
+  okxLiveMaxAccountNotionalUsdt: number | null;
+  /** Live signed submit guard: max add-on count per symbol (null if not explicitly configured). */
+  okxLiveMaxAddonCount: number | null;
+  /** Whether to use static cap or dynamic balance-based cap (default true). */
   okxLiveStaticNotionalCapEnabled: boolean;
   /** Fraction of available balance to use for dynamic capping (default 0.95). */
   okxLiveUsableBalanceRatio: number;
