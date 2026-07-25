@@ -3724,10 +3724,104 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const accountEquityUsdt = typeof rawAccountEquity === "number" && Number.isFinite(rawAccountEquity) ? rawAccountEquity : null;
     const availableBalanceUsdt = typeof rawAvailableBalance === "number" && Number.isFinite(rawAvailableBalance) ? rawAvailableBalance : null;
 
+    // OKX actual positions & pending orders readiness
+    const liveBalanceReady = (v2State as any).liveBalanceReady === true || (input.state as any).liveBalanceReady === true;
+    const okxActualPositionsReady = (v2State as any).okxActualPositionsReady === true || (input.state as any).okxActualPositionsReady === true;
+    const actualAccountNotionalUsdtReady = (v2State as any).actualAccountNotionalUsdtReady === true || (input.state as any).actualAccountNotionalUsdtReady === true;
+    const okxPendingOrdersReady = (v2State as any).okxPendingOrdersReady === true || (input.state as any).okxPendingOrdersReady === true;
+
+    // Raw payloads
+    const okxActualPositionsRaw = (v2State as any).okxActualPositions ?? (input.state as any).okxActualPositions;
+    const pendingOrdersNotionalRaw = (v2State as any).okxPendingOrdersNotionalUsdt ?? (input.state as any).okxPendingOrdersNotionalUsdt;
+    const pendingSymbolNotionalRaw = (v2State as any).okxPendingSymbolNotionalUsdt ?? (input.state as any).okxPendingSymbolNotionalUsdt;
+
+    // Timestamps
+    const balanceFetchedAt = (v2State as any).balanceFetchedAt ?? (input.state as any).balanceFetchedAt;
+    const positionsFetchedAt = (v2State as any).positionsFetchedAt ?? (input.state as any).positionsFetchedAt;
+    const pendingOrdersFetchedAt = (v2State as any).pendingOrdersFetchedAt ?? (input.state as any).pendingOrdersFetchedAt;
+
+    // Timestamp & freshness validation
+    const maxDataAgeMs = 30000;
+    const maxDataSkewMs = 10000;
+    const nowMs = input.now ?? Date.now();
+
+    const timestampsPresent =
+        typeof balanceFetchedAt === "number" && Number.isFinite(balanceFetchedAt) && balanceFetchedAt > 0 &&
+        typeof positionsFetchedAt === "number" && Number.isFinite(positionsFetchedAt) && positionsFetchedAt > 0 &&
+        typeof pendingOrdersFetchedAt === "number" && Number.isFinite(pendingOrdersFetchedAt) && pendingOrdersFetchedAt > 0;
+
+    const dataFresh =
+        timestampsPresent &&
+        (nowMs - balanceFetchedAt) <= maxDataAgeMs &&
+        (nowMs - positionsFetchedAt) <= maxDataAgeMs &&
+        (nowMs - pendingOrdersFetchedAt) <= maxDataAgeMs;
+
+    const dataSynced =
+        timestampsPresent &&
+        (Math.max(balanceFetchedAt, positionsFetchedAt, pendingOrdersFetchedAt) -
+         Math.min(balanceFetchedAt, positionsFetchedAt, pendingOrdersFetchedAt)) <= maxDataSkewMs;
+
+    // Validate OKX actual positions payload array structure and content
+    let okxPositionsValid = okxActualPositionsReady && Array.isArray(okxActualPositionsRaw);
+    const validPositionsList: Array<{ symbol: string; sizeUsd: number; side: string }> = [];
+
+    if (okxPositionsValid) {
+        for (const p of okxActualPositionsRaw) {
+            if (!p || typeof p.symbol !== "string" || !p.symbol) {
+                okxPositionsValid = false;
+                break;
+            }
+            const rawNotional = p.sizeUsd ?? p.notionalUsd ?? (p as any).notionalUSDT;
+            if (typeof rawNotional !== "number" || !Number.isFinite(rawNotional) || rawNotional < 0) {
+                okxPositionsValid = false;
+                break;
+            }
+            const rawSide = String(p.side ?? "").toUpperCase();
+            if (rawSide !== "LONG" && rawSide !== "SHORT" && rawSide !== "BUY" && rawSide !== "SELL" && rawSide !== "NONE") {
+                okxPositionsValid = false;
+                break;
+            }
+            validPositionsList.push({
+                symbol: p.symbol,
+                sizeUsd: Math.abs(rawNotional),
+                side: rawSide === "BUY" ? "LONG" : rawSide === "SELL" ? "SHORT" : rawSide
+            });
+        }
+    }
+
+    const pendingOrdersValid =
+        okxPendingOrdersReady &&
+        (pendingOrdersNotionalRaw == null || (typeof pendingOrdersNotionalRaw === "number" && Number.isFinite(pendingOrdersNotionalRaw) && pendingOrdersNotionalRaw >= 0)) &&
+        (pendingSymbolNotionalRaw == null || (typeof pendingSymbolNotionalRaw === "number" && Number.isFinite(pendingSymbolNotionalRaw) && pendingSymbolNotionalRaw >= 0));
+
+    // Ledger vs OKX Actual Position Matching (Add-on Authority)
+    const normSide = (s?: string) => {
+        const u = String(s ?? "").toUpperCase();
+        return u === "BUY" ? "LONG" : u === "SELL" ? "SHORT" : u;
+    };
     const currentPositions = Array.isArray(v2State.currentPositions) ? v2State.currentPositions : [];
-    const sameSymbolPos = currentPositions.find((p) => p && p.symbol === input.symbol) ?? null;
-    const isAddOn = sameSymbolPos != null;
-    const currentAddonCount = isAddOn ? ((sameSymbolPos as any).addonCount ?? Math.max(0, ((sameSymbolPos.entryStage ?? 1) - 1))) : 0;
+    const ledgerPos = currentPositions.find((p) => p && p.symbol === input.symbol) ?? null;
+    const actualPos = validPositionsList.find((p) => p && p.symbol === input.symbol && p.sizeUsd > 0) ?? null;
+
+    let isAddOn = false;
+    let positionMismatch = false;
+
+    if (ledgerPos != null && actualPos != null) {
+        if (normSide(ledgerPos.side) === normSide(actualPos.side)) {
+            isAddOn = true;
+        } else {
+            positionMismatch = true;
+        }
+    } else if (ledgerPos != null && actualPos == null) {
+        positionMismatch = true;
+    } else if (actualPos != null && ledgerPos == null) {
+        positionMismatch = true;
+    } else {
+        isAddOn = false;
+    }
+
+    const sameSymbolPos = ledgerPos;
+    const currentAddonCount = isAddOn ? ((sameSymbolPos as any).addonCount ?? Math.max(0, (((sameSymbolPos as any).entryStage ?? 1) - 1))) : 0;
 
     let requestedOrderNotionalUsdt = 0;
     let finalOrderNotionalUsdt = 0;
@@ -3768,21 +3862,26 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             maxAccountNotionalUsdt != null && maxAccountNotionalUsdt > 0 &&
             maxAddonCount != null && maxAddonCount >= 0;
 
-        // Fail-Closed Live Readiness verification
-        const liveBalanceReady = (v2State as any).liveBalanceReady === true || (input.state as any).liveBalanceReady === true;
-        const okxActualPositionsReady = (v2State as any).okxActualPositionsReady === true || (input.state as any).okxActualPositionsReady === true;
-        const actualAccountNotionalUsdtReady = (v2State as any).actualAccountNotionalUsdtReady === true || (input.state as any).actualAccountNotionalUsdtReady === true;
-
         const liveReadinessPassed =
             liveBalanceReady &&
             accountEquityUsdt !== null && accountEquityUsdt > 0 &&
             availableBalanceUsdt !== null && availableBalanceUsdt >= 0 &&
             okxActualPositionsReady &&
-            actualAccountNotionalUsdtReady;
+            actualAccountNotionalUsdtReady &&
+            okxPendingOrdersReady &&
+            okxPositionsValid &&
+            pendingOrdersValid &&
+            timestampsPresent &&
+            dataFresh &&
+            dataSynced &&
+            !positionMismatch;
 
         if (isLiveSignedOrderAttempt && !limitsConfigured) {
             min_order_check_passed = false;
             min_order_block_reason = "LIVE_SIZING_LIMITS_NOT_CONFIGURED";
+        } else if (isLiveSignedOrderAttempt && positionMismatch) {
+            min_order_check_passed = false;
+            min_order_block_reason = "POSITION_AUTHORITY_MISMATCH";
         } else if (isLiveSignedOrderAttempt && !liveReadinessPassed) {
             min_order_check_passed = false;
             min_order_block_reason = "LIVE_ACCOUNT_AUTHORITY_NOT_READY";
@@ -3791,17 +3890,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             min_order_block_reason = riskSizing.blockReason ?? "RISK_SIZING_BLOCKED";
         } else if (isLiveSignedOrderAttempt) {
             // Live Signed Order Attempt: Compute exposures pure in USDT from OKX actual positions + pending orders
-            const okxActualPositions: Array<{ symbol: string; sizeUsd: number; side: string }> =
-                (v2State as any).okxActualPositions ?? (input.state as any).okxActualPositions ?? [];
-            const pendingOrdersNotionalUsdt = (v2State as any).okxPendingOrdersNotionalUsdt ?? (input.state as any).okxPendingOrdersNotionalUsdt ?? 0;
-            const pendingSymbolNotionalUsdt = (v2State as any).okxPendingSymbolNotionalUsdt ?? (input.state as any).okxPendingSymbolNotionalUsdt ?? 0;
+            const pendingOrdersNotionalUsdt = (pendingOrdersNotionalRaw ?? 0) as number;
+            const pendingSymbolNotionalUsdt = (pendingSymbolNotionalRaw ?? 0) as number;
 
             existingAccountNotionalUsdt =
-                okxActualPositions.reduce((acc, p) => acc + Math.max(0, p?.sizeUsd ?? 0), 0) + pendingOrdersNotionalUsdt;
+                validPositionsList.reduce((acc, p) => acc + p.sizeUsd, 0) + pendingOrdersNotionalUsdt;
             existingSymbolNotionalUsdt =
-                okxActualPositions
+                validPositionsList
                     .filter((p) => p && p.symbol === input.symbol)
-                    .reduce((acc, p) => acc + Math.max(0, p?.sizeUsd ?? 0), 0) + pendingSymbolNotionalUsdt;
+                    .reduce((acc, p) => acc + p.sizeUsd, 0) + pendingSymbolNotionalUsdt;
 
             const orderCap = isAddOn ? maxAddonNotionalUsdt! : maxOrderNotionalUsdt!;
 
@@ -5390,6 +5487,21 @@ export function adaptV2Input(
         pumpState?: string | null;
         pump_state?: string | null;
         okxActualSide?: string;
+        okxAuthMode?: "disabled" | "demo" | "live";
+        okxExchangeAuthOptIn?: boolean;
+        okxLiveEnabled?: boolean;
+        liveBalanceReady?: boolean;
+        accountEquityUsdt?: number;
+        availableBalanceUsdt?: number;
+        okxActualPositionsReady?: boolean;
+        actualAccountNotionalUsdtReady?: boolean;
+        okxActualPositions?: Array<{ symbol: string; sizeUsd?: number; notionalUsd?: number; side: string }>;
+        okxPendingOrdersReady?: boolean;
+        okxPendingOrdersNotionalUsdt?: number;
+        okxPendingSymbolNotionalUsdt?: number;
+        balanceFetchedAt?: number;
+        positionsFetchedAt?: number;
+        pendingOrdersFetchedAt?: number;
     },
     v1Result: LegacyResultAdapter,
     recentCandles?: import("../models/types").Candle[]
@@ -5407,11 +5519,11 @@ export function adaptV2Input(
             boxPos:
                 typeof snapshot.boxPosDiag === "number" && Number.isFinite(snapshot.boxPosDiag)
                     ? snapshot.boxPosDiag
-                    : 0.5,
-            rangeConfidence: snapshot.rangeConfidenceDiag ?? 0,
+                    : (snapshot.boxPos ?? 0.5),
+            rangeConfidence: snapshot.rangeConfidenceDiag ?? snapshot.rangeConfidence ?? 0,
             ema20: snapshot.ema20 ?? 0,
-            emaGap: snapshot.emaGapDiag ?? 0,
-            volatilityProxy: snapshot.volatilityProxyDiag ?? 0,
+            emaGap: snapshot.emaGapDiag ?? snapshot.emaGap ?? 0,
+            volatilityProxy: snapshot.volatilityProxyDiag ?? snapshot.volatilityProxy ?? 0,
             boxCohesion01: snapshot.boxCohesion01 ?? snapshot.boxCohesionDiag ?? 0,
             breakoutFailureRate: snapshot.breakoutFailureRate ?? snapshot.breakoutFailureRateDiag ?? 0,
             trendWeaknessScore: snapshot.trendWeaknessScore ?? snapshot.trendWeaknessDiag ?? 0,
@@ -5445,7 +5557,11 @@ export function adaptV2Input(
             paperMaxOpenPositions: config.paperMaxOpenPositions,
             paperReentryCooldownMs: config.paperReentryCooldownMs,
             baseSizeUsd: config.baseSizeUsd,
-            okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt
+            okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt,
+            okxLiveMaxAddonNotionalUsdt: config.okxLiveMaxAddonNotionalUsdt ?? null,
+            okxLiveMaxSymbolNotionalUsdt: config.okxLiveMaxSymbolNotionalUsdt ?? null,
+            okxLiveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt ?? null,
+            okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null
         },
         state: {
             currentPositions: state.currentPositions.map((p: LegacyPositionAdapter) => {
@@ -5496,13 +5612,28 @@ export function adaptV2Input(
             symbolExposureNotionalCapKrw: state.symbolExposureNotionalCapKrw,
             finalAddonNotionalUsdt: (state as any).finalAddonNotionalUsdt,
             addonMaxNotionalUsdt: (state as any).addonMaxNotionalUsdt,
-            okxActualSide: state.okxActualSide
+            okxActualSide: state.okxActualSide,
+            okxAuthMode: state.okxAuthMode,
+            okxExchangeAuthOptIn: state.okxExchangeAuthOptIn,
+            okxLiveEnabled: state.okxLiveEnabled,
+            liveBalanceReady: state.liveBalanceReady,
+            accountEquityUsdt: state.accountEquityUsdt,
+            availableBalanceUsdt: state.availableBalanceUsdt,
+            okxActualPositionsReady: state.okxActualPositionsReady,
+            actualAccountNotionalUsdtReady: state.actualAccountNotionalUsdtReady,
+            okxActualPositions: state.okxActualPositions,
+            okxPendingOrdersReady: state.okxPendingOrdersReady,
+            okxPendingOrdersNotionalUsdt: state.okxPendingOrdersNotionalUsdt,
+            okxPendingSymbolNotionalUsdt: state.okxPendingSymbolNotionalUsdt,
+            balanceFetchedAt: state.balanceFetchedAt,
+            positionsFetchedAt: state.positionsFetchedAt,
+            pendingOrdersFetchedAt: state.pendingOrdersFetchedAt
         },
         v1Result: {
-            regime: v1Result.decision?.regime_state ?? "UNDEFINED",
-            decision: v1Result.decision?.final_decision ?? "SKIP",
-            side: v1Result.intentSide ?? "none",
-            isBlocked: !!v1Result.decision?.reject_reason
+            regime: v1Result.decision?.regime_state ?? (v1Result as any).regime ?? "UNDEFINED",
+            decision: v1Result.decision?.final_decision ?? (v1Result as any).decision ?? "SKIP",
+            side: v1Result.intentSide ?? (v1Result as any).side ?? "none",
+            isBlocked: !!(v1Result.decision?.reject_reason ?? (v1Result as any).isBlocked)
         }
     };
 }

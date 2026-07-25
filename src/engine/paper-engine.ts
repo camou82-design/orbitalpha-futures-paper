@@ -87,6 +87,8 @@ import { evaluateMarketModeSelector } from "./mode-selector";
 import { evaluateRiskExposure } from "./risk-exposure";
 import { buildPaperExplanation } from "./explanation-layer";
 import { runEngineV2, adaptV2Input, shouldEmitV2Proof } from "../engine-v2/index";
+import { normalizeOkxSwapContractsFromNotional, formatOkxSwapContractSzString, okxInstrumentSzDecimals, type OkxSwapInstrumentSizing } from "../engine-v2/okx-swap-sizing";
+export { normalizeOkxSwapContractsFromNotional };
 import { getPaperLoopIntervalMs } from "../config/env";
 import {
   EngineV2Input,
@@ -723,13 +725,6 @@ function isOrderEngineOwned(ord: { clOrdId?: string; ordId?: string }): boolean 
   return ord.clOrdId.startsWith("p");
 }
 
-type OkxSwapInstrumentSizing = Readonly<{
-  lotSz: number;
-  minSz: number;
-  ctVal: number;
-  ctValCcy: string;
-}>;
-
 function parseOkxSwapInstrumentSizing(inst: Record<string, unknown>): OkxSwapInstrumentSizing | null {
   const lotSz = Number(inst.lotSz);
   const minSz = Number(inst.minSz);
@@ -741,66 +736,7 @@ function parseOkxSwapInstrumentSizing(inst: Record<string, unknown>): OkxSwapIns
   return { lotSz, minSz, ctVal, ctValCcy };
 }
 
-function okxInstrumentSzDecimals(n: number): number {
-  if (!Number.isFinite(n)) return 0;
-  const s = String(n);
-  if (/e/i.test(s)) {
-    const x = Number.parseFloat(s);
-    const t = x.toFixed(12);
-    const i = t.indexOf(".");
-    return i < 0 ? 0 : Math.min(12, t.replace(/0+$/, "").length - i - 1);
-  }
-  const i = s.indexOf(".");
-  return i < 0 ? 0 : Math.min(12, s.length - i - 1);
-}
 
-function formatOkxSwapContractSzString(n: number, lotSz: number): string {
-  const d = Math.max(okxInstrumentSzDecimals(lotSz), okxInstrumentSzDecimals(n));
-  let out = n.toFixed(Math.min(Math.max(d, 0), 12));
-  if (out.includes(".")) out = out.replace(/\.?0+$/, "");
-  return out.length > 0 ? out : "0";
-}
-
-/** Linear USDT-margined SWAP: contracts ??notionalUSDT / (lastPrice * ctVal); sz must be lotSz multiple and ??minSz. */
-function normalizeOkxSwapContractsFromNotional(args: {
-  desiredNotionalUsdt: number;
-  lastPrice: number;
-  sizing: OkxSwapInstrumentSizing;
-}): {
-  raw_contracts: number;
-  normalized_contracts: number;
-  normalized_sz: string;
-  sz_lot_multiple_ok: boolean;
-  min_size_ok: boolean;
-} {
-  const { sizing } = args;
-  const denom = args.lastPrice * sizing.ctVal;
-  const raw_contracts = denom > 1e-24 ? args.desiredNotionalUsdt / denom : 0;
-  const lot = sizing.lotSz;
-  let steps = Math.floor(raw_contracts / lot + 1e-12);
-  let normalized_contracts = steps * lot;
-  while (denom > 0 && steps > 0 && normalized_contracts * denom > args.desiredNotionalUsdt + 1e-9) {
-    steps--;
-    normalized_contracts = steps * lot;
-  }
-  normalized_contracts = Number(
-    normalized_contracts.toFixed(Math.min(12, Math.max(okxInstrumentSzDecimals(lot), okxInstrumentSzDecimals(normalized_contracts))))
-  );
-  const normalized_sz = formatOkxSwapContractSzString(normalized_contracts, lot);
-  const roundTol = Math.max(1e-10, Math.abs(normalized_contracts) * 1e-9);
-  const sz_lot_multiple_ok =
-    steps >= 0 &&
-    Number.isFinite(normalized_contracts) &&
-    Math.abs(normalized_contracts - steps * lot) <= roundTol + 1e-12;
-  const min_size_ok = normalized_contracts + 1e-12 >= sizing.minSz;
-  return {
-    raw_contracts,
-    normalized_contracts,
-    normalized_sz,
-    sz_lot_multiple_ok,
-    min_size_ok
-  };
-}
 
 
 function isBtcEthSampleSymbol(symbol: string): boolean {
@@ -4397,7 +4333,17 @@ export class PaperEngine {
           this.buildEntryQualityProfilesForV2(),
           this.serverTradeControlState,
           this.reconcileSafetyCloseOnly,
-          this.lastLivePositionsPayload
+          this.lastLivePositionsPayload,
+          this.liveBalanceReady,
+          this.okxWalletBalanceUsdt,
+          this.okxAvailableBalanceUsdt,
+          this.okxPositionsOk,
+          this.okxOrderSubmitOk,
+          0,
+          0,
+          this.lastSignedRestSuccessAt ?? fetchedAt,
+          this.lastSignedRestSuccessAt ?? fetchedAt,
+          this.lastSignedRestSuccessAt ?? fetchedAt
         ),
         v2Mode
       });
@@ -17580,7 +17526,11 @@ function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
     baseSizeUsd: computePaperSizingAnchorUsd(config),
     maxOpenPositions: config.paperMaxOpenPositions,
     reentryCooldownMs: config.paperReentryCooldownMs,
-    okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt ?? 0
+    okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt ?? null,
+    okxLiveMaxAddonNotionalUsdt: config.okxLiveMaxAddonNotionalUsdt ?? null,
+    okxLiveMaxSymbolNotionalUsdt: config.okxLiveMaxSymbolNotionalUsdt ?? null,
+    okxLiveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt ?? null,
+    okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null
   };
 }
 
@@ -17601,7 +17551,17 @@ function buildV2StateBridge(
   },
   serverTradeControlState: ServerTradeControlState,
   reconcileSafeModeActive: boolean,
-  lastLivePositionsPayload?: ReadonlyArray<Record<string, unknown>> | null
+  lastLivePositionsPayload?: ReadonlyArray<Record<string, unknown>> | null,
+  liveBalanceReady?: boolean,
+  okxWalletBalanceUsdt?: number | null,
+  okxAvailableBalanceUsdt?: number | null,
+  okxPositionsOk?: boolean,
+  okxPendingOrdersReady?: boolean,
+  pendingOrdersNotionalUsdt?: number,
+  pendingSymbolNotionalUsdt?: number,
+  balanceFetchedAt?: number,
+  positionsFetchedAt?: number,
+  pendingOrdersFetchedAt?: number
 ): V2BridgeState {
   let okxActualSide = "none";
   if (lastLivePositionsPayload && Array.isArray(lastLivePositionsPayload)) {
@@ -17613,6 +17573,21 @@ function buildV2StateBridge(
       }
     }
   }
+
+  const okxActualPositions = Array.isArray(lastLivePositionsPayload)
+    ? lastLivePositionsPayload.map((p) => {
+        const hit = okxSwapRowToLedgerKey(p as Record<string, unknown>);
+        const symbol = hit?.symbol ?? String((p as any).instId ?? "").replace("-SWAP", "");
+        const side = hit?.side ?? String((p as any).posSide ?? "").toLowerCase();
+        const rawNotional = Number((p as any).notionalUsd ?? (p as any).notionalUSDT ?? (p as any).sizeUsd ?? 0);
+        return {
+          symbol,
+          side: side === "long" ? "LONG" : side === "short" ? "SHORT" : side.toUpperCase(),
+          sizeUsd: Math.abs(rawNotional),
+          notionalUsd: Math.abs(rawNotional)
+        };
+      })
+    : undefined;
 
   return {
     currentPositions: opensAfterClose
@@ -17645,8 +17620,28 @@ function buildV2StateBridge(
     okxApiSecretPresent: config.okxAuthMode === "live" ? config.okxApiSecret.length > 0 : config.okxDemoApiSecret.length > 0,
     okxPassphrasePresent: config.okxAuthMode === "live" ? config.okxPassphrase.length > 0 : config.okxDemoPassphrase.length > 0,
     okxSimulatedTradingHeaderEnabled: config.okxSimulatedTradingHeaderEnabled,
-    // Snapshot from EngineConfig at process start; may be 0 if env was unset at load time. V2 live cap proof uses process.env in runEngineV2.
-    liveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt ?? 0,
+    liveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt ?? null,
+    liveMaxAddonNotionalUsdt: config.okxLiveMaxAddonNotionalUsdt ?? null,
+    liveMaxSymbolNotionalUsdt: config.okxLiveMaxSymbolNotionalUsdt ?? null,
+    liveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt ?? null,
+    liveMaxAddonCount: config.okxLiveMaxAddonCount ?? null,
+    okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt ?? null,
+    okxLiveMaxAddonNotionalUsdt: config.okxLiveMaxAddonNotionalUsdt ?? null,
+    okxLiveMaxSymbolNotionalUsdt: config.okxLiveMaxSymbolNotionalUsdt ?? null,
+    okxLiveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt ?? null,
+    okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null,
+    liveBalanceReady: liveBalanceReady ?? false,
+    accountEquityUsdt: okxWalletBalanceUsdt ?? undefined,
+    availableBalanceUsdt: okxAvailableBalanceUsdt ?? undefined,
+    okxActualPositionsReady: okxPositionsOk ?? Array.isArray(lastLivePositionsPayload),
+    actualAccountNotionalUsdtReady: okxPositionsOk ?? Array.isArray(lastLivePositionsPayload),
+    okxActualPositions,
+    okxPendingOrdersReady: okxPendingOrdersReady ?? true,
+    okxPendingOrdersNotionalUsdt: pendingOrdersNotionalUsdt ?? 0,
+    okxPendingSymbolNotionalUsdt: pendingSymbolNotionalUsdt ?? 0,
+    balanceFetchedAt,
+    positionsFetchedAt,
+    pendingOrdersFetchedAt,
     freshTickBarrierActive,
     freshTickExecutionBlocked,
     freshTickCompletedCycles,

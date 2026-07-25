@@ -137,10 +137,14 @@ export interface LegacySnapshotAdapter {
     boxHigh: number | null;
     boxLow: number | null;
     boxPosDiag: number | null;
+    boxPos?: number | null;
     rangeConfidenceDiag: number | null;
+    rangeConfidence?: number | null;
     ema20: number | null;
     emaGapDiag: number | null;
+    emaGap?: number | null;
     volatilityProxyDiag: number | null;
+    volatilityProxy?: number | null;
     boxCohesion01?: number;
     boxCohesionDiag?: number;
     breakoutFailureRate?: number;
@@ -254,13 +258,17 @@ export interface EngineV2Input {
         liveBalanceReady?: boolean;
         okxActualPositionsReady?: boolean;
         actualAccountNotionalUsdtReady?: boolean;
-        okxActualPositions?: Array<{ symbol: string; sizeUsd: number; side: string }>;
+        okxActualPositions?: Array<{ symbol: string; sizeUsd?: number; notionalUsd?: number; side: string }>;
+        okxPendingOrdersReady?: boolean;
         okxPendingOrdersNotionalUsdt?: number;
         okxPendingSymbolNotionalUsdt?: number;
         accountEquityUsdt?: number;
         availableBalanceUsdt?: number;
         existingAccountNotionalUsdt?: number;
         existingSymbolNotionalUsdt?: number;
+        balanceFetchedAt?: number;
+        positionsFetchedAt?: number;
+        pendingOrdersFetchedAt?: number;
         freshTickBarrierActive: boolean;
         /** Same tick / post-barrier: execution must not proceed until cleared at end of tick. */
         freshTickExecutionBlocked?: boolean;
@@ -439,7 +447,11 @@ export interface V2BridgeConfig {
     baseSizeUsd: number;
     maxOpenPositions: number;
     reentryCooldownMs: number;
-    okxLiveMaxOrderNotionalUsdt: number;
+    okxLiveMaxOrderNotionalUsdt: number | null;
+    okxLiveMaxAddonNotionalUsdt?: number | null;
+    okxLiveMaxSymbolNotionalUsdt?: number | null;
+    okxLiveMaxAccountNotionalUsdt?: number | null;
+    okxLiveMaxAddonCount?: number | null;
 }
 
 export interface V2BridgePosition {
@@ -475,7 +487,28 @@ export interface V2BridgeState {
     okxApiSecretPresent?: boolean;
     okxPassphrasePresent?: boolean;
     okxSimulatedTradingHeaderEnabled?: boolean;
-    liveMaxOrderNotionalUsdt?: number;
+    liveMaxOrderNotionalUsdt?: number | null;
+    liveMaxAddonNotionalUsdt?: number | null;
+    liveMaxSymbolNotionalUsdt?: number | null;
+    liveMaxAccountNotionalUsdt?: number | null;
+    liveMaxAddonCount?: number | null;
+    okxLiveMaxOrderNotionalUsdt?: number | null;
+    okxLiveMaxAddonNotionalUsdt?: number | null;
+    okxLiveMaxSymbolNotionalUsdt?: number | null;
+    okxLiveMaxAccountNotionalUsdt?: number | null;
+    okxLiveMaxAddonCount?: number | null;
+    liveBalanceReady?: boolean;
+    accountEquityUsdt?: number;
+    availableBalanceUsdt?: number;
+    okxActualPositionsReady?: boolean;
+    actualAccountNotionalUsdtReady?: boolean;
+    okxActualPositions?: Array<{ symbol: string; sizeUsd?: number; notionalUsd?: number; side: string }>;
+    okxPendingOrdersReady?: boolean;
+    okxPendingOrdersNotionalUsdt?: number;
+    okxPendingSymbolNotionalUsdt?: number;
+    balanceFetchedAt?: number;
+    positionsFetchedAt?: number;
+    pendingOrdersFetchedAt?: number;
     freshTickBarrierActive: boolean;
     /** Paper engine: block V2 ENTER until fresh-tick gate clears (includes same-tick post-cycle race). */
     freshTickExecutionBlocked?: boolean;
