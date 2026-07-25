@@ -777,8 +777,12 @@ function normalizeOkxSwapContractsFromNotional(args: {
   const denom = args.lastPrice * sizing.ctVal;
   const raw_contracts = denom > 1e-24 ? args.desiredNotionalUsdt / denom : 0;
   const lot = sizing.lotSz;
-  const steps = Math.floor(raw_contracts / lot + 1e-12);
+  let steps = Math.floor(raw_contracts / lot + 1e-12);
   let normalized_contracts = steps * lot;
+  while (denom > 0 && steps > 0 && normalized_contracts * denom > args.desiredNotionalUsdt + 1e-9) {
+    steps--;
+    normalized_contracts = steps * lot;
+  }
   normalized_contracts = Number(
     normalized_contracts.toFixed(Math.min(12, Math.max(okxInstrumentSzDecimals(lot), okxInstrumentSzDecimals(normalized_contracts))))
   );

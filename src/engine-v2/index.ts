@@ -3750,7 +3750,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         riskSizing.appliedLeverage = appliedLeverage;
         riskSizing.leverageReason = leverageReason;
 
-        // Mandatory check: If any sizing limit env is missing or invalid, block with LIVE_SIZING_LIMITS_NOT_CONFIGURED
         const limitsConfigured =
             maxOrderNotionalUsdt != null && maxOrderNotionalUsdt > 0 &&
             maxAddonNotionalUsdt != null && maxAddonNotionalUsdt > 0 &&
@@ -3758,15 +3757,28 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             maxAccountNotionalUsdt != null && maxAccountNotionalUsdt > 0 &&
             maxAddonCount != null && maxAddonCount >= 0;
 
-        if (!limitsConfigured || riskSizing.isBlocked) {
+        const okxLiveEnabled = (v2State as any).okxLiveEnabled === true || input.state.okxLiveEnabled === true;
+        const okxAuthMode = (v2State as any).okxAuthMode ?? input.state.okxAuthMode;
+        const okxExchangeAuthOptIn = (v2State as any).okxExchangeAuthOptIn === true || input.state.okxExchangeAuthOptIn === true;
+
+        const isLiveSignedOrderAttempt =
+            okxAuthMode === "live" &&
+            okxExchangeAuthOptIn === true &&
+            okxLiveEnabled === true &&
+            (finalDecision === "ENTER" || isAddOn);
+
+        if (isLiveSignedOrderAttempt && !limitsConfigured) {
             min_order_check_passed = false;
-            min_order_block_reason = !limitsConfigured ? "LIVE_SIZING_LIMITS_NOT_CONFIGURED" : (riskSizing.blockReason ?? "RISK_SIZING_BLOCKED");
+            min_order_block_reason = "LIVE_SIZING_LIMITS_NOT_CONFIGURED";
+        } else if (riskSizing.isBlocked) {
+            min_order_check_passed = false;
+            min_order_block_reason = riskSizing.blockReason ?? "RISK_SIZING_BLOCKED";
         } else {
             // Determine allowed order cap based on whether it's an initial entry or add-on
-            const orderCap = isAddOn ? maxAddonNotionalUsdt : maxOrderNotionalUsdt;
+            const orderCap = limitsConfigured ? (isAddOn ? maxAddonNotionalUsdt! : maxOrderNotionalUsdt!) : 40;
 
-            if (isAddOn) {
-                if (currentAddonCount >= maxAddonCount) {
+            if (isAddOn && limitsConfigured) {
+                if (currentAddonCount >= maxAddonCount!) {
                     min_order_check_passed = false;
                     min_order_block_reason = "MAX_ADDON_COUNT_EXCEEDED";
                 } else if ((v2State as any).addOnPolicyAllowed === false) {
@@ -3776,34 +3788,38 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
 
             if (min_order_check_passed) {
-                // Calculate raw requested order notional from sizing algorithm
-                const rawNotionalUsdt = (stageMarginKrwAfter / 1400) * appliedLeverage;
-                // Apply cap: do not force size up to cap if algorithm calculated a smaller size
-                requestedOrderNotionalUsdt = Math.min(orderCap, Math.round(rawNotionalUsdt * 100) / 100);
+                // Calculate raw requested order notional pure in USDT (without 1400 fixed exchange rate or KRW division)
+                const baseUsdtNotional = (v2State as any).baseSizeUsd ?? input.config.baseSizeUsd ?? 40;
+                const rawNotionalUsdt = isAddOn ? orderCap : Math.min(orderCap, baseUsdtNotional);
+                requestedOrderNotionalUsdt = Math.min(orderCap, rawNotionalUsdt);
                 if (requestedOrderNotionalUsdt <= 0) requestedOrderNotionalUsdt = orderCap;
 
-                // Enforce Symbol Exposure Cap (maxSymbolNotionalUsdt)
-                const remainingSymbolCap = Math.max(0, maxSymbolNotionalUsdt - existingSymbolNotionalUsdt);
-                if (existingSymbolNotionalUsdt >= maxSymbolNotionalUsdt) {
-                    min_order_check_passed = false;
-                    min_order_block_reason = "MAX_SYMBOL_NOTIONAL_EXCEEDED";
-                }
-
-                // Enforce Account Exposure Cap (maxAccountNotionalUsdt)
-                const remainingAccountCap = Math.max(0, maxAccountNotionalUsdt - existingAccountNotionalUsdt);
-                if (existingAccountNotionalUsdt >= maxAccountNotionalUsdt) {
-                    min_order_check_passed = false;
-                    min_order_block_reason = "MAX_ACCOUNT_NOTIONAL_EXCEEDED";
-                }
-
-                if (min_order_check_passed) {
-                    const notionalAfterSymbolCap = Math.min(requestedOrderNotionalUsdt, remainingSymbolCap);
-                    finalOrderNotionalUsdt = Math.min(notionalAfterSymbolCap, remainingAccountCap);
-
-                    if (finalOrderNotionalUsdt < 1.0) { // Minimum 1 USDT required for valid order
+                if (limitsConfigured) {
+                    // Enforce Symbol Exposure Cap (maxSymbolNotionalUsdt)
+                    const remainingSymbolCap = Math.max(0, maxSymbolNotionalUsdt! - existingSymbolNotionalUsdt);
+                    if (existingSymbolNotionalUsdt >= maxSymbolNotionalUsdt!) {
                         min_order_check_passed = false;
-                        min_order_block_reason = "MIN_ORDER_SIZE_UNDERFLOW";
+                        min_order_block_reason = "MAX_SYMBOL_NOTIONAL_EXCEEDED";
                     }
+
+                    // Enforce Account Exposure Cap (maxAccountNotionalUsdt)
+                    const remainingAccountCap = Math.max(0, maxAccountNotionalUsdt! - existingAccountNotionalUsdt);
+                    if (existingAccountNotionalUsdt >= maxAccountNotionalUsdt!) {
+                        min_order_check_passed = false;
+                        min_order_block_reason = "MAX_ACCOUNT_NOTIONAL_EXCEEDED";
+                    }
+
+                    if (min_order_check_passed) {
+                        const notionalAfterSymbolCap = Math.min(requestedOrderNotionalUsdt, remainingSymbolCap);
+                        finalOrderNotionalUsdt = Math.min(notionalAfterSymbolCap, remainingAccountCap);
+
+                        if (finalOrderNotionalUsdt < 1.0) { // Minimum 1 USDT required for valid order
+                            min_order_check_passed = false;
+                            min_order_block_reason = "MIN_ORDER_SIZE_UNDERFLOW";
+                        }
+                    }
+                } else {
+                    finalOrderNotionalUsdt = requestedOrderNotionalUsdt;
                 }
             }
         }
@@ -4959,7 +4975,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             isBlocked: hardBlockPresent || riskSizing.isBlocked || finalDecision === "REJECT",
             blockReason: hardBlockReason ?? riskSizing.blockReason ?? blockReason ?? null,
             stageMarginKrw: finalDecision === "ENTER" ? stageMarginKrwAfter : 0,
-            exposureNotionalKrw: (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) * riskSizing.appliedLeverage
+            exposureNotionalKrw: (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) * riskSizing.appliedLeverage,
+            finalOrderNotionalUsdt: finalDecision === "ENTER" ? finalOrderNotionalUsdt : 0,
+            requestedOrderNotionalUsdt: finalDecision === "ENTER" ? requestedOrderNotionalUsdt : 0
         },
         explanation: {
             reason: finalReason,

@@ -101,10 +101,7 @@ export function calculateRiskSizing(
         maxAccountNotionalUsdt != null && maxAccountNotionalUsdt > 0 &&
         maxAddonCount != null && maxAddonCount >= 0;
 
-    if (!limitsConfigured) {
-        isBlocked = true;
-        blockReason = "LIVE_SIZING_LIMITS_NOT_CONFIGURED";
-    } else if (judgment.regime === "NO_TRADE") {
+    if (judgment.regime === "NO_TRADE") {
         isBlocked = true;
         blockReason = "NO_TRADE_REGIME";
     } else if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
@@ -256,8 +253,8 @@ export function calculateRiskSizing(
     const currentSymbolNotionalKrw = currentSymbolNotional * 1400;
     const proposedNotional = stageMarginKrw * appliedLeverage;
 
-    // Legacy KRW limits are used ONLY as diagnostic checks when USDT live limits are not present
-    if (!limitsConfigured) {
+    // Legacy KRW limits are diagnostic checks used only when neither USDT limits nor signed execution apply
+    if (!limitsConfigured && !(state as any).okxLiveEnabled) {
         if (!isBlocked && currentMarginUsedKrw + stageMarginKrw > maxUsableMarginKrw) {
             isBlocked = true;
             blockReason = "MAX_USABLE_MARGIN_EXCEEDED";

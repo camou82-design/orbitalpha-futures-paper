@@ -801,6 +801,8 @@ export interface RiskSizingOutput {
     entryQualityGrade: EntryQualityGrade;
     exposureNotionalKrw: number;
     equityMultiple: number;
+    finalOrderNotionalUsdt?: number;
+    requestedOrderNotionalUsdt?: number;
     diagnostics?: RiskSizingDiagnostics;
 }
 
