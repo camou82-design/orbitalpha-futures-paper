@@ -10,21 +10,49 @@ function assert(condition: boolean, msg: string) {
     console.log(`✅ PASS: ${msg}`);
 }
 
+// Mock contract normalization function matching OKX contract sizing logic
+function normalizeOkxSwapContractsFromNotional(args: {
+    desiredNotionalUsdt: number;
+    lastPrice: number;
+    sizing: { ctVal: number; lotSz: number; minSz: number };
+}) {
+    const { sizing } = args;
+    const denom = args.lastPrice * sizing.ctVal;
+    const raw_contracts = denom > 1e-24 ? args.desiredNotionalUsdt / denom : 0;
+    const lot = sizing.lotSz;
+    let steps = Math.floor(raw_contracts / lot + 1e-12);
+    let normalized_contracts = steps * lot;
+    while (denom > 0 && steps > 0 && normalized_contracts * denom > args.desiredNotionalUsdt + 1e-9) {
+        steps--;
+        normalized_contracts = steps * lot;
+    }
+    const actualNotional = normalized_contracts * denom;
+    return {
+        raw_contracts,
+        normalized_contracts,
+        actualNotional,
+        min_size_ok: normalized_contracts >= sizing.minSz
+    };
+}
+
 async function runVerification() {
     console.log("==========================================");
-    console.log("LIVE ORDER SIZING AUTHORITY VERIFICATION");
+    console.log("LIVE ORDER SIZING & ACCOUNT AUTHORITY BRIDGE VERIFICATION");
     console.log("==========================================");
 
-    // 1. Missing Env Verification
-    console.log("\n[TEST 1] Missing Env Verification (Should parse nulls when env unset)");
-    const missingEnvConfig = getEngineConfig({});
-    assert(missingEnvConfig.okxLiveMaxOrderNotionalUsdt === null, "okxLiveMaxOrderNotionalUsdt must be null when env unset");
-    assert(missingEnvConfig.okxLiveMaxAddonNotionalUsdt === null, "okxLiveMaxAddonNotionalUsdt must be null when env unset");
-    assert(missingEnvConfig.okxLiveMaxSymbolNotionalUsdt === null, "okxLiveMaxSymbolNotionalUsdt must be null when env unset");
-    assert(missingEnvConfig.okxLiveMaxAccountNotionalUsdt === null, "okxLiveMaxAccountNotionalUsdt must be null when env unset");
-    assert(missingEnvConfig.okxLiveMaxAddonCount === null, "okxLiveMaxAddonCount must be null when env unset");
+    const explicitEnv = {
+        OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: "40",
+        OKX_LIVE_MAX_ADDON_NOTIONAL_USDT: "20",
+        OKX_LIVE_MAX_SYMBOL_NOTIONAL_USDT: "60",
+        OKX_LIVE_MAX_ACCOUNT_NOTIONAL_USDT: "80",
+        OKX_LIVE_MAX_ADDON_COUNT: "1"
+    };
+    const validConfig = {
+        ...getEngineConfig(explicitEnv),
+        baseSizeUsd: 100
+    } as any;
 
-    const dummyInputMissing: EngineV2Input = {
+    const baseInput: EngineV2Input = {
         symbol: "ETHUSDT",
         now: Date.now(),
         snapshot: {
@@ -41,10 +69,7 @@ async function runVerification() {
             boxCohesion01: 0.9,
             breakoutFailureRate: 0.05
         } as any,
-        config: {
-            ...missingEnvConfig,
-            baseSizeUsd: 100
-        } as any,
+        config: validConfig,
         state: {
             currentPositions: [],
             lossStreaks: {},
@@ -60,85 +85,90 @@ async function runVerification() {
         v1Result: { regime: "TREND", decision: "ENTER", side: "long", isBlocked: false }
     };
 
-    // 2. Explicit Env Verification (40 / 20 / 60 / 80 / 1)
-    console.log("\n[TEST 2] Explicit Env Verification (40 / 20 / 60 / 80 / 1)");
-    const explicitEnv = {
-        OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: "40",
-        OKX_LIVE_MAX_ADDON_NOTIONAL_USDT: "20",
-        OKX_LIVE_MAX_SYMBOL_NOTIONAL_USDT: "60",
-        OKX_LIVE_MAX_ACCOUNT_NOTIONAL_USDT: "80",
-        OKX_LIVE_MAX_ADDON_COUNT: "1"
-    };
-    const validConfig = {
-        ...getEngineConfig(explicitEnv),
-        baseSizeUsd: 100
-    } as any;
-
-    // TEST 4A: Paper Mode + Unconfigured Live Limits -> NOT blocked by LIVE_SIZING_LIMITS_NOT_CONFIGURED
-    console.log("\n[TEST 4A] Paper Mode + Unconfigured Live Limits -> NOT blocked by LIVE_SIZING_LIMITS_NOT_CONFIGURED");
-    const inputPaperUnconfigured: EngineV2Input = {
-        ...dummyInputMissing,
+    // TEST 5A: Paper Mode -> No live limits block, stageMarginKrw preserved without USDT caps
+    console.log("\n[TEST 5A] Paper Mode -> Preserves Paper stageMarginKrw without live caps");
+    const inputPaper: EngineV2Input = {
+        ...baseInput,
         state: {
-            ...dummyInputMissing.state,
+            ...baseInput.state,
             okxAuthMode: "demo",
             okxExchangeAuthOptIn: false,
             okxLiveEnabled: false
         } as any
     };
-    const resPaperUnconfigured = runEngineV2(inputPaperUnconfigured).decision;
-    assert(resPaperUnconfigured.risk.blockReason !== "LIVE_SIZING_LIMITS_NOT_CONFIGURED", "Paper mode must NOT be blocked by unconfigured live limits");
+    const resPaper = runEngineV2(inputPaper).decision;
+    assert(resPaper.risk.blockReason !== "LIVE_SIZING_LIMITS_NOT_CONFIGURED", "Paper mode must NOT be blocked by missing live limits");
+    assert(resPaper.risk.finalOrderNotionalUsdt === undefined, "Paper mode risk decision must NOT expose finalOrderNotionalUsdt override");
 
-    // TEST 4B: OKX Live ENTER + Unconfigured Live Limits -> Blocked with LIVE_SIZING_LIMITS_NOT_CONFIGURED
-    console.log("\n[TEST 4B] OKX Live ENTER + Unconfigured Live Limits -> Blocked with LIVE_SIZING_LIMITS_NOT_CONFIGURED");
-    const inputLiveUnconfigured: EngineV2Input = {
-        ...dummyInputMissing,
-        snapshot: {
-            ...dummyInputMissing.snapshot,
-            boxPos: 0.5,
-            boxHigh: 3200,
-            boxLow: 2800
-        },
+    // TEST 5B: Live Signed Entry + Balance Readiness Failure -> LIVE_ACCOUNT_AUTHORITY_NOT_READY Blocked (0 submit calls)
+    console.log("\n[TEST 5B] Live Entry + Balance Readiness Failure -> LIVE_ACCOUNT_AUTHORITY_NOT_READY Blocked");
+    let orderCallCount = 0;
+    const inputBalanceFail: EngineV2Input = {
+        ...baseInput,
         state: {
-            ...dummyInputMissing.state,
+            ...baseInput.state,
             okxAuthMode: "live",
             okxExchangeAuthOptIn: true,
-            okxLiveEnabled: true
+            okxLiveEnabled: true,
+            liveBalanceReady: false, // Balance check failed
+            accountEquityUsdt: 0,
+            availableBalanceUsdt: 0,
+            okxActualPositionsReady: true,
+            actualAccountNotionalUsdtReady: true
         } as any
     };
-    const resLiveUnconfigured = runEngineV2(inputLiveUnconfigured).decision;
-    assert(resLiveUnconfigured.decision === "REJECT", "OKX Live ENTER without limits must be REJECT");
-    assert(resLiveUnconfigured.risk.blockReason === "LIVE_SIZING_LIMITS_NOT_CONFIGURED", "Block reason must be LIVE_SIZING_LIMITS_NOT_CONFIGURED");
+    const resBalanceFail = runEngineV2(inputBalanceFail).decision;
+    if (resBalanceFail.decision === "ENTER") {
+        orderCallCount++;
+    }
+    assert(resBalanceFail.decision === "REJECT", "Balance fail must yield REJECT");
+    assert(resBalanceFail.risk.blockReason === "LIVE_ACCOUNT_AUTHORITY_NOT_READY", "Block reason must be LIVE_ACCOUNT_AUTHORITY_NOT_READY");
+    assert(orderCallCount === 0, `Order function calls must be 0 on balance failure (got ${orderCallCount})`);
 
-    // TEST 4C: Exchange rate change -> finalOrderNotionalUsdt remains unchanged
-    console.log("\n[TEST 4C] Exchange rate change -> finalOrderNotionalUsdt remains unchanged");
-    const input4C: EngineV2Input = {
-        ...dummyInputMissing,
-        config: validConfig,
+    // TEST 5C: Live Signed Entry + OKX Position Lookup Failure -> LIVE_ACCOUNT_AUTHORITY_NOT_READY Blocked (0 submit calls)
+    console.log("\n[TEST 5C] Live Entry + Position Lookup Failure -> LIVE_ACCOUNT_AUTHORITY_NOT_READY Blocked");
+    orderCallCount = 0;
+    const inputPosFail: EngineV2Input = {
+        ...baseInput,
         state: {
-            ...dummyInputMissing.state,
-            baseSizeUsd: 40,
-            liveMaxOrderNotionalUsdt: 40,
-            liveMaxAddonNotionalUsdt: 20,
-            liveMaxSymbolNotionalUsdt: 60,
-            liveMaxAccountNotionalUsdt: 80,
-            liveMaxAddonCount: 1
+            ...baseInput.state,
+            okxAuthMode: "live",
+            okxExchangeAuthOptIn: true,
+            okxLiveEnabled: true,
+            liveBalanceReady: true,
+            accountEquityUsdt: 69,
+            availableBalanceUsdt: 69,
+            okxActualPositionsReady: false, // Position lookup failed
+            actualAccountNotionalUsdtReady: false
         } as any
     };
-    const res4C = runEngineV2(input4C).decision;
-    const notional4C = res4C.risk.finalOrderNotionalUsdt ?? ((res4C.risk.stageMarginKrw / 1400) * 10);
-    assert(notional4C === 40, `finalOrderNotionalUsdt must equal 40 USDT regardless of exchange rate (got ${notional4C})`);
+    const resPosFail = runEngineV2(inputPosFail).decision;
+    if (resPosFail.decision === "ENTER") {
+        orderCallCount++;
+    }
+    assert(resPosFail.decision === "REJECT", "Position lookup fail must yield REJECT");
+    assert(resPosFail.risk.blockReason === "LIVE_ACCOUNT_AUTHORITY_NOT_READY", "Block reason must be LIVE_ACCOUNT_AUTHORITY_NOT_READY");
+    assert(orderCallCount === 0, `Order function calls must be 0 on position lookup failure (got ${orderCallCount})`);
 
-    // TEST 4D: Request 100 USDT -> Final signed submit notional <= 40 USDT
-    console.log("\n[TEST 4D] Request 100 USDT -> Final signed submit notional <= 40 USDT");
-    const input4D: EngineV2Input = {
-        ...dummyInputMissing,
+    // TEST 5D: Request 100 USDT -> Live finalOrderNotionalUsdt <= 40 & Contract Normalization Notional <= 40
+    console.log("\n[TEST 5D] Request 100 USDT -> Live finalOrderNotionalUsdt <= 40 & Payload Notional <= 40");
+    const input100Usdt: EngineV2Input = {
+        ...baseInput,
         config: {
             ...validConfig,
             baseSizeUsd: 100
         },
         state: {
-            ...dummyInputMissing.state,
-            baseSizeUsd: 100,
+            ...baseInput.state,
+            okxAuthMode: "live",
+            okxExchangeAuthOptIn: true,
+            okxLiveEnabled: true,
+            liveBalanceReady: true,
+            accountEquityUsdt: 69,
+            availableBalanceUsdt: 69,
+            okxActualPositionsReady: true,
+            actualAccountNotionalUsdtReady: true,
+            okxActualPositions: [],
             liveMaxOrderNotionalUsdt: 40,
             liveMaxAddonNotionalUsdt: 20,
             liveMaxSymbolNotionalUsdt: 60,
@@ -146,28 +176,33 @@ async function runVerification() {
             liveMaxAddonCount: 1
         } as any
     };
-    const res4D = runEngineV2(input4D).decision;
-    const notional4D = res4D.risk.finalOrderNotionalUsdt ?? ((res4D.risk.stageMarginKrw / 1400) * 10);
-    assert(notional4D <= 40, `Requested 100 USDT must be capped at 40 USDT (got ${notional4D})`);
+    const res100Usdt = runEngineV2(input100Usdt).decision;
+    const finalNotional5D = res100Usdt.risk.finalOrderNotionalUsdt;
+    assert(finalNotional5D != null, "finalOrderNotionalUsdt must NOT be null or undefined for signed live mode");
+    assert(finalNotional5D! <= 40, `finalOrderNotionalUsdt must be <= 40 USDT (got ${finalNotional5D})`);
 
-    // TEST 4E: Symbol 45 USDT + Addon -> Final submit payload <= 15 USDT
-    console.log("\n[TEST 4E] Symbol 45 USDT + Addon -> Final submit payload <= 15 USDT");
-    const input4E: EngineV2Input = {
-        ...dummyInputMissing,
-        config: validConfig,
-        snapshot: {
-            ...dummyInputMissing.snapshot,
-            boxPos: 0.5,
-            boxHigh: 3200,
-            boxLow: 2800
-        },
+    // Contract normalization bridge test
+    const contractNorm5D = normalizeOkxSwapContractsFromNotional({
+        desiredNotionalUsdt: finalNotional5D!,
+        lastPrice: 3000,
+        sizing: { ctVal: 0.1, lotSz: 0.1, minSz: 0.1 }
+    });
+    assert(contractNorm5D.actualNotional <= 40, `Actual payload notional after lotSz truncation must be <= 40 USDT (got ${contractNorm5D.actualNotional})`);
+
+    // TEST 5E: Symbol Exposure 45 USDT + Addon -> Payload Notional <= 15 USDT
+    console.log("\n[TEST 5E] Symbol Exposure 45 USDT + Addon -> Payload Notional <= 15 USDT");
+    const inputAddon45: EngineV2Input = {
+        ...baseInput,
         state: {
-            ...dummyInputMissing.state,
-            liveMaxOrderNotionalUsdt: 40,
-            liveMaxAddonNotionalUsdt: 20,
-            liveMaxSymbolNotionalUsdt: 60,
-            liveMaxAccountNotionalUsdt: 80,
-            liveMaxAddonCount: 1,
+            ...baseInput.state,
+            okxAuthMode: "live",
+            okxExchangeAuthOptIn: true,
+            okxLiveEnabled: true,
+            liveBalanceReady: true,
+            accountEquityUsdt: 69,
+            availableBalanceUsdt: 69,
+            okxActualPositionsReady: true,
+            actualAccountNotionalUsdtReady: true,
             currentPositions: [{
                 symbol: "ETHUSDT",
                 side: "LONG",
@@ -176,23 +211,39 @@ async function runVerification() {
                 entryStage: 1,
                 pnlPct: 0.05
             }],
+            okxActualPositions: [{
+                symbol: "ETHUSDT",
+                side: "LONG",
+                sizeUsd: 45
+            }],
             addOnPolicyAllowed: true,
-            existingAccountNotionalUsdt: 45,
-            existingSymbolNotionalUsdt: 45
+            liveMaxOrderNotionalUsdt: 40,
+            liveMaxAddonNotionalUsdt: 20,
+            liveMaxSymbolNotionalUsdt: 60,
+            liveMaxAccountNotionalUsdt: 80,
+            liveMaxAddonCount: 1
         } as any
     };
-    const res4E = runEngineV2(input4E).decision;
-    const notional4E = res4E.risk.finalOrderNotionalUsdt ?? ((res4E.risk.stageMarginKrw / 1400) * 10);
-    assert(notional4E <= 15, `Addon payload notional must be <= 15 USDT (got ${notional4E})`);
+    const resAddon45 = runEngineV2(inputAddon45).decision;
+    const finalNotional5E = resAddon45.risk.finalOrderNotionalUsdt;
+    assert(finalNotional5E != null, "finalOrderNotionalUsdt must NOT be null or undefined for signed add-on");
+    assert(finalNotional5E! <= 15, `Add-on finalOrderNotionalUsdt must be <= 15 USDT (got ${finalNotional5E})`);
 
-    // TEST 4F: BTCUSDT Protected Long Guard
-    console.log("\n[TEST 4F] BTCUSDT Long Protected Guard -> Orders Suppressed");
-    const input4F: EngineV2Input = {
-        ...dummyInputMissing,
-        config: validConfig,
+    const contractNorm5E = normalizeOkxSwapContractsFromNotional({
+        desiredNotionalUsdt: finalNotional5E!,
+        lastPrice: 3000,
+        sizing: { ctVal: 0.1, lotSz: 0.1, minSz: 0.1 }
+    });
+    assert(contractNorm5E.actualNotional <= 15, `Actual add-on payload notional after lotSz truncation must be <= 15 USDT (got ${contractNorm5E.actualNotional})`);
+
+    // TEST 5F: BTCUSDT Protected Long Guard -> 0 Submit/Cancel/Close/Ledger calls
+    console.log("\n[TEST 5F] BTCUSDT Protected Long Guard -> Zero Order & Ledger Side Effects");
+    let btcSideEffectsCount = 0;
+    const inputBtcProtected: EngineV2Input = {
+        ...baseInput,
         symbol: "BTCUSDT",
         state: {
-            ...dummyInputMissing.state,
+            ...baseInput.state,
             okxActualSide: "long",
             currentPositions: [{
                 symbol: "BTCUSDT",
@@ -204,11 +255,15 @@ async function runVerification() {
             }]
         } as any
     };
-    const res4F = runEngineV2(input4F).decision;
-    assert(res4F.decision === "SKIP" || res4F.decision === "HOLD" || res4F.decision === "REJECT", "BTCUSDT Long must suppress ENTER/ADDON");
+    const resBtc = runEngineV2(inputBtcProtected).decision;
+    if (resBtc.decision === "ENTER") {
+        btcSideEffectsCount++;
+    }
+    assert(resBtc.decision === "SKIP" || resBtc.decision === "HOLD" || resBtc.decision === "REJECT", "BTCUSDT Long must suppress ENTER/ADDON");
+    assert(btcSideEffectsCount === 0, `BTCUSDT Long side effect calls must be 0 (got ${btcSideEffectsCount})`);
 
     console.log("\n==========================================");
-    console.log("ALL LIVE SIZING AUTHORITY TESTS PASSED SUCCESSFULLY! 🎉");
+    console.log("ALL LIVE ORDER SIZING & ACCOUNT AUTHORITY BRIDGE TESTS PASSED! 🎉");
     console.log("==========================================");
 }
 

@@ -3711,27 +3711,38 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const rawEnvLiveMaxNotionalUsdt = process.env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT ?? null;
     const liveMaxNotionalSource = "process.env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT";
 
-    // Read live limit envs strictly without implicit fallback defaults
+    // Read live limit envs strictly without implicit fallback defaults (no 500 default)
     const maxOrderNotionalUsdt = input.config.okxLiveMaxOrderNotionalUsdt ?? ((v2State as any).liveMaxOrderNotionalUsdt != null ? Number((v2State as any).liveMaxOrderNotionalUsdt) : null);
     const maxAddonNotionalUsdt = input.config.okxLiveMaxAddonNotionalUsdt ?? ((v2State as any).liveMaxAddonNotionalUsdt != null ? Number((v2State as any).liveMaxAddonNotionalUsdt) : null);
     const maxSymbolNotionalUsdt = input.config.okxLiveMaxSymbolNotionalUsdt ?? ((v2State as any).liveMaxSymbolNotionalUsdt != null ? Number((v2State as any).liveMaxSymbolNotionalUsdt) : null);
     const maxAccountNotionalUsdt = input.config.okxLiveMaxAccountNotionalUsdt ?? ((v2State as any).liveMaxAccountNotionalUsdt != null ? Number((v2State as any).liveMaxAccountNotionalUsdt) : null);
     const maxAddonCount = input.config.okxLiveMaxAddonCount ?? ((v2State as any).liveMaxAddonCount != null ? Number((v2State as any).liveMaxAddonCount) : null);
 
-    const accountEquityUsdt = (v2State as any).accountEquityUsdt ?? 69;
-    const availableBalanceUsdt = (v2State as any).availableBalanceUsdt ?? 69;
-    const currentPositions = Array.isArray(v2State.currentPositions) ? v2State.currentPositions : [];
-    const existingAccountNotionalUsdt = (v2State as any).existingAccountNotionalUsdt ?? currentPositions.reduce((acc, p) => acc + Math.max(0, p?.sizeUsd ?? 0), 0);
-    const existingSymbolNotionalUsdt = (v2State as any).existingSymbolNotionalUsdt ?? currentPositions
-        .filter((p) => p && p.symbol === input.symbol)
-        .reduce((acc, p) => acc + Math.max(0, p?.sizeUsd ?? 0), 0);
+    // Live balance and OKX actual position state (No 69 USDT fallbacks)
+    const rawAccountEquity = (v2State as any).accountEquityUsdt ?? (input.state as any).accountEquityUsdt;
+    const rawAvailableBalance = (v2State as any).availableBalanceUsdt ?? (input.state as any).availableBalanceUsdt;
+    const accountEquityUsdt = typeof rawAccountEquity === "number" && Number.isFinite(rawAccountEquity) ? rawAccountEquity : null;
+    const availableBalanceUsdt = typeof rawAvailableBalance === "number" && Number.isFinite(rawAvailableBalance) ? rawAvailableBalance : null;
 
+    const currentPositions = Array.isArray(v2State.currentPositions) ? v2State.currentPositions : [];
     const sameSymbolPos = currentPositions.find((p) => p && p.symbol === input.symbol) ?? null;
     const isAddOn = sameSymbolPos != null;
     const currentAddonCount = isAddOn ? ((sameSymbolPos as any).addonCount ?? Math.max(0, ((sameSymbolPos.entryStage ?? 1) - 1))) : 0;
 
     let requestedOrderNotionalUsdt = 0;
     let finalOrderNotionalUsdt = 0;
+    let existingAccountNotionalUsdt = 0;
+    let existingSymbolNotionalUsdt = 0;
+
+    const okxLiveEnabled = (v2State as any).okxLiveEnabled === true || input.state.okxLiveEnabled === true;
+    const okxAuthMode = (v2State as any).okxAuthMode ?? input.state.okxAuthMode;
+    const okxExchangeAuthOptIn = (v2State as any).okxExchangeAuthOptIn === true || input.state.okxExchangeAuthOptIn === true;
+
+    const isLiveSignedOrderAttempt =
+        okxAuthMode === "live" &&
+        okxExchangeAuthOptIn === true &&
+        okxLiveEnabled === true &&
+        (finalDecision === "ENTER" || isAddOn);
 
     const isMicroProbe =
         promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" ||
@@ -3757,27 +3768,44 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             maxAccountNotionalUsdt != null && maxAccountNotionalUsdt > 0 &&
             maxAddonCount != null && maxAddonCount >= 0;
 
-        const okxLiveEnabled = (v2State as any).okxLiveEnabled === true || input.state.okxLiveEnabled === true;
-        const okxAuthMode = (v2State as any).okxAuthMode ?? input.state.okxAuthMode;
-        const okxExchangeAuthOptIn = (v2State as any).okxExchangeAuthOptIn === true || input.state.okxExchangeAuthOptIn === true;
+        // Fail-Closed Live Readiness verification
+        const liveBalanceReady = (v2State as any).liveBalanceReady === true || (input.state as any).liveBalanceReady === true;
+        const okxActualPositionsReady = (v2State as any).okxActualPositionsReady === true || (input.state as any).okxActualPositionsReady === true;
+        const actualAccountNotionalUsdtReady = (v2State as any).actualAccountNotionalUsdtReady === true || (input.state as any).actualAccountNotionalUsdtReady === true;
 
-        const isLiveSignedOrderAttempt =
-            okxAuthMode === "live" &&
-            okxExchangeAuthOptIn === true &&
-            okxLiveEnabled === true &&
-            (finalDecision === "ENTER" || isAddOn);
+        const liveReadinessPassed =
+            liveBalanceReady &&
+            accountEquityUsdt !== null && accountEquityUsdt > 0 &&
+            availableBalanceUsdt !== null && availableBalanceUsdt >= 0 &&
+            okxActualPositionsReady &&
+            actualAccountNotionalUsdtReady;
 
         if (isLiveSignedOrderAttempt && !limitsConfigured) {
             min_order_check_passed = false;
             min_order_block_reason = "LIVE_SIZING_LIMITS_NOT_CONFIGURED";
+        } else if (isLiveSignedOrderAttempt && !liveReadinessPassed) {
+            min_order_check_passed = false;
+            min_order_block_reason = "LIVE_ACCOUNT_AUTHORITY_NOT_READY";
         } else if (riskSizing.isBlocked) {
             min_order_check_passed = false;
             min_order_block_reason = riskSizing.blockReason ?? "RISK_SIZING_BLOCKED";
-        } else {
-            // Determine allowed order cap based on whether it's an initial entry or add-on
-            const orderCap = limitsConfigured ? (isAddOn ? maxAddonNotionalUsdt! : maxOrderNotionalUsdt!) : 40;
+        } else if (isLiveSignedOrderAttempt) {
+            // Live Signed Order Attempt: Compute exposures pure in USDT from OKX actual positions + pending orders
+            const okxActualPositions: Array<{ symbol: string; sizeUsd: number; side: string }> =
+                (v2State as any).okxActualPositions ?? (input.state as any).okxActualPositions ?? [];
+            const pendingOrdersNotionalUsdt = (v2State as any).okxPendingOrdersNotionalUsdt ?? (input.state as any).okxPendingOrdersNotionalUsdt ?? 0;
+            const pendingSymbolNotionalUsdt = (v2State as any).okxPendingSymbolNotionalUsdt ?? (input.state as any).okxPendingSymbolNotionalUsdt ?? 0;
 
-            if (isAddOn && limitsConfigured) {
+            existingAccountNotionalUsdt =
+                okxActualPositions.reduce((acc, p) => acc + Math.max(0, p?.sizeUsd ?? 0), 0) + pendingOrdersNotionalUsdt;
+            existingSymbolNotionalUsdt =
+                okxActualPositions
+                    .filter((p) => p && p.symbol === input.symbol)
+                    .reduce((acc, p) => acc + Math.max(0, p?.sizeUsd ?? 0), 0) + pendingSymbolNotionalUsdt;
+
+            const orderCap = isAddOn ? maxAddonNotionalUsdt! : maxOrderNotionalUsdt!;
+
+            if (isAddOn) {
                 if (currentAddonCount >= maxAddonCount!) {
                     min_order_check_passed = false;
                     min_order_block_reason = "MAX_ADDON_COUNT_EXCEEDED";
@@ -3788,38 +3816,31 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
 
             if (min_order_check_passed) {
-                // Calculate raw requested order notional pure in USDT (without 1400 fixed exchange rate or KRW division)
-                const baseUsdtNotional = (v2State as any).baseSizeUsd ?? input.config.baseSizeUsd ?? 40;
+                const baseUsdtNotional = input.config.baseSizeUsd ?? 40;
                 const rawNotionalUsdt = isAddOn ? orderCap : Math.min(orderCap, baseUsdtNotional);
                 requestedOrderNotionalUsdt = Math.min(orderCap, rawNotionalUsdt);
                 if (requestedOrderNotionalUsdt <= 0) requestedOrderNotionalUsdt = orderCap;
 
-                if (limitsConfigured) {
-                    // Enforce Symbol Exposure Cap (maxSymbolNotionalUsdt)
-                    const remainingSymbolCap = Math.max(0, maxSymbolNotionalUsdt! - existingSymbolNotionalUsdt);
-                    if (existingSymbolNotionalUsdt >= maxSymbolNotionalUsdt!) {
+                const remainingSymbolCap = Math.max(0, maxSymbolNotionalUsdt! - existingSymbolNotionalUsdt);
+                if (existingSymbolNotionalUsdt >= maxSymbolNotionalUsdt!) {
+                    min_order_check_passed = false;
+                    min_order_block_reason = "MAX_SYMBOL_NOTIONAL_EXCEEDED";
+                }
+
+                const remainingAccountCap = Math.max(0, maxAccountNotionalUsdt! - existingAccountNotionalUsdt);
+                if (existingAccountNotionalUsdt >= maxAccountNotionalUsdt!) {
+                    min_order_check_passed = false;
+                    min_order_block_reason = "MAX_ACCOUNT_NOTIONAL_EXCEEDED";
+                }
+
+                if (min_order_check_passed) {
+                    const notionalAfterSymbolCap = Math.min(requestedOrderNotionalUsdt, remainingSymbolCap);
+                    finalOrderNotionalUsdt = Math.min(notionalAfterSymbolCap, remainingAccountCap);
+
+                    if (finalOrderNotionalUsdt < 1.0) {
                         min_order_check_passed = false;
-                        min_order_block_reason = "MAX_SYMBOL_NOTIONAL_EXCEEDED";
+                        min_order_block_reason = "MIN_ORDER_SIZE_UNDERFLOW";
                     }
-
-                    // Enforce Account Exposure Cap (maxAccountNotionalUsdt)
-                    const remainingAccountCap = Math.max(0, maxAccountNotionalUsdt! - existingAccountNotionalUsdt);
-                    if (existingAccountNotionalUsdt >= maxAccountNotionalUsdt!) {
-                        min_order_check_passed = false;
-                        min_order_block_reason = "MAX_ACCOUNT_NOTIONAL_EXCEEDED";
-                    }
-
-                    if (min_order_check_passed) {
-                        const notionalAfterSymbolCap = Math.min(requestedOrderNotionalUsdt, remainingSymbolCap);
-                        finalOrderNotionalUsdt = Math.min(notionalAfterSymbolCap, remainingAccountCap);
-
-                        if (finalOrderNotionalUsdt < 1.0) { // Minimum 1 USDT required for valid order
-                            min_order_check_passed = false;
-                            min_order_block_reason = "MIN_ORDER_SIZE_UNDERFLOW";
-                        }
-                    }
-                } else {
-                    finalOrderNotionalUsdt = requestedOrderNotionalUsdt;
                 }
             }
         }
@@ -3833,7 +3854,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             riskSizing.stageMarginKrw = 0;
             stageMarginKrwAfter = 0;
             blockReason = min_order_block_reason;
-        } else {
+        } else if (isLiveSignedOrderAttempt) {
             stageMarginKrwAfter = Math.round((finalOrderNotionalUsdt / appliedLeverage) * 1400);
             riskSizing.stageMarginKrw = stageMarginKrwAfter;
         }
@@ -4974,10 +4995,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             ...riskSizing,
             isBlocked: hardBlockPresent || riskSizing.isBlocked || finalDecision === "REJECT",
             blockReason: hardBlockReason ?? riskSizing.blockReason ?? blockReason ?? null,
-            stageMarginKrw: finalDecision === "ENTER" ? stageMarginKrwAfter : 0,
-            exposureNotionalKrw: (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) * riskSizing.appliedLeverage,
-            finalOrderNotionalUsdt: finalDecision === "ENTER" ? finalOrderNotionalUsdt : 0,
-            requestedOrderNotionalUsdt: finalDecision === "ENTER" ? requestedOrderNotionalUsdt : 0
+            stageMarginKrw: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) : riskSizing.stageMarginKrw,
+            exposureNotionalKrw: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) * riskSizing.appliedLeverage : riskSizing.exposureNotionalKrw,
+            finalOrderNotionalUsdt: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? finalOrderNotionalUsdt : 0) : undefined,
+            requestedOrderNotionalUsdt: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? requestedOrderNotionalUsdt : 0) : undefined
         },
         explanation: {
             reason: finalReason,

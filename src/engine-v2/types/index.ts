@@ -251,6 +251,12 @@ export interface EngineV2Input {
         liveMaxSymbolNotionalUsdt?: number | null;
         liveMaxAccountNotionalUsdt?: number | null;
         liveMaxAddonCount?: number | null;
+        liveBalanceReady?: boolean;
+        okxActualPositionsReady?: boolean;
+        actualAccountNotionalUsdtReady?: boolean;
+        okxActualPositions?: Array<{ symbol: string; sizeUsd: number; side: string }>;
+        okxPendingOrdersNotionalUsdt?: number;
+        okxPendingSymbolNotionalUsdt?: number;
         accountEquityUsdt?: number;
         availableBalanceUsdt?: number;
         existingAccountNotionalUsdt?: number;
