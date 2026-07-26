@@ -887,6 +887,7 @@ export type PaperOpenPositionRecord = {
   isProtectionFailed?: boolean;
   /** Whether the position was opened by V2 authority. Used for unit scaling logic. */
   isV2Authority?: boolean;
+  addonCount?: number;
 
   // Partial Pending Tracking
   partialPendingOrdId?: string;

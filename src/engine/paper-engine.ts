@@ -17233,74 +17233,277 @@ export class PaperEngine {
     return res.ok;
   }
 
-  public async executeV2SignedExecutionBridge(args: {
+  public async prunePositions(symbol: string): Promise<void> {
+    const opens = await this.positions.loadOpenAll();
+    const filtered = opens.filter((p) => p.symbol !== symbol);
+    await this.positions.saveOpenAll(filtered);
+  }
+
+  public async removeClosedPositionFromLedger(symbol: string): Promise<void> {
+    const opens = await this.positions.loadOpenAll();
+    const filtered = opens.filter((p) => p.symbol !== symbol);
+    await this.writeOpenPositions(filtered);
+  }
+
+  public async executeAuthorizedV2Action(args: {
     symbol: MarketSymbol;
     v2Decision: EngineV2Decision;
     lastPrice: number;
-  }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null }> {
-    const { symbol, v2Decision, lastPrice } = args;
+    committedRiskPlan?: {
+      finalOrderNotionalUsdt: number;
+      appliedLeverage: number;
+      stopPrice: number;
+      invalidationPx: number;
+      side: "long" | "short";
+    };
+  }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null; updatedRecord?: PaperOpenPositionRecord; pendingOnly?: boolean }> {
+    const { symbol, v2Decision, lastPrice, committedRiskPlan } = args;
 
-    // BTC Protected Long Suppressor
-    if (symbol === "BTCUSDT" && Array.isArray(this.lastLivePositionsPayload) && this.lastLivePositionsPayload.some((p: any) => p && String(p.symbol ?? p.instId).includes("BTC") && String(p.side ?? p.posSide).toLowerCase() === "long")) {
-      await this.logAndSuppressBtcUsdtAction("v2_signed_execution_bridge", "LONG", ["ENTER", "ADDON", "ORDER_SUBMIT"]);
+    // BTC Suppressor (Requirement 5): Use okxSwapRowToLedgerKey parser exclusively
+    let hasBtcLongActual = false;
+    if (symbol === "BTCUSDT" && Array.isArray(this.lastLivePositionsPayload)) {
+      for (const p of this.lastLivePositionsPayload) {
+        const hit = okxSwapRowToLedgerKey(p as Record<string, unknown>);
+        if (hit && hit.symbol === "BTCUSDT" && hit.side === "long") {
+          hasBtcLongActual = true;
+          break;
+        }
+      }
+    }
+    if (hasBtcLongActual) {
+      await this.logAndSuppressBtcUsdtAction("v2_authorized_entry", "long", ["ENTER", "ADDON", "ORDER_SUBMIT"]);
       return { executed: false, blockReason: "BTCUSDT_OKX_LONG_POSITION_PROTECTED" };
     }
 
-    if (v2Decision.decision !== "ENTER") {
-      return { executed: false, blockReason: v2Decision.risk.blockReason ?? (v2Decision as any).promotionReason ?? "NOT_ENTER" };
+    const executionAction = v2Decision.executionAction ?? (v2Decision.decision === "ENTER" ? (v2Decision.risk?.isAddOn ? "ADDON" : "ENTER") : "NONE");
+
+    if (executionAction !== "ENTER" && executionAction !== "ADDON") {
+      return { executed: false, blockReason: v2Decision.risk?.blockReason ?? "NO_EXECUTION_ACTION" };
+    }
+
+    // Strict Fail-Closed Live Order Parameters Validation (Requirement 2 & 3 - NO FALLBACKS)
+    const finalOrderNotionalUsdt = committedRiskPlan ? committedRiskPlan.finalOrderNotionalUsdt : v2Decision.risk?.finalOrderNotionalUsdt;
+    const appliedLeverage = committedRiskPlan ? committedRiskPlan.appliedLeverage : v2Decision.risk?.appliedLeverage;
+    const sideCandidate = committedRiskPlan ? committedRiskPlan.side : v2Decision.side;
+    
+    // Stop price & invalidation px strictly from lifecycleAuthority or committedRiskPlan (NO v2Decision.risk as any)
+    const stopPrice = committedRiskPlan ? committedRiskPlan.stopPrice : v2Decision.lifecycleAuthority?.newStopPrice;
+    const invalidationPx = committedRiskPlan ? committedRiskPlan.invalidationPx : (v2Decision.lifecycleAuthority?.invalidationPx ?? stopPrice);
+
+    const notionalValid = typeof finalOrderNotionalUsdt === "number" && Number.isFinite(finalOrderNotionalUsdt) && finalOrderNotionalUsdt > 0;
+    const leverageValid = typeof appliedLeverage === "number" && Number.isFinite(appliedLeverage) && appliedLeverage >= 1 && appliedLeverage <= 125;
+    const stopValid = typeof stopPrice === "number" && Number.isFinite(stopPrice) && stopPrice > 0 &&
+      (sideCandidate === "long" ? stopPrice < lastPrice : stopPrice > lastPrice);
+    const invalidationValid = typeof invalidationPx === "number" && Number.isFinite(invalidationPx) && invalidationPx > 0 &&
+      (sideCandidate === "long" ? invalidationPx < lastPrice : invalidationPx > lastPrice);
+
+    if (!notionalValid || !leverageValid || !stopValid || !invalidationValid || !sideCandidate || sideCandidate === "none") {
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
     }
 
     if (!this.okxDemo || this.signedSubmitMode() !== "enabled") {
       return { executed: false, blockReason: "SIGNED_EXECUTION_NOT_READY" };
     }
 
-    const side = v2Decision.side === "long" ? "buy" : "sell";
-    const posSide = v2Decision.side === "long" ? "long" : "short";
+    const existingPositions = await this.positions.loadOpenAll();
+    const existing = existingPositions.find((p) => p.symbol === symbol && (p.status ?? "open") === "open");
+
+    const sharedParams = {
+      symbol,
+      sideCandidate: sideCandidate as "long" | "short",
+      finalOrderNotionalUsdt,
+      appliedLeverage,
+      stopPrice,
+      invalidationPx,
+      lastPrice,
+      existing,
+      existingPositions,
+      v2Decision
+    };
+
+    switch (executionAction) {
+      case "ENTER":
+        return this.executeAuthorizedV2Entry(sharedParams);
+      case "ADDON":
+        return this.executeAuthorizedV2Addon(sharedParams);
+      default:
+        return { executed: false, blockReason: "NO_EXECUTION_ACTION" };
+    }
+  }
+
+  // Common Entry execution handler (Requirement 2, 4)
+  private async executeAuthorizedV2Entry(params: {
+    symbol: MarketSymbol;
+    sideCandidate: "long" | "short";
+    finalOrderNotionalUsdt: number;
+    appliedLeverage: number;
+    stopPrice: number;
+    invalidationPx: number;
+    lastPrice: number;
+    existingPositions: PaperOpenPositionRecord[];
+    v2Decision: EngineV2Decision;
+  }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null; updatedRecord?: PaperOpenPositionRecord; pendingOnly?: boolean }> {
+    const { symbol, sideCandidate, finalOrderNotionalUsdt, appliedLeverage, stopPrice, invalidationPx, lastPrice, existingPositions, v2Decision } = params;
+
+    const side = sideCandidate === "long" ? "buy" : "sell";
+    const posSide = sideCandidate === "long" ? "long" : "short";
     const clOrdId = buildOkxClOrdId(symbol, side);
-    const traceId = `v2_test_${Date.now()}`;
-    const desiredNotionalUsdt = v2Decision.risk.finalOrderNotionalUsdt ?? 40;
+    const traceId = `v2_auth_${Date.now()}`;
 
     const submitRes = await this.submitOkxOrder({
       symbol,
       side,
       posSide,
-      qty: Math.max(0.001, desiredNotionalUsdt / Math.max(1, lastPrice)),
+      qty: Math.max(0.001, finalOrderNotionalUsdt / Math.max(1, lastPrice)),
       clOrdId,
       traceId,
       reason: "v2_authorized_signed_bridge",
       authoritySource: "v2",
       adoptedEngine: "V2",
       entryQualityGrade: "S",
-      appliedLeverage: v2Decision.risk.appliedLeverage ?? 10,
+      appliedLeverage,
       marketRegime: v2Decision.regime,
       entryPrice: lastPrice,
-      stopPrice: (v2Decision.risk as any).stopPrice ?? lastPrice * (v2Decision.side === "long" ? 0.95 : 1.05),
+      stopPrice,
       isNewEntry: true,
-      desiredNotionalUsdt,
+      desiredNotionalUsdt: finalOrderNotionalUsdt,
       pricingReferencePx: lastPrice
     });
 
-    if (submitRes.ok) {
-      const openRecord: PaperOpenPositionRecord = {
-        symbol,
-        side: v2Decision.side === "long" ? "long" : "short",
-        entryPrice: lastPrice,
-        sizeUsd: desiredNotionalUsdt,
-        leverage: v2Decision.risk.appliedLeverage ?? 10,
-        openedAt: Date.now(),
-        entryStage: 1,
-        stopPrice: lastPrice * (v2Decision.side === "long" ? 0.95 : 1.05),
-        strategyVersion: "paper-v2",
-        sourceSignal: "V2",
-        sourceRunPath: "",
-        status: "open",
-        pos: 1
-      };
-      await this.ensureProtectiveStopOrder(openRecord, `v2_bridge_auto:${symbol}:${openRecord.openedAt}`);
-      await this.writeOpenPositions([openRecord]);
+    if (!submitRes.ok) {
+      return { executed: false, submitResult: submitRes };
     }
 
-    return { executed: submitRes.ok, submitResult: submitRes };
+    const isFilled = submitRes.fillConfirmed === true || submitRes.orderState === "filled";
+
+    // Requirement 4: Separate Order Submitted vs Order Filled. If not fillConfirmed, record pending only and DO NOT update open ledger or create protective stop order!
+    if (!isFilled) {
+      await (this.store as any)?.writePendingEntryOrders?.([{
+        symbol,
+        clOrdId,
+        ordId: submitRes.ordId ?? "pending_ord",
+        side,
+        posSide,
+        desiredNotionalUsdt: finalOrderNotionalUsdt,
+        submittedAt: Date.now()
+      }]);
+      return { executed: false, submitResult: submitRes, pendingOnly: true };
+    }
+
+    // Only when fillConfirmed === true, update open position ledger and build protective stop order!
+    const openRecord: PaperOpenPositionRecord = {
+      symbol,
+      side: sideCandidate,
+      entryPrice: submitRes.fillPx ? Number(submitRes.fillPx) : lastPrice,
+      sizeUsd: finalOrderNotionalUsdt,
+      initialSizeUsd: finalOrderNotionalUsdt,
+      leverage: appliedLeverage,
+      openedAt: Date.now(),
+      entryStage: 1,
+      stopPrice,
+      invalidationPx,
+      strategyVersion: "paper-v2",
+      sourceSignal: "V2",
+      sourceRunPath: "",
+      status: "open",
+      pos: submitRes.fillSize || (finalOrderNotionalUsdt / lastPrice),
+      isV2Authority: true
+    };
+
+    await this.ensureProtectiveStopOrder(openRecord, `v2_bridge_auto:${symbol}:${openRecord.openedAt}`);
+    await this.writeOpenPositions([...existingPositions, openRecord]);
+    return { executed: true, submitResult: submitRes, updatedRecord: openRecord };
+  }
+
+  // Common Addon scale-in execution handler (Requirement 4)
+  private async executeAuthorizedV2Addon(params: {
+    symbol: MarketSymbol;
+    sideCandidate: "long" | "short";
+    finalOrderNotionalUsdt: number;
+    appliedLeverage: number;
+    stopPrice: number;
+    invalidationPx: number;
+    lastPrice: number;
+    existing?: PaperOpenPositionRecord;
+    existingPositions: PaperOpenPositionRecord[];
+    v2Decision: EngineV2Decision;
+  }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null; updatedRecord?: PaperOpenPositionRecord; pendingOnly?: boolean }> {
+    const { symbol, sideCandidate, finalOrderNotionalUsdt, appliedLeverage, stopPrice, invalidationPx, lastPrice, existing, existingPositions, v2Decision } = params;
+
+    if (!existing) {
+      return { executed: false, blockReason: "NO_EXISTING_POSITION_FOR_ADDON" };
+    }
+
+    const side = sideCandidate === "long" ? "buy" : "sell";
+    const posSide = sideCandidate === "long" ? "long" : "short";
+    const clOrdId = buildOkxClOrdId(symbol, side);
+    const traceId = `v2_auth_${Date.now()}`;
+
+    const submitRes = await this.submitOkxOrder({
+      symbol,
+      side,
+      posSide,
+      qty: Math.max(0.001, finalOrderNotionalUsdt / Math.max(1, lastPrice)),
+      clOrdId,
+      traceId,
+      reason: "scale_in_authorized",
+      authoritySource: "v2",
+      adoptedEngine: "V2",
+      entryQualityGrade: "S",
+      appliedLeverage,
+      marketRegime: v2Decision.regime,
+      entryPrice: lastPrice,
+      stopPrice,
+      isNewEntry: false, // Strictly false for add-on!
+      desiredNotionalUsdt: finalOrderNotionalUsdt,
+      pricingReferencePx: lastPrice
+    });
+
+    if (!submitRes.ok) {
+      return { executed: false, submitResult: submitRes };
+    }
+
+    const isFilled = submitRes.fillConfirmed === true || submitRes.orderState === "filled";
+
+    // Requirement 4: Order Submitted but un-filled/pending -> DO NOT update sizeUsd, entryStage, weighted avg price or protective stop!
+    if (!isFilled) {
+      await (this.store as any)?.writePendingEntryOrders?.([{
+        symbol,
+        clOrdId,
+        ordId: submitRes.ordId ?? "pending_addon_ord",
+        side,
+        posSide,
+        desiredNotionalUsdt: finalOrderNotionalUsdt,
+        submittedAt: Date.now()
+      }]);
+      return { executed: false, submitResult: submitRes, pendingOnly: true };
+    }
+
+    // Only update position record and rebuild protective stop upon fillConfirmed === true!
+    const newTotalSizeUsd = existing.sizeUsd + finalOrderNotionalUsdt;
+    const newEntryPrice = (existing.entryPrice * existing.sizeUsd + lastPrice * finalOrderNotionalUsdt) / newTotalSizeUsd;
+    const nextStage = (existing.entryStage ?? 1) + 1;
+
+    const updatedRecord: PaperOpenPositionRecord = {
+      ...existing,
+      sizeUsd: newTotalSizeUsd,
+      entryPrice: newEntryPrice,
+      entryStage: nextStage,
+      addonCount: nextStage - 1,
+      lifecycleState: "ADDON_ACTIVE",
+      stopPrice,
+      invalidationPx
+    };
+
+    await this.ensureProtectiveStopOrder(updatedRecord, `v2_addon_auto:${symbol}:${updatedRecord.openedAt}`);
+    const idx = existingPositions.findIndex((p) => p.symbol === symbol && (p.status ?? "open") === "open");
+    if (idx >= 0) {
+      existingPositions[idx] = updatedRecord;
+    } else {
+      existingPositions.push(updatedRecord);
+    }
+    await this.writeOpenPositions(existingPositions);
+    return { executed: true, submitResult: submitRes, updatedRecord };
   }
 }
 

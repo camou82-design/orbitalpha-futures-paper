@@ -3866,13 +3866,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const okxAuthMode = (v2State as any).okxAuthMode ?? input.state.okxAuthMode;
     const okxExchangeAuthOptIn = (v2State as any).okxExchangeAuthOptIn === true || input.state.okxExchangeAuthOptIn === true;
 
-    const isOrderAttemptAction = finalDecision === "ENTER" || (isAddOn && addOnPolicy.allowed === true);
+    let executionAction: import("./types").EngineV2ExecutionAction =
+        finalDecision === "ENTER"
+            ? (isAddOn ? "ADDON" : "ENTER")
+            : "NONE";
 
     const isLiveSignedOrderAttempt =
         okxAuthMode === "live" &&
         okxExchangeAuthOptIn === true &&
         okxLiveEnabled === true &&
-        isOrderAttemptAction;
+        (executionAction === "ENTER" || executionAction === "ADDON");
 
     const isMicroProbe =
         promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" ||
@@ -3925,6 +3928,23 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             min_order_check_passed = false;
             min_order_block_reason = riskSizing.blockReason ?? "RISK_SIZING_BLOCKED";
         } else if (isLiveSignedOrderAttempt) {
+            // Validate required order parameters without fallback (Requirement 2)
+            const stopPriceVal = (riskSizing as any).stopPrice ?? (riskSizing as any).stop_price ?? (execution as any).stopPrice ?? (v2State as any).stopPrice;
+            const invalidationPxVal = (riskSizing as any).invalidationPx ?? (execution as any).invalidationPx ?? stopPriceVal;
+            const lastPx = input.snapshot.lastPrice;
+            const sideCand = v2SideAfterPromotion;
+
+            const levOk = typeof appliedLeverage === "number" && Number.isFinite(appliedLeverage) && appliedLeverage >= 1 && appliedLeverage <= 125;
+            const stopOk = typeof stopPriceVal === "number" && Number.isFinite(stopPriceVal) && stopPriceVal > 0 &&
+                (sideCand === "long" ? stopPriceVal < lastPx : stopPriceVal > lastPx);
+            const invalidationOk = typeof invalidationPxVal === "number" && Number.isFinite(invalidationPxVal) && invalidationPxVal > 0 &&
+                (sideCand === "long" ? invalidationPxVal < lastPx : invalidationPxVal > lastPx);
+
+            if (!levOk || !stopOk || !invalidationOk) {
+                min_order_check_passed = false;
+                min_order_block_reason = "ORDER_BUILD_FAIL";
+            }
+
             // Live Signed Order Attempt: Compute exposures pure in USDT from OKX actual positions + pending orders
             const pendingOrdersNotionalUsdt = (pendingOrdersNotionalRaw ?? 0) as number;
             const pendingSymbolNotionalUsdt = (pendingSymbolNotionalRaw ?? 0) as number;
@@ -3970,9 +3990,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     const notionalAfterSymbolCap = Math.min(requestedOrderNotionalUsdt, remainingSymbolCap);
                     finalOrderNotionalUsdt = Math.min(notionalAfterSymbolCap, remainingAccountCap);
 
-                    if (finalOrderNotionalUsdt < 1.0) {
+                    const finalNotionalOk = typeof finalOrderNotionalUsdt === "number" && Number.isFinite(finalOrderNotionalUsdt) && finalOrderNotionalUsdt > 0 && finalOrderNotionalUsdt <= orderCap;
+
+                    if (!finalNotionalOk || finalOrderNotionalUsdt < 1.0) {
                         min_order_check_passed = false;
-                        min_order_block_reason = "MIN_ORDER_SIZE_UNDERFLOW";
+                        min_order_block_reason = "ORDER_BUILD_FAIL";
                     }
                 }
             }
@@ -5114,6 +5136,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Requirement 7: decision이 ENTER가 아니면 최종 실행 side는 none으로 정규화
     const normalizedV2Side = finalDecision === "ENTER" ? v2SideAfterPromotion : "none";
+    executionAction = finalDecision === "ENTER"
+        ? (isAddOn || (v2State as any).addOnPolicyAllowed === true ? "ADDON" : "ENTER")
+        : "NONE";
 
     const decision: EngineV2Decision = {
         symbol: input.symbol,
@@ -5124,6 +5149,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         signal: execution.signal,
         side: normalizedV2Side as any,
         decision: finalDecision,
+        executionAction,
         risk: {
             ...riskSizing,
             isBlocked: hardBlockPresent || riskSizing.isBlocked || finalDecision === "REJECT",
@@ -5324,6 +5350,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         decision.decision = decision.decision === "ENTER" ? "SKIP" : "HOLD";
         decision.side = "none";
         decision.signal = "NONE";
+        decision.executionAction = "NONE";
 
         // Zero out all sizing
         if (decision.risk) {

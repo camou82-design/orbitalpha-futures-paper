@@ -365,6 +365,8 @@ export interface EngineV2ConfigAdapter {
     okxLiveMaxAddonCount?: number | null;
 }
 
+export type EngineV2ExecutionAction = "ENTER" | "ADDON" | "NONE";
+
 /** Final V2 Decision Object - Completely Independent Output */
 export interface EngineV2Decision {
     symbol: MarketSymbol;
@@ -375,6 +377,7 @@ export interface EngineV2Decision {
     signal: EngineV2SignalState;
     side: EngineV2Side;
     decision: EngineV2FinalDecision;
+    executionAction: EngineV2ExecutionAction;
     risk: RiskSizingOutput;
     explanation: {
         reason: string;

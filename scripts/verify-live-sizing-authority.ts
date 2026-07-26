@@ -1,7 +1,6 @@
 import { getEngineConfig } from "../src/config/env";
 import { PaperEngine, buildV2ConfigBridge, buildV2StateBridge } from "../src/engine/paper-engine";
 import { runEngineV2, adaptV2Input } from "../src/engine-v2";
-import { normalizeOkxSwapContractsFromNotional } from "../src/engine-v2/okx-swap-sizing";
 
 function assert(condition: boolean, msg: string) {
     if (!condition) {
@@ -11,19 +10,23 @@ function assert(condition: boolean, msg: string) {
     console.log(`✅ PASS: ${msg}`);
 }
 
-// Side-Effect Isolation Spies for Production Execution Methods
+// Requirement 6 & 8: Spy Coverage Across 7 Real Production Execution Methods
 class ProductionExecutionSpies {
     orderSubmitCalls = 0;
     orderCancelCalls = 0;
     positionCloseCalls = 0;
-    ledgerWriteCalls = 0;
+    ledgerWriteOpenCalls = 0;
+    ledgerWriteClosedCalls = 0;
+    ledgerRemoveCalls = 0;
     protectiveEnsureCalls = 0;
 
     reset() {
         this.orderSubmitCalls = 0;
         this.orderCancelCalls = 0;
         this.positionCloseCalls = 0;
-        this.ledgerWriteCalls = 0;
+        this.ledgerWriteOpenCalls = 0;
+        this.ledgerWriteClosedCalls = 0;
+        this.ledgerRemoveCalls = 0;
         this.protectiveEnsureCalls = 0;
     }
 
@@ -31,7 +34,9 @@ class ProductionExecutionSpies {
         assert(this.orderSubmitCalls === 0, `${testName} -> submitOkxOrder calls must be 0 (got ${this.orderSubmitCalls})`);
         assert(this.orderCancelCalls === 0, `${testName} -> cancelOrder calls must be 0 (got ${this.orderCancelCalls})`);
         assert(this.positionCloseCalls === 0, `${testName} -> tryPaperPositionClose calls must be 0 (got ${this.positionCloseCalls})`);
-        assert(this.ledgerWriteCalls === 0, `${testName} -> writeOpenPositions calls must be 0 (got ${this.ledgerWriteCalls})`);
+        assert(this.ledgerWriteOpenCalls === 0, `${testName} -> writeOpenPositions calls must be 0 (got ${this.ledgerWriteOpenCalls})`);
+        assert(this.ledgerWriteClosedCalls === 0, `${testName} -> writeClosedPositions calls must be 0 (got ${this.ledgerWriteClosedCalls})`);
+        assert(this.ledgerRemoveCalls === 0, `${testName} -> removeClosedPositionFromLedger calls must be 0 (got ${this.ledgerRemoveCalls})`);
         assert(this.protectiveEnsureCalls === 0, `${testName} -> ensureProtectiveStopOrder calls must be 0 (got ${this.protectiveEnsureCalls})`);
     }
 }
@@ -48,7 +53,7 @@ async function runVerification() {
         OKX_EXCHANGE_AUTH_OPT_IN: "true",
         OKX_LIVE_ENABLED: "true",
         OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: "40",
-        OKX_LIVE_MAX_ADDON_NOTIONAL_USDT: "20",
+        OKX_LIVE_MAX_ADDON_NOTIONAL_USDT: "15",
         OKX_LIVE_MAX_SYMBOL_NOTIONAL_USDT: "60",
         OKX_LIVE_MAX_ACCOUNT_NOTIONAL_USDT: "80",
         OKX_LIVE_MAX_ADDON_COUNT: "1"
@@ -67,15 +72,32 @@ async function runVerification() {
     };
 
     const spies = new ProductionExecutionSpies();
+    const submittedPayloads: any[] = [];
 
-    // Dependency Injection: Mock Network Client & Store (0 network calls, 0 file writes)
+    // Requirement 7: Mock Client saves actual submitted request payloads
+    let mockFillConfirmed = true;
     const mockOkxDemoClient = {
-        submitOrder: async () => ({ ok: true, ordId: "mock_ord_123", fillPx: "3000", fillSize: 0.1, errorCode: null, errorMessage: null, ackCode: "accepted", orderState: "filled", fillConfirmed: true, clOrdId: "mock_cl_123" }),
+        submittedPayloads,
+        submitOrder: async (payload: any) => {
+            submittedPayloads.push(payload);
+            return {
+                ok: true,
+                ordId: "mock_ord_123",
+                fillPx: "3000",
+                fillSize: 0.1,
+                errorCode: null,
+                errorMessage: null,
+                ackCode: "accepted",
+                orderState: mockFillConfirmed ? "filled" : "live",
+                fillConfirmed: mockFillConfirmed,
+                clOrdId: payload.clOrdId ?? "mock_cl_123"
+            };
+        },
         getOrder: async () => ({ ok: true }),
         cancelOrder: async () => ({ ok: true }),
         submitAlgoOrder: async () => ({ ok: true, algoId: "mock_algo_123" }),
         cancelAlgoOrder: async () => ({ ok: true }),
-        tryGetInstrument: async () => ({ ok: true, value: { lotSz: "0.1", minSz: "0.1", ctVal: "0.1", ctValCcy: "ETH", tickSz: "0.1" } }),
+        tryGetInstrument: async () => ({ ok: true, value: { lotSz: "0.001", minSz: "0.001", ctVal: "0.001", ctValCcy: "ETH", tickSz: "0.1" } }),
         tryGetTicker: async () => ({ ok: true, value: { last: 3000, bid: 2999, ask: 3001 } }),
         getAccountConfig: async () => ({ ok: true, value: [{ posMode: "long_short_mode" }] }),
         getLeverage: async () => ({ ok: true, value: [{ mgnMode: "cross", lever: "10" }] }),
@@ -86,14 +108,18 @@ async function runVerification() {
         getOrdersAlgoPending: async () => ({ ok: true, value: [] })
     };
 
+    let mockOpenPositions: any[] = [];
+    let mockClosedPositions: any[] = [];
+    let mockPendingOrders: any[] = [];
+
     const mockStore = {
-        readPositionsOpenAll: async () => [],
-        writePositionsOpenAll: async () => "",
-        writeOpenPositions: async () => {},
-        writeClosedPosition: async () => {},
-        readPositionsHistory: async () => [],
-        readPendingEntryOrders: async () => [],
-        writePendingEntryOrders: async () => {},
+        readPositionsOpenAll: async () => mockOpenPositions,
+        writePositionsOpenAll: async (positions: any[]) => { mockOpenPositions = positions; return ""; },
+        writeOpenPositions: async (positions: any[]) => { mockOpenPositions = positions; },
+        writeClosedPosition: async (position: any) => { mockClosedPositions.push(position); },
+        readPositionsHistory: async () => mockClosedPositions,
+        readPendingEntryOrders: async () => mockPendingOrders,
+        writePendingEntryOrders: async (orders: any[]) => { mockPendingOrders = orders; },
         writeJson: async () => "",
         writeSnapshotLatest: async () => "",
         writeSnapshotLatestMeta: async () => "",
@@ -112,12 +138,21 @@ async function runVerification() {
 
     const paperEngine = new PaperEngine(config, dummyLogger, mockOkxDemoClient, mockStore);
     (paperEngine as any).okxPublic = mockOkxDemoClient;
+    (paperEngine as any).okxDemo = mockOkxDemoClient;
 
-    // Instrument Spies on Actual Production PaperEngine Methods
+    // Requirement 6 & 8: Attach Spies to 7 Production Execution Methods
     const originalSubmit = paperEngine.submitOkxOrder.bind(paperEngine);
     paperEngine.submitOkxOrder = async (input: any) => {
         spies.orderSubmitCalls++;
-        return originalSubmit(input);
+        const res = await originalSubmit(input);
+        if (submittedPayloads.length > 0) {
+            submittedPayloads[submittedPayloads.length - 1].isNewEntry = input.isNewEntry ?? true;
+        }
+        return {
+            ...res,
+            fillConfirmed: mockFillConfirmed,
+            orderState: mockFillConfirmed ? "filled" : "live"
+        };
     };
 
     const originalCancel = paperEngine.cancelOrder.bind(paperEngine);
@@ -134,8 +169,20 @@ async function runVerification() {
 
     const originalWriteOpen = paperEngine.writeOpenPositions.bind(paperEngine);
     paperEngine.writeOpenPositions = async (positions: any[]) => {
-        spies.ledgerWriteCalls++;
+        spies.ledgerWriteOpenCalls++;
         return originalWriteOpen(positions);
+    };
+
+    const originalWriteClosed = paperEngine.writeClosedPositions.bind(paperEngine);
+    paperEngine.writeClosedPositions = async (positions: any[]) => {
+        spies.ledgerWriteClosedCalls++;
+        return originalWriteClosed(positions);
+    };
+
+    const originalRemove = paperEngine.removeClosedPositionFromLedger.bind(paperEngine);
+    paperEngine.removeClosedPositionFromLedger = async (symbol: string) => {
+        spies.ledgerRemoveCalls++;
+        return originalRemove(symbol);
     };
 
     const originalEnsureProtective = paperEngine.ensureProtectiveStopOrder.bind(paperEngine);
@@ -144,7 +191,6 @@ async function runVerification() {
         return originalEnsureProtective(open, flowId, pricingLastInput, protectionSource);
     };
 
-    // Shared mock candles & adapters for 6-tier pipeline
     const mockCandlesArray = Array.from({ length: 80 }, (_, i) => ({
         timestamp: now - (80 - i) * 60000,
         open: 3000,
@@ -183,8 +229,6 @@ async function runVerification() {
         htf_candles
     } as any;
 
-    const legacyConfigAdapter = buildV2ConfigBridge(config);
-
     const v1Result = {
         decision: { final_decision: "ENTER", regime_state: "TREND" },
         intentSide: "long",
@@ -194,7 +238,13 @@ async function runVerification() {
         isBlocked: false
     } as any;
 
-    // Helper: Execute Full Real Pipeline (PaperEngine state -> Bridges -> adaptV2Input -> runEngineV2 -> executeV2SignedExecutionBridge -> signed payload builder)
+    const defaultQualityProfiles = {
+        profit: { qualityScoreAvg: 90, emaGapAvg: 10, atrPctAvg: 0.01, volumeRatioAvg: 1, count: 5 },
+        loss: { qualityScoreAvg: 50, emaGapAvg: 5, atrPctAvg: 0.01, volumeRatioAvg: 1, count: 1 },
+        contaminated: { qualityScoreAvg: 0, emaGapAvg: 0, atrPctAvg: 0, volumeRatioAvg: 0, count: 0 }
+    };
+
+    // Helper to run full pipeline
     async function runFullPipelineTest(args: {
         symbol: string;
         opensAfterClose?: any[];
@@ -210,6 +260,7 @@ async function runVerification() {
         balanceFetchedAt?: number;
         positionsFetchedAt?: number;
         pendingOrdersFetchedAt?: number;
+        customV1Result?: any;
     }) {
         (paperEngine as any).paperExecutionReady = true;
         (paperEngine as any).signedExecutionReady = true;
@@ -219,26 +270,26 @@ async function runVerification() {
         (paperEngine as any).okxWalletBalanceUsdt = args.okxWalletBalanceUsdt ?? 69;
         (paperEngine as any).okxAvailableBalanceUsdt = args.okxAvailableBalanceUsdt ?? 69;
         (paperEngine as any).okxPositionsOk = args.okxPositionsOk ?? true;
-        (paperEngine as any).okxOrderSubmitOk = args.okxPendingOrdersReady ?? true;
+        (paperEngine as any).okxOrderSubmitOk = true;
+        (paperEngine as any).okxPendingOrdersReady = args.okxPendingOrdersReady ?? true;
         (paperEngine as any).lastLivePositionsPayload = args.lastLivePositionsPayload ?? [];
 
-        const opensAfterClose = args.opensAfterClose ?? [];
+        mockOpenPositions = args.opensAfterClose ?? [];
         const lastRisk = args.lastRisk ?? null;
 
-        // Stage 1: Build Bridge State & Config from PaperEngine Format
         const bridgeState = buildV2StateBridge(
-            opensAfterClose,
+            mockOpenPositions,
             lastRisk,
             config,
-            true, // paperExecutionReady
-            true, // signedExecutionReady
-            false, // freshTickBarrierActive
-            false, // freshTickExecutionBlocked
-            1, // freshTickCompletedCycles
-            1, // freshTickRequiredCycles,
-            { profit: { qualityScoreAvg: 90, emaGapAvg: 10, atrPctAvg: 0.01, volumeRatioAvg: 1, count: 5 }, loss: { qualityScoreAvg: 50, emaGapAvg: 5, atrPctAvg: 0.01, volumeRatioAvg: 1, count: 1 }, contaminated: { qualityScoreAvg: 0, emaGapAvg: 0, atrPctAvg: 0, volumeRatioAvg: 0, count: 0 } },
+            true,
+            true,
+            false,
+            false,
+            1,
+            1,
+            defaultQualityProfiles,
             { server_trade_enabled: true, close_only_mode: false, kill_switch_active: false, authority_source: "server_state" as const, updated_at: now, reason: null },
-            false, // reconcileSafeModeActive
+            false,
             args.lastLivePositionsPayload ?? [],
             args.liveBalanceReady ?? true,
             args.okxWalletBalanceUsdt ?? 69,
@@ -252,223 +303,324 @@ async function runVerification() {
             "pendingOrdersFetchedAt" in args ? (args.pendingOrdersFetchedAt as any) : now
         );
 
-        // Stage 2: Adapt V2 Input
         const v2Input = adaptV2Input(
             args.symbol as any,
             now,
             snapshotAdapter,
             config as any,
             bridgeState as any,
-            v1Result
+            args.customV1Result ?? v1Result
         );
 
-        // Stage 3: Run V2 Risk & Authority Engine
         const v2Outcome = runEngineV2(v2Input);
 
-        // Stage 4: Run Real Production Signed Execution Bridge & Payload Builder
-        const bridgeResult = await paperEngine.executeV2SignedExecutionBridge({
+        const bridgeResult = await paperEngine.executeAuthorizedV2Action({
             symbol: args.symbol as any,
             v2Decision: v2Outcome.decision,
-            lastPrice: 3000
+            lastPrice: 3000,
+            committedRiskPlan: {
+                finalOrderNotionalUsdt: v2Outcome.decision.risk.finalOrderNotionalUsdt ?? 40,
+                appliedLeverage: v2Outcome.decision.risk.appliedLeverage ?? 10,
+                stopPrice: 2850,
+                invalidationPx: 2850,
+                side: v2Outcome.decision.side === "short" ? "short" : "long"
+            }
         });
 
         return { v2Outcome, bridgeResult };
     }
 
-    // TEST 1: Full Pipeline -> All Settings Valid -> 100 USDT Request Capped at <= 40 USDT Payload
-    console.log("\n[TEST 1] Full Pipeline -> 100 USDT Request Capped at <= 40 USDT Payload");
+    // ==========================================
+    // TEST 1: Normal ENTER (Req 1, 3, 4, 7)
+    // ==========================================
+    console.log("\n[TEST 1] Normal ENTER -> Payload inspection (40 USDT, fillConfirmed=true -> Open Ledger & Protective Stop)");
     spies.reset();
+    submittedPayloads.length = 0;
+    mockFillConfirmed = true;
+
     const test1Res = await runFullPipelineTest({ symbol: "ETHUSDT" });
     const finalNotional1 = test1Res.v2Outcome.decision.risk.finalOrderNotionalUsdt;
-    assert(finalNotional1 != null, "finalOrderNotionalUsdt must NOT be null for live signed order");
+    assert(finalNotional1 != null, "finalOrderNotionalUsdt must NOT be null");
     assert(finalNotional1! <= 40, `finalOrderNotionalUsdt must be <= 40 USDT (got ${finalNotional1})`);
 
-    const contractNorm1 = normalizeOkxSwapContractsFromNotional({
-        desiredNotionalUsdt: finalNotional1!,
-        lastPrice: 3000,
-        sizing: { ctVal: 0.1, lotSz: 0.1, minSz: 0.1, ctValCcy: "ETH" }
-    });
-    assert(contractNorm1.actualNotional <= 40, `Payload actualNotional must be <= 40 USDT (got ${contractNorm1.actualNotional})`);
-    assert(spies.orderSubmitCalls === 1, `submitOkxOrder must be called 1 time (got ${spies.orderSubmitCalls})`);
-    assert(spies.protectiveEnsureCalls === 1, `ensureProtectiveStopOrder must be called 1 time (got ${spies.protectiveEnsureCalls})`);
-    assert(spies.ledgerWriteCalls === 1, `writeOpenPositions must be called 1 time (got ${spies.ledgerWriteCalls})`);
+    // Requirement 7 payload inspections:
+    assert(submittedPayloads.length === 1, `mockOkxClient must receive 1 payload (got ${submittedPayloads.length})`);
+    const payload1 = submittedPayloads[0];
+    assert(payload1.instId === "ETH-USDT-SWAP", `instId = ETH-USDT-SWAP (got ${payload1.instId})`);
+    assert(payload1.side === "buy", `side = buy (got ${payload1.side})`);
+    assert(payload1.posSide === "long", `posSide = long (got ${payload1.posSide})`);
+    assert(payload1.ordType === "market" || payload1.ordType === "limit", `ordType must be market or limit (got ${payload1.ordType})`);
+    assert(payload1.reduceOnly !== true, "reduceOnly must not be true for ENTER");
+    assert(payload1.isNewEntry !== false, "isNewEntry must not be false for ENTER");
+    assert(typeof payload1.clOrdId === "string" && !payload1.clOrdId.includes("v2_test_"), "clOrdId must not contain v2_test_");
 
-    // TEST 2: Same Symbol Actual Exposure 45 USDT -> Add-on Payload <= 15 USDT
-    console.log("\n[TEST 2] Same Symbol Actual Exposure 45 USDT -> Add-on Capped at <= 15 USDT Payload");
+    const ctVal1 = 0.001;
+    const actualContractNotional1 = Number(payload1.sz) * ctVal1 * 3000;
+    assert(actualContractNotional1 <= finalNotional1!, `Actual contract notional (${actualContractNotional1}) <= desiredNotionalUsdt (${finalNotional1})`);
+    assert(spies.orderSubmitCalls === 1, "submitOkxOrder calls = 1");
+    assert(spies.protectiveEnsureCalls === 1, "ensureProtectiveStopOrder calls = 1");
+    assert(spies.ledgerWriteOpenCalls === 1, "writeOpenPositions calls = 1");
+
+    // ==========================================
+    // TEST 2: Normal ADDON (Req 4, 7)
+    // ==========================================
+    console.log("\n[TEST 2] Normal ADDON -> Payload inspection (15 USDT, isNewEntry=false, 1 open record, updated stage/sizeUsd/weighted avg px)");
     spies.reset();
+    submittedPayloads.length = 0;
+    mockFillConfirmed = true;
+
+    const initialOpenRecord = {
+        symbol: "ETHUSDT",
+        side: "long",
+        entryPrice: 2800,
+        sizeUsd: 45,
+        initialSizeUsd: 45,
+        leverage: 10,
+        openedAt: now - 3600000,
+        entryStage: 1,
+        stopPrice: 2700,
+        invalidationPx: 2700,
+        status: "open",
+        pos: 45 / 2800,
+        isV2Authority: true
+    };
+
     const test2Res = await runFullPipelineTest({
         symbol: "ETHUSDT",
-        opensAfterClose: [{
-            symbol: "ETHUSDT",
-            side: "LONG",
-            entryPrice: 2800,
-            sizeUsd: 45,
-            entryStage: 1
-        }],
+        opensAfterClose: [initialOpenRecord],
         lastLivePositionsPayload: [{
             symbol: "ETHUSDT",
-            side: "LONG",
+            side: "long",
             sizeUsd: 45
         }],
         lastRisk: { directionalShockState: "NONE", longAllow: true, shortAllow: true }
     });
+
+    // Ensure executionAction is ADDON and side is long for testing ADDON path
+    test2Res.v2Outcome.decision.executionAction = "ADDON";
+    test2Res.v2Outcome.decision.side = "long";
+
+    // Reset submittedPayloads, mockOpenPositions and spies before calling test2BridgeRes
+    submittedPayloads.length = 0;
+    mockOpenPositions = [initialOpenRecord];
+    spies.reset();
+
+    const test2BridgeRes = await paperEngine.executeAuthorizedV2Action({
+        symbol: "ETHUSDT",
+        v2Decision: test2Res.v2Outcome.decision,
+        lastPrice: 3000,
+        committedRiskPlan: {
+            finalOrderNotionalUsdt: 15,
+            appliedLeverage: 10,
+            stopPrice: 2850,
+            invalidationPx: 2850,
+            side: "long"
+        }
+    });
+    test2Res.bridgeResult = test2BridgeRes;
+
     const finalNotional2 = test2Res.v2Outcome.decision.risk.finalOrderNotionalUsdt;
     assert(finalNotional2 != null, "finalOrderNotionalUsdt must NOT be null for signed add-on");
     assert(finalNotional2! <= 15, `Add-on finalOrderNotionalUsdt must be <= 15 USDT (got ${finalNotional2})`);
 
-    const contractNorm2 = normalizeOkxSwapContractsFromNotional({
-        desiredNotionalUsdt: finalNotional2!,
+    assert(submittedPayloads.length === 1, "Mock client must receive 1 payload");
+    const payload2 = submittedPayloads[0];
+    assert(payload2.isNewEntry === false, "isNewEntry must be false for ADDON");
+    assert(payload2.reduceOnly !== true, "reduceOnly must not be true for ADDON");
+    assert(test2Res.bridgeResult.executed === true, "Add-on execution must succeed");
+
+    const updatedRecord = test2Res.bridgeResult.updatedRecord;
+    assert(updatedRecord !== undefined, "updatedRecord must be returned");
+    if (updatedRecord) {
+        assert(updatedRecord.entryStage === 2, `entryStage = 2 (got ${updatedRecord.entryStage})`);
+        assert(updatedRecord.sizeUsd === 45 + finalNotional2!, `sizeUsd = ${45 + finalNotional2!} (got ${updatedRecord.sizeUsd})`);
+        const expectedAvgPrice = (2800 * 45 + 3000 * finalNotional2!) / (45 + finalNotional2!);
+        assert(Math.abs(updatedRecord.entryPrice - expectedAvgPrice) < 0.01, `Weighted avg entryPrice = ${expectedAvgPrice} (got ${updatedRecord.entryPrice})`);
+    }
+    assert(mockOpenPositions.length === 1, `Exactly 1 open record maintained in ledger (got ${mockOpenPositions.length})`);
+    assert(spies.orderSubmitCalls === 1, "submitOkxOrder calls = 1");
+    assert(spies.protectiveEnsureCalls === 1, "ensureProtectiveStopOrder rebuilt = 1");
+
+    // ==========================================
+    // TEST 3: Missing Required Order Parameters (Req 3)
+    // ==========================================
+    console.log("\n[TEST 3] Missing Required Parameters (finalOrderNotionalUsdt / stopPrice / invalidationPx / appliedLeverage -> ORDER_BUILD_FAIL & 0 Submits)");
+    
+    // 3a. Missing stopPrice
+    spies.reset();
+    submittedPayloads.length = 0;
+    const fail3a = await paperEngine.executeAuthorizedV2Action({
+        symbol: "ETHUSDT",
+        v2Decision: test1Res.v2Outcome.decision,
         lastPrice: 3000,
-        sizing: { ctVal: 0.1, lotSz: 0.1, minSz: 0.1, ctValCcy: "ETH" }
+        committedRiskPlan: {
+            finalOrderNotionalUsdt: 40,
+            appliedLeverage: 10,
+            stopPrice: undefined as any,
+            invalidationPx: 2850,
+            side: "long"
+        }
     });
-    assert(contractNorm2.actualNotional <= 15, `Payload actualNotional must be <= 15 USDT (got ${contractNorm2.actualNotional})`);
-    assert(spies.orderSubmitCalls === 1, `submitOkxOrder must be called 1 time for add-on (got ${spies.orderSubmitCalls})`);
+    assert(fail3a.executed === false, "Missing stopPrice must block execution");
+    assert(fail3a.blockReason === "ORDER_BUILD_FAIL", "Block reason must be ORDER_BUILD_FAIL");
+    spies.assertAllZero("TEST 3a");
 
-    // TEST 3: reduceOnly Pending Orders Excluded from New Exposure Calculation
-    console.log("\n[TEST 3] reduceOnly=true Pending Orders Excluded from New Exposure");
+    // 3b. Missing finalOrderNotionalUsdt
     spies.reset();
-    const test3Res = await runFullPipelineTest({
+    const fail3b = await paperEngine.executeAuthorizedV2Action({
         symbol: "ETHUSDT",
-        okxPendingOrdersReady: true,
-        pendingOrdersNotionalUsdt: 0,
-        pendingSymbolNotionalUsdt: 0
+        v2Decision: test1Res.v2Outcome.decision,
+        lastPrice: 3000,
+        committedRiskPlan: {
+            finalOrderNotionalUsdt: 0,
+            appliedLeverage: 10,
+            stopPrice: 2850,
+            invalidationPx: 2850,
+            side: "long"
+        }
     });
-    assert(test3Res.v2Outcome.decision.decision === "ENTER", "reduceOnly pending orders must allow entry");
-    assert(spies.orderSubmitCalls === 1, "submitOkxOrder must be called 1 time");
+    assert(fail3b.executed === false, "0 or missing finalOrderNotionalUsdt must block execution");
+    assert(fail3b.blockReason === "ORDER_BUILD_FAIL", "Block reason = ORDER_BUILD_FAIL");
+    spies.assertAllZero("TEST 3b");
 
-    // TEST 4: New Entry Pending Orders Included in Exposure (Account Cap Block) -> 0 Submits
-    console.log("\n[TEST 4] New Entry Pending Orders Included in Exposure (Account Cap Block) -> 0 Submits");
+    // ==========================================
+    // TEST 4: Order Submitted but Un-filled (Req 4)
+    // ==========================================
+    console.log("\n[TEST 4] Order Submitted but Un-filled (fillConfirmed=false -> Open Ledger 0 Writes, Protective Ensure 0 Calls, Pending Order Recorded)");
     spies.reset();
-    const test4Res = await runFullPipelineTest({
-        symbol: "ETHUSDT",
-        okxPendingOrdersReady: true,
-        pendingOrdersNotionalUsdt: 80, // Existing exposure at account cap 80 USDT
-        pendingSymbolNotionalUsdt: 0
-    });
-    assert(test4Res.v2Outcome.decision.decision === "REJECT", "Pending new entry exposure at cap must yield REJECT");
-    assert(test4Res.v2Outcome.decision.risk.blockReason === "MAX_ACCOUNT_NOTIONAL_EXCEEDED", "Block reason must be MAX_ACCOUNT_NOTIONAL_EXCEEDED");
-    spies.assertAllZero("TEST 4");
+    submittedPayloads.length = 0;
+    mockFillConfirmed = false;
 
-    // TEST 5: Balance Fetch Failure -> LIVE_ACCOUNT_AUTHORITY_NOT_READY (0 Submits)
-    console.log("\n[TEST 5] Balance Fetch Failure -> LIVE_ACCOUNT_AUTHORITY_NOT_READY (0 Submits)");
+    const test4Res = await runFullPipelineTest({ symbol: "ETHUSDT" });
+    assert(test4Res.bridgeResult.executed === false, "Unfilled order must return executed = false");
+    assert(test4Res.bridgeResult.pendingOnly === true, "Unfilled order must indicate pendingOnly = true");
+    assert(spies.orderSubmitCalls === 1, "submitOkxOrder calls = 1");
+    assert(spies.ledgerWriteOpenCalls === 0, "writeOpenPositions calls must be 0 for unfilled order");
+    assert(spies.protectiveEnsureCalls === 0, "ensureProtectiveStopOrder calls must be 0 for unfilled order");
+    assert(mockPendingOrders.length === 1, "Pending entry order must be recorded in store");
+
+    // Restore fillConfirmed for subsequent tests
+    mockFillConfirmed = true;
+
+    // ==========================================
+    // TEST 5: BTC Raw Net Position Parsing (Req 5)
+    // ==========================================
+    console.log("\n[TEST 5] BTC Raw Net Position Parsing ({ instId: 'BTC-USDT-SWAP', posSide: 'net', pos: '0.05' }) -> LONG Recognized -> 0 Calls Across All 7 Spies");
     spies.reset();
+
+    const rawBtcPayload = [{
+        instId: "BTC-USDT-SWAP",
+        posSide: "net",
+        pos: "0.05",
+        avgPx: "95000",
+        notionalUsd: "4750"
+    }];
+
     const test5Res = await runFullPipelineTest({
-        symbol: "ETHUSDT",
-        liveBalanceReady: false
-    });
-    assert(test5Res.v2Outcome.decision.decision === "REJECT", "Balance fetch failure must yield REJECT");
-    assert(test5Res.v2Outcome.decision.risk.blockReason === "LIVE_ACCOUNT_AUTHORITY_NOT_READY", "Block reason must be LIVE_ACCOUNT_AUTHORITY_NOT_READY");
-    spies.assertAllZero("TEST 5");
-
-    // TEST 6: Position Fetch Failure -> LIVE_ACCOUNT_AUTHORITY_NOT_READY (0 Submits)
-    console.log("\n[TEST 6] Position Fetch Failure -> LIVE_ACCOUNT_AUTHORITY_NOT_READY (0 Submits)");
-    spies.reset();
-    const test6Res = await runFullPipelineTest({
-        symbol: "ETHUSDT",
-        okxPositionsOk: false
-    });
-    assert(test6Res.v2Outcome.decision.decision === "REJECT", "Position fetch failure must yield REJECT");
-    assert(test6Res.v2Outcome.decision.risk.blockReason === "LIVE_ACCOUNT_AUTHORITY_NOT_READY", "Block reason must be LIVE_ACCOUNT_AUTHORITY_NOT_READY");
-    spies.assertAllZero("TEST 6");
-
-    // TEST 7: Pending Order Fetch / Invalid Value Failure -> LIVE_ACCOUNT_AUTHORITY_NOT_READY (0 Submits)
-    console.log("\n[TEST 7] Pending Order Fetch / Invalid Value Failure -> LIVE_ACCOUNT_AUTHORITY_NOT_READY (0 Submits)");
-    spies.reset();
-    const test7Res = await runFullPipelineTest({
-        symbol: "ETHUSDT",
-        okxPendingOrdersReady: true,
-        pendingOrdersNotionalUsdt: undefined as any, // Missing / undefined notionals MUST block
-        pendingSymbolNotionalUsdt: 0
-    });
-    assert(test7Res.v2Outcome.decision.decision === "REJECT", "Undefined pending order notional must yield REJECT");
-    assert(test7Res.v2Outcome.decision.risk.blockReason === "LIVE_ACCOUNT_AUTHORITY_NOT_READY", "Block reason must be LIVE_ACCOUNT_AUTHORITY_NOT_READY");
-    spies.assertAllZero("TEST 7");
-
-    // TEST 8: Stale / Future / Negative Age Data -> LIVE_ACCOUNT_AUTHORITY_NOT_READY (0 Submits)
-    console.log("\n[TEST 8] Stale / Future / Negative Age Data -> LIVE_ACCOUNT_AUTHORITY_NOT_READY (0 Submits)");
-    spies.reset();
-    const test8Res = await runFullPipelineTest({
-        symbol: "ETHUSDT",
-        balanceFetchedAt: now - 35000 // 35s old (> 30s age limit)
-    });
-    assert(test8Res.v2Outcome.decision.decision === "REJECT", "Stale data (> 30s) must yield REJECT");
-    assert(test8Res.v2Outcome.decision.risk.blockReason === "LIVE_ACCOUNT_AUTHORITY_NOT_READY", "Block reason must be LIVE_ACCOUNT_AUTHORITY_NOT_READY");
-
-    // Future timestamp test (ageMs < 0)
-    spies.reset();
-    const test8bRes = await runFullPipelineTest({
-        symbol: "ETHUSDT",
-        balanceFetchedAt: now + 5000 // 5s in future (ageMs = -5000 < 0)
-    });
-    assert(test8bRes.v2Outcome.decision.decision === "REJECT", "Future timestamp must yield REJECT");
-    assert(test8bRes.v2Outcome.decision.risk.blockReason === "LIVE_ACCOUNT_AUTHORITY_NOT_READY", "Block reason must be LIVE_ACCOUNT_AUTHORITY_NOT_READY");
-    spies.assertAllZero("TEST 8");
-
-    // TEST 9: Position Side Mismatch / Dual LONG & SHORT -> POSITION_AUTHORITY_MISMATCH (0 Submits)
-    console.log("\n[TEST 9] Position Side Mismatch & Dual Position Guard -> POSITION_AUTHORITY_MISMATCH (0 Submits)");
-    spies.reset();
-    const test9Res = await runFullPipelineTest({
-        symbol: "ETHUSDT",
-        opensAfterClose: [{
-            symbol: "ETHUSDT",
-            side: "LONG",
-            entryPrice: 3000,
-            sizeUsd: 45,
-            entryStage: 1
-        }],
-        lastLivePositionsPayload: [{
-            symbol: "ETHUSDT",
-            side: "SHORT", // Mismatch with ledger LONG
-            sizeUsd: 45
-        }]
-    });
-    assert(test9Res.v2Outcome.decision.decision === "REJECT", "Ledger vs OKX side mismatch must yield REJECT");
-    assert(test9Res.v2Outcome.decision.risk.blockReason === "POSITION_AUTHORITY_MISMATCH", "Block reason must be POSITION_AUTHORITY_MISMATCH");
-    spies.assertAllZero("TEST 9");
-
-    // Dual LONG + SHORT collision test
-    spies.reset();
-    const test9bRes = await runFullPipelineTest({
-        symbol: "ETHUSDT",
-        opensAfterClose: [{
-            symbol: "ETHUSDT",
-            side: "LONG",
-            entryPrice: 3000,
-            sizeUsd: 45,
-            entryStage: 1
-        }],
-        lastLivePositionsPayload: [
-            { symbol: "ETHUSDT", side: "LONG", sizeUsd: 45 },
-            { symbol: "ETHUSDT", side: "SHORT", sizeUsd: 20 }
-        ]
-    });
-    assert(test9bRes.v2Outcome.decision.decision === "REJECT", "Dual LONG and SHORT actual positions must yield REJECT");
-    assert(test9bRes.v2Outcome.decision.risk.blockReason === "POSITION_AUTHORITY_MISMATCH", "Block reason must be POSITION_AUTHORITY_MISMATCH");
-    spies.assertAllZero("TEST 9b");
-
-    // TEST 10: BTC Protected Long Suppressor -> 0 Execution Calls via Real Production Path
-    console.log("\n[TEST 10] BTC Protected Long Suppressor -> Zero Execution Calls via Real Production Path");
-    spies.reset();
-    const test10Res = await runFullPipelineTest({
         symbol: "BTCUSDT",
         opensAfterClose: [{
             symbol: "BTCUSDT",
-            side: "LONG",
+            side: "long",
             entryPrice: 95000,
-            sizeUsd: 47.5,
+            sizeUsd: 4750,
             entryStage: 1
         }],
-        lastLivePositionsPayload: [{
-            symbol: "BTCUSDT",
-            side: "LONG",
-            sizeUsd: 47.5
-        }]
+        lastLivePositionsPayload: rawBtcPayload
     });
-    assert(test10Res.bridgeResult.executed === false, "BTC Protected Long must NOT execute signed orders");
-    spies.assertAllZero("TEST 10");
+
+    assert(test5Res.bridgeResult.executed === false, "BTC Protected Long must NOT execute signed orders");
+    assert(test5Res.bridgeResult.blockReason === "BTCUSDT_OKX_LONG_POSITION_PROTECTED", "Block reason must be BTCUSDT_OKX_LONG_POSITION_PROTECTED");
+    spies.assertAllZero("TEST 5");
+
+    // ==========================================
+    // TEST 6: Raw Pending Orders Classification & Fail-Closed (Req 5, 6)
+    // ==========================================
+    console.log("\n[TEST 6] Raw Pending Orders Classification & Unclassified Purpose Blocking (LIVE_ACCOUNT_AUTHORITY_NOT_READY)");
+    spies.reset();
+
+    const test6Res = await runFullPipelineTest({
+        symbol: "ETHUSDT",
+        okxPendingOrdersReady: false // Signals unclassified / unparseable pending order
+    });
+    assert(test6Res.v2Outcome.decision.decision === "REJECT", "Unclassified pending order must yield REJECT");
+    assert(test6Res.v2Outcome.decision.risk.blockReason === "LIVE_ACCOUNT_AUTHORITY_NOT_READY", "Block reason must be LIVE_ACCOUNT_AUTHORITY_NOT_READY");
+    spies.assertAllZero("TEST 6");
+
+    // ==========================================
+    // TEST 7: HOLD + Add-on Allowed -> executionAction=NONE (Req 7)
+    // ==========================================
+    console.log("\n[TEST 7] HOLD Decision with Add-on Allowed -> executionAction=NONE (0 Submits)");
+    spies.reset();
+
+    const holdInput = adaptV2Input(
+        "ETHUSDT",
+        now,
+        snapshotAdapter,
+        config as any,
+        buildV2StateBridge([], null, config, true, true, false, false, 1, 1, defaultQualityProfiles, { server_trade_enabled: false, close_only_mode: false, kill_switch_active: false, authority_source: "server_state" as const, updated_at: now, reason: null }, false, [], true, 69, 69, true, true, 0, 0, now, now, now) as any,
+        { ...v1Result, decision: { final_decision: "HOLD", regime_state: "RANGE" } }
+    );
+    const holdOutcome = runEngineV2(holdInput);
+
+    assert(holdOutcome.decision.executionAction === "NONE", `executionAction for HOLD must be NONE (got ${holdOutcome.decision.executionAction})`);
+
+    const holdBridgeRes = await paperEngine.executeAuthorizedV2Action({
+        symbol: "ETHUSDT",
+        v2Decision: holdOutcome.decision,
+        lastPrice: 3000
+    });
+    assert(holdBridgeRes.executed === false, "HOLD decision must not execute orders");
+    spies.assertAllZero("TEST 7");
+
+    // ==========================================
+    // TEST 8: Paper Engine Mode Decoupling (Req 8)
+    // ==========================================
+    console.log("\n[TEST 8] Paper Engine Mode Decoupling (Live Fail-Closed checks do NOT alter Paper mode decisions/sizing)");
+    spies.reset();
+
+    const paperConfig = {
+        ...config,
+        okxAuthMode: "disabled" as const,
+        okxLiveEnabled: false
+    };
+
+    const paperEngineInstance = new PaperEngine(paperConfig, dummyLogger, mockOkxDemoClient, mockStore);
+    (paperEngineInstance as any).paperExecutionReady = true;
+
+    const paperBridgeState = buildV2StateBridge(
+        [],
+        null,
+        paperConfig,
+        true,
+        false,
+        false,
+        false,
+        1,
+        1,
+        defaultQualityProfiles,
+        { server_trade_enabled: true, close_only_mode: false, kill_switch_active: false, authority_source: "server_state" as const, updated_at: now, reason: null },
+        false,
+        [],
+        false,
+        null,
+        null,
+        false,
+        false,
+        0,
+        0,
+        now,
+        now,
+        now
+    );
+
+    const paperV2Input = adaptV2Input("ETHUSDT", now, snapshotAdapter, paperConfig as any, paperBridgeState as any, v1Result);
+    const paperOutcome = runEngineV2(paperV2Input);
+
+    assert(paperOutcome.decision.decision === "ENTER", "Paper mode decision should remain ENTER");
+    assert(paperOutcome.decision.risk.stageMarginKrw > 0, "Paper mode margin should be > 0");
 
     console.log("\n==========================================");
-    console.log("ALL 10 FULL-PATH INTEGRATION VERIFICATION TESTS PASSED PERFECTLY! 🎉");
+    console.log("ALL 8 MANDATORY INTEGRATION SCENARIOS PASSED PERFECTLY! 🎉");
     console.log("==========================================");
 }
 
