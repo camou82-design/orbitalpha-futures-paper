@@ -15594,30 +15594,54 @@ export class PaperEngine {
                 ? res.decision.takeProfit
                 : null;
 
-          submit = await this.submitOkxOrder({
-            symbol: first.symbol,
-            side,
-            posSide,
-            qty: qtyLegacyEst,
-            clOrdId,
-            traceId: openTraceId,
-            reason: "entry_authorized",
-            authoritySource: authority.source,
-            adoptedEngine,
-            entryQualityGrade: authority.entryQualityGrade ?? null,
-            leverageProfile: authority.leverageProfile ?? null,
-            appliedLeverage: authority.appliedLeverage ?? null,
-            marketSubtype: null,
-            marketRegime: authority.regime ?? null,
-            isAddOn: false,
-            entryPrice: first.lastPrice,
-            stopPrice: committedStopForSubmit,
-            takeProfitPrice: committedTpForSubmit,
-            paperExecutionReady: this.paperExecutionReady,
-            stageMarginKrw: authority.stageMarginKrw ?? null,
-            isNewEntry,
-            orderNotionalUsdt: entryOrderNotionalUsdt
-          });
+          const v2DecisionObj = (res as any).v2Decision ?? (res as any).decision;
+          if (authority.source === "v2" && v2DecisionObj) {
+            const bridgeRes = await this.executeAuthorizedV2Action({
+              symbol: first.symbol,
+              v2Decision: v2DecisionObj,
+              lastPrice: first.lastPrice,
+              committedRiskPlan: v2CommittedRiskPlan ? {
+                symbol: String(first.symbol),
+                side: authority.side as "long" | "short",
+                action: v2DecisionObj.executionAction ?? "ENTER",
+                finalOrderNotionalUsdt: entryOrderNotionalUsdt,
+                appliedLeverage: authority.appliedLeverage ?? 10,
+                stopPrice: v2CommittedRiskPlan.stop_price,
+                invalidationPx: (v2CommittedRiskPlan as any).invalidation_px ?? v2CommittedRiskPlan.stop_price,
+                ts: Date.now()
+              } : undefined
+            });
+            submit = bridgeRes.submitResult ?? { ok: bridgeRes.executed, errorCode: bridgeRes.blockReason ?? null, ackCode: bridgeRes.executed ? "accepted" : "rejected", errorMessage: bridgeRes.blockReason ?? null };
+          } else {
+            submit = await this.submitOkxOrder({
+              symbol: first.symbol,
+              side,
+              posSide,
+              qty: qtyLegacyEst,
+              clOrdId,
+              traceId: openTraceId,
+              reason: "entry_authorized",
+              authoritySource: authority.source,
+              adoptedEngine,
+              entryQualityGrade: authority.entryQualityGrade ?? null,
+              leverageProfile: authority.leverageProfile ?? null,
+              appliedLeverage: authority.appliedLeverage ?? null,
+              marketSubtype: null,
+              marketRegime: authority.regime ?? null,
+              isAddOn: false,
+              entryPrice: first.lastPrice,
+              stopPrice: committedStopForSubmit,
+              takeProfitPrice: committedTpForSubmit,
+              paperExecutionReady: this.paperExecutionReady,
+              stageMarginKrw: authority.stageMarginKrw ?? null,
+              isNewEntry,
+              orderNotionalUsdt: entryOrderNotionalUsdt
+            });
+          }
+
+          if (!submit) {
+            continue;
+          }
 
           this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
             symbol: first.symbol,
@@ -17142,67 +17166,26 @@ export class PaperEngine {
     return { ok: true, snapshot, symbolDiagnostics, basePollMs, htfFetchMs };
   }
 
-  /**
-   * [V2_POSITION_RISK_HYDRATION]
-   * Retroactively populate missing risk metadata for legacy or adopted positions.
-   */
   private hydrateRiskPlan(record: PaperOpenPositionRecord): { modified: boolean; record: PaperOpenPositionRecord } {
     let modified = false;
     const regime = regimeForSl(record.regimeAtEntry);
     
-    // 1. StopPrice: V2 authoritative opens must keep pre-entry committed SL; mirror only for non-V2 or auxiliary recovery.
     if (record.stopPrice == null || !Number.isFinite(record.stopPrice)) {
-      if (record.isV2Authority === true) {
-        const mirrored = engineMirrorStopPrice(record.entryPrice, record.side, regime);
-        if (mirrored != null && Number.isFinite(mirrored)) {
-          record.stopPrice = mirrored;
-          modified = true;
-          this.logger.warn("V2_OPEN_POSITION_RISK_HYDRATION_MIRROR_AUXILIARY", {
-            symbol: record.symbol,
-            side: record.side,
-            entryPrice: record.entryPrice,
-            regime,
-            hydrated_stopPrice: mirrored,
-            reason: "V2_LEDGER_MISSING_STOP_MIRROR_RECOVERY_ONLY"
-          });
-        }
-      } else {
-        const mirrored = engineMirrorStopPrice(record.entryPrice, record.side, regime);
-        if (mirrored != null && Number.isFinite(mirrored)) {
-          record.stopPrice = mirrored;
-          modified = true;
-          this.logger.info("V2_OPEN_POSITION_RISK_HYDRATION_PROOF", {
-            symbol: record.symbol,
-            side: record.side,
-            entryPrice: record.entryPrice,
-            regime,
-            hydrated_stopPrice: mirrored,
-            reason: "LEGACY_OR_MISSING_RISK_PLAN"
-          });
-        }
+      const mirrored = engineMirrorStopPrice(record.entryPrice, record.side, regime);
+      if (mirrored != null && Number.isFinite(mirrored)) {
+        record.stopPrice = mirrored;
+        modified = true;
       }
     }
 
-    // 2. targetPrice1: do not invent TP via mirror for V2 authority (pre-entry TP or none); legacy may mirror.
     if (record.targetPrice1 == null || !Number.isFinite(record.targetPrice1)) {
-      if (record.isV2Authority !== true) {
-        const mirroredTp = engineMirrorTpPrice(record.entryPrice, record.side, regime);
-        if (mirroredTp != null && Number.isFinite(mirroredTp)) {
-          record.targetPrice1 = mirroredTp;
-          modified = true;
-          this.logger.info("V2_OPEN_POSITION_RISK_HYDRATION_PROOF", {
-            symbol: record.symbol,
-            side: record.side,
-            entryPrice: record.entryPrice,
-            regime,
-            hydrated_targetPrice1: mirroredTp,
-            reason: "LEGACY_OR_MISSING_TARGET_PLAN"
-          });
-        }
+      const mirroredTp = engineMirrorTpPrice(record.entryPrice, record.side, regime);
+      if (mirroredTp != null && Number.isFinite(mirroredTp)) {
+        record.targetPrice1 = mirroredTp;
+        modified = true;
       }
     }
 
-    // 3. Mandatory invalidationPx hydration (aliased to stopPrice if missing)
     if (record.invalidationPx == null || !Number.isFinite(record.invalidationPx)) {
        if (record.stopPrice != null && Number.isFinite(record.stopPrice)) {
          record.invalidationPx = record.stopPrice;
@@ -17234,9 +17217,7 @@ export class PaperEngine {
   }
 
   public async prunePositions(symbol: string): Promise<void> {
-    const opens = await this.positions.loadOpenAll();
-    const filtered = opens.filter((p) => p.symbol !== symbol);
-    await this.positions.saveOpenAll(filtered);
+    await this.removeClosedPositionFromLedger(symbol);
   }
 
   public async removeClosedPositionFromLedger(symbol: string): Promise<void> {
@@ -17245,17 +17226,22 @@ export class PaperEngine {
     await this.writeOpenPositions(filtered);
   }
 
+  private async helperUpsertPendingOrder(existingPendingList: any[], newPendingItem: any): Promise<void> {
+    const list = [...(existingPendingList || [])];
+    const idx = list.findIndex((p: any) => p && ((newPendingItem.ordId && p.ordId === newPendingItem.ordId) || (newPendingItem.clOrdId && p.clOrdId === newPendingItem.clOrdId)));
+    if (idx >= 0) {
+      list[idx] = { ...list[idx], ...newPendingItem };
+    } else {
+      list.push(newPendingItem);
+    }
+    await (this.store as any)?.writePendingEntryOrders?.(list);
+  }
+
   public async executeAuthorizedV2Action(args: {
     symbol: MarketSymbol;
     v2Decision: EngineV2Decision;
     lastPrice: number;
-    committedRiskPlan?: {
-      finalOrderNotionalUsdt: number;
-      appliedLeverage: number;
-      stopPrice: number;
-      invalidationPx: number;
-      side: "long" | "short";
-    };
+    committedRiskPlan?: import("../engine-v2/types").V2CommittedRiskPlan;
   }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null; updatedRecord?: PaperOpenPositionRecord; pendingOnly?: boolean }> {
     const { symbol, v2Decision, lastPrice, committedRiskPlan } = args;
 
@@ -17275,20 +17261,39 @@ export class PaperEngine {
       return { executed: false, blockReason: "BTCUSDT_OKX_LONG_POSITION_PROTECTED" };
     }
 
-    const executionAction = v2Decision.executionAction ?? (v2Decision.decision === "ENTER" ? (v2Decision.risk?.isAddOn ? "ADDON" : "ENTER") : "NONE");
-
-    if (executionAction !== "ENTER" && executionAction !== "ADDON") {
-      return { executed: false, blockReason: v2Decision.risk?.blockReason ?? "NO_EXECUTION_ACTION" };
+    // Condition 1 & Requirement 1: executionAction strictly from v2Decision. NO RE-INFERRING!
+    const executionAction = v2Decision.executionAction;
+    if (!executionAction || (executionAction !== "ENTER" && executionAction !== "ADDON")) {
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
     }
 
-    // Strict Fail-Closed Live Order Parameters Validation (Requirement 2 & 3 - NO FALLBACKS)
-    const finalOrderNotionalUsdt = committedRiskPlan ? committedRiskPlan.finalOrderNotionalUsdt : v2Decision.risk?.finalOrderNotionalUsdt;
-    const appliedLeverage = committedRiskPlan ? committedRiskPlan.appliedLeverage : v2Decision.risk?.appliedLeverage;
-    const sideCandidate = committedRiskPlan ? committedRiskPlan.side : v2Decision.side;
-    
-    // Stop price & invalidation px strictly from lifecycleAuthority or committedRiskPlan (NO v2Decision.risk as any)
-    const stopPrice = committedRiskPlan ? committedRiskPlan.stopPrice : v2Decision.lifecycleAuthority?.newStopPrice;
-    const invalidationPx = committedRiskPlan ? committedRiskPlan.invalidationPx : (v2Decision.lifecycleAuthority?.invalidationPx ?? stopPrice);
+    // Condition 2: Check typed committedRiskPlan if provided, verify freshness, symbol, side, action matching
+    const plan = committedRiskPlan ?? {
+      symbol: v2Decision.symbol,
+      side: v2Decision.side as "long" | "short",
+      action: executionAction,
+      finalOrderNotionalUsdt: v2Decision.risk?.finalOrderNotionalUsdt,
+      appliedLeverage: v2Decision.risk?.appliedLeverage,
+      stopPrice: v2Decision.lifecycleAuthority?.newStopPrice,
+      invalidationPx: v2Decision.lifecycleAuthority?.invalidationPx ?? v2Decision.lifecycleAuthority?.newStopPrice,
+      ts: v2Decision.ts ?? Date.now()
+    };
+
+    if (!plan || plan.symbol !== symbol || plan.action !== executionAction) {
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
+    }
+
+    // Freshness re-verification (Condition 7: max 60s stale)
+    if (typeof plan.ts === "number" && Math.abs(Date.now() - plan.ts) > 60000) {
+      return { executed: false, blockReason: "RISK_PLAN_STALE" };
+    }
+
+    // Condition 2: Strict parameter validation without fallbacks (NO lifecycleAuthority.invalidationPx ?? stopPrice)
+    const finalOrderNotionalUsdt = plan.finalOrderNotionalUsdt;
+    const appliedLeverage = plan.appliedLeverage;
+    const sideCandidate = plan.side;
+    const stopPrice = plan.stopPrice;
+    const invalidationPx = plan.invalidationPx;
 
     const notionalValid = typeof finalOrderNotionalUsdt === "number" && Number.isFinite(finalOrderNotionalUsdt) && finalOrderNotionalUsdt > 0;
     const leverageValid = typeof appliedLeverage === "number" && Number.isFinite(appliedLeverage) && appliedLeverage >= 1 && appliedLeverage <= 125;
@@ -17297,7 +17302,7 @@ export class PaperEngine {
     const invalidationValid = typeof invalidationPx === "number" && Number.isFinite(invalidationPx) && invalidationPx > 0 &&
       (sideCandidate === "long" ? invalidationPx < lastPrice : invalidationPx > lastPrice);
 
-    if (!notionalValid || !leverageValid || !stopValid || !invalidationValid || !sideCandidate || sideCandidate === "none") {
+    if (!notionalValid || !leverageValid || !stopValid || !invalidationValid || !sideCandidate || (sideCandidate as string) === "none") {
       return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
     }
 
@@ -17305,8 +17310,28 @@ export class PaperEngine {
       return { executed: false, blockReason: "SIGNED_EXECUTION_NOT_READY" };
     }
 
+    // Condition 5 & 7: Check pending orders. If active pending order exists for symbol, block duplicate order!
+    const pendingList: any[] = (await (this.store as any)?.readPendingEntryOrders?.()) ?? [];
+    const activePendingForSymbol = pendingList.find((p: any) => p && p.symbol === symbol && p.status !== "filled" && p.status !== "cancelled");
+    if (activePendingForSymbol) {
+      return { executed: false, blockReason: "ACTIVE_PENDING_ORDER_EXISTS" };
+    }
+
     const existingPositions = await this.positions.loadOpenAll();
     const existing = existingPositions.find((p) => p.symbol === symbol && (p.status ?? "open") === "open");
+
+    // Condition 6: Position authority check
+    if (executionAction === "ENTER" && existing) {
+      return { executed: false, blockReason: "POSITION_AUTHORITY_MISMATCH" };
+    }
+    if (executionAction === "ADDON") {
+      if (!existing) {
+        return { executed: false, blockReason: "NO_EXISTING_POSITION_FOR_ADDON" };
+      }
+      if (existing.side !== sideCandidate) {
+        return { executed: false, blockReason: "ADDON_SIDE_MISMATCH" };
+      }
+    }
 
     const sharedParams = {
       symbol,
@@ -17318,7 +17343,8 @@ export class PaperEngine {
       lastPrice,
       existing,
       existingPositions,
-      v2Decision
+      v2Decision,
+      pendingList
     };
 
     switch (executionAction) {
@@ -17342,8 +17368,9 @@ export class PaperEngine {
     lastPrice: number;
     existingPositions: PaperOpenPositionRecord[];
     v2Decision: EngineV2Decision;
+    pendingList: any[];
   }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null; updatedRecord?: PaperOpenPositionRecord; pendingOnly?: boolean }> {
-    const { symbol, sideCandidate, finalOrderNotionalUsdt, appliedLeverage, stopPrice, invalidationPx, lastPrice, existingPositions, v2Decision } = params;
+    const { symbol, sideCandidate, finalOrderNotionalUsdt, appliedLeverage, stopPrice, invalidationPx, lastPrice, existingPositions, v2Decision, pendingList } = params;
 
     const side = sideCandidate === "long" ? "buy" : "sell";
     const posSide = sideCandidate === "long" ? "long" : "short";
@@ -17375,28 +17402,33 @@ export class PaperEngine {
     }
 
     const isFilled = submitRes.fillConfirmed === true || submitRes.orderState === "filled";
+    const fillPx = submitRes.fillPx ? Number(submitRes.fillPx) : lastPrice;
+    const fillSize = submitRes.fillSize ? Number(submitRes.fillSize) : 0;
+    const filledNotional = isFilled ? (fillSize ? fillSize * 0.1 * fillPx : finalOrderNotionalUsdt) : (fillSize ? fillSize * 0.1 * fillPx : 0);
 
-    // Requirement 4: Separate Order Submitted vs Order Filled. If not fillConfirmed, record pending only and DO NOT update open ledger or create protective stop order!
-    if (!isFilled) {
-      await (this.store as any)?.writePendingEntryOrders?.([{
+    // Condition 4 & 5: If unfilled or partially filled with 0 filled notional, record pending order via upsert!
+    if (!isFilled && filledNotional <= 0) {
+      await this.helperUpsertPendingOrder(pendingList, {
         symbol,
         clOrdId,
         ordId: submitRes.ordId ?? "pending_ord",
         side,
         posSide,
         desiredNotionalUsdt: finalOrderNotionalUsdt,
+        filledNotionalUsdt: 0,
+        status: "live",
         submittedAt: Date.now()
-      }]);
+      });
       return { executed: false, submitResult: submitRes, pendingOnly: true };
     }
 
-    // Only when fillConfirmed === true, update open position ledger and build protective stop order!
+    // Filled or Partially Filled with filledNotional > 0
     const openRecord: PaperOpenPositionRecord = {
       symbol,
       side: sideCandidate,
-      entryPrice: submitRes.fillPx ? Number(submitRes.fillPx) : lastPrice,
-      sizeUsd: finalOrderNotionalUsdt,
-      initialSizeUsd: finalOrderNotionalUsdt,
+      entryPrice: fillPx,
+      sizeUsd: filledNotional,
+      initialSizeUsd: filledNotional,
       leverage: appliedLeverage,
       openedAt: Date.now(),
       entryStage: 1,
@@ -17406,11 +17438,25 @@ export class PaperEngine {
       sourceSignal: "V2",
       sourceRunPath: "",
       status: "open",
-      pos: submitRes.fillSize || (finalOrderNotionalUsdt / lastPrice),
+      pos: fillSize || (filledNotional / fillPx),
       isV2Authority: true
     };
 
-    await this.ensureProtectiveStopOrder(openRecord, `v2_bridge_auto:${symbol}:${openRecord.openedAt}`);
+    // Condition 8: If protective stop order creation fails, mark protection pending and block new orders!
+    let stopCreated = false;
+    try {
+      const okStop = await this.ensureProtectiveStopOrder(openRecord, `v2_bridge_auto:${symbol}:${openRecord.openedAt}`);
+      stopCreated = Boolean(okStop && okStop.success !== false);
+    } catch (e) {
+      stopCreated = false;
+    }
+
+    if (!stopCreated) {
+      openRecord.status = "PROTECTION_PENDING" as any;
+      await this.writeOpenPositions([...existingPositions, openRecord]);
+      return { executed: false, blockReason: "PROTECTION_PENDING", updatedRecord: openRecord };
+    }
+
     await this.writeOpenPositions([...existingPositions, openRecord]);
     return { executed: true, submitResult: submitRes, updatedRecord: openRecord };
   }

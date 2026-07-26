@@ -367,6 +367,17 @@ export interface EngineV2ConfigAdapter {
 
 export type EngineV2ExecutionAction = "ENTER" | "ADDON" | "NONE";
 
+export interface V2CommittedRiskPlan {
+    symbol: string;
+    side: "long" | "short";
+    action: EngineV2ExecutionAction;
+    finalOrderNotionalUsdt: number;
+    appliedLeverage: number;
+    stopPrice: number;
+    invalidationPx: number;
+    ts: number;
+}
+
 /** Final V2 Decision Object - Completely Independent Output */
 export interface EngineV2Decision {
     symbol: MarketSymbol;

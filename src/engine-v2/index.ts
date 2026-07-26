@@ -5497,9 +5497,17 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         sideZoneValid
     };
 
-    const currentHistory = symbolHistoryMap.get(symbolStr) ?? [];
-    currentHistory.push(histItem);
-    symbolHistoryMap.set(symbolStr, currentHistory);
+    // Requirement 1: Single authoritative executionAction finalization right before return.
+    const finalExecutionAction: import("./types").EngineV2ExecutionAction = (() => {
+        if (decision.decision !== "ENTER" || decision.side === "none" || !decision.side) return "NONE";
+        const hasExistingSameSide = Array.isArray(input.state.currentPositions) &&
+            input.state.currentPositions.some(p => p && (p as any).side === decision.side && ((p as any).status ?? "open") === "open");
+        if (isAddOn || hasExistingSameSide || (decision.lifecycleAuthority?.addOnAllowed === true)) {
+            return "ADDON";
+        }
+        return "ENTER";
+    })();
+    decision.executionAction = finalExecutionAction;
 
     return { decision, internal };
 }
