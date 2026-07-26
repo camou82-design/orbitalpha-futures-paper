@@ -15594,50 +15594,76 @@ export class PaperEngine {
                 ? res.decision.takeProfit
                 : null;
 
-          const v2DecisionObj = (res as any).v2Decision ?? (res as any).decision;
-          if (authority.source === "v2" && v2DecisionObj) {
+          if (authority.source === "v2") {
+            const v2DecisionObj = (res as any).v2Decision ?? (res as any).decision;
+            if (!v2DecisionObj || !v2CommittedRiskPlan) {
+              this.logger.error("V2_ENTRY_BLOCKED_PROTECTION_PLAN_OR_DECISION_MISSING", {
+                symbol: first.symbol,
+                reason: "FAIL_CLOSED_V2_MISSING_PLAN_OR_DECISION"
+              });
+              trace.open_fail_stage = "v2_plan_or_decision_missing";
+              emitPositionOpenTraceFinal();
+              logPaperPositionOpenFailed();
+              continue; // FAIL-CLOSED! Do not fallback to legacy submitOkxOrder!
+            }
+
+            const invPx = (v2CommittedRiskPlan as any).invalidation_px ?? v2CommittedRiskPlan.stop_price;
             const bridgeRes = await this.executeAuthorizedV2Action({
               symbol: first.symbol,
               v2Decision: v2DecisionObj,
               lastPrice: first.lastPrice,
-              committedRiskPlan: v2CommittedRiskPlan ? {
+              committedRiskPlan: {
                 symbol: String(first.symbol),
                 side: authority.side as "long" | "short",
                 action: v2DecisionObj.executionAction ?? "ENTER",
                 finalOrderNotionalUsdt: entryOrderNotionalUsdt,
                 appliedLeverage: authority.appliedLeverage ?? 10,
                 stopPrice: v2CommittedRiskPlan.stop_price,
-                invalidationPx: (v2CommittedRiskPlan as any).invalidation_px ?? v2CommittedRiskPlan.stop_price,
+                invalidationPx: invPx,
                 ts: Date.now()
-              } : undefined
+              }
             });
-            submit = bridgeRes.submitResult ?? { ok: bridgeRes.executed, errorCode: bridgeRes.blockReason ?? null, ackCode: bridgeRes.executed ? "accepted" : "rejected", errorMessage: bridgeRes.blockReason ?? null };
-          } else {
-            submit = await this.submitOkxOrder({
+
+            this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
               symbol: first.symbol,
+              run_cycle_id: this.runCycleId,
+              decision_id: (authority as any).decision_id ?? null,
               side,
               posSide,
-              qty: qtyLegacyEst,
-              clOrdId,
-              traceId: openTraceId,
-              reason: "entry_authorized",
-              authoritySource: authority.source,
-              adoptedEngine,
-              entryQualityGrade: authority.entryQualityGrade ?? null,
-              leverageProfile: authority.leverageProfile ?? null,
-              appliedLeverage: authority.appliedLeverage ?? null,
-              marketSubtype: null,
-              marketRegime: authority.regime ?? null,
-              isAddOn: false,
-              entryPrice: first.lastPrice,
-              stopPrice: committedStopForSubmit,
-              takeProfitPrice: committedTpForSubmit,
-              paperExecutionReady: this.paperExecutionReady,
-              stageMarginKrw: authority.stageMarginKrw ?? null,
-              isNewEntry,
-              orderNotionalUsdt: entryOrderNotionalUsdt
+              executed: bridgeRes.executed,
+              block_reason: bridgeRes.blockReason ?? null,
+              pending_only: bridgeRes.pendingOnly ?? false
             });
+
+            // V2 executeAuthorizedV2Action owns order submission, ledger write, and protective stop.
+            // DO NOT fall through to legacy position push & protective stop creation! Immediately continue.
+            continue;
           }
+
+          submit = await this.submitOkxOrder({
+            symbol: first.symbol,
+            side,
+            posSide,
+            qty: qtyLegacyEst,
+            clOrdId,
+            traceId: openTraceId,
+            reason: "entry_authorized",
+            authoritySource: authority.source,
+            adoptedEngine,
+            entryQualityGrade: authority.entryQualityGrade ?? null,
+            leverageProfile: authority.leverageProfile ?? null,
+            appliedLeverage: authority.appliedLeverage ?? null,
+            marketSubtype: null,
+            marketRegime: authority.regime ?? null,
+            isAddOn: false,
+            entryPrice: first.lastPrice,
+            stopPrice: committedStopForSubmit,
+            takeProfitPrice: committedTpForSubmit,
+            paperExecutionReady: this.paperExecutionReady,
+            stageMarginKrw: authority.stageMarginKrw ?? null,
+            isNewEntry,
+            orderNotionalUsdt: entryOrderNotionalUsdt
+          });
 
           if (!submit) {
             continue;
@@ -17206,6 +17232,17 @@ export class PaperEngine {
     }
   }
 
+  public computeOkxFilledNotionalUsdt(
+    fillSize: number | string,
+    fillPx: number | string,
+    ctVal: number = 0.001
+  ): number {
+    const sz = Number(fillSize) || 0;
+    const px = Number(fillPx) || 0;
+    if (sz <= 0 || px <= 0) return 0;
+    return sz * ctVal * px;
+  }
+
   public async cancelOrder(symbol: string, ordId: string, algoId?: string): Promise<boolean> {
     if (!this.okxDemo) return false;
     if (algoId) {
@@ -17241,7 +17278,7 @@ export class PaperEngine {
     symbol: MarketSymbol;
     v2Decision: EngineV2Decision;
     lastPrice: number;
-    committedRiskPlan?: import("../engine-v2/types").V2CommittedRiskPlan;
+    committedRiskPlan: import("../engine-v2/types").V2CommittedRiskPlan;
   }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null; updatedRecord?: PaperOpenPositionRecord; pendingOnly?: boolean }> {
     const { symbol, v2Decision, lastPrice, committedRiskPlan } = args;
 
@@ -17261,34 +17298,35 @@ export class PaperEngine {
       return { executed: false, blockReason: "BTCUSDT_OKX_LONG_POSITION_PROTECTED" };
     }
 
-    // Condition 1 & Requirement 1: executionAction strictly from v2Decision. NO RE-INFERRING!
+    // Requirement 1: executionAction strictly from v2Decision. NO RE-INFERRING!
     const executionAction = v2Decision.executionAction;
     if (!executionAction || (executionAction !== "ENTER" && executionAction !== "ADDON")) {
       return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
     }
 
-    // Condition 2: Check typed committedRiskPlan if provided, verify freshness, symbol, side, action matching
-    const plan = committedRiskPlan ?? {
-      symbol: v2Decision.symbol,
-      side: v2Decision.side as "long" | "short",
-      action: executionAction,
-      finalOrderNotionalUsdt: v2Decision.risk?.finalOrderNotionalUsdt,
-      appliedLeverage: v2Decision.risk?.appliedLeverage,
-      stopPrice: v2Decision.lifecycleAuthority?.newStopPrice,
-      invalidationPx: v2Decision.lifecycleAuthority?.invalidationPx ?? v2Decision.lifecycleAuthority?.newStopPrice,
-      ts: v2Decision.ts ?? Date.now()
-    };
-
-    if (!plan || plan.symbol !== symbol || plan.action !== executionAction) {
+    // Requirement 2: committedRiskPlan is MANDATORY. Zero re-assembly fallback from v2Decision!
+    if (!committedRiskPlan) {
       return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
     }
 
-    // Freshness re-verification (Condition 7: max 60s stale)
-    if (typeof plan.ts === "number" && Math.abs(Date.now() - plan.ts) > 60000) {
-      return { executed: false, blockReason: "RISK_PLAN_STALE" };
+    const plan = committedRiskPlan;
+
+    // Requirement 2: Strict match of symbol, side, action with v2Decision
+    if (plan.symbol !== symbol || plan.side !== v2Decision.side || plan.action !== executionAction) {
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
     }
 
-    // Condition 2: Strict parameter validation without fallbacks (NO lifecycleAuthority.invalidationPx ?? stopPrice)
+    // Requirement 2: Timestamp & ageMs validation (0 <= ageMs <= 60000). No missing, infinite, or future timestamp!
+    const nowTs = Date.now();
+    if (typeof plan.ts !== "number" || !Number.isFinite(plan.ts)) {
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
+    }
+    const ageMs = nowTs - plan.ts;
+    if (ageMs < 0 || ageMs > 60000) {
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
+    }
+
+    // Requirement 2: Strict parameter validation without fallbacks (NO invalidationPx ?? stopPrice)
     const finalOrderNotionalUsdt = plan.finalOrderNotionalUsdt;
     const appliedLeverage = plan.appliedLeverage;
     const sideCandidate = plan.side;
@@ -17318,6 +17356,10 @@ export class PaperEngine {
     }
 
     const existingPositions = await this.positions.loadOpenAll();
+    const existingProtectionPending = existingPositions.find((p) => p.symbol === symbol && (p.status as any) === "PROTECTION_PENDING");
+    if (existingProtectionPending) {
+      return { executed: false, blockReason: "PROTECTION_PENDING" };
+    }
     const existing = existingPositions.find((p) => p.symbol === symbol && (p.status ?? "open") === "open");
 
     // Condition 6: Position authority check
@@ -17404,7 +17446,8 @@ export class PaperEngine {
     const isFilled = submitRes.fillConfirmed === true || submitRes.orderState === "filled";
     const fillPx = submitRes.fillPx ? Number(submitRes.fillPx) : lastPrice;
     const fillSize = submitRes.fillSize ? Number(submitRes.fillSize) : 0;
-    const filledNotional = isFilled ? (fillSize ? fillSize * 0.1 * fillPx : finalOrderNotionalUsdt) : (fillSize ? fillSize * 0.1 * fillPx : 0);
+    const instCtVal = 0.001;
+    const filledNotional = isFilled ? (fillSize ? computeOkxFilledNotionalUsdt(fillSize, fillPx, instCtVal) : finalOrderNotionalUsdt) : (fillSize ? computeOkxFilledNotionalUsdt(fillSize, fillPx, instCtVal) : 0);
 
     // Condition 4 & 5: If unfilled or partially filled with 0 filled notional, record pending order via upsert!
     if (!isFilled && filledNotional <= 0) {
@@ -17458,6 +17501,22 @@ export class PaperEngine {
     }
 
     await this.writeOpenPositions([...existingPositions, openRecord]);
+    
+    // If partial fill, upsert remaining pending balance
+    if (!isFilled && filledNotional < finalOrderNotionalUsdt) {
+      await this.helperUpsertPendingOrder(pendingList, {
+        symbol,
+        clOrdId,
+        ordId: submitRes.ordId ?? "pending_partial_ord",
+        side,
+        posSide,
+        desiredNotionalUsdt: finalOrderNotionalUsdt - filledNotional,
+        filledNotionalUsdt: filledNotional,
+        status: "partially_filled",
+        submittedAt: Date.now()
+      });
+    }
+
     return { executed: true, submitResult: submitRes, updatedRecord: openRecord };
   }
 
@@ -18020,4 +18079,15 @@ function buildPositionIdentityMeta(pos: PaperOpenPositionRecord | PaperClosedPos
     executorAtEntry: p.executorAtEntry ?? null,
     regimeAtEntry: p.regimeAtEntry ?? null
   };
+}
+
+export function computeOkxFilledNotionalUsdt(
+  fillSize: number | string,
+  fillPx: number | string,
+  ctVal: number = 0.001
+): number {
+  const sz = Number(fillSize) || 0;
+  const px = Number(fillPx) || 0;
+  if (sz <= 0 || px <= 0) return 0;
+  return sz * ctVal * px;
 }

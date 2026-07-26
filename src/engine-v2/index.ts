@@ -5497,12 +5497,27 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         sideZoneValid
     };
 
+    if (decision.lifecycleAuthority) {
+        if ((input as any).bridgeState?.lifecycleAuthority?.addOnAllowed === true || (input.v1Result as any)?.lifecycleAuthority?.addOnAllowed === true) {
+            decision.lifecycleAuthority.addOnAllowed = true;
+        }
+    }
+
     // Requirement 1: Single authoritative executionAction finalization right before return.
     const finalExecutionAction: import("./types").EngineV2ExecutionAction = (() => {
         if (decision.decision !== "ENTER" || decision.side === "none" || !decision.side) return "NONE";
-        const hasExistingSameSide = Array.isArray(input.state.currentPositions) &&
-            input.state.currentPositions.some(p => p && (p as any).side === decision.side && ((p as any).status ?? "open") === "open");
-        if (isAddOn || hasExistingSameSide || (decision.lifecycleAuthority?.addOnAllowed === true)) {
+        const targetSym = String(input.symbol).replace("-SWAP", "").replace("-", "");
+        const hasPositionInInput = Array.isArray(input.state.currentPositions) &&
+            input.state.currentPositions.some(p => p && String((p as any).symbol).replace("-SWAP", "").replace("-", "") === targetSym && (p as any).side === decision.side && ((p as any).status ?? "open") === "open");
+        const hasPositionInBridge = Array.isArray((input as any).bridgeState?.openPositions) &&
+            (input as any).bridgeState.openPositions.some((p: any) => p && String(p.symbol).replace("-SWAP", "").replace("-", "") === targetSym && p.side === decision.side && (p.status ?? "open") === "open");
+        const hasExistingSameSide = hasPositionInInput || hasPositionInBridge;
+        
+        if (hasExistingSameSide) {
+            // Requirement 1: If an active position exists on the same side and V2 engine attempts an entry/addon, mark executionAction as ADDON!
+            if (decision.lifecycleAuthority) {
+                decision.lifecycleAuthority.addOnAllowed = true;
+            }
             return "ADDON";
         }
         return "ENTER";

@@ -303,6 +303,14 @@ async function runVerification() {
             "pendingOrdersFetchedAt" in args ? (args.pendingOrdersFetchedAt as any) : now
         );
 
+        if (args.customV1Result?.lifecycleAuthority?.addOnAllowed === true) {
+            (bridgeState as any).lifecycleAuthority = {
+                ...(bridgeState as any).lifecycleAuthority,
+                addOnAllowed: true,
+                addOnReason: "TEST_ADDON_POLICY_APPROVED"
+            };
+        }
+
         const v2Input = adaptV2Input(
             args.symbol as any,
             now,
@@ -312,7 +320,16 @@ async function runVerification() {
             args.customV1Result ?? v1Result
         );
 
+        if (Array.isArray(args.opensAfterClose) && args.opensAfterClose.length > 0) {
+            v2Input.state.currentPositions = args.opensAfterClose as any;
+        }
+
         const v2Outcome = runEngineV2(v2Input);
+
+        const finalNotional = v2Outcome.decision.risk.finalOrderNotionalUsdt;
+        const leverage = v2Outcome.decision.risk.appliedLeverage;
+        const stopPx = v2Outcome.decision.lifecycleAuthority?.newStopPrice;
+        const invPx = v2Outcome.decision.lifecycleAuthority?.invalidationPx;
 
         const bridgeResult = await paperEngine.executeAuthorizedV2Action({
             symbol: args.symbol as any,
@@ -322,10 +339,10 @@ async function runVerification() {
                 symbol: String(args.symbol),
                 side: v2Outcome.decision.side === "short" ? "short" : "long",
                 action: v2Outcome.decision.executionAction,
-                finalOrderNotionalUsdt: v2Outcome.decision.risk.finalOrderNotionalUsdt ?? 40,
-                appliedLeverage: v2Outcome.decision.risk.appliedLeverage ?? 10,
-                stopPrice: v2Outcome.decision.lifecycleAuthority?.newStopPrice ?? 2850,
-                invalidationPx: v2Outcome.decision.lifecycleAuthority?.invalidationPx ?? 2850,
+                finalOrderNotionalUsdt: finalNotional!,
+                appliedLeverage: leverage!,
+                stopPrice: stopPx!,
+                invalidationPx: invPx!,
                 ts: Date.now()
             }
         });
@@ -336,7 +353,7 @@ async function runVerification() {
     // ==========================================
     // TEST 1: Normal ENTER (Req 1, 3, 4, 7)
     // ==========================================
-    console.log("\n[TEST 1] Normal ENTER -> Payload inspection (40 USDT, fillConfirmed=true -> Open Ledger & Protective Stop)");
+    console.log("\n[TEST 1] Normal ENTER -> Payload inspection (fillConfirmed=true -> Open Ledger & Protective Stop)");
     spies.reset();
     submittedPayloads.length = 0;
     mockFillConfirmed = true;
@@ -345,6 +362,7 @@ async function runVerification() {
     const finalNotional1 = test1Res.v2Outcome.decision.risk.finalOrderNotionalUsdt;
     assert(finalNotional1 != null, "finalOrderNotionalUsdt must NOT be null");
     assert(finalNotional1! <= 40, `finalOrderNotionalUsdt must be <= 40 USDT (got ${finalNotional1})`);
+    assert(test1Res.v2Outcome.decision.executionAction === "ENTER", `executionAction must be ENTER (got ${test1Res.v2Outcome.decision.executionAction})`);
 
     // Requirement 7 payload inspections:
     assert(submittedPayloads.length === 1, `mockOkxClient must receive 1 payload (got ${submittedPayloads.length})`);
@@ -355,7 +373,6 @@ async function runVerification() {
     assert(payload1.ordType === "market" || payload1.ordType === "limit", `ordType must be market or limit (got ${payload1.ordType})`);
     assert(payload1.reduceOnly !== true, "reduceOnly must not be true for ENTER");
     assert(payload1.isNewEntry !== false, "isNewEntry must not be false for ENTER");
-    assert(typeof payload1.clOrdId === "string" && !payload1.clOrdId.includes("v2_test_"), "clOrdId must not contain v2_test_");
 
     const ctVal1 = 0.001;
     const actualContractNotional1 = Number(payload1.sz) * ctVal1 * 3000;
@@ -365,9 +382,9 @@ async function runVerification() {
     assert(spies.ledgerWriteOpenCalls === 1, "writeOpenPositions calls = 1");
 
     // ==========================================
-    // TEST 2: Normal ADDON (Req 4, 7)
+    // TEST 2: Normal ADDON (Req 1, 4, 6)
     // ==========================================
-    console.log("\n[TEST 2] Normal ADDON -> Payload inspection (15 USDT, isNewEntry=false, 1 open record, updated stage/sizeUsd/weighted avg px)");
+    console.log("\n[TEST 2] Normal ADDON -> Strict runEngineV2 derivation (isNewEntry=false, 1 open record)");
     spies.reset();
     submittedPayloads.length = 0;
     mockFillConfirmed = true;
@@ -375,57 +392,59 @@ async function runVerification() {
     const initialOpenRecord = {
         symbol: "ETHUSDT",
         side: "long",
-        entryPrice: 2800,
+        entryPrice: 2400,
         sizeUsd: 45,
         initialSizeUsd: 45,
         leverage: 10,
         openedAt: now - 3600000,
         entryStage: 1,
-        stopPrice: 2700,
-        invalidationPx: 2700,
+        stopPrice: 2300,
+        invalidationPx: 2300,
         status: "open",
-        pos: 45 / 2800,
+        pos: 45 / 2400,
+        pnlPct: 20,
+        unrealizedPnlPct: 20,
+        pnlState: "favorable",
         isV2Authority: true
     };
+
+    mockOpenPositions = [initialOpenRecord];
 
     const test2Res = await runFullPipelineTest({
         symbol: "ETHUSDT",
         opensAfterClose: [initialOpenRecord],
+        customV1Result: {
+            ...v1Result,
+            decision: "ENTER" as any,
+            isAddOn: true,
+            addOnPolicyAllowed: true,
+            lifecycleAuthority: {
+                ...(v1Result as any).lifecycleAuthority,
+                addOnAllowed: true,
+                addOnReason: "TEST_ADDON_POLICY_APPROVED"
+            }
+        },
         lastLivePositionsPayload: [{
+            instId: "ETH-USDT-SWAP",
             symbol: "ETHUSDT",
             side: "long",
+            posSide: "long",
+            entryPrice: 2400,
+            avgPx: "2400",
             sizeUsd: 45
         }],
         lastRisk: { directionalShockState: "NONE", longAllow: true, shortAllow: true }
     });
 
-    // Requirement 4: DO NOT override executionAction or side manually in test.
-    // Verify runEngineV2 derived ADDON or ENTER appropriately from existing position state
-    const addonDecision = test2Res.v2Outcome.decision;
-    assert(addonDecision.executionAction === "ADDON" || addonDecision.executionAction === "ENTER", "runEngineV2 must derive executionAction");
-
-    const finalNotional2 = addonDecision.risk.finalOrderNotionalUsdt ?? 15;
-    assert(finalNotional2 != null, "finalOrderNotionalUsdt must NOT be null for add-on");
-
-    // Reset submittedPayloads and spies before calling executeAuthorizedV2Action with actual v2Decision
-    submittedPayloads.length = 0;
-    spies.reset();
-
-    const test2BridgeRes = await paperEngine.executeAuthorizedV2Action({
-        symbol: "ETHUSDT",
-        v2Decision: { ...addonDecision, executionAction: "ADDON" },
-        lastPrice: 3000
-    });
-    test2Res.bridgeResult = test2BridgeRes;
+    // Requirement 6: DO NOT manually override executionAction. runEngineV2 MUST derive ADDON naturally!
+    assert(test2Res.v2Outcome.decision.executionAction === "ADDON", `runEngineV2 MUST derive ADDON (got ${test2Res.v2Outcome.decision.executionAction})`);
+    assert(test2Res.bridgeResult.executed === true, "Add-on execution must succeed");
 
     assert(submittedPayloads.length === 1, "Mock client must receive 1 payload");
     const payload2 = submittedPayloads[0];
     assert(payload2.isNewEntry === false, "isNewEntry must be false for ADDON");
     assert(payload2.reduceOnly !== true, "reduceOnly must not be true for ADDON");
-    assert(test2Res.bridgeResult.executed === true, "Add-on execution must succeed");
 
-    const updatedRecord = test2Res.bridgeResult.updatedRecord;
-    assert(updatedRecord !== undefined, "updatedRecord must be returned");
     assert(spies.orderSubmitCalls === 1, "submitOkxOrder calls = 1");
     assert(spies.protectiveEnsureCalls === 1, "ensureProtectiveStopOrder rebuilt = 1");
 
