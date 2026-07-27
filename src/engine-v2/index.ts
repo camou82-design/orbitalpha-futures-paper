@@ -8,7 +8,8 @@ import {
     LegacySnapshotAdapter,
     LegacyConfigAdapter,
     LegacyPositionAdapter,
-    LegacyResultAdapter
+    LegacyResultAdapter,
+    V2CommittedRiskPlan
 } from "./types";
 import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
 import { detectMarketRegime, emitRangeDriftStateProof } from "./market-judgment/detector";
@@ -5140,6 +5141,25 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         ? (isAddOn || (v2State as any).addOnPolicyAllowed === true ? "ADDON" : "ENTER")
         : "NONE";
 
+    const v2StopPrice = (riskSizing as any).stopPrice ?? (riskSizing as any).stop_price ?? (execution as any).stopPrice ?? (v2State as any).stopPrice ?? 0;
+    const v2InvalidationPx = (riskSizing as any).invalidationPx ?? (execution as any).invalidationPx ?? v2StopPrice ?? 0;
+    const authorityCreatedAt = input.now;
+
+    const v2CommittedPlan: V2CommittedRiskPlan | undefined =
+        (finalDecision === "ENTER" && (executionAction === "ENTER" || executionAction === "ADDON") && !hardBlockPresent && !riskSizing.isBlocked && finalOrderNotionalUsdt > 0)
+            ? {
+                symbol: input.symbol,
+                side: (normalizedV2Side === "short" ? "short" : "long") as "long" | "short",
+                action: executionAction,
+                finalOrderNotionalUsdt,
+                appliedLeverage: riskSizing.appliedLeverage,
+                stopPrice: Number(v2StopPrice),
+                invalidationPx: Number(v2InvalidationPx),
+                ts: authorityCreatedAt,
+                authorityCreatedAt
+            }
+            : undefined;
+
     const decision: EngineV2Decision = {
         symbol: input.symbol,
         ts: input.now,
@@ -5159,6 +5179,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             finalOrderNotionalUsdt: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? finalOrderNotionalUsdt : 0) : undefined,
             requestedOrderNotionalUsdt: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? requestedOrderNotionalUsdt : 0) : undefined
         },
+        committedRiskPlan: v2CommittedPlan,
         explanation: {
             reason: finalReason,
             uiLabelRegime: judgment.subtype === "WHIPSAW_SHOCK_RECHECK" ? "WHIPSAW" : judgment.regime,

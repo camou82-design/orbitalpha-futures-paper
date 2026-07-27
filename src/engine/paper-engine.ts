@@ -15607,16 +15607,19 @@ export class PaperEngine {
               continue; // FAIL-CLOSED!
             }
 
-            const rawPlan = v2CommittedRiskPlan as any;
+            const rawPlan = v2DecisionObj.committedRiskPlan ?? v2CommittedRiskPlan;
             const planAction = v2DecisionObj.executionAction;
-            const planStop = rawPlan.stop_price ?? rawPlan.stopPrice;
-            const planInv = rawPlan.invalidation_px ?? rawPlan.invalidationPx;
-            const planLeverage = authority.appliedLeverage ?? rawPlan.appliedLeverage;
-            const planTs = rawPlan.ts ?? rawPlan.timestamp;
+            const planStop = rawPlan?.stopPrice ?? rawPlan?.stop_price;
+            const planInv = rawPlan?.invalidationPx ?? rawPlan?.invalidation_px;
+            const planLeverage = rawPlan?.appliedLeverage ?? authority.appliedLeverage;
+            const planTs = rawPlan?.ts ?? rawPlan?.timestamp ?? rawPlan?.authorityCreatedAt;
+            const planNotional = rawPlan?.finalOrderNotionalUsdt ?? v2DecisionObj.risk?.finalOrderNotionalUsdt;
 
             // Zero Fallback Validation: All fields must exist strictly without fallbacks
             if (
+              !rawPlan ||
               !planAction ||
+              typeof planNotional !== "number" || !Number.isFinite(planNotional) || planNotional <= 0 ||
               typeof planStop !== "number" || !Number.isFinite(planStop) ||
               typeof planInv !== "number" || !Number.isFinite(planInv) ||
               typeof planLeverage !== "number" || !Number.isFinite(planLeverage) ||
@@ -15625,7 +15628,7 @@ export class PaperEngine {
               this.logger.error("V2_ENTRY_BLOCKED_COMMITTED_PLAN_FIELD_MISSING", {
                 symbol: first.symbol,
                 reason: "FAIL_CLOSED_V2_PLAN_FIELD_MISSING",
-                planAction, planStop, planInv, planLeverage, planTs
+                planAction, planNotional, planStop, planInv, planLeverage, planTs
               });
               trace.open_fail_stage = "v2_plan_field_missing";
               emitPositionOpenTraceFinal();
@@ -15641,11 +15644,12 @@ export class PaperEngine {
                 symbol: String(first.symbol),
                 side: authority.side as "long" | "short",
                 action: planAction,
-                finalOrderNotionalUsdt: entryOrderNotionalUsdt,
+                finalOrderNotionalUsdt: planNotional,
                 appliedLeverage: planLeverage,
                 stopPrice: planStop,
                 invalidationPx: planInv,
-                ts: planTs
+                ts: planTs,
+                authorityCreatedAt: rawPlan.authorityCreatedAt ?? planTs
               }
             });
 
@@ -17339,6 +17343,12 @@ export class PaperEngine {
     // Requirement 2: Strict match of symbol, side, action with v2Decision
     if (plan.symbol !== symbol || plan.side !== v2Decision.side || plan.action !== executionAction) {
       return { executed: false, blockReason: "ORDER_BUILD_FAIL_MISMATCH" };
+    }
+
+    if (typeof v2Decision.risk?.finalOrderNotionalUsdt === "number" && v2Decision.risk.finalOrderNotionalUsdt > 0) {
+      if (Math.abs(plan.finalOrderNotionalUsdt - v2Decision.risk.finalOrderNotionalUsdt) > 1e-4) {
+        return { executed: false, blockReason: "ORDER_BUILD_FAIL_NOTIONAL_MISMATCH" };
+      }
     }
 
     // Requirement 2: Timestamp & ageMs validation (0 <= ageMs <= 60000). No missing, infinite, or future timestamp!

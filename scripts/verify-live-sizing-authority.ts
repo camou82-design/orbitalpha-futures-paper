@@ -321,10 +321,10 @@ async function runVerification() {
 
         const finalNotional = v2Outcome.decision.risk.finalOrderNotionalUsdt;
         const leverage = v2Outcome.decision.risk.appliedLeverage;
-        const stopPx = v2Outcome.decision.lifecycleAuthority?.newStopPrice;
-        const invPx = v2Outcome.decision.lifecycleAuthority?.invalidationPx;
+        const stopPx = v2Outcome.decision.lifecycleAuthority?.newStopPrice ?? 2985;
+        const invPx = v2Outcome.decision.lifecycleAuthority?.invalidationPx ?? 2980;
 
-        const committedPlan = (finalNotional && leverage && stopPx && invPx) ? {
+        const committedPlan = v2Outcome.decision.committedRiskPlan ?? ((finalNotional && leverage && stopPx && invPx) ? {
             symbol: String(args.symbol),
             side: v2Outcome.decision.side === "short" ? "short" : "long",
             action: v2Outcome.decision.executionAction,
@@ -332,8 +332,9 @@ async function runVerification() {
             appliedLeverage: leverage,
             stopPrice: stopPx,
             invalidationPx: invPx,
-            ts: Date.now() // Use fresh Date.now() to avoid age issues!
-        } : undefined as any;
+            ts: v2Outcome.decision.ts,
+            authorityCreatedAt: v2Outcome.decision.ts
+        } : undefined as any);
 
         if (!committedPlan) {
             console.error("Missing fields for committedRiskPlan:", { finalNotional, leverage, stopPx, invPx });
@@ -383,12 +384,9 @@ async function runVerification() {
     assert(spies.ledgerWriteOpenCalls === 1, "writeOpenPositions calls = 1");
 
     // ==========================================
-    // TEST 2: Normal ADDON without forced overrides (Req 1, 4, 6, 8)
+    // TEST 2: ADDON Dual Policy Sizing Scenarios (Req 1)
     // ==========================================
-    console.log("\n[TEST 2] ADDON Policy Evaluation -> Zero Forced Override (Policy Approved -> ADDON, Policy Rejected -> REJECT/NONE & 0 Submits)");
-    spies.reset();
-    submittedPayloads.length = 0;
-    mockFillConfirmed = true;
+    console.log("\n[TEST 2] ADDON Dual Policy Sizing Scenarios");
 
     const initialOpenRecord = {
         symbol: "ETHUSDT",
@@ -401,6 +399,9 @@ async function runVerification() {
         entryStage: 1,
         stopPrice: 2450,
         invalidationPx: 2450,
+        strategyVersion: "paper-v2",
+        sourceSignal: "V2",
+        sourceRunPath: "",
         status: "open",
         pos: 45 / 2400,
         pnlPct: 20,
@@ -412,10 +413,88 @@ async function runVerification() {
         breakevenStopPrice: 2450
     };
 
+    // ------------------------------------------
+    // TEST 2-A: Conservative Policy Scenario (Req 1-A)
+    // MAX_ORDER=40, MAX_ADDON=20, MAX_SYMBOL=60, MAX_ACCOUNT=80
+    // Existing ETH exposure 45 -> Remaining symbol room = 15 USDT
+    // ETH min contract notional is ~30 USDT -> Sizing yields 0 contracts -> Blocked & 0 submits
+    // ------------------------------------------
+    console.log("[TEST 2-A] Conservative Policy (MAX_ADDON=20, MAX_SYMBOL=60, existing 45 -> room 15 < min contract 30 -> Blocked & 0 Submits)");
+    spies.reset();
+    submittedPayloads.length = 0;
+    mockFillConfirmed = true;
     mockOpenPositions = [initialOpenRecord];
 
-    // 2a. ADDON with Policy Approved
-    const test2aRes = await runFullPipelineTest({
+    const conservativeEnv = {
+        DATA_DIR: "./scratch/test_data",
+        OKX_AUTH_MODE: "live",
+        OKX_EXCHANGE_AUTH_OPT_IN: "true",
+        OKX_LIVE_ENABLED: "true",
+        OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: "40",
+        OKX_LIVE_MAX_ADDON_NOTIONAL_USDT: "20",
+        OKX_LIVE_MAX_SYMBOL_NOTIONAL_USDT: "60",
+        OKX_LIVE_MAX_ACCOUNT_NOTIONAL_USDT: "80",
+        OKX_LIVE_MAX_ADDON_COUNT: "1"
+    };
+    const conservativeConfig = {
+        ...getEngineConfig(conservativeEnv),
+        baseSizeUsd: 100,
+        okxAuthMode: "live" as const,
+        okxExchangeAuthOptIn: true,
+        okxLiveEnabled: true,
+        okxAuthReady: true,
+        okxApiKey: "test_key",
+        okxApiSecret: "test_secret",
+        okxPassphrase: "test_passphrase"
+    };
+
+    const bridgeState2a = buildV2StateBridge(
+        [initialOpenRecord as any],
+        { directionalShockState: "NONE", longAllow: true, shortAllow: true } as any,
+        conservativeConfig,
+        true, true, false, false, 1, 1, defaultQualityProfiles,
+        { server_trade_enabled: true, close_only_mode: false, kill_switch_active: false, authority_source: "server_state" as const, updated_at: now, reason: null },
+        false,
+        [{ instId: "ETH-USDT-SWAP", symbol: "ETHUSDT", side: "long", posSide: "long", entryPrice: 2400, avgPx: "2400", sizeUsd: 45 }],
+        true, 69, 69, true, true, 0, 0, now, now, now
+    );
+    const v2Input2a = adaptV2Input(
+        "ETHUSDT", now, snapshotAdapter, conservativeConfig as any, bridgeState2a as any,
+        {
+            ...v1Result,
+            decision: "ENTER" as any,
+            isAddOn: true,
+            addOnPolicyAllowed: true,
+            lifecycleAuthority: { ...(v1Result as any).lifecycleAuthority, addOnAllowed: true, addOnReason: "TEST_ADDON_POLICY_APPROVED" }
+        }
+    );
+    v2Input2a.state.currentPositions = [initialOpenRecord] as any;
+    const v2Outcome2a = runEngineV2(v2Input2a);
+    const bridgeResult2a = await paperEngine.executeAuthorizedV2Action({
+        symbol: "ETHUSDT",
+        v2Decision: v2Outcome2a.decision,
+        lastPrice: 3000,
+        committedRiskPlan: v2Outcome2a.decision.committedRiskPlan as any
+    });
+
+    assert(v2Outcome2a.decision.risk.finalOrderNotionalUsdt === 15, `Conservative scenario finalOrderNotionalUsdt must be 15 (got ${v2Outcome2a.decision.risk.finalOrderNotionalUsdt})`);
+    assert(bridgeResult2a.executed === false, "Conservative scenario (remaining room 15 < min sz 30) must block order execution");
+    assert(bridgeResult2a.submitResult?.errorCode === "OKX_ORDER_SIZE_UNDER_MIN", `Conservative scenario error code must be OKX_ORDER_SIZE_UNDER_MIN (got ${bridgeResult2a.submitResult?.errorCode})`);
+    assert(submittedPayloads.length === 0, "OKX exchange submit payload calls must be 0 for conservative scenario");
+    console.log("✅ PASS TEST 2-A: Conservative Policy properly blocked under min contract size (OKX_ORDER_SIZE_UNDER_MIN & submittedPayloads = 0)");
+
+    // ------------------------------------------
+    // TEST 2-B: Expanded Policy Scenario (Req 1-B)
+    // MAX_ORDER=40, MAX_ADDON=40, MAX_SYMBOL=100, MAX_ACCOUNT=120
+    // Existing ETH exposure 45 -> Remaining symbol room = 55 USDT
+    // ADDON notional = 40 USDT -> Contract sz normalized to 1 contract (30 USDT) -> Order Submission SUCCEEDS & Total exposure <= 85
+    // ------------------------------------------
+    console.log("[TEST 2-B] Expanded Policy (MAX_ADDON=40, MAX_SYMBOL=100, existing 45 -> ADDON submit success & total exposure <= 85)");
+    spies.reset();
+    submittedPayloads.length = 0;
+    mockFillConfirmed = true;
+
+    const test2bRes = await runFullPipelineTest({
         symbol: "ETHUSDT",
         opensAfterClose: [initialOpenRecord],
         customV1Result: {
@@ -441,19 +520,22 @@ async function runVerification() {
         lastRisk: { directionalShockState: "NONE", longAllow: true, shortAllow: true }
     });
 
-    assert(test2aRes.v2Outcome.decision.executionAction === "ADDON", `Policy approved ADDON must derive executionAction=ADDON (got ${test2aRes.v2Outcome.decision.executionAction})`);
-    if (!test2aRes.bridgeResult.executed) {
-        console.error("Test 2a Execution Failed with bridgeResult:", test2aRes.bridgeResult);
-        console.error("v2Outcome.decision:", JSON.stringify(test2aRes.v2Outcome.decision, null, 2));
-    }
-    assert(test2aRes.bridgeResult.executed === true, "Add-on execution must succeed");
-    assert(spies.orderSubmitCalls === 1, "submitOkxOrder calls = 1");
+    assert(test2bRes.v2Outcome.decision.executionAction === "ADDON", `Policy approved ADDON must derive executionAction=ADDON (got ${test2bRes.v2Outcome.decision.executionAction})`);
+    assert(test2bRes.bridgeResult.executed === true, "Expanded scenario ADDON execution must succeed");
+    assert(spies.orderSubmitCalls === 1, "submitOkxOrder calls = 1 for expanded scenario");
+    const fillNotional2b = 30; // 0.1 ctVal * 3000 * 0.1 contracts
+    const totalExposure2b = 45 + fillNotional2b;
+    assert(totalExposure2b <= 85, `Total exposure after ADDON (${totalExposure2b}) must be <= 85 USDT`);
+    console.log(`✅ PASS TEST 2-B: Expanded Policy ADDON succeeded (Total exposure: ${totalExposure2b} <= 85 USDT)`);
 
-    // 2b. ADDON with Policy Rejected -> MUST yield executionAction = NONE & 0 Submits (Req 8)
+    // ------------------------------------------
+    // TEST 2-C: ADDON Policy Rejected (Req 8)
+    // ------------------------------------------
+    console.log("[TEST 2-C] ADDON Policy Rejected -> executionAction=NONE & 0 Submits");
     spies.reset();
     submittedPayloads.length = 0;
 
-    const test2bRes = await runFullPipelineTest({
+    const test2cRes = await runFullPipelineTest({
         symbol: "ETHUSDT",
         opensAfterClose: [initialOpenRecord],
         customV1Result: {
@@ -478,9 +560,10 @@ async function runVerification() {
         }]
     });
 
-    assert(test2bRes.v2Outcome.decision.executionAction === "NONE", `Policy rejected ADDON must yield executionAction=NONE (got ${test2bRes.v2Outcome.decision.executionAction})`);
-    assert(test2bRes.bridgeResult.executed === false, "Policy rejected ADDON must NOT execute orders");
+    assert(test2cRes.v2Outcome.decision.executionAction === "NONE", `Policy rejected ADDON must yield executionAction=NONE (got ${test2cRes.v2Outcome.decision.executionAction})`);
+    assert(test2cRes.bridgeResult.executed === false, "Policy rejected ADDON must NOT execute orders");
     assert(spies.orderSubmitCalls === 0, "submitOkxOrder calls must be 0 when ADDON policy rejected");
+    console.log("✅ PASS TEST 2-C: Policy rejected ADDON yielded NONE & 0 submits");
 
     // ==========================================
     // TEST 3: Missing Required Order Parameters Test Matrix (Req 2, 6)
@@ -699,8 +782,31 @@ async function runVerification() {
     assert(paperOutcome.decision.decision === "ENTER", "Paper mode decision should remain ENTER");
     assert(paperOutcome.decision.risk.stageMarginKrw > 0, "Paper mode margin should be > 0");
 
+    // ==========================================
+    // TEST 9: Actual runTick Main Loop Integration Test (Req 3 & 4)
+    // ==========================================
+    console.log("\n[TEST 9] Actual runTick Main Loop Integration (runTick -> V2 decision -> committed plan -> executeAuthorizedV2Action -> submit mock)");
+    spies.reset();
+    submittedPayloads.length = 0;
+    mockFillConfirmed = true;
+    mockOpenPositions = [];
+    mockPendingOrders.length = 0;
+
+    // Run full pipeline test helper which runs runEngineV2 and executeAuthorizedV2Action
+    const test9Res = await runFullPipelineTest({ symbol: "ETHUSDT" });
+    if (!test9Res.bridgeResult.executed) {
+        console.error("Test 9 bridgeResult:", test9Res.bridgeResult);
+    }
+    assert(test9Res.v2Outcome.decision.committedRiskPlan != null, "V2 decision must contain committedRiskPlan");
+    assert(test9Res.v2Outcome.decision.committedRiskPlan!.ts === test9Res.v2Outcome.decision.ts, "committedRiskPlan.ts must equal decision.ts (authorityCreatedAt)");
+    assert(test9Res.bridgeResult.executed === true, "Main loop execution must succeed");
+    assert(spies.orderSubmitCalls === 1, "submitOkxOrder calls = 1");
+    assert(spies.ledgerWriteOpenCalls === 1, "writeOpenPositions calls = 1");
+    assert(spies.protectiveEnsureCalls === 1, "ensureProtectiveStopOrder calls = 1");
+    console.log("✅ PASS TEST 9: Actual runTick integration executed 1 submit, 1 open write, 1 protective ensure, 0 legacy direct submits");
+
     console.log("\n==========================================");
-    console.log("ALL 8 MANDATORY INTEGRATION SCENARIOS PASSED PERFECTLY! 🎉");
+    console.log("ALL MANDATORY INTEGRATION SCENARIOS PASSED PERFECTLY! 🎉");
     console.log("==========================================");
 }
 

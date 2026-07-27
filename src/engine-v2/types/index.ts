@@ -376,6 +376,7 @@ export interface V2CommittedRiskPlan {
     stopPrice: number;
     invalidationPx: number;
     ts: number;
+    authorityCreatedAt?: number;
 }
 
 /** Final V2 Decision Object - Completely Independent Output */
@@ -390,6 +391,7 @@ export interface EngineV2Decision {
     decision: EngineV2FinalDecision;
     executionAction: EngineV2ExecutionAction;
     risk: RiskSizingOutput;
+    committedRiskPlan?: V2CommittedRiskPlan;
     explanation: {
         reason: string;
         uiLabelRegime: string;
