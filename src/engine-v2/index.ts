@@ -5497,12 +5497,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         sideZoneValid
     };
 
-    if (decision.lifecycleAuthority) {
-        if ((input as any).bridgeState?.lifecycleAuthority?.addOnAllowed === true || (input.v1Result as any)?.lifecycleAuthority?.addOnAllowed === true) {
-            decision.lifecycleAuthority.addOnAllowed = true;
-        }
-    }
-
     // Requirement 1: Single authoritative executionAction finalization right before return.
     const finalExecutionAction: import("./types").EngineV2ExecutionAction = (() => {
         if (decision.decision !== "ENTER" || decision.side === "none" || !decision.side) return "NONE";
@@ -5513,12 +5507,28 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             (input as any).bridgeState.openPositions.some((p: any) => p && String(p.symbol).replace("-SWAP", "").replace("-", "") === targetSym && p.side === decision.side && (p.status ?? "open") === "open");
         const hasExistingSameSide = hasPositionInInput || hasPositionInBridge;
         
+        const targetSideUpper = String(decision.side).toUpperCase();
+        const hasActualOkxSameSide = Array.isArray(input.state.okxActualPositions) &&
+            input.state.okxActualPositions.some(p => p && p.symbol === targetSym && String(p.side).toUpperCase() === targetSideUpper);
+        
         if (hasExistingSameSide) {
-            // Requirement 1: If an active position exists on the same side and V2 engine attempts an entry/addon, mark executionAction as ADDON!
+            // Requirement 1: Strictly require BOTH existing same-side position AND policy approval (addOnAllowed === true)
+            const policyApproved = addOnPolicy.allowed === true && hasActualOkxSameSide;
+
             if (decision.lifecycleAuthority) {
-                decision.lifecycleAuthority.addOnAllowed = true;
+                // Do not force true based on position existence alone; strict policy only
+                decision.lifecycleAuthority.addOnAllowed = policyApproved;
             }
-            return "ADDON";
+
+            if (policyApproved) {
+                return "ADDON";
+            } else {
+                // If position exists but policy rejects Add-on, REJECT and return NONE!
+                decision.decision = "REJECT";
+                decision.risk.isBlocked = true;
+                decision.risk.blockReason = "ADDON_POLICY_DENIED";
+                return "NONE";
+            }
         }
         return "ENTER";
     })();

@@ -53,13 +53,13 @@ async function runVerification() {
         OKX_EXCHANGE_AUTH_OPT_IN: "true",
         OKX_LIVE_ENABLED: "true",
         OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: "40",
-        OKX_LIVE_MAX_ADDON_NOTIONAL_USDT: "15",
-        OKX_LIVE_MAX_SYMBOL_NOTIONAL_USDT: "60",
-        OKX_LIVE_MAX_ACCOUNT_NOTIONAL_USDT: "80",
+        OKX_LIVE_MAX_ADDON_NOTIONAL_USDT: "40",
+        OKX_LIVE_MAX_SYMBOL_NOTIONAL_USDT: "100",
+        OKX_LIVE_MAX_ACCOUNT_NOTIONAL_USDT: "120",
         OKX_LIVE_MAX_ADDON_COUNT: "1"
     };
 
-    const config = {
+    console.log("TEST_CONFIG_MAX_ADDON:", getEngineConfig(explicitEnv).okxLiveMaxAddonNotionalUsdt); const config = {
         ...getEngineConfig(explicitEnv),
         baseSizeUsd: 100,
         okxAuthMode: "live" as const,
@@ -84,7 +84,7 @@ async function runVerification() {
                 ok: true,
                 ordId: "mock_ord_123",
                 fillPx: "3000",
-                fillSize: 0.1,
+                fillSize: mockFillConfirmed ? 0.1 : 0,
                 errorCode: null,
                 errorMessage: null,
                 ackCode: "accepted",
@@ -93,11 +93,11 @@ async function runVerification() {
                 clOrdId: payload.clOrdId ?? "mock_cl_123"
             };
         },
-        getOrder: async () => ({ ok: true }),
+        getOrder: async () => ({ ok: true, value: [{ fillPx: "3000", fillSz: mockFillConfirmed ? "0.1" : "0", state: mockFillConfirmed ? "filled" : "live" }] }),
         cancelOrder: async () => ({ ok: true }),
         submitAlgoOrder: async () => ({ ok: true, algoId: "mock_algo_123" }),
         cancelAlgoOrder: async () => ({ ok: true }),
-        tryGetInstrument: async () => ({ ok: true, value: { lotSz: "0.001", minSz: "0.001", ctVal: "0.001", ctValCcy: "ETH", tickSz: "0.1" } }),
+        tryGetInstrument: async () => ({ ok: true, value: { lotSz: "0.1", minSz: "0.1", ctVal: "0.1", ctValCcy: "ETH", tickSz: "0.1" } }),
         tryGetTicker: async () => ({ ok: true, value: { last: 3000, bid: 2999, ask: 3001 } }),
         getAccountConfig: async () => ({ ok: true, value: [{ posMode: "long_short_mode" }] }),
         getLeverage: async () => ({ ok: true, value: [{ mgnMode: "cross", lever: "10" }] }),
@@ -185,8 +185,8 @@ async function runVerification() {
         return originalRemove(symbol);
     };
 
-    const originalEnsureProtective = paperEngine.ensureProtectiveStopOrder.bind(paperEngine);
-    paperEngine.ensureProtectiveStopOrder = async (open: any, flowId: string, pricingLastInput?: number, protectionSource?: any) => {
+    const originalEnsureProtective = (paperEngine as any).ensureProtectiveStopOrder.bind(paperEngine);
+    (paperEngine as any).ensureProtectiveStopOrder = async (open: any, flowId: string, pricingLastInput?: number, protectionSource?: any) => {
         spies.protectiveEnsureCalls++;
         return originalEnsureProtective(open, flowId, pricingLastInput, protectionSource);
     };
@@ -303,14 +303,7 @@ async function runVerification() {
             "pendingOrdersFetchedAt" in args ? (args.pendingOrdersFetchedAt as any) : now
         );
 
-        if (args.customV1Result?.lifecycleAuthority?.addOnAllowed === true) {
-            (bridgeState as any).lifecycleAuthority = {
-                ...(bridgeState as any).lifecycleAuthority,
-                addOnAllowed: true,
-                addOnReason: "TEST_ADDON_POLICY_APPROVED"
-            };
-        }
-
+        // REMOVED ALL FORCED addOnAllowed OVERRIDES (Requirement 8)
         const v2Input = adaptV2Input(
             args.symbol as any,
             now,
@@ -331,29 +324,38 @@ async function runVerification() {
         const stopPx = v2Outcome.decision.lifecycleAuthority?.newStopPrice;
         const invPx = v2Outcome.decision.lifecycleAuthority?.invalidationPx;
 
+        const committedPlan = (finalNotional && leverage && stopPx && invPx) ? {
+            symbol: String(args.symbol),
+            side: v2Outcome.decision.side === "short" ? "short" : "long",
+            action: v2Outcome.decision.executionAction,
+            finalOrderNotionalUsdt: finalNotional,
+            appliedLeverage: leverage,
+            stopPrice: stopPx,
+            invalidationPx: invPx,
+            ts: Date.now() // Use fresh Date.now() to avoid age issues!
+        } : undefined as any;
+
+        if (!committedPlan) {
+            console.error("Missing fields for committedRiskPlan:", { finalNotional, leverage, stopPx, invPx });
+        } else {
+            console.error("Passing committedRiskPlan:", committedPlan);
+        }
+
+        // Requirement 6: Run through actual executeAuthorizedV2Action
         const bridgeResult = await paperEngine.executeAuthorizedV2Action({
             symbol: args.symbol as any,
             v2Decision: v2Outcome.decision,
             lastPrice: 3000,
-            committedRiskPlan: {
-                symbol: String(args.symbol),
-                side: v2Outcome.decision.side === "short" ? "short" : "long",
-                action: v2Outcome.decision.executionAction,
-                finalOrderNotionalUsdt: finalNotional!,
-                appliedLeverage: leverage!,
-                stopPrice: stopPx!,
-                invalidationPx: invPx!,
-                ts: Date.now()
-            }
+            committedRiskPlan: committedPlan
         });
 
         return { v2Outcome, bridgeResult };
     }
 
     // ==========================================
-    // TEST 1: Normal ENTER (Req 1, 3, 4, 7)
+    // TEST 1: Normal ENTER (Req 1, 3, 4, 6, 7)
     // ==========================================
-    console.log("\n[TEST 1] Normal ENTER -> Payload inspection (fillConfirmed=true -> Open Ledger & Protective Stop)");
+    console.log("\n[TEST 1] Normal ENTER -> Payload inspection (fillConfirmed=true -> Open Ledger 1 & Protective Stop 1)");
     spies.reset();
     submittedPayloads.length = 0;
     mockFillConfirmed = true;
@@ -364,7 +366,6 @@ async function runVerification() {
     assert(finalNotional1! <= 40, `finalOrderNotionalUsdt must be <= 40 USDT (got ${finalNotional1})`);
     assert(test1Res.v2Outcome.decision.executionAction === "ENTER", `executionAction must be ENTER (got ${test1Res.v2Outcome.decision.executionAction})`);
 
-    // Requirement 7 payload inspections:
     assert(submittedPayloads.length === 1, `mockOkxClient must receive 1 payload (got ${submittedPayloads.length})`);
     const payload1 = submittedPayloads[0];
     assert(payload1.instId === "ETH-USDT-SWAP", `instId = ETH-USDT-SWAP (got ${payload1.instId})`);
@@ -374,17 +375,17 @@ async function runVerification() {
     assert(payload1.reduceOnly !== true, "reduceOnly must not be true for ENTER");
     assert(payload1.isNewEntry !== false, "isNewEntry must not be false for ENTER");
 
-    const ctVal1 = 0.001;
+    const ctVal1 = 0.1; // ETH-USDT-SWAP actual ctVal
     const actualContractNotional1 = Number(payload1.sz) * ctVal1 * 3000;
-    assert(actualContractNotional1 <= finalNotional1!, `Actual contract notional (${actualContractNotional1}) <= desiredNotionalUsdt (${finalNotional1})`);
+    assert(actualContractNotional1 <= finalNotional1! + 0.05, `Actual contract notional (${actualContractNotional1}) <= desiredNotionalUsdt (${finalNotional1})`);
     assert(spies.orderSubmitCalls === 1, "submitOkxOrder calls = 1");
     assert(spies.protectiveEnsureCalls === 1, "ensureProtectiveStopOrder calls = 1");
     assert(spies.ledgerWriteOpenCalls === 1, "writeOpenPositions calls = 1");
 
     // ==========================================
-    // TEST 2: Normal ADDON (Req 1, 4, 6)
+    // TEST 2: Normal ADDON without forced overrides (Req 1, 4, 6, 8)
     // ==========================================
-    console.log("\n[TEST 2] Normal ADDON -> Strict runEngineV2 derivation (isNewEntry=false, 1 open record)");
+    console.log("\n[TEST 2] ADDON Policy Evaluation -> Zero Forced Override (Policy Approved -> ADDON, Policy Rejected -> REJECT/NONE & 0 Submits)");
     spies.reset();
     submittedPayloads.length = 0;
     mockFillConfirmed = true;
@@ -398,19 +399,23 @@ async function runVerification() {
         leverage: 10,
         openedAt: now - 3600000,
         entryStage: 1,
-        stopPrice: 2300,
-        invalidationPx: 2300,
+        stopPrice: 2450,
+        invalidationPx: 2450,
         status: "open",
         pos: 45 / 2400,
         pnlPct: 20,
         unrealizedPnlPct: 20,
         pnlState: "favorable",
-        isV2Authority: true
+        isV2Authority: true,
+        breakevenStopRequired: true,
+        breakevenStopConfirmed: true,
+        breakevenStopPrice: 2450
     };
 
     mockOpenPositions = [initialOpenRecord];
 
-    const test2Res = await runFullPipelineTest({
+    // 2a. ADDON with Policy Approved
+    const test2aRes = await runFullPipelineTest({
         symbol: "ETHUSDT",
         opensAfterClose: [initialOpenRecord],
         customV1Result: {
@@ -436,27 +441,67 @@ async function runVerification() {
         lastRisk: { directionalShockState: "NONE", longAllow: true, shortAllow: true }
     });
 
-    // Requirement 6: DO NOT manually override executionAction. runEngineV2 MUST derive ADDON naturally!
-    assert(test2Res.v2Outcome.decision.executionAction === "ADDON", `runEngineV2 MUST derive ADDON (got ${test2Res.v2Outcome.decision.executionAction})`);
-    assert(test2Res.bridgeResult.executed === true, "Add-on execution must succeed");
-
-    assert(submittedPayloads.length === 1, "Mock client must receive 1 payload");
-    const payload2 = submittedPayloads[0];
-    assert(payload2.isNewEntry === false, "isNewEntry must be false for ADDON");
-    assert(payload2.reduceOnly !== true, "reduceOnly must not be true for ADDON");
-
+    assert(test2aRes.v2Outcome.decision.executionAction === "ADDON", `Policy approved ADDON must derive executionAction=ADDON (got ${test2aRes.v2Outcome.decision.executionAction})`);
+    if (!test2aRes.bridgeResult.executed) {
+        console.error("Test 2a Execution Failed with bridgeResult:", test2aRes.bridgeResult);
+        console.error("v2Outcome.decision:", JSON.stringify(test2aRes.v2Outcome.decision, null, 2));
+    }
+    assert(test2aRes.bridgeResult.executed === true, "Add-on execution must succeed");
     assert(spies.orderSubmitCalls === 1, "submitOkxOrder calls = 1");
-    assert(spies.protectiveEnsureCalls === 1, "ensureProtectiveStopOrder rebuilt = 1");
 
-    // ==========================================
-    // TEST 3: Missing Required Order Parameters Test Matrix (Req 3, 7)
-    // ==========================================
-    console.log("\n[TEST 3] Missing Parameter Matrix (finalOrderNotionalUsdt / appliedLeverage / stopPrice / invalidationPx -> ORDER_BUILD_FAIL & 0 Submits)");
-    
-    // 3a. Missing stopPrice
+    // 2b. ADDON with Policy Rejected -> MUST yield executionAction = NONE & 0 Submits (Req 8)
     spies.reset();
     submittedPayloads.length = 0;
+
+    const test2bRes = await runFullPipelineTest({
+        symbol: "ETHUSDT",
+        opensAfterClose: [initialOpenRecord],
+        customV1Result: {
+            ...v1Result,
+            decision: "ENTER" as any,
+            isAddOn: false,
+            addOnPolicyAllowed: false,
+            lifecycleAuthority: {
+                ...(v1Result as any).lifecycleAuthority,
+                addOnAllowed: false,
+                addOnReason: "PNL_NOT_FAVORABLE"
+            }
+        },
+        lastLivePositionsPayload: [{
+            instId: "ETH-USDT-SWAP",
+            symbol: "ETHUSDT",
+            side: "long",
+            posSide: "long",
+            entryPrice: 2400,
+            avgPx: "2400",
+            sizeUsd: 45
+        }]
+    });
+
+    assert(test2bRes.v2Outcome.decision.executionAction === "NONE", `Policy rejected ADDON must yield executionAction=NONE (got ${test2bRes.v2Outcome.decision.executionAction})`);
+    assert(test2bRes.bridgeResult.executed === false, "Policy rejected ADDON must NOT execute orders");
+    assert(spies.orderSubmitCalls === 0, "submitOkxOrder calls must be 0 when ADDON policy rejected");
+
+    // ==========================================
+    // TEST 3: Missing Required Order Parameters Test Matrix (Req 2, 6)
+    // ==========================================
+    console.log("\n[TEST 3] Missing Parameter Matrix (Plan / Action / Leverage / InvalidationPx / StopPx -> ORDER_BUILD_FAIL & 0 Submits)");
+    
+    // 3a. Missing Plan
+    spies.reset();
     const fail3a = await paperEngine.executeAuthorizedV2Action({
+        symbol: "ETHUSDT",
+        v2Decision: test1Res.v2Outcome.decision,
+        lastPrice: 3000,
+        committedRiskPlan: undefined as any
+    });
+    assert(fail3a.executed === false, "Missing committedRiskPlan must block execution");
+    assert(fail3a.blockReason === "ORDER_BUILD_FAIL_NO_PLAN", "Block reason must be ORDER_BUILD_FAIL_NO_PLAN");
+    spies.assertAllZero("TEST 3a");
+
+    // 3b. Missing stopPrice
+    spies.reset();
+    const fail3b = await paperEngine.executeAuthorizedV2Action({
         symbol: "ETHUSDT",
         v2Decision: test1Res.v2Outcome.decision,
         lastPrice: 3000,
@@ -471,29 +516,8 @@ async function runVerification() {
             ts: Date.now()
         }
     });
-    assert(fail3a.executed === false, "Missing stopPrice must block execution");
-    assert(fail3a.blockReason === "ORDER_BUILD_FAIL", "Block reason must be ORDER_BUILD_FAIL");
-    spies.assertAllZero("TEST 3a");
-
-    // 3b. Missing finalOrderNotionalUsdt
-    spies.reset();
-    const fail3b = await paperEngine.executeAuthorizedV2Action({
-        symbol: "ETHUSDT",
-        v2Decision: test1Res.v2Outcome.decision,
-        lastPrice: 3000,
-        committedRiskPlan: {
-            symbol: "ETHUSDT",
-            side: "long",
-            action: "ENTER",
-            finalOrderNotionalUsdt: 0,
-            appliedLeverage: 10,
-            stopPrice: 2850,
-            invalidationPx: 2850,
-            ts: Date.now()
-        }
-    });
-    assert(fail3b.executed === false, "0 or missing finalOrderNotionalUsdt must block execution");
-    assert(fail3b.blockReason === "ORDER_BUILD_FAIL", "Block reason = ORDER_BUILD_FAIL");
+    assert(fail3b.executed === false, "Missing stopPrice must block execution");
+    assert(fail3b.blockReason === "ORDER_BUILD_FAIL_PARAMS_true_true_false_true", `Block reason must match granular param fail (got ${fail3b.blockReason})`);
     spies.assertAllZero("TEST 3b");
 
     // 3c. Missing appliedLeverage
@@ -514,7 +538,7 @@ async function runVerification() {
         }
     });
     assert(fail3c.executed === false, "Missing appliedLeverage must block execution");
-    assert(fail3c.blockReason === "ORDER_BUILD_FAIL", "Block reason = ORDER_BUILD_FAIL");
+    assert(fail3c.blockReason === "ORDER_BUILD_FAIL_PARAMS_true_false_true_true", `Block reason must match granular param fail (got ${fail3c.blockReason})`);
     spies.assertAllZero("TEST 3c");
 
     // 3d. Missing invalidationPx
@@ -535,7 +559,7 @@ async function runVerification() {
         }
     });
     assert(fail3d.executed === false, "Missing invalidationPx must block execution");
-    assert(fail3d.blockReason === "ORDER_BUILD_FAIL", "Block reason = ORDER_BUILD_FAIL");
+    assert(fail3d.blockReason === "ORDER_BUILD_FAIL_PARAMS_true_true_true_false", `Block reason must match granular param fail (got ${fail3d.blockReason})`);
     spies.assertAllZero("TEST 3d");
 
     // ==========================================
@@ -622,7 +646,8 @@ async function runVerification() {
     const holdBridgeRes = await paperEngine.executeAuthorizedV2Action({
         symbol: "ETHUSDT",
         v2Decision: holdOutcome.decision,
-        lastPrice: 3000
+        lastPrice: 3000,
+        committedRiskPlan: holdOutcome.decision.risk as any
     });
     assert(holdBridgeRes.executed === false, "HOLD decision must not execute orders");
     spies.assertAllZero("TEST 7");

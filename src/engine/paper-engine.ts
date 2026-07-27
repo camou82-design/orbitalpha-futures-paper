@@ -15604,10 +15604,35 @@ export class PaperEngine {
               trace.open_fail_stage = "v2_plan_or_decision_missing";
               emitPositionOpenTraceFinal();
               logPaperPositionOpenFailed();
-              continue; // FAIL-CLOSED! Do not fallback to legacy submitOkxOrder!
+              continue; // FAIL-CLOSED!
             }
 
-            const invPx = (v2CommittedRiskPlan as any).invalidation_px ?? v2CommittedRiskPlan.stop_price;
+            const rawPlan = v2CommittedRiskPlan as any;
+            const planAction = v2DecisionObj.executionAction;
+            const planStop = rawPlan.stop_price ?? rawPlan.stopPrice;
+            const planInv = rawPlan.invalidation_px ?? rawPlan.invalidationPx;
+            const planLeverage = authority.appliedLeverage ?? rawPlan.appliedLeverage;
+            const planTs = rawPlan.ts ?? rawPlan.timestamp;
+
+            // Zero Fallback Validation: All fields must exist strictly without fallbacks
+            if (
+              !planAction ||
+              typeof planStop !== "number" || !Number.isFinite(planStop) ||
+              typeof planInv !== "number" || !Number.isFinite(planInv) ||
+              typeof planLeverage !== "number" || !Number.isFinite(planLeverage) ||
+              typeof planTs !== "number" || !Number.isFinite(planTs)
+            ) {
+              this.logger.error("V2_ENTRY_BLOCKED_COMMITTED_PLAN_FIELD_MISSING", {
+                symbol: first.symbol,
+                reason: "FAIL_CLOSED_V2_PLAN_FIELD_MISSING",
+                planAction, planStop, planInv, planLeverage, planTs
+              });
+              trace.open_fail_stage = "v2_plan_field_missing";
+              emitPositionOpenTraceFinal();
+              logPaperPositionOpenFailed();
+              continue; // FAIL-CLOSED! Zero fallback!
+            }
+
             const bridgeRes = await this.executeAuthorizedV2Action({
               symbol: first.symbol,
               v2Decision: v2DecisionObj,
@@ -15615,12 +15640,12 @@ export class PaperEngine {
               committedRiskPlan: {
                 symbol: String(first.symbol),
                 side: authority.side as "long" | "short",
-                action: v2DecisionObj.executionAction ?? "ENTER",
+                action: planAction,
                 finalOrderNotionalUsdt: entryOrderNotionalUsdt,
-                appliedLeverage: authority.appliedLeverage ?? 10,
-                stopPrice: v2CommittedRiskPlan.stop_price,
-                invalidationPx: invPx,
-                ts: Date.now()
+                appliedLeverage: planLeverage,
+                stopPrice: planStop,
+                invalidationPx: planInv,
+                ts: planTs
               }
             });
 
@@ -17301,29 +17326,29 @@ export class PaperEngine {
     // Requirement 1: executionAction strictly from v2Decision. NO RE-INFERRING!
     const executionAction = v2Decision.executionAction;
     if (!executionAction || (executionAction !== "ENTER" && executionAction !== "ADDON")) {
-      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL_ACTION_INVALID" };
     }
 
     // Requirement 2: committedRiskPlan is MANDATORY. Zero re-assembly fallback from v2Decision!
     if (!committedRiskPlan) {
-      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL_NO_PLAN" };
     }
 
     const plan = committedRiskPlan;
 
     // Requirement 2: Strict match of symbol, side, action with v2Decision
     if (plan.symbol !== symbol || plan.side !== v2Decision.side || plan.action !== executionAction) {
-      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL_MISMATCH" };
     }
 
     // Requirement 2: Timestamp & ageMs validation (0 <= ageMs <= 60000). No missing, infinite, or future timestamp!
     const nowTs = Date.now();
     if (typeof plan.ts !== "number" || !Number.isFinite(plan.ts)) {
-      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL_TS_INVALID" };
     }
     const ageMs = nowTs - plan.ts;
     if (ageMs < 0 || ageMs > 60000) {
-      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL_AGE" };
     }
 
     // Requirement 2: Strict parameter validation without fallbacks (NO invalidationPx ?? stopPrice)
@@ -17341,7 +17366,7 @@ export class PaperEngine {
       (sideCandidate === "long" ? invalidationPx < lastPrice : invalidationPx > lastPrice);
 
     if (!notionalValid || !leverageValid || !stopValid || !invalidationValid || !sideCandidate || (sideCandidate as string) === "none") {
-      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
+      return { executed: false, blockReason: `ORDER_BUILD_FAIL_PARAMS_${notionalValid}_${leverageValid}_${stopValid}_${invalidationValid}` };
     }
 
     if (!this.okxDemo || this.signedSubmitMode() !== "enabled") {
@@ -17414,16 +17439,22 @@ export class PaperEngine {
   }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null; updatedRecord?: PaperOpenPositionRecord; pendingOnly?: boolean }> {
     const { symbol, sideCandidate, finalOrderNotionalUsdt, appliedLeverage, stopPrice, invalidationPx, lastPrice, existingPositions, v2Decision, pendingList } = params;
 
+    const instMeta = getOkxInstrumentMeta(symbol);
+    if (!instMeta) {
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
+    }
+
     const side = sideCandidate === "long" ? "buy" : "sell";
     const posSide = sideCandidate === "long" ? "long" : "short";
     const clOrdId = buildOkxClOrdId(symbol, side);
     const traceId = `v2_auth_${Date.now()}`;
+    const calculatedContractQty = Math.max(instMeta.lotSz, finalOrderNotionalUsdt / Math.max(1, lastPrice * instMeta.ctVal));
 
     const submitRes = await this.submitOkxOrder({
       symbol,
       side,
       posSide,
-      qty: Math.max(0.001, finalOrderNotionalUsdt / Math.max(1, lastPrice)),
+      qty: calculatedContractQty,
       clOrdId,
       traceId,
       reason: "v2_authorized_signed_bridge",
@@ -17444,12 +17475,16 @@ export class PaperEngine {
     }
 
     const isFilled = submitRes.fillConfirmed === true || submitRes.orderState === "filled";
+
+    if (isFilled && (!submitRes.fillPx || !submitRes.fillSize || Number(submitRes.fillPx) <= 0 || Number(submitRes.fillSize) <= 0)) {
+      return { executed: false, blockReason: "FAIL_CLOSED_FILL_DETAILS_MISSING" };
+    }
+
     const fillPx = submitRes.fillPx ? Number(submitRes.fillPx) : lastPrice;
     const fillSize = submitRes.fillSize ? Number(submitRes.fillSize) : 0;
-    const instCtVal = 0.001;
-    const filledNotional = isFilled ? (fillSize ? computeOkxFilledNotionalUsdt(fillSize, fillPx, instCtVal) : finalOrderNotionalUsdt) : (fillSize ? computeOkxFilledNotionalUsdt(fillSize, fillPx, instCtVal) : 0);
+    const filledNotional = isFilled ? (fillSize ? computeOkxFilledNotionalUsdt(fillSize, fillPx, instMeta.ctVal) : finalOrderNotionalUsdt) : (fillSize ? computeOkxFilledNotionalUsdt(fillSize, fillPx, instMeta.ctVal) : 0);
 
-    // Condition 4 & 5: If unfilled or partially filled with 0 filled notional, record pending order via upsert!
+    // Unfilled or 0 filled notional -> record pending order via upsert
     if (!isFilled && filledNotional <= 0) {
       await this.helperUpsertPendingOrder(pendingList, {
         symbol,
@@ -17532,23 +17567,30 @@ export class PaperEngine {
     existing?: PaperOpenPositionRecord;
     existingPositions: PaperOpenPositionRecord[];
     v2Decision: EngineV2Decision;
+    pendingList: any[];
   }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null; updatedRecord?: PaperOpenPositionRecord; pendingOnly?: boolean }> {
-    const { symbol, sideCandidate, finalOrderNotionalUsdt, appliedLeverage, stopPrice, invalidationPx, lastPrice, existing, existingPositions, v2Decision } = params;
+    const { symbol, sideCandidate, finalOrderNotionalUsdt, appliedLeverage, stopPrice, invalidationPx, lastPrice, existing, existingPositions, v2Decision, pendingList } = params;
 
     if (!existing) {
       return { executed: false, blockReason: "NO_EXISTING_POSITION_FOR_ADDON" };
+    }
+
+    const instMeta = getOkxInstrumentMeta(symbol);
+    if (!instMeta) {
+      return { executed: false, blockReason: "ORDER_BUILD_FAIL" };
     }
 
     const side = sideCandidate === "long" ? "buy" : "sell";
     const posSide = sideCandidate === "long" ? "long" : "short";
     const clOrdId = buildOkxClOrdId(symbol, side);
     const traceId = `v2_auth_${Date.now()}`;
+    const calculatedContractQty = Math.max(instMeta.lotSz, finalOrderNotionalUsdt / Math.max(1, lastPrice * instMeta.ctVal));
 
     const submitRes = await this.submitOkxOrder({
       symbol,
       side,
       posSide,
-      qty: Math.max(0.001, finalOrderNotionalUsdt / Math.max(1, lastPrice)),
+      qty: calculatedContractQty,
       clOrdId,
       traceId,
       reason: "scale_in_authorized",
@@ -17570,23 +17612,33 @@ export class PaperEngine {
 
     const isFilled = submitRes.fillConfirmed === true || submitRes.orderState === "filled";
 
-    // Requirement 4: Order Submitted but un-filled/pending -> DO NOT update sizeUsd, entryStage, weighted avg price or protective stop!
-    if (!isFilled) {
-      await (this.store as any)?.writePendingEntryOrders?.([{
+    if (isFilled && (!submitRes.fillPx || !submitRes.fillSize || Number(submitRes.fillPx) <= 0 || Number(submitRes.fillSize) <= 0)) {
+      return { executed: false, blockReason: "FAIL_CLOSED_FILL_DETAILS_MISSING" };
+    }
+
+    const fillPx = submitRes.fillPx ? Number(submitRes.fillPx) : lastPrice;
+    const fillSize = submitRes.fillSize ? Number(submitRes.fillSize) : 0;
+    const filledNotional = isFilled ? (fillSize ? computeOkxFilledNotionalUsdt(fillSize, fillPx, instMeta.ctVal) : finalOrderNotionalUsdt) : (fillSize ? computeOkxFilledNotionalUsdt(fillSize, fillPx, instMeta.ctVal) : 0);
+
+    // Unfilled or 0 fill -> upsert pending order via helperUpsertPendingOrder
+    if (!isFilled && filledNotional <= 0) {
+      await this.helperUpsertPendingOrder(pendingList, {
         symbol,
         clOrdId,
         ordId: submitRes.ordId ?? "pending_addon_ord",
         side,
         posSide,
         desiredNotionalUsdt: finalOrderNotionalUsdt,
+        filledNotionalUsdt: 0,
+        status: "live",
         submittedAt: Date.now()
-      }]);
+      });
       return { executed: false, submitResult: submitRes, pendingOnly: true };
     }
 
-    // Only update position record and rebuild protective stop upon fillConfirmed === true!
-    const newTotalSizeUsd = existing.sizeUsd + finalOrderNotionalUsdt;
-    const newEntryPrice = (existing.entryPrice * existing.sizeUsd + lastPrice * finalOrderNotionalUsdt) / newTotalSizeUsd;
+    // Filled or Partially Filled with filledNotional > 0
+    const newTotalSizeUsd = existing.sizeUsd + filledNotional;
+    const newEntryPrice = (existing.entryPrice * existing.sizeUsd + fillPx * filledNotional) / newTotalSizeUsd;
     const nextStage = (existing.entryStage ?? 1) + 1;
 
     const updatedRecord: PaperOpenPositionRecord = {
@@ -17600,14 +17652,40 @@ export class PaperEngine {
       invalidationPx
     };
 
-    await this.ensureProtectiveStopOrder(updatedRecord, `v2_addon_auto:${symbol}:${updatedRecord.openedAt}`);
-    const idx = existingPositions.findIndex((p) => p.symbol === symbol && (p.status ?? "open") === "open");
-    if (idx >= 0) {
-      existingPositions[idx] = updatedRecord;
-    } else {
-      existingPositions.push(updatedRecord);
+    // Rebuild protective stop order for filled portion
+    let stopCreated = false;
+    try {
+      const okStop = await this.ensureProtectiveStopOrder(updatedRecord, `v2_bridge_addon:${symbol}:${Date.now()}`);
+      stopCreated = Boolean(okStop && okStop.success !== false);
+    } catch (e) {
+      stopCreated = false;
     }
-    await this.writeOpenPositions(existingPositions);
+
+    if (!stopCreated) {
+      updatedRecord.status = "PROTECTION_PENDING" as any;
+      const otherPositions = existingPositions.filter(p => p.symbol !== symbol);
+      await this.writeOpenPositions([...otherPositions, updatedRecord]);
+      return { executed: false, blockReason: "PROTECTION_PENDING", updatedRecord };
+    }
+
+    const otherPositions = existingPositions.filter(p => p.symbol !== symbol);
+    await this.writeOpenPositions([...otherPositions, updatedRecord]);
+
+    // Partial fill -> upsert remaining pending balance
+    if (!isFilled && filledNotional < finalOrderNotionalUsdt) {
+      await this.helperUpsertPendingOrder(pendingList, {
+        symbol,
+        clOrdId,
+        ordId: submitRes.ordId ?? "pending_addon_partial",
+        side,
+        posSide,
+        desiredNotionalUsdt: finalOrderNotionalUsdt - filledNotional,
+        filledNotionalUsdt: filledNotional,
+        status: "partially_filled",
+        submittedAt: Date.now()
+      });
+    }
+
     return { executed: true, submitResult: submitRes, updatedRecord };
   }
 }
@@ -18004,7 +18082,12 @@ export function buildV2StateBridge(
           side: side,
           entryPrice: p.entryPrice,
           sizeUsd: p.sizeUsd,
-          entryStage: p.entryStage ?? 1
+          entryStage: p.entryStage ?? 1,
+          peakUnrealizedPnlPct: p.peakUnrealizedPnlPct,
+          peakPnlUpdatedAt: p.peakPnlUpdatedAt,
+          breakevenStopRequired: p.breakevenStopRequired,
+          breakevenStopConfirmed: p.breakevenStopConfirmed,
+          breakevenStopPrice: p.breakevenStopPrice
         };
       })
       .filter((x): x is V2BridgePosition => x !== null),
@@ -18090,4 +18173,29 @@ export function computeOkxFilledNotionalUsdt(
   const px = Number(fillPx) || 0;
   if (sz <= 0 || px <= 0) return 0;
   return sz * ctVal * px;
+}
+
+export interface OkxInstrumentMeta {
+  ctVal: number;
+  ctValCcy: string;
+  lotSz: number;
+}
+
+export const OKX_INSTRUMENT_SPECS: Record<string, OkxInstrumentMeta> = {
+  "ETHUSDT": { ctVal: 0.1, ctValCcy: "ETH", lotSz: 0.1 },
+  "ETH-USDT-SWAP": { ctVal: 0.1, ctValCcy: "ETH", lotSz: 0.1 },
+  "BTCUSDT": { ctVal: 0.01, ctValCcy: "BTC", lotSz: 0.01 },
+  "BTC-USDT-SWAP": { ctVal: 0.01, ctValCcy: "BTC", lotSz: 0.01 },
+  "SOLUSDT": { ctVal: 1, ctValCcy: "SOL", lotSz: 1 },
+  "SOL-USDT-SWAP": { ctVal: 1, ctValCcy: "SOL", lotSz: 1 },
+  "XRPUSDT": { ctVal: 100, ctValCcy: "XRP", lotSz: 1 },
+  "XRP-USDT-SWAP": { ctVal: 100, ctValCcy: "XRP", lotSz: 1 }
+};
+
+export function getOkxInstrumentMeta(symbol: string): OkxInstrumentMeta | null {
+  const norm = String(symbol).trim().toUpperCase();
+  if (OKX_INSTRUMENT_SPECS[norm]) return OKX_INSTRUMENT_SPECS[norm];
+  const swapNorm = norm.includes("-SWAP") ? norm : `${norm.replace("USDT", "")}-USDT-SWAP`;
+  if (OKX_INSTRUMENT_SPECS[swapNorm]) return OKX_INSTRUMENT_SPECS[swapNorm];
+  return null;
 }
