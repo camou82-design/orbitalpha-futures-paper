@@ -3646,6 +3646,10 @@ export class PaperEngine {
     });
   }
 
+  public async runTick(): Promise<void> {
+    return this.runOnce();
+  }
+
   async runOnce(): Promise<void> {
     this.runCycleId += 1;
     const tickNow = Date.now();
@@ -4325,31 +4329,34 @@ export class PaperEngine {
         snapshot: buildV2SnapshotBridge(snapForDecision!),
         legacy: buildV2LegacyBridge(res),
         config: buildV2ConfigBridge(this.config),
-        state: buildV2StateBridge(
-          opensAfterClose,
-          this.lastRisk,
-          this.config,
-          this.paperExecutionReady,
-          this.signedExecutionReady,
-          readinessBarrierActive,
-          this.freshTickRequiredAfterReadiness,
-          this.readinessFreshTickCompletedCycles,
-          this.readinessFreshTickRequiredCycles,
-          this.buildEntryQualityProfilesForV2(),
-          this.serverTradeControlState,
-          this.reconcileSafetyCloseOnly,
-          this.lastLivePositionsPayload,
-          this.liveBalanceReady,
-          this.okxWalletBalanceUsdt,
-          this.okxAvailableBalanceUsdt,
-          this.okxPositionsOk,
-          this.okxOrderSubmitOk,
-          0,
-          0,
-          this.lastSignedRestSuccessAt ?? fetchedAt,
-          this.lastSignedRestSuccessAt ?? fetchedAt,
-          this.lastSignedRestSuccessAt ?? fetchedAt
-        ),
+        state: (() => {
+          console.log("DEBUG: About to call buildV2StateBridge. this.okxOrderSubmitOk is:", this.okxOrderSubmitOk);
+          return buildV2StateBridge(
+            opensAfterClose,
+            this.lastRisk,
+            this.config,
+            this.paperExecutionReady,
+            this.signedExecutionReady,
+            readinessBarrierActive,
+            this.freshTickRequiredAfterReadiness,
+            this.readinessFreshTickCompletedCycles,
+            this.readinessFreshTickRequiredCycles,
+            this.buildEntryQualityProfilesForV2(),
+            this.serverTradeControlState,
+            this.reconcileSafetyCloseOnly,
+            this.lastLivePositionsPayload,
+            this.liveBalanceReady,
+            this.okxWalletBalanceUsdt,
+            this.okxAvailableBalanceUsdt,
+            this.okxPositionsOk,
+            this.okxOrderSubmitOk,
+            0,
+            0,
+            this.lastSignedRestSuccessAt ?? fetchedAt,
+            this.lastSignedRestSuccessAt ?? fetchedAt,
+            this.lastSignedRestSuccessAt ?? fetchedAt
+          );
+        })(),
         v2Mode
       });
 
@@ -15607,50 +15614,49 @@ export class PaperEngine {
               continue; // FAIL-CLOSED!
             }
 
-            const rawPlan = v2DecisionObj.committedRiskPlan ?? v2CommittedRiskPlan;
-            const planAction = v2DecisionObj.executionAction;
-            const planStop = rawPlan?.stopPrice ?? rawPlan?.stop_price;
-            const planInv = rawPlan?.invalidationPx ?? rawPlan?.invalidation_px;
-            const planLeverage = rawPlan?.appliedLeverage ?? authority.appliedLeverage;
-            const planTs = rawPlan?.ts ?? rawPlan?.timestamp ?? rawPlan?.authorityCreatedAt;
-            const planNotional = rawPlan?.finalOrderNotionalUsdt ?? v2DecisionObj.risk?.finalOrderNotionalUsdt;
+            const rawPlan = v2DecisionObj.committedRiskPlan;
 
-            // Zero Fallback Validation: All fields must exist strictly without fallbacks
-            if (
-              !rawPlan ||
-              !planAction ||
-              typeof planNotional !== "number" || !Number.isFinite(planNotional) || planNotional <= 0 ||
-              typeof planStop !== "number" || !Number.isFinite(planStop) ||
-              typeof planInv !== "number" || !Number.isFinite(planInv) ||
-              typeof planLeverage !== "number" || !Number.isFinite(planLeverage) ||
-              typeof planTs !== "number" || !Number.isFinite(planTs)
-            ) {
-              this.logger.error("V2_ENTRY_BLOCKED_COMMITTED_PLAN_FIELD_MISSING", {
+            if (!rawPlan) {
+              this.logger.error("V2_ENTRY_BLOCKED_COMMITTED_PLAN_MISSING", {
                 symbol: first.symbol,
-                reason: "FAIL_CLOSED_V2_PLAN_FIELD_MISSING",
-                planAction, planNotional, planStop, planInv, planLeverage, planTs
+                reason: "FAIL_CLOSED_V2_COMMITTED_PLAN_MISSING"
               });
-              trace.open_fail_stage = "v2_plan_field_missing";
+              trace.open_fail_stage = "v2_committed_plan_missing";
               emitPositionOpenTraceFinal();
               logPaperPositionOpenFailed();
-              continue; // FAIL-CLOSED! Zero fallback!
+              continue; // FAIL-CLOSED!
+            }
+
+            // Requirement 3: Strict match validation with decision (Zero fallback, zero re-assembly!)
+            const planValid =
+              rawPlan.symbol === String(first.symbol) &&
+              rawPlan.side === v2DecisionObj.side &&
+              rawPlan.action === v2DecisionObj.executionAction &&
+              rawPlan.ts === v2DecisionObj.ts &&
+              typeof v2DecisionObj.risk?.finalOrderNotionalUsdt === "number" &&
+              rawPlan.finalOrderNotionalUsdt === v2DecisionObj.risk.finalOrderNotionalUsdt;
+
+            if (!planValid) {
+              this.logger.error("V2_ENTRY_BLOCKED_COMMITTED_PLAN_MISMATCH", {
+                symbol: first.symbol,
+                reason: "FAIL_CLOSED_V2_COMMITTED_PLAN_MISMATCH",
+                planSymbol: rawPlan.symbol, decisionSymbol: first.symbol,
+                planSide: rawPlan.side, decisionSide: v2DecisionObj.side,
+                planAction: rawPlan.action, decisionAction: v2DecisionObj.executionAction,
+                planTs: rawPlan.ts, decisionTs: v2DecisionObj.ts,
+                planNotional: rawPlan.finalOrderNotionalUsdt, decisionNotional: v2DecisionObj.risk?.finalOrderNotionalUsdt
+              });
+              trace.open_fail_stage = "v2_committed_plan_mismatch";
+              emitPositionOpenTraceFinal();
+              logPaperPositionOpenFailed();
+              continue; // FAIL-CLOSED! Do not reassemble or correct!
             }
 
             const bridgeRes = await this.executeAuthorizedV2Action({
               symbol: first.symbol,
               v2Decision: v2DecisionObj,
               lastPrice: first.lastPrice,
-              committedRiskPlan: {
-                symbol: String(first.symbol),
-                side: authority.side as "long" | "short",
-                action: planAction,
-                finalOrderNotionalUsdt: planNotional,
-                appliedLeverage: planLeverage,
-                stopPrice: planStop,
-                invalidationPx: planInv,
-                ts: planTs,
-                authorityCreatedAt: rawPlan.authorityCreatedAt ?? planTs
-              }
+              committedRiskPlan: rawPlan
             });
 
             this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
@@ -17324,17 +17330,20 @@ export class PaperEngine {
     }
     if (hasBtcLongActual) {
       await this.logAndSuppressBtcUsdtAction("v2_authorized_entry", "long", ["ENTER", "ADDON", "ORDER_SUBMIT"]);
+      console.log("EXECUTE_AUTH_FAIL", "BTCUSDT_OKX_LONG_POSITION_PROTECTED");
       return { executed: false, blockReason: "BTCUSDT_OKX_LONG_POSITION_PROTECTED" };
     }
 
     // Requirement 1: executionAction strictly from v2Decision. NO RE-INFERRING!
     const executionAction = v2Decision.executionAction;
     if (!executionAction || (executionAction !== "ENTER" && executionAction !== "ADDON")) {
+      console.log("EXECUTE_AUTH_FAIL", "ORDER_BUILD_FAIL_ACTION_INVALID");
       return { executed: false, blockReason: "ORDER_BUILD_FAIL_ACTION_INVALID" };
     }
 
     // Requirement 2: committedRiskPlan is MANDATORY. Zero re-assembly fallback from v2Decision!
     if (!committedRiskPlan) {
+      console.log("EXECUTE_AUTH_FAIL", "ORDER_BUILD_FAIL_NO_PLAN");
       return { executed: false, blockReason: "ORDER_BUILD_FAIL_NO_PLAN" };
     }
 
@@ -17342,11 +17351,13 @@ export class PaperEngine {
 
     // Requirement 2: Strict match of symbol, side, action with v2Decision
     if (plan.symbol !== symbol || plan.side !== v2Decision.side || plan.action !== executionAction) {
+      console.log("EXECUTE_AUTH_FAIL", "ORDER_BUILD_FAIL_MISMATCH");
       return { executed: false, blockReason: "ORDER_BUILD_FAIL_MISMATCH" };
     }
 
     if (typeof v2Decision.risk?.finalOrderNotionalUsdt === "number" && v2Decision.risk.finalOrderNotionalUsdt > 0) {
       if (Math.abs(plan.finalOrderNotionalUsdt - v2Decision.risk.finalOrderNotionalUsdt) > 1e-4) {
+        console.log("EXECUTE_AUTH_FAIL", "ORDER_BUILD_FAIL_NOTIONAL_MISMATCH");
         return { executed: false, blockReason: "ORDER_BUILD_FAIL_NOTIONAL_MISMATCH" };
       }
     }
@@ -17354,10 +17365,12 @@ export class PaperEngine {
     // Requirement 2: Timestamp & ageMs validation (0 <= ageMs <= 60000). No missing, infinite, or future timestamp!
     const nowTs = Date.now();
     if (typeof plan.ts !== "number" || !Number.isFinite(plan.ts)) {
+      console.log("EXECUTE_AUTH_FAIL", "ORDER_BUILD_FAIL_TS_INVALID");
       return { executed: false, blockReason: "ORDER_BUILD_FAIL_TS_INVALID" };
     }
     const ageMs = nowTs - plan.ts;
     if (ageMs < 0 || ageMs > 60000) {
+      console.log("EXECUTE_AUTH_FAIL", "ORDER_BUILD_FAIL_AGE", ageMs);
       return { executed: false, blockReason: "ORDER_BUILD_FAIL_AGE" };
     }
 
@@ -17376,10 +17389,13 @@ export class PaperEngine {
       (sideCandidate === "long" ? invalidationPx < lastPrice : invalidationPx > lastPrice);
 
     if (!notionalValid || !leverageValid || !stopValid || !invalidationValid || !sideCandidate || (sideCandidate as string) === "none") {
-      return { executed: false, blockReason: `ORDER_BUILD_FAIL_PARAMS_${notionalValid}_${leverageValid}_${stopValid}_${invalidationValid}` };
+      const br = `ORDER_BUILD_FAIL_PARAMS_${notionalValid}_${leverageValid}_${stopValid}_${invalidationValid}`;
+      console.log("EXECUTE_AUTH_FAIL", br);
+      return { executed: false, blockReason: br };
     }
 
     if (!this.okxDemo || this.signedSubmitMode() !== "enabled") {
+      console.log("EXECUTE_AUTH_FAIL", "SIGNED_EXECUTION_NOT_READY", !!this.okxDemo, this.signedSubmitMode());
       return { executed: false, blockReason: "SIGNED_EXECUTION_NOT_READY" };
     }
 
@@ -17387,18 +17403,21 @@ export class PaperEngine {
     const pendingList: any[] = (await (this.store as any)?.readPendingEntryOrders?.()) ?? [];
     const activePendingForSymbol = pendingList.find((p: any) => p && p.symbol === symbol && p.status !== "filled" && p.status !== "cancelled");
     if (activePendingForSymbol) {
+      console.log("EXECUTE_AUTH_FAIL", "ACTIVE_PENDING_ORDER_EXISTS");
       return { executed: false, blockReason: "ACTIVE_PENDING_ORDER_EXISTS" };
     }
 
     const existingPositions = await this.positions.loadOpenAll();
     const existingProtectionPending = existingPositions.find((p) => p.symbol === symbol && (p.status as any) === "PROTECTION_PENDING");
     if (existingProtectionPending) {
+      console.log("EXECUTE_AUTH_FAIL", "PROTECTION_PENDING");
       return { executed: false, blockReason: "PROTECTION_PENDING" };
     }
     const existing = existingPositions.find((p) => p.symbol === symbol && (p.status ?? "open") === "open");
 
     // Condition 6: Position authority check
     if (executionAction === "ENTER" && existing) {
+      console.log("EXECUTE_AUTH_FAIL", "POSITION_AUTHORITY_MISMATCH");
       return { executed: false, blockReason: "POSITION_AUTHORITY_MISMATCH" };
     }
     if (executionAction === "ADDON") {

@@ -47,6 +47,11 @@ async function runVerification() {
     console.log("==========================================");
 
     const now = Date.now();
+    process.env.OKX_LIVE_MAX_ORDER_NOTIONAL_USDT = "40";
+    process.env.OKX_LIVE_MAX_ADDON_NOTIONAL_USDT = "40";
+    process.env.OKX_LIVE_MAX_SYMBOL_NOTIONAL_USDT = "100";
+    process.env.OKX_LIVE_MAX_ACCOUNT_NOTIONAL_USDT = "120";
+
     const explicitEnv = {
         DATA_DIR: "./scratch/test_data",
         OKX_AUTH_MODE: "live",
@@ -56,20 +61,37 @@ async function runVerification() {
         OKX_LIVE_MAX_ADDON_NOTIONAL_USDT: "40",
         OKX_LIVE_MAX_SYMBOL_NOTIONAL_USDT: "100",
         OKX_LIVE_MAX_ACCOUNT_NOTIONAL_USDT: "120",
-        OKX_LIVE_MAX_ADDON_COUNT: "1"
+        OKX_LIVE_MAX_ADDON_COUNT: "1",
+        SERVER_TRADE_ENABLED: "true"
     };
 
     console.log("TEST_CONFIG_MAX_ADDON:", getEngineConfig(explicitEnv).okxLiveMaxAddonNotionalUsdt); const config = {
         ...getEngineConfig(explicitEnv),
         baseSizeUsd: 100,
+        paperBaseSizeUsd: 100,
+        maxOpenPositions: 3,
+        paperMaxOpenPositions: 3,
+        reentryCooldownMs: 0,
+        paperReentryCooldownMs: 0,
         okxAuthMode: "live" as const,
         okxExchangeAuthOptIn: true,
         okxLiveEnabled: true,
         okxAuthReady: true,
         okxApiKey: "test_key",
         okxApiSecret: "test_secret",
-        okxPassphrase: "test_passphrase"
-    };
+        okxPassphrase: "test_passphrase",
+        serverTradeEnabled: true,
+        okxLiveMaxOrderNotionalUsdt: 40,
+        okxLiveMaxAddonNotionalUsdt: 40,
+        okxLiveMaxSymbolNotionalUsdt: 100,
+        okxLiveMaxAccountNotionalUsdt: 120,
+        okxAccountConfigOk: true,
+        okxBalanceOk: true,
+        reports: {
+            ...((getEngineConfig(explicitEnv) as any).reports || {}),
+            summaryPath: "scratch/test_summary.md"
+        }
+    } as any;
 
     const spies = new ProductionExecutionSpies();
     const submittedPayloads: any[] = [];
@@ -98,13 +120,29 @@ async function runVerification() {
         submitAlgoOrder: async () => ({ ok: true, algoId: "mock_algo_123" }),
         cancelAlgoOrder: async () => ({ ok: true }),
         tryGetInstrument: async () => ({ ok: true, value: { lotSz: "0.1", minSz: "0.1", ctVal: "0.1", ctValCcy: "ETH", tickSz: "0.1" } }),
-        tryGetTicker: async () => ({ ok: true, value: { last: 3000, bid: 2999, ask: 3001 } }),
+        getInstruments: async () => ({ ok: true, data: [] }),
+        tryGetTicker: async () => ({ ok: true, value: { last: 3000, bid: 2999, ask: 3001 }, diagnostics: { httpStatus: 200 } }),
         getAccountConfig: async () => ({ ok: true, value: [{ posMode: "long_short_mode" }] }),
         getLeverage: async () => ({ ok: true, value: [{ mgnMode: "cross", lever: "10" }] }),
         setLeverage: async () => ({ ok: true }),
-        checkSignedReady: async () => true,
-        getBalance: async () => ({ ok: true, value: 69 }),
+        checkSignedReady: async () => ({ configOk: true, balanceOk: true, positionsOk: true, diagnostics: {} }),
+        getBalance: async () => ({
+          ok: true,
+          value: [{
+            totalEq: "69",
+            adjEq: "69",
+            details: [{
+              ccy: "USDT",
+              eq: "69",
+              availEq: "69",
+              availBal: "69",
+              cashBal: "69"
+            }]
+          }]
+        }),
+        getBalances: async () => ({ ok: true, value: { details: [{ eqUsd: "69", availBal: "69" }] } }),
         getPositions: async () => ({ ok: true, value: [] }),
+        getOrdersPending: async () => ({ ok: true, value: [] }),
         getOrdersAlgoPending: async () => ({ ok: true, value: [] })
     };
 
@@ -120,25 +158,29 @@ async function runVerification() {
         readPositionsHistory: async () => mockClosedPositions,
         readPendingEntryOrders: async () => mockPendingOrders,
         writePendingEntryOrders: async (orders: any[]) => { mockPendingOrders = orders; },
-        writeJson: async () => "",
-        writeSnapshotLatest: async () => "",
-        writeSnapshotLatestMeta: async () => "",
-        writePaperCandidateRun: async () => "",
+        writeJson: async () => "mock_path",
+        ensurePositionsHistoryEmpty: async () => {},
+        writeSnapshotLatest: async () => "mock_path",
+        writeSnapshotLatestMeta: async () => "mock_path",
+        writePaperCandidateRun: async () => "mock_path",
         updateRunsIndex: async () => "",
         appendJsonlLine: async () => {},
-        mergeNoEntryAuditSnapshot: async () => {}
+        mergeNoEntryAuditSnapshot: async () => {},
+        writePaperSummaryReport: async () => ({ summaryPath: "mock.json", dailyPath: "mock.json", windowPath: "mock.json", healthPath: "mock.json", health: {} })
     };
 
     const dummyLogger = {
-        info: () => {},
-        warn: () => {},
-        error: () => {},
-        debug: () => {}
+        info: (msg: string, ...args: any[]) => { console.log(msg, ...args); },
+        error: (msg: string, ...args: any[]) => { console.error(msg, ...args); },
+        warn: (msg: string, ...args: any[]) => { console.warn(msg, ...args); },
+        debug: (msg: string, ...args: any[]) => { console.debug(msg, ...args); }
     } as any;
 
     const paperEngine = new PaperEngine(config, dummyLogger, mockOkxDemoClient, mockStore);
     (paperEngine as any).okxPublic = mockOkxDemoClient;
     (paperEngine as any).okxDemo = mockOkxDemoClient;
+    (paperEngine as any).serverTradeControlState = { server_trade_enabled: true, close_only_mode: false, kill_switch_active: false };
+    (paperEngine as any).loadServerTradeControlState = async () => {};
 
     // Requirement 6 & 8: Attach Spies to 7 Production Execution Methods
     const originalSubmit = paperEngine.submitOkxOrder.bind(paperEngine);
@@ -191,14 +233,17 @@ async function runVerification() {
         return originalEnsureProtective(open, flowId, pricingLastInput, protectionSource);
     };
 
-    const mockCandlesArray = Array.from({ length: 80 }, (_, i) => ({
-        timestamp: now - (80 - i) * 60000,
-        open: 3000,
-        high: 3000,
-        low: 3000,
-        close: 3000,
-        volume: 1000
-    }));
+    const mockCandlesArray = Array.from({ length: 120 }, (_, i) => {
+        const base = 2000 + i * 10;
+        return {
+            timestamp: now - (120 - i) * 60000,
+            open: base,
+            high: base + 5,
+            low: base - 5,
+            close: base + 2,
+            volume: 100
+        };
+    });
 
     const htf_candles = {
         "5m": mockCandlesArray,
@@ -318,28 +363,10 @@ async function runVerification() {
         }
 
         const v2Outcome = runEngineV2(v2Input);
+        const committedPlan = v2Outcome.decision.committedRiskPlan;
 
-        const finalNotional = v2Outcome.decision.risk.finalOrderNotionalUsdt;
-        const leverage = v2Outcome.decision.risk.appliedLeverage;
-        const stopPx = v2Outcome.decision.lifecycleAuthority?.newStopPrice ?? 2985;
-        const invPx = v2Outcome.decision.lifecycleAuthority?.invalidationPx ?? 2980;
-
-        const committedPlan = v2Outcome.decision.committedRiskPlan ?? ((finalNotional && leverage && stopPx && invPx) ? {
-            symbol: String(args.symbol),
-            side: v2Outcome.decision.side === "short" ? "short" : "long",
-            action: v2Outcome.decision.executionAction,
-            finalOrderNotionalUsdt: finalNotional,
-            appliedLeverage: leverage,
-            stopPrice: stopPx,
-            invalidationPx: invPx,
-            ts: v2Outcome.decision.ts,
-            authorityCreatedAt: v2Outcome.decision.ts
-        } : undefined as any);
-
-        if (!committedPlan) {
-            console.error("Missing fields for committedRiskPlan:", { finalNotional, leverage, stopPx, invPx });
-        } else {
-            console.error("Passing committedRiskPlan:", committedPlan);
+        if ((v2Outcome.decision.executionAction === "ENTER" || v2Outcome.decision.executionAction === "ADDON") && !committedPlan) {
+            throw new Error(`TEST FAIL: decision.committedRiskPlan MUST be present for executionAction=${v2Outcome.decision.executionAction}`);
         }
 
         // Requirement 6: Run through actual executeAuthorizedV2Action
@@ -347,7 +374,7 @@ async function runVerification() {
             symbol: args.symbol as any,
             v2Decision: v2Outcome.decision,
             lastPrice: 3000,
-            committedRiskPlan: committedPlan
+            committedRiskPlan: committedPlan as any
         });
 
         return { v2Outcome, bridgeResult };
@@ -744,11 +771,14 @@ async function runVerification() {
     const paperConfig = {
         ...config,
         okxAuthMode: "disabled" as const,
-        okxLiveEnabled: false
+        okxLiveEnabled: false,
+        serverTradeEnabled: true
     };
 
     const paperEngineInstance = new PaperEngine(paperConfig, dummyLogger, mockOkxDemoClient, mockStore);
     (paperEngineInstance as any).paperExecutionReady = true;
+    (paperEngineInstance as any).serverTradeControlState = { server_trade_enabled: true, close_only_mode: false, kill_switch_active: false };
+    (paperEngineInstance as any).loadServerTradeControlState = async () => {};
 
     const paperBridgeState = buildV2StateBridge(
         [],
@@ -783,27 +813,87 @@ async function runVerification() {
     assert(paperOutcome.decision.risk.stageMarginKrw > 0, "Paper mode margin should be > 0");
 
     // ==========================================
-    // TEST 9: Actual runTick Main Loop Integration Test (Req 3 & 4)
+    // TEST 9: Real paperEngine.runTick() Production Main Loop Integration Test (Req 5)
     // ==========================================
-    console.log("\n[TEST 9] Actual runTick Main Loop Integration (runTick -> V2 decision -> committed plan -> executeAuthorizedV2Action -> submit mock)");
+    console.log("\n--- TEST 9: Real paperEngine.runTick() Production Main Loop Integration ---");
+
+    mockOkxDemoClient.tryGetInstrument = async () => ({ ok: true, value: { lotSz: "0.1", minSz: "0.1", ctVal: "0.001", ctValCcy: "ETH", tickSz: "0.1" } });
     spies.reset();
     submittedPayloads.length = 0;
     mockFillConfirmed = true;
     mockOpenPositions = [];
     mockPendingOrders.length = 0;
 
-    // Run full pipeline test helper which runs runEngineV2 and executeAuthorizedV2Action
-    const test9Res = await runFullPipelineTest({ symbol: "ETHUSDT" });
-    if (!test9Res.bridgeResult.executed) {
-        console.error("Test 9 bridgeResult:", test9Res.bridgeResult);
-    }
-    assert(test9Res.v2Outcome.decision.committedRiskPlan != null, "V2 decision must contain committedRiskPlan");
-    assert(test9Res.v2Outcome.decision.committedRiskPlan!.ts === test9Res.v2Outcome.decision.ts, "committedRiskPlan.ts must equal decision.ts (authorityCreatedAt)");
-    assert(test9Res.bridgeResult.executed === true, "Main loop execution must succeed");
-    assert(spies.orderSubmitCalls === 1, "submitOkxOrder calls = 1");
-    assert(spies.ledgerWriteOpenCalls === 1, "writeOpenPositions calls = 1");
-    assert(spies.protectiveEnsureCalls === 1, "ensureProtectiveStopOrder calls = 1");
-    console.log("✅ PASS TEST 9: Actual runTick integration executed 1 submit, 1 open write, 1 protective ensure, 0 legacy direct submits");
+    // Attach mock candles provider to mockOkxDemoClient so runTick() can fetch market data
+    (mockOkxDemoClient as any).tryGetCandles = async (symbol: string, interval: string, limit?: number) => ({
+        ok: true,
+        value: mockCandlesArray,
+        diagnostics: { httpStatus: 200 }
+    });
+    (mockOkxDemoClient as any).tryGetTicker = async (symbol: string) => ({
+        ok: true,
+        value: { last: 3000, bid: 2999, ask: 3001 },
+        diagnostics: { httpStatus: 200 }
+    });
+    (mockOkxDemoClient as any).tryGetFundingRate = async (symbol: string) => ({
+        ok: true,
+        value: { rate: 0.0001 },
+        diagnostics: { httpStatus: 200 }
+    });
+
+
+    (paperEngine as any).paperExecutionReady = true;
+    (paperEngine as any).signedExecutionReady = true;
+    (paperEngine as any).okxSmokeTestPerformed = true;
+    (paperEngine as any).okxSignedRestReady = true;
+    (paperEngine as any).liveBalanceReady = true;
+    (paperEngine as any).okxWalletBalanceUsdt = 69;
+    (paperEngine as any).okxAvailableBalanceUsdt = 69;
+    (paperEngine as any).okxPositionsOk = true;
+    (paperEngine as any).okxPendingOrdersReady = true;
+    const testNow = Date.now();
+    (paperEngine as any).balanceFetchedAt = testNow;
+    (paperEngine as any).positionsFetchedAt = testNow;
+    (paperEngine as any).pendingOrdersFetchedAt = testNow;
+    (paperEngine as any).pendingOrdersNotionalUsdt = 0;
+    (paperEngine as any).pendingSymbolNotionalUsdt = 0;
+    (paperEngine as any).okxOrderSubmitOk = true;
+    (paperEngine as any).okxAccountConfigOk = true;
+    (paperEngine as any).okxBalanceOk = true;
+    (paperEngine as any).bundleWriterReady = true;
+    (paperEngine as any).publicMarketDataReady = true;
+    (paperEngine as any).positionTrackingAlive = true;
+    (paperEngine as any).engineLastTickAt = Date.now();
+    (paperEngine as any).freshTickRequiredAfterReadiness = false;
+    (paperEngine as any).evaluateReadinessTransition = () => {};
+    (paperEngine as any).applyStartupRecoveryBarrier = () => {};
+
+    const originalPoll = (paperEngine as any).pollSymbol.bind(paperEngine);
+    (paperEngine as any).pollSymbol = async (...args: any[]) => {
+        const result = await originalPoll(...args);
+        if (result && result.snapshot) {
+            result.snapshot.qualityScore = 100;
+            result.snapshot.trendOk = true;
+            result.snapshot.signal = "LONG_CANDIDATE";
+            result.snapshot.candidateStrength = 100;
+            result.snapshot.trendReversalMeta = {
+                reversal_confirmed: true,
+                chase_blocked: false,
+                retest_required: false,
+                support_recheck_required: false
+            };
+        }
+        return result;
+    };
+
+    // Directly invoke the production main loop method: paperEngine.runTick()
+    await paperEngine.runTick();
+
+    assert(spies.orderSubmitCalls === 1, `paperEngine.runTick() must execute submitOkxOrder 1 time (got ${spies.orderSubmitCalls})`);
+    assert(spies.ledgerWriteOpenCalls === 1, `paperEngine.runTick() must write open ledger 1 time (got ${spies.ledgerWriteOpenCalls})`);
+    assert(spies.protectiveEnsureCalls === 1, `paperEngine.runTick() must ensure protective stop order 1 time (got ${spies.protectiveEnsureCalls})`);
+    assert(submittedPayloads.length === 1, `OKX mock client must receive 1 submitted order payload (got ${submittedPayloads.length})`);
+    console.log("✅ PASS TEST 9: Real paperEngine.runTick() main loop executed 1 V2 submit, 1 open ledger write, 1 protective stop ensure, 0 legacy direct submits, 0 duplicate submits");
 
     console.log("\n==========================================");
     console.log("ALL MANDATORY INTEGRATION SCENARIOS PASSED PERFECTLY! 🎉");

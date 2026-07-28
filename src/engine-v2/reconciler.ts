@@ -286,7 +286,11 @@ export function resolveSymbolDecisionEnvelope(
         baseSizeUsd: config.baseSizeUsd,
         paperMaxOpenPositions: config.maxOpenPositions,
         paperReentryCooldownMs: config.reentryCooldownMs,
-        okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt
+        okxLiveMaxOrderNotionalUsdt: config.okxLiveMaxOrderNotionalUsdt,
+        okxLiveMaxAddonNotionalUsdt: config.okxLiveMaxAddonNotionalUsdt,
+        okxLiveMaxSymbolNotionalUsdt: config.okxLiveMaxSymbolNotionalUsdt,
+        okxLiveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt,
+        okxLiveMaxAddonCount: config.okxLiveMaxAddonCount
     };
 
     // 3. Legacy Decision Mapping

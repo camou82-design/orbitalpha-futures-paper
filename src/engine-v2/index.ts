@@ -1115,10 +1115,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         "FRESH_TICK_BARRIER_ACTIVE",
         "WHIPSAW_SHOCK_RECHECK"
     ]);
-    const hardBlockPresent =
+    let hardBlockPresent =
         !hardControlClear ||
         (v2RejectReasonAfterPromotion != null && hardBlockReasons.has(v2RejectReasonAfterPromotion));
-    const hardBlockReason =
+    let hardBlockReason =
         !hardControlClear
             ? "HARD_CONTROL_NOT_CLEAR"
             : (v2RejectReasonAfterPromotion != null && hardBlockReasons.has(v2RejectReasonAfterPromotion)
@@ -3878,6 +3878,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         okxLiveEnabled === true &&
         (executionAction === "ENTER" || executionAction === "ADDON");
 
+    console.log(JSON.stringify({
+        event: "DEBUG_LIVE_ORDER_VARS",
+        okxAuthMode,
+        okxExchangeAuthOptIn,
+        okxLiveEnabled,
+        executionAction,
+        isLiveSignedOrderAttempt
+    }));
+
     const isMicroProbe =
         promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" ||
         promotionReason === "V2_PROBE_ENTRY_CONFIRMED" ||
@@ -3915,6 +3924,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             dataFresh &&
             dataSynced &&
             !positionMismatch;
+
+        if (!liveReadinessPassed && isLiveSignedOrderAttempt) {
+            console.log("DEBUG liveReadinessPassed FALSE. Flags:", {
+                liveBalanceReady, accountEquityUsdt, availableBalanceUsdt,
+                okxActualPositionsReady, actualAccountNotionalUsdtReady,
+                okxPendingOrdersReady, okxPositionsValid, pendingOrdersValid,
+                timestampsPresent, dataFresh, dataSynced, positionMismatch,
+                balanceFetchedAt, positionsFetchedAt, pendingOrdersFetchedAt, nowMs: Date.now()
+            });
+        }
 
         if (isLiveSignedOrderAttempt && !limitsConfigured) {
             min_order_check_passed = false;
@@ -3992,6 +4011,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     finalOrderNotionalUsdt = Math.min(notionalAfterSymbolCap, remainingAccountCap);
 
                     const finalNotionalOk = typeof finalOrderNotionalUsdt === "number" && Number.isFinite(finalOrderNotionalUsdt) && finalOrderNotionalUsdt > 0 && finalOrderNotionalUsdt <= orderCap;
+
+                    console.log(JSON.stringify({
+                        event: "DEBUG_LIVE_SIZING_VARS",
+                        orderCap,
+                        baseUsdtNotional,
+                        rawNotionalUsdt,
+                        requestedOrderNotionalUsdt,
+                        remainingSymbolCap,
+                        remainingAccountCap,
+                        notionalAfterSymbolCap,
+                        finalOrderNotionalUsdt,
+                        finalNotionalOk
+                    }));
 
                     if (!finalNotionalOk || finalOrderNotionalUsdt < 1.0) {
                         min_order_check_passed = false;
@@ -5135,14 +5167,41 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (execMeta as any).support_recheck_required === true ||
         (isShockRetestBlock && sideVetoDetail?.includes("SHOCK_UP"));
 
-    // Requirement 7: decision이 ENTER가 아니면 최종 실행 side는 none으로 정규화
+    // Requirement 7: Validate StopPrice & InvalidationPx strictly from lifecycleAuthority
+    const v2StopPrice = lifecycleAuthority?.newStopPrice;
+    const v2InvalidationPx = lifecycleAuthority?.invalidationPx;
+
+    if (finalDecision === "ENTER") {
+        let invalidRisk = false;
+        let invalidReason = "";
+
+        if (v2StopPrice == null || v2StopPrice <= 0) {
+            invalidRisk = true;
+            invalidReason = "MISSING_STOP_PRICE";
+        } else if (v2InvalidationPx == null || v2InvalidationPx <= 0) {
+            invalidRisk = true;
+            invalidReason = "MISSING_INVALIDATION_PX";
+        } else if (v2SideAfterPromotion === "long" && (v2StopPrice >= input.snapshot.lastPrice || v2InvalidationPx >= input.snapshot.lastPrice)) {
+            invalidRisk = true;
+            invalidReason = "INVALID_LONG_STOP_DIRECTION";
+        } else if (v2SideAfterPromotion === "short" && (v2StopPrice <= input.snapshot.lastPrice || v2InvalidationPx <= input.snapshot.lastPrice)) {
+            invalidRisk = true;
+            invalidReason = "INVALID_SHORT_STOP_DIRECTION";
+        }
+
+        if (invalidRisk) {
+            finalDecision = "REJECT";
+            hardBlockPresent = true;
+            hardBlockReason = invalidReason;
+            blockReason = invalidReason;
+        }
+    }
+
     const normalizedV2Side = finalDecision === "ENTER" ? v2SideAfterPromotion : "none";
     executionAction = finalDecision === "ENTER"
         ? (isAddOn || (v2State as any).addOnPolicyAllowed === true ? "ADDON" : "ENTER")
         : "NONE";
 
-    const v2StopPrice = (riskSizing as any).stopPrice ?? (riskSizing as any).stop_price ?? (execution as any).stopPrice ?? (v2State as any).stopPrice ?? 0;
-    const v2InvalidationPx = (riskSizing as any).invalidationPx ?? (execution as any).invalidationPx ?? v2StopPrice ?? 0;
     const authorityCreatedAt = input.now;
 
     const v2CommittedPlan: V2CommittedRiskPlan | undefined =
