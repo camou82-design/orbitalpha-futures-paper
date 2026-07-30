@@ -14034,11 +14034,24 @@ export class PaperEngine {
       const marginUsdt = (authority.stageMarginKrw ?? 0) / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
       const appliedLev = authority.appliedLeverage ?? (authority.source === "v2" ? 10 : 1);
       const computedNotionalUsdt = marginUsdt * appliedLev;
-      const minReqNotional = authority.source === "v2" ? 100 : MIN_POSITION_SIZE_USD;
       
+      let minReqNotional = MIN_POSITION_SIZE_USD;
       let minOrderUnderflow = false;
+      let minOrderBlockReason: string | null = null;
       if (authority.source === "v2") {
-        if ((authority.stageMarginKrw ?? 0) > 0 && computedNotionalUsdt < 100) minOrderUnderflow = true;
+        const currentPrice = first?.lastPrice ?? 0;
+        const instId = sym.replace("USDT", "-USDT-SWAP");
+        const inst = this.instrumentCache.get(instId);
+        if (!inst || currentPrice <= 0) {
+          // Fail-Closed: instrument 또는 가격 미준비 시 최소 명목 추정 금지
+          minOrderUnderflow = true;
+          minOrderBlockReason = "OKX_INSTRUMENT_SIZING_NOT_READY";
+        } else {
+          // Linear USDT SWAP 기준: lotSz 반영한 실제 최소 계약 수
+          const minContracts = Math.ceil(inst.minSz / inst.lotSz - 1e-12) * inst.lotSz;
+          minReqNotional = minContracts * inst.ctVal * currentPrice;
+          if ((authority.stageMarginKrw ?? 0) > 0 && computedNotionalUsdt < minReqNotional) minOrderUnderflow = true;
+        }
       } else if ((authority.stageMarginKrw ?? 0) > 0 && marginUsdt < MIN_POSITION_SIZE_USD) {
         minOrderUnderflow = true;
       }
@@ -14055,12 +14068,13 @@ export class PaperEngine {
           min_required_notional_usdt: minReqNotional,
           min_order_ok: minOrderOk,
           min_order_underflow: minOrderUnderflow,
+          min_order_block_reason: minOrderBlockReason ?? null,
           ...buildAuthorityEventMeta(authority)
         });
       }
       if (!hardBlockPresent && !minOrderOk) {
         hardBlockPresent = true;
-        hardBlockReason = "MIN_ORDER_SIZE_UNDERFLOW";
+        hardBlockReason = minOrderBlockReason ?? "MIN_ORDER_SIZE_UNDERFLOW";
       }
 
       // Final Readiness & Taxonomy Consolidation

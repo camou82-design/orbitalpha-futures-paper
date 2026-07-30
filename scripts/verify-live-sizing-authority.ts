@@ -913,7 +913,7 @@ async function runVerification() {
 
     const totalLedgerWrites = spies.ledgerWriteOpenCalls + saveOpenAllCalls9;
     assert(spies.orderSubmitCalls === 1, `paperEngine.runTick() must execute submitOkxOrder 1 time (got ${spies.orderSubmitCalls})`);
-    assert(totalLedgerWrites >= 1, `paperEngine.runTick() must write open ledger at least 1 time (writeOpenPositions=${spies.ledgerWriteOpenCalls}, saveOpenAll=${saveOpenAllCalls9})`);
+    assert(totalLedgerWrites === 1, `paperEngine.runTick() must write open ledger exactly 1 time (writeOpenPositions=${spies.ledgerWriteOpenCalls}, saveOpenAll=${saveOpenAllCalls9})`);
     assert(spies.protectiveEnsureCalls === 1, `paperEngine.runTick() must ensure protective stop order 1 time (got ${spies.protectiveEnsureCalls})`);
     assert(submittedPayloads.length === 1, `OKX mock client must receive 1 submitted order payload (got ${submittedPayloads.length})`);
     console.log("✅ PASS TEST 9: Real paperEngine.runTick() main loop executed 1 V2 submit, 1 open ledger write, 1 protective stop ensure, 0 legacy direct submits, 0 duplicate submits");
