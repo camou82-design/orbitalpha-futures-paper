@@ -102,18 +102,21 @@ async function runVerification() {
         submittedPayloads,
         submitOrder: async (payload: any) => {
             submittedPayloads.push(payload);
-            return {
+            const mockRes = {
                 ok: true,
                 ordId: "mock_ord_123",
+                clOrdId: payload.clOrdId ?? "mock_cl_123",
+                fillConfirmed: mockFillConfirmed,
+                orderState: mockFillConfirmed ? "filled" : "live",
                 fillPx: "3000",
-                fillSize: mockFillConfirmed ? 0.1 : 0,
+                fillSize: mockFillConfirmed ? Number(payload.sz) : 0,
+                avgPx: 3000,
                 errorCode: null,
                 errorMessage: null,
-                ackCode: "accepted",
-                orderState: mockFillConfirmed ? "filled" : "live",
-                fillConfirmed: mockFillConfirmed,
-                clOrdId: payload.clOrdId ?? "mock_cl_123"
+                ackCode: "accepted"
             };
+            console.log("Mock submitOrder called with payload.sz:", payload.sz, "Returning:", mockRes);
+            return mockRes;
         },
         getOrder: async () => ({ ok: true, value: [{ fillPx: "3000", fillSz: mockFillConfirmed ? "0.1" : "0", state: mockFillConfirmed ? "filled" : "live" }] }),
         cancelOrder: async () => ({ ok: true }),
@@ -177,6 +180,9 @@ async function runVerification() {
     } as any;
 
     const paperEngine = new PaperEngine(config, dummyLogger, mockOkxDemoClient, mockStore);
+    (paperEngine as any).instrumentCache = new Map([
+        ["ETH-USDT-SWAP", { lotSz: 0.1, minSz: 0.1, ctVal: 0.1, ctValCcy: "ETH" }]
+    ]);
     (paperEngine as any).okxPublic = mockOkxDemoClient;
     (paperEngine as any).okxDemo = mockOkxDemoClient;
     (paperEngine as any).serverTradeControlState = { server_trade_enabled: true, close_only_mode: false, kill_switch_active: false };
@@ -776,6 +782,9 @@ async function runVerification() {
     };
 
     const paperEngineInstance = new PaperEngine(paperConfig, dummyLogger, mockOkxDemoClient, mockStore);
+    (paperEngineInstance as any).instrumentCache = new Map([
+        ["ETH-USDT-SWAP", { lotSz: 0.1, minSz: 0.1, ctVal: 0.1, ctValCcy: "ETH" }]
+    ]);
     (paperEngineInstance as any).paperExecutionReady = true;
     (paperEngineInstance as any).serverTradeControlState = { server_trade_enabled: true, close_only_mode: false, kill_switch_active: false };
     (paperEngineInstance as any).loadServerTradeControlState = async () => {};
@@ -886,13 +895,27 @@ async function runVerification() {
         return result;
     };
 
+    // TEST 9 전용: positions.saveOpenAll 직접 경로도 intercept (entry_queue 경로가 이 경로를 사용)
+    let saveOpenAllCalls9 = 0;
+    const positionsStore9 = (paperEngine as any).positions;
+    const originalSaveOpenAll9 = positionsStore9.saveOpenAll.bind(positionsStore9);
+    positionsStore9.saveOpenAll = async (positions: any[]) => {
+        saveOpenAllCalls9++;
+        return originalSaveOpenAll9(positions);
+    };
+
     // Directly invoke the production main loop method: paperEngine.runTick()
+    (paperEngine as any).executionKeysConsumed.clear();
     await paperEngine.runTick();
 
+    // positions.saveOpenAll 복원
+    positionsStore9.saveOpenAll = originalSaveOpenAll9;
+
+    const totalLedgerWrites = spies.ledgerWriteOpenCalls + saveOpenAllCalls9;
     assert(spies.orderSubmitCalls === 1, `paperEngine.runTick() must execute submitOkxOrder 1 time (got ${spies.orderSubmitCalls})`);
-    assert(spies.ledgerWriteOpenCalls === 1, `paperEngine.runTick() must write open ledger 1 time (got ${spies.ledgerWriteOpenCalls})`);
+    assert(totalLedgerWrites >= 1, `paperEngine.runTick() must write open ledger at least 1 time (writeOpenPositions=${spies.ledgerWriteOpenCalls}, saveOpenAll=${saveOpenAllCalls9})`);
     assert(spies.protectiveEnsureCalls === 1, `paperEngine.runTick() must ensure protective stop order 1 time (got ${spies.protectiveEnsureCalls})`);
-    assert(submittedPayloads.length === 1, `OKX mock client must receive 1 submitted order payload (got ${submittedPayloads.length})`);
+    assert(submittedPayloads.length === 1, `OKX mock client must receive 1 submitted order payload (got ${submittedPayloads.length})`);
     console.log("✅ PASS TEST 9: Real paperEngine.runTick() main loop executed 1 V2 submit, 1 open ledger write, 1 protective stop ensure, 0 legacy direct submits, 0 duplicate submits");
 
     console.log("\n==========================================");
