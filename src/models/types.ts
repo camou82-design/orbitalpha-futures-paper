@@ -696,6 +696,47 @@ export type PaperSymbolDecisionRecord = Readonly<{
   /** Diagnostics: adaptive engine fail metadata */
   adaptive_fail_stage?: string | null;
   adaptive_fail_reason?: string | null;
+
+  // =========================================================================
+  // [DIAG-V1] 진입 차단 원인 진단 필드 — 진입 기준·주문 로직 변경 없음
+  // NO_TRADE_SIGNAL / V7 6개 조건 재확인 대기 연결용
+  // =========================================================================
+  /** 롱 후보(RANGE_LONG_CANDIDATE 또는 paper_long_candidate)가 생성됐는지 */
+  diag_long_candidate_created?: boolean | null;
+  /** 숏 후보(RANGE_SHORT_CANDIDATE 또는 paper_short_candidate)가 생성됐는지 */
+  diag_short_candidate_created?: boolean | null;
+  /** 롱 후보가 제거된 레이어별 사유 목록 */
+  diag_long_rejected_reasons?: string[] | null;
+  /** 숏 후보가 제거된 레이어별 사유 목록 */
+  diag_short_rejected_reasons?: string[] | null;
+  /** BTC 5m EMA 편향 ("up" | "down" | "flat") */
+  diag_btc_bias?: "up" | "down" | "flat" | null;
+  /** 대시보드 표시 기준 우선 방향 ("long" | "short" | "none") */
+  diag_preferred_direction?: "long" | "short" | "none" | null;
+  /** RANGE 복합 신호 점수 (conf×0.3 + cohesion×0.2 + breakoutFail×0.2 + oscillation×0.2 + edgeProximity×0.1) */
+  diag_range_signal_score?: number | null;
+  /** 횡보 확신도 (0~1) */
+  diag_range_confidence?: number | null;
+  /** 박스 응집도 (0~1) */
+  diag_box_cohesion01?: number | null;
+  /** 왕복 빈도 점수 (0~1) */
+  diag_range_oscillation_score?: number | null;
+  /** 박스 내 위치 (0=하단, 1=상단) */
+  diag_box_position?: number | null;
+  /** 돌파 실패율 (0~1) */
+  diag_breakout_failure_rate?: number | null;
+  /** 레짐 이탈 위험도 (0~1) */
+  diag_regime_exit_risk?: number | null;
+  /** 1m 봉 반전 확인 여부 (upper→숏: close<prev.close && high<=prev.high) */
+  diag_reversal_confirmed?: boolean | null;
+  /** Tier-0 방향성 가드(directionalTrendEntryGuard) 차단 여부 */
+  diag_directional_guard_blocked?: boolean | null;
+  /** 리스크 엔진(crash/pump/daily loss/longAllow/shortAllow) 차단 여부 */
+  diag_risk_blocked?: boolean | null;
+  /** 최종 차단이 발생한 레이어 이름 */
+  diag_final_block_layer?: string | null;
+  /** 최종 차단 사유 (gateResult 또는 reject_reason 원문) */
+  diag_final_block_reason?: string | null;
 }>;
 
 /** Minimal row shape for funnel math. */

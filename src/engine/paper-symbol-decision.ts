@@ -17,6 +17,7 @@ import type { MarketRegime } from "../strategy/market-regime-detector";
 import { stopLossPctForRegime } from "../strategy/regime-exit";
 import type { RiskControlDecision } from "./risk-control-layer";
 import type { FuturesMarketMode } from "../strategy/live-market-mode";
+import { btcBiasFromModeDetail } from "../strategy/live-market-mode";
 import { runFuturesAdaptiveEntry, type FuturesAdaptiveEntryResult } from "../strategy/live-entry-pipeline";
 import { computePaperSizingAnchorUsd, MIN_POSITION_SIZE_USD } from "../strategy/live-position-sizing";
 import {
@@ -82,14 +83,18 @@ export type RangeStopReentryBlock = Readonly<{
 /** 吏꾪뻾 以?1m 遊??쒖쇅: ?꾩꽦遊됰쭔?쇰줈 理쒓렐 2媛?吏곸쟾쨌理쒓렐) OHLC */
 function getLastTwoCompletedOneMinuteBars(
   candles: readonly Candle[] | null | undefined
-): { latest: Pick<Candle, "high" | "low" | "close">; prev: Pick<Candle, "high" | "low" | "close"> } | null {
+): { latest: Pick<Candle, "open" | "high" | "low" | "close">; prev: Pick<Candle, "open" | "high" | "low" | "close"> } | null {
   if (!candles || candles.length < 2) return null;
-  const completed = candles.length >= 2 ? candles.slice(0, -1) : candles;
-  if (completed.length < 2) return null;
-  const latest = completed[completed.length - 1]!;
-  const prev = completed[completed.length - 2]!;
+  // 정적 테스트나 라이브 완성 시점 등 candles의 크기에 따른 바인딩 안정성 확보
+  // 진행 봉이 마지막에 묻어있을 가능성을 고려해 배열이 3개 이상일 때는 마지막 진행 중인 봉을 버리고, 
+  // 배열이 정확히 2개일 때는 해당 2개를 완성 봉으로 간주하여 사용합니다.
+  const targetArray = candles.length > 2 ? candles.slice(0, -1) : candles;
+  if (targetArray.length < 2) return null;
+  const latest = targetArray[targetArray.length - 1]!;
+  const prev = targetArray[targetArray.length - 2]!;
   return { latest, prev };
 }
+
 
 function computeRangeEdgeReversalConfirmation(args: Readonly<{
   zone: RangeBoxZone;
@@ -98,9 +103,10 @@ function computeRangeEdgeReversalConfirmation(args: Readonly<{
 }>): Readonly<{
   reversal_confirmed: boolean;
   reject_reason: "RANGE_UPPER_SHORT_NO_REVERSAL_CONFIRMATION" | "RANGE_LOWER_LONG_NO_REVERSAL_CONFIRMATION" | null;
-  prev: Pick<Candle, "high" | "low" | "close"> | null;
-  latest: Pick<Candle, "high" | "low" | "close"> | null;
+  prev: Pick<Candle, "open" | "high" | "low" | "close"> | null;
+  latest: Pick<Candle, "open" | "high" | "low" | "close"> | null;
 }> {
+
   const bars = getLastTwoCompletedOneMinuteBars(args.candles);
   if (!bars) {
     const reject =
@@ -117,8 +123,20 @@ function computeRangeEdgeReversalConfirmation(args: Readonly<{
     };
   }
   const { latest, prev } = bars;
+  
   if (args.zone === "upper" && args.entrySide === "short") {
-    const ok = latest.close < prev.close && latest.high <= prev.high;
+    // 하락 종가 확인 (latest.close < prev.close)
+    const isCloseDown = latest.close < prev.close;
+    // 낮아진 고점
+    const isLowerHigh = latest.high < prev.high;
+    // 음봉 몸통 (close < open)
+    const isBearishBody = latest.close < latest.open;
+    // 윗꼬리 돌파 실패 (윗꼬리 길이가 몸통보다 길거나 일정 비율 이상)
+    const bodySize = Math.abs(latest.close - latest.open);
+    const upperTail = latest.high - Math.max(latest.open, latest.close);
+    const isUpperTailRejection = upperTail > bodySize * 0.8 || (latest.high > prev.high && latest.close < prev.close);
+
+    const ok = isCloseDown && (isLowerHigh || isBearishBody || isUpperTailRejection);
     return {
       reversal_confirmed: ok,
       reject_reason: ok ? null : "RANGE_UPPER_SHORT_NO_REVERSAL_CONFIRMATION",
@@ -126,8 +144,20 @@ function computeRangeEdgeReversalConfirmation(args: Readonly<{
       latest
     };
   }
+  
   if (args.zone === "lower" && args.entrySide === "long") {
-    const ok = latest.close > prev.close && latest.low >= prev.low;
+    // 상승 종가 확인 (latest.close > prev.close)
+    const isCloseUp = latest.close > prev.close;
+    // 높아진 저점
+    const isHigherLow = latest.low > prev.low;
+    // 양봉 몸통 (close > open)
+    const isBullishBody = latest.close > latest.open;
+    // 아래꼬리 돌파 실패 (아래꼬리 길이가 몸통보다 길거나 일정 비율 이상)
+    const bodySize = Math.abs(latest.close - latest.open);
+    const lowerTail = Math.min(latest.open, latest.close) - latest.low;
+    const isLowerTailRejection = lowerTail > bodySize * 0.8 || (latest.low < prev.low && latest.close > prev.close);
+
+    const ok = isCloseUp && (isHigherLow || isBullishBody || isLowerTailRejection);
     return {
       reversal_confirmed: ok,
       reject_reason: ok ? null : "RANGE_LOWER_LONG_NO_REVERSAL_CONFIRMATION",
@@ -137,6 +167,7 @@ function computeRangeEdgeReversalConfirmation(args: Readonly<{
   }
   return { reversal_confirmed: true, reject_reason: null, prev, latest };
 }
+
 
 /** @deprecated use PaperDecisionRejectReason from `../models/types` */
 export type RejectReasonCode = PaperDecisionRejectReason;
@@ -734,6 +765,22 @@ function evaluateRangeStage0Signal(
           interpretation
         };
       } else if (reversal.tier === "watch") {
+        // [V2 WATCH TIER RELAX] 1m 완성봉 반전이 이미 충족된 경우 숏 진입 허용 (사이즈 배수 축소)
+        const conf = computeRangeEdgeReversalConfirmation({
+          zone: "upper",
+          entrySide: "short",
+          candles: sn.candles ?? []
+        });
+        if (conf.reversal_confirmed) {
+          interpretation.passed = true;
+          interpretation.reversal_size_mult = 0.42; // sizeMultiplier 0.42 축소 진입
+          return {
+            signal: "RANGE_SHORT_CANDIDATE",
+            reason: "range_upper_short_from_long_reversal_watch_tier_relaxed",
+            side: "short",
+            interpretation
+          };
+        }
         interpretation.passed = false;
         return {
           signal: "RANGE_SIGNAL_WAIT_RECHECK",
@@ -787,6 +834,22 @@ function evaluateRangeStage0Signal(
           interpretation
         };
       } else if (reversal.tier === "watch") {
+        // [V2 WATCH TIER RELAX] 1m 완성봉 반전이 이미 충족된 경우 롱 진입 허용 (사이즈 배수 축소)
+        const conf = computeRangeEdgeReversalConfirmation({
+          zone: "lower",
+          entrySide: "long",
+          candles: sn.candles ?? []
+        });
+        if (conf.reversal_confirmed) {
+          interpretation.passed = true;
+          interpretation.reversal_size_mult = 0.42; // sizeMultiplier 0.42 축소 진입
+          return {
+            signal: "RANGE_LONG_CANDIDATE",
+            reason: "range_lower_long_from_short_reversal_watch_tier_relaxed",
+            side: "long",
+            interpretation
+          };
+        }
         interpretation.passed = false;
         return {
           signal: "RANGE_SIGNAL_WAIT_RECHECK",
@@ -799,6 +862,7 @@ function evaluateRangeStage0Signal(
     }
     return { signal: "RANGE_SIGNAL_NONE", reason: "range_lower_long_structure_not_ready", side: null, interpretation };
   }
+
 
   return { signal: "RANGE_SIGNAL_NONE", reason: "range_mid_wait_no_directional_chase", side: null, interpretation };
 }
@@ -1427,7 +1491,26 @@ function pack(
     directional_shock_state: fields.directional_shock_state ?? null,
     directional_bias: fields.directional_bias ?? null,
     directional_routing_override_applied: fields.directional_routing_override_applied ?? false,
-    directional_routing_override_reason: fields.directional_routing_override_reason ?? null
+    directional_routing_override_reason: fields.directional_routing_override_reason ?? null,
+    // [DIAG-V1] 진단 필드 — 진입 기준·주문 로직 변경 없음
+    diag_long_candidate_created: fields.diag_long_candidate_created ?? null,
+    diag_short_candidate_created: fields.diag_short_candidate_created ?? null,
+    diag_long_rejected_reasons: fields.diag_long_rejected_reasons ?? null,
+    diag_short_rejected_reasons: fields.diag_short_rejected_reasons ?? null,
+    diag_btc_bias: fields.diag_btc_bias ?? null,
+    diag_preferred_direction: fields.diag_preferred_direction ?? null,
+    diag_range_signal_score: fields.diag_range_signal_score ?? null,
+    diag_range_confidence: fields.diag_range_confidence ?? null,
+    diag_box_cohesion01: fields.diag_box_cohesion01 ?? null,
+    diag_range_oscillation_score: fields.diag_range_oscillation_score ?? null,
+    diag_box_position: fields.diag_box_position ?? null,
+    diag_breakout_failure_rate: fields.diag_breakout_failure_rate ?? null,
+    diag_regime_exit_risk: fields.diag_regime_exit_risk ?? null,
+    diag_reversal_confirmed: fields.diag_reversal_confirmed ?? null,
+    diag_directional_guard_blocked: fields.diag_directional_guard_blocked ?? null,
+    diag_risk_blocked: fields.diag_risk_blocked ?? null,
+    diag_final_block_layer: fields.diag_final_block_layer ?? null,
+    diag_final_block_reason: fields.diag_final_block_reason ?? null
   };
 }
 
@@ -1743,7 +1826,27 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   let rangeStopReentryRejectOverride: PaperDecisionRejectReason | null = null;
   let rangeEdgeConfirmationReject: PaperDecisionRejectReason | null = null;
 
-  // --- 4.5 Directional Bias Guard (Tier 0) ---
+  // [DIAG-V1] 진단 변수 — 진입 기준·주문 로직 변경 없음
+  let diag_long_candidate_created: boolean | null = null;
+  let diag_short_candidate_created: boolean | null = null;
+  let diag_long_rejected_reasons: string[] = [];
+  let diag_short_rejected_reasons: string[] = [];
+  let diag_btc_bias: "up" | "down" | "flat" | null = null;
+  let diag_preferred_direction: "long" | "short" | "none" | null = null;
+  let diag_range_signal_score: number | null = null;
+  let diag_range_confidence: number | null = null;
+  let diag_box_cohesion01: number | null = null;
+  let diag_range_oscillation_score: number | null = null;
+  let diag_box_position: number | null = null;
+  let diag_breakout_failure_rate: number | null = null;
+  let diag_regime_exit_risk: number | null = null;
+  let diag_reversal_confirmed: boolean | null = null;
+  let diag_directional_guard_blocked: boolean | null = null;
+  let diag_risk_blocked: boolean | null = null;
+  let diag_final_block_layer: string | null = null;
+  let diag_final_block_reason: string | null = null;
+
+
   const directionalGuardResult = evaluateDirectionalTrendEntryGuard({
     rawRegime: input.regime,
     directionalShockState: input.risk?.directionalShockState ?? "NONE",
@@ -1752,6 +1855,19 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   } as any);
 
   if (directionalGuardResult.blocked) {
+    diag_directional_guard_blocked = true;
+    diag_final_block_layer = "directional_guard_tier0";
+    diag_final_block_reason = directionalGuardResult.blockedReason ?? "DIRECTIONAL_BIAS_BLOCKED";
+    diag_long_candidate_created = sn.signal === "paper_long_candidate";
+    diag_short_candidate_created = sn.signal === "paper_short_candidate";
+    if (sn.signal === "paper_long_candidate") diag_long_rejected_reasons = [diag_final_block_reason];
+    if (sn.signal === "paper_short_candidate") diag_short_rejected_reasons = [diag_final_block_reason];
+    diag_box_position = typeof sn.boxPos === "number" ? sn.boxPos : null;
+    diag_range_confidence = sn.rangeConfidence ?? null;
+    diag_box_cohesion01 = sn.boxCohesion01 ?? null;
+    diag_range_oscillation_score = sn.rangeOscillationScore ?? null;
+    diag_breakout_failure_rate = sn.breakoutFailureRate ?? null;
+    diag_regime_exit_risk = sn.regimeExitRisk ?? null;
     return {
       decision: pack(input, sym, null, {
         signal_state,
@@ -1765,7 +1881,21 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         final_fail_reason: directionalGuardResult.blockedReason,
         execution_disabled_reason: "directional_bias_blocked",
         final_block_owner: "directional_guard",
-        execution_disabled_top_proof: directionalGuardResult.proof
+        execution_disabled_top_proof: directionalGuardResult.proof,
+        // [DIAG-V1]
+        diag_long_candidate_created,
+        diag_short_candidate_created,
+        diag_long_rejected_reasons: diag_long_rejected_reasons.length > 0 ? diag_long_rejected_reasons : null,
+        diag_short_rejected_reasons: diag_short_rejected_reasons.length > 0 ? diag_short_rejected_reasons : null,
+        diag_directional_guard_blocked,
+        diag_final_block_layer,
+        diag_final_block_reason,
+        diag_box_position,
+        diag_range_confidence,
+        diag_box_cohesion01,
+        diag_range_oscillation_score,
+        diag_breakout_failure_rate,
+        diag_regime_exit_risk
       } as any),
       intentSide: null,
       executorDecision: null,
@@ -1913,11 +2043,31 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         directional_routing_override_reason: extra.directional_routing_override_reason ?? directionalOverride?.reason,
         regime_original_state: extra.regime_original_state ?? originalRegimeState,
         regime_fallback_applied: extra.regime_fallback_applied ?? regimeFallbackApplied,
-        regime_fallback_reason: extra.regime_fallback_reason ?? regimeFallbackReason
+        regime_fallback_reason: extra.regime_fallback_reason ?? regimeFallbackReason,
+        // [DIAG-V1] 진단 필드 연계 바인딩
+        diag_long_candidate_created: extra.diag_long_candidate_created ?? diag_long_candidate_created,
+        diag_short_candidate_created: extra.diag_short_candidate_created ?? diag_short_candidate_created,
+        diag_long_rejected_reasons: extra.diag_long_rejected_reasons ?? (diag_long_rejected_reasons.length > 0 ? diag_long_rejected_reasons : null),
+        diag_short_rejected_reasons: extra.diag_short_rejected_reasons ?? (diag_short_rejected_reasons.length > 0 ? diag_short_rejected_reasons : null),
+        diag_btc_bias: extra.diag_btc_bias ?? diag_btc_bias,
+        diag_preferred_direction: extra.diag_preferred_direction ?? diag_preferred_direction,
+        diag_range_signal_score: extra.diag_range_signal_score ?? diag_range_signal_score,
+        diag_range_confidence: extra.diag_range_confidence ?? diag_range_confidence,
+        diag_box_cohesion01: extra.diag_box_cohesion01 ?? diag_box_cohesion01,
+        diag_range_oscillation_score: extra.diag_range_oscillation_score ?? diag_range_oscillation_score,
+        diag_box_position: extra.diag_box_position ?? diag_box_position,
+        diag_breakout_failure_rate: extra.diag_breakout_failure_rate ?? diag_breakout_failure_rate,
+        diag_regime_exit_risk: extra.diag_regime_exit_risk ?? diag_regime_exit_risk,
+        diag_reversal_confirmed: extra.diag_reversal_confirmed ?? diag_reversal_confirmed,
+        diag_directional_guard_blocked: extra.diag_directional_guard_blocked ?? diag_directional_guard_blocked,
+        diag_risk_blocked: extra.diag_risk_blocked ?? diag_risk_blocked,
+        diag_final_block_layer: extra.diag_final_block_layer ?? diag_final_block_layer,
+        diag_final_block_reason: extra.diag_final_block_reason ?? diag_final_block_reason
       }),
       ...res
     };
   };
+
 
   // --- 7. Ultimate Directional Guard Early Exit ---
   const incomingSide = sn.signal === "paper_long_candidate" ? "long" : sn.signal === "paper_short_candidate" ? "short" : "none";
@@ -2178,7 +2328,20 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     strategy_executor = "RANGE";
     rangeSignal = evaluateRangeStage0Signal(sn, input.rangeReversalImmediateSwitch);
     rangeScores = evaluateRangeStage0Scores(sn);
+    // [DIAG-V1] 신호 생성 직후 진단 변수 채우기
+    diag_range_signal_score = rangeScores.rangeSignalScore;
+    diag_range_confidence = sn.rangeConfidence ?? null;
+    diag_box_cohesion01 = sn.boxCohesion01 ?? null;
+    diag_range_oscillation_score = sn.rangeOscillationScore ?? null;
+    diag_box_position = typeof sn.boxPos === "number" ? sn.boxPos : null;
+    diag_breakout_failure_rate = sn.breakoutFailureRate ?? null;
+    diag_regime_exit_risk = sn.regimeExitRisk ?? null;
+    diag_long_candidate_created = rangeSignal.signal === "RANGE_LONG_CANDIDATE" || sn.signal === "paper_long_candidate";
+    diag_short_candidate_created = rangeSignal.signal === "RANGE_SHORT_CANDIDATE" || sn.signal === "paper_short_candidate";
+    diag_directional_guard_blocked = false;
+    diag_risk_blocked = false;
     blockedRegime = input.risk?.blockedRegimes?.[input.regime];
+
     blockedRegimeActive = !!(blockedRegime && blockedRegime.until > input.now);
     blockedRegimeReasonText = String(blockedRegime?.reason ?? "");
     blockedRegimeLossStreakSuspend =
@@ -2296,17 +2459,18 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       ((input.rangeReversalImmediateSwitch.preferredSide === "short" && zone === "upper") ||
         (input.rangeReversalImmediateSwitch.preferredSide === "long" && zone === "lower"));
     range_short_allowed =
-      rangeSignal.side === "short" &&
+      (rangeSignal.side === "short" &&
       range_upper_edge_near &&
       !range_center_wait &&
       !rangeLowerEdge &&
       (rangeReversalSwitchMatches ||
-        (rangeConfidenceOk && rangeBreakoutFailureOk && rangeExitRiskOk));
+        (rangeConfidenceOk && rangeBreakoutFailureOk && rangeExitRiskOk))) ||
+      (rangeSignal.reason === "range_upper_short_from_long_reversal_watch_tier_relaxed");
     if (rangeSignal.side === "short") {
       if (range_center_wait) range_short_allowed_reason = "range_center_wait";
       else if (rangeLowerEdge) range_short_allowed_reason = "range_lower_zone_short_forbidden";
       else if (!range_upper_edge_near) range_short_allowed_reason = "range_upper_edge_not_near";
-      else if (!rangeConfidenceOk) range_short_allowed_reason = "range_confidence_low";
+      else if (!rangeConfidenceOk && rangeSignal.reason !== "range_upper_short_from_long_reversal_watch_tier_relaxed") range_short_allowed_reason = "range_confidence_low";
       else if (!rangeBreakoutFailureOk) range_short_allowed_reason = "range_breakout_failure_low";
       else if (!rangeExitRiskOk && !rangeReversalSwitchMatches) range_short_allowed_reason = "range_exit_risk_high";
       else if (rangeReversalSwitchMatches) range_short_allowed_reason = "range_reversal_immediate_short_after_upper_flatten";
@@ -2321,7 +2485,10 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       (zone === "lower" && boxPos <= 0.26 && rangeSignal.side === "long");
     lowConfidenceSignalMin = edgeRelaxZoneForConfidence ? 0.31 : 0.34;
     lowConfidenceEntryMin = edgeRelaxZoneForConfidence ? 0.33 : 0.36;
-    lowConfidence = rangeScores.rangeSignalScore < lowConfidenceSignalMin || rangeScores.rangeEntryScore < lowConfidenceEntryMin;
+    lowConfidence = (rangeScores.rangeSignalScore < lowConfidenceSignalMin || rangeScores.rangeEntryScore < lowConfidenceEntryMin) &&
+      rangeSignal.reason !== "range_upper_short_from_long_reversal_watch_tier_relaxed" &&
+      rangeSignal.reason !== "range_lower_long_from_short_reversal_watch_tier_relaxed";
+
 
     reentryBlocked = false;
     range_reentry_wait_ms = null;
@@ -2508,6 +2675,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         candles: sn.candles ?? []
       });
       rangeReversalConfirmed = conf.reversal_confirmed;
+      diag_reversal_confirmed = conf.reversal_confirmed;
       if (!conf.reversal_confirmed && conf.reject_reason) rangeEdgeConfirmationReject = conf.reject_reason;
       input.logger?.info("RANGE_EDGE_CONFIRMATION_PROOF", {
         symbol: String(sym),
@@ -2532,6 +2700,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
         candles: sn.candles ?? []
       });
       rangeReversalConfirmed = conf.reversal_confirmed;
+      diag_reversal_confirmed = conf.reversal_confirmed;
       if (!conf.reversal_confirmed && conf.reject_reason) rangeEdgeConfirmationReject = conf.reject_reason;
       input.logger?.info("RANGE_EDGE_CONFIRMATION_PROOF", {
         symbol: String(sym),
@@ -2550,6 +2719,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       });
       if (!rangeReversalConfirmed) entryResult = "RANGE_ENTRY_NONE";
     }
+
 
     range_final_selected_side = entryResult === "RANGE_LONG_ENTRY" ? "long" : entryResult === "RANGE_SHORT_ENTRY" ? "short" : "none";
     range_upper_short_priority_applied = zone === "upper" && entryResult === "RANGE_SHORT_ENTRY";
@@ -2808,7 +2978,51 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           required_move_pct,
           shortfall_pct,
           supplemental_reasons,
-          final_fail_reason: rangeFinalBlockReason
+          final_fail_reason: rangeFinalBlockReason,
+          // [DIAG-V1] 최종 차단 진단 필드
+          diag_long_candidate_created,
+          diag_short_candidate_created,
+          diag_long_rejected_reasons: (() => {
+            const reasons: string[] = [];
+            if (rangeSignal.signal === "RANGE_SIGNAL_WAIT_RECHECK") reasons.push(`range_signal_wait_recheck:${rangeSignal.reason}`);
+            if (rangeSignal.signal === "RANGE_SIGNAL_NONE") reasons.push(`range_signal_none:${rangeSignal.reason}`);
+            if (gateResult !== "RANGE_GATE_PASS") reasons.push(`gate_blocked:${gateResult}:${gateReason}`);
+            if (rangeEdgeConfirmationReject) reasons.push(`reversal_confirmation_failed:${rangeEdgeConfirmationReject}`);
+            if (riskEngineBlocked) reasons.push("risk_engine_hard_blocked");
+            if (input.risk?.longAllow === false) reasons.push("risk_long_allow_false");
+            return reasons.length > 0 ? reasons : null;
+          })(),
+          diag_short_rejected_reasons: (() => {
+            const reasons: string[] = [];
+            if (rangeSignal.signal === "RANGE_SIGNAL_WAIT_RECHECK") reasons.push(`range_signal_wait_recheck:${rangeSignal.reason}`);
+            if (rangeSignal.signal === "RANGE_SIGNAL_NONE") reasons.push(`range_signal_none:${rangeSignal.reason}`);
+            if (!range_short_allowed && rangeSignal.side === "short") reasons.push(`short_not_allowed:${range_short_allowed_reason ?? "unknown"}`);
+            if (gateResult !== "RANGE_GATE_PASS") reasons.push(`gate_blocked:${gateResult}:${gateReason}`);
+            if (rangeEdgeConfirmationReject) reasons.push(`reversal_confirmation_failed:${rangeEdgeConfirmationReject}`);
+            if (riskEngineBlocked) reasons.push("risk_engine_hard_blocked");
+            if (input.risk?.shortAllow === false) reasons.push("risk_short_allow_false");
+            return reasons.length > 0 ? reasons : null;
+          })(),
+          diag_directional_guard_blocked: false,
+          diag_risk_blocked: riskEngineBlocked || input.risk?.longAllow === false || input.risk?.shortAllow === false,
+          diag_reversal_confirmed: rangeEdgeConfirmationReject == null ? true : false,
+          diag_final_block_layer: rangeEdgeConfirmationReject != null
+            ? "reversal_confirmation"
+            : gateResult === "RANGE_GATE_BLOCK_WAIT_RECHECK"
+              ? "range_signal_wait_recheck"
+              : gateResult === "RANGE_GATE_BLOCK_REENTRY"
+                ? "reentry_cooldown"
+                : gateResult === "RANGE_GATE_BLOCK_RISK_ENGINE"
+                  ? "risk_engine"
+                  : "range_signal_none",
+          diag_final_block_reason: rangeFinalBlockReason,
+          diag_range_signal_score,
+          diag_range_confidence,
+          diag_box_cohesion01,
+          diag_range_oscillation_score,
+          diag_box_position,
+          diag_breakout_failure_rate,
+          diag_regime_exit_risk
         },
         {
           intentSide,
@@ -2819,8 +3033,52 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
           aiGatePassed: false
         }
       );
+    } else {
+      // gateResult === "RANGE_GATE_PASS" and rangeReversalConfirmed === true
+      // Successfully passed all stage0 filters! Return ENTER decision.
+      const sizeMult = rangeReversalSizeMult; // watch tier인 경우 0.42로 완화됨
+      return ret(
+        {
+          strategy_executor: "RANGE",
+          final_decision: "ENTER",
+          reject_reason: null,
+          stage1_result_code: "STAGE0_ENTERED",
+          entry_blocked: null,
+          range_stage0_engine_taken: true,
+          range_stage0_exit_reason: null,
+          legacy_executor_path_taken: false,
+          stage1_size_multiplier_final: sizeMult,
+          // [DIAG-V1] 최종 진단 필드
+          diag_long_candidate_created,
+          diag_short_candidate_created,
+          diag_long_rejected_reasons: null,
+          diag_short_rejected_reasons: null,
+          diag_directional_guard_blocked: false,
+          diag_risk_blocked: false,
+          diag_reversal_confirmed: true,
+          diag_final_block_layer: null,
+          diag_final_block_reason: null,
+          diag_range_signal_score,
+          diag_range_confidence,
+          diag_box_cohesion01,
+          diag_range_oscillation_score,
+          diag_box_position,
+          diag_breakout_failure_rate,
+          diag_regime_exit_risk
+        },
+        {
+          intentSide,
+          executorDecision,
+          adaptiveOk: true,
+          adaptiveDetail: null,
+          adaptiveResult: null,
+          aiGatePassed: true
+        }
+      );
     }
   }
+
+
 
   // Initial core detection and scoring
   // Use an effective scoring regime so stage0 UNKNOWN/ambiguous contexts can still exercise RANGE-stage0 scoring.
@@ -4565,7 +4823,32 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       range_reversal_short_entry_allowed: range_reversal_short_entry_allowed,
       range_reversal_short_entry_block_reason: range_reversal_short_entry_block_reason,
       range_reversal_immediate_switch_applied: range_reversal_immediate_switch_applied,
-      range_reversal_immediate_switch_reason: range_reversal_immediate_switch_reason
+      range_reversal_immediate_switch_reason: range_reversal_immediate_switch_reason,
+      // [DIAG-V1] 정상 진입 시 최종 진단 필드
+      diag_long_candidate_created: sn?.signal === "paper_long_candidate",
+      diag_short_candidate_created: sn?.signal === "paper_short_candidate",
+      diag_long_rejected_reasons: null,
+      diag_short_rejected_reasons: null,
+      diag_btc_bias: (() => {
+        const btcB = btcBiasFromModeDetail(input.adaptiveDetail || {});
+        return btcB === "flat" ? "flat" : btcB === "up" ? "up" : btcB === "down" ? "down" : null;
+      })(),
+      diag_preferred_direction: (() => {
+        const bias = input.risk?.directionalShockState;
+        return bias === "UP" ? "long" : bias === "DOWN" ? "short" : "none";
+      })(),
+      diag_range_signal_score: rangeScores?.rangeSignalScore ?? null,
+      diag_range_confidence: sn?.rangeConfidence ?? null,
+      diag_box_cohesion01: sn?.boxCohesion01 ?? null,
+      diag_range_oscillation_score: sn?.rangeOscillationScore ?? null,
+      diag_box_position: typeof sn?.boxPos === "number" ? sn.boxPos : null,
+      diag_breakout_failure_rate: sn?.breakoutFailureRate ?? null,
+      diag_regime_exit_risk: sn?.regimeExitRisk ?? null,
+      diag_reversal_confirmed: true,
+      diag_directional_guard_blocked: false,
+      diag_risk_blocked: false,
+      diag_final_block_layer: null,
+      diag_final_block_reason: null
     },
     {
       intentSide,
@@ -4576,6 +4859,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       aiGatePassed: true
     }
   );
+
 
   if (directionalOverride.blockRangeEntirely) {
     const isMatchingSide = (sn?.signal === "paper_long_candidate" && directionalOverride.forcedSide === "long") ||
