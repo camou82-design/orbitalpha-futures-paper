@@ -110,11 +110,13 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const bhSlope = (judgment.metadata as any)?.bhSlope ?? 0;
     const blSlope = (judgment.metadata as any)?.blSlope ?? 0;
 
+    const execMeta = (judgment.metadata ?? {}) as Record<string, unknown>;
+    const readBool = (v: unknown): boolean => v === true || v === "true";
     let signal: any = "NONE";
     let side: EngineV2Side = "none";
     let reason = "Initial state";
     let recheckSuggested = false;
-    let reversalConfirmed = false;
+    let reversalConfirmed = readBool(execMeta.reversal_confirmed) || (judgment as any).reversalConfirmed === true;
     let sideOverrideApplied = false;
     let lateChaseBlocked = false;
     let retestRequired = false;
@@ -143,10 +145,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     // --- SHOCK & TREND GUARD ---
     const emaGap = sn.emaGap ?? 0;
     if (isLower && currentStage === 0) {
-        const isBearishRegime = judgment.shockPhase === "DOWN_SHOCK" || judgment.trendPhase === "DOWN" || emaGap < 0;
-        // reversalConfirmed check is simplified here as we don't have candle history in this scope easily, 
-        // but let's assume it from judgment or metadata if available.
-        if (isBearishRegime) {
+        if (judgment.shockPhase === "DOWN_SHOCK") {
             console.warn(JSON.stringify({
                 event: "V2_RANGE_LOWER_LONG_BLOCKED_BY_DOWN_SHOCK_PROOF",
                 symbol: input.symbol,
@@ -157,7 +156,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             return {
                 signal: "NONE",
                 side: "none",
-                reason: "V2_RANGE_LOWER_LONG_BLOCKED_BY_BEARISH_SHOCK",
+                reason: "V2_RANGE_LOWER_LONG_BLOCKED_BY_DOWN_SHOCK",
                 baseSizeIntent: 0,
                 recheckSuggested: true,
                 isAddOnEligible: false,
@@ -165,6 +164,75 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                 invalidationPx: null,
                 metadata: { shockPhase: judgment.shockPhase, trendPhase: judgment.trendPhase }
             };
+        } else if (judgment.trendPhase === "DOWN" || emaGap < 0) {
+            if (!reversalConfirmed) {
+                console.warn(JSON.stringify({
+                    event: "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND_PROOF",
+                    symbol: input.symbol,
+                    shockPhase: judgment.shockPhase,
+                    trendPhase: judgment.trendPhase,
+                    emaGap,
+                    reversalConfirmed
+                }));
+                return {
+                    signal: "NONE",
+                    side: "none",
+                    reason: "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND",
+                    baseSizeIntent: 0,
+                    recheckSuggested: true,
+                    isAddOnEligible: false,
+                    stopPrice: null,
+                    invalidationPx: null,
+                    metadata: { shockPhase: judgment.shockPhase, trendPhase: judgment.trendPhase, reversalConfirmed }
+                };
+            }
+            // reversalConfirmed === true 이면 이어서 진입 허용 (역추세 위험 감점 등은 후속 로직에서 적용됨)
+        }
+    }
+
+    if (isUpper && currentStage === 0) {
+        if (judgment.shockPhase === "UP_SHOCK") {
+            console.warn(JSON.stringify({
+                event: "V2_RANGE_UPPER_SHORT_BLOCKED_BY_UP_SHOCK_PROOF",
+                symbol: input.symbol,
+                shockPhase: judgment.shockPhase,
+                trendPhase: judgment.trendPhase,
+                emaGap
+            }));
+            return {
+                signal: "NONE",
+                side: "none",
+                reason: "V2_RANGE_UPPER_SHORT_BLOCKED_BY_UP_SHOCK",
+                baseSizeIntent: 0,
+                recheckSuggested: true,
+                isAddOnEligible: false,
+                stopPrice: null,
+                invalidationPx: null,
+                metadata: { shockPhase: judgment.shockPhase, trendPhase: judgment.trendPhase }
+            };
+        } else if (judgment.trendPhase === "UP" || emaGap > 0) {
+            if (!reversalConfirmed) {
+                console.warn(JSON.stringify({
+                    event: "V2_RANGE_UPPER_SHORT_WAITING_DUE_TO_UP_TREND_PROOF",
+                    symbol: input.symbol,
+                    shockPhase: judgment.shockPhase,
+                    trendPhase: judgment.trendPhase,
+                    emaGap,
+                    reversalConfirmed
+                }));
+                return {
+                    signal: "NONE",
+                    side: "none",
+                    reason: "V2_RANGE_UPPER_SHORT_WAITING_DUE_TO_UP_TREND",
+                    baseSizeIntent: 0,
+                    recheckSuggested: true,
+                    isAddOnEligible: false,
+                    stopPrice: null,
+                    invalidationPx: null,
+                    metadata: { shockPhase: judgment.shockPhase, trendPhase: judgment.trendPhase, reversalConfirmed }
+                };
+            }
+            // reversalConfirmed === true 이면 이어서 진입 허용
         }
     }
 
@@ -576,15 +644,25 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         rangeBoxDistorted: isDistorted
     };
 
+    const finalSide = signal === "NONE" ? "none" as const : side;
+    const finalStopPrice = signal === "NONE" ? null : (inv || null);
+    const finalInvalidationPx = signal === "NONE" ? null : (inv || null);
+    if (signal === "NONE") {
+        metadata.takeProfitPlan = null;
+        metadata.takeProfit1Px = 0;
+        metadata.takeProfit2Px = 0;
+        metadata.invalidationPx = null;
+    }
+
     return {
         signal,
-        side,
+        side: finalSide,
         reason,
         baseSizeIntent: signal === "NONE" ? 0 : 1,
         recheckSuggested,
         isAddOnEligible: true,
-        stopPrice: inv || null,
-        invalidationPx: inv || null,
+        stopPrice: finalStopPrice,
+        invalidationPx: finalInvalidationPx,
         metadata
     };
 }

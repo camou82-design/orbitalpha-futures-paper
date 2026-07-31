@@ -1,0 +1,1 @@
+import { detectMarketRegime } from "./src/strategy/market-regime-detector"; const now = Date.now(); const arr = Array.from({ length: 120 }, (_, i) => { const base = 2000 + i * 10; return { ts: now - (120 - i) * 60000, open: base, high: base + 5, low: base - 5, close: base + 2, volume: 100 }; }); console.log(JSON.stringify(detectMarketRegime({btcCandles5m: arr}), null, 2));

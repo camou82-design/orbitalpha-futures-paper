@@ -125,8 +125,7 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
 
   // --- SHOCK & TREND GUARD ---
   if (dir === "long" && box_position === "lower" && currentStage === 0) {
-    const isBearishRegime = shockPhase === "DOWN_SHOCK" || trendPhase === "DOWN" || emaGap < 0;
-    if (isBearishRegime && !reversalConfirmed) {
+    if (shockPhase === "DOWN_SHOCK") {
         console.warn(JSON.stringify({
             event: "V2_RANGE_LOWER_LONG_BLOCKED_BY_DOWN_SHOCK_PROOF",
             symbol: input.symbol,
@@ -139,14 +138,85 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
             regime: input.regime,
             executor: "RANGE",
             entry_allowed: false,
-            blocked_reason: "range_lower_long_blocked_by_bearish_shock",
+            blocked_reason: "V2_RANGE_LOWER_LONG_BLOCKED_BY_DOWN_SHOCK",
             box_position,
             expected_move: input.expectedMove,
             total_cost: input.totalCost,
             risk_state: input.risk_state,
-            guidance: "하락 충격/추세 중 하단 롱 차단 (반전 확인 필요)",
+            guidance: "하락 쇼크 중 하단 롱 차단",
             detail: { shockPhase, trendPhase, emaGap }
         };
+    } else if (trendPhase === "DOWN" || emaGap < 0) {
+        if (!reversalConfirmed) {
+            console.warn(JSON.stringify({
+                event: "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND_PROOF",
+                symbol: input.symbol,
+                shockPhase,
+                trendPhase,
+                emaGap,
+                reversalConfirmed
+            }));
+            return {
+                regime: input.regime,
+                executor: "RANGE",
+                entry_allowed: false,
+                blocked_reason: "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND",
+                box_position,
+                expected_move: input.expectedMove,
+                total_cost: input.totalCost,
+                risk_state: input.risk_state,
+                guidance: "하락 추세 중 하단 롱 관망 (반전 미확인)",
+                detail: { shockPhase, trendPhase, emaGap, reversalConfirmed }
+            };
+        }
+    }
+  }
+
+  if (dir === "short" && box_position === "upper" && currentStage === 0) {
+    if (shockPhase === "UP_SHOCK") {
+        console.warn(JSON.stringify({
+            event: "V2_RANGE_UPPER_SHORT_BLOCKED_BY_UP_SHOCK_PROOF",
+            symbol: input.symbol,
+            shockPhase,
+            trendPhase,
+            emaGap,
+            reversalConfirmed
+        }));
+        return {
+            regime: input.regime,
+            executor: "RANGE",
+            entry_allowed: false,
+            blocked_reason: "V2_RANGE_UPPER_SHORT_BLOCKED_BY_UP_SHOCK",
+            box_position,
+            expected_move: input.expectedMove,
+            total_cost: input.totalCost,
+            risk_state: input.risk_state,
+            guidance: "상승 쇼크 중 상단 숏 차단",
+            detail: { shockPhase, trendPhase, emaGap }
+        };
+    } else if (trendPhase === "UP" || emaGap > 0) {
+        if (!reversalConfirmed) {
+            console.warn(JSON.stringify({
+                event: "V2_RANGE_UPPER_SHORT_WAITING_DUE_TO_UP_TREND_PROOF",
+                symbol: input.symbol,
+                shockPhase,
+                trendPhase,
+                emaGap,
+                reversalConfirmed
+            }));
+            return {
+                regime: input.regime,
+                executor: "RANGE",
+                entry_allowed: false,
+                blocked_reason: "V2_RANGE_UPPER_SHORT_WAITING_DUE_TO_UP_TREND",
+                box_position,
+                expected_move: input.expectedMove,
+                total_cost: input.totalCost,
+                risk_state: input.risk_state,
+                guidance: "상승 추세 중 상단 숏 관망 (반전 미확인)",
+                detail: { shockPhase, trendPhase, emaGap, reversalConfirmed }
+            };
+        }
     }
   }
 

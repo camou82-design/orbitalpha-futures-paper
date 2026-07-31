@@ -1051,8 +1051,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             trendSideCandidate === "long" ? "paper_long_candidate" : "none";
 
     const readinessDiag = (riskSizing.diagnostics ?? {}) as Record<string, unknown>;
+    const isLiveExecution = v2State.okxLiveEnabled === true || readinessDiag.okx_live_enabled === true;
     const paperExecutionReady = readinessDiag.paper_execution_ready === true;
-    const signedExecutionReady = readinessDiag.signed_execution_ready === true;
+    const signedExecutionReady = isLiveExecution ? readinessDiag.signed_execution_ready === true : true;
     const hardControlClear =
         paperExecutionReady === true &&
         v2State.serverTradeEnabled === true &&
@@ -4149,21 +4150,28 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }));
         }
 
+        // --- Pre-audit normalization for incomplete plans ---
         const structuralStopPx = execution.stopPrice;
         const structuralInvalidationPx = execution.invalidationPx;
 
         let riskAuditFailed = false;
         let riskAuditReason: string | null = null;
 
-        if (structuralStopPx == null || structuralInvalidationPx == null || isNaN(structuralStopPx) || isNaN(structuralInvalidationPx)) {
-            riskAuditFailed = true;
-            riskAuditReason = "STOP_PRICE_MISSING";
-        } else {
+        if (sideFinal === "long" || sideFinal === "short") {
+            if (structuralStopPx == null || structuralInvalidationPx == null || isNaN(structuralStopPx) || isNaN(structuralInvalidationPx)) {
+                riskAuditFailed = true;
+                riskAuditReason = "STOP_PRICE_MISSING";
+            }
+        }
+
+        if (!riskAuditFailed && (sideFinal === "long" || sideFinal === "short")) {
+            const stopPxVal = structuralStopPx!;
+            const invPxVal = structuralInvalidationPx!;
             // Directional Safety Check
-            if (sideFinal === "long" && (structuralInvalidationPx >= lastPrice || (structuralStopPx >= lastPrice && Math.abs(structuralStopPx - lastPrice) > 0.00000001))) {
+            if (sideFinal === "long" && (invPxVal >= lastPrice || (stopPxVal >= lastPrice && Math.abs(stopPxVal - lastPrice) > 0.00000001))) {
                 riskAuditFailed = true;
                 riskAuditReason = "LONG_INVALIDATION_ABOVE_ENTRY";
-            } else if (sideFinal === "short" && (structuralInvalidationPx <= lastPrice || (structuralStopPx <= lastPrice && Math.abs(structuralStopPx - lastPrice) > 0.00000001))) {
+            } else if (sideFinal === "short" && (invPxVal <= lastPrice || (stopPxVal <= lastPrice && Math.abs(stopPxVal - lastPrice) > 0.00000001))) {
                 riskAuditFailed = true;
                 riskAuditReason = "SHORT_INVALIDATION_BELOW_ENTRY";
             }
@@ -4185,6 +4193,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             finalDecision = "REJECT";
             v2DecisionAfterPromotion = "REJECT";
             v2SideAfterPromotion = "none";
+            execution.side = "none";
+            execution.stopPrice = null;
+            execution.invalidationPx = null;
             blockReason = riskAuditReason;
             stageMarginKrwAfter = 0;
             expectedMissingCondition = riskAuditReason;

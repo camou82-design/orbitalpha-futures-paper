@@ -33,7 +33,8 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
     const newStopPrice = args.newStopPrice;
 
     if (mode === "engine_v2") {
-        const signedReadyBlocked = v2Decision.decision === "ENTER" && signedExecutionReady !== true;
+        const isLiveMode = diagnostics["okx_live_enabled"] === true || diagnostics["okxLiveEnabled"] === true;
+        const signedReadyBlocked = v2Decision.decision === "ENTER" && isLiveMode && signedExecutionReady !== true;
 
         let finalDecision = v2Decision.decision;
         let finalSide = v2Decision.side;
