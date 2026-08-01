@@ -315,12 +315,19 @@ class OkxDemoClient {
     }
     /** Pending TP/SL / conditional / trigger algos — reduce-only protective stops live here. */
     getOrdersAlgoPending(args) {
+        const targetOrdType = args.ordType || "conditional";
+        const allowedTypes = ["conditional", "oco", "trigger", "move_order_stop"];
+        if (!allowedTypes.includes(targetOrdType)) {
+            return Promise.resolve({
+                ok: false,
+                error: `Parameter ordType error: '${targetOrdType}' is not allowed. Must be one of ${allowedTypes.join(", ")}`
+            });
+        }
         const q = new URLSearchParams();
         q.set("instType", args.instType);
         if (args.instId)
             q.set("instId", args.instId);
-        if (args.ordType)
-            q.set("ordType", args.ordType);
+        q.set("ordType", targetOrdType);
         return this.signedRequest("GET", "/api/v5/trade/orders-algo-pending", q, null);
     }
     async checkSignedReady() {

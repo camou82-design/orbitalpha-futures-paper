@@ -417,10 +417,24 @@ export class OkxDemoClient {
     instId?: string;
     ordType?: string;
   }): Promise<TryResult<Record<string, unknown>[]>> {
+    const targetOrdType = args.ordType || "conditional";
+    const allowedTypes = ["conditional", "oco", "trigger", "move_order_stop"];
+    if (!allowedTypes.includes(targetOrdType)) {
+      return Promise.resolve({
+        ok: false,
+        error: `Parameter ordType error: '${targetOrdType}' is not allowed. Must be one of ${allowedTypes.join(", ")}`,
+        diagnostics: {
+          httpStatus: 400,
+          requestUrl: "/api/v5/trade/orders-algo-pending",
+          method: "GET"
+        }
+      });
+    }
+
     const q = new URLSearchParams();
     q.set("instType", args.instType);
     if (args.instId) q.set("instId", args.instId);
-    if (args.ordType) q.set("ordType", args.ordType);
+    q.set("ordType", targetOrdType);
     return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/orders-algo-pending", q, null);
   }
 
