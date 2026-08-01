@@ -3,6 +3,22 @@ import type { V2StateAuthority } from "./types";
 
 const DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT = 100;
 
+interface ShockState {
+    activeDirection: "UP" | "DOWN" | "NONE" | "UNKNOWN";
+    rawDirection: "UP" | "DOWN" | "NONE" | "UNKNOWN";
+    candidateDirection: "UP" | "DOWN" | "NONE" | "UNKNOWN";
+    candidateCount: number;
+    neutralCount: number;
+    candidateStartedAt: number | null;
+    activatedAt: number | null;
+    lastChangedAt: number;
+    rawMovePct: number;
+    requiredMovePct: number;
+    emergencyBypass: boolean;
+}
+
+const globalShockStates = new Map<string, ShockState>();
+
 function inferIntentSide(input: EngineV2Input): EngineV2Side {
     if (input.symbol === "BTCUSDT") {
         if (input.state.okxActualSide === "long") return "long";
@@ -178,7 +194,170 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
             if (typeof configFallback === "number" && Number.isFinite(configFallback) && configFallback > 0) return configFallback;
             return DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT;
         })(),
-        directionalShockState: input.state.directionalShockState ?? "NONE",
+        ...((): {
+            directionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
+            rawDirectionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
+            stabilizedDirectionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
+            rawShockMovePct: number;
+            requiredShockMovePct: number;
+            shockEmergencyBypass: boolean;
+        } => {
+            const raw = (input.state.directionalShockState ?? "NONE") as "UP" | "DOWN" | "NONE" | "UNKNOWN";
+            
+            // Get symbol-specific state store or initialize
+            const sym = String(symbol);
+            if (!globalShockStates.has(sym)) {
+                globalShockStates.set(sym, {
+                    activeDirection: "NONE",
+                    rawDirection: "NONE",
+                    candidateDirection: "NONE",
+                    candidateCount: 0,
+                    neutralCount: 0,
+                    candidateStartedAt: null,
+                    activatedAt: null,
+                    lastChangedAt: Date.now(),
+                    rawMovePct: 0,
+                    requiredMovePct: 0,
+                    emergencyBypass: false
+                });
+            }
+            const st = globalShockStates.get(sym)!;
+            const nowMs = input.now || Date.now();
+
+            // Setup variables
+            st.rawDirection = raw === "UNKNOWN" ? "NONE" : raw;
+
+            // Calculate raw move magnitude if candles are available
+            const candles = input.candles || input.snapshot?.candles || [];
+            let rawMovePct = 0;
+            if (candles.length >= 16) {
+                const latestClose = candles[candles.length - 1].close;
+                const prevClose = candles[candles.length - 16].close;
+                rawMovePct = Math.abs((latestClose - prevClose) / prevClose);
+            }
+            st.rawMovePct = rawMovePct;
+
+            // Calculate required move limit based on ATR or floor (0.12%)
+            const atr = input.snapshot?.atr || 0;
+            const lastPrice = input.snapshot?.lastPrice || 1;
+            const atrPct = atr / lastPrice;
+            const requiredMovePct = Math.max(0.0012, atrPct * 0.65);
+            st.requiredMovePct = requiredMovePct;
+
+            // Emergency bypass criteria: 0.35% absolute move OR ATR 1.8x breach OR Volume surge 2.5x with ATR expansion 1.4x
+            let emergencyBypass = false;
+            if (candles.length >= 6) {
+                const latestClose = candles[candles.length - 1].close;
+                const prevClose = candles[candles.length - 6].close;
+                const move5m = Math.abs((latestClose - prevClose) / prevClose);
+                const volumeExpansion = input.snapshot?.volumeExpansion ?? 1.0;
+                const atrExpansion = input.snapshot?.atrExpansion ?? 1.0;
+                
+                const atrSeverity = atr > 0 ? Math.abs(latestClose - prevClose) / atr : 0;
+                if (move5m >= 0.0035 || atrSeverity >= 1.8 || (volumeExpansion >= 2.5 && atrExpansion >= 1.4)) {
+                    emergencyBypass = true;
+                }
+            }
+            st.emergencyBypass = emergencyBypass;
+
+            const prevActive = st.activeDirection;
+            let activationBlockReason = "";
+            let stateChanged = false;
+
+            if (st.rawDirection !== "NONE") {
+                // If there's an active shock and raw direction has flipped to the opposite
+                const isOpposite = (prevActive === "UP" && st.rawDirection === "DOWN") || 
+                                   (prevActive === "DOWN" && st.rawDirection === "UP");
+                
+                if (isOpposite && !st.emergencyBypass) {
+                    // Prevent direct flip without emergency bypass -> treat it as normal candidate flow from NONE
+                    activationBlockReason = "DIRECT_FLIP_PROHIBITED_WITHOUT_BYPASS";
+                } else if (st.emergencyBypass) {
+                    // Emergency bypass: instantly activate
+                    st.activeDirection = st.rawDirection;
+                    st.candidateDirection = "NONE";
+                    st.candidateCount = 0;
+                    st.neutralCount = 0;
+                    st.candidateStartedAt = null;
+                    st.activatedAt = nowMs;
+                    st.lastChangedAt = nowMs;
+                } else {
+                    // Normal activation flow (requires 2 consecutive raw signals in same direction, 30s elapsed, minimum move)
+                    if (st.candidateDirection !== st.rawDirection) {
+                        st.candidateDirection = st.rawDirection;
+                        st.candidateCount = 1;
+                        st.candidateStartedAt = nowMs;
+                    } else {
+                        st.candidateCount++;
+                    }
+
+                    const elapsedCand = st.candidateStartedAt ? (nowMs - st.candidateStartedAt) >= 30000 : false;
+                    const magnitudePassed = st.rawMovePct >= st.requiredMovePct;
+
+                    if (st.candidateCount >= 2 && elapsedCand && magnitudePassed) {
+                        st.activeDirection = st.rawDirection;
+                        st.activatedAt = nowMs;
+                        st.lastChangedAt = nowMs;
+                    } else {
+                        if (st.candidateCount < 2) activationBlockReason = "INSUFFICIENT_CONSECUTIVE_RAW_COUNT";
+                        else if (!elapsedCand) activationBlockReason = "MINIMUM_DURATION_NOT_MET";
+                        else if (!magnitudePassed) activationBlockReason = "MINIMUM_MOVE_THRESHOLD_NOT_MET";
+                    }
+                }
+            } else {
+                // Raw is NONE: evaluation for release/deactivation
+                if (st.activeDirection !== "NONE") {
+                    st.neutralCount++;
+                    const elapsedRelease = st.activatedAt ? (nowMs - st.activatedAt) >= 45000 : false;
+                    if (st.neutralCount >= 2 && elapsedRelease) {
+                        st.activeDirection = "NONE";
+                        st.candidateDirection = "NONE";
+                        st.candidateCount = 0;
+                        st.neutralCount = 0;
+                        st.candidateStartedAt = null;
+                        st.activatedAt = null;
+                        st.lastChangedAt = nowMs;
+                    }
+                } else {
+                    st.candidateDirection = "NONE";
+                    st.candidateCount = 0;
+                    st.neutralCount = 0;
+                    st.candidateStartedAt = null;
+                }
+            }
+
+            if (st.activeDirection !== prevActive) {
+                stateChanged = true;
+            }
+
+            // V2_DIRECTIONAL_SHOCK_STABILIZATION_PROOF diagnostic log
+            console.info(JSON.stringify({
+                event: "V2_DIRECTIONAL_SHOCK_STABILIZATION_PROOF",
+                symbol: sym,
+                raw_direction: st.rawDirection,
+                stable_direction_before: prevActive,
+                stable_direction_after: st.activeDirection,
+                candidate_direction: st.candidateDirection,
+                candidate_count: st.candidateCount,
+                neutral_count: st.neutralCount,
+                raw_move_pct: st.rawMovePct,
+                required_move_pct: st.requiredMovePct,
+                magnitude_passed: st.rawMovePct >= st.requiredMovePct,
+                emergency_bypass: st.emergencyBypass,
+                activation_block_reason: activationBlockReason || null,
+                state_changed: stateChanged,
+                ts: nowMs
+            }));
+
+            return {
+                directionalShockState: st.activeDirection,
+                rawDirectionalShockState: raw,
+                stabilizedDirectionalShockState: st.activeDirection,
+                rawShockMovePct: st.rawMovePct,
+                requiredShockMovePct: st.requiredMovePct,
+                shockEmergencyBypass: st.emergencyBypass
+            };
+        })(),
         crashState,
         pumpState,
         longAllow: input.state.longAllow !== false,

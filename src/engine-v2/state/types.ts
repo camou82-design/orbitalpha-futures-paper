@@ -44,6 +44,11 @@ export type V2StateAuthority = Readonly<{
     okxSimulatedTradingHeaderEnabled: boolean;
     liveMaxOrderNotionalUsdt: number;
     directionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
+    rawDirectionalShockState?: "UP" | "DOWN" | "NONE" | "UNKNOWN";
+    stabilizedDirectionalShockState?: "UP" | "DOWN" | "NONE" | "UNKNOWN";
+    rawShockMovePct?: number;
+    requiredShockMovePct?: number;
+    shockEmergencyBypass?: boolean;
     crashState: string;
     pumpState: string;
     longAllow: boolean;

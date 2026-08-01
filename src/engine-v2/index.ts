@@ -5353,7 +5353,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             htf_requires_stronger_confirmation: judgment.htf_requires_stronger_confirmation ?? false,
             macro_polarity: judgment.macroPolarity ?? "NEUTRAL",
             polarity_mismatch: judgment.polarityMismatch ?? false,
-            trend_ok: trendOk
+            trend_ok: trendOk,
+            judgmentShockPhase: judgment.shockPhase,
+            judgmentTrendPhase: judgment.trendPhase
         },
         v2ExitAuthority: v2ExitAuthority ?? undefined,
         v2PartialAuthority: v2PartialAuthority ?? undefined,
@@ -5706,7 +5708,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
         
         if (decision.metadata) {
+            const savedShock = decision.metadata.judgmentShockPhase;
+            const savedTrend = decision.metadata.judgmentTrendPhase;
             decision.metadata.invalidationPx = undefined;
+            decision.metadata.judgmentShockPhase = savedShock;
+            decision.metadata.judgmentTrendPhase = savedTrend;
         }
         
         decision.committedRiskPlan = undefined;
