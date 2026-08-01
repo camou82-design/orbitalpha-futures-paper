@@ -2165,114 +2165,123 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     v2DecisionAfterPromotion === "HOLD" ||
                     v2DecisionAfterPromotion === "REJECT")
             ) {
-                const macroSrc = judgment.macro_source ?? "data_not_ready";
-                const htfPol = judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT";
-                const chaseBlockedLower = (execMeta as Record<string, unknown>).late_chase_blocked === true;
-                const retestReqLower = (execMeta as Record<string, unknown>).retest_required === true;
-                const reclaimReqLower = (execMeta as Record<string, unknown>).reclaim_required === true;
-
-                const boxHighL = Number(authoritativeInput.snapshot.boxHigh ?? 0);
-                const boxLowL = Number(authoritativeInput.snapshot.boxLow ?? 0);
-                const boxMidL = (boxHighL + boxLowL) / 2;
-                const atrL = Number(authoritativeInput.snapshot.atr ?? 0);
-                const entryPxL = Number(authoritativeInput.snapshot.lastPrice ?? 0);
-                const minProfitL = Math.max(atrL * 0.35, entryPxL * 0.001);
-                const minStopL = Math.max(atrL * 0.5, entryPxL * 0.0015);
-                let stopPxL = Math.min(boxLowL - minStopL, entryPxL - minStopL);
-                let tp1L = Math.max(boxMidL, entryPxL + minProfitL);
-                if (tp1L <= entryPxL) tp1L = entryPxL + minProfitL;
-                let tp2L = Math.max(boxHighL, tp1L + minProfitL);
-                if (tp2L <= tp1L) tp2L = tp1L + minProfitL;
-                const boxHeightL = boxHighL - boxLowL;
-                const boxHeightPctL = boxLowL > 0 ? boxHeightL / boxLowL : 0;
-                const longOrderOkL =
-                    stopPxL < entryPxL && entryPxL < tp1L && tp1L < tp2L;
-                const planInvalidL =
-                    !Number.isFinite(entryPxL) ||
-                    entryPxL <= 0 ||
-                    !Number.isFinite(tp1L) ||
-                    !Number.isFinite(tp2L) ||
-                    !Number.isFinite(stopPxL) ||
-                    tp1L <= 0 ||
-                    tp2L <= 0 ||
-                    stopPxL <= 0 ||
-                    boxHeightPctL < 0.0008 ||
-                    !longOrderOkL;
-
-                type LowerLongGate = string | null;
-                let lowerLongGate: LowerLongGate = null;
-                if (chaseBlockedLower) lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_CHASE_BLOCKED";
-                else if (!(riskLongAllow && allowNewLong)) {
-                    lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_LONG_NOT_ALLOWED";
-                } else if (!paperExecutionReady || !signedExecutionReady) {
-                    lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_EXECUTION_READINESS";
-                } else if (hasSameSidePosition || hasOppositeSidePosition) {
-                    lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_POSITION_CONFLICT";
-                } else if (hardBlockPresent) lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_HARD_BLOCK";
-                else if (!(stopPxL > 0 && stopPxL < entryPxL)) {
-                    lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_STOP_PRICE_MISSING";
-                } else if (planInvalidL) lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_TP_SL_PLAN_INVALID";
-
-                if (lowerLongGate != null) {
-                    promotionBlockReason = lowerLongGate;
-                    expectedMissingCondition = lowerLongGate;
-                    expectedNextAction = "WAIT_FOR_LOWER_LONG_REACTION_PROBE_GATE";
-                    console.info(
-                        JSON.stringify({
-                            event: "V2_LOWER_LONG_REACTION_PROBE_GATE_SKIP_PROOF",
-                            symbol: String(input.symbol),
-                            gate_reason: lowerLongGate,
-                            zone,
-                            qualityScore,
-                            range_side_candidate: rangeSideCandidate,
-                            trend_side_candidate: trendSideCandidate,
-                            side_zone_valid: sideZoneValid,
-                            htf_entry_policy: htfPol,
-                            macro_source: macroSrc,
-                            chase_blocked: chaseBlockedLower,
-                            retest_required: retestReqLower,
-                            reclaim_required: reclaimReqLower,
-                            paper_execution_ready: paperExecutionReady,
-                            signed_execution_ready: signedExecutionReady,
-                            decision_before_gate: v2DecisionAfterPromotion
-                        })
-                    );
+                if (judgment.trendPhase === "DOWN" && !reversalConfirmed) {
+                    // reversalConfirmed === false인 WAITING_DUE_TO_DOWN_TREND인 상태는 롱 진입 시도가 아니므로 제외하고 hold/skip 처리 유지
+                    v2DecisionAfterPromotion = "HOLD";
+                    v2SideAfterPromotion = "none";
+                    v2RejectReasonAfterPromotion = "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND";
+                    expectedMissingCondition = "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND";
+                    expectedNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
                 } else {
-                    v2DecisionAfterPromotion = "ENTER";
-                    v2SideAfterPromotion = "long";
-                    v2RejectReasonAfterPromotion = null;
-                    promotionApplied = true;
-                    promotionReason = "V2_LOWER_LONG_REACTION_PROBE_PROMOTION";
-                    promotionBlockReason = null;
-                    promotionMinConditionPassed = true;
-                    v2CalculatedInvalidationPx = stopPxL;
+                    const macroSrc = judgment.macro_source ?? "data_not_ready";
+                    const htfPol = judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT";
+                    const chaseBlockedLower = (execMeta as Record<string, unknown>).late_chase_blocked === true;
+                    const retestReqLower = (execMeta as Record<string, unknown>).retest_required === true;
+                    const reclaimReqLower = (execMeta as Record<string, unknown>).reclaim_required === true;
 
-                    console.info(
-                        JSON.stringify({
-                            event: "V2_TREND_PROMOTION_TO_ENTER_PROOF",
-                            symbol: String(input.symbol),
-                            side: "long",
-                            zone,
-                            qualityScore,
-                            htf_entry_policy: htfPol,
-                            htf_size_multiplier:
-                                typeof judgment.htf_size_multiplier === "number"
-                                    ? judgment.htf_size_multiplier
-                                    : null,
-                            htf_requires_stronger_confirmation: judgment.htf_requires_stronger_confirmation ?? false,
-                            entryPx: entryPxL,
-                            stopPrice: stopPxL,
-                            tp1: tp1L,
-                            tp2: tp2L,
-                            finalDecision: "ENTER",
-                            promotion_reason: promotionReason,
-                            macro_source: macroSrc,
-                            retest_required: retestReqLower,
-                            reclaim_required: reclaimReqLower,
-                            micro_probe_cap_forced: retestReqLower || reclaimReqLower,
-                            side_zone_valid: sideZoneValid
-                        })
-                    );
+                    const boxHighL = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+                    const boxLowL = Number(authoritativeInput.snapshot.boxLow ?? 0);
+                    const boxMidL = (boxHighL + boxLowL) / 2;
+                    const atrL = Number(authoritativeInput.snapshot.atr ?? 0);
+                    const entryPxL = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+                    const minProfitL = Math.max(atrL * 0.35, entryPxL * 0.001);
+                    const minStopL = Math.max(atrL * 0.5, entryPxL * 0.0015);
+                    let stopPxL = Math.min(boxLowL - minStopL, entryPxL - minStopL);
+                    let tp1L = Math.max(boxMidL, entryPxL + minProfitL);
+                    if (tp1L <= entryPxL) tp1L = entryPxL + minProfitL;
+                    let tp2L = Math.max(boxHighL, tp1L + minProfitL);
+                    if (tp2L <= tp1L) tp2L = tp1L + minProfitL;
+                    const boxHeightL = boxHighL - boxLowL;
+                    const boxHeightPctL = boxLowL > 0 ? boxHeightL / boxLowL : 0;
+                    const longOrderOkL =
+                        stopPxL < entryPxL && entryPxL < tp1L && tp1L < tp2L;
+                    const planInvalidL =
+                        !Number.isFinite(entryPxL) ||
+                        entryPxL <= 0 ||
+                        !Number.isFinite(tp1L) ||
+                        !Number.isFinite(tp2L) ||
+                        !Number.isFinite(stopPxL) ||
+                        tp1L <= 0 ||
+                        tp2L <= 0 ||
+                        stopPxL <= 0 ||
+                        boxHeightPctL < 0.0008 ||
+                        !longOrderOkL;
+
+                    type LowerLongGate = string | null;
+                    let lowerLongGate: LowerLongGate = null;
+                    if (chaseBlockedLower) lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_CHASE_BLOCKED";
+                    else if (!(riskLongAllow && allowNewLong)) {
+                        lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_LONG_NOT_ALLOWED";
+                    } else if (!paperExecutionReady || !signedExecutionReady) {
+                        lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_EXECUTION_READINESS";
+                    } else if (hasSameSidePosition || hasOppositeSidePosition) {
+                        lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_POSITION_CONFLICT";
+                    } else if (hardBlockPresent) lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_HARD_BLOCK";
+                    else if (!(stopPxL > 0 && stopPxL < entryPxL)) {
+                        lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_STOP_PRICE_MISSING";
+                    } else if (planInvalidL) lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_TP_SL_PLAN_INVALID";
+
+                    if (lowerLongGate != null) {
+                        promotionBlockReason = lowerLongGate;
+                        expectedMissingCondition = lowerLongGate;
+                        expectedNextAction = "WAIT_FOR_LOWER_LONG_REACTION_PROBE_GATE";
+                        console.info(
+                            JSON.stringify({
+                                event: "V2_LOWER_LONG_REACTION_PROBE_GATE_SKIP_PROOF",
+                                symbol: String(input.symbol),
+                                gate_reason: lowerLongGate,
+                                zone,
+                                qualityScore,
+                                range_side_candidate: rangeSideCandidate,
+                                trend_side_candidate: trendSideCandidate,
+                                side_zone_valid: sideZoneValid,
+                                htf_entry_policy: htfPol,
+                                macro_source: macroSrc,
+                                chase_blocked: chaseBlockedLower,
+                                retest_required: retestReqLower,
+                                reclaim_required: reclaimReqLower,
+                                paper_execution_ready: paperExecutionReady,
+                                signed_execution_ready: signedExecutionReady,
+                                decision_before_gate: v2DecisionAfterPromotion
+                            })
+                        );
+                    } else {
+                        v2DecisionAfterPromotion = "ENTER";
+                        v2SideAfterPromotion = "long";
+                        v2RejectReasonAfterPromotion = null;
+                        promotionApplied = true;
+                        promotionReason = "V2_LOWER_LONG_REACTION_PROBE_PROMOTION";
+                        promotionBlockReason = null;
+                        promotionMinConditionPassed = true;
+                        v2CalculatedInvalidationPx = stopPxL;
+
+                        console.info(
+                            JSON.stringify({
+                                event: "V2_TREND_PROMOTION_TO_ENTER_PROOF",
+                                symbol: String(input.symbol),
+                                side: "long",
+                                zone,
+                                qualityScore,
+                                htf_entry_policy: htfPol,
+                                htf_size_multiplier:
+                                    typeof judgment.htf_size_multiplier === "number"
+                                        ? judgment.htf_size_multiplier
+                                        : null,
+                                htf_requires_stronger_confirmation: judgment.htf_requires_stronger_confirmation ?? false,
+                                entryPx: entryPxL,
+                                stopPrice: stopPxL,
+                                tp1: tp1L,
+                                tp2: tp2L,
+                                finalDecision: "ENTER",
+                                promotion_reason: promotionReason,
+                                macro_source: macroSrc,
+                                retest_required: retestReqLower,
+                                reclaim_required: reclaimReqLower,
+                                micro_probe_cap_forced: retestReqLower || reclaimReqLower,
+                                side_zone_valid: sideZoneValid
+                            })
+                        );
+                    }
                 }
             } else if (
                 !promotionApplied &&
@@ -5093,16 +5102,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         symbol: String(input.symbol),
         paper_execution_ready: readinessDiag.paper_execution_ready ?? null,
         signed_execution_ready: readinessDiag.signed_execution_ready ?? null,
-        okx_auth_mode: readinessDiag.okx_auth_mode ?? null,
-        okx_auth_ready: readinessDiag.okx_auth_ready ?? null,
-        okx_exchange_auth_opt_in: readinessDiag.okx_exchange_auth_opt_in ?? null,
-        okx_live_enabled: readinessDiag.okx_live_enabled ?? null,
-        okx_demo_enabled: readinessDiag.okx_demo_enabled ?? null,
-        okx_api_key_present: readinessDiag.okx_api_key_present ?? null,
-        okx_api_secret_present: readinessDiag.okx_api_secret_present ?? null,
-        okx_passphrase_present: readinessDiag.okx_passphrase_present ?? null,
-        okx_simulated_trading_header_enabled: readinessDiag.okx_simulated_trading_header_enabled ?? null,
-        live_max_order_notional_usdt: readinessDiag.live_max_order_notional_usdt ?? null,
+        okx_auth_mode: v2State.okxAuthMode ?? null,
+        okx_auth_ready: v2State.okxAuthReady ?? null,
+        okx_exchange_auth_opt_in: v2State.okxExchangeAuthOptIn ?? null,
+        okx_live_enabled: v2State.okxLiveEnabled ?? null,
+        okx_demo_enabled: v2State.okxDemoEnabled ?? null,
+        okx_api_key_present: v2State.okxApiKeyPresent ?? null,
+        okx_api_secret_present: v2State.okxApiSecretPresent ?? null,
+        okx_passphrase_present: v2State.okxPassphrasePresent ?? null,
+        okx_simulated_trading_header_enabled: v2State.okxSimulatedTradingHeaderEnabled ?? null,
+        live_max_order_notional_usdt: v2State.liveMaxOrderNotionalUsdt ?? null,
         paper_readiness_block_reasons: readinessDiag.paper_readiness_block_reasons ?? null,
         signed_readiness_block_reason: readinessDiag.signed_readiness_block_reason ?? null,
         serverTradeEnabled: v2State.serverTradeEnabled,
@@ -5646,6 +5655,38 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         return "ENTER";
     })();
     decision.executionAction = finalExecutionAction;
+
+    // Requirement 1: WAIT/HOLD/SKIP/REJECT이며 최종 side가 none인 모든 경로에서 envelope 최종 정규화
+    const isNeutralDecision = 
+        decision.decision === ("WAIT" as any) || 
+        decision.decision === "HOLD" || 
+        decision.decision === "SKIP" || 
+        decision.decision === "REJECT" || 
+        decision.decision === "DISABLED";
+    
+    if (isNeutralDecision || decision.side === "none" || !decision.side) {
+        decision.side = "none";
+        decision.executionAction = "NONE";
+        
+        if (decision.risk) {
+            decision.risk.stageMarginKrw = 0;
+            decision.risk.sizeMultiplier = 0;
+            decision.risk.exposureNotionalKrw = 0;
+        }
+        
+        if (decision.lifecycleAuthority) {
+            const la = decision.lifecycleAuthority as any;
+            la.newStopPrice = undefined;
+            la.suggestedStopPrice = undefined;
+            la.suggestedInvalidationPx = undefined;
+        }
+        
+        if (decision.metadata) {
+            decision.metadata.invalidationPx = undefined;
+        }
+        
+        decision.committedRiskPlan = undefined;
+    }
 
     return { decision, internal };
 }
