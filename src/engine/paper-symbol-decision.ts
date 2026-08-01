@@ -1528,7 +1528,8 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
   const v2Env = resolveSymbolDecisionEnvelope({
     symbol: sn.symbol,
     fetchedAt: input.now,
-    evaluationMode: "diagnostic",
+      runCycleId: (input as any).runCycleId ?? String(input.now),
+      evaluationMode: "diagnostic",
     snapshot: {
       lastPrice: sn.lastPrice,
       latestCandleClose: sn.latestCandleClose,
@@ -4894,3 +4895,5 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
   }
 }
+
+

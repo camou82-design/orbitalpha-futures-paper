@@ -323,7 +323,8 @@ export function resolveSymbolDecisionEnvelope(
         state,
         buildV2LegacyAdapter(legacyDecision),
         snapshotAdapter.candles,
-        input.evaluationMode
+        input.evaluationMode,
+        input.runCycleId
     );
 
     const v2ResRaw = runEngineV2(v2Input);

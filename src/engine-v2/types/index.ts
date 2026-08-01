@@ -228,6 +228,7 @@ export interface LegacyResultAdapter {
 }
 
 export interface EngineV2Input {
+    run_cycle_id?: string;
     symbol: MarketSymbol;
     evaluationMode?: "authoritative" | "diagnostic";
     snapshot: EngineV2SnapshotAdapter;
@@ -580,6 +581,7 @@ export interface V2BridgeState {
 }
 
 export interface V2BridgeInput {
+    runCycleId?: string;
     symbol: MarketSymbol;
     fetchedAt: number;
     evaluationMode?: "authoritative" | "diagnostic";

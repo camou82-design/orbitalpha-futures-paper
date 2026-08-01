@@ -43,6 +43,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         let finalHardBlockReason = hardBlockReason;
         let finalAuthorityReason = "engine_v2_mode_uses_v2_execution_envelope";
 
+        if (finalDecision !== "ENTER") {
+            finalSide = "none";
+            finalStageMarginKrw = 0;
+        }
+
         let finalPrimaryMissingCondition = args.primaryMissingCondition;
         let finalRawMissingCondition = args.rawMissingCondition;
         let finalExpectedMissingCondition = args.expectedMissingCondition;
@@ -159,8 +164,8 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             finalEngineOwner: "V1",
             adoptedEngine: "V1",
             decision: selector.legacy_result.decision,
-            side: selector.legacy_result.side,
-            stageMarginKrw: (selector.legacy_result.size ?? 0) * 1400,
+            side: selector.legacy_result.decision !== "ENTER" ? "none" : selector.legacy_result.side,
+            stageMarginKrw: selector.legacy_result.decision !== "ENTER" ? 0 : (selector.legacy_result.size ?? 0) * 1400,
             baseStageMarginKrw: (selector.legacy_result.size ?? 0) * 1400, // Legacy fallback
             regime: selector.legacy_result.regime,
             marketSubtype,
@@ -235,8 +240,8 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         finalEngineOwner: selector.adopted_result.engine,
         adoptedEngine: selector.adopted_result.engine,
         decision: selector.adopted_result.adopted_decision,
-        side: selector.adopted_result.adopted_side,
-        stageMarginKrw: Number(selector.adopted_result.adopted_size_usd ?? 0) * 1400,
+        side: selector.adopted_result.adopted_decision !== "ENTER" ? "none" : selector.adopted_result.adopted_side,
+        stageMarginKrw: selector.adopted_result.adopted_decision !== "ENTER" ? 0 : Number(selector.adopted_result.adopted_size_usd ?? 0) * 1400,
         baseStageMarginKrw: Number(selector.adopted_result.adopted_size_usd ?? 0) * 1400, // Adopted fallback
         regime: String(selector.adopted_result.adopted_regime ?? "UNKNOWN"),
         marketSubtype,

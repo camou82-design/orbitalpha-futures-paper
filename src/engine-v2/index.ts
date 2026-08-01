@@ -5809,13 +5809,15 @@ export function adaptV2Input(
     },
     v1Result: LegacyResultAdapter,
     recentCandles?: import("../models/types").Candle[],
-    evaluationMode?: "authoritative" | "diagnostic"
+    evaluationMode?: "authoritative" | "diagnostic",
+    runCycleId?: string
 ): EngineV2Input {
     const htfCandlesRef = snapshot.htf_candles;
     return {
         symbol,
         now,
         evaluationMode,
+        run_cycle_id: runCycleId,
         htf_candles: htfCandlesRef,
         snapshot: {
             lastPrice: snapshot.lastPrice,

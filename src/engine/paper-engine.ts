@@ -4326,6 +4326,7 @@ export class PaperEngine {
       const envelope = resolveSymbolDecisionEnvelope({
         symbol: sym,
         fetchedAt,
+        runCycleId: String(this.runCycleId),
         evaluationMode: "authoritative",
         snapshot: buildV2SnapshotBridge(snapForDecision!),
         legacy: buildV2LegacyBridge(res),
