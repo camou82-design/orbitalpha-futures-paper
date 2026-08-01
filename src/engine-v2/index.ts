@@ -332,6 +332,30 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Tier 1: Market Judgment (authoritative input only)
     const judgment = detectMarketRegime(authoritativeInput);
 
+    // Synchronize computed fallback slopes back into authoritativeInput and input snapshots to prevent downstream 0 overrides
+    const judgmentSlopes = judgment as any;
+    if (judgmentSlopes.slopeSource === "candles_fallback") {
+        authoritativeInput.snapshot.boxHighSlope = judgmentSlopes.bhSlope ?? 0;
+        authoritativeInput.snapshot.boxLowSlope = judgmentSlopes.blSlope ?? 0;
+        authoritativeInput.snapshot.rangeCenterSlope = judgmentSlopes.rcSlope ?? 0;
+        authoritativeInput.snapshot.ema20Slope = judgmentSlopes.e20Slope ?? 0;
+        
+        input.snapshot.boxHighSlope = judgmentSlopes.bhSlope ?? 0;
+        input.snapshot.boxLowSlope = judgmentSlopes.blSlope ?? 0;
+        input.snapshot.rangeCenterSlope = judgmentSlopes.rcSlope ?? 0;
+        input.snapshot.ema20Slope = judgmentSlopes.e20Slope ?? 0;
+
+        console.info(JSON.stringify({
+            event: "V2_SLOPE_DOWNSTREAM_SYNC_PROOF",
+            symbol: String(input.symbol),
+            bhSlope: judgmentSlopes.bhSlope,
+            blSlope: judgmentSlopes.blSlope,
+            rcSlope: judgmentSlopes.rcSlope,
+            e20Slope: judgmentSlopes.e20Slope,
+            source: judgmentSlopes.slopeSource
+        }));
+    }
+
     // Phase 6 Proof: Range Drift Analysis
     if (judgment.regime === "RANGE") {
         emitRangeDriftStateProof(String(input.symbol), judgment, authoritativeInput.snapshot);

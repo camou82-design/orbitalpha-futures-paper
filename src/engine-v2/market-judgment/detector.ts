@@ -82,16 +82,35 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
     let rcSlope = typeof sn.rangeCenterSlope === "number" ? sn.rangeCenterSlope : 0;
     let e20Slope = typeof sn.ema20Slope === "number" ? sn.ema20Slope : 0;
     let source = "snapshot";
-
     // Fallback if snapshot slopes are zero or null
+    console.info(JSON.stringify({
+        event: "V2_SLOPE_FALLBACK_CHECK_PROOF",
+        symbol: input.symbol,
+        bhSlope_snap: bhSlope,
+        blSlope_snap: blSlope,
+        candles_length: sn.candles ? sn.candles.length : 0,
+        eligible: bhSlope === 0 && blSlope === 0 && sn.candles && sn.candles.length >= 40 ? true : false
+    }));
+
     if (bhSlope === 0 && blSlope === 0 && sn.candles && sn.candles.length >= 40) {
         const computed = computeSlopesFromCandles(sn.candles);
+        console.info(JSON.stringify({
+            event: "V2_SLOPE_FALLBACK_COMPUTED_PROOF",
+            symbol: input.symbol,
+            computed: computed ? {
+                bhSlope: computed.bhSlope,
+                blSlope: computed.blSlope,
+                rcSlope: computed.rcSlope,
+                e20Slope: computed.e20Slope,
+                windowSize: computed.windowSize
+            } : null
+        }));
         if (computed) {
             bhSlope = computed.bhSlope;
             blSlope = computed.blSlope;
             rcSlope = computed.rcSlope;
             e20Slope = computed.e20Slope;
-            source = `computed_from_candles_${computed.windowSize}`;
+            source = "candles_fallback";
         }
     }
 
@@ -1357,7 +1376,13 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
                     ((finalSubtype === "EARLY_SHORT_PROBE" || (finalSubtype === "FAST_TREND_SHIFT" && fastShift.direction === "short")) ? "short" : "none")
     }));
 
-    const output: MarketJudgmentOutput = {
+    const output: MarketJudgmentOutput & {
+        bhSlope?: number;
+        blSlope?: number;
+        rcSlope?: number;
+        e20Slope?: number;
+        slopeSource?: string;
+    } = {
         regime,
         regime_final,
         subtype: finalSubtype,
@@ -1365,6 +1390,11 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         shockPhase,
         rangePhase,
         trendPhase,
+        bhSlope: slopeMetadata.bhSlope,
+        blSlope: slopeMetadata.blSlope,
+        rcSlope: slopeMetadata.rcSlope,
+        e20Slope: slopeMetadata.e20Slope,
+        slopeSource: slopeMetadata.source,
         diagnostics: {
             structural_hit_count: whipsaw.structuralHitCount,
             context_hit_count: whipsaw.contextHitCount,
