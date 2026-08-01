@@ -58,4 +58,16 @@ export type V2StateAuthority = Readonly<{
     entryQualityProfiles: EngineV2Input["state"]["entryQualityProfiles"];
     stateAuthoritySource: V2StateAuthoritySource;
     inferredIntentSide: EngineV2Side;
+    liveBalanceReady?: boolean;
+    accountEquityUsdt?: number;
+    availableBalanceUsdt?: number;
+    okxActualPositionsReady?: boolean;
+    actualAccountNotionalUsdtReady?: boolean;
+    okxActualPositions?: Array<{ symbol: string; sizeUsd?: number; notionalUsd?: number; side: string }>;
+    okxPendingOrdersReady?: boolean;
+    okxPendingOrdersNotionalUsdt?: number;
+    okxPendingSymbolNotionalUsdt?: number;
+    balanceFetchedAt?: number;
+    positionsFetchedAt?: number;
+    pendingOrdersFetchedAt?: number;
 }>;

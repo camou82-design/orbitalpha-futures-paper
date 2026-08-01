@@ -1,87 +1,76 @@
-import type { EngineV2Input, EngineV2Position, EngineV2Side } from "../types";
-import type { V2StateAuthority } from "./types";
-
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.resolvePositionStateForSide = resolvePositionStateForSide;
+exports.deriveV2StateAuthority = deriveV2StateAuthority;
 const DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT = 100;
-
-function inferIntentSide(input: EngineV2Input): EngineV2Side {
+function inferIntentSide(input) {
     if (input.symbol === "BTCUSDT") {
-        if (input.state.okxActualSide === "long") return "long";
-        if (input.state.okxActualSide === "short") return "short";
-
+        if (input.state.okxActualSide === "long")
+            return "long";
+        if (input.state.okxActualSide === "short")
+            return "short";
         const rawPositions = Array.isArray(input.state.currentPositions) ? input.state.currentPositions : [];
         const btcPositions = rawPositions.filter(p => p != null && p.symbol === "BTCUSDT");
         const hasLong = btcPositions.some(p => String(p.side).toLowerCase() === "long");
         const hasShort = btcPositions.some(p => String(p.side).toLowerCase() === "short");
-        if (hasLong && !hasShort) return "long";
-        if (hasShort && !hasLong) return "short";
+        if (hasLong && !hasShort)
+            return "long";
+        if (hasShort && !hasLong)
+            return "short";
         if (hasLong && hasShort) {
             const first = btcPositions[0];
             return String(first.side).toLowerCase() === "long" ? "long" : "short";
         }
         return "none";
     }
-
     const shock = input.state.directionalShockState ?? "NONE";
     const s = input.snapshot?.signal ?? "none";
-    let side: EngineV2Side = "none";
-    
-    if (s === "paper_long_candidate") side = "long";
-    else if (s === "paper_short_candidate") side = "short";
+    let side = "none";
+    if (s === "paper_long_candidate")
+        side = "long";
+    else if (s === "paper_short_candidate")
+        side = "short";
     else {
         const emaGap = Number(input.snapshot?.emaGap ?? 0);
-        if (emaGap > 0) side = "long";
-        else if (emaGap < 0) side = "short";
+        if (emaGap > 0)
+            side = "long";
+        else if (emaGap < 0)
+            side = "short";
     }
-
     // DOWN shock에서는 long 배제, UP shock에서는 short 배제
-    if (shock === "DOWN" && side === "long") return "none";
-    if (shock === "UP" && side === "short") return "none";
-    
+    if (shock === "DOWN" && side === "long")
+        return "none";
+    if (shock === "UP" && side === "short")
+        return "none";
     return side;
 }
-
-function toSideLower(p: EngineV2Position): "long" | "short" | "none" {
+function toSideLower(p) {
     const side = String(p.side).toLowerCase();
-    if (side === "long") return "long";
-    if (side === "short") return "short";
+    if (side === "long")
+        return "long";
+    if (side === "short")
+        return "short";
     return "none";
 }
-
-function ledgerNotionalKrw(positions: EngineV2Position[]): number {
-    return Math.round(
-        positions.reduce((acc, p) => acc + Math.max(0, Number(p.sizeUsd ?? 0)), 0)
-    );
+function ledgerNotionalKrw(positions) {
+    return Math.round(positions.reduce((acc, p) => acc + Math.max(0, Number(p.sizeUsd ?? 0)), 0));
 }
-
-export function resolvePositionStateForSide(
-    v2State: V2StateAuthority,
-    side: EngineV2Side
-): Readonly<{
-    side: EngineV2Side;
-    sameSidePosition: EngineV2Position | null;
-    oppositeSidePosition: EngineV2Position | null;
-    hasSameSidePosition: boolean;
-    hasOppositeSidePosition: boolean;
-    currentStage: number;
-}> {
-    const sameSidePosition =
-        side === "long"
-            ? v2State.longPosition
-            : side === "short"
-                ? v2State.shortPosition
-                : null;
-    const oppositeSidePosition =
-        side === "long"
+function resolvePositionStateForSide(v2State, side) {
+    const sameSidePosition = side === "long"
+        ? v2State.longPosition
+        : side === "short"
             ? v2State.shortPosition
-            : side === "short"
-                ? v2State.longPosition
-                : null;
-    const currentStage =
-        side === "long"
-            ? v2State.longStage
-            : side === "short"
-                ? v2State.shortStage
-                : 0;
+            : null;
+    const oppositeSidePosition = side === "long"
+        ? v2State.shortPosition
+        : side === "short"
+            ? v2State.longPosition
+            : null;
+    const currentStage = side === "long"
+        ? v2State.longStage
+        : side === "short"
+            ? v2State.shortStage
+            : 0;
     return {
         side,
         sameSidePosition,
@@ -91,8 +80,7 @@ export function resolvePositionStateForSide(
         currentStage
     };
 }
-
-export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
+function deriveV2StateAuthority(input) {
     const rawPositions = Array.isArray(input.state.currentPositions) ? input.state.currentPositions : [];
     const currentPositions = rawPositions.filter((p) => p != null);
     const symbol = input.symbol;
@@ -102,26 +90,22 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
     const shortPosition = symbolPositions.find((p) => toSideLower(p) === "short") ?? null;
     const longStage = longPosition ? Math.max(1, Number(longPosition.entryStage ?? 1)) : 0;
     const shortStage = shortPosition ? Math.max(1, Number(shortPosition.entryStage ?? 1)) : 0;
-    const sameSidePosition =
-        inferredIntentSide === "long"
-            ? longPosition
-            : inferredIntentSide === "short"
-                ? shortPosition
-                : null;
-    const oppositeSidePosition =
-        inferredIntentSide === "long"
+    const sameSidePosition = inferredIntentSide === "long"
+        ? longPosition
+        : inferredIntentSide === "short"
             ? shortPosition
-            : inferredIntentSide === "short"
-                ? longPosition
-                : null;
-    const currentStage =
-        inferredIntentSide === "long"
-            ? longStage
-            : inferredIntentSide === "short"
-                ? shortStage
-                : 0;
-    const marketSnapshotReady =
-        input.snapshot != null &&
+            : null;
+    const oppositeSidePosition = inferredIntentSide === "long"
+        ? shortPosition
+        : inferredIntentSide === "short"
+            ? longPosition
+            : null;
+    const currentStage = inferredIntentSide === "long"
+        ? longStage
+        : inferredIntentSide === "short"
+            ? shortStage
+            : 0;
+    const marketSnapshotReady = input.snapshot != null &&
         Number.isFinite(input.snapshot.lastPrice) &&
         input.snapshot.lastPrice > 0 &&
         Number.isFinite(input.snapshot.latestCandleClose);
@@ -171,11 +155,13 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
         okxApiSecretPresent: input.state.okxApiSecretPresent === true,
         okxPassphrasePresent: input.state.okxPassphrasePresent === true,
         okxSimulatedTradingHeaderEnabled: input.state.okxSimulatedTradingHeaderEnabled === true,
-        liveMaxOrderNotionalUsdt: ((): number => {
+        liveMaxOrderNotionalUsdt: (() => {
             const raw = input.state.liveMaxOrderNotionalUsdt;
-            if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
+            if (typeof raw === "number" && Number.isFinite(raw) && raw > 0)
+                return raw;
             const configFallback = input.config.okxLiveMaxOrderNotionalUsdt;
-            if (typeof configFallback === "number" && Number.isFinite(configFallback) && configFallback > 0) return configFallback;
+            if (typeof configFallback === "number" && Number.isFinite(configFallback) && configFallback > 0)
+                return configFallback;
             return DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT;
         })(),
         directionalShockState: input.state.directionalShockState ?? "NONE",
