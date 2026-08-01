@@ -5573,6 +5573,30 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    // V2_EARLY_NORMALIZATION: Ensure non-ENTER states do not leak candidate values to execution bridge
+    if (decision.decision !== "ENTER" || decision.side === "none" || decision.signal === "NONE") {
+        if (!decision.metadata) {
+            decision.metadata = {};
+        }
+        decision.metadata.candidate_side = decision.side;
+        decision.metadata.candidate_stageMarginKrw = decision.risk.stageMarginKrw;
+        decision.metadata.candidate_exposureNotionalKrw = decision.risk.exposureNotionalKrw;
+        decision.metadata.candidate_finalOrderNotionalUsdt = decision.risk.finalOrderNotionalUsdt;
+        if (decision.lifecycleAuthority) {
+            decision.metadata.candidate_stopPrice = decision.lifecycleAuthority.newStopPrice;
+            decision.metadata.candidate_invalidationPx = decision.lifecycleAuthority.invalidationPx;
+            decision.lifecycleAuthority.newStopPrice = undefined;
+            decision.lifecycleAuthority.invalidationPx = undefined;
+        }
+
+        decision.side = "none";
+        decision.risk.stageMarginKrw = 0;
+        decision.risk.finalOrderNotionalUsdt = 0;
+        decision.risk.exposureNotionalKrw = 0;
+        decision.committedRiskPlan = undefined;
+        decision.executionAction = "NONE";
+    }
+
     console.info(JSON.stringify({
         event: "V2_ENTRY_EXECUTION_BRIDGE_PROOF",
         symbol: String(input.symbol),
@@ -5784,12 +5808,14 @@ export function adaptV2Input(
         pendingOrdersFetchedAt?: number;
     },
     v1Result: LegacyResultAdapter,
-    recentCandles?: import("../models/types").Candle[]
+    recentCandles?: import("../models/types").Candle[],
+    evaluationMode?: "authoritative" | "diagnostic"
 ): EngineV2Input {
     const htfCandlesRef = snapshot.htf_candles;
     return {
         symbol,
         now,
+        evaluationMode,
         htf_candles: htfCandlesRef,
         snapshot: {
             lastPrice: snapshot.lastPrice,

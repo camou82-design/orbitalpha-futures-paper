@@ -1528,6 +1528,7 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
   const v2Env = resolveSymbolDecisionEnvelope({
     symbol: sn.symbol,
     fetchedAt: input.now,
+    evaluationMode: "diagnostic",
     snapshot: {
       lastPrice: sn.lastPrice,
       latestCandleClose: sn.latestCandleClose,

@@ -223,7 +223,11 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
                     lastProcessedCycle: 0
                 });
             }
-            const st = globalShockStates.get(sym)!;
+
+            const originalSt = globalShockStates.get(sym)!;
+            const isDiagnostic = (input as any).evaluationMode === "diagnostic";
+            const st = isDiagnostic ? { ...originalSt } : originalSt;
+
             const nowMs = input.now || Date.now();
 
             const candles = input.candles || input.snapshot?.candles || [];
@@ -304,7 +308,7 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
                     st.candidateStartedAt = null;
                     st.lastChangedAt = nowMs;
                 } else {
-                    // Normal activation flow (requires 2 consecutive raw signals in same direction, 30s elapsed, minimum move)
+                    // Normal activation flow
                     if (st.candidateDirection !== st.rawDirection) {
                         st.candidateDirection = st.rawDirection;
                         st.candidateCount = 1;

@@ -4326,6 +4326,7 @@ export class PaperEngine {
       const envelope = resolveSymbolDecisionEnvelope({
         symbol: sym,
         fetchedAt,
+        evaluationMode: "authoritative",
         snapshot: buildV2SnapshotBridge(snapForDecision!),
         legacy: buildV2LegacyBridge(res),
         config: buildV2ConfigBridge(this.config),
@@ -18027,6 +18028,7 @@ function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapshot {
     ema60Slope: snap.ema60Slope ?? 0,
     atrExpansion: snap.atrExpansion ?? 0,
     volumeExpansion: snap.volumeExpansion ?? 0,
+    candles: snap.candles ?? [],
     htf_candles: snap.htf_candles
   };
 }

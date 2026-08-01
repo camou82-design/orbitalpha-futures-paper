@@ -229,6 +229,7 @@ export interface LegacyResultAdapter {
 
 export interface EngineV2Input {
     symbol: MarketSymbol;
+    evaluationMode?: "authoritative" | "diagnostic";
     snapshot: EngineV2SnapshotAdapter;
     config: EngineV2ConfigAdapter;
     state: {
@@ -581,6 +582,7 @@ export interface V2BridgeState {
 export interface V2BridgeInput {
     symbol: MarketSymbol;
     fetchedAt: number;
+    evaluationMode?: "authoritative" | "diagnostic";
     snapshot: V2BridgeSnapshot;
     legacy: V2BridgeLegacyDecision;
     config: V2BridgeConfig;

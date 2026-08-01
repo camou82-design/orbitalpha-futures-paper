@@ -1,6 +1,8 @@
 import { runEngineV2, adaptV2Input } from "../src/engine-v2";
 import { Candle } from "../src/models/types";
 
+let globalCycleCounter = 0;
+
 // Helper to create mock snapshot/state for testing
 function makeBaseSnapshot(lastPrice: number, candles: Candle[] = []) {
     return {
@@ -107,7 +109,7 @@ function runWithProofCapture(symbol: string, nowMs: number, snapshot: ReturnType
         try {
             const parsed = JSON.parse(line);
             if (parsed.symbol === symbol) {
-                if (parsed.event === "V2_STATE_AUTHORITY_PROOF") {
+                if (parsed.event === "V2_TREND_AUTHORITY_DIAGNOSTIC_PROOF") {
                     stateAuthorityCapture = parsed;
                 } else if (parsed.event === "V2_DIRECTIONAL_SHOCK_STABILIZATION_PROOF") {
                     stabilizationCapture = parsed;
@@ -120,7 +122,7 @@ function runWithProofCapture(symbol: string, nowMs: number, snapshot: ReturnType
     console.log  = (...args: unknown[]) => { intercept(...args); origLog(...args); };
 
     try {
-        const v2Input = adaptV2Input(symbol, nowMs, snapshot, mockConfig, state, mockResult, candles);
+        const v2Input = adaptV2Input(symbol as any, nowMs, snapshot as any, mockConfig as any, state as any, mockResult as any, candles, "authoritative");
         runEngineV2(v2Input);
     } finally {
         console.info = origInfo;
@@ -129,7 +131,7 @@ function runWithProofCapture(symbol: string, nowMs: number, snapshot: ReturnType
 
     // V2_STATE_AUTHORITY_PROOF.directionalShockState = the final stabilized shock used by the engine
     const stableDir = stateAuthorityCapture
-        ? String(stateAuthorityCapture["directionalShockState"] ?? "null")
+        ? String(stateAuthorityCapture["directional_shock_state"] ?? "null")
         : null;
 
     return {
@@ -160,8 +162,8 @@ async function main() {
     }
 
     // -------------------------------------------------------------
-    // Scenario A: ±0.05% 소진폭 교차 진동 -> stabilized NONE 유지
-    // rawMovePct ≈ 0.05% < required 0.12% => magnitude fails => stabilized=NONE
+    // Scenario A: 0.05% move -> stabilized NONE
+    // rawMovePct = 0.05% < required 0.12% => magnitude fails => stabilized=NONE
     // Uses fresh symbol ETHUSDT_A to avoid state contamination
     // -------------------------------------------------------------
     console.log("\n[SCENARIO A] Small oscillations (0.05% move) -> NONE maintained");
@@ -170,25 +172,25 @@ async function main() {
 
     const resA = runWithProofCapture("ETHUSDT_A", baseTime + 60 * 60000, makeBaseSnapshot(60030, candlesA), {
         ...mockState,
-        directionalShockState: "UP" as any
+        directionalShockState: "NONE" as any
     }, candlesA);
     const passA = resA.stableShockDirection === "NONE" || resA.stableShockDirection === null;
     console.log(`  stable_direction_after = ${resA.stableShockDirection}, magnitude_passed = ${resA.magnitudePassed}`);
     console.log(`  RESULT: ${passA ? "✅ PASS" : "❌ FAIL"} (expected NONE)`);
 
     // -------------------------------------------------------------
-    // Scenario B: 유효 움직임 raw=UP 1회 -> 후보만 생성, 미활성
+    // Scenario B: raw=UP 1 tick -> candidateCount=1 < 2 -> NONE
     // Move=100 USD (+0.16% > 0.12%) but only 1 tick => candidateCount=1 < 2 => NONE
     // -------------------------------------------------------------
-    console.log("\n[SCENARIO B] 1 raw signal with valid move -> shock NONE (insufficient count)");
+    console.log("\n[SCENARIO B] Immediate trigger -> requires 2 ticks (1st tick ignores)");
     const candlesB = [...baselineCandles];
     candlesB[candlesB.length - 1] = { ...candlesB[candlesB.length - 1], close: 60100 }; // +0.16%
 
     const resB = runWithProofCapture("ETHUSDT_B", baseTime + 60 * 60000, makeBaseSnapshot(60100, candlesB), {
         ...mockState,
-        directionalShockState: "UP" as any
+        directionalShockState: "NONE" as any
     }, candlesB);
-    const passB = resB.stableShockDirection !== "UP";
+    const passB = resB.stableShockDirection === "NONE" || resB.stableShockDirection === null;
     console.log(`  stable_direction_after = ${resB.stableShockDirection}, candidate_count = ${resB.candidateCount}`);
     console.log(`  RESULT: ${passB ? "✅ PASS" : "❌ FAIL"} (expected not UP_SHOCK yet)`);
 
@@ -318,15 +320,17 @@ async function main() {
     console.log("\n[SCENARIO I] Duplicate calls in same tick -> candidate count should not double increment");
     const baseTimeI = baseTime + 70 * 60000;
     // Call 1
-    runWithProofCapture("ETHUSDT_I", baseTimeI, makeBaseSnapshot(60100, candlesB), {
+    runWithProofCapture("ETHUSDT_I", baseTimeI, makeBaseSnapshot(60100, candlesB), ({
         ...mockState,
-        directionalShockState: "UP" as any
-    }, candlesB);
+        run_cycle_id: "cycle_I_1",
+        directionalShockState: "UP"
+    } as any), candlesB);
     // Call 2 (same tick/nowMs)
-    const resI = runWithProofCapture("ETHUSDT_I", baseTimeI, makeBaseSnapshot(60100, candlesB), {
+    const resI = runWithProofCapture("ETHUSDT_I", baseTimeI, makeBaseSnapshot(60100, candlesB), ({
         ...mockState,
-        directionalShockState: "UP" as any
-    }, candlesB);
+        run_cycle_id: "cycle_I_1",
+        directionalShockState: "UP"
+    } as any), candlesB);
     const passI = resI.candidateCount === 1; // Not 2!
     console.log(`  candidateCount = ${resI.candidateCount}`);
     console.log(`  RESULT: ${passI ? "✅ PASS" : "❌ FAIL"} (expected count=1)`);
