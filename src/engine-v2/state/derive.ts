@@ -15,6 +15,7 @@ interface ShockState {
     rawMovePct: number;
     requiredMovePct: number;
     emergencyBypass: boolean;
+    lastProcessedCycle: number | string;
 }
 
 const globalShockStates = new Map<string, ShockState>();
@@ -40,7 +41,7 @@ function inferIntentSide(input: EngineV2Input): EngineV2Side {
     const shock = input.state.directionalShockState ?? "NONE";
     const s = input.snapshot?.signal ?? "none";
     let side: EngineV2Side = "none";
-    
+
     if (s === "paper_long_candidate") side = "long";
     else if (s === "paper_short_candidate") side = "short";
     else {
@@ -52,7 +53,7 @@ function inferIntentSide(input: EngineV2Input): EngineV2Side {
     // DOWN shock에서는 long 배제, UP shock에서는 short 배제
     if (shock === "DOWN" && side === "long") return "none";
     if (shock === "UP" && side === "short") return "none";
-    
+
     return side;
 }
 
@@ -203,7 +204,7 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
             shockEmergencyBypass: boolean;
         } => {
             const raw = (input.state.directionalShockState ?? "NONE") as "UP" | "DOWN" | "NONE" | "UNKNOWN";
-            
+
             // Get symbol-specific state store or initialize
             const sym = String(symbol);
             if (!globalShockStates.has(sym)) {
@@ -218,17 +219,33 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
                     lastChangedAt: Date.now(),
                     rawMovePct: 0,
                     requiredMovePct: 0,
-                    emergencyBypass: false
+                    emergencyBypass: false,
+                    lastProcessedCycle: 0
                 });
             }
             const st = globalShockStates.get(sym)!;
             const nowMs = input.now || Date.now();
 
+            const candles = input.candles || input.snapshot?.candles || [];
+            const latestCandleTs = candles.length > 0 ? Number(candles[candles.length - 1]?.ts ?? 0) : 0;
+            const cycleKey =
+                (input as any).runCycleId ??
+                (input.state as any)?.run_cycle_id ??
+                (input.snapshot as any)?.fetchedAt ??
+                (input.snapshot as any)?.snapshot_fetched_at ??
+                (latestCandleTs > 0 ? latestCandleTs : null) ??
+                nowMs;
+
+            const isNewCycle = st.lastProcessedCycle !== cycleKey;
+            st.lastProcessedCycle = cycleKey;
+
             // Setup variables
             st.rawDirection = raw === "UNKNOWN" ? "NONE" : raw;
+            if (st.rawDirection !== "NONE") {
+                st.neutralCount = 0;
+            }
 
             // Calculate raw move magnitude if candles are available
-            const candles = input.candles || input.snapshot?.candles || [];
             let rawMovePct = 0;
             if (candles.length >= 16) {
                 const latestClose = candles[candles.length - 1].close;
@@ -249,13 +266,16 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
             if (candles.length >= 6) {
                 const latestClose = candles[candles.length - 1].close;
                 const prevClose = candles[candles.length - 6].close;
-                const move5m = Math.abs((latestClose - prevClose) / prevClose);
+                const signedMove5m = (latestClose - prevClose) / prevClose;
+                const move5m = Math.abs(signedMove5m);
                 const volumeExpansion = input.snapshot?.volumeExpansion ?? 1.0;
                 const atrExpansion = input.snapshot?.atrExpansion ?? 1.0;
-                
+
                 const atrSeverity = atr > 0 ? Math.abs(latestClose - prevClose) / atr : 0;
                 if (move5m >= 0.0035 || atrSeverity >= 1.8 || (volumeExpansion >= 2.5 && atrExpansion >= 1.4)) {
-                    emergencyBypass = true;
+                    if ((st.rawDirection === "UP" && signedMove5m > 0) || (st.rawDirection === "DOWN" && signedMove5m < 0)) {
+                        emergencyBypass = true;
+                    }
                 }
             }
             st.emergencyBypass = emergencyBypass;
@@ -266,20 +286,22 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
 
             if (st.rawDirection !== "NONE") {
                 // If there's an active shock and raw direction has flipped to the opposite
-                const isOpposite = (prevActive === "UP" && st.rawDirection === "DOWN") || 
+                const isOpposite = (prevActive === "UP" && st.rawDirection === "DOWN") ||
                                    (prevActive === "DOWN" && st.rawDirection === "UP");
-                
+
                 if (isOpposite && !st.emergencyBypass) {
                     // Prevent direct flip without emergency bypass -> treat it as normal candidate flow from NONE
                     activationBlockReason = "DIRECT_FLIP_PROHIBITED_WITHOUT_BYPASS";
                 } else if (st.emergencyBypass) {
                     // Emergency bypass: instantly activate
-                    st.activeDirection = st.rawDirection;
+                    if (st.activeDirection !== st.rawDirection) {
+                        st.activeDirection = st.rawDirection;
+                        st.activatedAt = nowMs;
+                    }
                     st.candidateDirection = "NONE";
                     st.candidateCount = 0;
                     st.neutralCount = 0;
                     st.candidateStartedAt = null;
-                    st.activatedAt = nowMs;
                     st.lastChangedAt = nowMs;
                 } else {
                     // Normal activation flow (requires 2 consecutive raw signals in same direction, 30s elapsed, minimum move)
@@ -287,7 +309,7 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
                         st.candidateDirection = st.rawDirection;
                         st.candidateCount = 1;
                         st.candidateStartedAt = nowMs;
-                    } else {
+                    } else if (isNewCycle) {
                         st.candidateCount++;
                     }
 
@@ -295,8 +317,10 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
                     const magnitudePassed = st.rawMovePct >= st.requiredMovePct;
 
                     if (st.candidateCount >= 2 && elapsedCand && magnitudePassed) {
-                        st.activeDirection = st.rawDirection;
-                        st.activatedAt = nowMs;
+                        if (st.activeDirection !== st.rawDirection) {
+                            st.activeDirection = st.rawDirection;
+                            st.activatedAt = nowMs;
+                        }
                         st.lastChangedAt = nowMs;
                     } else {
                         if (st.candidateCount < 2) activationBlockReason = "INSUFFICIENT_CONSECUTIVE_RAW_COUNT";
@@ -307,9 +331,12 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
             } else {
                 // Raw is NONE: evaluation for release/deactivation
                 if (st.activeDirection !== "NONE") {
-                    st.neutralCount++;
-                    const elapsedRelease = st.activatedAt ? (nowMs - st.activatedAt) >= 45000 : false;
-                    if (st.neutralCount >= 2 && elapsedRelease) {
+                    if (isNewCycle) {
+                        st.neutralCount++;
+                    }
+                    const elapsedActive = st.activatedAt ? (nowMs - st.activatedAt) >= 45000 : false;
+
+                    if (st.neutralCount >= 2 && elapsedActive) {
                         st.activeDirection = "NONE";
                         st.candidateDirection = "NONE";
                         st.candidateCount = 0;
