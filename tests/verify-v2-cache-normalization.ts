@@ -183,7 +183,10 @@ async function runTests() {
     const resSymB = runEngineV2(inputSymB);
     assertStrict(resSymB.internal.judgment.subtype !== "RANGE_DRIFT_UP", "Symbol B is independent of Symbol A's cache");
 
-    // F. 동일 심볼로 1,000개 cycle 반복 후 캐시 항목 수 1개 유지
+    // F. Map clear
+    marketJudgmentCacheBySymbol.clear();
+
+    // BTCUSDT만 1,000 cycle 실행
     for (let i = 0; i < 1000; i++) {
         const iterInput = adaptV2Input(
             symbolA, now, snapAuth as any, mockConfig as any, mockState as any, 
@@ -192,8 +195,20 @@ async function runTests() {
         );
         runEngineV2(iterInput);
     }
-    // G. BTC와 ETH 반복 후 캐시 항목 수 최대 2개 유지
-    assertStrict(marketJudgmentCacheBySymbol.size <= 2, `Cache bounded size validation (Size: ${marketJudgmentCacheBySymbol.size} <= 2)`);
+    
+    // size === 1 확인
+    assertStrict(marketJudgmentCacheBySymbol.size === 1, `Cache size should be exactly 1 after 1,000 BTC runs (Actual: ${marketJudgmentCacheBySymbol.size})`);
+
+    // ETHUSDT 실행
+    const inputSymBEth = adaptV2Input(
+        symbolB, now, snapAuth as any, mockConfig as any, mockState as any, 
+        { regime: "RANGE", decision: "SKIP", side: "none", isBlocked: true } as any, 
+        [], "authoritative", "cycle_eth_test"
+    );
+    runEngineV2(inputSymBEth);
+
+    // size === 2 확인
+    assertStrict(marketJudgmentCacheBySymbol.size === 2, `Cache size should be exactly 2 after BTC + ETH runs (Actual: ${marketJudgmentCacheBySymbol.size})`);
 
     // H. 0캔들 먼저 후 120캔들 -> 캐시 승격
     const hCycle = "cycle_promote_test";
@@ -314,6 +329,50 @@ async function runTests() {
     assertStrict(enterDecision.risk.finalOrderNotionalUsdt === 100, `[ENTER] finalOrderNotionalUsdt is preserved`);
     assertStrict(enterDecision.lifecycleAuthority.newStopPrice === 50000, `[ENTER] newStopPrice is preserved`);
     assertStrict(enterDecision.committedRiskPlan !== undefined, `[ENTER] committedRiskPlan is preserved`);
+
+    console.log("\n--- Testing EXIT Preservation ---");
+    const exitDecision = {
+        decision: "EXIT",
+        side: "long",
+        executionAction: "EXIT",
+        risk: {
+            stageMarginKrw: 10000,
+            exposureNotionalKrw: 50000,
+            finalOrderNotionalUsdt: 100,
+            requestedOrderNotionalUsdt: 150,
+            sizeMultiplier: 1,
+        },
+        lifecycleAuthority: {
+            newStopPrice: 50000,
+            takeProfitPlan: "T1_T2",
+        },
+        committedRiskPlan: { somePlan: true },
+        // EXIT-specific properties we want to ensure are not dropped manually (they're not strictly inside risk or lifecycleAuthority, but exist on internal or envelope in practice, or metadata). 
+        // We will just test that whatever is inside isn't cleared if it shouldn't be.
+        v2ExitAuthority: {
+            exitRequired: true,
+            exitReason: "TREND_REVERSAL"
+        },
+        v2PartialAuthority: {
+            shouldPartial: true,
+            partialAction: "REDUCE_50"
+        }
+    } as any;
+    
+    normalizeNonEnterDecision(exitDecision);
+    
+    assertStrict(exitDecision.side === "none", `[EXIT] side is normalized`);
+    assertStrict(exitDecision.executionAction === "NONE", `[EXIT] executionAction is normalized`);
+    assertStrict(exitDecision.risk.stageMarginKrw === 0, `[EXIT] stageMarginKrw is zeroed`);
+    assertStrict(exitDecision.risk.exposureNotionalKrw === 0, `[EXIT] exposureNotionalKrw is zeroed`);
+    assertStrict(exitDecision.committedRiskPlan === undefined, `[EXIT] committedRiskPlan is undefined`);
+    assertStrict(exitDecision.lifecycleAuthority.takeProfitPlan === "T1_T2", `[EXIT] takeProfitPlan is preserved`);
+    
+    // Assert EXIT properties preserved
+    assertStrict(exitDecision.v2ExitAuthority.exitRequired === true, `[EXIT] v2ExitAuthority.exitRequired is preserved`);
+    assertStrict(exitDecision.v2ExitAuthority.exitReason === "TREND_REVERSAL", `[EXIT] v2ExitAuthority.exitReason is preserved`);
+    assertStrict(exitDecision.v2PartialAuthority.shouldPartial === true, `[EXIT] v2PartialAuthority.shouldPartial is preserved`);
+    assertStrict(exitDecision.v2PartialAuthority.partialAction === "REDUCE_50", `[EXIT] v2PartialAuthority.partialAction is preserved`);
 
     console.log(`\n=== RESULTS: ${passCount} PASSED, ${failCount} FAILED ===`);
     if (failCount > 0) {

@@ -15,3 +15,4 @@ scratch_diff_paper.txt
 tsc_output*.txt
 final_*.txt
 brace_counter*.js
+*.tsbuildinfo

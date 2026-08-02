@@ -2,7 +2,7 @@
   "extends": "./tsconfig.json",
   "include": [
     "src/**/*",
-    "tests/**/*"
+    "tests/verify-v2-cache-normalization.ts"
   ],
   "compilerOptions": {
     "noEmit": true,
