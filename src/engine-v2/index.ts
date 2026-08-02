@@ -55,7 +55,12 @@ const symbolLastProbeAtMap = new Map<string, number>();
 const symbolLastProbeSideMap = new Map<string, string>();
 const symbolLastProbeQualityMap = new Map<string, number>();
 const symbolLastProbeStructureMap = new Map<string, string>();
-const marketJudgmentCache = new Map<string, ReturnType<typeof detectMarketRegime>>();
+export interface MarketJudgmentCache {
+    runCycleId: string;
+    judgment: ReturnType<typeof detectMarketRegime>;
+    candleCount: number;
+}
+export const marketJudgmentCacheBySymbol = new Map<string, MarketJudgmentCache>();
 const symbolHasPositionMap = new Map<string, boolean>();
 const symbolLastDeadlockAuditLoggedAtMap = new Map<string, number>();
 const symbolDeadlockAuditCycleMap = new Map<string, number>();
@@ -331,13 +336,36 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     };
 
     // Tier 1: Market Judgment (authoritative input only)
-        let judgment: ReturnType<typeof detectMarketRegime>;
-    const cacheKey = input.run_cycle_id ? `${input.symbol}_${input.run_cycle_id}` : null;
-    if (cacheKey && marketJudgmentCache.has(cacheKey)) {
-        judgment = marketJudgmentCache.get(cacheKey)!;
+    let judgment: ReturnType<typeof detectMarketRegime>;
+    const symbol = authoritativeInput.symbol;
+    const runCycleId = authoritativeInput.run_cycle_id;
+    
+    // Count effective candles to measure cache "quality"
+    const effectiveCandles = Array.isArray(authoritativeInput.snapshot.candles) 
+        ? authoritativeInput.snapshot.candles.length 
+        : 0;
+    
+    let effectiveHtfCandles = 0;
+    if (authoritativeInput.htf_candles) {
+        for (const k of ["5m", "15m", "1h", "4h", "1d"] as const) {
+            const arr = authoritativeInput.htf_candles[k];
+            if (Array.isArray(arr)) effectiveHtfCandles += arr.length;
+        }
+    }
+    const totalCandleCount = effectiveCandles + effectiveHtfCandles;
+
+    const cached = runCycleId ? marketJudgmentCacheBySymbol.get(symbol) : undefined;
+    if (cached && cached.runCycleId === runCycleId && totalCandleCount <= cached.candleCount) {
+        judgment = cached.judgment;
     } else {
         judgment = detectMarketRegime(authoritativeInput);
-        if (cacheKey) marketJudgmentCache.set(cacheKey, judgment);
+        if (runCycleId) {
+            marketJudgmentCacheBySymbol.set(symbol, {
+                runCycleId,
+                judgment,
+                candleCount: totalCandleCount
+            });
+        }
     }
 
     // Synchronize computed fallback slopes back into authoritativeInput and input snapshots to prevent downstream 0 overrides
@@ -5706,22 +5734,23 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     })();
     decision.executionAction = finalExecutionAction;
 
-    // Requirement 1: WAIT/HOLD/SKIP/REJECT이며 최종 side가 none인 모든 경로에서 envelope 최종 정규화
-    const isNeutralDecision = 
-        decision.decision === ("WAIT" as any) || 
-        decision.decision === "HOLD" || 
-        decision.decision === "SKIP" || 
-        decision.decision === "REJECT" || 
-        decision.decision === "DISABLED";
-    
-    if (isNeutralDecision || decision.side === "none" || !decision.side) {
+    // Requirement 1: Non-ENTER 정규화
+    normalizeNonEnterDecision(decision);
+
+    return { decision, internal };
+}
+
+export function normalizeNonEnterDecision(decision: EngineV2Decision): void {
+    if (decision.decision !== "ENTER") {
         decision.side = "none";
         decision.executionAction = "NONE";
         
         if (decision.risk) {
             decision.risk.stageMarginKrw = 0;
-            decision.risk.sizeMultiplier = 0;
             decision.risk.exposureNotionalKrw = 0;
+            decision.risk.finalOrderNotionalUsdt = 0;
+            decision.risk.requestedOrderNotionalUsdt = 0;
+            decision.risk.sizeMultiplier = 0; 
         }
         
         if (decision.lifecycleAuthority) {
@@ -5741,8 +5770,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         
         decision.committedRiskPlan = undefined;
     }
-
-    return { decision, internal };
 }
 
 /**

@@ -1,4 +1,4 @@
-import { runEngineV2, adaptV2Input, marketJudgmentCacheBySymbol } from "../src/engine-v2";
+import { runEngineV2, adaptV2Input, marketJudgmentCacheBySymbol, normalizeNonEnterDecision } from "../src/engine-v2";
 import { Candle } from "../src/models/types";
 
 let passCount = 0;
@@ -248,29 +248,72 @@ async function runTests() {
     const nonEnterStates = ["SKIP", "HOLD", "REJECT", "DISABLED", "EXIT"] as const;
 
     for (const state of nonEnterStates) {
-        const neInput = adaptV2Input(
-            symbolA, now, snapDiagUp as any, mockConfig as any, mockState as any, 
-            { regime: "RANGE", decision: "SKIP", side: "none", isBlocked: true } as any, 
-            [], "diagnostic", `ne_cycle_${state}`
-        );
+        // Create a dirty decision with risk sizing left behind
+        const dirtyDecision = {
+            decision: state,
+            side: "long",
+            executionAction: "ENTER",
+            risk: {
+                stageMarginKrw: 10000,
+                exposureNotionalKrw: 50000,
+                finalOrderNotionalUsdt: 100,
+                requestedOrderNotionalUsdt: 150,
+                sizeMultiplier: 1,
+            },
+            lifecycleAuthority: {
+                newStopPrice: 50000,
+                suggestedStopPrice: 49000,
+                takeProfitPlan: "T1_T2", // this should be preserved!
+                invalidationPx: 48000
+            },
+            committedRiskPlan: { somePlan: true }
+        } as any;
         
-        const neRes = runEngineV2(neInput);
+        normalizeNonEnterDecision(dirtyDecision);
         
-        // We artificially force the decision to the non-enter state to verify normalization block
-        // Wait! The normalization block runs INSIDE runEngineV2! We can't inject it here.
-        // But runEngineV2 with 0 candles usually naturally yields REJECT or DISABLED due to missing data.
+        assertStrict(dirtyDecision.side === "none", `[${state}] side is none`);
+        assertStrict(dirtyDecision.executionAction === "NONE", `[${state}] executionAction is NONE`);
+        assertStrict(dirtyDecision.risk.stageMarginKrw === 0, `[${state}] stageMarginKrw is 0`);
+        assertStrict(dirtyDecision.risk.exposureNotionalKrw === 0, `[${state}] exposureNotionalKrw is 0`);
+        assertStrict(dirtyDecision.risk.finalOrderNotionalUsdt === 0, `[${state}] finalOrderNotionalUsdt is 0`);
+        assertStrict(dirtyDecision.risk.requestedOrderNotionalUsdt === 0, `[${state}] requestedOrderNotionalUsdt is 0`);
+        assertStrict(dirtyDecision.committedRiskPlan === undefined, `[${state}] committedRiskPlan is undefined`);
         
-        // Instead of injecting, let's just assert the natural output of 0 candles which is REJECT.
-        if (neRes.decision.decision !== "ENTER") {
-            assertStrict(neRes.decision.side === "none", `[${neRes.decision.decision}] side is none`);
-            assertStrict(neRes.decision.executionAction === "NONE", `[${neRes.decision.decision}] executionAction is NONE`);
-            assertStrict(neRes.decision.risk.stageMarginKrw === 0, `[${neRes.decision.decision}] stageMarginKrw is 0`);
-            assertStrict(neRes.decision.risk.exposureNotionalKrw === 0, `[${neRes.decision.decision}] exposureNotionalKrw is 0`);
-            assertStrict(neRes.decision.risk.finalOrderNotionalUsdt === 0, `[${neRes.decision.decision}] finalOrderNotionalUsdt is 0`);
-            assertStrict(neRes.decision.risk.requestedOrderNotionalUsdt === 0, `[${neRes.decision.decision}] requestedOrderNotionalUsdt is 0`);
-            assertStrict(neRes.decision.committedRiskPlan === undefined, `[${neRes.decision.decision}] committedRiskPlan is undefined`);
-        }
+        // Preserve checks
+        assertStrict(dirtyDecision.lifecycleAuthority.takeProfitPlan === "T1_T2", `[${state}] takeProfitPlan is preserved`);
+        assertStrict(dirtyDecision.lifecycleAuthority.newStopPrice === undefined, `[${state}] newStopPrice is removed`);
     }
+
+    console.log("\n--- Testing ENTER Preservation ---");
+    const enterDecision = {
+        decision: "ENTER",
+        side: "long",
+        executionAction: "ENTER",
+        risk: {
+            stageMarginKrw: 10000,
+            exposureNotionalKrw: 50000,
+            finalOrderNotionalUsdt: 100,
+            requestedOrderNotionalUsdt: 150,
+            sizeMultiplier: 1,
+        },
+        lifecycleAuthority: {
+            newStopPrice: 50000,
+            suggestedStopPrice: 49000,
+            takeProfitPlan: "T1_T2",
+            invalidationPx: 48000
+        },
+        committedRiskPlan: { somePlan: true }
+    } as any;
+    
+    normalizeNonEnterDecision(enterDecision);
+    
+    assertStrict(enterDecision.side === "long", `[ENTER] side is preserved`);
+    assertStrict(enterDecision.executionAction === "ENTER", `[ENTER] executionAction is preserved`);
+    assertStrict(enterDecision.risk.stageMarginKrw === 10000, `[ENTER] stageMarginKrw is preserved`);
+    assertStrict(enterDecision.risk.exposureNotionalKrw === 50000, `[ENTER] exposureNotionalKrw is preserved`);
+    assertStrict(enterDecision.risk.finalOrderNotionalUsdt === 100, `[ENTER] finalOrderNotionalUsdt is preserved`);
+    assertStrict(enterDecision.lifecycleAuthority.newStopPrice === 50000, `[ENTER] newStopPrice is preserved`);
+    assertStrict(enterDecision.committedRiskPlan !== undefined, `[ENTER] committedRiskPlan is preserved`);
 
     console.log(`\n=== RESULTS: ${passCount} PASSED, ${failCount} FAILED ===`);
     if (failCount > 0) {
