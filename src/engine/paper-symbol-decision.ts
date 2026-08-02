@@ -971,6 +971,7 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   logger?: { info: (event: string, payload?: any) => void };
   /** `paper-engine` ?쇱슦??activeEngine ??internal V2 MODE瑜?envelope怨??숆린(RANGE 媛뺤젣 engine_v2). */
   routingActiveEngine?: PaperEngineRoutingKind | null;
+  runCycleId?: string;
 }>;
 
 /** ?곸쐞 ?쒖옣 紐⑤뱶쨌?붿쭊쨌?좉퇋 諛⑺뼢 ?덉슜 ???쒓렇???덉씠??TREND-UP ?뺣젹(???꾨낫 ?듭젣)??*/
@@ -1528,7 +1529,7 @@ function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): Entr
   const v2Env = resolveSymbolDecisionEnvelope({
     symbol: sn.symbol,
     fetchedAt: input.now,
-      runCycleId: (input as any).runCycleId ?? String(input.now),
+      runCycleId: input.runCycleId,
       evaluationMode: "diagnostic",
     snapshot: {
       lastPrice: sn.lastPrice,
@@ -4895,5 +4896,6 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
     }
   }
 }
+
 
 

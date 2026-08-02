@@ -55,6 +55,7 @@ const symbolLastProbeAtMap = new Map<string, number>();
 const symbolLastProbeSideMap = new Map<string, string>();
 const symbolLastProbeQualityMap = new Map<string, number>();
 const symbolLastProbeStructureMap = new Map<string, string>();
+const marketJudgmentCache = new Map<string, ReturnType<typeof detectMarketRegime>>();
 const symbolHasPositionMap = new Map<string, boolean>();
 const symbolLastDeadlockAuditLoggedAtMap = new Map<string, number>();
 const symbolDeadlockAuditCycleMap = new Map<string, number>();
@@ -330,7 +331,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     };
 
     // Tier 1: Market Judgment (authoritative input only)
-    const judgment = detectMarketRegime(authoritativeInput);
+        let judgment: ReturnType<typeof detectMarketRegime>;
+    const cacheKey = input.run_cycle_id ? `${input.symbol}_${input.run_cycle_id}` : null;
+    if (cacheKey && marketJudgmentCache.has(cacheKey)) {
+        judgment = marketJudgmentCache.get(cacheKey)!;
+    } else {
+        judgment = detectMarketRegime(authoritativeInput);
+        if (cacheKey) marketJudgmentCache.set(cacheKey, judgment);
+    }
 
     // Synchronize computed fallback slopes back into authoritativeInput and input snapshots to prevent downstream 0 overrides
     const judgmentSlopes = judgment as any;
@@ -3981,15 +3989,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             dataSynced &&
             !positionMismatch;
 
-        if (!liveReadinessPassed && isLiveSignedOrderAttempt) {
-            console.log("DEBUG liveReadinessPassed FALSE. Flags:", {
-                liveBalanceReady, accountEquityUsdt, availableBalanceUsdt,
-                okxActualPositionsReady, actualAccountNotionalUsdtReady,
-                okxPendingOrdersReady, okxPositionsValid, pendingOrdersValid,
-                timestampsPresent, dataFresh, dataSynced, positionMismatch,
-                balanceFetchedAt, positionsFetchedAt, pendingOrdersFetchedAt, nowMs: Date.now()
-            });
-        }
+
 
         if (isLiveSignedOrderAttempt && !limitsConfigured) {
             min_order_check_passed = false;

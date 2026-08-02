@@ -43,9 +43,18 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         let finalHardBlockReason = hardBlockReason;
         let finalAuthorityReason = "engine_v2_mode_uses_v2_execution_envelope";
 
+        let finalExposureNotionalKrw = exposureNotionalKrw;
+        let finalNewStopPrice = newStopPrice;
+        let finalInvalidationPx = args.invalidationPx;
+        let finalTakeProfitPlan = args.takeProfitPlan;
+
         if (finalDecision !== "ENTER") {
             finalSide = "none";
             finalStageMarginKrw = 0;
+            finalExposureNotionalKrw = 0;
+            finalNewStopPrice = undefined;
+            finalInvalidationPx = undefined;
+            finalTakeProfitPlan = undefined;
         }
 
         let finalPrimaryMissingCondition = args.primaryMissingCondition;
@@ -83,7 +92,7 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             entryQualityGrade,
             leverageProfile,
             appliedLeverage,
-            exposureNotionalKrw,
+            exposureNotionalKrw: finalExposureNotionalKrw,
             equityMultiple,
             addOnAllowed,
             addOnPolicyAction,
@@ -105,18 +114,18 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             originalDecision,
             originalSide,
             originalStageMarginKrw,
-            newStopPrice,
+            newStopPrice: finalNewStopPrice,
             rangeBoxHighAtEntry: args.rangeBoxHighAtEntry,
             rangeBoxLowAtEntry: args.rangeBoxLowAtEntry,
             rangeBoxMidAtEntry: args.rangeBoxMidAtEntry,
             rangeBoxQuality: args.rangeBoxQuality,
             rangeBoxSlope: args.rangeBoxSlope,
             rangeBoxDistorted: args.rangeBoxDistorted,
-            takeProfitPlan: args.takeProfitPlan,
+            takeProfitPlan: finalTakeProfitPlan,
             takeProfit1Px: args.takeProfit1Px,
             takeProfit2Px: args.takeProfit2Px,
             partialExitRatio: args.partialExitRatio,
-            invalidationPx: args.invalidationPx,
+            invalidationPx: finalInvalidationPx,
             aligned_signal: args.alignedSignal,
             selected_side_after_veto: args.selectedSideAfterVeto,
             promotion_applied: args.promotionApplied,
@@ -194,7 +203,7 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             originalDecision,
             originalSide,
             originalStageMarginKrw,
-            newStopPrice,
+            newStopPrice: selector.legacy_result.decision !== "ENTER" ? undefined : newStopPrice,
             aligned_signal: args.alignedSignal ?? null,
             selected_side_after_veto: args.selectedSideAfterVeto ?? null,
             promotion_applied: args.promotionApplied ?? null,
@@ -248,7 +257,7 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         entryQualityGrade: selector.adopted_result.engine === "V2" ? entryQualityGrade : null,
         leverageProfile: selector.adopted_result.engine === "V2" ? leverageProfile : null,
         appliedLeverage: selector.adopted_result.engine === "V2" ? appliedLeverage : 0,
-        exposureNotionalKrw: selector.adopted_result.engine === "V2" ? exposureNotionalKrw : 0,
+        exposureNotionalKrw: selector.adopted_result.adopted_decision !== "ENTER" ? 0 : (selector.adopted_result.engine === "V2" ? exposureNotionalKrw : 0),
         equityMultiple: selector.adopted_result.engine === "V2" ? equityMultiple : 0,
         addOnAllowed: selector.adopted_result.engine === "V2" ? addOnAllowed : null,
         addOnPolicyAction: selector.adopted_result.engine === "V2" ? addOnPolicyAction : null,
@@ -270,7 +279,7 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         originalDecision,
         originalSide,
         originalStageMarginKrw,
-        newStopPrice,
+        newStopPrice: selector.adopted_result.adopted_decision !== "ENTER" ? undefined : newStopPrice,
         aligned_signal: args.alignedSignal ?? null,
         selected_side_after_veto: args.selectedSideAfterVeto ?? null,
         promotion_applied: args.promotionApplied ?? null,

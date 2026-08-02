@@ -4220,6 +4220,7 @@ export class PaperEngine {
       // 1. Snapshot-Check & Preliminary Block Logging
       if (!snap) {
         const resNull = blockRes || evaluatePaperSymbolEntry({
+          runCycleId: String(this.runCycleId),
           config: this.config,
           snapshot: null,
           dataReady: regimeUnknown === false,
@@ -4270,6 +4271,7 @@ export class PaperEngine {
 
       // 2. Decision Logic
       let res = blockRes || evaluatePaperSymbolEntry({
+          runCycleId: String(this.runCycleId),
         config: this.config,
         snapshot: snapForDecision!,
         dataReady: regimeUnknown === false,
@@ -4332,7 +4334,6 @@ export class PaperEngine {
         legacy: buildV2LegacyBridge(res),
         config: buildV2ConfigBridge(this.config),
         state: (() => {
-          console.log("DEBUG: About to call buildV2StateBridge. this.okxOrderSubmitOk is:", this.okxOrderSubmitOk);
           return buildV2StateBridge(
             opensAfterClose,
             this.lastRisk,
@@ -18245,3 +18246,4 @@ export function getOkxInstrumentMeta(symbol: string): OkxInstrumentMeta | null {
   if (OKX_INSTRUMENT_SPECS[swapNorm]) return OKX_INSTRUMENT_SPECS[swapNorm];
   return null;
 }
+
