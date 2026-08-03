@@ -13,6 +13,10 @@ export interface RangeContinuationState {
     watchBoundaryPrice: number | null;
     watchStartedAtTimestamp: number | null;
     totalCyclesSinceWatch: number;
+    countStartedCandleTs: number | null;
+    hasCandleAdvancedDuringCount: boolean;
+    watchStartedCandleTs: number | null;
+    lastLoggedRunCycleId: string | null;
 }
 
 export const rangeContinuationStateMap = new Map<string, RangeContinuationState>();
@@ -47,14 +51,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const boxMid = (boxHigh + boxLow) / 2;
     const atr = sn.atr ?? (lastPrice * 0.01);
     
-    // Fallback for candles
-    let recentCandles: { high: number; low: number; timestamp?: number }[] = [];
-    if ((input as any).candles && Array.isArray((input as any).candles)) {
-        recentCandles = (input as any).candles;
-    } else if (sn.candles && Array.isArray(sn.candles)) {
-        recentCandles = sn.candles;
-    }
-    const lastCandleTimestamp = recentCandles.length > 0 ? recentCandles[recentCandles.length - 1].timestamp ?? 0 : 0;
+    const recentCandles: import("../../models/types").Candle[] = sn.candles ?? [];
+    const lastCandleTimestamp = recentCandles.length > 0 ? recentCandles[recentCandles.length - 1].ts : 0;
     const currentRunCycleId = input.run_cycle_id ?? "unknown";
     const isAuthoritative = input.evaluationMode !== "diagnostic";
     const currentStage = input.state.currentPositions.find(p => p.symbol === input.symbol)?.entryStage ?? 0;
@@ -167,7 +165,11 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         lastCandleTimestamp: null,
         watchBoundaryPrice: null,
         watchStartedAtTimestamp: null,
-        totalCyclesSinceWatch: 0
+        totalCyclesSinceWatch: 0,
+        countStartedCandleTs: null,
+        hasCandleAdvancedDuringCount: false,
+        watchStartedCandleTs: null,
+        lastLoggedRunCycleId: null
     };
 
     const now = Date.now();
@@ -195,9 +197,21 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             lastCandleTimestamp: null,
             watchBoundaryPrice: null,
             watchStartedAtTimestamp: null,
-            totalCyclesSinceWatch: 0
+            totalCyclesSinceWatch: 0,
+            countStartedCandleTs: null,
+            hasCandleAdvancedDuringCount: false,
+            watchStartedCandleTs: null,
+            lastLoggedRunCycleId: null
         };
     }
+
+    const logProof = (event: string, payload: any) => {
+        if (cState.lastLoggedRunCycleId !== currentRunCycleId) {
+            console.warn(JSON.stringify({ event, symbol: input.symbol, ...payload }));
+            cState.lastLoggedRunCycleId = currentRunCycleId;
+            rangeContinuationStateMap.set(input.symbol, cState);
+        }
+    };
 
     const atrPct = lastPrice > 0 ? (atr / lastPrice) : 0;
     const retestTolerancePct = clamp(atrPct * 0.5, 0.0010, 0.0030); // 0.10% ~ 0.30%
@@ -209,7 +223,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         !reversalConfirmed && 
         blSlope < 0 && 
         rcSlope < 0 && 
-        (lastPrice < boxLow || recentCandles.some(c => c.low < boxLow));
+        (lastPrice < boxLow || recentCandles.slice(-3).some(c => c.low < boxLow));
 
     const isUpDeadlockCondition = 
         judgment.trendPhase === "UP" && 
@@ -217,9 +231,21 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         !reversalConfirmed && 
         bhSlope > 0 && 
         rcSlope > 0 && 
-        (lastPrice > boxHigh || recentCandles.some(c => c.high > boxHigh));
+        (lastPrice > boxHigh || recentCandles.slice(-3).some(c => c.high > boxHigh));
 
     let updatedCycle = false;
+    
+    // Position open -> immediate IDLE
+    if (currentStage > 0 && cState.phase !== "IDLE") {
+        cState.phase = "IDLE";
+        cState.consecutiveCycles = 0;
+        cState.direction = null;
+        cState.countStartedCandleTs = null;
+        cState.hasCandleAdvancedDuringCount = false;
+        cState.watchBoundaryPrice = null;
+        updatedCycle = true;
+    }
+    
     if (isAuthoritative && currentRunCycleId !== cState.lastRunCycleId) {
         if (cState.phase === "CONTINUATION_WATCH" || cState.phase === "RETEST_TOUCHED") {
             cState.totalCyclesSinceWatch++;
@@ -227,33 +253,55 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         
         const timestampChanged = lastCandleTimestamp !== cState.lastCandleTimestamp;
         
+        if (cState.phase === "RETEST_CONFIRMED") {
+            cState.phase = "EXPIRED";
+        }
+        if (cState.phase === "EXPIRED" && timestampChanged) {
+            cState.phase = "IDLE";
+            cState.direction = null;
+        }
+        
         if (cState.phase === "IDLE" || cState.phase === "DEADLOCK_COUNTING") {
             if (isDownDeadlockCondition) {
                 if (cState.direction !== "down") {
                     cState.direction = "down";
                     cState.consecutiveCycles = 1;
-                } else if (timestampChanged || cState.consecutiveCycles > 0) {
+                    cState.countStartedCandleTs = lastCandleTimestamp;
+                    cState.hasCandleAdvancedDuringCount = false;
+                } else {
                     cState.consecutiveCycles++;
+                }
+                if (lastCandleTimestamp > (cState.countStartedCandleTs ?? 0)) {
+                    cState.hasCandleAdvancedDuringCount = true;
                 }
                 cState.phase = "DEADLOCK_COUNTING";
             } else if (isUpDeadlockCondition) {
                 if (cState.direction !== "up") {
                     cState.direction = "up";
                     cState.consecutiveCycles = 1;
-                } else if (timestampChanged || cState.consecutiveCycles > 0) {
+                    cState.countStartedCandleTs = lastCandleTimestamp;
+                    cState.hasCandleAdvancedDuringCount = false;
+                } else {
                     cState.consecutiveCycles++;
+                }
+                if (lastCandleTimestamp > (cState.countStartedCandleTs ?? 0)) {
+                    cState.hasCandleAdvancedDuringCount = true;
                 }
                 cState.phase = "DEADLOCK_COUNTING";
             } else {
                 cState.phase = "IDLE";
                 cState.consecutiveCycles = 0;
                 cState.direction = null;
+                cState.countStartedCandleTs = null;
+                cState.hasCandleAdvancedDuringCount = false;
             }
         }
         
-        if (cState.phase === "DEADLOCK_COUNTING" && cState.consecutiveCycles >= 3) {
+        if (cState.phase === "DEADLOCK_COUNTING" && cState.consecutiveCycles >= 3 && cState.hasCandleAdvancedDuringCount) {
             cState.phase = "CONTINUATION_WATCH";
+            if (updatedCycle) logProof(cState.direction === "down" ? "RANGE_BREAKDOWN_CONTINUATION_WATCH" : "RANGE_BREAKOUT_CONTINUATION_WATCH", { boxLow, boxHigh });
             cState.watchStartedAtTimestamp = now;
+            cState.watchStartedCandleTs = lastCandleTimestamp;
             cState.totalCyclesSinceWatch = 0;
             cState.watchBoundaryPrice = cState.direction === "down" ? boxLow : boxHigh;
         }
@@ -266,15 +314,33 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     if (updatedCycle) {
         rangeContinuationStateMap.set(input.symbol, cState);
     }
+    
 
-    if ((cState.phase === "CONTINUATION_WATCH" || cState.phase === "RETEST_TOUCHED") && currentStage === 0) {
+
+    if ((cState.phase === "CONTINUATION_WATCH" || cState.phase === "RETEST_TOUCHED" || cState.phase === "RETEST_CONFIRMED" || cState.phase === "EXPIRED") && currentStage === 0) {
+        if (cState.phase === "RETEST_CONFIRMED" || cState.phase === "EXPIRED") {
+            return {
+                signal: "WAIT_RECHECK",
+                side: "none",
+                reason: "RANGE_CONTINUATION_" + cState.phase,
+                baseSizeIntent: 0,
+                recheckSuggested: true,
+                isAddOnEligible: false,
+                stopPrice: null,
+                invalidationPx: null,
+                metadata: { phase: cState.phase }
+            };
+        }
+        
         const watchBoundary = cState.watchBoundaryPrice ?? (cState.direction === "down" ? boxLow : boxHigh);
         
         if (cState.direction === "down") {
             let touchDetected = false;
             for (const c of recentCandles.slice(-5)) {
-                if (c.high >= watchBoundary * (1 - retestTolerancePct) && c.high <= watchBoundary * (1 + retestTolerancePct)) {
-                    touchDetected = true;
+                if (c.ts > (cState.watchStartedCandleTs ?? 0)) {
+                    if (c.high >= watchBoundary * (1 - retestTolerancePct) && c.high <= watchBoundary * (1 + retestTolerancePct)) {
+                        touchDetected = true;
+                    }
                 }
             }
             if (touchDetected && cState.phase === "CONTINUATION_WATCH") {
@@ -284,6 +350,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             
             if (cState.phase === "RETEST_TOUCHED" && lastPrice < watchBoundary * (1 - retestTolerancePct * 1.5)) {
                 cState.phase = "RETEST_CONFIRMED";
+                logProof("BREAKDOWN_RETEST_SHORT_CONFIRMED", { watchBoundary, lastPrice });
                 rangeContinuationStateMap.set(input.symbol, cState);
                 
                 const stopPrice = watchBoundary * 1.002;
@@ -299,7 +366,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     metadata: { retest_confirmed: true, watchBoundary }
                 };
             } else if (lastPrice < watchBoundary * (1 - noRetestSkipPct) && cState.phase === "CONTINUATION_WATCH") {
-                console.warn(JSON.stringify({ event: "BREAKDOWN_SHORT_SKIPPED_NO_RETEST", symbol: input.symbol, lastPrice, watchBoundary, skipThreshold: watchBoundary * (1 - noRetestSkipPct) }));
+                logProof("BREAKDOWN_SHORT_SKIPPED_NO_RETEST", { symbol: input.symbol, lastPrice, watchBoundary, skipThreshold: watchBoundary * (1 - noRetestSkipPct) });
                 return {
                     signal: "WAIT_RECHECK",
                     side: "none",
@@ -327,8 +394,10 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         } else if (cState.direction === "up") {
             let touchDetected = false;
             for (const c of recentCandles.slice(-5)) {
-                if (c.low <= watchBoundary * (1 + retestTolerancePct) && c.low >= watchBoundary * (1 - retestTolerancePct)) {
-                    touchDetected = true;
+                if (c.ts > (cState.watchStartedCandleTs ?? 0)) {
+                    if (c.low <= watchBoundary * (1 + retestTolerancePct) && c.low >= watchBoundary * (1 - retestTolerancePct)) {
+                        touchDetected = true;
+                    }
                 }
             }
             if (touchDetected && cState.phase === "CONTINUATION_WATCH") {
@@ -338,6 +407,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             
             if (cState.phase === "RETEST_TOUCHED" && lastPrice > watchBoundary * (1 + retestTolerancePct * 1.5)) {
                 cState.phase = "RETEST_CONFIRMED";
+                logProof("BREAKOUT_RETEST_LONG_CONFIRMED", { watchBoundary, lastPrice });
                 rangeContinuationStateMap.set(input.symbol, cState);
                 
                 const stopPrice = watchBoundary * 0.998;
@@ -353,7 +423,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     metadata: { retest_confirmed: true, watchBoundary }
                 };
             } else if (lastPrice > watchBoundary * (1 + noRetestSkipPct) && cState.phase === "CONTINUATION_WATCH") {
-                console.warn(JSON.stringify({ event: "BREAKOUT_LONG_SKIPPED_NO_RETEST", symbol: input.symbol, lastPrice, watchBoundary, skipThreshold: watchBoundary * (1 + noRetestSkipPct) }));
+                logProof("BREAKOUT_LONG_SKIPPED_NO_RETEST", { symbol: input.symbol, lastPrice, watchBoundary, skipThreshold: watchBoundary * (1 + noRetestSkipPct) });
                 return {
                     signal: "WAIT_RECHECK",
                     side: "none",

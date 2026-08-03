@@ -1,13 +1,16 @@
 import { executeRangeRegime, rangeContinuationStateMap } from "../src/engine-v2/executors/range-executor";
 import { EngineV2Input, MarketJudgmentOutput } from "../src/engine-v2/types";
 
+let globalTsOffset = 0;
 function buildInput(overrides: Partial<EngineV2Input> = {}): EngineV2Input {
+    globalTsOffset += 60000;
     return {
         run_cycle_id: "cycle-1",
         symbol: "BTCUSDT",
         evaluationMode: "authoritative",
+        now: 1000000,
+        v1Result: {} as any,
         snapshot: {
-            symbol: "BTCUSDT",
             lastPrice: 50000,
             boxHigh: 51000,
             boxLow: 49000,
@@ -20,11 +23,11 @@ function buildInput(overrides: Partial<EngineV2Input> = {}): EngineV2Input {
             emaGap: 0,
             qualityScore: 1,
             candles: [
-                { high: 50500, low: 49500, timestamp: 1000000 },
-                { high: 50500, low: 49500, timestamp: 1000060 }
+                { high: 50500, low: 49500, ts: 1000000 },
+                { high: 50500, low: 49500, ts: 1000000 + globalTsOffset }
             ] as any,
             rangeCenterSlope: 0
-        },
+        } as any,
         config: {} as any,
         state: {
             currentPositions: [],
@@ -89,7 +92,7 @@ function test1() {
             run_cycle_id: `c-4`,
             snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, lastPrice: 48000, atr: 500, emaGap: -10, rangeCenterSlope: -1,
                 candles: [
-                    { high: 48500, low: 48000, timestamp: 1000000 }
+                    { high: 48500, low: 48000, ts: 999999999 }
                 ] as any
              }
         }),
@@ -116,7 +119,7 @@ function test2() {
         buildInput({
             run_cycle_id: `c-4`,
             snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, lastPrice: 48995, atr: 500, emaGap: -10, rangeCenterSlope: -1,
-                candles: [{ high: 48995, low: 48900, timestamp: 1000000 }] as any
+                candles: [{ high: 48995, low: 48900, ts: 999999999 }] as any
              }
         }),
         buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1, bhSlope: 0 } as any })
@@ -126,7 +129,7 @@ function test2() {
         buildInput({
             run_cycle_id: `c-5`,
             snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, lastPrice: 48700, atr: 500, emaGap: -10, rangeCenterSlope: -1,
-                candles: [{ high: 48995, low: 48800, timestamp: 1000000 }] as any
+                candles: [{ high: 48995, low: 48800, ts: 999999999 }] as any
              }
         }),
         buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1, bhSlope: 0 } as any })
@@ -153,10 +156,10 @@ function test3() {
         buildInput({
             run_cycle_id: `c-4`,
             snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 49500, atr: 500, emaGap: -10, rangeCenterSlope: -1,
-                candles: [{ high: 49500, low: 48950, timestamp: 1000000 }] as any
+                candles: [{ high: 49500, low: 48950, ts: 999999999 }] as any
              }
         }),
-        buildJudgment({ trendPhase: "DOWN", reversalConfirmed: true, metadata: { blSlope: -1, rcSlope: -1, bhSlope: 0, reversal_confirmed: true } as any })
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1, bhSlope: 0, reversal_confirmed: true } as any })
     );
     assertEqual(res.reason, "Lower edge reversal identified by price reaction", "Test 3: Long entry preserved on reversal");
 }
@@ -178,7 +181,7 @@ function test4() {
         buildInput({
             run_cycle_id: `c-4`,
             snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, lastPrice: 52000, atr: 500, emaGap: 10, rangeCenterSlope: 1,
-                candles: [{ high: 52000, low: 51500, timestamp: 1000000 }] as any
+                candles: [{ high: 52000, low: 51500, ts: 999999999 }] as any
              }
         }),
         buildJudgment({ trendPhase: "UP", metadata: { blSlope: 0, rcSlope: 1, bhSlope: 1 } as any })
@@ -203,7 +206,7 @@ function test5() {
         buildInput({
             run_cycle_id: `c-4`,
             snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, lastPrice: 51005, atr: 500, emaGap: 10, rangeCenterSlope: 1,
-                candles: [{ high: 51100, low: 51005, timestamp: 1000000 }] as any
+                candles: [{ high: 51100, low: 51005, ts: 999999999 }] as any
              }
         }),
         buildJudgment({ trendPhase: "UP", metadata: { blSlope: 0, rcSlope: 1, bhSlope: 1 } as any })
@@ -212,7 +215,7 @@ function test5() {
         buildInput({
             run_cycle_id: `c-5`,
             snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, lastPrice: 51300, atr: 500, emaGap: 10, rangeCenterSlope: 1,
-                candles: [{ high: 51200, low: 51005, timestamp: 1000000 }] as any
+                candles: [{ high: 51200, low: 51005, ts: 999999999 }] as any
              }
         }),
         buildJudgment({ trendPhase: "UP", metadata: { blSlope: 0, rcSlope: 1, bhSlope: 1 } as any })
@@ -237,10 +240,10 @@ function test6() {
         buildInput({
             run_cycle_id: `c-4`,
             snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 50500, atr: 500, emaGap: 10, rangeCenterSlope: 1,
-                candles: [{ high: 51050, low: 50500, timestamp: 1000000 }] as any
+                candles: [{ high: 51050, low: 50500, ts: 999999999 }] as any
              }
         }),
-        buildJudgment({ trendPhase: "UP", reversalConfirmed: true, metadata: { blSlope: 0, rcSlope: 1, bhSlope: 1, reversal_confirmed: true } as any })
+        buildJudgment({ trendPhase: "UP", metadata: { blSlope: 0, rcSlope: 1, bhSlope: 1, reversal_confirmed: true } as any })
     );
     assertEqual(res.reason, "Upper edge reversal identified by price reaction", "Test 6: Short entry preserved on reversal");
 }
@@ -364,7 +367,7 @@ function test11() {
         buildInput({
             run_cycle_id: `c-4`,
             snapshot: { ...buildInput().snapshot, boxLow: 48800, boxHigh: 50800, boxPos: 0.1, lastPrice: 48995, atr: 500, emaGap: -10, rangeCenterSlope: -1,
-                candles: [{ high: 48995, low: 48900, timestamp: 1000000 }] as any
+                candles: [{ high: 48995, low: 48900, ts: 999999999 }] as any
              }
         }),
         buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1, bhSlope: 0 } as any })
@@ -373,7 +376,7 @@ function test11() {
         buildInput({
             run_cycle_id: `c-5`,
             snapshot: { ...buildInput().snapshot, boxLow: 48800, boxHigh: 50800, boxPos: 0.1, lastPrice: 48700, atr: 500, emaGap: -10, rangeCenterSlope: -1,
-                candles: [{ high: 48995, low: 48700, timestamp: 1000000 }] as any
+                candles: [{ high: 48995, low: 48700, ts: 999999999 }] as any
              }
         }),
         buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1, bhSlope: 0 } as any })
@@ -398,7 +401,7 @@ function test12() {
         res = executeRangeRegime(
             buildInput({
                 run_cycle_id: `c-${i}`,
-                snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48900, atr: 500, emaGap: -10, rangeCenterSlope: -1, candles: [{high:48950, low:48800, timestamp: i}] as any }
+                snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48900, atr: 500, emaGap: -10, rangeCenterSlope: -1, candles: [{high:48950, low:48800, ts: i}] as any }
             }),
             buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1, bhSlope: 0 } as any })
         );
@@ -446,14 +449,14 @@ function test14() {
     executeRangeRegime(
         buildInput({
             run_cycle_id: `c-4`,
-            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, lastPrice: 48995, atr: 500, emaGap: -10, rangeCenterSlope: -1, candles: [{ high: 48995, low: 48900, timestamp: 1000000 }] as any }
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, lastPrice: 48995, atr: 500, emaGap: -10, rangeCenterSlope: -1, candles: [{ high: 48995, low: 48900, ts: 999999999 }] as any }
         }),
         buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1, bhSlope: 0 } as any })
     );
     res = executeRangeRegime(
         buildInput({
             run_cycle_id: `c-5`,
-            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, lastPrice: 48700, atr: 500, emaGap: -10, rangeCenterSlope: -1, candles: [{ high: 48995, low: 48800, timestamp: 1000000 }] as any }
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, lastPrice: 48700, atr: 500, emaGap: -10, rangeCenterSlope: -1, candles: [{ high: 48995, low: 48800, ts: 999999999 }] as any }
         }),
         buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1, bhSlope: 0 } as any })
     );
