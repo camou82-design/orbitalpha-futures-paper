@@ -2,7 +2,8 @@
   "extends": "./tsconfig.json",
   "include": [
     "src/**/*",
-    "tests/verify-v2-cache-normalization.ts"
+    "tests/verify-v2-cache-normalization.ts",
+    "tests/test-deadlock-continuation.ts"
   ],
   "compilerOptions": {
     "noEmit": true,

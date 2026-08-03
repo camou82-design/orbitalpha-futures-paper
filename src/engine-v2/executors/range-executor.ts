@@ -206,9 +206,10 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     }
 
     const logProof = (event: string, payload: any) => {
-        if (cState.lastLoggedRunCycleId !== currentRunCycleId) {
+        const eventKey = `${currentRunCycleId}:${event}`;
+        if (cState.lastLoggedRunCycleId !== eventKey) {
             console.warn(JSON.stringify({ event, symbol: input.symbol, ...payload }));
-            cState.lastLoggedRunCycleId = currentRunCycleId;
+            cState.lastLoggedRunCycleId = eventKey;
             rangeContinuationStateMap.set(input.symbol, cState);
         }
     };
@@ -299,7 +300,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         
         if (cState.phase === "DEADLOCK_COUNTING" && cState.consecutiveCycles >= 3 && cState.hasCandleAdvancedDuringCount) {
             cState.phase = "CONTINUATION_WATCH";
-            if (updatedCycle) logProof(cState.direction === "down" ? "RANGE_BREAKDOWN_CONTINUATION_WATCH" : "RANGE_BREAKOUT_CONTINUATION_WATCH", { boxLow, boxHigh });
+            logProof(cState.direction === "down" ? "RANGE_BREAKDOWN_CONTINUATION_WATCH" : "RANGE_BREAKOUT_CONTINUATION_WATCH", { boxLow, boxHigh });
             cState.watchStartedAtTimestamp = now;
             cState.watchStartedCandleTs = lastCandleTimestamp;
             cState.totalCyclesSinceWatch = 0;
