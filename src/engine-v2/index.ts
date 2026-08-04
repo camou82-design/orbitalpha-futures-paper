@@ -12,6 +12,132 @@ import {
     V2CommittedRiskPlan
 } from "./types";
 import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
+
+// Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
+export function ensurePromotedEntryRiskPlan(
+    execution: ExecutorOutput,
+    v2DecisionAfterPromotion: EngineV2FinalDecision,
+    v2SideAfterPromotion: EngineV2Side,
+    v2CalculatedInvalidationPx: number | null,
+    snapshot: any,
+    judgment: ReturnType<typeof detectMarketRegime>,
+    promotionReason: string | null
+): void {
+    if (v2DecisionAfterPromotion !== "ENTER") return;
+    const side = v2SideAfterPromotion;
+    if (side !== "long" && side !== "short") return;
+
+    const entryPrice = Number(snapshot.lastPrice ?? 0);
+    if (entryPrice <= 0) return;
+
+    let stopPriceBefore = execution.stopPrice;
+    let invalidationPxBefore = execution.invalidationPx;
+    let stopPriceAfter = stopPriceBefore;
+    let invalidationPxAfter = invalidationPxBefore;
+    let resolvedSource = "existing_valid";
+
+    let needsPatch = false;
+
+    if (side === "long") {
+        const isExistingValid = stopPriceBefore != null && stopPriceBefore > 0 && invalidationPxBefore != null && invalidationPxBefore > 0 && stopPriceBefore < entryPrice && invalidationPxBefore < entryPrice;
+        if (!isExistingValid) needsPatch = true;
+    } else if (side === "short") {
+        const isExistingValid = stopPriceBefore != null && stopPriceBefore > entryPrice && invalidationPxBefore != null && invalidationPxBefore > entryPrice;
+        if (!isExistingValid) needsPatch = true;
+    }
+
+    if (needsPatch) {
+        let candidateStop: number | null = null;
+        
+        if (side === "long") {
+            if (v2CalculatedInvalidationPx != null && v2CalculatedInvalidationPx > 0 && v2CalculatedInvalidationPx < entryPrice) {
+                candidateStop = v2CalculatedInvalidationPx;
+                resolvedSource = "v2CalculatedInvalidationPx";
+            }
+        } else if (side === "short") {
+            if (v2CalculatedInvalidationPx != null && v2CalculatedInvalidationPx > entryPrice) {
+                candidateStop = v2CalculatedInvalidationPx;
+                resolvedSource = "v2CalculatedInvalidationPx";
+            }
+        }
+
+        const atrVal = Number(snapshot.atr ?? 0);
+        const candles = snapshot.candles || [];
+        
+        if (candidateStop == null) {
+            if (side === "long") {
+                let swingLowVal = entryPrice;
+                if (candles.length > 0) {
+                    const recentLows = candles.slice(-20).map((c: any) => Number(c.low ?? c.l ?? entryPrice));
+                    swingLowVal = Math.min(...recentLows);
+                }
+                const swingLowBuffer = swingLowVal - (atrVal * 0.5);
+                
+                const boxLowVal = Number(snapshot.boxLow ?? entryPrice);
+                const boxLowBuffer = boxLowVal - (atrVal * 0.5);
+                
+                if (swingLowVal > 0 && swingLowVal < entryPrice && swingLowBuffer > 0) {
+                    candidateStop = swingLowBuffer;
+                    resolvedSource = "swingLow_buffer";
+                } else if (boxLowVal > 0 && boxLowVal < entryPrice && boxLowBuffer > 0) {
+                    candidateStop = boxLowBuffer;
+                    resolvedSource = "boxLow_buffer";
+                } else {
+                    candidateStop = entryPrice * (1 - 0.012);
+                    resolvedSource = "fallback_1.2pct";
+                }
+            } else if (side === "short") {
+                let swingHighVal = entryPrice;
+                if (candles.length > 0) {
+                    const recentHighs = candles.slice(-20).map((c: any) => Number(c.high ?? c.h ?? entryPrice));
+                    swingHighVal = Math.max(...recentHighs);
+                }
+                const swingHighBuffer = swingHighVal + (atrVal * 0.5);
+                
+                const boxHighVal = Number(snapshot.boxHigh ?? entryPrice);
+                const boxHighBuffer = boxHighVal + (atrVal * 0.5);
+                
+                if (swingHighVal > entryPrice && swingHighBuffer > entryPrice) {
+                    candidateStop = swingHighBuffer;
+                    resolvedSource = "swingHigh_buffer";
+                } else if (boxHighVal > entryPrice && boxHighBuffer > entryPrice) {
+                    candidateStop = boxHighBuffer;
+                    resolvedSource = "boxHigh_buffer";
+                } else {
+                    candidateStop = entryPrice * (1 + 0.012);
+                    resolvedSource = "fallback_1.2pct";
+                }
+            }
+        }
+        
+        stopPriceAfter = candidateStop;
+        invalidationPxAfter = candidateStop;
+        
+        execution.stopPrice = stopPriceAfter;
+        execution.invalidationPx = invalidationPxAfter;
+        
+        execution.metadata = {
+            ...execution.metadata,
+            promotedRiskPlanInjected: true,
+            promotedRiskPlanSource: resolvedSource,
+            promotedRiskPlanReason: promotionReason
+        };
+    }
+    
+    console.info(JSON.stringify({
+        event: "V2_PROMOTED_ENTRY_RISK_PLAN_PROOF",
+        symbol: String(snapshot.symbol ?? ""),
+        side,
+        entryPrice,
+        stopPriceBefore,
+        invalidationPxBefore,
+        stopPriceAfter,
+        invalidationPxAfter,
+        source: resolvedSource,
+        promotionReason,
+        auditEligible: needsPatch
+    }));
+}
 import { detectMarketRegime, emitRangeDriftStateProof } from "./market-judgment/detector";
 import { calculateRegimeConfidence } from "./regime-confidence/scorer";
 import { routeToExecutor } from "./engine-router/selector";
@@ -2794,12 +2920,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const upperShortProbePromotion = promotionReason === "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION";
     const isConflictResolvedUpperShort = promotionReason === "V2_CONFLICT_RESOLVED_UPPER_SHORT";
     const isConflictResolvedTrendLong = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
+    const isMicroProbePromotion = promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" || promotionReason === "V2_RANGE_LOWER_MICRO_PROBE_CONFIRMED" || promotionReason === "V2_RANGE_UPPER_MICRO_PROBE_CONFIRMED";
+    
     if (v2DecisionAfterPromotion === "ENTER" && 
         !upperLongProbePromotion && 
         !lowerLongProbePromotion && 
         !upperShortProbePromotion &&
         !isConflictResolvedUpperShort &&
-        !isConflictResolvedTrendLong) {
+        !isConflictResolvedTrendLong &&
+        !isMicroProbePromotion) {
         v2SideAfterPromotion = selectedSideFinal;
     }
 
@@ -4170,70 +4299,41 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
 
     // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
+
     if (finalDecision === "ENTER") {
         const lastPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
         const sideFinal = v2SideAfterPromotion;
 
-        // stopPrice 패치 로직 (특히 short 진입 시)
-        if (sideFinal === "short" && (execution.stopPrice == null || execution.invalidationPx == null || execution.stopPrice <= lastPrice)) {
-            const atrVal = Number(authoritativeInput.snapshot.atr ?? 0);
-            
-            const candles = authoritativeInput.snapshot.candles;
-            let swingHighVal = 0;
-            if (Array.isArray(candles) && candles.length > 0) {
-                const recentHighs = candles.slice(-20).map(c => Number(c.high ?? (c as any).h ?? 0));
-                swingHighVal = Math.max(...recentHighs);
+        // --- Pre-audit normalization for incomplete plans ---
+        if (sideFinal === "long" || sideFinal === "short") {
+            if (execution.stopPrice == null || isNaN(execution.stopPrice as number)) {
+                const atrVal = Number(input.snapshot.atr ?? (lastPrice * 0.01));
+                const minStopDist = Math.max(atrVal * 1.5, lastPrice * 0.0020);
+                execution.stopPrice = sideFinal === "long" ? lastPrice - minStopDist : lastPrice + minStopDist;
+                execution.invalidationPx = execution.stopPrice;
+                console.info(JSON.stringify({
+                    event: "V2_PROMOTION_STOP_PRICE_INJECTED",
+                    symbol: String(input.symbol),
+                    promotionReason,
+                    injectedStopPrice: execution.stopPrice
+                }));
             }
-
-            const boxHighVal = Number(authoritativeInput.snapshot.boxHigh ?? 0);
-            const boxLowVal = Number(authoritativeInput.snapshot.boxLow ?? 0);
-            const boxMidVal = boxHighVal > 0 && boxLowVal > 0 ? (boxHighVal + boxLowVal) / 2 : 0;
-            
-            const minStopDist = Math.max(atrVal * 0.5, lastPrice * 0.0015);
-            const atrStopCandidate = lastPrice + Math.max(atrVal * 1.5, lastPrice * 0.005);
-            
-            const candidates = [
-                swingHighVal,
-                boxHighVal,
-                boxMidVal,
-                atrStopCandidate
-            ].filter(v => Number.isFinite(v) && v > lastPrice + minStopDist);
-            
-            let calculatedStopPrice = candidates.length > 0 ? Math.max(...candidates) : (lastPrice + minStopDist);
-            if (!Number.isFinite(calculatedStopPrice) || calculatedStopPrice <= lastPrice) {
-                calculatedStopPrice = lastPrice + minStopDist;
-            }
-
-            // 실제 plan 및 execution bridge에 주입
-            execution.stopPrice = calculatedStopPrice;
-            execution.invalidationPx = calculatedStopPrice;
-            v2CalculatedInvalidationPx = calculatedStopPrice;
-
-            const riskDistance = calculatedStopPrice - lastPrice;
-            const validStop = calculatedStopPrice > lastPrice;
-
-            console.info(JSON.stringify({
-                event: "V2_ENTRY_STOP_PLAN_PATCH_PROOF",
-                symbol: String(input.symbol),
-                side: sideFinal,
-                lastPrice,
-                stopPrice: calculatedStopPrice,
-                invalidationPx: calculatedStopPrice,
-                stopBasis: calculatedStopPrice === swingHighVal ? "swingHigh" :
-                           calculatedStopPrice === boxHighVal ? "boxHigh" :
-                           calculatedStopPrice === boxMidVal ? "boxMid" :
-                           calculatedStopPrice === atrStopCandidate ? "atrBuffer" : "fallback",
-                swingHigh: swingHighVal,
-                boxHigh: boxHighVal,
-                atr: atrVal,
-                riskDistance,
-                validStop,
-                injectedToEntryPlan: true,
-                injectedToAuthorityEnvelope: true
-            }));
         }
 
-        // --- Pre-audit normalization for incomplete plans ---
+        ensurePromotedEntryRiskPlan(
+            execution,
+            finalDecision,
+            sideFinal,
+            v2CalculatedInvalidationPx,
+            authoritativeInput.snapshot,
+            judgment as any,
+            promotionReason
+        );
+        
+        if (execution.invalidationPx != null) {
+            v2CalculatedInvalidationPx = execution.invalidationPx;
+        }
+
         const structuralStopPx = execution.stopPrice;
         const structuralInvalidationPx = execution.invalidationPx;
 
