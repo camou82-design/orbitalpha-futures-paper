@@ -22,13 +22,13 @@ export function ensurePromotedEntryRiskPlan(
     snapshot: any,
     judgment: ReturnType<typeof detectMarketRegime>,
     promotionReason: string | null
-): void {
-    if (v2DecisionAfterPromotion !== "ENTER") return;
+): string | null {
+    if (v2DecisionAfterPromotion !== "ENTER") return null;
     const side = v2SideAfterPromotion;
-    if (side !== "long" && side !== "short") return;
+    if (side !== "long" && side !== "short") return null;
 
     const entryPrice = Number(snapshot.lastPrice ?? 0);
-    if (entryPrice <= 0) return;
+    if (entryPrice <= 0) return null;
 
     let stopPriceBefore = execution.stopPrice;
     let invalidationPxBefore = execution.invalidationPx;
@@ -110,6 +110,18 @@ export function ensurePromotedEntryRiskPlan(
             }
         }
         
+        let blockReason: string | null = null;
+        if (candidateStop != null) {
+            const stopDistPct = Math.abs(entryPrice - candidateStop) / entryPrice;
+            const atrPct = atrVal / entryPrice;
+            const maxStopDistancePct = Math.min(Math.max(atrPct * 3, 0.005), 0.03); // clamp between 0.5% and 3.0%
+            
+            if (stopDistPct > maxStopDistancePct) {
+                blockReason = "STOP_DISTANCE_TOO_WIDE";
+                candidateStop = null;
+            }
+        }
+        
         stopPriceAfter = candidateStop;
         invalidationPxAfter = candidateStop;
         
@@ -122,6 +134,49 @@ export function ensurePromotedEntryRiskPlan(
             promotedRiskPlanSource: resolvedSource,
             promotedRiskPlanReason: promotionReason
         };
+        
+        if (blockReason) {
+            console.info(JSON.stringify({
+                event: "V2_PROMOTED_ENTRY_RISK_PLAN_PROOF",
+                symbol: String(snapshot.symbol ?? ""),
+                side,
+                entryPrice,
+                stopPriceBefore,
+                invalidationPxBefore,
+                stopPriceAfter,
+                invalidationPxAfter,
+                source: resolvedSource,
+                promotionReason,
+                auditEligible: needsPatch,
+                blockReason
+            }));
+            return blockReason;
+        }
+    } else {
+        const stopDistPct = stopPriceBefore != null ? Math.abs(entryPrice - stopPriceBefore) / entryPrice : 0;
+        const atrVal = Number(snapshot.atr ?? 0);
+        const atrPct = atrVal / entryPrice;
+        const maxStopDistancePct = Math.min(Math.max(atrPct * 3, 0.005), 0.03);
+        if (stopDistPct > maxStopDistancePct) {
+            execution.stopPrice = null;
+            execution.invalidationPx = null;
+            
+            console.info(JSON.stringify({
+                event: "V2_PROMOTED_ENTRY_RISK_PLAN_PROOF",
+                symbol: String(snapshot.symbol ?? ""),
+                side,
+                entryPrice,
+                stopPriceBefore,
+                invalidationPxBefore,
+                stopPriceAfter: null,
+                invalidationPxAfter: null,
+                source: resolvedSource,
+                promotionReason,
+                auditEligible: needsPatch,
+                blockReason: "STOP_DISTANCE_TOO_WIDE"
+            }));
+            return "STOP_DISTANCE_TOO_WIDE";
+        }
     }
     
     console.info(JSON.stringify({
@@ -137,6 +192,8 @@ export function ensurePromotedEntryRiskPlan(
         promotionReason,
         auditEligible: needsPatch
     }));
+    
+    return null;
 }
 import { detectMarketRegime, emitRangeDriftStateProof } from "./market-judgment/detector";
 import { calculateRegimeConfidence } from "./regime-confidence/scorer";
@@ -2915,21 +2972,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const selectedSideFinal: EngineV2Side = selected_side_final_after_sanitize;
 
 
-    const upperLongProbePromotion = promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
-    const lowerLongProbePromotion = promotionReason === "V2_LOWER_LONG_REACTION_PROBE_PROMOTION";
-    const upperShortProbePromotion = promotionReason === "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION";
-    const isConflictResolvedUpperShort = promotionReason === "V2_CONFLICT_RESOLVED_UPPER_SHORT";
-    const isConflictResolvedTrendLong = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
-    const isMicroProbePromotion = promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" || promotionReason === "V2_RANGE_LOWER_MICRO_PROBE_CONFIRMED" || promotionReason === "V2_RANGE_UPPER_MICRO_PROBE_CONFIRMED";
-    
-    if (v2DecisionAfterPromotion === "ENTER" && 
-        !upperLongProbePromotion && 
-        !lowerLongProbePromotion && 
-        !upperShortProbePromotion &&
-        !isConflictResolvedUpperShort &&
-        !isConflictResolvedTrendLong &&
-        !isMicroProbePromotion) {
-        v2SideAfterPromotion = selectedSideFinal;
+    if (v2DecisionAfterPromotion === "ENTER") {
+        if (promotionApplied && (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")) {
+            // Preserve the side assigned by the promotion logic
+        } else {
+            v2SideAfterPromotion = selectedSideFinal;
+        }
     }
 
     const finalDecisionBeforeVeto = v2DecisionAfterPromotion;
@@ -2953,13 +3001,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         !shockRecoveryHint;
 
     if (v2DecisionAfterPromotion === "ENTER") {
-        if (rangeLowerShortMismatch && !execMeta.sideOverrideApplied && !upperShortProbePromotion) {
+        if (rangeLowerShortMismatch && !execMeta.sideOverrideApplied) {
             vetoReason = "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
-        } else if (rangeUpperLongMismatch && !execMeta.sideOverrideApplied && !upperLongProbePromotion) {
+        } else if (rangeUpperLongMismatch && !execMeta.sideOverrideApplied) {
             vetoReason = "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
         } else if (rangeDowngradedHardBlock) {
             vetoReason = "RANGE_SIGNAL_DOWNGRADED_NOT_RELAXED";
-        } else if (entryCandidateHardBlock && !upperLongProbePromotion && !lowerLongProbePromotion && !upperShortProbePromotion) {
+        } else if (entryCandidateHardBlock) {
             vetoReason = "ENTRY_CANDIDATE_FALSE_VETO";
         } else if (trendPromotionHardBlock) {
             vetoReason = "TREND_PROMOTION_BLOCKED_TREND_NOT_OK";
@@ -4304,23 +4352,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const lastPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
         const sideFinal = v2SideAfterPromotion;
 
-        // --- Pre-audit normalization for incomplete plans ---
-        if (sideFinal === "long" || sideFinal === "short") {
-            if (execution.stopPrice == null || isNaN(execution.stopPrice as number)) {
-                const atrVal = Number(input.snapshot.atr ?? (lastPrice * 0.01));
-                const minStopDist = Math.max(atrVal * 1.5, lastPrice * 0.0020);
-                execution.stopPrice = sideFinal === "long" ? lastPrice - minStopDist : lastPrice + minStopDist;
-                execution.invalidationPx = execution.stopPrice;
-                console.info(JSON.stringify({
-                    event: "V2_PROMOTION_STOP_PRICE_INJECTED",
-                    symbol: String(input.symbol),
-                    promotionReason,
-                    injectedStopPrice: execution.stopPrice
-                }));
-            }
-        }
-
-        ensurePromotedEntryRiskPlan(
+        const auditBlockReason = ensurePromotedEntryRiskPlan(
             execution,
             finalDecision,
             sideFinal,
@@ -4340,7 +4372,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         let riskAuditFailed = false;
         let riskAuditReason: string | null = null;
 
-        if (sideFinal === "long" || sideFinal === "short") {
+        if (auditBlockReason) {
+            riskAuditFailed = true;
+            riskAuditReason = auditBlockReason;
+        } else if (sideFinal === "long" || sideFinal === "short") {
             if (structuralStopPx == null || structuralInvalidationPx == null || isNaN(structuralStopPx) || isNaN(structuralInvalidationPx)) {
                 riskAuditFailed = true;
                 riskAuditReason = "STOP_PRICE_MISSING";
