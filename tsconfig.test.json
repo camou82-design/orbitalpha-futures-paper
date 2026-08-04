@@ -4,7 +4,8 @@
     "src/**/*",
     "tests/verify-v2-cache-normalization.ts",
     "tests/test-deadlock-continuation.ts",
-    "tests/test-promoted-entry-risk-plan.ts"
+    "tests/test-promoted-entry-risk-plan.ts",
+    "tests/test-promoted-entry-risk-plan-integration.ts"
   ],
   "compilerOptions": {
     "noEmit": true,
