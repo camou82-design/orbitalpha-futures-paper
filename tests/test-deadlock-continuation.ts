@@ -1,4 +1,4 @@
-import { executeRangeRegime, rangeContinuationStateMap } from "../src/engine-v2/executors/range-executor";
+import { RangeContinuationPhase, executeRangeRegime, rangeContinuationStateMap } from "../src/engine-v2/executors/range-executor";
 import { EngineV2Input, MarketJudgmentOutput } from "../src/engine-v2/types";
 
 let globalTsOffset = 0;
@@ -646,6 +646,109 @@ function test22() {
     console.warn = origWarn;
 }
 
+// 23. Verify Up deadlock fixed boundary & internal states
+function test23() {
+    clearState();
+    let res: any;
+    
+    // Cycle 1: DEADLOCK_COUNTING initially starts. 
+    // countBoundaryPrice should be locked to 51000 (prevHigh / current fallback)
+    res = executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-1`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    let state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "DEADLOCK_COUNTING", "Test 23: Phase should be DEADLOCK_COUNTING");
+    assertEqual(state?.countBoundaryPrice, 51000, "Test 23: countBoundaryPrice should be 51000");
+
+    // Cycle 2: Dynamic boxHigh increases to 51200. Still breaking 51000.
+    res = executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-2`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51200, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}, {high:51500, low:51000, close:51500, ts: 2}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "DEADLOCK_COUNTING", "Test 23: Phase should remain DEADLOCK_COUNTING");
+    assertEqual(state?.countBoundaryPrice, 51000, "Test 23: countBoundaryPrice should remain 51000 despite dynamic boxHigh");
+
+    // Cycle 3: Dynamic boxHigh increases to 51400. Still breaking 51000. Price is 51300 (which is < 51400 but > 51000)
+    res = executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-3`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51400, boxPos: 0.9, lastPrice: 51300, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}, {high:51500, low:51000, close:51500, ts: 2}, {high:51300, low:51000, close:51300, ts: 3}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "CONTINUATION_WATCH", "Test 23: Should enter CONTINUATION_WATCH since price 51300 > countBoundaryPrice 51000");
+    assertEqual(state?.watchBoundaryPrice, 51000, "Test 23: watchBoundaryPrice should be set to 51000 directly from countBoundaryPrice");
+    
+    // Cycle 4: Retest - price drops to 50000. Deadlock conditions fail, but Watch should hold.
+    res = executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-4`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51400, boxPos: 0.5, lastPrice: 50000, atr: 500, emaGap: -0.00025, candles: [{high:51500, low:51000, close:51500, ts: 2}, {high:51300, low:51000, close:51300, ts: 3}, {high:51000, low:49000, close:50000, ts: 4}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: -1, rcSlope: -1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "CONTINUATION_WATCH", "Test 23: Watch should be maintained even if deadlock conditions dynamically fail during retest");
+}
+
+// 24. Verify Down deadlock fixed boundary & internal states
+function test24() {
+    clearState();
+    let res: any;
+    
+    // Cycle 1: DEADLOCK_COUNTING initially starts. 
+    // countBoundaryPrice should be locked to 49000
+    res = executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-1`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, candles: [{high:49000, low:48500, close:48500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1 } as any })
+    );
+    let state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "DEADLOCK_COUNTING", "Test 24: Phase should be DEADLOCK_COUNTING");
+    assertEqual(state?.countBoundaryPrice, 49000, "Test 24: countBoundaryPrice should be 49000");
+
+    // Cycle 2: Dynamic boxLow decreases to 48800
+    res = executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-2`,
+            snapshot: { ...buildInput().snapshot, boxLow: 48800, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, candles: [{high:49000, low:48500, close:48500, ts: 1}, {high:49000, low:48500, close:48500, ts: 2}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.countBoundaryPrice, 49000, "Test 24: countBoundaryPrice should remain 49000");
+
+    // Cycle 3: Dynamic boxLow decreases to 48600. Price is 48700 (which is > 48600 but < 49000)
+    res = executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-3`,
+            snapshot: { ...buildInput().snapshot, boxLow: 48600, boxHigh: 51000, boxPos: 0.1, lastPrice: 48700, atr: 500, emaGap: -0.00025, candles: [{high:49000, low:48500, close:48500, ts: 1}, {high:49000, low:48500, close:48500, ts: 2}, {high:49000, low:48700, close:48700, ts: 3}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "CONTINUATION_WATCH", "Test 24: Should enter CONTINUATION_WATCH since price 48700 < countBoundaryPrice 49000");
+    assertEqual(state?.watchBoundaryPrice, 49000, "Test 24: watchBoundaryPrice should be set to 49000 directly from countBoundaryPrice");
+}
+
 
 test1();
 test2();
@@ -670,6 +773,8 @@ test19();
 test20();
 test21();
 test22();
+test23();
+test24();
 
 console.log(`Passed ${passed} out of ${total} tests.`);
 if (passed !== total) process.exit(1);
