@@ -126,8 +126,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const isDistorted = (judgment.metadata as any)?.isDistorted === true;
     const isDrifting = (judgment.metadata as any)?.isDrifting === true;
     const distortionFactor = (judgment.metadata as any)?.distortionFactor ?? 0;
-    const bhSlope = (judgment.metadata as any)?.bhSlope ?? 0;
-    const blSlope = (judgment.metadata as any)?.blSlope ?? 0;
+    const bhSlope = (judgment.metadata as any)?.bhSlope ?? (sn as any).boxHighSlope ?? 0;
+    const blSlope = (judgment.metadata as any)?.blSlope ?? (sn as any).boxLowSlope ?? 0;
     const rcSlope = (judgment.metadata as any)?.rcSlope ?? (sn as any).rangeCenterSlope ?? 0;
 
     const execMeta = (judgment.metadata ?? {}) as Record<string, unknown>;
@@ -233,6 +233,42 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         bhSlope > 0 && 
         rcSlope > 0 && 
         (lastPrice > boxHigh || recentCandles.slice(-3).some(c => c.high > boxHigh));
+
+    if (isAuthoritative) {
+        if (judgment.trendPhase === "DOWN") {
+            console.warn(JSON.stringify({
+                event: "V2_RANGE_DEADLOCK_CONDITION_BREAKDOWN_PROOF",
+                symbol: input.symbol,
+                direction: "down",
+                checks: {
+                    trendDown: judgment.trendPhase === "DOWN",
+                    emaNegative: emaGap < 0,
+                    noReversal: !reversalConfirmed,
+                    boundarySlopeNegative: blSlope < 0,
+                    centerSlopeNegative: rcSlope < 0,
+                    boundaryBroken: (lastPrice < boxLow || recentCandles.slice(-3).some(c => c.low < boxLow)),
+                    authoritative: true,
+                    candleAdvanced: cState.hasCandleAdvancedDuringCount
+                }
+            }));
+        } else if (judgment.trendPhase === "UP") {
+            console.warn(JSON.stringify({
+                event: "V2_RANGE_DEADLOCK_CONDITION_BREAKDOWN_PROOF",
+                symbol: input.symbol,
+                direction: "up",
+                checks: {
+                    trendUp: judgment.trendPhase === "UP",
+                    emaPositive: emaGap > 0,
+                    noReversal: !reversalConfirmed,
+                    boundarySlopePositive: bhSlope > 0,
+                    centerSlopePositive: rcSlope > 0,
+                    boundaryBroken: (lastPrice > boxHigh || recentCandles.slice(-3).some(c => c.high > boxHigh)),
+                    authoritative: true,
+                    candleAdvanced: cState.hasCandleAdvancedDuringCount
+                }
+            }));
+        }
+    }
 
     let updatedCycle = false;
     
@@ -479,10 +515,24 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                 console.warn(JSON.stringify({
                     event: "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND_PROOF",
                     symbol: input.symbol,
-                    shockPhase: judgment.shockPhase,
+                    runCycleId: currentRunCycleId,
+                    evaluationMode: isAuthoritative ? "authoritative" : "paper",
+                    lastPrice,
+                    boxHigh: sn.boxHigh ?? 0,
+                    boxLow: sn.boxLow ?? 0,
+                    boxPos: currentBoxPos,
                     trendPhase: judgment.trendPhase,
                     emaGap,
-                    reversalConfirmed
+                    blSlope,
+                    rcSlope,
+                    reversalConfirmed,
+                    recentLowBreakdown: (lastPrice < (sn.boxLow ?? 0) || recentCandles.slice(-3).some(c => c.low < (sn.boxLow ?? 0))),
+                    isDownDeadlockCondition,
+                    consecutiveCycles: cState.consecutiveCycles,
+                    continuationPhase: cState.phase,
+                    hasCandleAdvancedDuringCount: cState.hasCandleAdvancedDuringCount,
+                    lastCandleTimestamp: cState.lastCandleTimestamp,
+                    countStartedCandleTs: cState.countStartedCandleTs
                 }));
                 return {
                     signal: "NONE",
@@ -524,10 +574,24 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                 console.warn(JSON.stringify({
                     event: "V2_RANGE_UPPER_SHORT_WAITING_DUE_TO_UP_TREND_PROOF",
                     symbol: input.symbol,
-                    shockPhase: judgment.shockPhase,
+                    runCycleId: currentRunCycleId,
+                    evaluationMode: isAuthoritative ? "authoritative" : "paper",
+                    lastPrice,
+                    boxHigh: sn.boxHigh ?? 0,
+                    boxLow: sn.boxLow ?? 0,
+                    boxPos: currentBoxPos,
                     trendPhase: judgment.trendPhase,
                     emaGap,
-                    reversalConfirmed
+                    bhSlope,
+                    rcSlope,
+                    reversalConfirmed,
+                    recentHighBreakout: (lastPrice > (sn.boxHigh ?? 0) || recentCandles.slice(-3).some(c => c.high > (sn.boxHigh ?? 0))),
+                    isUpDeadlockCondition,
+                    consecutiveCycles: cState.consecutiveCycles,
+                    continuationPhase: cState.phase,
+                    hasCandleAdvancedDuringCount: cState.hasCandleAdvancedDuringCount,
+                    lastCandleTimestamp: cState.lastCandleTimestamp,
+                    countStartedCandleTs: cState.countStartedCandleTs
                 }));
                 return {
                     signal: "NONE",

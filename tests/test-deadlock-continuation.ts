@@ -464,6 +464,74 @@ function test14() {
     assertEqual(res.invalidationPx, 49000 * 1.002, "Test 14: invalidationPx is watchBoundary * 1.002");
 }
 
+// 15. UP trend deadlock watch triggers
+function test15() {
+    clearState();
+    let res: any;
+    for (let i = 1; i <= 3; i++) {
+        res = executeRangeRegime(
+            buildInput({
+                symbol: "ETHUSDT" as any,
+                run_cycle_id: `c-${i}`,
+                snapshot: { ...buildInput().snapshot, boxLow: 1800, boxHigh: 2000, boxPos: 0.9, lastPrice: 2010, atr: 50, emaGap: 0.00025, rangeCenterSlope: 1, candles: [{high:2010, low:1900, ts: i}] as any }
+            }),
+            buildJudgment({ trendPhase: "UP", metadata: { blSlope: 1, rcSlope: 1, bhSlope: 1 } as any })
+        );
+    }
+    assertEqual(res.reason, "RANGE_BREAKOUT_CONTINUATION_WATCH", "Test 15: Up deadlock triggers continuation watch");
+}
+
+// 16. DOWN trend deadlock watch triggers
+function test16() {
+    clearState();
+    let res: any;
+    for (let i = 1; i <= 3; i++) {
+        res = executeRangeRegime(
+            buildInput({
+                symbol: "BTCUSDT" as any,
+                run_cycle_id: `c-${i}`,
+                snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48600, atr: 500, emaGap: -0.00025, rangeCenterSlope: -1, candles: [{high:49000, low:48600, ts: i}] as any }
+            }),
+            buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1, bhSlope: -1 } as any })
+        );
+    }
+    assertEqual(res.reason, "RANGE_BREAKDOWN_CONTINUATION_WATCH", "Test 16: Down deadlock triggers continuation watch");
+}
+
+// 17. UP trend negative (bhSlope = 0)
+function test17() {
+    clearState();
+    let res: any;
+    for (let i = 1; i <= 3; i++) {
+        res = executeRangeRegime(
+            buildInput({
+                symbol: "ETHUSDT" as any,
+                run_cycle_id: `c-${i}`,
+                snapshot: { ...buildInput().snapshot, boxLow: 1800, boxHigh: 2000, boxPos: 0.9, lastPrice: 2050, atr: 50, emaGap: 0.00025, rangeCenterSlope: 1, candles: [{high:2050, low:1900, ts: i}] as any }
+            }),
+            buildJudgment({ trendPhase: "UP", metadata: { blSlope: 1, rcSlope: 1, bhSlope: 0 } as any })
+        );
+    }
+    assertEqual(res.reason, "V2_RANGE_UPPER_SHORT_WAITING_DUE_TO_UP_TREND", "Test 17: Up deadlock skipped due to bhSlope=0");
+}
+
+// 18. DOWN trend negative (rcSlope = 0)
+function test18() {
+    clearState();
+    let res: any;
+    for (let i = 1; i <= 3; i++) {
+        res = executeRangeRegime(
+            buildInput({
+                symbol: "BTCUSDT" as any,
+                run_cycle_id: `c-${i}`,
+                snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, rangeCenterSlope: 0, candles: [{high:49000, low:48500, ts: i}] as any }
+            }),
+            buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: 0, bhSlope: -1 } as any })
+        );
+    }
+    assertEqual(res.reason, "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND", "Test 18: Down deadlock skipped due to rcSlope=0");
+}
+
 test1();
 test2();
 test3();
@@ -478,6 +546,10 @@ test11();
 test12();
 test13();
 test14();
+test15();
+test16();
+test17();
+test18();
 
 console.log(`Passed ${passed} out of ${total} tests.`);
 if (passed !== total) process.exit(1);
