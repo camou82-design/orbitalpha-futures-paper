@@ -532,6 +532,104 @@ function test18() {
     assertEqual(res.reason, "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND", "Test 18: Down deadlock skipped due to rcSlope=0");
 }
 
+function test19() {
+    clearState();
+    let res: any;
+    for (let i = 1; i <= 3; i++) {
+        res = executeRangeRegime(
+            buildInput({
+                symbol: "BTCUSDT" as any,
+                run_cycle_id: `c-${i}`,
+                snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, boxHighSlope: 1, rangeCenterSlope: 1, candles: [{high:51500, low:51000, ts: i}] as any }
+            }),
+            buildJudgment({ trendPhase: "UP", metadata: {} as any })
+        );
+    }
+    assertEqual(res.reason, "RANGE_BREAKOUT_CONTINUATION_WATCH", "Test 19: Up deadlock entered via snapshot fallback");
+}
+
+function test20() {
+    clearState();
+    let res: any;
+    for (let i = 1; i <= 3; i++) {
+        res = executeRangeRegime(
+            buildInput({
+                symbol: "BTCUSDT" as any,
+                run_cycle_id: `c-${i}`,
+                snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, boxLowSlope: -1, rangeCenterSlope: -1, candles: [{high:49000, low:48500, ts: i}] as any }
+            }),
+            buildJudgment({ trendPhase: "DOWN", metadata: {} as any })
+        );
+    }
+    assertEqual(res.reason, "BREAKDOWN_SHORT_SKIPPED_NO_RETEST", "Test 20: Down deadlock entered via snapshot fallback");
+}
+
+function test21() {
+    clearState();
+    let res: any;
+    for (let i = 1; i <= 3; i++) {
+        res = executeRangeRegime(
+            buildInput({
+                symbol: "BTCUSDT" as any,
+                run_cycle_id: `c-${i}`,
+                snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, ts: i}] as any }
+            }),
+            buildJudgment({ trendPhase: "UP", metadata: {} as any })
+        );
+    }
+    assertEqual(res.reason, "V2_RANGE_UPPER_SHORT_WAITING_DUE_TO_UP_TREND", "Test 21: Up deadlock skipped due to missing slopes on both sides");
+}
+
+function test22() {
+    clearState();
+    const origWarn = console.warn;
+    let proofCount = 0;
+    console.warn = (msg) => {
+        if (typeof msg === 'string' && msg.includes("V2_RANGE_DEADLOCK_CONDITION_BREAKDOWN_PROOF")) proofCount++;
+    };
+
+    // Same cycle ID called 2 times
+    for (let i = 1; i <= 2; i++) {
+        executeRangeRegime(
+            buildInput({
+                symbol: "BTCUSDT" as any,
+                run_cycle_id: `c-1`,
+                evaluationMode: "authoritative",
+                snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, ts: i}] as any }
+            }),
+            buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+        );
+    }
+    assertEqual(proofCount, 1, "Test 22: Dedupe proof count should be exactly 1 for same cycle ID");
+
+    // Next cycle ID called 1 time
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-2`,
+            evaluationMode: "authoritative",
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, ts: 3}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    assertEqual(proofCount, 2, "Test 22: Dedupe proof count should be 2 for next cycle ID");
+    
+    // diagnostic evaluation
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-3`,
+            evaluationMode: "diagnostic",
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, ts: 4}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    assertEqual(proofCount, 2, "Test 22: Dedupe proof count should remain 2 for diagnostic evaluation");
+
+    console.warn = origWarn;
+}
+
+
 test1();
 test2();
 test3();
@@ -550,6 +648,10 @@ test15();
 test16();
 test17();
 test18();
+test19();
+test20();
+test21();
+test22();
 
 console.log(`Passed ${passed} out of ${total} tests.`);
 if (passed !== total) process.exit(1);

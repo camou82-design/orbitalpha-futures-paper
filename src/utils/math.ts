@@ -39,3 +39,35 @@ export function roundQtyByInstrumentStep(qty: number, step: number = 0.000001): 
   }
   return rounded;
 }
+
+export function computeSlopesFromCandles(candles: { high: number, low: number, close: number }[]) {
+  if (!candles || candles.length < 40) return null;
+
+  // Use two windows: recent 20 vs previous 20 (total 40)
+  // Or scale up to 60 vs 60 if available.
+  const fullSize = Math.min(120, candles.length);
+  const halfSize = Math.floor(fullSize / 2);
+  
+  const recent = candles.slice(-halfSize);
+  const older = candles.slice(-2 * halfSize, -halfSize);
+
+  if (recent.length < 20 || older.length < 20) return null;
+
+  const recentAvgHigh = recent.reduce((sum, c) => sum + c.high, 0) / recent.length;
+  const recentAvgLow = recent.reduce((sum, c) => sum + c.low, 0) / recent.length;
+  const recentAvgClose = recent.reduce((sum, c) => sum + c.close, 0) / recent.length;
+  const recentAvgCenter = (recentAvgHigh + recentAvgLow) / 2;
+
+  const olderAvgHigh = older.reduce((sum, c) => sum + c.high, 0) / older.length;
+  const olderAvgLow = older.reduce((sum, c) => sum + c.low, 0) / older.length;
+  const olderAvgClose = older.reduce((sum, c) => sum + c.close, 0) / older.length;
+  const olderAvgCenter = (olderAvgHigh + olderAvgLow) / 2;
+
+  // Scale to "per candle" roughly to match engine expectations
+  const bhSlope = ((recentAvgHigh - olderAvgHigh) / olderAvgHigh) / halfSize;
+  const blSlope = ((recentAvgLow - olderAvgLow) / olderAvgLow) / halfSize;
+  const rcSlope = ((recentAvgCenter - olderAvgCenter) / olderAvgCenter) / halfSize;
+  const e20Slope = ((recentAvgClose - olderAvgClose) / olderAvgClose) / halfSize;
+
+  return { bhSlope, blSlope, rcSlope, e20Slope, windowSize: halfSize };
+}

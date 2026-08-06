@@ -1,7 +1,6 @@
 import { EngineV2Input, EngineV2MarketSubtype, MarketJudgmentOutput } from "../types";
 import { Candle, classifyRangeZone } from "../../models/types";
-import { emaLastFromCloses } from "../../utils/math";
-
+import { emaLastFromCloses, computeSlopesFromCandles } from "../../utils/math";
 function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPhase"] {
     const shock = input.state.directionalShockState ?? "NONE";
     const crashState = String(input.state.crashState ?? "").toUpperCase();
@@ -11,38 +10,6 @@ function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPh
     if (crashState.includes("RECOVERY") || crashState.includes("REDUCE")) return "CRASH_RECOVERY";
     if (pumpState.includes("RECOVERY") || pumpState.includes("REDUCE")) return "PUMP_RECOVERY";
     return "NONE";
-}
-
-function computeSlopesFromCandles(candles: Candle[]) {
-    if (!candles || candles.length < 40) return null;
-
-    // Use two windows: recent 20 vs previous 20 (total 40)
-    // Or scale up to 60 vs 60 if available.
-    const fullSize = Math.min(120, candles.length);
-    const halfSize = Math.floor(fullSize / 2);
-    
-    const recent = candles.slice(-halfSize);
-    const older = candles.slice(-2 * halfSize, -halfSize);
-
-    if (recent.length < 20 || older.length < 20) return null;
-
-    const recentAvgHigh = recent.reduce((sum, c) => sum + c.high, 0) / recent.length;
-    const recentAvgLow = recent.reduce((sum, c) => sum + c.low, 0) / recent.length;
-    const recentAvgClose = recent.reduce((sum, c) => sum + c.close, 0) / recent.length;
-    const recentAvgCenter = (recentAvgHigh + recentAvgLow) / 2;
-
-    const olderAvgHigh = older.reduce((sum, c) => sum + c.high, 0) / older.length;
-    const olderAvgLow = older.reduce((sum, c) => sum + c.low, 0) / older.length;
-    const olderAvgClose = older.reduce((sum, c) => sum + c.close, 0) / older.length;
-    const olderAvgCenter = (olderAvgHigh + olderAvgLow) / 2;
-
-    // Scale to "per candle" roughly to match engine expectations
-    const bhSlope = ((recentAvgHigh - olderAvgHigh) / olderAvgHigh) / halfSize;
-    const blSlope = ((recentAvgLow - olderAvgLow) / olderAvgLow) / halfSize;
-    const rcSlope = ((recentAvgCenter - olderAvgCenter) / olderAvgCenter) / halfSize;
-    const e20Slope = ((recentAvgClose - olderAvgClose) / olderAvgClose) / halfSize;
-
-    return { bhSlope, blSlope, rcSlope, e20Slope, windowSize: halfSize };
 }
 
 function computeMedian(values: number[]): number {
