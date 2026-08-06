@@ -18,6 +18,8 @@ export interface RangeContinuationState {
     watchStartedCandleTs: number | null;
     lastLoggedRunCycleId: string | null;
     lastLoggedDeadlockBreakdownRunCycleId: string | null;
+    previousConfirmedBoxHigh: number | null;
+    previousConfirmedBoxLow: number | null;
 }
 
 export const rangeContinuationStateMap = new Map<string, RangeContinuationState>();
@@ -175,7 +177,9 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         hasCandleAdvancedDuringCount: false,
         watchStartedCandleTs: null,
         lastLoggedRunCycleId: null,
-        lastLoggedDeadlockBreakdownRunCycleId: null
+        lastLoggedDeadlockBreakdownRunCycleId: null,
+        previousConfirmedBoxHigh: null,
+        previousConfirmedBoxLow: null
     };
 
     const currentLastCandleTimestamp = lastCandleTimestamp;
@@ -212,7 +216,9 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             hasCandleAdvancedDuringCount: false,
             watchStartedCandleTs: null,
             lastLoggedRunCycleId: null,
-            lastLoggedDeadlockBreakdownRunCycleId: null
+            lastLoggedDeadlockBreakdownRunCycleId: null,
+            previousConfirmedBoxHigh: cState.previousConfirmedBoxHigh,
+            previousConfirmedBoxLow: cState.previousConfirmedBoxLow
         };
     }
 
@@ -229,21 +235,32 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const retestTolerancePct = clamp(atrPct * 0.5, 0.0010, 0.0030); // 0.10% ~ 0.30%
     const noRetestSkipPct = clamp(atrPct * 1.5, 0.0050, 0.0100);    // 0.5% ~ 1.0%
 
+    const recentClosedClose = recentCandles.length > 0 ? recentCandles[recentCandles.length - 1].close : lastPrice;
+    
+    const isDownSlopeAligned = blSlope < 0 || rcSlope < 0;
+    const isDownSlopeOpposite = blSlope > 0 && rcSlope > 0;
+    const isDownSlopeValid = isDownSlopeAligned && !isDownSlopeOpposite;
+
+    const isUpSlopeAligned = bhSlope > 0 || rcSlope > 0;
+    const isUpSlopeOpposite = bhSlope < 0 && rcSlope < 0;
+    const isUpSlopeValid = isUpSlopeAligned && !isUpSlopeOpposite;
+    
+    const prevHigh = cState.previousConfirmedBoxHigh ?? boxHigh;
+    const prevLow = cState.previousConfirmedBoxLow ?? boxLow;
+
     const isDownDeadlockCondition = 
         judgment.trendPhase === "DOWN" && 
         emaGap < 0 && 
         !reversalConfirmed && 
-        blSlope < 0 && 
-        rcSlope < 0 && 
-        (lastPrice < boxLow || recentCandles.slice(-3).some(c => c.low < boxLow));
+        isDownSlopeValid && 
+        (lastPrice < prevLow || recentClosedClose < prevLow);
 
     const isUpDeadlockCondition = 
         judgment.trendPhase === "UP" && 
         emaGap > 0 && 
         !reversalConfirmed && 
-        bhSlope > 0 && 
-        rcSlope > 0 && 
-        (lastPrice > boxHigh || recentCandles.slice(-3).some(c => c.high > boxHigh));
+        isUpSlopeValid && 
+        (lastPrice > prevHigh || recentClosedClose > prevHigh);
 
     if (isAuthoritative) {
         if (judgment.trendPhase === "DOWN" || judgment.trendPhase === "UP") {
@@ -265,18 +282,36 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                         noReversal: !reversalConfirmed,
                         boundarySlopeNegative: blSlope < 0,
                         centerSlopeNegative: rcSlope < 0,
-                        boundaryBroken: (lastPrice < boxLow || recentCandles.slice(-3).some(c => c.low < boxLow)),
+                        boundaryBrokenByLastPrice: lastPrice < prevLow,
+                        boundaryBrokenByClose: recentClosedClose < prevLow,
                         authoritative: true,
-                        candleAdvanced: cState.hasCandleAdvancedDuringCount
+                        candleAdvanced: cState.hasCandleAdvancedDuringCount,
+                        currentBoxHigh: boxHigh,
+                        currentBoxLow: boxLow,
+                        previousConfirmedBoxHigh: cState.previousConfirmedBoxHigh,
+                        previousConfirmedBoxLow: cState.previousConfirmedBoxLow,
+                        boundaryReferenceSource: cState.previousConfirmedBoxLow !== null ? "previous_confirmed" : "current",
+                        boundaryDistancePct: prevLow !== 0 ? (lastPrice - prevLow) / prevLow : 0,
+                        slopeAlignmentMode: "bl_or_rc_negative",
+                        alignedSlopeCount: (blSlope < 0 ? 1 : 0) + (rcSlope < 0 ? 1 : 0)
                     } : {
                         trendUp: true,
                         emaPositive: emaGap > 0,
                         noReversal: !reversalConfirmed,
                         boundarySlopePositive: bhSlope > 0,
                         centerSlopePositive: rcSlope > 0,
-                        boundaryBroken: (lastPrice > boxHigh || recentCandles.slice(-3).some(c => c.high > boxHigh)),
+                        boundaryBrokenByLastPrice: lastPrice > prevHigh,
+                        boundaryBrokenByClose: recentClosedClose > prevHigh,
                         authoritative: true,
-                        candleAdvanced: cState.hasCandleAdvancedDuringCount
+                        candleAdvanced: cState.hasCandleAdvancedDuringCount,
+                        currentBoxHigh: boxHigh,
+                        currentBoxLow: boxLow,
+                        previousConfirmedBoxHigh: cState.previousConfirmedBoxHigh,
+                        previousConfirmedBoxLow: cState.previousConfirmedBoxLow,
+                        boundaryReferenceSource: cState.previousConfirmedBoxHigh !== null ? "previous_confirmed" : "current",
+                        boundaryDistancePct: prevHigh !== 0 ? (lastPrice - prevHigh) / prevHigh : 0,
+                        slopeAlignmentMode: "bh_or_rc_positive",
+                        alignedSlopeCount: (bhSlope > 0 ? 1 : 0) + (rcSlope > 0 ? 1 : 0)
                     }
                 }));
             }
@@ -302,6 +337,11 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         }
         
         const timestampChanged = lastCandleTimestamp !== cState.lastCandleTimestamp;
+        
+        if (timestampChanged) {
+            cState.previousConfirmedBoxHigh = sn.boxHigh ?? null;
+            cState.previousConfirmedBoxLow = sn.boxLow ?? null;
+        }
         
         if (cState.phase === "RETEST_CONFIRMED") {
             cState.phase = "EXPIRED";
@@ -353,7 +393,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             cState.watchStartedAtTimestamp = now;
             cState.watchStartedCandleTs = lastCandleTimestamp;
             cState.totalCyclesSinceWatch = 0;
-            cState.watchBoundaryPrice = cState.direction === "down" ? boxLow : boxHigh;
+            cState.watchBoundaryPrice = cState.direction === "down" ? (cState.previousConfirmedBoxLow ?? boxLow) : (cState.previousConfirmedBoxHigh ?? boxHigh);
         }
 
         cState.lastRunCycleId = currentRunCycleId;

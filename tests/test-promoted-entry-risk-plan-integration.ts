@@ -119,7 +119,7 @@ async function runScenario(
         };
     }
     if (mockOverrides.executeRangeRegime) {
-        (rangeExecutor as any).executeRangeRegime = async (...args: any[]) => {
+        (rangeExecutor as any).executeRangeRegime = (...args: any[]) => {
             return mockOverrides.executeRangeRegime;
         };
     }

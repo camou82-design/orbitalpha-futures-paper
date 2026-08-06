@@ -512,7 +512,7 @@ function test17() {
             buildJudgment({ trendPhase: "UP", metadata: { blSlope: 1, rcSlope: 1, bhSlope: 0 } as any })
         );
     }
-    assertEqual(res.reason, "V2_RANGE_UPPER_SHORT_WAITING_DUE_TO_UP_TREND", "Test 17: Up deadlock skipped due to bhSlope=0");
+    assertEqual(res.reason, "BREAKOUT_LONG_SKIPPED_NO_RETEST", "Test 17: Up deadlock enters watch due to rcSlope>0 (relaxed)");
 }
 
 // 18. DOWN trend negative (rcSlope = 0)
@@ -529,7 +529,24 @@ function test18() {
             buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: 0, bhSlope: -1 } as any })
         );
     }
-    assertEqual(res.reason, "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND", "Test 18: Down deadlock skipped due to rcSlope=0");
+    assertEqual(res.reason, "BREAKDOWN_SHORT_SKIPPED_NO_RETEST", "Test 18: Down deadlock enters watch due to blSlope<0 (relaxed)");
+}
+
+// 18.5 Both opposite
+function test18_5() {
+    clearState();
+    let res: any;
+    for (let i = 1; i <= 3; i++) {
+        res = executeRangeRegime(
+            buildInput({
+                symbol: "BTCUSDT" as any,
+                run_cycle_id: `c-${i}`,
+                snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, rangeCenterSlope: 1, candles: [{high:49000, low:48500, ts: i}] as any }
+            }),
+            buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: 1, rcSlope: 1, bhSlope: 1 } as any })
+        );
+    }
+    assertEqual(res.reason, "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND", "Test 18.5: Down deadlock blocked because both slopes opposite");
 }
 
 function test19() {
@@ -648,6 +665,7 @@ test15();
 test16();
 test17();
 test18();
+test18_5();
 test19();
 test20();
 test21();
