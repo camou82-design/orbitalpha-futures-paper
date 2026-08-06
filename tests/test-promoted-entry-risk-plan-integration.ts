@@ -98,10 +98,10 @@ async function runScenario(
                 rangePhase: mockOverrides.detect.rangePhase || realJudgment.rangePhase,
                 transitionPhase: "NONE",
                 activeEngineRouting: setup.regime,
-                qualityScore: mockOverrides.detect.qualityScore || realJudgment.qualityScore,
-                rangeConfidence: mockOverrides.detect.rangeConfidence || realJudgment.rangeConfidence,
-                boxPos: mockOverrides.detect.boxPos || realJudgment.boxPos,
-                rangeOscillationScore: mockOverrides.detect.rangeOscillationScore || realJudgment.rangeOscillationScore,
+                qualityScore: mockOverrides.detect.qualityScore || (realJudgment as any).qualityScore,
+                rangeConfidence: mockOverrides.detect.rangeConfidence || (realJudgment as any).rangeConfidence,
+                boxPos: mockOverrides.detect.boxPos || (realJudgment as any).boxPos,
+                rangeOscillationScore: mockOverrides.detect.rangeOscillationScore || (realJudgment as any).rangeOscillationScore,
                 metadata: {
                     ...realJudgment.metadata,
                     ...(mockOverrides.detect.metadata || {})
@@ -113,7 +113,7 @@ async function runScenario(
     }
     if (mockOverrides.route) {
         (selector as any).routeToExecutor = (...args: any[]) => {
-            const result = { ...origRoute(...args as any), ...mockOverrides.route };
+            const result = { ...(origRoute as any)(...args), ...mockOverrides.route };
             console.log("Mocked Route Result:", result);
             return result;
         };
@@ -212,9 +212,9 @@ async function runTests() {
     if (r1) {
         assert(r1.decision.decision === "ENTER", "Scenario 1: Expected ENTER");
         assert(r1.decision.side === "long", `Scenario 1: Expected side long, got ${r1.decision.side}`);
-        assert(r1.decision.risk?.stopPrice != null, "Scenario 1: stopPrice must not be null");
-        assert(r1.decision.risk?.invalidationPx != null, "Scenario 1: invalidationPx must not be null");
-        assert(r1.decision.risk!.stopPrice! < 63500, "Scenario 1: long stopPrice must be < entryPrice");
+        assert((r1.decision.risk as any)?.stopPrice != null, "Scenario 1: stopPrice must not be null");
+        assert((r1.decision.risk as any)?.invalidationPx != null, "Scenario 1: invalidationPx must not be null");
+        assert((r1.decision.risk as any)!.stopPrice! < 63500, "Scenario 1: long stopPrice must be < entryPrice");
         assert(r1.entryProof?.audit_passed === true, "Scenario 1: audit_passed must be true");
         assert(r1.entryProof?.action === "ALLOW_ENTRY", "Scenario 1: action must be ALLOW_ENTRY");
     }
@@ -248,9 +248,9 @@ async function runTests() {
     if (r2) {
         assert(r2.decision.decision === "ENTER", "Scenario 2: Expected ENTER");
         assert(r2.decision.side === "long", `Scenario 2: Expected side long, got ${r2.decision.side}`);
-        assert(r2.decision.risk?.stopPrice != null, "Scenario 2: stopPrice must not be null");
-        assert(r2.decision.risk?.invalidationPx != null, "Scenario 2: invalidationPx must not be null");
-        assert(r2.decision.risk!.stopPrice! < 63500, "Scenario 2: long stopPrice must be < entryPrice");
+        assert((r2.decision.risk as any)?.stopPrice != null, "Scenario 2: stopPrice must not be null");
+        assert((r2.decision.risk as any)?.invalidationPx != null, "Scenario 2: invalidationPx must not be null");
+        assert((r2.decision.risk as any)!.stopPrice! < 63500, "Scenario 2: long stopPrice must be < entryPrice");
         assert(r2.entryProof?.audit_passed === true, "Scenario 2: audit_passed must be true");
         assert(r2.entryProof?.action === "ALLOW_ENTRY", "Scenario 2: action must be ALLOW_ENTRY");
     }
@@ -287,9 +287,9 @@ async function runTests() {
     if (r3) {
         assert(r3.decision.decision === "ENTER", "Scenario 3: Expected ENTER");
         assert(r3.decision.side === "long", `Scenario 3: Expected side long, got ${r3.decision.side}`);
-        assert(r3.decision.risk?.stopPrice != null, "Scenario 3: stopPrice must not be null");
-        assert(r3.decision.risk?.invalidationPx != null, "Scenario 3: invalidationPx must not be null");
-        assert(r3.decision.risk!.stopPrice! < 63500, "Scenario 3: long stopPrice must be < entryPrice");
+        assert((r3.decision.risk as any)?.stopPrice != null, "Scenario 3: stopPrice must not be null");
+        assert((r3.decision.risk as any)?.invalidationPx != null, "Scenario 3: invalidationPx must not be null");
+        assert((r3.decision.risk as any)!.stopPrice! < 63500, "Scenario 3: long stopPrice must be < entryPrice");
         assert(r3.entryProof?.audit_passed === true, "Scenario 3: audit_passed must be true");
         assert(r3.entryProof?.action === "ALLOW_ENTRY", "Scenario 3: action must be ALLOW_ENTRY");
     }
