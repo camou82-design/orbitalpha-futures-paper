@@ -45,7 +45,16 @@ export function ensurePromotedEntryRiskPlan(
     // 1. Existing executor stop
     rawCandidates.push({ source: "existing_valid", price: stopPriceBefore ?? invalidationPxBefore ?? null });
     
-    // 2. v2CalculatedInvalidationPx
+    // 2. continuation_watch_boundary_buffer
+    if (fixedBoundary != null) {
+        if (side === "long") {
+            rawCandidates.push({ source: "continuation_watch_boundary_buffer", price: fixedBoundary * 0.998 });
+        } else {
+            rawCandidates.push({ source: "continuation_watch_boundary_buffer", price: fixedBoundary * 1.002 });
+        }
+    }
+    
+    // 3. v2CalculatedInvalidationPx
     rawCandidates.push({ source: "v2CalculatedInvalidationPx", price: v2CalculatedInvalidationPx });
 
     const boxLowVal = Number(snapshot.boxLow ?? entryPrice);
@@ -62,16 +71,10 @@ export function ensurePromotedEntryRiskPlan(
     }
 
     if (side === "long") {
-        if (fixedBoundary != null) {
-            rawCandidates.push({ source: "continuation_watch_boundary_buffer", price: fixedBoundary * 0.998 });
-        }
         rawCandidates.push({ source: "boxLow_buffer", price: boxLowVal > 0 && boxLowVal < entryPrice ? boxLowVal - atrBuffer : null });
         rawCandidates.push({ source: "swingLow_buffer", price: swingLowVal > 0 && swingLowVal < entryPrice ? swingLowVal - atrBuffer : null });
         rawCandidates.push({ source: "fallback_1.2pct", price: entryPrice * (1 - 0.012) });
     } else {
-        if (fixedBoundary != null) {
-            rawCandidates.push({ source: "continuation_watch_boundary_buffer", price: fixedBoundary * 1.002 });
-        }
         rawCandidates.push({ source: "boxHigh_buffer", price: boxHighVal > entryPrice ? boxHighVal + atrBuffer : null });
         rawCandidates.push({ source: "swingHigh_buffer", price: swingHighVal > entryPrice ? swingHighVal + atrBuffer : null });
         rawCandidates.push({ source: "fallback_1.2pct", price: entryPrice * (1 + 0.012) });
@@ -675,17 +678,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // CONTINUATION_MICRO_PROBE scope variables
     let microProbeFixedBoundary: number | null = null;
     let microProbeSizeCap: number | null = null;
+    let microProbeSetupKeyToConsume: string | null = null;
     
     if (routing.executor === "RANGE") execution = executeRangeRegime(authoritativeInput, judgment);
     else if (routing.executor === "TREND") execution = executeTrendRegime(authoritativeInput, judgment);
     else if (routing.executor === "TRANSITION") execution = executeTransitionRegime(authoritativeInput, judgment);
     else {
         execution = {
-            signal: "WAIT_RECHECK",
+            signal: "NONE",
             side: "none",
-            reason: "V2_INIT",
+            reason: "No Routing",
             baseSizeIntent: 0,
-            recheckSuggested: true,
+            recheckSuggested: false,
             isAddOnEligible: false,
             stopPrice: null,
             invalidationPx: null,
@@ -2118,8 +2122,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             let microProbeBlockReason: string | null = null;
             let atrPct = 0;
             
-            // Extract fixedBoundary from skipped retest metadata
-            const rangeMeta = (judgment.metadata as any) ?? {};
+            const rangeMeta = (execution.metadata ?? {}) as Record<string, unknown>;
             const watchBoundary = Number(rangeMeta.watchBoundary ?? 0);
             const watchStartedCandleTs = Number(rangeMeta.watchStartedCandleTs ?? 0);
             
@@ -2140,7 +2143,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 if (shortCandleBreakdown) {
                     microProbeSide = "short";
                     microProbeDistancePct = (watchBoundary - entryPrice) / watchBoundary;
-                    htfReverseRisk = htfPolicy === "BOTH";
+                    htfReverseRisk = judgment.counter_trend_risk === true || judgment.htf_requires_stronger_confirmation === true;
                     
                     if (trendPhase !== "DOWN") microProbeBlockReason = "TREND_NOT_DOWN";
                     else if (!(blSlope < 0 || rcSlope < 0)) microProbeBlockReason = "SLOPE_NOT_NEGATIVE";
@@ -2150,7 +2153,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 } else if (longCandleBreakout) {
                     microProbeSide = "long";
                     microProbeDistancePct = (entryPrice - watchBoundary) / watchBoundary;
-                    htfReverseRisk = htfPolicy === "BOTH";
+                    htfReverseRisk = judgment.counter_trend_risk === true || judgment.htf_requires_stronger_confirmation === true;
                     
                     if (trendPhase !== "UP") microProbeBlockReason = "TREND_NOT_UP";
                     else if (!(bhSlope > 0 || rcSlope > 0)) microProbeBlockReason = "SLOPE_NOT_POSITIVE";
@@ -2190,51 +2193,47 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             let effectiveSizeMultiplier = 0;
             const probeSizeCap = htfReverseRisk ? 0.15 : 0.20;
             
-            if (microProbeSide !== "none") {
-                if (microProbeAllowed) {
-                    v2DecisionAfterPromotion = "ENTER";
-                    v2SideAfterPromotion = microProbeSide;
-                    v2RejectReasonAfterPromotion = null;
-                    promotionApplied = true;
-                    promotionReason = "CONTINUATION_MICRO_PROBE";
-                    promotionBlockReason = null;
-                    shockReactionBlockReason = null;
-                    
-                    microProbeFixedBoundary = watchBoundary;
-                    
-                    const existingSizeMultiplier = Number((riskSizing as any).sizeMultiplier ?? 1.0);
-                    effectiveSizeMultiplier = Math.min(existingSizeMultiplier, probeSizeCap);
-                    microProbeSizeCap = effectiveSizeMultiplier;
-                    
-                    symbolLastProbeStructureMap.set(input.symbol, setupKey);
-                }
+            if (microProbeSide !== "none" && microProbeAllowed) {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = microProbeSide;
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = "CONTINUATION_MICRO_PROBE";
+                promotionBlockReason = null;
+                shockReactionBlockReason = null;
                 
-                console.info(JSON.stringify({
-                    event: "V2_WHIPSAW_MICRO_PROBE_EVALUATION_PROOF",
-                    symbol: String(input.symbol),
-                    side: microProbeSide,
-                    setupKey,
-                    fixedBoundary: watchBoundary,
-                    boundarySource: "watchBoundary",
-                    lastPrice: entryPrice,
-                    closedClose: closedClose ?? null,
-                    atr20: atr20,
-                    atrPct: atrPct,
-                    distanceFromBoundaryPct: microProbeDistancePct,
-                    maxAllowedDistancePct: maxAllowedDistancePct,
-                    trendAligned: microProbeSide === "short" ? trendPhase === "DOWN" : trendPhase === "UP",
-                    slopeAligned: microProbeSide === "short" ? (blSlope < 0 || rcSlope < 0) : (bhSlope > 0 || rcSlope > 0),
-                    htfPolicy: htfPolicy,
-                    htfReverseRisk: htfReverseRisk,
-                    shockPhase: shockPhase,
-                    probeSizeCap: probeSizeCap,
-                    effectiveSizeMultiplier: effectiveSizeMultiplier,
-                    selectedStopPrice: null,
-                    selectedStopSource: "none",
-                    microProbeAllowed: microProbeAllowed,
-                    blockReason: microProbeBlockReason
-                }));
+                microProbeFixedBoundary = watchBoundary;
+                
+                const existingSizeMultiplier = Number((riskSizing as any).sizeMultiplier ?? 1.0);
+                effectiveSizeMultiplier = Math.min(existingSizeMultiplier, probeSizeCap);
+                microProbeSizeCap = effectiveSizeMultiplier;
+                
+                microProbeSetupKeyToConsume = setupKey;
             }
+            
+            console.info(JSON.stringify({
+                event: "V2_WHIPSAW_MICRO_PROBE_EVALUATION_PROOF",
+                symbol: String(input.symbol),
+                side: microProbeSide,
+                setupKey,
+                fixedBoundary: watchBoundary,
+                boundarySource: "watchBoundary",
+                lastPrice: entryPrice,
+                closedClose: closedClose ?? null,
+                atr20: atr20,
+                atrPct: atrPct,
+                distanceFromBoundaryPct: microProbeDistancePct,
+                maxAllowedDistancePct: maxAllowedDistancePct,
+                trendAligned: microProbeSide === "short" ? trendPhase === "DOWN" : trendPhase === "UP",
+                slopeAligned: microProbeSide === "short" ? (blSlope < 0 || rcSlope < 0) : (bhSlope > 0 || rcSlope > 0),
+                htfPolicy: htfPolicy,
+                htfReverseRisk: htfReverseRisk,
+                shockPhase: shockPhase,
+                probeSizeCap: probeSizeCap,
+                effectiveSizeMultiplier: effectiveSizeMultiplier,
+                microProbeAllowed: microProbeAllowed,
+                blockReason: microProbeBlockReason
+            }));
         }
 
 
@@ -5445,14 +5444,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }));
 
     // Tier 6: Unify diagnostic suppression reasons for audit-ready transparency
-    const whipsawBlocking = judgment.subtype === "WHIPSAW_SHOCK_RECHECK";
-    const auditRawMissingCondition = promotionBlockReason || v2RejectReasonAfterPromotion || expectedMissingCondition || (finalDecision === "SKIP" ? "MIN_QUALITY_NOT_MET" : "NONE");
+    let whipsawBlocking = judgment.subtype === "WHIPSAW_SHOCK_RECHECK";
+    let auditRawMissingCondition: string | null = promotionBlockReason || v2RejectReasonAfterPromotion || expectedMissingCondition || (finalDecision === "SKIP" ? "MIN_QUALITY_NOT_MET" : "NONE");
     
     // Priority Logic for primary_missing_condition (Requirement 2 & 3 & 4)
     const htfPolarityMismatchReason = (judgment.htf_policy_reason || "").includes("POLARITY_MISMATCH") ? judgment.htf_policy_reason : null;
     
     // Requirement 4: Shock/Retest/Reclaim check
-    const isShockRetestBlock =
+    let isShockRetestBlock =
         judgment.subtype === "WHIPSAW_SHOCK_RECHECK" ||
         sideVetoDetail === "WHIPSAW_SHOCK_RECHECK_ACTIVE" ||
         sideVetoDetail === "SHOCK_UP_RECLAIM_NOT_CONFIRMED" ||
@@ -5469,7 +5468,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Requirement 3: Handle SIGNED_EXECUTION_NOT_READY priority
     const signedReadyBlocked = (finalDecision === "REJECT" || finalDecision === "HOLD") && hardBlockReason === "SIGNED_EXECUTION_NOT_READY";
 
-    let primaryMissingCondition =
+    let primaryMissingCondition: string | null =
         (whipsawBlocking ? "WHIPSAW_RECHECK_NOT_CONFIRMED" : null) ||
         (signedReadyBlocked ? "SIGNED_EXECUTION_NOT_READY" : null) ||
         (hardBlockReason ? hardBlockReason : null) ||
@@ -5494,29 +5493,35 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         dashboardNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
     }
 
-    if (promotionReason === "CONTINUATION_MICRO_PROBE" && finalDecision === "ENTER") {
-        if (dashboardMissingCondition === "WHIPSAW_RECHECK_NOT_CONFIRMED") {
-            dashboardMissingCondition = null;
-        }
+    const isContinuationMicroProbeEnter = promotionReason === "CONTINUATION_MICRO_PROBE" && finalDecision === "ENTER";
+
+    if (isContinuationMicroProbeEnter) {
+        whipsawBlocking = false;
+        isShockRetestBlock = false;
+        primaryMissingCondition = null;
+        dashboardMissingCondition = null;
+        auditRawMissingCondition = null;
         dashboardNextAction = "WAIT_FOR_RETEST_BEFORE_ADDON";
     }
 
     // Requirement 3 & 4: align expected_next_action
-    if (primaryMissingCondition === "SIGNED_EXECUTION_NOT_READY") {
-        dashboardNextAction = "WAIT_FOR_SIGNED_EXECUTION_READY";
-    } else if (primaryMissingCondition && (primaryMissingCondition.includes("POLARITY_MISMATCH") || primaryMissingCondition.includes("HTF_BIAS_MISMATCH"))) {
-        dashboardNextAction = "WAIT_FOR_HTF_POLARITY_ALIGNMENT";
-    } else if (isShockRetestBlock) {
-        dashboardNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
-    } else if (sideVetoDetail === "SHOCK_DOWN_TREND_CONFIRMATION_WEAK") {
-        dashboardNextAction = "WAIT_FOR_TREND_CONFIRMATION";
-    }
+    if (!isContinuationMicroProbeEnter) {
+        if (primaryMissingCondition === "SIGNED_EXECUTION_NOT_READY") {
+            dashboardNextAction = "WAIT_FOR_SIGNED_EXECUTION_READY";
+        } else if (primaryMissingCondition && (primaryMissingCondition.includes("POLARITY_MISMATCH") || primaryMissingCondition.includes("HTF_BIAS_MISMATCH"))) {
+            dashboardNextAction = "WAIT_FOR_HTF_POLARITY_ALIGNMENT";
+        } else if (isShockRetestBlock) {
+            dashboardNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
+        } else if (sideVetoDetail === "SHOCK_DOWN_TREND_CONFIRMATION_WEAK") {
+            dashboardNextAction = "WAIT_FOR_TREND_CONFIRMATION";
+        }
 
-    // Requirement 5: If primary is retest/shock/hard-block, do not overwrite WAIT_FOR_QUALITY_IMPROVEMENT
-    if (dashboardNextAction === "WAIT_FOR_QUALITY_IMPROVEMENT" && (isShockRetestBlock || hardBlockReason || htfPolarityMismatchReason)) {
-        // Keep the more specific wait state if it was already set
-        if (isShockRetestBlock) dashboardNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
-        else if (hardBlockReason) dashboardNextAction = "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST"; // Fallback for general hard block
+        // Requirement 5: If primary is retest/shock/hard-block, do not overwrite WAIT_FOR_QUALITY_IMPROVEMENT
+        if (dashboardNextAction === "WAIT_FOR_QUALITY_IMPROVEMENT" && (isShockRetestBlock || hardBlockReason || htfPolarityMismatchReason)) {
+            // Keep the more specific wait state if it was already set
+            if (isShockRetestBlock) dashboardNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
+            else if (hardBlockReason) dashboardNextAction = "WAIT_FOR_STRUCTURAL_REVERSAL_OR_RETEST"; // Fallback for general hard block
+        }
     }
 
     const displayRetestRequired =
