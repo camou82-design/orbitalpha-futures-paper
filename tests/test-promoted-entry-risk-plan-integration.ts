@@ -296,7 +296,7 @@ async function runTests() {
 
     // 4. Exceeding max stop distance blocks entry
     const r4 = await runScenario("Max Stop Distance Block", {
-        symbol: "BTCUSDT", price: 63500, trend: "UP", regime: "RANGE", atr: 63500 * 0.05 // 5% ATR
+        symbol: "BTCUSDT", price: 63500, trend: "UP", regime: "RANGE", atr: 63500 * 0.005 // 0.5% ATR
     }, {
         detect: { 
             rangePhase: "RANGE_MID_CHOP", 

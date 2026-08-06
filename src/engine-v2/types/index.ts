@@ -138,6 +138,9 @@ export interface LegacySnapshotAdapter {
     boxLow: number | null;
     boxPosDiag: number | null;
     boxPos?: number | null;
+    closedClose?: number;
+    atr20?: number;
+    rcSlope?: number;
     rangeConfidenceDiag: number | null;
     rangeConfidence?: number | null;
     ema20: number | null;
@@ -352,6 +355,9 @@ export interface EngineV2SnapshotAdapter {
     ema60Slope?: number;
     atrExpansion?: number;
     volumeExpansion?: number;
+    atr20?: number;
+    closedClose?: number;
+    rcSlope?: number;
     candles?: import("../../models/types").Candle[];
     htf_candles?: Record<string, import("../../models/types").Candle[]>;
 }

@@ -506,7 +506,13 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     isAddOnEligible: false,
                     stopPrice: null,
                     invalidationPx: null,
-                    metadata: { skipped_no_retest: true }
+                    metadata: { 
+                        skipped_no_retest: true, 
+                        watchBoundary, 
+                        continuationDirection: cState.direction, 
+                        continuationPhase: cState.phase, 
+                        watchStartedCandleTs: cState.watchStartedCandleTs 
+                    }
                 };
             } else {
                 return {
@@ -563,7 +569,13 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     isAddOnEligible: false,
                     stopPrice: null,
                     invalidationPx: null,
-                    metadata: { skipped_no_retest: true }
+                    metadata: { 
+                        skipped_no_retest: true, 
+                        watchBoundary, 
+                        continuationDirection: cState.direction, 
+                        continuationPhase: cState.phase, 
+                        watchStartedCandleTs: cState.watchStartedCandleTs 
+                    }
                 };
             } else {
                 return {
