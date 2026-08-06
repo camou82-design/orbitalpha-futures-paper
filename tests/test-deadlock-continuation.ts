@@ -749,6 +749,215 @@ function test24() {
     assertEqual(state?.watchBoundaryPrice, 49000, "Test 24: watchBoundaryPrice should be set to 49000 directly from countBoundaryPrice");
 }
 
+// 25. Same candle timestamp boxHigh 51000 -> 51200 -> 51400 and next candle promotion
+function test25() {
+    clearState();
+    let res: any;
+    
+    // Cycle 1: ts=1, boxHigh=51000
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-1`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    let state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.lastObservedBoxHigh, 51000, "Test 25: lastObservedBoxHigh should be 51000");
+
+    // Cycle 2: ts=1 (same), boxHigh=51200
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-2`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51200, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.lastObservedBoxHigh, 51200, "Test 25: lastObservedBoxHigh should update to 51200");
+
+    // Cycle 3: ts=1 (same), boxHigh=51400
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-3`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51400, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.lastObservedBoxHigh, 51400, "Test 25: lastObservedBoxHigh should update to 51400");
+    assertEqual(state?.previousConfirmedBoxHigh, null, "Test 25: previousConfirmedBoxHigh should still be null (ts not changed)");
+
+    // Cycle 4: ts=2 (new candle), boxHigh=51500
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-4`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51500, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}, {high:51500, low:51000, close:51500, ts: 2}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.previousConfirmedBoxHigh, 51400, "Test 25: previousConfirmedBoxHigh should be promoted to 51400 (the final value of ts=1)");
+}
+
+// 26. Same candle timestamp boxLow 49000 -> 48800 -> 48600 and next candle promotion
+function test26() {
+    clearState();
+    let res: any;
+    
+    // Cycle 1: ts=1, boxLow=49000
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-1`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, candles: [{high:49000, low:48500, close:48500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1 } as any })
+    );
+    let state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.lastObservedBoxLow, 49000, "Test 26: lastObservedBoxLow should be 49000");
+
+    // Cycle 2: ts=1 (same), boxLow=48800
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-2`,
+            snapshot: { ...buildInput().snapshot, boxLow: 48800, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, candles: [{high:49000, low:48500, close:48500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.lastObservedBoxLow, 48800, "Test 26: lastObservedBoxLow should update to 48800");
+
+    // Cycle 3: ts=1 (same), boxLow=48600
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-3`,
+            snapshot: { ...buildInput().snapshot, boxLow: 48600, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, candles: [{high:49000, low:48500, close:48500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.lastObservedBoxLow, 48600, "Test 26: lastObservedBoxLow should update to 48600");
+    assertEqual(state?.previousConfirmedBoxLow, null, "Test 26: previousConfirmedBoxLow should still be null");
+
+    // Cycle 4: ts=2 (new candle), boxLow=48500
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-4`,
+            snapshot: { ...buildInput().snapshot, boxLow: 48500, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, candles: [{high:49000, low:48500, close:48500, ts: 1}, {high:49000, low:48500, close:48500, ts: 2}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.previousConfirmedBoxLow, 48600, "Test 26: previousConfirmedBoxLow should be promoted to 48600");
+}
+
+// 27. Direction Switch (Down -> Up) during counting
+function test27() {
+    clearState();
+    let res: any;
+    
+    // Cycle 1: DOWN counting starts
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-1`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, candles: [{high:49000, low:48500, close:48500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1 } as any })
+    );
+    let state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "DEADLOCK_COUNTING", "Test 27: Down count started");
+    assertEqual(state?.direction, "down", "Test 27: Direction is down");
+    assertEqual(state?.countBoundaryPrice, 49000, "Test 27: countBoundaryPrice 49000");
+
+    // Cycle 2: Sudden trendPhase UP, price breaks 51000 (which is current boxHigh)
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-2`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:49000, low:48500, close:48500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    // State should reset to IDLE, then in the same cycle detect Up Deadlock, switching to DEADLOCK_COUNTING with UP.
+    assertEqual(state?.phase, "DEADLOCK_COUNTING", "Test 27: Should flip and count UP");
+    assertEqual(state?.direction, "up", "Test 27: Direction flipped to up");
+    assertEqual(state?.countBoundaryPrice, 51000, "Test 27: countBoundaryPrice should be for UP (51000), not old DOWN boundary");
+}
+
+// 28. Direction Switch (Up -> Down) during counting
+function test28() {
+    clearState();
+    let res: any;
+    
+    // Cycle 1: UP counting starts
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-1`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    let state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.direction, "up", "Test 28: Direction is up");
+
+    // Cycle 2: Sudden trendPhase DOWN, price breaks 49000
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-2`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.direction, "down", "Test 28: Direction flipped to down");
+    assertEqual(state?.countBoundaryPrice, 49000, "Test 28: countBoundaryPrice should be for DOWN (49000)");
+}
+
+// 29. currentStage > 0 prevents starting DEADLOCK_COUNTING
+function test29() {
+    clearState();
+    let res: any;
+    
+    // Cycle 1: Position is open (currentStage=1), deadlock condition met
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-1`,
+            state: { currentPositions: [{ symbol: "BTCUSDT", entryStage: 1 }] } as any,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    let state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "IDLE", "Test 29: Should stay IDLE while position is open");
+    
+    // Cycle 2: Position closed (currentStage=0), deadlock condition still met
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-2`,
+            state: { currentPositions: [] } as any, // Position closed
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "DEADLOCK_COUNTING", "Test 29: Should start DEADLOCK_COUNTING once position is closed");
+}
+
+
 
 test1();
 test2();
@@ -775,6 +984,11 @@ test21();
 test22();
 test23();
 test24();
+test25();
+test26();
+test27();
+test28();
+test29();
 
 console.log(`Passed ${passed} out of ${total} tests.`);
 if (passed !== total) process.exit(1);
