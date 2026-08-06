@@ -877,6 +877,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             isAddOnEligible: false,
             metadata: {
                 ...execution.metadata,
+                range_side_candidate: localRangeSideCandidate,
+                trend_side_candidate: localTrendSideCandidate,
                 addonPolicyAction: addOnPolicy.action,
                 addonPolicyReason: addOnPolicy.reason,
                 addonPolicyAllowed: false
@@ -1863,9 +1865,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
 
         const saCandidateSide: EngineV2Side =
-            activeEngineRouting === "RANGE" ? rangeSideCandidate :
+            activeEngineRouting === "RANGE" ? (rangeSideCandidate !== "none" ? rangeSideCandidate : trendSideCandidate) :
             activeEngineRouting === "TREND" ? trendSideCandidate :
             (trendSideCandidate !== "none" ? trendSideCandidate : rangeSideCandidate);
+
         const saPromotionNeeded =
             (entryQualityGrade === "S" || entryQualityGrade === "A") &&
             saCandidateSide !== "none" &&
@@ -5397,8 +5400,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (isShockRetestBlock && sideVetoDetail?.includes("SHOCK_UP"));
 
     // Requirement 7: Validate StopPrice & InvalidationPx strictly from lifecycleAuthority
-    const v2StopPrice = lifecycleAuthority?.newStopPrice;
-    const v2InvalidationPx = lifecycleAuthority?.invalidationPx;
+    const v2StopPrice = lifecycleAuthority?.newStopPrice ?? execution.stopPrice;
+    const v2InvalidationPx = lifecycleAuthority?.invalidationPx ?? execution.invalidationPx;
 
     if (finalDecision === "ENTER") {
         let invalidRisk = false;
@@ -5454,12 +5457,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         regime: judgment.regime,
         confidence: confidence.level,
         confidenceScore: confidence.score,
-        signal: execution.signal,
+        signal: finalDecision === "ENTER" && execution.signal === "NONE" ? "ENTER" : execution.signal,
         side: normalizedV2Side as any,
         decision: finalDecision,
         executionAction,
         risk: {
             ...riskSizing,
+            stopPrice: v2StopPrice,
+            invalidationPx: v2InvalidationPx ?? undefined,
             isBlocked: hardBlockPresent || riskSizing.isBlocked || finalDecision === "REJECT",
             blockReason: hardBlockReason ?? riskSizing.blockReason ?? blockReason ?? null,
             stageMarginKrw: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) : riskSizing.stageMarginKrw,

@@ -85,6 +85,13 @@ async function runRegressionTests() {
     runTest("ETHUSDT long V2_WAIT_RECHECK_QUALIFIED_PROMOTION", "ETHUSDT", 1864.02, "long", true);
 
     console.log(`=== RESULTS: ${passedCount} PASSED, ${failedCount} FAILED ===`);
+    
+    if (failedCount > 0) {
+        throw new Error(`${failedCount} promoted risk plan tests failed`);
+    }
 }
 
-runRegressionTests().catch(console.error);
+runRegressionTests().catch(e => {
+    console.error(e);
+    process.exit(1);
+});
