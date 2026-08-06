@@ -30,155 +30,101 @@ export function ensurePromotedEntryRiskPlan(
     const entryPrice = Number(snapshot.lastPrice ?? 0);
     if (entryPrice <= 0) return null;
 
-    let stopPriceBefore = execution.stopPrice;
-    let invalidationPxBefore = execution.invalidationPx;
-    let stopPriceAfter = stopPriceBefore;
-    let invalidationPxAfter = invalidationPxBefore;
-    let resolvedSource = "existing_valid";
+    const stopPriceBefore = execution.stopPrice;
+    const invalidationPxBefore = execution.invalidationPx;
 
-    let needsPatch = false;
+    const atrVal = Number(snapshot.atr ?? 0);
+    const atrPct = atrVal / entryPrice;
+    const maxStopDistancePct = Math.min(Math.max(atrPct * 3, 0.005), 0.03); // clamp between 0.5% and 3.0%
+    const atrBuffer = atrVal * 0.5;
 
-    if (side === "long") {
-        const isExistingValid = stopPriceBefore != null && stopPriceBefore > 0 && invalidationPxBefore != null && invalidationPxBefore > 0 && stopPriceBefore < entryPrice && invalidationPxBefore < entryPrice;
-        if (!isExistingValid) needsPatch = true;
-    } else if (side === "short") {
-        const isExistingValid = stopPriceBefore != null && stopPriceBefore > entryPrice && invalidationPxBefore != null && invalidationPxBefore > entryPrice;
-        if (!isExistingValid) needsPatch = true;
+    // Build candidates list in priority order
+    const rawCandidates: { source: string, price: number | null }[] = [];
+    
+    // 1. Existing executor stop
+    rawCandidates.push({ source: "existing_valid", price: stopPriceBefore ?? invalidationPxBefore ?? null });
+    
+    // 2. v2CalculatedInvalidationPx
+    rawCandidates.push({ source: "v2CalculatedInvalidationPx", price: v2CalculatedInvalidationPx });
+
+    const boxLowVal = Number(snapshot.boxLow ?? entryPrice);
+    const boxHighVal = Number(snapshot.boxHigh ?? entryPrice);
+    
+    let swingLowVal = entryPrice;
+    let swingHighVal = entryPrice;
+    const candles = snapshot.candles || [];
+    if (candles.length > 0) {
+        const recentLows = candles.slice(-20).map((c: any) => Number(c.low ?? c.l ?? entryPrice));
+        swingLowVal = Math.min(...recentLows);
+        const recentHighs = candles.slice(-20).map((c: any) => Number(c.high ?? c.h ?? entryPrice));
+        swingHighVal = Math.max(...recentHighs);
     }
 
-    if (needsPatch) {
-        let candidateStop: number | null = null;
-        
-        if (side === "long") {
-            if (v2CalculatedInvalidationPx != null && v2CalculatedInvalidationPx > 0 && v2CalculatedInvalidationPx < entryPrice) {
-                candidateStop = v2CalculatedInvalidationPx;
-                resolvedSource = "v2CalculatedInvalidationPx";
-            }
-        } else if (side === "short") {
-            if (v2CalculatedInvalidationPx != null && v2CalculatedInvalidationPx > entryPrice) {
-                candidateStop = v2CalculatedInvalidationPx;
-                resolvedSource = "v2CalculatedInvalidationPx";
-            }
-        }
+    if (side === "long") {
+        rawCandidates.push({ source: "boxLow_buffer", price: boxLowVal > 0 && boxLowVal < entryPrice ? boxLowVal - atrBuffer : null });
+        rawCandidates.push({ source: "swingLow_buffer", price: swingLowVal > 0 && swingLowVal < entryPrice ? swingLowVal - atrBuffer : null });
+        rawCandidates.push({ source: "fallback_1.2pct", price: entryPrice * (1 - 0.012) });
+    } else {
+        rawCandidates.push({ source: "boxHigh_buffer", price: boxHighVal > entryPrice ? boxHighVal + atrBuffer : null });
+        rawCandidates.push({ source: "swingHigh_buffer", price: swingHighVal > entryPrice ? swingHighVal + atrBuffer : null });
+        rawCandidates.push({ source: "fallback_1.2pct", price: entryPrice * (1 + 0.012) });
+    }
 
-        const atrVal = Number(snapshot.atr ?? 0);
-        const candles = snapshot.candles || [];
-        
-        if (candidateStop == null) {
-            if (side === "long") {
-                let swingLowVal = entryPrice;
-                if (candles.length > 0) {
-                    const recentLows = candles.slice(-20).map((c: any) => Number(c.low ?? c.l ?? entryPrice));
-                    swingLowVal = Math.min(...recentLows);
-                }
-                const swingLowBuffer = swingLowVal - (atrVal * 0.5);
-                
-                const boxLowVal = Number(snapshot.boxLow ?? entryPrice);
-                const boxLowBuffer = boxLowVal - (atrVal * 0.5);
-                
-                if (swingLowVal > 0 && swingLowVal < entryPrice && swingLowBuffer > 0) {
-                    candidateStop = swingLowBuffer;
-                    resolvedSource = "swingLow_buffer";
-                } else if (boxLowVal > 0 && boxLowVal < entryPrice && boxLowBuffer > 0) {
-                    candidateStop = boxLowBuffer;
-                    resolvedSource = "boxLow_buffer";
-                } else {
-                    candidateStop = entryPrice * (1 - 0.012);
-                    resolvedSource = "fallback_1.2pct";
-                }
-            } else if (side === "short") {
-                let swingHighVal = entryPrice;
-                if (candles.length > 0) {
-                    const recentHighs = candles.slice(-20).map((c: any) => Number(c.high ?? c.h ?? entryPrice));
-                    swingHighVal = Math.max(...recentHighs);
-                }
-                const swingHighBuffer = swingHighVal + (atrVal * 0.5);
-                
-                const boxHighVal = Number(snapshot.boxHigh ?? entryPrice);
-                const boxHighBuffer = boxHighVal + (atrVal * 0.5);
-                
-                if (swingHighVal > entryPrice && swingHighBuffer > entryPrice) {
-                    candidateStop = swingHighBuffer;
-                    resolvedSource = "swingHigh_buffer";
-                } else if (boxHighVal > entryPrice && boxHighBuffer > entryPrice) {
-                    candidateStop = boxHighBuffer;
-                    resolvedSource = "boxHigh_buffer";
-                } else {
-                    candidateStop = entryPrice * (1 + 0.012);
-                    resolvedSource = "fallback_1.2pct";
-                }
+    const candidateStops = rawCandidates.map(c => {
+        if (c.price == null || !Number.isFinite(c.price) || c.price <= 0) {
+            return { source: c.source, price: c.price, directionValid: false, stopDistPct: 0, withinMaxDistance: false };
+        }
+        const directionValid = side === "long" ? c.price < entryPrice : c.price > entryPrice;
+        const stopDistPct = Math.abs(entryPrice - c.price) / entryPrice;
+        const withinMaxDistance = stopDistPct <= maxStopDistancePct;
+        return { source: c.source, price: c.price, directionValid, stopDistPct, withinMaxDistance };
+    });
+
+    let selectedStopSource: string | null = null;
+    let selectedStopPrice: number | null = null;
+
+    for (const c of candidateStops) {
+        if (c.directionValid && c.withinMaxDistance) {
+            selectedStopSource = c.source;
+            selectedStopPrice = c.price;
+            break;
+        }
+    }
+
+    const audit_passed = selectedStopPrice !== null;
+    let blockReason: string | null = null;
+
+    let closestInvalidSource: string | null = null;
+    let closestInvalidPrice: number | null = null;
+    let closestInvalidDistPct: number | null = null;
+
+    if (!audit_passed) {
+        blockReason = "STOP_DISTANCE_TOO_WIDE";
+        let minDistance = Infinity;
+        for (const c of candidateStops) {
+            if (c.directionValid && c.price != null && c.stopDistPct < minDistance) {
+                minDistance = c.stopDistPct;
+                closestInvalidSource = c.source;
+                closestInvalidPrice = c.price;
+                closestInvalidDistPct = c.stopDistPct;
             }
         }
-        
-        let blockReason: string | null = null;
-        if (candidateStop != null) {
-            const stopDistPct = Math.abs(entryPrice - candidateStop) / entryPrice;
-            const atrPct = atrVal / entryPrice;
-            const maxStopDistancePct = Math.min(Math.max(atrPct * 3, 0.005), 0.03); // clamp between 0.5% and 3.0%
-            
-            if (stopDistPct > maxStopDistancePct) {
-                blockReason = "STOP_DISTANCE_TOO_WIDE";
-                candidateStop = null;
-            }
-        }
-        
-        stopPriceAfter = candidateStop;
-        invalidationPxAfter = candidateStop;
-        
-        execution.stopPrice = stopPriceAfter;
-        execution.invalidationPx = invalidationPxAfter;
-        
+    }
+
+    execution.stopPrice = selectedStopPrice;
+    execution.invalidationPx = selectedStopPrice;
+
+    const needsPatch = selectedStopSource !== "existing_valid";
+
+    if (needsPatch) {
         execution.metadata = {
             ...execution.metadata,
             promotedRiskPlanInjected: true,
-            promotedRiskPlanSource: resolvedSource,
+            promotedRiskPlanSource: selectedStopSource ?? "none",
             promotedRiskPlanReason: promotionReason
         };
-        
-        if (blockReason) {
-            console.info(JSON.stringify({
-                event: "V2_PROMOTED_ENTRY_RISK_PLAN_PROOF",
-                symbol: String(snapshot.symbol ?? ""),
-                side,
-                entryPrice,
-                stopPriceBefore,
-                invalidationPxBefore,
-                stopPriceAfter,
-                invalidationPxAfter,
-                source: resolvedSource,
-                promotionReason,
-                auditEligible: needsPatch,
-                blockReason
-            }));
-            return blockReason;
-        }
-    } else {
-        const stopDistPct = stopPriceBefore != null ? Math.abs(entryPrice - stopPriceBefore) / entryPrice : 0;
-        const atrVal = Number(snapshot.atr ?? 0);
-        const atrPct = atrVal / entryPrice;
-        const maxStopDistancePct = Math.min(Math.max(atrPct * 3, 0.005), 0.03);
-        if (stopDistPct > maxStopDistancePct) {
-            execution.stopPrice = null;
-            execution.invalidationPx = null;
-            
-            console.info(JSON.stringify({
-                event: "V2_PROMOTED_ENTRY_RISK_PLAN_PROOF",
-                symbol: String(snapshot.symbol ?? ""),
-                side,
-                entryPrice,
-                stopPriceBefore,
-                invalidationPxBefore,
-                stopPriceAfter: null,
-                invalidationPxAfter: null,
-                source: resolvedSource,
-                promotionReason,
-                auditEligible: needsPatch,
-                blockReason: "STOP_DISTANCE_TOO_WIDE"
-            }));
-            return "STOP_DISTANCE_TOO_WIDE";
-        }
     }
-    
+
     console.info(JSON.stringify({
         event: "V2_PROMOTED_ENTRY_RISK_PLAN_PROOF",
         symbol: String(snapshot.symbol ?? ""),
@@ -186,14 +132,25 @@ export function ensurePromotedEntryRiskPlan(
         entryPrice,
         stopPriceBefore,
         invalidationPxBefore,
-        stopPriceAfter,
-        invalidationPxAfter,
-        source: resolvedSource,
+        stopPriceAfter: selectedStopPrice,
+        invalidationPxAfter: selectedStopPrice,
+        source: selectedStopSource ?? "none",
         promotionReason,
-        auditEligible: needsPatch
+        auditEligible: needsPatch,
+        blockReason,
+        candidateStops,
+        selectedStopSource,
+        selectedStopPrice,
+        maxStopDistancePct,
+        atrPct,
+        ...(blockReason === "STOP_DISTANCE_TOO_WIDE" && {
+            closestInvalidStopSource: closestInvalidSource,
+            closestInvalidStopPrice: closestInvalidPrice,
+            closestInvalidStopDistPct: closestInvalidDistPct
+        })
     }));
-    
-    return null;
+
+    return blockReason;
 }
 import { detectMarketRegime, emitRangeDriftStateProof } from "./market-judgment/detector";
 import { calculateRegimeConfidence } from "./regime-confidence/scorer";

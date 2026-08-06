@@ -84,6 +84,70 @@ async function runRegressionTests() {
     runTest("BTCUSDT long V2_WAIT_RECHECK_QUALIFIED_PROMOTION", "BTCUSDT", 63513.2, "long", true);
     runTest("ETHUSDT long V2_WAIT_RECHECK_QUALIFIED_PROMOTION", "ETHUSDT", 1864.02, "long", true);
 
+    const runSpecificTest = (
+        name: string,
+        symbol: string,
+        lastPrice: number,
+        box: number,
+        swing: number,
+        side: "long" | "short",
+        expectedSource: string,
+        expectedBlock: string | null,
+        atrMultiplier: number = 0.01
+    ) => {
+        const execution: ExecutorOutput = {
+            signal: "WAIT_RECHECK",
+            side: "none",
+            reason: "TEST",
+            baseSizeIntent: 0,
+            recheckSuggested: true,
+            isAddOnEligible: false,
+            stopPrice: null,
+            invalidationPx: null,
+            metadata: {}
+        };
+        const snapshot = {
+            symbol,
+            lastPrice,
+            atr: lastPrice * atrMultiplier,
+            boxHigh: side === "short" ? box : lastPrice * 1.02,
+            boxLow: side === "long" ? box : lastPrice * 0.98,
+            candles: [
+                { high: side === "short" ? swing : lastPrice, low: side === "long" ? swing : lastPrice, ts: 1000000 }
+            ]
+        };
+        const blockReason = ensurePromotedEntryRiskPlan(
+            execution, "ENTER", side, null, snapshot, {} as any, "TEST_PROMOTION"
+        );
+        let ok = true;
+        if (blockReason !== expectedBlock) {
+            console.error(`[FAIL] ${name}: Expected blockReason ${expectedBlock}, got ${blockReason}`);
+            ok = false;
+        }
+        if (expectedBlock === null && execution.metadata?.promotedRiskPlanSource !== expectedSource) {
+            console.error(`[FAIL] ${name}: Expected source ${expectedSource}, got ${execution.metadata?.promotedRiskPlanSource}`);
+            ok = false;
+        }
+        if (ok) {
+            console.log(`[PASS] ${name} (source: ${execution.metadata?.promotedRiskPlanSource}, stopPrice: ${execution.stopPrice})`);
+            passedCount++;
+        } else {
+            console.error("Result execution metadata:", execution.metadata);
+            failedCount++;
+        }
+    };
+
+    // 7. BTCUSDT short: entry=64588.7, boxHigh=64672.5, swingHigh=70000 (too wide > 3%)
+    runSpecificTest("BTCUSDT short box priority", "BTCUSDT", 64588.7, 64672.5, 70000, "short", "boxHigh_buffer", null);
+    // ETHUSDT short: entry=1901, boxHigh=1905.32, swingHigh=2000 (too wide)
+    runSpecificTest("ETHUSDT short box priority", "ETHUSDT", 1901, 1905.32, 2000, "short", "boxHigh_buffer", null);
+    // BTCUSDT long: entry=64000, boxLow=63800, swingLow=60000 (too wide)
+    runSpecificTest("BTCUSDT long box priority", "BTCUSDT", 64000, 63800, 60000, "long", "boxLow_buffer", null);
+    
+    // 8. All candidates too wide -> STOP_DISTANCE_TOO_WIDE
+    // Setting atr to 0.001 (0.1%) makes maxStopDistancePct = 0.5%, so fallback (1.2%) is also too wide.
+    runSpecificTest("BTCUSDT short all too wide", "BTCUSDT", 64000, 70000, 70000, "short", "none", "STOP_DISTANCE_TOO_WIDE", 0.001);
+
     console.log(`=== RESULTS: ${passedCount} PASSED, ${failedCount} FAILED ===`);
     
     if (failedCount > 0) {
