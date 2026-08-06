@@ -863,6 +863,10 @@ export interface RiskSizingOutput {
     finalOrderNotionalUsdt?: number;
     requestedOrderNotionalUsdt?: number;
     diagnostics?: RiskSizingDiagnostics;
+    /** Promoted entry stop price (injected by engine after risk plan audit) */
+    stopPrice?: number | null;
+    /** Promoted entry invalidation price (injected by engine after risk plan audit) */
+    invalidationPx?: number | null;
 }
 
 export interface MicroExecutionScoreSummary {

@@ -877,8 +877,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             isAddOnEligible: false,
             metadata: {
                 ...execution.metadata,
-                range_side_candidate: (judgment.metadata as any)?.range_side_candidate ?? "none",
-                trend_side_candidate: (judgment.metadata as any)?.trend_side_candidate ?? "none",
+                range_side_candidate:
+                    (execution.metadata as any)?.range_side_candidate ??
+                    (judgment.metadata as any)?.range_side_candidate ??
+                    "none",
+                trend_side_candidate:
+                    (execution.metadata as any)?.trend_side_candidate ??
+                    (judgment.metadata as any)?.trend_side_candidate ??
+                    "none",
                 addonPolicyAction: addOnPolicy.action,
                 addonPolicyReason: addOnPolicy.reason,
                 addonPolicyAllowed: false
@@ -5457,7 +5463,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         regime: judgment.regime,
         confidence: confidence.level,
         confidenceScore: confidence.score,
-        signal: (finalDecision === "ENTER" && execution.signal === "NONE" ? "ENTER" : execution.signal) as any,
+        signal: execution.signal,
         side: normalizedV2Side as any,
         decision: finalDecision,
         executionAction,
@@ -5471,7 +5477,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             exposureNotionalKrw: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) * riskSizing.appliedLeverage : riskSizing.exposureNotionalKrw,
             finalOrderNotionalUsdt: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? finalOrderNotionalUsdt : 0) : undefined,
             requestedOrderNotionalUsdt: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? requestedOrderNotionalUsdt : 0) : undefined
-        } as any,
+        },
         committedRiskPlan: v2CommittedPlan,
         explanation: {
             reason: finalReason,
@@ -5742,7 +5748,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
 
     // V2_EARLY_NORMALIZATION: Ensure non-ENTER states do not leak candidate values to execution bridge
-    if (decision.decision !== "ENTER" || decision.side === "none" || decision.signal === "NONE") {
+    // Note: SA and deadlock promotion paths produce ENTER decision with execution.signal === "NONE".
+    // In those cases, decision.decision is the authoritative ENTER marker; do NOT zero out side.
+    const isValidEnter = decision.decision === "ENTER" && decision.side !== "none";
+    if (!isValidEnter) {
         if (!decision.metadata) {
             decision.metadata = {};
         }
