@@ -877,8 +877,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             isAddOnEligible: false,
             metadata: {
                 ...execution.metadata,
-                range_side_candidate: localRangeSideCandidate,
-                trend_side_candidate: localTrendSideCandidate,
+                range_side_candidate: (judgment.metadata as any)?.range_side_candidate ?? "none",
+                trend_side_candidate: (judgment.metadata as any)?.trend_side_candidate ?? "none",
                 addonPolicyAction: addOnPolicy.action,
                 addonPolicyReason: addOnPolicy.reason,
                 addonPolicyAllowed: false
@@ -5457,7 +5457,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         regime: judgment.regime,
         confidence: confidence.level,
         confidenceScore: confidence.score,
-        signal: finalDecision === "ENTER" && execution.signal === "NONE" ? "ENTER" : execution.signal,
+        signal: (finalDecision === "ENTER" && execution.signal === "NONE" ? "ENTER" : execution.signal) as any,
         side: normalizedV2Side as any,
         decision: finalDecision,
         executionAction,
@@ -5471,7 +5471,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             exposureNotionalKrw: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) * riskSizing.appliedLeverage : riskSizing.exposureNotionalKrw,
             finalOrderNotionalUsdt: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? finalOrderNotionalUsdt : 0) : undefined,
             requestedOrderNotionalUsdt: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? requestedOrderNotionalUsdt : 0) : undefined
-        },
+        } as any,
         committedRiskPlan: v2CommittedPlan,
         explanation: {
             reason: finalReason,
