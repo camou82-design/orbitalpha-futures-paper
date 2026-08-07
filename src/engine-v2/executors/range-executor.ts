@@ -168,7 +168,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const emaGap = sn.emaGap ?? 0;
 
     // --- CONTINUATION STATE MACHINE (Deadlock Resolver) ---
-    let cState = rangeContinuationStateMap.get(input.symbol) ?? {
+    const storedContinuationState = rangeContinuationStateMap.get(input.symbol);
+    let cState = storedContinuationState ? { ...storedContinuationState } : {
         symbol: input.symbol,
         direction: null,
         phase: "IDLE",
@@ -190,7 +191,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         lastObservedBoxHigh: null,
         lastObservedBoxLow: null,
         lastObservedCandleTs: null
-    };
+    } as RangeContinuationState;
 
     const currentLastCandleTimestamp = lastCandleTimestamp;
     const previousLastCandleTimestamp = cState.lastCandleTimestamp;
@@ -204,7 +205,9 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         if (cState.lastLoggedRunCycleId !== eventKey) {
             console.warn(JSON.stringify({ event, symbol: input.symbol, ...payload }));
             cState.lastLoggedRunCycleId = eventKey;
-            rangeContinuationStateMap.set(input.symbol, cState);
+            if (isAuthoritative) {
+                rangeContinuationStateMap.set(input.symbol, cState);
+            }
         }
     };
 
@@ -301,7 +304,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             lastObservedBoxHigh: cState.lastObservedBoxHigh,
             lastObservedBoxLow: cState.lastObservedBoxLow,
             lastObservedCandleTs: cState.lastObservedCandleTs
-        };
+        } as RangeContinuationState;
     }
 
     if (isAuthoritative) {
@@ -442,7 +445,9 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     }
     
     if (updatedCycle) {
-        rangeContinuationStateMap.set(input.symbol, cState);
+        if (isAuthoritative) {
+            rangeContinuationStateMap.set(input.symbol, cState);
+        }
     }
     
 
@@ -475,13 +480,26 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             }
             if (touchDetected && cState.phase === "CONTINUATION_WATCH") {
                 cState.phase = "RETEST_TOUCHED";
-                rangeContinuationStateMap.set(input.symbol, cState);
+                if (isAuthoritative) {
+                    rangeContinuationStateMap.set(input.symbol, cState);
+                }
             }
             
             if (cState.phase === "RETEST_TOUCHED" && lastPrice < watchBoundary * (1 - retestTolerancePct * 1.5)) {
+                const phaseBefore = cState.phase;
                 cState.phase = "RETEST_CONFIRMED";
-                logProof("BREAKDOWN_RETEST_SHORT_CONFIRMED", { watchBoundary, lastPrice });
-                rangeContinuationStateMap.set(input.symbol, cState);
+                logProof("BREAKDOWN_RETEST_SHORT_CONFIRMED", { 
+                    runCycleId: currentRunCycleId,
+                    evaluationMode: input.evaluationMode,
+                    isAuthoritative,
+                    phaseBefore,
+                    phaseAfter: cState.phase,
+                    watchBoundary, 
+                    lastPrice 
+                });
+                if (isAuthoritative) {
+                    rangeContinuationStateMap.set(input.symbol, cState);
+                }
                 
                 const stopPrice = watchBoundary * 1.002;
                 return {
@@ -538,13 +556,26 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             }
             if (touchDetected && cState.phase === "CONTINUATION_WATCH") {
                 cState.phase = "RETEST_TOUCHED";
-                rangeContinuationStateMap.set(input.symbol, cState);
+                if (isAuthoritative) {
+                    rangeContinuationStateMap.set(input.symbol, cState);
+                }
             }
             
             if (cState.phase === "RETEST_TOUCHED" && lastPrice > watchBoundary * (1 + retestTolerancePct * 1.5)) {
+                const phaseBefore = cState.phase;
                 cState.phase = "RETEST_CONFIRMED";
-                logProof("BREAKOUT_RETEST_LONG_CONFIRMED", { watchBoundary, lastPrice });
-                rangeContinuationStateMap.set(input.symbol, cState);
+                logProof("BREAKOUT_RETEST_LONG_CONFIRMED", { 
+                    runCycleId: currentRunCycleId,
+                    evaluationMode: input.evaluationMode,
+                    isAuthoritative,
+                    phaseBefore,
+                    phaseAfter: cState.phase,
+                    watchBoundary, 
+                    lastPrice 
+                });
+                if (isAuthoritative) {
+                    rangeContinuationStateMap.set(input.symbol, cState);
+                }
                 
                 const stopPrice = watchBoundary * 0.998;
                 return {
