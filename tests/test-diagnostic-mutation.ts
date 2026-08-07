@@ -4,7 +4,6 @@ import { EngineV2Input } from "../src/engine-v2/types";
 function buildInput(symbol: string, overrides: Partial<EngineV2Input> = {}): EngineV2Input {
     const input: EngineV2Input = {
         symbol,
-        exchange: "binance",
         run_cycle_id: "cycle_1",
         evaluationMode: "diagnostic",
         snapshot: {
