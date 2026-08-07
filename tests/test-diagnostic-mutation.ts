@@ -30,7 +30,6 @@ function buildInput(symbol: string, overrides: Partial<EngineV2Input> = {}): Eng
             currentPositions: [],
             marginUsagePct: 0
         } as any,
-        marketPhase: "RANGE",
         ...overrides
     };
     return input;
