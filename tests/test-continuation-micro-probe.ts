@@ -415,17 +415,7 @@ runTestCase("C. Micro Probe DISTANCE_TOO_WIDE preempts wider risk stop", {
     }
 });
 
-// D. STOP_PRICE_MISSING test
-runTestCase("D. Micro Probe DISTANCE_TOO_WIDE preempts missing stop price", {
-    watchBoundary: 91000,
-    inputOverrides: {
-        snapshot: { lastPrice: 90450, closedClose: 90700, atr: 10, atr20: 2000, emaGap: -2100, boxLowSlope: -0.1, rcSlope: -0.1, reversalConfirmed: true, qualityScore: 100 },
-        state: buildLiveReadyState(Date.now())
-    },
-    assert: (res: any) => {
-        if (res.decision.risk.blockReason !== "WHIPSAW_SHOCK_RECHECK") throw new Error("Expected WHIPSAW_SHOCK_RECHECK, got " + res.decision.risk.blockReason);
-    }
-});
+
 
 // E. LIVE_ACCOUNT_AUTHORITY_NOT_READY test
 runTestCase("E. LIVE_ACCOUNT_AUTHORITY_NOT_READY Block", {

@@ -4374,6 +4374,92 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" ||
         execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST";
 
+    // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
+
+    if (finalDecision === "ENTER") {
+        const lastPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+        const sideFinal = v2SideAfterPromotion;
+
+        const auditBlockReason = ensurePromotedEntryRiskPlan(
+            execution,
+            finalDecision,
+            sideFinal,
+            v2CalculatedInvalidationPx,
+            authoritativeInput.snapshot,
+            judgment as any,
+            promotionReason,
+            microProbeFixedBoundary
+        );
+        
+        if (execution.invalidationPx != null) {
+            v2CalculatedInvalidationPx = execution.invalidationPx;
+        }
+
+        const structuralStopPx = execution.stopPrice;
+        const structuralInvalidationPx = execution.invalidationPx;
+
+        let riskAuditFailed = false;
+        let riskAuditReason: string | null = null;
+
+        if (auditBlockReason) {
+            riskAuditFailed = true;
+            riskAuditReason = auditBlockReason;
+        } else if (sideFinal === "long" || sideFinal === "short") {
+            if (structuralStopPx == null || structuralInvalidationPx == null || isNaN(structuralStopPx) || isNaN(structuralInvalidationPx)) {
+                riskAuditFailed = true;
+                riskAuditReason = "STOP_PRICE_MISSING";
+            }
+        }
+
+        if (!riskAuditFailed && (sideFinal === "long" || sideFinal === "short")) {
+            const stopPxVal = structuralStopPx!;
+            const invPxVal = structuralInvalidationPx!;
+            // Directional Safety Check
+            if (sideFinal === "long" && (invPxVal >= lastPrice || (stopPxVal >= lastPrice && Math.abs(stopPxVal - lastPrice) > 0.00000001))) {
+                riskAuditFailed = true;
+                riskAuditReason = "LONG_INVALIDATION_ABOVE_ENTRY";
+            } else if (sideFinal === "short" && (invPxVal <= lastPrice || (stopPxVal <= lastPrice && Math.abs(stopPxVal - lastPrice) > 0.00000001))) {
+                riskAuditFailed = true;
+                riskAuditReason = "SHORT_INVALIDATION_BELOW_ENTRY";
+            }
+        }
+
+        if (riskAuditFailed) {
+            console.error(JSON.stringify({
+                event: "V2_ENTRY_PLAN_RISK_PROOF",
+                symbol: String(input.symbol),
+                side: sideFinal,
+                lastPrice,
+                stopPrice: structuralStopPx,
+                invalidationPx: structuralInvalidationPx,
+                audit_passed: false,
+                fail_reason: riskAuditReason,
+                action: "HARD_BLOCK_ENTRY"
+            }));
+
+            finalDecision = "REJECT";
+            v2DecisionAfterPromotion = "REJECT";
+            v2SideAfterPromotion = "none";
+            execution.side = "none";
+            execution.stopPrice = null;
+            execution.invalidationPx = null;
+            blockReason = riskAuditReason;
+            stageMarginKrwAfter = 0;
+            expectedMissingCondition = riskAuditReason;
+            expectedNextAction = "FIX_EXECUTOR_RISK_PLAN";
+        } else {
+             console.info(JSON.stringify({
+                event: "V2_ENTRY_PLAN_RISK_PROOF",
+                symbol: String(input.symbol),
+                side: sideFinal,
+                lastPrice,
+                stopPrice: structuralStopPx,
+                invalidationPx: structuralInvalidationPx,
+                audit_passed: true,
+                action: "ALLOW_ENTRY"
+            }));
+        }
+    }
     if (riskSizing.isBlocked || finalDecision === "ENTER") {
         riskSizing.appliedLeverage = appliedLeverage;
         riskSizing.leverageReason = leverageReason;
@@ -4551,92 +4637,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotedSide = "none";
     }
 
-    // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
-
-    if (finalDecision === "ENTER") {
-        const lastPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
-        const sideFinal = v2SideAfterPromotion;
-
-        const auditBlockReason = ensurePromotedEntryRiskPlan(
-            execution,
-            finalDecision,
-            sideFinal,
-            v2CalculatedInvalidationPx,
-            authoritativeInput.snapshot,
-            judgment as any,
-            promotionReason,
-            microProbeFixedBoundary
-        );
-        
-        if (execution.invalidationPx != null) {
-            v2CalculatedInvalidationPx = execution.invalidationPx;
-        }
-
-        const structuralStopPx = execution.stopPrice;
-        const structuralInvalidationPx = execution.invalidationPx;
-
-        let riskAuditFailed = false;
-        let riskAuditReason: string | null = null;
-
-        if (auditBlockReason) {
-            riskAuditFailed = true;
-            riskAuditReason = auditBlockReason;
-        } else if (sideFinal === "long" || sideFinal === "short") {
-            if (structuralStopPx == null || structuralInvalidationPx == null || isNaN(structuralStopPx) || isNaN(structuralInvalidationPx)) {
-                riskAuditFailed = true;
-                riskAuditReason = "STOP_PRICE_MISSING";
-            }
-        }
-
-        if (!riskAuditFailed && (sideFinal === "long" || sideFinal === "short")) {
-            const stopPxVal = structuralStopPx!;
-            const invPxVal = structuralInvalidationPx!;
-            // Directional Safety Check
-            if (sideFinal === "long" && (invPxVal >= lastPrice || (stopPxVal >= lastPrice && Math.abs(stopPxVal - lastPrice) > 0.00000001))) {
-                riskAuditFailed = true;
-                riskAuditReason = "LONG_INVALIDATION_ABOVE_ENTRY";
-            } else if (sideFinal === "short" && (invPxVal <= lastPrice || (stopPxVal <= lastPrice && Math.abs(stopPxVal - lastPrice) > 0.00000001))) {
-                riskAuditFailed = true;
-                riskAuditReason = "SHORT_INVALIDATION_BELOW_ENTRY";
-            }
-        }
-
-        if (riskAuditFailed) {
-            console.error(JSON.stringify({
-                event: "V2_ENTRY_PLAN_RISK_PROOF",
-                symbol: String(input.symbol),
-                side: sideFinal,
-                lastPrice,
-                stopPrice: structuralStopPx,
-                invalidationPx: structuralInvalidationPx,
-                audit_passed: false,
-                fail_reason: riskAuditReason,
-                action: "HARD_BLOCK_ENTRY"
-            }));
-
-            finalDecision = "REJECT";
-            v2DecisionAfterPromotion = "REJECT";
-            v2SideAfterPromotion = "none";
-            execution.side = "none";
-            execution.stopPrice = null;
-            execution.invalidationPx = null;
-            blockReason = riskAuditReason;
-            stageMarginKrwAfter = 0;
-            expectedMissingCondition = riskAuditReason;
-            expectedNextAction = "FIX_EXECUTOR_RISK_PLAN";
-        } else {
-             console.info(JSON.stringify({
-                event: "V2_ENTRY_PLAN_RISK_PROOF",
-                symbol: String(input.symbol),
-                side: sideFinal,
-                lastPrice,
-                stopPrice: structuralStopPx,
-                invalidationPx: structuralInvalidationPx,
-                audit_passed: true,
-                action: "ALLOW_ENTRY"
-            }));
-        }
-    }
 
     if (!riskSizing.diagnostics) {
         (riskSizing as { diagnostics?: import("./types").RiskSizingDiagnostics }).diagnostics = {};
