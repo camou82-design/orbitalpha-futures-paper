@@ -166,7 +166,7 @@ export function ensurePromotedEntryRiskPlan(
 import { detectMarketRegime, emitRangeDriftStateProof } from "./market-judgment/detector";
 import { calculateRegimeConfidence } from "./regime-confidence/scorer";
 import { routeToExecutor } from "./engine-router/selector";
-import { executeRangeRegime } from "./executors/range-executor";
+import { executeRangeRegime, rangeContinuationStateMap } from "./executors/range-executor";
 import { executeTrendRegime } from "./executors/trend-executor";
 import { executeTransitionRegime } from "./executors/transition-executor";
 import { calculateRiskSizing } from "./risk-sizing/policy";
@@ -696,6 +696,53 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             metadata: {}
         };
     }
+
+    const continuationState = rangeContinuationStateMap.get(String(input.symbol));
+    if (continuationState) {
+        const phaseOk = continuationState.phase === "CONTINUATION_WATCH" || continuationState.phase === "RETEST_TOUCHED";
+        const dirOk = continuationState.direction === "down" || continuationState.direction === "up";
+        const boundaryOk = Number(continuationState.watchBoundaryPrice) > 0;
+        const startCandleOk = Number(continuationState.watchStartedCandleTs) > 0;
+        const startTsOk = Number(continuationState.watchStartedAtTimestamp) > 0;
+        const noPosition = v2State.currentPositions.length === 0;
+
+        const evaluationNow = Number(authoritativeInput.now ?? Date.now());
+        const continuationAgeMs = evaluationNow - Number(continuationState.watchStartedAtTimestamp);
+        const ageOk = continuationAgeMs >= 0 && continuationAgeMs <= 10 * 60 * 1000;
+
+        if (phaseOk && dirOk && boundaryOk && startCandleOk && startTsOk && noPosition && ageOk) {
+            const execMetaBoundary = Number(execution.metadata?.watchBoundary ?? 0);
+            const execMetaDirection = String(execution.metadata?.continuationDirection ?? "");
+            const stateBoundary = Number(continuationState.watchBoundaryPrice);
+            const stateDirection = String(continuationState.direction);
+
+            if (execMetaBoundary > 0 && (execMetaBoundary !== stateBoundary || execMetaDirection !== stateDirection)) {
+                console.info(JSON.stringify({
+                    event: "V2_CONTINUATION_CONTEXT_MISMATCH_PROOF",
+                    symbol: String(input.symbol),
+                    activeEngineRouting: routing.executor,
+                    metadataBoundary: execMetaBoundary,
+                    stateBoundary,
+                    metadataDirection: execMetaDirection,
+                    stateDirection,
+                    selectedSource: "range_state_map_bridge"
+                }));
+            }
+
+            execution = {
+                ...execution,
+                metadata: {
+                    ...(execution.metadata ?? {}),
+                    watchBoundary: continuationState.watchBoundaryPrice,
+                    watchStartedCandleTs: continuationState.watchStartedCandleTs,
+                    continuationDirection: continuationState.direction,
+                    continuationPhase: continuationState.phase,
+                    continuationContextSource: "range_state_map_bridge",
+                    continuationAgeMs
+                }
+            };
+        }
+    }
     v2CalculatedInvalidationPx = execution.invalidationPx;
     const USD_PER_KRW = 1 / 1400;
     const accountEquityUsd = (v2State.accountEquityKrw ?? 0) * USD_PER_KRW;
@@ -1197,6 +1244,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let promotionApplied = false;
     let promotionReason: string | null = null;
     let promotionBlockReason: string | null = null;
+    let microProbeBlockReason: string | null = null;
     let promotionMinConditionPassed = false;
     let shockReactionPromotionType: string | null = null;
     let shockReactionBlockReason: string | null = null;
@@ -1363,6 +1411,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         "FRESH_TICK_BARRIER_ACTIVE",
         "WHIPSAW_SHOCK_RECHECK"
     ]);
+    if (v2RejectReasonAfterPromotion === "WHIPSAW_SHOCK_RECHECK_TRANSITION_HOLD") v2RejectReasonAfterPromotion = "WHIPSAW_SHOCK_RECHECK";
+
     let hardBlockPresent =
         !hardControlClear ||
         (v2RejectReasonAfterPromotion != null && hardBlockReasons.has(v2RejectReasonAfterPromotion));
@@ -2119,17 +2169,28 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             let microProbeDistancePct = 0;
             let maxAllowedDistancePct = 0;
             let htfReverseRisk = false;
-            let microProbeBlockReason: string | null = null;
             let atrPct = 0;
             
             const rangeMeta = (execution.metadata ?? {}) as Record<string, unknown>;
             const watchBoundary = Number(rangeMeta.watchBoundary ?? 0);
             const watchStartedCandleTs = Number(rangeMeta.watchStartedCandleTs ?? 0);
+            const continuationDirection = String(rangeMeta.continuationDirection ?? "none");
             
             if (atr20 <= 0 || entryPrice <= 0) {
                 microProbeBlockReason = "ATR_DATA_NOT_READY";
             } else if (!watchBoundary || watchBoundary <= 0) {
-                microProbeBlockReason = "WATCH_BOUNDARY_MISSING";
+                const cState = rangeContinuationStateMap.get(String(input.symbol));
+                if (cState && Number(cState.watchBoundaryPrice) > 0) {
+                    const evalNow = Number(input.now ?? Date.now());
+                    const ageMs = evalNow - Number(cState.watchStartedAtTimestamp);
+                    if (ageMs > 10 * 60 * 1000) {
+                        microProbeBlockReason = "CONTINUATION_CONTEXT_STALE";
+                    } else {
+                        microProbeBlockReason = "WATCH_BOUNDARY_MISSING";
+                    }
+                } else {
+                    microProbeBlockReason = "WATCH_BOUNDARY_MISSING";
+                }
             } else if (closedClose == null) {
                 microProbeBlockReason = "CLOSED_CLOSE_NULL";
             } else if (shockPhase !== "NONE") {
@@ -2149,6 +2210,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     else if (!(blSlope < 0 || rcSlope < 0)) microProbeBlockReason = "SLOPE_NOT_NEGATIVE";
                     else if (htfPolicy !== "SHORT_ONLY_OR_NONE" && htfPolicy !== "BOTH") microProbeBlockReason = "HTF_POLICY_NOT_SHORT";
                     else if (emaGap >= 0) microProbeBlockReason = "EMA_GAP_NOT_NEGATIVE";
+                    else if (continuationDirection !== "none" && continuationDirection !== "down") microProbeBlockReason = "CONTINUATION_DIRECTION_MISMATCH";
                     else microProbeAllowed = true;
                 } else if (longCandleBreakout) {
                     microProbeSide = "long";
@@ -2159,6 +2221,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     else if (!(bhSlope > 0 || rcSlope > 0)) microProbeBlockReason = "SLOPE_NOT_POSITIVE";
                     else if (htfPolicy !== "LONG_ONLY_OR_NONE" && htfPolicy !== "BOTH") microProbeBlockReason = "HTF_POLICY_NOT_LONG";
                     else if (emaGap <= 0) microProbeBlockReason = "EMA_GAP_NOT_POSITIVE";
+                    else if (continuationDirection !== "none" && continuationDirection !== "up") microProbeBlockReason = "CONTINUATION_DIRECTION_MISMATCH";
                     else microProbeAllowed = true;
                 } else {
                     microProbeBlockReason = "NO_CANDLE_BREAKOUT_OR_BREAKDOWN";
@@ -2185,8 +2248,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     microProbeAllowed = false;
                     microProbeBlockReason = "ALREADY_HAS_POSITION";
                 } else if (hardBlockPresent) {
-                    microProbeAllowed = false;
-                    microProbeBlockReason = "HARD_BLOCK_PRESENT";
+                    const onlyWhipsawBlock = hardControlClear && (v2RejectReasonAfterPromotion === "WHIPSAW_SHOCK_RECHECK" || v2RejectReasonAfterPromotion === "WHIPSAW_RECHECK_NOT_CONFIRMED");
+                    if (!onlyWhipsawBlock) {
+                        microProbeAllowed = false;
+                        microProbeBlockReason = "HARD_BLOCK_PRESENT";
+                    }
                 }
             }
             
@@ -2194,6 +2260,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             const probeSizeCap = htfReverseRisk ? 0.15 : 0.20;
             
             if (microProbeSide !== "none" && microProbeAllowed) {
+                const isWhipsaw = v2RejectReasonAfterPromotion === "WHIPSAW_SHOCK_RECHECK" || v2RejectReasonAfterPromotion === "WHIPSAW_RECHECK_NOT_CONFIRMED" || v2RejectReasonAfterPromotion === "WHIPSAW_SHOCK_RECHECK_TRANSITION_HOLD";
+                
                 v2DecisionAfterPromotion = "ENTER";
                 v2SideAfterPromotion = microProbeSide;
                 v2RejectReasonAfterPromotion = null;
@@ -2202,6 +2270,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 promotionBlockReason = null;
                 shockReactionBlockReason = null;
                 
+                if (isWhipsaw && hardControlClear && signedExecutionReady) {
+                    riskSizing.isBlocked = false;
+                    riskSizing.blockReason = null;
+                    hardBlockPresent = false;
+                    hardBlockReason = null;
+                }
+                
+                execution.stopPrice = watchBoundary;
+                execution.invalidationPx = watchBoundary;
                 microProbeFixedBoundary = watchBoundary;
                 
                 const existingSizeMultiplier = Number((riskSizing as any).sizeMultiplier ?? 1.0);
@@ -5664,6 +5741,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             judgmentShockPhase: judgment.shockPhase,
             judgmentTrendPhase: judgment.trendPhase,
             micro_probe_active: promotionReason === "CONTINUATION_MICRO_PROBE" ? true : undefined,
+            micro_probe_block_reason: microProbeBlockReason ?? undefined,
             full_entry_retest_required: promotionReason === "CONTINUATION_MICRO_PROBE" ? true : undefined
         },
         v2ExitAuthority: v2ExitAuthority ?? undefined,
@@ -6014,12 +6092,81 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 return "NONE";
             }
         }
+        
+        const finalEnterExecutable =
+            decision.decision === "ENTER" &&
+            String(decision.side) !== "none" &&
+            decision.risk.isBlocked !== true &&
+            Number(decision.risk.finalOrderNotionalUsdt ?? 0) > 0 &&
+            decision.committedRiskPlan != null &&
+            Number(decision.lifecycleAuthority?.newStopPrice ?? 0) > 0;
+
+        if (!finalEnterExecutable) {
+            let finalEnterBlockReason = decision.risk.blockReason ?? "UNKNOWN";
+            if (!decision.risk.blockReason) {
+                if (String(decision.side) === "none") finalEnterBlockReason = "SIDE_MISSING";
+                else if (decision.risk.isBlocked === true) finalEnterBlockReason = "RISK_BLOCKED";
+                else if (!(Number(decision.risk.finalOrderNotionalUsdt ?? 0) > 0)) finalEnterBlockReason = "ORDER_NOTIONAL_ZERO";
+                else if (decision.committedRiskPlan == null) finalEnterBlockReason = "COMMITTED_RISK_PLAN_MISSING";
+                else if (!(Number(decision.lifecycleAuthority?.newStopPrice ?? 0) > 0)) finalEnterBlockReason = "STOP_PRICE_INVALID";
+            }
+            if (decision.metadata) {
+                decision.metadata.final_enter_executable = false;
+                decision.metadata.final_enter_block_reason = finalEnterBlockReason;
+            }
+            
+            decision.decision = "SKIP";
+            return "NONE";
+        }
+
         return "ENTER";
     })();
     decision.executionAction = finalExecutionAction;
 
     // Requirement 1: Non-ENTER 정규화
     normalizeNonEnterDecision(decision);
+
+    const shouldConsumeMicroProbeSetup =
+        promotionReason === "CONTINUATION_MICRO_PROBE" &&
+        microProbeSetupKeyToConsume != null &&
+        decision.decision === "ENTER" &&
+        decision.executionAction === "ENTER" &&
+        String(decision.side) !== "none" &&
+        decision.risk.isBlocked !== true &&
+        Number(decision.risk.finalOrderNotionalUsdt ?? 0) > 0 &&
+        decision.committedRiskPlan != null &&
+        Number(decision.lifecycleAuthority?.newStopPrice ?? 0) > 0;
+
+    if (shouldConsumeMicroProbeSetup) {
+        symbolLastProbeAtMap.set(symbolStr, input.now);
+        symbolLastProbeSideMap.set(symbolStr, decision.side ?? "none");
+        symbolLastProbeQualityMap.set(symbolStr, qualityScore);
+        symbolLastProbeStructureMap.set(
+            symbolStr,
+            microProbeSetupKeyToConsume!
+        );
+
+        if (decision.metadata) {
+            decision.metadata.micro_probe_setup_consumed = true;
+        }
+    } else if (promotionReason === "CONTINUATION_MICRO_PROBE") {
+        if (decision.metadata) {
+            decision.metadata.micro_probe_setup_consumed = false;
+        }
+    }
+
+    if (finalDecision === "ENTER" && decision.decision !== "ENTER") {
+        console.info(JSON.stringify({
+            event: "V2_ENTER_HISTORY_FINALIZATION_MISMATCH_PROOF",
+            symbol: symbolStr,
+            preFinalDecision: finalDecision,
+            postFinalDecision: decision.decision,
+            executionAction: decision.executionAction,
+            riskBlocked: decision.risk.isBlocked,
+            riskBlockReason: decision.risk.blockReason,
+            promotionReason
+        }));
+    }
 
     return { decision, internal };
 }

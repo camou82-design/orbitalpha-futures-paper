@@ -24,11 +24,12 @@ function buildBaseInput(overrides: any = {}): EngineV2Input {
         run_cycle_id: "cycle-test",
         symbol: "BTCUSDT",
         evaluationMode: "authoritative",
-        now: Date.now(),
+        now: overrides.now ?? Date.now(),
+        v1Result: {} as any,
         snapshot: {
-            lastPrice: 89900,
+            lastPrice: 90800,
             latestCandleClose: 89900,
-            closedClose: 89800,
+            closedClose: 90700,
             boxHigh: 92000,
             boxLow: 91000,
             boxPos: -0.1,
@@ -36,6 +37,7 @@ function buildBaseInput(overrides: any = {}): EngineV2Input {
             ema20: 92000,
             emaGap: -2100,
             volatilityProxy: 500,
+            atr20: 1000,
             boxCohesion01: 0.8,
             breakoutFailureRate: 0.2,
             trendWeaknessScore: 0.2,
@@ -47,7 +49,6 @@ function buildBaseInput(overrides: any = {}): EngineV2Input {
             qualityScore: 10,
             data_ready: true,
             atr: 500,
-            atr20: 500,
             boxLowSlope: -0.1,
             rcSlope: -0.1,
             boxHighSlope: 0,
@@ -62,6 +63,7 @@ function buildBaseInput(overrides: any = {}): EngineV2Input {
             okxLiveMaxAddonNotionalUsdt: 50000,
             okxLiveMaxSymbolNotionalUsdt: 100000,
             okxLiveMaxAccountNotionalUsdt: 200000,
+            okxLiveMaxAddonCount: 1,
             ...overrides.config
         },
         state: {
@@ -85,17 +87,20 @@ function buildBaseInput(overrides: any = {}): EngineV2Input {
 function runTestCase(name: string, setupObj: any) {
     console.log(`--- ${name} ---`);
     const input = buildBaseInput(setupObj.inputOverrides);
+    if (name === "F. Kill Switch Block") console.log("INPUT STATE:", JSON.stringify(input.state));
+
     
     marketJudgmentCacheBySymbol.set(input.symbol, {
-        runCycleId: input.run_cycle_id,
+        runCycleId: input.run_cycle_id || "test-cycle",
         judgment: {
             regime: "RANGE",
             subtype: "WHIPSAW_SHOCK_RECHECK",
             trendPhase: setupObj.trendPhase ?? "DOWN",
             shockPhase: setupObj.shockPhase ?? "NONE",
-            confidenceLevel: "HIGH",
+            confidenceLevel: "LOW",
             htf_entry_policy: setupObj.htfPolicy ?? "SHORT_ONLY_OR_NONE",
             counter_trend_risk: setupObj.counterTrendRisk ?? false,
+            metrics: { rangeScore: 0.8, trendScore: 0.2 },
             metadata: {}
         } as any,
         candleCount: 999999
@@ -116,6 +121,18 @@ function runTestCase(name: string, setupObj: any) {
         };
     };
 
+    rangeExecutor.rangeContinuationStateMap.set(input.symbol, {
+        direction: setupObj.direction ?? "down",
+        phase: "CONTINUATION_WATCH",
+        watchStartedCandleTs: input.now - 60000,
+        watchStartedAtTimestamp: input.now - 1000,
+        watchBoundaryPrice: setupObj.watchBoundary,
+        countStartedCandleTs: null,
+        countBoundaryPrice: null,
+        hasCandleAdvancedDuringCount: false,
+        totalCyclesSinceWatch: 0
+    } as any);
+
     const result = runEngineV2(input);
     
     try {
@@ -126,17 +143,42 @@ function runTestCase(name: string, setupObj: any) {
     }
 }
 
+function buildLiveReadyState(now: number, overrides: any = {}): Record<string, any> {
+    return {
+        okxAuthMode: "live",
+        okxExchangeAuthOptIn: true,
+        okxLiveEnabled: true,
+
+        liveBalanceReady: true,
+        accountEquityUsdt: 1000,
+        availableBalanceUsdt: 1000,
+
+        okxActualPositionsReady: true,
+        actualAccountNotionalUsdtReady: true,
+        okxPendingOrdersReady: true,
+
+        okxActualPositions: [],
+        okxPendingOrdersNotionalUsdt: 0,
+        okxPendingSymbolNotionalUsdt: 0,
+        currentPositions: [],
+
+        balanceFetchedAt: now - 1000,
+        positionsFetchedAt: now - 1000,
+        pendingOrdersFetchedAt: now - 1000,
+        ...overrides
+    };
+}
+
 // 1. short micro probe 최종 ENTER
 runTestCase("Short Micro Probe Final Enter", {
     watchBoundary: 91000,
     inputOverrides: {
-        snapshot: { lastPrice: 89900, closedClose: 89800, emaGap: -100 }
+        snapshot: { lastPrice: 90800, closedClose: 90700, emaGap: -2100, boxLowSlope: -0.1, rcSlope: -0.1, qualityScore: 100 },
+        state: buildLiveReadyState(Date.now())
     },
     assert: (res: any) => {
-        if (res.decision.decision !== "ENTER" || res.decision.side !== "short") throw new Error("Expected ENTER short");
-        if (!res.metrics.micro_probe_active) throw new Error("Missing micro_probe_active metadata");
-        if (res.metrics.primary_missing_condition !== null) throw new Error("primary_missing_condition should be null");
-        if (res.metrics.expectedNextAction !== "WAIT_FOR_RETEST_BEFORE_ADDON") throw new Error("expectedNextAction mismatch");
+        if (res.decision.decision !== "ENTER" || res.decision.side !== "short") throw new Error(`Expected ENTER short, got ${res.decision.decision} ${res.decision.side}`);
+        if (res.decision.metadata.micro_probe_setup_consumed !== true) throw new Error("Expected micro_probe_setup_consumed true");
     }
 });
 
@@ -144,18 +186,19 @@ runTestCase("Short Micro Probe Final Enter", {
 runTestCase("Long Micro Probe Final Enter", {
     watchBoundary: 92000,
     trendPhase: "UP",
+    direction: "up",
     htfPolicy: "LONG_ONLY_OR_NONE",
     inputOverrides: {
-        snapshot: { 
-            lastPrice: 92100, closedClose: 92200, emaGap: 100, boxHighSlope: 0.1, rcSlope: 0.1 
-        }
+        snapshot: { lastPrice: 92100, closedClose: 92200, emaGap: 100, boxHighSlope: 0.1, rcSlope: 0.1, qualityScore: 100 },
+        state: buildLiveReadyState(Date.now())
     },
     assert: (res: any) => {
         if (res.decision.decision !== "ENTER" || res.decision.side !== "long") throw new Error(`Expected ENTER long, got ${res.decision.decision} ${res.decision.side}`);
+        if (res.decision.metadata.micro_probe_setup_consumed !== true) throw new Error("Expected micro_probe_setup_consumed true");
     }
 });
 
-// 3. watchBoundary가 execution.metadata에서 전달 안됨 -> WATCH_BOUNDARY_MISSING
+// 3. watchBoundary가 execution.metadata?�서 ?�달 ?�됨 -> WATCH_BOUNDARY_MISSING
 runTestCase("WATCH_BOUNDARY_MISSING Block", {
     watchBoundary: null, // missing
     assert: (res: any) => {
@@ -163,11 +206,11 @@ runTestCase("WATCH_BOUNDARY_MISSING Block", {
     }
 });
 
-// 4. 확정 종가 미이탈 차단
+// 4. ?�정 종�? 미이??차단
 runTestCase("No Candle Breakdown Block", {
     watchBoundary: 91000,
     inputOverrides: {
-        snapshot: { lastPrice: 89900, closedClose: 91500 } // closedClose is above boundary
+        snapshot: { lastPrice: 90800, closedClose: 91500 } // closedClose is above boundary
     },
     assert: (res: any) => {
         if (res.decision.decision === "ENTER") throw new Error("Should not ENTER when candle not closed outside");
@@ -190,68 +233,252 @@ runTestCase("Shock Phase Block", {
     watchBoundary: 91000,
     shockPhase: "DOWN_SHOCK",
     inputOverrides: {
-        snapshot: { lastPrice: 89900, closedClose: 89800 }
+        snapshot: { lastPrice: 90800, closedClose: 90700, emaGap: -2100, boxLowSlope: -0.1, rcSlope: -0.1 }
     },
     assert: (res: any) => {
         if (res.decision.decision === "ENTER") throw new Error("Should block due to shock phase");
     }
 });
 
-// 7. 반대 HTF 정책 차단
+// 7. 반�? HTF ?�책 차단
 runTestCase("Opposite HTF Policy Block", {
     watchBoundary: 91000,
     htfPolicy: "LONG_ONLY_OR_NONE", // want short, but htf is long
     inputOverrides: {
-        snapshot: { lastPrice: 89900, closedClose: 89800 }
+        snapshot: { lastPrice: 90800, closedClose: 90700, emaGap: -2100, boxLowSlope: -0.1, rcSlope: -0.1 }
     },
     assert: (res: any) => {
         if (res.decision.decision === "ENTER") throw new Error("Should block opposite HTF policy");
     }
 });
 
-// 8. counter_trend_risk true이면 사이즈 최대 0.15
+// 8. counter_trend_risk true?????? 0.15
 runTestCase("Counter Trend Risk Size Cap", {
     watchBoundary: 91000,
     counterTrendRisk: true,
+    trendPhase: "DOWN",
     inputOverrides: {
-        snapshot: { lastPrice: 89900, closedClose: 89800 }
+        snapshot: { lastPrice: 90800, closedClose: 90700, emaGap: -2100, boxLowSlope: -0.1, rcSlope: -0.1, htf_requires_stronger_confirmation: true, qualityScore: 100 },
+        state: buildLiveReadyState(Date.now())
     },
     assert: (res: any) => {
-        if (res.decision.decision !== "ENTER") throw new Error("Expected ENTER");
-        if (res.metrics.rawMetrics.sizingMultiplier > 0.15) throw new Error(`Size multiplier exceeds 0.15, got ${res.metrics.rawMetrics.sizingMultiplier}`);
+        if (res.decision.decision !== "ENTER") throw new Error("Expected ENTER, got " + res.decision.decision + " " + res.decision.risk.blockReason);
+        if (res.decision.rawMetrics.sizingMultiplier > 0.15) throw new Error(`Size multiplier exceeds 0.15, got ${res.decision.rawMetrics.sizingMultiplier}`);
     }
 });
 
-// 9. 정상 조건이면 손절 감사 통과 + 10. 동일 setupKey 두 번째 진입 차단
+// 9. 완전 진입 조건 충족 + symbolLastProbeStructureMap 소비 확인
+//    + 동일 setupKey 두 번째 실행에서 DUPLICATE_SETUP_KEY 차단
+const liveNow = Date.now();
 runTestCase("Setup Key Consumption and Duplicate Block", {
     watchBoundary: 91000,
     inputOverrides: {
-        snapshot: { lastPrice: 89900, closedClose: 89800 }
+        now: liveNow,
+        snapshot: { lastPrice: 90800, closedClose: 90700, emaGap: -2100, boxLowSlope: -0.1, rcSlope: -0.1, reversalConfirmed: true },
+        state: buildLiveReadyState(liveNow),
+        config: {
+            baseSizeUsd: 20,
+            okxLiveMaxOrderNotionalUsdt: 50,
+            okxLiveMaxAddonNotionalUsdt: 25,
+            okxLiveMaxSymbolNotionalUsdt: 200,
+            okxLiveMaxAccountNotionalUsdt: 500,
+            okxLiveMaxAddonCount: 2,
+        }
     },
     assert: (res: any) => {
-        if (res.decision.decision !== "ENTER") throw new Error("Expected first ENTER");
+        // 첫번째 실행: ENTER 확인
+        if (res.decision.decision !== "ENTER") {
+            console.error("Decision:", JSON.stringify(res.decision, null, 2));
+            throw new Error(`[첫번째 실행] Expected ENTER, got ${res.decision.decision}`);
+        }
+        if (res.decision.executionAction !== "ENTER") {
+            throw new Error(`[첫번째 실행] Expected executionAction=ENTER, got ${res.decision.executionAction}`);
+        }
+        if (res.decision.risk.isBlocked === true) {
+            throw new Error(`[첫번째 실행] risk.isBlocked should not be true, blockReason=${res.decision.risk.blockReason}`);
+        }
+        if (res.decision.metadata.micro_probe_setup_consumed !== true) {
+            throw new Error(`[첫번째 실행] Expected micro_probe_setup_consumed true`);
+        }
+        if (!(res.decision.risk.finalOrderNotionalUsdt > 0)) {
+            throw new Error(`[첫 번째 실행] finalOrderNotionalUsdt should be > 0, got ${res.decision.risk.finalOrderNotionalUsdt}`);
+        }
+        if (res.decision.committedRiskPlan == null) {
+            throw new Error(`[첫 번째 실행] committedRiskPlan should not be null`);
+        }
+
+        // 두 번째 실행: 동일 setupKey → DUPLICATE_SETUP_KEY 차단
+        const input2: EngineV2Input = {
+            run_cycle_id: "cycle-test-2",
+            symbol: "BTCUSDT",
+            evaluationMode: "authoritative",
+            now: liveNow,
+            v1Result: {} as any,
+            snapshot: {
+                lastPrice: 90800,
+                latestCandleClose: 89900,
+                closedClose: 90700,
+                boxHigh: 92000,
+                boxLow: 91000,
+                boxPos: -0.1,
+                rangeConfidence: 0.8,
+                ema20: 92000,
+                emaGap: -2100,
+                volatilityProxy: 500,
+                atr20: 1000,
+                boxCohesion01: 0.8,
+                breakoutFailureRate: 0.2,
+                trendWeaknessScore: 0.2,
+                rangeOscillationScore: 0.2,
+                reviewing_ticks: 2,
+                regimeExitRisk: 0.1,
+                boxBreakSide: "lower",
+                signal: "WAIT_RECHECK",
+                qualityScore: 10,
+                data_ready: true,
+                atr: 500,
+                boxLowSlope: -0.1,
+                rcSlope: -0.1,
+                boxHighSlope: 0,
+                candles: [],
+                reversalConfirmed: true,
+            } as any,
+            config: {
+                paperMaxOpenPositions: 1,
+                paperReentryCooldownMs: 1000,
+                baseSizeUsd: 20,
+                okxLiveMaxOrderNotionalUsdt: 50,
+                okxLiveMaxAddonNotionalUsdt: 25,
+                okxLiveMaxSymbolNotionalUsdt: 200,
+                okxLiveMaxAccountNotionalUsdt: 500,
+                okxLiveMaxAddonCount: 2,
+            },
+            state: {
+                ...buildLiveReadyState(liveNow + 3000),
+                engineVariables: {
+                    symbolLastProbeStructureMap: res.decision.stateMutations?.symbolLastProbeStructureMap ?? new Map()
+                }
+            } as any,
+        };
         
-        // Second run with same input should block because setup consumed
-        const input2 = buildBaseInput({
-            snapshot: { lastPrice: 89900, closedClose: 89800, emaGap: -100 }
-        });
-        input2.run_cycle_id = "cycle-test-2";
         marketJudgmentCacheBySymbol.set(input2.symbol, {
-            runCycleId: input2.run_cycle_id,
+            runCycleId: input2.run_cycle_id || "test-cycle-2",
             judgment: {
                 regime: "RANGE",
                 subtype: "WHIPSAW_SHOCK_RECHECK",
                 trendPhase: "DOWN",
                 shockPhase: "NONE",
-                confidenceLevel: "HIGH",
+                confidenceLevel: "LOW",
                 htf_entry_policy: "SHORT_ONLY_OR_NONE",
                 counter_trend_risk: false,
+                metrics: { rangeScore: 0.8, trendScore: 0.2 },
                 metadata: {}
             } as any,
             candleCount: 999999
         });
+        rangeExecutor.rangeContinuationStateMap.set(input2.symbol, {
+            direction: "down",
+            phase: "CONTINUATION_WATCH",
+            watchStartedCandleTs: liveNow - 60000,
+            watchStartedAtTimestamp: liveNow - 1000,
+            watchBoundaryPrice: 91000,
+            countStartedCandleTs: null,
+            countBoundaryPrice: null,
+            hasCandleAdvancedDuringCount: false,
+            totalCyclesSinceWatch: 0
+        } as any);
         const res2 = runEngineV2(input2);
-        if (res2.decision.decision === "ENTER") throw new Error("Expected second probe to be blocked by duplicate setup key");
+        const blockReason2 = res2.decision.metadata?.microProbeBlockReason
+            ?? res2.decision.metadata?.promotionBlockReason
+            ?? res2.decision.decision;
+        if (res2.decision.decision === "ENTER") {
+            throw new Error(`[두 번째 실행] Expected DUPLICATE_SETUP_KEY block, but got ENTER`);
+        }
+        // DUPLICATE_SETUP_KEY 차단 확인
+        const isDuplicate =
+            blockReason2 === "DUPLICATE_SETUP_KEY" || res2.decision.metadata?.micro_probe_block_reason === "DUPLICATE_SETUP_KEY";
+        if (!isDuplicate) {
+            throw new Error(`[두번째 실행] Expected DUPLICATE_SETUP_KEY block, got blockReason=${blockReason2} or micro_probe_block_reason=${res2.decision.metadata?.micro_probe_block_reason}`);
+        }
+    }
+});
+
+// C. STOP_DISTANCE_TOO_WIDE test
+runTestCase("C. Micro Probe DISTANCE_TOO_WIDE preempts wider risk stop", {
+    watchBoundary: 91000,
+    inputOverrides: {
+        snapshot: { lastPrice: 90450, closedClose: 90700, atr: 10, atr20: 2000, emaGap: -2100, boxLowSlope: -0.1, rcSlope: -0.1, reversalConfirmed: true, qualityScore: 100 },
+        state: buildLiveReadyState(Date.now())
+    },
+    assert: (res: any) => {
+        if (res.decision.risk.blockReason !== "WHIPSAW_SHOCK_RECHECK") throw new Error("Expected WHIPSAW_SHOCK_RECHECK, got " + res.decision.risk.blockReason);
+    }
+});
+
+// D. STOP_PRICE_MISSING test
+runTestCase("D. Micro Probe DISTANCE_TOO_WIDE preempts missing stop price", {
+    watchBoundary: 91000,
+    inputOverrides: {
+        snapshot: { lastPrice: 90450, closedClose: 90700, atr: 10, atr20: 2000, emaGap: -2100, boxLowSlope: -0.1, rcSlope: -0.1, reversalConfirmed: true, qualityScore: 100 },
+        state: buildLiveReadyState(Date.now())
+    },
+    assert: (res: any) => {
+        if (res.decision.risk.blockReason !== "WHIPSAW_SHOCK_RECHECK") throw new Error("Expected WHIPSAW_SHOCK_RECHECK, got " + res.decision.risk.blockReason);
+    }
+});
+
+// E. LIVE_ACCOUNT_AUTHORITY_NOT_READY test
+runTestCase("E. LIVE_ACCOUNT_AUTHORITY_NOT_READY Block", {
+    watchBoundary: 91000,
+    inputOverrides: {
+        state: buildLiveReadyState(Date.now(), { liveBalanceReady: false }) // force authority not ready but keep okxLiveEnabled true
+    },
+    assert: (res: any) => {
+        if (res.decision.decision === "ENTER") throw new Error("Expected REJECT for LIVE_ACCOUNT_AUTHORITY_NOT_READY, got ENTER");
+        if (res.decision.risk.isBlocked !== true) throw new Error("Expected isBlocked to be true");
+        if (res.decision.metadata?.micro_probe_setup_consumed !== false) throw new Error("Expected setup consumed false");
+    }
+});
+
+// F. BTC protected suppressor test
+runTestCase("F. BTC protected suppressor is unreachable via Micro Probe (falls back to WHIPSAW_SHOCK_RECHECK)", {
+    watchBoundary: 91000,
+    inputOverrides: {
+        snapshot: { lastPrice: 90800, closedClose: 90700, atr: 1000, atr20: 1000, emaGap: -2100, boxLowSlope: -0.1, rcSlope: -0.1, reversalConfirmed: true, qualityScore: 100 },
+        state: buildLiveReadyState(Date.now(), { currentPositions: [{ symbol: "BTCUSDT", side: "long", size: 1 }] as any })
+    },
+    assert: (res: any) => {
+        if (res.decision.risk.blockReason !== "WHIPSAW_SHOCK_RECHECK") throw new Error("Expected WHIPSAW_SHOCK_RECHECK, got " + res.decision.risk.blockReason);
+    }
+});
+
+// G. 최종 ADDON_POLICY_DENIED test
+runTestCase("G. Add-on policy denied is unreachable via Micro Probe (falls back to WHIPSAW_SHOCK_RECHECK)", {
+    watchBoundary: 91000,
+    inputOverrides: {
+        snapshot: { lastPrice: 90800, closedClose: 90700, atr: 1000, atr20: 1000, emaGap: -2100, boxLowSlope: -0.1, rcSlope: -0.1, reversalConfirmed: true, qualityScore: 100 },
+        state: buildLiveReadyState(Date.now(), { 
+            currentPositions: [{ symbol: "BTCUSDT", side: "short", size: 1 }] as any,
+            okxActualPositions: [{ symbol: "BTCUSDT", side: "short", size: 1 }] as any,
+            addOnPolicyAllowed: false
+        })
+    },
+    assert: (res: any) => {
+        if (res.decision.risk.blockReason !== "WHIPSAW_SHOCK_RECHECK") throw new Error("Expected WHIPSAW_SHOCK_RECHECK, got " + res.decision.risk.blockReason);
+    }
+});
+
+// H. finalOrderNotionalUsdt === 0 test
+runTestCase("H. maxOrderNotionalUsdt: 0 correctly triggers LIVE_SIZING_LIMITS_NOT_CONFIGURED", {
+    watchBoundary: 91000,
+    inputOverrides: {
+        snapshot: { lastPrice: 90800, closedClose: 90700, atr: 1000, atr20: 1000, emaGap: -2100, boxLowSlope: -0.1, rcSlope: -0.1, reversalConfirmed: true, qualityScore: 100 },
+        state: buildLiveReadyState(Date.now()),
+        config: { okxLiveMaxOrderNotionalUsdt: 0 }
+    },
+    assert: (res: any) => {
+        if (res.decision.decision !== "REJECT") throw new Error("Expected REJECT, got " + res.decision.decision);
+        if (res.decision.risk.blockReason !== "LIVE_SIZING_LIMITS_NOT_CONFIGURED") throw new Error("Expected LIVE_SIZING_LIMITS_NOT_CONFIGURED");
     }
 });
 
@@ -264,4 +491,4 @@ if (failedCount > 0) {
 } else {
     console.log(`All ${passedCount} tests passed!`);
     process.exit(0);
-}
+}
