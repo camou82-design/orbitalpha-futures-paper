@@ -8,7 +8,6 @@ function buildInput(symbol: string, overrides: Partial<EngineV2Input> = {}): Eng
         run_cycle_id: "cycle_1",
         evaluationMode: "diagnostic",
         snapshot: {
-            symbol,
             exchange: "binance",
             timestamp: Date.now(),
             lastPrice: 100,
@@ -25,15 +24,13 @@ function buildInput(symbol: string, overrides: Partial<EngineV2Input> = {}): Eng
                 { ts: 1000, open: 100, high: 105, low: 95, close: 100, volume: 100 },
                 { ts: 2000, open: 100, high: 105, low: 95, close: 100, volume: 100 }
             ]
-        },
+        } as any,
         state: {
             longAllow: true,
             shortAllow: true,
-            globalRiskMultiplier: 1.0,
             currentPositions: [],
-            marginUsagePct: 0,
-            winRate3d: 0.5
-        },
+            marginUsagePct: 0
+        } as any,
         marketPhase: "RANGE",
         ...overrides
     };
