@@ -2270,15 +2270,24 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 promotionBlockReason = null;
                 shockReactionBlockReason = null;
                 
-                if (isWhipsaw && hardControlClear && signedExecutionReady) {
+                const releasableWhipsawRiskBlock =
+                    promotionReason === "CONTINUATION_MICRO_PROBE" &&
+                    isWhipsaw &&
+                    hardControlClear &&
+                    signedExecutionReady &&
+                    (
+                        riskSizing.blockReason == null ||
+                        riskSizing.blockReason === "WHIPSAW_SHOCK_RECHECK" ||
+                        riskSizing.blockReason === "WHIPSAW_RECHECK_NOT_CONFIRMED" ||
+                        riskSizing.blockReason === "WHIPSAW_SHOCK_RECHECK_TRANSITION_HOLD"
+                    );
+
+                if (releasableWhipsawRiskBlock) {
                     riskSizing.isBlocked = false;
                     riskSizing.blockReason = null;
                     hardBlockPresent = false;
                     hardBlockReason = null;
                 }
-                
-                execution.stopPrice = watchBoundary;
-                execution.invalidationPx = watchBoundary;
                 microProbeFixedBoundary = watchBoundary;
                 
                 const existingSizeMultiplier = Number((riskSizing as any).sizeMultiplier ?? 1.0);

@@ -178,6 +178,19 @@ runTestCase("Short Micro Probe Final Enter", {
     },
     assert: (res: any) => {
         if (res.decision.decision !== "ENTER" || res.decision.side !== "short") throw new Error(`Expected ENTER short, got ${res.decision.decision} ${res.decision.side}`);
+        if (res.decision.executionAction !== "ENTER") throw new Error("Expected executionAction ENTER");
+        if (res.decision.riskSizing?.isBlocked === true) throw new Error("Expected risk.isBlocked false");
+        if ((res.decision.finalOrderNotionalUsdt ?? 0) <= 0) throw new Error("Expected finalOrderNotionalUsdt > 0");
+        if (!res.decision.committedRiskPlan) throw new Error("Expected committedRiskPlan");
+        
+        const source = res.decision.metadata?.promotedRiskPlanSource ?? res.decision.committedRiskPlan?.source;
+        if (source !== "continuation_watch_boundary_buffer") throw new Error(`Expected continuation_watch_boundary_buffer, got ${source}`);
+        
+        const stopPrice = res.decision.committedRiskPlan?.stopPrice ?? res.decision.stop_price ?? 0;
+        if (stopPrice <= 0) throw new Error("Expected stopPrice > 0");
+        if (stopPrice === 91000) throw new Error("Expected stopPrice !== watchBoundary");
+        if (stopPrice <= 91000) throw new Error(`Expected stopPrice > watchBoundary for short, got ${stopPrice}`);
+        
         if (res.decision.metadata.micro_probe_setup_consumed !== true) throw new Error("Expected micro_probe_setup_consumed true");
     }
 });
@@ -194,6 +207,19 @@ runTestCase("Long Micro Probe Final Enter", {
     },
     assert: (res: any) => {
         if (res.decision.decision !== "ENTER" || res.decision.side !== "long") throw new Error(`Expected ENTER long, got ${res.decision.decision} ${res.decision.side}`);
+        if (res.decision.executionAction !== "ENTER") throw new Error("Expected executionAction ENTER");
+        if (res.decision.riskSizing?.isBlocked === true) throw new Error("Expected risk.isBlocked false");
+        if ((res.decision.finalOrderNotionalUsdt ?? 0) <= 0) throw new Error("Expected finalOrderNotionalUsdt > 0");
+        if (!res.decision.committedRiskPlan) throw new Error("Expected committedRiskPlan");
+        
+        const source = res.decision.metadata?.promotedRiskPlanSource ?? res.decision.committedRiskPlan?.source;
+        if (source !== "continuation_watch_boundary_buffer") throw new Error(`Expected continuation_watch_boundary_buffer, got ${source}`);
+        
+        const stopPrice = res.decision.committedRiskPlan?.stopPrice ?? res.decision.stop_price ?? 0;
+        if (stopPrice <= 0) throw new Error("Expected stopPrice > 0");
+        if (stopPrice === 92000) throw new Error("Expected stopPrice !== watchBoundary");
+        if (stopPrice >= 92000) throw new Error(`Expected stopPrice < watchBoundary for long, got ${stopPrice}`);
+        
         if (res.decision.metadata.micro_probe_setup_consumed !== true) throw new Error("Expected micro_probe_setup_consumed true");
     }
 });
