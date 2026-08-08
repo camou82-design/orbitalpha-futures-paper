@@ -4334,6 +4334,55 @@ export class PaperEngine {
         legacy: buildV2LegacyBridge(res),
         config: buildV2ConfigBridge(this.config),
         state: (() => {
+          const pendingFetchPerformed =
+            this.opsOrdersScanEverDone === true &&
+            typeof this.lastOpsOrdersScanAtMs === "number" &&
+            this.lastOpsOrdersScanAtMs > 0;
+
+          const cachedOpsPendingIsArray = Array.isArray(this.cachedOpsPending);
+          const cachedOpsAlgosIsArray = Array.isArray(this.cachedOpsAlgos);
+          const pendingFetchErrorsCount = this.cachedOpsFetchErrors ? this.cachedOpsFetchErrors.length : 0;
+          const cachedOpsPendingCount = cachedOpsPendingIsArray ? this.cachedOpsPending.length : 0;
+          const cachedOpsAlgosCount = cachedOpsAlgosIsArray ? this.cachedOpsAlgos.length : 0;
+
+          const pendingFetchReady =
+            pendingFetchPerformed &&
+            cachedOpsPendingIsArray &&
+            cachedOpsAlgosIsArray &&
+            pendingFetchErrorsCount === 0;
+
+          const pendingPayloadEmpty =
+            cachedOpsPendingCount === 0 &&
+            cachedOpsAlgosCount === 0;
+
+          const pendingOrdersExposureReady = pendingFetchReady && pendingPayloadEmpty;
+
+          let authorityMode = "FETCH_NOT_READY";
+          if (!pendingFetchPerformed) {
+             authorityMode = "FETCH_NOT_READY";
+          } else if (pendingFetchErrorsCount > 0 || !cachedOpsPendingIsArray || !cachedOpsAlgosIsArray) {
+             authorityMode = "FETCH_ERROR";
+          } else if (!pendingPayloadEmpty) {
+             authorityMode = "NONEMPTY_PENDING_FAIL_CLOSED";
+          } else if (pendingOrdersExposureReady) {
+             authorityMode = "ZERO_PENDING_SAFE";
+          }
+
+          this.logger.info("V2_PENDING_ORDER_BRIDGE_AUTHORITY_PROOF", {
+             pendingFetchPerformed,
+             pendingFetchTimestamp: this.lastOpsOrdersScanAtMs,
+             pendingFetchErrorsCount,
+             cachedOpsPendingIsArray,
+             cachedOpsAlgosIsArray,
+             cachedOpsPendingCount,
+             cachedOpsAlgosCount,
+             pendingPayloadEmpty,
+             pendingOrdersExposureReady,
+             accountPendingNotionalUsdt: 0,
+             symbolPendingNotionalUsdt: 0,
+             authorityMode
+          });
+
           return buildV2StateBridge(
             opensAfterClose,
             this.lastRisk,
@@ -4352,12 +4401,12 @@ export class PaperEngine {
             this.okxWalletBalanceUsdt,
             this.okxAvailableBalanceUsdt,
             this.okxPositionsOk,
-            this.okxOrderSubmitOk,
+            pendingOrdersExposureReady,
             0,
             0,
             this.lastSignedRestSuccessAt ?? fetchedAt,
             this.lastSignedRestSuccessAt ?? fetchedAt,
-            this.lastSignedRestSuccessAt ?? fetchedAt
+            this.lastOpsOrdersScanAtMs ?? fetchedAt
           );
         })(),
         v2Mode
