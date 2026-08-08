@@ -1331,6 +1331,34 @@ export class PaperEngine {
     }
   }
 
+  private async refreshPendingOrdersSnapshot(nowTs: number): Promise<void> {
+    const canScan =
+      Boolean(this.okxDemo && this.signedExecutionReady) &&
+      nowTs - this.lastOpsOrdersScanAtMs >= this.opsOrdersScanMinIntervalMs;
+
+    if (canScan && this.okxDemo) {
+      this.lastOpsOrdersScanAtMs = nowTs;
+      this.opsOrdersScanEverDone = true;
+      this.cachedOpsFetchErrors = [];
+
+      const [pendRes, algoRes] = await Promise.all([
+        this.okxDemo.getOrdersPending({ instType: "SWAP" }),
+        this.okxDemo.getOrdersAlgoPending({ instType: "SWAP" })
+      ]);
+
+      if (pendRes.ok) this.cachedOpsPending = pendRes.value ?? [];
+      else {
+        this.cachedOpsPending = [];
+        this.cachedOpsFetchErrors.push(`orders_pending:${pendRes.error}`);
+      }
+      if (algoRes.ok) this.cachedOpsAlgos = algoRes.value ?? [];
+      else {
+        this.cachedOpsAlgos = [];
+        this.cachedOpsFetchErrors.push(`orders_algos_pending:${algoRes.error}`);
+      }
+    }
+  }
+
   /**
    * Post-entry watch: OKX positions vs ledger, protective SL+TP proof on reduce-only algos,
    * hard-blocks new entries when exposure is unprotected, and runs `ensureProtectiveStopOrder`
@@ -1464,31 +1492,9 @@ export class PaperEngine {
     }
 
 
-    const canScan =
-      Boolean(this.okxDemo && this.signedExecutionReady) &&
-      nowTs - this.lastOpsOrdersScanAtMs >= this.opsOrdersScanMinIntervalMs;
+    await this.refreshPendingOrdersSnapshot(nowTs);
 
-    if (canScan && this.okxDemo) {
-      this.lastOpsOrdersScanAtMs = nowTs;
-      this.opsOrdersScanEverDone = true;
-      this.cachedOpsFetchErrors = [];
-
-      const [pendRes, algoRes] = await Promise.all([
-        this.okxDemo.getOrdersPending({ instType: "SWAP" }),
-        this.okxDemo.getOrdersAlgoPending({ instType: "SWAP" })
-      ]);
-
-      if (pendRes.ok) this.cachedOpsPending = pendRes.value ?? [];
-      else {
-        this.cachedOpsPending = [];
-        this.cachedOpsFetchErrors.push(`orders_pending:${pendRes.error}`);
-      }
-      if (algoRes.ok) this.cachedOpsAlgos = algoRes.value ?? [];
-      else {
-        this.cachedOpsAlgos = [];
-        this.cachedOpsFetchErrors.push(`orders_algos_pending:${algoRes.error}`);
-      }
-
+    if (this.okxDemo && this.opsOrdersScanEverDone) {
       const okxActualFlat: Record<string, unknown>[] = [];
       if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
         for (const row of this.lastLivePositionsPayload) {
@@ -3741,6 +3747,7 @@ export class PaperEngine {
     await this.processOperatorInstructions(Date.now());
     okx_position_reconcile_ms = Date.now() - tRec0;
     this.evaluateReadinessTransition(Date.now());
+    await this.refreshPendingOrdersSnapshot(Date.now());
     let history_write_skipped = false;
     let history_write_skip_reason = "";
     const fiveMinMs = 5 * 60_000;
