@@ -4494,6 +4494,90 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             dataSynced &&
             !positionMismatch;
 
+        const liveReadinessFailureReasons: string[] = [];
+
+        if (!liveBalanceReady)
+            liveReadinessFailureReasons.push("LIVE_BALANCE_NOT_READY");
+
+        if (!(accountEquityUsdt !== null && accountEquityUsdt > 0))
+            liveReadinessFailureReasons.push("ACCOUNT_EQUITY_INVALID");
+
+        if (!(availableBalanceUsdt !== null && availableBalanceUsdt >= 0))
+            liveReadinessFailureReasons.push("AVAILABLE_BALANCE_INVALID");
+
+        if (!okxActualPositionsReady)
+            liveReadinessFailureReasons.push("POSITIONS_NOT_READY");
+
+        if (!actualAccountNotionalUsdtReady)
+            liveReadinessFailureReasons.push("ACCOUNT_NOTIONAL_NOT_READY");
+
+        if (!okxPendingOrdersReady)
+            liveReadinessFailureReasons.push("PENDING_ORDERS_NOT_READY");
+
+        if (!okxPositionsValid)
+            liveReadinessFailureReasons.push("POSITIONS_PAYLOAD_INVALID");
+
+        if (!pendingOrdersValid)
+            liveReadinessFailureReasons.push("PENDING_ORDERS_PAYLOAD_INVALID");
+
+        if (!timestampsPresent)
+            liveReadinessFailureReasons.push("TIMESTAMPS_MISSING");
+
+        if (!dataFresh)
+            liveReadinessFailureReasons.push("DATA_STALE");
+
+        if (!dataSynced)
+            liveReadinessFailureReasons.push("DATA_SKEW_TOO_WIDE");
+
+        if (positionMismatch)
+            liveReadinessFailureReasons.push("POSITION_AUTHORITY_MISMATCH");
+
+        if (isLiveSignedOrderAttempt) {
+            console.info(JSON.stringify({
+                event: "V2_LIVE_ACCOUNT_AUTHORITY_BREAKDOWN_PROOF",
+                symbol: String(input.symbol),
+
+                isLiveSignedOrderAttempt,
+                liveReadinessPassed,
+
+                liveBalanceReady,
+                accountEquityUsdt,
+                availableBalanceUsdt,
+
+                okxActualPositionsReady,
+                actualAccountNotionalUsdtReady,
+                okxPendingOrdersReady,
+
+                okxPositionsValid,
+                pendingOrdersValid,
+
+                timestampsPresent,
+                dataFresh,
+                dataSynced,
+
+                positionMismatch,
+
+                balanceFetchedAt: balanceFetchedAt ?? null,
+                positionsFetchedAt: positionsFetchedAt ?? null,
+                pendingOrdersFetchedAt: pendingOrdersFetchedAt ?? null,
+
+                balanceAgeMs: typeof balanceFetchedAt === "number" ? nowMs - balanceFetchedAt : null,
+                positionsAgeMs: typeof positionsFetchedAt === "number" ? nowMs - positionsFetchedAt : null,
+                pendingOrdersAgeMs: typeof pendingOrdersFetchedAt === "number" ? nowMs - pendingOrdersFetchedAt : null,
+
+                maxDataAgeMs,
+                maxDataSkewMs,
+
+                okxActualPositionsIsArray: Array.isArray(okxActualPositionsRaw),
+                okxActualPositionsCount: Array.isArray(okxActualPositionsRaw) ? okxActualPositionsRaw.length : null,
+
+                pendingOrdersNotionalUsdt: pendingOrdersNotionalRaw ?? null,
+                pendingSymbolNotionalUsdt: pendingSymbolNotionalRaw ?? null,
+
+                failureReasons: liveReadinessFailureReasons
+            }));
+        }
+
 
 
         if (isLiveSignedOrderAttempt && !limitsConfigured) {
