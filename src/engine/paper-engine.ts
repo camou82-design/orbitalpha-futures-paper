@@ -7502,51 +7502,65 @@ export class PaperEngine {
         liquidationBufferRatio >= requiredBufferRatio;
       
       if (!liveLeverageAllowed) {
-        const isV2NewEntry = input.isNewEntry === true && input.authoritySource === "v2";
-        const isLiqDataMissing = liquidationBufferRatio == null || estimatedLiquidationPrice == null || entryPriceVal == null;
-
-        // V2 New Entry Hardening: Only allow warning if data is truly missing (N/A).
-        // If data is present but buffer is insufficient, it's a hard block.
-        if (isV2NewEntry && isLiqDataMissing) {
-          this.logger.warn("LIQUIDATION_BUFFER_PREOPEN_UNAVAILABLE_WARNING", {
+        const isRiskReducingClose = input.reduceOnly === true && input.isNewEntry === false;
+        
+        if (isRiskReducingClose) {
+          this.logger.info("REDUCE_ONLY_LIQUIDATION_BUFFER_BYPASS_PROOF", {
             symbol: input.symbol,
+            reason: input.reason || "unknown",
+            isNewEntry: input.isNewEntry,
+            reduceOnly: input.reduceOnly,
+            stopPrice,
             liquidationBufferRatio,
-            stopBeforeLiquidation,
-            isNewEntry: true,
-            authoritySource: "v2",
-            notionalUsdt: v2_intended_notional_usdt,
-            appliedLeverage: okx_confirmed_leverage,
-            reason: "new_probe_entry_allowed_due_to_missing_liq_calc_data"
+            bypass_scope: "liquidation_buffer_only"
           });
         } else {
-          const reject_reason = "EXCHANGE_REALITY_BLOCK";
-          const detail = "LIVE_LIQUIDATION_BUFFER_INSUFFICIENT";
-          const missingFields = [];
-          if (stopPrice === null) missingFields.push("stopPrice");
-          if (entryPriceVal === null) missingFields.push("entryPrice");
-          if (estimatedLiquidationPrice === null) missingFields.push("estimatedLiquidationPrice");
-          
-          const errorMsg = `Live liquidation buffer insufficient (Required: ${requiredBufferRatio}, Available: ${liquidationBufferRatio?.toFixed(2) ?? "N/A"}${missingFields.length > 0 ? ", Missing: " + missingFields.join("|") : ""})`;
-          this.logger.warn("EXCHANGE_REALITY_BLOCK", { 
-            ...logCtxReality, 
-            reject_reason, 
-            detail, 
-            error: errorMsg,
-            stopPrice,
-            entryPrice: entryPriceVal,
-            estimatedLiquidationPrice,
-            isNewEntry: input.isNewEntry,
-            walletBalance: this.okxAvailableBalanceUsdt,
-            stopBeforeLiquidation,
-            liquidationBufferRatio
-          });
-          return {
-            ok: false, ordId: null, fillPx: null, fillSize: 0,
-            errorCode: "live_liquidation_buffer_insufficient", 
-            errorMessage: errorMsg, 
-            ackCode: "rejected", orderState: null, fillConfirmed: false,
-            clOrdId: input.clOrdId
-          };
+          const isV2NewEntry = input.isNewEntry === true && input.authoritySource === "v2";
+          const isLiqDataMissing = liquidationBufferRatio == null || estimatedLiquidationPrice == null || entryPriceVal == null;
+
+          // V2 New Entry Hardening: Only allow warning if data is truly missing (N/A).
+          // If data is present but buffer is insufficient, it's a hard block.
+          if (isV2NewEntry && isLiqDataMissing) {
+            this.logger.warn("LIQUIDATION_BUFFER_PREOPEN_UNAVAILABLE_WARNING", {
+              symbol: input.symbol,
+              liquidationBufferRatio,
+              stopBeforeLiquidation,
+              isNewEntry: true,
+              authoritySource: "v2",
+              notionalUsdt: v2_intended_notional_usdt,
+              appliedLeverage: okx_confirmed_leverage,
+              reason: "new_probe_entry_allowed_due_to_missing_liq_calc_data"
+            });
+          } else {
+            const reject_reason = "EXCHANGE_REALITY_BLOCK";
+            const detail = "LIVE_LIQUIDATION_BUFFER_INSUFFICIENT";
+            const missingFields = [];
+            if (stopPrice === null) missingFields.push("stopPrice");
+            if (entryPriceVal === null) missingFields.push("entryPrice");
+            if (estimatedLiquidationPrice === null) missingFields.push("estimatedLiquidationPrice");
+            
+            const errorMsg = `Live liquidation buffer insufficient (Required: ${requiredBufferRatio}, Available: ${liquidationBufferRatio?.toFixed(2) ?? "N/A"}${missingFields.length > 0 ? ", Missing: " + missingFields.join("|") : ""})`;
+            this.logger.warn("EXCHANGE_REALITY_BLOCK", { 
+              ...logCtxReality, 
+              reject_reason, 
+              detail, 
+              error: errorMsg,
+              stopPrice,
+              entryPrice: entryPriceVal,
+              estimatedLiquidationPrice,
+              isNewEntry: input.isNewEntry,
+              walletBalance: this.okxAvailableBalanceUsdt,
+              stopBeforeLiquidation,
+              liquidationBufferRatio
+            });
+            return {
+              ok: false, ordId: null, fillPx: null, fillSize: 0,
+              errorCode: "live_liquidation_buffer_insufficient", 
+              errorMessage: errorMsg, 
+              ackCode: "rejected", orderState: null, fillConfirmed: false,
+              clOrdId: input.clOrdId
+            };
+          }
         }
       }
     }
