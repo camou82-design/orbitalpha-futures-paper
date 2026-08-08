@@ -249,26 +249,30 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         ? cState.countBoundaryPrice 
         : (cState.previousConfirmedBoxLow ?? boxLow);
 
-    const isDownDeadlockCondition = 
+    const isDownDeadlockCountingCondition = 
         judgment.trendPhase === "DOWN" && 
         emaGap < 0 && 
         !reversalConfirmed && 
-        isDownSlopeValid && 
         (lastPrice < effectiveDownBoundary || (recentClosedClose !== null && recentClosedClose < effectiveDownBoundary));
 
-    const isUpDeadlockCondition = 
+    const isUpDeadlockCountingCondition = 
         judgment.trendPhase === "UP" && 
         emaGap > 0 && 
         !reversalConfirmed && 
-        isUpSlopeValid && 
         (lastPrice > effectiveUpBoundary || (recentClosedClose !== null && recentClosedClose > effectiveUpBoundary));
+
+    const MAX_CONTINUATION_CYCLES = 10;
+    let expiredThisCycle = false;
 
     if (cState.phase === "CONTINUATION_WATCH" || cState.phase === "RETEST_TOUCHED") {
         if (reversalConfirmed) shouldResetWatch = true;
         if (cState.direction === "down" && judgment.trendPhase === "UP") shouldResetWatch = true;
         if (cState.direction === "up" && judgment.trendPhase === "DOWN") shouldResetWatch = true;
         if (cState.watchStartedAtTimestamp && (now - cState.watchStartedAtTimestamp > 10 * 60 * 1000)) shouldResetWatch = true;
-        if (cState.totalCyclesSinceWatch >= 10) shouldResetWatch = true;
+        if (cState.totalCyclesSinceWatch >= MAX_CONTINUATION_CYCLES) {
+            shouldResetWatch = true;
+            expiredThisCycle = true;
+        }
         if (cState.direction === "down" && lastPrice > boxHigh) shouldResetWatch = true;
         if (cState.direction === "up" && lastPrice < boxLow) shouldResetWatch = true;
         if (currentStage > 0) shouldResetWatch = true;
@@ -277,8 +281,12 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         if (cState.direction === "down" && judgment.trendPhase === "UP") shouldResetWatch = true;
         if (cState.direction === "up" && judgment.trendPhase === "DOWN") shouldResetWatch = true;
         if (currentStage > 0) shouldResetWatch = true;
-        if (cState.direction === "down" && !isDownDeadlockCondition) shouldResetWatch = true;
-        if (cState.direction === "up" && !isUpDeadlockCondition) shouldResetWatch = true;
+        if (cState.direction === "down" && !isDownDeadlockCountingCondition) shouldResetWatch = true;
+        if (cState.direction === "up" && !isUpDeadlockCountingCondition) shouldResetWatch = true;
+        if (cState.consecutiveCycles >= MAX_CONTINUATION_CYCLES) {
+            shouldResetWatch = true;
+            expiredThisCycle = true;
+        }
     }
 
     if (shouldResetWatch) {
@@ -287,7 +295,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             direction: null,
             phase: "IDLE",
             consecutiveCycles: 0,
-            lastRunCycleId: null,
+            lastRunCycleId: expiredThisCycle ? currentRunCycleId : null,
             lastCandleTimestamp: null,
             watchBoundaryPrice: null,
             watchStartedAtTimestamp: null,
@@ -322,13 +330,15 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     runCycleId: currentRunCycleId,
                     evaluationMode: input.evaluationMode,
                     checks: direction === "down" ? {
-                        trendDown: true,
+                        trendDown: judgment.trendPhase === "DOWN",
                         emaNegative: emaGap < 0,
                         noReversal: !reversalConfirmed,
-                        boundarySlopeNegative: blSlope < 0,
-                        centerSlopeNegative: rcSlope < 0,
                         boundaryBrokenByLastPrice: lastPrice < effectiveDownBoundary,
                         boundaryBrokenByClose: recentClosedClose !== null && recentClosedClose < effectiveDownBoundary,
+                        countingEligible: isDownDeadlockCountingCondition,
+                        slopeAligned: isDownSlopeAligned,
+                        boundarySlopeNegative: blSlope < 0,
+                        centerSlopeNegative: rcSlope < 0,
                         authoritative: true,
                         candleAdvanced: cState.hasCandleAdvancedDuringCount,
                         currentBoxHigh: boxHigh,
@@ -340,13 +350,15 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                         slopeAlignmentMode: "bl_or_rc_negative",
                         alignedSlopeCount: (blSlope < 0 ? 1 : 0) + (rcSlope < 0 ? 1 : 0)
                     } : {
-                        trendUp: true,
+                        trendUp: judgment.trendPhase === "UP",
                         emaPositive: emaGap > 0,
                         noReversal: !reversalConfirmed,
-                        boundarySlopePositive: bhSlope > 0,
-                        centerSlopePositive: rcSlope > 0,
                         boundaryBrokenByLastPrice: lastPrice > effectiveUpBoundary,
                         boundaryBrokenByClose: recentClosedClose !== null && recentClosedClose > effectiveUpBoundary,
+                        countingEligible: isUpDeadlockCountingCondition,
+                        slopeAligned: isUpSlopeAligned,
+                        boundarySlopePositive: bhSlope > 0,
+                        centerSlopePositive: rcSlope > 0,
                         authoritative: true,
                         candleAdvanced: cState.hasCandleAdvancedDuringCount,
                         currentBoxHigh: boxHigh,
@@ -357,7 +369,9 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                         boundaryDistancePct: effectiveUpBoundary !== 0 ? (lastPrice - effectiveUpBoundary) / effectiveUpBoundary : 0,
                         slopeAlignmentMode: "bh_or_rc_positive",
                         alignedSlopeCount: (bhSlope > 0 ? 1 : 0) + (rcSlope > 0 ? 1 : 0)
-                    }
+                    },
+                    deadlockCountingStarted: direction === "down" ? isDownDeadlockCountingCondition : isUpDeadlockCountingCondition,
+                    continuationWatchEligible: cState.consecutiveCycles >= 3 && cState.hasCandleAdvancedDuringCount && (direction === "down" ? isDownSlopeAligned : isUpSlopeAligned)
                 }));
             }
         }
@@ -393,7 +407,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         }
         
         if (cState.phase === "IDLE" || cState.phase === "DEADLOCK_COUNTING") {
-            if (isDownDeadlockCondition) {
+            if (isDownDeadlockCountingCondition) {
                 if (cState.direction !== "down") {
                     if (currentStage === 0) {
                         cState.direction = "down";
@@ -410,7 +424,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     cState.hasCandleAdvancedDuringCount = true;
                 }
                 if (cState.direction === "down") cState.phase = "DEADLOCK_COUNTING";
-            } else if (isUpDeadlockCondition) {
+            } else if (isUpDeadlockCountingCondition) {
                 if (cState.direction !== "up") {
                     if (currentStage === 0) {
                         cState.direction = "up";
@@ -431,12 +445,14 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         }
         
         if (cState.phase === "DEADLOCK_COUNTING" && cState.consecutiveCycles >= 3 && cState.hasCandleAdvancedDuringCount) {
-            cState.phase = "CONTINUATION_WATCH";
-            logProof(cState.direction === "down" ? "RANGE_BREAKDOWN_CONTINUATION_WATCH" : "RANGE_BREAKOUT_CONTINUATION_WATCH", { boxLow, boxHigh });
-            cState.watchStartedAtTimestamp = now;
-            cState.watchStartedCandleTs = lastCandleTimestamp;
-            cState.totalCyclesSinceWatch = 0;
-            cState.watchBoundaryPrice = cState.countBoundaryPrice;
+            if ((cState.direction === "down" && isDownSlopeAligned) || (cState.direction === "up" && isUpSlopeAligned)) {
+                cState.phase = "CONTINUATION_WATCH";
+                logProof(cState.direction === "down" ? "RANGE_BREAKDOWN_CONTINUATION_WATCH" : "RANGE_BREAKOUT_CONTINUATION_WATCH", { boxLow, boxHigh });
+                cState.watchStartedAtTimestamp = now;
+                cState.watchStartedCandleTs = lastCandleTimestamp;
+                cState.totalCyclesSinceWatch = 0;
+                cState.watchBoundaryPrice = cState.countBoundaryPrice;
+            }
         }
 
         cState.lastRunCycleId = currentRunCycleId;
@@ -666,7 +682,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     rcSlopeSource,
                     reversalConfirmed,
                     recentLowBreakdown: (lastPrice < (sn.boxLow ?? 0) || recentCandles.slice(-3).some(c => c.low < (sn.boxLow ?? 0))),
-                    isDownDeadlockCondition,
+                    countingEligible: isDownDeadlockCountingCondition,
+                    slopeAligned: isDownSlopeAligned,
                     consecutiveCycles: cState.consecutiveCycles,
                     continuationPhase: cState.phase,
                     hasCandleAdvancedDuringCount: cState.hasCandleAdvancedDuringCount,
@@ -730,7 +747,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     rcSlopeSource,
                     reversalConfirmed,
                     recentHighBreakout: (lastPrice > (sn.boxHigh ?? 0) || recentCandles.slice(-3).some(c => c.high > (sn.boxHigh ?? 0))),
-                    isUpDeadlockCondition,
+                    countingEligible: isUpDeadlockCountingCondition,
+                    slopeAligned: isUpSlopeAligned,
                     consecutiveCycles: cState.consecutiveCycles,
                     continuationPhase: cState.phase,
                     hasCandleAdvancedDuringCount: cState.hasCandleAdvancedDuringCount,

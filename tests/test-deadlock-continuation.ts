@@ -959,6 +959,180 @@ function test29() {
 
 
 
+// 30. Slope independent DEADLOCK_COUNTING
+function test30() {
+    clearState();
+    
+    // Test A - UP breakout, slope initially opposite
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-1`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: -1, rcSlope: -1 } as any })
+    );
+    let state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "DEADLOCK_COUNTING", "Test 30A: Should start DEADLOCK_COUNTING despite negative slope");
+    assertEqual(state?.consecutiveCycles, 1, "Test 30A: consecutiveCycles = 1");
+
+    // Test B - A 이후 slope 정렬
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-2`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 2}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: -1, rcSlope: -1 } as any })
+    );
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-3`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 3}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: -1, rcSlope: -1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "DEADLOCK_COUNTING", "Test 30B (pre): Still counting because slope is not aligned");
+    
+    // Now align slope
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-4`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 4}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "CONTINUATION_WATCH", "Test 30B: Promoted to WATCH because slope is now aligned");
+    assertEqual(state?.watchBoundaryPrice, 51000, "Test 30B: watchBoundaryPrice correctly captured");
+
+    // Test C - DOWN 대칭
+    clearState();
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-1`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, candles: [{high:48500, low:48000, close:48500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: 1, rcSlope: 1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "DEADLOCK_COUNTING", "Test 30C (pre): DOWN DEADLOCK_COUNTING started despite positive slope");
+    
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-2`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, candles: [{high:48500, low:48000, close:48500, ts: 2}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: 1, rcSlope: 1 } as any })
+    );
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-3`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, candles: [{high:48500, low:48000, close:48500, ts: 3}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: 1, rcSlope: 1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "DEADLOCK_COUNTING", "Test 30C (mid): Still counting");
+    
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-4`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.1, lastPrice: 48500, atr: 500, emaGap: -0.00025, candles: [{high:48500, low:48000, close:48500, ts: 4}] as any }
+        }),
+        buildJudgment({ trendPhase: "DOWN", metadata: { blSlope: -1, rcSlope: -1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "CONTINUATION_WATCH", "Test 30C (end): Promoted to WATCH");
+
+    // Test D - slope 끝까지 반대
+    clearState();
+    let promotedToWatch = false;
+    for (let i = 1; i <= 11; i++) {
+        executeRangeRegime(
+            buildInput({
+                symbol: "BTCUSDT" as any,
+                run_cycle_id: `c-${i}`,
+                snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: i}] as any }
+            }),
+            buildJudgment({ trendPhase: "UP", metadata: { bhSlope: -1, rcSlope: -1 } as any })
+        );
+        state = rangeContinuationStateMap.get("BTCUSDT");
+        if (state?.phase === "CONTINUATION_WATCH") promotedToWatch = true;
+        if (i <= 10) {
+            assertEqual(state?.phase, "DEADLOCK_COUNTING", `Test 30D (cycle ${i}): Should be DEADLOCK_COUNTING`);
+        }
+    }
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(promotedToWatch, false, "Test 30D: Never promotes to WATCH if slope is never aligned");
+    assertEqual(state?.phase, "IDLE", "Test 30D: Expiry resets to IDLE after MAX cycles");
+    assertEqual(state?.countBoundaryPrice, null, "Test 30D: Expiry resets countBoundaryPrice");
+    assertEqual(state?.countBoundarySource, null, "Test 30D: Expiry resets countBoundarySource");
+    assertEqual(state?.consecutiveCycles, 0, "Test 30D: Expiry resets consecutiveCycles");
+
+    // Test D2 - expiry 직전 마지막 허용 cycle에서 slope 정상 정렬
+    clearState();
+    promotedToWatch = false;
+    for (let i = 1; i <= 10; i++) {
+        const isLastCycle = (i === 10);
+        executeRangeRegime(
+            buildInput({
+                symbol: "BTCUSDT" as any,
+                run_cycle_id: `c-d2-${i}`,
+                snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: i}] as any }
+            }),
+            buildJudgment({ trendPhase: "UP", metadata: { bhSlope: isLastCycle ? 1 : -1, rcSlope: isLastCycle ? 1 : -1 } as any })
+        );
+        state = rangeContinuationStateMap.get("BTCUSDT");
+        if (state?.phase === "CONTINUATION_WATCH") promotedToWatch = true;
+    }
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(promotedToWatch, true, "Test 30D2: Promotes to WATCH successfully on the 10th cycle");
+    assertEqual(state?.phase, "CONTINUATION_WATCH", "Test 30D2: Final state is WATCH");
+    assertEqual(state?.watchBoundaryPrice, 51000, "Test 30D2: Watch boundary is correct");
+
+    // Test E - no breakout
+    clearState();
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-1`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 50000, atr: 500, emaGap: 0.00025, candles: [{high:50000, low:49000, close:50000, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: 1, rcSlope: 1 } as any })
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "IDLE", "Test 30E: No breakout means IDLE");
+
+    // Test F - reversal confirmed
+    clearState();
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-1`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 1}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: -1, rcSlope: -1 } as any })
+    );
+    executeRangeRegime(
+        buildInput({
+            symbol: "BTCUSDT" as any,
+            run_cycle_id: `c-2`,
+            snapshot: { ...buildInput().snapshot, boxLow: 49000, boxHigh: 51000, boxPos: 0.9, lastPrice: 51500, atr: 500, emaGap: 0.00025, candles: [{high:51500, low:51000, close:51500, ts: 2}] as any }
+        }),
+        buildJudgment({ trendPhase: "UP", metadata: { bhSlope: -1, rcSlope: -1 } as any, reversalConfirmed: true } as any)
+    );
+    state = rangeContinuationStateMap.get("BTCUSDT");
+    assertEqual(state?.phase, "IDLE", "Test 30F: reversalConfirmed resets to IDLE");
+}
+
 test1();
 test2();
 test3();
@@ -989,6 +1163,7 @@ test26();
 test27();
 test28();
 test29();
+test30();
 
 console.log(`Passed ${passed} out of ${total} tests.`);
 if (passed !== total) process.exit(1);
