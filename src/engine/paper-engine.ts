@@ -940,31 +940,54 @@ function buildV2PreEntryRiskPlanCommitted(
   let finalTpPrice: number | null = null;
   let finalTpSource: "engine_calculated" | "authority_tp_price" | "none" = "none";
   let policyTpPrice: number | null = null;
+  let profitManagementMode: "FIXED_TP" | "PARTIAL_TRAILING" | "NONE" = "NONE";
 
-  const authTp =
-    typeof decision.takeProfit === "number" && Number.isFinite(decision.takeProfit) && decision.takeProfit !== 0
-      ? decision.takeProfit
-      : typeof authority.takeProfit1Px === "number" &&
-          Number.isFinite(authority.takeProfit1Px) &&
-          authority.takeProfit1Px !== 0
-        ? authority.takeProfit1Px
-        : null;
-
-  if (authTp != null) {
-    finalTpPrice = authTp;
-    finalTpSource = "authority_tp_price";
-  }
-
-  // Enforce RANGE fixed TP
   if (regime === "RANGE") {
-    policyTpPrice = engineMirrorTpPrice(referenceEntryPx, side, regime);
-    if (finalTpPrice == null && policyTpPrice != null) {
-      finalTpPrice = policyTpPrice;
-      finalTpSource = "engine_calculated";
+    profitManagementMode = "FIXED_TP";
+    const authTp =
+      typeof decision.takeProfit === "number" && Number.isFinite(decision.takeProfit) && decision.takeProfit !== 0
+        ? decision.takeProfit
+        : typeof authority.takeProfit1Px === "number" &&
+            Number.isFinite(authority.takeProfit1Px) &&
+            authority.takeProfit1Px !== 0
+          ? authority.takeProfit1Px
+          : null;
+
+    if (authTp != null) {
+      const isAuthTpValidDirection =
+        side === "long" ? authTp > referenceEntryPx : authTp < referenceEntryPx;
+      if (isAuthTpValidDirection) {
+        finalTpPrice = authTp;
+        finalTpSource = "authority_tp_price";
+      } else {
+        logger.warn("V2_EXIT_PLAN_AUTHORITY_TP_REJECTED", {
+          symbol,
+          side,
+          rejectedTpPrice: authTp,
+          reason: "range_tp_wrong_direction"
+        });
+      }
     }
+
     if (finalTpPrice == null) {
-       return { ok: false, reason: "range_tp_missing" };
+      policyTpPrice = engineMirrorTpPrice(referenceEntryPx, side, regime);
+      if (policyTpPrice != null) {
+        const isPolicyTpValidDirection =
+          side === "long" ? policyTpPrice > referenceEntryPx : policyTpPrice < referenceEntryPx;
+        if (isPolicyTpValidDirection) {
+          finalTpPrice = policyTpPrice;
+          finalTpSource = "engine_calculated";
+        }
+      }
     }
+
+    if (finalTpPrice == null) {
+      return { ok: false, reason: "range_tp_missing" };
+    }
+  } else if (regime === "TREND") {
+    profitManagementMode = "PARTIAL_TRAILING";
+    finalTpPrice = null;
+    finalTpSource = "none";
   }
 
   let takeProfitDistancePct: number | null = null;
@@ -1000,7 +1023,11 @@ function buildV2PreEntryRiskPlanCommitted(
     stopClampApplied: clampApplied,
     stopClampReason: clampApplied ? "invalidation_too_close" : null,
     tpRequired: regime === "RANGE",
-    authorityOwner: "V2PreEntryRiskPlanCommitted"
+    authorityOwner: "V2PreEntryRiskPlanCommitted",
+    tp_direction_valid: finalTpPrice != null,
+    authority_tp_rejected: finalTpSource === "engine_calculated" && finalTpPrice != null,
+    final_tp_source: finalTpSource,
+    profit_management_mode: profitManagementMode
   });
 
   return {
@@ -8734,7 +8761,8 @@ export class PaperEngine {
             this.logger.info("STOP_LOSS_POSITION_CLOSED", { symbol: open.symbol, flowId, fillSize });
             
             const fillPxStr = st.fillPx || st.avgPx;
-            const actualExitPrice = fillPxStr ? Number(fillPxStr) : closePrice;
+            const parsedFillPx = fillPxStr ? Number(fillPxStr) : NaN;
+            const actualExitPrice = Number.isFinite(parsedFillPx) && parsedFillPx > 0 ? parsedFillPx : closePrice;
             
             const actualMetrics = computePaperCloseLegMetrics({
               open,
@@ -15852,8 +15880,8 @@ export class PaperEngine {
                 : null;
 
           const committedTpForSubmit =
-            authority.source === "v2" && v2CommittedRiskPlan?.initial_tp_price != null
-              ? v2CommittedRiskPlan.initial_tp_price
+            authority.source === "v2"
+              ? (v2CommittedRiskPlan?.initial_tp_price ?? null)
               : typeof res.decision.takeProfit === "number" && Number.isFinite(res.decision.takeProfit) && res.decision.takeProfit !== 0
                 ? res.decision.takeProfit
                 : null;
@@ -16136,8 +16164,10 @@ export class PaperEngine {
             return undefined;
           })(),
           targetPrice1: (() => {
-            if (authority.source === "v2" && v2CommittedRiskPlan?.initial_tp_price != null) {
-              return v2CommittedRiskPlan.initial_tp_price;
+            if (authority.source === "v2") {
+              if (v2CommittedRiskPlan?.initial_tp_price != null) return v2CommittedRiskPlan.initial_tp_price;
+              if (authority.takeProfit1Px !== undefined && isCommittedEntryStopPrice(authority.takeProfit1Px)) return authority.takeProfit1Px;
+              return undefined;
             }
             return typeof res.decision.takeProfit === "number" ? res.decision.takeProfit : undefined;
           })(),
