@@ -730,10 +730,15 @@ function parseOkxSwapInstrumentSizing(inst: Record<string, unknown>): OkxSwapIns
   const minSz = Number(inst.minSz);
   const ctVal = Number(inst.ctVal);
   const ctValCcy = String(inst.ctValCcy ?? "");
+  const tickSz = Number(inst.tickSz);
   if (!Number.isFinite(lotSz) || lotSz <= 0) return null;
   if (!Number.isFinite(minSz) || minSz <= 0) return null;
   if (!Number.isFinite(ctVal) || ctVal <= 0) return null;
-  return { lotSz, minSz, ctVal, ctValCcy };
+  const result = { lotSz, minSz, ctVal, ctValCcy } as OkxSwapInstrumentSizing;
+  if (Number.isFinite(tickSz) && tickSz > 0) {
+    (result as any).tickSz = tickSz;
+  }
+  return result;
 }
 
 
@@ -6747,6 +6752,11 @@ export class PaperEngine {
     const cancelTargets: Array<{ instId: string; algoId: string }> = [];
     const expectedSide = open.side === "long" ? "sell" : "buy";
 
+    const cachedSizing = this.instrumentCache.get(instId) as any;
+    const tickSz = cachedSizing?.tickSz ? Number(cachedSizing.tickSz) : 1e-8;
+    const priceTolerance = Math.max(tickSz, 1e-8);
+    const isPriceMatch = (pxA: number, pxB: number) => Math.abs(pxA - pxB) <= priceTolerance;
+
     for (const algo of pendingAlgos) {
       const curAlgoClOrdId = String(algo.algoClOrdId || "");
       const isEngineOwned = curAlgoClOrdId.startsWith("oap");
@@ -6773,8 +6783,8 @@ export class PaperEngine {
       if (Math.abs(algoSz - contractsToProtect) > 1e-8) { wrongSizeCount++; isWrong = true; }
       if (algoSide !== expectedSide) { wrongSideCount++; isWrong = true; }
       
-      if (hasSlTrigger && Math.abs(Number(algo.slTriggerPx) - activeStopPrice) > 1e-8) { wrongPriceCount++; isWrong = true; }
-      if (hasTpTrigger && wantsTp && Math.abs(Number(algo.tpTriggerPx) - activeTpPrice!) > 1e-8) { wrongPriceCount++; isWrong = true; }
+      if (hasSlTrigger && !isPriceMatch(Number(algo.slTriggerPx), activeStopPrice)) { wrongPriceCount++; isWrong = true; }
+      if (hasTpTrigger && wantsTp && !isPriceMatch(Number(algo.tpTriggerPx), activeTpPrice!)) { wrongPriceCount++; isWrong = true; }
 
       if (hasSlTrigger || (isOco && wantsTp)) {
         if (!engineOwnedSl && !isWrong && isMyPosition) {
