@@ -842,7 +842,8 @@ export type V2CommittedStopSource =
   | "invalidation_px"
   | "authority_stop_price"
   | "new_stop_price"
-  | "decision_stop_loss";
+  | "decision_stop_loss"
+  | "policy_clamped";
 
 export type V2PreEntryRiskPlanCommitted = Readonly<{
   side: "long" | "short";
@@ -852,6 +853,10 @@ export type V2PreEntryRiskPlanCommitted = Readonly<{
   risk_distance: number;
   protection_required: true;
   stop_source: V2CommittedStopSource;
+  take_profit_source: "engine_calculated" | "authority_tp_price" | "none";
+  stop_distance_pct: number;
+  take_profit_distance_pct: number | null;
+  risk_reward_ratio: number | null;
 }>;
 
 function isCommittedEntryStopPrice(v: unknown): v is number {
@@ -879,12 +884,64 @@ function buildV2PreEntryRiskPlanCommitted(
   authority: EntryExecutionAuthority,
   decision: { stopLoss?: unknown; takeProfit?: unknown },
   side: "long" | "short",
-  referenceEntryPx: number
-): { ok: true; plan: V2PreEntryRiskPlanCommitted } | { ok: false } {
-  if (!(referenceEntryPx > 0) || !Number.isFinite(referenceEntryPx)) return { ok: false };
-  const sp = extractV2StrategyStopPriceForEntry(authority, decision.stopLoss);
-  if (sp == null) return { ok: false };
-  const tp =
+  referenceEntryPx: number,
+  logger: any,
+  symbol: string
+): { ok: true; plan: V2PreEntryRiskPlanCommitted } | { ok: false; reason?: string } {
+  if (!(referenceEntryPx > 0) || !Number.isFinite(referenceEntryPx)) return { ok: false, reason: "invalid_entry_px" };
+  const rawSp = extractV2StrategyStopPriceForEntry(authority, decision.stopLoss);
+  if (rawSp == null) return { ok: false, reason: "no_raw_stop" };
+  
+  const regime = regimeForSl(authority.regime);
+  const policySl = engineMirrorStopPrice(referenceEntryPx, side, regime);
+  
+  let finalStopPrice = rawSp.price;
+  let finalStopSource = rawSp.source;
+  let clampApplied = false;
+  
+  if (policySl != null) {
+    if (side === "long") {
+      if (rawSp.price > policySl) {
+        finalStopPrice = policySl;
+        finalStopSource = "policy_clamped";
+        clampApplied = true;
+      }
+    } else {
+      if (rawSp.price < policySl) {
+        finalStopPrice = policySl;
+        finalStopSource = "policy_clamped";
+        clampApplied = true;
+      }
+    }
+  }
+
+  // Directional sanity check
+  if (side === "long" && finalStopPrice >= referenceEntryPx) return { ok: false, reason: "invalid_stop_direction_long" };
+  if (side === "short" && finalStopPrice <= referenceEntryPx) return { ok: false, reason: "invalid_stop_direction_short" };
+
+  const rawStopDistancePct = (Math.abs(referenceEntryPx - rawSp.price) / referenceEntryPx) * 100;
+  const finalStopDistancePct = (Math.abs(referenceEntryPx - finalStopPrice) / referenceEntryPx) * 100;
+
+  if (clampApplied) {
+    logger.info("V2_STOP_DISTANCE_CLAMP_PROOF", {
+      symbol,
+      side,
+      entryPrice: referenceEntryPx,
+      rawInvalidationPx: rawSp.price,
+      policyStopPrice: policySl,
+      finalStopPrice,
+      rawStopDistancePct,
+      finalStopDistancePct,
+      clampApplied: true,
+      clampReason: "invalidation_too_close"
+    });
+  }
+
+  let finalTpPrice: number | null = null;
+  let finalTpSource: "engine_calculated" | "authority_tp_price" | "none" = "none";
+  let policyTpPrice: number | null = null;
+
+  const authTp =
     typeof decision.takeProfit === "number" && Number.isFinite(decision.takeProfit) && decision.takeProfit !== 0
       ? decision.takeProfit
       : typeof authority.takeProfit1Px === "number" &&
@@ -892,17 +949,74 @@ function buildV2PreEntryRiskPlanCommitted(
           authority.takeProfit1Px !== 0
         ? authority.takeProfit1Px
         : null;
-  const risk_distance = Math.abs(referenceEntryPx - sp.price);
+
+  if (authTp != null) {
+    finalTpPrice = authTp;
+    finalTpSource = "authority_tp_price";
+  }
+
+  // Enforce RANGE fixed TP
+  if (regime === "RANGE") {
+    policyTpPrice = engineMirrorTpPrice(referenceEntryPx, side, regime);
+    if (finalTpPrice == null && policyTpPrice != null) {
+      finalTpPrice = policyTpPrice;
+      finalTpSource = "engine_calculated";
+    }
+    if (finalTpPrice == null) {
+       return { ok: false, reason: "range_tp_missing" };
+    }
+  }
+
+  let takeProfitDistancePct: number | null = null;
+  let riskRewardRatio: number | null = null;
+
+  const risk = Math.abs(referenceEntryPx - finalStopPrice);
+  if (finalTpPrice != null && risk > 0) {
+    const reward = Math.abs(finalTpPrice - referenceEntryPx);
+    takeProfitDistancePct = (reward / referenceEntryPx) * 100;
+    riskRewardRatio = reward / risk;
+  }
+
+  if (regime === "RANGE" && (riskRewardRatio == null || riskRewardRatio <= 0)) {
+    return { ok: false, reason: "range_invalid_rr" };
+  }
+
+  logger.info("V2_EXIT_PLAN_AUTHORITY_PROOF", {
+    symbol,
+    side,
+    regime,
+    entryPrice: referenceEntryPx,
+    rawInvalidationPx: rawSp.price,
+    policyStopPrice: policySl,
+    finalStopPrice,
+    stopSource: finalStopSource,
+    policyTakeProfitPrice: policyTpPrice,
+    finalTakeProfitPrice: finalTpPrice,
+    takeProfitSource: finalTpSource,
+    rawStopDistancePct,
+    finalStopDistancePct,
+    takeProfitDistancePct,
+    riskRewardRatio,
+    stopClampApplied: clampApplied,
+    stopClampReason: clampApplied ? "invalidation_too_close" : null,
+    tpRequired: regime === "RANGE",
+    authorityOwner: "V2PreEntryRiskPlanCommitted"
+  });
+
   return {
     ok: true,
     plan: {
       side,
       reference_entry_px: referenceEntryPx,
-      stop_price: sp.price,
-      initial_tp_price: tp,
-      risk_distance,
+      stop_price: finalStopPrice,
+      initial_tp_price: finalTpPrice,
+      risk_distance: risk,
       protection_required: true,
-      stop_source: sp.source
+      stop_source: finalStopSource,
+      take_profit_source: finalTpSource,
+      stop_distance_pct: finalStopDistancePct,
+      take_profit_distance_pct: takeProfitDistancePct,
+      risk_reward_ratio: riskRewardRatio
     }
   };
 }
@@ -8619,15 +8733,27 @@ export class PaperEngine {
           if (isActuallyClosedOnOkx) {
             this.logger.info("STOP_LOSS_POSITION_CLOSED", { symbol: open.symbol, flowId, fillSize });
             
-            const metrics = leg(open.sizeUsd);
+            const fillPxStr = st.fillPx || st.avgPx;
+            const actualExitPrice = fillPxStr ? Number(fillPxStr) : closePrice;
+            
+            const actualMetrics = computePaperCloseLegMetrics({
+              open,
+              closePrice: actualExitPrice,
+              closedAt: snap!.fetchedAt,
+              snapFundingRate: snap!.fundingRate,
+              marginUsd: open.sizeUsd,
+              paperTakerFeeRate: this.config.paperTakerFeeRate,
+              paperFundingIntervalHours: this.config.paperFundingIntervalHours
+            });
+            
             const closedRow = finalizePaperClosedRecord({
               open,
               symbol: open.symbol,
-              closePrice,
+              closePrice: actualExitPrice,
               closedAt: snap!.fetchedAt,
               closeReason: (open as any).closePendingReason || "stop_loss",
               legMarginUsd: open.sizeUsd,
-              metrics,
+              metrics: actualMetrics,
               feeRate: this.config.paperTakerFeeRate,
               fundingIntervalHours: this.config.paperFundingIntervalHours,
               strategyVersion: inheritedStrategyVersion,
@@ -8706,6 +8832,7 @@ export class PaperEngine {
               symbol: open.symbol,
               side: open.side,
               sizeUsd: open.sizeUsd,
+              okxContracts: open.okxContracts ?? undefined,
               appliedLeverage: Math.max(1, open.leverage ?? 1),
               lastPrice: closePrice,
               flowId,
@@ -8730,6 +8857,9 @@ export class PaperEngine {
               continue;
             } else {
               this.logger.error("STOP_LOSS_CLOSE_ORDER_FAILED", { symbol: open.symbol, flowId, error: closeResult?.errorMessage || "unknown_error" });
+              // If failed, we should still bypass the rest of the close logic for this tick to avoid duplicate processing.
+              remaining.push(posTrail);
+              continue;
             }
           }
         }
@@ -14443,7 +14573,7 @@ export class PaperEngine {
 
       // --- [GUARD-1] V2: committed risk plan (no mirror) before any OKX entry / queue consume ---
       if (authority.source === "v2" && authorityDecisionForExecution === "ENTER") {
-        const rp = buildV2PreEntryRiskPlanCommitted(authority, res.decision, intentSide, first.lastPrice);
+        const rp = buildV2PreEntryRiskPlanCommitted(authority, res.decision, intentSide, first.lastPrice, this.logger, sym);
         if (!rp.ok) {
           this.logger.error("V2_ENTRY_BLOCKED_PROTECTION_PLAN_MISSING", {
             symbol: sym,
@@ -14451,7 +14581,7 @@ export class PaperEngine {
             decision_id: (authority as any).decision_id ?? null,
             intent_side: intentSide,
             reference_entry_px: first.lastPrice,
-            reason: "STOP_PRICE_REQUIRED_BEFORE_ENTRY",
+            reason: (rp as any).reason || "STOP_PRICE_REQUIRED_BEFORE_ENTRY",
             invalidation_px: authority.invalidationPx ?? null,
             authority_stop_price: authority.stopPrice ?? null,
             new_stop_price: authority.newStopPrice ?? null,
