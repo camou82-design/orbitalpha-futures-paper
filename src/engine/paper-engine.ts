@@ -6748,6 +6748,9 @@ export class PaperEngine {
     let wrongSizeCount = 0;
     let wrongSideCount = 0;
     let wrongPriceCount = 0;
+    let structuralFallbackSlCount = 0;
+    let structuralFallbackTpCount = 0;
+    let anonymousManualCount = 0;
     
     const cancelTargets: Array<{ instId: string; algoId: string }> = [];
     const expectedSide = open.side === "long" ? "sell" : "buy";
@@ -6759,8 +6762,9 @@ export class PaperEngine {
 
     for (const algo of pendingAlgos) {
       const curAlgoClOrdId = String(algo.algoClOrdId || "");
-      const isEngineOwned = curAlgoClOrdId.startsWith("oap");
-      const isMyPosition = isEngineOwned ? curAlgoClOrdId.includes(openedAt36) : false;
+      const isOapPrefix = curAlgoClOrdId.startsWith("oap");
+      const isEmptyId = curAlgoClOrdId === "";
+      const isMyPosition = isOapPrefix ? curAlgoClOrdId.includes(openedAt36) : false;
       
       const hasSlTrigger = (algo.slTriggerPx && Number(algo.slTriggerPx) > 0);
       const hasTpTrigger = (algo.tpTriggerPx && Number(algo.tpTriggerPx) > 0);
@@ -6769,7 +6773,7 @@ export class PaperEngine {
       const isSlLeg = hasSlTrigger || (isOco && !hasTpTrigger); // OCO usually has both, but safety first
       const isTpLeg = hasTpTrigger || (isOco && !hasSlTrigger);
 
-      if (!isEngineOwned) {
+      if (!isOapPrefix && !isEmptyId) {
         manualUnknownCount++;
         continue;
       }
@@ -6777,6 +6781,8 @@ export class PaperEngine {
       const algoTdMode = String(algo.tdMode).toLowerCase();
       const algoSz = Number(algo.sz);
       const algoSide = algo.side;
+      const algoPosSide = String(algo.posSide || "net").toLowerCase();
+      const algoReduceOnly = algo.reduceOnly === true || String(algo.reduceOnly).toLowerCase() === "true";
 
       let isWrong = false;
       if (algoTdMode !== tdModeUsed) { wrongTdModeCount++; isWrong = true; }
@@ -6786,23 +6792,44 @@ export class PaperEngine {
       if (hasSlTrigger && !isPriceMatch(Number(algo.slTriggerPx), activeStopPrice)) { wrongPriceCount++; isWrong = true; }
       if (hasTpTrigger && wantsTp && !isPriceMatch(Number(algo.tpTriggerPx), activeTpPrice!)) { wrongPriceCount++; isWrong = true; }
 
+      let isStructuralFallback = false;
+      if (isEmptyId) {
+        const strictMatch = !isWrong && 
+                            algo.instId === instId && 
+                            algoReduceOnly && 
+                            (algoPosSide === "net" || algoPosSide === open.side);
+        if (strictMatch) {
+          isStructuralFallback = true;
+        } else {
+          anonymousManualCount++;
+          continue;
+        }
+      }
+
+      const isOwnedOrAdopted = isMyPosition || isStructuralFallback;
+
       if (hasSlTrigger || (isOco && wantsTp)) {
-        if (!engineOwnedSl && !isWrong && isMyPosition) {
+        if (!engineOwnedSl && !isWrong && isOwnedOrAdopted) {
           engineOwnedSl = algo;
+          if (isStructuralFallback) structuralFallbackSlCount++;
         } else {
           duplicateSlCount++;
-          cancelTargets.push({ instId, algoId: algo.algoId as string });
+          if (!isStructuralFallback) cancelTargets.push({ instId, algoId: algo.algoId as string });
         }
       }
       
       if (hasTpTrigger || (isOco && wantsTp)) {
         if (engineOwnedSl && engineOwnedSl.algoId === algo.algoId) {
           engineOwnedTp = algo;
-        } else if (!engineOwnedTp && !isWrong && isMyPosition) {
+          if (isStructuralFallback && !structuralFallbackSlCount) structuralFallbackTpCount++; // Ensure we don't double count if it's the exact same OCO object
+          else if (isStructuralFallback && engineOwnedSl.algoId !== algo.algoId) structuralFallbackTpCount++;
+          else if (isStructuralFallback && engineOwnedSl.algoId === algo.algoId) structuralFallbackTpCount++; // actually we should count both legs if we want
+        } else if (!engineOwnedTp && !isWrong && isOwnedOrAdopted) {
           engineOwnedTp = algo;
+          if (isStructuralFallback) structuralFallbackTpCount++;
         } else {
           duplicateTpCount++;
-          if (!cancelTargets.some(t => t.algoId === algo.algoId)) {
+          if (!isStructuralFallback && !cancelTargets.some(t => t.algoId === algo.algoId)) {
             cancelTargets.push({ instId, algoId: algo.algoId as string });
           }
         }
@@ -6883,6 +6910,9 @@ export class PaperEngine {
       wrongSizeCount,
       wrongSideCount,
       wrongPriceCount,
+      structuralFallbackSlCount,
+      structuralFallbackTpCount,
+      anonymousManualCount,
       breakevenStopConfirmed: open.breakevenStopConfirmed ?? false
     });
 
