@@ -158,20 +158,16 @@ export function findProtectiveHintsForInst(
     matchingProtectiveOrderCount += 1;
     const slPx = extractSlPx(o);
     const tpPx = extractTpPx(o);
-    const slOk = slPx != null;
-    const tpOk = !tpRequired || (tpPx != null && tpPx > 0);
-    if (slOk && tpOk) {
-      protectionSatisfied = true;
-      if (foundSlPrice == null && slPx != null) foundSlPrice = slPx;
-      if (foundTpPrice == null && tpPx != null) foundTpPrice = tpPx;
-    } else {
-      if (foundSlPrice == null && slPx != null) foundSlPrice = slPx;
-      if (foundTpPrice == null && tpPx != null) foundTpPrice = tpPx;
-    }
+    if (foundSlPrice == null && slPx != null) foundSlPrice = slPx;
+    if (foundTpPrice == null && tpPx != null) foundTpPrice = tpPx;
   };
 
   for (const o of algos) consider(o, "algo");
   for (const o of pending) consider(o, "pend");
+
+  const foundSl = foundSlPrice != null;
+  const foundTp = foundTpPrice != null;
+  protectionSatisfied = foundSl && (!tpRequired || foundTp);
 
   return {
     protectionSatisfied,
