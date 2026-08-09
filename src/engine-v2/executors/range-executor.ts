@@ -29,6 +29,121 @@ export interface RangeContinuationState {
 
 export const rangeContinuationStateMap = new Map<string, RangeContinuationState>();
 
+type CycleCandleAdvanceObservation = {
+    runCycleId: string;
+    symbol: string;
+    currentCandleTs: number;
+    previousCommittedCandleTs: number | null;
+    rawCandleAdvanced: boolean;
+    authoritativeCandleAdvanced: boolean;
+};
+
+/** Cycle-local immutable candle advance observation (authoritative pass only). */
+const cycleCandleAdvanceObservationMap = new Map<string, CycleCandleAdvanceObservation>();
+
+function pruneCycleCandleAdvanceObservations(activeRunCycleId: string): void {
+    for (const key of cycleCandleAdvanceObservationMap.keys()) {
+        if (!key.endsWith(`:${activeRunCycleId}`)) {
+            cycleCandleAdvanceObservationMap.delete(key);
+        }
+    }
+}
+
+function resolveAuthoritativeCandleAdvance(
+    input: EngineV2Input,
+    lastCandleTimestamp: number
+): {
+    previousCommittedLastCandleTs: number | null;
+    rawCandleAdvanced: boolean;
+    authoritativeCandleAdvancedThisCycle: boolean;
+    stateMutationAllowed: boolean;
+    diagnosticMutationBlocked: boolean;
+} {
+    const isAuthoritative = input.evaluationMode !== "diagnostic";
+    const currentRunCycleId = input.run_cycle_id ?? "unknown";
+    const stored = rangeContinuationStateMap.get(input.symbol);
+    const previousCommittedLastCandleTs = stored?.lastCandleTimestamp ?? null;
+    const currentCandleTs = lastCandleTimestamp;
+    const rawCandleAdvanced =
+        previousCommittedLastCandleTs != null &&
+        currentCandleTs !== 0 &&
+        currentCandleTs !== previousCommittedLastCandleTs;
+    const authoritativeFromComparison =
+        previousCommittedLastCandleTs != null &&
+        currentCandleTs !== 0 &&
+        currentCandleTs > previousCommittedLastCandleTs;
+
+    if (!isAuthoritative) {
+        const authKey = `${input.symbol}:${currentRunCycleId}`;
+        const authObs = cycleCandleAdvanceObservationMap.get(authKey);
+        return {
+            previousCommittedLastCandleTs,
+            rawCandleAdvanced,
+            authoritativeCandleAdvancedThisCycle: authObs?.authoritativeCandleAdvanced ?? authoritativeFromComparison,
+            stateMutationAllowed: false,
+            diagnosticMutationBlocked: true
+        };
+    }
+
+    pruneCycleCandleAdvanceObservations(currentRunCycleId);
+    const authKey = `${input.symbol}:${currentRunCycleId}`;
+    let obs = cycleCandleAdvanceObservationMap.get(authKey);
+    if (!obs) {
+        obs = {
+            runCycleId: currentRunCycleId,
+            symbol: input.symbol,
+            currentCandleTs,
+            previousCommittedCandleTs: previousCommittedLastCandleTs,
+            rawCandleAdvanced,
+            authoritativeCandleAdvanced: authoritativeFromComparison
+        };
+        cycleCandleAdvanceObservationMap.set(authKey, obs);
+    }
+
+    return {
+        previousCommittedLastCandleTs,
+        rawCandleAdvanced,
+        authoritativeCandleAdvancedThisCycle: obs.authoritativeCandleAdvanced,
+        stateMutationAllowed: true,
+        diagnosticMutationBlocked: false
+    };
+}
+
+function emitCandleAdvanceAuthorityProof(
+    input: EngineV2Input,
+    candleAdvance: ReturnType<typeof resolveAuthoritativeCandleAdvance>,
+    opts: {
+        commitPerformed: boolean;
+        deadlockCandleAdvanced: boolean;
+    }
+): void {
+    const consistencyPassed =
+        !candleAdvance.rawCandleAdvanced ||
+        candleAdvance.authoritativeCandleAdvancedThisCycle === opts.deadlockCandleAdvanced;
+    const payload = {
+        event: "V2_CANDLE_ADVANCE_AUTHORITY_PROOF",
+        symbol: input.symbol,
+        runCycleId: input.run_cycle_id ?? "unknown",
+        evaluationMode: input.evaluationMode ?? "authoritative",
+        currentCandleTs: input.snapshot?.candles?.length
+            ? input.snapshot.candles[input.snapshot.candles.length - 1]?.ts ?? 0
+            : 0,
+        previousCommittedCandleTs: candleAdvance.previousCommittedLastCandleTs,
+        rawCandleAdvanced: candleAdvance.rawCandleAdvanced,
+        authoritativeCandleAdvanced: candleAdvance.authoritativeCandleAdvancedThisCycle,
+        stateMutationAllowed: candleAdvance.stateMutationAllowed,
+        commitPerformed: opts.commitPerformed,
+        diagnosticMutationBlocked: candleAdvance.diagnosticMutationBlocked,
+        deadlockCandleAdvanced: opts.deadlockCandleAdvanced,
+        consistencyPassed
+    };
+    if (!consistencyPassed && candleAdvance.stateMutationAllowed) {
+        console.error(JSON.stringify(payload));
+    } else {
+        console.info(JSON.stringify(payload));
+    }
+}
+
 function clamp(value: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, value));
 }
@@ -193,9 +308,11 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         lastObservedCandleTs: null
     } as RangeContinuationState;
 
+    const candleAdvance = resolveAuthoritativeCandleAdvance(input, lastCandleTimestamp);
     const currentLastCandleTimestamp = lastCandleTimestamp;
-    const previousLastCandleTimestamp = cState.lastCandleTimestamp;
-    const candleAdvancedThisCycle = lastCandleTimestamp !== cState.lastCandleTimestamp;
+    const previousLastCandleTimestamp = candleAdvance.previousCommittedLastCandleTs;
+    const authoritativeCandleAdvancedThisCycle = candleAdvance.authoritativeCandleAdvancedThisCycle;
+    const candleAdvancedThisCycle = authoritativeCandleAdvancedThisCycle;
 
     const now = Date.now();
     let shouldResetWatch = false;
@@ -215,18 +332,23 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const retestTolerancePct = clamp(atrPct * 0.5, 0.0010, 0.0030); // 0.10% ~ 0.30%
     const noRetestSkipPct = clamp(atrPct * 1.5, 0.0050, 0.0100);    // 0.5% ~ 1.0%
 
-    // Promotion logic for previousConfirmedBoxHigh/Low
-    if (lastCandleTimestamp !== 0 && lastCandleTimestamp !== cState.lastObservedCandleTs) {
+    // Promotion logic for previousConfirmedBoxHigh/Low (authoritative commit only)
+    if (isAuthoritative && lastCandleTimestamp !== 0 && lastCandleTimestamp !== cState.lastObservedCandleTs) {
         if (cState.lastObservedCandleTs !== null) {
             cState.previousConfirmedBoxHigh = cState.lastObservedBoxHigh;
             cState.previousConfirmedBoxLow = cState.lastObservedBoxLow;
         }
         cState.lastObservedCandleTs = lastCandleTimestamp;
     }
-    
-    // Always update the observed box limits in the current cycle
-    cState.lastObservedBoxHigh = boxHigh;
-    cState.lastObservedBoxLow = boxLow;
+
+    if (isAuthoritative) {
+        cState.lastObservedBoxHigh = boxHigh;
+        cState.lastObservedBoxLow = boxLow;
+    } else {
+        // Diagnostic observation uses stored values without mutating committed box cache.
+        cState.lastObservedBoxHigh = cState.lastObservedBoxHigh ?? boxHigh;
+        cState.lastObservedBoxLow = cState.lastObservedBoxLow ?? boxLow;
+    }
 
     const recentClosedClose = recentCandles.length >= 2 
         ? recentCandles[recentCandles.length - 2].close 
@@ -289,7 +411,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         }
     }
 
-    if (shouldResetWatch) {
+    if (shouldResetWatch && isAuthoritative) {
         cState = {
             symbol: input.symbol,
             direction: null,
@@ -315,72 +437,10 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         } as RangeContinuationState;
     }
 
-    if (isAuthoritative) {
-        if (judgment.trendPhase === "DOWN" || judgment.trendPhase === "UP") {
-            const direction = judgment.trendPhase === "DOWN" ? "down" : "up";
-            const dedupeKey = `${input.symbol}:${currentRunCycleId}:${direction}`;
-            if (cState.lastLoggedDeadlockBreakdownRunCycleId !== dedupeKey) {
-                cState.lastLoggedDeadlockBreakdownRunCycleId = dedupeKey;
-                rangeContinuationStateMap.set(input.symbol, cState);
-                
-                console.warn(JSON.stringify({
-                    event: "V2_RANGE_DEADLOCK_CONDITION_BREAKDOWN_PROOF",
-                    symbol: input.symbol,
-                    direction,
-                    runCycleId: currentRunCycleId,
-                    evaluationMode: input.evaluationMode,
-                    checks: direction === "down" ? {
-                        trendDown: judgment.trendPhase === "DOWN",
-                        emaNegative: emaGap < 0,
-                        noReversal: !reversalConfirmed,
-                        boundaryBrokenByLastPrice: lastPrice < effectiveDownBoundary,
-                        boundaryBrokenByClose: recentClosedClose !== null && recentClosedClose < effectiveDownBoundary,
-                        countingEligible: isDownDeadlockCountingCondition,
-                        slopeAligned: isDownSlopeAligned,
-                        boundarySlopeNegative: blSlope < 0,
-                        centerSlopeNegative: rcSlope < 0,
-                        authoritative: true,
-                        candleAdvanced: cState.hasCandleAdvancedDuringCount,
-                        currentBoxHigh: boxHigh,
-                        currentBoxLow: boxLow,
-                        previousConfirmedBoxHigh: cState.previousConfirmedBoxHigh,
-                        previousConfirmedBoxLow: cState.previousConfirmedBoxLow,
-                        boundaryReferenceSource: cState.previousConfirmedBoxLow !== null ? "previous_confirmed" : "current",
-                        boundaryDistancePct: effectiveDownBoundary !== 0 ? (lastPrice - effectiveDownBoundary) / effectiveDownBoundary : 0,
-                        slopeAlignmentMode: "bl_or_rc_negative",
-                        alignedSlopeCount: (blSlope < 0 ? 1 : 0) + (rcSlope < 0 ? 1 : 0)
-                    } : {
-                        trendUp: judgment.trendPhase === "UP",
-                        emaPositive: emaGap > 0,
-                        noReversal: !reversalConfirmed,
-                        boundaryBrokenByLastPrice: lastPrice > effectiveUpBoundary,
-                        boundaryBrokenByClose: recentClosedClose !== null && recentClosedClose > effectiveUpBoundary,
-                        countingEligible: isUpDeadlockCountingCondition,
-                        slopeAligned: isUpSlopeAligned,
-                        boundarySlopePositive: bhSlope > 0,
-                        centerSlopePositive: rcSlope > 0,
-                        authoritative: true,
-                        candleAdvanced: cState.hasCandleAdvancedDuringCount,
-                        currentBoxHigh: boxHigh,
-                        currentBoxLow: boxLow,
-                        previousConfirmedBoxHigh: cState.previousConfirmedBoxHigh,
-                        previousConfirmedBoxLow: cState.previousConfirmedBoxLow,
-                        boundaryReferenceSource: cState.previousConfirmedBoxHigh !== null ? "previous_confirmed" : "current",
-                        boundaryDistancePct: effectiveUpBoundary !== 0 ? (lastPrice - effectiveUpBoundary) / effectiveUpBoundary : 0,
-                        slopeAlignmentMode: "bh_or_rc_positive",
-                        alignedSlopeCount: (bhSlope > 0 ? 1 : 0) + (rcSlope > 0 ? 1 : 0)
-                    },
-                    deadlockCountingStarted: direction === "down" ? isDownDeadlockCountingCondition : isUpDeadlockCountingCondition,
-                    continuationWatchEligible: cState.consecutiveCycles >= 3 && cState.hasCandleAdvancedDuringCount && (direction === "down" ? isDownSlopeAligned : isUpSlopeAligned)
-                }));
-            }
-        }
-    }
-
     let updatedCycle = false;
-    
-    // Position open -> immediate IDLE
-    if (currentStage > 0 && cState.phase !== "IDLE") {
+    let commitPerformed = false;
+    // Position open -> immediate IDLE (authoritative commit only)
+    if (isAuthoritative && currentStage > 0 && cState.phase !== "IDLE") {
         cState.phase = "IDLE";
         cState.consecutiveCycles = 0;
         cState.direction = null;
@@ -395,8 +455,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             cState.totalCyclesSinceWatch++;
         }
         
-        const timestampChanged = lastCandleTimestamp !== cState.lastCandleTimestamp;
-        // Note: The actual promotion is now done at the top of the function to ensure calculations use updated values.
+        const timestampChanged = authoritativeCandleAdvancedThisCycle;
         
         if (cState.phase === "RETEST_CONFIRMED") {
             cState.phase = "EXPIRED";
@@ -458,6 +517,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         cState.lastRunCycleId = currentRunCycleId;
         cState.lastCandleTimestamp = lastCandleTimestamp;
         updatedCycle = true;
+        commitPerformed = true;
     }
     
     if (updatedCycle) {
@@ -465,8 +525,84 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             rangeContinuationStateMap.set(input.symbol, cState);
         }
     }
-    
 
+    const deadlockCandleAdvanced = authoritativeCandleAdvancedThisCycle;
+
+    if (isAuthoritative) {
+        emitCandleAdvanceAuthorityProof(input, candleAdvance, {
+            commitPerformed,
+            deadlockCandleAdvanced
+        });
+
+        if (judgment.trendPhase === "DOWN" || judgment.trendPhase === "UP") {
+            const direction = judgment.trendPhase === "DOWN" ? "down" : "up";
+            const dedupeKey = `${input.symbol}:${currentRunCycleId}:${direction}`;
+            if (cState.lastLoggedDeadlockBreakdownRunCycleId !== dedupeKey) {
+                cState.lastLoggedDeadlockBreakdownRunCycleId = dedupeKey;
+                rangeContinuationStateMap.set(input.symbol, cState);
+
+                console.warn(JSON.stringify({
+                    event: "V2_RANGE_DEADLOCK_CONDITION_BREAKDOWN_PROOF",
+                    symbol: input.symbol,
+                    direction,
+                    runCycleId: currentRunCycleId,
+                    evaluationMode: input.evaluationMode,
+                    authoritativeCandleAdvancedThisCycle,
+                    checks: direction === "down" ? {
+                        trendDown: judgment.trendPhase === "DOWN",
+                        emaNegative: emaGap < 0,
+                        noReversal: !reversalConfirmed,
+                        boundaryBrokenByLastPrice: lastPrice < effectiveDownBoundary,
+                        boundaryBrokenByClose: recentClosedClose !== null && recentClosedClose < effectiveDownBoundary,
+                        countingEligible: isDownDeadlockCountingCondition,
+                        slopeAligned: isDownSlopeAligned,
+                        boundarySlopeNegative: blSlope < 0,
+                        centerSlopeNegative: rcSlope < 0,
+                        authoritative: true,
+                        candleAdvanced: deadlockCandleAdvanced,
+                        hasCandleAdvancedDuringCount: cState.hasCandleAdvancedDuringCount,
+                        currentBoxHigh: boxHigh,
+                        currentBoxLow: boxLow,
+                        previousConfirmedBoxHigh: cState.previousConfirmedBoxHigh,
+                        previousConfirmedBoxLow: cState.previousConfirmedBoxLow,
+                        boundaryReferenceSource: cState.previousConfirmedBoxLow !== null ? "previous_confirmed" : "current",
+                        boundaryDistancePct: effectiveDownBoundary !== 0 ? (lastPrice - effectiveDownBoundary) / effectiveDownBoundary : 0,
+                        slopeAlignmentMode: "bl_or_rc_negative",
+                        alignedSlopeCount: (blSlope < 0 ? 1 : 0) + (rcSlope < 0 ? 1 : 0)
+                    } : {
+                        trendUp: judgment.trendPhase === "UP",
+                        emaPositive: emaGap > 0,
+                        noReversal: !reversalConfirmed,
+                        boundaryBrokenByLastPrice: lastPrice > effectiveUpBoundary,
+                        boundaryBrokenByClose: recentClosedClose !== null && recentClosedClose > effectiveUpBoundary,
+                        countingEligible: isUpDeadlockCountingCondition,
+                        slopeAligned: isUpSlopeAligned,
+                        boundarySlopePositive: bhSlope > 0,
+                        centerSlopePositive: rcSlope > 0,
+                        authoritative: true,
+                        candleAdvanced: deadlockCandleAdvanced,
+                        hasCandleAdvancedDuringCount: cState.hasCandleAdvancedDuringCount,
+                        currentBoxHigh: boxHigh,
+                        currentBoxLow: boxLow,
+                        previousConfirmedBoxHigh: cState.previousConfirmedBoxHigh,
+                        previousConfirmedBoxLow: cState.previousConfirmedBoxLow,
+                        boundaryReferenceSource: cState.previousConfirmedBoxHigh !== null ? "previous_confirmed" : "current",
+                        boundaryDistancePct: effectiveUpBoundary !== 0 ? (lastPrice - effectiveUpBoundary) / effectiveUpBoundary : 0,
+                        slopeAlignmentMode: "bh_or_rc_positive",
+                        alignedSlopeCount: (bhSlope > 0 ? 1 : 0) + (rcSlope > 0 ? 1 : 0)
+                    },
+                    deadlockCountingStarted: direction === "down" ? isDownDeadlockCountingCondition : isUpDeadlockCountingCondition,
+                    continuationWatchEligible: cState.consecutiveCycles >= 3 && cState.hasCandleAdvancedDuringCount && (direction === "down" ? isDownSlopeAligned : isUpSlopeAligned)
+                }));
+            }
+        }
+    } else {
+        emitCandleAdvanceAuthorityProof(input, candleAdvance, {
+            commitPerformed: false,
+            deadlockCandleAdvanced
+        });
+    }
+    
 
     if ((cState.phase === "CONTINUATION_WATCH" || cState.phase === "RETEST_TOUCHED" || cState.phase === "RETEST_CONFIRMED" || cState.phase === "EXPIRED") && currentStage === 0) {
         if (cState.phase === "RETEST_CONFIRMED" || cState.phase === "EXPIRED") {
@@ -690,6 +826,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     lastCandleTimestamp: currentLastCandleTimestamp,
                     previousLastCandleTimestamp,
                     candleAdvancedThisCycle,
+                    authoritativeCandleAdvancedThisCycle,
                     countStartedCandleTs: cState.countStartedCandleTs
                 }));
                 return {
@@ -755,6 +892,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     lastCandleTimestamp: currentLastCandleTimestamp,
                     previousLastCandleTimestamp,
                     candleAdvancedThisCycle,
+                    authoritativeCandleAdvancedThisCycle,
                     countStartedCandleTs: cState.countStartedCandleTs
                 }));
                 return {

@@ -1239,6 +1239,7 @@ export class PaperEngine {
   private readinessFreshTickRequiredCycles = 2;
   private readinessFreshTickLastFetchedAt: number | null = null;
   private readinessFreshTickLastCandleTs: number | null = null;
+  private lastMarketCandleTs: number | null = null;
   private contaminatedEntrySamples: EntryQualitySample[] = [];
   private lastEntryQualitySamples = {
     profit: [] as EntryQualitySample[],
@@ -4409,6 +4410,10 @@ export class PaperEngine {
 
     const signalSummary = buildSignalSummary(snapshots);
     this.marketDataLastUpdateAt = fetchedAt;
+    const maxMarketCandleTs = this.maxCandleTsFromSnapshots(snapshots);
+    if (maxMarketCandleTs != null) {
+      this.lastMarketCandleTs = maxMarketCandleTs;
+    }
     this.publicMarketDataReady = errors.length === 0 && snapshots.length > 0;
     this.updateReadinessFreshTickBarrierProgress(fetchedAt, snapshots);
     const readinessBarrierActive =
@@ -5667,7 +5672,14 @@ export class PaperEngine {
           entry_pipeline_ready: this.entryPipelineReady,
           exit_pipeline_ready: this.exitPipelineReady,
           fresh_tick_age_ms:
-            this.readinessFreshTickLastFetchedAt != null ? Math.max(0, stateNow - this.readinessFreshTickLastFetchedAt) : null,
+            this.lastMarketCandleTs != null ? Math.max(0, stateNow - this.lastMarketCandleTs) : null,
+          readiness_fresh_tick_barrier_age_ms:
+            this.freshTickRequiredAfterReadiness && this.readinessFreshTickLastFetchedAt != null
+              ? Math.max(0, stateNow - this.readinessFreshTickLastFetchedAt)
+              : null,
+          last_candle_advance_age_ms:
+            this.lastMarketCandleTs != null ? Math.max(0, stateNow - this.lastMarketCandleTs) : null,
+          last_market_candle_ts: this.lastMarketCandleTs,
           snapshot_age_ms:
             this.marketDataLastUpdateAt != null ? Math.max(0, stateNow - this.marketDataLastUpdateAt) : null,
           okx_signed_rest_ready: this.okxSignedRestReady,
@@ -5799,7 +5811,14 @@ export class PaperEngine {
         reconcileSafeMode: this.reconcileSafetyCloseOnly,
         reconcile_last_mismatch_reason: this.reconcileLastMismatchReason,
         fresh_tick_age_ms:
-          this.readinessFreshTickLastFetchedAt != null ? Math.max(0, Date.now() - this.readinessFreshTickLastFetchedAt) : null,
+          this.lastMarketCandleTs != null ? Math.max(0, Date.now() - this.lastMarketCandleTs) : null,
+        readiness_fresh_tick_barrier_age_ms:
+          this.freshTickRequiredAfterReadiness && this.readinessFreshTickLastFetchedAt != null
+            ? Math.max(0, Date.now() - this.readinessFreshTickLastFetchedAt)
+            : null,
+        last_candle_advance_age_ms:
+          this.lastMarketCandleTs != null ? Math.max(0, Date.now() - this.lastMarketCandleTs) : null,
+        last_market_candle_ts: this.lastMarketCandleTs,
         snapshot_age_ms:
           this.marketDataLastUpdateAt != null ? Math.max(0, Date.now() - this.marketDataLastUpdateAt) : null,
         public_market_data_ready: this.publicMarketDataReady,
