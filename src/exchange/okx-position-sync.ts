@@ -24,6 +24,8 @@ export type LedgerOkxPositionSyncSnapshot = Readonly<{
     | "AVG_PRICE_MISMATCH" 
     | "REMOTE_UNAVAILABLE"
     | "MANUAL_PARTIAL_DETECTED"
+    | "ENGINE_PARTIAL_FILL_IN_FLIGHT"
+    | "ENGINE_PARTIAL_FILL_RECONCILING"
     | "MANUAL_FULL_CLOSE_DETECTED"
     | "ADOPTED_POSITION_SIZE_MISMATCH"
     | "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED"
@@ -121,6 +123,9 @@ export function buildLedgerOkxPositionSyncSnapshot(
     baseQty?: number;
     notionalUsd?: number;
     avgPx?: number;
+    partialPendingOrdId?: string;
+    partialPendingClOrdId?: string;
+    partialPendingContracts?: number;
   }>,
   okxPayload: ReadonlyArray<Record<string, unknown>> | null | undefined,
   instrumentMap?: Map<string, InstrumentSizing>
@@ -327,13 +332,28 @@ export function buildLedgerOkxPositionSyncSnapshot(
         hasExplicitPaperBase &&
         Math.abs(okxBaseQty - paperBaseLedger) > Math.max(1e-8, 0.002 * Math.max(okxBaseQty, paperBaseLedger))
       ) {
+        const enginePartialPending =
+          paperPosData.lifecycleState === "PARTIAL_PENDING" ||
+          (typeof paperPosData.partialPendingOrdId === "string" && paperPosData.partialPendingOrdId.length > 0) ||
+          (typeof paperPosData.partialPendingClOrdId === "string" && paperPosData.partialPendingClOrdId.length > 0) ||
+          (typeof paperPosData.partialPendingContracts === "number" &&
+            Number.isFinite(paperPosData.partialPendingContracts) &&
+            paperPosData.partialPendingContracts > 0);
+
         if (sync_status === "ALIGNED" || sync_status === "KEY_MISMATCH" || sync_status === "AVG_PRICE_MISMATCH" || sync_status === "NOTIONAL_MISMATCH") {
            if (!isExternalManual) {
-             sync_status = isAdoptedOrManaged ? "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED" : "MANUAL_PARTIAL_DETECTED";
+             if (enginePartialPending) {
+               sync_status =
+                 okxBaseQty > paperBaseLedger
+                   ? "ENGINE_PARTIAL_FILL_IN_FLIGHT"
+                   : "ENGINE_PARTIAL_FILL_RECONCILING";
+             } else {
+               sync_status = isAdoptedOrManaged ? "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED" : "MANUAL_PARTIAL_DETECTED";
+             }
            }
         }
         detail = detail || `Base quantity mismatch on ${key}: OKX=${okxBaseQty.toFixed(8)}, Paper=${paperBaseLedger.toFixed(8)}`;
-        mismatchAtThisKey = true;
+        mismatchAtThisKey = !enginePartialPending;
       }
 
       if (mismatchAtThisKey) {

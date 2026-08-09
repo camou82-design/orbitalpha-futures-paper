@@ -2183,8 +2183,37 @@ export class PaperEngine {
     let contractMismatch = false;
 
     if (ledgerHasContracts && !opts.isPartialPending && !opts.isClosePending) {
-      const contractDiff = Math.abs(open.okxContracts! - remote.contracts);
+      const contractDiffSigned = open.okxContracts! - remote.contracts;
+      const contractDiff = Math.abs(contractDiffSigned);
       const contractTol = Math.max(1e-8, RECONCILE_CONTRACT_TOLERANCE_RATIO * remote.contracts);
+      const pendingContracts = open.partialPendingContracts ?? 0;
+      const enginePartialActive = this.isV2PartialPendingActive(open);
+
+      if (enginePartialActive && contractDiff > contractTol) {
+        const classification =
+          remote.contracts > open.okxContracts!
+            ? "ENGINE_PARTIAL_FILL_IN_FLIGHT"
+            : "ENGINE_PARTIAL_FILL_RECONCILING";
+        this.logger.info("V2_ENGINE_PARTIAL_RECONCILE_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          paper_contracts: open.okxContracts,
+          okx_contracts: remote.contracts,
+          pending_contracts: pendingContracts,
+          classification
+        });
+        if (open.okxContracts! < remote.contracts) {
+          this.syncOpenLedgerFromRemoteAuthority(open, remote);
+          open.reconcileState = "MATCHED";
+          open.lastCheckedAt = nowTs;
+          this.logPositionUnitInvariant(open);
+          return { ledgerModified: true, mismatchType: "MATCHED", blocked: false };
+        }
+        open.reconcileState = "MATCHED";
+        open.lastCheckedAt = nowTs;
+        return { ledgerModified: false, mismatchType: "MATCHED", blocked: false };
+      }
+
       if (contractDiff > contractTol) {
         contractMismatch = true;
         mismatchType = "CONTRACT_MISMATCH";
@@ -2684,7 +2713,7 @@ export class PaperEngine {
           if (ordRes.ok && ordRes.value.length > 0) {
             const ord = (ordRes.value[0] as any);
             const orderState = ord.state;
-            const fillSzRaw = Number(ord.fillSz) || 0;
+            const fillSzRaw = Number(ord.accFillSz ?? ord.fillSz) || 0;
 
             if (orderState === "filled" || (orderState === "partially_filled" && fillSzRaw > 0)) {
               const fillPx = Number(ord.fillPx) || (isClosePending ? open.closePendingPrice : open.partialPendingPrice) || 0;
@@ -2695,7 +2724,9 @@ export class PaperEngine {
               
               const requestedQty = Number(ord.sz);
               const cumulativeFillSz = fillSzRaw;
-              const previousProcessedFillSz = isPartialPending ? (open.partialPendingProcessedFillSz ?? 0) : (open.closePendingProcessedFillSz ?? 0);
+              const previousProcessedFillSz = isPartialPending
+                ? (open.partialPendingProcessedContracts ?? open.partialPendingProcessedFillSz ?? 0)
+                : (open.closePendingProcessedFillSz ?? 0);
               const deltaFillSz = Math.max(0, cumulativeFillSz - previousProcessedFillSz);
 
               if (!requestedQty || requestedQty <= 0) {
@@ -2800,6 +2831,7 @@ export class PaperEngine {
                 }
               } else if (isPartialPending) {
                 if (unitConversionOk && deltaFillSz > 0) {
+                  const pendingReasonBefore = open.partialPendingReason;
                   this.logger.info("V2_PARTIAL_PENDING_RECONCILE_PROOF", { 
                     symbol: open.symbol, 
                     side: open.side, 
@@ -2813,31 +2845,66 @@ export class PaperEngine {
                     delta_filled_usd: deltaFilledUsd,
                     unit_conversion_ok: true
                   });
-                  
-                  const metrics = computePaperCloseLegMetrics({
+
+                  this.applyV2PartialFillConfirmed({
                     open,
-                    closePrice: fillPx,
-                    closedAt: fillTime,
-                    snapFundingRate: fundingRate,
-                    marginUsd: deltaFilledUsd,
-                    paperTakerFeeRate: this.config.paperTakerFeeRate,
-                    paperFundingIntervalHours: this.config.paperFundingIntervalHours
-                  });
-                  
-                  const { deltaMarginUsd } = this.applyV2PartialFillLedgerDelta({
-                    open,
-                    deltaContracts: deltaFillSz,
+                    newFillContracts: deltaFillSz,
+                    cumulativeFillContracts: cumulativeFillSz,
                     fillPx,
-                    pnlUsdNet: metrics.pnlUsdNet,
-                    flowId
+                    flowId,
+                    orderFullyFilled: orderState === "filled",
+                    fundingRate,
+                    closedAt: fillTime
                   });
 
-                  // Update processed counters
-                  open.partialPendingProcessedFillSz = cumulativeFillSz;
-                  open.partialPendingProcessedMarginUsd = (open.partialPendingProcessedMarginUsd ?? 0) + deltaMarginUsd;
+                  if (orderState === "filled" && pendingReasonBefore === "v2_tp1_automated") {
+                    const legContracts = cumulativeFillSz;
+                    const instIdTp1 = open.instId ?? toOkxSwapInstId(open.symbol);
+                    const instTp1 = this.instrumentCache.get(instIdTp1);
+                    const ctTp1 = instTp1?.ctVal ?? 1;
+                    const partialNotional = legContracts * ctTp1 * fillPx;
+                    const partialMarginUsd = partialNotional / (open.leverage ?? 10);
+                    const metricsTp1 = computePaperCloseLegMetrics({
+                      open,
+                      closePrice: fillPx,
+                      closedAt: fillTime,
+                      snapFundingRate: fundingRate,
+                      marginUsd: partialMarginUsd,
+                      paperTakerFeeRate: this.config.paperTakerFeeRate,
+                      paperFundingIntervalHours: this.config.paperFundingIntervalHours
+                    });
+                    const closedRowTp1 = finalizePaperClosedRecord({
+                      open,
+                      symbol: open.symbol as MarketSymbol,
+                      closePrice: fillPx,
+                      closedAt: fillTime,
+                      closeReason: "take_profit_1" as PaperClosedPositionRecord["closeReason"],
+                      legMarginUsd: partialMarginUsd,
+                      metrics: metricsTp1,
+                      feeRate: this.config.paperTakerFeeRate,
+                      fundingIntervalHours: this.config.paperFundingIntervalHours,
+                      strategyVersion: open.strategyVersion ?? "paper-v2",
+                      exitTypeOverride: "EXIT_TP_1",
+                      closeSourceOverride: "V2_AUTOMATED_TP_GATE"
+                    });
+                    await this.appendClosedWithStandardRouting({
+                      closedRow: closedRowTp1,
+                      open,
+                      flowId,
+                      exitReason: "take_profit_1",
+                      closeSource: "V2_AUTOMATED_TP_GATE",
+                      currentRegime: this.lastRegime.regime || "NO_TRADE"
+                    });
+                    open.v2RangeTp1Triggered = true;
+                    this.logger.info("V2_RANGE_TP_TRIGGER_LEDGER_SAVE_PROOF", {
+                      symbol: open.symbol,
+                      tp1Triggered: true,
+                      tp2Triggered: open.v2RangeTp2Triggered ?? false,
+                      flowId
+                    });
+                  }
 
-                  // Force protective stop re-registration on size change
-                  if (open.protectiveStopAlgoId && open.isProtectiveStopRegistered) {
+                  if (open.protectiveStopAlgoId && open.isProtectiveStopRegistered && orderState === "filled") {
                     this.logger.info("PROTECTIVE_STOP_UPDATE_REQUIRED_PARTIAL_FILL", { 
                       symbol: open.symbol, 
                       oldAlgoId: open.protectiveStopAlgoId,
@@ -2849,35 +2916,13 @@ export class PaperEngine {
                     open.isProtectiveStopRegistered = false;
                   }
 
-                  if (orderState === "filled") {
-                    open.lifecycleState = "OPEN";
-                    open.partialExitStage = (open.partialExitStage ?? 0) + 1;
-                    // Clear pending fields
-                    open.partialPendingOrdId = undefined;
-                    open.partialPendingClOrdId = undefined;
-                    open.partialPendingSizeUsd = undefined;
-                    open.partialPendingOriginalSizeUsd = undefined;
-                    open.partialPendingProcessedFillSz = undefined;
-                    open.partialPendingProcessedMarginUsd = undefined;
-                    open.partialPendingAt = undefined;
-                    open.partialPendingReduceRatio = undefined;
-                    open.partialPendingReason = undefined;
-                    open.partialPendingPrice = undefined;
-                    open.partialPendingFundingRate = undefined;
-                  } else {
-                    // partially_filled: update remaining pending size using delta
-                    if (open.partialPendingSizeUsd) {
-                      open.partialPendingSizeUsd = Math.max(0, open.partialPendingSizeUsd - deltaFilledUsd);
-                    }
-                  }
-                  
                   this.logger.info("V2_PARTIAL_POSITION_UPDATE_PROOF", {
                     symbol: open.symbol,
                     side: open.side,
-                    delta_reduced_usd: deltaFilledUsd,
-                    total_processed_margin_usd: open.partialPendingProcessedMarginUsd,
+                    delta_reduced_contracts: deltaFillSz,
+                    total_processed_contracts: open.partialPendingProcessedContracts ?? cumulativeFillSz,
+                    remaining_contracts: open.okxContracts,
                     remaining_size_usd: open.sizeUsd,
-                    realized_pnl: metrics.pnlUsdNet,
                     total_realized_pnl: open.realizedPnl,
                     is_final: orderState === "filled"
                   });
@@ -6559,6 +6604,137 @@ export class PaperEngine {
     return { deltaMarginUsd, deltaNotionalUsd, deltaBaseQty };
   }
 
+  private isV2PartialPendingActive(open: PaperOpenPositionRecord): boolean {
+    return (
+      open.lifecycleState === "PARTIAL_PENDING" ||
+      (typeof open.partialPendingOrdId === "string" && open.partialPendingOrdId.length > 0) ||
+      (typeof open.partialPendingClOrdId === "string" && open.partialPendingClOrdId.length > 0) ||
+      (typeof open.partialPendingContracts === "number" &&
+        Number.isFinite(open.partialPendingContracts) &&
+        open.partialPendingContracts > 0)
+    );
+  }
+
+  private clearV2PartialPendingMetadata(open: PaperOpenPositionRecord): void {
+    open.partialPendingOrdId = undefined;
+    open.partialPendingClOrdId = undefined;
+    open.partialPendingContracts = undefined;
+    open.partialPendingStage = undefined;
+    open.partialPendingSizeUsd = undefined;
+    open.partialPendingOriginalSizeUsd = undefined;
+    open.partialPendingProcessedContracts = undefined;
+    open.partialPendingProcessedFillSz = undefined;
+    open.partialPendingProcessedMarginUsd = undefined;
+    open.partialPendingAt = undefined;
+    open.partialPendingReduceRatio = undefined;
+    open.partialPendingReason = undefined;
+    open.partialPendingPrice = undefined;
+    open.partialPendingFundingRate = undefined;
+  }
+
+  private buildV2PartialPendingRecord(
+    open: PaperOpenPositionRecord,
+    input: {
+      ordId?: string;
+      clOrdId?: string;
+      pendingContracts: number;
+      stage: number;
+      reason: string;
+      price: number;
+      fundingRate?: number;
+      reduceRatio?: number;
+    }
+  ): PaperOpenPositionRecord {
+    const marginEstimate =
+      input.reduceRatio != null && Number.isFinite(input.reduceRatio)
+        ? open.sizeUsd * input.reduceRatio
+        : undefined;
+    return {
+      ...open,
+      lifecycleState: "PARTIAL_PENDING",
+      partialPendingOrdId: input.ordId,
+      partialPendingClOrdId: input.clOrdId,
+      partialPendingContracts: input.pendingContracts,
+      partialPendingStage: input.stage,
+      partialPendingProcessedContracts: 0,
+      partialPendingProcessedFillSz: 0,
+      partialPendingProcessedMarginUsd: 0,
+      partialPendingAt: Date.now(),
+      partialPendingReason: input.reason,
+      partialPendingPrice: input.price,
+      partialPendingFundingRate: input.fundingRate,
+      partialPendingReduceRatio: input.reduceRatio,
+      partialPendingSizeUsd: marginEstimate,
+      partialPendingOriginalSizeUsd: marginEstimate
+    };
+  }
+
+  private applyV2PartialFillConfirmed(input: {
+    open: PaperOpenPositionRecord;
+    newFillContracts: number;
+    cumulativeFillContracts: number;
+    fillPx: number;
+    flowId: string;
+    orderFullyFilled: boolean;
+    fundingRate?: number;
+    closedAt?: number;
+  }): void {
+    const { open, newFillContracts, cumulativeFillContracts, fillPx, flowId, orderFullyFilled } = input;
+    if (newFillContracts <= 0) return;
+
+    const stageBefore = open.partialPendingStage ?? open.partialExitStage ?? 0;
+    const processedBefore =
+      open.partialPendingProcessedContracts ?? open.partialPendingProcessedFillSz ?? 0;
+    const contractsBefore = open.okxContracts ?? 0;
+
+    const metrics = computePaperCloseLegMetrics({
+      open,
+      closePrice: fillPx,
+      closedAt: input.closedAt ?? Date.now(),
+      snapFundingRate: input.fundingRate ?? 0,
+      marginUsd:
+        contractsBefore > 0
+          ? (open.sizeUsd * newFillContracts) / contractsBefore
+          : open.sizeUsd,
+      paperTakerFeeRate: this.config.paperTakerFeeRate,
+      paperFundingIntervalHours: this.config.paperFundingIntervalHours
+    });
+
+    const { deltaMarginUsd } = this.applyV2PartialFillLedgerDelta({
+      open,
+      deltaContracts: newFillContracts,
+      fillPx,
+      flowId
+    });
+    open.realizedPnl = (open.realizedPnl ?? 0) + metrics.pnlUsdNet;
+
+    open.partialPendingProcessedContracts = cumulativeFillContracts;
+    open.partialPendingProcessedFillSz = cumulativeFillContracts;
+    open.partialPendingProcessedMarginUsd =
+      (open.partialPendingProcessedMarginUsd ?? 0) + deltaMarginUsd;
+
+    const stageAfter = orderFullyFilled ? stageBefore + 1 : stageBefore;
+    this.logger.info("V2_PARTIAL_FILL_CONFIRMED_PROOF", {
+      symbol: open.symbol,
+      side: open.side,
+      contracts_before: contractsBefore,
+      actual_filled_contracts: newFillContracts,
+      contracts_after: open.okxContracts,
+      processed_fill_before: processedBefore,
+      processed_fill_after: cumulativeFillContracts,
+      stage_before: stageBefore,
+      stage_after: stageAfter,
+      flowId
+    });
+
+    if (orderFullyFilled) {
+      open.partialExitStage = stageAfter;
+      open.lastPartialAt = input.closedAt ?? Date.now();
+      open.lifecycleState = "OPEN";
+      this.clearV2PartialPendingMetadata(open);
+    }
+  }
+
   private async dispatchOkxClose(input: {
     symbol: string;
     side: "long" | "short";
@@ -9487,6 +9663,20 @@ export class PaperEngine {
 
         // TP1: Partial Exit (Lower Priority)
         if (stage < 1 && !open.v2RangeTp1Triggered && tp1Hit) {
+          if (this.isV2PartialPendingActive(open)) {
+            this.logger.info("V2_PARTIAL_REENTRY_BLOCKED_PENDING_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              stage: open.partialPendingStage ?? open.partialExitStage ?? 0,
+              pending_contracts: open.partialPendingContracts ?? null,
+              ord_id: open.partialPendingOrdId ?? null,
+              cl_ord_id: open.partialPendingClOrdId ?? null,
+              flowId
+            });
+            remaining.push({ ...open });
+            continue;
+          }
+
           this.logger.info("V2_RANGE_TP1_TRIGGER_PROOF", {
             event: "V2_RANGE_TP1_TRIGGER_PROOF",
             symbol: open.symbol,
@@ -9554,12 +9744,11 @@ export class PaperEngine {
           const isExchangeEnabledTp1 = this.okxDemo && this.signedSubmitMode() === "enabled";
 
           if (isExchangeEnabledTp1) {
-            if (tp1Submit?.ordId == null) {
-              // ord_id null = submit failed: retain open position for next-tick retry
+            if (!tp1Submit?.ok || tp1Submit?.ordId == null) {
               this.logger.info("V2_RANGE_TP1_REDUCE_ORDER_SUBMIT_FAIL_PROOF", {
                 symbol: open.symbol,
                 side: open.side,
-                ord_id: null,
+                ord_id: tp1Submit?.ordId ?? null,
                 error_code: tp1Submit?.errorCode ?? null,
                 error_message: tp1Submit?.errorMessage ?? null,
                 partial_size_usd: partialSizeUsd,
@@ -9570,96 +9759,78 @@ export class PaperEngine {
               continue;
             }
 
-            if (tp1Submit.fillConfirmed !== true) {
-              // ord_id present but not yet filled: transition to PARTIAL_PENDING
-              const updatedOpen: PaperOpenPositionRecord = {
-                ...open,
-                lifecycleState: "PARTIAL_PENDING",
-                partialPendingOrdId: tp1Submit.ordId,
-                partialPendingClOrdId: tp1Submit?.clOrdId ?? undefined,
-                partialPendingSizeUsd: partialSizeUsd,
-                partialPendingOriginalSizeUsd: partialSizeUsd,
-                partialPendingProcessedFillSz: 0,
-                partialPendingProcessedMarginUsd: 0,
-                partialPendingAt: Date.now(),
-                partialPendingReduceRatio: ratio,
-                partialPendingReason: "v2_tp1_automated",
-                partialPendingPrice: closePrice,
-                partialPendingFundingRate: snap?.fundingRate
-              };
-              this.logger.info("V2_RANGE_TP1_REDUCE_PENDING_PROOF", {
-                symbol: open.symbol,
-                side: open.side,
-                ord_id: tp1Submit.ordId,
-                pending_reason: "fill_not_confirmed",
-                partial_size_usd: partialSizeUsd,
-                flowId
-              });
-              crashPositionsModified = true;
-              remaining.push(updatedOpen);
-              continue;
-            }
-          }
-
-          // Fill confirmed (or exchange disabled): commit all ledger mutations
-          this.logger.info("V2_RANGE_TP1_REDUCE_FILL_STATUS_PROOF", {
-            symbol: open.symbol,
-            side: open.side,
-            ord_id: tp1Submit?.ordId ?? null,
-            fill_confirmed: true,
-            partial_size_usd: partialSizeUsd,
-            close_price: closePrice,
-            flowId
-          });
-
-          // Persist trigger flag only after fill confirmed
-          open.v2RangeTp1Triggered = true;
-          this.logger.info("V2_RANGE_TP_TRIGGER_LEDGER_SAVE_PROOF", {
-            symbol: open.symbol,
-            tp1Triggered: true,
-            tp2Triggered: open.v2RangeTp2Triggered ?? false,
-            flowId
-          });
-
-          const { historyAppended: tp1HistoryAppended } = await this.appendClosedWithStandardRouting({
-            closedRow: closedRowP,
-            open,
-            flowId,
-            envelope: null as any,
-            exitReason: "take_profit_1" as any,
-            closeSource: "V2_AUTOMATED_TP_GATE",
-            currentRegime: regimeNow
-          });
-
-          if (!tp1HistoryAppended) {
-            remaining.push({ ...open });
+            const pendingRecord = this.buildV2PartialPendingRecord(open, {
+              ordId: tp1Submit.ordId,
+              clOrdId: tp1Submit.clOrdId,
+              pendingContracts: tp1DeltaContracts,
+              stage: open.partialExitStage ?? 0,
+              reason: "v2_tp1_automated",
+              price: closePrice,
+              fundingRate: snap?.fundingRate,
+              reduceRatio: ratio
+            });
+            this.logger.info("V2_PARTIAL_SUBMIT_PENDING_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              contracts_before: open.okxContracts ?? null,
+              requested_contracts: open.okxContracts != null ? open.okxContracts * ratio : null,
+              submitted_contracts: tp1DeltaContracts,
+              stage: open.partialExitStage ?? 0,
+              ord_id: tp1Submit.ordId,
+              cl_ord_id: tp1Submit.clOrdId ?? null,
+              ledger_mutated: false,
+              flowId
+            });
+            crashPositionsModified = true;
+            remaining.push(pendingRecord);
             continue;
           }
 
-          const tp1FillPx = tp1Submit.actualFillPx ?? closePrice;
-          if (tp1DeltaContracts > 0) {
-            this.applyV2PartialFillLedgerDelta({
-              open,
-              deltaContracts: tp1DeltaContracts,
-              fillPx: tp1FillPx,
+          if (tp1Submit?.fillConfirmed === true) {
+            this.logger.info("V2_RANGE_TP1_REDUCE_FILL_STATUS_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              ord_id: tp1Submit?.ordId ?? null,
+              fill_confirmed: true,
+              partial_size_usd: partialSizeUsd,
+              close_price: closePrice,
               flowId
             });
-          } else {
-            open.sizeUsd = Math.max(0, open.sizeUsd - partialSizeUsd);
-          }
-          open.partialExitStage = 1;
-          open.lastPartialAt = closedAt;
-          crashPositionsModified = true;
 
-          this.logger.info("V2_RANGE_TP1_REDUCE_LEDGER_UPDATE_PROOF", {
-            symbol: open.symbol,
-            side: open.side,
-            ord_id: tp1Submit?.ordId ?? null,
-            history_appended: true,
-            size_after_usd: open.sizeUsd,
-            partial_exit_stage: open.partialExitStage,
-            flowId
-          });
+            const { historyAppended: tp1HistoryAppended } = await this.appendClosedWithStandardRouting({
+              closedRow: closedRowP,
+              open,
+              flowId,
+              envelope: null as any,
+              exitReason: "take_profit_1" as any,
+              closeSource: "V2_AUTOMATED_TP_GATE",
+              currentRegime: regimeNow
+            });
+
+            if (!tp1HistoryAppended) {
+              remaining.push({ ...open });
+              continue;
+            }
+
+            this.applyV2PartialFillConfirmed({
+              open,
+              newFillContracts: tp1DeltaContracts,
+              cumulativeFillContracts: tp1DeltaContracts,
+              fillPx: tp1Submit.actualFillPx ?? closePrice,
+              flowId,
+              orderFullyFilled: true,
+              fundingRate: snap?.fundingRate,
+              closedAt
+            });
+            open.v2RangeTp1Triggered = true;
+            open.partialExitStage = 1;
+            crashPositionsModified = true;
+            remaining.push(open);
+            continue;
+          }
+
+          remaining.push({ ...open });
+          continue;
         }
       }
 
@@ -11265,8 +11436,22 @@ export class PaperEngine {
         });
       }
 
-      // V2 PARTIAL: ?낅┰ early takeover 寃쎈줈. exitEval ?ㅼ뿼 ?놁씠 吏곸젒 ?ㅽ뻾.
+      // V2 PARTIAL: independent early takeover path.
       if ((v2TakeoverAction as string) === "partial_close" && v2PartialAuthority?.shouldPartial === true) {
+        if (this.isV2PartialPendingActive(open)) {
+          this.logger.info("V2_PARTIAL_REENTRY_BLOCKED_PENDING_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            stage: open.partialPendingStage ?? open.partialExitStage ?? 0,
+            pending_contracts: open.partialPendingContracts ?? null,
+            ord_id: open.partialPendingOrdId ?? null,
+            cl_ord_id: open.partialPendingClOrdId ?? null,
+            flowId
+          });
+          remaining.push(open);
+          continue;
+        }
+
         const reduceRatio = v2PartialAuthority.reduceRatio ?? 0.5;
         const partialSizeUsd = open.sizeUsd * reduceRatio;
         
@@ -11420,91 +11605,59 @@ export class PaperEngine {
         }
 
         const isExchangeEnabled = this.okxDemo && this.signedSubmitMode() === "enabled";
-        const partialConfirmed = !isExchangeEnabled || (partialSubmit?.ordId != null && partialSubmit?.fillConfirmed === true);
 
-        if (isExchangeEnabled && !partialConfirmed) {
-          const updatedOpen: PaperOpenPositionRecord = {
-            ...open,
-            lifecycleState: "PARTIAL_PENDING",
-            partialPendingOrdId: partialSubmit?.ordId ?? undefined,
-            partialPendingSizeUsd: partialSizeUsd,
-            partialPendingOriginalSizeUsd: partialSizeUsd,
-            partialPendingProcessedFillSz: 0,
-            partialPendingProcessedMarginUsd: 0,
-            partialPendingAt: Date.now(),
-            partialPendingReduceRatio: reduceRatio,
-            partialPendingReason: v2PartialAuthority.partialReason ?? "v2_partial_exit",
-            partialPendingPrice: closePrice,
-            partialPendingFundingRate: snap.fundingRate
-          };
-          this.logger.info("V2_PARTIAL_EXCHANGE_PENDING_PROOF", {
-            symbol: open.symbol,
-            side: open.side,
-            ord_id: partialSubmit?.ordId,
-            partial_size_usd: partialSizeUsd
-          });
-          remaining.push(updatedOpen);
+        if (!partialSubmit?.ok || (isExchangeEnabled && !partialSubmit?.ordId)) {
+          remaining.push(open);
           continue;
         }
 
-        this.logger.info("V2_PARTIAL_EXCHANGE_CONFIRM_PROOF", {
-          symbol: open.symbol,
-          side: open.side,
-          ord_id: partialSubmit?.ordId,
-          fill_confirmed: true,
-          partial_size_usd: partialSizeUsd
-        });
+        if (isExchangeEnabled) {
+          const pendingRecord = this.buildV2PartialPendingRecord(open, {
+            ordId: partialSubmit.ordId,
+            clOrdId: partialSubmit.clOrdId,
+            pendingContracts: normalizedPartialContracts,
+            stage: open.partialExitStage ?? 0,
+            reason: v2PartialAuthority.partialReason ?? "v2_partial_exit",
+            price: closePrice,
+            fundingRate: snap.fundingRate,
+            reduceRatio
+          });
+          this.logger.info("V2_PARTIAL_SUBMIT_PENDING_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            contracts_before: okxContracts,
+            requested_contracts: requestedContracts,
+            submitted_contracts: normalizedPartialContracts,
+            stage: open.partialExitStage ?? 0,
+            ord_id: partialSubmit.ordId ?? null,
+            cl_ord_id: partialSubmit.clOrdId ?? null,
+            ledger_mutated: false,
+            flowId
+          });
+          handleV2PartialAuthorityProof("partial", v2PartialAuthority.partialReason);
+          handleV2ExitAuthorityProof("none", null);
+          remaining.push(pendingRecord);
+          continue;
+        }
 
-        this.logger.info("POSITION_PARTIAL_CLOSE_EVALUATION_PROOF", {
-          symbol: open.symbol,
-          partial_triggered: true,
-          reduce_only: true,
-          current_position_size: open.sizeUsd,
-          requested_close_size: partialSizeUsd,
-          remaining_position_size: Math.max(0, open.sizeUsd - partialSizeUsd),
-          ledger_update_required: true,
-          flowId
-        });
+        if (partialSubmit.fillConfirmed === true) {
+          this.applyV2PartialFillConfirmed({
+            open,
+            newFillContracts: normalizedPartialContracts,
+            cumulativeFillContracts: normalizedPartialContracts,
+            fillPx: partialSubmit.actualFillPx ?? closePrice,
+            flowId,
+            orderFullyFilled: true,
+            fundingRate: snap.fundingRate,
+            closedAt
+          });
+          handleV2PartialAuthorityProof("partial", v2PartialAuthority.partialReason);
+          handleV2ExitAuthorityProof("none", null);
+          remaining.push({ ...open, lifecycleState: "OPEN" });
+          continue;
+        }
 
-        // Partial position update - contract-authoritative ledger reconcile
-        const partialFillPx = partialSubmit.actualFillPx ?? closePrice;
-        const sizeBeforeUsd = open.sizeUsd;
-        const { deltaMarginUsd } = this.applyV2PartialFillLedgerDelta({
-          open,
-          deltaContracts: normalizedPartialContracts,
-          fillPx: partialFillPx,
-          flowId
-        });
-        const partialMetrics = computePaperCloseLegMetrics({
-          open,
-          closePrice: partialFillPx,
-          closedAt,
-          snapFundingRate: snap.fundingRate,
-          marginUsd: deltaMarginUsd,
-          paperTakerFeeRate: this.config.paperTakerFeeRate,
-          paperFundingIntervalHours: this.config.paperFundingIntervalHours
-        });
-        open.realizedPnl = (open.realizedPnl ?? 0) + partialMetrics.pnlUsdNet;
-        const updatedOpen: typeof open = {
-          ...open,
-          partialExitStage: (open.partialExitStage ?? 0) + 1,
-          lastPartialAt: closedAt,
-          lifecycleState: "OPEN"
-        };
-        this.logger.info("V2_PARTIAL_POSITION_UPDATE_PROOF", {
-          symbol: open.symbol,
-          side: open.side,
-          size_before_usd: sizeBeforeUsd,
-          partial_size_executed_usd: deltaMarginUsd,
-          size_after_usd: updatedOpen.sizeUsd,
-          partial_exit_stage_after: updatedOpen.partialExitStage,
-          full_close_prevented: true,
-          open_ledger_pruned: false
-        });
-
-        handleV2PartialAuthorityProof("partial", v2PartialAuthority.partialReason);
-        handleV2ExitAuthorityProof("none", null);
-        remaining.push(updatedOpen);
+        remaining.push(open);
         continue;
       }
 

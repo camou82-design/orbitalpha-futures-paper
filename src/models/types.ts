@@ -937,8 +937,14 @@ export type PaperOpenPositionRecord = {
   // Partial Pending Tracking
   partialPendingOrdId?: string;
   partialPendingClOrdId?: string;
+  /** Submitted reduce-only contract count awaiting OKX fill confirmation. */
+  partialPendingContracts?: number;
+  /** Stage at partial submit; advance only after fill confirmed. */
+  partialPendingStage?: number;
   partialPendingSizeUsd?: number;
   partialPendingOriginalSizeUsd?: number;
+  /** Cumulative OKX fill contracts already applied to ledger (idempotency). */
+  partialPendingProcessedContracts?: number;
   partialPendingProcessedFillSz?: number;
   partialPendingProcessedMarginUsd?: number;
   partialPendingAt?: number;
