@@ -741,8 +741,45 @@ function parseOkxSwapInstrumentSizing(inst: Record<string, unknown>): OkxSwapIns
   return result;
 }
 
+/** OKX actual position unit authority for reconcile (contracts ≠ baseQty). */
+type OkxRemotePositionAuthority = {
+  contracts: number;
+  baseQty: number;
+  ctVal: number;
+  avgPx: number;
+  notionalUsd: number;
+  marginUsd: number;
+  leverage: number;
+  instId: string;
+  posSide: string;
+};
 
+type PositionReconcileMismatchType =
+  | "MATCHED"
+  | "AVG_PRICE_MISMATCH"
+  | "NOTIONAL_MISMATCH"
+  | "CONTRACT_MISMATCH"
+  | "SIDE_MISMATCH"
+  | "CONTRACT_HYDRATION_REQUIRED"
+  | "LEGACY_UNIT_REPAIR";
 
+const RECONCILE_NOTIONAL_TOLERANCE_USD = 1.0;
+const RECONCILE_PRICE_TOLERANCE_RATIO = 0.0005;
+const RECONCILE_CONTRACT_TOLERANCE_RATIO = 0.001;
+const RECONCILE_MARGIN_INVARIANT_TOLERANCE_USD = 0.15;
+
+function hasLedgerContracts(open: PaperOpenPositionRecord): boolean {
+  return typeof open.okxContracts === "number" && Number.isFinite(open.okxContracts) && open.okxContracts > 0;
+}
+
+function isHardBlockReconcileMismatch(type: PositionReconcileMismatchType): boolean {
+  return (
+    type === "AVG_PRICE_MISMATCH" ||
+    type === "NOTIONAL_MISMATCH" ||
+    type === "CONTRACT_MISMATCH" ||
+    type === "SIDE_MISMATCH"
+  );
+}
 
 function isBtcEthSampleSymbol(symbol: string): boolean {
   const s = String(symbol).toUpperCase();
@@ -1955,6 +1992,330 @@ export class PaperEngine {
     return true;
   }
 
+  private buildOkxRemotePositionAuthority(
+    row: Record<string, unknown>,
+    hit: NonNullable<ReturnType<typeof okxSwapRowToLedgerKey>>,
+    inst: OkxSwapInstrumentSizing | undefined
+  ): OkxRemotePositionAuthority {
+    const ctVal = inst?.ctVal ?? 1;
+    const contracts = Math.abs(hit.posSigned);
+    const baseQty = contracts * ctVal;
+    let notionalUsd = hit.notionalUsd;
+    if ((!Number.isFinite(notionalUsd) || notionalUsd === 0) && hit.avgPx > 0 && baseQty > 0) {
+      notionalUsd = baseQty * hit.avgPx;
+    }
+    notionalUsd = Math.abs(notionalUsd);
+    const leverRaw = (row as { lever?: unknown }).lever;
+    const leverage =
+      typeof leverRaw === "number" && Number.isFinite(leverRaw) && leverRaw > 0
+        ? leverRaw
+        : typeof leverRaw === "string" && Number(leverRaw) > 0
+          ? Number(leverRaw)
+          : 10;
+    const marginUsd = notionalUsd / leverage;
+    const posSide = String((row as { posSide?: unknown }).posSide ?? "").toLowerCase();
+    return {
+      contracts,
+      baseQty,
+      ctVal,
+      avgPx: hit.avgPx,
+      notionalUsd,
+      marginUsd,
+      leverage,
+      instId: hit.instId,
+      posSide
+    };
+  }
+
+  private logOkxRemoteUnitAuthority(remote: OkxRemotePositionAuthority, symbol: string, side: string): void {
+    this.logger.info("V2_OKX_POSITION_UNIT_AUTHORITY_PROOF", {
+      symbol,
+      side,
+      contracts: remote.contracts,
+      ct_val: remote.ctVal,
+      base_qty: remote.baseQty,
+      avg_px: remote.avgPx,
+      notional_usdt: remote.notionalUsd,
+      leverage: remote.leverage,
+      margin_usdt: remote.marginUsd
+    });
+  }
+
+  private syncOpenLedgerFromRemoteAuthority(open: PaperOpenPositionRecord, remote: OkxRemotePositionAuthority): void {
+    open.okxContracts = remote.contracts;
+    open.baseQty = remote.baseQty;
+    open.pos = remote.baseQty;
+    open.notionalUsd = remote.notionalUsd;
+    open.notional = remote.notionalUsd;
+    open.actualNotionalUsd = remote.notionalUsd;
+    open.sizeUsd = remote.marginUsd;
+    open.actualMarginUsd = remote.marginUsd;
+    open.leverage = remote.leverage;
+    open.avgPx = remote.avgPx;
+    open.entryPrice = remote.avgPx;
+    open.actualContracts = remote.contracts;
+    open.actualPos = remote.baseQty;
+    open.actualAvgPx = remote.avgPx;
+    open.exchangeFilledSize = remote.contracts;
+    const remainingSizeRatio =
+      open.initialSizeUsd != null && open.initialSizeUsd > 0
+        ? remote.marginUsd / open.initialSizeUsd
+        : 1;
+    open.remainingSizeRatio = remainingSizeRatio;
+  }
+
+  private logPositionUnitInvariant(open: PaperOpenPositionRecord): void {
+    const leverage = Math.max(1, open.leverage ?? 10);
+    const notionalUsd = open.notionalUsd ?? 0;
+    const expectedMarginUsd = notionalUsd > 0 ? notionalUsd / leverage : 0;
+    const marginError = Math.abs(open.sizeUsd - expectedMarginUsd);
+    const unitInvariantPassed = marginError <= RECONCILE_MARGIN_INVARIANT_TOLERANCE_USD;
+    this.logger.info("V2_POSITION_UNIT_INVARIANT_PROOF", {
+      symbol: open.symbol,
+      side: open.side,
+      okx_contracts: open.okxContracts ?? null,
+      ct_val: open.baseQty != null && open.okxContracts != null && open.okxContracts > 0
+        ? open.baseQty / open.okxContracts
+        : null,
+      base_qty: open.baseQty ?? null,
+      entry_price: open.entryPrice,
+      notional_usdt: notionalUsd,
+      size_usd_margin: open.sizeUsd,
+      leverage,
+      expected_margin_usdt: expectedMarginUsd,
+      margin_error_usdt: marginError,
+      unit_invariant_passed: unitInvariantPassed
+    });
+  }
+
+  private detectLegacyMarginUnitPollution(
+    open: PaperOpenPositionRecord,
+    remote: OkxRemotePositionAuthority
+  ): boolean {
+    const leverage = remote.leverage || open.leverage || 10;
+    const ledgerNotional = open.notionalUsd ?? open.sizeUsd;
+    const ledgerMargin = open.sizeUsd;
+    if (!(ledgerNotional > 0 && ledgerMargin > 0)) return false;
+
+    const marginNotionalConfused =
+      Math.abs(ledgerMargin - ledgerNotional) / Math.max(ledgerNotional, 1e-9) < 0.02;
+    if (!marginNotionalConfused) return false;
+
+    const priceOk =
+      Math.abs(open.entryPrice - remote.avgPx) / Math.max(open.entryPrice || 1, 1e-9) <=
+      RECONCILE_PRICE_TOLERANCE_RATIO;
+    const notionalOk = Math.abs(ledgerNotional - remote.notionalUsd) <= RECONCILE_NOTIONAL_TOLERANCE_USD;
+    if (!priceOk || !notionalOk) return false;
+
+    const expectedMargin = remote.notionalUsd / leverage;
+    const looksLikeNotionalStoredAsMargin =
+      Math.abs(ledgerMargin - remote.notionalUsd) / Math.max(remote.notionalUsd, 1e-9) < 0.02 &&
+      Math.abs(expectedMargin - remote.marginUsd) / Math.max(remote.marginUsd, 1e-9) < 0.05;
+    if (!looksLikeNotionalStoredAsMargin) return false;
+
+    if (hasLedgerContracts(open)) {
+      const contractDiff = Math.abs(open.okxContracts! - remote.contracts);
+      const contractTol = Math.max(1e-8, RECONCILE_CONTRACT_TOLERANCE_RATIO * remote.contracts);
+      if (contractDiff > contractTol) return false;
+    }
+    return true;
+  }
+
+  private applyLegacyMarginUnitRepair(
+    open: PaperOpenPositionRecord,
+    remote: OkxRemotePositionAuthority
+  ): void {
+    const before = {
+      sizeUsd: open.sizeUsd,
+      notionalUsd: open.notionalUsd ?? open.notional,
+      okxContracts: open.okxContracts
+    };
+    this.syncOpenLedgerFromRemoteAuthority(open, remote);
+    if (open.initialSizeUsd == null || Math.abs((open.initialSizeUsd ?? 0) - before.sizeUsd) < 0.02) {
+      open.initialSizeUsd = remote.marginUsd;
+    }
+    this.logger.info("V2_LEGACY_POSITION_UNIT_REPAIR_PROOF", {
+      symbol: open.symbol,
+      side: open.side,
+      before_size_usd: before.sizeUsd,
+      before_notional_usd: before.notionalUsd ?? null,
+      before_okx_contracts: before.okxContracts ?? null,
+      actual_notional_usd: remote.notionalUsd,
+      actual_margin_usd: remote.marginUsd,
+      actual_contracts: remote.contracts,
+      after_size_usd: open.sizeUsd,
+      after_notional_usd: open.notionalUsd,
+      after_okx_contracts: open.okxContracts,
+      repair_reason: "margin_notional_unit_confusion"
+    });
+  }
+
+  private reconcileOpenPositionWithRemote(
+    open: PaperOpenPositionRecord,
+    remote: OkxRemotePositionAuthority,
+    nowTs: number,
+    opts: { isPartialPending: boolean; isClosePending: boolean }
+  ): { ledgerModified: boolean; mismatchType: PositionReconcileMismatchType; blocked: boolean } {
+    let ledgerModified = false;
+    let mismatchType: PositionReconcileMismatchType = "MATCHED";
+
+    const priceDiffRatio =
+      Math.abs(open.entryPrice - remote.avgPx) / Math.max(open.entryPrice || 1, 1e-9);
+    const ledgerNotional = open.notionalUsd ?? 0;
+    const notionalDiff = Math.abs(ledgerNotional - remote.notionalUsd);
+
+    if (this.detectLegacyMarginUnitPollution(open, remote)) {
+      this.applyLegacyMarginUnitRepair(open, remote);
+      open.reconcileState = "MATCHED";
+      open.lifecycleState = "OPEN";
+      open.lastCheckedAt = nowTs;
+      this.logPositionUnitInvariant(open);
+      return { ledgerModified: true, mismatchType: "LEGACY_UNIT_REPAIR", blocked: false };
+    }
+
+    if (priceDiffRatio > RECONCILE_PRICE_TOLERANCE_RATIO) {
+      mismatchType = "AVG_PRICE_MISMATCH";
+    } else if (notionalDiff > RECONCILE_NOTIONAL_TOLERANCE_USD) {
+      mismatchType = "NOTIONAL_MISMATCH";
+    }
+
+    const ledgerHasContracts = hasLedgerContracts(open);
+    let contractMismatch = false;
+
+    if (ledgerHasContracts && !opts.isPartialPending && !opts.isClosePending) {
+      const contractDiff = Math.abs(open.okxContracts! - remote.contracts);
+      const contractTol = Math.max(1e-8, RECONCILE_CONTRACT_TOLERANCE_RATIO * remote.contracts);
+      if (contractDiff > contractTol) {
+        contractMismatch = true;
+        mismatchType = "CONTRACT_MISMATCH";
+      }
+    } else if (!ledgerHasContracts && !opts.isPartialPending && !opts.isClosePending) {
+      if (priceDiffRatio <= RECONCILE_PRICE_TOLERANCE_RATIO && notionalDiff <= RECONCILE_NOTIONAL_TOLERANCE_USD) {
+        mismatchType = "CONTRACT_HYDRATION_REQUIRED";
+        this.logger.info("V2_POSITION_CONTRACT_HYDRATION_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          before_okx_contracts: open.okxContracts ?? null,
+          actual_okx_contracts: remote.contracts,
+          ct_val: remote.ctVal,
+          base_qty: remote.baseQty,
+          reason: "ledger_contracts_missing_identity_aligned"
+        });
+      } else if (mismatchType === "MATCHED") {
+        mismatchType = "CONTRACT_HYDRATION_REQUIRED";
+      }
+    }
+
+    const hardBlock = isHardBlockReconcileMismatch(mismatchType) || (contractMismatch && ledgerHasContracts);
+
+    if (hardBlock || (contractMismatch && ledgerHasContracts)) {
+      this.logger.warn("V2_POSITION_RECONCILE_MISMATCH_BLOCK_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        mismatch_type: mismatchType,
+        actual_contracts: remote.contracts,
+        actual_notional: remote.notionalUsd,
+        actual_margin: remote.marginUsd,
+        ledger_notional: ledgerNotional,
+        ledger_margin: open.sizeUsd,
+        ledger_contracts: open.okxContracts ?? null,
+        action: "RECONCILE_MISMATCH_NO_HYDRATION"
+      });
+      open.reconcileState = "RECONCILE_MISMATCH";
+      open.lastCheckedAt = nowTs;
+      return { ledgerModified: true, mismatchType, blocked: true };
+    }
+
+    if (mismatchType === "MATCHED" || mismatchType === "CONTRACT_HYDRATION_REQUIRED") {
+      this.syncOpenLedgerFromRemoteAuthority(open, remote);
+      open.reconcileState = "MATCHED";
+      open.lastCheckedAt = nowTs;
+      if (
+        mismatchType === "CONTRACT_HYDRATION_REQUIRED" &&
+        open.lifecycleState === "CLOSE_ONLY_MANAGED"
+      ) {
+        open.lifecycleState = "OPEN";
+      }
+      this.logger.info("POSITION_CARD_HYDRATE_FROM_OKX_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        mismatch_type: mismatchType,
+        actualContracts: open.okxContracts,
+        actualNotionalUsd: open.notionalUsd,
+        actualMarginUsd: open.sizeUsd,
+        initialSizeUsd: open.initialSizeUsd,
+        remainingSizeRatio: open.remainingSizeRatio
+      });
+      this.logPositionUnitInvariant(open);
+      ledgerModified = true;
+    }
+
+    return { ledgerModified, mismatchType, blocked: false };
+  }
+
+  private syncAdoptedFamilyFromRemote(
+    open: PaperOpenPositionRecord,
+    remote: OkxRemotePositionAuthority,
+    nowTs: number
+  ): boolean {
+    const isFirstTimeSync = !open.adoptedMetadataSyncedAt;
+    const needsSync =
+      isFirstTimeSync ||
+      Math.abs(open.sizeUsd - remote.marginUsd) > RECONCILE_MARGIN_INVARIANT_TOLERANCE_USD ||
+      !open.notionalUsd ||
+      Math.abs((open.notionalUsd ?? 0) - remote.notionalUsd) > RECONCILE_NOTIONAL_TOLERANCE_USD ||
+      !hasLedgerContracts(open);
+
+    if (!needsSync) return false;
+
+    const beforeSizeUsd = open.sizeUsd;
+    open.okxContracts = remote.contracts;
+    open.baseQty = remote.baseQty;
+    open.pos = remote.baseQty;
+    open.notionalUsd = remote.notionalUsd;
+    open.notional = remote.notionalUsd;
+    open.actualNotionalUsd = remote.notionalUsd;
+    open.sizeUsd = remote.marginUsd;
+    open.actualMarginUsd = remote.marginUsd;
+    open.leverage = remote.leverage;
+    if (remote.avgPx > 0) {
+      open.avgPx = remote.avgPx;
+      open.entryPrice = remote.avgPx;
+    }
+
+    if (isFirstTimeSync) {
+      open.initialSizeUsd = remote.marginUsd;
+      open.adoptedMetadataSyncedAt = nowTs;
+    } else if (
+      open.initialSizeUsd != null &&
+      Math.abs(open.initialSizeUsd - beforeSizeUsd) < 0.02 &&
+      Math.abs(open.initialSizeUsd - remote.notionalUsd) < 0.02
+    ) {
+      open.initialSizeUsd = remote.marginUsd;
+    }
+
+    this.logger.info("LEDGER_OKX_POSITION_NOTIONAL_SYNCED_PROOF", {
+      symbol: open.symbol,
+      side: open.side,
+      sync_reason: isFirstTimeSync ? "initial_and_current_margin_first_sync" : "current_margin_unit_sync",
+      okxNotionalUsd: remote.notionalUsd,
+      okxMarginUsd: remote.marginUsd,
+      okxContracts: remote.contracts,
+      okxBaseQty: remote.baseQty,
+      initialSizeUsd: open.initialSizeUsd,
+      adoptedMetadataSyncedAt: open.adoptedMetadataSyncedAt
+    });
+    this.logPositionUnitInvariant(open);
+    return true;
+  }
+
+  private hydrateOpenFromRemoteSnapshot(
+    open: PaperOpenPositionRecord,
+    remote: OkxRemotePositionAuthority
+  ): void {
+    this.syncOpenLedgerFromRemoteAuthority(open, remote);
+  }
+
   private async runPositionStateReconciliation(nowTs: number): Promise<void> {
     if (this.reconcileLastCheckedAt != null && nowTs - this.reconcileLastCheckedAt < this.reconcileCheckIntervalMs) return;
     this.reconcileLastCheckedAt = nowTs;
@@ -1972,28 +2333,15 @@ export class PaperEngine {
 
     const okxPositions = okxPosRes.value;
     const effectiveCloseOnlyMode = this.serverTradeControlState.close_only_mode || this.reconcileSafetyCloseOnly;
-    const remoteMap = new Map<string, { size: number; instId: string; posSide: string; avgPx: number; notionalUsd: number }>();
+    const remoteMap = new Map<string, OkxRemotePositionAuthority>();
     for (const row of okxPositions) {
       const hit = okxSwapRowToLedgerKey(row as Record<string, unknown>);
       if (!hit) continue;
-      const posSideRaw = String((row as any).posSide ?? "").toLowerCase();
       const instId = hit.instId;
       const inst = this.instrumentCache.get(instId);
-      const ctVal = inst?.ctVal ?? 1;
-
-      const baseSz = Math.abs(hit.posSigned) * ctVal;
-      let nu = hit.notionalUsd;
-      if ((!Number.isFinite(nu) || nu === 0) && hit.avgPx > 0 && baseSz > 0) {
-        nu = baseSz * hit.avgPx;
-      }
-
-      remoteMap.set(hit.key, {
-        size: baseSz,
-        instId,
-        posSide: posSideRaw,
-        avgPx: hit.avgPx,
-        notionalUsd: nu
-      });
+      const remote = this.buildOkxRemotePositionAuthority(row as Record<string, unknown>, hit, inst);
+      remoteMap.set(hit.key, remote);
+      this.logOkxRemoteUnitAuthority(remote, hit.symbol, hit.side);
     }
 
     const next: PaperOpenPositionRecord[] = [];
@@ -2003,11 +2351,11 @@ export class PaperEngine {
     const untrackedFills: string[] = [];
     const RECONCILE_GRACE_PERIOD_MS = 30_000;
 
-    const reconcileManualFullClose = async (open: PaperOpenPositionRecord, source: string) => {
+    const reconcileManualFullClose = async (open: PaperOpenPositionRecord, source: string): Promise<boolean> => {
       if (open.symbol === "BTCUSDT") {
         if (this.isBtcSuppressionTarget()) {
           await this.logAndSuppressBtcUsdtAction("reconcileManualFullClose", open.side, ["CLOSE", "close history write", "ledger prune"]);
-          return;
+          return false;
         }
       }
       const snap = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
@@ -2048,7 +2396,7 @@ export class PaperEngine {
         strategyVersion: open.strategyVersion ?? "paper-v2"
       });
 
-      await this.appendClosedWithStandardRouting({
+      const { historyAppended } = await this.appendClosedWithStandardRouting({
         closedRow,
         open,
         flowId: `${open.symbol}:${open.side}:${open.openedAt}`,
@@ -2056,6 +2404,14 @@ export class PaperEngine {
         closeSource: source,
         currentRegime: this.lastRegime.regime || "NO_TRADE"
       });
+      if (!historyAppended) {
+        this.logger.warn("MANUAL_FULL_CLOSE_HISTORY_APPEND_BLOCKED_KEEP_LEDGER", {
+          symbol: open.symbol,
+          side: open.side,
+          source
+        });
+        return false;
+      }
 
       // [HARDENING] Manual close cooldown (5 min) to prevent immediate re-entry
       this.manualCloseCooldownBySymbol.set(String(open.symbol), {
@@ -2098,6 +2454,7 @@ export class PaperEngine {
       if (open.lifecycleState !== "EXTERNAL_MANUAL_POSITION") {
         mismatchCount++;
       }
+      return true;
     };
 
     for (let open of rawOpens) {
@@ -2117,40 +2474,8 @@ export class PaperEngine {
         open.sourceSignal === "OPERATOR_ADOPTED";
 
       if (isAdoptedFamily && remotePos && remotePos.notionalUsd > 0) {
-        const remoteNotional = Math.abs(remotePos.notionalUsd);
-        const needsCurrentNotionalSync =
-          Math.abs(open.sizeUsd - remoteNotional) > 0.5 ||
-          !open.notionalUsd ||
-          Math.abs(open.notionalUsd - remoteNotional) > 0.5;
-
-        // Check if initialSizeUsd has not been synced yet (first-time correction for legacy/incorrect adoption)
-        const isFirstTimeSync = !open.adoptedMetadataSyncedAt;
-
-        if (needsCurrentNotionalSync || isFirstTimeSync) {
-          open.sizeUsd = remoteNotional;
-          open.notional = remoteNotional;
-          open.notionalUsd = remoteNotional;
-          if (remotePos.size > 0) {
-            open.pos = remotePos.size;
-            open.baseQty = remotePos.size;
-          }
-
-          // Fix initialSizeUsd ONLY on the very first sync
-          if (isFirstTimeSync) {
-            open.initialSizeUsd = remoteNotional;
-            open.adoptedMetadataSyncedAt = nowTs;
-          }
-
+        if (this.syncAdoptedFamilyFromRemote(open, remotePos, nowTs)) {
           ledgerModified = true;
-          this.logger.info("LEDGER_OKX_POSITION_NOTIONAL_SYNCED_PROOF", {
-            symbol: open.symbol,
-            side: open.side,
-            sync_reason: isFirstTimeSync ? "initial_and_current_notional_first_sync" : "current_notional_sync",
-            okxNotionalUsd: remoteNotional,
-            okxBaseQty: remotePos.size,
-            initialSizeUsd: open.initialSizeUsd,
-            adoptedMetadataSyncedAt: open.adoptedMetadataSyncedAt
-          });
         }
       }
 
@@ -2185,28 +2510,12 @@ export class PaperEngine {
 
       if (isPending || open.lifecycleState === "INITIAL" || !open.lifecycleState) {
         if (remotePos) {
-          const instIdR = toOkxSwapInstId(open.symbol);
-          const instR = this.instrumentCache.get(instIdR);
-          const ctValR = instR?.ctVal ?? 1;
-          const baseFromRemote = remotePos.size;
-          let nuR = remotePos.notionalUsd;
-          if ((!Number.isFinite(nuR) || nuR === 0) && remotePos.avgPx > 0 && baseFromRemote > 0) {
-            nuR = baseFromRemote * remotePos.avgPx;
-          }
           open.lifecycleState = "OPEN";
           open.reconcileState = "MATCHED";
           open.lastCheckedAt = nowTs;
-          open.baseQty = baseFromRemote;
-          open.pos = baseFromRemote;
-          open.notionalUsd = Math.abs(nuR);
-          if (ctValR > 0) {
-            const contractsAbs = baseFromRemote / ctValR;
-            open.okxContracts = contractsAbs;
-            open.exchangeFilledSize = contractsAbs;
-          }
-          if (remotePos.avgPx > 0) {
-            open.avgPx = remotePos.avgPx;
-            open.entryPrice = remotePos.avgPx;
+          this.hydrateOpenFromRemoteSnapshot(open, remotePos);
+          if (open.initialSizeUsd == null || open.initialSizeUsd <= 0) {
+            open.initialSizeUsd = remotePos.marginUsd;
           }
           ledgerModified = true;
           this.logger.info("POSITION_OPEN_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, status: "confirmed" });
@@ -2288,7 +2597,9 @@ export class PaperEngine {
 
         if (!(ordId || clOrdId)) {
           if (!remotePos && !isNew) {
-            await reconcileManualFullClose(open, "RECONCILE_ABSENT_PENDING_NO_ID");
+            const pruned = await reconcileManualFullClose(open, "RECONCILE_ABSENT_PENDING_NO_ID");
+            if (pruned) continue;
+            next.push(open);
             continue;
           }
           if (isPartialPending) {
@@ -2313,24 +2624,7 @@ export class PaperEngine {
             open.partialPendingPrice = undefined;
             open.partialPendingFundingRate = undefined;
             if (remotePos && remotePos.avgPx > 0) {
-              const instIdR = toOkxSwapInstId(open.symbol);
-              const instR = this.instrumentCache.get(instIdR);
-              const ctValR = instR?.ctVal ?? 1;
-              const baseFromRemote = remotePos.size;
-              let nuR = remotePos.notionalUsd;
-              if ((!Number.isFinite(nuR) || nuR === 0) && remotePos.avgPx > 0 && baseFromRemote > 0) {
-                nuR = baseFromRemote * remotePos.avgPx;
-              }
-              open.baseQty = baseFromRemote;
-              open.pos = baseFromRemote;
-              open.notionalUsd = Math.abs(nuR);
-              if (ctValR > 0) {
-                const cAbs = baseFromRemote / ctValR;
-                open.okxContracts = cAbs;
-                open.exchangeFilledSize = cAbs;
-              }
-              open.avgPx = remotePos.avgPx;
-              open.entryPrice = remotePos.avgPx;
+              this.hydrateOpenFromRemoteSnapshot(open, remotePos);
             }
             ledgerModified = true;
           } else if (isClosePending && pendingAt && nowTs - pendingAt > PENDING_TIMEOUT_MS && remotePos) {
@@ -2371,20 +2665,7 @@ export class PaperEngine {
             open.closePendingClOrdId = undefined;
 
             // Update to OKX actual
-            open.entryPrice = remotePos.avgPx;
-            open.avgPx = remotePos.avgPx;
-            open.baseQty = remotePos.size;
-            open.pos = remotePos.size;
-            open.notionalUsd = Math.abs(remotePos.notionalUsd);
-
-            const instIdR = toOkxSwapInstId(open.symbol);
-            const instR = this.instrumentCache.get(instIdR);
-            const ctValR = instR?.ctVal ?? 1;
-            if (ctValR > 0) {
-              const cAbs = remotePos.size / ctValR;
-              open.okxContracts = cAbs;
-              open.exchangeFilledSize = cAbs;
-            }
+            this.hydrateOpenFromRemoteSnapshot(open, remotePos);
 
             // stopPrice recalculation
             const slReg = regimeForSl(open.regimeAtEntry);
@@ -2473,7 +2754,7 @@ export class PaperEngine {
                     strategyVersion: open.strategyVersion ?? "paper-v2"
                   });
                   
-                  await this.appendClosedWithStandardRouting({
+                  const { historyAppended } = await this.appendClosedWithStandardRouting({
                     closedRow,
                     open,
                     flowId,
@@ -2481,6 +2762,11 @@ export class PaperEngine {
                     closeSource: "V2_RECONCILE",
                     currentRegime: this.lastRegime.regime || "NO_TRADE"
                   });
+                  
+                  if (!historyAppended) {
+                    next.push(open);
+                    continue;
+                  }
                   
                   this.logger.info("PAPER_POSITION_CLOSED_PROOF", { 
                     symbol: open.symbol, 
@@ -2502,7 +2788,7 @@ export class PaperEngine {
                     symbol: open.symbol,
                     side: open.side,
                     ord_id: ordId,
-                    remote_size: remotePos?.size ?? 0,
+                    remote_contracts: remotePos?.contracts ?? 0,
                     ledger_size: open.sizeUsd,
                     filled_qty_raw: cumulativeFillSz,
                     delta_fill_sz: deltaFillSz,
@@ -2662,7 +2948,9 @@ export class PaperEngine {
           } else {
             // ordRes.ok but value is empty (Order not found in OKX)
             if (ordRes.ok && ordRes.value.length === 0 && !remotePos && !isNew) {
-              await reconcileManualFullClose(open, "RECONCILE_ABSENT_PENDING_NOT_FOUND");
+              const pruned = await reconcileManualFullClose(open, "RECONCILE_ABSENT_PENDING_NOT_FOUND");
+              if (pruned) continue;
+              next.push(open);
               continue;
             }
 
@@ -2734,24 +3022,7 @@ export class PaperEngine {
               open.partialPendingPrice = undefined;
               open.partialPendingFundingRate = undefined;
               if (remotePos && remotePos.avgPx > 0) {
-                const instIdR = toOkxSwapInstId(open.symbol);
-                const instR = this.instrumentCache.get(instIdR);
-                const ctValR = instR?.ctVal ?? 1;
-                const baseFromRemote = remotePos.size;
-                let nuR = remotePos.notionalUsd;
-                if ((!Number.isFinite(nuR) || nuR === 0) && remotePos.avgPx > 0 && baseFromRemote > 0) {
-                  nuR = baseFromRemote * remotePos.avgPx;
-                }
-                open.baseQty = baseFromRemote;
-                open.pos = baseFromRemote;
-                open.notionalUsd = Math.abs(nuR);
-                if (ctValR > 0) {
-                  const cAbs = baseFromRemote / ctValR;
-                  open.okxContracts = cAbs;
-                  open.exchangeFilledSize = cAbs;
-                }
-                open.avgPx = remotePos.avgPx;
-                open.entryPrice = remotePos.avgPx;
+                this.hydrateOpenFromRemoteSnapshot(open, remotePos);
 
                 // stopPrice correction based on actual avgPx after recovery
                 const slReg = regimeForSl(open.regimeAtEntry);
@@ -2772,129 +3043,18 @@ export class PaperEngine {
       // 3. Regular Open Position Reconciliation (Deep Comparison & Repair)
       if (open.lifecycleState === "OPEN" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
         if (!remotePos) {
-          await reconcileManualFullClose(open, "RECONCILE_ABSENT");
-          continue; // Pruned
+          const pruned = await reconcileManualFullClose(open, "RECONCILE_ABSENT");
+          if (pruned) continue;
+          next.push(open);
+          continue;
         }
 
-        // Deep comparison: avgPx + notional first; base size only when paper.baseQty is explicit (exchange-derived).
-        const isAdoptedOrManaged = open.reconcileState === "ADOPTED" || open.lifecycleState === "CLOSE_ONLY_MANAGED";
-        const paperNotional = open.notionalUsd ?? open.sizeUsd;
-        const priceDiffRatio = Math.abs(open.entryPrice - remotePos.avgPx) / (open.entryPrice || 1);
-        const notionalDiff = Math.abs(Math.abs(paperNotional) - Math.abs(remotePos.notionalUsd));
-        const paperBaseForCompare =
-          typeof open.baseQty === "number" && Number.isFinite(open.baseQty) && open.baseQty > 0
-            ? open.baseQty
-            : paperNotional / Math.max(1e-12, open.entryPrice || 1);
-        const sizeDiff =
-          typeof open.baseQty === "number" && Number.isFinite(open.baseQty) && open.baseQty > 0
-            ? Math.abs(open.baseQty - remotePos.size)
-            : 0;
-
-        let mismatchDetected = false;
-        let mismatchType: string = "MATCHED";
-
-        if (priceDiffRatio > 0.0005) {
-          mismatchDetected = true;
-          mismatchType = "AVG_PRICE_MISMATCH";
-        } else if (notionalDiff > 1.0) {
-          mismatchDetected = true;
-          mismatchType = "NOTIONAL_MISMATCH";
-        } else if (
-          typeof open.baseQty === "number" &&
-          Number.isFinite(open.baseQty) &&
-          open.baseQty > 0 &&
-          sizeDiff > Math.max(1e-8, 0.002 * Math.max(open.baseQty, remotePos.size))
-        ) {
-          mismatchDetected = true;
-          mismatchType = isAdoptedOrManaged ? "MANUAL_PARTIAL_DETECTED" : "SIZE_MISMATCH";
-        }
-
-        // --- Mandatory Hydration from OKX Actual ---
-        const instIdHydrate = toOkxSwapInstId(open.symbol);
-        const instHydrate = this.instrumentCache.get(instIdHydrate);
-        const ctHydrate = instHydrate?.ctVal ?? 1;
-
-        const actualContracts = remotePos.size / ctHydrate;
-        const actualNotionalUsd = Math.abs(remotePos.notionalUsd);
-        const actualMarginUsd = actualNotionalUsd / (open.leverage || 10);
-        const remainingSizeRatio = open.initialSizeUsd ? (actualMarginUsd / open.initialSizeUsd) : 1;
-
-        // Detect manual size change (excluding active partial/close pending states)
-        const sizeDiffAbs = Math.abs((open.okxContracts ?? 0) - actualContracts);
-        const isSizeMismatched = sizeDiffAbs > Math.max(1e-8, 0.001 * (open.okxContracts ?? actualContracts));
-
-        if (isSizeMismatched && !isPartialPending && !isClosePending) {
-          this.logger.warn("MANUAL_SIZE_CHANGE_DETECTED_PROOF", {
-            symbol: open.symbol,
-            side: open.side,
-            prev_contracts: open.okxContracts,
-            new_contracts: actualContracts,
-            prev_size_usd: open.sizeUsd,
-            new_size_usd: actualMarginUsd,
-            mismatch_type: mismatchType,
-            detail: "OKX_ACTUAL_SIZE_DIFFERS_FROM_LEDGER_HYDRATING"
-          });
-          
-          if (actualContracts < (open.okxContracts ?? 0)) {
-            this.logger.info("MANUAL_PARTIAL_SIZE_RECONCILE_PROOF", {
-              symbol: open.symbol,
-              side: open.side,
-              reduced_contracts: (open.okxContracts ?? 0) - actualContracts,
-              remaining_contracts: actualContracts
-            });
-          }
-        }
-
-        // --- Zero-Trust Reconciliation Hardening ---
-        if (mismatchDetected || isSizeMismatched) {
-           this.logger.warn("V2_POSITION_RECONCILE_MISMATCH_BLOCK_PROOF", {
-             symbol: open.symbol,
-             side: open.side,
-             mismatch_type: mismatchType,
-             actual_contracts: actualContracts,
-             actual_notional: actualNotionalUsd,
-             actual_margin: actualMarginUsd,
-             ledger_notional: paperNotional,
-             ledger_margin: open.sizeUsd,
-             action: "BLOCK_HYDRATION_AND_KEEP_ORIGINAL_LEDGER"
-           });
-           
-           open.reconcileState = "RECONCILE_MISMATCH";
-           open.lastCheckedAt = nowTs;
-           ledgerModified = true;
-           // Do NOT proceed to hydration - keep original ledger values for audit visibility
-        } else {
-          // Hydrate all fields (Only for MATCHED/ALIGNED positions)
-          open.actualContracts = actualContracts;
-          open.actualNotionalUsd = actualNotionalUsd;
-          open.actualMarginUsd = actualMarginUsd;
-          open.actualPos = remotePos.size;
-          open.actualAvgPx = remotePos.avgPx;
-          open.actualUnrealizedPnl = 0; 
-          open.actualUnrealizedPnlPct = 0;
-          open.remainingSizeRatio = remainingSizeRatio;
-
-          // Update legacy fields to match actuals
-          open.okxContracts = actualContracts;
-          open.pos = remotePos.size;
-          open.baseQty = remotePos.size;
-          open.notionalUsd = actualNotionalUsd;
-          open.avgPx = remotePos.avgPx;
-          open.entryPrice = remotePos.avgPx;
-          open.sizeUsd = actualMarginUsd; // sizeUsd now represents current margin
-
-          open.reconcileState = "MATCHED";
-          open.lastCheckedAt = nowTs;
-
-          this.logger.info("POSITION_CARD_HYDRATE_FROM_OKX_PROOF", {
-            symbol: open.symbol,
-            side: open.side,
-            actualContracts: open.actualContracts,
-            actualNotionalUsd: open.actualNotionalUsd,
-            actualMarginUsd: open.actualMarginUsd,
-            initialSizeUsd: open.initialSizeUsd,
-            remainingSizeRatio: open.remainingSizeRatio
-          });
+        const reconcileResult = this.reconcileOpenPositionWithRemote(open, remotePos, nowTs, {
+          isPartialPending,
+          isClosePending
+        });
+        if (reconcileResult.ledgerModified) {
+          ledgerModified = true;
         }
 
         // --- V2 Risk Integrity Hardening (Hydrate & Prove) ---
@@ -2972,7 +3132,8 @@ export class PaperEngine {
           symbol,
           side,
           instId: remoteVal.instId,
-          size: remoteVal.size,
+          contracts: remoteVal.contracts,
+          base_qty: remoteVal.baseQty,
           detail: "EXCHANGE_POSITION_MISSING_IN_LEDGER_ADOPTING"
         });
 
@@ -2982,9 +3143,9 @@ export class PaperEngine {
           String(r.posSide ?? "").toLowerCase() === remoteVal.posSide
         );
 
-        const avgPx = Number(okxRow?.avgPx) || 0;
-        const leverage = Number(okxRow?.lever) || 10;
-        const notional = Number(okxRow?.notionalUsd) || 0;
+        const avgPx = remoteVal.avgPx > 0 ? remoteVal.avgPx : Number(okxRow?.avgPx) || 0;
+        const leverage = remoteVal.leverage > 0 ? remoteVal.leverage : Number(okxRow?.lever) || 10;
+        const notional = remoteVal.notionalUsd > 0 ? remoteVal.notionalUsd : Number(okxRow?.notionalUsd) || 0;
         const marginMode = String(okxRow?.mgnMode || "cross");
 
         if (notional <= 0) {
@@ -3003,25 +3164,23 @@ export class PaperEngine {
         
         const cTime = Number(okxRow?.cTime);
         const originalOpenedAt = (cTime > 0 && cTime < nowTs) ? cTime : 0;
-        const actualMarginUsd = notional / leverage;
+        const actualMarginUsd = remoteVal.marginUsd > 0 ? remoteVal.marginUsd : notional / leverage;
         const instId = remoteVal.instId ?? toOkxSwapInstId(symbol);
         const inst = this.instrumentCache.get(instId);
         
-        const baseQty = Math.abs(Number(remoteVal.size));
-        let okxContracts: number | undefined = undefined;
+        const okxContracts = remoteVal.contracts;
+        const baseQty = remoteVal.baseQty;
         let finalLifecycleState: PaperOpenPositionRecord["lifecycleState"] = lifecycleState as PaperOpenPositionRecord["lifecycleState"];
         
-        if (inst && inst.ctVal > 0) {
-           okxContracts = baseQty / inst.ctVal;
-        } else {
+        if (!(inst && inst.ctVal > 0) && !(okxContracts > 0 && baseQty > 0)) {
            finalLifecycleState = "CLOSE_ONLY_MANAGED";
         }
 
         this.logger.info("ADOPTED_POSITION_UNIT_AUTHORITY_PROOF", {
            symbol,
-           remote_size_raw: remoteVal.size,
+           remote_contracts: remoteVal.contracts,
            base_qty: baseQty,
-           ct_val: inst?.ctVal,
+           ct_val: remoteVal.ctVal,
            okx_contracts: okxContracts,
            lot_sz: inst?.lotSz,
            min_sz: inst?.minSz,
@@ -3036,6 +3195,7 @@ export class PaperEngine {
           leverage,
           sizeUsd: actualMarginUsd,
           initialSizeUsd: actualMarginUsd,
+          actualMarginUsd,
           strategyVersion: "paper-v2",
           sourceSignal: isEngineOwned ? "okx_reconcile_untracked_auto" : "okx_reconcile_adopted",
           sourceRunPath: isEngineOwned ? "auto_adoption_untracked" : "manual_adoption",
@@ -3052,7 +3212,7 @@ export class PaperEngine {
           marginMode,
           notionalUsd: notional,
           actualNotionalUsd: notional,
-          pos: remoteVal.size,
+          pos: baseQty,
           okxContracts,
           baseQty,
           instId
@@ -3120,7 +3280,8 @@ export class PaperEngine {
           source: adopted.sourceSignal,
           lifecycleState: adopted.lifecycleState,
           adopted_at: nowTs,
-          size_usd: notional,
+          size_usd: actualMarginUsd,
+          notional_usd: notional,
           is_repair: true,
           clOrdId: okxRow?.clOrdId,
           ordId: okxRow?.ordId,
@@ -3136,7 +3297,7 @@ export class PaperEngine {
             clOrdId: okxRow?.clOrdId,
             ordId: okxRow?.ordId,
             fillPx: avgPx,
-            fillSz: remoteVal.size,
+            fillSz: remoteVal.contracts,
             fee: okxRow?.fee ?? 0,
             posSide: okxRow?.posSide,
             source: "reconcile_ghost_path"
@@ -6618,19 +6779,7 @@ export class PaperEngine {
     const isExchangeEnabled = !!(this.okxDemo && this.signedSubmitMode() === "enabled");
 
     if (!isExchangeEnabled) {
-      this.logger.info("V2_FULL_CLOSE_FILL_AUTHORITY_PROOF", {
-        symbol: open.symbol,
-        reason: cr,
-        requestedContracts,
-        ordId: closeSubmit.ordId ?? null,
-        orderState: "PAPER_OR_SUBMIT_DISABLED",
-        fillConfirmed: true,
-        requestedPrice,
-        actualFillPx: closeSubmit.actualFillPx ?? requestedPrice,
-        historyAppendAllowed: true,
-        ledgerPruneAllowed: true
-      });
-      const routedClosed = await this.appendClosedWithStandardRouting({
+      const { row: routedClosed, historyAppended } = await this.appendClosedWithStandardRouting({
         closedRow,
         open,
         flowId,
@@ -6639,7 +6788,23 @@ export class PaperEngine {
         closeSource,
         currentRegime: regimeNow
       });
-      return { historyAppendAllowed: true, ledgerPruneAllowed: true, routedClosed };
+      this.logger.info("V2_FULL_CLOSE_FILL_AUTHORITY_PROOF", {
+        symbol: open.symbol,
+        reason: cr,
+        requestedContracts,
+        ordId: closeSubmit.ordId ?? null,
+        orderState: historyAppended ? "PAPER_OR_SUBMIT_DISABLED" : "PAPER_HISTORY_BLOCKED",
+        fillConfirmed: true,
+        requestedPrice,
+        actualFillPx: closeSubmit.actualFillPx ?? requestedPrice,
+        historyAppendAllowed: historyAppended,
+        ledgerPruneAllowed: historyAppended
+      });
+      return {
+        historyAppendAllowed: historyAppended,
+        ledgerPruneAllowed: historyAppended,
+        routedClosed: historyAppended ? routedClosed : undefined
+      };
     }
 
     if (!closeSubmit.ok || !closeSubmit.ordId) {
@@ -6661,6 +6826,7 @@ export class PaperEngine {
     if (!closeSubmit.fillConfirmed) {
       open.lifecycleState = "CLOSE_PENDING";
       open.closePendingOrdId = closeSubmit.ordId;
+      open.closePendingClOrdId = closeSubmit.clOrdId;
       open.closePendingAt = Date.now();
       open.closePendingReason = cr;
       open.closePendingPrice = requestedPrice;
@@ -6681,20 +6847,7 @@ export class PaperEngine {
 
     const actualFillPx = closeSubmit.actualFillPx ?? requestedPrice;
 
-    this.logger.info("V2_FULL_CLOSE_FILL_AUTHORITY_PROOF", {
-      symbol: open.symbol,
-      reason: cr,
-      requestedContracts,
-      ordId: closeSubmit.ordId,
-      orderState: "FILLED",
-      fillConfirmed: true,
-      requestedPrice,
-      actualFillPx,
-      historyAppendAllowed: true,
-      ledgerPruneAllowed: true
-    });
-
-    const routedClosed = await this.appendClosedWithStandardRouting({
+    const { row: routedClosed, historyAppended } = await this.appendClosedWithStandardRouting({
       closedRow,
       open,
       flowId,
@@ -6703,8 +6856,25 @@ export class PaperEngine {
       closeSource,
       currentRegime: regimeNow
     });
+
+    this.logger.info("V2_FULL_CLOSE_FILL_AUTHORITY_PROOF", {
+      symbol: open.symbol,
+      reason: cr,
+      requestedContracts,
+      ordId: closeSubmit.ordId,
+      orderState: historyAppended ? "FILLED" : "FILLED_HISTORY_BLOCKED",
+      fillConfirmed: true,
+      requestedPrice,
+      actualFillPx,
+      historyAppendAllowed: historyAppended,
+      ledgerPruneAllowed: historyAppended
+    });
     
-    return { historyAppendAllowed: true, ledgerPruneAllowed: true, routedClosed };
+    return {
+      historyAppendAllowed: historyAppended,
+      ledgerPruneAllowed: historyAppended,
+      routedClosed: historyAppended ? routedClosed : undefined
+    };
   }
 
 
@@ -8411,7 +8581,7 @@ export class PaperEngine {
     exitReason: string;
     closeSource: string;
     currentRegime: MarketRegime | "NO_TRADE";
-  }>): Promise<PaperClosedPositionRecord> {
+  }>): Promise<{ row: PaperClosedPositionRecord; historyAppended: boolean }> {
     const authoritySource =
       input.envelope?.authority.source ??
       input.open.authoritySourceAtEntry ??
@@ -8466,7 +8636,7 @@ export class PaperEngine {
         exitType: normalized.exitType,
         closeReason: normalized.closeReason
       });
-      return normalized;
+      return { row: normalized, historyAppended: false };
     }
 
     const okxPositionExists = !!okxPos;
@@ -8490,9 +8660,9 @@ export class PaperEngine {
         okx_base_qty: okxPos ? (okxPos as any).baseQty : null,
         okx_contracts: okxPos ? (okxPos as any).pos : null,
         reason: blockReason,
-        action: "SKIP_HISTORY_APPEND_KEEP_EXTERNAL_POSITION"
+        action: "SKIP_HISTORY_APPEND_KEEP_OPEN_LEDGER"
       });
-      return normalized;
+      return { row: normalized, historyAppended: false };
     }
 
     await this.positions.appendClosed(normalized);
@@ -8516,7 +8686,7 @@ export class PaperEngine {
       killSwitch: this.serverTradeControlState.kill_switch_active,
       reconcileSafeMode: this.reconcileSafetyCloseOnly
     });
-    return normalized;
+    return { row: normalized, historyAppended: true };
   }
 
   public async tryPaperPositionClose(input: Readonly<{
@@ -8627,8 +8797,9 @@ export class PaperEngine {
             // [FIX: history-ledger] CRASH_REDUCE is a partial defense event (50% reduction).
             // Only full-liquidation (forceExit ??EXIT_LONG_CRASH_FORCE) goes into history.json.
             // CRASH_REDUCE is recorded to events.jsonl only (see below).
+            let crashHistoryAppended = false;
             if (forceExit) {
-              const routedClosed = await this.appendClosedWithStandardRouting({
+              const { row: routedClosed, historyAppended } = await this.appendClosedWithStandardRouting({
                 closedRow,
                 open: op,
                 flowId: `${op.symbol}:${op.side}:${op.openedAt}`,
@@ -8637,7 +8808,10 @@ export class PaperEngine {
                 closeSource: "CRASH_LONG_DEFENSE",
                 currentRegime: (input.marketMode.marketMode as MarketRegime) ?? "NO_TRADE"
               });
-              authorizeOpenLedgerPruneAfterAttestedClose(`${op.symbol}:${op.side}:${op.openedAt}`, routedClosed);
+              crashHistoryAppended = historyAppended;
+              if (historyAppended) {
+                authorizeOpenLedgerPruneAfterAttestedClose(`${op.symbol}:${op.side}:${op.openedAt}`, routedClosed);
+              }
             } else {
               this.logger.info("CRASH_REDUCE_PARTIAL_EVENT_ONLY", {
                 symbol: op.symbol,
@@ -8658,11 +8832,11 @@ export class PaperEngine {
             });
 
             const key = `${op.symbol}:${op.openedAt}`;
-            if (forceExit) {
+            if (forceExit && crashHistoryAppended) {
               (op as { status: string; sizeUsd: number }).status = "closed";
               crashForceClosedKeys.add(key);
               crashPositionsModified = true;
-            } else {
+            } else if (!forceExit) {
               op.sizeUsd -= marginToClose;
               crashReducedThisTickKeys.add(key);
               crashPositionsModified = true;
@@ -9002,7 +9176,7 @@ export class PaperEngine {
               strategyVersion: inheritedStrategyVersion,
               ...snapPaths
             });
-            const routedClosed = await this.appendClosedWithStandardRouting({
+            const { row: routedClosed, historyAppended } = await this.appendClosedWithStandardRouting({
               closedRow,
               open,
               flowId,
@@ -9012,6 +9186,10 @@ export class PaperEngine {
               currentRegime: input.marketMode.marketMode as MarketRegime
             });
             
+            if (!historyAppended) {
+              remaining.push(posTrail);
+              continue;
+            }
             authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
             this.terminalExitConsumedByFlow.add(flowId);
             openLedgerPruned = true;
@@ -9278,7 +9456,7 @@ export class PaperEngine {
             flowId
           });
 
-          const routedClosedF = await this.appendClosedWithStandardRouting({
+          const { row: routedClosedF, historyAppended: tp2HistoryAppended } = await this.appendClosedWithStandardRouting({
             closedRow: closedRowF,
             open,
             flowId,
@@ -9287,6 +9465,11 @@ export class PaperEngine {
             closeSource: "V2_AUTOMATED_TP_GATE",
             currentRegime: regimeNow
           });
+
+          if (!tp2HistoryAppended) {
+            remaining.push({ ...open });
+            continue;
+          }
 
           this.logger.info("V2_RANGE_TP2_CLOSE_LEDGER_UPDATE_PROOF", {
             symbol: open.symbol,
@@ -9438,7 +9621,7 @@ export class PaperEngine {
             flowId
           });
 
-          await this.appendClosedWithStandardRouting({
+          const { historyAppended: tp1HistoryAppended } = await this.appendClosedWithStandardRouting({
             closedRow: closedRowP,
             open,
             flowId,
@@ -9447,6 +9630,11 @@ export class PaperEngine {
             closeSource: "V2_AUTOMATED_TP_GATE",
             currentRegime: regimeNow
           });
+
+          if (!tp1HistoryAppended) {
+            remaining.push({ ...open });
+            continue;
+          }
 
           const tp1FillPx = tp1Submit.actualFillPx ?? closePrice;
           if (tp1DeltaContracts > 0) {
