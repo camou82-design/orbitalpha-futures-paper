@@ -3039,7 +3039,34 @@ export class PaperEngine {
         if (hydration.modified) {
           // record updated in-place by hydrateRiskPlan as it's not a read-only object here
         }
-        
+        if (adopted.stopPrice == null || !Number.isFinite(adopted.stopPrice)) {
+          // It's still missing, we handle it below
+        } else {
+          this.logger.info("V2_ADOPTED_POSITION_PROFIT_AUTHORITY_PROOF", {
+             symbol: adopted.symbol,
+             entryPrice: adopted.entryPrice,
+             okxContracts: adopted.pos,
+             notionalUsdt: adopted.sizeUsd,
+             regime: adopted.regimeAtEntry,
+             profitManagementMode: adopted.profitManagementMode,
+             stopPrice: adopted.stopPrice,
+             targetPrice1: adopted.targetPrice1,
+             partialTrigger: adopted.partialExitStage,
+             trailingTrigger: adopted.trailingStopPrice,
+             authoritySource: "ADOPTED_FROM_OKX"
+          });
+
+          this.logger.info("V2_PROFIT_MANAGEMENT_STATE_PROOF", {
+             symbol: adopted.symbol,
+             regime: adopted.regimeAtEntry,
+             profitManagementMode: adopted.profitManagementMode,
+             targetPrice1: adopted.targetPrice1,
+             partialExitStage: adopted.partialExitStage,
+             highestPnlPctNet: adopted.highestPnlPctNet,
+             trailingExtremePrice: adopted.trailingExtremePrice
+          });
+        }
+
         if (adopted.stopPrice == null || !Number.isFinite(adopted.stopPrice)) {
           adopted.lifecycleState = "CLOSE_ONLY_MANAGED";
           this.logger.error("V2_OPEN_POSITION_RISK_STATE_PROOF", {
@@ -10904,21 +10931,52 @@ export class PaperEngine {
           authority_owner: "V2"
         });
 
-        const MIN_PARTIAL_NOTIONAL = 5; // minimum $5 partial
-        if (partialSizeUsd < MIN_PARTIAL_NOTIONAL) {
+        const okxContracts = open.pos ?? 0;
+        const minSz = 1; // OKX swap contract min size is typically 1
+        let blocked = false;
+        let blockReason: string | null = null;
+        let partialCloseContracts = 0;
+
+        if (okxContracts > 0) {
+           partialCloseContracts = Math.floor(okxContracts * reduceRatio);
+           if (partialCloseContracts < minSz) {
+              blocked = true;
+              blockReason = "partial_contracts_below_minSz";
+           }
+        } else {
+           const MIN_PARTIAL_NOTIONAL = 5; // fallback
+           if (partialSizeUsd < MIN_PARTIAL_NOTIONAL) {
+              blocked = true;
+              blockReason = "partial_size_below_min_notional";
+           }
+        }
+
+        if (blocked) {
           this.logger.warn("V2_PARTIAL_SIZE_BUILD_PROOF", {
             symbol: open.symbol,
             side: open.side,
             reduce_ratio: reduceRatio,
             full_size_usd: open.sizeUsd,
             partial_size_usd: partialSizeUsd,
-            min_notional: MIN_PARTIAL_NOTIONAL,
+            okxContracts,
+            partialCloseContracts,
+            minSz,
             blocked: true,
-            block_reason: "partial_size_below_min_notional"
+            block_reason: blockReason
           });
           remaining.push(open);
           continue;
         }
+
+        this.logger.info("V2_PARTIAL_CONTRACT_SIZE_PROOF", {
+           symbol: open.symbol,
+           okxContracts,
+           partialCloseContracts,
+           minSz,
+           reduceRatio,
+           notionalUsdt: open.sizeUsd,
+           partialSizeUsd
+        });
 
         this.logger.info("V2_PARTIAL_EXECUTION_EARLY_TAKEOVER_PROOF", {
           symbol: open.symbol,
@@ -10935,7 +10993,9 @@ export class PaperEngine {
           reduce_ratio: reduceRatio,
           full_size_usd: open.sizeUsd,
           partial_size_usd: partialSizeUsd,
-          min_notional: MIN_PARTIAL_NOTIONAL,
+          okxContracts,
+          partialCloseContracts,
+          minSz,
           blocked: false
         });
 
@@ -11369,12 +11429,34 @@ export class PaperEngine {
         const partialMargin = Math.round(open.sizeUsd * ratio * 100) / 100;
         const newMargin = Math.round((open.sizeUsd - partialMargin) * 100) / 100;
 
-        if (newMargin < MIN_POSITION_SIZE_USD) {
+        const okxContracts = open.pos ?? 0;
+        const minSz = 1; // OKX swap contract min size is typically 1
+        let blocked = false;
+        let blockReason: string | null = null;
+        let partialCloseContracts = 0;
+
+        if (okxContracts > 0) {
+           partialCloseContracts = Math.floor(okxContracts * ratio);
+           if (partialCloseContracts < minSz) {
+              blocked = true;
+              blockReason = "partial_contracts_below_minSz";
+           }
+        } else {
+           if (newMargin < MIN_POSITION_SIZE_USD) {
+              blocked = true;
+              blockReason = "remaining_below_min";
+           }
+        }
+
+        if (blocked) {
           this.logger.info("partial_exit_skipped", {
             ...exitDetailBase(open, m),
-            reason: "remaining_below_min",
+            reason: blockReason,
             partial_ratio: ratio,
             remaining_after: newMargin,
+            okxContracts,
+            partialCloseContracts,
+            minSz,
             min_usd: MIN_POSITION_SIZE_USD
           });
         } else {
@@ -11382,6 +11464,17 @@ export class PaperEngine {
           const pReason = stage === 1 ? ("partial_exit_1" as const) : ("partial_exit_2" as const);
           const pLog = stage === 1 ? "partial_exit_first" : "partial_exit_second";
           handleV2PartialAuthorityProof("partial", pReason);
+          
+          this.logger.info("V2_PARTIAL_CONTRACT_SIZE_PROOF", {
+             symbol: open.symbol,
+             okxContracts,
+             partialCloseContracts,
+             minSz,
+             reduceRatio: ratio,
+             notionalUsdt: open.sizeUsd,
+             partialSizeUsd: partialMargin
+          });
+
           const mp = leg(partialMargin);
 
           // [FIX: history-ledger] Partial exits (partial_exit_1, partial_exit_2) are
@@ -17526,18 +17619,44 @@ export class PaperEngine {
       }
     }
 
-    if (record.targetPrice1 == null || !Number.isFinite(record.targetPrice1)) {
-      const mirroredTp = engineMirrorTpPrice(record.entryPrice, record.side, regime);
-      if (mirroredTp != null && Number.isFinite(mirroredTp)) {
-        record.targetPrice1 = mirroredTp;
-        modified = true;
+    if (regime === "RANGE") {
+      record.profitManagementMode = "FIXED_TP";
+      if (record.targetPrice1 == null || !Number.isFinite(record.targetPrice1)) {
+        const mirroredTp = engineMirrorTpPrice(record.entryPrice, record.side, regime);
+        if (mirroredTp != null && Number.isFinite(mirroredTp)) {
+          record.targetPrice1 = mirroredTp;
+          modified = true;
+        }
       }
+    } else {
+      record.profitManagementMode = "PARTIAL_TRAILING";
+      record.targetPrice1 = undefined; // Force no fixed TP for TREND
+      record.partialExitStage = record.partialExitStage ?? 0;
+      // Note: trailingExtremePrice and highestPnlPctNet remain unchanged or undefined (dynamic).
     }
 
     if (record.invalidationPx == null || !Number.isFinite(record.invalidationPx)) {
        if (record.stopPrice != null && Number.isFinite(record.stopPrice)) {
          record.invalidationPx = record.stopPrice;
          modified = true;
+       }
+    }
+
+    // 대시보드 상태 생성
+    const isRecovered = record.sync_status !== "ADOPTED_FROM_OKX" || (record.stopPrice != null && (regime !== "RANGE" || record.targetPrice1 != null));
+    if (!isRecovered) {
+       record.dashboardProfitManagementStatus = "수익관리 미복구 경고 (ADOPTED)";
+    } else {
+       const slText = record.stopPrice ? record.stopPrice.toFixed(4) : "없음";
+       if (regime === "RANGE") {
+         const tpText = record.targetPrice1 ? record.targetPrice1.toFixed(4) : "없음";
+         const risk = record.stopPrice ? Math.abs(record.entryPrice - record.stopPrice) : 0;
+         const reward = record.targetPrice1 ? Math.abs(record.targetPrice1 - record.entryPrice) : 0;
+         const rr = risk > 0 ? (reward / risk).toFixed(2) : "N/A";
+         record.dashboardProfitManagementStatus = `손절가: ${slText} / 익절가: ${tpText} / 예상 R:R: ${rr}`;
+       } else {
+         const stage = record.partialExitStage ?? 0;
+         record.dashboardProfitManagementStatus = `손절가: ${slText} / 1차 부분익절: 동적 계산 / 트레일링: 동적 계산 / 현재 stage: ${stage}`;
        }
     }
 

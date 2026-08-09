@@ -852,6 +852,10 @@ export type PaperOpenPositionRecord = {
   totalCostAtEntry?: number;
   /** 분할 청산 단계 (0=없음, 1=1차 완료, 2=2차 완료·잔여만). 하위 호환: 미설정은 0. */
   partialExitStage?: number;
+  /** V2 Profit Management Mode */
+  profitManagementMode?: "FIXED_TP" | "PARTIAL_TRAILING" | "NONE";
+  /** 대시보드 표시용 수익관리 상태 */
+  dashboardProfitManagementStatus?: string;
   /** Lifecycle status for exchange confirmation hardening and engine state. */
   lifecycleState?: 
     | "INITIAL" 
