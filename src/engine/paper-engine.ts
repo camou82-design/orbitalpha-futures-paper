@@ -27,7 +27,7 @@ import { JsonStore } from "../storage/json-store";
 import type { OkxPublicDiagnostics } from "../exchange/okx-demo";
 import { OkxDemoClient, toOkxSwapInstId } from "../exchange/okx-demo";
 import { buildLedgerOkxPositionSyncSnapshot, okxSwapRowToLedgerKey, resolveOkxRowNotionalUsd } from "../exchange/okx-position-sync";
-import { buildPositionOpsSurface, engineMirrorStopPrice, engineMirrorTpPrice, regimeForSl } from "./position-ops-monitor";
+import { buildPositionOpsSurface, engineMirrorStopPrice, engineMirrorTpPrice, regimeForSl, classifyOkxOpenOrderPurpose, countBlockingOkxOpenOrders, evaluateV2ReducePendingGuard } from "./position-ops-monitor";
 import type { PositionOpsSurface } from "./position-ops-monitor";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
 import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
@@ -1813,20 +1813,16 @@ export class PaperEngine {
         }
 
         // [TASK_4 & TASK_7] Open order purpose classification and stale entry auto-cancel
+        const ledgerPosForClassify = paperOpens.find((p) => p.symbol === r.symbol && p.side === r.side);
         const algoForSymbol = (this as any).cachedOpsAlgos?.filter((a: any) => a.instId === r.inst_id) ?? [];
         const swapForSymbol = (this as any).cachedOpsPending?.filter((a: any) => a.instId === r.inst_id) ?? [];
         const allOpenOrders = [...algoForSymbol, ...swapForSymbol];
 
         if (allOpenOrders.length > 0) {
           for (const ord of allOpenOrders) {
+            const classify = classifyOkxOpenOrderPurpose(ord, ledgerPosForClassify ?? null);
+            const purpose = classify.purpose;
             const isReduceOnly = ord.reduceOnly === "true" || ord.reduceOnly === true;
-            const hasEngineClOrdId = ord.clOrdId && String(ord.clOrdId).length > 0;
-
-            let purpose = "unknown";
-            if (!isReduceOnly && hasEngineClOrdId) purpose = "entry-purpose";
-            else if (isReduceOnly && hasEngineClOrdId) purpose = "protective-purpose";
-            else if (isReduceOnly && !hasEngineClOrdId) purpose = "manual-reduce-purpose";
-            else purpose = "manual-entry-purpose";
 
             this.logger.info("OKX_OPEN_ORDER_PURPOSE_CLASSIFY_PROOF", {
               symbol: r.symbol,
@@ -1839,7 +1835,15 @@ export class PaperEngine {
               purpose
             });
 
-            if (purpose === "manual-reduce-purpose") {
+            this.logger.info("V2_OPEN_ORDER_PURPOSE_CLASSIFY_FIX_PROOF", {
+              symbol: r.symbol,
+              algoId: ord.algoId ?? ord.ordId ?? null,
+              purpose,
+              matched_protective_algo: classify.matchedProtectiveAlgo,
+              manual_reduce_detected: classify.manualReduceDetected
+            });
+
+            if (classify.manualReduceDetected) {
               this.logger.info("MANUAL_REDUCE_ORDER_DETECTED_PROOF", { symbol: r.symbol, ordId: ord.ordId, side: ord.side });
             }
 
@@ -4931,6 +4935,11 @@ export class PaperEngine {
           const pendingFetchErrorsCount = this.cachedOpsFetchErrors ? this.cachedOpsFetchErrors.length : 0;
           const cachedOpsPendingCount = cachedOpsPendingIsArray ? this.cachedOpsPending.length : 0;
           const cachedOpsAlgosCount = cachedOpsAlgosIsArray ? this.cachedOpsAlgos.length : 0;
+          const blockingCounts = countBlockingOkxOpenOrders(
+            cachedOpsPendingIsArray ? this.cachedOpsPending : [],
+            cachedOpsAlgosIsArray ? this.cachedOpsAlgos : [],
+            opensAfterClose
+          );
 
           const pendingFetchReady =
             pendingFetchPerformed &&
@@ -4939,8 +4948,8 @@ export class PaperEngine {
             pendingFetchErrorsCount === 0;
 
           const pendingPayloadEmpty =
-            cachedOpsPendingCount === 0 &&
-            cachedOpsAlgosCount === 0;
+            blockingCounts.blockingPendingCount === 0 &&
+            blockingCounts.blockingAlgosCount === 0;
 
           const pendingOrdersExposureReady = pendingFetchReady && pendingPayloadEmpty;
 
@@ -4963,6 +4972,9 @@ export class PaperEngine {
              cachedOpsAlgosIsArray,
              cachedOpsPendingCount,
              cachedOpsAlgosCount,
+             blocking_pending_count: blockingCounts.blockingPendingCount,
+             blocking_algos_count: blockingCounts.blockingAlgosCount,
+             bot_managed_protective_count: blockingCounts.botManagedProtectiveCount,
              pendingPayloadEmpty,
              pendingOrdersExposureReady,
              accountPendingNotionalUsdt: 0,
@@ -6826,6 +6838,27 @@ export class PaperEngine {
         Number.isFinite(open.partialPendingContracts) &&
         open.partialPendingContracts > 0)
     );
+  }
+
+  private evaluateAndLogV2ReducePendingGuard(
+    open: PaperOpenPositionRecord,
+    flowId: string
+  ): { pending: boolean; submitAllowed: boolean; terminalState: string | null } {
+    const instId = open.instId ?? toOkxSwapInstId(open.symbol);
+    const guard = evaluateV2ReducePendingGuard({
+      open,
+      flowId,
+      instId,
+      pendingSwapOrders: this.cachedOpsPending
+    });
+    this.logger.info("V2_REDUCE_PENDING_GUARD_PROOF", {
+      symbol: open.symbol,
+      flowId,
+      pending: guard.pending,
+      submit_allowed: guard.submitAllowed,
+      terminal_state: guard.terminalState
+    });
+    return guard;
   }
 
   private clearV2PartialPendingMetadata(open: PaperOpenPositionRecord): void {
@@ -10041,7 +10074,8 @@ export class PaperEngine {
 
         // TP1: Partial Exit (Lower Priority)
         if (stage < 1 && !open.v2RangeTp1Triggered && tp1Hit) {
-          if (this.isV2PartialPendingActive(open)) {
+          const reduceGuard = this.evaluateAndLogV2ReducePendingGuard(open, flowId);
+          if (!reduceGuard.submitAllowed) {
             this.logger.info("V2_PARTIAL_REENTRY_BLOCKED_PENDING_PROOF", {
               symbol: open.symbol,
               side: open.side,
@@ -11816,7 +11850,8 @@ export class PaperEngine {
 
       // V2 PARTIAL: independent early takeover path.
       if ((v2TakeoverAction as string) === "partial_close" && v2PartialAuthority?.shouldPartial === true) {
-        if (this.isV2PartialPendingActive(open)) {
+        const reduceGuard = this.evaluateAndLogV2ReducePendingGuard(open, flowId);
+        if (!reduceGuard.submitAllowed) {
           this.logger.info("V2_PARTIAL_REENTRY_BLOCKED_PENDING_PROOF", {
             symbol: open.symbol,
             side: open.side,

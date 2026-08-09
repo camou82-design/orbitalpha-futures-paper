@@ -105,13 +105,287 @@ export function orderLooksReduceOnlyProtective(o: Record<string, unknown>): bool
     return true;
   }
   if (
-    o.slTriggerPx != null || 
-    o.tpTriggerPx != null || 
-    o.triggerPx != null || 
-    o.stopPx != null || 
+    o.slTriggerPx != null ||
+    o.tpTriggerPx != null ||
+    o.triggerPx != null ||
+    o.stopPx != null ||
     o.trigPx != null
-  ) return true;
+  ) {
+    return true;
+  }
   return false;
+}
+
+export type OkxOpenOrderPurpose =
+  | "protective-stop"
+  | "protective-take-profit"
+  | "bot-managed-protection"
+  | "protective-purpose"
+  | "manual-reduce-purpose"
+  | "entry-purpose"
+  | "manual-entry-purpose"
+  | "unknown";
+
+export type OkxOpenOrderPurposeClassifyResult = Readonly<{
+  purpose: OkxOpenOrderPurpose;
+  matchedProtectiveAlgo:
+    | "sl"
+    | "tp"
+    | "stop"
+    | "breakeven"
+    | "algo_clord"
+    | "reduce_only_protective_shape"
+    | null;
+  manualReduceDetected: boolean;
+  isBotManagedProtection: boolean;
+}>;
+
+const TERMINAL_OKX_ORDER_STATES = new Set(["filled", "canceled", "cancelled", "rejected", "expired"]);
+
+function orderReduceOnly(o: Record<string, unknown>): boolean {
+  return o.reduceOnly === true || String(o.reduceOnly).toLowerCase() === "true";
+}
+
+function orderAlgoId(o: Record<string, unknown>): string {
+  const id = o.algoId ?? o.ordId ?? "";
+  return id != null && String(id).length > 0 ? String(id) : "";
+}
+
+function ledgerMatchesOrderSide(
+  ledger: PaperOpenPositionRecord,
+  positionSide: "long" | "short",
+  instId: string
+): boolean {
+  const ps = String(ledger.side).toLowerCase() === "short" ? "short" : "long";
+  if (ps !== positionSide) return false;
+  const ledgerInst = String(ledger.instId ?? "").trim();
+  if (ledgerInst.length > 0 && ledgerInst !== instId) return false;
+  return (ledger.status ?? "open") === "open";
+}
+
+function findLedgerForOrder(
+  opens: readonly PaperOpenPositionRecord[],
+  instId: string,
+  positionSide: "long" | "short"
+): PaperOpenPositionRecord | null {
+  for (const p of opens) {
+    if (ledgerMatchesOrderSide(p, positionSide, instId)) return p;
+  }
+  return null;
+}
+
+function resolvePositionSideFromOrder(o: Record<string, unknown>): "long" | "short" | null {
+  const ps = String(o.posSide ?? "").trim().toLowerCase();
+  if (ps === "long" || ps === "short") return ps;
+  return null;
+}
+
+export function isBotManagedProtectivePurpose(purpose: OkxOpenOrderPurpose): boolean {
+  return (
+    purpose === "protective-stop" ||
+    purpose === "protective-take-profit" ||
+    purpose === "bot-managed-protection" ||
+    purpose === "protective-purpose"
+  );
+}
+
+export function classifyOkxOpenOrderPurpose(
+  ord: Record<string, unknown>,
+  ledgerPos?: PaperOpenPositionRecord | null
+): OkxOpenOrderPurposeClassifyResult {
+  const isReduceOnly = orderReduceOnly(ord);
+  const clOrdId = ord.clOrdId != null ? String(ord.clOrdId) : "";
+  const algoClOrdId = ord.algoClOrdId != null ? String(ord.algoClOrdId) : "";
+  const hasEngineClOrdId = clOrdId.length > 0;
+  const hasEngineAlgoClOrdId = algoClOrdId.startsWith("oap");
+  const algoId = orderAlgoId(ord);
+
+  const botManagedBase = (
+    purpose: OkxOpenOrderPurpose,
+    matchedProtectiveAlgo: OkxOpenOrderPurposeClassifyResult["matchedProtectiveAlgo"]
+  ): OkxOpenOrderPurposeClassifyResult => ({
+    purpose,
+    matchedProtectiveAlgo,
+    manualReduceDetected: false,
+    isBotManagedProtection: true
+  });
+
+  if (isReduceOnly && ledgerPos && algoId.length > 0) {
+    if (ledgerPos.protectiveSlAlgoId && algoId === String(ledgerPos.protectiveSlAlgoId)) {
+      return botManagedBase("protective-stop", "sl");
+    }
+    if (ledgerPos.protectiveTpAlgoId && algoId === String(ledgerPos.protectiveTpAlgoId)) {
+      return botManagedBase("protective-take-profit", "tp");
+    }
+    if (ledgerPos.protectiveStopAlgoId && algoId === String(ledgerPos.protectiveStopAlgoId)) {
+      return botManagedBase("protective-stop", "stop");
+    }
+    if (ledgerPos.breakevenStopAlgoId && algoId === String(ledgerPos.breakevenStopAlgoId)) {
+      return botManagedBase("protective-stop", "breakeven");
+    }
+  }
+
+  if (isReduceOnly && orderLooksReduceOnlyProtective(ord)) {
+    const tpPx = ord.tpTriggerPx;
+    const hasTp = tpPx != null && String(tpPx).length > 0 && Number(tpPx) > 0;
+    const slPx = ord.slTriggerPx ?? ord.triggerPx ?? ord.stopPx ?? ord.trigPx;
+    const hasSl = slPx != null && String(slPx).length > 0 && Number(slPx) > 0;
+    if (hasTp && !hasSl) {
+      return botManagedBase("protective-take-profit", "reduce_only_protective_shape");
+    }
+    return botManagedBase("protective-stop", "reduce_only_protective_shape");
+  }
+
+  if (isReduceOnly && hasEngineAlgoClOrdId) {
+    return botManagedBase("bot-managed-protection", "algo_clord");
+  }
+
+  if (!isReduceOnly && hasEngineClOrdId) {
+    return {
+      purpose: "entry-purpose",
+      matchedProtectiveAlgo: null,
+      manualReduceDetected: false,
+      isBotManagedProtection: false
+    };
+  }
+
+  if (isReduceOnly && hasEngineClOrdId) {
+    return botManagedBase("protective-purpose", null);
+  }
+
+  if (isReduceOnly) {
+    return {
+      purpose: "manual-reduce-purpose",
+      matchedProtectiveAlgo: null,
+      manualReduceDetected: true,
+      isBotManagedProtection: false
+    };
+  }
+
+  if (!isReduceOnly && !hasEngineClOrdId) {
+    return {
+      purpose: "manual-entry-purpose",
+      matchedProtectiveAlgo: null,
+      manualReduceDetected: false,
+      isBotManagedProtection: false
+    };
+  }
+
+  return {
+    purpose: "unknown",
+    matchedProtectiveAlgo: null,
+    manualReduceDetected: false,
+    isBotManagedProtection: false
+  };
+}
+
+export function countBlockingOkxOpenOrders(
+  pending: readonly Record<string, unknown>[],
+  algos: readonly Record<string, unknown>[],
+  opens: readonly PaperOpenPositionRecord[]
+): Readonly<{
+  blockingPendingCount: number;
+  blockingAlgosCount: number;
+  botManagedProtectiveCount: number;
+}> {
+  let blockingPendingCount = 0;
+  let blockingAlgosCount = 0;
+  let botManagedProtectiveCount = 0;
+
+  const classifyWithLedger = (ord: Record<string, unknown>): OkxOpenOrderPurposeClassifyResult => {
+    const instId = String(ord.instId ?? "");
+    const positionSide = resolvePositionSideFromOrder(ord);
+    const ledger =
+      positionSide != null && instId.length > 0
+        ? findLedgerForOrder(opens, instId, positionSide)
+        : null;
+    return classifyOkxOpenOrderPurpose(ord, ledger);
+  };
+
+  for (const ord of pending) {
+    const result = classifyWithLedger(ord);
+    if (result.isBotManagedProtection) {
+      botManagedProtectiveCount += 1;
+      continue;
+    }
+    blockingPendingCount += 1;
+  }
+
+  for (const ord of algos) {
+    const result = classifyWithLedger(ord);
+    if (result.isBotManagedProtection) {
+      botManagedProtectiveCount += 1;
+      continue;
+    }
+    blockingAlgosCount += 1;
+  }
+
+  return { blockingPendingCount, blockingAlgosCount, botManagedProtectiveCount };
+}
+
+export function evaluateV2ReducePendingGuard(input: Readonly<{
+  open: PaperOpenPositionRecord;
+  flowId: string;
+  instId: string;
+  pendingSwapOrders: readonly Record<string, unknown>[];
+}>): Readonly<{
+  pending: boolean;
+  submitAllowed: boolean;
+  terminalState: string | null;
+}> {
+  const { open, instId, pendingSwapOrders } = input;
+
+  const ledgerPartialPending =
+    open.lifecycleState === "PARTIAL_PENDING" ||
+    (typeof open.partialPendingOrdId === "string" && open.partialPendingOrdId.length > 0) ||
+    (typeof open.partialPendingClOrdId === "string" && open.partialPendingClOrdId.length > 0) ||
+    (typeof open.partialPendingContracts === "number" &&
+      Number.isFinite(open.partialPendingContracts) &&
+      open.partialPendingContracts > 0);
+
+  let okxReducePending = false;
+  let terminalState: string | null = null;
+
+  for (const ord of pendingSwapOrders) {
+    if (String(ord.instId ?? "") !== instId) continue;
+    if (!orderMatchesPositionSide(ord, open.side)) continue;
+    if (!orderReduceOnly(ord)) continue;
+
+    const ordState = String(ord.state ?? ord.status ?? "").toLowerCase();
+    if (ordState.length > 0 && TERMINAL_OKX_ORDER_STATES.has(ordState)) {
+      if (
+        (open.partialPendingOrdId && String(ord.ordId ?? "") === open.partialPendingOrdId) ||
+        (open.partialPendingClOrdId && String(ord.clOrdId ?? "") === open.partialPendingClOrdId)
+      ) {
+        terminalState = ordState;
+      }
+      continue;
+    }
+
+    const clOrdId = String(ord.clOrdId ?? "");
+    const ordId = String(ord.ordId ?? "");
+    const matchesPendingIds =
+      (open.partialPendingOrdId && ordId === open.partialPendingOrdId) ||
+      (open.partialPendingClOrdId && clOrdId === open.partialPendingClOrdId);
+    const engineOwnedReduce = clOrdId.startsWith("oap");
+    const classify = classifyOkxOpenOrderPurpose(ord, open);
+
+    if (matchesPendingIds || (engineOwnedReduce && !classify.isBotManagedProtection)) {
+      okxReducePending = true;
+      break;
+    }
+  }
+
+  const pending = ledgerPartialPending || okxReducePending;
+  const submitAllowed = !pending;
+
+  if (pending) {
+    terminalState = null;
+  } else if (terminalState == null && open.lifecycleState === "OPEN") {
+    terminalState = "cleared";
+  }
+
+  return { pending, submitAllowed, terminalState };
 }
 
 function orderMatchesPositionSide(o: Record<string, unknown>, positionSide: "long" | "short"): boolean {
