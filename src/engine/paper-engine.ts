@@ -3006,14 +3006,23 @@ export class PaperEngine {
         const isEngineOwned = isOrderEngineOwned({ clOrdId: okxRow?.clOrdId, ordId: okxRow?.ordId });
         const lifecycleState = isEngineOwned ? "UNTRACKED_AUTO_ORIGIN" : "OKX_UNTRACKED_FILL";
         
+        const cTime = Number(okxRow?.cTime);
+        const originalOpenedAt = (cTime > 0 && cTime < nowTs) ? cTime : 0;
+        const actualMarginUsd = notional / leverage;
+        const instId = remoteVal.instId ?? toOkxSwapInstId(symbol);
+        const inst = this.instrumentCache.get(instId);
+        const ctVal = inst?.ctVal ?? 1;
+        const okxContracts = Math.abs(Number(remoteVal.size));
+        const baseQty = okxContracts * ctVal;
+
         const adopted: PaperOpenPositionRecord = {
-          openedAt: nowTs,
+          openedAt: originalOpenedAt,
           symbol: symbol as MarketSymbol,
           side,
           entryPrice: avgPx,
           leverage,
-          sizeUsd: notional,
-          initialSizeUsd: notional,
+          sizeUsd: actualMarginUsd,
+          initialSizeUsd: actualMarginUsd,
           strategyVersion: "paper-v2",
           sourceSignal: isEngineOwned ? "okx_reconcile_untracked_auto" : "okx_reconcile_adopted",
           sourceRunPath: isEngineOwned ? "auto_adoption_untracked" : "manual_adoption",
@@ -3021,17 +3030,19 @@ export class PaperEngine {
           reconcileState: "ADOPTED",
           lastCheckedAt: nowTs,
           status: "open",
-          regimeAtEntry: this.lastRegime.regime || "NO_TRADE",
+          regimeAtEntry: "NO_TRADE",
           executorAtEntry: "IDLE",
           
-          // Adoption specific fields (USER priority 6)
           adoptedAt: nowTs,
           detectedAt: nowTs,
           sync_status: "ADOPTED_FROM_OKX",
           marginMode,
-          notional,
+          notionalUsd: notional,
+          actualNotionalUsd: notional,
           pos: remoteVal.size,
-          instId: remoteVal.instId
+          okxContracts,
+          baseQty,
+          instId
         };
 
         // --- V2 Risk Integrity Hardening for Adopted ---
@@ -10931,24 +10942,33 @@ export class PaperEngine {
           authority_owner: "V2"
         });
 
-        const okxContracts = open.pos ?? 0;
-        const minSz = 1; // OKX swap contract min size is typically 1
+        const instId = open.instId ?? toOkxSwapInstId(open.symbol);
+        const inst = this.instrumentCache.get(instId);
+        const ctVal = inst?.ctVal ?? 1;
+        const lotSz = inst?.lotSz ?? 1;
+        const minSz = inst?.minSz ?? 1;
+
+        let okxContracts = open.okxContracts;
+        if (okxContracts == null) {
+           const posAbs = Math.abs(Number(open.pos ?? 0));
+           okxContracts = ctVal > 0 ? posAbs / ctVal : posAbs;
+        }
+
         let blocked = false;
         let blockReason: string | null = null;
-        let partialCloseContracts = 0;
+        let requestedContracts = 0;
+        let normalizedPartialContracts = 0;
 
         if (okxContracts > 0) {
-           partialCloseContracts = Math.floor(okxContracts * reduceRatio);
-           if (partialCloseContracts < minSz) {
+           requestedContracts = okxContracts * reduceRatio;
+           normalizedPartialContracts = Math.floor(requestedContracts / lotSz + 1e-12) * lotSz;
+           if (normalizedPartialContracts < minSz) {
               blocked = true;
               blockReason = "partial_contracts_below_minSz";
            }
         } else {
-           const MIN_PARTIAL_NOTIONAL = 5; // fallback
-           if (partialSizeUsd < MIN_PARTIAL_NOTIONAL) {
-              blocked = true;
-              blockReason = "partial_size_below_min_notional";
-           }
+           blocked = true;
+           blockReason = "missing_contract_authority";
         }
 
         if (blocked) {
@@ -10959,7 +10979,8 @@ export class PaperEngine {
             full_size_usd: open.sizeUsd,
             partial_size_usd: partialSizeUsd,
             okxContracts,
-            partialCloseContracts,
+            requestedContracts,
+            normalizedPartialContracts,
             minSz,
             blocked: true,
             block_reason: blockReason
@@ -10970,12 +10991,14 @@ export class PaperEngine {
 
         this.logger.info("V2_PARTIAL_CONTRACT_SIZE_PROOF", {
            symbol: open.symbol,
-           okxContracts,
-           partialCloseContracts,
+           rawOkxContracts: okxContracts,
+           ctVal,
+           lotSz,
            minSz,
            reduceRatio,
-           notionalUsdt: open.sizeUsd,
-           partialSizeUsd
+           requestedPartialContracts: requestedContracts,
+           normalizedPartialContracts,
+           submittedContracts: normalizedPartialContracts
         });
 
         this.logger.info("V2_PARTIAL_EXECUTION_EARLY_TAKEOVER_PROOF", {
@@ -10994,7 +11017,7 @@ export class PaperEngine {
           full_size_usd: open.sizeUsd,
           partial_size_usd: partialSizeUsd,
           okxContracts,
-          partialCloseContracts,
+          normalizedPartialContracts,
           minSz,
           blocked: false
         });
@@ -11014,7 +11037,8 @@ export class PaperEngine {
         const partialSubmit = await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
-          sizeUsd: partialSizeUsd,
+          sizeUsd: partialSizeUsd, // Legacy param
+          okxContracts: normalizedPartialContracts, // The true authority
           appliedLeverage: Math.max(1, open.leverage ?? 1),
           lastPrice: closePrice,
           flowId,
@@ -11033,6 +11057,7 @@ export class PaperEngine {
           partial_size_usd: partialSizeUsd,
           lev: open.leverage,
           desired_notional_usdt: partialSizeUsd,
+          submittedContracts: normalizedPartialContracts,
           submit_ok: partialSubmit?.ok,
           ord_id: partialSubmit?.ordId,
           fill_confirmed: partialSubmit?.fillConfirmed,
@@ -11429,15 +11454,27 @@ export class PaperEngine {
         const partialMargin = Math.round(open.sizeUsd * ratio * 100) / 100;
         const newMargin = Math.round((open.sizeUsd - partialMargin) * 100) / 100;
 
-        const okxContracts = open.pos ?? 0;
-        const minSz = 1; // OKX swap contract min size is typically 1
+        const instId = open.instId ?? toOkxSwapInstId(open.symbol);
+        const inst = this.instrumentCache.get(instId);
+        const ctVal = inst?.ctVal ?? 1;
+        const lotSz = inst?.lotSz ?? 1;
+        const minSz = inst?.minSz ?? 1;
+
+        let okxContracts = open.okxContracts;
+        if (okxContracts == null) {
+           const posAbs = Math.abs(Number(open.pos ?? 0));
+           okxContracts = ctVal > 0 ? posAbs / ctVal : posAbs;
+        }
+
         let blocked = false;
         let blockReason: string | null = null;
-        let partialCloseContracts = 0;
+        let requestedContracts = 0;
+        let normalizedPartialContracts = 0;
 
         if (okxContracts > 0) {
-           partialCloseContracts = Math.floor(okxContracts * ratio);
-           if (partialCloseContracts < minSz) {
+           requestedContracts = okxContracts * ratio;
+           normalizedPartialContracts = Math.floor(requestedContracts / lotSz + 1e-12) * lotSz;
+           if (normalizedPartialContracts < minSz) {
               blocked = true;
               blockReason = "partial_contracts_below_minSz";
            }
@@ -11455,7 +11492,8 @@ export class PaperEngine {
             partial_ratio: ratio,
             remaining_after: newMargin,
             okxContracts,
-            partialCloseContracts,
+            requestedContracts,
+            normalizedPartialContracts,
             minSz,
             min_usd: MIN_POSITION_SIZE_USD
           });
@@ -11467,12 +11505,14 @@ export class PaperEngine {
           
           this.logger.info("V2_PARTIAL_CONTRACT_SIZE_PROOF", {
              symbol: open.symbol,
-             okxContracts,
-             partialCloseContracts,
+             rawOkxContracts: okxContracts,
+             ctVal,
+             lotSz,
              minSz,
              reduceRatio: ratio,
-             notionalUsdt: open.sizeUsd,
-             partialSizeUsd: partialMargin
+             requestedPartialContracts: requestedContracts,
+             normalizedPartialContracts,
+             submittedContracts: normalizedPartialContracts
           });
 
           const mp = leg(partialMargin);
@@ -11502,6 +11542,7 @@ export class PaperEngine {
               side: pSide,
               posSide: pPosSide,
               qty: pQtyLegacy,
+              okxContracts: normalizedPartialContracts,
               desiredNotionalUsdt: partialMargin * pLev,
               pricingReferencePx: mp.mark,
               appliedLeverage: pLev,
@@ -17644,8 +17685,10 @@ export class PaperEngine {
 
     // 대시보드 상태 생성
     const isRecovered = record.sync_status !== "ADOPTED_FROM_OKX" || (record.stopPrice != null && (regime !== "RANGE" || record.targetPrice1 != null));
+    const timeWarning = record.openedAt === 0 ? " (보유시간 원본 미확인)" : "";
+
     if (!isRecovered) {
-       record.dashboardProfitManagementStatus = "수익관리 미복구 경고 (ADOPTED)";
+       record.dashboardProfitManagementStatus = "수익관리 미복구 경고 (ADOPTED)" + timeWarning;
     } else {
        const slText = record.stopPrice ? record.stopPrice.toFixed(4) : "없음";
        if (regime === "RANGE") {
@@ -17653,10 +17696,10 @@ export class PaperEngine {
          const risk = record.stopPrice ? Math.abs(record.entryPrice - record.stopPrice) : 0;
          const reward = record.targetPrice1 ? Math.abs(record.targetPrice1 - record.entryPrice) : 0;
          const rr = risk > 0 ? (reward / risk).toFixed(2) : "N/A";
-         record.dashboardProfitManagementStatus = `손절가: ${slText} / 익절가: ${tpText} / 예상 R:R: ${rr}`;
+         record.dashboardProfitManagementStatus = `손절가: ${slText} / 익절가: ${tpText} / 예상 R:R: ${rr}${timeWarning}`;
        } else {
          const stage = record.partialExitStage ?? 0;
-         record.dashboardProfitManagementStatus = `손절가: ${slText} / 1차 부분익절: 동적 계산 / 트레일링: 동적 계산 / 현재 stage: ${stage}`;
+         record.dashboardProfitManagementStatus = `손절가: ${slText} / 1차 부분익절: 동적 계산 / 트레일링: 동적 계산 / 현재 stage: ${stage}${timeWarning}`;
        }
     }
 
