@@ -19,6 +19,7 @@ export type V2AddOnReason =
     | "TREND_PULLBACK_ADDON_ALLOWED"
     | "TREND_CONTINUATION_ADDON_ALLOWED"
     | "TREND_PYRAMID_PROFIT_FUNDED_ALLOWED"
+    | "CONFIRMED_ADVERSE_ADDON_ALLOWED"
     | "QUALITY_TOO_LOW_FOR_ADDON"
     | "CURRENT_STAGE_LIMIT"
     | "PNL_NOT_FAVORABLE"
@@ -28,6 +29,8 @@ export type V2AddOnReason =
     | "WHIPSAW_SHOCK_RECHECK_ADDON_FORBIDDEN"
     | "BREAKEVEN_STOP_UPDATE_REQUIRED"
     | "BREAKEVEN_STOP_NOT_CONFIRMED";
+
+export type V2AddonMode = "PYRAMIDING" | "CONFIRMED_ADVERSE_ADDON" | "NONE";
 
 export type V2AddOnPolicyResult = Readonly<{
     action: V2AddOnAction;
@@ -62,6 +65,20 @@ export type V2AddOnPolicyResult = Readonly<{
     breakevenStopPrice?: number;
     addonBlockedReason?: string;
     breakevenGateProof?: Record<string, any>;
+    addonMode?: V2AddonMode;
+    requestedAddonNotionalUsdt?: number;
+    thesisValid?: boolean;
+    sameSideConfirmation?: boolean;
+    priceDistancePassed?: boolean;
+    riskProjection?: {
+        projectedTotalNotionalUsdt: number;
+        projectedWeightedAvgEntry: number;
+        projectedStopPrice: number;
+        projectedLossAtStopUsdt: number;
+        riskBeforeAddonUsdt: number;
+        riskBudgetUsdt: number;
+        riskBudgetAllowedNotional: number;
+    };
     evidence: string;
 }>;
 
@@ -87,4 +104,5 @@ export type EvaluateV2AddOnPolicyArgs = Readonly<{
     currentGlobalNotionalUsd?: number;
     currentStopPrice?: number;
     peakUnrealizedPnlPct?: number;
+    maxAddonNotionalUsdt?: number;
 }>;

@@ -1,4 +1,9 @@
 import type { EvaluateV2AddOnPolicyArgs, V2AddOnPolicyResult } from "./types";
+import { evaluateConfirmedAdverseAddOn } from "./adverse-addon";
+
+function withAddonMode<T extends V2AddOnPolicyResult>(result: T, addonMode: V2AddOnPolicyResult["addonMode"]): T {
+    return { ...result, addonMode: addonMode ?? "NONE" };
+}
 
 export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnPolicyResult {
     const { side, v2State, judgment, snapshot } = args;
@@ -254,12 +259,11 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
         };
     }
     // Stage limit removed to allow Profit-Funded Pyramid in TREND
-    // Non-TREND stage limits will be handled within their respective sections if needed
-    if (qualityScore < 70 || pnlPct <= 0) {
-        return {
+    if (qualityScore < 70 && pnlPct > 0) {
+        return withAddonMode({
             action: "ADDON_WATCH",
             allowed: false,
-            reason: qualityScore < 70 ? "QUALITY_TOO_LOW_FOR_ADDON" : "PNL_NOT_FAVORABLE",
+            reason: "QUALITY_TOO_LOW_FOR_ADDON",
             addOnEligible: false,
             isInitial,
             isAddOn,
@@ -283,8 +287,42 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             breakevenStopRequired,
             breakevenStopConfirmed,
             breakevenStopPrice,
-            evidence: "quality_score_too_low_or_pnl_not_favorable"
+            addonBlockedReason: "QUALITY_NOT_MET",
+            evidence: "pyramiding_quality_score_too_low"
+        }, "PYRAMIDING");
+    }
+
+    if (pnlPct <= 0) {
+        const adverseBase: V2AddOnPolicyResult = {
+            action: "ADDON_WATCH",
+            allowed: false,
+            reason: "SAME_SIDE_POSITION_WATCH_RECHECK",
+            addOnEligible: false,
+            isInitial,
+            isAddOn,
+            side,
+            currentStage,
+            hasSameSidePosition,
+            hasOppositeSidePosition,
+            marketRegime: judgment.regime_final,
+            marketSubtype: judgment.subtype,
+            shockPhase: judgment.shockPhase,
+            rangePhase: judgment.rangePhase,
+            trendPhase: judgment.trendPhase,
+            transitionPhase: judgment.transitionPhase,
+            qualityScore,
+            reviewingTicks,
+            pnlPct,
+            boxPos,
+            emaGap,
+            trendWeaknessScore,
+            rangeConfidence,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
+            evidence: "adverse_addon_evaluation"
         };
+        return evaluateConfirmedAdverseAddOn(args, adverseBase);
     }
 
     if (judgment.regime_final === "RANGE") {
@@ -325,7 +363,7 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             };
         }
         if (canReattack) {
-            return {
+            return withAddonMode({
                 action: "ADDON_ALLOWED",
                 allowed: true,
                 reason: "RANGE_EDGE_REATTACK_ALLOWED",
@@ -352,10 +390,13 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
                 breakevenStopRequired,
                 breakevenStopConfirmed,
                 breakevenStopPrice,
+                thesisValid: true,
+                sameSideConfirmation: breakevenStopConfirmed,
+                priceDistancePassed: true,
                 evidence: "range_edge_reattack_allowed"
-            };
+            }, "PYRAMIDING");
         }
-        return {
+        return withAddonMode({
             action: "ADDON_WATCH",
             allowed: false,
             reason: "SAME_SIDE_POSITION_WATCH_RECHECK",
@@ -383,7 +424,7 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             breakevenStopConfirmed,
             breakevenStopPrice,
             evidence: "range_addon_watch_recheck"
-        };
+        }, "PYRAMIDING");
     }
 
     if (judgment.regime_final === "TREND") {
@@ -575,7 +616,7 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
     }
 
     if (pyramidAllowed) {
-        return {
+        return withAddonMode({
             action: "ADDON_ALLOWED",
             allowed: true,
             reason: "TREND_PYRAMID_PROFIT_FUNDED_ALLOWED",
@@ -605,15 +646,35 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             breakevenStopRequired,
             breakevenStopConfirmed,
             breakevenStopPrice,
+            thesisValid: true,
+            sameSideConfirmation: breakevenStopConfirmed,
+            priceDistancePassed: true,
             evidence: "trend_pyramid_allowed_with_locked_profit"
-        };
+        }, "PYRAMIDING");
     } else {
-        const failReason = !breakevenStopConfirmed ? "BREAKEVEN_STOP_NOT_CONFIRMED" : 
-                          availableRiskBudgetUsdt <= 0 ? "PROFIT_BUFFER_INSUFFICIENT" : "PNL_NOT_FAVORABLE";
-        return {
+        const failReason: V2AddOnPolicyResult["reason"] = !breakevenStopConfirmed
+            ? "BREAKEVEN_STOP_NOT_CONFIRMED"
+            : availableRiskBudgetUsdt <= 0
+              ? "PROFIT_BUFFER_INSUFFICIENT"
+              : qualityScore < 80
+                ? "QUALITY_TOO_LOW_FOR_ADDON"
+                : pnlPct < 0.002
+                  ? "PROFIT_BUFFER_INSUFFICIENT"
+                  : "PROFIT_BUFFER_INSUFFICIENT";
+        const pyramidBlockedReason =
+            !breakevenStopConfirmed
+                ? "PYRAMIDING_CONFIRMATION_NOT_MET"
+                : qualityScore < 80
+                  ? "QUALITY_NOT_MET"
+                  : pnlPct < 0.002
+                    ? "PYRAMIDING_CONFIRMATION_NOT_MET"
+                    : availableRiskBudgetUsdt <= 0
+                      ? "PROFIT_BUFFER_INSUFFICIENT"
+                      : addonBlockedReason || String(failReason);
+        return withAddonMode({
             action: "ADDON_WATCH",
             allowed: false,
-            reason: failReason as any,
+            reason: failReason,
             addOnEligible: false,
             isInitial,
             isAddOn,
@@ -640,9 +701,9 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             breakevenStopRequired,
             breakevenStopConfirmed,
             breakevenStopPrice,
-            addonBlockedReason: addonBlockedReason || failReason,
+            addonBlockedReason: pyramidBlockedReason,
             evidence: "profit_funded_pyramid_insufficient_buffer_or_stop_not_confirmed"
-        };
+        }, "PYRAMIDING");
     }
     }
 

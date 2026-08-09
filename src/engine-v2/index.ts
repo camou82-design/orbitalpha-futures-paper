@@ -174,6 +174,7 @@ import { calculateRiskSizing } from "./risk-sizing/policy";
 import { generateExplanation } from "./explain/diagnostic";
 import { deriveV2StateAuthority } from "./state/derive";
 import { evaluateV2AddOnPolicy } from "./addon/policy";
+import { buildV2AddonEligibilityProof } from "./addon/eligibility-proof";
 import { evaluateV2ExitPolicy } from "./exit/policy";
 import { deriveMicroExecutionScore } from "./execution/micro-execution-score";
 import { deriveTradeLifecycleAuthority } from "./lifecycle/trade-lifecycle-authority";
@@ -754,6 +755,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         p => p.symbol === input.symbol && String(p.side).toLowerCase() === execution.side
     );
 
+    const liveMaxAddonNotionalUsdt =
+        input.config.okxLiveMaxAddonNotionalUsdt ??
+        (v2State as { liveMaxAddonNotionalUsdt?: number }).liveMaxAddonNotionalUsdt ??
+        20;
+
     const addOnPolicy = evaluateV2AddOnPolicy({
         symbol: String(input.symbol),
         side: execution.side,
@@ -774,11 +780,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         accountEquityUsd,
         currentSymbolNotionalUsd,
         currentGlobalNotionalUsd,
-        currentStopPrice: preAddOnPosition?.ledger_stop_px ?? undefined
+        currentStopPrice: preAddOnPosition?.ledger_stop_px ?? undefined,
+        maxAddonNotionalUsdt: liveMaxAddonNotionalUsdt
     });
 
-    // --- V2_ADDON_BREAKEVEN_GATE_PROOF (Universal Hard Gate) ---
-    const breakevenGateBlocked = addOnPolicy.allowed && !addOnPolicy.breakevenStopConfirmed;
+    // --- V2_ADDON_BREAKEVEN_GATE_PROOF (Pyramiding-only Hard Gate) ---
+    const breakevenGateBlocked =
+        addOnPolicy.addonMode === "PYRAMIDING" &&
+        addOnPolicy.allowed &&
+        !addOnPolicy.breakevenStopConfirmed;
     if (breakevenGateBlocked) {
         if (shouldEmitV2Proof("V2_ADDON_BREAKEVEN_GATE_PROOF", String(input.symbol), `${addOnPolicy.side}|${addOnPolicy.reason}`, true)) {
             console.info(JSON.stringify({
@@ -920,9 +930,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const remainingGlobalRoom = Math.max(0, globalMaxNotionalUsdt - currentGlobalNotionalUsd);
     const liveMaxOrderNotionalUsdt = v2State.liveMaxOrderNotionalUsdt ?? 500;
 
+    const addonPolicyNotionalCap =
+        addOnPolicy.addonMode === "CONFIRMED_ADVERSE_ADDON"
+            ? (addOnPolicy.requestedAddonNotionalUsdt ?? addOnPolicy.addonMaxNotionalUsdt ?? liveMaxAddonNotionalUsdt)
+            : (addOnPolicy.addonMaxNotionalUsdt ?? 0);
+
     const finalAddonNotionalUsdt = Math.min(
-        addOnPolicy.addonMaxNotionalUsdt ?? 0,
-        liveMaxOrderNotionalUsdt,
+        addonPolicyNotionalCap,
+        liveMaxAddonNotionalUsdt,
         remainingSymbolRoom,
         remainingGlobalRoom
     );
@@ -947,7 +962,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             lockedProfitUsdt: addOnPolicy.lockedProfitUsdt,
             availableRiskBudgetUsdt: addOnPolicy.availableRiskBudgetUsdt,
             addonMaxNotionalUsdt: addOnPolicy.addonMaxNotionalUsdt,
-            finalAddonNotionalUsdt: finalAddonNotionalUsdt
+            finalAddonNotionalUsdt: finalAddonNotionalUsdt,
+            ...( {
+                addOnPolicyMode: addOnPolicy.addonMode ?? "NONE",
+                requestedAddonNotionalUsdt: addOnPolicy.requestedAddonNotionalUsdt
+            } as Record<string, unknown> )
         }
     };
     const exitPolicy = evaluateV2ExitPolicy({
@@ -4391,6 +4410,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST";
 
     // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
+    let liveReadinessPassed = true;
 
     if (finalDecision === "ENTER") {
         const lastPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
@@ -4487,7 +4507,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             maxAccountNotionalUsdt != null && maxAccountNotionalUsdt > 0 &&
             maxAddonCount != null && maxAddonCount >= 0;
 
-        const liveReadinessPassed =
+        liveReadinessPassed =
             liveBalanceReady &&
             accountEquityUsdt !== null && accountEquityUsdt > 0 &&
             availableBalanceUsdt !== null && availableBalanceUsdt >= 0 &&
@@ -6270,6 +6290,72 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         return "ENTER";
     })();
     decision.executionAction = finalExecutionAction;
+
+    const addonPositionSide: "long" | "short" | null = (() => {
+        const ledgerSide = String(ledgerPos?.side ?? "").toLowerCase();
+        if (ledgerSide === "long" || ledgerSide === "short") return ledgerSide;
+        if (hasShortActual) return "short";
+        if (hasLongActual) return "long";
+        return null;
+    })();
+    if (addonPositionSide != null || isAddOn || ledgerPos != null) {
+        const authoritySide: "long" | "short" | "none" =
+            decision.side === "long" || decision.side === "short" ? decision.side : "none";
+        const entryPriceForProof = Number(
+            (sameSymbolPos as { entryPrice?: number } | null)?.entryPrice ??
+            ledgerPos?.entryPrice ??
+            0
+        );
+        const currentPriceForProof = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+        const cooldownBlocked =
+            v2CooldownAuthority?.cooldownAction === "block_entry" ||
+            v2CooldownAuthority?.cooldownAction === "block_direction" ||
+            v2CooldownAuthority?.cooldownAction === "halt" ||
+            (v2CooldownAuthority?.directionBlocked != null && v2CooldownAuthority.directionBlocked !== "none");
+        const addonEligibilityProof = buildV2AddonEligibilityProof({
+            symbol: String(input.symbol),
+            positionSide: addonPositionSide,
+            authoritySide,
+            currentNotionalUsdt: existingSymbolNotionalUsdt > 0
+                ? existingSymbolNotionalUsdt
+                : Number((sameSymbolPos as { sizeUsd?: number } | null)?.sizeUsd ?? 0),
+            addonRequestedNotionalUsdt: Number(
+                (v2State as { finalAddonNotionalUsdt?: number }).finalAddonNotionalUsdt ??
+                finalOrderNotionalUsdt ??
+                0
+            ),
+            addOnPolicy,
+            executionAction: finalExecutionAction,
+            finalDecision: decision.decision,
+            liveReadinessPassed,
+            okxPendingOrdersReady: okxPendingOrdersReady === true,
+            minOrderBlockReason: min_order_block_reason,
+            riskBlockReason: decision.risk.blockReason ?? null,
+            cooldownBlocked,
+            cooldownReason: v2CooldownAuthority?.cooldownReason ?? null,
+            currentPrice: currentPriceForProof,
+            entryPrice: entryPriceForProof
+        });
+        const addonEligibilityProofKey = [
+            addOnPolicy.addonMode ?? "NONE",
+            addonPositionSide,
+            authoritySide,
+            addonEligibilityProof.add_on_allowed,
+            addonEligibilityProof.block_reason ?? "none",
+            addOnPolicy.reason,
+            finalExecutionAction
+        ].join("|");
+        if (
+            shouldEmitV2Proof(
+                "V2_ADDON_ELIGIBILITY_PROOF",
+                String(input.symbol),
+                addonEligibilityProofKey,
+                addonEligibilityProof.add_on_allowed === true || addonEligibilityProof.block_reason === "LIVE_ACCOUNT_AUTHORITY_NOT_READY"
+            )
+        ) {
+            console.info(JSON.stringify(addonEligibilityProof));
+        }
+    }
 
     // Requirement 1: Non-ENTER 정규화
     normalizeNonEnterDecision(decision);
