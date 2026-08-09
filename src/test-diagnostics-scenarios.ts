@@ -67,6 +67,8 @@ const mockConfig = {
   okxLiveMaxAddonCount: null,
   okxLiveStaticNotionalCapEnabled: true,
   okxLiveUsableBalanceRatio: 0.95,
+  okxMomentumIocSlippagePct: 0.0003,
+  okxPassiveEntryTtlMs: 15_000,
   okxDemoBaseUrl: "https://www.okx.com",
   okxBaseUrl: "https://www.okx.com",
   okxApiKey: "",

@@ -187,6 +187,10 @@ export type EngineConfig = Readonly<{
   okxAuthReady: boolean;
   /** Include `x-simulated-trading: 1` for OKX requests (demo only). */
   okxSimulatedTradingHeaderEnabled: boolean;
+  /** Momentum IOC worst-fill slippage cap (fraction). Env: `OKX_MOMENTUM_IOC_SLIPPAGE_PCT`. */
+  okxMomentumIocSlippagePct: number;
+  /** Passive entry limit TTL before cancel (ms). Env: `OKX_PASSIVE_ENTRY_TTL_MS`. */
+  okxPassiveEntryTtlMs: number;
   /** Live signed submit guard: max order notional in USDT (null if not explicitly configured). */
   okxLiveMaxOrderNotionalUsdt: number | null;
   /** Live signed submit guard: max add-on order notional in USDT (null if not explicitly configured). */
@@ -1525,7 +1529,15 @@ export interface PendingEntryOrderRecord {
   stopPrice?: number;
   createdAt: number;
   status: "ENTRY_ORDER_PENDING";
-  
+  executionStyle?: "MOMENTUM_MARKETABLE_IOC" | "PASSIVE_LIMIT";
+  ordType?: "ioc" | "limit";
+  entryPendingState?: "ENTRY_SUBMIT_PENDING" | "ENTRY_FILL_RECONCILING";
+  promotionReason?: string | null;
+  entrySubtype?: string | null;
+  originalAuthorityDecision?: string;
+  originalAuthoritySide?: string;
+  submittedAt?: number;
+
   /** To recreate the full open position and events once filled */
   paperRecordSnapshot: any;
   authoritySnapshot: any;

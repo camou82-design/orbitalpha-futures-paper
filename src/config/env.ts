@@ -268,6 +268,16 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     if (!Number.isFinite(n) || n <= 0) return 0.95;
     return Math.min(1, n);
   })();
+  const okxMomentumIocSlippagePct = (() => {
+    const n = parseNumber(env.OKX_MOMENTUM_IOC_SLIPPAGE_PCT, 0.0003);
+    if (!Number.isFinite(n) || n < 0) return 0.0003;
+    return Math.min(0.01, n);
+  })();
+  const okxPassiveEntryTtlMs = (() => {
+    const n = parseInt(env.OKX_PASSIVE_ENTRY_TTL_MS ?? "15000", 10);
+    if (!Number.isFinite(n) || n <= 0) return 15_000;
+    return Math.min(120_000, n);
+  })();
   const okxAuthReady =
     okxExchangeAuthOptIn &&
     (
@@ -348,6 +358,8 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     okxLiveMaxAddonCount,
     okxLiveStaticNotionalCapEnabled,
     okxLiveUsableBalanceRatio,
+    okxMomentumIocSlippagePct,
+    okxPassiveEntryTtlMs,
     okxBaseUrl,
     okxApiKey,
     okxApiSecret,

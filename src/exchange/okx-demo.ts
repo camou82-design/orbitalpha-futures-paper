@@ -34,7 +34,7 @@ export type OkxOrderSubmitInput = Readonly<{
   posSide?: OkxDemoPositionSide;
   sz: string;
   tdMode?: "isolated" | "cross";
-  ordType?: "market" | "limit";
+  ordType?: "market" | "limit" | "ioc";
   px?: string;
   clOrdId?: string;
   reduceOnly?: boolean;
@@ -299,11 +299,15 @@ export class OkxDemoClient {
       ...(input.reduceOnly === true ? { reduceOnly: "true" } : {}),
       ...(input.attachAlgoOrds ? { attachAlgoOrds: input.attachAlgoOrds } : {})
     };
-    if (payload.ordType === "limit" && !payload.px) {
+    if ((payload.ordType === "limit" || payload.ordType === "ioc") && !payload.px) {
       return Promise.resolve({
         ok: false,
         error: "limit_price_missing",
-        diagnostics: { httpStatus: 0, requestUrl: "/api/v5/trade/order", retMsg: "px is required for limit orders" }
+        diagnostics: {
+          httpStatus: 0,
+          requestUrl: "/api/v5/trade/order",
+          retMsg: "px is required for limit and ioc orders"
+        }
       });
     }
     return this.signedRequest<Record<string, unknown>>("POST", "/api/v5/trade/order", null, payload);

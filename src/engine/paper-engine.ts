@@ -121,6 +121,13 @@ import {
   normalizePositionSideUpper,
   normalizePositionSideLower
 } from "../engine-v2/reconciler";
+import {
+  buildMomentumIocLimitPx,
+  classifyEntryOrderExecution,
+  hasBlockingEntryPendingState,
+  shouldCancelStaleEntryOrder,
+  type EntryExecutionStyle
+} from "../engine-v2/execution/entry-order-type";
 
 /** RANGE 1m edge reversal candle ?덇굅??寃뚯씠????V2 ?ㅽ뻾 遊됲닾媛 ENTER쨌臾댄븯?쒕툝濡앹씪 ??理쒖쥌 ?ㅽ뻾 寃쎈줈瑜?留됱? ?딅룄濡?遺꾨━?쒕떎. */
 const LEGACY_RANGE_EDGE_NO_REVERSAL_REJECTS = new Set<string>([
@@ -7922,7 +7929,7 @@ export class PaperEngine {
     /** Mark/last price for `notional / (price * ctVal)` when ticker not yet loaded here. */
     pricingReferencePx?: number | null;
     reduceOnly?: boolean;
-    ordType?: "market" | "limit";
+    ordType?: "market" | "limit" | "ioc";
     /** Explicit contract count for accurate reduction/close */
     okxContracts?: number;
   }): Promise<{
@@ -8147,7 +8154,23 @@ export class PaperEngine {
       const tickSize = Number(instTryAll.value.tickSz);
 
       try {
-        if (input.entryPrice && input.reason.includes("recovery")) {
+        if (input.ordType === "ioc") {
+          if (input.entryPrice == null || !Number.isFinite(input.entryPrice) || input.entryPrice <= 0) {
+            return {
+              ok: false,
+              ordId: null,
+              fillPx: null,
+              fillSize: 0,
+              errorCode: "ioc_cap_price_missing",
+              errorMessage: "IOC entry requires precomputed worst-fill cap price",
+              ackCode: "rejected",
+              orderState: null,
+              fillConfirmed: false,
+              clOrdId: input.clOrdId
+            };
+          }
+          limitPrice = input.entryPrice;
+        } else if (input.entryPrice && input.reason.includes("recovery")) {
           limitPrice = input.entryPrice;
         } else {
           limitPrice = this.buildLiveLimitOrderPrice({
@@ -8601,7 +8624,7 @@ export class PaperEngine {
     const finalOrderNotionalUsdt = effectiveNotionalUsdt;
     const formulaNotionalUsdt = (stageMarginKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD) * (input.appliedLeverage ?? 1);
     
-    if (input.ordType === "limit" && limitPrice == null) {
+    if ((input.ordType === "limit" || input.ordType === "ioc") && limitPrice == null) {
       limitPrice = input.entryPrice ?? pricingLast ?? null;
     }
 
@@ -8778,23 +8801,40 @@ export class PaperEngine {
       }
 
       let st0 = status.value?.[0];
-      let fillPx = st0?.fillPx ?? null;
-      let fillSize = st0?.fillSz != null ? Number(st0.fillSz) : 0;
+      let fillPx = st0?.avgPx ?? st0?.fillPx ?? null;
+      let fillSize =
+        st0?.accFillSz != null
+          ? Number(st0.accFillSz)
+          : st0?.fillSz != null
+            ? Number(st0.fillSz)
+            : 0;
       let orderState = st0?.state != null ? String(st0.state) : null;
+      const isIocOrder = input.ordType === "ioc";
       if (
         fillSize === 0 &&
         (orderState === "live" || orderState === "partially_filled" || orderState === "mmp_canceled")
       ) {
-        await new Promise((r) => setTimeout(r, 280));
+        await new Promise((r) => setTimeout(r, isIocOrder ? 120 : 280));
         const status2 = await this.okxDemo.getOrder(instId, ordId || undefined, input.clOrdId);
         if (status2.ok && status2.value?.[0]) {
           st0 = status2.value[0];
-          fillPx = st0?.fillPx ?? null;
-          fillSize = st0?.fillSz != null ? Number(st0.fillSz) : 0;
+          fillPx = st0?.avgPx ?? st0?.fillPx ?? null;
+          fillSize =
+            st0?.accFillSz != null
+              ? Number(st0.accFillSz)
+              : st0?.fillSz != null
+                ? Number(st0.fillSz)
+                : 0;
           orderState = st0?.state != null ? String(st0.state) : orderState;
         }
       }
-      const fillConfirmed = orderState === "filled" || orderState === "partially_filled" || fillSize > 0;
+      const fillConfirmed = isIocOrder
+        ? fillSize > 0 &&
+          (orderState === "filled" ||
+            orderState === "partially_filled" ||
+            orderState === "canceled" ||
+            orderState === "mmp_canceled")
+        : orderState === "filled" || orderState === "partially_filled" || fillSize > 0;
 
       this.logger.info("okx_order_submit_accepted", {
         ...logCtx,
@@ -8813,10 +8853,23 @@ export class PaperEngine {
         order_state: orderState,
         fill_px: fillPx,
         fill_size: fillSize,
+        acc_fill_sz: fillSize,
+        ord_type: input.ordType ?? null,
         accepted_at: Date.now(),
         checked_at: Date.now(),
         fill_confirmed: fillConfirmed
       });
+
+      const filledContracts = fillSize > 0 ? fillSize : norm.normalized_contracts;
+      const filledBaseQty = filledContracts * sizingMeta.ctVal;
+      const filledAvgPx =
+        fillPx != null && Number.isFinite(Number(fillPx))
+          ? Number(fillPx)
+          : pricingLast ?? undefined;
+      const filledNotionalUsd =
+        filledAvgPx != null && Number.isFinite(filledAvgPx) && filledContracts > 0
+          ? filledContracts * sizingMeta.ctVal * filledAvgPx
+          : finalOrderNotionalUsdt;
 
       return {
         ok: true,
@@ -8831,12 +8884,10 @@ export class PaperEngine {
         submittedContractSz: submitSzStr,
         
         // Decoupled metadata for reconciliation
-        okxContracts: norm.normalized_contracts,
-        baseQty: norm.normalized_contracts * sizingMeta.ctVal,
-        notionalUsd: (fillPx != null && Number.isFinite(Number(fillPx))) 
-          ? (norm.normalized_contracts * sizingMeta.ctVal * Number(fillPx)) 
-          : finalOrderNotionalUsdt,
-        avgPx: fillPx != null ? Number(fillPx) : (pricingLast ?? undefined),
+        okxContracts: fillConfirmed ? filledContracts : norm.normalized_contracts,
+        baseQty: fillConfirmed ? filledBaseQty : norm.normalized_contracts * sizingMeta.ctVal,
+        notionalUsd: fillConfirmed ? filledNotionalUsd : finalOrderNotionalUsdt,
+        avgPx: filledAvgPx,
         clOrdId: input.clOrdId
       };
     } catch (e) {
@@ -14106,53 +14157,97 @@ export class PaperEngine {
         continue;
       }
 
+      const symEnvelope = input.decisionBySymbol.get(String(pending.symbol));
+      const currentAuthority = symEnvelope?.authority;
+      const staleCancelReason =
+        currentAuthority != null
+          ? shouldCancelStaleEntryOrder({
+              pendingSide: pending.side,
+              currentDecision: String(currentAuthority.decision),
+              currentSide: String(currentAuthority.side)
+            })
+          : null;
+      if (staleCancelReason) {
+        let cancelRequested = false;
+        let cancelConfirmed = false;
+        let orderState: string | null = null;
+        if (this.okxDemo) {
+          try {
+            const res = await this.okxDemo.cancelOrder(pending.instId, ordId, pending.clOrdId || undefined);
+            cancelRequested = true;
+            if (res.ok) cancelConfirmed = true;
+            const getRes = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId || undefined);
+            if (getRes.ok && getRes.value?.[0]?.state != null) {
+              orderState = String(getRes.value[0].state);
+              if (orderState === "canceled" || orderState === "mmp_canceled") cancelConfirmed = true;
+            }
+          } catch (e) {}
+        }
+        this.logger.info("V2_STALE_ENTRY_CANCEL_PROOF", {
+          symbol: pending.symbol,
+          ordId,
+          clOrdId: pending.clOrdId ?? null,
+          originalSide: pending.side,
+          currentAuthorityDecision: currentAuthority?.decision ?? null,
+          currentAuthoritySide: currentAuthority?.side ?? null,
+          cancelReason: staleCancelReason,
+          cancelRequested,
+          cancelConfirmed,
+          orderState
+        });
+        if (cancelConfirmed || !this.okxDemo) {
+          this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", {
+            symbol: pending.symbol,
+            side: pending.side,
+            ord_id: ordId,
+            reason: staleCancelReason
+          });
+          pendingRegistryModified = true;
+        } else {
+          activePendingEntryOrders.push(pending);
+        }
+        continue;
+      }
+
       if (liveOrder) {
         this.logger.info("PENDING_ENTRY_ORDER_FILL_CHECK_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, status: "still_pending" });
         
-        // --- V2 Missed Limit Fill Recovery Trigger ---
         const ageMs = Date.now() - pending.createdAt;
-        if (pending.authority_source === "v2" && ageMs > 20_000) {
-            this.logger.warn("V2_MISSED_LIMIT_FILL_PROOF", {
+        const passiveTtlMs = this.config.okxPassiveEntryTtlMs;
+        const isPassivePending = pending.executionStyle !== "MOMENTUM_MARKETABLE_IOC";
+        if (pending.authority_source === "v2" && isPassivePending && ageMs > passiveTtlMs) {
+            this.logger.warn("V2_PASSIVE_ENTRY_TTL_EXPIRED_PROOF", {
                 symbol: pending.symbol,
                 side: pending.side,
                 ord_id: ordId,
                 age_ms: ageMs,
+                ttl_ms: passiveTtlMs,
                 status: "stale_unfilled",
-                action: "CANCEL_AND_RECOVER"
+                action: "CANCEL_NO_CHASE"
             });
             
             let cancelSuccess = false;
+            let orderState: string | null = null;
             if (this.okxDemo) {
                 try {
-                    const res = await this.okxDemo.cancelOrder(pending.instId, ordId);
+                    const res = await this.okxDemo.cancelOrder(pending.instId, ordId, pending.clOrdId || undefined);
                     if (res.ok) cancelSuccess = true;
-                    else {
-                        const getRes = await this.okxDemo.getOrder(pending.instId, ordId);
-                        if (getRes.ok && getRes.value?.[0]?.state === "filled") {
-                            activePendingEntryOrders.push(pending);
-                            continue;
-                        }
+                    const getRes = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId || undefined);
+                    if (getRes.ok && getRes.value?.[0]?.state != null) {
+                      orderState = String(getRes.value[0].state);
+                      if (orderState === "canceled" || orderState === "mmp_canceled") cancelSuccess = true;
                     }
                 } catch (e) {}
             }
             
             if (cancelSuccess) {
-                const newCount = (pending.missedLimitFillCount ?? 0) + 1;
-                this.logger.info("V2_MISSED_LIMIT_FILL_RECOVERY_PROOF", {
+                this.logger.info("V2_PASSIVE_ENTRY_TTL_CANCEL_CONFIRMED_PROOF", {
                     symbol: pending.symbol,
                     side: pending.side,
-                    missedLimitFillCount: newCount,
-                    lastEntryIntentSide: pending.side,
-                    originalLimitPrice: pending.originalLimitPrice,
-                    ts: Date.now()
-                });
-                
-                this.v2RecoveryActiveBySymbol.set(pending.symbol, { 
-                    side: pending.side, 
-                    ts: Date.now(),
-                    missedLimitFillCount: newCount,
-                    lastEntryIntentSide: pending.side,
-                    originalLimitPrice: pending.originalLimitPrice
+                    ord_id: ordId,
+                    age_ms: ageMs,
+                    ttl_ms: passiveTtlMs,
+                    order_state: orderState
                 });
                 pendingRegistryModified = true;
                 continue; 
@@ -14291,8 +14386,15 @@ export class PaperEngine {
       const envelope = input.decisionBySymbol.get(String(first.symbol))!;
       const authority = envelope.authority;
 
-      if (activePendingEntryOrders.some(p => p.symbol === String(first.symbol) && p.side === authority.side)) {
-        this.logger.warn("V2_DUPLICATE_PENDING_ENTRY_BLOCK_PROOF", { symbol: first.symbol, side: authority.side });
+      if (hasBlockingEntryPendingState(activePendingEntryOrders, String(first.symbol), authority.side as "long" | "short")) {
+        this.logger.warn("V2_ENTRY_REENTRY_BLOCKED_PENDING_PROOF", {
+          symbol: first.symbol,
+          side: authority.side,
+          ordId: activePendingEntryOrders.find(p => p.symbol === String(first.symbol) && p.side === authority.side)?.ordId ?? null,
+          clOrdId: activePendingEntryOrders.find(p => p.symbol === String(first.symbol) && p.side === authority.side)?.clOrdId ?? null,
+          entryPendingState: activePendingEntryOrders.find(p => p.symbol === String(first.symbol) && p.side === authority.side)?.entryPendingState ?? null,
+          reason: "pending_entry_or_unconfirmed_fill"
+        });
         consumeIdx++;
         continue;
       }
@@ -15785,61 +15887,82 @@ export class PaperEngine {
             ...v2CommittedRiskPlan
           });
 
-          const recoveryInfo = this.v2RecoveryActiveBySymbol.get(sym);
-          const maxChaseBps = 12; // 8~15bps range per instruction
-          
-          let isRecovery = !!(recoveryInfo && recoveryInfo.side === side && (Date.now() - recoveryInfo.ts < 60_000));
-          
-          if (isRecovery && recoveryInfo) {
-              const currentPrice = first.lastPrice;
-              const originalPrice = recoveryInfo.originalLimitPrice ?? currentPrice;
-              const chaseBps = Math.abs(currentPrice - originalPrice) / originalPrice * 10000;
-              
-              // Strict Condition Check
-              const hasPosition = opens.some(p => p.symbol === sym);
-              const signedReady = this.signedExecutionReady === true;
-              const protectionBlocked = this.symbolProtectionFailedBlocked.has(sym);
-              
-              const conditionsPassed = 
-                  !hasPosition && 
-                  !!stopPrice && 
-                  signedReady && 
-                  !protectionBlocked && 
-                  chaseBps <= maxChaseBps;
+          const promotionReason = envelope.v2_execution_envelope?.promotion_reason ?? null;
+          const entrySubtype = effectiveMarketSubtype || null;
+          const orderTypeClass = classifyEntryOrderExecution({
+            promotionReason,
+            entrySubtype,
+            executorReason: (decision as { reason?: string | null }).reason ?? res.executorDecision?.blocked_reason ?? null
+          });
+          const executionStyle: EntryExecutionStyle = orderTypeClass.executionStyle;
+          const submitOrdType = orderTypeClass.ordType;
+          const slippageCapPct = this.config.okxMomentumIocSlippagePct;
 
-              if (!conditionsPassed) {
-                  this.logger.warn("MISSED_LIMIT_FILL_RECOVERY_SKIPPED", {
-                      symbol: sym,
-                      side,
-                      chaseBps,
-                      maxChaseBps,
-                      hasPosition,
-                      hasStopPrice: !!stopPrice,
-                      signedReady,
-                      protectionBlocked,
-                      reason: chaseBps > maxChaseBps ? "CHASE_DISTANCE_EXCEEDED" : "STRICT_CONDITION_NOT_MET"
-                  });
-                  this.v2RecoveryActiveBySymbol.delete(sym);
-                  isRecovery = false;
-                  continue; 
-              }
+          const instIdForEntry = toOkxSwapInstId(sym as MarketSymbol);
+          let bestBid: number | null = null;
+          let bestAsk: number | null = null;
+          let rawLimitPx: number | null = null;
+          let normalizedLimitPx: number | null = null;
+          let orderSubmitAllowed = true;
+          let orderTypeBlockReason: string | null = null;
+          let submitEntryPrice: number | undefined;
+          const instCachedAny = this.instrumentCache.get(instIdForEntry) as
+            | (OkxSwapInstrumentSizing & { tickSz?: number })
+            | undefined;
+          let tickSz =
+            instCachedAny?.tickSz != null && Number.isFinite(Number(instCachedAny.tickSz))
+              ? Number(instCachedAny.tickSz)
+              : 0.1;
 
-              this.logger.info("V2_RECOVERY_ENTRY_TRIGGER_PROOF", {
-                  symbol: sym,
-                  side,
-                  reason: "missed_limit_fill_recovery",
-                  action: "USE_MARKETABLE_LIMIT_ORDER",
-                  missedLimitFillCount: recoveryInfo.missedLimitFillCount,
-                  lastEntryIntentSide: recoveryInfo.lastEntryIntentSide,
-                  chaseBps
+          if (executionStyle === "MOMENTUM_MARKETABLE_IOC") {
+            const tickerTry = await this.okxPublic.tryGetTicker(first.symbol);
+            if (!tickerTry.ok || tickerTry.value.bid == null || tickerTry.value.ask == null) {
+              orderSubmitAllowed = false;
+              orderTypeBlockReason = "ticker_missing_bid_ask_for_ioc";
+            } else {
+              bestBid = tickerTry.value.bid;
+              bestAsk = tickerTry.value.ask;
+              const iocPx = buildMomentumIocLimitPx({
+                side,
+                bestBid,
+                bestAsk,
+                tickSz,
+                slippageCapPct
               });
+              rawLimitPx = iocPx.rawLimitPx;
+              normalizedLimitPx = iocPx.normalizedLimitPx;
+              submitEntryPrice = normalizedLimitPx;
+            }
           }
 
-          // Marketable Limit Pricing for Recovery (5bps buffer)
-          const recoveryPriceOffset = 0.0005;
-          const finalEntryPrice = isRecovery 
-              ? (side === "buy" ? first.lastPrice * (1 + recoveryPriceOffset) : first.lastPrice * (1 - recoveryPriceOffset))
-              : first.lastPrice;
+          this.logger.info("V2_ENTRY_ORDER_TYPE_AUTHORITY_PROOF", {
+            symbol: sym,
+            side: intentSide,
+            authorityDecision: authorityDecisionForExecution,
+            promotionReason,
+            entrySubtype,
+            executionStyle,
+            ordType: submitOrdType,
+            bestBid,
+            bestAsk,
+            slippageCapPct,
+            rawLimitPx,
+            normalizedLimitPx,
+            tickSz,
+            requestedContracts: null,
+            orderSubmitAllowed,
+            reason: orderTypeBlockReason ?? orderTypeClass.classificationReason
+          });
+
+          if (!orderSubmitAllowed) {
+            this.logger.warn("V2_ENTRY_ORDER_TYPE_BLOCKED", {
+              symbol: sym,
+              side: intentSide,
+              executionStyle,
+              reason: orderTypeBlockReason
+            });
+            continue;
+          }
 
           const submit = await this.submitOkxOrder({
             symbol: first.symbol,
@@ -15848,15 +15971,15 @@ export class PaperEngine {
             qty: qtyLegacyEst,
             clOrdId,
             traceId: openTraceId,
-            ordType: "limit", // Explicit marketable limit
-            reason: isRecovery ? "v2_authorized_recovery_path" : "v2_authorized_fast_path",
+            ordType: submitOrdType,
+            reason: executionStyle === "MOMENTUM_MARKETABLE_IOC" ? "v2_authorized_momentum_ioc" : "v2_authorized_passive_limit",
             authoritySource: authority.source,
             adoptedEngine,
             entryQualityGrade: authority.entryQualityGrade ?? null,
             leverageProfile: authority.leverageProfile ?? null,
             appliedLeverage: authority.appliedLeverage ?? null,
             marketRegime: authority.regime ?? null,
-            entryPrice: finalEntryPrice,
+            entryPrice: submitEntryPrice,
             stopPrice,
             takeProfitPrice: initialTpForRecord,
             paperExecutionReady: executionSnapshot.paperReady,
@@ -15866,17 +15989,24 @@ export class PaperEngine {
             orderNotionalUsdt: v2EntrySizeUsd
           });
 
-          if (isRecovery) {
-              this.logger.info("V2_ENTRY_RECOVERY_ORDER_RESULT_PROOF", {
-                  symbol: sym,
-                  side,
-                  success: submit.ok,
-                  ordId: submit.ordId,
-                  errorCode: submit.errorCode,
-                  ts: Date.now()
-              });
-              if (submit.ok) this.v2RecoveryActiveBySymbol.delete(sym);
-          }
+          this.logger.info("V2_ENTRY_ORDER_TYPE_AUTHORITY_PROOF", {
+            symbol: sym,
+            side: intentSide,
+            authorityDecision: authorityDecisionForExecution,
+            promotionReason,
+            entrySubtype,
+            executionStyle,
+            ordType: submitOrdType,
+            bestBid,
+            bestAsk,
+            slippageCapPct,
+            rawLimitPx,
+            normalizedLimitPx,
+            tickSz,
+            requestedContracts: submit.submittedContractSz ?? null,
+            orderSubmitAllowed: submit.ok,
+            reason: submit.ok ? "submit_accepted" : (submit.errorCode ?? "submit_rejected")
+          });
 
           this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
             symbol: sym,
@@ -15919,10 +16049,58 @@ export class PaperEngine {
 
           if (submit.ok) {
             const slReg = regimeForSl(authority.regime);
-            const isPending = submit.fillConfirmed !== true;
+            const isMomentumIoc = executionStyle === "MOMENTUM_MARKETABLE_IOC";
+            const hasFill = submit.fillConfirmed === true && (submit.fillSize ?? 0) > 0;
+            const isPending = !isMomentumIoc && submit.fillConfirmed !== true;
+
+            if (isMomentumIoc && !hasFill) {
+              this.logger.info("V2_IOC_ZERO_FILL_NO_LEDGER_PROOF", {
+                symbol: sym,
+                side: intentSide,
+                ord_id: submit.ordId ?? null,
+                order_state: submit.orderState ?? null,
+                fill_size: submit.fillSize ?? 0
+              });
+              const terminalZeroFill =
+                submit.orderState === "canceled" || submit.orderState === "mmp_canceled";
+              if (submit.ordId && submit.fillConfirmed !== true && !terminalZeroFill) {
+                const pendingReg: import("../models/types").PendingEntryOrderRecord = {
+                  symbol: sym,
+                  side: intentSide,
+                  ordId: String(submit.ordId),
+                  clOrdId: submit.clOrdId ?? "",
+                  instId: instIdForEntry,
+                  authority_source: authority.source,
+                  intended_notional_usdt: v2EntrySizeUsd,
+                  stopPrice,
+                  createdAt: Date.now(),
+                  submittedAt: Date.now(),
+                  status: "ENTRY_ORDER_PENDING",
+                  executionStyle,
+                  ordType: submitOrdType,
+                  entryPendingState: "ENTRY_FILL_RECONCILING",
+                  promotionReason,
+                  entrySubtype,
+                  originalAuthorityDecision: String(authority.decision),
+                  originalAuthoritySide: String(authority.side),
+                  paperRecordSnapshot: null,
+                  authoritySnapshot: authority,
+                  openTraceId: openTraceId
+                };
+                const currentPending = await this.store.readPendingEntryOrders();
+                currentPending.push(pendingReg);
+                await this.store.writePendingEntryOrders(currentPending);
+              }
+              continue;
+            }
+
             const fillPxNum =
               submit.fillPx != null && String(submit.fillPx).length > 0 ? Number(submit.fillPx) : NaN;
             const entryPxOpen = Number.isFinite(fillPxNum) && fillPxNum > 0 ? fillPxNum : first.lastPrice;
+            const filledNotionalUsd =
+              typeof submit.notionalUsd === "number" && Number.isFinite(submit.notionalUsd) && hasFill
+                ? submit.notionalUsd
+                : v2EntrySizeUsd;
             const baseQtyOpen =
               typeof submit.baseQty === "number" && Number.isFinite(submit.baseQty) && submit.baseQty > 0
                 ? submit.baseQty
@@ -15933,25 +16111,22 @@ export class PaperEngine {
               side: intentSide,
               entryPrice: entryPxOpen,
               leverage: levScaled,
-              sizeUsd: v2EntrySizeUsd,
-              initialSizeUsd: v2EntrySizeUsd,
+              sizeUsd: filledNotionalUsd,
+              initialSizeUsd: filledNotionalUsd,
               isV2Authority: true,
               pos: baseQtyOpen,
               baseQty: baseQtyOpen,
               okxContracts: submit.okxContracts,
-              notionalUsd:
-                typeof submit.notionalUsd === "number" && Number.isFinite(submit.notionalUsd)
-                  ? submit.notionalUsd
-                  : v2EntrySizeUsd,
+              notionalUsd: filledNotionalUsd,
               avgPx:
                 typeof submit.avgPx === "number" && Number.isFinite(submit.avgPx)
                   ? submit.avgPx
                   : entryPxOpen,
-              notional: v2EntrySizeUsd,
+              notional: filledNotionalUsd,
               regimeAtEntry: slReg,
               lifecycleState: isPending ? "PENDING_EXCHANGE_CONFIRM" : "OPEN",
-              isProtectiveStopRegistered: submit.ok === true,
-              isProtectionFailed: submit.ok !== true,
+              isProtectiveStopRegistered: hasFill,
+              isProtectionFailed: !hasFill,
               exchangeOrdId: submit.ordId ?? undefined,
               exchangeClOrdId: clOrdId,
               exchangeFilledSize: submit.fillSize ?? 0,
@@ -15987,12 +16162,21 @@ export class PaperEngine {
                 side: intentSide,
                 ordId: String(submit.ordId),
                 clOrdId: submit.clOrdId ?? "",
-                instId: toOkxSwapInstId(sym as MarketSymbol),
+                instId: instIdForEntry,
                 authority_source: authority.source,
                 intended_notional_usdt: v2EntrySizeUsd,
                 stopPrice,
                 createdAt: Date.now(),
+                submittedAt: Date.now(),
                 status: "ENTRY_ORDER_PENDING",
+                executionStyle,
+                ordType: submitOrdType,
+                entryPendingState: "ENTRY_SUBMIT_PENDING",
+                promotionReason,
+                entrySubtype,
+                originalAuthorityDecision: String(authority.decision),
+                originalAuthoritySide: String(authority.side),
+                originalLimitPrice: normalizedLimitPx ?? undefined,
                 paperRecordSnapshot: record,
                 authoritySnapshot: authority,
                 openTraceId: openTraceId
