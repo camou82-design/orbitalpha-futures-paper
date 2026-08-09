@@ -33,7 +33,6 @@ import { rangeExecutorEvaluateEntry } from "../strategy/executors/range-executor
 import { highwayExecutorEvaluateEntry } from "./highway-entry-executor";
 import type { AnyEntryDecision } from "../strategy/executors/types";
 import type { EntryExecutionAuthority } from "../engine-v2/types";
-import { resolveSymbolDecisionEnvelope } from "../engine-v2/reconciler";
 import { parseEngineV2OpModeFromEnv } from "../engine-v2/op-mode";
 import { aiApproveEntry, aiInputFromDecision } from "../ai/entry-approval";
 import { HighwayTrendState } from "../models/types";
@@ -1515,92 +1514,17 @@ function pack(
   };
 }
 
-/** Internal candidate discovery for V2 authority when not injected from caller. */
-function internalDiscoverV2Authority(input: EvaluatePaperSymbolEntryInput): EntryExecutionAuthority {
-  const configuredV2Mode = parseEngineV2OpModeFromEnv(process.env.ORBITALPHA_ENGINE_V2_MODE);
-  const rangeLaneForcesV2 =
-    input.regime === "RANGE" || input.routingActiveEngine === "RANGE";
-  const v2Mode = rangeLaneForcesV2 ? "engine_v2" : configuredV2Mode;
-  const sn = input.snapshot;
-  if (!sn) {
-    return { decision: "HOLD", source: "v2", side: "none", stageMarginKrw: 0, regime: "UNKNOWN", stopPrice: null, invalidationPx: null };
-  }
-
-  const v2Env = resolveSymbolDecisionEnvelope({
-    symbol: sn.symbol,
-    fetchedAt: input.now,
-      runCycleId: input.runCycleId,
-      evaluationMode: "diagnostic",
-    snapshot: {
-      lastPrice: sn.lastPrice,
-      latestCandleClose: sn.latestCandleClose,
-      boxHigh: sn.boxHigh ?? 0,
-      boxLow: sn.boxLow ?? 0,
-      boxPos: sn.boxPos ?? 0.5,
-      rangeConfidence: sn.rangeConfidence ?? 0.5,
-      breakoutFailureRate: sn.breakoutFailureRate ?? 0,
-      trendWeaknessScore: sn.trendWeaknessScore ?? 0,
-      rangeOscillationScore: sn.rangeOscillationScore ?? 0,
-      ema20: sn.ema20 ?? 0,
-      emaGap: sn.emaGap ?? 0,
-      atr: sn.atr ?? 0,
-      signal: sn.signal ?? "NONE",
-      qualityScore: sn.qualityScore ?? 0,
-      swingHighSlope: sn.swingHighSlope ?? 0,
-      swingLowSlope: sn.swingLowSlope ?? 0,
-      rangeCenterSlope: sn.rangeCenterSlope ?? 0,
-      boxHighSlope: sn.boxHighSlope ?? 0,
-      boxLowSlope: sn.boxLowSlope ?? 0,
-      ema20Slope: sn.ema20Slope ?? 0,
-      ema60Slope: sn.ema60Slope ?? 0,
-      atrExpansion: sn.atrExpansion ?? 0,
-      volumeExpansion: sn.volumeExpansion ?? 0,
-      candles: sn.candles ?? [],
-      htf_candles: sn.htf_candles
-    },
-    legacy: {
-      regime: input.regime,
-      finalDecision: "SKIP",
-      rejectReason: "v2_dry_run_candidate",
-      requiredCostUsd: 0,
-      entryAllowed: false,
-      executorLabel: "none",
-      intentSide: null,
-      adaptiveOk: false
-    },
-    config: {
-      baseSizeUsd: computePaperSizingAnchorUsd(input.config),
-      maxOpenPositions: input.config.paperMaxOpenPositions,
-      reentryCooldownMs: input.config.paperReentryCooldownMs,
-      okxLiveMaxOrderNotionalUsdt: input.config.okxLiveMaxOrderNotionalUsdt ?? 0
-    },
-    state: {
-      currentPositions: [], // Dry run only
-      globalRiskScore: 0.5,
-      lossStreaks: input.risk?.recentLossStreakByMode ?? {},
-      directionalShockState: input.risk?.directionalShockState ?? "NONE",
-      longAllow: input.risk?.longAllow ?? true,
-      shortAllow: input.risk?.shortAllow ?? true,
-      executionReadiness: true,
-      freshTickBarrierActive: false,
-      freshTickExecutionBlocked: false,
-      freshTickCompletedCycles: 2,
-      freshTickRequiredCycles: 2,
-      serverTradeEnabled: true,
-      closeOnlyMode: false,
-      killSwitch: false,
-      reconcileSafeMode: false,
-      killSwitchActive: false,
-      reconcileSafeModeActive: false,
-      accountEquityKrw: 500_000,
-      maxUsableMarginKrw: 420_000,
-      exposureNotionalCapKrw: 2_000_000,
-      symbolExposureNotionalCapKrw: 1_400_000
-    },
-    v2Mode
-  });
-
-  return v2Env.authority;
+/** Placeholder only — authoritative V2 evaluation runs once in paper-engine via resolveSymbolDecisionEnvelope. */
+function neutralV2AuthorityPlaceholder(input: EvaluatePaperSymbolEntryInput): EntryExecutionAuthority {
+  return {
+    decision: "HOLD",
+    source: "v2",
+    side: "none",
+    stageMarginKrw: 0,
+    regime: input.regime ?? "UNKNOWN",
+    stopPrice: null,
+    invalidationPx: null
+  };
 }
 
 /**
@@ -1639,7 +1563,7 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   const sym = sn.symbol;
 
 
-  const authority = input.authority || internalDiscoverV2Authority(input);
+  const authority = input.authority || neutralV2AuthorityPlaceholder(input);
   const v2AuthorityOwnsExecution =
     authority.decision === "ENTER" &&
     authority.source === "v2" &&

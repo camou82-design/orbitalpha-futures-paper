@@ -4694,24 +4694,27 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
 
     // Required Proof Log: LIVE_ORDER_SIZING_AUTHORITY_PROOF
-    console.info(JSON.stringify({
-        event: "LIVE_ORDER_SIZING_AUTHORITY_PROOF",
-        symbol: String(input.symbol),
-        accountEquityUsdt,
-        availableBalanceUsdt,
-        existingAccountNotionalUsdt,
-        existingSymbolNotionalUsdt,
-        requestedOrderNotionalUsdt,
-        finalOrderNotionalUsdt,
-        maxOrderNotionalUsdt: maxOrderNotionalUsdt ?? null,
-        maxAddonNotionalUsdt: maxAddonNotionalUsdt ?? null,
-        maxSymbolNotionalUsdt: maxSymbolNotionalUsdt ?? null,
-        maxAccountNotionalUsdt: maxAccountNotionalUsdt ?? null,
-        currentAddonCount,
-        isAddon: isAddOn,
-        blocked: finalDecision !== "ENTER",
-        blockReason: blockReason ?? null
-    }));
+    if (input.evaluationMode !== "diagnostic") {
+        console.info(JSON.stringify({
+            event: "LIVE_ORDER_SIZING_AUTHORITY_PROOF",
+            symbol: String(input.symbol),
+            evaluation_mode: input.evaluationMode ?? "authoritative",
+            accountEquityUsdt,
+            availableBalanceUsdt,
+            existingAccountNotionalUsdt,
+            existingSymbolNotionalUsdt,
+            requestedOrderNotionalUsdt,
+            finalOrderNotionalUsdt,
+            maxOrderNotionalUsdt: maxOrderNotionalUsdt ?? null,
+            maxAddonNotionalUsdt: maxAddonNotionalUsdt ?? null,
+            maxSymbolNotionalUsdt: maxSymbolNotionalUsdt ?? null,
+            maxAccountNotionalUsdt: maxAccountNotionalUsdt ?? null,
+            currentAddonCount,
+            isAddon: isAddOn,
+            blocked: finalDecision !== "ENTER",
+            blockReason: blockReason ?? null
+        }));
+    }
 
     if (isDeadlockProbe && finalDecision !== "ENTER") {
         console.warn(JSON.stringify({
@@ -6057,6 +6060,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Note: SA and deadlock promotion paths produce ENTER decision with execution.signal === "NONE".
     // In those cases, decision.decision is the authoritative ENTER marker; do NOT zero out side.
     const isValidEnter = decision.decision === "ENTER" && decision.side !== "none";
+    if (isValidEnter) {
+        if (!decision.signal || decision.signal === "NONE") {
+            decision.signal = decision.side === "long" ? "LONG_CANDIDATE" : "SHORT_CANDIDATE";
+        }
+    }
     if (!isValidEnter) {
         if (!decision.metadata) {
             decision.metadata = {};
@@ -6080,12 +6088,25 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         decision.executionAction = "NONE";
     }
 
+    const bridgeFinalSignal = (() => {
+        if (decision.decision === "ENTER" && decision.side === "long") {
+            const snap = String(input.snapshot?.signal ?? "");
+            return snap === "paper_long_candidate_v2" ? "paper_long_candidate_v2" : "paper_long_candidate";
+        }
+        if (decision.decision === "ENTER" && decision.side === "short") {
+            const snap = String(input.snapshot?.signal ?? "");
+            return snap === "paper_short_candidate_v2" ? "paper_short_candidate_v2" : "paper_short_candidate";
+        }
+        return decision.signal;
+    })();
+
     console.info(JSON.stringify({
         event: "V2_ENTRY_EXECUTION_BRIDGE_PROOF",
         symbol: String(input.symbol),
         final_decision: decision.decision,
         final_side: decision.side,
-        final_signal: decision.signal,
+        final_signal: bridgeFinalSignal,
+        v2_signal_state: decision.signal,
         stage_margin_krw: decision.risk.stageMarginKrw,
         applied_leverage: decision.risk.appliedLeverage,
         exposure_notional_krw: decision.risk.exposureNotionalKrw,
@@ -6111,8 +6132,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
 
     if (finalDecision === "ENTER") {
-        symbolLastV2EnterDecisionAtMap.set(symbolStr, input.now);
-        symbolCyclesSinceLastEnterMap.set(symbolStr, 0);
+        if (input.evaluationMode !== "diagnostic") {
+            symbolLastV2EnterDecisionAtMap.set(symbolStr, input.now);
+            symbolCyclesSinceLastEnterMap.set(symbolStr, 0);
+        }
 
         if (isDeadlockProbe) {
             symbolLastProbeAtMap.set(symbolStr, input.now);
@@ -6120,7 +6143,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             symbolLastProbeQualityMap.set(symbolStr, qualityScore);
             symbolLastProbeStructureMap.set(symbolStr, `${judgment.regime}|${judgment.subtype ?? "none"}|${zone}`);
         }
-    } else {
+    } else if (input.evaluationMode !== "diagnostic") {
         symbolCyclesSinceLastEnterMap.set(symbolStr, (symbolCyclesSinceLastEnterMap.get(symbolStr) ?? 0) + 1);
     }
 

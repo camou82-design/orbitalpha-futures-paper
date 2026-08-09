@@ -16,6 +16,65 @@ import { adaptV2Input, runEngineV2 } from "./index";
 import { buildV2ExecutionAuthorityEnvelope } from "./execution/envelope";
 import type { V2ExecutionAuthorityEnvelope, V2LegacyComparison } from "./execution/types";
 
+type CycleAuthorityCommitRecord = {
+    runCycleId: string;
+    symbol: string;
+    firstAuthorityDecision: string;
+    firstAuthoritySide: string;
+    firstSignedExecutionReady: boolean;
+    decisionSource: "LIVE_EXECUTION" | "DIAGNOSTIC";
+    accountEquityUsdt: number | null;
+};
+
+const cycleAuthorityCommitByKey = new Map<string, CycleAuthorityCommitRecord>();
+
+function cycleAuthorityKey(runCycleId: string | undefined, symbol: string): string {
+    return `${runCycleId ?? "unknown"}:${String(symbol).toUpperCase()}`;
+}
+
+function pruneCycleAuthorityCommits(activeRunCycleId: string | undefined): void {
+    if (!activeRunCycleId) return;
+    const prefix = `${activeRunCycleId}:`;
+    for (const key of cycleAuthorityCommitByKey.keys()) {
+        if (!key.startsWith(prefix)) {
+            cycleAuthorityCommitByKey.delete(key);
+        }
+    }
+}
+
+function readBridgeAccountEquityUsdt(state: V2BridgeInput["state"]): number | null {
+    const fromState = (state as { accountEquityUsdt?: unknown }).accountEquityUsdt;
+    if (typeof fromState === "number" && Number.isFinite(fromState)) return fromState;
+    const wallet = (state as { okxWalletBalanceUsdt?: unknown }).okxWalletBalanceUsdt;
+    if (typeof wallet === "number" && Number.isFinite(wallet)) return wallet;
+    return null;
+}
+
+function emitSingleCycleAuthorityCommitProof(args: {
+    runCycleId: string | undefined;
+    symbol: string;
+    first: CycleAuthorityCommitRecord;
+    secondaryEvaluationDetected: boolean;
+    secondaryDecision: string | null;
+    secondarySide: string | null;
+    secondaryAllowedToMutate: boolean;
+}): void {
+    console.info(JSON.stringify({
+        event: "V2_SINGLE_CYCLE_AUTHORITY_COMMIT_PROOF",
+        run_cycle_id: args.runCycleId ?? null,
+        symbol: args.symbol,
+        first_authority_decision: args.first.firstAuthorityDecision,
+        first_authority_side: args.first.firstAuthoritySide,
+        first_signed_execution_ready: args.first.firstSignedExecutionReady,
+        secondary_evaluation_detected: args.secondaryEvaluationDetected,
+        secondary_decision: args.secondaryDecision,
+        secondary_side: args.secondarySide,
+        secondary_allowed_to_mutate: args.secondaryAllowedToMutate,
+        final_committed_decision: args.first.firstAuthorityDecision,
+        final_committed_side: args.first.firstAuthoritySide
+    }));
+}
+
 /** 
  * LEGACY NORMALIZATION HELPERS (Phase 4 Independence)
  * Ensures consistent behavior across engine boundaries.
@@ -250,6 +309,83 @@ export function resolveSymbolDecisionEnvelope(
     input: V2BridgeInput
 ): SymbolDecisionEnvelope {
     const { symbol, fetchedAt, snapshot, legacy: legacyBridge, config, state, v2Mode } = input;
+    const evaluationMode = input.evaluationMode ?? "authoritative";
+    const commitKey = cycleAuthorityKey(input.runCycleId, String(symbol));
+    pruneCycleAuthorityCommits(input.runCycleId);
+    const existingCommit = cycleAuthorityCommitByKey.get(commitKey);
+
+    if (evaluationMode === "diagnostic") {
+        emitSingleCycleAuthorityCommitProof({
+            runCycleId: input.runCycleId,
+            symbol: String(symbol),
+            first: existingCommit ?? {
+                runCycleId: input.runCycleId ?? "unknown",
+                symbol: String(symbol),
+                firstAuthorityDecision: "SKIP",
+                firstAuthoritySide: "none",
+                firstSignedExecutionReady: false,
+                decisionSource: "DIAGNOSTIC",
+                accountEquityUsdt: null
+            },
+            secondaryEvaluationDetected: existingCommit != null,
+            secondaryDecision: "DIAGNOSTIC_SKIPPED",
+            secondarySide: "none",
+            secondaryAllowedToMutate: false
+        });
+        const diagnosticAuthority: EntryExecutionAuthority = {
+            decision: "HOLD",
+            source: "v2",
+            side: "none",
+            stageMarginKrw: 0,
+            regime: legacyBridge.regime ?? "UNKNOWN",
+            stopPrice: null,
+            invalidationPx: null
+        };
+        const diagnosticLegacy: LegacyDecisionResult = {
+            decision: {
+                regime_state: legacyBridge.regime,
+                final_decision: legacyBridge.finalDecision,
+                reject_reason: legacyBridge.rejectReason,
+                required_cost_usd: legacyBridge.requiredCostUsd
+            },
+            executorDecision: null,
+            intentSide: normalizeAuthoritySide(legacyBridge.intentSide),
+            adaptiveOk: legacyBridge.adaptiveOk,
+            adaptiveDetail: legacyBridge.adaptiveDetail
+        };
+        return {
+            legacy: diagnosticLegacy,
+            selector: null as unknown as EngineV2SelectorResult,
+            authority: diagnosticAuthority,
+            execution_authority_source: "diagnostic_observation_only",
+            execution_authority_version: "diagnostic_skipped",
+            v2_execution_envelope: undefined,
+            legacy_comparison: {
+                legacyDecision: legacyBridge.finalDecision as EngineV2FinalDecision,
+                legacySide: normalizeAuthoritySide(legacyBridge.intentSide),
+                legacySize: legacyBridge.requiredCostUsd,
+                v2Decision: "SKIP",
+                v2Side: "none",
+                v2Size: 0,
+                selectorMismatch: false
+            },
+            hard_block_present: false,
+            runtime_authority_owner: "V2",
+            runtime_authority_decision: "SKIP",
+            runtime_authority_side: "none",
+            runtime_authority_stage_margin_krw: 0,
+            runtime_authority_size_usdt: 0,
+            runtime_authority_new_stop_px: null,
+            runtime_authority_invalidation_px: null,
+            v1_decision: legacyBridge.finalDecision,
+            v1_side: normalizeAuthoritySide(legacyBridge.intentSide) ?? undefined,
+            v1_size: legacyBridge.requiredCostUsd,
+            v2_decision: "SKIP",
+            v2_side: "none",
+            v2_size: 0,
+            selector_mismatch: false
+        };
+    }
 
     // 1. Snapshot Mapping (Bridge DTO -> Internal Adapter)
     const snapshotAdapter: LegacySnapshotAdapter = {
@@ -741,6 +877,66 @@ export function resolveSymbolDecisionEnvelope(
         side_veto_detail: executionEnvelope.side_veto_detail,
         trend_ok: executionEnvelope.trend_ok
     }));
+
+    const accountEquityUsdt = readBridgeAccountEquityUsdt(state);
+    const signedExecutionReadyCommitted = executionEnvelope.signedExecutionReady === true;
+    const liveSizingAuthoritative =
+        accountEquityUsdt != null ||
+        (executionEnvelope.stageMarginKrw > 0 && signedExecutionReadyCommitted);
+    const priorCommit = cycleAuthorityCommitByKey.get(commitKey);
+    const currentDecision = String(executionEnvelope.decision);
+    const currentSide = String(executionEnvelope.side ?? "none");
+
+    if (liveSizingAuthoritative) {
+        const secondaryWeakPass =
+            priorCommit != null &&
+            priorCommit.decisionSource === "LIVE_EXECUTION" &&
+            priorCommit.accountEquityUsdt != null &&
+            accountEquityUsdt == null &&
+            priorCommit.firstAuthorityDecision === "ENTER" &&
+            currentDecision !== "ENTER";
+
+        if (secondaryWeakPass) {
+            emitSingleCycleAuthorityCommitProof({
+                runCycleId: input.runCycleId,
+                symbol: String(symbol),
+                first: priorCommit,
+                secondaryEvaluationDetected: true,
+                secondaryDecision: currentDecision,
+                secondarySide: currentSide,
+                secondaryAllowedToMutate: false
+            });
+        } else if (!priorCommit) {
+            cycleAuthorityCommitByKey.set(commitKey, {
+                runCycleId: input.runCycleId ?? "unknown",
+                symbol: String(symbol),
+                firstAuthorityDecision: currentDecision,
+                firstAuthoritySide: currentSide,
+                firstSignedExecutionReady: signedExecutionReadyCommitted,
+                decisionSource: "LIVE_EXECUTION",
+                accountEquityUsdt
+            });
+            emitSingleCycleAuthorityCommitProof({
+                runCycleId: input.runCycleId,
+                symbol: String(symbol),
+                first: cycleAuthorityCommitByKey.get(commitKey)!,
+                secondaryEvaluationDetected: false,
+                secondaryDecision: null,
+                secondarySide: null,
+                secondaryAllowedToMutate: false
+            });
+        } else {
+            emitSingleCycleAuthorityCommitProof({
+                runCycleId: input.runCycleId,
+                symbol: String(symbol),
+                first: priorCommit,
+                secondaryEvaluationDetected: true,
+                secondaryDecision: currentDecision,
+                secondarySide: currentSide,
+                secondaryAllowedToMutate: false
+            });
+        }
+    }
 
     // 6. Comparison Metrics for Engine-State
     return {

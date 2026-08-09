@@ -1256,6 +1256,7 @@ export class PaperEngine {
   private engineLastTickAt: number | null = null;
   private marketDataLastUpdateAt: number | null = null;
   private v2LastDecisionAt: number | null = null;
+  private lastBtcPaperSideSnapshot: { side: string; reconcileState: string } = { side: "none", reconcileState: "none" };
   private bundleLastWrittenAt: number | null = null;
   /** Main loop scheduling (mirrors `src/loop.ts` + ORBITALPHA_PAPER_LOOP_INTERVAL_MS). */
   private loopIntervalTargetMs = 10_000;
@@ -1988,8 +1989,105 @@ export class PaperEngine {
     });
   }
 
+  private resolveBtcExecutionSuppressorState(authorityDecision?: string, authoritySide?: string): {
+    suppressor_active: boolean;
+    suppressor_reason: string | null;
+    okx_actual_side: string;
+    paper_side: string;
+    v2_inferred_side: string;
+    reconcile_state: string;
+    paper_execution_ready: boolean;
+    signed_execution_ready: boolean;
+    authority_decision: string;
+    authority_side: string;
+    order_submit_allowed: boolean;
+  } {
+    let okxActualSide = "none";
+    if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
+      for (const p of this.lastLivePositionsPayload) {
+        const hit = okxSwapRowToLedgerKey(p as Record<string, unknown>);
+        if (hit && hit.symbol === "BTCUSDT") {
+          okxActualSide = hit.side;
+          break;
+        }
+      }
+    }
+
+    let paperSide = this.lastBtcPaperSideSnapshot.side;
+    let reconcileState = this.lastBtcPaperSideSnapshot.reconcileState;
+
+    const v2InferredSide = (this.lastRisk as any)?.v2InferredSide ?? okxActualSide;
+    const paperExecutionReady = this.paperExecutionReady === true;
+    const signedExecutionReady = this.signedExecutionReady === true;
+    const closeOnlyMode =
+      this.serverTradeControlState.close_only_mode === true || this.reconcileSafetyCloseOnly === true;
+    const killSwitch = this.serverTradeControlState.kill_switch_active === true;
+    const readinessBarrierActive =
+      this.freshTickRequiredAfterReadiness === true &&
+      this.readinessFreshTickCompletedCycles < this.readinessFreshTickRequiredCycles;
+    const externalManualBlocked =
+      this.symbolExternalManualBlocked.has("BTCUSDT:long") ||
+      this.symbolExternalManualBlocked.has("BTCUSDT:short");
+    const protectionFailed = this.symbolProtectionFailedBlocked.has("BTCUSDT");
+    const reconcileMismatch =
+      reconcileState === "RECONCILE_MISMATCH" ||
+      externalManualBlocked ||
+      protectionFailed;
+
+    const reasons: string[] = [];
+    if (reconcileMismatch) reasons.push("reconcile_or_external_manual_conflict");
+    if (okxActualSide === "long") reasons.push("okx_actual_long_position");
+    if (closeOnlyMode) reasons.push("close_only_mode");
+    if (killSwitch) reasons.push("kill_switch");
+    if (readinessBarrierActive) reasons.push("recovery_barrier");
+    if (!signedExecutionReady) reasons.push("signed_execution_not_ready");
+    if (!paperExecutionReady) reasons.push("paper_execution_not_ready");
+
+    const suppressor_active = reasons.length > 0;
+    const authorityDecisionOut = authorityDecision ?? "SKIP";
+    const authoritySideOut = authoritySide ?? "none";
+    const order_submit_allowed =
+      !suppressor_active &&
+      authorityDecisionOut === "ENTER" &&
+      (authoritySideOut === "long" || authoritySideOut === "short") &&
+      paperExecutionReady &&
+      signedExecutionReady;
+
+    return {
+      suppressor_active,
+      suppressor_reason: suppressor_active ? reasons.join("|") : null,
+      okx_actual_side: okxActualSide,
+      paper_side: paperSide,
+      v2_inferred_side: String(v2InferredSide ?? "none"),
+      reconcile_state: reconcileState,
+      paper_execution_ready: paperExecutionReady,
+      signed_execution_ready: signedExecutionReady,
+      authority_decision: authorityDecisionOut,
+      authority_side: authoritySideOut,
+      order_submit_allowed
+    };
+  }
+
+  private emitBtcExecutionSuppressorProof(authorityDecision?: string, authoritySide?: string): void {
+    const proof = this.resolveBtcExecutionSuppressorState(authorityDecision, authoritySide);
+    this.logger.info("V2_BTC_EXECUTION_SUPPRESSOR_PROOF", {
+      symbol: "BTCUSDT",
+      suppressor_active: proof.suppressor_active,
+      suppressor_reason: proof.suppressor_reason,
+      okx_actual_side: proof.okx_actual_side,
+      paper_side: proof.paper_side,
+      v2_inferred_side: proof.v2_inferred_side,
+      reconcile_state: proof.reconcile_state,
+      paper_execution_ready: proof.paper_execution_ready,
+      signed_execution_ready: proof.signed_execution_ready,
+      authority_decision: proof.authority_decision,
+      authority_side: proof.authority_side,
+      order_submit_allowed: proof.order_submit_allowed
+    });
+  }
+
   private isBtcSuppressionTarget(): boolean {
-    return true;
+    return this.resolveBtcExecutionSuppressorState().suppressor_active;
   }
 
   private buildOkxRemotePositionAuthority(
@@ -4472,6 +4570,13 @@ export class PaperEngine {
     this.lastExplanation = explanationOut;
 
     let opensAfterClose = await this.positions.loadOpenAll();
+    {
+      const btcOpen = opensAfterClose.find((o) => o.symbol === "BTCUSDT");
+      this.lastBtcPaperSideSnapshot = {
+        side: btcOpen ? String(btcOpen.side).toLowerCase() : "none",
+        reconcileState: btcOpen ? String(btcOpen.reconcileState ?? "none") : "none"
+      };
+    }
     const lastCloseMetaBySymbolForDecision =
       this.config.paperReentryCooldownMs > 0 ? latestCloseMetaBySymbol(await this.store.readPositionsHistory()) : null;
     const regimeUnknown = btc5.length < MIN_BTC_5M_BARS_REGIME;
@@ -5043,11 +5148,19 @@ export class PaperEngine {
         ledger_equity_multiple: ledgerEquityMultiple
       });
 
-      // 5. V2 No-Entry Audit (Required by USER - Consolidated location)
-      if (
-        (envelope.runtime_authority_owner === "V2" || authority.source === "v2") &&
-        envelope.runtime_authority_decision !== "ENTER"
-      ) {
+      // 5. V2 decision freshness audit (authoritative evaluation timestamp for dashboard/monitor)
+      if (envelope.runtime_authority_owner === "V2" || authority.source === "v2") {
+        const authorityDecisionAt = fetchedAt;
+        if (envelope.runtime_authority_decision === "ENTER") {
+          await this.store.mergeNoEntryAuditSnapshot(String(sym), {
+            authority_decision: envelope.runtime_authority_decision,
+            authority_side: envelope.runtime_authority_side ?? authority.side ?? "none",
+            expected_missing_condition: "ENTER_AUTHORITY_ACTIVE",
+            expected_next_action: "EXECUTE_V2_AUTHORITY",
+            audit_source: "v2_execution_envelope_authoritative",
+            ts: authorityDecisionAt
+          });
+        } else {
         const v2 = selectorResult?.v2_result;
         const v2Env = envelope.v2_execution_envelope;
         const v2Risk = v2?.risk;
@@ -5317,6 +5430,20 @@ export class PaperEngine {
           htf_1d_bias: v2Env?.daily_bias_actual ?? null,
         };
         await this.store.mergeNoEntryAuditSnapshot(String(sym), noEntryAuditRow);
+        }
+
+        const dashboardDecisionAt = authorityDecisionAt;
+        const ageDiffMs = Math.max(0, Date.now() - authorityDecisionAt);
+        this.logger.info("V2_DASHBOARD_DECISION_FRESHNESS_PROOF", {
+          symbol: sym,
+          run_cycle_id: this.runCycleId,
+          authority_decision: envelope.runtime_authority_decision,
+          authority_side: envelope.runtime_authority_side ?? authority.side ?? "none",
+          authority_decision_at: authorityDecisionAt,
+          dashboard_decision_at: dashboardDecisionAt,
+          age_diff_ms: ageDiffMs,
+          freshness_passed: ageDiffMs <= 60_000
+        });
       }
 
 
@@ -13505,6 +13632,7 @@ export class PaperEngine {
       const base = snapshotBySymbol.get(symKey) ?? snapshot;
 
       if (symKey === "BTCUSDT") {
+        this.emitBtcExecutionSuppressorProof(authority.decision, authority.side ?? "none");
         if (this.isBtcSuppressionTarget()) {
           if (authority.decision === "ENTER") {
             this.logAndSuppressBtcUsdtAction("processPaperSymbolEntries ENTER gate", "none", ["ENTER", "ADDON"]);
@@ -18264,21 +18392,11 @@ export class PaperEngine {
   }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null; updatedRecord?: PaperOpenPositionRecord; pendingOnly?: boolean }> {
     const { symbol, v2Decision, lastPrice, committedRiskPlan } = args;
 
-    // BTC Suppressor (Requirement 5): Use okxSwapRowToLedgerKey parser exclusively
-    let hasBtcLongActual = false;
-    if (symbol === "BTCUSDT" && Array.isArray(this.lastLivePositionsPayload)) {
-      for (const p of this.lastLivePositionsPayload) {
-        const hit = okxSwapRowToLedgerKey(p as Record<string, unknown>);
-        if (hit && hit.symbol === "BTCUSDT" && hit.side === "long") {
-          hasBtcLongActual = true;
-          break;
-        }
-      }
-    }
-    if (hasBtcLongActual) {
-      await this.logAndSuppressBtcUsdtAction("v2_authorized_entry", "long", ["ENTER", "ADDON", "ORDER_SUBMIT"]);
-      console.log("EXECUTE_AUTH_FAIL", "BTCUSDT_OKX_LONG_POSITION_PROTECTED");
-      return { executed: false, blockReason: "BTCUSDT_OKX_LONG_POSITION_PROTECTED" };
+    // BTC Suppressor: only when real operational conflict exists (not blanket symbol block)
+    if (symbol === "BTCUSDT" && this.isBtcSuppressionTarget()) {
+      await this.logAndSuppressBtcUsdtAction("v2_authorized_entry", v2Decision.side ?? "none", ["ENTER", "ADDON", "ORDER_SUBMIT"]);
+      console.log("EXECUTE_AUTH_FAIL", "BTCUSDT_EXECUTION_SUPPRESSOR_ACTIVE");
+      return { executed: false, blockReason: "BTCUSDT_EXECUTION_SUPPRESSOR_ACTIVE" };
     }
 
     // Requirement 1: executionAction strictly from v2Decision. NO RE-INFERRING!
@@ -18729,6 +18847,8 @@ function buildEngineStateSymbolDecision(envelope: PaperEngineDecisionEnvelope): 
 
     authority_decision: authority.decision,
     authority_side: authority.side,
+    authority_evaluated_at: envelope.authorityEvaluatedAt ?? null,
+    authority_decision_at: envelope.authorityEvaluatedAt ?? null,
     authority_stage_margin_krw: authority.decision === "ENTER" ? authority.stageMarginKrw : 0,
     authority_size_usdt: authority.decision === "ENTER" ? (authority.stageMarginKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD) : 0,
     authority_source: authority.source,
