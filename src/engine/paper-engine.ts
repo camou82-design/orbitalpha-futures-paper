@@ -1,4 +1,4 @@
-import * as path from "node:path";
+﻿import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 
@@ -2306,7 +2306,7 @@ export class PaperEngine {
             open.partialPendingSizeUsd = undefined;
             open.partialPendingOriginalSizeUsd = undefined;
             open.partialPendingProcessedFillSz = undefined;
-            open.partialPendingProcessedUsd = undefined;
+            open.partialPendingProcessedMarginUsd = undefined;
             open.partialPendingAt = undefined;
             open.partialPendingReduceRatio = undefined;
             open.partialPendingReason = undefined;
@@ -2542,18 +2542,42 @@ export class PaperEngine {
                   const inst = this.instrumentCache.get(instId);
                   const ctVal = inst?.ctVal ?? 1;
 
-                  open.sizeUsd = Math.max(0, open.sizeUsd - deltaFilledUsd);
-                  open.realizedPnl = (open.realizedPnl ?? 0) + metrics.pnlUsdNet;
+                  const deltaContracts = deltaFillSz;
+                  const deltaBaseQty = deltaContracts * ctVal;
+                  const deltaNotionalUsd = deltaBaseQty * fillPx;
+                  const deltaMarginUsd = deltaNotionalUsd / (open.leverage ?? 10);
 
-                  // Update decoupled quantity fields
-                  if (open.pos != null) open.pos = open.sizeUsd / (open.entryPrice || 1);
-                  if (open.baseQty != null) open.baseQty = Math.max(0, open.baseQty - (deltaFillSz * ctVal));
-                  if (open.okxContracts != null) open.okxContracts = Math.max(0, open.okxContracts - deltaFillSz);
-                  if (open.notionalUsd != null) open.notionalUsd = Math.max(0, open.notionalUsd - deltaFilledUsd);
+                  const beforeContracts = open.okxContracts;
+                  const beforeBaseQty = open.baseQty;
+                  const beforeNotionalUsd = open.notionalUsd;
+                  const beforeSizeUsd = open.sizeUsd;
+
+                  open.realizedPnl = (open.realizedPnl ?? 0) + metrics.pnlUsdNet;
+                  if (open.okxContracts != null) open.okxContracts = Math.max(0, open.okxContracts - deltaContracts);
+                  if (open.baseQty != null) open.baseQty = Math.max(0, open.baseQty - deltaBaseQty);
+                  if (open.baseQty != null) open.pos = open.baseQty;
+                  if (open.notionalUsd != null) open.notionalUsd = Math.max(0, open.notionalUsd - deltaNotionalUsd);
+                  open.sizeUsd = Math.max(0, open.sizeUsd - deltaMarginUsd);
+                  
+                  this.logger.info("V2_PARTIAL_LEDGER_UNIT_RECONCILE_PROOF", {
+                    symbol: open.symbol,
+                    before_contracts: beforeContracts,
+                    after_contracts: open.okxContracts,
+                    before_baseQty: beforeBaseQty,
+                    after_baseQty: open.baseQty,
+                    deltaNotionalUsd,
+                    deltaMarginUsd,
+                    before_notionalUsd: beforeNotionalUsd,
+                    after_notionalUsd: open.notionalUsd,
+                    before_sizeUsd: beforeSizeUsd,
+                    after_sizeUsd: open.sizeUsd,
+                    fillPx,
+                    leverage: open.leverage ?? 10
+                  });
                   
                   // Update processed counters
                   open.partialPendingProcessedFillSz = cumulativeFillSz;
-                  open.partialPendingProcessedUsd = (open.partialPendingProcessedUsd ?? 0) + deltaFilledUsd;
+                  open.partialPendingProcessedMarginUsd = (open.partialPendingProcessedMarginUsd ?? 0) + deltaMarginUsd;
 
                   // Force protective stop re-registration on size change
                   if (open.protectiveStopAlgoId && open.isProtectiveStopRegistered) {
@@ -2577,7 +2601,7 @@ export class PaperEngine {
                     open.partialPendingSizeUsd = undefined;
                     open.partialPendingOriginalSizeUsd = undefined;
                     open.partialPendingProcessedFillSz = undefined;
-                    open.partialPendingProcessedUsd = undefined;
+                    open.partialPendingProcessedMarginUsd = undefined;
                     open.partialPendingAt = undefined;
                     open.partialPendingReduceRatio = undefined;
                     open.partialPendingReason = undefined;
@@ -2594,7 +2618,7 @@ export class PaperEngine {
                     symbol: open.symbol,
                     side: open.side,
                     delta_reduced_usd: deltaFilledUsd,
-                    total_processed_usd: open.partialPendingProcessedUsd,
+                    total_processed_margin_usd: open.partialPendingProcessedMarginUsd,
                     remaining_size_usd: open.sizeUsd,
                     realized_pnl: metrics.pnlUsdNet,
                     total_realized_pnl: open.realizedPnl,
@@ -2639,7 +2663,7 @@ export class PaperEngine {
               open.partialPendingSizeUsd = undefined;
               open.partialPendingOriginalSizeUsd = undefined;
               open.partialPendingProcessedFillSz = undefined;
-              open.partialPendingProcessedUsd = undefined;
+              open.partialPendingProcessedMarginUsd = undefined;
               open.partialPendingAt = undefined;
               open.partialPendingReduceRatio = undefined;
               open.partialPendingReason = undefined;
@@ -2732,7 +2756,7 @@ export class PaperEngine {
               open.partialPendingSizeUsd = undefined;
               open.partialPendingOriginalSizeUsd = undefined;
               open.partialPendingProcessedFillSz = undefined;
-              open.partialPendingProcessedUsd = undefined;
+              open.partialPendingProcessedMarginUsd = undefined;
               open.partialPendingAt = undefined;
               open.partialPendingReduceRatio = undefined;
               open.partialPendingReason = undefined;
@@ -3011,9 +3035,27 @@ export class PaperEngine {
         const actualMarginUsd = notional / leverage;
         const instId = remoteVal.instId ?? toOkxSwapInstId(symbol);
         const inst = this.instrumentCache.get(instId);
-        const ctVal = inst?.ctVal ?? 1;
-        const okxContracts = Math.abs(Number(remoteVal.size));
-        const baseQty = okxContracts * ctVal;
+        
+        const baseQty = Math.abs(Number(remoteVal.size));
+        let okxContracts: number | undefined = undefined;
+        let finalLifecycleState: PaperOpenPositionRecord["lifecycleState"] = lifecycleState as PaperOpenPositionRecord["lifecycleState"];
+        
+        if (inst && inst.ctVal > 0) {
+           okxContracts = baseQty / inst.ctVal;
+        } else {
+           finalLifecycleState = "CLOSE_ONLY_MANAGED";
+        }
+
+        this.logger.info("ADOPTED_POSITION_UNIT_AUTHORITY_PROOF", {
+           symbol,
+           remote_size_raw: remoteVal.size,
+           base_qty: baseQty,
+           ct_val: inst?.ctVal,
+           okx_contracts: okxContracts,
+           lot_sz: inst?.lotSz,
+           min_sz: inst?.minSz,
+           unit_source: "okx_reconcile"
+        });
 
         const adopted: PaperOpenPositionRecord = {
           openedAt: originalOpenedAt,
@@ -3026,7 +3068,7 @@ export class PaperEngine {
           strategyVersion: "paper-v2",
           sourceSignal: isEngineOwned ? "okx_reconcile_untracked_auto" : "okx_reconcile_adopted",
           sourceRunPath: isEngineOwned ? "auto_adoption_untracked" : "manual_adoption",
-          lifecycleState,
+          lifecycleState: finalLifecycleState,
           reconcileState: "ADOPTED",
           lastCheckedAt: nowTs,
           status: "open",
@@ -6358,6 +6400,7 @@ export class PaperEngine {
     ok: boolean; 
     ordId?: string; 
     fillConfirmed?: boolean;
+    actualFillPx?: number | null;
     clOrdId?: string;
     errorCode?: string | null;
     errorMessage?: string | null;
@@ -6525,11 +6568,95 @@ export class PaperEngine {
       ok: result.ok, 
       ordId: result.ordId ?? undefined, 
       fillConfirmed: result.fillConfirmed,
+      actualFillPx: result.fillPx ? Number(result.fillPx) : null,
       clOrdId: result.clOrdId,
       errorCode: result.errorCode,
       errorMessage: result.errorMessage
     };
   }
+
+  private async finalizeFullClose(input: {
+    open: PaperOpenPositionRecord;
+    closeSubmit: {
+      ok: boolean;
+      ordId?: string;
+      fillConfirmed?: boolean;
+      actualFillPx?: number | null;
+      clOrdId?: string;
+    };
+    closedRow: PaperClosedPositionRecord;
+    cr: string;
+    closeSource: string;
+    regimeNow: MarketRegime;
+    envelope: any;
+    flowId: string;
+    requestedContracts: number;
+    requestedPrice: number;
+  }): Promise<{ historyAppendAllowed: boolean; ledgerPruneAllowed: boolean; routedClosed?: PaperClosedPositionRecord }> {
+    const { open, closeSubmit, closedRow, cr, closeSource, regimeNow, envelope, flowId, requestedContracts, requestedPrice } = input;
+    
+    if (!closeSubmit.ok || !closeSubmit.ordId) {
+      this.logger.info("V2_FULL_CLOSE_FILL_AUTHORITY_PROOF", {
+        symbol: open.symbol,
+        reason: cr,
+        requestedContracts,
+        ordId: closeSubmit.ordId,
+        orderState: "SUBMIT_FAILED",
+        fillConfirmed: false,
+        requestedPrice,
+        actualFillPx: null,
+        historyAppendAllowed: false,
+        ledgerPruneAllowed: false
+      });
+      return { historyAppendAllowed: false, ledgerPruneAllowed: false };
+    }
+
+    if (!closeSubmit.fillConfirmed) {
+      open.lifecycleState = "CLOSE_PENDING";
+      open.closePendingOrdId = closeSubmit.ordId;
+      this.logger.info("V2_FULL_CLOSE_FILL_AUTHORITY_PROOF", {
+        symbol: open.symbol,
+        reason: cr,
+        requestedContracts,
+        ordId: closeSubmit.ordId,
+        orderState: "CLOSE_PENDING",
+        fillConfirmed: false,
+        requestedPrice,
+        actualFillPx: null,
+        historyAppendAllowed: false,
+        ledgerPruneAllowed: false
+      });
+      return { historyAppendAllowed: false, ledgerPruneAllowed: false };
+    }
+
+    const actualFillPx = closeSubmit.actualFillPx ?? requestedPrice;
+
+    this.logger.info("V2_FULL_CLOSE_FILL_AUTHORITY_PROOF", {
+      symbol: open.symbol,
+      reason: cr,
+      requestedContracts,
+      ordId: closeSubmit.ordId,
+      orderState: "FILLED",
+      fillConfirmed: true,
+      requestedPrice,
+      actualFillPx,
+      historyAppendAllowed: true,
+      ledgerPruneAllowed: true
+    });
+
+    const routedClosed = await this.appendClosedWithStandardRouting({
+      closedRow,
+      open,
+      flowId,
+      envelope,
+      exitReason: cr,
+      closeSource,
+      currentRegime: regimeNow
+    });
+    
+    return { historyAppendAllowed: true, ledgerPruneAllowed: true, routedClosed };
+  }
+
 
   private buildLiveLimitOrderPrice(input: {
     symbol: string;
@@ -9206,7 +9333,7 @@ export class PaperEngine {
                 partialPendingSizeUsd: partialSizeUsd,
                 partialPendingOriginalSizeUsd: partialSizeUsd,
                 partialPendingProcessedFillSz: 0,
-                partialPendingProcessedUsd: 0,
+                partialPendingProcessedMarginUsd: 0,
                 partialPendingAt: Date.now(),
                 partialPendingReduceRatio: ratio,
                 partialPendingReason: "v2_tp1_automated",
@@ -9338,7 +9465,7 @@ export class PaperEngine {
           });
         }
 
-        await this.dispatchOkxClose({
+        const closeSubmit = await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
@@ -9352,16 +9479,14 @@ export class PaperEngine {
           isTrailingStop: isTrailingTriggered
         });
 
-        const routedClosed = await this.appendClosedWithStandardRouting({
-          closedRow,
-          open,
-          flowId,
-          envelope: null as any, 
-          exitReason: cr,
-          closeSource: confirmedCloseSource,
-          currentRegime: regimeNow
+        const fin = await this.finalizeFullClose({
+          open, closeSubmit, closedRow, cr, closeSource: confirmedCloseSource, regimeNow, envelope: null as any, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
         });
-        authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+        if (!fin.ledgerPruneAllowed) {
+          remaining.push(open);
+          continue;
+        }
+        authorizeOpenLedgerPruneAfterAttestedClose(flowId, fin.routedClosed!);
         this.terminalExitConsumedByFlow.add(flowId);
         continue;
       }
@@ -9677,48 +9802,14 @@ export class PaperEngine {
           });
         }
 
-        const isExchangeEnabled = this.okxDemo && this.signedSubmitMode() === "enabled";
-        const closeConfirmed = !isExchangeEnabled || (closeSubmit?.ordId != null && closeSubmit?.fillConfirmed === true);
-
-        if (isExchangeEnabled && !closeConfirmed) {
-          const updatedOpen: PaperOpenPositionRecord = { 
-            ...open, 
-            lifecycleState: "CLOSE_PENDING",
-            closePendingOrdId: closeSubmit?.ordId ?? undefined,
-            closePendingAt: Date.now(),
-            closePendingReason: cr,
-            closePendingPrice: closePrice,
-            closePendingFundingRate: snap.fundingRate
-          };
-          this.logger.info("V2_CLOSE_PENDING_EXCHANGE_CONFIRM", {
-            symbol: updatedOpen.symbol,
-            side: updatedOpen.side,
-            ord_id: closeSubmit?.ordId,
-            reason: cr
-          });
-          remaining.push(updatedOpen);
+        const fin = await this.finalizeFullClose({
+          open, closeSubmit, closedRow, cr, closeSource: "V2_AUTHORITY", regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
+        });
+        if (!fin.ledgerPruneAllowed) {
+          remaining.push(open);
           continue;
         }
-
-        const routedClosed = await this.appendClosedWithStandardRouting({
-          closedRow,
-          open,
-          flowId,
-          envelope,
-          exitReason: cr,
-          closeSource: "V2_AUTHORITY",
-          currentRegime: regimeNow
-        });
-
-        this.logger.info("V2_CLOSE_EXCHANGE_CONFIRM_PROOF", {
-          symbol: open.symbol,
-          side: open.side,
-          ord_id: closeSubmit?.ordId,
-          fill_confirmed: true,
-          close_reason: cr
-        });
-
-        authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+        authorizeOpenLedgerPruneAfterAttestedClose(flowId, fin.routedClosed!);
         
         this.terminalExitConsumedByFlow.add(flowId);
         const mappedType = exitEventJsonlType(cr);
@@ -9858,7 +9949,7 @@ export class PaperEngine {
               });
               handleV2ExitAuthorityProof("exit", cr);
               handleV2PartialAuthorityProof("superseded_by_exit", null);
-              await this.dispatchOkxClose({
+              const closeSubmit = await this.dispatchOkxClose({
                 symbol: open.symbol,
                 side: open.side,
                 sizeUsd: open.sizeUsd,
@@ -9868,16 +9959,14 @@ export class PaperEngine {
                 flowId,
                 reason: "range_long_upper_reversal"
               });
-              const routedClosed = await this.appendClosedWithStandardRouting({
-                closedRow,
-                open,
-                flowId,
-                envelope,
-                exitReason: cr,
-                closeSource: "range_reversal_logic",
-                currentRegime: regimeNow
+              const fin = await this.finalizeFullClose({
+                open, closeSubmit, closedRow, cr, closeSource: "range_reversal_logic", regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
               });
-              authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+              if (!fin.ledgerPruneAllowed) {
+                remaining.push(open);
+                continue;
+              }
+              authorizeOpenLedgerPruneAfterAttestedClose(flowId, fin.routedClosed!);
               this.rangeReversalExitThisTickBySymbol.set(symKey, {
                 ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
                 range_existing_long_reversal_exit_applied: true
@@ -9991,7 +10080,7 @@ export class PaperEngine {
               });
               handleV2ExitAuthorityProof("exit", cr);
               handleV2PartialAuthorityProof("superseded_by_exit", null);
-              await this.dispatchOkxClose({
+              const closeSubmit = await this.dispatchOkxClose({
                 symbol: open.symbol,
                 side: open.side,
                 sizeUsd: open.sizeUsd,
@@ -10001,16 +10090,14 @@ export class PaperEngine {
                 flowId,
                 reason: "range_short_lower_reversal"
               });
-              const routedClosed = await this.appendClosedWithStandardRouting({
-                closedRow,
-                open,
-                flowId,
-                envelope,
-                exitReason: cr,
-                closeSource: "range_reversal_logic",
-                currentRegime: regimeNow
+              const fin = await this.finalizeFullClose({
+                open, closeSubmit, closedRow, cr, closeSource: "range_reversal_logic", regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
               });
-              authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+              if (!fin.ledgerPruneAllowed) {
+                remaining.push(open);
+                continue;
+              }
+              authorizeOpenLedgerPruneAfterAttestedClose(flowId, fin.routedClosed!);
               this.rangeReversalExitThisTickBySymbol.set(symKey, {
                 ...(this.rangeReversalExitThisTickBySymbol.get(symKey) ?? {}),
                 range_existing_short_reversal_exit_applied: true
@@ -10228,7 +10315,7 @@ export class PaperEngine {
           confirmedCloseSource = "range_profit_trail_executor";
           handleV2ExitAuthorityProof("exit", crTrail);
           handleV2PartialAuthorityProof("superseded_by_exit", null);
-          await this.dispatchOkxClose({
+          const closeSubmit = await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
             sizeUsd: open.sizeUsd,
@@ -10238,16 +10325,14 @@ export class PaperEngine {
             flowId,
             reason: "range_profit_trail"
           });
-          const routedClosedTrail = await this.appendClosedWithStandardRouting({
-            closedRow: closedRowTrail,
-            open,
-            flowId,
-            envelope,
-            exitReason: crTrail,
-            closeSource: "range_profit_trail",
-            currentRegime: regimeNow
+          const fin = await this.finalizeFullClose({
+            open, closeSubmit, closedRow: closedRowTrail, cr: crTrail, closeSource: "range_profit_trail", regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
           });
-          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosedTrail);
+          if (!fin.ledgerPruneAllowed) {
+            remaining.push(open);
+            continue;
+          }
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, fin.routedClosed!);
           this.lastExitReasonLabel = "?섏씡沅??섎룎由?異붿쥌 泥?궛";
 
           const mappedType = exitEventJsonlType(crTrail);
@@ -10435,7 +10520,7 @@ export class PaperEngine {
               : toClosed(cr, m, open.sizeUsd);
           handleV2ExitAuthorityProof("exit", cr);
           handleV2PartialAuthorityProof("superseded_by_exit", null);
-          await this.dispatchOkxClose({
+          const closeSubmit = await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
             sizeUsd: open.sizeUsd,
@@ -10444,16 +10529,14 @@ export class PaperEngine {
             flowId,
             reason: st.reason ?? cr
           });
-          const routedClosed = await this.appendClosedWithStandardRouting({
-            closedRow,
-            open,
-            flowId,
-            envelope,
-            exitReason: cr,
-            closeSource: confirmedCloseSource ?? "executor_close_action",
-            currentRegime: regimeNow
+          const fin = await this.finalizeFullClose({
+            open, closeSubmit, closedRow, cr, closeSource: confirmedCloseSource ?? "executor_close_action", regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
           });
-          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+          if (!fin.ledgerPruneAllowed) {
+            remaining.push(open);
+            continue;
+          }
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, fin.routedClosed!);
           this.lastExitReasonLabel =
             st.reason === "range_box_break"
               ? "諛뺤뒪 遺뺢눼 泥?궛"
@@ -10518,7 +10601,7 @@ export class PaperEngine {
           confirmedCloseSource = "trend_engine_switch";
           handleV2ExitAuthorityProof("exit", cr);
           handleV2PartialAuthorityProof("superseded_by_exit", null);
-          await this.dispatchOkxClose({
+          const closeSubmit = await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
             sizeUsd: open.sizeUsd,
@@ -10565,16 +10648,14 @@ export class PaperEngine {
             strategyVersion: inheritedStrategyVersion,
             ...snapPaths
           });
-          const routedClosed = await this.appendClosedWithStandardRouting({
-            closedRow,
-            open,
-            flowId,
-            envelope,
-            exitReason: cr,
-            closeSource: String(closedRow.closeSource ?? "executor_close_action"),
-            currentRegime: regimeNow
+          const fin = await this.finalizeFullClose({
+            open, closeSubmit, closedRow, cr, closeSource: String(closedRow.closeSource ?? "executor_close_action"), regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
           });
-          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+          if (!fin.ledgerPruneAllowed) {
+            remaining.push(open);
+            continue;
+          }
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, fin.routedClosed!);
           this.lastExitReasonLabel = "異붿꽭 諛섎? ?뚰뙆濡?泥?궛";
           this.lastSwitchReasonLabel = trendState.trendSwitchReasonLabel;
           this.trendSwitchTimestampsMs.push(Date.now());
@@ -10725,7 +10806,7 @@ export class PaperEngine {
           const closedRow = toClosed(cr, m, open.sizeUsd);
           handleV2ExitAuthorityProof("exit", cr);
           handleV2PartialAuthorityProof("superseded_by_exit", null);
-          await this.dispatchOkxClose({
+          const closeSubmit = await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
             sizeUsd: open.sizeUsd,
@@ -10734,16 +10815,14 @@ export class PaperEngine {
             flowId,
             reason: `regime_shift_${cr}`
           });
-          const routedClosed = await this.appendClosedWithStandardRouting({
-            closedRow,
-            open,
-            flowId,
-            envelope,
-            exitReason: cr,
-            closeSource: String(closedRow.closeSource ?? "executor_close_action"),
-            currentRegime: regimeNow
+          const fin = await this.finalizeFullClose({
+            open, closeSubmit, closedRow, cr, closeSource: String(closedRow.closeSource ?? "executor_close_action"), regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
           });
-          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+          if (!fin.ledgerPruneAllowed) {
+            remaining.push(open);
+            continue;
+          }
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, fin.routedClosed!);
           this.logger.info(exitFullLogKey(cr), { ...exitDetailBase(open, m), exitReason: cr });
 
           const mappedType = exitEventJsonlType(cr);
@@ -11085,7 +11164,7 @@ export class PaperEngine {
             partialPendingSizeUsd: partialSizeUsd,
             partialPendingOriginalSizeUsd: partialSizeUsd,
             partialPendingProcessedFillSz: 0,
-            partialPendingProcessedUsd: 0,
+            partialPendingProcessedMarginUsd: 0,
             partialPendingAt: Date.now(),
             partialPendingReduceRatio: reduceRatio,
             partialPendingReason: v2PartialAuthority.partialReason ?? "v2_partial_exit",
@@ -11328,38 +11407,14 @@ export class PaperEngine {
           isV2Authority: true
         });
 
-        const isExchangeEnabled = this.okxDemo && this.signedSubmitMode() === "enabled";
-        const closeConfirmed = !isExchangeEnabled || (exitSubmit?.ordId != null && exitSubmit?.fillConfirmed === true);
-
-        if (isExchangeEnabled && !closeConfirmed) {
-          const updatedOpen: PaperOpenPositionRecord = {
-            ...open,
-            lifecycleState: "CLOSE_PENDING",
-            closePendingOrdId: exitSubmit?.ordId ?? undefined,
-            closePendingAt: Date.now(),
-            closePendingReason: cr,
-            closePendingPrice: closePrice
-          };
-          this.logger.info("V2_CLOSE_EXCHANGE_PENDING_PROOF", {
-            symbol: open.symbol,
-            side: open.side,
-            ord_id: exitSubmit?.ordId,
-            reason: cr
-          });
-          remaining.push(updatedOpen);
+        const fin = await this.finalizeFullClose({
+          open, closeSubmit: exitSubmit, closedRow, cr, closeSource: String(closedRow.closeSource ?? "executor_close_action"), regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
+        });
+        if (!fin.ledgerPruneAllowed) {
+          remaining.push(open);
           continue;
         }
-
-        const routedClosed = await this.appendClosedWithStandardRouting({
-          closedRow,
-          open,
-          flowId,
-          envelope,
-          exitReason: cr,
-          closeSource: String(closedRow.closeSource ?? "executor_close_action"),
-          currentRegime: regimeNow
-        });
-        authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+        authorizeOpenLedgerPruneAfterAttestedClose(flowId, fin.routedClosed!);
         this.logger.info(exitFullLogKey(cr), {
           ...exitDetailBase(open, m),
           exitReason: cr,
@@ -11728,7 +11783,7 @@ export class PaperEngine {
                 : "RANGE ?뺥빀?? ?섎떒 ??媛뺤젣 泥?궛",
             ...snapPaths
           });
-          await this.dispatchOkxClose({
+          const closeSubmit = await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
             sizeUsd: open.sizeUsd,
@@ -11737,16 +11792,14 @@ export class PaperEngine {
             flowId,
             reason: "safety_net_alignment"
           });
-          const routedClosed = await this.appendClosedWithStandardRouting({
-            closedRow,
-            open,
-            flowId,
-            envelope,
-            exitReason: cr,
-            closeSource: "range_misaligned_safety_net",
-            currentRegime: regimeNow
+          const fin = await this.finalizeFullClose({
+            open, closeSubmit, closedRow, cr, closeSource: "range_misaligned_safety_net", regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
           });
-          authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+          if (!fin.ledgerPruneAllowed) {
+            remaining.push(open);
+            continue;
+          }
+          authorizeOpenLedgerPruneAfterAttestedClose(flowId, fin.routedClosed!);
           this.logger.info("RANGE_CLOSE_ALIGNMENT_PROOF", {
             symbol: open.symbol,
             side: open.side,
@@ -11966,7 +12019,7 @@ export class PaperEngine {
       confirmedExitType = exitEventJsonlType(cr);
       confirmedCloseSource = "candidate_lost_watchdog";
       const closedRow = toClosed(cr, m, open.sizeUsd);
-      await this.dispatchOkxClose({
+      const closeSubmit = await this.dispatchOkxClose({
         symbol: open.symbol,
         side: open.side,
         sizeUsd: open.sizeUsd,
@@ -11975,16 +12028,14 @@ export class PaperEngine {
         flowId,
         reason: "candidate_lost"
       });
-      const routedClosed = await this.appendClosedWithStandardRouting({
-        closedRow,
-        open,
-        flowId,
-        envelope,
-        exitReason: cr,
-        closeSource: String(closedRow.closeSource ?? "executor_close_action"),
-        currentRegime: regimeNow
+      const fin = await this.finalizeFullClose({
+        open, closeSubmit, closedRow, cr, closeSource: String(closedRow.closeSource ?? "executor_close_action"), regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
       });
-      authorizeOpenLedgerPruneAfterAttestedClose(flowId, routedClosed);
+      if (!fin.ledgerPruneAllowed) {
+        remaining.push(open);
+        continue;
+      }
+      authorizeOpenLedgerPruneAfterAttestedClose(flowId, fin.routedClosed!);
       this.logger.info("paper_position_closed", {
         symbol: open.symbol,
         side: open.side,
@@ -17669,11 +17720,16 @@ export class PaperEngine {
           modified = true;
         }
       }
-    } else {
+    } else if (regime === "TREND") {
       record.profitManagementMode = "PARTIAL_TRAILING";
       record.targetPrice1 = undefined; // Force no fixed TP for TREND
       record.partialExitStage = record.partialExitStage ?? 0;
       // Note: trailingExtremePrice and highestPnlPctNet remain unchanged or undefined (dynamic).
+    } else {
+      record.profitManagementMode = "NONE";
+      record.targetPrice1 = undefined;
+      record.trailingStopPrice = undefined;
+      record.lifecycleState = "CLOSE_ONLY_MANAGED";
     }
 
     if (record.invalidationPx == null || !Number.isFinite(record.invalidationPx)) {
