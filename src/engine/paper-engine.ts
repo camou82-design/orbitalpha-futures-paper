@@ -9661,6 +9661,13 @@ export class PaperEngine {
           });
         }
 
+        const adverseAnchorCandleTs = (() => {
+          const candles = snap.candles;
+          if (!Array.isArray(candles) || candles.length === 0) return null;
+          const ts = Number(candles[candles.length - 1]?.ts ?? 0);
+          return Number.isFinite(ts) && ts > 0 ? ts : null;
+        })();
+
         open = { 
           ...open, 
           highestPnlPctNet: highWater, 
@@ -9668,13 +9675,8 @@ export class PaperEngine {
           peakPnlUpdatedAt: peakUnrealized > (open.peakUnrealizedPnlPct ?? -999) ? Date.now() : open.peakPnlUpdatedAt,
           breakevenStopRequired: beRequired,
           breakevenStopPrice: bePrice,
-          ...(currentPnlPct <= 0 && open.adverseMoveAnchorCandleTs == null
-            ? {
-                adverseMoveAnchorCandleTs:
-                  snap.candles && snap.candles.length > 0
-                    ? Number(snap.candles[snap.candles.length - 1]?.ts ?? snap.fetchedAt)
-                    : snap.fetchedAt
-              }
+          ...(currentPnlPct <= 0 && open.adverseMoveAnchorCandleTs == null && adverseAnchorCandleTs != null
+            ? { adverseMoveAnchorCandleTs: adverseAnchorCandleTs }
             : {})
         };
       }
@@ -18171,10 +18173,13 @@ export class PaperEngine {
       ...(isAdverseAddonPath
         ? {
             adverseAddonCount: (existing.adverseAddonCount ?? 0) + 1,
-            lastAdverseConfirmationCandleTs:
-              first.candles && first.candles.length > 0
-                ? Number(first.candles[first.candles.length - 1]?.ts ?? first.fetchedAt)
-                : first.fetchedAt
+            ...((): Record<string, number> => {
+              const candles = first.candles;
+              if (!Array.isArray(candles) || candles.length === 0) return {};
+              const ts = Number(candles[candles.length - 1]?.ts ?? 0);
+              if (!Number.isFinite(ts) || ts <= 0) return {};
+              return { lastAdverseConfirmationCandleTs: ts };
+            })()
           }
         : {}),
       stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : existing.stopPrice,

@@ -491,6 +491,36 @@ export function runAddonModeCaseTests(): boolean {
       ) && ok;
   }
 
+  // CASE M: no market candles → fail-closed even if wall-clock elapsed
+  {
+    const policy = evalShort({
+      v2State: baseV2State({
+        shortPosition: adverseShortPosition({ adverseMoveAnchorCandleTs: 1_000_000 })
+      }),
+      snapshot: {
+        qualityScore: 82,
+        reviewing_ticks: 3,
+        boxPos: 0.8,
+        emaGap: 0.004,
+        trendWeaknessScore: 0.3,
+        rangeConfidence: 0.7,
+        lastPrice: 95400,
+        atr: 500,
+        latestCandleTs: 0
+      },
+      currentSymbolNotionalUsd: 120,
+      currentGlobalNotionalUsd: 120
+    });
+    ok =
+      run(
+        "CASE M",
+        policy.allowed === false &&
+          policy.addonMode === "CONFIRMED_ADVERSE_ADDON" &&
+          policy.addonBlockedReason === "FRESH_CONFIRMATION_NOT_MET",
+        `block=${policy.addonBlockedReason}, latestCandleTs=0`
+      ) && ok;
+  }
+
   return ok;
 }
 

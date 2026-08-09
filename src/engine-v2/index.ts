@@ -778,10 +778,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             volatilityProxyDiag: authoritativeInput.snapshot.volatilityProxy,
             latestCandleTs: (() => {
                 const candles = input.candles ?? input.snapshot?.candles;
-                if (Array.isArray(candles) && candles.length > 0) {
-                    return Number(candles[candles.length - 1]?.ts ?? 0);
-                }
-                return Number(input.now ?? 0);
+                if (!Array.isArray(candles) || candles.length === 0) return 0;
+                const ts = Number(candles[candles.length - 1]?.ts ?? 0);
+                return Number.isFinite(ts) && ts > 0 ? ts : 0;
             })()
         },
         accountEquityUsd,
