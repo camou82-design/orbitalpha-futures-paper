@@ -12,6 +12,7 @@ import {
     V2CommittedRiskPlan
 } from "./types";
 import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
+import { emitLiveExposureAuthorityProof, resolveLiveExposureAuthority } from "./live-account/exposure-authority";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -4331,7 +4332,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     } else {
         if (symbolActualPositions.length > 0) {
-            positionMismatch = true;
+            const actualSide = symbolActualPositions[0]?.side;
+            const enterSide = v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short" ? v2SideAfterPromotion : null;
+            const enterSideNorm = enterSide != null ? normSide(enterSide) : null;
+            if (enterSideNorm != null && actualSide === enterSideNorm) {
+                isAddOn = true;
+            }
+            positionMismatch = false;
         } else {
             isAddOn = false;
         }
@@ -4610,16 +4617,21 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 min_order_block_reason = "ORDER_BUILD_FAIL";
             }
 
-            // Live Signed Order Attempt: Compute exposures pure in USDT from OKX actual positions + pending orders
+            // Live Signed Order Attempt: exposure authority from OKX actual (+ pending), paper diagnostic only
             const pendingOrdersNotionalUsdt = (pendingOrdersNotionalRaw ?? 0) as number;
             const pendingSymbolNotionalUsdt = (pendingSymbolNotionalRaw ?? 0) as number;
 
-            existingAccountNotionalUsdt =
-                validPositionsList.reduce((acc, p) => acc + p.sizeUsd, 0) + pendingOrdersNotionalUsdt;
-            existingSymbolNotionalUsdt =
-                validPositionsList
-                    .filter((p) => p && p.symbol === input.symbol)
-                    .reduce((acc, p) => acc + p.sizeUsd, 0) + pendingSymbolNotionalUsdt;
+            const exposureAuthority = resolveLiveExposureAuthority({
+                symbol: String(input.symbol),
+                okxPositions: validPositionsList,
+                paperPositions: currentPositions,
+                pendingSymbolNotionalUsdt,
+                pendingOrdersNotionalUsdt,
+                isLiveAuthority: true
+            });
+
+            existingAccountNotionalUsdt = exposureAuthority.final_account_notional_usdt;
+            existingSymbolNotionalUsdt = exposureAuthority.final_symbol_notional_usdt;
 
             const orderCap = isAddOn ? maxAddonNotionalUsdt! : maxOrderNotionalUsdt!;
 
@@ -4654,6 +4666,26 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 if (min_order_check_passed) {
                     const notionalAfterSymbolCap = Math.min(requestedOrderNotionalUsdt, remainingSymbolCap);
                     finalOrderNotionalUsdt = Math.min(notionalAfterSymbolCap, remainingAccountCap);
+
+                    const projectedSymbolNotionalUsdt = existingSymbolNotionalUsdt + finalOrderNotionalUsdt;
+                    const projectedAccountNotionalUsdt = existingAccountNotionalUsdt + finalOrderNotionalUsdt;
+                    const capPassed =
+                        projectedSymbolNotionalUsdt <= maxSymbolNotionalUsdt! + 1e-6 &&
+                        projectedAccountNotionalUsdt <= maxAccountNotionalUsdt! + 1e-6;
+
+                    if (input.evaluationMode !== "diagnostic") {
+                        emitLiveExposureAuthorityProof((payload) => console.info(JSON.stringify(payload)), {
+                            symbol: String(input.symbol),
+                            exposure: exposureAuthority,
+                            is_addon: isAddOn,
+                            requested_order_notional_usdt: requestedOrderNotionalUsdt,
+                            projected_symbol_notional_usdt: projectedSymbolNotionalUsdt,
+                            projected_account_notional_usdt: projectedAccountNotionalUsdt,
+                            max_symbol_notional_usdt: maxSymbolNotionalUsdt ?? null,
+                            max_account_notional_usdt: maxAccountNotionalUsdt ?? null,
+                            cap_passed: capPassed
+                        });
+                    }
 
                     const finalNotionalOk = typeof finalOrderNotionalUsdt === "number" && Number.isFinite(finalOrderNotionalUsdt) && finalOrderNotionalUsdt > 0 && finalOrderNotionalUsdt <= orderCap;
 

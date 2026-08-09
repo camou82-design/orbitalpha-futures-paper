@@ -104,6 +104,22 @@ export function okxSwapRowToLedgerKey(row: Record<string, unknown>): OkxSwapLedg
   return { key: `${symbol}:${side}`, symbol, side, posSigned: posNum, avgPx, notionalUsd, instId };
 }
 
+/** Resolve authoritative OKX row notional in USDT (contracts * ctVal * price fallback). */
+export function resolveOkxRowNotionalUsd(
+  row: Record<string, unknown>,
+  ctVal = 1
+): number {
+  const hit = okxSwapRowToLedgerKey(row);
+  if (!hit) return 0;
+  let notional = Math.abs(hit.notionalUsd);
+  const contracts = Math.abs(hit.posSigned);
+  const baseQty = contracts * Math.max(ctVal, 1e-12);
+  if ((!Number.isFinite(notional) || notional <= 0) && hit.avgPx > 0 && baseQty > 0) {
+    notional = baseQty * hit.avgPx;
+  }
+  return Number.isFinite(notional) && notional > 0 ? notional : 0;
+}
+
 export type InstrumentSizing = {
   ctVal: number;
   ctValCcy: string;

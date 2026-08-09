@@ -26,7 +26,7 @@ import type { Logger } from "../logs/logger";
 import { JsonStore } from "../storage/json-store";
 import type { OkxPublicDiagnostics } from "../exchange/okx-demo";
 import { OkxDemoClient, toOkxSwapInstId } from "../exchange/okx-demo";
-import { buildLedgerOkxPositionSyncSnapshot, okxSwapRowToLedgerKey } from "../exchange/okx-position-sync";
+import { buildLedgerOkxPositionSyncSnapshot, okxSwapRowToLedgerKey, resolveOkxRowNotionalUsd } from "../exchange/okx-position-sync";
 import { buildPositionOpsSurface, engineMirrorStopPrice, engineMirrorTpPrice, regimeForSl } from "./position-ops-monitor";
 import type { PositionOpsSurface } from "./position-ops-monitor";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
@@ -128,6 +128,10 @@ import {
   shouldCancelStaleEntryOrder,
   type EntryExecutionStyle
 } from "../engine-v2/execution/entry-order-type";
+import {
+  computeOkxReduceOrderUnits,
+  validateOkxReduceOrderUnitInvariant
+} from "../engine-v2/live-account/reduce-order-units";
 
 /** RANGE 1m edge reversal candle ?덇굅??寃뚯씠????V2 ?ㅽ뻾 遊됲닾媛 ENTER쨌臾댄븯?쒕툝濡앹씪 ??理쒖쥌 ?ㅽ뻾 寃쎈줈瑜?留됱? ?딅룄濡?遺꾨━?쒕떎. */
 const LEGACY_RANGE_EDGE_NO_REVERSAL_REJECTS = new Set<string>([
@@ -1868,7 +1872,7 @@ export class PaperEngine {
 
         const ledgerPos = paperOpens.find((p) => p.symbol === r.symbol && p.side === r.side);
         let ensureOutcome: { success: boolean; modified: boolean } | null = null;
-        if (r.symbol === "BTCUSDT" && this.isBtcSuppressionTarget()) {
+        if (r.symbol === "BTCUSDT" && this.isBtcPositionManagementBlocked()) {
           await this.logAndSuppressBtcUsdtAction("ops_watch_protect_cycle", r.side, ["PROTECTIVE_ENSURE", "REDUCE", "PARTIAL"]);
         } else if (
           ledgerPos &&
@@ -2009,6 +2013,11 @@ export class PaperEngine {
     authority_decision: string;
     authority_side: string;
     order_submit_allowed: boolean;
+    entry_submit_blocked: boolean;
+    existing_position_management_blocked: boolean;
+    protective_ensure_allowed: boolean;
+    close_allowed: boolean;
+    partial_reduce_allowed: boolean;
   } {
     let okxActualSide = "none";
     if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
@@ -2021,10 +2030,9 @@ export class PaperEngine {
       }
     }
 
-    let paperSide = this.lastBtcPaperSideSnapshot.side;
-    let reconcileState = this.lastBtcPaperSideSnapshot.reconcileState;
-
-    const v2InferredSide = (this.lastRisk as any)?.v2InferredSide ?? okxActualSide;
+    const paperSide = this.lastBtcPaperSideSnapshot.side;
+    const reconcileState = this.lastBtcPaperSideSnapshot.reconcileState;
+    const v2InferredSide = String((this.lastRisk as any)?.v2InferredSide ?? okxActualSide);
     const paperExecutionReady = this.paperExecutionReady === true;
     const signedExecutionReady = this.signedExecutionReady === true;
     const closeOnlyMode =
@@ -2036,26 +2044,59 @@ export class PaperEngine {
     const externalManualBlocked =
       this.symbolExternalManualBlocked.has("BTCUSDT:long") ||
       this.symbolExternalManualBlocked.has("BTCUSDT:short");
-    const protectionFailed = this.symbolProtectionFailedBlocked.has("BTCUSDT");
+
+    const isNormalMatchedOpen =
+      okxActualSide !== "none" &&
+      paperSide !== "none" &&
+      okxActualSide === paperSide &&
+      okxActualSide === v2InferredSide &&
+      reconcileState === "MATCHED" &&
+      !closeOnlyMode &&
+      !killSwitch &&
+      !readinessBarrierActive &&
+      !externalManualBlocked;
+
     const reconcileMismatch =
-      reconcileState === "RECONCILE_MISMATCH" ||
-      externalManualBlocked ||
-      protectionFailed;
+      reconcileState === "RECONCILE_MISMATCH" || externalManualBlocked;
 
-    const reasons: string[] = [];
-    if (reconcileMismatch) reasons.push("reconcile_or_external_manual_conflict");
-    if (okxActualSide === "long") reasons.push("okx_actual_long_position");
-    if (closeOnlyMode) reasons.push("close_only_mode");
-    if (killSwitch) reasons.push("kill_switch");
-    if (readinessBarrierActive) reasons.push("recovery_barrier");
-    if (!signedExecutionReady) reasons.push("signed_execution_not_ready");
-    if (!paperExecutionReady) reasons.push("paper_execution_not_ready");
+    const managementBlockReasons: string[] = [];
+    if (reconcileMismatch) managementBlockReasons.push("reconcile_or_external_manual_conflict");
+    if (closeOnlyMode) managementBlockReasons.push("close_only_mode");
+    if (killSwitch) managementBlockReasons.push("kill_switch");
 
-    const suppressor_active = reasons.length > 0;
+    const existing_position_management_blocked =
+      !isNormalMatchedOpen && managementBlockReasons.length > 0;
+
     const authorityDecisionOut = authorityDecision ?? "SKIP";
     const authoritySideOut = authoritySide ?? "none";
+    const normalizedAuthoritySide =
+      authoritySideOut === "long" || authoritySideOut === "short" ? authoritySideOut : "none";
+
+    const sameSideDuplicateEntry =
+      authorityDecisionOut === "ENTER" &&
+      normalizedAuthoritySide !== "none" &&
+      okxActualSide !== "none" &&
+      normalizedAuthoritySide === okxActualSide;
+
+    const entryReadinessBlocked =
+      authorityDecisionOut === "ENTER" &&
+      (!paperExecutionReady || !signedExecutionReady || readinessBarrierActive);
+
+    const entry_submit_blocked =
+      sameSideDuplicateEntry ||
+      entryReadinessBlocked ||
+      existing_position_management_blocked ||
+      reconcileMismatch;
+
+    const protective_ensure_allowed = !existing_position_management_blocked;
+    const close_allowed = !existing_position_management_blocked;
+    const partial_reduce_allowed = !existing_position_management_blocked;
+
+    const suppressor_active = existing_position_management_blocked;
+    const suppressor_reason = suppressor_active ? managementBlockReasons.join("|") : null;
+
     const order_submit_allowed =
-      !suppressor_active &&
+      !entry_submit_blocked &&
       authorityDecisionOut === "ENTER" &&
       (authoritySideOut === "long" || authoritySideOut === "short") &&
       paperExecutionReady &&
@@ -2063,16 +2104,21 @@ export class PaperEngine {
 
     return {
       suppressor_active,
-      suppressor_reason: suppressor_active ? reasons.join("|") : null,
+      suppressor_reason,
       okx_actual_side: okxActualSide,
       paper_side: paperSide,
-      v2_inferred_side: String(v2InferredSide ?? "none"),
+      v2_inferred_side: v2InferredSide,
       reconcile_state: reconcileState,
       paper_execution_ready: paperExecutionReady,
       signed_execution_ready: signedExecutionReady,
       authority_decision: authorityDecisionOut,
       authority_side: authoritySideOut,
-      order_submit_allowed
+      order_submit_allowed,
+      entry_submit_blocked,
+      existing_position_management_blocked,
+      protective_ensure_allowed,
+      close_allowed,
+      partial_reduce_allowed
     };
   }
 
@@ -2090,12 +2136,26 @@ export class PaperEngine {
       signed_execution_ready: proof.signed_execution_ready,
       authority_decision: proof.authority_decision,
       authority_side: proof.authority_side,
-      order_submit_allowed: proof.order_submit_allowed
+      order_submit_allowed: proof.order_submit_allowed,
+      entry_submit_blocked: proof.entry_submit_blocked,
+      existing_position_management_blocked: proof.existing_position_management_blocked,
+      protective_ensure_allowed: proof.protective_ensure_allowed,
+      close_allowed: proof.close_allowed,
+      partial_reduce_allowed: proof.partial_reduce_allowed
     });
   }
 
+  private isBtcEntrySubmitBlocked(authorityDecision?: string, authoritySide?: string): boolean {
+    return this.resolveBtcExecutionSuppressorState(authorityDecision, authoritySide).entry_submit_blocked;
+  }
+
+  private isBtcPositionManagementBlocked(): boolean {
+    return this.resolveBtcExecutionSuppressorState().existing_position_management_blocked;
+  }
+
+  /** @deprecated Prefer isBtcEntrySubmitBlocked / isBtcPositionManagementBlocked */
   private isBtcSuppressionTarget(): boolean {
-    return this.resolveBtcExecutionSuppressorState().suppressor_active;
+    return this.resolveBtcExecutionSuppressorState().existing_position_management_blocked;
   }
 
   private buildOkxRemotePositionAuthority(
@@ -2488,7 +2548,7 @@ export class PaperEngine {
 
     const reconcileManualFullClose = async (open: PaperOpenPositionRecord, source: string): Promise<boolean> => {
       if (open.symbol === "BTCUSDT") {
-        if (this.isBtcSuppressionTarget()) {
+        if (this.isBtcPositionManagementBlocked()) {
           await this.logAndSuppressBtcUsdtAction("reconcileManualFullClose", open.side, ["CLOSE", "close history write", "ledger prune"]);
           return false;
         }
@@ -6958,12 +7018,55 @@ export class PaperEngine {
       finalSzStr = String(finalQty);
     }
 
-    const desiredNotionalUsdt = Math.max(0, input.sizeUsd);
+    const refPrice = input.lastPrice > 0 ? input.lastPrice : 1;
+    const reduceUnits =
+      inst && finalQty > 0
+        ? computeOkxReduceOrderUnits({
+            contracts: finalQty,
+            ctVal: inst.ctVal,
+            referencePrice: refPrice,
+            leverage: lev
+          })
+        : null;
+    const desiredNotionalUsdt = reduceUnits ? reduceUnits.notionalUsd : Math.max(0, input.sizeUsd);
+
+    if (reduceUnits) {
+      const invariant = validateOkxReduceOrderUnitInvariant(reduceUnits);
+      if (!invariant.pass) {
+        this.logger.error("V2_REDUCE_ORDER_UNIT_INVARIANT_PROOF", {
+          symbol: input.symbol,
+          side: input.side,
+          flowId: input.flowId,
+          reason: input.reason,
+          ...reduceUnits,
+          notional_delta: invariant.notionalDelta,
+          margin_delta: invariant.marginDelta,
+          invariant_pass: false
+        });
+      } else {
+        this.logger.info("V2_REDUCE_ORDER_UNIT_INVARIANT_PROOF", {
+          symbol: input.symbol,
+          side: input.side,
+          flowId: input.flowId,
+          reason: input.reason,
+          ...reduceUnits,
+          invariant_pass: true
+        });
+      }
+    }
+
     this.logger.info("V2_CLOSE_SIZE_UNIT_PROOF", {
       symbol: input.symbol,
       size_usd: input.sizeUsd,
       desired_notional_usdt: desiredNotionalUsdt,
-      applied_leverage: lev
+      applied_leverage: lev,
+      contracts: reduceUnits?.contracts ?? finalQty,
+      ctVal: reduceUnits?.ctVal ?? inst?.ctVal ?? null,
+      baseQty: reduceUnits?.baseQty ?? null,
+      referencePrice: reduceUnits?.referencePrice ?? refPrice,
+      notionalUsd: reduceUnits?.notionalUsd ?? desiredNotionalUsdt,
+      marginUsd: reduceUnits?.marginUsd ?? null,
+      unitAuthoritySource: reduceUnits?.unitAuthoritySource ?? "legacy_size_usd"
     });
     const clOrdId = buildOkxClOrdId(input.symbol, side);
 
@@ -7423,9 +7526,9 @@ export class PaperEngine {
     if (!this.okxDemo) return { modified: false, success: false, record: open };
 
     if (open.symbol === "BTCUSDT") {
-      if (this.isBtcSuppressionTarget()) {
+      if (this.isBtcPositionManagementBlocked()) {
         await this.logAndSuppressBtcUsdtAction("ensureProtectiveStopOrder", open.side, ["order submit", "PROTECTIVE_ENSURE"]);
-        return { modified: false, success: true, record: open };
+        return { modified: false, success: false, record: open };
       }
     }
 
@@ -7774,6 +7877,26 @@ export class PaperEngine {
     // 4. Reconcile Plan
     const needSubmitSl = !engineOwnedSl;
     const needSubmitTp = wantsTp && !engineOwnedTp;
+
+    if (!needSubmitSl && !needSubmitTp && cancelTargets.length === 0) {
+      this.logger.info("V2_PROTECTION_STATE_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        status: "PROTECTION_PRESENT",
+        sl_algo_id: engineOwnedSl?.algoId ?? null,
+        tp_algo_id: engineOwnedTp?.algoId ?? null
+      });
+    } else if (needSubmitSl || needSubmitTp) {
+      this.logger.info("V2_PROTECTION_STATE_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        status: "PROTECTION_SUBMIT_ATTEMPT",
+        needSubmitSl,
+        needSubmitTp
+      });
+    }
     
     this.logger.info("PROTECTIVE_ORDER_RECONCILE_PLAN_PROOF", {
       symbol: open.symbol,
@@ -7859,6 +7982,17 @@ export class PaperEngine {
       protectionSuccess,
       isProtectionFailed: !protectionSuccess
     });
+
+    if (needSubmitSl || needSubmitTp) {
+      this.logger.info("V2_PROTECTION_STATE_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        status: protectionSuccess ? "PROTECTED" : "PROTECTION_FAILED",
+        slRegistered,
+        tpRegistered
+      });
+    }
     
     // Final Atomic Rebuild Completion Gate
     if (open.addonRebuildPendingConfirmation === true && protectionSuccess === true) {
@@ -8621,11 +8755,42 @@ export class PaperEngine {
     const stageMarginKrw = input.stageMarginKrw ?? 0;
     const stageMarginUsdt = stageMarginKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD;
     const authoritySizeUsdt = stageMarginUsdt;
-    const finalOrderNotionalUsdt = effectiveNotionalUsdt;
+    let finalOrderNotionalUsdt = effectiveNotionalUsdt;
     const formulaNotionalUsdt = (stageMarginKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD) * (input.appliedLeverage ?? 1);
     
     if ((input.ordType === "limit" || input.ordType === "ioc") && limitPrice == null) {
       limitPrice = input.entryPrice ?? pricingLast ?? null;
+    }
+
+    let reduceUnitsForProof: ReturnType<typeof computeOkxReduceOrderUnits> | null = null;
+    if (input.reduceOnly === true && norm.normalized_contracts > 0) {
+      const refPxForUnits = pricingLast ?? refPrice ?? input.pricingReferencePx ?? input.entryPrice ?? null;
+      if (refPxForUnits != null && Number.isFinite(refPxForUnits) && refPxForUnits > 0) {
+        reduceUnitsForProof = computeOkxReduceOrderUnits({
+          contracts: norm.normalized_contracts,
+          ctVal: sizingMeta.ctVal,
+          referencePrice: refPxForUnits,
+          leverage: input.appliedLeverage ?? 1
+        });
+        effectiveNotionalUsdt = reduceUnitsForProof.notionalUsd;
+        finalOrderNotionalUsdt = reduceUnitsForProof.notionalUsd;
+        const invariant = validateOkxReduceOrderUnitInvariant(reduceUnitsForProof);
+        const invariantPayload = {
+          symbol: input.symbol,
+          side: input.side,
+          order_trace_id: input.traceId,
+          order_reason: input.reason,
+          ...reduceUnitsForProof,
+          notional_delta: invariant.notionalDelta,
+          margin_delta: invariant.marginDelta,
+          invariant_pass: invariant.pass
+        };
+        if (invariant.pass) {
+          this.logger.info("V2_REDUCE_ORDER_UNIT_INVARIANT_PROOF", invariantPayload);
+        } else {
+          this.logger.error("V2_REDUCE_ORDER_UNIT_INVARIANT_PROOF", invariantPayload);
+        }
+      }
     }
 
     this.logger.info("LIVE_ORDER_SIZE_PROOF", {
@@ -8638,14 +8803,25 @@ export class PaperEngine {
       leverage_reason: null,
       leverage_block_reason: null,
       entry_quality_grade: input.entryQualityGrade ?? null,
-      size_unit_source: "stageMarginKrw",
+      size_unit_source: input.reduceOnly === true ? "okx_contracts_ctVal_price" : "stageMarginKrw",
       stage_margin_krw: stageMarginKrw,
       stage_margin_usdt: stageMarginUsdt,
       authority_size_usdt: authoritySizeUsdt,
       final_order_notional_usdt: finalOrderNotionalUsdt,
-      formula_notional_usdt: formulaNotionalUsdt,
-      formula_match: Math.abs(finalOrderNotionalUsdt - formulaNotionalUsdt) < 0.01,
+      formula_notional_usdt: input.reduceOnly === true && reduceUnitsForProof ? reduceUnitsForProof.notionalUsd : formulaNotionalUsdt,
+      formula_match:
+        input.reduceOnly === true && reduceUnitsForProof
+          ? Math.abs(finalOrderNotionalUsdt - reduceUnitsForProof.notionalUsd) < 0.01
+          : Math.abs(finalOrderNotionalUsdt - formulaNotionalUsdt) < 0.01,
       final_submitted_contracts: norm.normalized_contracts,
+      contracts: norm.normalized_contracts,
+      ctVal: sizingMeta.ctVal,
+      baseQty: reduceUnitsForProof?.baseQty ?? norm.normalized_contracts * sizingMeta.ctVal,
+      referencePrice: reduceUnitsForProof?.referencePrice ?? pricingLast ?? refPrice ?? input.entryPrice ?? null,
+      notionalUsd: reduceUnitsForProof?.notionalUsd ?? finalOrderNotionalUsdt,
+      marginUsd: reduceUnitsForProof?.marginUsd ?? null,
+      leverage: input.appliedLeverage ?? null,
+      unitAuthoritySource: reduceUnitsForProof?.unitAuthoritySource ?? (input.reduceOnly ? "okx_contracts_ctVal_price" : "stageMarginKrw"),
       req_sz: submitSzStr,
       ref_price: pricingLast ?? refPrice ?? input.entryPrice ?? null,
       limit_price: limitPrice
@@ -8734,9 +8910,14 @@ export class PaperEngine {
     }
 
     if (instId.startsWith("BTC-")) {
-      if (this.isBtcSuppressionTarget()) {
+      if (input.reduceOnly === true) {
+        if (this.isBtcPositionManagementBlocked()) {
+          await this.logAndSuppressBtcUsdtAction("submitOrder", "none", ["reduce/close order submit"]);
+          return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "BTCUSDT_MANAGEMENT_BLOCKED", errorMessage: "BTCUSDT position management blocked", ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
+        }
+      } else if (this.isBtcEntrySubmitBlocked()) {
         await this.logAndSuppressBtcUsdtAction("submitOrder", "none", ["order submit"]);
-        return { ok: false, error: "BTCUSDT_PROTECTED_BYPASS" } as any;
+        return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "BTCUSDT_PROTECTED_BYPASS", errorMessage: "BTCUSDT entry submit blocked", ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
       }
     }
 
@@ -9270,7 +9451,7 @@ export class PaperEngine {
 
     for (const openRaw of opens) {
       if (openRaw.symbol === "BTCUSDT") {
-        if (this.isBtcSuppressionTarget()) {
+        if (this.isBtcPositionManagementBlocked()) {
           await this.logAndSuppressBtcUsdtAction("tryPaperPositionClose normal loop", openRaw.side, ["CLOSE", "PARTIAL", "PARTIAL_CLOSE", "REVERSE", "close history write", "ledger prune"]);
           remaining.push(openRaw);
           continue;
@@ -13703,10 +13884,8 @@ export class PaperEngine {
 
       if (symKey === "BTCUSDT") {
         this.emitBtcExecutionSuppressorProof(authority.decision, authority.side ?? "none");
-        if (this.isBtcSuppressionTarget()) {
-          if (authority.decision === "ENTER") {
-            this.logAndSuppressBtcUsdtAction("processPaperSymbolEntries ENTER gate", "none", ["ENTER", "ADDON"]);
-          }
+        if (authority.decision === "ENTER" && this.isBtcEntrySubmitBlocked(authority.decision, authority.side ?? "none")) {
+          this.logAndSuppressBtcUsdtAction("processPaperSymbolEntries ENTER gate", "none", ["ENTER", "ADDON"]);
           return;
         }
       }
@@ -18596,7 +18775,7 @@ export class PaperEngine {
     const { symbol, v2Decision, lastPrice, committedRiskPlan } = args;
 
     // BTC Suppressor: only when real operational conflict exists (not blanket symbol block)
-    if (symbol === "BTCUSDT" && this.isBtcSuppressionTarget()) {
+    if (symbol === "BTCUSDT" && this.isBtcEntrySubmitBlocked(v2Decision.decision, v2Decision.side ?? "none")) {
       await this.logAndSuppressBtcUsdtAction("v2_authorized_entry", v2Decision.side ?? "none", ["ENTER", "ADDON", "ORDER_SUBMIT"]);
       console.log("EXECUTE_AUTH_FAIL", "BTCUSDT_EXECUTION_SUPPRESSOR_ACTIVE");
       return { executed: false, blockReason: "BTCUSDT_EXECUTION_SUPPRESSOR_ACTIVE" };
@@ -19356,20 +19535,22 @@ export function buildV2StateBridge(
   }
 
   const okxActualPositions = Array.isArray(lastLivePositionsPayload)
-    ? lastLivePositionsPayload.map((p) => {
-        const hit = okxSwapRowToLedgerKey(p as Record<string, unknown>);
-        const symbol = hit?.symbol ?? (p as any).symbol ?? String((p as any).instId ?? "").replace("-SWAP", "").replace("-USDT", "USDT");
-        const rawSide = hit?.side ?? (p as any).side ?? (p as any).posSide ?? "";
-        const sideStr = String(rawSide).toLowerCase();
-        const normSideStr = sideStr === "buy" ? "long" : sideStr === "sell" ? "short" : sideStr;
-        const rawNotional = Number((p as any).notionalUsd ?? (p as any).notionalUSDT ?? (p as any).sizeUsd ?? 0);
-        return {
-          symbol,
-          side: normSideStr === "long" ? "LONG" : normSideStr === "short" ? "SHORT" : normSideStr.toUpperCase(),
-          sizeUsd: Math.abs(rawNotional),
-          notionalUsd: Math.abs(rawNotional)
-        };
-      })
+    ? lastLivePositionsPayload
+        .map((p) => {
+          const hit = okxSwapRowToLedgerKey(p as Record<string, unknown>);
+          if (!hit) return null;
+          const instMeta = getOkxInstrumentMeta(hit.symbol);
+          const ctVal = instMeta?.ctVal ?? 1;
+          const notionalUsd = resolveOkxRowNotionalUsd(p as Record<string, unknown>, ctVal);
+          if (notionalUsd <= 0) return null;
+          return {
+            symbol: hit.symbol,
+            side: hit.side === "long" ? "LONG" : "SHORT",
+            sizeUsd: notionalUsd,
+            notionalUsd
+          };
+        })
+        .filter((x): x is { symbol: string; side: string; sizeUsd: number; notionalUsd: number } => x != null)
     : undefined;
 
   return {
