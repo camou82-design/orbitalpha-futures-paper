@@ -30,8 +30,10 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     exposureNotionalKrw: number;
     equityMultiple: number;
     addOnAllowed: boolean | null;
+    addOnPolicyMode: string | null;
     addOnPolicyAction: string | null;
     addOnPolicyReason: string | null;
+    requestedAddonNotionalUsdt: number | null;
     exitPolicyAction: string | null;
     exitPolicyReason: string | null;
     exitShouldExit: boolean | null;

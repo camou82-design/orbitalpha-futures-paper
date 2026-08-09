@@ -245,6 +245,13 @@ export function deriveExecutionAuthorityFromEnvelope(
         equityMultiple: envelope.equityMultiple,
         entryQualityGrade: envelope.entryQualityGrade == null ? "B" : (envelope.entryQualityGrade as "S" | "A" | "B"),
         addOnAllowed: envelope.addOnAllowed ?? false,
+        addOnPolicyMode:
+            envelope.addOnPolicyMode === "PYRAMIDING" || envelope.addOnPolicyMode === "CONFIRMED_ADVERSE_ADDON"
+                ? envelope.addOnPolicyMode
+                : envelope.addOnPolicyMode === "NONE"
+                    ? "NONE"
+                    : undefined,
+        requestedAddonNotionalUsdt: envelope.requestedAddonNotionalUsdt ?? undefined,
         originalDecision: envelope.originalDecision,
         originalSide: envelope.originalSide,
         originalStageMarginKrw: envelope.originalStageMarginKrw,

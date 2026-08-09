@@ -109,6 +109,13 @@ export interface EngineV2Position {
     breakevenStopRequired?: boolean;
     breakevenStopConfirmed?: boolean;
     breakevenStopPrice?: number;
+    /** Completed CONFIRMED_ADVERSE_ADDON fills for this position (max 1). */
+    adverseAddonCount?: number;
+    /** Candle ts when position first entered adverse (loss) territory. */
+    adverseMoveAnchorCandleTs?: number;
+    /** Candle ts of last fresh adverse confirmation (post-fill anchor). */
+    lastAdverseConfirmationCandleTs?: number;
+    addonCount?: number;
     /** V2 진입 사유 - probe TP/exit 단계에서 진입 유형 판별에 사용. */
     v2EntryReason?: string;
     /** Probe TP1 주문 제출 완료 여부 (요청 ≠ 체결 분리). */
@@ -214,6 +221,10 @@ export interface LegacyPositionAdapter {
     breakevenStopRequired?: boolean;
     breakevenStopConfirmed?: boolean;
     breakevenStopPrice?: number;
+    adverseAddonCount?: number;
+    adverseMoveAnchorCandleTs?: number;
+    lastAdverseConfirmationCandleTs?: number;
+    addonCount?: number;
 }
 
 export interface LegacyResultAdapter {
@@ -306,6 +317,8 @@ export interface EngineV2Input {
         availableRiskBudgetUsdt?: number;
         addonMaxNotionalUsdt?: number;
         finalAddonNotionalUsdt?: number;
+        addOnPolicyMode?: "PYRAMIDING" | "CONFIRMED_ADVERSE_ADDON" | "NONE";
+        requestedAddonNotionalUsdt?: number;
         okxActualSide?: string;
     };
     now: number;
@@ -490,6 +503,11 @@ export interface V2BridgePosition {
     breakevenStopRequired?: boolean;
     breakevenStopConfirmed?: boolean;
     breakevenStopPrice?: number;
+    pnlPct?: number;
+    addonCount?: number;
+    adverseAddonCount?: number;
+    adverseMoveAnchorCandleTs?: number;
+    lastAdverseConfirmationCandleTs?: number;
 }
 
 export interface V2BridgeState {
@@ -1136,6 +1154,8 @@ export type EntryExecutionAuthority = Readonly<{
     equityMultiple?: number;
     entryQualityGrade?: EntryQualityGrade;
     addOnAllowed?: boolean;
+    addOnPolicyMode?: "PYRAMIDING" | "CONFIRMED_ADVERSE_ADDON" | "NONE";
+    requestedAddonNotionalUsdt?: number;
 
     // -- Added for V2 Bridge Hardening --
     marketSubtype?: string | null;

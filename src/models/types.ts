@@ -937,6 +937,12 @@ export type PaperOpenPositionRecord = {
   /** Whether the position was opened by V2 authority. Used for unit scaling logic. */
   isV2Authority?: boolean;
   addonCount?: number;
+  /** CONFIRMED_ADVERSE_ADDON fills completed (max 1). */
+  adverseAddonCount?: number;
+  /** Candle ts when position first entered adverse territory. */
+  adverseMoveAnchorCandleTs?: number;
+  /** Candle ts anchor after last adverse addon fill. */
+  lastAdverseConfirmationCandleTs?: number;
 
   // Partial Pending Tracking
   partialPendingOrdId?: string;
@@ -984,6 +990,8 @@ export type PaperOpenPositionRecord = {
     newAvgEntry?: number;
     rebuildStartedAt?: number;
     fillConfirmed?: boolean;
+    beforeContracts?: number;
+    addonFilledContracts?: number;
   };
   /** 트레일링 기준으로 마지막으로 잠근 가격/레벨(옵션). */
   lastTrailLevel?: number;

@@ -11,6 +11,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
     const addOnPolicyAction = typeof diagnostics["addon_policy_action"] === "string" ? String(diagnostics["addon_policy_action"]) : null;
     const addOnPolicyReason = typeof diagnostics["addon_policy_reason"] === "string" ? String(diagnostics["addon_policy_reason"]) : null;
     const addOnAllowed = typeof diagnostics["addon_policy_allowed"] === "boolean" ? Boolean(diagnostics["addon_policy_allowed"]) : null;
+    const addOnPolicyMode = typeof diagnostics["addon_policy_mode"] === "string" ? String(diagnostics["addon_policy_mode"]) : null;
+    const requestedAddonNotionalUsdt =
+        typeof diagnostics["requested_addon_notional_usdt"] === "number" && Number.isFinite(diagnostics["requested_addon_notional_usdt"])
+            ? Number(diagnostics["requested_addon_notional_usdt"])
+            : null;
     
     const originalDecision = typeof diagnostics["original_v2_decision"] === "string" ? String(diagnostics["original_v2_decision"]) : undefined;
     const originalSide = typeof diagnostics["original_v2_side"] === "string" ? String(diagnostics["original_v2_side"]) : undefined;
@@ -95,8 +100,10 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             exposureNotionalKrw: finalExposureNotionalKrw,
             equityMultiple,
             addOnAllowed,
+            addOnPolicyMode,
             addOnPolicyAction,
             addOnPolicyReason,
+            requestedAddonNotionalUsdt,
             exitPolicyAction,
             exitPolicyReason,
             exitShouldExit,
@@ -184,8 +191,10 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             exposureNotionalKrw: 0,
             equityMultiple: 0,
             addOnAllowed: null,
+            addOnPolicyMode: null,
             addOnPolicyAction: null,
             addOnPolicyReason: null,
+            requestedAddonNotionalUsdt: null,
             exitPolicyAction,
             exitPolicyReason,
             exitShouldExit,
@@ -260,8 +269,10 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         exposureNotionalKrw: selector.adopted_result.adopted_decision !== "ENTER" ? 0 : (selector.adopted_result.engine === "V2" ? exposureNotionalKrw : 0),
         equityMultiple: selector.adopted_result.engine === "V2" ? equityMultiple : 0,
         addOnAllowed: selector.adopted_result.engine === "V2" ? addOnAllowed : null,
+        addOnPolicyMode: selector.adopted_result.engine === "V2" ? addOnPolicyMode : null,
         addOnPolicyAction: selector.adopted_result.engine === "V2" ? addOnPolicyAction : null,
         addOnPolicyReason: selector.adopted_result.engine === "V2" ? addOnPolicyReason : null,
+        requestedAddonNotionalUsdt: selector.adopted_result.engine === "V2" ? requestedAddonNotionalUsdt : null,
         exitPolicyAction,
         exitPolicyReason,
         exitShouldExit,

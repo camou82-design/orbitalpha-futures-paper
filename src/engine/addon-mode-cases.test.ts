@@ -1,6 +1,11 @@
 import { evaluateV2AddOnPolicy } from "../engine-v2/addon/policy";
 import { buildV2AddonEligibilityProof } from "../engine-v2/addon/eligibility-proof";
-import { computeAdverseAddonRiskProjection } from "../engine-v2/addon/adverse-addon";
+import {
+  computeAdverseAddonRiskProjection,
+  shouldTriggerProtectionResize,
+  MAX_ADVERSE_ADDON_COUNT
+} from "../engine-v2/addon/adverse-addon";
+import { normalizeOkxSwapContractsFromNotional } from "../engine-v2/okx-swap-sizing";
 import type { V2StateAuthority } from "../engine-v2/state/types";
 
 function run(label: string, passed: boolean, detail: string): boolean {
@@ -49,7 +54,8 @@ function evalShort(args: Partial<Parameters<typeof evaluateV2AddOnPolicy>[0]> = 
       trendWeaknessScore: 0.3,
       rangeConfidence: 0.7,
       lastPrice: 94000,
-      atr: 500
+      atr: 500,
+      latestCandleTs: 2_000_000
     },
     accountEquityUsd: 1400,
     currentSymbolNotionalUsd: 1200,
@@ -57,6 +63,20 @@ function evalShort(args: Partial<Parameters<typeof evaluateV2AddOnPolicy>[0]> = 
     maxAddonNotionalUsdt: 20,
     ...args
   });
+}
+
+function adverseShortPosition(overrides: Record<string, unknown> = {}) {
+  return {
+    symbol: "BTCUSDT",
+    side: "short",
+    entryPrice: 95000,
+    sizeUsd: 120,
+    entryStage: 1,
+    pnlPct: -0.004,
+    breakevenStopConfirmed: false,
+    adverseMoveAnchorCandleTs: 1_000_000,
+    ...overrides
+  };
 }
 
 export function runAddonModeCaseTests(): boolean {
@@ -179,15 +199,7 @@ export function runAddonModeCaseTests(): boolean {
   {
     const policy = evalShort({
       v2State: baseV2State({
-        shortPosition: {
-          symbol: "BTCUSDT",
-          side: "short",
-          entryPrice: 95000,
-          sizeUsd: 120,
-          entryStage: 1,
-          pnlPct: -0.004,
-          breakevenStopConfirmed: false
-        }
+        shortPosition: adverseShortPosition()
       }),
       judgment: {
         regime_final: "TREND",
@@ -207,7 +219,8 @@ export function runAddonModeCaseTests(): boolean {
         trendWeaknessScore: 0.3,
         rangeConfidence: 0.7,
         lastPrice: 95400,
-        atr: 500
+        atr: 500,
+        latestCandleTs: 2_000_000
       },
       currentSymbolNotionalUsd: 120,
       currentGlobalNotionalUsd: 120
@@ -226,13 +239,7 @@ export function runAddonModeCaseTests(): boolean {
   {
     const policy = evalShort({
       v2State: baseV2State({
-        shortPosition: {
-          symbol: "BTCUSDT",
-          side: "short",
-          entryPrice: 95000,
-          sizeUsd: 120,
-          pnlPct: -0.004
-        }
+        shortPosition: adverseShortPosition({ pnlPct: -0.004 })
       }),
       execution: { signal: "WAIT_RECHECK", side: "none" } as any,
       snapshot: {
@@ -303,13 +310,7 @@ export function runAddonModeCaseTests(): boolean {
   {
     const policy = evalShort({
       v2State: baseV2State({
-        shortPosition: {
-          symbol: "BTCUSDT",
-          side: "short",
-          entryPrice: 95000,
-          sizeUsd: 120,
-          pnlPct: -0.02
-        }
+        shortPosition: adverseShortPosition({ pnlPct: -0.02 })
       }),
       judgment: {
         regime_final: "TREND",
@@ -335,7 +336,8 @@ export function runAddonModeCaseTests(): boolean {
         trendWeaknessScore: 0.3,
         rangeConfidence: 0.7,
         lastPrice: 95800,
-        atr: 1200
+        atr: 1200,
+        latestCandleTs: 2_000_000
       },
       currentSymbolNotionalUsd: 800,
       currentGlobalNotionalUsd: 800
@@ -352,13 +354,7 @@ export function runAddonModeCaseTests(): boolean {
   {
     const policy = evalShort({
       v2State: baseV2State({
-        shortPosition: {
-          symbol: "BTCUSDT",
-          side: "short",
-          entryPrice: 95000,
-          sizeUsd: 120,
-          pnlPct: -0.004
-        }
+        shortPosition: adverseShortPosition({ pnlPct: -0.004 })
       }),
       judgment: {
         regime_final: "TREND",
@@ -407,6 +403,91 @@ export function runAddonModeCaseTests(): boolean {
           risk_before: risk.riskBeforeAddonUsdt,
           risk_after: risk.projectedLossAtStopUsdt
         })
+      ) && ok;
+  }
+
+  // CASE I: adverse addon 1회 완료 후 → ADVERSE_ADDON_LIMIT_REACHED
+  {
+    const policy = evalShort({
+      v2State: baseV2State({
+        shortPosition: adverseShortPosition({ adverseAddonCount: MAX_ADVERSE_ADDON_COUNT })
+      }),
+      snapshot: {
+        qualityScore: 82,
+        reviewing_ticks: 3,
+        boxPos: 0.8,
+        emaGap: 0.004,
+        trendWeaknessScore: 0.3,
+        rangeConfidence: 0.7,
+        lastPrice: 95400,
+        atr: 500,
+        latestCandleTs: 2_000_000
+      },
+      currentSymbolNotionalUsd: 120,
+      currentGlobalNotionalUsd: 120
+    });
+    ok =
+      run(
+        "CASE I",
+        policy.allowed === false && policy.addonBlockedReason === "ADVERSE_ADDON_LIMIT_REACHED",
+        `block=${policy.addonBlockedReason}`
+      ) && ok;
+  }
+
+  // CASE J: position 0.05 / protection 0.03 → protection resize required
+  {
+    ok =
+      run(
+        "CASE J",
+        shouldTriggerProtectionResize(0.05, 0.03) && !shouldTriggerProtectionResize(0.05, 0.05),
+        "partial protection must trigger resize"
+      ) && ok;
+  }
+
+  // CASE K: 20 USDT request → normalized final notional <= 20
+  {
+    const norm = normalizeOkxSwapContractsFromNotional({
+      desiredNotionalUsdt: 20,
+      lastPrice: 95000,
+      sizing: { lotSz: 0.01, minSz: 0.01, ctVal: 0.01, ctValCcy: "BTC" }
+    });
+    ok =
+      run(
+        "CASE K",
+        norm.actualNotional <= 20 + 1e-6 && norm.min_size_ok,
+        JSON.stringify({
+          raw: norm.raw_contracts,
+          normalized: norm.normalized_contracts,
+          final_notional: norm.actualNotional
+        })
+      ) && ok;
+  }
+
+  // CASE L: same side but no fresh confirmation → FRESH_CONFIRMATION_NOT_MET
+  {
+    const policy = evalShort({
+      v2State: baseV2State({
+        shortPosition: adverseShortPosition({ adverseMoveAnchorCandleTs: 5_000_000 })
+      }),
+      snapshot: {
+        qualityScore: 82,
+        reviewing_ticks: 3,
+        boxPos: 0.8,
+        emaGap: 0.004,
+        trendWeaknessScore: 0.3,
+        rangeConfidence: 0.7,
+        lastPrice: 95400,
+        atr: 500,
+        latestCandleTs: 5_000_000
+      },
+      currentSymbolNotionalUsd: 120,
+      currentGlobalNotionalUsd: 120
+    });
+    ok =
+      run(
+        "CASE L",
+        policy.allowed === false && policy.addonBlockedReason === "FRESH_CONFIRMATION_NOT_MET",
+        `block=${policy.addonBlockedReason}`
       ) && ok;
   }
 

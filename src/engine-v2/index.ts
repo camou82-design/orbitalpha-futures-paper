@@ -775,7 +775,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             rangeConfidence: authoritativeInput.snapshot.rangeConfidence,
             lastPrice: authoritativeInput.snapshot.lastPrice,
             atr: authoritativeInput.snapshot.atr,
-            volatilityProxyDiag: authoritativeInput.snapshot.volatilityProxy
+            volatilityProxyDiag: authoritativeInput.snapshot.volatilityProxy,
+            latestCandleTs: (() => {
+                const candles = input.candles ?? input.snapshot?.candles;
+                if (Array.isArray(candles) && candles.length > 0) {
+                    return Number(candles[candles.length - 1]?.ts ?? 0);
+                }
+                return Number(input.now ?? 0);
+            })()
         },
         accountEquityUsd,
         currentSymbolNotionalUsd,
@@ -1164,6 +1171,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 5: Risk Sizing (executor/risk-sizing share same authoritative state)
     const riskSizing = calculateRiskSizing(judgment, confidence, execution, authoritativeInput);
+    if (riskSizing.diagnostics) {
+        (riskSizing.diagnostics as Record<string, unknown>).addon_policy_mode = addOnPolicy.addonMode ?? "NONE";
+        (riskSizing.diagnostics as Record<string, unknown>).requested_addon_notional_usdt =
+            addOnPolicy.requestedAddonNotionalUsdt ?? null;
+    }
 
     // Tier 5: Explanation (Diagnostics)
     const explanation = generateExplanation(judgment, execution, riskSizing);
@@ -6579,7 +6591,14 @@ export function adaptV2Input(
                     peakPnlUpdatedAt: p.peakPnlUpdatedAt,
                     takeProfitPlan: p.takeProfitPlan,
                     tp1Triggered: p.tp1Triggered,
-                    tp2Triggered: p.tp2Triggered
+                    tp2Triggered: p.tp2Triggered,
+                    breakevenStopRequired: p.breakevenStopRequired,
+                    breakevenStopConfirmed: p.breakevenStopConfirmed,
+                    breakevenStopPrice: p.breakevenStopPrice,
+                    addonCount: p.addonCount,
+                    adverseAddonCount: p.adverseAddonCount,
+                    adverseMoveAnchorCandleTs: p.adverseMoveAnchorCandleTs,
+                    lastAdverseConfirmationCandleTs: p.lastAdverseConfirmationCandleTs
                 };
             }),
             globalRiskScore: state.globalRiskScore,

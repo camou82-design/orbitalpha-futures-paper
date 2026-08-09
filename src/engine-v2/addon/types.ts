@@ -98,6 +98,7 @@ export type EvaluateV2AddOnPolicyArgs = Readonly<{
         lastPrice?: number;
         atr?: number;
         volatilityProxyDiag?: number | null;
+        latestCandleTs?: number;
     };
     accountEquityUsd?: number;
     currentSymbolNotionalUsd?: number;

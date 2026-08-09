@@ -7856,6 +7856,8 @@ export class PaperEngine {
 
     // [V2_ADDON_GATING] Atomic Rebuild Trigger
     if (open.addonRebuildRequired === true) {
+      const protectedContractsBefore = engineOwnedSl ? Number(engineOwnedSl.sz ?? 0) : 0;
+      const addonFilledContracts = Math.max(0, actualSz - (open.addonRebuildMetrics?.beforeContracts ?? protectedContractsBefore));
       // Capture pre-rebuild state
       open.addonRebuildMetrics = {
         oldSize: open.initialSizeUsd ?? open.sizeUsd, 
@@ -7863,7 +7865,9 @@ export class PaperEngine {
         oldAvgEntry: open.entryPrice,
         newAvgEntry: Number(actualPos.avgPx) || open.entryPrice,
         rebuildStartedAt: Date.now(),
-        fillConfirmed: true
+        fillConfirmed: true,
+        beforeContracts: open.addonRebuildMetrics?.beforeContracts ?? protectedContractsBefore,
+        addonFilledContracts
       };
 
       this.logger.info("V2_ADDON_POST_FILL_PROTECTION_REBUILD_START_PROOF", {
@@ -7872,6 +7876,9 @@ export class PaperEngine {
         reason: "addon_fill_detected",
         old_sl_algo_id: engineOwnedSl?.algoId,
         old_tp_algo_id: engineOwnedTp?.algoId,
+        before_contracts: open.addonRebuildMetrics.beforeContracts,
+        addon_filled_contracts: open.addonRebuildMetrics.addonFilledContracts,
+        okx_actual_contracts: actualSz,
         ...open.addonRebuildMetrics
       });
 
@@ -8029,10 +8036,17 @@ export class PaperEngine {
     
     // Final Atomic Rebuild Completion Gate
     if (open.addonRebuildPendingConfirmation === true && protectionSuccess === true) {
-      this.logger.info("V2_ADDON_POST_FILL_PROTECTION_REBUILD_PROOF", {
+      const protectedContracts = engineOwnedSl ? Number(engineOwnedSl.sz ?? 0) : contractsToProtect;
+      const protectionSizeMatch = Math.abs(protectedContracts - actualSz) <= 1e-8;
+      this.logger.info("V2_ADDON_POST_FILL_PROTECTION_PROOF", {
         symbol: open.symbol,
         side: open.side,
         fillConfirmed: open.addonRebuildMetrics?.fillConfirmed ?? true,
+        before_contracts: open.addonRebuildMetrics?.beforeContracts ?? null,
+        addon_filled_contracts: open.addonRebuildMetrics?.addonFilledContracts ?? null,
+        okx_actual_contracts: actualSz,
+        protected_contracts: protectedContracts,
+        protection_size_match: protectionSizeMatch,
         oldSize: open.addonRebuildMetrics?.oldSize,
         newSize: open.addonRebuildMetrics?.newSize,
         oldAvgEntry: open.addonRebuildMetrics?.oldAvgEntry,
@@ -8099,6 +8113,8 @@ export class PaperEngine {
     ordType?: "market" | "limit" | "ioc";
     /** Explicit contract count for accurate reduction/close */
     okxContracts?: number;
+    logAdverseAddonOrderUnitProof?: boolean;
+    requestedAddonNotionalUsdtCap?: number;
   }): Promise<{
     ok: boolean;
     ordId: string | null;
@@ -8724,6 +8740,25 @@ export class PaperEngine {
       min_size_ok: norm.min_size_ok,
       previous_base_qty_if_any: previousBaseQty
     });
+
+    if (input.logAdverseAddonOrderUnitProof === true) {
+      const finalSubmittedNotional =
+        "actualNotional" in norm
+          ? Number((norm as { actualNotional: number }).actualNotional)
+          : norm.normalized_contracts * pricingLast * sizingMeta.ctVal;
+      const requestedCap = input.requestedAddonNotionalUsdtCap ?? input.desiredNotionalUsdt ?? effectiveNotionalUsdt;
+      const lev = Math.max(1, input.appliedLeverage ?? 1);
+      this.logger.info("V2_ADVERSE_ADDON_ORDER_UNIT_PROOF", {
+        requested_addon_notional_usdt: requestedCap,
+        raw_contracts: norm.raw_contracts,
+        normalized_contracts: norm.normalized_contracts,
+        ctVal: sizingMeta.ctVal,
+        reference_price: pricingLast,
+        final_submitted_notional_usdt: finalSubmittedNotional,
+        estimated_margin_usdt: finalSubmittedNotional / lev,
+        notional_cap_respected: finalSubmittedNotional <= (requestedCap ?? finalSubmittedNotional) + 1e-6
+      });
+    }
 
     if (!norm.sz_lot_multiple_ok) {
       this.logger.info("ORDER_BUILD_FAIL", {
@@ -9632,7 +9667,15 @@ export class PaperEngine {
           peakUnrealizedPnlPct: peakUnrealized,
           peakPnlUpdatedAt: peakUnrealized > (open.peakUnrealizedPnlPct ?? -999) ? Date.now() : open.peakPnlUpdatedAt,
           breakevenStopRequired: beRequired,
-          breakevenStopPrice: bePrice
+          breakevenStopPrice: bePrice,
+          ...(currentPnlPct <= 0 && open.adverseMoveAnchorCandleTs == null
+            ? {
+                adverseMoveAnchorCandleTs:
+                  snap.candles && snap.candles.length > 0
+                    ? Number(snap.candles[snap.candles.length - 1]?.ts ?? snap.fetchedAt)
+                    : snap.fetchedAt
+              }
+            : {})
         };
       }
 
@@ -16584,14 +16627,19 @@ export class PaperEngine {
             ? (first.lastPrice - existingRow.entryPrice) / Math.max(1e-9, existingRow.entryPrice)
             : (existingRow.entryPrice - first.lastPrice) / Math.max(1e-9, existingRow.entryPrice);
         if (pnlPctPreScale <= 0) {
-          this.logger.info("ADDON_PRECHECK_BLOCK_PROOF", {
-            symbol: sym,
-            side: intentSide,
-            pnl_pct: pnlPctPreScale,
-            block_reason: "loss_averaging_forbidden",
-            add_on_candidate_suppressed: true
-          });
-          continue;
+          const isAdverseAddonPath =
+            authority.addOnAllowed === true &&
+            authority.addOnPolicyMode === "CONFIRMED_ADVERSE_ADDON";
+          if (!isAdverseAddonPath) {
+            this.logger.info("ADDON_PRECHECK_BLOCK_PROOF", {
+              symbol: sym,
+              side: intentSide,
+              pnl_pct: pnlPctPreScale,
+              block_reason: "loss_averaging_forbidden",
+              add_on_candidate_suppressed: true
+            });
+            continue;
+          }
         }
         const struct = this.evaluateAddOnStructureReinforced(existingRow, first, intentSide);
         if (!struct.ok) {
@@ -17757,7 +17805,9 @@ export class PaperEngine {
       existing.side === "long"
         ? (first.lastPrice - existing.entryPrice) / Math.max(1e-9, existing.entryPrice)
         : (existing.entryPrice - first.lastPrice) / Math.max(1e-9, existing.entryPrice);
-    if (pnlPctNow <= 0) {
+    const isAdverseAddonPath =
+      authority.addOnPolicyMode === "CONFIRMED_ADVERSE_ADDON" && authority.addOnAllowed === true;
+    if (pnlPctNow <= 0 && !isAdverseAddonPath) {
       this.logger.info("ADDON_PRECHECK_BLOCK_PROOF", {
         symbol: existing.symbol,
         pnl_pct: pnlPctNow,
@@ -17821,9 +17871,16 @@ export class PaperEngine {
       targetStage = Math.min(3, (existing.entryStage ?? 1) + 1);
       scalingWeights = existing.scalingWeights ?? [0.5, 0.5];
       rangeAddOnSizeMultApplied = 1;
-      incrementalSizeUsd = authority.source === "v2"
-        ? Math.max(10, Math.round(adaptive.sizeUsd * 100) / 100)
-        : Math.max(MIN_POSITION_SIZE_USD, Math.round(adaptive.sizeUsd * 100) / 100);
+      if (isAdverseAddonPath) {
+        incrementalSizeUsd = Math.max(
+          0,
+          Math.round((authority.requestedAddonNotionalUsdt ?? 20) * 100) / 100
+        );
+      } else {
+        incrementalSizeUsd = authority.source === "v2"
+          ? Math.max(10, Math.round(adaptive.sizeUsd * 100) / 100)
+          : Math.max(MIN_POSITION_SIZE_USD, Math.round(adaptive.sizeUsd * 100) / 100);
+      }
       this.logger.info("V2_POLICY_SCALE_IN_SIZING_APPLIED", {
         symbol: existing.symbol,
         side: existing.side,
@@ -18111,6 +18168,15 @@ export class PaperEngine {
         ? ("REATTACK_USED" as RangeManagementState)
         : (existing.rangeManagementState ?? "INIT"),
       addonRebuildRequired: true, // Trigger protection rebuild on next reconciliation
+      ...(isAdverseAddonPath
+        ? {
+            adverseAddonCount: (existing.adverseAddonCount ?? 0) + 1,
+            lastAdverseConfirmationCandleTs:
+              first.candles && first.candles.length > 0
+                ? Number(first.candles[first.candles.length - 1]?.ts ?? first.fetchedAt)
+                : first.fetchedAt
+          }
+        : {}),
       stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : existing.stopPrice,
       trailingExtremePrice: existing.side === "long"
         ? Math.max(existing.trailingExtremePrice ?? 0, first.lastPrice)
@@ -18165,7 +18231,9 @@ export class PaperEngine {
         entryQualityGrade: authority.entryQualityGrade ?? null,
         leverageProfile: authority.leverageProfile ?? null,
         paperExecutionReady: this.paperExecutionReady,
-        isNewEntry: false
+        isNewEntry: false,
+        logAdverseAddonOrderUnitProof: isAdverseAddonPath,
+        requestedAddonNotionalUsdtCap: isAdverseAddonPath ? incrementalSizeUsd : undefined
       });
     }
 
@@ -19603,7 +19671,11 @@ export function buildV2StateBridge(
           peakPnlUpdatedAt: p.peakPnlUpdatedAt,
           breakevenStopRequired: p.breakevenStopRequired,
           breakevenStopConfirmed: p.breakevenStopConfirmed,
-          breakevenStopPrice: p.breakevenStopPrice
+          breakevenStopPrice: p.breakevenStopPrice,
+          addonCount: p.addonCount,
+          adverseAddonCount: p.adverseAddonCount,
+          adverseMoveAnchorCandleTs: p.adverseMoveAnchorCandleTs,
+          lastAdverseConfirmationCandleTs: p.lastAdverseConfirmationCandleTs
         };
       })
       .filter((x): x is V2BridgePosition => x !== null),

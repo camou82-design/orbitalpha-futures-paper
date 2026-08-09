@@ -35,6 +35,8 @@ export function isThesisValidForAdverseAddon(
     return true;
 }
 
+export const MAX_ADVERSE_ADDON_COUNT = 1;
+
 export function isAuthoritySameSideConfirmed(
     side: EngineV2Side,
     execution: EvaluateV2AddOnPolicyArgs["execution"]
@@ -45,6 +47,31 @@ export function isAuthoritySameSideConfirmed(
     if (side === "long" && signal !== "LONG_CANDIDATE") return false;
     if (side === "short" && signal !== "SHORT_CANDIDATE") return false;
     return true;
+}
+
+/** Fresh candle/structure confirmation required after adverse move — not stale authority reuse. */
+export function hasFreshAdverseConfirmation(input: Readonly<{
+    side: "long" | "short";
+    execution: EvaluateV2AddOnPolicyArgs["execution"];
+    latestCandleTs: number;
+    adverseMoveAnchorCandleTs?: number | null;
+    lastAdverseConfirmationCandleTs?: number | null;
+}>): boolean {
+    if (!isAuthoritySameSideConfirmed(input.side, input.execution)) return false;
+    const anchorTs = Math.max(
+        Number(input.adverseMoveAnchorCandleTs ?? 0),
+        Number(input.lastAdverseConfirmationCandleTs ?? 0)
+    );
+    if (!(input.latestCandleTs > 0) || !(anchorTs > 0)) return false;
+    return input.latestCandleTs > anchorTs;
+}
+
+export function protectionSizeMatch(okxActualContracts: number, protectedContracts: number): boolean {
+    return Math.abs(protectedContracts - okxActualContracts) <= 1e-8;
+}
+
+export function shouldTriggerProtectionResize(okxActualContracts: number, protectedContracts: number): boolean {
+    return !protectionSizeMatch(okxActualContracts, protectedContracts);
 }
 
 export function isPriceDistancePassedForAdverseAddon(
@@ -171,8 +198,28 @@ export function evaluateConfirmedAdverseAddOn(
         return adverseWatch(base, "SIDE_MISMATCH_FORBIDDEN", "AUTHORITY_SIDE_MISMATCH");
     }
 
+    const sameSidePositionForLimit = side === "long" ? v2State.longPosition : v2State.shortPosition;
+    const adverseAddonCount = Math.max(0, Number(sameSidePositionForLimit?.adverseAddonCount ?? 0));
+    if (adverseAddonCount >= MAX_ADVERSE_ADDON_COUNT) {
+        return adverseWatch(base, "SAME_SIDE_POSITION_WATCH_RECHECK", "ADVERSE_ADDON_LIMIT_REACHED");
+    }
+
     if (!isAuthoritySameSideConfirmed(side, execution)) {
         return adverseWatch(base, "SAME_SIDE_POSITION_WATCH_RECHECK", "SAME_SIDE_CONFIRMATION_NOT_MET");
+    }
+
+    const latestCandleTs = Number(args.snapshot.latestCandleTs ?? 0);
+    const freshConfirmed = hasFreshAdverseConfirmation({
+        side,
+        execution,
+        latestCandleTs,
+        adverseMoveAnchorCandleTs: sameSidePositionForLimit?.adverseMoveAnchorCandleTs,
+        lastAdverseConfirmationCandleTs: sameSidePositionForLimit?.lastAdverseConfirmationCandleTs
+    });
+    if (!freshConfirmed) {
+        return adverseWatch(base, "SAME_SIDE_POSITION_WATCH_RECHECK", "FRESH_CONFIRMATION_NOT_MET", {
+            sameSideConfirmation: false
+        });
     }
 
     if (!isThesisValidForAdverseAddon(side, judgment, execution)) {
