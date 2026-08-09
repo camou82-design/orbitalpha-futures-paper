@@ -2538,43 +2538,14 @@ export class PaperEngine {
                     paperFundingIntervalHours: this.config.paperFundingIntervalHours
                   });
                   
-                  const instId = toOkxSwapInstId(open.symbol);
-                  const inst = this.instrumentCache.get(instId);
-                  const ctVal = inst?.ctVal ?? 1;
-
-                  const deltaContracts = deltaFillSz;
-                  const deltaBaseQty = deltaContracts * ctVal;
-                  const deltaNotionalUsd = deltaBaseQty * fillPx;
-                  const deltaMarginUsd = deltaNotionalUsd / (open.leverage ?? 10);
-
-                  const beforeContracts = open.okxContracts;
-                  const beforeBaseQty = open.baseQty;
-                  const beforeNotionalUsd = open.notionalUsd;
-                  const beforeSizeUsd = open.sizeUsd;
-
-                  open.realizedPnl = (open.realizedPnl ?? 0) + metrics.pnlUsdNet;
-                  if (open.okxContracts != null) open.okxContracts = Math.max(0, open.okxContracts - deltaContracts);
-                  if (open.baseQty != null) open.baseQty = Math.max(0, open.baseQty - deltaBaseQty);
-                  if (open.baseQty != null) open.pos = open.baseQty;
-                  if (open.notionalUsd != null) open.notionalUsd = Math.max(0, open.notionalUsd - deltaNotionalUsd);
-                  open.sizeUsd = Math.max(0, open.sizeUsd - deltaMarginUsd);
-                  
-                  this.logger.info("V2_PARTIAL_LEDGER_UNIT_RECONCILE_PROOF", {
-                    symbol: open.symbol,
-                    before_contracts: beforeContracts,
-                    after_contracts: open.okxContracts,
-                    before_baseQty: beforeBaseQty,
-                    after_baseQty: open.baseQty,
-                    deltaNotionalUsd,
-                    deltaMarginUsd,
-                    before_notionalUsd: beforeNotionalUsd,
-                    after_notionalUsd: open.notionalUsd,
-                    before_sizeUsd: beforeSizeUsd,
-                    after_sizeUsd: open.sizeUsd,
+                  const { deltaMarginUsd } = this.applyV2PartialFillLedgerDelta({
+                    open,
+                    deltaContracts: deltaFillSz,
                     fillPx,
-                    leverage: open.leverage ?? 10
+                    pnlUsdNet: metrics.pnlUsdNet,
+                    flowId
                   });
-                  
+
                   // Update processed counters
                   open.partialPendingProcessedFillSz = cumulativeFillSz;
                   open.partialPendingProcessedMarginUsd = (open.partialPendingProcessedMarginUsd ?? 0) + deltaMarginUsd;
@@ -6377,6 +6348,56 @@ export class PaperEngine {
     return { raw_contracts: okxContracts, normalized_contracts, normalized_sz, ok };
   }
 
+  private applyV2PartialFillLedgerDelta(input: {
+    open: PaperOpenPositionRecord;
+    deltaContracts: number;
+    fillPx: number;
+    pnlUsdNet?: number;
+    flowId?: string;
+  }): { deltaMarginUsd: number; deltaNotionalUsd: number; deltaBaseQty: number } {
+    const { open, deltaContracts, fillPx, pnlUsdNet, flowId } = input;
+    const instId = open.instId ?? toOkxSwapInstId(open.symbol as MarketSymbol);
+    const inst = this.instrumentCache.get(instId);
+    const ctVal = inst?.ctVal ?? 1;
+
+    const deltaBaseQty = deltaContracts * ctVal;
+    const deltaNotionalUsd = deltaBaseQty * fillPx;
+    const deltaMarginUsd = deltaNotionalUsd / (open.leverage ?? 10);
+
+    const beforeContracts = open.okxContracts;
+    const beforeBaseQty = open.baseQty;
+    const beforeNotionalUsd = open.notionalUsd;
+    const beforeSizeUsd = open.sizeUsd;
+
+    if (pnlUsdNet != null) {
+      open.realizedPnl = (open.realizedPnl ?? 0) + pnlUsdNet;
+    }
+    if (open.okxContracts != null) open.okxContracts = Math.max(0, open.okxContracts - deltaContracts);
+    if (open.baseQty != null) open.baseQty = Math.max(0, open.baseQty - deltaBaseQty);
+    if (open.baseQty != null) open.pos = open.baseQty;
+    if (open.notionalUsd != null) open.notionalUsd = Math.max(0, open.notionalUsd - deltaNotionalUsd);
+    open.sizeUsd = Math.max(0, open.sizeUsd - deltaMarginUsd);
+
+    this.logger.info("V2_PARTIAL_LEDGER_UNIT_RECONCILE_PROOF", {
+      symbol: open.symbol,
+      before_contracts: beforeContracts,
+      after_contracts: open.okxContracts,
+      before_baseQty: beforeBaseQty,
+      after_baseQty: open.baseQty,
+      deltaNotionalUsd,
+      deltaMarginUsd,
+      before_notionalUsd: beforeNotionalUsd,
+      after_notionalUsd: open.notionalUsd,
+      before_sizeUsd: beforeSizeUsd,
+      after_sizeUsd: open.sizeUsd,
+      fillPx,
+      leverage: open.leverage ?? 10,
+      flowId
+    });
+
+    return { deltaMarginUsd, deltaNotionalUsd, deltaBaseQty };
+  }
+
   private async dispatchOkxClose(input: {
     symbol: string;
     side: "long" | "short";
@@ -6594,7 +6615,33 @@ export class PaperEngine {
     requestedPrice: number;
   }): Promise<{ historyAppendAllowed: boolean; ledgerPruneAllowed: boolean; routedClosed?: PaperClosedPositionRecord }> {
     const { open, closeSubmit, closedRow, cr, closeSource, regimeNow, envelope, flowId, requestedContracts, requestedPrice } = input;
-    
+    const isExchangeEnabled = !!(this.okxDemo && this.signedSubmitMode() === "enabled");
+
+    if (!isExchangeEnabled) {
+      this.logger.info("V2_FULL_CLOSE_FILL_AUTHORITY_PROOF", {
+        symbol: open.symbol,
+        reason: cr,
+        requestedContracts,
+        ordId: closeSubmit.ordId ?? null,
+        orderState: "PAPER_OR_SUBMIT_DISABLED",
+        fillConfirmed: true,
+        requestedPrice,
+        actualFillPx: closeSubmit.actualFillPx ?? requestedPrice,
+        historyAppendAllowed: true,
+        ledgerPruneAllowed: true
+      });
+      const routedClosed = await this.appendClosedWithStandardRouting({
+        closedRow,
+        open,
+        flowId,
+        envelope,
+        exitReason: cr,
+        closeSource,
+        currentRegime: regimeNow
+      });
+      return { historyAppendAllowed: true, ledgerPruneAllowed: true, routedClosed };
+    }
+
     if (!closeSubmit.ok || !closeSubmit.ordId) {
       this.logger.info("V2_FULL_CLOSE_FILL_AUTHORITY_PROOF", {
         symbol: open.symbol,
@@ -6614,6 +6661,9 @@ export class PaperEngine {
     if (!closeSubmit.fillConfirmed) {
       open.lifecycleState = "CLOSE_PENDING";
       open.closePendingOrdId = closeSubmit.ordId;
+      open.closePendingAt = Date.now();
+      open.closePendingReason = cr;
+      open.closePendingPrice = requestedPrice;
       this.logger.info("V2_FULL_CLOSE_FILL_AUTHORITY_PROOF", {
         symbol: open.symbol,
         reason: cr,
@@ -9265,6 +9315,20 @@ export class PaperEngine {
           });
 
           const partialSizeUsd = open.sizeUsd * ratio;
+          const tp1InstId = open.instId ?? toOkxSwapInstId(open.symbol);
+          const tp1Inst = this.instrumentCache.get(tp1InstId);
+          let tp1DeltaContracts = 0;
+          if (open.okxContracts != null && open.okxContracts > 0 && tp1Inst) {
+            const tp1Norm = this.normalizeOkxReduceOrderSize({
+              symbol: open.symbol,
+              okxContracts: open.okxContracts * ratio,
+              sizing: tp1Inst,
+              flowId,
+              reason: "v2_tp1_automated"
+            });
+            tp1DeltaContracts = tp1Norm.normalized_contracts;
+          }
+
           const metricsP = leg(partialSizeUsd);
           const closedRowP = finalizePaperClosedRecord({
             open,
@@ -9286,7 +9350,7 @@ export class PaperEngine {
             symbol: open.symbol,
             side: open.side,
             sizeUsd: partialSizeUsd,
-            okxContracts: open.okxContracts != null ? open.okxContracts * ratio : undefined,
+            okxContracts: tp1DeltaContracts > 0 ? tp1DeltaContracts : undefined,
             appliedLeverage: Math.max(1, open.leverage ?? 1),
             lastPrice: closePrice,
             flowId,
@@ -9384,7 +9448,17 @@ export class PaperEngine {
             currentRegime: regimeNow
           });
 
-          open.sizeUsd -= partialSizeUsd;
+          const tp1FillPx = tp1Submit.actualFillPx ?? closePrice;
+          if (tp1DeltaContracts > 0) {
+            this.applyV2PartialFillLedgerDelta({
+              open,
+              deltaContracts: tp1DeltaContracts,
+              fillPx: tp1FillPx,
+              flowId
+            });
+          } else {
+            open.sizeUsd = Math.max(0, open.sizeUsd - partialSizeUsd);
+          }
           open.partialExitStage = 1;
           open.lastPartialAt = closedAt;
           crashPositionsModified = true;
@@ -11023,14 +11097,11 @@ export class PaperEngine {
 
         const instId = open.instId ?? toOkxSwapInstId(open.symbol);
         const inst = this.instrumentCache.get(instId);
-        const ctVal = inst?.ctVal ?? 1;
-        const lotSz = inst?.lotSz ?? 1;
-        const minSz = inst?.minSz ?? 1;
 
         let okxContracts = open.okxContracts;
-        if (okxContracts == null) {
-           const posAbs = Math.abs(Number(open.pos ?? 0));
-           okxContracts = ctVal > 0 ? posAbs / ctVal : posAbs;
+        if (okxContracts == null && inst && inst.ctVal > 0) {
+           const posAbs = Math.abs(Number(open.pos ?? open.baseQty ?? 0));
+           okxContracts = posAbs / inst.ctVal;
         }
 
         let blocked = false;
@@ -11038,16 +11109,23 @@ export class PaperEngine {
         let requestedContracts = 0;
         let normalizedPartialContracts = 0;
 
-        if (okxContracts > 0) {
+        if (okxContracts != null && okxContracts > 0 && inst) {
            requestedContracts = okxContracts * reduceRatio;
-           normalizedPartialContracts = Math.floor(requestedContracts / lotSz + 1e-12) * lotSz;
-           if (normalizedPartialContracts < minSz) {
+           const norm = this.normalizeOkxReduceOrderSize({
+             symbol: open.symbol,
+             okxContracts: requestedContracts,
+             sizing: inst,
+             flowId,
+             reason: v2PartialAuthority.partialReason ?? "v2_partial_exit"
+           });
+           normalizedPartialContracts = norm.normalized_contracts;
+           if (!norm.ok) {
               blocked = true;
               blockReason = "partial_contracts_below_minSz";
            }
         } else {
            blocked = true;
-           blockReason = "missing_contract_authority";
+           blockReason = okxContracts == null || okxContracts <= 0 ? "missing_contract_authority" : "missing_instrument_sizing";
         }
 
         if (blocked) {
@@ -11060,7 +11138,7 @@ export class PaperEngine {
             okxContracts,
             requestedContracts,
             normalizedPartialContracts,
-            minSz,
+            minSz: inst?.minSz,
             blocked: true,
             block_reason: blockReason
           });
@@ -11071,9 +11149,9 @@ export class PaperEngine {
         this.logger.info("V2_PARTIAL_CONTRACT_SIZE_PROOF", {
            symbol: open.symbol,
            rawOkxContracts: okxContracts,
-           ctVal,
-           lotSz,
-           minSz,
+           ctVal: inst?.ctVal,
+           lotSz: inst?.lotSz,
+           minSz: inst?.minSz,
            reduceRatio,
            requestedPartialContracts: requestedContracts,
            normalizedPartialContracts,
@@ -11097,7 +11175,7 @@ export class PaperEngine {
           partial_size_usd: partialSizeUsd,
           okxContracts,
           normalizedPartialContracts,
-          minSz,
+          minSz: inst?.minSz,
           blocked: false
         });
 
@@ -11200,24 +11278,37 @@ export class PaperEngine {
           flowId
         });
 
-        // Partial position update - reduce size, pos, notional
-        const remainingSizeUsd = Math.max(0, open.sizeUsd - partialSizeUsd);
-        const ratioRemaining = open.sizeUsd > 0 ? (remainingSizeUsd / open.sizeUsd) : 0;
+        // Partial position update - contract-authoritative ledger reconcile
+        const partialFillPx = partialSubmit.actualFillPx ?? closePrice;
+        const sizeBeforeUsd = open.sizeUsd;
+        const { deltaMarginUsd } = this.applyV2PartialFillLedgerDelta({
+          open,
+          deltaContracts: normalizedPartialContracts,
+          fillPx: partialFillPx,
+          flowId
+        });
+        const partialMetrics = computePaperCloseLegMetrics({
+          open,
+          closePrice: partialFillPx,
+          closedAt,
+          snapFundingRate: snap.fundingRate,
+          marginUsd: deltaMarginUsd,
+          paperTakerFeeRate: this.config.paperTakerFeeRate,
+          paperFundingIntervalHours: this.config.paperFundingIntervalHours
+        });
+        open.realizedPnl = (open.realizedPnl ?? 0) + partialMetrics.pnlUsdNet;
         const updatedOpen: typeof open = {
           ...open,
-          sizeUsd: remainingSizeUsd,
-          pos: (open.pos ?? 0) * ratioRemaining,
-          notional: (open.notional ?? 0) * ratioRemaining,
-          initialSizeUsd: (open.initialSizeUsd ?? open.sizeUsd) * ratioRemaining,
           partialExitStage: (open.partialExitStage ?? 0) + 1,
-          lastPartialAt: closedAt
+          lastPartialAt: closedAt,
+          lifecycleState: "OPEN"
         };
         this.logger.info("V2_PARTIAL_POSITION_UPDATE_PROOF", {
           symbol: open.symbol,
           side: open.side,
-          size_before_usd: open.sizeUsd,
-          partial_size_executed_usd: partialSizeUsd,
-          size_after_usd: remainingSizeUsd,
+          size_before_usd: sizeBeforeUsd,
+          partial_size_executed_usd: deltaMarginUsd,
+          size_after_usd: updatedOpen.sizeUsd,
           partial_exit_stage_after: updatedOpen.partialExitStage,
           full_close_prevented: true,
           open_ledger_pruned: false
@@ -11508,17 +11599,16 @@ export class PaperEngine {
         ratio = Math.min(1, Math.max(0.05, ratio));
         const partialMargin = Math.round(open.sizeUsd * ratio * 100) / 100;
         const newMargin = Math.round((open.sizeUsd - partialMargin) * 100) / 100;
+        const nextStage = (open.partialExitStage ?? 0) + 1;
+        const pReason = nextStage === 1 ? ("partial_exit_1" as const) : ("partial_exit_2" as const);
 
         const instId = open.instId ?? toOkxSwapInstId(open.symbol);
         const inst = this.instrumentCache.get(instId);
-        const ctVal = inst?.ctVal ?? 1;
-        const lotSz = inst?.lotSz ?? 1;
-        const minSz = inst?.minSz ?? 1;
 
         let okxContracts = open.okxContracts;
-        if (okxContracts == null) {
-           const posAbs = Math.abs(Number(open.pos ?? 0));
-           okxContracts = ctVal > 0 ? posAbs / ctVal : posAbs;
+        if (okxContracts == null && inst && inst.ctVal > 0) {
+           const posAbs = Math.abs(Number(open.pos ?? open.baseQty ?? 0));
+           okxContracts = posAbs / inst.ctVal;
         }
 
         let blocked = false;
@@ -11526,18 +11616,31 @@ export class PaperEngine {
         let requestedContracts = 0;
         let normalizedPartialContracts = 0;
 
-        if (okxContracts > 0) {
+        if (okxContracts != null && okxContracts > 0 && inst) {
            requestedContracts = okxContracts * ratio;
-           normalizedPartialContracts = Math.floor(requestedContracts / lotSz + 1e-12) * lotSz;
-           if (normalizedPartialContracts < minSz) {
+           const norm = this.normalizeOkxReduceOrderSize({
+             symbol: open.symbol,
+             okxContracts: requestedContracts,
+             sizing: inst,
+             flowId,
+             reason: `partial_close_${pReason}`
+           });
+           normalizedPartialContracts = norm.normalized_contracts;
+           if (!norm.ok) {
               blocked = true;
               blockReason = "partial_contracts_below_minSz";
            }
-        } else {
+        } else if (okxContracts == null || okxContracts <= 0) {
            if (newMargin < MIN_POSITION_SIZE_USD) {
               blocked = true;
               blockReason = "remaining_below_min";
+           } else {
+              blocked = true;
+              blockReason = "missing_contract_authority";
            }
+        } else {
+           blocked = true;
+           blockReason = "missing_instrument_sizing";
         }
 
         if (blocked) {
@@ -11549,21 +11652,19 @@ export class PaperEngine {
             okxContracts,
             requestedContracts,
             normalizedPartialContracts,
-            minSz,
+            minSz: inst?.minSz,
             min_usd: MIN_POSITION_SIZE_USD
           });
         } else {
-          const stage = (open.partialExitStage ?? 0) + 1;
-          const pReason = stage === 1 ? ("partial_exit_1" as const) : ("partial_exit_2" as const);
-          const pLog = stage === 1 ? "partial_exit_first" : "partial_exit_second";
+          const pLog = nextStage === 1 ? "partial_exit_first" : "partial_exit_second";
           handleV2PartialAuthorityProof("partial", pReason);
           
           this.logger.info("V2_PARTIAL_CONTRACT_SIZE_PROOF", {
              symbol: open.symbol,
              rawOkxContracts: okxContracts,
-             ctVal,
-             lotSz,
-             minSz,
+             ctVal: inst?.ctVal,
+             lotSz: inst?.lotSz,
+             minSz: inst?.minSz,
              reduceRatio: ratio,
              requestedPartialContracts: requestedContracts,
              normalizedPartialContracts,
@@ -11662,7 +11763,7 @@ export class PaperEngine {
             pos: (open.pos ?? 0) * ratioRemaining,
             notional: (open.notional ?? 0) * ratioRemaining,
             initialSizeUsd: (open.initialSizeUsd ?? open.sizeUsd) * ratioRemaining,
-            partialExitStage: stage,
+            partialExitStage: nextStage,
             lifecycleState: "PARTIAL_ACTIVE",
             lastPartialAt: closedAt,
             realizedPnl: (open.realizedPnl ?? 0) + mp.pnlUsdNet,
@@ -11686,7 +11787,7 @@ export class PaperEngine {
               range_first_profit_locked: true,
               range_profit_lock_side: partialDetail["range_profit_lock_side"] ?? open.side,
               range_profit_lock_symmetry_branch: partialDetail["range_profit_lock_symmetry_branch"] ?? null,
-              partial_exit_stage_after: stage
+              partial_exit_stage_after: nextStage
             });
           }
           remaining.push(open);

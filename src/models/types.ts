@@ -940,7 +940,7 @@ export type PaperOpenPositionRecord = {
   partialPendingSizeUsd?: number;
   partialPendingOriginalSizeUsd?: number;
   partialPendingProcessedFillSz?: number;
-  partialPendingProcessedUsd?: number;
+  partialPendingProcessedMarginUsd?: number;
   partialPendingAt?: number;
   partialPendingReduceRatio?: number;
   partialPendingReason?: string;
