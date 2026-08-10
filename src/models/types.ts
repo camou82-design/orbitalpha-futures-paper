@@ -923,6 +923,11 @@ export type PaperOpenPositionRecord = {
   shockReduceOrdId?: string;
   shockReduceReason?: string;
 
+  /** Sticky manual ownership latch — set on confirmed manual intervention; cleared only on OKX position terminal. */
+  manualOwnershipLatch?: boolean;
+  manualOwnershipLatchReason?: string;
+  manualOwnershipLatchAt?: number;
+
   // Close Pending Tracking
   closePendingOrdId?: string;
   closePendingClOrdId?: string;

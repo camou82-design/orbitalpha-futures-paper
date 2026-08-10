@@ -2,7 +2,9 @@ import { evaluateV2AddOnPolicy } from "../engine-v2/addon/policy";
 import {
   resolvePositionOwnership,
   isAddonManagementAllowedForOwnership,
-  isEntryAddonBlockedForOwnership
+  isEntryAddonBlockedForOwnership,
+  isAutomatedOrderMutationBlockedForOwnership,
+  detectManualInterventionEvidence
 } from "../engine-v2/position/ownership-resolver";
 import {
   buildReduceFlowKey,
@@ -92,7 +94,9 @@ export function runV2PositionLifecycleCaseTests(): boolean {
     ok =
       run(
         "CASE B",
-        r.ownershipClass === "EXTERNAL_MANUAL_MANAGED" && r.v2ManagementRestored === false,
+        r.ownershipClass === "EXTERNAL_MANUAL_MANAGED" &&
+          r.v2ManagementRestored === false &&
+          r.lifecycleAfter === "EXTERNAL_MANUAL_MANAGED",
         JSON.stringify(r)
       ) && ok;
   }
@@ -412,6 +416,173 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       decisionCandleTs: 12345
     });
     ok = run("CASE P", k1 === k2 && k1.includes("ETHUSDT"), k1) && ok;
+  }
+
+  const manualResolveInput = (overrides: {
+    ledger?: Partial<PaperOpenPositionRecord>;
+    okxContracts?: number;
+    latch?: boolean;
+    blocked?: boolean;
+  } = {}) =>
+    ({
+      symbol: "ETHUSDT",
+      side: "long" as const,
+      okxActualPositionExists: (overrides.okxContracts ?? 0.06) > 0,
+      okxActualContracts: overrides.okxContracts ?? 0.06,
+      ledger: botLedger({
+        okxContracts: 0.03,
+        lifecycleState: "BOT_V2_MANAGED",
+        reconcileState: "RECONCILE_MISMATCH",
+        manualOwnershipLatch: overrides.latch ? true : undefined,
+        ...overrides.ledger
+      }),
+      ledgerPaperContracts: overrides.ledger?.okxContracts ?? 0.03,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      externalManualEvidence: false,
+      symbolExternalManualBlocked: overrides.blocked ?? true,
+      manualOwnershipLatchActive: overrides.latch === true
+    });
+
+  // LATCH 1: paper 0.03 / OKX 0.06 → EXTERNAL_MANUAL_MANAGED
+  {
+    const r = resolvePositionOwnership(manualResolveInput());
+    ok =
+      run(
+        "LATCH 1",
+        r.ownershipClass === "EXTERNAL_MANUAL_MANAGED" &&
+          r.lifecycleAfter === "EXTERNAL_MANUAL_MANAGED" &&
+          r.manualLatchShouldBeActive === true &&
+          r.automatedOrderMutationBlocked === true,
+        JSON.stringify(r)
+      ) && ok;
+  }
+
+  // LATCH 2: next cycle same state with latch persisted → stays EXTERNAL_MANUAL_MANAGED
+  {
+    const r = resolvePositionOwnership(manualResolveInput({ latch: true }));
+    ok =
+      run(
+        "LATCH 2",
+        r.ownershipClass === "EXTERNAL_MANUAL_MANAGED" &&
+          r.manualOwnershipLatchActive === true &&
+          r.lifecycleAfter === "EXTERNAL_MANUAL_MANAGED",
+        r.ownershipSource
+      ) && ok;
+  }
+
+  // LATCH 3: V2 bot evidence + contract mismatch → BOT_V2_MANAGED promotion blocked
+  {
+    const r = resolvePositionOwnership(manualResolveInput());
+    ok =
+      run(
+        "LATCH 3",
+        r.ownershipClass !== "BOT_V2_MANAGED" &&
+          r.v2ManagementRestored === false &&
+          isEntryAddonBlockedForOwnership(r) &&
+          isAutomatedOrderMutationBlockedForOwnership(r),
+        r.ownershipClass
+      ) && ok;
+  }
+
+  // LATCH 4: restart with persisted latch + same OKX 0.06 → manual ownership restored
+  {
+    const r = resolvePositionOwnership(
+      manualResolveInput({
+        latch: true,
+        blocked: false,
+        ledger: {
+          lifecycleState: "CLOSE_ONLY_MANAGED",
+          reconcileState: "RECONCILE_MISMATCH"
+        }
+      })
+    );
+    ok =
+      run(
+        "LATCH 4",
+        r.ownershipClass === "EXTERNAL_MANUAL_MANAGED" &&
+          r.lifecycleAfter === "EXTERNAL_MANUAL_MANAGED" &&
+          r.manualOwnershipLatchActive === true,
+        JSON.stringify(r)
+      ) && ok;
+  }
+
+  // LATCH 5: OKX contracts 0 → NO_POSITION + latch cleared via terminal cleanup
+  {
+    const open = botLedger({
+      okxContracts: 0.03,
+      manualOwnershipLatch: true,
+      manualOwnershipLatchReason: "paper_okx_contract_mismatch",
+      lifecycleState: "EXTERNAL_MANUAL_MANAGED"
+    });
+    const r = resolvePositionOwnership({
+      symbol: "ETHUSDT",
+      side: "long",
+      okxActualPositionExists: false,
+      okxActualContracts: 0,
+      ledger: open,
+      ledgerPaperContracts: 0.03,
+      externalManualEvidence: true,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: true
+    });
+    const cleanup = applyPositionTerminalCleanup(open);
+    ok =
+      run(
+        "LATCH 5",
+        r.ownershipClass === "NO_POSITION" &&
+          cleanup.fieldsCleared.includes("manualOwnershipLatch"),
+        `${r.ownershipClass}, cleared=${cleanup.fieldsCleared.join(",")}`
+      ) && ok;
+  }
+
+  // LATCH 6: after terminal, fresh pure V2 entry → BOT_V2_MANAGED allowed
+  {
+    const r = resolvePositionOwnership({
+      symbol: "ETHUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.03,
+      ledger: botLedger({
+        lifecycleState: "OPEN",
+        reconcileState: "MATCHED",
+        okxContracts: 0.03,
+        manualOwnershipLatch: undefined
+      }),
+      ledgerPaperContracts: 0.03,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      externalManualEvidence: false,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: false
+    });
+    ok =
+      run(
+        "LATCH 6",
+        r.ownershipClass === "BOT_V2_MANAGED" &&
+          r.manualLatchShouldBeActive === false &&
+          !isAutomatedOrderMutationBlockedForOwnership(r),
+        r.ownershipClass
+      ) && ok;
+  }
+
+  // LATCH 7: contract mismatch detection helper
+  {
+    const evidence = detectManualInterventionEvidence({
+      ledgerPaperContracts: 0.03,
+      okxActualContracts: 0.06,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      externalManualEvidence: false,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: false
+    });
+    ok =
+      run(
+        "LATCH 7",
+        evidence.detected === true && evidence.reason === "paper_okx_contract_mismatch",
+        JSON.stringify(evidence)
+      ) && ok;
   }
 
   return ok;

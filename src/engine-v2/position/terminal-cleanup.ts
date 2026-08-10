@@ -39,6 +39,21 @@ export function applyPositionTerminalCleanup(
             (open as { shockReduceState?: string }).shockReduceState = "TERMINAL";
         });
     }
+    if (open.manualOwnershipLatch != null) {
+        mark("manualOwnershipLatch", () => {
+            open.manualOwnershipLatch = undefined;
+        });
+    }
+    if (open.manualOwnershipLatchReason != null) {
+        mark("manualOwnershipLatchReason", () => {
+            open.manualOwnershipLatchReason = undefined;
+        });
+    }
+    if (open.manualOwnershipLatchAt != null) {
+        mark("manualOwnershipLatchAt", () => {
+            open.manualOwnershipLatchAt = undefined;
+        });
+    }
 
     return { cleared: fieldsCleared.length > 0, fieldsCleared };
 }

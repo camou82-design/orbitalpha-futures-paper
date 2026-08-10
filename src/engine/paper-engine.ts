@@ -91,6 +91,7 @@ import { normalizeOkxSwapContractsFromNotional, formatOkxSwapContractSzString, o
 import {
   resolvePositionOwnership,
   isEntryAddonBlockedForOwnership,
+  isAutomatedOrderMutationBlockedForOwnership,
   buildOwnershipRehydrationProof,
   type PositionOwnershipResolveResult
 } from "../engine-v2/position/ownership-resolver";
@@ -1901,6 +1902,8 @@ export class PaperEngine {
           ledgerPos &&
           liveExposure &&
           ledgerPos.lifecycleState !== "FAILED" &&
+          ledgerPos.lifecycleState !== "EXTERNAL_MANUAL_MANAGED" &&
+          ledgerPos.manualOwnershipLatch !== true &&
           ledgerPos.reconcileState !== "RECONCILE_MISMATCH"
         ) {
           const pricingLast =
@@ -3320,6 +3323,13 @@ export class PaperEngine {
         }
 
         const ownership = this.resolveOpenPositionOwnership(open, remotePos);
+        if (ownership.manualLatchShouldBeActive && open.manualOwnershipLatch !== true) {
+          open.manualOwnershipLatch = true;
+          open.manualOwnershipLatchReason =
+            ownership.manualInterventionReason ?? "manual_intervention_detected";
+          open.manualOwnershipLatchAt = nowTs;
+          ledgerModified = true;
+        }
         if (
           ownership.lifecycleAfter != null &&
           ownership.lifecycleAfter !== open.lifecycleState
@@ -3339,8 +3349,12 @@ export class PaperEngine {
               okxActualPositionExists: remotePos.contracts > 0,
               okxActualContracts: remotePos.contracts,
               ledger: open,
+              ledgerPaperContracts: open.okxContracts ?? null,
+              ledgerEntryPrice: open.entryPrice ?? open.avgPx ?? null,
+              okxAvgPx: remotePos.avgPx ?? null,
               externalManualEvidence: ownership.externalManualEvidence,
-              symbolExternalManualBlocked: this.symbolExternalManualBlocked.has(key)
+              symbolExternalManualBlocked: this.symbolExternalManualBlocked.has(key),
+              manualOwnershipLatchActive: open.manualOwnershipLatch === true
             },
             ownership
           )
@@ -3367,27 +3381,41 @@ export class PaperEngine {
           ledgerModified = true;
         }
 
+        const mutationBlocked = isAutomatedOrderMutationBlockedForOwnership(ownership);
+
         // Periodic check for protection or size update for OPEN positions
-        const protectRes = await this.ensureProtectiveStopOrder(open, `tick:${this.runCycleId}:${open.symbol}`);
-        if (protectRes.modified) {
-          open = protectRes.record;
-          ledgerModified = true;
-        }
-        if (!protectRes.success) {
-          this.symbolProtectionFailedBlocked.add(open.symbol);
-          this.logger.error("PROTECTIVE_ORDER_SUBMIT_FAILED", {
+        if (!mutationBlocked) {
+          const protectRes = await this.ensureProtectiveStopOrder(open, `tick:${this.runCycleId}:${open.symbol}`);
+          if (protectRes.modified) {
+            open = protectRes.record;
+            ledgerModified = true;
+          }
+          if (!protectRes.success) {
+            this.symbolProtectionFailedBlocked.add(open.symbol);
+            this.logger.error("PROTECTIVE_ORDER_SUBMIT_FAILED", {
+              symbol: open.symbol,
+              side: open.side,
+              flowId: `tick:${this.runCycleId}:${open.symbol}`,
+              scope: "reconcile_tick_hydrate",
+              detail: "ensureProtectiveStopOrder failed during periodic MATCHED position tick."
+            });
+            this.logger.error("POSITION_UNPROTECTED_HARD_BLOCK", {
+              symbol: open.symbol,
+              side: open.side,
+              scope: "reconcile_tick_hydrate",
+              action: "HARD_BLOCK_NEW_ENTRIES",
+              reason: "protective_submit_failed_on_tick"
+            });
+          }
+        } else {
+          this.logger.info("V2_EXTERNAL_MANUAL_MUTATION_BLOCKED_PROOF", {
             symbol: open.symbol,
             side: open.side,
-            flowId: `tick:${this.runCycleId}:${open.symbol}`,
-            scope: "reconcile_tick_hydrate",
-            detail: "ensureProtectiveStopOrder failed during periodic MATCHED position tick."
-          });
-          this.logger.error("POSITION_UNPROTECTED_HARD_BLOCK", {
-            symbol: open.symbol,
-            side: open.side,
-            scope: "reconcile_tick_hydrate",
-            action: "HARD_BLOCK_NEW_ENTRIES",
-            reason: "protective_submit_failed_on_tick"
+            ownership_class: ownership.ownershipClass,
+            manual_ownership_latch_active: ownership.manualOwnershipLatchActive,
+            manual_intervention_reason: ownership.manualInterventionReason,
+            scope: "reconcile_tick_protective_ensure",
+            action: "audit_only"
           });
         }
 
@@ -3397,7 +3425,7 @@ export class PaperEngine {
           open.lifecycleState === "BOT_V2_MANAGED" ||
           (open.isV2Authority === true && ownership.ownershipClass === "BOT_V2_MANAGED");
 
-        if ((!riskSafe || !reconcileSafe) && !botManaged) {
+        if ((!riskSafe || !reconcileSafe) && !botManaged && !mutationBlocked) {
           this.logger.error("V2_OPEN_POSITION_RISK_STATE_PROOF", {
             symbol: open.symbol,
             side: open.side,
@@ -6591,17 +6619,23 @@ export class PaperEngine {
     remote: OkxRemotePositionAuthority | null | undefined
   ): PositionOwnershipResolveResult {
     const key = `${open.symbol}:${open.side}`;
+    const manualLatchActive = open.manualOwnershipLatch === true;
     return resolvePositionOwnership({
       symbol: String(open.symbol),
       side: open.side as "long" | "short",
       okxActualPositionExists: remote != null && remote.contracts > 0,
       okxActualContracts: remote?.contracts ?? 0,
       ledger: open,
+      ledgerPaperContracts: open.okxContracts ?? null,
+      ledgerEntryPrice: open.entryPrice ?? open.avgPx ?? null,
+      okxAvgPx: remote?.avgPx ?? null,
       externalManualEvidence:
+        manualLatchActive ||
         open.lifecycleState === "EXTERNAL_MANUAL_POSITION" ||
         open.lifecycleState === "OPERATOR_MANAGED" ||
         open.lifecycleState === "EXTERNAL_MANUAL_MANAGED",
-      symbolExternalManualBlocked: this.symbolExternalManualBlocked.has(key)
+      symbolExternalManualBlocked: this.symbolExternalManualBlocked.has(key),
+      manualOwnershipLatchActive: manualLatchActive
     });
   }
 
