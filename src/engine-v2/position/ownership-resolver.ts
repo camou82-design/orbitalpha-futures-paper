@@ -12,6 +12,9 @@ export const MANUAL_CONTRACT_MISMATCH_TOLERANCE_RATIO = 0.001;
 /** AvgPx mismatch tolerance aligned with reconcile price tolerance. */
 export const MANUAL_AVG_PX_MISMATCH_TOLERANCE_RATIO = 0.0005;
 
+/** Grace window while bot ENTER/ADDON/REDUCE fill reconciliation catches up to OKX actual. */
+export const BOT_ATTRIBUTED_TRANSIENT_MISMATCH_GRACE_MS = 45_000;
+
 export type PositionOwnershipResolveInput = Readonly<{
     symbol: string;
     side: "long" | "short";
@@ -70,6 +73,87 @@ function isExternalManualLifecycle(ledger: PaperOpenPositionRecord | null): bool
     );
 }
 
+function hasBotOrderAttribution(ledger: PaperOpenPositionRecord | null | undefined): boolean {
+    if (ledger == null) return false;
+    if (ledger.isV2Authority === true) return true;
+    const authSrc = String(ledger.authoritySourceAtEntry ?? ledger.authority ?? "").trim().toLowerCase();
+    if (authSrc === "v2") return true;
+    const clOrdId = String(ledger.exchangeClOrdId ?? "");
+    return clOrdId.startsWith("p");
+}
+
+/** Bot ENTER/ADDON/REDUCE pending or recent fill reconciliation — not manual intervention. */
+export function isBotAttributedTransientMismatch(
+    ledger: PaperOpenPositionRecord | null | undefined,
+    nowMs: number = Date.now()
+): boolean {
+    if (ledger == null || !hasBotOrderAttribution(ledger)) return false;
+
+    const ls = ledger.lifecycleState;
+    if (
+        ls === "INITIAL" ||
+        ls === "PENDING_EXCHANGE_CONFIRM" ||
+        ls === "PARTIAL_PENDING" ||
+        ls === "CLOSE_PENDING" ||
+        ls === "ADDON_ACTIVE"
+    ) {
+        return true;
+    }
+
+    if (
+        (typeof ledger.partialPendingOrdId === "string" && ledger.partialPendingOrdId.length > 0) ||
+        (typeof ledger.partialPendingClOrdId === "string" && ledger.partialPendingClOrdId.length > 0) ||
+        (typeof ledger.partialPendingContracts === "number" &&
+            Number.isFinite(ledger.partialPendingContracts) &&
+            ledger.partialPendingContracts > 0)
+    ) {
+        return true;
+    }
+
+    if (
+        (typeof ledger.closePendingOrdId === "string" && ledger.closePendingOrdId.length > 0) ||
+        (typeof ledger.closePendingClOrdId === "string" && ledger.closePendingClOrdId.length > 0)
+    ) {
+        return true;
+    }
+
+    if (ledger.addonRebuildPendingConfirmation === true || ledger.addonRebuildRequired === true) {
+        return true;
+    }
+
+    const shockState = ledger.shockReduceState;
+    if (
+        shockState === "REQUESTED" ||
+        shockState === "SUBMITTED" ||
+        shockState === "PARTIALLY_FILLED"
+    ) {
+        return true;
+    }
+
+    const rebuildStartedAt = ledger.addonRebuildMetrics?.rebuildStartedAt;
+    if (
+        rebuildStartedAt != null &&
+        Number.isFinite(rebuildStartedAt) &&
+        nowMs - rebuildStartedAt >= 0 &&
+        nowMs - rebuildStartedAt <= BOT_ATTRIBUTED_TRANSIENT_MISMATCH_GRACE_MS
+    ) {
+        return true;
+    }
+
+    const partialPendingAt = ledger.partialPendingAt;
+    if (
+        partialPendingAt != null &&
+        Number.isFinite(partialPendingAt) &&
+        nowMs - partialPendingAt >= 0 &&
+        nowMs - partialPendingAt <= BOT_ATTRIBUTED_TRANSIENT_MISMATCH_GRACE_MS &&
+        (ledger.partialPendingOrdId != null || ledger.partialPendingClOrdId != null)
+    ) {
+        return true;
+    }
+
+    return false;
+}
+
 export function detectManualInterventionEvidence(
     input: Pick<
         PositionOwnershipResolveInput,
@@ -80,17 +164,33 @@ export function detectManualInterventionEvidence(
         | "externalManualEvidence"
         | "symbolExternalManualBlocked"
         | "manualOwnershipLatchActive"
-    >
+    > & {
+        ledger?: PaperOpenPositionRecord | null;
+        nowMs?: number;
+    }
 ): { detected: boolean; reason: string | null } {
     if (input.manualOwnershipLatchActive === true) {
         return { detected: true, reason: "manual_ownership_latch_active" };
     }
+
+    if (isExternalManualLifecycle(input.ledger ?? null)) {
+        return { detected: true, reason: "external_manual_lifecycle_evidence" };
+    }
+
+    const botTransient = isBotAttributedTransientMismatch(
+        input.ledger,
+        input.nowMs ?? Date.now()
+    );
+    if (botTransient) {
+        return { detected: false, reason: null };
+    }
+
     if (input.externalManualEvidence || input.symbolExternalManualBlocked) {
         return {
             detected: true,
             reason: input.symbolExternalManualBlocked
                 ? "symbol_external_manual_blocked"
-                : "external_manual_lifecycle_evidence"
+                : "external_manual_evidence"
         };
     }
 
@@ -156,7 +256,8 @@ export function resolvePositionOwnership(
         okxAvgPx: input.okxAvgPx,
         externalManualEvidence: input.externalManualEvidence || isExternalManualLifecycle(input.ledger),
         symbolExternalManualBlocked: input.symbolExternalManualBlocked,
-        manualOwnershipLatchActive: manualLatchActive
+        manualOwnershipLatchActive: manualLatchActive,
+        ledger: input.ledger
     });
     const manualLatchShouldBeActive = manualIntervention.detected;
     const automatedOrderMutationBlocked = manualIntervention.detected;

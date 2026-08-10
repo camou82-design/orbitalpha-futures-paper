@@ -4,7 +4,8 @@ import {
   isAddonManagementAllowedForOwnership,
   isEntryAddonBlockedForOwnership,
   isAutomatedOrderMutationBlockedForOwnership,
-  detectManualInterventionEvidence
+  detectManualInterventionEvidence,
+  isBotAttributedTransientMismatch
 } from "../engine-v2/position/ownership-resolver";
 import {
   buildReduceFlowKey,
@@ -54,6 +55,25 @@ function manualLedger(): PaperOpenPositionRecord {
     lifecycleState: "EXTERNAL_MANUAL_POSITION",
     reconcileState: "ADOPTED"
   });
+}
+
+function unattributedLedger(overrides: Partial<PaperOpenPositionRecord> = {}): PaperOpenPositionRecord {
+  return {
+    symbol: "ETHUSDT",
+    side: "long",
+    openedAt: Date.now(),
+    entryPrice: 1900,
+    sizeUsd: 20,
+    leverage: 10,
+    strategyVersion: "test",
+    sourceSignal: "test",
+    sourceRunPath: "test",
+    isV2Authority: false,
+    lifecycleState: "OPEN",
+    reconcileState: "RECONCILE_MISMATCH",
+    okxContracts: 0.03,
+    ...overrides
+  } as PaperOpenPositionRecord;
 }
 
 export function runV2PositionLifecycleCaseTests(): boolean {
@@ -582,6 +602,140 @@ export function runV2PositionLifecycleCaseTests(): boolean {
         "LATCH 7",
         evidence.detected === true && evidence.reason === "paper_okx_contract_mismatch",
         JSON.stringify(evidence)
+      ) && ok;
+  }
+
+  const fixedNow = 10_000_000;
+
+  // LATCH FP 1: V2 ADDON fill just after paper 0.03 / OKX 0.05 with bot attribution → no latch
+  {
+    const ledger = botLedger({
+      okxContracts: 0.03,
+      lifecycleState: "ADDON_ACTIVE",
+      addonRebuildPendingConfirmation: true
+    });
+    const r = resolvePositionOwnership({
+      symbol: "ETHUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.05,
+      ledger,
+      ledgerPaperContracts: 0.03,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      externalManualEvidence: false,
+      symbolExternalManualBlocked: true,
+      manualOwnershipLatchActive: false
+    });
+    ok =
+      run(
+        "LATCH FP 1",
+        r.manualLatchShouldBeActive === false &&
+          r.ownershipClass === "BOT_V2_MANAGED" &&
+          isBotAttributedTransientMismatch(ledger, fixedNow),
+        JSON.stringify({ latch: r.manualLatchShouldBeActive, class: r.ownershipClass })
+      ) && ok;
+  }
+
+  // LATCH FP 2: V2 REDUCE fill transient mismatch → no latch
+  {
+    const ledger = botLedger({
+      okxContracts: 0.05,
+      lifecycleState: "PARTIAL_PENDING",
+      partialPendingOrdId: "ord-reduce-1",
+      partialPendingContracts: 0.02,
+      partialPendingAt: fixedNow - 5_000
+    });
+    const r = resolvePositionOwnership({
+      symbol: "ETHUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.03,
+      ledger,
+      ledgerPaperContracts: 0.05,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      externalManualEvidence: false,
+      symbolExternalManualBlocked: true,
+      manualOwnershipLatchActive: false
+    });
+    ok =
+      run(
+        "LATCH FP 2",
+        r.manualLatchShouldBeActive === false &&
+          r.ownershipClass === "BOT_V2_MANAGED" &&
+          isBotAttributedTransientMismatch(ledger, fixedNow),
+        JSON.stringify({ latch: r.manualLatchShouldBeActive, class: r.ownershipClass })
+      ) && ok;
+  }
+
+  // LATCH FP 3: no bot attribution paper 0.03 / OKX 0.06 → latch
+  {
+    const ledger = unattributedLedger();
+    const evidence = detectManualInterventionEvidence({
+      ledgerPaperContracts: 0.03,
+      okxActualContracts: 0.06,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      externalManualEvidence: false,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: false,
+      ledger
+    });
+    const r = resolvePositionOwnership({
+      symbol: "ETHUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.06,
+      ledger,
+      ledgerPaperContracts: 0.03,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      externalManualEvidence: false,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: false
+    });
+    ok =
+      run(
+        "LATCH FP 3",
+        evidence.detected === true &&
+          evidence.reason === "paper_okx_contract_mismatch" &&
+          r.manualLatchShouldBeActive === true &&
+          !isBotAttributedTransientMismatch(ledger, fixedNow),
+        JSON.stringify({ evidence, latch: r.manualLatchShouldBeActive })
+      ) && ok;
+  }
+
+  // LATCH FP 4: bot order terminal complete, unexplained mismatch → latch
+  {
+    const ledger = botLedger({
+      okxContracts: 0.03,
+      lifecycleState: "BOT_V2_MANAGED",
+      reconcileState: "MATCHED",
+      addonRebuildPendingConfirmation: false,
+      partialPendingOrdId: undefined,
+      shockReduceState: "TERMINAL"
+    });
+    const r = resolvePositionOwnership({
+      symbol: "ETHUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.06,
+      ledger,
+      ledgerPaperContracts: 0.03,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      externalManualEvidence: false,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: false
+    });
+    ok =
+      run(
+        "LATCH FP 4",
+        r.manualLatchShouldBeActive === true &&
+          r.ownershipClass === "EXTERNAL_MANUAL_MANAGED" &&
+          !isBotAttributedTransientMismatch(ledger, fixedNow),
+        JSON.stringify(r)
       ) && ok;
   }
 
