@@ -869,7 +869,9 @@ export type PaperOpenPositionRecord = {
     | "PARTIAL_PENDING"
     | "ADDON_ACTIVE" 
     | "PARTIAL_ACTIVE" 
+    | "BOT_V2_MANAGED"
     | "CLOSE_ONLY_MANAGED"
+    | "EXTERNAL_MANUAL_MANAGED"
     | "EXTERNAL_MANUAL_POSITION"
     | "UNTRACKED_AUTO_ORIGIN"
     | "OKX_UNTRACKED_FILL"
@@ -914,6 +916,13 @@ export type PaperOpenPositionRecord = {
 
   
   
+  /** Shock/partial reduce lifecycle (policy-layer duplicate submit guard). */
+  shockReduceState?: "IDLE" | "REQUESTED" | "SUBMITTED" | "PARTIALLY_FILLED" | "FILLED" | "TERMINAL";
+  shockReduceFlowKey?: string;
+  shockReduceDecisionCandleTs?: number;
+  shockReduceOrdId?: string;
+  shockReduceReason?: string;
+
   // Close Pending Tracking
   closePendingOrdId?: string;
   closePendingClOrdId?: string;

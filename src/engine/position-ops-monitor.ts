@@ -7,6 +7,7 @@ import {
   type InstrumentSizing,
   type LedgerOkxPositionSyncSnapshot
 } from "../exchange/okx-position-sync";
+import { protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
 
 export type PositionOpsBanner =
   | "NO_POSITION"
@@ -399,7 +400,13 @@ export function findProtectiveHintsForInst(
   positionSide: "long" | "short",
   pending: readonly Record<string, unknown>[],
   algos: readonly Record<string, unknown>[],
-  tpRequired: boolean
+  tpRequired: boolean,
+  options?: Readonly<{
+    ledger?: PaperOpenPositionRecord | null;
+    tickSz?: number;
+    requiredStopPx?: number | null;
+    requiredContracts?: number | null;
+  }>
 ): {
   protectionSatisfied: boolean;
   hints: string[];
@@ -427,7 +434,8 @@ export function findProtectiveHintsForInst(
   const consider = (o: Record<string, unknown>, prefix: "algo" | "pend") => {
     if (!instIdMatchesRow(instId, String(o.instId ?? ""))) return;
     if (!orderMatchesPositionSide(o, positionSide)) return;
-    if (!orderLooksReduceOnlyProtective(o)) return;
+    const classified = classifyOkxOpenOrderPurpose(o, options?.ledger ?? null);
+    if (!classified.isBotManagedProtection && !orderLooksReduceOnlyProtective(o)) return;
     hints.push(`${prefix}:${stringifyHints(o)}`);
     matchingProtectiveOrderCount += 1;
     const slPx = extractSlPx(o);
@@ -441,7 +449,13 @@ export function findProtectiveHintsForInst(
 
   const foundSl = foundSlPrice != null;
   const foundTp = foundTpPrice != null;
-  protectionSatisfied = foundSl && (!tpRequired || foundTp);
+  const tickSz = options?.tickSz ?? 0;
+  const reqStop = options?.requiredStopPx ?? null;
+  const slPriceMatch =
+    reqStop != null && foundSlPrice != null && tickSz > 0
+      ? protectiveStopPricesMatch(reqStop, foundSlPrice, tickSz)
+      : foundSl;
+  protectionSatisfied = slPriceMatch && (!tpRequired || foundTp);
 
   return {
     protectionSatisfied,
@@ -527,13 +541,21 @@ export function buildPositionOpsSurface(input: Readonly<{
       const tpRequired =
         (ledgerTp != null && ledgerTp > 0) || (tpPx != null && tpPx > 0 && Number.isFinite(tpPx));
 
+      const instSizing = instMap?.get(hit.instId) as { tickSz?: number } | undefined;
+      const tickSz = instSizing?.tickSz != null ? Number(instSizing.tickSz) : 0;
+
       const {
         protectionSatisfied,
         hints,
         slPrice: exchStopPx,
         tpPrice: exchTpPx,
         matchingProtectiveOrderCount
-      } = findProtectiveHintsForInst(hit.instId, hit.side, pending, algos, tpRequired);
+      } = findProtectiveHintsForInst(hit.instId, hit.side, pending, algos, tpRequired, {
+        ledger,
+        tickSz: tickSz > 0 ? tickSz : undefined,
+        requiredStopPx: ledgerStop ?? stopPx,
+        requiredContracts: ledger?.okxContracts ?? null
+      });
 
       let pxSource: PositionOpsRow["stop_px_source"] = "none";
       if (exchStopPx != null) pxSource = "exchange_order";

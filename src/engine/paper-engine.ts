@@ -88,6 +88,25 @@ import { evaluateRiskExposure } from "./risk-exposure";
 import { buildPaperExplanation } from "./explanation-layer";
 import { runEngineV2, adaptV2Input, shouldEmitV2Proof } from "../engine-v2/index";
 import { normalizeOkxSwapContractsFromNotional, formatOkxSwapContractSzString, okxInstrumentSzDecimals, type OkxSwapInstrumentSizing } from "../engine-v2/okx-swap-sizing";
+import {
+  resolvePositionOwnership,
+  isEntryAddonBlockedForOwnership,
+  buildOwnershipRehydrationProof,
+  type PositionOwnershipResolveResult
+} from "../engine-v2/position/ownership-resolver";
+import {
+  buildPositionRealityReconcileProof,
+  buildPositionTerminalCleanupProof,
+  applyPositionTerminalCleanup
+} from "../engine-v2/position/terminal-cleanup";
+import {
+  buildReduceFlowKey,
+  evaluateReduceResubmitAllowed,
+  buildReduceExecutionLifecycleProof,
+  type V2ReduceLifecycleState
+} from "../engine-v2/execution/reduce-lifecycle";
+import { evaluateReduceLotDistortion, buildReduceLotDistortionProof } from "../engine-v2/execution/reduce-lot-distortion";
+import { buildProtectiveOrderMatchProof, protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
 export { normalizeOkxSwapContractsFromNotional };
 import { getPaperLoopIntervalMs } from "../config/env";
 import {
@@ -3256,8 +3275,36 @@ export class PaperEngine {
       }
 
       // 3. Regular Open Position Reconciliation (Deep Comparison & Repair)
-      if (open.lifecycleState === "OPEN" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
+      if (
+        open.lifecycleState === "OPEN" ||
+        open.lifecycleState === "BOT_V2_MANAGED" ||
+        open.lifecycleState === "CLOSE_ONLY_MANAGED"
+      ) {
         if (!remotePos) {
+          this.logger.info(
+            "V2_POSITION_REALITY_RECONCILE_PROOF",
+            buildPositionRealityReconcileProof({
+              symbol: String(open.symbol),
+              side: open.side,
+              okxActualSide: null,
+              okxActualContracts: 0,
+              ledgerSide: open.side,
+              ledgerContracts: open.okxContracts ?? null,
+              finalPositionExists: false,
+              finalManagementSide: null,
+              staleStateCleared: true
+            })
+          );
+          const cleanup = applyPositionTerminalCleanup(open);
+          this.logger.info(
+            "V2_POSITION_TERMINAL_CLEANUP_PROOF",
+            buildPositionTerminalCleanupProof({
+              symbol: String(open.symbol),
+              side: open.side,
+              okxActualContracts: 0,
+              cleanup
+            })
+          );
           const pruned = await reconcileManualFullClose(open, "RECONCILE_ABSENT");
           if (pruned) continue;
           next.push(open);
@@ -3271,6 +3318,47 @@ export class PaperEngine {
         if (reconcileResult.ledgerModified) {
           ledgerModified = true;
         }
+
+        const ownership = this.resolveOpenPositionOwnership(open, remotePos);
+        if (
+          ownership.lifecycleAfter != null &&
+          ownership.lifecycleAfter !== open.lifecycleState
+        ) {
+          open.lifecycleState = ownership.lifecycleAfter;
+          if (ownership.v2ManagementRestored && open.reconcileState === "ADOPTED") {
+            open.reconcileState = "MATCHED";
+          }
+          ledgerModified = true;
+        }
+        this.logger.info(
+          "V2_POSITION_OWNERSHIP_REHYDRATION_PROOF",
+          buildOwnershipRehydrationProof(
+            {
+              symbol: String(open.symbol),
+              side: open.side as "long" | "short",
+              okxActualPositionExists: remotePos.contracts > 0,
+              okxActualContracts: remotePos.contracts,
+              ledger: open,
+              externalManualEvidence: ownership.externalManualEvidence,
+              symbolExternalManualBlocked: this.symbolExternalManualBlocked.has(key)
+            },
+            ownership
+          )
+        );
+        this.logger.info(
+          "V2_POSITION_REALITY_RECONCILE_PROOF",
+          buildPositionRealityReconcileProof({
+            symbol: String(open.symbol),
+            side: open.side,
+            okxActualSide: open.side,
+            okxActualContracts: remotePos.contracts,
+            ledgerSide: open.side,
+            ledgerContracts: open.okxContracts ?? null,
+            finalPositionExists: true,
+            finalManagementSide: open.side,
+            staleStateCleared: false
+          })
+        );
 
         // --- V2 Risk Integrity Hardening (Hydrate & Prove) ---
         const hydration = this.hydrateRiskPlan(open);
@@ -3305,8 +3393,11 @@ export class PaperEngine {
 
         const riskSafe = open.stopPrice != null && Number.isFinite(open.stopPrice);
         const reconcileSafe = open.reconcileState !== "RECONCILE_MISMATCH";
-        
-        if (!riskSafe || !reconcileSafe) {
+        const botManaged =
+          open.lifecycleState === "BOT_V2_MANAGED" ||
+          (open.isV2Authority === true && ownership.ownershipClass === "BOT_V2_MANAGED");
+
+        if ((!riskSafe || !reconcileSafe) && !botManaged) {
           this.logger.error("V2_OPEN_POSITION_RISK_STATE_PROOF", {
             symbol: open.symbol,
             side: open.side,
@@ -3420,6 +3511,8 @@ export class PaperEngine {
           status: "open",
           regimeAtEntry: "NO_TRADE",
           executorAtEntry: "IDLE",
+          isV2Authority: isEngineOwned,
+          authoritySourceAtEntry: isEngineOwned ? "v2" : undefined,
           
           adoptedAt: nowTs,
           detectedAt: nowTs,
@@ -3477,6 +3570,9 @@ export class PaperEngine {
             audit_flag: "RECOVERY_POSITION_STOP_MISSING",
             reason: "ADOPTED_POSITION_STOP_MISSING"
           });
+        } else if (isEngineOwned) {
+          adopted.lifecycleState = "BOT_V2_MANAGED";
+          adopted.reconcileState = "MATCHED";
         }
 
         next.push(adopted);
@@ -4891,17 +4987,35 @@ export class PaperEngine {
         logger: this.logger
       });
 
-      // --- Adopted / Close-Only Entry Block ---
-      const isAdoptedOrCloseOnly = 
-        existingPos?.reconcileState === "ADOPTED" || 
-        existingPos?.lifecycleState === "CLOSE_ONLY_MANAGED";
-      
+      // --- Adopted / Close-Only Entry Block (ownership-aware, symbol-common) ---
+      const existingRemote = existingPos
+        ? this.remoteAuthorityForOpen(existingPos, (() => {
+            const m = new Map<string, OkxRemotePositionAuthority>();
+            if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
+              for (const row of this.lastLivePositionsPayload) {
+                const hit = okxSwapRowToLedgerKey(row as Record<string, unknown>);
+                if (!hit) continue;
+                const inst = this.instrumentCache.get(hit.instId);
+                m.set(hit.key, this.buildOkxRemotePositionAuthority(row as Record<string, unknown>, hit, inst));
+              }
+            }
+            return m;
+          })())
+        : null;
+      const ownershipForEntry = existingPos
+        ? this.resolveOpenPositionOwnership(existingPos, existingRemote)
+        : null;
+      const isAdoptedOrCloseOnly =
+        ownershipForEntry != null && isEntryAddonBlockedForOwnership(ownershipForEntry);
+
       if (isAdoptedOrCloseOnly && res.decision.final_signal_state !== "NONE") {
         this.logger.info("ADOPTED_POSITION_ENTRY_BLOCKED_PROOF", {
           symbol: sym,
           side: existingPos?.side,
           reconcileState: existingPos?.reconcileState,
           lifecycleState: existingPos?.lifecycleState,
+          ownership_class: ownershipForEntry?.ownershipClass,
+          ownership_source: ownershipForEntry?.ownershipSource,
           original_entry_signal: res.decision.final_signal_state,
           action: "forced_no_trade"
         });
@@ -6469,7 +6583,33 @@ export class PaperEngine {
 
   private isV2AuthorityPosition(open: PaperOpenPositionRecord): boolean {
     const authSrc = String(open.authoritySourceAtEntry ?? open.authority ?? "").trim().toLowerCase();
-    return authSrc === "v2";
+    return authSrc === "v2" || open.isV2Authority === true;
+  }
+
+  private resolveOpenPositionOwnership(
+    open: PaperOpenPositionRecord,
+    remote: OkxRemotePositionAuthority | null | undefined
+  ): PositionOwnershipResolveResult {
+    const key = `${open.symbol}:${open.side}`;
+    return resolvePositionOwnership({
+      symbol: String(open.symbol),
+      side: open.side as "long" | "short",
+      okxActualPositionExists: remote != null && remote.contracts > 0,
+      okxActualContracts: remote?.contracts ?? 0,
+      ledger: open,
+      externalManualEvidence:
+        open.lifecycleState === "EXTERNAL_MANUAL_POSITION" ||
+        open.lifecycleState === "OPERATOR_MANAGED" ||
+        open.lifecycleState === "EXTERNAL_MANUAL_MANAGED",
+      symbolExternalManualBlocked: this.symbolExternalManualBlocked.has(key)
+    });
+  }
+
+  private remoteAuthorityForOpen(
+    open: PaperOpenPositionRecord,
+    remoteMap: Map<string, OkxRemotePositionAuthority>
+  ): OkxRemotePositionAuthority | null {
+    return remoteMap.get(`${open.symbol}:${open.side}`) ?? null;
   }
 
   /** true ???꾨웾 泥?궛???대쾲 ?깆뿉???섏? ?딄퀬 ?좎?(?μ꽭/?덉씤 ?꾪솚??. ?먯젅쨌由ъ뒪???쒕룄 ?깆? ?몄텧遺?먯꽌 蹂꾨룄 ?덉슜. */
@@ -7827,6 +7967,38 @@ export class PaperEngine {
       }
     }
     
+    this.logger.info("V2_PROTECTION_CANONICALIZATION_PROOF", {
+      symbol: open.symbol,
+      side: open.side,
+      flowId,
+      duplicate_sl_count: duplicateSlCount,
+      duplicate_tp_count: duplicateTpCount,
+      wrong_size_count: wrongSizeCount,
+      cancel_targets_count: cancelTargets.length,
+      canonical_sl_algo_id: engineOwnedSl?.algoId ?? null,
+      canonical_tp_algo_id: engineOwnedTp?.algoId ?? null,
+      contracts_to_protect: contractsToProtect,
+      protected_sl_contracts: engineOwnedSl ? Number(engineOwnedSl.sz ?? 0) : null
+    });
+
+    if (engineOwnedSl && activeStopPrice != null) {
+      const tickSzCanon = cachedSizing?.tickSz ? Number(cachedSizing.tickSz) : 0.01;
+      this.logger.info(
+        "V2_PROTECTIVE_ORDER_MATCH_PROOF",
+        buildProtectiveOrderMatchProof({
+          symbol: open.symbol,
+          side: open.side,
+          requiredStopRaw: activeStopPrice,
+          exchangeStopRaw: Number(engineOwnedSl.slTriggerPx ?? 0),
+          tickSz: tickSzCanon,
+          contractsRequired: contractsToProtect,
+          contractsProtected: Number(engineOwnedSl.sz ?? 0),
+          algoId: engineOwnedSl.algoId,
+          purpose: "bot_protective_sl"
+        })
+      );
+    }
+
     // V2 Breakeven Confirmation
     if (engineOwnedSl && open.breakevenStopRequired === true && open.breakevenStopPrice != null) {
       const confirmedPx = Number(engineOwnedSl.slTriggerPx);
@@ -9693,8 +9865,9 @@ export class PaperEngine {
         open.lifecycleState === "OPEN" || 
         open.lifecycleState === undefined || 
         open.lifecycleState === null || 
-        open.lifecycleState === "ADDON_ACTIVE" || 
+      open.lifecycleState === "ADDON_ACTIVE" ||
         open.lifecycleState === "PARTIAL_ACTIVE" ||
+        open.lifecycleState === "BOT_V2_MANAGED" ||
         open.lifecycleState === "CLOSE_ONLY_MANAGED";
       
       if (!isManaged) {
@@ -11977,6 +12150,72 @@ export class PaperEngine {
           continue;
         }
 
+        const partialReason = v2PartialAuthority.partialReason ?? "v2_partial_exit";
+        const lotDistortion = evaluateReduceLotDistortion({
+          positionContracts: okxContracts ?? 0,
+          desiredReduceRatio: reduceRatio,
+          normalizedReduceContracts: normalizedPartialContracts,
+          reason: partialReason
+        });
+        this.logger.info(
+          "V2_REDUCE_LOT_DISTORTION_PROOF",
+          buildReduceLotDistortionProof(open.symbol, open.side, lotDistortion)
+        );
+        if (lotDistortion.holdDueToDistortion) {
+          remaining.push(open);
+          continue;
+        }
+
+        const snapForReduce = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
+        const candles = snapForReduce?.candles;
+        const decisionCandleTs =
+          candles && candles.length > 0
+            ? Number(candles[candles.length - 1]?.ts ?? 0)
+            : 0;
+        const flowKey = buildReduceFlowKey({
+          symbol: String(open.symbol),
+          side: open.side,
+          reason: partialReason,
+          targetContracts: normalizedPartialContracts,
+          decisionCandleTs
+        });
+        const prevState = (open.shockReduceState ?? "IDLE") as V2ReduceLifecycleState;
+        const resubmit = evaluateReduceResubmitAllowed({
+          previousState: prevState,
+          okxOrderTerminal: prevState === "TERMINAL" || prevState === "FILLED",
+          okxOrderRejected: false,
+          okxOrderCanceled: false,
+          previousZeroFill: false,
+          newDecisionCandle: open.shockReduceDecisionCandleTs !== decisionCandleTs,
+          actualContractsChanged: false,
+          sameFlowKey: open.shockReduceFlowKey === flowKey
+        });
+        this.logger.info(
+          "V2_REDUCE_EXECUTION_LIFECYCLE_PROOF",
+          buildReduceExecutionLifecycleProof({
+            symbol: open.symbol,
+            flowId,
+            reason: partialReason,
+            decision_candle_ts: decisionCandleTs,
+            requested_contracts: normalizedPartialContracts,
+            previous_state: prevState,
+            current_state: resubmit.resubmitAllowed ? "REQUESTED" : prevState,
+            okx_order_id: open.shockReduceOrdId ?? null,
+            fill_contracts: open.partialPendingProcessedContracts ?? 0,
+            remaining_actual_contracts: okxContracts ?? 0,
+            resubmit_allowed: resubmit.resubmitAllowed,
+            resubmit_reason: resubmit.resubmitReason
+          })
+        );
+        if (!resubmit.resubmitAllowed) {
+          remaining.push(open);
+          continue;
+        }
+        open.shockReduceState = "REQUESTED";
+        open.shockReduceFlowKey = flowKey;
+        open.shockReduceDecisionCandleTs = decisionCandleTs;
+        open.shockReduceReason = partialReason;
+
         this.logger.info("V2_PARTIAL_CONTRACT_SIZE_PROOF", {
            symbol: open.symbol,
            rawOkxContracts: okxContracts,
@@ -12065,9 +12304,13 @@ export class PaperEngine {
         const isExchangeEnabled = this.okxDemo && this.signedSubmitMode() === "enabled";
 
         if (!partialSubmit?.ok || (isExchangeEnabled && !partialSubmit?.ordId)) {
+          open.shockReduceState = "TERMINAL";
           remaining.push(open);
           continue;
         }
+
+        open.shockReduceState = "SUBMITTED";
+        open.shockReduceOrdId = partialSubmit.ordId ?? undefined;
 
         if (isExchangeEnabled) {
           const pendingRecord = this.buildV2PartialPendingRecord(open, {
