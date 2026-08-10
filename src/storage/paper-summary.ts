@@ -1,3 +1,8 @@
+import {
+  isStrategyStatsRow,
+  isAccountStatsRow
+} from "../engine-v2/lifecycle/completed-trade";
+
 /** Core metrics shared by overall and per-day reports (no `generatedAt`). */
 export type PaperSummaryStats = Readonly<{
   totalTrades: number;
@@ -105,6 +110,20 @@ export type PaperWindowSummaryReport = Readonly<{
     monthToDate: PaperSummaryStats;
     all: PaperSummaryStats;
   }>;
+  /** BOT_V2 completed position cycles only. */
+  strategyWindows: Readonly<{
+    last24h: PaperSummaryStats;
+    last7d: PaperSummaryStats;
+    last30d: PaperSummaryStats;
+    all: PaperSummaryStats;
+  }>;
+  /** All OKX completed position cycles (incl. manual/external). */
+  accountWindows: Readonly<{
+    last24h: PaperSummaryStats;
+    last7d: PaperSummaryStats;
+    last30d: PaperSummaryStats;
+    all: PaperSummaryStats;
+  }>;
 }>;
 
 /**
@@ -136,15 +155,11 @@ const PARTIAL_EVENT_EXIT_TYPES = new Set([
 ]);
 
 function isFinalClosedRow(r: unknown): boolean {
-  if (!r || typeof r !== "object") return true; // parseRow will handle invalid rows
-  const o = r as Record<string, unknown>;
-  // Filter by closeReason
-  if (typeof o.closeReason === "string" && PARTIAL_EVENT_CLOSE_REASONS.has(o.closeReason)) return false;
-  // Filter by exitType
-  if (typeof o.exitType === "string" && PARTIAL_EVENT_EXIT_TYPES.has(o.exitType)) return false;
-  // Filter by closeSource (PARTIAL_SPLIT is only ever a sub-event, never a final close)
-  if (o.closeSource === "PARTIAL_SPLIT") return false;
-  return true;
+  return isStrategyStatsRow(r);
+}
+
+function isAccountClosedRow(r: unknown): boolean {
+  return isAccountStatsRow(r);
 }
 
 function parseRow(
@@ -559,21 +574,29 @@ export function buildPaperDailySummaryFromHistory(history: unknown[], generatedA
  * Rows without `closedAt` are excluded from those windows only; `all` matches overall `summary.json`.
  */
 export function buildPaperWindowSummaryFromHistory(history: unknown[], generatedAt: number = Date.now()): PaperWindowSummaryReport {
-  const rows: ParsedHistoryRow[] = [];
+  const strategyRows: ParsedHistoryRow[] = [];
+  const accountRows: ParsedHistoryRow[] = [];
   for (const r of history) {
-    // [FIX: history-ledger] Exclude partial/defense sub-events from window statistics.
-    if (!isFinalClosedRow(r)) continue;
     const row = parseRow(r);
-    if (row) rows.push(row);
+    if (!row) continue;
+    if (isAccountClosedRow(r)) accountRows.push(row);
+    if (isFinalClosedRow(r)) strategyRows.push(row);
   }
 
   const inClosedRange = (row: ParsedHistoryRow, fromInclusive: number): boolean =>
     row.closedAt !== undefined && row.closedAt >= fromInclusive && row.closedAt <= generatedAt;
 
-  const last7d = rows.filter((r) => inClosedRange(r, generatedAt - 7 * MS_PER_DAY));
-  const last30d = rows.filter((r) => inClosedRange(r, generatedAt - 30 * MS_PER_DAY));
+  const last24hFrom = generatedAt - MS_PER_DAY;
+  const last7dFrom = generatedAt - 7 * MS_PER_DAY;
+  const last30dFrom = generatedAt - 30 * MS_PER_DAY;
   const monthStart = utcMonthStartMs(generatedAt);
-  const monthToDate = rows.filter((r) => inClosedRange(r, monthStart));
+
+  const filterWindow = (rows: ParsedHistoryRow[], fromInclusive: number) =>
+    rows.filter((r) => inClosedRange(r, fromInclusive));
+
+  const last7d = strategyRows.filter((r) => inClosedRange(r, last7dFrom));
+  const last30d = strategyRows.filter((r) => inClosedRange(r, last30dFrom));
+  const monthToDate = strategyRows.filter((r) => inClosedRange(r, monthStart));
 
   return {
     generatedAt,
@@ -581,7 +604,19 @@ export function buildPaperWindowSummaryFromHistory(history: unknown[], generated
       last7d: aggregateRows(last7d),
       last30d: aggregateRows(last30d),
       monthToDate: aggregateRows(monthToDate),
-      all: aggregateRows(rows)
+      all: aggregateRows(strategyRows)
+    },
+    strategyWindows: {
+      last24h: aggregateRows(filterWindow(strategyRows, last24hFrom)),
+      last7d: aggregateRows(filterWindow(strategyRows, last7dFrom)),
+      last30d: aggregateRows(filterWindow(strategyRows, last30dFrom)),
+      all: aggregateRows(strategyRows)
+    },
+    accountWindows: {
+      last24h: aggregateRows(filterWindow(accountRows, last24hFrom)),
+      last7d: aggregateRows(filterWindow(accountRows, last7dFrom)),
+      last30d: aggregateRows(filterWindow(accountRows, last30dFrom)),
+      all: aggregateRows(accountRows)
     }
   };
 }

@@ -89,6 +89,16 @@ export type PaperDashboardReport = Readonly<{
     last30d: PaperDashboardFeeSlice;
     all: PaperDashboardFeeSlice;
   }>;
+  /** OKX actual completed position cycles (all trade sources). */
+  account_realized_pnl_24h: number;
+  account_realized_pnl_7d: number;
+  account_realized_pnl_30d: number;
+  /** BOT_V2 strategy completed position cycles only. */
+  strategy_realized_pnl_24h: number;
+  strategy_realized_pnl_7d: number;
+  strategy_realized_pnl_30d: number;
+  strategy_win_rate_7d: number;
+  strategy_closed_count_7d: number;
   recentTrend: PaperDashboardRecentTrend;
   observation: import("./paper-summary").PaperObservationMetrics;
 }>;
@@ -228,6 +238,9 @@ export function buildPaperDashboard(input: Readonly<{
     all: pickFeeSlice(w.all)
   };
 
+  const sw = window.strategyWindows;
+  const aw = window.accountWindows;
+
   return {
     generatedAt: health.generatedAt,
     status: health.status,
@@ -237,6 +250,14 @@ export function buildPaperDashboard(input: Readonly<{
     okx_balance,
     snapshot,
     feeAnalytics,
+    account_realized_pnl_24h: aw.last24h.totalPnlUsdNet,
+    account_realized_pnl_7d: aw.last7d.totalPnlUsdNet,
+    account_realized_pnl_30d: aw.last30d.totalPnlUsdNet,
+    strategy_realized_pnl_24h: sw.last24h.totalPnlUsdNet,
+    strategy_realized_pnl_7d: sw.last7d.totalPnlUsdNet,
+    strategy_realized_pnl_30d: sw.last30d.totalPnlUsdNet,
+    strategy_win_rate_7d: sw.last7d.winRate,
+    strategy_closed_count_7d: sw.last7d.totalTrades,
     recentTrend: buildRecentTrend(healthHistoryLines),
     observation: summary.observation
   };

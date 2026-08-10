@@ -4,6 +4,11 @@
  * so UI matches `data/positions/history.json` at bundle load time.
  */
 
+import {
+  isStrategyStatsRow,
+  isAccountStatsRow
+} from "../engine-v2/lifecycle/completed-trade";
+
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 function utcMonthStartMs(now: number): number {
@@ -68,6 +73,18 @@ export type FuturesPaperLedgerPerformance = Readonly<{
   last7d: FuturesPaperLedgerWindowStats;
   last30d: FuturesPaperLedgerWindowStats;
   monthToDate: FuturesPaperLedgerWindowStats;
+  strategy: Readonly<{
+    parsedTradeCount: number;
+    all: FuturesPaperLedgerWindowStats;
+    last7d: FuturesPaperLedgerWindowStats;
+    last30d: FuturesPaperLedgerWindowStats;
+  }>;
+  account: Readonly<{
+    parsedTradeCount: number;
+    all: FuturesPaperLedgerWindowStats;
+    last7d: FuturesPaperLedgerWindowStats;
+    last30d: FuturesPaperLedgerWindowStats;
+  }>;
 }>;
 
 function aggregateRows(rows: ParsedHistoryRow[]): FuturesPaperLedgerWindowStats {
@@ -144,26 +161,44 @@ export function buildLedgerPerformanceFromHistory(
   history: unknown[],
   generatedAt: number = Date.now()
 ): FuturesPaperLedgerPerformance {
-  const rows: ParsedHistoryRow[] = [];
+  const strategyRows: ParsedHistoryRow[] = [];
+  const accountRows: ParsedHistoryRow[] = [];
   for (const r of history) {
     const row = parseRow(r);
-    if (row) rows.push(row);
+    if (!row) continue;
+    if (isAccountStatsRow(r)) accountRows.push(row);
+    if (isStrategyStatsRow(r)) strategyRows.push(row);
   }
 
   const inClosedRange = (row: ParsedHistoryRow, fromInclusive: number): boolean =>
     row.closedAt !== undefined && row.closedAt >= fromInclusive && row.closedAt <= generatedAt;
 
-  const last7d = rows.filter((r) => inClosedRange(r, generatedAt - 7 * MS_PER_DAY));
-  const last30d = rows.filter((r) => inClosedRange(r, generatedAt - 30 * MS_PER_DAY));
+  const last7dStrategy = strategyRows.filter((r) => inClosedRange(r, generatedAt - 7 * MS_PER_DAY));
+  const last30dStrategy = strategyRows.filter((r) => inClosedRange(r, generatedAt - 30 * MS_PER_DAY));
   const monthStart = utcMonthStartMs(generatedAt);
-  const monthToDate = rows.filter((r) => inClosedRange(r, monthStart));
+  const monthToDate = strategyRows.filter((r) => inClosedRange(r, monthStart));
+
+  const last7dAccount = accountRows.filter((r) => inClosedRange(r, generatedAt - 7 * MS_PER_DAY));
+  const last30dAccount = accountRows.filter((r) => inClosedRange(r, generatedAt - 30 * MS_PER_DAY));
 
   return {
     generatedAt,
-    parsedTradeCount: rows.length,
-    all: aggregateRows(rows),
-    last7d: aggregateRows(last7d),
-    last30d: aggregateRows(last30d),
-    monthToDate: aggregateRows(monthToDate)
+    parsedTradeCount: strategyRows.length,
+    all: aggregateRows(strategyRows),
+    last7d: aggregateRows(last7dStrategy),
+    last30d: aggregateRows(last30dStrategy),
+    monthToDate: aggregateRows(monthToDate),
+    strategy: {
+      parsedTradeCount: strategyRows.length,
+      all: aggregateRows(strategyRows),
+      last7d: aggregateRows(last7dStrategy),
+      last30d: aggregateRows(last30dStrategy)
+    },
+    account: {
+      parsedTradeCount: accountRows.length,
+      all: aggregateRows(accountRows),
+      last7d: aggregateRows(last7dAccount),
+      last30d: aggregateRows(last30dAccount)
+    }
   };
 }

@@ -928,6 +928,24 @@ export type PaperOpenPositionRecord = {
   manualOwnershipLatchReason?: string;
   manualOwnershipLatchAt?: number;
 
+  /** Position cycle execution tracking (one cycle = one completed trade). */
+  positionCycleId?: string;
+  positionCycleExitFills?: Array<{
+    px: number;
+    contracts: number;
+    pnlUsdNet: number;
+    feeUsd: number;
+    at: number;
+    reason?: string;
+  }>;
+  positionCycleCumulativePnlUsdNet?: number;
+  positionCycleCumulativeFeeUsd?: number;
+  positionCyclePartialReduceCount?: number;
+  positionCycleAddonCount?: number;
+  positionCycleAdverseAddonCount?: number;
+  positionCyclePyramidingCount?: number;
+  positionCycleMaxContracts?: number;
+
   // Close Pending Tracking
   closePendingOrdId?: string;
   closePendingClOrdId?: string;
@@ -1537,6 +1555,22 @@ export type PaperClosedPositionRecord = Readonly<{
   realizedPnlPct?: number;
   /** 익/손/보합(신규 건 항상 기록). */
   outcomeStatus?: "win" | "loss" | "flat";
+
+  /** Completed trade lifecycle (one position cycle = one dashboard trade). */
+  flowId?: string;
+  positionCycleId?: string;
+  tradeSource?: "BOT_V2" | "MANUAL_EXTERNAL" | "ADOPTED_EXTERNAL";
+  isPositionCycleFinal?: boolean;
+  isChildExecution?: boolean;
+  entryAvgPx?: number;
+  exitAvgPx?: number;
+  maxPositionContracts?: number;
+  partialReduceCount?: number;
+  addonCount?: number;
+  adverseAddonCount?: number;
+  pyramidingCount?: number;
+  finalCloseReason?: string;
+  netRealizedPnlUsd?: number;
 }>;
 
 // --- PENDING ENTRY REGISTRY ---

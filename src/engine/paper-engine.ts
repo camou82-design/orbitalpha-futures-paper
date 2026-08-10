@@ -108,6 +108,16 @@ import {
 } from "../engine-v2/execution/reduce-lifecycle";
 import { evaluateReduceLotDistortion, buildReduceLotDistortionProof } from "../engine-v2/execution/reduce-lot-distortion";
 import { buildProtectiveOrderMatchProof, protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
+import {
+  enrichCompletedTradeRecord,
+  isChildExecutionClose,
+  buildCompletedTradeFinalizeProof,
+  buildCompletedTradeAggregationProof,
+  buildTradeSourceClassificationProof,
+  classifyTradeSource,
+  recordPositionCycleExitFill,
+  normalizeFinalCloseReason
+} from "../engine-v2/lifecycle/completed-trade";
 export { normalizeOkxSwapContractsFromNotional };
 import { getPaperLoopIntervalMs } from "../config/env";
 import {
@@ -2573,14 +2583,23 @@ export class PaperEngine {
     const RECONCILE_GRACE_PERIOD_MS = 30_000;
 
     const reconcileManualFullClose = async (open: PaperOpenPositionRecord, source: string): Promise<boolean> => {
-      if (open.symbol === "BTCUSDT") {
-        if (this.isBtcPositionManagementBlocked()) {
-          await this.logAndSuppressBtcUsdtAction("reconcileManualFullClose", open.side, ["CLOSE", "close history write", "ledger prune"]);
-          return false;
-        }
+      const isManualExternal =
+        open.manualOwnershipLatch === true ||
+        open.lifecycleState === "EXTERNAL_MANUAL_MANAGED" ||
+        open.lifecycleState === "EXTERNAL_MANUAL_POSITION" ||
+        open.lifecycleState === "OPERATOR_MANAGED";
+      if (open.symbol === "BTCUSDT" && this.isBtcPositionManagementBlocked() && !isManualExternal) {
+        await this.logAndSuppressBtcUsdtAction("reconcileManualFullClose", open.side, ["CLOSE", "close history write", "ledger prune"]);
+        return false;
       }
       const snap = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
-      const closePrice = snap?.lastPrice || open.entryPrice;
+      const closePrice =
+        (typeof open.closePendingPrice === "number" && open.closePendingPrice > 0
+          ? open.closePendingPrice
+          : null) ??
+        (open.avgPx != null && open.avgPx > 0 ? open.avgPx : null) ??
+        snap?.lastPrice ??
+        open.entryPrice;
       const closedAt = nowTs;
       
       this.logger.warn("MANUAL_FULL_CLOSE_RECONCILE_PROOF", {
@@ -2609,22 +2628,64 @@ export class PaperEngine {
         symbol: open.symbol as MarketSymbol,
         closePrice,
         closedAt,
-        closeReason: "manual_full_close_reconciled",
+        closeReason: open.manualOwnershipLatch
+          ? "manual_full_close_reconciled"
+          : "manual_full_close_reconciled",
         legMarginUsd: open.sizeUsd,
         metrics,
         feeRate: this.config.paperTakerFeeRate,
         fundingIntervalHours: this.config.paperFundingIntervalHours,
         strategyVersion: open.strategyVersion ?? "paper-v2"
       });
+      const enriched = enrichCompletedTradeRecord({
+        open,
+        closedRow,
+        isFinalClose: true,
+        actualFillPx: closePrice,
+        actualFillContracts: open.okxContracts ?? 0
+      });
+      const tradeSource = classifyTradeSource(open);
 
       const { historyAppended } = await this.appendClosedWithStandardRouting({
-        closedRow,
+        closedRow: enriched,
         open,
         flowId: `${open.symbol}:${open.side}:${open.openedAt}`,
-        exitReason: "manual_full_close_reconciled",
+        exitReason: enriched.finalCloseReason ?? "manual_full_close_reconciled",
         closeSource: source,
         currentRegime: this.lastRegime.regime || "NO_TRADE"
       });
+      this.logger.info(
+        "V2_COMPLETED_TRADE_FINALIZE_PROOF",
+        buildCompletedTradeFinalizeProof({
+          symbol: open.symbol,
+          flow_id: enriched.flowId,
+          okx_contracts: 0,
+          entry_avg_px: enriched.entryAvgPx ?? open.entryPrice,
+          exit_avg_px: enriched.exitAvgPx ?? closePrice,
+          realized_pnl_usdt: enriched.pnlUsdNet,
+          fee_usdt: enriched.feeUsd,
+          net_pnl_usdt: enriched.pnlUsdNet,
+          close_reason: enriched.finalCloseReason ?? normalizeFinalCloseReason({
+            closeReason: "manual_full_close_reconciled",
+            tradeSource
+          }),
+          history_persisted: historyAppended,
+          cleanup_allowed: historyAppended
+        })
+      );
+      this.logger.info(
+        "TRADE_SOURCE_CLASSIFICATION_PROOF",
+        buildTradeSourceClassificationProof({
+          symbol: open.symbol,
+          flow_id: enriched.flowId,
+          ownership: open.lifecycleState,
+          manual_latch: open.manualOwnershipLatch === true,
+          bot_attribution: tradeSource === "BOT_V2",
+          trade_source: tradeSource,
+          included_in_account_stats: historyAppended,
+          included_in_strategy_stats: historyAppended && tradeSource === "BOT_V2"
+        })
+      );
       if (!historyAppended) {
         this.logger.warn("MANUAL_FULL_CLOSE_HISTORY_APPEND_BLOCKED_KEEP_LEDGER", {
           symbol: open.symbol,
@@ -3296,16 +3357,6 @@ export class PaperEngine {
               finalPositionExists: false,
               finalManagementSide: null,
               staleStateCleared: true
-            })
-          );
-          const cleanup = applyPositionTerminalCleanup(open);
-          this.logger.info(
-            "V2_POSITION_TERMINAL_CLEANUP_PROOF",
-            buildPositionTerminalCleanupProof({
-              symbol: String(open.symbol),
-              side: open.side,
-              okxActualContracts: 0,
-              cleanup
             })
           );
           const pruned = await reconcileManualFullClose(open, "RECONCILE_ABSENT");
@@ -7106,6 +7157,10 @@ export class PaperEngine {
     const processedBefore =
       open.partialPendingProcessedContracts ?? open.partialPendingProcessedFillSz ?? 0;
     const contractsBefore = open.okxContracts ?? 0;
+    open.positionCycleMaxContracts = Math.max(
+      open.positionCycleMaxContracts ?? 0,
+      contractsBefore
+    );
 
     const metrics = computePaperCloseLegMetrics({
       open,
@@ -7127,6 +7182,14 @@ export class PaperEngine {
       flowId
     });
     open.realizedPnl = (open.realizedPnl ?? 0) + metrics.pnlUsdNet;
+    recordPositionCycleExitFill(open, {
+      px: fillPx,
+      contracts: newFillContracts,
+      pnlUsdNet: metrics.pnlUsdNet,
+      feeUsd: metrics.feeUsd,
+      at: input.closedAt ?? Date.now(),
+      reason: open.partialPendingReason ?? "partial_reduce"
+    });
 
     open.partialPendingProcessedContracts = cumulativeFillContracts;
     open.partialPendingProcessedFillSz = cumulativeFillContracts;
@@ -9429,6 +9492,54 @@ export class PaperEngine {
       ...(input.open.authoritySideAtEntry != null ? { authoritySide: input.open.authoritySideAtEntry } : {})
     };
 
+    const isChild = isChildExecutionClose(
+      String(normalized.closeReason),
+      normalized.exitType,
+      normalized.closeSource
+    );
+    const enriched = enrichCompletedTradeRecord({
+      open: input.open,
+      closedRow: normalized,
+      isFinalClose: !isChild,
+      actualFillPx: normalized.closePrice,
+      actualFillContracts: input.open.okxContracts ?? 0,
+      isStop: String(normalized.closeReason).includes("stop"),
+      isTakeProfit: String(normalized.closeReason).includes("take_profit")
+    });
+    const tradeSource = classifyTradeSource(input.open);
+
+    this.logger.info(
+      "TRADE_SOURCE_CLASSIFICATION_PROOF",
+      buildTradeSourceClassificationProof({
+        symbol: input.open.symbol,
+        flow_id: enriched.flowId ?? input.flowId,
+        ownership: input.open.lifecycleState,
+        manual_latch: input.open.manualOwnershipLatch === true,
+        bot_attribution: tradeSource === "BOT_V2",
+        trade_source: tradeSource,
+        included_in_account_stats: enriched.isPositionCycleFinal === true,
+        included_in_strategy_stats: enriched.isPositionCycleFinal === true && tradeSource === "BOT_V2"
+      })
+    );
+
+    this.logger.info(
+      "V2_COMPLETED_TRADE_AGGREGATION_PROOF",
+      buildCompletedTradeAggregationProof({
+        symbol: input.open.symbol,
+        flow_id: enriched.flowId ?? input.flowId,
+        position_cycle_id: enriched.positionCycleId,
+        entry_fill_count: 1,
+        addon_fill_count: enriched.addonCount ?? 0,
+        partial_reduce_count: enriched.partialReduceCount ?? 0,
+        final_close_fill_count: enriched.isPositionCycleFinal ? 1 : 0,
+        completed_trade_count_increment: enriched.isPositionCycleFinal ? 1 : 0,
+        aggregate_realized_pnl_usdt: enriched.pnlUsdNet,
+        aggregate_fee_usdt: enriched.feeUsd,
+        aggregate_net_pnl_usdt: enriched.pnlUsdNet,
+        final_close_reason: enriched.finalCloseReason ?? null
+      })
+    );
+
     // --- History Append Guard ---
     const okxPos = this.lastLivePositionsPayload?.find((p: any) => {
       const hit = okxSwapRowToLedgerKey(p);
@@ -9454,35 +9565,35 @@ export class PaperEngine {
       input.exitReason
     );
 
-    const isDuplicate = await this.isHistoryDuplicate(normalized);
+    const isDuplicate = await this.isHistoryDuplicate(enriched);
     if (isDuplicate) {
       this.logger.warn("HISTORY_APPEND_DUPLICATE_BLOCKED", {
-        symbol: normalized.symbol,
-        side: normalized.side,
-        openedAt: normalized.openedAt,
-        entryPrice: normalized.entryPrice,
-        exitType: normalized.exitType,
-        closeReason: normalized.closeReason
+        symbol: enriched.symbol,
+        side: enriched.side,
+        openedAt: enriched.openedAt,
+        entryPrice: enriched.entryPrice,
+        exitType: enriched.exitType,
+        closeReason: enriched.closeReason
       });
-      return { row: normalized, historyAppended: false };
+      return { row: enriched, historyAppended: false };
     }
 
     const okxPositionExists = !!okxPos;
-    const invalidPrice = !normalized.closePrice || !Number.isFinite(normalized.closePrice) || normalized.closePrice <= 0;
+    const invalidPrice = !enriched.closePrice || !Number.isFinite(enriched.closePrice) || enriched.closePrice <= 0;
 
-    const blockReason = 
+    const blockReason =
         invalidPrice ? "INVALID_CLOSE_PRICE" :
-        (okxPositionExists ? "OKX_POSITION_STILL_EXISTS_NO_CLOSE_FILL" : null);
+        (!isChild && okxPositionExists ? "OKX_POSITION_STILL_EXISTS_NO_CLOSE_FILL" : null);
 
     if (blockReason) {
       this.logger.warn("HISTORY_APPEND_BLOCKED_EXTERNAL_MANUAL_POSITION", {
-        symbol: normalized.symbol,
-        side: normalized.side,
+        symbol: enriched.symbol,
+        side: enriched.side,
         sourceSignal: input.open.sourceSignal,
         lifecycleState: input.open.lifecycleState,
-        closeReason: normalized.closeReason,
-        exitType: normalized.exitType,
-        closePrice: normalized.closePrice,
+        closeReason: enriched.closeReason,
+        exitType: enriched.exitType,
+        closePrice: enriched.closePrice,
         okx_position_exists: okxPositionExists,
         okx_avg_px: okxPos ? (okxPos as any).avgPx : null,
         okx_base_qty: okxPos ? (okxPos as any).baseQty : null,
@@ -9490,20 +9601,50 @@ export class PaperEngine {
         reason: blockReason,
         action: "SKIP_HISTORY_APPEND_KEEP_OPEN_LEDGER"
       });
-      return { row: normalized, historyAppended: false };
+      this.logger.info(
+        "V2_COMPLETED_TRADE_FINALIZE_PROOF",
+        buildCompletedTradeFinalizeProof({
+          symbol: enriched.symbol,
+          flow_id: enriched.flowId ?? input.flowId,
+          okx_contracts: okxPos ? (okxPos as any).pos : 0,
+          entry_avg_px: enriched.entryAvgPx ?? enriched.entryPrice,
+          exit_avg_px: enriched.exitAvgPx ?? null,
+          realized_pnl_usdt: enriched.pnlUsdNet,
+          fee_usdt: enriched.feeUsd,
+          net_pnl_usdt: enriched.pnlUsdNet,
+          close_reason: enriched.finalCloseReason ?? null,
+          history_persisted: false,
+          cleanup_allowed: false
+        })
+      );
+      return { row: enriched, historyAppended: false };
     }
 
-    await this.positions.appendClosed(normalized);
+    await this.positions.appendClosed(enriched);
     this.historyDirty = true;
     this.bundleDirty = true;
+
+    this.logger.info("V2_COMPLETED_TRADE_FINALIZE_PROOF", buildCompletedTradeFinalizeProof({
+      symbol: enriched.symbol,
+      flow_id: enriched.flowId ?? input.flowId,
+      okx_contracts: 0,
+      entry_avg_px: enriched.entryAvgPx ?? enriched.entryPrice,
+      exit_avg_px: enriched.exitAvgPx ?? enriched.closePrice,
+      realized_pnl_usdt: enriched.pnlUsdNet,
+      fee_usdt: enriched.feeUsd,
+      net_pnl_usdt: enriched.pnlUsdNet,
+      close_reason: enriched.finalCloseReason ?? null,
+      history_persisted: true,
+      cleanup_allowed: enriched.isPositionCycleFinal === true
+    }));
 
     this.logger.info("EXIT_STANDARD_ROUTING_PROOF", {
       symbol: input.open.symbol,
       side: input.open.side,
       flowId: input.flowId,
       exitReason: routedExitReason,
-      exitType: normalized.exitType ?? null,
-      closeSource: normalized.closeSource ?? null,
+      exitType: enriched.exitType ?? null,
+      closeSource: enriched.closeSource ?? null,
       authority_source: authoritySource,
       adopted_engine: adoptedEngine,
       lifecycleState: input.open.lifecycleState ?? "INITIAL",
@@ -9512,9 +9653,11 @@ export class PaperEngine {
       serverTradeEnabled: this.serverTradeControlState.server_trade_enabled,
       closeOnlyMode: this.serverTradeControlState.close_only_mode,
       killSwitch: this.serverTradeControlState.kill_switch_active,
-      reconcileSafeMode: this.reconcileSafetyCloseOnly
+      reconcileSafeMode: this.reconcileSafetyCloseOnly,
+      trade_source: tradeSource,
+      is_position_cycle_final: enriched.isPositionCycleFinal === true
     });
-    return { row: normalized, historyAppended: true };
+    return { row: enriched, historyAppended: true };
   }
 
   public async tryPaperPositionClose(input: Readonly<{
