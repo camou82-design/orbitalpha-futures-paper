@@ -1,4 +1,5 @@
 import type { PaperClosedPositionRecord, PaperOpenPositionRecord } from "../../models/types";
+import { isProtectivePartialReason } from "../execution/reduce-economics";
 
 export type CompletedTradeSource = "BOT_V2" | "MANUAL_EXTERNAL" | "ADOPTED_EXTERNAL";
 
@@ -166,8 +167,10 @@ export function recordPositionCycleExitFill(
         (open.positionCycleCumulativePnlUsdNet ?? 0) + fill.pnlUsdNet;
     open.positionCycleCumulativeFeeUsd =
         (open.positionCycleCumulativeFeeUsd ?? 0) + fill.feeUsd;
-    open.positionCyclePartialReduceCount =
-        (open.positionCyclePartialReduceCount ?? 0) + 1;
+    if (isProtectivePartialReason(fill.reason)) {
+        open.positionCyclePartialReduceCount =
+            (open.positionCyclePartialReduceCount ?? 0) + 1;
+    }
 }
 
 export function aggregatePositionCycleClose(input: Readonly<{
@@ -206,7 +209,10 @@ export function aggregatePositionCycleClose(input: Readonly<{
         pnlUsdGross: aggregateGross,
         feeUsd: aggregateFee,
         realizedPnlUsd: aggregateNet,
-        partialReduceCount: open.positionCyclePartialReduceCount ?? 0,
+        partialReduceCount:
+            open.protectivePartialReduceCount ??
+            open.positionCyclePartialReduceCount ??
+            0,
         addonCount: open.positionCycleAddonCount ?? open.addonCount,
         adverseAddonCount: open.positionCycleAdverseAddonCount ?? open.adverseAddonCount,
         pyramidingCount: open.positionCyclePyramidingCount,

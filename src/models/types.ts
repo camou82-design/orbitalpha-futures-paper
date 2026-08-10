@@ -922,6 +922,27 @@ export type PaperOpenPositionRecord = {
   shockReduceDecisionCandleTs?: number;
   shockReduceOrdId?: string;
   shockReduceReason?: string;
+  /** Reduce episode FSM — one defensive episode per confirmed market evidence. */
+  lastReduceEpisodeId?: string;
+  lastReduceReason?: string;
+  lastReduceFilledCandleTs?: number;
+  lastReduceFilledAt?: number;
+  lastReduceMarketSubtype?: string;
+  lastReduceShockPhase?: string;
+  lastReduceRatio?: number;
+  lastReduceUrgency?: string;
+  lastReduceInvalidationDistancePct?: number;
+  consecutiveReduceEpisodeCount?: number;
+  /** Protective partial reduces only (excludes TP ladder / final close). */
+  protectivePartialReduceCount?: number;
+  /** Last bot-attributed execution for terminal close attribution. */
+  lastBotExecutionReason?: string;
+  lastBotExecutionAt?: number;
+  /** Position cycle excursion telemetry (analysis only). */
+  maxFavorableExcursionPct?: number;
+  maxAdverseExcursionPct?: number;
+  maxFavorablePrice?: number;
+  maxAdversePrice?: number;
 
   /** Sticky manual ownership latch — set on confirmed manual intervention; cleared only on OKX position terminal. */
   manualOwnershipLatch?: boolean;
@@ -1571,6 +1592,9 @@ export type PaperClosedPositionRecord = Readonly<{
   pyramidingCount?: number;
   finalCloseReason?: string;
   netRealizedPnlUsd?: number;
+  /** Max favorable / adverse excursion during position cycle (telemetry). */
+  mfePct?: number;
+  maePct?: number;
 }>;
 
 // --- PENDING ENTRY REGISTRY ---

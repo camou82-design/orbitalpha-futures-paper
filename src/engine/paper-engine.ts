@@ -107,6 +107,29 @@ import {
   type V2ReduceLifecycleState
 } from "../engine-v2/execution/reduce-lifecycle";
 import { evaluateReduceLotDistortion, buildReduceLotDistortionProof } from "../engine-v2/execution/reduce-lot-distortion";
+import {
+  evaluateReduceEpisodeGate,
+  evaluatePartialReduceLimit,
+  evaluateReduceEconomicSize,
+  evaluateReduceExecutionEconomics,
+  evaluateShockReduceEscalation,
+  markProtectiveReduceEpisodeFilled,
+  estimatePositionRiskAtStop,
+  updatePositionExcursionTelemetry,
+  isProtectivePartialReason,
+  buildReduceEpisodeId,
+  buildPartialReduceLimitProof,
+  buildReduceEconomicSizeProof,
+  buildReduceFeeEconomicsProof,
+  buildShockReduceEscalationProof,
+  buildCompletedTradeEconomicsProof,
+  MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT,
+  REDUCE_FEE_SAFETY_MULTIPLIER
+} from "../engine-v2/execution/reduce-economics";
+import {
+  resolveTerminalCloseAttribution,
+  buildTerminalCloseAttributionProof
+} from "../engine-v2/lifecycle/terminal-close-attribution";
 import { buildProtectiveOrderMatchProof, protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
 import {
   enrichCompletedTradeRecord,
@@ -2624,35 +2647,62 @@ export class PaperEngine {
         paperFundingIntervalHours: this.config.paperFundingIntervalHours
       });
 
+      const manualEvidencePresent =
+        open.manualOwnershipLatch === true || isManualExternal;
+      const attribution = resolveTerminalCloseAttribution({
+        open,
+        reconcileSource: source,
+        okxFlatDetectedAt: closedAt,
+        manualEvidencePresent
+      });
+      const tradeSourcePre = classifyTradeSource(open);
+      this.logger.info(
+        "V2_TERMINAL_CLOSE_ATTRIBUTION_PROOF",
+        buildTerminalCloseAttributionProof({
+          symbol: open.symbol,
+          flow_id: `${open.symbol}:${open.side}:${open.openedAt}`,
+          trade_source: tradeSourcePre,
+          ownership: open.lifecycleState,
+          last_bot_execution_reason: open.lastBotExecutionReason ?? null,
+          last_bot_execution_at: open.lastBotExecutionAt ?? null,
+          manual_evidence_present: manualEvidencePresent,
+          okx_flat_detected_at: closedAt,
+          resolved_close_reason: attribution.finalCloseReason,
+          attribution_source: attribution.attributionSource
+        })
+      );
+
       const closedRow = finalizePaperClosedRecord({
         open,
         symbol: open.symbol as MarketSymbol,
         closePrice,
         closedAt,
-        closeReason: open.manualOwnershipLatch
-          ? "manual_full_close_reconciled"
-          : "manual_full_close_reconciled",
+        closeReason: attribution.closeReason as PaperClosedPositionRecord["closeReason"],
         legMarginUsd: open.sizeUsd,
         metrics,
         feeRate: this.config.paperTakerFeeRate,
         fundingIntervalHours: this.config.paperFundingIntervalHours,
         strategyVersion: open.strategyVersion ?? "paper-v2"
       });
-      const enriched = enrichCompletedTradeRecord({
+      const enrichedBase = enrichCompletedTradeRecord({
         open,
         closedRow,
         isFinalClose: true,
         actualFillPx: closePrice,
         actualFillContracts: open.okxContracts ?? 0
       });
+      const enriched =
+        enrichedBase.finalCloseReason !== attribution.finalCloseReason
+          ? { ...enrichedBase, finalCloseReason: attribution.finalCloseReason }
+          : enrichedBase;
       const tradeSource = classifyTradeSource(open);
 
       const { historyAppended } = await this.appendClosedWithStandardRouting({
         closedRow: enriched,
         open,
         flowId: `${open.symbol}:${open.side}:${open.openedAt}`,
-        exitReason: enriched.finalCloseReason ?? "manual_full_close_reconciled",
-        closeSource: source,
+        exitReason: enriched.finalCloseReason ?? attribution.finalCloseReason,
+        closeSource: attribution.closeSource,
         currentRegime: this.lastRegime.regime || "NO_TRADE"
       });
       this.logger.info(
@@ -7183,14 +7233,36 @@ export class PaperEngine {
       flowId
     });
     open.realizedPnl = (open.realizedPnl ?? 0) + metrics.pnlUsdNet;
+    const fillReason =
+      open.partialPendingReason ?? open.shockReduceReason ?? "partial_reduce";
     recordPositionCycleExitFill(open, {
       px: fillPx,
       contracts: newFillContracts,
       pnlUsdNet: metrics.pnlUsdNet,
       feeUsd: metrics.feeUsd,
       at: input.closedAt ?? Date.now(),
-      reason: open.partialPendingReason ?? "partial_reduce"
+      reason: fillReason
     });
+
+    if (orderFullyFilled && isProtectivePartialReason(fillReason)) {
+      markProtectiveReduceEpisodeFilled(open, {
+        episodeId: buildReduceEpisodeId({
+          symbol: String(open.symbol),
+          side: open.side,
+          reason: fillReason,
+          shockPhase: open.lastReduceShockPhase,
+          marketSubtype: open.lastReduceMarketSubtype
+        }),
+        reason: fillReason,
+        decisionCandleTs: open.shockReduceDecisionCandleTs ?? 0,
+        filledAt: input.closedAt ?? Date.now(),
+        shockPhase: open.lastReduceShockPhase,
+        marketSubtype: open.lastReduceMarketSubtype,
+        urgency: open.lastReduceUrgency,
+        reduceRatio: open.lastReduceRatio,
+        invalidationDistancePct: open.lastReduceInvalidationDistancePct
+      });
+    }
 
     open.partialPendingProcessedContracts = cumulativeFillContracts;
     open.partialPendingProcessedFillSz = cumulativeFillContracts;
@@ -7238,7 +7310,9 @@ export class PaperEngine {
     isPartial?: boolean;
     /** Explicit contract count for accurate reduction (0.43, 0.12 etc) */
     okxContracts?: number;
-  }): Promise<{ 
+    /** When set, records bot execution attribution on the open position. */
+    open?: PaperOpenPositionRecord;
+  }): Promise<{
     ok: boolean; 
     ordId?: string; 
     fillConfirmed?: boolean;
@@ -7255,6 +7329,11 @@ export class PaperEngine {
         okx_signed_ready: this.okxSignedRestReady
       });
       return { ok: false, errorMessage: "okx_client_or_mode_not_ready" };
+    }
+
+    if (input.open) {
+      input.open.lastBotExecutionReason = input.reason;
+      input.open.lastBotExecutionAt = Date.now();
     }
 
     const side = input.side === "long" ? "sell" : "buy";
@@ -9499,7 +9578,7 @@ export class PaperEngine {
       normalized.exitType,
       normalized.closeSource
     );
-    const enriched = enrichCompletedTradeRecord({
+    let enriched = enrichCompletedTradeRecord({
       open: input.open,
       closedRow: normalized,
       isFinalClose: !isChild,
@@ -9541,6 +9620,40 @@ export class PaperEngine {
         final_close_reason: enriched.finalCloseReason ?? null
       })
     );
+
+    if (enriched.isPositionCycleFinal === true) {
+      const gross =
+        enriched.pnlUsdGross ??
+        (enriched.pnlUsdNet + (enriched.feeUsd ?? 0));
+      const fee = enriched.feeUsd ?? 0;
+      const net = enriched.pnlUsdNet ?? 0;
+      enriched = {
+        ...enriched,
+        mfePct: input.open.maxFavorableExcursionPct,
+        maePct: input.open.maxAdverseExcursionPct
+      };
+      this.logger.info(
+        "V2_COMPLETED_TRADE_ECONOMICS_PROOF",
+        buildCompletedTradeEconomicsProof({
+          symbol: input.open.symbol,
+          flow_id: enriched.flowId ?? input.flowId,
+          trade_source: tradeSource,
+          gross_realized_pnl_usdt: gross,
+          total_fee_usdt: fee,
+          funding_usdt: enriched.fundingUsd ?? 0,
+          net_realized_pnl_usdt: net,
+          partial_reduce_count: enriched.partialReduceCount ?? 0,
+          addon_count: enriched.addonCount ?? 0,
+          max_position_contracts: enriched.maxPositionContracts ?? null,
+          fee_to_gross_abs_ratio:
+            Math.abs(gross) > 0 ? Math.abs(fee) / Math.abs(gross) : null,
+          fee_dominated_loss: net < 0 && gross >= 0,
+          fee_pressure_high: Math.abs(fee) > Math.abs(gross),
+          mfe_pct: input.open.maxFavorableExcursionPct ?? null,
+          mae_pct: input.open.maxAdverseExcursionPct ?? null
+        })
+      );
+    }
 
     // --- History Append Guard ---
     const okxPos = this.lastLivePositionsPayload?.find((p: any) => {
@@ -9987,6 +10100,7 @@ export class PaperEngine {
           paperTakerFeeRate: this.config.paperTakerFeeRate,
           paperFundingIntervalHours: this.config.paperFundingIntervalHours
         });
+        updatePositionExcursionTelemetry(open, closePrice);
         const highWater = Math.max(open.highestPnlPctNet ?? m.pnlPctNet, m.pnlPctNet);
         const peakUnrealized = Math.max(open.peakUnrealizedPnlPct ?? m.pnlPctNet, m.pnlPctNet);
         const currentPnlPct = m.pnlPctNet;
@@ -11031,7 +11145,8 @@ export class PaperEngine {
           isV2Authority: true,
           isStopLoss: isStopLossClose,
           isTakeProfit: isTakeProfitClose,
-          isTrailingStop: isTrailingClose
+          isTrailingStop: isTrailingClose,
+          open
         });
 
         if (cr === "take_profit" && String(v2ExitAuthority?.exitReason).startsWith("V2_RANGE")) {
@@ -12330,6 +12445,256 @@ export class PaperEngine {
         }
 
         const partialReason = v2PartialAuthority.partialReason ?? "v2_partial_exit";
+        const snapForReduce = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
+        const candles = snapForReduce?.candles;
+        const decisionCandleTs =
+          candles && candles.length > 0
+            ? Number(candles[candles.length - 1]?.ts ?? 0)
+            : 0;
+        const shockPhase = this.lastRisk?.directionalShockState ?? "NONE";
+        const marketSubtype = input.marketMode?.marketMode ?? null;
+        const partialUrgency = v2PartialAuthority.partialUrgency ?? "none";
+        const appliedLev = Math.max(1, open.leverage ?? 1);
+        const ctVal = inst?.ctVal ?? 1;
+        const desiredReduceNotionalUsdt =
+          (okxContracts ?? 0) * reduceRatio * ctVal * closePrice;
+        const normalizedReduceNotionalUsdt =
+          normalizedPartialContracts * ctVal * closePrice;
+        const protectiveCount = open.protectivePartialReduceCount ?? 0;
+        const invalidationPx = open.invalidationPx ?? open.stopPrice;
+        const invalidationDistancePct =
+          invalidationPx != null && closePrice > 0
+            ? open.side === "long"
+              ? (closePrice - invalidationPx) / closePrice
+              : (invalidationPx - closePrice) / closePrice
+            : null;
+        const invalidationImminent =
+          invalidationDistancePct != null && invalidationDistancePct < 0.005;
+        const isProtectivePartial = isProtectivePartialReason(partialReason);
+
+        if (isProtectivePartial) {
+          const episodeGate = evaluateReduceEpisodeGate({
+            open,
+            reason: partialReason,
+            decisionCandleTs,
+            shockPhase,
+            marketSubtype,
+            urgency: partialUrgency,
+            reduceRatio,
+            invalidationDistancePct
+          });
+          if (!episodeGate.submitAllowed) {
+            this.logger.info("V2_REDUCE_EPISODE_GATE_PROOF", {
+              symbol: open.symbol,
+              flow_id: flowId,
+              reason: partialReason,
+              block_reason: episodeGate.blockReason,
+              new_market_evidence: episodeGate.newMarketEvidence,
+              submit_allowed: false
+            });
+            remaining.push(open);
+            continue;
+          }
+
+          const limitGate = evaluatePartialReduceLimit({
+            open,
+            reason: partialReason,
+            protectivePartialCount: protectiveCount,
+            urgency: partialUrgency,
+            invalidationImminent
+          });
+          this.logger.info(
+            "V2_PARTIAL_REDUCE_LIMIT_PROOF",
+            buildPartialReduceLimitProof({
+              symbol: open.symbol,
+              flow_id: flowId,
+              partial_reduce_count: protectiveCount,
+              max_partial_reduce_count: MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT,
+              requested_reason: partialReason,
+              new_market_evidence: episodeGate.newMarketEvidence,
+              submit_allowed: limitGate.submitAllowed,
+              block_reason: limitGate.blockReason,
+              fallback_action: limitGate.fallbackAction
+            })
+          );
+          if (!limitGate.submitAllowed) {
+            if (limitGate.fallbackAction === "FULL_EXIT") {
+              handleV2PartialAuthorityProof("superseded_by_exit", partialReason);
+              const cr = "v2_exit_authority" as PaperClosedPositionRecord["closeReason"];
+              const metricsEsc = leg(open.sizeUsd);
+              const closedRowEsc = toClosed(cr, metricsEsc, open.sizeUsd);
+              const closeSubmitEsc = await this.dispatchOkxClose({
+                symbol: open.symbol,
+                side: open.side,
+                sizeUsd: open.sizeUsd,
+                okxContracts: okxContracts ?? undefined,
+                appliedLeverage: appliedLev,
+                lastPrice: closePrice,
+                flowId,
+                reason: "SHOCK_FULL_EXIT_AGAINST_POSITION",
+                closeSource: "V2_PARTIAL_ESCALATION",
+                authorityOwner: "V2",
+                executionOwner: "paper_engine",
+                isV2Authority: true,
+                open
+              });
+              const finEsc = await this.finalizeFullClose({
+                open,
+                closeSubmit: closeSubmitEsc,
+                closedRow: closedRowEsc,
+                cr,
+                closeSource: "V2_PARTIAL_ESCALATION",
+                regimeNow,
+                envelope,
+                flowId,
+                requestedContracts: okxContracts ?? 0,
+                requestedPrice: closePrice
+              });
+              if (!finEsc.ledgerPruneAllowed) {
+                remaining.push(open);
+              }
+              continue;
+            }
+            remaining.push(open);
+            continue;
+          }
+
+          const freshCandle =
+            decisionCandleTs > (open.lastReduceFilledCandleTs ?? 0);
+          const shockEsc = evaluateShockReduceEscalation({
+            episodeCount: protectiveCount,
+            shockPhase,
+            previousShockPhase: open.lastReduceShockPhase,
+            freshCandle,
+            riskDeteriorated: episodeGate.newMarketEvidence,
+            urgency: partialUrgency,
+            invalidationImminent
+          });
+          this.logger.info(
+            "V2_SHOCK_REDUCE_ESCALATION_PROOF",
+            buildShockReduceEscalationProof({
+              symbol: open.symbol,
+              flow_id: flowId,
+              episode_count: protectiveCount,
+              shock_phase: shockPhase,
+              previous_shock_phase: open.lastReduceShockPhase ?? null,
+              fresh_candle: freshCandle,
+              risk_deteriorated: episodeGate.newMarketEvidence,
+              partial_allowed: shockEsc.partialAllowed,
+              full_exit_required: shockEsc.fullExitRequired,
+              decision_reason: shockEsc.decisionReason
+            })
+          );
+          if (!shockEsc.partialAllowed) {
+            if (shockEsc.fullExitRequired) {
+              handleV2PartialAuthorityProof("superseded_by_exit", partialReason);
+              const cr = "v2_exit_authority" as PaperClosedPositionRecord["closeReason"];
+              const metricsEsc = leg(open.sizeUsd);
+              const closedRowEsc = toClosed(cr, metricsEsc, open.sizeUsd);
+              const closeSubmitEsc = await this.dispatchOkxClose({
+                symbol: open.symbol,
+                side: open.side,
+                sizeUsd: open.sizeUsd,
+                okxContracts: okxContracts ?? undefined,
+                appliedLeverage: appliedLev,
+                lastPrice: closePrice,
+                flowId,
+                reason: "SHOCK_FULL_EXIT_AGAINST_POSITION",
+                closeSource: "V2_PARTIAL_ESCALATION",
+                authorityOwner: "V2",
+                executionOwner: "paper_engine",
+                isV2Authority: true,
+                open
+              });
+              const finEsc = await this.finalizeFullClose({
+                open,
+                closeSubmit: closeSubmitEsc,
+                closedRow: closedRowEsc,
+                cr,
+                closeSource: "V2_PARTIAL_ESCALATION",
+                regimeNow,
+                envelope,
+                flowId,
+                requestedContracts: okxContracts ?? 0,
+                requestedPrice: closePrice
+              });
+              if (!finEsc.ledgerPruneAllowed) {
+                remaining.push(open);
+              }
+              continue;
+            }
+            remaining.push(open);
+            continue;
+          }
+
+          const economicSize = evaluateReduceEconomicSize({
+            reason: partialReason,
+            requestedReduceNotionalUsdt: desiredReduceNotionalUsdt,
+            normalizedReduceNotionalUsdt
+          });
+          this.logger.info(
+            "V2_REDUCE_ECONOMIC_SIZE_PROOF",
+            buildReduceEconomicSizeProof({
+              symbol: open.symbol,
+              flow_id: flowId,
+              reason: partialReason,
+              requested_reduce_notional_usdt: desiredReduceNotionalUsdt,
+              normalized_reduce_contracts: normalizedPartialContracts,
+              normalized_reduce_notional_usdt: normalizedReduceNotionalUsdt,
+              lot_distortion_ratio: economicSize.lotDistortionRatio,
+              economic_size_passed: economicSize.economicSizePassed,
+              fallback_action: economicSize.fallbackAction
+            })
+          );
+          if (!economicSize.economicSizePassed) {
+            remaining.push(open);
+            continue;
+          }
+
+          const positionNotionalUsdt = (okxContracts ?? 0) * ctVal * closePrice;
+          const postContracts = Math.max(0, (okxContracts ?? 0) - normalizedPartialContracts);
+          const postNotionalUsdt = postContracts * ctVal * closePrice;
+          const riskBeforeUsdt = estimatePositionRiskAtStop(open, closePrice);
+          const riskAfterUsdt =
+            positionNotionalUsdt > 0
+              ? riskBeforeUsdt * (postNotionalUsdt / positionNotionalUsdt)
+              : 0;
+          const feeEconomics = evaluateReduceExecutionEconomics({
+            reason: partialReason,
+            positionNotionalUsdt,
+            requestedReduceNotionalUsdt: desiredReduceNotionalUsdt,
+            normalizedReduceNotionalUsdt,
+            feeRate: this.config.paperTakerFeeRate,
+            riskBeforeUsdt,
+            riskAfterUsdt,
+            includeReentryFee: true
+          });
+          this.logger.info(
+            "V2_REDUCE_FEE_ECONOMICS_PROOF",
+            buildReduceFeeEconomicsProof({
+              symbol: open.symbol,
+              flow_id: flowId,
+              reason: partialReason,
+              position_notional_usdt: positionNotionalUsdt,
+              requested_reduce_notional_usdt: desiredReduceNotionalUsdt,
+              normalized_reduce_notional_usdt: normalizedReduceNotionalUsdt,
+              estimated_exit_fee_usdt: feeEconomics.estimatedExitFeeUsdt,
+              estimated_reentry_fee_usdt: feeEconomics.estimatedReentryFeeUsdt,
+              risk_before_usdt: riskBeforeUsdt,
+              risk_after_usdt: riskAfterUsdt,
+              risk_reduction_usdt: feeEconomics.riskReductionUsdt,
+              fee_safety_multiplier: REDUCE_FEE_SAFETY_MULTIPLIER,
+              economics_passed: feeEconomics.economicsPassed,
+              bypass_reason: feeEconomics.bypassReason,
+              final_action: feeEconomics.finalAction
+            })
+          );
+          if (!feeEconomics.economicsPassed) {
+            remaining.push(open);
+            continue;
+          }
+        }
+
         const lotDistortion = evaluateReduceLotDistortion({
           positionContracts: okxContracts ?? 0,
           desiredReduceRatio: reduceRatio,
@@ -12345,12 +12710,6 @@ export class PaperEngine {
           continue;
         }
 
-        const snapForReduce = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
-        const candles = snapForReduce?.candles;
-        const decisionCandleTs =
-          candles && candles.length > 0
-            ? Number(candles[candles.length - 1]?.ts ?? 0)
-            : 0;
         const flowKey = buildReduceFlowKey({
           symbol: String(open.symbol),
           side: open.side,
@@ -12394,6 +12753,13 @@ export class PaperEngine {
         open.shockReduceFlowKey = flowKey;
         open.shockReduceDecisionCandleTs = decisionCandleTs;
         open.shockReduceReason = partialReason;
+        if (isProtectivePartial) {
+          open.lastReduceMarketSubtype = marketSubtype ?? undefined;
+          open.lastReduceShockPhase = shockPhase;
+          open.lastReduceRatio = reduceRatio;
+          open.lastReduceUrgency = partialUrgency;
+          open.lastReduceInvalidationDistancePct = invalidationDistancePct ?? undefined;
+        }
 
         this.logger.info("V2_PARTIAL_CONTRACT_SIZE_PROOF", {
            symbol: open.symbol,
@@ -12453,7 +12819,8 @@ export class PaperEngine {
           authorityOwner: "V2",
           executionOwner: "paper_engine",
           isV2Authority: true,
-          isPartial: true
+          isPartial: true,
+          open
         });
 
         this.logger.info("PARTIAL_EXECUTION_PROOF", {
