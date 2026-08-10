@@ -8,6 +8,7 @@ import {
   isProtectivePartialReason,
   isFeeEconomicsBypassReason,
   buildCompletedTradeEconomicsProof,
+  markProtectiveReduceEpisodeFilled,
   MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT,
   REDUCE_FEE_SAFETY_MULTIPLIER,
   V2_REDUCE_ECONOMIC_LOT_DISTORTION_THRESHOLD
@@ -442,6 +443,145 @@ export function runReduceEconomicsCaseTests(): boolean {
           (rowWithMfe.pnlUsdNet ?? 0) < 0 &&
           (rowWithMfe.maePct ?? 0) > 0,
         JSON.stringify({ mfePct: rowWithMfe.mfePct, maePct: rowWithMfe.maePct, pnl: rowWithMfe.pnlUsdNet })
+      ) && ok;
+  }
+
+  // CASE P: restart persistence — ledger round-trip preserves episode state and blocks re-submit
+  {
+    const open = botOpen({ okxContracts: 0.08, sizeUsd: 16 });
+    markProtectiveReduceEpisodeFilled(open, {
+      episodeId: "ETHUSDT|long|SHOCK_PROTECTIVE_REDUCE|DOWN_SHOCK|SHOCK",
+      reason: "SHOCK_PROTECTIVE_REDUCE",
+      decisionCandleTs: candleTs,
+      filledAt: 1_500_000,
+      shockPhase: "DOWN_SHOCK",
+      marketSubtype: "SHOCK",
+      urgency: "medium",
+      reduceRatio: 0.2,
+      invalidationDistancePct: 0.02
+    });
+    open.lastBotExecutionReason = "SHOCK_PROTECTIVE_REDUCE";
+    open.lastBotExecutionAt = 1_500_000;
+    open.shockReduceState = "FILLED";
+
+    const restored = JSON.parse(JSON.stringify(open)) as PaperOpenPositionRecord;
+    const gate = evaluateReduceEpisodeGate({
+      open: restored,
+      reason: "SHOCK_PROTECTIVE_REDUCE",
+      decisionCandleTs: candleTs,
+      shockPhase: "DOWN_SHOCK",
+      marketSubtype: "SHOCK",
+      urgency: "medium",
+      reduceRatio: 0.2,
+      invalidationDistancePct: 0.02
+    });
+    const limit = evaluatePartialReduceLimit({
+      open: restored,
+      reason: "SHOCK_PROTECTIVE_REDUCE",
+      protectivePartialCount: restored.protectivePartialReduceCount ?? 0,
+      urgency: "medium",
+      invalidationImminent: false
+    });
+    const esc = evaluateShockReduceEscalation({
+      episodeCount: restored.protectivePartialReduceCount ?? 0,
+      shockPhase: "DOWN_SHOCK",
+      previousShockPhase: restored.lastReduceShockPhase,
+      freshCandle: false,
+      riskDeteriorated: false,
+      urgency: "medium",
+      invalidationImminent: false
+    });
+    ok =
+      run(
+        "CASE P",
+        restored.protectivePartialReduceCount === 1 &&
+          restored.lastReduceFilledCandleTs === candleTs &&
+          restored.lastReduceEpisodeId != null &&
+          !gate.submitAllowed &&
+          gate.blockReason === "REDUCE_EPISODE_ALREADY_EXECUTED" &&
+          limit.submitAllowed &&
+          !esc.partialAllowed &&
+          (restored.protectivePartialReduceCount ?? 0) < MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT,
+        JSON.stringify({
+          count: restored.protectivePartialReduceCount,
+          candleTs: restored.lastReduceFilledCandleTs,
+          gate,
+          limitCapBypass: limit.submitAllowed
+        })
+      ) && ok;
+  }
+
+  // CASE Q: manual close attribution precedence over stale bot partial execution
+  {
+    const partialAt = Date.now() - 5 * 60_000;
+    const flatAt = Date.now();
+    const openWithManual = botOpen({
+      manualOwnershipLatch: true,
+      lifecycleState: "EXTERNAL_MANUAL_MANAGED",
+      lastBotExecutionReason: "SHOCK_PROTECTIVE_REDUCE",
+      lastBotExecutionAt: partialAt,
+      protectivePartialReduceCount: 1,
+      positionCycleExitFills: [
+        {
+          px: 1876,
+          contracts: 0.02,
+          pnlUsdNet: 0.01,
+          feeUsd: 0.02,
+          at: partialAt,
+          reason: "SHOCK_PROTECTIVE_REDUCE"
+        }
+      ]
+    });
+    const manualAttr = resolveTerminalCloseAttribution({
+      open: openWithManual,
+      reconcileSource: "RECONCILE_ABSENT",
+      okxFlatDetectedAt: flatAt,
+      manualEvidencePresent: true
+    });
+
+    const openStalePartial = botOpen({
+      lastBotExecutionReason: "SHOCK_PROTECTIVE_REDUCE",
+      lastBotExecutionAt: flatAt - 60_000,
+      protectivePartialReduceCount: 1,
+      positionCycleExitFills: [
+        {
+          px: 1876,
+          contracts: 0.02,
+          pnlUsdNet: 0.01,
+          feeUsd: 0.02,
+          at: flatAt - 60_000,
+          reason: "SHOCK_PROTECTIVE_REDUCE"
+        }
+      ]
+    });
+    const staleAttr = resolveTerminalCloseAttribution({
+      open: openStalePartial,
+      reconcileSource: "RECONCILE_ABSENT",
+      okxFlatDetectedAt: flatAt,
+      manualEvidencePresent: false
+    });
+
+    const openBotFinal = botOpen({
+      lastBotExecutionReason: "v2_exit_authority",
+      lastBotExecutionAt: flatAt - 30_000
+    });
+    const botFinalAttr = resolveTerminalCloseAttribution({
+      open: openBotFinal,
+      reconcileSource: "RECONCILE_ABSENT",
+      okxFlatDetectedAt: flatAt,
+      manualEvidencePresent: false
+    });
+
+    ok =
+      run(
+        "CASE Q",
+        manualAttr.finalCloseReason === "EXTERNAL_MANUAL_CLOSE" &&
+          manualAttr.attributionSource === "explicit_manual_evidence" &&
+          staleAttr.attributionSource !== "last_bot_execution" &&
+          staleAttr.attributionSource !== "position_cycle_exit_fill" &&
+          botFinalAttr.attributionSource === "last_bot_execution" &&
+          botFinalAttr.finalCloseReason === "V2_EXIT",
+        JSON.stringify({ manual: manualAttr, stale: staleAttr, botFinal: botFinalAttr })
       ) && ok;
   }
 

@@ -14,6 +14,21 @@ export type TerminalCloseAttribution = Readonly<{
     manualEvidencePresent: boolean;
 }>;
 
+const TERMINAL_CLOSE_CAUSALITY_MS = 15 * 60_000;
+
+function isTerminalCloseBotExecutionReason(reason: string | null | undefined): boolean {
+    const r = String(reason ?? "").trim();
+    if (!r) return false;
+    if (isProtectivePartialReason(r)) return false;
+    const upper = r.toUpperCase();
+    if (upper.includes("PARTIAL") && !upper.includes("FULL")) return false;
+    return true;
+}
+
+function isTerminalCycleExitFillReason(reason: string | null | undefined): boolean {
+    return isTerminalCloseBotExecutionReason(reason);
+}
+
 export function resolveTerminalCloseAttribution(input: Readonly<{
     open: PaperOpenPositionRecord;
     reconcileSource: string;
@@ -23,8 +38,12 @@ export function resolveTerminalCloseAttribution(input: Readonly<{
     const { open, reconcileSource, manualEvidencePresent } = input;
     const lastBotReason = String(open.lastBotExecutionReason ?? "").trim();
     const lastBotAt = open.lastBotExecutionAt ?? 0;
-    const recentBotMs = 15 * 60_000;
-    const botRecent = lastBotAt > 0 && input.okxFlatDetectedAt - lastBotAt <= recentBotMs;
+    const botRecent =
+        lastBotAt > 0 && input.okxFlatDetectedAt - lastBotAt <= TERMINAL_CLOSE_CAUSALITY_MS;
+    const botTerminalExecution =
+        botRecent &&
+        isTerminalCloseBotExecutionReason(lastBotReason) &&
+        lastBotReason.length > 0;
 
     if (open.closePendingReason && open.closePendingAt) {
         const cr = String(open.closePendingReason);
@@ -42,7 +61,17 @@ export function resolveTerminalCloseAttribution(input: Readonly<{
         };
     }
 
-    if (botRecent && lastBotReason.length > 0 && !manualEvidencePresent) {
+    if (manualEvidencePresent) {
+        return {
+            closeReason: "manual_full_close_reconciled",
+            finalCloseReason: "EXTERNAL_MANUAL_CLOSE",
+            closeSource: reconcileSource,
+            attributionSource: "explicit_manual_evidence",
+            manualEvidencePresent: true
+        };
+    }
+
+    if (botTerminalExecution) {
         const isStop = lastBotReason.toUpperCase().includes("STOP");
         const isTp = lastBotReason.toUpperCase().includes("TAKE_PROFIT");
         const isShockExit =
@@ -67,8 +96,8 @@ export function resolveTerminalCloseAttribution(input: Readonly<{
     const lastFill = open.positionCycleExitFills?.[open.positionCycleExitFills.length - 1];
     if (
         lastFill &&
-        input.okxFlatDetectedAt - lastFill.at <= recentBotMs &&
-        !manualEvidencePresent &&
+        input.okxFlatDetectedAt - lastFill.at <= TERMINAL_CLOSE_CAUSALITY_MS &&
+        isTerminalCycleExitFillReason(lastFill.reason) &&
         classifyTradeSource(open) === "BOT_V2"
     ) {
         const reason = String(lastFill.reason ?? "v2_exit_authority");
@@ -82,16 +111,6 @@ export function resolveTerminalCloseAttribution(input: Readonly<{
             closeSource: "BOT_CYCLE_EXIT_FILL",
             attributionSource: "position_cycle_exit_fill",
             manualEvidencePresent: false
-        };
-    }
-
-    if (manualEvidencePresent) {
-        return {
-            closeReason: "manual_full_close_reconciled",
-            finalCloseReason: "EXTERNAL_MANUAL_CLOSE",
-            closeSource: reconcileSource,
-            attributionSource: "explicit_manual_evidence",
-            manualEvidencePresent: true
         };
     }
 
