@@ -302,6 +302,31 @@ export function enrichCompletedTradeRecord(input: Readonly<{
     };
 }
 
+export function isPositionCycleFinalizeDuplicate(
+    record: Pick<
+        PaperClosedPositionRecord,
+        "symbol" | "side" | "openedAt" | "positionCycleId" | "isPositionCycleFinal" | "isChildExecution"
+    >,
+    history: unknown[]
+): boolean {
+    if (record.isChildExecution === true || record.isPositionCycleFinal !== true) return false;
+    const cycleId =
+        record.positionCycleId ??
+        buildPositionCycleId(record.symbol, record.side, record.openedAt);
+    return history.some((h) => {
+        if (!h || typeof h !== "object") return false;
+        const o = h as Record<string, unknown>;
+        if (o.isChildExecution === true) return false;
+        const existingCycle =
+            typeof o.positionCycleId === "string"
+                ? o.positionCycleId
+                : buildPositionCycleId(String(o.symbol), String(o.side), Number(o.openedAt));
+        if (existingCycle !== cycleId) return false;
+        if (o.isPositionCycleFinal === true) return true;
+        return isPositionCycleFinalRow(h);
+    });
+}
+
 export function buildCompletedTradeAggregationProof(input: Record<string, unknown>): Record<string, unknown> {
     return { event: "V2_COMPLETED_TRADE_AGGREGATION_PROOF", ...input };
 }

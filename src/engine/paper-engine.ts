@@ -116,7 +116,8 @@ import {
   buildTradeSourceClassificationProof,
   classifyTradeSource,
   recordPositionCycleExitFill,
-  normalizeFinalCloseReason
+  normalizeFinalCloseReason,
+  isPositionCycleFinalizeDuplicate
 } from "../engine-v2/lifecycle/completed-trade";
 export { normalizeOkxSwapContractsFromNotional };
 import { getPaperLoopIntervalMs } from "../config/env";
@@ -9450,6 +9451,7 @@ export class PaperEngine {
     try {
       const history = await this.store.readPositionsHistory();
       if (!Array.isArray(history)) return false;
+      if (isPositionCycleFinalizeDuplicate(record, history)) return true;
       return history.some((h: any) =>
         h &&
         h.symbol === record.symbol &&

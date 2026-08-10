@@ -7,11 +7,13 @@ import {
   isAccountStatsRow,
   isChildExecutionClose,
   isPositionCycleFinalRow,
+  isPositionCycleFinalizeDuplicate,
   isStrategyStatsRow,
   normalizeFinalCloseReason,
   recordPositionCycleExitFill,
   resolveWeightedExitAvgPx
 } from "../engine-v2/lifecycle/completed-trade";
+import { buildPaperWindowSummaryFromHistory } from "../storage/paper-summary";
 import { finalizePaperClosedRecord, computePaperCloseLegMetrics } from "../engine/paper-close-finalize";
 import { applyPositionTerminalCleanup } from "../engine-v2/position/terminal-cleanup";
 
@@ -279,6 +281,94 @@ export function runCompletedTradeCaseTests(): boolean {
           row.isPositionCycleFinal === true &&
           classifyTradeSource(open) === "BOT_V2",
         row.positionCycleId ?? "null"
+      ) && ok;
+  }
+
+  // CASE M: duplicate finalize on same position_cycle_id → blocked (final count 1)
+  {
+    const open = botOpen();
+    const finalRow = enrichCompletedTradeRecord({
+      open,
+      closedRow: finalizeRow(open, 1915, "stop_loss", 20),
+      isFinalClose: true,
+      actualFillPx: 1915,
+      actualFillContracts: 0.03,
+      isStop: true
+    });
+    const duplicateAttempt = enrichCompletedTradeRecord({
+      open,
+      closedRow: finalizeRow(open, 1914, "manual_full_close_reconciled", 20),
+      isFinalClose: true,
+      actualFillPx: 1914,
+      actualFillContracts: 0.03
+    });
+    const history = [finalRow];
+    ok =
+      run(
+        "CASE M",
+        isPositionCycleFinalizeDuplicate(duplicateAttempt, history) === true &&
+          isPositionCycleFinalizeDuplicate(finalRow, []) === false,
+        `cycle=${finalRow.positionCycleId}`
+      ) && ok;
+  }
+
+  // CASE N: partial + partial + final → aggregate pnl/fee includes all legs
+  {
+    const open = botOpen();
+    recordPositionCycleExitFill(open, {
+      px: 1910,
+      contracts: 0.01,
+      pnlUsdNet: 0.4,
+      feeUsd: 0.02,
+      at: 1_400_000,
+      reason: "SHOCK_PROTECTIVE_REDUCE"
+    });
+    recordPositionCycleExitFill(open, {
+      px: 1912,
+      contracts: 0.005,
+      pnlUsdNet: 0.15,
+      feeUsd: 0.01,
+      at: 1_600_000,
+      reason: "take_profit_1"
+    });
+    const finalLeg = finalizeRow(open, 1918, "stop_loss", 10);
+    const row = enrichCompletedTradeRecord({
+      open,
+      closedRow: finalLeg,
+      isFinalClose: true,
+      actualFillPx: 1918,
+      actualFillContracts: 0.015,
+      isStop: true
+    });
+    const expectedNet = 0.4 + 0.15 + finalLeg.pnlUsdNet;
+    const expectedFee = 0.02 + 0.01 + finalLeg.feeUsd;
+    ok =
+      run(
+        "CASE N",
+        Math.abs(row.pnlUsdNet - expectedNet) < 1e-9 &&
+          Math.abs(row.feeUsd - expectedFee) < 1e-9 &&
+          row.pnlUsdNet !== finalLeg.pnlUsdNet,
+        JSON.stringify({ aggregate: row.pnlUsdNet, finalOnly: finalLeg.pnlUsdNet, fee: row.feeUsd })
+      ) && ok;
+  }
+
+  // CASE O: legacy child rows without isPositionCycleFinal → excluded from strategy stats
+  {
+    const legacyHistory = [
+      { symbol: "ETHUSDT", side: "long", openedAt: 900_000, closedAt: 950_000, pnlUsdNet: 0.5, closeReason: "take_profit_1", exitType: "EXIT_TP_1", isV2Authority: true },
+      { symbol: "ETHUSDT", side: "long", openedAt: 900_000, closedAt: 960_000, pnlUsdNet: 0.3, closeReason: "partial_exit_1", exitType: "EXIT_PARTIAL_SPLIT_1", isV2Authority: true },
+      { symbol: "ETHUSDT", side: "long", openedAt: 900_000, closedAt: 980_000, pnlUsdNet: 2.0, closeReason: "stop_loss", exitType: "EXIT_SL", isV2Authority: true }
+    ];
+    const strategyCount = legacyHistory.filter(isStrategyStatsRow).length;
+    const window = buildPaperWindowSummaryFromHistory(legacyHistory, 1_000_000);
+    ok =
+      run(
+        "CASE O",
+        strategyCount === 1 &&
+          window.strategyWindows.all.totalTrades === 1 &&
+          !isStrategyStatsRow(legacyHistory[0]) &&
+          !isStrategyStatsRow(legacyHistory[1]),
+        `strategyCount=${strategyCount}, window=${window.strategyWindows.all.totalTrades}`
       ) && ok;
   }
 
