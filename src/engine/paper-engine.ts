@@ -7894,6 +7894,7 @@ export class PaperEngine {
     const flowId = `${open.symbol}:${open.side}:${open.openedAt}`;
     const flatKey = authoritativeFlatKey(String(open.symbol), open.side);
     const ledgerExistsBefore = (open.okxContracts ?? 0) > 0 || open.status === "open";
+    const flatAttribution = resolveAuthoritativeFlatCloseAttribution({ ledger: open, nowMs: nowTs });
 
     clearManualOwnershipLatchFields(open);
     this.clearV2PartialPendingMetadata(open);
@@ -7920,7 +7921,6 @@ export class PaperEngine {
       })
     );
 
-    const flatAttribution = resolveAuthoritativeFlatCloseAttribution({ ledger: open, nowMs: nowTs });
     this.logger.info(
       "V2_AUTHORITATIVE_FLAT_CLOSE_ATTRIBUTION_PROOF",
       buildAuthoritativeFlatCloseAttributionProof({

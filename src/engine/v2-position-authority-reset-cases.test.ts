@@ -470,4 +470,45 @@ function v2Ledger(overrides: Partial<PaperOpenPositionRecord> = {}): PaperOpenPo
   assertFalse(gate.allowed, "CASE E no close when actual flat");
 }
 
+// Prune attribution ordering — confirmed pendingFinalize BOT_V2 before cleanup => BOT
+{
+  const nowMs = Date.now();
+  const ledgerBeforePrune = v2Ledger({
+    finalizePending: true,
+    pendingFinalizeTradeSource: "BOT_V2",
+    pendingFinalizeFinalFillAt: nowMs - 1_000,
+    pendingFinalizeExitAvgPx: 64250,
+    pendingFinalizeFinalCloseReason: "V2_EXIT"
+  });
+  const action = resolveAuthoritativeFlatFinalizePendingAction({
+    finalizePending: true,
+    authoritativeFetchReady: true,
+    zeroConfirmCount: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+    finalizeSucceeded: false
+  });
+  assertEq(action, "PRUNE_UNRESOLVED_FINALIZE", "prune path for unresolved finalize");
+  const attribution = resolveAuthoritativeFlatCloseAttribution({
+    ledger: ledgerBeforePrune,
+    nowMs
+  });
+  assertEq(attribution.attribution, "BOT_FULL_CLOSE_RECONCILE", "prune snapshot bot attribution");
+  assertTrue(attribution.botFinalFillEvidenceFound, "pending finalize evidence preserved pre-cleanup");
+}
+
+// Prune attribution ordering — no confirmed bot fill before cleanup => EXTERNAL
+{
+  const nowMs = Date.now();
+  const ledgerBeforePrune = v2Ledger({
+    finalizePending: true,
+    lastBotExecutionAt: nowMs - 1_000,
+    lastBotExecutionReason: "candidate_lost"
+  });
+  const attribution = resolveAuthoritativeFlatCloseAttribution({
+    ledger: ledgerBeforePrune,
+    nowMs
+  });
+  assertEq(attribution.attribution, "EXTERNAL_MANUAL_FULL_CLOSE", "prune snapshot external attribution");
+  assertFalse(attribution.botFinalFillEvidenceFound, "intent-only not bot attribution");
+}
+
 console.log("v2-position-authority-reset-cases: ALL PASS");
