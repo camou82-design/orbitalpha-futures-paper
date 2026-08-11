@@ -593,7 +593,7 @@ export function buildPositionOpsSurface(input: Readonly<{
         ledger,
         tickSz: tickSz > 0 ? tickSz : undefined,
         requiredStopPx: ledgerStop ?? stopPx,
-        requiredContracts: ledger?.okxContracts ?? null
+        requiredContracts: Math.abs(hit.posSigned) > 0 ? Math.abs(hit.posSigned) : ledger?.okxContracts ?? null
       });
 
       let pxSource: PositionOpsRow["stop_px_source"] = "none";

@@ -233,10 +233,31 @@ import {
   buildV2ExitSovereigntyGuardProof
 } from "../engine-v2/exit/exit-sovereignty-guard";
 import {
-  attributePositionSizeMutation,
-  buildBotPositionSizeMutationAttributionProof,
   buildFalseManualLatchRecoveredProof
 } from "../engine-v2/position/bot-size-mutation-attribution";
+import {
+  authoritativeFlatKey,
+  recordAuthoritativeFlatZeroObservation,
+  shouldPerformAuthoritativeFlatReconcile,
+  buildV2AuthoritativeFlatReconcileProof,
+  AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+  resolveAuthoritativeFlatCloseAttribution,
+  buildAuthoritativeFlatCloseAttributionProof
+} from "../engine-v2/position/authoritative-flat-reconcile";
+import {
+  classifyPositionSizeDelta,
+  buildV2ManualReduceRebaseProof,
+  type SizeDeltaClassification
+} from "../engine-v2/position/manual-reduce-rebase";
+import {
+  evaluateReduceProtectiveReensure,
+  buildV2ReduceProtectiveReensureProof
+} from "../engine-v2/execution/reduce-protective-reensure";
+import {
+  evaluateV2ExitExecutionGate,
+  buildV2ExitExecutionGateProof,
+  inferExitExecutionRequestedAction
+} from "../engine-v2/exit/exit-execution-gate";
 import {
   evaluateStaleLedgerExecutionSuppression,
   buildStaleLedgerExecutionSuppressedProof
@@ -1584,6 +1605,8 @@ export class PaperEngine {
   private cachedOpsFetchErrors: string[] = [];
   private lastPositionOpsSurface: PositionOpsSurface | null = null;
   private positionExitProofThrottleByFlow = new Map<string, number>();
+  /** Consecutive reconcile cycles with authoritative OKX zero for symbol:side. */
+  private authoritativeFlatZeroConfirmByKey = new Map<string, number>();
 
   private tradeControlPath(): string {
     return path.resolve(this.config.dataDir, "control/trade-control.json");
@@ -2074,8 +2097,11 @@ export class PaperEngine {
       for (const r of surfaceScan.rows) {
         const scanClean = this.cachedOpsFetchErrors.length === 0;
         const liveExposure = Math.abs(r.okx_pos_signed) > 0;
+        if (!liveExposure) {
+          continue;
+        }
 
-        if (scanClean && liveExposure && r.matching_protective_pending_count === 0) {
+        if (scanClean && r.matching_protective_pending_count === 0) {
           this.logger.error("POSITION_PROTECTIVE_PENDING_ZERO_FAULT", {
             ts: nowTs,
             symbol: r.symbol,
@@ -2254,7 +2280,7 @@ export class PaperEngine {
             ledger: ledgerPos,
             tickSz: tickSz > 0 ? tickSz : undefined,
             requiredStopPx: r.ledger_stop_px ?? r.initial_stop_px_engine_mirror,
-            requiredContracts: ledgerPos.okxContracts ?? null
+            requiredContracts: Math.abs(r.okx_pos_signed) > 0 ? Math.abs(r.okx_pos_signed) : ledgerPos.okxContracts ?? null
           });
           this.logger.info(
             "POSITION_PROTECTION_STATE_PROOF",
@@ -2692,9 +2718,10 @@ export class PaperEngine {
     remote: OkxRemotePositionAuthority,
     nowTs: number,
     opts: { isPartialPending: boolean; isClosePending: boolean }
-  ): { ledgerModified: boolean; mismatchType: PositionReconcileMismatchType; blocked: boolean } {
+  ): { ledgerModified: boolean; mismatchType: PositionReconcileMismatchType; blocked: boolean; sizeDeltaClassification?: SizeDeltaClassification } {
     let ledgerModified = false;
     let mismatchType: PositionReconcileMismatchType = "MATCHED";
+    let sizeDeltaClassification: SizeDeltaClassification | undefined;
 
     const priceDiffRatio =
       Math.abs(open.entryPrice - remote.avgPx) / Math.max(open.entryPrice || 1, 1e-9);
@@ -2775,38 +2802,26 @@ export class PaperEngine {
     const hardBlock = isHardBlockReconcileMismatch(mismatchType) || (contractMismatch && ledgerHasContracts);
 
     if (contractMismatch && ledgerHasContracts && remote.contracts >= 0) {
-      const mutation = attributePositionSizeMutation({
+      const botManaged =
+        open.isV2Authority === true ||
+        String(open.authoritySourceAtEntry ?? open.authority ?? "")
+          .trim()
+          .toLowerCase() === "v2" ||
+        String(open.exchangeClOrdId ?? "").startsWith("p");
+      const delta = classifyPositionSizeDelta({
         beforeContracts: open.okxContracts ?? 0,
         afterContracts: remote.contracts,
-        botOrderEvidenceFound:
-          open.isV2Authority === true ||
-          String(open.authoritySourceAtEntry ?? open.authority ?? "")
-            .trim()
-            .toLowerCase() === "v2" ||
-          String(open.exchangeClOrdId ?? "").startsWith("p"),
-        matchingBotReduceContracts: Math.abs((open.okxContracts ?? 0) - remote.contracts),
         ledger: open,
-        manualEvidenceIndependent: open.manualLifecycleEvidenceIndependent === true
+        botManaged,
+        nowMs: nowTs
       });
-      this.logger.info(
-        "BOT_POSITION_SIZE_MUTATION_ATTRIBUTION_PROOF",
-        buildBotPositionSizeMutationAttributionProof({
-          symbol: open.symbol,
-          side: open.side,
-          before_contracts: open.okxContracts ?? null,
-          after_contracts: remote.contracts,
-          delta_contracts: mutation.deltaContracts,
-          bot_order_evidence_found: mutation.botOrderEvidenceFound,
-          matching_bot_reduce_contracts: mutation.matchingBotReduceContracts,
-          manual_evidence_independent: mutation.manualEvidenceIndependent,
-          attribution: mutation.attribution
-        })
-      );
-      if (mutation.attribution === "BOT" && open.okxContracts! > remote.contracts) {
+
+      if (delta.classification === "BOT_REDUCE_RECONCILE" && open.okxContracts! > remote.contracts) {
+        sizeDeltaClassification = delta.classification;
         this.syncOpenLedgerFromRemoteAuthority(open, remote);
         open.reconcileState = "MATCHED";
         open.lastCheckedAt = nowTs;
-        if (open.manualOwnershipLatch === true && !mutation.manualEvidenceIndependent) {
+        if (open.manualOwnershipLatch === true && !open.manualLifecycleEvidenceIndependent) {
           clearManualOwnershipLatchFields(open);
           this.logger.info(
             "FALSE_MANUAL_LATCH_RECOVERED_PROOF",
@@ -2814,13 +2829,43 @@ export class PaperEngine {
               symbol: open.symbol,
               side: open.side,
               reason: "bot_reduce_reconciled_to_actual",
-              before_contracts: mutation.deltaContracts + remote.contracts,
+              before_contracts: delta.deltaContracts + remote.contracts,
               after_contracts: remote.contracts
             })
           );
         }
         this.logPositionUnitInvariant(open);
-        return { ledgerModified: true, mismatchType: "MATCHED", blocked: false };
+        return { ledgerModified: true, mismatchType: "MATCHED", blocked: false, sizeDeltaClassification };
+      }
+
+      if (delta.classification === "MANUAL_REDUCE_REBASE" && open.okxContracts! > remote.contracts) {
+        sizeDeltaClassification = delta.classification;
+        const beforeContracts = open.okxContracts ?? 0;
+        this.syncOpenLedgerFromRemoteAuthority(open, remote);
+        open.reconcileState = "MATCHED";
+        open.lastCheckedAt = nowTs;
+        if (open.lifecycleState === "EXTERNAL_MANUAL_MANAGED") {
+          open.lifecycleState = "BOT_V2_MANAGED";
+        }
+        this.logger.info(
+          "V2_MANUAL_REDUCE_REBASE_PROOF",
+          buildV2ManualReduceRebaseProof({
+            before_contracts: beforeContracts,
+            actual_contracts: remote.contracts,
+            delta_contracts: delta.deltaContracts,
+            bot_fill_evidence_found: false,
+            manual_latch_created: false,
+            management_owner: "V2"
+          })
+        );
+        this.logPositionUnitInvariant(open);
+        return { ledgerModified: true, mismatchType: "MATCHED", blocked: false, sizeDeltaClassification };
+      }
+
+      if (delta.classification === "MANUAL_INCREASE") {
+        open.reconcileState = "RECONCILE_MISMATCH";
+        open.lastCheckedAt = nowTs;
+        return { ledgerModified: true, mismatchType: "CONTRACT_MISMATCH", blocked: false };
       }
     }
 
@@ -3775,6 +3820,24 @@ export class PaperEngine {
           : "ALIGNED";
 
         if (!remotePos) {
+          const authoritativeFetchReady =
+            this.okxSignedRestReady &&
+            this.okxPositionsOk &&
+            Array.isArray(this.lastLivePositionsPayload);
+          const flatKey = authoritativeFlatKey(String(open.symbol), open.side);
+          const priorCount = this.authoritativeFlatZeroConfirmByKey.get(flatKey) ?? 0;
+          const zeroCount = recordAuthoritativeFlatZeroObservation({
+            key: flatKey,
+            authoritativeFetchReady,
+            okxActualExists: false,
+            priorCount
+          });
+          if (authoritativeFetchReady && zeroCount > 0) {
+            this.authoritativeFlatZeroConfirmByKey.set(flatKey, zeroCount);
+          } else {
+            this.authoritativeFlatZeroConfirmByKey.delete(flatKey);
+          }
+
           const paperContracts = open.okxContracts ?? 0;
           if (open.finalizePending === true && paperContracts > 0 && !isNew) {
             if (open.okxZeroUnconfirmedSince == null) {
@@ -3799,7 +3862,13 @@ export class PaperEngine {
                 })
               );
             }
-            if (nowTs - (open.okxZeroUnconfirmedSince ?? nowTs) < OKX_ZERO_CONFIRM_MS) {
+            const flatConfirmed =
+              authoritativeFetchReady &&
+              zeroCount >= AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED;
+            if (
+              !flatConfirmed &&
+              nowTs - (open.okxZeroUnconfirmedSince ?? nowTs) < OKX_ZERO_CONFIRM_MS
+            ) {
               next.push(open);
               continue;
             }
@@ -3808,47 +3877,45 @@ export class PaperEngine {
             next.push(open);
             continue;
           }
-          if (paperContracts > 0 && !isNew) {
-            if (open.okxZeroUnconfirmedSince == null) {
-              open.okxZeroUnconfirmedSince = nowTs;
-              open.reconcileState = "OKX_ZERO_UNCONFIRMED";
-              ledgerModified = true;
-              this.logger.warn("OKX_ZERO_UNCONFIRMED_PROOF", {
-                symbol: open.symbol,
-                side: open.side,
-                paper_contracts: paperContracts,
-                okx_contracts: 0,
-                sync_status: symbolSyncStatus,
-                action: "HOLD_LATCH_FORBIDDEN",
-                detail: "Transient OKX zero — awaiting fresh position snapshot confirmation"
-              });
-              next.push(open);
-              continue;
-            }
-            if (nowTs - open.okxZeroUnconfirmedSince < OKX_ZERO_CONFIRM_MS) {
-              next.push(open);
-              continue;
-            }
-          }
-          this.logger.info(
-            "V2_POSITION_REALITY_RECONCILE_PROOF",
-            buildPositionRealityReconcileProof({
-              symbol: String(open.symbol),
-              side: open.side,
-              okxActualSide: null,
-              okxActualContracts: 0,
-              ledgerSide: open.side,
-              ledgerContracts: open.okxContracts ?? null,
-              finalPositionExists: false,
-              finalManagementSide: null,
-              staleStateCleared: true
+
+          const ledgerExists = paperContracts > 0 || open.status === "open";
+          if (
+            shouldPerformAuthoritativeFlatReconcile({
+              authoritativeFetchReady,
+              ledgerExists,
+              okxActualExists: false,
+              zeroConfirmCount: zeroCount
             })
-          );
-          const pruned = await reconcileManualFullClose(open, "RECONCILE_ABSENT");
-          if (pruned) continue;
-          next.push(open);
+          ) {
+            await this.pruneAuthoritativeFlatLedger(open, nowTs, "authoritative_flat_zero_confirmed");
+            ledgerModified = true;
+            continue;
+          }
+
+          if (paperContracts > 0 && !isNew) {
+            open.reconcileState = "OKX_ZERO_UNCONFIRMED";
+            open.okxZeroUnconfirmedSince = open.okxZeroUnconfirmedSince ?? nowTs;
+            ledgerModified = true;
+            this.logger.warn("OKX_ZERO_UNCONFIRMED_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              paper_contracts: paperContracts,
+              okx_contracts: 0,
+              sync_status: symbolSyncStatus,
+              zero_confirm_count: zeroCount,
+              zero_confirm_required: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+              action: "HOLD_NO_CLOSE_SUBMIT",
+              detail: "Awaiting consecutive authoritative OKX zero confirmations before ledger prune"
+            });
+            next.push(open);
+            continue;
+          }
           continue;
         }
+
+        this.authoritativeFlatZeroConfirmByKey.delete(
+          authoritativeFlatKey(String(open.symbol), open.side)
+        );
 
         if (open.okxZeroUnconfirmedSince != null) {
           open.okxZeroUnconfirmedSince = undefined;
@@ -3861,6 +3928,22 @@ export class PaperEngine {
         });
         if (reconcileResult.ledgerModified) {
           ledgerModified = true;
+        }
+
+        if (
+          reconcileResult.sizeDeltaClassification === "BOT_REDUCE_RECONCILE" ||
+          reconcileResult.sizeDeltaClassification === "MANUAL_REDUCE_REBASE"
+        ) {
+          const protectRes = await this.reconcileProtectiveAfterSizeMutation(
+            open,
+            remotePos,
+            reconcileResult.sizeDeltaClassification,
+            nowTs
+          );
+          if (protectRes.ledgerModified) {
+            open = protectRes.record;
+            ledgerModified = true;
+          }
         }
 
         const poisonedLatchRecovery = evaluatePoisonedStrongManualLatchRecovery({
@@ -7352,7 +7435,7 @@ export class PaperEngine {
       const remote = this.buildOkxRemotePositionAuthority(row as Record<string, unknown>, hit, inst);
       return { contracts: remote.contracts, available: true };
     }
-    return { contracts: null, available: true };
+    return { contracts: 0, available: true };
   }
 
   private buildCloseContractContext(open: PaperOpenPositionRecord): Readonly<{
@@ -7774,6 +7857,199 @@ export class PaperEngine {
     open.partialPendingFundingRate = undefined;
   }
 
+  private clearClosePendingMetadata(open: PaperOpenPositionRecord): void {
+    open.closePendingOrdId = undefined;
+    open.closePendingClOrdId = undefined;
+    open.closePendingAt = undefined;
+    open.closePendingReason = undefined;
+    open.closePendingPrice = undefined;
+    open.closePendingFundingRate = undefined;
+    open.closePendingFilledSize = undefined;
+    open.closePendingRemainingSize = undefined;
+    open.closePendingProcessedFillSz = undefined;
+  }
+
+  private clearProtectivePendingMetadata(open: PaperOpenPositionRecord): void {
+    open.protectiveStopAlgoId = undefined;
+    open.protectiveSlAlgoId = undefined;
+    open.protectiveTpAlgoId = undefined;
+    open.isProtectiveStopRegistered = undefined;
+    open.isTakeProfitRegistered = undefined;
+    open.isProtectionFailed = undefined;
+  }
+
+  private clearFlowExecutionDedupState(open: PaperOpenPositionRecord): void {
+    const flowId = `${open.symbol}:${open.side}:${open.openedAt}`;
+    this.terminalExitConsumedByFlow.delete(flowId);
+    this.positionExitProofThrottleByFlow.delete(flowId);
+  }
+
+  private async pruneAuthoritativeFlatLedger(
+    open: PaperOpenPositionRecord,
+    nowTs: number,
+    reason: string
+  ): Promise<void> {
+    const flowId = `${open.symbol}:${open.side}:${open.openedAt}`;
+    const flatKey = authoritativeFlatKey(String(open.symbol), open.side);
+    const ledgerExistsBefore = (open.okxContracts ?? 0) > 0 || open.status === "open";
+
+    clearManualOwnershipLatchFields(open);
+    this.clearV2PartialPendingMetadata(open);
+    this.clearClosePendingMetadata(open);
+    this.clearProtectivePendingMetadata(open);
+    this.clearFlowExecutionDedupState(open);
+    open.okxZeroUnconfirmedSince = undefined;
+    open.finalizePending = undefined;
+    open.pendingFinalizeFlowId = undefined;
+
+    this.logger.info(
+      "V2_AUTHORITATIVE_FLAT_RECONCILE_PROOF",
+      buildV2AuthoritativeFlatReconcileProof({
+        symbol: open.symbol,
+        side: open.side,
+        ledger_exists_before: ledgerExistsBefore,
+        okx_actual_exists: false,
+        zero_confirm_count: this.authoritativeFlatZeroConfirmByKey.get(flatKey) ?? AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+        ledger_pruned: true,
+        manual_latch_cleared: true,
+        pending_metadata_cleared: true,
+        strategy_history_appended: false,
+        reason
+      })
+    );
+
+    const flatAttribution = resolveAuthoritativeFlatCloseAttribution({ ledger: open, nowMs: nowTs });
+    this.logger.info(
+      "V2_AUTHORITATIVE_FLAT_CLOSE_ATTRIBUTION_PROOF",
+      buildAuthoritativeFlatCloseAttributionProof({
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        attribution: flatAttribution.attribution,
+        bot_final_fill_evidence_found: flatAttribution.botFinalFillEvidenceFound,
+        strategy_history_appended: false
+      })
+    );
+
+    if (flatAttribution.attribution === "BOT_FULL_CLOSE_RECONCILE") {
+      this.logger.info("BOT_FULL_CLOSE_RECONCILE", {
+        ts: nowTs,
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        source: "authoritative_flat_reconcile",
+        strategy_history_appended: false,
+        okx_order_submitted: false
+      });
+    } else {
+      this.logger.info("EXTERNAL_MANUAL_FULL_CLOSE", {
+        ts: nowTs,
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        source: "authoritative_flat_reconcile",
+        strategy_history_appended: false,
+        okx_order_submitted: false
+      });
+    }
+
+    this.authoritativeFlatZeroConfirmByKey.delete(flatKey);
+  }
+
+  private async reconcileProtectiveAfterSizeMutation(
+    open: PaperOpenPositionRecord,
+    remote: OkxRemotePositionAuthority,
+    classification: "BOT_REDUCE_RECONCILE" | "MANUAL_REDUCE_REBASE",
+    nowTs: number
+  ): Promise<{ ledgerModified: boolean; record: PaperOpenPositionRecord }> {
+    const instId = remote.instId ?? toOkxSwapInstId(open.symbol);
+    const instSizing = this.instrumentCache.get(instId) as { tickSz?: number } | undefined;
+    const tickSz = instSizing?.tickSz != null ? Number(instSizing.tickSz) : 0;
+    const reensure = evaluateReduceProtectiveReensure({
+      open,
+      actualContracts: remote.contracts,
+      instId,
+      pending: this.cachedOpsPending ?? [],
+      algos: this.cachedOpsAlgos ?? [],
+      tickSz: tickSz > 0 ? tickSz : undefined
+    });
+
+    this.logger.info(
+      "V2_REDUCE_PROTECTIVE_REENSURE_PROOF",
+      buildV2ReduceProtectiveReensureProof({
+        symbol: open.symbol,
+        side: open.side,
+        classification,
+        actual_contracts: reensure.actualContracts,
+        ledger_contracts: reensure.ledgerContracts,
+        valid_protective_present: reensure.validProtectivePresent,
+        reensure_needed: reensure.reensureNeeded,
+        manual_latch_created: false,
+        management_owner: "V2",
+        uses_actual_contract_authority: reensure.usesActualContractAuthority
+      })
+    );
+
+    if (!reensure.reensureNeeded) {
+      return { ledgerModified: false, record: open };
+    }
+
+    const flowId = `${open.symbol}:${open.side}:${open.openedAt}:reduce_protective_reensure:${nowTs}`;
+    const res = await this.ensureProtectiveStopOrder(
+      open,
+      flowId,
+      remote.avgPx > 0 ? remote.avgPx : undefined,
+      "reconcile_algo"
+    );
+    return { ledgerModified: res.modified, record: res.record };
+  }
+
+  private buildV2ManagedExitGateContext(input: Readonly<{
+    reason: string;
+    closeSource?: string;
+    isPartial?: boolean;
+    isStopLoss?: boolean;
+    actualStopBreached?: boolean;
+    v2ShouldExit?: boolean;
+    v2ShouldReduce?: boolean;
+    v2ShouldPartial?: boolean;
+    isLiquidationEmergency?: boolean;
+  }>): Readonly<{
+    v2ShouldExit: boolean;
+    v2ShouldReduce: boolean;
+    v2ShouldPartial: boolean;
+    actualStopBreached: boolean;
+    isLiquidationEmergency: boolean;
+  }> {
+    const reason = input.reason;
+    const v2ShouldExit =
+      input.v2ShouldExit === true ||
+      reason.includes("v2_exit") ||
+      input.closeSource === "V2_AUTHORITY" ||
+      reason === "executor_v2_exit_authority";
+    const v2ShouldPartial =
+      input.v2ShouldPartial === true ||
+      (input.isPartial === true &&
+        (reason.includes("v2_partial") || reason.includes("partial_close") || reason.includes("partial")));
+    const v2ShouldReduce =
+      input.v2ShouldReduce === true ||
+      v2ShouldPartial ||
+      (input.isPartial === true && reason.includes("reduce"));
+    const isLiquidationEmergency =
+      input.isLiquidationEmergency === true ||
+      reason.includes("liquidation") ||
+      reason.includes("crash") ||
+      reason.includes("emergency") ||
+      reason.includes("force_close");
+    return {
+      v2ShouldExit,
+      v2ShouldReduce,
+      v2ShouldPartial,
+      actualStopBreached: input.actualStopBreached === true,
+      isLiquidationEmergency
+    };
+  }
+
   private buildV2PartialPendingRecord(
     open: PaperOpenPositionRecord,
     input: {
@@ -7933,9 +8209,18 @@ export class PaperEngine {
     /** Authoritative OKX actual contracts when available (preferred over ledger). */
     okxActualContracts?: number;
     okxActualAvailable?: boolean;
+    /** Remote/live OKX position contracts — never alias ledger okxContracts. */
+    remotePositionContracts?: number;
     fullClose?: boolean;
     /** When set, records bot execution attribution on the open position. */
     open?: PaperOpenPositionRecord;
+    exitGateContext?: Readonly<{
+      v2ShouldExit?: boolean;
+      v2ShouldReduce?: boolean;
+      v2ShouldPartial?: boolean;
+      actualStopBreached?: boolean;
+      isLiquidationEmergency?: boolean;
+    }>;
   }): Promise<{
     ok: boolean; 
     ordId?: string; 
@@ -7960,6 +8245,83 @@ export class PaperEngine {
       input.open.lastBotExecutionAt = Date.now();
     }
 
+    const isV2Managed =
+      input.isV2Authority === true ||
+      (input.open != null && this.isV2AuthorityPosition(input.open));
+    const contractCtx =
+      input.open != null
+        ? this.buildCloseContractContext(input.open)
+        : {
+            okxActualContracts: input.okxActualContracts ?? null,
+            okxActualAvailable: input.okxActualAvailable === true,
+            isV2Authority: input.isV2Authority === true
+          };
+    const actualPositionExists =
+      contractCtx.okxActualAvailable &&
+      (contractCtx.okxActualContracts ?? 0) > 0;
+    let actualStopBreached = input.exitGateContext?.actualStopBreached === true;
+    if (
+      !actualStopBreached &&
+      input.open &&
+      hasValidV2StopPrice(input.open.stopPrice) &&
+      input.lastPrice > 0
+    ) {
+      actualStopBreached = isV2StopPriceBreached(
+        input.side,
+        input.lastPrice,
+        input.open.stopPrice
+      );
+    }
+    const gateCtx = this.buildV2ManagedExitGateContext({
+      reason: input.reason,
+      closeSource: input.closeSource,
+      isPartial: input.isPartial,
+      isStopLoss: input.isStopLoss,
+      actualStopBreached,
+      v2ShouldExit: input.exitGateContext?.v2ShouldExit,
+      v2ShouldReduce: input.exitGateContext?.v2ShouldReduce,
+      v2ShouldPartial: input.exitGateContext?.v2ShouldPartial,
+      isLiquidationEmergency: input.exitGateContext?.isLiquidationEmergency
+    });
+    const requestedAction = inferExitExecutionRequestedAction({
+      isPartial: input.isPartial,
+      reason: input.reason
+    });
+    const exitGate = evaluateV2ExitExecutionGate({
+      symbol: input.symbol,
+      side: input.side,
+      requestedAction,
+      requestedReason: input.reason,
+      isV2Managed,
+      v2ShouldExit: gateCtx.v2ShouldExit,
+      v2ShouldReduce: gateCtx.v2ShouldReduce,
+      v2ShouldPartial: gateCtx.v2ShouldPartial,
+      actualStopBreached: gateCtx.actualStopBreached,
+      actualPositionExists,
+      isLiquidationEmergency: gateCtx.isLiquidationEmergency
+    });
+    this.logger.info(
+      "V2_EXIT_EXECUTION_GATE_PROOF",
+      buildV2ExitExecutionGateProof({
+        symbol: input.symbol,
+        side: input.side,
+        requested_action: requestedAction,
+        requested_reason: input.reason,
+        v2_should_exit: gateCtx.v2ShouldExit,
+        v2_should_reduce: gateCtx.v2ShouldReduce,
+        actual_stop_breached: gateCtx.actualStopBreached,
+        actual_position_exists: actualPositionExists,
+        allowed: exitGate.allowed,
+        block_reason: exitGate.blockReason
+      })
+    );
+    if (!exitGate.allowed) {
+      return {
+        ok: false,
+        errorMessage: exitGate.blockReason ?? "v2_exit_execution_gate_blocked"
+      };
+    }
+
     const side = input.side === "long" ? "sell" : "buy";
     const posSide = input.side === "long" ? "long" : "short";
     const lev = typeof input.appliedLeverage === "number" && Number.isFinite(input.appliedLeverage) && input.appliedLeverage > 0 ? input.appliedLeverage : 1;
@@ -7970,17 +8332,23 @@ export class PaperEngine {
     let finalSzStr = "0";
 
     if (inst) {
-      const isV2Authority = input.isV2Authority === true;
+      const isV2Authority = input.isV2Authority === true || isV2Managed;
+      const okxActualAvailable =
+        input.okxActualAvailable === true || contractCtx.okxActualAvailable;
+      const okxActualContracts =
+        input.okxActualContracts ?? contractCtx.okxActualContracts ?? null;
+      const remotePositionContracts =
+        input.remotePositionContracts ??
+        (okxActualAvailable ? okxActualContracts : null);
+      const ledgerContracts = input.open?.okxContracts ?? null;
       const authority = resolveV2CloseContractAuthority({
         symbol: input.symbol,
         side: input.side,
         closeKind: input.isPartial ? "partial" : "full",
-        okxActualContracts: input.okxActualContracts ?? null,
-        okxActualAvailable:
-          input.okxActualAvailable === true ||
-          (input.okxActualContracts != null && input.okxActualContracts > 0),
-        ledgerContracts: input.okxContracts ?? input.open?.okxContracts ?? null,
-        liveContracts: input.okxContracts ?? null,
+        okxActualContracts,
+        okxActualAvailable,
+        ledgerContracts,
+        remotePositionContracts,
         sizeUsd: input.sizeUsd,
         isV2Authority,
         fullClose: input.fullClose ?? !input.isPartial
@@ -7994,6 +8362,7 @@ export class PaperEngine {
           close_kind: input.isPartial ? "partial" : "full",
           okx_actual_contracts: authority.okxActualContracts,
           ledger_contracts: authority.ledgerContracts,
+          live_contracts: remotePositionContracts,
           size_usd: authority.sizeUsd,
           selected_contracts: authority.selectedContracts,
           contract_authority_source: authority.contractAuthoritySource,
@@ -8018,14 +8387,16 @@ export class PaperEngine {
         };
       }
 
-      let sourceContracts = authority.submitAllowed ? authority.selectedContracts : input.okxContracts;
+      let sourceContracts = authority.submitAllowed ? authority.selectedContracts : null;
       if (sourceContracts == null || sourceContracts <= 0) {
         if (!isV2Authority) {
-          sourceContracts = (input.sizeUsd / Math.max(1e-9, input.lastPrice)) / (inst.ctVal || 1);
+          sourceContracts =
+            input.okxContracts ??
+            ((input.sizeUsd / Math.max(1e-9, input.lastPrice)) / (inst.ctVal || 1));
         } else {
           return {
             ok: false,
-            errorMessage: "NO_POSITION_TO_CLOSE"
+            errorMessage: authority.blockReason ?? "NO_POSITION_TO_CLOSE"
           };
         }
       }
@@ -14096,16 +14467,21 @@ export class PaperEngine {
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
-          okxContracts: closeContractCtx.okxActualContracts ?? open.okxContracts ?? undefined,
           okxActualContracts: closeContractCtx.okxActualContracts ?? undefined,
           okxActualAvailable: closeContractCtx.okxActualAvailable,
+          remotePositionContracts: closeContractCtx.okxActualContracts ?? undefined,
           fullClose: true,
           appliedLeverage: Math.max(1, open.leverage ?? 1),
           lastPrice: closePrice,
           flowId,
           reason: `executor_${cr}`,
           isV2Authority: closeContractCtx.isV2Authority,
-          open
+          isStopLoss: cr === "stop_loss",
+          open,
+          exitGateContext: {
+            v2ShouldExit: v2ExitAuthority?.shouldExit === true,
+            actualStopBreached: stopAuthorityForClose.actualStopBreached
+          }
         });
 
         const fin = await this.finalizeFullClose({
@@ -14730,15 +15106,28 @@ export class PaperEngine {
       confirmedExitType = exitEventJsonlType(cr);
       confirmedCloseSource = "candidate_lost_watchdog";
       const closedRow = toClosed(cr, m, open.sizeUsd);
+      const closeContractCtx = this.buildCloseContractContext(open);
       const closeSubmit = await this.dispatchOkxClose({
         symbol: open.symbol,
         side: open.side,
         sizeUsd: open.sizeUsd,
+        okxActualContracts: closeContractCtx.okxActualContracts ?? undefined,
+        okxActualAvailable: closeContractCtx.okxActualAvailable,
+        remotePositionContracts: closeContractCtx.okxActualContracts ?? undefined,
         appliedLeverage: Math.max(1, open.leverage ?? 1),
         lastPrice: closePrice,
         flowId,
-        reason: "candidate_lost"
+        reason: "candidate_lost",
+        isV2Authority: closeContractCtx.isV2Authority,
+        open,
+        exitGateContext: {
+          v2ShouldExit: false
+        }
       });
+      if (!closeSubmit.ok) {
+        remaining.push({ ...posTrail, candidateLostStreak: 0 });
+        continue;
+      }
       const fin = await this.finalizeFullClose({
         open, closeSubmit, closedRow, cr, closeSource: String(closedRow.closeSource ?? "executor_close_action"), regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
       });

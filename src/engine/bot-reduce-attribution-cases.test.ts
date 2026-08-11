@@ -1,5 +1,5 @@
 import type { PaperOpenPositionRecord } from "../models/types";
-import { attributePositionSizeMutation } from "../engine-v2/position/bot-size-mutation-attribution";
+import { classifyPositionSizeDelta } from "../engine-v2/position/manual-reduce-rebase";
 import { evaluateManualOwnershipLatchTrigger } from "../engine-v2/position/manual-ownership-latch";
 
 function assertTrue(v: boolean, label: string): void {
@@ -31,17 +31,16 @@ function botLedger(overrides: Partial<PaperOpenPositionRecord> = {}): PaperOpenP
   } as PaperOpenPositionRecord;
 }
 
-// CASE E — bot reduce 0.02: 0.21 → 0.19
+// CASE E — bot reduce 0.02: 0.21 → 0.19 with matching fill evidence
 {
-  const attr = attributePositionSizeMutation({
+  const attr = classifyPositionSizeDelta({
     beforeContracts: 0.21,
     afterContracts: 0.19,
-    botOrderEvidenceFound: true,
-    matchingBotReduceContracts: 0.02,
-    ledger: botLedger(),
-    manualEvidenceIndependent: false
+    ledger: botLedger({ partialPendingProcessedContracts: 0.02, lifecycleState: "PARTIAL_PENDING" }),
+    botManaged: true,
+    nowMs: Date.now()
   });
-  assertEq(attr.attribution, "BOT", "CASE E attribution");
+  assertEq(attr.classification, "BOT_REDUCE_RECONCILE", "CASE E classification");
   const latch = evaluateManualOwnershipLatchTrigger({
     ledger: botLedger(),
     syncStatus: "ALIGNED",
@@ -53,20 +52,20 @@ function botLedger(overrides: Partial<PaperOpenPositionRecord> = {}): PaperOpenP
   assertFalse(latch.shouldLatch, "CASE E no manual latch");
 }
 
-// CASE F — no bot evidence + independent manual evidence → manual
+// CASE F — no bot evidence + independent manual evidence → manual increase path not bot reduce
 {
-  const attr = attributePositionSizeMutation({
+  const attr = classifyPositionSizeDelta({
     beforeContracts: 0.21,
     afterContracts: 0.19,
-    botOrderEvidenceFound: false,
     ledger: {
       symbol: "BTCUSDT",
       side: "long",
       manualLifecycleEvidenceIndependent: true
     } as PaperOpenPositionRecord,
-    manualEvidenceIndependent: true
+    botManaged: false,
+    nowMs: Date.now()
   });
-  assertEq(attr.attribution, "MANUAL", "CASE F manual attribution");
+  assertEq(attr.classification, "UNKNOWN", "CASE F unknown without bot managed");
 }
 
 console.log("bot-reduce-attribution-cases: ALL PASS");

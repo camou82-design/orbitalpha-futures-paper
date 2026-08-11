@@ -13,7 +13,7 @@ export function resolveV2CloseContractAuthority(input: Readonly<{
     okxActualContracts: number | null;
     okxActualAvailable: boolean;
     ledgerContracts: number | null;
-    liveContracts?: number | null;
+    remotePositionContracts?: number | null;
     sizeUsd?: number | null;
     isV2Authority: boolean;
     fullClose?: boolean;
@@ -38,24 +38,38 @@ export function resolveV2CloseContractAuthority(input: Readonly<{
             ? input.okxActualContracts
             : null;
     const live =
-        input.liveContracts != null && Number.isFinite(input.liveContracts) && input.liveContracts > 0
-            ? input.liveContracts
+        input.remotePositionContracts != null &&
+        Number.isFinite(input.remotePositionContracts) &&
+        input.remotePositionContracts > 0
+            ? input.remotePositionContracts
             : null;
 
-    if (input.okxActualAvailable && actual != null) {
+    if (input.okxActualAvailable) {
+        if (actual != null && actual > 0) {
+            return {
+                selectedContracts: actual,
+                contractAuthoritySource: "okx_actual_contracts",
+                fallbackUsed: ledger != null && Math.abs(ledger - actual) > 1e-8,
+                submitAllowed: true,
+                blockReason: null,
+                okxActualContracts: actual,
+                ledgerContracts: ledger,
+                sizeUsd: input.sizeUsd ?? null
+            };
+        }
         return {
-            selectedContracts: actual,
-            contractAuthoritySource: "okx_actual_contracts",
-            fallbackUsed: ledger != null && Math.abs(ledger - actual) > 1e-8,
-            submitAllowed: true,
-            blockReason: null,
-            okxActualContracts: actual,
+            selectedContracts: 0,
+            contractAuthoritySource: "blocked_no_authority",
+            fallbackUsed: false,
+            submitAllowed: false,
+            blockReason: "NO_POSITION_TO_CLOSE",
+            okxActualContracts: actual ?? 0,
             ledgerContracts: ledger,
             sizeUsd: input.sizeUsd ?? null
         };
     }
 
-    if (live != null) {
+    if (live != null && live > 0) {
         return {
             selectedContracts: live,
             contractAuthoritySource: "live_position_contracts",
@@ -102,7 +116,7 @@ export function resolveV2ReduceContracts(input: Readonly<{
     okxActualContracts: number | null;
     okxActualAvailable: boolean;
     ledgerContracts: number | null;
-    liveContracts?: number | null;
+    remotePositionContracts?: number | null;
     sizeUsd?: number | null;
     isV2Authority: boolean;
 }>): Readonly<{
@@ -118,7 +132,7 @@ export function resolveV2ReduceContracts(input: Readonly<{
         okxActualContracts: input.okxActualContracts,
         okxActualAvailable: input.okxActualAvailable,
         ledgerContracts: input.ledgerContracts,
-        liveContracts: input.liveContracts,
+        remotePositionContracts: input.remotePositionContracts,
         sizeUsd: input.sizeUsd,
         isV2Authority: input.isV2Authority,
         fullClose: false
