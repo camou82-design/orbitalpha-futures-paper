@@ -43,6 +43,70 @@ export function isAuthoritativeFlatConfirmed(input: Readonly<{
     );
 }
 
+export function isOpenLedgerRow(input: Readonly<{
+    okxContracts?: number | null;
+    status?: string | null;
+}>): boolean {
+    return (input.okxContracts ?? 0) > 0 || input.status === "open";
+}
+
+export function isAuthoritativeFlatPreflightCandidate(input: Readonly<{
+    remotePosExists: boolean;
+    isNew: boolean;
+    lifecycleState?: string | null;
+    ledgerExists: boolean;
+}>): boolean {
+    if (input.remotePosExists || input.isNew || !input.ledgerExists) return false;
+    const lifecycle = String(input.lifecycleState ?? "").trim();
+    if (!lifecycle || lifecycle === "INITIAL" || lifecycle === "PENDING_EXCHANGE_CONFIRM") {
+        return false;
+    }
+    return true;
+}
+
+export type AuthoritativeFlatPreflightOutcome =
+    | "NOT_APPLICABLE"
+    | "HOLD_UNCONFIRMED_ZERO"
+    | "PRUNE_ZERO_CONFIRMED"
+    | "PRUNE_UNRESOLVED_FINALIZE"
+    | "FINALIZE_SUCCEEDED";
+
+export function resolveAuthoritativeFlatPreflightOutcome(input: Readonly<{
+    candidate: boolean;
+    authoritativeFetchReady: boolean;
+    ledgerExists: boolean;
+    zeroConfirmCount: number;
+    finalizePending: boolean;
+    finalizeSucceeded: boolean;
+}>): AuthoritativeFlatPreflightOutcome {
+    if (!input.candidate) return "NOT_APPLICABLE";
+
+    if (input.finalizePending) {
+        const action = resolveAuthoritativeFlatFinalizePendingAction({
+            finalizePending: true,
+            authoritativeFetchReady: input.authoritativeFetchReady,
+            zeroConfirmCount: input.zeroConfirmCount,
+            finalizeSucceeded: input.finalizeSucceeded
+        });
+        if (action === "HOLD_UNCONFIRMED_ZERO") return "HOLD_UNCONFIRMED_ZERO";
+        if (action === "FINALIZE_SUCCEEDED") return "FINALIZE_SUCCEEDED";
+        if (action === "PRUNE_UNRESOLVED_FINALIZE") return "PRUNE_UNRESOLVED_FINALIZE";
+    }
+
+    if (
+        shouldPerformAuthoritativeFlatReconcile({
+            authoritativeFetchReady: input.authoritativeFetchReady,
+            ledgerExists: input.ledgerExists,
+            okxActualExists: false,
+            zeroConfirmCount: input.zeroConfirmCount
+        })
+    ) {
+        return "PRUNE_ZERO_CONFIRMED";
+    }
+
+    return "HOLD_UNCONFIRMED_ZERO";
+}
+
 export type AuthoritativeFlatFinalizePendingAction =
     | "HOLD_UNCONFIRMED_ZERO"
     | "FINALIZE_SUCCEEDED"

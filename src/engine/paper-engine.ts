@@ -242,7 +242,10 @@ import {
   buildV2AuthoritativeFlatReconcileProof,
   AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
   resolveAuthoritativeFlatCloseAttribution,
-  buildAuthoritativeFlatCloseAttributionProof
+  buildAuthoritativeFlatCloseAttributionProof,
+  isAuthoritativeFlatConfirmed,
+  isAuthoritativeFlatPreflightCandidate,
+  isOpenLedgerRow
 } from "../engine-v2/position/authoritative-flat-reconcile";
 import {
   classifyPositionSizeDelta,
@@ -3258,6 +3261,23 @@ export class PaperEngine {
         }
       }
 
+      const symbolSyncStatus = reconcileSyncSnap.mismatched_keys.includes(key)
+        ? reconcileSyncSnap.sync_status
+        : "ALIGNED";
+
+      const flatPreflight = await this.processAuthoritativeFlatReconcilePreflight(
+        open,
+        remotePos,
+        nowTs,
+        isNew,
+        symbolSyncStatus,
+        next
+      );
+      if (flatPreflight.consumed) {
+        if (flatPreflight.ledgerModified) ledgerModified = true;
+        continue;
+      }
+
       // 1. Handle Entry Pending States (Normalization)
 
       if (isPending || open.lifecycleState === "INITIAL" || !open.lifecycleState) {
@@ -3348,6 +3368,22 @@ export class PaperEngine {
         }
 
         if (!(ordId || clOrdId)) {
+          if (
+            !remotePos &&
+            !isNew &&
+            isAuthoritativeFlatPreflightCandidate({
+              remotePosExists: false,
+              isNew,
+              lifecycleState: open.lifecycleState,
+              ledgerExists: isOpenLedgerRow({
+                okxContracts: open.okxContracts,
+                status: open.status
+              })
+            })
+          ) {
+            next.push(open);
+            continue;
+          }
           if (!remotePos && !isNew) {
             const pruned = await reconcileManualFullClose(open, "RECONCILE_ABSENT_PENDING_NO_ID");
             if (pruned) continue;
@@ -3716,6 +3752,20 @@ export class PaperEngine {
           } else {
             // ordRes.ok but value is empty (Order not found in OKX)
             if (ordRes.ok && ordRes.value.length === 0 && !remotePos && !isNew) {
+              if (
+                isAuthoritativeFlatPreflightCandidate({
+                  remotePosExists: false,
+                  isNew,
+                  lifecycleState: open.lifecycleState,
+                  ledgerExists: isOpenLedgerRow({
+                    okxContracts: open.okxContracts,
+                    status: open.status
+                  })
+                })
+              ) {
+                next.push(open);
+                continue;
+              }
               const pruned = await reconcileManualFullClose(open, "RECONCILE_ABSENT_PENDING_NOT_FOUND");
               if (pruned) continue;
               next.push(open);
@@ -3812,106 +3862,11 @@ export class PaperEngine {
       if (
         open.lifecycleState === "OPEN" ||
         open.lifecycleState === "BOT_V2_MANAGED" ||
+        open.lifecycleState === "PARTIAL_ACTIVE" ||
         open.lifecycleState === "CLOSE_ONLY_MANAGED" ||
         open.lifecycleState === "EXTERNAL_MANUAL_MANAGED"
       ) {
-        const symbolSyncStatus = reconcileSyncSnap.mismatched_keys.includes(key)
-          ? reconcileSyncSnap.sync_status
-          : "ALIGNED";
-
         if (!remotePos) {
-          const authoritativeFetchReady =
-            this.okxSignedRestReady &&
-            this.okxPositionsOk &&
-            Array.isArray(this.lastLivePositionsPayload);
-          const flatKey = authoritativeFlatKey(String(open.symbol), open.side);
-          const priorCount = this.authoritativeFlatZeroConfirmByKey.get(flatKey) ?? 0;
-          const zeroCount = recordAuthoritativeFlatZeroObservation({
-            key: flatKey,
-            authoritativeFetchReady,
-            okxActualExists: false,
-            priorCount
-          });
-          if (authoritativeFetchReady && zeroCount > 0) {
-            this.authoritativeFlatZeroConfirmByKey.set(flatKey, zeroCount);
-          } else {
-            this.authoritativeFlatZeroConfirmByKey.delete(flatKey);
-          }
-
-          const paperContracts = open.okxContracts ?? 0;
-          if (open.finalizePending === true && paperContracts > 0 && !isNew) {
-            if (open.okxZeroUnconfirmedSince == null) {
-              open.okxZeroUnconfirmedSince = nowTs;
-              open.reconcileState = "OKX_ZERO_UNCONFIRMED";
-              ledgerModified = true;
-              this.logger.info(
-                "V2_TERMINAL_FINALIZE_HANDOFF_PROOF",
-                buildTerminalFinalizeHandoffProof({
-                  symbol: open.symbol,
-                  flow_id:
-                    open.pendingFinalizeFlowId ??
-                    `${open.symbol}:${open.side}:${open.openedAt}`,
-                  final_fill_confirmed: true,
-                  okx_flat_confirmed: false,
-                  finalize_pending: true,
-                  history_persisted: false,
-                  cleanup_requested: false,
-                  cleanup_allowed: false,
-                  handoff_state: "OKX_ZERO_UNCONFIRMED_HOLD",
-                  block_reason: "destructive_cleanup_forbidden_during_unconfirmed_zero"
-                })
-              );
-            }
-            const flatConfirmed =
-              authoritativeFetchReady &&
-              zeroCount >= AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED;
-            if (!flatConfirmed) {
-              next.push(open);
-              continue;
-            }
-            const finalized = await this.tryPendingCompletedTradeFinalize(open, true, nowTs);
-            if (finalized) continue;
-            await this.pruneAuthoritativeFlatLedger(
-              open,
-              nowTs,
-              "authoritative_flat_finalize_unresolved_zero_confirmed"
-            );
-            ledgerModified = true;
-            continue;
-          }
-
-          const ledgerExists = paperContracts > 0 || open.status === "open";
-          if (
-            shouldPerformAuthoritativeFlatReconcile({
-              authoritativeFetchReady,
-              ledgerExists,
-              okxActualExists: false,
-              zeroConfirmCount: zeroCount
-            })
-          ) {
-            await this.pruneAuthoritativeFlatLedger(open, nowTs, "authoritative_flat_zero_confirmed");
-            ledgerModified = true;
-            continue;
-          }
-
-          if (paperContracts > 0 && !isNew) {
-            open.reconcileState = "OKX_ZERO_UNCONFIRMED";
-            open.okxZeroUnconfirmedSince = open.okxZeroUnconfirmedSince ?? nowTs;
-            ledgerModified = true;
-            this.logger.warn("OKX_ZERO_UNCONFIRMED_PROOF", {
-              symbol: open.symbol,
-              side: open.side,
-              paper_contracts: paperContracts,
-              okx_contracts: 0,
-              sync_status: symbolSyncStatus,
-              zero_confirm_count: zeroCount,
-              zero_confirm_required: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
-              action: "HOLD_NO_CLOSE_SUBMIT",
-              detail: "Awaiting consecutive authoritative OKX zero confirmations before ledger prune"
-            });
-            next.push(open);
-            continue;
-          }
           continue;
         }
 
@@ -7884,6 +7839,135 @@ export class PaperEngine {
     const flowId = `${open.symbol}:${open.side}:${open.openedAt}`;
     this.terminalExitConsumedByFlow.delete(flowId);
     this.positionExitProofThrottleByFlow.delete(flowId);
+  }
+
+  private async processAuthoritativeFlatReconcilePreflight(
+    open: PaperOpenPositionRecord,
+    remotePos: OkxRemotePositionAuthority | undefined,
+    nowTs: number,
+    isNew: boolean,
+    symbolSyncStatus: string,
+    next: PaperOpenPositionRecord[]
+  ): Promise<{ consumed: boolean; ledgerModified: boolean }> {
+    if (remotePos) {
+      this.authoritativeFlatZeroConfirmByKey.delete(
+        authoritativeFlatKey(String(open.symbol), open.side)
+      );
+      if (open.okxZeroUnconfirmedSince != null) {
+        open.okxZeroUnconfirmedSince = undefined;
+        return { consumed: false, ledgerModified: true };
+      }
+      return { consumed: false, ledgerModified: false };
+    }
+
+    const paperContracts = open.okxContracts ?? 0;
+    const ledgerExists = isOpenLedgerRow({
+      okxContracts: open.okxContracts,
+      status: open.status
+    });
+    const candidate = isAuthoritativeFlatPreflightCandidate({
+      remotePosExists: false,
+      isNew,
+      lifecycleState: open.lifecycleState,
+      ledgerExists
+    });
+    if (!candidate) {
+      return { consumed: false, ledgerModified: false };
+    }
+
+    let ledgerModified = false;
+    const authoritativeFetchReady =
+      this.okxSignedRestReady &&
+      this.okxPositionsOk &&
+      Array.isArray(this.lastLivePositionsPayload);
+    const flatKey = authoritativeFlatKey(String(open.symbol), open.side);
+    const priorCount = this.authoritativeFlatZeroConfirmByKey.get(flatKey) ?? 0;
+    const zeroCount = recordAuthoritativeFlatZeroObservation({
+      key: flatKey,
+      authoritativeFetchReady,
+      okxActualExists: false,
+      priorCount
+    });
+    if (authoritativeFetchReady && zeroCount > 0) {
+      this.authoritativeFlatZeroConfirmByKey.set(flatKey, zeroCount);
+    } else {
+      this.authoritativeFlatZeroConfirmByKey.delete(flatKey);
+    }
+
+    if (open.finalizePending === true) {
+      if (open.okxZeroUnconfirmedSince == null) {
+        open.okxZeroUnconfirmedSince = nowTs;
+        open.reconcileState = "OKX_ZERO_UNCONFIRMED";
+        ledgerModified = true;
+        this.logger.info(
+          "V2_TERMINAL_FINALIZE_HANDOFF_PROOF",
+          buildTerminalFinalizeHandoffProof({
+            symbol: open.symbol,
+            flow_id:
+              open.pendingFinalizeFlowId ??
+              `${open.symbol}:${open.side}:${open.openedAt}`,
+            final_fill_confirmed: true,
+            okx_flat_confirmed: false,
+            finalize_pending: true,
+            history_persisted: false,
+            cleanup_requested: false,
+            cleanup_allowed: false,
+            handoff_state: "OKX_ZERO_UNCONFIRMED_HOLD",
+            block_reason: "destructive_cleanup_forbidden_during_unconfirmed_zero"
+          })
+        );
+      }
+      const flatConfirmed = isAuthoritativeFlatConfirmed({
+        authoritativeFetchReady,
+        zeroConfirmCount: zeroCount
+      });
+      if (!flatConfirmed) {
+        next.push(open);
+        return { consumed: true, ledgerModified };
+      }
+      const finalized = await this.tryPendingCompletedTradeFinalize(open, true, nowTs);
+      if (finalized) {
+        return { consumed: true, ledgerModified: true };
+      }
+      await this.pruneAuthoritativeFlatLedger(
+        open,
+        nowTs,
+        "authoritative_flat_finalize_unresolved_zero_confirmed"
+      );
+      return { consumed: true, ledgerModified: true };
+    }
+
+    if (
+      shouldPerformAuthoritativeFlatReconcile({
+        authoritativeFetchReady,
+        ledgerExists,
+        okxActualExists: false,
+        zeroConfirmCount: zeroCount
+      })
+    ) {
+      await this.pruneAuthoritativeFlatLedger(open, nowTs, "authoritative_flat_zero_confirmed");
+      return { consumed: true, ledgerModified: true };
+    }
+
+    if (paperContracts > 0) {
+      open.reconcileState = "OKX_ZERO_UNCONFIRMED";
+      open.okxZeroUnconfirmedSince = open.okxZeroUnconfirmedSince ?? nowTs;
+      ledgerModified = true;
+      this.logger.warn("OKX_ZERO_UNCONFIRMED_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        paper_contracts: paperContracts,
+        okx_contracts: 0,
+        sync_status: symbolSyncStatus,
+        zero_confirm_count: zeroCount,
+        zero_confirm_required: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+        action: "HOLD_NO_CLOSE_SUBMIT",
+        detail: "Awaiting consecutive authoritative OKX zero confirmations before ledger prune"
+      });
+    }
+
+    next.push(open);
+    return { consumed: true, ledgerModified };
   }
 
   private async pruneAuthoritativeFlatLedger(

@@ -4,7 +4,10 @@ import {
   shouldPerformAuthoritativeFlatReconcile,
   AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
   resolveAuthoritativeFlatCloseAttribution,
-  resolveAuthoritativeFlatFinalizePendingAction
+  resolveAuthoritativeFlatFinalizePendingAction,
+  isAuthoritativeFlatPreflightCandidate,
+  isOpenLedgerRow,
+  resolveAuthoritativeFlatPreflightOutcome
 } from "../engine-v2/position/authoritative-flat-reconcile";
 import { classifyPositionSizeDelta } from "../engine-v2/position/manual-reduce-rebase";
 import { resolveV2CloseContractAuthority } from "../engine-v2/execution/close-contract-authority";
@@ -509,6 +512,140 @@ function v2Ledger(overrides: Partial<PaperOpenPositionRecord> = {}): PaperOpenPo
   });
   assertEq(attribution.attribution, "EXTERNAL_MANUAL_FULL_CLOSE", "prune snapshot external attribution");
   assertFalse(attribution.botFinalFillEvidenceFound, "intent-only not bot attribution");
+}
+
+// REG 1 — PARTIAL_ACTIVE + finalizePending + remote absent, zero=1 => HOLD
+{
+  const ledgerExists = isOpenLedgerRow({ okxContracts: 0.2, status: "open" });
+  assertTrue(
+    isAuthoritativeFlatPreflightCandidate({
+      remotePosExists: false,
+      isNew: false,
+      lifecycleState: "PARTIAL_ACTIVE",
+      ledgerExists
+    }),
+    "REG 1 PARTIAL_ACTIVE is preflight candidate"
+  );
+  const outcome = resolveAuthoritativeFlatPreflightOutcome({
+    candidate: true,
+    authoritativeFetchReady: true,
+    ledgerExists,
+    zeroConfirmCount: 1,
+    finalizePending: true,
+    finalizeSucceeded: false
+  });
+  assertEq(outcome, "HOLD_UNCONFIRMED_ZERO", "REG 1 hold on first zero");
+}
+
+// REG 2 — PARTIAL_ACTIVE + finalizePending + remote absent, zero=2, finalize fail => PRUNE
+{
+  const outcome = resolveAuthoritativeFlatPreflightOutcome({
+    candidate: true,
+    authoritativeFetchReady: true,
+    ledgerExists: true,
+    zeroConfirmCount: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+    finalizePending: true,
+    finalizeSucceeded: false
+  });
+  assertEq(outcome, "PRUNE_UNRESOLVED_FINALIZE", "REG 2 prune unresolved finalize");
+}
+
+// REG 3 — BOT_V2_MANAGED + pending-not-found scenario + remote absent, zero=1 => HOLD
+{
+  assertTrue(
+    isAuthoritativeFlatPreflightCandidate({
+      remotePosExists: false,
+      isNew: false,
+      lifecycleState: "BOT_V2_MANAGED",
+      ledgerExists: true
+    }),
+    "REG 3 BOT_V2_MANAGED is preflight candidate"
+  );
+  const outcome = resolveAuthoritativeFlatPreflightOutcome({
+    candidate: true,
+    authoritativeFetchReady: true,
+    ledgerExists: true,
+    zeroConfirmCount: 1,
+    finalizePending: false,
+    finalizeSucceeded: false
+  });
+  assertEq(outcome, "HOLD_UNCONFIRMED_ZERO", "REG 3 hold on first zero without finalizePending");
+}
+
+// REG 4 — BOT_V2_MANAGED + remote absent, zero=2 => PRUNE
+{
+  const outcome = resolveAuthoritativeFlatPreflightOutcome({
+    candidate: true,
+    authoritativeFetchReady: true,
+    ledgerExists: true,
+    zeroConfirmCount: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+    finalizePending: false,
+    finalizeSucceeded: false
+  });
+  assertEq(outcome, "PRUNE_ZERO_CONFIRMED", "REG 4 prune on second zero");
+}
+
+// REG 5 — remote position reappears => zero counter reset, no prune
+{
+  let count = AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED;
+  count = recordAuthoritativeFlatZeroObservation({
+    key: "BTCUSDT:long",
+    authoritativeFetchReady: true,
+    okxActualExists: true,
+    priorCount: count
+  });
+  assertEq(count, 0, "REG 5 zero counter reset when remote reappears");
+  assertFalse(
+    shouldPerformAuthoritativeFlatReconcile({
+      authoritativeFetchReady: true,
+      ledgerExists: true,
+      okxActualExists: true,
+      zeroConfirmCount: count
+    }),
+    "REG 5 no prune when remote exists"
+  );
+  assertFalse(
+    isAuthoritativeFlatPreflightCandidate({
+      remotePosExists: true,
+      isNew: false,
+      lifecycleState: "BOT_V2_MANAGED",
+      ledgerExists: true
+    }),
+    "REG 5 not a flat preflight candidate when remote exists"
+  );
+}
+
+// REG 6 — confirmed BOT final fill => BOT_FULL_CLOSE_RECONCILE
+{
+  const nowMs = Date.now();
+  const botFlat = resolveAuthoritativeFlatCloseAttribution({
+    ledger: v2Ledger({
+      lifecycleState: "PARTIAL_ACTIVE",
+      finalizePending: true,
+      pendingFinalizeTradeSource: "BOT_V2",
+      pendingFinalizeFinalFillAt: nowMs - 1_000,
+      pendingFinalizeExitAvgPx: 64250,
+      pendingFinalizeFinalCloseReason: "V2_EXIT"
+    }),
+    nowMs
+  });
+  assertEq(botFlat.attribution, "BOT_FULL_CLOSE_RECONCILE", "REG 6 confirmed bot final fill");
+}
+
+// REG 7 — candidate_lost intent only => EXTERNAL_MANUAL_FULL_CLOSE
+{
+  const nowMs = Date.now();
+  const intentOnly = resolveAuthoritativeFlatCloseAttribution({
+    ledger: v2Ledger({
+      lifecycleState: "BOT_V2_MANAGED",
+      lastBotExecutionAt: nowMs - 5_000,
+      lastBotExecutionReason: "candidate_lost",
+      closePendingReason: "candidate_lost",
+      closePendingAt: nowMs - 4_000
+    }),
+    nowMs
+  });
+  assertEq(intentOnly.attribution, "EXTERNAL_MANUAL_FULL_CLOSE", "REG 7 candidate_lost intent only");
 }
 
 console.log("v2-position-authority-reset-cases: ALL PASS");
