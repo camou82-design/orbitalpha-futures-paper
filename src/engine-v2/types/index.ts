@@ -198,6 +198,8 @@ export interface LegacyConfigAdapter {
     okxLiveMaxSymbolNotionalUsdt?: number | null;
     okxLiveMaxAccountNotionalUsdt?: number | null;
     okxLiveMaxAddonCount?: number | null;
+    okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
+    okxLiveMarginReserveRatio?: number;
 }
 
 export interface LegacyPositionAdapter {
@@ -280,6 +282,8 @@ export interface EngineV2Input {
         okxPendingSymbolNotionalUsdt?: number;
         accountEquityUsdt?: number;
         availableBalanceUsdt?: number;
+        equitySource?: string;
+        okxInstrumentSizing?: import("../okx-swap-sizing").OkxSwapInstrumentSizing;
         existingAccountNotionalUsdt?: number;
         existingSymbolNotionalUsdt?: number;
         balanceFetchedAt?: number;
@@ -384,6 +388,8 @@ export interface EngineV2ConfigAdapter {
     okxLiveMaxSymbolNotionalUsdt?: number | null;
     okxLiveMaxAccountNotionalUsdt?: number | null;
     okxLiveMaxAddonCount?: number | null;
+    okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
+    okxLiveMarginReserveRatio?: number;
 }
 
 export type EngineV2ExecutionAction = "ENTER" | "ADDON" | "NONE";
@@ -489,6 +495,8 @@ export interface V2BridgeConfig {
     okxLiveMaxSymbolNotionalUsdt?: number | null;
     okxLiveMaxAccountNotionalUsdt?: number | null;
     okxLiveMaxAddonCount?: number | null;
+    okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
+    okxLiveMarginReserveRatio?: number;
 }
 
 export interface V2BridgePosition {
@@ -540,6 +548,7 @@ export interface V2BridgeState {
     okxLiveMaxAccountNotionalUsdt?: number | null;
     okxLiveMaxAddonCount?: number | null;
     liveBalanceReady?: boolean;
+    equitySource?: string;
     accountEquityUsdt?: number;
     availableBalanceUsdt?: number;
     okxActualPositionsReady?: boolean;

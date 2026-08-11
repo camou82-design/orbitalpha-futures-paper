@@ -4326,6 +4326,16 @@ export class PaperEngine {
     okx_passphrase_present: boolean;
     okx_simulated_trading_header_enabled: boolean;
     live_max_order_notional_usdt: number;
+    live_emergency_max_order_notional_usdt: number | null;
+    live_margin_reserve_ratio: number;
+    account_equity_usdt: number | null;
+    risk_per_trade_pct: number;
+    initial_notional_cap_usdt: number | null;
+    symbol_cap_usdt: number | null;
+    account_cap_usdt: number | null;
+    current_account_exposure_usdt: number | null;
+    next_order_risk_budget_usdt: number | null;
+    next_order_max_notional_usdt: number | null;
   } {
     const mode = this.config.okxAuthMode;
     const apiKey = mode === "live" ? this.config.okxApiKey : mode === "demo" ? this.config.okxDemoApiKey : "";
@@ -4353,7 +4363,22 @@ export class PaperEngine {
       okx_api_secret_present: apiSecret.length > 0,
       okx_passphrase_present: passphrase.length > 0,
       okx_simulated_trading_header_enabled: this.config.okxSimulatedTradingHeaderEnabled,
-      live_max_order_notional_usdt: this.config.okxLiveMaxOrderNotionalUsdt ?? 0
+      live_max_order_notional_usdt: this.config.okxLiveMaxOrderNotionalUsdt ?? 0,
+      live_emergency_max_order_notional_usdt: this.config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null,
+      live_margin_reserve_ratio: this.config.okxLiveMarginReserveRatio ?? 0.2,
+      account_equity_usdt: authority.okx_total_equity_usdt,
+      risk_per_trade_pct: 0.005,
+      initial_notional_cap_usdt:
+        authority.okx_total_equity_usdt != null ? authority.okx_total_equity_usdt * 0.8 : null,
+      symbol_cap_usdt:
+        authority.okx_total_equity_usdt != null ? authority.okx_total_equity_usdt * 1.0 : null,
+      account_cap_usdt:
+        authority.okx_total_equity_usdt != null ? authority.okx_total_equity_usdt * 1.5 : null,
+      current_account_exposure_usdt: authority.okx_total_position_notional_usdt,
+      next_order_risk_budget_usdt:
+        authority.okx_total_equity_usdt != null ? authority.okx_total_equity_usdt * 0.005 : null,
+      next_order_max_notional_usdt:
+        authority.okx_total_equity_usdt != null ? authority.okx_total_equity_usdt * 0.8 : null
     };
   }
 
@@ -8944,12 +8969,9 @@ export class PaperEngine {
 
       // 3. Dynamic Capping (Execution Reality)
       // 3. Dynamic Capping (Execution Reality)
-      let static_safety_cap = this.config.okxLiveMaxOrderNotionalUsdt;
-      
-      // V2 EXCEPTION: V2 authoritative signals bypass legacy static caps to allow 100 USDT probes
-      if (input.authoritySource === "v2") {
-        static_safety_cap = Math.max(static_safety_cap ?? 0, 500); 
-      }
+      let static_safety_cap =
+        this.config.okxLiveEmergencyMaxOrderNotionalUsdt ??
+        this.config.okxLiveMaxOrderNotionalUsdt;
 
       // 3.5 Leverage Sync for V2
       if (input.authoritySource === "v2" && input.appliedLeverage != null && okx_confirmed_leverage != null && okx_confirmed_leverage !== input.appliedLeverage) {
@@ -17018,12 +17040,19 @@ export class PaperEngine {
             ? authority.exposureNotionalKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD
             : marginUsdt * (authority.appliedLeverage ?? 10);
 
-        const liveMaxOrderNotionalUsdt =
-          typeof this.config.okxLiveMaxOrderNotionalUsdt === "number" && this.config.okxLiveMaxOrderNotionalUsdt > 0
-            ? this.config.okxLiveMaxOrderNotionalUsdt
-            : authorityNotionalUsdt;
+        const emergencyCapUsdt =
+          typeof this.config.okxLiveEmergencyMaxOrderNotionalUsdt === "number" &&
+          this.config.okxLiveEmergencyMaxOrderNotionalUsdt > 0
+            ? this.config.okxLiveEmergencyMaxOrderNotionalUsdt
+            : typeof this.config.okxLiveMaxOrderNotionalUsdt === "number" &&
+                this.config.okxLiveMaxOrderNotionalUsdt > 0
+              ? this.config.okxLiveMaxOrderNotionalUsdt
+              : null;
 
-        const v2OrderNotionalUsdt = Math.min(authorityNotionalUsdt, liveMaxOrderNotionalUsdt);
+        const v2OrderNotionalUsdt =
+          emergencyCapUsdt != null
+            ? Math.min(authorityNotionalUsdt, emergencyCapUsdt)
+            : authorityNotionalUsdt;
         let v2EntrySizeUsd = v2OrderNotionalUsdt;
         const symS = String(first.symbol);
         const mPreV2 = marginsForSymbol(next, symS);
@@ -17400,7 +17429,7 @@ export class PaperEngine {
             authority_exposure_notional_krw: authority.exposureNotionalKrw ?? 0,
             authority_notional_usdt: authorityNotionalUsdt,
             order_notional_usdt: v2EntrySizeUsd,
-            live_max_order_notional_usdt: liveMaxOrderNotionalUsdt,
+            live_max_order_notional_usdt: emergencyCapUsdt,
             min_order_notional_usdt: MIN_POSITION_SIZE_USD,
             notional_ok: v2EntrySizeUsd >= MIN_POSITION_SIZE_USD,
             entry_price: first.lastPrice,
@@ -20715,7 +20744,9 @@ export function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
     okxLiveMaxAddonNotionalUsdt: config.okxLiveMaxAddonNotionalUsdt ?? null,
     okxLiveMaxSymbolNotionalUsdt: config.okxLiveMaxSymbolNotionalUsdt ?? null,
     okxLiveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt ?? null,
-    okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null
+    okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null,
+    okxLiveEmergencyMaxOrderNotionalUsdt: config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null,
+    okxLiveMarginReserveRatio: config.okxLiveMarginReserveRatio ?? 0.2
   };
 }
 
@@ -20829,6 +20860,7 @@ export function buildV2StateBridge(
     okxLiveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt ?? null,
     okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null,
     liveBalanceReady: liveBalanceReady ?? false,
+    equitySource: okxWalletBalanceUsdt != null ? "okx_total_eq" : undefined,
     accountEquityUsdt: okxWalletBalanceUsdt ?? undefined,
     availableBalanceUsdt: okxAvailableBalanceUsdt ?? undefined,
     okxActualPositionsReady: okxPositionsOk ?? Array.isArray(lastLivePositionsPayload),

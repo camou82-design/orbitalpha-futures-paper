@@ -433,7 +433,9 @@ export function resolveSymbolDecisionEnvelope(
         okxLiveMaxAddonNotionalUsdt: config.okxLiveMaxAddonNotionalUsdt,
         okxLiveMaxSymbolNotionalUsdt: config.okxLiveMaxSymbolNotionalUsdt,
         okxLiveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt,
-        okxLiveMaxAddonCount: config.okxLiveMaxAddonCount
+        okxLiveMaxAddonCount: config.okxLiveMaxAddonCount,
+        okxLiveEmergencyMaxOrderNotionalUsdt: config.okxLiveEmergencyMaxOrderNotionalUsdt,
+        okxLiveMarginReserveRatio: config.okxLiveMarginReserveRatio
     };
 
     // 3. Legacy Decision Mapping

@@ -13,6 +13,18 @@ import {
 } from "./types";
 import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
 import { emitLiveExposureAuthorityProof, resolveLiveExposureAuthority } from "./live-account/exposure-authority";
+import {
+    evaluateEquityAdaptiveSizing,
+    evaluateEquitySizingAuthority,
+    buildEquitySizingAuthorityProof,
+    buildRiskBasedNotionalProof,
+    buildMarginCapacityProof,
+    buildEquityAdaptiveSizingProof,
+    MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,
+    MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE,
+    MAX_ADVERSE_ADDON_EQUITY_MULTIPLE,
+    RISK_PER_TRADE_PCT
+} from "./risk-sizing/equity-adaptive-sizing";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -747,7 +759,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
     v2CalculatedInvalidationPx = execution.invalidationPx;
     const USD_PER_KRW = 1 / 1400;
-    const accountEquityUsd = (v2State.accountEquityKrw ?? 0) * USD_PER_KRW;
+    const liveAccountEquityUsdt =
+        typeof v2State.accountEquityUsdt === "number" && v2State.accountEquityUsdt > 0
+            ? v2State.accountEquityUsdt
+            : 0;
+    const accountEquityUsd =
+        liveAccountEquityUsdt > 0
+            ? liveAccountEquityUsdt
+            : (v2State.accountEquityKrw ?? 0) * USD_PER_KRW;
     const currentSymbolNotionalUsd = (v2State.symbolLedgerExposureNotionalKrw ?? 0) * USD_PER_KRW;
     const currentGlobalNotionalUsd = (v2State.ledgerExposureNotionalKrw ?? 0) * USD_PER_KRW;
 
@@ -930,20 +949,25 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         };
     }
     // --- Unified finalAddonNotionalUsdt Calculation (Pyramid Sizing Source of Truth) ---
-    const symbolMaxNotionalUsdt = accountEquityUsd * 0.8;
-    const globalMaxNotionalUsdt = accountEquityUsd * 1.5;
+    const symbolMaxNotionalUsdt = liveAccountEquityUsdt > 0
+        ? liveAccountEquityUsdt * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE
+        : accountEquityUsd * 0.8;
+    const globalMaxNotionalUsdt = liveAccountEquityUsdt > 0
+        ? liveAccountEquityUsdt * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE
+        : accountEquityUsd * 1.5;
     const remainingSymbolRoom = Math.max(0, symbolMaxNotionalUsdt - currentSymbolNotionalUsd);
     const remainingGlobalRoom = Math.max(0, globalMaxNotionalUsdt - currentGlobalNotionalUsd);
-    const liveMaxOrderNotionalUsdt = v2State.liveMaxOrderNotionalUsdt ?? 500;
+    const maxAdverseAddonUsdt = liveAccountEquityUsdt > 0
+        ? liveAccountEquityUsdt * MAX_ADVERSE_ADDON_EQUITY_MULTIPLE
+        : accountEquityUsd * MAX_ADVERSE_ADDON_EQUITY_MULTIPLE;
 
     const addonPolicyNotionalCap =
         addOnPolicy.addonMode === "CONFIRMED_ADVERSE_ADDON"
-            ? (addOnPolicy.requestedAddonNotionalUsdt ?? addOnPolicy.addonMaxNotionalUsdt ?? liveMaxAddonNotionalUsdt)
+            ? (addOnPolicy.requestedAddonNotionalUsdt ?? addOnPolicy.addonMaxNotionalUsdt ?? maxAdverseAddonUsdt)
             : (addOnPolicy.addonMaxNotionalUsdt ?? 0);
 
     const finalAddonNotionalUsdt = Math.min(
         addonPolicyNotionalCap,
-        liveMaxAddonNotionalUsdt,
         remainingSymbolRoom,
         remainingGlobalRoom
     );
@@ -952,7 +976,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         event: "V2_TREND_FINAL_ADDON_NOTIONAL_PROOF",
         symbol: String(input.symbol),
         addonPolicyMax: addOnPolicy.addonMaxNotionalUsdt,
-        liveMaxOrder: liveMaxOrderNotionalUsdt,
+        liveAccountEquityUsdt,
+        maxAdverseAddonUsdt,
         remainingSymbolRoom,
         remainingGlobalRoom,
         finalAddonNotionalUsdt
@@ -4601,12 +4626,42 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         riskSizing.appliedLeverage = appliedLeverage;
         riskSizing.leverageReason = leverageReason;
 
-        const limitsConfigured =
-            maxOrderNotionalUsdt != null && maxOrderNotionalUsdt > 0 &&
-            maxAddonNotionalUsdt != null && maxAddonNotionalUsdt > 0 &&
-            maxSymbolNotionalUsdt != null && maxSymbolNotionalUsdt > 0 &&
-            maxAccountNotionalUsdt != null && maxAccountNotionalUsdt > 0 &&
-            maxAddonCount != null && maxAddonCount >= 0;
+        const effectiveMaxAddonCount = maxAddonCount ?? 1;
+
+        const equitySource =
+            (v2State as any).equitySource ??
+            (input.state as any).equitySource ??
+            "okx_total_eq";
+        const equityAgeMs =
+            typeof balanceFetchedAt === "number" ? nowMs - balanceFetchedAt : null;
+        const equityFresh = dataFresh;
+        const okxAuthReady =
+            (v2State as any).okxAuthReady === true ||
+            (input.state as any).okxAuthReady === true;
+
+        const equityAuthority = evaluateEquitySizingAuthority({
+            symbol: String(input.symbol),
+            accountEquityUsdt,
+            availableBalanceUsdt,
+            liveBalanceReady,
+            okxAuthReady,
+            equityFresh,
+            equitySource,
+            equityAgeMs
+        });
+
+        if (isLiveSignedOrderAttempt && input.evaluationMode !== "diagnostic") {
+            console.info(JSON.stringify(buildEquitySizingAuthorityProof({
+                symbol: String(input.symbol),
+                account_equity_usdt: accountEquityUsdt,
+                available_balance_usdt: availableBalanceUsdt,
+                equity_source: equitySource,
+                equity_age_ms: equityAgeMs,
+                equity_fresh: equityFresh,
+                sizing_authority_ready: equityAuthority.sizingAuthorityReady,
+                block_reason: equityAuthority.blockReason
+            })));
+        }
 
         liveReadinessPassed =
             liveBalanceReady &&
@@ -4708,9 +4763,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
 
 
-        if (isLiveSignedOrderAttempt && !limitsConfigured) {
+        if (isLiveSignedOrderAttempt && !equityAuthority.sizingAuthorityReady) {
             min_order_check_passed = false;
-            min_order_block_reason = "LIVE_SIZING_LIMITS_NOT_CONFIGURED";
+            min_order_block_reason = "LIVE_ACCOUNT_EQUITY_NOT_READY";
         } else if (isLiveSignedOrderAttempt && positionMismatch) {
             min_order_check_passed = false;
             min_order_block_reason = "POSITION_AUTHORITY_MISMATCH";
@@ -4754,10 +4809,25 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             existingAccountNotionalUsdt = exposureAuthority.final_account_notional_usdt;
             existingSymbolNotionalUsdt = exposureAuthority.final_symbol_notional_usdt;
 
-            const orderCap = isAddOn ? maxAddonNotionalUsdt! : maxOrderNotionalUsdt!;
+            const addOnPolicyMode =
+                (v2State as any).addOnPolicyMode ??
+                addOnPolicy?.addonMode ??
+                "NONE";
+            const isAdverseAddon = addOnPolicyMode === "CONFIRMED_ADVERSE_ADDON";
+            const orderKind = !isAddOn
+                ? "ENTRY"
+                : isAdverseAddon
+                  ? "ADVERSE_ADDON"
+                  : "PYRAMIDING_ADDON";
+
+            const effectiveStopPrice = stopOk
+                ? stopPriceVal
+                : invalidationOk
+                  ? invalidationPxVal
+                  : null;
 
             if (isAddOn) {
-                if (currentAddonCount >= maxAddonCount!) {
+                if (currentAddonCount >= effectiveMaxAddonCount) {
                     min_order_check_passed = false;
                     min_order_block_reason = "MAX_ADDON_COUNT_EXCEEDED";
                 } else if ((v2State as any).addOnPolicyAllowed === false) {
@@ -4766,33 +4836,114 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 }
             }
 
-            if (min_order_check_passed) {
-                const baseUsdtNotional = input.config.baseSizeUsd ?? 40;
-                const rawNotionalUsdt = isAddOn ? orderCap : Math.min(orderCap, baseUsdtNotional);
-                requestedOrderNotionalUsdt = Math.min(orderCap, rawNotionalUsdt);
-                if (requestedOrderNotionalUsdt <= 0) requestedOrderNotionalUsdt = orderCap;
+            if (min_order_check_passed && accountEquityUsdt != null && availableBalanceUsdt != null) {
+                const emergencyAbsoluteCapUsdt =
+                    input.config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null;
+                const marginReserveRatio =
+                    input.config.okxLiveMarginReserveRatio ?? 0.2;
+                const instrumentSizing =
+                    (v2State as any).okxInstrumentSizing ??
+                    (input.state as any).okxInstrumentSizing ??
+                    null;
+                const policyRequestedNotional = isAddOn
+                    ? (isAdverseAddon
+                        ? ((v2State as any).requestedAddonNotionalUsdt ??
+                            addOnPolicy?.requestedAddonNotionalUsdt ??
+                            0)
+                        : ((v2State as any).finalAddonNotionalUsdt ?? finalAddonNotionalUsdt ?? 0))
+                    : null;
+                const adverseRiskBudgetAllowedNotional = isAdverseAddon
+                    ? (addOnPolicy?.requestedAddonNotionalUsdt ??
+                        (addOnPolicy as any)?.riskProjection?.riskBudgetAllowedNotional ??
+                        null)
+                    : null;
 
-                const remainingSymbolCap = Math.max(0, maxSymbolNotionalUsdt! - existingSymbolNotionalUsdt);
-                if (existingSymbolNotionalUsdt >= maxSymbolNotionalUsdt!) {
-                    min_order_check_passed = false;
-                    min_order_block_reason = "MAX_SYMBOL_NOTIONAL_EXCEEDED";
+                const sizingResult = evaluateEquityAdaptiveSizing({
+                    symbol: String(input.symbol),
+                    side: sideCand === "short" ? "short" : "long",
+                    orderKind,
+                    accountEquityUsdt,
+                    availableBalanceUsdt,
+                    entryReferencePrice: lastPx,
+                    effectiveStopPrice,
+                    appliedLeverage,
+                    entryQualityGrade: entryQualityGrade,
+                    existingSymbolNotionalUsdt,
+                    existingAccountNotionalUsdt,
+                    policyRequestedNotionalUsdt: policyRequestedNotional,
+                    adverseRiskBudgetAllowedNotional,
+                    emergencyAbsoluteCapUsdt,
+                    legacyStaticCapUsdt: maxOrderNotionalUsdt,
+                    marginReserveRatio,
+                    roundTripFeeRate: 0,
+                    lastPrice: lastPx,
+                    instrumentSizing
+                });
+
+                if (input.evaluationMode !== "diagnostic") {
+                    console.info(JSON.stringify(buildRiskBasedNotionalProof({
+                        symbol: String(input.symbol),
+                        equity_usdt: accountEquityUsdt,
+                        risk_pct: sizingResult.riskPct,
+                        risk_budget_usdt: sizingResult.riskBudgetUsdt,
+                        entry_reference_price: lastPx,
+                        effective_stop_price: effectiveStopPrice,
+                        stop_distance_pct: sizingResult.stopDistancePct,
+                        estimated_round_trip_fee_usdt: sizingResult.estimatedRoundTripFeeUsdt,
+                        net_risk_budget_usdt: sizingResult.netRiskBudgetUsdt,
+                        risk_based_notional_usdt: sizingResult.riskBasedNotionalUsdt,
+                        applied_leverage: appliedLeverage,
+                        estimated_margin_usdt: sizingResult.finalRequiredMarginUsdt
+                    })));
+                    console.info(JSON.stringify(buildMarginCapacityProof({
+                        available_balance_usdt: availableBalanceUsdt,
+                        margin_reserve_ratio: marginReserveRatio,
+                        usable_available_balance_usdt: sizingResult.usableAvailableBalanceUsdt,
+                        final_notional_usdt: sizingResult.finalOrderNotionalUsdt,
+                        leverage: appliedLeverage,
+                        required_margin_usdt: sizingResult.finalRequiredMarginUsdt,
+                        margin_capacity_passed: sizingResult.marginCapacityPassed
+                    })));
+                    console.info(JSON.stringify(buildEquityAdaptiveSizingProof({
+                        symbol: String(input.symbol),
+                        equity_usdt: accountEquityUsdt,
+                        risk_pct: sizingResult.riskPct,
+                        quality_multiplier: sizingResult.qualityMultiplier,
+                        risk_budget_usdt: sizingResult.riskBudgetUsdt,
+                        stop_distance_pct: sizingResult.stopDistancePct,
+                        risk_based_notional_usdt: sizingResult.riskBasedNotionalUsdt,
+                        equity_initial_cap_usdt: sizingResult.equityInitialCapUsdt,
+                        symbol_cap_usdt: sizingResult.symbolCapUsdt,
+                        account_cap_usdt: sizingResult.accountCapUsdt,
+                        existing_symbol_notional_usdt: existingSymbolNotionalUsdt,
+                        existing_account_notional_usdt: existingAccountNotionalUsdt,
+                        available_margin_cap_usdt: sizingResult.usableAvailableBalanceUsdt * appliedLeverage,
+                        emergency_cap_usdt: sizingResult.emergencyCapUsdt,
+                        legacy_cap_source: sizingResult.legacyCapSource,
+                        pre_lot_notional_usdt: sizingResult.preLotNotionalUsdt,
+                        normalized_contracts: sizingResult.normalizedContracts,
+                        normalized_notional_usdt: sizingResult.normalizedNotionalUsdt,
+                        actual_risk_at_stop_usdt: sizingResult.actualRiskAtStopUsdt,
+                        actual_risk_pct: sizingResult.actualRiskPct,
+                        final_order_notional_usdt: sizingResult.finalOrderNotionalUsdt,
+                        final_required_margin_usdt: sizingResult.finalRequiredMarginUsdt,
+                        sizing_passed: sizingResult.sizingPassed,
+                        block_reason: sizingResult.blockReason
+                    })));
                 }
 
-                const remainingAccountCap = Math.max(0, maxAccountNotionalUsdt! - existingAccountNotionalUsdt);
-                if (existingAccountNotionalUsdt >= maxAccountNotionalUsdt!) {
+                if (!sizingResult.sizingPassed) {
                     min_order_check_passed = false;
-                    min_order_block_reason = "MAX_ACCOUNT_NOTIONAL_EXCEEDED";
-                }
-
-                if (min_order_check_passed) {
-                    const notionalAfterSymbolCap = Math.min(requestedOrderNotionalUsdt, remainingSymbolCap);
-                    finalOrderNotionalUsdt = Math.min(notionalAfterSymbolCap, remainingAccountCap);
+                    min_order_block_reason = sizingResult.blockReason ?? "ORDER_BUILD_FAIL";
+                } else {
+                    requestedOrderNotionalUsdt = sizingResult.preLotNotionalUsdt;
+                    finalOrderNotionalUsdt = sizingResult.finalOrderNotionalUsdt;
 
                     const projectedSymbolNotionalUsdt = existingSymbolNotionalUsdt + finalOrderNotionalUsdt;
                     const projectedAccountNotionalUsdt = existingAccountNotionalUsdt + finalOrderNotionalUsdt;
                     const capPassed =
-                        projectedSymbolNotionalUsdt <= maxSymbolNotionalUsdt! + 1e-6 &&
-                        projectedAccountNotionalUsdt <= maxAccountNotionalUsdt! + 1e-6;
+                        projectedSymbolNotionalUsdt <= sizingResult.symbolCapUsdt + 1e-6 &&
+                        projectedAccountNotionalUsdt <= sizingResult.accountCapUsdt + 1e-6;
 
                     if (input.evaluationMode !== "diagnostic") {
                         emitLiveExposureAuthorityProof((payload) => console.info(JSON.stringify(payload)), {
@@ -4802,28 +4953,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             requested_order_notional_usdt: requestedOrderNotionalUsdt,
                             projected_symbol_notional_usdt: projectedSymbolNotionalUsdt,
                             projected_account_notional_usdt: projectedAccountNotionalUsdt,
-                            max_symbol_notional_usdt: maxSymbolNotionalUsdt ?? null,
-                            max_account_notional_usdt: maxAccountNotionalUsdt ?? null,
+                            max_symbol_notional_usdt: sizingResult.symbolCapUsdt,
+                            max_account_notional_usdt: sizingResult.accountCapUsdt,
                             cap_passed: capPassed
                         });
                     }
 
-                    const finalNotionalOk = typeof finalOrderNotionalUsdt === "number" && Number.isFinite(finalOrderNotionalUsdt) && finalOrderNotionalUsdt > 0 && finalOrderNotionalUsdt <= orderCap;
-
-                    console.log(JSON.stringify({
-                        event: "DEBUG_LIVE_SIZING_VARS",
-                        orderCap,
-                        baseUsdtNotional,
-                        rawNotionalUsdt,
-                        requestedOrderNotionalUsdt,
-                        remainingSymbolCap,
-                        remainingAccountCap,
-                        notionalAfterSymbolCap,
-                        finalOrderNotionalUsdt,
-                        finalNotionalOk
-                    }));
-
-                    if (!finalNotionalOk || finalOrderNotionalUsdt < 1.0) {
+                    if (finalOrderNotionalUsdt < 1.0) {
                         min_order_check_passed = false;
                         min_order_block_reason = "ORDER_BUILD_FAIL";
                     }
@@ -4858,10 +4994,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             existingSymbolNotionalUsdt,
             requestedOrderNotionalUsdt,
             finalOrderNotionalUsdt,
-            maxOrderNotionalUsdt: maxOrderNotionalUsdt ?? null,
-            maxAddonNotionalUsdt: maxAddonNotionalUsdt ?? null,
-            maxSymbolNotionalUsdt: maxSymbolNotionalUsdt ?? null,
-            maxAccountNotionalUsdt: maxAccountNotionalUsdt ?? null,
+            risk_per_trade_pct: RISK_PER_TRADE_PCT,
+            equity_initial_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * 0.8 : null,
+            symbol_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE : null,
+            account_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE : null,
+            emergency_cap_usdt: input.config.okxLiveEmergencyMaxOrderNotionalUsdt ?? maxOrderNotionalUsdt ?? null,
+            legacy_static_cap_usdt: maxOrderNotionalUsdt ?? null,
             currentAddonCount,
             isAddon: isAddOn,
             blocked: finalDecision !== "ENTER",
@@ -6662,7 +6800,9 @@ export function adaptV2Input(
             okxLiveMaxAddonNotionalUsdt: config.okxLiveMaxAddonNotionalUsdt ?? null,
             okxLiveMaxSymbolNotionalUsdt: config.okxLiveMaxSymbolNotionalUsdt ?? null,
             okxLiveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt ?? null,
-            okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null
+            okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null,
+            okxLiveEmergencyMaxOrderNotionalUsdt: config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null,
+            okxLiveMarginReserveRatio: config.okxLiveMarginReserveRatio ?? 0.2
         },
         state: {
             currentPositions: state.currentPositions.map((p: LegacyPositionAdapter) => {

@@ -201,6 +201,10 @@ export type EngineConfig = Readonly<{
   okxLiveMaxAccountNotionalUsdt: number | null;
   /** Live signed submit guard: max add-on count per symbol (null if not explicitly configured). */
   okxLiveMaxAddonCount: number | null;
+  /** Emergency fail-safe max order notional in USDT (optional; not primary sizing authority). */
+  okxLiveEmergencyMaxOrderNotionalUsdt: number | null;
+  /** Fraction of available balance reserved (not used for margin). Env: `OKX_LIVE_MARGIN_RESERVE_RATIO`. */
+  okxLiveMarginReserveRatio: number;
   /** Whether to use static cap or dynamic balance-based cap (default true). */
   okxLiveStaticNotionalCapEnabled: boolean;
   /** Fraction of available balance to use for dynamic capping (default 0.95). */

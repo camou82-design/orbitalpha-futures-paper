@@ -65,6 +65,8 @@ const mockConfig = {
   okxLiveMaxSymbolNotionalUsdt: null,
   okxLiveMaxAccountNotionalUsdt: null,
   okxLiveMaxAddonCount: null,
+  okxLiveEmergencyMaxOrderNotionalUsdt: null,
+  okxLiveMarginReserveRatio: 0.2,
   okxLiveStaticNotionalCapEnabled: true,
   okxLiveUsableBalanceRatio: 0.95,
   okxMomentumIocSlippagePct: 0.0003,

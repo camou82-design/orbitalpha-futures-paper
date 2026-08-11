@@ -262,6 +262,20 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     return n;
   })();
 
+  const okxLiveEmergencyMaxOrderNotionalUsdt = (() => {
+    const raw = env.OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT;
+    if (raw === undefined || raw.trim() === "") return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return Math.min(1_000_000, n);
+  })();
+
+  const okxLiveMarginReserveRatio = (() => {
+    const n = parseNumber(env.OKX_LIVE_MARGIN_RESERVE_RATIO, 0.2);
+    if (!Number.isFinite(n) || n < 0) return 0.2;
+    return Math.min(0.9, n);
+  })();
+
   const okxLiveStaticNotionalCapEnabled = parseBool(env.OKX_LIVE_STATIC_NOTIONAL_CAP_ENABLED, true);
   const okxLiveUsableBalanceRatio = (() => {
     const n = parseNumber(env.OKX_LIVE_USABLE_BALANCE_RATIO, 0.95);
@@ -356,6 +370,8 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     okxLiveMaxSymbolNotionalUsdt,
     okxLiveMaxAccountNotionalUsdt,
     okxLiveMaxAddonCount,
+    okxLiveEmergencyMaxOrderNotionalUsdt,
+    okxLiveMarginReserveRatio,
     okxLiveStaticNotionalCapEnabled,
     okxLiveUsableBalanceRatio,
     okxMomentumIocSlippagePct,

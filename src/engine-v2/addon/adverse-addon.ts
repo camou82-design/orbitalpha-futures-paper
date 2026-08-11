@@ -251,12 +251,19 @@ export function evaluateConfirmedAdverseAddOn(
         return adverseWatch(base, "RANGE_MID_ADDON_FORBIDDEN", "PRICE_DISTANCE_NOT_MET");
     }
 
-    const accountEquityUsd = args.accountEquityUsd || (v2State.accountEquityKrw || 1_400_000) / 1400;
-    const symbolMaxNotional = accountEquityUsd * 0.8;
+    const accountEquityUsdRaw = args.accountEquityUsd;
+    if (typeof accountEquityUsdRaw !== "number" || !(accountEquityUsdRaw > 0)) {
+        return adverseWatch(base, "PROFIT_BUFFER_INSUFFICIENT", "EQUITY_NOT_READY", {
+            addonMaxNotionalUsdt: 0
+        });
+    }
+    const accountEquityUsd = accountEquityUsdRaw;
+    const symbolMaxNotional = accountEquityUsd * 1.0;
     const globalMaxNotional = accountEquityUsd * 1.5;
+    const maxAdverseAddonUsd = accountEquityUsd * 0.25;
+
     const currentSymbolNotionalUsd = args.currentSymbolNotionalUsd || 0;
     const currentGlobalNotionalUsd = args.currentGlobalNotionalUsd || currentSymbolNotionalUsd;
-    const maxAddonNotionalUsdt = args.maxAddonNotionalUsdt ?? 20;
 
     const remainingSymbolCap = Math.max(0, symbolMaxNotional - currentSymbolNotionalUsd);
     const remainingAccountCap = Math.max(0, globalMaxNotional - currentGlobalNotionalUsd);
@@ -272,7 +279,7 @@ export function evaluateConfirmedAdverseAddOn(
         });
     }
 
-    const policySize = maxAddonNotionalUsdt;
+    const policySize = maxAdverseAddonUsd;
     const sameSidePosition = side === "long" ? v2State.longPosition : v2State.shortPosition;
     const entryPrice = Number(sameSidePosition?.entryPrice ?? 0);
     const atrVal = Number(snapshot.atr || snapshot.volatilityProxyDiag || currentPrice * 0.005);
@@ -288,7 +295,7 @@ export function evaluateConfirmedAdverseAddOn(
 
     const requestedAddonNotionalUsdt = Math.min(
         policySize,
-        maxAddonNotionalUsdt,
+        maxAdverseAddonUsd,
         remainingSymbolCap,
         remainingAccountCap,
         riskProjection.riskBudgetAllowedNotional
