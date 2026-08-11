@@ -33,7 +33,8 @@ import {
   buildFalseManualBlockClearedProof,
   resolveBtcPositionManagementSuppressor,
   hasBotOwnershipEvidenceOnLedgerRow,
-  isPositiveExternalManualLifecycleRow
+  isPositiveExternalManualLifecycleRow,
+  buildOkxActualKeySetFromSync
 } from "../lib/position-reconcile-classification";
 import { buildPositionOpsSurface, engineMirrorStopPrice, engineMirrorTpPrice, regimeForSl, classifyOkxOpenOrderPurpose, countBlockingOkxOpenOrders, evaluateV2ReducePendingGuard } from "./position-ops-monitor";
 import type { PositionOpsSurface } from "./position-ops-monitor";
@@ -217,6 +218,33 @@ import {
   computeOkxReduceOrderUnits,
   validateOkxReduceOrderUnitInvariant
 } from "../engine-v2/live-account/reduce-order-units";
+import {
+  resolveV2CloseContractAuthority,
+  resolveV2ReduceContracts,
+  buildV2CloseContractAuthorityProof
+} from "../engine-v2/execution/close-contract-authority";
+import {
+  evaluateV2StopLossSubmitAuthority,
+  isV2StopPriceBreached,
+  hasValidV2StopPrice
+} from "../engine-v2/exit/stop-price-authority";
+import {
+  evaluateV2ExitSovereigntyGuard,
+  buildV2ExitSovereigntyGuardProof
+} from "../engine-v2/exit/exit-sovereignty-guard";
+import {
+  attributePositionSizeMutation,
+  buildBotPositionSizeMutationAttributionProof,
+  buildFalseManualLatchRecoveredProof
+} from "../engine-v2/position/bot-size-mutation-attribution";
+import {
+  evaluateStaleLedgerExecutionSuppression,
+  buildStaleLedgerExecutionSuppressedProof
+} from "../engine-v2/position/stale-ledger-execution-guard";
+import {
+  evaluatePositionProtectionState,
+  buildPositionProtectionStateProof
+} from "../engine-v2/execution/protective-order-state";
 
 /** RANGE 1m edge reversal candle ?덇굅??寃뚯씠????V2 ?ㅽ뻾 遊됲닾媛 ENTER쨌臾댄븯?쒕툝濡앹씪 ??理쒖쥌 ?ㅽ뻾 寃쎈줈瑜?留됱? ?딅룄濡?遺꾨━?쒕떎. */
 const LEGACY_RANGE_EDGE_NO_REVERSAL_REJECTS = new Set<string>([
@@ -2215,6 +2243,35 @@ export class PaperEngine {
         }
 
         if (!r.reduce_only_protective_found && ledgerPos) {
+          const instSizing = this.instrumentCache.get(r.inst_id) as { tickSz?: number } | undefined;
+          const tickSz = instSizing?.tickSz != null ? Number(instSizing.tickSz) : 0;
+          const protectionState = evaluatePositionProtectionState({
+            instId: r.inst_id,
+            positionSide: r.side,
+            pending: this.cachedOpsPending ?? [],
+            algos: this.cachedOpsAlgos ?? [],
+            tpRequired: r.tp_required_for_exchange_protection,
+            ledger: ledgerPos,
+            tickSz: tickSz > 0 ? tickSz : undefined,
+            requiredStopPx: r.ledger_stop_px ?? r.initial_stop_px_engine_mirror,
+            requiredContracts: ledgerPos.okxContracts ?? null
+          });
+          this.logger.info(
+            "POSITION_PROTECTION_STATE_PROOF",
+            buildPositionProtectionStateProof({
+              symbol: r.symbol,
+              side: r.side,
+              inst_id: r.inst_id,
+              reduce_only_protective_found: protectionState.reduceOnlyProtectiveFound,
+              matching_protective_pending_count: protectionState.matchingProtectivePendingCount,
+              consistency_check: protectionState.consistencyCheck,
+              pre_scan_fault: protectionState.preScanFault,
+              canonical_protective_sl_found: protectionState.canonicalProtectiveSlFound
+            })
+          );
+          if (protectionState.reduceOnlyProtectiveFound) {
+            continue;
+          }
           this.logger.info("PROTECTIVE_STOP_MISSING_PROOF", {
             ts: nowTs,
             symbol: r.symbol,
@@ -2716,6 +2773,56 @@ export class PaperEngine {
     }
 
     const hardBlock = isHardBlockReconcileMismatch(mismatchType) || (contractMismatch && ledgerHasContracts);
+
+    if (contractMismatch && ledgerHasContracts && remote.contracts >= 0) {
+      const mutation = attributePositionSizeMutation({
+        beforeContracts: open.okxContracts ?? 0,
+        afterContracts: remote.contracts,
+        botOrderEvidenceFound:
+          open.isV2Authority === true ||
+          String(open.authoritySourceAtEntry ?? open.authority ?? "")
+            .trim()
+            .toLowerCase() === "v2" ||
+          String(open.exchangeClOrdId ?? "").startsWith("p"),
+        matchingBotReduceContracts: Math.abs((open.okxContracts ?? 0) - remote.contracts),
+        ledger: open,
+        manualEvidenceIndependent: open.manualLifecycleEvidenceIndependent === true
+      });
+      this.logger.info(
+        "BOT_POSITION_SIZE_MUTATION_ATTRIBUTION_PROOF",
+        buildBotPositionSizeMutationAttributionProof({
+          symbol: open.symbol,
+          side: open.side,
+          before_contracts: open.okxContracts ?? null,
+          after_contracts: remote.contracts,
+          delta_contracts: mutation.deltaContracts,
+          bot_order_evidence_found: mutation.botOrderEvidenceFound,
+          matching_bot_reduce_contracts: mutation.matchingBotReduceContracts,
+          manual_evidence_independent: mutation.manualEvidenceIndependent,
+          attribution: mutation.attribution
+        })
+      );
+      if (mutation.attribution === "BOT" && open.okxContracts! > remote.contracts) {
+        this.syncOpenLedgerFromRemoteAuthority(open, remote);
+        open.reconcileState = "MATCHED";
+        open.lastCheckedAt = nowTs;
+        if (open.manualOwnershipLatch === true && !mutation.manualEvidenceIndependent) {
+          clearManualOwnershipLatchFields(open);
+          this.logger.info(
+            "FALSE_MANUAL_LATCH_RECOVERED_PROOF",
+            buildFalseManualLatchRecoveredProof({
+              symbol: open.symbol,
+              side: open.side,
+              reason: "bot_reduce_reconciled_to_actual",
+              before_contracts: mutation.deltaContracts + remote.contracts,
+              after_contracts: remote.contracts
+            })
+          );
+        }
+        this.logPositionUnitInvariant(open);
+        return { ledgerModified: true, mismatchType: "MATCHED", blocked: false };
+      }
+    }
 
     if (hardBlock || (contractMismatch && ledgerHasContracts)) {
       this.logger.warn("V2_POSITION_RECONCILE_MISMATCH_BLOCK_PROOF", {
@@ -7231,6 +7338,36 @@ export class PaperEngine {
     return remoteMap.get(`${open.symbol}:${open.side}`) ?? null;
   }
 
+  private resolveOkxActualContractsForOpen(open: PaperOpenPositionRecord): Readonly<{
+    contracts: number | null;
+    available: boolean;
+  }> {
+    if (!this.okxSignedRestReady || !Array.isArray(this.lastLivePositionsPayload)) {
+      return { contracts: null, available: false };
+    }
+    for (const row of this.lastLivePositionsPayload) {
+      const hit = okxSwapRowToLedgerKey(row as Record<string, unknown>);
+      if (!hit || hit.symbol !== String(open.symbol) || hit.side !== open.side) continue;
+      const inst = this.instrumentCache.get(hit.instId);
+      const remote = this.buildOkxRemotePositionAuthority(row as Record<string, unknown>, hit, inst);
+      return { contracts: remote.contracts, available: true };
+    }
+    return { contracts: null, available: true };
+  }
+
+  private buildCloseContractContext(open: PaperOpenPositionRecord): Readonly<{
+    okxActualContracts: number | null;
+    okxActualAvailable: boolean;
+    isV2Authority: boolean;
+  }> {
+    const actual = this.resolveOkxActualContractsForOpen(open);
+    return {
+      okxActualContracts: actual.contracts,
+      okxActualAvailable: actual.available,
+      isV2Authority: this.isV2AuthorityPosition(open)
+    };
+  }
+
   /** true ???꾨웾 泥?궛???대쾲 ?깆뿉???섏? ?딄퀬 ?좎?(?μ꽭/?덉씤 ?꾪솚??. ?먯젅쨌由ъ뒪???쒕룄 ?깆? ?몄텧遺?먯꽌 蹂꾨룄 ?덉슜. */
   private shouldDeferRegimeLaneTransitionClose(
     open: PaperOpenPositionRecord,
@@ -7793,6 +7930,10 @@ export class PaperEngine {
     isPartial?: boolean;
     /** Explicit contract count for accurate reduction (0.43, 0.12 etc) */
     okxContracts?: number;
+    /** Authoritative OKX actual contracts when available (preferred over ledger). */
+    okxActualContracts?: number;
+    okxActualAvailable?: boolean;
+    fullClose?: boolean;
     /** When set, records bot execution attribution on the open position. */
     open?: PaperOpenPositionRecord;
   }): Promise<{
@@ -7829,10 +7970,73 @@ export class PaperEngine {
     let finalSzStr = "0";
 
     if (inst) {
-      // Use explicit okxContracts if provided, fallback to estimation from sizeUsd
-      let sourceContracts = input.okxContracts;
+      const isV2Authority = input.isV2Authority === true;
+      const authority = resolveV2CloseContractAuthority({
+        symbol: input.symbol,
+        side: input.side,
+        closeKind: input.isPartial ? "partial" : "full",
+        okxActualContracts: input.okxActualContracts ?? null,
+        okxActualAvailable:
+          input.okxActualAvailable === true ||
+          (input.okxActualContracts != null && input.okxActualContracts > 0),
+        ledgerContracts: input.okxContracts ?? input.open?.okxContracts ?? null,
+        liveContracts: input.okxContracts ?? null,
+        sizeUsd: input.sizeUsd,
+        isV2Authority,
+        fullClose: input.fullClose ?? !input.isPartial
+      });
+
+      this.logger.info(
+        "V2_CLOSE_CONTRACT_AUTHORITY_PROOF",
+        buildV2CloseContractAuthorityProof({
+          symbol: input.symbol,
+          side: input.side,
+          close_kind: input.isPartial ? "partial" : "full",
+          okx_actual_contracts: authority.okxActualContracts,
+          ledger_contracts: authority.ledgerContracts,
+          size_usd: authority.sizeUsd,
+          selected_contracts: authority.selectedContracts,
+          contract_authority_source: authority.contractAuthoritySource,
+          fallback_used: authority.fallbackUsed,
+          full_close: input.fullClose ?? !input.isPartial,
+          submit_allowed: authority.submitAllowed,
+          block_reason: authority.blockReason
+        })
+      );
+
+      if (isV2Authority && !authority.submitAllowed) {
+        this.logger.warn("V2_CLOSE_CONTRACT_AUTHORITY_BLOCKED", {
+          symbol: input.symbol,
+          side: input.side,
+          reason: input.reason,
+          flowId: input.flowId,
+          block_reason: authority.blockReason
+        });
+        return {
+          ok: false,
+          errorMessage: authority.blockReason ?? "v2_contract_authority_blocked"
+        };
+      }
+
+      let sourceContracts = authority.submitAllowed ? authority.selectedContracts : input.okxContracts;
       if (sourceContracts == null || sourceContracts <= 0) {
-        sourceContracts = (input.sizeUsd / Math.max(1e-9, input.lastPrice)) / (inst.ctVal || 1);
+        if (!isV2Authority) {
+          sourceContracts = (input.sizeUsd / Math.max(1e-9, input.lastPrice)) / (inst.ctVal || 1);
+        } else {
+          return {
+            ok: false,
+            errorMessage: "NO_POSITION_TO_CLOSE"
+          };
+        }
+      }
+
+      if (
+        isV2Authority &&
+        authority.okxActualContracts != null &&
+        authority.okxActualContracts > 0 &&
+        sourceContracts > authority.okxActualContracts + 1e-8
+      ) {
+        sourceContracts = authority.okxActualContracts;
       }
 
       const norm = this.normalizeOkxReduceOrderSize({
@@ -10604,6 +10808,13 @@ export class PaperEngine {
     // ------------------------------------
 
     let remaining: PaperOpenPositionRecord[] = [];
+    const reconcileSyncForClose = Array.isArray(this.lastLivePositionsPayload)
+      ? buildLedgerOkxPositionSyncSnapshot(opens, this.lastLivePositionsPayload, this.instrumentCache)
+      : null;
+    const okxActualKeysForClose =
+      reconcileSyncForClose != null ? buildOkxActualKeySetFromSync(reconcileSyncForClose) : new Set<string>();
+    const authoritativeOkxPositionsReady =
+      this.okxSignedRestReady === true && Array.isArray(this.lastLivePositionsPayload);
     const stopBackfillSaveExpectations: Array<{
       flowId: string;
       symbol: string;
@@ -10738,6 +10949,30 @@ export class PaperEngine {
       }
 
       if (openRaw.status !== "open") {
+        continue;
+      }
+
+      const staleGuard = evaluateStaleLedgerExecutionSuppression({
+        symbol: String(open.symbol),
+        side: open.side as "long" | "short",
+        authoritativePositionsReady: authoritativeOkxPositionsReady,
+        actualKeyExists: okxActualKeysForClose.has(symSideKey),
+        ledgerKeyExists: true
+      });
+      if (staleGuard.suppressed) {
+        this.logger.info(
+          "STALE_LEDGER_EXECUTION_SUPPRESSED_PROOF",
+          buildStaleLedgerExecutionSuppressedProof({
+            symbol: open.symbol,
+            side: open.side,
+            authoritative_positions_ready: authoritativeOkxPositionsReady,
+            actual_key_exists: okxActualKeysForClose.has(symSideKey),
+            ledger_key_exists: true,
+            reconcile_state: staleGuard.reconcileState,
+            suppressed_actions: staleGuard.suppressedActions
+          })
+        );
+        remaining.push(open);
         continue;
       }
 
@@ -10975,11 +11210,15 @@ export class PaperEngine {
       // Goal: Priority execution with strict fill verification and manual position protection.
       let isSlTriggered = false;
       if (snap && m && closePrice != null) {
-        if (typeof open.stopPrice === "number" && Number.isFinite(open.stopPrice)) {
-          isSlTriggered = open.side === "long" ? closePrice <= open.stopPrice : closePrice >= open.stopPrice;
-        } else {
-          isSlTriggered = m.pnlPctNet <= stopLossPctForRegime(slRegime);
-        }
+        const stopAuthority = evaluateV2StopLossSubmitAuthority({
+          side: open.side,
+          mark: closePrice,
+          stopPrice: open.stopPrice,
+          pnlPctNet: m.pnlPctNet,
+          slRegime,
+          isV2Authority: this.isV2AuthorityPosition(open)
+        });
+        isSlTriggered = stopAuthority.stopSubmitAllowed;
 
         if (isSlTriggered) {
           // EXCLUDE: symbolExternalManualBlocked, EXTERNAL_MANUAL_POSITION, OPERATOR_MANAGED
@@ -11009,16 +11248,22 @@ export class PaperEngine {
             });
 
             this.logger.info("STOP_LOSS_CLOSE_ORDER_SUBMIT", { symbol: open.symbol, flowId });
+            const closeContractCtx = this.buildCloseContractContext(open);
             const closeResult = await this.dispatchOkxClose({
               symbol: open.symbol,
               side: open.side,
               sizeUsd: open.sizeUsd,
               okxContracts: open.okxContracts ?? undefined,
+              okxActualContracts: closeContractCtx.okxActualContracts ?? undefined,
+              okxActualAvailable: closeContractCtx.okxActualAvailable,
+              fullClose: true,
               appliedLeverage: Math.max(1, open.leverage ?? 1),
               lastPrice: closePrice,
               flowId,
               reason: `stop_loss_priority_close`,
-              isStopLoss: true
+              isStopLoss: true,
+              isV2Authority: closeContractCtx.isV2Authority,
+              open
             });
 
             if (closeResult && closeResult.ok) {
@@ -11483,22 +11728,28 @@ export class PaperEngine {
           });
         }
 
+        const closeContractCtxHard = this.buildCloseContractContext(open);
         const closeSubmit = await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
-          okxContracts: open.okxContracts ?? undefined,
+          okxContracts: closeContractCtxHard.okxActualContracts ?? open.okxContracts ?? undefined,
+          okxActualContracts: closeContractCtxHard.okxActualContracts ?? undefined,
+          okxActualAvailable: closeContractCtxHard.okxActualAvailable,
+          fullClose: true,
           appliedLeverage: Math.max(1, open.leverage ?? 1),
           lastPrice: closePrice,
           flowId,
           reason: `${cr}_close`,
           isStopLoss: isSlTriggered,
           isTakeProfit: isTpTriggered,
-          isTrailingStop: isTrailingTriggered
+          isTrailingStop: isTrailingTriggered,
+          isV2Authority: closeContractCtxHard.isV2Authority,
+          open
         });
 
         const fin = await this.finalizeFullClose({
-          open, closeSubmit, closedRow, cr, closeSource: confirmedCloseSource, regimeNow, envelope: null as any, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
+          open, closeSubmit, closedRow, cr, closeSource: confirmedCloseSource, regimeNow, envelope: null as any, flowId, requestedContracts: closeContractCtxHard.okxActualContracts ?? open.okxContracts ?? 0, requestedPrice: closePrice
         });
         if (!fin.ledgerPruneAllowed) {
           remaining.push(open);
@@ -11792,11 +12043,15 @@ export class PaperEngine {
         const isStopLossClose = cr === "stop_loss" || String(cr).includes("stop_loss");
         const isTakeProfitClose = cr === "take_profit" || String(cr).includes("take_profit");
         const isTrailingClose = cr === "trailing_stop" || String(cr).includes("trail");
+        const closeContractCtxV2 = this.buildCloseContractContext(open);
         const closeSubmit = await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
-          okxContracts: open.okxContracts ?? undefined,
+          okxContracts: closeContractCtxV2.okxActualContracts ?? open.okxContracts ?? undefined,
+          okxActualContracts: closeContractCtxV2.okxActualContracts ?? undefined,
+          okxActualAvailable: closeContractCtxV2.okxActualAvailable,
+          fullClose: true,
           appliedLeverage: Math.max(1, open.leverage ?? 1),
           lastPrice: closePrice,
           flowId,
@@ -12933,33 +13188,95 @@ export class PaperEngine {
       // --- Adopted / Close-Only Policy Enforcement ---
       if (open.reconcileState === "ADOPTED" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
         const policyAction = regimeExitSnap.action;
-        
+        const stopAuthorityForGuard = evaluateV2StopLossSubmitAuthority({
+          side: open.side,
+          mark: closePrice,
+          stopPrice: open.stopPrice,
+          pnlPctNet: m.pnlPctNet,
+          slRegime,
+          isV2Authority: isV2Pos
+        });
+
         if (policyAction === "close") {
           const policyReason = regimeExitSnap.reason;
-          this.logger.info("ADOPTED_POLICY_EXIT_OVERRIDE_PROOF", {
+          const sovereignty = evaluateV2ExitSovereigntyGuard({
             symbol: open.symbol,
             side: open.side,
-            policy_reason: policyReason,
-            original_executor_action: exitEval.action,
-            action: "override_to_close"
+            isV2AuthorityPosition: isV2Pos,
+            v2ExitAuthorityAvailable: v2ExitAuthority != null,
+            v2ShouldExit: v2ExitAuthority?.shouldExit === true,
+            v2ExitAction: v2ExitAuthority?.exitAction ?? null,
+            paperCandidateAction: "close",
+            paperCandidateReason: policyReason ?? null,
+            actualStopBreached: stopAuthorityForGuard.actualStopBreached
           });
-          exitEval = {
-            ...exitEval,
-            action: "close",
-            reason: policyReason as any
-          };
+          this.logger.info(
+            "V2_EXIT_SOVEREIGNTY_GUARD_PROOF",
+            buildV2ExitSovereigntyGuardProof({
+              symbol: open.symbol,
+              side: open.side,
+              v2_should_exit: v2ExitAuthority?.shouldExit ?? false,
+              v2_exit_action: v2ExitAuthority?.exitAction ?? null,
+              paper_candidate_action: "close",
+              paper_candidate_reason: policyReason ?? null,
+              actual_stop_breached: stopAuthorityForGuard.actualStopBreached,
+              override_allowed: sovereignty.overrideAllowed,
+              override_block_reason: sovereignty.overrideBlockReason
+            })
+          );
+          if (sovereignty.overrideAllowed) {
+            this.logger.info("ADOPTED_POLICY_EXIT_OVERRIDE_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              policy_reason: policyReason,
+              original_executor_action: exitEval.action,
+              action: "override_to_close"
+            });
+            exitEval = {
+              ...exitEval,
+              action: "close",
+              reason: policyReason as any
+            };
+          }
         } else if (partialPol.shouldExitPartial && exitEval.action === "hold") {
-          this.logger.info("ADOPTED_POLICY_PARTIAL_OVERRIDE_PROOF", {
+          const sovereignty = evaluateV2ExitSovereigntyGuard({
             symbol: open.symbol,
             side: open.side,
-            partial_reason: partialPol.reason,
-            action: "override_to_partial"
+            isV2AuthorityPosition: isV2Pos,
+            v2ExitAuthorityAvailable: v2ExitAuthority != null,
+            v2ShouldExit: v2ExitAuthority?.shouldExit === true,
+            v2ExitAction: v2ExitAuthority?.exitAction ?? null,
+            paperCandidateAction: "partial_close",
+            paperCandidateReason: partialPol.reason ?? null,
+            actualStopBreached: stopAuthorityForGuard.actualStopBreached
           });
-          exitEval = {
-            ...exitEval,
-            action: "partial_close",
-            reason: partialPol.reason as any
-          };
+          this.logger.info(
+            "V2_EXIT_SOVEREIGNTY_GUARD_PROOF",
+            buildV2ExitSovereigntyGuardProof({
+              symbol: open.symbol,
+              side: open.side,
+              v2_should_exit: v2ExitAuthority?.shouldExit ?? false,
+              v2_exit_action: v2ExitAuthority?.exitAction ?? null,
+              paper_candidate_action: "partial_close",
+              paper_candidate_reason: partialPol.reason ?? null,
+              actual_stop_breached: stopAuthorityForGuard.actualStopBreached,
+              override_allowed: sovereignty.overrideAllowed,
+              override_block_reason: sovereignty.overrideBlockReason
+            })
+          );
+          if (sovereignty.overrideAllowed) {
+            this.logger.info("ADOPTED_POLICY_PARTIAL_OVERRIDE_PROOF", {
+              symbol: open.symbol,
+              side: open.side,
+              partial_reason: partialPol.reason,
+              action: "override_to_partial"
+            });
+            exitEval = {
+              ...exitEval,
+              action: "partial_close",
+              reason: partialPol.reason as any
+            };
+          }
         }
       }
 
@@ -13701,6 +14018,43 @@ export class PaperEngine {
 
       if (exitEval.action === "close") {
         const cr = exitEval.reason as PaperClosedPositionRecord["closeReason"];
+        const stopAuthorityForClose = evaluateV2StopLossSubmitAuthority({
+          side: open.side,
+          mark: closePrice,
+          stopPrice: open.stopPrice,
+          pnlPctNet: m.pnlPctNet,
+          slRegime,
+          isV2Authority: isV2Pos
+        });
+        const closeSovereignty = evaluateV2ExitSovereigntyGuard({
+          symbol: open.symbol,
+          side: open.side,
+          isV2AuthorityPosition: isV2Pos,
+          v2ExitAuthorityAvailable: v2ExitAuthority != null,
+          v2ShouldExit: v2ExitAuthority?.shouldExit === true,
+          v2ExitAction: v2ExitAuthority?.exitAction ?? null,
+          paperCandidateAction: "close",
+          paperCandidateReason: cr ?? null,
+          actualStopBreached: stopAuthorityForClose.actualStopBreached
+        });
+        this.logger.info(
+          "V2_EXIT_SOVEREIGNTY_GUARD_PROOF",
+          buildV2ExitSovereigntyGuardProof({
+            symbol: open.symbol,
+            side: open.side,
+            v2_should_exit: v2ExitAuthority?.shouldExit ?? false,
+            v2_exit_action: v2ExitAuthority?.exitAction ?? null,
+            paper_candidate_action: "close",
+            paper_candidate_reason: cr ?? null,
+            actual_stop_breached: stopAuthorityForClose.actualStopBreached,
+            override_allowed: closeSovereignty.overrideAllowed,
+            override_block_reason: closeSovereignty.overrideBlockReason
+          })
+        );
+        if (!closeSovereignty.overrideAllowed) {
+          remaining.push(posTrail);
+          continue;
+        }
         if (this.shouldDeferRegimeLaneTransitionClose(open, closedAt, cr, postPartialProtectActive)) {
           this.logger.info("ENTRY_POST_OPEN_REGIME_LANE_PROTECT_ACTIVE", {
             symbol: open.symbol,
@@ -13737,19 +14091,25 @@ export class PaperEngine {
         const closedRow = toClosed(cr, m, open.sizeUsd);
         handleV2ExitAuthorityProof("exit", cr);
         handleV2PartialAuthorityProof("superseded_by_exit", null);
+        const closeContractCtx = this.buildCloseContractContext(open);
         const exitSubmit = await this.dispatchOkxClose({
           symbol: open.symbol,
           side: open.side,
           sizeUsd: open.sizeUsd,
+          okxContracts: closeContractCtx.okxActualContracts ?? open.okxContracts ?? undefined,
+          okxActualContracts: closeContractCtx.okxActualContracts ?? undefined,
+          okxActualAvailable: closeContractCtx.okxActualAvailable,
+          fullClose: true,
           appliedLeverage: Math.max(1, open.leverage ?? 1),
           lastPrice: closePrice,
           flowId,
           reason: `executor_${cr}`,
-          isV2Authority: true
+          isV2Authority: closeContractCtx.isV2Authority,
+          open
         });
 
         const fin = await this.finalizeFullClose({
-          open, closeSubmit: exitSubmit, closedRow, cr, closeSource: String(closedRow.closeSource ?? "executor_close_action"), regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
+          open, closeSubmit: exitSubmit, closedRow, cr, closeSource: String(closedRow.closeSource ?? "executor_close_action"), regimeNow, envelope, flowId, requestedContracts: closeContractCtx.okxActualContracts ?? open.okxContracts ?? 0, requestedPrice: closePrice
         });
         if (!fin.ledgerPruneAllowed) {
           remaining.push(open);

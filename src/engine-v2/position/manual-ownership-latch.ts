@@ -4,6 +4,7 @@ import {
     MANUAL_AVG_PX_MISMATCH_TOLERANCE_RATIO,
     MANUAL_CONTRACT_MISMATCH_TOLERANCE_RATIO
 } from "./ownership-resolver";
+import { isBotSizeReconcilePendingSyncStatus } from "../../lib/position-reconcile-classification";
 
 export type ManualLatchStrength = "STRONG" | "WEAK" | "LEGACY";
 
@@ -399,15 +400,20 @@ export function evaluateManualOwnershipLatchTrigger(input: Readonly<{
         hasBotOrderAttribution(ledger) &&
         paperContracts != null &&
         Number.isFinite(paperContracts) &&
-        okxContracts > 0 &&
-        syncStatus === "ALIGNED"
+        okxContracts > 0
     ) {
-        const contractDiff = Math.abs(paperContracts - okxContracts);
+        const contractDiffSigned = okxContracts - paperContracts;
         const contractTol = Math.max(
             1e-8,
             MANUAL_CONTRACT_MISMATCH_TOLERANCE_RATIO * okxContracts
         );
-        if (contractDiff > contractTol) {
+        if (contractDiffSigned > contractTol) {
+            if (
+                isBotAttributedTransientMismatch(ledger, nowMs) ||
+                isBotSizeReconcilePendingSyncStatus(syncStatus)
+            ) {
+                return { shouldLatch: false, source: null, strength: null, reason: "BOT_ATTRIBUTED_TRANSIENT_MISMATCH" };
+            }
             return {
                 shouldLatch: true,
                 source: "CONFIRMED_MANUAL_SIZE_CHANGE",
@@ -455,18 +461,11 @@ export function evaluatePoisonedStrongManualLatchRecovery(input: Readonly<{
     if (source === "EXPLICIT_EXTERNAL_FILL") {
         return { shouldClear: false, reason: null };
     }
-    if (source === "CONFIRMED_MANUAL_SIZE_CHANGE") {
-        return { shouldClear: false, reason: null };
-    }
     if (isIndependentExternalManualLifecycle(input.ledger)) {
         return { shouldClear: false, reason: null };
     }
 
     const reconcileState = String(input.reconcileState ?? input.ledger.reconcileState ?? "");
-    if (reconcileState !== "MATCHED") {
-        return { shouldClear: false, reason: null };
-    }
-
     const ledgerSide = input.ledgerSide ?? input.ledger.side ?? null;
     const okxSide = input.okxSide ?? ledgerSide;
     if (ledgerSide != null && okxSide != null && ledgerSide !== okxSide) {
@@ -474,6 +473,33 @@ export function evaluatePoisonedStrongManualLatchRecovery(input: Readonly<{
     }
 
     const paperContracts = input.ledgerPaperContracts ?? input.ledger.okxContracts ?? null;
+    const botAttributed = hasBotOrderAttribution(input.ledger);
+    const contractDeltaExplainedByBot =
+        input.okxActualPositionExists === true &&
+        input.okxActualContracts > 0 &&
+        paperContracts != null &&
+        Number.isFinite(paperContracts) &&
+        paperContracts > input.okxActualContracts &&
+        botAttributed;
+
+    if (source === "CONFIRMED_MANUAL_SIZE_CHANGE") {
+        if (
+            botAttributed &&
+            !hasIndependentManualLifecycleEvidence(input.ledger) &&
+            (contractDeltaExplainedByBot ||
+                reconcileState === "MATCHED" ||
+                String(input.syncStatus ?? "") === "ALIGNED" ||
+                String(input.syncStatus ?? "") === "BOT_POSITION_SIZE_RECONCILE_PENDING")
+        ) {
+            return { shouldClear: true, reason: "confirmed_manual_size_change_bot_attribution_recovery" };
+        }
+        return { shouldClear: false, reason: null };
+    }
+
+    if (reconcileState !== "MATCHED") {
+        return { shouldClear: false, reason: null };
+    }
+
     const aligned =
         input.okxActualPositionExists === true &&
         input.okxActualContracts > 0 &&
@@ -481,7 +507,7 @@ export function evaluatePoisonedStrongManualLatchRecovery(input: Readonly<{
         Number.isFinite(paperContracts) &&
         contractsAligned(paperContracts, input.okxActualContracts);
 
-    if (!aligned || !hasBotOrderAttribution(input.ledger)) {
+    if (!aligned || !botAttributed) {
         return { shouldClear: false, reason: null };
     }
 

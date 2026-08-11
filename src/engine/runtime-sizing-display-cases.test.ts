@@ -20,8 +20,8 @@ function assertIncludes(source: string, needle: string, label: string): void {
 }
 
 function runCases(): void {
-  const paperEngine = readFileSync(join(__dirname, "paper-engine.ts"), "utf8");
-  const indexTs = readFileSync(join(__dirname, "../engine-v2/index.ts"), "utf8");
+  const paperEngine = readFileSync(join(__dirname, "../../src/engine/paper-engine.ts"), "utf8");
+  const indexTs = readFileSync(join(__dirname, "../../src/engine-v2/index.ts"), "utf8");
 
   assertIncludes(paperEngine, "RISK_PER_TRADE_PCT", "paper-engine imports risk pct");
   assertIncludes(paperEngine, "MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE", "paper-engine imports initial cap");

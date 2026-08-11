@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { evaluatePositionProtectionState } from "../engine-v2/execution/protective-order-state";
 import {
   resolveProtectiveExistingAlgoLedgerAdoption
 } from "./paper-engine";
@@ -105,7 +106,7 @@ function runCases(): void {
   assertFalse(caseD.ledgerRepairNeeded, "CASE D idempotent no repair");
 
   // CASE E — BTC suppressor + ensureProtectiveStopOrder adoption proof still present
-  const source = readFileSync(join(__dirname, "paper-engine.ts"), "utf8");
+  const source = readFileSync(join(__dirname, "../../src/engine/paper-engine.ts"), "utf8");
   assertTrue(
     source.includes("isBtcPositionManagementBlocked()") &&
       source.includes("V2_PROTECTIVE_EXISTING_ALGO_ADOPTED_PROOF") &&
@@ -118,9 +119,39 @@ function runCases(): void {
     "CASE E ledger repair sets modified for persistence"
   );
 
+  // CASE H — canonical BTC protective algo → found=true, consistency PASS
+  const caseH = evaluatePositionProtectionState({
+    instId: "BTC-USDT-SWAP",
+    positionSide: "long",
+    pending: [],
+    algos: [
+      {
+        instId: "BTC-USDT-SWAP",
+        posSide: "long",
+        side: "sell",
+        reduceOnly: "true",
+        slTriggerPx: "64013.2",
+        algoId: SL
+      }
+    ],
+    tpRequired: false,
+    ledger: {
+      symbol: "BTCUSDT",
+      side: "long",
+      stopPrice: 64013.2,
+      okxContracts: 0.19
+    } as any,
+    tickSz: 0.1,
+    requiredStopPx: 64013.2,
+    requiredContracts: 0.19
+  });
+  assertTrue(caseH.canonicalProtectiveSlFound, "CASE H canonical SL");
+  assertTrue(caseH.reduceOnlyProtectiveFound, "CASE H protective found");
+  assertEq(caseH.consistencyCheck, "PASS", "CASE H consistency PASS");
+
   console.info(JSON.stringify({
     event: "PROTECTIVE_EXISTING_ALGO_ADOPTION_CASES_PASS",
-    cases: ["A", "B", "C", "D", "E"]
+    cases: ["A", "B", "C", "D", "E", "H"]
   }));
 }
 

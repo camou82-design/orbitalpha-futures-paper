@@ -20,7 +20,7 @@ function assertTrue(value: boolean, label: string): void {
 }
 
 function loadProcessPaperSymbolEntriesBody(): string {
-  const source = readFileSync(join(__dirname, "paper-engine.ts"), "utf8");
+  const source = readFileSync(join(__dirname, "../../src/engine/paper-engine.ts"), "utf8");
   const fnStart = source.indexOf("private async processPaperSymbolEntries(input: Readonly<{");
   if (fnStart < 0) throw new Error("processPaperSymbolEntries not found");
   return source.slice(fnStart);
@@ -113,7 +113,7 @@ function runCases(): void {
   );
 
   assertTrue(
-    readFileSync(join(__dirname, "paper-engine.ts"), "utf8").includes("PENDING_ENTRY_RECONCILE_CYCLE_PROOF"),
+    readFileSync(join(__dirname, "../../src/engine/paper-engine.ts"), "utf8").includes("PENDING_ENTRY_RECONCILE_CYCLE_PROOF"),
     "reconcile helper emits cycle proof"
   );
 

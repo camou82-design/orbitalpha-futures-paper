@@ -437,17 +437,46 @@ export function findProtectiveHintsForInst(
     return Number.isFinite(n) && n > 0 ? n : null;
   };
 
+  let canonicalProtectiveSlFound = false;
+
   const consider = (o: Record<string, unknown>, prefix: "algo" | "pend") => {
     if (!instIdMatchesRow(instId, String(o.instId ?? ""))) return;
     if (!orderMatchesPositionSide(o, positionSide)) return;
     const classified = classifyOkxOpenOrderPurpose(o, options?.ledger ?? null);
-    if (!classified.isBotManagedProtection && !orderLooksReduceOnlyProtective(o)) return;
+    const reduceOnly = o.reduceOnly === "true" || o.reduceOnly === true;
+    const isCanonical =
+      classified.isBotManagedProtection === true ||
+      (reduceOnly && orderLooksReduceOnlyProtective(o));
+    if (!isCanonical) return;
     hints.push(`${prefix}:${stringifyHints(o)}`);
     matchingProtectiveOrderCount += 1;
     const slPx = extractSlPx(o);
     const tpPx = extractTpPx(o);
     if (foundSlPrice == null && slPx != null) foundSlPrice = slPx;
     if (foundTpPrice == null && tpPx != null) foundTpPrice = tpPx;
+
+    const closeSideOk =
+      positionSide === "long"
+        ? String(o.side ?? "").toLowerCase() === "sell"
+        : String(o.side ?? "").toLowerCase() === "buy";
+    const reqStop = options?.requiredStopPx ?? null;
+    const tickSz = options?.tickSz ?? 0;
+    const priceMatch =
+      reqStop != null && slPx != null && tickSz > 0
+        ? protectiveStopPricesMatch(reqStop, slPx, tickSz)
+        : slPx != null;
+    if (
+      reduceOnly &&
+      closeSideOk &&
+      slPx != null &&
+      priceMatch &&
+      (classified.purpose === "protective-stop" ||
+        classified.purpose === "bot-managed-protection" ||
+        classified.purpose === "protective-purpose" ||
+        classified.matchedProtectiveAlgo != null)
+    ) {
+      canonicalProtectiveSlFound = true;
+    }
   };
 
   for (const o of algos) consider(o, "algo");
@@ -461,7 +490,9 @@ export function findProtectiveHintsForInst(
     reqStop != null && foundSlPrice != null && tickSz > 0
       ? protectiveStopPricesMatch(reqStop, foundSlPrice, tickSz)
       : foundSl;
-  protectionSatisfied = slPriceMatch && (!tpRequired || foundTp);
+  protectionSatisfied =
+    (canonicalProtectiveSlFound && (!tpRequired || foundTp)) ||
+    (slPriceMatch && (!tpRequired || foundTp));
 
   return {
     protectionSatisfied,
