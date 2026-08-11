@@ -950,6 +950,11 @@ export type PaperOpenPositionRecord = {
   manualOwnershipLatchAt?: number;
   manualOwnershipLatchSource?: string;
   manualOwnershipLatchStrength?: "STRONG" | "WEAK" | "LEGACY";
+  /** Provenance for STRONG manual lifecycle evidence — independent origin required for latch. */
+  manualLifecycleEvidenceOrigin?: string;
+  manualLifecycleEvidenceId?: string;
+  manualLifecycleEvidenceAt?: number;
+  manualLifecycleEvidenceIndependent?: boolean;
   /** First observation of OKX missing position while paper still open (transient zero guard). */
   okxZeroUnconfirmedSince?: number;
 

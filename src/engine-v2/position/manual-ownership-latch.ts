@@ -33,13 +33,28 @@ export const FORBIDDEN_LATCH_TRIGGER_REASONS = new Set([
     "paper_okx_avgpx_mismatch_transient"
 ]);
 
-function isExternalManualLifecycle(ledger: PaperOpenPositionRecord | null): boolean {
+/** Circular / derived origins — must never justify EXPLICIT_MANUAL_LIFECYCLE STRONG. */
+export const DERIVED_MANUAL_EVIDENCE_ORIGINS = new Set([
+    "DERIVED_FROM_LIFECYCLE_STATE",
+    "DERIVED_FROM_EXISTING_LATCH",
+    "DERIVED_FROM_OWNERSHIP_CLASS",
+    "DERIVED_FROM_RECONCILE_MISMATCH",
+    "TRANSIENT_OKX_STATE"
+]);
+
+export const INDEPENDENT_MANUAL_EVIDENCE_ORIGINS = new Set([
+    "INDEPENDENT_EXTERNAL_FILL",
+    "INDEPENDENT_MANUAL_ADOPTION",
+    "INDEPENDENT_CONFIRMED_SIZE_CHANGE",
+    "INDEPENDENT_USER_MANUAL_FLAG"
+]);
+
+/** True external/manual lifecycle origins — not derived from latch feedback. */
+export function isIndependentExternalManualLifecycle(
+    ledger: PaperOpenPositionRecord | null | undefined
+): boolean {
     const ls = ledger?.lifecycleState;
-    return (
-        ls === "EXTERNAL_MANUAL_POSITION" ||
-        ls === "OPERATOR_MANAGED" ||
-        ls === "EXTERNAL_MANUAL_MANAGED"
-    );
+    return ls === "EXTERNAL_MANUAL_POSITION" || ls === "OPERATOR_MANAGED";
 }
 
 function hasBotOrderAttribution(ledger: PaperOpenPositionRecord | null | undefined): boolean {
@@ -80,6 +95,183 @@ export function isWeakOrLegacyManualLatchSource(source: string | null | undefine
     return strength === "WEAK" || strength === "LEGACY";
 }
 
+export function hasIndependentManualLifecycleEvidence(
+    ledger: PaperOpenPositionRecord | null | undefined
+): boolean {
+    if (ledger == null) return false;
+    if (ledger.manualLifecycleEvidenceIndependent === true) return true;
+    if (ledger.manualLifecycleEvidenceIndependent === false) return false;
+
+    if (isIndependentExternalManualLifecycle(ledger)) return true;
+
+    const source = String(
+        ledger.manualOwnershipLatchSource ?? ledger.manualOwnershipLatchReason ?? ""
+    ).trim();
+    if (source === "EXPLICIT_EXTERNAL_FILL") return true;
+    if (source === "CONFIRMED_MANUAL_SIZE_CHANGE") return true;
+    if (source === "EXPLICIT_MANUAL_LIFECYCLE" || source === "external_manual_lifecycle_evidence") {
+        return false;
+    }
+    return false;
+}
+
+function resolveLatchEvidenceProvenance(
+    input: Readonly<{
+        source: string;
+        strength: ManualLatchStrength;
+        reason: string;
+        at: number;
+        evidenceOrigin?: string | null;
+        evidenceId?: string | null;
+        evidenceIndependent?: boolean | null;
+    }>,
+    ledger: PaperOpenPositionRecord | null
+): Readonly<{
+    origin: string;
+    id: string;
+    at: number;
+    independent: boolean;
+}> {
+    if (input.evidenceOrigin != null && input.evidenceOrigin.length > 0) {
+        return {
+            origin: input.evidenceOrigin,
+            id: String(input.evidenceId ?? input.reason),
+            at: input.evidenceId != null ? input.at : (ledger?.manualLifecycleEvidenceAt ?? input.at),
+            independent: input.evidenceIndependent === true
+        };
+    }
+
+    switch (input.source) {
+        case "EXPLICIT_EXTERNAL_FILL":
+            return {
+                origin: "INDEPENDENT_EXTERNAL_FILL",
+                id: input.reason,
+                at: input.at,
+                independent: true
+            };
+        case "CONFIRMED_MANUAL_SIZE_CHANGE":
+            return {
+                origin: "INDEPENDENT_CONFIRMED_SIZE_CHANGE",
+                id: input.reason,
+                at: input.at,
+                independent: true
+            };
+        case "EXPLICIT_MANUAL_LIFECYCLE":
+            if (isIndependentExternalManualLifecycle(ledger)) {
+                return {
+                    origin: "INDEPENDENT_MANUAL_ADOPTION",
+                    id: String(ledger?.lifecycleState ?? input.reason),
+                    at: input.at,
+                    independent: true
+                };
+            }
+            return {
+                origin: "DERIVED_FROM_LIFECYCLE_STATE",
+                id: String(ledger?.lifecycleState ?? input.reason),
+                at: input.at,
+                independent: false
+            };
+        default:
+            return {
+                origin: "DERIVED_FROM_EXISTING_LATCH",
+                id: input.reason,
+                at: input.at,
+                independent: false
+            };
+    }
+}
+
+export function validateStrongManualLatchEvidence(input: Readonly<{
+    symbol: string;
+    requested_source: string;
+    requested_strength: ManualLatchStrength;
+    ledger: PaperOpenPositionRecord | null;
+    evidenceOrigin?: string | null;
+    evidenceIndependent?: boolean | null;
+    existing_latch?: boolean;
+    current_lifecycle?: string | null;
+}>): Readonly<{
+    strongLatchAllowed: boolean;
+    blockReason: string | null;
+    evidenceOrigin: string;
+    evidenceIndependent: boolean;
+}> {
+    const provenance = resolveLatchEvidenceProvenance(
+        {
+            source: input.requested_source,
+            strength: input.requested_strength,
+            reason: input.requested_source,
+            at: Date.now(),
+            evidenceOrigin: input.evidenceOrigin,
+            evidenceIndependent: input.evidenceIndependent
+        },
+        input.ledger
+    );
+    const evidenceOrigin = provenance.origin;
+    const evidenceIndependent = provenance.independent;
+
+    if (input.requested_strength !== "STRONG") {
+        return {
+            strongLatchAllowed: true,
+            blockReason: null,
+            evidenceOrigin,
+            evidenceIndependent
+        };
+    }
+
+    if (DERIVED_MANUAL_EVIDENCE_ORIGINS.has(evidenceOrigin)) {
+        return {
+            strongLatchAllowed: false,
+            blockReason: `derived_evidence_origin:${evidenceOrigin}`,
+            evidenceOrigin,
+            evidenceIndependent
+        };
+    }
+
+    if (input.requested_source === "EXPLICIT_MANUAL_LIFECYCLE" && evidenceIndependent !== true) {
+        return {
+            strongLatchAllowed: false,
+            blockReason: "explicit_manual_lifecycle_missing_independent_evidence",
+            evidenceOrigin,
+            evidenceIndependent
+        };
+    }
+
+    if (
+        input.requested_source === "EXPLICIT_MANUAL_LIFECYCLE" ||
+        input.requested_source === "external_manual_lifecycle_evidence"
+    ) {
+        if (input.current_lifecycle === "EXTERNAL_MANUAL_MANAGED") {
+            return {
+                strongLatchAllowed: false,
+                blockReason: "derived_external_manual_managed_lifecycle",
+                evidenceOrigin,
+                evidenceIndependent
+            };
+        }
+    }
+
+    if (evidenceIndependent !== true) {
+        return {
+            strongLatchAllowed: false,
+            blockReason: "missing_independent_manual_evidence",
+            evidenceOrigin,
+            evidenceIndependent
+        };
+    }
+
+    return {
+        strongLatchAllowed: true,
+        blockReason: null,
+        evidenceOrigin,
+        evidenceIndependent
+    };
+}
+
+export function buildManualLatchStrongEvidenceProof(input: Record<string, unknown>): Record<string, unknown> {
+    return { event: "V2_MANUAL_LATCH_STRONG_EVIDENCE_PROOF", ...input };
+}
+
 export function evaluateManualOwnershipLatchTrigger(input: Readonly<{
     ledger: PaperOpenPositionRecord | null;
     syncStatus?: string | null;
@@ -97,6 +289,8 @@ export function evaluateManualOwnershipLatchTrigger(input: Readonly<{
     source: string | null;
     strength: ManualLatchStrength | null;
     reason: string | null;
+    evidenceOrigin?: string | null;
+    evidenceIndependent?: boolean | null;
 }> {
     const ledger = input.ledger;
     const nowMs = input.nowMs ?? Date.now();
@@ -123,12 +317,15 @@ export function evaluateManualOwnershipLatchTrigger(input: Readonly<{
         };
     }
 
-    if (isExternalManualLifecycle(ledger)) {
+    // Only independent external lifecycle (not derived EXTERNAL_MANUAL_MANAGED) may trigger STRONG latch.
+    if (isIndependentExternalManualLifecycle(ledger)) {
         return {
             shouldLatch: true,
             source: "EXPLICIT_MANUAL_LIFECYCLE",
             strength: "STRONG",
-            reason: "external_manual_lifecycle_evidence"
+            reason: "external_manual_lifecycle_evidence",
+            evidenceOrigin: "INDEPENDENT_MANUAL_ADOPTION",
+            evidenceIndependent: true
         };
     }
 
@@ -137,7 +334,9 @@ export function evaluateManualOwnershipLatchTrigger(input: Readonly<{
             shouldLatch: true,
             source: "EXPLICIT_EXTERNAL_FILL",
             strength: "STRONG",
-            reason: "explicit_external_manual_evidence"
+            reason: "explicit_external_manual_evidence",
+            evidenceOrigin: "INDEPENDENT_EXTERNAL_FILL",
+            evidenceIndependent: true
         };
     }
 
@@ -159,7 +358,9 @@ export function evaluateManualOwnershipLatchTrigger(input: Readonly<{
                 shouldLatch: true,
                 source: "CONFIRMED_MANUAL_SIZE_CHANGE",
                 strength: "STRONG",
-                reason: "paper_okx_contract_mismatch"
+                reason: "paper_okx_contract_mismatch",
+                evidenceOrigin: "INDEPENDENT_CONFIRMED_SIZE_CHANGE",
+                evidenceIndependent: true
             };
         }
     }
@@ -186,7 +387,9 @@ export function evaluateManualOwnershipLatchTrigger(input: Readonly<{
                     shouldLatch: true,
                     source: "CONFIRMED_MANUAL_SIZE_CHANGE",
                     strength: "STRONG",
-                    reason: "paper_okx_avgpx_mismatch"
+                    reason: "paper_okx_avgpx_mismatch",
+                    evidenceOrigin: "INDEPENDENT_CONFIRMED_SIZE_CHANGE",
+                    evidenceIndependent: true
                 };
             }
         }
@@ -209,12 +412,93 @@ export function evaluateManualOwnershipLatchTrigger(input: Readonly<{
                 shouldLatch: true,
                 source: "CONFIRMED_MANUAL_SIZE_CHANGE",
                 strength: "STRONG",
-                reason: "paper_okx_contract_mismatch"
+                reason: "paper_okx_contract_mismatch",
+                evidenceOrigin: "INDEPENDENT_CONFIRMED_SIZE_CHANGE",
+                evidenceIndependent: true
             };
         }
     }
 
     return { shouldLatch: false, source: null, strength: null, reason: null };
+}
+
+export function evaluatePoisonedStrongManualLatchRecovery(input: Readonly<{
+    ledger: PaperOpenPositionRecord;
+    reconcileState?: string | null;
+    okxActualContracts: number;
+    okxActualPositionExists: boolean;
+    ledgerPaperContracts?: number | null;
+    ledgerSide?: "long" | "short" | null;
+    okxSide?: "long" | "short" | null;
+    syncStatus?: string | null;
+}>): Readonly<{ shouldClear: boolean; reason: string | null }> {
+    if (input.ledger.manualOwnershipLatch !== true) {
+        return { shouldClear: false, reason: null };
+    }
+
+    if (hasIndependentManualLifecycleEvidence(input.ledger)) {
+        return { shouldClear: false, reason: null };
+    }
+
+    const source = String(
+        input.ledger.manualOwnershipLatchSource ??
+            input.ledger.manualOwnershipLatchReason ??
+            ""
+    ).trim();
+    const strength =
+        input.ledger.manualOwnershipLatchStrength ?? inferManualLatchStrength(source);
+
+    if (strength !== "STRONG") {
+        return { shouldClear: false, reason: null };
+    }
+
+    if (source === "EXPLICIT_EXTERNAL_FILL") {
+        return { shouldClear: false, reason: null };
+    }
+    if (source === "CONFIRMED_MANUAL_SIZE_CHANGE") {
+        return { shouldClear: false, reason: null };
+    }
+    if (isIndependentExternalManualLifecycle(input.ledger)) {
+        return { shouldClear: false, reason: null };
+    }
+
+    const reconcileState = String(input.reconcileState ?? input.ledger.reconcileState ?? "");
+    if (reconcileState !== "MATCHED") {
+        return { shouldClear: false, reason: null };
+    }
+
+    const ledgerSide = input.ledgerSide ?? input.ledger.side ?? null;
+    const okxSide = input.okxSide ?? ledgerSide;
+    if (ledgerSide != null && okxSide != null && ledgerSide !== okxSide) {
+        return { shouldClear: false, reason: null };
+    }
+
+    const paperContracts = input.ledgerPaperContracts ?? input.ledger.okxContracts ?? null;
+    const aligned =
+        input.okxActualPositionExists === true &&
+        input.okxActualContracts > 0 &&
+        paperContracts != null &&
+        Number.isFinite(paperContracts) &&
+        contractsAligned(paperContracts, input.okxActualContracts);
+
+    if (!aligned || !hasBotOrderAttribution(input.ledger)) {
+        return { shouldClear: false, reason: null };
+    }
+
+    if (
+        source === "EXPLICIT_MANUAL_LIFECYCLE" ||
+        source === "external_manual_lifecycle_evidence"
+    ) {
+        return { shouldClear: true, reason: "poisoned_explicit_manual_lifecycle_strong_recovery" };
+    }
+
+    return { shouldClear: false, reason: null };
+}
+
+export function buildPoisonedStrongManualLatchRecoveryProof(
+    input: Record<string, unknown>
+): Record<string, unknown> {
+    return { event: "V2_POISONED_STRONG_MANUAL_LATCH_RECOVERY_PROOF", ...input };
 }
 
 export function evaluateFalseManualLatchRecovery(input: Readonly<{
@@ -232,8 +516,7 @@ export function evaluateFalseManualLatchRecovery(input: Readonly<{
     if (input.explicitManualEvidence === true) {
         return { shouldClear: false, reason: null };
     }
-    const ls = input.ledger.lifecycleState;
-    if (ls === "EXTERNAL_MANUAL_POSITION" || ls === "OPERATOR_MANAGED") {
+    if (isIndependentExternalManualLifecycle(input.ledger)) {
         return { shouldClear: false, reason: null };
     }
 
@@ -241,7 +524,7 @@ export function evaluateFalseManualLatchRecovery(input: Readonly<{
         input.ledger.manualOwnershipLatchSource ??
         input.ledger.manualOwnershipLatchReason ??
         null;
-    if (isStrongManualLatchSource(source)) {
+    if (isStrongManualLatchSource(source) && hasIndependentManualLifecycleEvidence(input.ledger)) {
         return { shouldClear: false, reason: null };
     }
 
@@ -270,6 +553,10 @@ export function clearManualOwnershipLatchFields(open: PaperOpenPositionRecord): 
     open.manualOwnershipLatchAt = undefined;
     open.manualOwnershipLatchSource = undefined;
     open.manualOwnershipLatchStrength = undefined;
+    open.manualLifecycleEvidenceOrigin = undefined;
+    open.manualLifecycleEvidenceId = undefined;
+    open.manualLifecycleEvidenceAt = undefined;
+    open.manualLifecycleEvidenceIndependent = undefined;
 }
 
 export function applyManualOwnershipLatch(
@@ -279,13 +566,69 @@ export function applyManualOwnershipLatch(
         source: string;
         strength: ManualLatchStrength;
         reason: string;
+        evidenceOrigin?: string | null;
+        evidenceId?: string | null;
+        evidenceIndependent?: boolean | null;
     }>
 ): void {
+    const provenance = resolveLatchEvidenceProvenance(input, open);
     open.manualOwnershipLatch = true;
     open.manualOwnershipLatchSource = input.source;
     open.manualOwnershipLatchStrength = input.strength;
     open.manualOwnershipLatchReason = input.reason;
     open.manualOwnershipLatchAt = input.at;
+    open.manualLifecycleEvidenceOrigin = provenance.origin;
+    open.manualLifecycleEvidenceId = provenance.id;
+    open.manualLifecycleEvidenceAt = provenance.at;
+    open.manualLifecycleEvidenceIndependent = provenance.independent;
+}
+
+export function applyManualOwnershipLatchGuarded(
+    open: PaperOpenPositionRecord,
+    input: Readonly<{
+        at: number;
+        source: string;
+        strength: ManualLatchStrength;
+        reason: string;
+        evidenceOrigin?: string | null;
+        evidenceId?: string | null;
+        evidenceIndependent?: boolean | null;
+    }>,
+    context: Readonly<{ symbol: string }>
+): Readonly<{ applied: boolean; proof: Record<string, unknown> }> {
+    const validation = validateStrongManualLatchEvidence({
+        symbol: context.symbol,
+        requested_source: input.source,
+        requested_strength: input.strength,
+        ledger: open,
+        evidenceOrigin: input.evidenceOrigin,
+        evidenceIndependent: input.evidenceIndependent,
+        existing_latch: open.manualOwnershipLatch === true,
+        current_lifecycle: open.lifecycleState ?? null
+    });
+
+    const proof = buildManualLatchStrongEvidenceProof({
+        symbol: context.symbol,
+        requested_source: input.source,
+        requested_strength: input.strength,
+        evidence_origin: validation.evidenceOrigin,
+        evidence_independent: validation.evidenceIndependent,
+        existing_latch: open.manualOwnershipLatch === true,
+        current_lifecycle: open.lifecycleState ?? null,
+        strong_latch_allowed: validation.strongLatchAllowed,
+        block_reason: validation.blockReason
+    });
+
+    if (input.strength === "STRONG" && !validation.strongLatchAllowed) {
+        return { applied: false, proof };
+    }
+
+    applyManualOwnershipLatch(open, {
+        ...input,
+        evidenceOrigin: validation.evidenceOrigin,
+        evidenceIndependent: validation.evidenceIndependent
+    });
+    return { applied: true, proof };
 }
 
 export function buildFalseManualLatchRecoveryProof(

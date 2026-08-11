@@ -20,8 +20,11 @@ import { protectiveStopPricesMatch } from "../engine-v2/execution/protective-mat
 import {
   evaluateManualOwnershipLatchTrigger,
   evaluateFalseManualLatchRecovery,
-  applyManualOwnershipLatch,
-  clearManualOwnershipLatchFields
+  evaluatePoisonedStrongManualLatchRecovery,
+  applyManualOwnershipLatchGuarded,
+  validateStrongManualLatchEvidence,
+  clearManualOwnershipLatchFields,
+  hasIndependentManualLifecycleEvidence
 } from "../engine-v2/position/manual-ownership-latch";
 import { applyPositionTerminalCleanup } from "../engine-v2/position/terminal-cleanup";
 import type { PaperOpenPositionRecord } from "../models/types";
@@ -691,6 +694,270 @@ export function runV2PositionLifecycleCaseTests(): boolean {
           trigger.strength === "STRONG" &&
           trigger.source === "CONFIRMED_MANUAL_SIZE_CHANGE",
         JSON.stringify(trigger)
+      ) && ok;
+  }
+
+  // FLCASE H: derived EXTERNAL_MANUAL_MANAGED must not trigger STRONG latch
+  {
+    const trigger = evaluateManualOwnershipLatchTrigger({
+      ledger: botLedger({
+        okxContracts: 0.06,
+        lifecycleState: "EXTERNAL_MANUAL_MANAGED",
+        reconcileState: "MATCHED"
+      }),
+      syncStatus: "ALIGNED",
+      okxActualContracts: 0.06,
+      okxActualPositionExists: true,
+      ledgerPaperContracts: 0.06,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      symbolExternalManualBlocked: false
+    });
+    ok =
+      run(
+        "FLCASE H",
+        trigger.shouldLatch === false,
+        JSON.stringify(trigger)
+      ) && ok;
+  }
+
+  // FLCASE I: weak/false latch derived EXTERNAL_MANUAL_MANAGED → no new EXPLICIT_MANUAL_LIFECYCLE
+  {
+    const open = botLedger({
+      okxContracts: 0.06,
+      lifecycleState: "EXTERNAL_MANUAL_MANAGED",
+      reconcileState: "MATCHED",
+      manualOwnershipLatch: true,
+      manualOwnershipLatchSource: "paper_okx_contract_mismatch",
+      manualOwnershipLatchStrength: "WEAK"
+    });
+    const r = resolvePositionOwnership({
+      symbol: "BTCUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.06,
+      ledger: open,
+      ledgerPaperContracts: 0.06,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      explicitExternalManualEvidence: false,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: true,
+      syncStatus: "ALIGNED",
+      reconcileState: "MATCHED"
+    });
+    ok =
+      run(
+        "FLCASE I",
+        r.manualLatchShouldBeActive === false &&
+          r.ownershipClass === "BOT_V2_MANAGED",
+        JSON.stringify({ latch: r.manualLatchShouldBeActive, class: r.ownershipClass })
+      ) && ok;
+  }
+
+  // FLCASE J: EXPLICIT_MANUAL_LIFECYCLE with derived evidence origin → STRONG reject
+  {
+    const open = botLedger({
+      lifecycleState: "EXTERNAL_MANUAL_MANAGED",
+      reconcileState: "MATCHED"
+    });
+    const validation = validateStrongManualLatchEvidence({
+      symbol: "ETHUSDT",
+      requested_source: "EXPLICIT_MANUAL_LIFECYCLE",
+      requested_strength: "STRONG",
+      ledger: open,
+      evidenceOrigin: "DERIVED_FROM_EXISTING_LATCH",
+      evidenceIndependent: false,
+      existing_latch: true,
+      current_lifecycle: "EXTERNAL_MANUAL_MANAGED"
+    });
+    const apply = applyManualOwnershipLatchGuarded(
+      open,
+      {
+        at: Date.now(),
+        source: "EXPLICIT_MANUAL_LIFECYCLE",
+        strength: "STRONG",
+        reason: "external_manual_lifecycle_evidence",
+        evidenceOrigin: "DERIVED_FROM_EXISTING_LATCH",
+        evidenceIndependent: false
+      },
+      { symbol: "ETHUSDT" }
+    );
+    ok =
+      run(
+        "FLCASE J",
+        validation.strongLatchAllowed === false &&
+          apply.applied === false &&
+          open.manualOwnershipLatch !== true,
+        JSON.stringify({ validation, applied: apply.applied })
+      ) && ok;
+  }
+
+  // FLCASE K: poisoned STRONG + MATCHED + bot attribution → recovery → BOT_V2_MANAGED
+  {
+    const open = botLedger({
+      symbol: "BTCUSDT",
+      okxContracts: 0.06,
+      lifecycleState: "EXTERNAL_MANUAL_MANAGED",
+      reconcileState: "MATCHED",
+      manualOwnershipLatch: true,
+      manualOwnershipLatchSource: "EXPLICIT_MANUAL_LIFECYCLE",
+      manualOwnershipLatchStrength: "STRONG",
+      manualOwnershipLatchReason: "external_manual_lifecycle_evidence"
+    });
+    const recovery = evaluatePoisonedStrongManualLatchRecovery({
+      ledger: open,
+      reconcileState: "MATCHED",
+      okxActualContracts: 0.06,
+      okxActualPositionExists: true,
+      ledgerPaperContracts: 0.06,
+      ledgerSide: "long",
+      okxSide: "long",
+      syncStatus: "ALIGNED"
+    });
+    if (recovery.shouldClear) {
+      clearManualOwnershipLatchFields(open);
+      open.lifecycleState = "BOT_V2_MANAGED";
+    }
+    const r = resolvePositionOwnership({
+      symbol: "BTCUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.06,
+      ledger: open,
+      ledgerPaperContracts: 0.06,
+      explicitExternalManualEvidence: false,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: false,
+      syncStatus: "ALIGNED",
+      reconcileState: "MATCHED"
+    });
+    ok =
+      run(
+        "FLCASE K",
+        recovery.shouldClear === true &&
+          r.ownershipClass === "BOT_V2_MANAGED" &&
+          open.manualOwnershipLatch !== true,
+        JSON.stringify({ recovery, class: r.ownershipClass })
+      ) && ok;
+  }
+
+  // FLCASE L: real external fill evidence → STRONG latch retained
+  {
+    const open = botLedger({
+      lifecycleState: "EXTERNAL_MANUAL_MANAGED",
+      reconcileState: "MATCHED",
+      manualOwnershipLatch: true,
+      manualOwnershipLatchSource: "EXPLICIT_EXTERNAL_FILL",
+      manualOwnershipLatchStrength: "STRONG",
+      manualLifecycleEvidenceIndependent: true,
+      manualLifecycleEvidenceOrigin: "INDEPENDENT_EXTERNAL_FILL"
+    });
+    const recovery = evaluatePoisonedStrongManualLatchRecovery({
+      ledger: open,
+      reconcileState: "MATCHED",
+      okxActualContracts: 0.06,
+      okxActualPositionExists: true,
+      ledgerPaperContracts: 0.06,
+      syncStatus: "ALIGNED"
+    });
+    const r = resolvePositionOwnership({
+      symbol: "ETHUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.06,
+      ledger: open,
+      ledgerPaperContracts: 0.06,
+      explicitExternalManualEvidence: true,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: true,
+      syncStatus: "ALIGNED",
+      reconcileState: "MATCHED"
+    });
+    ok =
+      run(
+        "FLCASE L",
+        recovery.shouldClear === false &&
+          r.ownershipClass === "EXTERNAL_MANUAL_MANAGED" &&
+          r.manualOwnershipLatchActive === true,
+        JSON.stringify({ recovery, r })
+      ) && ok;
+  }
+
+  // FLCASE M: confirmed manual size change independent evidence → STRONG retained
+  {
+    const open = botLedger({
+      okxContracts: 0.06,
+      lifecycleState: "EXTERNAL_MANUAL_MANAGED",
+      reconcileState: "MATCHED",
+      manualOwnershipLatch: true,
+      manualOwnershipLatchSource: "CONFIRMED_MANUAL_SIZE_CHANGE",
+      manualOwnershipLatchStrength: "STRONG",
+      manualLifecycleEvidenceIndependent: true,
+      manualLifecycleEvidenceOrigin: "INDEPENDENT_CONFIRMED_SIZE_CHANGE"
+    });
+    const recovery = evaluatePoisonedStrongManualLatchRecovery({
+      ledger: open,
+      reconcileState: "MATCHED",
+      okxActualContracts: 0.06,
+      okxActualPositionExists: true,
+      ledgerPaperContracts: 0.06,
+      syncStatus: "ALIGNED"
+    });
+    ok =
+      run(
+        "FLCASE M",
+        recovery.shouldClear === false &&
+          hasIndependentManualLifecycleEvidence(open) === true,
+        JSON.stringify(recovery)
+      ) && ok;
+  }
+
+  // FLCASE N: restart-style poisoned strong recovery → BOT_V2_MANAGED restored
+  {
+    const open = botLedger({
+      symbol: "ETHUSDT",
+      okxContracts: 0.06,
+      lifecycleState: "EXTERNAL_MANUAL_MANAGED",
+      reconcileState: "MATCHED",
+      manualOwnershipLatch: true,
+      manualOwnershipLatchSource: "EXPLICIT_MANUAL_LIFECYCLE",
+      manualOwnershipLatchStrength: "STRONG",
+      manualOwnershipLatchAt: 1786413038533
+    });
+    const recovery = evaluatePoisonedStrongManualLatchRecovery({
+      ledger: open,
+      reconcileState: "MATCHED",
+      okxActualContracts: 0.06,
+      okxActualPositionExists: true,
+      ledgerPaperContracts: 0.06,
+      ledgerSide: "long",
+      okxSide: "long"
+    });
+    if (recovery.shouldClear) {
+      clearManualOwnershipLatchFields(open);
+      open.lifecycleState = "BOT_V2_MANAGED";
+    }
+    const r = resolvePositionOwnership({
+      symbol: "ETHUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.06,
+      ledger: open,
+      ledgerPaperContracts: 0.06,
+      explicitExternalManualEvidence: false,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: false,
+      syncStatus: "ALIGNED",
+      reconcileState: "MATCHED"
+    });
+    ok =
+      run(
+        "FLCASE N",
+        recovery.shouldClear === true &&
+          r.ownershipClass === "BOT_V2_MANAGED" &&
+          r.lifecycleAfter === "BOT_V2_MANAGED",
+        JSON.stringify({ recovery, r })
       ) && ok;
   }
 

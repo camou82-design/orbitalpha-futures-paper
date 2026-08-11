@@ -96,11 +96,14 @@ import {
   type PositionOwnershipResolveResult
 } from "../engine-v2/position/ownership-resolver";
 import {
-  applyManualOwnershipLatch,
+  applyManualOwnershipLatchGuarded,
   clearManualOwnershipLatchFields,
   buildFalseManualLatchRecoveryProof,
+  buildPoisonedStrongManualLatchRecoveryProof,
   evaluateFalseManualLatchRecovery,
-  isStrongManualLatchSource
+  evaluatePoisonedStrongManualLatchRecovery,
+  hasIndependentManualLifecycleEvidence,
+  isIndependentExternalManualLifecycle
 } from "../engine-v2/position/manual-ownership-latch";
 import {
   buildPositionRealityReconcileProof,
@@ -3470,6 +3473,50 @@ export class PaperEngine {
           ledgerModified = true;
         }
 
+        const poisonedLatchRecovery = evaluatePoisonedStrongManualLatchRecovery({
+          ledger: open,
+          reconcileState: open.reconcileState,
+          okxActualContracts: remotePos.contracts,
+          okxActualPositionExists: true,
+          ledgerPaperContracts: open.okxContracts ?? null,
+          ledgerSide: open.side as "long" | "short",
+          okxSide: open.side as "long" | "short",
+          syncStatus: symbolSyncStatus
+        });
+        if (poisonedLatchRecovery.shouldClear) {
+          const previousSource =
+            open.manualOwnershipLatchSource ?? open.manualOwnershipLatchReason ?? null;
+          const latchAt = open.manualOwnershipLatchAt ?? null;
+          const latchStrength = open.manualOwnershipLatchStrength ?? null;
+          const evidenceOrigin =
+            open.manualLifecycleEvidenceOrigin ?? "DERIVED_FROM_LIFECYCLE_STATE";
+          clearManualOwnershipLatchFields(open);
+          if (open.lifecycleState === "EXTERNAL_MANUAL_MANAGED") {
+            open.lifecycleState = "BOT_V2_MANAGED";
+          }
+          ledgerModified = true;
+          this.logger.info(
+            "V2_POISONED_STRONG_MANUAL_LATCH_RECOVERY_PROOF",
+            buildPoisonedStrongManualLatchRecoveryProof({
+              symbol: open.symbol,
+              latch_source: previousSource,
+              latch_strength: latchStrength,
+              latch_at: latchAt,
+              evidence_origin: evidenceOrigin,
+              independent_manual_evidence: false,
+              bot_attribution: open.isV2Authority === true,
+              reconcile_state: open.reconcileState ?? symbolSyncStatus,
+              paper_contracts: open.okxContracts ?? null,
+              okx_contracts: remotePos.contracts,
+              side_match: true,
+              contracts_match: true,
+              recovery_allowed: true,
+              latch_cleared: true,
+              reason: poisonedLatchRecovery.reason
+            })
+          );
+        }
+
         const latchRecovery = evaluateFalseManualLatchRecovery({
           ledger: open,
           reconcileState: open.reconcileState,
@@ -3479,9 +3526,7 @@ export class PaperEngine {
           syncStatus: symbolSyncStatus,
           explicitManualEvidence:
             open.manualOwnershipLatch === true &&
-            isStrongManualLatchSource(
-              open.manualOwnershipLatchSource ?? open.manualOwnershipLatchReason
-            )
+            hasIndependentManualLifecycleEvidence(open)
         });
         if (latchRecovery.shouldClear) {
           const previousSource =
@@ -3509,13 +3554,29 @@ export class PaperEngine {
           okxFetchReady: true
         });
         if (ownership.manualLatchShouldBeActive && open.manualOwnershipLatch !== true) {
-          applyManualOwnershipLatch(open, {
-            at: nowTs,
-            source: ownership.manualLatchTriggerSource ?? "CONFIRMED_MANUAL_SIZE_CHANGE",
-            strength: ownership.manualLatchTriggerStrength ?? "STRONG",
-            reason: ownership.manualInterventionReason ?? "manual_intervention_detected"
-          });
-          ledgerModified = true;
+          const latchApply = applyManualOwnershipLatchGuarded(
+            open,
+            {
+              at: nowTs,
+              source: ownership.manualLatchTriggerSource ?? "CONFIRMED_MANUAL_SIZE_CHANGE",
+              strength: ownership.manualLatchTriggerStrength ?? "STRONG",
+              reason: ownership.manualInterventionReason ?? "manual_intervention_detected",
+              evidenceOrigin: ownership.manualLatchTriggerSource === "EXPLICIT_MANUAL_LIFECYCLE"
+                ? "INDEPENDENT_MANUAL_ADOPTION"
+                : ownership.manualLatchTriggerSource === "EXPLICIT_EXTERNAL_FILL"
+                  ? "INDEPENDENT_EXTERNAL_FILL"
+                  : ownership.manualLatchTriggerSource === "CONFIRMED_MANUAL_SIZE_CHANGE"
+                    ? "INDEPENDENT_CONFIRMED_SIZE_CHANGE"
+                    : undefined,
+              evidenceIndependent:
+                ownership.manualLatchTriggerStrength === "STRONG" ? true : undefined
+            },
+            { symbol: String(open.symbol) }
+          );
+          this.logger.info("V2_MANUAL_LATCH_STRONG_EVIDENCE_PROOF", latchApply.proof);
+          if (latchApply.applied) {
+            ledgerModified = true;
+          }
         }
         if (
           ownership.lifecycleAfter != null &&
@@ -6814,10 +6875,6 @@ export class PaperEngine {
   ): PositionOwnershipResolveResult {
     const key = `${open.symbol}:${open.side}`;
     const manualLatchActive = open.manualOwnershipLatch === true;
-    const isManualExternalLifecycle =
-      open.lifecycleState === "EXTERNAL_MANUAL_POSITION" ||
-      open.lifecycleState === "OPERATOR_MANAGED" ||
-      open.lifecycleState === "EXTERNAL_MANUAL_MANAGED";
     return resolvePositionOwnership({
       symbol: String(open.symbol),
       side: open.side as "long" | "short",
@@ -6828,11 +6885,8 @@ export class PaperEngine {
       ledgerEntryPrice: open.entryPrice ?? open.avgPx ?? null,
       okxAvgPx: remote?.avgPx ?? null,
       explicitExternalManualEvidence:
-        (manualLatchActive &&
-          isStrongManualLatchSource(
-            open.manualOwnershipLatchSource ?? open.manualOwnershipLatchReason
-          )) ||
-        isManualExternalLifecycle,
+        (manualLatchActive && hasIndependentManualLifecycleEvidence(open)) ||
+        isIndependentExternalManualLifecycle(open),
       symbolExternalManualBlocked: this.symbolExternalManualBlocked.has(key),
       manualOwnershipLatchActive: manualLatchActive,
       syncStatus: context?.syncStatus ?? null,

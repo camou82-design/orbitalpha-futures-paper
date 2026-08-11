@@ -64,6 +64,26 @@ export function applyPositionTerminalCleanup(
             open.manualOwnershipLatchStrength = undefined;
         });
     }
+    if (open.manualLifecycleEvidenceOrigin != null) {
+        mark("manualLifecycleEvidenceOrigin", () => {
+            open.manualLifecycleEvidenceOrigin = undefined;
+        });
+    }
+    if (open.manualLifecycleEvidenceId != null) {
+        mark("manualLifecycleEvidenceId", () => {
+            open.manualLifecycleEvidenceId = undefined;
+        });
+    }
+    if (open.manualLifecycleEvidenceAt != null) {
+        mark("manualLifecycleEvidenceAt", () => {
+            open.manualLifecycleEvidenceAt = undefined;
+        });
+    }
+    if (open.manualLifecycleEvidenceIndependent != null) {
+        mark("manualLifecycleEvidenceIndependent", () => {
+            open.manualLifecycleEvidenceIndependent = undefined;
+        });
+    }
     if (open.okxZeroUnconfirmedSince != null) {
         mark("okxZeroUnconfirmedSince", () => {
             open.okxZeroUnconfirmedSince = undefined;

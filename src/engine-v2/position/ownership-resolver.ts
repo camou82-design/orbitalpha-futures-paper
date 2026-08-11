@@ -2,6 +2,9 @@ import type { PaperOpenPositionRecord } from "../../models/types";
 import {
     evaluateFalseManualLatchRecovery,
     evaluateManualOwnershipLatchTrigger,
+    evaluatePoisonedStrongManualLatchRecovery,
+    hasIndependentManualLifecycleEvidence,
+    isIndependentExternalManualLifecycle,
     isStrongManualLatchSource,
     type ManualLatchStrength
 } from "./manual-ownership-latch";
@@ -78,13 +81,9 @@ function isBotV2LedgerEvidence(ledger: PaperOpenPositionRecord | null): boolean 
     return false;
 }
 
+/** @deprecated Use isIndependentExternalManualLifecycle — EXTERNAL_MANUAL_MANAGED is derived, not evidence. */
 function isExternalManualLifecycle(ledger: PaperOpenPositionRecord | null): boolean {
-    const ls = ledger?.lifecycleState;
-    return (
-        ls === "EXTERNAL_MANUAL_POSITION" ||
-        ls === "OPERATOR_MANAGED" ||
-        ls === "EXTERNAL_MANUAL_MANAGED"
-    );
+    return isIndependentExternalManualLifecycle(ledger);
 }
 
 function hasBotOrderAttribution(ledger: PaperOpenPositionRecord | null | undefined): boolean {
@@ -188,12 +187,13 @@ export function detectManualInterventionEvidence(
         input.ledger != null &&
         isStrongManualLatchSource(
             input.ledger.manualOwnershipLatchSource ?? input.ledger.manualOwnershipLatchReason
-        )
+        ) &&
+        hasIndependentManualLifecycleEvidence(input.ledger)
     ) {
         return { detected: true, reason: "manual_ownership_latch_active" };
     }
 
-    if (isExternalManualLifecycle(input.ledger ?? null)) {
+    if (isIndependentExternalManualLifecycle(input.ledger ?? null)) {
         return { detected: true, reason: "external_manual_lifecycle_evidence" };
     }
 
@@ -263,18 +263,35 @@ export function resolvePositionOwnership(
         (input.ledger != null &&
             typeof input.ledger.exchangeClOrdId === "string" &&
             input.ledger.exchangeClOrdId.startsWith("p"));
-    const latchRecovery =
+    const poisonedRecovery =
         input.ledger != null
-            ? evaluateFalseManualLatchRecovery({
+            ? evaluatePoisonedStrongManualLatchRecovery({
                   ledger: input.ledger,
                   reconcileState: input.reconcileState ?? input.ledger.reconcileState,
                   okxActualContracts: input.okxActualContracts,
                   okxActualPositionExists: input.okxActualPositionExists,
                   ledgerPaperContracts: input.ledgerPaperContracts,
-                  syncStatus: input.syncStatus,
-                  explicitManualEvidence: input.explicitExternalManualEvidence
+                  ledgerSide: input.side,
+                  okxSide: input.side,
+                  syncStatus: input.syncStatus
               })
             : { shouldClear: false, reason: null };
+    const latchRecovery =
+        poisonedRecovery.shouldClear
+            ? poisonedRecovery
+            : input.ledger != null
+              ? evaluateFalseManualLatchRecovery({
+                    ledger: input.ledger,
+                    reconcileState: input.reconcileState ?? input.ledger.reconcileState,
+                    okxActualContracts: input.okxActualContracts,
+                    okxActualPositionExists: input.okxActualPositionExists,
+                    ledgerPaperContracts: input.ledgerPaperContracts,
+                    syncStatus: input.syncStatus,
+                    explicitManualEvidence:
+                        input.explicitExternalManualEvidence === true ||
+                        hasIndependentManualLifecycleEvidence(input.ledger)
+                })
+              : { shouldClear: false, reason: null };
     const latchTrigger = evaluateManualOwnershipLatchTrigger({
         ledger: input.ledger,
         syncStatus: input.syncStatus,
@@ -293,10 +310,10 @@ export function resolvePositionOwnership(
     const strongLatchActive =
         existingLatch &&
         input.ledger != null &&
-        (isStrongManualLatchSource(
+        isStrongManualLatchSource(
             input.ledger.manualOwnershipLatchSource ?? input.ledger.manualOwnershipLatchReason
-        ) ||
-            isExternalManualLifecycle(input.ledger));
+        ) &&
+        hasIndependentManualLifecycleEvidence(input.ledger);
     const manualIntervention = detectManualInterventionEvidence({
         ledgerPaperContracts: input.ledgerPaperContracts,
         okxActualContracts: input.okxActualContracts,
@@ -304,7 +321,7 @@ export function resolvePositionOwnership(
         okxAvgPx: input.okxAvgPx,
         explicitExternalManualEvidence:
             input.explicitExternalManualEvidence === true ||
-            isExternalManualLifecycle(input.ledger),
+            isIndependentExternalManualLifecycle(input.ledger),
         symbolExternalManualBlocked: input.symbolExternalManualBlocked,
         manualOwnershipLatchActive: strongLatchActive,
         ledger: input.ledger
