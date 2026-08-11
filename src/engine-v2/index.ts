@@ -6723,6 +6723,12 @@ export function adaptV2Input(
         pump_state?: string | null;
         okxActualSide?: string;
         okxAuthMode?: "disabled" | "demo" | "live";
+        okxAuthReady?: boolean;
+        okxDemoEnabled?: boolean;
+        okxApiKeyPresent?: boolean;
+        okxApiSecretPresent?: boolean;
+        okxPassphrasePresent?: boolean;
+        okxSimulatedTradingHeaderEnabled?: boolean;
         okxExchangeAuthOptIn?: boolean;
         okxLiveEnabled?: boolean;
         liveBalanceReady?: boolean;
@@ -6862,6 +6868,12 @@ export function adaptV2Input(
             addonMaxNotionalUsdt: (state as any).addonMaxNotionalUsdt,
             okxActualSide: state.okxActualSide,
             okxAuthMode: state.okxAuthMode,
+            okxAuthReady: state.okxAuthReady,
+            okxDemoEnabled: state.okxDemoEnabled,
+            okxApiKeyPresent: state.okxApiKeyPresent,
+            okxApiSecretPresent: state.okxApiSecretPresent,
+            okxPassphrasePresent: state.okxPassphrasePresent,
+            okxSimulatedTradingHeaderEnabled: state.okxSimulatedTradingHeaderEnabled,
             okxExchangeAuthOptIn: state.okxExchangeAuthOptIn,
             okxLiveEnabled: state.okxLiveEnabled,
             liveBalanceReady: state.liveBalanceReady,
