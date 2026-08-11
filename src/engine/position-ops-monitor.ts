@@ -7,12 +7,18 @@ import {
   type InstrumentSizing,
   type LedgerOkxPositionSyncSnapshot
 } from "../exchange/okx-position-sync";
+import {
+  hasBotOwnershipEvidenceOnLedgerRow,
+  isLedgerOnlyStaleKey,
+  isOkxOnlyKey
+} from "../lib/position-reconcile-classification";
 import { protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
 
 export type PositionOpsBanner =
   | "NO_POSITION"
   | "REMOTE_UNAVAILABLE"
   | "RECONCILE_MISMATCH"
+  | "LEDGER_STALE_PENDING"
   | "MONITORING_NO_PROTECT_WARNING"
   | "MONITORING_RISK_PLAN_MISSING_WARNING"
   | "MONITORING_PROTECT_DETECTED"
@@ -44,7 +50,7 @@ export type PositionOpsRow = Readonly<{
   reduce_only_protective_found: boolean;
   protective_match_hints: string[];
   reconcile_state: string;
-  sync_status: LedgerOkxPositionSyncSnapshot["sync_status"] | "OKX_GHOST";
+  sync_status: LedgerOkxPositionSyncSnapshot["sync_status"] | "OKX_GHOST" | "ENGINE_LEDGER_STALE";
   can_adopt: boolean;
 }>;
 
@@ -489,7 +495,9 @@ function bannerKo(b: PositionOpsBanner): string {
     case "REMOTE_UNAVAILABLE":
       return "OKX 포지션 스냅샷 없음 · 감시 제한";
     case "RECONCILE_MISMATCH":
-      return "실거래소 포지션 / 장부 불일치 / 자동관리 제한";
+      return "실거래소 포지션 / 장부 불일치 · 외부 수동 개입 확인 필요";
+    case "LEDGER_STALE_PENDING":
+      return "ledger 정리 대기 · 실제 포지션 기준 감시 유지";
     case "MONITORING_NO_PROTECT_WARNING":
       return "감시 중 · 보호(reduce-only) 주문 없음";
     case "MONITORING_RISK_PLAN_MISSING_WARNING":
@@ -590,11 +598,27 @@ export function buildPositionOpsSurface(input: Readonly<{
         reduce_only_protective_found: protectionSatisfied,
         protective_match_hints: hints,
         reconcile_state: ledger?.reconcileState ?? "NONE",
-        sync_status: ledger ? (sync.sync_status === "ALIGNED" ? "ALIGNED" : sync.sync_status) : "OKX_GHOST",
+        sync_status: (() => {
+          const rowKey = `${hit.symbol}:${hit.side}`;
+          if (!ledger) return "OKX_GHOST";
+          if (!sync.mismatched_keys.includes(rowKey)) return "ALIGNED";
+          if (isLedgerOnlyStaleKey(rowKey, sync)) return "ENGINE_LEDGER_STALE";
+          return sync.sync_status;
+        })(),
         can_adopt: ledger?.reconcileState === "RECONCILE_MISMATCH"
       });
     }
   }
+
+  const hasOkxOnlyExternal = sync.okx_positions_preview.some((p) => {
+    const key = `${p.symbol}:${p.side}`;
+    if (!isOkxOnlyKey(key, sync)) return false;
+    const ledger = matchLedgerRow(input.paperOpens, p.symbol, p.side);
+    return ledger == null || !hasBotOwnershipEvidenceOnLedgerRow(ledger);
+  });
+  const hasLedgerOnlyStale =
+    sync.okx_nonzero_position_count > 0 &&
+    sync.paper_positions_preview.some((p) => isLedgerOnlyStaleKey(`${p.symbol}:${p.side}`, sync));
 
   let surface_banner: PositionOpsBanner;
   if (sync.sync_status === "REMOTE_UNAVAILABLE") {
@@ -603,6 +627,10 @@ export function buildPositionOpsSurface(input: Readonly<{
     } else {
       surface_banner = "REMOTE_UNAVAILABLE";
     }
+  } else if (hasOkxOnlyExternal) {
+    surface_banner = "RECONCILE_MISMATCH";
+  } else if (hasLedgerOnlyStale) {
+    surface_banner = "LEDGER_STALE_PENDING";
   } else if (sync.sync_status !== "ALIGNED") {
     surface_banner = "RECONCILE_MISMATCH";
   } else if (rows.length === 0) {

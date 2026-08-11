@@ -27,6 +27,10 @@ import { JsonStore } from "../storage/json-store";
 import type { OkxPublicDiagnostics } from "../exchange/okx-demo";
 import { OkxDemoClient, toOkxSwapInstId } from "../exchange/okx-demo";
 import { buildLedgerOkxPositionSyncSnapshot, okxSwapRowToLedgerKey, resolveOkxRowNotionalUsd } from "../exchange/okx-position-sync";
+import {
+  resolveAuthoritativePaperOpenForSymbol,
+  shouldBlockAutomatedManagementForSyncKey
+} from "../lib/position-reconcile-classification";
 import { buildPositionOpsSurface, engineMirrorStopPrice, engineMirrorTpPrice, regimeForSl, classifyOkxOpenOrderPurpose, countBlockingOkxOpenOrders, evaluateV2ReducePendingGuard } from "./position-ops-monitor";
 import type { PositionOpsSurface } from "./position-ops-monitor";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
@@ -1824,24 +1828,41 @@ export class PaperEngine {
         );
 
         if (!isNormalInLedger) {
-          if (!this.symbolExternalManualBlocked.has(key)) {
-            this.symbolExternalManualBlocked.add(key);
-            this.logger.warn("SYMBOL_EXTERNAL_MANUAL_POSITION_BLOCK", {
-              symbol: hit.symbol,
-              side: hit.side,
-              okx_position_exists: true,
-              source: "okx_actual_or_external_manual",
-              action: "BLOCK_THIS_SYMBOL_ONLY",
-              global_trade_blocked: false,
-              detail: "Position exists on OKX but is not a normal paper-ledger position. Blocking entries for this symbol:side."
-            });
+          if (
+            shouldBlockAutomatedManagementForSyncKey({
+              key,
+              sync: syncSnap,
+              paperOpens
+            })
+          ) {
+            if (!this.symbolExternalManualBlocked.has(key)) {
+              this.symbolExternalManualBlocked.add(key);
+              this.logger.warn("SYMBOL_EXTERNAL_MANUAL_POSITION_BLOCK", {
+                symbol: hit.symbol,
+                side: hit.side,
+                okx_position_exists: true,
+                source: "okx_actual_without_bot_ledger_evidence",
+                action: "BLOCK_THIS_SYMBOL_ONLY",
+                global_trade_blocked: false,
+                detail: "Position exists on OKX without bot ownership evidence for this symbol:side."
+              });
+            }
           }
         }
       }
     }
 
-    // Also include keys from sync mismatch in symbol-level block
+    // Ledger-only stale keys must not trigger automated-management blocks.
     for (const mk of syncSnap.mismatched_keys) {
+      if (
+        !shouldBlockAutomatedManagementForSyncKey({
+          key: mk,
+          sync: syncSnap,
+          paperOpens
+        })
+      ) {
+        continue;
+      }
       const [msym, mside] = mk.split(":");
       const paperRow = paperOpens.find(p => `${p.symbol}:${p.side}` === mk);
       const okxRow = syncSnap.okx_positions_preview.find(rv => `${rv.symbol}:${rv.side}` === mk);
@@ -1853,7 +1874,7 @@ export class PaperEngine {
           side: mside,
           sync_status: syncSnap.sync_status,
           action: "BLOCK_AUTOMATED_MANAGEMENT",
-          detail: `Sync mismatch (${syncSnap.sync_status}) detected. Enforcing initial manual reconciliation block for ${mk}.`
+          detail: `True external manual / OKX-only mismatch detected for ${mk}.`
         });
       }
 
@@ -2279,8 +2300,8 @@ export class PaperEngine {
       this.freshTickRequiredAfterReadiness === true &&
       this.readinessFreshTickCompletedCycles < this.readinessFreshTickRequiredCycles;
     const externalManualBlocked =
-      this.symbolExternalManualBlocked.has("BTCUSDT:long") ||
-      this.symbolExternalManualBlocked.has("BTCUSDT:short");
+      (okxActualSide === "long" && this.symbolExternalManualBlocked.has("BTCUSDT:long")) ||
+      (okxActualSide === "short" && this.symbolExternalManualBlocked.has("BTCUSDT:short"));
 
     const isNormalMatchedOpen =
       okxActualSide !== "none" &&
@@ -5263,7 +5284,17 @@ export class PaperEngine {
 
     let opensAfterClose = await this.positions.loadOpenAll();
     {
-      const btcOpen = opensAfterClose.find((o) => o.symbol === "BTCUSDT");
+      const btcSync = buildLedgerOkxPositionSyncSnapshot(
+        opensAfterClose,
+        this.lastLivePositionsPayload,
+        this.instrumentCache
+      );
+      const btcOkx = btcSync.okx_positions_preview.find((p) => p.symbol === "BTCUSDT");
+      const btcOpen = resolveAuthoritativePaperOpenForSymbol(
+        opensAfterClose,
+        "BTCUSDT",
+        btcOkx?.side ?? null
+      );
       this.lastBtcPaperSideSnapshot = {
         side: btcOpen ? String(btcOpen.side).toLowerCase() : "none",
         reconcileState: btcOpen ? String(btcOpen.reconcileState ?? "none") : "none"

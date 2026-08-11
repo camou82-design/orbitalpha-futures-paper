@@ -12,6 +12,26 @@ export {
 } from "./paperClosedHistoryNormalize";
 export type { NormalizedPaperClosedRow, ClosedRowDisplayFields } from "./paperClosedHistoryNormalize";
 import { readLastLines } from "./file-utils";
+import {
+  classifyLedgerOpenRowsForDisplay,
+  isAuthoritativeOkxPositionSnapshotForDisplay
+} from "./position-reconcile-classification";
+
+export {
+  classifyLedgerOpenRowsForDisplay,
+  isAuthoritativeOkxPositionSnapshotForDisplay,
+  mapLedgerRowsToStaleReconcile,
+  buildOkxActualKeySetFromEngineState,
+  buildOkxActualKeySetFromSync,
+  hasBotOwnershipEvidenceOnLedgerRow,
+  isLedgerOnlyStaleKey,
+  isOkxOnlyKey,
+  isTrueExternalManualClassification,
+  ledgerPositionKey,
+  normalizePositionSide,
+  resolveAuthoritativePaperOpenForSymbol,
+  shouldBlockAutomatedManagementForSyncKey
+} from "./position-reconcile-classification";
 function isRoutingKind(x: unknown): x is PaperEngineRoutingKind {
   return x === "RANGE" || x === "TREND" || x === "IDLE";
 }
@@ -234,60 +254,11 @@ function isPaperLedgerPositionOpen(x: unknown): boolean {
   return st === undefined || st === "open";
 }
 
-export function isAuthoritativeOkxPositionSnapshotForDisplay(engineState: unknown): boolean {
-  if (!engineState || typeof engineState !== "object") return false;
-  const es = engineState as Record<string, unknown>;
-  return (
-    es.position_source === "okx_actual" &&
-    es.okx_signed_rest_ready === true &&
-    es.okx_positions_ok === true
-  );
-}
-
-export function okxActualPositionsEmptyForDisplay(engineState: unknown): boolean {
-  if (!engineState || typeof engineState !== "object") return false;
-  const es = engineState as Record<string, unknown>;
-  const notional = es.okx_total_position_notional_usdt;
-  const parseSource = es.okx_position_parse_source;
-  const sync = es.ledger_okx_position_sync;
-  const syncStatus =
-    sync && typeof sync === "object"
-      ? String((sync as Record<string, unknown>).sync_status ?? "")
-      : "";
-  const okxPreview =
-    sync && typeof sync === "object" && Array.isArray((sync as Record<string, unknown>).okx_positions_preview)
-      ? ((sync as Record<string, unknown>).okx_positions_preview as unknown[])
-      : null;
-  const okxPreviewEmpty = okxPreview == null || okxPreview.length === 0;
-  return (
-    (notional === 0 || notional === null) &&
-    parseSource === "no_open_positions" &&
-    (syncStatus === "LEDGER_ONLY" || okxPreviewEmpty)
-  );
-}
-
-export function mapLedgerRowsToStaleReconcile(ledgerOpen: unknown[]): unknown[] {
-  return ledgerOpen.map((row) => {
-    const base = row && typeof row === "object" ? (row as Record<string, unknown>) : {};
-    return {
-      ...base,
-      status: "ledger_stale_reconcile",
-      displayReconciliationState: "ledger_stale_reconcile",
-      displaySource: "paper_ledger_stale",
-      isActivePosition: false
-    };
-  });
-}
-
 export function deriveLedgerStalePositionsForDisplay(
   engineState: unknown,
   openPositions: unknown[]
 ): unknown[] {
-  const ledgerOpen = Array.isArray(openPositions) ? openPositions.filter(isPaperLedgerPositionOpen) : [];
-  if (ledgerOpen.length === 0) return [];
-  if (!isAuthoritativeOkxPositionSnapshotForDisplay(engineState)) return [];
-  if (!okxActualPositionsEmptyForDisplay(engineState)) return [];
-  return mapLedgerRowsToStaleReconcile(ledgerOpen);
+  return classifyLedgerOpenRowsForDisplay(engineState, openPositions).stale;
 }
 
 /**
@@ -298,13 +269,9 @@ export function deriveLedgerStalePositionsForDisplay(
 export function deriveCurrentPositionsForDisplay(engineState: unknown, openPositions: unknown[]): unknown[] {
   const ledgerOpen = Array.isArray(openPositions) ? openPositions.filter(isPaperLedgerPositionOpen) : [];
   if (ledgerOpen.length > 0) {
-    if (
-      isAuthoritativeOkxPositionSnapshotForDisplay(engineState) &&
-      okxActualPositionsEmptyForDisplay(engineState)
-    ) {
-      return [];
-    }
-    return ledgerOpen;
+    const { active } = classifyLedgerOpenRowsForDisplay(engineState, ledgerOpen);
+    if (active.length > 0) return active;
+    if (isAuthoritativeOkxPositionSnapshotForDisplay(engineState)) return [];
   }
 
   if (!engineState || typeof engineState !== "object") return [];

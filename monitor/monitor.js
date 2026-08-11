@@ -330,6 +330,64 @@
     return s && typeof s === "object" ? s : null;
   }
 
+  function okxActualKeySet(sync) {
+    const keys = new Set();
+    if (!sync || !Array.isArray(sync.okx_positions_preview)) return keys;
+    for (const row of sync.okx_positions_preview) {
+      if (!row || !row.symbol) continue;
+      const side = row.side === "short" ? "short" : "long";
+      keys.add(String(row.symbol) + ":" + side);
+    }
+    return keys;
+  }
+
+  function isLedgerOnlyStaleKey(sync, key) {
+    if (!sync) return false;
+    const okxHas = Array.isArray(sync.okx_positions_preview)
+      && sync.okx_positions_preview.some((r) => r && String(r.symbol) + ":" + (r.side === "short" ? "short" : "long") === key);
+    const paperHas = Array.isArray(sync.paper_positions_preview)
+      && sync.paper_positions_preview.some((r) => r && String(r.symbol) + ":" + (r.side === "short" ? "short" : "long") === key);
+    return paperHas && !okxHas;
+  }
+
+  function isOkxOnlyKey(sync, key) {
+    if (!sync) return false;
+    const okxHas = Array.isArray(sync.okx_positions_preview)
+      && sync.okx_positions_preview.some((r) => r && String(r.symbol) + ":" + (r.side === "short" ? "short" : "long") === key);
+    const paperHas = Array.isArray(sync.paper_positions_preview)
+      && sync.paper_positions_preview.some((r) => r && String(r.symbol) + ":" + (r.side === "short" ? "short" : "long") === key);
+    return okxHas && !paperHas;
+  }
+
+  function hasBotOwnershipEvidence(pos) {
+    if (!pos || typeof pos !== "object") return false;
+    if (pos.isV2Authority === true) return true;
+    const auth = String(pos.authoritySourceAtEntry || pos.authority || "").toLowerCase();
+    if (auth === "v2") return true;
+    if (String(pos.exchangeClOrdId || "").startsWith("p")) return true;
+    return false;
+  }
+
+  function isTrueExternalManualForDisplay(pos, bundle) {
+    if (!pos) return false;
+    const ls = String(pos.lifecycleState || "");
+    if (ls === "EXTERNAL_MANUAL_POSITION" || ls === "OPERATOR_MANAGED") return true;
+    if (pos.manualOwnershipLatch === true && String(pos.manualOwnershipLatchStrength || "") === "STRONG") return true;
+    const sync = ledgerOkxSync(bundle);
+    if (!sync) return false;
+    const key = String(pos.symbol || "") + ":" + (pos.side === "short" ? "short" : "long");
+    if (!isOkxOnlyKey(sync, key)) return false;
+    return !hasBotOwnershipEvidence(pos);
+  }
+
+  function syncMismatchIsLedgerStaleOnly(bundle) {
+    const sync = ledgerOkxSync(bundle);
+    if (!sync || sync.sync_status !== "KEY_MISMATCH") return false;
+    const mismatched = Array.isArray(sync.mismatched_keys) ? sync.mismatched_keys : [];
+    if (mismatched.length === 0) return false;
+    return mismatched.every((k) => isLedgerOnlyStaleKey(sync, k));
+  }
+
   function okxExchangePositionForSymbol(bundle, sym) {
     const sync = ledgerOkxSync(bundle);
     const prev = sync && Array.isArray(sync.okx_positions_preview) ? sync.okx_positions_preview : [];
@@ -604,7 +662,7 @@
     const sync = ledgerOkxSync(bundle);
     const st = sync && typeof sync.sync_status === "string" ? sync.sync_status : null;
     const detail = sync && typeof sync.detail === "string" && sync.detail.trim().length > 0 ? sync.detail : "";
-    const mismatch = st === "OKX_ONLY" || st === "LEDGER_ONLY" || st === "KEY_MISMATCH";
+    const mismatch = st === "OKX_ONLY" || st === "LEDGER_ONLY" || (st === "KEY_MISMATCH" && !syncMismatchIsLedgerStaleOnly(bundle));
     function subMismatch(extra) {
       let s = "RECONCILE_MISMATCH";
       if (extra) s += " · " + extra;
@@ -661,10 +719,13 @@
     const title =
       opens.length === 1 ? sides[0] + " 보유 중" : opens.length + "개 포지션 보유 · " + sides.join(", ");
     if (mismatch) {
+      const staleOnly = syncMismatchIsLedgerStaleOnly(bundle);
       return {
         title,
-        sub: subMismatch(st || ""),
-        badge: "badge-warn",
+        sub: staleOnly
+          ? "ledger 정리 대기 · 실제 포지션 기준 감시 유지"
+          : subMismatch(st || ""),
+        badge: staleOnly ? "badge-warn" : "badge-warn",
         cardClass: "hero-card--warn"
       };
     }
@@ -676,6 +737,9 @@
     if (pos.sourceSignal === "okx_reconcile_adopted" || pos.lifecycleState === "CLOSE_ONLY_MANAGED") {
       if (pos.lifecycleState === "CLOSE_ONLY_MANAGED") return { text: "Close-only 관리", cls: "badge-warn" };
       return { text: "복구 관리", cls: "badge-warn" };
+    }
+    if (pos.lifecycleState === "EXTERNAL_MANUAL_MANAGED" || pos.lifecycleState === "EXTERNAL_MANUAL_POSITION") {
+      return { text: "외부 수동 관리", cls: "badge-warn" };
     }
     const r = pos.regimeAtEntry || pos.executorAtEntry || pos.strategy;
     if (r === "RANGE" || r === "R") return { text: "R", cls: "badge-range" };
@@ -1344,7 +1408,8 @@
       if (s === "REMOTE_UNAVAILABLE") return "확인 불가(원격 응답 없음)";
       if (s === "OKX_ONLY") return "OKX에만 있음 (장부 누락)";
       if (s === "LEDGER_ONLY") return "장부에만 있음 (OKX 없음)";
-      if (s === "KEY_MISMATCH") return "키 불일치";
+      if (s === "KEY_MISMATCH") return "ledger 정리 대기";
+      if (s === "ENGINE_LEDGER_STALE" || s === "ENGINE_RECONCILE_PENDING") return "ledger 정리 대기";
       return esc(String(v));
     }
 
@@ -1605,6 +1670,12 @@
         const markDisp = mark !== null ? formatPrice(mark) : "N/A";
 
         const rb = getRegimeBadge(pos);
+        const trueExternalManual = isTrueExternalManualForDisplay(pos, bundle);
+        const reconcileBanner = trueExternalManual
+          ? `<div class="v2-pos-fallback-banner">외부 수동 개입 확인 · ${esc(String(pos.reconcileState || pos.ledgerSyncStatus || "EXTERNAL_MANUAL"))}</div>`
+          : syncMismatchIsLedgerStaleOnly(bundle)
+            ? `<div class="v2-pos-fallback-banner">ledger 정리 대기 · OKX actual 기준 감시 유지</div>`
+            : "";
         const badgeHtml = rb ? `<span class="badge ${rb.cls}" style="margin-top:0; margin-left:0.5rem; vertical-align:middle;">${esc(rb.text)}</span>` : "";
 
         const isTrend = (pos.regimeAtEntry || pos.executorAtEntry || pos.strategy) === "TREND";
@@ -1644,7 +1715,7 @@
 
         return `
         <article class="${cardClass}">
-          ${isOkxFallback ? `<div class="v2-pos-fallback-banner">⚠ 레저 포지션 미확인 — OKX 스냅샷 폴백 데이터입니다. 실제 포지션 여부를 직접 확인하세요.</div>` : ""}
+          ${isOkxFallback ? `<div class="v2-pos-fallback-banner">⚠ 레저 포지션 미확인 — OKX 스냅샷 폴백 데이터입니다. 실제 포지션 여부를 직접 확인하세요.</div>` : reconcileBanner}
           <div class="pos-money-strip pos-money-strip--primary" aria-label="포지션 손익 5항목">
             <div class="pos-money-cell">
               <span class="pos-money-num tabular-nums">${esc(fmtUsdPosNoDecimal(sizeUsd))}</span>
