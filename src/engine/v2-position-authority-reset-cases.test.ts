@@ -9,6 +9,8 @@ import {
   isOpenLedgerRow,
   resolveAuthoritativeFlatPreflightOutcome
 } from "../engine-v2/position/authoritative-flat-reconcile";
+import { isOpenLedgerTerminalCleanupBlocked } from "../engine-v2/lifecycle/pending-finalize";
+import { deriveLiveBalanceAuthority } from "../engine-v2/live-account/balance-authority";
 import { classifyPositionSizeDelta } from "../engine-v2/position/manual-reduce-rebase";
 import { resolveV2CloseContractAuthority } from "../engine-v2/execution/close-contract-authority";
 import { evaluateReduceProtectiveReensure } from "../engine-v2/execution/reduce-protective-reensure";
@@ -646,6 +648,142 @@ function v2Ledger(overrides: Partial<PaperOpenPositionRecord> = {}): PaperOpenPo
     nowMs
   });
   assertEq(intentOnly.attribution, "EXTERNAL_MANUAL_FULL_CLOSE", "REG 7 candidate_lost intent only");
+}
+
+// BLOCKER 1 — finalizePending + remote absent + authoritative ready + zero=1 => ledger hold via preflight
+{
+  const ledger = v2Ledger({ finalizePending: true, lifecycleState: "BOT_V2_MANAGED", status: "open" });
+  assertTrue(isOpenLedgerTerminalCleanupBlocked(ledger), "BLOCKER 1 terminal cleanup blocked");
+  assertTrue(
+    isAuthoritativeFlatPreflightCandidate({
+      remotePosExists: false,
+      isNew: false,
+      lifecycleState: ledger.lifecycleState,
+      ledgerExists: isOpenLedgerRow({ okxContracts: ledger.okxContracts, status: ledger.status })
+    }),
+    "BLOCKER 1 preflight candidate despite finalizePending"
+  );
+  const outcome = resolveAuthoritativeFlatPreflightOutcome({
+    candidate: true,
+    authoritativeFetchReady: true,
+    ledgerExists: true,
+    zeroConfirmCount: 1,
+    finalizePending: true,
+    finalizeSucceeded: false
+  });
+  assertEq(outcome, "HOLD_UNCONFIRMED_ZERO", "BLOCKER 1 hold on first zero");
+}
+
+// BLOCKER 2 — finalizePending + zero=2 + finalize fail => authoritative prune
+{
+  const outcome = resolveAuthoritativeFlatPreflightOutcome({
+    candidate: true,
+    authoritativeFetchReady: true,
+    ledgerExists: true,
+    zeroConfirmCount: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+    finalizePending: true,
+    finalizeSucceeded: false
+  });
+  assertEq(outcome, "PRUNE_UNRESOLVED_FINALIZE", "BLOCKER 2 prune unresolved finalize");
+}
+
+// BLOCKER 3 — finalizePending + zero=2 + finalize success => finalize path
+{
+  const outcome = resolveAuthoritativeFlatPreflightOutcome({
+    candidate: true,
+    authoritativeFetchReady: true,
+    ledgerExists: true,
+    zeroConfirmCount: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+    finalizePending: true,
+    finalizeSucceeded: true
+  });
+  assertEq(outcome, "FINALIZE_SUCCEEDED", "BLOCKER 3 finalize success path");
+}
+
+// BLOCKER 4 — PARTIAL_ACTIVE + finalizePending + actual zero => 2-cycle prune
+{
+  const outcome = resolveAuthoritativeFlatPreflightOutcome({
+    candidate: isAuthoritativeFlatPreflightCandidate({
+      remotePosExists: false,
+      isNew: false,
+      lifecycleState: "PARTIAL_ACTIVE",
+      ledgerExists: true
+    }),
+    authoritativeFetchReady: true,
+    ledgerExists: true,
+    zeroConfirmCount: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+    finalizePending: true,
+    finalizeSucceeded: false
+  });
+  assertEq(outcome, "PRUNE_UNRESOLVED_FINALIZE", "BLOCKER 4 PARTIAL_ACTIVE prune");
+}
+
+// BLOCKER 5 — BOT_V2_MANAGED + finalizePending + actual zero => 2-cycle prune
+{
+  const outcome = resolveAuthoritativeFlatPreflightOutcome({
+    candidate: isAuthoritativeFlatPreflightCandidate({
+      remotePosExists: false,
+      isNew: false,
+      lifecycleState: "BOT_V2_MANAGED",
+      ledgerExists: true
+    }),
+    authoritativeFetchReady: true,
+    ledgerExists: true,
+    zeroConfirmCount: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+    finalizePending: true,
+    finalizeSucceeded: false
+  });
+  assertEq(outcome, "PRUNE_UNRESOLVED_FINALIZE", "BLOCKER 5 BOT_V2_MANAGED prune");
+}
+
+// BLOCKER 6 — remotePos exists => not flat preflight candidate, terminal block inactive when remote present
+{
+  assertFalse(
+    isAuthoritativeFlatPreflightCandidate({
+      remotePosExists: true,
+      isNew: false,
+      lifecycleState: "BOT_V2_MANAGED",
+      ledgerExists: true
+    }),
+    "BLOCKER 6 no flat preflight when remote exists"
+  );
+  const outcome = resolveAuthoritativeFlatPreflightOutcome({
+    candidate: false,
+    authoritativeFetchReady: true,
+    ledgerExists: true,
+    zeroConfirmCount: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+    finalizePending: true,
+    finalizeSucceeded: false
+  });
+  assertEq(outcome, "NOT_APPLICABLE", "BLOCKER 6 preflight not applicable with remote");
+}
+
+// BLOCKER 7 — pruned positions input => paper balance notional zero
+{
+  const stalePositions = [
+    { symbol: "BTCUSDT", side: "long", sizeUsd: 5.28, leverage: 10 },
+    { symbol: "ETHUSDT", side: "long", sizeUsd: 5.29, leverage: 10 }
+  ];
+  const before = deriveLiveBalanceAuthority({
+    okxAuthMode: "demo",
+    balancePayload: null,
+    balanceFetchError: null,
+    okxPositionsPayload: [],
+    positions: stalePositions
+  });
+  assertTrue(
+    before.paper_position_estimated_notional_usdt > 0,
+    "BLOCKER 7 stale positions contribute notional"
+  );
+  const after = deriveLiveBalanceAuthority({
+    okxAuthMode: "demo",
+    balancePayload: null,
+    balanceFetchError: null,
+    okxPositionsPayload: [],
+    positions: []
+  });
+  assertEq(after.paper_position_estimated_notional_usdt, 0, "BLOCKER 7 pruned positions zero notional");
+  assertEq(after.position_margin_lines.length, 0, "BLOCKER 7 no margin lines after prune");
 }
 
 console.log("v2-position-authority-reset-cases: ALL PASS");

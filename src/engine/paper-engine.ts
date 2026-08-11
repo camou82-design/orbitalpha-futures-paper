@@ -3230,11 +3230,29 @@ export class PaperEngine {
         }
       }
 
-      // --- EXTERNAL MANUAL RESIDUE PRUNING (Quiet) ---
+      const symbolSyncStatus = reconcileSyncSnap.mismatched_keys.includes(key)
+        ? reconcileSyncSnap.sync_status
+        : "ALIGNED";
+
+      const flatPreflight = await this.processAuthoritativeFlatReconcilePreflight(
+        open,
+        remotePos,
+        nowTs,
+        isNew,
+        symbolSyncStatus,
+        next
+      );
+      if (flatPreflight.consumed) {
+        if (flatPreflight.ledgerModified) ledgerModified = true;
+        continue;
+      }
+
       if (!remotePos && !isNew && isOpenLedgerTerminalCleanupBlocked(open)) {
         next.push(open);
         continue;
       }
+
+      // --- EXTERNAL MANUAL RESIDUE PRUNING (Quiet) ---
       // If OKX actual position is zero and paper open position exists as manual residue, prune it quietly.
       if (!remotePos && !isNew) {
         const isManualFlagged = open.lifecycleState === "EXTERNAL_MANUAL_POSITION";
@@ -3259,23 +3277,6 @@ export class PaperEngine {
           this.symbolExternalManualBlocked.delete(key);
           continue; // Skip pushing to next, effectively pruning it.
         }
-      }
-
-      const symbolSyncStatus = reconcileSyncSnap.mismatched_keys.includes(key)
-        ? reconcileSyncSnap.sync_status
-        : "ALIGNED";
-
-      const flatPreflight = await this.processAuthoritativeFlatReconcilePreflight(
-        open,
-        remotePos,
-        nowTs,
-        isNew,
-        symbolSyncStatus,
-        next
-      );
-      if (flatPreflight.consumed) {
-        if (flatPreflight.ledgerModified) ledgerModified = true;
-        continue;
       }
 
       // 1. Handle Entry Pending States (Normalization)
