@@ -998,6 +998,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
               : "none";
     const exitPreReversalConfirmed =
         (execution.metadata as Record<string, unknown> | undefined)?.reversal_confirmed === true;
+    const exitPreMeta = execution.metadata as Record<string, unknown> | undefined;
+    const exitPreBoxBreakSide = authoritativeInput.snapshot.boxBreakSide ?? "none";
+    const exitInvalidationBreachConfirmed =
+        exitPreReversalConfirmed === true ||
+        exitPreMeta?.invalidation_breach_confirmed === true ||
+        exitPreMeta?.structural_break_confirmed === true ||
+        exitPreMeta?.confirmed_candle_close_beyond_invalidation === true;
+    const exitBoxBreakConfirmed =
+        exitPreMeta?.box_break_confirmed === true ||
+        (exitPreReversalConfirmed === true &&
+            String(exitPreBoxBreakSide) !== "none" &&
+            String(exitPreBoxBreakSide).toLowerCase() !== "unknown");
     const exitPolicy = evaluateV2ExitPolicy({
         symbol: String(input.symbol),
         v2State,
@@ -1012,7 +1024,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         },
         trendSideCandidate: exitPreTrendSideCandidate,
         rangeSideCandidate: exitPreRangeSideCandidate,
-        reversalConfirmed: exitPreReversalConfirmed
+        reversalConfirmed: exitPreReversalConfirmed,
+        invalidationBreachConfirmed: exitInvalidationBreachConfirmed,
+        structuralBreakConfirmed: exitPreMeta?.structural_break_confirmed === true,
+        boxBreakConfirmed: exitBoxBreakConfirmed
     });
     if (
         exitPolicy.hasPosition &&

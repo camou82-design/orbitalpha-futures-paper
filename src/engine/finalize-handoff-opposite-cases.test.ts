@@ -5,6 +5,7 @@ import {
   isOpenLedgerTerminalCleanupBlocked,
   buildClosedRowFromPendingFinalize
 } from "../engine-v2/lifecycle/pending-finalize";
+import { isPositionCycleFinalizeDuplicate } from "../engine-v2/lifecycle/completed-trade";
 import type { PaperOpenPositionRecord } from "../models/types";
 import type { MarketJudgmentOutput } from "../engine-v2/types";
 
@@ -214,7 +215,9 @@ async function main() {
         qualityScore: 50
       },
       trendSideCandidate: "short",
-      rangeSideCandidate: "short"
+      rangeSideCandidate: "short",
+      boxBreakConfirmed: true,
+      invalidationBreachConfirmed: true
     });
     ok =
       run(
@@ -259,6 +262,112 @@ async function main() {
         "HYST D",
         r.action === "REDUCE" || r.oppositeHysteresisState === "CONFIRMED_OPPOSITE_REDUCE",
         `${r.action}|${r.oppositeHysteresisState}`
+      ) && ok;
+  }
+
+  // HYST E: single-cycle EMA/box flicker without confirmed invalidation → HOLD not THESIS_INVALIDATED_EXIT
+  {
+    const r = evaluateV2ExitPolicy({
+      symbol: "ETHUSDT",
+      v2State: baseV2State("long"),
+      judgment: baseJudgment({ regime_final: "TREND", transitionPhase: "CONFLICT" }),
+      snapshot: {
+        boxPos: 0.72,
+        boxBreakSide: "none",
+        emaGap: -0.0003,
+        trendWeaknessScore: 0.42,
+        rangeConfidence: 0.55,
+        qualityScore: 65
+      },
+      trendSideCandidate: "long",
+      rangeSideCandidate: "short",
+      reversalConfirmed: false,
+      invalidationBreachConfirmed: false,
+      boxBreakConfirmed: false
+    });
+    ok =
+      run(
+        "HYST E",
+        r.action !== "FULL_EXIT" &&
+          r.oppositeHysteresisState !== "THESIS_INVALIDATED_EXIT" &&
+          (r.oppositeHysteresisState === "WEAK_OPPOSITE_HOLD" ||
+            r.oppositeHysteresisState === "PROFIT_PROTECT_HOLD"),
+        `${r.action}|${r.reason}|${r.oppositeHysteresisState}`
+      ) && ok;
+  }
+
+  // HYST F: confirmed invalidation breach → immediate FULL_EXIT (THESIS_INVALIDATED_EXIT)
+  {
+    const r = evaluateV2ExitPolicy({
+      symbol: "ETHUSDT",
+      v2State: baseV2State("long"),
+      judgment: baseJudgment({ regime_final: "TREND", trendPhase: "DOWN" }),
+      snapshot: {
+        boxPos: 0.15,
+        boxBreakSide: "lower",
+        emaGap: -0.003,
+        trendWeaknessScore: 0.4,
+        rangeConfidence: 0.4,
+        qualityScore: 50
+      },
+      trendSideCandidate: "short",
+      rangeSideCandidate: "short",
+      reversalConfirmed: true,
+      invalidationBreachConfirmed: true,
+      boxBreakConfirmed: true
+    });
+    ok =
+      run(
+        "HYST F",
+        r.action === "FULL_EXIT" &&
+          r.oppositeHysteresisState === "THESIS_INVALIDATED_EXIT" &&
+          r.shouldExit === true,
+        `${r.action}|${r.reason}|${r.oppositeHysteresisState}`
+      ) && ok;
+  }
+
+  // FINALIZE D: restart reload preserves pending finalize + idempotent history guard
+  {
+    const open = botOpen({
+      finalizePending: true,
+      reconcileState: "OKX_ZERO_UNCONFIRMED",
+      okxZeroUnconfirmedSince: Date.now() - 5000,
+      pendingFinalizeFlowId: "ETHUSDT:long:1786408899302",
+      pendingFinalizePositionCycleId: "ETHUSDT:long:1786408899302",
+      pendingFinalizeEntryAvgPx: 1872.29,
+      pendingFinalizeExitAvgPx: 1877.57,
+      pendingFinalizeFinalCloseReason: "V2_EXIT",
+      pendingFinalizeFinalFillAt: 1786409999999,
+      pendingFinalizeCumulativePnlUsdNet: 0.42,
+      pendingFinalizeCumulativeFeeUsd: 0.04,
+      pendingFinalizePartialReduceCount: 0,
+      pendingFinalizeCloseReason: "v2_exit_authority",
+      pendingFinalizeCloseSource: "BOT_EXECUTION_ATTRIBUTION",
+      pendingFinalizeTradeSource: "BOT_V2"
+    });
+    const reloaded = JSON.parse(JSON.stringify(open)) as PaperOpenPositionRecord;
+    const row = buildClosedRowFromPendingFinalize(reloaded, Date.now());
+    const history: unknown[] = [];
+    const firstDuplicate =
+      row != null ? isPositionCycleFinalizeDuplicate(row, history) : true;
+    if (row != null) history.push(row);
+    const secondDuplicate =
+      row != null ? isPositionCycleFinalizeDuplicate(row, history) : false;
+    ok =
+      run(
+        "FINALIZE D",
+        reloaded.finalizePending === true &&
+          isOpenLedgerTerminalCleanupBlocked(reloaded) === true &&
+          row != null &&
+          row.positionCycleId === "ETHUSDT:long:1786408899302" &&
+          firstDuplicate === false &&
+          secondDuplicate === true,
+        JSON.stringify({
+          reloaded: reloaded.finalizePending,
+          cycleId: row?.positionCycleId,
+          firstDup: firstDuplicate,
+          secondDup: secondDuplicate
+        })
       ) && ok;
   }
 

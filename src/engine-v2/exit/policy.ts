@@ -166,7 +166,10 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
             proposedReason: reason,
             proposedReduceRatio: reduceRatio,
             reversalConfirmed: args.reversalConfirmed,
-            sameCycleExitConsumed: args.sameCycleExitConsumed
+            sameCycleExitConsumed: args.sameCycleExitConsumed,
+            invalidationBreachConfirmed: args.invalidationBreachConfirmed,
+            structuralBreakConfirmed: args.structuralBreakConfirmed,
+            boxBreakConfirmed: args.boxBreakConfirmed
         });
         action = hysteresisBase.action;
         reason = hysteresisBase.reason;
@@ -223,7 +226,10 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
                 proposedReason: profitReason,
                 proposedReduceRatio: profitReduce,
                 reversalConfirmed: args.reversalConfirmed,
-                sameCycleExitConsumed: args.sameCycleExitConsumed
+                sameCycleExitConsumed: args.sameCycleExitConsumed,
+                invalidationBreachConfirmed: args.invalidationBreachConfirmed,
+                structuralBreakConfirmed: args.structuralBreakConfirmed,
+                boxBreakConfirmed: args.boxBreakConfirmed
             });
             action = profitHysteresis.action;
             reason = profitHysteresis.reason;

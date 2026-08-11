@@ -25,6 +25,10 @@ export type EvaluateOppositeHysteresisArgs = Readonly<{
     proposedReduceRatio: number;
     reversalConfirmed?: boolean;
     sameCycleExitConsumed?: boolean;
+    /** Fresh confirmed invalidation — required for THESIS_INVALIDATED_EXIT. */
+    invalidationBreachConfirmed?: boolean;
+    structuralBreakConfirmed?: boolean;
+    boxBreakConfirmed?: boolean;
 }>;
 
 export type OppositeHysteresisResult = Readonly<{
@@ -59,7 +63,7 @@ function isSameSideTrend(
     return false;
 }
 
-function detectInvalidationBreached(input: EvaluateOppositeHysteresisArgs): boolean {
+function detectSoftInvalidationSignal(input: EvaluateOppositeHysteresisArgs): boolean {
     const { positionSide, emaGap, trendWeaknessScore, boxBreakSide, judgment } = input;
     if (positionSide === "long") {
         if (emaGap < 0 || trendWeaknessScore >= 0.75) return true;
@@ -72,6 +76,19 @@ function detectInvalidationBreached(input: EvaluateOppositeHysteresisArgs): bool
     return false;
 }
 
+function detectConfirmedInvalidationBreach(input: EvaluateOppositeHysteresisArgs): boolean {
+    if (!detectSoftInvalidationSignal(input)) return false;
+    if (input.invalidationBreachConfirmed === true) return true;
+    if (input.structuralBreakConfirmed === true) return true;
+    const { positionSide, boxBreakSide } = input;
+    if (input.boxBreakConfirmed === true) {
+        if (positionSide === "long" && boxBreakSide === "lower") return true;
+        if (positionSide === "short" && boxBreakSide === "upper") return true;
+    }
+    if (input.reversalConfirmed === true && detectSoftInvalidationSignal(input)) return true;
+    return false;
+}
+
 function detectOppositeConfirmationFresh(input: EvaluateOppositeHysteresisArgs): boolean {
     if (input.positionSide === "none") return false;
     if (input.reversalConfirmed === true) return true;
@@ -80,14 +97,18 @@ function detectOppositeConfirmationFresh(input: EvaluateOppositeHysteresisArgs):
     if (judgment.transitionPhase === "CONFLICT" && judgment.subtype === "TRANSITION_CONFLICT") {
         return true;
     }
-    if (positionSide === "long" && boxBreakSide === "lower") return true;
-    if (positionSide === "short" && boxBreakSide === "upper") return true;
+    if (positionSide === "long" && boxBreakSide === "lower") {
+        return input.boxBreakConfirmed === true;
+    }
+    if (positionSide === "short" && boxBreakSide === "upper") {
+        return input.boxBreakConfirmed === true;
+    }
     return false;
 }
 
 function isThesisValid(input: EvaluateOppositeHysteresisArgs): boolean {
     if (input.positionSide === "none") return false;
-    if (detectInvalidationBreached(input)) return false;
+    if (detectConfirmedInvalidationBreach(input)) return false;
     const shockAgainst =
         (input.positionSide === "long" && input.judgment.shockPhase === "DOWN_SHOCK") ||
         (input.positionSide === "short" && input.judgment.shockPhase === "UP_SHOCK");
@@ -125,7 +146,8 @@ export function evaluateOppositePositionHysteresis(
         };
     }
 
-    const invalidationBreached = detectInvalidationBreached(input);
+    const softInvalidationSignal = detectSoftInvalidationSignal(input);
+    const invalidationBreached = detectConfirmedInvalidationBreach(input);
     const oppositeConfirmationFresh = detectOppositeConfirmationFresh(input);
     const rangeOpposite = isOppositeCandidate(positionSide, rangeSideCandidate);
     const trendOpposite = isOppositeCandidate(positionSide, trendSideCandidate);
@@ -150,6 +172,19 @@ export function evaluateOppositePositionHysteresis(
 
     if (invalidationBreached && proposedAction === "FULL_EXIT") {
         hysteresisState = "THESIS_INVALIDATED_EXIT";
+    } else if (
+        softInvalidationSignal &&
+        !invalidationBreached &&
+        (proposedAction === "FULL_EXIT" ||
+            proposedReason === "TREND_FULL_EXIT_EMA60_INVALID" ||
+            proposedReason === "RANGE_FULL_EXIT_BOX_BREAK")
+    ) {
+        action = "HOLD";
+        reason = "TREND_HOLD_VALID";
+        reduceRatio = 0;
+        hysteresisState =
+            profitProtectionActive && thesisValid ? "PROFIT_PROTECT_HOLD" : "WEAK_OPPOSITE_HOLD";
+        blockReason = "unconfirmed_invalidation_hold";
     } else if (
         oppositeConfirmationFresh &&
         !invalidationBreached &&

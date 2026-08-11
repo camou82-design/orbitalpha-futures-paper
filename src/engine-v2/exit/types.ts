@@ -77,4 +77,7 @@ export type EvaluateV2ExitPolicyArgs = Readonly<{
     rangeSideCandidate?: "long" | "short" | "none";
     reversalConfirmed?: boolean;
     sameCycleExitConsumed?: boolean;
+    invalidationBreachConfirmed?: boolean;
+    structuralBreakConfirmed?: boolean;
+    boxBreakConfirmed?: boolean;
 }>;
