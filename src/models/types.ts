@@ -948,6 +948,10 @@ export type PaperOpenPositionRecord = {
   manualOwnershipLatch?: boolean;
   manualOwnershipLatchReason?: string;
   manualOwnershipLatchAt?: number;
+  manualOwnershipLatchSource?: string;
+  manualOwnershipLatchStrength?: "STRONG" | "WEAK" | "LEGACY";
+  /** First observation of OKX missing position while paper still open (transient zero guard). */
+  okxZeroUnconfirmedSince?: number;
 
   /** Position cycle execution tracking (one cycle = one completed trade). */
   positionCycleId?: string;
@@ -1017,7 +1021,7 @@ export type PaperOpenPositionRecord = {
   partialPendingFundingRate?: number;
 
   lastCheckedAt?: number;
-  reconcileState?: "PENDING" | "MATCHED" | "FAILED" | "ADOPTED" | "RECONCILE_MISMATCH";
+  reconcileState?: "PENDING" | "MATCHED" | "FAILED" | "ADOPTED" | "RECONCILE_MISMATCH" | "OKX_ZERO_UNCONFIRMED";
   /** 진입 직후 보호구간 종료 시각(ms) */
   entryProtectionUntil?: number;
   /** 최초 진입 마진(USD). 미설정 시 `sizeUsd`만 사용(레거시). */

@@ -96,6 +96,13 @@ import {
   type PositionOwnershipResolveResult
 } from "../engine-v2/position/ownership-resolver";
 import {
+  applyManualOwnershipLatch,
+  clearManualOwnershipLatchFields,
+  buildFalseManualLatchRecoveryProof,
+  evaluateFalseManualLatchRecovery,
+  isStrongManualLatchSource
+} from "../engine-v2/position/manual-ownership-latch";
+import {
   buildPositionRealityReconcileProof,
   buildPositionTerminalCleanupProof,
   applyPositionTerminalCleanup
@@ -2587,6 +2594,12 @@ export class PaperEngine {
     }
 
     const okxPositions = okxPosRes.value;
+    const reconcileSyncSnap = buildLedgerOkxPositionSyncSnapshot(
+      rawOpens,
+      okxPositions,
+      this.instrumentCache
+    );
+    const OKX_ZERO_CONFIRM_MS = 30_000;
     const effectiveCloseOnlyMode = this.serverTradeControlState.close_only_mode || this.reconcileSafetyCloseOnly;
     const remoteMap = new Map<string, OkxRemotePositionAuthority>();
     for (const row of okxPositions) {
@@ -3393,9 +3406,37 @@ export class PaperEngine {
       if (
         open.lifecycleState === "OPEN" ||
         open.lifecycleState === "BOT_V2_MANAGED" ||
-        open.lifecycleState === "CLOSE_ONLY_MANAGED"
+        open.lifecycleState === "CLOSE_ONLY_MANAGED" ||
+        open.lifecycleState === "EXTERNAL_MANUAL_MANAGED"
       ) {
+        const symbolSyncStatus = reconcileSyncSnap.mismatched_keys.includes(key)
+          ? reconcileSyncSnap.sync_status
+          : "ALIGNED";
+
         if (!remotePos) {
+          const paperContracts = open.okxContracts ?? 0;
+          if (paperContracts > 0 && !isNew) {
+            if (open.okxZeroUnconfirmedSince == null) {
+              open.okxZeroUnconfirmedSince = nowTs;
+              open.reconcileState = "OKX_ZERO_UNCONFIRMED";
+              ledgerModified = true;
+              this.logger.warn("OKX_ZERO_UNCONFIRMED_PROOF", {
+                symbol: open.symbol,
+                side: open.side,
+                paper_contracts: paperContracts,
+                okx_contracts: 0,
+                sync_status: symbolSyncStatus,
+                action: "HOLD_LATCH_FORBIDDEN",
+                detail: "Transient OKX zero — awaiting fresh position snapshot confirmation"
+              });
+              next.push(open);
+              continue;
+            }
+            if (nowTs - open.okxZeroUnconfirmedSince < OKX_ZERO_CONFIRM_MS) {
+              next.push(open);
+              continue;
+            }
+          }
           this.logger.info(
             "V2_POSITION_REALITY_RECONCILE_PROOF",
             buildPositionRealityReconcileProof({
@@ -3416,6 +3457,11 @@ export class PaperEngine {
           continue;
         }
 
+        if (open.okxZeroUnconfirmedSince != null) {
+          open.okxZeroUnconfirmedSince = undefined;
+          ledgerModified = true;
+        }
+
         const reconcileResult = this.reconcileOpenPositionWithRemote(open, remotePos, nowTs, {
           isPartialPending,
           isClosePending
@@ -3424,12 +3470,51 @@ export class PaperEngine {
           ledgerModified = true;
         }
 
-        const ownership = this.resolveOpenPositionOwnership(open, remotePos);
+        const latchRecovery = evaluateFalseManualLatchRecovery({
+          ledger: open,
+          reconcileState: open.reconcileState,
+          okxActualContracts: remotePos.contracts,
+          okxActualPositionExists: true,
+          ledgerPaperContracts: open.okxContracts ?? null,
+          syncStatus: symbolSyncStatus,
+          explicitManualEvidence:
+            open.manualOwnershipLatch === true &&
+            isStrongManualLatchSource(
+              open.manualOwnershipLatchSource ?? open.manualOwnershipLatchReason
+            )
+        });
+        if (latchRecovery.shouldClear) {
+          const previousSource =
+            open.manualOwnershipLatchSource ?? open.manualOwnershipLatchReason ?? null;
+          clearManualOwnershipLatchFields(open);
+          ledgerModified = true;
+          this.logger.info(
+            "V2_FALSE_MANUAL_LATCH_RECOVERY_PROOF",
+            buildFalseManualLatchRecoveryProof({
+              symbol: open.symbol,
+              previous_latch_source: previousSource,
+              reconcile_state: open.reconcileState ?? symbolSyncStatus,
+              paper_contracts: open.okxContracts ?? null,
+              okx_contracts: remotePos.contracts,
+              bot_attribution: open.isV2Authority === true,
+              explicit_manual_evidence: false,
+              latch_cleared: true,
+              reason: latchRecovery.reason
+            })
+          );
+        }
+
+        const ownership = this.resolveOpenPositionOwnership(open, remotePos, {
+          syncStatus: symbolSyncStatus,
+          okxFetchReady: true
+        });
         if (ownership.manualLatchShouldBeActive && open.manualOwnershipLatch !== true) {
-          open.manualOwnershipLatch = true;
-          open.manualOwnershipLatchReason =
-            ownership.manualInterventionReason ?? "manual_intervention_detected";
-          open.manualOwnershipLatchAt = nowTs;
+          applyManualOwnershipLatch(open, {
+            at: nowTs,
+            source: ownership.manualLatchTriggerSource ?? "CONFIRMED_MANUAL_SIZE_CHANGE",
+            strength: ownership.manualLatchTriggerStrength ?? "STRONG",
+            reason: ownership.manualInterventionReason ?? "manual_intervention_detected"
+          });
           ledgerModified = true;
         }
         if (
@@ -3454,9 +3539,12 @@ export class PaperEngine {
               ledgerPaperContracts: open.okxContracts ?? null,
               ledgerEntryPrice: open.entryPrice ?? open.avgPx ?? null,
               okxAvgPx: remotePos.avgPx ?? null,
-              externalManualEvidence: ownership.externalManualEvidence,
+              explicitExternalManualEvidence: ownership.externalManualEvidence,
               symbolExternalManualBlocked: this.symbolExternalManualBlocked.has(key),
-              manualOwnershipLatchActive: open.manualOwnershipLatch === true
+              manualOwnershipLatchActive: open.manualOwnershipLatch === true,
+              syncStatus: symbolSyncStatus,
+              okxFetchReady: true,
+              reconcileState: open.reconcileState ?? null
             },
             ownership
           )
@@ -6718,10 +6806,18 @@ export class PaperEngine {
 
   private resolveOpenPositionOwnership(
     open: PaperOpenPositionRecord,
-    remote: OkxRemotePositionAuthority | null | undefined
+    remote: OkxRemotePositionAuthority | null | undefined,
+    context?: Readonly<{
+      syncStatus?: string | null;
+      okxFetchReady?: boolean;
+    }>
   ): PositionOwnershipResolveResult {
     const key = `${open.symbol}:${open.side}`;
     const manualLatchActive = open.manualOwnershipLatch === true;
+    const isManualExternalLifecycle =
+      open.lifecycleState === "EXTERNAL_MANUAL_POSITION" ||
+      open.lifecycleState === "OPERATOR_MANAGED" ||
+      open.lifecycleState === "EXTERNAL_MANUAL_MANAGED";
     return resolvePositionOwnership({
       symbol: String(open.symbol),
       side: open.side as "long" | "short",
@@ -6731,13 +6827,17 @@ export class PaperEngine {
       ledgerPaperContracts: open.okxContracts ?? null,
       ledgerEntryPrice: open.entryPrice ?? open.avgPx ?? null,
       okxAvgPx: remote?.avgPx ?? null,
-      externalManualEvidence:
-        manualLatchActive ||
-        open.lifecycleState === "EXTERNAL_MANUAL_POSITION" ||
-        open.lifecycleState === "OPERATOR_MANAGED" ||
-        open.lifecycleState === "EXTERNAL_MANUAL_MANAGED",
+      explicitExternalManualEvidence:
+        (manualLatchActive &&
+          isStrongManualLatchSource(
+            open.manualOwnershipLatchSource ?? open.manualOwnershipLatchReason
+          )) ||
+        isManualExternalLifecycle,
       symbolExternalManualBlocked: this.symbolExternalManualBlocked.has(key),
-      manualOwnershipLatchActive: manualLatchActive
+      manualOwnershipLatchActive: manualLatchActive,
+      syncStatus: context?.syncStatus ?? null,
+      okxFetchReady: context?.okxFetchReady ?? true,
+      reconcileState: open.reconcileState ?? null
     });
   }
 

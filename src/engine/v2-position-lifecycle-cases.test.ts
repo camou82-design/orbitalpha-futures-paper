@@ -17,6 +17,12 @@ import {
 } from "../engine-v2/execution/reduce-lot-distortion";
 import { shouldTriggerProtectionResize } from "../engine-v2/addon/adverse-addon";
 import { protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
+import {
+  evaluateManualOwnershipLatchTrigger,
+  evaluateFalseManualLatchRecovery,
+  applyManualOwnershipLatch,
+  clearManualOwnershipLatchFields
+} from "../engine-v2/position/manual-ownership-latch";
 import { applyPositionTerminalCleanup } from "../engine-v2/position/terminal-cleanup";
 import type { PaperOpenPositionRecord } from "../models/types";
 import type { V2StateAuthority } from "../engine-v2/state/types";
@@ -87,7 +93,7 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       okxActualPositionExists: true,
       okxActualContracts: 0.03,
       ledger: botLedger(),
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: false
     });
     ok =
@@ -108,7 +114,7 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       okxActualPositionExists: true,
       okxActualContracts: 0.01,
       ledger: manualLedger(),
-      externalManualEvidence: true,
+      explicitExternalManualEvidence: true,
       symbolExternalManualBlocked: true
     });
     ok =
@@ -129,7 +135,7 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       okxActualPositionExists: true,
       okxActualContracts: 0.02,
       ledger: botLedger({ isV2Authority: false, authoritySourceAtEntry: undefined, exchangeClOrdId: undefined }),
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: false
     });
     ok =
@@ -194,7 +200,7 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       okxActualPositionExists: true,
       okxActualContracts: 0.02,
       ledger: botLedger({ symbol: "ETHUSDT", side: "short", lifecycleState: "BOT_V2_MANAGED" }),
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: false
     });
     ok =
@@ -378,7 +384,7 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       okxActualPositionExists: true,
       okxActualContracts: 0.03,
       ledger: botLedger({ lifecycleState: "BOT_V2_MANAGED", reconcileState: "MATCHED" }),
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: false
     });
     ok =
@@ -397,7 +403,7 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       okxActualPositionExists: true,
       okxActualContracts: 0.02,
       ledger: botLedger(),
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: false
     });
     const btc = resolvePositionOwnership({
@@ -406,7 +412,7 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       okxActualPositionExists: true,
       okxActualContracts: 0.01,
       ledger: botLedger({ symbol: "BTCUSDT" }),
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: false
     });
     ok =
@@ -443,6 +449,9 @@ export function runV2PositionLifecycleCaseTests(): boolean {
     okxContracts?: number;
     latch?: boolean;
     blocked?: boolean;
+    syncStatus?: string;
+    okxFetchReady?: boolean;
+    explicitManual?: boolean;
   } = {}) =>
     ({
       symbol: "ETHUSDT",
@@ -459,28 +468,257 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       ledgerPaperContracts: overrides.ledger?.okxContracts ?? 0.03,
       ledgerEntryPrice: 1900,
       okxAvgPx: 1900,
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: overrides.explicitManual ?? false,
       symbolExternalManualBlocked: overrides.blocked ?? true,
-      manualOwnershipLatchActive: overrides.latch === true
+      manualOwnershipLatchActive: overrides.latch === true,
+      syncStatus: overrides.syncStatus ?? "ALIGNED",
+      okxFetchReady: overrides.okxFetchReady ?? true,
+      reconcileState: overrides.ledger?.reconcileState ?? "RECONCILE_MISMATCH"
     });
 
-  // LATCH 1: paper 0.03 / OKX 0.06 → EXTERNAL_MANUAL_MANAGED
+  // FLCASE A: KEY_MISMATCH + transient OKX zero → latch forbidden
+  {
+    const trigger = evaluateManualOwnershipLatchTrigger({
+      ledger: botLedger({ okxContracts: 0.06, reconcileState: "OKX_ZERO_UNCONFIRMED" }),
+      syncStatus: "KEY_MISMATCH",
+      okxActualContracts: 0,
+      okxActualPositionExists: false,
+      ledgerPaperContracts: 0.06,
+      symbolExternalManualBlocked: true,
+      okxFetchReady: true
+    });
+    ok =
+      run(
+        "FLCASE A",
+        trigger.shouldLatch === false && trigger.reason === "KEY_MISMATCH",
+        JSON.stringify(trigger)
+      ) && ok;
+  }
+
+  // FLCASE B: fresh MATCHED aligned bot position → BOT_V2_MANAGED
+  {
+    const r = resolvePositionOwnership({
+      symbol: "BTCUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.06,
+      ledger: botLedger({
+        symbol: "BTCUSDT",
+        okxContracts: 0.06,
+        lifecycleState: "OPEN",
+        reconcileState: "MATCHED"
+      }),
+      ledgerPaperContracts: 0.06,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      explicitExternalManualEvidence: false,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: false,
+      syncStatus: "ALIGNED",
+      okxFetchReady: true,
+      reconcileState: "MATCHED"
+    });
+    ok =
+      run(
+        "FLCASE B",
+        r.ownershipClass === "BOT_V2_MANAGED" && r.manualLatchShouldBeActive === false,
+        JSON.stringify(r)
+      ) && ok;
+  }
+
+  // FLCASE C: legacy weak latch + MATCHED aligned bot → recovery clears latch
+  {
+    const open = botLedger({
+      okxContracts: 0.06,
+      lifecycleState: "OPEN",
+      reconcileState: "MATCHED",
+      manualOwnershipLatch: true,
+      manualOwnershipLatchReason: "paper_okx_contract_mismatch",
+      manualOwnershipLatchSource: "paper_okx_contract_mismatch",
+      manualOwnershipLatchStrength: "WEAK"
+    });
+    const recovery = evaluateFalseManualLatchRecovery({
+      ledger: open,
+      reconcileState: "MATCHED",
+      okxActualContracts: 0.06,
+      okxActualPositionExists: true,
+      ledgerPaperContracts: 0.06,
+      syncStatus: "ALIGNED"
+    });
+    clearManualOwnershipLatchFields(open);
+    const r = resolvePositionOwnership({
+      symbol: "ETHUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.06,
+      ledger: open,
+      ledgerPaperContracts: 0.06,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      explicitExternalManualEvidence: false,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: false,
+      syncStatus: "ALIGNED",
+      reconcileState: "MATCHED"
+    });
+    ok =
+      run(
+        "FLCASE C",
+        recovery.shouldClear === true &&
+          r.ownershipClass === "BOT_V2_MANAGED" &&
+          open.manualOwnershipLatch !== true,
+        JSON.stringify({ recovery, class: r.ownershipClass })
+      ) && ok;
+  }
+
+  // FLCASE D: explicit strong manual latch + MATCHED → latch retained
+  {
+    const open = botLedger({
+      lifecycleState: "EXTERNAL_MANUAL_MANAGED",
+      reconcileState: "MATCHED",
+      manualOwnershipLatch: true,
+      manualOwnershipLatchSource: "EXPLICIT_EXTERNAL_FILL",
+      manualOwnershipLatchStrength: "STRONG"
+    });
+    const recovery = evaluateFalseManualLatchRecovery({
+      ledger: open,
+      reconcileState: "MATCHED",
+      okxActualContracts: 0.06,
+      okxActualPositionExists: true,
+      ledgerPaperContracts: 0.06,
+      syncStatus: "ALIGNED",
+      explicitManualEvidence: true
+    });
+    const r = resolvePositionOwnership({
+      symbol: "ETHUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.06,
+      ledger: open,
+      ledgerPaperContracts: 0.06,
+      explicitExternalManualEvidence: true,
+      symbolExternalManualBlocked: false,
+      manualOwnershipLatchActive: true,
+      syncStatus: "ALIGNED",
+      reconcileState: "MATCHED"
+    });
+    ok =
+      run(
+        "FLCASE D",
+        recovery.shouldClear === false &&
+          r.ownershipClass === "EXTERNAL_MANUAL_MANAGED" &&
+          r.manualOwnershipLatchActive === true,
+        JSON.stringify({ recovery, r })
+      ) && ok;
+  }
+
+  // FLCASE E: bot ADDON transient mismatch → latch forbidden
+  {
+    const ledger = botLedger({
+      okxContracts: 0.03,
+      lifecycleState: "ADDON_ACTIVE",
+      addonRebuildPendingConfirmation: true
+    });
+    const trigger = evaluateManualOwnershipLatchTrigger({
+      ledger,
+      syncStatus: "ALIGNED",
+      okxActualContracts: 0.05,
+      okxActualPositionExists: true,
+      ledgerPaperContracts: 0.03,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      symbolExternalManualBlocked: true
+    });
+    const r = resolvePositionOwnership({
+      symbol: "ETHUSDT",
+      side: "long",
+      okxActualPositionExists: true,
+      okxActualContracts: 0.05,
+      ledger,
+      ledgerPaperContracts: 0.03,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      explicitExternalManualEvidence: false,
+      symbolExternalManualBlocked: true,
+      manualOwnershipLatchActive: false,
+      syncStatus: "ALIGNED"
+    });
+    ok =
+      run(
+        "FLCASE E",
+        trigger.shouldLatch === false &&
+          r.manualLatchShouldBeActive === false &&
+          r.ownershipClass === "BOT_V2_MANAGED",
+        JSON.stringify({ trigger, class: r.ownershipClass })
+      ) && ok;
+  }
+
+  // FLCASE F: OKX fetch failure → latch forbidden
+  {
+    const trigger = evaluateManualOwnershipLatchTrigger({
+      ledger: botLedger({ okxContracts: 0.06 }),
+      syncStatus: "REMOTE_UNAVAILABLE",
+      okxActualContracts: 0,
+      okxActualPositionExists: false,
+      okxFetchReady: false,
+      ledgerPaperContracts: 0.06
+    });
+    ok =
+      run(
+        "FLCASE F",
+        trigger.shouldLatch === false &&
+          (trigger.reason === "OKX_FETCH_FAILURE" || trigger.reason === "REMOTE_UNAVAILABLE"),
+        JSON.stringify(trigger)
+      ) && ok;
+  }
+
+  // FLCASE G: confirmed external contract change, no bot evidence → latch allowed
+  {
+    const trigger = evaluateManualOwnershipLatchTrigger({
+      ledger: unattributedLedger({ okxContracts: 0.03, isV2Authority: false }),
+      syncStatus: "ALIGNED",
+      okxActualContracts: 0.06,
+      okxActualPositionExists: true,
+      ledgerPaperContracts: 0.03,
+      ledgerEntryPrice: 1900,
+      okxAvgPx: 1900,
+      symbolExternalManualBlocked: false
+    });
+    ok =
+      run(
+        "FLCASE G",
+        trigger.shouldLatch === true &&
+          trigger.strength === "STRONG" &&
+          trigger.source === "CONFIRMED_MANUAL_SIZE_CHANGE",
+        JSON.stringify(trigger)
+      ) && ok;
+  }
+
+  // LATCH 1: bot-attributed mismatch under sync block → BOT managed, no new latch
   {
     const r = resolvePositionOwnership(manualResolveInput());
     ok =
       run(
         "LATCH 1",
-        r.ownershipClass === "EXTERNAL_MANUAL_MANAGED" &&
-          r.lifecycleAfter === "EXTERNAL_MANUAL_MANAGED" &&
-          r.manualLatchShouldBeActive === true &&
-          r.automatedOrderMutationBlocked === true,
+        r.ownershipClass === "BOT_V2_MANAGED" &&
+          r.manualLatchShouldBeActive === false,
         JSON.stringify(r)
       ) && ok;
   }
 
-  // LATCH 2: next cycle same state with latch persisted → stays EXTERNAL_MANUAL_MANAGED
+  // LATCH 2: next cycle same state with STRONG latch persisted → stays EXTERNAL_MANUAL_MANAGED
   {
-    const r = resolvePositionOwnership(manualResolveInput({ latch: true }));
+    const r = resolvePositionOwnership(
+      manualResolveInput({
+        latch: true,
+        ledger: {
+          manualOwnershipLatchSource: "EXPLICIT_EXTERNAL_FILL",
+          manualOwnershipLatchStrength: "STRONG",
+          lifecycleState: "EXTERNAL_MANUAL_MANAGED"
+        },
+        explicitManual: true
+      })
+    );
     ok =
       run(
         "LATCH 2",
@@ -491,29 +729,31 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       ) && ok;
   }
 
-  // LATCH 3: V2 bot evidence + contract mismatch → BOT_V2_MANAGED promotion blocked
+  // LATCH 3: V2 bot evidence + contract mismatch under sync block → still BOT_V2, no latch
   {
     const r = resolvePositionOwnership(manualResolveInput());
     ok =
       run(
         "LATCH 3",
-        r.ownershipClass !== "BOT_V2_MANAGED" &&
-          r.v2ManagementRestored === false &&
-          isEntryAddonBlockedForOwnership(r) &&
-          isAutomatedOrderMutationBlockedForOwnership(r),
+        r.ownershipClass === "BOT_V2_MANAGED" &&
+          r.manualLatchShouldBeActive === false,
         r.ownershipClass
       ) && ok;
   }
 
-  // LATCH 4: restart with persisted latch + same OKX 0.06 → manual ownership restored
+  // LATCH 4: restart with STRONG latch + same OKX 0.06 → manual ownership restored
   {
     const r = resolvePositionOwnership(
       manualResolveInput({
         latch: true,
         blocked: false,
+        explicitManual: true,
+        syncStatus: "ALIGNED",
         ledger: {
-          lifecycleState: "CLOSE_ONLY_MANAGED",
-          reconcileState: "RECONCILE_MISMATCH"
+          lifecycleState: "EXTERNAL_MANUAL_MANAGED",
+          reconcileState: "MATCHED",
+          manualOwnershipLatchSource: "EXPLICIT_EXTERNAL_FILL",
+          manualOwnershipLatchStrength: "STRONG"
         }
       })
     );
@@ -533,6 +773,8 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       okxContracts: 0.03,
       manualOwnershipLatch: true,
       manualOwnershipLatchReason: "paper_okx_contract_mismatch",
+      manualOwnershipLatchSource: "paper_okx_contract_mismatch",
+      manualOwnershipLatchStrength: "WEAK",
       lifecycleState: "EXTERNAL_MANUAL_MANAGED"
     });
     const r = resolvePositionOwnership({
@@ -542,9 +784,10 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       okxActualContracts: 0,
       ledger: open,
       ledgerPaperContracts: 0.03,
-      externalManualEvidence: true,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: false,
-      manualOwnershipLatchActive: true
+      manualOwnershipLatchActive: true,
+      syncStatus: "ALIGNED"
     });
     const cleanup = applyPositionTerminalCleanup(open);
     ok =
@@ -572,7 +815,7 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       ledgerPaperContracts: 0.03,
       ledgerEntryPrice: 1900,
       okxAvgPx: 1900,
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: false,
       manualOwnershipLatchActive: false
     });
@@ -593,7 +836,7 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       okxActualContracts: 0.06,
       ledgerEntryPrice: 1900,
       okxAvgPx: 1900,
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: false,
       manualOwnershipLatchActive: false
     });
@@ -623,7 +866,7 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       ledgerPaperContracts: 0.03,
       ledgerEntryPrice: 1900,
       okxAvgPx: 1900,
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: true,
       manualOwnershipLatchActive: false
     });
@@ -655,7 +898,7 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       ledgerPaperContracts: 0.05,
       ledgerEntryPrice: 1900,
       okxAvgPx: 1900,
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: true,
       manualOwnershipLatchActive: false
     });
@@ -677,7 +920,7 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       okxActualContracts: 0.06,
       ledgerEntryPrice: 1900,
       okxAvgPx: 1900,
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: false,
       manualOwnershipLatchActive: false,
       ledger
@@ -691,9 +934,11 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       ledgerPaperContracts: 0.03,
       ledgerEntryPrice: 1900,
       okxAvgPx: 1900,
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: false,
-      manualOwnershipLatchActive: false
+      manualOwnershipLatchActive: false,
+      syncStatus: "ALIGNED",
+      reconcileState: "MATCHED"
     });
     ok =
       run(
@@ -725,9 +970,11 @@ export function runV2PositionLifecycleCaseTests(): boolean {
       ledgerPaperContracts: 0.03,
       ledgerEntryPrice: 1900,
       okxAvgPx: 1900,
-      externalManualEvidence: false,
+      explicitExternalManualEvidence: false,
       symbolExternalManualBlocked: false,
-      manualOwnershipLatchActive: false
+      manualOwnershipLatchActive: false,
+      syncStatus: "ALIGNED",
+      reconcileState: "MATCHED"
     });
     ok =
       run(

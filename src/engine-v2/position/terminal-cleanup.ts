@@ -54,6 +54,21 @@ export function applyPositionTerminalCleanup(
             open.manualOwnershipLatchAt = undefined;
         });
     }
+    if (open.manualOwnershipLatchSource != null) {
+        mark("manualOwnershipLatchSource", () => {
+            open.manualOwnershipLatchSource = undefined;
+        });
+    }
+    if (open.manualOwnershipLatchStrength != null) {
+        mark("manualOwnershipLatchStrength", () => {
+            open.manualOwnershipLatchStrength = undefined;
+        });
+    }
+    if (open.okxZeroUnconfirmedSince != null) {
+        mark("okxZeroUnconfirmedSince", () => {
+            open.okxZeroUnconfirmedSince = undefined;
+        });
+    }
 
     return { cleared: fieldsCleared.length > 0, fieldsCleared };
 }

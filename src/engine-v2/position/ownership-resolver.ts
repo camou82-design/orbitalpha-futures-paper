@@ -1,4 +1,10 @@
 import type { PaperOpenPositionRecord } from "../../models/types";
+import {
+    evaluateFalseManualLatchRecovery,
+    evaluateManualOwnershipLatchTrigger,
+    isStrongManualLatchSource,
+    type ManualLatchStrength
+} from "./manual-ownership-latch";
 
 export type PositionOwnershipClass =
     | "BOT_V2_MANAGED"
@@ -24,9 +30,13 @@ export type PositionOwnershipResolveInput = Readonly<{
     ledgerPaperContracts?: number | null;
     ledgerEntryPrice?: number | null;
     okxAvgPx?: number | null;
-    externalManualEvidence: boolean;
     symbolExternalManualBlocked: boolean;
     manualOwnershipLatchActive?: boolean;
+    syncStatus?: string | null;
+    okxFetchReady?: boolean;
+    reconcileState?: string | null;
+    explicitExternalManualEvidence?: boolean;
+    latchRecoveryPending?: boolean;
 }>;
 
 export type PositionOwnershipResolveResult = Readonly<{
@@ -39,6 +49,10 @@ export type PositionOwnershipResolveResult = Readonly<{
     manualLatchShouldBeActive: boolean;
     manualInterventionReason: string | null;
     automatedOrderMutationBlocked: boolean;
+    manualLatchTriggerSource: string | null;
+    manualLatchTriggerStrength: ManualLatchStrength | null;
+    latchRecoveryRecommended: boolean;
+    latchRecoveryReason: string | null;
     lifecycleBefore: PaperOpenPositionRecord["lifecycleState"] | null;
     lifecycleAfter: PaperOpenPositionRecord["lifecycleState"];
     v2ManagementRestored: boolean;
@@ -161,15 +175,21 @@ export function detectManualInterventionEvidence(
         | "okxActualContracts"
         | "ledgerEntryPrice"
         | "okxAvgPx"
-        | "externalManualEvidence"
         | "symbolExternalManualBlocked"
         | "manualOwnershipLatchActive"
     > & {
         ledger?: PaperOpenPositionRecord | null;
         nowMs?: number;
+        explicitExternalManualEvidence?: boolean;
     }
 ): { detected: boolean; reason: string | null } {
-    if (input.manualOwnershipLatchActive === true) {
+    if (
+        input.manualOwnershipLatchActive === true &&
+        input.ledger != null &&
+        isStrongManualLatchSource(
+            input.ledger.manualOwnershipLatchSource ?? input.ledger.manualOwnershipLatchReason
+        )
+    ) {
         return { detected: true, reason: "manual_ownership_latch_active" };
     }
 
@@ -185,13 +205,8 @@ export function detectManualInterventionEvidence(
         return { detected: false, reason: null };
     }
 
-    if (input.externalManualEvidence || input.symbolExternalManualBlocked) {
-        return {
-            detected: true,
-            reason: input.symbolExternalManualBlocked
-                ? "symbol_external_manual_blocked"
-                : "external_manual_evidence"
-        };
+    if (input.explicitExternalManualEvidence === true) {
+        return { detected: true, reason: "external_manual_evidence" };
     }
 
     const paperContracts = input.ledgerPaperContracts;
@@ -199,7 +214,8 @@ export function detectManualInterventionEvidence(
     if (
         paperContracts != null &&
         Number.isFinite(paperContracts) &&
-        okxContracts > 0
+        okxContracts > 0 &&
+        !hasBotOrderAttribution(input.ledger)
     ) {
         const contractDiff = Math.abs(paperContracts - okxContracts);
         const contractTol = Math.max(
@@ -214,6 +230,7 @@ export function detectManualInterventionEvidence(
     const entryPx = input.ledgerEntryPrice;
     const okxPx = input.okxAvgPx;
     if (
+        !hasBotOrderAttribution(input.ledger) &&
         entryPx != null &&
         okxPx != null &&
         Number.isFinite(entryPx) &&
@@ -246,21 +263,62 @@ export function resolvePositionOwnership(
         (input.ledger != null &&
             typeof input.ledger.exchangeClOrdId === "string" &&
             input.ledger.exchangeClOrdId.startsWith("p"));
-    const manualLatchActive =
-        input.manualOwnershipLatchActive === true ||
-        isManualOwnershipLatched(input.ledger);
+    const latchRecovery =
+        input.ledger != null
+            ? evaluateFalseManualLatchRecovery({
+                  ledger: input.ledger,
+                  reconcileState: input.reconcileState ?? input.ledger.reconcileState,
+                  okxActualContracts: input.okxActualContracts,
+                  okxActualPositionExists: input.okxActualPositionExists,
+                  ledgerPaperContracts: input.ledgerPaperContracts,
+                  syncStatus: input.syncStatus,
+                  explicitManualEvidence: input.explicitExternalManualEvidence
+              })
+            : { shouldClear: false, reason: null };
+    const latchTrigger = evaluateManualOwnershipLatchTrigger({
+        ledger: input.ledger,
+        syncStatus: input.syncStatus,
+        okxActualContracts: input.okxActualContracts,
+        okxActualPositionExists: input.okxActualPositionExists,
+        okxFetchReady: input.okxFetchReady,
+        ledgerPaperContracts: input.ledgerPaperContracts,
+        ledgerEntryPrice: input.ledgerEntryPrice,
+        okxAvgPx: input.okxAvgPx,
+        symbolExternalManualBlocked: input.symbolExternalManualBlocked,
+        explicitExternalManualEvidence: input.explicitExternalManualEvidence
+    });
+    const existingLatch =
+        !latchRecovery.shouldClear &&
+        (input.manualOwnershipLatchActive === true || isManualOwnershipLatched(input.ledger));
+    const strongLatchActive =
+        existingLatch &&
+        input.ledger != null &&
+        (isStrongManualLatchSource(
+            input.ledger.manualOwnershipLatchSource ?? input.ledger.manualOwnershipLatchReason
+        ) ||
+            isExternalManualLifecycle(input.ledger));
     const manualIntervention = detectManualInterventionEvidence({
         ledgerPaperContracts: input.ledgerPaperContracts,
         okxActualContracts: input.okxActualContracts,
         ledgerEntryPrice: input.ledgerEntryPrice,
         okxAvgPx: input.okxAvgPx,
-        externalManualEvidence: input.externalManualEvidence || isExternalManualLifecycle(input.ledger),
+        explicitExternalManualEvidence:
+            input.explicitExternalManualEvidence === true ||
+            isExternalManualLifecycle(input.ledger),
         symbolExternalManualBlocked: input.symbolExternalManualBlocked,
-        manualOwnershipLatchActive: manualLatchActive,
+        manualOwnershipLatchActive: strongLatchActive,
         ledger: input.ledger
     });
-    const manualLatchShouldBeActive = manualIntervention.detected;
-    const automatedOrderMutationBlocked = manualIntervention.detected;
+    const manualLatchShouldBeActive = latchTrigger.shouldLatch;
+    const operationalManualBlock =
+        manualIntervention.detected ||
+        (input.symbolExternalManualBlocked === true && !botOrderEvidenceFound);
+    const baseMeta = {
+        manualLatchTriggerSource: latchTrigger.source,
+        manualLatchTriggerStrength: latchTrigger.strength,
+        latchRecoveryRecommended: latchRecovery.shouldClear,
+        latchRecoveryReason: latchRecovery.reason
+    };
 
     if (!input.okxActualPositionExists || !(input.okxActualContracts > 0)) {
         return {
@@ -268,11 +326,12 @@ export function resolvePositionOwnership(
             ownershipSource: "okx_actual_none",
             persistedV2OwnerFound,
             botOrderEvidenceFound,
-            externalManualEvidence: manualIntervention.detected,
-            manualOwnershipLatchActive: false,
+            externalManualEvidence: strongLatchActive,
+            manualOwnershipLatchActive: strongLatchActive,
             manualLatchShouldBeActive: false,
             manualInterventionReason: null,
             automatedOrderMutationBlocked: false,
+            ...baseMeta,
             lifecycleBefore,
             lifecycleAfter: lifecycleBefore ?? undefined,
             v2ManagementRestored: false,
@@ -281,19 +340,24 @@ export function resolvePositionOwnership(
         };
     }
 
-    if (manualIntervention.detected) {
+    if (
+        strongLatchActive ||
+        manualIntervention.detected ||
+        (manualLatchShouldBeActive && latchTrigger.strength === "STRONG")
+    ) {
         return {
             ownershipClass: "EXTERNAL_MANUAL_MANAGED",
-            ownershipSource: manualLatchActive
+            ownershipSource: strongLatchActive
                 ? "manual_ownership_latch"
-                : manualIntervention.reason ?? "external_manual_evidence",
+                : manualIntervention.reason ?? latchTrigger.reason ?? "external_manual_evidence",
             persistedV2OwnerFound,
             botOrderEvidenceFound,
             externalManualEvidence: true,
-            manualOwnershipLatchActive: manualLatchActive || manualLatchShouldBeActive,
+            manualOwnershipLatchActive: strongLatchActive || manualLatchShouldBeActive,
             manualLatchShouldBeActive,
             manualInterventionReason: manualIntervention.reason,
             automatedOrderMutationBlocked: true,
+            ...baseMeta,
             lifecycleBefore,
             lifecycleAfter: "EXTERNAL_MANUAL_MANAGED",
             v2ManagementRestored: false,
@@ -305,6 +369,7 @@ export function resolvePositionOwnership(
     if (botOrderEvidenceFound || persistedV2OwnerFound) {
         const priorCloseOnly =
             lifecycleBefore === "CLOSE_ONLY_MANAGED" ||
+            lifecycleBefore === "EXTERNAL_MANUAL_MANAGED" ||
             input.ledger?.reconcileState === "ADOPTED";
         const lifecycleAfter: PaperOpenPositionRecord["lifecycleState"] = priorCloseOnly
             ? "BOT_V2_MANAGED"
@@ -320,13 +385,14 @@ export function resolvePositionOwnership(
             botOrderEvidenceFound,
             externalManualEvidence: false,
             manualOwnershipLatchActive: false,
-            manualLatchShouldBeActive: false,
+            manualLatchShouldBeActive,
             manualInterventionReason: null,
-            automatedOrderMutationBlocked: false,
+            automatedOrderMutationBlocked: operationalManualBlock,
+            ...baseMeta,
             lifecycleBefore,
             lifecycleAfter,
             v2ManagementRestored: priorCloseOnly,
-            addonManagementAllowed: true,
+            addonManagementAllowed: !operationalManualBlock,
             normalExitPolicyAllowed: true
         };
     }
@@ -340,7 +406,8 @@ export function resolvePositionOwnership(
         manualOwnershipLatchActive: false,
         manualLatchShouldBeActive: false,
         manualInterventionReason: null,
-        automatedOrderMutationBlocked: false,
+        automatedOrderMutationBlocked: operationalManualBlock,
+        ...baseMeta,
         lifecycleBefore,
         lifecycleAfter: "CLOSE_ONLY_MANAGED",
         v2ManagementRestored: false,
