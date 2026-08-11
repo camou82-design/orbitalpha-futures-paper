@@ -29,7 +29,11 @@ import { OkxDemoClient, toOkxSwapInstId } from "../exchange/okx-demo";
 import { buildLedgerOkxPositionSyncSnapshot, okxSwapRowToLedgerKey, resolveOkxRowNotionalUsd } from "../exchange/okx-position-sync";
 import {
   resolveAuthoritativePaperOpenForSymbol,
-  shouldBlockAutomatedManagementForSyncKey
+  shouldBlockAutomatedManagementForSyncKey,
+  buildFalseManualBlockClearedProof,
+  resolveBtcPositionManagementSuppressor,
+  hasBotOwnershipEvidenceOnLedgerRow,
+  isPositiveExternalManualLifecycleRow
 } from "../lib/position-reconcile-classification";
 import { buildPositionOpsSurface, engineMirrorStopPrice, engineMirrorTpPrice, regimeForSl, classifyOkxOpenOrderPurpose, countBlockingOkxOpenOrders, evaluateV2ReducePendingGuard } from "./position-ops-monitor";
 import type { PositionOpsSurface } from "./position-ops-monitor";
@@ -1504,6 +1508,7 @@ export class PaperEngine {
   private marketDataLastUpdateAt: number | null = null;
   private v2LastDecisionAt: number | null = null;
   private lastBtcPaperSideSnapshot: { side: string; reconcileState: string } = { side: "none", reconcileState: "none" };
+  private lastBtcAuthoritativeOpen: PaperOpenPositionRecord | null = null;
   private bundleLastWrittenAt: number | null = null;
   /** Main loop scheduling (mirrors `src/loop.ts` + ORBITALPHA_PAPER_LOOP_INTERVAL_MS). */
   private loopIntervalTargetMs = 10_000;
@@ -1798,6 +1803,15 @@ export class PaperEngine {
   private async runPositionOperationsWatch(nowTs: number, paperOpens: ReadonlyArray<PaperOpenPositionRecord>): Promise<void> {
     await this.updateInstrumentCache();
     const syncSnap = buildLedgerOkxPositionSyncSnapshot(paperOpens, this.lastLivePositionsPayload, this.instrumentCache);
+    const btcOkxPreview = syncSnap.okx_positions_preview.find((p) => p.symbol === "BTCUSDT");
+    this.lastBtcAuthoritativeOpen =
+      resolveAuthoritativePaperOpenForSymbol(paperOpens, "BTCUSDT", btcOkxPreview?.side ?? null) ?? null;
+    this.lastBtcPaperSideSnapshot = {
+      side: this.lastBtcAuthoritativeOpen ? String(this.lastBtcAuthoritativeOpen.side).toLowerCase() : "none",
+      reconcileState: this.lastBtcAuthoritativeOpen
+        ? String(this.lastBtcAuthoritativeOpen.reconcileState ?? "none")
+        : "none"
+    };
 
     this.symbolExternalManualBlocked.clear();
     const currentRunBlockedSymbols = new Set<string>();
@@ -1820,12 +1834,14 @@ export class PaperEngine {
         if (!hit) continue;
         const key = hit.key; // symbol:side
         
-        // Block if not in ledger OR if in ledger as EXTERNAL_MANUAL_POSITION
-        const isNormalInLedger = paperOpens.some(p => 
-          `${p.symbol}:${p.side}` === key && 
-          (p.lifecycleState !== "EXTERNAL_MANUAL_POSITION" || 
-           (p.reconcileState === "MATCHED" && syncSnap.sync_status === "ALIGNED"))
-        );
+        // OKX actual exists — block only when this key lacks bot-managed ledger evidence.
+        const ledgerRow = paperOpens.find((p) => `${p.symbol}:${p.side}` === key);
+        const isNormalInLedger =
+          ledgerRow != null &&
+          !isPositiveExternalManualLifecycleRow(ledgerRow) &&
+          (hasBotOwnershipEvidenceOnLedgerRow(ledgerRow) ||
+            ledgerRow.lifecycleState !== "EXTERNAL_MANUAL_POSITION" ||
+            (ledgerRow.reconcileState === "MATCHED" && syncSnap.sync_status === "ALIGNED"));
 
         if (!isNormalInLedger) {
           if (
@@ -1898,6 +1914,28 @@ export class PaperEngine {
       });
     }
 
+    for (const blockedKey of [...this.symbolExternalManualBlocked]) {
+      if (shouldBlockAutomatedManagementForSyncKey({ key: blockedKey, sync: syncSnap, paperOpens })) {
+        continue;
+      }
+      this.symbolExternalManualBlocked.delete(blockedKey);
+      const [sym, side] = blockedKey.split(":");
+      const paperRow = paperOpens.find((p) => `${p.symbol}:${p.side}` === blockedKey);
+      const okxRow = syncSnap.okx_positions_preview.find((rv) => `${rv.symbol}:${rv.side}` === blockedKey);
+      this.logger.info(
+        "FALSE_MANUAL_BLOCK_CLEARED_PROOF",
+        buildFalseManualBlockClearedProof({
+          symbol: sym,
+          side,
+          previous_status: syncSnap.sync_status,
+          ownership_evidence: hasBotOwnershipEvidenceOnLedgerRow(paperRow),
+          actual_contracts: okxRow?.okxContracts ?? null,
+          ledger_contracts: paperRow?.okxContracts ?? null,
+          action: "restore_bot_managed_position"
+        })
+      );
+    }
+
     const unblockedMismatches = syncSnap.mismatched_keys.filter(mk => !this.symbolExternalManualBlocked.has(mk));
     const hasUnblockedMismatch = unblockedMismatches.length > 0;
 
@@ -1913,7 +1951,10 @@ export class PaperEngine {
       "MANUAL_PARTIAL_DETECTED", 
       "MANUAL_FULL_CLOSE_DETECTED", 
       "ADOPTED_POSITION_SIZE_MISMATCH", 
-      "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED", 
+      "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED",
+      "BOT_POSITION_SIZE_RECONCILE_PENDING",
+      "ENGINE_PARTIAL_FILL_IN_FLIGHT",
+      "ENGINE_PARTIAL_FILL_RECONCILING",
       "EXTERNAL_MANUAL_LARGE_DRIFT", 
       "EXTERNAL_MANUAL_MISMATCH_IGNORED"
     ]);
@@ -2299,31 +2340,46 @@ export class PaperEngine {
     const readinessBarrierActive =
       this.freshTickRequiredAfterReadiness === true &&
       this.readinessFreshTickCompletedCycles < this.readinessFreshTickRequiredCycles;
-    const externalManualBlocked =
+    const externalManualBlockedForSide =
       (okxActualSide === "long" && this.symbolExternalManualBlocked.has("BTCUSDT:long")) ||
       (okxActualSide === "short" && this.symbolExternalManualBlocked.has("BTCUSDT:short"));
 
+    const btcPaper = this.lastBtcAuthoritativeOpen;
+    const suppressor = resolveBtcPositionManagementSuppressor({
+      okxActualSide,
+      paperSide,
+      v2InferredSide,
+      reconcileState,
+      externalManualBlockedForSide,
+      botOwnershipEvidence: btcPaper != null ? hasBotOwnershipEvidenceOnLedgerRow(btcPaper) : false,
+      positiveExternalManualEvidence:
+        btcPaper != null ? isPositiveExternalManualLifecycleRow(btcPaper) : false,
+      closeOnlyMode,
+      killSwitch
+    });
+
     const isNormalMatchedOpen =
-      okxActualSide !== "none" &&
-      paperSide !== "none" &&
-      okxActualSide === paperSide &&
-      okxActualSide === v2InferredSide &&
-      reconcileState === "MATCHED" &&
+      suppressor.sides_aligned &&
+      !suppressor.effective_external_manual_blocked &&
       !closeOnlyMode &&
       !killSwitch &&
-      !readinessBarrierActive &&
-      !externalManualBlocked;
+      !readinessBarrierActive;
 
     const reconcileMismatch =
-      reconcileState === "RECONCILE_MISMATCH" || externalManualBlocked;
+      suppressor.side_mismatch || suppressor.effective_external_manual_blocked;
 
     const managementBlockReasons: string[] = [];
-    if (reconcileMismatch) managementBlockReasons.push("reconcile_or_external_manual_conflict");
+    if (suppressor.effective_external_manual_blocked) {
+      managementBlockReasons.push("reconcile_or_external_manual_conflict");
+    }
+    if (suppressor.side_mismatch) managementBlockReasons.push("side_mismatch");
+    if (reconcileState === "RECONCILE_MISMATCH" && !suppressor.sides_aligned) {
+      managementBlockReasons.push("reconcile_mismatch");
+    }
     if (closeOnlyMode) managementBlockReasons.push("close_only_mode");
     if (killSwitch) managementBlockReasons.push("kill_switch");
 
-    const existing_position_management_blocked =
-      !isNormalMatchedOpen && managementBlockReasons.length > 0;
+    const existing_position_management_blocked = suppressor.existing_position_management_blocked;
 
     const authorityDecisionOut = authorityDecision ?? "SKIP";
     const authoritySideOut = authoritySide ?? "none";
@@ -2344,14 +2400,14 @@ export class PaperEngine {
       sameSideDuplicateEntry ||
       entryReadinessBlocked ||
       existing_position_management_blocked ||
-      reconcileMismatch;
+      (reconcileMismatch && !suppressor.sides_aligned);
 
-    const protective_ensure_allowed = !existing_position_management_blocked;
-    const close_allowed = !existing_position_management_blocked;
-    const partial_reduce_allowed = !existing_position_management_blocked;
+    const protective_ensure_allowed = suppressor.protective_ensure_allowed;
+    const close_allowed = suppressor.close_allowed;
+    const partial_reduce_allowed = suppressor.partial_reduce_allowed;
 
-    const suppressor_active = existing_position_management_blocked;
-    const suppressor_reason = suppressor_active ? managementBlockReasons.join("|") : null;
+    const suppressor_active = suppressor.suppressor_active;
+    const suppressor_reason = suppressor.suppressor_reason;
 
     const order_submit_allowed =
       !entry_submit_blocked &&
@@ -5295,6 +5351,7 @@ export class PaperEngine {
         "BTCUSDT",
         btcOkx?.side ?? null
       );
+      this.lastBtcAuthoritativeOpen = btcOpen ?? null;
       this.lastBtcPaperSideSnapshot = {
         side: btcOpen ? String(btcOpen.side).toLowerCase() : "none",
         reconcileState: btcOpen ? String(btcOpen.reconcileState ?? "none") : "none"

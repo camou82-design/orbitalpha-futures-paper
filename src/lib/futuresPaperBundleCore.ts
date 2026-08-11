@@ -30,7 +30,12 @@ export {
   ledgerPositionKey,
   normalizePositionSide,
   resolveAuthoritativePaperOpenForSymbol,
-  shouldBlockAutomatedManagementForSyncKey
+  shouldBlockAutomatedManagementForSyncKey,
+  resolveBtcPositionManagementSuppressor,
+  isPositiveExternalManualLifecycleRow,
+  shouldTreatSyncStatusAsManualPartial,
+  isBotSizeReconcilePendingSyncStatus,
+  buildFalseManualBlockClearedProof
 } from "./position-reconcile-classification";
 function isRoutingKind(x: unknown): x is PaperEngineRoutingKind {
   return x === "RANGE" || x === "TREND" || x === "IDLE";

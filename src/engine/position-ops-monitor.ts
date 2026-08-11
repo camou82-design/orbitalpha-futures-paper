@@ -603,6 +603,13 @@ export function buildPositionOpsSurface(input: Readonly<{
           if (!ledger) return "OKX_GHOST";
           if (!sync.mismatched_keys.includes(rowKey)) return "ALIGNED";
           if (isLedgerOnlyStaleKey(rowKey, sync)) return "ENGINE_LEDGER_STALE";
+          if (
+            sync.sync_status === "BOT_POSITION_SIZE_RECONCILE_PENDING" ||
+            sync.sync_status === "ENGINE_PARTIAL_FILL_IN_FLIGHT" ||
+            sync.sync_status === "ENGINE_PARTIAL_FILL_RECONCILING"
+          ) {
+            return "BOT_POSITION_SIZE_RECONCILE_PENDING";
+          }
           return sync.sync_status;
         })(),
         can_adopt: ledger?.reconcileState === "RECONCILE_MISMATCH"
@@ -629,6 +636,12 @@ export function buildPositionOpsSurface(input: Readonly<{
     }
   } else if (hasOkxOnlyExternal) {
     surface_banner = "RECONCILE_MISMATCH";
+  } else if (
+    sync.sync_status === "BOT_POSITION_SIZE_RECONCILE_PENDING" ||
+    sync.sync_status === "ENGINE_PARTIAL_FILL_IN_FLIGHT" ||
+    sync.sync_status === "ENGINE_PARTIAL_FILL_RECONCILING"
+  ) {
+    surface_banner = "LEDGER_STALE_PENDING";
   } else if (hasLedgerOnlyStale) {
     surface_banner = "LEDGER_STALE_PENDING";
   } else if (sync.sync_status !== "ALIGNED") {

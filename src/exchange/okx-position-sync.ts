@@ -2,6 +2,8 @@
  * Normalize OKX `/api/v5/account/positions` SWAP rows for hedge (`long`/`short`) and net (`net`/empty posSide) modes.
  */
 
+import { hasBotOwnershipEvidenceOnLedgerRow, hasBotPartialReconcileEvidence } from "../lib/position-reconcile-classification";
+
 export type OkxSwapLedgerKeyParts = Readonly<{
   /** Paper ledger style e.g. `BTCUSDT:short` */
   key: string;
@@ -26,6 +28,7 @@ export type LedgerOkxPositionSyncSnapshot = Readonly<{
     | "MANUAL_PARTIAL_DETECTED"
     | "ENGINE_PARTIAL_FILL_IN_FLIGHT"
     | "ENGINE_PARTIAL_FILL_RECONCILING"
+    | "BOT_POSITION_SIZE_RECONCILE_PENDING"
     | "MANUAL_FULL_CLOSE_DETECTED"
     | "ADOPTED_POSITION_SIZE_MISMATCH"
     | "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED"
@@ -142,6 +145,14 @@ export function buildLedgerOkxPositionSyncSnapshot(
     partialPendingOrdId?: string;
     partialPendingClOrdId?: string;
     partialPendingContracts?: number;
+    closePendingOrdId?: string;
+    closePendingClOrdId?: string;
+    exchangeOrdId?: string;
+    exchangeClOrdId?: string;
+    isV2Authority?: boolean;
+    authoritySourceAtEntry?: string;
+    authority?: string;
+    shockReduceState?: string;
   }>,
   okxPayload: ReadonlyArray<Record<string, unknown>> | null | undefined,
   instrumentMap?: Map<string, InstrumentSizing>
@@ -309,6 +320,8 @@ export function buildLedgerOkxPositionSyncSnapshot(
 
       const isAdoptedOrManaged = paperPosData.reconcileState === "ADOPTED" || paperPosData.lifecycleState === "CLOSE_ONLY_MANAGED";
       const isExternalManual = paperPosData.lifecycleState === "EXTERNAL_MANUAL_POSITION";
+      const botOwned = hasBotOwnershipEvidenceOnLedgerRow(paperPosData);
+      const botPartialEvidence = hasBotPartialReconcileEvidence(paperPosData);
 
       const paperNotional =
         typeof paperPosData.notionalUsd === "number" && Number.isFinite(paperPosData.notionalUsd)
@@ -349,6 +362,7 @@ export function buildLedgerOkxPositionSyncSnapshot(
         Math.abs(okxBaseQty - paperBaseLedger) > Math.max(1e-8, 0.002 * Math.max(okxBaseQty, paperBaseLedger))
       ) {
         const enginePartialPending =
+          botPartialEvidence ||
           paperPosData.lifecycleState === "PARTIAL_PENDING" ||
           (typeof paperPosData.partialPendingOrdId === "string" && paperPosData.partialPendingOrdId.length > 0) ||
           (typeof paperPosData.partialPendingClOrdId === "string" && paperPosData.partialPendingClOrdId.length > 0) ||
@@ -358,18 +372,20 @@ export function buildLedgerOkxPositionSyncSnapshot(
 
         if (sync_status === "ALIGNED" || sync_status === "KEY_MISMATCH" || sync_status === "AVG_PRICE_MISMATCH" || sync_status === "NOTIONAL_MISMATCH") {
            if (!isExternalManual) {
-             if (enginePartialPending) {
+             if (enginePartialPending || botOwned) {
                sync_status =
-                 okxBaseQty > paperBaseLedger
+                 enginePartialPending && okxBaseQty > (paperBaseLedger ?? 0)
                    ? "ENGINE_PARTIAL_FILL_IN_FLIGHT"
-                   : "ENGINE_PARTIAL_FILL_RECONCILING";
+                   : "BOT_POSITION_SIZE_RECONCILE_PENDING";
+             } else if (isAdoptedOrManaged) {
+               sync_status = "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED";
              } else {
-               sync_status = isAdoptedOrManaged ? "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED" : "MANUAL_PARTIAL_DETECTED";
+               sync_status = "MANUAL_PARTIAL_DETECTED";
              }
            }
         }
         detail = detail || `Base quantity mismatch on ${key}: OKX=${okxBaseQty.toFixed(8)}, Paper=${paperBaseLedger.toFixed(8)}`;
-        mismatchAtThisKey = !enginePartialPending;
+        mismatchAtThisKey = !enginePartialPending && !botOwned;
       }
 
       if (mismatchAtThisKey) {

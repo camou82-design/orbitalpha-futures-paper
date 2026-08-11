@@ -8,6 +8,27 @@ export type LedgerReconcileDisplayState =
   | "engine_reconcile_pending"
   | "true_external_manual";
 
+export const BOT_SIZE_RECONCILE_PENDING_SYNC_STATUSES = new Set<string>([
+  "ENGINE_PARTIAL_FILL_IN_FLIGHT",
+  "ENGINE_PARTIAL_FILL_RECONCILING",
+  "BOT_POSITION_SIZE_RECONCILE_PENDING",
+  "ADOPTED_POSITION_SIZE_MISMATCH",
+  "NOTIONAL_MISMATCH"
+]);
+
+export const FALSE_MANUAL_ESCALATION_SYNC_STATUSES = new Set<string>([
+  "KEY_MISMATCH",
+  "MANUAL_PARTIAL_DETECTED",
+  "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED",
+  "ADOPTED_POSITION_SIZE_MISMATCH",
+  "NOTIONAL_MISMATCH",
+  "AVG_PRICE_MISMATCH",
+  "SIZE_MISMATCH",
+  "ENGINE_PARTIAL_FILL_IN_FLIGHT",
+  "ENGINE_PARTIAL_FILL_RECONCILING",
+  "BOT_POSITION_SIZE_RECONCILE_PENDING"
+]);
+
 export function normalizePositionSide(raw: unknown): PositionSide {
   return String(raw ?? "").toLowerCase() === "short" ? "short" : "long";
 }
@@ -57,15 +78,82 @@ export function hasBotOwnershipEvidenceOnLedgerRow(row: unknown): boolean {
   if (r.isV2Authority === true) return true;
   const authSrc = String(r.authoritySourceAtEntry ?? r.authority ?? "").trim().toLowerCase();
   if (authSrc === "v2") return true;
-  if (String(r.exchangeClOrdId ?? "").startsWith("p")) return true;
-  if (String(r.exchangeOrdId ?? "").trim().length > 0 && String(r.exchangeClOrdId ?? "").startsWith("p")) {
+  const clOrdId = String(r.exchangeClOrdId ?? "");
+  if (clOrdId.startsWith("p")) return true;
+  const ordId = String(r.exchangeOrdId ?? "").trim();
+  if (ordId.length > 0 && clOrdId.startsWith("p")) return true;
+  if (String(r.reconcileState ?? "") === "ADOPTED") return true;
+  const ls = String(r.lifecycleState ?? "");
+  if (ls === "BOT_V2_MANAGED") return true;
+  if (
+    ls === "OPEN" ||
+    ls === "ADDON_ACTIVE" ||
+    ls === "PARTIAL_ACTIVE" ||
+    ls === "PARTIAL_PENDING" ||
+    ls === "CLOSE_PENDING"
+  ) {
+    return authSrc === "v2" || r.isV2Authority === true || clOrdId.startsWith("p") || ordId.length > 0;
+  }
+  if (
+    (typeof r.partialPendingOrdId === "string" && r.partialPendingOrdId.length > 0) ||
+    (typeof r.partialPendingClOrdId === "string" && r.partialPendingClOrdId.length > 0) ||
+    (typeof r.closePendingOrdId === "string" && r.closePendingOrdId.length > 0) ||
+    (typeof r.closePendingClOrdId === "string" && r.closePendingClOrdId.length > 0)
+  ) {
     return true;
   }
-  const ls = String(r.lifecycleState ?? "");
-  if (ls === "BOT_V2_MANAGED" || ls === "OPEN" || ls === "ADDON_ACTIVE" || ls === "PARTIAL_ACTIVE") {
-    return authSrc === "v2" || r.isV2Authority === true || String(r.exchangeClOrdId ?? "").startsWith("p");
-  }
   return false;
+}
+
+export function hasBotPartialReconcileEvidence(row: unknown): boolean {
+  if (!row || typeof row !== "object") return false;
+  const r = row as Record<string, unknown>;
+  const ls = String(r.lifecycleState ?? "");
+  return (
+    ls === "PARTIAL_PENDING" ||
+    ls === "CLOSE_PENDING" ||
+    ls === "ADDON_ACTIVE" ||
+    (typeof r.partialPendingOrdId === "string" && r.partialPendingOrdId.length > 0) ||
+    (typeof r.partialPendingClOrdId === "string" && r.partialPendingClOrdId.length > 0) ||
+    (typeof r.closePendingOrdId === "string" && r.closePendingOrdId.length > 0) ||
+    (typeof r.closePendingClOrdId === "string" && r.closePendingClOrdId.length > 0) ||
+    r.shockReduceState === "REQUESTED" ||
+    r.shockReduceState === "SUBMITTED" ||
+    r.shockReduceState === "PARTIALLY_FILLED"
+  );
+}
+
+export function isPositiveExternalManualLifecycleRow(row: unknown): boolean {
+  if (!isIndependentExternalManualLifecycleRow(row)) return false;
+  return !hasBotOwnershipEvidenceOnLedgerRow(row);
+}
+
+export function actualPositionExistsForLedgerKey(
+  key: string,
+  sync: Pick<LedgerOkxPositionSyncSnapshot, "okx_positions_preview">
+): boolean {
+  return sync.okx_positions_preview.some((r) => `${r.symbol}:${r.side}` === key);
+}
+
+export function isBotSizeReconcilePendingSyncStatus(syncStatus: string | null | undefined): boolean {
+  return BOT_SIZE_RECONCILE_PENDING_SYNC_STATUSES.has(String(syncStatus ?? "").trim());
+}
+
+export function shouldTreatSyncStatusAsManualPartial(input: Readonly<{
+  syncStatus: string | null | undefined;
+  key: string;
+  sync: LedgerOkxPositionSyncSnapshot;
+  paperRow: unknown;
+}>): boolean {
+  const status = String(input.syncStatus ?? "").trim();
+  if (status !== "MANUAL_PARTIAL_DETECTED" && status !== "ADOPTED_POSITION_MANUAL_PARTIAL_DETECTED") {
+    return false;
+  }
+  if (!actualPositionExistsForLedgerKey(input.key, input.sync)) return false;
+  if (isLedgerOnlyStaleKey(input.key, input.sync)) return false;
+  if (hasBotOwnershipEvidenceOnLedgerRow(input.paperRow)) return false;
+  if (hasBotPartialReconcileEvidence(input.paperRow)) return false;
+  return true;
 }
 
 export function isIndependentExternalManualLifecycleRow(row: unknown): boolean {
@@ -106,19 +194,89 @@ export function shouldBlockAutomatedManagementForSyncKey(input: Readonly<{
   paperOpens: ReadonlyArray<{ symbol: string; side: string; status?: string; lifecycleState?: string }>;
 }>): boolean {
   if (isLedgerOnlyStaleKey(input.key, input.sync)) return false;
-
-  if (isOkxOnlyKey(input.key, input.sync)) {
-    const paperRow = findLedgerOpenRow(input.paperOpens, input.key);
-    if (paperRow == null) return true;
-    if (isIndependentExternalManualLifecycleRow(paperRow)) return true;
-    return !hasBotOwnershipEvidenceOnLedgerRow(paperRow);
-  }
+  if (!actualPositionExistsForLedgerKey(input.key, input.sync)) return false;
 
   const paperRow = findLedgerOpenRow(input.paperOpens, input.key);
-  if (paperRow == null) return false;
-  if (isIndependentExternalManualLifecycleRow(paperRow)) return true;
-  if (hasBotOwnershipEvidenceOnLedgerRow(paperRow)) return false;
+  if (paperRow != null) {
+    if (hasBotOwnershipEvidenceOnLedgerRow(paperRow)) return false;
+    if (hasBotPartialReconcileEvidence(paperRow)) return false;
+    if (!isPositiveExternalManualLifecycleRow(paperRow)) return false;
+    return true;
+  }
+
+  if (isOkxOnlyKey(input.key, input.sync)) {
+    return true;
+  }
+
   return false;
+}
+
+export function resolveBtcPositionManagementSuppressor(input: Readonly<{
+  okxActualSide: string;
+  paperSide: string;
+  v2InferredSide: string;
+  reconcileState: string;
+  externalManualBlockedForSide: boolean;
+  botOwnershipEvidence: boolean;
+  positiveExternalManualEvidence: boolean;
+  closeOnlyMode: boolean;
+  killSwitch: boolean;
+}>): Readonly<{
+  sides_aligned: boolean;
+  side_mismatch: boolean;
+  false_manual_block_ignored: boolean;
+  effective_external_manual_blocked: boolean;
+  existing_position_management_blocked: boolean;
+  protective_ensure_allowed: boolean;
+  close_allowed: boolean;
+  partial_reduce_allowed: boolean;
+  suppressor_active: boolean;
+  suppressor_reason: string | null;
+}> {
+  const okxActualSide = input.okxActualSide;
+  const paperSide = input.paperSide;
+  const v2InferredSide = input.v2InferredSide;
+  const sidesAligned =
+    okxActualSide !== "none" &&
+    paperSide !== "none" &&
+    okxActualSide === paperSide &&
+    okxActualSide === v2InferredSide;
+  const sideMismatch =
+    okxActualSide !== "none" && paperSide !== "none" && okxActualSide !== paperSide;
+  const falseManualBlockIgnored =
+    sidesAligned && input.botOwnershipEvidence && !input.positiveExternalManualEvidence;
+  const effectiveExternalManualBlocked =
+    input.externalManualBlockedForSide && !falseManualBlockIgnored;
+  const hardReconcileBlock =
+    input.reconcileState === "RECONCILE_MISMATCH" && !sidesAligned;
+  const existing_position_management_blocked =
+    effectiveExternalManualBlocked ||
+    sideMismatch ||
+    hardReconcileBlock ||
+    input.closeOnlyMode ||
+    input.killSwitch;
+  const managementBlockReasons: string[] = [];
+  if (effectiveExternalManualBlocked) managementBlockReasons.push("external_manual_block");
+  if (sideMismatch) managementBlockReasons.push("side_mismatch");
+  if (hardReconcileBlock) managementBlockReasons.push("reconcile_mismatch");
+  if (input.closeOnlyMode) managementBlockReasons.push("close_only_mode");
+  if (input.killSwitch) managementBlockReasons.push("kill_switch");
+  return {
+    sides_aligned: sidesAligned,
+    side_mismatch: sideMismatch,
+    false_manual_block_ignored: falseManualBlockIgnored,
+    effective_external_manual_blocked: effectiveExternalManualBlocked,
+    existing_position_management_blocked,
+    protective_ensure_allowed: !existing_position_management_blocked,
+    close_allowed: !existing_position_management_blocked,
+    partial_reduce_allowed: !existing_position_management_blocked,
+    suppressor_active: existing_position_management_blocked,
+    suppressor_reason: existing_position_management_blocked ? managementBlockReasons.join("|") : null
+  };
+}
+
+export function buildFalseManualBlockClearedProof(input: Record<string, unknown>): Record<string, unknown> {
+  return { event: "FALSE_MANUAL_BLOCK_CLEARED_PROOF", ...input };
 }
 
 export function isTrueExternalManualClassification(input: Readonly<{
