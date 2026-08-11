@@ -240,6 +240,68 @@ const EP = {
 
 const SAME_DIR_REENTRY_COOLDOWN_MULT = 1.35;
 const RANGE_REVERSAL_SWITCH_PENDING_MS = 90_000;
+/** Grace before clearing filled pending entries with no matching OKX position. */
+export const PENDING_FILLED_NO_POSITION_GRACE_MS = 120_000;
+
+export type StaleEntryCancelPrecheckAction = "defer_filled_reconcile" | "clear_terminal" | "attempt_cancel";
+
+export function resolveStaleEntryCancelPrecheckAction(
+  orderState: string | null
+): StaleEntryCancelPrecheckAction {
+  const state = String(orderState ?? "").toLowerCase();
+  if (state === "filled") return "defer_filled_reconcile";
+  if (
+    state === "canceled" ||
+    state === "mmp_canceled" ||
+    state === "rejected" ||
+    state === "expired"
+  ) {
+    return "clear_terminal";
+  }
+  return "attempt_cancel";
+}
+
+export function isAuthoritativePositionsSnapshot(input: Readonly<{
+  okxSignedRestReady: boolean;
+  okxPositionsOk: boolean;
+  lastLivePositionsPayload: unknown;
+}>): boolean {
+  return (
+    input.okxSignedRestReady === true &&
+    input.okxPositionsOk === true &&
+    Array.isArray(input.lastLivePositionsPayload)
+  );
+}
+
+export type FilledPendingNoPositionAction =
+  | "reconcile_open"
+  | "clear_stale_filled_pending_no_actual_position"
+  | "keep_pending_during_reconcile_grace";
+
+export function resolveFilledPendingNoPositionAction(input: Readonly<{
+  orderState: string;
+  hasActualPosition: boolean;
+  positionsSnapshotAuthoritative: boolean;
+  pendingAgeMs: number;
+  graceMs?: number;
+}>): FilledPendingNoPositionAction {
+  if (String(input.orderState).toLowerCase() !== "filled") {
+    return "keep_pending_during_reconcile_grace";
+  }
+  if (input.hasActualPosition) return "reconcile_open";
+  const graceMs = input.graceMs ?? PENDING_FILLED_NO_POSITION_GRACE_MS;
+  if (input.positionsSnapshotAuthoritative && input.pendingAgeMs >= graceMs) {
+    return "clear_stale_filled_pending_no_actual_position";
+  }
+  return "keep_pending_during_reconcile_grace";
+}
+
+export function computePendingAgeMs(
+  pending: Readonly<{ submittedAt?: number; createdAt: number }>,
+  nowMs: number
+): number {
+  return nowMs - (pending.submittedAt ?? pending.createdAt);
+}
 
 /** 吏꾩엯 吏곹썑 entry identity ?덉씤 ?좎?: ?μ꽭쨌?덉씤 ?꾪솚???꾨웾 泥?궛留???援ш컙?먯꽌 湲덉?(?먯젅쨌?몄텧 ?쒕룄 ?깆? ?덉슜). */
 const ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS = 120_000;
@@ -15565,49 +15627,73 @@ export class PaperEngine {
               currentSide: String(currentAuthority.side)
             })
           : null;
+      let deferFilledReconcileFromStaleCancel = false;
       if (staleCancelReason) {
-        let cancelRequested = false;
-        let cancelConfirmed = false;
-        let orderState: string | null = null;
+        let stalePrecheckOrderState: string | null = null;
         if (this.okxDemo) {
           try {
-            const res = await this.okxDemo.cancelOrder(pending.instId, ordId, pending.clOrdId || undefined);
-            cancelRequested = true;
-            if (res.ok) cancelConfirmed = true;
             const getRes = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId || undefined);
             if (getRes.ok && getRes.value?.[0]?.state != null) {
-              orderState = String(getRes.value[0].state);
-              if (orderState === "canceled" || orderState === "mmp_canceled") cancelConfirmed = true;
+              stalePrecheckOrderState = String(getRes.value[0].state).toLowerCase();
             }
           } catch (e) {}
         }
-        this.logger.info("V2_STALE_ENTRY_CANCEL_PROOF", {
-          symbol: pending.symbol,
-          ordId,
-          clOrdId: pending.clOrdId ?? null,
-          originalSide: pending.side,
-          currentAuthorityDecision: currentAuthority?.decision ?? null,
-          currentAuthoritySide: currentAuthority?.side ?? null,
-          cancelReason: staleCancelReason,
-          cancelRequested,
-          cancelConfirmed,
-          orderState
-        });
-        if (cancelConfirmed || !this.okxDemo) {
+        const staleCancelPrecheck = resolveStaleEntryCancelPrecheckAction(stalePrecheckOrderState);
+        if (staleCancelPrecheck === "defer_filled_reconcile") {
+          deferFilledReconcileFromStaleCancel = true;
+        } else if (staleCancelPrecheck === "clear_terminal") {
           this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", {
             symbol: pending.symbol,
             side: pending.side,
             ord_id: ordId,
-            reason: staleCancelReason
+            reason: stalePrecheckOrderState
           });
           pendingRegistryModified = true;
+          continue;
         } else {
-          activePendingEntryOrders.push(pending);
+          let cancelRequested = false;
+          let cancelConfirmed = false;
+          let orderState: string | null = stalePrecheckOrderState;
+          if (this.okxDemo) {
+            try {
+              const res = await this.okxDemo.cancelOrder(pending.instId, ordId, pending.clOrdId || undefined);
+              cancelRequested = true;
+              if (res.ok) cancelConfirmed = true;
+              const getRes = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId || undefined);
+              if (getRes.ok && getRes.value?.[0]?.state != null) {
+                orderState = String(getRes.value[0].state).toLowerCase();
+                if (orderState === "canceled" || orderState === "mmp_canceled") cancelConfirmed = true;
+              }
+            } catch (e) {}
+          }
+          this.logger.info("V2_STALE_ENTRY_CANCEL_PROOF", {
+            symbol: pending.symbol,
+            ordId,
+            clOrdId: pending.clOrdId ?? null,
+            originalSide: pending.side,
+            currentAuthorityDecision: currentAuthority?.decision ?? null,
+            currentAuthoritySide: currentAuthority?.side ?? null,
+            cancelReason: staleCancelReason,
+            cancelRequested,
+            cancelConfirmed,
+            orderState
+          });
+          if (cancelConfirmed || !this.okxDemo) {
+            this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", {
+              symbol: pending.symbol,
+              side: pending.side,
+              ord_id: ordId,
+              reason: staleCancelReason
+            });
+            pendingRegistryModified = true;
+          } else {
+            activePendingEntryOrders.push(pending);
+          }
+          continue;
         }
-        continue;
       }
 
-      if (liveOrder) {
+      if (liveOrder && !deferFilledReconcileFromStaleCancel) {
         this.logger.info("PENDING_ENTRY_ORDER_FILL_CHECK_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, status: "still_pending" });
         
         const ageMs = Date.now() - pending.createdAt;
@@ -15674,21 +15760,59 @@ export class PaperEngine {
              continue;
            }
 
-           let actualPos = null;
+           let actualPos: Record<string, unknown> | null = null;
            if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
-             actualPos = this.lastLivePositionsPayload.find((p: any) => p.instId === pending.instId && String(p.posSide).toLowerCase() === pending.side);
+             actualPos = this.lastLivePositionsPayload.find(
+               (p) => p.instId === pending.instId && String(p.posSide).toLowerCase() === pending.side
+             ) ?? null;
              if (!actualPos) {
-               actualPos = this.lastLivePositionsPayload.find((p: any) => {
+               actualPos = this.lastLivePositionsPayload.find((p) => {
                  if (p.instId !== pending.instId) return false;
                  const posNum = Number(p.pos) || 0;
-                 const deducedSide = posNum > 0 ? "long" : (posNum < 0 ? "short" : null);
+                 const deducedSide = posNum > 0 ? "long" : posNum < 0 ? "short" : null;
                  return deducedSide === pending.side;
-               });
+               }) ?? null;
              }
            }
-           
+
+           const pendingAgeMs = computePendingAgeMs(pending, Date.now());
+           const positionsSnapshotAuthoritative = isAuthoritativePositionsSnapshot({
+             okxSignedRestReady: this.okxSignedRestReady,
+             okxPositionsOk: this.okxPositionsOk,
+             lastLivePositionsPayload: this.lastLivePositionsPayload
+           });
+           const filledNoPositionAction = resolveFilledPendingNoPositionAction({
+             orderState,
+             hasActualPosition: actualPos != null,
+             positionsSnapshotAuthoritative,
+             pendingAgeMs
+           });
+
            if (!actualPos) {
-             this.logger.error("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_FAIL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "actual_position_not_found" });
+             if (filledNoPositionAction === "clear_stale_filled_pending_no_actual_position") {
+               this.logger.info("PENDING_ENTRY_FILLED_NO_POSITION_STALE_CLEARED_PROOF", {
+                 symbol: pending.symbol,
+                 side: pending.side,
+                 ord_id: ordId,
+                 cl_ord_id: pending.clOrdId ?? null,
+                 pending_age_ms: pendingAgeMs,
+                 grace_ms: PENDING_FILLED_NO_POSITION_GRACE_MS,
+                 positions_snapshot_authoritative: positionsSnapshotAuthoritative,
+                 action: "clear_stale_filled_pending_no_actual_position"
+               });
+               pendingRegistryModified = true;
+               continue;
+             }
+             this.logger.error("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_FAIL_PROOF", {
+               symbol: pending.symbol,
+               side: pending.side,
+               ord_id: ordId,
+               reason: "actual_position_not_found",
+               pending_age_ms: pendingAgeMs,
+               grace_ms: PENDING_FILLED_NO_POSITION_GRACE_MS,
+               positions_snapshot_authoritative: positionsSnapshotAuthoritative,
+               action: "keep_pending_during_reconcile_grace"
+             });
              activePendingEntryOrders.push(pending);
              continue;
            }
