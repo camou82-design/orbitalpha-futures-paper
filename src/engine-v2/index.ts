@@ -4314,6 +4314,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let cap_kind: string | null = null;
     let min_order_check_passed = true;
     let min_order_block_reason: string | null = null;
+    let equityAdaptiveSizingAuthority: ReturnType<typeof evaluateEquityAdaptiveSizing> | null = null;
     const minProbeMarginKrw = 14000;
     const appliedLeverage = 10;
     const leverageSource = "v2_fixed";
@@ -4881,6 +4882,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     instrumentSizing
                 });
 
+                equityAdaptiveSizingAuthority = sizingResult;
+
                 if (input.evaluationMode !== "diagnostic") {
                     console.info(JSON.stringify(buildRiskBasedNotionalProof({
                         symbol: String(input.symbol),
@@ -5049,15 +5052,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotion_reason: promotionReason,
             raw_env_OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: rawEnvLiveMaxNotionalUsdt,
             live_max_notional_source: liveMaxNotionalSource,
-            max_order_notional_usdt: maxOrderNotionalUsdt,
-            max_addon_notional_usdt: maxAddonNotionalUsdt,
-            max_symbol_notional_usdt: maxSymbolNotionalUsdt,
-            max_account_notional_usdt: maxAccountNotionalUsdt,
+            legacy_max_order_notional_usdt: maxOrderNotionalUsdt,
+            legacy_max_addon_notional_usdt: maxAddonNotionalUsdt,
+            legacy_max_symbol_notional_usdt: maxSymbolNotionalUsdt,
+            legacy_max_account_notional_usdt: maxAccountNotionalUsdt,
             final_order_notional_usdt: finalOrderNotionalUsdt,
             applied_leverage: appliedLeverage,
             leverage_source: leverageSource,
             leverage_reason: leverageReason,
-            cap_kind: cap_kind ?? "usdt_live_sizing_cap",
+            cap_kind: cap_kind ?? "equity_adaptive_sizing",
             min_margin_krw_required: minProbeMarginKrw,
             cap_applied: cap_applied ?? false,
             cap_reason: cap_reason ?? null,
@@ -5078,15 +5081,20 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             is_micro_probe: isMicroProbe,
             raw_env_OKX_LIVE_MAX_ORDER_NOTIONAL_USDT: rawEnvLiveMaxNotionalUsdt,
             live_max_notional_source: liveMaxNotionalSource,
-            max_order_notional_usdt: maxOrderNotionalUsdt,
-            max_addon_notional_usdt: maxAddonNotionalUsdt,
-            max_symbol_notional_usdt: maxSymbolNotionalUsdt,
-            max_account_notional_usdt: maxAccountNotionalUsdt,
+            order_size_authority: "risk.finalOrderNotionalUsdt",
+            legacy_max_order_notional_usdt: maxOrderNotionalUsdt,
+            legacy_max_addon_notional_usdt: maxAddonNotionalUsdt,
+            legacy_max_symbol_notional_usdt: maxSymbolNotionalUsdt,
+            legacy_max_account_notional_usdt: maxAccountNotionalUsdt,
+            equity_adaptive_risk_pct: equityAdaptiveSizingAuthority?.riskPct ?? null,
+            equity_adaptive_initial_cap_usdt: equityAdaptiveSizingAuthority?.equityInitialCapUsdt ?? null,
+            equity_adaptive_symbol_cap_usdt: equityAdaptiveSizingAuthority?.symbolCapUsdt ?? null,
+            equity_adaptive_account_cap_usdt: equityAdaptiveSizingAuthority?.accountCapUsdt ?? null,
             final_order_notional_usdt: finalOrderNotionalUsdt,
             applied_leverage: appliedLeverage,
             leverage_source: leverageSource,
             leverage_reason: leverageReason,
-            cap_kind: cap_kind ?? "usdt_live_sizing_cap",
+            cap_kind: cap_kind ?? "equity_adaptive_sizing",
             min_margin_krw_required: minProbeMarginKrw,
             cap_applied: cap_applied ?? false,
             cap_reason: cap_reason ?? null,

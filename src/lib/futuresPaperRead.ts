@@ -1,6 +1,7 @@
 import type { FuturesPaperDataBundle } from "./futuresPaperBundleCore";
 import {
   deriveCurrentPositionsForDisplay,
+  deriveLedgerStalePositionsForDisplay,
   loadFuturesPaperBundleFromDiskRoot,
   normalizePositionsHistoryArray,
   paperOperationalFromEngineState
@@ -17,6 +18,7 @@ export type {
 } from "./futuresPaperBundleCore";
 export {
   deriveCurrentPositionsForDisplay,
+  deriveLedgerStalePositionsForDisplay,
   displayFieldsForClosedRow,
   normalizeClosedHistoryRow,
   normalizePositionsHistoryArray,
@@ -46,6 +48,7 @@ function emptyBundle(configHint: string): FuturesPaperDataBundle {
     ledgerPerformance: null,
     openPositions: [],
     currentPositions: [],
+    ledgerStalePositions: [],
     positionsHistory: [],
     eventsRecent: [],
     generatedAt: now,
@@ -136,6 +139,7 @@ async function loadFromRemoteApi(baseUrl: string, secret: string): Promise<Futur
     ledgerPerformance,
     openPositions,
     currentPositions: deriveCurrentPositionsForDisplay(b.engineState, openPositions),
+    ledgerStalePositions: deriveLedgerStalePositionsForDisplay(b.engineState, openPositions),
     positionsHistory,
     paperOperational,
     generatedAt

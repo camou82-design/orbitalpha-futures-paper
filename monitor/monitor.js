@@ -318,6 +318,11 @@
     return Array.isArray(o) ? o.filter((x) => x && x.status === "open") : [];
   }
 
+  function getStaleLedgerPositions(bundle) {
+    const stale = bundle.ledgerStalePositions;
+    return Array.isArray(stale) ? stale : [];
+  }
+
   function ledgerOkxSync(bundle) {
     const es = bundle.engineState;
     if (!es || typeof es !== "object") return null;
@@ -333,6 +338,10 @@
 
   function openForSymbol(bundle, sym) {
     return getOpenPositions(bundle).find((p) => p.symbol === sym) || null;
+  }
+
+  function staleLedgerForSymbol(bundle, sym) {
+    return getStaleLedgerPositions(bundle).find((p) => p && p.symbol === sym) || null;
   }
 
   /** OKX 감시·보호 주문·리컨실 표면 (`engine-state.position_ops_surface`). */
@@ -604,6 +613,15 @@
     }
 
     if (opens.length === 0) {
+      const staleLedger = getStaleLedgerPositions(bundle);
+      if (staleLedger.length > 0) {
+        return {
+          title: "실제 포지션 없음",
+          sub: "ledger 정리 대기 · 원장 stale " + staleLedger.length + "건",
+          badge: "badge-warn",
+          cardClass: "hero-card--warn"
+        };
+      }
       if (st === "OKX_ONLY") {
         return {
           title: "실거래소 포지션 보유 중",
@@ -1499,7 +1517,33 @@
     const cards = want.map((sym) => {
       const s = snapBySymbol(bundle, sym);
       const pos = openForSymbol(bundle, sym);
+      const staleLedgerPos = staleLedgerForSymbol(bundle, sym);
       const ctx = contextFor(sym, s || {});
+
+      if (!pos && staleLedgerPos) {
+        const sideK =
+          staleLedgerPos.side === "long" ? "LONG" : staleLedgerPos.side === "short" ? "SHORT" : String(staleLedgerPos.side ?? "—");
+        return `
+        <article class="sym-card sym-card--warn">
+          <div class="v2-pos-fallback-banner">ledger stale reconcile · OKX actual position 없음</div>
+          <header class="pos-card-head pos-card-head--compact">
+            <span class="pos-card-titleline">
+              <span class="pos-card-ticker">${esc(sym)}</span>
+              <span class="pos-card-side">${esc(sideK)}</span>
+            </span>
+          </header>
+          <div class="sym-state-block" style="border-top:1px solid rgba(255,255,255,0.05); padding-top:0.8rem;">
+            <div class="sym-state-row">
+              <span class="sym-state-k">상태</span>
+              <span class="sym-state-v">실제 포지션 없음 / ledger 정리 대기</span>
+            </div>
+            <div class="sym-state-row">
+              <span class="sym-state-k">reconcile</span>
+              <span class="sym-state-v">${esc(String(staleLedgerPos.displayReconciliationState ?? "ledger_stale_reconcile"))}</span>
+            </div>
+          </div>
+        </article>`;
+      }
 
       // pos 소스 조기 판별 — cardClass 결정에 사용
       const posIsOkxFallback = pos

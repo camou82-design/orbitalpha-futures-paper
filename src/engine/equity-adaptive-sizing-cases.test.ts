@@ -320,9 +320,42 @@ function runCases(): void {
         assertClose(r.finalOrderNotionalUsdt, 90, 0.01, "CASE N emergency cap");
     }
 
+    // CASE O — V2 emergency failsafe 500 binds even when equity-adaptive sizing would exceed it
+    {
+        const uncapped = entrySizing({ equity: 600, entryPrice: 100_000, stopPrice: 99_500 });
+        if (!(uncapped.finalOrderNotionalUsdt > 500)) {
+            throw new Error(
+                `CASE O setup: uncapped sizing should exceed 500, got ${uncapped.finalOrderNotionalUsdt}`
+            );
+        }
+        const capped = evaluateEquityAdaptiveSizing({
+            symbol: "BTCUSDT",
+            side: "long",
+            orderKind: "ENTRY",
+            accountEquityUsdt: 600,
+            availableBalanceUsdt: 600,
+            entryReferencePrice: 100_000,
+            effectiveStopPrice: 99_500,
+            appliedLeverage: 10,
+            entryQualityGrade: "A",
+            existingSymbolNotionalUsdt: 0,
+            existingAccountNotionalUsdt: 0,
+            emergencyAbsoluteCapUsdt: 500,
+            roundTripFeeRate: 0,
+            lastPrice: 100_000
+        });
+        if (capped.finalOrderNotionalUsdt > 500) {
+            throw new Error(
+                `CASE O emergency cap: finalOrderNotionalUsdt must be <= 500, got ${capped.finalOrderNotionalUsdt}`
+            );
+        }
+        assertClose(capped.finalOrderNotionalUsdt, 500, 0.01, "CASE O emergency cap at 500");
+        assertTrue(capped.emergencyCapUsdt === 500, "CASE O emergencyCapUsdt recorded");
+    }
+
     console.info(JSON.stringify({
         event: "V2_EQUITY_ADAPTIVE_SIZING_CASES_PASS",
-        cases: ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N"],
+        cases: ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O"],
         risk_per_trade_pct: RISK_PER_TRADE_PCT,
         initial_cap_multiple: MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE,
         symbol_cap_multiple: MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,

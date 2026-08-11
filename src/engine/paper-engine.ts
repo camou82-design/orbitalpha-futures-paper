@@ -140,6 +140,12 @@ import {
   resolveTerminalCloseAttribution,
   buildTerminalCloseAttributionProof
 } from "../engine-v2/lifecycle/terminal-close-attribution";
+import {
+    RISK_PER_TRADE_PCT,
+    MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE,
+    MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,
+    MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE
+} from "../engine-v2/risk-sizing/equity-adaptive-sizing";
 import { buildProtectiveOrderMatchProof, protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
 import {
   enrichCompletedTradeRecord,
@@ -4521,18 +4527,28 @@ export class PaperEngine {
       live_emergency_max_order_notional_usdt: this.config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null,
       live_margin_reserve_ratio: this.config.okxLiveMarginReserveRatio ?? 0.2,
       account_equity_usdt: authority.okx_total_equity_usdt,
-      risk_per_trade_pct: 0.005,
+      risk_per_trade_pct: RISK_PER_TRADE_PCT,
       initial_notional_cap_usdt:
-        authority.okx_total_equity_usdt != null ? authority.okx_total_equity_usdt * 0.8 : null,
+        authority.okx_total_equity_usdt != null
+          ? authority.okx_total_equity_usdt * MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE
+          : null,
       symbol_cap_usdt:
-        authority.okx_total_equity_usdt != null ? authority.okx_total_equity_usdt * 1.0 : null,
+        authority.okx_total_equity_usdt != null
+          ? authority.okx_total_equity_usdt * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE
+          : null,
       account_cap_usdt:
-        authority.okx_total_equity_usdt != null ? authority.okx_total_equity_usdt * 1.5 : null,
+        authority.okx_total_equity_usdt != null
+          ? authority.okx_total_equity_usdt * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE
+          : null,
       current_account_exposure_usdt: authority.okx_total_position_notional_usdt,
       next_order_risk_budget_usdt:
-        authority.okx_total_equity_usdt != null ? authority.okx_total_equity_usdt * 0.005 : null,
+        authority.okx_total_equity_usdt != null
+          ? authority.okx_total_equity_usdt * RISK_PER_TRADE_PCT
+          : null,
       next_order_max_notional_usdt:
-        authority.okx_total_equity_usdt != null ? authority.okx_total_equity_usdt * 0.8 : null
+        authority.okx_total_equity_usdt != null
+          ? authority.okx_total_equity_usdt * MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE
+          : null
     };
   }
 
@@ -9219,10 +9235,18 @@ export class PaperEngine {
       }
 
       // Constraint: Static Cap (Optional safety override)
-      if (this.config.okxLiveStaticNotionalCapEnabled && static_safety_cap != null && final_submitted_notional_usdt > static_safety_cap) {
-        final_submitted_notional_usdt = static_safety_cap;
+      // V2 equity-adaptive sizing already applied emergency/legacy caps in evaluateEquityAdaptiveSizing.
+      const staticCapResolution = resolveLiveSubmitStaticSafetyCap({
+        authoritySource: input.authoritySource,
+        okxLiveStaticNotionalCapEnabled: this.config.okxLiveStaticNotionalCapEnabled,
+        staticSafetyCapUsdt: static_safety_cap,
+        intendedNotionalUsdt: final_submitted_notional_usdt
+      });
+      final_submitted_notional_usdt = staticCapResolution.finalSubmittedNotionalUsdt;
+      if (staticCapResolution.finalSizeSource === "static_safety_cap") {
         final_size_source = "static_safety_cap";
       }
+      const skipStaticCapForV2Authority = staticCapResolution.skipStaticCapForV2Authority;
 
       const logCtxReality = {
         ...logCtx,
@@ -9236,6 +9260,7 @@ export class PaperEngine {
         final_size_source,
         static_safety_cap,
         static_cap_enabled: this.config.okxLiveStaticNotionalCapEnabled,
+        static_cap_skipped_for_v2_authority: skipStaticCapForV2Authority,
         ref_price: refPrice
       };
 
@@ -9642,11 +9667,20 @@ export class PaperEngine {
       leverage_reason: null,
       leverage_block_reason: null,
       entry_quality_grade: input.entryQualityGrade ?? null,
+      order_size_authority: input.authoritySource === "v2" ? "risk.finalOrderNotionalUsdt" : "submit_path_notional",
       size_unit_source: input.reduceOnly === true ? "okx_contracts_ctVal_price" : "stageMarginKrw",
       stage_margin_krw: stageMarginKrw,
       stage_margin_usdt: stageMarginUsdt,
       authority_size_usdt: authoritySizeUsdt,
       final_order_notional_usdt: finalOrderNotionalUsdt,
+      v2_authority_notional_usdt:
+        input.authoritySource === "v2"
+          ? (input.orderNotionalUsdt ?? input.desiredNotionalUsdt ?? finalOrderNotionalUsdt)
+          : null,
+      legacy_static_safety_cap_usdt:
+        this.config.okxLiveEmergencyMaxOrderNotionalUsdt ??
+        this.config.okxLiveMaxOrderNotionalUsdt ??
+        null,
       formula_notional_usdt: input.reduceOnly === true && reduceUnitsForProof ? reduceUnitsForProof.notionalUsd : formulaNotionalUsdt,
       formula_match:
         input.reduceOnly === true && reduceUnitsForProof
@@ -21217,6 +21251,31 @@ function buildPositionIdentityMeta(pos: PaperOpenPositionRecord | PaperClosedPos
     executorAtEntry: p.executorAtEntry ?? null,
     regimeAtEntry: p.regimeAtEntry ?? null
   };
+}
+
+export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
+  authoritySource?: string | null;
+  okxLiveStaticNotionalCapEnabled: boolean;
+  staticSafetyCapUsdt: number | null;
+  intendedNotionalUsdt: number;
+}>): Readonly<{
+  finalSubmittedNotionalUsdt: number;
+  finalSizeSource: "v2_risk" | "static_safety_cap";
+  skipStaticCapForV2Authority: boolean;
+}> {
+  const skipStaticCapForV2Authority = input.authoritySource === "v2";
+  let finalSubmittedNotionalUsdt = input.intendedNotionalUsdt;
+  let finalSizeSource: "v2_risk" | "static_safety_cap" = "v2_risk";
+  if (
+    !skipStaticCapForV2Authority &&
+    input.okxLiveStaticNotionalCapEnabled &&
+    input.staticSafetyCapUsdt != null &&
+    finalSubmittedNotionalUsdt > input.staticSafetyCapUsdt
+  ) {
+    finalSubmittedNotionalUsdt = input.staticSafetyCapUsdt;
+    finalSizeSource = "static_safety_cap";
+  }
+  return { finalSubmittedNotionalUsdt, finalSizeSource, skipStaticCapForV2Authority };
 }
 
 export function computeOkxFilledNotionalUsdt(

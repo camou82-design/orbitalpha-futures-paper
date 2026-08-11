@@ -234,6 +234,62 @@ function isPaperLedgerPositionOpen(x: unknown): boolean {
   return st === undefined || st === "open";
 }
 
+export function isAuthoritativeOkxPositionSnapshotForDisplay(engineState: unknown): boolean {
+  if (!engineState || typeof engineState !== "object") return false;
+  const es = engineState as Record<string, unknown>;
+  return (
+    es.position_source === "okx_actual" &&
+    es.okx_signed_rest_ready === true &&
+    es.okx_positions_ok === true
+  );
+}
+
+export function okxActualPositionsEmptyForDisplay(engineState: unknown): boolean {
+  if (!engineState || typeof engineState !== "object") return false;
+  const es = engineState as Record<string, unknown>;
+  const notional = es.okx_total_position_notional_usdt;
+  const parseSource = es.okx_position_parse_source;
+  const sync = es.ledger_okx_position_sync;
+  const syncStatus =
+    sync && typeof sync === "object"
+      ? String((sync as Record<string, unknown>).sync_status ?? "")
+      : "";
+  const okxPreview =
+    sync && typeof sync === "object" && Array.isArray((sync as Record<string, unknown>).okx_positions_preview)
+      ? ((sync as Record<string, unknown>).okx_positions_preview as unknown[])
+      : null;
+  const okxPreviewEmpty = okxPreview == null || okxPreview.length === 0;
+  return (
+    (notional === 0 || notional === null) &&
+    parseSource === "no_open_positions" &&
+    (syncStatus === "LEDGER_ONLY" || okxPreviewEmpty)
+  );
+}
+
+export function mapLedgerRowsToStaleReconcile(ledgerOpen: unknown[]): unknown[] {
+  return ledgerOpen.map((row) => {
+    const base = row && typeof row === "object" ? (row as Record<string, unknown>) : {};
+    return {
+      ...base,
+      status: "ledger_stale_reconcile",
+      displayReconciliationState: "ledger_stale_reconcile",
+      displaySource: "paper_ledger_stale",
+      isActivePosition: false
+    };
+  });
+}
+
+export function deriveLedgerStalePositionsForDisplay(
+  engineState: unknown,
+  openPositions: unknown[]
+): unknown[] {
+  const ledgerOpen = Array.isArray(openPositions) ? openPositions.filter(isPaperLedgerPositionOpen) : [];
+  if (ledgerOpen.length === 0) return [];
+  if (!isAuthoritativeOkxPositionSnapshotForDisplay(engineState)) return [];
+  if (!okxActualPositionsEmptyForDisplay(engineState)) return [];
+  return mapLedgerRowsToStaleReconcile(ledgerOpen);
+}
+
 /**
  * UI `/futures-paper` current-positions path: ledger `open.json` first; if empty,
  * read-only rows from `engineState.ledger_okx_position_sync` + `position_ops_surface`
@@ -241,7 +297,15 @@ function isPaperLedgerPositionOpen(x: unknown): boolean {
  */
 export function deriveCurrentPositionsForDisplay(engineState: unknown, openPositions: unknown[]): unknown[] {
   const ledgerOpen = Array.isArray(openPositions) ? openPositions.filter(isPaperLedgerPositionOpen) : [];
-  if (ledgerOpen.length > 0) return ledgerOpen;
+  if (ledgerOpen.length > 0) {
+    if (
+      isAuthoritativeOkxPositionSnapshotForDisplay(engineState) &&
+      okxActualPositionsEmptyForDisplay(engineState)
+    ) {
+      return [];
+    }
+    return ledgerOpen;
+  }
 
   if (!engineState || typeof engineState !== "object") return [];
   const es = engineState as Record<string, unknown>;
@@ -379,6 +443,8 @@ export type FuturesPaperDataBundle = Readonly<{
   openPositions: unknown[];
   /** Ledger opens, or read-only OKX sync / ops-surface fallback for homepage current-positions UI */
   currentPositions: unknown[];
+  /** Paper ledger rows kept for reconcile when OKX authoritative snapshot is empty */
+  ledgerStalePositions: unknown[];
   positionsHistory: unknown[];
   eventsRecent: unknown[];
   generatedAt: number;
@@ -605,6 +671,7 @@ export async function composePublicFuturesPaperBundleForWrite(
   const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt);
   const paperOperational = paperOperationalFromEngineState(engineState);
   const currentPositions = deriveCurrentPositionsForDisplay(engineState, openPositions);
+  const ledgerStalePositions = deriveLedgerStalePositionsForDisplay(engineState, openPositions);
   const noEntryAuditDoc = await readNoEntryAuditFromDataDir(dataDir);
   const { noEntryAudit, noEntryAuditBySymbol } = bundleNoEntryAuditFields(noEntryAuditDoc);
 
@@ -627,6 +694,7 @@ export async function composePublicFuturesPaperBundleForWrite(
     ledgerPerformance,
     openPositions,
     currentPositions,
+    ledgerStalePositions,
     positionsHistory,
     eventsRecent,
     generatedAt,
@@ -682,6 +750,7 @@ async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): P
   const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt);
   const paperOperational = paperOperationalFromEngineState(engineState);
   const currentPositions = deriveCurrentPositionsForDisplay(engineState, openPositions);
+  const ledgerStalePositions = deriveLedgerStalePositionsForDisplay(engineState, openPositions);
   const noEntryAuditDoc = await readNoEntryAuditFromDataDir(dataDir);
   const { noEntryAudit, noEntryAuditBySymbol } = bundleNoEntryAuditFields(noEntryAuditDoc);
 
@@ -704,6 +773,7 @@ async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): P
     ledgerPerformance,
     openPositions,
     currentPositions,
+    ledgerStalePositions,
     positionsHistory,
     eventsRecent,
     generatedAt,
@@ -728,6 +798,7 @@ export async function loadFuturesPaperBundleFromDiskRoot(projectRoot: string): P
       ...published,
       openPositions,
       currentPositions: deriveCurrentPositionsForDisplay(published.engineState, openPositions),
+      ledgerStalePositions: deriveLedgerStalePositionsForDisplay(published.engineState, openPositions),
       noEntryAudit,
       noEntryAuditBySymbol
     };
