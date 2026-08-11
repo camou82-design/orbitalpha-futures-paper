@@ -3370,8 +3370,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 }
             }
 
-            // 단순 upper/mid chase long 금지.
-            if (!conflictResolvedUpperShort && !conflictResolvedTrendLong && trendSideCandidate === "long") {
+            // 단순 upper/mid chase long 금지. Confirmed RANGE boundary continuation must not be undone.
+            const continuationPromotionProtected =
+                promotionApplied === true &&
+                promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
+            if (
+                !conflictResolvedUpperShort &&
+                !conflictResolvedTrendLong &&
+                trendSideCandidate === "long" &&
+                !continuationPromotionProtected
+            ) {
                 conflictResolutionAction = "skip";
                 conflictResolutionReason = "chase_long_disallowed_in_upper_zone";
                 v2DecisionAfterPromotion = "SKIP";
