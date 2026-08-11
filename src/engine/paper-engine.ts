@@ -3865,16 +3865,18 @@ export class PaperEngine {
             const flatConfirmed =
               authoritativeFetchReady &&
               zeroCount >= AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED;
-            if (
-              !flatConfirmed &&
-              nowTs - (open.okxZeroUnconfirmedSince ?? nowTs) < OKX_ZERO_CONFIRM_MS
-            ) {
+            if (!flatConfirmed) {
               next.push(open);
               continue;
             }
             const finalized = await this.tryPendingCompletedTradeFinalize(open, true, nowTs);
             if (finalized) continue;
-            next.push(open);
+            await this.pruneAuthoritativeFlatLedger(
+              open,
+              nowTs,
+              "authoritative_flat_finalize_unresolved_zero_confirmed"
+            );
+            ledgerModified = true;
             continue;
           }
 

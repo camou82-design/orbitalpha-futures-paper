@@ -3,7 +3,8 @@ import {
   recordAuthoritativeFlatZeroObservation,
   shouldPerformAuthoritativeFlatReconcile,
   AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
-  resolveAuthoritativeFlatCloseAttribution
+  resolveAuthoritativeFlatCloseAttribution,
+  resolveAuthoritativeFlatFinalizePendingAction
 } from "../engine-v2/position/authoritative-flat-reconcile";
 import { classifyPositionSizeDelta } from "../engine-v2/position/manual-reduce-rebase";
 import { resolveV2CloseContractAuthority } from "../engine-v2/execution/close-contract-authority";
@@ -370,6 +371,103 @@ function v2Ledger(overrides: Partial<PaperOpenPositionRecord> = {}): PaperOpenPo
   });
   assertEq(nearFullBot.attribution, "BOT_FULL_CLOSE_RECONCILE", "0.199/0.20 within 1% tolerance");
   assertTrue(nearFullBot.botFinalFillEvidenceFound, "near-full fill bot evidence");
+}
+
+// A. finalizePending + zeroConfirm=2 + finalize=false => PRUNE
+{
+  const action = resolveAuthoritativeFlatFinalizePendingAction({
+    finalizePending: true,
+    authoritativeFetchReady: true,
+    zeroConfirmCount: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+    finalizeSucceeded: false
+  });
+  assertEq(action, "PRUNE_UNRESOLVED_FINALIZE", "CASE A prune unresolved finalize");
+}
+
+// B. finalizePending + zeroConfirm=2 + finalize=true => FINALIZE, no duplicate prune
+{
+  const action = resolveAuthoritativeFlatFinalizePendingAction({
+    finalizePending: true,
+    authoritativeFetchReady: true,
+    zeroConfirmCount: AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED,
+    finalizeSucceeded: true
+  });
+  assertEq(action, "FINALIZE_SUCCEEDED", "CASE B finalize success");
+}
+
+// C. finalizePending + zeroConfirm=1 => HOLD
+{
+  const action = resolveAuthoritativeFlatFinalizePendingAction({
+    finalizePending: true,
+    authoritativeFetchReady: true,
+    zeroConfirmCount: 1,
+    finalizeSucceeded: false
+  });
+  assertEq(action, "HOLD_UNCONFIRMED_ZERO", "CASE C hold on first zero");
+}
+
+// D. BTC+ETH stale finalizePending + authoritative positions=[] 2 cycles => both prune eligible
+{
+  const symbols = ["BTCUSDT:long", "ETHUSDT:long"] as const;
+  for (const key of symbols) {
+    let count = 0;
+    count = recordAuthoritativeFlatZeroObservation({
+      key,
+      authoritativeFetchReady: true,
+      okxActualExists: false,
+      priorCount: count
+    });
+    count = recordAuthoritativeFlatZeroObservation({
+      key,
+      authoritativeFetchReady: true,
+      okxActualExists: false,
+      priorCount: count
+    });
+    const action = resolveAuthoritativeFlatFinalizePendingAction({
+      finalizePending: true,
+      authoritativeFetchReady: true,
+      zeroConfirmCount: count,
+      finalizeSucceeded: false
+    });
+    assertEq(action, "PRUNE_UNRESOLVED_FINALIZE", `CASE D prune ${key}`);
+    assertTrue(
+      shouldPerformAuthoritativeFlatReconcile({
+        authoritativeFetchReady: true,
+        ledgerExists: true,
+        okxActualExists: false,
+        zeroConfirmCount: count
+      }),
+      `CASE D flat reconcile eligible ${key}`
+    );
+  }
+}
+
+// E. flat authoritative actual=0 => no close submit / no protective fault path
+{
+  for (const symbol of ["BTCUSDT", "ETHUSDT"]) {
+    const guard = evaluateStaleLedgerExecutionSuppression({
+      symbol,
+      side: "long",
+      authoritativePositionsReady: true,
+      actualKeyExists: false,
+      ledgerKeyExists: true
+    });
+    assertTrue(guard.suppressed, `CASE E stale suppress ${symbol}`);
+    assertTrue(guard.suppressedActions.includes("signed_order_submit"), `CASE E no submit ${symbol}`);
+  }
+  const gate = evaluateV2ExitExecutionGate({
+    symbol: "BTCUSDT",
+    side: "long",
+    requestedAction: "close",
+    requestedReason: "candidate_lost",
+    isV2Managed: true,
+    v2ShouldExit: false,
+    v2ShouldReduce: false,
+    v2ShouldPartial: false,
+    actualStopBreached: false,
+    actualPositionExists: false
+  });
+  assertFalse(gate.allowed, "CASE E no close when actual flat");
 }
 
 console.log("v2-position-authority-reset-cases: ALL PASS");

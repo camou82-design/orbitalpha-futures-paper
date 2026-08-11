@@ -33,6 +33,41 @@ export function shouldPerformAuthoritativeFlatReconcile(input: Readonly<{
     );
 }
 
+export function isAuthoritativeFlatConfirmed(input: Readonly<{
+    authoritativeFetchReady: boolean;
+    zeroConfirmCount: number;
+}>): boolean {
+    return (
+        input.authoritativeFetchReady &&
+        input.zeroConfirmCount >= AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED
+    );
+}
+
+export type AuthoritativeFlatFinalizePendingAction =
+    | "HOLD_UNCONFIRMED_ZERO"
+    | "FINALIZE_SUCCEEDED"
+    | "PRUNE_UNRESOLVED_FINALIZE"
+    | "NOT_APPLICABLE";
+
+export function resolveAuthoritativeFlatFinalizePendingAction(input: Readonly<{
+    finalizePending: boolean;
+    authoritativeFetchReady: boolean;
+    zeroConfirmCount: number;
+    finalizeSucceeded: boolean;
+}>): AuthoritativeFlatFinalizePendingAction {
+    if (!input.finalizePending) return "NOT_APPLICABLE";
+    if (
+        !isAuthoritativeFlatConfirmed({
+            authoritativeFetchReady: input.authoritativeFetchReady,
+            zeroConfirmCount: input.zeroConfirmCount
+        })
+    ) {
+        return "HOLD_UNCONFIRMED_ZERO";
+    }
+    if (input.finalizeSucceeded) return "FINALIZE_SUCCEEDED";
+    return "PRUNE_UNRESOLVED_FINALIZE";
+}
+
 export function buildV2AuthoritativeFlatReconcileProof(
     input: Record<string, unknown>
 ): Record<string, unknown> {
