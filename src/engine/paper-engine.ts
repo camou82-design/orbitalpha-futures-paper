@@ -326,6 +326,70 @@ export function computePendingAgeMs(
   return nowMs - (pending.submittedAt ?? pending.createdAt);
 }
 
+export type ProtectiveExistingAlgoLedgerAdoption = Readonly<{
+  slAdopted: boolean;
+  tpAdopted: boolean;
+  protectionComplete: boolean;
+  isProtectiveStopRegistered: boolean;
+  isTakeProfitRegistered: boolean;
+  isProtectionFailed: boolean;
+  protectiveStopAlgoId: string | undefined;
+  protectiveSlAlgoId: string | undefined;
+  protectiveTpAlgoId: string | undefined;
+  ledgerRepairNeeded: boolean;
+}>;
+
+export function resolveProtectiveExistingAlgoLedgerAdoption(input: Readonly<{
+  previousIsProtectiveStopRegistered: boolean | undefined;
+  previousIsProtectionFailed: boolean | undefined;
+  previousIsTakeProfitRegistered: boolean | undefined;
+  previousProtectiveStopAlgoId: string | undefined;
+  previousProtectiveSlAlgoId: string | undefined;
+  previousProtectiveTpAlgoId: string | undefined;
+  slAlgoId: string | null | undefined;
+  tpAlgoId: string | null | undefined;
+  wantsTp: boolean;
+  slCanonicalMatch: boolean;
+  tpCanonicalMatch: boolean;
+}>): ProtectiveExistingAlgoLedgerAdoption {
+  const slAdopted =
+    input.slCanonicalMatch && input.slAlgoId != null && String(input.slAlgoId).length > 0;
+  const tpAdopted =
+    !input.wantsTp ||
+    (input.tpCanonicalMatch && input.tpAlgoId != null && String(input.tpAlgoId).length > 0);
+  const protectionComplete = slAdopted && tpAdopted;
+
+  const slAlgoStr = slAdopted ? String(input.slAlgoId) : undefined;
+  const tpAlgoStr = input.wantsTp && tpAdopted && input.tpAlgoId != null
+    ? String(input.tpAlgoId)
+    : undefined;
+
+  const isProtectiveStopRegistered = slAdopted;
+  const isTakeProfitRegistered = !input.wantsTp || tpAdopted;
+  const isProtectionFailed = !protectionComplete;
+
+  const ledgerRepairNeeded =
+    input.previousIsProtectiveStopRegistered !== isProtectiveStopRegistered ||
+    input.previousIsProtectionFailed !== isProtectionFailed ||
+    input.previousIsTakeProfitRegistered !== isTakeProfitRegistered ||
+    (slAdopted && input.previousProtectiveStopAlgoId !== slAlgoStr) ||
+    (slAdopted && input.previousProtectiveSlAlgoId !== slAlgoStr) ||
+    (input.wantsTp && tpAdopted && input.previousProtectiveTpAlgoId !== tpAlgoStr);
+
+  return {
+    slAdopted,
+    tpAdopted,
+    protectionComplete,
+    isProtectiveStopRegistered,
+    isTakeProfitRegistered,
+    isProtectionFailed,
+    protectiveStopAlgoId: slAlgoStr,
+    protectiveSlAlgoId: slAlgoStr,
+    protectiveTpAlgoId: tpAlgoStr,
+    ledgerRepairNeeded
+  };
+}
+
 /** 吏꾩엯 吏곹썑 entry identity ?덉씤 ?좎?: ?μ꽭쨌?덉씤 ?꾪솚???꾨웾 泥?궛留???援ш컙?먯꽌 湲덉?(?먯젅쨌?몄텧 ?쒕룄 ?깆? ?덉슜). */
 const ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS = 120_000;
 
@@ -8578,6 +8642,41 @@ export class PaperEngine {
       breakevenStopConfirmed: open.breakevenStopConfirmed ?? false
     });
 
+    const existingAlgoAdoption = resolveProtectiveExistingAlgoLedgerAdoption({
+      previousIsProtectiveStopRegistered: open.isProtectiveStopRegistered,
+      previousIsProtectionFailed: open.isProtectionFailed,
+      previousIsTakeProfitRegistered: open.isTakeProfitRegistered,
+      previousProtectiveStopAlgoId: open.protectiveStopAlgoId,
+      previousProtectiveSlAlgoId: open.protectiveSlAlgoId,
+      previousProtectiveTpAlgoId: open.protectiveTpAlgoId,
+      slAlgoId: engineOwnedSl?.algoId ?? null,
+      tpAlgoId: engineOwnedTp?.algoId ?? null,
+      wantsTp,
+      slCanonicalMatch: engineOwnedSl != null,
+      tpCanonicalMatch: engineOwnedTp != null
+    });
+
+    if (
+      existingAlgoAdoption.ledgerRepairNeeded &&
+      (existingAlgoAdoption.slAdopted || existingAlgoAdoption.tpAdopted)
+    ) {
+      this.logger.info("V2_PROTECTIVE_EXISTING_ALGO_ADOPTED_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        slAlgoId: existingAlgoAdoption.protectiveStopAlgoId ?? null,
+        tpAlgoId: existingAlgoAdoption.protectiveTpAlgoId ?? null,
+        contractsRequired: contractsToProtect,
+        contractsProtected: engineOwnedSl ? Number(engineOwnedSl.sz ?? 0) : null,
+        slAdopted: existingAlgoAdoption.slAdopted,
+        tpAdopted: existingAlgoAdoption.tpAdopted,
+        protectionComplete: existingAlgoAdoption.protectionComplete,
+        previousIsProtectiveStopRegistered: open.isProtectiveStopRegistered ?? false,
+        previousIsProtectionFailed: open.isProtectionFailed ?? false,
+        previousIsTakeProfitRegistered: open.isTakeProfitRegistered ?? false,
+        flowId
+      });
+    }
+
     // 4. Reconcile Plan
     const needSubmitSl = !engineOwnedSl;
     const needSubmitTp = wantsTp && !engineOwnedTp;
@@ -8729,12 +8828,23 @@ export class PaperEngine {
       ...open,
       stopPrice: activeStopPrice,
       targetPrice1: wantsTp ? activeTpPrice : undefined,
-      protectiveSlAlgoId: engineOwnedSl?.algoId as (string | undefined),
-      protectiveTpAlgoId: engineOwnedTp?.algoId as (string | undefined),
+      protectiveStopAlgoId: slRegistered
+        ? (engineOwnedSl?.algoId as string | undefined)
+        : open.protectiveStopAlgoId,
+      protectiveSlAlgoId: slRegistered
+        ? (engineOwnedSl?.algoId as string | undefined)
+        : open.protectiveSlAlgoId,
+      protectiveTpAlgoId: tpRegistered && wantsTp
+        ? (engineOwnedTp?.algoId as string | undefined)
+        : open.protectiveTpAlgoId,
       isProtectiveStopRegistered: slRegistered,
       isTakeProfitRegistered: tpRegistered,
       isProtectionFailed: !protectionSuccess
     };
+
+    if (existingAlgoAdoption.ledgerRepairNeeded) {
+      modified = true;
+    }
 
     if (!protectionSuccess) {
       this.symbolProtectionFailedBlocked.add(open.symbol);
