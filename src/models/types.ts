@@ -958,6 +958,22 @@ export type PaperOpenPositionRecord = {
   /** First observation of OKX missing position while paper still open (transient zero guard). */
   okxZeroUnconfirmedSince?: number;
 
+  /** Pending completed-trade finalize — final fill confirmed but OKX flat/history not yet persisted. */
+  finalizePending?: boolean;
+  pendingFinalizeFlowId?: string;
+  pendingFinalizePositionCycleId?: string;
+  pendingFinalizeEntryAvgPx?: number;
+  pendingFinalizeExitAvgPx?: number;
+  pendingFinalizeFinalCloseReason?: string;
+  pendingFinalizeFinalFillAt?: number;
+  pendingFinalizeTradeSource?: string;
+  pendingFinalizeCumulativePnlUsdNet?: number;
+  pendingFinalizeCumulativeFeeUsd?: number;
+  pendingFinalizePartialReduceCount?: number;
+  pendingFinalizeCloseReason?: string;
+  pendingFinalizeCloseSource?: string;
+  pendingFinalizeExitReason?: string;
+
   /** Position cycle execution tracking (one cycle = one completed trade). */
   positionCycleId?: string;
   positionCycleExitFills?: Array<{

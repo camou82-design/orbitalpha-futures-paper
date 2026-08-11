@@ -152,6 +152,13 @@ import {
   normalizeFinalCloseReason,
   isPositionCycleFinalizeDuplicate
 } from "../engine-v2/lifecycle/completed-trade";
+import {
+  persistPendingCompletedTradeFinalize,
+  clearPendingCompletedTradeFinalize,
+  isOpenLedgerTerminalCleanupBlocked,
+  buildTerminalFinalizeHandoffProof,
+  buildClosedRowFromPendingFinalize
+} from "../engine-v2/lifecycle/pending-finalize";
 export { normalizeOkxSwapContractsFromNotional };
 import { getPaperLoopIntervalMs } from "../config/env";
 import {
@@ -2623,6 +2630,9 @@ export class PaperEngine {
     const RECONCILE_GRACE_PERIOD_MS = 30_000;
 
     const reconcileManualFullClose = async (open: PaperOpenPositionRecord, source: string): Promise<boolean> => {
+      if (open.finalizePending === true) {
+        return this.tryPendingCompletedTradeFinalize(open, true, nowTs);
+      }
       const isManualExternal =
         open.manualOwnershipLatch === true ||
         open.lifecycleState === "EXTERNAL_MANUAL_MANAGED" ||
@@ -2829,6 +2839,10 @@ export class PaperEngine {
       }
 
       // --- EXTERNAL MANUAL RESIDUE PRUNING (Quiet) ---
+      if (!remotePos && !isNew && isOpenLedgerTerminalCleanupBlocked(open)) {
+        next.push(open);
+        continue;
+      }
       // If OKX actual position is zero and paper open position exists as manual residue, prune it quietly.
       if (!remotePos && !isNew) {
         const isManualFlagged = open.lifecycleState === "EXTERNAL_MANUAL_POSITION";
@@ -3418,6 +3432,38 @@ export class PaperEngine {
 
         if (!remotePos) {
           const paperContracts = open.okxContracts ?? 0;
+          if (open.finalizePending === true && paperContracts > 0 && !isNew) {
+            if (open.okxZeroUnconfirmedSince == null) {
+              open.okxZeroUnconfirmedSince = nowTs;
+              open.reconcileState = "OKX_ZERO_UNCONFIRMED";
+              ledgerModified = true;
+              this.logger.info(
+                "V2_TERMINAL_FINALIZE_HANDOFF_PROOF",
+                buildTerminalFinalizeHandoffProof({
+                  symbol: open.symbol,
+                  flow_id:
+                    open.pendingFinalizeFlowId ??
+                    `${open.symbol}:${open.side}:${open.openedAt}`,
+                  final_fill_confirmed: true,
+                  okx_flat_confirmed: false,
+                  finalize_pending: true,
+                  history_persisted: false,
+                  cleanup_requested: false,
+                  cleanup_allowed: false,
+                  handoff_state: "OKX_ZERO_UNCONFIRMED_HOLD",
+                  block_reason: "destructive_cleanup_forbidden_during_unconfirmed_zero"
+                })
+              );
+            }
+            if (nowTs - (open.okxZeroUnconfirmedSince ?? nowTs) < OKX_ZERO_CONFIRM_MS) {
+              next.push(open);
+              continue;
+            }
+            const finalized = await this.tryPendingCompletedTradeFinalize(open, true, nowTs);
+            if (finalized) continue;
+            next.push(open);
+            continue;
+          }
           if (paperContracts > 0 && !isNew) {
             if (open.okxZeroUnconfirmedSince == null) {
               open.okxZeroUnconfirmedSince = nowTs;
@@ -9680,6 +9726,85 @@ export class PaperEngine {
     };
   }
 
+  private async tryPendingCompletedTradeFinalize(
+    open: PaperOpenPositionRecord,
+    okxFlatConfirmed: boolean,
+    nowTs: number
+  ): Promise<boolean> {
+    if (open.finalizePending !== true) return false;
+
+    const flowId =
+      open.pendingFinalizeFlowId ?? `${open.symbol}:${open.side}:${open.openedAt}`;
+
+    if (!okxFlatConfirmed) {
+      this.logger.info(
+        "V2_TERMINAL_FINALIZE_HANDOFF_PROOF",
+        buildTerminalFinalizeHandoffProof({
+          symbol: open.symbol,
+          flow_id: flowId,
+          final_fill_confirmed: true,
+          okx_flat_confirmed: false,
+          finalize_pending: true,
+          history_persisted: false,
+          cleanup_requested: false,
+          cleanup_allowed: false,
+          handoff_state: "AWAITING_OKX_FLAT",
+          block_reason: "okx_flat_not_confirmed"
+        })
+      );
+      return false;
+    }
+
+    const closedRow = buildClosedRowFromPendingFinalize(open, nowTs);
+    if (closedRow == null) {
+      this.logger.warn("PENDING_FINALIZE_BUILD_FAILED", {
+        symbol: open.symbol,
+        side: open.side,
+        flowId
+      });
+      return false;
+    }
+
+    const enriched = enrichCompletedTradeRecord({
+      open,
+      closedRow,
+      isFinalClose: true,
+      actualFillPx: closedRow.closePrice,
+      actualFillContracts: open.okxContracts ?? 0
+    });
+
+    const { historyAppended } = await this.appendClosedWithStandardRouting({
+      closedRow: enriched,
+      open,
+      flowId,
+      exitReason: enriched.finalCloseReason ?? open.pendingFinalizeExitReason ?? "V2_EXIT",
+      closeSource: open.pendingFinalizeCloseSource ?? "BOT_EXECUTION_ATTRIBUTION",
+      currentRegime: this.lastRegime.regime || "NO_TRADE"
+    });
+
+    this.logger.info(
+      "V2_TERMINAL_FINALIZE_HANDOFF_PROOF",
+      buildTerminalFinalizeHandoffProof({
+        symbol: open.symbol,
+        flow_id: flowId,
+        final_fill_confirmed: true,
+        okx_flat_confirmed: true,
+        finalize_pending: open.finalizePending === true,
+        history_persisted: historyAppended,
+        cleanup_requested: historyAppended,
+        cleanup_allowed: historyAppended,
+        handoff_state: historyAppended
+          ? "FINALIZED_AND_CLEANUP_ALLOWED"
+          : "HISTORY_PERSIST_FAILED",
+        block_reason: historyAppended ? null : "history_persist_failed"
+      })
+    );
+
+    if (!historyAppended) return false;
+    clearPendingCompletedTradeFinalize(open);
+    return true;
+  }
+
   private async isHistoryDuplicate(record: PaperClosedPositionRecord): Promise<boolean> {
     try {
       const history = await this.store.readPositionsHistory();
@@ -9870,6 +9995,41 @@ export class PaperEngine {
         reason: blockReason,
         action: "SKIP_HISTORY_APPEND_KEEP_OPEN_LEDGER"
       });
+      if (
+        blockReason === "OKX_POSITION_STILL_EXISTS_NO_CLOSE_FILL" &&
+        enriched.isPositionCycleFinal === true
+      ) {
+        persistPendingCompletedTradeFinalize(input.open, {
+          flowId: enriched.flowId ?? input.flowId,
+          positionCycleId: enriched.positionCycleId,
+          entryAvgPx: enriched.entryAvgPx ?? enriched.entryPrice,
+          exitAvgPx: enriched.exitAvgPx ?? enriched.closePrice,
+          finalCloseReason: enriched.finalCloseReason ?? null,
+          finalFillAt: enriched.closedAt ?? Date.now(),
+          tradeSource: enriched.tradeSource ?? classifyTradeSource(input.open),
+          cumulativePnlUsdNet: enriched.pnlUsdNet,
+          cumulativeFeeUsd: enriched.feeUsd,
+          partialReduceCount: enriched.partialReduceCount ?? 0,
+          closeReason: String(enriched.closeReason),
+          closeSource: String(enriched.closeSource ?? input.closeSource),
+          exitReason: enriched.exitReason ?? input.exitReason
+        });
+        this.logger.info(
+          "V2_TERMINAL_FINALIZE_HANDOFF_PROOF",
+          buildTerminalFinalizeHandoffProof({
+            symbol: enriched.symbol,
+            flow_id: enriched.flowId ?? input.flowId,
+            final_fill_confirmed: true,
+            okx_flat_confirmed: false,
+            finalize_pending: true,
+            history_persisted: false,
+            cleanup_requested: false,
+            cleanup_allowed: false,
+            handoff_state: "PENDING_AWAITING_OKX_FLAT",
+            block_reason: blockReason
+          })
+        );
+      }
       this.logger.info(
         "V2_COMPLETED_TRADE_FINALIZE_PROOF",
         buildCompletedTradeFinalizeProof({
@@ -9887,6 +10047,10 @@ export class PaperEngine {
         })
       );
       return { row: enriched, historyAppended: false };
+    }
+
+    if (input.open.finalizePending === true) {
+      clearPendingCompletedTradeFinalize(input.open);
     }
 
     await this.positions.appendClosed(enriched);
@@ -13932,6 +14096,16 @@ export class PaperEngine {
     for (const o of opens) {
       const fid = `${o.symbol}:${o.side}:${o.openedAt}`;
       if (remainingIdsBeforeFinalGate.has(fid)) continue;
+      if (isOpenLedgerTerminalCleanupBlocked(o)) {
+        remaining.push(o);
+        rescuedForUnauthorizedLedgerPrune.push({
+          flowId: fid,
+          symbol: String(o.symbol),
+          side: o.side,
+          openedAt: o.openedAt
+        });
+        continue;
+      }
       const ledgerPruneAllowed =
         openLedgerPruneAuthorizedFlowIds.has(fid) || this.terminalExitConsumedByFlow.has(fid);
       if (ledgerPruneAllowed) continue;

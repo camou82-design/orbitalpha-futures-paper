@@ -56,6 +56,9 @@ export type V2ExitPolicyResult = Readonly<{
     hasPosition: boolean;
     peakUnrealizedPnlPct: number;
     profitProtectionActive: boolean;
+    oppositeHysteresisState?: string;
+    oppositeHysteresisBlockReason?: string | null;
+    thesisValid?: boolean;
 }>;
 
 export type EvaluateV2ExitPolicyArgs = Readonly<{
@@ -70,4 +73,8 @@ export type EvaluateV2ExitPolicyArgs = Readonly<{
         rangeConfidence: number | null;
         qualityScore: number;
     };
+    trendSideCandidate?: "long" | "short" | "none";
+    rangeSideCandidate?: "long" | "short" | "none";
+    reversalConfirmed?: boolean;
+    sameCycleExitConsumed?: boolean;
 }>;

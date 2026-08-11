@@ -975,6 +975,29 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             } as Record<string, unknown> )
         }
     };
+    const exitPreShock = v2State.directionalShockState ?? "NONE";
+    const exitPreEmaGap = Number(authoritativeInput.snapshot.emaGap ?? 0);
+    const exitPreBoxPos = Number(authoritativeInput.snapshot.boxPos ?? 0.5);
+    const exitPreTrendSideCandidate: "long" | "short" | "none" =
+        exitPreShock === "DOWN"
+            ? "short"
+            : exitPreShock === "UP"
+              ? "long"
+              : exitPreEmaGap < 0
+                ? "short"
+                : exitPreEmaGap > 0
+                  ? "long"
+                  : "none";
+    const exitPreRangeZone =
+        exitPreBoxPos <= 0.26 ? "lower" : exitPreBoxPos >= 0.74 ? "upper" : "mid";
+    const exitPreRangeSideCandidate: "long" | "short" | "none" =
+        exitPreRangeZone === "lower"
+            ? "long"
+            : exitPreRangeZone === "upper"
+              ? "short"
+              : "none";
+    const exitPreReversalConfirmed =
+        (execution.metadata as Record<string, unknown> | undefined)?.reversal_confirmed === true;
     const exitPolicy = evaluateV2ExitPolicy({
         symbol: String(input.symbol),
         v2State,
@@ -986,7 +1009,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             trendWeaknessScore: authoritativeInput.snapshot.trendWeaknessScore,
             rangeConfidence: authoritativeInput.snapshot.rangeConfidence,
             qualityScore: authoritativeInput.snapshot.qualityScore
-        }
+        },
+        trendSideCandidate: exitPreTrendSideCandidate,
+        rangeSideCandidate: exitPreRangeSideCandidate,
+        reversalConfirmed: exitPreReversalConfirmed
     });
     if (
         exitPolicy.hasPosition &&
@@ -1043,6 +1069,35 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             reason: exitPolicy.reason,
             reduceRatio: exitPolicy.reduceRatio,
             evidence: exitPolicy.evidence
+        }));
+    }
+
+    if (
+        exitPolicy.hasPosition &&
+        shouldEmitV2Proof(
+            "V2_OPPOSITE_POSITION_HYSTERESIS_PROOF",
+            String(input.symbol),
+            `${exitPolicy.oppositeHysteresisState ?? "NONE"}|${exitPolicy.action}|${exitPolicy.reason}`,
+            true
+        )
+    ) {
+        console.info(JSON.stringify({
+            event: "V2_OPPOSITE_POSITION_HYSTERESIS_PROOF",
+            symbol: String(input.symbol),
+            position_side: exitPolicy.positionSide,
+            trend_side_candidate: exitPreTrendSideCandidate,
+            range_side_candidate: exitPreRangeSideCandidate,
+            trend_ok: Math.abs(exitPreEmaGap) >= 0.0004 && authoritativeInput.snapshot.trendWeaknessScore < 0.5,
+            shock_phase: exitPolicy.shockPhase,
+            market_subtype: exitPolicy.marketSubtype,
+            transition_phase: exitPolicy.transitionPhase,
+            invalidation_breached: exitPolicy.thesisValid === false && exitPolicy.action === "FULL_EXIT",
+            opposite_confirmation_fresh: exitPreReversalConfirmed,
+            thesis_valid: exitPolicy.thesisValid === true,
+            profit_protection_active: exitPolicy.profitProtectionActive,
+            hysteresis_state: exitPolicy.oppositeHysteresisState ?? "NONE",
+            final_position_action: exitPolicy.action,
+            block_reason: exitPolicy.oppositeHysteresisBlockReason ?? null
         }));
     }
 
@@ -4422,6 +4477,26 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
     let liveReadinessPassed = true;
+
+    if (
+        finalDecision === "ENTER" &&
+        exitPolicy.shouldExit === true &&
+        exitPolicy.action === "FULL_EXIT" &&
+        exitPolicy.positionSide !== "none" &&
+        v2SideAfterPromotion !== "none" &&
+        v2SideAfterPromotion !== exitPolicy.positionSide
+    ) {
+        finalDecision = "HOLD";
+        v2DecisionAfterPromotion = "HOLD";
+        v2SideAfterPromotion = "none";
+        v2RejectReasonAfterPromotion = "SAME_CYCLE_REVERSE_BLOCKED";
+        execution = {
+            ...execution,
+            signal: "WAIT_RECHECK" as const,
+            side: "none" as const,
+            reason: "SAME_CYCLE_REVERSE_BLOCKED"
+        };
+    }
 
     if (finalDecision === "ENTER") {
         const lastPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);

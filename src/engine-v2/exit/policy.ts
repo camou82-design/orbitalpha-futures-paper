@@ -1,4 +1,8 @@
-import type { EvaluateV2ExitPolicyArgs, V2ExitPolicyResult, V2ExitUrgency } from "./types";
+import type { EvaluateV2ExitPolicyArgs, V2ExitPolicyResult, V2ExitUrgency, V2ExitAction, V2ExitReason } from "./types";
+import {
+    evaluateOppositePositionHysteresis,
+    type OppositeHysteresisState
+} from "./opposite-hysteresis-policy";
 
 function resolvePosition(args: EvaluateV2ExitPolicyArgs) {
     const positions = args.v2State.symbolPositions ?? [];
@@ -141,34 +145,95 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         }
     }
 
+    // --- OPPOSITE POSITION HYSTERESIS (before profit protection) ---
+    let oppositeHysteresisState: OppositeHysteresisState = "NONE";
+    let oppositeHysteresisBlockReason: string | null = null;
+    let thesisValid = false;
+    if (hasPosition) {
+        const hysteresisBase = evaluateOppositePositionHysteresis({
+            symbol: args.symbol,
+            positionSide: side,
+            trendSideCandidate: args.trendSideCandidate ?? "none",
+            rangeSideCandidate: args.rangeSideCandidate ?? "none",
+            judgment: args.judgment,
+            pnlPct,
+            peakPnl: Number(pos?.peakUnrealizedPnlPct ?? pnlPct),
+            emaGap,
+            trendWeaknessScore: tw,
+            boxBreakSide,
+            boxPos,
+            proposedAction: action,
+            proposedReason: reason,
+            proposedReduceRatio: reduceRatio,
+            reversalConfirmed: args.reversalConfirmed,
+            sameCycleExitConsumed: args.sameCycleExitConsumed
+        });
+        action = hysteresisBase.action;
+        reason = hysteresisBase.reason;
+        reduceRatio = hysteresisBase.reduceRatio;
+        oppositeHysteresisState = hysteresisBase.hysteresisState;
+        oppositeHysteresisBlockReason = hysteresisBase.blockReason;
+        thesisValid = hysteresisBase.thesisValid;
+        if (hysteresisBase.hysteresisState !== "NONE") {
+            evidence += `|opposite_hysteresis:${hysteresisBase.hysteresisState}`;
+        }
+    }
+
     // --- V2 PROFIT PROTECTION PIPELINE (State-Aware Hardening) ---
     // This section implements active PnL management to lock in gains and mitigate reversal risks.
     const peakPnl = Number(pos?.peakUnrealizedPnlPct ?? pnlPct);
     
     if (hasPosition && (action === "HOLD" || action === "WATCH")) {
+        let profitAction: V2ExitAction = action;
+        let profitReason: V2ExitReason = reason;
+        let profitReduce = reduceRatio;
+
         // 1. Breakeven Stop: If profit once reached 1.5% and now dropped to 0.2%
-        // Target: Prevent "winner turns loser" scenarios by locking in a small core gain.
         if (peakPnl >= 0.015 && pnlPct < 0.002) {
-            action = "FULL_EXIT";
-            reason = "PROFIT_PROTECTION_BREAKEVEN_EXIT";
-            reduceRatio = 1;
+            profitAction = "FULL_EXIT";
+            profitReason = "PROFIT_PROTECTION_BREAKEVEN_EXIT";
+            profitReduce = 1;
             evidence += "|v2_breakeven_trigger";
-        }
-        // 2. Partial Profit Taking: If profit once reached 2.5% and TP1 not yet triggered
-        // Target: Lock in 40% of the position during significant extension.
-        else if (peakPnl >= 0.025 && !pos?.tp1Triggered) {
-            action = "PARTIAL_TAKE_PROFIT";
-            reason = "PROFIT_PROTECTION_PARTIAL_TP";
-            reduceRatio = 0.4;
+        } else if (peakPnl >= 0.025 && !pos?.tp1Triggered) {
+            profitAction = "PARTIAL_TAKE_PROFIT";
+            profitReason = "PROFIT_PROTECTION_PARTIAL_TP";
+            profitReduce = 0.4;
             evidence += "|v2_partial_tp_trigger";
-        }
-        // 3. Trailing Stop: High water mark trailing (3% baseline, 1.5% callback)
-        // Target: Capture trend reversals after significant moves (3%+).
-        else if (peakPnl >= 0.03 && (peakPnl - pnlPct) >= 0.015) {
-            action = "FULL_EXIT";
-            reason = "PROFIT_PROTECTION_TRAILING_STOP";
-            reduceRatio = 1;
+        } else if (peakPnl >= 0.03 && (peakPnl - pnlPct) >= 0.015) {
+            profitAction = "FULL_EXIT";
+            profitReason = "PROFIT_PROTECTION_TRAILING_STOP";
+            profitReduce = 1;
             evidence += "|v2_trailing_stop_trigger";
+        }
+
+        if (profitAction !== action || profitReason !== reason) {
+            const profitHysteresis = evaluateOppositePositionHysteresis({
+                symbol: args.symbol,
+                positionSide: side,
+                trendSideCandidate: args.trendSideCandidate ?? "none",
+                rangeSideCandidate: args.rangeSideCandidate ?? "none",
+                judgment: args.judgment,
+                pnlPct,
+                peakPnl,
+                emaGap,
+                trendWeaknessScore: tw,
+                boxBreakSide,
+                boxPos,
+                proposedAction: profitAction,
+                proposedReason: profitReason,
+                proposedReduceRatio: profitReduce,
+                reversalConfirmed: args.reversalConfirmed,
+                sameCycleExitConsumed: args.sameCycleExitConsumed
+            });
+            action = profitHysteresis.action;
+            reason = profitHysteresis.reason;
+            reduceRatio = profitHysteresis.reduceRatio;
+            oppositeHysteresisState = profitHysteresis.hysteresisState;
+            oppositeHysteresisBlockReason = profitHysteresis.blockReason;
+            thesisValid = profitHysteresis.thesisValid;
+            if (profitHysteresis.hysteresisState !== "NONE") {
+                evidence += `|profit_hysteresis:${profitHysteresis.hysteresisState}`;
+            }
         }
     }
 
@@ -204,6 +269,9 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         evidence,
         hasPosition,
         peakUnrealizedPnlPct: peakPnl,
-        profitProtectionActive: reason.startsWith("PROFIT_PROTECTION_")
+        profitProtectionActive: reason.startsWith("PROFIT_PROTECTION_") || oppositeHysteresisState === "PROFIT_PROTECT_HOLD",
+        oppositeHysteresisState,
+        oppositeHysteresisBlockReason,
+        thesisValid
     };
 }
