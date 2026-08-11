@@ -60,7 +60,7 @@ function isBotV2ManagedLedger(ledger: PaperOpenPositionRecord): boolean {
 }
 
 function contractTolerance(baseline: number): number {
-    return Math.max(1e-8, CONTRACT_MISMATCH_TOLERANCE_RATIO * Math.max(baseline, 1));
+    return Math.max(1e-8, CONTRACT_MISMATCH_TOLERANCE_RATIO * baseline);
 }
 
 function isConfirmedPositionCycleExitFill(

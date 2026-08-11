@@ -300,4 +300,76 @@ function v2Ledger(overrides: Partial<PaperOpenPositionRecord> = {}): PaperOpenPo
   assertFalse(externalFlat.strategyHistoryAppended, "flat external no history append");
 }
 
+// FLAT tolerance — baseline 0.20 / bot fills 0.19 => external (residual manual close)
+{
+  const nowMs = Date.now();
+  const partialBot = resolveAuthoritativeFlatCloseAttribution({
+    ledger: v2Ledger({
+      okxContracts: 0.2,
+      positionCycleMaxContracts: 0.2,
+      positionCycleExitFills: [
+        {
+          px: 64250,
+          contracts: 0.19,
+          pnlUsdNet: 0.4,
+          feeUsd: 0.01,
+          at: nowMs - 2_000,
+          reason: "v2_exit_authority"
+        }
+      ]
+    }),
+    nowMs
+  });
+  assertEq(partialBot.attribution, "EXTERNAL_MANUAL_FULL_CLOSE", "0.19/0.20 fill not full bot close");
+  assertFalse(partialBot.botFinalFillEvidenceFound, "residual 0.01 not bot explained");
+}
+
+// FLAT tolerance — baseline 0.20 / bot fills 0.20 => BOT
+{
+  const nowMs = Date.now();
+  const fullBot = resolveAuthoritativeFlatCloseAttribution({
+    ledger: v2Ledger({
+      okxContracts: 0.2,
+      positionCycleMaxContracts: 0.2,
+      positionCycleExitFills: [
+        {
+          px: 64250,
+          contracts: 0.2,
+          pnlUsdNet: 0.5,
+          feeUsd: 0.01,
+          at: nowMs - 2_000,
+          reason: "v2_exit_authority"
+        }
+      ]
+    }),
+    nowMs
+  });
+  assertEq(fullBot.attribution, "BOT_FULL_CLOSE_RECONCILE", "0.20/0.20 exact bot close");
+  assertTrue(fullBot.botFinalFillEvidenceFound, "exact fill bot evidence");
+}
+
+// FLAT tolerance — baseline 0.20 / fills 0.199 within 1% => BOT
+{
+  const nowMs = Date.now();
+  const nearFullBot = resolveAuthoritativeFlatCloseAttribution({
+    ledger: v2Ledger({
+      okxContracts: 0.2,
+      positionCycleMaxContracts: 0.2,
+      positionCycleExitFills: [
+        {
+          px: 64250,
+          contracts: 0.199,
+          pnlUsdNet: 0.49,
+          feeUsd: 0.01,
+          at: nowMs - 2_000,
+          reason: "v2_exit_authority"
+        }
+      ]
+    }),
+    nowMs
+  });
+  assertEq(nearFullBot.attribution, "BOT_FULL_CLOSE_RECONCILE", "0.199/0.20 within 1% tolerance");
+  assertTrue(nearFullBot.botFinalFillEvidenceFound, "near-full fill bot evidence");
+}
+
 console.log("v2-position-authority-reset-cases: ALL PASS");
