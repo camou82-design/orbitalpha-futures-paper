@@ -23,6 +23,7 @@ import {
     MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,
     MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE,
     MAX_ADVERSE_ADDON_EQUITY_MULTIPLE,
+    MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE,
     RISK_PER_TRADE_PCT
 } from "./risk-sizing/equity-adaptive-sizing";
 
@@ -4995,7 +4996,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             requestedOrderNotionalUsdt,
             finalOrderNotionalUsdt,
             risk_per_trade_pct: RISK_PER_TRADE_PCT,
-            equity_initial_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * 0.8 : null,
+            equity_initial_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE : null,
             symbol_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE : null,
             account_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE : null,
             emergency_cap_usdt: input.config.okxLiveEmergencyMaxOrderNotionalUsdt ?? maxOrderNotionalUsdt ?? null,

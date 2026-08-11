@@ -1,10 +1,10 @@
 import type { OkxSwapInstrumentSizing } from "../okx-swap-sizing";
 import { normalizeOkxSwapContractsFromNotional } from "../okx-swap-sizing";
 
-export const RISK_PER_TRADE_PCT = 0.005;
-export const MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE = 0.8;
-export const MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE = 1.0;
-export const MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE = 1.5;
+export const RISK_PER_TRADE_PCT = 0.010;
+export const MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE = 2.0;
+export const MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE = 2.5;
+export const MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE = 3.0;
 export const MAX_ADVERSE_ADDON_EQUITY_MULTIPLE = 0.25;
 export const MARGIN_RESERVE_RATIO_DEFAULT = 0.2;
 export const RISK_BUDGET_TOLERANCE_MULTIPLIER = 1.2;
