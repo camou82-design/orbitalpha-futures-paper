@@ -296,6 +296,29 @@ export function resolveFilledPendingNoPositionAction(input: Readonly<{
   return "keep_pending_during_reconcile_grace";
 }
 
+
+export class PendingEntryReconcileCycleGuard {
+  private lastCycleId: number | null = null;
+  tryBegin(runCycleId: number): boolean {
+    if (this.lastCycleId === runCycleId) return false;
+    this.lastCycleId = runCycleId;
+    return true;
+  }
+}
+
+export function pendingReconcileRunsBeforeEntryQueueGate(source: string): boolean {
+  const reconcileIdx = source.indexOf("await this.reconcilePendingEntryOrders(");
+  const emptyReturnIdx = source.indexOf('return_point: "entry_queue_empty_return"');
+  const freshReturnIdx = source.indexOf('return_point: "fresh_tick_barrier_return"');
+  const pathReturnIdx = source.indexOf('return_point: "path_check_return"');
+  return (
+    reconcileIdx >= 0 &&
+    emptyReturnIdx > reconcileIdx &&
+    freshReturnIdx > reconcileIdx &&
+    pathReturnIdx > reconcileIdx
+  );
+}
+
 export function computePendingAgeMs(
   pending: Readonly<{ submittedAt?: number; createdAt: number }>,
   nowMs: number
@@ -1341,6 +1364,11 @@ export class PaperEngine {
   private okxAccountConfigLoaded = false;
   private okxDemoKeysLoaded = false;
   private okxSignedRestReady = false;
+  private pendingEntryReconcileCache: {
+    runCycleId: number;
+    activePendingEntryOrders: import("../models/types").PendingEntryOrderRecord[];
+  } | null = null;
+
   private okxAccountConfigOk = false;
   private okxBalanceOk = false;
   private okxPositionsOk = false;
@@ -14919,6 +14947,365 @@ export class PaperEngine {
    * ?ъ???蹂댁쑀 ?쒖뿉留??됯?쨌?ㅽ뻾?쒕떎.
    */
 
+  private async reconcilePendingEntryOrders(input: Readonly<{
+    decisionBySymbol: ReadonlyMap<string, PaperEngineDecisionEnvelope>;
+    executionSnapshot: Readonly<{
+      tradeEnabled: boolean;
+      closeOnly: boolean;
+      killSwitch: boolean;
+    }>;
+    entryQueueLength: number;
+  }>): Promise<Readonly<{
+    activePendingEntryOrders: import("../models/types").PendingEntryOrderRecord[];
+    skippedDuplicate: boolean;
+  }>> {
+    if (this.pendingEntryReconcileCache?.runCycleId === this.runCycleId) {
+      return {
+        activePendingEntryOrders: this.pendingEntryReconcileCache.activePendingEntryOrders,
+        skippedDuplicate: true
+      };
+    }
+
+    this.logger.info("PENDING_ENTRY_RECONCILE_CYCLE_PROOF", {
+      run_cycle_id: this.runCycleId,
+      entry_queue_length: input.entryQueueLength,
+      ran_before_entry_queue_gate: true,
+      fresh_tick_barrier_active: this.freshTickRequiredAfterReadiness
+    });
+
+    let pendingRegistryModified = false;
+    const pendingEntryOrders = await this.store.readPendingEntryOrders();
+    const activePendingEntryOrders: import("../models/types").PendingEntryOrderRecord[] = [];
+    const openedFromPending: PaperOpenPositionRecord[] = [];
+    const shouldCancelPending = !input.executionSnapshot.tradeEnabled || input.executionSnapshot.closeOnly || input.executionSnapshot.killSwitch;
+
+    for (const pending of pendingEntryOrders) {
+      const ordId = pending.ordId;
+      const liveOrder = this.cachedOpsPending.find(o => String(o.ordId) === ordId);
+      
+      if (shouldCancelPending) {
+        let cancelSuccess = false;
+        if (this.okxDemo) {
+          try {
+            const res = await this.okxDemo.cancelOrder(pending.instId, ordId);
+            if (res.ok) cancelSuccess = true;
+          } catch (e) {}
+        }
+        if (cancelSuccess) {
+          this.logger.info("OKX_STALE_ENTRY_ORDER_CANCEL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "global_trade_disabled_or_kill_switch" });
+          this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "canceled_due_to_global_flags" });
+          pendingRegistryModified = true;
+        } else {
+          this.logger.warn("OKX_STALE_ENTRY_ORDER_CANCEL_FAIL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "cancel_failed_or_network_error" });
+          activePendingEntryOrders.push(pending);
+        }
+        continue;
+      }
+
+      const symEnvelope = input.decisionBySymbol.get(String(pending.symbol));
+      const currentAuthority = symEnvelope?.authority;
+      const staleCancelReason =
+        currentAuthority != null
+          ? shouldCancelStaleEntryOrder({
+              pendingSide: pending.side,
+              currentDecision: String(currentAuthority.decision),
+              currentSide: String(currentAuthority.side)
+            })
+          : null;
+      let deferFilledReconcileFromStaleCancel = false;
+      if (staleCancelReason) {
+        let stalePrecheckOrderState: string | null = null;
+        if (this.okxDemo) {
+          try {
+            const getRes = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId || undefined);
+            if (getRes.ok && getRes.value?.[0]?.state != null) {
+              stalePrecheckOrderState = String(getRes.value[0].state).toLowerCase();
+            }
+          } catch (e) {}
+        }
+        const staleCancelPrecheck = resolveStaleEntryCancelPrecheckAction(stalePrecheckOrderState);
+        if (staleCancelPrecheck === "defer_filled_reconcile") {
+          deferFilledReconcileFromStaleCancel = true;
+        } else if (staleCancelPrecheck === "clear_terminal") {
+          this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", {
+            symbol: pending.symbol,
+            side: pending.side,
+            ord_id: ordId,
+            reason: stalePrecheckOrderState
+          });
+          pendingRegistryModified = true;
+          continue;
+        } else {
+          let cancelRequested = false;
+          let cancelConfirmed = false;
+          let orderState: string | null = stalePrecheckOrderState;
+          if (this.okxDemo) {
+            try {
+              const res = await this.okxDemo.cancelOrder(pending.instId, ordId, pending.clOrdId || undefined);
+              cancelRequested = true;
+              if (res.ok) cancelConfirmed = true;
+              const getRes = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId || undefined);
+              if (getRes.ok && getRes.value?.[0]?.state != null) {
+                orderState = String(getRes.value[0].state).toLowerCase();
+                if (orderState === "canceled" || orderState === "mmp_canceled") cancelConfirmed = true;
+              }
+            } catch (e) {}
+          }
+          this.logger.info("V2_STALE_ENTRY_CANCEL_PROOF", {
+            symbol: pending.symbol,
+            ordId,
+            clOrdId: pending.clOrdId ?? null,
+            originalSide: pending.side,
+            currentAuthorityDecision: currentAuthority?.decision ?? null,
+            currentAuthoritySide: currentAuthority?.side ?? null,
+            cancelReason: staleCancelReason,
+            cancelRequested,
+            cancelConfirmed,
+            orderState
+          });
+          if (cancelConfirmed || !this.okxDemo) {
+            this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", {
+              symbol: pending.symbol,
+              side: pending.side,
+              ord_id: ordId,
+              reason: staleCancelReason
+            });
+            pendingRegistryModified = true;
+          } else {
+            activePendingEntryOrders.push(pending);
+          }
+          continue;
+        }
+      }
+
+      if (liveOrder && !deferFilledReconcileFromStaleCancel) {
+        this.logger.info("PENDING_ENTRY_ORDER_FILL_CHECK_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, status: "still_pending" });
+        
+        const ageMs = Date.now() - pending.createdAt;
+        const passiveTtlMs = this.config.okxPassiveEntryTtlMs;
+        const isPassivePending = pending.executionStyle !== "MOMENTUM_MARKETABLE_IOC";
+        if (pending.authority_source === "v2" && isPassivePending && ageMs > passiveTtlMs) {
+            this.logger.warn("V2_PASSIVE_ENTRY_TTL_EXPIRED_PROOF", {
+                symbol: pending.symbol,
+                side: pending.side,
+                ord_id: ordId,
+                age_ms: ageMs,
+                ttl_ms: passiveTtlMs,
+                status: "stale_unfilled",
+                action: "CANCEL_NO_CHASE"
+            });
+            
+            let cancelSuccess = false;
+            let orderState: string | null = null;
+            if (this.okxDemo) {
+                try {
+                    const res = await this.okxDemo.cancelOrder(pending.instId, ordId, pending.clOrdId || undefined);
+                    if (res.ok) cancelSuccess = true;
+                    const getRes = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId || undefined);
+                    if (getRes.ok && getRes.value?.[0]?.state != null) {
+                      orderState = String(getRes.value[0].state);
+                      if (orderState === "canceled" || orderState === "mmp_canceled") cancelSuccess = true;
+                    }
+                } catch (e) {}
+            }
+            
+            if (cancelSuccess) {
+                this.logger.info("V2_PASSIVE_ENTRY_TTL_CANCEL_CONFIRMED_PROOF", {
+                    symbol: pending.symbol,
+                    side: pending.side,
+                    ord_id: ordId,
+                    age_ms: ageMs,
+                    ttl_ms: passiveTtlMs,
+                    order_state: orderState
+                });
+                pendingRegistryModified = true;
+                continue; 
+            }
+        }
+        
+        activePendingEntryOrders.push(pending);
+      } else {
+        let orderState = "unknown";
+        let ordResRef: any = null;
+        if (this.okxDemo) {
+          try {
+            const res = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId);
+            if (res.ok && res.value && res.value.length > 0) {
+              ordResRef = res.value[0];
+              orderState = String(ordResRef.state).toLowerCase();
+            }
+          } catch (e) {}
+        }
+        
+        if (orderState === "filled") {
+           // Snapshot Guard
+           if (!pending.paperRecordSnapshot || typeof pending.paperRecordSnapshot !== "object") {
+             this.logger.error("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_FAIL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "null_or_invalid_snapshot" });
+             activePendingEntryOrders.push(pending);
+             continue;
+           }
+
+           let actualPos: Record<string, unknown> | null = null;
+           if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
+             actualPos = this.lastLivePositionsPayload.find(
+               (p) => p.instId === pending.instId && String(p.posSide).toLowerCase() === pending.side
+             ) ?? null;
+             if (!actualPos) {
+               actualPos = this.lastLivePositionsPayload.find((p) => {
+                 if (p.instId !== pending.instId) return false;
+                 const posNum = Number(p.pos) || 0;
+                 const deducedSide = posNum > 0 ? "long" : posNum < 0 ? "short" : null;
+                 return deducedSide === pending.side;
+               }) ?? null;
+             }
+           }
+
+           const pendingAgeMs = computePendingAgeMs(pending, Date.now());
+           const positionsSnapshotAuthoritative = isAuthoritativePositionsSnapshot({
+             okxSignedRestReady: this.okxSignedRestReady,
+             okxPositionsOk: this.okxPositionsOk,
+             lastLivePositionsPayload: this.lastLivePositionsPayload
+           });
+           const filledNoPositionAction = resolveFilledPendingNoPositionAction({
+             orderState,
+             hasActualPosition: actualPos != null,
+             positionsSnapshotAuthoritative,
+             pendingAgeMs
+           });
+
+           if (!actualPos) {
+             if (filledNoPositionAction === "clear_stale_filled_pending_no_actual_position") {
+               this.logger.info("PENDING_ENTRY_FILLED_NO_POSITION_STALE_CLEARED_PROOF", {
+                 symbol: pending.symbol,
+                 side: pending.side,
+                 ord_id: ordId,
+                 cl_ord_id: pending.clOrdId ?? null,
+                 pending_age_ms: pendingAgeMs,
+                 grace_ms: PENDING_FILLED_NO_POSITION_GRACE_MS,
+                 positions_snapshot_authoritative: positionsSnapshotAuthoritative,
+                 action: "clear_stale_filled_pending_no_actual_position"
+               });
+               pendingRegistryModified = true;
+               continue;
+             }
+             this.logger.error("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_FAIL_PROOF", {
+               symbol: pending.symbol,
+               side: pending.side,
+               ord_id: ordId,
+               reason: "actual_position_not_found",
+               pending_age_ms: pendingAgeMs,
+               grace_ms: PENDING_FILLED_NO_POSITION_GRACE_MS,
+               positions_snapshot_authoritative: positionsSnapshotAuthoritative,
+               action: "keep_pending_during_reconcile_grace"
+             });
+             activePendingEntryOrders.push(pending);
+             continue;
+           }
+
+           const actualAvgPx = Number(actualPos.avgPx);
+           const actualBase = Number(actualPos.pos);
+           const instR = this.instrumentCache.get(pending.instId);
+           const ctValR = instR?.ctVal ?? 1;
+           const baseQtyAbs = Math.abs(actualBase);
+
+           const record = pending.paperRecordSnapshot;
+           record.openedAt = Date.now();
+           record.lifecycleState = "OPEN";
+           record.avgPx = actualAvgPx;
+           record.entryPrice = actualAvgPx;
+           record.pos = actualBase;
+           record.baseQty = baseQtyAbs;
+           record.okxContracts = ctValR > 0 ? baseQtyAbs / ctValR : baseQtyAbs;
+           record.exchangeFilledSize = record.okxContracts;
+           
+           let nuR = Number(actualPos.notionalUsd);
+           if ((!Number.isFinite(nuR) || nuR === 0) && actualAvgPx > 0 && baseQtyAbs > 0) {
+             nuR = baseQtyAbs * actualAvgPx;
+           }
+           record.notionalUsd = Math.abs(nuR);
+           record.sizeUsd = record.notionalUsd;
+
+           if (!isCommittedEntryStopPrice(record.stopPrice) && isCommittedEntryStopPrice(pending.stopPrice)) {
+             record.stopPrice = pending.stopPrice as number;
+           }
+           if (!isCommittedEntryStopPrice(record.stopPrice)) {
+             this.logger.error("PAPER_POSITION_OPEN_BLOCKED_MISSING_STOP", {
+               symbol: pending.symbol,
+               side: pending.side,
+               path: "pending_entry_filled",
+               pending_registry_stop: pending.stopPrice ?? null,
+               snapshot_stop: record.stopPrice ?? null
+             });
+             this.logger.error("PROTECTION_REPAIR_REQUIRED", {
+               symbol: pending.symbol,
+               side: pending.side,
+               detail: "pending_fill_without_committed_stop_on_snapshot"
+             });
+             this.symbolProtectionFailedBlocked.add(String(pending.symbol));
+             activePendingEntryOrders.push(pending);
+             continue;
+           }
+
+           this.logger.info("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId });
+           
+           openedFromPending.push(record);
+           
+           const protectRes = await this.ensureProtectiveStopOrder(record, `v2_pending_filled_auto:${record.symbol}:${record.openedAt}`);
+           if (protectRes.modified) {
+             record.isProtectiveStopRegistered = protectRes.record.isProtectiveStopRegistered;
+             record.protectiveStopAlgoId = protectRes.record.protectiveStopAlgoId;
+           }
+           
+           this.logger.info("paper_position_opened", {
+             ...pending.authoritySnapshot,
+             open_trace_id: pending.openTraceId,
+             symbol: pending.symbol,
+             side: pending.side,
+             ord_id: ordId,
+             path: "positions/open.json",
+             size_usd: record.sizeUsd
+           });
+           try {
+             await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(pending.symbol, pending.authoritySnapshot as any, record));
+           } catch(e) {}
+           
+           pendingRegistryModified = true;
+        } else if (orderState === "canceled" || orderState === "mmp_canceled" || orderState === "rejected" || orderState === "expired") {
+           this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: orderState });
+           pendingRegistryModified = true;
+        } else if (orderState === "unknown") {
+           this.logger.warn("PENDING_ENTRY_ORDER_FILL_CHECK_FAIL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "get_order_failed_or_unknown" });
+           activePendingEntryOrders.push(pending);
+        } else {
+           this.logger.info("PENDING_ENTRY_ORDER_FILL_CHECK_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, status: orderState });
+           activePendingEntryOrders.push(pending);
+        }
+      }
+    }
+    
+    if (pendingRegistryModified) {
+      await this.store.writePendingEntryOrders(activePendingEntryOrders);
+    }
+
+    if (openedFromPending.length > 0) {
+      const existing = await this.positions.loadOpenAll();
+      const merged = [...existing, ...openedFromPending];
+      await this.positions.saveOpenAll(merged);
+      this.bundleDirty = true;
+      this.logger.info("PENDING_ENTRY_RECONCILE_OPEN_PERSIST_PROOF", {
+        run_cycle_id: this.runCycleId,
+        opened_count: openedFromPending.length
+      });
+    }
+
+    this.pendingEntryReconcileCache = {
+      runCycleId: this.runCycleId,
+      activePendingEntryOrders
+    };
+
+    return { activePendingEntryOrders, skippedDuplicate: false };
+  }
+
   private async processPaperSymbolEntries(input: Readonly<{
     snapshots: SymbolSnapshot[];
     errorsCount: number;
@@ -15299,6 +15686,12 @@ export class PaperEngine {
       if (!aMajor && bMajor) return +1;
       return 0;
     });
+    const pendingReconcileResult = await this.reconcilePendingEntryOrders({
+      decisionBySymbol: input.decisionBySymbol,
+      executionSnapshot,
+      entryQueueLength: entryQueue.length
+    });
+
     if (entryQueue.length === 0) {
       const barrierActive = this.freshTickRequiredAfterReadiness === true || input.readinessBarrierActive === true;
       const emptyPayload = {
@@ -15588,321 +15981,7 @@ export class PaperEngine {
 
     let consumeIdx = 0;
     
-    // [PENDING ENTRY REGISTRY PROCESSING]
-    let pendingRegistryModified = false;
-    let pendingEntryOrders = await this.store.readPendingEntryOrders();
-    const activePendingEntryOrders: import("../models/types").PendingEntryOrderRecord[] = [];
-    const shouldCancelPending = !executionSnapshot.tradeEnabled || executionSnapshot.closeOnly || executionSnapshot.killSwitch;
-
-    for (const pending of pendingEntryOrders) {
-      const ordId = pending.ordId;
-      const liveOrder = this.cachedOpsPending.find(o => String(o.ordId) === ordId);
-      
-      if (shouldCancelPending) {
-        let cancelSuccess = false;
-        if (this.okxDemo) {
-          try {
-            const res = await this.okxDemo.cancelOrder(pending.instId, ordId);
-            if (res.ok) cancelSuccess = true;
-          } catch (e) {}
-        }
-        if (cancelSuccess) {
-          this.logger.info("OKX_STALE_ENTRY_ORDER_CANCEL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "global_trade_disabled_or_kill_switch" });
-          this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "canceled_due_to_global_flags" });
-          pendingRegistryModified = true;
-        } else {
-          this.logger.warn("OKX_STALE_ENTRY_ORDER_CANCEL_FAIL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "cancel_failed_or_network_error" });
-          activePendingEntryOrders.push(pending);
-        }
-        continue;
-      }
-
-      const symEnvelope = input.decisionBySymbol.get(String(pending.symbol));
-      const currentAuthority = symEnvelope?.authority;
-      const staleCancelReason =
-        currentAuthority != null
-          ? shouldCancelStaleEntryOrder({
-              pendingSide: pending.side,
-              currentDecision: String(currentAuthority.decision),
-              currentSide: String(currentAuthority.side)
-            })
-          : null;
-      let deferFilledReconcileFromStaleCancel = false;
-      if (staleCancelReason) {
-        let stalePrecheckOrderState: string | null = null;
-        if (this.okxDemo) {
-          try {
-            const getRes = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId || undefined);
-            if (getRes.ok && getRes.value?.[0]?.state != null) {
-              stalePrecheckOrderState = String(getRes.value[0].state).toLowerCase();
-            }
-          } catch (e) {}
-        }
-        const staleCancelPrecheck = resolveStaleEntryCancelPrecheckAction(stalePrecheckOrderState);
-        if (staleCancelPrecheck === "defer_filled_reconcile") {
-          deferFilledReconcileFromStaleCancel = true;
-        } else if (staleCancelPrecheck === "clear_terminal") {
-          this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", {
-            symbol: pending.symbol,
-            side: pending.side,
-            ord_id: ordId,
-            reason: stalePrecheckOrderState
-          });
-          pendingRegistryModified = true;
-          continue;
-        } else {
-          let cancelRequested = false;
-          let cancelConfirmed = false;
-          let orderState: string | null = stalePrecheckOrderState;
-          if (this.okxDemo) {
-            try {
-              const res = await this.okxDemo.cancelOrder(pending.instId, ordId, pending.clOrdId || undefined);
-              cancelRequested = true;
-              if (res.ok) cancelConfirmed = true;
-              const getRes = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId || undefined);
-              if (getRes.ok && getRes.value?.[0]?.state != null) {
-                orderState = String(getRes.value[0].state).toLowerCase();
-                if (orderState === "canceled" || orderState === "mmp_canceled") cancelConfirmed = true;
-              }
-            } catch (e) {}
-          }
-          this.logger.info("V2_STALE_ENTRY_CANCEL_PROOF", {
-            symbol: pending.symbol,
-            ordId,
-            clOrdId: pending.clOrdId ?? null,
-            originalSide: pending.side,
-            currentAuthorityDecision: currentAuthority?.decision ?? null,
-            currentAuthoritySide: currentAuthority?.side ?? null,
-            cancelReason: staleCancelReason,
-            cancelRequested,
-            cancelConfirmed,
-            orderState
-          });
-          if (cancelConfirmed || !this.okxDemo) {
-            this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", {
-              symbol: pending.symbol,
-              side: pending.side,
-              ord_id: ordId,
-              reason: staleCancelReason
-            });
-            pendingRegistryModified = true;
-          } else {
-            activePendingEntryOrders.push(pending);
-          }
-          continue;
-        }
-      }
-
-      if (liveOrder && !deferFilledReconcileFromStaleCancel) {
-        this.logger.info("PENDING_ENTRY_ORDER_FILL_CHECK_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, status: "still_pending" });
-        
-        const ageMs = Date.now() - pending.createdAt;
-        const passiveTtlMs = this.config.okxPassiveEntryTtlMs;
-        const isPassivePending = pending.executionStyle !== "MOMENTUM_MARKETABLE_IOC";
-        if (pending.authority_source === "v2" && isPassivePending && ageMs > passiveTtlMs) {
-            this.logger.warn("V2_PASSIVE_ENTRY_TTL_EXPIRED_PROOF", {
-                symbol: pending.symbol,
-                side: pending.side,
-                ord_id: ordId,
-                age_ms: ageMs,
-                ttl_ms: passiveTtlMs,
-                status: "stale_unfilled",
-                action: "CANCEL_NO_CHASE"
-            });
-            
-            let cancelSuccess = false;
-            let orderState: string | null = null;
-            if (this.okxDemo) {
-                try {
-                    const res = await this.okxDemo.cancelOrder(pending.instId, ordId, pending.clOrdId || undefined);
-                    if (res.ok) cancelSuccess = true;
-                    const getRes = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId || undefined);
-                    if (getRes.ok && getRes.value?.[0]?.state != null) {
-                      orderState = String(getRes.value[0].state);
-                      if (orderState === "canceled" || orderState === "mmp_canceled") cancelSuccess = true;
-                    }
-                } catch (e) {}
-            }
-            
-            if (cancelSuccess) {
-                this.logger.info("V2_PASSIVE_ENTRY_TTL_CANCEL_CONFIRMED_PROOF", {
-                    symbol: pending.symbol,
-                    side: pending.side,
-                    ord_id: ordId,
-                    age_ms: ageMs,
-                    ttl_ms: passiveTtlMs,
-                    order_state: orderState
-                });
-                pendingRegistryModified = true;
-                continue; 
-            }
-        }
-        
-        activePendingEntryOrders.push(pending);
-      } else {
-        let orderState = "unknown";
-        let ordResRef: any = null;
-        if (this.okxDemo) {
-          try {
-            const res = await this.okxDemo.getOrder(pending.instId, ordId, pending.clOrdId);
-            if (res.ok && res.value && res.value.length > 0) {
-              ordResRef = res.value[0];
-              orderState = String(ordResRef.state).toLowerCase();
-            }
-          } catch (e) {}
-        }
-        
-        if (orderState === "filled") {
-           // Snapshot Guard
-           if (!pending.paperRecordSnapshot || typeof pending.paperRecordSnapshot !== "object") {
-             this.logger.error("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_FAIL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "null_or_invalid_snapshot" });
-             activePendingEntryOrders.push(pending);
-             continue;
-           }
-
-           let actualPos: Record<string, unknown> | null = null;
-           if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
-             actualPos = this.lastLivePositionsPayload.find(
-               (p) => p.instId === pending.instId && String(p.posSide).toLowerCase() === pending.side
-             ) ?? null;
-             if (!actualPos) {
-               actualPos = this.lastLivePositionsPayload.find((p) => {
-                 if (p.instId !== pending.instId) return false;
-                 const posNum = Number(p.pos) || 0;
-                 const deducedSide = posNum > 0 ? "long" : posNum < 0 ? "short" : null;
-                 return deducedSide === pending.side;
-               }) ?? null;
-             }
-           }
-
-           const pendingAgeMs = computePendingAgeMs(pending, Date.now());
-           const positionsSnapshotAuthoritative = isAuthoritativePositionsSnapshot({
-             okxSignedRestReady: this.okxSignedRestReady,
-             okxPositionsOk: this.okxPositionsOk,
-             lastLivePositionsPayload: this.lastLivePositionsPayload
-           });
-           const filledNoPositionAction = resolveFilledPendingNoPositionAction({
-             orderState,
-             hasActualPosition: actualPos != null,
-             positionsSnapshotAuthoritative,
-             pendingAgeMs
-           });
-
-           if (!actualPos) {
-             if (filledNoPositionAction === "clear_stale_filled_pending_no_actual_position") {
-               this.logger.info("PENDING_ENTRY_FILLED_NO_POSITION_STALE_CLEARED_PROOF", {
-                 symbol: pending.symbol,
-                 side: pending.side,
-                 ord_id: ordId,
-                 cl_ord_id: pending.clOrdId ?? null,
-                 pending_age_ms: pendingAgeMs,
-                 grace_ms: PENDING_FILLED_NO_POSITION_GRACE_MS,
-                 positions_snapshot_authoritative: positionsSnapshotAuthoritative,
-                 action: "clear_stale_filled_pending_no_actual_position"
-               });
-               pendingRegistryModified = true;
-               continue;
-             }
-             this.logger.error("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_FAIL_PROOF", {
-               symbol: pending.symbol,
-               side: pending.side,
-               ord_id: ordId,
-               reason: "actual_position_not_found",
-               pending_age_ms: pendingAgeMs,
-               grace_ms: PENDING_FILLED_NO_POSITION_GRACE_MS,
-               positions_snapshot_authoritative: positionsSnapshotAuthoritative,
-               action: "keep_pending_during_reconcile_grace"
-             });
-             activePendingEntryOrders.push(pending);
-             continue;
-           }
-
-           const actualAvgPx = Number(actualPos.avgPx);
-           const actualBase = Number(actualPos.pos);
-           const instR = this.instrumentCache.get(pending.instId);
-           const ctValR = instR?.ctVal ?? 1;
-           const baseQtyAbs = Math.abs(actualBase);
-
-           const record = pending.paperRecordSnapshot;
-           record.openedAt = Date.now();
-           record.lifecycleState = "OPEN";
-           record.avgPx = actualAvgPx;
-           record.entryPrice = actualAvgPx;
-           record.pos = actualBase;
-           record.baseQty = baseQtyAbs;
-           record.okxContracts = ctValR > 0 ? baseQtyAbs / ctValR : baseQtyAbs;
-           record.exchangeFilledSize = record.okxContracts;
-           
-           let nuR = Number(actualPos.notionalUsd);
-           if ((!Number.isFinite(nuR) || nuR === 0) && actualAvgPx > 0 && baseQtyAbs > 0) {
-             nuR = baseQtyAbs * actualAvgPx;
-           }
-           record.notionalUsd = Math.abs(nuR);
-           record.sizeUsd = record.notionalUsd;
-
-           if (!isCommittedEntryStopPrice(record.stopPrice) && isCommittedEntryStopPrice(pending.stopPrice)) {
-             record.stopPrice = pending.stopPrice as number;
-           }
-           if (!isCommittedEntryStopPrice(record.stopPrice)) {
-             this.logger.error("PAPER_POSITION_OPEN_BLOCKED_MISSING_STOP", {
-               symbol: pending.symbol,
-               side: pending.side,
-               path: "pending_entry_filled",
-               pending_registry_stop: pending.stopPrice ?? null,
-               snapshot_stop: record.stopPrice ?? null
-             });
-             this.logger.error("PROTECTION_REPAIR_REQUIRED", {
-               symbol: pending.symbol,
-               side: pending.side,
-               detail: "pending_fill_without_committed_stop_on_snapshot"
-             });
-             this.symbolProtectionFailedBlocked.add(String(pending.symbol));
-             activePendingEntryOrders.push(pending);
-             continue;
-           }
-
-           this.logger.info("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId });
-           
-           next.push(record);
-           openPositionsChanged = true;
-           
-           const protectRes = await this.ensureProtectiveStopOrder(record, `v2_pending_filled_auto:${record.symbol}:${record.openedAt}`);
-           if (protectRes.modified) {
-             record.isProtectiveStopRegistered = protectRes.record.isProtectiveStopRegistered;
-             record.protectiveStopAlgoId = protectRes.record.protectiveStopAlgoId;
-           }
-           
-           this.logger.info("paper_position_opened", {
-             ...pending.authoritySnapshot,
-             open_trace_id: pending.openTraceId,
-             symbol: pending.symbol,
-             side: pending.side,
-             ord_id: ordId,
-             path: "positions/open.json",
-             size_usd: record.sizeUsd
-           });
-           try {
-             await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(pending.symbol, pending.authoritySnapshot as any, record));
-           } catch(e) {}
-           
-           pendingRegistryModified = true;
-        } else if (orderState === "canceled" || orderState === "mmp_canceled" || orderState === "rejected" || orderState === "expired") {
-           this.logger.info("PENDING_ENTRY_ORDER_CLEARED_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: orderState });
-           pendingRegistryModified = true;
-        } else if (orderState === "unknown") {
-           this.logger.warn("PENDING_ENTRY_ORDER_FILL_CHECK_FAIL_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, reason: "get_order_failed_or_unknown" });
-           activePendingEntryOrders.push(pending);
-        } else {
-           this.logger.info("PENDING_ENTRY_ORDER_FILL_CHECK_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId, status: orderState });
-           activePendingEntryOrders.push(pending);
-        }
-      }
-    }
-    
-    if (pendingRegistryModified) {
-      await this.store.writePendingEntryOrders(activePendingEntryOrders);
-      pendingEntryOrders = activePendingEntryOrders;
-    }
+    const activePendingEntryOrders = pendingReconcileResult.activePendingEntryOrders;
 
     for (const first of entryQueue) {
       const envelope = input.decisionBySymbol.get(String(first.symbol))!;
