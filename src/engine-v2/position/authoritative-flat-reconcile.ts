@@ -1,3 +1,7 @@
+import type { PaperOpenPositionRecord } from "../../models/types";
+import { isProtectivePartialReason } from "../execution/reduce-economics";
+import { classifyTradeSource } from "../lifecycle/completed-trade";
+
 export const AUTHORITATIVE_FLAT_ZERO_CONFIRM_REQUIRED = 2;
 
 export function authoritativeFlatKey(symbol: string, side: "long" | "short"): string {
@@ -40,27 +44,98 @@ export type AuthoritativeFlatCloseAttribution =
     | "EXTERNAL_MANUAL_FULL_CLOSE";
 
 const BOT_FINAL_CLOSE_GRACE_MS = 120_000;
+const CONTRACT_MISMATCH_TOLERANCE_RATIO = 0.01;
 
-function isTerminalBotFullCloseReason(reason: string | null | undefined): boolean {
-    const r = String(reason ?? "").trim().toLowerCase();
-    if (!r) return false;
-    if (r.includes("partial") && !r.includes("full")) return false;
-    if (r.includes("addon") || r.includes("pyramid") || r.includes("enter")) return false;
+function isRecentTimestamp(at: number, nowMs: number): boolean {
+    return Number.isFinite(at) && nowMs - at >= 0 && nowMs - at <= BOT_FINAL_CLOSE_GRACE_MS;
+}
+
+function isBotV2TradeSource(source: string | null | undefined): boolean {
+    const normalized = String(source ?? "").trim().toUpperCase();
+    return normalized === "BOT_V2";
+}
+
+function isBotV2ManagedLedger(ledger: PaperOpenPositionRecord): boolean {
+    return classifyTradeSource(ledger) === "BOT_V2";
+}
+
+function contractTolerance(baseline: number): number {
+    return Math.max(1e-8, CONTRACT_MISMATCH_TOLERANCE_RATIO * Math.max(baseline, 1));
+}
+
+function isConfirmedPositionCycleExitFill(
+    fill: NonNullable<PaperOpenPositionRecord["positionCycleExitFills"]>[number]
+): boolean {
     return (
-        r.includes("v2_exit") ||
-        r.includes("stop_loss") ||
-        r.includes("take_profit") ||
-        r.includes("executor_") ||
-        r.includes("regime_exit") ||
-        r.includes("candidate_lost") ||
-        r.includes("trend_break") ||
-        r.includes("close") ||
-        r.includes("trailing")
+        fill != null &&
+        Number.isFinite(fill.at) &&
+        Number.isFinite(fill.px) &&
+        fill.px > 0 &&
+        Number.isFinite(fill.contracts) &&
+        fill.contracts > 0
     );
 }
 
+function isTerminalConfirmedExitFillReason(reason: string | null | undefined): boolean {
+    const r = String(reason ?? "").trim();
+    if (!r) return false;
+    if (isProtectivePartialReason(r)) return false;
+    if (r.includes("partial_exit") || r === "take_profit_1" || r === "v2_partial_authority") {
+        return false;
+    }
+    return true;
+}
+
+function hasPendingFinalizeBotConfirmedFinalFill(
+    ledger: PaperOpenPositionRecord,
+    nowMs: number
+): boolean {
+    if (ledger.finalizePending !== true) return false;
+
+    const fillAt = ledger.pendingFinalizeFinalFillAt;
+    if (fillAt == null || !isRecentTimestamp(fillAt, nowMs)) return false;
+    if (!isBotV2TradeSource(ledger.pendingFinalizeTradeSource)) return false;
+
+    const exitPx = ledger.pendingFinalizeExitAvgPx;
+    return exitPx != null && Number.isFinite(exitPx) && exitPx > 0;
+}
+
+function hasPositionCycleConfirmedFinalFillExplainingFlat(
+    ledger: PaperOpenPositionRecord,
+    nowMs: number
+): boolean {
+    if (!isBotV2ManagedLedger(ledger)) return false;
+
+    const fills = ledger.positionCycleExitFills;
+    if (!Array.isArray(fills) || fills.length === 0) return false;
+
+    const baseline =
+        ledger.positionCycleMaxContracts ??
+        ledger.okxContracts ??
+        0;
+    if (!(baseline > 0)) return false;
+
+    let cumulativeRecentExitContracts = 0;
+    let hasRecentTerminalFill = false;
+
+    for (const fill of fills) {
+        if (!isConfirmedPositionCycleExitFill(fill)) continue;
+        if (!isRecentTimestamp(fill.at, nowMs)) continue;
+
+        cumulativeRecentExitContracts += fill.contracts;
+        if (isTerminalConfirmedExitFillReason(fill.reason)) {
+            hasRecentTerminalFill = true;
+        }
+    }
+
+    if (!hasRecentTerminalFill) return false;
+
+    const tol = contractTolerance(baseline);
+    return cumulativeRecentExitContracts + tol >= baseline;
+}
+
 export function resolveAuthoritativeFlatCloseAttribution(input: Readonly<{
-    ledger: import("../../models/types").PaperOpenPositionRecord;
+    ledger: PaperOpenPositionRecord;
     nowMs: number;
 }>): Readonly<{
     attribution: AuthoritativeFlatCloseAttribution;
@@ -69,29 +144,7 @@ export function resolveAuthoritativeFlatCloseAttribution(input: Readonly<{
 }> {
     const { ledger, nowMs } = input;
 
-    if (ledger.closePendingReason && ledger.closePendingAt != null) {
-        const age = nowMs - ledger.closePendingAt;
-        if (age >= 0 && age <= BOT_FINAL_CLOSE_GRACE_MS) {
-            const reason = String(ledger.closePendingReason);
-            if (isTerminalBotFullCloseReason(reason)) {
-                return {
-                    attribution: "BOT_FULL_CLOSE_RECONCILE",
-                    botFinalFillEvidenceFound: true,
-                    strategyHistoryAppended: false
-                };
-            }
-        }
-    }
-
-    const lastAt = ledger.lastBotExecutionAt;
-    const lastReason = String(ledger.lastBotExecutionReason ?? "");
-    if (
-        lastAt != null &&
-        Number.isFinite(lastAt) &&
-        nowMs - lastAt >= 0 &&
-        nowMs - lastAt <= BOT_FINAL_CLOSE_GRACE_MS &&
-        isTerminalBotFullCloseReason(lastReason)
-    ) {
+    if (hasPendingFinalizeBotConfirmedFinalFill(ledger, nowMs)) {
         return {
             attribution: "BOT_FULL_CLOSE_RECONCILE",
             botFinalFillEvidenceFound: true,
@@ -99,23 +152,12 @@ export function resolveAuthoritativeFlatCloseAttribution(input: Readonly<{
         };
     }
 
-    const fills = ledger.positionCycleExitFills;
-    if (Array.isArray(fills) && fills.length > 0) {
-        const last = fills[fills.length - 1];
-        if (
-            last &&
-            last.at != null &&
-            Number.isFinite(last.at) &&
-            nowMs - last.at >= 0 &&
-            nowMs - last.at <= BOT_FINAL_CLOSE_GRACE_MS &&
-            isTerminalBotFullCloseReason(String(last.reason ?? ""))
-        ) {
-            return {
-                attribution: "BOT_FULL_CLOSE_RECONCILE",
-                botFinalFillEvidenceFound: true,
-                strategyHistoryAppended: false
-            };
-        }
+    if (hasPositionCycleConfirmedFinalFillExplainingFlat(ledger, nowMs)) {
+        return {
+            attribution: "BOT_FULL_CLOSE_RECONCILE",
+            botFinalFillEvidenceFound: true,
+            strategyHistoryAppended: false
+        };
     }
 
     return {

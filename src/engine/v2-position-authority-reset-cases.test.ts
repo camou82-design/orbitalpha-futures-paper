@@ -231,22 +231,65 @@ function v2Ledger(overrides: Partial<PaperOpenPositionRecord> = {}): PaperOpenPo
   assertFalse(reensure.validProtectivePresent, "REDUCE missing protective detected");
 }
 
-// FLAT close attribution — bot final close evidence
+// FLAT close attribution — candidate_lost intent only, no confirmed fill => external manual
+{
+  const nowMs = Date.now();
+  const intentOnly = resolveAuthoritativeFlatCloseAttribution({
+    ledger: v2Ledger({
+      lastBotExecutionAt: nowMs - 5_000,
+      lastBotExecutionReason: "candidate_lost",
+      closePendingReason: "candidate_lost",
+      closePendingAt: nowMs - 4_000
+    }),
+    nowMs
+  });
+  assertEq(intentOnly.attribution, "EXTERNAL_MANUAL_FULL_CLOSE", "candidate_lost intent only external");
+  assertFalse(intentOnly.botFinalFillEvidenceFound, "candidate_lost intent not bot fill");
+}
+
+// FLAT close attribution — confirmed BOT_V2 pending finalize final fill
 {
   const nowMs = Date.now();
   const botFlat = resolveAuthoritativeFlatCloseAttribution({
     ledger: v2Ledger({
-      lastBotExecutionAt: nowMs - 1_000,
-      lastBotExecutionReason: "executor_v2_exit_authority"
+      finalizePending: true,
+      pendingFinalizeTradeSource: "BOT_V2",
+      pendingFinalizeFinalFillAt: nowMs - 1_000,
+      pendingFinalizeExitAvgPx: 64250,
+      pendingFinalizeFinalCloseReason: "V2_EXIT"
     }),
     nowMs
   });
-  assertEq(botFlat.attribution, "BOT_FULL_CLOSE_RECONCILE", "flat bot full close");
-  assertTrue(botFlat.botFinalFillEvidenceFound, "flat bot evidence");
+  assertEq(botFlat.attribution, "BOT_FULL_CLOSE_RECONCILE", "flat bot pending finalize");
+  assertTrue(botFlat.botFinalFillEvidenceFound, "flat bot confirmed finalize fill");
   assertFalse(botFlat.strategyHistoryAppended, "flat bot no history append");
 }
 
-// FLAT close attribution — external manual when no bot evidence
+// FLAT close attribution — confirmed BOT_V2 position cycle final fill explaining flat
+{
+  const nowMs = Date.now();
+  const botCycleFlat = resolveAuthoritativeFlatCloseAttribution({
+    ledger: v2Ledger({
+      okxContracts: 0.2,
+      positionCycleMaxContracts: 0.2,
+      positionCycleExitFills: [
+        {
+          px: 64250,
+          contracts: 0.2,
+          pnlUsdNet: 0.5,
+          feeUsd: 0.01,
+          at: nowMs - 2_000,
+          reason: "v2_exit_authority"
+        }
+      ]
+    }),
+    nowMs
+  });
+  assertEq(botCycleFlat.attribution, "BOT_FULL_CLOSE_RECONCILE", "flat bot cycle fill");
+  assertTrue(botCycleFlat.botFinalFillEvidenceFound, "flat bot cycle confirmed fill");
+}
+
+// FLAT close attribution — external manual when no confirmed fill evidence
 {
   const externalFlat = resolveAuthoritativeFlatCloseAttribution({
     ledger: v2Ledger(),
