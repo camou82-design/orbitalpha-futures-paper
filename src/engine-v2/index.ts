@@ -192,6 +192,11 @@ import { evaluateV2ExitPolicy } from "./exit/policy";
 import { deriveMicroExecutionScore } from "./execution/micro-execution-score";
 import { deriveTradeLifecycleAuthority } from "./lifecycle/trade-lifecycle-authority";
 import type { MicroExecutionScoreSummary, V2ExitAuthorityResult, V2PartialAuthorityResult, V2TradeLifecycleAuthorityResult, V2CooldownAuthorityResult, V2PositionStateAuthorityResult } from "./types";
+import {
+    evaluateLowerBreakdownShortConfirmed,
+    evaluateUpperBreakoutLongConfirmed,
+    type RangeBoundaryContinuationContext
+} from "./range-boundary-continuation";
 
 const V2_PROOF_KEY_TTL_MS = 60 * 60 * 1000;
 const V2_PROOF_KEY_MAX_SIZE = 5000;
@@ -2083,6 +2088,59 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const hasSameSidePosition = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === trendSideCandidate);
         const hasOppositeSidePosition = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() !== trendSideCandidate);
 
+        const execMetaForBoundary = execMeta as Record<string, unknown>;
+        const judgmentMetaForBoundary = (judgment.metadata ?? {}) as Record<string, unknown>;
+        const continuationStateForBoundary = rangeContinuationStateMap.get(String(input.symbol));
+        const rangeBoundaryCtx: RangeBoundaryContinuationContext = {
+            trendSideCandidate,
+            zone,
+            boxBreakSide,
+            boxLow: Number(authoritativeInput.snapshot.boxLow ?? 0),
+            boxHigh: Number(authoritativeInput.snapshot.boxHigh ?? 0),
+            closedClose:
+                typeof authoritativeInput.snapshot.closedClose === "number"
+                    ? authoritativeInput.snapshot.closedClose
+                    : null,
+            lastPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0),
+            previousConfirmedBoxLow: continuationStateForBoundary?.previousConfirmedBoxLow ?? null,
+            previousConfirmedBoxHigh: continuationStateForBoundary?.previousConfirmedBoxHigh ?? null,
+            emaGap,
+            htfEntryPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+            htfRequiresStrongerConfirmation: judgment.htf_requires_stronger_confirmation === true,
+            counterTrendRisk: judgment.counter_trend_risk === true,
+            riskLongAllow,
+            riskShortAllow,
+            allowNewLong,
+            allowNewShort,
+            whipsawShockRecheckActive,
+            hardBlockPresent,
+            paperExecutionReady,
+            signedExecutionReady,
+            hasSameSidePosition,
+            hasOppositeSidePosition,
+            judgmentSubtype: String(judgment.subtype ?? ""),
+            rangePhase: judgment.rangePhase ?? null,
+            transitionPhase: judgment.transitionPhase ?? null,
+            continuationDirection:
+                typeof execMetaForBoundary.continuationDirection === "string"
+                    ? String(execMetaForBoundary.continuationDirection)
+                    : continuationStateForBoundary?.direction ?? null,
+            continuationPhase:
+                typeof execMetaForBoundary.continuationPhase === "string"
+                    ? String(execMetaForBoundary.continuationPhase)
+                    : continuationStateForBoundary?.phase ?? null,
+            retestConfirmed:
+                execMetaForBoundary.retest_confirmed === true || judgmentMetaForBoundary.retestConfirmed === true,
+            retestTouched:
+                execMetaForBoundary.retestTouched === true || judgmentMetaForBoundary.retestTouched === true,
+            retestRejected:
+                execMetaForBoundary.retestRejected === true || judgmentMetaForBoundary.retestRejected === true,
+            reversalConfirmed,
+            execReason: typeof execution.reason === "string" ? execution.reason : null,
+            lateChaseBlocked: execMetaForBoundary.late_chase_blocked === true,
+            retestRequired: execMetaForBoundary.retest_required === true
+        };
+
         const probeCommonOk =
             !whipsawShockRecheckActive &&
             hardControlClear === true &&
@@ -2207,8 +2265,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             transitionWatchShortAction === "WATCH" &&
             (transitionWatchShortRejectReason === "INSUFFICIENT_CONFIRMATION" || transitionWatchShortRejectReason === "EMA_GAP_ONLY_PREFLIGHT_BLOCKED");
 
+        const lowerBreakdownShortForTransition = evaluateLowerBreakdownShortConfirmed({
+            ...rangeBoundaryCtx,
+            trendSideCandidate: "short",
+            skipExecutionGate: true
+        }).confirmed;
+
         const transitionWatchShortZoneOk =
-            zone === "upper" || rangeSideCandidate === "short";
+            zone === "upper" ||
+            (zone === "lower" && lowerBreakdownShortForTransition) ||
+            (judgment.subtype === "BREAKDOWN_RETEST_FAILED" && (zone === "mid" || zone === "lower"));
 
         const transitionWatchShortConditionsMet =
             !whipsawShockRecheckActive &&
@@ -2239,7 +2305,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             else if (transitionWatchShortAction !== "WATCH") transitionWatchShortFailReason = "ACTION_NOT_WATCH";
             else transitionWatchShortFailReason = "NOT_ELIGIBLE_CONTEXT_OTHER";
         } else {
-            if (!transitionWatchShortZoneOk) transitionWatchShortFailReason = "ZONE_NOT_UPPER";
+            if (!transitionWatchShortZoneOk) {
+                transitionWatchShortFailReason =
+                    zone === "lower" ? "ZONE_LOWER_BREAKDOWN_NOT_CONFIRMED" : "ZONE_NOT_UPPER";
+            }
             else if (trendSideCandidate !== "short") transitionWatchShortFailReason = "TREND_SIDE_NOT_SHORT";
             else if (!riskShortAllow || !allowNewShort) transitionWatchShortFailReason = "SHORT_NOT_ALLOWED";
             else if (qualityScore < 60) transitionWatchShortFailReason = "QUALITY_TOO_LOW";
@@ -2667,6 +2736,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     upperLongGate = "TREND_PROMOTION_BLOCKED_SIDE_ZONE_AND_BREAKOUT_WATCH";
                 }
 
+                const upperLongContinuationEval = evaluateUpperBreakoutLongConfirmed({
+                    ...rangeBoundaryCtx,
+                    trendSideCandidate: "long"
+                });
+                if (upperLongGate == null && !upperLongContinuationEval.confirmed) {
+                    upperLongGate =
+                        upperLongContinuationEval.holdReason ?? "UPPER_BREAKOUT_CONTINUATION_NOT_CONFIRMED";
+                }
+
                 if (upperLongGate != null) {
                     promotionBlockReason = upperLongGate;
                     expectedMissingCondition = upperLongGate;
@@ -2727,6 +2805,112 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             promotion_reason: promotionReason,
                             breakout_watch_ok: breakoutWatchOk,
                             side_zone_valid: sideZoneValid
+                        })
+                    );
+                }
+            } else if (
+                !promotionApplied &&
+                trendSideCandidate === "short" &&
+                (zone === "lower" || String(boxBreakSide).toLowerCase() === "lower") &&
+                qualityScore >= 70 &&
+                (v2DecisionAfterPromotion === "SKIP" ||
+                    v2DecisionAfterPromotion === "HOLD" ||
+                    v2DecisionAfterPromotion === "REJECT")
+            ) {
+                const lowerShortContinuationEval = evaluateLowerBreakdownShortConfirmed({
+                    ...rangeBoundaryCtx,
+                    trendSideCandidate: "short"
+                });
+
+                const boxHighS = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+                const boxLowS = Number(authoritativeInput.snapshot.boxLow ?? 0);
+                const boxMidS = (boxHighS + boxLowS) / 2;
+                const atrS = Number(authoritativeInput.snapshot.atr ?? 0);
+                const entryPxS = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+                const minProfitS = Math.max(atrS * 0.35, entryPxS * 0.001);
+                const minStopS = Math.max(atrS * 0.5, entryPxS * 0.0015);
+                let stopPxS = Math.max(boxHighS + minStopS, entryPxS + minStopS);
+                let tp1S = Math.min(boxMidS, entryPxS - minProfitS);
+                if (tp1S >= entryPxS) tp1S = entryPxS - minProfitS;
+                let tp2S = Math.min(boxLowS, tp1S - minProfitS);
+                if (tp2S >= tp1S) tp2S = tp1S - minProfitS;
+                const boxHeightS = boxHighS - boxLowS;
+                const boxHeightPctS = boxLowS > 0 ? boxHeightS / boxLowS : 0;
+                const shortOrderOkS = tp2S < tp1S && tp1S < entryPxS && entryPxS < stopPxS;
+                const planInvalidS =
+                    !Number.isFinite(entryPxS) ||
+                    entryPxS <= 0 ||
+                    !Number.isFinite(tp1S) ||
+                    !Number.isFinite(tp2S) ||
+                    !Number.isFinite(stopPxS) ||
+                    tp1S <= 0 ||
+                    tp2S <= 0 ||
+                    stopPxS <= 0 ||
+                    boxHeightPctS < 0.0008 ||
+                    !shortOrderOkS;
+
+                type LowerShortGate = string | null;
+                let lowerShortGate: LowerShortGate = null;
+                if (!lowerShortContinuationEval.confirmed) {
+                    lowerShortGate =
+                        lowerShortContinuationEval.holdReason ??
+                        "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED";
+                } else if (planInvalidS) {
+                    lowerShortGate = "LOWER_SHORT_CONTINUATION_PROBE_BLOCKED_TP_SL_PLAN_INVALID";
+                } else if (!(stopPxS > 0 && stopPxS > entryPxS)) {
+                    lowerShortGate = "LOWER_SHORT_CONTINUATION_PROBE_BLOCKED_STOP_PRICE_MISSING";
+                }
+
+                if (lowerShortGate != null) {
+                    promotionBlockReason = lowerShortGate;
+                    expectedMissingCondition = lowerShortGate;
+                    expectedNextAction = "WAIT_FOR_BREAKDOWN_RETEST_RESISTANCE_CONFIRM";
+                    v2DecisionAfterPromotion = "HOLD";
+                    v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                    console.info(
+                        JSON.stringify({
+                            event: "V2_LOWER_SHORT_BREAKDOWN_PROBE_GATE_SKIP_PROOF",
+                            symbol: String(input.symbol),
+                            expected_missing_condition: lowerShortGate,
+                            promotion_block_reason: lowerShortGate,
+                            zone,
+                            qualityScore,
+                            trend_side_candidate: trendSideCandidate,
+                            boxBreakSide,
+                            continuation_eval: lowerShortContinuationEval.evidence,
+                            wick_only_break: lowerShortContinuationEval.wickOnlyBreak,
+                            closed_break_confirmed: lowerShortContinuationEval.closedBreakConfirmed,
+                            retest_confirmed: lowerShortContinuationEval.retestConfirmed,
+                            paper_execution_ready: paperExecutionReady,
+                            signed_execution_ready: signedExecutionReady,
+                            decision_before_gate: v2DecisionAfterPromotion
+                        })
+                    );
+                } else {
+                    v2DecisionAfterPromotion = "ENTER";
+                    v2SideAfterPromotion = "short";
+                    v2RejectReasonAfterPromotion = null;
+                    promotionApplied = true;
+                    promotionReason = "V2_LOWER_SHORT_BREAKDOWN_CONTINUATION_PROMOTION";
+                    promotionBlockReason = null;
+                    promotionMinConditionPassed = true;
+                    v2CalculatedInvalidationPx = stopPxS;
+
+                    console.info(
+                        JSON.stringify({
+                            event: "V2_TREND_PROMOTION_TO_ENTER_PROOF",
+                            symbol: String(input.symbol),
+                            side: "short",
+                            zone,
+                            qualityScore,
+                            htf_entry_policy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+                            promotion_reason: promotionReason,
+                            boxBreakSide,
+                            continuation_eval: lowerShortContinuationEval.evidence,
+                            entryPx: entryPxS,
+                            stopPrice: stopPxS,
+                            tp1: tp1S,
+                            tp2: tp2S
                         })
                     );
                 }
@@ -2984,11 +3168,35 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     expectedNextAction = "WAIT_FOR_QUALITY_IMPROVEMENT";
                     expectedMissingCondition = "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD";
                 } else if (zone === "lower" && trendSideCandidate === "short") {
-                    promotionBlockReason = "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED";
+                    const lowerShortFallbackEval = evaluateLowerBreakdownShortConfirmed({
+                        ...rangeBoundaryCtx,
+                        trendSideCandidate: "short"
+                    });
+                    promotionBlockReason =
+                        lowerShortFallbackEval.holdReason ??
+                        "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED";
                     v2DecisionAfterPromotion = "HOLD";
                     v2RejectReasonAfterPromotion = "WAIT_RECHECK";
                     expectedNextAction = "WAIT_FOR_BREAKDOWN_RETEST_RESISTANCE_CONFIRM";
-                    expectedMissingCondition = "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED";
+                    expectedMissingCondition = promotionBlockReason;
+                } else if (
+                    zone === "upper" &&
+                    trendSideCandidate === "long" &&
+                    marketMode === "RANGE"
+                ) {
+                    const upperLongFallbackEval = evaluateUpperBreakoutLongConfirmed({
+                        ...rangeBoundaryCtx,
+                        trendSideCandidate: "long"
+                    });
+                    if (!upperLongFallbackEval.confirmed) {
+                        promotionBlockReason =
+                            upperLongFallbackEval.holdReason ??
+                            "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
+                        expectedNextAction = "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM";
+                        expectedMissingCondition = promotionBlockReason;
+                        v2DecisionAfterPromotion = "HOLD";
+                        v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                    }
                 } else if (marketMode === "RANGE" && (boxBreakSide === "none" || boxBreakSide === "UNKNOWN")) {
                     promotionBlockReason = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
                     expectedNextAction = "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM";
