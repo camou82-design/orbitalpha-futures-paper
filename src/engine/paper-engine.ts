@@ -160,8 +160,23 @@ import { buildProtectiveOrderMatchProof, protectiveStopPricesMatch } from "../en
 import {
   acquireProtectiveSubmitInflightLock,
   planProtectiveOrderReconcile,
+  type ProtectiveAlgoRow,
   type ProtectiveReconcileContext
 } from "../engine-v2/execution/protective-reconcile-plan";
+import {
+  buildEntryAttachProtectiveCandidates,
+  buildProtectiveClOrdIdCandidates,
+  clearProtectiveClOrdIdSubmitBlocked,
+  clearProtectiveClOrdIdBlocksForSymbolSide,
+  inventoryRowsMatchingClOrdId,
+  isOkxAlgoClOrdIdExistsError,
+  isProtectiveClOrdIdSubmitBlocked,
+  markProtectiveClOrdIdSubmitBlocked,
+  mergeProtectiveInventoryRows,
+  normalizeProtectiveOrderClOrdIds,
+  resolve51068ProtectiveLookup,
+  type Protective51068Resolution
+} from "../engine-v2/execution/protective-inventory";
 import {
   enrichCompletedTradeRecord,
   isChildExecutionClose,
@@ -1888,6 +1903,8 @@ export class PaperEngine {
       if (!inLedger && !inExchange) {
         this.logger.info("PROTECTION_FAILURE_BLOCK_CLEARED", { symbol: sym, reason: "position_zeroed" });
         this.symbolProtectionFailedBlocked.delete(sym);
+        clearProtectiveClOrdIdBlocksForSymbolSide(sym, "long");
+        clearProtectiveClOrdIdBlocksForSymbolSide(sym, "short");
       }
     }
     if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
@@ -8047,6 +8064,7 @@ export class PaperEngine {
     }
 
     this.authoritativeFlatZeroConfirmByKey.delete(flatKey);
+    clearProtectiveClOrdIdBlocksForSymbolSide(open.symbol, open.side);
   }
 
   private async reconcileProtectiveAfterSizeMutation(
@@ -8988,6 +9006,188 @@ export class PaperEngine {
     };
   }
 
+  private async collectProtectiveInventoryForReconcile(input: Readonly<{
+    instId: string;
+    open: PaperOpenPositionRecord;
+    slAlgoClOrdId: string;
+    tpAlgoClOrdId: string;
+    engineOwnedPrefix: string;
+    expectedSide: "buy" | "sell";
+    tdModeUsed: string;
+    contractsToProtect: number;
+    activeStopPrice: number;
+    activeTpPrice: number | null;
+    wantsTp: boolean;
+    flowId: string;
+  }>): Promise<ProtectiveAlgoRow[] | null> {
+    const pendingTry = await this.okxDemo!.getOrdersAlgoPendingAll({
+      instType: "SWAP",
+      instId: input.instId
+    });
+    if (!pendingTry.ok) {
+      this.logger.error("PROTECTIVE_ORDER_PENDING_QUERY_FAILED_PROOF", {
+        symbol: input.open.symbol,
+        flowId: input.flowId,
+        error: pendingTry.error
+      });
+      return null;
+    }
+
+    const attachRows = buildEntryAttachProtectiveCandidates({
+      instId: input.instId,
+      positionSide: input.open.side,
+      tdModeUsed: input.tdModeUsed,
+      expectedSide: input.expectedSide,
+      contracts: input.contractsToProtect,
+      activeStopPrice: input.activeStopPrice,
+      activeTpPrice: input.activeTpPrice,
+      wantsTp: input.wantsTp,
+      entryClOrdId: input.open.exchangeClOrdId
+    });
+
+    const clOrdCandidates = buildProtectiveClOrdIdCandidates({
+      slAlgoClOrdId: input.slAlgoClOrdId,
+      tpAlgoClOrdId: input.tpAlgoClOrdId,
+      engineOwnedPrefix: input.engineOwnedPrefix,
+      entryClOrdId: input.open.exchangeClOrdId
+    });
+
+    const pendingRows = pendingTry.value as ProtectiveAlgoRow[];
+    const pendingClSet = new Set<string>();
+    for (const row of pendingRows) {
+      for (const cl of normalizeProtectiveOrderClOrdIds(row)) pendingClSet.add(cl);
+    }
+
+    const lookupRows: ProtectiveAlgoRow[] = [];
+    for (const clOrdId of clOrdCandidates) {
+      if (pendingClSet.has(clOrdId)) continue;
+      const lookupTry = await this.okxDemo!.getAlgoOrder({ instId: input.instId, algoClOrdId: clOrdId });
+      if (!lookupTry.ok) {
+        this.logger.error("PROTECTIVE_ALGO_CLORDID_LOOKUP_FAILED_PROOF", {
+          symbol: input.open.symbol,
+          side: input.open.side,
+          flowId: input.flowId,
+          clOrdId,
+          error: lookupTry.error,
+          diag: lookupTry.diagnostics
+        });
+        return null;
+      }
+      if (lookupTry.value.length === 0) continue;
+      lookupRows.push(lookupTry.value[0] as ProtectiveAlgoRow);
+    }
+
+    const inventory = mergeProtectiveInventoryRows(pendingRows, attachRows, lookupRows);
+    this.logger.info("PROTECTIVE_INVENTORY_MERGE_PROOF", {
+      symbol: input.open.symbol,
+      side: input.open.side,
+      flowId: input.flowId,
+      pending_count: pendingRows.length,
+      attach_candidate_count: attachRows.length,
+      authoritative_lookup_count: lookupRows.length,
+      merged_inventory_count: inventory.length,
+      cl_ord_candidates: clOrdCandidates
+    });
+    return inventory;
+  }
+
+  private applyProtective51068Resolution(
+    resolution: Protective51068Resolution,
+    input: Readonly<{
+      symbol: string;
+      side: string;
+      clOrdId: string;
+      flowId: string;
+      engineOwnedSl: any;
+      engineOwnedTp: any;
+      wantsTp: boolean;
+    }>
+  ): { engineOwnedSl: any; engineOwnedTp: any; adopted: boolean; staleCancelId?: string } {
+    let engineOwnedSl = input.engineOwnedSl;
+    let engineOwnedTp = input.engineOwnedTp;
+    if (resolution.action === "adopt") {
+      clearProtectiveClOrdIdSubmitBlocked(input.symbol, input.side, input.clOrdId);
+      engineOwnedSl = resolution.row;
+      if (input.wantsTp) engineOwnedTp = resolution.row;
+      this.logger.info("PROTECTIVE_51068_ADOPTED_PROOF", {
+        symbol: input.symbol,
+        side: input.side,
+        flowId: input.flowId,
+        clOrdId: input.clOrdId,
+        algoId: resolution.row.algoId ?? null
+      });
+      return { engineOwnedSl, engineOwnedTp, adopted: true };
+    }
+    if (resolution.action === "stale_replace") {
+      clearProtectiveClOrdIdSubmitBlocked(input.symbol, input.side, input.clOrdId);
+      this.logger.info("PROTECTIVE_51068_STALE_REPLACE_PROOF", {
+        symbol: input.symbol,
+        side: input.side,
+        flowId: input.flowId,
+        clOrdId: input.clOrdId,
+        cancelAlgoId: resolution.cancelAlgoId
+      });
+      return { engineOwnedSl, engineOwnedTp, adopted: false, staleCancelId: resolution.cancelAlgoId };
+    }
+    if (resolution.action === "blocked_existing_unresolved") {
+      markProtectiveClOrdIdSubmitBlocked(input.symbol, input.side, input.clOrdId);
+      this.logger.warn("PROTECTIVE_51068_EXISTING_UNRESOLVED_BLOCK_PROOF", {
+        symbol: input.symbol,
+        side: input.side,
+        flowId: input.flowId,
+        clOrdId: input.clOrdId
+      });
+      return { engineOwnedSl, engineOwnedTp, adopted: false };
+    }
+    markProtectiveClOrdIdSubmitBlocked(input.symbol, input.side, input.clOrdId);
+    this.logger.warn("PROTECTIVE_51068_LOOKUP_MISS_BLOCK_PROOF", {
+      symbol: input.symbol,
+      side: input.side,
+      flowId: input.flowId,
+      clOrdId: input.clOrdId
+    });
+    return { engineOwnedSl, engineOwnedTp, adopted: false };
+  }
+
+  private async resolveProtective51068AfterSubmit(input: Readonly<{
+    instId: string;
+    clOrdId: string;
+    reconcileCtx: ProtectiveReconcileContext;
+    inventory: ProtectiveAlgoRow[];
+    symbol: string;
+    side: string;
+    flowId: string;
+    engineOwnedSl: any;
+    engineOwnedTp: any;
+    wantsTp: boolean;
+  }>): Promise<{ engineOwnedSl: any; engineOwnedTp: any; adopted: boolean; staleCancelId?: string }> {
+    let lookupRow =
+      inventoryRowsMatchingClOrdId(input.inventory, input.clOrdId)[0] ?? null;
+    if (!lookupRow) {
+      const lookupTry = await this.okxDemo!.getAlgoOrder({
+        instId: input.instId,
+        algoClOrdId: input.clOrdId
+      });
+      if (!lookupTry.ok) {
+        this.logger.error("PROTECTIVE_51068_ALGO_CLORDID_LOOKUP_FAILED_PROOF", {
+          symbol: input.symbol,
+          side: input.side,
+          flowId: input.flowId,
+          clOrdId: input.clOrdId,
+          error: lookupTry.error,
+          diag: lookupTry.diagnostics
+        });
+        markProtectiveClOrdIdSubmitBlocked(input.symbol, input.side, input.clOrdId);
+        return { engineOwnedSl: input.engineOwnedSl, engineOwnedTp: input.engineOwnedTp, adopted: false };
+      }
+      if (lookupTry.value.length > 0) {
+        lookupRow = lookupTry.value[0] as ProtectiveAlgoRow;
+      }
+    }
+    const resolution = resolve51068ProtectiveLookup(lookupRow, input.reconcileCtx, input.clOrdId);
+    return this.applyProtective51068Resolution(resolution, input);
+  }
+
   private validateProtectiveOkxTriggerLayout(input: {
     positionSide: "long" | "short";
     lastPx: number;
@@ -9209,18 +9409,25 @@ export class PaperEngine {
       return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
     }
 
-    // 3. Pending Algo Scan
-    const pendingTry = await this.okxDemo.getOrdersAlgoPending({ instType: "SWAP", instId });
-    if (!pendingTry.ok) {
-      this.logger.error("PROTECTIVE_ORDER_PENDING_QUERY_FAILED_PROOF", {
-        symbol: open.symbol,
-        flowId,
-        error: pendingTry.error
-      });
+    // 3. Protective inventory (pending conditional+OCO, entry attach candidates, authoritative clOrdId lookup)
+    const protectiveInventory = await this.collectProtectiveInventoryForReconcile({
+      instId,
+      open,
+      slAlgoClOrdId,
+      tpAlgoClOrdId,
+      engineOwnedPrefix,
+      expectedSide: open.side === "long" ? "sell" : "buy",
+      tdModeUsed,
+      contractsToProtect,
+      activeStopPrice,
+      activeTpPrice: wantsTp ? activeTpPrice! : null,
+      wantsTp,
+      flowId
+    });
+    if (protectiveInventory == null) {
       return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
     }
 
-    const pendingAlgos = pendingTry.value;
     const expectedSide = open.side === "long" ? "sell" : "buy";
     const cachedSizing = this.instrumentCache.get(instId) as any;
     const tickSz = cachedSizing?.tickSz ? Number(cachedSizing.tickSz) : 1e-8;
@@ -9238,7 +9445,7 @@ export class PaperEngine {
       tickSz
     };
 
-    let reconcilePlan = planProtectiveOrderReconcile(pendingAlgos, reconcileCtx);
+    let reconcilePlan = planProtectiveOrderReconcile(protectiveInventory, reconcileCtx);
     let engineOwnedSl: any = reconcilePlan.canonicalSl;
     let engineOwnedTp: any = reconcilePlan.canonicalTp;
     let duplicateSlCount = reconcilePlan.duplicateSlCount;
@@ -9310,7 +9517,7 @@ export class PaperEngine {
         confirmedStopPrice: confirmedPx,
         confirmed: isConfirmed,
         algoId: engineOwnedSl.algoId,
-        pendingAlgoCount: pendingAlgos.length
+        pendingAlgoCount: protectiveInventory.length
       });
     } else if (open.breakevenStopRequired === false || open.breakevenStopRequired === undefined) {
       open.breakevenStopConfirmed = false; // Reset if not required
@@ -9360,7 +9567,7 @@ export class PaperEngine {
 
     this.logger.info("PROTECTIVE_ORDER_PENDING_ALGO_SCAN_PROOF", {
       symbol: open.symbol,
-      pendingAlgoCount: pendingAlgos.length,
+      pendingAlgoCount: protectiveInventory.length,
       engineOwnedSlCount: engineOwnedSl ? 1 : 0,
       engineOwnedTpCount: engineOwnedTp ? 1 : 0,
       manualUnknownCount,
@@ -9468,69 +9675,125 @@ export class PaperEngine {
       reason: "protective_stop_registration" 
     }).normalized_sz : String(contractsToProtect);
 
-    if (submitOco) {
-      const ocoRes = await this.okxDemo.submitAlgoOrder({
-        instId, tdMode: tdModeUsed, side: expectedSide, posSide: hedgePosSide, accountPosMode: okxPosMode,
-        ordType: "oco", sz: szStr, reduceOnly: true,
-        slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last",
-        tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1", tpTriggerPxType: "last",
-        algoClOrdId: slAlgoClOrdId
+    const handle51068 = async (clOrdId: string) => {
+      const resolved = await this.resolveProtective51068AfterSubmit({
+        instId,
+        clOrdId,
+        reconcileCtx,
+        inventory: protectiveInventory,
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        engineOwnedSl,
+        engineOwnedTp,
+        wantsTp
       });
-      submittedProtective = true;
-      if (ocoRes.ok) {
+      engineOwnedSl = resolved.engineOwnedSl;
+      engineOwnedTp = resolved.engineOwnedTp;
+      if (resolved.staleCancelId) {
+        await this.okxDemo!.cancelAlgoOrder([{ instId, algoId: resolved.staleCancelId }]);
         modified = true;
-        this.logger.info("PROTECTIVE_OCO_SUBMIT_RESULT", { symbol: open.symbol, success: true, algoId: ocoRes.value[0].algoId, flowId });
+      }
+      return resolved.adopted;
+    };
+
+    if (submitOco) {
+      if (isProtectiveClOrdIdSubmitBlocked(open.symbol, open.side, slAlgoClOrdId)) {
+        await handle51068(slAlgoClOrdId);
       } else {
-        this.logger.error("PROTECTIVE_OCO_SUBMIT_FAILED", { symbol: open.symbol, flowId, diag: ocoRes.diagnostics });
+        const ocoRes = await this.okxDemo.submitAlgoOrder({
+          instId, tdMode: tdModeUsed, side: expectedSide, posSide: hedgePosSide, accountPosMode: okxPosMode,
+          ordType: "oco", sz: szStr, reduceOnly: true,
+          slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last",
+          tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1", tpTriggerPxType: "last",
+          algoClOrdId: slAlgoClOrdId
+        });
+        submittedProtective = true;
+        if (ocoRes.ok) {
+          modified = true;
+          clearProtectiveClOrdIdSubmitBlocked(open.symbol, open.side, slAlgoClOrdId);
+          this.logger.info("PROTECTIVE_OCO_SUBMIT_RESULT", { symbol: open.symbol, success: true, algoId: ocoRes.value[0].algoId, flowId });
+        } else {
+          const codes = this.extractOkxOrderAlgoRowCodes(ocoRes.diagnostics);
+          if (isOkxAlgoClOrdIdExistsError(codes)) {
+            await handle51068(slAlgoClOrdId);
+          } else {
+            this.logger.error("PROTECTIVE_OCO_SUBMIT_FAILED", { symbol: open.symbol, flowId, diag: ocoRes.diagnostics, sCode: codes.sCode });
+          }
+        }
       }
     } else if (needSubmitSl) {
-      if (open.breakevenStopRequired === true) {
-        this.logger.info("V2_BREAKEVEN_STOP_UPDATE_SUBMIT_PROOF", {
-          symbol: open.symbol,
-          side: open.side,
-          requiredBreakevenStopPrice: open.breakevenStopPrice,
-          activeStopPrice,
-          flowId,
-          ts: Date.now()
-        });
-      }
-      const slRes = await this.okxDemo.submitAlgoOrder({
-        instId, tdMode: tdModeUsed, side: expectedSide, posSide: hedgePosSide, accountPosMode: okxPosMode,
-        ordType: "conditional", sz: szStr, reduceOnly: true,
-        slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last",
-        algoClOrdId: slAlgoClOrdId
-      });
-      submittedProtective = true;
-      if (slRes.ok) {
-        modified = true;
-        this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: true, algoId: slRes.value[0].algoId, flowId });
+      if (isProtectiveClOrdIdSubmitBlocked(open.symbol, open.side, slAlgoClOrdId)) {
+        await handle51068(slAlgoClOrdId);
       } else {
-        this.logger.error("PROTECTIVE_STOP_SUBMIT_FAILED", { symbol: open.symbol, flowId, diag: slRes.diagnostics });
+        if (open.breakevenStopRequired === true) {
+          this.logger.info("V2_BREAKEVEN_STOP_UPDATE_SUBMIT_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            requiredBreakevenStopPrice: open.breakevenStopPrice,
+            activeStopPrice,
+            flowId,
+            ts: Date.now()
+          });
+        }
+        const slRes = await this.okxDemo.submitAlgoOrder({
+          instId, tdMode: tdModeUsed, side: expectedSide, posSide: hedgePosSide, accountPosMode: okxPosMode,
+          ordType: "conditional", sz: szStr, reduceOnly: true,
+          slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last",
+          algoClOrdId: slAlgoClOrdId
+        });
+        submittedProtective = true;
+        if (slRes.ok) {
+          modified = true;
+          clearProtectiveClOrdIdSubmitBlocked(open.symbol, open.side, slAlgoClOrdId);
+          this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: true, algoId: slRes.value[0].algoId, flowId });
+        } else {
+          const codes = this.extractOkxOrderAlgoRowCodes(slRes.diagnostics);
+          if (isOkxAlgoClOrdIdExistsError(codes)) {
+            await handle51068(slAlgoClOrdId);
+          } else {
+            this.logger.error("PROTECTIVE_STOP_SUBMIT_FAILED", { symbol: open.symbol, flowId, diag: slRes.diagnostics, sCode: codes.sCode });
+          }
+        }
       }
     }
 
     if (needSubmitTp && !submitOco) {
-      const tpRes = await this.okxDemo.submitAlgoOrder({
-        instId, tdMode: tdModeUsed, side: expectedSide, posSide: hedgePosSide, accountPosMode: okxPosMode,
-        ordType: "conditional", sz: szStr, reduceOnly: true,
-        tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1", tpTriggerPxType: "last",
-        algoClOrdId: tpAlgoClOrdId
-      });
-      submittedProtective = true;
-      if (tpRes.ok) {
-        modified = true;
-        this.logger.info("TAKE_PROFIT_SUBMIT_RESULT", { symbol: open.symbol, success: true, algoId: tpRes.value[0].algoId, flowId });
+      if (isProtectiveClOrdIdSubmitBlocked(open.symbol, open.side, tpAlgoClOrdId)) {
+        await handle51068(tpAlgoClOrdId);
       } else {
-        this.logger.error("TAKE_PROFIT_SUBMIT_FAILED", { symbol: open.symbol, flowId, diag: tpRes.diagnostics });
+        const tpRes = await this.okxDemo.submitAlgoOrder({
+          instId, tdMode: tdModeUsed, side: expectedSide, posSide: hedgePosSide, accountPosMode: okxPosMode,
+          ordType: "conditional", sz: szStr, reduceOnly: true,
+          tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1", tpTriggerPxType: "last",
+          algoClOrdId: tpAlgoClOrdId
+        });
+        submittedProtective = true;
+        if (tpRes.ok) {
+          modified = true;
+          clearProtectiveClOrdIdSubmitBlocked(open.symbol, open.side, tpAlgoClOrdId);
+          this.logger.info("TAKE_PROFIT_SUBMIT_RESULT", { symbol: open.symbol, success: true, algoId: tpRes.value[0].algoId, flowId });
+        } else {
+          const codes = this.extractOkxOrderAlgoRowCodes(tpRes.diagnostics);
+          if (isOkxAlgoClOrdIdExistsError(codes)) {
+            await handle51068(tpAlgoClOrdId);
+          } else {
+            this.logger.error("TAKE_PROFIT_SUBMIT_FAILED", { symbol: open.symbol, flowId, diag: tpRes.diagnostics, sCode: codes.sCode });
+          }
+        }
       }
     }
 
     if (submittedProtective) {
-      const pendingAfterSubmit = await this.okxDemo.getOrdersAlgoPending({ instType: "SWAP", instId });
+      const pendingAfterSubmit = await this.okxDemo.getOrdersAlgoPendingAll({ instType: "SWAP", instId });
       if (pendingAfterSubmit.ok) {
-        reconcilePlan = planProtectiveOrderReconcile(pendingAfterSubmit.value, reconcileCtx);
-        engineOwnedSl = reconcilePlan.canonicalSl;
-        engineOwnedTp = reconcilePlan.canonicalTp;
+        const postInventory = mergeProtectiveInventoryRows(
+          protectiveInventory,
+          pendingAfterSubmit.value as ProtectiveAlgoRow[]
+        );
+        reconcilePlan = planProtectiveOrderReconcile(postInventory, reconcileCtx);
+        engineOwnedSl = reconcilePlan.canonicalSl ?? engineOwnedSl;
+        engineOwnedTp = reconcilePlan.canonicalTp ?? engineOwnedTp;
         this.logger.info("PROTECTIVE_POST_SUBMIT_AUTHORITATIVE_RESCAN_PROOF", {
           symbol: open.symbol,
           side: open.side,

@@ -99,6 +99,16 @@ function timeframeToOkxBar(tf: Timeframe): string {
   }
 }
 
+function inventoryRowFallbackKey(row: Record<string, unknown>): string {
+  return JSON.stringify({
+    cl: row.algoClOrdId ?? row.attachAlgoClOrdId ?? row.attachAlgoOrdId,
+    instId: row.instId,
+    ordType: row.ordType,
+    sl: row.slTriggerPx,
+    tp: row.tpTriggerPx
+  });
+}
+
 export function toOkxSwapInstId(symbol: string): string {
   const x = String(symbol).trim().toUpperCase();
   if (x.endsWith("USDT")) {
@@ -417,8 +427,8 @@ export class OkxDemoClient {
 
   /** Pending TP/SL / conditional / trigger algos — reduce-only protective stops live here. */
   getOrdersAlgoPending(args: {
-    instType: string;
     instId?: string;
+    instType: string;
     ordType?: string;
   }): Promise<TryResult<Record<string, unknown>[]>> {
     const targetOrdType = args.ordType || "conditional";
@@ -440,6 +450,46 @@ export class OkxDemoClient {
     if (args.instId) q.set("instId", args.instId);
     q.set("ordType", targetOrdType);
     return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/orders-algo-pending", q, null);
+  }
+
+  /** Merge conditional + OCO pending algos (protective inventory uses both). */
+  async getOrdersAlgoPendingAll(args: {
+    instType: string;
+    instId?: string;
+  }): Promise<TryResult<Record<string, unknown>[]>> {
+    const ordTypes = ["conditional", "oco"] as const;
+    const merged: Record<string, unknown>[] = [];
+    const seen = new Set<string>();
+    let diagnostics: OkxPublicDiagnostics = {
+      httpStatus: 200,
+      requestUrl: "/api/v5/trade/orders-algo-pending",
+      method: "GET"
+    };
+    for (const ordType of ordTypes) {
+      const res = await this.getOrdersAlgoPending({ ...args, ordType });
+      if (!res.ok) return res;
+      diagnostics = res.diagnostics;
+      for (const row of res.value) {
+        const algoId = String(row.algoId ?? "").trim();
+        const key = algoId || inventoryRowFallbackKey(row);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(row);
+      }
+    }
+    return { ok: true, value: merged, diagnostics };
+  }
+
+  getAlgoOrder(args: {
+    instId?: string;
+    algoId?: string;
+    algoClOrdId?: string;
+  }): Promise<TryResult<Record<string, unknown>[]>> {
+    const q = new URLSearchParams();
+    if (args.instId) q.set("instId", args.instId);
+    if (args.algoId) q.set("algoId", args.algoId);
+    if (args.algoClOrdId) q.set("algoClOrdId", args.algoClOrdId);
+    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/order-algo", q, null);
   }
 
   async checkSignedReady(): Promise<{
