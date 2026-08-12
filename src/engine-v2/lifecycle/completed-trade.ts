@@ -1,5 +1,10 @@
 import type { PaperClosedPositionRecord, PaperOpenPositionRecord } from "../../models/types";
 import { isProtectivePartialReason } from "../execution/reduce-economics";
+import {
+    hasIndependentManualLifecycleEvidence,
+    isIndependentExternalManualLifecycle,
+    isStrongManualLatchSource
+} from "../position/manual-ownership-latch";
 
 export type CompletedTradeSource = "BOT_V2" | "MANUAL_EXTERNAL" | "ADOPTED_EXTERNAL";
 
@@ -51,13 +56,30 @@ export function buildPositionFlowId(symbol: string, side: string, openedAt: numb
     return buildPositionCycleId(symbol, side, openedAt);
 }
 
+export function hasExplicitIndependentManualEvidence(
+    open: PaperOpenPositionRecord | null | undefined
+): boolean {
+    if (open == null) return false;
+    if (isIndependentExternalManualLifecycle(open)) return true;
+    if (open.manualLifecycleEvidenceIndependent === true) return true;
+    if (open.manualLifecycleEvidenceIndependent === false) return false;
+    if (open.manualOwnershipLatch !== true) return false;
+    return (
+        isStrongManualLatchSource(
+            open.manualOwnershipLatchSource ?? open.manualOwnershipLatchReason
+        ) && hasIndependentManualLifecycleEvidence(open)
+    );
+}
+
+function hasBotTradeAttribution(open: PaperOpenPositionRecord): boolean {
+    if (open.isV2Authority === true) return true;
+    const authSrc = String(open.authoritySourceAtEntry ?? open.authority ?? "").trim().toLowerCase();
+    if (authSrc === "v2") return true;
+    return String(open.exchangeClOrdId ?? "").startsWith("p");
+}
+
 export function classifyTradeSource(open: PaperOpenPositionRecord): CompletedTradeSource {
-    if (
-        open.manualOwnershipLatch === true ||
-        open.lifecycleState === "EXTERNAL_MANUAL_MANAGED" ||
-        open.lifecycleState === "EXTERNAL_MANUAL_POSITION" ||
-        open.lifecycleState === "OPERATOR_MANAGED"
-    ) {
+    if (hasExplicitIndependentManualEvidence(open)) {
         return "MANUAL_EXTERNAL";
     }
     if (
@@ -68,10 +90,7 @@ export function classifyTradeSource(open: PaperOpenPositionRecord): CompletedTra
     ) {
         return "ADOPTED_EXTERNAL";
     }
-    const authSrc = String(open.authoritySourceAtEntry ?? open.authority ?? "").trim().toLowerCase();
-    if (open.isV2Authority === true || authSrc === "v2") return "BOT_V2";
-    const clOrdId = String(open.exchangeClOrdId ?? "");
-    if (clOrdId.startsWith("p")) return "BOT_V2";
+    if (hasBotTradeAttribution(open)) return "BOT_V2";
     return "MANUAL_EXTERNAL";
 }
 
@@ -129,8 +148,11 @@ export function normalizeFinalCloseReason(input: Readonly<{
     }
     if (cr.includes("trailing") || et === "EXIT_TRAILING") return "TRAILING_STOP";
     if (cr.includes("v2_exit") || cr.includes("v2_exit_authority") || et === "EXIT_V2_AUTHORITY") return "V2_EXIT";
-    if (cr.includes("manual") || input.tradeSource === "MANUAL_EXTERNAL") {
-        return input.tradeSource === "MANUAL_EXTERNAL" ? "EXTERNAL_MANUAL_CLOSE" : "MANUAL_CLOSE";
+    if (input.tradeSource === "MANUAL_EXTERNAL") {
+        return "EXTERNAL_MANUAL_CLOSE";
+    }
+    if (cr === "manual_full_close_reconciled") {
+        return "UNKNOWN_EXECUTION_CLOSE";
     }
     if (cr.includes("liquidation")) return "LIQUIDATION";
     if (cr.includes("regime") || cr.includes("reversal")) return "REVERSAL_EXIT";
@@ -343,4 +365,57 @@ export function buildCompletedTradeFinalizeProof(input: Record<string, unknown>)
 
 export function buildTradeSourceClassificationProof(input: Record<string, unknown>): Record<string, unknown> {
     return { event: "TRADE_SOURCE_CLASSIFICATION_PROOF", ...input };
+}
+
+const TRUSTED_TERMINAL_ATTRIBUTION_SOURCES = new Set([
+    "explicit_manual_evidence",
+    "last_bot_execution",
+    "position_cycle_exit_fill",
+    "bot_close_pending",
+    "bot_v2_reconcile_flat_fallback"
+]);
+
+type TerminalAttributionLike = Readonly<{
+    finalCloseReason: FinalCloseReason;
+    attributionSource: string;
+    manualEvidencePresent: boolean;
+}>;
+
+export function shouldPreferTerminalAttributionFinalCloseReason(input: Readonly<{
+    enriched: Pick<PaperClosedPositionRecord, "tradeSource" | "finalCloseReason">;
+    attribution: TerminalAttributionLike;
+}>): boolean {
+    const { enriched, attribution } = input;
+    if (enriched.finalCloseReason === attribution.finalCloseReason) return false;
+    if (
+        attribution.finalCloseReason === "EXTERNAL_MANUAL_CLOSE" &&
+        enriched.tradeSource === "BOT_V2"
+    ) {
+        return false;
+    }
+    if (
+        attribution.manualEvidencePresent &&
+        enriched.tradeSource !== "MANUAL_EXTERNAL"
+    ) {
+        return false;
+    }
+    return TRUSTED_TERMINAL_ATTRIBUTION_SOURCES.has(attribution.attributionSource);
+}
+
+export function mergeTerminalCloseAttributionWithEnrichedRecord(input: Readonly<{
+    enrichedBase: PaperClosedPositionRecord;
+    attribution: TerminalAttributionLike;
+}>): PaperClosedPositionRecord {
+    if (
+        !shouldPreferTerminalAttributionFinalCloseReason({
+            enriched: input.enrichedBase,
+            attribution: input.attribution
+        })
+    ) {
+        return input.enrichedBase;
+    }
+    return {
+        ...input.enrichedBase,
+        finalCloseReason: input.attribution.finalCloseReason
+    };
 }

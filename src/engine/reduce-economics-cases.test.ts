@@ -290,7 +290,16 @@ export function runReduceEconomicsCaseTests(): boolean {
 
   // CASE K: explicit manual external — EXTERNAL_MANUAL_CLOSE
   {
-    const open = botOpen({ manualOwnershipLatch: true, lifecycleState: "EXTERNAL_MANUAL_MANAGED" });
+    const open = botOpen({
+      manualOwnershipLatch: true,
+      manualOwnershipLatchSource: "EXPLICIT_EXTERNAL_FILL",
+      manualOwnershipLatchStrength: "STRONG",
+      manualLifecycleEvidenceIndependent: true,
+      lifecycleState: "OPERATOR_MANAGED",
+      isV2Authority: false,
+      authoritySourceAtEntry: undefined,
+      exchangeClOrdId: undefined
+    });
     const attr = resolveTerminalCloseAttribution({
       open,
       reconcileSource: "RECONCILE_ABSENT",
@@ -517,7 +526,13 @@ export function runReduceEconomicsCaseTests(): boolean {
     const flatAt = Date.now();
     const openWithManual = botOpen({
       manualOwnershipLatch: true,
-      lifecycleState: "EXTERNAL_MANUAL_MANAGED",
+      manualOwnershipLatchSource: "EXPLICIT_EXTERNAL_FILL",
+      manualOwnershipLatchStrength: "STRONG",
+      manualLifecycleEvidenceIndependent: true,
+      lifecycleState: "OPERATOR_MANAGED",
+      isV2Authority: false,
+      authoritySourceAtEntry: undefined,
+      exchangeClOrdId: undefined,
       lastBotExecutionReason: "SHOCK_PROTECTIVE_REDUCE",
       lastBotExecutionAt: partialAt,
       protectivePartialReduceCount: 1,

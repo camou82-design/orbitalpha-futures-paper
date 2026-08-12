@@ -163,6 +163,8 @@ import {
   buildCompletedTradeAggregationProof,
   buildTradeSourceClassificationProof,
   classifyTradeSource,
+  hasExplicitIndependentManualEvidence,
+  mergeTerminalCloseAttributionWithEnrichedRecord,
   recordPositionCycleExitFill,
   normalizeFinalCloseReason,
   isPositionCycleFinalizeDuplicate
@@ -3065,8 +3067,7 @@ export class PaperEngine {
         paperFundingIntervalHours: this.config.paperFundingIntervalHours
       });
 
-      const manualEvidencePresent =
-        open.manualOwnershipLatch === true || isManualExternal;
+      const manualEvidencePresent = hasExplicitIndependentManualEvidence(open);
       const attribution = resolveTerminalCloseAttribution({
         open,
         reconcileSource: source,
@@ -3109,10 +3110,10 @@ export class PaperEngine {
         actualFillPx: closePrice,
         actualFillContracts: open.okxContracts ?? 0
       });
-      const enriched =
-        enrichedBase.finalCloseReason !== attribution.finalCloseReason
-          ? { ...enrichedBase, finalCloseReason: attribution.finalCloseReason }
-          : enrichedBase;
+      const enriched = mergeTerminalCloseAttributionWithEnrichedRecord({
+        enrichedBase,
+        attribution
+      });
       const tradeSource = classifyTradeSource(open);
 
       const { historyAppended } = await this.appendClosedWithStandardRouting({

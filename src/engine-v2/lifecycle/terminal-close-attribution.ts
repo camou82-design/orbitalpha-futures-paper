@@ -1,6 +1,7 @@
 import type { PaperOpenPositionRecord } from "../../models/types";
 import {
     classifyTradeSource,
+    hasExplicitIndependentManualEvidence,
     normalizeFinalCloseReason,
     type FinalCloseReason
 } from "./completed-trade";
@@ -35,7 +36,8 @@ export function resolveTerminalCloseAttribution(input: Readonly<{
     okxFlatDetectedAt: number;
     manualEvidencePresent: boolean;
 }>): TerminalCloseAttribution {
-    const { open, reconcileSource, manualEvidencePresent } = input;
+    const { open, reconcileSource } = input;
+    const explicitManualEvidence = hasExplicitIndependentManualEvidence(open);
     const lastBotReason = String(open.lastBotExecutionReason ?? "").trim();
     const lastBotAt = open.lastBotExecutionAt ?? 0;
     const botRecent =
@@ -57,17 +59,7 @@ export function resolveTerminalCloseAttribution(input: Readonly<{
             }),
             closeSource: "BOT_CLOSE_PENDING_FILL",
             attributionSource: "bot_close_pending",
-            manualEvidencePresent
-        };
-    }
-
-    if (manualEvidencePresent) {
-        return {
-            closeReason: "manual_full_close_reconciled",
-            finalCloseReason: "EXTERNAL_MANUAL_CLOSE",
-            closeSource: reconcileSource,
-            attributionSource: "explicit_manual_evidence",
-            manualEvidencePresent: true
+            manualEvidencePresent: explicitManualEvidence
         };
     }
 
@@ -124,6 +116,16 @@ export function resolveTerminalCloseAttribution(input: Readonly<{
             closeSource: reconcileSource,
             attributionSource: "bot_v2_reconcile_flat_fallback",
             manualEvidencePresent: false
+        };
+    }
+
+    if (explicitManualEvidence) {
+        return {
+            closeReason: "manual_full_close_reconciled",
+            finalCloseReason: "EXTERNAL_MANUAL_CLOSE",
+            closeSource: reconcileSource,
+            attributionSource: "explicit_manual_evidence",
+            manualEvidencePresent: true
         };
     }
 
