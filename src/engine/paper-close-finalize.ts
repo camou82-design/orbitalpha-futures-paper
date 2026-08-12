@@ -5,6 +5,20 @@ import type {
   PaperExitType,
   PaperOpenPositionRecord
 } from "../models/types";
+import {
+  resolveCloseLegSizing,
+  resolveOpenPositionSizeUnit,
+  type PaperPositionSizeUnit
+} from "../engine-v2/live-account/position-size-authority";
+
+export type { PaperPositionSizeUnit };
+export {
+  isV2NotionalSizeAuthority,
+  resolveOpenMarginUsd,
+  resolveOpenNotionalUsd,
+  resolveOpenPositionSizeUnit,
+  resolveCloseLegSizing
+} from "../engine-v2/live-account/position-size-authority";
 
 export type PaperCloseReasonLike = PaperClosedPositionRecord["closeReason"] | string;
 
@@ -208,26 +222,30 @@ export function computePaperCloseLegMetrics(input: Readonly<{
   closePrice: number;
   closedAt: number;
   snapFundingRate: number;
-  marginUsd: number;
+  /** Leg size in the unit specified by `sizeUnit` (defaults from open authority). */
+  legSizeUsd?: number;
+  /** @deprecated Use `legSizeUsd`. Legacy alias when `sizeUnit` is LEGACY_MARGIN. */
+  marginUsd?: number;
+  sizeUnit?: PaperPositionSizeUnit;
   paperTakerFeeRate: number;
   paperFundingIntervalHours: number;
 }>): PaperCloseLegMetrics {
   const feeRate = input.paperTakerFeeRate;
-  const lev = input.open.leverage;
-  const marginRaw = input.marginUsd;
-  const margin =
-    typeof marginRaw === "number" && Number.isFinite(marginRaw) && marginRaw > 0 ? marginRaw : 0;
-  const openNotionalUsd = margin * lev;
-  const closeNotionalUsd = margin * lev;
-  const feeUsd = (openNotionalUsd + closeNotionalUsd) * feeRate;
+  const lev = Math.max(1, input.open.leverage ?? 1);
+  const unit = input.sizeUnit ?? resolveOpenPositionSizeUnit(input.open);
+  const legSizeRaw = input.legSizeUsd ?? input.marginUsd;
+  const sizing = resolveCloseLegSizing(input.open, legSizeRaw ?? 0, unit);
+  const legNotionalUsd = sizing.legNotionalUsd;
+  const legMarginUsd = sizing.legMarginUsd;
+  const feeUsd = (legNotionalUsd + legNotionalUsd) * feeRate;
 
   const ep = input.open.entryPrice;
   const entryOk = typeof ep === "number" && Number.isFinite(ep) && ep > 0;
   const pnlUsdGross = !entryOk
     ? 0
     : input.open.side === "long"
-      ? ((input.closePrice - ep) / ep) * margin * lev
-      : ((ep - input.closePrice) / ep) * margin * lev;
+      ? ((input.closePrice - ep) / ep) * legNotionalUsd
+      : ((ep - input.closePrice) / ep) * legNotionalUsd;
 
   const rawOpenFr = input.open.openFundingRate;
   const fundingRateAppliedOpen = typeof rawOpenFr === "number" && Number.isFinite(rawOpenFr) ? rawOpenFr : 0;
@@ -245,9 +263,9 @@ export function computePaperCloseLegMetrics(input: Readonly<{
   const holdingMsRaw = input.closedAt - input.open.openedAt;
   const holdingMs = holdingMsRaw <= 0 ? 0 : holdingMsRaw;
   const fundingPeriods = intervalMs > 0 && holdingMs > 0 ? holdingMs / intervalMs : 0;
-  const fundingUsd = margin * lev * fundingRateAverage * fundingPeriods;
+  const fundingUsd = legNotionalUsd * fundingRateAverage * fundingPeriods;
   const pnlUsdNet = pnlUsdGross - feeUsd - fundingUsd;
-  const pnlPctNet = margin > 0 ? pnlUsdNet / margin : 0;
+  const pnlPctNet = legMarginUsd > 0 ? pnlUsdNet / legMarginUsd : 0;
 
   return {
     pnlUsdGross: finiteUsd(pnlUsdGross),
@@ -262,6 +280,28 @@ export function computePaperCloseLegMetrics(input: Readonly<{
     holdingMs: finiteUsd(holdingMs),
     mark: finiteUsd(input.closePrice)
   };
+}
+
+export function computePaperCloseLegMetricsForOpen(input: Readonly<{
+  open: PaperOpenPositionRecord;
+  closePrice: number;
+  closedAt: number;
+  snapFundingRate: number;
+  legSizeUsd: number;
+  paperTakerFeeRate: number;
+  paperFundingIntervalHours: number;
+}>): PaperCloseLegMetrics {
+  return computePaperCloseLegMetrics({
+    ...input,
+    sizeUnit: resolveOpenPositionSizeUnit(input.open)
+  });
+}
+
+export function resolveCloseLegMarginUsdForRecord(
+  open: PaperOpenPositionRecord,
+  legSizeUsd: number
+): number {
+  return resolveCloseLegSizing(open, legSizeUsd).legMarginUsd;
 }
 
 export function paperExitDisplayMeta(

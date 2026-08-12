@@ -90,6 +90,7 @@ import {
   computePaperCloseLegMetrics,
   finalizePaperClosedRecord,
   paperExitDisplayMeta,
+  resolveCloseLegMarginUsdForRecord,
   type PaperCloseLegMetrics
 } from "./paper-close-finalize";
 import { evaluateMarketModeSelector } from "./mode-selector";
@@ -3097,7 +3098,7 @@ export class PaperEngine {
         closePrice,
         closedAt,
         closeReason: attribution.closeReason as PaperClosedPositionRecord["closeReason"],
-        legMarginUsd: open.sizeUsd,
+        legMarginUsd: resolveCloseLegMarginUsdForRecord(open, open.sizeUsd),
         metrics,
         feeRate: this.config.paperTakerFeeRate,
         fundingIntervalHours: this.config.paperFundingIntervalHours,
@@ -3539,7 +3540,7 @@ export class PaperEngine {
                     closePrice: fillPx,
                     closedAt: fillTime,
                     closeReason: (open.closePendingReason as any) || "v2_exit_authority",
-                    legMarginUsd: open.sizeUsd,
+                    legMarginUsd: resolveCloseLegMarginUsdForRecord(open, open.sizeUsd),
                     metrics,
                     feeRate: this.config.paperTakerFeeRate,
                     fundingIntervalHours: this.config.paperFundingIntervalHours,
@@ -3624,13 +3625,12 @@ export class PaperEngine {
                     const instTp1 = this.instrumentCache.get(instIdTp1);
                     const ctTp1 = instTp1?.ctVal ?? 1;
                     const partialNotional = legContracts * ctTp1 * fillPx;
-                    const partialMarginUsd = partialNotional / (open.leverage ?? 10);
                     const metricsTp1 = computePaperCloseLegMetrics({
                       open,
                       closePrice: fillPx,
                       closedAt: fillTime,
                       snapFundingRate: fundingRate,
-                      marginUsd: partialMarginUsd,
+                      legSizeUsd: partialNotional,
                       paperTakerFeeRate: this.config.paperTakerFeeRate,
                       paperFundingIntervalHours: this.config.paperFundingIntervalHours
                     });
@@ -3640,7 +3640,7 @@ export class PaperEngine {
                       closePrice: fillPx,
                       closedAt: fillTime,
                       closeReason: "take_profit_1" as PaperClosedPositionRecord["closeReason"],
-                      legMarginUsd: partialMarginUsd,
+                      legMarginUsd: resolveCloseLegMarginUsdForRecord(open, partialNotional),
                       metrics: metricsTp1,
                       feeRate: this.config.paperTakerFeeRate,
                       fundingIntervalHours: this.config.paperFundingIntervalHours,
@@ -11196,7 +11196,7 @@ export class PaperEngine {
               closePrice: snap.lastPrice,
               closedAt: snap.fetchedAt,
               closeReason: et as PaperClosedPositionRecord["closeReason"],
-              legMarginUsd: marginToClose,
+              legMarginUsd: resolveCloseLegMarginUsdForRecord(op, marginToClose),
               metrics: m,
               feeRate: this.config.paperTakerFeeRate,
               fundingIntervalHours: this.config.paperFundingIntervalHours,
@@ -11623,7 +11623,7 @@ export class PaperEngine {
               closePrice: actualExitPrice,
               closedAt: snap!.fetchedAt,
               closeReason: (open as any).closePendingReason || "stop_loss",
-              legMarginUsd: open.sizeUsd,
+              legMarginUsd: resolveCloseLegMarginUsdForRecord(open, open.sizeUsd),
               metrics: actualMetrics,
               feeRate: this.config.paperTakerFeeRate,
               fundingIntervalHours: this.config.paperFundingIntervalHours,
@@ -11825,7 +11825,7 @@ export class PaperEngine {
             closePrice,
             closedAt,
             closeReason: "take_profit_2" as any,
-            legMarginUsd: open.sizeUsd,
+            legMarginUsd: resolveCloseLegMarginUsdForRecord(open, open.sizeUsd),
             metrics: metricsF,
             feeRate: this.config.paperTakerFeeRate,
             fundingIntervalHours: this.config.paperFundingIntervalHours,
@@ -11998,7 +11998,7 @@ export class PaperEngine {
             closePrice,
             closedAt,
             closeReason: "take_profit_1" as any,
-            legMarginUsd: partialSizeUsd,
+            legMarginUsd: resolveCloseLegMarginUsdForRecord(open, partialSizeUsd),
             metrics: metricsP,
             feeRate: this.config.paperTakerFeeRate,
             fundingIntervalHours: this.config.paperFundingIntervalHours,
@@ -12168,7 +12168,7 @@ export class PaperEngine {
                 ...snapPaths
             });
 
-        const closedRow = toClosedLocal(cr, m, open.sizeUsd);
+        const closedRow = toClosedLocal(cr, m, resolveCloseLegMarginUsdForRecord(open, open.sizeUsd));
         
         if (open.reconcileState === "ADOPTED" || open.lifecycleState === "CLOSE_ONLY_MANAGED") {
           this.logger.info("ADOPTED_EXIT_TRIGGERED_PROOF", {
@@ -12672,7 +12672,7 @@ export class PaperEngine {
                 closePrice,
                 closedAt,
                 closeReason: cr,
-                legMarginUsd: open.sizeUsd,
+                legMarginUsd: resolveCloseLegMarginUsdForRecord(open, open.sizeUsd),
                 metrics: m,
                 feeRate,
                 fundingIntervalHours: intervalH,
@@ -12803,7 +12803,7 @@ export class PaperEngine {
                 closePrice,
                 closedAt,
                 closeReason: cr,
-                legMarginUsd: open.sizeUsd,
+                legMarginUsd: resolveCloseLegMarginUsdForRecord(open, open.sizeUsd),
                 metrics: m,
                 feeRate,
                 fundingIntervalHours: intervalH,
@@ -13020,7 +13020,7 @@ export class PaperEngine {
             closePrice,
             closedAt,
             closeReason: crTrail,
-            legMarginUsd: open.sizeUsd,
+            legMarginUsd: resolveCloseLegMarginUsdForRecord(open, open.sizeUsd),
             metrics: m,
             feeRate,
             fundingIntervalHours: intervalH,
@@ -13241,7 +13241,7 @@ export class PaperEngine {
                 closePrice,
                 closedAt,
                 closeReason: cr,
-                legMarginUsd: open.sizeUsd,
+                legMarginUsd: resolveCloseLegMarginUsdForRecord(open, open.sizeUsd),
                 metrics: m,
                 feeRate,
                 fundingIntervalHours: intervalH,
@@ -13374,7 +13374,7 @@ export class PaperEngine {
             closePrice,
             closedAt,
             closeReason: cr,
-            legMarginUsd: open.sizeUsd,
+            legMarginUsd: resolveCloseLegMarginUsdForRecord(open, open.sizeUsd),
             metrics: m,
             feeRate,
             fundingIntervalHours: intervalH,
@@ -14947,7 +14947,7 @@ export class PaperEngine {
             closePrice,
             closedAt,
             closeReason: cr,
-            legMarginUsd: open.sizeUsd,
+            legMarginUsd: resolveCloseLegMarginUsdForRecord(open, open.sizeUsd),
             metrics: m,
             feeRate,
             fundingIntervalHours: intervalH,

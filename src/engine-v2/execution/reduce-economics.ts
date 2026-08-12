@@ -1,4 +1,5 @@
 import type { PaperOpenPositionRecord } from "../../models/types";
+import { resolveOpenNotionalUsd } from "../live-account/position-size-authority";
 
 export const MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT = 2;
 export const REDUCE_FEE_SAFETY_MULTIPLIER = 1.5;
@@ -315,7 +316,7 @@ export function markProtectiveReduceEpisodeFilled(
 }
 
 export function estimatePositionRiskAtStop(open: PaperOpenPositionRecord, lastPrice: number): number {
-    const notional = Math.max(0, open.notionalUsd ?? open.sizeUsd * Math.max(1, open.leverage ?? 1));
+    const notional = resolveOpenNotionalUsd(open);
     const stop = open.stopPrice ?? open.invalidationPx;
     const entry = open.avgPx ?? open.entryPrice;
     if (!(notional > 0) || !(entry > 0) || stop == null || !Number.isFinite(stop)) {
