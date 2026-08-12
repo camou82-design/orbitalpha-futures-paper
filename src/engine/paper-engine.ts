@@ -158,6 +158,11 @@ import {
 } from "../engine-v2/risk-sizing/equity-adaptive-sizing";
 import { buildProtectiveOrderMatchProof, protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
 import {
+  acquireProtectiveSubmitInflightLock,
+  planProtectiveOrderReconcile,
+  type ProtectiveReconcileContext
+} from "../engine-v2/execution/protective-reconcile-plan";
+import {
   enrichCompletedTradeRecord,
   isChildExecutionClose,
   buildCompletedTradeFinalizeProof,
@@ -9028,6 +9033,29 @@ export class PaperEngine {
       }
     }
 
+    const symSideLockKey = `${open.symbol}:${open.side}`;
+    const { lock, promise } = acquireProtectiveSubmitInflightLock(symSideLockKey, () =>
+      this.ensureProtectiveStopOrderCore(open, flowId, pricingLastInput, protectionSource)
+    );
+    if (lock.joinedExisting) {
+      this.logger.info("PROTECTIVE_ENSURE_SINGLE_FLIGHT_JOIN", {
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        protectionSource: protectionSource ?? null
+      });
+    }
+    return promise;
+  }
+
+  private async ensureProtectiveStopOrderCore(
+    open: PaperOpenPositionRecord,
+    flowId: string,
+    pricingLastInput?: number,
+    protectionSource?: "post_fill_algo" | "ops_watch_algo" | "reconcile_algo"
+  ): Promise<{ modified: boolean; success: boolean; record: PaperOpenPositionRecord }> {
+    if (!this.okxDemo) return { modified: false, success: false, record: open };
+
     const instId = toOkxSwapInstId(open.symbol);
     const openedAt36 = open.openedAt.toString(36);
     // Unique but identifiable prefix for this specific position instance
@@ -9193,102 +9221,41 @@ export class PaperEngine {
     }
 
     const pendingAlgos = pendingTry.value;
-    let engineOwnedSl: any = null;
-    let engineOwnedTp: any = null;
-    let duplicateSlCount = 0;
-    let duplicateTpCount = 0;
-    let manualUnknownCount = 0;
-    let wrongTdModeCount = 0;
-    let wrongSizeCount = 0;
-    let wrongSideCount = 0;
-    let wrongPriceCount = 0;
-    let structuralFallbackSlCount = 0;
-    let structuralFallbackTpCount = 0;
-    let anonymousManualCount = 0;
-    
-    const cancelTargets: Array<{ instId: string; algoId: string }> = [];
     const expectedSide = open.side === "long" ? "sell" : "buy";
-
     const cachedSizing = this.instrumentCache.get(instId) as any;
     const tickSz = cachedSizing?.tickSz ? Number(cachedSizing.tickSz) : 1e-8;
-    const priceTolerance = Math.max(tickSz, 1e-8);
-    const isPriceMatch = (pxA: number, pxB: number) => Math.abs(pxA - pxB) <= priceTolerance;
 
-    for (const algo of pendingAlgos) {
-      const curAlgoClOrdId = String(algo.algoClOrdId || "");
-      const isOapPrefix = curAlgoClOrdId.startsWith("oap");
-      const isEmptyId = curAlgoClOrdId === "";
-      const isMyPosition = isOapPrefix ? curAlgoClOrdId.includes(openedAt36) : false;
-      
-      const hasSlTrigger = (algo.slTriggerPx && Number(algo.slTriggerPx) > 0);
-      const hasTpTrigger = (algo.tpTriggerPx && Number(algo.tpTriggerPx) > 0);
-      const isOco = algo.ordType === "oco";
-      
-      const isSlLeg = hasSlTrigger || (isOco && !hasTpTrigger); // OCO usually has both, but safety first
-      const isTpLeg = hasTpTrigger || (isOco && !hasSlTrigger);
+    const reconcileCtx: ProtectiveReconcileContext = {
+      instId,
+      positionSide: open.side,
+      openedAt36,
+      tdModeUsed,
+      contractsToProtect,
+      activeStopPrice,
+      activeTpPrice: wantsTp ? activeTpPrice! : null,
+      wantsTp,
+      expectedSide,
+      tickSz
+    };
 
-      if (!isOapPrefix && !isEmptyId) {
-        manualUnknownCount++;
-        continue;
-      }
+    let reconcilePlan = planProtectiveOrderReconcile(pendingAlgos, reconcileCtx);
+    let engineOwnedSl: any = reconcilePlan.canonicalSl;
+    let engineOwnedTp: any = reconcilePlan.canonicalTp;
+    let duplicateSlCount = reconcilePlan.duplicateSlCount;
+    let duplicateTpCount = reconcilePlan.duplicateTpCount;
+    const manualUnknownCount = reconcilePlan.manualIgnoredCount;
+    const wrongSizeCount = reconcilePlan.staleCount;
+    const wrongTdModeCount = 0;
+    const wrongSideCount = 0;
+    const wrongPriceCount = 0;
+    const structuralFallbackSlCount = engineOwnedSl && !String(engineOwnedSl.algoClOrdId ?? "").startsWith("oap") ? 1 : 0;
+    const structuralFallbackTpCount = engineOwnedTp && !String(engineOwnedTp.algoClOrdId ?? "").startsWith("oap") ? 1 : 0;
+    const anonymousManualCount = 0;
 
-      const algoTdMode = String(algo.tdMode).toLowerCase();
-      const algoSz = Number(algo.sz);
-      const algoSide = algo.side;
-      const algoPosSide = String(algo.posSide || "net").toLowerCase();
-      const algoReduceOnly = algo.reduceOnly === true || String(algo.reduceOnly).toLowerCase() === "true";
-
-      let isWrong = false;
-      if (algoTdMode !== tdModeUsed) { wrongTdModeCount++; isWrong = true; }
-      if (Math.abs(algoSz - contractsToProtect) > 1e-8) { wrongSizeCount++; isWrong = true; }
-      if (algoSide !== expectedSide) { wrongSideCount++; isWrong = true; }
-      
-      if (hasSlTrigger && !isPriceMatch(Number(algo.slTriggerPx), activeStopPrice)) { wrongPriceCount++; isWrong = true; }
-      if (hasTpTrigger && wantsTp && !isPriceMatch(Number(algo.tpTriggerPx), activeTpPrice!)) { wrongPriceCount++; isWrong = true; }
-
-      let isStructuralFallback = false;
-      if (isEmptyId) {
-        const strictMatch = !isWrong && 
-                            algo.instId === instId && 
-                            algoReduceOnly && 
-                            (algoPosSide === "net" || algoPosSide === open.side);
-        if (strictMatch) {
-          isStructuralFallback = true;
-        } else {
-          anonymousManualCount++;
-          continue;
-        }
-      }
-
-      const isOwnedOrAdopted = isMyPosition || isStructuralFallback;
-
-      if (hasSlTrigger || (isOco && wantsTp)) {
-        if (!engineOwnedSl && !isWrong && isOwnedOrAdopted) {
-          engineOwnedSl = algo;
-          if (isStructuralFallback) structuralFallbackSlCount++;
-        } else {
-          duplicateSlCount++;
-          if (!isStructuralFallback) cancelTargets.push({ instId, algoId: algo.algoId as string });
-        }
-      }
-      
-      if (hasTpTrigger || (isOco && wantsTp)) {
-        if (engineOwnedSl && engineOwnedSl.algoId === algo.algoId) {
-          engineOwnedTp = algo;
-          if (isStructuralFallback && !structuralFallbackSlCount) structuralFallbackTpCount++; // Ensure we don't double count if it's the exact same OCO object
-          else if (isStructuralFallback && engineOwnedSl.algoId !== algo.algoId) structuralFallbackTpCount++;
-          else if (isStructuralFallback && engineOwnedSl.algoId === algo.algoId) structuralFallbackTpCount++; // actually we should count both legs if we want
-        } else if (!engineOwnedTp && !isWrong && isOwnedOrAdopted) {
-          engineOwnedTp = algo;
-          if (isStructuralFallback) structuralFallbackTpCount++;
-        } else {
-          duplicateTpCount++;
-          if (!isStructuralFallback && !cancelTargets.some(t => t.algoId === algo.algoId)) {
-            cancelTargets.push({ instId, algoId: algo.algoId as string });
-          }
-        }
-      }
-    }
+    const cancelTargets: Array<{ instId: string; algoId: string }> = reconcilePlan.cancelAlgoIds.map((algoId) => ({
+      instId,
+      algoId
+    }));
     
     this.logger.info("V2_PROTECTION_CANONICALIZATION_PROOF", {
       symbol: open.symbol,
@@ -9444,11 +9411,12 @@ export class PaperEngine {
       });
     }
 
-    // 4. Reconcile Plan
-    const needSubmitSl = !engineOwnedSl;
-    const needSubmitTp = wantsTp && !engineOwnedTp;
+    // 4. Reconcile Plan (derive submit intent from canonical scan after addon rebuild adjustments)
+    let needSubmitSl = !engineOwnedSl;
+    let needSubmitTp = wantsTp && !engineOwnedTp;
+    let submitOco = needSubmitSl && needSubmitTp && wantsTp;
 
-    if (!needSubmitSl && !needSubmitTp && cancelTargets.length === 0) {
+    if (!needSubmitSl && !needSubmitTp && !submitOco && cancelTargets.length === 0) {
       this.logger.info("V2_PROTECTION_STATE_PROOF", {
         symbol: open.symbol,
         side: open.side,
@@ -9457,30 +9425,34 @@ export class PaperEngine {
         sl_algo_id: engineOwnedSl?.algoId ?? null,
         tp_algo_id: engineOwnedTp?.algoId ?? null
       });
-    } else if (needSubmitSl || needSubmitTp) {
+    } else if (needSubmitSl || needSubmitTp || submitOco) {
       this.logger.info("V2_PROTECTION_STATE_PROOF", {
         symbol: open.symbol,
         side: open.side,
         flowId,
         status: "PROTECTION_SUBMIT_ATTEMPT",
         needSubmitSl,
-        needSubmitTp
+        needSubmitTp,
+        submitOco
       });
     }
     
     this.logger.info("PROTECTIVE_ORDER_RECONCILE_PLAN_PROOF", {
       symbol: open.symbol,
-      action: (needSubmitSl || needSubmitTp || cancelTargets.length > 0) ? "MODIFY" : "KEEP",
-      reason: needSubmitSl ? "missing_sl" : needSubmitTp ? "missing_tp" : cancelTargets.length > 0 ? "cleanup_duplicates" : "reconciled",
+      action: (needSubmitSl || needSubmitTp || submitOco || cancelTargets.length > 0) ? "MODIFY" : "KEEP",
+      reason: needSubmitSl ? "missing_sl" : needSubmitTp ? "missing_tp" : submitOco ? "missing_oco_both" : cancelTargets.length > 0 ? "cleanup_duplicates" : "reconciled",
       needSubmitSl,
       needSubmitTp,
+      submitOco,
       needCancelDuplicate: cancelTargets.length > 0,
       cancelTargetsCount: cancelTargets.length,
-      manualOrdersIgnoredCount: manualUnknownCount
+      manualOrdersIgnoredCount: manualUnknownCount,
+      contractsAuthority: contractsToProtect
     });
 
     // 5. Execution
     let modified = false;
+    let submittedProtective = false;
     if (cancelTargets.length > 0) {
       await this.okxDemo.cancelAlgoOrder(cancelTargets);
       modified = true;
@@ -9496,7 +9468,22 @@ export class PaperEngine {
       reason: "protective_stop_registration" 
     }).normalized_sz : String(contractsToProtect);
 
-    if (needSubmitSl) {
+    if (submitOco) {
+      const ocoRes = await this.okxDemo.submitAlgoOrder({
+        instId, tdMode: tdModeUsed, side: expectedSide, posSide: hedgePosSide, accountPosMode: okxPosMode,
+        ordType: "oco", sz: szStr, reduceOnly: true,
+        slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last",
+        tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1", tpTriggerPxType: "last",
+        algoClOrdId: slAlgoClOrdId
+      });
+      submittedProtective = true;
+      if (ocoRes.ok) {
+        modified = true;
+        this.logger.info("PROTECTIVE_OCO_SUBMIT_RESULT", { symbol: open.symbol, success: true, algoId: ocoRes.value[0].algoId, flowId });
+      } else {
+        this.logger.error("PROTECTIVE_OCO_SUBMIT_FAILED", { symbol: open.symbol, flowId, diag: ocoRes.diagnostics });
+      }
+    } else if (needSubmitSl) {
       if (open.breakevenStopRequired === true) {
         this.logger.info("V2_BREAKEVEN_STOP_UPDATE_SUBMIT_PROOF", {
           symbol: open.symbol,
@@ -9513,6 +9500,7 @@ export class PaperEngine {
         slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last",
         algoClOrdId: slAlgoClOrdId
       });
+      submittedProtective = true;
       if (slRes.ok) {
         modified = true;
         this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: true, algoId: slRes.value[0].algoId, flowId });
@@ -9521,13 +9509,14 @@ export class PaperEngine {
       }
     }
 
-    if (needSubmitTp) {
+    if (needSubmitTp && !submitOco) {
       const tpRes = await this.okxDemo.submitAlgoOrder({
         instId, tdMode: tdModeUsed, side: expectedSide, posSide: hedgePosSide, accountPosMode: okxPosMode,
         ordType: "conditional", sz: szStr, reduceOnly: true,
         tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1", tpTriggerPxType: "last",
         algoClOrdId: tpAlgoClOrdId
       });
+      submittedProtective = true;
       if (tpRes.ok) {
         modified = true;
         this.logger.info("TAKE_PROFIT_SUBMIT_RESULT", { symbol: open.symbol, success: true, algoId: tpRes.value[0].algoId, flowId });
@@ -9536,9 +9525,24 @@ export class PaperEngine {
       }
     }
 
-    // 6. Final State Evaluation (Success only if confirmed in scan, or just submitted successfully)
-    // We strictly use the scan results for "registered" status to ensure ground truth.
-    // If we just submitted, it will be picked up in the next tick's scan.
+    if (submittedProtective) {
+      const pendingAfterSubmit = await this.okxDemo.getOrdersAlgoPending({ instType: "SWAP", instId });
+      if (pendingAfterSubmit.ok) {
+        reconcilePlan = planProtectiveOrderReconcile(pendingAfterSubmit.value, reconcileCtx);
+        engineOwnedSl = reconcilePlan.canonicalSl;
+        engineOwnedTp = reconcilePlan.canonicalTp;
+        this.logger.info("PROTECTIVE_POST_SUBMIT_AUTHORITATIVE_RESCAN_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          sl_algo_id: engineOwnedSl?.algoId ?? null,
+          tp_algo_id: engineOwnedTp?.algoId ?? null,
+          contractsAuthority: contractsToProtect
+        });
+      }
+    }
+
+    // 6. Final State Evaluation — ground truth from OKX pending scan (post-submit rescan when applicable)
     const slRegistered = !!engineOwnedSl;
     const tpRegistered = !wantsTp || !!engineOwnedTp;
     const protectionSuccess = slRegistered && tpRegistered;
