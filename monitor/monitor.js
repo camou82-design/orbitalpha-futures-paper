@@ -368,16 +368,19 @@
     return false;
   }
 
-  function isTrueExternalManualForDisplay(pos, bundle) {
+  function isTrueExternalManualForDisplay(pos) {
     if (!pos) return false;
+    if (pos.manualLifecycleEvidenceIndependent === false) return false;
+
     const ls = String(pos.lifecycleState || "");
     if (ls === "EXTERNAL_MANUAL_POSITION" || ls === "OPERATOR_MANAGED") return true;
-    if (pos.manualOwnershipLatch === true && String(pos.manualOwnershipLatchStrength || "") === "STRONG") return true;
-    const sync = ledgerOkxSync(bundle);
-    if (!sync) return false;
-    const key = String(pos.symbol || "") + ":" + (pos.side === "short" ? "short" : "long");
-    if (!isOkxOnlyKey(sync, key)) return false;
-    return !hasBotOwnershipEvidence(pos);
+    if (pos.manualLifecycleEvidenceIndependent === true) return true;
+
+    if (pos.manualOwnershipLatch === true && String(pos.manualOwnershipLatchStrength || "") === "STRONG") {
+      if (String(pos.authoritySourceAtEntry || "") === "EXPLICIT_EXTERNAL_FILL") return true;
+    }
+
+    return false;
   }
 
   function syncMismatchIsLedgerStaleOnly(bundle) {
@@ -738,7 +741,7 @@
       if (pos.lifecycleState === "CLOSE_ONLY_MANAGED") return { text: "Close-only 관리", cls: "badge-warn" };
       return { text: "복구 관리", cls: "badge-warn" };
     }
-    if (pos.lifecycleState === "EXTERNAL_MANUAL_MANAGED" || pos.lifecycleState === "EXTERNAL_MANUAL_POSITION") {
+    if (isTrueExternalManualForDisplay(pos)) {
       return { text: "외부 수동 관리", cls: "badge-warn" };
     }
     const r = pos.regimeAtEntry || pos.executorAtEntry || pos.strategy;
@@ -1670,12 +1673,21 @@
         const markDisp = mark !== null ? formatPrice(mark) : "N/A";
 
         const rb = getRegimeBadge(pos);
-        const trueExternalManual = isTrueExternalManualForDisplay(pos, bundle);
-        const reconcileBanner = trueExternalManual
-          ? `<div class="v2-pos-fallback-banner">외부 수동 개입 확인 · ${esc(String(pos.reconcileState || pos.ledgerSyncStatus || "EXTERNAL_MANUAL"))}</div>`
-          : syncMismatchIsLedgerStaleOnly(bundle)
-            ? `<div class="v2-pos-fallback-banner">ledger 정리 대기 · OKX actual 기준 감시 유지</div>`
-            : "";
+        const trueExternalManual = isTrueExternalManualForDisplay(pos);
+        
+        const okxRow = okxExchangePositionForSymbol(bundle, sym);
+        const okxSide = okxRow ? okxRow.side : "없음";
+        const ledgerSide = pos.side || "없음";
+        const sideMismatch = okxRow && (okxRow.side !== pos.side);
+        
+        let reconcileBanner = "";
+        if (sideMismatch) {
+          reconcileBanner = `<div class="v2-pos-fallback-banner">포지션 동기화 불일치 · OKX actual 기준 감시 중 (OKX actual: ${esc(okxSide)} / Engine: ${esc(ledgerSide)} / manual evidence: ${trueExternalManual ? '확인' : '없음'})</div>`;
+        } else if (trueExternalManual) {
+          reconcileBanner = `<div class="v2-pos-fallback-banner">외부 수동 개입 확인 · ${esc(String(pos.reconcileState || pos.ledgerSyncStatus || "EXTERNAL_MANUAL"))}</div>`;
+        } else if (syncMismatchIsLedgerStaleOnly(bundle)) {
+          reconcileBanner = `<div class="v2-pos-fallback-banner">ledger 정리 대기 · OKX actual 기준 감시 유지</div>`;
+        }
         const badgeHtml = rb ? `<span class="badge ${rb.cls}" style="margin-top:0; margin-left:0.5rem; vertical-align:middle;">${esc(rb.text)}</span>` : "";
 
         const isTrend = (pos.regimeAtEntry || pos.executorAtEntry || pos.strategy) === "TREND";
