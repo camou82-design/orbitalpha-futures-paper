@@ -284,6 +284,8 @@ import {
   buildV2ExitExecutionGateProof,
   inferExitExecutionRequestedAction
 } from "../engine-v2/exit/exit-execution-gate";
+import { evaluatePaperCloseSoftExitFeeGate } from "../engine-v2/exit/soft-exit-fee-live-bridge";
+import { resolvePaperSoftExitSubmitDecision } from "../engine-v2/exit/soft-exit-fee-authority-collision";
 import {
   evaluateStaleLedgerExecutionSuppression,
   buildStaleLedgerExecutionSuppressedProof
@@ -8161,6 +8163,84 @@ export class PaperEngine {
     };
   }
 
+  private evaluateLivePaperSoftExitFeeGate(input: Readonly<{
+    symbol: string;
+    side: "long" | "short";
+    closeReason: PaperClosedPositionRecord["closeReason"];
+    closeSource: string;
+    open: PaperOpenPositionRecord;
+    markPrice: number;
+    feeRate: number;
+    v2ShouldExit: boolean;
+  }>): Readonly<{
+    proceed: boolean;
+  }> {
+    const evaluation = evaluatePaperCloseSoftExitFeeGate({
+      closeReason: input.closeReason,
+      closeSource: input.closeSource,
+      positionSide: input.side,
+      entryPrice: Number(input.open.entryPrice ?? 0),
+      markPrice: input.markPrice,
+      positionNotionalUsd: Math.max(0, Number(input.open.sizeUsd ?? 0)),
+      feeRate: input.feeRate
+    });
+    if (evaluation.proof != null) {
+      this.logger.info("V2_SOFT_EXIT_FEE_GATE_PROOF", {
+        symbol: input.symbol,
+        side: input.side,
+        ...evaluation.proof
+      });
+    }
+    const submitDecision = resolvePaperSoftExitSubmitDecision({
+      feeGateProceed: evaluation.proceed,
+      isV2AuthorityPosition: this.isV2AuthorityPosition(input.open),
+      v2ShouldExit: input.v2ShouldExit
+    });
+    if (!submitDecision.allowSubmit) {
+      if (submitDecision.blockReason === "v2_exit_sovereignty_hold") {
+        this.logger.info(
+          "V2_EXIT_SOVEREIGNTY_GUARD_PROOF",
+          buildV2ExitSovereigntyGuardProof({
+            symbol: input.symbol,
+            side: input.side,
+            v2_should_exit: input.v2ShouldExit,
+            paper_candidate_action: "close",
+            paper_candidate_reason: input.closeReason,
+            override_allowed: false,
+            override_block_reason: submitDecision.blockReason,
+            soft_exit_fee_gate_proceed: evaluation.proceed
+          })
+        );
+      } else if (submitDecision.blockReason === "soft_exit_fee_hold_recheck") {
+        this.logger.info("SOFT_EXIT_FEE_GATE_HOLD_RECHECK", {
+          symbol: input.symbol,
+          side: input.side,
+          authoritative_close_reason: evaluation.authoritativeCloseReason,
+          authoritative_close_source: evaluation.authoritativeCloseSource,
+          mapped_fee_gate_reason: evaluation.mappedFeeGateReason,
+          gate_action: evaluation.gate?.gateAction ?? null,
+          bypass_reason: evaluation.gate?.bypassReason ?? null,
+          gross_return_pct: evaluation.gate?.grossReturnPct ?? null,
+          fee_break_even_pct: evaluation.gate?.feeBreakEvenPct ?? null
+        });
+      } else if (evaluation.wired) {
+        this.logger.info("SOFT_EXIT_FEE_AUTHORITY_COLLISION_HOLD", {
+          symbol: input.symbol,
+          side: input.side,
+          authoritative_close_reason: evaluation.authoritativeCloseReason,
+          authoritative_close_source: evaluation.authoritativeCloseSource,
+          mapped_fee_gate_reason: evaluation.mappedFeeGateReason,
+          block_reason: submitDecision.blockReason,
+          gate_action: evaluation.gate?.gateAction ?? null,
+          bypass_reason: evaluation.gate?.bypassReason ?? null
+        });
+      }
+    }
+    return {
+      proceed: submitDecision.allowSubmit
+    };
+  }
+
   private buildV2PartialPendingRecord(
     open: PaperOpenPositionRecord,
     input: {
@@ -12949,6 +13029,20 @@ export class PaperEngine {
               });
               handleV2ExitAuthorityProof("exit", cr);
               handleV2PartialAuthorityProof("superseded_by_exit", null);
+              const regimeReversalFeeGate = this.evaluateLivePaperSoftExitFeeGate({
+                symbol: open.symbol,
+                side: open.side,
+                closeReason: cr,
+                closeSource: confirmedCloseSource,
+                open,
+                markPrice: closePrice,
+                feeRate,
+                v2ShouldExit: v2ExitAuthority?.shouldExit === true
+              });
+              if (!regimeReversalFeeGate.proceed) {
+                remaining.push(posTrail);
+                continue;
+              }
               const closeSubmit = await this.dispatchOkxClose({
                 symbol: open.symbol,
                 side: open.side,
@@ -12957,7 +13051,9 @@ export class PaperEngine {
                 appliedLeverage: Math.max(1, open.leverage ?? 1),
                 lastPrice: closePrice,
                 flowId,
-                reason: "range_long_upper_reversal"
+                reason: "range_long_upper_reversal",
+                isV2Authority: this.isV2AuthorityPosition(open),
+                open
               });
               const fin = await this.finalizeFullClose({
                 open, closeSubmit, closedRow, cr, closeSource: "range_reversal_logic", regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
@@ -13080,6 +13176,20 @@ export class PaperEngine {
               });
               handleV2ExitAuthorityProof("exit", cr);
               handleV2PartialAuthorityProof("superseded_by_exit", null);
+              const regimeReversalShortFeeGate = this.evaluateLivePaperSoftExitFeeGate({
+                symbol: open.symbol,
+                side: open.side,
+                closeReason: cr,
+                closeSource: confirmedCloseSource,
+                open,
+                markPrice: closePrice,
+                feeRate,
+                v2ShouldExit: v2ExitAuthority?.shouldExit === true
+              });
+              if (!regimeReversalShortFeeGate.proceed) {
+                remaining.push(posTrail);
+                continue;
+              }
               const closeSubmit = await this.dispatchOkxClose({
                 symbol: open.symbol,
                 side: open.side,
@@ -13088,7 +13198,9 @@ export class PaperEngine {
                 appliedLeverage: Math.max(1, open.leverage ?? 1),
                 lastPrice: closePrice,
                 flowId,
-                reason: "range_short_lower_reversal"
+                reason: "range_short_lower_reversal",
+                isV2Authority: this.isV2AuthorityPosition(open),
+                open
               });
               const fin = await this.finalizeFullClose({
                 open, closeSubmit, closedRow, cr, closeSource: "range_reversal_logic", regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
@@ -15225,6 +15337,20 @@ export class PaperEngine {
                 : "RANGE ?뺥빀?? ?섎떒 ??媛뺤젣 泥?궛",
             ...snapPaths
           });
+          const regimeSafetyNetFeeGate = this.evaluateLivePaperSoftExitFeeGate({
+            symbol: open.symbol,
+            side: open.side,
+            closeReason: cr,
+            closeSource: confirmedCloseSource,
+            open,
+            markPrice: closePrice,
+            feeRate,
+            v2ShouldExit: v2ExitAuthority?.shouldExit === true
+          });
+          if (!regimeSafetyNetFeeGate.proceed) {
+            remaining.push(posTrail);
+            continue;
+          }
           const closeSubmit = await this.dispatchOkxClose({
             symbol: open.symbol,
             side: open.side,
@@ -15232,7 +15358,9 @@ export class PaperEngine {
             appliedLeverage: Math.max(1, open.leverage ?? 1),
             lastPrice: closePrice,
             flowId,
-            reason: "safety_net_alignment"
+            reason: "safety_net_alignment",
+            isV2Authority: this.isV2AuthorityPosition(open),
+            open
           });
           const fin = await this.finalizeFullClose({
             open, closeSubmit, closedRow, cr, closeSource: "range_misaligned_safety_net", regimeNow, envelope, flowId, requestedContracts: open.okxContracts ?? 0, requestedPrice: closePrice
@@ -15460,6 +15588,20 @@ export class PaperEngine {
       finalCloseReason = cr;
       confirmedExitType = exitEventJsonlType(cr);
       confirmedCloseSource = "candidate_lost_watchdog";
+      const candidateLostFeeGate = this.evaluateLivePaperSoftExitFeeGate({
+        symbol: open.symbol,
+        side: open.side,
+        closeReason: cr,
+        closeSource: confirmedCloseSource,
+        open,
+        markPrice: closePrice,
+        feeRate,
+        v2ShouldExit: v2ExitAuthority?.shouldExit === true
+      });
+      if (!candidateLostFeeGate.proceed) {
+        remaining.push({ ...posTrail, candidateLostStreak: signalLostCandidateCount });
+        continue;
+      }
       const closedRow = toClosed(cr, m, open.sizeUsd);
       const closeContractCtx = this.buildCloseContractContext(open);
       const closeSubmit = await this.dispatchOkxClose({
@@ -15474,10 +15616,7 @@ export class PaperEngine {
         flowId,
         reason: "candidate_lost",
         isV2Authority: closeContractCtx.isV2Authority,
-        open,
-        exitGateContext: {
-          v2ShouldExit: false
-        }
+        open
       });
       if (!closeSubmit.ok) {
         remaining.push({ ...posTrail, candidateLostStreak: 0 });
@@ -22285,7 +22424,8 @@ export function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
     okxLiveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt ?? null,
     okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null,
     okxLiveEmergencyMaxOrderNotionalUsdt: config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null,
-    okxLiveMarginReserveRatio: config.okxLiveMarginReserveRatio ?? 0.2
+    okxLiveMarginReserveRatio: config.okxLiveMarginReserveRatio ?? 0.2,
+    paperTakerFeeRate: config.paperTakerFeeRate
   };
 }
 

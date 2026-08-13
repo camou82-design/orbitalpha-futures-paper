@@ -189,6 +189,11 @@ import { deriveV2StateAuthority } from "./state/derive";
 import { evaluateV2AddOnPolicy } from "./addon/policy";
 import { buildV2AddonEligibilityProof } from "./addon/eligibility-proof";
 import { evaluateV2ExitPolicy } from "./exit/policy";
+import {
+    buildSoftExitFeeGateProof,
+    computeGrossReturnPct
+} from "./exit/soft-exit-fee-gate";
+import { evaluateV2ExitPolicySoftExitFeeGate } from "./exit/soft-exit-fee-live-bridge";
 import { deriveMicroExecutionScore } from "./execution/micro-execution-score";
 import { deriveTradeLifecycleAuthority } from "./lifecycle/trade-lifecycle-authority";
 import type { MicroExecutionScoreSummary, V2ExitAuthorityResult, V2PartialAuthorityResult, V2TradeLifecycleAuthorityResult, V2CooldownAuthorityResult, V2PositionStateAuthorityResult } from "./types";
@@ -1041,7 +1046,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (exitPreReversalConfirmed === true &&
             String(exitPreBoxBreakSide) !== "none" &&
             String(exitPreBoxBreakSide).toLowerCase() !== "unknown");
-    const exitPolicy = evaluateV2ExitPolicy({
+    const exitPolicyBase = evaluateV2ExitPolicy({
         symbol: String(input.symbol),
         v2State,
         judgment,
@@ -1060,6 +1065,78 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         structuralBreakConfirmed: exitPreMeta?.structural_break_confirmed === true,
         boxBreakConfirmed: exitBoxBreakConfirmed
     });
+
+    const exitHeldPosition =
+        exitPolicyBase.positionSide === "long"
+            ? v2State.longPosition
+            : exitPolicyBase.positionSide === "short"
+              ? v2State.shortPosition
+              : v2State.longPosition ?? v2State.shortPosition;
+    const exitFeeRate = Number(authoritativeInput.config.paperTakerFeeRate ?? 0.0005);
+    const exitGrossReturnPct = computeGrossReturnPct({
+        positionSide: exitPolicyBase.positionSide,
+        entryPrice: Number(exitHeldPosition?.entryPrice ?? 0),
+        markPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0),
+        reportedPnlPct: exitPolicyBase.pnlPct
+    });
+    const exitNotionalUsd = Math.max(0, Number(exitPolicyBase.positionSizeUsd ?? 0));
+    const softExitFeeGate = evaluateV2ExitPolicySoftExitFeeGate({
+        policyReason: exitPolicyBase.reason,
+        policyAction: exitPolicyBase.action,
+        shouldExit: exitPolicyBase.shouldExit,
+        shouldReduce: exitPolicyBase.shouldReduce,
+        shouldPartial: exitPolicyBase.shouldPartial,
+        reduceRatio: exitPolicyBase.reduceRatio,
+        grossReturnPct: exitGrossReturnPct,
+        positionNotionalUsd: exitNotionalUsd,
+        feeRate: exitFeeRate,
+        exitUrgency: exitPolicyBase.exitUrgency,
+        oppositeHysteresisState: exitPolicyBase.oppositeHysteresisState,
+        invalidationBreachConfirmed: exitInvalidationBreachConfirmed,
+        reversalConfirmed: exitPreReversalConfirmed
+    });
+    const exitPolicy = softExitFeeGate.applied
+        ? {
+              ...exitPolicyBase,
+              action: softExitFeeGate.action,
+              reason: softExitFeeGate.reason,
+              shouldExit: softExitFeeGate.shouldExit,
+              shouldReduce: softExitFeeGate.shouldReduce,
+              shouldPartial: softExitFeeGate.shouldPartial,
+              reduceRatio: softExitFeeGate.reduceRatio,
+              evidence: `${exitPolicyBase.evidence}${softExitFeeGate.evidenceSuffix}`
+          }
+        : exitPolicyBase;
+
+    if (
+        softExitFeeGate.evaluated &&
+        shouldEmitV2Proof(
+            "V2_SOFT_EXIT_FEE_GATE_PROOF",
+            String(input.symbol),
+            `${exitPolicyBase.reason}|${softExitFeeGate.gateAction}|${softExitFeeGate.grossReturnPct}|${softExitFeeGate.feeBreakEvenPct}|${softExitFeeGate.bypassReason ?? "none"}`,
+            true
+        )
+    ) {
+        console.info(JSON.stringify(buildSoftExitFeeGateProof({
+            symbol: String(input.symbol),
+            side: exitPolicy.positionSide,
+            authoritative_close_reason: exitPolicyBase.reason,
+            mapped_fee_gate_reason: softExitFeeGate.mappedFeeGateReason,
+            prior_reason: exitPolicyBase.reason,
+            prior_action: exitPolicyBase.action,
+            final_action: exitPolicy.action,
+            final_reason: exitPolicy.reason,
+            gross_return_pct: softExitFeeGate.grossReturnPct,
+            entry_fee_pct: softExitFeeGate.entryFeePct,
+            exit_fee_pct: softExitFeeGate.exitFeePct,
+            slippage_buffer_pct: softExitFeeGate.slippageBufferPct,
+            fee_break_even_pct: softExitFeeGate.feeBreakEvenPct,
+            gate_action: softExitFeeGate.gateAction,
+            bypass_reason: softExitFeeGate.bypassReason,
+            position_notional_usd: exitNotionalUsd,
+            block_reason: softExitFeeGate.blockReason
+        })));
+    }
     if (
         exitPolicy.hasPosition &&
         shouldEmitV2Proof(
@@ -7033,7 +7110,8 @@ export function adaptV2Input(
             okxLiveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt ?? null,
             okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null,
             okxLiveEmergencyMaxOrderNotionalUsdt: config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null,
-            okxLiveMarginReserveRatio: config.okxLiveMarginReserveRatio ?? 0.2
+            okxLiveMarginReserveRatio: config.okxLiveMarginReserveRatio ?? 0.2,
+            paperTakerFeeRate: config.paperTakerFeeRate ?? 0.0005
         },
         state: {
             currentPositions: state.currentPositions.map((p: LegacyPositionAdapter) => {

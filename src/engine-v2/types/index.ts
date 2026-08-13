@@ -200,6 +200,7 @@ export interface LegacyConfigAdapter {
     okxLiveMaxAddonCount?: number | null;
     okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
     okxLiveMarginReserveRatio?: number;
+    paperTakerFeeRate?: number;
 }
 
 export interface LegacyPositionAdapter {
@@ -390,6 +391,7 @@ export interface EngineV2ConfigAdapter {
     okxLiveMaxAddonCount?: number | null;
     okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
     okxLiveMarginReserveRatio?: number;
+    paperTakerFeeRate?: number;
 }
 
 export type EngineV2ExecutionAction = "ENTER" | "ADDON" | "NONE";
@@ -497,6 +499,7 @@ export interface V2BridgeConfig {
     okxLiveMaxAddonCount?: number | null;
     okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
     okxLiveMarginReserveRatio?: number;
+    paperTakerFeeRate?: number;
 }
 
 export interface V2BridgePosition {
