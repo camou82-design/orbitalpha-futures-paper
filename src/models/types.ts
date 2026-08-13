@@ -858,6 +858,38 @@ export type PaperOpenPositionRecord = {
   expectedMoveAtEntry?: number;
   /** 진입 시점 총 비용(fee+slippage+safety) (옵션). */
   totalCostAtEntry?: number;
+
+  // --- BOT_V2 Entry Telemetry ---
+  entryQualityGrade?: string;
+  entryQualityScore?: number;
+  entryRegime?: string;
+  entryMarketSubtype?: string;
+  entryMarketMode?: string;
+  entryZone?: string;
+  entryBoxPos?: string;
+  entryTrendSideCandidate?: string;
+  entryRangeSideCandidate?: string;
+  entryHtfPolicy?: string;
+  entryPromotionReason?: string;
+  entryAuthorityReason?: string;
+  entryDecisionReason?: string;
+  entryExpectedMovePct?: number;
+  entryFeeBreakEvenPct?: number;
+  entrySnapshotAt?: number;
+
+  // --- BOT_V2 Exit & Partial Telemetry ---
+  exitPolicyAction?: string;
+  exitPolicyReason?: string;
+  exitUrgency?: string;
+  exitConfidence?: string;
+  exitGrossReturnPct?: number;
+  exitMfePct?: number;
+  exitMaePct?: number;
+  exitFeeBreakEvenPct?: number;
+  softExitFeeGateAction?: string;
+  softExitFeeGateReason?: string;
+  exitSnapshotAt?: number;
+
   /** 분할 청산 단계 (0=없음, 1=1차 완료, 2=2차 완료·잔여만). 하위 호환: 미설정은 0. */
   partialExitStage?: number;
   /** V2 Profit Management Mode */
@@ -1614,6 +1646,40 @@ export type PaperClosedPositionRecord = Readonly<{
   isChildExecution?: boolean;
   entryAvgPx?: number;
   exitAvgPx?: number;
+
+  // --- BOT_V2 Entry Telemetry ---
+  entryQualityGrade?: string;
+  entryQualityScore?: number;
+  entryRegime?: string;
+  entryMarketSubtype?: string;
+  entryMarketMode?: string;
+  entryZone?: string;
+  entryBoxPos?: string;
+  entryTrendSideCandidate?: string;
+  entryRangeSideCandidate?: string;
+  entryHtfPolicy?: string;
+  entryPromotionReason?: string;
+  entryAuthorityReason?: string;
+  entryDecisionReason?: string;
+  entryExpectedMovePct?: number;
+  entryFeeBreakEvenPct?: number;
+  entrySnapshotAt?: number;
+
+  // --- BOT_V2 Exit & Partial Telemetry ---
+  exitPolicyAction?: string;
+  exitPolicyReason?: string;
+  exitUrgency?: string;
+  exitConfidence?: string;
+  exitGrossReturnPct?: number;
+  exitMfePct?: number;
+  exitMaePct?: number;
+  exitFeeBreakEvenPct?: number;
+  softExitFeeGateAction?: string;
+  softExitFeeGateReason?: string;
+  exitSnapshotAt?: number;
+  lastReduceReason?: string;
+  lastReduceUrgency?: string;
+
   maxPositionContracts?: number;
   partialReduceCount?: number;
   addonCount?: number;

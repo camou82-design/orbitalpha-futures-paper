@@ -6658,10 +6658,22 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             decision.signal = decision.side === "long" ? "LONG_CANDIDATE" : "SHORT_CANDIDATE";
         }
     }
+    if (!decision.metadata) {
+        decision.metadata = {};
+    }
+    
+    // V2 Telemetry Extension
+    decision.metadata.entry_quality_grade = entryQualityGrade;
+    decision.metadata.entry_quality_score = qualityScore;
+    decision.metadata.judgment_subtype = judgment.subtype ?? null;
+    decision.metadata.zone = zone;
+    decision.metadata.trend_side = trendSideCandidate;
+    decision.metadata.range_side = rangeSideCandidate;
+    decision.metadata.htf_policy = judgment.htf_entry_policy ?? null;
+    decision.metadata.promotion_reason = promotionReason;
+    decision.metadata.decision_reason = execution.reason;
+
     if (!isValidEnter) {
-        if (!decision.metadata) {
-            decision.metadata = {};
-        }
         decision.metadata.candidate_side = decision.side;
         decision.metadata.candidate_stageMarginKrw = decision.risk.stageMarginKrw;
         decision.metadata.candidate_exposureNotionalKrw = decision.risk.exposureNotionalKrw;

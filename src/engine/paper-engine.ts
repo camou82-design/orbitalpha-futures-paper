@@ -1,4 +1,4 @@
-﻿import * as path from "node:path";
+import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 
@@ -166,6 +166,7 @@ import {
 import {
   buildEntryAttachProtectiveCandidates,
   buildProtectiveClOrdIdCandidates,
+  classifyProtectiveAlgoOrderLookupTry,
   clearProtectiveClOrdIdSubmitBlocked,
   clearProtectiveClOrdIdBlocksForSymbolSide,
   inventoryRowsMatchingClOrdId,
@@ -295,7 +296,7 @@ import {
   buildPositionProtectionStateProof
 } from "../engine-v2/execution/protective-order-state";
 
-/** RANGE 1m edge reversal candle ?덇굅??寃뚯씠????V2 ?ㅽ뻾 遊됲닾媛 ENTER쨌臾댄븯?쒕툝濡앹씪 ??理쒖쥌 ?ㅽ뻾 寃쎈줈瑜?留됱? ?딅룄濡?遺꾨━?쒕떎. */
+/** RANGE 1m edge reversal candle ?덇굅??寃뚯씠????V2 ?ㅽ뻾 遊됲닾媛€ ENTER쨌臾댄븯?쒕툝濡앹앪 ??理쒖쥌 ?ㅽ뻾 寃쎈줈瑜?留됱? ?딅룄濡?遺꾨━?쒕떎. */
 const LEGACY_RANGE_EDGE_NO_REVERSAL_REJECTS = new Set<string>([
   "RANGE_LOWER_LONG_NO_REVERSAL_CONFIRMATION",
   "RANGE_UPPER_SHORT_NO_REVERSAL_CONFIRMATION"
@@ -486,12 +487,12 @@ const ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS = 120_000;
 
 /**
  * Partial ?댄썑 ?붿뿬 ?ъ???蹂댄샇 援ш컙(ms).
- * 遺遺꾩껌??TP_PARTIAL / PARTIAL_SPLIT) 吏곹썑 SIGNAL_LOST / REGIME_EXIT 怨쇰? 泥?궛 李⑤떒.
- * STRUCTURAL / TREND_BREAK / CRASH_FORCE ????援ш컙?먯꽌???덉쇅?곸쑝濡?泥?궛 ?덉슜.
+ * 遺€遺꾩껌??TP_PARTIAL / PARTIAL_SPLIT) 吏곹썑 SIGNAL_LOST / REGIME_EXIT 怨쇰? 泥?궛 李⑤떒.
+ * STRUCTURAL / TREND_BREAK / CRASH_FORCE ????援ш컙?먯꽌???덉쇅?곸쑝濡?泥?궛 ?덉윜.
  */
 const POST_PARTIAL_REGIME_PROTECT_MS = 3 * 60_000; // 3遺?
 /**
- * Crash guard ?먮룞 ?댁젣 ?좎삁 ?쒓컙(ms): CRASH_EXIT/LOCK 諛쒖깮 ?????쒓컙??吏?섍퀬
+ * Crash guard ?먮룞 ?댁젣 ?좎삁 ?쒓컙(ms): CRASH_EXIT/LOCK 諛쒖깮 ?????쒓컙??吏€?섍퀬
  * activeEngine ??RANGE 濡??꾪솚???덉쑝硫?濡?吏꾩엯 李⑤떒???댁젣?쒕떎.
  * 洹밸떒 ?щ옒??吏곹썑 臾닿린??block 諛⑹?.
  */
@@ -604,7 +605,7 @@ type SymbolSnapshot = Readonly<{
   emaGap: number | null;
   volumeRatioProxy: number;
   authoritySource?: "v1" | "v2";
-  /** RANGE/TREND ?먮떒??諛뺤뒪(理쒓렐 1m) */
+  /** RANGE/TREND 판단용 박스(최근 1m) */
   boxHigh: number | null;
   boxLow: number | null;
   boxPos: number | null;
@@ -8184,6 +8185,14 @@ export class PaperEngine {
       positionNotionalUsd: Math.max(0, Number(input.open.sizeUsd ?? 0)),
       feeRate: input.feeRate
     });
+
+    if (evaluation.gate) {
+      input.open.softExitFeeGateAction = String(evaluation.gate.gateAction);
+      input.open.softExitFeeGateReason = evaluation.mappedFeeGateReason ?? undefined;
+      input.open.exitGrossReturnPct = evaluation.gate.grossReturnPct;
+      input.open.exitFeeBreakEvenPct = evaluation.gate.feeBreakEvenPct;
+    }
+
     if (evaluation.proof != null) {
       this.logger.info("V2_SOFT_EXIT_FEE_GATE_PROOF", {
         symbol: input.symbol,
@@ -9142,19 +9151,21 @@ export class PaperEngine {
     for (const clOrdId of clOrdCandidates) {
       if (pendingClSet.has(clOrdId)) continue;
       const lookupTry = await this.okxDemo!.getAlgoOrder({ instId: input.instId, algoClOrdId: clOrdId });
-      if (!lookupTry.ok) {
+      const lookupState = classifyProtectiveAlgoOrderLookupTry(lookupTry);
+      if (lookupState === "ERROR") {
         this.logger.error("PROTECTIVE_ALGO_CLORDID_LOOKUP_FAILED_PROOF", {
           symbol: input.open.symbol,
           side: input.open.side,
           flowId: input.flowId,
           clOrdId,
-          error: lookupTry.error,
+          error: lookupTry.ok ? "lookup_unexpected_empty_error" : lookupTry.error,
           diag: lookupTry.diagnostics
         });
         return null;
       }
-      if (lookupTry.value.length === 0) continue;
-      lookupRows.push(lookupTry.value[0] as ProtectiveAlgoRow);
+      if (lookupState === "FOUND" && lookupTry.ok) {
+        lookupRows.push(lookupTry.value[0] as ProtectiveAlgoRow);
+      }
     }
 
     const inventory = mergeProtectiveInventoryRows(pendingRows, attachRows, lookupRows);
@@ -9181,6 +9192,7 @@ export class PaperEngine {
       engineOwnedSl: any;
       engineOwnedTp: any;
       wantsTp: boolean;
+      lookupAbsentConfirmed?: boolean;
     }>
   ): { engineOwnedSl: any; engineOwnedTp: any; adopted: boolean; staleCancelId?: string } {
     let engineOwnedSl = input.engineOwnedSl;
@@ -9219,6 +9231,16 @@ export class PaperEngine {
       });
       return { engineOwnedSl, engineOwnedTp, adopted: false };
     }
+    if (input.lookupAbsentConfirmed === true) {
+      clearProtectiveClOrdIdSubmitBlocked(input.symbol, input.side, input.clOrdId);
+      this.logger.info("PROTECTIVE_51068_LOOKUP_ABSENT_CLEAR_PROOF", {
+        symbol: input.symbol,
+        side: input.side,
+        flowId: input.flowId,
+        clOrdId: input.clOrdId
+      });
+      return { engineOwnedSl, engineOwnedTp, adopted: false };
+    }
     markProtectiveClOrdIdSubmitBlocked(input.symbol, input.side, input.clOrdId);
     this.logger.warn("PROTECTIVE_51068_LOOKUP_MISS_BLOCK_PROOF", {
       symbol: input.symbol,
@@ -9243,29 +9265,33 @@ export class PaperEngine {
   }>): Promise<{ engineOwnedSl: any; engineOwnedTp: any; adopted: boolean; staleCancelId?: string }> {
     let lookupRow =
       inventoryRowsMatchingClOrdId(input.inventory, input.clOrdId)[0] ?? null;
+    let lookupAbsentConfirmed = false;
     if (!lookupRow) {
       const lookupTry = await this.okxDemo!.getAlgoOrder({
         instId: input.instId,
         algoClOrdId: input.clOrdId
       });
-      if (!lookupTry.ok) {
+      const lookupState = classifyProtectiveAlgoOrderLookupTry(lookupTry);
+      if (lookupState === "ERROR") {
         this.logger.error("PROTECTIVE_51068_ALGO_CLORDID_LOOKUP_FAILED_PROOF", {
           symbol: input.symbol,
           side: input.side,
           flowId: input.flowId,
           clOrdId: input.clOrdId,
-          error: lookupTry.error,
+          error: lookupTry.ok ? "lookup_unexpected_empty_error" : lookupTry.error,
           diag: lookupTry.diagnostics
         });
         markProtectiveClOrdIdSubmitBlocked(input.symbol, input.side, input.clOrdId);
         return { engineOwnedSl: input.engineOwnedSl, engineOwnedTp: input.engineOwnedTp, adopted: false };
       }
-      if (lookupTry.value.length > 0) {
+      if (lookupState === "FOUND" && lookupTry.ok) {
         lookupRow = lookupTry.value[0] as ProtectiveAlgoRow;
+      } else if (lookupState === "ABSENT") {
+        lookupAbsentConfirmed = true;
       }
     }
     const resolution = resolve51068ProtectiveLookup(lookupRow, input.reconcileCtx, input.clOrdId);
-    return this.applyProtective51068Resolution(resolution, input);
+    return this.applyProtective51068Resolution(resolution, { ...input, lookupAbsentConfirmed });
   }
 
   private validateProtectiveOkxTriggerLayout(input: {
@@ -12674,6 +12700,12 @@ export class PaperEngine {
           v2_mapped_close_reason: mappedCloseReason,
           v2_exit_urgency: v2ExitAuthority.exitUrgency
         };
+        // V2 Exit Telemetry Extension
+        open.exitPolicyAction = v2ExitAuthority.exitAction;
+        open.exitPolicyReason = v2ExitAuthority.exitReason ?? undefined;
+        open.exitUrgency = v2ExitAuthority.exitUrgency;
+        open.exitConfidence = String(v2ExitAuthority.exitConfidence);
+        open.exitSnapshotAt = input.snapshots.find(s => s.symbol === sk)?.fetchedAt;
       } else if (v2PartialAuthority?.shouldPartial === true) {
         v2TakeoverAction = "partial_close";
         v2TakeoverReason = "v2_partial_authority";
@@ -12683,6 +12715,9 @@ export class PaperEngine {
           v2_partial_urgency: v2PartialAuthority.partialUrgency,
           v2_reduce_ratio: v2PartialAuthority.reduceRatio
         };
+        // V2 Partial Telemetry Extension
+        open.lastReduceReason = v2PartialAuthority.partialReason ?? undefined;
+        open.lastReduceUrgency = v2PartialAuthority.partialUrgency;
       }
 
       let paperExitProofHandled = false;
@@ -21925,7 +21960,25 @@ export class PaperEngine {
       sourceRunPath: "",
       status: "open",
       pos: fillSize || (filledNotional / fillPx),
-      isV2Authority: true
+      isV2Authority: true,
+      
+      // V2 Telemetry Extension
+      entryQualityGrade: v2Decision.metadata?.entry_quality_grade ?? (v2Decision.rawMetrics as any)?.entryQualityGrade ?? undefined,
+      entryQualityScore: v2Decision.metadata?.entry_quality_score ?? v2Decision.confidenceScore ?? undefined,
+      entryRegime: v2Decision.regime ?? undefined,
+      entryMarketSubtype: v2Decision.metadata?.judgment_subtype ?? undefined,
+      entryMarketMode: v2Decision.metadata?.market_mode ?? undefined,
+      entryZone: v2Decision.metadata?.zone ?? undefined,
+      entryBoxPos: v2Decision.metadata?.box_pos ?? undefined,
+      entryTrendSideCandidate: v2Decision.metadata?.trend_side ?? undefined,
+      entryRangeSideCandidate: v2Decision.metadata?.range_side ?? undefined,
+      entryHtfPolicy: v2Decision.metadata?.htf_policy ?? undefined,
+      entryPromotionReason: v2Decision.metadata?.promotion_reason ?? undefined,
+      entryAuthorityReason: v2Decision.explanation?.reason ?? undefined,
+      entryDecisionReason: v2Decision.metadata?.decision_reason ?? undefined,
+      entryExpectedMovePct: v2Decision.metadata?.expected_move_pct ?? undefined,
+      entryFeeBreakEvenPct: v2Decision.metadata?.fee_break_even_pct ?? undefined,
+      entrySnapshotAt: v2Decision.ts
     };
 
     // Condition 8: If protective stop order creation fails, mark protection pending and block new orders!

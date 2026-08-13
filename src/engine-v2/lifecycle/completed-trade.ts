@@ -326,7 +326,41 @@ export function enrichCompletedTradeRecord(input: Readonly<{
         isPositionCycleFinal: isFinal,
         finalCloseReason,
         closeReasonLabel: closeReasonLabel || input.closedRow.closeReasonLabel,
-        exitReason: closeReasonLabel || input.closedRow.exitReason
+        exitReason: closeReasonLabel || input.closedRow.exitReason,
+        
+        // Propagate BOT_V2 Telemetry
+        entryQualityGrade: input.open.entryQualityGrade,
+        entryQualityScore: input.open.entryQualityScore,
+        entryRegime: input.open.entryRegime,
+        entryMarketSubtype: input.open.entryMarketSubtype,
+        entryMarketMode: input.open.entryMarketMode,
+        entryZone: input.open.entryZone,
+        entryBoxPos: input.open.entryBoxPos,
+        entryTrendSideCandidate: input.open.entryTrendSideCandidate,
+        entryRangeSideCandidate: input.open.entryRangeSideCandidate,
+        entryHtfPolicy: input.open.entryHtfPolicy,
+        entryPromotionReason: input.open.entryPromotionReason,
+        entryAuthorityReason: input.open.entryAuthorityReason,
+        entryDecisionReason: input.open.entryDecisionReason,
+        entryExpectedMovePct: input.open.entryExpectedMovePct,
+        entryFeeBreakEvenPct: input.open.entryFeeBreakEvenPct,
+        entrySnapshotAt: input.open.entrySnapshotAt,
+
+        exitPolicyAction: input.open.exitPolicyAction,
+        exitPolicyReason: input.open.exitPolicyReason,
+        exitUrgency: input.open.exitUrgency,
+        exitConfidence: input.open.exitConfidence,
+        exitGrossReturnPct: input.open.exitGrossReturnPct,
+        exitFeeBreakEvenPct: input.open.exitFeeBreakEvenPct,
+        softExitFeeGateAction: input.open.softExitFeeGateAction,
+        softExitFeeGateReason: input.open.softExitFeeGateReason,
+        exitSnapshotAt: input.open.exitSnapshotAt,
+        lastReduceReason: input.open.lastReduceReason,
+        lastReduceUrgency: input.open.lastReduceUrgency,
+
+        // Normalize MFE/MAE
+        exitMfePct: Math.max(0, input.open.maxFavorableExcursionPct ?? 0),
+        exitMaePct: Math.max(0, input.open.maxAdverseExcursionPct ?? 0)
     };
 }
 

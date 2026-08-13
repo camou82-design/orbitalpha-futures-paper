@@ -5,6 +5,9 @@ import {
 } from "./protective-reconcile-plan";
 
 export const OKX_ALGO_CL_ORD_ID_EXISTS = "51068";
+export const OKX_ALGO_ORDER_DOES_NOT_EXIST = "51603";
+
+export type ProtectiveAlgoOrderLookupState = "FOUND" | "ABSENT" | "ERROR";
 
 const CL_ORD_ID_KEYS = [
     "algoClOrdId",
@@ -151,6 +154,64 @@ export function isOkxAlgoClOrdIdExistsError(input: Readonly<{
     if (String(input.sCode ?? "") === OKX_ALGO_CL_ORD_ID_EXISTS) return true;
     const msg = String(input.sMsg ?? "").toLowerCase();
     return msg.includes("already exists") && msg.includes("algoclordid");
+}
+
+export function isOkxAlgoOrderDoesNotExistError(input: Readonly<{
+    retCode?: string | null;
+    sCode?: string | null;
+}>): boolean {
+    const code = String(input.retCode ?? input.sCode ?? "");
+    return code === OKX_ALGO_ORDER_DOES_NOT_EXIST;
+}
+
+export function classifyProtectiveAlgoOrderLookupTry(lookupTry: Readonly<{
+    ok: boolean;
+    value?: readonly unknown[];
+    diagnostics?: Readonly<{ retCode?: string; retMsg?: string; okxData?: unknown }>;
+}>): ProtectiveAlgoOrderLookupState {
+    if (lookupTry.ok) {
+        return (lookupTry.value?.length ?? 0) > 0 ? "FOUND" : "ABSENT";
+    }
+    if (
+        isOkxAlgoOrderDoesNotExistError({
+            retCode: lookupTry.diagnostics?.retCode
+        })
+    ) {
+        return "ABSENT";
+    }
+    return "ERROR";
+}
+
+export function mergeProtectiveInventoryAfterClOrdIdLookups(input: Readonly<{
+    pendingRows: readonly ProtectiveAlgoRow[];
+    attachRows: readonly ProtectiveAlgoRow[];
+    clOrdCandidates: readonly string[];
+    lookupRowsByClOrdId: Readonly<Record<string, ProtectiveAlgoOrderLookupState | ProtectiveAlgoRow>>;
+}>): Readonly<{ inventory: ProtectiveAlgoRow[] | null; lookupAbsentCount: number }> {
+    const pendingClSet = new Set<string>();
+    for (const row of input.pendingRows) {
+        for (const cl of normalizeProtectiveOrderClOrdIds(row)) pendingClSet.add(cl);
+    }
+    const lookupRows: ProtectiveAlgoRow[] = [];
+    let lookupAbsentCount = 0;
+    for (const clOrdId of input.clOrdCandidates) {
+        if (pendingClSet.has(clOrdId)) continue;
+        const outcome = input.lookupRowsByClOrdId[clOrdId];
+        if (outcome === "ERROR") {
+            return { inventory: null, lookupAbsentCount };
+        }
+        if (outcome === "ABSENT") {
+            lookupAbsentCount += 1;
+            continue;
+        }
+        if (outcome && typeof outcome === "object") {
+            lookupRows.push(outcome);
+        }
+    }
+    return {
+        inventory: mergeProtectiveInventoryRows(input.pendingRows, input.attachRows, lookupRows),
+        lookupAbsentCount
+    };
 }
 
 export function isLiveOkxProtectiveAlgoState(stateRaw: unknown): boolean {
