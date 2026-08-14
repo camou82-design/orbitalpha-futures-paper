@@ -138,6 +138,19 @@ import {
   type PositionOwnershipResolveResult
 } from "../engine-v2/position/ownership-resolver";
 import {
+  buildV2PostFillOwnershipEvidence,
+  buildPositionSideKey,
+  findV2PostFillOwnershipEvidence,
+  hasAuthoritativeV2FillEvidenceOnPending,
+  isStrongV2PostFillRecoveryEvidence,
+  ledgerHasBotOwnershipForKey,
+  materializeV2ManagedOpenFromPostFillEvidence,
+  mergeOpenLedgerBySymbolSide,
+  pruneExpiredV2PostFillOwnershipRegistry,
+  shouldSuppressUntrackedGhostAdoption,
+  type V2PostFillOwnershipEvidence
+} from "../engine-v2/position/v2-post-fill-ownership";
+import {
   applyManualOwnershipLatchGuarded,
   clearManualOwnershipLatchFields,
   buildFalseManualLatchRecoveryProof,
@@ -399,6 +412,7 @@ export function isAuthoritativePositionsSnapshot(input: Readonly<{
 
 export type FilledPendingNoPositionAction =
   | "reconcile_open"
+  | "promote_fill_evidence_pending_position_visibility"
   | "clear_stale_filled_pending_no_actual_position"
   | "keep_pending_during_reconcile_grace";
 
@@ -408,11 +422,15 @@ export function resolveFilledPendingNoPositionAction(input: Readonly<{
   positionsSnapshotAuthoritative: boolean;
   pendingAgeMs: number;
   graceMs?: number;
+  hasAuthoritativeV2FillEvidence?: boolean;
 }>): FilledPendingNoPositionAction {
   if (String(input.orderState).toLowerCase() !== "filled") {
     return "keep_pending_during_reconcile_grace";
   }
   if (input.hasActualPosition) return "reconcile_open";
+  if (input.hasAuthoritativeV2FillEvidence === true) {
+    return "promote_fill_evidence_pending_position_visibility";
+  }
   const graceMs = input.graceMs ?? PENDING_FILLED_NO_POSITION_GRACE_MS;
   if (input.positionsSnapshotAuthoritative && input.pendingAgeMs >= graceMs) {
     return "clear_stale_filled_pending_no_actual_position";
@@ -1556,6 +1574,10 @@ export class PaperEngine {
     runCycleId: number;
     activePendingEntryOrders: import("../models/types").PendingEntryOrderRecord[];
   } | null = null;
+  private v2PostFillOwnershipByKey = new Map<
+    string,
+    import("../engine-v2/position/v2-post-fill-ownership").V2PostFillOwnershipEvidence
+  >();
 
   private okxAccountConfigOk = false;
   private okxBalanceOk = false;
@@ -3040,11 +3062,65 @@ export class PaperEngine {
     this.syncOpenLedgerFromRemoteAuthority(open, remote);
   }
 
+  private registerV2PostFillOwnership(
+    record: PaperOpenPositionRecord,
+    input: Readonly<{
+      source: V2PostFillOwnershipEvidence["source"];
+      ordId?: string | null;
+      clOrdId?: string | null;
+      openTraceId?: string | null;
+      pendingOrdId?: string | null;
+    }>
+  ): void {
+    const evidence = buildV2PostFillOwnershipEvidence({
+      record,
+      source: input.source,
+      ordId: input.ordId,
+      clOrdId: input.clOrdId,
+      openTraceId: input.openTraceId,
+      pendingOrdId: input.pendingOrdId
+    });
+    this.v2PostFillOwnershipByKey.set(evidence.key, evidence);
+  }
+
+  private async persistV2OpenLedgerImmediate(
+    record: PaperOpenPositionRecord,
+    input: Readonly<{ path: string; openTraceId?: string | null }>
+  ): Promise<boolean> {
+    try {
+      const existing = await this.positions.loadOpenAll();
+      const key = buildPositionSideKey(String(record.symbol), record.side);
+      const merged = mergeOpenLedgerBySymbolSide(existing, [record]);
+      await this.positions.saveOpenAll(merged);
+      this.bundleDirty = true;
+      this.logger.info("V2_POST_FILL_LEDGER_PERSIST_IMMEDIATE_PROOF", {
+        symbol: record.symbol,
+        side: record.side,
+        path: input.path,
+        open_trace_id: input.openTraceId ?? null,
+        lifecycle_state: record.lifecycleState,
+        reconcile_state: record.reconcileState ?? null
+      });
+      return true;
+    } catch (err) {
+      this.logger.error("V2_POST_FILL_LEDGER_PERSIST_IMMEDIATE_FAIL_PROOF", {
+        symbol: record.symbol,
+        side: record.side,
+        path: input.path,
+        open_trace_id: input.openTraceId ?? null,
+        error: String(err)
+      });
+      return false;
+    }
+  }
+
   private async runPositionStateReconciliation(nowTs: number): Promise<void> {
     if (this.reconcileLastCheckedAt != null && nowTs - this.reconcileLastCheckedAt < this.reconcileCheckIntervalMs) return;
     this.reconcileLastCheckedAt = nowTs;
     if (!this.okxDemo || !this.signedExecutionReady) return;
 
+    pruneExpiredV2PostFillOwnershipRegistry(this.v2PostFillOwnershipByKey, nowTs);
+    const pendingEntryOrdersForReconcile = await this.store.readPendingEntryOrders();
     const rawOpens = await this.positions.loadOpenAll();
     await this.updateInstrumentCache();
     const okxPosRes = await this.okxDemo.getPositions("SWAP");
@@ -3275,6 +3351,39 @@ export class PaperEngine {
       
       const key = `${open.symbol}:${open.side}`;
       const remotePos = remoteMap.get(key);
+
+      if (
+        open.lifecycleState === "OKX_UNTRACKED_FILL" ||
+        (open.reconcileState === "ADOPTED" && open.isV2Authority !== true)
+      ) {
+        const recoveryEvidence = findV2PostFillOwnershipEvidence({
+          key,
+          pendingOrders: pendingEntryOrdersForReconcile,
+          persistedOpens: rawOpens.filter((p) => `${p.symbol}:${p.side}` !== key),
+          recentFillRegistry: this.v2PostFillOwnershipByKey,
+          nowMs: nowTs,
+          requireStrongOrderEvidence: true
+        });
+        if (recoveryEvidence != null && isStrongV2PostFillRecoveryEvidence(recoveryEvidence)) {
+          open.lifecycleState = "BOT_V2_MANAGED";
+          open.reconcileState = remotePos ? "MATCHED" : "PENDING";
+          open.isV2Authority = true;
+          open.exchangeOrdId = recoveryEvidence.ordId ?? open.exchangeOrdId;
+          open.exchangeClOrdId = recoveryEvidence.clOrdId ?? open.exchangeClOrdId;
+          ledgerModified = true;
+          this.logger.info("V2_POST_FILL_OWNERSHIP_RECOVERY_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            previous_lifecycle: "OKX_UNTRACKED_FILL",
+            lifecycle_state: open.lifecycleState,
+            reconcile_state: open.reconcileState,
+            ownership_source: recoveryEvidence.source,
+            ord_id: recoveryEvidence.ordId,
+            cl_ord_id: recoveryEvidence.clOrdId,
+            action: "restore_bot_v2_managed_from_post_fill_evidence"
+          });
+        }
+      }
 
       // --- ADOPTED FAMILY POSITION METADATA SYNC (Notional Alignment) ---
       const isAdoptedFamily =
@@ -4197,6 +4306,54 @@ export class PaperEngine {
     // 4. Remote-Only Ghost Positions (Adopt/Repair Path)
     for (const [key, remoteVal] of remoteMap.entries()) {
       if (!rawOpens.some(p => `${p.symbol}:${p.side}` === key)) {
+        const ghostSuppress = shouldSuppressUntrackedGhostAdoption({
+          key,
+          pendingOrders: pendingEntryOrdersForReconcile,
+          persistedOpens: rawOpens,
+          recentFillRegistry: this.v2PostFillOwnershipByKey,
+          nowMs: nowTs
+        });
+        if (ghostSuppress.suppress && ghostSuppress.evidence != null) {
+          const materialized = materializeV2ManagedOpenFromPostFillEvidence(
+            ghostSuppress.evidence,
+            {
+              avgPx: remoteVal.avgPx,
+              contracts: remoteVal.contracts,
+              baseQty: remoteVal.baseQty,
+              notionalUsd: remoteVal.notionalUsd,
+              marginUsd: remoteVal.marginUsd,
+              leverage: remoteVal.leverage,
+              instId: remoteVal.instId
+            },
+            nowTs
+          );
+          if (materialized != null) {
+            const hydration = this.hydrateRiskPlan(materialized);
+            const adoptedRecord = hydration.modified ? hydration.record : materialized;
+            next.push(adoptedRecord);
+            ledgerModified = true;
+            this.registerV2PostFillOwnership(adoptedRecord, {
+              source: ghostSuppress.evidence.source,
+              ordId: ghostSuppress.evidence.ordId,
+              clOrdId: ghostSuppress.evidence.clOrdId,
+              openTraceId: ghostSuppress.evidence.openTraceId,
+              pendingOrdId: ghostSuppress.evidence.pendingOrdId
+            });
+            this.logger.info("V2_POST_FILL_OWNERSHIP_MATERIALIZED_PROOF", {
+              symbol: adoptedRecord.symbol,
+              side: adoptedRecord.side,
+              lifecycle_state: adoptedRecord.lifecycleState,
+              reconcile_state: adoptedRecord.reconcileState,
+              ownership_source: ghostSuppress.reason,
+              ord_id: ghostSuppress.evidence.ordId,
+              cl_ord_id: ghostSuppress.evidence.clOrdId,
+              open_trace_id: ghostSuppress.evidence.openTraceId,
+              action: "suppress_untracked_ghost_adoption"
+            });
+            continue;
+          }
+        }
+
         // We do NOT increment mismatchCount for Remote-Only Ghost positions anymore.
         // Instead, we adopt them as EXTERNAL_MANUAL_POSITION which only blocks that symbol.
         const [symbol, sideToken] = key.split(":");
@@ -16513,6 +16670,7 @@ export class PaperEngine {
 
     let pendingRegistryModified = false;
     const pendingEntryOrders = await this.store.readPendingEntryOrders();
+    const ledgerOpensForPending = await this.positions.loadOpenAll();
     const activePendingEntryOrders: import("../models/types").PendingEntryOrderRecord[] = [];
     const openedFromPending: PaperOpenPositionRecord[] = [];
     const shouldCancelPending = !input.executionSnapshot.tradeEnabled || input.executionSnapshot.closeOnly || input.executionSnapshot.killSwitch;
@@ -16683,6 +16841,22 @@ export class PaperEngine {
              continue;
            }
 
+           const pendingSideKey = buildPositionSideKey(String(pending.symbol), pending.side);
+           const existingBotOpen = ledgerHasBotOwnershipForKey(ledgerOpensForPending, pendingSideKey);
+           if (existingBotOpen != null) {
+             this.logger.info("PENDING_ENTRY_PROMOTE_IDEMPOTENT_SKIP_PROOF", {
+               symbol: pending.symbol,
+               side: pending.side,
+               ord_id: ordId,
+               cl_ord_id: pending.clOrdId ?? null,
+               opened_at: existingBotOpen.openedAt,
+               lifecycle_state: existingBotOpen.lifecycleState,
+               action: "ledger_bot_ownership_already_materialized"
+             });
+             pendingRegistryModified = true;
+             continue;
+           }
+
            let actualPos: Record<string, unknown> | null = null;
            if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
              actualPos = this.lastLivePositionsPayload.find(
@@ -16708,7 +16882,8 @@ export class PaperEngine {
              orderState,
              hasActualPosition: actualPos != null,
              positionsSnapshotAuthoritative,
-             pendingAgeMs
+             pendingAgeMs,
+             hasAuthoritativeV2FillEvidence: hasAuthoritativeV2FillEvidenceOnPending(pending)
            });
 
            if (!actualPos) {
@@ -16722,6 +16897,50 @@ export class PaperEngine {
                  grace_ms: PENDING_FILLED_NO_POSITION_GRACE_MS,
                  positions_snapshot_authoritative: positionsSnapshotAuthoritative,
                  action: "clear_stale_filled_pending_no_actual_position"
+               });
+               pendingRegistryModified = true;
+               continue;
+             }
+             if (filledNoPositionAction === "promote_fill_evidence_pending_position_visibility") {
+               const record = pending.paperRecordSnapshot as PaperOpenPositionRecord;
+               record.openedAt = Date.now();
+               record.lifecycleState = "BOT_V2_MANAGED";
+               record.reconcileState = "PENDING";
+               record.exchangeOrdId = pending.ordId;
+               record.exchangeClOrdId = pending.clOrdId;
+               if (!isCommittedEntryStopPrice(record.stopPrice) && isCommittedEntryStopPrice(pending.stopPrice)) {
+                 record.stopPrice = pending.stopPrice as number;
+               }
+               if (!isCommittedEntryStopPrice(record.stopPrice)) {
+                 this.logger.error("PAPER_POSITION_OPEN_BLOCKED_MISSING_STOP", {
+                   symbol: pending.symbol,
+                   side: pending.side,
+                   path: "pending_entry_filled_fill_evidence",
+                   pending_registry_stop: pending.stopPrice ?? null,
+                   snapshot_stop: record.stopPrice ?? null
+                 });
+                 activePendingEntryOrders.push(pending);
+                 continue;
+               }
+               this.registerV2PostFillOwnership(record, {
+                 source: "pending_fill",
+                 ordId: pending.ordId,
+                 clOrdId: pending.clOrdId,
+                 openTraceId: pending.openTraceId,
+                 pendingOrdId: pending.ordId
+               });
+               await this.persistV2OpenLedgerImmediate(record, {
+                 path: "positions/open.json",
+                 openTraceId: pending.openTraceId
+               });
+               openedFromPending.push(record);
+               this.logger.info("V2_POST_FILL_PENDING_PROMOTE_FILL_EVIDENCE_PROOF", {
+                 symbol: pending.symbol,
+                 side: pending.side,
+                 ord_id: ordId,
+                 cl_ord_id: pending.clOrdId ?? null,
+                 pending_age_ms: pendingAgeMs,
+                 action: "promote_fill_evidence_pending_position_visibility"
                });
                pendingRegistryModified = true;
                continue;
@@ -16748,7 +16967,8 @@ export class PaperEngine {
 
            const record = pending.paperRecordSnapshot;
            record.openedAt = Date.now();
-           record.lifecycleState = "OPEN";
+           record.lifecycleState = "BOT_V2_MANAGED";
+           record.reconcileState = "MATCHED";
            record.avgPx = actualAvgPx;
            record.entryPrice = actualAvgPx;
            record.pos = actualBase;
@@ -16786,6 +17006,17 @@ export class PaperEngine {
 
            this.logger.info("PENDING_ENTRY_FILLED_TO_LEDGER_OPEN_PROOF", { symbol: pending.symbol, side: pending.side, ord_id: ordId });
            
+           this.registerV2PostFillOwnership(record, {
+             source: "pending_fill",
+             ordId: pending.ordId,
+             clOrdId: pending.clOrdId,
+             openTraceId: pending.openTraceId,
+             pendingOrdId: pending.ordId
+           });
+           await this.persistV2OpenLedgerImmediate(record, {
+             path: "positions/open.json",
+             openTraceId: pending.openTraceId
+           });
            openedFromPending.push(record);
            
            const protectRes = await this.ensureProtectiveStopOrder(record, `v2_pending_filled_auto:${record.symbol}:${record.openedAt}`);
@@ -16827,7 +17058,7 @@ export class PaperEngine {
 
     if (openedFromPending.length > 0) {
       const existing = await this.positions.loadOpenAll();
-      const merged = [...existing, ...openedFromPending];
+      const merged = mergeOpenLedgerBySymbolSide(existing, openedFromPending);
       await this.positions.saveOpenAll(merged);
       this.bundleDirty = true;
       this.logger.info("PENDING_ENTRY_RECONCILE_OPEN_PERSIST_PROOF", {
@@ -19375,8 +19606,25 @@ export class PaperEngine {
             }
 
             try {
-              next.push(record);
-              
+              record.lifecycleState = "BOT_V2_MANAGED";
+              record.reconcileState = "PENDING";
+              const sideKey = buildPositionSideKey(String(record.symbol), record.side);
+              const existingIdx = next.findIndex(
+                (p) => buildPositionSideKey(String(p.symbol), p.side) === sideKey
+              );
+              if (existingIdx >= 0) next[existingIdx] = record;
+              else next.push(record);
+              this.registerV2PostFillOwnership(record, {
+                source: "immediate_fill",
+                ordId: submit.ordId ?? null,
+                clOrdId,
+                openTraceId
+              });
+              await this.persistV2OpenLedgerImmediate(record, {
+                path: "positions/open.json",
+                openTraceId
+              });
+
               // [V2_PROTECTIVE_STOP_AUTO_REGISTRATION]
               const protectRes = await this.ensureProtectiveStopOrder(record, `v2_fast_entry_auto:${record.symbol}:${record.openedAt}`);
               if (protectRes.modified) {
@@ -19477,16 +19725,15 @@ export class PaperEngine {
               note: !reconcileFound ? "actual_position_not_yet_visible_will_reconcile_next_cycle" : "reconciled"
             });
 
-            // Post-fill: block symbol until live reconcile sees actual position (when payload available).
+            // Post-fill: visibility delay alone must not block symbol or discard V2 ownership.
             if (!reconcileFound) {
-              this.logger.error("V2_POST_FILL_ACTUAL_POSITION_RECONCILE_FAIL_BLOCK_PROOF", {
+              this.logger.warn("V2_POST_FILL_ACTUAL_POSITION_RECONCILE_DEFER_PROOF", {
                 symbol: sym,
                 side: intentSide,
                 paper_size_usd: record.sizeUsd,
-                action: "symbol_level_new_entry_blocked_pending_actual_reconcile",
-                reason: "filled_but_actual_position_not_found_in_live_payload"
+                action: "ownership_persisted_pending_okx_position_visibility",
+                reason: "filled_but_actual_position_not_yet_visible_in_live_payload"
               });
-              this.symbolProtectionFailedBlocked.add(sym);
             }
 
             if (record.isProtectiveStopRegistered !== true) {
@@ -20618,10 +20865,12 @@ export class PaperEngine {
 
     if (openPositionsChanged || next.length !== before) {
       try {
-        await this.positions.saveOpenAll(next);
+        const freshDisk = await this.positions.loadOpenAll();
+        const merged = mergeOpenLedgerBySymbolSide(freshDisk, next);
+        await this.positions.saveOpenAll(merged);
         this.bundleDirty = true;
 
-        this.logger.info("paper_positions_persist_open_batch_ok", { added: next.length - before });
+        this.logger.info("paper_positions_persist_open_batch_ok", { added: merged.length - freshDisk.length });
       } catch (persistErr) {
         const pm = persistErr instanceof Error ? persistErr.message : String(persistErr);
         this.logger.error("paper_positions_persist_open_batch_failed", {

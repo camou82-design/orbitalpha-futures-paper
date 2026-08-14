@@ -132,6 +132,18 @@ export function isBotAttributedTransientMismatch(
         return true;
     }
 
+    if (ledger.reconcileState === "PENDING" && hasBotOrderAttribution(ledger)) {
+        const openedAt = ledger.openedAt;
+        if (
+            openedAt == null ||
+            !Number.isFinite(openedAt) ||
+            (nowMs - openedAt >= 0 &&
+                nowMs - openedAt <= BOT_ATTRIBUTED_TRANSIENT_MISMATCH_GRACE_MS)
+        ) {
+            return true;
+        }
+    }
+
     const shockState = ledger.shockReduceState;
     if (
         shockState === "REQUESTED" ||
