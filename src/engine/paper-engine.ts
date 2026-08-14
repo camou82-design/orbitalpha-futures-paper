@@ -21927,6 +21927,25 @@ export class PaperEngine {
     const fillSize = submitRes.fillSize ? Number(submitRes.fillSize) : 0;
     const filledNotional = isFilled ? (fillSize ? computeOkxFilledNotionalUsdt(fillSize, fillPx, instMeta.ctVal) : finalOrderNotionalUsdt) : (fillSize ? computeOkxFilledNotionalUsdt(fillSize, fillPx, instMeta.ctVal) : 0);
 
+    const v2Telemetry = {
+      entryQualityGrade: v2Decision.metadata?.entry_quality_grade ?? undefined,
+      entryQualityScore: v2Decision.metadata?.entry_quality_score ?? v2Decision.confidenceScore ?? undefined,
+      entryRegime: v2Decision.regime ?? undefined,
+      entryMarketSubtype: v2Decision.metadata?.judgment_subtype ?? undefined,
+      entryMarketMode: v2Decision.metadata?.market_mode ?? undefined,
+      entryZone: v2Decision.metadata?.zone ?? undefined,
+      entryBoxPos: v2Decision.metadata?.box_pos ?? undefined,
+      entryTrendSideCandidate: v2Decision.metadata?.trend_side ?? undefined,
+      entryRangeSideCandidate: v2Decision.metadata?.range_side ?? undefined,
+      entryHtfPolicy: v2Decision.metadata?.htf_policy ?? undefined,
+      entryPromotionReason: v2Decision.metadata?.promotion_reason ?? undefined,
+      entryAuthorityReason: v2Decision.explanation?.reason ?? undefined,
+      entryDecisionReason: v2Decision.metadata?.decision_reason ?? undefined,
+      entryExpectedMovePct: v2Decision.metadata?.expected_move_pct ?? undefined,
+      entryFeeBreakEvenPct: v2Decision.metadata?.fee_break_even_pct ?? undefined,
+      entrySnapshotAt: v2Decision.ts
+    };
+
     // Unfilled or 0 filled notional -> record pending order via upsert
     if (!isFilled && filledNotional <= 0) {
       await this.helperUpsertPendingOrder(pendingList, {
@@ -21938,7 +21957,26 @@ export class PaperEngine {
         desiredNotionalUsdt: finalOrderNotionalUsdt,
         filledNotionalUsdt: 0,
         status: "live",
-        submittedAt: Date.now()
+        submittedAt: Date.now(),
+        paperRecordSnapshot: {
+          symbol,
+          side: sideCandidate,
+          entryPrice: lastPrice,
+          sizeUsd: finalOrderNotionalUsdt,
+          initialSizeUsd: finalOrderNotionalUsdt,
+          leverage: appliedLeverage,
+          openedAt: Date.now(),
+          entryStage: 1,
+          stopPrice,
+          invalidationPx,
+          strategyVersion: "paper-v2",
+          sourceSignal: "V2",
+          sourceRunPath: "",
+          status: "open",
+          pos: finalOrderNotionalUsdt / Math.max(1e-12, lastPrice),
+          isV2Authority: true,
+          ...v2Telemetry
+        }
       });
       return { executed: false, submitResult: submitRes, pendingOnly: true };
     }
@@ -21961,24 +21999,7 @@ export class PaperEngine {
       status: "open",
       pos: fillSize || (filledNotional / fillPx),
       isV2Authority: true,
-      
-      // V2 Telemetry Extension
-      entryQualityGrade: v2Decision.metadata?.entry_quality_grade ?? (v2Decision.rawMetrics as any)?.entryQualityGrade ?? undefined,
-      entryQualityScore: v2Decision.metadata?.entry_quality_score ?? v2Decision.confidenceScore ?? undefined,
-      entryRegime: v2Decision.regime ?? undefined,
-      entryMarketSubtype: v2Decision.metadata?.judgment_subtype ?? undefined,
-      entryMarketMode: v2Decision.metadata?.market_mode ?? undefined,
-      entryZone: v2Decision.metadata?.zone ?? undefined,
-      entryBoxPos: v2Decision.metadata?.box_pos ?? undefined,
-      entryTrendSideCandidate: v2Decision.metadata?.trend_side ?? undefined,
-      entryRangeSideCandidate: v2Decision.metadata?.range_side ?? undefined,
-      entryHtfPolicy: v2Decision.metadata?.htf_policy ?? undefined,
-      entryPromotionReason: v2Decision.metadata?.promotion_reason ?? undefined,
-      entryAuthorityReason: v2Decision.explanation?.reason ?? undefined,
-      entryDecisionReason: v2Decision.metadata?.decision_reason ?? undefined,
-      entryExpectedMovePct: v2Decision.metadata?.expected_move_pct ?? undefined,
-      entryFeeBreakEvenPct: v2Decision.metadata?.fee_break_even_pct ?? undefined,
-      entrySnapshotAt: v2Decision.ts
+      ...v2Telemetry
     };
 
     // Condition 8: If protective stop order creation fails, mark protection pending and block new orders!

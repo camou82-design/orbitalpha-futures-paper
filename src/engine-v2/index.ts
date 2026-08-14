@@ -6672,6 +6672,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     decision.metadata.htf_policy = judgment.htf_entry_policy ?? null;
     decision.metadata.promotion_reason = promotionReason;
     decision.metadata.decision_reason = execution.reason;
+    decision.metadata.market_mode = marketMode;
+    decision.metadata.box_pos = typeof boxPos === "number" && Number.isFinite(boxPos) ? boxPos : undefined;
 
     if (!isValidEnter) {
         decision.metadata.candidate_side = decision.side;
