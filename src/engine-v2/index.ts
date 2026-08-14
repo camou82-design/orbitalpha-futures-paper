@@ -5130,6 +5130,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     min_order_block_reason = (v2State as any).addOnPolicyReason ?? "ADDON_POLICY_FORBIDDEN";
                 }
             }
+            
+            if (!Number.isFinite(existingSymbolNotionalUsdt) || !Number.isFinite(existingAccountNotionalUsdt)) {
+                min_order_check_passed = false;
+                min_order_block_reason = "EXPOSURE_CALCULATION_FAILED_NAN";
+            }
 
             if (min_order_check_passed && accountEquityUsdt != null && availableBalanceUsdt != null) {
                 const emergencyAbsoluteCapUsdt =
@@ -5238,6 +5243,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
                     const projectedSymbolNotionalUsdt = existingSymbolNotionalUsdt + finalOrderNotionalUsdt;
                     const projectedAccountNotionalUsdt = existingAccountNotionalUsdt + finalOrderNotionalUsdt;
+                    
+                    if (!Number.isFinite(projectedSymbolNotionalUsdt) || !Number.isFinite(projectedAccountNotionalUsdt)) {
+                        min_order_check_passed = false;
+                        min_order_block_reason = "EXPOSURE_CALCULATION_FAILED_NAN";
+                    }
+
                     const capPassed =
                         projectedSymbolNotionalUsdt <= sizingResult.symbolCapUsdt + 1e-6 &&
                         projectedAccountNotionalUsdt <= sizingResult.accountCapUsdt + 1e-6;

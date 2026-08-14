@@ -1,4 +1,5 @@
 import { EngineV2Input, ExecutorOutput, RiskSizingOutput, MarketJudgmentOutput, RegimeConfidenceOutput } from "../types";
+import { resolveOpenNotionalUsd, resolveOpenMarginUsd, resolveOpenNotionalAuthority } from "../live-account/position-size-authority";
 
 /**
  * Tier 5: Risk & Sizing Policy (Refined)
@@ -61,11 +62,27 @@ export function calculateRiskSizing(
     const isAddOn = sameSymbolPos != null;
     const addOnPolicyAllowed = state.addOnPolicyAllowed;
     const addOnPolicyReason = state.addOnPolicyReason;
-    const currentMarginUsed = state.currentPositions.reduce((acc, p) => acc + Math.max(0, p.sizeUsd), 0);
-    const currentNotional = state.currentPositions.reduce((acc, p) => acc + Math.max(0, p.sizeUsd), 0);
+    const currentMarginUsed = state.currentPositions.reduce((acc, p) => acc + resolveOpenMarginUsd(p as any), 0);
+    
+    let hasUnknownUnit = false;
+    const currentNotional = state.currentPositions.reduce((acc, p) => {
+        const auth = resolveOpenNotionalAuthority(p as any);
+        if (!auth.authoritative || auth.valueUsd == null) {
+            hasUnknownUnit = true;
+            return NaN;
+        }
+        return acc + auth.valueUsd;
+    }, 0);
     const currentSymbolNotional = state.currentPositions
         .filter((p) => p.symbol === input.symbol)
-        .reduce((acc, p) => acc + Math.max(0, p.sizeUsd), 0);
+        .reduce((acc, p) => {
+            const auth = resolveOpenNotionalAuthority(p as any);
+            if (!auth.authoritative || auth.valueUsd == null) {
+                hasUnknownUnit = true;
+                return NaN;
+            }
+            return acc + auth.valueUsd;
+        }, 0);
     const marketSnapshotReady =
         snapshot != null &&
         Number.isFinite(snapshot.lastPrice) &&
@@ -85,6 +102,7 @@ export function calculateRiskSizing(
     if (!marketSnapshotReady) paperReadinessBlockReasons.push("MARKET_SNAPSHOT_NOT_READY");
     if (!positionStateReady) paperReadinessBlockReasons.push("POSITION_STATE_NOT_READY");
     if (!v2InputReady) paperReadinessBlockReasons.push("V2_INPUT_NOT_READY");
+    if (hasUnknownUnit) paperReadinessBlockReasons.push("UNKNOWN_UNIT_SAFETY_BLOCK");
     const effectivePaperExecutionReady = paperReadinessBlockReasons.length === 0;
     const signedReadinessBlockReason = state.signedExecutionReady === false ? "SIGNED_EXECUTION_NOT_READY" : null;
 

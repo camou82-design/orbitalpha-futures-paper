@@ -1564,6 +1564,8 @@ export type PaperClosedPositionRecord = Readonly<{
   pnlUsdNet: number;
   feeRate: number;
   feeUsd: number;
+  feePctNotional?: number;
+  feePctOnMargin?: number;
   fundingModel: "avg_open_close_rate_v3";
   fundingIntervalHours: number;
   holdingMs: number;

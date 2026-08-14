@@ -227,7 +227,14 @@ function runCases(): void {
       balancePayload: null,
       balanceFetchError: null,
       okxPositionsPayload: null,
-      positions: [{ symbol: "BTCUSDT", side: "short", sizeUsd: open.sizeUsd, leverage: 10 }]
+      positions: [{ 
+        symbol: "BTCUSDT", 
+        side: "short", 
+        sizeUsd: open.sizeUsd, 
+        leverage: 10,
+        isV2Authority: open.isV2Authority,
+        authoritySourceAtEntry: open.authoritySourceAtEntry
+      }]
     });
     assertNear(notional, 102.7272, 1e-9, "ACCT-9 open notional");
     assertNear(bal.paper_position_estimated_notional_usdt, 102.7272, 1e-9, "ACCT-9 balance notional");

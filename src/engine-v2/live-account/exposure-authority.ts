@@ -1,7 +1,18 @@
+import { resolveOpenNotionalUsd, resolveOpenNotionalAuthority } from "./position-size-authority";
+
 export type LiveExposureAuthorityInput = Readonly<{
   symbol: string;
   okxPositions: ReadonlyArray<{ symbol: string; sizeUsd: number; side: string }>;
-  paperPositions: ReadonlyArray<{ symbol: string; sizeUsd?: number; side?: string }>;
+  paperPositions: ReadonlyArray<{ 
+    symbol: string; 
+    sizeUsd?: number; 
+    side?: string;
+    leverage?: number;
+    isV2Authority?: boolean;
+    authoritySourceAtEntry?: string;
+    authority?: string;
+    exchangeClOrdId?: string;
+  }>;
   pendingSymbolNotionalUsdt: number;
   pendingOrdersNotionalUsdt: number;
   isLiveAuthority: boolean;
@@ -31,15 +42,16 @@ export function sumOkxExposureNotional(
 }
 
 export function sumPaperExposureNotional(
-  positions: ReadonlyArray<{ symbol: string; sizeUsd?: number }>,
+  positions: LiveExposureAuthorityInput["paperPositions"],
   symbolFilter?: string
-): number {
+): number | null {
   let total = 0;
   for (const p of positions) {
     if (!p || typeof p.symbol !== "string") continue;
     if (symbolFilter != null && p.symbol !== symbolFilter) continue;
-    const n = typeof p.sizeUsd === "number" && Number.isFinite(p.sizeUsd) ? p.sizeUsd : 0;
-    total += Math.abs(n);
+    const auth = resolveOpenNotionalAuthority(p as any);
+    if (!auth.authoritative || auth.valueUsd == null) return null; // Fail closed: exposure unknown
+    total += Math.abs(auth.valueUsd);
   }
   return total;
 }
@@ -49,8 +61,8 @@ export function resolveLiveExposureAuthority(input: LiveExposureAuthorityInput):
     sumOkxExposureNotional(input.okxPositions, input.symbol) + Math.max(0, input.pendingSymbolNotionalUsdt);
   const okx_account_notional_usdt =
     sumOkxExposureNotional(input.okxPositions) + Math.max(0, input.pendingOrdersNotionalUsdt);
-  const paper_symbol_notional_usdt = sumPaperExposureNotional(input.paperPositions, input.symbol);
-  const paper_account_notional_usdt = sumPaperExposureNotional(input.paperPositions);
+  const paper_symbol_notional_usdt = sumPaperExposureNotional(input.paperPositions, input.symbol) ?? NaN; // Keep interface type but signal NaN if null
+  const paper_account_notional_usdt = sumPaperExposureNotional(input.paperPositions) ?? NaN;
 
   const useOkx = input.isLiveAuthority;
   return {

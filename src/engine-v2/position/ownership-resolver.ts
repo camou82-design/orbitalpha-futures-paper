@@ -68,8 +68,6 @@ function isBotV2LedgerEvidence(ledger: PaperOpenPositionRecord | null): boolean 
     if (ledger.isV2Authority === true) return true;
     const authSrc = String(ledger.authoritySourceAtEntry ?? ledger.authority ?? "").trim().toLowerCase();
     if (authSrc === "v2") return true;
-    const clOrdId = String(ledger.exchangeClOrdId ?? "");
-    if (clOrdId.startsWith("p")) return true;
     if (ledger.lifecycleState === "BOT_V2_MANAGED") return true;
     if (
         ledger.lifecycleState === "OPEN" ||

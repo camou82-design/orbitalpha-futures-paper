@@ -401,17 +401,21 @@ export function rangeLadderLegMultiplier(rangeLadderLevel: number, hedgeBalance:
   return Math.max(0.45, Math.min(1, ladderPart * hedgePart));
 }
 
+import { resolveOpenNotionalUsd, resolveOpenNotionalAuthority } from "../engine-v2/live-account/position-size-authority";
+
 /** ?숈씪 ?щ낵 ?ㅽ뵂 諛곗뿴?먯꽌 濡???留덉쭊 ?⑹궛. */
 export function marginsForSymbol(
   opens: readonly PaperOpenPositionRecord[],
   symbol: string
-): { longUsd: number; shortUsd: number } {
+): { longUsd: number; shortUsd: number; authoritative: boolean; blockReason?: string } {
   let longUsd = 0;
   let shortUsd = 0;
   for (const o of opens) {
     if (o.status !== "open" || String(o.symbol) !== symbol) continue;
-    if (o.side === "long") longUsd += finite(o.sizeUsd, 0);
-    else shortUsd += finite(o.sizeUsd, 0);
+    const auth = resolveOpenNotionalAuthority(o as any);
+    if (!auth.authoritative || auth.valueUsd == null) return { longUsd: NaN, shortUsd: NaN, authoritative: false, blockReason: "UNKNOWN_UNIT_SAFETY_BLOCK" }; // Fail closed
+    if (o.side === "long") longUsd += finite(auth.valueUsd, 0);
+    else shortUsd += finite(auth.valueUsd, 0);
   }
-  return { longUsd, shortUsd };
+  return { longUsd, shortUsd, authoritative: true };
 }

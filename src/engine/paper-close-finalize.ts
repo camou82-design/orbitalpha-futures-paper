@@ -8,6 +8,9 @@ import type {
 import {
   resolveCloseLegSizing,
   resolveOpenPositionSizeUnit,
+  resolveOpenNotionalUsd,
+  resolveOpenMarginUsd,
+  isV2NotionalSizeAuthority,
   type PaperPositionSizeUnit
 } from "../engine-v2/live-account/position-size-authority";
 
@@ -18,7 +21,7 @@ export {
   resolveOpenNotionalUsd,
   resolveOpenPositionSizeUnit,
   resolveCloseLegSizing
-} from "../engine-v2/live-account/position-size-authority";
+};
 
 export type PaperCloseReasonLike = PaperClosedPositionRecord["closeReason"] | string;
 
@@ -215,6 +218,8 @@ export type PaperCloseLegMetrics = Readonly<{
   fundingRateAverage: number;
   holdingMs: number;
   mark: number;
+  legNotionalUsd: number;
+  legMarginUsd: number;
 }>;
 
 export function computePaperCloseLegMetrics(input: Readonly<{
@@ -278,7 +283,9 @@ export function computePaperCloseLegMetrics(input: Readonly<{
     fundingRateAppliedClose: finiteUsd(fundingRateAppliedClose),
     fundingRateAverage: finiteUsd(fundingRateAverage),
     holdingMs: finiteUsd(holdingMs),
-    mark: finiteUsd(input.closePrice)
+    mark: finiteUsd(input.closePrice),
+    legNotionalUsd: finiteUsd(legNotionalUsd),
+    legMarginUsd: finiteUsd(legMarginUsd)
   };
 }
 
@@ -449,6 +456,8 @@ export function finalizePaperClosedRecord(input: FinalizeClosedInput): PaperClos
     pnlUsdNet: net,
     feeRate: finiteUsd(input.feeRate),
     feeUsd: finiteUsd(m.feeUsd),
+    feePctNotional: finiteUsd(m.feeUsd / m.legNotionalUsd),
+    feePctOnMargin: finiteUsd(m.feeUsd / m.legMarginUsd),
     fundingModel: "avg_open_close_rate_v3",
     fundingIntervalHours: finiteUsd(input.fundingIntervalHours),
     holdingMs: finiteUsd(m.holdingMs),

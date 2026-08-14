@@ -1,6 +1,7 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { resolveOpenNotionalUsd, resolveOpenPositionSizeUnit, resolveOpenNotionalAuthority } from "../engine-v2/live-account/position-size-authority";
 
 export function resolveV2ExitAuthorityBooleans(input: Readonly<{
   reason: string;
@@ -7801,7 +7802,10 @@ export class PaperEngine {
     if (open.baseQty != null) open.baseQty = Math.max(0, open.baseQty - deltaBaseQty);
     if (open.baseQty != null) open.pos = open.baseQty;
     if (open.notionalUsd != null) open.notionalUsd = Math.max(0, open.notionalUsd - deltaNotionalUsd);
-    open.sizeUsd = Math.max(0, open.sizeUsd - deltaMarginUsd);
+    
+    const unit = resolveOpenPositionSizeUnit(open);
+    const deltaForSizeUsd = (unit === "V2_NOTIONAL" || unit === "UNKNOWN") ? deltaNotionalUsd : deltaMarginUsd;
+    open.sizeUsd = Math.max(0, open.sizeUsd - deltaForSizeUsd);
 
     this.logger.info("V2_PARTIAL_LEDGER_UNIT_RECONCILE_PROOF", {
       symbol: open.symbol,
@@ -12368,7 +12372,7 @@ export class PaperEngine {
             flowId
           });
 
-          const partialSizeUsd = open.sizeUsd * ratio;
+          const partialSizeUsd = resolveOpenNotionalUsd(open) * ratio;
           const tp1InstId = open.instId ?? toOkxSwapInstId(open.symbol);
           const tp1Inst = this.instrumentCache.get(tp1InstId);
           let tp1DeltaContracts = 0;
@@ -14249,7 +14253,7 @@ export class PaperEngine {
         }
 
         const reduceRatio = v2PartialAuthority.reduceRatio ?? 0.5;
-        const partialSizeUsd = open.sizeUsd * reduceRatio;
+        const partialSizeUsd = resolveOpenNotionalUsd(open) * reduceRatio;
         
         // [PARTIAL_EXECUTION_PROOF] Task 5: Detailed partial execution log for V2 authority
         this.logger.info("PARTIAL_EXECUTION_PROOF", {
@@ -14258,7 +14262,7 @@ export class PaperEngine {
           side: open.side,
           partial_ratio: reduceRatio,
           partial_size_usd: partialSizeUsd,
-          remaining_size_usd: open.sizeUsd - partialSizeUsd,
+          remaining_size_usd: resolveOpenNotionalUsd(open) - partialSizeUsd,
           reason: v2PartialAuthority.partialReason,
           urgency: v2PartialAuthority.partialUrgency,
           authority_owner: "V2"
@@ -14302,7 +14306,7 @@ export class PaperEngine {
             symbol: open.symbol,
             side: open.side,
             reduce_ratio: reduceRatio,
-            full_size_usd: open.sizeUsd,
+            full_size_usd: resolveOpenNotionalUsd(open),
             partial_size_usd: partialSizeUsd,
             okxContracts,
             requestedContracts,
@@ -14657,7 +14661,7 @@ export class PaperEngine {
           symbol: open.symbol,
           side: open.side,
           reduce_ratio: reduceRatio,
-          full_size_usd: open.sizeUsd,
+          full_size_usd: resolveOpenNotionalUsd(open),
           partial_size_usd: partialSizeUsd,
           okxContracts,
           normalizedPartialContracts,
@@ -15109,8 +15113,8 @@ export class PaperEngine {
             ? rawRatio
             : defaultPartialExitRatioForStage(adaptiveMode, open.partialExitStage ?? 0);
         ratio = Math.min(1, Math.max(0.05, ratio));
-        const partialMargin = Math.round(open.sizeUsd * ratio * 100) / 100;
-        const newMargin = Math.round((open.sizeUsd - partialMargin) * 100) / 100;
+        const partialMargin = Math.round(resolveOpenNotionalUsd(open) * ratio * 100) / 100;
+        const newMargin = Math.round((resolveOpenNotionalUsd(open) - partialMargin) * 100) / 100;
         const nextStage = (open.partialExitStage ?? 0) + 1;
         const pReason = nextStage === 1 ? ("partial_exit_1" as const) : ("partial_exit_2" as const);
 
@@ -15261,14 +15265,14 @@ export class PaperEngine {
             symbol: open.symbol,
             partial_triggered: true,
             reduce_only: true,
-            current_position_size: open.sizeUsd,
+            current_position_size: resolveOpenNotionalUsd(open),
             requested_close_size: partialMargin,
             remaining_position_size: newMargin,
             ledger_update_required: true,
             flowId
           });
 
-          const ratioRemaining = open.sizeUsd > 0 ? (newMargin / open.sizeUsd) : 0;
+          const ratioRemaining = resolveOpenNotionalUsd(open) > 0 ? (newMargin / resolveOpenNotionalUsd(open)) : 0;
           open = {
             ...open,
             sizeUsd: newMargin,
@@ -18793,6 +18797,19 @@ export class PaperEngine {
         let v2EntrySizeUsd = v2OrderNotionalUsdt;
         const symS = String(first.symbol);
         const mPreV2 = marginsForSymbol(next, symS);
+        if (!mPreV2.authoritative) {
+          const skip_reason = mPreV2.blockReason ?? "UNKNOWN_UNIT_SAFETY_BLOCK";
+          this.logger.warn(skip_reason, { symbol: sym });
+          this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
+            symbol: sym,
+            run_cycle_id: executionSnapshot.runCycleId,
+            decision_id: (authority as any).decision_id ?? null,
+            order_path_allowed: false,
+            skip_reason,
+            ...buildAuthorityEventMeta(authority)
+          });
+          continue;
+        }
         if (riskE) {
           const cap = authority.side === "long" ? riskE.maxLongExposure : riskE.maxShortExposure;
           const currentUsd = authority.side === "long" ? mPreV2.longUsd : mPreV2.shortUsd;
@@ -19823,6 +19840,12 @@ export class PaperEngine {
 
         const symS = String(first.symbol);
         const mPre = marginsForSymbol(next, symS);
+        if (!mPre.authoritative) {
+          const skip_reason = mPre.blockReason ?? "UNKNOWN_UNIT_SAFETY_BLOCK";
+          this.logger.warn(skip_reason, { symbol: symS });
+          logPaperPositionOpenFailed();
+          return;
+        }
         if (
           riskE &&
           ((authority.side === "long" && mPre.longUsd + entrySizeUsd > riskE.maxLongExposure) ||
@@ -20975,7 +20998,12 @@ export class PaperEngine {
     }
 
     const opensList = await this.positions.loadOpenAll();
-    const { longUsd, shortUsd } = marginsForSymbol(opensList, symEx);
+    const mScaleIn = marginsForSymbol(opensList, symEx);
+    if (!mScaleIn.authoritative) {
+      this.logger.info("scale_in_blocked_unknown_unit", { symbol: existing.symbol });
+      return null;
+    }
+    const { longUsd, shortUsd } = mScaleIn;
     if (re) {
       if (existing.side === "long" && longUsd + incrementalSizeUsd > re.maxLongExposure) {
         this.logger.info("scale_in_blocked_max_long_exposure", { symbol: existing.symbol });
@@ -20986,10 +21014,19 @@ export class PaperEngine {
         return null;
       }
     }
-    const newTotalSizeUsd = existing.sizeUsd + incrementalSizeUsd;
+    const existingAuth = resolveOpenNotionalAuthority(existing as any);
+    if (!existingAuth.authoritative || existingAuth.valueUsd == null) {
+      this.logger.info("scale_in_blocked_unknown_unit", { symbol: existing.symbol });
+      return null; // Fail closed: Cannot safely scale in to UNKNOWN position
+    }
+    const existingNotionalUsd = existingAuth.valueUsd;
+    const newTotalSizeUsd = existingNotionalUsd + incrementalSizeUsd;
 
     // Weighted average price
-    const newEntryPrice = (existing.entryPrice * existing.sizeUsd + first.lastPrice * incrementalSizeUsd) / newTotalSizeUsd;
+    const newEntryPrice = (existing.entryPrice * existingNotionalUsd + first.lastPrice * incrementalSizeUsd) / newTotalSizeUsd;
+
+    // Upgrade the record to V2 Notional semantics permanently
+    existing.isV2Authority = true;
 
     // NOTE: ENTRY_OPENED is no longer recorded here. 
     // It is recorded in the main loop or as POSITION_SCALE_IN_SUCCESS.
