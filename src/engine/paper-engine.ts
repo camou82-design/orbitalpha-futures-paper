@@ -340,7 +340,8 @@ import {
 } from "../engine-v2/position/stale-ledger-execution-guard";
 import {
   evaluatePositionProtectionState,
-  buildPositionProtectionStateProof
+  buildPositionProtectionStateProof,
+  evaluateOpsWatchProtectiveScanVerdict
 } from "../engine-v2/execution/protective-order-state";
 
 /** RANGE 1m edge reversal candle ?덇굅??寃뚯씠????V2 ?ㅽ뻾 遊됲닾媛€ ENTER쨌臾댄븯?쒕툝濡앹앪 ??理쒖쥌 ?ㅽ뻾 寃쎈줈瑜?留됱? ?딅룄濡?遺꾨━?쒕떎. */
@@ -2188,7 +2189,38 @@ export class PaperEngine {
           continue;
         }
 
-        if (scanClean && r.matching_protective_pending_count === 0) {
+        const ledgerPos = paperOpens.find((p) => p.symbol === r.symbol && p.side === r.side);
+        const opsWatchGrace = evaluateOpsWatchProtectiveScanVerdict({
+          nowMs: nowTs,
+          ledger: ledgerPos ?? null,
+          reduceOnlyProtectiveFound: r.reduce_only_protective_found,
+          matchingProtectivePendingCount: r.matching_protective_pending_count,
+          scanClean,
+          tpRequired: r.tp_required_for_exchange_protection
+        });
+
+        if (opsWatchGrace.opsWatchVisibilityGraceApplied) {
+          this.logger.warn("OPS_WATCH_PROTECTIVE_VISIBILITY_GRACE_DEFER_PROOF", {
+            ts: nowTs,
+            symbol: r.symbol,
+            side: r.side,
+            inst_id: r.inst_id,
+            reconcile_state: r.reconcile_state,
+            entry_protection_until: ledgerPos?.entryProtectionUntil ?? null,
+            protective_visibility_grace_deadline_ms: ledgerPos?.protectiveVisibilityGraceDeadlineMs ?? null,
+            protective_sl_algo_id: ledgerPos?.protectiveSlAlgoId ?? ledgerPos?.protectiveStopAlgoId ?? null,
+            protective_tp_algo_id: ledgerPos?.protectiveTpAlgoId ?? null,
+            matching_protective_pending_count: r.matching_protective_pending_count,
+            reduce_only_protective_found: r.reduce_only_protective_found,
+            grace_reason: opsWatchGrace.reason,
+            detail: "Accepted protective algoId within 30s visibility grace — deferring ops-watch hard block"
+          });
+          if (this.symbolProtectionFailedBlocked.has(r.symbol)) {
+            this.symbolProtectionFailedBlocked.delete(r.symbol);
+          }
+        }
+
+        if (scanClean && r.matching_protective_pending_count === 0 && opsWatchGrace.shouldEmitPendingZeroFault) {
           this.logger.error("POSITION_PROTECTIVE_PENDING_ZERO_FAULT", {
             ts: nowTs,
             symbol: r.symbol,
@@ -2202,7 +2234,7 @@ export class PaperEngine {
           });
         }
 
-        if (!r.reduce_only_protective_found) {
+        if (!r.reduce_only_protective_found && opsWatchGrace.shouldEmitOrderFault) {
           this.symbolProtectionFailedBlocked.add(r.symbol);
 
           this.logger.error("POSITION_PROTECTIVE_ORDER_FAULT", {
@@ -2224,16 +2256,18 @@ export class PaperEngine {
             detail: "Policy requires reduce-only SL (+ TP when applicable) on OKX; exchange state does not satisfy full protection."
           });
 
-          this.logger.error("POSITION_UNPROTECTED_HARD_BLOCK_DETECTED", {
-            symbol: r.symbol,
-            side: r.side,
-            inst_id: r.inst_id,
-            reconcile_state: r.reconcile_state,
-            sync_status: r.sync_status,
-            action: "HARD_BLOCK_NEW_ENTRIES",
-            reason: "confirmed_unprotected_exposure_on_exchange"
-          });
-        } else if (this.symbolProtectionFailedBlocked.has(r.symbol)) {
+          if (opsWatchGrace.shouldEmitHardBlockDetected) {
+            this.logger.error("POSITION_UNPROTECTED_HARD_BLOCK_DETECTED", {
+              symbol: r.symbol,
+              side: r.side,
+              inst_id: r.inst_id,
+              reconcile_state: r.reconcile_state,
+              sync_status: r.sync_status,
+              action: "HARD_BLOCK_NEW_ENTRIES",
+              reason: "confirmed_unprotected_exposure_on_exchange"
+            });
+          }
+        } else if (r.reduce_only_protective_found && this.symbolProtectionFailedBlocked.has(r.symbol)) {
           this.symbolProtectionFailedBlocked.delete(r.symbol);
           this.logger.info("POSITION_PROTECTION_VERIFIED_UNBLOCK", {
             symbol: r.symbol,
@@ -2247,7 +2281,7 @@ export class PaperEngine {
         }
 
         // [TASK_4 & TASK_7] Open order purpose classification and stale entry auto-cancel
-        const ledgerPosForClassify = paperOpens.find((p) => p.symbol === r.symbol && p.side === r.side);
+        const ledgerPosForClassify = ledgerPos;
         const algoForSymbol = (this as any).cachedOpsAlgos?.filter((a: any) => a.instId === r.inst_id) ?? [];
         const swapForSymbol = (this as any).cachedOpsPending?.filter((a: any) => a.instId === r.inst_id) ?? [];
         const allOpenOrders = [...algoForSymbol, ...swapForSymbol];
@@ -2308,7 +2342,6 @@ export class PaperEngine {
           }
         }
 
-        const ledgerPos = paperOpens.find((p) => p.symbol === r.symbol && p.side === r.side);
         let ensureOutcome: { success: boolean; modified: boolean } | null = null;
         if (r.symbol === "BTCUSDT" && this.isBtcPositionManagementBlocked()) {
           await this.logAndSuppressBtcUsdtAction("ops_watch_protect_cycle", r.side, ["PROTECTIVE_ENSURE", "REDUCE", "PARTIAL"]);
@@ -2355,7 +2388,7 @@ export class PaperEngine {
           }
         }
 
-        if (!r.reduce_only_protective_found && ledgerPos) {
+        if (!r.reduce_only_protective_found && ledgerPos && opsWatchGrace.verdict !== "DEFER") {
           const instSizing = this.instrumentCache.get(r.inst_id) as { tickSz?: number } | undefined;
           const tickSz = instSizing?.tickSz != null ? Number(instSizing.tickSz) : 0;
           const protectionState = evaluatePositionProtectionState({
@@ -17198,31 +17231,29 @@ export class PaperEngine {
            openedFromPending.push(record);
            
            const protectRes = await this.ensureProtectiveStopOrder(record, `v2_pending_filled_auto:${record.symbol}:${record.openedAt}`);
-           if (protectRes.modified) {
-             // [BLOCKER-3-2] ALGO_ID DURABILITY: immediately persist protectRes.record so
-             // that protectiveStopAlgoId / protectiveSlAlgoId / protectiveTpAlgoId are durable
-             // BEFORE the next visibility evaluation cycle. Without this, a process restart
-             // between submit and the next reconcile scan loses the algoId.
+           if (protectRes.success) {
              record.isProtectiveStopRegistered = protectRes.record.isProtectiveStopRegistered;
              record.protectiveStopAlgoId = protectRes.record.protectiveStopAlgoId;
              record.protectiveSlAlgoId = protectRes.record.protectiveSlAlgoId;
              record.protectiveTpAlgoId = protectRes.record.protectiveTpAlgoId;
              record.isTakeProfitRegistered = protectRes.record.isTakeProfitRegistered;
              record.isProtectionFailed = protectRes.record.isProtectionFailed;
-             // Persist algoId to ledger immediately — before visibility check
-             await this.persistV2OpenLedgerImmediate(record, {
-               path: "positions/open.json",
-               openTraceId: pending.openTraceId
-             });
-             this.logger.info("V2_ALGO_ID_DURABLE_PERSIST_PROOF", {
-               symbol: record.symbol,
-               side: record.side,
-               protectiveStopAlgoId: record.protectiveStopAlgoId ?? null,
-               protectiveSlAlgoId: record.protectiveSlAlgoId ?? null,
-               protectiveTpAlgoId: record.protectiveTpAlgoId ?? null,
-               isProtectiveStopRegistered: record.isProtectiveStopRegistered,
-               path: "pending_filled_auto"
-             });
+             record.protectiveVisibilityGraceDeadlineMs = protectRes.record.protectiveVisibilityGraceDeadlineMs;
+             if (protectRes.modified) {
+               await this.persistV2OpenLedgerImmediate(record, {
+                 path: "positions/open.json",
+                 openTraceId: pending.openTraceId
+               });
+               this.logger.info("V2_ALGO_ID_DURABLE_PERSIST_PROOF", {
+                 symbol: record.symbol,
+                 side: record.side,
+                 protectiveStopAlgoId: record.protectiveStopAlgoId ?? null,
+                 protectiveSlAlgoId: record.protectiveSlAlgoId ?? null,
+                 protectiveTpAlgoId: record.protectiveTpAlgoId ?? null,
+                 isProtectiveStopRegistered: record.isProtectiveStopRegistered,
+                 path: "pending_filled_auto"
+               });
+             }
            }
            
            this.logger.info("paper_position_opened", {
@@ -19715,8 +19746,9 @@ export class PaperEngine {
               notional: filledNotionalUsd,
               regimeAtEntry: slReg,
               lifecycleState: isPending ? "PENDING_EXCHANGE_CONFIRM" : "OPEN",
-              isProtectiveStopRegistered: hasFill,
-              isProtectionFailed: !hasFill,
+              isProtectiveStopRegistered: false,
+              isTakeProfitRegistered: false,
+              isProtectionFailed: false,
               exchangeOrdId: submit.ordId ?? undefined,
               exchangeClOrdId: clOrdId,
               exchangeFilledSize: submit.fillSize ?? 0,
@@ -19827,28 +19859,29 @@ export class PaperEngine {
 
               // [V2_PROTECTIVE_STOP_AUTO_REGISTRATION]
               const protectRes = await this.ensureProtectiveStopOrder(record, `v2_fast_entry_auto:${record.symbol}:${record.openedAt}`);
-              if (protectRes.modified) {
-                // [BLOCKER-3-2] ALGO_ID DURABILITY: immediately persist protectRes.record
-                // so algoId survives process restart before the next visibility scan.
+              if (protectRes.success) {
                 record.isProtectiveStopRegistered = protectRes.record.isProtectiveStopRegistered;
                 record.protectiveStopAlgoId = protectRes.record.protectiveStopAlgoId;
                 record.protectiveSlAlgoId = protectRes.record.protectiveSlAlgoId;
                 record.protectiveTpAlgoId = protectRes.record.protectiveTpAlgoId;
                 record.isTakeProfitRegistered = protectRes.record.isTakeProfitRegistered;
                 record.isProtectionFailed = protectRes.record.isProtectionFailed;
-                await this.persistV2OpenLedgerImmediate(record, {
-                  path: "positions/open.json",
-                  openTraceId
-                });
-                this.logger.info("V2_ALGO_ID_DURABLE_PERSIST_PROOF", {
-                  symbol: record.symbol,
-                  side: record.side,
-                  protectiveStopAlgoId: record.protectiveStopAlgoId ?? null,
-                  protectiveSlAlgoId: record.protectiveSlAlgoId ?? null,
-                  protectiveTpAlgoId: record.protectiveTpAlgoId ?? null,
-                  isProtectiveStopRegistered: record.isProtectiveStopRegistered,
-                  path: "fast_entry_auto"
-                });
+                record.protectiveVisibilityGraceDeadlineMs = protectRes.record.protectiveVisibilityGraceDeadlineMs;
+                if (protectRes.modified) {
+                  await this.persistV2OpenLedgerImmediate(record, {
+                    path: "positions/open.json",
+                    openTraceId
+                  });
+                  this.logger.info("V2_ALGO_ID_DURABLE_PERSIST_PROOF", {
+                    symbol: record.symbol,
+                    side: record.side,
+                    protectiveStopAlgoId: record.protectiveStopAlgoId ?? null,
+                    protectiveSlAlgoId: record.protectiveSlAlgoId ?? null,
+                    protectiveTpAlgoId: record.protectiveTpAlgoId ?? null,
+                    isProtectiveStopRegistered: record.isProtectiveStopRegistered,
+                    path: "fast_entry_auto"
+                  });
+                }
               }
               
               openPositionsChanged = true;
