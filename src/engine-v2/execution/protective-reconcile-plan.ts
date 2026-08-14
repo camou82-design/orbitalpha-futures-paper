@@ -55,7 +55,12 @@ function isEngineOwnedAlgo(algoClOrdId: string, openedAt36: string): boolean {
 }
 
 function isAttachAlgoClOrdId(algoClOrdId: string): boolean {
-    return algoClOrdId.startsWith("sl_") || algoClOrdId.startsWith("tp_");
+    // New canonical form: "sl"/"tp" + alphanumeric body (no underscore)
+    // Legacy form: "sl_"/"tp_" + entry clOrdId (kept for backward compat)
+    return (
+        algoClOrdId.startsWith("sl") ||
+        algoClOrdId.startsWith("tp")
+    ) && !algoClOrdId.startsWith("oap"); // must not collide with engine-owned prefix
 }
 
 function routingMatch(algo: ProtectiveAlgoRow, ctx: ProtectiveReconcileContext): boolean {

@@ -7,6 +7,34 @@ import {
 export const OKX_ALGO_CL_ORD_ID_EXISTS = "51068";
 export const OKX_ALGO_ORDER_DOES_NOT_EXIST = "51603";
 
+/**
+ * OKX algo clOrdId format contract:
+ *   - alphanumeric only (A-Z, a-z, 0-9)
+ *   - max 32 characters
+ *   - NO underscores, hyphens, colons or other special chars
+ *   - "sl" prefix for SL legs, "tp" prefix for TP legs
+ *
+ * This is the SINGLE canonical producer of protective algo clOrdIds.
+ * All producers MUST route through this function.
+ */
+export function buildOkxAlgoClOrdId(kind: "sl" | "tp", entryClOrdId: string): string {
+    // Strip every non-alphanumeric character from the entry clOrdId to guarantee
+    // the output satisfies /^[A-Za-z0-9]{1,32}$/.
+    const sanitized = String(entryClOrdId).replace(/[^A-Za-z0-9]/g, "");
+    // "sl" / "tp" = 2 chars, leaving 30 for the sanitized entry id
+    const body = sanitized.slice(0, 30);
+    const result = `${kind}${body}`;
+    return result;
+}
+
+/**
+ * Returns true iff the given string satisfies the OKX clOrdId invariant:
+ * alphanumeric only, length 1–32.
+ */
+export function isValidOkxAlgoClOrdId(id: string): boolean {
+    return /^[A-Za-z0-9]{1,32}$/.test(id);
+}
+
 export type ProtectiveAlgoOrderLookupState = "FOUND" | "ABSENT" | "ERROR";
 
 const CL_ORD_ID_KEYS = [
@@ -105,6 +133,11 @@ export function buildProtectiveClOrdIdCandidates(input: Readonly<{
     }
     const entryCl = String(input.entryClOrdId ?? "").trim();
     if (entryCl) {
+        // Use buildOkxAlgoClOrdId to guarantee alphanumeric-only output.
+        // Also add legacy sl_/tp_ variants as fallback for orders already on exchange.
+        ids.add(buildOkxAlgoClOrdId("sl", entryCl));
+        ids.add(buildOkxAlgoClOrdId("tp", entryCl));
+        // Legacy fallback: orders submitted before this fix used sl_/tp_ prefix
         ids.add(`sl_${entryCl}`);
         ids.add(`tp_${entryCl}`);
     }
@@ -124,7 +157,12 @@ export function buildEntryAttachProtectiveCandidates(input: Readonly<{
 }>): ProtectiveAlgoRow[] {
     const entryCl = String(input.entryClOrdId ?? "").trim();
     if (!entryCl) return [];
-    const attachId = `sl_${entryCl}`;
+    // New canonical attach ID: alphanumeric only via buildOkxAlgoClOrdId
+    const attachId = buildOkxAlgoClOrdId("sl", entryCl);
+    // Legacy attach ID (sl_ prefix): orders already on exchange may use this form.
+    // Stored in clOrdId (which is in CL_ORD_ID_KEYS) so normalizeProtectiveOrderClOrdIds
+    // includes it, enabling inventory merge dedup against legacy pending orders.
+    const legacyAttachId = `sl_${entryCl}`;
     const ordType = input.wantsTp ? "oco" : "conditional";
     return [
         {
@@ -142,6 +180,9 @@ export function buildEntryAttachProtectiveCandidates(input: Readonly<{
             algoClOrdId: attachId,
             attachAlgoClOrdId: attachId,
             attachAlgoOrdId: attachId,
+            // clOrdId carries the legacy form so CL_ORD_ID_KEYS dedup still works
+            // for orders already on exchange that were submitted with sl_ prefix.
+            clOrdId: legacyAttachId,
             _protectiveInventorySource: "entry_attach_candidate"
         }
     ];

@@ -210,6 +210,7 @@ import {
 } from "../engine-v2/execution/protective-reconcile-plan";
 import {
   buildEntryAttachProtectiveCandidates,
+  buildOkxAlgoClOrdId,
   buildProtectiveClOrdIdCandidates,
   classifyProtectiveAlgoOrderLookupTry,
   clearProtectiveClOrdIdSubmitBlocked,
@@ -217,6 +218,7 @@ import {
   inventoryRowsMatchingClOrdId,
   isOkxAlgoClOrdIdExistsError,
   isProtectiveClOrdIdSubmitBlocked,
+  isValidOkxAlgoClOrdId,
   markProtectiveClOrdIdSubmitBlocked,
   mergeProtectiveInventoryRows,
   normalizeProtectiveOrderClOrdIds,
@@ -9330,6 +9332,20 @@ export class PaperEngine {
     const lookupRows: ProtectiveAlgoRow[] = [];
     for (const clOrdId of clOrdCandidates) {
       if (pendingClSet.has(clOrdId)) continue;
+      // [BLOCKER-3-2] LEGACY ID REMOTE LOOKUP BLOCK:
+      // Only send alphanumeric-only ids to OKX. Legacy sl_/tp_ forms (with underscore)
+      // are valid LOCAL candidates for dedup, but MUST NOT be sent to OKX API
+      // because OKX rejects non-alphanumeric algoClOrdId values.
+      if (!isValidOkxAlgoClOrdId(clOrdId)) {
+        this.logger.info("PROTECTIVE_ALGO_CLORDID_LOOKUP_SKIP_INVALID_PROOF", {
+          symbol: input.open.symbol,
+          side: input.open.side,
+          flowId: input.flowId,
+          clOrdId,
+          reason: "non_alphanumeric_clordid_blocked_from_okx_remote_lookup"
+        });
+        continue;
+      }
       const lookupTry = await this.okxDemo!.getAlgoOrder({ instId: input.instId, algoClOrdId: clOrdId });
       const lookupState = classifyProtectiveAlgoOrderLookupTry(lookupTry);
       if (lookupState === "ERROR") {
@@ -9983,6 +9999,11 @@ export class PaperEngine {
       return resolved.adopted;
     };
 
+    // [BLOCKER-3-2] Track algoIds from successful submits — OKX confirms the order even
+    // before it propagates to the pending scan (short visibility window).
+    let submittedSlAlgoId: string | null = null;
+    let submittedTpAlgoId: string | null = null;
+
     if (submitOco) {
       if (isProtectiveClOrdIdSubmitBlocked(open.symbol, open.side, slAlgoClOrdId)) {
         await handle51068(slAlgoClOrdId);
@@ -9999,6 +10020,9 @@ export class PaperEngine {
           modified = true;
           clearProtectiveClOrdIdSubmitBlocked(open.symbol, open.side, slAlgoClOrdId);
           this.logger.info("PROTECTIVE_OCO_SUBMIT_RESULT", { symbol: open.symbol, success: true, algoId: ocoRes.value[0].algoId, flowId });
+          // [BLOCKER-3-2] Capture accepted algoId before rescan
+          const ocoAlgoId = String(ocoRes.value[0]?.algoId ?? "").trim();
+          if (ocoAlgoId) { submittedSlAlgoId = ocoAlgoId; submittedTpAlgoId = ocoAlgoId; }
         } else {
           const codes = this.extractOkxOrderAlgoRowCodes(ocoRes.diagnostics);
           if (isOkxAlgoClOrdIdExistsError(codes)) {
@@ -10033,6 +10057,9 @@ export class PaperEngine {
           modified = true;
           clearProtectiveClOrdIdSubmitBlocked(open.symbol, open.side, slAlgoClOrdId);
           this.logger.info("PROTECTIVE_STOP_SUBMIT_RESULT", { symbol: open.symbol, success: true, algoId: slRes.value[0].algoId, flowId });
+          // [BLOCKER-3-2] Capture accepted algoId before rescan
+          const slAcceptedId = String(slRes.value[0]?.algoId ?? "").trim();
+          if (slAcceptedId) submittedSlAlgoId = slAcceptedId;
         } else {
           const codes = this.extractOkxOrderAlgoRowCodes(slRes.diagnostics);
           if (isOkxAlgoClOrdIdExistsError(codes)) {
@@ -10059,6 +10086,9 @@ export class PaperEngine {
           modified = true;
           clearProtectiveClOrdIdSubmitBlocked(open.symbol, open.side, tpAlgoClOrdId);
           this.logger.info("TAKE_PROFIT_SUBMIT_RESULT", { symbol: open.symbol, success: true, algoId: tpRes.value[0].algoId, flowId });
+          // [BLOCKER-3-2] Capture accepted algoId before rescan
+          const tpAcceptedId = String(tpRes.value[0]?.algoId ?? "").trim();
+          if (tpAcceptedId) submittedTpAlgoId = tpAcceptedId;
         } else {
           const codes = this.extractOkxOrderAlgoRowCodes(tpRes.diagnostics);
           if (isOkxAlgoClOrdIdExistsError(codes)) {
@@ -10068,6 +10098,48 @@ export class PaperEngine {
           }
         }
       }
+    }
+
+    // [BLOCKER-3-2] Explicit time-bounded visibility grace — shared by pre-visibility persist + evaluation.
+    const PROTECTIVE_GRACE_DURATION_MS = 30_000;
+
+    // [BLOCKER-3-2] Durable algoId + grace deadline MUST land on open.json BEFORE pending rescan
+    // and visibility evaluation so a process restart cannot lose submit-accepted identity.
+    if (submittedSlAlgoId || submittedTpAlgoId) {
+      const preVisibilityNowMs = Date.now();
+      const preVisibilityGraceDeadlineMs = preVisibilityNowMs + PROTECTIVE_GRACE_DURATION_MS;
+      const preVisibilityPersistRecord: PaperOpenPositionRecord = {
+        ...open,
+        ...(submittedSlAlgoId
+          ? {
+              protectiveStopAlgoId: submittedSlAlgoId,
+              protectiveSlAlgoId: submittedSlAlgoId,
+              isProtectiveStopRegistered: true
+            }
+          : {}),
+        ...(submittedTpAlgoId && wantsTp
+          ? {
+              protectiveTpAlgoId: submittedTpAlgoId,
+              isTakeProfitRegistered: true
+            }
+          : {}),
+        protectiveVisibilityGraceDeadlineMs: preVisibilityGraceDeadlineMs
+      };
+      await this.persistV2OpenLedgerImmediate(preVisibilityPersistRecord, {
+        path: "positions/open.json",
+        openTraceId: flowId
+      });
+      open = preVisibilityPersistRecord;
+      modified = true;
+      this.logger.info("PROTECTIVE_ALGO_ID_DURABLE_PRE_VISIBILITY_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        submittedSlAlgoId,
+        submittedTpAlgoId,
+        protectiveVisibilityGraceDeadlineMs: preVisibilityGraceDeadlineMs,
+        detail: "Canonical algoId persisted to open.json BEFORE pending rescan and visibility evaluation"
+      });
     }
 
     if (submittedProtective) {
@@ -10080,18 +10152,115 @@ export class PaperEngine {
         reconcilePlan = planProtectiveOrderReconcile(postInventory, reconcileCtx);
         engineOwnedSl = reconcilePlan.canonicalSl ?? engineOwnedSl;
         engineOwnedTp = reconcilePlan.canonicalTp ?? engineOwnedTp;
-        this.logger.info("PROTECTIVE_POST_SUBMIT_AUTHORITATIVE_RESCAN_PROOF", {
-          symbol: open.symbol,
-          side: open.side,
-          flowId,
-          sl_algo_id: engineOwnedSl?.algoId ?? null,
-          tp_algo_id: engineOwnedTp?.algoId ?? null,
-          contractsAuthority: contractsToProtect
-        });
+        // Note: visibility grace (DEFER vs HARD_BLOCK) is evaluated in section 6 below,
+        // using the explicit time-bounded grace deadline.
       }
     }
 
     // 6. Final State Evaluation — ground truth from OKX pending scan (post-submit rescan when applicable)
+    // [BLOCKER-3-2] VISIBILITY GRACE TIME-BOUNDED:
+    //   Grace starts at submit-accepted time.
+    //   Grace ends at PROTECTIVE_GRACE_DURATION_MS after submit.
+    //   If now < deadline and order not visible → DEFER (not HARD_BLOCK).
+    //   If now >= deadline and order still not visible → HARD_BLOCK.
+    //   Grace state is persisted to ledger (protectiveVisibilityGraceDeadlineMs) so restart-safe.
+    const nowMs = Date.now();
+
+    // Determine grace deadline: set from new submit OR carry forward from ledger (restart-safe)
+    let graceDeadlineMs: number | undefined = undefined;
+    if (submittedSlAlgoId || submittedTpAlgoId) {
+      // Fresh submit this cycle — deadline already durably persisted pre-visibility
+      graceDeadlineMs =
+        open.protectiveVisibilityGraceDeadlineMs ?? nowMs + PROTECTIVE_GRACE_DURATION_MS;
+    } else if (open.protectiveVisibilityGraceDeadlineMs != null && open.protectiveVisibilityGraceDeadlineMs > nowMs) {
+      // No submit this cycle but ledger has an active grace from a previous submit → carry forward
+      graceDeadlineMs = open.protectiveVisibilityGraceDeadlineMs;
+    }
+
+    const insideGrace = graceDeadlineMs != null && nowMs < graceDeadlineMs;
+
+    // Apply time-bounded visibility grace only if inside the deadline window
+    if (!engineOwnedSl && submittedSlAlgoId) {
+      if (insideGrace) {
+        this.logger.warn("PROTECTIVE_SUBMIT_ACCEPTED_VISIBILITY_PENDING_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          submittedSlAlgoId,
+          graceDeadlineMs,
+          graceRemainingMs: (graceDeadlineMs ?? 0) - nowMs,
+          detail: "SL/OCO algoId accepted — visibility pending within grace window — DEFER (not HARD_BLOCK)"
+        });
+        engineOwnedSl = { algoId: submittedSlAlgoId, _provisionalVisibilityPending: true } as any;
+      } else {
+        this.logger.error("PROTECTIVE_SUBMIT_ACCEPTED_GRACE_EXPIRED_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          submittedSlAlgoId,
+          detail: "Grace expired and SL still not visible → HARD_BLOCK"
+        });
+        // engineOwnedSl remains null → protectionSuccess = false → HARD_BLOCK
+      }
+    } else if (!engineOwnedSl && !submittedSlAlgoId && insideGrace && open.protectiveSlAlgoId) {
+      // Restart case: no new submit but ledger has an algoId and grace is still active
+      this.logger.warn("PROTECTIVE_RESTART_WITHIN_GRACE_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        ledgerAlgoId: open.protectiveSlAlgoId,
+        graceDeadlineMs,
+        graceRemainingMs: (graceDeadlineMs ?? 0) - nowMs,
+        detail: "Restarted within grace window — treating ledger algoId as provisional DEFER"
+      });
+      engineOwnedSl = { algoId: open.protectiveSlAlgoId, _provisionalVisibilityPending: true } as any;
+    }
+
+    if (!engineOwnedTp && submittedTpAlgoId && wantsTp) {
+      if (insideGrace) {
+        this.logger.warn("PROTECTIVE_SUBMIT_ACCEPTED_VISIBILITY_PENDING_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          submittedTpAlgoId,
+          graceDeadlineMs,
+          graceRemainingMs: (graceDeadlineMs ?? 0) - nowMs,
+          detail: "TP algoId accepted — visibility pending within grace window — DEFER (not HARD_BLOCK)"
+        });
+        engineOwnedTp = { algoId: submittedTpAlgoId, _provisionalVisibilityPending: true } as any;
+      } else {
+        this.logger.error("PROTECTIVE_SUBMIT_ACCEPTED_GRACE_EXPIRED_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          submittedTpAlgoId,
+          detail: "Grace expired and TP still not visible → HARD_BLOCK"
+        });
+      }
+    } else if (!engineOwnedTp && !submittedTpAlgoId && insideGrace && open.protectiveTpAlgoId && wantsTp) {
+      this.logger.warn("PROTECTIVE_RESTART_WITHIN_GRACE_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        ledgerAlgoId: open.protectiveTpAlgoId,
+        detail: "TP restart within grace — provisional DEFER"
+      });
+      engineOwnedTp = { algoId: open.protectiveTpAlgoId, _provisionalVisibilityPending: true } as any;
+    }
+
+    this.logger.info("PROTECTIVE_POST_SUBMIT_AUTHORITATIVE_RESCAN_PROOF", {
+      symbol: open.symbol,
+      side: open.side,
+      flowId,
+      sl_algo_id: engineOwnedSl?.algoId ?? null,
+      tp_algo_id: engineOwnedTp?.algoId ?? null,
+      sl_provisional: !!(engineOwnedSl as any)?._provisionalVisibilityPending,
+      tp_provisional: !!(engineOwnedTp as any)?._provisionalVisibilityPending,
+      insideGrace,
+      graceDeadlineMs: graceDeadlineMs ?? null,
+      contractsAuthority: contractsToProtect
+    });
+
     const slRegistered = !!engineOwnedSl;
     const tpRegistered = !wantsTp || !!engineOwnedTp;
     const protectionSuccess = slRegistered && tpRegistered;
@@ -10144,6 +10313,13 @@ export class PaperEngine {
       open.addonRebuildMetrics = undefined;
     }
 
+    // Determine whether to preserve grace deadline in ledger:
+    // Clear it once order is confirmed visible (no longer provisional), keep it while inside grace.
+    const slIsProvisional = !!(engineOwnedSl as any)?._provisionalVisibilityPending;
+    const tpIsProvisional = !!(engineOwnedTp as any)?._provisionalVisibilityPending;
+    const anyProvisional = slIsProvisional || tpIsProvisional;
+    const persistedGraceDeadlineMs = (insideGrace && anyProvisional) ? graceDeadlineMs : undefined;
+
     const updatedRecord: PaperOpenPositionRecord = {
       ...open,
       stopPrice: activeStopPrice,
@@ -10159,7 +10335,9 @@ export class PaperEngine {
         : open.protectiveTpAlgoId,
       isProtectiveStopRegistered: slRegistered,
       isTakeProfitRegistered: tpRegistered,
-      isProtectionFailed: !protectionSuccess
+      isProtectionFailed: !protectionSuccess,
+      // [BLOCKER-3-2] Persist grace deadline for restart-safety; cleared when order confirmed visible
+      protectiveVisibilityGraceDeadlineMs: persistedGraceDeadlineMs
     };
 
     if (existingAlgoAdoption.ledgerRepairNeeded) {
@@ -11074,7 +11252,7 @@ export class PaperEngine {
 
       if (slTriggerPx) {
         attachAlgoOrds.push({
-          attachAlgoOrdId: `sl_${input.clOrdId}`,
+          attachAlgoOrdId: buildOkxAlgoClOrdId("sl", input.clOrdId),
           ordType,
           sz: submitSzStr,
           slTriggerPx,
@@ -17021,8 +17199,30 @@ export class PaperEngine {
            
            const protectRes = await this.ensureProtectiveStopOrder(record, `v2_pending_filled_auto:${record.symbol}:${record.openedAt}`);
            if (protectRes.modified) {
+             // [BLOCKER-3-2] ALGO_ID DURABILITY: immediately persist protectRes.record so
+             // that protectiveStopAlgoId / protectiveSlAlgoId / protectiveTpAlgoId are durable
+             // BEFORE the next visibility evaluation cycle. Without this, a process restart
+             // between submit and the next reconcile scan loses the algoId.
              record.isProtectiveStopRegistered = protectRes.record.isProtectiveStopRegistered;
              record.protectiveStopAlgoId = protectRes.record.protectiveStopAlgoId;
+             record.protectiveSlAlgoId = protectRes.record.protectiveSlAlgoId;
+             record.protectiveTpAlgoId = protectRes.record.protectiveTpAlgoId;
+             record.isTakeProfitRegistered = protectRes.record.isTakeProfitRegistered;
+             record.isProtectionFailed = protectRes.record.isProtectionFailed;
+             // Persist algoId to ledger immediately — before visibility check
+             await this.persistV2OpenLedgerImmediate(record, {
+               path: "positions/open.json",
+               openTraceId: pending.openTraceId
+             });
+             this.logger.info("V2_ALGO_ID_DURABLE_PERSIST_PROOF", {
+               symbol: record.symbol,
+               side: record.side,
+               protectiveStopAlgoId: record.protectiveStopAlgoId ?? null,
+               protectiveSlAlgoId: record.protectiveSlAlgoId ?? null,
+               protectiveTpAlgoId: record.protectiveTpAlgoId ?? null,
+               isProtectiveStopRegistered: record.isProtectiveStopRegistered,
+               path: "pending_filled_auto"
+             });
            }
            
            this.logger.info("paper_position_opened", {
@@ -19628,8 +19828,27 @@ export class PaperEngine {
               // [V2_PROTECTIVE_STOP_AUTO_REGISTRATION]
               const protectRes = await this.ensureProtectiveStopOrder(record, `v2_fast_entry_auto:${record.symbol}:${record.openedAt}`);
               if (protectRes.modified) {
+                // [BLOCKER-3-2] ALGO_ID DURABILITY: immediately persist protectRes.record
+                // so algoId survives process restart before the next visibility scan.
                 record.isProtectiveStopRegistered = protectRes.record.isProtectiveStopRegistered;
                 record.protectiveStopAlgoId = protectRes.record.protectiveStopAlgoId;
+                record.protectiveSlAlgoId = protectRes.record.protectiveSlAlgoId;
+                record.protectiveTpAlgoId = protectRes.record.protectiveTpAlgoId;
+                record.isTakeProfitRegistered = protectRes.record.isTakeProfitRegistered;
+                record.isProtectionFailed = protectRes.record.isProtectionFailed;
+                await this.persistV2OpenLedgerImmediate(record, {
+                  path: "positions/open.json",
+                  openTraceId
+                });
+                this.logger.info("V2_ALGO_ID_DURABLE_PERSIST_PROOF", {
+                  symbol: record.symbol,
+                  side: record.side,
+                  protectiveStopAlgoId: record.protectiveStopAlgoId ?? null,
+                  protectiveSlAlgoId: record.protectiveSlAlgoId ?? null,
+                  protectiveTpAlgoId: record.protectiveTpAlgoId ?? null,
+                  isProtectiveStopRegistered: record.isProtectiveStopRegistered,
+                  path: "fast_entry_auto"
+                });
               }
               
               openPositionsChanged = true;

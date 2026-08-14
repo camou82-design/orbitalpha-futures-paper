@@ -1048,6 +1048,14 @@ export type PaperOpenPositionRecord = {
   isTakeProfitRegistered?: boolean;
   /** Whether OKX protective order registration failed and requires repair. */
   isProtectionFailed?: boolean;
+  /**
+   * [BLOCKER-3-2] Timestamp (ms) until which a visibility miss after a successful submit
+   * is treated as DEFER rather than HARD_BLOCK.
+   * Set immediately after submit succeeds (algoId confirmed by OKX).
+   * Cleared once the order is confirmed visible in a pending scan.
+   * If now >= deadline and order still not visible → HARD_BLOCK.
+   */
+  protectiveVisibilityGraceDeadlineMs?: number;
   /** Whether the position was opened by V2 authority. Used for unit scaling logic. */
   isV2Authority?: boolean;
   addonCount?: number;
