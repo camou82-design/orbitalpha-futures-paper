@@ -2,6 +2,37 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 
+export function resolveV2ExitAuthorityBooleans(input: Readonly<{
+  reason: string;
+  closeSource?: string;
+  isPartial?: boolean;
+  v2ShouldExit?: boolean;
+  v2ShouldReduce?: boolean;
+  v2ShouldPartial?: boolean;
+}>): Readonly<{
+  v2ShouldExit: boolean;
+  v2ShouldReduce: boolean;
+  v2ShouldPartial: boolean;
+}> {
+  const reason = input.reason;
+  const v2ShouldExit = input.v2ShouldExit !== undefined
+    ? input.v2ShouldExit
+    : (reason.includes("v2_exit") || input.closeSource === "V2_AUTHORITY" || reason === "executor_v2_exit_authority");
+  
+  const legacyShouldPartial = input.isPartial === true && (reason.includes("v2_partial") || reason.includes("partial_close") || reason.includes("partial"));
+  const v2ShouldPartial = input.v2ShouldPartial !== undefined
+    ? input.v2ShouldPartial
+    : legacyShouldPartial;
+
+  const legacyShouldReduce = legacyShouldPartial || (input.isPartial === true && reason.includes("reduce"));
+  const v2ShouldReduce = input.v2ShouldReduce !== undefined
+    ? input.v2ShouldReduce
+    : legacyShouldReduce;
+
+  return { v2ShouldExit, v2ShouldReduce, v2ShouldPartial };
+}
+
+
 import { classifyRangeZone } from "../models/types";
 import type {
   EngineConfig,
@@ -8135,20 +8166,8 @@ export class PaperEngine {
     actualStopBreached: boolean;
     isLiquidationEmergency: boolean;
   }> {
+    const { v2ShouldExit, v2ShouldReduce, v2ShouldPartial } = resolveV2ExitAuthorityBooleans(input);
     const reason = input.reason;
-    const v2ShouldExit =
-      input.v2ShouldExit === true ||
-      reason.includes("v2_exit") ||
-      input.closeSource === "V2_AUTHORITY" ||
-      reason === "executor_v2_exit_authority";
-    const v2ShouldPartial =
-      input.v2ShouldPartial === true ||
-      (input.isPartial === true &&
-        (reason.includes("v2_partial") || reason.includes("partial_close") || reason.includes("partial")));
-    const v2ShouldReduce =
-      input.v2ShouldReduce === true ||
-      v2ShouldPartial ||
-      (input.isPartial === true && reason.includes("reduce"));
     const isLiquidationEmergency =
       input.isLiquidationEmergency === true ||
       reason.includes("liquidation") ||
@@ -14672,7 +14691,12 @@ export class PaperEngine {
           executionOwner: "paper_engine",
           isV2Authority: true,
           isPartial: true,
-          open
+          open,
+          exitGateContext: {
+            v2ShouldExit: false,
+            v2ShouldReduce: v2PartialAuthority.shouldReduce === true,
+            v2ShouldPartial: v2PartialAuthority.shouldPartial === true
+          }
         });
 
         this.logger.info("PARTIAL_EXECUTION_PROOF", {

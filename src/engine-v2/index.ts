@@ -5512,6 +5512,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         partialExecutionOwner: "paper_engine",
         partialAction: partialActionMap[exitPolicy.action] ?? "none",
         shouldPartial: exitPolicy.shouldPartial === true || exitPolicy.shouldReduce === true,
+        shouldReduce: exitPolicy.shouldReduce === true,
         partialReason: exitPolicy.hasPosition ? exitPolicy.reason : null,
         partialUrgency:
             (exitPolicy.shouldPartial === true || exitPolicy.shouldReduce === true)

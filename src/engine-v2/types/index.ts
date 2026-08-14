@@ -943,6 +943,7 @@ export interface V2PartialAuthorityResult {
     partialExecutionOwner: "paper_engine" | "v2_executor" | "legacy" | "unknown";
     partialAction: "none" | "watch" | "protect_profit" | "reduce_candidate";
     shouldPartial: boolean;
+    shouldReduce: boolean;
     partialReason: string | null;
     partialUrgency: "none" | "low" | "medium" | "high";
     partialConfidence: number;
