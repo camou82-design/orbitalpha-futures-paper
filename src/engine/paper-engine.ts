@@ -341,7 +341,8 @@ import {
 import {
   evaluatePositionProtectionState,
   buildPositionProtectionStateProof,
-  evaluateOpsWatchProtectiveScanVerdict
+  evaluateOpsWatchProtectiveScanVerdict,
+  reevaluateOpsWatchProtectiveScanVerdictAfterEnsure
 } from "../engine-v2/execution/protective-order-state";
 
 /** RANGE 1m edge reversal candle ?덇굅??寃뚯씠????V2 ?ㅽ뻾 遊됲닾媛€ ENTER쨌臾댄븯?쒕툝濡앹앪 ??理쒖쥌 ?ㅽ뻾 寃쎈줈瑜?留됱? ?딅룄濡?遺꾨━?쒕떎. */
@@ -2190,7 +2191,7 @@ export class PaperEngine {
         }
 
         const ledgerPos = paperOpens.find((p) => p.symbol === r.symbol && p.side === r.side);
-        const opsWatchGrace = evaluateOpsWatchProtectiveScanVerdict({
+        let opsWatchGrace = evaluateOpsWatchProtectiveScanVerdict({
           nowMs: nowTs,
           ledger: ledgerPos ?? null,
           reduceOnlyProtectiveFound: r.reduce_only_protective_found,
@@ -2198,6 +2199,103 @@ export class PaperEngine {
           scanClean,
           tpRequired: r.tp_required_for_exchange_protection
         });
+
+        let ensureOutcome: { success: boolean; modified: boolean } | null = null;
+        const ensureEligible =
+          ledgerPos != null &&
+          liveExposure &&
+          ledgerPos.lifecycleState !== "FAILED" &&
+          ledgerPos.lifecycleState !== "EXTERNAL_MANUAL_MANAGED" &&
+          ledgerPos.manualOwnershipLatch !== true &&
+          ledgerPos.reconcileState !== "RECONCILE_MISMATCH";
+
+        const runOpsWatchEnsure = async (): Promise<{
+          success: boolean;
+          modified: boolean;
+          record: PaperOpenPositionRecord;
+        } | null> => {
+          if (r.symbol === "BTCUSDT" && this.isBtcPositionManagementBlocked()) {
+            await this.logAndSuppressBtcUsdtAction("ops_watch_protect_cycle", r.side, ["PROTECTIVE_ENSURE", "REDUCE", "PARTIAL"]);
+            return null;
+          }
+          if (!ensureEligible || !ledgerPos) return null;
+          const pricingLast =
+            r.okx_avg_px != null && r.okx_avg_px > 0
+              ? r.okx_avg_px
+              : ledgerPos.entryPrice > 0
+                ? ledgerPos.entryPrice
+                : undefined;
+          const flowId = `ops_watch_protect_cycle:${r.symbol}:${r.side}:${nowTs}`;
+          const res = await this.ensureProtectiveStopOrder(ledgerPos, flowId, pricingLast);
+          if (res.modified) {
+            const idx = paperOpens.findIndex((p) => p.symbol === r.symbol && p.side === r.side);
+            if (idx >= 0) {
+              const nextArray = [...paperOpens];
+              nextArray[idx] = res.record;
+              await this.positions.saveOpenAll(nextArray);
+              this.bundleDirty = true;
+            }
+          }
+          return { success: res.success, modified: res.modified, record: res.record };
+        };
+
+        // [BLOCKER-3-2.2] Fresh V2-owned exposure: ensure BEFORE pre-submit fault emission.
+        if (opsWatchGrace.verdict === "ENSURE_REQUIRED" && ensureEligible) {
+          this.logger.info("OPS_WATCH_PRE_SUBMIT_ENSURE_REQUIRED_PROOF", {
+            ts: nowTs,
+            symbol: r.symbol,
+            side: r.side,
+            inst_id: r.inst_id,
+            reconcile_state: ledgerPos?.reconcileState ?? null,
+            lifecycle_state: ledgerPos?.lifecycleState ?? null,
+            matching_protective_pending_count: r.matching_protective_pending_count,
+            reduce_only_protective_found: r.reduce_only_protective_found,
+            detail: "Zero inventory with no accepted submit evidence — running ensureProtectiveStopOrder before ops-watch fault verdict"
+          });
+          const ensureRes = await runOpsWatchEnsure();
+          if (ensureRes) {
+            ensureOutcome = { success: ensureRes.success, modified: ensureRes.modified };
+            const updatedLedger = ensureRes.record;
+            opsWatchGrace = reevaluateOpsWatchProtectiveScanVerdictAfterEnsure({
+              nowMs: nowTs,
+              ledger: updatedLedger,
+              reduceOnlyProtectiveFound: r.reduce_only_protective_found,
+              matchingProtectivePendingCount: r.matching_protective_pending_count,
+              scanClean,
+              tpRequired: r.tp_required_for_exchange_protection,
+              ensureAttempted: true,
+              ensureSuccess: ensureRes.success
+            });
+            this.logger.info("OPS_WATCH_PRE_SUBMIT_ENSURE_RESULT_PROOF", {
+              ts: nowTs,
+              symbol: r.symbol,
+              side: r.side,
+              ensure_success: ensureRes.success,
+              post_ensure_verdict: opsWatchGrace.verdict,
+              post_ensure_reason: opsWatchGrace.reason,
+              protective_sl_algo_id: updatedLedger.protectiveSlAlgoId ?? updatedLedger.protectiveStopAlgoId ?? null,
+              protective_tp_algo_id: updatedLedger.protectiveTpAlgoId ?? null,
+              protective_visibility_grace_deadline_ms: updatedLedger.protectiveVisibilityGraceDeadlineMs ?? null
+            });
+            if (!ensureRes.success) {
+              this.symbolProtectionFailedBlocked.add(r.symbol);
+              this.logger.error("PROTECTIVE_ORDER_SUBMIT_FAILED", {
+                symbol: r.symbol,
+                side: r.side,
+                flowId: `ops_watch_protect_cycle:${r.symbol}:${r.side}:${nowTs}`,
+                reconcile_state: ledgerPos?.reconcileState,
+                detail: "ensureProtectiveStopOrder failed during pre-submit ops-watch ensure (see PROTECTIVE_STOP_SUBMIT_RESULT / TAKE_PROFIT_SUBMIT_RESULT)."
+              });
+              this.logger.error("POSITION_UNPROTECTED_HARD_BLOCK", {
+                symbol: r.symbol,
+                side: r.side,
+                scope: "ops_watch_post_ensure",
+                action: "HARD_BLOCK_NEW_ENTRIES",
+                reason: "protective_order_submit_failed_or_incomplete"
+              });
+            }
+          }
+        }
 
         if (opsWatchGrace.opsWatchVisibilityGraceApplied) {
           this.logger.warn("OPS_WATCH_PROTECTIVE_VISIBILITY_GRACE_DEFER_PROOF", {
@@ -2342,50 +2440,33 @@ export class PaperEngine {
           }
         }
 
-        let ensureOutcome: { success: boolean; modified: boolean } | null = null;
-        if (r.symbol === "BTCUSDT" && this.isBtcPositionManagementBlocked()) {
-          await this.logAndSuppressBtcUsdtAction("ops_watch_protect_cycle", r.side, ["PROTECTIVE_ENSURE", "REDUCE", "PARTIAL"]);
-        } else if (
-          ledgerPos &&
-          liveExposure &&
-          ledgerPos.lifecycleState !== "FAILED" &&
-          ledgerPos.lifecycleState !== "EXTERNAL_MANUAL_MANAGED" &&
-          ledgerPos.manualOwnershipLatch !== true &&
-          ledgerPos.reconcileState !== "RECONCILE_MISMATCH"
-        ) {
-          const pricingLast =
-            r.okx_avg_px != null && r.okx_avg_px > 0 ? r.okx_avg_px : ledgerPos.entryPrice > 0 ? ledgerPos.entryPrice : undefined;
-          const flowId = `ops_watch_protect_cycle:${r.symbol}:${r.side}:${nowTs}`;
-          const res = await this.ensureProtectiveStopOrder(ledgerPos, flowId, pricingLast);
-          ensureOutcome = { success: res.success, modified: res.modified };
-          if (res.modified) {
-            const idx = paperOpens.findIndex((p) => p.symbol === r.symbol && p.side === r.side);
-            if (idx >= 0) {
-              const nextArray = [...paperOpens];
-              nextArray[idx] = res.record;
-              await this.positions.saveOpenAll(nextArray);
-              this.bundleDirty = true;
+        let ensureOutcomeLate = ensureOutcome;
+        if (ensureEligible && ensureOutcomeLate == null) {
+          const ensureRes = await runOpsWatchEnsure();
+          if (ensureRes) {
+            ensureOutcomeLate = { success: ensureRes.success, modified: ensureRes.modified };
+            if (ensureRes.success && ensureRes.record.isProtectiveStopRegistered) {
+              this.symbolProtectionFailedBlocked.delete(r.symbol);
+            } else if (!ensureRes.success) {
+              this.symbolProtectionFailedBlocked.add(r.symbol);
+              this.logger.error("PROTECTIVE_ORDER_SUBMIT_FAILED", {
+                symbol: r.symbol,
+                side: r.side,
+                flowId: `ops_watch_protect_cycle:${r.symbol}:${r.side}:${nowTs}`,
+                reconcile_state: ledgerPos?.reconcileState,
+                detail: "ensureProtectiveStopOrder reported failure during ops-watch protection cycle (see PROTECTIVE_STOP_SUBMIT_RESULT / TAKE_PROFIT_SUBMIT_RESULT)."
+              });
+              this.logger.error("POSITION_UNPROTECTED_HARD_BLOCK", {
+                symbol: r.symbol,
+                side: r.side,
+                scope: "ops_watch_post_ensure",
+                action: "HARD_BLOCK_NEW_ENTRIES",
+                reason: "protective_order_submit_failed_or_incomplete"
+              });
             }
           }
-          if (res.success && res.record.isProtectiveStopRegistered) {
-            this.symbolProtectionFailedBlocked.delete(r.symbol);
-          } else if (!res.success) {
-            this.symbolProtectionFailedBlocked.add(r.symbol);
-            this.logger.error("PROTECTIVE_ORDER_SUBMIT_FAILED", {
-              symbol: r.symbol,
-              side: r.side,
-              flowId,
-              reconcile_state: ledgerPos.reconcileState,
-              detail: "ensureProtectiveStopOrder reported failure during ops-watch protection cycle (see PROTECTIVE_STOP_SUBMIT_RESULT / TAKE_PROFIT_SUBMIT_RESULT)."
-            });
-            this.logger.error("POSITION_UNPROTECTED_HARD_BLOCK", {
-              symbol: r.symbol,
-              side: r.side,
-              scope: "ops_watch_post_ensure",
-              action: "HARD_BLOCK_NEW_ENTRIES",
-              reason: "protective_order_submit_failed_or_incomplete"
-            });
-          }
+        } else if (ensureOutcomeLate?.success) {
+          this.symbolProtectionFailedBlocked.delete(r.symbol);
         }
 
         if (!r.reduce_only_protective_found && ledgerPos && opsWatchGrace.verdict !== "DEFER") {
@@ -2428,9 +2509,9 @@ export class PaperEngine {
             reduce_only_protective_found: false,
             consistency_check: "FAIL",
             pre_scan_fault: true,
-            ensure_attempted: ensureOutcome != null,
-            ensure_success: ensureOutcome?.success ?? false,
-            ensure_modified: ensureOutcome?.modified ?? false
+            ensure_attempted: ensureOutcomeLate != null,
+            ensure_success: ensureOutcomeLate?.success ?? false,
+            ensure_modified: ensureOutcomeLate?.modified ?? false
           });
         }
       }

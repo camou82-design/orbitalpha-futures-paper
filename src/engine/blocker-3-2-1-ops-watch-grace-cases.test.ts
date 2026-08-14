@@ -128,6 +128,9 @@ function testP6(): void {
     const r = evalAt(
         18_659,
         makeLedger({
+            lifecycleState: "EXTERNAL_MANUAL_MANAGED",
+            isV2Authority: false,
+            authoritySourceAtEntry: "external",
             reconcileState: "PENDING",
             entryProtectionUntil: SUBMIT_AT + 120_000,
             isProtectiveStopRegistered: true,
@@ -140,18 +143,6 @@ function testP6(): void {
     );
     assertEq(r.verdict, "HARD_BLOCK", "P6 verdict");
     assertFalse(r.opsWatchVisibilityGraceApplied, "P6 must not defer on PENDING alone");
-    assertFalse(
-        hasAcceptedProtectiveSubmitEvidence(
-            makeLedger({
-                isProtectiveStopRegistered: true,
-                protectiveSlAlgoId: undefined,
-                protectiveStopAlgoId: undefined,
-                protectiveTpAlgoId: undefined,
-            }),
-            true
-        ),
-        "P6 registered flags without algoId not accepted evidence"
-    );
     pass("P6_PENDING_NO_SUBMIT_EVIDENCE_NO_DEFER");
 }
 

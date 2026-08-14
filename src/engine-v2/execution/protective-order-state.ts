@@ -3,13 +3,34 @@ import {
     findProtectiveHintsForInst,
     orderLooksReduceOnlyProtective
 } from "../../engine/position-ops-monitor";
+import { hasBotOwnershipEvidenceOnLedgerRow } from "../../lib/position-reconcile-classification";
 import type { PaperOpenPositionRecord } from "../../models/types";
 import { protectiveStopPricesMatch } from "./protective-match";
 
 /** BLOCKER 3-2 visibility grace — distinct from entryProtectionUntil (120s post-fill ownership). */
 export const PROTECTIVE_VISIBILITY_GRACE_MS = 30_000;
 
-export type OpsWatchProtectiveScanVerdict = "HARD_BLOCK" | "DEFER" | "PASS";
+export type OpsWatchProtectiveScanVerdict = "HARD_BLOCK" | "DEFER" | "PASS" | "ENSURE_REQUIRED";
+
+export type OpsWatchProtectiveScanResult = Readonly<{
+    verdict: OpsWatchProtectiveScanVerdict;
+    shouldEmitPendingZeroFault: boolean;
+    shouldEmitOrderFault: boolean;
+    shouldEmitHardBlockDetected: boolean;
+    shouldBlockSymbol: boolean;
+    opsWatchVisibilityGraceApplied: boolean;
+    preSubmitEnsureRequired: boolean;
+    reason: string;
+}>;
+
+const NO_FAULTS = {
+    shouldEmitPendingZeroFault: false,
+    shouldEmitOrderFault: false,
+    shouldEmitHardBlockDetected: false,
+    shouldBlockSymbol: false,
+    opsWatchVisibilityGraceApplied: false,
+    preSubmitEnsureRequired: false
+} as const;
 
 /**
  * Canonical submit-acceptance evidence for ops-watch / scanner grace.
@@ -27,7 +48,21 @@ export function hasAcceptedProtectiveSubmitEvidence(
 }
 
 /**
- * Ops-watch / scanner grace precedence (BLOCKER 3-2.1):
+ * Fresh V2-owned exposure that may not have attempted protective submit yet.
+ * External/manual positions are excluded — existing hard-block policy applies.
+ */
+export function isFreshV2OwnedPositionRequiringProtectiveEnsure(
+    ledger: PaperOpenPositionRecord | null | undefined
+): boolean {
+    if (!ledger) return false;
+    if (ledger.lifecycleState === "EXTERNAL_MANUAL_MANAGED") return false;
+    if (ledger.manualOwnershipLatch === true) return false;
+    return ledger.lifecycleState === "BOT_V2_MANAGED" || hasBotOwnershipEvidenceOnLedgerRow(ledger);
+}
+
+/**
+ * Ops-watch / scanner grace precedence (BLOCKER 3-2.1 + 3-2.2):
+ *   ENSURE_REQUIRED) fresh V2 + zero inventory + no accepted evidence + no explicit failure
  *   A) submit rejected / failed without algo evidence → HARD_BLOCK
  *   B) submit accepted + algoId + inside visibility deadline + inventory miss → DEFER
  *   C) submit accepted + deadline elapsed + inventory still missing → HARD_BLOCK
@@ -41,25 +76,9 @@ export function evaluateOpsWatchProtectiveScanVerdict(input: Readonly<{
     matchingProtectivePendingCount: number;
     scanClean: boolean;
     tpRequired: boolean;
-}>): Readonly<{
-    verdict: OpsWatchProtectiveScanVerdict;
-    shouldEmitPendingZeroFault: boolean;
-    shouldEmitOrderFault: boolean;
-    shouldEmitHardBlockDetected: boolean;
-    shouldBlockSymbol: boolean;
-    opsWatchVisibilityGraceApplied: boolean;
-    reason: string;
-}> {
-    const noFaults = {
-        shouldEmitPendingZeroFault: false,
-        shouldEmitOrderFault: false,
-        shouldEmitHardBlockDetected: false,
-        shouldBlockSymbol: false,
-        opsWatchVisibilityGraceApplied: false
-    } as const;
-
+}>): OpsWatchProtectiveScanResult {
     if (input.reduceOnlyProtectiveFound) {
-        return { ...noFaults, verdict: "PASS", reason: "exchange_inventory_visible" };
+        return { ...NO_FAULTS, verdict: "PASS", reason: "exchange_inventory_visible" };
     }
 
     const hasEvidence = hasAcceptedProtectiveSubmitEvidence(input.ledger, input.tpRequired);
@@ -76,11 +95,24 @@ export function evaluateOpsWatchProtectiveScanVerdict(input: Readonly<{
             shouldEmitHardBlockDetected: true,
             shouldBlockSymbol: true,
             opsWatchVisibilityGraceApplied: false,
+            preSubmitEnsureRequired: false,
             reason: "submit_rejected_or_protection_failed_without_algo_evidence"
         };
     }
 
     if (!hasEvidence) {
+        if (isFreshV2OwnedPositionRequiringProtectiveEnsure(input.ledger)) {
+            return {
+                verdict: "ENSURE_REQUIRED",
+                shouldEmitPendingZeroFault: false,
+                shouldEmitOrderFault: false,
+                shouldEmitHardBlockDetected: false,
+                shouldBlockSymbol: false,
+                opsWatchVisibilityGraceApplied: false,
+                preSubmitEnsureRequired: true,
+                reason: "fresh_v2_zero_inventory_no_submit_evidence_ensure_required"
+            };
+        }
         return {
             verdict: "HARD_BLOCK",
             shouldEmitPendingZeroFault: pendingZeroEligible,
@@ -88,6 +120,7 @@ export function evaluateOpsWatchProtectiveScanVerdict(input: Readonly<{
             shouldEmitHardBlockDetected: true,
             shouldBlockSymbol: true,
             opsWatchVisibilityGraceApplied: false,
+            preSubmitEnsureRequired: false,
             reason: "no_accepted_submit_evidence_inventory_miss"
         };
     }
@@ -100,6 +133,7 @@ export function evaluateOpsWatchProtectiveScanVerdict(input: Readonly<{
             shouldEmitHardBlockDetected: false,
             shouldBlockSymbol: false,
             opsWatchVisibilityGraceApplied: true,
+            preSubmitEnsureRequired: false,
             reason: "accepted_algo_id_inside_visibility_grace_inventory_miss"
         };
     }
@@ -111,8 +145,41 @@ export function evaluateOpsWatchProtectiveScanVerdict(input: Readonly<{
         shouldEmitHardBlockDetected: true,
         shouldBlockSymbol: true,
         opsWatchVisibilityGraceApplied: false,
+        preSubmitEnsureRequired: false,
         reason: "accepted_algo_id_grace_expired_inventory_still_missing"
     };
+}
+
+/**
+ * Re-evaluate ops-watch verdict after ensureProtectiveStopOrder using updated ledger state.
+ * When ensure confirms visible protection (registered, not failed, grace cleared), treat inventory as visible.
+ */
+export function reevaluateOpsWatchProtectiveScanVerdictAfterEnsure(input: Readonly<{
+    nowMs: number;
+    ledger: PaperOpenPositionRecord;
+    reduceOnlyProtectiveFound: boolean;
+    matchingProtectivePendingCount: number;
+    scanClean: boolean;
+    tpRequired: boolean;
+    ensureAttempted: boolean;
+    ensureSuccess: boolean;
+}>): OpsWatchProtectiveScanResult {
+    const ensureConfirmedVisible =
+        input.ensureAttempted &&
+        input.ensureSuccess &&
+        input.ledger.isProtectiveStopRegistered === true &&
+        input.ledger.isProtectionFailed !== true &&
+        input.ledger.protectiveVisibilityGraceDeadlineMs == null &&
+        hasAcceptedProtectiveSubmitEvidence(input.ledger, input.tpRequired);
+
+    return evaluateOpsWatchProtectiveScanVerdict({
+        nowMs: input.nowMs,
+        ledger: input.ledger,
+        reduceOnlyProtectiveFound: input.reduceOnlyProtectiveFound || ensureConfirmedVisible,
+        matchingProtectivePendingCount: input.matchingProtectivePendingCount,
+        scanClean: input.scanClean,
+        tpRequired: input.tpRequired
+    });
 }
 
 function orderMatchesPositionSide(o: Record<string, unknown>, positionSide: "long" | "short"): boolean {
