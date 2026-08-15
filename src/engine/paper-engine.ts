@@ -8142,7 +8142,14 @@ export class PaperEngine {
     if (open.notionalUsd != null) open.notionalUsd = Math.max(0, open.notionalUsd - deltaNotionalUsd);
     
     const unit = resolveOpenPositionSizeUnit(open);
-    const deltaForSizeUsd = (unit === "V2_NOTIONAL" || unit === "UNKNOWN") ? deltaNotionalUsd : deltaMarginUsd;
+    
+    let deltaForSizeUsd: number;
+    if (unit === "V2_UNIT_UNVERIFIED") {
+        deltaForSizeUsd = NaN;
+    } else {
+        deltaForSizeUsd = (unit === "V2_NOTIONAL" || unit === "UNKNOWN") ? deltaNotionalUsd : deltaMarginUsd;
+    }
+    
     open.sizeUsd = Math.max(0, open.sizeUsd - deltaForSizeUsd);
 
     this.logger.info("V2_PARTIAL_LEDGER_UNIT_RECONCILE_PROOF", {

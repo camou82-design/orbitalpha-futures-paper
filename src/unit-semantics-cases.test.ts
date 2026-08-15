@@ -200,6 +200,7 @@ function runNSeriesTests() {
   const v2Record: PaperOpenPositionRecord = {
     ...(baseRecord as any),
     sizeUsd: 118,
+    notionalUsd: 118,
     isV2Authority: true
   };
   const authV2 = resolveOpenNotionalAuthority(v2Record);

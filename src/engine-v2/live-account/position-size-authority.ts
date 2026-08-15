@@ -1,15 +1,15 @@
 import type { PaperOpenPositionRecord } from "../../models/types";
 
 /** V2 ledger `sizeUsd` is NOTIONAL; legacy paper `sizeUsd` is margin. */
-export type PaperPositionSizeUnit = "LEGACY_MARGIN" | "V2_NOTIONAL" | "UNKNOWN";
+export type PaperPositionSizeUnit = "LEGACY_MARGIN" | "V2_NOTIONAL" | "V2_UNIT_UNVERIFIED" | "UNKNOWN";
 
 export function resolveOpenPositionSizeUnit(open: PaperOpenPositionRecord): PaperPositionSizeUnit {
     if (typeof open.notionalUsd === "number" && Number.isFinite(open.notionalUsd) && open.notionalUsd > 0) {
         return "V2_NOTIONAL";
     }
-    if (open.isV2Authority === true) return "V2_NOTIONAL";
+    if (open.isV2Authority === true) return "V2_UNIT_UNVERIFIED";
     const authSrc = String(open.authoritySourceAtEntry ?? open.authority ?? "").trim().toLowerCase();
-    if (authSrc === "v2") return "V2_NOTIONAL";
+    if (authSrc === "v2") return "V2_UNIT_UNVERIFIED";
 
     const strategy = String(open.strategyVersion ?? "").toLowerCase();
     if (strategy.includes("v2")) return "UNKNOWN";
@@ -116,7 +116,7 @@ export function resolveOpenNotionalAuthority(open: PaperOpenPositionRecord, okxA
     if (typeof okxActualNotionalUsd === "number" && Number.isFinite(okxActualNotionalUsd) && okxActualNotionalUsd > 0) {
         return {
             valueUsd: okxActualNotionalUsd,
-            unit: "UNKNOWN", // Ledger is still structurally UNKNOWN
+            unit: unit, // Keeps structural unit (e.g. V2_UNIT_UNVERIFIED or UNKNOWN)
             source: "OKX_ACTUAL",
             authoritative: true
         };
@@ -124,7 +124,7 @@ export function resolveOpenNotionalAuthority(open: PaperOpenPositionRecord, okxA
 
     return {
         valueUsd: null,
-        unit: "UNKNOWN",
+        unit: unit,
         source: "UNKNOWN_FALLBACK",
         authoritative: false
     };
@@ -136,6 +136,7 @@ export function resolveOpenNotionalUsd(open: PaperOpenPositionRecord): number {
     }
     const size = Math.max(0, open.sizeUsd ?? 0);
     const unit = resolveOpenPositionSizeUnit(open);
+    if (unit === "V2_UNIT_UNVERIFIED") return NaN; // Explicit fail-closed for corrupted V2 rows without notionalUsd
     if (unit === "V2_NOTIONAL" || unit === "UNKNOWN") return size;
     
     if (typeof open.leverage !== "number" || !Number.isFinite(open.leverage) || open.leverage <= 0) {
@@ -147,6 +148,7 @@ export function resolveOpenNotionalUsd(open: PaperOpenPositionRecord): number {
 export function resolveOpenMarginUsd(open: PaperOpenPositionRecord): number {
     const size = Math.max(0, open.sizeUsd ?? 0);
     const unit = resolveOpenPositionSizeUnit(open);
+    if (unit === "V2_UNIT_UNVERIFIED") return NaN; // Explicit fail-closed
     if (unit === "UNKNOWN") return size;
     
     if (unit === "V2_NOTIONAL") {
@@ -173,8 +175,18 @@ export function resolveCloseLegSizing(
     const unit = sizeUnit ?? resolveOpenPositionSizeUnit(open);
     const legSize = typeof legSizeUsd === "number" && Number.isFinite(legSizeUsd) && legSizeUsd > 0 ? legSizeUsd : 0;
     const lev = Math.max(1, open.leverage ?? 1);
-    const legNotionalUsd = unit === "V2_NOTIONAL" ? legSize : legSize * lev;
-    const legMarginUsd = legNotionalUsd / lev;
+    
+    let legNotionalUsd = 0;
+    let legMarginUsd = 0;
+    
+    if (unit === "V2_UNIT_UNVERIFIED") {
+        legNotionalUsd = NaN;
+        legMarginUsd = NaN;
+    } else {
+        legNotionalUsd = unit === "V2_NOTIONAL" ? legSize : legSize * lev;
+        legMarginUsd = legNotionalUsd / lev;
+    }
+
     return {
         sizeUnit: unit,
         legSizeUsd: legSize,
