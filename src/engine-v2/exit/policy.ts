@@ -40,6 +40,18 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
     const shockAgainst =
         (side === "long" && args.judgment.shockPhase === "DOWN_SHOCK") ||
         (side === "short" && args.judgment.shockPhase === "UP_SHOCK");
+
+    // BLOCKER 4-5: Directional shock authority resolver.
+    // CRASH_LOCK / PUMP_LOCK alone (stale time-latch) must NOT trigger SHOCK_PROTECTIVE_REDUCE.
+    // Only current adverse directional shock authority qualifies for protective reduce:
+    //   LONG  position: requires directionalShockState === "DOWN" (adverse down-shock confirmed)
+    //   SHORT position: requires directionalShockState === "UP"   (adverse up-shock confirmed)
+    // BOTH-LOCK + directionalShockState=NONE → no adverse authority → HOLD (no reduce).
+    const dss = args.v2State.directionalShockState;
+    const hasAdverseDirectionalAuthority =
+        (side === "long" && dss === "DOWN") ||
+        (side === "short" && dss === "UP");
+
     let action: V2ExitPolicyResult["action"] = "HOLD";
     let reason: V2ExitPolicyResult["reason"] = "NO_EXIT_SIGNAL";
     let reduceRatio = 0;
@@ -58,10 +70,20 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         reason = "PNL_STOP_PROTECT";
         reduceRatio = 0.4;
         evidence += "|pnl_stop_reduce";
-    } else if (shockAgainst || args.v2State.crashState.includes("CRASH_LOCK") || args.v2State.pumpState.includes("PUMP_LOCK")) {
-        action = shockAgainst ? "FULL_EXIT" : "REDUCE";
-        reason = shockAgainst ? "SHOCK_FULL_EXIT_AGAINST_POSITION" : "SHOCK_PROTECTIVE_REDUCE";
-        reduceRatio = shockAgainst ? 1 : 0.35;
+    } else if (shockAgainst) {
+        // FULL_EXIT when current shockPhase is directly adverse to position side.
+        action = "FULL_EXIT";
+        reason = "SHOCK_FULL_EXIT_AGAINST_POSITION";
+        reduceRatio = 1;
+        evidence += "|shock_full_exit_against";
+    } else if (hasAdverseDirectionalAuthority) {
+        // BLOCKER 4-5: SHOCK_PROTECTIVE_REDUCE only when directionalShockState is currently
+        // adverse to the position (DOWN for LONG, UP for SHORT).
+        // CRASH_LOCK / PUMP_LOCK strings alone (stale time-latch) do NOT qualify here.
+        // BOTH-LOCK + directionalShockState=NONE → hasAdverseDirectionalAuthority=false → no reduce.
+        action = "REDUCE";
+        reason = "SHOCK_PROTECTIVE_REDUCE";
+        reduceRatio = 0.35;
         evidence += "|shock_protective";
     } else if (args.judgment.regime_final === "TRANSITION") {
         if (args.judgment.transitionPhase === "CONFLICT") {
