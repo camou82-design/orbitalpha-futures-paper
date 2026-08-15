@@ -8956,6 +8956,24 @@ export class PaperEngine {
       }
 
       let sourceContracts = authority.submitAllowed ? authority.selectedContracts : null;
+
+      if (isV2Authority && input.isPartial) {
+        if (!authority.submitAllowed) {
+          return {
+            ok: false,
+            errorMessage: authority.blockReason ?? "NO_POSITION_TO_CLOSE_FOR_PARTIAL"
+          };
+        }
+        if (input.okxContracts != null && Number.isFinite(input.okxContracts) && input.okxContracts > 0) {
+          sourceContracts = input.okxContracts;
+        } else {
+          return {
+            ok: false,
+            errorMessage: "invalid_partial_reduce_contracts_fail_closed"
+          };
+        }
+      }
+
       if (sourceContracts == null || sourceContracts <= 0) {
         if (!isV2Authority) {
           sourceContracts =
@@ -8975,6 +8993,12 @@ export class PaperEngine {
         authority.okxActualContracts > 0 &&
         sourceContracts > authority.okxActualContracts + 1e-8
       ) {
+        if (input.isPartial) {
+          return {
+            ok: false,
+            errorMessage: "partial_reduce_exceeds_actual_position_fail_closed"
+          };
+        }
         sourceContracts = authority.okxActualContracts;
       }
 
@@ -8985,6 +9009,13 @@ export class PaperEngine {
         flowId: input.flowId,
         reason: input.reason
       });
+
+      if (isV2Authority && input.isPartial && !norm.ok) {
+        return {
+          ok: false,
+          errorMessage: "partial_reduce_normalization_failed_fail_closed"
+        };
+      }
 
       finalQty = norm.normalized_contracts;
       finalSzStr = norm.normalized_sz;
