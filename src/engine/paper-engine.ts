@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { resolveOpenNotionalUsd, resolveOpenPositionSizeUnit, resolveOpenNotionalAuthority } from "../engine-v2/live-account/position-size-authority";
+import { resolveOpenNotionalUsd, resolveOpenPositionSizeUnit, resolveOpenNotionalAuthority, resolveCanonicalV2SizeUsd, isV2AuthorityRow } from "../engine-v2/live-account/position-size-authority";
 
 export function resolveV2ExitAuthorityBooleans(input: Readonly<{
   reason: string;
@@ -2812,7 +2812,6 @@ export class PaperEngine {
     open.notionalUsd = remote.notionalUsd;
     open.notional = remote.notionalUsd;
     open.actualNotionalUsd = remote.notionalUsd;
-    open.sizeUsd = remote.marginUsd;
     open.actualMarginUsd = remote.marginUsd;
     open.leverage = remote.leverage;
     open.avgPx = remote.avgPx;
@@ -2821,9 +2820,22 @@ export class PaperEngine {
     open.actualPos = remote.baseQty;
     open.actualAvgPx = remote.avgPx;
     open.exchangeFilledSize = remote.contracts;
+
+    // [V2_CANONICAL_WRITE] V2 rows: sizeUsd = NOTIONAL. Legacy rows: sizeUsd = margin.
+    if (isV2AuthorityRow(open)) {
+      const canonical = resolveCanonicalV2SizeUsd({
+        notionalUsd: remote.notionalUsd,
+        marginUsd: remote.marginUsd,
+        leverage: remote.leverage,
+      });
+      open.sizeUsd = canonical ?? remote.notionalUsd;
+    } else {
+      open.sizeUsd = remote.marginUsd;
+    }
+
     const remainingSizeRatio =
       open.initialSizeUsd != null && open.initialSizeUsd > 0
-        ? remote.marginUsd / open.initialSizeUsd
+        ? open.sizeUsd / open.initialSizeUsd
         : 1;
     open.remainingSizeRatio = remainingSizeRatio;
   }
@@ -2831,12 +2843,27 @@ export class PaperEngine {
   private logPositionUnitInvariant(open: PaperOpenPositionRecord): void {
     const leverage = Math.max(1, open.leverage ?? 10);
     const notionalUsd = open.notionalUsd ?? 0;
-    const expectedMarginUsd = notionalUsd > 0 ? notionalUsd / leverage : 0;
-    const marginError = Math.abs(open.sizeUsd - expectedMarginUsd);
-    const unitInvariantPassed = marginError <= RECONCILE_MARGIN_INVARIANT_TOLERANCE_USD;
+    const isV2 = isV2AuthorityRow(open);
+
+    // V2 invariant: sizeUsd === notionalUsd. Legacy invariant: sizeUsd === margin.
+    let unitInvariantPassed: boolean;
+    let invariantLabel: string;
+    if (isV2) {
+      const notionalError = Math.abs(open.sizeUsd - notionalUsd);
+      unitInvariantPassed = notionalError <= RECONCILE_NOTIONAL_TOLERANCE_USD;
+      invariantLabel = "V2_NOTIONAL_MATCH";
+    } else {
+      const expectedMarginUsd = notionalUsd > 0 ? notionalUsd / leverage : 0;
+      const marginError = Math.abs(open.sizeUsd - expectedMarginUsd);
+      unitInvariantPassed = marginError <= RECONCILE_MARGIN_INVARIANT_TOLERANCE_USD;
+      invariantLabel = "LEGACY_MARGIN_MATCH";
+    }
+
     this.logger.info("V2_POSITION_UNIT_INVARIANT_PROOF", {
       symbol: open.symbol,
       side: open.side,
+      is_v2_row: isV2,
+      invariant_label: invariantLabel,
       okx_contracts: open.okxContracts ?? null,
       ct_val: open.baseQty != null && open.okxContracts != null && open.okxContracts > 0
         ? open.baseQty / open.okxContracts
@@ -2844,10 +2871,9 @@ export class PaperEngine {
       base_qty: open.baseQty ?? null,
       entry_price: open.entryPrice,
       notional_usdt: notionalUsd,
-      size_usd_margin: open.sizeUsd,
+      size_usd: open.sizeUsd,
+      actual_margin_usd: open.actualMarginUsd ?? null,
       leverage,
-      expected_margin_usdt: expectedMarginUsd,
-      margin_error_usdt: marginError,
       unit_invariant_passed: unitInvariantPassed
     });
   }
@@ -2895,8 +2921,9 @@ export class PaperEngine {
       okxContracts: open.okxContracts
     };
     this.syncOpenLedgerFromRemoteAuthority(open, remote);
+    // [V2_CANONICAL_WRITE] initialSizeUsd tracks same unit as sizeUsd after repair.
     if (open.initialSizeUsd == null || Math.abs((open.initialSizeUsd ?? 0) - before.sizeUsd) < 0.02) {
-      open.initialSizeUsd = remote.marginUsd;
+      open.initialSizeUsd = open.sizeUsd;
     }
     this.logger.info("V2_LEGACY_POSITION_UNIT_REPAIR_PROOF", {
       symbol: open.symbol,
@@ -3121,23 +3148,27 @@ export class PaperEngine {
     nowTs: number
   ): boolean {
     const isFirstTimeSync = !open.adoptedMetadataSyncedAt;
+    const isV2 = isV2AuthorityRow(open);
+
+    // [V2_CANONICAL_WRITE] needsSync check uses notional diff for V2 rows,
+    // margin diff for legacy rows — consistent with their respective sizeUsd units.
     const needsSync =
       isFirstTimeSync ||
-      Math.abs(open.sizeUsd - remote.marginUsd) > RECONCILE_MARGIN_INVARIANT_TOLERANCE_USD ||
+      (isV2
+        ? Math.abs(open.sizeUsd - remote.notionalUsd) > RECONCILE_NOTIONAL_TOLERANCE_USD
+        : Math.abs(open.sizeUsd - remote.marginUsd) > RECONCILE_MARGIN_INVARIANT_TOLERANCE_USD) ||
       !open.notionalUsd ||
       Math.abs((open.notionalUsd ?? 0) - remote.notionalUsd) > RECONCILE_NOTIONAL_TOLERANCE_USD ||
       !hasLedgerContracts(open);
 
     if (!needsSync) return false;
 
-    const beforeSizeUsd = open.sizeUsd;
     open.okxContracts = remote.contracts;
     open.baseQty = remote.baseQty;
     open.pos = remote.baseQty;
     open.notionalUsd = remote.notionalUsd;
     open.notional = remote.notionalUsd;
     open.actualNotionalUsd = remote.notionalUsd;
-    open.sizeUsd = remote.marginUsd;
     open.actualMarginUsd = remote.marginUsd;
     open.leverage = remote.leverage;
     if (remote.avgPx > 0) {
@@ -3145,25 +3176,39 @@ export class PaperEngine {
       open.entryPrice = remote.avgPx;
     }
 
+    // [V2_CANONICAL_WRITE] V2 rows: sizeUsd = NOTIONAL. Legacy rows: sizeUsd = margin.
+    if (isV2) {
+      const canonical = resolveCanonicalV2SizeUsd({
+        notionalUsd: remote.notionalUsd,
+        marginUsd: remote.marginUsd,
+        leverage: remote.leverage,
+      });
+      open.sizeUsd = canonical ?? remote.notionalUsd;
+    } else {
+      open.sizeUsd = remote.marginUsd;
+    }
+
     if (isFirstTimeSync) {
-      open.initialSizeUsd = remote.marginUsd;
+      open.initialSizeUsd = open.sizeUsd;
       open.adoptedMetadataSyncedAt = nowTs;
     } else if (
       open.initialSizeUsd != null &&
-      Math.abs(open.initialSizeUsd - beforeSizeUsd) < 0.02 &&
-      Math.abs(open.initialSizeUsd - remote.notionalUsd) < 0.02
+      Math.abs(open.initialSizeUsd - open.sizeUsd) < (isV2 ? RECONCILE_NOTIONAL_TOLERANCE_USD : 0.02)
     ) {
-      open.initialSizeUsd = remote.marginUsd;
+      // initialSizeUsd was tracking old sizeUsd unit — keep in sync.
+      open.initialSizeUsd = open.sizeUsd;
     }
 
     this.logger.info("LEDGER_OKX_POSITION_NOTIONAL_SYNCED_PROOF", {
       symbol: open.symbol,
       side: open.side,
-      sync_reason: isFirstTimeSync ? "initial_and_current_margin_first_sync" : "current_margin_unit_sync",
+      is_v2_row: isV2,
+      sync_reason: isFirstTimeSync ? "initial_first_sync" : "current_unit_sync",
       okxNotionalUsd: remote.notionalUsd,
       okxMarginUsd: remote.marginUsd,
       okxContracts: remote.contracts,
       okxBaseQty: remote.baseQty,
+      storedSizeUsd: open.sizeUsd,
       initialSizeUsd: open.initialSizeUsd,
       adoptedMetadataSyncedAt: open.adoptedMetadataSyncedAt
     });
@@ -3572,7 +3617,17 @@ export class PaperEngine {
           open.lastCheckedAt = nowTs;
           this.hydrateOpenFromRemoteSnapshot(open, remotePos);
           if (open.initialSizeUsd == null || open.initialSizeUsd <= 0) {
-            open.initialSizeUsd = remotePos.marginUsd;
+            // [V2_CANONICAL_WRITE]
+            if (isV2AuthorityRow(open)) {
+              const canonical = resolveCanonicalV2SizeUsd({
+                notionalUsd: remotePos.notionalUsd,
+                marginUsd: remotePos.marginUsd,
+                leverage: remotePos.leverage,
+              });
+              open.initialSizeUsd = canonical ?? remotePos.notionalUsd;
+            } else {
+              open.initialSizeUsd = remotePos.marginUsd;
+            }
           }
           ledgerModified = true;
           this.logger.info("POSITION_OPEN_RECONCILE_PROOF", { symbol: open.symbol, side: open.side, status: "confirmed" });
@@ -4534,14 +4589,24 @@ export class PaperEngine {
            unit_source: "okx_reconcile"
         });
 
+        const v2Canonical = isEngineOwned ? resolveCanonicalV2SizeUsd({
+          notionalUsd: notional,
+          marginUsd: actualMarginUsd,
+          leverage: leverage,
+          contracts: okxContracts,
+          ctVal: inst?.ctVal,
+          price: avgPx
+        }) : null;
+        const finalSizeUsd = isEngineOwned ? (v2Canonical ?? notional) : actualMarginUsd;
+
         const adopted: PaperOpenPositionRecord = {
           openedAt: originalOpenedAt,
           symbol: symbol as MarketSymbol,
           side,
           entryPrice: avgPx,
           leverage,
-          sizeUsd: actualMarginUsd,
-          initialSizeUsd: actualMarginUsd,
+          sizeUsd: finalSizeUsd,
+          initialSizeUsd: finalSizeUsd,
           actualMarginUsd,
           strategyVersion: "paper-v2",
           sourceSignal: isEngineOwned ? "okx_reconcile_untracked_auto" : "okx_reconcile_adopted",

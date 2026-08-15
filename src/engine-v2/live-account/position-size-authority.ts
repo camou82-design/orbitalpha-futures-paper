@@ -21,6 +21,60 @@ export function isV2NotionalSizeAuthority(open: PaperOpenPositionRecord): boolea
     return resolveOpenPositionSizeUnit(open) === "V2_NOTIONAL";
 }
 
+/**
+ * Returns true if the record is definitively a V2/BOT_V2_MANAGED row.
+ * Used by writers to decide whether to store sizeUsd as NOTIONAL.
+ */
+export function isV2AuthorityRow(open: Pick<PaperOpenPositionRecord,
+    "isV2Authority" | "lifecycleState" | "authoritySourceAtEntry" | "authority">
+): boolean {
+    if (open.isV2Authority === true) return true;
+    if (open.lifecycleState === "BOT_V2_MANAGED") return true;
+    const authSrc = String(open.authoritySourceAtEntry ?? open.authority ?? "").trim().toLowerCase();
+    return authSrc === "v2";
+}
+
+/**
+ * Canonical V2 sizeUsd resolver used at WRITE time.
+ *
+ * Priority:
+ *   a) OKX actual notionalUsd (finite > 0) → authoritative
+ *   b) contracts × ctVal × price (if ctVal > 0 and price > 0) → derived
+ *   c) marginUsd × leverage (only if both are finite and leverage > 0) → allowed
+ *   d) neither authoritative → null (fail-closed, caller must not write)
+ *
+ * Returns the canonical NOTIONAL value to store as sizeUsd and notionalUsd,
+ * or null when not determinable.
+ */
+export function resolveCanonicalV2SizeUsd(input: Readonly<{
+    notionalUsd: number;         // OKX-reported notional (authoritative if > 0)
+    marginUsd?: number;          // OKX-reported margin (fallback derivation)
+    leverage?: number;           // OKX-reported leverage (used only with marginUsd)
+    contracts?: number;          // OKX contracts
+    ctVal?: number;              // Instrument ctVal
+    price?: number;              // avgPx or markPx
+}>): number | null {
+    // (a) OKX actual notional — most authoritative
+    if (Number.isFinite(input.notionalUsd) && input.notionalUsd > 0) {
+        return input.notionalUsd;
+    }
+    // (b) contracts × ctVal × price — derived notional
+    const contracts = input.contracts ?? 0;
+    const ctVal = input.ctVal ?? 0;
+    const price = input.price ?? 0;
+    if (contracts > 0 && ctVal > 0 && price > 0) {
+        return contracts * ctVal * price;
+    }
+    // (c) margin × leverage — only when both authoritative
+    const leverage = input.leverage ?? 0;
+    const marginUsd = input.marginUsd ?? 0;
+    if (marginUsd > 0 && leverage > 0 && Number.isFinite(leverage)) {
+        return marginUsd * leverage;
+    }
+    // (d) fail-closed
+    return null;
+}
+
 export type PaperNotionalAuthority = {
     valueUsd: number | null;
     unit: PaperPositionSizeUnit;

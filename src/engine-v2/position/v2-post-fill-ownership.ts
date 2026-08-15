@@ -1,5 +1,6 @@
 import type { PaperOpenPositionRecord, PendingEntryOrderRecord } from "../../models/types";
 import { hasBotOwnershipEvidenceOnLedgerRow } from "../../lib/position-reconcile-classification";
+import { resolveCanonicalV2SizeUsd } from "../live-account/position-size-authority";
 
 /** Grace while OKX positions payload catches up after authoritative V2 fill. */
 export const V2_POST_FILL_OWNERSHIP_GRACE_MS = 120_000;
@@ -159,6 +160,19 @@ export function hydrateOpenFromRemoteForPostFill(
         remote.marginUsd > 0
             ? remote.marginUsd
             : notional / Math.max(1, remote.leverage > 0 ? remote.leverage : record.leverage ?? 10);
+
+    // [V2_CANONICAL_WRITE] V2/BOT_V2_MANAGED rows store sizeUsd = NOTIONAL.
+    // resolveCanonicalV2SizeUsd() enforces priority: OKX notional → derived → fail-closed.
+    const canonicalNotional = resolveCanonicalV2SizeUsd({
+        notionalUsd: remote.notionalUsd,
+        marginUsd: remote.marginUsd,
+        leverage: remote.leverage > 0 ? remote.leverage : record.leverage,
+    });
+    // Canonical sizeUsd = notional (invariant: V2 sizeUsd is NOTIONAL).
+    // If resolveCanonicalV2SizeUsd returns null (edge case: all inputs 0/invalid),
+    // fall back to computed notional to avoid storing 0. This path should not occur in prod.
+    const canonicalSizeUsd = canonicalNotional ?? notional;
+
     return {
         ...record,
         entryPrice: avgPx,
@@ -168,8 +182,8 @@ export function hydrateOpenFromRemoteForPostFill(
         pos: record.side === "short" ? -Math.abs(remote.baseQty) : Math.abs(remote.baseQty),
         notionalUsd: notional,
         actualNotionalUsd: notional,
-        sizeUsd: marginUsd,
-        actualMarginUsd: marginUsd,
+        sizeUsd: canonicalSizeUsd,      // V2 canonical: NOTIONAL
+        actualMarginUsd: marginUsd,     // margin stored separately for bookkeeping
         leverage: remote.leverage > 0 ? remote.leverage : record.leverage,
         instId: remote.instId,
         reconcileState: "MATCHED",
@@ -178,6 +192,7 @@ export function hydrateOpenFromRemoteForPostFill(
         status: "open"
     };
 }
+
 
 export function materializeV2ManagedOpenFromPostFillEvidence(
     evidence: V2PostFillOwnershipEvidence,
