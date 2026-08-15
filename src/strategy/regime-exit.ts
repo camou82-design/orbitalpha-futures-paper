@@ -77,7 +77,15 @@ export function evaluateRegimeExitPolicy(input: Readonly<{
 
   const tpLevel = runner ? t.runnerTp : t.tp;
 
-  if (input.pnlPctNet >= tpLevel) return { action: "close", reason: "take_profit", trailingExtreme: extreme };
+  let priceMoveFrac = 0;
+  if (input.entryPrice > 0) {
+    const rawFrac = input.side === "long" 
+      ? (input.mark - input.entryPrice) / input.entryPrice 
+      : (input.entryPrice - input.mark) / input.entryPrice;
+    priceMoveFrac = Number(rawFrac.toFixed(8));
+  }
+
+  if (input.entryPrice > 0 && priceMoveFrac >= tpLevel) return { action: "close", reason: "take_profit", trailingExtreme: extreme };
 
   // PRICE_MOVE_FRACTION canonical authority for Stop Loss
   // 1. If stopPrice exists, it's the absolute truth
@@ -86,9 +94,6 @@ export function evaluateRegimeExitPolicy(input: Readonly<{
   if (input.stopPrice !== undefined && input.stopPrice > 0) {
     stopBreached = input.side === "long" ? input.mark <= input.stopPrice : input.mark >= input.stopPrice;
   } else if (input.entryPrice > 0) {
-    const priceMoveFrac = input.side === "long" 
-      ? (input.mark - input.entryPrice) / input.entryPrice 
-      : (input.entryPrice - input.mark) / input.entryPrice;
     stopBreached = priceMoveFrac <= t.sl;
   }
   
