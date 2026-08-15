@@ -14588,6 +14588,8 @@ export class PaperEngine {
         pnlPctNet: m.pnlPctNet,
         holdingMs: m.holdingMs,
         mark: closePrice,
+        entryPrice: open.entryPrice ?? 0,
+        stopPrice: open.stopPrice ?? undefined,
         trailingExtreme: open.trailingExtremePrice,
         partialExitStage: open.partialExitStage ?? 0
       });
@@ -14701,17 +14703,26 @@ export class PaperEngine {
       if (diagTs - lastExitPf >= 15_000) {
 
         this.positionExitProofThrottleByFlow.set(flowId, diagTs);
+        const entryPx = open.entryPrice ?? 0;
+        const priceMoveFrac = entryPx > 0 
+          ? (open.side === "long" ? (closePrice - entryPx) / entryPx : (entryPx - closePrice) / entryPx)
+          : 0;
+        
         this.logger.info("POSITION_EXIT_POLICY_PROOF", {
           symbol: open.symbol,
           side: open.side,
           flowId,
           regime_at_entry: open.regimeAtEntry ?? null,
           exit_lane_sl_regime: slRegime,
+          entry_price: entryPx,
           mark: closePrice,
+          price_move_frac: priceMoveFrac,
           holding_ms: m.holdingMs,
           pnl_pct_net: m.pnlPctNet,
           stop_price_ledger: open.stopPrice ?? null,
           stop_loss_pct_gate: stopLossPctForRegime(slRegime),
+          stop_gate_unit: "price_move_fraction",
+          actual_stop_breached: hasValidV2StopPrice(open.stopPrice) ? isV2StopPriceBreached(open.side, closePrice, open.stopPrice) : false,
           regime_exit_snapshot: regimeExitSnap,
           executor_exit_eval_action: exitEval.action,
           executor_exit_eval_reason:

@@ -62,6 +62,8 @@ export function evaluateRegimeExitPolicy(input: Readonly<{
   pnlPctNet: number;
   holdingMs: number;
   mark: number;
+  entryPrice: number; // Added for true price move fraction
+  stopPrice?: number; // Added for explicit price gate
   trailingExtreme: number | undefined;
   exitProfile?: ExitProfile;
   partialExitStage?: number;
@@ -76,7 +78,22 @@ export function evaluateRegimeExitPolicy(input: Readonly<{
   const tpLevel = runner ? t.runnerTp : t.tp;
 
   if (input.pnlPctNet >= tpLevel) return { action: "close", reason: "take_profit", trailingExtreme: extreme };
-  if (input.pnlPctNet <= t.sl) return { action: "close", reason: "stop_loss", trailingExtreme: extreme };
+
+  // PRICE_MOVE_FRACTION canonical authority for Stop Loss
+  // 1. If stopPrice exists, it's the absolute truth
+  // 2. Otherwise compute actual price move fraction
+  let stopBreached = false;
+  if (input.stopPrice !== undefined && input.stopPrice > 0) {
+    stopBreached = input.side === "long" ? input.mark <= input.stopPrice : input.mark >= input.stopPrice;
+  } else if (input.entryPrice > 0) {
+    const priceMoveFrac = input.side === "long" 
+      ? (input.mark - input.entryPrice) / input.entryPrice 
+      : (input.entryPrice - input.mark) / input.entryPrice;
+    stopBreached = priceMoveFrac <= t.sl;
+  }
+  
+  if (stopBreached) return { action: "close", reason: "stop_loss", trailingExtreme: extreme };
+
   if (input.holdingMs >= t.maxHoldMs) return { action: "close", reason: "time_based_exit", trailingExtreme: extreme };
 
   const allowTrail = input.regime === "TREND" || (runner && input.regime === "RANGE");
