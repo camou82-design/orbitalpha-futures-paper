@@ -403,16 +403,35 @@ export function rangeLadderLegMultiplier(rangeLadderLevel: number, hedgeBalance:
 
 import { resolveOpenNotionalUsd, resolveOpenNotionalAuthority } from "../engine-v2/live-account/position-size-authority";
 
-/** ?숈씪 ?щ낵 ?ㅽ뵂 諛곗뿴?먯꽌 濡???留덉쭊 ?⑹궛. */
+/** 심볼 롱/숏 노셔널 합산. OKX actual positions로 unknown unit 해소 가능. */
 export function marginsForSymbol(
   opens: readonly PaperOpenPositionRecord[],
-  symbol: string
+  symbol: string,
+  okxActualPositions?: ReadonlyArray<{ symbol: string; sizeUsd?: number; notionalUsd?: number; side: string }> | null
 ): { longUsd: number; shortUsd: number; authoritative: boolean; blockReason?: string } {
+  // BLOCKER 4-6: OKX actual notional lookup for unknown-unit positions.
+  function findOkxNotional(pSide: string): number | undefined {
+    if (!Array.isArray(okxActualPositions)) return undefined;
+    const sideLower = String(pSide).toLowerCase();
+    for (const okxP of okxActualPositions) {
+      if (!okxP || okxP.symbol !== symbol) continue;
+      if (String(okxP.side).toLowerCase() !== sideLower) continue;
+      const n = typeof okxP.notionalUsd === "number" && Number.isFinite(okxP.notionalUsd) && okxP.notionalUsd > 0
+        ? okxP.notionalUsd
+        : typeof okxP.sizeUsd === "number" && Number.isFinite(okxP.sizeUsd) && okxP.sizeUsd > 0
+          ? okxP.sizeUsd
+          : undefined;
+      if (n !== undefined) return n;
+    }
+    return undefined;
+  }
+
   let longUsd = 0;
   let shortUsd = 0;
   for (const o of opens) {
     if (o.status !== "open" || String(o.symbol) !== symbol) continue;
-    const auth = resolveOpenNotionalAuthority(o as any);
+    const okxNotional = findOkxNotional(String(o.side ?? ""));
+    const auth = resolveOpenNotionalAuthority(o as any, okxNotional);
     if (!auth.authoritative || auth.valueUsd == null) return { longUsd: NaN, shortUsd: NaN, authoritative: false, blockReason: "UNKNOWN_UNIT_SAFETY_BLOCK" }; // Fail closed
     if (o.side === "long") longUsd += finite(auth.valueUsd, 0);
     else shortUsd += finite(auth.valueUsd, 0);

@@ -63,10 +63,39 @@ export function calculateRiskSizing(
     const addOnPolicyAllowed = state.addOnPolicyAllowed;
     const addOnPolicyReason = state.addOnPolicyReason;
     const currentMarginUsed = state.currentPositions.reduce((acc, p) => acc + resolveOpenMarginUsd(p as any), 0);
-    
+
+    // BLOCKER 4-6: OKX Actual Notional authority helper.
+    // For each paper ledger position, look up a matching OKX actual position
+    // (same symbol + same side) and return its notionalUsd as authoritative override.
+    // This allows manual/external positions with unknown ledger units to be resolved
+    // via OKX Actual instead of triggering UNKNOWN_UNIT_SAFETY_BLOCK.
+    // Conditions: okxActualPositionsReady must be true, notionalUsd must be finite > 0.
+    // If OKX Actual is absent or not ready, returns undefined → Fail-Closed preserved.
+    const okxActualPositionsReady = (state as any).okxActualPositionsReady === true;
+    const okxActualPositionsRaw: Array<{ symbol: string; sizeUsd?: number; notionalUsd?: number; side: string }> | undefined =
+        okxActualPositionsReady ? ((state as any).okxActualPositions ?? undefined) : undefined;
+
+    function findOkxActualNotional(pSymbol: string, pSide: string): number | undefined {
+        if (!Array.isArray(okxActualPositionsRaw)) return undefined;
+        const pSideLower = String(pSide).toLowerCase();
+        for (const okxP of okxActualPositionsRaw) {
+            if (!okxP) continue;
+            if (okxP.symbol !== pSymbol) continue;
+            if (String(okxP.side).toLowerCase() !== pSideLower) continue;
+            const n = typeof okxP.notionalUsd === "number" && Number.isFinite(okxP.notionalUsd) && okxP.notionalUsd > 0
+                ? okxP.notionalUsd
+                : typeof okxP.sizeUsd === "number" && Number.isFinite(okxP.sizeUsd) && okxP.sizeUsd > 0
+                    ? okxP.sizeUsd
+                    : undefined;
+            if (n !== undefined) return n;
+        }
+        return undefined;
+    }
+
     let hasUnknownUnit = false;
     const currentNotional = state.currentPositions.reduce((acc, p) => {
-        const auth = resolveOpenNotionalAuthority(p as any);
+        const okxNotional = findOkxActualNotional(String((p as any).symbol ?? ""), String((p as any).side ?? ""));
+        const auth = resolveOpenNotionalAuthority(p as any, okxNotional);
         if (!auth.authoritative || auth.valueUsd == null) {
             hasUnknownUnit = true;
             return NaN;
@@ -76,7 +105,8 @@ export function calculateRiskSizing(
     const currentSymbolNotional = state.currentPositions
         .filter((p) => p.symbol === input.symbol)
         .reduce((acc, p) => {
-            const auth = resolveOpenNotionalAuthority(p as any);
+            const okxNotional = findOkxActualNotional(String((p as any).symbol ?? ""), String((p as any).side ?? ""));
+            const auth = resolveOpenNotionalAuthority(p as any, okxNotional);
             if (!auth.authoritative || auth.valueUsd == null) {
                 hasUnknownUnit = true;
                 return NaN;

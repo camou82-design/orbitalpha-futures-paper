@@ -13,6 +13,8 @@ export type LiveExposureAuthorityInput = Readonly<{
     authority?: string;
     exchangeClOrdId?: string;
   }>;
+  /** BLOCKER 4-6: OKX actual positions for unknown-unit paper position authority resolution. */
+  okxActualPositions?: ReadonlyArray<{ symbol: string; sizeUsd?: number; notionalUsd?: number; side: string }> | null;
   pendingSymbolNotionalUsdt: number;
   pendingOrdersNotionalUsdt: number;
   isLiveAuthority: boolean;
@@ -43,13 +45,32 @@ export function sumOkxExposureNotional(
 
 export function sumPaperExposureNotional(
   positions: LiveExposureAuthorityInput["paperPositions"],
-  symbolFilter?: string
+  symbolFilter?: string,
+  okxActualPositions?: ReadonlyArray<{ symbol: string; sizeUsd?: number; notionalUsd?: number; side: string }> | null
 ): number | null {
+  // BLOCKER 4-6: OKX actual notional lookup for unknown-unit paper positions.
+  function findOkxNotional(pSymbol: string, pSide: string): number | undefined {
+    if (!Array.isArray(okxActualPositions)) return undefined;
+    const sideLower = String(pSide).toLowerCase();
+    for (const okxP of okxActualPositions) {
+      if (!okxP || okxP.symbol !== pSymbol) continue;
+      if (String(okxP.side).toLowerCase() !== sideLower) continue;
+      const n = typeof okxP.notionalUsd === "number" && Number.isFinite(okxP.notionalUsd) && okxP.notionalUsd > 0
+        ? okxP.notionalUsd
+        : typeof okxP.sizeUsd === "number" && Number.isFinite(okxP.sizeUsd) && okxP.sizeUsd > 0
+          ? okxP.sizeUsd
+          : undefined;
+      if (n !== undefined) return n;
+    }
+    return undefined;
+  }
+
   let total = 0;
   for (const p of positions) {
     if (!p || typeof p.symbol !== "string") continue;
     if (symbolFilter != null && p.symbol !== symbolFilter) continue;
-    const auth = resolveOpenNotionalAuthority(p as any);
+    const okxNotional = findOkxNotional(p.symbol, String(p.side ?? ""));
+    const auth = resolveOpenNotionalAuthority(p as any, okxNotional);
     if (!auth.authoritative || auth.valueUsd == null) return null; // Fail closed: exposure unknown
     total += Math.abs(auth.valueUsd);
   }
@@ -61,8 +82,8 @@ export function resolveLiveExposureAuthority(input: LiveExposureAuthorityInput):
     sumOkxExposureNotional(input.okxPositions, input.symbol) + Math.max(0, input.pendingSymbolNotionalUsdt);
   const okx_account_notional_usdt =
     sumOkxExposureNotional(input.okxPositions) + Math.max(0, input.pendingOrdersNotionalUsdt);
-  const paper_symbol_notional_usdt = sumPaperExposureNotional(input.paperPositions, input.symbol) ?? NaN; // Keep interface type but signal NaN if null
-  const paper_account_notional_usdt = sumPaperExposureNotional(input.paperPositions) ?? NaN;
+  const paper_symbol_notional_usdt = sumPaperExposureNotional(input.paperPositions, input.symbol, input.okxActualPositions) ?? NaN;
+  const paper_account_notional_usdt = sumPaperExposureNotional(input.paperPositions, undefined, input.okxActualPositions) ?? NaN;
 
   const useOkx = input.isLiveAuthority;
   return {
@@ -75,6 +96,7 @@ export function resolveLiveExposureAuthority(input: LiveExposureAuthorityInput):
     authority_source: useOkx ? "okx_actual" : "paper_ledger"
   };
 }
+
 
 export function emitLiveExposureAuthorityProof(
   emit: (payload: Record<string, unknown>) => void,
