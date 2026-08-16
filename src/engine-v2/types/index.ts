@@ -451,6 +451,8 @@ export interface V2BridgeSnapshot {
     boxLow: number;
     boxPos: number;
     rangeConfidence: number;
+    boxCohesion01?: number;
+    boxCohesionDiag?: number;
     breakoutFailureRate: number;
     trendWeaknessScore: number;
     rangeOscillationScore: number;

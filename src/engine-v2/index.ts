@@ -6100,6 +6100,24 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2_reject_reason_after: blockReason
     }));
     console.info(JSON.stringify({
+        event: "V2_STRUCTURAL_METRIC_PROPAGATION_PROOF",
+        symbol: String(input.symbol),
+        source_boxCohesion01: input.snapshot?.boxCohesion01,
+        adapted_boxCohesion01: authoritativeInput.snapshot?.boxCohesion01,
+        final_boxCohesion01: boxCohesion01,
+        source_trendWeaknessScore: input.snapshot?.trendWeaknessScore,
+        adapted_trendWeaknessScore: authoritativeInput.snapshot?.trendWeaknessScore,
+        final_trendWeaknessScore: trendWeaknessFromMeta,
+        source_breakoutFailureRate: input.snapshot?.breakoutFailureRate,
+        adapted_breakoutFailureRate: authoritativeInput.snapshot?.breakoutFailureRate,
+        source_rangeOscillationScore: input.snapshot?.rangeOscillationScore,
+        adapted_rangeOscillationScore: authoritativeInput.snapshot?.rangeOscillationScore,
+        rangeConfidence,
+        rangeConfidenceSource: rangeMetadataSource,
+        fallbackUsed: rangeMetadataSource === "snapshot_fallback" || rangeMetadataMissingFields.length > 0,
+        fallbackFields: rangeMetadataMissingFields
+    }));
+    console.info(JSON.stringify({
         event: "V2_AUTHORITY_PROMOTION_FINALIZER_PROOF",
         symbol: String(input.symbol),
         market_mode: marketMode,

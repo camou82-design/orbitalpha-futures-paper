@@ -154,6 +154,13 @@ function clamp(value: number, min: number, max: number): number {
  */
 export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmentOutput): ExecutorOutput {
     const { snapshot: sn } = input;
+    const boxCohesion01 = typeof sn.boxCohesion01 === "number" && Number.isFinite(sn.boxCohesion01) ? sn.boxCohesion01 : 0;
+    const trendWeaknessScore = typeof sn.trendWeaknessScore === "number" && Number.isFinite(sn.trendWeaknessScore) ? sn.trendWeaknessScore : 0;
+    const rangeConfidence = typeof sn.rangeConfidence === "number" && Number.isFinite(sn.rangeConfidence) ? sn.rangeConfidence : 0;
+    const boxPos = typeof sn.boxPos === "number" && Number.isFinite(sn.boxPos) ? sn.boxPos : null;
+    const breakoutFailureRate = typeof sn.breakoutFailureRate === "number" && Number.isFinite(sn.breakoutFailureRate) ? sn.breakoutFailureRate : 0;
+    const rangeOscillationScore = typeof sn.rangeOscillationScore === "number" && Number.isFinite(sn.rangeOscillationScore) ? sn.rangeOscillationScore : 0;
+
     if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
         return {
             signal: "WAIT_RECHECK",
@@ -164,7 +171,15 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             isAddOnEligible: false,
             stopPrice: null,
             invalidationPx: null,
-            metadata: { whipsaw_shock_recheck: true }
+            metadata: {
+                whipsaw_shock_recheck: true,
+                boxPos,
+                rangeConfidence,
+                boxCohesion01,
+                trendWeaknessScore,
+                breakoutFailureRate,
+                rangeOscillationScore
+            }
         };
     }
 
@@ -206,7 +221,13 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                 stop_basis: "conservative_probe_basis",
                 swing_low: swingLow,
                 box_mid: boxMid,
-                atr_stop: stopBasisAtr
+                atr_stop: stopBasisAtr,
+                boxPos,
+                rangeConfidence,
+                boxCohesion01,
+                trendWeaknessScore,
+                breakoutFailureRate,
+                rangeOscillationScore
             }
         };
     }
@@ -237,15 +258,17 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                 stop_basis: "conservative_probe_basis",
                 swing_high: swingHigh,
                 box_mid: boxMid,
-                atr_stop: stopBasisAtr
+                atr_stop: stopBasisAtr,
+                boxPos,
+                rangeConfidence,
+                boxCohesion01,
+                trendWeaknessScore,
+                breakoutFailureRate,
+                rangeOscillationScore
             }
         };
     }
 
-    const boxPos = typeof sn.boxPos === "number" && Number.isFinite(sn.boxPos) ? sn.boxPos : null;
-    const rangeConfidence = typeof sn.rangeConfidence === "number" && Number.isFinite(sn.rangeConfidence) ? sn.rangeConfidence : 0;
-    const breakoutFailureRate = typeof sn.breakoutFailureRate === "number" && Number.isFinite(sn.breakoutFailureRate) ? sn.breakoutFailureRate : 0;
-    const rangeOscillationScore = typeof sn.rangeOscillationScore === "number" && Number.isFinite(sn.rangeOscillationScore) ? sn.rangeOscillationScore : 0;
     const isDistorted = (judgment.metadata as any)?.isDistorted === true;
     const isDrifting = (judgment.metadata as any)?.isDrifting === true;
     const distortionFactor = (judgment.metadata as any)?.distortionFactor ?? 0;
@@ -1147,6 +1170,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const metadata: Record<string, string | number | boolean | null | any> = {
         boxPos: currentBoxPos,
         rangeConfidence,
+        boxCohesion01,
+        trendWeaknessScore,
         breakoutFailureRate,
         rangeOscillationScore,
         isUpper,

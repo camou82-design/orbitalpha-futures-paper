@@ -420,6 +420,14 @@ export function resolveSymbolDecisionEnvelope(
         ema60Slope: snapshot.ema60Slope,
         atrExpansion: snapshot.atrExpansion,
         volumeExpansion: snapshot.volumeExpansion,
+        boxCohesion01: snapshot.boxCohesion01,
+        boxCohesionDiag: snapshot.boxCohesion01,
+        trendWeaknessScore: snapshot.trendWeaknessScore,
+        trendWeaknessDiag: snapshot.trendWeaknessScore,
+        breakoutFailureRate: snapshot.breakoutFailureRate,
+        breakoutFailureRateDiag: snapshot.breakoutFailureRate,
+        rangeOscillationScore: snapshot.rangeOscillationScore,
+        rangeOscillationDiag: snapshot.rangeOscillationScore,
         candles: snapshot.candles,
         htf_candles: snapshot.htf_candles
     };
