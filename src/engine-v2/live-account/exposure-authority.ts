@@ -1,4 +1,4 @@
-import { resolveOpenNotionalUsd, resolveOpenNotionalAuthority } from "./position-size-authority";
+import { resolveOpenNotionalUsd, resolveOpenNotionalAuthority, isV2AuthorityRow } from "./position-size-authority";
 
 export type LiveExposureAuthorityInput = Readonly<{
   symbol: string;
@@ -28,6 +28,12 @@ export type LiveExposureAuthorityResult = Readonly<{
   final_symbol_notional_usdt: number;
   final_account_notional_usdt: number;
   authority_source: "okx_actual" | "paper_ledger";
+
+  strategy_symbol_notional_usdt: number;
+  strategy_account_notional_usdt: number;
+  manual_external_notional_usdt: number;
+  bot_v2_notional_usdt: number;
+  excluded_manual_position_count: number;
 }>;
 
 export function sumOkxExposureNotional(
@@ -43,12 +49,11 @@ export function sumOkxExposureNotional(
   return total;
 }
 
-export function sumPaperExposureNotional(
+export function analyzePaperExposure(
   positions: LiveExposureAuthorityInput["paperPositions"],
   symbolFilter?: string,
   okxActualPositions?: ReadonlyArray<{ symbol: string; sizeUsd?: number; notionalUsd?: number; side: string }> | null
-): number | null {
-  // BLOCKER 4-6: OKX actual notional lookup for unknown-unit paper positions.
+): { total: number | null; strategyOnly: number | null; manualExternal: number; botV2: number; excludedManualCount: number } {
   function findOkxNotional(pSymbol: string, pSide: string): number | undefined {
     if (!Array.isArray(okxActualPositions)) return undefined;
     const sideLower = String(pSide).toLowerCase();
@@ -66,15 +71,47 @@ export function sumPaperExposureNotional(
   }
 
   let total = 0;
+  let strategyOnly = 0;
+  let manualExternal = 0;
+  let botV2 = 0;
+  let excludedManualCount = 0;
+  let hasUnknown = false;
+
   for (const p of positions) {
     if (!p || typeof p.symbol !== "string") continue;
     if (symbolFilter != null && p.symbol !== symbolFilter) continue;
     const okxNotional = findOkxNotional(p.symbol, String(p.side ?? ""));
     const auth = resolveOpenNotionalAuthority(p as any, okxNotional);
-    if (!auth.authoritative || auth.valueUsd == null) return null; // Fail closed: exposure unknown
-    total += Math.abs(auth.valueUsd);
+    
+    if (!auth.authoritative || auth.valueUsd == null) {
+      hasUnknown = true; // Fail closed: exposure unknown
+      continue;
+    }
+    
+    const val = Math.abs(auth.valueUsd);
+    total += val;
+    
+    if (isV2AuthorityRow(p as any)) {
+      strategyOnly += val;
+      botV2 += val;
+    } else {
+      manualExternal += val;
+      excludedManualCount++;
+    }
   }
-  return total;
+  
+  if (hasUnknown) {
+    return { total: null, strategyOnly: null, manualExternal, botV2, excludedManualCount };
+  }
+  return { total, strategyOnly, manualExternal, botV2, excludedManualCount };
+}
+
+export function sumPaperExposureNotional(
+  positions: LiveExposureAuthorityInput["paperPositions"],
+  symbolFilter?: string,
+  okxActualPositions?: ReadonlyArray<{ symbol: string; sizeUsd?: number; notionalUsd?: number; side: string }> | null
+): number | null {
+  return analyzePaperExposure(positions, symbolFilter, okxActualPositions).total;
 }
 
 export function resolveLiveExposureAuthority(input: LiveExposureAuthorityInput): LiveExposureAuthorityResult {
@@ -82,8 +119,15 @@ export function resolveLiveExposureAuthority(input: LiveExposureAuthorityInput):
     sumOkxExposureNotional(input.okxPositions, input.symbol) + Math.max(0, input.pendingSymbolNotionalUsdt);
   const okx_account_notional_usdt =
     sumOkxExposureNotional(input.okxPositions) + Math.max(0, input.pendingOrdersNotionalUsdt);
-  const paper_symbol_notional_usdt = sumPaperExposureNotional(input.paperPositions, input.symbol, input.okxActualPositions) ?? NaN;
-  const paper_account_notional_usdt = sumPaperExposureNotional(input.paperPositions, undefined, input.okxActualPositions) ?? NaN;
+    
+  const symbolAnalysis = analyzePaperExposure(input.paperPositions, input.symbol, input.okxActualPositions);
+  const accountAnalysis = analyzePaperExposure(input.paperPositions, undefined, input.okxActualPositions);
+  
+  const paper_symbol_notional_usdt = symbolAnalysis.total ?? NaN;
+  const paper_account_notional_usdt = accountAnalysis.total ?? NaN;
+  
+  const strategy_symbol_notional_usdt = symbolAnalysis.strategyOnly ?? NaN;
+  const strategy_account_notional_usdt = accountAnalysis.strategyOnly ?? NaN;
 
   const useOkx = input.isLiveAuthority;
   return {
@@ -93,7 +137,13 @@ export function resolveLiveExposureAuthority(input: LiveExposureAuthorityInput):
     paper_account_notional_usdt,
     final_symbol_notional_usdt: useOkx ? okx_symbol_notional_usdt : paper_symbol_notional_usdt,
     final_account_notional_usdt: useOkx ? okx_account_notional_usdt : paper_account_notional_usdt,
-    authority_source: useOkx ? "okx_actual" : "paper_ledger"
+    authority_source: useOkx ? "okx_actual" : "paper_ledger",
+    
+    strategy_symbol_notional_usdt,
+    strategy_account_notional_usdt,
+    manual_external_notional_usdt: accountAnalysis.manualExternal,
+    bot_v2_notional_usdt: accountAnalysis.botV2,
+    excluded_manual_position_count: accountAnalysis.excludedManualCount
   };
 }
 

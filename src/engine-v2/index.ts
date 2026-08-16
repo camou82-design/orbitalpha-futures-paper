@@ -5101,8 +5101,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 isLiveAuthority: true
             });
 
-            existingAccountNotionalUsdt = exposureAuthority.final_account_notional_usdt;
-            existingSymbolNotionalUsdt = exposureAuthority.final_symbol_notional_usdt;
+            existingAccountNotionalUsdt = exposureAuthority.strategy_account_notional_usdt;
+            existingSymbolNotionalUsdt = exposureAuthority.strategy_symbol_notional_usdt;
 
             const addOnPolicyMode =
                 (v2State as any).addOnPolicyMode ??
@@ -5157,6 +5157,22 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         (addOnPolicy as any)?.riskProjection?.riskBudgetAllowedNotional ??
                         null)
                     : null;
+
+                if (input.evaluationMode !== "diagnostic") {
+                    console.info(JSON.stringify({
+                        event: "V2_STRATEGY_EXPOSURE_PROOF",
+                        symbol: String(input.symbol),
+                        strategy_account_notional_usdt: existingAccountNotionalUsdt,
+                        strategy_symbol_notional_usdt: existingSymbolNotionalUsdt,
+                        okx_actual_account_notional_usdt: exposureAuthority.okx_account_notional_usdt,
+                        manual_external_notional_usdt: exposureAuthority.manual_external_notional_usdt,
+                        bot_v2_notional_usdt: exposureAuthority.bot_v2_notional_usdt,
+                        account_cap_usdt: input.config.okxLiveMaxAccountNotionalUsdt ?? null,
+                        symbol_cap_usdt: input.config.okxLiveMaxSymbolNotionalUsdt ?? null,
+                        available_balance_usdt: availableBalanceUsdt,
+                        excluded_manual_position_count: exposureAuthority.excluded_manual_position_count
+                    }));
+                }
 
                 const sizingResult = evaluateEquityAdaptiveSizing({
                     symbol: String(input.symbol),

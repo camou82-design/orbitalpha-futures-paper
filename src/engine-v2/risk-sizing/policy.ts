@@ -1,5 +1,5 @@
 import { EngineV2Input, ExecutorOutput, RiskSizingOutput, MarketJudgmentOutput, RegimeConfidenceOutput } from "../types";
-import { resolveOpenNotionalUsd, resolveOpenMarginUsd, resolveOpenNotionalAuthority } from "../live-account/position-size-authority";
+import { resolveOpenNotionalUsd, resolveOpenMarginUsd, resolveOpenNotionalAuthority, isV2AuthorityRow } from "../live-account/position-size-authority";
 
 /**
  * Tier 5: Risk & Sizing Policy (Refined)
@@ -100,6 +100,7 @@ export function calculateRiskSizing(
             hasUnknownUnit = true;
             return NaN;
         }
+        if (!isV2AuthorityRow(p as any)) return acc;
         return acc + auth.valueUsd;
     }, 0);
     const currentSymbolNotional = state.currentPositions
@@ -111,6 +112,7 @@ export function calculateRiskSizing(
                 hasUnknownUnit = true;
                 return NaN;
             }
+            if (!isV2AuthorityRow(p as any)) return acc;
             return acc + auth.valueUsd;
         }, 0);
     const marketSnapshotReady =
