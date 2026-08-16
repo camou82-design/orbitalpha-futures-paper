@@ -5096,6 +5096,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 symbol: String(input.symbol),
                 okxPositions: validPositionsList,
                 paperPositions: currentPositions,
+                okxActualPositions: okxPositionsValid ? validPositionsList : null,
                 pendingSymbolNotionalUsdt,
                 pendingOrdersNotionalUsdt,
                 isLiveAuthority: true
