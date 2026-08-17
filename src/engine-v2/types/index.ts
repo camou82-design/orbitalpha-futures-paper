@@ -476,6 +476,7 @@ export interface V2BridgeSnapshot {
     rangeSignalKeptByRelax?: boolean;
     candles?: import("../../models/types").Candle[];
     htf_candles?: Record<string, import("../../models/types").Candle[]>;
+    reviewing_ticks: number;
 }
 
 export interface V2BridgeLegacyDecision {

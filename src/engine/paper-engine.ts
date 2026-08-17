@@ -1493,8 +1493,12 @@ export class PaperEngine {
   /** 鍮꾩쁺?? 理쒓렐 ?깅퀎 `decision_funnel_tick` ?ㅻ깄??(理쒕? DECISION_FUNNEL_RING_MAX). */
   private decisionFunnelTickRing: DecisionFunnelTick[] = [];
   /** 鍮꾩쁺?? Stage 1 吏꾩엯 寃??SKIP) 以묒씤 ?щ낵??泥대쪟 ?쒓컙 諛??덉쭏 異붿쟻 */
-  /** 鍮꾩쁺?? Stage 1 吏꾩엯 寃€??SKIP) 以묒씤 ?щ낵??泥대쪟 ?쒓컙 諛??덉쭏 異붿쟻 */
-  private reviewingState = new Map<string, { ticks: number; initialQuality: number; lastQuality: number }>();
+  private reviewingState = new Map<string, {
+    ticks: number;
+    initialQuality: number;
+    lastQuality: number;
+    side: "long" | "short";
+  }>();
   private lastMarketMode: MarketModeSelectorOutput | null = null;
   private lastRiskExposure: RiskExposureOutput | null = null;
   private lastExplanation: PaperExplanationFields | null = null;
@@ -6058,6 +6062,7 @@ export class PaperEngine {
 
       // 1. Snapshot-Check & Preliminary Block Logging
       if (!snap) {
+        this.reviewingState.delete(symKeyEarly);
         const resNull = blockRes || evaluatePaperSymbolEntry({
           runCycleId: String(this.runCycleId),
           config: this.config,
@@ -6084,11 +6089,10 @@ export class PaperEngine {
           rangeReversalImmediateSwitch: undefined,
           regimeExitConsumed: this.regimeExitConsumedBySymbol.get(symKeyEarly),
           routingActiveEngine: marketModeOut.routing.activeEngine,
+          reviewingTicks: 0,
+          autoEntryTriggered: false,
           logger: this.logger
         });
-
-
-
 
         this.logger.info(
           "PAPER_TRADE_BLOCK_DECOMPOSITION",
@@ -6108,11 +6112,67 @@ export class PaperEngine {
         continue;
       }
 
+      // Candidate reviewing ticks calculation
+      const sig = snapForDecision?.signal;
+      const candidateSide: "long" | "short" | null =
+        sig === "paper_long_candidate"
+          ? "long"
+          : sig === "paper_short_candidate"
+            ? "short"
+            : null;
+
+      const hasOpenPos = !!existingPos;
+      const currentStage = existingPos?.entryStage ?? 0;
+      const candidateEligible =
+        snapForDecision != null &&
+        candidateSide != null &&
+        !hasOpenPos &&
+        currentStage === 0 &&
+        !symbolBlocked &&
+        !isManualCooldownActive;
+
+      let reviewingTicks = 0;
+      let autoEntryTriggered = false;
+
+      if (candidateEligible && snapForDecision) {
+        const rev = this.reviewingState.get(symKeyEarly);
+        const qualityScore = Number(snapForDecision.qualityScore ?? 0);
+        let nextTicks = 1;
+        if (rev && rev.side === candidateSide && qualityScore >= rev.initialQuality - 2) {
+          nextTicks = rev.ticks + 1;
+          this.reviewingState.set(symKeyEarly, {
+            ticks: nextTicks,
+            initialQuality: rev.initialQuality,
+            lastQuality: qualityScore,
+            side: candidateSide
+          });
+        } else {
+          nextTicks = 1;
+          this.reviewingState.set(symKeyEarly, {
+            ticks: 1,
+            initialQuality: qualityScore,
+            lastQuality: qualityScore,
+            side: candidateSide
+          });
+        }
+        reviewingTicks = nextTicks;
+        autoEntryTriggered = nextTicks >= 6;
+      } else {
+        this.reviewingState.delete(symKeyEarly);
+        reviewingTicks = 0;
+        autoEntryTriggered = false;
+      }
+
+      const snapForDecisionWithReviewing: SymbolSnapshotLike | null = snapForDecision ? {
+        ...snapForDecision,
+        reviewing_ticks: reviewingTicks
+      } : null;
+
       // 2. Decision Logic
       let res = blockRes || evaluatePaperSymbolEntry({
-          runCycleId: String(this.runCycleId),
+        runCycleId: String(this.runCycleId),
         config: this.config,
-        snapshot: snapForDecision!,
+        snapshot: snapForDecisionWithReviewing!,
         dataReady: regimeUnknown === false,
         openPositionSide: existingPos?.side ?? null,
         regime: effectiveRegimeForDecision,
@@ -6136,6 +6196,8 @@ export class PaperEngine {
         regimeExitConsumed: this.regimeExitConsumedBySymbol.get(symKeyEarly),
         rangeStopReentryBlock: this.rangeStopReentryBlockedBySymbol.get(symKeyEarly),
         routingActiveEngine: marketModeOut.routing.activeEngine,
+        reviewingTicks,
+        autoEntryTriggered,
         logger: this.logger
       });
 
@@ -6187,7 +6249,7 @@ export class PaperEngine {
         fetchedAt,
         runCycleId: String(this.runCycleId),
         evaluationMode: "authoritative",
-        snapshot: buildV2SnapshotBridge(snapForDecision!),
+        snapshot: buildV2SnapshotBridge(snapForDecisionWithReviewing ?? snapForDecision!),
         legacy: buildV2LegacyBridge(res),
         config: buildV2ConfigBridge(this.config),
         state: (() => {
@@ -23232,7 +23294,7 @@ function buildEntryOpenedEventPayload(
     ...buildAuthorityEventMeta(authority, pos.sizeUsd)
   };
 }
-function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapshot {
+export function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapshot {
   return {
     lastPrice: snap.lastPrice,
     latestCandleClose: snap.latestCandleClose,
@@ -23262,7 +23324,8 @@ function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapshot {
     atrExpansion: snap.atrExpansion ?? 0,
     volumeExpansion: snap.volumeExpansion ?? 0,
     candles: snap.candles ?? [],
-    htf_candles: snap.htf_candles
+    htf_candles: snap.htf_candles,
+    reviewing_ticks: snap.reviewing_ticks ?? 0
   };
 }
 

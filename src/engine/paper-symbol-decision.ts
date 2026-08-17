@@ -178,6 +178,7 @@ export type SymbolSnapshotLike = Readonly<{
   lastPrice: number;
   latestCandleClose: number;
   signal: PaperSignal;
+  reviewing_ticks?: number;
   entryCandidate?: boolean;
   gateExpectedMove: number | null;
   gateRequiredMove: number | null;
