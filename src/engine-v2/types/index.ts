@@ -272,6 +272,7 @@ export interface EngineV2Input {
         lossStreaks: Record<string, number>;
         globalRiskScore: number;
         directionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
+        shockEmergencyBypass?: boolean;
         longAllow: boolean;
         shortAllow: boolean;
         executionReadiness: boolean;
@@ -808,6 +809,16 @@ export interface MarketJudgmentOutput {
         structural_hits: string[];
         context_hits: string[];
         confirmation_wait_reasons: string[];
+        whipsaw?: {
+            active: boolean;
+            isSoftWatch: boolean;
+            episodeId: string | null;
+            recheckTicks: number;
+            requiredTicks: number;
+            resetReason: string | null;
+            observationAgePassed: boolean;
+            finalRecheckConfirmed: boolean;
+        };
         early_probe?: {
             allowed: boolean;
             reason: string;

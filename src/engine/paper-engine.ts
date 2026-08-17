@@ -129,6 +129,7 @@ import { evaluateMarketModeSelector } from "./mode-selector";
 import { evaluateRiskExposure } from "./risk-exposure";
 import { buildPaperExplanation } from "./explanation-layer";
 import { runEngineV2, adaptV2Input, shouldEmitV2Proof } from "../engine-v2/index";
+import { clearWhipsawObservationState } from "../engine-v2/market-judgment/whipsaw-observer";
 import { normalizeOkxSwapContractsFromNotional, formatOkxSwapContractSzString, okxInstrumentSzDecimals, type OkxSwapInstrumentSizing } from "../engine-v2/okx-swap-sizing";
 import {
   resolvePositionOwnership,
@@ -1830,6 +1831,7 @@ export class PaperEngine {
       had_last_entry_decision: this.lastEntryDecision != null
     };
     this.reviewingState.clear();
+    clearWhipsawObservationState();
     this.lastTickRangeEvalBySymbol.clear();
     this.lastTickSymbolSnapshotBySymbol.clear();
     this.rangeReversalSwitchPendingBySymbol.clear();

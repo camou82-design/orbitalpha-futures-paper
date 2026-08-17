@@ -1,6 +1,7 @@
 import { EngineV2Input, EngineV2MarketSubtype, MarketJudgmentOutput } from "../types";
 import { Candle, classifyRangeZone } from "../../models/types";
 import { emaLastFromCloses, computeSlopesFromCandles } from "../../utils/math";
+import { updateWhipsawObservation } from "./whipsaw-observer";
 function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPhase"] {
     const shock = input.state.directionalShockState ?? "NONE";
     const crashState = String(input.state.crashState ?? "").toUpperCase();
@@ -615,6 +616,11 @@ function evaluateWhipsawShockRecheck(args: {
     contextHitCount: number;
     confirmationWaitReasons: string[];
     recheckTicks: number;
+    whipsawEpisodeId: string | null;
+    whipsawRecheckRequiredTicks: number;
+    whipsawCounterResetReason: string | null;
+    observationAgePassed: boolean;
+    finalRecheckConfirmed: boolean;
 } {
     const { input, shockPhase, rangePhase, transitionPhase, mixedBreakoutState, rangeMetadata, regimeFinal, noTradeReason } = args;
     if (regimeFinal === "NO_TRADE" && (noTradeReason === "DATA_NOT_READY" || noTradeReason === "DUMP_PROTECTION")) {
@@ -633,7 +639,12 @@ function evaluateWhipsawShockRecheck(args: {
             structuralHitCount: 0,
             contextHitCount: 0,
             confirmationWaitReasons: [],
-            recheckTicks: 0
+            recheckTicks: 0,
+            whipsawEpisodeId: null,
+            whipsawRecheckRequiredTicks: 6,
+            whipsawCounterResetReason: null,
+            observationAgePassed: false,
+            finalRecheckConfirmed: true
         };
     }
 
@@ -689,21 +700,36 @@ function evaluateWhipsawShockRecheck(args: {
     const hitCount = structuralHits.length;
 
     // RULE: Hard Block requires at least 1 micro reversal AND at least 1 other structural evidence
-    let active = microHitCount >= 1 && otherStructuralHitCount >= 1;
+    const rawActive = microHitCount >= 1 && otherStructuralHitCount >= 1;
 
     // Soft Watch: Micro reversal + context (directional shock) without heavy structural evidence
-    const isSoftWatch = !active && microHitCount >= 1 && contextHitCount >= 1;
+    const rawIsSoftWatch = !rawActive && microHitCount >= 1 && contextHitCount >= 1;
+
+    // Dedicated Symbol-Scoped WHIPSAW Observation State (Independent from V1 reviewingState)
+    const observation = updateWhipsawObservation({
+        symbol: input.symbol,
+        rawActive: rawActive || rawIsSoftWatch,
+        directionalShockState: directional,
+        structuralHits,
+        shockEmergencyBypass: input.state.shockEmergencyBypass === true,
+        now: (input.state as any)?.now ?? Date.now()
+    });
+
+    let active = rawActive;
+    let isSoftWatch = rawIsSoftWatch;
+
+    const finalRecheckConfirmed = retestConfirmed || reclaimConfirmed;
 
     // --- Deactivation (Release) Conditions ---
     if (active) {
-        if (reviewingTicks >= 6) {
+        if (observation.observationAgePassed) {
             const structuralVanished = structuralHits.length === 0;
             const releasedBySwing = !micro.reverseSwingDetected;
             const releasedByVol = volExp < 1.7; // Easing from 2.0 threshold
             const releasedByFailRate = breakoutFailureRate < 0.32; // Easing from 0.4 threshold
-            const releasedByConfirmation = retestConfirmed || reclaimConfirmed;
+            const releasedByConfirmation = finalRecheckConfirmed;
 
-            if (structuralVanished || releasedBySwing || releasedByVol || releasedByFailRate || releasedByConfirmation) {
+            if (structuralVanished || (releasedByConfirmation && (releasedBySwing || releasedByVol || releasedByFailRate))) {
                 active = false;
             }
         }
@@ -717,6 +743,7 @@ function evaluateWhipsawShockRecheck(args: {
     if (!retestConfirmed) confirmationWaitReasons.push("retest_not_confirmed");
     if (!reclaimConfirmed) confirmationWaitReasons.push("reclaim_not_confirmed");
     if (reviewingTicks < 6) confirmationWaitReasons.push("reviewing_ticks_insufficient");
+    if (!observation.observationAgePassed) confirmationWaitReasons.push("whipsaw_observation_age_insufficient");
 
     const hits = structuralHits;
 
@@ -739,7 +766,12 @@ function evaluateWhipsawShockRecheck(args: {
         boxOrbitChop,
         structuralHitCount: otherStructuralHitCount,
         contextHitCount,
-        recheckTicks: reviewingTicks
+        recheckTicks: observation.recheckTicks,
+        whipsawEpisodeId: observation.episodeId,
+        whipsawRecheckRequiredTicks: observation.requiredTicks,
+        whipsawCounterResetReason: observation.resetReason,
+        observationAgePassed: observation.observationAgePassed,
+        finalRecheckConfirmed
     };
 }
 
@@ -1298,8 +1330,14 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
                 isSoftWatch: whipsaw.isSoftWatch,
                 hits: whipsaw.hits,
                 contextHits: whipsaw.contextHits,
+                whipsaw_episode_id: whipsaw.whipsawEpisodeId,
+                whipsaw_recheck_ticks: whipsaw.recheckTicks,
+                whipsaw_recheck_required_ticks: whipsaw.whipsawRecheckRequiredTicks,
+                whipsaw_counter_reset_reason: whipsaw.whipsawCounterResetReason,
                 retestConfirmed: whipsaw.retestConfirmed,
                 reclaimConfirmed: whipsaw.reclaimConfirmed,
+                observation_age_passed: whipsaw.observationAgePassed,
+                final_recheck_confirmed: whipsaw.finalRecheckConfirmed,
                 recheckTicks: whipsaw.recheckTicks,
                 structuralHitCount: whipsaw.structuralHitCount,
                 contextHitCount: whipsaw.contextHitCount,
@@ -1368,6 +1406,16 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
             structural_hits: whipsaw.hits,
             context_hits: whipsaw.contextHits,
             confirmation_wait_reasons: whipsaw.confirmationWaitReasons,
+            whipsaw: {
+                active: whipsaw.active,
+                isSoftWatch: whipsaw.isSoftWatch,
+                episodeId: whipsaw.whipsawEpisodeId,
+                recheckTicks: whipsaw.recheckTicks,
+                requiredTicks: whipsaw.whipsawRecheckRequiredTicks,
+                resetReason: whipsaw.whipsawCounterResetReason,
+                observationAgePassed: whipsaw.observationAgePassed,
+                finalRecheckConfirmed: whipsaw.finalRecheckConfirmed
+            },
             early_probe: {
                 allowed: earlyLongProbe.allowed || earlyShortProbe.allowed,
                 reason: earlyLongProbe.allowed ? earlyLongProbe.reason : earlyShortProbe.reason,
