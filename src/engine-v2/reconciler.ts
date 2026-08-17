@@ -428,6 +428,7 @@ export function resolveSymbolDecisionEnvelope(
         breakoutFailureRateDiag: snapshot.breakoutFailureRate,
         rangeOscillationScore: snapshot.rangeOscillationScore,
         rangeOscillationDiag: snapshot.rangeOscillationScore,
+        reviewing_ticks: snapshot.reviewing_ticks,
         candles: snapshot.candles,
         htf_candles: snapshot.htf_candles
     };

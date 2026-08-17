@@ -15,6 +15,7 @@
 
 import { buildV2SnapshotBridge } from "./paper-engine";
 import { adaptV2Input } from "../engine-v2";
+import { resolveSymbolDecisionEnvelope } from "../engine-v2/reconciler";
 import { detectMarketRegime } from "../engine-v2/market-judgment/detector";
 import type { SymbolSnapshotLike } from "./paper-symbol-decision";
 
@@ -104,6 +105,105 @@ class ReviewingStateSimulator {
   public hasState(symbol: string): boolean {
     return this.reviewingState.has(symbol);
   }
+}
+
+function captureProofLogs(run: () => void): any[] {
+  const proofLogs: any[] = [];
+  const origInfo = console.info;
+  console.info = (msg: unknown) => {
+    try {
+      const parsed = typeof msg === "string" ? JSON.parse(msg) : msg;
+      if (parsed && typeof parsed === "object" && typeof (parsed as { event?: unknown }).event === "string") {
+        proofLogs.push(parsed);
+      }
+    } catch {}
+    origInfo(msg as any);
+  };
+  try {
+    run();
+  } finally {
+    console.info = origInfo;
+  }
+  return proofLogs;
+}
+
+function buildMockBridgeFixtures(reviewingTicks: number) {
+  const now = Date.now();
+  const bridgeSnapshot = buildV2SnapshotBridge({
+    symbol: "BTCUSDT",
+    lastPrice: 60000,
+    latestCandleClose: 60000,
+    signal: "paper_long_candidate",
+    qualityScore: 85,
+    volumeRatioProxy: 1.0,
+    boxPos: 0.1,
+    boxRel: 0.1,
+    ema20: 59900,
+    ema60: 59500,
+    emaGap: 0.002,
+    boxHigh: 61000,
+    boxLow: 59000,
+    atr: 500,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    candidateStrength: "strong",
+    reviewing_ticks: reviewingTicks
+  });
+
+  const config = {
+    baseSizeUsd: 100,
+    maxOpenPositions: 3,
+    reentryCooldownMs: 0,
+    okxLiveMaxOrderNotionalUsdt: 100,
+    okxLiveMaxAddonNotionalUsdt: 100,
+    okxLiveMaxSymbolNotionalUsdt: 100,
+    okxLiveMaxAccountNotionalUsdt: 100,
+    okxLiveMaxAddonCount: 1,
+    okxLiveEmergencyMaxOrderNotionalUsdt: 100,
+    okxLiveMarginReserveRatio: 0.2
+  } as const;
+
+  const state = {
+    currentPositions: [],
+    symbolPositions: [],
+    lossStreaks: {},
+    globalRiskScore: 0,
+    longAllow: true,
+    shortAllow: true,
+    executionReadiness: true,
+    freshTickBarrierActive: false,
+    freshTickCompletedCycles: 0,
+    freshTickRequiredCycles: 0,
+    hasLongPosition: false,
+    hasShortPosition: false,
+    longStage: 0,
+    shortStage: 0,
+    crashState: "NONE",
+    pumpState: "NONE",
+    directionalShockState: "NONE",
+    serverTradeEnabled: true,
+    closeOnlyMode: false,
+    killSwitch: false,
+    reconcileSafeMode: false,
+    accountEquityKrw: 1000000,
+    maxUsableMarginKrw: 900000,
+    exposureNotionalCapKrw: 5000000,
+    symbolExposureNotionalCapKrw: 3000000
+  } as const;
+
+  const legacyBridge = {
+    regime: "RANGE",
+    finalDecision: "SKIP",
+    rejectReason: null,
+    requiredCostUsd: 0,
+    entryAllowed: false,
+    executorLabel: "range",
+    intentSide: null,
+    adaptiveOk: true,
+    adaptiveDetail: {}
+  } as const;
+
+  return { now, bridgeSnapshot, config, state, legacyBridge };
 }
 
 function runBlocker412Cases(): void {
@@ -275,80 +375,106 @@ function runBlocker412Cases(): void {
   // CASE G: V1 reviewing_ticks matches V2BridgeSnapshot.reviewing_ticks
   // -------------------------------------------------------------------------
   {
-    const v1Snap: SymbolSnapshotLike = {
-      ...baseSnap,
-      symbol: "BTCUSDT",
-      reviewing_ticks: 4
-    };
-
-    const bridge = buildV2SnapshotBridge(v1Snap);
-    assertEq(bridge.reviewing_ticks, 4, "CASE G bridge snapshot reviewing_ticks match");
-
-    const mockConfig = {
-      paperMaxOpenPositions: 3,
-      paperReentryCooldownMs: 0,
-      baseSizeUsd: 100,
-      paperTakerFeeRate: 0.0005,
-      paperFundingIntervalHours: 8,
-      okxAuthMode: "disabled",
-      okxAuthReady: false,
-      okxExchangeAuthOptIn: false,
-      okxLiveEnabled: false,
-      okxLiveMaxOrderNotionalUsdt: 100,
-      okxApiKey: "",
-      okxApiSecret: "",
-      okxPassphrase: "",
-      okxDemoApiKey: "",
-      okxDemoApiSecret: "",
-      okxDemoPassphrase: ""
-    } as any;
-
-    const mockBridgeState = {
-      currentPositions: [],
-      symbolPositions: [],
-      hasLongPosition: false,
-      hasShortPosition: false,
-      longStage: 0,
-      shortStage: 0,
-      crashState: "NONE",
-      pumpState: "NONE",
-      directionalShockState: "NONE"
-    } as any;
+    const { now, bridgeSnapshot, config, state, legacyBridge } = buildMockBridgeFixtures(4);
+    assertEq(bridgeSnapshot.reviewing_ticks, 4, "CASE G bridge snapshot reviewing_ticks match");
 
     const adapted = adaptV2Input(
       "BTCUSDT",
-      Date.now(),
-      bridge as any,
-      mockConfig,
-      mockBridgeState,
-      {} as any
+      now,
+      bridgeSnapshot as any,
+      config as any,
+      state as any,
+      {
+        decision: {
+          regime_state: "RANGE",
+          final_decision: "SKIP",
+          reject_reason: null,
+          required_cost_usd: 0
+        },
+        executorDecision: null,
+        intentSide: "none"
+      }
     );
 
     assertEq(adapted.snapshot.reviewing_ticks, 4, "CASE G adapted V2 input reviewing_ticks matches");
-    pass("CASE G - V1 reviewing_ticks propagated through V2 bridge", "v1.reviewing_ticks=4 == bridge.reviewing_ticks=4 == adapted.reviewing_ticks=4");
+
+    const proofLogs = captureProofLogs(() => {
+      resolveSymbolDecisionEnvelope({
+        symbol: "BTCUSDT",
+        fetchedAt: now,
+        snapshot: bridgeSnapshot,
+        config: config as any,
+        state: state as any,
+        legacy: legacyBridge,
+        v2Mode: "engine_v2",
+        evaluationMode: "authoritative",
+        runCycleId: "blocker-4-12-case-g"
+      });
+    });
+    const propProof = proofLogs.find((l) => l.event === "V2_STRUCTURAL_METRIC_PROPAGATION_PROOF");
+    assertTrue(propProof != null, "CASE G reconciler path emits V2_STRUCTURAL_METRIC_PROPAGATION_PROOF");
+    assertEq(propProof.source_reviewing_ticks, 4, "CASE G reconciler source reviewing_ticks preserved");
+    assertEq(propProof.adapted_reviewing_ticks, 4, "CASE G reconciler adapted reviewing_ticks preserved");
+    pass(
+      "CASE G - V1 reviewing_ticks propagated through V2 bridge and reconciler",
+      "bridge=4 == adaptV2Input=4 == reconciler source/adapted=4"
+    );
   }
 
   // -------------------------------------------------------------------------
-  // CASE H: WHIPSAW detector checks reviewing_ticks < 6
+  // CASE H: WHIPSAW detector checks reviewing_ticks < 6 (production detectMarketRegime)
   // -------------------------------------------------------------------------
   {
-    // Simulating detector logic directly: reviewingTicks < 6 => confirmationWaitReasons.push("reviewing_ticks_insufficient")
-    const getWhipsawReasons = (reviewingTicks: number) => {
-      const confirmationWaitReasons: string[] = [];
-      const retestConfirmed = false;
-      const reclaimConfirmed = false;
-      if (!retestConfirmed) confirmationWaitReasons.push("retest_not_confirmed");
-      if (!reclaimConfirmed) confirmationWaitReasons.push("reclaim_not_confirmed");
-      if (reviewingTicks < 6) confirmationWaitReasons.push("reviewing_ticks_insufficient");
-      return confirmationWaitReasons;
+    const baseJudgmentInput = {
+      symbol: "BTCUSDT",
+      now: Date.now(),
+      snapshot: {
+        lastPrice: 60000,
+        latestCandleClose: 60000,
+        boxHigh: 61000,
+        boxLow: 59000,
+        boxPos: 0.5,
+        rangeConfidence: 0.65,
+        ema20: 59900,
+        emaGap: 0.002,
+        volatilityProxy: 500,
+        boxCohesion01: 0.5,
+        breakoutFailureRate: 0.2,
+        trendWeaknessScore: 0.2,
+        rangeOscillationScore: 0.4,
+        boxBreakSide: "none" as const,
+        signal: "paper_long_candidate",
+        qualityScore: 85,
+        data_ready: true,
+        atr: 500,
+        volumeExpansion: 1.0,
+        atrExpansion: 1.0,
+        candles: []
+      },
+      state: {
+        currentPositions: [],
+        longAllow: true,
+        shortAllow: true,
+        directionalShockState: "NONE" as const,
+        crashState: "NONE",
+        pumpState: "NONE"
+      }
     };
 
-    const reasons5 = getWhipsawReasons(5);
+    const judgment5 = detectMarketRegime({
+      ...baseJudgmentInput,
+      snapshot: { ...baseJudgmentInput.snapshot, reviewing_ticks: 5 }
+    } as any);
+    const reasons5 = judgment5.diagnostics?.confirmation_wait_reasons ?? [];
     assertTrue(reasons5.includes("reviewing_ticks_insufficient"), "CASE H reviewing_ticks=5 has reviewing_ticks_insufficient");
 
-    const reasons6 = getWhipsawReasons(6);
+    const judgment6 = detectMarketRegime({
+      ...baseJudgmentInput,
+      snapshot: { ...baseJudgmentInput.snapshot, reviewing_ticks: 6 }
+    } as any);
+    const reasons6 = judgment6.diagnostics?.confirmation_wait_reasons ?? [];
     assertTrue(!reasons6.includes("reviewing_ticks_insufficient"), "CASE H reviewing_ticks=6 removes reviewing_ticks_insufficient");
-    pass("CASE H - WHIPSAW detector tick 5 vs 6 verification", "tick 5: insufficient present, tick 6: insufficient removed");
+    pass("CASE H - WHIPSAW detector tick 5 vs 6 verification", "production detectMarketRegime confirmation_wait_reasons");
   }
 
   // -------------------------------------------------------------------------

@@ -6133,6 +6133,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         adapted_breakoutFailureRate: authoritativeInput.snapshot?.breakoutFailureRate,
         source_rangeOscillationScore: input.snapshot?.rangeOscillationScore,
         adapted_rangeOscillationScore: authoritativeInput.snapshot?.rangeOscillationScore,
+        source_reviewing_ticks: input.snapshot?.reviewing_ticks,
+        adapted_reviewing_ticks: authoritativeInput.snapshot?.reviewing_ticks,
         rangeConfidence,
         rangeConfidenceSource: rangeMetadataSource,
         fallbackUsed: rangeMetadataSource === "snapshot_fallback" || rangeMetadataMissingFields.length > 0,
