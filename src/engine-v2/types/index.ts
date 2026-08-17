@@ -136,6 +136,12 @@ export interface EngineV2Position {
     probeHeld5mBars?: number;
     /** Blocker 4-15: Flag set when manual increase rebase detects structural invalidation is already breached */
     structureBreached?: boolean;
+    /** Blocker 4-16 / 4-17: Confirmed exchange protective SL order tracking */
+    slProtectionSatisfied?: boolean;
+    protectiveSlAlgoId?: string;
+    isProtectiveStopRegistered?: boolean;
+    slProtectionProvisional?: boolean;
+    protectiveVisibilityGraceDeadlineMs?: number;
 }
 
 /** 
@@ -234,6 +240,11 @@ export interface LegacyPositionAdapter {
     addonCount?: number;
     /** Blocker 4-15: Flag set when manual increase rebase detects structural invalidation is already breached */
     structureBreached?: boolean;
+    slProtectionSatisfied?: boolean;
+    protectiveSlAlgoId?: string;
+    isProtectiveStopRegistered?: boolean;
+    slProtectionProvisional?: boolean;
+    protectiveVisibilityGraceDeadlineMs?: number;
 }
 
 export interface LegacyResultAdapter {
@@ -379,7 +390,7 @@ export interface EngineV2SnapshotAdapter {
     ema60Slope?: number;
     atrExpansion?: number;
     volumeExpansion?: number;
-    atr20?: number;
+    atr20?: number | null;
     closedClose?: number;
     rcSlope?: number;
     candles?: import("../../models/types").Candle[];

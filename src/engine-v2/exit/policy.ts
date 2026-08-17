@@ -4,6 +4,10 @@ import {
     evaluateOppositePositionHysteresis,
     type OppositeHysteresisState
 } from "./opposite-hysteresis-policy";
+import {
+    evaluatePnlStopMeaningfulMoveGate,
+    type PnlStopMeaningfulMoveGateResult
+} from "./pnl-stop-gate";
 
 function resolvePosition(args: EvaluateV2ExitPolicyArgs) {
     const positions = args.v2State.symbolPositions ?? [];
@@ -64,6 +68,44 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         (side === "long" && dss === "DOWN") ||
         (side === "short" && dss === "UP");
 
+    let thresholdActionCandidate: "FULL_EXIT" | "REDUCE" | "NONE" = "NONE";
+    const PNL_EPS = 1e-6;
+    if (pnlStopProtectPct <= -0.02 + PNL_EPS) {
+        thresholdActionCandidate = "FULL_EXIT";
+    } else if (pnlStopProtectPct <= -0.012 + PNL_EPS) {
+        thresholdActionCandidate = "REDUCE";
+    }
+
+    const ledgerStopPx =
+        typeof pos?.ledger_stop_px === "number" && Number.isFinite(pos.ledger_stop_px) && pos.ledger_stop_px > 0
+            ? pos.ledger_stop_px
+            : null;
+    const atr20 =
+        typeof s.atr20 === "number" && Number.isFinite(s.atr20) && s.atr20 > 0
+            ? s.atr20
+            : null;
+
+    const pnlGateResult = evaluatePnlStopMeaningfulMoveGate({
+        symbol: args.symbol,
+        side,
+        entryPrice: Number(pos?.entryPrice ?? 0),
+        markPrice: Number(args.markPrice ?? 0),
+        leverage: Number(pos?.leverage ?? 0),
+        pnlStopProtectPct,
+        ledgerStopPx,
+        atr20,
+        slProtectionSatisfied: pos?.slProtectionSatisfied === true || pos?.isProtectiveStopRegistered === true,
+        slProtectionProvisional: pos?.slProtectionProvisional === true,
+        protectiveVisibilityGraceDeadlineMs: pos?.protectiveVisibilityGraceDeadlineMs ?? null,
+        now: (args.v2State as any)?.now ?? Date.now(),
+        protectiveSlAlgoId: pos?.protectiveSlAlgoId ?? null,
+        structureBreached: pos?.structureBreached === true,
+        invalidationBreachConfirmed: args.invalidationBreachConfirmed === true,
+        shockAgainst,
+        hasAdverseDirectionalAuthority,
+        thresholdActionCandidate
+    });
+
     let action: V2ExitPolicyResult["action"] = "HOLD";
     let reason: V2ExitPolicyResult["reason"] = "NO_EXIT_SIGNAL";
     let reduceRatio = 0;
@@ -77,16 +119,16 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         reason = "V2_EXIT_INVALIDATION";
         reduceRatio = 1;
         evidence += "|structure_invalidation_breached";
-    } else if (pnlStopProtectPct <= -0.02) {
+    } else if (pnlGateResult.finalAction === "FULL_EXIT") {
         action = "FULL_EXIT";
         reason = "PNL_STOP_PROTECT";
         reduceRatio = 1;
-        evidence += "|pnl_stop_critical";
-    } else if (pnlStopProtectPct <= -0.012) {
+        evidence += `|pnl_stop_critical|${pnlGateResult.evidence}`;
+    } else if (pnlGateResult.finalAction === "REDUCE") {
         action = "REDUCE";
         reason = "PNL_STOP_PROTECT";
         reduceRatio = 0.4;
-        evidence += "|pnl_stop_reduce";
+        evidence += `|pnl_stop_reduce|${pnlGateResult.evidence}`;
     } else if (shockAgainst) {
         // FULL_EXIT when current shockPhase is directly adverse to position side.
         action = "FULL_EXIT";
@@ -317,6 +359,7 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         profitProtectionActive: reason.startsWith("PROFIT_PROTECTION_") || oppositeHysteresisState === "PROFIT_PROTECT_HOLD",
         oppositeHysteresisState,
         oppositeHysteresisBlockReason,
-        thesisValid
+        thesisValid,
+        pnlStopGateResult: pnlGateResult
     };
 }

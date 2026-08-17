@@ -190,6 +190,9 @@ import { evaluateV2AddOnPolicy } from "./addon/policy";
 import { buildV2AddonEligibilityProof } from "./addon/eligibility-proof";
 import { evaluateV2ExitPolicy } from "./exit/policy";
 import {
+    buildPnlStopMeaningfulMoveGateProof
+} from "./exit/pnl-stop-gate";
+import {
     buildSoftExitFeeGateProof,
     computeGrossReturnPct
 } from "./exit/soft-exit-fee-gate";
@@ -1056,7 +1059,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             emaGap: authoritativeInput.snapshot.emaGap,
             trendWeaknessScore: authoritativeInput.snapshot.trendWeaknessScore,
             rangeConfidence: authoritativeInput.snapshot.rangeConfidence,
-            qualityScore: authoritativeInput.snapshot.qualityScore
+            qualityScore: authoritativeInput.snapshot.qualityScore,
+            atr20: typeof authoritativeInput.snapshot.atr20 === "number" && authoritativeInput.snapshot.atr20 > 0 ? authoritativeInput.snapshot.atr20 : null
         },
         trendSideCandidate: exitPreTrendSideCandidate,
         rangeSideCandidate: exitPreRangeSideCandidate,
@@ -1108,6 +1112,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
               evidence: `${exitPolicyBase.evidence}${softExitFeeGate.evidenceSuffix}`
           }
         : exitPolicyBase;
+
+    if (
+        exitPolicyBase.hasPosition &&
+        exitPolicyBase.pnlStopGateResult != null &&
+        shouldEmitV2Proof(
+            "V2_PNL_STOP_MEANINGFUL_MOVE_GATE_PROOF",
+            String(input.symbol),
+            `${exitPolicyBase.pnlStopGateResult.thresholdActionCandidate}|${exitPolicyBase.pnlStopGateResult.meaningfulMovePassed}|${exitPolicyBase.pnlStopGateResult.finalAction}|${exitPolicyBase.pnlStopGateResult.bypassReason ?? "none"}`,
+            true
+        )
+    ) {
+        console.info(JSON.stringify(buildPnlStopMeaningfulMoveGateProof(exitPolicyBase.pnlStopGateResult)));
+    }
 
     if (
         softExitFeeGate.evaluated &&
@@ -7175,6 +7192,10 @@ export function adaptV2Input(
             rangeSignalDowngraded: snapshot.rangeSignalDowngraded ?? false,
             rangeSignalKeptByRelax: snapshot.rangeSignalKeptByRelax ?? false,
             atr: snapshot.atr ?? snapshot.volatilityProxyDiag ?? 0,
+            atr20:
+                typeof snapshot.atr20 === "number" && Number.isFinite(snapshot.atr20) && snapshot.atr20 > 0
+                    ? snapshot.atr20
+                    : null,
             swingHighSlope: snapshot.swingHighSlope ?? 0,
             swingLowSlope: snapshot.swingLowSlope ?? 0,
             rangeCenterSlope: snapshot.rangeCenterSlope ?? 0,
@@ -7224,7 +7245,12 @@ export function adaptV2Input(
                     adverseAddonCount: p.adverseAddonCount,
                     adverseMoveAnchorCandleTs: p.adverseMoveAnchorCandleTs,
                     lastAdverseConfirmationCandleTs: p.lastAdverseConfirmationCandleTs,
-                    structureBreached: p.structureBreached === true
+                    structureBreached: p.structureBreached === true,
+                    slProtectionSatisfied: p.slProtectionSatisfied === true,
+                    protectiveSlAlgoId: p.protectiveSlAlgoId,
+                    isProtectiveStopRegistered: p.isProtectiveStopRegistered === true,
+                    slProtectionProvisional: p.slProtectionProvisional === true,
+                    protectiveVisibilityGraceDeadlineMs: p.protectiveVisibilityGraceDeadlineMs
                 };
             }),
             globalRiskScore: state.globalRiskScore,

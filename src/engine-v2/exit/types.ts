@@ -64,6 +64,7 @@ export type V2ExitPolicyResult = Readonly<{
     oppositeHysteresisState?: string;
     oppositeHysteresisBlockReason?: string | null;
     thesisValid?: boolean;
+    pnlStopGateResult?: import("./pnl-stop-gate").PnlStopMeaningfulMoveGateResult;
 }>;
 
 export type EvaluateV2ExitPolicyArgs = Readonly<{
@@ -77,6 +78,7 @@ export type EvaluateV2ExitPolicyArgs = Readonly<{
         trendWeaknessScore: number;
         rangeConfidence: number | null;
         qualityScore: number;
+        atr20?: number | null;
     };
     trendSideCandidate?: "long" | "short" | "none";
     rangeSideCandidate?: "long" | "short" | "none";
