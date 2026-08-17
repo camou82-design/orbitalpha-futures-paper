@@ -6072,6 +6072,26 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 hold_ms: v2PositionStateAuthority.holdMs
             }));
         }
+
+        const rawBridgePnl = (lifecyclePosition_latest as any)?.pnlPct;
+        const pnlReady = typeof rawBridgePnl === "number" && Number.isFinite(rawBridgePnl);
+        console.info(JSON.stringify({
+            event: "V2_POSITION_PNL_PROPAGATION_PROOF",
+            proof_stage: "v2_bridge_consumer",
+            symbol: String(input.symbol),
+            side: v2PositionStateAuthority.side,
+            entry_price: lifecyclePosition_latest?.entryPrice ?? null,
+            current_price: input.snapshot?.lastPrice ?? null,
+            paper_metric_pnl_pct_net: rawBridgePnl ?? null,
+            paper_open_unrealized_pnl_pct: rawBridgePnl ?? null,
+            bridge_pnl_pct: rawBridgePnl ?? null,
+            adapted_v2_pnl_pct: pnlReady ? rawBridgePnl : 0,
+            peak_unrealized_pnl_pct: v2PositionStateAuthority.peakUnrealizedPnlPct,
+            pnl_source: pnlReady ? "bridge_position" : "fallback_zero",
+            pnl_ready: pnlReady,
+            fallback_used: !pnlReady,
+            fallback_reason: !pnlReady ? "bridge_pnl_pct_missing" : null
+        }));
     }
 
     console.info(JSON.stringify({

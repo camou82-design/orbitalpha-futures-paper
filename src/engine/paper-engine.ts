@@ -6393,12 +6393,17 @@ export class PaperEngine {
             proofReasons.push("STAGE_DIFF");
           }
 
-          const pnlDiff = Math.abs((paperPos.unrealizedPnlPct ?? 0) - (v2PositionStateAuthority.unrealizedPnlPct ?? 0));
-          if (pnlDiff > 0.05) { // 5% diff
+          const paperPnlReady = typeof paperPos.unrealizedPnlPct === "number" && Number.isFinite(paperPos.unrealizedPnlPct);
+          const v2PnlReady = typeof v2PositionStateAuthority.unrealizedPnlPct === "number" && Number.isFinite(v2PositionStateAuthority.unrealizedPnlPct);
+          const pnlComparisonValid = paperPnlReady && v2PnlReady;
+          const pnlDiff = pnlComparisonValid ? Math.abs(paperPos.unrealizedPnlPct! - v2PositionStateAuthority.unrealizedPnlPct!) : null;
+          if (pnlDiff != null && pnlDiff > 0.05) { // 5% diff
             v2_paper_position_state_agreement = false;
             trueInconsistencyReasons.push("LARGE_PNL_DIFF");
-          } else if (pnlDiff > 0.01) {
+          } else if (pnlDiff != null && pnlDiff > 0.01) {
             proofReasons.push("MINOR_PNL_DIFF");
+          } else if (!pnlComparisonValid && paperHasPosition && v2HasPosition) {
+            proofReasons.push("PNL_COMPARISON_INCOMPLETE");
           }
         }
 
@@ -6419,6 +6424,9 @@ export class PaperEngine {
         const positionStateHighPriority = !v2_paper_position_state_agreement || trueInconsistencyReasons.length > 0;
 
         if (shouldEmitV2Proof("V2_POSITION_STATE_AUTHORITY_PROOF", String(sym), positionStateProofKey, positionStateHighPriority)) {
+          const paperPnlReady = typeof paperPos?.unrealizedPnlPct === "number" && Number.isFinite(paperPos.unrealizedPnlPct);
+          const v2PnlReady = typeof v2PositionStateAuthority.unrealizedPnlPct === "number" && Number.isFinite(v2PositionStateAuthority.unrealizedPnlPct);
+          const pnlComparisonValid = paperPnlReady && v2PnlReady;
           this.logger.info("V2_POSITION_STATE_AUTHORITY_PROOF", {
             symbol: sym,
             side: v2PositionStateAuthority.side,
@@ -6444,6 +6452,9 @@ export class PaperEngine {
             paper_unrealized_pnl_krw: paperPos?.unrealizedPnl ?? null,
             paper_unrealized_pnl_pct: paperPos?.unrealizedPnlPct ?? null,
             paper_position_state: paperHasPosition ? "open" : "none",
+            paper_pnl_ready: paperPnlReady,
+            v2_pnl_ready: v2PnlReady,
+            pnl_comparison_valid: pnlComparisonValid,
             v2_paper_position_state_agreement,
             known_shadow_gaps: knownShadowGaps,
             true_inconsistency_reasons: trueInconsistencyReasons,
@@ -12446,6 +12457,9 @@ export class PaperEngine {
           ...open, 
           highestPnlPctNet: highWater, 
           peakUnrealizedPnlPct: peakUnrealized,
+          unrealizedPnlPct: currentPnlPct,
+          unrealizedPnl: m.pnlUsdNet,
+          currentPrice: closePrice,
           peakPnlUpdatedAt: peakUnrealized > (open.peakUnrealizedPnlPct ?? -999) ? Date.now() : open.peakPnlUpdatedAt,
           breakevenStopRequired: beRequired,
           breakevenStopPrice: bePrice,
@@ -12453,6 +12467,23 @@ export class PaperEngine {
             ? { adverseMoveAnchorCandleTs: adverseAnchorCandleTs }
             : {})
         };
+
+        this.logger.info("V2_POSITION_PNL_PROPAGATION_PROOF", {
+          proof_stage: "paper_metric_persist",
+          symbol: open.symbol,
+          side: open.side,
+          entry_price: open.entryPrice,
+          current_price: closePrice,
+          paper_metric_pnl_pct_net: currentPnlPct,
+          paper_open_unrealized_pnl_pct: currentPnlPct,
+          bridge_pnl_pct: currentPnlPct,
+          adapted_v2_pnl_pct: currentPnlPct,
+          peak_unrealized_pnl_pct: peakUnrealized,
+          pnl_source: "paper_metric_pnl_pct_net",
+          pnl_ready: true,
+          fallback_used: false,
+          fallback_reason: null
+        });
       }
 
 
@@ -23334,6 +23365,7 @@ export function buildV2StateBridge(
           side: side,
           entryPrice: p.entryPrice,
           sizeUsd: p.sizeUsd,
+          pnlPct: p.unrealizedPnlPct,
           entryStage: p.entryStage ?? 1,
           peakUnrealizedPnlPct: p.peakUnrealizedPnlPct,
           peakPnlUpdatedAt: p.peakPnlUpdatedAt,
