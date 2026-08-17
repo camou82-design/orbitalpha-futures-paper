@@ -950,8 +950,11 @@ export type PaperOpenPositionRecord = {
   /** Probe 5분봉 홀드 카운트 (마지막 확인 시점). */
   probeHeld5mBars?: number;
 
-  
-  
+  /** Blocker 4-15: Flag set when manual increase rebase detects structural invalidation is already breached */
+  structureBreached?: boolean;
+  /** Blocker 4-15: Revision tracking for unique protective replacement algoClOrdIds */
+  protectiveRevision?: number;
+
   /** Shock/partial reduce lifecycle (policy-layer duplicate submit guard). */
   shockReduceState?: "IDLE" | "REQUESTED" | "SUBMITTED" | "PARTIALLY_FILLED" | "FILLED" | "TERMINAL";
   shockReduceFlowKey?: string;

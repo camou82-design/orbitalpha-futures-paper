@@ -6657,8 +6657,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             decision.lifecycleAuthority.addOnAllowed = false;
         }
 
+        const hasStructureBreach = Array.isArray(input.state.currentPositions) &&
+            input.state.currentPositions.some(p => p && p.symbol === "BTCUSDT" && p.structureBreached === true);
+
         // Suppress exit/partial/reduce policy
-        if (internal.exitPolicy) {
+        if (internal.exitPolicy && !hasStructureBreach) {
             internal.exitPolicy.action = "SUPPRESSED";
             internal.exitPolicy.shouldExit = false;
             internal.exitPolicy.shouldReduce = false;
@@ -6667,7 +6670,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
 
         // Suppress v2 exit authority
-        if (internal.v2ExitAuthority) {
+        if (internal.v2ExitAuthority && !hasStructureBreach) {
             (internal.v2ExitAuthority as any).exitAction = "none";
             (internal.v2ExitAuthority as any).shouldExit = false;
         }
@@ -7220,7 +7223,8 @@ export function adaptV2Input(
                     addonCount: p.addonCount,
                     adverseAddonCount: p.adverseAddonCount,
                     adverseMoveAnchorCandleTs: p.adverseMoveAnchorCandleTs,
-                    lastAdverseConfirmationCandleTs: p.lastAdverseConfirmationCandleTs
+                    lastAdverseConfirmationCandleTs: p.lastAdverseConfirmationCandleTs,
+                    structureBreached: p.structureBreached === true
                 };
             }),
             globalRiskScore: state.globalRiskScore,

@@ -321,6 +321,9 @@ import {
 import {
   classifyPositionSizeDelta,
   buildV2ManualReduceRebaseProof,
+  isEligibleForManualIncreaseAdoption,
+  rebasePositionProtectiveAuthority,
+  buildV2ManualIncreaseRebaseProof,
   type SizeDeltaClassification
 } from "../engine-v2/position/manual-reduce-rebase";
 import {
@@ -3108,9 +3111,74 @@ export class PaperEngine {
       }
 
       if (delta.classification === "MANUAL_INCREASE") {
-        open.reconcileState = "RECONCILE_MISMATCH";
-        open.lastCheckedAt = nowTs;
-        return { ledgerModified: true, mismatchType: "CONTRACT_MISMATCH", blocked: false };
+        if (isEligibleForManualIncreaseAdoption(open)) {
+          sizeDeltaClassification = delta.classification;
+          const beforeContracts = open.okxContracts ?? 0;
+          const beforeAvgPx = open.entryPrice;
+          const oldStop = open.stopPrice ?? null;
+          const oldTp = open.targetPrice1 ?? null;
+          const oldProtectiveContracts = open.okxContracts ?? 0;
+
+          // 1. Authoritative sync of contracts, avgPx, notional, leverage
+          this.syncOpenLedgerFromRemoteAuthority(open, remote);
+
+          // 2. Increment protective revision so replacement orders use unique algoClOrdIds
+          open.protectiveRevision = (open.protectiveRevision ?? 0) + 1;
+
+          // 3. Rebase SL & TP preserving structural context (or retain if already breached)
+          const currentSnap = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
+          const rebase = rebasePositionProtectiveAuthority({
+            open,
+            newAvgPx: remote.avgPx,
+            markPrice: currentSnap?.lastPrice ?? remote.avgPx,
+            currentSnapshot: currentSnap
+          });
+
+          if (rebase.rebaseStatus === "REBASE_SUCCESS" && rebase.rebasedStop != null) {
+            open.stopPrice = rebase.rebasedStop;
+            open.structureBreached = undefined;
+            if (rebase.rebasedTp != null) {
+              open.targetPrice1 = rebase.rebasedTp;
+            } else {
+              open.targetPrice1 = undefined;
+            }
+          } else if (rebase.rebaseStatus === "REBASE_REJECTED_STRUCTURE_ALREADY_BREACHED") {
+            open.structureBreached = true;
+          }
+
+          open.reconcileState = "MATCHED";
+          open.lastCheckedAt = nowTs;
+
+          this.logger.info(
+            "V2_MANUAL_INCREASE_REBASE_PROOF",
+            buildV2ManualIncreaseRebaseProof({
+              symbol: open.symbol,
+              side: open.side,
+              rebase_status: rebase.rebaseStatus,
+              rebase_reason: rebase.rebaseReason,
+              rebase_stop_source: rebase.rebasedStopSource,
+              rebase_tp_source: rebase.rebasedTpSource,
+              protective_revision: open.protectiveRevision,
+              structure_breached: open.structureBreached === true,
+              before_contracts: beforeContracts,
+              after_contracts: remote.contracts,
+              before_avg_px: beforeAvgPx,
+              after_avg_px: remote.avgPx,
+              old_stop: oldStop,
+              rebased_stop: open.stopPrice ?? rebase.rebasedStop,
+              old_tp: oldTp,
+              rebased_tp: open.targetPrice1 ?? rebase.rebasedTp,
+              old_protective_contracts: oldProtectiveContracts,
+              new_protective_contracts: remote.contracts
+            })
+          );
+          this.logPositionUnitInvariant(open);
+          return { ledgerModified: true, mismatchType: "MATCHED", blocked: false, sizeDeltaClassification };
+        } else {
+          open.reconcileState = "RECONCILE_MISMATCH";
+          open.lastCheckedAt = nowTs;
+          return { ledgerModified: true, mismatchType: "CONTRACT_MISMATCH", blocked: false };
+        }
       }
     }
 
@@ -9864,10 +9932,12 @@ export class PaperEngine {
     const instId = toOkxSwapInstId(open.symbol);
     const openedAt36 = open.openedAt.toString(36);
     // Unique but identifiable prefix for this specific position instance
-    // Format: oap{shortSymbol}{sideChar}{openedAtBase36}
+    // Format: oap{shortSymbol}{sideChar}{openedAtBase36}{revisionSuffix}
     const engineOwnedPrefix = `oap${open.symbol.slice(0, 5)}${open.side[0]}${openedAt36}`; 
-    const slAlgoClOrdId = `${engineOwnedPrefix}s`;
-    const tpAlgoClOrdId = `${engineOwnedPrefix}t`;
+    const rev = open.protectiveRevision ?? 0;
+    const revSuffix = rev > 0 ? `r${rev}` : "";
+    const slAlgoClOrdId = `${engineOwnedPrefix}${revSuffix}s`;
+    const tpAlgoClOrdId = `${engineOwnedPrefix}${revSuffix}t`;
 
     const symSideKey = `${open.symbol}:${open.side}`;
     const paperOpensForSync = await this.positions.loadOpenAll();
@@ -10002,6 +10072,17 @@ export class PaperEngine {
       entryPrice: refPx,
       ledgerPositionId: open.openedAt
     });
+
+    if (open.structureBreached === true) {
+      this.logger.warn("V2_PROTECTIVE_STOP_SKIP_STRUCTURE_BREACHED_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        stopPrice: open.stopPrice,
+        flowId,
+        detail: "Position structure is already breached; skipping protective order submission to hand off to V2 exit authority."
+      });
+      return { modified: false, success: true, record: open };
+    }
 
     // [VALIDATOR] Trigger price layout check
     const layoutCheck = this.validateProtectiveOkxTriggerLayout({ 
@@ -10271,10 +10352,11 @@ export class PaperEngine {
       contractsAuthority: contractsToProtect
     });
 
-    // 5. Execution
+    // 5. Execution (Safe Replacement Atomic Swap: Submit replacement first, cleanup stale cancel targets on success)
     let modified = false;
     let submittedProtective = false;
-    if (cancelTargets.length > 0) {
+    const isPureDuplicateCleanup = cancelTargets.length > 0 && !needSubmitSl && !needSubmitTp && !submitOco;
+    if (isPureDuplicateCleanup) {
       await this.okxDemo.cancelAlgoOrder(cancelTargets);
       modified = true;
     }
@@ -10415,8 +10497,8 @@ export class PaperEngine {
     // [BLOCKER-3-2] Explicit time-bounded visibility grace — shared by pre-visibility persist + evaluation.
     const PROTECTIVE_GRACE_DURATION_MS = 30_000;
 
-    // [BLOCKER-3-2] Durable algoId + grace deadline MUST land on open.json BEFORE pending rescan
-    // and visibility evaluation so a process restart cannot lose submit-accepted identity.
+    // [BLOCKER-4-15] Durable protective swap sequence:
+    // submit accepted → new algoId capture → open.json durable persist → old cancel
     if (submittedSlAlgoId || submittedTpAlgoId) {
       const preVisibilityNowMs = Date.now();
       const preVisibilityGraceDeadlineMs = preVisibilityNowMs + PROTECTIVE_GRACE_DURATION_MS;
@@ -10437,21 +10519,61 @@ export class PaperEngine {
           : {}),
         protectiveVisibilityGraceDeadlineMs: preVisibilityGraceDeadlineMs
       };
-      await this.persistV2OpenLedgerImmediate(preVisibilityPersistRecord, {
-        path: "positions/open.json",
-        openTraceId: flowId
-      });
-      open = preVisibilityPersistRecord;
-      modified = true;
-      this.logger.info("PROTECTIVE_ALGO_ID_DURABLE_PRE_VISIBILITY_PROOF", {
-        symbol: open.symbol,
-        side: open.side,
-        flowId,
-        submittedSlAlgoId,
-        submittedTpAlgoId,
-        protectiveVisibilityGraceDeadlineMs: preVisibilityGraceDeadlineMs,
-        detail: "Canonical algoId persisted to open.json BEFORE pending rescan and visibility evaluation"
-      });
+
+      let persistSuccess = false;
+      try {
+        persistSuccess = await this.persistV2OpenLedgerImmediate(preVisibilityPersistRecord, {
+          path: "positions/open.json",
+          openTraceId: flowId
+        });
+      } catch (err) {
+        this.logger.error("PROTECTIVE_ALGO_PERSIST_FAILED", {
+          symbol: open.symbol,
+          flowId,
+          error: String(err)
+        });
+        persistSuccess = false;
+      }
+
+      if (persistSuccess) {
+        open = preVisibilityPersistRecord;
+        modified = true;
+        this.logger.info("PROTECTIVE_ALGO_ID_DURABLE_PRE_VISIBILITY_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          submittedSlAlgoId,
+          submittedTpAlgoId,
+          protectiveVisibilityGraceDeadlineMs: preVisibilityGraceDeadlineMs,
+          detail: "Canonical algoId persisted to open.json BEFORE canceling old protective orders"
+        });
+
+        // ONLY AFTER new algoId is durably persisted to open.json do we cancel old protective orders
+        if (cancelTargets.length > 0) {
+          try {
+            await this.okxDemo.cancelAlgoOrder(cancelTargets);
+            this.logger.info("PROTECTIVE_OLD_STALE_CANCELED_POST_PERSIST_PROOF", {
+              symbol: open.symbol,
+              cancelTargetsCount: cancelTargets.length,
+              flowId
+            });
+          } catch (cancelErr) {
+            this.logger.warn("PROTECTIVE_OLD_STALE_CANCEL_FAILED_DEFERRED", {
+              symbol: open.symbol,
+              cancelTargets,
+              error: String(cancelErr),
+              flowId
+            });
+          }
+        }
+      } else {
+        this.logger.warn("PROTECTIVE_OLD_CANCEL_ABORTED_DUE_TO_PERSIST_FAILURE", {
+          symbol: open.symbol,
+          cancelTargetsCount: cancelTargets.length,
+          flowId,
+          detail: "New algoId failed to persist durably to open.json; keeping old protective order intact."
+        });
+      }
     }
 
     if (submittedProtective) {
@@ -23459,7 +23581,8 @@ export function buildV2StateBridge(
           addonCount: p.addonCount,
           adverseAddonCount: p.adverseAddonCount,
           adverseMoveAnchorCandleTs: p.adverseMoveAnchorCandleTs,
-          lastAdverseConfirmationCandleTs: p.lastAdverseConfirmationCandleTs
+          lastAdverseConfirmationCandleTs: p.lastAdverseConfirmationCandleTs,
+          structureBreached: p.structureBreached === true
         };
       })
       .filter((x): x is V2BridgePosition => x !== null),

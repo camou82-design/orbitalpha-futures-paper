@@ -77,6 +77,7 @@ function detectSoftInvalidationSignal(input: EvaluateOppositeHysteresisArgs): bo
 }
 
 function detectConfirmedInvalidationBreach(input: EvaluateOppositeHysteresisArgs): boolean {
+    if (input.proposedReason === "V2_EXIT_INVALIDATION") return true;
     if (!detectSoftInvalidationSignal(input)) return false;
     if (input.invalidationBreachConfirmed === true) return true;
     if (input.structuralBreakConfirmed === true) return true;

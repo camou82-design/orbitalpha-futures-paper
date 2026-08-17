@@ -134,6 +134,8 @@ export interface EngineV2Position {
     probeEntryBarTime?: number;
     /** Probe 5분봉 홀드 카운트 (마지막 확인 시점). */
     probeHeld5mBars?: number;
+    /** Blocker 4-15: Flag set when manual increase rebase detects structural invalidation is already breached */
+    structureBreached?: boolean;
 }
 
 /** 
@@ -230,6 +232,8 @@ export interface LegacyPositionAdapter {
     adverseMoveAnchorCandleTs?: number;
     lastAdverseConfirmationCandleTs?: number;
     addonCount?: number;
+    /** Blocker 4-15: Flag set when manual increase rebase detects structural invalidation is already breached */
+    structureBreached?: boolean;
 }
 
 export interface LegacyResultAdapter {
@@ -525,6 +529,8 @@ export interface V2BridgePosition {
     adverseAddonCount?: number;
     adverseMoveAnchorCandleTs?: number;
     lastAdverseConfirmationCandleTs?: number;
+    /** Blocker 4-15: Flag set when manual increase rebase detects structural invalidation is already breached */
+    structureBreached?: boolean;
 }
 
 export interface V2BridgeState {

@@ -72,6 +72,11 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
     if (!hasPosition) {
         action = "HOLD";
         reason = "NO_POSITION_HOLD";
+    } else if (pos?.structureBreached === true || args.invalidationBreachConfirmed === true) {
+        action = "FULL_EXIT";
+        reason = "V2_EXIT_INVALIDATION";
+        reduceRatio = 1;
+        evidence += "|structure_invalidation_breached";
     } else if (pnlStopProtectPct <= -0.02) {
         action = "FULL_EXIT";
         reason = "PNL_STOP_PROTECT";
@@ -201,7 +206,7 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
             proposedReduceRatio: reduceRatio,
             reversalConfirmed: args.reversalConfirmed,
             sameCycleExitConsumed: args.sameCycleExitConsumed,
-            invalidationBreachConfirmed: args.invalidationBreachConfirmed,
+            invalidationBreachConfirmed: pos?.structureBreached === true || args.invalidationBreachConfirmed === true,
             structuralBreakConfirmed: args.structuralBreakConfirmed,
             boxBreakConfirmed: args.boxBreakConfirmed
         });
