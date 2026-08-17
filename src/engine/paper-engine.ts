@@ -23449,6 +23449,7 @@ export function buildV2StateBridge(
           entryPrice: p.entryPrice,
           sizeUsd: p.sizeUsd,
           pnlPct: p.unrealizedPnlPct,
+          leverage: typeof p.leverage === "number" && Number.isFinite(p.leverage) && p.leverage > 0 ? p.leverage : undefined,
           entryStage: p.entryStage ?? 1,
           peakUnrealizedPnlPct: p.peakUnrealizedPnlPct,
           peakPnlUpdatedAt: p.peakPnlUpdatedAt,

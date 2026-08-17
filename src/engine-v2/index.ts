@@ -1063,7 +1063,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         reversalConfirmed: exitPreReversalConfirmed,
         invalidationBreachConfirmed: exitInvalidationBreachConfirmed,
         structuralBreakConfirmed: exitPreMeta?.structural_break_confirmed === true,
-        boxBreakConfirmed: exitBoxBreakConfirmed
+        boxBreakConfirmed: exitBoxBreakConfirmed,
+        markPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0)
     });
 
     const exitHeldPosition =

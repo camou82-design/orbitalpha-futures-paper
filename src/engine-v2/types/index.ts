@@ -95,6 +95,8 @@ export interface EngineV2Position {
     sizeUsd: number;
     entryStage: number;
     pnlPct: number;
+    /** Actual position leverage for PNL_STOP_PROTECT judgment authority. */
+    leverage?: number;
     ledger_stop_px?: number;
     peakUnrealizedPnlPct?: number;
     peakUnrealizedPnlUsd?: number;
@@ -518,6 +520,7 @@ export interface V2BridgePosition {
     breakevenStopConfirmed?: boolean;
     breakevenStopPrice?: number;
     pnlPct?: number;
+    leverage?: number;
     addonCount?: number;
     adverseAddonCount?: number;
     adverseMoveAnchorCandleTs?: number;

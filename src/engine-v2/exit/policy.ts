@@ -1,4 +1,5 @@
 import type { EvaluateV2ExitPolicyArgs, V2ExitPolicyResult, V2ExitUrgency, V2ExitAction, V2ExitReason } from "./types";
+import { computePnlStopProtectJudgmentPct } from "./stop-price-authority";
 import {
     evaluateOppositePositionHysteresis,
     type OppositeHysteresisState
@@ -37,6 +38,17 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
     const sizeUsd = Number(pos?.sizeUsd ?? 0);
     const stage = pos ? Math.max(1, Number(pos.entryStage ?? 1)) : 0;
     const hasPosition = pos != null;
+    const pnlStopProtectJudgment =
+        hasPosition && (side === "long" || side === "short")
+            ? computePnlStopProtectJudgmentPct({
+                  side,
+                  entryPrice: Number(pos?.entryPrice ?? 0),
+                  markPrice: Number(args.markPrice ?? 0),
+                  leverage: Number(pos?.leverage ?? 0),
+                  pnlPctNetFallback: pnlPct
+              })
+            : { pnlStopProtectPct: pnlPct, source: "pnl_pct_net_fallback" as const };
+    const pnlStopProtectPct = pnlStopProtectJudgment.pnlStopProtectPct;
     const shockAgainst =
         (side === "long" && args.judgment.shockPhase === "DOWN_SHOCK") ||
         (side === "short" && args.judgment.shockPhase === "UP_SHOCK");
@@ -60,12 +72,12 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
     if (!hasPosition) {
         action = "HOLD";
         reason = "NO_POSITION_HOLD";
-    } else if (pnlPct <= -0.02) {
+    } else if (pnlStopProtectPct <= -0.02) {
         action = "FULL_EXIT";
         reason = "PNL_STOP_PROTECT";
         reduceRatio = 1;
         evidence += "|pnl_stop_critical";
-    } else if (pnlPct <= -0.012) {
+    } else if (pnlStopProtectPct <= -0.012) {
         action = "REDUCE";
         reason = "PNL_STOP_PROTECT";
         reduceRatio = 0.4;
@@ -265,7 +277,7 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         }
     }
 
-    const critical = reason === "PNL_STOP_PROTECT" && pnlPct <= -0.02;
+    const critical = reason === "PNL_STOP_PROTECT" && pnlStopProtectPct <= -0.02;
     const exitUrgency = urgencyFromAction(action, critical);
     const exitConfidence = Math.max(0, Math.min(1, (qs / 100) * (action === "HOLD" ? 0.6 : 1)));
 

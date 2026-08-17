@@ -84,4 +84,6 @@ export type EvaluateV2ExitPolicyArgs = Readonly<{
     invalidationBreachConfirmed?: boolean;
     structuralBreakConfirmed?: boolean;
     boxBreakConfirmed?: boolean;
+    /** Mark price for PNL_STOP_PROTECT price-move × leverage authority only. */
+    markPrice?: number | null;
 }>;
