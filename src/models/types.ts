@@ -1046,6 +1046,11 @@ export type PaperOpenPositionRecord = {
   isProtectiveStopRegistered?: boolean;
   /** New field for granular TP tracking */
   isTakeProfitRegistered?: boolean;
+  takeProfitRequired?: boolean;
+  slRequired?: boolean;
+  tpRequired?: boolean;
+  slProtectionSatisfied?: boolean;
+  tpProtectionSatisfied?: boolean;
   /** Whether OKX protective order registration failed and requires repair. */
   isProtectionFailed?: boolean;
   /**

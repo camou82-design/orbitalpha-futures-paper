@@ -475,6 +475,10 @@ export function computePendingAgeMs(
 export type ProtectiveExistingAlgoLedgerAdoption = Readonly<{
   slAdopted: boolean;
   tpAdopted: boolean;
+  slRequired?: boolean;
+  tpRequired?: boolean;
+  slProtectionSatisfied?: boolean;
+  tpProtectionSatisfied?: boolean;
   protectionComplete: boolean;
   isProtectiveStopRegistered: boolean;
   isTakeProfitRegistered: boolean;
@@ -495,24 +499,29 @@ export function resolveProtectiveExistingAlgoLedgerAdoption(input: Readonly<{
   slAlgoId: string | null | undefined;
   tpAlgoId: string | null | undefined;
   wantsTp: boolean;
+  tpRequired?: boolean;
+  slRequired?: boolean;
   slCanonicalMatch: boolean;
   tpCanonicalMatch: boolean;
 }>): ProtectiveExistingAlgoLedgerAdoption {
-  const slAdopted =
-    input.slCanonicalMatch && input.slAlgoId != null && String(input.slAlgoId).length > 0;
-  const tpAdopted =
-    !input.wantsTp ||
-    (input.tpCanonicalMatch && input.tpAlgoId != null && String(input.tpAlgoId).length > 0);
-  const protectionComplete = slAdopted && tpAdopted;
+  const slRequired = input.slRequired ?? true;
+  const tpRequired = input.tpRequired ?? input.wantsTp;
 
-  const slAlgoStr = slAdopted ? String(input.slAlgoId) : undefined;
-  const tpAlgoStr = input.wantsTp && tpAdopted && input.tpAlgoId != null
-    ? String(input.tpAlgoId)
-    : undefined;
+  const slAdopted =
+    input.slCanonicalMatch && input.slAlgoId != null && String(input.slAlgoId).trim().length > 0;
+  const tpAdopted =
+    input.tpCanonicalMatch && input.tpAlgoId != null && String(input.tpAlgoId).trim().length > 0;
 
   const isProtectiveStopRegistered = slAdopted;
-  const isTakeProfitRegistered = !input.wantsTp || tpAdopted;
+  const isTakeProfitRegistered = tpAdopted;
+
+  const slProtectionSatisfied = !slRequired || slAdopted;
+  const tpProtectionSatisfied = !tpRequired || tpAdopted;
+  const protectionComplete = slProtectionSatisfied && tpProtectionSatisfied;
   const isProtectionFailed = !protectionComplete;
+
+  const slAlgoStr = slAdopted ? String(input.slAlgoId).trim() : undefined;
+  const tpAlgoStr = tpAdopted ? String(input.tpAlgoId).trim() : undefined;
 
   const ledgerRepairNeeded =
     input.previousIsProtectiveStopRegistered !== isProtectiveStopRegistered ||
@@ -520,11 +529,15 @@ export function resolveProtectiveExistingAlgoLedgerAdoption(input: Readonly<{
     input.previousIsTakeProfitRegistered !== isTakeProfitRegistered ||
     (slAdopted && input.previousProtectiveStopAlgoId !== slAlgoStr) ||
     (slAdopted && input.previousProtectiveSlAlgoId !== slAlgoStr) ||
-    (input.wantsTp && tpAdopted && input.previousProtectiveTpAlgoId !== tpAlgoStr);
+    (tpAdopted && input.previousProtectiveTpAlgoId !== tpAlgoStr);
 
   return {
     slAdopted,
     tpAdopted,
+    slRequired,
+    tpRequired,
+    slProtectionSatisfied,
+    tpProtectionSatisfied,
     protectionComplete,
     isProtectiveStopRegistered,
     isTakeProfitRegistered,
@@ -9975,6 +9988,8 @@ export class PaperEngine {
     const tickerTry = await this.okxDemo.tryGetTicker(open.symbol);
     const lastPxForOkx = tickerTry.ok ? tickerTry.value.last : pricingLast;
     const wantsTp = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0;
+    const slRequired = true;
+    const tpRequired = (open.regimeAtEntry === "RANGE") || (open.takeProfitRequired === true) || (wantsTp && open.isV2Authority !== true);
 
     this.logger.info("PROTECTIVE_ORDER_POSITION_CONTEXT_PROOF", {
       symbol: open.symbol,
@@ -10190,6 +10205,8 @@ export class PaperEngine {
       slAlgoId: engineOwnedSl?.algoId ?? null,
       tpAlgoId: engineOwnedTp?.algoId ?? null,
       wantsTp,
+      tpRequired,
+      slRequired,
       slCanonicalMatch: engineOwnedSl != null,
       tpCanonicalMatch: engineOwnedTp != null
     });
@@ -10216,8 +10233,8 @@ export class PaperEngine {
     }
 
     // 4. Reconcile Plan (derive submit intent from canonical scan after addon rebuild adjustments)
-    let needSubmitSl = !engineOwnedSl;
-    let needSubmitTp = wantsTp && !engineOwnedTp;
+    let needSubmitSl = slRequired && !hasAuthoritativeSl;
+    let needSubmitTp = tpRequired && !hasAuthoritativeTp;
     let submitOco = needSubmitSl && needSubmitTp && wantsTp;
 
     if (hasAuthoritativeSl && (!wantsTp || hasAuthoritativeTp) && cancelTargets.length === 0) {
@@ -10556,16 +10573,25 @@ export class PaperEngine {
       contractsAuthority: contractsToProtect
     });
 
-    const slRegistered = !!engineOwnedSl;
-    const tpRegistered = !wantsTp || !!engineOwnedTp;
-    const protectionSuccess = slRegistered && tpRegistered;
+    const slRegistered = engineOwnedSl?.algoId != null && String(engineOwnedSl.algoId).trim().length > 0;
+    const tpRegistered = engineOwnedTp?.algoId != null && String(engineOwnedTp.algoId).trim().length > 0;
+    const slAlgoId = slRegistered ? String(engineOwnedSl.algoId).trim() : undefined;
+    const tpAlgoId = tpRegistered ? String(engineOwnedTp.algoId).trim() : undefined;
+
+    const slProtectionSatisfied = !slRequired || slRegistered;
+    const tpProtectionSatisfied = !tpRequired || tpRegistered;
+    const protectionSuccess = slProtectionSatisfied && tpProtectionSatisfied;
 
     this.logger.info("PROTECTIVE_ORDER_FINAL_STATE_PROOF", {
       symbol: open.symbol,
+      slRequired,
+      tpRequired,
       slRegistered,
       tpRegistered,
-      slAlgoId: engineOwnedSl?.algoId,
-      tpAlgoId: engineOwnedTp?.algoId,
+      slAlgoId: slAlgoId ?? null,
+      tpAlgoId: tpAlgoId ?? null,
+      slProtectionSatisfied,
+      tpProtectionSatisfied,
       protectionSuccess,
       isProtectionFailed: !protectionSuccess
     });
@@ -10619,15 +10645,9 @@ export class PaperEngine {
       ...open,
       stopPrice: activeStopPrice,
       targetPrice1: wantsTp ? activeTpPrice : undefined,
-      protectiveStopAlgoId: slRegistered
-        ? (engineOwnedSl?.algoId as string | undefined)
-        : open.protectiveStopAlgoId,
-      protectiveSlAlgoId: slRegistered
-        ? (engineOwnedSl?.algoId as string | undefined)
-        : open.protectiveSlAlgoId,
-      protectiveTpAlgoId: tpRegistered && wantsTp
-        ? (engineOwnedTp?.algoId as string | undefined)
-        : open.protectiveTpAlgoId,
+      protectiveStopAlgoId: slAlgoId ?? (slRegistered ? open.protectiveStopAlgoId : undefined),
+      protectiveSlAlgoId: slAlgoId ?? (slRegistered ? open.protectiveSlAlgoId : undefined),
+      protectiveTpAlgoId: tpAlgoId ?? (tpRegistered ? open.protectiveTpAlgoId : undefined),
       isProtectiveStopRegistered: slRegistered,
       isTakeProfitRegistered: tpRegistered,
       isProtectionFailed: !protectionSuccess,
