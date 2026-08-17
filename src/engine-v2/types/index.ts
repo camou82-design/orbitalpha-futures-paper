@@ -299,6 +299,8 @@ export interface EngineV2Input {
         okxPendingOrdersReady?: boolean;
         okxPendingOrdersNotionalUsdt?: number;
         okxPendingSymbolNotionalUsdt?: number;
+        hasSymbolPendingEntry?: boolean;
+        hasUnknownPendingNotional?: boolean;
         accountEquityUsdt?: number;
         availableBalanceUsdt?: number;
         equitySource?: string;
@@ -584,6 +586,8 @@ export interface V2BridgeState {
     okxPendingOrdersReady?: boolean;
     okxPendingOrdersNotionalUsdt?: number;
     okxPendingSymbolNotionalUsdt?: number;
+    hasSymbolPendingEntry?: boolean;
+    hasUnknownPendingNotional?: boolean;
     balanceFetchedAt?: number;
     positionsFetchedAt?: number;
     pendingOrdersFetchedAt?: number;
