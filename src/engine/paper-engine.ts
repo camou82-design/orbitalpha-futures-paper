@@ -2259,8 +2259,14 @@ export class PaperEngine {
           return { success: res.success, modified: res.modified, record: res.record };
         };
 
-        // [BLOCKER-3-2.2] Fresh V2-owned exposure: ensure BEFORE pre-submit fault emission.
-        if (opsWatchGrace.verdict === "ENSURE_REQUIRED" && ensureEligible) {
+        let effectiveReduceOnlyProtectiveFound = r.reduce_only_protective_found;
+        let effectiveLedger = ledgerPos;
+
+        // [BLOCKER-3-2.2 & BLOCKER-4-16] Authoritative ensure on missing pre-scan inventory:
+        // Shallow pre-scan may miss OCO / attach / remote lookup algos.
+        // Run ensureProtectiveStopOrder before emitting any hard block, and override pre-scan fault if ensure succeeds.
+        const shouldRunPreScanEnsure = (!effectiveReduceOnlyProtectiveFound || opsWatchGrace.verdict === "ENSURE_REQUIRED") && ensureEligible;
+        if (shouldRunPreScanEnsure) {
           this.logger.info("OPS_WATCH_PRE_SUBMIT_ENSURE_REQUIRED_PROOF", {
             ts: nowTs,
             symbol: r.symbol,
@@ -2269,17 +2275,31 @@ export class PaperEngine {
             reconcile_state: ledgerPos?.reconcileState ?? null,
             lifecycle_state: ledgerPos?.lifecycleState ?? null,
             matching_protective_pending_count: r.matching_protective_pending_count,
-            reduce_only_protective_found: r.reduce_only_protective_found,
-            detail: "Zero inventory with no accepted submit evidence — running ensureProtectiveStopOrder before ops-watch fault verdict"
+            reduce_only_protective_found: effectiveReduceOnlyProtectiveFound,
+            detail: "Zero/missing inventory from pre-scan — running ensureProtectiveStopOrder before ops-watch fault verdict"
           });
           const ensureRes = await runOpsWatchEnsure();
           if (ensureRes) {
             ensureOutcome = { success: ensureRes.success, modified: ensureRes.modified };
-            const updatedLedger = ensureRes.record;
+            effectiveLedger = ensureRes.record;
+            const ensureSatisfied =
+              ensureRes.success &&
+              effectiveLedger.isProtectiveStopRegistered === true &&
+              effectiveLedger.isProtectionFailed !== true;
+            if (ensureSatisfied) {
+              effectiveReduceOnlyProtectiveFound = true;
+              this.logger.info("V2_PROTECTIVE_PRE_SCAN_FAULT_OVERRIDDEN_BY_AUTHORITATIVE_ENSURE_PROOF", {
+                symbol: r.symbol,
+                side: r.side,
+                ensure_success: ensureRes.success,
+                ensure_modified: ensureRes.modified,
+                detail: "Authoritative ensure confirmed protective satisfaction; overriding pre-scan fault."
+              });
+            }
             opsWatchGrace = reevaluateOpsWatchProtectiveScanVerdictAfterEnsure({
               nowMs: nowTs,
-              ledger: updatedLedger,
-              reduceOnlyProtectiveFound: r.reduce_only_protective_found,
+              ledger: effectiveLedger,
+              reduceOnlyProtectiveFound: effectiveReduceOnlyProtectiveFound,
               matchingProtectivePendingCount: r.matching_protective_pending_count,
               scanClean,
               tpRequired: r.tp_required_for_exchange_protection,
@@ -2293,9 +2313,9 @@ export class PaperEngine {
               ensure_success: ensureRes.success,
               post_ensure_verdict: opsWatchGrace.verdict,
               post_ensure_reason: opsWatchGrace.reason,
-              protective_sl_algo_id: updatedLedger.protectiveSlAlgoId ?? updatedLedger.protectiveStopAlgoId ?? null,
-              protective_tp_algo_id: updatedLedger.protectiveTpAlgoId ?? null,
-              protective_visibility_grace_deadline_ms: updatedLedger.protectiveVisibilityGraceDeadlineMs ?? null
+              protective_sl_algo_id: effectiveLedger.protectiveSlAlgoId ?? effectiveLedger.protectiveStopAlgoId ?? null,
+              protective_tp_algo_id: effectiveLedger.protectiveTpAlgoId ?? null,
+              protective_visibility_grace_deadline_ms: effectiveLedger.protectiveVisibilityGraceDeadlineMs ?? null
             });
             if (!ensureRes.success) {
               this.symbolProtectionFailedBlocked.add(r.symbol);
@@ -2324,12 +2344,12 @@ export class PaperEngine {
             side: r.side,
             inst_id: r.inst_id,
             reconcile_state: r.reconcile_state,
-            entry_protection_until: ledgerPos?.entryProtectionUntil ?? null,
-            protective_visibility_grace_deadline_ms: ledgerPos?.protectiveVisibilityGraceDeadlineMs ?? null,
-            protective_sl_algo_id: ledgerPos?.protectiveSlAlgoId ?? ledgerPos?.protectiveStopAlgoId ?? null,
-            protective_tp_algo_id: ledgerPos?.protectiveTpAlgoId ?? null,
+            entry_protection_until: effectiveLedger?.entryProtectionUntil ?? null,
+            protective_visibility_grace_deadline_ms: effectiveLedger?.protectiveVisibilityGraceDeadlineMs ?? null,
+            protective_sl_algo_id: effectiveLedger?.protectiveSlAlgoId ?? effectiveLedger?.protectiveStopAlgoId ?? null,
+            protective_tp_algo_id: effectiveLedger?.protectiveTpAlgoId ?? null,
             matching_protective_pending_count: r.matching_protective_pending_count,
-            reduce_only_protective_found: r.reduce_only_protective_found,
+            reduce_only_protective_found: effectiveReduceOnlyProtectiveFound,
             grace_reason: opsWatchGrace.reason,
             detail: "Accepted protective algoId within 30s visibility grace — deferring ops-watch hard block"
           });
@@ -2352,7 +2372,7 @@ export class PaperEngine {
           });
         }
 
-        if (!r.reduce_only_protective_found && opsWatchGrace.shouldEmitOrderFault) {
+        if (!effectiveReduceOnlyProtectiveFound && opsWatchGrace.shouldEmitOrderFault) {
           this.symbolProtectionFailedBlocked.add(r.symbol);
 
           this.logger.error("POSITION_PROTECTIVE_ORDER_FAULT", {
@@ -2385,7 +2405,7 @@ export class PaperEngine {
               reason: "confirmed_unprotected_exposure_on_exchange"
             });
           }
-        } else if (r.reduce_only_protective_found && this.symbolProtectionFailedBlocked.has(r.symbol)) {
+        } else if (effectiveReduceOnlyProtectiveFound && this.symbolProtectionFailedBlocked.has(r.symbol)) {
           this.symbolProtectionFailedBlocked.delete(r.symbol);
           this.logger.info("POSITION_PROTECTION_VERIFIED_UNBLOCK", {
             symbol: r.symbol,
@@ -2489,7 +2509,7 @@ export class PaperEngine {
           this.symbolProtectionFailedBlocked.delete(r.symbol);
         }
 
-        if (!r.reduce_only_protective_found && ledgerPos && opsWatchGrace.verdict !== "DEFER") {
+        if (!effectiveReduceOnlyProtectiveFound && ledgerPos && opsWatchGrace.verdict !== "DEFER") {
           const instSizing = this.instrumentCache.get(r.inst_id) as { tickSz?: number } | undefined;
           const tickSz = instSizing?.tickSz != null ? Number(instSizing.tickSz) : 0;
           const protectionState = evaluatePositionProtectionState({

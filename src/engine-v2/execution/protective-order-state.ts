@@ -44,7 +44,10 @@ export function hasAcceptedProtectiveSubmitEvidence(
     const slAlgoId = String(ledger.protectiveSlAlgoId ?? ledger.protectiveStopAlgoId ?? "").trim();
     if (!slAlgoId) return false;
     if (!tpRequired) return true;
-    return String(ledger.protectiveTpAlgoId ?? "").trim().length > 0;
+    const tpAlgoId = String(ledger.protectiveTpAlgoId ?? "").trim();
+    if (tpAlgoId.length > 0) return true;
+    if (ledger.isTakeProfitRegistered === true) return true;
+    return false;
 }
 
 /**
