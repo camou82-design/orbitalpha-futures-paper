@@ -53,7 +53,7 @@ function ctx(input: Readonly<{
 function runCases(): void {
   resetProtectiveClOrdIdBlocksForTests();
 
-  // CASE A — pending empty, entry attach OCO candidate → submit 0
+  // CASE A — pending empty, entry attach OCO candidate without algoId → submit required (BLOCKER 4-10)
   {
     const instId = "ETH-USDT-SWAP";
     const reconcileCtx = ctx({ instId, side: "long", contracts: 2.5, slPx: 3100, tpPx: 3400 });
@@ -70,9 +70,15 @@ function runCases(): void {
     });
     const inventory = mergeProtectiveInventoryRows([], attach);
     const plan = planProtectiveOrderReconcile(inventory, reconcileCtx);
-    assertFalse(plan.needSubmitSl, "CASE A needSubmitSl");
-    assertFalse(plan.needSubmitTp, "CASE A needSubmitTp");
-    assertFalse(plan.submitOco, "CASE A submitOco");
+    // [BLOCKER 4-10]: attach candidate alone does NOT have algoId -> must submit
+    assertTrue(plan.submitOco, "CASE A attach candidate alone must submitOco");
+    assertEq(plan.canonicalSl, null, "CASE A attach candidate must not be canonicalSl");
+
+    // With real confirmed algoId -> adopted, submit 0
+    const liveInventory = [{ ...attach[0], algoId: "eth_live_algo_123" }];
+    const livePlan = planProtectiveOrderReconcile(liveInventory, reconcileCtx);
+    assertFalse(livePlan.submitOco, "CASE A live algoId adopted submitOco false");
+    assertFalse(livePlan.needSubmitSl, "CASE A live algoId needSubmitSl false");
   }
 
   // CASE B — attachAlgoClOrdId normalized lookup → adopt
@@ -190,9 +196,12 @@ function runCases(): void {
       entryClOrdId: row.entry
     });
     const plan = planProtectiveOrderReconcile(mergeProtectiveInventoryRows([], attach), reconcileCtx);
-    assertFalse(plan.submitOco, `${row.symbol} ${row.side} CASE F submitOco`);
-    assertFalse(plan.needSubmitSl, `${row.symbol} ${row.side} CASE F needSubmitSl`);
-    assertFalse(plan.needSubmitTp, `${row.symbol} ${row.side} CASE F needSubmitTp`);
+    // [BLOCKER 4-10]: attach candidate alone without algoId requires submit
+    assertTrue(plan.submitOco, `${row.symbol} ${row.side} CASE F submitOco true for candidate`);
+
+    // When confirmed with algoId on exchange -> adopted
+    const confirmedPlan = planProtectiveOrderReconcile([{ ...attach[0], algoId: "confirmed_algo_id" }], reconcileCtx);
+    assertFalse(confirmedPlan.submitOco, `${row.symbol} ${row.side} CASE F submitOco false when confirmed`);
   }
 
   // CASE G — pending OCO + attach + lookup same clOrdId → merge dedupe 1 row

@@ -9974,8 +9974,13 @@ export class PaperEngine {
     const wrongTdModeCount = 0;
     const wrongSideCount = 0;
     const wrongPriceCount = 0;
-    const structuralFallbackSlCount = engineOwnedSl && !String(engineOwnedSl.algoClOrdId ?? "").startsWith("oap") ? 1 : 0;
-    const structuralFallbackTpCount = engineOwnedTp && !String(engineOwnedTp.algoClOrdId ?? "").startsWith("oap") ? 1 : 0;
+    const authoritativePendingCount = protectiveInventory.filter(
+      (r) => r.algoId != null && String(r.algoId).trim().length > 0 && r._protectiveInventorySource !== "entry_attach_candidate"
+    ).length;
+    const hasAuthoritativeSl = engineOwnedSl?.algoId != null && String(engineOwnedSl.algoId).trim().length > 0;
+    const hasAuthoritativeTp = engineOwnedTp?.algoId != null && String(engineOwnedTp.algoId).trim().length > 0;
+    const structuralFallbackSlCount = !hasAuthoritativeSl ? 1 : 0;
+    const structuralFallbackTpCount = wantsTp && !hasAuthoritativeTp ? 1 : 0;
     const anonymousManualCount = 0;
 
     const cancelTargets: Array<{ instId: string; algoId: string }> = reconcilePlan.cancelAlgoIds.map((algoId) => ({
@@ -10036,7 +10041,7 @@ export class PaperEngine {
         confirmedStopPrice: confirmedPx,
         confirmed: isConfirmed,
         algoId: engineOwnedSl.algoId,
-        pendingAlgoCount: protectiveInventory.length
+        pendingAlgoCount: authoritativePendingCount
       });
     } else if (open.breakevenStopRequired === false || open.breakevenStopRequired === undefined) {
       open.breakevenStopConfirmed = false; // Reset if not required
@@ -10086,9 +10091,9 @@ export class PaperEngine {
 
     this.logger.info("PROTECTIVE_ORDER_PENDING_ALGO_SCAN_PROOF", {
       symbol: open.symbol,
-      pendingAlgoCount: protectiveInventory.length,
-      engineOwnedSlCount: engineOwnedSl ? 1 : 0,
-      engineOwnedTpCount: engineOwnedTp ? 1 : 0,
+      pendingAlgoCount: authoritativePendingCount,
+      engineOwnedSlCount: hasAuthoritativeSl ? 1 : 0,
+      engineOwnedTpCount: hasAuthoritativeTp ? 1 : 0,
       manualUnknownCount,
       duplicateSlCount,
       duplicateTpCount,
@@ -10142,7 +10147,7 @@ export class PaperEngine {
     let needSubmitTp = wantsTp && !engineOwnedTp;
     let submitOco = needSubmitSl && needSubmitTp && wantsTp;
 
-    if (!needSubmitSl && !needSubmitTp && !submitOco && cancelTargets.length === 0) {
+    if (hasAuthoritativeSl && (!wantsTp || hasAuthoritativeTp) && cancelTargets.length === 0) {
       this.logger.info("V2_PROTECTION_STATE_PROOF", {
         symbol: open.symbol,
         side: open.side,

@@ -131,20 +131,27 @@ export function evaluateProtectiveAlgoMatch(
     const slLegValid = slPriceOk && sizeMatch;
     const tpLegValid = tpPriceOk && sizeMatch;
     const ocoBothValid = isOco && slLegValid && (!ctx.wantsTp || tpLegValid);
-    const adoptable = slLegValid || tpLegValid || ocoBothValid;
+
+    const algoId = String(algo.algoId ?? "").trim();
+    const hasExchangeIdentity = algoId.length > 0;
 
     const algoClOrdId = String(algo.algoClOrdId ?? "");
     const engineOwned = isEngineOwnedAlgo(algoClOrdId, ctx.openedAt36);
     const attachAlgo = isAttachAlgoClOrdId(algoClOrdId);
 
-    const stale = routingMatch(algo, ctx) && !sizeMatch;
+    const stale = hasExchangeIdentity && routingMatch(algo, ctx) && !sizeMatch;
+
+    // [BLOCKER 4-10] Authoritative Exchange Identity Requirement:
+    // Synthetic candidates or structural fallback rows without real OKX algoId
+    // can NEVER be adopted as canonical exchange protection.
+    const adoptable = hasExchangeIdentity && (slLegValid || tpLegValid || ocoBothValid);
 
     return {
         adoptable,
         stale,
-        slLegValid: slLegValid || ocoBothValid,
-        tpLegValid: ctx.wantsTp ? tpLegValid || ocoBothValid : false,
-        ocoBothValid,
+        slLegValid: hasExchangeIdentity ? (slLegValid || ocoBothValid) : false,
+        tpLegValid: hasExchangeIdentity ? (ctx.wantsTp ? tpLegValid || ocoBothValid : false) : false,
+        ocoBothValid: hasExchangeIdentity ? ocoBothValid : false,
         isOco,
         engineOwned,
         attachAlgo
