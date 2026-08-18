@@ -1,7 +1,9 @@
 import type { PaperOpenPositionRecord } from "../../models/types";
 import { resolveOpenNotionalUsd } from "../live-account/position-size-authority";
 
-export const MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT = 2;
+// One defensive trim per position cycle. Repeated trimming was converting small market noise
+// into fee-heavy reduce -> reduce -> full-exit churn.
+export const MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT = 1;
 export const REDUCE_FEE_SAFETY_MULTIPLIER = 1.5;
 export const V2_REDUCE_ECONOMIC_LOT_DISTORTION_THRESHOLD = 1.75;
 
@@ -15,7 +17,6 @@ const URGENCY_RANK: Record<string, number> = {
 
 const FEE_BYPASS_REASONS = new Set([
     "STOP_LOSS",
-    "PNL_STOP_PROTECT",
     "INVALIDATION_REACHED",
     "INVALIDATION_BREACH",
     "SHOCK_FULL_EXIT_AGAINST_POSITION",
@@ -29,9 +30,16 @@ export function isProtectivePartialReason(reason: string | null | undefined): bo
     const r = String(reason ?? "").toUpperCase();
     if (!r) return false;
     if (r.startsWith("V2_RANGE_TAKE_PROFIT")) return false;
+    if (r.includes("RANGE_PARTIAL_AT_OPPOSITE_EDGE")) return false;
     if (r.includes("TAKE_PROFIT") && !r.includes("SHOCK")) return false;
     if (r.includes("FULL_EXIT") || r.includes("FINAL_EXIT")) return false;
-    if (r.includes("STOP_LOSS") || r.includes("PNL_STOP")) return false;
+    if (r.includes("STOP_LOSS")) return false;
+
+    // PNL_STOP_PROTECT is a partial defensive mutation when the policy downgrades it to REDUCE.
+    // It must be counted so it cannot silently escape the one-defensive-trim limit.
+    if (r.includes("PNL_STOP")) return true;
+    if (r.includes("TRANSITION_REDUCE_ON_CONFLICT")) return true;
+
     return (
         r.includes("SHOCK") ||
         r.includes("V2_PARTIAL") ||
@@ -168,7 +176,10 @@ export function evaluatePartialReduceLimit(input: Readonly<{
     if (input.protectivePartialCount < MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT) {
         return { submitAllowed: true, blockReason: null, fallbackAction: "NONE" };
     }
-    if (input.invalidationImminent === true || urgencyRank(input.urgency) >= urgencyRank("high")) {
+
+    // High urgency alone must not transform a blocked second trim into a full exit.
+    // Only an independently confirmed imminent invalidation may escalate after the one allowed trim.
+    if (input.invalidationImminent === true) {
         return {
             submitAllowed: false,
             blockReason: "MAX_PROTECTIVE_PARTIAL_REDUCE_REACHED",
@@ -261,11 +272,11 @@ export function evaluateShockReduceEscalation(input: Readonly<{
     decisionReason: string;
 }> {
     if (input.episodeCount >= MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT) {
-        if (input.invalidationImminent || urgencyRank(input.urgency) >= urgencyRank("high")) {
+        if (input.invalidationImminent === true) {
             return {
                 partialAllowed: false,
                 fullExitRequired: true,
-                decisionReason: "max_partials_reached_severe_deterioration"
+                decisionReason: "max_partials_reached_confirmed_invalidation"
             };
         }
         return {
@@ -277,13 +288,10 @@ export function evaluateShockReduceEscalation(input: Readonly<{
     if (input.episodeCount === 0) {
         return { partialAllowed: true, fullExitRequired: false, decisionReason: "first_protective_partial" };
     }
-    if (input.freshCandle && input.riskDeteriorated) {
-        return { partialAllowed: true, fullExitRequired: false, decisionReason: "fresh_deterioration_second_partial" };
-    }
     return {
         partialAllowed: false,
         fullExitRequired: false,
-        decisionReason: "same_shock_episode_hold"
+        decisionReason: "defensive_partial_limit_hold"
     };
 }
 
