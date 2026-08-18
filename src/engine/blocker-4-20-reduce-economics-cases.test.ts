@@ -1,5 +1,6 @@
 import {
     evaluatePartialReduceLimit,
+    evaluateShockReduceEscalation,
     isFeeEconomicsBypassReason,
     isProtectivePartialReason,
     MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT,
@@ -49,15 +50,16 @@ function runAll(): void {
     assertEq(repeatPnl.submitAllowed, false, "second PNL defensive reduce blocked");
     assertEq(repeatPnl.fallbackAction, "HOLD", "high urgency alone cannot escalate blocked PNL trim to full exit");
 
-    const confirmedInvalidation = evaluatePartialReduceLimit({
+    // Review C6: proximity-only invalidationImminent is not terminal-exit authority.
+    const proximityOnly = evaluatePartialReduceLimit({
         open: fakeOpen(),
         reason: "PNL_STOP_PROTECT",
         protectivePartialCount: 1,
         urgency: "high",
         invalidationImminent: true
     });
-    assertEq(confirmedInvalidation.submitAllowed, false, "repeat trim still blocked on confirmed invalidation");
-    assertEq(confirmedInvalidation.fallbackAction, "FULL_EXIT", "confirmed imminent invalidation may full exit");
+    assertEq(proximityOnly.submitAllowed, false, "repeat trim still blocked near invalidation");
+    assertEq(proximityOnly.fallbackAction, "HOLD", "reduce layer cannot synthesize FULL_EXIT from proximity");
 
     const shockSecond = evaluatePartialReduceLimit({
         open: fakeOpen(),
@@ -67,6 +69,18 @@ function runAll(): void {
         invalidationImminent: false
     });
     assertEq(shockSecond.submitAllowed, true, "second genuine shock defensive trim remains available");
+
+    const shockAtCap = evaluateShockReduceEscalation({
+        episodeCount: 2,
+        shockPhase: "DOWN_SHOCK_CRITICAL",
+        previousShockPhase: "DOWN_SHOCK",
+        freshCandle: true,
+        riskDeteriorated: true,
+        urgency: "high",
+        invalidationImminent: true
+    });
+    assertEq(shockAtCap.partialAllowed, false, "shock partial blocked at cap");
+    assertEq(shockAtCap.fullExitRequired, false, "shock reduce helper cannot manufacture terminal exit");
 
     console.info("=== ALL BLOCKER 4-20 REDUCE ECONOMICS REGRESSIONS PASSED ===");
 }
