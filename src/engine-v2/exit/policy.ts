@@ -147,7 +147,9 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         adverseMoveLargeEnoughForDefensiveAction &&
         (shockAgainst || secondaryInvalidationConfirmation);
 
-    const priorDefensiveReduce = isPriorDefensiveReduce((pos as any)?.lastReduceReason);
+    const priorDefensiveReduce =
+        isPriorDefensiveReduce(pos?.lastReduceReason) ||
+        (typeof pos?.protectivePartialReduceCount === "number" && pos.protectivePartialReduceCount > 0);
 
     let action: V2ExitPolicyResult["action"] = "HOLD";
     let reason: V2ExitPolicyResult["reason"] = "NO_EXIT_SIGNAL";

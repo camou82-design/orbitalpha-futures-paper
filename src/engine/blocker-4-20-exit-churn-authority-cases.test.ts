@@ -218,7 +218,8 @@ function testTrendWeaknessCannotStackAfterDefensiveReduce(): void {
         trendWeaknessScore: 0.56,
         pnlPct: -0.005,
         entryPrice: 1900,
-        markPrice: 1896.5,
+        markPrice: 1899.0,
+        ledgerStopPx: 1880,
         lastReduceReason: "PNL_STOP_PROTECT"
     }));
     assertEq(res.action, "WATCH", "underwater trend weakness after defensive trim must WATCH");

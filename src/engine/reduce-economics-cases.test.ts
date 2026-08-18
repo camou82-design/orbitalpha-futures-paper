@@ -311,6 +311,7 @@ export function runReduceEconomicsCaseTests(): boolean {
   // use the close-leg metric for the loss sanity check and keep the telemetry assertion focused.
   {
     const open = botOpen({
+      notionalUsd: 20,
       maxFavorableExcursionPct: 0.012,
       maxAdverseExcursionPct: 0.008,
       maxFavorablePrice: 1900,

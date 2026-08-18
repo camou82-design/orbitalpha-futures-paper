@@ -142,6 +142,10 @@ export interface EngineV2Position {
     isProtectiveStopRegistered?: boolean;
     slProtectionProvisional?: boolean;
     protectiveVisibilityGraceDeadlineMs?: number;
+    /** Last filled defensive partial reduce reason (ledger → policy repeat guard). */
+    lastReduceReason?: string;
+    /** Protective partial reduce count excluding TP ladder (ledger → execution/policy). */
+    protectivePartialReduceCount?: number;
 }
 
 /** 
@@ -220,6 +224,7 @@ export interface LegacyPositionAdapter {
     sizeUsd: number;
     entryStage?: number;
     pnlPct?: number;
+    leverage?: number;
     ledger_stop_px?: number;
     peakUnrealizedPnlPct?: number;
     peakUnrealizedPnlUsd?: number;
@@ -245,6 +250,8 @@ export interface LegacyPositionAdapter {
     isProtectiveStopRegistered?: boolean;
     slProtectionProvisional?: boolean;
     protectiveVisibilityGraceDeadlineMs?: number;
+    lastReduceReason?: string;
+    protectivePartialReduceCount?: number;
 }
 
 export interface LegacyResultAdapter {
@@ -543,6 +550,12 @@ export interface V2BridgePosition {
     lastAdverseConfirmationCandleTs?: number;
     /** Blocker 4-15: Flag set when manual increase rebase detects structural invalidation is already breached */
     structureBreached?: boolean;
+    ledger_stop_px?: number;
+    slProtectionSatisfied?: boolean;
+    protectiveSlAlgoId?: string;
+    slProtectionProvisional?: boolean;
+    lastReduceReason?: string;
+    protectivePartialReduceCount?: number;
 }
 
 export interface V2BridgeState {

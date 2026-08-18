@@ -7231,6 +7231,7 @@ export function adaptV2Input(
                     sizeUsd: p.sizeUsd,
                     entryStage: p.entryStage ?? 0,
                     pnlPct: p.pnlPct ?? 0,
+                    leverage: p.leverage,
                     ledger_stop_px: p.ledger_stop_px,
                     peakUnrealizedPnlPct: p.peakUnrealizedPnlPct,
                     peakUnrealizedPnlUsd: p.peakUnrealizedPnlUsd,
@@ -7250,7 +7251,9 @@ export function adaptV2Input(
                     protectiveSlAlgoId: p.protectiveSlAlgoId,
                     isProtectiveStopRegistered: p.isProtectiveStopRegistered === true,
                     slProtectionProvisional: p.slProtectionProvisional === true,
-                    protectiveVisibilityGraceDeadlineMs: p.protectiveVisibilityGraceDeadlineMs
+                    protectiveVisibilityGraceDeadlineMs: p.protectiveVisibilityGraceDeadlineMs,
+                    lastReduceReason: p.lastReduceReason,
+                    protectivePartialReduceCount: p.protectivePartialReduceCount
                 };
             }),
             globalRiskScore: state.globalRiskScore,

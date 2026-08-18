@@ -23604,7 +23604,15 @@ export function buildV2StateBridge(
           adverseAddonCount: p.adverseAddonCount,
           adverseMoveAnchorCandleTs: p.adverseMoveAnchorCandleTs,
           lastAdverseConfirmationCandleTs: p.lastAdverseConfirmationCandleTs,
-          structureBreached: p.structureBreached === true
+          structureBreached: p.structureBreached === true,
+          ledger_stop_px:
+            typeof p.stopPrice === "number" && Number.isFinite(p.stopPrice) && p.stopPrice > 0
+              ? p.stopPrice
+              : undefined,
+          slProtectionSatisfied: p.slProtectionSatisfied === true,
+          protectiveSlAlgoId: p.protectiveSlAlgoId,
+          lastReduceReason: p.lastReduceReason,
+          protectivePartialReduceCount: p.protectivePartialReduceCount
         };
       })
       .filter((x): x is V2BridgePosition => x !== null),
