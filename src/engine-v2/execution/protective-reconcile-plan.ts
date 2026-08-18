@@ -114,8 +114,12 @@ export function evaluateProtectiveAlgoMatch(
         return { ...zero, stale: routingMatch(algo, ctx) || true };
     }
 
+    const isCloseFraction =
+        algo.closeFraction === "1" ||
+        String(algo.closeFraction ?? "") === "1";
+
     const algoSz = Number(algo.sz);
-    const sizeMatch = protectiveContractSizesMatch(ctx.contractsToProtect, algoSz);
+    const sizeMatch = isCloseFraction || protectiveContractSizesMatch(ctx.contractsToProtect, algoSz);
     const slPx = extractPx(algo, "slTriggerPx");
     const tpPx = extractPx(algo, "tpTriggerPx");
     const isOco = String(algo.ordType ?? "").toLowerCase() === "oco";

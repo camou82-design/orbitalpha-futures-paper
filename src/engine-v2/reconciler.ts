@@ -223,7 +223,17 @@ export function deriveExecutionAuthority(
             "SHORT_INVALIDATION_BELOW_ENTRY"
         ]).has(v2Risk.blockReason) : undefined,
         stopPrice: useV2 ? (selector.v2_result.lifecycleAuthority?.newStopPrice ?? null) : null,
-        invalidationPx: useV2 ? (selector.v2_result.lifecycleAuthority?.invalidationPx ?? null) : null
+        invalidationPx: useV2 ? (selector.v2_result.lifecycleAuthority?.invalidationPx ?? null) : null,
+        rangeBoxHighAtEntry: useV2 && typeof selector.v2_result.metadata?.rangeBoxHighAtEntry === "number" ? selector.v2_result.metadata.rangeBoxHighAtEntry : undefined,
+        rangeBoxLowAtEntry: useV2 && typeof selector.v2_result.metadata?.rangeBoxLowAtEntry === "number" ? selector.v2_result.metadata.rangeBoxLowAtEntry : undefined,
+        rangeBoxMidAtEntry: useV2 && typeof selector.v2_result.metadata?.rangeBoxMidAtEntry === "number" ? selector.v2_result.metadata.rangeBoxMidAtEntry : undefined,
+        rangeBoxQuality: useV2 && typeof selector.v2_result.metadata?.rangeBoxQuality === "number" ? selector.v2_result.metadata.rangeBoxQuality : undefined,
+        rangeBoxSlope: useV2 && typeof selector.v2_result.metadata?.rangeBoxSlope === "number" ? selector.v2_result.metadata.rangeBoxSlope : undefined,
+        rangeBoxDistorted: useV2 && typeof selector.v2_result.metadata?.rangeBoxDistorted === "boolean" ? selector.v2_result.metadata.rangeBoxDistorted : undefined,
+        takeProfitPlan: useV2 ? selector.v2_result.metadata?.takeProfitPlan : undefined,
+        takeProfit1Px: useV2 && typeof selector.v2_result.metadata?.takeProfit1Px === "number" ? selector.v2_result.metadata.takeProfit1Px : undefined,
+        takeProfit2Px: useV2 && typeof selector.v2_result.metadata?.takeProfit2Px === "number" ? selector.v2_result.metadata.takeProfit2Px : undefined,
+        partialExitRatio: useV2 && typeof selector.v2_result.metadata?.partialExitRatio === "number" ? selector.v2_result.metadata.partialExitRatio : undefined
     };
 }
 
@@ -274,7 +284,17 @@ export function deriveExecutionAuthorityFromEnvelope(
             "SHORT_INVALIDATION_BELOW_ENTRY"
         ]).has(envelope.hardBlockReason),
         stopPrice: envelope.newStopPrice ?? null,
-        invalidationPx: envelope.invalidationPx ?? null
+        invalidationPx: envelope.invalidationPx ?? null,
+        rangeBoxHighAtEntry: envelope.rangeBoxHighAtEntry,
+        rangeBoxLowAtEntry: envelope.rangeBoxLowAtEntry,
+        rangeBoxMidAtEntry: envelope.rangeBoxMidAtEntry,
+        rangeBoxQuality: envelope.rangeBoxQuality,
+        rangeBoxSlope: envelope.rangeBoxSlope,
+        rangeBoxDistorted: envelope.rangeBoxDistorted,
+        takeProfitPlan: envelope.takeProfitPlan,
+        takeProfit1Px: envelope.takeProfit1Px,
+        takeProfit2Px: envelope.takeProfit2Px,
+        partialExitRatio: envelope.partialExitRatio
     };
 }
 

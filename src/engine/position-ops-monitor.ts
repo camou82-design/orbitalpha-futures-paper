@@ -791,8 +791,20 @@ export function buildPositionOpsSurface(input: Readonly<{
       const tpPx = refPx != null && refPx > 0 ? engineMirrorTpPrice(refPx, hit.side, regime) : null;
       const ledgerStop = typeof ledger?.stopPrice === "number" && Number.isFinite(ledger.stopPrice) ? ledger.stopPrice : null;
       const ledgerTp = typeof ledger?.targetPrice1 === "number" && Number.isFinite(ledger.targetPrice1) ? ledger.targetPrice1 : null;
-      const tpRequired =
+
+      const isV2RangePartialPlan =
+        ledger?.isV2Authority === true &&
+        ledger?.regimeAtEntry === "RANGE" &&
+        ledger?.takeProfitPlan != null &&
+        typeof ledger?.takeProfit1Px === "number" &&
+        Number.isFinite(ledger.takeProfit1Px) &&
+        typeof ledger?.partialExitRatio === "number" &&
+        ledger.partialExitRatio > 0 &&
+        ledger.partialExitRatio < 1;
+
+      const rawTpRequired =
         (ledgerTp != null && ledgerTp > 0) || (tpPx != null && tpPx > 0 && Number.isFinite(tpPx));
+      const tpRequired = !isV2RangePartialPlan && rawTpRequired;
 
       const instSizing = instMap?.get(hit.instId) as { tickSz?: number } | undefined;
       const tickSz = instSizing?.tickSz != null ? Number(instSizing.tickSz) : 0;

@@ -4109,16 +4109,22 @@ export class PaperEngine {
                     });
                   }
 
-                  if (open.protectiveStopAlgoId && open.isProtectiveStopRegistered && orderState === "filled") {
+                  if (orderState === "filled") {
                     this.logger.info("PROTECTIVE_STOP_UPDATE_REQUIRED_PARTIAL_FILL", { 
                       symbol: open.symbol, 
                       oldAlgoId: open.protectiveStopAlgoId,
                       newSize: open.okxContracts,
                       flowId
                     });
-                    await this.cancelProtectiveStopOrder(open.symbol, open.protectiveStopAlgoId, flowId);
-                    open.protectiveStopAlgoId = undefined;
-                    open.isProtectiveStopRegistered = false;
+                    const ensureRes = await this.ensureProtectiveStopOrder(
+                      open,
+                      `${flowId}:post_partial_fill_ensure`,
+                      fillPx,
+                      "post_fill_algo"
+                    );
+                    if (ensureRes.modified) {
+                      open = ensureRes.record;
+                    }
                   }
 
                   this.logger.info("V2_PARTIAL_POSITION_UPDATE_PROOF", {
@@ -8859,8 +8865,9 @@ export class PaperEngine {
     orderFullyFilled: boolean;
     fundingRate?: number;
     closedAt?: number;
+    reason?: string;
   }): void {
-    const { open, newFillContracts, cumulativeFillContracts, fillPx, flowId, orderFullyFilled } = input;
+    const { open, newFillContracts, cumulativeFillContracts, fillPx, flowId, orderFullyFilled, reason } = input;
     if (newFillContracts <= 0) return;
 
     const stageBefore = open.partialPendingStage ?? open.partialExitStage ?? 0;
@@ -8893,7 +8900,7 @@ export class PaperEngine {
     });
     open.realizedPnl = (open.realizedPnl ?? 0) + metrics.pnlUsdNet;
     const fillReason =
-      open.partialPendingReason ?? open.shockReduceReason ?? "partial_reduce";
+      reason ?? open.partialPendingReason ?? open.shockReduceReason ?? "partial_reduce";
     recordPositionCycleExitFill(open, {
       px: fillPx,
       contracts: newFillContracts,
@@ -8947,6 +8954,46 @@ export class PaperEngine {
       open.lastPartialAt = input.closedAt ?? Date.now();
       open.lifecycleState = "OPEN";
       this.clearV2PartialPendingMetadata(open);
+
+      // [P0-B] V2 RANGE TP1 partial confirmed: advance targetPrice1 to TP2 (or clear old TP1 if TP2 missing/invalid)
+      const isRangeTp1Confirmed =
+        open.isV2Authority === true &&
+        open.regimeAtEntry === "RANGE" &&
+        (fillReason === "v2_tp1_automated" ||
+         reason === "v2_tp1_automated" ||
+         open.v2RangeTp1Triggered === true ||
+         stageAfter >= 1);
+
+      if (isRangeTp1Confirmed) {
+        const tp2 = open.takeProfit2Px;
+        const tp1 = open.takeProfit1Px;
+        const entryPx = open.entryPrice;
+        const isValidTp2Direction =
+          typeof tp2 === "number" &&
+          Number.isFinite(tp2) &&
+          (open.side === "long" ? tp2 > (tp1 ?? entryPx) : tp2 < (tp1 ?? entryPx));
+
+        if (isValidTp2Direction) {
+          open.targetPrice1 = tp2;
+          this.logger.info("V2_RANGE_TP1_CONFIRMED_TARGET_ADVANCED_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            previousTarget: tp1,
+            newTarget: tp2,
+            reason: "tp1_confirmed_advance_to_tp2",
+            flowId
+          });
+        } else {
+          open.targetPrice1 = undefined;
+          this.logger.info("V2_RANGE_TP1_CONFIRMED_TARGET_CLEARED_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            previousTarget: tp1,
+            reason: "tp1_confirmed_tp2_missing_or_invalid",
+            flowId
+          });
+        }
+      }
     }
   }
 
@@ -10010,6 +10057,7 @@ export class PaperEngine {
     }
     const accountConfig = cfgTry.value[0] as any;
     const okxPosMode = String(accountConfig.posMode ?? "").trim().toLowerCase();
+    const okxAcctLv = String(accountConfig.acctLv ?? "").trim();
 
     const posTry = await this.okxDemo.getPositions();
     if (!posTry.ok) {
@@ -10098,9 +10146,41 @@ export class PaperEngine {
 
     const tickerTry = await this.okxDemo.tryGetTicker(open.symbol);
     const lastPxForOkx = tickerTry.ok ? tickerTry.value.last : pricingLast;
-    const wantsTp = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0;
+
+    // [P0-A] V2 RANGE Partial Plan Sovereign Scope:
+    // When V2 RANGE has an active partial TP plan (e.g. 50% partial exit at TP1),
+    // do not submit a full-position protective TP OCO on exchange to prevent 100% liquidation at TP1.
+    // Full-size SL protection is 100% maintained.
+    const isV2RangePartialPlan =
+      open.isV2Authority === true &&
+      open.regimeAtEntry === "RANGE" &&
+      open.takeProfitPlan != null &&
+      typeof open.takeProfit1Px === "number" &&
+      Number.isFinite(open.takeProfit1Px) &&
+      typeof open.partialExitRatio === "number" &&
+      open.partialExitRatio > 0 &&
+      open.partialExitRatio < 1;
+
+    const rawWantsTp = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0;
+    const wantsTp = rawWantsTp && !isV2RangePartialPlan;
     const slRequired = true;
-    const tpRequired = (open.regimeAtEntry === "RANGE") || (open.takeProfitRequired === true) || (wantsTp && open.isV2Authority !== true);
+    const tpRequired = !isV2RangePartialPlan && ((open.regimeAtEntry === "RANGE") || (open.takeProfitRequired === true) || (rawWantsTp && open.isV2Authority !== true));
+
+    if (isV2RangePartialPlan) {
+      this.logger.info("V2_PROTECTIVE_RANGE_PARTIAL_SOVEREIGNTY_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        regime: open.regimeAtEntry,
+        isV2Authority: open.isV2Authority,
+        takeProfitPlan: open.takeProfitPlan,
+        takeProfit1Px: open.takeProfit1Px,
+        takeProfit2Px: open.takeProfit2Px,
+        partialExitRatio: open.partialExitRatio,
+        exchangeSlProtectionRequired: true,
+        exchangeTpProtectionDelegatedToV2Ladder: true,
+        flowId
+      });
+    }
 
     this.logger.info("PROTECTIVE_ORDER_POSITION_CONTEXT_PROOF", {
       symbol: open.symbol,
@@ -10481,12 +10561,48 @@ export class PaperEngine {
             ts: Date.now()
           });
         }
-        const slRes = await this.okxDemo.submitAlgoOrder({
-          instId, tdMode: tdModeUsed, side: expectedSide, posSide: hedgePosSide, accountPosMode: okxPosMode,
-          ordType: "conditional", sz: szStr, reduceOnly: true,
-          slTriggerPx: String(activeStopPrice), slOrdPx: "-1", slTriggerPxType: "last",
-          algoClOrdId: slAlgoClOrdId
+        const useCloseFraction =
+          isV2RangePartialPlan &&
+          okxAcctLv === "2" &&
+          okxPosMode === "net_mode";
+
+        this.logger.info("V2_PROTECTIVE_SL_CLOSE_FRACTION_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          isV2RangePartialPlan,
+          okxAcctLv,
+          okxPosMode,
+          useCloseFraction,
+          fallbackReason: useCloseFraction ? null : (
+            !isV2RangePartialPlan ? "NOT_V2_RANGE_PARTIAL" :
+            okxAcctLv !== "2" ? `ACCT_LV_NOT_2:${okxAcctLv}` :
+            okxPosMode !== "net_mode" ? `POS_MODE_NOT_NET:${okxPosMode}` : "UNKNOWN"
+          )
         });
+
+        const slSubmitArgs: any = {
+          instId,
+          tdMode: tdModeUsed,
+          side: expectedSide,
+          ordType: "conditional",
+          reduceOnly: true,
+          slTriggerPx: String(activeStopPrice),
+          slOrdPx: "-1",
+          slTriggerPxType: "last",
+          algoClOrdId: slAlgoClOrdId,
+          accountPosMode: okxPosMode
+        };
+
+        if (useCloseFraction) {
+          slSubmitArgs.closeFraction = "1";
+          // sz is omitted
+        } else {
+          slSubmitArgs.sz = szStr;
+          if (hedgePosSide) slSubmitArgs.posSide = hedgePosSide;
+        }
+
+        const slRes = await this.okxDemo.submitAlgoOrder(slSubmitArgs);
         submittedProtective = true;
         if (slRes.ok) {
           modified = true;
@@ -13338,7 +13454,8 @@ export class PaperEngine {
               flowId,
               orderFullyFilled: true,
               fundingRate: snap?.fundingRate,
-              closedAt
+              closedAt,
+              reason: "v2_tp1_automated"
             });
             open.v2RangeTp1Triggered = true;
             open.partialExitStage = 1;

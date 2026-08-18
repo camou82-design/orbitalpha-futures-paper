@@ -72,8 +72,8 @@ function runTests() {
   // T4 just-before TP holds
   {
     const entryPrice = 100;
-    const mark = 100.37; // +0.37% move
-    const pnlPctNet = 0.037;
+    const mark = 100.24; // +0.24% move (just before 0.25% TP)
+    const pnlPctNet = 0.024;
     const res = evaluateRegimeExitPolicy({
       regime: "RANGE",
       side: "long",

@@ -52,6 +52,9 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         let finalNewStopPrice = newStopPrice;
         let finalInvalidationPx = args.invalidationPx;
         let finalTakeProfitPlan = args.takeProfitPlan;
+        let finalTakeProfit1Px = args.takeProfit1Px;
+        let finalTakeProfit2Px = args.takeProfit2Px;
+        let finalPartialExitRatio = args.partialExitRatio;
 
         if (finalDecision !== "ENTER") {
             finalSide = "none";
@@ -60,6 +63,9 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             finalNewStopPrice = undefined;
             finalInvalidationPx = undefined;
             finalTakeProfitPlan = undefined;
+            finalTakeProfit1Px = undefined;
+            finalTakeProfit2Px = undefined;
+            finalPartialExitRatio = undefined;
         }
 
         let finalPrimaryMissingCondition = args.primaryMissingCondition;
@@ -129,9 +135,9 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             rangeBoxSlope: args.rangeBoxSlope,
             rangeBoxDistorted: args.rangeBoxDistorted,
             takeProfitPlan: finalTakeProfitPlan,
-            takeProfit1Px: args.takeProfit1Px,
-            takeProfit2Px: args.takeProfit2Px,
-            partialExitRatio: args.partialExitRatio,
+            takeProfit1Px: finalTakeProfit1Px,
+            takeProfit2Px: finalTakeProfit2Px,
+            partialExitRatio: finalPartialExitRatio,
             invalidationPx: finalInvalidationPx,
             aligned_signal: args.alignedSignal,
             selected_side_after_veto: args.selectedSideAfterVeto,

@@ -347,7 +347,8 @@ export class OkxDemoClient {
     /** From GET /api/v5/account/config `posMode` (e.g. `net_mode`, `long_short_mode`). */
     accountPosMode?: string;
     ordType: string;
-    sz: string;
+    sz?: string;
+    closeFraction?: string;
     reduceOnly?: boolean;
     slTriggerPx?: string;
     slOrdPx?: string;
@@ -366,7 +367,7 @@ export class OkxDemoClient {
     if (!input.side) missing.push("side");
     if (!input.tdMode) missing.push("tdMode");
     if (!input.ordType) missing.push("ordType");
-    if (!input.sz) missing.push("sz");
+    if (!input.sz && !input.closeFraction) missing.push("sz or closeFraction");
 
     // ordType validation
     const allowedAlgoTypes = ["conditional", "oco", "trigger", "move_order_stop", "twap"];
@@ -400,7 +401,7 @@ export class OkxDemoClient {
       side: input.side,
       ...(isLongShortMode && input.posSide ? { posSide: input.posSide } : {}),
       ordType: input.ordType,
-      sz: input.sz,
+      ...(input.closeFraction ? { closeFraction: input.closeFraction } : input.sz ? { sz: input.sz } : {}),
       ...(input.reduceOnly === true ? { reduceOnly: "true" } : {}),
       ...(input.slTriggerPx ? { slTriggerPx: input.slTriggerPx } : {}),
       ...(input.slOrdPx ? { slOrdPx: input.slOrdPx } : {}),

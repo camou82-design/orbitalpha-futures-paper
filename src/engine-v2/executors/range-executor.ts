@@ -1097,6 +1097,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const entryPx = Number(sn.lastPrice ?? 0);
     const minProfitDistance = Math.max(atr * 0.35, entryPx * 0.001);
     const minStopDistance = Math.max(atr * 0.5, entryPx * 0.0015);
+    const TP1_MIN_PCT = 0.0018;
+    const TP1_MAX_PCT = 0.0025;
 
     let tp1 = 0;
     let tp2 = 0;
@@ -1104,14 +1106,16 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
 
     if (side === "long") {
         inv = Math.min(boxLow - minStopDistance, entryPx - minStopDistance);
-        tp1 = Math.max(boxMid, entryPx + minProfitDistance);
-        if (tp1 <= entryPx) tp1 = entryPx + minProfitDistance;
+        const rawTp1Dist = Math.max(boxMid - entryPx, minProfitDistance);
+        const clampedTp1Dist = clamp(rawTp1Dist, entryPx * TP1_MIN_PCT, entryPx * TP1_MAX_PCT);
+        tp1 = entryPx + clampedTp1Dist;
         tp2 = Math.max(boxHigh, tp1 + minProfitDistance);
         if (tp2 <= tp1) tp2 = tp1 + minProfitDistance;
     } else if (side === "short") {
         inv = Math.max(boxHigh + minStopDistance, entryPx + minStopDistance);
-        tp1 = Math.min(boxMid, entryPx - minProfitDistance);
-        if (tp1 >= entryPx) tp1 = entryPx - minProfitDistance;
+        const rawTp1Dist = Math.max(entryPx - boxMid, minProfitDistance);
+        const clampedTp1Dist = clamp(rawTp1Dist, entryPx * TP1_MIN_PCT, entryPx * TP1_MAX_PCT);
+        tp1 = entryPx - clampedTp1Dist;
         tp2 = Math.min(boxLow, tp1 - minProfitDistance);
         if (tp2 >= tp1) tp2 = tp1 - minProfitDistance;
     }

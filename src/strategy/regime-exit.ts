@@ -29,7 +29,7 @@ function thresholds(regime: MarketRegime): Readonly<{
       };
     case "RANGE":
       return {
-        tp: 0.0038,
+        tp: 0.0025,
         sl: -0.0026,
         maxHoldMs: 28 * 60 * 1000,
         trailDrawdown: 0.0018,
