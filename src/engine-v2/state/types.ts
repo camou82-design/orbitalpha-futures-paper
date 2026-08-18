@@ -72,6 +72,8 @@ export type V2StateAuthority = Readonly<{
     okxPendingOrdersReady?: boolean;
     okxPendingOrdersNotionalUsdt?: number;
     okxPendingSymbolNotionalUsdt?: number;
+    hasSymbolPendingEntry?: boolean;
+    hasUnknownPendingNotional?: boolean;
     balanceFetchedAt?: number;
     positionsFetchedAt?: number;
     pendingOrdersFetchedAt?: number;

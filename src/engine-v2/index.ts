@@ -4735,7 +4735,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         pendingOrdersNotionalRaw >= 0 &&
         typeof pendingSymbolNotionalRaw === "number" &&
         Number.isFinite(pendingSymbolNotionalRaw) &&
-        pendingSymbolNotionalRaw >= 0;
+        pendingSymbolNotionalRaw >= 0 &&
+        (v2State as any).hasUnknownPendingNotional !== true &&
+        (input.state as any).hasUnknownPendingNotional !== true;
 
     // Ledger vs OKX Actual Position Matching (Add-on Authority)
     const normSide = (s?: string) => {
@@ -5085,6 +5087,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         } else if (isLiveSignedOrderAttempt && !liveReadinessPassed) {
             min_order_check_passed = false;
             min_order_block_reason = "LIVE_ACCOUNT_AUTHORITY_NOT_READY";
+        } else if (isLiveSignedOrderAttempt && ((v2State as any).hasSymbolPendingEntry === true || (input.state as any).hasSymbolPendingEntry === true)) {
+            min_order_check_passed = false;
+            min_order_block_reason = "PENDING_ORDER_EXISTS";
         } else if (riskSizing.isBlocked) {
             min_order_check_passed = false;
             min_order_block_reason = riskSizing.blockReason ?? "RISK_SIZING_BLOCKED";
@@ -7146,6 +7151,8 @@ export function adaptV2Input(
         okxPendingOrdersReady?: boolean;
         okxPendingOrdersNotionalUsdt?: number;
         okxPendingSymbolNotionalUsdt?: number;
+        hasSymbolPendingEntry?: boolean;
+        hasUnknownPendingNotional?: boolean;
         balanceFetchedAt?: number;
         positionsFetchedAt?: number;
         pendingOrdersFetchedAt?: number;
@@ -7305,6 +7312,8 @@ export function adaptV2Input(
             okxPendingOrdersReady: state.okxPendingOrdersReady,
             okxPendingOrdersNotionalUsdt: state.okxPendingOrdersNotionalUsdt,
             okxPendingSymbolNotionalUsdt: state.okxPendingSymbolNotionalUsdt,
+            hasSymbolPendingEntry: state.hasSymbolPendingEntry,
+            hasUnknownPendingNotional: state.hasUnknownPendingNotional,
             balanceFetchedAt: state.balanceFetchedAt,
             positionsFetchedAt: state.positionsFetchedAt,
             pendingOrdersFetchedAt: state.pendingOrdersFetchedAt

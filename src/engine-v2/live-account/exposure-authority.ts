@@ -123,11 +123,15 @@ export function resolveLiveExposureAuthority(input: LiveExposureAuthorityInput):
   const symbolAnalysis = analyzePaperExposure(input.paperPositions, input.symbol, input.okxActualPositions);
   const accountAnalysis = analyzePaperExposure(input.paperPositions, undefined, input.okxActualPositions);
   
-  const paper_symbol_notional_usdt = symbolAnalysis.total ?? NaN;
-  const paper_account_notional_usdt = accountAnalysis.total ?? NaN;
+  const paper_symbol_notional_usdt =
+    symbolAnalysis.total != null ? symbolAnalysis.total + Math.max(0, input.pendingSymbolNotionalUsdt) : NaN;
+  const paper_account_notional_usdt =
+    accountAnalysis.total != null ? accountAnalysis.total + Math.max(0, input.pendingOrdersNotionalUsdt) : NaN;
   
-  const strategy_symbol_notional_usdt = symbolAnalysis.strategyOnly ?? NaN;
-  const strategy_account_notional_usdt = accountAnalysis.strategyOnly ?? NaN;
+  const strategy_symbol_notional_usdt =
+    symbolAnalysis.strategyOnly != null ? symbolAnalysis.strategyOnly + Math.max(0, input.pendingSymbolNotionalUsdt) : NaN;
+  const strategy_account_notional_usdt =
+    accountAnalysis.strategyOnly != null ? accountAnalysis.strategyOnly + Math.max(0, input.pendingOrdersNotionalUsdt) : NaN;
 
   const useOkx = input.isLiveAuthority;
   return {

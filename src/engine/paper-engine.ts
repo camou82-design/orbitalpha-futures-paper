@@ -68,7 +68,7 @@ import {
   isPositiveExternalManualLifecycleRow,
   buildOkxActualKeySetFromSync
 } from "../lib/position-reconcile-classification";
-import { buildPositionOpsSurface, engineMirrorStopPrice, engineMirrorTpPrice, regimeForSl, classifyOkxOpenOrderPurpose, countBlockingOkxOpenOrders, evaluateV2ReducePendingGuard } from "./position-ops-monitor";
+import { buildPositionOpsSurface, engineMirrorStopPrice, engineMirrorTpPrice, regimeForSl, classifyOkxOpenOrderPurpose, countBlockingOkxOpenOrders, evaluateV2ReducePendingGuard, resolvePendingOrdersExposure } from "./position-ops-monitor";
 import type { PositionOpsSurface } from "./position-ops-monitor";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
 import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
@@ -6364,53 +6364,70 @@ export class PaperEngine {
           const cachedOpsPendingIsArray = Array.isArray(this.cachedOpsPending);
           const cachedOpsAlgosIsArray = Array.isArray(this.cachedOpsAlgos);
           const pendingFetchErrorsCount = this.cachedOpsFetchErrors ? this.cachedOpsFetchErrors.length : 0;
-          const cachedOpsPendingCount = cachedOpsPendingIsArray ? this.cachedOpsPending.length : 0;
-          const cachedOpsAlgosCount = cachedOpsAlgosIsArray ? this.cachedOpsAlgos.length : 0;
-          const blockingCounts = countBlockingOkxOpenOrders(
-            cachedOpsPendingIsArray ? this.cachedOpsPending : [],
-            cachedOpsAlgosIsArray ? this.cachedOpsAlgos : [],
-            opensAfterClose
-          );
 
-          const pendingFetchReady =
-            pendingFetchPerformed &&
-            cachedOpsPendingIsArray &&
-            cachedOpsAlgosIsArray &&
-            pendingFetchErrorsCount === 0;
+          const snapshotPrices: Record<string, number> = {};
+          if (snapForDecision?.lastPrice) {
+            snapshotPrices[sym] = Number(snapForDecision.lastPrice);
+          }
 
-          const pendingPayloadEmpty =
-            blockingCounts.blockingPendingCount === 0 &&
-            blockingCounts.blockingAlgosCount === 0;
+          const pendingAnalysis = resolvePendingOrdersExposure({
+            pending: cachedOpsPendingIsArray ? this.cachedOpsPending : [],
+            algos: cachedOpsAlgosIsArray ? this.cachedOpsAlgos : [],
+            opens: opensAfterClose,
+            pendingFetchPerformed,
+            pendingFetchErrorsCount,
+            cachedOpsPendingIsArray,
+            cachedOpsAlgosIsArray,
+            snapshotPrices
+          });
 
-          const pendingOrdersExposureReady = pendingFetchReady && pendingPayloadEmpty;
+          const {
+            pendingFetchReady,
+            pendingPayloadEmpty,
+            blockingPendingCount,
+            blockingAlgosCount,
+            botManagedProtectiveCount,
+            accountPendingNotionalUsdt,
+            symbolPendingNotionalUsdt,
+            symbolHasBlockingPending,
+            hasUnknownNotional,
+            ordersDetail
+          } = pendingAnalysis;
 
           let authorityMode = "FETCH_NOT_READY";
           if (!pendingFetchPerformed) {
              authorityMode = "FETCH_NOT_READY";
           } else if (pendingFetchErrorsCount > 0 || !cachedOpsPendingIsArray || !cachedOpsAlgosIsArray) {
              authorityMode = "FETCH_ERROR";
-          } else if (!pendingPayloadEmpty) {
-             authorityMode = "NONEMPTY_PENDING_FAIL_CLOSED";
-          } else if (pendingOrdersExposureReady) {
+          } else if (hasUnknownNotional) {
+             authorityMode = "UNKNOWN_NOTIONAL_FAIL_CLOSED";
+          } else if (pendingPayloadEmpty) {
              authorityMode = "ZERO_PENDING_SAFE";
+          } else {
+             authorityMode = "NONEMPTY_PENDING_EXPOSURE_TRACKED";
           }
 
           this.logger.info("V2_PENDING_ORDER_BRIDGE_AUTHORITY_PROOF", {
+             symbol: sym,
              pendingFetchPerformed,
              pendingFetchTimestamp: this.lastOpsOrdersScanAtMs,
              pendingFetchErrorsCount,
              cachedOpsPendingIsArray,
              cachedOpsAlgosIsArray,
-             cachedOpsPendingCount,
-             cachedOpsAlgosCount,
-             blocking_pending_count: blockingCounts.blockingPendingCount,
-             blocking_algos_count: blockingCounts.blockingAlgosCount,
-             bot_managed_protective_count: blockingCounts.botManagedProtectiveCount,
+             cachedOpsPendingCount: cachedOpsPendingIsArray ? this.cachedOpsPending.length : 0,
+             cachedOpsAlgosCount: cachedOpsAlgosIsArray ? this.cachedOpsAlgos.length : 0,
+             blocking_pending_count: blockingPendingCount,
+             blocking_algos_count: blockingAlgosCount,
+             bot_managed_protective_count: botManagedProtectiveCount,
              pendingPayloadEmpty,
-             pendingOrdersExposureReady,
-             accountPendingNotionalUsdt: 0,
-             symbolPendingNotionalUsdt: 0,
-             authorityMode
+             pendingFetchReady,
+             okxPendingOrdersReady: pendingFetchReady,
+             accountPendingNotionalUsdt,
+             symbolPendingNotionalUsdt: symbolPendingNotionalUsdt[sym] ?? 0,
+             symbolHasBlockingPending: symbolHasBlockingPending[sym] === true,
+             hasUnknownNotional,
+             authorityMode,
+             pending_orders_detail: ordersDetail
           });
 
           return buildV2StateBridge(
@@ -6431,12 +6448,14 @@ export class PaperEngine {
             this.okxWalletBalanceUsdt,
             this.okxAvailableBalanceUsdt,
             this.okxPositionsOk,
-            pendingOrdersExposureReady,
-            0,
-            0,
+            pendingFetchReady,
+            accountPendingNotionalUsdt,
+            symbolPendingNotionalUsdt[sym] ?? 0,
             this.lastSignedRestSuccessAt ?? fetchedAt,
             this.lastSignedRestSuccessAt ?? fetchedAt,
-            this.lastOpsOrdersScanAtMs ?? fetchedAt
+            this.lastOpsOrdersScanAtMs ?? fetchedAt,
+            symbolHasBlockingPending[sym] === true,
+            hasUnknownNotional
           );
         })(),
         v2Mode
@@ -23550,7 +23569,9 @@ export function buildV2StateBridge(
   pendingSymbolNotionalUsdt?: number,
   balanceFetchedAt?: number,
   positionsFetchedAt?: number,
-  pendingOrdersFetchedAt?: number
+  pendingOrdersFetchedAt?: number,
+  hasSymbolPendingEntry?: boolean,
+  hasUnknownPendingNotional?: boolean
 ): V2BridgeState {
   let okxActualSide = "none";
   if (lastLivePositionsPayload && Array.isArray(lastLivePositionsPayload)) {
@@ -23653,6 +23674,8 @@ export function buildV2StateBridge(
     okxPendingOrdersReady: okxPendingOrdersReady ?? true,
     okxPendingOrdersNotionalUsdt: pendingOrdersNotionalUsdt,
     okxPendingSymbolNotionalUsdt: pendingSymbolNotionalUsdt,
+    hasSymbolPendingEntry,
+    hasUnknownPendingNotional,
     balanceFetchedAt,
     positionsFetchedAt,
     pendingOrdersFetchedAt,

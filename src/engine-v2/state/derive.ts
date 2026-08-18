@@ -412,6 +412,8 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
         okxPendingOrdersReady: input.state.okxPendingOrdersReady,
         okxPendingOrdersNotionalUsdt: input.state.okxPendingOrdersNotionalUsdt,
         okxPendingSymbolNotionalUsdt: input.state.okxPendingSymbolNotionalUsdt,
+        hasSymbolPendingEntry: (input.state as any).hasSymbolPendingEntry,
+        hasUnknownPendingNotional: (input.state as any).hasUnknownPendingNotional,
         balanceFetchedAt: input.state.balanceFetchedAt,
         positionsFetchedAt: input.state.positionsFetchedAt,
         pendingOrdersFetchedAt: input.state.pendingOrdersFetchedAt

@@ -330,6 +330,220 @@ export function countBlockingOkxOpenOrders(
   return { blockingPendingCount, blockingAlgosCount, botManagedProtectiveCount };
 }
 
+const OKX_SPEC_CT_VAL: Record<string, number> = {
+  "ETHUSDT": 0.1,
+  "ETH-USDT-SWAP": 0.1,
+  "BTCUSDT": 0.01,
+  "BTC-USDT-SWAP": 0.01,
+  "SOLUSDT": 1,
+  "SOL-USDT-SWAP": 1,
+  "XRPUSDT": 100,
+  "XRP-USDT-SWAP": 100
+};
+
+export function resolveInstrumentCtVal(symbolOrInstId: string): number {
+  const norm = String(symbolOrInstId).trim().toUpperCase();
+  if (OKX_SPEC_CT_VAL[norm] != null) return OKX_SPEC_CT_VAL[norm];
+  const swapNorm = norm.includes("-SWAP") ? norm : `${norm.replace("USDT", "")}-USDT-SWAP`;
+  if (OKX_SPEC_CT_VAL[swapNorm] != null) return OKX_SPEC_CT_VAL[swapNorm];
+  return 1;
+}
+
+export interface OkxPendingOrderDetail {
+  instId: string;
+  symbol: string;
+  ordId: string;
+  clOrdId: string;
+  side: string;
+  posSide: string;
+  reduceOnly: boolean;
+  ordType: string;
+  state: string;
+  sz: number;
+  px: number | null;
+  purpose: string;
+  exposureIncreasing: boolean;
+  resolvedNotionalUsdt: number | null;
+  notionalSource: string;
+}
+
+export interface PendingOrdersExposureAnalysis {
+  pendingFetchReady: boolean;
+  pendingPayloadEmpty: boolean;
+  blockingPendingCount: number;
+  blockingAlgosCount: number;
+  botManagedProtectiveCount: number;
+  accountPendingNotionalUsdt: number;
+  symbolPendingNotionalUsdt: Record<string, number>;
+  symbolHasBlockingPending: Record<string, boolean>;
+  hasUnknownNotional: boolean;
+  ordersDetail: OkxPendingOrderDetail[];
+}
+
+export function resolvePendingOrdersExposure(input: {
+  pending: readonly Record<string, unknown>[];
+  algos: readonly Record<string, unknown>[];
+  opens: readonly PaperOpenPositionRecord[];
+  pendingFetchPerformed: boolean;
+  pendingFetchErrorsCount: number;
+  cachedOpsPendingIsArray: boolean;
+  cachedOpsAlgosIsArray: boolean;
+  snapshotPrices?: Record<string, number>;
+}): PendingOrdersExposureAnalysis {
+  const {
+    pending,
+    algos,
+    opens,
+    pendingFetchPerformed,
+    pendingFetchErrorsCount,
+    cachedOpsPendingIsArray,
+    cachedOpsAlgosIsArray,
+    snapshotPrices = {}
+  } = input;
+
+  const pendingFetchReady =
+    pendingFetchPerformed &&
+    cachedOpsPendingIsArray &&
+    cachedOpsAlgosIsArray &&
+    pendingFetchErrorsCount === 0;
+
+  let blockingPendingCount = 0;
+  let blockingAlgosCount = 0;
+  let botManagedProtectiveCount = 0;
+  let accountPendingNotionalUsdt = 0;
+  const symbolPendingNotionalUsdt: Record<string, number> = {};
+  const symbolHasBlockingPending: Record<string, boolean> = {};
+  let hasUnknownNotional = false;
+  const ordersDetail: OkxPendingOrderDetail[] = [];
+
+  const classifyWithLedger = (ord: Record<string, unknown>): OkxOpenOrderPurposeClassifyResult => {
+    const instId = String(ord.instId ?? "");
+    const positionSide = resolvePositionSideFromOrder(ord);
+    const ledger =
+      positionSide != null && instId.length > 0
+        ? findLedgerForOrder(opens, instId, positionSide)
+        : null;
+    return classifyOkxOpenOrderPurpose(ord, ledger);
+  };
+
+  const processOrder = (ord: Record<string, unknown>, isAlgo: boolean) => {
+    const instId = String(ord.instId ?? "");
+    const rawSym = instId.includes("-USDT-SWAP")
+      ? instId.replace("-USDT-SWAP", "USDT").replace("-", "")
+      : instId.replace("-SWAP", "").replace("-", "");
+    const symbol = rawSym.length > 0 ? rawSym : "UNKNOWN";
+
+    const ordId = String(ord.ordId ?? ord.algoId ?? "");
+    const clOrdId = String(ord.clOrdId ?? ord.algoClOrdId ?? "");
+    const side = String(ord.side ?? "");
+    const posSide = String(ord.posSide ?? "");
+    const reduceOnly = orderReduceOnly(ord);
+    const ordType = String(ord.ordType ?? ord.algoType ?? "");
+    const state = String(ord.state ?? "");
+    const sz = Number(ord.sz ?? 0);
+
+    const classification = classifyWithLedger(ord);
+    const purpose = classification.purpose;
+
+    let exposureIncreasing = false;
+    let resolvedNotionalUsdt: number | null = null;
+    let notionalSource = "none";
+
+    if (classification.isBotManagedProtection || reduceOnly) {
+      botManagedProtectiveCount += 1;
+      exposureIncreasing = false;
+      resolvedNotionalUsdt = 0;
+      notionalSource = "reduce_only_zero";
+    } else {
+      if (isAlgo) blockingAlgosCount += 1;
+      else blockingPendingCount += 1;
+
+      exposureIncreasing = true;
+
+      // Sizing calculation
+      const ctVal = resolveInstrumentCtVal(symbol);
+
+      // Extract price
+      let pxVal: number | null = null;
+      let pxSource = "none";
+
+      const rawPx = Number(ord.px);
+      if (Number.isFinite(rawPx) && rawPx > 0) {
+        pxVal = rawPx;
+        pxSource = "order_px";
+      } else {
+        const rawTriggerPx = Number(ord.tpTriggerPx ?? ord.slTriggerPx ?? ord.triggerPx ?? ord.stopPx ?? ord.trigPx ?? ord.orderPx);
+        if (Number.isFinite(rawTriggerPx) && rawTriggerPx > 0) {
+          pxVal = rawTriggerPx;
+          pxSource = "trigger_px";
+        } else if (snapshotPrices[symbol] && snapshotPrices[symbol] > 0) {
+          pxVal = snapshotPrices[symbol];
+          pxSource = "snapshot_last_price";
+        } else if (Number(ord.lastPx) > 0) {
+          pxVal = Number(ord.lastPx);
+          pxSource = "order_last_px";
+        } else if (Number(ord.markPx) > 0) {
+          pxVal = Number(ord.markPx);
+          pxSource = "order_mark_px";
+        }
+      }
+
+      if (pxVal != null && pxVal > 0 && Number.isFinite(sz) && sz > 0) {
+        resolvedNotionalUsdt = sz * ctVal * pxVal;
+        notionalSource = pxSource;
+        accountPendingNotionalUsdt += resolvedNotionalUsdt;
+        symbolPendingNotionalUsdt[symbol] = (symbolPendingNotionalUsdt[symbol] ?? 0) + resolvedNotionalUsdt;
+        symbolHasBlockingPending[symbol] = true;
+      } else {
+        resolvedNotionalUsdt = null;
+        hasUnknownNotional = true;
+        notionalSource = "unresolved_price";
+        symbolHasBlockingPending[symbol] = true; // Still blocks duplicate entry for that symbol
+      }
+    }
+
+    ordersDetail.push({
+      instId,
+      symbol,
+      ordId,
+      clOrdId,
+      side,
+      posSide,
+      reduceOnly,
+      ordType,
+      state,
+      sz,
+      px: Number(ord.px) > 0 ? Number(ord.px) : null,
+      purpose,
+      exposureIncreasing,
+      resolvedNotionalUsdt,
+      notionalSource
+    });
+  };
+
+  if (Array.isArray(pending)) {
+    for (const ord of pending) processOrder(ord, false);
+  }
+  if (Array.isArray(algos)) {
+    for (const ord of algos) processOrder(ord, true);
+  }
+
+  const pendingPayloadEmpty = blockingPendingCount === 0 && blockingAlgosCount === 0;
+
+  return {
+    pendingFetchReady,
+    pendingPayloadEmpty,
+    blockingPendingCount,
+    blockingAlgosCount,
+    botManagedProtectiveCount,
+    accountPendingNotionalUsdt,
+    symbolPendingNotionalUsdt,
+    symbolHasBlockingPending,
+    hasUnknownNotional,
+    ordersDetail
+  };
+}
+
 export function evaluateV2ReducePendingGuard(input: Readonly<{
   open: PaperOpenPositionRecord;
   flowId: string;
