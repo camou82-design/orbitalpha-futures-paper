@@ -1,5 +1,5 @@
 import type { EvaluateV2ExitPolicyArgs, V2ExitPolicyResult, V2ExitUrgency, V2ExitAction, V2ExitReason } from "./types";
-import { computePnlStopProtectJudgmentPct } from "./stop-price-authority";
+import { computePnlStopProtectJudgmentPct, isV2StopPriceBreached } from "./stop-price-authority";
 import {
     evaluateOppositePositionHysteresis,
     type OppositeHysteresisState
@@ -8,6 +8,9 @@ import {
     evaluatePnlStopMeaningfulMoveGate,
     type PnlStopMeaningfulMoveGateResult
 } from "./pnl-stop-gate";
+
+const MIN_DEFENSIVE_REDUCE_ADVERSE_MOVE_PCT = 0.0015; // 0.15% underlying move; suppress ordinary ETH/BTC micro-noise.
+const PNL_STOP_REDUCE_RATIO = 0.25;
 
 function resolvePosition(args: EvaluateV2ExitPolicyArgs) {
     const positions = args.v2State.symbolPositions ?? [];
@@ -27,6 +30,17 @@ function urgencyFromAction(action: V2ExitPolicyResult["action"], critical: boole
     if (action === "FULL_EXIT") return "HIGH";
     if (action === "REDUCE" || action === "PARTIAL_TAKE_PROFIT") return "MID";
     return "LOW";
+}
+
+function isPriorDefensiveReduce(reason: unknown): boolean {
+    const r = String(reason ?? "").toUpperCase();
+    return (
+        r.includes("PNL_STOP_PROTECT") ||
+        r.includes("SHOCK_PROTECTIVE_REDUCE") ||
+        r.includes("TRANSITION_REDUCE_ON_CONFLICT") ||
+        r.includes("DEFENSIVE") ||
+        r.includes("PROTECTIVE_REDUCE")
+    );
 }
 
 export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPolicyResult {
@@ -84,12 +98,31 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         typeof s.atr20 === "number" && Number.isFinite(s.atr20) && s.atr20 > 0
             ? s.atr20
             : null;
+    const markPrice = Number(args.markPrice ?? 0);
+    const actualStopBreached =
+        ledgerStopPx != null &&
+        (side === "long" || side === "short") &&
+        markPrice > 0 &&
+        isV2StopPriceBreached(side, markPrice, ledgerStopPx);
 
+    const rawInvalidation = pos?.structureBreached === true || args.invalidationBreachConfirmed === true;
+    const secondaryInvalidationConfirmation =
+        args.structuralBreakConfirmed === true ||
+        args.boxBreakConfirmed === true ||
+        args.reversalConfirmed === true;
+    const hardInvalidationConfirmed =
+        rawInvalidation &&
+        (actualStopBreached || shockAgainst || hasAdverseDirectionalAuthority || secondaryInvalidationConfirmation);
+    const priorDefensiveReduce = isPriorDefensiveReduce((pos as any)?.lastReduceReason);
+
+    // Important separation of authority:
+    // structure/invalidation flags are judged below with a second confirmation. They must not bypass
+    // the PNL-specific noise gate on their own, otherwise a micro move can become REDUCE/FULL_EXIT.
     const pnlGateResult = evaluatePnlStopMeaningfulMoveGate({
         symbol: args.symbol,
         side,
         entryPrice: Number(pos?.entryPrice ?? 0),
-        markPrice: Number(args.markPrice ?? 0),
+        markPrice,
         leverage: Number(pos?.leverage ?? 0),
         pnlStopProtectPct,
         ledgerStopPx,
@@ -99,12 +132,15 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         protectiveVisibilityGraceDeadlineMs: pos?.protectiveVisibilityGraceDeadlineMs ?? null,
         now: (args.v2State as any)?.now ?? Date.now(),
         protectiveSlAlgoId: pos?.protectiveSlAlgoId ?? null,
-        structureBreached: pos?.structureBreached === true,
-        invalidationBreachConfirmed: args.invalidationBreachConfirmed === true,
+        structureBreached: false,
+        invalidationBreachConfirmed: false,
         shockAgainst,
         hasAdverseDirectionalAuthority,
         thresholdActionCandidate
     });
+
+    const adverseMoveLargeEnoughForDefensiveReduce =
+        pnlGateResult.underlyingAdverseMovePct >= MIN_DEFENSIVE_REDUCE_ADVERSE_MOVE_PCT;
 
     let action: V2ExitPolicyResult["action"] = "HOLD";
     let reason: V2ExitPolicyResult["reason"] = "NO_EXIT_SIGNAL";
@@ -114,21 +150,41 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
     if (!hasPosition) {
         action = "HOLD";
         reason = "NO_POSITION_HOLD";
-    } else if (pos?.structureBreached === true || args.invalidationBreachConfirmed === true) {
+    } else if (hardInvalidationConfirmed) {
         action = "FULL_EXIT";
         reason = "V2_EXIT_INVALIDATION";
         reduceRatio = 1;
-        evidence += "|structure_invalidation_breached";
+        evidence += "|hard_invalidation_confirmed";
+    } else if (rawInvalidation) {
+        // A raw invalidation bit is not sufficient authority to destroy a live position.
+        // Require an independent structural/box/reversal confirmation, an adverse current shock,
+        // or the committed exchange stop itself to be breached.
+        action = "HOLD";
+        reason = "NO_EXIT_SIGNAL";
+        reduceRatio = 0;
+        evidence += "|invalidation_noise_suppressed_wait_confirmation";
     } else if (pnlGateResult.finalAction === "FULL_EXIT") {
         action = "FULL_EXIT";
         reason = "PNL_STOP_PROTECT";
         reduceRatio = 1;
         evidence += `|pnl_stop_critical|${pnlGateResult.evidence}`;
     } else if (pnlGateResult.finalAction === "REDUCE") {
-        action = "REDUCE";
-        reason = "PNL_STOP_PROTECT";
-        reduceRatio = 0.4;
-        evidence += `|pnl_stop_reduce|${pnlGateResult.evidence}`;
+        if (!adverseMoveLargeEnoughForDefensiveReduce) {
+            action = "HOLD";
+            reason = "NO_EXIT_SIGNAL";
+            reduceRatio = 0;
+            evidence += `|pnl_stop_absolute_noise_floor_hold:${pnlGateResult.underlyingAdverseMovePct}`;
+        } else if (priorDefensiveReduce) {
+            action = "HOLD";
+            reason = "NO_EXIT_SIGNAL";
+            reduceRatio = 0;
+            evidence += "|repeat_defensive_reduce_suppressed";
+        } else {
+            action = "REDUCE";
+            reason = "PNL_STOP_PROTECT";
+            reduceRatio = PNL_STOP_REDUCE_RATIO;
+            evidence += `|pnl_stop_reduce_once|${pnlGateResult.evidence}`;
+        }
     } else if (shockAgainst) {
         // FULL_EXIT when current shockPhase is directly adverse to position side.
         action = "FULL_EXIT";
@@ -136,20 +192,32 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         reduceRatio = 1;
         evidence += "|shock_full_exit_against";
     } else if (hasAdverseDirectionalAuthority) {
-        // BLOCKER 4-5: SHOCK_PROTECTIVE_REDUCE only when directionalShockState is currently
-        // adverse to the position (DOWN for LONG, UP for SHORT).
-        // CRASH_LOCK / PUMP_LOCK strings alone (stale time-latch) do NOT qualify here.
-        // BOTH-LOCK + directionalShockState=NONE → hasAdverseDirectionalAuthority=false → no reduce.
-        action = "REDUCE";
-        reason = "SHOCK_PROTECTIVE_REDUCE";
-        reduceRatio = 0.35;
-        evidence += "|shock_protective";
+        // One defensive reduction per position cycle. A fresh explicit shockPhase still has the
+        // stronger SHOCK_FULL_EXIT path above, but repeated medium protective trims are suppressed.
+        if (priorDefensiveReduce) {
+            action = "WATCH";
+            reason = "TRANSITION_PROTECTIVE_WATCH";
+            reduceRatio = 0;
+            evidence += "|repeat_directional_defensive_reduce_suppressed";
+        } else {
+            action = "REDUCE";
+            reason = "SHOCK_PROTECTIVE_REDUCE";
+            reduceRatio = 0.3;
+            evidence += "|shock_protective_once";
+        }
     } else if (args.judgment.regime_final === "TRANSITION") {
         if (args.judgment.transitionPhase === "CONFLICT") {
-            action = "REDUCE";
-            reason = "TRANSITION_REDUCE_ON_CONFLICT";
-            reduceRatio = pnlPct > 0 ? 0.3 : 0.45;
-            evidence += "|transition_conflict";
+            if (priorDefensiveReduce) {
+                action = "WATCH";
+                reason = "TRANSITION_PROTECTIVE_WATCH";
+                reduceRatio = 0;
+                evidence += "|repeat_transition_reduce_suppressed";
+            } else {
+                action = "REDUCE";
+                reason = "TRANSITION_REDUCE_ON_CONFLICT";
+                reduceRatio = pnlPct > 0 ? 0.25 : 0.3;
+                evidence += "|transition_conflict_reduce_once";
+            }
         } else {
             action = "WATCH";
             reason = "TRANSITION_PROTECTIVE_WATCH";
@@ -248,7 +316,7 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
             proposedReduceRatio: reduceRatio,
             reversalConfirmed: args.reversalConfirmed,
             sameCycleExitConsumed: args.sameCycleExitConsumed,
-            invalidationBreachConfirmed: pos?.structureBreached === true || args.invalidationBreachConfirmed === true,
+            invalidationBreachConfirmed: hardInvalidationConfirmed,
             structuralBreakConfirmed: args.structuralBreakConfirmed,
             boxBreakConfirmed: args.boxBreakConfirmed
         });
@@ -308,7 +376,7 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
                 proposedReduceRatio: profitReduce,
                 reversalConfirmed: args.reversalConfirmed,
                 sameCycleExitConsumed: args.sameCycleExitConsumed,
-                invalidationBreachConfirmed: args.invalidationBreachConfirmed,
+                invalidationBreachConfirmed: hardInvalidationConfirmed,
                 structuralBreakConfirmed: args.structuralBreakConfirmed,
                 boxBreakConfirmed: args.boxBreakConfirmed
             });
