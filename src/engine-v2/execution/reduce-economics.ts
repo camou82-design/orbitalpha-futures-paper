@@ -188,15 +188,10 @@ export function evaluatePartialReduceLimit(input: Readonly<{
         return { submitAllowed: true, blockReason: null, fallbackAction: "NONE" };
     }
 
-    // High urgency alone must not transform a blocked repeat trim into a full exit.
-    // Only an independently confirmed imminent invalidation may escalate.
-    if (input.invalidationImminent === true) {
-        return {
-            submitAllowed: false,
-            blockReason: "MAX_PROTECTIVE_PARTIAL_REDUCE_REACHED",
-            fallbackAction: "FULL_EXIT"
-        };
-    }
+    // BLOCKER 4-20: a partial-execution limiter is not terminal-exit authority.
+    // Even when the old caller labels invalidation as "imminent" based only on distance,
+    // this layer must HOLD. A FULL_EXIT must be emitted independently by V2 exit policy
+    // (actual stop breach, confirmed structure/box/reversal with meaningful move, etc.).
     return {
         submitAllowed: false,
         blockReason: "MAX_PROTECTIVE_PARTIAL_REDUCE_REACHED",
@@ -283,17 +278,12 @@ export function evaluateShockReduceEscalation(input: Readonly<{
     decisionReason: string;
 }> {
     if (input.episodeCount >= MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT) {
-        if (input.invalidationImminent === true) {
-            return {
-                partialAllowed: false,
-                fullExitRequired: true,
-                decisionReason: "max_partials_reached_confirmed_invalidation"
-            };
-        }
+        // Same sovereignty rule as evaluatePartialReduceLimit: this helper may block a
+        // repeated partial, but it may never synthesize a terminal close from proximity.
         return {
             partialAllowed: false,
             fullExitRequired: false,
-            decisionReason: "max_partials_reached_hold"
+            decisionReason: "max_partials_reached_hold_for_exit_policy"
         };
     }
     if (input.episodeCount === 0) {
