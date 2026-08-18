@@ -1,9 +1,10 @@
 import type { PaperOpenPositionRecord } from "../../models/types";
 import { resolveOpenNotionalUsd } from "../live-account/position-size-authority";
 
-// One defensive trim per position cycle. Repeated trimming was converting small market noise
-// into fee-heavy reduce -> reduce -> full-exit churn.
-export const MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT = 1;
+// Preserve the existing two-step allowance for genuinely worsening SHOCK defense,
+// but routine PNL/TRANSITION defense is capped separately at one trim below.
+export const MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT = 2;
+export const MAX_ROUTINE_DEFENSIVE_REDUCE_COUNT = 1;
 export const REDUCE_FEE_SAFETY_MULTIPLIER = 1.5;
 export const V2_REDUCE_ECONOMIC_LOT_DISTORTION_THRESHOLD = 1.75;
 
@@ -35,8 +36,8 @@ export function isProtectivePartialReason(reason: string | null | undefined): bo
     if (r.includes("FULL_EXIT") || r.includes("FINAL_EXIT")) return false;
     if (r.includes("STOP_LOSS")) return false;
 
-    // PNL_STOP_PROTECT is a partial defensive mutation when the policy downgrades it to REDUCE.
-    // It must be counted so it cannot silently escape the one-defensive-trim limit.
+    // PNL_STOP_PROTECT is a partial defensive mutation when policy downgrades it to REDUCE.
+    // It must be counted rather than silently reporting partialReduceCount=0.
     if (r.includes("PNL_STOP")) return true;
     if (r.includes("TRANSITION_REDUCE_ON_CONFLICT")) return true;
 
@@ -46,6 +47,11 @@ export function isProtectivePartialReason(reason: string | null | undefined): bo
         r.includes("DEFENSIVE") ||
         r.includes("PROTECTIVE")
     );
+}
+
+export function isRoutineDefensivePartialReason(reason: string | null | undefined): boolean {
+    const r = String(reason ?? "").toUpperCase();
+    return r.includes("PNL_STOP") || r.includes("TRANSITION_REDUCE_ON_CONFLICT");
 }
 
 export function isFeeEconomicsBypassReason(reason: string | null | undefined): boolean {
@@ -173,12 +179,17 @@ export function evaluatePartialReduceLimit(input: Readonly<{
     if (!isProtectivePartialReason(input.reason)) {
         return { submitAllowed: true, blockReason: null, fallbackAction: "NONE" };
     }
-    if (input.protectivePartialCount < MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT) {
+
+    const maxAllowed = isRoutineDefensivePartialReason(input.reason)
+        ? MAX_ROUTINE_DEFENSIVE_REDUCE_COUNT
+        : MAX_PROTECTIVE_PARTIAL_REDUCE_COUNT;
+
+    if (input.protectivePartialCount < maxAllowed) {
         return { submitAllowed: true, blockReason: null, fallbackAction: "NONE" };
     }
 
-    // High urgency alone must not transform a blocked second trim into a full exit.
-    // Only an independently confirmed imminent invalidation may escalate after the one allowed trim.
+    // High urgency alone must not transform a blocked repeat trim into a full exit.
+    // Only an independently confirmed imminent invalidation may escalate.
     if (input.invalidationImminent === true) {
         return {
             submitAllowed: false,
@@ -288,10 +299,13 @@ export function evaluateShockReduceEscalation(input: Readonly<{
     if (input.episodeCount === 0) {
         return { partialAllowed: true, fullExitRequired: false, decisionReason: "first_protective_partial" };
     }
+    if (input.freshCandle && input.riskDeteriorated) {
+        return { partialAllowed: true, fullExitRequired: false, decisionReason: "fresh_deterioration_second_partial" };
+    }
     return {
         partialAllowed: false,
         fullExitRequired: false,
-        decisionReason: "defensive_partial_limit_hold"
+        decisionReason: "same_shock_episode_hold"
     };
 }
 
