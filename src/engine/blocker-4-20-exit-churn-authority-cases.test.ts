@@ -26,6 +26,12 @@ function baseArgs(overrides: {
     lastReduceReason?: string;
     regime?: "TREND" | "RANGE" | "TRANSITION";
     transitionPhase?: string;
+    shockPhase?: "NONE" | "DOWN_SHOCK" | "UP_SHOCK";
+    directionalShockState?: "NONE" | "DOWN" | "UP";
+    trendWeaknessScore?: number;
+    trendPhase?: string;
+    slProtectionSatisfied?: boolean;
+    protectiveSlAlgoId?: string | null;
 } = {}): EvaluateV2ExitPolicyArgs {
     const side = overrides.side ?? "long";
     const entryPrice = overrides.entryPrice ?? 1906.17;
@@ -34,7 +40,7 @@ function baseArgs(overrides: {
         symbol: "ETHUSDT",
         v2State: {
             symbol: "ETHUSDT",
-            directionalShockState: "NONE",
+            directionalShockState: overrides.directionalShockState ?? "NONE",
             symbolPositions: [
                 {
                     symbol: "ETHUSDT",
@@ -45,9 +51,11 @@ function baseArgs(overrides: {
                     pnlPct: overrides.pnlPct ?? 0,
                     leverage: 10,
                     ledger_stop_px: overrides.ledgerStopPx ?? 1898,
-                    slProtectionSatisfied: true,
+                    slProtectionSatisfied: overrides.slProtectionSatisfied ?? true,
                     slProtectionProvisional: false,
-                    protectiveSlAlgoId: "algo_sl_exit_churn_test",
+                    protectiveSlAlgoId: overrides.protectiveSlAlgoId === undefined
+                        ? "algo_sl_exit_churn_test"
+                        : overrides.protectiveSlAlgoId,
                     peakUnrealizedPnlPct: 0,
                     structureBreached: overrides.structureBreached === true,
                     lastReduceReason: overrides.lastReduceReason
@@ -57,9 +65,9 @@ function baseArgs(overrides: {
         judgment: {
             regime_final: overrides.regime ?? "TREND",
             subtype: "TREND_MOMENTUM_HEALTHY",
-            shockPhase: "NONE",
+            shockPhase: overrides.shockPhase ?? "NONE",
             rangePhase: "MID",
-            trendPhase: "UP",
+            trendPhase: overrides.trendPhase ?? "UP",
             transitionPhase: overrides.transitionPhase ?? "NONE",
             confidence: 0.8
         } as any,
@@ -67,7 +75,7 @@ function baseArgs(overrides: {
             boxPos: 0.5,
             boxBreakSide: "none",
             emaGap: side === "long" ? 0.001 : -0.001,
-            trendWeaknessScore: 0.2,
+            trendWeaknessScore: overrides.trendWeaknessScore ?? 0.2,
             rangeConfidence: 0.7,
             qualityScore: 80,
             atr20: overrides.atr20 ?? 6
@@ -92,47 +100,77 @@ function testTinyRawInvalidationMustHold(): void {
     }));
     assertEq(res.action, "HOLD", "tiny raw invalidation without independent confirmation must HOLD");
     assertTrue(res.evidence.includes("invalidation_noise_suppressed_wait_confirmation"), "noise suppression proof present");
-    console.info(JSON.stringify({ status: "PASS", label: "TINY_RAW_INVALIDATION_HOLD" }));
 }
 
-function testConfirmedStructuralBreakCanExit(): void {
+// Review C1: directional state cannot upgrade a ~0.06% raw invalidation into terminal exit.
+function testTinyDirectionalShockPlusInvalidationMustHold(): void {
     const res = evaluateV2ExitPolicy(baseArgs({
+        entryPrice: 1906.17,
+        markPrice: 1905.00,
+        structureBreached: true,
+        invalidationBreachConfirmed: true,
+        directionalShockState: "DOWN"
+    }));
+    assertEq(res.action, "HOLD", "micro raw invalidation + directional state must HOLD");
+    assertTrue(!res.shouldExit, "directional state alone cannot be terminal confirmation");
+}
+
+// Review C2/C3: even a current adverse shock may not mutate a position inside measured micro-noise.
+function testTinyAdverseShockMustWatchNotExit(): void {
+    const res = evaluateV2ExitPolicy(baseArgs({
+        entryPrice: 1906.17,
+        markPrice: 1905.00,
+        shockPhase: "DOWN_SHOCK",
+        directionalShockState: "DOWN"
+    }));
+    assertEq(res.action, "WATCH", "measured ~0.06% adverse shock must WATCH");
+    assertTrue(!res.shouldExit && !res.shouldReduce, "micro shock cannot close or reduce");
+}
+
+function testConfirmedStructuralBreakStillNeedsMeaningfulMove(): void {
+    const micro = evaluateV2ExitPolicy(baseArgs({
         entryPrice: 1906.17,
         markPrice: 1905.00,
         structureBreached: true,
         invalidationBreachConfirmed: true,
         structuralBreakConfirmed: true
     }));
-    assertEq(res.action, "FULL_EXIT", "independently confirmed structural break may full exit");
-    assertEq(res.reason, "V2_EXIT_INVALIDATION", "confirmed structural break reason");
-    console.info(JSON.stringify({ status: "PASS", label: "CONFIRMED_STRUCTURAL_BREAK_EXIT" }));
+    assertEq(micro.action, "HOLD", "confirmed structural metadata inside micro-noise must HOLD");
+
+    const meaningful = evaluateV2ExitPolicy(baseArgs({
+        entryPrice: 1906.17,
+        markPrice: 1902.90, // ~0.1715% adverse
+        structureBreached: true,
+        invalidationBreachConfirmed: true,
+        structuralBreakConfirmed: true
+    }));
+    assertEq(meaningful.action, "FULL_EXIT", "confirmed structural break + meaningful move may exit");
+    assertEq(meaningful.reason, "V2_EXIT_INVALIDATION", "confirmed structural break reason");
 }
 
-// Force the inner PNL gate to see >=1 ATR and >=40% stop progress, but keep the absolute move at only 0.12%.
+// Avoid an exact 40.0000% floating point boundary: this fixture is deliberately >40% stop progress.
 function testPnlProtectAbsoluteNoiseFloor(): void {
     const res = evaluateV2ExitPolicy(baseArgs({
         entryPrice: 1900,
-        markPrice: 1897.72, // -0.12% underlying; 10x => -1.2% PNL threshold
-        ledgerStopPx: 1894.30, // 0.30% stop distance => 40% progress
+        markPrice: 1897.72, // -0.12% underlying; 10x => -1.2%
+        ledgerStopPx: 1894.50, // stop distance 5.50; progress ~41.45%
         atr20: 2.0
     }));
     assertEq(res.pnlStopGateResult?.finalAction, "REDUCE", "inner PNL gate fixture must request REDUCE");
     assertEq(res.action, "HOLD", "0.12% underlying move must be blocked by absolute noise floor");
     assertTrue(res.evidence.includes("pnl_stop_absolute_noise_floor_hold"), "absolute noise floor proof present");
-    console.info(JSON.stringify({ status: "PASS", label: "PNL_PROTECT_ABSOLUTE_NOISE_FLOOR" }));
 }
 
 function testFirstMeaningfulPnlReduceIsSmaller(): void {
     const res = evaluateV2ExitPolicy(baseArgs({
         entryPrice: 1900,
-        markPrice: 1896.58, // -0.18% underlying; 10x => -1.8%
-        ledgerStopPx: 1891.45, // 0.45% stop distance => 40% progress
+        markPrice: 1896.58, // -0.18% underlying
+        ledgerStopPx: 1891.45,
         atr20: 3.0
     }));
     assertEq(res.action, "REDUCE", "first meaningful PNL protection may reduce");
     assertEq(res.reason, "PNL_STOP_PROTECT", "first meaningful reduce reason");
     assertEq(res.reduceRatio, 0.25, "PNL protective reduce must be 25%, not 40%");
-    console.info(JSON.stringify({ status: "PASS", label: "FIRST_PNL_REDUCE_25PCT" }));
 }
 
 function testSecondDefensivePnlReduceMustHold(): void {
@@ -145,7 +183,18 @@ function testSecondDefensivePnlReduceMustHold(): void {
     }));
     assertEq(res.action, "HOLD", "second defensive PNL reduce must HOLD");
     assertTrue(res.evidence.includes("repeat_defensive_reduce_suppressed"), "repeat defensive reduce proof present");
-    console.info(JSON.stringify({ status: "PASS", label: "SECOND_DEFENSIVE_REDUCE_HOLD" }));
+}
+
+function testTransitionMicroLossCannotTrim(): void {
+    const res = evaluateV2ExitPolicy(baseArgs({
+        regime: "TRANSITION",
+        transitionPhase: "CONFLICT",
+        entryPrice: 1906.17,
+        markPrice: 1905.00,
+        pnlPct: -0.001
+    }));
+    assertEq(res.action, "WATCH", "transition conflict inside micro adverse move must WATCH");
+    assertTrue(!res.shouldReduce, "transition micro loss cannot trim");
 }
 
 function testTransitionConflictCannotStackAnotherDefensiveReduce(): void {
@@ -160,17 +209,47 @@ function testTransitionConflictCannotStackAnotherDefensiveReduce(): void {
     }));
     assertEq(res.action, "WATCH", "transition conflict after prior defensive reduce must WATCH");
     assertEq(res.reason, "TRANSITION_PROTECTIVE_WATCH", "transition repeat reduction downgraded to watch");
-    console.info(JSON.stringify({ status: "PASS", label: "TRANSITION_REPEAT_REDUCE_WATCH" }));
+}
+
+// Review C4: an underwater trend weakness signal may not stack a second trim after PNL protection.
+function testTrendWeaknessCannotStackAfterDefensiveReduce(): void {
+    const res = evaluateV2ExitPolicy(baseArgs({
+        regime: "TREND",
+        trendWeaknessScore: 0.56,
+        pnlPct: -0.005,
+        entryPrice: 1900,
+        markPrice: 1896.5,
+        lastReduceReason: "PNL_STOP_PROTECT"
+    }));
+    assertEq(res.action, "WATCH", "underwater trend weakness after defensive trim must WATCH");
+    assertTrue(!res.shouldPartial && !res.shouldReduce, "trend weakness cannot stack another trim while underwater");
+    assertTrue(res.evidence.includes("trend_reduce_after_defensive_trim_suppressed"), "trend stack suppression proof present");
+}
+
+function testActualCommittedStopStillFullExits(): void {
+    const res = evaluateV2ExitPolicy(baseArgs({
+        entryPrice: 1900,
+        markPrice: 1889.9,
+        ledgerStopPx: 1890,
+        shockPhase: "NONE"
+    }));
+    assertEq(res.action, "FULL_EXIT", "actual committed stop breach must remain FULL_EXIT");
+    assertEq(res.reason, "PNL_STOP_PROTECT", "actual stop authority reason preserved");
 }
 
 function runAll(): void {
     console.info("=== RUNNING BLOCKER 4-20 EXIT CHURN REGRESSIONS ===");
     testTinyRawInvalidationMustHold();
-    testConfirmedStructuralBreakCanExit();
+    testTinyDirectionalShockPlusInvalidationMustHold();
+    testTinyAdverseShockMustWatchNotExit();
+    testConfirmedStructuralBreakStillNeedsMeaningfulMove();
     testPnlProtectAbsoluteNoiseFloor();
     testFirstMeaningfulPnlReduceIsSmaller();
     testSecondDefensivePnlReduceMustHold();
+    testTransitionMicroLossCannotTrim();
     testTransitionConflictCannotStackAnotherDefensiveReduce();
+    testTrendWeaknessCannotStackAfterDefensiveReduce();
+    testActualCommittedStopStillFullExits();
     console.info("=== ALL BLOCKER 4-20 EXIT CHURN REGRESSIONS PASSED ===");
 }
 
