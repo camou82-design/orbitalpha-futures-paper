@@ -349,20 +349,20 @@ async function runTests() {
     // PRODUCTION AUTHORITY PROPAGATION INTEGRATION TESTS (CASE I ~ L)
     // =========================================================================
 
-    // CASE I — LONG entry=100, executor TP1=100.18 -> envelope -> authority -> committed risk plan: initial_tp_price == 100.18
+    // CASE I — LONG entry=100, executor TP1=100.2 -> envelope -> authority -> committed risk plan: initial_tp_price == 100.2
     {
         const entry = 100;
         const input = createMockInput({
             side: "long",
             entryPx: entry,
             boxLow: 99.95,
-            boxHigh: 100.15, // boxMid = 100.05 -> clamped dist = 0.18 -> tp1 = 100.18
+            boxHigh: 100.15, // boxMid = 100.05 -> clamped dist = 0.20 -> tp1 = 100.2
             boxPos: 0.1,
             atr: 0.01
         });
         const out = executeRangeRegime(input, createMockJudgment());
         const execMeta = out.metadata;
-        assert.strictEqual(execMeta.takeProfit1Px, 100.18);
+        assert.strictEqual(execMeta.takeProfit1Px, 100.2);
 
         // Build execution envelope via production function
         const v2Decision: any = {
@@ -409,31 +409,31 @@ async function runTests() {
 
         // Derive authority from envelope via production function
         const authority = deriveExecutionAuthorityFromEnvelope(envelope);
-        assert.strictEqual(authority.takeProfit1Px, 100.18);
+        assert.strictEqual(authority.takeProfit1Px, 100.2);
 
         // Extract committed risk plan TP
         const riskPlan = extractCommittedTpPrice(authority, {}, "long", entry);
-        const ok = riskPlan.finalTpPrice === 100.18 && riskPlan.finalTpSource === "authority_tp_price";
-        report("CASE I — LONG entry=100 executor TP1=100.18 -> envelope -> authority -> risk plan: 100.18", ok, {
+        const ok = riskPlan.finalTpPrice === 100.2 && riskPlan.finalTpSource === "authority_tp_price";
+        report("CASE I — LONG entry=100 executor TP1=100.2 -> envelope -> authority -> risk plan: 100.2", ok, {
             authorityTp1: authority.takeProfit1Px,
             riskPlan
         });
     }
 
-    // CASE J — SHORT entry=100, executor TP1=99.82 -> envelope -> authority -> committed risk plan: initial_tp_price == 99.82
+    // CASE J — SHORT entry=100, executor TP1=99.8 -> envelope -> authority -> committed risk plan: initial_tp_price == 99.8
     {
         const entry = 100;
         const input = createMockInput({
             side: "short",
             entryPx: entry,
             boxLow: 99.85,
-            boxHigh: 100.05, // boxMid = 99.95 -> clamped dist = 0.18 -> tp1 = 99.82
+            boxHigh: 100.05, // boxMid = 99.95 -> clamped dist = 0.20 -> tp1 = 99.8
             boxPos: 0.9,
             atr: 0.01
         });
         const out = executeRangeRegime(input, createMockJudgment());
         const execMeta = out.metadata;
-        assert.strictEqual(execMeta.takeProfit1Px, 99.82);
+        assert.strictEqual(execMeta.takeProfit1Px, 99.8);
 
         const v2Decision: any = {
             decision: "ENTER",
@@ -478,11 +478,11 @@ async function runTests() {
         });
 
         const authority = deriveExecutionAuthorityFromEnvelope(envelope);
-        assert.strictEqual(authority.takeProfit1Px, 99.82);
+        assert.strictEqual(authority.takeProfit1Px, 99.8);
 
         const riskPlan = extractCommittedTpPrice(authority, {}, "short", entry);
-        const ok = riskPlan.finalTpPrice === 99.82 && riskPlan.finalTpSource === "authority_tp_price";
-        report("CASE J — SHORT entry=100 executor TP1=99.82 -> envelope -> authority -> risk plan: 99.82", ok, {
+        const ok = riskPlan.finalTpPrice === 99.8 && riskPlan.finalTpSource === "authority_tp_price";
+        report("CASE J — SHORT entry=100 executor TP1=99.8 -> envelope -> authority -> risk plan: 99.8", ok, {
             authorityTp1: authority.takeProfit1Px,
             riskPlan
         });

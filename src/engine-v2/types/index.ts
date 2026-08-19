@@ -144,6 +144,7 @@ export interface EngineV2Position {
     protectiveVisibilityGraceDeadlineMs?: number;
     /** Last filled defensive partial reduce reason (ledger → policy repeat guard). */
     lastReduceReason?: string;
+    rangeOppositePartialTaken?: boolean;
     /** Protective partial reduce count excluding TP ladder (ledger → execution/policy). */
     protectivePartialReduceCount?: number;
 }
@@ -251,6 +252,7 @@ export interface LegacyPositionAdapter {
     slProtectionProvisional?: boolean;
     protectiveVisibilityGraceDeadlineMs?: number;
     lastReduceReason?: string;
+    rangeOppositePartialTaken?: boolean;
     protectivePartialReduceCount?: number;
 }
 
@@ -557,6 +559,7 @@ export interface V2BridgePosition {
     protectiveSlAlgoId?: string;
     slProtectionProvisional?: boolean;
     lastReduceReason?: string;
+    rangeOppositePartialTaken?: boolean;
     protectivePartialReduceCount?: number;
 }
 

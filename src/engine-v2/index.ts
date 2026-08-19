@@ -7260,6 +7260,7 @@ export function adaptV2Input(
                     slProtectionProvisional: p.slProtectionProvisional === true,
                     protectiveVisibilityGraceDeadlineMs: p.protectiveVisibilityGraceDeadlineMs,
                     lastReduceReason: p.lastReduceReason,
+                    rangeOppositePartialTaken: p.rangeOppositePartialTaken === true,
                     protectivePartialReduceCount: p.protectivePartialReduceCount
                 };
             }),

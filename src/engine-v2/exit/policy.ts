@@ -261,12 +261,22 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
             evidence += "|transition_watch";
         }
     } else if (args.judgment.regime_final === "RANGE") {
+        const priorRangeOppositePartial =
+            pos?.rangeOppositePartialTaken === true;
+
         if (side === "long") {
             if ((args.judgment.rangePhase === "UPPER" || boxPos >= 0.74) && pnlPct > 0) {
-                action = "PARTIAL_TAKE_PROFIT";
-                reason = "RANGE_PARTIAL_AT_OPPOSITE_EDGE";
-                reduceRatio = 0.4;
-                evidence += "|range_long_opposite_edge";
+                if (priorRangeOppositePartial) {
+                    action = "HOLD";
+                    reason = "RANGE_PROFIT_PROTECT";
+                    reduceRatio = 0;
+                    evidence += "|repeat_range_opposite_edge_partial_suppressed";
+                } else {
+                    action = "PARTIAL_TAKE_PROFIT";
+                    reason = "RANGE_PARTIAL_AT_OPPOSITE_EDGE";
+                    reduceRatio = 0.4;
+                    evidence += "|range_long_opposite_edge";
+                }
             } else if (boxBreakSide === "lower" || boxPos < 0.15) {
                 action = "FULL_EXIT";
                 reason = "RANGE_FULL_EXIT_BOX_BREAK";
@@ -283,10 +293,17 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
             }
         } else if (side === "short") {
             if ((args.judgment.rangePhase === "LOWER" || boxPos <= 0.26) && pnlPct > 0) {
-                action = "PARTIAL_TAKE_PROFIT";
-                reason = "RANGE_PARTIAL_AT_OPPOSITE_EDGE";
-                reduceRatio = 0.4;
-                evidence += "|range_short_opposite_edge";
+                if (priorRangeOppositePartial) {
+                    action = "HOLD";
+                    reason = "RANGE_PROFIT_PROTECT";
+                    reduceRatio = 0;
+                    evidence += "|repeat_range_opposite_edge_partial_suppressed";
+                } else {
+                    action = "PARTIAL_TAKE_PROFIT";
+                    reason = "RANGE_PARTIAL_AT_OPPOSITE_EDGE";
+                    reduceRatio = 0.4;
+                    evidence += "|range_short_opposite_edge";
+                }
             } else if (boxBreakSide === "upper" || boxPos > 0.85) {
                 action = "FULL_EXIT";
                 reason = "RANGE_FULL_EXIT_BOX_BREAK";

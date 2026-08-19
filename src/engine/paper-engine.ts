@@ -8953,6 +8953,12 @@ export class PaperEngine {
       open.partialExitStage = stageAfter;
       open.lastPartialAt = input.closedAt ?? Date.now();
       open.lifecycleState = "OPEN";
+      if (
+        String(fillReason).toUpperCase().includes("RANGE_PARTIAL_AT_OPPOSITE_EDGE") ||
+        String(reason).toUpperCase().includes("RANGE_PARTIAL_AT_OPPOSITE_EDGE")
+      ) {
+        open.rangeOppositePartialTaken = true;
+      }
       this.clearV2PartialPendingMetadata(open);
 
       // [P0-B] V2 RANGE TP1 partial confirmed: advance targetPrice1 to TP2 (or clear old TP1 if TP2 missing/invalid)
@@ -8965,8 +8971,18 @@ export class PaperEngine {
          stageAfter >= 1);
 
       if (isRangeTp1Confirmed) {
-        const tp2 = open.takeProfit2Px;
-        const tp1 = open.takeProfit1Px;
+        const tp2 =
+          typeof open.takeProfit2Px === "number" && Number.isFinite(open.takeProfit2Px) && open.takeProfit2Px > 0
+            ? open.takeProfit2Px
+            : typeof (open.takeProfitPlan as any)?.tp2 === "number" && Number.isFinite((open.takeProfitPlan as any).tp2) && (open.takeProfitPlan as any).tp2 > 0
+              ? (open.takeProfitPlan as any).tp2
+              : undefined;
+        const tp1 =
+          typeof open.takeProfit1Px === "number" && Number.isFinite(open.takeProfit1Px) && open.takeProfit1Px > 0
+            ? open.takeProfit1Px
+            : typeof (open.takeProfitPlan as any)?.tp1 === "number" && Number.isFinite((open.takeProfitPlan as any).tp1) && (open.takeProfitPlan as any).tp1 > 0
+              ? (open.takeProfitPlan as any).tp1
+              : undefined;
         const entryPx = open.entryPrice;
         const isValidTp2Direction =
           typeof tp2 === "number" &&
@@ -8975,6 +8991,9 @@ export class PaperEngine {
 
         if (isValidTp2Direction) {
           open.targetPrice1 = tp2;
+          if (open.takeProfit2Px == null) {
+            open.takeProfit2Px = tp2;
+          }
           this.logger.info("V2_RANGE_TP1_CONFIRMED_TARGET_ADVANCED_PROOF", {
             symbol: open.symbol,
             side: open.side,
@@ -23082,6 +23101,17 @@ export class PaperEngine {
     const fillSize = submitRes.fillSize ? Number(submitRes.fillSize) : 0;
     const filledNotional = isFilled ? (fillSize ? computeOkxFilledNotionalUsdt(fillSize, fillPx, instMeta.ctVal) : finalOrderNotionalUsdt) : (fillSize ? computeOkxFilledNotionalUsdt(fillSize, fillPx, instMeta.ctVal) : 0);
 
+    const tp1Px = typeof v2Decision.metadata?.takeProfit1Px === "number" && v2Decision.metadata.takeProfit1Px > 0
+      ? v2Decision.metadata.takeProfit1Px
+      : typeof (v2Decision.metadata?.takeProfitPlan as any)?.tp1 === "number"
+        ? (v2Decision.metadata?.takeProfitPlan as any).tp1
+        : undefined;
+    const tp2Px = typeof v2Decision.metadata?.takeProfit2Px === "number" && v2Decision.metadata.takeProfit2Px > 0
+      ? v2Decision.metadata.takeProfit2Px
+      : typeof (v2Decision.metadata?.takeProfitPlan as any)?.tp2 === "number"
+        ? (v2Decision.metadata?.takeProfitPlan as any).tp2
+        : undefined;
+
     const v2Telemetry = {
       entryQualityGrade: v2Decision.metadata?.entry_quality_grade ?? undefined,
       entryQualityScore: v2Decision.metadata?.entry_quality_score ?? v2Decision.confidenceScore ?? undefined,
@@ -23098,7 +23128,18 @@ export class PaperEngine {
       entryDecisionReason: v2Decision.metadata?.decision_reason ?? undefined,
       entryExpectedMovePct: v2Decision.metadata?.expected_move_pct ?? undefined,
       entryFeeBreakEvenPct: v2Decision.metadata?.fee_break_even_pct ?? undefined,
-      entrySnapshotAt: v2Decision.ts
+      entrySnapshotAt: v2Decision.ts,
+      rangeBoxHighAtEntry: typeof v2Decision.metadata?.rangeBoxHighAtEntry === "number" ? v2Decision.metadata.rangeBoxHighAtEntry : undefined,
+      rangeBoxLowAtEntry: typeof v2Decision.metadata?.rangeBoxLowAtEntry === "number" ? v2Decision.metadata.rangeBoxLowAtEntry : undefined,
+      rangeBoxMidAtEntry: typeof v2Decision.metadata?.rangeBoxMidAtEntry === "number" ? v2Decision.metadata.rangeBoxMidAtEntry : undefined,
+      rangeBoxQuality: typeof v2Decision.metadata?.rangeBoxQuality === "number" ? v2Decision.metadata.rangeBoxQuality : undefined,
+      rangeBoxSlope: typeof v2Decision.metadata?.rangeBoxSlope === "number" ? v2Decision.metadata.rangeBoxSlope : undefined,
+      rangeBoxDistorted: typeof v2Decision.metadata?.rangeBoxDistorted === "boolean" ? v2Decision.metadata.rangeBoxDistorted : undefined,
+      takeProfitPlan: v2Decision.metadata?.takeProfitPlan ?? undefined,
+      takeProfit1Px: tp1Px,
+      takeProfit2Px: tp2Px,
+      targetPrice1: tp1Px,
+      partialExitRatio: typeof v2Decision.metadata?.partialExitRatio === "number" ? v2Decision.metadata.partialExitRatio : undefined
     };
 
     // Unfilled or 0 filled notional -> record pending order via upsert
@@ -23750,6 +23791,7 @@ export function buildV2StateBridge(
           slProtectionSatisfied: p.slProtectionSatisfied === true,
           protectiveSlAlgoId: p.protectiveSlAlgoId,
           lastReduceReason: p.lastReduceReason,
+          rangeOppositePartialTaken: p.rangeOppositePartialTaken === true,
           protectivePartialReduceCount: p.protectivePartialReduceCount
         };
       })

@@ -325,6 +325,9 @@ export function markProtectiveReduceEpisodeFilled(
     open.consecutiveReduceEpisodeCount = (open.consecutiveReduceEpisodeCount ?? 0) + 1;
     open.protectivePartialReduceCount = (open.protectivePartialReduceCount ?? 0) + 1;
     open.shockReduceState = "FILLED";
+    if (String(input.reason).toUpperCase().includes("RANGE_PARTIAL_AT_OPPOSITE_EDGE")) {
+        open.rangeOppositePartialTaken = true;
+    }
 }
 
 export function estimatePositionRiskAtStop(open: PaperOpenPositionRecord, lastPrice: number): number {

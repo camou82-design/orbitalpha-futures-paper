@@ -1,5 +1,6 @@
 import { EngineV2Input, EngineV2Side, ExecutorOutput, MarketJudgmentOutput } from "../types";
 import { classifyRangeZone } from "../../models/types";
+import { computeSoftExitFeeBreakEvenPct, DEFAULT_SOFT_EXIT_SLIPPAGE_BUFFER_PCT } from "../exit/soft-exit-fee-gate";
 
 export type RangeContinuationPhase = "IDLE" | "DEADLOCK_COUNTING" | "CONTINUATION_WATCH" | "RETEST_TOUCHED" | "RETEST_CONFIRMED" | "EXPIRED";
 
@@ -1097,7 +1098,15 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const entryPx = Number(sn.lastPrice ?? 0);
     const minProfitDistance = Math.max(atr * 0.35, entryPx * 0.001);
     const minStopDistance = Math.max(atr * 0.5, entryPx * 0.0015);
-    const TP1_MIN_PCT = 0.0018;
+
+    const feeRate = Number(input.config?.paperTakerFeeRate ?? 0.0005);
+    const feeBreakEvenPct = computeSoftExitFeeBreakEvenPct({
+        positionNotionalUsd: 1000,
+        feeRate,
+        slippageBufferPct: DEFAULT_SOFT_EXIT_SLIPPAGE_BUFFER_PCT
+    });
+    const RANGE_TP1_MIN_SAFETY_BUFFER_PCT = 0.0002;
+    const TP1_MIN_PCT = feeBreakEvenPct + RANGE_TP1_MIN_SAFETY_BUFFER_PCT;
     const TP1_MAX_PCT = 0.0025;
 
     let tp1 = 0;
@@ -1126,7 +1135,9 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const shortOrderOk = tp2 < tp1 && tp1 < entryPx && entryPx < inv;
     const validationOk = side === "long" ? longOrderOk : side === "short" ? shortOrderOk : false;
     let invalidTpReason: string;
-    if (!Number.isFinite(entryPx) || entryPx <= 0 || !Number.isFinite(tp1) || !Number.isFinite(tp2) || !Number.isFinite(inv)) {
+    if (TP1_MIN_PCT > TP1_MAX_PCT) {
+        invalidTpReason = "fee_slippage_cost_exceeds_max_tp1";
+    } else if (!Number.isFinite(entryPx) || entryPx <= 0 || !Number.isFinite(tp1) || !Number.isFinite(tp2) || !Number.isFinite(inv)) {
         invalidTpReason = "non_finite_or_non_positive_entry";
     } else if (tp1 <= 0 || tp2 <= 0 || inv <= 0) {
         invalidTpReason = "zero_or_negative_levels";

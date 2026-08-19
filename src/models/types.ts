@@ -964,6 +964,7 @@ export type PaperOpenPositionRecord = {
   /** Reduce episode FSM — one defensive episode per confirmed market evidence. */
   lastReduceEpisodeId?: string;
   lastReduceReason?: string;
+  rangeOppositePartialTaken?: boolean;
   lastReduceFilledCandleTs?: number;
   lastReduceFilledAt?: number;
   lastReduceMarketSubtype?: string;
@@ -1696,6 +1697,7 @@ export type PaperClosedPositionRecord = Readonly<{
   softExitFeeGateReason?: string;
   exitSnapshotAt?: number;
   lastReduceReason?: string;
+  rangeOppositePartialTaken?: boolean;
   lastReduceUrgency?: string;
 
   maxPositionContracts?: number;

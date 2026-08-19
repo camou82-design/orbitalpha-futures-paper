@@ -87,8 +87,8 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
     
     let tp1TriggeredResult: boolean | undefined;
     let tp2TriggeredResult: boolean | undefined;
-    let tp1PxResult: number | undefined;
-    let tp2PxResult: number | undefined;
+    let tp1PxResult: number | undefined = input.takeProfitPlan?.tp1;
+    let tp2PxResult: number | undefined = input.takeProfitPlan?.tp2;
 
     // --- V2 PROBE TP LAYER (EARLY_REVERSAL / PULLBACK_RETEST) ---
     // 기존 RANGE/TREND 로직과 완전히 분리. probe 포지션에만 적용.
