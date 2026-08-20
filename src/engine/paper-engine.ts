@@ -104,6 +104,7 @@ import { highwayExitEngine } from "./highway-exit-engine";
 import type { AnyEntryDecision } from "../strategy/executors/types";
 import { executorForExitEventPayload } from "../strategy/executors/executor-normalize";
 import { aiApproveEntry, aiInputFromDecision, type AiApprovalInput, type AiApprovalOutput } from "../ai/entry-approval";
+import { deriveLastLossReentryState, type LastLossReentryState } from "../engine-v2/state/loss-reentry-gate";
 import {
   aggregateRejectReasonCountsTick,
   computeFunnelTick,
@@ -6200,6 +6201,7 @@ export class PaperEngine {
           routingActiveEngine: marketModeOut.routing.activeEngine,
           reviewingTicks: 0,
           autoEntryTriggered: false,
+          lastLossReentryState: deriveLastLossReentryState({ history: this.cachedHistory, openPositions: opensAfterClose, symbol: symKeyEarly, now: fetchedAt }),
           logger: this.logger
         });
 
@@ -6307,6 +6309,7 @@ export class PaperEngine {
         routingActiveEngine: marketModeOut.routing.activeEngine,
         reviewingTicks,
         autoEntryTriggered,
+        lastLossReentryState: deriveLastLossReentryState({ history: this.cachedHistory, openPositions: opensAfterClose, symbol: symKeyEarly, now: fetchedAt }),
         logger: this.logger
       });
 
@@ -6461,7 +6464,8 @@ export class PaperEngine {
             this.lastSignedRestSuccessAt ?? fetchedAt,
             this.lastOpsOrdersScanAtMs ?? fetchedAt,
             symbolHasBlockingPending[sym] === true,
-            hasUnknownNotional
+            hasUnknownNotional,
+            deriveLastLossReentryState({ history: this.cachedHistory, openPositions: opensAfterClose, symbol: sym, now: fetchedAt })
           );
         })(),
         v2Mode
@@ -23729,7 +23733,8 @@ export function buildV2StateBridge(
   positionsFetchedAt?: number,
   pendingOrdersFetchedAt?: number,
   hasSymbolPendingEntry?: boolean,
-  hasUnknownPendingNotional?: boolean
+  hasUnknownPendingNotional?: boolean,
+  lastLossReentryState?: LastLossReentryState | null
 ): V2BridgeState {
   let okxActualSide = "none";
   if (lastLivePositionsPayload && Array.isArray(lastLivePositionsPayload)) {
@@ -23858,7 +23863,8 @@ export function buildV2StateBridge(
     maxUsableMarginKrw: 420_000,
     exposureNotionalCapKrw: 2_000_000,
     symbolExposureNotionalCapKrw: 1_400_000,
-    okxActualSide
+    okxActualSide,
+    lastLossReentryState: lastLossReentryState ?? null
   };
 }
 

@@ -1,5 +1,7 @@
 import { MarketSymbol, PositionSide } from "../../models/types";
 import type { V2ExecutionAuthorityEnvelope, V2LegacyComparison } from "../execution/types";
+import type { LastLossReentryState } from "../state/loss-reentry-gate";
+export type { LastLossReentryState };
 
 export type EngineV2OpMode = "legacy" | "shadow_v2" | "engine_v2";
 export type EngineV2Regime = "RANGE" | "TREND" | "TRANSITION" | "NO_TRADE";
@@ -354,6 +356,7 @@ export interface EngineV2Input {
         addOnPolicyMode?: "PYRAMIDING" | "CONFIRMED_ADVERSE_ADDON" | "NONE";
         requestedAddonNotionalUsdt?: number;
         okxActualSide?: string;
+        lastLossReentryState?: LastLossReentryState | null;
     };
     now: number;
     v1Result: {
@@ -658,6 +661,7 @@ export interface V2BridgeState {
     addonMaxNotionalUsdt?: number;
     finalAddonNotionalUsdt?: number;
     okxActualSide?: string;
+    lastLossReentryState?: LastLossReentryState | null;
 }
 
 export interface V2BridgeInput {

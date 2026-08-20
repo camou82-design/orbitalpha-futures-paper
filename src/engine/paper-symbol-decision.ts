@@ -41,6 +41,7 @@ import type { PaperSignal } from "../strategy/entry-signal";
 import type { PaperCandidateStrength } from "../strategy/entry-signal";
 import { PIPELINE_VERSION } from "./decision-funnel";
 import { RANGE_ZONE_ACTION_POLICY } from "./range-engine";
+import { evaluateSameSideLossReentryGate, type LastLossReentryState } from "../engine-v2/state/loss-reentry-gate";
 import { classifyRangeZone, type Candle, type RangeBoxZone } from "../models/types";
 import {
   evaluateDirectionalTrendEntryGuard,
@@ -972,6 +973,7 @@ export type EvaluatePaperSymbolEntryInput = Readonly<{
   /** `paper-engine` ?쇱슦??activeEngine ??internal V2 MODE瑜?envelope怨??숆린(RANGE 媛뺤젣 engine_v2). */
   routingActiveEngine?: PaperEngineRoutingKind | null;
   runCycleId?: string;
+  lastLossReentryState?: LastLossReentryState | null;
 }>;
 
 /** ?곸쐞 ?쒖옣 紐⑤뱶쨌?붿쭊쨌?좉퇋 諛⑺뼢 ?덉슜 ???쒓렇???덉씠??TREND-UP ?뺣젹(???꾨낫 ?듭젣)??*/
@@ -3638,6 +3640,30 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
       supplemental_reasons.push(`REENTRY_COOLDOWN_WAIT_MS_${String(waitMs)}`);
     } else if (lastClose > 0 && elapsedMs < waitMs && rangeReversalGlobalReentryBypass) {
       supplemental_reasons.push("RANGE_REVERSAL_GLOBAL_REENTRY_BYPASS");
+    }
+  }
+
+  if (intentSide && input.lastLossReentryState) {
+    const lossGate = evaluateSameSideLossReentryGate({
+      symbol: String(sym),
+      requestedSide: intentSide,
+      currentPrice: Number(sn?.lastPrice ?? 0),
+      now: input.now,
+      lastLossState: input.lastLossReentryState,
+      candles: sn?.candles,
+      atr: sn?.atr,
+      rangeBoxHigh: sn?.boxHigh,
+      rangeBoxLow: sn?.boxLow,
+      regime: input.regime,
+      zone: typeof sn?.boxPos === "number" ? classifyRangeZone(sn.boxPos) : null,
+      rangeCycleCount: sn?.rangeCycleCount
+    });
+    if (!lossGate.allowed) {
+      risk_state = "COOLDOWN";
+      risk_cooldown_subreason = "same_side_loss_reentry_hysteresis_blocked";
+      reject_reason = "RISK_FAIL_REENTRY";
+      final_decision = "REJECT";
+      supplemental_reasons.push("SAME_SIDE_LOSS_REENTRY_HYSTERESIS_BLOCKED");
     }
   }
 

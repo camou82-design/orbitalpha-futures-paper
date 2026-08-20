@@ -12,6 +12,7 @@ import {
     V2CommittedRiskPlan
 } from "./types";
 import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
+import { evaluateSameSideLossReentryGate } from "./state/loss-reentry-gate";
 import { emitLiveExposureAuthorityProof, resolveLiveExposureAuthority } from "./live-account/exposure-authority";
 import {
     evaluateEquityAdaptiveSizing,
@@ -510,7 +511,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             okxPendingSymbolNotionalUsdt: v2State.okxPendingSymbolNotionalUsdt,
             balanceFetchedAt: v2State.balanceFetchedAt ?? undefined,
             positionsFetchedAt: v2State.positionsFetchedAt ?? undefined,
-            pendingOrdersFetchedAt: v2State.pendingOrdersFetchedAt ?? undefined
+            pendingOrdersFetchedAt: v2State.pendingOrdersFetchedAt ?? undefined,
+            lastLossReentryState: v2State.lastLossReentryState ?? null
         }
     };
 
@@ -4068,6 +4070,43 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    // Tier 5.55: Same-Side Loss Re-entry Hysteresis & Fresh Setup Guard
+    if (v2DecisionAfterPromotion === "ENTER" && (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")) {
+        const lossGateResult = evaluateSameSideLossReentryGate({
+            symbol: String(input.symbol),
+            requestedSide: v2SideAfterPromotion,
+            currentPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0),
+            now: input.now,
+            lastLossState: v2State.lastLossReentryState,
+            candles: authoritativeInput.snapshot.candles,
+            atr: Number(authoritativeInput.snapshot.atr ?? 0),
+            feeBreakEvenPct: (riskSizing as any)?.feeBreakEvenPct ?? (riskSizing.diagnostics as any)?.fee_break_even_pct ?? 0.002,
+            rangeBoxHigh: Number(authoritativeInput.snapshot.boxHigh ?? 0),
+            rangeBoxLow: Number(authoritativeInput.snapshot.boxLow ?? 0),
+            rangeBoxMid: Number(
+                authoritativeInput.snapshot.boxHigh && authoritativeInput.snapshot.boxLow
+                    ? (authoritativeInput.snapshot.boxHigh + authoritativeInput.snapshot.boxLow) / 2
+                    : 0
+            ),
+            regime: judgment.regime,
+            subtype: judgment.subtype,
+            zone,
+            rangeCycleCount: typeof (authoritativeInput.snapshot as any).rangeCycleCount === "number" ? (authoritativeInput.snapshot as any).rangeCycleCount : null,
+            reversalConfirmed
+        });
+
+        if (!lossGateResult.allowed) {
+            const decisionBeforeLossBlock = v2DecisionAfterPromotion;
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = lossGateResult.reason;
+            promotionApplied = false;
+            promotionReason = null;
+            expectedMissingCondition = lossGateResult.reason;
+            expectedNextAction = "WAIT_FOR_MEANINGFUL_DISPLACEMENT_OR_FRESH_SETUP";
+        }
+    }
+
     finalDecision = v2DecisionAfterPromotion;
     blockReason = v2RejectReasonAfterPromotion;
 
@@ -7317,7 +7356,8 @@ export function adaptV2Input(
             hasUnknownPendingNotional: state.hasUnknownPendingNotional,
             balanceFetchedAt: state.balanceFetchedAt,
             positionsFetchedAt: state.positionsFetchedAt,
-            pendingOrdersFetchedAt: state.pendingOrdersFetchedAt
+            pendingOrdersFetchedAt: state.pendingOrdersFetchedAt,
+            lastLossReentryState: (state as any).lastLossReentryState ?? null
         },
         v1Result: {
             regime: v1Result.decision?.regime_state ?? (v1Result as any).regime ?? "UNDEFINED",
