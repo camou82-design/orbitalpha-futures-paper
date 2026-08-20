@@ -946,21 +946,33 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     const mixedBreakoutState = (sn.breakoutFailureRate || 0) > 0.4 && (sn.breakoutFailureRate || 0) < 0.7;
     const emaExpansionWeak = Math.abs(sn.emaGap || 0) > 0.0003 && (sn.trendWeaknessScore || 0) > 0.6;
 
-    // Standard 3: Strict TRANSITION rule (Conflict-based Scouting)
-    // Transition ONLY if scores reflect simultaneous indecision and structural conflict.
+    // Legacy diagnostic computation (for observation / comparison proof only)
     const midRange = rangeScore > 0.4 && rangeScore < 0.7;
     const midTrend = trendScore > 0.4 && trendScore < 0.7;
     const structuralConflict = mixedBreakoutState || boxCohesionCollapse;
 
-    let regime: MarketJudgmentOutput["regime"] = "NO_TRADE";
-
+    let legacy_v2_recomputed_regime: MarketJudgmentOutput["regime"] = "NO_TRADE";
     if (midRange && midTrend && structuralConflict) {
-        regime = "TRANSITION";
+        legacy_v2_recomputed_regime = "TRANSITION";
     } else if (rangeScore > 0.6) {
-        regime = "RANGE";
+        legacy_v2_recomputed_regime = "RANGE";
     } else if (trendScore > 0.7 && (sn.trendWeaknessScore || 0) < 0.5) {
-        regime = "TREND";
+        legacy_v2_recomputed_regime = "TREND";
     }
+
+    // Canonical Regime Authority (P0 Canonical Regime Authority Unification)
+    const canonicalRegime: MarketJudgmentOutput["regime"] =
+        sn.canonicalRegime === "RANGE" || sn.canonicalRegime === "TREND" || sn.canonicalRegime === "NO_TRADE"
+            ? sn.canonicalRegime
+            : (rangeScore > 0.6 ? "RANGE" : (trendScore > 0.7 && (sn.trendWeaknessScore || 0) < 0.5 ? "TREND" : "NO_TRADE"));
+    const canonicalRegimeSource = sn.canonicalRegimeSource ?? (sn.canonicalRegime ? "strategy_market_regime_detector" : "fallback_heuristic");
+    const canonicalTrendScore = typeof sn.canonicalTrendScore === "number" ? sn.canonicalTrendScore : trendScore;
+    const canonicalRangeConfidence = typeof sn.canonicalRangeConfidence === "number" ? sn.canonicalRangeConfidence : rangeScore;
+    const canonicalTrendWeaknessScore = typeof sn.canonicalTrendWeaknessScore === "number" ? sn.canonicalTrendWeaknessScore : (sn.trendWeaknessScore || 0);
+    const canonicalIsAmbiguous = sn.canonicalRegimeAmbiguous ?? false;
+
+    // Authoritative base regime is canonicalRegime
+    let regime: MarketJudgmentOutput["regime"] = canonicalRegime;
 
     let regime_final = regime;
     let no_trade_reason: string | null = null;
@@ -987,7 +999,26 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     } else if (dump_protection_hit === true) {
         regime_final = "NO_TRADE";
         no_trade_reason = "DUMP_PROTECTION";
+    } else if (regime === "NO_TRADE") {
+        regime_final = "NO_TRADE";
+        no_trade_reason = "CANONICAL_NO_TRADE";
     }
+
+    console.info(JSON.stringify({
+        event: "V2_CANONICAL_REGIME_AUTHORITY_PROOF",
+        symbol: input.symbol,
+        canonical_regime: canonicalRegime,
+        canonical_regime_source: canonicalRegimeSource,
+        canonical_trend_score: canonicalTrendScore,
+        canonical_range_confidence: canonicalRangeConfidence,
+        canonical_trend_weakness_score: canonicalTrendWeaknessScore,
+        canonical_is_ambiguous: canonicalIsAmbiguous,
+        legacy_v2_recomputed_regime: legacy_v2_recomputed_regime,
+        legacy_v2_recomputed_trend_score: trendScore,
+        authority_regime_final: regime_final,
+        regime_override_applied: canonicalRegime !== legacy_v2_recomputed_regime,
+        regime_override_reason: canonicalRegime !== legacy_v2_recomputed_regime ? `canonical_${canonicalRegime}_overrides_legacy_${legacy_v2_recomputed_regime}` : "none"
+    }));
 
     const htfPack = input.htf_candles ?? input.snapshot.htf_candles ?? {};
     const inputHtf = input.htf_candles;
@@ -1264,7 +1295,7 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
 
     // Fast Trend Shift override (Priority over probe)
     if (fastShift.active && finalSubtype !== "WHIPSAW_SHOCK_RECHECK") {
-        if (regime_final === "RANGE" || regime_final === "TRANSITION") {
+        if (regime_final === "RANGE" || (regime_final as string) === "TRANSITION") {
              finalSubtype = "FAST_TREND_SHIFT";
              finalSubtypeReason = `FAST_SHIFT_${fastShift.direction.toUpperCase()}: ${fastShift.reason}`;
              expectedNextAction = "SMALL_SIZE_PROBE_ALLOWED";
@@ -1281,7 +1312,7 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
             finalSubtype === "RANGE_UPPER_REACTION" ||
             finalSubtype === "RANGE_MID_CHOP";
 
-        if (isStandardBlocked || regime_final === "RANGE" || regime_final === "TRANSITION") {
+        if (isStandardBlocked || regime_final === "RANGE" || (regime_final as string) === "TRANSITION") {
             finalSubtype = "EARLY_LONG_PROBE";
             finalSubtypeReason = `EARLY_PROBE: ${earlyLongProbe.reason}`;
             expectedNextAction = "SMALL_SIZE_PROBE_ALLOWED";
@@ -1296,7 +1327,7 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
             finalSubtype === "RANGE_MID_CHOP" ||
             finalSubtypeReason.includes("LOWER_SHORT");
 
-        if (isStandardBlocked || regime_final === "RANGE" || regime_final === "TRANSITION") {
+        if (isStandardBlocked || regime_final === "RANGE" || (regime_final as string) === "TRANSITION") {
             finalSubtype = "EARLY_SHORT_PROBE";
             finalSubtypeReason = `EARLY_PROBE: ${earlyShortProbe.reason}`;
             expectedNextAction = "SMALL_SIZE_PROBE_ALLOWED";

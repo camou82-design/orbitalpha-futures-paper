@@ -450,7 +450,13 @@ export function resolveSymbolDecisionEnvelope(
         rangeOscillationDiag: snapshot.rangeOscillationScore,
         reviewing_ticks: snapshot.reviewing_ticks,
         candles: snapshot.candles,
-        htf_candles: snapshot.htf_candles
+        htf_candles: snapshot.htf_candles,
+        canonicalRegime: snapshot.canonicalRegime,
+        canonicalRegimeSource: snapshot.canonicalRegimeSource,
+        canonicalTrendScore: snapshot.canonicalTrendScore,
+        canonicalRangeConfidence: snapshot.canonicalRangeConfidence,
+        canonicalTrendWeaknessScore: snapshot.canonicalTrendWeaknessScore,
+        canonicalRegimeAmbiguous: snapshot.canonicalRegimeAmbiguous
     };
 
     // 2. Config Mapping

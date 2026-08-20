@@ -239,6 +239,12 @@ export type SymbolSnapshotLike = Readonly<{
   atrExpansion?: number;
   volumeExpansion?: number;
   htf_candles?: Record<string, import("../models/types").Candle[]>;
+  canonicalRegime?: MarketRegime;
+  canonicalRegimeSource?: string;
+  canonicalTrendScore?: number;
+  canonicalRangeConfidence?: number;
+  canonicalTrendWeaknessScore?: number;
+  canonicalRegimeAmbiguous?: boolean;
 }>;
 
 export function paperTradeBlockDecompositionPayload(

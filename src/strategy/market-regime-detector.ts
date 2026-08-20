@@ -19,6 +19,8 @@ export type MarketRegimeDetection = Readonly<{
   isAmbiguous: boolean;
   /** 0–1 RANGE 적합도. */
   rangeConfidence: number;
+  /** 0–1 TREND 적합도 (canonical). */
+  trendScore: number;
   /** 하이웨이: 세부 점수들 */
   boxCohesion01: number;
   breakoutFailureRate: number;
@@ -60,6 +62,7 @@ export const INITIAL_ENGINE_REGIME: MarketRegimeDetection = {
   regime: "NO_TRADE",
   isAmbiguous: false,
   rangeConfidence: 0,
+  trendScore: 0,
   detail: { reason: "engine_init" },
   log: {
     regime_raw: "NO_TRADE",
@@ -86,6 +89,7 @@ export function regimeWhenBtcFeedFailed(errorMessage: string): MarketRegimeDetec
     regime: "NO_TRADE",
     isAmbiguous: false,
     rangeConfidence: 0,
+    trendScore: 0,
     detail: { reason: "btc_candles_fetch_failed", error: errorMessage },
     log: makeLog({
       regimeRaw: "NO_TRADE",
@@ -139,6 +143,7 @@ export function detectMarketRegime(input: Readonly<{
       regime: "NO_TRADE",
       isAmbiguous: false,
       rangeConfidence: 0,
+      trendScore: 0,
       detail: { reason: "insufficient_btc_5m", len, min_required: MIN_BTC_5M_BARS_REGIME },
       log: makeLog({
         regimeRaw: "NO_TRADE",
@@ -174,6 +179,7 @@ export function detectMarketRegime(input: Readonly<{
       regime: "NO_TRADE",
       isAmbiguous: false,
       rangeConfidence: 0,
+      trendScore: 0,
       detail: { reason: "ema_not_ready_or_bad_price", len },
       log: makeLog({
         regimeRaw: "NO_TRADE",
@@ -268,6 +274,7 @@ export function detectMarketRegime(input: Readonly<{
       regime: "NO_TRADE",
       isAmbiguous: false,
       rangeConfidence: 0,
+      trendScore: 0,
       detail: {
         reason,
         atr_rel: atrRel,
@@ -364,6 +371,7 @@ export function detectMarketRegime(input: Readonly<{
     regime: regimeOut,
     isAmbiguous: finalIsAmbiguous,
     rangeConfidence,
+    trendScore,
     boxCohesion01,
     breakoutFailureRate,
     rangeOscillationScore,

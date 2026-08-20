@@ -204,6 +204,12 @@ export interface LegacySnapshotAdapter {
     volumeExpansion?: number;
     candles?: import("../../models/types").Candle[];
     htf_candles?: Record<string, import("../../models/types").Candle[]>;
+    canonicalRegime?: import("../../strategy/market-regime-detector").MarketRegime;
+    canonicalRegimeSource?: string;
+    canonicalTrendScore?: number;
+    canonicalRangeConfidence?: number;
+    canonicalTrendWeaknessScore?: number;
+    canonicalRegimeAmbiguous?: boolean;
 }
 
 export interface LegacyConfigAdapter {
@@ -367,6 +373,12 @@ export interface EngineV2Input {
     };
     candles?: import("../../models/types").Candle[];
     htf_candles?: Record<string, import("../../models/types").Candle[]>;
+    canonicalRegime?: import("../../strategy/market-regime-detector").MarketRegime;
+    canonicalRegimeSource?: string;
+    canonicalTrendScore?: number;
+    canonicalRangeConfidence?: number;
+    canonicalTrendWeaknessScore?: number;
+    canonicalRegimeAmbiguous?: boolean;
 }
 
 export interface EngineV2SnapshotAdapter {
@@ -410,6 +422,12 @@ export interface EngineV2SnapshotAdapter {
     rcSlope?: number;
     candles?: import("../../models/types").Candle[];
     htf_candles?: Record<string, import("../../models/types").Candle[]>;
+    canonicalRegime?: import("../../strategy/market-regime-detector").MarketRegime;
+    canonicalRegimeSource?: string;
+    canonicalTrendScore?: number;
+    canonicalRangeConfidence?: number;
+    canonicalTrendWeaknessScore?: number;
+    canonicalRegimeAmbiguous?: boolean;
 }
 
 export interface EngineV2ConfigAdapter {
@@ -509,6 +527,12 @@ export interface V2BridgeSnapshot {
     candles?: import("../../models/types").Candle[];
     htf_candles?: Record<string, import("../../models/types").Candle[]>;
     reviewing_ticks: number;
+    canonicalRegime?: import("../../strategy/market-regime-detector").MarketRegime;
+    canonicalRegimeSource?: string;
+    canonicalTrendScore?: number;
+    canonicalRangeConfidence?: number;
+    canonicalTrendWeaknessScore?: number;
+    canonicalRegimeAmbiguous?: boolean;
 }
 
 export interface V2BridgeLegacyDecision {

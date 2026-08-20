@@ -708,6 +708,12 @@ type SymbolSnapshot = Readonly<{
   highwayEntryTf?: string;
   reviewing_ticks?: number;
   htf_candles?: Record<string, import("../models/types").Candle[]>;
+  canonicalRegime?: MarketRegime;
+  canonicalRegimeSource?: string;
+  canonicalTrendScore?: number;
+  canonicalRangeConfidence?: number;
+  canonicalTrendWeaknessScore?: number;
+  canonicalRegimeAmbiguous?: boolean;
 }>;
 
 export type SymbolDiagnostic = Readonly<{
@@ -22763,7 +22769,13 @@ export class PaperEngine {
       candles: rC.value,
       highwayKlineLimitRequested: klineLimit,
       highwayEntryTf: "1m",
-      htf_candles
+      htf_candles,
+      canonicalRegime: regimeDetected.regime,
+      canonicalRegimeSource: "strategy_market_regime_detector",
+      canonicalTrendScore: regimeDetected.trendScore,
+      canonicalRangeConfidence: regimeDetected.rangeConfidence,
+      canonicalTrendWeaknessScore: regimeDetected.trendWeaknessScore,
+      canonicalRegimeAmbiguous: regimeDetected.isAmbiguous
     };
 
     this.logHighwayCandlePipelineProof("snapshot_before_return", {
@@ -23670,7 +23682,13 @@ export function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapsho
     volumeExpansion: snap.volumeExpansion ?? 0,
     candles: snap.candles ?? [],
     htf_candles: snap.htf_candles,
-    reviewing_ticks: snap.reviewing_ticks ?? 0
+    reviewing_ticks: snap.reviewing_ticks ?? 0,
+    canonicalRegime: snap.canonicalRegime,
+    canonicalRegimeSource: snap.canonicalRegimeSource ?? (snap.canonicalRegime ? "strategy_market_regime_detector" : undefined),
+    canonicalTrendScore: snap.canonicalTrendScore,
+    canonicalRangeConfidence: snap.canonicalRangeConfidence ?? (snap.rangeConfidence != null ? snap.rangeConfidence : undefined),
+    canonicalTrendWeaknessScore: snap.canonicalTrendWeaknessScore ?? (snap.trendWeaknessScore != null ? snap.trendWeaknessScore : undefined),
+    canonicalRegimeAmbiguous: snap.canonicalRegimeAmbiguous
   };
 }
 

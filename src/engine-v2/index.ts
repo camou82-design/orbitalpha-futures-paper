@@ -7252,7 +7252,13 @@ export function adaptV2Input(
             atrExpansion: snapshot.atrExpansion ?? 0,
             volumeExpansion: snapshot.volumeExpansion ?? 0,
             candles: recentCandles,
-            htf_candles: htfCandlesRef
+            htf_candles: htfCandlesRef,
+            canonicalRegime: snapshot.canonicalRegime,
+            canonicalRegimeSource: snapshot.canonicalRegimeSource,
+            canonicalTrendScore: snapshot.canonicalTrendScore,
+            canonicalRangeConfidence: snapshot.canonicalRangeConfidence,
+            canonicalTrendWeaknessScore: snapshot.canonicalTrendWeaknessScore,
+            canonicalRegimeAmbiguous: snapshot.canonicalRegimeAmbiguous
         },
         config: {
             paperMaxOpenPositions: config.paperMaxOpenPositions,
