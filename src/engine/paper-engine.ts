@@ -23728,6 +23728,8 @@ export function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapsho
     ema20: snap.ema20 ?? 0,
     emaGap: snap.emaGap ?? 0,
     atr: snap.atr ?? 0,
+    atr20: snap.atr20 ?? (typeof snap.atr === "number" && snap.atr > 0 ? snap.atr : null),
+    closedClose: snap.closedClose ?? (Array.isArray(snap.candles) && snap.candles.length >= 2 ? snap.candles[snap.candles.length - 2].close : (typeof snap.latestCandleClose === "number" ? snap.latestCandleClose : null)),
     signal: snap.signal ?? "NONE",
     qualityScore: snap.qualityScore ?? 0,
     entryCandidate: snap.entryCandidate ?? false,

@@ -7241,7 +7241,15 @@ export function adaptV2Input(
             atr20:
                 typeof snapshot.atr20 === "number" && Number.isFinite(snapshot.atr20) && snapshot.atr20 > 0
                     ? snapshot.atr20
-                    : null,
+                    : (typeof snapshot.atr === "number" && Number.isFinite(snapshot.atr) && snapshot.atr > 0 ? snapshot.atr : null),
+            closedClose:
+                typeof snapshot.closedClose === "number" && Number.isFinite(snapshot.closedClose)
+                    ? snapshot.closedClose
+                    : (Array.isArray(recentCandles) && recentCandles.length >= 2
+                        ? recentCandles[recentCandles.length - 2].close
+                        : (typeof snapshot.latestCandleClose === "number" && Number.isFinite(snapshot.latestCandleClose)
+                            ? snapshot.latestCandleClose
+                            : null)),
             swingHighSlope: snapshot.swingHighSlope ?? 0,
             swingLowSlope: snapshot.swingLowSlope ?? 0,
             rangeCenterSlope: snapshot.rangeCenterSlope ?? 0,

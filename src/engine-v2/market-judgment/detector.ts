@@ -600,6 +600,10 @@ function evaluateWhipsawShockRecheck(args: {
     rangeMetadata: Record<string, unknown> | undefined;
     regimeFinal: MarketJudgmentOutput["regime_final"];
     noTradeReason: string | null;
+    htfEntryPolicy?: string;
+    htfPolicyReason?: string;
+    counterTrendRisk?: boolean;
+    macroPolarity?: "BULLISH" | "BEARISH" | "NEUTRAL";
 }): {
     active: boolean;
     isSoftWatch: boolean;
@@ -621,8 +625,31 @@ function evaluateWhipsawShockRecheck(args: {
     whipsawCounterResetReason: string | null;
     observationAgePassed: boolean;
     finalRecheckConfirmed: boolean;
+    freshStructuralHits: string[];
+    historicalOnlyHits: string[];
+    directionConsistentStabilization: boolean;
+    baseReleaseEligible: boolean;
+    htfContrarianReleaseBlocked: boolean;
+    finalReleaseEligible: boolean;
+    releaseEligible: boolean;
+    baseReleaseReason: string | null;
+    finalReleaseReason: string | null;
+    releaseReason: string | null;
 } {
-    const { input, shockPhase, rangePhase, transitionPhase, mixedBreakoutState, rangeMetadata, regimeFinal, noTradeReason } = args;
+    const {
+        input,
+        shockPhase,
+        rangePhase,
+        transitionPhase,
+        mixedBreakoutState,
+        rangeMetadata,
+        regimeFinal,
+        noTradeReason,
+        htfEntryPolicy,
+        htfPolicyReason,
+        counterTrendRisk,
+        macroPolarity
+    } = args;
     if (regimeFinal === "NO_TRADE" && (noTradeReason === "DATA_NOT_READY" || noTradeReason === "DUMP_PROTECTION")) {
         return {
             active: false,
@@ -644,7 +671,17 @@ function evaluateWhipsawShockRecheck(args: {
             whipsawRecheckRequiredTicks: 6,
             whipsawCounterResetReason: null,
             observationAgePassed: false,
-            finalRecheckConfirmed: true
+            finalRecheckConfirmed: true,
+            freshStructuralHits: [],
+            historicalOnlyHits: [],
+            directionConsistentStabilization: false,
+            baseReleaseEligible: false,
+            htfContrarianReleaseBlocked: false,
+            finalReleaseEligible: false,
+            releaseEligible: false,
+            baseReleaseReason: null,
+            finalReleaseReason: null,
+            releaseReason: null
         };
     }
 
@@ -680,32 +717,35 @@ function evaluateWhipsawShockRecheck(args: {
 
     const contextHits: string[] = [];
     if (directional === "UP" || directional === "DOWN") contextHits.push("directional_shock_state");
-    // Add other context info if needed (e.g., pump_alert)
     if (pumpS.includes("ALERT") || crashS.includes("ALERT")) contextHits.push("pump_crash_alert");
 
-    const otherStructuralHits: string[] = [];
-    if (boxOrbitChop) otherStructuralHits.push("box_orbit_chop");
-    if (sn.boxBreakSide !== "none" && (!retestConfirmed || !reclaimConfirmed)) otherStructuralHits.push("box_break_unconfirmed");
-    if (volExp >= 2.0) otherStructuralHits.push("volume_expansion_ge_2");
-    if (breakoutFailureRate >= 0.4) otherStructuralHits.push("breakout_failure_rate_ge_0_4");
-    if (mixedBreakoutState) otherStructuralHits.push("mixed_breakout_state");
-    if (Number(sn.atrExpansion ?? 0) >= 1.5) otherStructuralHits.push("atr_expansion_ge_1_5");
-    if (reviewingTicks >= 2) otherStructuralHits.push("recheck_repetition");
+    // Fresh structural hazard hits (actively present right now)
+    const freshStructuralHits: string[] = [];
+    if (boxOrbitChop) freshStructuralHits.push("box_orbit_chop");
+    if (sn.boxBreakSide !== "none" && (!retestConfirmed || !reclaimConfirmed)) freshStructuralHits.push("box_break_unconfirmed");
+    if (volExp >= 2.0) freshStructuralHits.push("volume_expansion_ge_2");
+    if (breakoutFailureRate >= 0.4) freshStructuralHits.push("breakout_failure_rate_ge_0_4");
+    if (mixedBreakoutState) freshStructuralHits.push("mixed_breakout_state");
+    if (Number(sn.atrExpansion ?? 0) >= 1.5) freshStructuralHits.push("atr_expansion_ge_1_5");
+
+    // Historical observation markers (must NOT sustain hard-block alone)
+    const historicalOnlyHits: string[] = [];
+    if (reviewingTicks >= 2) historicalOnlyHits.push("recheck_repetition");
 
     const microHitCount = microHits.length;
-    const otherStructuralHitCount = otherStructuralHits.length;
+    const freshStructuralHitCount = freshStructuralHits.length;
     const contextHitCount = contextHits.length;
 
-    const structuralHits = [...microHits, ...otherStructuralHits];
+    const structuralHits = [...microHits, ...freshStructuralHits];
     const hitCount = structuralHits.length;
 
-    // RULE: Hard Block requires at least 1 micro reversal AND at least 1 other structural evidence
-    const rawActive = microHitCount >= 1 && otherStructuralHitCount >= 1;
+    // RULE: Hard Block requires at least 1 micro reversal AND at least 1 FRESH structural evidence
+    const rawActive = microHitCount >= 1 && freshStructuralHitCount >= 1;
 
-    // Soft Watch: Micro reversal + context (directional shock) without heavy structural evidence
+    // Soft Watch: Micro reversal + context (directional shock) without heavy fresh structural evidence
     const rawIsSoftWatch = !rawActive && microHitCount >= 1 && contextHitCount >= 1;
 
-    // Dedicated Symbol-Scoped WHIPSAW Observation State (Independent from V1 reviewingState)
+    // Dedicated Symbol-Scoped WHIPSAW Observation State
     const observation = updateWhipsawObservation({
         symbol: input.symbol,
         rawActive: rawActive || rawIsSoftWatch,
@@ -720,23 +760,88 @@ function evaluateWhipsawShockRecheck(args: {
 
     const finalRecheckConfirmed = retestConfirmed || reclaimConfirmed;
 
-    // --- Deactivation (Release) Conditions ---
-    if (active) {
+    // Direction-Consistent Stabilization: Previous shock aligns with healthy trend continuation
+    const trendWeakness = Number(sn.canonicalTrendWeaknessScore ?? sn.trendWeaknessScore ?? 0);
+    const isBullishStabilized =
+        directional === "UP" &&
+        regimeFinal === "TREND" &&
+        trendWeakness <= 0.4 &&
+        !micro.reverseSwingDetected &&
+        freshStructuralHits.length === 0;
+    const isBearishStabilized =
+        directional === "DOWN" &&
+        regimeFinal === "TREND" &&
+        trendWeakness <= 0.4 &&
+        !micro.reverseSwingDetected &&
+        freshStructuralHits.length === 0;
+    const directionConsistentStabilization = isBullishStabilized || isBearishStabilized;
+
+    // HTF / Macro Contrarian Authority Veto
+    const isUpShockContrarian =
+        directional === "UP" &&
+        (macroPolarity === "BEARISH" || (counterTrendRisk === true && htfEntryPolicy === "HOLD"));
+
+    const isDownShockContrarian =
+        directional === "DOWN" &&
+        (macroPolarity === "BULLISH" || (counterTrendRisk === true && htfEntryPolicy === "HOLD"));
+
+    const htfContrarianReleaseBlocked = isUpShockContrarian || isDownShockContrarian;
+
+    const hasActiveEpisode = observation.episodeId != null && observation.recheckTicks >= 1;
+    let baseReleaseEligible = false;
+    let baseReleaseReason: string | null = null;
+
+    // --- Deactivation (Release) Evaluation ---
+    if (active || hasActiveEpisode) {
         if (observation.observationAgePassed) {
-            const structuralVanished = structuralHits.length === 0;
+            const freshVanished = freshStructuralHits.length === 0 || microHits.length === 0;
             const releasedBySwing = !micro.reverseSwingDetected;
-            const releasedByVol = volExp < 1.7; // Easing from 2.0 threshold
-            const releasedByFailRate = breakoutFailureRate < 0.32; // Easing from 0.4 threshold
+            const releasedByVol = volExp < 1.7;
+            const releasedByFailRate = breakoutFailureRate < 0.32;
             const releasedByConfirmation = finalRecheckConfirmed;
 
-            if (structuralVanished || (releasedByConfirmation && (releasedBySwing || releasedByVol || releasedByFailRate))) {
-                active = false;
+            if (directionConsistentStabilization) {
+                baseReleaseEligible = true;
+                baseReleaseReason = "DIRECTION_CONSISTENT_STABILIZATION";
+            } else if (freshVanished) {
+                baseReleaseEligible = true;
+                baseReleaseReason = "FRESH_RISK_EVIDENCE_CLEARED";
+            } else if (releasedByConfirmation && (releasedBySwing || releasedByVol || releasedByFailRate)) {
+                baseReleaseEligible = true;
+                baseReleaseReason = "CONFIRMATION_MET";
             }
         }
-        // Force release if structural evidence disappears entirely regardless of ticks
-        if (structuralHits.length === 0) {
-            active = false;
+        // Force release consideration if fresh structural evidence disappears entirely
+        if (freshStructuralHits.length === 0 && microHits.length === 0) {
+            baseReleaseEligible = true;
+            baseReleaseReason = baseReleaseReason ?? "FRESH_RISK_EVIDENCE_CLEARED";
         }
+    }
+
+    const finalReleaseEligible = baseReleaseEligible && !htfContrarianReleaseBlocked;
+    let finalReleaseReason: string | null = null;
+
+    if (baseReleaseEligible) {
+        if (htfContrarianReleaseBlocked) {
+            finalReleaseReason = "HTF_CONTRARIAN_RELEASE_BLOCKED";
+            active = true; // Maintain Hard-Block against macro contrarian trend
+            isSoftWatch = false;
+        } else {
+            finalReleaseReason = baseReleaseReason;
+            active = false;
+            isSoftWatch = false;
+        }
+    }
+
+    if (finalReleaseEligible) {
+        // Clean up observer state upon release
+        updateWhipsawObservation({
+            symbol: input.symbol,
+            rawActive: false,
+            directionalShockState: directional,
+            structuralHits: [],
+            now: (input.state as any)?.now ?? Date.now()
+        });
     }
 
     const confirmationWaitReasons: string[] = [];
@@ -764,14 +869,24 @@ function evaluateWhipsawShockRecheck(args: {
         reverseSwingDetected: micro.reverseSwingDetected,
         recentSwingDirection: micro.recentSwingDirection,
         boxOrbitChop,
-        structuralHitCount: otherStructuralHitCount,
+        structuralHitCount: freshStructuralHitCount,
         contextHitCount,
         recheckTicks: observation.recheckTicks,
         whipsawEpisodeId: observation.episodeId,
         whipsawRecheckRequiredTicks: observation.requiredTicks,
         whipsawCounterResetReason: observation.resetReason,
         observationAgePassed: observation.observationAgePassed,
-        finalRecheckConfirmed
+        finalRecheckConfirmed,
+        freshStructuralHits,
+        historicalOnlyHits,
+        directionConsistentStabilization,
+        baseReleaseEligible,
+        htfContrarianReleaseBlocked,
+        finalReleaseEligible,
+        releaseEligible: finalReleaseEligible,
+        baseReleaseReason,
+        finalReleaseReason,
+        releaseReason: finalReleaseReason
     };
 }
 
@@ -1263,7 +1378,11 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         mixedBreakoutState,
         rangeMetadata: m as Record<string, unknown> | undefined,
         regimeFinal: regime_final,
-        noTradeReason: no_trade_reason
+        noTradeReason: no_trade_reason,
+        htfEntryPolicy,
+        htfPolicyReason,
+        counterTrendRisk,
+        macroPolarity
     });
 
     const fastShift = evaluateFastTrendShift({
@@ -1352,7 +1471,52 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     const volExpResolved = volumeExpansionResolved(sn);
     const atrExpResolved = typeof sn.atrExpansion === "number" && Number.isFinite(sn.atrExpansion) ? sn.atrExpansion : null;
 
-    if (whipsaw.active || whipsaw.isSoftWatch) {
+    if (whipsaw.active || whipsaw.isSoftWatch || whipsaw.releaseEligible || whipsaw.recheckTicks > 0) {
+        console.info(
+            JSON.stringify({
+                event: "V2_WHIPSAW_LIVENESS_PROOF",
+                symbol: input.symbol,
+                episode_id: whipsaw.whipsawEpisodeId,
+                directional_shock_state: input.state.directionalShockState ?? "NONE",
+                counter_trend_risk: counterTrendRisk,
+                macro_polarity: macroPolarity,
+                htf_entry_policy: htfEntryPolicy,
+                htf_policy_reason: htfPolicyReason,
+                base_release_eligible: whipsaw.baseReleaseEligible,
+                htf_contrarian_release_blocked: whipsaw.htfContrarianReleaseBlocked,
+                final_release_eligible: whipsaw.finalReleaseEligible,
+                direction_consistent_stabilization: whipsaw.directionConsistentStabilization,
+                fresh_structural_hits: whipsaw.freshStructuralHits,
+                micro_hits: whipsaw.hits.filter(h => h.startsWith("micro_")),
+                historical_only_hits: whipsaw.historicalOnlyHits,
+                recheck_ticks: whipsaw.recheckTicks,
+                required_ticks: whipsaw.whipsawRecheckRequiredTicks,
+                observation_age_passed: whipsaw.observationAgePassed,
+                raw_active: whipsaw.active || whipsaw.isSoftWatch,
+                hard_block_active: whipsaw.active,
+                retest_confirmed: whipsaw.retestConfirmed,
+                reclaim_confirmed: whipsaw.reclaimConfirmed,
+                release_eligible: whipsaw.releaseEligible,
+                base_release_reason: whipsaw.baseReleaseReason,
+                final_release_reason: whipsaw.finalReleaseReason,
+                release_reason: whipsaw.releaseReason
+            })
+        );
+
+        if (whipsaw.releaseEligible) {
+            console.info(
+                JSON.stringify({
+                    event: "V2_WHIPSAW_RELEASE_PROOF",
+                    symbol: input.symbol,
+                    episode_id: whipsaw.whipsawEpisodeId,
+                    release_reason: whipsaw.releaseReason ?? "FRESH_RISK_EVIDENCE_CLEARED",
+                    previous_state: "HARD_BLOCK",
+                    next_state: "NORMAL_EVALUATION",
+                    entry_auto_promoted: false
+                })
+            );
+        }
+
         console.info(
             JSON.stringify({
                 event: "V2_WHIPSAW_SHOCK_RECHECK_PROOF",

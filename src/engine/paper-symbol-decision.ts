@@ -194,6 +194,8 @@ export type SymbolSnapshotLike = Readonly<{
   boxHigh: number | null;
   boxLow: number | null;
   atr: number | null;
+  atr20?: number | null;
+  closedClose?: number | null;
   signalMissingReason?: string;
   signalGateBlockedReason?: string | null;
   rangeSignalDowngraded?: boolean;

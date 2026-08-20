@@ -162,8 +162,8 @@ export interface LegacySnapshotAdapter {
     boxLow: number | null;
     boxPosDiag: number | null;
     boxPos?: number | null;
-    closedClose?: number;
-    atr20?: number;
+    closedClose?: number | null;
+    atr20?: number | null;
     rcSlope?: number;
     rangeConfidenceDiag: number | null;
     rangeConfidence?: number | null;
@@ -418,7 +418,7 @@ export interface EngineV2SnapshotAdapter {
     atrExpansion?: number;
     volumeExpansion?: number;
     atr20?: number | null;
-    closedClose?: number;
+    closedClose?: number | null;
     rcSlope?: number;
     candles?: import("../../models/types").Candle[];
     htf_candles?: Record<string, import("../../models/types").Candle[]>;
@@ -509,6 +509,8 @@ export interface V2BridgeSnapshot {
     ema20: number;
     emaGap: number;
     atr: number;
+    atr20?: number | null;
+    closedClose?: number | null;
     signal: string;
     qualityScore: number;
     swingHighSlope: number;
