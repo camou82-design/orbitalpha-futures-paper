@@ -508,9 +508,19 @@ function makeBaseInput(
 }
 
 // =========================================================================
-// TEST L — ATR & closedClose Propagate to Micro Probe
+// TEST L — ATR & closedClose Propagate to Micro Probe via Reconciler Bridge
 // =========================================================================
 {
+  clearWhipsawObservationState("BTCUSDT");
+  for (let i = 1; i <= 6; i++) {
+    updateWhipsawObservation({
+      symbol: "BTCUSDT",
+      rawActive: true,
+      directionalShockState: "UP",
+      structuralHits: ["micro_up_then_drop"]
+    });
+  }
+
   const snapBtc: SymbolSnapshotLike = {
     symbol: "BTCUSDT",
     lastPrice: 69000,
@@ -528,12 +538,20 @@ function makeBaseInput(
     boxRel: 0.02,
     gateExpectedMove: null,
     gateRequiredMove: null,
-    atr: 250,
+    atr: 100, // Distinct from atr20=250 to ensure atr20 is not masked by atr
     atr20: 250,
     closedClose: 68990,
     rangeConfidence: 0.5,
     trendWeaknessScore: 0.1,
-    candles: mockBullishCandles
+    boxHighSlope: 0,
+    boxLowSlope: 0,
+    candles: mockBullishCandles,
+    htf_candles: {
+      "5m": mockBullishCandles,
+      "15m": mockBullishCandles,
+      "1h": mockBearishCandles,
+      "4h": mockBearishCandles
+    }
   };
 
   const bridge = buildV2SnapshotBridge(snapBtc);
@@ -542,7 +560,7 @@ function makeBaseInput(
     Date.now(),
     bridge as any,
     { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
-    { directionalShockState: "NONE", longAllow: true, shortAllow: true, currentPositions: [] } as any,
+    { directionalShockState: "UP", longAllow: true, shortAllow: true, currentPositions: [] } as any,
     { decision: { final_decision: "ENTER" } } as any,
     mockBullishCandles,
     "authoritative",
@@ -552,35 +570,59 @@ function makeBaseInput(
   run(
     "TEST_L_ATR_CLOSEDCLOSE_PROPAGATION",
     input.snapshot.atr20 === 250 && input.snapshot.closedClose === 68990,
-    `BTC atr20 and closedClose successfully propagated. atr20=${input.snapshot.atr20}, closedClose=${input.snapshot.closedClose}`
+    `BTC atr20 and closedClose successfully propagated to input adapter. atr20=${input.snapshot.atr20}, closedClose=${input.snapshot.closedClose}`
   );
 
-  const envelope = resolveSymbolDecisionEnvelope({
-    symbol: "BTCUSDT" as any,
-    fetchedAt: Date.now(),
-    snapshot: bridge,
-    config: { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
-    state: { directionalShockState: "NONE", longAllow: true, shortAllow: true, currentPositions: [] } as any,
-    legacy: {
-      regime: "RANGE",
-      finalDecision: "SKIP",
-      rejectReason: "none",
-      requiredCostUsd: 0,
-      entryAllowed: false,
-      executorLabel: "range",
-      intentSide: "none",
-      adaptiveOk: true,
-      adaptiveDetail: {}
-    } as any,
-    v2Mode: "engine_v2",
-    evaluationMode: "authoritative",
-    runCycleId: "cycle_btc_atr_bridge_prop"
-  });
+  const proofLogs: any[] = [];
+  const origInfo = console.info;
+  console.info = (msg: any) => {
+    try {
+      const parsed = JSON.parse(msg);
+      if (parsed && typeof parsed.event === "string") {
+        proofLogs.push(parsed);
+      }
+    } catch {}
+    origInfo(msg);
+  };
+
+  let envelope: any;
+  try {
+    envelope = resolveSymbolDecisionEnvelope({
+      symbol: "BTCUSDT" as any,
+      fetchedAt: Date.now(),
+      snapshot: bridge,
+      config: { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+      state: { directionalShockState: "UP", longAllow: true, shortAllow: true, currentPositions: [] } as any,
+      legacy: {
+        regime: "RANGE",
+        finalDecision: "SKIP",
+        rejectReason: "none",
+        requiredCostUsd: 0,
+        entryAllowed: false,
+        executorLabel: "range",
+        intentSide: "none",
+        adaptiveOk: true,
+        adaptiveDetail: {}
+      } as any,
+      v2Mode: "engine_v2",
+      evaluationMode: "authoritative",
+      runCycleId: "cycle_btc_atr_bridge_prop"
+    });
+  } finally {
+    console.info = origInfo;
+  }
+
+  const microProbeProof = proofLogs.find((l) => l.event === "V2_WHIPSAW_MICRO_PROBE_EVALUATION_PROOF");
+  const slopeFallbackProof = proofLogs.find((l) => l.event === "V2_SLOPE_FALLBACK_CHECK_PROOF");
+
+  const atr20Preserved = microProbeProof != null && microProbeProof.atr20 === 250;
+  const closedClosePreserved = microProbeProof != null && microProbeProof.closedClose === 68990;
+  const candlesPreserved = slopeFallbackProof != null && slopeFallbackProof.candles_length === mockBullishCandles.length;
 
   run(
     "TEST_L_RECONCILER_BRIDGE_PRESERVE_ATR20_CLOSEDCLOSE",
-    envelope != null && typeof envelope.runtime_authority_decision === "string",
-    `Reconciler bridge resolved envelope with atr20 and closedClose intact (decision=${envelope?.runtime_authority_decision})`
+    Boolean(envelope && atr20Preserved && closedClosePreserved && candlesPreserved),
+    `Reconciler bridge verified: atr20=${microProbeProof?.atr20} (expected 250), closedClose=${microProbeProof?.closedClose} (expected 68990), candles_length=${slopeFallbackProof?.candles_length} (expected ${mockBullishCandles.length})`
   );
 }
 
