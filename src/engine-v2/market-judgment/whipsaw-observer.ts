@@ -30,6 +30,10 @@ class WhipsawObservationAuthority {
         directionalShockState: string;
         structuralHits: string[];
         shockEmergencyBypass?: boolean;
+        /** True when micro + fresh structural evidence present (hard-block candidate). */
+        candidateRiskActive?: boolean;
+        /** Gate for starting a new hard-block episode without an existing one. */
+        allowNewHardBlockEpisode?: boolean;
         now?: number;
     }): WhipsawObservationResult {
         const { symbol, rawActive, directionalShockState, structuralHits, shockEmergencyBypass } = args;
@@ -57,6 +61,24 @@ class WhipsawObservationAuthority {
 
         let existing = this.episodeBySymbol.get(symKey);
         let resetReason: string | null = null;
+
+        const isHardBlockCandidate =
+            args.candidateRiskActive === true ||
+            (args.candidateRiskActive === undefined && rawActive);
+        const allowNewHardBlock =
+            args.allowNewHardBlockEpisode ??
+            (currentDirection === "UP" || currentDirection === "DOWN" || currentBypass);
+
+        if (!existing && isHardBlockCandidate && !allowNewHardBlock) {
+            return {
+                episodeId: null,
+                recheckTicks: 0,
+                requiredTicks: WHIPSAW_REQUIRED_RECHECK_TICKS,
+                resetReason: null,
+                observationAgePassed: false,
+                active: false
+            };
+        }
 
         if (existing) {
             // Check for new risk events:
@@ -141,6 +163,8 @@ export function updateWhipsawObservation(args: {
     directionalShockState: string;
     structuralHits: string[];
     shockEmergencyBypass?: boolean;
+    candidateRiskActive?: boolean;
+    allowNewHardBlockEpisode?: boolean;
     now?: number;
 }): WhipsawObservationResult {
     return whipsawObservationAuthority.updateObservation(args);

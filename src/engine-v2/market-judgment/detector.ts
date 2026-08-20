@@ -739,23 +739,35 @@ function evaluateWhipsawShockRecheck(args: {
     const structuralHits = [...microHits, ...freshStructuralHits];
     const hitCount = structuralHits.length;
 
-    // RULE: Hard Block requires at least 1 micro reversal AND at least 1 FRESH structural evidence
-    const rawActive = microHitCount >= 1 && freshStructuralHitCount >= 1;
+    // Hard-block candidate: micro reversal + fresh structural evidence
+    const candidateRiskActive = microHitCount >= 1 && freshStructuralHitCount >= 1;
+
+    const freshShockContext =
+        directional === "UP" ||
+        directional === "DOWN" ||
+        pumpS.includes("ALERT") ||
+        crashS.includes("ALERT") ||
+        input.state.shockEmergencyBypass === true;
+
+    const allowNewHardBlockEpisode = candidateRiskActive && freshShockContext;
 
     // Soft Watch: Micro reversal + context (directional shock) without heavy fresh structural evidence
-    const rawIsSoftWatch = !rawActive && microHitCount >= 1 && contextHitCount >= 1;
+    const rawIsSoftWatch = !candidateRiskActive && microHitCount >= 1 && contextHitCount >= 1;
 
     // Dedicated Symbol-Scoped WHIPSAW Observation State
     const observation = updateWhipsawObservation({
         symbol: input.symbol,
-        rawActive: rawActive || rawIsSoftWatch,
+        rawActive: candidateRiskActive || rawIsSoftWatch,
+        candidateRiskActive,
+        allowNewHardBlockEpisode,
         directionalShockState: directional,
         structuralHits,
         shockEmergencyBypass: input.state.shockEmergencyBypass === true,
         now: (input.state as any)?.now ?? Date.now()
     });
 
-    let active = rawActive;
+    // Hard block requires an active episode; new episodes need fresh shock context
+    let active = candidateRiskActive && observation.episodeId != null;
     let isSoftWatch = rawIsSoftWatch;
 
     const finalRecheckConfirmed = retestConfirmed || reclaimConfirmed;
