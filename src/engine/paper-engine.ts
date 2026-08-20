@@ -1424,8 +1424,42 @@ function buildV2PreEntryRiskPlanCommitted(
     }
   } else if (regime === "TREND") {
     profitManagementMode = "PARTIAL_TRAILING";
-    finalTpPrice = null;
-    finalTpSource = "none";
+    const authTp =
+      typeof decision.takeProfit === "number" && Number.isFinite(decision.takeProfit) && decision.takeProfit !== 0
+        ? decision.takeProfit
+        : typeof authority.takeProfit1Px === "number" &&
+            Number.isFinite(authority.takeProfit1Px) &&
+            authority.takeProfit1Px !== 0
+          ? authority.takeProfit1Px
+          : null;
+
+    if (authTp != null) {
+      const isAuthTpValidDirection =
+        side === "long" ? authTp > referenceEntryPx : authTp < referenceEntryPx;
+      if (isAuthTpValidDirection) {
+        finalTpPrice = authTp;
+        finalTpSource = "authority_tp_price";
+      } else {
+        logger.warn("V2_EXIT_PLAN_AUTHORITY_TP_REJECTED", {
+          symbol,
+          side,
+          rejectedTpPrice: authTp,
+          reason: "trend_tp_wrong_direction"
+        });
+      }
+    }
+
+    if (finalTpPrice == null) {
+      policyTpPrice = engineMirrorTpPrice(referenceEntryPx, side, regime);
+      if (policyTpPrice != null) {
+        const isPolicyTpValidDirection =
+          side === "long" ? policyTpPrice > referenceEntryPx : policyTpPrice < referenceEntryPx;
+        if (isPolicyTpValidDirection) {
+          finalTpPrice = policyTpPrice;
+          finalTpSource = "engine_calculated";
+        }
+      }
+    }
   }
 
   let takeProfitDistancePct: number | null = null;
@@ -10125,7 +10159,7 @@ export class PaperEngine {
 
     // 2. Derive Target Prices
     let activeStopPrice = open.stopPrice ?? (open as any).ledger_stop_px;
-    let activeTpPrice = open.targetPrice1;
+    let activeTpPrice = open.targetPrice1 ?? open.takeProfit1Px ?? open.takeProfitPlan?.tp1;
 
     // V2 Breakeven Promotion: If BE is required and better than current SL, use BE
     if (open.breakevenStopRequired === true && open.breakevenStopPrice != null) {
@@ -10193,7 +10227,18 @@ export class PaperEngine {
     const rawWantsTp = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0;
     const wantsTp = rawWantsTp && !isV2RangePartialPlan;
     const slRequired = true;
-    const tpRequired = !isV2RangePartialPlan && ((open.regimeAtEntry === "RANGE") || (open.takeProfitRequired === true) || (rawWantsTp && open.isV2Authority !== true));
+    const tpRequired = !isV2RangePartialPlan && ((open.regimeAtEntry === "RANGE") || (Boolean((open as any).takeProfitRequired)) || (rawWantsTp && open.isV2Authority !== true) || (open.isV2Authority === true && open.regimeAtEntry === "TREND" && (Boolean((open as any).takeProfitRequired) || rawWantsTp)));
+
+    if (tpRequired && (!activeTpPrice || !Number.isFinite(activeTpPrice))) {
+      this.logger.error("PROTECTIVE_ORDER_TP_REQUIRED_BUT_MISSING_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        reason: "tp_required_but_no_valid_tp_price"
+      });
+      this.symbolProtectionFailedBlocked.add(open.symbol);
+      return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
+    }
 
     if (isV2RangePartialPlan) {
       this.logger.info("V2_PROTECTIVE_RANGE_PARTIAL_SOVEREIGNTY_PROOF", {
@@ -10318,7 +10363,12 @@ export class PaperEngine {
       canonical_sl_algo_id: engineOwnedSl?.algoId ?? null,
       canonical_tp_algo_id: engineOwnedTp?.algoId ?? null,
       contracts_to_protect: contractsToProtect,
-      protected_sl_contracts: engineOwnedSl ? Number(engineOwnedSl.sz ?? 0) : null
+      protected_sl_contracts: engineOwnedSl ? Number(engineOwnedSl.sz ?? 0) : null,
+      pending_algo_orders_count: authoritativePendingCount,
+      unique_protective_algo_count: reconcilePlan.uniqueProtectiveAlgoCount,
+      matching_protective_pending_count: reconcilePlan.matchingProtectivePendingCount,
+      duplicate_sl_algo_ids: reconcilePlan.duplicateSlAlgoIds,
+      duplicate_tp_algo_ids: reconcilePlan.duplicateTpAlgoIds
     });
 
     if (engineOwnedSl && activeStopPrice != null) {
@@ -21414,12 +21464,18 @@ export class PaperEngine {
           })(),
           targetPrice1: (() => {
             if (authority.source === "v2") {
-              if (v2CommittedRiskPlan?.initial_tp_price != null) return v2CommittedRiskPlan.initial_tp_price;
+              if (v2CommittedRiskPlan?.initial_tp_price != null && Number.isFinite(v2CommittedRiskPlan.initial_tp_price)) return v2CommittedRiskPlan.initial_tp_price;
               if (authority.takeProfit1Px !== undefined && isCommittedEntryStopPrice(authority.takeProfit1Px)) return authority.takeProfit1Px;
               return undefined;
             }
             return typeof res.decision.takeProfit === "number" ? res.decision.takeProfit : undefined;
           })(),
+          ...(authority.source === "v2" && v2CommittedRiskPlan?.initial_tp_price != null
+            ? {
+                takeProfit1Px: v2CommittedRiskPlan.initial_tp_price,
+                takeProfitRequired: !isRangeCampaignNewEntry
+              }
+            : {}),
           pos: submit?.baseQty ?? (entrySizeUsd / first.lastPrice),
           okxContracts: submit?.okxContracts ?? undefined,
           baseQty: submit?.baseQty ?? undefined,
@@ -22831,7 +22887,14 @@ export class PaperEngine {
       }
     } else if (regime === "TREND") {
       record.profitManagementMode = "PARTIAL_TRAILING";
-      record.targetPrice1 = undefined; // Force no fixed TP for TREND
+      // Preserve existing targetPrice1 if already populated; do not forcibly erase
+      if (record.targetPrice1 == null || !Number.isFinite(record.targetPrice1)) {
+        const mirroredTp = engineMirrorTpPrice(record.entryPrice, record.side, regime);
+        if (mirroredTp != null && Number.isFinite(mirroredTp)) {
+          record.targetPrice1 = mirroredTp;
+          modified = true;
+        }
+      }
       record.partialExitStage = record.partialExitStage ?? 0;
       // Note: trailingExtremePrice and highestPnlPctNet remain unchanged or undefined (dynamic).
     } else {

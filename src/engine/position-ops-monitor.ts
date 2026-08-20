@@ -653,6 +653,8 @@ export function findProtectiveHintsForInst(
 
   let canonicalProtectiveSlFound = false;
 
+  const seenProtectiveKeys = new Set<string>();
+
   const consider = (o: Record<string, unknown>, prefix: "algo" | "pend") => {
     if (!instIdMatchesRow(instId, String(o.instId ?? ""))) return;
     if (!orderMatchesPositionSide(o, positionSide)) return;
@@ -662,6 +664,18 @@ export function findProtectiveHintsForInst(
       classified.isBotManagedProtection === true ||
       (reduceOnly && orderLooksReduceOnlyProtective(o));
     if (!isCanonical) return;
+
+    // Authoritative unique algo deduplication (P0-C)
+    const algoId = String(o.algoId ?? o.ordId ?? "").trim();
+    const clOrdId = String(o.algoClOrdId ?? o.clOrdId ?? "").trim();
+    const uniqueKey = algoId.length > 0
+      ? `id:${algoId}`
+      : clOrdId.length > 0
+        ? `cl:${clOrdId}`
+        : `px:${o.slTriggerPx ?? o.tpTriggerPx ?? o.px}:${o.side}`;
+    if (seenProtectiveKeys.has(uniqueKey)) return;
+    seenProtectiveKeys.add(uniqueKey);
+
     hints.push(`${prefix}:${stringifyHints(o)}`);
     matchingProtectiveOrderCount += 1;
     const slPx = extractSlPx(o);

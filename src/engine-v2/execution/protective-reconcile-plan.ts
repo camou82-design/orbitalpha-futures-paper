@@ -16,6 +16,7 @@ export type ProtectiveReconcileContext = Readonly<{
     wantsTp: boolean;
     expectedSide: "buy" | "sell";
     tickSz: number;
+    entryPrice?: number | null;
 }>;
 
 export type ProtectiveReconcilePlan = Readonly<{
@@ -29,6 +30,12 @@ export type ProtectiveReconcilePlan = Readonly<{
     duplicateTpCount: number;
     staleCount: number;
     manualIgnoredCount: number;
+    uniqueProtectiveAlgoCount: number;
+    matchingProtectivePendingCount: number;
+    canonicalSlAlgoId: string | null;
+    canonicalTpAlgoId: string | null;
+    duplicateSlAlgoIds: string[];
+    duplicateTpAlgoIds: string[];
 }>;
 
 function algoIdOf(algo: ProtectiveAlgoRow): string {
@@ -169,6 +176,8 @@ export function planProtectiveOrderReconcile(
     let canonicalSl: ProtectiveAlgoRow | null = null;
     let canonicalTp: ProtectiveAlgoRow | null = null;
     const cancelAlgoIds: string[] = [];
+    const duplicateSlAlgoIds: string[] = [];
+    const duplicateTpAlgoIds: string[] = [];
     let duplicateSlCount = 0;
     let duplicateTpCount = 0;
     let staleCount = 0;
@@ -178,7 +187,19 @@ export function planProtectiveOrderReconcile(
         if (id && !cancelAlgoIds.includes(id)) cancelAlgoIds.push(id);
     };
 
-    const evaluated = pendingAlgos.map((algo) => ({
+    // Dedupe evaluated list by algoId
+    const seenAlgoIds = new Set<string>();
+    const uniqueAlgos: ProtectiveAlgoRow[] = [];
+    for (const algo of pendingAlgos) {
+        const id = algoIdOf(algo);
+        if (id.length > 0) {
+            if (seenAlgoIds.has(id)) continue;
+            seenAlgoIds.add(id);
+        }
+        uniqueAlgos.push(algo);
+    }
+
+    const evaluated = uniqueAlgos.map((algo) => ({
         algo,
         id: algoIdOf(algo),
         ev: evaluateProtectiveAlgoMatch(algo, ctx)
@@ -202,10 +223,12 @@ export function planProtectiveOrderReconcile(
         let duplicate = false;
         if (coversSl && canonicalSl && algoIdOf(canonicalSl) !== id) {
             duplicateSlCount += 1;
+            if (id && !duplicateSlAlgoIds.includes(id)) duplicateSlAlgoIds.push(id);
             duplicate = true;
         }
         if (coversTp && canonicalTp && algoIdOf(canonicalTp) !== id) {
             duplicateTpCount += 1;
+            if (id && !duplicateTpAlgoIds.includes(id)) duplicateTpAlgoIds.push(id);
             duplicate = true;
         }
         if (duplicate) {
@@ -233,6 +256,9 @@ export function planProtectiveOrderReconcile(
     const needSubmitTp = ctx.wantsTp && !canonicalTp;
     const submitOco = needSubmitSl && needSubmitTp && ctx.wantsTp;
 
+    const uniqueProtectiveAlgoCount = uniqueAlgos.length;
+    const matchingProtectivePendingCount = adoptableRanked.length;
+
     return {
         canonicalSl,
         canonicalTp,
@@ -243,7 +269,13 @@ export function planProtectiveOrderReconcile(
         duplicateSlCount,
         duplicateTpCount,
         staleCount,
-        manualIgnoredCount
+        manualIgnoredCount,
+        uniqueProtectiveAlgoCount,
+        matchingProtectivePendingCount,
+        canonicalSlAlgoId: canonicalSl ? algoIdOf(canonicalSl) || null : null,
+        canonicalTpAlgoId: canonicalTp ? algoIdOf(canonicalTp) || null : null,
+        duplicateSlAlgoIds,
+        duplicateTpAlgoIds
     };
 }
 
