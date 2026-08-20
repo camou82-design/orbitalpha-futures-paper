@@ -22,6 +22,7 @@
 import { detectMarketRegime } from "../engine-v2/market-judgment/detector";
 import { clearWhipsawObservationState, whipsawObservationAuthority, updateWhipsawObservation } from "../engine-v2/market-judgment/whipsaw-observer";
 import { adaptV2Input, runEngineV2 } from "../engine-v2/index";
+import { resolveSymbolDecisionEnvelope } from "../engine-v2/reconciler";
 import { buildV2SnapshotBridge } from "./paper-engine";
 import type { Candle } from "../models/types";
 import type { EngineV2Input } from "../engine-v2/types";
@@ -552,6 +553,34 @@ function makeBaseInput(
     "TEST_L_ATR_CLOSEDCLOSE_PROPAGATION",
     input.snapshot.atr20 === 250 && input.snapshot.closedClose === 68990,
     `BTC atr20 and closedClose successfully propagated. atr20=${input.snapshot.atr20}, closedClose=${input.snapshot.closedClose}`
+  );
+
+  const envelope = resolveSymbolDecisionEnvelope({
+    symbol: "BTCUSDT" as any,
+    fetchedAt: Date.now(),
+    snapshot: bridge,
+    config: { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    state: { directionalShockState: "NONE", longAllow: true, shortAllow: true, currentPositions: [] } as any,
+    legacy: {
+      regime: "RANGE",
+      finalDecision: "SKIP",
+      rejectReason: "none",
+      requiredCostUsd: 0,
+      entryAllowed: false,
+      executorLabel: "range",
+      intentSide: "none",
+      adaptiveOk: true,
+      adaptiveDetail: {}
+    } as any,
+    v2Mode: "engine_v2",
+    evaluationMode: "authoritative",
+    runCycleId: "cycle_btc_atr_bridge_prop"
+  });
+
+  run(
+    "TEST_L_RECONCILER_BRIDGE_PRESERVE_ATR20_CLOSEDCLOSE",
+    envelope != null && typeof envelope.runtime_authority_decision === "string",
+    `Reconciler bridge resolved envelope with atr20 and closedClose intact (decision=${envelope?.runtime_authority_decision})`
   );
 }
 

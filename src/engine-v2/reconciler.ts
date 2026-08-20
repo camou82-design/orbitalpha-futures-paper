@@ -425,6 +425,8 @@ export function resolveSymbolDecisionEnvelope(
         ema20: snapshot.ema20,
         emaGapDiag: snapshot.emaGap,
         volatilityProxyDiag: snapshot.atr,
+        atr20: snapshot.atr20,
+        closedClose: snapshot.closedClose,
         signal: String(snapshot.signal),
         qualityScore: snapshot.qualityScore,
         entryCandidate: snapshot.entryCandidate ?? false,
