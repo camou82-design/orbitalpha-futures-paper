@@ -482,6 +482,31 @@ export function computePendingAgeMs(
   return nowMs - (pending.submittedAt ?? pending.createdAt);
 }
 
+export function resolvePendingFillRecordSizing(input: Readonly<{
+  actualPos: { pos?: number | string; avgPx?: number | string; notionalUsd?: number | string };
+  ctVal?: number | null;
+}>): {
+  actualAvgPx: number;
+  contractsAbs: number;
+  baseQtyAbs: number;
+  notionalUsd: number;
+} {
+  const actualAvgPx = Number(input.actualPos.avgPx);
+  const contractsAbs = Math.abs(Number(input.actualPos.pos));
+  const ctVal = input.ctVal ?? 1;
+  const baseQtyAbs = contractsAbs * ctVal;
+  let nuR = Number(input.actualPos.notionalUsd);
+  if ((!Number.isFinite(nuR) || nuR === 0) && actualAvgPx > 0 && baseQtyAbs > 0) {
+    nuR = baseQtyAbs * actualAvgPx;
+  }
+  return {
+    actualAvgPx,
+    contractsAbs,
+    baseQtyAbs,
+    notionalUsd: Math.abs(nuR)
+  };
+}
+
 export type ProtectiveExistingAlgoLedgerAdoption = Readonly<{
   slAdopted: boolean;
   tpAdopted: boolean;
@@ -18108,29 +18133,25 @@ export class PaperEngine {
              continue;
            }
 
-           const actualAvgPx = Number(actualPos.avgPx);
-           const actualBase = Number(actualPos.pos);
            const instR = this.instrumentCache.get(pending.instId);
            const ctValR = instR?.ctVal ?? 1;
-           const baseQtyAbs = Math.abs(actualBase);
+           const sizing = resolvePendingFillRecordSizing({
+             actualPos: actualPos as any,
+             ctVal: ctValR
+           });
 
            const record = pending.paperRecordSnapshot;
            record.openedAt = Date.now();
            record.lifecycleState = "BOT_V2_MANAGED";
            record.reconcileState = "MATCHED";
-           record.avgPx = actualAvgPx;
-           record.entryPrice = actualAvgPx;
-           record.pos = actualBase;
-           record.baseQty = baseQtyAbs;
-           record.okxContracts = ctValR > 0 ? baseQtyAbs / ctValR : baseQtyAbs;
-           record.exchangeFilledSize = record.okxContracts;
-           
-           let nuR = Number(actualPos.notionalUsd);
-           if ((!Number.isFinite(nuR) || nuR === 0) && actualAvgPx > 0 && baseQtyAbs > 0) {
-             nuR = baseQtyAbs * actualAvgPx;
-           }
-           record.notionalUsd = Math.abs(nuR);
-           record.sizeUsd = record.notionalUsd;
+           record.avgPx = sizing.actualAvgPx;
+           record.entryPrice = sizing.actualAvgPx;
+           record.pos = sizing.baseQtyAbs;
+           record.baseQty = sizing.baseQtyAbs;
+           record.okxContracts = sizing.contractsAbs;
+           record.exchangeFilledSize = sizing.contractsAbs;
+           record.notionalUsd = sizing.notionalUsd;
+           record.sizeUsd = sizing.notionalUsd;
 
            if (!isCommittedEntryStopPrice(record.stopPrice) && isCommittedEntryStopPrice(pending.stopPrice)) {
              record.stopPrice = pending.stopPrice as number;
