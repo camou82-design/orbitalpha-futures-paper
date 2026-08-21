@@ -354,6 +354,16 @@ import {
   evaluateOpsWatchProtectiveScanVerdict,
   reevaluateOpsWatchProtectiveScanVerdictAfterEnsure
 } from "../engine-v2/execution/protective-order-state";
+import { shouldAttachFullPositionProtectiveTp as shouldAttachFullPositionProtectiveTpCore } from "../engine-v2/execution/protective-tp-authority";
+import {
+  evaluateTerminalReentryBarrier,
+  buildTerminalReentryBarrierProof
+} from "../engine-v2/lifecycle/terminal-reentry-barrier";
+import {
+  isOkx51088FullPositionProtectiveConflict,
+  evaluateOkx51088ProtectionRecovery,
+  buildOkx51088RecoveryProof
+} from "../engine-v2/execution/okx-protection-51088-recovery";
 
 /** RANGE 1m edge reversal candle ?덇굅??寃뚯씠????V2 ?ㅽ뻾 遊됲닾媛€ ENTER쨌臾댄븯?쒕툝濡앹앪 ??理쒖쥌 ?ㅽ뻾 寃쎈줈瑜?留됱? ?딅룄濡?遺꾨━?쒕떎. */
 const LEGACY_RANGE_EDGE_NO_REVERSAL_REJECTS = new Set<string>([
@@ -591,29 +601,7 @@ export function shouldAttachFullPositionProtectiveTp(input: Readonly<{
   rawWantsTp: boolean;
   takeProfitRequired?: boolean;
 }>): { fullPositionTpRequired: boolean; reason: string } {
-  // 1. V2 RANGE partial plan -> full position TP is forbidden (partial ladder managed)
-  if (input.isV2RangePartialPlan) {
-    return { fullPositionTpRequired: false, reason: "V2_RANGE_PARTIAL_SOVEREIGNTY" };
-  }
-
-  // 2. V2 TREND -> full position exchange TP is forbidden by default (dynamic lifecycle sovereignty)
-  if (input.isV2Authority && input.regime === "TREND") {
-    return { fullPositionTpRequired: false, reason: "V2_TREND_DYNAMIC_EXIT_SOVEREIGNTY" };
-  }
-
-  // 3. V2 RANGE without partial plan -> full TP required if requested/available
-  if (input.isV2Authority && input.regime === "RANGE") {
-    const req = Boolean(input.takeProfitRequired) || input.rawWantsTp;
-    return { fullPositionTpRequired: req, reason: req ? "V2_RANGE_FULL_TP_REQUIRED" : "V2_RANGE_TP_NOT_REQUESTED" };
-  }
-
-  // 4. Legacy / non-V2 -> keep existing behavior
-  if (!input.isV2Authority) {
-    const req = (input.regime === "RANGE") || Boolean(input.takeProfitRequired) || input.rawWantsTp;
-    return { fullPositionTpRequired: req, reason: "LEGACY_TP_AUTHORITY" };
-  }
-
-  return { fullPositionTpRequired: false, reason: "DEFAULT_NO_FULL_TP" };
+  return shouldAttachFullPositionProtectiveTpCore(input);
 }
 
 export type ReplacementSlResubmitDeferEvaluation = Readonly<{
@@ -1812,6 +1800,7 @@ export class PaperEngine {
    * Key: `${symbol}:${side}:${openedAt}`
    */
   private readonly terminalExitConsumedByFlow = new Set<string>();
+  private cachedOpenPositionsForBarrier: PaperOpenPositionRecord[] = [];
   /** symbol:side -> true if OKX actual position exists but not in paper ledger. */
   private readonly symbolExternalManualBlocked = new Set<string>();
   /** symbol -> true if protective stop order failed to register; block further entries. */
@@ -10876,6 +10865,54 @@ export class PaperEngine {
       return resolved.adopted;
     };
 
+    const handle51088 = async (codes: { sCode: string | null; sMsg: string | null }) => {
+      const refreshed = await this.collectProtectiveInventoryForReconcile({
+        instId,
+        open,
+        slAlgoClOrdId,
+        tpAlgoClOrdId,
+        engineOwnedPrefix,
+        expectedSide: open.side === "long" ? "sell" : "buy",
+        tdModeUsed,
+        contractsToProtect,
+        activeStopPrice,
+        activeTpPrice: wantsTp ? activeTpPrice! : null,
+        wantsTp,
+        flowId
+      });
+      const inventory = refreshed ?? protectiveInventory;
+      const recovery = evaluateOkx51088ProtectionRecovery({
+        inventory,
+        reconcileCtx,
+        tpRequired
+      });
+      this.logger.warn(
+        "V2_OKX_PROTECTION_51088_RECOVERY_PROOF",
+        buildOkx51088RecoveryProof({
+          symbol: open.symbol,
+          side: open.side,
+          errorCode: codes.sCode,
+          existingAlgoCount: inventory.length,
+          canonicalSlFound: recovery.canonicalSlFound,
+          canonicalTpFound: recovery.canonicalTpFound,
+          slPrice: recovery.slPrice,
+          tpPrice: recovery.tpPrice,
+          adopted: recovery.adopted,
+          repairRequired: recovery.repairRequired,
+          repairAction: recovery.repairAction,
+          finalProtectionSatisfied: recovery.finalProtectionSatisfied
+        })
+      );
+      if (recovery.adopted) {
+        reconcilePlan = planProtectiveOrderReconcile(inventory, reconcileCtx);
+        engineOwnedSl = reconcilePlan.canonicalSl;
+        engineOwnedTp = reconcilePlan.canonicalTp;
+        modified = true;
+        return true;
+      }
+      return false;
+    };
+
     // [BLOCKER-3-2] Track algoIds from successful submits — OKX confirms the order even
     // before it propagates to the pending scan (short visibility window).
     let submittedSlAlgoId: string | null = null;
@@ -10904,6 +10941,8 @@ export class PaperEngine {
           const codes = this.extractOkxOrderAlgoRowCodes(ocoRes.diagnostics);
           if (isOkxAlgoClOrdIdExistsError(codes)) {
             await handle51068(slAlgoClOrdId);
+          } else if (isOkx51088FullPositionProtectiveConflict(codes)) {
+            await handle51088(codes);
           } else {
             this.logger.error("PROTECTIVE_OCO_SUBMIT_FAILED", { symbol: open.symbol, flowId, diag: ocoRes.diagnostics, sCode: codes.sCode });
           }
@@ -10977,6 +11016,8 @@ export class PaperEngine {
           const codes = this.extractOkxOrderAlgoRowCodes(slRes.diagnostics);
           if (isOkxAlgoClOrdIdExistsError(codes)) {
             await handle51068(slAlgoClOrdId);
+          } else if (isOkx51088FullPositionProtectiveConflict(codes)) {
+            await handle51088(codes);
           } else {
             this.logger.error("PROTECTIVE_STOP_SUBMIT_FAILED", { symbol: open.symbol, flowId, diag: slRes.diagnostics, sCode: codes.sCode });
           }
@@ -11006,6 +11047,8 @@ export class PaperEngine {
           const codes = this.extractOkxOrderAlgoRowCodes(tpRes.diagnostics);
           if (isOkxAlgoClOrdIdExistsError(codes)) {
             await handle51068(tpAlgoClOrdId);
+          } else if (isOkx51088FullPositionProtectiveConflict(codes)) {
+            await handle51088(codes);
           } else {
             this.logger.error("TAKE_PROFIT_SUBMIT_FAILED", { symbol: open.symbol, flowId, diag: tpRes.diagnostics, sCode: codes.sCode });
           }
@@ -18426,8 +18469,16 @@ export class PaperEngine {
             ? "SYMBOL_SAME_SIDE_POSITION_ALREADY_OPEN"
             : null;
 
+        const terminalBarrier = evaluateTerminalReentryBarrier({
+          symbol: symbolStr,
+          requestedSide: deferred.side,
+          openPositions: deferredCheckPositions,
+          terminalExitFlowIds: this.terminalExitConsumedByFlow
+        });
+
         let invalidReason: string | null = null;
-        if (!freshTickOk) invalidReason = "FRESH_TICK_NOT_OK";
+        if (terminalBarrier.blocked) invalidReason = `TERMINAL_REENTRY_BARRIER|${terminalBarrier.reason}`;
+        else if (!freshTickOk) invalidReason = "FRESH_TICK_NOT_OK";
         else if (!readinessOk) invalidReason = "READINESS_NOT_OK";
         else if (positionConflict) invalidReason = positionConflictReason ?? "SYMBOL_POSITION_CONFLICT";
         else if (!stopPriceValid) invalidReason = lastPrice > 0 && !stopDirectionValid ? "STOP_PRICE_DIRECTION_INVALID" : "STOP_PRICE_INVALID";
@@ -18545,6 +18596,35 @@ export class PaperEngine {
           });
         }
         return;
+      }
+
+      if (authority.decision === "ENTER") {
+        const opensForBarrier = this.cachedOpenPositionsForBarrier ?? [];
+        const barrier = evaluateTerminalReentryBarrier({
+          symbol: symKey,
+          requestedSide: authority.side === "long" || authority.side === "short" ? authority.side : undefined,
+          openPositions: opensForBarrier,
+          terminalExitFlowIds: this.terminalExitConsumedByFlow
+        });
+        if (barrier.blocked) {
+          this.logger.warn(
+            "V2_TERMINAL_REENTRY_BARRIER_PROOF",
+            buildTerminalReentryBarrierProof({
+              symbol: symKey,
+              requestedSide: authority.side ?? null,
+              blocked: true,
+              reason: barrier.reason,
+              closePending: barrier.closePending,
+              finalizePending: barrier.finalizePending,
+              actualPositionExists: barrier.actualPositionExists,
+              terminalFillConfirmed: barrier.terminalFillConfirmed,
+              lossStateCommitted: barrier.lossStateCommitted,
+              positionCycleId: barrier.positionCycleId,
+              now: Date.now()
+            })
+          );
+          return;
+        }
       }
 
       if (authority.source === "v2") {
@@ -18932,6 +19012,7 @@ export class PaperEngine {
       if (changed) openPositionsChanged = true;
       return current;
     });
+    this.cachedOpenPositionsForBarrier = opens;
     const before = opens.length;
     const next = [...opens];
     const isNewEntry = next.length === 0;
@@ -18955,6 +19036,33 @@ export class PaperEngine {
           entryPendingState: activePendingEntryOrders.find(p => p.symbol === String(first.symbol) && p.side === authority.side)?.entryPendingState ?? null,
           reason: "pending_entry_or_unconfirmed_fill"
         });
+        consumeIdx++;
+        continue;
+      }
+
+      const terminalBarrier = evaluateTerminalReentryBarrier({
+        symbol: String(first.symbol),
+        requestedSide: authority.side as "long" | "short",
+        openPositions: opens,
+        terminalExitFlowIds: this.terminalExitConsumedByFlow
+      });
+      if (terminalBarrier.blocked) {
+        this.logger.warn(
+          "V2_TERMINAL_REENTRY_BARRIER_PROOF",
+          buildTerminalReentryBarrierProof({
+            symbol: first.symbol,
+            requestedSide: authority.side ?? null,
+            blocked: true,
+            reason: terminalBarrier.reason,
+            closePending: terminalBarrier.closePending,
+            finalizePending: terminalBarrier.finalizePending,
+            actualPositionExists: terminalBarrier.actualPositionExists,
+            terminalFillConfirmed: terminalBarrier.terminalFillConfirmed,
+            lossStateCommitted: terminalBarrier.lossStateCommitted,
+            positionCycleId: terminalBarrier.positionCycleId,
+            now: nowTs
+          })
+        );
         consumeIdx++;
         continue;
       }

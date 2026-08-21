@@ -13,6 +13,8 @@ import {
 } from "./types";
 import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
 import { evaluateSameSideLossReentryGate } from "./state/loss-reentry-gate";
+import { applyV2ExitAuthorityInvariants, isExplicitTerminalExitReason } from "./exit/exit-authority-invariant";
+import { evaluateTerminalReentryBarrier, buildTerminalReentryBarrierProof } from "./lifecycle/terminal-reentry-barrier";
 import { emitLiveExposureAuthorityProof, resolveLiveExposureAuthority } from "./live-account/exposure-authority";
 import {
     evaluateEquityAdaptiveSizing,
@@ -4072,6 +4074,39 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 5.55: Same-Side Loss Re-entry Hysteresis & Fresh Setup Guard
     if (v2DecisionAfterPromotion === "ENTER" && (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")) {
+        const bridgeOpens = Array.isArray((input as any).bridgeState?.openPositions)
+            ? (input as any).bridgeState.openPositions
+            : [];
+        const terminalBarrier = evaluateTerminalReentryBarrier({
+            symbol: String(input.symbol),
+            requestedSide: v2SideAfterPromotion,
+            openPositions: bridgeOpens
+        });
+        if (terminalBarrier.blocked) {
+            console.warn(JSON.stringify(buildTerminalReentryBarrierProof({
+                symbol: String(input.symbol),
+                requestedSide: v2SideAfterPromotion,
+                blocked: true,
+                reason: terminalBarrier.reason,
+                closePending: terminalBarrier.closePending,
+                finalizePending: terminalBarrier.finalizePending,
+                actualPositionExists: terminalBarrier.actualPositionExists,
+                terminalFillConfirmed: terminalBarrier.terminalFillConfirmed,
+                lossStateCommitted: terminalBarrier.lossStateCommitted,
+                positionCycleId: terminalBarrier.positionCycleId,
+                now: input.now
+            })));
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = terminalBarrier.reason;
+            promotionApplied = false;
+            promotionReason = null;
+            expectedMissingCondition = terminalBarrier.reason;
+            expectedNextAction = "WAIT_FOR_TERMINAL_CYCLE_FINALIZE";
+        }
+    }
+
+    if (v2DecisionAfterPromotion === "ENTER" && (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")) {
         const lossGateResult = evaluateSameSideLossReentryGate({
             symbol: String(input.symbol),
             requestedSide: v2SideAfterPromotion,
@@ -5884,13 +5919,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
         // Bridge back to v2ExitAuthority and v2PartialAuthority if managed by V2
         if (lifecycleAuthority.exitManagedByV2 && lifecycleAuthority.exitAction === "exit") {
-            v2ExitAuthority = {
-                ...v2ExitAuthority,
-                exitAction: "exit",
-                shouldExit: true,
-                exitReason: lifecycleAuthority.exitReason || v2ExitAuthority.exitReason,
-                exitUrgency: "medium"
-            };
+            if (isExplicitTerminalExitReason(lifecycleAuthority.exitReason)) {
+                v2ExitAuthority = {
+                    ...v2ExitAuthority,
+                    exitAction: "exit",
+                    shouldExit: true,
+                    exitReason: lifecycleAuthority.exitReason ?? null,
+                    exitUrgency: "medium"
+                };
+            }
         }
         if (lifecycleAuthority.partialManagedByV2 && lifecycleAuthority.partialAction === "reduce") {
             v2PartialAuthority = {
@@ -5901,6 +5938,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 reduceRatio: lifecycleAuthority.reduceRatio || v2PartialAuthority.reduceRatio
             };
         }
+
+        v2ExitAuthority = applyV2ExitAuthorityInvariants(v2ExitAuthority, {
+            lifecycleExitReason: lifecycleAuthority.exitReason ?? null,
+            lifecycleExitAction: lifecycleAuthority.exitAction ?? null
+        });
 
         // Cooldown authority is computed as an independent proof/comparison layer.
         // It does NOT change any actual cooldown application logic (paper engine remains the executor).

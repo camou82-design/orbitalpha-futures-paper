@@ -31,6 +31,7 @@ export interface SameSideLossReentryGateInput {
     zone?: string | null;
     rangeCycleCount?: number | null;
     reversalConfirmed?: boolean | null;
+    structuralEvent?: string | null;
 }
 
 export interface SameSideLossReentryGateResult {
@@ -59,6 +60,20 @@ export interface DeriveLastLossReentryStateOptions {
     now?: number;
 }
 
+export function inferStructuralSetupEvent(input: Readonly<{
+    subtype?: string | null;
+    reversalConfirmed?: boolean | null;
+}>): string {
+    if (input.reversalConfirmed === true) return "confirmed_reversal";
+    const s = String(input.subtype ?? "").toUpperCase();
+    if (s.includes("BREAKOUT")) return "confirmed_breakout";
+    if (s.includes("BREAKDOWN")) return "confirmed_breakdown";
+    if (s.includes("RETEST")) return "confirmed_retest";
+    if (s.includes("REVERSAL")) return "confirmed_reversal";
+    if (s.includes("CONTINUATION")) return "confirmed_continuation";
+    return "none";
+}
+
 export function computeSetupIdentity(input: {
     symbol: string;
     side?: string | null;
@@ -71,9 +86,83 @@ export function computeSetupIdentity(input: {
     const side = String(input.side ?? "none").toLowerCase();
     const regime = String(input.regime ?? "UNKNOWN").toUpperCase();
     const zone = String(input.zone ?? "none").toLowerCase();
-    const bHigh = typeof input.boxHigh === "number" && input.boxHigh > 0 ? (Math.round(input.boxHigh * 10) / 10).toFixed(1) : "0";
-    const bLow = typeof input.boxLow === "number" && input.boxLow > 0 ? (Math.round(input.boxLow * 10) / 10).toFixed(1) : "0";
-    return `${sym}:${side}:${regime}:${zone}:H${bHigh}:L${bLow}`;
+    return `${sym}:${side}:${regime}:${zone}`;
+}
+
+export function computeStructuralSetupIdentity(input: {
+    symbol: string;
+    side?: string | null;
+    regime?: string | null;
+    zone?: string | null;
+    subtype?: string | null;
+    structuralEvent?: string | null;
+}): string {
+    const base = computeSetupIdentity(input);
+    const subtype = String(input.subtype ?? "none").toLowerCase();
+    const event = String(input.structuralEvent ?? "none").toLowerCase();
+    return `${base}:${subtype}:${event}`;
+}
+
+export function countCompletedCandlesSince(
+    candles: ReadonlyArray<{ ts?: number }> | null | undefined,
+    sinceTs: number,
+    nowMs: number,
+    intervalMs = 60_000
+): number {
+    if (!candles || candles.length === 0) return 0;
+    let count = 0;
+    for (const c of candles) {
+        const cTs = Number(c?.ts ?? 0);
+        if (!Number.isFinite(cTs) || cTs <= sinceTs) continue;
+        if (cTs + intervalMs > nowMs) continue;
+        count += 1;
+    }
+    return count;
+}
+
+function emitSameSideLossReentryProof(
+    input: SameSideLossReentryGateInput,
+    result: SameSideLossReentryGateResult,
+    extra: Record<string, unknown> = {}
+): void {
+    console.info(JSON.stringify({
+        event: "V2_SAME_SIDE_LOSS_REENTRY_PROOF",
+        symbol: input.symbol,
+        requestedSide: input.requestedSide,
+        action: result.allowed ? "ALLOW" : "BLOCK",
+        reason: result.reason,
+        evidence: result.evidence,
+        lastLossExitAt: input.lastLossState?.lastLossExitAt ?? null,
+        lastLossExitSide: input.lastLossState?.lastLossExitSide ?? null,
+        lastLossEntryPrice: input.lastLossState?.lastLossEntryPrice ?? null,
+        lastLossExitPrice: input.lastLossState?.lastLossExitPrice ?? null,
+        currentPrice: input.currentPrice,
+        directionalDisplacementPct: result.displacementPct ?? null,
+        requiredDisplacementPct: result.requiredDisplacementPct ?? null,
+        completedCandlesSinceLoss: result.completedCandlesSinceLoss ?? null,
+        lastLossSetupIdentity: input.lastLossState?.lastLossSetupIdentity ?? null,
+        currentSetupIdentity: extra.currentSetupIdentity ?? null,
+        lossSource: input.lastLossState?.source ?? null,
+        ...extra
+    }));
+}
+
+function computeDirectionalDisplacementPct(
+    requestedSide: "long" | "short",
+    currentPrice: number,
+    entryLossPrice: number,
+    exitLossPrice: number
+): Readonly<{ pct: number; favorable: boolean }> {
+    if (requestedSide === "short") {
+        const zoneTop = Math.max(entryLossPrice, exitLossPrice);
+        const favorable = currentPrice < zoneTop;
+        const pct = favorable ? (zoneTop - currentPrice) / zoneTop : 0;
+        return { pct, favorable };
+    }
+    const zoneBottom = Math.min(entryLossPrice, exitLossPrice);
+    const favorable = currentPrice > zoneBottom;
+    const pct = favorable ? (currentPrice - zoneBottom) / zoneBottom : 0;
+    return { pct, favorable };
 }
 
 /**
@@ -148,13 +237,13 @@ export function deriveLastLossReentryState(
         const entryPrice = Number(r.entryAvgPx ?? r.entryPrice ?? 0);
         const exitPrice = Number(r.exitAvgPx ?? r.closePrice ?? 0);
         const closeReason = String(r.exitPolicyReason ?? r.finalCloseReason ?? r.closeReason ?? "unknown");
-        const setupId = r.setupIdentity ?? computeSetupIdentity({
+        const setupId = computeStructuralSetupIdentity({
             symbol: symUpper,
             side,
             regime: r.regimeAtEntry ?? r.entryRegime,
             zone: r.entryZone ?? r.rangeEntryZone,
-            boxHigh: r.boxHighAtEntry,
-            boxLow: r.boxLowAtEntry
+            subtype: r.marketSubtype ?? r.subtype,
+            structuralEvent: inferStructuralSetupEvent({ subtype: r.marketSubtype ?? r.subtype })
         });
 
         const dedupeKey = r.flowId ? String(r.flowId) : `${symUpper}:${side}:${openedAt}:${closedAt}`;
@@ -195,13 +284,13 @@ export function deriveLastLossReentryState(
         const entryPrice = Number(closedRow.entryPrice ?? 0);
         const exitPrice = Number(closedRow.closePrice ?? 0);
         const closeReason = String(closedRow.closeReason ?? closedRow.exitReason ?? "pending_finalize");
-        const setupId = computeSetupIdentity({
+        const setupId = computeStructuralSetupIdentity({
             symbol: symUpper,
             side,
             regime: (o as any).regimeAtEntry ?? (o as any).entryRegime,
             zone: (o as any).entryZone ?? (o as any).rangeEntryZone,
-            boxHigh: (o as any).boxHighAtEntry,
-            boxLow: (o as any).boxLowAtEntry
+            subtype: (o as any).marketSubtype ?? (o as any).subtype,
+            structuralEvent: inferStructuralSetupEvent({ subtype: (o as any).marketSubtype ?? (o as any).subtype })
         });
 
         const dedupeKey = o.pendingFinalizeFlowId ? String(o.pendingFinalizeFlowId) : `${symUpper}:${side}:${openedAt}:${closedAt}`;
@@ -244,7 +333,7 @@ export function deriveLastLossReentryState(
                     pnlNet,
                     pnlGross: pnlNet,
                     closeReason: meta.closeReason ?? "runtime_close",
-                    setupId: computeSetupIdentity({ symbol: symUpper, side, regime: meta.regime, zone: meta.zone }),
+                    setupId: computeStructuralSetupIdentity({ symbol: symUpper, side, regime: meta.regime, zone: meta.zone }),
                     exitCandleTs: Math.floor(closedAt / 60000) * 60000,
                     source: "runtime_close_meta",
                     dedupeKey
@@ -297,183 +386,108 @@ export function evaluateSameSideLossReentryGate(
 
     // 1. If no previous loss state exists for symbol -> ALLOW
     if (!lastLossState) {
-        return {
+        const result: SameSideLossReentryGateResult = {
             allowed: true,
             reason: "NO_PRIOR_LOSS_ACTIVE",
             evidence: "no_prior_loss_for_symbol"
         };
+        emitSameSideLossReentryProof(input, result);
+        return result;
     }
 
     // 2. If requested side is OPPOSITE to the last loss side -> ALLOW
-    // (e.g. SHORT loss -> valid LONG reversal setup)
     if (requestedSide !== lastLossState.lastLossExitSide) {
         const result: SameSideLossReentryGateResult = {
             allowed: true,
             reason: "OPPOSITE_SIDE_REVERSAL_ALLOWED",
             evidence: `opposite_side_reversal|lossSide=${lastLossState.lastLossExitSide}|reqSide=${requestedSide}`
         };
-        console.info(JSON.stringify({
-            event: "V2_SAME_SIDE_LOSS_REENTRY_PROOF",
-            symbol,
-            requestedSide,
-            action: "ALLOW",
-            reason: result.reason,
-            evidence: result.evidence,
-            lastLossExitSide: lastLossState.lastLossExitSide,
-            lastLossExitPrice: lastLossState.lastLossExitPrice,
-            lastLossEntryPrice: lastLossState.lastLossEntryPrice,
-            currentPrice
-        }));
+        emitSameSideLossReentryProof(input, result);
         return result;
     }
 
-    // --- SAME SIDE EVALUATION ---
     const entryLossPrice = lastLossState.lastLossEntryPrice;
     const exitLossPrice = lastLossState.lastLossExitPrice;
     if (entryLossPrice <= 0 || currentPrice <= 0) {
-        return {
+        const result: SameSideLossReentryGateResult = {
             allowed: true,
             reason: "INVALID_PRICE_DATA_PASSTHROUGH",
             evidence: "invalid_price_data"
         };
+        emitSameSideLossReentryProof(input, result);
+        return result;
     }
 
-    // 3. Measure price displacement relative to the loss zone
-    // Distance from both the prior entry and prior exit
-    const distFromEntryPct = Math.abs(currentPrice - entryLossPrice) / entryLossPrice;
-    const distFromExitPct = exitLossPrice > 0 ? Math.abs(currentPrice - exitLossPrice) / exitLossPrice : distFromEntryPct;
-    const zoneDistPct = Math.min(distFromEntryPct, distFromExitPct);
-
-    // Baseline required displacement threshold:
-    // Uses ATR, fee break-even, and box width if available, minimum 0.35% (35 bps)
     const atrPct = typeof atr === "number" && atr > 0 ? (atr / currentPrice) : 0.003;
     const feeBufferPct = typeof feeBreakEvenPct === "number" && feeBreakEvenPct > 0 ? feeBreakEvenPct * 1.5 : 0.0035;
     const boxWidthPct = typeof input.rangeBoxHigh === "number" && typeof input.rangeBoxLow === "number" && input.rangeBoxHigh > input.rangeBoxLow
         ? (input.rangeBoxHigh - input.rangeBoxLow) / currentPrice
         : 0;
     const boxRelativePct = boxWidthPct > 0 ? boxWidthPct * 0.35 : 0.0035;
-
     const requiredDisplacementPct = Math.max(0.0035, Math.min(0.015, Math.max(atrPct * 0.75, feeBufferPct, boxRelativePct)));
 
-    const hasMeaningfulDisplacement = zoneDistPct >= requiredDisplacementPct;
+    const directional = computeDirectionalDisplacementPct(requestedSide, currentPrice, entryLossPrice, exitLossPrice);
+    const hasMeaningfulDisplacement = directional.favorable && directional.pct >= requiredDisplacementPct;
 
-    // 4. Measure completed candle count since loss exit
-    let completedCandlesSinceLoss = 0;
-    if (candles && Array.isArray(candles) && candles.length > 0) {
-        const lossTs = lastLossState.lastLossExitCandleTs ?? lastLossState.lastLossExitAt;
-        for (let i = candles.length - 1; i >= 0; i--) {
-            const c = candles[i];
-            const cTs = Number(c?.ts ?? 0);
-            if (cTs > lossTs) {
-                completedCandlesSinceLoss++;
-            } else {
-                break;
-            }
-        }
-    } else if (lastLossState.lastLossExitAt > 0 && now > lastLossState.lastLossExitAt) {
-        // Fallback approximation from elapsed time (1m bars)
-        completedCandlesSinceLoss = Math.floor((now - lastLossState.lastLossExitAt) / 60000);
-    }
+    const lossTs = lastLossState.lastLossExitCandleTs ?? lastLossState.lastLossExitAt;
+    const completedCandlesSinceLoss = countCompletedCandlesSince(candles ?? null, lossTs, now);
 
-    // Fresh setup criteria (STRICT):
-    // A. At least 5 completed 1m candles since the loss exit AND
-    // B. Setup identity MUST have genuinely changed OR reversalConfirmed
-    // NOTE: rangeCycleCount increment alone is explicitly INSUFFICIENT.
-    const hasEnoughCandles = completedCandlesSinceLoss >= 5;
-    const currentSetupIdentity = computeSetupIdentity({
+    const structuralEvent =
+        input.structuralEvent ??
+        inferStructuralSetupEvent({ subtype: input.subtype, reversalConfirmed: input.reversalConfirmed });
+    const currentSetupIdentity = computeStructuralSetupIdentity({
         symbol,
         side: requestedSide,
         regime: input.regime,
         zone: input.zone,
-        boxHigh: input.rangeBoxHigh,
-        boxLow: input.rangeBoxLow
+        subtype: input.subtype,
+        structuralEvent
     });
 
-    const setupIdentityChanged = lastLossState.lastLossSetupIdentity != null &&
+    const hasEnoughCandles = completedCandlesSinceLoss >= 5;
+    const setupIdentityChanged =
+        lastLossState.lastLossSetupIdentity != null &&
         currentSetupIdentity !== lastLossState.lastLossSetupIdentity;
+    const hasStructuralEvent = structuralEvent !== "none";
+    const isFreshSetupRegenerated =
+        hasEnoughCandles &&
+        hasStructuralEvent &&
+        (setupIdentityChanged || input.reversalConfirmed === true);
 
-    const isFreshSetupRegenerated = hasEnoughCandles && (setupIdentityChanged || input.reversalConfirmed === true);
-
-    // 5. Decision:
     if (hasMeaningfulDisplacement) {
         const result: SameSideLossReentryGateResult = {
             allowed: true,
-            reason: "MEANINGFUL_PRICE_DISPLACEMENT_ALLOWED",
-            evidence: `zoneDistPct=${(zoneDistPct * 100).toFixed(3)}%|req=${(requiredDisplacementPct * 100).toFixed(3)}%|candles=${completedCandlesSinceLoss}`,
-            displacementPct: zoneDistPct,
+            reason: "MEANINGFUL_DIRECTIONAL_DISPLACEMENT_ALLOWED",
+            evidence: `dirDispPct=${(directional.pct * 100).toFixed(3)}%|req=${(requiredDisplacementPct * 100).toFixed(3)}%|candles=${completedCandlesSinceLoss}`,
+            displacementPct: directional.pct,
             requiredDisplacementPct,
             completedCandlesSinceLoss
         };
-        console.info(JSON.stringify({
-            event: "V2_SAME_SIDE_LOSS_REENTRY_PROOF",
-            symbol,
-            requestedSide,
-            action: "ALLOW",
-            reason: result.reason,
-            evidence: result.evidence,
-            zoneDistPct,
-            requiredDisplacementPct,
-            completedCandlesSinceLoss,
-            currentPrice,
-            lastLossEntryPrice: entryLossPrice,
-            lastLossExitPrice: exitLossPrice
-        }));
+        emitSameSideLossReentryProof(input, result, { currentSetupIdentity, structuralEvent });
         return result;
     }
 
     if (isFreshSetupRegenerated) {
         const result: SameSideLossReentryGateResult = {
             allowed: true,
-            reason: "FRESH_CANDLE_SETUP_CONFIRMED",
-            evidence: `candlesSinceLoss=${completedCandlesSinceLoss}|setupChanged=${setupIdentityChanged}|reversalConfirmed=${input.reversalConfirmed === true}`,
-            displacementPct: zoneDistPct,
+            reason: "FRESH_STRUCTURAL_SETUP_CONFIRMED",
+            evidence: `candlesSinceLoss=${completedCandlesSinceLoss}|setupChanged=${setupIdentityChanged}|structuralEvent=${structuralEvent}`,
+            displacementPct: directional.pct,
             requiredDisplacementPct,
             completedCandlesSinceLoss
         };
-        console.info(JSON.stringify({
-            event: "V2_SAME_SIDE_LOSS_REENTRY_PROOF",
-            symbol,
-            requestedSide,
-            action: "ALLOW",
-            reason: result.reason,
-            evidence: result.evidence,
-            zoneDistPct,
-            requiredDisplacementPct,
-            completedCandlesSinceLoss,
-            currentPrice,
-            lastLossEntryPrice: entryLossPrice,
-            lastLossExitPrice: exitLossPrice
-        }));
+        emitSameSideLossReentryProof(input, result, { currentSetupIdentity, structuralEvent });
         return result;
     }
 
-    // Block same-side re-entry in same price zone without fresh setup
     const blockResult: SameSideLossReentryGateResult = {
         allowed: false,
         reason: "SAME_SIDE_LOSS_REENTRY_HYSTERESIS_BLOCKED",
-        evidence: `same_zone_loss_churn_blocked|zoneDistPct=${(zoneDistPct * 100).toFixed(3)}%<${(requiredDisplacementPct * 100).toFixed(3)}%|candlesSinceLoss=${completedCandlesSinceLoss}|setupChanged=${setupIdentityChanged}|lossReason=${lastLossState.lastLossExitReason}`,
-        displacementPct: zoneDistPct,
+        evidence: `same_zone_loss_churn_blocked|dirDispPct=${(directional.pct * 100).toFixed(3)}%<${(requiredDisplacementPct * 100).toFixed(3)}%|favorable=${directional.favorable}|candlesSinceLoss=${completedCandlesSinceLoss}|structuralEvent=${structuralEvent}|lossReason=${lastLossState.lastLossExitReason}`,
+        displacementPct: directional.pct,
         requiredDisplacementPct,
         completedCandlesSinceLoss
     };
-
-    console.info(JSON.stringify({
-        event: "V2_SAME_SIDE_LOSS_REENTRY_PROOF",
-        symbol,
-        requestedSide,
-        action: "BLOCK",
-        reason: blockResult.reason,
-        evidence: blockResult.evidence,
-        zoneDistPct,
-        requiredDisplacementPct,
-        completedCandlesSinceLoss,
-        currentPrice,
-        lastLossEntryPrice: entryLossPrice,
-        lastLossExitPrice: exitLossPrice,
-        lastLossExitReason: lastLossState.lastLossExitReason,
-        lastLossExitAt: lastLossState.lastLossExitAt,
-        lossSource: lastLossState.source
-    }));
-
+    emitSameSideLossReentryProof(input, blockResult, { currentSetupIdentity, structuralEvent });
     return blockResult;
 }

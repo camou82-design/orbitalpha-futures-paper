@@ -11,7 +11,7 @@
  * CASE G: manual TP-like order ignored => tpRegistered=false
  * CASE H: partial close changes size and SL disappears => SL repair continues to PASS
  * CASE I: final proof must never print tpRegistered=true with tpAlgoId=null when tpRequired=true
- * CASE J: TREND no-fixed-TP mode: tpRequired=false, tpAlgoId=null, protectionSuccess=true, tpRegistered=false
+ * CASE J: TREND V2 mandatory TP — tpRequired=true when TP price available; protection incomplete without exchange TP
  */
 
 import {
@@ -19,6 +19,7 @@ import {
   type ProtectiveAlgoRow,
   type ProtectiveReconcileContext
 } from "../engine-v2/execution/protective-reconcile-plan";
+import { shouldAttachFullPositionProtectiveTp } from "../engine-v2/execution/protective-tp-authority";
 import { resolveProtectiveExistingAlgoLedgerAdoption } from "./paper-engine";
 
 function assertEq<T>(actual: T, expected: T, label: string): void {
@@ -352,41 +353,40 @@ function runBlocker413Cases(): void {
   }
 
   // -------------------------------------------------------------------------
-  // CASE J: TREND no-fixed-TP mode: tpRequired=false, tpAlgoId=null, protectionSuccess=true, tpRegistered=false
+  // CASE J: TREND V2 mandatory server-side TP when TP price available
   // -------------------------------------------------------------------------
   {
-    const engineOwnedTp = null;
-    const tpRequired = false; // TREND mode does not use fixed TP
-    const slRequired = true;
-    const engineOwnedSl: any = { algoId: "algo_trend_sl" };
+    const tpEval = shouldAttachFullPositionProtectiveTp({
+      isV2Authority: true,
+      regime: "TREND",
+      isV2RangePartialPlan: false,
+      rawWantsTp: true
+    });
+    assertEq(tpEval.fullPositionTpRequired, true, "CASE J TREND V2 tpRequired true when TP available");
+    assertEq(tpEval.reason, "V2_TREND_MANDATORY_SERVER_TP", "CASE J reason");
 
-    const slRegistered = engineOwnedSl?.algoId != null && String(engineOwnedSl.algoId).trim().length > 0;
-    const tpRegistered = (engineOwnedTp as any)?.algoId != null && String((engineOwnedTp as any).algoId).trim().length > 0;
-    const slAlgoId = slRegistered ? String(engineOwnedSl.algoId).trim() : undefined;
-    const tpAlgoId = tpRegistered ? String((engineOwnedTp as any).algoId).trim() : undefined;
+    const slAlgoId = "algo_trend_sl";
+    const res = resolveProtectiveExistingAlgoLedgerAdoption({
+      previousIsProtectiveStopRegistered: true,
+      previousIsProtectionFailed: false,
+      previousIsTakeProfitRegistered: false,
+      previousProtectiveStopAlgoId: slAlgoId,
+      previousProtectiveSlAlgoId: slAlgoId,
+      previousProtectiveTpAlgoId: undefined,
+      slAlgoId,
+      tpAlgoId: null,
+      wantsTp: true,
+      tpRequired: true,
+      slRequired: true,
+      slCanonicalMatch: true,
+      tpCanonicalMatch: false
+    });
 
-    const slProtectionSatisfied = !slRequired || slRegistered;
-    const tpProtectionSatisfied = !tpRequired || tpRegistered;
-    const protectionSuccess = slProtectionSatisfied && tpProtectionSatisfied;
-
-    const proof = {
-      slRequired,
-      tpRequired,
-      slRegistered,
-      tpRegistered,
-      slAlgoId: slAlgoId ?? null,
-      tpAlgoId: tpAlgoId ?? null,
-      slProtectionSatisfied,
-      tpProtectionSatisfied,
-      protectionSuccess
-    };
-
-    assertEq(proof.tpRequired, false, "CASE J tpRequired is false");
-    assertEq(proof.tpRegistered, false, "CASE J tpRegistered is truthful false");
-    assertEq(proof.tpAlgoId, null, "CASE J tpAlgoId is null");
-    assertEq(proof.tpProtectionSatisfied, true, "CASE J tpProtectionSatisfied is true");
-    assertEq(proof.protectionSuccess, true, "CASE J protectionSuccess is true");
-    pass("CASE J - TREND mode truthful non-registration", "tpRequired=false, tpRegistered=false, tpAlgoId=null, protectionSuccess=true");
+    assertEq(res.tpRequired, true, "CASE J tpRequired is true for TREND V2");
+    assertEq(res.isTakeProfitRegistered, false, "CASE J tpRegistered false without algo");
+    assertEq(res.tpProtectionSatisfied, false, "CASE J tpProtectionSatisfied false");
+    assertEq(res.protectionComplete, false, "CASE J protectionComplete false without exchange TP");
+    pass("CASE J - TREND V2 mandatory TP", "tpRequired=true, tpRegistered=false until exchange TP exists");
   }
 
   console.info("\n=== BLOCKER 4-13 SUMMARY ===");

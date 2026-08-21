@@ -3,6 +3,7 @@ import {
     deriveLastLossReentryState,
     evaluateSameSideLossReentryGate,
     computeSetupIdentity,
+    computeStructuralSetupIdentity,
     type LastLossReentryState
 } from "../engine-v2/state/loss-reentry-gate";
 import { evaluateV2ExitPolicy } from "../engine-v2/exit/policy";
@@ -182,17 +183,17 @@ console.log("Running TEST C: 5 bars elapsed + rangeCycleCount >= 2 + same setup 
 }
 
 // =========================================================================
-// TEST D: 8 bars elapsed + genuinely new setup identity => ALLOW
+// TEST D: 8 bars elapsed + confirmed structural event => ALLOW
 // =========================================================================
-console.log("Running TEST D: 8 bars elapsed + genuinely new setup identity => ALLOW...");
+console.log("Running TEST D: 8 bars elapsed + confirmed structural event => ALLOW...");
 {
-    const oldSetupIdentity = computeSetupIdentity({
+    const oldSetupIdentity = computeStructuralSetupIdentity({
         symbol: "ETHUSDT",
         side: "short",
         regime: "RANGE",
         zone: "upper",
-        boxHigh: 2255,
-        boxLow: 2235
+        subtype: "RANGE_FLAT",
+        structuralEvent: "none"
     });
 
     const lossState: LastLossReentryState = {
@@ -203,6 +204,7 @@ console.log("Running TEST D: 8 bars elapsed + genuinely new setup identity => AL
         lastLossEntryPrice: 2248.62,
         lastLossExitReason: "range_box_break",
         lastLossSetupIdentity: oldSetupIdentity,
+        lastLossExitCandleTs: 1000000,
         realizedLossNetUsd: -1.1761
     };
 
@@ -211,24 +213,25 @@ console.log("Running TEST D: 8 bars elapsed + genuinely new setup identity => AL
         candles.push({ ts: 1000000 + i * 60000, open: 2270, high: 2280, low: 2265, close: 2275 });
     }
 
-    // New reformed range box (e.g. boxHigh shifted to 2260), while price is at 2250 (0.06% diff)
     const gateRes = evaluateSameSideLossReentryGate({
         symbol: "ETHUSDT",
         requestedSide: "short",
         currentPrice: 2250.0,
-        now: 1000000 + 9 * 60000,
+        now: 1000000 + 10 * 60000,
         lastLossState: lossState,
         candles,
         atr: 6.0,
-        rangeBoxHigh: 2260, // box reformed from 2255 -> 2260
+        rangeBoxHigh: 2260,
         rangeBoxLow: 2240,
         regime: "RANGE",
-        zone: "upper"
+        zone: "upper",
+        subtype: "RANGE_BREAKDOWN",
+        structuralEvent: "confirmed_breakdown"
     });
 
-    assert.equal(gateRes.allowed, true, "TEST D failed: Genuine fresh setup change must be ALLOWED");
-    assert.equal(gateRes.reason, "FRESH_CANDLE_SETUP_CONFIRMED");
-    console.log("✓ TEST D passed: Genuinely new setup identity successfully ALLOWED");
+    assert.equal(gateRes.allowed, true, "TEST D failed: Confirmed structural fresh setup must be ALLOWED");
+    assert.equal(gateRes.reason, "FRESH_STRUCTURAL_SETUP_CONFIRMED");
+    console.log("✓ TEST D passed: Confirmed structural setup successfully ALLOWED");
 }
 
 // =========================================================================
@@ -247,11 +250,11 @@ console.log("Running TEST E: Meaningful displacement but entry policy invalid =>
         realizedLossNetUsd: -1.1761
     };
 
-    // Price displaced significantly (2289.0)
+    // Favorable downward displacement for same-side SHORT re-entry
     const gateRes = evaluateSameSideLossReentryGate({
         symbol: "ETHUSDT",
         requestedSide: "short",
-        currentPrice: 2289.0,
+        currentPrice: 2220.0,
         now: 1000000 + 300000,
         lastLossState: lossState,
         atr: 6.0,
@@ -259,8 +262,8 @@ console.log("Running TEST E: Meaningful displacement but entry policy invalid =>
         zone: "upper"
     });
 
-    // Gate allows because displacement is met
-    assert.equal(gateRes.allowed, true, "Gate allows meaningful displacement");
+    // Gate allows because directional displacement is met
+    assert.equal(gateRes.allowed, true, "Gate allows meaningful directional displacement");
 
     // But if downstream quality score or policy fails, final entry remains blocked
     const downstreamQualityScore = 20; // Bad quality
@@ -284,7 +287,7 @@ console.log("Running TEST F: Meaningful displacement + valid setup => ALLOW...")
         realizedLossNetUsd: -1.1761
     };
 
-    const displacedPrice = 2248.62 * 1.015; // 2282.35 (+1.5%)
+    const displacedPrice = 2248.62 * 0.985; // favorable downward move for SHORT re-entry
     const gateRes = evaluateSameSideLossReentryGate({
         symbol: "ETHUSDT",
         requestedSide: "short",
@@ -296,8 +299,8 @@ console.log("Running TEST F: Meaningful displacement + valid setup => ALLOW...")
         zone: "upper"
     });
 
-    assert.equal(gateRes.allowed, true, "TEST F failed: Meaningful displacement must be ALLOWED");
-    assert.equal(gateRes.reason, "MEANINGFUL_PRICE_DISPLACEMENT_ALLOWED");
+    assert.equal(gateRes.allowed, true, "TEST F failed: Meaningful directional displacement must be ALLOWED");
+    assert.equal(gateRes.reason, "MEANINGFUL_DIRECTIONAL_DISPLACEMENT_ALLOWED");
     console.log("✓ TEST F passed: Meaningful price displacement successfully ALLOWED");
 }
 

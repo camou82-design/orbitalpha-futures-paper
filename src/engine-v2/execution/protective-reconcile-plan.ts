@@ -295,7 +295,8 @@ export function planProtectiveOrderReconcile(
 
     const needSubmitSl = !canonicalSl || legacyOcoMigrationNeeded;
     const needSubmitTp = ctx.wantsTp && !canonicalTp;
-    const submitOco = needSubmitSl && needSubmitTp && ctx.wantsTp;
+    const slOnlyTpMissing = canonicalSl != null && ctx.wantsTp && !canonicalTp;
+    const submitOco = (needSubmitSl && needSubmitTp && ctx.wantsTp) || slOnlyTpMissing;
 
     const uniqueProtectiveAlgoCount = uniqueAlgos.length;
     const matchingProtectivePendingCount = adoptableRanked.length;

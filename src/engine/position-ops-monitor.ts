@@ -14,6 +14,7 @@ import {
 } from "../lib/position-reconcile-classification";
 import { protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
 import { resolveLedgerCanonicalProtectiveTruth } from "../engine-v2/execution/protective-order-state";
+import { resolveOpsWatchTpRequired } from "../engine-v2/execution/protective-tp-authority";
 
 export type PositionOpsBanner =
   | "NO_POSITION"
@@ -846,7 +847,15 @@ export function buildPositionOpsSurface(input: Readonly<{
 
       const rawTpRequired =
         (ledgerTp != null && ledgerTp > 0) || (tpPx != null && tpPx > 0 && Number.isFinite(tpPx));
-      const tpRequired = !isV2RangePartialPlan && rawTpRequired;
+      const isV2ManagedTrend =
+        ledger?.isV2Authority === true &&
+        ledger?.lifecycleState === "BOT_V2_MANAGED" &&
+        ledger?.regimeAtEntry === "TREND";
+      const tpRequired = resolveOpsWatchTpRequired({
+        isV2RangePartialPlan,
+        isV2ManagedTrend,
+        rawTpRequired
+      });
 
       const instSizing = instMap?.get(hit.instId) as { tickSz?: number } | undefined;
       const tickSz = instSizing?.tickSz != null ? Number(instSizing.tickSz) : 0;

@@ -1,5 +1,6 @@
 import type { V2TradeLifecycleAuthorityInput, V2TradeLifecycleAuthorityResult, V2CooldownType, V2LifecycleStage } from "../types";
 import { classifyRangeZone } from "../../models/types";
+import { isExplicitTerminalExitReason } from "../exit/exit-authority-invariant";
 import {
     isProbeEntryReason,
     calculateProbeTpPlan,
@@ -608,8 +609,13 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
     }
 
     if (input.v2Decision === "EXIT") {
-        exitAction = "exit";
-        proofReasons.push("V2_DECISION_EXIT_CONFIRMED");
+        if (exitReason != null && isExplicitTerminalExitReason(exitReason)) {
+            exitAction = "exit";
+            proofReasons.push("V2_DECISION_EXIT_CONFIRMED");
+        } else {
+            exitAction = exitAction === "exit" && exitReason != null ? exitAction : "watch";
+            proofReasons.push("V2_DECISION_EXIT_WITHOUT_EXPLICIT_TERMINAL_REASON_HELD");
+        }
     }
 
     if (cooldownType !== "none" && input.v2Decision === "ENTER") {
