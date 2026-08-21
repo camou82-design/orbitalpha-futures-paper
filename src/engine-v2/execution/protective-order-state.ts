@@ -195,6 +195,161 @@ function instIdMatchesRow(expectedInstId: string, rowInstId: string): boolean {
     return String(rowInstId ?? "").trim() === String(expectedInstId ?? "").trim();
 }
 
+function extractSlPxFromOrder(o: Record<string, unknown>): number | null {
+    const val = o.slTriggerPx ?? o.triggerPx ?? o.stopPx ?? o.trigPx;
+    const n = typeof val === "number" ? val : typeof val === "string" ? Number(val) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function extractTpPxFromOrder(o: Record<string, unknown>): number | null {
+    const val = o.tpTriggerPx;
+    const n = typeof val === "number" ? val : typeof val === "string" ? Number(val) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function findOrderByAlgoId(
+    algoId: string,
+    pending: readonly Record<string, unknown>[],
+    algos: readonly Record<string, unknown>[]
+): Record<string, unknown> | null {
+    const target = String(algoId).trim();
+    if (!target) return null;
+    for (const o of algos) {
+        if (String(o.algoId ?? "").trim() === target) return o;
+    }
+    for (const o of pending) {
+        if (String(o.algoId ?? "").trim() === target) return o;
+    }
+    return null;
+}
+
+export type LedgerCanonicalProtectiveSource =
+    | "exchange_confirmed"
+    | "visibility_grace_pending"
+    | "not_confirmed";
+
+function validateCurrentExchangeSlRow(input: Readonly<{
+    row: Record<string, unknown>;
+    instId?: string;
+    positionSide?: "long" | "short";
+    requiredStopPx?: number | null;
+    tickSz?: number;
+}>): boolean {
+    const { row, instId, positionSide, requiredStopPx, tickSz } = input;
+    if (instId && !instIdMatchesRow(instId, String(row.instId ?? ""))) return false;
+    if (positionSide && !orderMatchesPositionSide(row, positionSide)) return false;
+    const reduceOnly = row.reduceOnly === "true" || row.reduceOnly === true;
+    if (!reduceOnly) return false;
+    const closeSideOk =
+        positionSide === "long"
+            ? String(row.side ?? "").toLowerCase() === "sell"
+            : positionSide === "short"
+              ? String(row.side ?? "").toLowerCase() === "buy"
+              : true;
+    if (!closeSideOk) return false;
+    const slPx = extractSlPxFromOrder(row);
+    if (slPx == null) return false;
+    const reqStop = requiredStopPx ?? null;
+    const tick = tickSz ?? 0;
+    if (reqStop != null && tick > 0) {
+        return protectiveStopPricesMatch(reqStop, slPx, tick);
+    }
+    return true;
+}
+
+/**
+ * Resolves protective truth from CURRENT exchange inventory vs bounded ledger grace.
+ * Ledger memory alone never proves live protection after grace expiry.
+ */
+export function resolveLedgerCanonicalProtectiveTruth(input: Readonly<{
+    ledger: PaperOpenPositionRecord | null | undefined;
+    pending: readonly Record<string, unknown>[];
+    algos: readonly Record<string, unknown>[];
+    tpRequired: boolean;
+    requiredStopPx?: number | null;
+    tickSz?: number;
+    instId?: string;
+    positionSide?: "long" | "short";
+    nowMs?: number;
+    /** Explicit authoritative lookup confirmed the registered algo is ABSENT. */
+    exchangeAbsentConfirmed?: boolean;
+}>): Readonly<{
+    authoritative: boolean;
+    reduceOnlyProtectiveFound: boolean;
+    canonicalProtectiveSlFound: boolean;
+    visibilityGracePending: boolean;
+    exchangeStopPx: number | null;
+    exchangeTpPx: number | null;
+    source: LedgerCanonicalProtectiveSource;
+}> {
+    const none = {
+        authoritative: false,
+        reduceOnlyProtectiveFound: false,
+        canonicalProtectiveSlFound: false,
+        visibilityGracePending: false,
+        exchangeStopPx: null as number | null,
+        exchangeTpPx: null as number | null,
+        source: "not_confirmed" as const
+    };
+    const ledger = input.ledger;
+    if (!ledger) return none;
+    if (ledger.isProtectionFailed === true) return none;
+    if (!hasAcceptedProtectiveSubmitEvidence(ledger, input.tpRequired)) return none;
+    if (ledger.isProtectiveStopRegistered !== true) return none;
+
+    const slAlgoId = String(ledger.protectiveSlAlgoId ?? ledger.protectiveStopAlgoId ?? "").trim();
+    if (!slAlgoId) return none;
+
+    if (input.exchangeAbsentConfirmed === true) return none;
+
+    const slRow = findOrderByAlgoId(slAlgoId, input.pending, input.algos);
+    if (slRow && validateCurrentExchangeSlRow({
+        row: slRow,
+        instId: input.instId,
+        positionSide: input.positionSide,
+        requiredStopPx: input.requiredStopPx ?? null,
+        tickSz: input.tickSz
+    })) {
+        const exchangeStopPx = extractSlPxFromOrder(slRow);
+        const tpAlgoId = String(ledger.protectiveTpAlgoId ?? "").trim();
+        const tpRow =
+            tpAlgoId && tpAlgoId !== slAlgoId
+                ? findOrderByAlgoId(tpAlgoId, input.pending, input.algos)
+                : slRow;
+        let exchangeTpPx: number | null = null;
+        if (tpRow) {
+            exchangeTpPx = extractTpPxFromOrder(tpRow);
+        }
+        const tpOk = !input.tpRequired || exchangeTpPx != null || ledger.isTakeProfitRegistered === true;
+        return {
+            authoritative: true,
+            reduceOnlyProtectiveFound: tpOk,
+            canonicalProtectiveSlFound: true,
+            visibilityGracePending: false,
+            exchangeStopPx,
+            exchangeTpPx,
+            source: "exchange_confirmed"
+        };
+    }
+
+    const nowMs = input.nowMs ?? Date.now();
+    const graceDeadline = ledger.protectiveVisibilityGraceDeadlineMs ?? null;
+    const insideGrace = graceDeadline != null && nowMs < graceDeadline;
+    if (insideGrace) {
+        return {
+            authoritative: false,
+            reduceOnlyProtectiveFound: false,
+            canonicalProtectiveSlFound: false,
+            visibilityGracePending: true,
+            exchangeStopPx: null,
+            exchangeTpPx: null,
+            source: "visibility_grace_pending"
+        };
+    }
+
+    return none;
+}
+
 export function evaluatePositionProtectionState(input: Readonly<{
     instId: string;
     positionSide: "long" | "short";
@@ -280,9 +435,28 @@ export function evaluatePositionProtectionState(input: Readonly<{
     for (const o of input.algos) consider(o);
     for (const o of input.pending) consider(o);
 
-    const reduceOnlyProtectiveFound =
+    let reduceOnlyProtectiveFound =
         canonicalProtectiveSlFound ||
         (matchingProtectivePendingCount > 0 && hintsResult.protectionSatisfied);
+    let exchangeStopPx = hintsResult.slPrice;
+    let exchangeTpPx = hintsResult.tpPrice;
+
+    const ledgerCanonical = resolveLedgerCanonicalProtectiveTruth({
+        ledger: input.ledger ?? null,
+        pending: input.pending,
+        algos: input.algos,
+        tpRequired: input.tpRequired,
+        requiredStopPx: input.requiredStopPx ?? null,
+        tickSz: input.tickSz,
+        instId: input.instId,
+        positionSide: input.positionSide
+    });
+    if (ledgerCanonical.source === "exchange_confirmed" && ledgerCanonical.authoritative) {
+        reduceOnlyProtectiveFound = ledgerCanonical.reduceOnlyProtectiveFound;
+        canonicalProtectiveSlFound = ledgerCanonical.canonicalProtectiveSlFound;
+        exchangeStopPx = ledgerCanonical.exchangeStopPx ?? exchangeStopPx;
+        exchangeTpPx = ledgerCanonical.exchangeTpPx ?? exchangeTpPx;
+    }
 
     return {
         reduceOnlyProtectiveFound,
@@ -290,8 +464,8 @@ export function evaluatePositionProtectionState(input: Readonly<{
             Math.max(matchingProtectivePendingCount, hintsResult.matchingProtectiveOrderCount),
         consistencyCheck: reduceOnlyProtectiveFound ? "PASS" : "FAIL",
         preScanFault: !reduceOnlyProtectiveFound,
-        exchangeStopPx: hintsResult.slPrice,
-        exchangeTpPx: hintsResult.tpPrice,
+        exchangeStopPx,
+        exchangeTpPx,
         hints: hintsResult.hints,
         canonicalProtectiveSlFound
     };

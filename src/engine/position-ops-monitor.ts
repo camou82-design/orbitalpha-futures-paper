@@ -13,6 +13,7 @@ import {
   isOkxOnlyKey
 } from "../lib/position-reconcile-classification";
 import { protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
+import { resolveLedgerCanonicalProtectiveTruth } from "../engine-v2/execution/protective-order-state";
 
 export type PositionOpsBanner =
   | "NO_POSITION"
@@ -721,6 +722,33 @@ export function findProtectiveHintsForInst(
   protectionSatisfied =
     (canonicalProtectiveSlFound && (!tpRequired || foundTp)) ||
     (slPriceMatch && (!tpRequired || foundTp));
+
+  if (options?.ledger && !protectionSatisfied) {
+    const ledgerCanonical = resolveLedgerCanonicalProtectiveTruth({
+      ledger: options.ledger,
+      pending,
+      algos,
+      tpRequired,
+      requiredStopPx: options.requiredStopPx ?? null,
+      tickSz: options.tickSz,
+      instId,
+      positionSide
+    });
+    if (
+      ledgerCanonical.source === "exchange_confirmed" &&
+      ledgerCanonical.authoritative &&
+      ledgerCanonical.reduceOnlyProtectiveFound
+    ) {
+      protectionSatisfied = true;
+      canonicalProtectiveSlFound = true;
+      if (foundSlPrice == null && ledgerCanonical.exchangeStopPx != null) {
+        foundSlPrice = ledgerCanonical.exchangeStopPx;
+      }
+      if (foundTpPrice == null && ledgerCanonical.exchangeTpPx != null) {
+        foundTpPrice = ledgerCanonical.exchangeTpPx;
+      }
+    }
+  }
 
   return {
     protectionSatisfied,

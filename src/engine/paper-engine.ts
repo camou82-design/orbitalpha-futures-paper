@@ -2,6 +2,10 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolveOpenNotionalUsd, resolveOpenPositionSizeUnit, resolveOpenNotionalAuthority, resolveCanonicalV2SizeUsd, isV2AuthorityRow } from "../engine-v2/live-account/position-size-authority";
+import {
+  detectLegacyMarginUnitPollution as detectLegacyMarginUnitPollutionAuthority,
+  evaluateV2NotionalReconcile
+} from "../engine-v2/live-account/reconcile-margin-authority";
 
 export function resolveV2ExitAuthorityBooleans(input: Readonly<{
   reason: string;
@@ -225,6 +229,7 @@ import {
   mergeProtectiveInventoryRows,
   normalizeProtectiveOrderClOrdIds,
   resolve51068ProtectiveLookup,
+  inferProtective51068RequestedRole,
   type Protective51068Resolution
 } from "../engine-v2/execution/protective-inventory";
 import {
@@ -2965,33 +2970,7 @@ export class PaperEngine {
     open: PaperOpenPositionRecord,
     remote: OkxRemotePositionAuthority
   ): boolean {
-    const leverage = remote.leverage || open.leverage || 10;
-    const ledgerNotional = open.notionalUsd ?? open.sizeUsd;
-    const ledgerMargin = open.sizeUsd;
-    if (!(ledgerNotional > 0 && ledgerMargin > 0)) return false;
-
-    const marginNotionalConfused =
-      Math.abs(ledgerMargin - ledgerNotional) / Math.max(ledgerNotional, 1e-9) < 0.02;
-    if (!marginNotionalConfused) return false;
-
-    const priceOk =
-      Math.abs(open.entryPrice - remote.avgPx) / Math.max(open.entryPrice || 1, 1e-9) <=
-      RECONCILE_PRICE_TOLERANCE_RATIO;
-    const notionalOk = Math.abs(ledgerNotional - remote.notionalUsd) <= RECONCILE_NOTIONAL_TOLERANCE_USD;
-    if (!priceOk || !notionalOk) return false;
-
-    const expectedMargin = remote.notionalUsd / leverage;
-    const looksLikeNotionalStoredAsMargin =
-      Math.abs(ledgerMargin - remote.notionalUsd) / Math.max(remote.notionalUsd, 1e-9) < 0.02 &&
-      Math.abs(expectedMargin - remote.marginUsd) / Math.max(remote.marginUsd, 1e-9) < 0.05;
-    if (!looksLikeNotionalStoredAsMargin) return false;
-
-    if (hasLedgerContracts(open)) {
-      const contractDiff = Math.abs(open.okxContracts! - remote.contracts);
-      const contractTol = Math.max(1e-8, RECONCILE_CONTRACT_TOLERANCE_RATIO * remote.contracts);
-      if (contractDiff > contractTol) return false;
-    }
-    return true;
+    return detectLegacyMarginUnitPollutionAuthority(open, remote, RECONCILE_PRICE_TOLERANCE_RATIO);
   }
 
   private applyLegacyMarginUnitRepair(
@@ -3048,14 +3027,50 @@ export class PaperEngine {
       return { ledgerModified: true, mismatchType: "LEGACY_UNIT_REPAIR", blocked: false };
     }
 
-    if (priceDiffRatio > RECONCILE_PRICE_TOLERANCE_RATIO) {
-      mismatchType = "AVG_PRICE_MISMATCH";
-    } else if (notionalDiff > RECONCILE_NOTIONAL_TOLERANCE_USD) {
-      mismatchType = "NOTIONAL_MISMATCH";
+    const ledgerHasContractsEarly = hasLedgerContracts(open);
+    let contractMismatch = false;
+    let contractsAlignedWithRemote = false;
+    if (ledgerHasContractsEarly) {
+      const contractDiff = Math.abs(open.okxContracts! - remote.contracts);
+      const contractTol = Math.max(1e-8, RECONCILE_CONTRACT_TOLERANCE_RATIO * remote.contracts);
+      contractsAlignedWithRemote = contractDiff <= contractTol;
+      if (!contractsAlignedWithRemote && !opts.isPartialPending && !opts.isClosePending) {
+        contractMismatch = true;
+      }
     }
 
-    const ledgerHasContracts = hasLedgerContracts(open);
-    let contractMismatch = false;
+    if (isV2AuthorityRow(open) && ledgerHasContractsEarly && contractsAlignedWithRemote) {
+      const v2Units = evaluateV2NotionalReconcile({
+        open,
+        remote: {
+          contracts: remote.contracts,
+          notionalUsd: remote.notionalUsd,
+          marginUsd: remote.marginUsd,
+          leverage: remote.leverage || open.leverage || 10,
+          avgPx: remote.avgPx
+        }
+      });
+      if (v2Units.mismatchType === "MATCHED") {
+        if (v2Units.notionalDriftOnly) {
+          this.syncOpenLedgerFromRemoteAuthority(open, remote);
+          open.reconcileState = "MATCHED";
+          open.lastCheckedAt = nowTs;
+          this.logPositionUnitInvariant(open);
+          return { ledgerModified: true, mismatchType: "MATCHED", blocked: false };
+        }
+      }
+    }
+
+    if (priceDiffRatio > RECONCILE_PRICE_TOLERANCE_RATIO) {
+      mismatchType = "AVG_PRICE_MISMATCH";
+    } else if (!contractsAlignedWithRemote && notionalDiff > RECONCILE_NOTIONAL_TOLERANCE_USD) {
+      mismatchType = "NOTIONAL_MISMATCH";
+    } else if (contractsAlignedWithRemote && notionalDiff > RECONCILE_NOTIONAL_TOLERANCE_USD) {
+      // Mark-price drift with unchanged contracts must not hard-block.
+      mismatchType = "MATCHED";
+    }
+
+    const ledgerHasContracts = ledgerHasContractsEarly;
 
     if (ledgerHasContracts && !opts.isPartialPending && !opts.isClosePending) {
       const contractDiffSigned = open.okxContracts! - remote.contracts;
@@ -3254,7 +3269,9 @@ export class PaperEngine {
         actual_notional: remote.notionalUsd,
         actual_margin: remote.marginUsd,
         ledger_notional: ledgerNotional,
-        ledger_margin: open.sizeUsd,
+        ledger_margin: isV2AuthorityRow(open)
+          ? (open.notionalUsd ?? open.sizeUsd) / Math.max(1, remote.leverage || open.leverage || 10)
+          : open.sizeUsd,
         ledger_contracts: open.okxContracts ?? null,
         action: "RECONCILE_MISMATCH_NO_HYDRATION"
       });
@@ -9911,22 +9928,49 @@ export class PaperEngine {
       engineOwnedTp: any;
       wantsTp: boolean;
       lookupAbsentConfirmed?: boolean;
+      requestedRole?: "sl" | "tp";
     }>
   ): { engineOwnedSl: any; engineOwnedTp: any; adopted: boolean; staleCancelId?: string } {
     let engineOwnedSl = input.engineOwnedSl;
     let engineOwnedTp = input.engineOwnedTp;
     if (resolution.action === "adopt") {
       clearProtectiveClOrdIdSubmitBlocked(input.symbol, input.side, input.clOrdId);
-      engineOwnedSl = resolution.row;
-      if (input.wantsTp) engineOwnedTp = resolution.row;
+      const { slLegValid, tpLegValid, ocoBothValid } = resolution;
+      if (slLegValid || ocoBothValid) {
+        engineOwnedSl = resolution.row;
+      }
+      if (input.wantsTp && (tpLegValid || ocoBothValid)) {
+        engineOwnedTp = resolution.row;
+      }
+      if (input.requestedRole === "sl" && !(slLegValid || ocoBothValid)) {
+        engineOwnedSl = input.engineOwnedSl;
+      }
+      if (input.requestedRole === "tp" && !(tpLegValid || ocoBothValid)) {
+        engineOwnedTp = input.engineOwnedTp;
+      }
+      const adopted =
+        (input.requestedRole === "tp"
+          ? tpLegValid || ocoBothValid
+          : input.requestedRole === "sl"
+            ? slLegValid || ocoBothValid
+            : slLegValid || tpLegValid || ocoBothValid) &&
+        (input.requestedRole === "sl"
+          ? engineOwnedSl === resolution.row
+          : input.requestedRole === "tp"
+            ? engineOwnedTp === resolution.row
+            : engineOwnedSl === resolution.row || engineOwnedTp === resolution.row);
       this.logger.info("PROTECTIVE_51068_ADOPTED_PROOF", {
         symbol: input.symbol,
         side: input.side,
         flowId: input.flowId,
         clOrdId: input.clOrdId,
-        algoId: resolution.row.algoId ?? null
+        algoId: resolution.row.algoId ?? null,
+        requested_role: input.requestedRole ?? null,
+        sl_leg_valid: slLegValid,
+        tp_leg_valid: tpLegValid,
+        oco_both_valid: ocoBothValid
       });
-      return { engineOwnedSl, engineOwnedTp, adopted: true };
+      return { engineOwnedSl, engineOwnedTp, adopted };
     }
     if (resolution.action === "stale_replace") {
       clearProtectiveClOrdIdSubmitBlocked(input.symbol, input.side, input.clOrdId);
@@ -9980,6 +10024,7 @@ export class PaperEngine {
     engineOwnedSl: any;
     engineOwnedTp: any;
     wantsTp: boolean;
+    requestedRole?: "sl" | "tp";
   }>): Promise<{ engineOwnedSl: any; engineOwnedTp: any; adopted: boolean; staleCancelId?: string }> {
     let lookupRow =
       inventoryRowsMatchingClOrdId(input.inventory, input.clOrdId)[0] ?? null;
@@ -10008,8 +10053,17 @@ export class PaperEngine {
         lookupAbsentConfirmed = true;
       }
     }
-    const resolution = resolve51068ProtectiveLookup(lookupRow, input.reconcileCtx, input.clOrdId);
-    return this.applyProtective51068Resolution(resolution, { ...input, lookupAbsentConfirmed });
+    const resolution = resolve51068ProtectiveLookup(
+      lookupRow,
+      input.reconcileCtx,
+      input.clOrdId,
+      input.requestedRole ?? inferProtective51068RequestedRole(input.clOrdId)
+    );
+    return this.applyProtective51068Resolution(resolution, {
+      ...input,
+      lookupAbsentConfirmed,
+      requestedRole: input.requestedRole ?? inferProtective51068RequestedRole(input.clOrdId)
+    });
   }
 
   private validateProtectiveOkxTriggerLayout(input: {

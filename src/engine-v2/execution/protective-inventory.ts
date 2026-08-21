@@ -262,15 +262,31 @@ export function isLiveOkxProtectiveAlgoState(stateRaw: unknown): boolean {
 }
 
 export type Protective51068Resolution =
-    | Readonly<{ action: "adopt"; row: ProtectiveAlgoRow }>
+    | Readonly<{
+          action: "adopt";
+          row: ProtectiveAlgoRow;
+          slLegValid: boolean;
+          tpLegValid: boolean;
+          ocoBothValid: boolean;
+      }>
     | Readonly<{ action: "stale_replace"; row: ProtectiveAlgoRow; cancelAlgoId: string }>
     | Readonly<{ action: "blocked_existing_unresolved"; clOrdId: string }>
     | Readonly<{ action: "not_found" }>;
 
+export type Protective51068RequestedRole = "sl" | "tp";
+
+export function inferProtective51068RequestedRole(clOrdId: string): Protective51068RequestedRole | undefined {
+    const id = String(clOrdId).trim();
+    if (id.startsWith("tp")) return "tp";
+    if (id.startsWith("sl")) return "sl";
+    return undefined;
+}
+
 export function resolve51068ProtectiveLookup(
     row: ProtectiveAlgoRow | null,
     ctx: ProtectiveReconcileContext,
-    clOrdId: string
+    clOrdId: string,
+    requestedRole?: Protective51068RequestedRole
 ): Protective51068Resolution {
     if (!row) return { action: "not_found" };
     const state = row.state;
@@ -278,7 +294,24 @@ export function resolve51068ProtectiveLookup(
         return { action: "not_found" };
     }
     const ev = evaluateProtectiveAlgoMatch(row, ctx);
-    if (ev.adoptable) return { action: "adopt", row };
+    if (ev.adoptable) {
+        const roleSatisfied =
+            requestedRole === "tp"
+                ? ev.tpLegValid || ev.ocoBothValid
+                : requestedRole === "sl"
+                  ? ev.slLegValid || ev.ocoBothValid
+                  : ev.slLegValid || ev.tpLegValid || ev.ocoBothValid;
+        if (!roleSatisfied) {
+            return { action: "blocked_existing_unresolved", clOrdId };
+        }
+        return {
+            action: "adopt",
+            row,
+            slLegValid: ev.slLegValid,
+            tpLegValid: ev.tpLegValid,
+            ocoBothValid: ev.ocoBothValid
+        };
+    }
     if (ev.stale) {
         const cancelAlgoId = String(row.algoId ?? "").trim();
         if (cancelAlgoId) return { action: "stale_replace", row, cancelAlgoId };
