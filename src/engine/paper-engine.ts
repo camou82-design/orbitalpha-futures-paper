@@ -559,6 +559,166 @@ export function resolveProtectiveExistingAlgoLedgerAdoption(input: Readonly<{
   };
 }
 
+export function shouldAttachFullPositionProtectiveTp(input: Readonly<{
+  isV2Authority: boolean;
+  regime: MarketRegime;
+  isV2RangePartialPlan: boolean;
+  rawWantsTp: boolean;
+  takeProfitRequired?: boolean;
+}>): { fullPositionTpRequired: boolean; reason: string } {
+  // 1. V2 RANGE partial plan -> full position TP is forbidden (partial ladder managed)
+  if (input.isV2RangePartialPlan) {
+    return { fullPositionTpRequired: false, reason: "V2_RANGE_PARTIAL_SOVEREIGNTY" };
+  }
+
+  // 2. V2 TREND -> full position exchange TP is forbidden by default (dynamic lifecycle sovereignty)
+  if (input.isV2Authority && input.regime === "TREND") {
+    return { fullPositionTpRequired: false, reason: "V2_TREND_DYNAMIC_EXIT_SOVEREIGNTY" };
+  }
+
+  // 3. V2 RANGE without partial plan -> full TP required if requested/available
+  if (input.isV2Authority && input.regime === "RANGE") {
+    const req = Boolean(input.takeProfitRequired) || input.rawWantsTp;
+    return { fullPositionTpRequired: req, reason: req ? "V2_RANGE_FULL_TP_REQUIRED" : "V2_RANGE_TP_NOT_REQUESTED" };
+  }
+
+  // 4. Legacy / non-V2 -> keep existing behavior
+  if (!input.isV2Authority) {
+    const req = (input.regime === "RANGE") || Boolean(input.takeProfitRequired) || input.rawWantsTp;
+    return { fullPositionTpRequired: req, reason: "LEGACY_TP_AUTHORITY" };
+  }
+
+  return { fullPositionTpRequired: false, reason: "DEFAULT_NO_FULL_TP" };
+}
+
+export type ReplacementSlResubmitDeferEvaluation = Readonly<{
+  shouldDefer: boolean;
+  activeGrace: boolean;
+  acceptedReplacementEvidence: boolean;
+  replacementAlgoId: string | null;
+  currentCanonicalSlAlgoId: string | null;
+  currentLiveSlProtectionConfirmed: boolean;
+  replacementExchangeConfirmed: boolean;
+  graceDeadlineMs: number | null;
+  graceRemainingMs: number | null;
+  reason: string;
+}>;
+
+export function shouldDeferReplacementSlResubmitDuringVisibilityGrace(input: Readonly<{
+  nowMs: number;
+  graceDeadlineMs: number | null | undefined;
+  persistedSlAlgoId: string | null | undefined;
+  canonicalSlAlgoId: string | null | undefined;
+  isCanonicalSlOco?: boolean;
+  hasAuthoritativeSl: boolean;
+  isV2Authority: boolean;
+  regime: MarketRegime;
+  wantsTp: boolean;
+}>): ReplacementSlResubmitDeferEvaluation {
+  const nowMs = input.nowMs;
+  const deadline = typeof input.graceDeadlineMs === "number" ? input.graceDeadlineMs : null;
+  const activeGrace = deadline != null && nowMs < deadline;
+  const graceRemainingMs = activeGrace && deadline != null ? deadline - nowMs : null;
+
+  const persistedSl = typeof input.persistedSlAlgoId === "string" ? input.persistedSlAlgoId.trim() : null;
+  const canonicalSl = typeof input.canonicalSlAlgoId === "string" ? input.canonicalSlAlgoId.trim() : null;
+  const isCanonicalOco = input.isCanonicalSlOco === true;
+
+  // 1. Current Live SL protection check (e.g. old OCO or another live SL order is confirmed on exchange)
+  const currentLiveSlProtectionConfirmed = input.hasAuthoritativeSl && canonicalSl != null && canonicalSl.length > 0;
+
+  // 2. Proves the persisted algoId represents a distinct, already-accepted REPLACEMENT SL,
+  // not merely the old OCO itself or an empty/stale ledger entry.
+  const acceptedReplacementEvidence =
+    persistedSl != null &&
+    persistedSl.length > 0 &&
+    currentLiveSlProtectionConfirmed &&
+    (isCanonicalOco ? persistedSl !== canonicalSl : true);
+
+  // 3. Replacement SL is only confirmed on exchange when canonical SL is a STANDALONE SL (!isCanonicalOco)
+  // and matches the persisted replacement ID.
+  const replacementExchangeConfirmed =
+    !isCanonicalOco &&
+    persistedSl != null &&
+    canonicalSl != null &&
+    persistedSl === canonicalSl;
+
+  const isV2TrendNoTp = input.isV2Authority && input.regime === "TREND" && !input.wantsTp;
+
+  if (!isV2TrendNoTp) {
+    return {
+      shouldDefer: false,
+      activeGrace,
+      acceptedReplacementEvidence,
+      replacementAlgoId: persistedSl,
+      currentCanonicalSlAlgoId: canonicalSl,
+      currentLiveSlProtectionConfirmed,
+      replacementExchangeConfirmed,
+      graceDeadlineMs: deadline,
+      graceRemainingMs,
+      reason: "NOT_V2_TREND_NO_TP"
+    };
+  }
+
+  if (!currentLiveSlProtectionConfirmed) {
+    return {
+      shouldDefer: false,
+      activeGrace,
+      acceptedReplacementEvidence,
+      replacementAlgoId: persistedSl,
+      currentCanonicalSlAlgoId: canonicalSl,
+      currentLiveSlProtectionConfirmed,
+      replacementExchangeConfirmed,
+      graceDeadlineMs: deadline,
+      graceRemainingMs,
+      reason: "NO_LIVE_SL_PROTECTION_CONFIRMED"
+    };
+  }
+
+  if (replacementExchangeConfirmed) {
+    return {
+      shouldDefer: false,
+      activeGrace,
+      acceptedReplacementEvidence,
+      replacementAlgoId: persistedSl,
+      currentCanonicalSlAlgoId: canonicalSl,
+      currentLiveSlProtectionConfirmed,
+      replacementExchangeConfirmed,
+      graceDeadlineMs: deadline,
+      graceRemainingMs,
+      reason: "REPLACEMENT_SL_ALREADY_EXCHANGE_CONFIRMED"
+    };
+  }
+
+  if (activeGrace && acceptedReplacementEvidence) {
+    return {
+      shouldDefer: true,
+      activeGrace: true,
+      acceptedReplacementEvidence: true,
+      replacementAlgoId: persistedSl,
+      currentCanonicalSlAlgoId: canonicalSl,
+      currentLiveSlProtectionConfirmed: true,
+      replacementExchangeConfirmed: false,
+      graceDeadlineMs: deadline,
+      graceRemainingMs,
+      reason: "REPLACEMENT_ACCEPTED_VISIBILITY_PENDING_UNDER_LIVE_SL"
+    };
+  }
+
+  return {
+    shouldDefer: false,
+    activeGrace,
+    acceptedReplacementEvidence,
+    replacementAlgoId: persistedSl,
+    currentCanonicalSlAlgoId: canonicalSl,
+    currentLiveSlProtectionConfirmed,
+    replacementExchangeConfirmed,
+    graceDeadlineMs: deadline,
+    graceRemainingMs,
+    reason: !activeGrace ? "VISIBILITY_GRACE_EXPIRED_OR_ABSENT" : "NO_ACCEPTED_REPLACEMENT_EVIDENCE"
+  };
+}
+
 /** 吏꾩엯 吏곹썑 entry identity ?덉씤 ?좎?: ?μ꽭쨌?덉씤 ?꾪솚???꾨웾 泥?궛留???援ш컙?먯꽌 湲덉?(?먯젅쨌?몄텧 ?쒕룄 ?깆? ?덉슜). */
 const ENTRY_POST_OPEN_REGIME_LANE_PROTECT_MS = 120_000;
 
@@ -1454,17 +1614,21 @@ function buildV2PreEntryRiskPlanCommitted(
       }
     }
 
-    if (finalTpPrice == null) {
-      policyTpPrice = engineMirrorTpPrice(referenceEntryPx, side, regime);
-      if (policyTpPrice != null) {
-        const isPolicyTpValidDirection =
-          side === "long" ? policyTpPrice > referenceEntryPx : policyTpPrice < referenceEntryPx;
-        if (isPolicyTpValidDirection) {
-          finalTpPrice = policyTpPrice;
-          finalTpSource = "engine_calculated";
-        }
-      }
-    }
+    // V2 TREND does NOT manufacture generic fixed-percentage full-position exchange TP.
+    // Dynamic lifecycle exit authority (weakness/exhaustion/pullback partial TP) is sovereign.
+    logger.info("V2_TREND_TP_AUTHORITY_PROOF", {
+      symbol,
+      side,
+      regime,
+      reference_entry_px: referenceEntryPx,
+      authority_tp_px: authTp,
+      engine_mirror_tp_px: null,
+      final_tp_px: finalTpPrice,
+      full_position_tp_required: false,
+      profit_management_mode: profitManagementMode,
+      tp_authority_source: finalTpSource,
+      reason: "V2_TREND_DYNAMIC_EXIT_SOVEREIGNTY"
+    });
   }
 
   let takeProfitDistancePct: number | null = null;
@@ -10279,9 +10443,17 @@ export class PaperEngine {
       open.partialExitRatio < 1;
 
     const rawWantsTp = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0;
-    const wantsTp = rawWantsTp && !isV2RangePartialPlan;
+    const tpEvaluation = shouldAttachFullPositionProtectiveTp({
+      isV2Authority: open.isV2Authority === true,
+      regime,
+      isV2RangePartialPlan,
+      rawWantsTp,
+      takeProfitRequired: Boolean((open as any).takeProfitRequired)
+    });
+    const fullPositionTpRequired = tpEvaluation.fullPositionTpRequired;
+    const wantsTp = rawWantsTp && fullPositionTpRequired;
     const slRequired = true;
-    const tpRequired = !isV2RangePartialPlan && ((open.regimeAtEntry === "RANGE") || (Boolean((open as any).takeProfitRequired)) || (rawWantsTp && open.isV2Authority !== true) || (open.isV2Authority === true && open.regimeAtEntry === "TREND" && (Boolean((open as any).takeProfitRequired) || rawWantsTp)));
+    const tpRequired = fullPositionTpRequired;
 
     if (tpRequired && (!activeTpPrice || !Number.isFinite(activeTpPrice))) {
       this.logger.error("PROTECTIVE_ORDER_TP_REQUIRED_BUT_MISSING_PROOF", {
@@ -10568,8 +10740,40 @@ export class PaperEngine {
     }
 
     // 4. Reconcile Plan (derive submit intent from canonical scan after addon rebuild adjustments)
-    let needSubmitSl = slRequired && !hasAuthoritativeSl;
-    let needSubmitTp = tpRequired && !hasAuthoritativeTp;
+    const rawNeedSubmitSl = slRequired && (!hasAuthoritativeSl || reconcilePlan.needSubmitSl);
+    const rawNeedSubmitTp = tpRequired && (!hasAuthoritativeTp || reconcilePlan.needSubmitTp);
+
+    const isCanonicalSlOco = String(engineOwnedSl?.ordType ?? "").toLowerCase() === "oco";
+
+    const deferEval = shouldDeferReplacementSlResubmitDuringVisibilityGrace({
+      nowMs: Date.now(),
+      graceDeadlineMs: open.protectiveVisibilityGraceDeadlineMs,
+      persistedSlAlgoId: open.protectiveSlAlgoId ?? open.protectiveStopAlgoId,
+      canonicalSlAlgoId: engineOwnedSl?.algoId ?? null,
+      isCanonicalSlOco,
+      hasAuthoritativeSl,
+      isV2Authority: open.isV2Authority === true,
+      regime,
+      wantsTp
+    });
+
+    if (deferEval.shouldDefer) {
+      this.logger.info("V2_PROTECTIVE_MIGRATION_SUBMIT_DEFERRED_VISIBILITY_GRACE_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        flowId,
+        replacementAlgoId: deferEval.replacementAlgoId,
+        currentCanonicalSlAlgoId: deferEval.currentCanonicalSlAlgoId,
+        graceDeadlineMs: deferEval.graceDeadlineMs,
+        graceRemainingMs: deferEval.graceRemainingMs,
+        currentLiveSlProtectionConfirmed: deferEval.currentLiveSlProtectionConfirmed,
+        replacementExchangeConfirmed: deferEval.replacementExchangeConfirmed,
+        reason: deferEval.reason
+      });
+    }
+
+    let needSubmitSl = rawNeedSubmitSl && !deferEval.shouldDefer;
+    let needSubmitTp = rawNeedSubmitTp;
     let submitOco = needSubmitSl && needSubmitTp && wantsTp;
 
     if (hasAuthoritativeSl && (!wantsTp || hasAuthoritativeTp) && cancelTargets.length === 0) {

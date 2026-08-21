@@ -78,9 +78,14 @@ function routingMatch(algo: ProtectiveAlgoRow, ctx: ProtectiveReconcileContext):
     return String(algo.tdMode ?? "").toLowerCase() === ctx.tdModeUsed;
 }
 
-function rankScore(ev: ReturnType<typeof evaluateProtectiveAlgoMatch>): number {
+function rankScore(ev: ReturnType<typeof evaluateProtectiveAlgoMatch>, ctx?: ProtectiveReconcileContext): number {
+    // When TP is not wanted (e.g. V2 TREND), a valid standalone SL order is preferred over an obsolete OCO containing a legacy TP.
+    const ocoScore = ctx && !ctx.wantsTp
+        ? (ev.slLegValid && !ev.isOco ? 100 : ev.ocoBothValid ? 80 : 0)
+        : (ev.ocoBothValid ? 100 : ev.slLegValid && ev.tpLegValid ? 50 : 0);
+
     return (
-        (ev.ocoBothValid ? 100 : 0) +
+        ocoScore +
         (ev.slLegValid && ev.tpLegValid ? 50 : 0) +
         (ev.engineOwned ? 20 : 0) +
         (ev.attachAlgo ? 10 : 0) +
@@ -150,7 +155,12 @@ export function evaluateProtectiveAlgoMatch(
     const engineOwned = isEngineOwnedAlgo(algoClOrdId, ctx.openedAt36);
     const attachAlgo = isAttachAlgoClOrdId(algoClOrdId);
 
-    const stale = hasExchangeIdentity && routingMatch(algo, ctx) && !sizeMatch;
+    const isBotOwnedCandidate = engineOwned || attachAlgo;
+    const hasSlTrigger = extractPx(algo, "slTriggerPx") != null || isOco;
+    const hasTpTrigger = extractPx(algo, "tpTriggerPx") != null;
+    const isStandaloneTp = hasTpTrigger && !hasSlTrigger;
+    const staleEligible = !isStandaloneTp || isBotOwnedCandidate;
+    const stale = hasExchangeIdentity && staleEligible && routingMatch(algo, ctx) && !sizeMatch;
 
     // [BLOCKER 4-10] Authoritative Exchange Identity Requirement:
     // Synthetic candidates or structural fallback rows without real OKX algoId
@@ -214,7 +224,7 @@ export function planProtectiveOrderReconcile(
 
     const adoptableRanked = evaluated
         .filter(({ ev }) => !ev.stale && ev.adoptable)
-        .sort((a, b) => rankScore(b.ev) - rankScore(a.ev));
+        .sort((a, b) => rankScore(b.ev, ctx) - rankScore(a.ev, ctx));
 
     for (const { algo, id, ev } of adoptableRanked) {
         const coversSl = ev.slLegValid;
@@ -248,11 +258,42 @@ export function planProtectiveOrderReconcile(
     for (const { algo, ev } of evaluated) {
         if (ev.stale || ev.adoptable) continue;
         if (!routingMatch(algo, ctx)) continue;
-        const cl = String(algo.algoClOrdId ?? "");
-        if (cl !== "") manualIgnoredCount += 1;
+        const isBotOwned = ev.engineOwned || ev.attachAlgo;
+        if (!isBotOwned) manualIgnoredCount += 1;
     }
 
-    const needSubmitSl = !canonicalSl;
+    // [V2_TREND_BOT_TP_CLEANUP] If TP is not wanted (wantsTp=false), any engine-owned / attach bot TP
+    // order must be canceled as obsolete, while manual TP orders MUST remain completely untouched.
+    if (!ctx.wantsTp) {
+        for (const { algo, id, ev } of evaluated) {
+            if (ev.engineOwned || ev.attachAlgo) {
+                const hasTp = extractPx(algo, "tpTriggerPx") != null;
+                const hasSl = extractPx(algo, "slTriggerPx") != null;
+                if (hasTp && !hasSl && !ev.isOco) {
+                    pushCancel(id);
+                }
+            }
+        }
+    }
+
+    // [V2_TREND_LEGACY_OCO_TO_SL_ONLY_MIGRATION]
+    // If TP is not wanted (wantsTp=false), and canonical SL is an obsolete bot-owned OCO containing a TP leg,
+    // we must replace it with a standalone SL.
+    // CRITICAL SAFETY: We do NOT add old OCO to cancelAlgoIds while it is the only live protection.
+    // Old OCO remains live on exchange until a valid standalone SL is submitted, confirmed on exchange,
+    // and supersedes it as canonicalSl (which automatically marks the old OCO as a duplicate for cancellation).
+    let legacyOcoMigrationNeeded = false;
+    if (!ctx.wantsTp && canonicalSl != null) {
+        const isOco = String(canonicalSl.ordType ?? "").toLowerCase() === "oco";
+        const hasTpLeg = extractPx(canonicalSl, "tpTriggerPx") != null;
+        const clOrdId = String(canonicalSl.algoClOrdId ?? "");
+        const isBotOwned = isEngineOwnedAlgo(clOrdId, ctx.openedAt36) || isAttachAlgoClOrdId(clOrdId);
+        if (isOco && hasTpLeg && isBotOwned) {
+            legacyOcoMigrationNeeded = true;
+        }
+    }
+
+    const needSubmitSl = !canonicalSl || legacyOcoMigrationNeeded;
     const needSubmitTp = ctx.wantsTp && !canonicalTp;
     const submitOco = needSubmitSl && needSubmitTp && ctx.wantsTp;
 
