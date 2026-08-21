@@ -270,7 +270,10 @@ export function isPendingEligibleForV2PostFillEvidence(
     pending: PendingEntryOrderRecord
 ): boolean {
     if (!hasAuthoritativeV2FillEvidenceOnPending(pending)) return false;
-    return pending.entryPendingState === "ENTRY_FILL_RECONCILING";
+    return (
+        pending.entryPendingState === "ENTRY_FILL_RECONCILING" ||
+        pending.entryPendingState === "ENTRY_SUBMIT_PENDING"
+    );
 }
 
 function openLedgerRowScore(row: PaperOpenPositionRecord): number {

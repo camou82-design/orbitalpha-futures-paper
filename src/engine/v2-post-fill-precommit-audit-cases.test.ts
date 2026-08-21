@@ -99,17 +99,17 @@ function pendingUnfilled(symbol: string, side: "long" | "short"): PendingEntryOr
   return {
     symbol,
     side,
-    ordId: "pending-unfilled",
-    clOrdId: "pBTCUSDTSpending",
+    ordId: "pending-external-manual",
+    clOrdId: "mBTCUSDTManual",
     instId: "BTC-USDT-SWAP",
-    authority_source: "v2",
+    authority_source: "manual",
     intended_notional_usdt: 200,
     stopPrice: 101_000,
     createdAt: Date.now(),
     status: "ENTRY_ORDER_PENDING",
     entryPendingState: "ENTRY_SUBMIT_PENDING",
-    paperRecordSnapshot: botRow({ symbol, side, openedAt: Date.now() }),
-    authoritySnapshot: { source: "v2" },
+    paperRecordSnapshot: null,
+    authoritySnapshot: null as any,
     openTraceId: "trace-unfilled"
   };
 }
