@@ -41,8 +41,8 @@ function runTrendTpAuthorityTests() {
         });
 
         report(
-            "TEST A — REAL BTC CASE: V2 TREND suppresses generic full-position fixed TP (78568.9)",
-            tpEval.fullPositionTpRequired === false && tpEval.reason === "V2_TREND_DYNAMIC_EXIT_SOVEREIGNTY",
+            "TEST A — REAL BTC CASE: V2 TREND requires mandatory server-side TP when price available",
+            tpEval.fullPositionTpRequired === true && tpEval.reason === "V2_TREND_MANDATORY_SERVER_TP",
             { oldMirrorTp, fullPositionTpRequired: tpEval.fullPositionTpRequired, reason: tpEval.reason }
         );
     }
@@ -59,9 +59,9 @@ function runTrendTpAuthorityTests() {
         });
 
         report(
-            "TEST B — V2 TREND NO AUTH TP: fullPositionTpRequired is false by default",
-            tpEval.fullPositionTpRequired === false && tpEval.reason === "V2_TREND_DYNAMIC_EXIT_SOVEREIGNTY",
-            { fullPositionTpRequired: tpEval.fullPositionTpRequired }
+            "TEST B — V2 TREND NO AUTH TP: fullPositionTpRequired false when TP price unavailable",
+            tpEval.fullPositionTpRequired === false && tpEval.reason === "V2_TREND_TP_PRICE_UNAVAILABLE",
+            { fullPositionTpRequired: tpEval.fullPositionTpRequired, reason: tpEval.reason }
         );
     }
 
@@ -78,9 +78,9 @@ function runTrendTpAuthorityTests() {
         });
 
         report(
-            "TEST C — V2 TREND EXPLICIT TARGET: advisory/diagnostic target does NOT attach full-position exchange TP",
-            tpEval.fullPositionTpRequired === false,
-            { explicitTarget, fullPositionTpRequired: tpEval.fullPositionTpRequired }
+            "TEST C — V2 TREND EXPLICIT TARGET: fullPositionTpRequired is true when TP available",
+            tpEval.fullPositionTpRequired === true && tpEval.reason === "V2_TREND_MANDATORY_SERVER_TP",
+            { explicitTarget, fullPositionTpRequired: tpEval.fullPositionTpRequired, reason: tpEval.reason }
         );
     }
 
@@ -271,7 +271,7 @@ function runTrendTpAuthorityTests() {
     }
 
     // TEST J — LONG / SHORT SYMMETRY:
-    // V2 TREND long and short both suppress generic fixed full-position TP
+    // V2 TREND long and short both require mandatory full-position TP when price available
     {
         const longEval = shouldAttachFullPositionProtectiveTp({
             isV2Authority: true,
@@ -290,8 +290,8 @@ function runTrendTpAuthorityTests() {
         });
 
         report(
-            "TEST J — LONG / SHORT SYMMETRY: Both long and short V2 TREND suppress generic full TP",
-            longEval.fullPositionTpRequired === false && shortEval.fullPositionTpRequired === false,
+            "TEST J — LONG / SHORT SYMMETRY: Both long and short V2 TREND require mandatory TP",
+            longEval.fullPositionTpRequired === true && shortEval.fullPositionTpRequired === true,
             { longReason: longEval.reason, shortReason: shortEval.reason }
         );
     }

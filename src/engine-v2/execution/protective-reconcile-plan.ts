@@ -26,6 +26,7 @@ export type ProtectiveReconcilePlan = Readonly<{
     needSubmitSl: boolean;
     needSubmitTp: boolean;
     submitOco: boolean;
+    slOnlyOcoRebuild: boolean;
     duplicateSlCount: number;
     duplicateTpCount: number;
     staleCount: number;
@@ -298,6 +299,8 @@ export function planProtectiveOrderReconcile(
     const slOnlyTpMissing = canonicalSl != null && ctx.wantsTp && !canonicalTp;
     const submitOco = (needSubmitSl && needSubmitTp && ctx.wantsTp) || slOnlyTpMissing;
 
+    const slOnlyOcoRebuild = slOnlyTpMissing;
+
     const uniqueProtectiveAlgoCount = uniqueAlgos.length;
     const matchingProtectivePendingCount = adoptableRanked.length;
 
@@ -308,6 +311,7 @@ export function planProtectiveOrderReconcile(
         needSubmitSl: submitOco ? false : needSubmitSl,
         needSubmitTp: submitOco ? false : needSubmitTp,
         submitOco,
+        slOnlyOcoRebuild,
         duplicateSlCount,
         duplicateTpCount,
         staleCount,

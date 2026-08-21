@@ -34,9 +34,23 @@ export function evaluateTerminalReentryBarrier(input: Readonly<{
     symbol: string;
     requestedSide?: "long" | "short";
     openPositions: readonly PaperOpenPositionRecord[];
+    openPositionsSourceAvailable?: boolean;
     actualOkxPositionExists?: boolean;
     terminalExitFlowIds?: ReadonlySet<string>;
 }>): TerminalReentryBarrierResult {
+    if (input.openPositionsSourceAvailable === false) {
+        return {
+            blocked: true,
+            reason: "TERMINAL_STATE_UNAVAILABLE_FAIL_CLOSED",
+            closePending: false,
+            finalizePending: false,
+            actualPositionExists: input.actualOkxPositionExists === true,
+            terminalFillConfirmed: false,
+            lossStateCommitted: false,
+            positionCycleId: null
+        };
+    }
+
     const sym = String(input.symbol).toUpperCase();
     const rows = input.openPositions.filter(
         (r) => String(r.symbol).toUpperCase() === sym && (r.status ?? "open") === "open"
@@ -98,4 +112,28 @@ export function evaluateTerminalReentryBarrier(input: Readonly<{
 
 export function buildTerminalReentryBarrierProof(input: Record<string, unknown>): Record<string, unknown> {
     return { event: "V2_TERMINAL_REENTRY_BARRIER_PROOF", ...input };
+}
+
+/**
+ * Resolves authoritative open-position lifecycle input for terminal barrier evaluation.
+ * Fail closed when neither bridge openPositions nor ready empty v2 position state is available.
+ */
+export function resolveTerminalBarrierContext(input: Readonly<{
+    bridgeOpenPositions?: unknown;
+    positionStateReady?: boolean;
+    symbolPositionsCount?: number;
+}>): Readonly<{ openPositions: PaperOpenPositionRecord[]; openPositionsSourceAvailable: boolean }> {
+    if (Array.isArray(input.bridgeOpenPositions)) {
+        return {
+            openPositions: input.bridgeOpenPositions as PaperOpenPositionRecord[],
+            openPositionsSourceAvailable: true
+        };
+    }
+    if (
+        input.positionStateReady === true &&
+        (input.symbolPositionsCount ?? 0) === 0
+    ) {
+        return { openPositions: [], openPositionsSourceAvailable: true };
+    }
+    return { openPositions: [], openPositionsSourceAvailable: false };
 }

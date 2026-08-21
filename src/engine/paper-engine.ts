@@ -364,6 +364,23 @@ import {
   evaluateOkx51088ProtectionRecovery,
   buildOkx51088RecoveryProof
 } from "../engine-v2/execution/okx-protection-51088-recovery";
+import {
+  compute51088EvidenceHash,
+  shouldSuppress51088Resubmit,
+  record51088RecoveryAttempt,
+  clear51088RecoveryInProgress
+} from "../engine-v2/execution/okx-51088-recovery-state";
+import {
+  evaluatePreEntryProtectionPlan,
+  buildPreEntryProtectionPlanProof
+} from "../engine-v2/execution/pre-entry-protection-plan";
+import {
+  isSlOnlyOcoRebuildScenario,
+  evaluateAuthoritativeProtectionPresence,
+  buildProtectiveRebuildTransactionProof,
+  mergeRebuildTransactionProof,
+  type ProtectiveRebuildTransactionProof
+} from "../engine-v2/execution/protective-rebuild-transaction";
 
 /** RANGE 1m edge reversal candle ?덇굅??寃뚯씠????V2 ?ㅽ뻾 遊됲닾媛€ ENTER쨌臾댄븯?쒕툝濡앹앪 ??理쒖쥌 ?ㅽ뻾 寃쎈줈瑜?留됱? ?딅룄濡?遺꾨━?쒕떎. */
 const LEGACY_RANGE_EDGE_NO_REVERSAL_REJECTS = new Set<string>([
@@ -1801,6 +1818,7 @@ export class PaperEngine {
    */
   private readonly terminalExitConsumedByFlow = new Set<string>();
   private cachedOpenPositionsForBarrier: PaperOpenPositionRecord[] = [];
+  private openPositionsBarrierSourceAvailable = true;
   /** symbol:side -> true if OKX actual position exists but not in paper ledger. */
   private readonly symbolExternalManualBlocked = new Set<string>();
   /** symbol -> true if protective stop order failed to register; block further entries. */
@@ -10274,6 +10292,204 @@ export class PaperEngine {
     return violations.length === 0 ? { ok: true } : { ok: false, violations };
   }
 
+  private async executeSlOnlyOcoRebuildTransaction(input: Readonly<{
+    instId: string;
+    open: PaperOpenPositionRecord;
+    flowId: string;
+    reconcileCtx: ProtectiveReconcileContext;
+    protectiveInventory: ProtectiveAlgoRow[];
+    oldSlAlgoId: string;
+    activeStopPrice: number;
+    activeTpPrice: number;
+    tdModeUsed: string;
+    expectedSide: "buy" | "sell";
+    hedgePosSide: "long" | "short";
+    okxPosMode: string;
+    szStr: string;
+    slAlgoClOrdId: string;
+    tpRequired: boolean;
+  }>): Promise<Readonly<{
+    success: boolean;
+    hardBlock: boolean;
+    proof: ProtectiveRebuildTransactionProof;
+    inventory: ProtectiveAlgoRow[] | null;
+    submittedSlAlgoId: string | null;
+    submittedTpAlgoId: string | null;
+  }>> {
+    const baseProof: Partial<ProtectiveRebuildTransactionProof> = {
+      symbol: input.open.symbol,
+      side: input.open.side,
+      oldSlAlgoId: input.oldSlAlgoId,
+      oldSlStillLiveBefore: true
+    };
+    let proof = mergeRebuildTransactionProof(baseProof, {});
+
+    const positionCycleId =
+      input.open.positionCycleId ??
+      `${input.open.symbol}:${input.open.side}:${input.open.openedAt}`;
+
+    const cancelRes = await this.okxDemo!.cancelAlgoOrder([
+      { instId: input.instId, algoId: input.oldSlAlgoId }
+    ]);
+    proof = mergeRebuildTransactionProof(proof, {
+      oldCancelAttempted: true,
+      oldCancelSucceeded: cancelRes.ok
+    });
+
+    if (!cancelRes.ok) {
+      proof = mergeRebuildTransactionProof(proof, {
+        finalSlPresent: true,
+        finalTpPresent: false,
+        finalProtectionSatisfied: false,
+        hardBlockApplied: false
+      });
+      this.logger.warn("V2_PROTECTIVE_REBUILD_TRANSACTION_PROOF", buildProtectiveRebuildTransactionProof(proof));
+      return {
+        success: false,
+        hardBlock: false,
+        proof,
+        inventory: input.protectiveInventory,
+        submittedSlAlgoId: input.oldSlAlgoId,
+        submittedTpAlgoId: null
+      };
+    }
+
+    proof = mergeRebuildTransactionProof(proof, { newCombinedSubmitAttempted: true });
+    const ocoRes = await this.okxDemo!.submitAlgoOrder({
+      instId: input.instId,
+      tdMode: input.tdModeUsed,
+      side: input.expectedSide,
+      posSide: input.hedgePosSide,
+      accountPosMode: input.okxPosMode,
+      ordType: "oco",
+      sz: input.szStr,
+      reduceOnly: true,
+      slTriggerPx: String(input.activeStopPrice),
+      slOrdPx: "-1",
+      slTriggerPxType: "last",
+      tpTriggerPx: String(input.activeTpPrice),
+      tpOrdPx: "-1",
+      tpTriggerPxType: "last",
+      algoClOrdId: input.slAlgoClOrdId
+    });
+
+    const ocoOk = ocoRes.ok;
+    proof = mergeRebuildTransactionProof(proof, { newCombinedSubmitSucceeded: ocoOk });
+
+    let refreshedInventory: ProtectiveAlgoRow[] | null = null;
+    const pendingAfter = await this.okxDemo!.getOrdersAlgoPendingAll({ instType: "SWAP", instId: input.instId });
+    if (pendingAfter.ok) {
+      refreshedInventory = mergeProtectiveInventoryRows(
+        input.protectiveInventory.filter((r) => String(r.algoId) !== input.oldSlAlgoId),
+        pendingAfter.value as ProtectiveAlgoRow[]
+      );
+    }
+
+    const presence = refreshedInventory
+      ? evaluateAuthoritativeProtectionPresence({
+          inventory: refreshedInventory,
+          reconcileCtx: input.reconcileCtx,
+          tpRequired: input.tpRequired
+        })
+      : { slPresent: false, tpPresent: false, slAlgoId: null, tpAlgoId: null, protectionSatisfied: false };
+
+    proof = mergeRebuildTransactionProof(proof, {
+      authoritativeRequeryPassed: presence.protectionSatisfied,
+      newSlAlgoId: presence.slAlgoId,
+      newTpAlgoId: presence.tpAlgoId,
+      finalSlPresent: presence.slPresent,
+      finalTpPresent: presence.tpPresent,
+      finalProtectionSatisfied: presence.protectionSatisfied
+    });
+
+    if (presence.protectionSatisfied) {
+      clear51088RecoveryInProgress(positionCycleId);
+      this.logger.info("V2_PROTECTIVE_REBUILD_TRANSACTION_PROOF", buildProtectiveRebuildTransactionProof(proof));
+      const ocoAlgoId = ocoOk ? String(ocoRes.value[0]?.algoId ?? "").trim() : presence.slAlgoId;
+      return {
+        success: true,
+        hardBlock: false,
+        proof,
+        inventory: refreshedInventory,
+        submittedSlAlgoId: ocoAlgoId || presence.slAlgoId,
+        submittedTpAlgoId: presence.tpAlgoId ?? ocoAlgoId
+      };
+    }
+
+    proof = mergeRebuildTransactionProof(proof, { restoreAttempted: true });
+    const restoreRes = await this.okxDemo!.submitAlgoOrder({
+      instId: input.instId,
+      tdMode: input.tdModeUsed,
+      side: input.expectedSide,
+      posSide: input.hedgePosSide,
+      accountPosMode: input.okxPosMode,
+      ordType: "conditional",
+      sz: input.szStr,
+      reduceOnly: true,
+      slTriggerPx: String(input.activeStopPrice),
+      slOrdPx: "-1",
+      slTriggerPxType: "last",
+      algoClOrdId: `${input.slAlgoClOrdId}_restore`
+    });
+    const restoreOk = restoreRes.ok;
+    proof = mergeRebuildTransactionProof(proof, { restoreSucceeded: restoreOk });
+
+    let restoreInventory: ProtectiveAlgoRow[] | null = refreshedInventory;
+    if (restoreOk) {
+      const pendingRestore = await this.okxDemo!.getOrdersAlgoPendingAll({ instType: "SWAP", instId: input.instId });
+      if (pendingRestore.ok) {
+        restoreInventory = mergeProtectiveInventoryRows([], pendingRestore.value as ProtectiveAlgoRow[]);
+      }
+      const restorePresence = restoreInventory
+        ? evaluateAuthoritativeProtectionPresence({
+            inventory: restoreInventory,
+            reconcileCtx: input.reconcileCtx,
+            tpRequired: false
+          })
+        : { slPresent: false, tpPresent: false, slAlgoId: null, tpAlgoId: null, protectionSatisfied: false };
+      proof = mergeRebuildTransactionProof(proof, {
+        finalSlPresent: restorePresence.slPresent,
+        finalTpPresent: restorePresence.tpPresent,
+        finalProtectionSatisfied: restorePresence.slPresent,
+        hardBlockApplied: !restorePresence.slPresent
+      });
+      if (restorePresence.slPresent) {
+        this.logger.warn("V2_PROTECTIVE_REBUILD_TRANSACTION_PROOF", buildProtectiveRebuildTransactionProof(proof));
+        return {
+          success: false,
+          hardBlock: false,
+          proof,
+          inventory: restoreInventory,
+          submittedSlAlgoId: restorePresence.slAlgoId,
+          submittedTpAlgoId: null
+        };
+      }
+    }
+
+    proof = mergeRebuildTransactionProof(proof, { hardBlockApplied: true });
+    this.symbolProtectionFailedBlocked.add(input.open.symbol);
+    record51088RecoveryAttempt({
+      positionCycleId,
+      symbol: input.open.symbol,
+      side: input.open.side,
+      nowMs: Date.now(),
+      evidenceHash: "rebuild_restore_failed",
+      repairPlan: "combined_oco_rebuild",
+      inventoryRequeryCompleted: refreshedInventory != null,
+      recoveryInProgress: false,
+      nextRetryAtMs: Date.now() + 60_000
+    });
+    this.logger.error("V2_PROTECTIVE_REBUILD_TRANSACTION_PROOF", buildProtectiveRebuildTransactionProof(proof));
+    return {
+      success: false,
+      hardBlock: true,
+      proof,
+      inventory: restoreInventory,
+      submittedSlAlgoId: null,
+      submittedTpAlgoId: null
+    };
+  }
+
   public async ensureProtectiveStopOrder(
     open: PaperOpenPositionRecord,
     flowId: string,
@@ -10533,7 +10749,7 @@ export class PaperEngine {
     }
 
     // 3. Protective inventory (pending conditional+OCO, entry attach candidates, authoritative clOrdId lookup)
-    const protectiveInventory = await this.collectProtectiveInventoryForReconcile({
+    let protectiveInventory = await this.collectProtectiveInventoryForReconcile({
       instId,
       open,
       slAlgoClOrdId,
@@ -10550,6 +10766,7 @@ export class PaperEngine {
     if (protectiveInventory == null) {
       return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
     }
+    let currentProtectiveInventory: ProtectiveAlgoRow[] = protectiveInventory;
 
     const expectedSide = open.side === "long" ? "sell" : "buy";
     const cachedSizing = this.instrumentCache.get(instId) as any;
@@ -10568,7 +10785,7 @@ export class PaperEngine {
       tickSz
     };
 
-    let reconcilePlan = planProtectiveOrderReconcile(protectiveInventory, reconcileCtx);
+    let reconcilePlan = planProtectiveOrderReconcile(currentProtectiveInventory, reconcileCtx);
     let engineOwnedSl: any = reconcilePlan.canonicalSl;
     let engineOwnedTp: any = reconcilePlan.canonicalTp;
     let duplicateSlCount = reconcilePlan.duplicateSlCount;
@@ -10578,7 +10795,7 @@ export class PaperEngine {
     const wrongTdModeCount = 0;
     const wrongSideCount = 0;
     const wrongPriceCount = 0;
-    const authoritativePendingCount = protectiveInventory.filter(
+    const authoritativePendingCount = currentProtectiveInventory.filter(
       (r) => r.algoId != null && String(r.algoId).trim().length > 0 && r._protectiveInventorySource !== "entry_attach_candidate"
     ).length;
     const hasAuthoritativeSl = engineOwnedSl?.algoId != null && String(engineOwnedSl.algoId).trim().length > 0;
@@ -10788,7 +11005,8 @@ export class PaperEngine {
 
     let needSubmitSl = rawNeedSubmitSl && !deferEval.shouldDefer;
     let needSubmitTp = rawNeedSubmitTp;
-    let submitOco = needSubmitSl && needSubmitTp && wantsTp;
+    let submitOco = reconcilePlan.submitOco && wantsTp && !deferEval.shouldDefer;
+    const slOnlyOcoRebuild = reconcilePlan.slOnlyOcoRebuild === true && submitOco;
 
     if (hasAuthoritativeSl && (!wantsTp || hasAuthoritativeTp) && cancelTargets.length === 0) {
       this.logger.info("V2_PROTECTION_STATE_PROOF", {
@@ -10848,7 +11066,7 @@ export class PaperEngine {
         instId,
         clOrdId,
         reconcileCtx,
-        inventory: protectiveInventory,
+        inventory: currentProtectiveInventory,
         symbol: open.symbol,
         side: open.side,
         flowId,
@@ -10865,7 +11083,14 @@ export class PaperEngine {
       return resolved.adopted;
     };
 
+    // [BLOCKER-3-2] Track algoIds from successful submits — OKX confirms the order even
+    // before it propagates to the pending scan (short visibility window).
+    let submittedSlAlgoId: string | null = null;
+    let submittedTpAlgoId: string | null = null;
+
     const handle51088 = async (codes: { sCode: string | null; sMsg: string | null }) => {
+      const positionCycleId =
+        open.positionCycleId ?? `${open.symbol}:${open.side}:${open.openedAt}`;
       const refreshed = await this.collectProtectiveInventoryForReconcile({
         instId,
         open,
@@ -10880,11 +11105,66 @@ export class PaperEngine {
         wantsTp,
         flowId
       });
-      const inventory = refreshed ?? protectiveInventory;
+      const inventory = refreshed ?? currentProtectiveInventory;
+      if (!inventory) return false;
       const recovery = evaluateOkx51088ProtectionRecovery({
         inventory,
         reconcileCtx,
         tpRequired
+      });
+      const evidenceHash = compute51088EvidenceHash({
+        errorCode: codes.sCode,
+        existingAlgoCount: inventory.length,
+        canonicalSlFound: recovery.canonicalSlFound,
+        canonicalTpFound: recovery.canonicalTpFound,
+        repairAction: recovery.repairAction
+      });
+      const emergencyUnprotected = !recovery.canonicalSlFound;
+      const suppress = shouldSuppress51088Resubmit({
+        positionCycleId,
+        nowMs: Date.now(),
+        evidenceHash,
+        emergencyUnprotected
+      });
+      if (suppress.suppress) {
+        record51088RecoveryAttempt({
+          positionCycleId,
+          symbol: open.symbol,
+          side: open.side,
+          nowMs: Date.now(),
+          evidenceHash,
+          repairPlan: recovery.repairAction as any,
+          inventoryRequeryCompleted: true,
+          recoveryInProgress: true,
+          suppressed: true
+        });
+        this.logger.warn("V2_OKX_PROTECTION_51088_RECOVERY_PROOF", buildOkx51088RecoveryProof({
+          symbol: open.symbol,
+          side: open.side,
+          errorCode: codes.sCode,
+          existingAlgoCount: inventory.length,
+          canonicalSlFound: recovery.canonicalSlFound,
+          canonicalTpFound: recovery.canonicalTpFound,
+          slPrice: recovery.slPrice,
+          tpPrice: recovery.tpPrice,
+          adopted: recovery.adopted,
+          repairRequired: recovery.repairRequired,
+          repairAction: recovery.repairAction,
+          finalProtectionSatisfied: recovery.finalProtectionSatisfied,
+          suppressReason: suppress.reason
+        }));
+        return recovery.adopted;
+      }
+      record51088RecoveryAttempt({
+        positionCycleId,
+        symbol: open.symbol,
+        side: open.side,
+        nowMs: Date.now(),
+        evidenceHash,
+        repairPlan: recovery.repairAction as any,
+        inventoryRequeryCompleted: true,
+        recoveryInProgress: recovery.repairRequired,
+        nextRetryAtMs: recovery.repairRequired ? Date.now() + 30_000 : null
       });
       this.logger.warn(
         "V2_OKX_PROTECTION_51088_RECOVERY_PROOF",
@@ -10908,15 +11188,75 @@ export class PaperEngine {
         engineOwnedSl = reconcilePlan.canonicalSl;
         engineOwnedTp = reconcilePlan.canonicalTp;
         modified = true;
+        clear51088RecoveryInProgress(positionCycleId);
         return true;
+      }
+      if (recovery.repairAction === "combined_oco_rebuild" && engineOwnedSl?.algoId && activeTpPrice) {
+        const rebuild = await this.executeSlOnlyOcoRebuildTransaction({
+          instId,
+          open,
+          flowId,
+          reconcileCtx,
+          protectiveInventory: inventory,
+          oldSlAlgoId: String(engineOwnedSl.algoId),
+          activeStopPrice,
+          activeTpPrice: activeTpPrice!,
+          tdModeUsed,
+          expectedSide,
+          hedgePosSide,
+          okxPosMode,
+          szStr,
+          slAlgoClOrdId,
+          tpRequired
+        });
+        if (rebuild.inventory) currentProtectiveInventory = rebuild.inventory;
+        if (rebuild.submittedSlAlgoId) submittedSlAlgoId = rebuild.submittedSlAlgoId;
+        if (rebuild.submittedTpAlgoId) submittedTpAlgoId = rebuild.submittedTpAlgoId;
+        if (rebuild.success) {
+          modified = true;
+          clear51088RecoveryInProgress(positionCycleId);
+          return true;
+        }
+        if (rebuild.hardBlock) return false;
       }
       return false;
     };
 
-    // [BLOCKER-3-2] Track algoIds from successful submits — OKX confirms the order even
-    // before it propagates to the pending scan (short visibility window).
-    let submittedSlAlgoId: string | null = null;
-    let submittedTpAlgoId: string | null = null;
+    if (slOnlyOcoRebuild && engineOwnedSl?.algoId && activeTpPrice) {
+      submittedProtective = true;
+      const rebuild = await this.executeSlOnlyOcoRebuildTransaction({
+        instId,
+        open,
+        flowId,
+        reconcileCtx,
+        protectiveInventory: currentProtectiveInventory,
+        oldSlAlgoId: String(engineOwnedSl.algoId),
+        activeStopPrice,
+        activeTpPrice: activeTpPrice!,
+        tdModeUsed,
+        expectedSide,
+        hedgePosSide,
+        okxPosMode,
+        szStr,
+        slAlgoClOrdId,
+        tpRequired
+      });
+      if (rebuild.inventory) {
+        currentProtectiveInventory = rebuild.inventory;
+        reconcilePlan = planProtectiveOrderReconcile(currentProtectiveInventory, reconcileCtx);
+        engineOwnedSl = reconcilePlan.canonicalSl;
+        engineOwnedTp = reconcilePlan.canonicalTp;
+      }
+      if (rebuild.submittedSlAlgoId) submittedSlAlgoId = rebuild.submittedSlAlgoId;
+      if (rebuild.submittedTpAlgoId) submittedTpAlgoId = rebuild.submittedTpAlgoId;
+      modified = modified || rebuild.success;
+      submitOco = false;
+      needSubmitSl = false;
+      needSubmitTp = false;
+      if (rebuild.hardBlock) {
+        return { modified: false, success: false, record: { ...open, isProtectionFailed: true } };
+      }
+    }
 
     if (submitOco) {
       if (isProtectiveClOrdIdSubmitBlocked(open.symbol, open.side, slAlgoClOrdId)) {
@@ -11142,7 +11482,7 @@ export class PaperEngine {
       const pendingAfterSubmit = await this.okxDemo.getOrdersAlgoPendingAll({ instType: "SWAP", instId });
       if (pendingAfterSubmit.ok) {
         const postInventory = mergeProtectiveInventoryRows(
-          protectiveInventory,
+          currentProtectiveInventory,
           pendingAfterSubmit.value as ProtectiveAlgoRow[]
         );
         reconcilePlan = planProtectiveOrderReconcile(postInventory, reconcileCtx);
@@ -18393,10 +18733,12 @@ export class PaperEngine {
     if (this.v2DeferredEntryQueue.size > 0) {
       // position mutex 확인용 최신 포지션 로드 (async이므로 가능)
       let deferredCheckPositions: Awaited<ReturnType<typeof this.positions.loadOpenAll>> = [];
+      let deferredOpensLoadOk = true;
       try {
         deferredCheckPositions = await this.positions.loadOpenAll();
       } catch {
         deferredCheckPositions = [];
+        deferredOpensLoadOk = false;
       }
 
       const toDelete: string[] = [];
@@ -18473,6 +18815,7 @@ export class PaperEngine {
           symbol: symbolStr,
           requestedSide: deferred.side,
           openPositions: deferredCheckPositions,
+          openPositionsSourceAvailable: deferredOpensLoadOk,
           terminalExitFlowIds: this.terminalExitConsumedByFlow
         });
 
@@ -18604,6 +18947,7 @@ export class PaperEngine {
           symbol: symKey,
           requestedSide: authority.side === "long" || authority.side === "short" ? authority.side : undefined,
           openPositions: opensForBarrier,
+          openPositionsSourceAvailable: this.openPositionsBarrierSourceAvailable,
           terminalExitFlowIds: this.terminalExitConsumedByFlow
         });
         if (barrier.blocked) {
@@ -18993,7 +19337,14 @@ export class PaperEngine {
     }
 
     const max = this.config.paperMaxOpenPositions;
-    const opensRawFull = await this.positions.loadOpenAll();
+    let opensRawFull: Awaited<ReturnType<typeof this.positions.loadOpenAll>> = [];
+    try {
+      opensRawFull = await this.positions.loadOpenAll();
+      this.openPositionsBarrierSourceAvailable = true;
+    } catch {
+      opensRawFull = [];
+      this.openPositionsBarrierSourceAvailable = false;
+    }
     let openPositionsChanged = false;
     const opensRaw = opensRawFull.filter((o) => {
       const fid = `${o.symbol}:${o.side}:${o.openedAt}`;
@@ -19044,6 +19395,7 @@ export class PaperEngine {
         symbol: String(first.symbol),
         requestedSide: authority.side as "long" | "short",
         openPositions: opens,
+        openPositionsSourceAvailable: this.openPositionsBarrierSourceAvailable,
         terminalExitFlowIds: this.terminalExitConsumedByFlow
       });
       if (terminalBarrier.blocked) {
@@ -20648,6 +21000,46 @@ export class PaperEngine {
               side: intentSide,
               executionStyle,
               reason: orderTypeBlockReason
+            });
+            continue;
+          }
+
+          const entryRefPx = submitEntryPrice ?? first.lastPrice;
+          const entryRegime = (authority.regime ?? effectiveMarketSubtype ?? "RANGE") as MarketRegime;
+          const preEntryPlan = evaluatePreEntryProtectionPlan({
+            symbol: sym,
+            side: authority.side as "long" | "short",
+            entryReferencePrice: entryRefPx,
+            slPrice: stopPrice,
+            tpPrice: initialTpForRecord ?? null,
+            isV2Authority: true,
+            regime: entryRegime,
+            tickSz
+          });
+          this.logger.info(
+            "V2_PRE_ENTRY_PROTECTION_PLAN_PROOF",
+            buildPreEntryProtectionPlanProof({
+              symbol: sym,
+              side: authority.side,
+              entryReferencePrice: entryRefPx,
+              slRequired: preEntryPlan.slRequired,
+              tpRequired: preEntryPlan.tpRequired,
+              slPrice: preEntryPlan.slPrice,
+              tpPrice: preEntryPlan.tpPrice,
+              slValid: preEntryPlan.slValid,
+              tpValid: preEntryPlan.tpValid,
+              directionValid: preEntryPlan.directionValid,
+              tickRounded: preEntryPlan.tickRounded,
+              protectionPlanReady: preEntryPlan.protectionPlanReady,
+              entryBlocked: preEntryPlan.entryBlocked,
+              blockReason: preEntryPlan.blockReason
+            })
+          );
+          if (preEntryPlan.entryBlocked) {
+            this.logger.error("V2_ENTRY_BLOCKED_PRE_ENTRY_PROTECTION_PLAN", {
+              symbol: sym,
+              side: authority.side,
+              blockReason: preEntryPlan.blockReason
             });
             continue;
           }

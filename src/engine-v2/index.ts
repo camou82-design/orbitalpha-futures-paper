@@ -14,7 +14,7 @@ import {
 import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
 import { evaluateSameSideLossReentryGate } from "./state/loss-reentry-gate";
 import { applyV2ExitAuthorityInvariants, isExplicitTerminalExitReason } from "./exit/exit-authority-invariant";
-import { evaluateTerminalReentryBarrier, buildTerminalReentryBarrierProof } from "./lifecycle/terminal-reentry-barrier";
+import { evaluateTerminalReentryBarrier, buildTerminalReentryBarrierProof, resolveTerminalBarrierContext } from "./lifecycle/terminal-reentry-barrier";
 import { emitLiveExposureAuthorityProof, resolveLiveExposureAuthority } from "./live-account/exposure-authority";
 import {
     evaluateEquityAdaptiveSizing,
@@ -4074,13 +4074,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 5.55: Same-Side Loss Re-entry Hysteresis & Fresh Setup Guard
     if (v2DecisionAfterPromotion === "ENTER" && (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")) {
-        const bridgeOpens = Array.isArray((input as any).bridgeState?.openPositions)
-            ? (input as any).bridgeState.openPositions
-            : [];
+        const terminalCtx = resolveTerminalBarrierContext({
+            bridgeOpenPositions: (input as any).bridgeState?.openPositions,
+            positionStateReady: v2State.positionStateReady,
+            symbolPositionsCount: v2State.symbolPositions.length
+        });
         const terminalBarrier = evaluateTerminalReentryBarrier({
             symbol: String(input.symbol),
             requestedSide: v2SideAfterPromotion,
-            openPositions: bridgeOpens
+            openPositions: terminalCtx.openPositions,
+            openPositionsSourceAvailable: terminalCtx.openPositionsSourceAvailable
         });
         if (terminalBarrier.blocked) {
             console.warn(JSON.stringify(buildTerminalReentryBarrierProof({

@@ -457,10 +457,24 @@ const baseCtx: ProtectiveReconcileContext = {
   const barrier = evaluateTerminalReentryBarrier({
     symbol: "ETHUSDT",
     requestedSide: "long",
-    openPositions: [external]
+    openPositions: [external],
+    openPositionsSourceAvailable: true
   });
   assert.equal(barrier.blocked, false);
   pass("CASE_17_EXTERNAL_MANUAL_NO_FALSE_TERMINAL_BARRIER");
+}
+
+// CASE 18: lifecycle source unavailable => fail closed
+{
+  const barrier = evaluateTerminalReentryBarrier({
+    symbol: "BTCUSDT",
+    requestedSide: "short",
+    openPositions: [],
+    openPositionsSourceAvailable: false
+  });
+  assert.equal(barrier.blocked, true);
+  assert.equal(barrier.reason, "TERMINAL_STATE_UNAVAILABLE_FAIL_CLOSED");
+  pass("CASE_18_TERMINAL_STATE_UNAVAILABLE_FAIL_CLOSED");
 }
 
 assert.ok(isNonTerminalExitReason("TREND_HOLD_VALID"));
