@@ -12919,8 +12919,13 @@ export class PaperEngine {
         const peakUnrealized = Math.max(open.peakUnrealizedPnlPct ?? m.pnlPctNet, m.pnlPctNet);
         const currentPnlPct = m.pnlPctNet;
 
-        // V2 Breakeven logic: PnL >= 0.4% or Peak >= 0.6%
-        const beRequired = currentPnlPct >= 0.004 || peakUnrealized >= 0.006;
+        // V2 Breakeven logic: Requires genuine raw-price favorable excursion (MFE >= 0.6%)
+        // Mere recovery toward entry or current positive PnL alone MUST NOT promote stop.
+        const RAW_PRICE_BREAKEVEN_MFE_THRESHOLD = 0.006; // 0.6% raw underlying price excursion
+        const rawPriceMfe = typeof open.maxFavorableExcursionPct === "number" && Number.isFinite(open.maxFavorableExcursionPct)
+          ? open.maxFavorableExcursionPct
+          : 0;
+        const beRequired = (open.breakevenStopRequired === true) || (rawPriceMfe >= RAW_PRICE_BREAKEVEN_MFE_THRESHOLD);
         const feeBuffer = 0.0008; // 0.08% buffer for fees and slippage
         const bePrice = open.side === "long"
           ? open.entryPrice * (1 + feeBuffer)
@@ -12934,9 +12939,12 @@ export class PaperEngine {
             markPrice: closePrice,
             pnlPct: currentPnlPct,
             peakUnrealizedPnlPct: peakUnrealized,
+            rawPriceMfe,
+            rawPriceMfeThreshold: RAW_PRICE_BREAKEVEN_MFE_THRESHOLD,
+            maxFavorablePrice: open.maxFavorablePrice,
             currentStopPrice: open.stopPrice,
             requiredBreakevenStopPrice: bePrice,
-            reason: "pnl_threshold_met"
+            reason: "genuine_raw_price_mfe_threshold_met"
           });
         }
 
