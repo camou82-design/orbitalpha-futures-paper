@@ -306,6 +306,32 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const isMid = boxZone === "mid";
     const emaGap = sn.emaGap ?? 0;
 
+    let localTouchDetected = false;
+    let localOvershot = false;
+    let localReactionDetected = false;
+
+    if (isUpper) {
+        const entryPx = sn.boxHigh ?? 0;
+        for (const c of recentCandles.slice(-5)) {
+            if (c.high >= entryPx) localTouchDetected = true;
+            if (c.high > entryPx + (atr * 0.15)) localOvershot = true;
+        }
+        localReactionDetected = localTouchDetected && lastPrice < entryPx * 0.9997;
+        if (localTouchDetected && !localOvershot && localReactionDetected) {
+            reversalConfirmed = true;
+        }
+    } else if (isLower) {
+        const entryPx = sn.boxLow ?? 0;
+        for (const c of recentCandles.slice(-5)) {
+            if (c.low <= entryPx) localTouchDetected = true;
+            if (c.low < entryPx - (atr * 0.15)) localOvershot = true;
+        }
+        localReactionDetected = localTouchDetected && lastPrice > entryPx * 1.0003;
+        if (localTouchDetected && !localOvershot && localReactionDetected) {
+            reversalConfirmed = true;
+        }
+    }
+
     // --- CONTINUATION STATE MACHINE (Deadlock Resolver) ---
     const storedContinuationState = rangeContinuationStateMap.get(input.symbol);
     let cState = storedContinuationState ? { ...storedContinuationState } : {
@@ -395,14 +421,17 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         ? cState.countBoundaryPrice 
         : (cState.previousConfirmedBoxLow ?? boxLow);
 
+    const isDownTrendEvidence = judgment.trendPhase === "DOWN" || (judgment.trendPhase === "EXHAUSTION" && emaGap < 0);
+    const isUpTrendEvidence = judgment.trendPhase === "UP" || (judgment.trendPhase === "EXHAUSTION" && emaGap > 0);
+
     const isDownDeadlockCountingCondition = 
-        judgment.trendPhase === "DOWN" && 
+        isDownTrendEvidence && 
         emaGap < 0 && 
         !reversalConfirmed && 
         (lastPrice < effectiveDownBoundary || (recentClosedClose !== null && recentClosedClose < effectiveDownBoundary));
 
     const isUpDeadlockCountingCondition = 
-        judgment.trendPhase === "UP" && 
+        isUpTrendEvidence && 
         emaGap > 0 && 
         !reversalConfirmed && 
         (lastPrice > effectiveUpBoundary || (recentClosedClose !== null && recentClosedClose > effectiveUpBoundary));
@@ -558,8 +587,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             deadlockCandleAdvanced
         });
 
-        if (judgment.trendPhase === "DOWN" || judgment.trendPhase === "UP") {
-            const direction = judgment.trendPhase === "DOWN" ? "down" : "up";
+        if (isDownTrendEvidence || isUpTrendEvidence) {
+            const direction = isDownTrendEvidence ? "down" : "up";
             const dedupeKey = `${input.symbol}:${currentRunCycleId}:${direction}`;
             if (cState.lastLoggedDeadlockBreakdownRunCycleId !== dedupeKey) {
                 cState.lastLoggedDeadlockBreakdownRunCycleId = dedupeKey;
@@ -573,7 +602,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     evaluationMode: input.evaluationMode,
                     authoritativeCandleAdvancedThisCycle,
                     checks: direction === "down" ? {
-                        trendDown: judgment.trendPhase === "DOWN",
+                        trendDown: isDownTrendEvidence,
                         emaNegative: emaGap < 0,
                         noReversal: !reversalConfirmed,
                         boundaryBrokenByLastPrice: lastPrice < effectiveDownBoundary,
@@ -594,7 +623,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                         slopeAlignmentMode: "bl_or_rc_negative",
                         alignedSlopeCount: (blSlope < 0 ? 1 : 0) + (rcSlope < 0 ? 1 : 0)
                     } : {
-                        trendUp: judgment.trendPhase === "UP",
+                        trendUp: isUpTrendEvidence,
                         emaPositive: emaGap > 0,
                         noReversal: !reversalConfirmed,
                         boundaryBrokenByLastPrice: lastPrice > effectiveUpBoundary,
@@ -954,25 +983,13 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             signal = "NONE";
             reason = "Upper edge reached but short blocked by bias";
         } else {
-            const entryPx = sn.boxHigh ?? 0;
-            let touchDetected = false;
-            let overshot = false;
-
-            for (const c of recentCandles.slice(-5)) {
-                if (c.high >= entryPx) touchDetected = true;
-                if (c.high > entryPx + (atr * 0.15)) overshot = true;
-            }
-
-            const reactionDetected = touchDetected && lastPrice < entryPx * 0.9997;
-            reversalConfirmed = touchDetected && !overshot && reactionDetected;
-
             if (reversalConfirmed) {
                 signal = "SHORT_CANDIDATE";
                 reason = "Upper edge reversal identified by price reaction";
             } else {
                 signal = "WAIT_RECHECK";
-                reason = touchDetected 
-                    ? (overshot ? "Upper edge overshot; reversal invalidated" : "Upper edge touched; awaiting reaction")
+                reason = localTouchDetected 
+                    ? (localOvershot ? "Upper edge overshot; reversal invalidated" : "Upper edge touched; awaiting reaction")
                     : "Upper edge reached; awaiting touch and reaction";
                 recheckSuggested = true;
             }
@@ -983,25 +1000,13 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             signal = "NONE";
             reason = "Lower edge reached but long blocked by bias";
         } else {
-            const entryPx = sn.boxLow ?? 0;
-            let touchDetected = false;
-            let overshot = false;
-
-            for (const c of recentCandles.slice(-5)) {
-                if (c.low <= entryPx) touchDetected = true;
-                if (c.low < entryPx - (atr * 0.15)) overshot = true;
-            }
-
-            const reactionDetected = touchDetected && lastPrice > entryPx * 1.0003;
-            reversalConfirmed = touchDetected && !overshot && reactionDetected;
-
             if (reversalConfirmed) {
                 signal = "LONG_CANDIDATE";
                 reason = "Lower edge reversal identified by price reaction";
             } else {
                 signal = "WAIT_RECHECK";
-                reason = touchDetected 
-                    ? (overshot ? "Lower edge overshot; reversal invalidated" : "Lower edge touched; awaiting reaction")
+                reason = localTouchDetected 
+                    ? (localOvershot ? "Lower edge overshot; reversal invalidated" : "Lower edge touched; awaiting reaction")
                     : "Lower edge reached; awaiting touch and reaction";
                 recheckSuggested = true;
             }
