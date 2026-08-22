@@ -14,6 +14,7 @@ import {
 import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
 import { evaluateSameSideLossReentryGate } from "./state/loss-reentry-gate";
 import { applyV2ExitAuthorityInvariants, isExplicitTerminalExitReason } from "./exit/exit-authority-invariant";
+import { resolveFinalExitAuthority, buildFinalExitAuthorityProof } from "./exit/final-exit-authority";
 import { evaluateTerminalReentryBarrier, buildTerminalReentryBarrierProof, resolveTerminalBarrierContext } from "./lifecycle/terminal-reentry-barrier";
 import { emitLiveExposureAuthorityProof, resolveLiveExposureAuthority } from "./live-account/exposure-authority";
 import {
@@ -5920,25 +5921,61 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             lifecyclePosition_latest.tp2Triggered = true;
         }
 
-        // Bridge back to v2ExitAuthority and v2PartialAuthority if managed by V2
-        if (lifecycleAuthority.exitManagedByV2 && lifecycleAuthority.exitAction === "exit") {
-            if (isExplicitTerminalExitReason(lifecycleAuthority.exitReason)) {
-                v2ExitAuthority = {
-                    ...v2ExitAuthority,
-                    exitAction: "exit",
-                    shouldExit: true,
-                    exitReason: lifecycleAuthority.exitReason ?? null,
-                    exitUrgency: "medium"
-                };
-            }
-        }
-        if (lifecycleAuthority.partialManagedByV2 && lifecycleAuthority.partialAction === "reduce") {
+        // Canonical Final Exit Authority Resolution (Phase D/E.5 runtime wiring)
+        const finalExitAuth = resolveFinalExitAuthority({
+            symbol: String(input.symbol),
+            side: (Array.isArray(input.state?.currentPositions) && input.state.currentPositions.find(p => p && p.symbol === input.symbol)?.side as any) ?? "none",
+            policyResult: {
+                action: exitPolicy.action,
+                reason: exitPolicy.reason,
+                shouldExit: exitPolicy.shouldExit,
+                shouldReduce: exitPolicy.shouldReduce,
+                shouldPartial: exitPolicy.shouldPartial,
+                reduceRatio: exitPolicy.reduceRatio
+            },
+            lifecycleResult: {
+                exitAction: lifecycleAuthority.exitManagedByV2 ? lifecycleAuthority.exitAction : null,
+                exitReason: lifecycleAuthority.exitManagedByV2 ? lifecycleAuthority.exitReason : null,
+                partialAction: lifecycleAuthority.partialManagedByV2 ? lifecycleAuthority.partialAction : null,
+                partialReason: lifecycleAuthority.partialManagedByV2 ? lifecycleAuthority.partialReason : null,
+                reduceRatio: lifecycleAuthority.reduceRatio ?? undefined
+            },
+            riskResult: {
+                action: v2ExitAuthority.exitAction,
+                reason: v2ExitAuthority.exitReason,
+                shouldExit: v2ExitAuthority.shouldExit
+            },
+            timestamp: input.now
+        });
+
+        if (finalExitAuth.action === "FULL_EXIT") {
+            v2ExitAuthority = {
+                ...v2ExitAuthority,
+                exitAction: "exit",
+                shouldExit: true,
+                exitReason: finalExitAuth.terminalReason,
+                exitUrgency: v2ExitAuthority.exitUrgency || "medium"
+            };
+        } else if (finalExitAuth.action === "PARTIAL_REDUCE") {
             v2PartialAuthority = {
                 ...v2PartialAuthority,
                 partialAction: "protect_profit",
                 shouldPartial: true,
-                partialReason: lifecycleAuthority.partialReason || v2PartialAuthority.partialReason,
-                reduceRatio: lifecycleAuthority.reduceRatio || v2PartialAuthority.reduceRatio
+                partialReason: finalExitAuth.reduceReason || v2PartialAuthority.partialReason,
+                reduceRatio: finalExitAuth.reduceRatio || v2PartialAuthority.reduceRatio
+            };
+            v2ExitAuthority = {
+                ...v2ExitAuthority,
+                exitAction: "none",
+                shouldExit: false,
+                exitReason: finalExitAuth.policyReason
+            };
+        } else {
+            v2ExitAuthority = {
+                ...v2ExitAuthority,
+                exitAction: "none",
+                shouldExit: false,
+                exitReason: finalExitAuth.policyReason
             };
         }
 

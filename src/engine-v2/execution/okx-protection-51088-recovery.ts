@@ -1,6 +1,11 @@
 import type { ProtectiveReconcileContext } from "./protective-reconcile-plan";
 import type { ProtectiveAlgoRow } from "./protective-reconcile-plan";
 import { planProtectiveOrderReconcile } from "./protective-reconcile-plan";
+import {
+    resolveDesiredProtectionPlan,
+    resolveExchangeProtectionTruth,
+    planProtectionReconcile as planCanonicalProtectionReconcile
+} from "./final-protection-authority";
 
 export const OKX_FULL_POSITION_TP_SL_CONFLICT = "51088";
 
@@ -37,6 +42,33 @@ export function evaluateOkx51088ProtectionRecovery(input: Readonly<{
     reconcileCtx: ProtectiveReconcileContext;
     tpRequired: boolean;
 }>): Okx51088RecoveryResult {
+    // 1. Canonical Desired & Exchange Truth Resolution (Phase E/E.5 runtime wiring)
+    const desired = resolveDesiredProtectionPlan({
+        symbol: input.reconcileCtx.instId.split("-")[0] || "BTCUSDT",
+        side: input.reconcileCtx.positionSide,
+        contracts: input.reconcileCtx.contractsToProtect,
+        slPrice: input.reconcileCtx.activeStopPrice,
+        tpPrice: input.reconcileCtx.activeTpPrice,
+        isV2Authority: true
+    });
+
+    const actual = resolveExchangeProtectionTruth({
+        symbol: desired.symbol,
+        instId: input.reconcileCtx.instId,
+        side: input.reconcileCtx.positionSide,
+        actualContracts: input.reconcileCtx.contractsToProtect,
+        authoritativeFetchReady: true,
+        pendingAlgos: input.inventory,
+        desiredPlan: desired,
+        tickSz: input.reconcileCtx.tickSz
+    });
+
+    const canonicalPlan = planCanonicalProtectionReconcile({
+        desired,
+        actual,
+        has51088Error: true
+    });
+
     const plan = planProtectiveOrderReconcile([...input.inventory], input.reconcileCtx);
     const slAlgoId = plan.canonicalSlAlgoId;
     const tpAlgoId = plan.canonicalTpAlgoId;
