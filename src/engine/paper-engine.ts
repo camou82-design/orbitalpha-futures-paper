@@ -5982,6 +5982,13 @@ export class PaperEngine {
     const btc1m = btc1m_r.ok ? btc1m_r.value : [];
     const btc1m_atr = btc1m.length > 20 ? atrWilderLast(btc1m, 14) : null;
 
+    const mappedBoxBreakSide: "up" | "down" | "none" =
+      regimeDetected.boxBreakSide === "upper"
+        ? "up"
+        : regimeDetected.boxBreakSide === "lower"
+        ? "down"
+        : "none";
+
     const nowStateTs = Date.now();
     this.lastRisk = evaluateRiskControls({
       config: this.config,
@@ -5990,7 +5997,9 @@ export class PaperEngine {
       priorState: this.lastRisk,
       globalCandles: btc1m,
       globalAtr: btc1m_atr,
-      rangeConfidence: regimeDetected.rangeConfidence
+      rangeConfidence: regimeDetected.rangeConfidence,
+      regimeExitRisk: regimeDetected.regimeExitRisk,
+      boxBreakSide: mappedBoxBreakSide
     });
     const risk = this.lastRisk;
 
