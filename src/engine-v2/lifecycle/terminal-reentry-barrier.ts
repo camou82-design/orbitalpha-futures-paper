@@ -1,4 +1,21 @@
 import type { PaperOpenPositionRecord } from "../../models/types";
+import {
+    resolvePositionLifecycleTruth,
+    rowHasClosePending,
+    rowHasTerminalTransition,
+    type PositionLifecycleState,
+    type PositionLifecycleTruthInput,
+    type PositionLifecycleTruthResult
+} from "./position-lifecycle-truth";
+
+export {
+    resolvePositionLifecycleTruth,
+    rowHasClosePending,
+    rowHasTerminalTransition,
+    type PositionLifecycleState,
+    type PositionLifecycleTruthInput,
+    type PositionLifecycleTruthResult
+};
 
 export type TerminalReentryBarrierResult = Readonly<{
     blocked: boolean;
@@ -9,26 +26,13 @@ export type TerminalReentryBarrierResult = Readonly<{
     terminalFillConfirmed: boolean;
     lossStateCommitted: boolean;
     positionCycleId: string | null;
+    lifecycleState?: PositionLifecycleState;
+    lifecycleSource?: string;
 }>;
 
-function rowHasClosePending(row: PaperOpenPositionRecord): boolean {
-    if (row.closePendingOrdId && String(row.closePendingOrdId).trim().length > 0) return true;
-    if (row.closePendingClOrdId && String(row.closePendingClOrdId).trim().length > 0) return true;
-    if (row.lifecycleState === "CLOSE_PENDING") return true;
-    if (row.lifecycleState === "CLOSE_ONLY_MANAGED" && row.closePendingAt != null) return true;
-    return false;
-}
-
-function rowHasTerminalTransition(row: PaperOpenPositionRecord): boolean {
-    if (row.finalizePending === true) return true;
-    if (rowHasClosePending(row)) return true;
-    if (row.lifecycleState === "PARTIAL_PENDING" && rowHasClosePending(row)) return true;
-    if (row.pendingFinalizeFlowId && String(row.pendingFinalizeFlowId).trim().length > 0) return true;
-    return false;
-}
-
 /**
- * Blocks new entry on a symbol while any prior position cycle is still in terminal close / finalize.
+ * Entry policy barrier consuming canonical lifecycle truth.
+ * Blocks new entry on a symbol while any prior position cycle is still in terminal close / finalize transition.
  */
 export function evaluateTerminalReentryBarrier(input: Readonly<{
     symbol: string;
@@ -38,76 +42,30 @@ export function evaluateTerminalReentryBarrier(input: Readonly<{
     actualOkxPositionExists?: boolean;
     terminalExitFlowIds?: ReadonlySet<string>;
 }>): TerminalReentryBarrierResult {
-    if (input.openPositionsSourceAvailable === false) {
-        return {
-            blocked: true,
-            reason: "TERMINAL_STATE_UNAVAILABLE_FAIL_CLOSED",
-            closePending: false,
-            finalizePending: false,
-            actualPositionExists: input.actualOkxPositionExists === true,
-            terminalFillConfirmed: false,
-            lossStateCommitted: false,
-            positionCycleId: null
-        };
-    }
+    const truth = resolvePositionLifecycleTruth({
+        symbol: input.symbol,
+        requestedSide: input.requestedSide,
+        openPositions: input.openPositions,
+        openPositionsSourceAvailable: input.openPositionsSourceAvailable,
+        actualOkxPositionExists: input.actualOkxPositionExists,
+        terminalExitFlowIds: input.terminalExitFlowIds
+    });
 
-    const sym = String(input.symbol).toUpperCase();
-    const rows = input.openPositions.filter(
-        (r) => String(r.symbol).toUpperCase() === sym && (r.status ?? "open") === "open"
-    );
+    const blocked = truth.hasTerminalTransition;
+    const reason = truth.hasTerminalTransition ? truth.reason : "NO_TERMINAL_TRANSITION";
 
-    const none: TerminalReentryBarrierResult = {
-        blocked: false,
-        reason: "NO_TERMINAL_TRANSITION",
-        closePending: false,
-        finalizePending: false,
-        actualPositionExists: input.actualOkxPositionExists === true,
-        terminalFillConfirmed: false,
-        lossStateCommitted: false,
-        positionCycleId: null
+    return {
+        blocked,
+        reason,
+        closePending: truth.closePending,
+        finalizePending: truth.finalizePending,
+        actualPositionExists: truth.actualPositionExists,
+        terminalFillConfirmed: truth.terminalFillConfirmed,
+        lossStateCommitted: truth.lossStateCommitted,
+        positionCycleId: truth.positionCycleId,
+        lifecycleState: truth.lifecycleState,
+        lifecycleSource: truth.source
     };
-
-    if (rows.length === 0) return none;
-
-    for (const row of rows) {
-        const flowId = `${row.symbol}:${row.side}:${row.openedAt}`;
-        if (input.terminalExitFlowIds?.has(flowId)) {
-            return {
-                blocked: true,
-                reason: "TERMINAL_EXIT_CONSUMED_AWAITING_FINALIZE",
-                closePending: rowHasClosePending(row),
-                finalizePending: row.finalizePending === true,
-                actualPositionExists: input.actualOkxPositionExists === true,
-                terminalFillConfirmed: row.finalizePending === true,
-                lossStateCommitted: row.finalizePending === true,
-                positionCycleId: row.positionCycleId ?? row.pendingFinalizePositionCycleId ?? null
-            };
-        }
-    }
-
-    for (const row of rows) {
-        if (!rowHasTerminalTransition(row)) continue;
-
-        const closePending = rowHasClosePending(row);
-        const finalizePending = row.finalizePending === true;
-        let reason = "TERMINAL_CYCLE_IN_PROGRESS";
-        if (finalizePending && closePending) reason = "FINALIZE_PENDING_WITH_CLOSE_PENDING";
-        else if (finalizePending) reason = "FINALIZE_PENDING_AWAITING_OKX_FLAT";
-        else if (closePending) reason = "CLOSE_PENDING_AWAITING_FILL";
-
-        return {
-            blocked: true,
-            reason,
-            closePending,
-            finalizePending,
-            actualPositionExists: input.actualOkxPositionExists === true,
-            terminalFillConfirmed: finalizePending || closePending,
-            lossStateCommitted: finalizePending,
-            positionCycleId: row.positionCycleId ?? row.pendingFinalizePositionCycleId ?? null
-        };
-    }
-
-    return none;
 }
 
 export function buildTerminalReentryBarrierProof(input: Record<string, unknown>): Record<string, unknown> {
