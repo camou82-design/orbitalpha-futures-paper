@@ -4,7 +4,8 @@ import { planProtectiveOrderReconcile } from "./protective-reconcile-plan";
 import {
     resolveDesiredProtectionPlan,
     resolveExchangeProtectionTruth,
-    planProtectionReconcile as planCanonicalProtectionReconcile
+    planProtectionReconcile as planCanonicalProtectionReconcile,
+    resolveFinalProtectionAuthority
 } from "./final-protection-authority";
 
 export const OKX_FULL_POSITION_TP_SL_CONFLICT = "51088";
@@ -69,6 +70,14 @@ export function evaluateOkx51088ProtectionRecovery(input: Readonly<{
         has51088Error: true
     });
 
+    const finalAuth = resolveFinalProtectionAuthority({
+        symbol: desired.symbol,
+        side: desired.side,
+        desired,
+        actual,
+        reconcilePlan: canonicalPlan
+    });
+
     const plan = planProtectiveOrderReconcile([...input.inventory], input.reconcileCtx);
     const slAlgoId = plan.canonicalSlAlgoId;
     const tpAlgoId = plan.canonicalTpAlgoId;
@@ -78,7 +87,7 @@ export function evaluateOkx51088ProtectionRecovery(input: Readonly<{
     const canonicalTpFound = tpAlgoId != null;
     const slOk = canonicalSlFound;
     const tpOk = !input.tpRequired || canonicalTpFound;
-    const finalProtectionSatisfied = slOk && tpOk;
+    const finalProtectionSatisfied = finalAuth.protectionComplete || (slOk && tpOk);
 
     if (finalProtectionSatisfied) {
         return {

@@ -1,5 +1,11 @@
 import type { ProtectiveAlgoRow } from "./protective-reconcile-plan";
 import { planProtectiveOrderReconcile, type ProtectiveReconcileContext } from "./protective-reconcile-plan";
+import {
+    resolveDesiredProtectionPlan,
+    resolveExchangeProtectionTruth,
+    planProtectionReconcile as planCanonicalProtectionReconcile,
+    resolveFinalProtectionAuthority
+} from "./final-protection-authority";
 
 export type ProtectiveRebuildTransactionProof = Readonly<{
     symbol: string;
@@ -47,15 +53,48 @@ export function evaluateAuthoritativeProtectionPresence(input: Readonly<{
     tpAlgoId: string | null;
     protectionSatisfied: boolean;
 }> {
+    const desired = resolveDesiredProtectionPlan({
+        symbol: input.reconcileCtx.instId.split("-")[0] || "BTCUSDT",
+        side: input.reconcileCtx.positionSide,
+        contracts: input.reconcileCtx.contractsToProtect,
+        slPrice: input.reconcileCtx.activeStopPrice,
+        tpPrice: input.reconcileCtx.activeTpPrice,
+        isV2Authority: true
+    });
+
+    const actual = resolveExchangeProtectionTruth({
+        symbol: desired.symbol,
+        instId: input.reconcileCtx.instId,
+        side: input.reconcileCtx.positionSide,
+        actualContracts: input.reconcileCtx.contractsToProtect,
+        authoritativeFetchReady: true,
+        pendingAlgos: input.inventory,
+        desiredPlan: desired,
+        tickSz: input.reconcileCtx.tickSz
+    });
+
+    const reconcilePlan = planCanonicalProtectionReconcile({
+        desired,
+        actual
+    });
+
+    const finalAuth = resolveFinalProtectionAuthority({
+        symbol: desired.symbol,
+        side: desired.side,
+        desired,
+        actual,
+        reconcilePlan
+    });
+
     const plan = planProtectiveOrderReconcile([...input.inventory], input.reconcileCtx);
-    const slPresent = plan.canonicalSlAlgoId != null;
-    const tpPresent = plan.canonicalTpAlgoId != null;
-    const protectionSatisfied = slPresent && (!input.tpRequired || tpPresent);
+    const slPresent = actual.actualSlPresent;
+    const tpPresent = actual.actualTpPresent;
+    const protectionSatisfied = finalAuth.protectionComplete;
     return {
         slPresent,
         tpPresent,
-        slAlgoId: plan.canonicalSlAlgoId,
-        tpAlgoId: plan.canonicalTpAlgoId,
+        slAlgoId: actual.actualSlAlgoId,
+        tpAlgoId: actual.actualTpAlgoId,
         protectionSatisfied
     };
 }

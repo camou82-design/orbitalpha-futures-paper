@@ -59,8 +59,9 @@ export function resolveDesiredProtectionPlan(
     const isV2 = context.isV2Authority !== false;
     const isTrend = context.regime === "TREND";
 
-    const slRequired = isV2; // In BOT_V2_MANAGED, SL is mandatory
-    const tpRequired = isV2; // In BOT_V2_MANAGED, TP is mandatory (server OCO TP)
+    const hasContracts = typeof context.contracts === "number" && context.contracts > 0;
+    const slRequired = isV2 && hasContracts; // In BOT_V2_MANAGED, SL is mandatory when position has contracts
+    const tpRequired = isV2 && hasContracts; // In BOT_V2_MANAGED, TP is mandatory when position has contracts
 
     const slPrice = context.slPrice;
     const tpPrice = context.tpPrice;
