@@ -113,6 +113,9 @@ export function evaluateRiskControls(input: Readonly<{
   let pumpState: PumpState = "NONE";
   let pumpReason: string | null = null;
   let pumpLockUntil = input.priorState?.pumpLockUntil ?? 0;
+  const priorPumpLockUntil = pumpLockUntil;
+  let pumpLockReleased = false;
+  let reversalReleaseEligible = false;
   let directionalShockState: DirectionalShockState = "NONE";
   let isLatePursuit = false;
   let isLateChase = false;
@@ -169,7 +172,18 @@ export function evaluateRiskControls(input: Readonly<{
       }
     }
 
-    if (pumpLockUntil > now) {
+    reversalReleaseEligible =
+      pumpLockUntil > now &&
+      globalPump.state !== "PUMP_EXIT" &&
+      globalPump.state !== "PUMP_REDUCE" &&
+      stateOrder(globalCrash.state) >= stateOrder("CRASH_ALERT");
+
+    if (reversalReleaseEligible) {
+      pumpLockUntil = 0;
+      pumpLockReleased = true;
+      pumpState = globalPump.state;
+      pumpReason = globalPump.reason;
+    } else if (pumpLockUntil > now) {
       pumpState = "PUMP_LOCK";
       pumpReason = "급등 후 숏 진입 제한 대기 중";
     } else if (globalPump.state !== "NONE") {
@@ -200,6 +214,10 @@ export function evaluateRiskControls(input: Readonly<{
       else if (pumpState === "PUMP_REDUCE") shortSizeMult *= 0.22;
       else if (pumpState === "PUMP_EXIT" || pumpState === "PUMP_LOCK") shortSizeMult *= 0.1;
       if (isLateChase) longSizeMult *= 0.35;
+    }
+
+    if (priorPumpLockUntil > now || reversalReleaseEligible) {
+      console.log(`[RISK] PUMP_LOCK_REVERSAL_RELEASE_PROOF | prior_pump_lock_until: ${priorPumpLockUntil} | now: ${now} | global_pump_state: ${globalPump.state} | global_crash_state: ${globalCrash.state} | reversal_release_eligible: ${reversalReleaseEligible} | pump_lock_released: ${pumpLockReleased} | pump_state_after: ${pumpState} | directional_shock_state_after: ${directionalShockState} | long_allow_after: ${longAllow} | short_allow_after: ${shortAllow}`);
     }
   }
 
@@ -364,6 +382,8 @@ export function evaluateRiskControls(input: Readonly<{
       late_pursuit: isLatePursuit,
       late_chase: isLateChase,
       pump_lock_until: pumpLockUntil,
+      pump_lock_released: pumpLockReleased,
+      reversal_release_eligible: reversalReleaseEligible,
       crash_lock_until: crashLockUntil
     }
   };

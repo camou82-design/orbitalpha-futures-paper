@@ -6,7 +6,8 @@
     "tests/test-deadlock-continuation.ts",
     "tests/test-promoted-entry-risk-plan.ts",
     "tests/test-promoted-entry-risk-plan-integration.ts",
-    "tests/test-continuation-micro-probe.ts"
+    "tests/test-continuation-micro-probe.ts",
+    "tests/test-pump-lock-reversal-release.ts"
   ],
   "compilerOptions": {
     "noEmit": true,
