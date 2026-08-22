@@ -21973,77 +21973,15 @@ export class PaperEngine {
                 : null;
 
           if (authority.source === "v2") {
-            const v2DecisionObj = (res as any).v2Decision ?? (res as any).decision;
-            if (!v2DecisionObj || !v2CommittedRiskPlan) {
-              this.logger.error("V2_ENTRY_BLOCKED_PROTECTION_PLAN_OR_DECISION_MISSING", {
-                symbol: first.symbol,
-                reason: "FAIL_CLOSED_V2_MISSING_PLAN_OR_DECISION"
-              });
-              trace.open_fail_stage = "v2_plan_or_decision_missing";
-              emitPositionOpenTraceFinal();
-              logPaperPositionOpenFailed();
-              continue; // FAIL-CLOSED!
-            }
-
-            const rawPlan = v2DecisionObj.committedRiskPlan;
-
-            if (!rawPlan) {
-              this.logger.error("V2_ENTRY_BLOCKED_COMMITTED_PLAN_MISSING", {
-                symbol: first.symbol,
-                reason: "FAIL_CLOSED_V2_COMMITTED_PLAN_MISSING"
-              });
-              trace.open_fail_stage = "v2_committed_plan_missing";
-              emitPositionOpenTraceFinal();
-              logPaperPositionOpenFailed();
-              continue; // FAIL-CLOSED!
-            }
-
-            // Requirement 3: Strict match validation with decision (Zero fallback, zero re-assembly!)
-            const planValid =
-              rawPlan.symbol === String(first.symbol) &&
-              rawPlan.side === v2DecisionObj.side &&
-              rawPlan.action === v2DecisionObj.executionAction &&
-              rawPlan.ts === v2DecisionObj.ts &&
-              typeof v2DecisionObj.risk?.finalOrderNotionalUsdt === "number" &&
-              rawPlan.finalOrderNotionalUsdt === v2DecisionObj.risk.finalOrderNotionalUsdt;
-
-            if (!planValid) {
-              this.logger.error("V2_ENTRY_BLOCKED_COMMITTED_PLAN_MISMATCH", {
-                symbol: first.symbol,
-                reason: "FAIL_CLOSED_V2_COMMITTED_PLAN_MISMATCH",
-                planSymbol: rawPlan.symbol, decisionSymbol: first.symbol,
-                planSide: rawPlan.side, decisionSide: v2DecisionObj.side,
-                planAction: rawPlan.action, decisionAction: v2DecisionObj.executionAction,
-                planTs: rawPlan.ts, decisionTs: v2DecisionObj.ts,
-                planNotional: rawPlan.finalOrderNotionalUsdt, decisionNotional: v2DecisionObj.risk?.finalOrderNotionalUsdt
-              });
-              trace.open_fail_stage = "v2_committed_plan_mismatch";
-              emitPositionOpenTraceFinal();
-              logPaperPositionOpenFailed();
-              continue; // FAIL-CLOSED! Do not reassemble or correct!
-            }
-
-            const bridgeRes = await this.executeAuthorizedV2Action({
+            this.logger.error("V2_LEGACY_ENTRY_PATH_FORBIDDEN", {
               symbol: first.symbol,
-              v2Decision: v2DecisionObj,
-              lastPrice: first.lastPrice,
-              committedRiskPlan: rawPlan
+              authority_source: authority.source,
+              note: "V2 orders must execute strictly through V2 Authoritative Fast-Path. Legacy bridge path is fail-closed."
             });
-
-            this.logger.info("V2_ENTER_ORDER_PATH_PROOF", {
-              symbol: first.symbol,
-              run_cycle_id: this.runCycleId,
-              decision_id: (authority as any).decision_id ?? null,
-              side,
-              posSide,
-              executed: bridgeRes.executed,
-              block_reason: bridgeRes.blockReason ?? null,
-              pending_only: bridgeRes.pendingOnly ?? false
-            });
-
-            // V2 executeAuthorizedV2Action owns order submission, ledger write, and protective stop.
-            // DO NOT fall through to legacy position push & protective stop creation! Immediately continue.
-            continue;
+            trace.open_fail_stage = "v2_legacy_path_forbidden";
+            emitPositionOpenTraceFinal();
+            logPaperPositionOpenFailed();
+            continue; // FAIL-CLOSED! Never submit V2 via legacy path!
           }
 
           submit = await this.submitOkxOrder({
@@ -23779,132 +23717,16 @@ export class PaperEngine {
     lastPrice: number;
     committedRiskPlan: import("../engine-v2/types").V2CommittedRiskPlan;
   }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null; updatedRecord?: PaperOpenPositionRecord; pendingOnly?: boolean }> {
-    const { symbol, v2Decision, lastPrice, committedRiskPlan } = args;
+    const { symbol, v2Decision } = args;
 
-    // BTC Suppressor: only when real operational conflict exists (not blanket symbol block)
-    if (symbol === "BTCUSDT" && this.isBtcEntrySubmitBlocked(v2Decision.decision, v2Decision.side ?? "none")) {
-      await this.logAndSuppressBtcUsdtAction("v2_authorized_entry", v2Decision.side ?? "none", ["ENTER", "ADDON", "ORDER_SUBMIT"]);
-      console.log("EXECUTE_AUTH_FAIL", "BTCUSDT_EXECUTION_SUPPRESSOR_ACTIVE");
-      return { executed: false, blockReason: "BTCUSDT_EXECUTION_SUPPRESSOR_ACTIVE" };
-    }
-
-    // Requirement 1: executionAction strictly from v2Decision. NO RE-INFERRING!
-    const executionAction = v2Decision.executionAction;
-    if (!executionAction || (executionAction !== "ENTER" && executionAction !== "ADDON")) {
-      console.log("EXECUTE_AUTH_FAIL", "ORDER_BUILD_FAIL_ACTION_INVALID");
-      return { executed: false, blockReason: "ORDER_BUILD_FAIL_ACTION_INVALID" };
-    }
-
-    // Requirement 2: committedRiskPlan is MANDATORY. Zero re-assembly fallback from v2Decision!
-    if (!committedRiskPlan) {
-      console.log("EXECUTE_AUTH_FAIL", "ORDER_BUILD_FAIL_NO_PLAN");
-      return { executed: false, blockReason: "ORDER_BUILD_FAIL_NO_PLAN" };
-    }
-
-    const plan = committedRiskPlan;
-
-    // Requirement 2: Strict match of symbol, side, action with v2Decision
-    if (plan.symbol !== symbol || plan.side !== v2Decision.side || plan.action !== executionAction) {
-      console.log("EXECUTE_AUTH_FAIL", "ORDER_BUILD_FAIL_MISMATCH");
-      return { executed: false, blockReason: "ORDER_BUILD_FAIL_MISMATCH" };
-    }
-
-    if (typeof v2Decision.risk?.finalOrderNotionalUsdt === "number" && v2Decision.risk.finalOrderNotionalUsdt > 0) {
-      if (Math.abs(plan.finalOrderNotionalUsdt - v2Decision.risk.finalOrderNotionalUsdt) > 1e-4) {
-        console.log("EXECUTE_AUTH_FAIL", "ORDER_BUILD_FAIL_NOTIONAL_MISMATCH");
-        return { executed: false, blockReason: "ORDER_BUILD_FAIL_NOTIONAL_MISMATCH" };
-      }
-    }
-
-    // Requirement 2: Timestamp & ageMs validation (0 <= ageMs <= 60000). No missing, infinite, or future timestamp!
-    const nowTs = Date.now();
-    if (typeof plan.ts !== "number" || !Number.isFinite(plan.ts)) {
-      console.log("EXECUTE_AUTH_FAIL", "ORDER_BUILD_FAIL_TS_INVALID");
-      return { executed: false, blockReason: "ORDER_BUILD_FAIL_TS_INVALID" };
-    }
-    const ageMs = nowTs - plan.ts;
-    if (ageMs < 0 || ageMs > 60000) {
-      console.log("EXECUTE_AUTH_FAIL", "ORDER_BUILD_FAIL_AGE", ageMs);
-      return { executed: false, blockReason: "ORDER_BUILD_FAIL_AGE" };
-    }
-
-    // Requirement 2: Strict parameter validation without fallbacks (NO invalidationPx ?? stopPrice)
-    const finalOrderNotionalUsdt = plan.finalOrderNotionalUsdt;
-    const appliedLeverage = plan.appliedLeverage;
-    const sideCandidate = plan.side;
-    const stopPrice = plan.stopPrice;
-    const invalidationPx = plan.invalidationPx;
-
-    const notionalValid = typeof finalOrderNotionalUsdt === "number" && Number.isFinite(finalOrderNotionalUsdt) && finalOrderNotionalUsdt > 0;
-    const leverageValid = typeof appliedLeverage === "number" && Number.isFinite(appliedLeverage) && appliedLeverage >= 1 && appliedLeverage <= 125;
-    const stopValid = typeof stopPrice === "number" && Number.isFinite(stopPrice) && stopPrice > 0 &&
-      (sideCandidate === "long" ? stopPrice < lastPrice : stopPrice > lastPrice);
-    const invalidationValid = typeof invalidationPx === "number" && Number.isFinite(invalidationPx) && invalidationPx > 0 &&
-      (sideCandidate === "long" ? invalidationPx < lastPrice : invalidationPx > lastPrice);
-
-    if (!notionalValid || !leverageValid || !stopValid || !invalidationValid || !sideCandidate || (sideCandidate as string) === "none") {
-      const br = `ORDER_BUILD_FAIL_PARAMS_${notionalValid}_${leverageValid}_${stopValid}_${invalidationValid}`;
-      console.log("EXECUTE_AUTH_FAIL", br);
-      return { executed: false, blockReason: br };
-    }
-
-    if (!this.okxDemo || this.signedSubmitMode() !== "enabled") {
-      console.log("EXECUTE_AUTH_FAIL", "SIGNED_EXECUTION_NOT_READY", !!this.okxDemo, this.signedSubmitMode());
-      return { executed: false, blockReason: "SIGNED_EXECUTION_NOT_READY" };
-    }
-
-    // Condition 5 & 7: Check pending orders. If active pending order exists for symbol, block duplicate order!
-    const pendingList: any[] = (await (this.store as any)?.readPendingEntryOrders?.()) ?? [];
-    const activePendingForSymbol = pendingList.find((p: any) => p && p.symbol === symbol && p.status !== "filled" && p.status !== "cancelled");
-    if (activePendingForSymbol) {
-      console.log("EXECUTE_AUTH_FAIL", "ACTIVE_PENDING_ORDER_EXISTS");
-      return { executed: false, blockReason: "ACTIVE_PENDING_ORDER_EXISTS" };
-    }
-
-    const existingPositions = await this.positions.loadOpenAll();
-    const existingProtectionPending = existingPositions.find((p) => p.symbol === symbol && (p.status as any) === "PROTECTION_PENDING");
-    if (existingProtectionPending) {
-      console.log("EXECUTE_AUTH_FAIL", "PROTECTION_PENDING");
-      return { executed: false, blockReason: "PROTECTION_PENDING" };
-    }
-    const existing = existingPositions.find((p) => p.symbol === symbol && (p.status ?? "open") === "open");
-
-    // Condition 6: Position authority check
-    if (executionAction === "ENTER" && existing) {
-      console.log("EXECUTE_AUTH_FAIL", "POSITION_AUTHORITY_MISMATCH");
-      return { executed: false, blockReason: "POSITION_AUTHORITY_MISMATCH" };
-    }
-    if (executionAction === "ADDON") {
-      if (!existing) {
-        return { executed: false, blockReason: "NO_EXISTING_POSITION_FOR_ADDON" };
-      }
-      if (existing.side !== sideCandidate) {
-        return { executed: false, blockReason: "ADDON_SIDE_MISMATCH" };
-      }
-    }
-
-    const sharedParams = {
+    // Defensive Guard: Legacy V2 bridge path is deprecated & fail-closed
+    this.logger.error("V2_LEGACY_ENTRY_PATH_FORBIDDEN", {
       symbol,
-      sideCandidate: sideCandidate as "long" | "short",
-      finalOrderNotionalUsdt,
-      appliedLeverage,
-      stopPrice,
-      invalidationPx,
-      lastPrice,
-      existing,
-      existingPositions,
-      v2Decision,
-      pendingList
-    };
-
-    switch (executionAction) {
-      case "ENTER":
-        return this.executeAuthorizedV2Entry(sharedParams);
-      case "ADDON":
-        return this.executeAuthorizedV2Addon(sharedParams);
-      default:
-        return { executed: false, blockReason: "NO_EXECUTION_ACTION" };
-    }
+      decision: v2Decision?.decision,
+      execution_action: v2Decision?.executionAction,
+      note: "executeAuthorizedV2Action is forbidden for direct live execution."
+    });
+    return { executed: false, blockReason: "V2_LEGACY_ENTRY_PATH_FORBIDDEN" };
   }
 
   // Common Entry execution handler (Requirement 2, 4)
