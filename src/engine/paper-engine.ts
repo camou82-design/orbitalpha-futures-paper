@@ -7111,8 +7111,8 @@ export class PaperEngine {
         const missingKey =
           refinedMissingCondition != null && typeof refinedMissingCondition === "string" ? refinedMissingCondition : "";
         const nextFromAuditKey =
-          (vetoKey && noEntryAuditNextByVetoOrMissing[vetoKey]) ||
           (missingKey && noEntryAuditNextByVetoOrMissing[missingKey]) ||
+          (vetoKey && noEntryAuditNextByVetoOrMissing[vetoKey]) ||
           null;
         if (nextFromAuditKey != null) {
           refinedNextAction = nextFromAuditKey;
