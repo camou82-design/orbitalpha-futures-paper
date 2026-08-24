@@ -171,7 +171,7 @@ function longBreakoutRetestConfirmed(ctx: RangeBoundaryContinuationContext): boo
 
 function htfAllowsShort(ctx: RangeBoundaryContinuationContext, strongConfirmationOk: boolean): boolean {
     const policy = String(ctx.htfEntryPolicy ?? "").trim().toUpperCase();
-    if (policy === "LONG_ONLY_OR_NONE" || policy === "LONG_ONLY" || policy === "HOLD") return false;
+    if (policy === "LONG_ONLY_OR_NONE" || policy === "LONG_ONLY" || policy === "HOLD" || policy === "NEUTRAL_HTF_DATA_WAIT") return false;
     if (ctx.counterTrendRisk && ctx.htfRequiresStrongerConfirmation && !strongConfirmationOk) return false;
     if (ctx.htfRequiresStrongerConfirmation && !strongConfirmationOk) return false;
     return (
@@ -179,14 +179,13 @@ function htfAllowsShort(ctx: RangeBoundaryContinuationContext, strongConfirmatio
         policy === "SHORT_ONLY" ||
         policy === "BOTH" ||
         policy === "ALLOW" ||
-        policy === "PROBE_ONLY" ||
-        policy === "NEUTRAL_HTF_DATA_WAIT"
+        policy === "PROBE_ONLY"
     );
 }
 
 function htfAllowsLong(ctx: RangeBoundaryContinuationContext, strongConfirmationOk: boolean): boolean {
     const policy = String(ctx.htfEntryPolicy ?? "").trim().toUpperCase();
-    if (policy === "SHORT_ONLY_OR_NONE" || policy === "SHORT_ONLY" || policy === "HOLD") return false;
+    if (policy === "SHORT_ONLY_OR_NONE" || policy === "SHORT_ONLY" || policy === "HOLD" || policy === "NEUTRAL_HTF_DATA_WAIT") return false;
     if (ctx.counterTrendRisk && ctx.htfRequiresStrongerConfirmation && !strongConfirmationOk) return false;
     if (ctx.htfRequiresStrongerConfirmation && !strongConfirmationOk) return false;
     return (
@@ -194,8 +193,7 @@ function htfAllowsLong(ctx: RangeBoundaryContinuationContext, strongConfirmation
         policy === "LONG_ONLY" ||
         policy === "BOTH" ||
         policy === "ALLOW" ||
-        policy === "PROBE_ONLY" ||
-        policy === "NEUTRAL_HTF_DATA_WAIT"
+        policy === "PROBE_ONLY"
     );
 }
 

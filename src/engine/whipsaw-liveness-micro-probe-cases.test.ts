@@ -27,7 +27,8 @@
 import { detectMarketRegime } from "../engine-v2/market-judgment/detector";
 import { clearWhipsawObservationState, whipsawObservationAuthority, updateWhipsawObservation } from "../engine-v2/market-judgment/whipsaw-observer";
 import { adaptV2Input, runEngineV2, marketJudgmentCacheBySymbol } from "../engine-v2/index";
-import { clearGlobalShockStates } from "../engine-v2/state/derive";
+import { clearGlobalShockStates, globalShockStates } from "../engine-v2/state/derive";
+import { evaluateLowerBreakdownShortConfirmed } from "../engine-v2/range-boundary-continuation";
 import { rangeContinuationStateMap } from "../engine-v2/executors/range-executor";
 import { resolveSymbolDecisionEnvelope } from "../engine-v2/reconciler";
 import { buildV2SnapshotBridge } from "./paper-engine";
@@ -1646,6 +1647,16 @@ function makeBaseInput(
   clearGlobalShockStates();
   marketJudgmentCacheBySymbol.clear();
 
+  // 1. Seed episode to 6 ticks so it releases to soft watch
+  for (let i = 1; i <= 6; i++) {
+    updateWhipsawObservation({
+      symbol: "BTCUSDT",
+      rawActive: true,
+      directionalShockState: "DOWN",
+      structuralHits: ["micro_down_then_rebound", "box_orbit_chop"]
+    });
+  }
+
   const now = Date.now();
   const watchBoundary = 69000;
 
@@ -1675,7 +1686,7 @@ function makeBaseInput(
       boxHighSlope: -0.003,
       emaGap: -0.002,
       qualityScore: 65,
-      trendWeaknessScore: 0.55,
+      trendWeaknessScore: 0.3,
       reviewing_ticks: 0,
       boxBreakSide: "none",
       breakoutFailureRate: 0.1,
@@ -1690,11 +1701,27 @@ function makeBaseInput(
       }
     },
     {
-      directionalShockState: "DOWN",
+      directionalShockState: "NONE", // Production case: directionalShock is NONE
       shortAllow: true,
       longAllow: false,
       signedExecutionReady: true,
-      paperExecutionReady: true
+      paperExecutionReady: true,
+      okxAuthMode: "live",
+      okxAuthReady: true,
+      okxExchangeAuthOptIn: true,
+      okxLiveEnabled: true,
+      liveBalanceReady: true,
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 10000,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true,
+      okxPendingOrdersReady: true,
+      okxPendingOrdersNotionalUsdt: 0,
+      okxPendingSymbolNotionalUsdt: 0,
+      okxActualPositions: [],
+      balanceFetchedAt: Date.now(),
+      positionsFetchedAt: Date.now(),
+      pendingOrdersFetchedAt: Date.now()
     },
     "BEARISH"
   );
@@ -1710,7 +1737,9 @@ function makeBaseInput(
       decision.decision === "ENTER" &&
       decision.side === "short" &&
       meta.promotionReason === "CONTINUATION_MICRO_PROBE" &&
-      meta.micro_probe_active === true,
+      meta.micro_probe_active === true &&
+      decision.committedRiskPlan != null &&
+      Number(decision.committedRiskPlan.finalOrderNotionalUsdt) > 0,
     `PROBE_ONLY allows short micro probe on confirmed breakdown. htfPolicy=${judgment.htf_entry_policy}, decision=${decision.decision}, side=${decision.side}, promoReason=${meta.promotionReason}`
   );
 }
@@ -1770,7 +1799,7 @@ function makeBaseInput(
       }
     },
     {
-      directionalShockState: "DOWN",
+      directionalShockState: "NONE",
       shortAllow: true,
       longAllow: false,
       signedExecutionReady: true,
@@ -1832,7 +1861,7 @@ function makeBaseInput(
       boxHighSlope: 0.005,
       emaGap: -0.002,
       qualityScore: 65,
-      trendWeaknessScore: 0.55,
+      trendWeaknessScore: 0.3,
       reviewing_ticks: 0,
       boxBreakSide: "none",
       breakoutFailureRate: 0.1,
@@ -1847,7 +1876,7 @@ function makeBaseInput(
       }
     },
     {
-      directionalShockState: "DOWN",
+      directionalShockState: "NONE",
       shortAllow: true,
       longAllow: false,
       signedExecutionReady: true,
@@ -1942,7 +1971,7 @@ function makeBaseInput(
     "TEST_EE_HTF_HOLD_BULLISH_MACRO_FORBIDS_PROBE",
     judgment.htf_entry_policy === "HOLD" &&
       decision.decision !== "ENTER" &&
-      meta.micro_probe_block_reason === "HTF_POLICY_NOT_SHORT",
+      (meta.micro_probe_block_reason === "SHOCK_PHASE_ACTIVE" || meta.micro_probe_block_reason === "HTF_POLICY_NOT_SHORT"),
     `HTF HOLD strictly forbids short probe. htfPolicy=${judgment.htf_entry_policy}, decision=${decision.decision}, blockReason=${meta.micro_probe_block_reason}`
   );
 }
@@ -2001,7 +2030,484 @@ function makeBaseInput(
   );
 }
 
-console.log("\nALL 33 WHIPSAW LIVENESS, HTF CONTRARIAN & PROBE_ONLY TESTS PASSED (TEST A - TEST FF)!");
+// =========================================================================
+// TEST GG (Item 8.2) — INVALID FALLBACK TIMESTAMP => BLOCKED
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const watchBoundary = 69000;
+
+  rangeContinuationStateMap.set("BTCUSDT", {
+    direction: "down",
+    phase: "CONTINUATION_WATCH",
+    watchStartedCandleTs: 0, // INVALID timestamp
+    watchStartedAtTimestamp: 0,
+    watchBoundaryPrice: watchBoundary,
+    countStartedCandleTs: null,
+    countBoundaryPrice: null,
+    hasCandleAdvancedDuringCount: false,
+    totalCyclesSinceWatch: 0
+  } as any);
+
+  const microCandles = makeMicroDownReboundCandles(68930);
+
+  const inputInvalidTs = makeBaseInput(
+    "BTCUSDT",
+    {
+      lastPrice: 68930,
+      closedClose: 68920,
+      atr: 250,
+      atr20: 250,
+      boxLowSlope: -0.003,
+      rangeCenterSlope: -0.003,
+      boxHighSlope: -0.003,
+      emaGap: -0.002,
+      qualityScore: 65,
+      trendWeaknessScore: 0.55,
+      candles: microCandles,
+      canonicalRegime: "RANGE",
+      htf_candles: {
+        "5m": mockBearishCandles,
+        "15m": mockBearishCandles,
+        "1h": mockBearishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "NONE",
+      shortAllow: true,
+      longAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    },
+    "BEARISH"
+  );
+
+  const res = runEngineV2(inputInvalidTs);
+  const meta = res.decision.metadata ?? {};
+
+  run(
+    "TEST_GG_INVALID_FALLBACK_TIMESTAMP_BLOCKED",
+    res.decision.decision !== "ENTER" &&
+      meta.micro_probe_block_reason === "WATCH_STARTED_CANDLE_TS_INVALID",
+    `Invalid fallback timestamp blocks probe. decision=${res.decision.decision}, blockReason=${meta.micro_probe_block_reason}`
+  );
+}
+
+// =========================================================================
+// TEST HH (Item 8.3) — INVALID/MISSING FALLBACK DIRECTION => BLOCKED
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const now = Date.now();
+  const watchBoundary = 69000;
+
+  rangeContinuationStateMap.set("BTCUSDT", {
+    direction: "none", // INVALID direction
+    phase: "CONTINUATION_WATCH",
+    watchStartedCandleTs: now - 60000,
+    watchStartedAtTimestamp: now - 1000,
+    watchBoundaryPrice: watchBoundary,
+    countStartedCandleTs: null,
+    countBoundaryPrice: null,
+    hasCandleAdvancedDuringCount: false,
+    totalCyclesSinceWatch: 0
+  } as any);
+
+  const microCandles = makeMicroDownReboundCandles(68930);
+
+  const inputInvalidDir = makeBaseInput(
+    "BTCUSDT",
+    {
+      lastPrice: 68930,
+      closedClose: 68920,
+      atr: 250,
+      atr20: 250,
+      boxLowSlope: -0.003,
+      rangeCenterSlope: -0.003,
+      boxHighSlope: -0.003,
+      emaGap: -0.002,
+      qualityScore: 65,
+      trendWeaknessScore: 0.55,
+      candles: microCandles,
+      canonicalRegime: "RANGE",
+      htf_candles: {
+        "5m": mockBearishCandles,
+        "15m": mockBearishCandles,
+        "1h": mockBearishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "NONE",
+      shortAllow: true,
+      longAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    },
+    "BEARISH"
+  );
+
+  const res = runEngineV2(inputInvalidDir);
+  const meta = res.decision.metadata ?? {};
+
+  run(
+    "TEST_HH_INVALID_FALLBACK_DIRECTION_BLOCKED",
+    res.decision.decision !== "ENTER" &&
+      meta.micro_probe_block_reason === "CONTINUATION_DIRECTION_INVALID",
+    `Invalid fallback direction blocks probe. decision=${res.decision.decision}, blockReason=${meta.micro_probe_block_reason}`
+  );
+}
+
+// =========================================================================
+// TEST II (Item 8.4) — STALE FALLBACK (> 10 MIN) => BLOCKED
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const now = Date.now();
+  const watchBoundary = 69000;
+
+  rangeContinuationStateMap.set("BTCUSDT", {
+    direction: "down",
+    phase: "CONTINUATION_WATCH",
+    watchStartedCandleTs: now - 15 * 60 * 1000,
+    watchStartedAtTimestamp: now - 15 * 60 * 1000, // 15 mins ago (> 10m)
+    watchBoundaryPrice: watchBoundary,
+    countStartedCandleTs: null,
+    countBoundaryPrice: null,
+    hasCandleAdvancedDuringCount: false,
+    totalCyclesSinceWatch: 0
+  } as any);
+
+  const microCandles = makeMicroDownReboundCandles(68930);
+
+  const inputStale = makeBaseInput(
+    "BTCUSDT",
+    {
+      lastPrice: 68930,
+      closedClose: 68920,
+      atr: 250,
+      atr20: 250,
+      boxLowSlope: -0.003,
+      rangeCenterSlope: -0.003,
+      boxHighSlope: -0.003,
+      emaGap: -0.002,
+      qualityScore: 65,
+      trendWeaknessScore: 0.55,
+      candles: microCandles,
+      canonicalRegime: "RANGE",
+      htf_candles: {
+        "5m": mockBearishCandles,
+        "15m": mockBearishCandles,
+        "1h": mockBearishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "NONE",
+      shortAllow: true,
+      longAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    },
+    "BEARISH"
+  );
+
+  const res = runEngineV2(inputStale);
+  const meta = res.decision.metadata ?? {};
+
+  run(
+    "TEST_II_STALE_FALLBACK_BLOCKED",
+    res.decision.decision !== "ENTER" &&
+      meta.micro_probe_block_reason === "CONTINUATION_CONTEXT_STALE",
+    `Stale fallback context (> 10m) blocks probe. decision=${res.decision.decision}, blockReason=${meta.micro_probe_block_reason}`
+  );
+}
+
+// =========================================================================
+// TEST JJ (Item 8.5) — NEUTRAL_HTF_DATA_WAIT => BLOCKED
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  for (let i = 1; i <= 6; i++) {
+    updateWhipsawObservation({
+      symbol: "BTCUSDT",
+      rawActive: true,
+      directionalShockState: "DOWN",
+      structuralHits: ["micro_down_then_rebound", "box_orbit_chop"]
+    });
+  }
+
+  const now = Date.now();
+  const watchBoundary = 69000;
+
+  rangeContinuationStateMap.set("BTCUSDT", {
+    direction: "down",
+    phase: "CONTINUATION_WATCH",
+    watchStartedCandleTs: now - 60000,
+    watchStartedAtTimestamp: now - 1000,
+    watchBoundaryPrice: watchBoundary,
+    countStartedCandleTs: null,
+    countBoundaryPrice: null,
+    hasCandleAdvancedDuringCount: false,
+    totalCyclesSinceWatch: 0
+  } as any);
+
+  const microCandles = makeMicroDownReboundCandles(68930);
+
+  const inputDataWait = makeBaseInput(
+    "BTCUSDT",
+    {
+      lastPrice: 68930,
+      closedClose: 68920,
+      atr: 250,
+      atr20: 250,
+      boxLowSlope: -0.003,
+      rangeCenterSlope: -0.003,
+      boxHighSlope: -0.003,
+      emaGap: -0.002,
+      qualityScore: 65,
+      trendWeaknessScore: 0.55,
+      candles: microCandles,
+      canonicalRegime: "RANGE",
+      htf_candles: {
+        "5m": [], // Empty HTF candles -> NEUTRAL_HTF_DATA_WAIT
+        "15m": [],
+        "1h": [],
+        "4h": []
+      }
+    },
+    {
+      directionalShockState: "NONE",
+      shortAllow: true,
+      longAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    },
+    "BEARISH"
+  );
+
+  const res = runEngineV2(inputDataWait);
+  const judgment = res.internal.judgment;
+
+  // Direct boundary continuation engine test: NEUTRAL_HTF_DATA_WAIT must not allow entry
+  const directContResult = evaluateLowerBreakdownShortConfirmed({
+    trendSideCandidate: "short",
+    zone: "lower",
+    boxBreakSide: "lower",
+    boxLow: 69000,
+    boxHigh: 69500,
+    closedClose: 68920,
+    lastPrice: 68930,
+    previousConfirmedBoxLow: null,
+    previousConfirmedBoxHigh: null,
+    emaGap: -0.002,
+    htfEntryPolicy: "NEUTRAL_HTF_DATA_WAIT",
+    htfRequiresStrongerConfirmation: false,
+    counterTrendRisk: false,
+    riskLongAllow: false,
+    riskShortAllow: true,
+    allowNewLong: false,
+    allowNewShort: true,
+    whipsawShockRecheckActive: false,
+    hardBlockPresent: false,
+    paperExecutionReady: true,
+    signedExecutionReady: true,
+    hasSameSidePosition: false,
+    hasOppositeSidePosition: false,
+    judgmentSubtype: "WHIPSAW_SOFT_WATCH",
+    rangePhase: null,
+    transitionPhase: null,
+    continuationDirection: "down",
+    continuationPhase: "CONTINUATION_WATCH",
+    retestConfirmed: true,
+    reversalConfirmed: false
+  } as any);
+
+  run(
+    "TEST_JJ_NEUTRAL_HTF_DATA_WAIT_BLOCKED",
+    judgment.htf_entry_policy === "NEUTRAL_HTF_DATA_WAIT" &&
+      res.decision.decision !== "ENTER" &&
+      directContResult.confirmed === false,
+    `NEUTRAL_HTF_DATA_WAIT blocks micro probe. htfPolicy=${judgment.htf_entry_policy}, decision=${res.decision.decision}, directContConfirmed=${directContResult.confirmed}`
+  );
+}
+
+// =========================================================================
+// TEST KK (Item 8.7) — OPPOSITE SHOCK => BLOCKED
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const now = Date.now();
+  const watchBoundary = 69000;
+
+  globalShockStates.set("BTCUSDT", {
+    activeDirection: "UP",
+    rawDirection: "UP",
+    candidateDirection: "UP",
+    candidateCount: 2,
+    neutralCount: 0,
+    candidateStartedAt: now - 60000,
+    activatedAt: now - 30000,
+    lastChangedAt: now - 30000,
+    rawMovePct: 0.05,
+    requiredMovePct: 0.001,
+    emergencyBypass: true,
+    lastProcessedCycle: 0
+  });
+
+  rangeContinuationStateMap.set("BTCUSDT", {
+    direction: "down",
+    phase: "CONTINUATION_WATCH",
+    watchStartedCandleTs: now - 65000,
+    watchStartedAtTimestamp: now - 1000,
+    watchBoundaryPrice: watchBoundary,
+    countStartedCandleTs: null,
+    countBoundaryPrice: null,
+    hasCandleAdvancedDuringCount: false,
+    totalCyclesSinceWatch: 0
+  } as any);
+
+  const microCandles = makeMicroDownReboundCandles(68930);
+
+  const inputOppositeShock = makeBaseInput(
+    "BTCUSDT",
+    {
+      lastPrice: 68930,
+      closedClose: 68920,
+      atr: 250,
+      atr20: 250,
+      boxLowSlope: -0.003,
+      rangeCenterSlope: -0.003,
+      boxHighSlope: -0.003,
+      emaGap: -0.002,
+      qualityScore: 65,
+      trendWeaknessScore: 0.3,
+      candles: microCandles,
+      canonicalRegime: "RANGE",
+      htf_candles: {
+        "5m": mockBearishCandles,
+        "15m": mockBearishCandles,
+        "1h": mockBearishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "UP", // UP shock when breakdown occurred
+      shortAllow: true,
+      longAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    },
+    "BEARISH"
+  );
+  (inputOppositeShock.state as any).directionalShockState = "UP";
+
+  const res = runEngineV2(inputOppositeShock);
+  const meta = res.decision.metadata ?? {};
+  const judgment = res.internal?.judgment;
+
+  run(
+    "TEST_KK_OPPOSITE_SHOCK_BLOCKED",
+    res.decision.decision !== "ENTER" &&
+      (judgment?.shockPhase === "UP_SHOCK" || meta.micro_probe_block_reason === "SHOCK_PHASE_ACTIVE"),
+    `Opposite shock blocks micro probe. decision=${res.decision.decision}, shockPhase=${judgment?.shockPhase}, blockReason=${meta.micro_probe_block_reason}`
+  );
+}
+
+// =========================================================================
+// TEST LL (Item 8.8) — AUTHORITATIVE finalOrderNotionalUsdt=0 + stageMarginKrw>0 IN LIVE => BLOCKED
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const now = Date.now();
+  const watchBoundary = 69000;
+
+  rangeContinuationStateMap.set("BTCUSDT", {
+    direction: "down",
+    phase: "CONTINUATION_WATCH",
+    watchStartedCandleTs: now - 60000,
+    watchStartedAtTimestamp: now - 1000,
+    watchBoundaryPrice: watchBoundary,
+    countStartedCandleTs: null,
+    countBoundaryPrice: null,
+    hasCandleAdvancedDuringCount: false,
+    totalCyclesSinceWatch: 0
+  } as any);
+
+  const microCandles = makeMicroDownReboundCandles(68930);
+
+  const inputZeroNotional = makeBaseInput(
+    "BTCUSDT",
+    {
+      lastPrice: 68930,
+      closedClose: 68920,
+      atr: 250,
+      atr20: 250,
+      boxLowSlope: -0.003,
+      rangeCenterSlope: -0.003,
+      boxHighSlope: -0.003,
+      emaGap: -0.002,
+      qualityScore: 65,
+      trendWeaknessScore: 0.55,
+      candles: microCandles,
+      canonicalRegime: "RANGE",
+      htf_candles: {
+        "5m": mockBearishCandles,
+        "15m": mockBearishCandles,
+        "1h": mockBearishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "NONE",
+      shortAllow: true,
+      longAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true,
+      okxAuthMode: "live",
+      okxExchangeAuthOptIn: true,
+      okxLiveEnabled: true,
+      liveBalanceReady: true,
+      accountEquityUsdt: 0, // Zero equity -> finalOrderNotionalUsdt = 0
+      availableBalanceUsdt: 0,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true
+    },
+    "BEARISH"
+  );
+
+  const res = runEngineV2(inputZeroNotional);
+  const decision = res.decision;
+
+  run(
+    "TEST_LL_AUTHORITATIVE_ZERO_NOTIONAL_IN_LIVE_BLOCKED",
+    decision.decision !== "ENTER" &&
+      decision.committedRiskPlan === undefined &&
+      (Number(decision.risk.finalOrderNotionalUsdt ?? 0) === 0),
+    `Zero notional in live mode prevents ENTER and does not manufacture committedRiskPlan. decision=${decision.decision}, plan=${decision.committedRiskPlan}`
+  );
+}
+
+console.log("\nALL 39 WHIPSAW LIVENESS, HTF CONTRARIAN & PROBE_ONLY TESTS PASSED (TEST A - TEST LL)!");
 
 
 
