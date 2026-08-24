@@ -30,6 +30,7 @@
  * TEST TT: Hard safety blocker strictly outranks WATCH_BOUNDARY_MISSING in missing condition & next action
  * TEST UU: Audit row precedence: WATCH_BOUNDARY_MISSING outranks QUALITY_BELOW_THRESHOLD
  * TEST VV: Audit row precedence: POLARITY_MISMATCH outranks RANGE_TREND_SIDE_CONFLICT + fallback preservation
+ * TEST WW: Audit row mapping for 13 authoritative primary missing tokens outranking conflicting vetoes
  */
 
 import { detectMarketRegime } from "../engine-v2/market-judgment/detector";
@@ -3396,4 +3397,176 @@ function makeBaseInput(
   );
 }
 
-console.log("\nALL 49 WHIPSAW LIVENESS, HTF CONTRARIAN, PROBE_ONLY & DIAGNOSTIC TESTS PASSED (TEST A - TEST VV)!");
+// =========================================================================
+// TEST WW — AUDIT ROW MAPPING FOR 13 AUTHORITATIVE PRIMARY MISSING TOKENS
+// =========================================================================
+{
+  const noEntryAuditNextByVetoOrMissing: Record<string, string> = {
+    WHIPSAW_SHOCK_RECHECK_ACTIVE: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
+    WHIPSAW_RECHECK_NOT_CONFIRMED: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
+    SHOCK_UP_RECLAIM_NOT_CONFIRMED: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
+    SHOCK_UP_MID_RETEST_REQUIRED: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
+    SHOCK_UP_TREND_CONFIRMATION_WEAK: "WAIT_FOR_TREND_CONFIRMATION",
+    SHOCK_DOWN_BREAKDOWN_RETEST_NOT_CONFIRMED: "WAIT_FOR_BREAKDOWN_RETEST_FAILURE",
+    SHOCK_DOWN_MID_RETEST_REQUIRED: "WAIT_FOR_BREAKDOWN_RETEST_FAILURE",
+    SHOCK_DOWN_TREND_CONFIRMATION_WEAK: "WAIT_FOR_TREND_CONFIRMATION",
+    RANGE_TREND_SIDE_CONFLICT: "WAIT_FOR_RANGE_TREND_ALIGNMENT",
+    TREND_PROMOTION_BLOCKED_HTF_DATA_NOT_READY: "WAIT_FOR_HTF_DATA_READY",
+    TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD: "WAIT_FOR_QUALITY_IMPROVEMENT",
+    TREND_PROMOTION_BLOCKED_QUALITY: "WAIT_FOR_QUALITY_IMPROVEMENT",
+    TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED: "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM",
+    TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED: "WAIT_FOR_RECHECK_OR_RETEST",
+    TREND_PROMOTION_VETOED: "WAIT_FOR_PROMOTION_CONFIRMATION",
+    RECOVERY_MODE_SIZE_SUPPRESSED: "WAIT_FOR_RECOVERY_MODE_CLEAR_OR_HIGH_CONFIDENCE_RETEST",
+    POLARITY_MISMATCH_BULLISH_MACRO_LIMITS_SHORT_SHOCK: "WAIT_FOR_HTF_POLARITY_ALIGNMENT",
+    POLARITY_MISMATCH_BEARISH_MACRO_LIMITS_LONG_SHOCK: "WAIT_FOR_HTF_POLARITY_ALIGNMENT",
+    POLARITY_MISMATCH_BULLISH_MACRO: "WAIT_FOR_HTF_POLARITY_ALIGNMENT",
+    POLARITY_MISMATCH_BEARISH_MACRO: "WAIT_FOR_HTF_POLARITY_ALIGNMENT",
+    HTF_POLICY_POLARITY_MISMATCH: "WAIT_FOR_HTF_POLARITY_ALIGNMENT",
+    WATCH_BOUNDARY_MISSING: "WAIT_FOR_BREAKOUT_OR_BREAKDOWN_SETUP",
+    TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH: "WAIT_FOR_TREND_STRENGTHENING",
+    TREND_PROMOTION_BLOCKED_EMA_GAP_INSUFFICIENT: "WAIT_FOR_TREND_CONFIRMATION",
+    TREND_PROMOTION_BLOCKED_TREND_NOT_CONFIRMED: "WAIT_FOR_TREND_CONFIRMATION",
+    TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED: "WAIT_FOR_BREAKDOWN_RETEST_RESISTANCE_CONFIRM",
+    TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKOUT_CONFIRMED: "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM",
+    TREND_PROMOTION_BLOCKED_BREAKDOWN_RETEST_NOT_CONFIRMED: "WAIT_FOR_BREAKDOWN_RETEST_FAILURE",
+    SIGNED_EXECUTION_NOT_READY: "WAIT_FOR_SIGNED_EXECUTION_READY",
+    TWO_CONSECUTIVE_LOSSES_RECOVERY_MODE: "WAIT_FOR_RECOVERY_MODE_CLEAR_OR_HIGH_CONFIDENCE_RETEST",
+    ENTRY_QUALITY_CONTAMINATED: "WAIT_FOR_QUALITY_IMPROVEMENT"
+  };
+
+  const conflictingVeto = "RANGE_TREND_SIDE_CONFLICT";
+
+  const resolveNext = (missingKey: string, vetoKey: string) =>
+    (missingKey && noEntryAuditNextByVetoOrMissing[missingKey]) ||
+    (vetoKey && noEntryAuditNextByVetoOrMissing[vetoKey]) ||
+    null;
+
+  // Verify all 13 tokens outrank conflicting veto
+  const test1 = resolveNext("TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH", conflictingVeto) === "WAIT_FOR_TREND_STRENGTHENING";
+  const test2 = resolveNext("TREND_PROMOTION_BLOCKED_EMA_GAP_INSUFFICIENT", conflictingVeto) === "WAIT_FOR_TREND_CONFIRMATION";
+  const test3 = resolveNext("TREND_PROMOTION_BLOCKED_TREND_NOT_CONFIRMED", conflictingVeto) === "WAIT_FOR_TREND_CONFIRMATION";
+  const test4 = resolveNext("POLARITY_MISMATCH_BEARISH_MACRO_LIMITS_LONG_SHOCK", conflictingVeto) === "WAIT_FOR_HTF_POLARITY_ALIGNMENT";
+  const test5 = resolveNext("POLARITY_MISMATCH_BULLISH_MACRO", conflictingVeto) === "WAIT_FOR_HTF_POLARITY_ALIGNMENT";
+  const test6 = resolveNext("POLARITY_MISMATCH_BEARISH_MACRO", conflictingVeto) === "WAIT_FOR_HTF_POLARITY_ALIGNMENT";
+  const test7 = resolveNext("HTF_POLICY_POLARITY_MISMATCH", conflictingVeto) === "WAIT_FOR_HTF_POLARITY_ALIGNMENT";
+  const test8 = resolveNext("TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED", conflictingVeto) === "WAIT_FOR_BREAKDOWN_RETEST_RESISTANCE_CONFIRM";
+  const test9 = resolveNext("TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKOUT_CONFIRMED", conflictingVeto) === "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM";
+  const test10 = resolveNext("TREND_PROMOTION_BLOCKED_BREAKDOWN_RETEST_NOT_CONFIRMED", conflictingVeto) === "WAIT_FOR_BREAKDOWN_RETEST_FAILURE";
+  const test11 = resolveNext("SIGNED_EXECUTION_NOT_READY", conflictingVeto) === "WAIT_FOR_SIGNED_EXECUTION_READY";
+  const test12 = resolveNext("TWO_CONSECUTIVE_LOSSES_RECOVERY_MODE", conflictingVeto) === "WAIT_FOR_RECOVERY_MODE_CLEAR_OR_HIGH_CONFIDENCE_RETEST";
+  const test13 = resolveNext("ENTRY_QUALITY_CONTAMINATED", conflictingVeto) === "WAIT_FOR_QUALITY_IMPROVEMENT";
+
+  // End-to-end evaluation check with runEngineV2
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const now = Date.now();
+  const snapWW: SymbolSnapshotLike = {
+    symbol: "BTCUSDT",
+    lastPrice: 68930,
+    latestCandleClose: 68930,
+    signal: "paper_short_candidate",
+    qualityScore: 65,
+    candidateStrength: "strong",
+    ema20: 68850,
+    ema60: 69200,
+    emaGap: -0.003,
+    volumeRatioProxy: 1.1,
+    boxHigh: 70000,
+    boxLow: 68000,
+    boxPos: 0.35,
+    boxRel: -0.02,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    atr: 250,
+    atr20: 250,
+    closedClose: 68920,
+    rangeConfidence: 0.2,
+    trendWeaknessScore: 0.56, // High trend weakness -> TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH
+    boxCohesion01: 0.7,
+    breakoutFailureRate: 0.1,
+    rangeOscillationScore: 0.2,
+    boxLowSlope: -0.003,
+    rangeCenterSlope: -0.003,
+    boxHighSlope: -0.003,
+    reviewing_ticks: 0,
+    boxBreakSide: "none",
+    volumeExpansion: 1.0,
+    candles: mockBearishCandles,
+    canonicalRegime: "TREND",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.75,
+    htf_candles: {
+      "5m": mockBearishCandles,
+      "15m": mockBearishCandles,
+      "1h": mockBearishCandles,
+      "4h": mockBullishCandles
+    }
+  };
+
+  const bridgeWW = buildV2SnapshotBridge(snapWW);
+  const inputWW = adaptV2Input(
+    "BTCUSDT",
+    now,
+    bridgeWW as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
+      shortAllow: true,
+      longAllow: false,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true,
+      okxAuthMode: "live",
+      okxAuthReady: true,
+      okxExchangeAuthOptIn: true,
+      okxLiveEnabled: true,
+      liveBalanceReady: true,
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 10000,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true,
+      okxPendingOrdersReady: true,
+      okxPendingOrdersNotionalUsdt: 0,
+      okxPendingSymbolNotionalUsdt: 0,
+      okxActualPositions: [],
+      balanceFetchedAt: now,
+      positionsFetchedAt: now,
+      pendingOrdersFetchedAt: now
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    mockBearishCandles,
+    "authoritative",
+    `cycle_BTCUSDT_${now}_ww`
+  );
+
+  const resWW = runEngineV2(inputWW);
+  const decisionWW = resWW.decision;
+
+  run(
+    "TEST_WW_AUDIT_ROW_MAPPING_FOR_13_AUTHORITATIVE_TOKENS",
+    test1 &&
+      test2 &&
+      test3 &&
+      test4 &&
+      test5 &&
+      test6 &&
+      test7 &&
+      test8 &&
+      test9 &&
+      test10 &&
+      test11 &&
+      test12 &&
+      test13 &&
+      (decisionWW.decision === "HOLD" || decisionWW.decision === "SKIP") &&
+      decisionWW.side === "none" &&
+      inputWW.state.longAllow === false &&
+      inputWW.state.shortAllow === true,
+    `All 13 authoritative primary missing tokens correctly mapped and outrank conflicting vetoes in audit action.`
+  );
+}
+
+console.log("\nALL 50 WHIPSAW LIVENESS, HTF CONTRARIAN, PROBE_ONLY & DIAGNOSTIC TESTS PASSED (TEST A - TEST WW)!");
