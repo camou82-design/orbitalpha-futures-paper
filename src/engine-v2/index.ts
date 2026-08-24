@@ -3435,10 +3435,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
 
     // --- V2_RANGE_TREND_CONFLICT_RESOLUTION_PROOF ---
+    // Tier 4.8: Conflict Resolution (Range vs Trend)
     const localConflict =
-        rangeSideCandidate && trendSideCandidate &&
+        activeEngineRouting === "RANGE" &&
         rangeSideCandidate !== "none" && trendSideCandidate !== "none" &&
         rangeSideCandidate !== trendSideCandidate;
+
+    const candlesForStairStep = input.candles ?? input.snapshot.candles;
+    const stairStepResult = detectStairStepStructure({
+        candles: candlesForStairStep,
+        snapshot: input.snapshot,
+        judgment
+    });
 
     let conflictResolvedUpperShort = false;
     let conflictResolvedTrendLong = false;
@@ -3447,7 +3455,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     if (localConflict && zone === "upper") {
         const stopPrice = execution.stopPrice;
-        if (stopPrice == null || isNaN(stopPrice) || stopPrice <= 0) {
+        const stairStepUpConfirmed = stairStepResult.detected === true && stairStepResult.direction === "UP" && stairStepResult.reclaim_or_rejection_confirmed === true;
+        if (!stairStepUpConfirmed && (stopPrice == null || isNaN(stopPrice) || stopPrice <= 0)) {
             conflictResolutionAction = "skip";
             conflictResolutionReason = "stop_price_invalid_or_null";
             v2DecisionAfterPromotion = "SKIP";
@@ -3524,6 +3533,105 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             action: conflictResolutionAction,
             reason: conflictResolutionReason
         }));
+    }
+
+    // -------------------------------------------------------------------------
+    // Tier 4.9: STAIR-STEP CONTINUATION PROMOTION (Symmetric UP / DOWN)
+    // -------------------------------------------------------------------------
+
+    let stairStepPromoted = false;
+    let stairStepPromotionReason: string | null = null;
+
+    const isRangeFamily =
+        activeEngineRouting === "RANGE" ||
+        judgment.regime === "RANGE" ||
+        String(judgment.subtype).startsWith("RANGE") ||
+        judgment.subtype === "ASCENDING_CHANNEL" ||
+        judgment.subtype === "DESCENDING_CHANNEL";
+
+    if (
+        !promotionApplied &&
+        isRangeFamily &&
+        v2DecisionBeforePromotion !== "REJECT" &&
+        qualityScore >= 70 &&
+        (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD") &&
+        stairStepResult.detected === true &&
+        stairStepResult.confidence >= 0.7 &&
+        stairStepResult.reclaim_or_rejection_confirmed === true
+    ) {
+        const macroPolarity = judgment.macroPolarity ?? "NEUTRAL";
+        const htfPolicy = judgment.htf_entry_policy ?? "ALLOW";
+        const htfHardBlock = judgment.htf_hard_block_reason ?? "";
+        const entryPx = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+        const atrVal = Number(authoritativeInput.snapshot.atr ?? 0);
+        const candleArr = candlesForStairStep ?? [];
+
+        // UP Evaluation
+        if (stairStepResult.direction === "UP") {
+            const htfVetoLong = htfPolicy === "SHORT_ONLY_OR_NONE" || (htfPolicy === "HOLD" && htfHardBlock === "STRONG_BEARISH_HTF_ALIGNMENT") || macroPolarity === "BEARISH";
+            if (!htfVetoLong && entryPx > 0) {
+                const stopDist = Math.max(atrVal * 1.5, entryPx * 0.005);
+                let stopPx = entryPx - stopDist;
+
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = "long";
+                promotionApplied = true;
+                promotionReason = "V2_STAIR_STEP_CONTINUATION_PROMOTION";
+                v2CalculatedInvalidationPx = stopPx;
+                v2RejectReasonAfterPromotion = null;
+                stairStepPromoted = true;
+                stairStepPromotionReason = "STAIR_STEP_UP_RECLAIM_CONFIRMED";
+                execMeta.entryReason = "V2_STAIR_STEP_CONTINUATION_PROMOTION";
+                execMeta.stair_step_promoted = true;
+
+                console.info(JSON.stringify({
+                    event: "V2_STAIR_STEP_PROMOTION_PROOF",
+                    symbol: String(input.symbol),
+                    direction: "UP",
+                    side: "long",
+                    entryPx,
+                    stopPx,
+                    htfPolicy,
+                    macroPolarity,
+                    confidence: stairStepResult.confidence,
+                    decision: "ENTER",
+                    promotion_reason: promotionReason
+                }));
+            }
+        }
+        // DOWN Evaluation (Exact Symmetric Inverse)
+        else if (stairStepResult.direction === "DOWN") {
+            const htfVetoShort = htfPolicy === "LONG_ONLY_OR_NONE" || (htfPolicy === "HOLD" && htfHardBlock === "STRONG_BULLISH_HTF_ALIGNMENT") || macroPolarity === "BULLISH";
+            if (!htfVetoShort && entryPx > 0) {
+                const stopDist = Math.max(atrVal * 1.5, entryPx * 0.005);
+                let stopPx = entryPx + stopDist;
+
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = "short";
+                promotionApplied = true;
+                promotionReason = "V2_STAIR_STEP_CONTINUATION_PROMOTION";
+                v2CalculatedInvalidationPx = stopPx;
+                v2RejectReasonAfterPromotion = null;
+                stairStepPromoted = true;
+                stairStepPromotionReason = "STAIR_STEP_DOWN_REJECTION_CONFIRMED";
+                execMeta.entryReason = "V2_STAIR_STEP_CONTINUATION_PROMOTION";
+                execMeta.stair_step_promoted = true;
+
+                console.info(JSON.stringify({
+                    event: "V2_STAIR_STEP_PROMOTION_PROOF",
+                    symbol: String(input.symbol),
+                    direction: "DOWN",
+                    side: "short",
+                    entryPx,
+                    stopPx,
+                    htfPolicy,
+                    macroPolarity,
+                    confidence: stairStepResult.confidence,
+                    decision: "ENTER",
+                    promotion_reason: promotionReason
+                }));
+            }
+        }
     }
 
     // Tier 5+: Side Consistency Enforcer (Authoritative)
@@ -3657,8 +3765,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const rangeUpperLongMismatchByReason = signalGateBlockedReason === "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
     const isRangeRouting = activeEngineRouting === "RANGE";
     const isMicroProbePromotion = promotionReason === "CONTINUATION_MICRO_PROBE";
-    const rangeLowerShortMismatch = isRangeRouting && !isMicroProbePromotion && sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
-    const rangeUpperLongMismatch = isRangeRouting && !isMicroProbePromotion && sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
+    const isStairStepPromotion = promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
+    const rangeLowerShortMismatch = isRangeRouting && !isMicroProbePromotion && !isStairStepPromotion && sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
+    const rangeUpperLongMismatch = isRangeRouting && !isMicroProbePromotion && !isStairStepPromotion && sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
     const rangeDowngradedHardBlock = rangeSignalDowngraded && !rangeSignalKeptByRelax;
     const entryCandidateHardBlock = !entryCandidate && !promotionApplied;
     const trendPromotionHardBlock = activeEngineRouting === "TREND" && trendOk !== true && sideCandidateBeforeVeto !== "none";
@@ -3670,7 +3779,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         !relaxedRangeEntry &&
         !rangeEdgeExtreme &&
         !shockRecoveryHint &&
-        !isMicroProbePromotion;
+        !isMicroProbePromotion &&
+        !isStairStepPromotion;
 
     if (v2DecisionAfterPromotion === "ENTER") {
         if (rangeLowerShortMismatch && !execMeta.sideOverrideApplied) {
@@ -4049,15 +4159,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             (judgment.metadata?.retestRejected === false && judgment.metadata?.retestConfirmed === true && sideFinal === "long");
 
         let mismatchReason: string | null = null;
+        const isStairStepPromotion = promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
         if (sideFinal === "short" && zone === "lower") {
-            const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown;
+            const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown || (isStairStepPromotion && sideFinal === "short");
             const htfStrongBullish = htfHardBlockReason === "STRONG_BULLISH_HTF_ALIGNMENT";
 
             if (!shortException || htfStrongBullish) {
                 mismatchReason = "SIDE_ZONE_MISMATCH_LOWER_SHORT";
             }
         } else if (sideFinal === "long" && zone === "upper") {
-            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp;
+            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp || (isStairStepPromotion && sideFinal === "long");
             const htfStrongBearish = htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT";
 
             if (!longException || htfStrongBearish) {
@@ -4707,7 +4818,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Live order size authority: fixed 10x leverage + strict env notional cap.
     const stageMarginKrwBefore = riskSizing.stageMarginKrw;
     let stageMarginKrwAfter = stageMarginKrwBefore;
-    if (isDeadlockProbe || promotionReason === "CONTINUATION_MICRO_PROBE" || promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG" || promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" || execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST") {
+    if (isDeadlockProbe || promotionReason === "CONTINUATION_MICRO_PROBE" || promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION" || promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG" || promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" || execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST") {
         let baseMargin = riskSizing.baseStageMarginKrw;
         if (!baseMargin || baseMargin <= 0) {
             baseMargin = input.config.baseSizeUsd ? input.config.baseSizeUsd * 1400 : 140000;
@@ -4921,6 +5032,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const isMicroProbe =
         promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" ||
         promotionReason === "CONTINUATION_MICRO_PROBE" ||
+        promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION" ||
         promotionReason === "V2_PROBE_ENTRY_CONFIRMED" ||
         promotionReason === "V2_WAIT_RECHECK_QUALIFIED_PROMOTION" ||
         promotionReason === "SHOCK_REACTION_DOWN_MID_MOMENTUM_CONFIRMED" ||
@@ -6611,13 +6723,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
             : undefined;
 
-    const candlesForStairStep = input.candles ?? input.snapshot.candles;
-    const stairStepResult = detectStairStepStructure({
-        candles: candlesForStairStep,
-        snapshot: input.snapshot,
-        judgment
-    });
-
     console.info(JSON.stringify({
         event: "V2_STAIR_STEP_STRUCTURE_PROOF",
         symbol: String(input.symbol),
@@ -6636,7 +6741,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         current_subtype: judgment.subtype,
         current_decision: finalDecision,
         current_side: normalizedV2Side,
-        diagnostic_only: true,
+        diagnostic_only: !stairStepPromoted,
+        stair_step_promoted: stairStepPromoted,
         confidence: stairStepResult.confidence,
         block_reason: stairStepResult.block_reason,
         structure_candles_closed_only: stairStepResult.structure_candles_closed_only,

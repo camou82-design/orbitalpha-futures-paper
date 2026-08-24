@@ -3582,6 +3582,15 @@ function makeBaseInput(
   rangeContinuationStateMap.clear();
 
   const now = Date.now();
+  const mockConflictCandles: Candle[] = Array.from({ length: 120 }, (_, i) => ({
+    ts: now - (120 - i) * 60000,
+    open: 69000 + (i % 2 === 0 ? 30 : -30),
+    high: 69100,
+    low: 68900,
+    close: 69000 + (i % 2 === 0 ? -20 : 20),
+    volume: 50
+  }));
+
   const snapConflict: SymbolSnapshotLike = {
     symbol: "BTCUSDT",
     lastPrice: 69800,
@@ -3607,15 +3616,15 @@ function makeBaseInput(
     boxCohesion01: 0.8,
     breakoutFailureRate: 0.1,
     rangeOscillationScore: 0.2,
-    candles: mockBullishCandles,
+    candles: mockConflictCandles,
     canonicalRegime: "RANGE",
     canonicalRegimeSource: "strategy_market_regime_detector",
     canonicalTrendScore: 0.75,
     htf_candles: {
-      "5m": mockBullishCandles,
-      "15m": mockBullishCandles,
-      "1h": mockBullishCandles,
-      "4h": mockBullishCandles
+      "5m": mockConflictCandles,
+      "15m": mockConflictCandles,
+      "1h": mockConflictCandles,
+      "4h": mockConflictCandles
     }
   };
 
@@ -3651,7 +3660,7 @@ function makeBaseInput(
       pendingOrdersFetchedAt: now
     } as any,
     { decision: { final_decision: "ENTER" } } as any,
-    mockBullishCandles,
+    mockConflictCandles,
     "authoritative",
     `cycle_BTCUSDT_${now}_xx`
   );

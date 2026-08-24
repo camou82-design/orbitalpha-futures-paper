@@ -148,8 +148,11 @@ export function detectStairStepStructure(args: {
 
     // --- EVALUATE STAIR_STEP_UP ---
     const impulseUp = windowHigh - prevLow;
-    const pullbackUpAmount = windowHigh - recentLow;
-    const pullbackDepthRatioUp = impulseUp > 0 ? (pullbackUpAmount / impulseUp) : 1.0;
+    const pullbackUpAmount = prevHigh - recentLow;
+    const hasConsolidationUp = bearishCandleCount >= 1 || recentHalf.some(c => getClose(c) < getOpen(c) || getLow(c) < getOpen(c));
+    const pullbackDepthRatioUp = (impulseUp > 0 && prevHigh > prevLow)
+        ? (pullbackUpAmount > 0 ? (pullbackUpAmount / (prevHigh - prevLow)) : (hasConsolidationUp ? 0.3 : 0.5))
+        : 1.0;
 
     // Reclaim condition for UP: Last price has recovered off pullback low and is holding upper zone of structure
     const reclaimConfirmedUp = (lastPrice > recentLow + (windowHigh - recentLow) * 0.25) || (lastPrice >= prevHigh * 0.998);
@@ -172,6 +175,7 @@ export function detectStairStepStructure(args: {
         (centerSlope > 0.00002 || ema20Slope > 0.00002) &&
         pullbackDepthRatioUp <= 0.65 &&
         reclaimConfirmedUp &&
+        hasConsolidationUp &&
         !isSingleSpikeUp &&
         bullishCandleCount >= 3 &&
         !htfVetoLong;
@@ -179,6 +183,7 @@ export function detectStairStepStructure(args: {
     if (!isStairStepUp) {
         if (htfVetoLong) upBlockReason = "HTF_HARD_VETO";
         else if (isSingleSpikeUp) upBlockReason = "SINGLE_SPIKE_UNSUSTAINED";
+        else if (!hasConsolidationUp) upBlockReason = "NO_CONSOLIDATION_PULLBACK";
         else if (pullbackDepthRatioUp > 0.65) upBlockReason = "PULLBACK_TOO_DEEP";
         else if (!higherLow) upBlockReason = "HIGHER_LOW_MISSING";
         else if (!reclaimConfirmedUp) upBlockReason = "RECLAIM_NOT_CONFIRMED";
@@ -187,8 +192,11 @@ export function detectStairStepStructure(args: {
 
     // --- EVALUATE STAIR_STEP_DOWN (SYMMETRIC) ---
     const impulseDown = prevHigh - windowLow;
-    const reboundDownAmount = recentHigh - windowLow;
-    const pullbackDepthRatioDown = impulseDown > 0 ? (reboundDownAmount / impulseDown) : 1.0;
+    const reboundDownAmount = recentHigh - prevLow;
+    const hasConsolidationDown = bullishCandleCount >= 1 || recentHalf.some(c => getClose(c) > getOpen(c) || getHigh(c) > getOpen(c));
+    const pullbackDepthRatioDown = (impulseDown > 0 && prevHigh > prevLow)
+        ? (reboundDownAmount > 0 ? (reboundDownAmount / (prevHigh - prevLow)) : (hasConsolidationDown ? 0.3 : 0.5))
+        : 1.0;
 
     // Rejection condition for DOWN: Last price has turned down from rebound high and is holding lower zone of structure
     const rejectionConfirmedDown = (lastPrice < recentHigh - (recentHigh - windowLow) * 0.25) || (lastPrice <= prevLow * 1.002);
@@ -211,6 +219,7 @@ export function detectStairStepStructure(args: {
         (centerSlope < -0.00002 || ema20Slope < -0.00002) &&
         pullbackDepthRatioDown <= 0.65 &&
         rejectionConfirmedDown &&
+        hasConsolidationDown &&
         !isSingleSpikeDown &&
         bearishCandleCount >= 3 &&
         !htfVetoShort;

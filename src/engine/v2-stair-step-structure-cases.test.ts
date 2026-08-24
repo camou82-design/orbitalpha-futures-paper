@@ -1,5 +1,5 @@
 /**
- * V2 STAIR-STEP CONTINUOUS TREND STRUCTURE & SYMMETRY TEST SUITE
+ * V2 STAIR-STEP CONTINUATION PROMOTION & SYMMETRY REGRESSION SUITE
  *
  * Verifies:
  * TEST 1: Uptrend -> shallow pullback -> re-advance -> STAIR_STEP_UP detected
@@ -8,14 +8,17 @@
  * TEST 4: Single upward spike without follow-through -> NONE detected (spike filter)
  * TEST 5: Single downward spike without follow-through -> NONE detected (spike filter)
  * TEST 6: Deep retracement / trend breach (> 75% pullback) -> NONE detected
- * TEST 7: Current production scenario: RANGE_FAKE_BREAKOUT + HTF BULLISH + higher-low progression -> shadow STAIR_STEP_UP=true, but authoritative decision=SKIP, side=none, size=0 strictly preserved (Execution Invariance)
- * TEST 8: Downward inverse scenario: RANGE_FAKE_BREAKOUT + HTF BEARISH + lower-high progression -> shadow STAIR_STEP_DOWN=true, but authoritative decision=SKIP, side=none, size=0 strictly preserved (Execution Invariance)
+ * TEST 7: Production BTC STAIR_STEP_UP scenario: RANGE_FAKE_BREAKOUT + HTF BULLISH + higher-low progression -> successfully promoted to ENTER long with valid stop and sizing
+ * TEST 8: Production ETH STAIR_STEP_DOWN inverse scenario: RANGE_FAKE_BREAKOUT + HTF BEARISH + lower-high progression -> successfully promoted to ENTER short with valid stop and sizing
  * TEST 9: In-flight forming candle instantaneous spike with insufficient closed candles -> returns NONE (forming candle isolation)
  * TEST 10: Subsequent candle closure confirming healthy structure -> returns STAIR_STEP_UP
  * TEST 11: In-flight forming candle instantaneous breakdown spike with insufficient closed candles -> returns NONE (DOWN forming candle isolation)
  * TEST 12: Subsequent candle closure confirming healthy structure -> returns STAIR_STEP_DOWN
  * TEST 13: HTF SHORT_ONLY_OR_NONE / STRONG_BEARISH_HTF_ALIGNMENT correctly vetoes STAIR_STEP_UP (block_reason=HTF_HARD_VETO)
  * TEST 14: HTF LONG_ONLY_OR_NONE / STRONG_BULLISH_HTF_ALIGNMENT correctly vetoes STAIR_STEP_DOWN (block_reason=HTF_HARD_VETO)
+ * TEST 15: Macro polarity mismatch (UP structure with BEARISH macro) blocks promotion -> decision=SKIP/HOLD, side=none
+ * TEST 16: Macro polarity mismatch (DOWN structure with BULLISH macro) blocks promotion -> decision=SKIP/HOLD, side=none
+ * TEST 17: Whipsaw shock hard-block blocks promotion -> decision=REJECT, side=none
  */
 
 import { detectStairStepStructure } from "../engine-v2/market-judgment/stair-step-detector";
@@ -37,7 +40,7 @@ function run(label: string, passed: boolean, detail: string): boolean {
   return passed;
 }
 
-console.log("=== STARTING V2 STAIR-STEP STRUCTURE & SYMMETRY TESTS ===");
+console.log("=== STARTING V2 STAIR-STEP STRUCTURE & PROMOTION REGRESSION TESTS ===");
 
 // -------------------------------------------------------------------------
 // Helper: Candle Generators
@@ -387,9 +390,7 @@ function makeDeepRetracementCandles(): Candle[] {
 }
 
 // =========================================================================
-// TEST 7 — PRODUCTION SCENARIO: RANGE_FAKE_BREAKOUT + BULLISH HTF
-//          Shadow STAIR_STEP_UP=true while authoritative execution invariance
-//          (decision=SKIP, side=none, size=0) is 100% PRESERVED.
+// TEST 7 — PRODUCTION BTC STAIR_STEP_UP PROMOTION TO ENTER LONG
 // =========================================================================
 {
   clearWhipsawObservationState("BTCUSDT");
@@ -474,7 +475,7 @@ function makeDeepRetracementCandles(): Candle[] {
     { decision: { final_decision: "ENTER" } } as any,
     candles,
     "authoritative",
-    `cycle_BTCUSDT_${now}_stair_up`
+    `cycle_BTCUSDT_${now}_stair_up_promoted`
   );
 
   const res = runEngineV2(input);
@@ -493,7 +494,23 @@ function makeDeepRetracementCandles(): Candle[] {
       longAllow: true,
       currentPositions: [],
       signedExecutionReady: true,
-      paperExecutionReady: true
+      paperExecutionReady: true,
+      okxAuthMode: "live",
+      okxAuthReady: true,
+      okxExchangeAuthOptIn: true,
+      okxLiveEnabled: true,
+      liveBalanceReady: true,
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 10000,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true,
+      okxPendingOrdersReady: true,
+      okxPendingOrdersNotionalUsdt: 0,
+      okxPendingSymbolNotionalUsdt: 0,
+      okxActualPositions: [],
+      balanceFetchedAt: now,
+      positionsFetchedAt: now,
+      pendingOrdersFetchedAt: now
     } as any,
     legacy: {
       regime: "RANGE",
@@ -508,29 +525,29 @@ function makeDeepRetracementCandles(): Candle[] {
     } as any,
     v2Mode: "engine_v2",
     evaluationMode: "authoritative",
-    runCycleId: `cycle_BTCUSDT_${now}_stair_up_env`
+    runCycleId: `cycle_BTCUSDT_${now}_stair_up_promoted_env`
   });
 
   const v2Env = env.v2_execution_envelope;
 
   run(
-    "TEST_7_STAIR_STEP_UP_SHADOW_WITH_AUTHORITATIVE_INVARIANCE",
+    "TEST_7_STAIR_STEP_UP_PROMOTED_TO_ENTER_LONG",
     meta.stair_step_detected === true &&
       meta.stair_step_direction === "UP" &&
-      v2Env?.stair_step_detected === true &&
-      v2Env?.stair_step_direction === "UP" &&
-      (decision.decision === "SKIP" || decision.decision === "HOLD") &&
-      decision.side === "none" &&
-      (decision.risk?.finalOrderNotionalUsdt ?? 0) === 0 &&
-      v2Env?.decision !== "ENTER",
-    `Stair step up shadow detection passed while execution invariance preserved: shadowUp=${meta.stair_step_detected}, direction=${meta.stair_step_direction}, authoritativeDecision=${decision.decision}, side=${decision.side}, size=${decision.risk?.finalOrderNotionalUsdt}`
+      meta.stair_step_promoted === true &&
+      decision.decision === "ENTER" &&
+      decision.side === "long" &&
+      (decision.risk?.finalOrderNotionalUsdt ?? 0) > 0 &&
+      (decision.risk?.stopPrice ?? 0) > 0 &&
+      (decision.risk?.stopPrice ?? 0) < snapFakeBreakout.lastPrice &&
+      v2Env?.decision === "ENTER" &&
+      v2Env?.side === "long",
+    `BTC Stair step up promoted to ENTER long: decision=${decision.decision}, side=${decision.side}, size=${decision.risk?.finalOrderNotionalUsdt}, stopPrice=${decision.risk?.stopPrice}`
   );
 }
 
 // =========================================================================
-// TEST 8 — DOWNWARD INVERSE SCENARIO: RANGE_FAKE_BREAKDOWN + BEARISH HTF
-//          Shadow STAIR_STEP_DOWN=true while authoritative execution invariance
-//          (decision=SKIP, side=none, size=0) is 100% PRESERVED.
+// TEST 8 — PRODUCTION ETH STAIR_STEP_DOWN PROMOTION TO ENTER SHORT (EXACT INVERSE)
 // =========================================================================
 {
   clearWhipsawObservationState("ETHUSDT");
@@ -615,7 +632,7 @@ function makeDeepRetracementCandles(): Candle[] {
     { decision: { final_decision: "ENTER" } } as any,
     candles,
     "authoritative",
-    `cycle_ETHUSDT_${now}_stair_down`
+    `cycle_ETHUSDT_${now}_stair_down_promoted`
   );
 
   const res = runEngineV2(input);
@@ -634,7 +651,23 @@ function makeDeepRetracementCandles(): Candle[] {
       longAllow: true,
       currentPositions: [],
       signedExecutionReady: true,
-      paperExecutionReady: true
+      paperExecutionReady: true,
+      okxAuthMode: "live",
+      okxAuthReady: true,
+      okxExchangeAuthOptIn: true,
+      okxLiveEnabled: true,
+      liveBalanceReady: true,
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 10000,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true,
+      okxPendingOrdersReady: true,
+      okxPendingOrdersNotionalUsdt: 0,
+      okxPendingSymbolNotionalUsdt: 0,
+      okxActualPositions: [],
+      balanceFetchedAt: now,
+      positionsFetchedAt: now,
+      pendingOrdersFetchedAt: now
     } as any,
     legacy: {
       regime: "RANGE",
@@ -649,22 +682,23 @@ function makeDeepRetracementCandles(): Candle[] {
     } as any,
     v2Mode: "engine_v2",
     evaluationMode: "authoritative",
-    runCycleId: `cycle_ETHUSDT_${now}_stair_down_env`
+    runCycleId: `cycle_ETHUSDT_${now}_stair_down_promoted_env`
   });
 
   const v2Env = env.v2_execution_envelope;
 
   run(
-    "TEST_8_STAIR_STEP_DOWN_SHADOW_WITH_AUTHORITATIVE_INVARIANCE",
+    "TEST_8_STAIR_STEP_DOWN_PROMOTED_TO_ENTER_SHORT",
     meta.stair_step_detected === true &&
       meta.stair_step_direction === "DOWN" &&
-      v2Env?.stair_step_detected === true &&
-      v2Env?.stair_step_direction === "DOWN" &&
-      (decision.decision === "SKIP" || decision.decision === "HOLD") &&
-      decision.side === "none" &&
-      (decision.risk?.finalOrderNotionalUsdt ?? 0) === 0 &&
-      v2Env?.decision !== "ENTER",
-    `Stair step down shadow detection passed while execution invariance preserved: shadowDown=${meta.stair_step_detected}, direction=${meta.stair_step_direction}, authoritativeDecision=${decision.decision}, side=${decision.side}, size=${decision.risk?.finalOrderNotionalUsdt}`
+      meta.stair_step_promoted === true &&
+      decision.decision === "ENTER" &&
+      decision.side === "short" &&
+      (decision.risk?.finalOrderNotionalUsdt ?? 0) > 0 &&
+      (decision.risk?.stopPrice ?? 0) > snapFakeBreakdown.lastPrice &&
+      v2Env?.decision === "ENTER" &&
+      v2Env?.side === "short",
+    `ETH Stair step down promoted to ENTER short: decision=${decision.decision}, side=${decision.side}, size=${decision.risk?.finalOrderNotionalUsdt}, stopPrice=${decision.risk?.stopPrice}`
   );
 }
 
@@ -673,7 +707,6 @@ function makeDeepRetracementCandles(): Candle[] {
 // =========================================================================
 {
   const now = Date.now();
-  // 16 flat closed candles + 1 massive forming candle spike
   const candles: Candle[] = Array.from({ length: 16 }, (_, i) => ({
     ts: now - (17 - i) * 60000,
     open: 65000,
@@ -682,7 +715,6 @@ function makeDeepRetracementCandles(): Candle[] {
     close: 65000,
     volume: 50
   }));
-  // Forming candle (17th) spikes up to 66000
   candles.push({
     ts: now,
     open: 65000,
@@ -760,7 +792,6 @@ function makeDeepRetracementCandles(): Candle[] {
     close: 65000,
     volume: 50
   }));
-  // Forming candle (17th) crashes to 64000
   candles.push({
     ts: now,
     open: 65000,
@@ -901,4 +932,305 @@ function makeDeepRetracementCandles(): Candle[] {
   );
 }
 
-console.log("\nALL 14 V2 STAIR-STEP STRUCTURE & SYMMETRY TESTS PASSED (TEST 1 - TEST 14)!");
+// =========================================================================
+// TEST 15 — POLARITY MISMATCH BLOCKS UP PROMOTION (Macro BEARISH)
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+  rangeContinuationStateMap.clear();
+
+  const now = Date.now();
+  const candles = makeStairStepUpCandles(68000);
+  // Macro bearish candles for 1h/4h
+  const bearishHtfCandles = makeStairStepDownCandles(70000);
+  const snapPolarityMismatch: SymbolSnapshotLike = {
+    symbol: "BTCUSDT",
+    lastPrice: 68850,
+    latestCandleClose: 68850,
+    signal: "paper_long_candidate",
+    qualityScore: 70,
+    candidateStrength: "strong",
+    ema20: 68600,
+    ema60: 68400,
+    emaGap: 0.002,
+    volumeRatioProxy: 1.2,
+    boxHigh: 69000,
+    boxLow: 68000,
+    boxPos: 0.84,
+    boxRel: 0.02,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    atr: 250,
+    atr20: 250,
+    closedClose: 68840,
+    rangeConfidence: 0.75,
+    candles,
+    canonicalRegime: "RANGE",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.75,
+    htf_candles: {
+      "5m": candles,
+      "15m": bearishHtfCandles,
+      "1h": bearishHtfCandles,
+      "4h": bearishHtfCandles
+    }
+  };
+
+  const bridge = buildV2SnapshotBridge(snapPolarityMismatch);
+  const input = adaptV2Input(
+    "BTCUSDT",
+    now,
+    bridge as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "NONE",
+      crashState: "NORMAL",
+      shortAllow: true,
+      longAllow: true,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    candles,
+    "authoritative",
+    `cycle_BTCUSDT_${now}_polarity_mismatch_up`
+  );
+
+  const res = runEngineV2(input);
+  run(
+    "TEST_15_POLARITY_MISMATCH_BLOCKS_UP_PROMOTION",
+    res.decision.decision !== "ENTER" && res.decision.side === "none",
+    `Polarity mismatch successfully blocked UP promotion: decision=${res.decision.decision}, side=${res.decision.side}`
+  );
+}
+
+// =========================================================================
+// TEST 16 — POLARITY MISMATCH BLOCKS DOWN PROMOTION (Macro BULLISH)
+// =========================================================================
+{
+  clearWhipsawObservationState("ETHUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+  rangeContinuationStateMap.clear();
+
+  const now = Date.now();
+  const candles = makeStairStepDownCandles(2600);
+  // Macro bullish candles for 1h/4h
+  const bullishHtfCandles = makeStairStepUpCandles(2500);
+  const snapPolarityMismatchDown: SymbolSnapshotLike = {
+    symbol: "ETHUSDT",
+    lastPrice: 2565,
+    latestCandleClose: 2565,
+    signal: "paper_short_candidate",
+    qualityScore: 70,
+    candidateStrength: "strong",
+    ema20: 2580,
+    ema60: 2600,
+    emaGap: -0.002,
+    volumeRatioProxy: 1.2,
+    boxHigh: 2600,
+    boxLow: 2550,
+    boxPos: 0.16,
+    boxRel: -0.02,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    atr: 12,
+    atr20: 12,
+    closedClose: 2566,
+    rangeConfidence: 0.75,
+    candles,
+    canonicalRegime: "RANGE",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.75,
+    htf_candles: {
+      "5m": candles,
+      "15m": bullishHtfCandles,
+      "1h": bullishHtfCandles,
+      "4h": bullishHtfCandles
+    }
+  };
+
+  const bridge = buildV2SnapshotBridge(snapPolarityMismatchDown);
+  const input = adaptV2Input(
+    "ETHUSDT",
+    now,
+    bridge as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "NONE",
+      crashState: "NORMAL",
+      shortAllow: true,
+      longAllow: true,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    candles,
+    "authoritative",
+    `cycle_ETHUSDT_${now}_polarity_mismatch_down`
+  );
+
+  const res = runEngineV2(input);
+  run(
+    "TEST_16_POLARITY_MISMATCH_BLOCKS_DOWN_PROMOTION",
+    res.decision.decision !== "ENTER" && res.decision.side === "none",
+    `Polarity mismatch successfully blocked DOWN promotion: decision=${res.decision.decision}, side=${res.decision.side}`
+  );
+}
+
+// =========================================================================
+// TEST 17 — WHIPSAW SHOCK HARD BLOCK PREVENTS STAIR STEP PROMOTION
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+  rangeContinuationStateMap.clear();
+
+  const now = Date.now();
+  const candles = makeStairStepUpCandles(68000);
+  const snapShockBlocked: SymbolSnapshotLike = {
+    symbol: "BTCUSDT",
+    lastPrice: 68850,
+    latestCandleClose: 68850,
+    signal: "paper_long_candidate",
+    qualityScore: 70,
+    candidateStrength: "strong",
+    ema20: 68600,
+    ema60: 68400,
+    emaGap: 0.002,
+    volumeRatioProxy: 1.2,
+    boxHigh: 69000,
+    boxLow: 68000,
+    boxPos: 0.84,
+    boxRel: 0.02,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    atr: 250,
+    atr20: 250,
+    closedClose: 68840,
+    rangeConfidence: 0.75,
+    candles,
+    canonicalRegime: "RANGE",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.75,
+    htf_candles: {
+      "5m": candles,
+      "15m": candles,
+      "1h": candles,
+      "4h": candles
+    }
+  };
+
+  const bridge = buildV2SnapshotBridge(snapShockBlocked);
+  const input = adaptV2Input(
+    "BTCUSDT",
+    now,
+    bridge as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "DOWN", // Hard shock active against long
+      crashState: "NORMAL",
+      shortAllow: true,
+      longAllow: true,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    candles,
+    "authoritative",
+    `cycle_BTCUSDT_${now}_shock_blocked`
+  );
+
+  const res = runEngineV2(input);
+  run(
+    "TEST_17_SHOCK_HARD_BLOCK_PREVENTS_PROMOTION",
+    res.decision.decision !== "ENTER" && res.decision.side === "none",
+    `Active directional shock DOWN correctly prevented stair-step UP promotion: decision=${res.decision.decision}, side=${res.decision.side}`
+  );
+}
+
+// =========================================================================
+// TEST 18 — ORDINARY REJECT IS NOT RESURRECTED BY STAIR STEP STRUCTURE
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+  rangeContinuationStateMap.clear();
+
+  const now = Date.now();
+  const candles = makeStairStepUpCandles(68000);
+  const snapReject: SymbolSnapshotLike = {
+    symbol: "BTCUSDT",
+    lastPrice: 68850,
+    latestCandleClose: 68850,
+    signal: "paper_long_candidate",
+    qualityScore: 70,
+    candidateStrength: "strong",
+    ema20: 68600,
+    ema60: 68400,
+    emaGap: 0.002,
+    volumeRatioProxy: 1.2,
+    boxHigh: 69000,
+    boxLow: 68000,
+    boxPos: 0.84,
+    boxRel: 0.02,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    atr: 250,
+    atr20: 250,
+    closedClose: 68840,
+    rangeConfidence: 0.75,
+    candles,
+    canonicalRegime: "RANGE",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.75,
+    htf_candles: {
+      "5m": candles,
+      "15m": candles,
+      "1h": candles,
+      "4h": candles
+    }
+  };
+
+  const bridge = buildV2SnapshotBridge(snapReject);
+  const input = adaptV2Input(
+    "BTCUSDT",
+    now,
+    bridge as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "NONE",
+      crashState: "NORMAL",
+      shortAllow: true,
+      longAllow: true,
+      maxUsableMarginKrw: 0, // Exceeded usable margin: triggers pre-promotion REJECT
+      exposureNotionalCapKrw: 0,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    candles,
+    "authoritative",
+    `cycle_BTCUSDT_${now}_reject_not_resurrected`
+  );
+
+  const res = runEngineV2(input);
+  run(
+    "TEST_18_ORDINARY_REJECT_CANNOT_BE_RESURRECTED",
+    res.decision.decision === "REJECT" &&
+    res.decision.side === "none" &&
+    (res.decision.metadata as any)?.promotion_applied !== true &&
+    (res.decision.metadata as any)?.promotion_reason !== "V2_STAIR_STEP_CONTINUATION_PROMOTION",
+    `Ordinary REJECT correctly maintained without resurrection: decision=${res.decision.decision}, side=${res.decision.side}`
+  );
+}
+
+console.log("\nALL 18 V2 STAIR-STEP STRUCTURE & PROMOTION TESTS PASSED (TEST 1 - TEST 18)!");
