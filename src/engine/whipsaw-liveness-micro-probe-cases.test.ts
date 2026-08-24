@@ -26,6 +26,8 @@
  * TEST PP: Hard safety blocker + micro probe blocker coexist (hard safety blocker strictly outranks micro probe block)
  * TEST QQ: No micro-probe evaluation, ordinary quality failure (TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD remains primary)
  * TEST RR: Diagnostic field separation (top_level_execution_lane & v2_router_executor) & execution invariance
+ * TEST SS: WATCH_BOUNDARY_MISSING aligns expected_next_action to WAIT_FOR_BREAKOUT_OR_BREAKDOWN_SETUP
+ * TEST TT: Hard safety blocker strictly outranks WATCH_BOUNDARY_MISSING in missing condition & next action
  */
 
 import { detectMarketRegime } from "../engine-v2/market-judgment/detector";
@@ -3086,10 +3088,221 @@ function makeBaseInput(
   );
 }
 
-console.log("\nALL 45 WHIPSAW LIVENESS, HTF CONTRARIAN, PROBE_ONLY & DIAGNOSTIC SEPARATION TESTS PASSED (TEST A - TEST RR)!");
+// =========================================================================
+// TEST SS — WATCH_BOUNDARY_MISSING ALIGNS EXPECTED_NEXT_ACTION TO BREAKOUT/BREAKDOWN SETUP
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+  rangeContinuationStateMap.clear();
 
+  const now = Date.now();
+  const snap: SymbolSnapshotLike = {
+    symbol: "BTCUSDT",
+    lastPrice: 68930,
+    latestCandleClose: 68930,
+    signal: "paper_short_candidate",
+    qualityScore: 65,
+    candidateStrength: "strong",
+    ema20: 68850,
+    ema60: 69200,
+    emaGap: -0.003,
+    volumeRatioProxy: 1.1,
+    boxHigh: 70000,
+    boxLow: 68000,
+    boxPos: 0.35,
+    boxRel: -0.02,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    atr: 250,
+    atr20: 250,
+    closedClose: 68920,
+    rangeConfidence: 0.2,
+    trendWeaknessScore: 0.2, // normal trend weakness so qualityScore is the only gate hit
+    boxCohesion01: 0.7,
+    breakoutFailureRate: 0.1,
+    rangeOscillationScore: 0.2,
+    boxLowSlope: -0.003,
+    rangeCenterSlope: -0.003,
+    boxHighSlope: -0.003,
+    reviewing_ticks: 0,
+    boxBreakSide: "none",
+    volumeExpansion: 1.0,
+    candles: mockBearishCandles,
+    canonicalRegime: "TREND",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.75,
+    htf_candles: {
+      "5m": mockBearishCandles,
+      "15m": mockBearishCandles,
+      "1h": mockBearishCandles,
+      "4h": mockBullishCandles
+    }
+  };
 
+  const bridge = buildV2SnapshotBridge(snap);
+  const inputSS = adaptV2Input(
+    "BTCUSDT",
+    now,
+    bridge as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
+      shortAllow: true,
+      longAllow: false,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true,
+      okxAuthMode: "live",
+      okxAuthReady: true,
+      okxExchangeAuthOptIn: true,
+      okxLiveEnabled: true,
+      liveBalanceReady: true,
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 10000,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true,
+      okxPendingOrdersReady: true,
+      okxPendingOrdersNotionalUsdt: 0,
+      okxPendingSymbolNotionalUsdt: 0,
+      okxActualPositions: [],
+      balanceFetchedAt: now,
+      positionsFetchedAt: now,
+      pendingOrdersFetchedAt: now
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    mockBearishCandles,
+    "authoritative",
+    `cycle_BTCUSDT_${now}_ss`
+  );
 
+  const res = runEngineV2(inputSS);
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
 
+  run(
+    "TEST_SS_WATCH_BOUNDARY_MISSING_ALIGNS_EXPECTED_NEXT_ACTION",
+    (decision.decision === "HOLD" || decision.decision === "SKIP") &&
+      decision.side === "none" &&
+      meta.micro_probe_block_reason === "WATCH_BOUNDARY_MISSING" &&
+      meta.primary_missing_condition === "WATCH_BOUNDARY_MISSING" &&
+      meta.expectedMissingCondition === "WATCH_BOUNDARY_MISSING" &&
+      meta.expectedNextAction === "WAIT_FOR_BREAKOUT_OR_BREAKDOWN_SETUP" &&
+      meta.secondary_missing_condition === "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD" &&
+      meta.promotionApplied === false &&
+      meta.promotionBlockReason === "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD" &&
+      meta.htf_entry_policy === "PROBE_ONLY" &&
+      inputSS.state.longAllow === false &&
+      inputSS.state.shortAllow === true,
+    `WATCH_BOUNDARY_MISSING successfully aligns expected_next_action to WAIT_FOR_BREAKOUT_OR_BREAKDOWN_SETUP while preserving secondary. primary=${meta.primary_missing_condition}, nextAction=${meta.expectedNextAction}, secondary=${meta.secondary_missing_condition}`
+  );
+}
 
+// =========================================================================
+// TEST TT — HARD SAFETY BLOCKER STRICTLY OUTRANKS WATCH_BOUNDARY_MISSING
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+  rangeContinuationStateMap.clear();
 
+  const now = Date.now();
+  const snap: SymbolSnapshotLike = {
+    symbol: "BTCUSDT",
+    lastPrice: 68930,
+    latestCandleClose: 68930,
+    signal: "paper_short_candidate",
+    qualityScore: 65,
+    candidateStrength: "strong",
+    ema20: 68850,
+    ema60: 69200,
+    emaGap: -0.003,
+    volumeRatioProxy: 1.1,
+    boxHigh: 70000,
+    boxLow: 68000,
+    boxPos: 0.35,
+    boxRel: -0.02,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    atr: 250,
+    atr20: 250,
+    closedClose: 68920,
+    rangeConfidence: 0.2,
+    trendWeaknessScore: 0.56,
+    boxCohesion01: 0.7,
+    breakoutFailureRate: 0.45, // Real shock hit -> whipsaw.active -> WHIPSAW_SHOCK_RECHECK
+    rangeOscillationScore: 0.2,
+    boxLowSlope: -0.003,
+    rangeCenterSlope: -0.003,
+    boxHighSlope: -0.003,
+    reviewing_ticks: 0,
+    boxBreakSide: "none",
+    volumeExpansion: 2.5,      // Volume expansion -> whipsaw.active -> WHIPSAW_SHOCK_RECHECK
+    candles: mockBearishCandles,
+    canonicalRegime: "TREND",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.75,
+    htf_candles: {
+      "5m": mockBearishCandles,
+      "15m": mockBearishCandles,
+      "1h": mockBearishCandles,
+      "4h": mockBullishCandles
+    }
+  };
+
+  const bridge = buildV2SnapshotBridge(snap);
+  const inputTT = adaptV2Input(
+    "BTCUSDT",
+    now,
+    bridge as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
+      shortAllow: true,
+      longAllow: false,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true,
+      okxAuthMode: "live",
+      okxAuthReady: true,
+      okxExchangeAuthOptIn: true,
+      okxLiveEnabled: true,
+      liveBalanceReady: true,
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 10000,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true,
+      okxPendingOrdersReady: true,
+      okxPendingOrdersNotionalUsdt: 0,
+      okxPendingSymbolNotionalUsdt: 0,
+      okxActualPositions: [],
+      balanceFetchedAt: now,
+      positionsFetchedAt: now,
+      pendingOrdersFetchedAt: now
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    mockBearishCandles,
+    "authoritative",
+    `cycle_BTCUSDT_${now}_tt`
+  );
+
+  const res = runEngineV2(inputTT);
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+
+  run(
+    "TEST_TT_HARD_SAFETY_BLOCKER_OUTRANKS_WATCH_BOUNDARY_MISSING",
+    (decision.decision === "HOLD" || decision.decision === "REJECT" || decision.decision === "SKIP") &&
+      decision.side === "none" &&
+      meta.primary_missing_condition === "WHIPSAW_RECHECK_NOT_CONFIRMED" &&
+      meta.expectedNextAction === "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION" &&
+      meta.micro_probe_block_reason === "WATCH_BOUNDARY_MISSING",
+    `Hard safety blocker strictly outranks WATCH_BOUNDARY_MISSING in missing condition and next action. primary=${meta.primary_missing_condition}, nextAction=${meta.expectedNextAction}, microProbe=${meta.micro_probe_block_reason}`
+  );
+}
+
+console.log("\nALL 47 WHIPSAW LIVENESS, HTF CONTRARIAN, PROBE_ONLY & DIAGNOSTIC TESTS PASSED (TEST A - TEST TT)!");

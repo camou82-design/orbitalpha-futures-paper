@@ -6532,6 +6532,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             dashboardNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
         } else if (sideVetoDetail === "SHOCK_DOWN_TREND_CONFIRMATION_WEAK") {
             dashboardNextAction = "WAIT_FOR_TREND_CONFIRMATION";
+        } else if (primaryMissingCondition === "WATCH_BOUNDARY_MISSING") {
+            dashboardNextAction = "WAIT_FOR_BREAKOUT_OR_BREAKDOWN_SETUP";
         }
 
         // Requirement 5: If primary is retest/shock/hard-block, do not overwrite WAIT_FOR_QUALITY_IMPROVEMENT
