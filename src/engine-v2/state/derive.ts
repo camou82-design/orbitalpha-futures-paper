@@ -18,7 +18,15 @@ interface ShockState {
     lastProcessedCycle: number | string;
 }
 
-const globalShockStates = new Map<string, ShockState>();
+export const globalShockStates = new Map<string, ShockState>();
+
+export function clearGlobalShockStates(symbol?: string): void {
+    if (symbol) {
+        globalShockStates.delete(String(symbol));
+    } else {
+        globalShockStates.clear();
+    }
+}
 
 function inferIntentSide(input: EngineV2Input): EngineV2Side {
     if (input.symbol === "BTCUSDT") {

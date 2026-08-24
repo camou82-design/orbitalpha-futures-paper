@@ -1357,25 +1357,32 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
 
     // Shock Reaction policy
     if (shockPhase === "UP_SHOCK") {
-        htfEntryPolicy = "LONG_ONLY_OR_NONE";
+        if (htfEntryPolicy !== "HOLD") {
+            htfEntryPolicy = "LONG_ONLY_OR_NONE";
+        }
     } else if (shockPhase === "DOWN_SHOCK") {
-        htfEntryPolicy = "SHORT_ONLY_OR_NONE";
+        if (htfEntryPolicy !== "HOLD") {
+            htfEntryPolicy = "SHORT_ONLY_OR_NONE";
+        }
     }
 
     // Polarity Invariant Check: Ensure policy doesn't hard-contradict macro trend
     const macroPolarity = htfResult.macroPolarity;
     let polarity_mismatch = false;
     
-    if (macroPolarity === "BULLISH" && htfEntryPolicy === "SHORT_ONLY_OR_NONE") {
+    if (macroPolarity === "BULLISH" && (htfEntryPolicy === "SHORT_ONLY_OR_NONE" || shockPhase === "DOWN_SHOCK")) {
         polarity_mismatch = true;
         htfEntryPolicy = "HOLD"; // Downgrade absolute short-only to HOLD if macro is BULLISH
         htfPolicyReason = "POLARITY_MISMATCH_BULLISH_MACRO_LIMITS_SHORT_SHOCK";
         expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
-    } else if (macroPolarity === "BEARISH" && htfEntryPolicy === "LONG_ONLY_OR_NONE") {
+    } else if (macroPolarity === "BEARISH" && (htfEntryPolicy === "LONG_ONLY_OR_NONE" || shockPhase === "UP_SHOCK")) {
         polarity_mismatch = true;
         htfEntryPolicy = "HOLD"; // Downgrade absolute long-only to HOLD if macro is BEARISH
         htfPolicyReason = "POLARITY_MISMATCH_BEARISH_MACRO_LIMITS_LONG_SHOCK";
         expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+    } else if (macroPolarity === "NEUTRAL" && counterTrendRisk && htfEntryPolicy !== "HOLD") {
+        htfEntryPolicy = "PROBE_ONLY";
+        expectedNextAction = "SMALL_SIZE_PROBE_ALLOWED";
     }
 
     console.info(JSON.stringify({

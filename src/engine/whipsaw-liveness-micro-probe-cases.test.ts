@@ -26,7 +26,9 @@
 
 import { detectMarketRegime } from "../engine-v2/market-judgment/detector";
 import { clearWhipsawObservationState, whipsawObservationAuthority, updateWhipsawObservation } from "../engine-v2/market-judgment/whipsaw-observer";
-import { adaptV2Input, runEngineV2 } from "../engine-v2/index";
+import { adaptV2Input, runEngineV2, marketJudgmentCacheBySymbol } from "../engine-v2/index";
+import { clearGlobalShockStates } from "../engine-v2/state/derive";
+import { rangeContinuationStateMap } from "../engine-v2/executors/range-executor";
 import { resolveSymbolDecisionEnvelope } from "../engine-v2/reconciler";
 import { buildV2SnapshotBridge } from "./paper-engine";
 import type { Candle } from "../models/types";
@@ -1298,6 +1300,7 @@ function makeBaseInput(
 // =========================================================================
 {
   clearWhipsawObservationState("ETHUSDT");
+  clearGlobalShockStates();
 
   const microCandles = makeMicroDownReboundCandles(2600);
 
@@ -1332,7 +1335,8 @@ function makeBaseInput(
       directionalShockState: "DOWN",
       shortAllow: true,
       longAllow: false
-    }
+    },
+    "BEARISH"
   );
 
   const judgment = detectMarketRegime(prodInput);
@@ -1626,5 +1630,378 @@ function makeBaseInput(
   );
 }
 
-console.log("\nALL 28 WHIPSAW LIVENESS & HTF CONTRARIAN TESTS PASSED (TEST A - TEST AA)!");
+// =========================================================================
+// TEST BB (Task 7.A) — PROBE_ONLY + WHIPSAW_SOFT_WATCH + VALID BREAKDOWN REACHES MICRO PROBE
+// - htf_entry_policy = "PROBE_ONLY" (from counter-trend risk / neutral HTF with probe allowed)
+// - market_subtype = "WHIPSAW_SOFT_WATCH"
+// - Valid short breakdown boundary (closedClose < watchBoundary && lastPrice < watchBoundary)
+// - Trend DOWN + negative slope + negative emaGap + all safety clear
+// Expected:
+// - Reduced-size micro probe is REACHABLE (decision = ENTER, side = short)
+// - promotionReason = "CONTINUATION_MICRO_PROBE"
+// - micro_probe_active = true
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const now = Date.now();
+  const watchBoundary = 69000;
+
+  rangeContinuationStateMap.set("BTCUSDT", {
+    direction: "down",
+    phase: "CONTINUATION_WATCH",
+    watchStartedCandleTs: now - 60000,
+    watchStartedAtTimestamp: now - 1000,
+    watchBoundaryPrice: watchBoundary,
+    countStartedCandleTs: null,
+    countBoundaryPrice: null,
+    hasCandleAdvancedDuringCount: false,
+    totalCyclesSinceWatch: 0
+  } as any);
+
+  const microCandles = makeMicroDownReboundCandles(68930);
+
+  const input = makeBaseInput(
+    "BTCUSDT",
+    {
+      lastPrice: 68930,
+      closedClose: 68920,
+      atr: 250,
+      atr20: 250,
+      boxLowSlope: -0.003,
+      rangeCenterSlope: -0.003,
+      boxHighSlope: -0.003,
+      emaGap: -0.002,
+      qualityScore: 65,
+      trendWeaknessScore: 0.55,
+      reviewing_ticks: 0,
+      boxBreakSide: "none",
+      breakoutFailureRate: 0.1,
+      volumeExpansion: 1.0,
+      candles: microCandles,
+      canonicalRegime: "RANGE",
+      htf_candles: {
+        "5m": mockBearishCandles,
+        "15m": mockBearishCandles,
+        "1h": mockBearishCandles,
+        "4h": mockBullishCandles // 4h bullish creates counterTrendRisk -> PROBE_ONLY
+      }
+    },
+    {
+      directionalShockState: "DOWN",
+      shortAllow: true,
+      longAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    },
+    "BEARISH"
+  );
+
+  const res = runEngineV2(input);
+  const judgment = res.internal.judgment;
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+
+  run(
+    "TEST_BB_PROBE_ONLY_SOFT_WATCH_BREAKDOWN_REACHABLE",
+    judgment.htf_entry_policy === "PROBE_ONLY" &&
+      decision.decision === "ENTER" &&
+      decision.side === "short" &&
+      meta.promotionReason === "CONTINUATION_MICRO_PROBE" &&
+      meta.micro_probe_active === true,
+    `PROBE_ONLY allows short micro probe on confirmed breakdown. htfPolicy=${judgment.htf_entry_policy}, decision=${decision.decision}, side=${decision.side}, promoReason=${meta.promotionReason}`
+  );
+}
+
+// =========================================================================
+// TEST CC (Task 7.B) — SAME STATE BUT NO CONFIRMED BOUNDARY BREAKDOWN => NO ENTER
+// - lastPrice and closedClose remain above watchBoundary
+// Expected:
+// - decision != ENTER (remains SKIP / HOLD)
+// - micro_probe_block_reason = "NO_CANDLE_BREAKOUT_OR_BREAKDOWN"
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const now = Date.now();
+  const watchBoundary = 69000;
+
+  rangeContinuationStateMap.set("BTCUSDT", {
+    direction: "down",
+    phase: "CONTINUATION_WATCH",
+    watchStartedCandleTs: now - 60000,
+    watchStartedAtTimestamp: now - 1000,
+    watchBoundaryPrice: watchBoundary,
+    countStartedCandleTs: null,
+    countBoundaryPrice: null,
+    hasCandleAdvancedDuringCount: false,
+    totalCyclesSinceWatch: 0
+  } as any);
+
+  const microCandles = makeMicroDownReboundCandles(69050);
+
+  const inputNoBreakdown = makeBaseInput(
+    "BTCUSDT",
+    {
+      lastPrice: 69050, // Above watchBoundary (wick only or unconfirmed)
+      closedClose: 68980, // Below watchBoundary
+      atr: 250,
+      atr20: 250,
+      boxLowSlope: -0.003,
+      rangeCenterSlope: -0.003,
+      emaGap: -0.002,
+      qualityScore: 65,
+      trendWeaknessScore: 0.55,
+      reviewing_ticks: 0,
+      boxBreakSide: "none",
+      breakoutFailureRate: 0.1,
+      volumeExpansion: 1.0,
+      candles: microCandles,
+      canonicalRegime: "RANGE",
+      htf_candles: {
+        "5m": mockBearishCandles,
+        "15m": mockBearishCandles,
+        "1h": mockBearishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "DOWN",
+      shortAllow: true,
+      longAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    },
+    "BEARISH"
+  );
+
+  const res = runEngineV2(inputNoBreakdown);
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+
+  run(
+    "TEST_CC_PROBE_ONLY_NO_BREAKDOWN_NO_ENTER",
+    decision.decision !== "ENTER" &&
+      meta.micro_probe_block_reason === "NO_CANDLE_BREAKOUT_OR_BREAKDOWN",
+    `No boundary breakdown correctly rejects ENTER. decision=${decision.decision}, blockReason=${meta.micro_probe_block_reason}`
+  );
+}
+
+// =========================================================================
+// TEST DD (Task 7.C) — PROBE_ONLY ALONE WITH NO DIRECTIONAL CONFIRMATION => NO ENTER
+// - Breakdown price exists, but slope is positive (slope mismatch)
+// Expected:
+// - decision != ENTER
+// - micro_probe_block_reason = "SLOPE_NOT_NEGATIVE"
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const now = Date.now();
+  const watchBoundary = 69000;
+
+  rangeContinuationStateMap.set("BTCUSDT", {
+    direction: "down",
+    phase: "CONTINUATION_WATCH",
+    watchStartedCandleTs: now - 60000,
+    watchStartedAtTimestamp: now - 1000,
+    watchBoundaryPrice: watchBoundary,
+    countStartedCandleTs: null,
+    countBoundaryPrice: null,
+    hasCandleAdvancedDuringCount: false,
+    totalCyclesSinceWatch: 0
+  } as any);
+
+  const microCandles = makeMicroDownReboundCandles(68930);
+
+  const inputNoSlopeConf = makeBaseInput(
+    "BTCUSDT",
+    {
+      lastPrice: 68930,
+      closedClose: 68920,
+      atr: 250,
+      atr20: 250,
+      boxLowSlope: 0.005, // Positive slope!
+      rangeCenterSlope: 0.005,
+      boxHighSlope: 0.005,
+      emaGap: -0.002,
+      qualityScore: 65,
+      trendWeaknessScore: 0.55,
+      reviewing_ticks: 0,
+      boxBreakSide: "none",
+      breakoutFailureRate: 0.1,
+      volumeExpansion: 1.0,
+      candles: microCandles,
+      canonicalRegime: "RANGE",
+      htf_candles: {
+        "5m": mockBearishCandles,
+        "15m": mockBearishCandles,
+        "1h": mockBearishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "DOWN",
+      shortAllow: true,
+      longAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    },
+    "BEARISH"
+  );
+
+  const res = runEngineV2(inputNoSlopeConf);
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+
+  run(
+    "TEST_DD_PROBE_ONLY_NO_DIRECTIONAL_CONFIRMATION_NO_ENTER",
+    decision.decision !== "ENTER" &&
+      meta.micro_probe_block_reason === "SLOPE_NOT_NEGATIVE",
+    `Positive slope rejects short probe despite PROBE_ONLY. decision=${decision.decision}, blockReason=${meta.micro_probe_block_reason}`
+  );
+}
+
+// =========================================================================
+// TEST EE (Task 7.D) — HTF HOLD + BULLISH MACRO VS SHORT => PROBE FORBIDDEN
+// - Macro polarity = BULLISH, shock = DOWN -> htf_entry_policy = "HOLD"
+// Expected:
+// - decision != ENTER
+// - micro_probe_block_reason = "HTF_POLICY_NOT_SHORT"
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const now = Date.now();
+  const watchBoundary = 69000;
+
+  rangeContinuationStateMap.set("BTCUSDT", {
+    direction: "down",
+    phase: "CONTINUATION_WATCH",
+    watchStartedCandleTs: now - 60000,
+    watchStartedAtTimestamp: now - 1000,
+    watchBoundaryPrice: watchBoundary,
+    countStartedCandleTs: null,
+    countBoundaryPrice: null,
+    hasCandleAdvancedDuringCount: false,
+    totalCyclesSinceWatch: 0
+  } as any);
+
+  const microCandles = makeMicroDownReboundCandles(68930);
+
+  const inputHtfHold = makeBaseInput(
+    "BTCUSDT",
+    {
+      lastPrice: 68930,
+      closedClose: 68920,
+      atr: 250,
+      atr20: 250,
+      boxLowSlope: -0.003,
+      rangeCenterSlope: -0.003,
+      boxHighSlope: -0.003,
+      emaGap: -0.002,
+      qualityScore: 65,
+      trendWeaknessScore: 0.55,
+      reviewing_ticks: 0,
+      boxBreakSide: "none",
+      breakoutFailureRate: 0.1,
+      volumeExpansion: 1.0,
+      candles: microCandles,
+      canonicalRegime: "RANGE",
+      htf_candles: {
+        "5m": mockBullishCandles,
+        "15m": mockBullishCandles,
+        "1h": mockBullishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "DOWN", // DOWN shock + BULLISH HTF => HOLD
+      shortAllow: true,
+      longAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    },
+    "BEARISH"
+  );
+
+  const res = runEngineV2(inputHtfHold);
+  const judgment = res.internal.judgment;
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+
+  run(
+    "TEST_EE_HTF_HOLD_BULLISH_MACRO_FORBIDS_PROBE",
+    judgment.htf_entry_policy === "HOLD" &&
+      decision.decision !== "ENTER" &&
+      meta.micro_probe_block_reason === "HTF_POLICY_NOT_SHORT",
+    `HTF HOLD strictly forbids short probe. htfPolicy=${judgment.htf_entry_policy}, decision=${decision.decision}, blockReason=${meta.micro_probe_block_reason}`
+  );
+}
+
+// =========================================================================
+// TEST FF (Task 7.E) — QUALITY >= 78 BUT TREND_WEAKNESS >= 0.5 => ACCURATE DIAGNOSTIC
+// - qualityScore = 80 (Grade A)
+// - trendWeaknessScore = 0.55 (>= 0.5 -> trendOk is false)
+// - activeEngineRouting = "TREND"
+// Expected:
+// - Generic TREND promotion does NOT enter (decision != ENTER)
+// - primary_missing_condition = "TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH"
+// - Does NOT falsely claim "QUALITY_BELOW_THRESHOLD"
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const inputTrendWeak = makeBaseInput(
+    "BTCUSDT",
+    {
+      qualityScore: 80,
+      trendWeaknessScore: 0.55,
+      emaGap: 0.002,
+      canonicalRegime: "TREND",
+      canonicalRegimeSource: "strategy_market_regime_detector",
+      canonicalTrendScore: 0.85,
+      candles: mockBullishCandles,
+      htf_candles: {
+        "5m": mockBullishCandles,
+        "15m": mockBullishCandles,
+        "1h": mockBullishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "NONE",
+      longAllow: true,
+      shortAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    }
+  );
+
+  const res = runEngineV2(inputTrendWeak);
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+  const missingCondition = meta.primary_missing_condition;
+
+  run(
+    "TEST_FF_TREND_WEAKNESS_ACCURATE_DIAGNOSTIC_NOT_QUALITY",
+    decision.decision !== "ENTER" &&
+      missingCondition === "TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH",
+    `Accurately diagnoses trend weakness without falsely blaming quality. decision=${decision.decision}, missingCondition=${missingCondition}`
+  );
+}
+
+console.log("\nALL 33 WHIPSAW LIVENESS, HTF CONTRARIAN & PROBE_ONLY TESTS PASSED (TEST A - TEST FF)!");
+
+
 
