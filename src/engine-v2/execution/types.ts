@@ -105,6 +105,10 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     display_retest_required: boolean;
     display_support_recheck_required: boolean;
     v2_router_executor?: string | null;
+    stair_step_detected?: boolean | null;
+    stair_step_direction?: string | null;
+    stair_step_confidence?: number | null;
+    stair_step_block_reason?: string | null;
 }>;
 export type V2LegacyComparison = Readonly<{
     legacyDecision: EngineV2FinalDecision;
@@ -183,4 +187,8 @@ export type BuildExecutionEnvelopeArgs = Readonly<{
     displayRetestRequired?: boolean | null;
     displaySupportRecheckRequired?: boolean | null;
     v2RouterExecutor?: string | null;
+    stairStepDetected?: boolean | null;
+    stairStepDirection?: string | null;
+    stairStepConfidence?: number | null;
+    stairStepBlockReason?: string | null;
 }>;

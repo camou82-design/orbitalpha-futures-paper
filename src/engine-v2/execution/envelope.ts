@@ -174,7 +174,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             trend_ok: args.trendOk ?? null,
             display_retest_required: args.displayRetestRequired === true,
             display_support_recheck_required: args.displaySupportRecheckRequired === true,
-            v2_router_executor: args.v2RouterExecutor ?? null
+            v2_router_executor: args.v2RouterExecutor ?? null,
+            stair_step_detected: args.stairStepDetected ?? null,
+            stair_step_direction: args.stairStepDirection ?? null,
+            stair_step_confidence: args.stairStepConfidence ?? null,
+            stair_step_block_reason: args.stairStepBlockReason ?? null
         };
 
     }
@@ -254,7 +258,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             htf_hard_block_reason: args.htf_hard_block_reason ?? null,
             trend_ok: args.trendOk ?? null,
             display_retest_required: args.displayRetestRequired === true,
-            display_support_recheck_required: args.displaySupportRecheckRequired === true
+            display_support_recheck_required: args.displaySupportRecheckRequired === true,
+            stair_step_detected: args.stairStepDetected ?? null,
+            stair_step_direction: args.stairStepDirection ?? null,
+            stair_step_confidence: args.stairStepConfidence ?? null,
+            stair_step_block_reason: args.stairStepBlockReason ?? null
         };
     }
     return {
@@ -332,6 +340,10 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         htf_hard_block_reason: args.htf_hard_block_reason ?? null,
         trend_ok: args.trendOk ?? null,
         display_retest_required: args.displayRetestRequired === true,
-        display_support_recheck_required: args.displaySupportRecheckRequired === true
+        display_support_recheck_required: args.displaySupportRecheckRequired === true,
+        stair_step_detected: args.stairStepDetected ?? null,
+        stair_step_direction: args.stairStepDirection ?? null,
+        stair_step_confidence: args.stairStepConfidence ?? null,
+        stair_step_block_reason: args.stairStepBlockReason ?? null
     };
 }

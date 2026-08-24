@@ -665,7 +665,11 @@ export function resolveSymbolDecisionEnvelope(
         trendOk: execMeta.trend_ok ?? execMeta.trendOk ?? null,
         displayRetestRequired: execMeta.display_retest_required ?? execMeta.displayRetestRequired ?? null,
         displaySupportRecheckRequired: execMeta.display_support_recheck_required ?? execMeta.displaySupportRecheckRequired ?? null,
-        v2RouterExecutor: execMeta.v2_router_executor ?? null
+        v2RouterExecutor: execMeta.v2_router_executor ?? null,
+        stairStepDetected: execMeta.stair_step_detected ?? null,
+        stairStepDirection: execMeta.stair_step_direction ?? null,
+        stairStepConfidence: execMeta.stair_step_confidence ?? null,
+        stairStepBlockReason: execMeta.stair_step_block_reason ?? null
     });
 
 

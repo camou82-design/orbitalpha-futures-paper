@@ -182,6 +182,7 @@ export function ensurePromotedEntryRiskPlan(
     return blockReason;
 }
 import { detectMarketRegime, emitRangeDriftStateProof } from "./market-judgment/detector";
+import { detectStairStepStructure } from "./market-judgment/stair-step-detector";
 import { calculateRegimeConfidence } from "./regime-confidence/scorer";
 import { routeToExecutor } from "./engine-router/selector";
 import { executeRangeRegime, rangeContinuationStateMap } from "./executors/range-executor";
@@ -6610,6 +6611,39 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
             : undefined;
 
+    const candlesForStairStep = input.candles ?? input.snapshot.candles;
+    const stairStepResult = detectStairStepStructure({
+        candles: candlesForStairStep,
+        snapshot: input.snapshot,
+        judgment
+    });
+
+    console.info(JSON.stringify({
+        event: "V2_STAIR_STEP_STRUCTURE_PROOF",
+        symbol: String(input.symbol),
+        detected: stairStepResult.detected,
+        direction: stairStepResult.direction,
+        higher_low_detected: stairStepResult.higher_low_detected,
+        higher_high_detected: stairStepResult.higher_high_detected,
+        lower_high_detected: stairStepResult.lower_high_detected,
+        lower_low_detected: stairStepResult.lower_low_detected,
+        center_slope: stairStepResult.center_slope,
+        ema20_slope: stairStepResult.ema20_slope,
+        pullback_depth_ratio: stairStepResult.pullback_depth_ratio,
+        reclaim_or_rejection_confirmed: stairStepResult.reclaim_or_rejection_confirmed,
+        htf_entry_policy: stairStepResult.htf_entry_policy,
+        current_regime: judgment.regime,
+        current_subtype: judgment.subtype,
+        current_decision: finalDecision,
+        current_side: normalizedV2Side,
+        diagnostic_only: true,
+        confidence: stairStepResult.confidence,
+        block_reason: stairStepResult.block_reason,
+        structure_candles_closed_only: stairStepResult.structure_candles_closed_only,
+        reclaim_price_source: stairStepResult.reclaim_price_source,
+        closed_candle_count: stairStepResult.closed_candle_count
+    }));
+
     const decision: EngineV2Decision = {
         symbol: input.symbol,
         ts: input.now,
@@ -6686,7 +6720,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             judgmentTrendPhase: judgment.trendPhase,
             micro_probe_active: promotionReason === "CONTINUATION_MICRO_PROBE" ? true : undefined,
             micro_probe_block_reason: microProbeBlockReason ?? undefined,
-            full_entry_retest_required: promotionReason === "CONTINUATION_MICRO_PROBE" ? true : undefined
+            full_entry_retest_required: promotionReason === "CONTINUATION_MICRO_PROBE" ? true : undefined,
+            stair_step_detected: stairStepResult.detected,
+            stair_step_direction: stairStepResult.direction,
+            stair_step_confidence: stairStepResult.confidence,
+            stair_step_block_reason: stairStepResult.block_reason
         },
         v2ExitAuthority: v2ExitAuthority ?? undefined,
         v2PartialAuthority: v2PartialAuthority ?? undefined,
