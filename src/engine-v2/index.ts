@@ -3634,6 +3634,153 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Tier 4.95: DEDICATED TREND CONTINUATION REVALIDATION (Symmetric UP / DOWN)
+    // -------------------------------------------------------------------------
+    let isTrendContinuationRevalidated = false;
+
+    const isAuthoritativeTrendRegime =
+        judgment.regime === "TREND" &&
+        judgment.regime_final === "TREND" &&
+        authoritativeInput.snapshot.canonicalRegime === "TREND" &&
+        activeEngineRouting === "TREND";
+
+    const isTrendContinuationSubtype =
+        judgment.subtype === "TREND_UP_CONTINUATION" ||
+        judgment.subtype === "TREND_DOWN_CONTINUATION";
+
+    const hasSameSidePos = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() === trendSideCandidate);
+    const hasOppositeSidePos = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() !== trendSideCandidate);
+
+    const trendContinuationCommonEligible =
+        (!promotionApplied || promotionReason === "V2_TREND_QUALIFIED_FINAL_PROMOTION" || promotionReason === "V2_WAIT_RECHECK_QUALIFIED_PROMOTION" || promotionReason === "V2_CONTAMINATION_SOFTENED_FOR_HIGH_QUALITY_AUTHORITY") &&
+        isAuthoritativeTrendRegime &&
+        isTrendContinuationSubtype &&
+        v2DecisionBeforePromotion !== "REJECT" &&
+        v2DecisionBeforePromotion !== "ENTER" &&
+        trendOk === true &&
+        qualityScore >= 70 &&
+        hardBlockPresent === false &&
+        hardControlClear === true &&
+        paperExecutionReady === true &&
+        signedExecutionReady === true &&
+        !hasSameSidePos &&
+        !hasOppositeSidePos &&
+        (riskSizing.diagnostics as any)?.contamination_hard_reject !== true &&
+        (riskSizing as any)?.isContaminated !== true;
+
+    if (trendContinuationCommonEligible) {
+        const macroPolarity = String(judgment.macroPolarity ?? "NEUTRAL").toUpperCase();
+        const htfPolicy = String(judgment.htf_entry_policy ?? "ALLOW").toUpperCase();
+        const shock = v2State.directionalShockState ?? (judgment.shockPhase === "DOWN_SHOCK" ? "DOWN" : judgment.shockPhase === "UP_SHOCK" ? "UP" : "NONE");
+        const entryPx = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+
+        // UP Evaluation (LONG)
+        if (
+            judgment.subtype === "TREND_UP_CONTINUATION" &&
+            trendSideCandidate === "long" &&
+            riskLongAllow === true &&
+            allowNewLong === true &&
+            (htfPolicy === "ALLOW" || htfPolicy === "LONG_ONLY_OR_NONE") &&
+            macroPolarity !== "BEARISH" &&
+            shock !== "DOWN" &&
+            entryPx > 0
+        ) {
+            const stopPx = execution.stopPrice;
+            const invPx = execution.invalidationPx ?? stopPx;
+
+            const stopValid =
+                stopPx != null && invPx != null &&
+                !isNaN(stopPx) && !isNaN(invPx) &&
+                stopPx > 0 && stopPx < entryPx &&
+                invPx > 0 && invPx < entryPx;
+
+            if (stopValid) {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = "long";
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = "V2_TREND_CONTINUATION_REVALIDATED";
+                isTrendContinuationRevalidated = true;
+                v2CalculatedInvalidationPx = invPx;
+                execution.stopPrice = stopPx;
+                execution.invalidationPx = invPx;
+                promotionBlockReason = null;
+                promotionMinConditionPassed = true;
+                execMeta.entryReason = "V2_TREND_CONTINUATION_REVALIDATED";
+                execMeta.trend_continuation_revalidated = true;
+
+                console.info(JSON.stringify({
+                    event: "V2_TREND_CONTINUATION_REVALIDATION_PROOF",
+                    symbol: String(input.symbol),
+                    direction: "UP",
+                    side: "long",
+                    entryPx,
+                    stopPx,
+                    invPx,
+                    qualityScore,
+                    htfPolicy,
+                    macroPolarity,
+                    directionalShock: shock,
+                    decision: "ENTER",
+                    promotion_reason: promotionReason
+                }));
+            }
+        }
+        // DOWN Evaluation (SHORT) - Exact symmetric inverse
+        else if (
+            judgment.subtype === "TREND_DOWN_CONTINUATION" &&
+            trendSideCandidate === "short" &&
+            riskShortAllow === true &&
+            allowNewShort === true &&
+            (htfPolicy === "ALLOW" || htfPolicy === "SHORT_ONLY_OR_NONE") &&
+            macroPolarity !== "BULLISH" &&
+            shock !== "UP" &&
+            entryPx > 0
+        ) {
+            const stopPx = execution.stopPrice;
+            const invPx = execution.invalidationPx ?? stopPx;
+
+            const stopValid =
+                stopPx != null && invPx != null &&
+                !isNaN(stopPx) && !isNaN(invPx) &&
+                stopPx > 0 && stopPx > entryPx &&
+                invPx > 0 && invPx > entryPx;
+
+            if (stopValid) {
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = "short";
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = "V2_TREND_CONTINUATION_REVALIDATED";
+                isTrendContinuationRevalidated = true;
+                v2CalculatedInvalidationPx = invPx;
+                execution.stopPrice = stopPx;
+                execution.invalidationPx = invPx;
+                promotionBlockReason = null;
+                promotionMinConditionPassed = true;
+                execMeta.entryReason = "V2_TREND_CONTINUATION_REVALIDATED";
+                execMeta.trend_continuation_revalidated = true;
+
+                console.info(JSON.stringify({
+                    event: "V2_TREND_CONTINUATION_REVALIDATION_PROOF",
+                    symbol: String(input.symbol),
+                    direction: "DOWN",
+                    side: "short",
+                    entryPx,
+                    stopPx,
+                    invPx,
+                    qualityScore,
+                    htfPolicy,
+                    macroPolarity,
+                    directionalShock: shock,
+                    decision: "ENTER",
+                    promotion_reason: promotionReason
+                }));
+            }
+        }
+    }
+
     // Tier 5+: Side Consistency Enforcer (Authoritative)
     const sideCandidateBeforeVetoEnforced = v2SideAfterPromotion;
 
@@ -3766,8 +3913,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const isRangeRouting = activeEngineRouting === "RANGE";
     const isMicroProbePromotion = promotionReason === "CONTINUATION_MICRO_PROBE";
     const isStairStepPromotion = promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
-    const rangeLowerShortMismatch = isRangeRouting && !isMicroProbePromotion && !isStairStepPromotion && sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
-    const rangeUpperLongMismatch = isRangeRouting && !isMicroProbePromotion && !isStairStepPromotion && sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
+    const isTrendContinuationRevalidatedPromotion = promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
+    const rangeLowerShortMismatch = isRangeRouting && !isMicroProbePromotion && !isStairStepPromotion && !isTrendContinuationRevalidatedPromotion && sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
+    const rangeUpperLongMismatch = isRangeRouting && !isMicroProbePromotion && !isStairStepPromotion && !isTrendContinuationRevalidatedPromotion && sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
     const rangeDowngradedHardBlock = rangeSignalDowngraded && !rangeSignalKeptByRelax;
     const entryCandidateHardBlock = !entryCandidate && !promotionApplied;
     const trendPromotionHardBlock = activeEngineRouting === "TREND" && trendOk !== true && sideCandidateBeforeVeto !== "none";
@@ -4160,15 +4308,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
         let mismatchReason: string | null = null;
         const isStairStepPromotion = promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
+        const isTrendContinuationRevalidatedPromotion = promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
         if (sideFinal === "short" && zone === "lower") {
-            const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown || (isStairStepPromotion && sideFinal === "short");
+            const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown || (isStairStepPromotion && sideFinal === "short") || (isTrendContinuationRevalidatedPromotion && sideFinal === "short");
             const htfStrongBullish = htfHardBlockReason === "STRONG_BULLISH_HTF_ALIGNMENT";
 
             if (!shortException || htfStrongBullish) {
                 mismatchReason = "SIDE_ZONE_MISMATCH_LOWER_SHORT";
             }
         } else if (sideFinal === "long" && zone === "upper") {
-            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp || (isStairStepPromotion && sideFinal === "long");
+            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp || (isStairStepPromotion && sideFinal === "long") || (isTrendContinuationRevalidatedPromotion && sideFinal === "long");
             const htfStrongBearish = htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT";
 
             if (!longException || htfStrongBearish) {
@@ -4823,7 +4972,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Live order size authority: fixed 10x leverage + strict env notional cap.
     const stageMarginKrwBefore = riskSizing.stageMarginKrw;
     let stageMarginKrwAfter = stageMarginKrwBefore;
-    if (isDeadlockProbe || promotionReason === "CONTINUATION_MICRO_PROBE" || promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION" || promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG" || promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" || execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST") {
+    if (isDeadlockProbe || promotionReason === "CONTINUATION_MICRO_PROBE" || promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION" || promotionReason === "V2_TREND_CONTINUATION_REVALIDATED" || promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG" || promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" || execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST") {
         let baseMargin = riskSizing.baseStageMarginKrw;
         if (!baseMargin || baseMargin <= 0) {
             baseMargin = input.config.baseSizeUsd ? input.config.baseSizeUsd * 1400 : 140000;
@@ -5038,6 +5187,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionReason === "V2_RANGE_MID_MICRO_PROBE_CONFIRMED" ||
         promotionReason === "CONTINUATION_MICRO_PROBE" ||
         promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION" ||
+        promotionReason === "V2_TREND_CONTINUATION_REVALIDATED" ||
         promotionReason === "V2_PROBE_ENTRY_CONFIRMED" ||
         promotionReason === "V2_WAIT_RECHECK_QUALIFIED_PROMOTION" ||
         promotionReason === "SHOCK_REACTION_DOWN_MID_MOMENTUM_CONFIRMED" ||

@@ -165,10 +165,10 @@ export function executeTrendRegime(input: EngineV2Input, judgment: MarketJudgmen
     let stopPrice: number | null = null;
     let invalidationPx: number | null = null;
 
-    if (side === "long") {
+    if (side === "long" || (signal === "WAIT_RECHECK" && emaGap > 0)) {
         stopPrice = Math.min(ema20 - atr * 0.5, entryPx - atr * 1.5);
         invalidationPx = Math.min(ema20 - atr * 1.0, entryPx - atr * 2.0);
-    } else if (side === "short") {
+    } else if (side === "short" || (signal === "WAIT_RECHECK" && emaGap < 0)) {
         stopPrice = Math.max(ema20 + atr * 0.5, entryPx + atr * 1.5);
         invalidationPx = Math.max(ema20 + atr * 1.0, entryPx + atr * 2.0);
     }
