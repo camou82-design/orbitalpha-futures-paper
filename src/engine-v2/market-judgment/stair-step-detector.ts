@@ -38,6 +38,13 @@ export interface StairStepDetectionResult {
     structure_candles_closed_only: true;
     reclaim_price_source: "live_last_price";
     closed_candle_count: number;
+    pivot_order_valid?: boolean;
+    impulse_start_idx?: number;
+    impulse_end_idx?: number;
+    correction_pivot_idx?: number;
+    post_correction_confirmation_present?: boolean;
+    prior_leg_size?: number;
+    correction_amount?: number;
 }
 
 export function detectStairStepStructure(args: {
@@ -81,30 +88,26 @@ export function detectStairStepStructure(args: {
     const closedCandles = candles.slice(0, -1);
     const windowSize = Math.min(closedCandles.length, 16);
     const windowCandles = closedCandles.slice(-windowSize);
-    const midPoint = Math.floor(windowSize / 2);
-
-    const prevHalf = windowCandles.slice(0, midPoint);
-    const recentHalf = windowCandles.slice(midPoint);
 
     const getHigh = (c: Candle) => Number(c.high ?? (c as any).h ?? c.close);
     const getLow = (c: Candle) => Number(c.low ?? (c as any).l ?? c.close);
     const getClose = (c: Candle) => Number(c.close ?? (c as any).c ?? 0);
     const getOpen = (c: Candle) => Number(c.open ?? (c as any).o ?? getClose(c));
-
-    const prevHigh = Math.max(...prevHalf.map(getHigh));
-    const prevLow = Math.min(...prevHalf.map(getLow));
-    const recentHigh = Math.max(...recentHalf.map(getHigh));
-    const recentLow = Math.min(...recentHalf.map(getLow));
     const lastPrice = Number(sn.lastPrice ?? getClose(candles[candles.length - 1]));
 
-    const higherLow = recentLow > prevLow;
-    const higherHigh = recentHigh > prevHigh;
-    const lowerHigh = recentHigh < prevHigh;
-    const lowerLow = recentLow < prevLow;
+    const N = windowCandles.length;
+    const midPoint = Math.floor(N / 2);
+    const prevHalf = windowCandles.slice(0, midPoint);
+    const recentHalf = windowCandles.slice(midPoint);
 
     // Directly compute closed-candle slopes across the two halves
-    const prevAvgCenter = (prevHigh + prevLow) / 2;
-    const recentAvgCenter = (recentHigh + recentLow) / 2;
+    const prevHalfHigh = Math.max(...prevHalf.map(getHigh));
+    const prevHalfLow = Math.min(...prevHalf.map(getLow));
+    const recentHalfHigh = Math.max(...recentHalf.map(getHigh));
+    const recentHalfLow = Math.min(...recentHalf.map(getLow));
+
+    const prevAvgCenter = (prevHalfHigh + prevHalfLow) / 2;
+    const recentAvgCenter = (recentHalfHigh + recentHalfLow) / 2;
     const computedCenterSlope = prevAvgCenter > 0 ? ((recentAvgCenter - prevAvgCenter) / prevAvgCenter) / Math.max(1, prevHalf.length) : 0;
 
     const prevAvgClose = prevHalf.reduce((sum, c) => sum + getClose(c), 0) / Math.max(1, prevHalf.length);
@@ -146,30 +149,92 @@ export function detectStairStepStructure(args: {
     const bullishCandleCount = windowCandles.filter(c => getClose(c) >= getOpen(c)).length;
     const bearishCandleCount = windowCandles.filter(c => getClose(c) <= getOpen(c)).length;
 
-    // --- EVALUATE STAIR_STEP_UP ---
-    const impulseUp = windowHigh - prevLow;
-    const pullbackUpAmount = prevHigh - recentLow;
-    const hasConsolidationUp = bearishCandleCount >= 1 || recentHalf.some(c => getClose(c) < getOpen(c) || getLow(c) < getOpen(c));
-    const pullbackDepthRatioUp = (impulseUp > 0 && prevHigh > prevLow)
-        ? (pullbackUpAmount > 0 ? (pullbackUpAmount / (prevHigh - prevLow)) : (hasConsolidationUp ? 0.3 : 0.5))
+    // =========================================================================
+    // A. CHRONOLOGICAL PIVOT SEARCH: STAIR_STEP_UP (L1 -> H1 -> L2 -> re-advance)
+    // =========================================================================
+    // 1. Find most recent genuine local correction swing low L2 (strict 3-bar pivot, search backward from N-2)
+    let l2Idx = -1;
+    for (let k = N - 2; k >= 2; k--) {
+        const lowK = getLow(windowCandles[k]);
+        const prevL = getLow(windowCandles[k - 1]);
+        const nextL = getLow(windowCandles[k + 1]);
+        if (lowK <= prevL && lowK <= nextL) {
+            l2Idx = k;
+            break;
+        }
+    }
+
+    // 2. Search strictly BEFORE L2 (search backward from l2Idx - 1 down to 1) for nearest valid 3-bar swing high H1
+    let h1Idx = -1;
+    if (l2Idx >= 2) {
+        for (let k = l2Idx - 1; k >= 1; k--) {
+            const highK = getHigh(windowCandles[k]);
+            const prevH = getHigh(windowCandles[k - 1]);
+            const nextH = getHigh(windowCandles[k + 1]);
+            if (highK >= prevH && highK >= nextH) {
+                h1Idx = k;
+                break;
+            }
+        }
+    }
+
+    // 3. Search strictly BEFORE H1 (search backward from h1Idx - 1 down to 1) for nearest valid 3-bar swing low L1
+    let l1Idx = -1;
+    if (h1Idx >= 2) {
+        for (let k = h1Idx - 1; k >= 1; k--) {
+            const lowK = getLow(windowCandles[k]);
+            const prevL = getLow(windowCandles[k - 1]);
+            const nextL = getLow(windowCandles[k + 1]);
+            if (lowK <= prevL && lowK <= nextL) {
+                l1Idx = k;
+                break;
+            }
+        }
+    }
+
+    const pivotOrderValidUp = l1Idx >= 0 && h1Idx > l1Idx && l2Idx > h1Idx && l2Idx < N;
+    const l1Val = pivotOrderValidUp ? getLow(windowCandles[l1Idx]) : 0;
+    const h1Val = pivotOrderValidUp ? getHigh(windowCandles[h1Idx]) : 0;
+    const l2Val = pivotOrderValidUp ? getLow(windowCandles[l2Idx]) : 0;
+
+    const impulseUp = pivotOrderValidUp ? (h1Val - l1Val) : 0;
+    const pullbackUpAmount = pivotOrderValidUp ? (h1Val - l2Val) : 0;
+    const hasConsolidationUp = bearishCandleCount >= 1 || (l2Idx >= 0 && l2Idx < N - 1);
+
+    const pullbackDepthRatioUp = (pivotOrderValidUp && impulseUp > 0)
+        ? (pullbackUpAmount > 0 ? (pullbackUpAmount / impulseUp) : (hasConsolidationUp ? 0.3 : 0.5))
         : 1.0;
 
-    // Reclaim condition for UP: Last price has recovered off pullback low and is holding upper zone of structure
-    const reclaimConfirmedUp = (lastPrice > recentLow + (windowHigh - recentLow) * 0.25) || (lastPrice >= prevHigh * 0.998);
+    // Post-L2 Re-advance / Higher High & Reclaim Confirmation
+    let maxPostL2High = -Infinity;
+    if (pivotOrderValidUp && l2Idx < N) {
+        for (let k = l2Idx; k < N; k++) {
+            maxPostL2High = Math.max(maxPostL2High, getHigh(windowCandles[k]));
+        }
+    }
+    maxPostL2High = Math.max(maxPostL2High, lastPrice);
+
+    const higherLowUp = pivotOrderValidUp ? (l2Val > l1Val) : false;
+    const higherHighUp = pivotOrderValidUp ? (maxPostL2High >= h1Val * 0.998) : false;
+    const reclaimConfirmedUp = pivotOrderValidUp
+        ? ((lastPrice > l2Val + (h1Val - l2Val) * 0.25) || (lastPrice >= h1Val * 0.998))
+        : false;
     const htfVetoLong = htfPolicy === "SHORT_ONLY_OR_NONE" || (htfPolicy === "HOLD" && htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT");
 
     let upConfidence = 0;
     let upBlockReason: string | null = null;
 
-    if (higherLow) upConfidence += 0.25;
-    if (higherHigh || lastPrice >= prevHigh * 0.998) upConfidence += 0.20;
+    if (pivotOrderValidUp) upConfidence += 0.10;
+    if (higherLowUp) upConfidence += 0.20;
+    if (higherHighUp) upConfidence += 0.20;
     if (centerSlope > 0.00002 || ema20Slope > 0.00002) upConfidence += 0.20;
     if (pullbackDepthRatioUp > 0 && pullbackDepthRatioUp <= 0.65) upConfidence += 0.20;
-    if (reclaimConfirmedUp) upConfidence += 0.15;
+    if (reclaimConfirmedUp) upConfidence += 0.10;
 
     const isStairStepUp =
-        higherLow &&
-        (higherHigh || lastPrice >= prevHigh * 0.998) &&
+        pivotOrderValidUp &&
+        higherLowUp &&
+        higherHighUp &&
         (centerSlope > -0.00005) &&
         (ema20Slope > -0.00005) &&
         (centerSlope > 0.00002 || ema20Slope > 0.00002) &&
@@ -182,38 +247,101 @@ export function detectStairStepStructure(args: {
 
     if (!isStairStepUp) {
         if (htfVetoLong) upBlockReason = "HTF_HARD_VETO";
+        else if (!pivotOrderValidUp) upBlockReason = "PIVOT_CHRONOLOGY_INVALID";
         else if (isSingleSpikeUp) upBlockReason = "SINGLE_SPIKE_UNSUSTAINED";
         else if (!hasConsolidationUp) upBlockReason = "NO_CONSOLIDATION_PULLBACK";
         else if (pullbackDepthRatioUp > 0.65) upBlockReason = "PULLBACK_TOO_DEEP";
-        else if (!higherLow) upBlockReason = "HIGHER_LOW_MISSING";
+        else if (!higherLowUp) upBlockReason = "HIGHER_LOW_MISSING";
         else if (!reclaimConfirmedUp) upBlockReason = "RECLAIM_NOT_CONFIRMED";
         else if (centerSlope <= 0.00002 && ema20Slope <= 0.00002) upBlockReason = "SLOPE_FLAT_OR_NEGATIVE";
     }
 
-    // --- EVALUATE STAIR_STEP_DOWN (SYMMETRIC) ---
-    const impulseDown = prevHigh - windowLow;
-    const reboundDownAmount = recentHigh - prevLow;
-    const hasConsolidationDown = bullishCandleCount >= 1 || recentHalf.some(c => getClose(c) > getOpen(c) || getHigh(c) > getOpen(c));
-    const pullbackDepthRatioDown = (impulseDown > 0 && prevHigh > prevLow)
-        ? (reboundDownAmount > 0 ? (reboundDownAmount / (prevHigh - prevLow)) : (hasConsolidationDown ? 0.3 : 0.5))
+    // =========================================================================
+    // B. CHRONOLOGICAL PIVOT SEARCH: STAIR_STEP_DOWN (H1 -> L1 -> H2 -> re-decline)
+    // =========================================================================
+    // 1. Find most recent genuine local rebound swing high H2 (strict 3-bar pivot, search backward from N-2)
+    let h2Idx = -1;
+    for (let k = N - 2; k >= 2; k--) {
+        const highK = getHigh(windowCandles[k]);
+        const prevH = getHigh(windowCandles[k - 1]);
+        const nextH = getHigh(windowCandles[k + 1]);
+        if (highK >= prevH && highK >= nextH) {
+            h2Idx = k;
+            break;
+        }
+    }
+
+    // 2. Search strictly BEFORE H2 (search backward from h2Idx - 1 down to 1) for nearest valid 3-bar swing low L1
+    let l1DownIdx = -1;
+    if (h2Idx >= 2) {
+        for (let k = h2Idx - 1; k >= 1; k--) {
+            const lowK = getLow(windowCandles[k]);
+            const prevL = getLow(windowCandles[k - 1]);
+            const nextL = getLow(windowCandles[k + 1]);
+            if (lowK <= prevL && lowK <= nextL) {
+                l1DownIdx = k;
+                break;
+            }
+        }
+    }
+
+    // 3. Search strictly BEFORE L1 (search backward from l1DownIdx - 1 down to 1) for nearest valid 3-bar swing high H1
+    let h1DownIdx = -1;
+    if (l1DownIdx >= 2) {
+        for (let k = l1DownIdx - 1; k >= 1; k--) {
+            const highK = getHigh(windowCandles[k]);
+            const prevH = getHigh(windowCandles[k - 1]);
+            const nextH = getHigh(windowCandles[k + 1]);
+            if (highK >= prevH && highK >= nextH) {
+                h1DownIdx = k;
+                break;
+            }
+        }
+    }
+
+    const pivotOrderValidDown = h1DownIdx >= 0 && l1DownIdx > h1DownIdx && h2Idx > l1DownIdx && h2Idx < N;
+    const h1DownVal = pivotOrderValidDown ? getHigh(windowCandles[h1DownIdx]) : 0;
+    const l1DownVal = pivotOrderValidDown ? getLow(windowCandles[l1DownIdx]) : 0;
+    const h2DownVal = pivotOrderValidDown ? getHigh(windowCandles[h2Idx]) : 0;
+
+    const impulseDown = pivotOrderValidDown ? (h1DownVal - l1DownVal) : 0;
+    const reboundDownAmount = pivotOrderValidDown ? (h2DownVal - l1DownVal) : 0;
+    const hasConsolidationDown = bullishCandleCount >= 1 || (h2Idx >= 0 && h2Idx < N - 1);
+
+    const pullbackDepthRatioDown = (pivotOrderValidDown && impulseDown > 0)
+        ? (reboundDownAmount > 0 ? (reboundDownAmount / impulseDown) : (hasConsolidationDown ? 0.3 : 0.5))
         : 1.0;
 
-    // Rejection condition for DOWN: Last price has turned down from rebound high and is holding lower zone of structure
-    const rejectionConfirmedDown = (lastPrice < recentHigh - (recentHigh - windowLow) * 0.25) || (lastPrice <= prevLow * 1.002);
+    // Post-H2 Re-decline / Lower Low & Rejection Confirmation
+    let minPostH2Low = Infinity;
+    if (pivotOrderValidDown && h2Idx < N) {
+        for (let k = h2Idx; k < N; k++) {
+            minPostH2Low = Math.min(minPostH2Low, getLow(windowCandles[k]));
+        }
+    }
+    minPostH2Low = Math.min(minPostH2Low, lastPrice);
+
+    const lowerHighDown = pivotOrderValidDown ? (h2DownVal < h1DownVal) : false;
+    const lowerLowDown = pivotOrderValidDown ? (minPostH2Low <= l1DownVal * 1.002) : false;
+    const rejectionConfirmedDown = pivotOrderValidDown
+        ? ((lastPrice < h2DownVal - (h2DownVal - l1DownVal) * 0.25) || (lastPrice <= l1DownVal * 1.002))
+        : false;
     const htfVetoShort = htfPolicy === "LONG_ONLY_OR_NONE" || (htfPolicy === "HOLD" && htfHardBlockReason === "STRONG_BULLISH_HTF_ALIGNMENT");
 
     let downConfidence = 0;
     let downBlockReason: string | null = null;
 
-    if (lowerHigh) downConfidence += 0.25;
-    if (lowerLow || lastPrice <= prevLow * 1.002) downConfidence += 0.20;
+    if (pivotOrderValidDown) downConfidence += 0.10;
+    if (lowerHighDown) downConfidence += 0.20;
+    if (lowerLowDown) downConfidence += 0.20;
     if (centerSlope < -0.00002 || ema20Slope < -0.00002) downConfidence += 0.20;
     if (pullbackDepthRatioDown > 0 && pullbackDepthRatioDown <= 0.65) downConfidence += 0.20;
-    if (rejectionConfirmedDown) downConfidence += 0.15;
+    if (rejectionConfirmedDown) downConfidence += 0.10;
 
     const isStairStepDown =
-        lowerHigh &&
-        (lowerLow || lastPrice <= prevLow * 1.002) &&
+        pivotOrderValidDown &&
+        lowerHighDown &&
+        lowerLowDown &&
         (centerSlope < 0.00005) &&
         (ema20Slope < 0.00005) &&
         (centerSlope < -0.00002 || ema20Slope < -0.00002) &&
@@ -226,9 +354,10 @@ export function detectStairStepStructure(args: {
 
     if (!isStairStepDown) {
         if (htfVetoShort) downBlockReason = "HTF_HARD_VETO";
+        else if (!pivotOrderValidDown) downBlockReason = "PIVOT_CHRONOLOGY_INVALID";
         else if (isSingleSpikeDown) downBlockReason = "SINGLE_SPIKE_UNSUSTAINED";
         else if (pullbackDepthRatioDown > 0.65) downBlockReason = "REBOUND_TOO_DEEP";
-        else if (!lowerHigh) downBlockReason = "LOWER_HIGH_MISSING";
+        else if (!lowerHighDown) downBlockReason = "LOWER_HIGH_MISSING";
         else if (!rejectionConfirmedDown) downBlockReason = "REJECTION_NOT_CONFIRMED";
         else if (centerSlope >= -0.00002 && ema20Slope >= -0.00002) downBlockReason = "SLOPE_FLAT_OR_POSITIVE";
     }
@@ -237,10 +366,10 @@ export function detectStairStepStructure(args: {
         return {
             detected: true,
             direction: "UP",
-            higher_low_detected: higherLow,
-            higher_high_detected: higherHigh,
-            lower_high_detected: lowerHigh,
-            lower_low_detected: lowerLow,
+            higher_low_detected: higherLowUp,
+            higher_high_detected: higherHighUp,
+            lower_high_detected: false,
+            lower_low_detected: false,
             center_slope: Number(centerSlope.toFixed(6)),
             ema20_slope: Number(ema20Slope.toFixed(6)),
             pullback_depth_ratio: Number(pullbackDepthRatioUp.toFixed(4)),
@@ -250,7 +379,14 @@ export function detectStairStepStructure(args: {
             block_reason: null,
             structure_candles_closed_only: true,
             reclaim_price_source: "live_last_price",
-            closed_candle_count: closedCandles.length
+            closed_candle_count: closedCandles.length,
+            pivot_order_valid: pivotOrderValidUp,
+            impulse_start_idx: l1Idx,
+            impulse_end_idx: h1Idx,
+            correction_pivot_idx: l2Idx,
+            post_correction_confirmation_present: higherHighUp,
+            prior_leg_size: Number(impulseUp.toFixed(2)),
+            correction_amount: Number(pullbackUpAmount.toFixed(2))
         };
     }
 
@@ -258,10 +394,10 @@ export function detectStairStepStructure(args: {
         return {
             detected: true,
             direction: "DOWN",
-            higher_low_detected: higherLow,
-            higher_high_detected: higherHigh,
-            lower_high_detected: lowerHigh,
-            lower_low_detected: lowerLow,
+            higher_low_detected: false,
+            higher_high_detected: false,
+            lower_high_detected: lowerHighDown,
+            lower_low_detected: lowerLowDown,
             center_slope: Number(centerSlope.toFixed(6)),
             ema20_slope: Number(ema20Slope.toFixed(6)),
             pullback_depth_ratio: Number(pullbackDepthRatioDown.toFixed(4)),
@@ -271,7 +407,14 @@ export function detectStairStepStructure(args: {
             block_reason: null,
             structure_candles_closed_only: true,
             reclaim_price_source: "live_last_price",
-            closed_candle_count: closedCandles.length
+            closed_candle_count: closedCandles.length,
+            pivot_order_valid: pivotOrderValidDown,
+            impulse_start_idx: h1DownIdx,
+            impulse_end_idx: l1DownIdx,
+            correction_pivot_idx: h2Idx,
+            post_correction_confirmation_present: lowerLowDown,
+            prior_leg_size: Number(impulseDown.toFixed(2)),
+            correction_amount: Number(reboundDownAmount.toFixed(2))
         };
     }
 
@@ -282,10 +425,10 @@ export function detectStairStepStructure(args: {
     return {
         detected: false,
         direction: "NONE",
-        higher_low_detected: higherLow,
-        higher_high_detected: higherHigh,
-        lower_high_detected: lowerHigh,
-        lower_low_detected: lowerLow,
+        higher_low_detected: higherLowUp,
+        higher_high_detected: higherHighUp,
+        lower_high_detected: lowerHighDown,
+        lower_low_detected: lowerLowDown,
         center_slope: Number(centerSlope.toFixed(6)),
         ema20_slope: Number(ema20Slope.toFixed(6)),
         pullback_depth_ratio: Number(chosenPullbackRatio.toFixed(4)),
@@ -295,6 +438,13 @@ export function detectStairStepStructure(args: {
         block_reason: chosenBlockReason,
         structure_candles_closed_only: true,
         reclaim_price_source: "live_last_price",
-        closed_candle_count: closedCandles.length
+        closed_candle_count: closedCandles.length,
+        pivot_order_valid: upConfidence >= downConfidence ? pivotOrderValidUp : pivotOrderValidDown,
+        impulse_start_idx: upConfidence >= downConfidence ? l1Idx : h1DownIdx,
+        impulse_end_idx: upConfidence >= downConfidence ? h1Idx : l1DownIdx,
+        correction_pivot_idx: upConfidence >= downConfidence ? l2Idx : h2Idx,
+        post_correction_confirmation_present: false,
+        prior_leg_size: Number((upConfidence >= downConfidence ? impulseUp : impulseDown).toFixed(2)),
+        correction_amount: Number((upConfidence >= downConfidence ? pullbackUpAmount : reboundDownAmount).toFixed(2))
     };
 }
