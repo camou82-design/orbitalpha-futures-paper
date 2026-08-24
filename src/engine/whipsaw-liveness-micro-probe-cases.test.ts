@@ -72,13 +72,44 @@ function makeMicroDownReboundCandles(basePrice = 69000): Candle[] {
   }));
   const tail: Array<{ o: number; h: number; l: number; c: number }> = [
     { o: basePrice, h: basePrice + 100, l: basePrice - 100, c: basePrice - 50 },
-    { o: basePrice - 50, h: basePrice, l: basePrice - 200, c: basePrice - 150 },
-    { o: basePrice - 150, h: basePrice - 100, l: basePrice - 400, c: basePrice - 350 },
-    { o: basePrice - 350, h: basePrice - 300, l: basePrice - 600, c: basePrice - 550 },
-    { o: basePrice - 550, h: basePrice - 500, l: basePrice - 650, c: basePrice - 600 },
-    { o: basePrice - 600, h: basePrice - 450, l: basePrice - 620, c: basePrice - 480 },
-    { o: basePrice - 480, h: basePrice - 300, l: basePrice - 500, c: basePrice - 350 },
-    { o: basePrice - 350, h: basePrice + 100, l: basePrice - 380, c: basePrice - 80 }
+    { o: basePrice - 50, h: basePrice, l: basePrice - 800, c: basePrice - 750 }, // min low early in window (index 1 < 4)
+    { o: basePrice - 750, h: basePrice - 600, l: basePrice - 760, c: basePrice - 650 },
+    { o: basePrice - 650, h: basePrice - 500, l: basePrice - 660, c: basePrice - 550 },
+    { o: basePrice - 550, h: basePrice - 400, l: basePrice - 560, c: basePrice - 450 },
+    { o: basePrice - 450, h: basePrice - 300, l: basePrice - 460, c: basePrice - 350 },
+    { o: basePrice - 350, h: basePrice - 200, l: basePrice - 360, c: basePrice - 250 },
+    { o: basePrice - 250, h: basePrice + 100, l: basePrice - 260, c: basePrice - 80 }
+  ];
+  const reversalBars: Candle[] = tail.map((b, i) => ({
+    ts: Date.now() - (8 - i) * 60000,
+    open: b.o,
+    high: b.h,
+    low: b.l,
+    close: b.c,
+    volume: 120
+  }));
+  return [...flat, ...reversalBars];
+}
+
+/** Candles engineered to trigger micro_up_then_drop in 8-bar window. */
+function makeMicroUpThenDropCandles(basePrice = 69000): Candle[] {
+  const flat: Candle[] = Array.from({ length: 112 }, (_, i) => ({
+    ts: Date.now() - (120 - i) * 60000,
+    open: basePrice,
+    high: basePrice + 50,
+    low: basePrice - 50,
+    close: basePrice,
+    volume: 100
+  }));
+  const tail: Array<{ o: number; h: number; l: number; c: number }> = [
+    { o: basePrice, h: basePrice + 100, l: basePrice - 100, c: basePrice + 50 },
+    { o: basePrice + 50, h: basePrice + 800, l: basePrice, c: basePrice + 750 }, // max high early in window (index 1 < 4)
+    { o: basePrice + 750, h: basePrice + 760, l: basePrice + 600, c: basePrice + 650 },
+    { o: basePrice + 650, h: basePrice + 660, l: basePrice + 500, c: basePrice + 550 },
+    { o: basePrice + 550, h: basePrice + 560, l: basePrice + 400, c: basePrice + 450 },
+    { o: basePrice + 450, h: basePrice + 460, l: basePrice + 300, c: basePrice + 350 },
+    { o: basePrice + 350, h: basePrice + 360, l: basePrice + 200, c: basePrice + 250 },
+    { o: basePrice + 250, h: basePrice + 260, l: basePrice - 100, c: basePrice + 80 }
   ];
   const reversalBars: Candle[] = tail.map((b, i) => ({
     ts: Date.now() - (8 - i) * 60000,
@@ -146,7 +177,7 @@ function makeBaseInput(
     { decision: { final_decision: "ENTER" } } as any,
     candles,
     "authoritative",
-    `cycle_${symbol}_test`
+    `cycle_${symbol}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
   );
 }
 
@@ -1339,7 +1370,7 @@ function makeBaseInput(
 {
   clearWhipsawObservationState("BTCUSDT");
 
-  const microCandles = makeMicroDownReboundCandles(69000);
+  const microCandles = makeMicroUpThenDropCandles(69000);
 
   const freshShockWithStaleHighReviewingTicks = makeBaseInput(
     "BTCUSDT",
@@ -1381,5 +1412,219 @@ function makeBaseInput(
   );
 }
 
-console.log("\nALL 24 WHIPSAW LIVENESS & HTF CONTRARIAN TESTS PASSED (TEST A - TEST W)!");
+// =========================================================================
+// TEST X — PURE SOFT-WATCH CANNOT CREATE A NEW WHIPSAW EPISODE
+// - No existing episode
+// - candidateRiskActive = false, allowNewHardBlockEpisode = false
+// - rawActive = true (micro + directional context only)
+// Expected:
+// - episodeId = null, recheckTicks = 0, active = false
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+
+  const res = updateWhipsawObservation({
+    symbol: "BTCUSDT",
+    rawActive: true,
+    candidateRiskActive: false,
+    allowNewHardBlockEpisode: false,
+    directionalShockState: "UP",
+    structuralHits: ["micro_up_then_drop"]
+  });
+
+  run(
+    "TEST_X_PURE_SOFT_WATCH_CANNOT_CREATE_EPISODE",
+    res.episodeId === null && res.recheckTicks === 0 && res.active === false,
+    `Pure soft-watch without candidate risk creates NO episode. episodeId=${res.episodeId}, recheckTicks=${res.recheckTicks}, active=${res.active}`
+  );
+}
+
+// =========================================================================
+// TEST Y — MULTIPLE SOFT-WATCH CYCLES NEVER PROMOTE TO HARD BLOCK
+// - Continuous cycles of soft-watch evidence (micro reversal + directional context)
+// - NO fresh structural hits
+// Expected:
+// - Never creates an episode
+// - Subtype remains WHIPSAW_SOFT_WATCH (or safe non-hard block)
+// - hard_block_active is never true
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+
+  const microCandles = makeMicroUpThenDropCandles(69000);
+  let neverPromotedToHardBlock = true;
+  let neverCreatedEpisode = true;
+
+  for (let cycle = 1; cycle <= 5; cycle++) {
+    const softWatchInput = makeBaseInput(
+      "BTCUSDT",
+      {
+        reviewing_ticks: 0,
+        boxBreakSide: "none",
+        breakoutFailureRate: 0.1,
+        volumeExpansion: 1.0,
+        candles: microCandles,
+        htf_candles: {
+          "5m": mockBullishCandles,
+          "15m": mockBullishCandles,
+          "1h": mockBullishCandles,
+          "4h": mockBullishCandles
+        }
+      },
+      {
+        directionalShockState: "UP",
+        longAllow: true,
+        shortAllow: false
+      }
+    );
+
+    const judgment = detectMarketRegime(softWatchInput);
+    const ep = whipsawObservationAuthority.getEpisode("BTCUSDT");
+
+    if (ep != null) neverCreatedEpisode = false;
+    if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") neverPromotedToHardBlock = false;
+    if (judgment.diagnostics?.whipsaw?.active === true) neverPromotedToHardBlock = false;
+  }
+
+  run(
+    "TEST_Y_MULTIPLE_SOFT_WATCH_CYCLES_NEVER_PROMOTE_TO_HARD_BLOCK",
+    neverCreatedEpisode && neverPromotedToHardBlock,
+    `5 consecutive soft-watch cycles created NO episode and never promoted to hard block. neverCreatedEpisode=${neverCreatedEpisode}, neverPromoted=${neverPromotedToHardBlock}`
+  );
+}
+
+// =========================================================================
+// TEST Z — REAL HARD CANDIDATE EPISODE CONTINUES OBSERVATION ACROSS EVIDENCE FADE
+// - Cycle 1: Genuine hard candidate (volExp=2.5 + micro reversal + shock) starts episode (ticks=1)
+// - Cycle 2: Fresh structural evidence fades (volExp=1.0) while micro reversal remains; snapshot has stale reviewing_ticks=20
+// Expected:
+// - Same episode continues (episodeId identical, ticks=2)
+// - effectiveRecheckTicks = 2 (does NOT inherit 20)
+// - subtype remains WHIPSAW_SHOCK_RECHECK for minimum observation window
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+
+  const microCandles = makeMicroDownReboundCandles(69000);
+
+  // Cycle 1: Hard shock candidate
+  const hardInput = makeBaseInput(
+    "BTCUSDT",
+    {
+      reviewing_ticks: 0,
+      boxBreakSide: "none",
+      breakoutFailureRate: 0.1,
+      volumeExpansion: 2.5,
+      candles: microCandles,
+      htf_candles: {
+        "5m": mockBullishCandles,
+        "15m": mockBullishCandles,
+        "1h": mockBullishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "DOWN",
+      shortAllow: true,
+      longAllow: false
+    }
+  );
+
+  const res1 = runEngineV2(hardInput);
+  const judgment1 = res1.internal.judgment;
+  const ep1 = whipsawObservationAuthority.getEpisode("BTCUSDT");
+  const ep1Ticks = ep1?.ticks ?? 0;
+  const ep1Id = ep1?.episodeId;
+
+  // Cycle 2: Evidence fades, legacy reviewing_ticks=20
+  const fadedInput = makeBaseInput(
+    "BTCUSDT",
+    {
+      reviewing_ticks: 20,
+      boxBreakSide: "none",
+      breakoutFailureRate: 0.1,
+      volumeExpansion: 1.0, // volExp back to normal
+      candles: microCandles, // micro reversal still unfolding
+      htf_candles: {
+        "5m": mockBullishCandles,
+        "15m": mockBullishCandles,
+        "1h": mockBullishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "DOWN",
+      shortAllow: true,
+      longAllow: false
+    }
+  );
+
+  const res2 = runEngineV2(fadedInput);
+  const judgment2 = res2.internal.judgment;
+  const decision2 = res2.decision;
+  const ep2 = whipsawObservationAuthority.getEpisode("BTCUSDT");
+
+  run(
+    "TEST_Z_LEGITIMATE_EPISODE_CONTINUES_ACROSS_EVIDENCE_FADE",
+    judgment1.subtype === "WHIPSAW_SHOCK_RECHECK" &&
+      ep1 != null &&
+      ep1Ticks === 1 &&
+      ep2 != null &&
+      ep2.episodeId === ep1Id &&
+      ep2.ticks === 2 &&
+      judgment2.diagnostics?.whipsaw?.recheckTicks === 2 &&
+      judgment2.subtype === "WHIPSAW_SHOCK_RECHECK" &&
+      decision2.decision !== "ENTER",
+    `Legitimate episode continues across evidence fade. ep1Ticks=${ep1Ticks}, ep2Ticks=${ep2?.ticks}, recheckTicks=${judgment2.diagnostics?.whipsaw?.recheckTicks}, subtype2=${judgment2.subtype}, decision2=${decision2.decision}`
+  );
+}
+
+// =========================================================================
+// TEST AA — GENUINE VOLUME EXPANSION + MICRO REVERSAL CREATES HARD EPISODE
+// - volExp=2.5 + micro_down_then_rebound + DOWN shock
+// Expected:
+// - Creates new episode at recheckTicks=1
+// - subtype = WHIPSAW_SHOCK_RECHECK
+// =========================================================================
+{
+  clearWhipsawObservationState("ETHUSDT");
+
+  const microCandles = makeMicroDownReboundCandles(2600);
+
+  const ethHardInput = makeBaseInput(
+    "ETHUSDT",
+    {
+      reviewing_ticks: 0,
+      boxBreakSide: "none",
+      breakoutFailureRate: 0.1,
+      volumeExpansion: 2.5,
+      candles: microCandles,
+      htf_candles: {
+        "5m": mockBullishCandles,
+        "15m": mockBullishCandles,
+        "1h": mockBullishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "DOWN",
+      shortAllow: true,
+      longAllow: false
+    }
+  );
+
+  const judgment = detectMarketRegime(ethHardInput);
+  const ep = whipsawObservationAuthority.getEpisode("ETHUSDT");
+
+  run(
+    "TEST_AA_GENUINE_VOLUME_EXPANSION_CREATES_HARD_EPISODE",
+    judgment.subtype === "WHIPSAW_SHOCK_RECHECK" &&
+      ep != null &&
+      ep.ticks === 1 &&
+      judgment.diagnostics?.whipsaw?.recheckTicks === 1,
+    `Genuine ETH volume expansion + micro reversal creates hard episode. subtype=${judgment.subtype}, epTicks=${ep?.ticks}`
+  );
+}
+
+console.log("\nALL 28 WHIPSAW LIVENESS & HTF CONTRARIAN TESTS PASSED (TEST A - TEST AA)!");
 
