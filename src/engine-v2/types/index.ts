@@ -857,6 +857,8 @@ export interface MarketJudgmentOutput {
         structural_hit_count: number;
         context_hit_count: number;
         structural_hits: string[];
+        fresh_structural_hits?: string[];
+        historical_only_hits?: string[];
         context_hits: string[];
         confirmation_wait_reasons: string[];
         whipsaw?: {

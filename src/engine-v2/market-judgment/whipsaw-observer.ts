@@ -65,9 +65,7 @@ class WhipsawObservationAuthority {
         const isHardBlockCandidate =
             args.candidateRiskActive === true ||
             (args.candidateRiskActive === undefined && rawActive);
-        const allowNewHardBlock =
-            args.allowNewHardBlockEpisode ??
-            (currentDirection === "UP" || currentDirection === "DOWN" || currentBypass);
+        const allowNewHardBlock = args.allowNewHardBlockEpisode ?? true;
 
         if (!existing && isHardBlockCandidate && !allowNewHardBlock) {
             return {

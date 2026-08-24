@@ -2445,11 +2445,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }));
         }
 
-        // CONTINUATION_MICRO_PROBE 경로 추가 (명확한 확정 이탈 발생 시)
-        
-        const isWhipsawRecheckBlock = whipsawShockRecheckActive || v2RejectReasonAfterPromotion === "WHIPSAW_SHOCK_RECHECK";
-        
-        if (isWhipsawRecheckBlock && (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "REJECT")) {
+        const isWhipsawRecheckBlock =
+            whipsawShockRecheckActive ||
+            judgment.subtype === "WHIPSAW_SOFT_WATCH" ||
+            v2RejectReasonAfterPromotion === "WHIPSAW_SHOCK_RECHECK";
+        const htfHoldBlock = judgment.htf_entry_policy === "HOLD" || judgment.counter_trend_risk === true;
+        if (isWhipsawRecheckBlock && (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "REJECT" || htfHoldBlock)) {
             const atr20 = Number(input.snapshot.atr20 ?? 0);
             const entryPrice = Number(input.snapshot.lastPrice ?? 0);
             const closedClose = input.snapshot.closedClose;
@@ -3886,6 +3887,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 stopPrice: stopPriceVal,
                 bypass_reason: "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST_BYPASS"
             }));
+        } else {
             v2DecisionAfterPromotion = "SKIP";
             v2SideAfterPromotion = "none";
             v2RejectReasonAfterPromotion = vetoReason;

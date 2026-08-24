@@ -1,7 +1,7 @@
 import { EngineV2Input, EngineV2MarketSubtype, MarketJudgmentOutput } from "../types";
 import { Candle, classifyRangeZone } from "../../models/types";
 import { emaLastFromCloses, computeSlopesFromCandles } from "../../utils/math";
-import { updateWhipsawObservation } from "./whipsaw-observer";
+import { updateWhipsawObservation, whipsawObservationAuthority } from "./whipsaw-observer";
 function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPhase"] {
     const shock = input.state.directionalShockState ?? "NONE";
     const crashState = String(input.state.crashState ?? "").toUpperCase();
@@ -724,13 +724,9 @@ function evaluateWhipsawShockRecheck(args: {
     if (boxOrbitChop) freshStructuralHits.push("box_orbit_chop");
     if (sn.boxBreakSide !== "none" && (!retestConfirmed || !reclaimConfirmed)) freshStructuralHits.push("box_break_unconfirmed");
     if (volExp >= 2.0) freshStructuralHits.push("volume_expansion_ge_2");
-    if (breakoutFailureRate >= 0.4) freshStructuralHits.push("breakout_failure_rate_ge_0_4");
-    if (mixedBreakoutState) freshStructuralHits.push("mixed_breakout_state");
+    if (sn.boxBreakSide !== "none" && breakoutFailureRate >= 0.4) freshStructuralHits.push("breakout_failure_rate_ge_0_4");
+    if (sn.boxBreakSide !== "none" && mixedBreakoutState) freshStructuralHits.push("mixed_breakout_state");
     if (Number(sn.atrExpansion ?? 0) >= 1.5) freshStructuralHits.push("atr_expansion_ge_1_5");
-
-    // Historical observation markers (must NOT sustain hard-block alone)
-    const historicalOnlyHits: string[] = [];
-    if (reviewingTicks >= 2) historicalOnlyHits.push("recheck_repetition");
 
     const microHitCount = microHits.length;
     const freshStructuralHitCount = freshStructuralHits.length;
@@ -745,19 +741,24 @@ function evaluateWhipsawShockRecheck(args: {
     const freshShockContext =
         directional === "UP" ||
         directional === "DOWN" ||
+        (sn.boxBreakSide !== "none" && freshStructuralHitCount >= 1) ||
+        volExp >= 2.0 ||
         pumpS.includes("ALERT") ||
         crashS.includes("ALERT") ||
         input.state.shockEmergencyBypass === true;
 
     const allowNewHardBlockEpisode = candidateRiskActive && freshShockContext;
 
-    // Soft Watch: Micro reversal + context (directional shock) without heavy fresh structural evidence
-    const rawIsSoftWatch = !candidateRiskActive && microHitCount >= 1 && contextHitCount >= 1;
+    const existingEpisode = whipsawObservationAuthority.getEpisode(String(input.symbol));
+    const hasExistingEpisode = existingEpisode != null;
+
+    // Soft Watch: Micro reversal + context (directional shock or existing episode) without heavy fresh structural evidence
+    const rawIsSoftWatch = !candidateRiskActive && microHitCount >= 1 && (contextHitCount >= 1 || hasExistingEpisode);
 
     // Dedicated Symbol-Scoped WHIPSAW Observation State
     const observation = updateWhipsawObservation({
         symbol: input.symbol,
-        rawActive: candidateRiskActive || rawIsSoftWatch,
+        rawActive: candidateRiskActive || rawIsSoftWatch || (hasExistingEpisode && microHitCount >= 1),
         candidateRiskActive,
         allowNewHardBlockEpisode,
         directionalShockState: directional,
@@ -766,8 +767,17 @@ function evaluateWhipsawShockRecheck(args: {
         now: (input.state as any)?.now ?? Date.now()
     });
 
-    // Hard block requires an active episode; new episodes need fresh shock context
-    let active = candidateRiskActive && observation.episodeId != null;
+    const effectiveRecheckTicks = Math.max(reviewingTicks, observation.recheckTicks);
+    const observationAgePassed = observation.observationAgePassed || effectiveRecheckTicks >= observation.requiredTicks;
+
+    // Historical observation markers (must NOT sustain hard-block alone)
+    const historicalOnlyHits: string[] = [];
+    if (effectiveRecheckTicks >= 2) historicalOnlyHits.push("recheck_repetition");
+    if (sn.boxBreakSide === "none" && breakoutFailureRate >= 0.4) historicalOnlyHits.push("breakout_failure_rate_ge_0_4");
+    if (sn.boxBreakSide === "none" && mixedBreakoutState) historicalOnlyHits.push("mixed_breakout_state");
+
+    // Hard block requires an active episode; ongoing unaged episode with micro reversal maintains hard block
+    let active = (candidateRiskActive || (hasExistingEpisode && !observationAgePassed && microHitCount >= 1)) && observation.episodeId != null;
     let isSoftWatch = rawIsSoftWatch;
 
     const finalRecheckConfirmed = retestConfirmed || reclaimConfirmed;
@@ -805,11 +815,11 @@ function evaluateWhipsawShockRecheck(args: {
 
     // --- Deactivation (Release) Evaluation ---
     if (active || hasActiveEpisode) {
-        if (observation.observationAgePassed) {
+        if (observationAgePassed) {
             const freshVanished = freshStructuralHits.length === 0 || microHits.length === 0;
             const releasedBySwing = !micro.reverseSwingDetected;
             const releasedByVol = volExp < 1.7;
-            const releasedByFailRate = breakoutFailureRate < 0.32;
+            const releasedByFailRate = sn.boxBreakSide === "none" || breakoutFailureRate < 0.32;
             const releasedByConfirmation = finalRecheckConfirmed;
 
             if (directionConsistentStabilization) {
@@ -830,19 +840,13 @@ function evaluateWhipsawShockRecheck(args: {
         }
     }
 
-    const finalReleaseEligible = baseReleaseEligible && !htfContrarianReleaseBlocked;
+    const finalReleaseEligible = baseReleaseEligible;
     let finalReleaseReason: string | null = null;
 
     if (baseReleaseEligible) {
-        if (htfContrarianReleaseBlocked) {
-            finalReleaseReason = "HTF_CONTRARIAN_RELEASE_BLOCKED";
-            active = true; // Maintain Hard-Block against macro contrarian trend
-            isSoftWatch = false;
-        } else {
-            finalReleaseReason = baseReleaseReason;
-            active = false;
-            isSoftWatch = false;
-        }
+        finalReleaseReason = baseReleaseReason;
+        active = false;
+        isSoftWatch = microHits.length > 0 && contextHitCount > 0;
     }
 
     if (finalReleaseEligible) {
@@ -859,8 +863,8 @@ function evaluateWhipsawShockRecheck(args: {
     const confirmationWaitReasons: string[] = [];
     if (!retestConfirmed) confirmationWaitReasons.push("retest_not_confirmed");
     if (!reclaimConfirmed) confirmationWaitReasons.push("reclaim_not_confirmed");
-    if (reviewingTicks < 6) confirmationWaitReasons.push("reviewing_ticks_insufficient");
-    if (!observation.observationAgePassed) confirmationWaitReasons.push("whipsaw_observation_age_insufficient");
+    if (effectiveRecheckTicks < 6 && !observationAgePassed) confirmationWaitReasons.push("reviewing_ticks_insufficient");
+    if (!observationAgePassed) confirmationWaitReasons.push("whipsaw_observation_age_insufficient");
 
     const hits = structuralHits;
 
@@ -883,11 +887,11 @@ function evaluateWhipsawShockRecheck(args: {
         boxOrbitChop,
         structuralHitCount: freshStructuralHitCount,
         contextHitCount,
-        recheckTicks: observation.recheckTicks,
+        recheckTicks: effectiveRecheckTicks,
         whipsawEpisodeId: observation.episodeId,
         whipsawRecheckRequiredTicks: observation.requiredTicks,
         whipsawCounterResetReason: observation.resetReason,
-        observationAgePassed: observation.observationAgePassed,
+        observationAgePassed,
         finalRecheckConfirmed,
         freshStructuralHits,
         historicalOnlyHits,
@@ -1611,6 +1615,8 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
             structural_hit_count: whipsaw.structuralHitCount,
             context_hit_count: whipsaw.contextHitCount,
             structural_hits: whipsaw.hits,
+            fresh_structural_hits: whipsaw.freshStructuralHits,
+            historical_only_hits: whipsaw.historicalOnlyHits,
             context_hits: whipsaw.contextHits,
             confirmation_wait_reasons: whipsaw.confirmationWaitReasons,
             whipsaw: {

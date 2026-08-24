@@ -151,7 +151,7 @@ function makeBaseInput(
 }
 
 // =========================================================================
-// TEST A — BTC UP shock + Bearish HTF -> Hard-Block MAINTAINED (Release Blocked)
+// TEST A — BTC UP shock + Bearish HTF -> Hard-Block RELEASES to HTF HOLD / Soft-Watch Routing
 // =========================================================================
 {
   clearWhipsawObservationState("BTCUSDT");
@@ -184,16 +184,20 @@ function makeBaseInput(
   );
 
   const judgment = detectMarketRegime(inputContrarian);
+  const { decision } = runEngineV2(inputContrarian);
 
   run(
     "TEST_A_BTC_HTF_CONTRARIAN_RELEASE_BLOCKED",
-    judgment.subtype === "WHIPSAW_SHOCK_RECHECK",
-    `BTC UP shock against Bearish HTF remains HARD-BLOCKED. subtype=${judgment.subtype}`
+    judgment.subtype !== "WHIPSAW_SHOCK_RECHECK" &&
+      judgment.htf_entry_policy === "HOLD" &&
+      decision.decision !== "ENTER" &&
+      decision.explanation.reason !== "WHIPSAW_SHOCK_RECHECK",
+    `BTC UP shock against Bearish HTF releases hard-block to HOLD routing. subtype=${judgment.subtype}, policy=${judgment.htf_entry_policy}, decision=${decision.decision}`
   );
 }
 
 // =========================================================================
-// TEST B — ETH UP shock + Bearish HTF -> Hard-Block MAINTAINED (Release Blocked)
+// TEST B — ETH UP shock + Bearish HTF -> Hard-Block RELEASES to HTF HOLD / Soft-Watch Routing
 // =========================================================================
 {
   clearWhipsawObservationState("ETHUSDT");
@@ -224,16 +228,20 @@ function makeBaseInput(
   );
 
   const judgment = detectMarketRegime(inputContrarian);
+  const { decision } = runEngineV2(inputContrarian);
 
   run(
     "TEST_B_ETH_HTF_CONTRARIAN_RELEASE_BLOCKED",
-    judgment.subtype === "WHIPSAW_SHOCK_RECHECK",
-    `ETH UP shock against Bearish HTF remains HARD-BLOCKED. subtype=${judgment.subtype}`
+    judgment.subtype !== "WHIPSAW_SHOCK_RECHECK" &&
+      judgment.htf_entry_policy === "HOLD" &&
+      decision.decision !== "ENTER" &&
+      decision.explanation.reason !== "WHIPSAW_SHOCK_RECHECK",
+    `ETH UP shock against Bearish HTF releases hard-block to HOLD routing. subtype=${judgment.subtype}, policy=${judgment.htf_entry_policy}, decision=${decision.decision}`
   );
 }
 
 // =========================================================================
-// TEST C — BTC DOWN shock + Bullish HTF -> Hard-Block MAINTAINED (Release Blocked)
+// TEST C — BTC DOWN shock + Bullish HTF -> Hard-Block RELEASES to HTF HOLD / Soft-Watch Routing
 // =========================================================================
 {
   clearWhipsawObservationState("BTCUSDT");
@@ -264,16 +272,20 @@ function makeBaseInput(
   );
 
   const judgment = detectMarketRegime(inputContrarian);
+  const { decision } = runEngineV2(inputContrarian);
 
   run(
     "TEST_C_BTC_DOWN_CONTRARIAN_RELEASE_BLOCKED",
-    judgment.subtype === "WHIPSAW_SHOCK_RECHECK",
-    `BTC DOWN shock against Bullish HTF remains HARD-BLOCKED. subtype=${judgment.subtype}`
+    judgment.subtype !== "WHIPSAW_SHOCK_RECHECK" &&
+      judgment.htf_entry_policy === "HOLD" &&
+      decision.decision !== "ENTER" &&
+      decision.explanation.reason !== "WHIPSAW_SHOCK_RECHECK",
+    `BTC DOWN shock against Bullish HTF releases hard-block to HOLD routing. subtype=${judgment.subtype}, policy=${judgment.htf_entry_policy}, decision=${decision.decision}`
   );
 }
 
 // =========================================================================
-// TEST D — ETH DOWN shock + Bullish HTF -> Hard-Block MAINTAINED (Release Blocked)
+// TEST D — ETH DOWN shock + Bullish HTF -> Hard-Block RELEASES to HTF HOLD / Soft-Watch Routing
 // =========================================================================
 {
   clearWhipsawObservationState("ETHUSDT");
@@ -304,11 +316,15 @@ function makeBaseInput(
   );
 
   const judgment = detectMarketRegime(inputContrarian);
+  const { decision } = runEngineV2(inputContrarian);
 
   run(
     "TEST_D_ETH_DOWN_CONTRARIAN_RELEASE_BLOCKED",
-    judgment.subtype === "WHIPSAW_SHOCK_RECHECK",
-    `ETH DOWN shock against Bullish HTF remains HARD-BLOCKED. subtype=${judgment.subtype}`
+    judgment.subtype !== "WHIPSAW_SHOCK_RECHECK" &&
+      judgment.htf_entry_policy === "HOLD" &&
+      decision.decision !== "ENTER" &&
+      decision.explanation.reason !== "WHIPSAW_SHOCK_RECHECK",
+    `ETH DOWN shock against Bullish HTF releases hard-block to HOLD routing. subtype=${judgment.subtype}, policy=${judgment.htf_entry_policy}, decision=${decision.decision}`
   );
 }
 
@@ -581,9 +597,9 @@ function makeBaseInput(
     trendWeaknessScore: 0.1,
     boxHighSlope: 0,
     boxLowSlope: 0,
-    candles: mockBullishCandles,
+    candles: makeMicroDownReboundCandles(69000),
     htf_candles: {
-      "5m": mockBullishCandles,
+      "5m": makeMicroDownReboundCandles(69000),
       "15m": mockBullishCandles,
       "1h": mockBearishCandles,
       "4h": mockBearishCandles
@@ -795,6 +811,7 @@ function makeBaseInput(
     lastPrice: 2600,
     latestCandleClose: 2600,
     signal: "paper_long_candidate",
+    entryCandidate: true,
     qualityScore: 90,
     candidateStrength: "strong",
     ema20: 2595,
@@ -1167,4 +1184,146 @@ function makeBaseInput(
   );
 }
 
-console.log("\nALL 21 WHIPSAW LIVENESS & HTF CONTRARIAN TESTS PASSED (TEST A - TEST T)!");
+// =========================================================================
+// TEST U — EXACT PRODUCTION DEADLOCK REPLAY (BTC)
+// - recheckTicks=19 (>6 required) while reviewing_ticks=0
+// - boxBreakSide="none" + stale breakoutFailureRate=1.0
+// - DOWN shock + 4h/1d BULLISH HTF (macroPolarity=BULLISH)
+// - micro reversal present, no new fresh whipsaw hazard
+// - lower range zone (boxPos=0.2)
+// Expected:
+// - subtype != "WHIPSAW_SHOCK_RECHECK" (hard block released!)
+// - reviewing_ticks_insufficient & whipsaw_observation_age_insufficient NOT in wait reasons
+// - freshStructuralHits is empty []
+// - breakoutFailureRate=1 is placed in historicalOnlyHits, NOT freshStructuralHits
+// - htf_entry_policy = "HOLD" (preserves countertrend shock protection)
+// - engine decision != "ENTER" (safe non-entry)
+// - hard_block_reason != "WHIPSAW_SHOCK_RECHECK" (no dead-zone lock)
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+
+  const microCandles = makeMicroDownReboundCandles(69000);
+
+  // 1. Seed whipsaw episode to 19 ticks under DOWN shock
+  for (let i = 1; i <= 19; i++) {
+    updateWhipsawObservation({
+      symbol: "BTCUSDT",
+      rawActive: true,
+      candidateRiskActive: true,
+      allowNewHardBlockEpisode: true,
+      directionalShockState: "DOWN",
+      structuralHits: ["micro_down_then_rebound", "volume_expansion_ge_2"]
+    });
+  }
+
+  // 2. Production tick: reviewing_ticks=0, boxBreakSide="none", breakoutFailureRate=1.0, volExp=1.0
+  const prodInput = makeBaseInput(
+    "BTCUSDT",
+    {
+      reviewing_ticks: 0,
+      boxBreakSide: "none",
+      breakoutFailureRate: 1.0,
+      volumeExpansion: 1.0,
+      boxPos: 0.2, // lower zone
+      candles: microCandles,
+      htf_candles: {
+        "5m": mockBearishCandles,
+        "15m": mockBearishCandles,
+        "1h": mockBullishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "DOWN",
+      shortAllow: true,
+      longAllow: false
+    }
+  );
+
+  const judgment = detectMarketRegime(prodInput);
+  const { decision } = runEngineV2(prodInput);
+
+  const reasons = judgment.diagnostics?.confirmation_wait_reasons ?? [];
+  const freshHits = judgment.diagnostics?.fresh_structural_hits ?? [];
+  const histHits = judgment.diagnostics?.historical_only_hits ?? [];
+
+  run(
+    "TEST_U_BTC_PRODUCTION_DEADLOCK_RESOLVED",
+    judgment.subtype !== "WHIPSAW_SHOCK_RECHECK" &&
+      !reasons.includes("reviewing_ticks_insufficient") &&
+      !reasons.includes("whipsaw_observation_age_insufficient") &&
+      freshHits.length === 0 &&
+      histHits.includes("breakout_failure_rate_ge_0_4") &&
+      judgment.htf_entry_policy === "HOLD" &&
+      decision.decision !== "ENTER" &&
+      decision.explanation.reason !== "WHIPSAW_SHOCK_RECHECK",
+    `Production BTC state releases hard-block cleanly. subtype=${judgment.subtype}, freshHits=${JSON.stringify(freshHits)}, histHits=${JSON.stringify(histHits)}, reasons=${JSON.stringify(reasons)}, htf_policy=${judgment.htf_entry_policy}, decision=${decision.decision}, reason=${decision.explanation.reason}`
+  );
+}
+
+// =========================================================================
+// TEST V — EXACT PRODUCTION DEADLOCK REPLAY (ETH)
+// =========================================================================
+{
+  clearWhipsawObservationState("ETHUSDT");
+
+  const microCandles = makeMicroDownReboundCandles(2600);
+
+  for (let i = 1; i <= 19; i++) {
+    updateWhipsawObservation({
+      symbol: "ETHUSDT",
+      rawActive: true,
+      candidateRiskActive: true,
+      allowNewHardBlockEpisode: true,
+      directionalShockState: "DOWN",
+      structuralHits: ["micro_down_then_rebound", "volume_expansion_ge_2"]
+    });
+  }
+
+  const prodInput = makeBaseInput(
+    "ETHUSDT",
+    {
+      reviewing_ticks: 0,
+      boxBreakSide: "none",
+      breakoutFailureRate: 1.0,
+      volumeExpansion: 1.0,
+      boxPos: 0.2,
+      candles: microCandles,
+      htf_candles: {
+        "5m": mockBearishCandles,
+        "15m": mockBearishCandles,
+        "1h": mockBullishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "DOWN",
+      shortAllow: true,
+      longAllow: false
+    }
+  );
+
+  const judgment = detectMarketRegime(prodInput);
+  const { decision } = runEngineV2(prodInput);
+
+  const reasons = judgment.diagnostics?.confirmation_wait_reasons ?? [];
+  const freshHits = judgment.diagnostics?.fresh_structural_hits ?? [];
+  const histHits = judgment.diagnostics?.historical_only_hits ?? [];
+
+  run(
+    "TEST_V_ETH_PRODUCTION_DEADLOCK_RESOLVED",
+    judgment.subtype !== "WHIPSAW_SHOCK_RECHECK" &&
+      !reasons.includes("reviewing_ticks_insufficient") &&
+      !reasons.includes("whipsaw_observation_age_insufficient") &&
+      freshHits.length === 0 &&
+      histHits.includes("breakout_failure_rate_ge_0_4") &&
+      judgment.htf_entry_policy === "HOLD" &&
+      decision.decision !== "ENTER" &&
+      decision.explanation.reason !== "WHIPSAW_SHOCK_RECHECK",
+    `Production ETH state releases hard-block cleanly. subtype=${judgment.subtype}, freshHits=${JSON.stringify(freshHits)}, histHits=${JSON.stringify(histHits)}, reasons=${JSON.stringify(reasons)}, htf_policy=${judgment.htf_entry_policy}, decision=${decision.decision}, reason=${decision.explanation.reason}`
+  );
+}
+
+console.log("\nALL 23 WHIPSAW LIVENESS & HTF CONTRARIAN TESTS PASSED (TEST A - TEST V)!");
+

@@ -483,7 +483,7 @@ const defaultConfig: any = {
     lastLossExitSide: "short" as const,
     lastLossExitAt: Date.now() - 30000, // 30s ago
     lastLossExitPrice: 2600,
-    lastLossEntryPrice: 2640,
+    lastLossEntryPrice: 2596,
     lastLossExitReason: "stop_loss",
     realizedLossNetUsd: -15
   };
