@@ -718,7 +718,6 @@ function evaluateWhipsawShockRecheck(args: {
     const contextHits: string[] = [];
     if (directional === "UP" || directional === "DOWN") contextHits.push("directional_shock_state");
     if (pumpS.includes("ALERT") || crashS.includes("ALERT")) contextHits.push("pump_crash_alert");
-    if (counterTrendRisk) contextHits.push("counter_trend_risk");
 
     // Fresh structural hazard hits (actively present right now)
     const freshStructuralHits: string[] = [];

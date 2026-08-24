@@ -1647,16 +1647,6 @@ function makeBaseInput(
   clearGlobalShockStates();
   marketJudgmentCacheBySymbol.clear();
 
-  // 1. Seed episode to 6 ticks so it releases to soft watch
-  for (let i = 1; i <= 6; i++) {
-    updateWhipsawObservation({
-      symbol: "BTCUSDT",
-      rawActive: true,
-      directionalShockState: "DOWN",
-      structuralHits: ["micro_down_then_rebound", "box_orbit_chop"]
-    });
-  }
-
   const now = Date.now();
   const watchBoundary = 69000;
 
@@ -1702,6 +1692,7 @@ function makeBaseInput(
     },
     {
       directionalShockState: "NONE", // Production case: directionalShock is NONE
+      crashState: "CRASH_ALERT",
       shortAllow: true,
       longAllow: false,
       signedExecutionReady: true,
@@ -1800,6 +1791,7 @@ function makeBaseInput(
     },
     {
       directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
       shortAllow: true,
       longAllow: false,
       signedExecutionReady: true,
@@ -1877,6 +1869,7 @@ function makeBaseInput(
     },
     {
       directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
       shortAllow: true,
       longAllow: false,
       signedExecutionReady: true,
@@ -2076,8 +2069,10 @@ function makeBaseInput(
         "4h": mockBullishCandles
       }
     },
+// TEST GG
     {
       directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
       shortAllow: true,
       longAllow: false,
       signedExecutionReady: true,
@@ -2146,6 +2141,7 @@ function makeBaseInput(
     },
     {
       directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
       shortAllow: true,
       longAllow: false,
       signedExecutionReady: true,
@@ -2214,6 +2210,7 @@ function makeBaseInput(
     },
     {
       directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
       shortAllow: true,
       longAllow: false,
       signedExecutionReady: true,
@@ -2291,6 +2288,7 @@ function makeBaseInput(
     },
     {
       directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
       shortAllow: true,
       longAllow: false,
       signedExecutionReady: true,
@@ -2479,6 +2477,7 @@ function makeBaseInput(
     },
     {
       directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
       shortAllow: true,
       longAllow: false,
       signedExecutionReady: true,
@@ -2507,7 +2506,124 @@ function makeBaseInput(
   );
 }
 
-console.log("\nALL 39 WHIPSAW LIVENESS, HTF CONTRARIAN & PROBE_ONLY TESTS PASSED (TEST A - TEST LL)!");
+// =========================================================================
+// TEST MM (Requirement 1) — counterTrendRisk ALONE DOES NOT MANUFACTURE WHIPSAW_SOFT_WATCH
+// - counterTrendRisk = true (due to 4h bullish vs 5m/15m bearish)
+// - micro reversal = true (micro_down_then_rebound)
+// - directionalShockState = "NONE"
+// - no pump/crash ALERT
+// - no existing episode
+// - no fresh structural risk
+// Expected:
+// - Must NOT become WHIPSAW_SOFT_WATCH solely because of counterTrendRisk.
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const microCandles = makeMicroDownReboundCandles(68930);
+
+  const inputNoSoftWatch = makeBaseInput(
+    "BTCUSDT",
+    {
+      lastPrice: 68930,
+      closedClose: 68920,
+      atr: 250,
+      atr20: 250,
+      boxLowSlope: -0.003,
+      rangeCenterSlope: -0.003,
+      boxHighSlope: -0.003,
+      emaGap: -0.002,
+      qualityScore: 65,
+      trendWeaknessScore: 0.3,
+      reviewing_ticks: 0,
+      boxBreakSide: "none",
+      breakoutFailureRate: 0.1,
+      volumeExpansion: 1.0,
+      candles: microCandles,
+      canonicalRegime: "RANGE",
+      htf_candles: {
+        "5m": mockBearishCandles,
+        "15m": mockBearishCandles,
+        "1h": mockBearishCandles,
+        "4h": mockBullishCandles // Creates counterTrendRisk: true
+      }
+    },
+    {
+      directionalShockState: "NONE",
+      shortAllow: true,
+      longAllow: false
+    },
+    "BEARISH"
+  );
+
+  const judgment = detectMarketRegime(inputNoSoftWatch);
+
+  run(
+    "TEST_MM_COUNTER_TREND_RISK_ALONE_DOES_NOT_MANUFACTURE_WHIPSAW_SOFT_WATCH",
+    judgment.counter_trend_risk === true &&
+      judgment.subtype !== "WHIPSAW_SOFT_WATCH" &&
+      judgment.diagnostics?.whipsaw?.isSoftWatch === false,
+    `counterTrendRisk alone does not create WHIPSAW_SOFT_WATCH. subtype=${judgment.subtype}, isSoftWatch=${judgment.diagnostics?.whipsaw?.isSoftWatch}`
+  );
+}
+
+// =========================================================================
+// TEST NN (Requirement 2) — DIAGNOSTIC TRUTHFULNESS DOES NOT MUTATE EXECUTION DECISION
+// - Quality score < 70 (Grade B / 65)
+// - Trend weakness score = 0.55 (trendOk = false)
+// - activeEngineRouting = "TREND"
+// Expected:
+// - Execution decision is identical to 994371a control flow (SKIP/none)
+// - Late diagnostic layer truthfully reports primary_missing_condition = "TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH"
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const inputDiag = makeBaseInput(
+    "BTCUSDT",
+    {
+      qualityScore: 65,
+      trendWeaknessScore: 0.55,
+      emaGap: 0.002,
+      canonicalRegime: "TREND",
+      canonicalRegimeSource: "strategy_market_regime_detector",
+      canonicalTrendScore: 0.85,
+      candles: mockBullishCandles,
+      htf_candles: {
+        "5m": mockBullishCandles,
+        "15m": mockBullishCandles,
+        "1h": mockBullishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "NONE",
+      longAllow: true,
+      shortAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    }
+  );
+
+  const res = runEngineV2(inputDiag);
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+
+  run(
+    "TEST_NN_DIAGNOSTIC_TRUTHFULNESS_DOES_NOT_MUTATE_EXECUTION_DECISION",
+    decision.decision === "SKIP" &&
+      decision.side === "none" &&
+      meta.primary_missing_condition === "TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH",
+    `Late diagnostic accurately reports trend weakness without changing execution decision. decision=${decision.decision}, missingCondition=${meta.primary_missing_condition}`
+  );
+}
+
+console.log("\nALL 41 WHIPSAW LIVENESS, HTF CONTRARIAN & PROBE_ONLY TESTS PASSED (TEST A - TEST NN)!");
+
 
 
 

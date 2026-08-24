@@ -3282,21 +3282,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     qualityScore >= 65 &&
                     (entryQualityGrade === "S" || entryQualityGrade === "A" || entryQualityGrade === "B");
 
-                if (!trendOk && (activeEngineRouting === "TREND" || marketMode === "TREND")) {
-                    if (trendWeaknessScore >= 0.5) {
-                        promotionBlockReason = "TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH";
-                        expectedNextAction = "WAIT_FOR_TREND_STRENGTHENING";
-                        expectedMissingCondition = "TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH";
-                    } else if (Math.abs(emaGap) < 0.0004) {
-                        promotionBlockReason = "TREND_PROMOTION_BLOCKED_EMA_GAP_INSUFFICIENT";
-                        expectedNextAction = "WAIT_FOR_TREND_CONFIRMATION";
-                        expectedMissingCondition = "TREND_PROMOTION_BLOCKED_EMA_GAP_INSUFFICIENT";
-                    } else {
-                        promotionBlockReason = "TREND_PROMOTION_BLOCKED_TREND_NOT_CONFIRMED";
-                        expectedNextAction = "WAIT_FOR_TREND_CONFIRMATION";
-                        expectedMissingCondition = "TREND_PROMOTION_BLOCKED_TREND_NOT_CONFIRMED";
-                    }
-                } else if (qualityScore < 70 && !isBypassRangeUpperShort) {
+                if (qualityScore < 70 && !isBypassRangeUpperShort) {
                     promotionBlockReason = "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD";
                     expectedNextAction = "WAIT_FOR_QUALITY_IMPROVEMENT";
                     expectedMissingCondition = "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD";
