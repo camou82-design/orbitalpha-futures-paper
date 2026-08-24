@@ -3939,6 +3939,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         event: "V2_SELECTED_SIDE_CONSISTENCY_PROOF",
         symbol: String(input.symbol),
         active_engine_routing: activeEngineRouting,
+        v2_router_executor: activeEngineRouting,
         market_subtype: judgment.subtype,
         range_zone: zone,
         range_side_candidate: rangeSideCandidate,
@@ -6310,6 +6311,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         symbol: String(input.symbol),
         market_mode: marketMode,
         active_engine_routing: activeEngineRouting,
+        v2_router_executor: activeEngineRouting,
         paper_execution_ready: paperExecutionReady,
         signed_execution_ready: signedExecutionReady,
         directional_shock_state: shock,
@@ -6637,6 +6639,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         lifecycleAuthority: lifecycleAuthority ?? undefined,
         metadata: {
             ...execMeta,
+            v2_router_executor: activeEngineRouting,
             alignedSignal,
             selectedSideAfterVeto: selectedSideFinal,
             promotionApplied,

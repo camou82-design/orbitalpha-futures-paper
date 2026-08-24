@@ -104,6 +104,7 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     trend_ok?: boolean | null;
     display_retest_required: boolean;
     display_support_recheck_required: boolean;
+    v2_router_executor?: string | null;
 }>;
 export type V2LegacyComparison = Readonly<{
     legacyDecision: EngineV2FinalDecision;
@@ -181,4 +182,5 @@ export type BuildExecutionEnvelopeArgs = Readonly<{
     trendOk?: boolean | null;
     displayRetestRequired?: boolean | null;
     displaySupportRecheckRequired?: boolean | null;
+    v2RouterExecutor?: string | null;
 }>;

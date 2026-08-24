@@ -664,7 +664,8 @@ export function resolveSymbolDecisionEnvelope(
         htf_hard_block_reason: execMeta.htf_hard_block_reason ?? null,
         trendOk: execMeta.trend_ok ?? execMeta.trendOk ?? null,
         displayRetestRequired: execMeta.display_retest_required ?? execMeta.displayRetestRequired ?? null,
-        displaySupportRecheckRequired: execMeta.display_support_recheck_required ?? execMeta.displaySupportRecheckRequired ?? null
+        displaySupportRecheckRequired: execMeta.display_support_recheck_required ?? execMeta.displaySupportRecheckRequired ?? null,
+        v2RouterExecutor: execMeta.v2_router_executor ?? null
     });
 
 

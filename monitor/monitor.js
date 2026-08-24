@@ -1300,7 +1300,9 @@
           ? `<span class="muted">—</span>`
           : `${esc(koNoEntryMarketSubtype(audit.market_subtype))} <span class="muted text-xs">(${esc(String(audit.market_subtype ?? "—"))})</span>`
       ),
-      ddt("active_engine_routing", strField("active_engine_routing")),
+      ddt("active_engine_routing (legacy)", strField("active_engine_routing")),
+      ddt("top_level_execution_lane", strField("top_level_execution_lane")),
+      ddt("v2_router_executor", strField("v2_router_executor")),
       ddt(
         "boxPos / zone",
         stale

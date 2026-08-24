@@ -25,6 +25,7 @@
  * TEST OO: WHIPSAW_SOFT_WATCH + PROBE_ONLY + trendPhase=PULLBACK (micro probe block reason takes diagnostic precedence)
  * TEST PP: Hard safety blocker + micro probe blocker coexist (hard safety blocker strictly outranks micro probe block)
  * TEST QQ: No micro-probe evaluation, ordinary quality failure (TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD remains primary)
+ * TEST RR: Diagnostic field separation (top_level_execution_lane & v2_router_executor) & execution invariance
  */
 
 import { detectMarketRegime } from "../engine-v2/market-judgment/detector";
@@ -2924,7 +2925,169 @@ function makeBaseInput(
   );
 }
 
-console.log("\nALL 44 WHIPSAW LIVENESS, HTF CONTRARIAN & PROBE_ONLY TESTS PASSED (TEST A - TEST QQ)!");
+// =========================================================================
+// TEST RR — DIAGNOSTIC FIELD SEPARATION & EXECUTION INVARIANCE
+// Assert v2_router_executor === routing.executor, execution fields remain unchanged.
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const now = Date.now();
+  const snap: SymbolSnapshotLike = {
+    symbol: "BTCUSDT",
+    lastPrice: 68930,
+    latestCandleClose: 68930,
+    signal: "paper_short_candidate",
+    qualityScore: 65,
+    candidateStrength: "strong",
+    ema20: 68850,
+    ema60: 69200,
+    emaGap: -0.003,
+    volumeRatioProxy: 1.1,
+    boxHigh: 70000,
+    boxLow: 68000,
+    boxPos: 0.35,
+    boxRel: -0.02,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    atr: 250,
+    atr20: 250,
+    closedClose: 68920,
+    rangeConfidence: 0.2,
+    trendWeaknessScore: 0.56,
+    boxCohesion01: 0.7,
+    breakoutFailureRate: 0.1,
+    rangeOscillationScore: 0.2,
+    boxLowSlope: -0.003,
+    rangeCenterSlope: -0.003,
+    boxHighSlope: -0.003,
+    reviewing_ticks: 0,
+    boxBreakSide: "none",
+    volumeExpansion: 1.0,
+    candles: mockBearishCandles,
+    canonicalRegime: "TREND",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.75,
+    htf_candles: {
+      "5m": mockBearishCandles,
+      "15m": mockBearishCandles,
+      "1h": mockBearishCandles,
+      "4h": mockBullishCandles
+    }
+  };
+
+  const bridge = buildV2SnapshotBridge(snap);
+  const inputRR = adaptV2Input(
+    "BTCUSDT",
+    now,
+    bridge as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
+      shortAllow: true,
+      longAllow: false,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true,
+      okxAuthMode: "live",
+      okxAuthReady: true,
+      okxExchangeAuthOptIn: true,
+      okxLiveEnabled: true,
+      liveBalanceReady: true,
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 10000,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true,
+      okxPendingOrdersReady: true,
+      okxPendingOrdersNotionalUsdt: 0,
+      okxPendingSymbolNotionalUsdt: 0,
+      okxActualPositions: [],
+      balanceFetchedAt: now,
+      positionsFetchedAt: now,
+      pendingOrdersFetchedAt: now
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    mockBearishCandles,
+    "authoritative",
+    `cycle_BTCUSDT_${now}_rr`
+  );
+
+  const res = runEngineV2(inputRR);
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+  const v2RoutingExecutor = res.internal.routing.executor;
+
+  const env = resolveSymbolDecisionEnvelope({
+    symbol: "BTCUSDT" as any,
+    fetchedAt: now,
+    snapshot: bridge,
+    config: { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    state: {
+      directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
+      shortAllow: true,
+      longAllow: false,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    } as any,
+    legacy: {
+      regime: "RANGE",
+      finalDecision: "SKIP",
+      rejectReason: "none",
+      requiredCostUsd: 0,
+      entryAllowed: false,
+      executorLabel: "range",
+      intentSide: "none",
+      adaptiveOk: true,
+      adaptiveDetail: {}
+    } as any,
+    v2Mode: "engine_v2",
+    evaluationMode: "authoritative",
+    runCycleId: `cycle_BTCUSDT_${now}_rr`
+  });
+
+  const v2Env = env.v2_execution_envelope;
+  const topLevelExecutionLane = "TREND";
+
+  // Simulate noEntryAuditRow mapping from paper-engine.ts
+  const noEntryAuditRow = {
+    expected_missing_condition: v2Env?.expected_missing_condition,
+    primary_missing_condition: v2Env?.primary_missing_condition,
+    secondary_missing_condition: v2Env?.secondary_missing_condition,
+    market_subtype: v2Env?.marketSubtype,
+    active_engine_routing: topLevelExecutionLane,
+    top_level_execution_lane: topLevelExecutionLane,
+    v2_router_executor: v2Env?.v2_router_executor ?? null
+  };
+
+  run(
+    "TEST_RR_DIAGNOSTIC_FIELD_SEPARATION_AND_EXECUTION_INVARIANCE",
+    // 1. Execution invariance
+    (decision.decision === "HOLD" || decision.decision === "SKIP") &&
+      decision.side === "none" &&
+      inputRR.state.longAllow === false &&
+      inputRR.state.shortAllow === true &&
+      meta.promotionApplied === false &&
+      meta.promotionBlockReason === "TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH" &&
+      meta.htf_entry_policy === "PROBE_ONLY" &&
+      meta.primary_missing_condition === "WATCH_BOUNDARY_MISSING" &&
+      meta.secondary_missing_condition === "TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH" &&
+      // 2. Diagnostic field separation & noEntryAuditRow correctness
+      noEntryAuditRow.active_engine_routing === topLevelExecutionLane &&
+      noEntryAuditRow.top_level_execution_lane === topLevelExecutionLane &&
+      noEntryAuditRow.v2_router_executor === v2RoutingExecutor &&
+      meta.v2_router_executor === v2RoutingExecutor &&
+      v2Env?.v2_router_executor === v2RoutingExecutor,
+    `Diagnostic fields properly separated and execution invariant preserved. decision=${decision.decision}, side=${decision.side}, v2_router_executor=${noEntryAuditRow.v2_router_executor}, top_level_execution_lane=${noEntryAuditRow.top_level_execution_lane}`
+  );
+}
+
+console.log("\nALL 45 WHIPSAW LIVENESS, HTF CONTRARIAN, PROBE_ONLY & DIAGNOSTIC SEPARATION TESTS PASSED (TEST A - TEST RR)!");
+
 
 
 

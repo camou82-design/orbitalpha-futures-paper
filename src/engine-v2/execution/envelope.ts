@@ -173,7 +173,8 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             htf_hard_block_reason: args.htf_hard_block_reason ?? null,
             trend_ok: args.trendOk ?? null,
             display_retest_required: args.displayRetestRequired === true,
-            display_support_recheck_required: args.displaySupportRecheckRequired === true
+            display_support_recheck_required: args.displaySupportRecheckRequired === true,
+            v2_router_executor: args.v2RouterExecutor ?? null
         };
 
     }
