@@ -767,8 +767,14 @@ function evaluateWhipsawShockRecheck(args: {
         now: (input.state as any)?.now ?? Date.now()
     });
 
-    const effectiveRecheckTicks = Math.max(reviewingTicks, observation.recheckTicks);
-    const observationAgePassed = observation.observationAgePassed || effectiveRecheckTicks >= observation.requiredTicks;
+    // Authority unification:
+    // When an active WHIPSAW observation episode exists, observation.recheckTicks is the sole canonical authority.
+    // Legacy snapshot.reviewing_ticks (tracking breakout observation windows) serves strictly as fallback when no episode exists.
+    const hasWhipsawEpisode = observation.episodeId != null;
+    const effectiveRecheckTicks = hasWhipsawEpisode ? observation.recheckTicks : reviewingTicks;
+    const observationAgePassed = hasWhipsawEpisode
+        ? (observation.observationAgePassed || observation.recheckTicks >= observation.requiredTicks)
+        : reviewingTicks >= observation.requiredTicks;
 
     // Historical observation markers (must NOT sustain hard-block alone)
     const historicalOnlyHits: string[] = [];

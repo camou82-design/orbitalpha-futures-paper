@@ -1325,5 +1325,61 @@ function makeBaseInput(
   );
 }
 
-console.log("\nALL 23 WHIPSAW LIVENESS & HTF CONTRARIAN TESTS PASSED (TEST A - TEST V)!");
+// =========================================================================
+// TEST W — NEW EPISODE CANNOT INHERIT STALE HIGH REVIEWING_TICKS (Safety Guard)
+// - Brand new whipsaw episode (tick 1)
+// - Stale legacy snapshot.reviewing_ticks = 15 (e.g. from old breakout window)
+// Expected:
+// - recheckTicks = 1 (canonical observer authority, does NOT inherit 15)
+// - observationAgePassed = false (1 < 6 required ticks)
+// - confirmation_wait_reasons contains "whipsaw_observation_age_insufficient"
+// - subtype = "WHIPSAW_SHOCK_RECHECK" (hard-block remains active)
+// - decision != "ENTER" (no premature release or promotion)
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+
+  const microCandles = makeMicroDownReboundCandles(69000);
+
+  const freshShockWithStaleHighReviewingTicks = makeBaseInput(
+    "BTCUSDT",
+    {
+      reviewing_ticks: 15, // Stale high legacy count
+      boxBreakSide: "none",
+      breakoutFailureRate: 0.1,
+      volumeExpansion: 2.5,
+      candles: microCandles,
+      htf_candles: {
+        "5m": mockBullishCandles,
+        "15m": mockBullishCandles,
+        "1h": mockBullishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "UP",
+      longAllow: true,
+      shortAllow: false
+    }
+  );
+
+  const judgment = detectMarketRegime(freshShockWithStaleHighReviewingTicks);
+  const { decision } = runEngineV2(freshShockWithStaleHighReviewingTicks);
+
+  const reasons = judgment.diagnostics?.confirmation_wait_reasons ?? [];
+  const recheckTicks = judgment.diagnostics?.whipsaw?.recheckTicks;
+  const agePassed = judgment.diagnostics?.whipsaw?.observationAgePassed;
+
+  run(
+    "TEST_W_NEW_EPISODE_CANNOT_INHERIT_STALE_HIGH_REVIEWING_TICKS",
+    judgment.subtype === "WHIPSAW_SHOCK_RECHECK" &&
+      recheckTicks === 1 &&
+      agePassed === false &&
+      reasons.includes("whipsaw_observation_age_insufficient") &&
+      decision.decision !== "ENTER",
+    `New whipsaw episode does NOT inherit stale reviewing_ticks=15. subtype=${judgment.subtype}, recheckTicks=${recheckTicks} (expected 1), agePassed=${agePassed} (expected false), decision=${decision.decision}`
+  );
+}
+
+console.log("\nALL 24 WHIPSAW LIVENESS & HTF CONTRARIAN TESTS PASSED (TEST A - TEST W)!");
 
