@@ -22,6 +22,9 @@
  * TEST R: EXISTING episode survives shock clear for observation
  * TEST S: RELEASED episode cannot re-arm from same stale evidence
  * TEST T: FRESH_SHOCK after release can re-arm
+ * TEST OO: WHIPSAW_SOFT_WATCH + PROBE_ONLY + trendPhase=PULLBACK (micro probe block reason takes diagnostic precedence)
+ * TEST PP: Hard safety blocker + micro probe blocker coexist (hard safety blocker strictly outranks micro probe block)
+ * TEST QQ: No micro-probe evaluation, ordinary quality failure (TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD remains primary)
  */
 
 import { detectMarketRegime } from "../engine-v2/market-judgment/detector";
@@ -2622,7 +2625,307 @@ function makeBaseInput(
   );
 }
 
-console.log("\nALL 41 WHIPSAW LIVENESS, HTF CONTRARIAN & PROBE_ONLY TESTS PASSED (TEST A - TEST NN)!");
+// =========================================================================
+// TEST OO (Requirement 1) — WHIPSAW_SOFT_WATCH + PROBE_ONLY + trendPhase=PULLBACK
+// Micro probe evaluates and blocks with TREND_NOT_DOWN; later quality gate also fails.
+// Assert:
+// - decision unchanged (SKIP/HOLD as baseline)
+// - side unchanged (none)
+// - micro_probe_block_reason === "TREND_NOT_DOWN"
+// - primary_missing_condition === "TREND_NOT_DOWN"
+// - generic quality reason remains secondary/audit-visible
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const now = Date.now();
+  const watchBoundary = 69000;
+
+  rangeContinuationStateMap.set("BTCUSDT", {
+    direction: "down",
+    phase: "CONTINUATION_WATCH",
+    watchStartedCandleTs: now - 60000,
+    watchStartedAtTimestamp: now - 1000,
+    watchBoundaryPrice: watchBoundary,
+    countStartedCandleTs: null,
+    countBoundaryPrice: null,
+    hasCandleAdvancedDuringCount: false,
+    totalCyclesSinceWatch: 0
+  } as any);
+
+  const microCandles = makeMicroDownReboundCandles(68930);
+
+  const snap: SymbolSnapshotLike = {
+    symbol: "BTCUSDT",
+    lastPrice: 68930,
+    latestCandleClose: 68930,
+    signal: "paper_short_candidate",
+    qualityScore: 65,
+    candidateStrength: "strong",
+    ema20: 68850,
+    ema60: 69200,
+    emaGap: -0.003,
+    volumeRatioProxy: 1.1,
+    boxHigh: 70000,
+    boxLow: 68000,
+    boxPos: 0.35,
+    boxRel: -0.02,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    atr: 250,
+    atr20: 250,
+    closedClose: 68920,
+    rangeConfidence: 0.2,
+    trendWeaknessScore: 0.56,
+    boxCohesion01: 0.7,
+    breakoutFailureRate: 0.1,
+    rangeOscillationScore: 0.2,
+    boxLowSlope: -0.003,
+    rangeCenterSlope: -0.003,
+    boxHighSlope: -0.003,
+    reviewing_ticks: 0,
+    boxBreakSide: "none",
+    volumeExpansion: 1.0,
+    candles: microCandles,
+    canonicalRegime: "TREND",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.75,
+    htf_candles: {
+      "5m": mockBearishCandles,
+      "15m": mockBearishCandles,
+      "1h": mockBearishCandles,
+      "4h": mockBullishCandles
+    }
+  };
+
+  const bridge = buildV2SnapshotBridge(snap);
+  const inputOO = adaptV2Input(
+    "BTCUSDT",
+    now,
+    bridge as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
+      shortAllow: true,
+      longAllow: false,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true,
+      okxAuthMode: "live",
+      okxAuthReady: true,
+      okxExchangeAuthOptIn: true,
+      okxLiveEnabled: true,
+      liveBalanceReady: true,
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 10000,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true,
+      okxPendingOrdersReady: true,
+      okxPendingOrdersNotionalUsdt: 0,
+      okxPendingSymbolNotionalUsdt: 0,
+      okxActualPositions: [],
+      balanceFetchedAt: now,
+      positionsFetchedAt: now,
+      pendingOrdersFetchedAt: now
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    microCandles,
+    "authoritative",
+    `cycle_BTCUSDT_${now}_oo`
+  );
+
+  const res = runEngineV2(inputOO);
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+
+  run(
+    "TEST_OO_MICRO_PROBE_BLOCK_REASON_ELEVATED_TO_PRIMARY_MISSING_CONDITION",
+    (decision.decision === "HOLD" || decision.decision === "SKIP") &&
+      decision.side === "none" &&
+      meta.micro_probe_block_reason === "TREND_NOT_DOWN" &&
+      meta.primary_missing_condition === "TREND_NOT_DOWN" &&
+      meta.secondary_missing_condition === "TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH",
+    `Micro probe block reason takes diagnostic precedence as primary_missing_condition while generic promotion reason remains secondary. decision=${decision.decision}, primary=${meta.primary_missing_condition}, secondary=${meta.secondary_missing_condition}`
+  );
+}
+
+// =========================================================================
+// TEST PP (Requirement 2) — HARD BLOCKER + MICRO PROBE BLOCKER COEXIST
+// Assert hard safety blocker remains primary and TREND_NOT_DOWN cannot outrank it.
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+
+  const now = Date.now();
+  const watchBoundary = 69000;
+
+  rangeContinuationStateMap.set("BTCUSDT", {
+    direction: "down",
+    phase: "CONTINUATION_WATCH",
+    watchStartedCandleTs: now - 60000,
+    watchStartedAtTimestamp: now - 1000,
+    watchBoundaryPrice: watchBoundary,
+    countStartedCandleTs: null,
+    countBoundaryPrice: null,
+    hasCandleAdvancedDuringCount: false,
+    totalCyclesSinceWatch: 0
+  } as any);
+
+  const microCandles = makeMicroDownReboundCandles(68930);
+
+  const snap: SymbolSnapshotLike = {
+    symbol: "BTCUSDT",
+    lastPrice: 68930,
+    latestCandleClose: 68930,
+    signal: "paper_short_candidate",
+    qualityScore: 65,
+    candidateStrength: "strong",
+    ema20: 68850,
+    ema60: 69200,
+    emaGap: -0.003,
+    volumeRatioProxy: 1.1,
+    boxHigh: 70000,
+    boxLow: 68000,
+    boxPos: 0.35,
+    boxRel: -0.02,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    atr: 250,
+    atr20: 250,
+    closedClose: 68920,
+    rangeConfidence: 0.2,
+    trendWeaknessScore: 0.56,
+    boxCohesion01: 0.7,
+    breakoutFailureRate: 0.45, // KEY: Real shock evidence -> whipsaw.active -> WHIPSAW_SHOCK_RECHECK
+    rangeOscillationScore: 0.2,
+    boxLowSlope: -0.003,
+    rangeCenterSlope: -0.003,
+    boxHighSlope: -0.003,
+    reviewing_ticks: 0,
+    boxBreakSide: "none",
+    volumeExpansion: 2.5,      // KEY: Volume expansion -> whipsaw.active -> WHIPSAW_SHOCK_RECHECK
+    candles: microCandles,
+    canonicalRegime: "TREND",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.75,
+    htf_candles: {
+      "5m": mockBearishCandles,
+      "15m": mockBearishCandles,
+      "1h": mockBearishCandles,
+      "4h": mockBullishCandles
+    }
+  };
+
+  const bridge = buildV2SnapshotBridge(snap);
+  const inputPP = adaptV2Input(
+    "BTCUSDT",
+    now,
+    bridge as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
+      shortAllow: true,
+      longAllow: false,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true,
+      okxAuthMode: "live",
+      okxAuthReady: true,
+      okxExchangeAuthOptIn: true,
+      okxLiveEnabled: true,
+      liveBalanceReady: true,
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 10000,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true,
+      okxPendingOrdersReady: true,
+      okxPendingOrdersNotionalUsdt: 0,
+      okxPendingSymbolNotionalUsdt: 0,
+      okxActualPositions: [],
+      balanceFetchedAt: now,
+      positionsFetchedAt: now,
+      pendingOrdersFetchedAt: now
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    microCandles,
+    "authoritative",
+    `cycle_BTCUSDT_${now}_pp`
+  );
+
+  const res = runEngineV2(inputPP);
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+
+  run(
+    "TEST_PP_HARD_BLOCKER_OUTRANKS_MICRO_PROBE_BLOCKER",
+    (decision.decision === "HOLD" || decision.decision === "REJECT" || decision.decision === "SKIP") &&
+      decision.side === "none" &&
+      meta.micro_probe_block_reason === "TREND_NOT_DOWN" &&
+      meta.primary_missing_condition === "WHIPSAW_RECHECK_NOT_CONFIRMED" &&
+      meta.primary_missing_condition !== "TREND_NOT_DOWN",
+    `Hard safety blocker strictly outranks micro probe block reason in diagnostic precedence. primary=${meta.primary_missing_condition}, microProbeBlock=${meta.micro_probe_block_reason}`
+  );
+}
+
+// =========================================================================
+// TEST QQ (Requirement 3) — NO MICRO-PROBE EVALUATION, ORDINARY QUALITY FAILURE
+// Assert existing TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD remains primary exactly as before.
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+  rangeContinuationStateMap.clear();
+
+  const inputQQ = makeBaseInput(
+    "BTCUSDT",
+    {
+      qualityScore: 65,            // < 70 -> fails quality gate
+      trendWeaknessScore: 0.1,     // healthy trend weakness
+      emaGap: 0.002,               // healthy emaGap -> trendOk = true
+      canonicalRegime: "TREND",
+      canonicalRegimeSource: "strategy_market_regime_detector",
+      canonicalTrendScore: 0.85,
+      candles: mockBullishCandles,
+      htf_candles: {
+        "5m": mockBullishCandles,
+        "15m": mockBullishCandles,
+        "1h": mockBullishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    {
+      directionalShockState: "NONE",
+      longAllow: true,
+      shortAllow: false,
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    }
+  );
+
+  const res = runEngineV2(inputQQ);
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+
+  run(
+    "TEST_QQ_NO_MICRO_PROBE_QUALITY_BELOW_THRESHOLD_REMAINS_PRIMARY",
+    decision.decision === "SKIP" &&
+      decision.side === "none" &&
+      meta.micro_probe_block_reason === undefined &&
+      meta.primary_missing_condition === "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD" &&
+      meta.secondary_missing_condition === null,
+    `Ordinary quality failure without micro probe retains TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD as primary. decision=${decision.decision}, primary=${meta.primary_missing_condition}, secondary=${meta.secondary_missing_condition}`
+  );
+}
+
+console.log("\nALL 44 WHIPSAW LIVENESS, HTF CONTRARIAN & PROBE_ONLY TESTS PASSED (TEST A - TEST QQ)!");
+
 
 
 

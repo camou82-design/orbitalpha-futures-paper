@@ -6489,6 +6489,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (hardBlockReason ? hardBlockReason : null) ||
         htfPolarityMismatchReason ||
         shockRetestReason ||
+        (microProbeBlockReason ? microProbeBlockReason : null) ||
         auditRawMissingCondition;
 
     // Force alignment for shock/retest cases (Requirement 4)
