@@ -4258,24 +4258,177 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
-    // Polarity Check V2: Strict suppression for HTF mismatch
-    if (judgment.polarityMismatch && (v2DecisionAfterPromotion === "ENTER" || promotionApplied)) {
+    // Polarity Check V2: Strict suppression for HTF mismatch with dedicated reversal micro-probe exception
+    if (judgment.polarityMismatch) {
         const macroPol = judgment.macroPolarity;
-        const finalSide = v2SideAfterPromotion;
-        if (macroPol === "BULLISH" && finalSide === "short") {
-            v2DecisionAfterPromotion = "HOLD";
-            v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
-            promotionApplied = false;
-            promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
-            expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
-            expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
-        } else if (macroPol === "BEARISH" && finalSide === "long") {
-            v2DecisionAfterPromotion = "HOLD";
-            v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
-            promotionApplied = false;
-            promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
-            expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
-            expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+        const candidateSide = trendSideCandidate !== "none" ? trendSideCandidate : v2SideAfterPromotion;
+
+        const isAuthoritativeTrend =
+            judgment.regime === "TREND" &&
+            judgment.regime_final === "TREND" &&
+            authoritativeInput.snapshot.canonicalRegime === "TREND" &&
+            activeEngineRouting === "TREND";
+
+        const htf5m = (judgment.htf_bias?.m5 && judgment.htf_bias.m5 !== "DATA_NOT_READY") ? judgment.htf_bias.m5 : (judgment.m5_bias_actual ?? judgment.htf_bias?.m5 ?? "DATA_NOT_READY");
+        const htf15m = (judgment.htf_bias?.m15 && judgment.htf_bias.m15 !== "DATA_NOT_READY") ? judgment.htf_bias.m15 : (judgment.m15_bias_actual ?? judgment.htf_bias?.m15 ?? "DATA_NOT_READY");
+        const entryPx = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+        const emaGapVal = Number(authoritativeInput.snapshot.emaGap ?? 0);
+        const currentShock = v2State.directionalShockState ?? (judgment.shockPhase === "DOWN_SHOCK" ? "DOWN" : judgment.shockPhase === "UP_SHOCK" ? "UP" : "NONE");
+
+        const hasSameSidePos = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() === candidateSide);
+        const hasOppositeSidePos = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() !== candidateSide);
+
+        const stopPx = execution.stopPrice;
+        const invPx = execution.invalidationPx ?? stopPx;
+
+        const isShortProbeHtfValid = (bias: string | null | undefined): boolean =>
+            bias === "BEARISH" || bias === "RANGE" || bias === "CONFLICT";
+
+        const isLongProbeHtfValid = (bias: string | null | undefined): boolean =>
+            bias === "BULLISH" || bias === "RANGE" || bias === "CONFLICT";
+
+        const isShortReversalMicroProbeEligible =
+            v2DecisionBeforePromotion === "ENTER" &&
+            v2SideBeforePromotion === candidateSide &&
+            macroPol === "BULLISH" &&
+            candidateSide === "short" &&
+            isAuthoritativeTrend &&
+            currentShock === "DOWN" &&
+            trendSideCandidate === "short" &&
+            trendOk === true &&
+            qualityScore >= 70 &&
+            emaGapVal <= -0.002 &&
+            isShortProbeHtfValid(htf5m) &&
+            isShortProbeHtfValid(htf15m) &&
+            riskShortAllow === true &&
+            allowNewShort === true &&
+            hardBlockPresent === false &&
+            hardControlClear === true &&
+            !whipsawShockRecheckActive &&
+            judgment.subtype !== "WHIPSAW_SHOCK_RECHECK" &&
+            paperExecutionReady === true &&
+            signedExecutionReady === true &&
+            !hasSameSidePos &&
+            !hasOppositeSidePos &&
+            (riskSizing.diagnostics as any)?.contamination_hard_reject !== true &&
+            (riskSizing as any)?.isContaminated !== true &&
+            stopPx != null && invPx != null &&
+            !isNaN(stopPx) && !isNaN(invPx) &&
+            stopPx > entryPx && invPx > entryPx &&
+            entryPx > 0;
+
+        const isLongReversalMicroProbeEligible =
+            v2DecisionBeforePromotion === "ENTER" &&
+            v2SideBeforePromotion === candidateSide &&
+            macroPol === "BEARISH" &&
+            candidateSide === "long" &&
+            isAuthoritativeTrend &&
+            currentShock === "UP" &&
+            trendSideCandidate === "long" &&
+            trendOk === true &&
+            qualityScore >= 70 &&
+            emaGapVal >= 0.002 &&
+            isLongProbeHtfValid(htf5m) &&
+            isLongProbeHtfValid(htf15m) &&
+            riskLongAllow === true &&
+            allowNewLong === true &&
+            hardBlockPresent === false &&
+            hardControlClear === true &&
+            !whipsawShockRecheckActive &&
+            judgment.subtype !== "WHIPSAW_SHOCK_RECHECK" &&
+            paperExecutionReady === true &&
+            signedExecutionReady === true &&
+            !hasSameSidePos &&
+            !hasOppositeSidePos &&
+            (riskSizing.diagnostics as any)?.contamination_hard_reject !== true &&
+            (riskSizing as any)?.isContaminated !== true &&
+            stopPx != null && invPx != null &&
+            !isNaN(stopPx) && !isNaN(invPx) &&
+            stopPx < entryPx && invPx < entryPx &&
+            entryPx > 0;
+
+        if (isShortReversalMicroProbeEligible) {
+            v2DecisionAfterPromotion = "ENTER";
+            v2SideAfterPromotion = "short";
+            v2RejectReasonAfterPromotion = null;
+            promotionApplied = true;
+            promotionReason = "V2_POLARITY_REVERSAL_MICRO_PROBE";
+            promotionBlockReason = null;
+            promotionMinConditionPassed = true;
+            execMeta.entryReason = "V2_POLARITY_REVERSAL_MICRO_PROBE";
+            execMeta.entry_reason = "V2_POLARITY_REVERSAL_MICRO_PROBE";
+            execMeta.polarity_reversal_micro_probe = true;
+            v2CalculatedInvalidationPx = invPx;
+            execution.stopPrice = stopPx;
+            execution.invalidationPx = invPx;
+
+            console.info(JSON.stringify({
+                event: "V2_POLARITY_REVERSAL_MICRO_PROBE_PROOF",
+                symbol: String(input.symbol),
+                direction: "DOWN",
+                side: "short",
+                entryPx,
+                stopPx,
+                invPx,
+                qualityScore,
+                macroPolarity: macroPol,
+                directionalShock: currentShock,
+                emaGap: emaGapVal,
+                htf5m,
+                htf15m,
+                decision: "ENTER",
+                promotion_reason: promotionReason
+            }));
+        } else if (isLongReversalMicroProbeEligible) {
+            v2DecisionAfterPromotion = "ENTER";
+            v2SideAfterPromotion = "long";
+            v2RejectReasonAfterPromotion = null;
+            promotionApplied = true;
+            promotionReason = "V2_POLARITY_REVERSAL_MICRO_PROBE";
+            promotionBlockReason = null;
+            promotionMinConditionPassed = true;
+            execMeta.entryReason = "V2_POLARITY_REVERSAL_MICRO_PROBE";
+            execMeta.entry_reason = "V2_POLARITY_REVERSAL_MICRO_PROBE";
+            execMeta.polarity_reversal_micro_probe = true;
+            v2CalculatedInvalidationPx = invPx;
+            execution.stopPrice = stopPx;
+            execution.invalidationPx = invPx;
+
+            console.info(JSON.stringify({
+                event: "V2_POLARITY_REVERSAL_MICRO_PROBE_PROOF",
+                symbol: String(input.symbol),
+                direction: "UP",
+                side: "long",
+                entryPx,
+                stopPx,
+                invPx,
+                qualityScore,
+                macroPolarity: macroPol,
+                directionalShock: currentShock,
+                emaGap: emaGapVal,
+                htf5m,
+                htf15m,
+                decision: "ENTER",
+                promotion_reason: promotionReason
+            }));
+        } else if (v2DecisionAfterPromotion === "ENTER" || promotionApplied) {
+            if (macroPol === "BULLISH" && candidateSide === "short") {
+                v2DecisionAfterPromotion = "HOLD";
+                v2SideAfterPromotion = "none";
+                v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
+                promotionApplied = false;
+                promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
+                expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
+                expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+            } else if (macroPol === "BEARISH" && candidateSide === "long") {
+                v2DecisionAfterPromotion = "HOLD";
+                v2SideAfterPromotion = "none";
+                v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
+                promotionApplied = false;
+                promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
+                expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
+                expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+            }
         }
     }
 
@@ -4309,18 +4462,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         let mismatchReason: string | null = null;
         const isStairStepPromotion = promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
         const isTrendContinuationRevalidatedPromotion = promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
+        const isPolarityReversalMicroProbePromotion = promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE";
         if (sideFinal === "short" && zone === "lower") {
-            const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown || (isStairStepPromotion && sideFinal === "short") || (isTrendContinuationRevalidatedPromotion && sideFinal === "short");
+            const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown || (isStairStepPromotion && sideFinal === "short") || (isTrendContinuationRevalidatedPromotion && sideFinal === "short") || (isPolarityReversalMicroProbePromotion && sideFinal === "short");
             const htfStrongBullish = htfHardBlockReason === "STRONG_BULLISH_HTF_ALIGNMENT";
 
-            if (!shortException || htfStrongBullish) {
+            if (!shortException || (htfStrongBullish && !isPolarityReversalMicroProbePromotion)) {
                 mismatchReason = "SIDE_ZONE_MISMATCH_LOWER_SHORT";
             }
         } else if (sideFinal === "long" && zone === "upper") {
-            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp || (isStairStepPromotion && sideFinal === "long") || (isTrendContinuationRevalidatedPromotion && sideFinal === "long");
+            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp || (isStairStepPromotion && sideFinal === "long") || (isTrendContinuationRevalidatedPromotion && sideFinal === "long") || (isPolarityReversalMicroProbePromotion && sideFinal === "long");
             const htfStrongBearish = htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT";
 
-            if (!longException || htfStrongBearish) {
+            if (!longException || (htfStrongBearish && !isPolarityReversalMicroProbePromotion)) {
                 mismatchReason = "SIDE_ZONE_MISMATCH_UPPER_LONG";
             }
         }
@@ -4972,8 +5126,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Live order size authority: fixed 10x leverage + strict env notional cap.
     const stageMarginKrwBefore = riskSizing.stageMarginKrw;
     let stageMarginKrwAfter = stageMarginKrwBefore;
-    if (isDeadlockProbe || promotionReason === "CONTINUATION_MICRO_PROBE" || promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION" || promotionReason === "V2_TREND_CONTINUATION_REVALIDATED" || promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG" || promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" || execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST") {
+    if (isDeadlockProbe || promotionReason === "CONTINUATION_MICRO_PROBE" || promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION" || promotionReason === "V2_TREND_CONTINUATION_REVALIDATED" || promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE" || promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG" || promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" || execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST") {
         let baseMargin = riskSizing.baseStageMarginKrw;
+        if (promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE") {
+            baseMargin = stageMarginKrwBefore > 0 ? stageMarginKrwBefore : riskSizing.baseStageMarginKrw;
+        }
         if (!baseMargin || baseMargin <= 0) {
             baseMargin = input.config.baseSizeUsd ? input.config.baseSizeUsd * 1400 : 140000;
         } else if (baseMargin < 1000) {
@@ -4983,6 +5140,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         let multiplier = 0.25;
         if (promotionReason === "CONTINUATION_MICRO_PROBE" && microProbeSizeCap != null) {
             multiplier = microProbeSizeCap;
+        } else if (promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE") {
+            multiplier = 0.20;
         }
         
         stageMarginKrwAfter = Math.round(baseMargin * multiplier);
@@ -5188,6 +5347,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionReason === "CONTINUATION_MICRO_PROBE" ||
         promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION" ||
         promotionReason === "V2_TREND_CONTINUATION_REVALIDATED" ||
+        promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE" ||
         promotionReason === "V2_PROBE_ENTRY_CONFIRMED" ||
         promotionReason === "V2_WAIT_RECHECK_QUALIFIED_PROMOTION" ||
         promotionReason === "SHOCK_REACTION_DOWN_MID_MOMENTUM_CONFIRMED" ||
@@ -5538,13 +5698,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     (v2State as any).okxInstrumentSizing ??
                     (input.state as any).okxInstrumentSizing ??
                     null;
+                const probeCapNotionalUsdt = isMicroProbe && stageMarginKrwAfter > 0
+                    ? (stageMarginKrwAfter / 1400) * appliedLeverage
+                    : null;
                 const policyRequestedNotional = isAddOn
                     ? (isAdverseAddon
                         ? ((v2State as any).requestedAddonNotionalUsdt ??
                             addOnPolicy?.requestedAddonNotionalUsdt ??
                             0)
                         : ((v2State as any).finalAddonNotionalUsdt ?? finalAddonNotionalUsdt ?? 0))
-                    : null;
+                    : probeCapNotionalUsdt;
                 const adverseRiskBudgetAllowedNotional = isAdverseAddon
                     ? (addOnPolicy?.requestedAddonNotionalUsdt ??
                         (addOnPolicy as any)?.riskProjection?.riskBudgetAllowedNotional ??
@@ -6921,8 +7084,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             invalidationPx: v2InvalidationPx ?? undefined,
             isBlocked: hardBlockPresent || riskSizing.isBlocked || finalDecision === "REJECT",
             blockReason: hardBlockReason ?? riskSizing.blockReason ?? blockReason ?? null,
-            stageMarginKrw: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) : riskSizing.stageMarginKrw,
-            exposureNotionalKrw: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) * riskSizing.appliedLeverage : riskSizing.exposureNotionalKrw,
+            stageMarginKrw: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) : (finalDecision === "ENTER" ? stageMarginKrwAfter : riskSizing.stageMarginKrw),
+            exposureNotionalKrw: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? stageMarginKrwAfter : 0) * riskSizing.appliedLeverage : (finalDecision === "ENTER" ? stageMarginKrwAfter * riskSizing.appliedLeverage : riskSizing.exposureNotionalKrw),
             finalOrderNotionalUsdt: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? finalOrderNotionalUsdt : 0) : undefined,
             requestedOrderNotionalUsdt: isLiveSignedOrderAttempt ? (finalDecision === "ENTER" ? requestedOrderNotionalUsdt : 0) : undefined
         },

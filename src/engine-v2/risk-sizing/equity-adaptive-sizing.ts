@@ -227,6 +227,7 @@ export function evaluateEquityAdaptiveSizing(
             equityInitialCapUsdt,
             remainingSymbolCapacity,
             remainingAccountCapacity,
+            input.policyRequestedNotionalUsdt ?? Number.POSITIVE_INFINITY,
             emergency.cap ?? Number.POSITIVE_INFINITY
         );
     } else if (input.orderKind === "ADVERSE_ADDON") {
