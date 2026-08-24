@@ -32,6 +32,11 @@ export interface SameSideLossReentryGateInput {
     rangeCycleCount?: number | null;
     reversalConfirmed?: boolean | null;
     structuralEvent?: string | null;
+    trendOk?: boolean | null;
+    qualityScore?: number | null;
+    htfEntryPolicy?: string | null;
+    macroPolarity?: string | null;
+    directionalShockState?: string | null;
 }
 
 export interface SameSideLossReentryGateResult {
@@ -143,6 +148,12 @@ function emitSameSideLossReentryProof(
         lastLossSetupIdentity: input.lastLossState?.lastLossSetupIdentity ?? null,
         currentSetupIdentity: extra.currentSetupIdentity ?? null,
         lossSource: input.lastLossState?.source ?? null,
+        trendOk: input.trendOk ?? false,
+        qualityScore: input.qualityScore ?? 0,
+        htfEntryPolicy: input.htfEntryPolicy ?? null,
+        macroPolarity: input.macroPolarity ?? null,
+        directionalShockState: input.directionalShockState ?? null,
+        strongTrendRevalidated: extra.strongTrendRevalidated ?? false,
         ...extra
     }));
 }
@@ -454,6 +465,38 @@ export function evaluateSameSideLossReentryGate(
         hasStructuralEvent &&
         (setupIdentityChanged || input.reversalConfirmed === true);
 
+    // Strong Trend Revalidation Conditions (authoritative TREND strongly confirmed after loss)
+    const trendOk = input.trendOk === true;
+    const qualityScore = typeof input.qualityScore === "number" ? input.qualityScore : 0;
+    const htfEntryPolicy = typeof input.htfEntryPolicy === "string" ? input.htfEntryPolicy.trim().toUpperCase() : null;
+    const macroPolarity = typeof input.macroPolarity === "string" ? input.macroPolarity.trim().toUpperCase() : null;
+    const directionalShockState = typeof input.directionalShockState === "string" ? input.directionalShockState.trim().toUpperCase() : null;
+    const regime = String(input.regime ?? "").toUpperCase();
+
+    const isTrendRegime = regime === "TREND";
+    const hasQualityScore = qualityScore >= 70;
+
+    const isHtfAligned = requestedSide === "long"
+        ? (htfEntryPolicy === "ALLOW" || htfEntryPolicy === "LONG_ONLY_OR_NONE")
+        : (htfEntryPolicy === "ALLOW" || htfEntryPolicy === "SHORT_ONLY_OR_NONE");
+
+    const isMacroAligned = requestedSide === "long"
+        ? (macroPolarity === "BULLISH" || macroPolarity === "NEUTRAL")
+        : (macroPolarity === "BEARISH" || macroPolarity === "NEUTRAL");
+
+    const isShockAligned = requestedSide === "long"
+        ? (directionalShockState === "NONE" || directionalShockState === "UP")
+        : (directionalShockState === "NONE" || directionalShockState === "DOWN");
+
+    const isStrongTrendRevalidated =
+        isTrendRegime &&
+        trendOk &&
+        hasQualityScore &&
+        isHtfAligned &&
+        isMacroAligned &&
+        isShockAligned &&
+        hasEnoughCandles;
+
     if (hasMeaningfulDisplacement) {
         const result: SameSideLossReentryGateResult = {
             allowed: true,
@@ -480,6 +523,19 @@ export function evaluateSameSideLossReentryGate(
         return result;
     }
 
+    if (isStrongTrendRevalidated) {
+        const result: SameSideLossReentryGateResult = {
+            allowed: true,
+            reason: "STRONG_TREND_REVALIDATED_AFTER_LOSS",
+            evidence: `candlesSinceLoss=${completedCandlesSinceLoss}|trendOk=${trendOk}|qualityScore=${qualityScore}|htfPolicy=${htfEntryPolicy}|macro=${macroPolarity}|shock=${directionalShockState}`,
+            displacementPct: directional.pct,
+            requiredDisplacementPct,
+            completedCandlesSinceLoss
+        };
+        emitSameSideLossReentryProof(input, result, { currentSetupIdentity, structuralEvent, strongTrendRevalidated: true });
+        return result;
+    }
+
     const blockResult: SameSideLossReentryGateResult = {
         allowed: false,
         reason: "SAME_SIDE_LOSS_REENTRY_HYSTERESIS_BLOCKED",
@@ -488,6 +544,6 @@ export function evaluateSameSideLossReentryGate(
         requiredDisplacementPct,
         completedCandlesSinceLoss
     };
-    emitSameSideLossReentryProof(input, blockResult, { currentSetupIdentity, structuralEvent });
+    emitSameSideLossReentryProof(input, blockResult, { currentSetupIdentity, structuralEvent, strongTrendRevalidated: false });
     return blockResult;
 }

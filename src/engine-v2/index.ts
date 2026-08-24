@@ -4266,7 +4266,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             subtype: judgment.subtype,
             zone,
             rangeCycleCount: typeof (authoritativeInput.snapshot as any).rangeCycleCount === "number" ? (authoritativeInput.snapshot as any).rangeCycleCount : null,
-            reversalConfirmed
+            reversalConfirmed,
+            trendOk,
+            qualityScore,
+            htfEntryPolicy: judgment.htf_entry_policy ?? null,
+            macroPolarity: judgment.macroPolarity ?? null,
+            directionalShockState: v2State.directionalShockState ?? null
         });
 
         if (!lossGateResult.allowed) {
