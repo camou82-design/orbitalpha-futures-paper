@@ -31,6 +31,9 @@
  * TEST UU: Audit row precedence: WATCH_BOUNDARY_MISSING outranks QUALITY_BELOW_THRESHOLD
  * TEST VV: Audit row precedence: POLARITY_MISMATCH outranks RANGE_TREND_SIDE_CONFLICT + fallback preservation
  * TEST WW: Audit row mapping for 13 authoritative primary missing tokens outranking conflicting vetoes
+ * TEST XX: RANGE short / TREND long conflict + SKIP -> selectedSideAfterVeto = none & side_veto_detail = RANGE_TREND_SIDE_CONFLICT
+ * TEST YY: Normal ENTER -> selectedSideAfterVeto matches final ENTER side
+ * TEST ZZ: HOLD & REJECT -> selectedSideAfterVeto = none
  */
 
 import { detectMarketRegime } from "../engine-v2/market-judgment/detector";
@@ -3569,4 +3572,503 @@ function makeBaseInput(
   );
 }
 
-console.log("\nALL 50 WHIPSAW LIVENESS, HTF CONTRARIAN, PROBE_ONLY & DIAGNOSTIC TESTS PASSED (TEST A - TEST WW)!");
+// =========================================================================
+// TEST XX — DIAGNOSTIC TRUTHFULNESS: RANGE SHORT / TREND LONG CONFLICT + SKIP
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+  rangeContinuationStateMap.clear();
+
+  const now = Date.now();
+  const snapConflict: SymbolSnapshotLike = {
+    symbol: "BTCUSDT",
+    lastPrice: 69800,
+    latestCandleClose: 69800,
+    signal: "paper_long_candidate",
+    qualityScore: 75,
+    candidateStrength: "strong",
+    ema20: 69500,
+    ema60: 69200,
+    emaGap: 0.003,
+    volumeRatioProxy: 1.2,
+    boxHigh: 70000,
+    boxLow: 68000,
+    boxPos: 0.88,
+    boxRel: 0.02,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    atr: 250,
+    atr20: 250,
+    closedClose: 69790,
+    rangeConfidence: 0.7,
+    trendWeaknessScore: 0.2,
+    boxCohesion01: 0.8,
+    breakoutFailureRate: 0.1,
+    rangeOscillationScore: 0.2,
+    candles: mockBullishCandles,
+    canonicalRegime: "RANGE",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.75,
+    htf_candles: {
+      "5m": mockBullishCandles,
+      "15m": mockBullishCandles,
+      "1h": mockBullishCandles,
+      "4h": mockBullishCandles
+    }
+  };
+
+  const bridge = buildV2SnapshotBridge(snapConflict);
+  const inputXX = adaptV2Input(
+    "BTCUSDT",
+    now,
+    bridge as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "NONE",
+      crashState: "NORMAL",
+      shortAllow: true,
+      longAllow: true,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true,
+      okxAuthMode: "live",
+      okxAuthReady: true,
+      okxExchangeAuthOptIn: true,
+      okxLiveEnabled: true,
+      liveBalanceReady: true,
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 10000,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true,
+      okxPendingOrdersReady: true,
+      okxPendingOrdersNotionalUsdt: 0,
+      okxPendingSymbolNotionalUsdt: 0,
+      okxActualPositions: [],
+      balanceFetchedAt: now,
+      positionsFetchedAt: now,
+      pendingOrdersFetchedAt: now
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    mockBullishCandles,
+    "authoritative",
+    `cycle_BTCUSDT_${now}_xx`
+  );
+
+  const res = runEngineV2(inputXX);
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+
+  const env = resolveSymbolDecisionEnvelope({
+    symbol: "BTCUSDT" as any,
+    fetchedAt: now,
+    snapshot: bridge,
+    config: { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    state: {
+      directionalShockState: "NONE",
+      crashState: "NORMAL",
+      shortAllow: true,
+      longAllow: true,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    } as any,
+    legacy: {
+      regime: "RANGE",
+      finalDecision: "SKIP",
+      rejectReason: "none",
+      requiredCostUsd: 0,
+      entryAllowed: false,
+      executorLabel: "range",
+      intentSide: "none",
+      adaptiveOk: true,
+      adaptiveDetail: {}
+    } as any,
+    v2Mode: "engine_v2",
+    evaluationMode: "authoritative",
+    runCycleId: `cycle_BTCUSDT_${now}_xx`
+  });
+
+  const v2Env = env.v2_execution_envelope;
+
+  run(
+    "TEST_XX_RANGE_SHORT_TREND_LONG_CONFLICT_SELECTED_SIDE_AFTER_VETO_TRUTHFULNESS",
+    (decision.decision === "SKIP" || decision.decision === "HOLD") &&
+      decision.side === "none" &&
+      meta.selectedSideAfterVeto === "none" &&
+      v2Env?.selected_side_after_veto === "none" &&
+      (meta.side_veto_detail === "RANGE_TREND_SIDE_CONFLICT" || v2Env?.side_veto_detail === "RANGE_TREND_SIDE_CONFLICT") &&
+      Boolean(meta.primary_missing_condition) &&
+      Boolean(meta.expectedNextAction),
+    `Conflict case truthful: decision=${decision.decision}, side=${decision.side}, meta.selectedSideAfterVeto=${meta.selectedSideAfterVeto}, env.selected_side_after_veto=${v2Env?.selected_side_after_veto}, side_veto_detail=${meta.side_veto_detail || v2Env?.side_veto_detail}`
+  );
+}
+
+// =========================================================================
+// TEST YY — DIAGNOSTIC TRUTHFULNESS: NORMAL ENTER CASE
+// =========================================================================
+{
+  clearWhipsawObservationState("ETHUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+  rangeContinuationStateMap.clear();
+
+  const nowMs = Date.now();
+  const snapEnter: SymbolSnapshotLike = {
+    symbol: "ETHUSDT",
+    lastPrice: 2600,
+    latestCandleClose: 2600,
+    signal: "paper_long_candidate",
+    entryCandidate: true,
+    qualityScore: 90,
+    candidateStrength: "strong",
+    ema20: 2595,
+    ema60: 2590,
+    emaGap: 0.002,
+    volumeRatioProxy: 1.5,
+    boxHigh: 2630,
+    boxLow: 2570,
+    boxPos: 0.1,
+    boxRel: 0.02,
+    gateExpectedMove: 20,
+    gateRequiredMove: 10,
+    atr: 12,
+    atr20: 12,
+    closedClose: 2598,
+    rangeConfidence: 0.8,
+    trendWeaknessScore: 0.8,
+    boxCohesion01: 0.8,
+    breakoutFailureRate: 0.05,
+    rangeOscillationScore: 0.1,
+    candles: mockBullishCandles,
+    htf_candles: {
+      "5m": mockBullishCandles,
+      "15m": mockBullishCandles,
+      "1h": mockBullishCandles,
+      "4h": mockBullishCandles
+    },
+    canonicalRegime: "RANGE",
+    canonicalRegimeSource: "strategy_market_regime_detector"
+  };
+
+  const bridge = buildV2SnapshotBridge(snapEnter);
+  const inputYY = adaptV2Input(
+    "ETHUSDT",
+    nowMs,
+    bridge as any,
+    {
+      paperMaxOpenPositions: 3,
+      baseSizeUsd: 100,
+      maxSymbolNotionalUsd: 5000,
+      maxAccountNotionalUsd: 20000,
+      okxLiveEnabled: true,
+      okxAuthMode: "live",
+      okxExchangeAuthOptIn: true
+    } as any,
+    {
+      directionalShockState: "NONE",
+      longAllow: true,
+      shortAllow: true,
+      currentPositions: [],
+      executionReadiness: true,
+      paperExecutionReady: true,
+      signedExecutionReady: true,
+      serverTradeEnabled: true,
+      accountEquityKrw: 10000000,
+      exposureNotionalCapKrw: 100000000,
+      symbolExposureNotionalCapKrw: 50000000,
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 10000,
+      liveBalanceReady: true,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true,
+      okxActualPositions: [],
+      okxPendingOrdersReady: true,
+      okxPendingOrdersNotionalUsdt: 0,
+      okxPendingSymbolNotionalUsdt: 0,
+      hasSymbolPendingEntry: false,
+      hasUnknownPendingNotional: false,
+      okxLiveEnabled: true,
+      okxAuthMode: "live",
+      okxAuthReady: true,
+      okxExchangeAuthOptIn: true,
+      okxApiKeyPresent: true,
+      okxApiSecretPresent: true,
+      okxPassphrasePresent: true,
+      balanceFetchedAt: nowMs,
+      positionsFetchedAt: nowMs,
+      pendingOrdersFetchedAt: nowMs
+    } as any,
+    {
+      decision: { final_decision: "ENTER" },
+      execution: { stopPrice: 2564, invalidationPx: 2564, side: "long", sizeUsd: 100 },
+      risk: { stopPrice: 2564, invalidationPx: 2564 }
+    } as any,
+    mockBullishCandles,
+    "authoritative",
+    `cycle_ETHUSDT_${nowMs}_yy`
+  );
+
+  const res = runEngineV2(inputYY);
+  const decision = res.decision;
+  const meta = res.decision.metadata ?? {};
+
+  const env = resolveSymbolDecisionEnvelope({
+    symbol: "ETHUSDT" as any,
+    fetchedAt: nowMs,
+    snapshot: bridge,
+    config: {
+      paperMaxOpenPositions: 3,
+      baseSizeUsd: 100,
+      maxSymbolNotionalUsd: 5000,
+      maxAccountNotionalUsd: 20000,
+      okxLiveEnabled: true,
+      okxAuthMode: "live",
+      okxExchangeAuthOptIn: true
+    } as any,
+    state: {
+      directionalShockState: "NONE",
+      longAllow: true,
+      shortAllow: true,
+      currentPositions: [],
+      executionReadiness: true,
+      paperExecutionReady: true,
+      signedExecutionReady: true,
+      serverTradeEnabled: true,
+      accountEquityKrw: 10000000,
+      exposureNotionalCapKrw: 100000000,
+      symbolExposureNotionalCapKrw: 50000000,
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 10000,
+      liveBalanceReady: true,
+      okxActualPositionsReady: true,
+      actualAccountNotionalUsdtReady: true,
+      okxActualPositions: [],
+      okxPendingOrdersReady: true,
+      okxPendingOrdersNotionalUsdt: 0,
+      okxPendingSymbolNotionalUsdt: 0,
+      hasSymbolPendingEntry: false,
+      hasUnknownPendingNotional: false,
+      okxLiveEnabled: true,
+      okxAuthMode: "live",
+      okxAuthReady: true,
+      okxExchangeAuthOptIn: true,
+      okxApiKeyPresent: true,
+      okxApiSecretPresent: true,
+      okxPassphrasePresent: true,
+      balanceFetchedAt: nowMs,
+      positionsFetchedAt: nowMs,
+      pendingOrdersFetchedAt: nowMs
+    } as any,
+    legacy: {
+      regime: "RANGE",
+      finalDecision: "ENTER",
+      rejectReason: "none",
+      requiredCostUsd: 0,
+      entryAllowed: true,
+      executorLabel: "range",
+      intentSide: "long",
+      adaptiveOk: true,
+      adaptiveDetail: {}
+    } as any,
+    v2Mode: "engine_v2",
+    evaluationMode: "authoritative",
+    runCycleId: `cycle_ETHUSDT_${nowMs}_yy_env`
+  });
+
+  const v2Env = env.v2_execution_envelope;
+
+  run(
+    "TEST_YY_NORMAL_ENTER_SELECTED_SIDE_AFTER_VETO_MATCHES_FINAL_SIDE",
+    decision.decision === "ENTER" &&
+      decision.side === "long" &&
+      meta.selectedSideAfterVeto === "long" &&
+      v2Env?.selected_side_after_veto === "long",
+    `Normal ENTER truthful: decision=${decision.decision}, side=${decision.side}, meta.selectedSideAfterVeto=${meta.selectedSideAfterVeto}, env.selected_side_after_veto=${v2Env?.selected_side_after_veto}`
+  );
+}
+
+// =========================================================================
+// TEST ZZ — DIAGNOSTIC TRUTHFULNESS: HOLD AND REJECT CASES
+// =========================================================================
+{
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+  rangeContinuationStateMap.clear();
+
+  const now = Date.now();
+  // 1. HOLD Case (Quality below threshold)
+  const snapHold: SymbolSnapshotLike = {
+    symbol: "BTCUSDT",
+    lastPrice: 68930,
+    latestCandleClose: 68930,
+    signal: "paper_short_candidate",
+    qualityScore: 65,
+    candidateStrength: "strong",
+    ema20: 68850,
+    ema60: 69200,
+    emaGap: -0.003,
+    volumeRatioProxy: 1.1,
+    boxHigh: 70000,
+    boxLow: 68000,
+    boxPos: 0.35,
+    boxRel: -0.02,
+    gateExpectedMove: null,
+    gateRequiredMove: null,
+    atr: 250,
+    atr20: 250,
+    closedClose: 68920,
+    rangeConfidence: 0.2,
+    trendWeaknessScore: 0.2,
+    boxCohesion01: 0.7,
+    breakoutFailureRate: 0.1,
+    rangeOscillationScore: 0.2,
+    candles: mockBearishCandles,
+    canonicalRegime: "TREND",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.75,
+    htf_candles: {
+      "5m": mockBearishCandles,
+      "15m": mockBearishCandles,
+      "1h": mockBearishCandles,
+      "4h": mockBullishCandles
+    }
+  };
+
+  const bridgeHold = buildV2SnapshotBridge(snapHold);
+  const inputHold = adaptV2Input(
+    "BTCUSDT",
+    now,
+    bridgeHold as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
+      shortAllow: true,
+      longAllow: false,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    mockBearishCandles,
+    "authoritative",
+    `cycle_BTCUSDT_${now}_zz_hold`
+  );
+
+  const resHold = runEngineV2(inputHold);
+  const decisionHold = resHold.decision;
+  const metaHold = resHold.decision.metadata ?? {};
+
+  const envHold = resolveSymbolDecisionEnvelope({
+    symbol: "BTCUSDT" as any,
+    fetchedAt: now,
+    snapshot: bridgeHold,
+    config: { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    state: {
+      directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
+      shortAllow: true,
+      longAllow: false,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    } as any,
+    legacy: {
+      regime: "TREND",
+      finalDecision: "SKIP",
+      rejectReason: "none",
+      requiredCostUsd: 0,
+      entryAllowed: false,
+      executorLabel: "trend",
+      intentSide: "none",
+      adaptiveOk: true,
+      adaptiveDetail: {}
+    } as any,
+    v2Mode: "engine_v2",
+    evaluationMode: "authoritative",
+    runCycleId: `cycle_BTCUSDT_${now}_zz_hold`
+  });
+
+  // 2. REJECT Case (Hard safety block - counter trend shock)
+  clearWhipsawObservationState("BTCUSDT");
+  clearGlobalShockStates();
+  marketJudgmentCacheBySymbol.clear();
+  rangeContinuationStateMap.clear();
+
+  const snapReject: SymbolSnapshotLike = {
+    ...snapHold,
+    breakoutFailureRate: 0.45,
+    volumeExpansion: 2.5
+  };
+
+  const bridgeReject = buildV2SnapshotBridge(snapReject);
+  const inputReject = adaptV2Input(
+    "BTCUSDT",
+    now,
+    bridgeReject as any,
+    { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    {
+      directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
+      shortAllow: true,
+      longAllow: false,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    } as any,
+    { decision: { final_decision: "ENTER" } } as any,
+    mockBearishCandles,
+    "authoritative",
+    `cycle_BTCUSDT_${now}_zz_reject`
+  );
+
+  const resReject = runEngineV2(inputReject);
+  const decisionReject = resReject.decision;
+  const metaReject = resReject.decision.metadata ?? {};
+
+  const envReject = resolveSymbolDecisionEnvelope({
+    symbol: "BTCUSDT" as any,
+    fetchedAt: now,
+    snapshot: bridgeReject,
+    config: { paperMaxOpenPositions: 3, baseSizeUsd: 100 } as any,
+    state: {
+      directionalShockState: "NONE",
+      crashState: "CRASH_ALERT",
+      shortAllow: true,
+      longAllow: false,
+      currentPositions: [],
+      signedExecutionReady: true,
+      paperExecutionReady: true
+    } as any,
+    legacy: {
+      regime: "TREND",
+      finalDecision: "SKIP",
+      rejectReason: "none",
+      requiredCostUsd: 0,
+      entryAllowed: false,
+      executorLabel: "trend",
+      intentSide: "none",
+      adaptiveOk: true,
+      adaptiveDetail: {}
+    } as any,
+    v2Mode: "engine_v2",
+    evaluationMode: "authoritative",
+    runCycleId: `cycle_BTCUSDT_${now}_zz_reject`
+  });
+
+  run(
+    "TEST_ZZ_HOLD_AND_REJECT_SELECTED_SIDE_AFTER_VETO_NONE",
+    (decisionHold.decision === "HOLD" || decisionHold.decision === "SKIP") &&
+      metaHold.selectedSideAfterVeto === "none" &&
+      envHold.v2_execution_envelope?.selected_side_after_veto === "none" &&
+      (decisionReject.decision === "REJECT" || decisionReject.decision === "HOLD") &&
+      metaReject.selectedSideAfterVeto === "none" &&
+      envReject.v2_execution_envelope?.selected_side_after_veto === "none",
+    `HOLD and REJECT truthfulness verified: Hold(decision=${decisionHold.decision}, metaSide=${metaHold.selectedSideAfterVeto}, envSide=${envHold.v2_execution_envelope?.selected_side_after_veto}), Reject(decision=${decisionReject.decision}, metaSide=${metaReject.selectedSideAfterVeto}, envSide=${envReject.v2_execution_envelope?.selected_side_after_veto})`
+  );
+}
+
+console.log("\nALL 53 WHIPSAW LIVENESS, HTF CONTRARIAN, PROBE_ONLY & DIAGNOSTIC TESTS PASSED (TEST A - TEST ZZ)!");

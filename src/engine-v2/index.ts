@@ -6643,7 +6643,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             ...execMeta,
             v2_router_executor: activeEngineRouting,
             alignedSignal,
-            selectedSideAfterVeto: selectedSideFinal,
+            selectedSideAfterVeto: normalizedV2Side,
             promotionApplied,
             promotionReason,
             promotionBlockReason,
