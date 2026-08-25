@@ -1661,6 +1661,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         shock === "NONE" ||
         (shock === "UP" && trendSideCandidate === "long") ||
         (shock === "DOWN" && trendSideCandidate === "short");
+    // Paper shock override can force TREND while V2 routeToExecutor stays RANGE — trend authority must not inherit RANGE zone vetoes.
+    const trendRoutingAuthority =
+        activeEngineRouting === "TREND" ||
+        (shock !== "NONE" && trendShockAligned && trendSideCandidate !== "none" && trendOk);
+    const isTrendAuthorityCandidate =
+        trendSideCandidate !== "none" &&
+        trendOk &&
+        trendShockAligned &&
+        (entryQualityGrade === "S" || entryQualityGrade === "A" || qualityScore >= 80);
     const rangeSideAligned =
         (zone === "lower" && rangeSideCandidate === "long") ||
         (zone === "upper" && rangeSideCandidate === "short");
@@ -2055,7 +2064,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             !shockReactionWatchActive &&
             (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD" || v2SideAfterPromotion === "none") &&
             (v2RejectReasonAfterPromotion === "WAIT_RECHECK" || v2RejectReasonAfterPromotion == null || contaminationSoftened) &&
-            activeEngineRouting === "TREND" &&
+            trendRoutingAuthority &&
             trendSideCandidate !== "none" &&
             trendOk;
         if (trendPromotionCandidate && trendShockAligned) {
@@ -3945,8 +3954,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const isStairStepPromotion = promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
     const isTrendContinuationRevalidatedPromotion = promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
     const isConflictResolvedTrendLongPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
-    const rangeLowerShortMismatch = isRangeRouting && !isMicroProbePromotion && !isStairStepPromotion && !isTrendContinuationRevalidatedPromotion && sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
-    const rangeUpperLongMismatch = isRangeRouting && !isMicroProbePromotion && !isStairStepPromotion && !isTrendContinuationRevalidatedPromotion && !isConflictResolvedTrendLongPromotion && sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
+    const isTrendQualifiedFinalPromotion =
+        promotionReason === "V2_TREND_QUALIFIED_FINAL_PROMOTION" ||
+        (isTrendAuthorityCandidate && promotionApplied === true);
+    const rangeZoneVetoExempt =
+        isMicroProbePromotion ||
+        isStairStepPromotion ||
+        isTrendContinuationRevalidatedPromotion ||
+        isTrendQualifiedFinalPromotion;
+    const rangeLowerShortMismatch = isRangeRouting && !rangeZoneVetoExempt && !isTrendAuthorityCandidate && sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
+    const rangeUpperLongMismatch = isRangeRouting && !rangeZoneVetoExempt && !isTrendAuthorityCandidate && !isConflictResolvedTrendLongPromotion && sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
     const rangeDowngradedHardBlock = rangeSignalDowngraded && !rangeSignalKeptByRelax;
     const entryCandidateHardBlock = !entryCandidate && !promotionApplied;
     const trendPromotionHardBlock = activeEngineRouting === "TREND" && trendOk !== true && sideCandidateBeforeVeto !== "none";
@@ -3958,8 +3975,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         !relaxedRangeEntry &&
         !rangeEdgeExtreme &&
         !shockRecoveryHint &&
-        !isMicroProbePromotion &&
-        !isStairStepPromotion;
+        !rangeZoneVetoExempt &&
+        !isTrendAuthorityCandidate;
 
     if (v2DecisionAfterPromotion === "ENTER") {
         if (rangeLowerShortMismatch && !execMeta.sideOverrideApplied) {
@@ -4496,14 +4513,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const isPolarityReversalMicroProbePromotion = promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE";
         const isConflictResolvedTrendLongPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
         if (sideFinal === "short" && zone === "lower") {
-            const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown || (isStairStepPromotion && sideFinal === "short") || (isTrendContinuationRevalidatedPromotion && sideFinal === "short") || (isPolarityReversalMicroProbePromotion && sideFinal === "short");
+            const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown || shock === "DOWN" || (isTrendQualifiedFinalPromotion && sideFinal === trendSideCandidate) || (isStairStepPromotion && sideFinal === "short") || (isTrendContinuationRevalidatedPromotion && sideFinal === "short") || (isPolarityReversalMicroProbePromotion && sideFinal === "short");
             const htfStrongBullish = htfHardBlockReason === "STRONG_BULLISH_HTF_ALIGNMENT";
 
             if (!shortException || (htfStrongBullish && !isPolarityReversalMicroProbePromotion)) {
                 mismatchReason = "SIDE_ZONE_MISMATCH_LOWER_SHORT";
             }
         } else if (sideFinal === "long" && zone === "upper") {
-            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp || (isStairStepPromotion && sideFinal === "long") || (isTrendContinuationRevalidatedPromotion && sideFinal === "long") || (isPolarityReversalMicroProbePromotion && sideFinal === "long") || (isConflictResolvedTrendLongPromotion && sideFinal === "long");
+            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp || shock === "UP" || (isTrendQualifiedFinalPromotion && sideFinal === trendSideCandidate) || (isStairStepPromotion && sideFinal === "long") || (isTrendContinuationRevalidatedPromotion && sideFinal === "long") || (isPolarityReversalMicroProbePromotion && sideFinal === "long") || (isConflictResolvedTrendLongPromotion && sideFinal === "long");
             const htfStrongBearish = htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT";
 
             if (!longException || (htfStrongBearish && !isPolarityReversalMicroProbePromotion && !isConflictResolvedTrendLongPromotion)) {
