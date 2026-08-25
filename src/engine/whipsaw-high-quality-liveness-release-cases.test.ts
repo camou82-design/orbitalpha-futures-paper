@@ -373,10 +373,11 @@ function check(label: string, ok: boolean, detail: string) {
   );
 }
 
-// G — polarity mismatch => no soft downgrade
+// G — HTF HOLD + polarity mismatch: liveness soft downgrade allowed, entry still blocked downstream
 {
   clearWhipsawObservationState("BTCUSDT");
   seedHardEpisode("BTCUSDT", 6, "UP");
+  const microCandles = makeMicroUpThenDropCandles(69000);
   const candlesUp = makeTrendCandles(69000, "up", 120);
   const candlesDown = makeTrendCandles(69000, "down", 120);
   const input = makeBaseInput(
@@ -387,9 +388,9 @@ function check(label: string, ok: boolean, detail: string) {
       trendWeaknessScore: 0.1,
       boxBreakSide: "none",
       volumeExpansion: 1.1,
-      candles: makeMicroUpThenDropCandles(69000),
+      candles: microCandles,
       htf_candles: {
-        "5m": candlesUp,
+        "5m": microCandles,
         "15m": candlesUp,
         "1h": candlesDown,
         "4h": candlesDown,
@@ -399,25 +400,100 @@ function check(label: string, ok: boolean, detail: string) {
     { directionalShockState: "UP", longAllow: true, shortAllow: false }
   );
   const j = detectMarketRegime(input);
+  const { decision } = runEngineV2(input);
   check(
-    "G_POLARITY_OR_HTF_BLOCK",
+    "G_HTF_HOLD_POLARITY_SOFT_DOWNGRADE_ENTRY_BLOCKED",
     j.polarityMismatch === true &&
-      j.diagnostics?.whipsaw?.hardToSoftDowngrade !== true &&
-      j.htf_entry_policy === "HOLD",
-    `downgrade=${j.diagnostics?.whipsaw?.hardToSoftDowngrade} htf=${j.htf_entry_policy} polarity=${j.polarityMismatch}`
+      j.htf_entry_policy === "HOLD" &&
+      j.subtype === "WHIPSAW_SOFT_WATCH" &&
+      j.diagnostics?.whipsaw?.hardToSoftDowngrade === true &&
+      j.diagnostics?.whipsaw?.livenessAligned === true &&
+      decision.decision !== "ENTER",
+    `downgrade=${j.diagnostics?.whipsaw?.hardToSoftDowngrade} htf=${j.htf_entry_policy} polarity=${j.polarityMismatch} decision=${decision.decision}`
   );
 }
 
-// H — trendOk false
+// G2 — production-shaped ETH: Q85, weakness 0.506, DOWN shock, short candidate, HTF HOLD bullish macro
+{
+  clearWhipsawObservationState("ETHUSDT");
+  seedHardEpisode("ETHUSDT", 24, "DOWN");
+  const bullishHtf = makeTrendCandles(2600, "up", 120);
+  const input = makeBaseInput(
+    "ETHUSDT",
+    {
+      qualityScore: 85,
+      emaGap: -0.005,
+      trendWeaknessScore: 0.50635,
+      canonicalTrendWeaknessScore: 0.50635,
+      signal: "paper_short_candidate",
+      boxBreakSide: "none",
+      volumeExpansion: 1.1,
+      candles: makeMicroDownReboundCandles(2600),
+      htf_candles: {
+        "5m": bullishHtf,
+        "15m": bullishHtf,
+        "1h": bullishHtf,
+        "4h": bullishHtf,
+        "1d": bullishHtf
+      }
+    },
+    { directionalShockState: "DOWN", longAllow: false, shortAllow: true }
+  );
+  const j = detectMarketRegime(input);
+  const { decision } = runEngineV2(input);
+  check(
+    "G2_PRODUCTION_ETH_WEAKNESS_506_HTF_HOLD_SOFT_NOT_ENTER",
+    j.diagnostics?.whipsaw?.candidateSide === "short" &&
+      j.diagnostics?.whipsaw?.hardToSoftDowngrade === true &&
+      j.diagnostics?.whipsaw?.livenessAligned === true &&
+      j.diagnostics?.whipsaw?.trendOk === false &&
+      j.subtype === "WHIPSAW_SOFT_WATCH" &&
+      (j.diagnostics?.fresh_structural_hits?.length ?? 0) === 0 &&
+      decision.decision !== "ENTER",
+    `subtype=${j.subtype} downgrade=${j.diagnostics?.whipsaw?.hardToSoftDowngrade} trendOk=${j.diagnostics?.whipsaw?.trendOk} liveness=${j.diagnostics?.whipsaw?.livenessAligned} decision=${decision.decision}`
+  );
+}
+
+// H — liveness alignment false when emaGap too small (independent of trend weakness)
 {
   clearWhipsawObservationState("BTCUSDT");
   seedHardEpisode("BTCUSDT", 6, "UP");
   const input = alignedLongAgedInput("BTCUSDT", 100, 0.0001);
   const j = detectMarketRegime(input);
   check(
-    "H_TREND_NOT_OK",
-    j.subtype === "WHIPSAW_SHOCK_RECHECK" || j.diagnostics?.whipsaw?.hardToSoftDowngrade !== true,
-    `subtype=${j.subtype} trendWeak=${input.snapshot.trendWeaknessScore} emaGap=${input.snapshot.emaGap}`
+    "H_EMA_GAP_TOO_SMALL_BLOCKS_LIVENESS",
+    j.diagnostics?.whipsaw?.hardToSoftDowngrade !== true &&
+      j.diagnostics?.whipsaw?.livenessAligned !== true,
+    `subtype=${j.subtype} emaGap=${input.snapshot.emaGap} liveness=${j.diagnostics?.whipsaw?.livenessAligned} downgrade=${j.diagnostics?.whipsaw?.hardToSoftDowngrade}`
+  );
+}
+
+// H2 — trendOk false (weakness 0.506) but liveness aligned => soft downgrade
+{
+  clearWhipsawObservationState("ETHUSDT");
+  seedHardEpisode("ETHUSDT", 20, "DOWN");
+  const input = makeBaseInput(
+    "ETHUSDT",
+    {
+      qualityScore: 88,
+      emaGap: -0.0042,
+      trendWeaknessScore: 0.50635,
+      canonicalTrendWeaknessScore: 0.50635,
+      signal: "paper_short_candidate",
+      boxBreakSide: "none",
+      volumeExpansion: 1.1,
+      candles: makeMicroDownReboundCandles(2600)
+    },
+    { directionalShockState: "DOWN", longAllow: false, shortAllow: true }
+  );
+  const j = detectMarketRegime(input);
+  check(
+    "H2_WEAKNESS_ABOVE_ENTRY_TRENDOK_LIVENESS_SOFT",
+    j.diagnostics?.whipsaw?.trendOk === false &&
+      j.diagnostics?.whipsaw?.livenessAligned === true &&
+      j.subtype === "WHIPSAW_SOFT_WATCH" &&
+      j.diagnostics?.whipsaw?.hardToSoftDowngrade === true,
+    `subtype=${j.subtype} trendOk=${j.diagnostics?.whipsaw?.trendOk} liveness=${j.diagnostics?.whipsaw?.livenessAligned}`
   );
 }
 
@@ -677,13 +753,46 @@ function check(label: string, ok: boolean, detail: string) {
   );
 }
 
-// HTF null/UNKNOWN blocks
+// HTF null/UNKNOWN still blocks entry permission helper (not aged liveness downgrade)
 {
   check(
-    "AUTH_HTF_NULL_UNKNOWN_BLOCKS",
+    "AUTH_HTF_NULL_UNKNOWN_BLOCKS_ENTRY_HELPER",
     isHtfPolicyCompatibleWithCandidateSide(null, "long") === false &&
       isHtfPolicyCompatibleWithCandidateSide("UNKNOWN", "long") === false,
-    `null/UNKNOWN HTF blocked`
+    `null/UNKNOWN HTF blocked for entry permission`
+  );
+}
+
+// HTF HOLD does not block aged liveness predicate when otherwise aligned
+{
+  clearWhipsawObservationState("ETHUSDT");
+  seedHardEpisode("ETHUSDT", 8, "DOWN");
+  const input = makeBaseInput(
+    "ETHUSDT",
+    {
+      qualityScore: 90,
+      emaGap: -0.0042,
+      trendWeaknessScore: 0.50635,
+      signal: "paper_short_candidate",
+      boxBreakSide: "none",
+      volumeExpansion: 1.1,
+      candles: makeMicroDownReboundCandles(2600)
+    },
+    { directionalShockState: "DOWN", longAllow: false, shortAllow: true }
+  );
+  const pred = evaluateWhipsawAgedSoftDowngradeEligible({
+    input,
+    observationAgePassed: true,
+    hasWhipsawEpisode: true,
+    freshStructuralHitCount: 0,
+    htfEntryPolicy: "HOLD",
+    polarityMismatch: true,
+    directionalShockState: "DOWN"
+  });
+  check(
+    "AUTH_HTF_HOLD_POLARITY_IGNORED_FOR_LIVENESS_PREDICATE",
+    pred.eligible === true && pred.livenessAligned === true && pred.trendOk === false,
+    `eligible=${pred.eligible} liveness=${pred.livenessAligned} trendOk=${pred.trendOk}`
   );
 }
 

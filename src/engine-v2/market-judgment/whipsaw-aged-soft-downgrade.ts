@@ -61,6 +61,19 @@ export function deriveTrendOk(snapshot: EngineV2Input["snapshot"]): boolean {
     );
 }
 
+/**
+ * WHIPSAW aged hard→soft liveness alignment — separate from entry/promotion trendOk.
+ * Requires directional EMA magnitude and candidate alignment only; does NOT gate on trendWeaknessScore.
+ */
+export function deriveWhipsawLivenessAlignment(
+    snapshot: EngineV2Input["snapshot"],
+    candidateSide: "long" | "short" | "none"
+): boolean {
+    const emaGap = Number(snapshot.emaGap ?? 0);
+    if (!(Number.isFinite(emaGap) && Math.abs(emaGap) >= 0.0004)) return false;
+    return isEmaGapAlignedWithTrendSideCandidate(candidateSide, emaGap);
+}
+
 export function isHardControlClear(state: EngineV2Input["state"]): boolean {
     return (
         state.paperExecutionReady === true &&
@@ -92,14 +105,12 @@ export function evaluateWhipsawAgedSoftDowngradeEligible(args: Readonly<{
     htfEntryPolicy?: string | null;
     polarityMismatch?: boolean;
     directionalShockState: string | null | undefined;
-}>): { eligible: boolean; candidateSide: "long" | "short" | "none"; trendOk: boolean } {
+}>): { eligible: boolean; candidateSide: "long" | "short" | "none"; trendOk: boolean; livenessAligned: boolean } {
     const {
         input,
         observationAgePassed,
         hasWhipsawEpisode,
         freshStructuralHitCount,
-        htfEntryPolicy,
-        polarityMismatch,
         directionalShockState
     } = args;
     const sn = input.snapshot;
@@ -108,7 +119,7 @@ export function evaluateWhipsawAgedSoftDowngradeEligible(args: Readonly<{
     const emaGap = Number(sn.emaGap ?? 0);
     const qualityScore = Number(sn.qualityScore ?? 0);
     const candidateSide = deriveTrendSideCandidate(directionalShockState, emaGap);
-    const emaAligned = isEmaGapAlignedWithTrendSideCandidate(candidateSide, emaGap);
+    const livenessAligned = deriveWhipsawLivenessAlignment(sn, candidateSide);
 
     const isLiveExecution = st.okxLiveEnabled === true;
     const readinessOk =
@@ -116,22 +127,20 @@ export function evaluateWhipsawAgedSoftDowngradeEligible(args: Readonly<{
         st.executionReadiness !== false &&
         (!isLiveExecution || st.signedExecutionReady === true);
 
+    // HTF HOLD / polarityMismatch intentionally excluded — entry permission only, not liveness state.
     const eligible =
         hasWhipsawEpisode &&
         observationAgePassed === true &&
         freshStructuralHitCount === 0 &&
         Number.isFinite(qualityScore) &&
         qualityScore >= WHIPSAW_AGED_SOFT_DOWNGRADE_MIN_QUALITY &&
-        trendOk === true &&
+        livenessAligned === true &&
         (candidateSide === "long" || candidateSide === "short") &&
-        emaAligned === true &&
-        isHtfPolicyCompatibleWithCandidateSide(htfEntryPolicy, candidateSide) &&
-        polarityMismatch !== true &&
         isDirectionalShockCompatibleWithCandidateSide(directionalShockState, candidateSide) &&
         isHardControlClear(st) &&
         readinessOk &&
         st.hasSymbolPendingEntry !== true &&
         !hasSymbolPositionBarrier(st, input.symbol);
 
-    return { eligible, candidateSide, trendOk };
+    return { eligible, candidateSide, trendOk, livenessAligned };
 }

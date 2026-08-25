@@ -649,6 +649,7 @@ function evaluateWhipsawShockRecheck(args: {
     downgradeReason: string | null;
     candidateSide: "long" | "short" | "none";
     trendOk: boolean;
+    livenessAligned: boolean;
 } {
     const {
         input,
@@ -700,7 +701,8 @@ function evaluateWhipsawShockRecheck(args: {
             hardToSoftDowngrade: false,
             downgradeReason: null,
             candidateSide: "none",
-            trendOk: false
+            trendOk: false,
+            livenessAligned: false
         };
     }
 
@@ -915,6 +917,7 @@ function evaluateWhipsawShockRecheck(args: {
         directionalShockState: directional
     });
     const trendOk = agedSoftDowngrade.trendOk;
+    const livenessAligned = agedSoftDowngrade.livenessAligned;
     const candidateSide = agedSoftDowngrade.candidateSide;
 
     // Aged aligned soft downgrade: hard WHIPSAW -> SOFT_WATCH (not ENTER, not full episode delete)
@@ -1012,7 +1015,8 @@ function evaluateWhipsawShockRecheck(args: {
         hardToSoftDowngrade,
         downgradeReason,
         candidateSide,
-        trendOk
+        trendOk,
+        livenessAligned
     };
 }
 
@@ -1630,6 +1634,7 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
                 hard_to_soft_downgrade: whipsaw.hardToSoftDowngrade,
                 downgrade_reason: whipsaw.downgradeReason,
                 trend_ok: whipsaw.trendOk,
+                liveness_aligned: whipsaw.livenessAligned,
                 candidate_side: whipsaw.candidateSide,
                 fresh_structural_hit_count: whipsaw.freshStructuralHits.length,
                 micro_hit: whipsaw.hits.filter((h) => h.startsWith("micro_"))
@@ -1748,7 +1753,8 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
                 hardToSoftDowngrade: whipsaw.hardToSoftDowngrade,
                 downgradeReason: whipsaw.downgradeReason,
                 candidateSide: whipsaw.candidateSide,
-                trendOk: whipsaw.trendOk
+                trendOk: whipsaw.trendOk,
+                livenessAligned: whipsaw.livenessAligned
             },
             early_probe: {
                 allowed: earlyLongProbe.allowed || earlyShortProbe.allowed,

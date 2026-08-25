@@ -874,6 +874,7 @@ export interface MarketJudgmentOutput {
             downgradeReason?: string | null;
             candidateSide?: "long" | "short" | "none";
             trendOk?: boolean;
+            livenessAligned?: boolean;
         };
         early_probe?: {
             allowed: boolean;
