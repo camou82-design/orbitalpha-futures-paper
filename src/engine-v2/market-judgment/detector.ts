@@ -11,6 +11,7 @@ import {
     isEmaGapAlignedWithTrendSideCandidate
 } from "./whipsaw-aged-soft-downgrade";
 import { deriveTrendSideCandidate } from "../trend-side-candidate";
+import { evaluateWhipsawEvidenceBundle } from "./whipsaw-structural-evidence";
 function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPhase"] {
     const shock = input.state.directionalShockState ?? "NONE";
     const crashState = String(input.state.crashState ?? "").toUpperCase();
@@ -732,61 +733,96 @@ function evaluateWhipsawShockRecheck(args: {
         breakoutFailureRate >= 0.35;
 
     // --- Activation Logic Refinement ---
-    const microHits: string[] = [];
-    if (micro.downThenRebound) microHits.push("micro_down_then_rebound");
-    if (micro.upThenDrop) microHits.push("micro_up_then_drop");
+    const evidence = evaluateWhipsawEvidenceBundle({
+        downThenRebound: micro.downThenRebound,
+        upThenDrop: micro.upThenDrop,
+        candles: sn.candles,
+        emaGap: Number(sn.emaGap ?? 0),
+        directionalShockState: directional,
+        boxOrbitChop,
+        boxBreakSide: String(sn.boxBreakSide ?? "none"),
+        retestConfirmed,
+        reclaimConfirmed,
+        breakoutFailureRate,
+        mixedBreakoutState
+    });
+
+    const microHits = evidence.whipsawMicroHits;
+    const continuationMicroHits = evidence.continuationMicroHits;
+    const microPatternIdentity = evidence.microPatternIdentity;
 
     const contextHits: string[] = [];
     if (directional === "UP" || directional === "DOWN") contextHits.push("directional_shock_state");
     if (pumpS.includes("ALERT") || crashS.includes("ALERT")) contextHits.push("pump_crash_alert");
 
-    // Fresh structural hazard hits (actively present right now)
-    const freshStructuralHits: string[] = [];
-    if (boxOrbitChop) freshStructuralHits.push("box_orbit_chop");
-    if (sn.boxBreakSide !== "none" && (!retestConfirmed || !reclaimConfirmed)) freshStructuralHits.push("box_break_unconfirmed");
-    if (volExp >= 2.0) freshStructuralHits.push("volume_expansion_ge_2");
-    if (sn.boxBreakSide !== "none" && breakoutFailureRate >= 0.4) freshStructuralHits.push("breakout_failure_rate_ge_0_4");
-    if (sn.boxBreakSide !== "none" && mixedBreakoutState) freshStructuralHits.push("mixed_breakout_state");
-    if (Number(sn.atrExpansion ?? 0) >= 1.5) freshStructuralHits.push("atr_expansion_ge_1_5");
+    const freshStructuralHits = evidence.directionalFailureStructuralHits;
 
     const microHitCount = microHits.length;
     const freshStructuralHitCount = freshStructuralHits.length;
     const contextHitCount = contextHits.length;
 
-    const structuralHits = [...microHits, ...freshStructuralHits];
+    const structuralHits = [...microHits, ...continuationMicroHits, ...freshStructuralHits];
     const hitCount = structuralHits.length;
 
-    // Hard-block candidate: micro reversal + fresh structural evidence
-    const candidateRiskActive = microHitCount >= 1 && freshStructuralHitCount >= 1;
+    const symKey = String(input.symbol).toUpperCase();
+    const dirFailSig = freshStructuralHits.slice().sort().join("|");
+
+    const existingEpisode = whipsawObservationAuthority.getEpisode(symKey);
+    const hasExistingEpisode = existingEpisode != null;
+
+    const preObservationFreshMicro = whipsawObservationAuthority.isMicroPatternFresh(
+        symKey,
+        microPatternIdentity
+    );
+    const preObservationFreshStructural = whipsawObservationAuthority.isStructuralSignatureFresh(
+        symKey,
+        dirFailSig
+    );
+
+    const hasWhipsawEvidencePair = microHitCount >= 1 && freshStructuralHitCount >= 1;
+
+    // Hard-block arming requires whipsaw micro + directional failure, and fresh identity for (re)start
+    const freshHardBlockArming =
+        hasWhipsawEvidencePair && (preObservationFreshMicro || preObservationFreshStructural);
+
+    const candidateRiskActive = freshHardBlockArming;
 
     const freshShockContext =
         directional === "UP" ||
         directional === "DOWN" ||
         (sn.boxBreakSide !== "none" && freshStructuralHitCount >= 1) ||
-        volExp >= 2.0 ||
         pumpS.includes("ALERT") ||
         crashS.includes("ALERT") ||
         input.state.shockEmergencyBypass === true;
 
     const allowNewHardBlockEpisode = candidateRiskActive && freshShockContext;
 
-    const existingEpisode = whipsawObservationAuthority.getEpisode(String(input.symbol));
-    const hasExistingEpisode = existingEpisode != null;
+    // Soft Watch: whipsaw micro + context without directional-failure structural evidence
+    const rawIsSoftWatch =
+        !candidateRiskActive && microHitCount >= 1 && (contextHitCount >= 1 || hasExistingEpisode);
 
-    // Soft Watch: Micro reversal + context (directional shock or existing episode) without heavy fresh structural evidence
-    const rawIsSoftWatch = !candidateRiskActive && microHitCount >= 1 && (contextHitCount >= 1 || hasExistingEpisode);
+    const episodeObservationRawActive =
+        candidateRiskActive ||
+        rawIsSoftWatch ||
+        (hasExistingEpisode &&
+            (freshStructuralHitCount >= 1 || (microHitCount >= 1 && preObservationFreshMicro)));
 
     // Dedicated Symbol-Scoped WHIPSAW Observation State
     const observation = updateWhipsawObservation({
         symbol: input.symbol,
-        rawActive: candidateRiskActive || rawIsSoftWatch || (hasExistingEpisode && microHitCount >= 1),
+        rawActive: episodeObservationRawActive,
         candidateRiskActive,
         allowNewHardBlockEpisode,
         directionalShockState: directional,
         structuralHits,
+        microPatternIdentity,
+        directionalFailureStructuralHits: freshStructuralHits,
         shockEmergencyBypass: input.state.shockEmergencyBypass === true,
         now: (input.state as any)?.now ?? Date.now()
     });
+
+    const freshMicroEvidence = observation.freshMicroEvidence;
+    const freshStructuralRearm = observation.freshStructuralRearm;
 
     // Authority unification:
     // When an active WHIPSAW observation episode exists, observation.recheckTicks is the sole canonical authority.
@@ -811,8 +847,13 @@ function evaluateWhipsawShockRecheck(args: {
     if (sn.boxBreakSide === "none" && breakoutFailureRate >= 0.4) historicalOnlyHits.push("breakout_failure_rate_ge_0_4");
     if (sn.boxBreakSide === "none" && mixedBreakoutState) historicalOnlyHits.push("mixed_breakout_state");
 
-    // Hard block requires an active episode; ongoing unaged episode with micro reversal maintains hard block
-    let active = (candidateRiskActive || (hasExistingEpisode && !observationAgePassed && microHitCount >= 1)) && observation.episodeId != null;
+    // Hard block requires active episode; sustain needs whipsaw micro + structural (not micro alone)
+    const episodeSustainHard =
+        hasExistingEpisode &&
+        !observationAgePassed &&
+        hasWhipsawEvidencePair;
+
+    let active = (freshHardBlockArming || episodeSustainHard) && observation.episodeId != null;
     let isSoftWatch = rawIsSoftWatch;
 
     const finalRecheckConfirmed = retestConfirmed || reclaimConfirmed;

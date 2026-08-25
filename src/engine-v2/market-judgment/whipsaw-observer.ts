@@ -8,6 +8,8 @@ export interface WhipsawEpisodeState {
     initialStructuralSignature: string;
     lastResetReason: string | null;
     lastShockEmergencyBypass: boolean;
+    lastMicroPatternIdentity: string | null;
+    lastDirectionalFailureSignature: string;
 }
 
 export interface WhipsawObservationResult {
@@ -17,12 +19,41 @@ export interface WhipsawObservationResult {
     resetReason: string | null;
     observationAgePassed: boolean;
     active: boolean;
+    freshMicroEvidence: boolean;
+    freshStructuralRearm: boolean;
 }
 
 const WHIPSAW_REQUIRED_RECHECK_TICKS = 6;
 
 class WhipsawObservationAuthority {
     private episodeBySymbol = new Map<string, WhipsawEpisodeState>();
+    private lastReleasedMicroIdentityBySymbol = new Map<string, string>();
+    private lastReleasedStructuralSignatureBySymbol = new Map<string, string>();
+
+    private rememberReleasedPattern(symKey: string, episode: WhipsawEpisodeState | undefined): void {
+        if (episode?.lastMicroPatternIdentity) {
+            this.lastReleasedMicroIdentityBySymbol.set(symKey, episode.lastMicroPatternIdentity);
+        }
+        if (episode?.lastDirectionalFailureSignature) {
+            this.lastReleasedStructuralSignatureBySymbol.set(symKey, episode.lastDirectionalFailureSignature);
+        }
+    }
+
+    public isMicroPatternFresh(symKey: string, microPatternIdentity: string | null): boolean {
+        if (microPatternIdentity == null) return false;
+        const episode = this.episodeBySymbol.get(symKey);
+        if (microPatternIdentity === (episode?.lastMicroPatternIdentity ?? null)) return false;
+        if (microPatternIdentity === (this.lastReleasedMicroIdentityBySymbol.get(symKey) ?? null)) return false;
+        return true;
+    }
+
+    public isStructuralSignatureFresh(symKey: string, dirFailSig: string): boolean {
+        if (!dirFailSig) return false;
+        const episode = this.episodeBySymbol.get(symKey);
+        if (dirFailSig === (episode?.lastDirectionalFailureSignature ?? "")) return false;
+        if (dirFailSig === (this.lastReleasedStructuralSignatureBySymbol.get(symKey) ?? "")) return false;
+        return true;
+    }
 
     public updateObservation(args: {
         symbol: string;
@@ -34,14 +65,20 @@ class WhipsawObservationAuthority {
         candidateRiskActive?: boolean;
         /** Gate for starting a new hard-block episode without an existing one. */
         allowNewHardBlockEpisode?: boolean;
+        microPatternIdentity?: string | null;
+        directionalFailureStructuralHits?: string[];
         now?: number;
     }): WhipsawObservationResult {
         const { symbol, rawActive, directionalShockState, structuralHits, shockEmergencyBypass } = args;
         const symKey = String(symbol).toUpperCase();
         const now = args.now ?? Date.now();
         const currentBypass = shockEmergencyBypass === true;
+        const microPatternIdentity = args.microPatternIdentity ?? null;
+        const dirFailSig = (args.directionalFailureStructuralHits ?? []).slice().sort().join("|");
 
         if (!rawActive) {
+            const existingBeforeClear = this.episodeBySymbol.get(symKey);
+            this.rememberReleasedPattern(symKey, existingBeforeClear);
             if (this.episodeBySymbol.has(symKey)) {
                 this.episodeBySymbol.delete(symKey);
             }
@@ -51,7 +88,9 @@ class WhipsawObservationAuthority {
                 requiredTicks: WHIPSAW_REQUIRED_RECHECK_TICKS,
                 resetReason: null,
                 observationAgePassed: false,
-                active: false
+                active: false,
+                freshMicroEvidence: false,
+                freshStructuralRearm: false
             };
         }
 
@@ -67,6 +106,9 @@ class WhipsawObservationAuthority {
             (args.candidateRiskActive === undefined && rawActive);
         const allowNewHardBlock = args.allowNewHardBlockEpisode ?? true;
 
+        const freshMicroEvidence = this.isMicroPatternFresh(symKey, microPatternIdentity);
+        const freshStructuralRearm = this.isStructuralSignatureFresh(symKey, dirFailSig);
+
         if (!existing && (!isHardBlockCandidate || !allowNewHardBlock)) {
             return {
                 episodeId: null,
@@ -74,7 +116,9 @@ class WhipsawObservationAuthority {
                 requiredTicks: WHIPSAW_REQUIRED_RECHECK_TICKS,
                 resetReason: null,
                 observationAgePassed: false,
-                active: false
+                active: false,
+                freshMicroEvidence,
+                freshStructuralRearm
             };
         }
 
@@ -89,9 +133,15 @@ class WhipsawObservationAuthority {
             // 2. Same-direction fresh hard shock: Rising edge of shockEmergencyBypass (false -> true)
             const isFreshHardShockRisingEdge = !existing.lastShockEmergencyBypass && currentBypass;
 
-            if (isDirectionFlip || isFreshHardShockRisingEdge) {
-                // If both occur in the same cycle, single reset with priority to direction flip reason
-                resetReason = isDirectionFlip ? "shock_direction_flip" : "same_direction_fresh_hard_shock";
+            // 3. Fresh structural invalidation signature (genuine HARD re-arm)
+            const isFreshStructuralEpisodeReset = freshStructuralRearm && dirFailSig !== existing.initialStructuralSignature;
+
+            if (isDirectionFlip || isFreshHardShockRisingEdge || isFreshStructuralEpisodeReset) {
+                resetReason = isDirectionFlip
+                    ? "shock_direction_flip"
+                    : isFreshStructuralEpisodeReset
+                      ? "fresh_structural_invalidation"
+                      : "same_direction_fresh_hard_shock";
                 const newEpisodeId = `whipsaw_${symKey}_${now}_${Math.random().toString(36).slice(2, 7)}`;
                 existing = {
                     episodeId: newEpisodeId,
@@ -102,7 +152,9 @@ class WhipsawObservationAuthority {
                     initialDirection: currentDirection,
                     initialStructuralSignature: structSig,
                     lastResetReason: resetReason,
-                    lastShockEmergencyBypass: currentBypass
+                    lastShockEmergencyBypass: currentBypass,
+                    lastMicroPatternIdentity: microPatternIdentity,
+                    lastDirectionalFailureSignature: dirFailSig
                 };
                 this.episodeBySymbol.set(symKey, existing);
             } else {
@@ -110,6 +162,12 @@ class WhipsawObservationAuthority {
                 existing.lastSeenAt = now;
                 existing.lastResetReason = null;
                 existing.lastShockEmergencyBypass = currentBypass;
+                if (microPatternIdentity != null) {
+                    existing.lastMicroPatternIdentity = microPatternIdentity;
+                }
+                if (dirFailSig.length > 0) {
+                    existing.lastDirectionalFailureSignature = dirFailSig;
+                }
             }
         } else {
             const newEpisodeId = `whipsaw_${symKey}_${now}_${Math.random().toString(36).slice(2, 7)}`;
@@ -122,7 +180,9 @@ class WhipsawObservationAuthority {
                 initialDirection: currentDirection,
                 initialStructuralSignature: structSig,
                 lastResetReason: null,
-                lastShockEmergencyBypass: currentBypass
+                lastShockEmergencyBypass: currentBypass,
+                lastMicroPatternIdentity: microPatternIdentity,
+                lastDirectionalFailureSignature: dirFailSig
             };
             this.episodeBySymbol.set(symKey, existing);
         }
@@ -136,14 +196,21 @@ class WhipsawObservationAuthority {
             requiredTicks: WHIPSAW_REQUIRED_RECHECK_TICKS,
             resetReason: existing.lastResetReason,
             observationAgePassed,
-            active: true
+            active: true,
+            freshMicroEvidence,
+            freshStructuralRearm
         };
     }
 
     public clear(symbol?: string): void {
         if (symbol) {
-            this.episodeBySymbol.delete(String(symbol).toUpperCase());
+            const symKey = String(symbol).toUpperCase();
+            this.rememberReleasedPattern(symKey, this.episodeBySymbol.get(symKey));
+            this.episodeBySymbol.delete(symKey);
         } else {
+            for (const [symKey, episode] of this.episodeBySymbol.entries()) {
+                this.rememberReleasedPattern(symKey, episode);
+            }
             this.episodeBySymbol.clear();
         }
     }
@@ -163,6 +230,8 @@ export function updateWhipsawObservation(args: {
     shockEmergencyBypass?: boolean;
     candidateRiskActive?: boolean;
     allowNewHardBlockEpisode?: boolean;
+    microPatternIdentity?: string | null;
+    directionalFailureStructuralHits?: string[];
     now?: number;
 }): WhipsawObservationResult {
     return whipsawObservationAuthority.updateObservation(args);

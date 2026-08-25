@@ -155,7 +155,13 @@ function makeBaseInput(
     canonicalTrendScore: 0.85,
     ...overrides
   };
-  const bridge = buildV2SnapshotBridge(snap);
+  const bridge = buildV2SnapshotBridge(snap) as unknown as Record<string, unknown>;
+  if (snap.boxBreakSide != null) {
+    bridge.boxBreakSide = snap.boxBreakSide;
+  }
+  if (snap.reviewing_ticks != null) {
+    bridge.reviewing_ticks = snap.reviewing_ticks;
+  }
   return adaptV2Input(
     symbol,
     Date.now(),
@@ -183,6 +189,8 @@ function makeBaseInput(
 
 function seedHardEpisode(symbol: "BTCUSDT" | "ETHUSDT", ticks: number, directional: "UP" | "DOWN") {
   clearWhipsawObservationState(symbol);
+  const structuralHits = ["micro_up_then_drop", "box_break_unconfirmed"];
+  const directionalFailureStructuralHits = ["box_break_unconfirmed"];
   for (let i = 0; i < ticks; i++) {
     updateWhipsawObservation({
       symbol,
@@ -190,9 +198,50 @@ function seedHardEpisode(symbol: "BTCUSDT" | "ETHUSDT", ticks: number, direction
       candidateRiskActive: true,
       allowNewHardBlockEpisode: true,
       directionalShockState: directional,
-      structuralHits: ["micro_up_then_drop", "volume_expansion_ge_2"]
+      structuralHits,
+      directionalFailureStructuralHits,
+      microPatternIdentity: `micro_up_then_drop:seed:${i}`
     });
   }
+}
+
+function seedAgedSoftEpisode(symbol: "BTCUSDT" | "ETHUSDT", ticks: number, directional: "UP" | "DOWN") {
+  clearWhipsawObservationState(symbol);
+  for (let i = 0; i < ticks; i++) {
+    updateWhipsawObservation({
+      symbol,
+      rawActive: true,
+      candidateRiskActive: i === 0,
+      allowNewHardBlockEpisode: i === 0,
+      directionalShockState: directional,
+      structuralHits: ["micro_up_then_drop"],
+      directionalFailureStructuralHits: [],
+      microPatternIdentity: `micro_up_then_drop:aged:${i}`
+    });
+  }
+}
+
+function alignedLongHardSustainInput(symbol: "BTCUSDT" | "ETHUSDT", qualityScore: number, emaGap: number) {
+  const microCandles = symbol === "BTCUSDT" ? makeMicroUpThenDropCandles(69000) : makeMicroUpThenDropCandles(2600);
+  return makeBaseInput(
+    symbol,
+    {
+      qualityScore,
+      emaGap,
+      trendWeaknessScore: 0.1,
+      boxBreakSide: "upper",
+      reviewing_ticks: 2,
+      breakoutFailureRate: 0.45,
+      volumeExpansion: 1.1,
+      atrExpansion: 1.0,
+      candles: microCandles
+    },
+    {
+      directionalShockState: "UP",
+      longAllow: true,
+      shortAllow: false
+    }
+  );
 }
 
 function alignedLongAgedInput(symbol: "BTCUSDT" | "ETHUSDT", qualityScore: number, emaGap: number) {
@@ -270,7 +319,7 @@ function check(label: string, ok: boolean, detail: string) {
 {
   clearWhipsawObservationState("BTCUSDT");
   seedHardEpisode("BTCUSDT", 3, "UP");
-  const input = alignedLongAgedInput("BTCUSDT", 100, 0.0042);
+  const input = alignedLongHardSustainInput("BTCUSDT", 100, 0.0042);
   const j = detectMarketRegime(input);
   const { decision } = runEngineV2(input);
   check(
@@ -291,8 +340,9 @@ function check(label: string, ok: boolean, detail: string) {
       emaGap: 0.0042,
       trendWeaknessScore: 0.1,
       boxBreakSide: "upper",
-      volumeExpansion: 2.5,
-      breakoutFailureRate: 0.1,
+      reviewing_ticks: 2,
+      volumeExpansion: 1.2,
+      breakoutFailureRate: 0.45,
       candles: makeMicroUpThenDropCandles(69000)
     },
     { directionalShockState: "UP", longAllow: true, shortAllow: false }
@@ -308,7 +358,7 @@ function check(label: string, ok: boolean, detail: string) {
 // C/J — production-shaped BTC Q100 aged soft downgrade
 {
   clearWhipsawObservationState("BTCUSDT");
-  seedHardEpisode("BTCUSDT", 6, "UP");
+  seedAgedSoftEpisode("BTCUSDT", 6, "UP");
   const input = alignedLongAgedInput("BTCUSDT", 100, 0.004244865855578648);
   const j = detectMarketRegime(input);
   const { decision } = runEngineV2(input);
@@ -325,7 +375,7 @@ function check(label: string, ok: boolean, detail: string) {
 // D/K — ETH Q99 symmetric
 {
   clearWhipsawObservationState("ETHUSDT");
-  seedHardEpisode("ETHUSDT", 6, "UP");
+  seedAgedSoftEpisode("ETHUSDT", 6, "UP");
   const input = alignedLongAgedInput("ETHUSDT", 99, 0.004221103934399031);
   const j = detectMarketRegime(input);
   check(
@@ -339,7 +389,7 @@ function check(label: string, ok: boolean, detail: string) {
 {
   clearWhipsawObservationState("BTCUSDT");
   seedHardEpisode("BTCUSDT", 6, "DOWN");
-  const input = alignedLongAgedInput("BTCUSDT", 100, 0.0042);
+  const input = alignedLongHardSustainInput("BTCUSDT", 100, 0.0042);
   const j = detectMarketRegime({ ...input, state: { ...input.state, directionalShockState: "DOWN" } });
   check(
     "E_LONG_OPPOSED_SHOCK_DOWN",
@@ -358,7 +408,9 @@ function check(label: string, ok: boolean, detail: string) {
       qualityScore: 95,
       emaGap: -0.0042,
       trendWeaknessScore: 0.1,
-      boxBreakSide: "none",
+      boxBreakSide: "lower",
+      reviewing_ticks: 2,
+      breakoutFailureRate: 0.45,
       volumeExpansion: 1.1,
       signal: "paper_short_candidate",
       candles: makeMicroDownReboundCandles(2600)
@@ -376,7 +428,7 @@ function check(label: string, ok: boolean, detail: string) {
 // G — HTF HOLD + polarity mismatch: liveness soft downgrade allowed, entry still blocked downstream
 {
   clearWhipsawObservationState("BTCUSDT");
-  seedHardEpisode("BTCUSDT", 6, "UP");
+  seedAgedSoftEpisode("BTCUSDT", 6, "UP");
   const microCandles = makeMicroUpThenDropCandles(69000);
   const candlesUp = makeTrendCandles(69000, "up", 120);
   const candlesDown = makeTrendCandles(69000, "down", 120);
@@ -416,7 +468,7 @@ function check(label: string, ok: boolean, detail: string) {
 // G2 — production-shaped ETH: Q85, weakness 0.506, DOWN shock, short candidate, HTF HOLD bullish macro
 {
   clearWhipsawObservationState("ETHUSDT");
-  seedHardEpisode("ETHUSDT", 24, "DOWN");
+  seedAgedSoftEpisode("ETHUSDT", 24, "DOWN");
   const bullishHtf = makeTrendCandles(2600, "up", 120);
   const input = makeBaseInput(
     "ETHUSDT",
@@ -457,7 +509,7 @@ function check(label: string, ok: boolean, detail: string) {
 // H — liveness alignment false when emaGap too small (independent of trend weakness)
 {
   clearWhipsawObservationState("BTCUSDT");
-  seedHardEpisode("BTCUSDT", 6, "UP");
+  seedAgedSoftEpisode("BTCUSDT", 6, "UP");
   const input = alignedLongAgedInput("BTCUSDT", 100, 0.0001);
   const j = detectMarketRegime(input);
   check(
@@ -471,7 +523,7 @@ function check(label: string, ok: boolean, detail: string) {
 // H2 — trendOk false (weakness 0.506) but liveness aligned => soft downgrade
 {
   clearWhipsawObservationState("ETHUSDT");
-  seedHardEpisode("ETHUSDT", 20, "DOWN");
+  seedAgedSoftEpisode("ETHUSDT", 20, "DOWN");
   const input = makeBaseInput(
     "ETHUSDT",
     {
@@ -501,7 +553,7 @@ function check(label: string, ok: boolean, detail: string) {
 {
   clearWhipsawObservationState("BTCUSDT");
   seedHardEpisode("BTCUSDT", 2, "UP");
-  const input = alignedLongAgedInput("BTCUSDT", 100, 0.0042);
+  const input = alignedLongHardSustainInput("BTCUSDT", 100, 0.0042);
   const j = detectMarketRegime(input);
   check(
     "I_OBS_AGE_NOT_PASSED",
@@ -562,7 +614,8 @@ function check(label: string, ok: boolean, detail: string) {
       qualityScore: 100,
       emaGap: 0.0042,
       boxBreakSide: "upper",
-      volumeExpansion: 2.2,
+      reviewing_ticks: 2,
+      volumeExpansion: 1.2,
       breakoutFailureRate: 0.5,
       candles: makeMicroUpThenDropCandles(69000)
     },
@@ -799,7 +852,7 @@ function check(label: string, ok: boolean, detail: string) {
 // Lifecycle: stale micro after soft downgrade → no hard re-arm
 {
   clearWhipsawObservationState("BTCUSDT");
-  seedHardEpisode("BTCUSDT", 6, "UP");
+  seedAgedSoftEpisode("BTCUSDT", 6, "UP");
   const softInput = alignedLongAgedInput("BTCUSDT", 100, 0.0042);
   detectMarketRegime(softInput);
   const staleInput = makeBaseInput(
@@ -826,7 +879,7 @@ function check(label: string, ok: boolean, detail: string) {
 // Lifecycle: fresh structural after soft downgrade → hard re-arm allowed
 {
   clearWhipsawObservationState("BTCUSDT");
-  seedHardEpisode("BTCUSDT", 6, "UP");
+  seedAgedSoftEpisode("BTCUSDT", 6, "UP");
   detectMarketRegime(alignedLongAgedInput("BTCUSDT", 100, 0.0042));
   const freshInput = makeBaseInput(
     "BTCUSDT",
@@ -834,12 +887,13 @@ function check(label: string, ok: boolean, detail: string) {
       qualityScore: 100,
       emaGap: 0.0042,
       trendWeaknessScore: 0.1,
-      boxBreakSide: "upper",
-      volumeExpansion: 2.5,
-      breakoutFailureRate: 0.1,
+      boxBreakSide: "lower",
+      reviewing_ticks: 2,
+      volumeExpansion: 1.2,
+      breakoutFailureRate: 0.55,
       candles: makeMicroUpThenDropCandles(69000)
     },
-    { directionalShockState: "UP", longAllow: true, shortAllow: false }
+    { directionalShockState: "DOWN", longAllow: true, shortAllow: false }
   );
   const j = detectMarketRegime(freshInput);
   check(
@@ -852,7 +906,7 @@ function check(label: string, ok: boolean, detail: string) {
 // Lifecycle: stabilization cleans episode
 {
   clearWhipsawObservationState("BTCUSDT");
-  seedHardEpisode("BTCUSDT", 6, "UP");
+  seedAgedSoftEpisode("BTCUSDT", 6, "UP");
   detectMarketRegime(alignedLongAgedInput("BTCUSDT", 100, 0.0042));
   const stableInput = makeBaseInput(
     "BTCUSDT",
