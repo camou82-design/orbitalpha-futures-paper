@@ -3284,7 +3284,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     qualityScore >= 65 &&
                     (entryQualityGrade === "S" || entryQualityGrade === "A" || entryQualityGrade === "B");
 
-                if (qualityScore < 70 && !isBypassRangeUpperShort) {
+                if (
+                    qualityScore < 70 &&
+                    !isBypassRangeUpperShort &&
+                    !(
+                        v2DecisionBeforePromotion === "ENTER" &&
+                        v2SideBeforePromotion !== "none"
+                    )
+                ) {
                     promotionBlockReason = "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD";
                     expectedNextAction = "WAIT_FOR_QUALITY_IMPROVEMENT";
                     expectedMissingCondition = "TREND_PROMOTION_BLOCKED_QUALITY_BELOW_THRESHOLD";
@@ -3326,14 +3333,21 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             v2RejectReasonAfterPromotion = "WAIT_RECHECK";
                         }
                     }
-                } else if (marketMode === "RANGE" && (boxBreakSide === "none" || boxBreakSide === "UNKNOWN")) {
-                    promotionBlockReason = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
-                    expectedNextAction = "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM";
-                    expectedMissingCondition = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
-                } else {
-                    promotionBlockReason = "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED";
-                    expectedNextAction = "WAIT_FOR_RECHECK_OR_RETEST";
-                    expectedMissingCondition = "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED";
+                } else if (
+                    !(
+                        v2DecisionBeforePromotion === "ENTER" &&
+                        v2SideBeforePromotion !== "none"
+                    )
+                ) {
+                    if (marketMode === "RANGE" && (boxBreakSide === "none" || boxBreakSide === "UNKNOWN")) {
+                        promotionBlockReason = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
+                        expectedNextAction = "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM";
+                        expectedMissingCondition = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
+                    } else {
+                        promotionBlockReason = "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED";
+                        expectedNextAction = "WAIT_FOR_RECHECK_OR_RETEST";
+                        expectedMissingCondition = "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED";
+                    }
                 }
             }
         }
@@ -3943,10 +3957,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     const selectedSideFinal: EngineV2Side = selected_side_final_after_sanitize;
 
+    const nativeExecutorEnterAuthority =
+        v2DecisionBeforePromotion === "ENTER" &&
+        v2SideBeforePromotion !== "none" &&
+        promotionApplied === false;
 
     if (v2DecisionAfterPromotion === "ENTER") {
         if (promotionApplied && (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")) {
             // Preserve the side assigned by the promotion logic
+        } else if (
+            nativeExecutorEnterAuthority &&
+            (selectedSideFinal === "none" || selectedSideFinal === v2SideBeforePromotion)
+        ) {
+            v2SideAfterPromotion = v2SideBeforePromotion;
         } else {
             v2SideAfterPromotion = selectedSideFinal;
         }
@@ -3979,8 +4002,21 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2DecisionBeforePromotion === "ENTER" &&
         judgment.htf_entry_policy === "PROBE_ONLY" &&
         judgment.polarityProbeEligible === true;
-    const rangeDowngradedHardBlock = rangeSignalDowngraded && !rangeSignalKeptByRelax && !probeOnlyPolarityEligibleEnter;
-    const entryCandidateHardBlock = !entryCandidate && !promotionApplied;
+    const rangeDowngradedHardBlock =
+        rangeSignalDowngraded &&
+        !rangeSignalKeptByRelax &&
+        !probeOnlyPolarityEligibleEnter &&
+        !nativeExecutorEnterAuthority;
+    const entryCandidateHardBlock =
+        !entryCandidate && !promotionApplied && !nativeExecutorEnterAuthority;
+    const execMetaRecord = execMeta as Record<string, unknown>;
+    const nativeExecutorFastProbeCoverage =
+        nativeExecutorEnterAuthority &&
+        (judgment.subtype === "FAST_TREND_SHIFT" ||
+            judgment.subtype === "EARLY_LONG_PROBE" ||
+            judgment.subtype === "EARLY_SHORT_PROBE" ||
+            execMetaRecord.fast_trend_shift === true ||
+            execMetaRecord.early_probe === true);
     const trendPromotionHardBlock = activeEngineRouting === "TREND" && trendOk !== true && sideCandidateBeforeVeto !== "none";
     const rangeMidConservativeBlock =
         rangeContextActive &&
@@ -3991,7 +4027,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         !rangeEdgeExtreme &&
         !shockRecoveryHint &&
         !rangeZoneVetoExempt &&
-        !isTrendAuthorityCandidate;
+        !isTrendAuthorityCandidate &&
+        !nativeExecutorFastProbeCoverage;
 
     if (v2DecisionAfterPromotion === "ENTER") {
         if (rangeLowerShortMismatch && !execMeta.sideOverrideApplied) {
