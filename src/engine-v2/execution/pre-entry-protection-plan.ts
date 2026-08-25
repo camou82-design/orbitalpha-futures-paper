@@ -38,16 +38,14 @@ export function evaluatePreEntryProtectionPlan(input: Readonly<{
 }>): PreEntryProtectionPlanResult {
     const slRequired = true;
     const rawWantsTp = isFinitePositive(input.tpPrice);
-    const isV2TrendMandatory =
-        input.isV2Authority && input.regime === "TREND" && input.isV2RangePartialPlan !== true;
     const tpEval = shouldAttachFullPositionProtectiveTp({
         isV2Authority: input.isV2Authority,
         regime: input.regime,
         isV2RangePartialPlan: input.isV2RangePartialPlan === true,
-        rawWantsTp: rawWantsTp || isV2TrendMandatory,
+        rawWantsTp,
         takeProfitRequired: input.takeProfitRequired
     });
-    const tpRequired = isV2TrendMandatory ? true : tpEval.fullPositionTpRequired;
+    const tpRequired = tpEval.fullPositionTpRequired;
 
     const slPrice = isFinitePositive(input.slPrice) ? input.slPrice : null;
     const tpPrice = isFinitePositive(input.tpPrice) ? input.tpPrice : null;
@@ -81,7 +79,7 @@ export function evaluatePreEntryProtectionPlan(input: Readonly<{
     let blockReason: string | null = null;
     if (!slValid) blockReason = "PRE_ENTRY_SL_PRICE_MISSING";
     else if (tpRequired && !tpValid) {
-        blockReason = isV2TrendMandatory && !rawWantsTp
+        blockReason = input.regime === "TREND" && !rawWantsTp
             ? "V2_TREND_TP_PRICE_UNAVAILABLE"
             : "PRE_ENTRY_TP_PRICE_MISSING";
     }

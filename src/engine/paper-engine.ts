@@ -20650,24 +20650,7 @@ export class PaperEngine {
           continue;
         }
 
-        // 2. Execution Key (Race Protection)
-        const v2EntryKey = `v2entry:${sym}:${intentSide}:${executionSnapshot.runCycleId}`;
-        const v2KeyOk = await this.consumeExecutionKey(v2EntryKey);
-        if (!v2KeyOk) {
-          const skip_reason = "V2_EXECUTION_DUPLICATE_KEY_BLOCKED";
-          this.logger.warn("V2_EXECUTION_DUPLICATE_KEY_BLOCKED", { symbol: sym, key: v2EntryKey });
-          this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
-            symbol: sym,
-            run_cycle_id: executionSnapshot.runCycleId,
-            decision_id: (authority as any).decision_id ?? null,
-            order_path_allowed: false,
-            skip_reason,
-            ...buildAuthorityEventMeta(authority)
-          });
-          continue;
-        }
-
-        // 3. Mutex Re-check (Pre-persist Safety)
+        // 2. Mutex Re-check (Pre-persist Safety)
         const latestPositions = await this.positions.loadOpenAll();
         const v2Mutex = this.positions.evaluateSymbolPositionMutex(sym, intentSide, latestPositions, false, authority.addOnAllowed === true);
         if (v2Mutex.blocked) {
@@ -21069,6 +21052,23 @@ export class PaperEngine {
               symbol: sym,
               side: authority.side,
               blockReason: preEntryPlan.blockReason
+            });
+            continue;
+          }
+
+          // Atomic Execution Key Claim immediately prior to OKX signed submit
+          const v2EntryKey = `v2entry:${sym}:${intentSide}:${executionSnapshot.runCycleId}`;
+          const v2KeyOk = await this.consumeExecutionKey(v2EntryKey);
+          if (!v2KeyOk) {
+            const skip_reason = "V2_EXECUTION_DUPLICATE_KEY_BLOCKED";
+            this.logger.warn("V2_EXECUTION_DUPLICATE_KEY_BLOCKED", { symbol: sym, key: v2EntryKey });
+            this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
+              symbol: sym,
+              run_cycle_id: executionSnapshot.runCycleId,
+              decision_id: (authority as any).decision_id ?? null,
+              order_path_allowed: false,
+              skip_reason,
+              ...buildAuthorityEventMeta(authority)
             });
             continue;
           }

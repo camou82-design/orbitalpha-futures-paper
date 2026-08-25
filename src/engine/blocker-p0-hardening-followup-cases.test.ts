@@ -179,7 +179,7 @@ const ctx: ProtectiveReconcileContext = {
   pass("REBUILD_RESTORE_FAIL_HARD_BLOCK");
 }
 
-// Pre-entry: TREND TP missing blocks
+// Pre-entry: TREND TP missing blocks when TP is required
 {
   const plan = evaluatePreEntryProtectionPlan({
     symbol: "BTCUSDT",
@@ -189,6 +189,7 @@ const ctx: ProtectiveReconcileContext = {
     tpPrice: null,
     isV2Authority: true,
     regime: "TREND",
+    takeProfitRequired: true,
     tickSz: 0.1
   });
   assert.equal(plan.entryBlocked, true);

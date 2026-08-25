@@ -147,6 +147,7 @@ const DEFAULT_MUTEX_OK = {
         slPrice: 77500,
         tpPrice: null, // TP Missing!
         isV2Authority: true,
+        takeProfitRequired: true,
         regime: "TREND"
     });
 
@@ -390,6 +391,7 @@ const DEFAULT_MUTEX_OK = {
         slPrice: 77500,
         tpPrice: null, // TP Missing!
         isV2Authority: true,
+        takeProfitRequired: true,
         regime: "TREND"
     });
 
