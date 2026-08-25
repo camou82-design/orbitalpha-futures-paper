@@ -3296,10 +3296,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     promotionBlockReason =
                         lowerShortFallbackEval.holdReason ??
                         "TREND_PROMOTION_BLOCKED_RANGE_ZONE_NOT_BREAKDOWN_CONFIRMED";
-                    v2DecisionAfterPromotion = "HOLD";
-                    v2RejectReasonAfterPromotion = "WAIT_RECHECK";
                     expectedNextAction = "WAIT_FOR_BREAKDOWN_RETEST_RESISTANCE_CONFIRM";
                     expectedMissingCondition = promotionBlockReason;
+                    // EXECUTOR-ENTER PRESERVATION GUARD: do not demote an already-valid executor ENTER
+                    // via recheck-only fallback gates. Only demote if executor itself did not produce ENTER.
+                    if (v2DecisionBeforePromotion !== "ENTER") {
+                        v2DecisionAfterPromotion = "HOLD";
+                        v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                    }
                 } else if (
                     zone === "upper" &&
                     trendSideCandidate === "long" &&
@@ -3315,8 +3319,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
                         expectedNextAction = "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM";
                         expectedMissingCondition = promotionBlockReason;
-                        v2DecisionAfterPromotion = "HOLD";
-                        v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                        // EXECUTOR-ENTER PRESERVATION GUARD: do not demote an already-valid executor ENTER
+                        // via recheck-only fallback gates. Only demote if executor itself did not produce ENTER.
+                        if (v2DecisionBeforePromotion !== "ENTER") {
+                            v2DecisionAfterPromotion = "HOLD";
+                            v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+                        }
                     }
                 } else if (marketMode === "RANGE" && (boxBreakSide === "none" || boxBreakSide === "UNKNOWN")) {
                     promotionBlockReason = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
@@ -3964,7 +3972,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         isTrendQualifiedFinalPromotion;
     const rangeLowerShortMismatch = isRangeRouting && !rangeZoneVetoExempt && !isTrendAuthorityCandidate && sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
     const rangeUpperLongMismatch = isRangeRouting && !rangeZoneVetoExempt && !isTrendAuthorityCandidate && !isConflictResolvedTrendLongPromotion && sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
-    const rangeDowngradedHardBlock = rangeSignalDowngraded && !rangeSignalKeptByRelax;
+    // PROBE_ONLY + polarityProbeEligible exemption: an executor ENTER under HTF PROBE_ONLY
+    // with confirmed polarity probe eligibility must not be blocked by a range signal downgrade.
+    // The HTF probe authority already accounts for the reduced sizing (htf_size_multiplier).
+    const probeOnlyPolarityEligibleEnter =
+        v2DecisionBeforePromotion === "ENTER" &&
+        judgment.htf_entry_policy === "PROBE_ONLY" &&
+        judgment.polarityProbeEligible === true;
+    const rangeDowngradedHardBlock = rangeSignalDowngraded && !rangeSignalKeptByRelax && !probeOnlyPolarityEligibleEnter;
     const entryCandidateHardBlock = !entryCandidate && !promotionApplied;
     const trendPromotionHardBlock = activeEngineRouting === "TREND" && trendOk !== true && sideCandidateBeforeVeto !== "none";
     const rangeMidConservativeBlock =
