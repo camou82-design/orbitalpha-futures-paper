@@ -3584,10 +3584,10 @@ function makeBaseInput(
   const now = Date.now();
   const mockConflictCandles: Candle[] = Array.from({ length: 120 }, (_, i) => ({
     ts: now - (120 - i) * 60000,
-    open: 69000 + (i % 2 === 0 ? 30 : -30),
-    high: 69100,
-    low: 68900,
-    close: 69000 + (i % 2 === 0 ? -20 : 20),
+    open: 69800 + (i % 2 === 0 ? 30 : -30),
+    high: 69850,
+    low: 69750,
+    close: 69800 + (i % 2 === 0 ? -20 : 20),
     volume: 50
   }));
 

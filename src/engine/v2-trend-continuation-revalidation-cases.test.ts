@@ -424,7 +424,8 @@ function runEngineWith(snapshotOverrides: Partial<SymbolSnapshotLike> = {}, stat
     canonicalRegime: "RANGE", // RANGE mode
     canonicalTrendScore: 0.3,
     signal: "paper_long_candidate",
-    qualityScore: 75
+    qualityScore: 75,
+    candles: makeTrendCandles(2600, "up", 120)
   });
 
   assert.notEqual(res.decision.decision, "ENTER");

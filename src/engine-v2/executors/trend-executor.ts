@@ -158,20 +158,13 @@ export function executeTrendRegime(input: EngineV2Input, judgment: MarketJudgmen
         }));
     }
 
-    const entryPx = sn.lastPrice ?? 0;
-    const atr = sn.atr ?? (entryPx * 0.01);
-    const ema20 = sn.ema20 && sn.ema20 > 0 ? sn.ema20 : entryPx / (1 + emaGap);
+    const trendStops = calculateAuthoritativeTrendStructuralStop(
+        sn,
+        (side === "long" || side === "short") ? side : (signal === "WAIT_RECHECK" ? (emaGap > 0 ? "long" : emaGap < 0 ? "short" : "none") : "none")
+    );
 
-    let stopPrice: number | null = null;
-    let invalidationPx: number | null = null;
-
-    if (side === "long" || (signal === "WAIT_RECHECK" && emaGap > 0)) {
-        stopPrice = Math.min(ema20 - atr * 0.5, entryPx - atr * 1.5);
-        invalidationPx = Math.min(ema20 - atr * 1.0, entryPx - atr * 2.0);
-    } else if (side === "short" || (signal === "WAIT_RECHECK" && emaGap < 0)) {
-        stopPrice = Math.max(ema20 + atr * 0.5, entryPx + atr * 1.5);
-        invalidationPx = Math.max(ema20 + atr * 1.0, entryPx + atr * 2.0);
-    }
+    const stopPrice = trendStops?.stopPrice ?? null;
+    const invalidationPx = trendStops?.invalidationPx ?? null;
 
     return {
         signal,
@@ -189,4 +182,36 @@ export function executeTrendRegime(input: EngineV2Input, judgment: MarketJudgmen
             invalidationPx
         }
     };
+}
+
+/**
+ * Pure helper for authoritative trend structural stop calculation.
+ * Zero state mutations, zero logging side effects.
+ */
+export function calculateAuthoritativeTrendStructuralStop(
+    snapshot: { lastPrice?: number | null; atr?: number | null; ema20?: number | null; emaGap?: number | null },
+    side: EngineV2Side
+): { stopPrice: number; invalidationPx: number } | null {
+    const entryPx = Number(snapshot.lastPrice ?? 0);
+    if (!Number.isFinite(entryPx) || entryPx <= 0) return null;
+
+    const emaGap = Number(snapshot.emaGap ?? 0);
+    const atr = Number(snapshot.atr ?? (entryPx * 0.01));
+    const ema20 = typeof snapshot.ema20 === "number" && snapshot.ema20 > 0 ? snapshot.ema20 : entryPx / (1 + emaGap);
+
+    if (side === "long") {
+        const stopPrice = Math.min(ema20 - atr * 0.5, entryPx - atr * 1.5);
+        const invalidationPx = Math.min(ema20 - atr * 1.0, entryPx - atr * 2.0);
+        if (Number.isFinite(stopPrice) && stopPrice > 0 && stopPrice < entryPx && Number.isFinite(invalidationPx) && invalidationPx > 0 && invalidationPx < entryPx) {
+            return { stopPrice, invalidationPx };
+        }
+    } else if (side === "short") {
+        const stopPrice = Math.max(ema20 + atr * 0.5, entryPx + atr * 1.5);
+        const invalidationPx = Math.max(ema20 + atr * 1.0, entryPx + atr * 2.0);
+        if (Number.isFinite(stopPrice) && stopPrice > 0 && stopPrice > entryPx && Number.isFinite(invalidationPx) && invalidationPx > 0 && invalidationPx > entryPx) {
+            return { stopPrice, invalidationPx };
+        }
+    }
+
+    return null;
 }

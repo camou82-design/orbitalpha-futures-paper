@@ -186,7 +186,7 @@ import { detectStairStepStructure } from "./market-judgment/stair-step-detector"
 import { calculateRegimeConfidence } from "./regime-confidence/scorer";
 import { routeToExecutor } from "./engine-router/selector";
 import { executeRangeRegime, rangeContinuationStateMap } from "./executors/range-executor";
-import { executeTrendRegime } from "./executors/trend-executor";
+import { executeTrendRegime, calculateAuthoritativeTrendStructuralStop } from "./executors/trend-executor";
 import { executeTransitionRegime } from "./executors/transition-executor";
 import { calculateRiskSizing } from "./risk-sizing/policy";
 import { generateExplanation } from "./explain/diagnostic";
@@ -3454,20 +3454,21 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let conflictResolutionReason = "no_conflict_or_conditions_unmet";
 
     if (localConflict && zone === "upper") {
-        const stopPrice = execution.stopPrice;
-        const stairStepUpConfirmed = stairStepResult.detected === true && stairStepResult.direction === "UP" && stairStepResult.reclaim_or_rejection_confirmed === true;
-        if (!stairStepUpConfirmed && (stopPrice == null || isNaN(stopPrice) || stopPrice <= 0)) {
-            conflictResolutionAction = "skip";
-            conflictResolutionReason = "stop_price_invalid_or_null";
-            v2DecisionAfterPromotion = "SKIP";
-            v2SideAfterPromotion = "none";
-            v2RejectReasonAfterPromotion = "CONFLICT_STOP_PRICE_NULL";
-            promotionApplied = false;
-            promotionReason = null;
-        } else {
-            // upper zone short
-            if (rangeSideCandidate === "short") {
-                if (reversalConfirmed === true && qualityScore >= 65) {
+        // upper zone short
+        if (rangeSideCandidate === "short") {
+            const stopPrice = execution.stopPrice;
+            const hasValidRangeStop = typeof stopPrice === "number" && Number.isFinite(stopPrice) && stopPrice > 0;
+
+            if (reversalConfirmed === true && qualityScore >= 65) {
+                if (!hasValidRangeStop) {
+                    conflictResolutionAction = "skip";
+                    conflictResolutionReason = "upper_short_stop_price_invalid_or_null";
+                    v2DecisionAfterPromotion = "SKIP";
+                    v2SideAfterPromotion = "none";
+                    v2RejectReasonAfterPromotion = "CONFLICT_STOP_PRICE_NULL";
+                    promotionApplied = false;
+                    promotionReason = null;
+                } else {
                     v2DecisionAfterPromotion = "ENTER";
                     v2SideAfterPromotion = "short";
                     promotionApplied = true;
@@ -3476,47 +3477,84 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     conflictResolvedUpperShort = true;
                     conflictResolutionAction = "enter_short";
                     conflictResolutionReason = "upper_zone_short_reversal_confirmed";
-                    
-                    execMeta.entryReason = "V2_CONFLICT_RESOLVED_UPPER_SHORT";
-                }
-            }
-            
-            // trend long
-            if (!conflictResolvedUpperShort && trendSideCandidate === "long") {
-                const upperBreakoutHold = judgment.metadata?.box_upper_breakout_hold === true || judgment.metadata?.upper_breakout_hold === true;
-                const reclaimConfirmedVal = judgment.metadata?.reclaimConfirmed === true;
-                if ((upperBreakoutHold || reclaimConfirmedVal) && qualityScore >= 67) {
-                    v2DecisionAfterPromotion = "ENTER";
-                    v2SideAfterPromotion = "long";
-                    promotionApplied = true;
-                    promotionReason = "V2_CONFLICT_RESOLVED_TREND_LONG";
-                    v2RejectReasonAfterPromotion = null;
-                    conflictResolvedTrendLong = true;
-                    conflictResolutionAction = "enter_long_probe";
-                    conflictResolutionReason = "trend_long_breakout_hold_or_reclaim_confirmed";
-                    
-                    execMeta.entryReason = "V2_CONFLICT_RESOLVED_TREND_LONG";
-                }
-            }
 
-            // 단순 upper/mid chase long 금지. Confirmed RANGE boundary continuation must not be undone.
-            const continuationPromotionProtected =
-                promotionApplied === true &&
-                promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
-            if (
-                !conflictResolvedUpperShort &&
-                !conflictResolvedTrendLong &&
-                trendSideCandidate === "long" &&
-                !continuationPromotionProtected
-            ) {
-                conflictResolutionAction = "skip";
-                conflictResolutionReason = "chase_long_disallowed_in_upper_zone";
-                v2DecisionAfterPromotion = "SKIP";
-                v2SideAfterPromotion = "none";
-                v2RejectReasonAfterPromotion = "CHASE_LONG_DISALLOWED_UPPER";
-                promotionApplied = false;
-                promotionReason = null;
+                    execMeta.entryReason = "V2_CONFLICT_RESOLVED_UPPER_SHORT";
+                    v2CalculatedInvalidationPx = stopPrice;
+                }
             }
+        }
+
+        // trend long
+        if (!conflictResolvedUpperShort && trendSideCandidate === "long" && !(stairStepResult.detected && stairStepResult.direction === "UP")) {
+            const upperBreakoutHold = judgment.metadata?.box_upper_breakout_hold === true || judgment.metadata?.upper_breakout_hold === true || judgment.diagnostics?.fastTrendShift?.box_upper_breakout_hold === true;
+            const reclaimConfirmedVal = judgment.metadata?.reclaimConfirmed === true || judgment.metadata?.reclaim_confirmed === true || judgment.transitionPhase === "RETEST_CONFIRMED" || judgment.diagnostics?.fastTrendShift?.box_mid_reclaimed === true;
+            if ((upperBreakoutHold || reclaimConfirmedVal) && qualityScore >= 67 && trendOk === true) {
+                const hasSameSidePos = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === "long");
+                const hasOppositeSidePos = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === "short");
+                const canPromoteTrendLong =
+                    v2DecisionBeforePromotion !== "REJECT" &&
+                    hardBlockPresent === false &&
+                    hardControlClear === true &&
+                    paperExecutionReady === true &&
+                    signedExecutionReady === true &&
+                    hasSameSidePos === false &&
+                    hasOppositeSidePos === false &&
+                    riskLongAllow === true &&
+                    allowNewLong === true;
+
+                if (canPromoteTrendLong) {
+                    const trendStops = calculateAuthoritativeTrendStructuralStop(authoritativeInput.snapshot, "long");
+                    const candidateStop = trendStops?.stopPrice ?? trendStops?.invalidationPx ?? null;
+                    const entryPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+                    const isValidTrendStop =
+                        typeof candidateStop === "number" &&
+                        Number.isFinite(candidateStop) &&
+                        candidateStop > 0 &&
+                        entryPrice > 0 &&
+                        candidateStop < entryPrice;
+
+                    if (!isValidTrendStop) {
+                        conflictResolutionAction = "skip";
+                        conflictResolutionReason = "authoritative_trend_stop_invalid_or_missing";
+                        v2DecisionAfterPromotion = "SKIP";
+                        v2SideAfterPromotion = "none";
+                        v2RejectReasonAfterPromotion = "CONFLICT_TREND_STOP_INVALID";
+                        promotionApplied = false;
+                        promotionReason = null;
+                    } else {
+                        v2DecisionAfterPromotion = "ENTER";
+                        v2SideAfterPromotion = "long";
+                        promotionApplied = true;
+                        promotionReason = "V2_CONFLICT_RESOLVED_TREND_LONG";
+                        v2RejectReasonAfterPromotion = null;
+                        conflictResolvedTrendLong = true;
+                        conflictResolutionAction = "enter_long_probe";
+                        conflictResolutionReason = "trend_long_breakout_hold_or_reclaim_confirmed";
+                        v2CalculatedInvalidationPx = candidateStop;
+
+                        execMeta.entryReason = "V2_CONFLICT_RESOLVED_TREND_LONG";
+                    }
+                }
+            }
+        }
+
+        // 단순 upper/mid chase long 금지. Confirmed RANGE boundary continuation must not be undone.
+        const continuationPromotionProtected =
+            promotionApplied === true &&
+            promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
+        if (
+            !conflictResolvedUpperShort &&
+            !conflictResolvedTrendLong &&
+            trendSideCandidate === "long" &&
+            !continuationPromotionProtected
+        ) {
+            conflictResolutionAction = "skip";
+            conflictResolutionReason = "chase_long_disallowed_in_upper_zone";
+            v2DecisionAfterPromotion = "SKIP";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = "CHASE_LONG_DISALLOWED_UPPER";
+            promotionApplied = false;
+            promotionReason = null;
         }
 
         console.info(JSON.stringify({
@@ -3526,10 +3564,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             trend_side_candidate: trendSideCandidate,
             zone,
             reversal_confirmed: reversalConfirmed,
-            upper_breakout_hold: judgment.metadata?.box_upper_breakout_hold === true || judgment.metadata?.upper_breakout_hold === true,
+            upper_breakout_hold: judgment.metadata?.box_upper_breakout_hold === true || judgment.metadata?.upper_breakout_hold === true || judgment.diagnostics?.fastTrendShift?.box_upper_breakout_hold === true,
             reclaim_confirmed: judgment.metadata?.reclaimConfirmed === true,
             quality_score: qualityScore,
-            stop_price: stopPrice,
+            trend_ok: trendOk,
             action: conflictResolutionAction,
             reason: conflictResolutionReason
         }));
@@ -3914,8 +3952,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const isMicroProbePromotion = promotionReason === "CONTINUATION_MICRO_PROBE";
     const isStairStepPromotion = promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
     const isTrendContinuationRevalidatedPromotion = promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
+    const isConflictResolvedTrendLongPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
     const rangeLowerShortMismatch = isRangeRouting && !isMicroProbePromotion && !isStairStepPromotion && !isTrendContinuationRevalidatedPromotion && sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
-    const rangeUpperLongMismatch = isRangeRouting && !isMicroProbePromotion && !isStairStepPromotion && !isTrendContinuationRevalidatedPromotion && sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
+    const rangeUpperLongMismatch = isRangeRouting && !isMicroProbePromotion && !isStairStepPromotion && !isTrendContinuationRevalidatedPromotion && !isConflictResolvedTrendLongPromotion && sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
     const rangeDowngradedHardBlock = rangeSignalDowngraded && !rangeSignalKeptByRelax;
     const entryCandidateHardBlock = !entryCandidate && !promotionApplied;
     const trendPromotionHardBlock = activeEngineRouting === "TREND" && trendOk !== true && sideCandidateBeforeVeto !== "none";
@@ -4463,6 +4502,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const isStairStepPromotion = promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
         const isTrendContinuationRevalidatedPromotion = promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
         const isPolarityReversalMicroProbePromotion = promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE";
+        const isConflictResolvedTrendLongPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
         if (sideFinal === "short" && zone === "lower") {
             const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown || (isStairStepPromotion && sideFinal === "short") || (isTrendContinuationRevalidatedPromotion && sideFinal === "short") || (isPolarityReversalMicroProbePromotion && sideFinal === "short");
             const htfStrongBullish = htfHardBlockReason === "STRONG_BULLISH_HTF_ALIGNMENT";
@@ -4471,10 +4511,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 mismatchReason = "SIDE_ZONE_MISMATCH_LOWER_SHORT";
             }
         } else if (sideFinal === "long" && zone === "upper") {
-            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp || (isStairStepPromotion && sideFinal === "long") || (isTrendContinuationRevalidatedPromotion && sideFinal === "long") || (isPolarityReversalMicroProbePromotion && sideFinal === "long");
+            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp || (isStairStepPromotion && sideFinal === "long") || (isTrendContinuationRevalidatedPromotion && sideFinal === "long") || (isPolarityReversalMicroProbePromotion && sideFinal === "long") || (isConflictResolvedTrendLongPromotion && sideFinal === "long");
             const htfStrongBearish = htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT";
 
-            if (!longException || (htfStrongBearish && !isPolarityReversalMicroProbePromotion)) {
+            if (!longException || (htfStrongBearish && !isPolarityReversalMicroProbePromotion && !isConflictResolvedTrendLongPromotion)) {
                 mismatchReason = "SIDE_ZONE_MISMATCH_UPPER_LONG";
             }
         }
@@ -7794,6 +7834,7 @@ export function adaptV2Input(
         evaluationMode,
         run_cycle_id: runCycleId,
         htf_candles: htfCandlesRef,
+        candles: recentCandles,
         snapshot: {
             lastPrice: snapshot.lastPrice,
             latestCandleClose: snapshot.latestCandleClose,
