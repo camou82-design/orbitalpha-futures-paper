@@ -11,6 +11,7 @@ import {
     LegacyResultAdapter,
     V2CommittedRiskPlan
 } from "./types";
+import { deriveTrendSideCandidate } from "./trend-side-candidate";
 import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
 import { evaluateSameSideLossReentryGate } from "./state/loss-reentry-gate";
 import { applyV2ExitAuthorityInvariants, isExplicitTerminalExitReason } from "./exit/exit-authority-invariant";
@@ -1023,16 +1024,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const exitPreShock = v2State.directionalShockState ?? "NONE";
     const exitPreEmaGap = Number(authoritativeInput.snapshot.emaGap ?? 0);
     const exitPreBoxPos = Number(authoritativeInput.snapshot.boxPos ?? 0.5);
-    const exitPreTrendSideCandidate: "long" | "short" | "none" =
-        exitPreShock === "DOWN"
-            ? "short"
-            : exitPreShock === "UP"
-              ? "long"
-              : exitPreEmaGap < 0
-                ? "short"
-                : exitPreEmaGap > 0
-                  ? "long"
-                  : "none";
+    const exitPreTrendSideCandidate = deriveTrendSideCandidate(exitPreShock, exitPreEmaGap);
     const exitPreRangeZone =
         exitPreBoxPos <= 0.26 ? "lower" : exitPreBoxPos >= 0.74 ? "upper" : "mid";
     const exitPreRangeSideCandidate: "long" | "short" | "none" =
@@ -1507,11 +1499,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const allowNewShort = Boolean((riskSizing.diagnostics as Record<string, unknown> | undefined)?.allow_new_short ?? v2State.shortAllow);
     const riskLongAllow = v2State.longAllow;
     const riskShortAllow = v2State.shortAllow;
-    const trendSideCandidate: EngineV2Side =
-        shock === "DOWN" ? "short" :
-            shock === "UP" ? "long" :
-                emaGap < 0 ? "short" :
-                    emaGap > 0 ? "long" : "none";
+    const trendSideCandidate: EngineV2Side = deriveTrendSideCandidate(shock, emaGap);
     const execMeta = execution.metadata ?? {};
     const readNullableNumber = (...values: unknown[]): number | null => {
         for (const v of values) {

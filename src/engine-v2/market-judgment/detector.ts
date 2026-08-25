@@ -2,6 +2,15 @@ import { EngineV2Input, EngineV2MarketSubtype, MarketJudgmentOutput } from "../t
 import { Candle, classifyRangeZone } from "../../models/types";
 import { emaLastFromCloses, computeSlopesFromCandles } from "../../utils/math";
 import { updateWhipsawObservation, whipsawObservationAuthority } from "./whipsaw-observer";
+import {
+    WHIPSAW_AGED_SOFT_DOWNGRADE_MIN_QUALITY,
+    WHIPSAW_AGED_SOFT_DOWNGRADE_REASON,
+    deriveTrendOk,
+    evaluateWhipsawAgedSoftDowngradeEligible,
+    isDirectionalShockCompatibleWithCandidateSide,
+    isEmaGapAlignedWithTrendSideCandidate
+} from "./whipsaw-aged-soft-downgrade";
+import { deriveTrendSideCandidate } from "../trend-side-candidate";
 function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPhase"] {
     const shock = input.state.directionalShockState ?? "NONE";
     const crashState = String(input.state.crashState ?? "").toUpperCase();
@@ -604,6 +613,7 @@ function evaluateWhipsawShockRecheck(args: {
     htfPolicyReason?: string;
     counterTrendRisk?: boolean;
     macroPolarity?: "BULLISH" | "BEARISH" | "NEUTRAL";
+    polarityMismatch?: boolean;
 }): {
     active: boolean;
     isSoftWatch: boolean;
@@ -635,6 +645,10 @@ function evaluateWhipsawShockRecheck(args: {
     baseReleaseReason: string | null;
     finalReleaseReason: string | null;
     releaseReason: string | null;
+    hardToSoftDowngrade: boolean;
+    downgradeReason: string | null;
+    candidateSide: "long" | "short" | "none";
+    trendOk: boolean;
 } {
     const {
         input,
@@ -648,7 +662,8 @@ function evaluateWhipsawShockRecheck(args: {
         htfEntryPolicy,
         htfPolicyReason,
         counterTrendRisk,
-        macroPolarity
+        macroPolarity,
+        polarityMismatch
     } = args;
     if (regimeFinal === "NO_TRADE" && (noTradeReason === "DATA_NOT_READY" || noTradeReason === "DUMP_PROTECTION")) {
         return {
@@ -681,7 +696,11 @@ function evaluateWhipsawShockRecheck(args: {
             releaseEligible: false,
             baseReleaseReason: null,
             finalReleaseReason: null,
-            releaseReason: null
+            releaseReason: null,
+            hardToSoftDowngrade: false,
+            downgradeReason: null,
+            candidateSide: "none",
+            trendOk: false
         };
     }
 
@@ -776,6 +795,14 @@ function evaluateWhipsawShockRecheck(args: {
         ? (observation.observationAgePassed || observation.recheckTicks >= observation.requiredTicks)
         : reviewingTicks >= observation.requiredTicks;
 
+    const emaGap = Number(sn.emaGap ?? 0);
+    const trendCandidateSide = deriveTrendSideCandidate(directional, emaGap);
+    const trendOkForRelease = deriveTrendOk(sn);
+    const shockOpposesTrendCandidate =
+        (trendCandidateSide === "long" || trendCandidateSide === "short") &&
+        isEmaGapAlignedWithTrendSideCandidate(trendCandidateSide, emaGap) &&
+        !isDirectionalShockCompatibleWithCandidateSide(directional, trendCandidateSide);
+
     // Historical observation markers (must NOT sustain hard-block alone)
     const historicalOnlyHits: string[] = [];
     if (effectiveRecheckTicks >= 2) historicalOnlyHits.push("recheck_repetition");
@@ -815,6 +842,11 @@ function evaluateWhipsawShockRecheck(args: {
 
     const htfContrarianReleaseBlocked = isUpShockContrarian || isDownShockContrarian;
 
+    const opposingShockBlocksHardRelease =
+        shockOpposesTrendCandidate &&
+        trendOkForRelease &&
+        !htfContrarianReleaseBlocked;
+
     const hasActiveEpisode = observation.episodeId != null && observation.recheckTicks >= 1;
     let baseReleaseEligible = false;
     let baseReleaseReason: string | null = null;
@@ -831,7 +863,7 @@ function evaluateWhipsawShockRecheck(args: {
             if (directionConsistentStabilization) {
                 baseReleaseEligible = true;
                 baseReleaseReason = "DIRECTION_CONSISTENT_STABILIZATION";
-            } else if (freshVanished) {
+            } else if (freshVanished && !(freshStructuralHits.length === 0 && microHits.length > 0)) {
                 baseReleaseEligible = true;
                 baseReleaseReason = "FRESH_RISK_EVIDENCE_CLEARED";
             } else if (releasedByConfirmation && (releasedBySwing || releasedByVol || releasedByFailRate)) {
@@ -846,6 +878,11 @@ function evaluateWhipsawShockRecheck(args: {
         }
     }
 
+    if (opposingShockBlocksHardRelease && hasWhipsawEpisode && microHitCount >= 1) {
+        baseReleaseEligible = false;
+        baseReleaseReason = null;
+    }
+
     const finalReleaseEligible = baseReleaseEligible;
     let finalReleaseReason: string | null = null;
 
@@ -857,6 +894,69 @@ function evaluateWhipsawShockRecheck(args: {
 
     if (finalReleaseEligible) {
         // Clean up observer state upon release
+        updateWhipsawObservation({
+            symbol: input.symbol,
+            rawActive: false,
+            directionalShockState: directional,
+            structuralHits: [],
+            now: (input.state as any)?.now ?? Date.now()
+        });
+    }
+
+    let hardToSoftDowngrade = false;
+    let downgradeReason: string | null = null;
+    const agedSoftDowngrade = evaluateWhipsawAgedSoftDowngradeEligible({
+        input,
+        observationAgePassed,
+        hasWhipsawEpisode,
+        freshStructuralHitCount,
+        htfEntryPolicy,
+        polarityMismatch,
+        directionalShockState: directional
+    });
+    const trendOk = agedSoftDowngrade.trendOk;
+    const candidateSide = agedSoftDowngrade.candidateSide;
+
+    // Aged aligned soft downgrade: hard WHIPSAW -> SOFT_WATCH (not ENTER, not full episode delete)
+    if (agedSoftDowngrade.eligible && !finalReleaseEligible && freshStructuralHitCount === 0) {
+        hardToSoftDowngrade = true;
+        downgradeReason = WHIPSAW_AGED_SOFT_DOWNGRADE_REASON;
+        active = false;
+        isSoftWatch = microHitCount >= 1 || rawIsSoftWatch;
+    }
+
+    if (opposingShockBlocksHardRelease && hasWhipsawEpisode && microHitCount >= 1) {
+        active = true;
+        isSoftWatch = false;
+        hardToSoftDowngrade = false;
+        downgradeReason = null;
+    }
+
+    const qualityScore = Number(sn.qualityScore ?? 0);
+    const emaMisalignmentSustainHard =
+        (trendCandidateSide === "long" || trendCandidateSide === "short") &&
+        !isEmaGapAlignedWithTrendSideCandidate(trendCandidateSide, emaGap) &&
+        hasWhipsawEpisode &&
+        microHitCount >= 1 &&
+        !htfContrarianReleaseBlocked;
+
+    const lowQualitySustainHard =
+        hasWhipsawEpisode &&
+        microHitCount >= 1 &&
+        Number.isFinite(qualityScore) &&
+        qualityScore < WHIPSAW_AGED_SOFT_DOWNGRADE_MIN_QUALITY &&
+        !finalReleaseEligible;
+
+    if (emaMisalignmentSustainHard || lowQualitySustainHard) {
+        active = true;
+        isSoftWatch = false;
+        hardToSoftDowngrade = false;
+        downgradeReason = null;
+    }
+
+    // Lifecycle cleanup: no hard/soft whipsaw evidence → drop episode (finite memory)
+    const whipsawEvidenceActive = active || isSoftWatch || candidateRiskActive || rawIsSoftWatch;
+    if (!whipsawEvidenceActive && observation.episodeId != null) {
         updateWhipsawObservation({
             symbol: input.symbol,
             rawActive: false,
@@ -908,7 +1008,11 @@ function evaluateWhipsawShockRecheck(args: {
         releaseEligible: finalReleaseEligible,
         baseReleaseReason,
         finalReleaseReason,
-        releaseReason: finalReleaseReason
+        releaseReason: finalReleaseReason,
+        hardToSoftDowngrade,
+        downgradeReason,
+        candidateSide,
+        trendOk
     };
 }
 
@@ -1404,7 +1508,8 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         htfEntryPolicy,
         htfPolicyReason,
         counterTrendRisk,
-        macroPolarity
+        macroPolarity,
+        polarityMismatch: polarity_mismatch
     });
 
     const fastShift = evaluateFastTrendShift({
@@ -1521,7 +1626,13 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
                 release_eligible: whipsaw.releaseEligible,
                 base_release_reason: whipsaw.baseReleaseReason,
                 final_release_reason: whipsaw.finalReleaseReason,
-                release_reason: whipsaw.releaseReason
+                release_reason: whipsaw.releaseReason,
+                hard_to_soft_downgrade: whipsaw.hardToSoftDowngrade,
+                downgrade_reason: whipsaw.downgradeReason,
+                trend_ok: whipsaw.trendOk,
+                candidate_side: whipsaw.candidateSide,
+                fresh_structural_hit_count: whipsaw.freshStructuralHits.length,
+                micro_hit: whipsaw.hits.filter((h) => h.startsWith("micro_"))
             })
         );
 
@@ -1633,7 +1744,11 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
                 requiredTicks: whipsaw.whipsawRecheckRequiredTicks,
                 resetReason: whipsaw.whipsawCounterResetReason,
                 observationAgePassed: whipsaw.observationAgePassed,
-                finalRecheckConfirmed: whipsaw.finalRecheckConfirmed
+                finalRecheckConfirmed: whipsaw.finalRecheckConfirmed,
+                hardToSoftDowngrade: whipsaw.hardToSoftDowngrade,
+                downgradeReason: whipsaw.downgradeReason,
+                candidateSide: whipsaw.candidateSide,
+                trendOk: whipsaw.trendOk
             },
             early_probe: {
                 allowed: earlyLongProbe.allowed || earlyShortProbe.allowed,

@@ -870,6 +870,10 @@ export interface MarketJudgmentOutput {
             resetReason: string | null;
             observationAgePassed: boolean;
             finalRecheckConfirmed: boolean;
+            hardToSoftDowngrade?: boolean;
+            downgradeReason?: string | null;
+            candidateSide?: "long" | "short" | "none";
+            trendOk?: boolean;
         };
         early_probe?: {
             allowed: boolean;

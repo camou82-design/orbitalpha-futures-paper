@@ -1091,7 +1091,7 @@ function makeBaseInput(
 }
 
 // =========================================================================
-// TEST S — Released episode cannot re-arm from same stale evidence
+// TEST S — Soft-downgrade lifecycle: stale no-rearm, fresh can re-arm, cleanup on stabilization
 // =========================================================================
 {
   clearWhipsawObservationState("BTCUSDT");
@@ -1109,7 +1109,6 @@ function makeBaseInput(
     }
   };
 
-  // Seed episode to 6 ticks under real shock (UP + aligned bullish HTF for clean release)
   for (let i = 1; i <= 6; i++) {
     updateWhipsawObservation({
       symbol: "BTCUSDT",
@@ -1121,13 +1120,69 @@ function makeBaseInput(
     });
   }
 
-  // Release via aligned HTF + cleared fresh danger (mirrors TEST E)
-  const releaseInput = makeBaseInput(
+  // Aged soft downgrade path: aligned UP shock + stale micro only (fresh structural cleared)
+  const softDowngradeInput = makeBaseInput(
     "BTCUSDT",
     {
-      ...staleEvidence,
+      qualityScore: 100,
+      emaGap: 0.0042,
+      trendWeaknessScore: 0.1,
       breakoutFailureRate: 0.1,
       volumeExpansion: 1.1,
+      boxBreakSide: "none",
+      candles: makeMicroUpThenDropCandles(69000),
+      htf_candles: {
+        "5m": mockBullishCandles,
+        "15m": mockBullishCandles,
+        "1h": mockBullishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    { directionalShockState: "UP", longAllow: true, shortAllow: false, paperExecutionReady: true, signedExecutionReady: true, serverTradeEnabled: true, executionReadiness: true, closeOnlyMode: false, killSwitch: false }
+  );
+  const afterSoft = detectMarketRegime(softDowngradeInput);
+  const epAfterSoft = whipsawObservationAuthority.getEpisode("BTCUSDT");
+
+  run(
+    "TEST_S_A_SOFT_DOWNGRADE_NO_HARD",
+    afterSoft.subtype === "WHIPSAW_SOFT_WATCH" &&
+      afterSoft.diagnostics?.whipsaw?.hardToSoftDowngrade === true,
+    `Soft downgrade must clear hard block. subtype=${afterSoft.subtype}, downgrade=${afterSoft.diagnostics?.whipsaw?.hardToSoftDowngrade}`
+  );
+
+  // A: stale micro repeat after soft downgrade must not hard re-arm
+  const rearmAttempt = makeBaseInput("BTCUSDT", staleEvidence, { directionalShockState: "NONE" });
+  const judgmentStale = detectMarketRegime(rearmAttempt);
+  const epAfterStale = whipsawObservationAuthority.getEpisode("BTCUSDT");
+
+  run(
+    "TEST_S_B_STALE_EVIDENCE_NO_HARD_REARM",
+    judgmentStale.subtype !== "WHIPSAW_SHOCK_RECHECK",
+    `Stale-only evidence must not hard re-arm. subtype=${judgmentStale.subtype}, ep=${epAfterStale?.episodeId ?? "null"}`
+  );
+
+  // C: stabilization (no micro, no shock) cleans up episode
+  clearWhipsawObservationState("BTCUSDT");
+  for (let i = 1; i <= 6; i++) {
+    updateWhipsawObservation({
+      symbol: "BTCUSDT",
+      rawActive: true,
+      candidateRiskActive: true,
+      allowNewHardBlockEpisode: true,
+      directionalShockState: "UP",
+      structuralHits: ["micro_up_then_drop", "volume_expansion_ge_2"]
+    });
+  }
+  detectMarketRegime(softDowngradeInput);
+  const stabilizeInput = makeBaseInput(
+    "BTCUSDT",
+    {
+      qualityScore: 100,
+      emaGap: 0.0042,
+      trendWeaknessScore: 0.1,
+      breakoutFailureRate: 0.1,
+      volumeExpansion: 1.1,
+      boxBreakSide: "none",
       candles: mockBullishCandles,
       htf_candles: {
         "5m": mockBullishCandles,
@@ -1136,23 +1191,17 @@ function makeBaseInput(
         "4h": mockBullishCandles
       }
     },
-    { directionalShockState: "UP" }
+    { directionalShockState: "NONE", longAllow: true, shortAllow: false, paperExecutionReady: true, signedExecutionReady: true, serverTradeEnabled: true, executionReadiness: true, closeOnlyMode: false, killSwitch: false }
   );
-  detectMarketRegime(releaseInput);
-
-  const epAfterRelease = whipsawObservationAuthority.getEpisode("BTCUSDT");
-
-  // Next tick: NONE shock + same stale micro + breakout failure
-  const rearmAttempt = makeBaseInput("BTCUSDT", staleEvidence, { directionalShockState: "NONE" });
-  const judgment = detectMarketRegime(rearmAttempt);
-  const epAfterRearm = whipsawObservationAuthority.getEpisode("BTCUSDT");
+  const judgmentStable = detectMarketRegime(stabilizeInput);
+  const epAfterCleanup = whipsawObservationAuthority.getEpisode("BTCUSDT");
 
   run(
-    "TEST_S_RELEASED_EPISODE_CANNOT_REARM_FROM_SAME_STALE_EVIDENCE",
-    epAfterRelease == null &&
-      judgment.subtype !== "WHIPSAW_SHOCK_RECHECK" &&
-      epAfterRearm == null,
-    `Post-release stale evidence must not re-arm. subtype=${judgment.subtype}, epAfterRelease=${epAfterRelease?.episodeId ?? "null"}, epAfterRearm=${epAfterRearm?.episodeId ?? "null"}`
+    "TEST_S_C_STABILIZATION_EPISODE_CLEANUP",
+    epAfterCleanup == null &&
+      judgmentStable.subtype !== "WHIPSAW_SHOCK_RECHECK" &&
+      judgmentStable.subtype !== "WHIPSAW_SOFT_WATCH",
+    `Stabilized market must cleanup episode. subtype=${judgmentStable.subtype}, ep=${epAfterCleanup?.episodeId ?? "null"}`
   );
 }
 
@@ -1200,13 +1249,38 @@ function makeBaseInput(
         "4h": mockBullishCandles
       }
     },
-    { directionalShockState: "UP" }
+    { directionalShockState: "UP", paperExecutionReady: true, signedExecutionReady: true, serverTradeEnabled: true, executionReadiness: true, closeOnlyMode: false, killSwitch: false }
   );
   detectMarketRegime(releaseInput);
+
+  const stabilizeAfterRelease = makeBaseInput(
+    "BTCUSDT",
+    {
+      qualityScore: 100,
+      emaGap: 0.0042,
+      trendWeaknessScore: 0.1,
+      breakoutFailureRate: 0.1,
+      volumeExpansion: 1.1,
+      boxBreakSide: "none",
+      candles: mockBullishCandles,
+      htf_candles: {
+        "5m": mockBullishCandles,
+        "15m": mockBullishCandles,
+        "1h": mockBullishCandles,
+        "4h": mockBullishCandles
+      }
+    },
+    { directionalShockState: "NONE", paperExecutionReady: true, signedExecutionReady: true, serverTradeEnabled: true, executionReadiness: true, closeOnlyMode: false, killSwitch: false }
+  );
+  detectMarketRegime(stabilizeAfterRelease);
+  const epAfterRelease = whipsawObservationAuthority.getEpisode("BTCUSDT");
 
   const freshShockInput = makeBaseInput(
     "BTCUSDT",
     {
+      qualityScore: 100,
+      emaGap: 0.0042,
+      trendWeaknessScore: 0.1,
       breakoutFailureRate: 0.45,
       volumeExpansion: 2.5,
       candles: microCandles,
@@ -1217,7 +1291,7 @@ function makeBaseInput(
         "4h": microCandles
       }
     },
-    { directionalShockState: "UP" }
+    { directionalShockState: "UP", paperExecutionReady: true, signedExecutionReady: true, serverTradeEnabled: true, executionReadiness: true, closeOnlyMode: false, killSwitch: false }
   );
 
   const judgment = detectMarketRegime(freshShockInput);
@@ -1225,8 +1299,11 @@ function makeBaseInput(
 
   run(
     "TEST_T_FRESH_SHOCK_AFTER_RELEASE_CAN_REARM",
-    judgment.subtype === "WHIPSAW_SHOCK_RECHECK" && ep != null && ep.ticks === 1,
-    `Fresh UP shock after release re-arms hard block. subtype=${judgment.subtype}, episode=${ep?.episodeId}, ticks=${ep?.ticks}`
+    epAfterRelease == null &&
+      judgment.subtype === "WHIPSAW_SHOCK_RECHECK" &&
+      ep != null &&
+      ep.ticks === 1,
+    `Fresh UP shock after release re-arms hard block. epAfterRelease=${epAfterRelease?.episodeId ?? "null"}, subtype=${judgment.subtype}, episode=${ep?.episodeId}, ticks=${ep?.ticks}`
   );
 }
 
