@@ -4460,22 +4460,31 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 promotion_reason: promotionReason
             }));
         } else if (v2DecisionAfterPromotion === "ENTER" || promotionApplied) {
-            if (macroPol === "BULLISH" && candidateSide === "short") {
-                v2DecisionAfterPromotion = "HOLD";
-                v2SideAfterPromotion = "none";
-                v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
-                promotionApplied = false;
-                promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
-                expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
-                expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
-            } else if (macroPol === "BEARISH" && candidateSide === "long") {
-                v2DecisionAfterPromotion = "HOLD";
-                v2SideAfterPromotion = "none";
-                v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
-                promotionApplied = false;
-                promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
-                expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
-                expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+            const detectorPolarityProbePreserved =
+                judgment.polarityProbeEligible === true &&
+                judgment.htf_entry_policy === "PROBE_ONLY" &&
+                macroPol === "BULLISH" &&
+                candidateSide === "short" &&
+                !whipsawShockRecheckActive &&
+                judgment.subtype !== "WHIPSAW_SHOCK_RECHECK";
+            if (!detectorPolarityProbePreserved) {
+                if (macroPol === "BULLISH" && candidateSide === "short") {
+                    v2DecisionAfterPromotion = "HOLD";
+                    v2SideAfterPromotion = "none";
+                    v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
+                    promotionApplied = false;
+                    promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
+                    expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
+                    expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+                } else if (macroPol === "BEARISH" && candidateSide === "long") {
+                    v2DecisionAfterPromotion = "HOLD";
+                    v2SideAfterPromotion = "none";
+                    v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
+                    promotionApplied = false;
+                    promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
+                    expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
+                    expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+                }
             }
         }
     }
@@ -5779,6 +5788,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     }));
                 }
 
+                const htfProbeSizeMultiplier =
+                    judgment.polarityProbeEligible === true &&
+                    judgment.htf_entry_policy === "PROBE_ONLY" &&
+                    typeof judgment.htf_size_multiplier === "number" &&
+                    judgment.htf_size_multiplier > 0 &&
+                    judgment.htf_size_multiplier < 1
+                        ? judgment.htf_size_multiplier
+                        : undefined;
+
                 const sizingResult = evaluateEquityAdaptiveSizing({
                     symbol: String(input.symbol),
                     side: sideCand === "short" ? "short" : "long",
@@ -5798,7 +5816,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     marginReserveRatio,
                     roundTripFeeRate: 0,
                     lastPrice: lastPx,
-                    instrumentSizing
+                    instrumentSizing,
+                    htfSizeMultiplier: htfProbeSizeMultiplier
                 });
 
                 equityAdaptiveSizingAuthority = sizingResult;
@@ -6949,7 +6968,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let auditRawMissingCondition: string | null = promotionBlockReason || v2RejectReasonAfterPromotion || expectedMissingCondition || (finalDecision === "SKIP" ? "MIN_QUALITY_NOT_MET" : "NONE");
     
     // Priority Logic for primary_missing_condition (Requirement 2 & 3 & 4)
-    const htfPolarityMismatchReason = (judgment.htf_policy_reason || "").includes("POLARITY_MISMATCH") ? judgment.htf_policy_reason : null;
+    const htfPolarityMismatchReason =
+        judgment.polarityProbeEligible === true
+            ? null
+            : (judgment.htf_policy_reason || "").includes("POLARITY_MISMATCH")
+              ? judgment.htf_policy_reason
+              : null;
     
     // Requirement 4: Shock/Retest/Reclaim check
     let isShockRetestBlock =
@@ -7192,6 +7216,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             htf_requires_stronger_confirmation: judgment.htf_requires_stronger_confirmation ?? false,
             macro_polarity: judgment.macroPolarity ?? "NEUTRAL",
             polarity_mismatch: judgment.polarityMismatch ?? false,
+            polarity_probe_eligible: judgment.polarityProbeEligible ?? false,
             trend_ok: trendOk,
             judgmentShockPhase: judgment.shockPhase,
             judgmentTrendPhase: judgment.trendPhase,

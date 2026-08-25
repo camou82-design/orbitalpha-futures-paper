@@ -286,9 +286,8 @@ function makeTrendRangeSplitInput(
   );
 }
 
-// CASE C — ETH HTF HOLD (contrarian) remains blocked through reconciler
+// CASE C — ETH contrarian qualified short → PROBE_ONLY (not full HOLD block)
 {
-  const nowMs = Date.now();
   const input = makeTrendRangeSplitInput("ETHUSDT", {
     qualityScore: 88,
     directionalShockState: "DOWN",
@@ -298,35 +297,17 @@ function makeTrendRangeSplitInput(
   });
   seedDownShock("ETHUSDT");
   const judgment = detectMarketRegime(input);
-  const bridge = buildV2SnapshotBridge(input.snapshot as any);
-  const envelope = resolveSymbolDecisionEnvelope({
-    symbol: "ETHUSDT" as any,
-    fetchedAt: nowMs,
-    snapshot: bridge,
-    config: makeLiveConfig() as any,
-    state: makeProductionBridge({ directionalShockState: "DOWN" }) as any,
-    legacy: {
-      regime: "RANGE",
-      finalDecision: "SKIP",
-      rejectReason: "none",
-      requiredCostUsd: 0,
-      entryAllowed: false,
-      executorLabel: "range",
-      intentSide: "none",
-      adaptiveOk: true,
-      adaptiveDetail: {}
-    } as any,
-    v2Mode: "engine_v2",
-    evaluationMode: "authoritative",
-    runCycleId: `entry_liveness_eth_hold_${nowMs}`
-  });
+  const { decision } = runEngineV2(input);
 
   run(
-    "CASE_C_ETH_HTF_HOLD_BLOCKED",
-    judgment.htf_entry_policy === "HOLD" &&
-      envelope.authority.decision !== "ENTER" &&
-      envelope.authority.side === "none",
-    `htf_policy=${judgment.htf_entry_policy}, decision=${envelope.authority.decision}, side=${envelope.authority.side}, hard=${envelope.authority.hardBlockReason ?? "none"}`
+    "CASE_C_ETH_CONTRARIAN_PROBE_ONLY_REACHABLE",
+    judgment.htf_entry_policy === "PROBE_ONLY" &&
+      judgment.polarityProbeEligible === true &&
+      judgment.polarityMismatch === true &&
+      decision.decision === "ENTER" &&
+      decision.side === "short" &&
+      (decision.risk?.finalOrderNotionalUsdt ?? 0) > 0,
+    `htf_policy=${judgment.htf_entry_policy}, probe=${judgment.polarityProbeEligible}, decision=${decision.decision}, side=${decision.side}, notional=${decision.risk?.finalOrderNotionalUsdt ?? 0}`
   );
 }
 

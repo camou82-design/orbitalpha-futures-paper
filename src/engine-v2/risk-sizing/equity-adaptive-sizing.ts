@@ -43,6 +43,8 @@ export type EvaluateEquityAdaptiveSizingInput = Readonly<{
     roundTripFeeRate?: number;
     lastPrice: number;
     instrumentSizing?: OkxSwapInstrumentSizing | null;
+    /** HTF PROBE_ONLY sizing cap — applied once to pre-lot notional for ENTRY orders. */
+    htfSizeMultiplier?: number;
 }>;
 
 export type EquityAdaptiveSizingResult = Readonly<{
@@ -70,6 +72,7 @@ export type EquityAdaptiveSizingResult = Readonly<{
     marginCapacityPassed: boolean;
     emergencyCapUsdt: number | null;
     legacyCapSource: string | null;
+    htfSizeMultiplierApplied: number;
 }>;
 
 export function qualityMultiplierFromGrade(grade: string | null | undefined): number | null {
@@ -189,6 +192,7 @@ export function evaluateEquityAdaptiveSizing(
         marginCapacityPassed: false,
         emergencyCapUsdt: emergency.cap,
         legacyCapSource: emergency.legacyCapSource,
+        htfSizeMultiplierApplied: 1,
         ...partial
     });
 
@@ -266,6 +270,32 @@ export function evaluateEquityAdaptiveSizing(
             netRiskBudgetUsdt,
             riskBasedNotionalUsdt,
             preLotNotionalUsdt: 0
+        });
+    }
+
+    const htfSizeMultiplierApplied =
+        input.orderKind === "ENTRY" &&
+        input.htfSizeMultiplier != null &&
+        input.htfSizeMultiplier > 0 &&
+        input.htfSizeMultiplier < 1
+            ? input.htfSizeMultiplier
+            : 1;
+    if (htfSizeMultiplierApplied < 1) {
+        preLotNotionalUsdt = preLotNotionalUsdt * htfSizeMultiplierApplied;
+    }
+
+    if (!(preLotNotionalUsdt > 0)) {
+        return baseFail({
+            blockReason: "HTF_PROBE_SIZE_MULTIPLIER_ZEROED",
+            riskPct,
+            qualityMultiplier: qualityMultiplier ?? 1,
+            riskBudgetUsdt,
+            stopDistancePct,
+            estimatedRoundTripFeeUsdt,
+            netRiskBudgetUsdt,
+            riskBasedNotionalUsdt,
+            preLotNotionalUsdt: 0,
+            htfSizeMultiplierApplied
         });
     }
 
@@ -372,6 +402,7 @@ export function evaluateEquityAdaptiveSizing(
         usableAvailableBalanceUsdt,
         marginCapacityPassed: true,
         emergencyCapUsdt: emergency.cap,
-        legacyCapSource: emergency.legacyCapSource
+        legacyCapSource: emergency.legacyCapSource,
+        htfSizeMultiplierApplied
     };
 }

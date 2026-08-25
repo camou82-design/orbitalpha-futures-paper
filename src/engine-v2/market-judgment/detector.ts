@@ -1511,18 +1511,55 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         htfEntryPolicy = "SHORT_ONLY_OR_NONE";
     }
 
+    const evaluatePolarityProbeEligibleShortShock = (): boolean => {
+        const shockDown =
+            shockPhase === "DOWN_SHOCK" ||
+            String(input.state.directionalShockState ?? "NONE").toUpperCase() === "DOWN";
+        if (!shockDown) return false;
+
+        const emaGap = Number(sn.emaGap ?? 0);
+        const trendWeaknessScore = Number(sn.trendWeaknessScore ?? 1);
+        const qualityScore = Number(sn.qualityScore ?? 0);
+        const trendOk =
+            Number.isFinite(emaGap) &&
+            Number.isFinite(trendWeaknessScore) &&
+            Math.abs(emaGap) >= 0.0004 &&
+            trendWeaknessScore < 0.5 &&
+            emaGap < 0;
+
+        if (!trendOk || qualityScore < 80) return false;
+        if (input.state.serverTradeEnabled === false) return false;
+        if (input.state.closeOnlyMode === true) return false;
+        if (input.state.killSwitch === true) return false;
+        if ((input.state as { reconcileSafeMode?: boolean }).reconcileSafeMode === true) return false;
+        if (input.state.shortAllow === false) return false;
+        if ((input.state as { paperExecutionReady?: boolean }).paperExecutionReady === false) return false;
+
+        return true;
+    };
+
     // Polarity Invariant Check: Ensure policy doesn't hard-contradict macro trend
     const macroPolarity = htfResult.macroPolarity;
     let polarity_mismatch = false;
-    
+    let polarity_probe_eligible = false;
+
     if (macroPolarity === "BULLISH" && htfEntryPolicy === "SHORT_ONLY_OR_NONE") {
         polarity_mismatch = true;
-        htfEntryPolicy = "HOLD"; // Downgrade absolute short-only to HOLD if macro is BULLISH
-        htfPolicyReason = "POLARITY_MISMATCH_BULLISH_MACRO_LIMITS_SHORT_SHOCK";
-        expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+        if (evaluatePolarityProbeEligibleShortShock()) {
+            polarity_probe_eligible = true;
+            htfEntryPolicy = "PROBE_ONLY";
+            htfSizeMultiplier = 0.5;
+            htfRequiresStrongerConfirmation = true;
+            htfPolicyReason = "POLARITY_PROBE_ONLY_SHORT_SHOCK";
+            expectedNextAction = "SMALL_SIZE_PROBE_ALLOWED";
+        } else {
+            htfEntryPolicy = "HOLD";
+            htfPolicyReason = "POLARITY_MISMATCH_BULLISH_MACRO_LIMITS_SHORT_SHOCK";
+            expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+        }
     } else if (macroPolarity === "BEARISH" && htfEntryPolicy === "LONG_ONLY_OR_NONE") {
         polarity_mismatch = true;
-        htfEntryPolicy = "HOLD"; // Downgrade absolute long-only to HOLD if macro is BEARISH
+        htfEntryPolicy = "HOLD";
         htfPolicyReason = "POLARITY_MISMATCH_BEARISH_MACRO_LIMITS_LONG_SHOCK";
         expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
     }
@@ -1534,6 +1571,7 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         raw_policy_before_invariant: shockPhase === "UP_SHOCK" ? "LONG_ONLY_OR_NONE" : (shockPhase === "DOWN_SHOCK" ? "SHORT_ONLY_OR_NONE" : "ALLOW"),
         final_policy: htfEntryPolicy,
         polarity_mismatch,
+        polarity_probe_eligible,
         shock_phase: shockPhase,
         h1_bias: htfBias.h1,
             h4_bias: htfBias.h4,
@@ -1633,6 +1671,11 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         finalSubtypeReason = `HARD_BLOCK: ${whipsaw.hits.join("|")}`;
         transitionPhaseOut = whipsaw.internalTransitionPhase;
         expectedNextActionOut = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
+        if (polarity_probe_eligible) {
+            polarity_probe_eligible = false;
+            htfEntryPolicy = "HOLD";
+            htfPolicyReason = "WHIPSAW_HARD_BLOCKS_POLARITY_PROBE";
+        }
     } else if (whipsaw.isSoftWatch) {
         finalSubtype = "WHIPSAW_SOFT_WATCH";
         finalSubtypeReason = `SOFT_WATCH: ${whipsaw.hits.join("|")} (context: ${whipsaw.contextHits.join("|")})`;
@@ -1849,6 +1892,7 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         macro_source: htfResult.source,
         macroPolarity,
         polarityMismatch: polarity_mismatch,
+        polarityProbeEligible: polarity_probe_eligible,
         daily_bias_actual: htfBias.d1,
         h4_bias_actual: htfBias.h4,
         h1_bias_actual: htfBias.h1,
