@@ -62,7 +62,16 @@ export type V2StateAuthority = Readonly<{
     lossStreaks: Record<string, number>;
     entryQualityProfiles: EngineV2Input["state"]["entryQualityProfiles"];
     stateAuthoritySource: V2StateAuthoritySource;
+    /** Sole open / OKX-resolved management side for the held position (not market candidate). */
+    heldPositionSide: EngineV2Side;
+    /** Alias for heldPositionSide — ledger/OKX management identity. */
+    managementSide: EngineV2Side;
+    /** Entry/routing candidate from signal/emaGap/shock (inferIntentSide). */
+    candidateIntentSide: EngineV2Side;
+    /** @deprecated Use candidateIntentSide — kept for existing consumers. */
     inferredIntentSide: EngineV2Side;
+    /** Diagnostic: held side differs from candidate intent (does not redefine held identity). */
+    hasOppositeToCandidate: boolean;
     liveBalanceReady?: boolean;
     accountEquityUsdt?: number;
     availableBalanceUsdt?: number;

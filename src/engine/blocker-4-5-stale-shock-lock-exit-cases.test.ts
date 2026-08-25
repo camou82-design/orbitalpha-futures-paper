@@ -111,7 +111,11 @@ function makeV2State(
     lossStreaks: {},
     entryQualityProfiles: undefined,
     stateAuthoritySource: "v2_state_authority_from_bridge",
-    inferredIntentSide: "none"
+    heldPositionSide: "none",
+    managementSide: "none",
+    candidateIntentSide: "none",
+    inferredIntentSide: "none",
+    hasOppositeToCandidate: false
   };
   return { ...base, ...overrides };
 }

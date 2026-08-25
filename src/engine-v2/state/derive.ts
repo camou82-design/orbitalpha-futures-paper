@@ -28,7 +28,7 @@ export function clearGlobalShockStates(symbol?: string): void {
     }
 }
 
-function inferIntentSide(input: EngineV2Input): EngineV2Side {
+export function inferIntentSide(input: EngineV2Input): EngineV2Side {
     if (input.symbol === "BTCUSDT") {
         if (input.state.okxActualSide === "long") return "long";
         if (input.state.okxActualSide === "short") return "short";
@@ -63,6 +63,24 @@ function inferIntentSide(input: EngineV2Input): EngineV2Side {
     if (shock === "UP" && side === "short") return "none";
 
     return side;
+}
+
+/** Held/open-position management side: OKX actual first, then sole ledger open side. */
+export function resolveHeldPositionSide(
+    input: EngineV2Input,
+    longPosition: EngineV2Position | null,
+    shortPosition: EngineV2Position | null
+): EngineV2Side {
+    const okx = String(input.state.okxActualSide ?? "").toLowerCase();
+    if (okx === "long") return "long";
+    if (okx === "short") return "short";
+
+    if (longPosition && !shortPosition) return "long";
+    if (shortPosition && !longPosition) return "short";
+    if (longPosition && shortPosition) {
+        return toSideLower(longPosition);
+    }
+    return "none";
 }
 
 function toSideLower(p: EngineV2Position): "long" | "short" | "none" {
@@ -122,29 +140,24 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
     const currentPositions = rawPositions.filter((p) => p != null);
     const symbol = input.symbol;
     const symbolPositions = currentPositions.filter((p) => p.symbol === symbol);
-    const inferredIntentSide = inferIntentSide(input);
+    const candidateIntentSide = inferIntentSide(input);
     const longPosition = symbolPositions.find((p) => toSideLower(p) === "long") ?? null;
     const shortPosition = symbolPositions.find((p) => toSideLower(p) === "short") ?? null;
     const longStage = longPosition ? Math.max(1, Number(longPosition.entryStage ?? 1)) : 0;
     const shortStage = shortPosition ? Math.max(1, Number(shortPosition.entryStage ?? 1)) : 0;
-    const sameSidePosition =
-        inferredIntentSide === "long"
-            ? longPosition
-            : inferredIntentSide === "short"
-                ? shortPosition
-                : null;
-    const oppositeSidePosition =
-        inferredIntentSide === "long"
-            ? shortPosition
-            : inferredIntentSide === "short"
-                ? longPosition
-                : null;
-    const currentStage =
-        inferredIntentSide === "long"
-            ? longStage
-            : inferredIntentSide === "short"
-                ? shortStage
-                : 0;
+    const heldPositionSide = resolveHeldPositionSide(input, longPosition, shortPosition);
+    const managementSide = heldPositionSide;
+    const heldPositionState = resolvePositionStateForSide(
+        { longPosition, shortPosition, longStage, shortStage } as V2StateAuthority,
+        heldPositionSide
+    );
+    const sameSidePosition = heldPositionState.sameSidePosition;
+    const oppositeSidePosition = heldPositionState.oppositeSidePosition;
+    const currentStage = heldPositionState.currentStage;
+    const hasOppositeToCandidate =
+        heldPositionSide !== "none" &&
+        candidateIntentSide !== "none" &&
+        heldPositionSide !== candidateIntentSide;
     const marketSnapshotReady =
         input.snapshot != null &&
         Number.isFinite(input.snapshot.lastPrice) &&
@@ -169,8 +182,8 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
         shortStage,
         sameSidePosition,
         oppositeSidePosition,
-        hasSameSidePosition: sameSidePosition != null,
-        hasOppositeSidePosition: oppositeSidePosition != null,
+        hasSameSidePosition: heldPositionState.hasSameSidePosition,
+        hasOppositeSidePosition: heldPositionState.hasOppositeSidePosition,
         currentStage,
         positionStateReady,
         marketSnapshotReady,
@@ -410,7 +423,11 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
         lossStreaks: input.state.lossStreaks ?? {},
         entryQualityProfiles: input.state.entryQualityProfiles,
         stateAuthoritySource: "v2_state_authority_from_bridge",
-        inferredIntentSide,
+        heldPositionSide,
+        managementSide,
+        candidateIntentSide,
+        inferredIntentSide: candidateIntentSide,
+        hasOppositeToCandidate,
         liveBalanceReady: input.state.liveBalanceReady,
         accountEquityUsdt: input.state.accountEquityUsdt,
         availableBalanceUsdt: input.state.availableBalanceUsdt,
