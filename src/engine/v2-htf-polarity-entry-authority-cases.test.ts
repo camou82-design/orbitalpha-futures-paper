@@ -308,12 +308,18 @@ function makeProbeInput(opts: ProbeInputOpts) {
   else globalShockStates.delete("BTCUSDT");
 
   const bridge = buildV2SnapshotBridge(snap as any);
+  const cycleNow = Date.now();
   return adaptV2Input(
     "BTCUSDT",
-    Date.now(),
+    cycleNow,
     bridge as any,
     makeLiveConfig() as any,
-    makeProductionBridge({ directionalShockState: opts.directionalShockState }) as any,
+    makeProductionBridge({
+      directionalShockState: opts.directionalShockState,
+      balanceFetchedAt: cycleNow,
+      positionsFetchedAt: cycleNow,
+      pendingOrdersFetchedAt: cycleNow
+    }) as any,
     { decision: { final_decision: "SKIP" } } as any,
     candles,
     "authoritative",
@@ -490,10 +496,15 @@ let alignedBaselineNotional = 0;
 
   const envelope = resolveSymbolDecisionEnvelope({
     symbol: "BTCUSDT" as any,
-    fetchedAt: Date.now(),
+    fetchedAt: input.now,
     snapshot: buildV2SnapshotBridge(input.snapshot as any),
     config: makeLiveConfig() as any,
-    state: makeProductionBridge({ directionalShockState: "UP" }) as any,
+    state: makeProductionBridge({
+      directionalShockState: "UP",
+      balanceFetchedAt: input.now,
+      positionsFetchedAt: input.now,
+      pendingOrdersFetchedAt: input.now
+    }) as any,
     legacy: {
       regime: "RANGE",
       finalDecision: "SKIP",
@@ -531,10 +542,15 @@ let alignedBaselineNotional = 0;
 
   const envelope = resolveSymbolDecisionEnvelope({
     symbol: "BTCUSDT" as any,
-    fetchedAt: Date.now(),
+    fetchedAt: input.now,
     snapshot: buildV2SnapshotBridge(input.snapshot as any),
     config: makeLiveConfig() as any,
-    state: makeProductionBridge({ directionalShockState: "NONE" }) as any,
+    state: makeProductionBridge({
+      directionalShockState: "NONE",
+      balanceFetchedAt: input.now,
+      positionsFetchedAt: input.now,
+      pendingOrdersFetchedAt: input.now
+    }) as any,
     legacy: {
       regime: "RANGE",
       finalDecision: "SKIP",
@@ -601,12 +617,19 @@ let alignedBaselineNotional = 0;
   };
   const bridge = buildV2SnapshotBridge(snap as any);
   (bridge as any).boxBreakSide = "lower";
+  const cycleNow = Date.now();
   const input = adaptV2Input(
     "BTCUSDT",
-    Date.now(),
+    cycleNow,
     bridge as any,
     makeLiveConfig() as any,
-    makeProductionBridge({ directionalShockState: "DOWN", crashState: "ALERT" }) as any,
+    makeProductionBridge({
+      directionalShockState: "DOWN",
+      crashState: "ALERT",
+      balanceFetchedAt: cycleNow,
+      positionsFetchedAt: cycleNow,
+      pendingOrdersFetchedAt: cycleNow
+    }) as any,
     { decision: { final_decision: "SKIP" } } as any,
     microCandles,
     "authoritative",
@@ -653,19 +676,24 @@ let alignedBaselineNotional = 0;
     `mismatch=${judgment.polarityMismatch}, policy=${judgment.htf_entry_policy}, mult=${judgment.htf_size_multiplier}, notional=${probeNotional}, baseline=${alignedBaselineNotional}`
   );
 
-  const nowMs = Date.now();
   const input = makeProbeInput({
     qualityScore: 85,
     boxPos: 0.5,
     directionalShockState: "DOWN",
     htfMode: "bullish_conflict"
   });
+  const cycleNow = input.now;
   const envelope = resolveSymbolDecisionEnvelope({
     symbol: "BTCUSDT" as any,
-    fetchedAt: nowMs,
+    fetchedAt: cycleNow,
     snapshot: buildV2SnapshotBridge(input.snapshot as any),
     config: makeLiveConfig() as any,
-    state: makeProductionBridge({ directionalShockState: "DOWN" }) as any,
+    state: makeProductionBridge({
+      directionalShockState: "DOWN",
+      balanceFetchedAt: cycleNow,
+      positionsFetchedAt: cycleNow,
+      pendingOrdersFetchedAt: cycleNow
+    }) as any,
     legacy: {
       regime: "RANGE",
       finalDecision: "SKIP",
@@ -679,7 +707,7 @@ let alignedBaselineNotional = 0;
     } as any,
     v2Mode: "engine_v2",
     evaluationMode: "authoritative",
-    runCycleId: `htf_polarity_reconciler_probe_${nowMs}`
+    runCycleId: `htf_polarity_reconciler_probe_${cycleNow}`
   });
 
   run(
