@@ -21038,6 +21038,8 @@ export class PaperEngine {
               tpRequired: preEntryPlan.tpRequired,
               slPrice: preEntryPlan.slPrice,
               tpPrice: preEntryPlan.tpPrice,
+              rawSlPrice: stopPrice,
+              rawTpPrice: initialTpForRecord ?? null,
               slValid: preEntryPlan.slValid,
               tpValid: preEntryPlan.tpValid,
               directionValid: preEntryPlan.directionValid,
@@ -21055,6 +21057,10 @@ export class PaperEngine {
             });
             continue;
           }
+
+          const submitStopPrice = preEntryPlan.slPrice ?? stopPrice;
+          const submitTakeProfitPrice =
+            preEntryPlan.tpPrice != null ? preEntryPlan.tpPrice : initialTpForRecord;
 
           // Atomic Execution Key Claim immediately prior to OKX signed submit
           const v2EntryKey = `v2entry:${sym}:${intentSide}:${executionSnapshot.runCycleId}`;
@@ -21089,8 +21095,8 @@ export class PaperEngine {
             appliedLeverage: authority.appliedLeverage ?? null,
             marketRegime: authority.regime ?? null,
             entryPrice: submitEntryPrice,
-            stopPrice,
-            takeProfitPrice: initialTpForRecord,
+            stopPrice: submitStopPrice,
+            takeProfitPrice: submitTakeProfitPrice,
             paperExecutionReady: executionSnapshot.paperReady,
             stageMarginKrw: authority.stageMarginKrw ?? null,
             exposureNotionalKrw: authority.exposureNotionalKrw ?? null,
@@ -21181,7 +21187,7 @@ export class PaperEngine {
                   instId: instIdForEntry,
                   authority_source: authority.source,
                   intended_notional_usdt: v2EntrySizeUsd,
-                  stopPrice,
+                  stopPrice: submitStopPrice,
                   createdAt: Date.now(),
                   submittedAt: Date.now(),
                   status: "ENTRY_ORDER_PENDING",
@@ -21242,8 +21248,8 @@ export class PaperEngine {
               exchangeFilledSize: submit.fillSize ?? 0,
               entryProtectionUntil: Date.now() + 120_000,
               realizedPnl: 0,
-              stopPrice,
-              targetPrice1: initialTpForRecord,
+              stopPrice: submitStopPrice,
+              targetPrice1: submitTakeProfitPrice,
               strategyVersion: entryIdentity.effectiveStrategyVersion,
               sourceSignal: entryIdentity.effectiveSourceSignal,
               authoritySourceAtEntry: authority.source,

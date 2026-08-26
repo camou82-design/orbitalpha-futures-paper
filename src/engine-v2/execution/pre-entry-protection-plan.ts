@@ -1,3 +1,4 @@
+import { normalizePxToTickSz } from "./entry-order-type";
 import { shouldAttachFullPositionProtectiveTp } from "./protective-tp-authority";
 import type { MarketRegime } from "../../strategy/market-regime-detector";
 
@@ -15,13 +16,21 @@ export type PreEntryProtectionPlanResult = Readonly<{
     tickRounded: boolean;
 }>;
 
-function roundToTick(px: number, tickSz: number): number {
-    if (!Number.isFinite(tickSz) || tickSz <= 0) return px;
-    return Math.round(px / tickSz) * tickSz;
-}
-
 function isFinitePositive(px: unknown): px is number {
     return typeof px === "number" && Number.isFinite(px) && px > 0;
+}
+
+function isTickCompliant(px: number, tickSz: number): boolean {
+    if (!Number.isFinite(tickSz) || tickSz <= 0) return true;
+    const normalized = normalizePxToTickSz(px, tickSz);
+    return Math.abs(px - normalized) <= tickSz * 0.001;
+}
+
+function normalizeProtectionPx(rawPx: number | null, tickSz: number): number | null {
+    if (rawPx == null) return null;
+    if (!(Number.isFinite(tickSz) && tickSz > 0)) return rawPx;
+    const normalized = normalizePxToTickSz(rawPx, tickSz);
+    return isFinitePositive(normalized) ? normalized : null;
 }
 
 export function evaluatePreEntryProtectionPlan(input: Readonly<{
@@ -47,8 +56,11 @@ export function evaluatePreEntryProtectionPlan(input: Readonly<{
     });
     const tpRequired = tpEval.fullPositionTpRequired;
 
-    const slPrice = isFinitePositive(input.slPrice) ? input.slPrice : null;
-    const tpPrice = isFinitePositive(input.tpPrice) ? input.tpPrice : null;
+    const tickSz = input.tickSz ?? 0;
+    const rawSlPrice = isFinitePositive(input.slPrice) ? input.slPrice : null;
+    const rawTpPrice = isFinitePositive(input.tpPrice) ? input.tpPrice : null;
+    const slPrice = normalizeProtectionPx(rawSlPrice, tickSz);
+    const tpPrice = normalizeProtectionPx(rawTpPrice, tickSz);
     const entryRef = input.entryReferencePrice;
 
     let slValid = slPrice != null;
@@ -56,24 +68,31 @@ export function evaluatePreEntryProtectionPlan(input: Readonly<{
     let directionValid = false;
     let tickRounded = true;
 
-    if (slValid && tpValid && slPrice != null && entryRef > 0) {
-        if (input.side === "long") {
-            directionValid = slPrice < entryRef && (!tpRequired || (tpPrice != null && tpPrice > entryRef));
-            if (tpRequired && tpPrice != null && slPrice >= tpPrice) directionValid = false;
-        } else {
-            directionValid = slPrice > entryRef && (!tpRequired || (tpPrice != null && tpPrice < entryRef));
-            if (tpRequired && tpPrice != null && slPrice <= tpPrice) directionValid = false;
-        }
+    if (tickSz > 0) {
+        if (rawSlPrice != null && slPrice == null) tickRounded = false;
+        if (rawTpPrice != null && tpPrice == null) tickRounded = false;
+        if (slPrice != null && !isTickCompliant(slPrice, tickSz)) tickRounded = false;
+        if (tpPrice != null && !isTickCompliant(tpPrice, tickSz)) tickRounded = false;
     }
 
-    const tickSz = input.tickSz ?? 0;
-    if (tickSz > 0 && slPrice != null) {
-        const roundedSl = roundToTick(slPrice, tickSz);
-        if (Math.abs(roundedSl - slPrice) > tickSz * 0.001) tickRounded = false;
-    }
-    if (tickSz > 0 && tpPrice != null) {
-        const roundedTp = roundToTick(tpPrice, tickSz);
-        if (Math.abs(roundedTp - tpPrice) > tickSz * 0.001) tickRounded = false;
+    if (slValid && tpValid && slPrice != null && entryRef > 0) {
+        if (input.side === "long") {
+            directionValid =
+                slPrice < entryRef &&
+                (!tpRequired || (tpPrice != null && tpPrice > entryRef));
+            if (tpRequired && tpPrice != null && slPrice >= tpPrice) directionValid = false;
+        } else {
+            directionValid =
+                slPrice > entryRef &&
+                (!tpRequired || (tpPrice != null && tpPrice < entryRef));
+            if (tpRequired && tpPrice != null && slPrice <= tpPrice) directionValid = false;
+        }
+
+        const collapseEpsilon = tickSz > 0 ? tickSz * 0.5 : 1e-8;
+        if (Math.abs(slPrice - entryRef) <= collapseEpsilon) directionValid = false;
+        if (tpRequired && tpPrice != null && Math.abs(tpPrice - entryRef) <= collapseEpsilon) {
+            directionValid = false;
+        }
     }
 
     let blockReason: string | null = null;
