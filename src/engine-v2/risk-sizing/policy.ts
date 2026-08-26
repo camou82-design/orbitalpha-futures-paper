@@ -225,8 +225,20 @@ export function calculateRiskSizing(
         sizeMultiplier *= 0.1; // Scouting mode is forced to 10% size
     }
 
-    if (judgment.subtype === "EARLY_LONG_PROBE" || judgment.subtype === "EARLY_SHORT_PROBE") {
-        sizeMultiplier = judgment.counter_trend_risk ? 0.22 : 0.32;
+    const isRangeProbeSubtype =
+        judgment.subtype === "EARLY_LONG_PROBE" ||
+        judgment.subtype === "EARLY_SHORT_PROBE" ||
+        judgment.subtype === "FAST_TREND_SHIFT";
+    const isRangeProbeInitialSizing = isRangeProbeSubtype && currentStage <= 0 && !isAddOn;
+
+    if (isRangeProbeSubtype) {
+        const probeIntent =
+            judgment.subtype === "FAST_TREND_SHIFT"
+                ? executor.baseSizeIntent > 0
+                    ? executor.baseSizeIntent
+                    : (judgment.diagnostics?.fastTrendShift?.baseSizeIntent ?? 0.32)
+                : 0.32;
+        sizeMultiplier = judgment.counter_trend_risk ? 0.22 : probeIntent;
     }
 
     // Confidence adjustment
@@ -253,7 +265,12 @@ export function calculateRiskSizing(
     let appliedLeverage = FIXED_LEVERAGE_10X;
     let stageMarginKrw = Math.max(0, baseStageMarginKrw * sizeMultiplier);
     if (judgment.regime === "RANGE") {
-        stageMarginKrw = currentStage <= 0 ? 140_000 : currentStage === 1 ? 80_000 : 40_000;
+        const rangeStageBaseKrw = currentStage <= 0 ? 140_000 : currentStage === 1 ? 80_000 : 40_000;
+        if (isRangeProbeInitialSizing) {
+            stageMarginKrw = Math.max(0, rangeStageBaseKrw * sizeMultiplier);
+        } else {
+            stageMarginKrw = rangeStageBaseKrw;
+        }
     } else if (shockActive) {
         stageMarginKrw = currentStage <= 0 ? 108_000 : 0;
         if (currentStage > 0) {
@@ -379,7 +396,9 @@ export function calculateRiskSizing(
         exposure_notional_krw: effectiveNotional,
         equity_multiple: accountEquityKrw > 0 ? effectiveNotional / accountEquityKrw : 0,
         wait_recheck: executor.signal === "WAIT_RECHECK",
-        soft_warning_reason: executor.signal === "WAIT_RECHECK" ? "WAIT_RECHECK" : null
+        soft_warning_reason: executor.signal === "WAIT_RECHECK" ? "WAIT_RECHECK" : null,
+        range_probe_sizing_applied: isRangeProbeInitialSizing,
+        range_probe_size_intent: isRangeProbeInitialSizing ? sizeMultiplier : null
     };
     return {
         baseStageMarginKrw,
