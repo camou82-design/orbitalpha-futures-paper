@@ -4001,7 +4001,92 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         isTrendContinuationRevalidatedPromotion ||
         isTrendQualifiedFinalPromotion;
     const rangeLowerShortMismatch = isRangeRouting && !rangeZoneVetoExempt && !isTrendAuthorityCandidate && sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
-    const rangeUpperLongMismatch = isRangeRouting && !rangeZoneVetoExempt && !isTrendAuthorityCandidate && !isConflictResolvedTrendLongPromotion && sideCandidateBeforeVeto === "long" && (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
+    const execMetaRecord = execMeta as Record<string, unknown>;
+    const nativeExecutorFastProbeCoverage =
+        nativeExecutorEnterAuthority &&
+        (judgment.subtype === "FAST_TREND_SHIFT" ||
+            judgment.subtype === "EARLY_LONG_PROBE" ||
+            judgment.subtype === "EARLY_SHORT_PROBE" ||
+            execMetaRecord.fast_trend_shift === true ||
+            execMetaRecord.early_probe === true);
+    const judgmentMetaForNativeUpper = (judgment.metadata ?? {}) as Record<string, unknown>;
+    const continuationStateForNativeUpper = rangeContinuationStateMap.get(String(input.symbol));
+    const hasSameSidePositionForNativeUpper = v2State.currentPositions.some(
+        (p) => p.symbol === input.symbol && String(p.side).toLowerCase() === "long"
+    );
+    const hasOppositeSidePositionForNativeUpper = v2State.currentPositions.some(
+        (p) => p.symbol === input.symbol && String(p.side).toLowerCase() === "short"
+    );
+    const nativeUpperBreakoutEvalCtx: RangeBoundaryContinuationContext = {
+        trendSideCandidate: "long",
+        zone,
+        boxBreakSide,
+        boxLow: Number(authoritativeInput.snapshot.boxLow ?? 0),
+        boxHigh: Number(authoritativeInput.snapshot.boxHigh ?? 0),
+        closedClose:
+            typeof authoritativeInput.snapshot.closedClose === "number"
+                ? authoritativeInput.snapshot.closedClose
+                : null,
+        lastPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0),
+        previousConfirmedBoxLow: continuationStateForNativeUpper?.previousConfirmedBoxLow ?? null,
+        previousConfirmedBoxHigh: continuationStateForNativeUpper?.previousConfirmedBoxHigh ?? null,
+        emaGap,
+        htfEntryPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+        htfRequiresStrongerConfirmation: judgment.htf_requires_stronger_confirmation === true,
+        counterTrendRisk: judgment.counter_trend_risk === true,
+        riskLongAllow,
+        riskShortAllow,
+        allowNewLong,
+        allowNewShort,
+        whipsawShockRecheckActive,
+        hardBlockPresent,
+        paperExecutionReady,
+        signedExecutionReady,
+        hasSameSidePosition: hasSameSidePositionForNativeUpper,
+        hasOppositeSidePosition: hasOppositeSidePositionForNativeUpper,
+        judgmentSubtype: String(judgment.subtype ?? ""),
+        rangePhase: judgment.rangePhase ?? null,
+        transitionPhase: judgment.transitionPhase ?? null,
+        continuationDirection:
+            typeof execMetaRecord.continuationDirection === "string"
+                ? String(execMetaRecord.continuationDirection)
+                : continuationStateForNativeUpper?.direction ?? null,
+        continuationPhase:
+            typeof execMetaRecord.continuationPhase === "string"
+                ? String(execMetaRecord.continuationPhase)
+                : continuationStateForNativeUpper?.phase ?? null,
+        retestConfirmed:
+            execMetaRecord.retest_confirmed === true || judgmentMetaForNativeUpper.retestConfirmed === true,
+        retestTouched:
+            execMetaRecord.retestTouched === true || judgmentMetaForNativeUpper.retestTouched === true,
+        retestRejected:
+            execMetaRecord.retestRejected === true || judgmentMetaForNativeUpper.retestRejected === true,
+        reversalConfirmed,
+        execReason: typeof execution.reason === "string" ? execution.reason : null,
+        lateChaseBlocked: execMetaRecord.late_chase_blocked === true,
+        retestRequired: execMetaRecord.retest_required === true
+    };
+    const nativeUpperBreakoutContinuationEval = evaluateUpperBreakoutLongConfirmed(nativeUpperBreakoutEvalCtx);
+    const nativeExecutorUpperBreakoutConfirmed =
+        nativeExecutorEnterAuthority === true &&
+        nativeExecutorFastProbeCoverage === true &&
+        v2SideBeforePromotion === "long" &&
+        isRangeRouting &&
+        zone === "upper" &&
+        nativeUpperBreakoutContinuationEval.confirmed === true;
+    const nativeExecutorUpperBreakoutConfirmationSource =
+        nativeExecutorUpperBreakoutConfirmed
+            ? "evaluateUpperBreakoutLongConfirmed"
+            : nativeUpperBreakoutContinuationEval.holdReason ?? null;
+    const rangeUpperLongMismatchBeforeExemption =
+        isRangeRouting &&
+        !rangeZoneVetoExempt &&
+        !isTrendAuthorityCandidate &&
+        !isConflictResolvedTrendLongPromotion &&
+        sideCandidateBeforeVeto === "long" &&
+        (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
+    const rangeUpperLongMismatch =
+        rangeUpperLongMismatchBeforeExemption && !nativeExecutorUpperBreakoutConfirmed;
     // PROBE_ONLY + polarityProbeEligible exemption: an executor ENTER under HTF PROBE_ONLY
     // with confirmed polarity probe eligibility must not be blocked by a range signal downgrade.
     // The HTF probe authority already accounts for the reduced sizing (htf_size_multiplier).
@@ -4016,14 +4101,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         !nativeExecutorEnterAuthority;
     const entryCandidateHardBlock =
         !entryCandidate && !promotionApplied && !nativeExecutorEnterAuthority;
-    const execMetaRecord = execMeta as Record<string, unknown>;
-    const nativeExecutorFastProbeCoverage =
-        nativeExecutorEnterAuthority &&
-        (judgment.subtype === "FAST_TREND_SHIFT" ||
-            judgment.subtype === "EARLY_LONG_PROBE" ||
-            judgment.subtype === "EARLY_SHORT_PROBE" ||
-            execMetaRecord.fast_trend_shift === true ||
-            execMetaRecord.early_probe === true);
     const trendPromotionHardBlock = activeEngineRouting === "TREND" && trendOk !== true && sideCandidateBeforeVeto !== "none";
     const rangeMidConservativeBlock =
         rangeContextActive &&
@@ -4068,6 +4145,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         range_downgraded_hard_block: rangeDowngradedHardBlock,
         entry_candidate_hard_block: entryCandidateHardBlock,
         native_fast_probe_coverage: nativeExecutorFastProbeCoverage,
+        native_executor_upper_breakout_confirmed: nativeExecutorUpperBreakoutConfirmed,
+        native_executor_upper_breakout_confirmation_source: nativeExecutorUpperBreakoutConfirmationSource,
+        range_upper_long_mismatch_before_exemption: rangeUpperLongMismatchBeforeExemption,
+        range_upper_long_mismatch_after_exemption: rangeUpperLongMismatch,
         range_mid_conservative_block: rangeMidConservativeBlock,
         veto_reason_pre_apply: vetoReason,
         veto_mutation_stage: "pre_veto_apply"
