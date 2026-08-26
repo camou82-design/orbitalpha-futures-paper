@@ -205,7 +205,8 @@ import {
     RISK_PER_TRADE_PCT,
     MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE,
     MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,
-    MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE
+    MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE,
+    resolveEffectiveLiveOrderNotionalCap
 } from "../engine-v2/risk-sizing/equity-adaptive-sizing";
 import { buildProtectiveOrderMatchProof, protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
 import {
@@ -11899,6 +11900,10 @@ export class PaperEngine {
       available_balance_usdt: this.okxAvailableBalanceUsdt,
       ...this.okxAuthProofContext()
     };
+    const liveCapResolution = resolveEffectiveLiveOrderNotionalCap({
+      emergencyCapUsdt: this.config.okxLiveEmergencyMaxOrderNotionalUsdt,
+      legacyStaticCapUsdt: this.config.okxLiveMaxOrderNotionalUsdt
+    });
 
     const rawSymbolStr = String(input.symbol);
     const clOrdId_alnum_only = /^[A-Za-z0-9]+$/.test(input.clOrdId);
@@ -12134,10 +12139,7 @@ export class PaperEngine {
       const okx_available_balance_usdt = this.okxAvailableBalanceUsdt;
 
       // 3. Dynamic Capping (Execution Reality)
-      // 3. Dynamic Capping (Execution Reality)
-      let static_safety_cap =
-        this.config.okxLiveEmergencyMaxOrderNotionalUsdt ??
-        this.config.okxLiveMaxOrderNotionalUsdt;
+      let static_safety_cap = liveCapResolution.effectiveLiveCapUsdt;
 
       // 3.5 Leverage Sync for V2
       if (input.authoritySource === "v2" && input.appliedLeverage != null && okx_confirmed_leverage != null && okx_confirmed_leverage !== input.appliedLeverage) {
@@ -12208,6 +12210,9 @@ export class PaperEngine {
         okx_dynamic_notional_cap_usdt,
         final_submitted_notional_usdt,
         final_size_source,
+        legacy_static_cap_usdt: liveCapResolution.legacyStaticCapUsdt,
+        emergency_cap_usdt: liveCapResolution.emergencyCapUsdt,
+        effective_live_cap_usdt: liveCapResolution.effectiveLiveCapUsdt,
         static_safety_cap,
         static_cap_enabled: this.config.okxLiveStaticNotionalCapEnabled,
         static_cap_skipped_for_v2_authority: skipStaticCapForV2Authority,
@@ -12627,10 +12632,10 @@ export class PaperEngine {
         input.authoritySource === "v2"
           ? (input.orderNotionalUsdt ?? input.desiredNotionalUsdt ?? finalOrderNotionalUsdt)
           : null,
-      legacy_static_safety_cap_usdt:
-        this.config.okxLiveEmergencyMaxOrderNotionalUsdt ??
-        this.config.okxLiveMaxOrderNotionalUsdt ??
-        null,
+      legacy_static_safety_cap_usdt: liveCapResolution.legacyStaticCapUsdt,
+      emergency_cap_usdt: liveCapResolution.emergencyCapUsdt,
+      effective_live_cap_usdt: liveCapResolution.effectiveLiveCapUsdt,
+      final_submitted_notional_usdt: finalOrderNotionalUsdt,
       formula_notional_usdt: input.reduceOnly === true && reduceUnitsForProof ? reduceUnitsForProof.notionalUsd : formulaNotionalUsdt,
       formula_match:
         input.reduceOnly === true && reduceUnitsForProof
@@ -20808,18 +20813,15 @@ export class PaperEngine {
             ? authority.exposureNotionalKrw / PAPER_LEDGER_KRW_NOTIONAL_PER_USD
             : marginUsdt * (authority.appliedLeverage ?? 10);
 
-        const emergencyCapUsdt =
-          typeof this.config.okxLiveEmergencyMaxOrderNotionalUsdt === "number" &&
-          this.config.okxLiveEmergencyMaxOrderNotionalUsdt > 0
-            ? this.config.okxLiveEmergencyMaxOrderNotionalUsdt
-            : typeof this.config.okxLiveMaxOrderNotionalUsdt === "number" &&
-                this.config.okxLiveMaxOrderNotionalUsdt > 0
-              ? this.config.okxLiveMaxOrderNotionalUsdt
-              : null;
+        const liveCapResolution = resolveEffectiveLiveOrderNotionalCap({
+          emergencyCapUsdt: this.config.okxLiveEmergencyMaxOrderNotionalUsdt,
+          legacyStaticCapUsdt: this.config.okxLiveMaxOrderNotionalUsdt
+        });
+        const effectiveLiveCapUsdt = liveCapResolution.effectiveLiveCapUsdt;
 
         const v2OrderNotionalUsdt =
-          emergencyCapUsdt != null
-            ? Math.min(authorityNotionalUsdt, emergencyCapUsdt)
+          effectiveLiveCapUsdt != null
+            ? Math.min(authorityNotionalUsdt, effectiveLiveCapUsdt)
             : authorityNotionalUsdt;
         let v2EntrySizeUsd = v2OrderNotionalUsdt;
         const symS = String(first.symbol);
@@ -21287,8 +21289,12 @@ export class PaperEngine {
             applied_leverage: authority.appliedLeverage ?? 10,
             authority_exposure_notional_krw: authority.exposureNotionalKrw ?? 0,
             authority_notional_usdt: authorityNotionalUsdt,
+            legacy_static_cap_usdt: liveCapResolution.legacyStaticCapUsdt,
+            emergency_cap_usdt: liveCapResolution.emergencyCapUsdt,
+            effective_live_cap_usdt: liveCapResolution.effectiveLiveCapUsdt,
             order_notional_usdt: v2EntrySizeUsd,
-            live_max_order_notional_usdt: emergencyCapUsdt,
+            final_submitted_notional_usdt: v2EntrySizeUsd,
+            live_max_order_notional_usdt: liveCapResolution.legacyStaticCapUsdt,
             min_order_notional_usdt: MIN_POSITION_SIZE_USD,
             notional_ok: v2EntrySizeUsd >= MIN_POSITION_SIZE_USD,
             entry_price: first.lastPrice,
@@ -24764,13 +24770,13 @@ export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
   finalSizeSource: "v2_risk" | "static_safety_cap";
   skipStaticCapForV2Authority: boolean;
 }> {
-  const skipStaticCapForV2Authority = input.authoritySource === "v2";
+  const skipStaticCapForV2Authority = false;
   let finalSubmittedNotionalUsdt = input.intendedNotionalUsdt;
   let finalSizeSource: "v2_risk" | "static_safety_cap" = "v2_risk";
   if (
-    !skipStaticCapForV2Authority &&
     input.okxLiveStaticNotionalCapEnabled &&
     input.staticSafetyCapUsdt != null &&
+    input.staticSafetyCapUsdt > 0 &&
     finalSubmittedNotionalUsdt > input.staticSafetyCapUsdt
   ) {
     finalSubmittedNotionalUsdt = input.staticSafetyCapUsdt;

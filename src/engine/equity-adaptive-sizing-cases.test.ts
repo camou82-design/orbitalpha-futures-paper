@@ -351,6 +351,7 @@ function runCases(): void {
         }
         assertClose(capped.finalOrderNotionalUsdt, 500, 0.01, "CASE O emergency cap at 500");
         assertTrue(capped.emergencyCapUsdt === 500, "CASE O emergencyCapUsdt recorded");
+        assertTrue(capped.effectiveLiveCapUsdt === 500, "CASE O effectiveLiveCapUsdt recorded");
     }
 
     console.info(JSON.stringify({

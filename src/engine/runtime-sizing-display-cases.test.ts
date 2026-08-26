@@ -41,7 +41,7 @@ function runCases(): void {
   assertTrue(MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE === 2.5, "symbol cap constant");
   assertTrue(MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE === 3.0, "account cap constant");
 
-  // CASE — V2 submit skips legacy static 40 cap but emergency 500 from sizing is preserved
+  // CASE — V2 submit applies effective static cap (legacy hard ceiling) even for v2 authority
   {
     const v2Sized = evaluateEquityAdaptiveSizing({
       symbol: "BTCUSDT",
@@ -56,26 +56,21 @@ function runCases(): void {
       existingSymbolNotionalUsdt: 0,
       existingAccountNotionalUsdt: 0,
       emergencyAbsoluteCapUsdt: 500,
+      legacyStaticCapUsdt: 40,
       roundTripFeeRate: 0,
       lastPrice: 100_000
     });
-    if (v2Sized.finalOrderNotionalUsdt > 500) {
-      throw new Error(
-        `v2 emergency sizing cap: expected <= 500, got ${v2Sized.finalOrderNotionalUsdt}`
-      );
-    }
+    assertTrue(v2Sized.finalOrderNotionalUsdt <= 40, "v2 equity path clamps to min(500,40)=40");
+    assertTrue(v2Sized.effectiveLiveCapUsdt === 40, "effective live cap is legacy when lower");
     const v2Submit = resolveLiveSubmitStaticSafetyCap({
       authoritySource: "v2",
       okxLiveStaticNotionalCapEnabled: true,
       staticSafetyCapUsdt: 40,
-      intendedNotionalUsdt: v2Sized.finalOrderNotionalUsdt
+      intendedNotionalUsdt: 356
     });
-    assertTrue(v2Submit.skipStaticCapForV2Authority, "v2 authority skips legacy static cap");
-    assertTrue(
-      v2Submit.finalSubmittedNotionalUsdt === v2Sized.finalOrderNotionalUsdt,
-      "v2 submit must not re-clamp emergency-sized notional to legacy static 40"
-    );
-    assertTrue(v2Submit.finalSubmittedNotionalUsdt <= 500, "v2 submit preserves emergency 500 ceiling");
+    assertTrue(!v2Submit.skipStaticCapForV2Authority, "v2 authority no longer skips static cap");
+    assertTrue(v2Submit.finalSubmittedNotionalUsdt === 40, "v2 submit last-mile clamps to 40");
+    assertTrue(v2Submit.finalSizeSource === "static_safety_cap", "v2 submit static cap source");
   }
 
   // CASE — non-V2 / legacy submit path still applies OKX_LIVE_MAX_ORDER_NOTIONAL_USDT static clamp
@@ -87,8 +82,8 @@ function runCases(): void {
     );
     assertIncludes(
       paperEngine,
-      "!skipStaticCapForV2Authority",
-      "non-v2 static clamp guard preserved in source"
+      "resolveEffectiveLiveOrderNotionalCap",
+      "paper-engine uses effective live cap resolution"
     );
     const legacySubmit = resolveLiveSubmitStaticSafetyCap({
       authoritySource: "legacy",
@@ -112,9 +107,9 @@ function runCases(): void {
     event: "RUNTIME_SIZING_DISPLAY_CASES_PASS",
     cases: [
       "engine_24h_constants",
-      "v2_static_cap_skip",
+      "v2_static_cap_applied_on_submit",
       "live_order_size_proof_legacy_fields",
-      "v2_emergency_cap_preserved_on_submit",
+      "v2_effective_cap_clamp_on_submit",
       "v1_non_v2_static_cap_regression"
     ]
   }));

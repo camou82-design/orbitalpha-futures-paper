@@ -29,7 +29,8 @@ import {
     MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE,
     MAX_ADVERSE_ADDON_EQUITY_MULTIPLE,
     MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE,
-    RISK_PER_TRADE_PCT
+    RISK_PER_TRADE_PCT,
+    resolveEffectiveLiveOrderNotionalCap
 } from "./risk-sizing/equity-adaptive-sizing";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
@@ -6023,7 +6024,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         existing_symbol_notional_usdt: existingSymbolNotionalUsdt,
                         existing_account_notional_usdt: existingAccountNotionalUsdt,
                         available_margin_cap_usdt: sizingResult.usableAvailableBalanceUsdt * appliedLeverage,
+                        legacy_static_cap_usdt: sizingResult.legacyStaticCapUsdt,
                         emergency_cap_usdt: sizingResult.emergencyCapUsdt,
+                        effective_live_cap_usdt: sizingResult.effectiveLiveCapUsdt,
                         legacy_cap_source: sizingResult.legacyCapSource,
                         pre_lot_notional_usdt: sizingResult.preLotNotionalUsdt,
                         normalized_contracts: sizingResult.normalizedContracts,
@@ -6095,6 +6098,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Required Proof Log: LIVE_ORDER_SIZING_AUTHORITY_PROOF
     if (input.evaluationMode !== "diagnostic") {
+        const liveCapProof = resolveEffectiveLiveOrderNotionalCap({
+            emergencyCapUsdt: input.config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null,
+            legacyStaticCapUsdt: maxOrderNotionalUsdt ?? null
+        });
         console.info(JSON.stringify({
             event: "LIVE_ORDER_SIZING_AUTHORITY_PROOF",
             symbol: String(input.symbol),
@@ -6109,8 +6116,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             equity_initial_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE : null,
             symbol_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE : null,
             account_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE : null,
-            emergency_cap_usdt: input.config.okxLiveEmergencyMaxOrderNotionalUsdt ?? maxOrderNotionalUsdt ?? null,
-            legacy_static_cap_usdt: maxOrderNotionalUsdt ?? null,
+            legacy_static_cap_usdt: liveCapProof.legacyStaticCapUsdt,
+            emergency_cap_usdt: liveCapProof.emergencyCapUsdt,
+            effective_live_cap_usdt: liveCapProof.effectiveLiveCapUsdt,
             currentAddonCount,
             isAddon: isAddOn,
             blocked: finalDecision !== "ENTER",
