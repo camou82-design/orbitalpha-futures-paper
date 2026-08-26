@@ -375,6 +375,15 @@ import {
   buildPreEntryProtectionPlanProof
 } from "../engine-v2/execution/pre-entry-protection-plan";
 import {
+  computeAdaptiveRangePreEntryProtection,
+  shouldApplyAdaptiveRangePreEntryProtection,
+  type AdaptiveRangeProtectionDiagnostics
+} from "../engine-v2/execution/adaptive-range-pre-entry-protection";
+import {
+  buildV2NewEntryAttachAlgoOrds,
+  isV2RangePartialPlanContext
+} from "../engine-v2/execution/entry-protection-attach";
+import {
   isSlOnlyOcoRebuildScenario,
   evaluateAuthoritativeProtectionPresence,
   buildProtectiveRebuildTransactionProof,
@@ -1476,7 +1485,29 @@ export type V2CommittedStopSource =
   | "authority_stop_price"
   | "new_stop_price"
   | "decision_stop_loss"
-  | "policy_clamped";
+  | "policy_clamped"
+  | "adaptive_range_structural_invalidation"
+  | "adaptive_range_atr_structural_buffer";
+
+export type V2CommittedTpSource =
+  | "engine_calculated"
+  | "authority_tp_price"
+  | "none"
+  | "adaptive_range_box_mid"
+  | "adaptive_range_atr_cap"
+  | "adaptive_range_atr_min_profit_floor";
+
+export type V2PreEntryRiskPlanAdaptiveContext = Readonly<{
+  atr?: number | null;
+  boxHigh?: number | null;
+  boxLow?: number | null;
+  boxMid?: number | null;
+  marketSubtype?: string | null;
+  routingEngine?: string | null;
+  confirmedBreakout?: boolean;
+  strongContinuation?: boolean;
+  feeRate?: number;
+}>;
 
 export type V2PreEntryRiskPlanCommitted = Readonly<{
   side: "long" | "short";
@@ -1486,7 +1517,7 @@ export type V2PreEntryRiskPlanCommitted = Readonly<{
   risk_distance: number;
   protection_required: true;
   stop_source: V2CommittedStopSource;
-  take_profit_source: "engine_calculated" | "authority_tp_price" | "none";
+  take_profit_source: V2CommittedTpSource;
   stop_distance_pct: number;
   take_profit_distance_pct: number | null;
   risk_reward_ratio: number | null;
@@ -1513,14 +1544,15 @@ function extractV2StrategyStopPriceForEntry(
   return null;
 }
 
-function buildV2PreEntryRiskPlanCommitted(
+export function buildV2PreEntryRiskPlanCommitted(
   authority: EntryExecutionAuthority,
   decision: { stopLoss?: unknown; takeProfit?: unknown },
   side: "long" | "short",
   referenceEntryPx: number,
   logger: any,
-  symbol: string
-): { ok: true; plan: V2PreEntryRiskPlanCommitted } | { ok: false; reason?: string } {
+  symbol: string,
+  adaptiveContext?: V2PreEntryRiskPlanAdaptiveContext
+): { ok: true; plan: V2PreEntryRiskPlanCommitted; adaptiveDiagnostics: AdaptiveRangeProtectionDiagnostics | null } | { ok: false; reason?: string; adaptiveDiagnostics?: AdaptiveRangeProtectionDiagnostics | null } {
   if (!(referenceEntryPx > 0) || !Number.isFinite(referenceEntryPx)) return { ok: false, reason: "invalid_entry_px" };
   const rawSp = extractV2StrategyStopPriceForEntry(authority, decision.stopLoss);
   if (rawSp == null) return { ok: false, reason: "no_raw_stop" };
@@ -1529,51 +1561,33 @@ function buildV2PreEntryRiskPlanCommitted(
   const policySl = engineMirrorStopPrice(referenceEntryPx, side, regime);
   
   let finalStopPrice = rawSp.price;
-  let finalStopSource = rawSp.source;
+  let finalStopSource: V2CommittedStopSource = rawSp.source;
   let clampApplied = false;
-  
+  let rawPolicySlPrice = rawSp.price;
+
   if (policySl != null) {
     if (side === "long") {
       if (rawSp.price > policySl) {
-        finalStopPrice = policySl;
-        finalStopSource = "policy_clamped";
+        rawPolicySlPrice = policySl;
         clampApplied = true;
       }
     } else {
       if (rawSp.price < policySl) {
-        finalStopPrice = policySl;
-        finalStopSource = "policy_clamped";
+        rawPolicySlPrice = policySl;
         clampApplied = true;
       }
     }
   }
-
-  // Directional sanity check
-  if (side === "long" && finalStopPrice >= referenceEntryPx) return { ok: false, reason: "invalid_stop_direction_long" };
-  if (side === "short" && finalStopPrice <= referenceEntryPx) return { ok: false, reason: "invalid_stop_direction_short" };
+  finalStopPrice = rawPolicySlPrice;
+  if (clampApplied) finalStopSource = "policy_clamped";
 
   const rawStopDistancePct = (Math.abs(referenceEntryPx - rawSp.price) / referenceEntryPx) * 100;
-  const finalStopDistancePct = (Math.abs(referenceEntryPx - finalStopPrice) / referenceEntryPx) * 100;
-
-  if (clampApplied) {
-    logger.info("V2_STOP_DISTANCE_CLAMP_PROOF", {
-      symbol,
-      side,
-      entryPrice: referenceEntryPx,
-      rawInvalidationPx: rawSp.price,
-      policyStopPrice: policySl,
-      finalStopPrice,
-      rawStopDistancePct,
-      finalStopDistancePct,
-      clampApplied: true,
-      clampReason: "invalidation_too_close"
-    });
-  }
 
   let finalTpPrice: number | null = null;
-  let finalTpSource: "engine_calculated" | "authority_tp_price" | "none" = "none";
+  let finalTpSource: V2CommittedTpSource = "none";
   let policyTpPrice: number | null = null;
   let profitManagementMode: "FIXED_TP" | "PARTIAL_TRAILING" | "NONE" = "NONE";
+  let adaptiveDiagnostics: AdaptiveRangeProtectionDiagnostics | null = null;
 
   if (regime === "RANGE") {
     profitManagementMode = "FIXED_TP";
@@ -1615,7 +1629,71 @@ function buildV2PreEntryRiskPlanCommitted(
     }
 
     if (finalTpPrice == null) {
-      return { ok: false, reason: "range_tp_missing" };
+      return { ok: false, reason: "range_tp_missing", adaptiveDiagnostics: null };
+    }
+
+    const rawPolicyTpPrice = finalTpPrice;
+    const adaptiveEligible =
+      adaptiveContext != null &&
+      shouldApplyAdaptiveRangePreEntryProtection({
+        regime,
+        routingEngine: adaptiveContext.routingEngine ?? null,
+        marketSubtype: adaptiveContext.marketSubtype ?? authority.marketSubtype ?? null,
+        confirmedBreakout: adaptiveContext.confirmedBreakout === true,
+        strongContinuation: adaptiveContext.strongContinuation === true
+      });
+    const adaptiveAtr =
+      adaptiveContext?.atr != null && Number.isFinite(adaptiveContext.atr) && adaptiveContext.atr > 0
+        ? adaptiveContext.atr
+        : null;
+    const adaptiveBoxHigh =
+      authority.rangeBoxHighAtEntry ??
+      (adaptiveContext?.boxHigh != null && Number.isFinite(adaptiveContext.boxHigh)
+        ? adaptiveContext.boxHigh
+        : null);
+    const adaptiveBoxLow =
+      authority.rangeBoxLowAtEntry ??
+      (adaptiveContext?.boxLow != null && Number.isFinite(adaptiveContext.boxLow)
+        ? adaptiveContext.boxLow
+        : null);
+
+    if (adaptiveEligible && adaptiveAtr != null && adaptiveBoxHigh != null && adaptiveBoxLow != null) {
+      const adaptive = computeAdaptiveRangePreEntryProtection({
+        side,
+        entryPx: referenceEntryPx,
+        rawStructuralSl: rawSp.price,
+        rawPolicySl: rawPolicySlPrice,
+        rawPolicyTp: rawPolicyTpPrice,
+        atr: adaptiveAtr,
+        boxHigh: adaptiveBoxHigh,
+        boxLow: adaptiveBoxLow,
+        boxMid: authority.rangeBoxMidAtEntry ?? adaptiveContext?.boxMid ?? null,
+        feeRate: adaptiveContext?.feeRate
+      });
+      adaptiveDiagnostics = adaptive.diagnostics;
+      if (!adaptive.ok) {
+        return {
+          ok: false,
+          reason: adaptive.blockReason,
+          adaptiveDiagnostics: adaptive.diagnostics
+        };
+      }
+      finalStopPrice = adaptive.slPrice;
+      finalStopSource = adaptive.slSource as V2CommittedStopSource;
+      finalTpPrice = adaptive.tpPrice;
+      finalTpSource = adaptive.tpSource as V2CommittedTpSource;
+      clampApplied = false;
+      adaptiveDiagnostics = {
+        ...adaptive.diagnostics,
+        final_committed_tp_price: adaptive.tpPrice,
+        final_committed_sl_price: adaptive.slPrice
+      };
+      logger.info("V2_ADAPTIVE_RANGE_PRE_ENTRY_PROTECTION_PROOF", {
+        symbol,
+        side,
+        entryPrice: referenceEntryPx,
+        ...adaptiveDiagnostics
+      });
     }
   } else if (regime === "TREND") {
     profitManagementMode = "PARTIAL_TRAILING";
@@ -1661,6 +1739,26 @@ function buildV2PreEntryRiskPlanCommitted(
     });
   }
 
+  if (side === "long" && finalStopPrice >= referenceEntryPx) return { ok: false, reason: "invalid_stop_direction_long", adaptiveDiagnostics };
+  if (side === "short" && finalStopPrice <= referenceEntryPx) return { ok: false, reason: "invalid_stop_direction_short", adaptiveDiagnostics };
+
+  const finalStopDistancePct = (Math.abs(referenceEntryPx - finalStopPrice) / referenceEntryPx) * 100;
+
+  if (clampApplied) {
+    logger.info("V2_STOP_DISTANCE_CLAMP_PROOF", {
+      symbol,
+      side,
+      entryPrice: referenceEntryPx,
+      rawInvalidationPx: rawSp.price,
+      policyStopPrice: policySl,
+      finalStopPrice,
+      rawStopDistancePct,
+      finalStopDistancePct,
+      clampApplied: true,
+      clampReason: "invalidation_too_close"
+    });
+  }
+
   let takeProfitDistancePct: number | null = null;
   let riskRewardRatio: number | null = null;
 
@@ -1672,7 +1770,7 @@ function buildV2PreEntryRiskPlanCommitted(
   }
 
   if (regime === "RANGE" && (riskRewardRatio == null || riskRewardRatio <= 0)) {
-    return { ok: false, reason: "range_invalid_rr" };
+    return { ok: false, reason: "range_invalid_rr", adaptiveDiagnostics };
   }
 
   logger.info("V2_EXIT_PLAN_AUTHORITY_PROOF", {
@@ -1698,7 +1796,8 @@ function buildV2PreEntryRiskPlanCommitted(
     tp_direction_valid: finalTpPrice != null,
     authority_tp_rejected: finalTpSource === "engine_calculated" && finalTpPrice != null,
     final_tp_source: finalTpSource,
-    profit_management_mode: profitManagementMode
+    profit_management_mode: profitManagementMode,
+    ...(adaptiveDiagnostics ?? {})
   });
 
   return {
@@ -1715,7 +1814,8 @@ function buildV2PreEntryRiskPlanCommitted(
       stop_distance_pct: finalStopDistancePct,
       take_profit_distance_pct: takeProfitDistancePct,
       risk_reward_ratio: riskRewardRatio
-    }
+    },
+    adaptiveDiagnostics
   };
 }
 
@@ -10691,15 +10791,13 @@ export class PaperEngine {
     // When V2 RANGE has an active partial TP plan (e.g. 50% partial exit at TP1),
     // do not submit a full-position protective TP OCO on exchange to prevent 100% liquidation at TP1.
     // Full-size SL protection is 100% maintained.
-    const isV2RangePartialPlan =
-      open.isV2Authority === true &&
-      open.regimeAtEntry === "RANGE" &&
-      open.takeProfitPlan != null &&
-      typeof open.takeProfit1Px === "number" &&
-      Number.isFinite(open.takeProfit1Px) &&
-      typeof open.partialExitRatio === "number" &&
-      open.partialExitRatio > 0 &&
-      open.partialExitRatio < 1;
+    const isV2RangePartialPlan = isV2RangePartialPlanContext({
+      isV2Authority: open.isV2Authority === true,
+      regime: open.regimeAtEntry,
+      takeProfitPlan: open.takeProfitPlan,
+      takeProfit1Px: open.takeProfit1Px,
+      partialExitRatio: open.partialExitRatio
+    });
 
     const rawWantsTp = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0;
     const tpEvaluation = shouldAttachFullPositionProtectiveTp({
@@ -11755,6 +11853,8 @@ export class PaperEngine {
     okxContracts?: number;
     logAdverseAddonOrderUnitProof?: boolean;
     requestedAddonNotionalUsdtCap?: number;
+    /** V2 RANGE partial plan: attach SL-only at entry (TP delegated to lifecycle). */
+    isV2RangePartialPlan?: boolean;
   }): Promise<{
     ok: boolean;
     ordId: string | null;
@@ -12612,24 +12712,36 @@ export class PaperEngine {
     });
 
     // [V2_PROTECTION_HARDENING] Build attachAlgoOrds for mandatory entry-time protection
-    const attachAlgoOrds: any[] = [];
-    if (input.isNewEntry && (input.stopPrice || input.takeProfitPrice)) {
-      const ordType = input.takeProfitPrice && input.takeProfitPrice > 0 ? "oco" : "conditional";
-      const slTriggerPx = input.stopPrice ? String(input.stopPrice) : undefined;
-      const tpTriggerPx = (ordType === "oco" && input.takeProfitPrice) ? String(input.takeProfitPrice) : undefined;
+    const attachBuild =
+      input.isNewEntry && (input.stopPrice || input.takeProfitPrice)
+        ? buildV2NewEntryAttachAlgoOrds({
+            clOrdId: input.clOrdId,
+            submitSzStr,
+            stopPrice: input.stopPrice,
+            takeProfitPrice: input.takeProfitPrice,
+            isV2RangePartialPlan: input.isV2RangePartialPlan === true
+          })
+        : {
+            attachAlgoOrds: [] as ReadonlyArray<Record<string, unknown>>,
+            entryFullPositionTpAttached: false,
+            attachOrdType: "conditional" as const,
+            lifecyclePartialTpAuthority: input.isV2RangePartialPlan === true
+          };
+    const attachAlgoOrds: any[] = [...attachBuild.attachAlgoOrds];
 
-      if (slTriggerPx) {
-        attachAlgoOrds.push({
-          attachAlgoOrdId: buildOkxAlgoClOrdId("sl", input.clOrdId),
-          ordType,
-          sz: submitSzStr,
-          slTriggerPx,
-          slOrdPx: "-1",
-          slTriggerPxType: "last",
-          ...(ordType === "oco" ? { tpTriggerPx, tpOrdPx: "-1", tpTriggerPxType: "last" } : {}),
-          reduceOnly: true
-        });
-      }
+    if (input.isNewEntry && attachAlgoOrds.length > 0) {
+      this.logger.info("V2_ENTRY_ATTACH_PROTECTION_PROOF", {
+        symbol: input.symbol,
+        side: input.posSide,
+        order_trace_id: input.traceId,
+        attach_ord_type: attachBuild.attachOrdType,
+        entry_full_position_tp_attached: attachBuild.entryFullPositionTpAttached,
+        lifecycle_partial_tp_authority: attachBuild.lifecyclePartialTpAuthority,
+        range_partial_plan: input.isV2RangePartialPlan === true,
+        committed_stop_price: input.stopPrice ?? null,
+        committed_tp_price: input.takeProfitPrice ?? null,
+        submit_sz: submitSzStr
+      });
     }
 
     if (instId.startsWith("BTC-")) {
@@ -19779,6 +19891,7 @@ export class PaperEngine {
 
       const intentSide = authority.side as "long" | "short";
       let v2CommittedRiskPlan: V2PreEntryRiskPlanCommitted | null = null;
+      let v2AdaptiveRangeDiagnostics: AdaptiveRangeProtectionDiagnostics | null = null;
       const existingOpen = next.find((o) => o.symbol === first.symbol && o.side === intentSide);
       const entryStage = existingOpen?.entryStage ?? 0;
       const existingIdx = next.findIndex((o) => o.symbol === first.symbol && o.side === intentSide);
@@ -20526,7 +20639,27 @@ export class PaperEngine {
 
       // --- [GUARD-1] V2: committed risk plan (no mirror) before any OKX entry / queue consume ---
       if (authority.source === "v2" && authorityDecisionForExecution === "ENTER") {
-        const rp = buildV2PreEntryRiskPlanCommitted(authority, res.decision, intentSide, first.lastPrice, this.logger, sym);
+        const rp = buildV2PreEntryRiskPlanCommitted(
+          authority,
+          res.decision,
+          intentSide,
+          first.lastPrice,
+          this.logger,
+          sym,
+          {
+            atr: typeof first.atr === "number" && Number.isFinite(first.atr) ? first.atr : null,
+            boxHigh:
+              authority.rangeBoxHighAtEntry ??
+              (typeof first.boxHigh === "number" && Number.isFinite(first.boxHigh) ? first.boxHigh : null),
+            boxLow:
+              authority.rangeBoxLowAtEntry ??
+              (typeof first.boxLow === "number" && Number.isFinite(first.boxLow) ? first.boxLow : null),
+            boxMid: authority.rangeBoxMidAtEntry ?? null,
+            marketSubtype: effectiveMarketSubtype,
+            routingEngine: stage1ExecutionEngine,
+            feeRate: this.config.paperTakerFeeRate
+          }
+        );
         if (!rp.ok) {
           this.logger.error("V2_ENTRY_BLOCKED_PROTECTION_PLAN_MISSING", {
             symbol: sym,
@@ -20543,6 +20676,7 @@ export class PaperEngine {
           continue;
         }
         v2CommittedRiskPlan = rp.plan;
+        v2AdaptiveRangeDiagnostics = rp.adaptiveDiagnostics ?? null;
         this.logger.info("V2_ENTRY_RISK_PLAN_PROOF", {
           symbol: sym,
           run_cycle_id: executionSnapshot.runCycleId,
@@ -21018,6 +21152,13 @@ export class PaperEngine {
 
           const entryRefPx = submitEntryPrice ?? first.lastPrice;
           const entryRegime = (authority.regime ?? effectiveMarketSubtype ?? "RANGE") as MarketRegime;
+          const isV2RangePartialPlan = isV2RangePartialPlanContext({
+            isV2Authority: true,
+            regime: entryRegime,
+            takeProfitPlan: authority.takeProfitPlan,
+            takeProfit1Px: authority.takeProfit1Px ?? initialTpForRecord ?? null,
+            partialExitRatio: authority.partialExitRatio
+          });
           const preEntryPlan = evaluatePreEntryProtectionPlan({
             symbol: sym,
             side: authority.side as "long" | "short",
@@ -21026,6 +21167,7 @@ export class PaperEngine {
             tpPrice: initialTpForRecord ?? null,
             isV2Authority: true,
             regime: entryRegime,
+            isV2RangePartialPlan,
             tickSz
           });
           this.logger.info(
@@ -21046,7 +21188,13 @@ export class PaperEngine {
               tickRounded: preEntryPlan.tickRounded,
               protectionPlanReady: preEntryPlan.protectionPlanReady,
               entryBlocked: preEntryPlan.entryBlocked,
-              blockReason: preEntryPlan.blockReason
+              blockReason: preEntryPlan.blockReason,
+              final_committed_sl_price: preEntryPlan.slPrice,
+              final_committed_tp_price: preEntryPlan.tpPrice,
+              range_partial_plan: isV2RangePartialPlan,
+              entry_full_position_tp_attached: !isV2RangePartialPlan && preEntryPlan.tpPrice != null,
+              lifecycle_partial_tp_authority: isV2RangePartialPlan,
+              ...(v2AdaptiveRangeDiagnostics ?? {})
             })
           );
           if (preEntryPlan.entryBlocked) {
@@ -21097,6 +21245,7 @@ export class PaperEngine {
             entryPrice: submitEntryPrice,
             stopPrice: submitStopPrice,
             takeProfitPrice: submitTakeProfitPrice,
+            isV2RangePartialPlan,
             paperExecutionReady: executionSnapshot.paperReady,
             stageMarginKrw: authority.stageMarginKrw ?? null,
             exposureNotionalKrw: authority.exposureNotionalKrw ?? null,
