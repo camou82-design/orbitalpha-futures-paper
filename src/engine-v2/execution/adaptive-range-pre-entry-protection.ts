@@ -99,6 +99,8 @@ export function computeAdaptiveRangePreEntryProtection(input: Readonly<{
     boxLow: number;
     boxMid?: number | null;
     feeRate?: number;
+    /** FAST_TREND_SHIFT canonical stop — never tighten inward; only keep or widen outward. */
+    preserveCanonicalStructuralStop?: boolean;
 }>):
     | Readonly<{
           ok: true;
@@ -205,12 +207,22 @@ export function computeAdaptiveRangePreEntryProtection(input: Readonly<{
     if (structuralDist >= atrMinStopDistance - 1e-9) {
         adaptiveSl = structuralSl;
         slSource = "adaptive_range_structural_invalidation";
+    } else if (input.preserveCanonicalStructuralStop === true) {
+        adaptiveSl = structuralSl;
+        slSource = "fast_trend_shift_canonical_structural";
     } else {
         adaptiveSl =
             input.side === "long"
                 ? Math.min(structuralSl, entryPx - atrMinStopDistance)
                 : Math.max(structuralSl, entryPx + atrMinStopDistance);
         slSource = "adaptive_range_atr_min_buffer";
+    }
+
+    if (input.preserveCanonicalStructuralStop === true) {
+        adaptiveSl =
+            input.side === "long"
+                ? Math.min(adaptiveSl, structuralSl)
+                : Math.max(adaptiveSl, structuralSl);
     }
 
     const pctWidenCandidate =

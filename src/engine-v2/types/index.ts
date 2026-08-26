@@ -916,6 +916,14 @@ export interface MarketJudgmentOutput {
             baseSizeIntent: number;
             stop_price: number | null;
             stop_basis: string;
+            structural_invalidation_price?: number | null;
+            structural_source?: string | null;
+            structural_candidate_stop?: number | null;
+            old_closed_only_safety_stop?: number | null;
+            non_tightening_floor_applied?: boolean;
+            atr_buffer_multiple?: number | null;
+            atr_buffer_price?: number | null;
+            stop_distance_pct?: number | null;
         };
     };
     metadata?: Record<string, any>;

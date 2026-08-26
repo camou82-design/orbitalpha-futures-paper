@@ -1,6 +1,10 @@
 import { EngineV2Input, EngineV2Side, ExecutorOutput, MarketJudgmentOutput } from "../types";
 import { classifyRangeZone } from "../../models/types";
 import { computeSoftExitFeeBreakEvenPct, DEFAULT_SOFT_EXIT_SLIPPAGE_BUFFER_PCT } from "../exit/soft-exit-fee-gate";
+import {
+    getClosedCandlesForStructuralStop,
+    resolveFastTrendShiftStructuralStop
+} from "../risk-sizing/fast-trend-shift-structural-stop";
 
 export type RangeContinuationPhase = "IDLE" | "DEADLOCK_COUNTING" | "CONTINUATION_WATCH" | "RETEST_TOUCHED" | "RETEST_CONFIRMED" | "EXPIRED";
 
@@ -196,7 +200,133 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const isAuthoritative = input.evaluationMode !== "diagnostic";
     const currentStage = input.state.currentPositions.find(p => p.symbol === input.symbol)?.entryStage ?? 0;
 
-    if (judgment.subtype === "EARLY_LONG_PROBE" || (judgment.subtype === "FAST_TREND_SHIFT" && judgment.diagnostics?.fastTrendShift?.direction === "long")) {
+    if (judgment.subtype === "FAST_TREND_SHIFT" && judgment.diagnostics?.fastTrendShift?.direction === "long") {
+        const closedCandles = getClosedCandlesForStructuralStop(recentCandles);
+        const resolved = resolveFastTrendShiftStructuralStop({
+            side: "long",
+            entryPrice: lastPrice,
+            lastPrice,
+            atr,
+            closedCandles,
+            boxMid,
+            previousConfirmedBoxHigh: boxHigh,
+            previousConfirmedBoxLow: boxLow
+        });
+        if (!resolved.valid || resolved.stopPrice == null) {
+            return {
+                signal: "WAIT_RECHECK",
+                side: "none",
+                reason: resolved.invalidReason ?? "FAST_TREND_SHIFT_STRUCTURAL_STOP_INVALID",
+                baseSizeIntent: 0,
+                recheckSuggested: true,
+                isAddOnEligible: false,
+                stopPrice: null,
+                invalidationPx: null,
+                metadata: {
+                    fast_trend_shift: true,
+                    stop_basis: resolved.stopBasis,
+                    structural_stop_invalid: true,
+                    invalid_reason: resolved.invalidReason
+                }
+            };
+        }
+        const baseSizeIntent = judgment.diagnostics?.fastTrendShift?.baseSizeIntent ?? 0.32;
+        return {
+            signal: "LONG_CANDIDATE",
+            side: "long",
+            reason: judgment.subtypeReason,
+            baseSizeIntent,
+            recheckSuggested: true,
+            isAddOnEligible: false,
+            stopPrice: resolved.stopPrice,
+            invalidationPx: resolved.stopPrice,
+            metadata: {
+                early_probe: true,
+                fast_trend_shift: true,
+                stop_basis: resolved.stopBasis,
+                structural_invalidation_price: resolved.structuralInvalidationPrice,
+                structural_source: resolved.structuralSource,
+                atr_buffer_multiple: resolved.atrBufferMultiple,
+                atr_buffer_price: resolved.atrBufferPrice,
+                stop_distance_pct: resolved.stopDistancePct,
+                structural_candidate_stop: resolved.structuralCandidateStop ?? null,
+                old_closed_only_safety_stop: resolved.oldClosedOnlySafetyStop ?? null,
+                non_tightening_floor_applied: resolved.nonTighteningFloorApplied === true,
+                box_mid: boxMid,
+                boxPos,
+                rangeConfidence,
+                boxCohesion01,
+                trendWeaknessScore,
+                breakoutFailureRate,
+                rangeOscillationScore
+            }
+        };
+    }
+
+    if (judgment.subtype === "FAST_TREND_SHIFT" && judgment.diagnostics?.fastTrendShift?.direction === "short") {
+        const closedCandles = getClosedCandlesForStructuralStop(recentCandles);
+        const resolved = resolveFastTrendShiftStructuralStop({
+            side: "short",
+            entryPrice: lastPrice,
+            lastPrice,
+            atr,
+            closedCandles,
+            boxMid,
+            previousConfirmedBoxHigh: boxHigh,
+            previousConfirmedBoxLow: boxLow
+        });
+        if (!resolved.valid || resolved.stopPrice == null) {
+            return {
+                signal: "WAIT_RECHECK",
+                side: "none",
+                reason: resolved.invalidReason ?? "FAST_TREND_SHIFT_STRUCTURAL_STOP_INVALID",
+                baseSizeIntent: 0,
+                recheckSuggested: true,
+                isAddOnEligible: false,
+                stopPrice: null,
+                invalidationPx: null,
+                metadata: {
+                    fast_trend_shift: true,
+                    stop_basis: resolved.stopBasis,
+                    structural_stop_invalid: true,
+                    invalid_reason: resolved.invalidReason
+                }
+            };
+        }
+        const baseSizeIntent = judgment.diagnostics?.fastTrendShift?.baseSizeIntent ?? 0.32;
+        return {
+            signal: "SHORT_CANDIDATE",
+            side: "short",
+            reason: judgment.subtypeReason,
+            baseSizeIntent,
+            recheckSuggested: true,
+            isAddOnEligible: false,
+            stopPrice: resolved.stopPrice,
+            invalidationPx: resolved.stopPrice,
+            metadata: {
+                early_probe: true,
+                fast_trend_shift: true,
+                stop_basis: resolved.stopBasis,
+                structural_invalidation_price: resolved.structuralInvalidationPrice,
+                structural_source: resolved.structuralSource,
+                atr_buffer_multiple: resolved.atrBufferMultiple,
+                atr_buffer_price: resolved.atrBufferPrice,
+                stop_distance_pct: resolved.stopDistancePct,
+                structural_candidate_stop: resolved.structuralCandidateStop ?? null,
+                old_closed_only_safety_stop: resolved.oldClosedOnlySafetyStop ?? null,
+                non_tightening_floor_applied: resolved.nonTighteningFloorApplied === true,
+                box_mid: boxMid,
+                boxPos,
+                rangeConfidence,
+                boxCohesion01,
+                trendWeaknessScore,
+                breakoutFailureRate,
+                rangeOscillationScore
+            }
+        };
+    }
+
+    if (judgment.subtype === "EARLY_LONG_PROBE") {
         const swingLow = recentCandles.length >= 10 
             ? Math.min(...recentCandles.slice(-10).map(c => c.low)) 
             : lastPrice * 0.99;
@@ -218,7 +348,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             invalidationPx: stopPrice,
             metadata: { 
                 early_probe: true,
-                fast_trend_shift: judgment.subtype === "FAST_TREND_SHIFT",
+                fast_trend_shift: false,
                 stop_basis: "conservative_probe_basis",
                 swing_low: swingLow,
                 box_mid: boxMid,
@@ -233,7 +363,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         };
     }
 
-    if (judgment.subtype === "EARLY_SHORT_PROBE" || (judgment.subtype === "FAST_TREND_SHIFT" && judgment.diagnostics?.fastTrendShift?.direction === "short")) {
+    if (judgment.subtype === "EARLY_SHORT_PROBE") {
         const swingHigh = recentCandles.length >= 10 
             ? Math.max(...recentCandles.slice(-10).map(c => c.high)) 
             : lastPrice * 1.01;
@@ -255,7 +385,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             invalidationPx: stopPrice,
             metadata: { 
                 early_probe: true,
-                fast_trend_shift: judgment.subtype === "FAST_TREND_SHIFT",
+                fast_trend_shift: false,
                 stop_basis: "conservative_probe_basis",
                 swing_high: swingHigh,
                 box_mid: boxMid,

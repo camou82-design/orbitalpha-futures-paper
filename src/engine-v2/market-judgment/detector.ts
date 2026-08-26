@@ -12,6 +12,10 @@ import {
 } from "./whipsaw-aged-soft-downgrade";
 import { deriveTrendSideCandidate } from "../trend-side-candidate";
 import { evaluateWhipsawEvidenceBundle } from "./whipsaw-structural-evidence";
+import {
+    getClosedCandlesForStructuralStop,
+    resolveFastTrendShiftStructuralStop
+} from "../risk-sizing/fast-trend-shift-structural-stop";
 function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPhase"] {
     const shock = input.state.directionalShockState ?? "NONE";
     const crashState = String(input.state.crashState ?? "").toUpperCase();
@@ -413,7 +417,15 @@ function evaluateFastTrendShift(args: {
         volume_expansion: false,
         baseSizeIntent: 0,
         stop_price: null as number | null,
-        stop_basis: "none"
+        stop_basis: "none",
+        structural_invalidation_price: null as number | null,
+        structural_source: null as string | null,
+        structural_candidate_stop: null as number | null,
+        old_closed_only_safety_stop: null as number | null,
+        non_tightening_floor_applied: false,
+        atr_buffer_multiple: null as number | null,
+        atr_buffer_price: null as number | null,
+        stop_distance_pct: null as number | null
     };
 
     if (!candles || candles.length < 10) return res;
@@ -483,17 +495,31 @@ function evaluateFastTrendShift(args: {
         res.reason = shortHits.join("|");
     }
 
-    // Stop calculation for probe
-    if (res.active) {
+    // Diagnostic mirror — same canonical resolver as executor authority (not execution authority itself).
+    if (res.active && (res.direction === "long" || res.direction === "short")) {
         const atr = Number(sn.atr ?? 0);
-        if (res.direction === "long") {
-            res.stop_price = lastPrice - (atr * 1.5);
-            res.stop_basis = "atr_1.5_probe_stop";
-        } else {
-            res.stop_price = lastPrice + (atr * 1.5);
-            res.stop_basis = "atr_1.5_probe_stop";
-        }
-        res.baseSizeIntent = 0.32; // Default probe size
+        const closedCandles = getClosedCandlesForStructuralStop(candles);
+        const resolved = resolveFastTrendShiftStructuralStop({
+            side: res.direction,
+            entryPrice: lastPrice,
+            lastPrice,
+            atr,
+            closedCandles,
+            boxMid,
+            previousConfirmedBoxHigh: sn.boxHigh ?? null,
+            previousConfirmedBoxLow: sn.boxLow ?? null
+        });
+        res.stop_price = resolved.stopPrice;
+        res.stop_basis = resolved.valid ? resolved.stopBasis : (resolved.invalidReason ?? "structural_stop_invalid");
+        res.structural_invalidation_price = resolved.structuralInvalidationPrice;
+        res.structural_source = resolved.structuralSource;
+        res.structural_candidate_stop = resolved.structuralCandidateStop ?? null;
+        res.old_closed_only_safety_stop = resolved.oldClosedOnlySafetyStop ?? null;
+        res.non_tightening_floor_applied = resolved.nonTighteningFloorApplied === true;
+        res.atr_buffer_multiple = resolved.atrBufferMultiple;
+        res.atr_buffer_price = resolved.atrBufferPrice;
+        res.stop_distance_pct = resolved.stopDistancePct;
+        res.baseSizeIntent = 0.32;
     }
 
     return res;

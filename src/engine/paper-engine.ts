@@ -1508,6 +1508,7 @@ export type V2PreEntryRiskPlanAdaptiveContext = Readonly<{
   confirmedBreakout?: boolean;
   strongContinuation?: boolean;
   feeRate?: number;
+  preserveCanonicalStructuralStop?: boolean;
 }>;
 
 export type V2PreEntryRiskPlanCommitted = Readonly<{
@@ -1669,7 +1670,8 @@ export function buildV2PreEntryRiskPlanCommitted(
         boxHigh: adaptiveBoxHigh,
         boxLow: adaptiveBoxLow,
         boxMid: authority.rangeBoxMidAtEntry ?? adaptiveContext?.boxMid ?? null,
-        feeRate: adaptiveContext?.feeRate
+        feeRate: adaptiveContext?.feeRate,
+        preserveCanonicalStructuralStop: adaptiveContext?.preserveCanonicalStructuralStop === true
       });
       adaptiveDiagnostics = adaptive.diagnostics;
       if (!adaptive.ok) {
@@ -20662,7 +20664,8 @@ export class PaperEngine {
             boxMid: authority.rangeBoxMidAtEntry ?? null,
             marketSubtype: effectiveMarketSubtype,
             routingEngine: stage1ExecutionEngine,
-            feeRate: this.config.paperTakerFeeRate
+            feeRate: this.config.paperTakerFeeRate,
+            preserveCanonicalStructuralStop: effectiveMarketSubtype === "FAST_TREND_SHIFT"
           }
         );
         if (!rp.ok) {

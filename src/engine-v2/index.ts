@@ -32,6 +32,11 @@ import {
     RISK_PER_TRADE_PCT,
     resolveEffectiveLiveOrderNotionalCap
 } from "./risk-sizing/equity-adaptive-sizing";
+import {
+    FTS_STRUCTURAL_STOP_BASIS,
+    FTS_ABSOLUTE_SAFETY_MAX_STOP_PCT,
+    isFastTrendShiftCanonicalStructuralStopBasis
+} from "./risk-sizing/fast-trend-shift-structural-stop";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -114,11 +119,31 @@ export function ensurePromotedEntryRiskPlan(
     let selectedStopSource: string | null = null;
     let selectedStopPrice: number | null = null;
 
-    for (const c of candidateStops) {
-        if (c.directionValid && c.withinMaxDistance) {
-            selectedStopSource = c.source;
-            selectedStopPrice = c.price;
-            break;
+    const execMeta = (execution.metadata ?? {}) as Record<string, unknown>;
+    const isFtsCanonicalStructuralStop =
+        judgment.subtype === "FAST_TREND_SHIFT" &&
+        isFastTrendShiftCanonicalStructuralStopBasis(execMeta.stop_basis);
+
+    if (isFtsCanonicalStructuralStop && stopPriceBefore != null && Number.isFinite(stopPriceBefore)) {
+        const directionValid = side === "long" ? stopPriceBefore < entryPrice : stopPriceBefore > entryPrice;
+        const stopDistPct = Math.abs(entryPrice - stopPriceBefore) / entryPrice;
+        if (!directionValid) {
+            selectedStopSource = null;
+            selectedStopPrice = null;
+        } else if (stopDistPct > FTS_ABSOLUTE_SAFETY_MAX_STOP_PCT) {
+            selectedStopSource = null;
+            selectedStopPrice = null;
+        } else {
+            selectedStopSource = "existing_valid";
+            selectedStopPrice = stopPriceBefore;
+        }
+    } else {
+        for (const c of candidateStops) {
+            if (c.directionValid && c.withinMaxDistance) {
+                selectedStopSource = c.source;
+                selectedStopPrice = c.price;
+                break;
+            }
         }
     }
 
@@ -130,7 +155,7 @@ export function ensurePromotedEntryRiskPlan(
     let closestInvalidDistPct: number | null = null;
 
     if (!audit_passed) {
-        blockReason = "STOP_DISTANCE_TOO_WIDE";
+        blockReason = isFtsCanonicalStructuralStop ? "STOP_DISTANCE_TOO_WIDE" : "STOP_DISTANCE_TOO_WIDE";
         let minDistance = Infinity;
         for (const c of candidateStops) {
             if (c.directionValid && c.price != null && c.stopDistPct < minDistance) {
@@ -140,12 +165,17 @@ export function ensurePromotedEntryRiskPlan(
                 closestInvalidDistPct = c.stopDistPct;
             }
         }
+        if (isFtsCanonicalStructuralStop && stopPriceBefore != null && Number.isFinite(stopPriceBefore)) {
+            closestInvalidSource = FTS_STRUCTURAL_STOP_BASIS;
+            closestInvalidPrice = stopPriceBefore;
+            closestInvalidDistPct = Math.abs(entryPrice - stopPriceBefore) / entryPrice;
+        }
     }
 
     execution.stopPrice = selectedStopPrice;
     execution.invalidationPx = selectedStopPrice;
 
-    const needsPatch = selectedStopSource !== "existing_valid";
+    const needsPatch = selectedStopSource !== "existing_valid" && !isFtsCanonicalStructuralStop;
 
     if (needsPatch) {
         execution.metadata = {
