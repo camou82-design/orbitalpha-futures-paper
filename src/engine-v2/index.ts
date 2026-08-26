@@ -3957,10 +3957,17 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     const selectedSideFinal: EngineV2Side = selected_side_final_after_sanitize;
 
+    const promotionAppliedAtNativeAuthorityEval = promotionApplied;
+    const nativeExecutorDecisionSource = v2DecisionBeforePromotion;
+    const nativeExecutorSideSource = v2SideBeforePromotion;
+    // Executor-native ENTER must survive paper-lane downgrade even when a later
+    // same-side shock/promotion overlay re-affirms ENTER (promotionApplied=true).
+    // Distinct promotion-generated ENTER (SKIP/HOLD -> ENTER) keeps promotion authority.
     const nativeExecutorEnterAuthority =
         v2DecisionBeforePromotion === "ENTER" &&
         v2SideBeforePromotion !== "none" &&
-        promotionApplied === false;
+        (promotionAppliedAtNativeAuthorityEval === false ||
+            v2SideAfterPromotion === v2SideBeforePromotion);
 
     if (v2DecisionAfterPromotion === "ENTER") {
         if (promotionApplied && (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")) {
@@ -4046,7 +4053,27 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
-    const isBypassRangeVeto = 
+    console.info(JSON.stringify({
+        event: "V2_NATIVE_EXECUTOR_AUTHORITY_PROOF",
+        symbol: String(input.symbol),
+        market_subtype: judgment.subtype,
+        native_executor_enter_authority: nativeExecutorEnterAuthority,
+        native_executor_decision_source: nativeExecutorDecisionSource,
+        native_executor_side_source: nativeExecutorSideSource,
+        promotion_applied_at_native_authority_eval: promotionAppliedAtNativeAuthorityEval,
+        promotion_reason_at_native_authority_eval: promotionReason,
+        side_after_promotion_at_native_authority_eval: v2SideAfterPromotion,
+        range_signal_downgraded: rangeSignalDowngraded,
+        entry_candidate: entryCandidate,
+        range_downgraded_hard_block: rangeDowngradedHardBlock,
+        entry_candidate_hard_block: entryCandidateHardBlock,
+        native_fast_probe_coverage: nativeExecutorFastProbeCoverage,
+        range_mid_conservative_block: rangeMidConservativeBlock,
+        veto_reason_pre_apply: vetoReason,
+        veto_mutation_stage: "pre_veto_apply"
+    }));
+
+    const isBypassRangeVeto =
         vetoReason != null &&
         shock === "DOWN" &&
         (judgment.htf_entry_policy === "SHORT_ONLY_OR_NONE" || judgment.htf_entry_policy === "SHORT_ONLY") &&
@@ -4288,7 +4315,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 short_allow: allowNewShort,
                 finalDecisionBeforeVeto,
                 finalDecisionAfterVeto: v2DecisionAfterPromotion,
-                vetoReason
+                vetoReason,
+                veto_mutation_stage: "post_veto_apply",
+                native_executor_enter_authority: nativeExecutorEnterAuthority,
+                promotion_applied_at_native_authority_eval: promotionAppliedAtNativeAuthorityEval
             }));
         }
     }

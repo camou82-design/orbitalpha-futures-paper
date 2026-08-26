@@ -327,9 +327,11 @@ type ScenarioOpts = {
   entryCandidate?: boolean;
   signal?: string;
   emaGap?: number;
+  trendWeaknessScore?: number;
   volumeExpansion?: number;
   ema20Slope?: number;
   breakoutFailureRate?: number;
+  pumpState?: string;
 };
 
 function buildInput(opts: ScenarioOpts) {
@@ -356,7 +358,7 @@ function buildInput(opts: ScenarioOpts) {
     atr20: 250,
     closedClose: base + (opts.boxPos - 0.5) * (boxHigh - boxLow),
     rangeConfidence: 0.78,
-    trendWeaknessScore: 0.22,
+    trendWeaknessScore: opts.trendWeaknessScore ?? 0.22,
     boxCohesion01: 0.92,
     breakoutFailureRate: opts.breakoutFailureRate ?? 0.15,
     rangeOscillationScore: 0.65,
@@ -391,6 +393,7 @@ function buildInput(opts: ScenarioOpts) {
     makeLiveConfig() as any,
     makeProductionBridge({
       directionalShockState: opts.shock === "NONE" ? "NONE" : opts.shock,
+      pumpState: opts.pumpState,
       balanceFetchedAt: cycleNow,
       positionsFetchedAt: cycleNow,
       pendingOrdersFetchedAt: cycleNow
@@ -653,6 +656,113 @@ function runScenario(opts: ScenarioOpts) {
       decision!.decision === "ENTER" &&
       decision!.side === "short",
     `promotion=${finalizer?.promotion_reason}, final=${decision!.decision}/${decision!.side}, notional=${decision!.risk?.finalOrderNotionalUsdt ?? 0}`
+  );
+}
+
+// CASE G — production Q70: trendOk=false, sideZoneValid=false, same-side shock overlay + downgrade
+{
+  const { judgment, decision, proofs } = runScenario({
+    candles: makeFastTrendShiftLongCandles(),
+    htfCandles: makeBullishHtf(),
+    qualityScore: 70,
+    boxPos: 0.52,
+    shock: "UP",
+    rangeSignalDowngraded: true,
+    entryCandidate: false,
+    signal: "paper_long_candidate",
+    emaGap: 0.005,
+    trendWeaknessScore: 0.55,
+    pumpState: "PUMP_ALERT"
+  });
+
+  const finalizer = proofs.find((p) => p.event === "V2_AUTHORITY_PROMOTION_FINALIZER_PROOF");
+  const nativeAuth = proofs.find((p) => p.event === "V2_NATIVE_EXECUTOR_AUTHORITY_PROOF");
+  const rangeVeto = proofs.find(
+    (p) => p.event === "V2_RANGE_SIDE_ZONE_VETO_PROOF" && p.vetoReason === "RANGE_SIGNAL_DOWNGRADED_NOT_RELAXED"
+  );
+
+  run(
+    "CASE_G_PRODUCTION_Q70_SHOCK_OVERLAY_SURVIVES_DOWNGRADE",
+    judgment.subtype === "FAST_TREND_SHIFT" &&
+      finalizer?.decision_before === "ENTER" &&
+      finalizer?.side_before === "long" &&
+      nativeAuth?.native_executor_enter_authority === true &&
+      nativeAuth?.range_downgraded_hard_block === false &&
+      rangeVeto == null &&
+      decision.decision === "ENTER" &&
+      decision.side === "long",
+    `subtype=${judgment.subtype}, native_auth=${nativeAuth?.native_executor_enter_authority}, promo_at_eval=${nativeAuth?.promotion_applied_at_native_authority_eval}, downgrade_block=${nativeAuth?.range_downgraded_hard_block}, final=${decision.decision}/${decision.side}`
+  );
+}
+
+// CASE H — upper-zone SHOCK_REACTION_UP long mismatch remains a genuine hard veto
+{
+  clearWhipsawObservationState("BTCUSDT");
+  seedUpShock("BTCUSDT");
+  const base = 69000;
+  const candles = makeFastTrendShiftLongCandles(base);
+  const cycleNow = Date.now();
+  const snap = {
+    symbol: "BTCUSDT",
+    lastPrice: 69850,
+    latestCandleClose: 69850,
+    signal: "paper_long_candidate",
+    entryCandidate: false,
+    qualityScore: 72,
+    emaGap: 0.006,
+    volumeRatioProxy: 1.2,
+    boxHigh: 70000,
+    boxLow: 68000,
+    boxPos: 0.88,
+    atr: 250,
+    atr20: 250,
+    closedClose: 69850,
+    rangeConfidence: 0.78,
+    trendWeaknessScore: 0.22,
+    boxCohesion01: 0.92,
+    breakoutFailureRate: 0.15,
+    rangeOscillationScore: 0.65,
+    volumeExpansion: 1.6,
+    ema20Slope: 0.0002,
+    rangeSignalDowngraded: false,
+    candles,
+    htf_candles: { "5m": candles, "15m": candles, "1h": makeBullishHtf(), "4h": makeBullishHtf() },
+    canonicalRegime: "RANGE",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.35,
+    reviewing_ticks: 0
+  };
+  const input = adaptV2Input(
+    "BTCUSDT",
+    cycleNow,
+    buildV2SnapshotBridge(snap as any) as any,
+    makeLiveConfig() as any,
+    makeProductionBridge({
+      directionalShockState: "UP",
+      balanceFetchedAt: cycleNow,
+      positionsFetchedAt: cycleNow,
+      pendingOrdersFetchedAt: cycleNow
+    }) as any,
+    { decision: { final_decision: "SKIP" } } as any,
+    candles,
+    "authoritative",
+    `native_exec_auth_upper_${cycleNow}`
+  );
+  const judgment = detectMarketRegime(input);
+  const { decision, proofs } = (() => {
+    let d: ReturnType<typeof runEngineV2>["decision"];
+    const p = captureProofLogs(() => { ({ decision: d } = runEngineV2(input)); });
+    return { decision: d!, proofs: p };
+  })();
+  const sideConsistency = proofs.find((p) => p.event === "V2_SELECTED_SIDE_CONSISTENCY_PROOF");
+
+  run(
+    "CASE_H_UPPER_ZONE_LONG_MISMATCH_STILL_HARD_VETO",
+    judgment.subtype === "FAST_TREND_SHIFT" &&
+      (sideConsistency?.vetoReason === "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG" ||
+        sideConsistency?.vetoReason === "CHASE_LONG_DISALLOWED_UPPER" ||
+        decision.decision !== "ENTER"),
+    `subtype=${judgment.subtype}, zone=upper, veto=${sideConsistency?.vetoReason ?? "none"}, final=${decision.decision}/${decision.side}`
   );
 }
 
