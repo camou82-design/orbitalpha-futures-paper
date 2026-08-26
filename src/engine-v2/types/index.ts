@@ -183,6 +183,9 @@ export interface LegacySnapshotAdapter {
     reviewing_ticks?: number;
     regimeExitRisk?: number;
     boxBreakSide?: "upper" | "lower" | "none";
+    retestConfirmed?: boolean;
+    retestTouched?: boolean;
+    retestRejected?: boolean;
     signal?: string;
     qualityScore?: number;
     data_ready?: boolean;
@@ -419,6 +422,9 @@ export interface EngineV2SnapshotAdapter {
     volumeExpansion?: number;
     atr20?: number | null;
     closedClose?: number | null;
+    retestConfirmed?: boolean;
+    retestTouched?: boolean;
+    retestRejected?: boolean;
     rcSlope?: number;
     candles?: import("../../models/types").Candle[];
     htf_candles?: Record<string, import("../../models/types").Candle[]>;
@@ -511,6 +517,10 @@ export interface V2BridgeSnapshot {
     atr: number;
     atr20?: number | null;
     closedClose?: number | null;
+    boxBreakSide?: "upper" | "lower" | "none";
+    retestConfirmed?: boolean;
+    retestTouched?: boolean;
+    retestRejected?: boolean;
     signal: string;
     qualityScore: number;
     swingHighSlope: number;

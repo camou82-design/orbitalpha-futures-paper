@@ -2193,18 +2193,23 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
         const execMetaForBoundary = execMeta as Record<string, unknown>;
         const judgmentMetaForBoundary = (judgment.metadata ?? {}) as Record<string, unknown>;
+        const authSnapForBoundary = authoritativeInput.snapshot as unknown as Record<string, unknown>;
+        const inputSnapForBoundary = input.snapshot as unknown as Record<string, unknown>;
         const continuationStateForBoundary = rangeContinuationStateMap.get(String(input.symbol));
+        const boundaryClosedClose =
+            typeof authSnapForBoundary.closedClose === "number"
+                ? authSnapForBoundary.closedClose
+                : (typeof inputSnapForBoundary.closedClose === "number"
+                    ? inputSnapForBoundary.closedClose
+                    : null);
         const rangeBoundaryCtx: RangeBoundaryContinuationContext = {
             trendSideCandidate,
             zone,
             boxBreakSide,
-            boxLow: Number(authoritativeInput.snapshot.boxLow ?? 0),
-            boxHigh: Number(authoritativeInput.snapshot.boxHigh ?? 0),
-            closedClose:
-                typeof authoritativeInput.snapshot.closedClose === "number"
-                    ? authoritativeInput.snapshot.closedClose
-                    : null,
-            lastPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0),
+            boxLow: Number(authSnapForBoundary.boxLow ?? inputSnapForBoundary.boxLow ?? 0),
+            boxHigh: Number(authSnapForBoundary.boxHigh ?? inputSnapForBoundary.boxHigh ?? 0),
+            closedClose: boundaryClosedClose,
+            lastPrice: Number(authSnapForBoundary.lastPrice ?? inputSnapForBoundary.lastPrice ?? 0),
             previousConfirmedBoxLow: continuationStateForBoundary?.previousConfirmedBoxLow ?? null,
             previousConfirmedBoxHigh: continuationStateForBoundary?.previousConfirmedBoxHigh ?? null,
             emaGap,
@@ -2233,11 +2238,20 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     ? String(execMetaForBoundary.continuationPhase)
                     : continuationStateForBoundary?.phase ?? null,
             retestConfirmed:
-                execMetaForBoundary.retest_confirmed === true || judgmentMetaForBoundary.retestConfirmed === true,
+                execMetaForBoundary.retest_confirmed === true ||
+                judgmentMetaForBoundary.retestConfirmed === true ||
+                authSnapForBoundary.retestConfirmed === true ||
+                inputSnapForBoundary.retestConfirmed === true,
             retestTouched:
-                execMetaForBoundary.retestTouched === true || judgmentMetaForBoundary.retestTouched === true,
+                execMetaForBoundary.retestTouched === true ||
+                judgmentMetaForBoundary.retestTouched === true ||
+                authSnapForBoundary.retestTouched === true ||
+                inputSnapForBoundary.retestTouched === true,
             retestRejected:
-                execMetaForBoundary.retestRejected === true || judgmentMetaForBoundary.retestRejected === true,
+                execMetaForBoundary.retestRejected === true ||
+                judgmentMetaForBoundary.retestRejected === true ||
+                authSnapForBoundary.retestRejected === true ||
+                inputSnapForBoundary.retestRejected === true,
             reversalConfirmed,
             execReason: typeof execution.reason === "string" ? execution.reason : null,
             lateChaseBlocked: execMetaForBoundary.late_chase_blocked === true,
@@ -3970,9 +3984,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (promotionAppliedAtNativeAuthorityEval === false ||
             v2SideAfterPromotion === v2SideBeforePromotion);
 
+    const execMetaRecordForReconcile = execMeta as Record<string, unknown>;
+    const nativeExecutorFastTrendShiftLowerShortPreserve =
+        nativeExecutorEnterAuthority &&
+        v2SideBeforePromotion === "short" &&
+        activeEngineRouting === "RANGE" &&
+        zone === "lower" &&
+        (judgment.subtype === "FAST_TREND_SHIFT" || execMetaRecordForReconcile.fast_trend_shift === true);
+
     if (v2DecisionAfterPromotion === "ENTER") {
         if (promotionApplied && (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")) {
             // Preserve the side assigned by the promotion logic
+        } else if (nativeExecutorFastTrendShiftLowerShortPreserve) {
+            v2SideAfterPromotion = v2SideBeforePromotion;
         } else if (
             nativeExecutorEnterAuthority &&
             (selectedSideFinal === "none" || selectedSideFinal === v2SideBeforePromotion)
@@ -4686,7 +4710,95 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const isPolarityReversalMicroProbePromotion = promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE";
         const isConflictResolvedTrendLongPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
         if (sideFinal === "short" && zone === "lower") {
-            const shortException = breakdownRetestFailure || boxBreakSideFinal === "lower" || isShockReactionDown || shock === "DOWN" || (isTrendQualifiedFinalPromotion && sideFinal === trendSideCandidate) || (isStairStepPromotion && sideFinal === "short") || (isTrendContinuationRevalidatedPromotion && sideFinal === "short") || (isPolarityReversalMicroProbePromotion && sideFinal === "short");
+            const isFastTrendShiftLowerShort = judgment.subtype === "FAST_TREND_SHIFT";
+            let fastTrendShiftLowerBreakdownConfirmed = false;
+            if (isFastTrendShiftLowerShort) {
+                const continuationStateTier55 = rangeContinuationStateMap.get(String(input.symbol));
+                const judgmentMetaTier55 = (judgment.metadata ?? {}) as Record<string, unknown>;
+                const execMetaTier55 = execMeta as Record<string, unknown>;
+                const authSnapTier55 = authoritativeInput.snapshot as unknown as Record<string, unknown>;
+                const inputSnapTier55 = input.snapshot as unknown as Record<string, unknown>;
+                const hasSameSidePosTier55 = v2State.currentPositions.some(
+                    (p) => p.symbol === input.symbol && String(p.side).toLowerCase() === "short"
+                );
+                const hasOppositeSidePosTier55 = v2State.currentPositions.some(
+                    (p) => p.symbol === input.symbol && String(p.side).toLowerCase() === "long"
+                );
+                const tier55ClosedClose =
+                    typeof authSnapTier55.closedClose === "number"
+                        ? authSnapTier55.closedClose
+                        : (typeof inputSnapTier55.closedClose === "number"
+                            ? inputSnapTier55.closedClose
+                            : null);
+                fastTrendShiftLowerBreakdownConfirmed = evaluateLowerBreakdownShortConfirmed({
+                    trendSideCandidate: "short",
+                    zone,
+                    boxBreakSide,
+                    boxLow: Number(authSnapTier55.boxLow ?? inputSnapTier55.boxLow ?? 0),
+                    boxHigh: Number(authSnapTier55.boxHigh ?? inputSnapTier55.boxHigh ?? 0),
+                    closedClose: tier55ClosedClose,
+                    lastPrice: Number(authSnapTier55.lastPrice ?? inputSnapTier55.lastPrice ?? 0),
+                    previousConfirmedBoxLow: continuationStateTier55?.previousConfirmedBoxLow ?? null,
+                    previousConfirmedBoxHigh: continuationStateTier55?.previousConfirmedBoxHigh ?? null,
+                    emaGap,
+                    htfEntryPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+                    htfRequiresStrongerConfirmation: judgment.htf_requires_stronger_confirmation === true,
+                    counterTrendRisk: judgment.counter_trend_risk === true,
+                    riskLongAllow,
+                    riskShortAllow,
+                    allowNewLong,
+                    allowNewShort,
+                    whipsawShockRecheckActive,
+                    hardBlockPresent,
+                    paperExecutionReady,
+                    signedExecutionReady,
+                    hasSameSidePosition: hasSameSidePosTier55,
+                    hasOppositeSidePosition: hasOppositeSidePosTier55,
+                    judgmentSubtype: String(judgment.subtype ?? ""),
+                    rangePhase: judgment.rangePhase ?? null,
+                    transitionPhase: judgment.transitionPhase ?? null,
+                    continuationDirection:
+                        typeof execMetaTier55.continuationDirection === "string"
+                            ? String(execMetaTier55.continuationDirection)
+                            : continuationStateTier55?.direction ?? null,
+                    continuationPhase:
+                        typeof execMetaTier55.continuationPhase === "string"
+                            ? String(execMetaTier55.continuationPhase)
+                            : continuationStateTier55?.phase ?? null,
+                    retestConfirmed:
+                        execMetaTier55.retest_confirmed === true ||
+                        judgmentMetaTier55.retestConfirmed === true ||
+                        authSnapTier55.retestConfirmed === true ||
+                        inputSnapTier55.retestConfirmed === true,
+                    retestTouched:
+                        execMetaTier55.retestTouched === true ||
+                        judgmentMetaTier55.retestTouched === true ||
+                        authSnapTier55.retestTouched === true ||
+                        inputSnapTier55.retestTouched === true,
+                    retestRejected:
+                        execMetaTier55.retestRejected === true ||
+                        judgmentMetaTier55.retestRejected === true ||
+                        authSnapTier55.retestRejected === true ||
+                        inputSnapTier55.retestRejected === true,
+                    reversalConfirmed,
+                    execReason: typeof execution.reason === "string" ? execution.reason : null,
+                    lateChaseBlocked: execMetaTier55.late_chase_blocked === true,
+                    retestRequired: execMetaTier55.retest_required === true
+                }).confirmed;
+            }
+            const shockDownBlanketException = shock === "DOWN" && !isFastTrendShiftLowerShort;
+            const shortException = isFastTrendShiftLowerShort
+                ? fastTrendShiftLowerBreakdownConfirmed
+                : (
+                    breakdownRetestFailure ||
+                    boxBreakSideFinal === "lower" ||
+                    isShockReactionDown ||
+                    shockDownBlanketException ||
+                    (isTrendQualifiedFinalPromotion && sideFinal === trendSideCandidate) ||
+                    (isStairStepPromotion && sideFinal === "short") ||
+                    (isTrendContinuationRevalidatedPromotion && sideFinal === "short") ||
+                    (isPolarityReversalMicroProbePromotion && sideFinal === "short")
+                );
             const htfStrongBullish = htfHardBlockReason === "STRONG_BULLISH_HTF_ALIGNMENT";
 
             if (!shortException || (htfStrongBullish && !isPolarityReversalMicroProbePromotion)) {
@@ -8086,6 +8198,9 @@ export function adaptV2Input(
                         : (typeof snapshot.latestCandleClose === "number" && Number.isFinite(snapshot.latestCandleClose)
                             ? snapshot.latestCandleClose
                             : null)),
+            retestConfirmed: snapshot.retestConfirmed === true,
+            retestTouched: snapshot.retestTouched === true,
+            retestRejected: snapshot.retestRejected === true,
             swingHighSlope: snapshot.swingHighSlope ?? 0,
             swingLowSlope: snapshot.swingLowSlope ?? 0,
             rangeCenterSlope: snapshot.rangeCenterSlope ?? 0,

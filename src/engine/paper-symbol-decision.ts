@@ -220,6 +220,9 @@ export type SymbolSnapshotLike = Readonly<{
   regimeExitRisk?: number;
   /** ?섏씠?⑥씠: 諛뺤뒪 遺뺢눼 諛⑺뼢 */
   boxBreakSide?: "upper" | "lower" | "none";
+  retestConfirmed?: boolean;
+  retestTouched?: boolean;
+  retestRejected?: boolean;
   signal_strength?: "strong" | "ok" | "weak";
   trendOk?: boolean;
   /** ?섏씠?⑥씠: ?꾩옱 ?덉쭚 ?곹깭 */
