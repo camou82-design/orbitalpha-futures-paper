@@ -206,7 +206,8 @@ import {
     MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE,
     MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,
     MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE,
-    resolveEffectiveLiveOrderNotionalCap
+    resolveEffectiveLiveOrderNotionalCap,
+    resolveUltimateSafetyCapForOrderSizing
 } from "../engine-v2/risk-sizing/equity-adaptive-sizing";
 import { buildProtectiveOrderMatchProof, protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
 import {
@@ -342,8 +343,14 @@ import {
   buildManualTakeoverAuthorityProof,
   buildManualTakeoverKey,
   evaluateManualTakeoverActionGuard,
+  expireStaleManualTakeoverEntries,
+  syncManualTakeoverLifecycleEntries,
+  countAuthoritativeEngineOwnedExchangeOrders,
+  shouldLatchManualProtectiveOnlyIntervention,
+  hasOpenPositionForManualTakeoverSymbol,
   isAuthoritativeBotOwnedAlgoOrder,
   isAuthoritativeBotOwnedPendingOrder,
+  isOperatorManagedOpenPosition,
   type ManualTakeoverRecord,
   type ManualTakeoverStoreDoc,
   type ManualTakeoverReason
@@ -1958,9 +1965,11 @@ export class PaperEngine {
   private lastV2ExitAuthorityProofBySymbol = new Map<string, string>();
   /** Manual close cooldown to prevent immediate re-entry. Key: symbol */
   private manualCloseCooldownBySymbol = new Map<string, { side: "long" | "short"; until: number }>();
-  /** Persistent manual takeover latch by symbol / symbol:side. */
+  /** Persistent manual takeover latch by symbol / symbol:side (position-cycle scoped). */
   private manualTakeoverBySymbol = new Map<string, ManualTakeoverRecord>();
   private manualTakeoverLoaded = false;
+  private lastOpenPositionsForTakeover: PaperOpenPositionRecord[] = [];
+  private manualTakeoverEngineOrderCountByKey = new Map<string, number>();
   /** Cached active algo orders from exchange for auto-repair logic. */
   private cachedOpsAlgos: any[] = [];
   private instrumentCache = new Map<string, OkxSwapInstrumentSizing>();
@@ -2332,6 +2341,68 @@ export class PaperEngine {
   }
 
   /**
+   * Detect external protective-only mutation from exchange scan and latch takeover
+   * BEFORE runEngineV2 / tryPaperPositionClose / ensureProtectiveStopOrder.
+   */
+  private async latchManualProtectiveInterventionsFromExchangeScan(
+    nowTs: number,
+    paperOpens: PaperOpenPositionRecord[]
+  ): Promise<boolean> {
+    await this.ensureManualTakeoverLoaded();
+    if (!this.okxDemo || !this.opsOrdersScanEverDone) return false;
+    const surfaceScan = buildPositionOpsSurface({
+      now: nowTs,
+      paperOpens,
+      okxPayload: this.lastLivePositionsPayload,
+      pendingOrders: this.cachedOpsPending,
+      algoOrders: this.cachedOpsAlgos,
+      ordersScanPerformed: true,
+      ordersScanErrors: this.cachedOpsFetchErrors,
+      instrumentByInstId: this.instrumentCache
+    });
+    const scanClean = this.cachedOpsFetchErrors.length === 0;
+    let latched = false;
+    for (const r of surfaceScan.rows) {
+      if (!(Math.abs(r.okx_pos_signed) > 0)) continue;
+      const ledgerPos = paperOpens.find((p) => p.symbol === r.symbol && p.side === r.side);
+      if (!ledgerPos) continue;
+      const isTakeover =
+        ledgerPos.manualTakeoverActive === true ||
+        ledgerPos.lifecycleState === "OPERATOR_MANAGED" ||
+        this.isManualTakeoverActive(r.symbol, r.side);
+      if (
+        !isTakeover &&
+        shouldLatchManualProtectiveOnlyIntervention({
+          ledger: ledgerPos,
+          reduceOnlyProtectiveFound: r.reduce_only_protective_found,
+          matchingProtectivePendingCount: r.matching_protective_pending_count,
+          scanClean,
+          nowMs: nowTs
+        })
+      ) {
+        await this.activateManualTakeover({
+          symbol: r.symbol,
+          side: r.side,
+          reason: "MANUAL_PROTECTIVE_CHANGE",
+          open: ledgerPos,
+          positionCycleId: ledgerPos.positionCycleId,
+          nowMs: nowTs
+        });
+        latched = true;
+        this.logger.warn("V2_MANUAL_PROTECTIVE_ONLY_TAKEOVER_PRE_V2_PROOF", {
+          symbol: r.symbol,
+          side: r.side,
+          reason: "MANUAL_PROTECTIVE_CHANGE",
+          contracts_unchanged: true,
+          reduce_only_protective_found: r.reduce_only_protective_found,
+          ordering: "before_runEngineV2_and_tryPaperPositionClose"
+        });
+      }
+    }
+    return latched;
+  }
+
+  /**
    * Post-entry watch: OKX positions vs ledger, protective SL+TP proof on reduce-only algos,
    * hard-blocks new entries when exposure is unprotected, and runs `ensureProtectiveStopOrder`
    * every successful order scan so missing protection is repaired with real OKX submits.
@@ -2615,10 +2686,40 @@ export class PaperEngine {
         });
 
         let ensureOutcome: { success: boolean; modified: boolean } | null = null;
-        const isTakeover =
+        let isTakeover =
           ledgerPos?.manualTakeoverActive === true ||
           ledgerPos?.lifecycleState === "OPERATOR_MANAGED" ||
           this.isManualTakeoverActive(r.symbol, r.side);
+
+        if (
+          !isTakeover &&
+          ledgerPos &&
+          shouldLatchManualProtectiveOnlyIntervention({
+            ledger: ledgerPos,
+            reduceOnlyProtectiveFound: r.reduce_only_protective_found,
+            matchingProtectivePendingCount: r.matching_protective_pending_count,
+            scanClean,
+            nowMs: nowTs
+          })
+        ) {
+          await this.activateManualTakeover({
+            symbol: r.symbol,
+            side: r.side,
+            reason: "MANUAL_PROTECTIVE_CHANGE",
+            open: ledgerPos,
+            positionCycleId: ledgerPos.positionCycleId,
+            nowMs: nowTs
+          });
+          isTakeover = true;
+          this.logger.warn("V2_MANUAL_PROTECTIVE_ONLY_TAKEOVER_PROOF", {
+            symbol: r.symbol,
+            side: r.side,
+            reason: "MANUAL_PROTECTIVE_CHANGE",
+            contracts_unchanged: true,
+            reduce_only_protective_found: r.reduce_only_protective_found,
+            ordering: "ops_watch_post_v2_reinforcement"
+          });
+        }
 
         if (isTakeover) {
           if (ledgerPos && !ledgerPos.manualTakeoverActive) {
@@ -4027,39 +4128,32 @@ export class PaperEngine {
         until: nowTs + 300_000
       });
 
-      // [MANUAL_TAKEOVER] Latch persistent manual takeover until explicit operator re-arm
-      const takeoverRec = createManualTakeoverRecord({
-        symbol: open.symbol,
-        side: open.side,
-        reason: "MANUAL_FULL_CLOSE",
-        positionCycleId: open.positionCycleId,
-        nowMs: nowTs
-      });
-      this.manualTakeoverBySymbol.set(buildManualTakeoverKey(open.symbol, open.side), takeoverRec);
-      this.manualTakeoverBySymbol.set(String(open.symbol).toUpperCase(), takeoverRec);
-      void this.persistManualTakeoverDoc();
+      // Position flat: cancel engine-owned orders; takeover clears only after exchange scan confirms zero.
+      await this.cancelEngineOwnedOrdersOnTakeover(open.symbol, open.side);
 
       this.logger.info("MANUAL_CLOSE_REENTRY_GUARD_PROOF", {
         symbol: open.symbol,
         side: open.side,
         cooldown_until: nowTs + 300_000,
+        takeover_latch: "flat_pending_engine_order_cleanup",
         reason: "manual_full_close_reconciled"
       });
 
-      // Also cancel any stale entry-purpose open orders for this symbol to prevent unwanted re-entry
+      // Cancel stale bot-owned entry orders only — never operator orders.
       if (this.okxDemo) {
          try {
              const instId = toOkxSwapInstId(open.symbol as MarketSymbol);
              const pendRes = await this.okxDemo.getOrdersPending({ instType: "SWAP", instId });
              if (pendRes.ok && pendRes.value) {
                  for (const ord of pendRes.value) {
-                    const isReduceOnly = ord.reduceOnly === "true" || (ord as any).reduceOnly === true;
-                    if (!isReduceOnly && ord.ordId) {
+                    if (!isAuthoritativeBotOwnedPendingOrder(ord, [open])) continue;
+                    if (ord.ordId) {
                         this.logger.info("OKX_STALE_ENTRY_ORDER_CANCEL_AFTER_MANUAL_CLOSE_PROOF", {
                             symbol: open.symbol,
                             ordId: ord.ordId,
                             side: ord.side,
-                            posSide: ord.posSide
+                            posSide: ord.posSide,
+                            bot_owned: true
                         });
                         await this.okxDemo?.cancelOrder(toOkxSwapInstId(open.symbol as MarketSymbol), String(ord.ordId));
                     }
@@ -6434,6 +6528,15 @@ export class PaperEngine {
     snapshot_write_ms = Date.now() - tSnapWrite0;
 
     const opensBeforeClose = await this.positions.loadOpenAll();
+    await this.syncManualTakeoverLifecycleFromOpens(opensBeforeClose);
+    const protectiveLatchBeforeV2 = await this.latchManualProtectiveInterventionsFromExchangeScan(
+      fetchedAt,
+      opensBeforeClose
+    );
+    if (protectiveLatchBeforeV2) {
+      await this.positions.saveOpenAll(opensBeforeClose);
+      this.bundleDirty = true;
+    }
     let volatilityProxy = 0.5;
     if (snapshots.length > 0) {
       let sum = 0;
@@ -10763,7 +10866,108 @@ export class PaperEngine {
   }
 
   public isManualTakeoverActive(symbol: string, side?: "long" | "short" | null): boolean {
-    return isManualTakeoverActiveForSymbol(symbol, side, this.manualTakeoverBySymbol);
+    const symKey = String(symbol).trim().toUpperCase();
+    const specificKey = buildManualTakeoverKey(symKey, side ?? undefined);
+    const engineOwnedOrderCount =
+      this.manualTakeoverEngineOrderCountByKey.get(specificKey) ??
+      this.manualTakeoverEngineOrderCountByKey.get(symKey) ??
+      null;
+    return isManualTakeoverActiveForSymbol(
+      symbol,
+      side,
+      this.manualTakeoverBySymbol,
+      this.lastOpenPositionsForTakeover,
+      { engineOwnedOrderCount }
+    );
+  }
+
+  private async refreshManualTakeoverEngineOrderCounts(
+    openPositions: ReadonlyArray<PaperOpenPositionRecord>
+  ): Promise<void> {
+    this.manualTakeoverEngineOrderCountByKey.clear();
+    if (!this.okxDemo) return;
+    const symbols = new Set<string>();
+    for (const rec of this.manualTakeoverBySymbol.values()) {
+      if (rec.manualTakeoverActive === true) symbols.add(rec.manualTakeoverSymbol);
+    }
+    for (const sym of symbols) {
+      try {
+        const instId = toOkxSwapInstId(sym as MarketSymbol);
+        const [pendRes, algoRes] = await Promise.all([
+          this.okxDemo.getOrdersPending({ instType: "SWAP", instId }),
+          this.okxDemo.getOrdersAlgoPending({ instType: "SWAP", instId })
+        ]);
+        const symOpens = openPositions.filter((p) => String(p.symbol).toUpperCase() === sym);
+        for (const open of symOpens) {
+          const key = buildManualTakeoverKey(sym, open.side);
+          const count = countAuthoritativeEngineOwnedExchangeOrders({
+            symbol: sym,
+            side: open.side,
+            openPositions: symOpens,
+            pendingOrders: pendRes.ok && Array.isArray(pendRes.value) ? pendRes.value : [],
+            algoOrders: algoRes.ok && Array.isArray(algoRes.value) ? algoRes.value : []
+          });
+          this.manualTakeoverEngineOrderCountByKey.set(key, count);
+          this.manualTakeoverEngineOrderCountByKey.set(sym, Math.max(this.manualTakeoverEngineOrderCountByKey.get(sym) ?? 0, count));
+        }
+        if (symOpens.length === 0) {
+          const count = countAuthoritativeEngineOwnedExchangeOrders({
+            symbol: sym,
+            openPositions: [],
+            pendingOrders: pendRes.ok && Array.isArray(pendRes.value) ? pendRes.value : [],
+            algoOrders: algoRes.ok && Array.isArray(algoRes.value) ? algoRes.value : []
+          });
+          this.manualTakeoverEngineOrderCountByKey.set(sym, count);
+        }
+      } catch (e) {
+        this.logger.error("MANUAL_TAKEOVER_ENGINE_ORDER_SCAN_ERROR", { symbol: sym, error: String(e) });
+      }
+    }
+  }
+
+  private async syncManualTakeoverLifecycleFromOpens(
+    openPositions: ReadonlyArray<PaperOpenPositionRecord>
+  ): Promise<void> {
+    await this.ensureManualTakeoverLoaded();
+    this.lastOpenPositionsForTakeover = [...openPositions];
+    await this.refreshManualTakeoverEngineOrderCounts(openPositions);
+    const engineCounts: Record<string, number> = {};
+    for (const [k, v] of this.manualTakeoverEngineOrderCountByKey.entries()) {
+      engineCounts[k] = v;
+    }
+    const pendingCleanup: string[] = [];
+    for (const [key, rec] of this.manualTakeoverBySymbol.entries()) {
+      if (rec.manualTakeoverActive !== true) continue;
+      const sym = rec.manualTakeoverSymbol;
+      const side = rec.manualTakeoverSide;
+      const stillOpen = hasOpenPositionForManualTakeoverSymbol(
+        sym,
+        key === sym ? null : side,
+        openPositions
+      );
+      if (!stillOpen && (engineCounts[key] ?? engineCounts[sym] ?? 0) > 0) {
+        pendingCleanup.push(key);
+        void this.cancelEngineOwnedOrdersOnTakeover(sym, side);
+      }
+    }
+    if (pendingCleanup.length > 0) {
+      this.logger.warn("V2_MANUAL_TAKEOVER_FLAT_PENDING_ENGINE_ORDER_CLEANUP", {
+        keys: pendingCleanup,
+        reason: "MANUAL_TAKEOVER_FLAT_PENDING_ENGINE_ORDER_CLEANUP"
+      });
+    }
+    const cleared = syncManualTakeoverLifecycleEntries(
+      this.manualTakeoverBySymbol,
+      openPositions,
+      engineCounts
+    );
+    if (cleared.length > 0) {
+      await this.persistManualTakeoverDoc();
+      this.logger.info("V2_MANUAL_TAKEOVER_POSITION_CYCLE_EXPIRED_PROOF", {
+        cleared_keys: cleared,
+        reason: "position_flat_and_engine_owned_orders_zero"
+      });
+    }
   }
 
   public async ensureManualTakeoverLoaded(): Promise<void> {
@@ -12246,10 +12450,17 @@ export class PaperEngine {
       available_balance_usdt: this.okxAvailableBalanceUsdt,
       ...this.okxAuthProofContext()
     };
-    const liveCapResolution = resolveEffectiveLiveOrderNotionalCap({
-      emergencyCapUsdt: this.config.okxLiveEmergencyMaxOrderNotionalUsdt,
-      legacyStaticCapUsdt: this.config.okxLiveMaxOrderNotionalUsdt
-    });
+    const liveCapResolution =
+      input.authoritySource === "v2"
+        ? resolveUltimateSafetyCapForOrderSizing({
+            v2AuthorityEntry: true,
+            emergencyCapUsdt: this.config.okxLiveEmergencyMaxOrderNotionalUsdt,
+            legacyStaticCapUsdt: this.config.okxLiveMaxOrderNotionalUsdt
+          })
+        : resolveEffectiveLiveOrderNotionalCap({
+            emergencyCapUsdt: this.config.okxLiveEmergencyMaxOrderNotionalUsdt,
+            legacyStaticCapUsdt: this.config.okxLiveMaxOrderNotionalUsdt
+          });
 
     const rawSymbolStr = String(input.symbol);
     const clOrdId_alnum_only = /^[A-Za-z0-9]+$/.test(input.clOrdId);
@@ -12485,7 +12696,10 @@ export class PaperEngine {
       const okx_available_balance_usdt = this.okxAvailableBalanceUsdt;
 
       // 3. Dynamic Capping (Execution Reality)
-      let static_safety_cap = liveCapResolution.effectiveLiveCapUsdt;
+      let static_safety_cap =
+        input.authoritySource === "v2"
+          ? liveCapResolution.emergencyCapUsdt
+          : liveCapResolution.effectiveLiveCapUsdt;
 
       // 3.5 Leverage Sync for V2
       if (input.authoritySource === "v2" && input.appliedLeverage != null && okx_confirmed_leverage != null && okx_confirmed_leverage !== input.appliedLeverage) {
@@ -12537,8 +12751,10 @@ export class PaperEngine {
       const staticCapResolution = resolveLiveSubmitStaticSafetyCap({
         authoritySource: input.authoritySource,
         okxLiveStaticNotionalCapEnabled: this.config.okxLiveStaticNotionalCapEnabled,
-        staticSafetyCapUsdt: static_safety_cap,
-        intendedNotionalUsdt: final_submitted_notional_usdt
+        staticSafetyCapUsdt:
+          input.authoritySource === "v2" ? null : liveCapResolution.effectiveLiveCapUsdt,
+        intendedNotionalUsdt: final_submitted_notional_usdt,
+        emergencyUltimateCapUsdt: liveCapResolution.emergencyCapUsdt
       });
       final_submitted_notional_usdt = staticCapResolution.finalSubmittedNotionalUsdt;
       if (staticCapResolution.finalSizeSource === "static_safety_cap") {
@@ -13876,6 +14092,28 @@ export class PaperEngine {
     });
 
     for (const openRaw of opens) {
+      if (
+        openRaw.manualTakeoverActive === true ||
+        isOperatorManagedOpenPosition(openRaw) ||
+        this.isManualTakeoverActive(openRaw.symbol, openRaw.side)
+      ) {
+        this.logger.info("V2_MANUAL_TAKEOVER_OBSERVE_ONLY_POSITION_CLOSE_LOOP", {
+          symbol: openRaw.symbol,
+          side: openRaw.side,
+          lifecycle_state: openRaw.lifecycleState ?? null,
+          manual_takeover_active: openRaw.manualTakeoverActive === true,
+          flowId: `${openRaw.symbol}:${openRaw.side}:${openRaw.openedAt}`,
+          blocked_actions: [
+            "stop_backfill",
+            "partial_tp",
+            "v2_exit",
+            "dispatchOkxClose",
+            "protective_reconcile"
+          ]
+        });
+        remaining.push(openRaw);
+        continue;
+      }
       if (openRaw.symbol === "BTCUSDT") {
         if (this.isBtcPositionManagementBlocked()) {
           await this.logAndSuppressBtcUsdtAction("tryPaperPositionClose normal loop", openRaw.side, ["CLOSE", "PARTIAL", "PARTIAL_CLOSE", "REVERSE", "close history write", "ledger prune"]);
@@ -25132,15 +25370,17 @@ export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
   okxLiveStaticNotionalCapEnabled: boolean;
   staticSafetyCapUsdt: number | null;
   intendedNotionalUsdt: number;
+  emergencyUltimateCapUsdt?: number | null;
 }>): Readonly<{
   finalSubmittedNotionalUsdt: number;
-  finalSizeSource: "v2_risk" | "static_safety_cap";
+  finalSizeSource: "v2_risk" | "static_safety_cap" | "emergency_ultimate_cap";
   skipStaticCapForV2Authority: boolean;
 }> {
-  const skipStaticCapForV2Authority = false;
+  const skipStaticCapForV2Authority = input.authoritySource === "v2";
   let finalSubmittedNotionalUsdt = input.intendedNotionalUsdt;
-  let finalSizeSource: "v2_risk" | "static_safety_cap" = "v2_risk";
+  let finalSizeSource: "v2_risk" | "static_safety_cap" | "emergency_ultimate_cap" = "v2_risk";
   if (
+    !skipStaticCapForV2Authority &&
     input.okxLiveStaticNotionalCapEnabled &&
     input.staticSafetyCapUsdt != null &&
     input.staticSafetyCapUsdt > 0 &&
@@ -25148,6 +25388,16 @@ export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
   ) {
     finalSubmittedNotionalUsdt = input.staticSafetyCapUsdt;
     finalSizeSource = "static_safety_cap";
+  }
+  const emergencyUltimate = input.emergencyUltimateCapUsdt;
+  if (
+    skipStaticCapForV2Authority &&
+    emergencyUltimate != null &&
+    emergencyUltimate > 0 &&
+    finalSubmittedNotionalUsdt > emergencyUltimate
+  ) {
+    finalSubmittedNotionalUsdt = emergencyUltimate;
+    finalSizeSource = "emergency_ultimate_cap";
   }
   return { finalSubmittedNotionalUsdt, finalSizeSource, skipStaticCapForV2Authority };
 }

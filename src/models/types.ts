@@ -984,7 +984,7 @@ export type PaperOpenPositionRecord = {
   maxFavorablePrice?: number;
   maxAdversePrice?: number;
 
-  /** Persistent manual takeover authority latch — set on operator manual intervention; clears ONLY on explicit operator re-arm. */
+  /** Position-cycle manual takeover latch — active while operator-managed position is open; expires when flat. */
   manualTakeoverActive?: boolean;
   manualTakeoverSymbol?: string;
   manualTakeoverSide?: "long" | "short";

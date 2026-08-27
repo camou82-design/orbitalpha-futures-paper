@@ -45,6 +45,8 @@ export type EvaluateEquityAdaptiveSizingInput = Readonly<{
     instrumentSizing?: OkxSwapInstrumentSizing | null;
     /** HTF PROBE_ONLY sizing cap — applied once to pre-lot notional for ENTRY orders. */
     htfSizeMultiplier?: number;
+    /** V2 risk-authoritative entries skip legacy 40 USDT; emergency cap remains ultimate ceiling. */
+    v2AuthorityEntry?: boolean;
 }>;
 
 export type EquityAdaptiveSizingResult = Readonly<{
@@ -76,8 +78,11 @@ export type EquityAdaptiveSizingResult = Readonly<{
     legacyStaticCapUsdt: number | null;
     /** min(emergency, legacy) binding cap for live signed orders. */
     effectiveLiveCapUsdt: number | null;
+    /** Cap applied inside evaluateEquityAdaptiveSizing pre-lot min(). */
+    ultimateSafetyCapUsdt: number | null;
     legacyCapSource: string | null;
     htfSizeMultiplierApplied: number;
+    v2AuthorityEntryApplied?: boolean;
 }>;
 
 export type LiveOrderNotionalCapResolution = Readonly<{
@@ -122,6 +127,32 @@ export function resolveEffectiveLiveOrderNotionalCap(input: Readonly<{
         effectiveLiveCapUsdt,
         legacyCapSource
     };
+}
+
+/**
+ * V2 risk-authoritative sizing uses emergency absolute ceiling only.
+ * Legacy OKX_LIVE_MAX_ORDER_NOTIONAL_USDT (e.g. 40) applies to non-V2 / legacy submit paths.
+ */
+export function resolveUltimateSafetyCapForOrderSizing(input: Readonly<{
+    v2AuthorityEntry?: boolean;
+    emergencyCapUsdt?: number | null;
+    legacyStaticCapUsdt?: number | null;
+}>): LiveOrderNotionalCapResolution {
+    const emergencyCapUsdt = positiveCapUsdt(input.emergencyCapUsdt);
+    const legacyStaticCapUsdt = positiveCapUsdt(input.legacyStaticCapUsdt);
+    if (input.v2AuthorityEntry === true) {
+        return {
+            cap: emergencyCapUsdt,
+            emergencyCapUsdt,
+            legacyStaticCapUsdt,
+            effectiveLiveCapUsdt: emergencyCapUsdt,
+            legacyCapSource:
+                emergencyCapUsdt != null
+                    ? "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT"
+                    : null
+        };
+    }
+    return resolveEffectiveLiveOrderNotionalCap({ emergencyCapUsdt, legacyStaticCapUsdt });
 }
 
 export function qualityMultiplierFromGrade(grade: string | null | undefined): number | null {
@@ -201,10 +232,12 @@ export function evaluateEquityAdaptiveSizing(
     const maxAdverseAddonUsdt = equity * MAX_ADVERSE_ADDON_EQUITY_MULTIPLE;
     const marginReserveRatio = input.marginReserveRatio ?? MARGIN_RESERVE_RATIO_DEFAULT;
     const usableAvailableBalanceUsdt = input.availableBalanceUsdt * (1 - marginReserveRatio);
-    const emergency = resolveEmergencyAbsoluteCap({
+    const emergency = resolveUltimateSafetyCapForOrderSizing({
+        v2AuthorityEntry: input.v2AuthorityEntry === true,
         emergencyCapUsdt: input.emergencyAbsoluteCapUsdt,
         legacyStaticCapUsdt: input.legacyStaticCapUsdt
     });
+    const ultimateSafetyCapUsdt = emergency.effectiveLiveCapUsdt;
 
     const baseFail = (
         partial: Partial<EquityAdaptiveSizingResult> & { blockReason: string }
@@ -234,6 +267,7 @@ export function evaluateEquityAdaptiveSizing(
         legacyStaticCapUsdt: emergency.legacyStaticCapUsdt,
         effectiveLiveCapUsdt: emergency.effectiveLiveCapUsdt,
         legacyCapSource: emergency.legacyCapSource,
+        ultimateSafetyCapUsdt,
         htfSizeMultiplierApplied: 1,
         ...partial
     });
@@ -274,7 +308,7 @@ export function evaluateEquityAdaptiveSizing(
             remainingSymbolCapacity,
             remainingAccountCapacity,
             input.policyRequestedNotionalUsdt ?? Number.POSITIVE_INFINITY,
-            emergency.effectiveLiveCapUsdt ?? Number.POSITIVE_INFINITY
+            ultimateSafetyCapUsdt ?? Number.POSITIVE_INFINITY
         );
     } else if (input.orderKind === "ADVERSE_ADDON") {
         const policyRequested = Math.max(0, input.policyRequestedNotionalUsdt ?? 0);
@@ -284,7 +318,7 @@ export function evaluateEquityAdaptiveSizing(
             remainingSymbolCapacity,
             remainingAccountCapacity,
             input.adverseRiskBudgetAllowedNotional ?? Number.POSITIVE_INFINITY,
-            emergency.effectiveLiveCapUsdt ?? Number.POSITIVE_INFINITY
+            ultimateSafetyCapUsdt ?? Number.POSITIVE_INFINITY
         );
     } else {
         const policyRequested = Math.max(0, input.policyRequestedNotionalUsdt ?? 0);
@@ -292,7 +326,7 @@ export function evaluateEquityAdaptiveSizing(
             policyRequested,
             remainingSymbolCapacity,
             remainingAccountCapacity,
-            emergency.effectiveLiveCapUsdt ?? Number.POSITIVE_INFINITY
+            ultimateSafetyCapUsdt ?? Number.POSITIVE_INFINITY
         );
     }
 
@@ -446,7 +480,9 @@ export function evaluateEquityAdaptiveSizing(
         emergencyCapUsdt: emergency.emergencyCapUsdt,
         legacyStaticCapUsdt: emergency.legacyStaticCapUsdt,
         effectiveLiveCapUsdt: emergency.effectiveLiveCapUsdt,
+        ultimateSafetyCapUsdt,
         legacyCapSource: emergency.legacyCapSource,
-        htfSizeMultiplierApplied
+        htfSizeMultiplierApplied,
+        v2AuthorityEntryApplied: input.v2AuthorityEntry === true
     };
 }

@@ -30,7 +30,8 @@ import {
     MAX_ADVERSE_ADDON_EQUITY_MULTIPLE,
     MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE,
     RISK_PER_TRADE_PCT,
-    resolveEffectiveLiveOrderNotionalCap
+    resolveEffectiveLiveOrderNotionalCap,
+    resolveUltimateSafetyCapForOrderSizing
 } from "./risk-sizing/equity-adaptive-sizing";
 import {
     FTS_STRUCTURAL_STOP_BASIS,
@@ -4799,6 +4800,72 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    // Strong HTF stack counter-trend RANGE entries require explicit reversal / failure evidence.
+    if (v2DecisionAfterPromotion === "ENTER" && judgment.regime_final === "RANGE") {
+        const sideFinal = v2SideAfterPromotion;
+        const htfBiases = [
+            String((judgment as { htf_1h_bias?: string }).htf_1h_bias ?? "").toUpperCase(),
+            String((judgment as { htf_4h_bias?: string }).htf_4h_bias ?? "").toUpperCase(),
+            String((judgment as { htf_1d_bias?: string }).htf_1d_bias ?? "").toUpperCase()
+        ];
+        const bullishHtfCount = htfBiases.filter((b) => b === "BULLISH").length;
+        const bearishHtfCount = htfBiases.filter((b) => b === "BEARISH").length;
+        const failedBreakoutReclaim =
+            judgment.metadata?.failed_breakdown_reclaim === true ||
+            judgment.metadata?.failed_breakout_reclaim === true ||
+            judgment.metadata?.breakdown_retest_failed === true ||
+            judgment.subtype === "BREAKDOWN_RETEST_FAILED";
+        const upperFailureShortEvidence =
+            sideFinal === "short" &&
+            zone === "upper" &&
+            (reversalConfirmed === true ||
+                judgment.subtype === "BREAKDOWN_RETEST_FAILED" ||
+                judgment.metadata?.retestRejected === true ||
+                judgment.metadata?.box_upper_breakout_hold === false ||
+                judgment.metadata?.upper_failure_short === true ||
+                shockReactionPromotionType === "upper_failure_short" ||
+                shockReactionPromotionType === "upper_reversal_confirmed_short");
+        const lowerReversalLongEvidence =
+            sideFinal === "long" &&
+            zone === "lower" &&
+            (reversalConfirmed === true ||
+                judgment.metadata?.reclaimConfirmed === true ||
+                judgment.metadata?.reclaim_confirmed === true ||
+                judgment.metadata?.box_lower_breakdown_hold === false ||
+                judgment.metadata?.lower_reversal_confirmed === true ||
+                shockReactionPromotionType === "lower_reversal_confirmed_long");
+        const hasExplicitReversalEvidence =
+            sideFinal === "short" ? upperFailureShortEvidence : sideFinal === "long" ? lowerReversalLongEvidence : false;
+
+        if (
+            sideFinal === "short" &&
+            zone === "upper" &&
+            bullishHtfCount >= 2 &&
+            !hasExplicitReversalEvidence
+        ) {
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = "HTF_COUNTER_TREND_RANGE_NO_REVERSAL";
+            promotionApplied = false;
+            promotionBlockReason = "HTF_COUNTER_TREND_RANGE_NO_REVERSAL";
+            expectedMissingCondition = "HTF_COUNTER_TREND_RANGE_NO_REVERSAL";
+            expectedNextAction = "WAIT_FOR_CONFIRMED_REVERSAL_OR_FAILED_BREAKOUT";
+        } else if (
+            sideFinal === "long" &&
+            zone === "lower" &&
+            bearishHtfCount >= 2 &&
+            !hasExplicitReversalEvidence
+        ) {
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = "HTF_COUNTER_TREND_RANGE_NO_REVERSAL";
+            promotionApplied = false;
+            promotionBlockReason = "HTF_COUNTER_TREND_RANGE_NO_REVERSAL";
+            expectedMissingCondition = "HTF_COUNTER_TREND_RANGE_NO_REVERSAL";
+            expectedNextAction = "WAIT_FOR_CONFIRMED_REVERSAL_OR_FAILED_BREAKOUT";
+        }
+    }
+
     // Tier 5.5: Side-Zone Mismatch Hard Guard (V2 Hard Protection)
     if (v2DecisionAfterPromotion === "ENTER") {
         const sideFinal = v2SideAfterPromotion;
@@ -6110,8 +6177,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 isLiveAuthority: true
             });
 
-            existingAccountNotionalUsdt = exposureAuthority.strategy_account_notional_usdt;
-            existingSymbolNotionalUsdt = exposureAuthority.strategy_symbol_notional_usdt;
+            existingAccountNotionalUsdt = exposureAuthority.final_account_notional_usdt;
+            existingSymbolNotionalUsdt = exposureAuthority.final_symbol_notional_usdt;
 
             const addOnPolicyMode =
                 (v2State as any).addOnPolicyMode ??
@@ -6174,8 +6241,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     console.info(JSON.stringify({
                         event: "V2_STRATEGY_EXPOSURE_PROOF",
                         symbol: String(input.symbol),
-                        strategy_account_notional_usdt: existingAccountNotionalUsdt,
-                        strategy_symbol_notional_usdt: existingSymbolNotionalUsdt,
+                        strategy_account_notional_usdt: exposureAuthority.strategy_account_notional_usdt,
+                        strategy_symbol_notional_usdt: exposureAuthority.strategy_symbol_notional_usdt,
+                        final_account_notional_usdt: exposureAuthority.final_account_notional_usdt,
+                        final_symbol_notional_usdt: exposureAuthority.final_symbol_notional_usdt,
                         okx_actual_account_notional_usdt: exposureAuthority.okx_account_notional_usdt,
                         manual_external_notional_usdt: exposureAuthority.manual_external_notional_usdt,
                         bot_v2_notional_usdt: exposureAuthority.bot_v2_notional_usdt,
@@ -6215,7 +6284,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     roundTripFeeRate: 0,
                     lastPrice: lastPx,
                     instrumentSizing,
-                    htfSizeMultiplier: htfProbeSizeMultiplier
+                    htfSizeMultiplier: htfProbeSizeMultiplier,
+                    v2AuthorityEntry: true
                 });
 
                 equityAdaptiveSizingAuthority = sizingResult;
@@ -6332,7 +6402,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Required Proof Log: LIVE_ORDER_SIZING_AUTHORITY_PROOF
     if (input.evaluationMode !== "diagnostic") {
-        const liveCapProof = resolveEffectiveLiveOrderNotionalCap({
+        const liveCapProof = resolveUltimateSafetyCapForOrderSizing({
+            v2AuthorityEntry: true,
             emergencyCapUsdt: input.config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null,
             legacyStaticCapUsdt: maxOrderNotionalUsdt ?? null
         });

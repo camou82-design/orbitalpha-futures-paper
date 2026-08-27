@@ -35,31 +35,200 @@ export function buildManualTakeoverKey(symbol: string, side?: string | null): st
   return s === "long" || s === "short" ? `${sym}:${s}` : sym;
 }
 
+export type ManualTakeoverOpenPositionRef = Readonly<{
+  symbol: string;
+  side: string;
+  status?: string;
+  lifecycleState?: string;
+  manualTakeoverActive?: boolean;
+  okxContracts?: number | null;
+  sizeUsd?: number | null;
+}>;
+
+function hasPositiveOpenSize(pos: ManualTakeoverOpenPositionRef): boolean {
+  const contracts = pos.okxContracts;
+  if (typeof contracts === "number" && Number.isFinite(contracts) && Math.abs(contracts) > 0) return true;
+  const sizeUsd = pos.sizeUsd;
+  return typeof sizeUsd === "number" && Number.isFinite(sizeUsd) && sizeUsd > 0;
+}
+
+/** Open ledger row for symbol (optional side filter) with live size. */
+export function hasOpenPositionForManualTakeoverSymbol(
+  symbol: string,
+  side: "long" | "short" | null | undefined,
+  openPositions: ReadonlyArray<ManualTakeoverOpenPositionRef>
+): boolean {
+  const symKey = String(symbol ?? "").trim().toUpperCase();
+  return openPositions.some((p) => {
+    if (String(p.symbol ?? "").trim().toUpperCase() !== symKey) return false;
+    if (p.status && p.status !== "open") return false;
+    if (!hasPositiveOpenSize(p)) return false;
+    if (side) return String(p.side).toLowerCase() === side;
+    return true;
+  });
+}
+
+export function isOperatorManagedOpenPosition(open: ManualTakeoverOpenPositionRef): boolean {
+  return (
+    open.manualTakeoverActive === true ||
+    open.lifecycleState === "OPERATOR_MANAGED" ||
+    open.lifecycleState === "EXTERNAL_MANUAL_POSITION" ||
+    open.lifecycleState === "EXTERNAL_MANUAL_MANAGED"
+  );
+}
+
+/**
+ * Position-cycle latch: takeover blocks automation only while a live position exists.
+ * Stale symbol keys (position flat) are treated as inactive.
+ */
 export function isManualTakeoverActiveForSymbol(
   symbol: string,
   side?: "long" | "short" | null,
-  activeMap?: ReadonlyMap<string, ManualTakeoverRecord> | Record<string, ManualTakeoverRecord> | null
+  activeMap?: ReadonlyMap<string, ManualTakeoverRecord> | Record<string, ManualTakeoverRecord> | null,
+  openPositions?: ReadonlyArray<ManualTakeoverOpenPositionRef> | null,
+  options?: Readonly<{ engineOwnedOrderCount?: number | null }>
 ): boolean {
   if (!activeMap) return false;
   const symKey = String(symbol ?? "").trim().toUpperCase();
+  let recordActive = false;
+  let recordSide: "long" | "short" | null = side ?? null;
   if (activeMap instanceof Map) {
     if (side) {
       const specific = activeMap.get(buildManualTakeoverKey(symKey, side));
-      if (specific && specific.manualTakeoverActive === true) return true;
+      if (specific && specific.manualTakeoverActive === true) {
+        recordActive = true;
+        recordSide = specific.manualTakeoverSide;
+      }
     }
-    const general = activeMap.get(symKey);
-    return general != null && general.manualTakeoverActive === true;
-  }
-  if (typeof activeMap === "object") {
+    if (!recordActive) {
+      const general = activeMap.get(symKey);
+      if (general != null && general.manualTakeoverActive === true) {
+        recordActive = true;
+        recordSide = general.manualTakeoverSide;
+      }
+    }
+  } else if (typeof activeMap === "object") {
     const obj = activeMap as Record<string, ManualTakeoverRecord>;
     if (side) {
       const specific = obj[buildManualTakeoverKey(symKey, side)];
-      if (specific && specific.manualTakeoverActive === true) return true;
+      if (specific && specific.manualTakeoverActive === true) {
+        recordActive = true;
+        recordSide = specific.manualTakeoverSide;
+      }
     }
-    const general = obj[symKey];
-    return general != null && general.manualTakeoverActive === true;
+    if (!recordActive) {
+      const general = obj[symKey];
+      if (general != null && general.manualTakeoverActive === true) {
+        recordActive = true;
+        recordSide = general.manualTakeoverSide;
+      }
+    }
   }
+  if (!recordActive) return false;
+  const sideFilter = side ?? recordSide ?? null;
+  const positionOpen = hasOpenPositionForManualTakeoverSymbol(symKey, sideFilter, openPositions ?? []);
+  if (positionOpen) return true;
+  if (openPositions == null) return true;
+  const engineOwnedOrderCount = options?.engineOwnedOrderCount;
+  if (engineOwnedOrderCount == null) {
+    return true;
+  }
+  if (engineOwnedOrderCount > 0) return true;
   return false;
+}
+
+export function countAuthoritativeEngineOwnedExchangeOrders(input: Readonly<{
+  symbol: string;
+  side?: "long" | "short" | null;
+  openPositions?: ReadonlyArray<PaperOpenPositionRecord> | null;
+  pendingOrders?: ReadonlyArray<Record<string, unknown>> | null;
+  algoOrders?: ReadonlyArray<Record<string, unknown>> | null;
+}>): number {
+  const sym = String(input.symbol ?? "").trim().toUpperCase();
+  const side = input.side ?? null;
+  let count = 0;
+  const opens = input.openPositions ?? [];
+  for (const ord of input.pendingOrders ?? []) {
+    if (!isAuthoritativeBotOwnedPendingOrder(ord, opens)) continue;
+    count += 1;
+  }
+  for (const algo of input.algoOrders ?? []) {
+    if (!isAuthoritativeBotOwnedAlgoOrder(algo, opens)) continue;
+    count += 1;
+  }
+  return count;
+}
+
+export function shouldLatchManualProtectiveOnlyIntervention(input: Readonly<{
+  ledger: PaperOpenPositionRecord | null;
+  reduceOnlyProtectiveFound: boolean;
+  matchingProtectivePendingCount: number;
+  scanClean: boolean;
+  nowMs: number;
+}>): boolean {
+  const ledger = input.ledger;
+  if (ledger == null) return false;
+  if (ledger.manualTakeoverActive === true || ledger.lifecycleState === "OPERATOR_MANAGED") return false;
+  const botManaged =
+    ledger.isV2Authority === true ||
+    ledger.lifecycleState === "BOT_V2_MANAGED" ||
+    String(ledger.authoritySourceAtEntry ?? ledger.authority ?? "")
+      .trim()
+      .toLowerCase() === "v2";
+  if (!botManaged) return false;
+  if (!input.scanClean) return false;
+  const graceUntil = ledger.protectiveVisibilityGraceDeadlineMs ?? ledger.entryProtectionUntil ?? 0;
+  if (graceUntil > input.nowMs) return false;
+  const botExpectedProtection =
+    ledger.isProtectiveStopRegistered === true ||
+    Boolean(ledger.protectiveSlAlgoId ?? ledger.protectiveStopAlgoId ?? ledger.protectiveTpAlgoId);
+  if (!botExpectedProtection) return false;
+  if (input.reduceOnlyProtectiveFound || input.matchingProtectivePendingCount > 0) return false;
+  return true;
+}
+
+/** Clear takeover only when flat AND no authoritative engine-owned exchange orders remain. */
+export function syncManualTakeoverLifecycleEntries(
+  activeMap: Map<string, ManualTakeoverRecord>,
+  openPositions: ReadonlyArray<ManualTakeoverOpenPositionRef>,
+  engineOwnedOrderCountByKey: Readonly<Record<string, number>>,
+  nowMs = Date.now(),
+  clearedBy = "position_cycle_terminal_engine_orders_cleared"
+): ReadonlyArray<string> {
+  const clearedKeys: string[] = [];
+  for (const [key, rec] of activeMap.entries()) {
+    if (rec.manualTakeoverActive !== true) continue;
+    const sym = rec.manualTakeoverSymbol;
+    const side = rec.manualTakeoverSide;
+    const keyIsGeneral = key === sym;
+    const stillOpen = keyIsGeneral
+      ? hasOpenPositionForManualTakeoverSymbol(sym, null, openPositions)
+      : hasOpenPositionForManualTakeoverSymbol(sym, side, openPositions);
+    if (stillOpen) continue;
+    const engineCount = engineOwnedOrderCountByKey[key] ?? engineOwnedOrderCountByKey[sym] ?? 0;
+    if (engineCount > 0) continue;
+    activeMap.set(
+      key,
+      createClearedManualTakeoverRecord({
+        symbol: sym,
+        side,
+        clearedBy,
+        nowMs
+      })
+    );
+    clearedKeys.push(key);
+  }
+  return clearedKeys;
+}
+
+/** @deprecated Use syncManualTakeoverLifecycleEntries with engine order scan. */
+export function expireStaleManualTakeoverEntries(
+  activeMap: Map<string, ManualTakeoverRecord>,
+  openPositions: ReadonlyArray<ManualTakeoverOpenPositionRef>,
+  nowMs = Date.now(),
+  clearedBy = "position_cycle_terminal"
+): ReadonlyArray<string> {
+  return syncManualTakeoverLifecycleEntries(activeMap, openPositions, {}, nowMs, clearedBy);
 }
 
 export function createManualTakeoverRecord(input: Readonly<{

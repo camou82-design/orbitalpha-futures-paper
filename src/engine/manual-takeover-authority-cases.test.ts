@@ -4,12 +4,16 @@ import {
   createManualTakeoverRecord,
   createClearedManualTakeoverRecord,
   isManualTakeoverActiveForSymbol,
+  expireStaleManualTakeoverEntries,
+  syncManualTakeoverLifecycleEntries,
+  countAuthoritativeEngineOwnedExchangeOrders,
+  shouldLatchManualProtectiveOnlyIntervention,
+  isAuthoritativeBotOwnedAlgoOrder,
   applyManualTakeoverToPositionRecord,
   evaluateManualTakeoverActionGuard,
   buildManualTakeoverAuthorityProof,
   readManualTakeoverDocFromDisk,
   writeManualTakeoverDocToDisk,
-  isAuthoritativeBotOwnedAlgoOrder,
   isAuthoritativeBotOwnedPendingOrder,
   type ManualTakeoverRecord,
   type ManualTakeoverStoreDoc
@@ -308,7 +312,7 @@ async function runManualTakeoverRegressionTests() {
     console.log("[CASE E] PASS: Manual protective order removal latches takeover without bot auto-recreating SL");
   }
 
-  // CASE F: operator manually fully closes -> ledger finalizes -> no duplicate bot close -> no immediate bot re-entry
+  // CASE F: flat + zero engine-owned orders -> position-cycle takeover expires -> new bot entry allowed
   {
     const map = new Map<string, ManualTakeoverRecord>();
     const takeoverRec = createManualTakeoverRecord({
@@ -320,8 +324,28 @@ async function runManualTakeoverRegressionTests() {
     map.set("ETHUSDT:long", takeoverRec);
     map.set("ETHUSDT", takeoverRec);
 
-    assertTrue(isManualTakeoverActiveForSymbol("ETHUSDT", "long", map), "CASE F: ETHUSDT takeover active after full close");
-    assertTrue(isManualTakeoverActiveForSymbol("ETHUSDT", null, map), "CASE F: ETHUSDT general takeover active");
+    // Flat but stale engine algo remains -> takeover MUST stay active
+    assertFalse(
+      syncManualTakeoverLifecycleEntries(map, [], { "ETHUSDT:long": 1, ETHUSDT: 1 }).length > 0,
+      "CASE F: stale engine orders prevent takeover clear"
+    );
+    assertTrue(
+      isManualTakeoverActiveForSymbol("ETHUSDT", "long", map, [], { engineOwnedOrderCount: 1 }),
+      "CASE F: takeover active while stale engine orders remain"
+    );
+    const blockedEntry = evaluateManualTakeoverActionGuard({
+      symbol: "ETHUSDT",
+      side: "long",
+      action: "ENTER",
+      manualTakeoverActive: isManualTakeoverActiveForSymbol("ETHUSDT", "long", map, [], { engineOwnedOrderCount: 1 })
+    });
+    assertFalse(blockedEntry.allowed, "CASE F: new entry blocked while stale engine algo remains");
+
+    const cleared = syncManualTakeoverLifecycleEntries(map, [], { "ETHUSDT:long": 0, ETHUSDT: 0 });
+    assertTrue(cleared.length >= 2, "CASE F: stale takeover keys cleared when flat and engine orders zero");
+
+    assertFalse(isManualTakeoverActiveForSymbol("ETHUSDT", "long", map, [], { engineOwnedOrderCount: 0 }), "CASE F: takeover inactive after engine cleanup");
+    assertFalse(isManualTakeoverActiveForSymbol("ETHUSDT", null, map, [], { engineOwnedOrderCount: 0 }), "CASE F: general takeover inactive when flat");
 
     const barrier = evaluateTerminalReentryBarrier({
       symbol: "ETHUSDT",
@@ -331,17 +355,15 @@ async function runManualTakeoverRegressionTests() {
     });
     assertFalse(barrier.blocked, "CASE F: barrier itself passes for 0 positions");
 
-    // But manual takeover guard blocks re-entry
     const entryGuard = evaluateManualTakeoverActionGuard({
       symbol: "ETHUSDT",
       side: "long",
       action: "ENTER",
-      manualTakeoverActive: isManualTakeoverActiveForSymbol("ETHUSDT", "long", map)
+      manualTakeoverActive: isManualTakeoverActiveForSymbol("ETHUSDT", "long", map, [], { engineOwnedOrderCount: 0 })
     });
-    assertFalse(entryGuard.allowed, "CASE F: new entry blocked by manual takeover");
-    assertEq(entryGuard.blockReason, "MANUAL_TAKEOVER_ACTIVE", "CASE F: block reason is MANUAL_TAKEOVER_ACTIVE");
+    assertTrue(entryGuard.allowed, "CASE F: new entry allowed after flat + engine order cleanup");
 
-    console.log("[CASE F] PASS: Manual full close keeps symbol takeover active and prevents bot re-entry");
+    console.log("[CASE F] PASS: Manual full close expires takeover only after authoritative engine order cleanup");
   }
 
   // CASE G: restart PM2 while takeover active -> takeover still active (loaded from JSON)
@@ -1107,7 +1129,119 @@ async function runManualTakeoverRegressionTests() {
     console.log("[CASE V] PASS: Takeover latch loaded and hydrated on restart BEFORE first V2/ops-watch cycle");
   }
 
-  console.log("=== ALL REGRESSION CASES (A-V) PASSED SUCCESSFULLY ===");
+  // CASE AA: flat + stale bot SL -> new BTC ENTER blocked
+  {
+    const map = new Map<string, ManualTakeoverRecord>();
+    const rec = createManualTakeoverRecord({ symbol: "BTCUSDT", side: "long", reason: "MANUAL_FULL_CLOSE" });
+    map.set("BTCUSDT:long", rec);
+    map.set("BTCUSDT", rec);
+    syncManualTakeoverLifecycleEntries(map, [], { "BTCUSDT:long": 1, BTCUSDT: 1 });
+    assertTrue(
+      isManualTakeoverActiveForSymbol("BTCUSDT", "long", map, [], { engineOwnedOrderCount: 1 }),
+      "CASE AA: takeover quarantine while stale bot algo remains"
+    );
+    const guard = evaluateManualTakeoverActionGuard({
+      symbol: "BTCUSDT",
+      side: "long",
+      action: "ENTER",
+      manualTakeoverActive: isManualTakeoverActiveForSymbol("BTCUSDT", "long", map, [], { engineOwnedOrderCount: 1 })
+    });
+    assertFalse(guard.allowed, "CASE AA: new BTC entry blocked");
+    console.log("[CASE AA] PASS: Flat takeover with stale engine algo blocks new entry");
+  }
+
+  // CASE AB: stale bot algo cleared -> old cycle expires -> new BTC entry allowed
+  {
+    const map = new Map<string, ManualTakeoverRecord>();
+    const rec = createManualTakeoverRecord({ symbol: "BTCUSDT", side: "long", reason: "MANUAL_FULL_CLOSE" });
+    map.set("BTCUSDT:long", rec);
+    map.set("BTCUSDT", rec);
+    syncManualTakeoverLifecycleEntries(map, [], { "BTCUSDT:long": 0, BTCUSDT: 0 });
+    assertFalse(
+      isManualTakeoverActiveForSymbol("BTCUSDT", "long", map, [], { engineOwnedOrderCount: 0 }),
+      "CASE AB: takeover cleared after engine cleanup"
+    );
+    const guard = evaluateManualTakeoverActionGuard({
+      symbol: "BTCUSDT",
+      side: "long",
+      action: "ENTER",
+      manualTakeoverActive: false
+    });
+    assertTrue(guard.allowed, "CASE AB: new BTC entry allowed");
+    console.log("[CASE AB] PASS: Stale bot algo cleared -> old cycle expires -> new BTC entry allowed");
+  }
+
+  // CASE AC: operator manual order survives authoritative cleanup predicate
+  {
+    const botOpen: PaperOpenPositionRecord = {
+      openedAt: 1700000000000,
+      symbol: "BTCUSDT",
+      side: "long",
+      entryPrice: 70_000,
+      leverage: 10,
+      sizeUsd: 400,
+      initialSizeUsd: 400,
+      strategyVersion: "paper-v2",
+      sourceSignal: "v2_engine",
+      sourceRunPath: "live_run",
+      lifecycleState: "BOT_V2_MANAGED",
+      status: "open",
+      pos: 0.01,
+      okxContracts: 0.01,
+      isV2Authority: true,
+      protectiveSlAlgoId: "bot-algo-123"
+    };
+    const staleBotAlgo = { algoId: "bot-algo-123", algoClOrdId: "oapBTCUlsg7k2j3s" };
+    const operatorLimit = { ordId: "op-999", clOrdId: "manualOperatorLimit", reduceOnly: "true" };
+    assertTrue(isAuthoritativeBotOwnedAlgoOrder(staleBotAlgo, [botOpen]), "CASE AC: stale bot SL is authoritative");
+    assertFalse(isAuthoritativeBotOwnedPendingOrder(operatorLimit, [botOpen]), "CASE AC: operator manual order NOT authoritative");
+    console.log("[CASE AC] PASS: Operator manual order survives cleanup predicate isolation");
+  }
+
+  // CASE AD: protective-only manual modification latches before calculation
+  {
+    const botOpen: PaperOpenPositionRecord = {
+      openedAt: 1700000000000,
+      symbol: "ETHUSDT",
+      side: "long",
+      entryPrice: 2500,
+      leverage: 10,
+      sizeUsd: 2500,
+      initialSizeUsd: 2500,
+      strategyVersion: "paper-v2",
+      sourceSignal: "v2_engine",
+      sourceRunPath: "live_run",
+      lifecycleState: "BOT_V2_MANAGED",
+      status: "open",
+      pos: 1.0,
+      okxContracts: 1.0,
+      isV2Authority: true,
+      isProtectiveStopRegistered: true,
+      protectiveSlAlgoId: "sl-gone",
+      protectiveVisibilityGraceDeadlineMs: 0,
+      entryProtectionUntil: 0
+    };
+    assertTrue(
+      shouldLatchManualProtectiveOnlyIntervention({
+        ledger: botOpen,
+        reduceOnlyProtectiveFound: false,
+        matchingProtectivePendingCount: 0,
+        scanClean: true,
+        nowMs: 1700000020000
+      }),
+      "CASE AD: protective-only mutation detected before any calc"
+    );
+    applyManualTakeoverToPositionRecord(
+      botOpen,
+      createManualTakeoverRecord({ symbol: "ETHUSDT", side: "long", reason: "MANUAL_PROTECTIVE_CHANGE" })
+    );
+    assertTrue(botOpen.manualTakeoverActive === true, "CASE AD: takeover latched");
+    const exitGate = evaluateV2ExitExecutionGate({ manualTakeoverActive: true, requestedAction: "close" } as any);
+    assertFalse(exitGate.allowed, "CASE AD: bot exit calculation blocked");
+    console.log("[CASE AD] PASS: Protective-only manual modification latches before calculation");
+  }
+
+  console.log("=== ALL REGRESSION CASES (A-AD) PASSED SUCCESSFULLY ===");
 }
 
 runManualTakeoverRegressionTests().catch((err) => {
