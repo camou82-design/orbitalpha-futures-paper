@@ -23,14 +23,19 @@ function audit(label: string, detail: Record<string, unknown>): void {
 // B — same-cycle ordering: latch before runEngineV2 / tryPaperPositionClose
 {
   const src = readFileSync(join(__dirname, "./paper-engine.ts"), "utf8");
+  const barrierIdx = src.indexOf("ensureStartupPositionAuthorityBarrier");
+  const reconcileIdx = src.indexOf("await this.runPositionStateReconciliation");
   const latchIdx = src.indexOf("latchManualProtectiveInterventionsFromExchangeScan");
   const v2Idx = src.indexOf("const tV2Decision0 = Date.now()");
   const closeIdx = src.indexOf("await this.tryPaperPositionClose({");
+  assert.ok(barrierIdx > 0, "startup barrier exists");
+  assert.ok(barrierIdx < reconcileIdx, "startup barrier before position reconcile");
   assert.ok(latchIdx > 0, "latch helper exists");
   assert.ok(latchIdx < v2Idx, "protective latch before runEngineV2 sym loop");
   assert.ok(latchIdx < closeIdx, "protective latch before tryPaperPositionClose");
   assert.ok(src.includes("V2_MANUAL_PROTECTIVE_ONLY_TAKEOVER_PRE_V2_PROOF"));
-  audit("B_SAME_CYCLE_ORDERING", { latch_before_v2: true, latch_before_close: true });
+  assert.ok(src.includes("V2_STARTUP_POSITION_AUTHORITY_BARRIER_PROOF"));
+  audit("B_SAME_CYCLE_ORDERING", { barrier_before_reconcile: true, latch_before_v2: true, latch_before_close: true });
 }
 
 // AG — flat + stale engine algo after failed cancel => quarantine

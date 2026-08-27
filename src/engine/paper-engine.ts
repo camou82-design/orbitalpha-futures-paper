@@ -351,6 +351,9 @@ import {
   isAuthoritativeBotOwnedAlgoOrder,
   isAuthoritativeBotOwnedPendingOrder,
   isOperatorManagedOpenPosition,
+  resolvePositionMutationAuthority,
+  hydrateManualTakeoverOntoOpenPositions,
+  buildStartupPositionAuthorityBarrierProof,
   type ManualTakeoverRecord,
   type ManualTakeoverStoreDoc,
   type ManualTakeoverReason
@@ -1968,6 +1971,7 @@ export class PaperEngine {
   /** Persistent manual takeover latch by symbol / symbol:side (position-cycle scoped). */
   private manualTakeoverBySymbol = new Map<string, ManualTakeoverRecord>();
   private manualTakeoverLoaded = false;
+  private startupPositionAuthorityBarrierResolved = false;
   private lastOpenPositionsForTakeover: PaperOpenPositionRecord[] = [];
   private manualTakeoverEngineOrderCountByKey = new Map<string, number>();
   /** Cached active algo orders from exchange for auto-repair logic. */
@@ -2688,7 +2692,7 @@ export class PaperEngine {
         let ensureOutcome: { success: boolean; modified: boolean } | null = null;
         let isTakeover =
           ledgerPos?.manualTakeoverActive === true ||
-          ledgerPos?.lifecycleState === "OPERATOR_MANAGED" ||
+          (ledgerPos != null && isOperatorManagedOpenPosition(ledgerPos)) ||
           this.isManualTakeoverActive(r.symbol, r.side);
 
         if (
@@ -3941,6 +3945,10 @@ export class PaperEngine {
     if (this.reconcileLastCheckedAt != null && nowTs - this.reconcileLastCheckedAt < this.reconcileCheckIntervalMs) return;
     this.reconcileLastCheckedAt = nowTs;
     if (!this.okxDemo || !this.signedExecutionReady) return;
+    await this.ensureManualTakeoverLoaded();
+    if (!this.startupPositionAuthorityBarrierResolved) {
+      await this.ensureStartupPositionAuthorityBarrier(nowTs);
+    }
 
     pruneExpiredV2PostFillOwnershipRegistry(this.v2PostFillOwnershipByKey, nowTs);
     const pendingEntryOrdersForReconcile = await this.store.readPendingEntryOrders();
@@ -5040,7 +5048,9 @@ export class PaperEngine {
         if (
           ownership.lifecycleAfter != null &&
           ownership.lifecycleAfter !== open.lifecycleState &&
-          !open.manualTakeoverActive
+          !open.manualTakeoverActive &&
+          !this.isManualTakeoverActive(open.symbol, open.side) &&
+          !isOperatorManagedOpenPosition(open)
         ) {
           open.lifecycleState = ownership.lifecycleAfter;
           if (ownership.v2ManagementRestored && open.reconcileState === "ADOPTED") {
@@ -5092,7 +5102,13 @@ export class PaperEngine {
           ledgerModified = true;
         }
 
-        const mutationBlocked = isAutomatedOrderMutationBlockedForOwnership(ownership);
+        const mutationAuthority = resolvePositionMutationAuthority({
+          open,
+          manualTakeoverActiveExternal: this.isManualTakeoverActive(open.symbol, open.side)
+        });
+        const mutationBlocked =
+          !mutationAuthority.positionMutationAllowed ||
+          isAutomatedOrderMutationBlockedForOwnership(ownership);
 
         // Periodic check for protection or size update for OPEN positions
         if (!mutationBlocked) {
@@ -5125,6 +5141,8 @@ export class PaperEngine {
             ownership_class: ownership.ownershipClass,
             manual_ownership_latch_active: ownership.manualOwnershipLatchActive,
             manual_intervention_reason: ownership.manualInterventionReason,
+            manual_takeover_active: mutationAuthority.manualTakeoverActive,
+            mutation_block_reason: mutationAuthority.blockReason,
             scope: "reconcile_tick_protective_ensure",
             action: "audit_only"
           });
@@ -6244,6 +6262,7 @@ export class PaperEngine {
     await this.refreshLiveBalanceSnapshot(Date.now());
     okx_balance_ms = Date.now() - tBal0;
     const tRec0 = Date.now();
+    await this.ensureStartupPositionAuthorityBarrier(tickNow);
     await this.runPositionStateReconciliation(Date.now());
     await this.processOperatorInstructions(Date.now());
     okx_position_reconcile_ms = Date.now() - tRec0;
@@ -10925,6 +10944,48 @@ export class PaperEngine {
     }
   }
 
+  private async ensureStartupPositionAuthorityBarrier(nowTs: number): Promise<void> {
+    await this.ensureManualTakeoverLoaded();
+    const opens = await this.positions.loadOpenAll();
+    const hydrated = hydrateManualTakeoverOntoOpenPositions(this.manualTakeoverBySymbol, opens);
+    if (hydrated) {
+      await this.positions.saveOpenAll(opens);
+      this.bundleDirty = true;
+    }
+    this.lastOpenPositionsForTakeover = [...opens];
+    this.startupPositionAuthorityBarrierResolved = true;
+    for (const open of opens) {
+      const side = open.side as "long" | "short";
+      const manualTakeoverActive = this.isManualTakeoverActive(open.symbol, side);
+      const authority = resolvePositionMutationAuthority({
+        open,
+        manualTakeoverActiveExternal: manualTakeoverActive
+      });
+      this.logger.info(
+        "V2_STARTUP_POSITION_AUTHORITY_BARRIER_PROOF",
+        buildStartupPositionAuthorityBarrierProof({
+          symbol: String(open.symbol),
+          side,
+          runCycleId: this.runCycleId,
+          positionExists: true,
+          manualTakeoverLoaded: this.manualTakeoverLoaded,
+          ledgerLifecycleState: open.lifecycleState,
+          authority
+        })
+      );
+    }
+    if (this.runCycleId === 1) {
+      this.logger.info("V2_STARTUP_POSITION_AUTHORITY_BARRIER_APPLIED", {
+        run_cycle_id: this.runCycleId,
+        open_count: opens.length,
+        manual_takeover_loaded: this.manualTakeoverLoaded,
+        hydrated_count: hydrated ? opens.filter((o) => o.manualTakeoverActive === true).length : 0,
+        barrier_before_reconcile: true,
+        ts: nowTs
+      });
+    }
+  }
+
   private async syncManualTakeoverLifecycleFromOpens(
     openPositions: ReadonlyArray<PaperOpenPositionRecord>
   ): Promise<void> {
@@ -11094,7 +11155,11 @@ export class PaperEngine {
   ): Promise<{ modified: boolean; success: boolean; record: PaperOpenPositionRecord }> {
     if (!this.okxDemo) return { modified: false, success: false, record: open };
 
-    if (open.manualTakeoverActive === true || this.isManualTakeoverActive(open.symbol, open.side)) {
+    if (
+      open.manualTakeoverActive === true ||
+      isOperatorManagedOpenPosition(open) ||
+      this.isManualTakeoverActive(open.symbol, open.side)
+    ) {
       this.logger.info("V2_PROTECTIVE_STOP_SKIP_MANUAL_TAKEOVER_PROOF", {
         symbol: open.symbol,
         side: open.side,
@@ -11150,7 +11215,11 @@ export class PaperEngine {
     const syncSnap = buildLedgerOkxPositionSyncSnapshot(paperOpensForSync, this.lastLivePositionsPayload, this.instrumentCache);
     const isTrueExternalManual = syncSnap.ignored_external_manual_keys.includes(symSideKey);
 
-    if (open.manualTakeoverActive === true || this.isManualTakeoverActive(open.symbol, open.side)) {
+    if (
+      open.manualTakeoverActive === true ||
+      isOperatorManagedOpenPosition(open) ||
+      this.isManualTakeoverActive(open.symbol, open.side)
+    ) {
       this.logger.info("V2_PROTECTIVE_STOP_SKIP_MANUAL_TAKEOVER_PROOF", {
         symbol: open.symbol,
         side: open.side,

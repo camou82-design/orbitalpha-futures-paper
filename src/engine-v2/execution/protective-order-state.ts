@@ -83,7 +83,13 @@ export function evaluateOpsWatchProtectiveScanVerdict(input: Readonly<{
     if (input.reduceOnlyProtectiveFound) {
         return { ...NO_FAULTS, verdict: "PASS", reason: "exchange_inventory_visible" };
     }
-    if (input.ledger?.manualTakeoverActive === true) {
+    if (
+        input.ledger?.manualTakeoverActive === true ||
+        (input.ledger != null &&
+            (input.ledger.lifecycleState === "OPERATOR_MANAGED" ||
+                input.ledger.lifecycleState === "EXTERNAL_MANUAL_MANAGED" ||
+                input.ledger.lifecycleState === "EXTERNAL_MANUAL_POSITION"))
+    ) {
         return { ...NO_FAULTS, verdict: "PASS", reason: "manual_takeover_operator_managed" };
     }
 

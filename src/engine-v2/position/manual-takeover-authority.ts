@@ -301,6 +301,103 @@ export function buildManualTakeoverAuthorityProof(input: Readonly<{
   };
 }
 
+export type PositionMutationAuthority = Readonly<{
+  effectiveAuthorityOwner: "OPERATOR" | "BOT";
+  manualTakeoverActive: boolean;
+  startupAuthorityResolved: boolean;
+  positionMutationAllowed: boolean;
+  protectiveReconcileAllowed: boolean;
+  exitCalculationAllowed: boolean;
+  blockReason: string | null;
+}>;
+
+/** Canonical predicate: operator/manual takeover => zero bot position mutation. */
+export function resolvePositionMutationAuthority(input: Readonly<{
+  open: ManualTakeoverOpenPositionRef & Pick<PaperOpenPositionRecord, "symbol" | "side">;
+  manualTakeoverActiveExternal?: boolean;
+}>): PositionMutationAuthority {
+  const manualActive =
+    input.open.manualTakeoverActive === true ||
+    input.manualTakeoverActiveExternal === true ||
+    isOperatorManagedOpenPosition(input.open);
+  if (manualActive) {
+    return {
+      effectiveAuthorityOwner: "OPERATOR",
+      manualTakeoverActive: true,
+      startupAuthorityResolved: true,
+      positionMutationAllowed: false,
+      protectiveReconcileAllowed: false,
+      exitCalculationAllowed: false,
+      blockReason: "MANUAL_TAKEOVER_OPERATOR_MANAGED"
+    };
+  }
+  return {
+    effectiveAuthorityOwner: "BOT",
+    manualTakeoverActive: false,
+    startupAuthorityResolved: true,
+    positionMutationAllowed: true,
+    protectiveReconcileAllowed: true,
+    exitCalculationAllowed: true,
+    blockReason: null
+  };
+}
+
+export function buildStartupPositionAuthorityBarrierProof(input: Readonly<{
+  symbol: string;
+  side: "long" | "short";
+  runCycleId: number;
+  positionExists: boolean;
+  manualTakeoverLoaded: boolean;
+  ledgerLifecycleState: string | null | undefined;
+  authority: PositionMutationAuthority;
+}>): Record<string, unknown> {
+  return {
+    event: "V2_STARTUP_POSITION_AUTHORITY_BARRIER_PROOF",
+    symbol: input.symbol,
+    side: input.side,
+    run_cycle_id: input.runCycleId,
+    position_exists: input.positionExists,
+    manual_takeover_loaded: input.manualTakeoverLoaded,
+    ledger_lifecycle_state: input.ledgerLifecycleState ?? null,
+    manual_takeover_active: input.authority.manualTakeoverActive,
+    effective_authority_owner: input.authority.effectiveAuthorityOwner,
+    startup_authority_resolved: input.authority.startupAuthorityResolved,
+    position_mutation_allowed: input.authority.positionMutationAllowed,
+    protective_reconcile_allowed: input.authority.protectiveReconcileAllowed,
+    exit_calculation_allowed: input.authority.exitCalculationAllowed,
+    startup_authority_resolved_before_position_mutation: input.authority.startupAuthorityResolved
+  };
+}
+
+/** Apply persisted manual-takeover.json onto open ledger rows before any mutation path. */
+export function hydrateManualTakeoverOntoOpenPositions(
+  activeMap: ReadonlyMap<string, ManualTakeoverRecord> | Record<string, ManualTakeoverRecord>,
+  openPositions: PaperOpenPositionRecord[]
+): boolean {
+  let modified = false;
+  for (const open of openPositions) {
+    const sym = String(open.symbol ?? "").trim().toUpperCase();
+    const side = String(open.side).toLowerCase() as "long" | "short";
+    const active = isManualTakeoverActiveForSymbol(sym, side, activeMap, openPositions);
+    if (!active) continue;
+    if (open.manualTakeoverActive === true && open.lifecycleState === "OPERATOR_MANAGED") continue;
+    let rec: ManualTakeoverRecord | undefined;
+    if (activeMap instanceof Map) {
+      rec =
+        activeMap.get(buildManualTakeoverKey(sym, side)) ??
+        activeMap.get(sym);
+    } else {
+      const obj = activeMap as Record<string, ManualTakeoverRecord>;
+      rec = obj[buildManualTakeoverKey(sym, side)] ?? obj[sym];
+    }
+    if (rec?.manualTakeoverActive === true) {
+      applyManualTakeoverToPositionRecord(open, rec);
+      modified = true;
+    }
+  }
+  return modified;
+}
+
 export function evaluateManualTakeoverActionGuard(input: Readonly<{
   symbol: string;
   side: "long" | "short";
