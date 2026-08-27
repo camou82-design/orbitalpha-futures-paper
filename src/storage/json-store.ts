@@ -124,6 +124,24 @@ export class JsonStore {
     }
   }
 
+  async readManualTakeoverDoc(): Promise<{ updatedAt: number; bySymbol: Record<string, any> }> {
+    const rel = "control/manual-takeover.json";
+    const fullPath = path.resolve(this.baseDir, rel);
+    try {
+      const raw = await fs.readFile(fullPath, "utf8");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const bySymbol = parsed.bySymbol && typeof parsed.bySymbol === "object" ? (parsed.bySymbol as Record<string, any>) : {};
+      const updatedAt = typeof parsed.updatedAt === "number" ? parsed.updatedAt : Date.now();
+      return { updatedAt, bySymbol };
+    } catch {
+      return { updatedAt: Date.now(), bySymbol: {} };
+    }
+  }
+
+  async writeManualTakeoverDoc(doc: { updatedAt: number; bySymbol: Record<string, any> }): Promise<string> {
+    return await this.writeJson("control/manual-takeover.json", doc);
+  }
+
   async writeJson(relativePath: string, data: unknown): Promise<string> {
     const fullPath = path.resolve(this.baseDir, relativePath);
     await fs.mkdir(path.dirname(fullPath), { recursive: true });

@@ -335,6 +335,20 @@ import {
   type SizeDeltaClassification
 } from "../engine-v2/position/manual-reduce-rebase";
 import {
+  isManualTakeoverActiveForSymbol,
+  createManualTakeoverRecord,
+  createClearedManualTakeoverRecord,
+  applyManualTakeoverToPositionRecord,
+  buildManualTakeoverAuthorityProof,
+  buildManualTakeoverKey,
+  evaluateManualTakeoverActionGuard,
+  isAuthoritativeBotOwnedAlgoOrder,
+  isAuthoritativeBotOwnedPendingOrder,
+  type ManualTakeoverRecord,
+  type ManualTakeoverStoreDoc,
+  type ManualTakeoverReason
+} from "../engine-v2/position/manual-takeover-authority";
+import {
   evaluateReduceProtectiveReensure,
   buildV2ReduceProtectiveReensureProof
 } from "../engine-v2/execution/reduce-protective-reensure";
@@ -1944,6 +1958,9 @@ export class PaperEngine {
   private lastV2ExitAuthorityProofBySymbol = new Map<string, string>();
   /** Manual close cooldown to prevent immediate re-entry. Key: symbol */
   private manualCloseCooldownBySymbol = new Map<string, { side: "long" | "short"; until: number }>();
+  /** Persistent manual takeover latch by symbol / symbol:side. */
+  private manualTakeoverBySymbol = new Map<string, ManualTakeoverRecord>();
+  private manualTakeoverLoaded = false;
   /** Cached active algo orders from exchange for auto-repair logic. */
   private cachedOpsAlgos: any[] = [];
   private instrumentCache = new Map<string, OkxSwapInstrumentSizing>();
@@ -2320,6 +2337,7 @@ export class PaperEngine {
    * every successful order scan so missing protection is repaired with real OKX submits.
    */
   private async runPositionOperationsWatch(nowTs: number, paperOpens: ReadonlyArray<PaperOpenPositionRecord>): Promise<void> {
+    await this.ensureManualTakeoverLoaded();
     await this.updateInstrumentCache();
     const syncSnap = buildLedgerOkxPositionSyncSnapshot(paperOpens, this.lastLivePositionsPayload, this.instrumentCache);
     const btcOkxPreview = syncSnap.okx_positions_preview.find((p) => p.symbol === "BTCUSDT");
@@ -3483,9 +3501,32 @@ export class PaperEngine {
         this.syncOpenLedgerFromRemoteAuthority(open, remote);
         open.reconcileState = "MATCHED";
         open.lastCheckedAt = nowTs;
-        if (open.lifecycleState === "EXTERNAL_MANUAL_MANAGED") {
-          open.lifecycleState = "BOT_V2_MANAGED";
-        }
+        
+        // Terminate all bot authority and activate manual takeover
+        const takeoverRec = createManualTakeoverRecord({
+          symbol: open.symbol,
+          side: open.side,
+          reason: "MANUAL_PARTIAL_CLOSE",
+          positionCycleId: open.positionCycleId,
+          nowMs: nowTs
+        });
+        this.manualTakeoverBySymbol.set(buildManualTakeoverKey(open.symbol, open.side), takeoverRec);
+        this.manualTakeoverBySymbol.set(String(open.symbol).toUpperCase(), takeoverRec);
+        applyManualTakeoverToPositionRecord(open, takeoverRec);
+        void this.persistManualTakeoverDoc();
+        void this.cancelEngineOwnedOrdersOnTakeover(open.symbol, open.side);
+
+        this.logger.warn("V2_MANUAL_TAKEOVER_ACTIVATED_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          reason: "MANUAL_PARTIAL_CLOSE",
+          classification: delta.classification,
+          before_contracts: beforeContracts,
+          after_contracts: remote.contracts,
+          manual_takeover_active: true,
+          action: "BOT_AUTHORITY_TERMINATED_OBSERVE_ONLY"
+        });
+
         this.logger.info(
           "V2_MANUAL_REDUCE_REBASE_PROOF",
           buildV2ManualReduceRebaseProof({
@@ -3493,8 +3534,8 @@ export class PaperEngine {
             actual_contracts: remote.contracts,
             delta_contracts: delta.deltaContracts,
             bot_fill_evidence_found: false,
-            manual_latch_created: false,
-            management_owner: "V2"
+            manual_latch_created: true,
+            management_owner: "OPERATOR"
           })
         );
         this.logPositionUnitInvariant(open);
@@ -3502,74 +3543,67 @@ export class PaperEngine {
       }
 
       if (delta.classification === "MANUAL_INCREASE") {
-        if (isEligibleForManualIncreaseAdoption(open)) {
-          sizeDeltaClassification = delta.classification;
-          const beforeContracts = open.okxContracts ?? 0;
-          const beforeAvgPx = open.entryPrice;
-          const oldStop = open.stopPrice ?? null;
-          const oldTp = open.targetPrice1 ?? null;
-          const oldProtectiveContracts = open.okxContracts ?? 0;
+        sizeDeltaClassification = delta.classification;
+        const beforeContracts = open.okxContracts ?? 0;
+        const beforeAvgPx = open.entryPrice;
 
-          // 1. Authoritative sync of contracts, avgPx, notional, leverage
-          this.syncOpenLedgerFromRemoteAuthority(open, remote);
+        // 1. Authoritative sync of contracts, avgPx, notional, leverage
+        this.syncOpenLedgerFromRemoteAuthority(open, remote);
+        open.reconcileState = "MATCHED";
+        open.lastCheckedAt = nowTs;
 
-          // 2. Increment protective revision so replacement orders use unique algoClOrdIds
-          open.protectiveRevision = (open.protectiveRevision ?? 0) + 1;
+        // 2. Terminate all bot authority and activate manual takeover
+        const takeoverRec = createManualTakeoverRecord({
+          symbol: open.symbol,
+          side: open.side,
+          reason: "MANUAL_ADD",
+          positionCycleId: open.positionCycleId,
+          nowMs: nowTs
+        });
+        this.manualTakeoverBySymbol.set(buildManualTakeoverKey(open.symbol, open.side), takeoverRec);
+        this.manualTakeoverBySymbol.set(String(open.symbol).toUpperCase(), takeoverRec);
+        applyManualTakeoverToPositionRecord(open, takeoverRec);
+        void this.persistManualTakeoverDoc();
+        void this.cancelEngineOwnedOrdersOnTakeover(open.symbol, open.side);
 
-          // 3. Rebase SL & TP preserving structural context (or retain if already breached)
-          const currentSnap = this.lastTickSymbolSnapshotBySymbol.get(open.symbol);
-          const rebase = rebasePositionProtectiveAuthority({
-            open,
-            newAvgPx: remote.avgPx,
-            markPrice: currentSnap?.lastPrice ?? remote.avgPx,
-            currentSnapshot: currentSnap
-          });
+        this.logger.warn("V2_MANUAL_TAKEOVER_ACTIVATED_PROOF", {
+          symbol: open.symbol,
+          side: open.side,
+          reason: "MANUAL_ADD",
+          classification: delta.classification,
+          before_contracts: beforeContracts,
+          after_contracts: remote.contracts,
+          before_avg_px: beforeAvgPx,
+          after_avg_px: remote.avgPx,
+          manual_takeover_active: true,
+          action: "BOT_AUTHORITY_TERMINATED_OBSERVE_ONLY"
+        });
 
-          if (rebase.rebaseStatus === "REBASE_SUCCESS" && rebase.rebasedStop != null) {
-            open.stopPrice = rebase.rebasedStop;
-            open.structureBreached = undefined;
-            if (rebase.rebasedTp != null) {
-              open.targetPrice1 = rebase.rebasedTp;
-            } else {
-              open.targetPrice1 = undefined;
-            }
-          } else if (rebase.rebaseStatus === "REBASE_REJECTED_STRUCTURE_ALREADY_BREACHED") {
-            open.structureBreached = true;
-          }
-
-          open.reconcileState = "MATCHED";
-          open.lastCheckedAt = nowTs;
-
-          this.logger.info(
-            "V2_MANUAL_INCREASE_REBASE_PROOF",
-            buildV2ManualIncreaseRebaseProof({
-              symbol: open.symbol,
-              side: open.side,
-              rebase_status: rebase.rebaseStatus,
-              rebase_reason: rebase.rebaseReason,
-              rebase_stop_source: rebase.rebasedStopSource,
-              rebase_tp_source: rebase.rebasedTpSource,
-              protective_revision: open.protectiveRevision,
-              structure_breached: open.structureBreached === true,
-              before_contracts: beforeContracts,
-              after_contracts: remote.contracts,
-              before_avg_px: beforeAvgPx,
-              after_avg_px: remote.avgPx,
-              old_stop: oldStop,
-              rebased_stop: open.stopPrice ?? rebase.rebasedStop,
-              old_tp: oldTp,
-              rebased_tp: open.targetPrice1 ?? rebase.rebasedTp,
-              old_protective_contracts: oldProtectiveContracts,
-              new_protective_contracts: remote.contracts
-            })
-          );
-          this.logPositionUnitInvariant(open);
-          return { ledgerModified: true, mismatchType: "MATCHED", blocked: false, sizeDeltaClassification };
-        } else {
-          open.reconcileState = "RECONCILE_MISMATCH";
-          open.lastCheckedAt = nowTs;
-          return { ledgerModified: true, mismatchType: "CONTRACT_MISMATCH", blocked: false };
-        }
+        this.logger.info(
+          "V2_MANUAL_INCREASE_REBASE_PROOF",
+          buildV2ManualIncreaseRebaseProof({
+            symbol: open.symbol,
+            side: open.side,
+            rebase_status: "MANUAL_TAKEOVER_ACTIVE",
+            rebase_reason: "manual_intervention_terminated_bot_authority",
+            rebase_stop_source: "manual_operator_managed",
+            rebase_tp_source: "manual_operator_managed",
+            protective_revision: open.protectiveRevision,
+            structure_breached: false,
+            before_contracts: beforeContracts,
+            after_contracts: remote.contracts,
+            before_avg_px: beforeAvgPx,
+            after_avg_px: remote.avgPx,
+            old_stop: open.stopPrice ?? null,
+            rebased_stop: null,
+            old_tp: open.targetPrice1 ?? null,
+            rebased_tp: null,
+            old_protective_contracts: beforeContracts,
+            new_protective_contracts: remote.contracts
+          })
+        );
+        this.logPositionUnitInvariant(open);
+        return { ledgerModified: true, mismatchType: "MATCHED", blocked: false, sizeDeltaClassification };
       }
     }
 
@@ -3943,6 +3977,18 @@ export class PaperEngine {
         side: open.side,
         until: nowTs + 300_000
       });
+
+      // [MANUAL_TAKEOVER] Latch persistent manual takeover until explicit operator re-arm
+      const takeoverRec = createManualTakeoverRecord({
+        symbol: open.symbol,
+        side: open.side,
+        reason: "MANUAL_FULL_CLOSE",
+        positionCycleId: open.positionCycleId,
+        nowMs: nowTs
+      });
+      this.manualTakeoverBySymbol.set(buildManualTakeoverKey(open.symbol, open.side), takeoverRec);
+      this.manualTakeoverBySymbol.set(String(open.symbol).toUpperCase(), takeoverRec);
+      void this.persistManualTakeoverDoc();
 
       this.logger.info("MANUAL_CLOSE_REENTRY_GUARD_PROOF", {
         symbol: open.symbol,
@@ -9472,6 +9518,19 @@ export class PaperEngine {
       return { ok: false, errorMessage: "okx_client_or_mode_not_ready" };
     }
 
+    if (input.open?.manualTakeoverActive === true || this.isManualTakeoverActive(input.symbol, input.side)) {
+      this.logger.warn("V2_MANUAL_TAKEOVER_AUTHORITY_PROOF", {
+        event: "V2_MANUAL_TAKEOVER_AUTHORITY_PROOF",
+        symbol: input.symbol,
+        side: input.side,
+        manual_takeover_active: true,
+        blocked_action: "V2_EXIT",
+        mutation_allowed: false,
+        reason: "MANUAL_TAKEOVER_ACTIVE"
+      });
+      return { ok: false, errorMessage: "MANUAL_TAKEOVER_ACTIVE" };
+    }
+
     if (input.open) {
       input.open.lastBotExecutionReason = input.reason;
       input.open.lastBotExecutionAt = Date.now();
@@ -10636,6 +10695,126 @@ export class PaperEngine {
     };
   }
 
+  public isManualTakeoverActive(symbol: string, side?: "long" | "short" | null): boolean {
+    return isManualTakeoverActiveForSymbol(symbol, side, this.manualTakeoverBySymbol);
+  }
+
+  public async ensureManualTakeoverLoaded(): Promise<void> {
+    if (this.manualTakeoverLoaded) return;
+    try {
+      const doc = await this.store.readManualTakeoverDoc();
+      if (doc && doc.bySymbol) {
+        for (const [k, v] of Object.entries(doc.bySymbol)) {
+          if (v && v.manualTakeoverActive === true) {
+            this.manualTakeoverBySymbol.set(k, v);
+          }
+        }
+      }
+      this.manualTakeoverLoaded = true;
+    } catch {
+      this.manualTakeoverLoaded = true;
+    }
+  }
+
+  public async persistManualTakeoverDoc(): Promise<void> {
+    try {
+      const bySymbol: Record<string, ManualTakeoverRecord> = {};
+      for (const [k, v] of this.manualTakeoverBySymbol.entries()) {
+        bySymbol[k] = v;
+      }
+      await this.store.writeManualTakeoverDoc({
+        updatedAt: Date.now(),
+        bySymbol
+      });
+    } catch (e) {
+      this.logger.error("MANUAL_TAKEOVER_PERSIST_ERROR", { error: String(e) });
+    }
+  }
+
+  public async activateManualTakeover(input: {
+    symbol: string;
+    side: "long" | "short";
+    reason: ManualTakeoverReason;
+    open?: PaperOpenPositionRecord | null;
+    positionCycleId?: string;
+    nowMs?: number;
+  }): Promise<ManualTakeoverRecord> {
+    await this.ensureManualTakeoverLoaded();
+    const rec = createManualTakeoverRecord(input);
+    const specificKey = buildManualTakeoverKey(input.symbol, input.side);
+    const generalKey = String(input.symbol).trim().toUpperCase();
+    this.manualTakeoverBySymbol.set(specificKey, rec);
+    this.manualTakeoverBySymbol.set(generalKey, rec);
+    if (input.open) {
+      applyManualTakeoverToPositionRecord(input.open, rec);
+    }
+    await this.persistManualTakeoverDoc();
+    await this.cancelEngineOwnedOrdersOnTakeover(input.symbol, input.side);
+    return rec;
+  }
+
+  public async rearmManualTakeoverForSymbol(
+    symbol: string,
+    side?: "long" | "short" | null,
+    clearedBy = "operator"
+  ): Promise<boolean> {
+    await this.ensureManualTakeoverLoaded();
+    const symUpper = String(symbol).trim().toUpperCase();
+    const specificKey = buildManualTakeoverKey(symUpper, side);
+    this.manualTakeoverBySymbol.delete(specificKey);
+    this.manualTakeoverBySymbol.delete(symUpper);
+    await this.persistManualTakeoverDoc();
+    this.logger.info("V2_MANUAL_TAKEOVER_REARMED_PROOF", {
+      symbol: symUpper,
+      side: side ?? "all",
+      cleared_by: clearedBy,
+      manual_takeover_active: false,
+      reason: "OPERATOR_REARM"
+    });
+    return true;
+  }
+
+  public async cancelEngineOwnedOrdersOnTakeover(
+    symbol: string,
+    side?: "long" | "short"
+  ): Promise<void> {
+    if (!this.okxDemo) return;
+    try {
+      const instId = toOkxSwapInstId(symbol as MarketSymbol);
+      const [pendRes, algoRes, paperOpens] = await Promise.all([
+        this.okxDemo.getOrdersPending({ instType: "SWAP", instId }),
+        this.okxDemo.getOrdersAlgoPending({ instType: "SWAP", instId }),
+        this.positions.loadOpenAll().catch(() => [] as PaperOpenPositionRecord[])
+      ]);
+      const symOpens = paperOpens.filter((p) => String(p.symbol).toUpperCase() === String(symbol).toUpperCase());
+
+      const cancelPendingTargets: string[] = [];
+      if (pendRes.ok && Array.isArray(pendRes.value)) {
+        for (const ord of pendRes.value) {
+          if (isAuthoritativeBotOwnedPendingOrder(ord, symOpens)) {
+            if (ord.ordId) cancelPendingTargets.push(String(ord.ordId));
+          }
+        }
+      }
+      for (const ordId of cancelPendingTargets) {
+        await this.okxDemo.cancelOrder(instId, ordId);
+      }
+      const cancelAlgoTargets: Array<{ instId: string; algoId: string }> = [];
+      if (algoRes.ok && Array.isArray(algoRes.value)) {
+        for (const algo of algoRes.value) {
+          if (isAuthoritativeBotOwnedAlgoOrder(algo, symOpens)) {
+            if (algo.algoId) cancelAlgoTargets.push({ instId, algoId: String(algo.algoId) });
+          }
+        }
+      }
+      if (cancelAlgoTargets.length > 0) {
+        await this.okxDemo.cancelAlgoOrder(cancelAlgoTargets);
+      }
+    } catch (e) {
+      this.logger.error("CANCEL_ENGINE_OWNED_ORDERS_ERROR", { symbol, error: String(e) });
+    }
+  }
+
   public async ensureProtectiveStopOrder(
     open: PaperOpenPositionRecord,
     flowId: string,
@@ -10688,6 +10867,17 @@ export class PaperEngine {
     const paperOpensForSync = await this.positions.loadOpenAll();
     const syncSnap = buildLedgerOkxPositionSyncSnapshot(paperOpensForSync, this.lastLivePositionsPayload, this.instrumentCache);
     const isTrueExternalManual = syncSnap.ignored_external_manual_keys.includes(symSideKey);
+
+    if (open.manualTakeoverActive === true || this.isManualTakeoverActive(open.symbol, open.side)) {
+      this.logger.info("V2_PROTECTIVE_STOP_SKIP_MANUAL_TAKEOVER_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        lifecycle: open.lifecycleState,
+        manual_takeover_active: true,
+        flowId
+      });
+      return { modified: false, success: true, record: open };
+    }
 
     if (isTrueExternalManual) {
       this.logger.info("V2_PROTECTIVE_STOP_SKIP_TRUE_EXTERNAL_MANUAL_PROOF", {
@@ -11932,6 +12122,28 @@ export class PaperEngine {
     if (!this.okxDemo) {
       return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "no_client", errorMessage: "OKX signed client not initialized", ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
     }
+
+    if (input.isNewEntry && this.isManualTakeoverActive(input.symbol)) {
+      this.logger.warn("V2_ENTRY_BLOCKED_MANUAL_TAKEOVER", {
+        symbol: input.symbol,
+        side: input.posSide,
+        reason: "V2_MANUAL_TAKEOVER_ACTIVE_BLOCK",
+        detail: "Entry blocked because operator manual takeover is active for this symbol. Explicit re-arm required."
+      });
+      return {
+        ok: false,
+        ordId: null,
+        fillPx: null,
+        fillSize: 0,
+        errorCode: "V2_MANUAL_TAKEOVER_ACTIVE_BLOCK",
+        errorMessage: "Manual takeover active for this symbol. Explicit operator re-arm required.",
+        ackCode: "rejected",
+        orderState: null,
+        fillConfirmed: false,
+        clOrdId: input.clOrdId
+      };
+    }
+
     const instId = toOkxSwapInstId(input.symbol);
     const logCtx = {
       order_trace_id: input.traceId,
@@ -19022,7 +19234,8 @@ export class PaperEngine {
         });
 
         let invalidReason: string | null = null;
-        if (terminalBarrier.blocked) invalidReason = `TERMINAL_REENTRY_BARRIER|${terminalBarrier.reason}`;
+        if (this.isManualTakeoverActive(symbolStr, deferred.side)) invalidReason = "MANUAL_TAKEOVER_ACTIVE";
+        else if (terminalBarrier.blocked) invalidReason = `TERMINAL_REENTRY_BARRIER|${terminalBarrier.reason}`;
         else if (!freshTickOk) invalidReason = "FRESH_TICK_NOT_OK";
         else if (!readinessOk) invalidReason = "READINESS_NOT_OK";
         else if (positionConflict) invalidReason = positionConflictReason ?? "SYMBOL_POSITION_CONFLICT";
@@ -19111,6 +19324,21 @@ export class PaperEngine {
           this.logAndSuppressBtcUsdtAction("processPaperSymbolEntries ENTER gate", "none", ["ENTER", "ADDON"]);
           return;
         }
+      }
+
+      // Manual Takeover Block for Symbol
+      const takeoverSide = authority.side === "long" || authority.side === "short" ? authority.side : undefined;
+      if (this.isManualTakeoverActive(symKey, takeoverSide)) {
+        if (authority.decision === "ENTER") {
+          this.logger.warn("ENTRY_BLOCKED_MANUAL_TAKEOVER_SYMBOL", {
+            symbol: symKey,
+            decision: authority.decision,
+            side: authority.side,
+            reason: "V2_MANUAL_TAKEOVER_ACTIVE_BLOCK",
+            detail: "Entry blocked because operator manual takeover is active for this symbol. Explicit re-arm required."
+          });
+        }
+        return;
       }
 
       // Local Symbol Block for External Manual Positions

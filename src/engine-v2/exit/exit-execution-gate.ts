@@ -12,11 +12,20 @@ export function evaluateV2ExitExecutionGate(input: Readonly<{
     actualStopBreached: boolean;
     actualPositionExists: boolean;
     isLiquidationEmergency?: boolean;
+    manualTakeoverActive?: boolean;
 }>): Readonly<{
     allowed: boolean;
     blockReason: string | null;
     effectiveAction: ExitExecutionRequestedAction;
 }> {
+    if (input.manualTakeoverActive === true) {
+        return {
+            allowed: false,
+            blockReason: "MANUAL_TAKEOVER_ACTIVE",
+            effectiveAction: "hold"
+        };
+    }
+
     if (!input.isV2Managed) {
         return {
             allowed: input.requestedAction !== "hold",

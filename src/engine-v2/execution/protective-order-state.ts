@@ -83,6 +83,9 @@ export function evaluateOpsWatchProtectiveScanVerdict(input: Readonly<{
     if (input.reduceOnlyProtectiveFound) {
         return { ...NO_FAULTS, verdict: "PASS", reason: "exchange_inventory_visible" };
     }
+    if (input.ledger?.manualTakeoverActive === true) {
+        return { ...NO_FAULTS, verdict: "PASS", reason: "manual_takeover_operator_managed" };
+    }
 
     const hasEvidence = hasAcceptedProtectiveSubmitEvidence(input.ledger, input.tpRequired);
     const graceDeadline = input.ledger?.protectiveVisibilityGraceDeadlineMs ?? null;

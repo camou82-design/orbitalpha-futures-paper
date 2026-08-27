@@ -984,6 +984,16 @@ export type PaperOpenPositionRecord = {
   maxFavorablePrice?: number;
   maxAdversePrice?: number;
 
+  /** Persistent manual takeover authority latch — set on operator manual intervention; clears ONLY on explicit operator re-arm. */
+  manualTakeoverActive?: boolean;
+  manualTakeoverSymbol?: string;
+  manualTakeoverSide?: "long" | "short";
+  manualTakeoverDetectedAt?: number;
+  manualTakeoverReason?: string;
+  manualTakeoverPositionCycleId?: string;
+  manualTakeoverClearedBy?: string;
+  manualTakeoverClearedAt?: number;
+
   /** Sticky manual ownership latch — set on confirmed manual intervention; cleared only on OKX position terminal. */
   manualOwnershipLatch?: boolean;
   manualOwnershipLatchReason?: string;
