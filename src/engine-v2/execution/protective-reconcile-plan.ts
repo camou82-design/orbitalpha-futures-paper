@@ -11,6 +11,7 @@ export type ProtectiveReconcileContext = Readonly<{
     openedAt36: string;
     tdModeUsed: string;
     contractsToProtect: number;
+    tpContractsToProtect?: number | null;
     activeStopPrice: number;
     activeTpPrice: number | null;
     wantsTp: boolean;
@@ -132,7 +133,15 @@ export function evaluateProtectiveAlgoMatch(
         String(algo.closeFraction ?? "") === "1";
 
     const algoSz = Number(algo.sz);
-    const sizeMatch = isCloseFraction || protectiveContractSizesMatch(ctx.contractsToProtect, algoSz);
+    const slSizeMatch = isCloseFraction || protectiveContractSizesMatch(ctx.contractsToProtect, algoSz);
+    const expectedTpContracts =
+        typeof ctx.tpContractsToProtect === "number" && ctx.tpContractsToProtect > 0
+            ? ctx.tpContractsToProtect
+            : ctx.contractsToProtect;
+    const tpSizeMatch = isCloseFraction
+        ? (expectedTpContracts === ctx.contractsToProtect)
+        : protectiveContractSizesMatch(expectedTpContracts, algoSz);
+
     const slPx = extractPx(algo, "slTriggerPx");
     const tpPx = extractPx(algo, "tpTriggerPx");
     const isOco = String(algo.ordType ?? "").toLowerCase() === "oco";
@@ -145,9 +154,9 @@ export function evaluateProtectiveAlgoMatch(
         tpPx != null &&
         protectiveStopPricesMatch(ctx.activeTpPrice, tpPx, ctx.tickSz);
 
-    const slLegValid = slPriceOk && sizeMatch;
-    const tpLegValid = tpPriceOk && sizeMatch;
-    const ocoBothValid = isOco && slLegValid && (!ctx.wantsTp || tpLegValid);
+    const slLegValid = slPriceOk && slSizeMatch;
+    const tpLegValid = tpPriceOk && tpSizeMatch;
+    const ocoBothValid = isOco && slLegValid && (!ctx.wantsTp || (tpLegValid && slSizeMatch && tpSizeMatch));
 
     const algoId = String(algo.algoId ?? "").trim();
     const hasExchangeIdentity = algoId.length > 0;
@@ -161,7 +170,8 @@ export function evaluateProtectiveAlgoMatch(
     const hasTpTrigger = extractPx(algo, "tpTriggerPx") != null;
     const isStandaloneTp = hasTpTrigger && !hasSlTrigger;
     const staleEligible = !isStandaloneTp || isBotOwnedCandidate;
-    const stale = hasExchangeIdentity && staleEligible && routingMatch(algo, ctx) && !sizeMatch;
+    const isMatchingSize = isStandaloneTp ? tpSizeMatch : slSizeMatch;
+    const stale = hasExchangeIdentity && staleEligible && routingMatch(algo, ctx) && !isMatchingSize;
 
     // [BLOCKER 4-10] Authoritative Exchange Identity Requirement:
     // Synthetic candidates or structural fallback rows without real OKX algoId
@@ -297,9 +307,13 @@ export function planProtectiveOrderReconcile(
     const needSubmitSl = !canonicalSl || legacyOcoMigrationNeeded;
     const needSubmitTp = ctx.wantsTp && !canonicalTp;
     const slOnlyTpMissing = canonicalSl != null && ctx.wantsTp && !canonicalTp;
-    const submitOco = (needSubmitSl && needSubmitTp && ctx.wantsTp) || slOnlyTpMissing;
+    const isPartialTp =
+        ctx.tpContractsToProtect != null &&
+        ctx.tpContractsToProtect > 0 &&
+        ctx.tpContractsToProtect !== ctx.contractsToProtect;
+    const submitOco = !isPartialTp && (((needSubmitSl && needSubmitTp && ctx.wantsTp) || slOnlyTpMissing));
 
-    const slOnlyOcoRebuild = slOnlyTpMissing;
+    const slOnlyOcoRebuild = !isPartialTp && slOnlyTpMissing;
 
     const uniqueProtectiveAlgoCount = uniqueAlgos.length;
     const matchingProtectivePendingCount = adoptableRanked.length;

@@ -382,7 +382,8 @@ import {
 } from "../engine-v2/execution/adaptive-range-pre-entry-protection";
 import {
   buildV2NewEntryAttachAlgoOrds,
-  isV2RangePartialPlanContext
+  isV2RangePartialPlanContext,
+  resolvePartialExitRatio
 } from "../engine-v2/execution/entry-protection-attach";
 import {
   isSlOnlyOcoRebuildScenario,
@@ -1681,11 +1682,24 @@ export function buildV2PreEntryRiskPlanCommitted(
           adaptiveDiagnostics: adaptive.diagnostics
         };
       }
-      finalStopPrice = adaptive.slPrice;
-      finalStopSource = adaptive.slSource as V2CommittedStopSource;
+      if (policySl != null) {
+        if (side === "long" && adaptive.slPrice > policySl) {
+          finalStopPrice = policySl;
+          finalStopSource = "policy_clamped";
+        } else if (side === "short" && adaptive.slPrice < policySl) {
+          finalStopPrice = policySl;
+          finalStopSource = "policy_clamped";
+        } else {
+          finalStopPrice = adaptive.slPrice;
+          finalStopSource = adaptive.slSource as V2CommittedStopSource;
+        }
+      } else {
+        finalStopPrice = adaptive.slPrice;
+        finalStopSource = adaptive.slSource as V2CommittedStopSource;
+      }
       finalTpPrice = adaptive.tpPrice;
       finalTpSource = adaptive.tpSource as V2CommittedTpSource;
-      clampApplied = false;
+      clampApplied = finalStopSource === "policy_clamped";
       adaptiveDiagnostics = {
         ...adaptive.diagnostics,
         final_committed_tp_price: adaptive.tpPrice,
@@ -10902,12 +10916,43 @@ export class PaperEngine {
     const cachedSizing = this.instrumentCache.get(instId) as any;
     const tickSz = cachedSizing?.tickSz ? Number(cachedSizing.tickSz) : 1e-8;
 
+    const partialRatio = resolvePartialExitRatio({
+      isV2Authority: open.isV2Authority === true,
+      regime: open.regimeAtEntry,
+      takeProfitPlan: open.takeProfitPlan,
+      takeProfit1Px: open.takeProfit1Px,
+      partialExitRatio: open.partialExitRatio
+    });
+    let tpContractsToProtect: number | undefined = undefined;
+    if (partialRatio != null && partialRatio > 0 && partialRatio < 1 && (open.partialExitStage ?? 0) === 0) {
+      const rawTpContracts = contractsToProtect * partialRatio;
+      const inst = this.instrumentCache.get(instId);
+      if (inst) {
+        const norm = this.normalizeOkxReduceOrderSize({
+          symbol: open.symbol,
+          okxContracts: rawTpContracts,
+          sizing: inst,
+          flowId,
+          reason: "protective_tp_partial_sizing"
+        });
+        const parsed = Number(norm.normalized_sz);
+        if (Number.isFinite(parsed) && parsed > 0 && parsed < contractsToProtect) {
+          tpContractsToProtect = parsed;
+        } else {
+          tpContractsToProtect = rawTpContracts;
+        }
+      } else {
+        tpContractsToProtect = rawTpContracts;
+      }
+    }
+
     const reconcileCtx: ProtectiveReconcileContext = {
       instId,
       positionSide: open.side,
       openedAt36,
       tdModeUsed,
       contractsToProtect,
+      tpContractsToProtect,
       activeStopPrice,
       activeTpPrice: wantsTp ? activeTpPrice! : null,
       wantsTp,
@@ -11499,9 +11544,18 @@ export class PaperEngine {
       if (isProtectiveClOrdIdSubmitBlocked(open.symbol, open.side, tpAlgoClOrdId)) {
         await handle51068(tpAlgoClOrdId);
       } else {
+        const tpSzContracts = tpContractsToProtect != null && tpContractsToProtect > 0 ? tpContractsToProtect : contractsToProtect;
+        const tpSzStr = inst ? this.normalizeOkxReduceOrderSize({
+          symbol: open.symbol,
+          okxContracts: tpSzContracts,
+          sizing: inst,
+          flowId,
+          reason: "protective_tp_registration"
+        }).normalized_sz : String(tpSzContracts);
+
         const tpRes = await this.okxDemo.submitAlgoOrder({
           instId, tdMode: tdModeUsed, side: expectedSide, posSide: hedgePosSide, accountPosMode: okxPosMode,
-          ordType: "conditional", sz: szStr, reduceOnly: true,
+          ordType: "conditional", sz: tpSzStr, reduceOnly: true,
           tpTriggerPx: String(activeTpPrice), tpOrdPx: "-1", tpTriggerPxType: "last",
           algoClOrdId: tpAlgoClOrdId
         });

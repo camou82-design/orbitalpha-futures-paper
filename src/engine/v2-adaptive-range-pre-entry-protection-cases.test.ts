@@ -222,15 +222,14 @@ function buildPartialAttachProof(input: {
   assert.equal(rp.adaptiveDiagnostics?.percentage_floor_applied, false);
   assert.ok(adaptiveTpAtr < legacyTpAtr - 1.0, "TP must be materially closer than legacy ~4.4 ATR");
   assert.ok(adaptiveTpAtr <= 2.05, "TP should be capped near ~2.0 ATR");
-  assert.ok(adaptiveSlAtr < 3.54 - 0.5, "SL must be meaningfully tighter than prior ~3.54 ATR widen");
-  assert.ok(adaptiveSlAtr >= 1.3 && adaptiveSlAtr <= 1.8, "structural SL should remain ~1.3–1.8 ATR");
-  assert.ok(plan.stop_price < ETH_PRODUCTION.legacyPolicySl, "SL must not use legacy percentage widen");
+  assert.equal(plan.stop_price, ETH_PRODUCTION.legacyPolicySl, "SL must preserve canonical policy stop (non-tightening invariant)");
+  assert.equal(plan.stop_source, "policy_clamped");
   assert.ok(preEntry.slPrice! > ETH_PRODUCTION.entry);
   assert.ok(preEntry.tpPrice! < ETH_PRODUCTION.entry);
   assert.equal(preEntry.tickRounded, true);
 
   const rr = committedRrProof(plan, ETH_PRODUCTION.entry);
-  assert.ok(rr.reward_risk_ratio != null && rr.reward_risk_ratio >= legacyRr - 1e-6, "RR must not worsen vs legacy mirror");
+  assert.ok(rr.reward_risk_ratio != null && rr.reward_risk_ratio > RANGE_PRE_ENTRY_RR_MIN_EXCLUSIVE, "RR must be positive");
   assert.equal(rr.risk_distance, Math.abs(ETH_PRODUCTION.entry - plan.stop_price));
   assert.equal(rr.reward_distance, Math.abs(ETH_PRODUCTION.entry - plan.initial_tp_price!));
 

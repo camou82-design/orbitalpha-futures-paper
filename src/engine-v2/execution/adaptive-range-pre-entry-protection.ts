@@ -225,6 +225,17 @@ export function computeAdaptiveRangePreEntryProtection(input: Readonly<{
                 : Math.max(adaptiveSl, structuralSl);
     }
 
+    // Downstream non-inward-tightening invariant against canonical policy SL
+    if (isFinitePositive(input.rawPolicySl)) {
+        if (input.side === "long" && adaptiveSl > input.rawPolicySl) {
+            adaptiveSl = input.rawPolicySl;
+            slSource = "policy_clamped";
+        } else if (input.side === "short" && adaptiveSl < input.rawPolicySl) {
+            adaptiveSl = input.rawPolicySl;
+            slSource = "policy_clamped";
+        }
+    }
+
     const pctWidenCandidate =
         input.side === "long" ? entryPx - percentageFloorDistance : entryPx + percentageFloorDistance;
     const pctWouldWiden =
