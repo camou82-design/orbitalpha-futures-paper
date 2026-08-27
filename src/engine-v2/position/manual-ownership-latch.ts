@@ -442,6 +442,10 @@ export function evaluatePoisonedStrongManualLatchRecovery(input: Readonly<{
         return { shouldClear: false, reason: null };
     }
 
+    if (input.ledger.manualTakeoverActive === true || input.ledger.lifecycleState === "OPERATOR_MANAGED") {
+        return { shouldClear: false, reason: null };
+    }
+
     if (hasIndependentManualLifecycleEvidence(input.ledger)) {
         return { shouldClear: false, reason: null };
     }

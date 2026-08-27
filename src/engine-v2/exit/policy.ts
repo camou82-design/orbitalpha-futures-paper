@@ -17,8 +17,8 @@ const PNL_STOP_REDUCE_RATIO = 0.25;
 
 function resolvePosition(args: EvaluateV2ExitPolicyArgs) {
     const positions = args.v2State.symbolPositions ?? [];
-    const longPos = positions.find((p) => String(p.side).toLowerCase() === "long") ?? null;
-    const shortPos = positions.find((p) => String(p.side).toLowerCase() === "short") ?? null;
+    const longPos = positions.find((p) => String(p.side).toLowerCase() === "long") ?? args.v2State.longPosition ?? null;
+    const shortPos = positions.find((p) => String(p.side).toLowerCase() === "short") ?? args.v2State.shortPosition ?? null;
     if (longPos && shortPos) {
         return { pos: longPos, side: "long" as const, dual: true };
     }
@@ -47,6 +47,44 @@ function isPriorDefensiveReduce(reason: unknown): boolean {
 
 export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPolicyResult {
     const { pos, side, dual } = resolvePosition(args);
+    const pnlPct = Number(pos?.pnlPct ?? 0);
+    const sizeUsd = Number(pos?.sizeUsd ?? 0);
+    const stage = pos ? Math.max(1, Number(pos.entryStage ?? 1)) : 0;
+
+    const posAny = pos as any;
+    if (posAny && (posAny.manualTakeoverActive === true || posAny.lifecycleState === "OPERATOR_MANAGED" || posAny.manualOwnershipLatch === true)) {
+        return {
+            action: "HOLD",
+            shouldExit: false,
+            shouldReduce: false,
+            shouldPartial: false,
+            reason: "NO_POSITION_HOLD",
+            positionSide: side,
+            positionSizeUsd: sizeUsd,
+            currentStage: stage,
+            pnlPct,
+            marketRegime: args.judgment.regime_final,
+            marketSubtype: args.judgment.subtype,
+            shockPhase: args.judgment.shockPhase,
+            rangePhase: args.judgment.rangePhase,
+            trendPhase: args.judgment.trendPhase,
+            transitionPhase: args.judgment.transitionPhase,
+            boxPos: 0.5,
+            boxBreakSide: "none",
+            emaGap: 0,
+            trendWeaknessScore: 0,
+            rangeConfidence: 0,
+            qualityScore: 0,
+            reduceRatio: 0,
+            exitUrgency: "LOW",
+            exitConfidence: 0,
+            evidence: "manual_takeover_observe_only",
+            hasPosition: true,
+            peakUnrealizedPnlPct: pnlPct,
+            profitProtectionActive: false
+        };
+    }
+
     const s = args.snapshot;
     const boxPos = Number(s.boxPos ?? 0.5);
     const boxBreakSide = s.boxBreakSide ?? "none";
@@ -54,9 +92,6 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
     const tw = Number(s.trendWeaknessScore ?? 1);
     const rc = Number(s.rangeConfidence ?? 0);
     const qs = Number(s.qualityScore ?? 0);
-    const pnlPct = Number(pos?.pnlPct ?? 0);
-    const sizeUsd = Number(pos?.sizeUsd ?? 0);
-    const stage = pos ? Math.max(1, Number(pos.entryStage ?? 1)) : 0;
     const hasPosition = pos != null;
     const entryPrice = Number(pos?.entryPrice ?? 0);
     const markPrice = Number(args.markPrice ?? 0);

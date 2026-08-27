@@ -8,7 +8,10 @@ export type ManualTakeoverReason =
   | "MANUAL_ADD"
   | "MANUAL_PROTECTIVE_CHANGE"
   | "MANUAL_FULL_CLOSE"
-  | "EXTERNAL_POSITION_MUTATION";
+  | "EXTERNAL_POSITION_MUTATION"
+  | "EXTERNAL_MANUAL_POSITION"
+  | "OPERATOR_MANUAL_INTERVENTION"
+  | "MANUAL_INTERVENTION_DETECTED";
 
 export type ManualTakeoverRecord = Readonly<{
   manualTakeoverActive: boolean;

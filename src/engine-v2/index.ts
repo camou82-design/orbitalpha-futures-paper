@@ -552,6 +552,98 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     };
 
+    const heldPos = v2State.longPosition ?? v2State.shortPosition;
+    const posAny = heldPos as any;
+    const isManualTakeover =
+        posAny?.manualTakeoverActive === true ||
+        posAny?.lifecycleState === "OPERATOR_MANAGED" ||
+        (authoritativeInput.state as any)?.manualTakeoverActive === true;
+
+    if (isManualTakeover) {
+        console.info(JSON.stringify({
+            event: "V2_MANUAL_TAKEOVER_AUTHORITY_PROOF",
+            symbol: String(input.symbol),
+            side: heldPos?.side ?? "none",
+            manual_takeover_active: true,
+            mutation_allowed: false,
+            position_calculation_allowed: false,
+            lifecycle_state: "OPERATOR_MANAGED",
+            reason: "OPERATOR_MANUAL_INTERVENTION_OBSERVE_ONLY"
+        }));
+        const heldSideNormalized: EngineV2Side =
+            String(heldPos?.side ?? "").toLowerCase() === "long"
+                ? "long"
+                : String(heldPos?.side ?? "").toLowerCase() === "short"
+                  ? "short"
+                  : "none";
+
+        return {
+            decision: {
+                symbol: input.symbol as MarketSymbol,
+                ts: input.now,
+                regime: "NO_TRADE",
+                confidence: "LOW",
+                confidenceScore: 0,
+                signal: "NONE",
+                side: heldSideNormalized,
+                decision: "HOLD",
+                executionAction: "NONE",
+                risk: {
+                    stageMarginKrw: 0,
+                    baseStageMarginKrw: 0,
+                    sizeMultiplier: 0,
+                    leverageProfile: "BASE",
+                    appliedLeverage: 0,
+                    leverageReason: "manual_takeover_observe_only",
+                    leverageBlockReason: "MANUAL_TAKEOVER_ACTIVE",
+                    isBlocked: true,
+                    blockReason: "MANUAL_TAKEOVER_ACTIVE",
+                    isAddOn: false,
+                    entryQualityGrade: "B",
+                    exposureNotionalKrw: 0,
+                    equityMultiple: 0
+                },
+                explanation: {
+                    reason: "MANUAL_TAKEOVER_ACTIVE_OBSERVE_ONLY",
+                    uiLabelRegime: "NO_TRADE",
+                    uiLabelStatus: "OBSERVE_ONLY"
+                },
+                rawMetrics: {
+                    manual_takeover_active: true,
+                    mutation_allowed: false,
+                    position_calculation_allowed: false,
+                    lifecycle_state: "OPERATOR_MANAGED"
+                },
+                metadata: {
+                    manual_takeover_active: true,
+                    mutation_allowed: false,
+                    position_calculation_allowed: false,
+                    lifecycle_state: "OPERATOR_MANAGED"
+                }
+            },
+            internal: {
+                judgment: { regime: "NO_TRADE", subtype: "NONE", isAmbiguous: false, shockPhase: "NONE", transitionPhase: "NONE" },
+                confidence: { overall: 0, breakdown: {} },
+                execution: { signal: "HOLD", side: heldSideNormalized, reason: "manual_takeover_active", baseSizeIntent: 0, isAddOnEligible: false },
+                riskSizing: {
+                    stageMarginKrw: 0,
+                    baseStageMarginKrw: 0,
+                    sizeMultiplier: 0,
+                    leverageProfile: "BASE",
+                    appliedLeverage: 0,
+                    leverageReason: "manual_takeover",
+                    isBlocked: true,
+                    blockReason: "MANUAL_TAKEOVER_ACTIVE",
+                    isAddOn: false,
+                    entryQualityGrade: "SKIP",
+                    exposureNotionalKrw: 0,
+                    equityMultiple: 0
+                },
+                explanation: { reason: "MANUAL_TAKEOVER_ACTIVE_OBSERVE_ONLY", confidence: 0, metrics: {} }
+            } as any
+        };
+    }
+
     // Tier 1: Market Judgment (authoritative input only)
     let judgment: ReturnType<typeof detectMarketRegime>;
     const symbol = authoritativeInput.symbol;

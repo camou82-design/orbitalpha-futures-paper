@@ -2383,6 +2383,21 @@ export class PaperEngine {
             (ledgerRow.reconcileState === "MATCHED" && syncSnap.sync_status === "ALIGNED"));
 
         if (!isNormalInLedger) {
+          const takeoverRec = createManualTakeoverRecord({
+            symbol: hit.symbol,
+            side: hit.side as "long" | "short",
+            reason: "EXTERNAL_MANUAL_POSITION",
+            positionCycleId: ledgerRow?.positionCycleId,
+            nowMs: nowTs
+          });
+          this.manualTakeoverBySymbol.set(buildManualTakeoverKey(hit.symbol, hit.side), takeoverRec);
+          this.manualTakeoverBySymbol.set(String(hit.symbol).toUpperCase(), takeoverRec);
+          if (ledgerRow) {
+            applyManualTakeoverToPositionRecord(ledgerRow, takeoverRec);
+          }
+          void this.persistManualTakeoverDoc();
+          void this.cancelEngineOwnedOrdersOnTakeover(hit.symbol, hit.side as "long" | "short");
+
           if (
             shouldBlockAutomatedManagementForSyncKey({
               key,
@@ -2600,12 +2615,46 @@ export class PaperEngine {
         });
 
         let ensureOutcome: { success: boolean; modified: boolean } | null = null;
+        const isTakeover =
+          ledgerPos?.manualTakeoverActive === true ||
+          ledgerPos?.lifecycleState === "OPERATOR_MANAGED" ||
+          this.isManualTakeoverActive(r.symbol, r.side);
+
+        if (isTakeover) {
+          if (ledgerPos && !ledgerPos.manualTakeoverActive) {
+            const takeoverRec = createManualTakeoverRecord({
+              symbol: r.symbol,
+              side: r.side,
+              reason: "OPERATOR_MANUAL_INTERVENTION",
+              positionCycleId: ledgerPos.positionCycleId,
+              nowMs: nowTs
+            });
+            this.manualTakeoverBySymbol.set(buildManualTakeoverKey(r.symbol, r.side), takeoverRec);
+            this.manualTakeoverBySymbol.set(String(r.symbol).toUpperCase(), takeoverRec);
+            applyManualTakeoverToPositionRecord(ledgerPos, takeoverRec);
+            void this.persistManualTakeoverDoc();
+          }
+          this.logger.info("V2_MANUAL_TAKEOVER_AUTHORITY_PROOF", {
+            event: "V2_MANUAL_TAKEOVER_AUTHORITY_PROOF",
+            symbol: r.symbol,
+            side: r.side,
+            manual_takeover_active: true,
+            mutation_allowed: false,
+            position_calculation_allowed: false,
+            lifecycle_state: "OPERATOR_MANAGED",
+            reason: "OPERATOR_MANUAL_INTERVENTION_OBSERVE_ONLY"
+          });
+        }
+
         const ensureEligible =
+          !isTakeover &&
           ledgerPos != null &&
           liveExposure &&
           ledgerPos.lifecycleState !== "FAILED" &&
           ledgerPos.lifecycleState !== "EXTERNAL_MANUAL_MANAGED" &&
+          ledgerPos.lifecycleState !== "OPERATOR_MANAGED" &&
           ledgerPos.manualOwnershipLatch !== true &&
+          ledgerPos.manualTakeoverActive !== true &&
           ledgerPos.reconcileState !== "RECONCILE_MISMATCH";
 
         const runOpsWatchEnsure = async (): Promise<{
@@ -4757,8 +4806,8 @@ export class PaperEngine {
         }
 
         if (
-          reconcileResult.sizeDeltaClassification === "BOT_REDUCE_RECONCILE" ||
-          reconcileResult.sizeDeltaClassification === "MANUAL_REDUCE_REBASE"
+          reconcileResult.sizeDeltaClassification === "BOT_REDUCE_RECONCILE" &&
+          open.manualTakeoverActive !== true
         ) {
           const protectRes = await this.reconcileProtectiveAfterSizeMutation(
             open,
@@ -4877,9 +4926,27 @@ export class PaperEngine {
             ledgerModified = true;
           }
         }
+
+        if (ownership.manualLatchShouldBeActive || open.manualOwnershipLatch === true) {
+          const takeoverRec = createManualTakeoverRecord({
+            symbol: open.symbol,
+            side: open.side,
+            reason: "MANUAL_INTERVENTION_DETECTED",
+            positionCycleId: open.positionCycleId,
+            nowMs: nowTs
+          });
+          this.manualTakeoverBySymbol.set(buildManualTakeoverKey(open.symbol, open.side), takeoverRec);
+          this.manualTakeoverBySymbol.set(String(open.symbol).toUpperCase(), takeoverRec);
+          applyManualTakeoverToPositionRecord(open, takeoverRec);
+          void this.persistManualTakeoverDoc();
+          void this.cancelEngineOwnedOrdersOnTakeover(open.symbol, open.side);
+          ledgerModified = true;
+        }
+
         if (
           ownership.lifecycleAfter != null &&
-          ownership.lifecycleAfter !== open.lifecycleState
+          ownership.lifecycleAfter !== open.lifecycleState &&
+          !open.manualTakeoverActive
         ) {
           open.lifecycleState = ownership.lifecycleAfter;
           if (ownership.v2ManagementRestored && open.reconcileState === "ADOPTED") {
@@ -10822,6 +10889,17 @@ export class PaperEngine {
     protectionSource?: "post_fill_algo" | "ops_watch_algo" | "reconcile_algo"
   ): Promise<{ modified: boolean; success: boolean; record: PaperOpenPositionRecord }> {
     if (!this.okxDemo) return { modified: false, success: false, record: open };
+
+    if (open.manualTakeoverActive === true || this.isManualTakeoverActive(open.symbol, open.side)) {
+      this.logger.info("V2_PROTECTIVE_STOP_SKIP_MANUAL_TAKEOVER_PROOF", {
+        symbol: open.symbol,
+        side: open.side,
+        lifecycle: open.lifecycleState,
+        manual_takeover_active: true,
+        flowId
+      });
+      return { modified: false, success: true, record: open };
+    }
 
     if (open.symbol === "BTCUSDT") {
       if (this.isBtcPositionManagementBlocked()) {
