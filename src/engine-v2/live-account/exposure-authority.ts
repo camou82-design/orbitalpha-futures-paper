@@ -1,4 +1,5 @@
 import { resolveOpenNotionalUsd, resolveOpenNotionalAuthority, isV2AuthorityRow } from "./position-size-authority";
+import { evaluateOrderOwnership, type OrderOwnershipResult } from "../position/manual-takeover-authority";
 
 export type LiveExposureAuthorityInput = Readonly<{
   symbol: string;
@@ -12,12 +13,21 @@ export type LiveExposureAuthorityInput = Readonly<{
     authoritySourceAtEntry?: string;
     authority?: string;
     exchangeClOrdId?: string;
+    manualTakeoverActive?: boolean;
+    manualOwnershipLatch?: boolean;
+    lifecycleState?: string;
   }>;
   /** BLOCKER 4-6: OKX actual positions for unknown-unit paper position authority resolution. */
   okxActualPositions?: ReadonlyArray<{ symbol: string; sizeUsd?: number; notionalUsd?: number; side: string }> | null;
   pendingSymbolNotionalUsdt: number;
   pendingOrdersNotionalUsdt: number;
   isLiveAuthority: boolean;
+  botPendingSymbolNotionalUsdt?: number;
+  botPendingOrdersNotionalUsdt?: number;
+  operatorPendingSymbolNotionalUsdt?: number;
+  operatorPendingOrdersNotionalUsdt?: number;
+  pendingOrdersList?: ReadonlyArray<Record<string, unknown>> | null;
+  algoOrdersList?: ReadonlyArray<Record<string, unknown>> | null;
 }>;
 
 export type LiveExposureAuthorityResult = Readonly<{
@@ -31,8 +41,13 @@ export type LiveExposureAuthorityResult = Readonly<{
 
   strategy_symbol_notional_usdt: number;
   strategy_account_notional_usdt: number;
+  bot_strategy_symbol_notional_usdt: number;
+  bot_strategy_account_notional_usdt: number;
   manual_external_notional_usdt: number;
+  manual_position_notional_usdt: number;
   bot_v2_notional_usdt: number;
+  operator_pending_notional_usdt: number;
+  engine_owned_pending_notional_usdt: number;
   excluded_manual_position_count: number;
 }>;
 
@@ -91,7 +106,15 @@ export function analyzePaperExposure(
     const val = Math.abs(auth.valueUsd);
     total += val;
     
-    if (isV2AuthorityRow(p as any)) {
+    const isManual =
+      p.manualTakeoverActive === true ||
+      p.manualOwnershipLatch === true ||
+      p.lifecycleState === "OPERATOR_MANAGED" ||
+      p.lifecycleState === "EXTERNAL_MANUAL_MANAGED" ||
+      p.lifecycleState === "EXTERNAL_MANUAL_POSITION" ||
+      !isV2AuthorityRow(p as any);
+
+    if (!isManual && isV2AuthorityRow(p as any)) {
       strategyOnly += val;
       botV2 += val;
     } else {
@@ -122,16 +145,62 @@ export function resolveLiveExposureAuthority(input: LiveExposureAuthorityInput):
     
   const symbolAnalysis = analyzePaperExposure(input.paperPositions, input.symbol, input.okxActualPositions);
   const accountAnalysis = analyzePaperExposure(input.paperPositions, undefined, input.okxActualPositions);
-  
+
+  // Compute pending order split between bot-owned and operator-owned
+  let botPendingOrdersNotional = typeof input.botPendingOrdersNotionalUsdt === "number" && Number.isFinite(input.botPendingOrdersNotionalUsdt)
+    ? Math.max(0, input.botPendingOrdersNotionalUsdt)
+    : null;
+  let botPendingSymbolNotional = typeof input.botPendingSymbolNotionalUsdt === "number" && Number.isFinite(input.botPendingSymbolNotionalUsdt)
+    ? Math.max(0, input.botPendingSymbolNotionalUsdt)
+    : null;
+
+  if (botPendingOrdersNotional == null) {
+    if (input.pendingOrdersList || input.algoOrdersList) {
+      let bAccountNotional = 0;
+      let bSymbolNotional = 0;
+      const opens = input.paperPositions as any[];
+      for (const ord of input.pendingOrdersList ?? []) {
+        const ev = evaluateOrderOwnership(ord, false, opens);
+        const sz = Number(ord.notionalUsd ?? ord.sz ?? 0);
+        if (ev.ownership === "ENGINE_OWNED" && Number.isFinite(sz) && sz > 0) {
+          bAccountNotional += sz;
+          if (String(ord.instId ?? ord.symbol ?? "").includes(input.symbol)) {
+            bSymbolNotional += sz;
+          }
+        }
+      }
+      for (const algo of input.algoOrdersList ?? []) {
+        const ev = evaluateOrderOwnership(algo, true, opens);
+        const sz = Number(algo.notionalUsd ?? algo.sz ?? 0);
+        if (ev.ownership === "ENGINE_OWNED" && Number.isFinite(sz) && sz > 0) {
+          bAccountNotional += sz;
+          if (String(algo.instId ?? algo.symbol ?? "").includes(input.symbol)) {
+            bSymbolNotional += sz;
+          }
+        }
+      }
+      botPendingOrdersNotional = bAccountNotional;
+      botPendingSymbolNotional = bSymbolNotional;
+    } else {
+      // Default: if no separate breakdown provided, assume zero operator orders unless specified
+      botPendingOrdersNotional = Math.max(0, input.pendingOrdersNotionalUsdt);
+      botPendingSymbolNotional = Math.max(0, input.pendingSymbolNotionalUsdt);
+    }
+  }
+
+  const engine_owned_pending_notional_usdt = botPendingOrdersNotional ?? 0;
+  const engine_owned_symbol_pending_notional = botPendingSymbolNotional ?? (botPendingOrdersNotional != null ? Math.min(botPendingOrdersNotional, Math.max(0, input.pendingSymbolNotionalUsdt)) : 0);
+  const operator_pending_notional_usdt = Math.max(0, input.pendingOrdersNotionalUsdt - engine_owned_pending_notional_usdt);
+
   const paper_symbol_notional_usdt =
     symbolAnalysis.total != null ? symbolAnalysis.total + Math.max(0, input.pendingSymbolNotionalUsdt) : NaN;
   const paper_account_notional_usdt =
     accountAnalysis.total != null ? accountAnalysis.total + Math.max(0, input.pendingOrdersNotionalUsdt) : NaN;
   
   const strategy_symbol_notional_usdt =
-    symbolAnalysis.strategyOnly != null ? symbolAnalysis.strategyOnly + Math.max(0, input.pendingSymbolNotionalUsdt) : NaN;
+    symbolAnalysis.strategyOnly != null ? symbolAnalysis.strategyOnly + engine_owned_symbol_pending_notional : NaN;
   const strategy_account_notional_usdt =
-    accountAnalysis.strategyOnly != null ? accountAnalysis.strategyOnly + Math.max(0, input.pendingOrdersNotionalUsdt) : NaN;
+    accountAnalysis.strategyOnly != null ? accountAnalysis.strategyOnly + engine_owned_pending_notional_usdt : NaN;
 
   const useOkx = input.isLiveAuthority;
   return {
@@ -145,12 +214,16 @@ export function resolveLiveExposureAuthority(input: LiveExposureAuthorityInput):
     
     strategy_symbol_notional_usdt,
     strategy_account_notional_usdt,
+    bot_strategy_symbol_notional_usdt: strategy_symbol_notional_usdt,
+    bot_strategy_account_notional_usdt: strategy_account_notional_usdt,
     manual_external_notional_usdt: accountAnalysis.manualExternal,
+    manual_position_notional_usdt: accountAnalysis.manualExternal,
     bot_v2_notional_usdt: accountAnalysis.botV2,
+    operator_pending_notional_usdt,
+    engine_owned_pending_notional_usdt,
     excluded_manual_position_count: accountAnalysis.excludedManualCount
   };
 }
-
 
 export function emitLiveExposureAuthorityProof(
   emit: (payload: Record<string, unknown>) => void,
