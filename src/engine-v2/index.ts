@@ -38,6 +38,7 @@ import {
     FTS_ABSOLUTE_SAFETY_MAX_STOP_PCT,
     isFastTrendShiftCanonicalStructuralStopBasis
 } from "./risk-sizing/fast-trend-shift-structural-stop";
+import { evaluateTpProfitabilityAuthority } from "./execution/tp-profitability-authority";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -6420,6 +6421,70 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     if (finalOrderNotionalUsdt < 1.0) {
                         min_order_check_passed = false;
                         min_order_block_reason = "ORDER_BUILD_FAIL";
+                    }
+
+                    // --- Canonical Pre-Entry TP Profitability Authority ---
+                    // Invariant: Read-only evaluation. NEVER modifies TP1/TP2 or SL prices.
+                    // Blocks entry if structural TP1 distance < minimumProfitableTpPct (V2_TP1_NET_EDGE_INSUFFICIENT)
+                    // Blocks entry if cost authority is invalid (V2_TP_PROFITABILITY_COST_AUTHORITY_INVALID)
+                    if (min_order_check_passed && finalDecision === "ENTER" && !isAddOn) {
+                        const execMetaRec = execMeta as Record<string, any>;
+                        const execMetaRaw = (execution.metadata as Record<string, any>) ?? {};
+                        const canonicalTp1Price: number | null =
+                            typeof execMetaRec?.takeProfitPlan?.tp1 === "number"
+                                ? execMetaRec.takeProfitPlan.tp1
+                                : typeof execMetaRec?.takeProfit1Px === "number"
+                                  ? execMetaRec.takeProfit1Px
+                                  : typeof execMetaRaw?.takeProfitPlan?.tp1 === "number"
+                                    ? execMetaRaw.takeProfitPlan.tp1
+                                    : typeof execMetaRaw?.takeProfit1Px === "number"
+                                      ? execMetaRaw.takeProfit1Px
+                                      : null;
+                        const canonicalTp1Source =
+                            typeof execMetaRec?.takeProfitPlan?.tp1 === "number"
+                                ? "execMeta.takeProfitPlan.tp1"
+                                : typeof execMetaRec?.takeProfit1Px === "number"
+                                  ? "execMeta.takeProfit1Px"
+                                  : typeof execMetaRaw?.takeProfitPlan?.tp1 === "number"
+                                    ? "execution.metadata.takeProfitPlan.tp1"
+                                    : typeof execMetaRaw?.takeProfit1Px === "number"
+                                      ? "execution.metadata.takeProfit1Px"
+                                      : "none";
+
+                        const slippageBps =
+                            typeof (authoritativeInput.config as any)?.paperSlippageEstimateBps === "number"
+                                ? (authoritativeInput.config as any).paperSlippageEstimateBps
+                                : typeof (input.config as any)?.paperSlippageEstimateBps === "number"
+                                  ? (input.config as any).paperSlippageEstimateBps
+                                  : 8;
+
+                        const tickSz =
+                            typeof (authoritativeInput.snapshot as any)?.tickSz === "number"
+                                ? (authoritativeInput.snapshot as any).tickSz
+                                : typeof (input.snapshot as any)?.tickSz === "number"
+                                  ? (input.snapshot as any).tickSz
+                                  : null;
+
+                        const tpProfitabilityResult = evaluateTpProfitabilityAuthority({
+                            symbol: String(input.symbol),
+                            side: sideCand === "short" ? "short" : "long",
+                            regime: String(judgment.regime),
+                            entryPrice: lastPx,
+                            canonicalTp1Price,
+                            canonicalTp1Source,
+                            feeRate: Number(authoritativeInput.config.paperTakerFeeRate ?? input.config.paperTakerFeeRate ?? 0.0005),
+                            paperSlippageEstimateBps: slippageBps,
+                            tickSz
+                        });
+
+                        if (input.evaluationMode !== "diagnostic") {
+                            console.info(JSON.stringify(tpProfitabilityResult));
+                        }
+
+                        if (!tpProfitabilityResult.entryAllowed) {
+                            min_order_check_passed = false;
+                            min_order_block_reason = tpProfitabilityResult.blockReason ?? "V2_TP1_NET_EDGE_INSUFFICIENT";
+                        }
                     }
                 }
             }

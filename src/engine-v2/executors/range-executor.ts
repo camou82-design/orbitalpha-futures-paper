@@ -1240,10 +1240,6 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         feeRate,
         slippageBufferPct: DEFAULT_SOFT_EXIT_SLIPPAGE_BUFFER_PCT
     });
-    const RANGE_TP1_MIN_SAFETY_BUFFER_PCT = 0.0002;
-    const TP1_MIN_PCT = feeBreakEvenPct + RANGE_TP1_MIN_SAFETY_BUFFER_PCT;
-    const TP1_MAX_PCT = 0.0025;
-
     let tp1 = 0;
     let tp2 = 0;
     let inv = 0;
@@ -1251,15 +1247,13 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     if (side === "long") {
         inv = Math.min(boxLow - minStopDistance, entryPx - minStopDistance);
         const rawTp1Dist = Math.max(boxMid - entryPx, minProfitDistance);
-        const clampedTp1Dist = clamp(rawTp1Dist, entryPx * TP1_MIN_PCT, entryPx * TP1_MAX_PCT);
-        tp1 = entryPx + clampedTp1Dist;
+        tp1 = entryPx + rawTp1Dist;
         tp2 = Math.max(boxHigh, tp1 + minProfitDistance);
         if (tp2 <= tp1) tp2 = tp1 + minProfitDistance;
     } else if (side === "short") {
         inv = Math.max(boxHigh + minStopDistance, entryPx + minStopDistance);
         const rawTp1Dist = Math.max(entryPx - boxMid, minProfitDistance);
-        const clampedTp1Dist = clamp(rawTp1Dist, entryPx * TP1_MIN_PCT, entryPx * TP1_MAX_PCT);
-        tp1 = entryPx - clampedTp1Dist;
+        tp1 = entryPx - rawTp1Dist;
         tp2 = Math.min(boxLow, tp1 - minProfitDistance);
         if (tp2 >= tp1) tp2 = tp1 - minProfitDistance;
     }
@@ -1270,9 +1264,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     const shortOrderOk = tp2 < tp1 && tp1 < entryPx && entryPx < inv;
     const validationOk = side === "long" ? longOrderOk : side === "short" ? shortOrderOk : false;
     let invalidTpReason: string;
-    if (TP1_MIN_PCT > TP1_MAX_PCT) {
-        invalidTpReason = "fee_slippage_cost_exceeds_max_tp1";
-    } else if (!Number.isFinite(entryPx) || entryPx <= 0 || !Number.isFinite(tp1) || !Number.isFinite(tp2) || !Number.isFinite(inv)) {
+    if (!Number.isFinite(entryPx) || entryPx <= 0 || !Number.isFinite(tp1) || !Number.isFinite(tp2) || !Number.isFinite(inv)) {
         invalidTpReason = "non_finite_or_non_positive_entry";
     } else if (tp1 <= 0 || tp2 <= 0 || inv <= 0) {
         invalidTpReason = "zero_or_negative_levels";
