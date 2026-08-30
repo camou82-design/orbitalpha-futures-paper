@@ -48,6 +48,16 @@ export function getExternalMarketFetchConfig(env: NodeJS.ProcessEnv = process.en
     const newsHalfLifeHours = clamp(parseNumber(env.EXTERNAL_MARKET_CONTEXT_NEWS_HALF_LIFE_HOURS, 2), 0.5, 24);
     const newsMaxWeight = clamp(parseNumber(env.EXTERNAL_MARKET_CONTEXT_NEWS_MAX_WEIGHT, 0.15), 0.05, 0.15);
     const newsApiKey = String(env.EXTERNAL_MARKET_CONTEXT_NEWS_API_KEY ?? "").trim() || null;
+    const economicCalendarFetchIntervalMs = clamp(
+        parseNumber(env.EXTERNAL_MARKET_ECONOMIC_CALENDAR_FETCH_INTERVAL_MS, 3_600_000),
+        300_000,
+        86_400_000
+    );
+    const economicCalendarCacheMaxAgeMs = clamp(
+        parseNumber(env.EXTERNAL_MARKET_ECONOMIC_CALENDAR_CACHE_MAX_AGE_MS, 14_400_000),
+        economicCalendarFetchIntervalMs,
+        86_400_000
+    );
     return {
         fetchEnabled,
         fetchIntervalMs,
@@ -56,7 +66,9 @@ export function getExternalMarketFetchConfig(env: NodeJS.ProcessEnv = process.en
         newsMaxAgeHours,
         newsHalfLifeHours,
         newsMaxWeight,
-        newsApiKey
+        newsApiKey,
+        economicCalendarFetchIntervalMs,
+        economicCalendarCacheMaxAgeMs
     };
 }
 
@@ -89,6 +101,8 @@ export function mapExternalMarketFetchConfigFromEngine(config: {
     externalMarketContextNewsHalfLifeHours?: number;
     externalMarketContextNewsMaxWeight?: number;
     externalMarketContextNewsApiKey?: string | null;
+    externalMarketEconomicCalendarFetchIntervalMs?: number;
+    externalMarketEconomicCalendarCacheMaxAgeMs?: number;
 }): import("./types").ExternalMarketFetchConfig {
     return {
         fetchEnabled: config.externalMarketContextFetchEnabled === true,
@@ -98,6 +112,8 @@ export function mapExternalMarketFetchConfigFromEngine(config: {
         newsMaxAgeHours: config.externalMarketContextNewsMaxAgeHours ?? 6,
         newsHalfLifeHours: config.externalMarketContextNewsHalfLifeHours ?? 2,
         newsMaxWeight: config.externalMarketContextNewsMaxWeight ?? 0.15,
-        newsApiKey: config.externalMarketContextNewsApiKey ?? null
+        newsApiKey: config.externalMarketContextNewsApiKey ?? null,
+        economicCalendarFetchIntervalMs: config.externalMarketEconomicCalendarFetchIntervalMs ?? 3_600_000,
+        economicCalendarCacheMaxAgeMs: config.externalMarketEconomicCalendarCacheMaxAgeMs ?? 14_400_000
     };
 }

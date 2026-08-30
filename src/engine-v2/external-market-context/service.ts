@@ -1,4 +1,5 @@
 import { assembleExternalMarketSnapshot } from "./fetch/assemble-snapshot";
+import { EconomicCalendarManager } from "./fetch/economic-calendar-manager";
 import { getExternalMarketFetchConfig } from "./config";
 import type { ExternalMarketFetchConfig, ExternalMarketSnapshot } from "./types";
 
@@ -9,6 +10,10 @@ export type ExternalMarketContextServiceState = Readonly<{
     lastFetchElapsedMs: number | null;
     lastFetchErrors: Record<string, string | undefined>;
     fetchInFlight: boolean;
+    economicEventSourceStatus?: string | null;
+    economicEventCacheAgeMs?: number | null;
+    economicEventNextFetchAt?: number | null;
+    economicEventFetchError?: string | null;
 }>;
 
 export class ExternalMarketContextService {
@@ -20,19 +25,30 @@ export class ExternalMarketContextService {
     private fetchInFlight: Promise<void> | null = null;
     private readonly seenNewsIds = new Set<string>();
     private readonly config: ExternalMarketFetchConfig;
+    private readonly calendarManager: EconomicCalendarManager;
 
     constructor(config?: ExternalMarketFetchConfig) {
         this.config = config ?? getExternalMarketFetchConfig();
+        this.calendarManager = new EconomicCalendarManager({
+            fetchTimeoutMs: this.config.fetchTimeoutMs,
+            fetchIntervalMs: this.config.economicCalendarFetchIntervalMs,
+            cacheMaxAgeMs: this.config.economicCalendarCacheMaxAgeMs
+        });
     }
 
     getState(now = Date.now()): ExternalMarketContextServiceState {
+        const snap = this.getCachedSnapshot(now);
         return {
-            snapshot: this.getCachedSnapshot(now),
+            snapshot: snap,
             lastFetchStartedAt: this.lastFetchStartedAt,
             lastFetchCompletedAt: this.lastFetchCompletedAt,
             lastFetchElapsedMs: this.lastFetchElapsedMs,
             lastFetchErrors: { ...this.lastFetchErrors },
-            fetchInFlight: this.fetchInFlight != null
+            fetchInFlight: this.fetchInFlight != null,
+            economicEventSourceStatus: snap?.economicEventSourceStatus ?? null,
+            economicEventCacheAgeMs: snap?.economicEventCacheAgeMs ?? null,
+            economicEventNextFetchAt: snap?.economicEventNextFetchAt ?? null,
+            economicEventFetchError: snap?.economicEventFetchError ?? null
         };
     }
 
@@ -78,10 +94,12 @@ export class ExternalMarketContextService {
     }
 
     private async runFetch(now: number): Promise<void> {
+        const calendarResolved = await this.calendarManager.resolve(now);
         const result = await assembleExternalMarketSnapshot({
             config: this.config,
             now,
-            seenNewsIds: this.seenNewsIds
+            seenNewsIds: this.seenNewsIds,
+            calendarResolved
         });
         this.snapshot = result.snapshot;
         this.lastFetchCompletedAt = now;

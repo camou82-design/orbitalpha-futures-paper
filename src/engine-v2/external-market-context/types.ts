@@ -45,6 +45,10 @@ export type ExternalMarketSnapshot = Readonly<{
     status?: "ok" | "partial" | "stale" | "error" | "unavailable";
     errorReason?: string | null;
     shadowMode?: boolean;
+    economicEventSourceStatus?: "live" | "cached" | "unavailable";
+    economicEventCacheAgeMs?: number | null;
+    economicEventNextFetchAt?: number | null;
+    economicEventFetchError?: string | null;
 }>;
 
 export type ExternalMarketSignalBreakdown = Readonly<{
@@ -76,6 +80,8 @@ export type ExternalMarketFetchConfig = Readonly<{
     newsHalfLifeHours: number;
     newsMaxWeight: number;
     newsApiKey?: string | null;
+    economicCalendarFetchIntervalMs: number;
+    economicCalendarCacheMaxAgeMs: number;
 }>;
 
 export type ExternalMarketContextResult = Readonly<{

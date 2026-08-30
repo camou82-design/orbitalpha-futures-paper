@@ -33,6 +33,11 @@ export {
     resetExternalMarketContextServiceForTests
 } from "./service";
 export { assembleExternalMarketSnapshot } from "./fetch/assemble-snapshot";
+export {
+    EconomicCalendarManager,
+    type EconomicCalendarResolved,
+    type EconomicEventSourceStatus
+} from "./fetch/economic-calendar-manager";
 export { aggregateCryptoNewsSentiment, fetchCryptoNewsReading, isCryptoNewsApiKeyConfigured } from "./fetch/crypto-news";
 export { deriveEconomicEventRisk, fetchEconomicCalendarReading } from "./fetch/economic-calendar";
 export { fetchWithTimeout } from "./fetch/http-client";

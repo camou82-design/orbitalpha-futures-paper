@@ -39,7 +39,9 @@ function baseFetchConfig() {
         newsMaxAgeHours: 6,
         newsHalfLifeHours: 2,
         newsMaxWeight: 0.15,
-        newsApiKey: null as string | null
+        newsApiKey: null as string | null,
+        economicCalendarFetchIntervalMs: 3_600_000,
+        economicCalendarCacheMaxAgeMs: 14_400_000
     };
 }
 

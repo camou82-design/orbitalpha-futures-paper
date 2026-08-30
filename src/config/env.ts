@@ -329,6 +329,16 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     const key = String(env.EXTERNAL_MARKET_CONTEXT_NEWS_API_KEY ?? "").trim();
     return key.length > 0 ? key : null;
   })();
+  const externalMarketEconomicCalendarFetchIntervalMs = (() => {
+    const n = parseNumber(env.EXTERNAL_MARKET_ECONOMIC_CALENDAR_FETCH_INTERVAL_MS, 3_600_000);
+    if (!Number.isFinite(n)) return 3_600_000;
+    return Math.min(86_400_000, Math.max(300_000, Math.floor(n)));
+  })();
+  const externalMarketEconomicCalendarCacheMaxAgeMs = (() => {
+    const n = parseNumber(env.EXTERNAL_MARKET_ECONOMIC_CALENDAR_CACHE_MAX_AGE_MS, 14_400_000);
+    if (!Number.isFinite(n)) return 14_400_000;
+    return Math.min(86_400_000, Math.max(externalMarketEconomicCalendarFetchIntervalMs, Math.floor(n)));
+  })();
 
   const okxLiveStaticNotionalCapEnabled = parseBool(env.OKX_LIVE_STATIC_NOTIONAL_CAP_ENABLED, true);
   const okxLiveUsableBalanceRatio = (() => {
@@ -440,6 +450,8 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     externalMarketContextNewsHalfLifeHours,
     externalMarketContextNewsMaxWeight,
     externalMarketContextNewsApiKey,
+    externalMarketEconomicCalendarFetchIntervalMs,
+    externalMarketEconomicCalendarCacheMaxAgeMs,
     okxLiveStaticNotionalCapEnabled,
     okxLiveUsableBalanceRatio,
     okxMomentumIocSlippagePct,

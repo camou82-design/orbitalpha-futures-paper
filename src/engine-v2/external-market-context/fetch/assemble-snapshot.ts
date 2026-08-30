@@ -1,12 +1,13 @@
 import { fetchAllYahooReadings } from "./yahoo-chart";
-import { fetchEconomicCalendarReading } from "./economic-calendar";
 import { fetchCryptoNewsReading } from "./crypto-news";
+import type { EconomicCalendarResolved } from "./economic-calendar-manager";
 import type { ExternalMarketFetchConfig, ExternalMarketSnapshot } from "../types";
 
 export type AssembleSnapshotInput = Readonly<{
     config: ExternalMarketFetchConfig;
     now?: number;
     seenNewsIds?: Set<string>;
+    calendarResolved?: EconomicCalendarResolved;
 }>;
 
 export type AssembleSnapshotResult = Readonly<{
@@ -36,9 +37,8 @@ export async function assembleExternalMarketSnapshot(
     const unavailableSources: string[] = [];
     const fetchErrors: Record<string, string | undefined> = {};
 
-    const [yahoo, calendar, news] = await Promise.all([
+    const [yahoo, news] = await Promise.all([
         fetchAllYahooReadings(timeoutMs),
-        fetchEconomicCalendarReading(timeoutMs, now),
         fetchCryptoNewsReading(
             timeoutMs,
             now,
@@ -48,6 +48,14 @@ export async function assembleExternalMarketSnapshot(
             input.config.newsApiKey ?? null
         )
     ]);
+    const calendar =
+        input.calendarResolved ??
+        ({
+            reading: null,
+            newsEventRisk: 0,
+            sourceStatus: "unavailable",
+            fetchError: "CALENDAR_NOT_RESOLVED"
+        } satisfies EconomicCalendarResolved);
 
     for (const [key, result] of Object.entries(yahoo) as Array<
         [keyof typeof yahoo, (typeof yahoo)[keyof typeof yahoo]]
@@ -59,7 +67,9 @@ export async function assembleExternalMarketSnapshot(
     }
     if (!calendar.reading) {
         unavailableSources.push("economicEvent");
-        fetchErrors.economicEvent = calendar.error ?? "UNAVAILABLE";
+        fetchErrors.economicEvent = calendar.fetchError ?? "UNAVAILABLE";
+    } else if (calendar.fetchError) {
+        fetchErrors.economicEvent = calendar.fetchError;
     }
     if (!news.reading) {
         unavailableSources.push("news");
@@ -101,6 +111,10 @@ export async function assembleExternalMarketSnapshot(
         newsEventRisk,
         economicEventImminent: economicEvent?.imminent === true,
         economicEventLabel: economicEvent?.label ?? null,
+        economicEventSourceStatus: calendar.sourceStatus,
+        economicEventCacheAgeMs: calendar.cacheAgeMs ?? null,
+        economicEventNextFetchAt: calendar.nextFetchAt ?? null,
+        economicEventFetchError: calendar.fetchError ?? null,
         fetchedAt: now,
         status,
         errorReason: availableCount === 0 ? "ALL_SOURCES_UNAVAILABLE" : undefined

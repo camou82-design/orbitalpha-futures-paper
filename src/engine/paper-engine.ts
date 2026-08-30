@@ -25481,7 +25481,9 @@ export function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
     externalMarketContextNewsMaxAgeHours: config.externalMarketContextNewsMaxAgeHours ?? 6,
     externalMarketContextNewsHalfLifeHours: config.externalMarketContextNewsHalfLifeHours ?? 2,
     externalMarketContextNewsMaxWeight: config.externalMarketContextNewsMaxWeight ?? 0.15,
-    externalMarketContextNewsApiKey: config.externalMarketContextNewsApiKey ?? null
+    externalMarketContextNewsApiKey: config.externalMarketContextNewsApiKey ?? null,
+    externalMarketEconomicCalendarFetchIntervalMs: config.externalMarketEconomicCalendarFetchIntervalMs ?? 3_600_000,
+    externalMarketEconomicCalendarCacheMaxAgeMs: config.externalMarketEconomicCalendarCacheMaxAgeMs ?? 14_400_000
   };
 }
 

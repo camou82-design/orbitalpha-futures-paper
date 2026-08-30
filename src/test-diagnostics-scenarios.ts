@@ -92,7 +92,9 @@ const mockConfig = {
   externalMarketContextNewsMaxAgeHours: 6,
   externalMarketContextNewsHalfLifeHours: 2,
   externalMarketContextNewsMaxWeight: 0.15,
-  externalMarketContextNewsApiKey: null
+  externalMarketContextNewsApiKey: null,
+  externalMarketEconomicCalendarFetchIntervalMs: 3_600_000,
+  externalMarketEconomicCalendarCacheMaxAgeMs: 14_400_000
 };
 
 

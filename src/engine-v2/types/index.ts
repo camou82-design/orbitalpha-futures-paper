@@ -605,6 +605,8 @@ export interface V2BridgeConfig {
     externalMarketContextNewsHalfLifeHours?: number;
     externalMarketContextNewsMaxWeight?: number;
     externalMarketContextNewsApiKey?: string | null;
+    externalMarketEconomicCalendarFetchIntervalMs?: number;
+    externalMarketEconomicCalendarCacheMaxAgeMs?: number;
 }
 
 export interface V2BridgePosition {

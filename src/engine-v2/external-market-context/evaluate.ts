@@ -474,6 +474,10 @@ export function buildExternalMarketContextProofLog(
         reliability_adjusted_short_preview_multiplier: external.reliabilityAdjustedShortPreviewMultiplier ?? null,
         available_signal_weight: external.signals.availableWeight,
         unavailable_sources: external.signals.unavailableSources,
+        economic_event_source_status: snapshot?.economicEventSourceStatus ?? null,
+        economic_event_cache_age_ms: snapshot?.economicEventCacheAgeMs ?? null,
+        economic_event_next_fetch_at: snapshot?.economicEventNextFetchAt ?? null,
+        economic_event_fetch_error: snapshot?.economicEventFetchError ?? null,
         snapshot_status: snapshot?.status ?? null,
         snapshot_generated_at: snapshot?.generatedAt ?? null,
         raw_sources: snapshot
@@ -495,6 +499,10 @@ export function buildExternalMarketContextShadowProofLog(
         lastFetchElapsedMs: number | null;
         lastFetchErrors: Record<string, string | undefined>;
         fetchInFlight: boolean;
+        economicEventSourceStatus?: string | null;
+        economicEventCacheAgeMs?: number | null;
+        economicEventNextFetchAt?: number | null;
+        economicEventFetchError?: string | null;
     },
     preview: ExternalMarketContextResult,
     now: number
@@ -505,6 +513,14 @@ export function buildExternalMarketContextShadowProofLog(
         fetch_in_flight: serviceState.fetchInFlight,
         last_fetch_elapsed_ms: serviceState.lastFetchElapsedMs,
         last_fetch_errors: serviceState.lastFetchErrors,
+        economic_event_source_status:
+            serviceState.economicEventSourceStatus ?? serviceState.snapshot?.economicEventSourceStatus ?? null,
+        economic_event_cache_age_ms:
+            serviceState.economicEventCacheAgeMs ?? serviceState.snapshot?.economicEventCacheAgeMs ?? null,
+        economic_event_next_fetch_at:
+            serviceState.economicEventNextFetchAt ?? serviceState.snapshot?.economicEventNextFetchAt ?? null,
+        economic_event_fetch_error:
+            serviceState.economicEventFetchError ?? serviceState.snapshot?.economicEventFetchError ?? null,
         snapshot_status: serviceState.snapshot?.status ?? null,
         snapshot_generated_at: serviceState.snapshot?.generatedAt ?? null,
         snapshot_age_ms:
