@@ -34,6 +34,11 @@ import {
     resolveUltimateSafetyCapForOrderSizing
 } from "./risk-sizing/equity-adaptive-sizing";
 import {
+    applyExternalContextToConfidenceScore,
+    buildExternalMarketContextProofLog,
+    evaluateExternalMarketContext
+} from "./external-market-context";
+import {
     FTS_STRUCTURAL_STOP_BASIS,
     FTS_ABSOLUTE_SAFETY_MAX_STOP_PCT,
     isFastTrendShiftCanonicalStructuralStopBasis
@@ -1497,7 +1502,56 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
 
     // Tier 5: Risk Sizing (executor/risk-sizing share same authoritative state)
-    const riskSizing = calculateRiskSizing(judgment, confidence, execution, authoritativeInput);
+    const externalSide: "long" | "short" | "none" =
+        execution.side === "long" || execution.side === "short" ? execution.side : "none";
+    const externalMarketContext = evaluateExternalMarketContext({
+        side: externalSide,
+        now: input.now,
+        config: {
+            enabled: input.config.externalMarketContextEnabled === true,
+            shadowMode: input.config.externalMarketContextShadowMode !== false,
+            weight: input.config.externalMarketContextWeight ?? 0.22,
+            minSizeMultiplier: input.config.externalMarketMinSizeMultiplier ?? 0.8,
+            maxSizeMultiplier: input.config.externalMarketMaxSizeMultiplier ?? 1.1,
+            maxAgeMs: input.config.externalMarketContextMaxAgeMs ?? 900_000,
+            emergencyEventEnabled: input.config.externalMarketEmergencyEventEnabled === true
+        },
+        snapshot: authoritativeInput.state.externalMarketSnapshot ?? null
+    });
+    if (input.evaluationMode !== "diagnostic") {
+        console.info(
+            JSON.stringify(
+                buildExternalMarketContextProofLog(
+                    String(input.symbol),
+                    externalMarketContext,
+                    authoritativeInput.state.externalMarketSnapshot ?? null
+                )
+            )
+        );
+    }
+    let confidenceForSizing = confidence;
+    if (externalMarketContext.externalContextApplied && externalSide !== "none") {
+        const blendedScore = applyExternalContextToConfidenceScore(
+            confidence.score,
+            externalMarketContext,
+            input.config.externalMarketContextWeight ?? 0.22
+        );
+        confidenceForSizing = {
+            score: blendedScore,
+            level: blendedScore >= 75 ? "HIGH" : blendedScore < 50 ? "LOW" : "MID"
+        };
+    }
+    const externalSizeMultiplierForSizing =
+        externalMarketContext.externalContextApplied && externalSide !== "none"
+            ? externalMarketContext.externalSizeMultiplier
+            : null;
+    const riskSizing = calculateRiskSizing(
+        judgment,
+        confidenceForSizing,
+        execution,
+        authoritativeInput,
+        externalSizeMultiplierForSizing
+    );
     if (riskSizing.diagnostics) {
         (riskSizing.diagnostics as Record<string, unknown>).addon_policy_mode = addOnPolicy.addonMode ?? "NONE";
         (riskSizing.diagnostics as Record<string, unknown>).requested_addon_notional_usdt =
@@ -6310,6 +6364,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     lastPrice: lastPx,
                     instrumentSizing,
                     htfSizeMultiplier: htfProbeSizeMultiplier,
+                    externalSizeMultiplier:
+                        externalMarketContext.externalContextApplied && !isAddOn
+                            ? externalMarketContext.externalSizeMultiplier
+                            : undefined,
                     v2AuthorityEntry: true,
                     entryProbeSizeMultiplier,
                     entryProbeSizingSource: probeSizingSource
@@ -7736,8 +7794,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         symbol: input.symbol,
         ts: input.now,
         regime: judgment.regime,
-        confidence: confidence.level,
-        confidenceScore: confidence.score,
+        confidence: confidenceForSizing.level,
+        confidenceScore: confidenceForSizing.score,
         signal: execution.signal,
         side: normalizedV2Side as any,
         decision: finalDecision,
@@ -7813,7 +7871,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             stair_step_detected: stairStepResult.detected,
             stair_step_direction: stairStepResult.direction,
             stair_step_confidence: stairStepResult.confidence,
-            stair_step_block_reason: stairStepResult.block_reason
+            stair_step_block_reason: stairStepResult.block_reason,
+            external_context_score: externalMarketContext.externalContextScore,
+            nq_signal: externalMarketContext.signals.nqSignal,
+            es_signal: externalMarketContext.signals.esSignal,
+            dxy_signal: externalMarketContext.signals.dxySignal,
+            us10y_signal: externalMarketContext.signals.us10ySignal,
+            news_signal: externalMarketContext.signals.newsSignal,
+            news_event_risk: externalMarketContext.newsEventRisk,
+            external_size_multiplier: externalMarketContext.externalSizeMultiplier,
+            external_context_age_ms: externalMarketContext.externalContextAgeMs,
+            external_context_applied: externalMarketContext.externalContextApplied,
+            external_context_reason: externalMarketContext.externalContextReason
         },
         v2ExitAuthority: v2ExitAuthority ?? undefined,
         v2PartialAuthority: v2PartialAuthority ?? undefined,
@@ -8534,7 +8603,15 @@ export function adaptV2Input(
             okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null,
             okxLiveEmergencyMaxOrderNotionalUsdt: config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null,
             okxLiveMarginReserveRatio: config.okxLiveMarginReserveRatio ?? 0.2,
-            paperTakerFeeRate: config.paperTakerFeeRate ?? 0.0005
+            paperTakerFeeRate: config.paperTakerFeeRate ?? 0.0005,
+            externalMarketContextEnabled: config.externalMarketContextEnabled ?? false,
+            externalMarketContextShadowMode: config.externalMarketContextShadowMode !== false,
+            externalMarketContextFetchEnabled: config.externalMarketContextFetchEnabled ?? false,
+            externalMarketContextWeight: config.externalMarketContextWeight ?? 0.22,
+            externalMarketMinSizeMultiplier: config.externalMarketMinSizeMultiplier ?? 0.8,
+            externalMarketMaxSizeMultiplier: config.externalMarketMaxSizeMultiplier ?? 1.1,
+            externalMarketContextMaxAgeMs: config.externalMarketContextMaxAgeMs ?? 900_000,
+            externalMarketEmergencyEventEnabled: config.externalMarketEmergencyEventEnabled ?? false
         },
         state: {
             currentPositions: state.currentPositions.map((p: LegacyPositionAdapter) => {
@@ -8626,7 +8703,8 @@ export function adaptV2Input(
             balanceFetchedAt: state.balanceFetchedAt,
             positionsFetchedAt: state.positionsFetchedAt,
             pendingOrdersFetchedAt: state.pendingOrdersFetchedAt,
-            lastLossReentryState: (state as any).lastLossReentryState ?? null
+            lastLossReentryState: (state as any).lastLossReentryState ?? null,
+            externalMarketSnapshot: (state as any).externalMarketSnapshot ?? null
         },
         v1Result: {
             regime: v1Result.decision?.regime_state ?? (v1Result as any).regime ?? "UNDEFINED",

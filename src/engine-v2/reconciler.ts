@@ -472,7 +472,15 @@ export function resolveSymbolDecisionEnvelope(
         okxLiveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt,
         okxLiveMaxAddonCount: config.okxLiveMaxAddonCount,
         okxLiveEmergencyMaxOrderNotionalUsdt: config.okxLiveEmergencyMaxOrderNotionalUsdt,
-        okxLiveMarginReserveRatio: config.okxLiveMarginReserveRatio
+        okxLiveMarginReserveRatio: config.okxLiveMarginReserveRatio,
+        externalMarketContextEnabled: config.externalMarketContextEnabled,
+        externalMarketContextShadowMode: config.externalMarketContextShadowMode,
+        externalMarketContextFetchEnabled: config.externalMarketContextFetchEnabled,
+        externalMarketContextWeight: config.externalMarketContextWeight,
+        externalMarketMinSizeMultiplier: config.externalMarketMinSizeMultiplier,
+        externalMarketMaxSizeMultiplier: config.externalMarketMaxSizeMultiplier,
+        externalMarketContextMaxAgeMs: config.externalMarketContextMaxAgeMs,
+        externalMarketEmergencyEventEnabled: config.externalMarketEmergencyEventEnabled
     };
 
     // 3. Legacy Decision Mapping

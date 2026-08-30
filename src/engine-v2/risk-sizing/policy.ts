@@ -9,7 +9,8 @@ export function calculateRiskSizing(
     judgment: MarketJudgmentOutput,
     confidence: RegimeConfidenceOutput,
     executor: ExecutorOutput,
-    input: EngineV2Input
+    input: EngineV2Input,
+    externalSizeMultiplier?: number | null
 ): RiskSizingOutput & { diagnostics?: Record<string, number | string | boolean | null> } {
     const { config } = input;
     const { snapshot, state } = input;
@@ -315,6 +316,16 @@ export function calculateRiskSizing(
         leverageReason = "v2_fixed_10x";
     }
 
+    // External market context — sizing auxiliary only (never entry block).
+    if (
+        externalSizeMultiplier != null &&
+        Number.isFinite(externalSizeMultiplier) &&
+        externalSizeMultiplier > 0 &&
+        externalSizeMultiplier !== 1
+    ) {
+        stageMarginKrw *= externalSizeMultiplier;
+    }
+
     const currentMarginUsedKrw = currentMarginUsed * 1400;
     const currentNotionalKrw = currentNotional * 1400;
     const currentSymbolNotionalKrw = currentSymbolNotional * 1400;
@@ -398,7 +409,13 @@ export function calculateRiskSizing(
         wait_recheck: executor.signal === "WAIT_RECHECK",
         soft_warning_reason: executor.signal === "WAIT_RECHECK" ? "WAIT_RECHECK" : null,
         range_probe_sizing_applied: isRangeProbeInitialSizing,
-        range_probe_size_intent: isRangeProbeInitialSizing ? sizeMultiplier : null
+        range_probe_size_intent: isRangeProbeInitialSizing ? sizeMultiplier : null,
+        external_size_multiplier_applied:
+            externalSizeMultiplier != null &&
+            Number.isFinite(externalSizeMultiplier) &&
+            externalSizeMultiplier > 0
+                ? externalSizeMultiplier
+                : null
     };
     return {
         baseStageMarginKrw,

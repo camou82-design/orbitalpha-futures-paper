@@ -134,6 +134,13 @@ import { evaluateMarketModeSelector } from "./mode-selector";
 import { evaluateRiskExposure } from "./risk-exposure";
 import { buildPaperExplanation } from "./explanation-layer";
 import { runEngineV2, adaptV2Input, shouldEmitV2Proof } from "../engine-v2/index";
+import {
+  ExternalMarketContextService,
+  evaluateExternalMarketContext,
+  buildExternalMarketContextShadowProofLog,
+  mapExternalMarketContextConfigFromEngine,
+  mapExternalMarketFetchConfigFromEngine
+} from "../engine-v2/external-market-context";
 import { clearWhipsawObservationState } from "../engine-v2/market-judgment/whipsaw-observer";
 import { normalizeOkxSwapContractsFromNotional, formatOkxSwapContractSzString, okxInstrumentSzDecimals, type OkxSwapInstrumentSizing } from "../engine-v2/okx-swap-sizing";
 import {
@@ -2013,6 +2020,7 @@ export class PaperEngine {
   private lastSignedRestSuccessAt: number | null = null;
   private lastSignedRestFailAt: number | null = null;
   private runCycleId = 0;
+  private readonly externalMarketContextService: ExternalMarketContextService;
   private paperExecutionReady = false;
   private paperExecutionReadyChangedAt: number | null = null;
   private signedExecutionReady = false;
@@ -6182,6 +6190,9 @@ export class PaperEngine {
     });
     this.positions = new PositionManager(this.store);
     this.risk = new RiskManager(config);
+    this.externalMarketContextService = new ExternalMarketContextService(
+      mapExternalMarketFetchConfigFromEngine(config)
+    );
     if (okxClientOverride != null) {
       this.okxDemo = okxClientOverride;
       this.okxDemoKeysLoaded = true;
@@ -6299,6 +6310,24 @@ export class PaperEngine {
     await this.positions.ensureHistoryFile();
     this.positionTrackingAlive = true;
     pre_tick_setup_ms = Date.now() - tPre0;
+
+    const externalMarketSnapshot = this.externalMarketContextService.touch(tickNow);
+    if (this.config.externalMarketContextFetchEnabled) {
+      const preview = evaluateExternalMarketContext({
+        side: "none",
+        now: tickNow,
+        config: mapExternalMarketContextConfigFromEngine(this.config),
+        snapshot: externalMarketSnapshot
+      });
+      this.logger.info(
+        "EXTERNAL_MARKET_CONTEXT_SHADOW_PROOF",
+        buildExternalMarketContextShadowProofLog(
+          this.externalMarketContextService.getState(tickNow),
+          preview,
+          tickNow
+        )
+      );
+    }
 
     // --- 1. Ledger Integrity: High-Fidelity Position Normalization Promotion ---
     const allOpensForNormalization = await this.positions.loadOpenAll();
@@ -7154,7 +7183,8 @@ export class PaperEngine {
             this.lastOpsOrdersScanAtMs ?? fetchedAt,
             symbolHasBlockingPending[sym] === true,
             hasUnknownNotional,
-            deriveLastLossReentryState({ history: this.cachedHistory, openPositions: opensAfterClose, symbol: sym, now: fetchedAt })
+            deriveLastLossReentryState({ history: this.cachedHistory, openPositions: opensAfterClose, symbol: sym, now: fetchedAt }),
+            externalMarketSnapshot
           );
         })(),
         v2Mode
@@ -25437,7 +25467,20 @@ export function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
     okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null,
     okxLiveEmergencyMaxOrderNotionalUsdt: config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null,
     okxLiveMarginReserveRatio: config.okxLiveMarginReserveRatio ?? 0.2,
-    paperTakerFeeRate: config.paperTakerFeeRate
+    paperTakerFeeRate: config.paperTakerFeeRate,
+    externalMarketContextEnabled: config.externalMarketContextEnabled ?? false,
+    externalMarketContextShadowMode: config.externalMarketContextShadowMode !== false,
+    externalMarketContextFetchEnabled: config.externalMarketContextFetchEnabled ?? false,
+    externalMarketContextWeight: config.externalMarketContextWeight ?? 0.22,
+    externalMarketMinSizeMultiplier: config.externalMarketMinSizeMultiplier ?? 0.8,
+    externalMarketMaxSizeMultiplier: config.externalMarketMaxSizeMultiplier ?? 1.1,
+    externalMarketContextMaxAgeMs: config.externalMarketContextMaxAgeMs ?? 900_000,
+    externalMarketEmergencyEventEnabled: config.externalMarketEmergencyEventEnabled ?? false,
+    externalMarketContextFetchIntervalMs: config.externalMarketContextFetchIntervalMs ?? 120_000,
+    externalMarketContextFetchTimeoutMs: config.externalMarketContextFetchTimeoutMs ?? 4_000,
+    externalMarketContextNewsMaxAgeHours: config.externalMarketContextNewsMaxAgeHours ?? 6,
+    externalMarketContextNewsHalfLifeHours: config.externalMarketContextNewsHalfLifeHours ?? 2,
+    externalMarketContextNewsMaxWeight: config.externalMarketContextNewsMaxWeight ?? 0.15
   };
 }
 
@@ -25471,7 +25514,8 @@ export function buildV2StateBridge(
   pendingOrdersFetchedAt?: number,
   hasSymbolPendingEntry?: boolean,
   hasUnknownPendingNotional?: boolean,
-  lastLossReentryState?: LastLossReentryState | null
+  lastLossReentryState?: LastLossReentryState | null,
+  externalMarketSnapshot?: import("../engine-v2/external-market-context/types").ExternalMarketSnapshot | null
 ): V2BridgeState {
   let okxActualSide = "none";
   if (lastLivePositionsPayload && Array.isArray(lastLivePositionsPayload)) {
@@ -25601,7 +25645,8 @@ export function buildV2StateBridge(
     exposureNotionalCapKrw: 2_000_000,
     symbolExposureNotionalCapKrw: 1_400_000,
     okxActualSide,
-    lastLossReentryState: lastLossReentryState ?? null
+    lastLossReentryState: lastLossReentryState ?? null,
+    externalMarketSnapshot: externalMarketSnapshot ?? null
   };
 }
 

@@ -276,6 +276,56 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     return Math.min(0.9, n);
   })();
 
+  const externalMarketContextEnabled = parseBool(env.EXTERNAL_MARKET_CONTEXT_ENABLED, false);
+  const externalMarketContextShadowMode = parseBool(env.EXTERNAL_MARKET_CONTEXT_SHADOW_MODE, true);
+  const externalMarketContextFetchEnabled = parseBool(env.EXTERNAL_MARKET_CONTEXT_FETCH_ENABLED, false);
+  const externalMarketContextWeight = (() => {
+    const n = parseNumber(env.EXTERNAL_MARKET_CONTEXT_WEIGHT, 0.22);
+    if (!Number.isFinite(n)) return 0.22;
+    return Math.min(0.5, Math.max(0, n));
+  })();
+  const externalMarketMinSizeMultiplier = (() => {
+    const n = parseNumber(env.EXTERNAL_MARKET_MIN_SIZE_MULTIPLIER, 0.8);
+    if (!Number.isFinite(n)) return 0.8;
+    return Math.min(1, Math.max(0.5, n));
+  })();
+  const externalMarketMaxSizeMultiplier = (() => {
+    const n = parseNumber(env.EXTERNAL_MARKET_MAX_SIZE_MULTIPLIER, 1.1);
+    if (!Number.isFinite(n)) return 1.1;
+    return Math.min(1.5, Math.max(1, n));
+  })();
+  const externalMarketContextMaxAgeMs = (() => {
+    const n = parseNumber(env.EXTERNAL_MARKET_CONTEXT_MAX_AGE_MS, 900_000);
+    if (!Number.isFinite(n)) return 900_000;
+    return Math.min(3_600_000, Math.max(60_000, Math.floor(n)));
+  })();
+  const externalMarketEmergencyEventEnabled = parseBool(env.EXTERNAL_MARKET_EMERGENCY_EVENT_ENABLED, false);
+  const externalMarketContextFetchIntervalMs = (() => {
+    const n = parseNumber(env.EXTERNAL_MARKET_CONTEXT_FETCH_INTERVAL_MS, 120_000);
+    if (!Number.isFinite(n)) return 120_000;
+    return Math.min(900_000, Math.max(30_000, Math.floor(n)));
+  })();
+  const externalMarketContextFetchTimeoutMs = (() => {
+    const n = parseNumber(env.EXTERNAL_MARKET_CONTEXT_FETCH_TIMEOUT_MS, 4_000);
+    if (!Number.isFinite(n)) return 4_000;
+    return Math.min(15_000, Math.max(500, Math.floor(n)));
+  })();
+  const externalMarketContextNewsMaxAgeHours = (() => {
+    const n = parseNumber(env.EXTERNAL_MARKET_CONTEXT_NEWS_MAX_AGE_HOURS, 6);
+    if (!Number.isFinite(n)) return 6;
+    return Math.min(48, Math.max(1, n));
+  })();
+  const externalMarketContextNewsHalfLifeHours = (() => {
+    const n = parseNumber(env.EXTERNAL_MARKET_CONTEXT_NEWS_HALF_LIFE_HOURS, 2);
+    if (!Number.isFinite(n)) return 2;
+    return Math.min(24, Math.max(0.5, n));
+  })();
+  const externalMarketContextNewsMaxWeight = (() => {
+    const n = parseNumber(env.EXTERNAL_MARKET_CONTEXT_NEWS_MAX_WEIGHT, 0.15);
+    if (!Number.isFinite(n)) return 0.15;
+    return Math.min(0.15, Math.max(0.05, n));
+  })();
+
   const okxLiveStaticNotionalCapEnabled = parseBool(env.OKX_LIVE_STATIC_NOTIONAL_CAP_ENABLED, true);
   const okxLiveUsableBalanceRatio = (() => {
     const n = parseNumber(env.OKX_LIVE_USABLE_BALANCE_RATIO, 0.95);
@@ -372,6 +422,19 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     okxLiveMaxAddonCount,
     okxLiveEmergencyMaxOrderNotionalUsdt,
     okxLiveMarginReserveRatio,
+    externalMarketContextEnabled,
+    externalMarketContextShadowMode,
+    externalMarketContextFetchEnabled,
+    externalMarketContextWeight,
+    externalMarketMinSizeMultiplier,
+    externalMarketMaxSizeMultiplier,
+    externalMarketContextMaxAgeMs,
+    externalMarketEmergencyEventEnabled,
+    externalMarketContextFetchIntervalMs,
+    externalMarketContextFetchTimeoutMs,
+    externalMarketContextNewsMaxAgeHours,
+    externalMarketContextNewsHalfLifeHours,
+    externalMarketContextNewsMaxWeight,
     okxLiveStaticNotionalCapEnabled,
     okxLiveUsableBalanceRatio,
     okxMomentumIocSlippagePct,

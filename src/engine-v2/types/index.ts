@@ -227,6 +227,14 @@ export interface LegacyConfigAdapter {
     okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
     okxLiveMarginReserveRatio?: number;
     paperTakerFeeRate?: number;
+    externalMarketContextEnabled?: boolean;
+    externalMarketContextShadowMode?: boolean;
+    externalMarketContextFetchEnabled?: boolean;
+    externalMarketContextWeight?: number;
+    externalMarketMinSizeMultiplier?: number;
+    externalMarketMaxSizeMultiplier?: number;
+    externalMarketContextMaxAgeMs?: number;
+    externalMarketEmergencyEventEnabled?: boolean;
 }
 
 export interface LegacyPositionAdapter {
@@ -368,6 +376,8 @@ export interface EngineV2Input {
         requestedAddonNotionalUsdt?: number;
         okxActualSide?: string;
         lastLossReentryState?: LastLossReentryState | null;
+        /** Optional external market snapshot — fail-open when absent. */
+        externalMarketSnapshot?: import("../external-market-context/types").ExternalMarketSnapshot | null;
     };
     now: number;
     v1Result: {
@@ -450,6 +460,14 @@ export interface EngineV2ConfigAdapter {
     okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
     okxLiveMarginReserveRatio?: number;
     paperTakerFeeRate?: number;
+    externalMarketContextEnabled?: boolean;
+    externalMarketContextShadowMode?: boolean;
+    externalMarketContextFetchEnabled?: boolean;
+    externalMarketContextWeight?: number;
+    externalMarketMinSizeMultiplier?: number;
+    externalMarketMaxSizeMultiplier?: number;
+    externalMarketContextMaxAgeMs?: number;
+    externalMarketEmergencyEventEnabled?: boolean;
 }
 
 export type EngineV2ExecutionAction = "ENTER" | "ADDON" | "NONE";
@@ -573,6 +591,14 @@ export interface V2BridgeConfig {
     okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
     okxLiveMarginReserveRatio?: number;
     paperTakerFeeRate?: number;
+    externalMarketContextEnabled?: boolean;
+    externalMarketContextShadowMode?: boolean;
+    externalMarketContextFetchEnabled?: boolean;
+    externalMarketContextWeight?: number;
+    externalMarketMinSizeMultiplier?: number;
+    externalMarketMaxSizeMultiplier?: number;
+    externalMarketContextMaxAgeMs?: number;
+    externalMarketEmergencyEventEnabled?: boolean;
 }
 
 export interface V2BridgePosition {
@@ -700,6 +726,7 @@ export interface V2BridgeState {
     finalAddonNotionalUsdt?: number;
     okxActualSide?: string;
     lastLossReentryState?: LastLossReentryState | null;
+    externalMarketSnapshot?: import("../external-market-context/types").ExternalMarketSnapshot | null;
 }
 
 export interface V2BridgeInput {

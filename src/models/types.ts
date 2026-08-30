@@ -205,6 +205,20 @@ export type EngineConfig = Readonly<{
   okxLiveEmergencyMaxOrderNotionalUsdt: number | null;
   /** Fraction of available balance reserved (not used for margin). Env: `OKX_LIVE_MARGIN_RESERVE_RATIO`. */
   okxLiveMarginReserveRatio: number;
+  /** External market/news auxiliary layer — sizing + confidence only, never hard-blocks entry. */
+  externalMarketContextEnabled: boolean;
+  externalMarketContextShadowMode: boolean;
+  externalMarketContextFetchEnabled: boolean;
+  externalMarketContextWeight: number;
+  externalMarketMinSizeMultiplier: number;
+  externalMarketMaxSizeMultiplier: number;
+  externalMarketContextMaxAgeMs: number;
+  externalMarketEmergencyEventEnabled: boolean;
+  externalMarketContextFetchIntervalMs: number;
+  externalMarketContextFetchTimeoutMs: number;
+  externalMarketContextNewsMaxAgeHours: number;
+  externalMarketContextNewsHalfLifeHours: number;
+  externalMarketContextNewsMaxWeight: number;
   /** Whether to use static cap or dynamic balance-based cap (default true). */
   okxLiveStaticNotionalCapEnabled: boolean;
   /** Fraction of available balance to use for dynamic capping (default 0.95). */

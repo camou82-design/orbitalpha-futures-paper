@@ -45,6 +45,11 @@ export type EvaluateEquityAdaptiveSizingInput = Readonly<{
     instrumentSizing?: OkxSwapInstrumentSizing | null;
     /** HTF PROBE_ONLY sizing cap — applied once to pre-lot notional for ENTRY orders. */
     htfSizeMultiplier?: number;
+    /**
+     * External market context sizing multiplier (confidence/sizing auxiliary only).
+     * Applied after probe + HTF multipliers. Must be > 0; never blocks entry by itself.
+     */
+    externalSizeMultiplier?: number;
     /** V2 risk-authoritative entries skip legacy 40 USDT; emergency cap remains ultimate ceiling. */
     v2AuthorityEntry?: boolean;
     /**
@@ -102,6 +107,7 @@ export type EquityAdaptiveSizingResult = Readonly<{
     ultimateSafetyCapUsdt: number | null;
     legacyCapSource: string | null;
     htfSizeMultiplierApplied: number;
+    externalSizeMultiplierApplied: number;
     /** Always false — legacy absolute probe cap (baseSizeUsd×multiplier) never used in V2 ENTRY. */
     legacyAbsoluteProbeCapApplied: boolean;
     v2AuthorityEntryApplied?: boolean;
@@ -295,6 +301,7 @@ export function evaluateEquityAdaptiveSizing(
         legacyCapSource: emergency.legacyCapSource,
         ultimateSafetyCapUsdt,
         htfSizeMultiplierApplied: 1,
+        externalSizeMultiplierApplied: 1,
         legacyAbsoluteProbeCapApplied: false,
         ...partial
     });
@@ -453,6 +460,17 @@ export function evaluateEquityAdaptiveSizing(
         preLotNotionalUsdt = preLotNotionalUsdt * htfSizeMultiplierApplied;
     }
 
+    const externalSizeMultiplierApplied =
+        input.orderKind === "ENTRY" &&
+        input.externalSizeMultiplier != null &&
+        Number.isFinite(input.externalSizeMultiplier) &&
+        input.externalSizeMultiplier > 0
+            ? input.externalSizeMultiplier
+            : 1;
+    if (externalSizeMultiplierApplied !== 1) {
+        preLotNotionalUsdt = preLotNotionalUsdt * externalSizeMultiplierApplied;
+    }
+
     if (!(preLotNotionalUsdt > 0)) {
         return baseFail({
             blockReason: "HTF_PROBE_SIZE_MULTIPLIER_ZEROED",
@@ -596,6 +614,7 @@ export function evaluateEquityAdaptiveSizing(
         ultimateSafetyCapUsdt,
         legacyCapSource: emergency.legacyCapSource,
         htfSizeMultiplierApplied,
+        externalSizeMultiplierApplied,
         legacyAbsoluteProbeCapApplied: false,
         v2AuthorityEntryApplied: input.v2AuthorityEntry === true
     };
