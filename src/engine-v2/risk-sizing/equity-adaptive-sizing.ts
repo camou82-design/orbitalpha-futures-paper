@@ -47,6 +47,18 @@ export type EvaluateEquityAdaptiveSizingInput = Readonly<{
     htfSizeMultiplier?: number;
     /** V2 risk-authoritative entries skip legacy 40 USDT; emergency cap remains ultimate ceiling. */
     v2AuthorityEntry?: boolean;
+    /**
+     * ENTRY probe size multiplier. Applied after equity/symbol/account/emergency caps,
+     * before HTF multiplier and OKX lot normalization.
+     * - null / undefined       → treated as 1 (no probe reduction)
+     * - >= 1                   → treated as 1 (no probe reduction)
+     * - 0 < multiplier < 1     → applied as probe fraction of full equity-authoritative notional
+     * - multiplier <= 0        → strictly BLOCKED with PROBE_MULTIPLIER_INVALID_ZERO_OR_NEGATIVE (fail-closed, never promoted to full)
+     * - ADDON orders: this field is ignored (ADDON path uses policyRequestedNotionalUsdt)
+     */
+    entryProbeSizeMultiplier?: number | null;
+    /** Source label for probe multiplier attribution (e.g. V2_POLARITY_REVERSAL_MICRO_PROBE, CONTINUATION_MICRO_PROBE, DEFAULT_MICRO_PROBE, NONE). */
+    entryProbeSizingSource?: string | null;
 }>;
 
 export type EquityAdaptiveSizingResult = Readonly<{
@@ -63,6 +75,14 @@ export type EquityAdaptiveSizingResult = Readonly<{
     estimatedRoundTripFeeUsdt: number;
     netRiskBudgetUsdt: number;
     riskBasedNotionalUsdt: number;
+    /** Full equity-authoritative notional before probe multiplier is applied (ENTRY only). */
+    cappedFullEntryNotionalUsdt: number;
+    /** Probe multiplier applied (1 if no probe reduction). */
+    probeMultiplierApplied: number;
+    /** Source label for the probe multiplier decision. */
+    probeSizingSource: string;
+    /** preLotNotionalUsdt after probe multiplier but before HTF multiplier. */
+    probeAdjustedPreLotNotionalUsdt: number;
     preLotNotionalUsdt: number;
     finalOrderNotionalUsdt: number;
     finalRequiredMarginUsdt: number;
@@ -82,6 +102,8 @@ export type EquityAdaptiveSizingResult = Readonly<{
     ultimateSafetyCapUsdt: number | null;
     legacyCapSource: string | null;
     htfSizeMultiplierApplied: number;
+    /** Always false — legacy absolute probe cap (baseSizeUsd×multiplier) never used in V2 ENTRY. */
+    legacyAbsoluteProbeCapApplied: boolean;
     v2AuthorityEntryApplied?: boolean;
 }>;
 
@@ -254,6 +276,10 @@ export function evaluateEquityAdaptiveSizing(
         estimatedRoundTripFeeUsdt: 0,
         netRiskBudgetUsdt: 0,
         riskBasedNotionalUsdt: 0,
+        cappedFullEntryNotionalUsdt: 0,
+        probeMultiplierApplied: 1,
+        probeSizingSource: "none",
+        probeAdjustedPreLotNotionalUsdt: 0,
         preLotNotionalUsdt: 0,
         finalOrderNotionalUsdt: 0,
         finalRequiredMarginUsdt: 0,
@@ -269,6 +295,7 @@ export function evaluateEquityAdaptiveSizing(
         legacyCapSource: emergency.legacyCapSource,
         ultimateSafetyCapUsdt,
         htfSizeMultiplierApplied: 1,
+        legacyAbsoluteProbeCapApplied: false,
         ...partial
     });
 
@@ -345,7 +372,73 @@ export function evaluateEquityAdaptiveSizing(
             estimatedRoundTripFeeUsdt,
             netRiskBudgetUsdt,
             riskBasedNotionalUsdt,
-            preLotNotionalUsdt: 0
+            preLotNotionalUsdt: 0,
+            cappedFullEntryNotionalUsdt: 0,
+            probeMultiplierApplied: 1,
+            probeSizingSource: "none",
+            probeAdjustedPreLotNotionalUsdt: 0,
+            legacyAbsoluteProbeCapApplied: false
+        });
+    }
+
+    // --- Probe multiplier (ENTRY only) ---
+    // Applied after equity/symbol/account/emergency caps, before HTF multiplier and lot normalization.
+    // null / undefined → 1 (no-op). >= 1 → 1 (no-op).
+    // 0 < x < 1 → reduce by fraction.
+    // x <= 0 or non-finite when provided → strictly BLOCKED (PROBE_MULTIPLIER_INVALID_ZERO_OR_NEGATIVE)
+    // ADDON orders: entryProbeSizeMultiplier is ignored.
+    const cappedFullEntryNotionalUsdt = preLotNotionalUsdt;
+    let probeMultiplierApplied = 1;
+    let probeSizingSource = input.entryProbeSizingSource ?? "NONE";
+
+    if (input.orderKind === "ENTRY" && input.entryProbeSizeMultiplier != null) {
+        const mult = input.entryProbeSizeMultiplier;
+        if (!Number.isFinite(mult) || mult <= 0) {
+            // RELEASE BLOCKER GUARD: multiplier <= 0 MUST NEVER be silently ignored or promoted to full size.
+            return baseFail({
+                blockReason: "PROBE_MULTIPLIER_INVALID_ZERO_OR_NEGATIVE",
+                riskPct,
+                qualityMultiplier: qualityMultiplier ?? 1,
+                riskBudgetUsdt,
+                stopDistancePct,
+                estimatedRoundTripFeeUsdt,
+                netRiskBudgetUsdt,
+                riskBasedNotionalUsdt,
+                preLotNotionalUsdt: 0,
+                cappedFullEntryNotionalUsdt,
+                probeMultiplierApplied: 0,
+                probeSizingSource: input.entryProbeSizingSource ?? "INVALID_ZERO_OR_NEGATIVE",
+                probeAdjustedPreLotNotionalUsdt: 0,
+                legacyAbsoluteProbeCapApplied: false
+            });
+        } else if (mult < 1) {
+            probeMultiplierApplied = mult;
+            probeSizingSource = input.entryProbeSizingSource ?? "MICRO_PROBE";
+            preLotNotionalUsdt = preLotNotionalUsdt * probeMultiplierApplied;
+        } else {
+            // mult >= 1: full entry (1.0 no-op)
+            probeMultiplierApplied = 1;
+            probeSizingSource = input.entryProbeSizingSource ?? "FULL_ENTRY";
+        }
+    }
+    const probeAdjustedPreLotNotionalUsdt = preLotNotionalUsdt;
+
+    if (input.orderKind === "ENTRY" && !(preLotNotionalUsdt > 0)) {
+        return baseFail({
+            blockReason: "PROBE_MULTIPLIER_ZEROED",
+            riskPct,
+            qualityMultiplier: qualityMultiplier ?? 1,
+            riskBudgetUsdt,
+            stopDistancePct,
+            estimatedRoundTripFeeUsdt,
+            netRiskBudgetUsdt,
+            riskBasedNotionalUsdt,
+            preLotNotionalUsdt: 0,
+            cappedFullEntryNotionalUsdt,
+            probeMultiplierApplied,
+            probeSizingSource,
+            probeAdjustedPreLotNotionalUsdt: 0,
+            legacyAbsoluteProbeCapApplied: false
         });
     }
 
@@ -371,6 +464,10 @@ export function evaluateEquityAdaptiveSizing(
             netRiskBudgetUsdt,
             riskBasedNotionalUsdt,
             preLotNotionalUsdt: 0,
+            cappedFullEntryNotionalUsdt,
+            probeMultiplierApplied,
+            probeSizingSource,
+            probeAdjustedPreLotNotionalUsdt,
             htfSizeMultiplierApplied
         });
     }
@@ -397,6 +494,10 @@ export function evaluateEquityAdaptiveSizing(
                 netRiskBudgetUsdt,
                 riskBasedNotionalUsdt,
                 preLotNotionalUsdt,
+                cappedFullEntryNotionalUsdt,
+                probeMultiplierApplied,
+                probeSizingSource,
+                probeAdjustedPreLotNotionalUsdt,
                 normalizedContracts: norm.normalized_contracts,
                 normalizedNotionalUsdt: norm.actualNotional
             });
@@ -421,6 +522,10 @@ export function evaluateEquityAdaptiveSizing(
                 netRiskBudgetUsdt,
                 riskBasedNotionalUsdt,
                 preLotNotionalUsdt,
+                cappedFullEntryNotionalUsdt,
+                probeMultiplierApplied,
+                probeSizingSource,
+                probeAdjustedPreLotNotionalUsdt,
                 normalizedContracts,
                 normalizedNotionalUsdt,
                 actualRiskAtStopUsdt,
@@ -444,6 +549,10 @@ export function evaluateEquityAdaptiveSizing(
             netRiskBudgetUsdt,
             riskBasedNotionalUsdt,
             preLotNotionalUsdt,
+            cappedFullEntryNotionalUsdt,
+            probeMultiplierApplied,
+            probeSizingSource,
+            probeAdjustedPreLotNotionalUsdt,
             finalOrderNotionalUsdt,
             finalRequiredMarginUsdt,
             normalizedContracts,
@@ -468,6 +577,10 @@ export function evaluateEquityAdaptiveSizing(
         estimatedRoundTripFeeUsdt,
         netRiskBudgetUsdt,
         riskBasedNotionalUsdt,
+        cappedFullEntryNotionalUsdt,
+        probeMultiplierApplied,
+        probeSizingSource,
+        probeAdjustedPreLotNotionalUsdt,
         preLotNotionalUsdt,
         finalOrderNotionalUsdt,
         finalRequiredMarginUsdt,
@@ -483,6 +596,7 @@ export function evaluateEquityAdaptiveSizing(
         ultimateSafetyCapUsdt,
         legacyCapSource: emergency.legacyCapSource,
         htfSizeMultiplierApplied,
+        legacyAbsoluteProbeCapApplied: false,
         v2AuthorityEntryApplied: input.v2AuthorityEntry === true
     };
 }

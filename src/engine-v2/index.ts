@@ -6221,16 +6221,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     (v2State as any).okxInstrumentSizing ??
                     (input.state as any).okxInstrumentSizing ??
                     null;
-                const probeCapNotionalUsdt = isMicroProbe && stageMarginKrwAfter > 0
-                    ? (stageMarginKrwAfter / 1400) * appliedLeverage
-                    : null;
+                // V2 ENTRY: policyRequestedNotionalUsdt is null for non-addon entries.
+                // Probe multiplier is evaluated and passed via entryProbeSizeMultiplier into evaluateEquityAdaptiveSizing.
+                // Legacy probeCapNotionalUsdt (stageMarginKrwAfter-based absolute anchor) REMOVED.
                 const policyRequestedNotional = isAddOn
                     ? (isAdverseAddon
                         ? ((v2State as any).requestedAddonNotionalUsdt ??
                             addOnPolicy?.requestedAddonNotionalUsdt ??
                             0)
                         : ((v2State as any).finalAddonNotionalUsdt ?? finalAddonNotionalUsdt ?? 0))
-                    : probeCapNotionalUsdt;
+                    : null;
                 const adverseRiskBudgetAllowedNotional = isAdverseAddon
                     ? (addOnPolicy?.requestedAddonNotionalUsdt ??
                         (addOnPolicy as any)?.riskProjection?.riskBudgetAllowedNotional ??
@@ -6264,6 +6264,24 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         ? judgment.htf_size_multiplier
                         : undefined;
 
+                // --- Probe multiplier decision (before evaluateEquityAdaptiveSizing) ---
+                // Canonical order: risk notional → caps → probe → HTF → lot normalization → validation
+                let entryProbeSizeMultiplier: number | null = null;
+                let probeSizingSource = "NONE";
+                if (!isAddOn) {
+                    if (promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE") {
+                        entryProbeSizeMultiplier = 0.20;
+                        probeSizingSource = "V2_POLARITY_REVERSAL_MICRO_PROBE";
+                    } else if (promotionReason === "CONTINUATION_MICRO_PROBE" && microProbeSizeCap != null) {
+                        entryProbeSizeMultiplier = microProbeSizeCap;
+                        probeSizingSource = "CONTINUATION_MICRO_PROBE";
+                    } else if (isMicroProbe) {
+                        entryProbeSizeMultiplier = 0.25;
+                        probeSizingSource = "DEFAULT_MICRO_PROBE";
+                    }
+                    // FULL V2 ENTRY: entryProbeSizeMultiplier = null, probeSizingSource = "NONE" (no reduction)
+                }
+
                 const sizingResult = evaluateEquityAdaptiveSizing({
                     symbol: String(input.symbol),
                     side: sideCand === "short" ? "short" : "long",
@@ -6285,7 +6303,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     lastPrice: lastPx,
                     instrumentSizing,
                     htfSizeMultiplier: htfProbeSizeMultiplier,
-                    v2AuthorityEntry: true
+                    v2AuthorityEntry: true,
+                    entryProbeSizeMultiplier,
+                    entryProbeSizingSource: probeSizingSource
                 });
 
                 equityAdaptiveSizingAuthority = sizingResult;
@@ -6351,9 +6371,29 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     requestedOrderNotionalUsdt = sizingResult.preLotNotionalUsdt;
                     finalOrderNotionalUsdt = sizingResult.finalOrderNotionalUsdt;
 
+                    if (input.evaluationMode !== "diagnostic") {
+                        console.info(JSON.stringify({
+                            event: "V2_PROBE_SIZING_AUTHORITY_PROOF",
+                            symbol: String(input.symbol),
+                            is_micro_probe: isMicroProbe,
+                            is_addon: isAddOn,
+                            riskBasedNotionalUsdt: sizingResult.riskBasedNotionalUsdt,
+                            cappedFullEntryNotionalUsdt: sizingResult.cappedFullEntryNotionalUsdt,
+                            probeMultiplierApplied: sizingResult.probeMultiplierApplied,
+                            probeSizingSource: sizingResult.probeSizingSource,
+                            probeAdjustedPreLotNotionalUsdt: sizingResult.probeAdjustedPreLotNotionalUsdt,
+                            htfSizeMultiplierApplied: sizingResult.htfSizeMultiplierApplied,
+                            finalOrderNotionalUsdt,
+                            normalizedContracts: sizingResult.normalizedContracts,
+                            finalRequiredMarginUsdt: sizingResult.finalRequiredMarginUsdt,
+                            effectiveLiveCapUsdt: sizingResult.effectiveLiveCapUsdt,
+                            legacyAbsoluteProbeCapApplied: false
+                        }));
+                    }
+
                     const projectedSymbolNotionalUsdt = existingSymbolNotionalUsdt + finalOrderNotionalUsdt;
                     const projectedAccountNotionalUsdt = existingAccountNotionalUsdt + finalOrderNotionalUsdt;
-                    
+
                     if (!Number.isFinite(projectedSymbolNotionalUsdt) || !Number.isFinite(projectedAccountNotionalUsdt)) {
                         min_order_check_passed = false;
                         min_order_block_reason = "EXPOSURE_CALCULATION_FAILED_NAN";
