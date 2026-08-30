@@ -330,6 +330,8 @@ export interface EngineV2Input {
         balanceFetchedAt?: number;
         positionsFetchedAt?: number;
         pendingOrdersFetchedAt?: number;
+        hasOperatorPendingOrders?: boolean;
+        manualTakeoverActive?: boolean;
         freshTickBarrierActive: boolean;
         /** Same tick / post-barrier: execution must not proceed until cleared at end of tick. */
         freshTickExecutionBlocked?: boolean;

@@ -442,6 +442,8 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
         balanceFetchedAt: input.state.balanceFetchedAt,
         positionsFetchedAt: input.state.positionsFetchedAt,
         pendingOrdersFetchedAt: input.state.pendingOrdersFetchedAt,
-        lastLossReentryState: input.state.lastLossReentryState ?? null
+        lastLossReentryState: input.state.lastLossReentryState ?? null,
+        hasOperatorPendingOrders: (input.state as any)?.hasOperatorPendingOrders,
+        manualTakeoverActive: (input.state as any)?.manualTakeoverActive
     };
 }

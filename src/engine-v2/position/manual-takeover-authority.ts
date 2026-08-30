@@ -493,20 +493,42 @@ export function isAuthoritativeBotOwnedAlgoOrder(
   const algoId = String(algo.algoId ?? algo.ordId ?? "").trim();
   const algoClOrdId = String(algo.algoClOrdId ?? algo.clOrdId ?? "").trim();
 
-  // 1. Exact match against open ledger algo IDs (SL / TP / Stop / BE)
-  if (algoId.length > 0 && openPositions && openPositions.length > 0) {
+  // 1. Exact match against open ledger algo IDs or position openedAt / closePendingClOrdId
+  if (openPositions && openPositions.length > 0) {
     for (const open of openPositions) {
-      if (open.protectiveSlAlgoId && algoId === String(open.protectiveSlAlgoId).trim()) return true;
-      if (open.protectiveTpAlgoId && algoId === String(open.protectiveTpAlgoId).trim()) return true;
-      if (open.protectiveStopAlgoId && algoId === String(open.protectiveStopAlgoId).trim()) return true;
-      if (open.breakevenStopAlgoId && algoId === String(open.breakevenStopAlgoId).trim()) return true;
+      if (algoId.length > 0) {
+        if (open.protectiveSlAlgoId && algoId === String(open.protectiveSlAlgoId).trim()) return true;
+        if (open.protectiveTpAlgoId && algoId === String(open.protectiveTpAlgoId).trim()) return true;
+        if (open.protectiveStopAlgoId && algoId === String(open.protectiveStopAlgoId).trim()) return true;
+        if (open.breakevenStopAlgoId && algoId === String(open.breakevenStopAlgoId).trim()) return true;
+      }
+      if (algoClOrdId.length > 0) {
+        if (open.openedAt && open.openedAt > 0) {
+          const openedAt36 = open.openedAt.toString(36);
+          if (algoClOrdId.includes(openedAt36)) return true;
+        }
+        if (open.closePendingClOrdId && algoClOrdId.includes(String(open.closePendingClOrdId).slice(1))) {
+          return true;
+        }
+        // Match schema strictly bound to this open position's symbol and side
+        const symShort = String(open.symbol).slice(0, 5).toUpperCase();
+        const sideChar = String(open.side)[0].toLowerCase();
+        const expectedPrefix = `oap${symShort}${sideChar}`.toLowerCase();
+        if (algoClOrdId.toLowerCase().startsWith(expectedPrefix)) {
+          const rest = algoClOrdId.slice(expectedPrefix.length);
+          if (/^[0-9a-z]{7,10}(?:r\d+)?[st]?$/i.test(rest)) {
+            return true;
+          }
+        }
+      }
     }
+    // When positions exist, never grant cancel authority on casual prefix match alone
+    return false;
   }
 
-  // 2. Strict match for engine-generated protective algo client order ID schema:
-  // Format: oap{shortSymbol}{sideChar}{openedAtBase36}{revisionSuffix}[s|t]
-  // e.g. oapETHUSlsg7k2j3s or oapETHUSlsg7k2j3r1t
-  if (/^oap[A-Za-z0-9]{3,6}[ls][0-9a-z]+(?:r\d+)?[st]?$/i.test(algoClOrdId)) {
+  // 2. Strict match for flat state stale algo cleanup:
+  // Must match full engine-generated schema with valid timestamp length
+  if (/^oap[A-Za-z0-9]{3,6}[ls][0-9a-z]{7,10}(?:r\d+)?[st]?$/i.test(algoClOrdId)) {
     return true;
   }
 
@@ -523,20 +545,296 @@ export function isAuthoritativeBotOwnedPendingOrder(
   const ordId = String(ord.ordId ?? "").trim();
   const clOrdId = String(ord.clOrdId ?? "").trim();
 
-  // 1. Exact match against open ledger close pending IDs
+  // 1. Exact match against open ledger close pending IDs or position openedAt
   if (openPositions && openPositions.length > 0) {
     for (const open of openPositions) {
       if (open.closePendingClOrdId && clOrdId === String(open.closePendingClOrdId).trim()) return true;
       if (open.closePendingOrdId && ordId === String(open.closePendingOrdId).trim()) return true;
+      if (clOrdId.length > 0 && open.openedAt && open.openedAt > 0) {
+        const openedAt36 = open.openedAt.toString(36);
+        if (clOrdId.includes(openedAt36)) {
+          return true;
+        }
+      }
     }
+    return false;
   }
 
-  // 2. Strict match for engine-generated entry/close clOrdId schema:
-  // Format: p{shortSymbol}{sideChar}{timestampBase36}
-  // e.g. pETHUSlsg7k2j3
-  if (/^p[A-Za-z0-9]{3,6}[ls][0-9a-z]+$/i.test(clOrdId)) {
+  // 2. Strict match for flat state stale pending order cleanup
+  if (/^p[A-Za-z0-9]{3,6}[ls][0-9a-z]{7,10}$/i.test(clOrdId)) {
     return true;
   }
 
   return false;
+}
+
+export type OrderOwnershipResult = Readonly<{
+  ownership: "OPERATOR_OWNED" | "ENGINE_OWNED" | "UNKNOWN_OPERATOR_PRESERVED";
+  ownershipEvidence: string;
+  mutationAllowed: boolean;
+  cancelAllowed: boolean;
+  authorityOwner: "OPERATOR" | "ENGINE";
+  reason: string;
+}>;
+
+export function evaluateOrderOwnership(
+  order: Record<string, unknown>,
+  isAlgo: boolean,
+  openPositions?: ReadonlyArray<PaperOpenPositionRecord> | null
+): OrderOwnershipResult {
+  const ordId = String(order.ordId ?? order.algoId ?? "").trim();
+  const clOrdId = String(order.clOrdId ?? order.algoClOrdId ?? "").trim();
+
+  const isBotOwned = isAlgo
+    ? isAuthoritativeBotOwnedAlgoOrder(order, openPositions)
+    : isAuthoritativeBotOwnedPendingOrder(order, openPositions);
+
+  if (isBotOwned) {
+    return {
+      ownership: "ENGINE_OWNED",
+      ownershipEvidence: `bot_matched_${isAlgo ? "algo" : "pending"}_id`,
+      mutationAllowed: true,
+      cancelAllowed: true,
+      authorityOwner: "ENGINE",
+      reason: "ENGINE_OWNED_CONFIRMED"
+    };
+  }
+
+  const hasClOrdId = clOrdId.length > 0;
+  const isExplicitManual =
+    clOrdId.startsWith("p_") ||
+    clOrdId.startsWith("sl_") ||
+    clOrdId.startsWith("tp_") ||
+    clOrdId.startsWith("manual") ||
+    clOrdId.startsWith("user") ||
+    clOrdId.toLowerCase().includes("manual");
+
+  const ownership = isExplicitManual || !hasClOrdId ? "OPERATOR_OWNED" : "UNKNOWN_OPERATOR_PRESERVED";
+  const evidence = !hasClOrdId
+    ? "empty_clOrdId_exchange_created"
+    : isExplicitManual
+      ? `explicit_operator_prefix:${clOrdId}`
+      : `non_bot_clOrdId_schema:${clOrdId}`;
+
+  return {
+    ownership,
+    ownershipEvidence: evidence,
+    mutationAllowed: false,
+    cancelAllowed: false,
+    authorityOwner: "OPERATOR",
+    reason: "OPERATOR_ORDER_PRESERVED_NO_MUTATION"
+  };
+}
+
+export function buildManualPendingOrderAuthorityProof(input: Readonly<{
+  symbol: string;
+  orderType: "PENDING_ORDER" | "ALGO_ORDER";
+  ordId?: string | null;
+  clOrdId?: string | null;
+  algoId?: string | null;
+  algoClOrdId?: string | null;
+  ownership: "OPERATOR_OWNED" | "ENGINE_OWNED" | "UNKNOWN_OPERATOR_PRESERVED";
+  ownershipEvidence: string;
+  mutationAllowed: boolean;
+  cancelAllowed: boolean;
+  authorityOwner: "OPERATOR" | "ENGINE";
+  reason: string;
+}>): Record<string, unknown> {
+  return {
+    event: "V2_MANUAL_PENDING_ORDER_AUTHORITY_PROOF",
+    symbol: input.symbol,
+    orderType: input.orderType,
+    ordId: input.ordId ?? null,
+    clOrdId: input.clOrdId ?? null,
+    algoId: input.algoId ?? null,
+    algoClOrdId: input.algoClOrdId ?? null,
+    ownership: input.ownership,
+    ownershipEvidence: input.ownershipEvidence,
+    mutationAllowed: input.mutationAllowed,
+    cancelAllowed: input.cancelAllowed,
+    authorityOwner: input.authorityOwner,
+    reason: input.reason
+  };
+}
+
+function matchesSymbolInstId(instId: string, symbol: string): boolean {
+  if (!instId || !symbol) return false;
+  const cleanInst = instId.replace(/[-_]/g, "").toUpperCase();
+  const cleanSym = symbol.replace(/[-_]/g, "").toUpperCase();
+  return cleanInst.startsWith(cleanSym) || cleanSym.startsWith(cleanInst);
+}
+
+export function evaluateSymbolPendingOrderAuthority(input: Readonly<{
+  symbol: string;
+  pendingOrders?: ReadonlyArray<Record<string, unknown>> | null;
+  algoOrders?: ReadonlyArray<Record<string, unknown>> | null;
+  openPositions?: ReadonlyArray<PaperOpenPositionRecord> | null;
+}>): Readonly<{
+  hasOperatorPendingOrders: boolean;
+  operatorOrderCount: number;
+  engineOrderCount: number;
+  authorityOwner: "OPERATOR" | "ENGINE";
+  mutationAllowed: boolean;
+  cancelAllowed: boolean;
+  proofs: ReadonlyArray<Record<string, unknown>>;
+}> {
+  const sym = String(input.symbol ?? "").trim().toUpperCase();
+  const opens = input.openPositions?.filter(p => String(p.symbol).toUpperCase() === sym) ?? [];
+  const symPending = (input.pendingOrders ?? []).filter(o => matchesSymbolInstId(String(o.instId ?? ""), sym));
+  const symAlgos = (input.algoOrders ?? []).filter(a => matchesSymbolInstId(String(a.instId ?? ""), sym));
+
+  const proofs: Record<string, unknown>[] = [];
+  let operatorOrderCount = 0;
+  let engineOrderCount = 0;
+
+  for (const ord of symPending) {
+    const ev = evaluateOrderOwnership(ord, false, opens);
+    if (ev.authorityOwner === "OPERATOR") operatorOrderCount++;
+    else engineOrderCount++;
+    const proof = buildManualPendingOrderAuthorityProof({
+      symbol: sym,
+      orderType: "PENDING_ORDER",
+      ordId: ord.ordId ? String(ord.ordId) : null,
+      clOrdId: ord.clOrdId ? String(ord.clOrdId) : null,
+      algoId: null,
+      algoClOrdId: null,
+      ownership: ev.ownership,
+      ownershipEvidence: ev.ownershipEvidence,
+      mutationAllowed: ev.mutationAllowed,
+      cancelAllowed: ev.cancelAllowed,
+      authorityOwner: ev.authorityOwner,
+      reason: ev.reason
+    });
+    proofs.push(proof);
+  }
+
+  for (const algo of symAlgos) {
+    const ev = evaluateOrderOwnership(algo, true, opens);
+    if (ev.authorityOwner === "OPERATOR") operatorOrderCount++;
+    else engineOrderCount++;
+    const proof = buildManualPendingOrderAuthorityProof({
+      symbol: sym,
+      orderType: "ALGO_ORDER",
+      ordId: null,
+      clOrdId: null,
+      algoId: algo.algoId ? String(algo.algoId) : null,
+      algoClOrdId: algo.algoClOrdId ? String(algo.algoClOrdId) : null,
+      ownership: ev.ownership,
+      ownershipEvidence: ev.ownershipEvidence,
+      mutationAllowed: ev.mutationAllowed,
+      cancelAllowed: ev.cancelAllowed,
+      authorityOwner: ev.authorityOwner,
+      reason: ev.reason
+    });
+    proofs.push(proof);
+  }
+
+  const hasOperatorPendingOrders = operatorOrderCount > 0;
+  const authorityOwner = hasOperatorPendingOrders ? "OPERATOR" : "ENGINE";
+  const mutationAllowed = !hasOperatorPendingOrders;
+  const cancelAllowed = !hasOperatorPendingOrders;
+
+  return {
+    hasOperatorPendingOrders,
+    operatorOrderCount,
+    engineOrderCount,
+    authorityOwner,
+    mutationAllowed,
+    cancelAllowed,
+    proofs
+  };
+}
+
+export function buildOperatorOrderFillAuthorityProof(input: Readonly<{
+  symbol: string;
+  side: string;
+  previousOperatorOrderObserved: boolean;
+  previousOrdId?: string | null;
+  previousAlgoId?: string | null;
+  pendingOrderPresentNow: boolean;
+  exchangePositionContracts: number;
+  positionDeltaContracts: number;
+  resolvedPositionOwner: "OPERATOR" | "ENGINE";
+  lifecycleState: "OPERATOR_MANAGED" | "BOT_V2_MANAGED";
+  positionCalculationAllowed: boolean;
+  mutationAllowed: boolean;
+  reason: string;
+}>): Record<string, unknown> {
+  return {
+    event: "V2_OPERATOR_ORDER_FILL_AUTHORITY_PROOF",
+    symbol: input.symbol,
+    side: input.side,
+    previousOperatorOrderObserved: input.previousOperatorOrderObserved,
+    previousOrdId: input.previousOrdId ?? null,
+    previousAlgoId: input.previousAlgoId ?? null,
+    pendingOrderPresentNow: input.pendingOrderPresentNow,
+    exchangePositionContracts: input.exchangePositionContracts,
+    positionDeltaContracts: input.positionDeltaContracts,
+    resolvedPositionOwner: input.resolvedPositionOwner,
+    lifecycleState: input.lifecycleState,
+    positionCalculationAllowed: input.positionCalculationAllowed,
+    mutationAllowed: input.mutationAllowed,
+    reason: input.reason
+  };
+}
+
+export function evaluateOperatorOrderFillTransition(input: Readonly<{
+  symbol: string;
+  side: "long" | "short";
+  currentExchangeContracts: number;
+  previousExchangeContracts: number;
+  previousOperatorOrders?: ReadonlyArray<Record<string, unknown>> | null;
+  currentOperatorOrders?: ReadonlyArray<Record<string, unknown>> | null;
+  isBotOrderFilled?: boolean;
+}>): Readonly<{
+  isOperatorFill: boolean;
+  resolvedPositionOwner: "OPERATOR" | "ENGINE";
+  lifecycleState: "OPERATOR_MANAGED" | "BOT_V2_MANAGED";
+  positionCalculationAllowed: boolean;
+  mutationAllowed: boolean;
+  proof: Record<string, unknown>;
+}> {
+  const delta = Math.abs(input.currentExchangeContracts - input.previousExchangeContracts);
+  const hadPrevOperatorOrder = (input.previousOperatorOrders ?? []).length > 0;
+  const currentOperatorOrderCount = (input.currentOperatorOrders ?? []).length;
+  const prevOrdId = input.previousOperatorOrders?.[0]?.ordId ? String(input.previousOperatorOrders[0].ordId) : null;
+  const prevAlgoId = input.previousOperatorOrders?.[0]?.algoId ? String(input.previousOperatorOrders[0].algoId) : null;
+
+  const isOperatorFill =
+    !input.isBotOrderFilled &&
+    (hadPrevOperatorOrder || currentOperatorOrderCount > 0) &&
+    input.currentExchangeContracts > 0;
+
+  const resolvedPositionOwner = isOperatorFill ? "OPERATOR" : "ENGINE";
+  const lifecycleState = isOperatorFill ? "OPERATOR_MANAGED" : "BOT_V2_MANAGED";
+  const positionCalculationAllowed = !isOperatorFill;
+  const mutationAllowed = !isOperatorFill;
+  const reason = isOperatorFill
+    ? (currentOperatorOrderCount > 0 ? "OPERATOR_ORDER_PARTIAL_FILL_OR_CONCURRENT_PENDING" : "OPERATOR_PENDING_ORDER_FILLED")
+    : "ENGINE_ORDER_FILL_OR_NORMAL";
+
+  const proof = buildOperatorOrderFillAuthorityProof({
+    symbol: input.symbol,
+    side: input.side,
+    previousOperatorOrderObserved: hadPrevOperatorOrder,
+    previousOrdId: prevOrdId,
+    previousAlgoId: prevAlgoId,
+    pendingOrderPresentNow: currentOperatorOrderCount > 0,
+    exchangePositionContracts: input.currentExchangeContracts,
+    positionDeltaContracts: delta,
+    resolvedPositionOwner,
+    lifecycleState,
+    positionCalculationAllowed,
+    mutationAllowed,
+    reason
+  });
+
+  return {
+    isOperatorFill,
+    resolvedPositionOwner,
+    lifecycleState,
+    positionCalculationAllowed,
+    mutationAllowed,
+    proof
+  };
 }

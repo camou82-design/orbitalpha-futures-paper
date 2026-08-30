@@ -354,6 +354,10 @@ import {
   resolvePositionMutationAuthority,
   hydrateManualTakeoverOntoOpenPositions,
   buildStartupPositionAuthorityBarrierProof,
+  evaluateOrderOwnership,
+  evaluateSymbolPendingOrderAuthority,
+  evaluateOperatorOrderFillTransition,
+  buildOperatorOrderFillAuthorityProof,
   type ManualTakeoverRecord,
   type ManualTakeoverStoreDoc,
   type ManualTakeoverReason
@@ -2104,6 +2108,8 @@ export class PaperEngine {
   private positionExitProofThrottleByFlow = new Map<string, number>();
   /** Consecutive reconcile cycles with authoritative OKX zero for symbol:side. */
   private authoritativeFlatZeroConfirmByKey = new Map<string, number>();
+  private operatorPendingOrdersBySymbol = new Map<string, boolean>();
+  private lastObservedOperatorOrdersBySymbol = new Map<string, Array<Record<string, unknown>>>();
 
   private tradeControlPath(): string {
     return path.resolve(this.config.dataDir, "control/trade-control.json");
@@ -2340,6 +2346,27 @@ export class PaperEngine {
       else {
         this.cachedOpsAlgos = [];
         this.cachedOpsFetchErrors.push(`orders_algos_pending:${algoRes.error}`);
+      }
+
+      for (const sym of this.config.symbols) {
+        const symKey = String(sym).trim().toUpperCase();
+        const auth = evaluateSymbolPendingOrderAuthority({
+          symbol: symKey,
+          pendingOrders: this.cachedOpsPending,
+          algoOrders: this.cachedOpsAlgos,
+          openPositions: this.lastOpenPositionsForTakeover
+        });
+        this.operatorPendingOrdersBySymbol.set(symKey, auth.hasOperatorPendingOrders);
+        const opOrders = [
+          ...this.cachedOpsPending.filter(o => evaluateOrderOwnership(o, false, this.lastOpenPositionsForTakeover).authorityOwner === "OPERATOR"),
+          ...this.cachedOpsAlgos.filter(a => evaluateOrderOwnership(a, true, this.lastOpenPositionsForTakeover).authorityOwner === "OPERATOR")
+        ];
+        if (opOrders.length > 0) {
+          this.lastObservedOperatorOrdersBySymbol.set(symKey, opOrders);
+        }
+        for (const proof of auth.proofs) {
+          this.logger.info("V2_MANUAL_PENDING_ORDER_AUTHORITY_PROOF", proof);
+        }
       }
     }
   }
@@ -2987,6 +3014,21 @@ export class PaperEngine {
             }
 
             if (!isReduceOnly && (ord.ordId || ord.algoId) && liveExposure) {
+              const botOwned = ord.algoId
+                ? isAuthoritativeBotOwnedAlgoOrder(ord, this.lastOpenPositionsForTakeover)
+                : isAuthoritativeBotOwnedPendingOrder(ord, this.lastOpenPositionsForTakeover);
+
+              if (!botOwned) {
+                this.logger.info("OPERATOR_ORDER_PRESERVED_PROOF", {
+                  symbol: r.symbol,
+                  ordId: ord.ordId,
+                  algoId: ord.algoId,
+                  clOrdId: ord.clOrdId,
+                  reason: "operator_order_untouched_no_mutation"
+                });
+                continue;
+              }
+
               this.logger.info("OKX_STALE_ENTRY_ORDER_CANCEL_ATTEMPT_PROOF", { symbol: r.symbol, ordId: ord.ordId, algoId: ord.algoId });
               try {
                 if (ord.algoId) {
@@ -5248,7 +5290,6 @@ export class PaperEngine {
           detail: "EXCHANGE_POSITION_MISSING_IN_LEDGER_ADOPTING"
         });
 
-        // Search for the raw row in lastLivePositionsPayload to get more details
         const okxRow = (this.lastLivePositionsPayload as any[] || []).find(r => 
           String(r.instId) === remoteVal.instId && 
           String(r.posSide ?? "").toLowerCase() === remoteVal.posSide
@@ -5270,8 +5311,41 @@ export class PaperEngine {
           continue;
         }
 
+        const symKey = String(symbol).trim().toUpperCase();
         const isEngineOwned = isOrderEngineOwned({ clOrdId: okxRow?.clOrdId, ordId: okxRow?.ordId });
-        const lifecycleState = isEngineOwned ? "UNTRACKED_AUTO_ORIGIN" : "OKX_UNTRACKED_FILL";
+        const prevOpOrders = this.lastObservedOperatorOrdersBySymbol.get(symKey) ?? [];
+        const currentOpOrders = (this.cachedOpsPending ?? []).filter(o => {
+          return evaluateOrderOwnership(o, false, rawOpens).authorityOwner === "OPERATOR";
+        });
+        const fillEval = evaluateOperatorOrderFillTransition({
+          symbol: symKey,
+          side,
+          currentExchangeContracts: remoteVal.contracts,
+          previousExchangeContracts: 0,
+          previousOperatorOrders: prevOpOrders,
+          currentOperatorOrders: currentOpOrders,
+          isBotOrderFilled: isEngineOwned
+        });
+
+        if (fillEval.isOperatorFill) {
+          this.logger.info("V2_OPERATOR_ORDER_FILL_AUTHORITY_PROOF", fillEval.proof);
+          const takeoverRec = createManualTakeoverRecord({
+            symbol: symKey,
+            side,
+            reason: "OPERATOR_MANUAL_INTERVENTION",
+            nowMs: nowTs
+          });
+          this.manualTakeoverBySymbol.set(buildManualTakeoverKey(symKey, side), takeoverRec);
+          this.manualTakeoverBySymbol.set(symKey, takeoverRec);
+          void this.persistManualTakeoverDoc();
+          void this.cancelEngineOwnedOrdersOnTakeover(symKey, side);
+        }
+
+        const lifecycleState = fillEval.isOperatorFill
+          ? "OPERATOR_MANAGED"
+          : isEngineOwned
+            ? "UNTRACKED_AUTO_ORIGIN"
+            : "OKX_UNTRACKED_FILL";
         
         const cTime = Number(okxRow?.cTime);
         const originalOpenedAt = (cTime > 0 && cTime < nowTs) ? cTime : 0;
@@ -5284,7 +5358,7 @@ export class PaperEngine {
         let finalLifecycleState: PaperOpenPositionRecord["lifecycleState"] = lifecycleState as PaperOpenPositionRecord["lifecycleState"];
         
         if (!(inst && inst.ctVal > 0) && !(okxContracts > 0 && baseQty > 0)) {
-           finalLifecycleState = "CLOSE_ONLY_MANAGED";
+           finalLifecycleState = fillEval.isOperatorFill ? "OPERATOR_MANAGED" : "CLOSE_ONLY_MANAGED";
         }
 
         this.logger.info("ADOPTED_POSITION_UNIT_AUTHORITY_PROOF", {
@@ -5298,7 +5372,7 @@ export class PaperEngine {
            unit_source: "okx_reconcile"
         });
 
-        const v2Canonical = isEngineOwned ? resolveCanonicalV2SizeUsd({
+        const v2Canonical = isEngineOwned && !fillEval.isOperatorFill ? resolveCanonicalV2SizeUsd({
           notionalUsd: notional,
           marginUsd: actualMarginUsd,
           leverage: leverage,
@@ -5306,7 +5380,7 @@ export class PaperEngine {
           ctVal: inst?.ctVal,
           price: avgPx
         }) : null;
-        const finalSizeUsd = isEngineOwned ? (v2Canonical ?? notional) : actualMarginUsd;
+        const finalSizeUsd = isEngineOwned && !fillEval.isOperatorFill ? (v2Canonical ?? notional) : actualMarginUsd;
 
         const adopted: PaperOpenPositionRecord = {
           openedAt: originalOpenedAt,
@@ -5318,16 +5392,18 @@ export class PaperEngine {
           initialSizeUsd: finalSizeUsd,
           actualMarginUsd,
           strategyVersion: "paper-v2",
-          sourceSignal: isEngineOwned ? "okx_reconcile_untracked_auto" : "okx_reconcile_adopted",
-          sourceRunPath: isEngineOwned ? "auto_adoption_untracked" : "manual_adoption",
+          sourceSignal: fillEval.isOperatorFill ? "manual_intervention_fill" : isEngineOwned ? "okx_reconcile_untracked_auto" : "okx_reconcile_adopted",
+          sourceRunPath: fillEval.isOperatorFill ? "manual_adoption" : isEngineOwned ? "auto_adoption_untracked" : "manual_adoption",
           lifecycleState: finalLifecycleState,
           reconcileState: "ADOPTED",
+          manualTakeoverActive: fillEval.isOperatorFill ? true : undefined,
+          manualOwnershipLatch: fillEval.isOperatorFill ? true : undefined,
           lastCheckedAt: nowTs,
           status: "open",
           regimeAtEntry: "NO_TRADE",
           executorAtEntry: "IDLE",
-          isV2Authority: isEngineOwned,
-          authoritySourceAtEntry: isEngineOwned ? "v2" : undefined,
+          isV2Authority: isEngineOwned && !fillEval.isOperatorFill,
+          authoritySourceAtEntry: isEngineOwned && !fillEval.isOperatorFill ? "v2" : undefined,
           
           adoptedAt: nowTs,
           detectedAt: nowTs,
@@ -5488,8 +5564,7 @@ export class PaperEngine {
         if (pendTry.ok && pendTry.value) {
           let cancelledCount = 0;
           for (const algo of pendTry.value) {
-            const clOrdId = String(algo.algoClOrdId || "");
-            if (clOrdId.startsWith("oap")) {
+            if (isAuthoritativeBotOwnedAlgoOrder(algo, next)) {
               await this.okxDemo.cancelAlgoOrder([{ instId, algoId: String(algo.algoId) }]);
               cancelledCount++;
             }
@@ -10311,9 +10386,14 @@ export class PaperEngine {
         return;
       }
 
+      const syntheticClosedPosition = {
+        symbol: symbol as MarketSymbol,
+        side: posSide,
+        openedAt,
+      } as PaperOpenPositionRecord;
       const cancelTargets = pendingTry.value.filter(algo => {
-        const clOrdId = String(algo.algoClOrdId || "");
-        return clOrdId.startsWith(engineOwnedPrefix);
+        const ev = evaluateOrderOwnership(algo, true, [syntheticClosedPosition, ...this.lastOpenPositionsForTakeover]);
+        return ev.ownership === "ENGINE_OWNED" && ev.cancelAllowed === true;
       });
 
       if (cancelTargets.length === 0) {
@@ -10886,6 +10966,9 @@ export class PaperEngine {
 
   public isManualTakeoverActive(symbol: string, side?: "long" | "short" | null): boolean {
     const symKey = String(symbol).trim().toUpperCase();
+    if (this.operatorPendingOrdersBySymbol.get(symKey) === true) {
+      return true;
+    }
     const specificKey = buildManualTakeoverKey(symKey, side ?? undefined);
     const engineOwnedOrderCount =
       this.manualTakeoverEngineOrderCountByKey.get(specificKey) ??
@@ -10954,6 +11037,21 @@ export class PaperEngine {
     }
     this.lastOpenPositionsForTakeover = [...opens];
     this.startupPositionAuthorityBarrierResolved = true;
+
+    for (const sym of this.config.symbols) {
+      const symKey = String(sym).trim().toUpperCase();
+      const auth = evaluateSymbolPendingOrderAuthority({
+        symbol: symKey,
+        pendingOrders: this.cachedOpsPending,
+        algoOrders: this.cachedOpsAlgos,
+        openPositions: opens
+      });
+      this.operatorPendingOrdersBySymbol.set(symKey, auth.hasOperatorPendingOrders);
+      for (const proof of auth.proofs) {
+        this.logger.info("V2_MANUAL_PENDING_ORDER_AUTHORITY_PROOF", proof);
+      }
+    }
+
     for (const open of opens) {
       const side = open.side as "long" | "short";
       const manualTakeoverActive = this.isManualTakeoverActive(open.symbol, side);
@@ -13389,6 +13487,89 @@ export class PaperEngine {
       } else if (this.isBtcEntrySubmitBlocked()) {
         await this.logAndSuppressBtcUsdtAction("submitOrder", "none", ["order submit"]);
         return { ok: false, ordId: null, fillPx: null, fillSize: 0, errorCode: "BTCUSDT_PROTECTED_BYPASS", errorMessage: "BTCUSDT entry submit blocked", ackCode: "rejected", orderState: null, fillConfirmed: false, clOrdId: input.clOrdId };
+      }
+    }
+
+    if (input.isNewEntry === true) {
+      const symKey = String(input.symbol).trim().toUpperCase();
+      let hasLiveOperatorOrder = this.isManualTakeoverActive(symKey);
+      let liveAuthorityScanFailed = false;
+      let liveAuthorityScanErrorReason = "";
+
+      if (!hasLiveOperatorOrder && this.okxDemo) {
+        try {
+          const livePendTry = await this.okxDemo.getOrdersPending({ instType: "SWAP", instId });
+          const liveAlgoTry = await this.okxDemo.getOrdersAlgoPending({ instType: "SWAP", instId });
+
+          if (!livePendTry.ok) {
+            liveAuthorityScanFailed = true;
+            liveAuthorityScanErrorReason = `orders_pending_failed:${livePendTry.error}`;
+          } else if (!liveAlgoTry.ok) {
+            liveAuthorityScanFailed = true;
+            liveAuthorityScanErrorReason = `orders_algo_pending_failed:${liveAlgoTry.error}`;
+          } else {
+            const livePending = Array.isArray(livePendTry.value) ? livePendTry.value : [];
+            const liveAlgos = Array.isArray(liveAlgoTry.value) ? liveAlgoTry.value : [];
+            const liveAuth = evaluateSymbolPendingOrderAuthority({
+              symbol: symKey,
+              pendingOrders: livePending,
+              algoOrders: liveAlgos,
+              openPositions: this.lastOpenPositionsForTakeover
+            });
+            if (liveAuth.hasOperatorPendingOrders) {
+              hasLiveOperatorOrder = true;
+              this.operatorPendingOrdersBySymbol.set(symKey, true);
+              for (const proof of liveAuth.proofs) {
+                this.logger.info("V2_MANUAL_PENDING_ORDER_AUTHORITY_PROOF", proof);
+              }
+            }
+          }
+        } catch (e) {
+          liveAuthorityScanFailed = true;
+          liveAuthorityScanErrorReason = `exception:${String(e)}`;
+          this.logger.error("V2_LAST_MILE_LIVE_INVENTORY_SCAN_ERROR", { symbol: symKey, error: String(e) });
+        }
+      }
+
+      if (liveAuthorityScanFailed) {
+        this.logger.warn("V2_LAST_MILE_ENTRY_BLOCKED_PROOF", {
+          symbol: input.symbol,
+          reason: "MANUAL_PENDING_ORDER_AUTHORITY_UNAVAILABLE_FAIL_CLOSED",
+          detail: liveAuthorityScanErrorReason,
+          clOrdId: input.clOrdId
+        });
+        return {
+          ok: false,
+          ordId: null,
+          fillPx: null,
+          fillSize: 0,
+          errorCode: "MANUAL_PENDING_ORDER_AUTHORITY_UNAVAILABLE_FAIL_CLOSED",
+          errorMessage: `Live pending order inventory authority scan failed: ${liveAuthorityScanErrorReason} (fail-closed)`,
+          ackCode: "rejected",
+          orderState: null,
+          fillConfirmed: false,
+          clOrdId: input.clOrdId
+        };
+      }
+
+      if (hasLiveOperatorOrder) {
+        this.logger.warn("V2_LAST_MILE_ENTRY_BLOCKED_PROOF", {
+          symbol: input.symbol,
+          reason: "MANUAL_TAKEOVER_ACTIVE_LAST_MILE",
+          clOrdId: input.clOrdId
+        });
+        return {
+          ok: false,
+          ordId: null,
+          fillPx: null,
+          fillSize: 0,
+          errorCode: "MANUAL_TAKEOVER_ACTIVE",
+          errorMessage: "Manual operator pending order or takeover active on symbol (last-mile live revalidation)",
+          ackCode: "rejected",
+          orderState: null,
+          fillConfirmed: false,
+          clOrdId: input.clOrdId
+        };
       }
     }
 

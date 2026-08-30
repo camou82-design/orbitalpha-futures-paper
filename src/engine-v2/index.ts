@@ -550,18 +550,23 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             balanceFetchedAt: v2State.balanceFetchedAt ?? undefined,
             positionsFetchedAt: v2State.positionsFetchedAt ?? undefined,
             pendingOrdersFetchedAt: v2State.pendingOrdersFetchedAt ?? undefined,
-            lastLossReentryState: v2State.lastLossReentryState ?? null
+            lastLossReentryState: v2State.lastLossReentryState ?? null,
+            hasOperatorPendingOrders: v2State.hasOperatorPendingOrders ?? undefined,
+            manualTakeoverActive: v2State.manualTakeoverActive ?? undefined
         }
     };
 
     const heldPos = v2State.longPosition ?? v2State.shortPosition;
     const posAny = heldPos as any;
+    const stateAny = authoritativeInput.state as any;
     const isManualTakeover =
         posAny?.manualTakeoverActive === true ||
         posAny?.lifecycleState === "OPERATOR_MANAGED" ||
-        (authoritativeInput.state as any)?.manualTakeoverActive === true;
+        stateAny?.manualTakeoverActive === true ||
+        stateAny?.hasOperatorPendingOrders === true;
 
     if (isManualTakeover) {
+        const isPendingOrderSource = stateAny?.hasOperatorPendingOrders === true && !heldPos;
         console.info(JSON.stringify({
             event: "V2_MANUAL_TAKEOVER_AUTHORITY_PROOF",
             symbol: String(input.symbol),
@@ -570,7 +575,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             mutation_allowed: false,
             position_calculation_allowed: false,
             lifecycle_state: "OPERATOR_MANAGED",
-            reason: "OPERATOR_MANUAL_INTERVENTION_OBSERVE_ONLY"
+            reason: isPendingOrderSource ? "OPERATOR_PENDING_ORDER_OBSERVE_ONLY" : "OPERATOR_MANUAL_INTERVENTION_OBSERVE_ONLY"
         }));
         const heldSideNormalized: EngineV2Side =
             String(heldPos?.side ?? "").toLowerCase() === "long"

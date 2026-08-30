@@ -87,4 +87,6 @@ export type V2StateAuthority = Readonly<{
     positionsFetchedAt?: number;
     pendingOrdersFetchedAt?: number;
     lastLossReentryState?: import("./loss-reentry-gate").LastLossReentryState | null;
+    hasOperatorPendingOrders?: boolean;
+    manualTakeoverActive?: boolean;
 }>;
