@@ -599,6 +599,11 @@ export interface V2BridgeConfig {
     externalMarketMaxSizeMultiplier?: number;
     externalMarketContextMaxAgeMs?: number;
     externalMarketEmergencyEventEnabled?: boolean;
+    externalMarketContextFetchIntervalMs?: number;
+    externalMarketContextFetchTimeoutMs?: number;
+    externalMarketContextNewsMaxAgeHours?: number;
+    externalMarketContextNewsHalfLifeHours?: number;
+    externalMarketContextNewsMaxWeight?: number;
 }
 
 export interface V2BridgePosition {

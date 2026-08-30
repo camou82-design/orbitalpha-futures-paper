@@ -51,16 +51,11 @@ function readingSignal(
 
 export function buildSignalBreakdown(snapshot: ExternalMarketSnapshot): ExternalMarketSignalBreakdown {
     const unavailableSources = [...(snapshot.unavailableSources ?? [])];
-    const signals: ExternalMarketSignalBreakdown = {
-        nqSignal: 0,
-        esSignal: 0,
-        dxySignal: 0,
-        us10ySignal: 0,
-        newsSignal: 0,
-        availableWeight: 0,
-        unavailableSources
-    };
-
+    let nqSignal = 0;
+    let esSignal = 0;
+    let dxySignal = 0;
+    let us10ySignal = 0;
+    let newsSignal = 0;
     let availableWeight = 0;
     (Object.keys(SIGNAL_WEIGHTS) as SignalKey[]).forEach((key) => {
         const sig = readingSignal(snapshot, key);
@@ -71,24 +66,24 @@ export function buildSignalBreakdown(snapshot: ExternalMarketSnapshot): External
         availableWeight += SIGNAL_WEIGHTS[key];
         switch (key) {
             case "nq":
-                signals.nqSignal = sig;
+                nqSignal = sig;
                 break;
             case "es":
-                signals.esSignal = sig;
+                esSignal = sig;
                 break;
             case "dxy":
-                signals.dxySignal = sig;
+                dxySignal = sig;
                 break;
             case "us10y":
-                signals.us10ySignal = sig;
+                us10ySignal = sig;
                 break;
             case "news":
-                signals.newsSignal = sig;
+                newsSignal = sig;
                 break;
         }
     });
 
-    return { ...signals, availableWeight, unavailableSources };
+    return { nqSignal, esSignal, dxySignal, us10ySignal, newsSignal, availableWeight, unavailableSources };
 }
 
 /**

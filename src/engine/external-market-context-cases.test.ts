@@ -54,6 +54,10 @@ function runExternalMarketContextCases(): void {
             now: 1_000_000,
             config: baseConfig(false),
             snapshot: {
+                generatedAt: 999_000,
+                maxAgeMs: 900_000,
+                unavailableSources: [],
+                sources: {},
                 nqMomentum: 3,
                 fetchedAt: 999_000,
                 status: "ok"
@@ -85,6 +89,10 @@ function runExternalMarketContextCases(): void {
             now: 2_000_000,
             config: baseConfig(true),
             snapshot: {
+                generatedAt: 500_000,
+                maxAgeMs: 900_000,
+                unavailableSources: [],
+                sources: {},
                 nqMomentum: 2,
                 fetchedAt: 500_000,
                 status: "ok"
@@ -171,7 +179,7 @@ function runExternalMarketContextCases(): void {
 
         const judgment = { regime: "TREND" } as MarketJudgmentOutput;
         const confidence: RegimeConfidenceOutput = { score: strategyScore, level: "HIGH" };
-        const executor = { baseSizeIntent: 1, side: "long", signal: "ENTER" } as ExecutorOutput;
+        const executor = { baseSizeIntent: 1, side: "long", signal: "ENTER" } as unknown as ExecutorOutput;
         const input = {
             symbol: "BTCUSDT",
             config: { baseSizeUsd: 100, paperMaxOpenPositions: 3, paperReentryCooldownMs: 0, okxLiveMaxOrderNotionalUsdt: null },
@@ -197,7 +205,7 @@ function runExternalMarketContextCases(): void {
             },
             now: Date.now(),
             v1Result: { regime: "TREND", decision: "ENTER", side: "long", isBlocked: false }
-        } as EngineV2Input;
+        } as unknown as EngineV2Input;
 
         const baseSizing = calculateRiskSizing(judgment, confidence, executor, input, null);
         const extSizing = calculateRiskSizing(judgment, confidence, executor, input, 0.85);

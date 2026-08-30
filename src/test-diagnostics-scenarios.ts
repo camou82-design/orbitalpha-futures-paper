@@ -78,7 +78,20 @@ const mockConfig = {
   okxPassphrase: "",
   okxDemoApiKey: "demo_key",
   okxDemoApiSecret: "demo_secret",
-  okxDemoPassphrase: "demo_passphrase"
+  okxDemoPassphrase: "demo_passphrase",
+  externalMarketContextEnabled: false,
+  externalMarketContextShadowMode: true,
+  externalMarketContextFetchEnabled: false,
+  externalMarketContextWeight: 0.22,
+  externalMarketMinSizeMultiplier: 0.8,
+  externalMarketMaxSizeMultiplier: 1.1,
+  externalMarketContextMaxAgeMs: 900_000,
+  externalMarketEmergencyEventEnabled: false,
+  externalMarketContextFetchIntervalMs: 120_000,
+  externalMarketContextFetchTimeoutMs: 4_000,
+  externalMarketContextNewsMaxAgeHours: 6,
+  externalMarketContextNewsHalfLifeHours: 2,
+  externalMarketContextNewsMaxWeight: 0.15
 };
 
 
