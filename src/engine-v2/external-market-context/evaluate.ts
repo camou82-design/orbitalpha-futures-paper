@@ -101,6 +101,24 @@ export function computeExternalContextScore(signals: ExternalMarketSignalBreakdo
     return Math.max(-1, Math.min(1, longBias));
 }
 
+export const EXTERNAL_SIGNAL_WEIGHT_MIN = 0.35;
+export const EXTERNAL_SIGNAL_WEIGHT_FULL = 0.6;
+
+/** Reliability factor [0,1] from available signal weight — not a trading gate. */
+export function computeExternalSignalReliability(availableWeight: number): number {
+    if (!Number.isFinite(availableWeight) || availableWeight < EXTERNAL_SIGNAL_WEIGHT_MIN) return 0;
+    if (availableWeight >= EXTERNAL_SIGNAL_WEIGHT_FULL) return 1;
+    return (availableWeight - EXTERNAL_SIGNAL_WEIGHT_MIN) / (EXTERNAL_SIGNAL_WEIGHT_FULL - EXTERNAL_SIGNAL_WEIGHT_MIN);
+}
+
+/** Blend raw external multiplier toward 1.0 when reliability is partial. */
+export function applySignalReliabilityToMultiplier(rawMultiplier: number, reliability: number): number {
+    const r = Math.max(0, Math.min(1, reliability));
+    if (r <= 0) return 1;
+    if (r >= 1) return rawMultiplier;
+    return 1 + (rawMultiplier - 1) * r;
+}
+
 /** Event-risk sizing factor — never zero; scales toward minSizeMultiplier at risk=1. */
 export function computeEventRiskMultiplier(
     newsEventRisk: number,
@@ -280,14 +298,37 @@ function evaluateCore(
         externalSizeMultiplier = Math.max(config.minSizeMultiplier, externalSizeMultiplier);
     }
 
-    const externalAsConfidence = ((sideAlignedScore + 1) / 2) * 100;
-    const confidenceScoreDelta = externalAsConfidence * config.weight - 50 * config.weight;
     const previews = computePreviewMultipliers(
         externalContextScore,
         config,
         newsEventRisk,
         economicEventImminent
     );
+
+    const reliability = computeExternalSignalReliability(signalBreakdown.availableWeight);
+    const rawLongPreviewMultiplier = previews.longPreviewMultiplier;
+    const rawShortPreviewMultiplier = previews.shortPreviewMultiplier;
+    const reliabilityAdjustedLongPreviewMultiplier = applySignalReliabilityToMultiplier(
+        rawLongPreviewMultiplier,
+        reliability
+    );
+    const reliabilityAdjustedShortPreviewMultiplier = applySignalReliabilityToMultiplier(
+        rawShortPreviewMultiplier,
+        reliability
+    );
+    const reliabilityAdjustedSizeMultiplier = applySignalReliabilityToMultiplier(externalSizeMultiplier, reliability);
+
+    const externalAsConfidence = ((sideAlignedScore + 1) / 2) * 100;
+    const rawConfidenceScoreDelta = externalAsConfidence * config.weight - 50 * config.weight;
+    const confidenceScoreDelta = rawConfidenceScoreDelta * reliability;
+
+    const reliabilityFields = {
+        externalSignalReliability: reliability,
+        rawLongPreviewMultiplier,
+        rawShortPreviewMultiplier,
+        reliabilityAdjustedLongPreviewMultiplier,
+        reliabilityAdjustedShortPreviewMultiplier
+    };
 
     const shadowPreview = !applyToTrading && config.shadowMode === true;
     if (!applyToTrading) {
@@ -303,10 +344,31 @@ function evaluateCore(
             externalContextReason: shadowPreview ? "SHADOW_OBSERVE_ONLY" : config.enabled ? "NEUTRAL_NO_SIDE" : "FEATURE_DISABLED",
             failOpen: true,
             shadowPreview,
-            longPreviewMultiplier: previews.longPreviewMultiplier,
-            shortPreviewMultiplier: previews.shortPreviewMultiplier,
+            longPreviewMultiplier: rawLongPreviewMultiplier,
+            shortPreviewMultiplier: rawShortPreviewMultiplier,
             directionalSizeMultiplier: directionalMultiplier,
-            eventRiskMultiplier: previews.eventRiskMultiplier
+            eventRiskMultiplier: previews.eventRiskMultiplier,
+            ...reliabilityFields
+        };
+    }
+
+    if (reliability <= 0) {
+        return {
+            externalContextScore,
+            sideAlignedScore,
+            signals: signalBreakdown,
+            newsEventRisk,
+            externalSizeMultiplier: 1,
+            confidenceScoreDelta: 0,
+            externalContextAgeMs: ageMs,
+            externalContextApplied: false,
+            externalContextReason: "INSUFFICIENT_EXTERNAL_SIGNAL_WEIGHT_FAIL_OPEN",
+            failOpen: true,
+            longPreviewMultiplier: rawLongPreviewMultiplier,
+            shortPreviewMultiplier: rawShortPreviewMultiplier,
+            directionalSizeMultiplier: directionalMultiplier,
+            eventRiskMultiplier: previews.eventRiskMultiplier,
+            ...reliabilityFields
         };
     }
 
@@ -315,16 +377,17 @@ function evaluateCore(
         sideAlignedScore,
         signals: signalBreakdown,
         newsEventRisk,
-        externalSizeMultiplier,
+        externalSizeMultiplier: reliabilityAdjustedSizeMultiplier,
         confidenceScoreDelta,
         externalContextAgeMs: ageMs,
         externalContextApplied: true,
         externalContextReason: side === "none" ? "NEUTRAL_NO_SIDE" : "APPLIED",
         failOpen: false,
-        longPreviewMultiplier: previews.longPreviewMultiplier,
-        shortPreviewMultiplier: previews.shortPreviewMultiplier,
+        longPreviewMultiplier: rawLongPreviewMultiplier,
+        shortPreviewMultiplier: rawShortPreviewMultiplier,
         directionalSizeMultiplier: directionalMultiplier,
-        eventRiskMultiplier: previews.eventRiskMultiplier
+        eventRiskMultiplier: previews.eventRiskMultiplier,
+        ...reliabilityFields
     };
 }
 
@@ -371,7 +434,8 @@ function sourceProofField(
 export function buildExternalMarketContextProofLog(
     symbol: string,
     external: ExternalMarketContextResult,
-    snapshot?: ExternalMarketSnapshot | null
+    snapshot?: ExternalMarketSnapshot | null,
+    side: "long" | "short" | "none" = "none"
 ): Record<string, unknown> {
     return {
         event: "EXTERNAL_MARKET_CONTEXT_PROOF",
@@ -393,8 +457,21 @@ export function buildExternalMarketContextProofLog(
         shadow_preview: external.shadowPreview === true,
         long_preview_multiplier: external.longPreviewMultiplier ?? null,
         short_preview_multiplier: external.shortPreviewMultiplier ?? null,
+        raw_preview_multiplier:
+            side === "short"
+                ? (external.rawShortPreviewMultiplier ?? external.shortPreviewMultiplier ?? null)
+                : (external.rawLongPreviewMultiplier ?? external.longPreviewMultiplier ?? null),
+        reliability_adjusted_preview_multiplier:
+            side === "short"
+                ? (external.reliabilityAdjustedShortPreviewMultiplier ?? null)
+                : (external.reliabilityAdjustedLongPreviewMultiplier ?? null),
         directional_size_multiplier: external.directionalSizeMultiplier ?? null,
         event_risk_multiplier: external.eventRiskMultiplier ?? null,
+        external_signal_reliability: external.externalSignalReliability ?? null,
+        raw_long_preview_multiplier: external.rawLongPreviewMultiplier ?? external.longPreviewMultiplier ?? null,
+        raw_short_preview_multiplier: external.rawShortPreviewMultiplier ?? external.shortPreviewMultiplier ?? null,
+        reliability_adjusted_long_preview_multiplier: external.reliabilityAdjustedLongPreviewMultiplier ?? null,
+        reliability_adjusted_short_preview_multiplier: external.reliabilityAdjustedShortPreviewMultiplier ?? null,
         available_signal_weight: external.signals.availableWeight,
         unavailable_sources: external.signals.unavailableSources,
         snapshot_status: snapshot?.status ?? null,
@@ -434,8 +511,14 @@ export function buildExternalMarketContextShadowProofLog(
             serviceState.snapshot?.generatedAt != null ? now - serviceState.snapshot.generatedAt : null,
         unavailable_sources: serviceState.snapshot?.unavailableSources ?? [],
         external_context_score: preview.externalContextScore,
+        available_signal_weight: preview.signals.availableWeight,
+        external_signal_reliability: preview.externalSignalReliability ?? null,
+        raw_long_preview_multiplier: preview.rawLongPreviewMultiplier ?? preview.longPreviewMultiplier ?? null,
+        raw_short_preview_multiplier: preview.rawShortPreviewMultiplier ?? preview.shortPreviewMultiplier ?? null,
         long_preview_multiplier: preview.longPreviewMultiplier ?? null,
         short_preview_multiplier: preview.shortPreviewMultiplier ?? null,
+        reliability_adjusted_long_preview_multiplier: preview.reliabilityAdjustedLongPreviewMultiplier ?? null,
+        reliability_adjusted_short_preview_multiplier: preview.reliabilityAdjustedShortPreviewMultiplier ?? null,
         news_event_risk: preview.newsEventRisk,
         external_context_applied: false,
         trading_impact: "none"

@@ -1524,7 +1524,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 buildExternalMarketContextProofLog(
                     String(input.symbol),
                     externalMarketContext,
-                    authoritativeInput.state.externalMarketSnapshot ?? null
+                    authoritativeInput.state.externalMarketSnapshot ?? null,
+                    externalSide
                 )
             )
         );

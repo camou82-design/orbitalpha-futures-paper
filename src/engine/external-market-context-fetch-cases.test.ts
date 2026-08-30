@@ -1,5 +1,6 @@
 import {
     aggregateCryptoNewsSentiment,
+    applySignalReliabilityToMultiplier,
     assembleExternalMarketSnapshot,
     buildExternalMarketContextProofLog,
     buildExternalMarketContextShadowProofLog,
@@ -7,10 +8,12 @@ import {
     combineDirectionalAndEventRiskMultipliers,
     computeEventRiskMultiplier,
     computeExternalContextScore,
+    computeExternalSignalReliability,
     computeSizeMultiplierFromAlignment,
     evaluateExternalMarketContext,
     ExternalMarketContextService,
     deriveEconomicEventRisk,
+    fetchCryptoNewsReading,
     normalizeTnxToYieldPercent,
     normalizeUs10yYieldPointChange,
     resetExternalMarketContextServiceForTests
@@ -35,7 +38,8 @@ function baseFetchConfig() {
         maxAgeMs: 900_000,
         newsMaxAgeHours: 6,
         newsHalfLifeHours: 2,
-        newsMaxWeight: 0.15
+        newsMaxWeight: 0.15,
+        newsApiKey: null as string | null
     };
 }
 
@@ -399,6 +403,121 @@ async function runFetchLayerCases(): Promise<void> {
             "CASE 13 same signal from pct and 10x raw series"
         );
         console.log("CASE 13 us10y bp signals:", JSON.stringify(bpTable));
+    }
+
+    // CASE 14 — news API key missing: no HTTP, explicit unavailable reason
+    {
+        const result = await fetchCryptoNewsReading(4_000, Date.now(), 6, 2, new Set(), null);
+        assertTrue(result.reading === null, "CASE 14 no reading without key");
+        assertTrue(result.error === "NEWS_API_KEY_NOT_CONFIGURED", "CASE 14 explicit reason");
+        assertTrue(result.skipped === true, "CASE 14 skipped fetch");
+        const assembled = await assembleExternalMarketSnapshot({
+            config: { ...baseFetchConfig(), newsApiKey: null, fetchTimeoutMs: 1 },
+            now: Date.now()
+        });
+        assertTrue(assembled.fetchErrors.news === "NEWS_API_KEY_NOT_CONFIGURED", "CASE 14 assemble error");
+        assertTrue(assembled.snapshot.unavailableSources.includes("news"), "CASE 14 news unavailable");
+    }
+
+    // CASE 15 — signal weight reliability safeguard (not a hard block)
+    {
+        assertClose(computeExternalSignalReliability(0.2), 0, 1e-9, "CASE 15 reliability below min");
+        assertClose(computeExternalSignalReliability(0.35), 0, 1e-9, "CASE 15 reliability at min edge");
+        assertClose(computeExternalSignalReliability(0.475), 0.5, 1e-9, "CASE 15 reliability mid band");
+        assertClose(computeExternalSignalReliability(0.6), 1, 1e-9, "CASE 15 reliability full");
+        assertClose(applySignalReliabilityToMultiplier(1.1, 0), 1, 1e-9, "CASE 15 zero reliability neutral");
+        assertClose(applySignalReliabilityToMultiplier(1.1, 0.5), 1.05, 1e-9, "CASE 15 half reliability blend");
+        assertClose(applySignalReliabilityToMultiplier(1.1, 1), 1.1, 1e-9, "CASE 15 full reliability raw");
+
+        const now = 1_000_000;
+        const lowWeightSnap: ExternalMarketSnapshot = {
+            generatedAt: now,
+            maxAgeMs: 900_000,
+            unavailableSources: ["es", "dxy", "us10y", "news"],
+            sources: {
+                nq: { value: 20100, signal: 0.95, fetchedAt: now, source: "test:nq" }
+            },
+            fetchedAt: now,
+            status: "partial"
+        };
+        const lowWeight = evaluateExternalMarketContext({
+            side: "long",
+            now,
+            config: {
+                enabled: true,
+                shadowMode: false,
+                weight: 0.22,
+                minSizeMultiplier: 0.8,
+                maxSizeMultiplier: 1.1,
+                maxAgeMs: 900_000,
+                emergencyEventEnabled: false
+            },
+            snapshot: lowWeightSnap
+        });
+        assertTrue(lowWeight.signals.availableWeight === 0.25, "CASE 15 low available weight");
+        assertClose(lowWeight.externalSignalReliability ?? -1, 0, 1e-9, "CASE 15 zero reliability");
+        assertClose(lowWeight.externalSizeMultiplier, 1, 1e-9, "CASE 15 sizing neutral");
+        assertTrue(lowWeight.externalContextApplied === false, "CASE 15 not applied");
+        assertTrue(
+            lowWeight.externalContextReason === "INSUFFICIENT_EXTERNAL_SIGNAL_WEIGHT_FAIL_OPEN",
+            "CASE 15 fail-open reason"
+        );
+        assertTrue((lowWeight.rawLongPreviewMultiplier ?? 1) > 1, "CASE 15 raw preview still computed");
+        assertClose(lowWeight.reliabilityAdjustedLongPreviewMultiplier ?? 0, 1, 1e-9, "CASE 15 adjusted preview neutral");
+
+        const midWeightSnap: ExternalMarketSnapshot = {
+            generatedAt: now,
+            maxAgeMs: 900_000,
+            unavailableSources: ["us10y", "news"],
+            sources: {
+                nq: { value: 20100, signal: 0.7, fetchedAt: now, source: "test:nq" },
+                es: { value: 5650, signal: 0.6, fetchedAt: now, source: "test:es" },
+                dxy: { value: 103, signal: -0.4, fetchedAt: now, source: "test:dxy" }
+            },
+            fetchedAt: now,
+            status: "partial"
+        };
+        const midWeight = evaluateExternalMarketContext({
+            side: "long",
+            now,
+            config: {
+                enabled: true,
+                shadowMode: false,
+                weight: 0.22,
+                minSizeMultiplier: 0.8,
+                maxSizeMultiplier: 1.1,
+                maxAgeMs: 900_000,
+                emergencyEventEnabled: false
+            },
+            snapshot: midWeightSnap
+        });
+        assertTrue(midWeight.signals.availableWeight === 0.65, "CASE 15 mid available weight");
+        assertClose(midWeight.externalSignalReliability ?? 0, 1, 1e-9, "CASE 15 full reliability band");
+        assertTrue(midWeight.externalContextApplied === true, "CASE 15 mid weight applied");
+        assertTrue(
+            (midWeight.reliabilityAdjustedLongPreviewMultiplier ?? 0) <= (midWeight.rawLongPreviewMultiplier ?? 2),
+            "CASE 15 adjusted <= raw"
+        );
+
+        const shadow = evaluateExternalMarketContext({
+            side: "long",
+            now,
+            config: {
+                enabled: false,
+                shadowMode: true,
+                weight: 0.22,
+                minSizeMultiplier: 0.8,
+                maxSizeMultiplier: 1.1,
+                maxAgeMs: 900_000,
+                emergencyEventEnabled: false
+            },
+            snapshot: lowWeightSnap
+        });
+        const proof = buildExternalMarketContextProofLog("BTCUSDT", shadow, lowWeightSnap, "long");
+        assertTrue(proof.external_signal_reliability === 0, "CASE 15 proof reliability");
+        assertTrue(proof.raw_preview_multiplier != null, "CASE 15 proof raw preview");
+        assertClose(proof.reliability_adjusted_preview_multiplier as number, 1, 1e-9, "CASE 15 proof adjusted preview");
+        assertClose(shadow.externalSizeMultiplier, 1, 1e-9, "CASE 15 shadow trading multiplier neutral");
     }
 
     console.log("external-market-context-fetch-cases: ALL PASS");

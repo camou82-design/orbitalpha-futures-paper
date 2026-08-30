@@ -325,6 +325,10 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     if (!Number.isFinite(n)) return 0.15;
     return Math.min(0.15, Math.max(0.05, n));
   })();
+  const externalMarketContextNewsApiKey = (() => {
+    const key = String(env.EXTERNAL_MARKET_CONTEXT_NEWS_API_KEY ?? "").trim();
+    return key.length > 0 ? key : null;
+  })();
 
   const okxLiveStaticNotionalCapEnabled = parseBool(env.OKX_LIVE_STATIC_NOTIONAL_CAP_ENABLED, true);
   const okxLiveUsableBalanceRatio = (() => {
@@ -435,6 +439,7 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
     externalMarketContextNewsMaxAgeHours,
     externalMarketContextNewsHalfLifeHours,
     externalMarketContextNewsMaxWeight,
+    externalMarketContextNewsApiKey,
     okxLiveStaticNotionalCapEnabled,
     okxLiveUsableBalanceRatio,
     okxMomentumIocSlippagePct,

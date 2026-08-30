@@ -75,6 +75,7 @@ export type ExternalMarketFetchConfig = Readonly<{
     newsMaxAgeHours: number;
     newsHalfLifeHours: number;
     newsMaxWeight: number;
+    newsApiKey?: string | null;
 }>;
 
 export type ExternalMarketContextResult = Readonly<{
@@ -93,6 +94,11 @@ export type ExternalMarketContextResult = Readonly<{
     shortPreviewMultiplier?: number;
     directionalSizeMultiplier?: number;
     eventRiskMultiplier?: number;
+    externalSignalReliability?: number;
+    rawLongPreviewMultiplier?: number;
+    rawShortPreviewMultiplier?: number;
+    reliabilityAdjustedLongPreviewMultiplier?: number;
+    reliabilityAdjustedShortPreviewMultiplier?: number;
 }>;
 
 export type EvaluateExternalMarketContextInput = Readonly<{

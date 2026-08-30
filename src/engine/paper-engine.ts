@@ -25480,7 +25480,8 @@ export function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
     externalMarketContextFetchTimeoutMs: config.externalMarketContextFetchTimeoutMs ?? 4_000,
     externalMarketContextNewsMaxAgeHours: config.externalMarketContextNewsMaxAgeHours ?? 6,
     externalMarketContextNewsHalfLifeHours: config.externalMarketContextNewsHalfLifeHours ?? 2,
-    externalMarketContextNewsMaxWeight: config.externalMarketContextNewsMaxWeight ?? 0.15
+    externalMarketContextNewsMaxWeight: config.externalMarketContextNewsMaxWeight ?? 0.15,
+    externalMarketContextNewsApiKey: config.externalMarketContextNewsApiKey ?? null
   };
 }
 

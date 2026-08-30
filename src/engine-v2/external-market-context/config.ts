@@ -47,6 +47,7 @@ export function getExternalMarketFetchConfig(env: NodeJS.ProcessEnv = process.en
     const newsMaxAgeHours = clamp(parseNumber(env.EXTERNAL_MARKET_CONTEXT_NEWS_MAX_AGE_HOURS, 6), 1, 48);
     const newsHalfLifeHours = clamp(parseNumber(env.EXTERNAL_MARKET_CONTEXT_NEWS_HALF_LIFE_HOURS, 2), 0.5, 24);
     const newsMaxWeight = clamp(parseNumber(env.EXTERNAL_MARKET_CONTEXT_NEWS_MAX_WEIGHT, 0.15), 0.05, 0.15);
+    const newsApiKey = String(env.EXTERNAL_MARKET_CONTEXT_NEWS_API_KEY ?? "").trim() || null;
     return {
         fetchEnabled,
         fetchIntervalMs,
@@ -54,7 +55,8 @@ export function getExternalMarketFetchConfig(env: NodeJS.ProcessEnv = process.en
         maxAgeMs,
         newsMaxAgeHours,
         newsHalfLifeHours,
-        newsMaxWeight
+        newsMaxWeight,
+        newsApiKey
     };
 }
 
@@ -86,6 +88,7 @@ export function mapExternalMarketFetchConfigFromEngine(config: {
     externalMarketContextNewsMaxAgeHours?: number;
     externalMarketContextNewsHalfLifeHours?: number;
     externalMarketContextNewsMaxWeight?: number;
+    externalMarketContextNewsApiKey?: string | null;
 }): import("./types").ExternalMarketFetchConfig {
     return {
         fetchEnabled: config.externalMarketContextFetchEnabled === true,
@@ -94,6 +97,7 @@ export function mapExternalMarketFetchConfigFromEngine(config: {
         maxAgeMs: config.externalMarketContextMaxAgeMs ?? 900_000,
         newsMaxAgeHours: config.externalMarketContextNewsMaxAgeHours ?? 6,
         newsHalfLifeHours: config.externalMarketContextNewsHalfLifeHours ?? 2,
-        newsMaxWeight: config.externalMarketContextNewsMaxWeight ?? 0.15
+        newsMaxWeight: config.externalMarketContextNewsMaxWeight ?? 0.15,
+        newsApiKey: config.externalMarketContextNewsApiKey ?? null
     };
 }

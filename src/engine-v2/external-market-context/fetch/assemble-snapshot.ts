@@ -44,7 +44,8 @@ export async function assembleExternalMarketSnapshot(
             now,
             input.config.newsMaxAgeHours,
             input.config.newsHalfLifeHours,
-            input.seenNewsIds ?? new Set()
+            input.seenNewsIds ?? new Set(),
+            input.config.newsApiKey ?? null
         )
     ]);
 

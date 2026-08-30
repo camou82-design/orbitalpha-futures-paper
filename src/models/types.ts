@@ -219,6 +219,8 @@ export type EngineConfig = Readonly<{
   externalMarketContextNewsMaxAgeHours: number;
   externalMarketContextNewsHalfLifeHours: number;
   externalMarketContextNewsMaxWeight: number;
+  /** CryptoCompare news API key — fetch skipped when unset. */
+  externalMarketContextNewsApiKey: string | null;
   /** Whether to use static cap or dynamic balance-based cap (default true). */
   okxLiveStaticNotionalCapEnabled: boolean;
   /** Fraction of available balance to use for dynamic capping (default 0.95). */

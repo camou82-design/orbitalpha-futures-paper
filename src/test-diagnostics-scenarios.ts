@@ -91,7 +91,8 @@ const mockConfig = {
   externalMarketContextFetchTimeoutMs: 4_000,
   externalMarketContextNewsMaxAgeHours: 6,
   externalMarketContextNewsHalfLifeHours: 2,
-  externalMarketContextNewsMaxWeight: 0.15
+  externalMarketContextNewsMaxWeight: 0.15,
+  externalMarketContextNewsApiKey: null
 };
 
 

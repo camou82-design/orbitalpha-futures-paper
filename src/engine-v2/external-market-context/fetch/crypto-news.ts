@@ -30,7 +30,12 @@ export type CryptoNewsFetchResult = Readonly<{
     reading: ExternalMarketSourceReading | null;
     error?: string;
     dedupedCount?: number;
+    skipped?: boolean;
 }>;
+
+export function isCryptoNewsApiKeyConfigured(apiKey: string | null | undefined): boolean {
+    return String(apiKey ?? "").trim().length > 0;
+}
 
 function sourceConfidence(sourceName: string | undefined): number {
     const normalized = String(sourceName ?? "")
@@ -131,11 +136,19 @@ export async function fetchCryptoNewsReading(
     now = Date.now(),
     maxAgeHours = 6,
     halfLifeHours = 2,
-    seenIds: Set<string> = new Set()
+    seenIds: Set<string> = new Set(),
+    apiKey: string | null = null
 ): Promise<CryptoNewsFetchResult> {
+    if (!isCryptoNewsApiKeyConfigured(apiKey)) {
+        return { reading: null, error: "NEWS_API_KEY_NOT_CONFIGURED", skipped: true };
+    }
     const url =
         "https://min-api.cryptocompare.com/data/v2/news/?lang=EN&categories=BTC,ETH,Trading,Blockchain,Regulation";
-    const res = await fetchWithTimeout(url, timeoutMs);
+    const res = await fetchWithTimeout(url, timeoutMs, {
+        headers: {
+            authorization: `Apikey ${String(apiKey).trim()}`
+        }
+    });
     if (!res.ok) {
         return { reading: null, error: res.error ?? `HTTP_${res.status}` };
     }
