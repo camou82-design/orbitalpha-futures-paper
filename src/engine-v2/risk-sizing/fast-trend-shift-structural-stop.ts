@@ -373,3 +373,150 @@ export function resolveFastTrendShiftStructuralStop(
 export function isFastTrendShiftCanonicalStructuralStopBasis(stopBasis: unknown): boolean {
     return stopBasis === FTS_STRUCTURAL_STOP_BASIS;
 }
+
+const FTS_STOP_PRICE_MATCH_EPS = 1e-6;
+
+export type FtsCanonicalStructuralStopAuthority = Readonly<{
+    stopPrice: number;
+    stopBasis: string;
+    structuralInvalidationPrice: number;
+    structuralSource: string;
+    atrBufferMultiple: number | null;
+    atrBufferPrice: number | null;
+}>;
+
+export type FastTrendShiftStructuralStopDiag = Readonly<{
+    active?: boolean;
+    direction?: string;
+    side?: string;
+    stop_price?: number | null;
+    stop_basis?: string;
+    structural_invalidation_price?: number | null;
+    structural_source?: string | null;
+    atr_buffer_multiple?: number | null;
+    atr_buffer_price?: number | null;
+}>;
+
+export type FtsCanonicalStructuralStopVerifyInput = Readonly<{
+    side: "long" | "short";
+    entryPrice: number;
+    stopPrice: number | null | undefined;
+    execMeta?: Record<string, unknown> | null;
+    fastTrendShiftDiag?: FastTrendShiftStructuralStopDiag | null;
+    resolverCrossCheck?: Readonly<{
+        lastPrice: number;
+        atr: number;
+        closedCandles: readonly Candle[];
+        boxMid?: number | null;
+        previousConfirmedBoxHigh?: number | null;
+        previousConfirmedBoxLow?: number | null;
+    }> | null;
+}>;
+
+function stopPricesMatch(a: number, b: number): boolean {
+    return Math.abs(a - b) <= FTS_STOP_PRICE_MATCH_EPS;
+}
+
+/**
+ * Verified FTS canonical structural stop authority — basis string alone is insufficient.
+ * Requires structural invalidation/source, side-aligned diagnostic mirror when present,
+ * and optional closed-candle resolver cross-check to block spoofed provenance.
+ */
+export function resolveVerifiedFtsCanonicalStructuralStopAuthority(
+    input: FtsCanonicalStructuralStopVerifyInput
+): FtsCanonicalStructuralStopAuthority | null {
+    const { side, entryPrice, stopPrice, execMeta, fastTrendShiftDiag, resolverCrossCheck } = input;
+    if (stopPrice == null || !Number.isFinite(stopPrice) || stopPrice <= 0) return null;
+    if (!Number.isFinite(entryPrice) || entryPrice <= 0) return null;
+
+    const directionValid = side === "long" ? stopPrice < entryPrice : stopPrice > entryPrice;
+    if (!directionValid) return null;
+
+    const stopBasisRaw = execMeta?.stop_basis ?? fastTrendShiftDiag?.stop_basis;
+    if (!isFastTrendShiftCanonicalStructuralStopBasis(stopBasisRaw)) return null;
+
+    const structuralInvalidationRaw =
+        execMeta?.structural_invalidation_price ?? fastTrendShiftDiag?.structural_invalidation_price;
+    const structuralSourceRaw = execMeta?.structural_source ?? fastTrendShiftDiag?.structural_source;
+    if (!isFinitePositive(structuralInvalidationRaw)) return null;
+    if (typeof structuralSourceRaw !== "string" || structuralSourceRaw.length === 0) return null;
+
+    if (fastTrendShiftDiag != null) {
+        if (fastTrendShiftDiag.active !== true) return null;
+        const diagSide = fastTrendShiftDiag.direction ?? fastTrendShiftDiag.side;
+        if (diagSide !== side) return null;
+        if (
+            fastTrendShiftDiag.stop_price != null &&
+            Number.isFinite(fastTrendShiftDiag.stop_price) &&
+            !stopPricesMatch(fastTrendShiftDiag.stop_price, stopPrice)
+        ) {
+            return null;
+        }
+        if (!isFastTrendShiftCanonicalStructuralStopBasis(fastTrendShiftDiag.stop_basis)) return null;
+    }
+
+    if (resolverCrossCheck != null) {
+        const resolved = resolveFastTrendShiftStructuralStop({
+            side,
+            entryPrice,
+            lastPrice: resolverCrossCheck.lastPrice,
+            atr: resolverCrossCheck.atr,
+            closedCandles: resolverCrossCheck.closedCandles,
+            boxMid: resolverCrossCheck.boxMid,
+            previousConfirmedBoxHigh: resolverCrossCheck.previousConfirmedBoxHigh,
+            previousConfirmedBoxLow: resolverCrossCheck.previousConfirmedBoxLow
+        });
+        if (!resolved.valid || resolved.stopPrice == null) return null;
+        if (!stopPricesMatch(resolved.stopPrice, stopPrice)) return null;
+        if (!isFastTrendShiftCanonicalStructuralStopBasis(resolved.stopBasis)) return null;
+    }
+
+    const atrBufferMultipleRaw =
+        execMeta?.atr_buffer_multiple ?? fastTrendShiftDiag?.atr_buffer_multiple ?? null;
+    const atrBufferPriceRaw = execMeta?.atr_buffer_price ?? fastTrendShiftDiag?.atr_buffer_price ?? null;
+
+    return {
+        stopPrice,
+        stopBasis: FTS_STRUCTURAL_STOP_BASIS,
+        structuralInvalidationPrice: structuralInvalidationRaw,
+        structuralSource: structuralSourceRaw,
+        atrBufferMultiple:
+            typeof atrBufferMultipleRaw === "number" && Number.isFinite(atrBufferMultipleRaw)
+                ? atrBufferMultipleRaw
+                : null,
+        atrBufferPrice:
+            typeof atrBufferPriceRaw === "number" && Number.isFinite(atrBufferPriceRaw)
+                ? atrBufferPriceRaw
+                : null
+    };
+}
+
+export function buildFtsStructuralStopExecMetadata(
+    authority: FtsCanonicalStructuralStopAuthority
+): Record<string, string | number | boolean | null> {
+    return {
+        stop_basis: authority.stopBasis,
+        structural_invalidation_price: authority.structuralInvalidationPrice,
+        structural_source: authority.structuralSource,
+        atr_buffer_multiple: authority.atrBufferMultiple,
+        atr_buffer_price: authority.atrBufferPrice,
+        fast_trend_shift_structural_inherited: true
+    };
+}
+
+export function tryInheritFastTrendShiftStructuralStopFromDiag(args: Readonly<{
+    side: "long" | "short";
+    entryPrice: number;
+    fastTrendShiftDiag?: FastTrendShiftStructuralStopDiag | null;
+    resolverCrossCheck?: FtsCanonicalStructuralStopVerifyInput["resolverCrossCheck"];
+}>): FtsCanonicalStructuralStopAuthority | null {
+    const stopPrice = args.fastTrendShiftDiag?.stop_price;
+    return resolveVerifiedFtsCanonicalStructuralStopAuthority({
+        side: args.side,
+        entryPrice: args.entryPrice,
+        stopPrice,
+        execMeta: null,
+        fastTrendShiftDiag: args.fastTrendShiftDiag ?? null,
+        resolverCrossCheck: args.resolverCrossCheck ?? null
+    });
+}

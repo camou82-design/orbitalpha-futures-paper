@@ -662,11 +662,27 @@ function ftsJudgment(direction: "long" | "short", resolved: ReturnType<typeof re
         isAddOnEligible: false,
         stopPrice: tooWideStop,
         invalidationPx: tooWideStop,
-        metadata: { stop_basis: FTS_STRUCTURAL_STOP_BASIS, fast_trend_shift: true }
+        metadata: {
+            stop_basis: FTS_STRUCTURAL_STOP_BASIS,
+            fast_trend_shift: true,
+            structural_invalidation_price: entryPrice * 1.03,
+            structural_source: "confirmed_swing_high"
+        }
     };
     const judgment = {
         subtype: "FAST_TREND_SHIFT",
-        regime: "RANGE"
+        regime: "RANGE",
+        diagnostics: {
+            fastTrendShift: {
+                active: true,
+                direction: "short",
+                side: "short",
+                stop_price: tooWideStop,
+                stop_basis: FTS_STRUCTURAL_STOP_BASIS,
+                structural_invalidation_price: entryPrice * 1.03,
+                structural_source: "confirmed_swing_high"
+            }
+        }
     } as any;
     const block = ensurePromotedEntryRiskPlan(
         execution,

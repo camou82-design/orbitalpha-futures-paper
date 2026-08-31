@@ -41,7 +41,11 @@ import {
 import {
     FTS_STRUCTURAL_STOP_BASIS,
     FTS_ABSOLUTE_SAFETY_MAX_STOP_PCT,
-    isFastTrendShiftCanonicalStructuralStopBasis
+    getClosedCandlesForStructuralStop,
+    isFastTrendShiftCanonicalStructuralStopBasis,
+    buildFtsStructuralStopExecMetadata,
+    resolveVerifiedFtsCanonicalStructuralStopAuthority,
+    tryInheritFastTrendShiftStructuralStopFromDiag
 } from "./risk-sizing/fast-trend-shift-structural-stop";
 import { evaluateTpProfitabilityAuthority } from "./execution/tp-profitability-authority";
 import {
@@ -131,22 +135,41 @@ export function ensurePromotedEntryRiskPlan(
     let selectedStopPrice: number | null = null;
 
     const execMeta = (execution.metadata ?? {}) as Record<string, unknown>;
-    const isFtsCanonicalStructuralStop =
-        judgment.subtype === "FAST_TREND_SHIFT" &&
-        isFastTrendShiftCanonicalStructuralStopBasis(execMeta.stop_basis);
+    const closedCandlesForFts = getClosedCandlesForStructuralStop(snapshot.candles || []);
+    const boxHighValForFts = Number(snapshot.boxHigh ?? 0);
+    const boxLowValForFts = Number(snapshot.boxLow ?? 0);
+    const boxMidForFts =
+        boxHighValForFts > 0 && boxLowValForFts > 0 ? (boxHighValForFts + boxLowValForFts) / 2 : null;
+    const ftsResolverCrossCheck =
+        closedCandlesForFts.length > 0 && atrVal > 0
+            ? {
+                  lastPrice: entryPrice,
+                  atr: atrVal,
+                  closedCandles: closedCandlesForFts,
+                  boxMid: boxMidForFts,
+                  previousConfirmedBoxHigh: boxHighValForFts > 0 ? boxHighValForFts : null,
+                  previousConfirmedBoxLow: boxLowValForFts > 0 ? boxLowValForFts : null
+              }
+            : null;
+    const ftsCanonicalAuthority = resolveVerifiedFtsCanonicalStructuralStopAuthority({
+        side,
+        entryPrice,
+        stopPrice: stopPriceBefore,
+        execMeta,
+        fastTrendShiftDiag: judgment.diagnostics?.fastTrendShift ?? null,
+        resolverCrossCheck: ftsResolverCrossCheck
+    });
+    const isFtsCanonicalStructuralStop = ftsCanonicalAuthority != null;
 
-    if (isFtsCanonicalStructuralStop && stopPriceBefore != null && Number.isFinite(stopPriceBefore)) {
-        const directionValid = side === "long" ? stopPriceBefore < entryPrice : stopPriceBefore > entryPrice;
-        const stopDistPct = Math.abs(entryPrice - stopPriceBefore) / entryPrice;
-        if (!directionValid) {
-            selectedStopSource = null;
-            selectedStopPrice = null;
-        } else if (stopDistPct > FTS_ABSOLUTE_SAFETY_MAX_STOP_PCT) {
+    if (isFtsCanonicalStructuralStop && ftsCanonicalAuthority != null) {
+        const canonicalStop = ftsCanonicalAuthority.stopPrice;
+        const stopDistPct = Math.abs(entryPrice - canonicalStop) / entryPrice;
+        if (stopDistPct > FTS_ABSOLUTE_SAFETY_MAX_STOP_PCT) {
             selectedStopSource = null;
             selectedStopPrice = null;
         } else {
             selectedStopSource = "existing_valid";
-            selectedStopPrice = stopPriceBefore;
+            selectedStopPrice = canonicalStop;
         }
     } else {
         for (const c of candidateStops) {
@@ -166,7 +189,33 @@ export function ensurePromotedEntryRiskPlan(
     let closestInvalidDistPct: number | null = null;
 
     if (!audit_passed) {
-        blockReason = isFtsCanonicalStructuralStop ? "STOP_DISTANCE_TOO_WIDE" : "STOP_DISTANCE_TOO_WIDE";
+        const authorityStopSources = new Set([
+            "existing_valid",
+            "continuation_watch_boundary_buffer",
+            "v2CalculatedInvalidationPx"
+        ]);
+        let hasFiniteDirectionValidStop = false;
+        for (const c of candidateStops) {
+            if (
+                authorityStopSources.has(c.source) &&
+                c.directionValid &&
+                c.price != null &&
+                Number.isFinite(c.price)
+            ) {
+                hasFiniteDirectionValidStop = true;
+                break;
+            }
+        }
+        if (
+            ftsCanonicalAuthority != null &&
+            Number.isFinite(ftsCanonicalAuthority.stopPrice) &&
+            (side === "long"
+                ? ftsCanonicalAuthority.stopPrice < entryPrice
+                : ftsCanonicalAuthority.stopPrice > entryPrice)
+        ) {
+            hasFiniteDirectionValidStop = true;
+        }
+        blockReason = hasFiniteDirectionValidStop ? "STOP_DISTANCE_TOO_WIDE" : "STOP_PRICE_MISSING";
         let minDistance = Infinity;
         for (const c of candidateStops) {
             if (c.directionValid && c.price != null && c.stopDistPct < minDistance) {
@@ -176,17 +225,19 @@ export function ensurePromotedEntryRiskPlan(
                 closestInvalidDistPct = c.stopDistPct;
             }
         }
-        if (isFtsCanonicalStructuralStop && stopPriceBefore != null && Number.isFinite(stopPriceBefore)) {
+        if (ftsCanonicalAuthority != null) {
             closestInvalidSource = FTS_STRUCTURAL_STOP_BASIS;
-            closestInvalidPrice = stopPriceBefore;
-            closestInvalidDistPct = Math.abs(entryPrice - stopPriceBefore) / entryPrice;
+            closestInvalidPrice = ftsCanonicalAuthority.stopPrice;
+            closestInvalidDistPct = Math.abs(entryPrice - ftsCanonicalAuthority.stopPrice) / entryPrice;
         }
     }
 
     execution.stopPrice = selectedStopPrice;
     execution.invalidationPx = selectedStopPrice;
 
-    const needsPatch = selectedStopSource !== "existing_valid" && !isFtsCanonicalStructuralStop;
+    const needsPatch =
+        selectedStopSource !== "existing_valid" &&
+        selectedStopSource !== FTS_STRUCTURAL_STOP_BASIS;
 
     if (needsPatch) {
         execution.metadata = {
@@ -194,6 +245,11 @@ export function ensurePromotedEntryRiskPlan(
             promotedRiskPlanInjected: true,
             promotedRiskPlanSource: selectedStopSource ?? "none",
             promotedRiskPlanReason: promotionReason
+        };
+    } else if (isFtsCanonicalStructuralStop && ftsCanonicalAuthority != null) {
+        execution.metadata = {
+            ...execution.metadata,
+            ...buildFtsStructuralStopExecMetadata(ftsCanonicalAuthority)
         };
     }
 
@@ -4488,41 +4544,75 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2SideAfterPromotion = "short";
             v2RejectReasonAfterPromotion = null;
 
-            // stopPrice 보수적 계산
+            // stopPrice: prefer verified FTS canonical structural authority when present in-cycle
             const entryPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
             const atrVal = Number(authoritativeInput.snapshot.atr ?? 0);
-            
-            const candles = authoritativeInput.snapshot.candles;
-            let swingHighVal = 0;
-            if (Array.isArray(candles) && candles.length > 0) {
-                const recentHighs = candles.slice(-20).map(c => Number(c.high ?? (c as any).h ?? 0));
-                swingHighVal = Math.max(...recentHighs);
-            }
-
+            const closedCandlesForBypass = getClosedCandlesForStructuralStop(
+                authoritativeInput.snapshot.candles || []
+            );
             const boxHighVal = Number(authoritativeInput.snapshot.boxHigh ?? 0);
             const boxLowVal = Number(authoritativeInput.snapshot.boxLow ?? 0);
             const boxMidVal = boxHighVal > 0 && boxLowVal > 0 ? (boxHighVal + boxLowVal) / 2 : 0;
-            
-            const minStopDist = Math.max(atrVal * 0.5, entryPrice * 0.0015);
-            const atrStopCandidate = entryPrice + Math.max(atrVal * 1.5, entryPrice * 0.005);
-            
-            const candidates = [
-                swingHighVal,
-                boxHighVal,
-                boxMidVal,
-                atrStopCandidate
-            ].filter(v => Number.isFinite(v) && v > entryPrice + minStopDist);
-            
-            let calculatedStopPrice = candidates.length > 0 ? Math.max(...candidates) : (entryPrice + minStopDist);
-            if (!Number.isFinite(calculatedStopPrice) || calculatedStopPrice <= entryPrice) {
-                calculatedStopPrice = entryPrice + minStopDist;
+
+            const ftsInherited = tryInheritFastTrendShiftStructuralStopFromDiag({
+                side: "short",
+                entryPrice,
+                fastTrendShiftDiag: judgment.diagnostics?.fastTrendShift ?? null,
+                resolverCrossCheck:
+                    closedCandlesForBypass.length > 0 && atrVal > 0
+                        ? {
+                              lastPrice: entryPrice,
+                              atr: atrVal,
+                              closedCandles: closedCandlesForBypass,
+                              boxMid: boxMidVal > 0 ? boxMidVal : null,
+                              previousConfirmedBoxHigh: boxHighVal > 0 ? boxHighVal : null,
+                              previousConfirmedBoxLow: boxLowVal > 0 ? boxLowVal : null
+                          }
+                        : null
+            });
+
+            let calculatedStopPrice: number;
+            let stopBasisLabel: string;
+
+            if (ftsInherited != null) {
+                calculatedStopPrice = ftsInherited.stopPrice;
+                stopBasisLabel = FTS_STRUCTURAL_STOP_BASIS;
+                execution.metadata = {
+                    ...execution.metadata,
+                    ...buildFtsStructuralStopExecMetadata(ftsInherited),
+                    shock_reaction_stop_inheritance: "fast_trend_shift_structural"
+                };
+            } else {
+                const candles = authoritativeInput.snapshot.candles;
+                let swingHighVal = 0;
+                if (Array.isArray(candles) && candles.length > 0) {
+                    const recentHighs = candles.slice(-20).map(c => Number(c.high ?? (c as any).h ?? 0));
+                    swingHighVal = Math.max(...recentHighs);
+                }
+
+                const minStopDist = Math.max(atrVal * 0.5, entryPrice * 0.0015);
+                const atrStopCandidate = entryPrice + Math.max(atrVal * 1.5, entryPrice * 0.005);
+
+                const candidates = [
+                    swingHighVal,
+                    boxHighVal,
+                    boxMidVal,
+                    atrStopCandidate
+                ].filter(v => Number.isFinite(v) && v > entryPrice + minStopDist);
+
+                calculatedStopPrice = candidates.length > 0 ? Math.max(...candidates) : (entryPrice + minStopDist);
+                if (!Number.isFinite(calculatedStopPrice) || calculatedStopPrice <= entryPrice) {
+                    calculatedStopPrice = entryPrice + minStopDist;
+                }
+                stopBasisLabel =
+                    calculatedStopPrice === swingHighVal ? "swingHigh" :
+                    calculatedStopPrice === boxHighVal ? "boxHigh" :
+                    calculatedStopPrice === boxMidVal ? "boxMid" :
+                    calculatedStopPrice === atrStopCandidate ? "atrBuffer" : "fallback";
             }
 
             execution.stopPrice = calculatedStopPrice;
             execution.invalidationPx = calculatedStopPrice;
-            
-            const riskDistance = calculatedStopPrice - entryPrice;
-            const validStop = calculatedStopPrice > entryPrice;
 
             console.info(JSON.stringify({
                 event: "V2_RANGE_SIDE_ZONE_VETO_BYPASS_PROOF",
@@ -4549,16 +4639,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 side: "short",
                 entryPrice,
                 stopPrice: calculatedStopPrice,
-                stopBasis: calculatedStopPrice === swingHighVal ? "swingHigh" :
-                           calculatedStopPrice === boxHighVal ? "boxHigh" :
-                           calculatedStopPrice === boxMidVal ? "boxMid" :
-                           calculatedStopPrice === atrStopCandidate ? "atrBuffer" : "fallback",
+                stopBasis: stopBasisLabel,
+                fts_structural_inherited: ftsInherited != null,
                 atr: atrVal,
-                swingHigh: swingHighVal,
-                boxHigh: boxHighVal,
-                riskDistance,
-                validStop,
-                reason: "shock_reaction_continuation_short_stop_plan"
+                riskDistance: calculatedStopPrice - entryPrice,
+                validStop: calculatedStopPrice > entryPrice,
+                reason: ftsInherited != null
+                    ? "shock_reaction_fts_structural_stop_inherited"
+                    : "shock_reaction_continuation_short_stop_plan"
             }));
         } else if (isBypassRangeUpperShort) {
             v2DecisionAfterPromotion = finalDecisionBeforeVeto; // "ENTER"
