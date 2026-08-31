@@ -276,7 +276,7 @@ function runPreEntryTpExactEqualityCases(): void {
     // CASE B — BTC FAST_TREND_SHIFT
     assertExactTpChain("CASE_B_BTC_FAST_TREND_SHIFT", BTC_FTS);
 
-    // CASE C — fractional raw TP tick normalization parity
+    // CASE C — fractional raw TP tick normalization parity (FTS escalation needs atr/box authority metadata)
     {
         const entry = 2480.005;
         const tickSz = 0.01;
@@ -296,10 +296,16 @@ function runPreEntryTpExactEqualityCases(): void {
             execMetaTakeProfitPlanTp1: rawTp,
             marketSubtype: "FAST_TREND_SHIFT",
             routingEngine: "RANGE",
+            atr: ETH_FTS.atr,
+            boxHigh: ETH_FTS.boxHigh,
+            boxLow: ETH_FTS.boxLow,
+            boxMid: ETH_FTS.boxMid,
             feeRate: 0.0005,
+            paperSlippageEstimateBps: 8,
             preserveCanonicalStructuralStop: true,
             adaptiveContextPresent: false,
-            snapshotTickSz: bridgeTickSz
+            snapshotTickSz: bridgeTickSz,
+            symbol: "ETHUSDT"
         });
         assert.equal(bundle.ok, true);
         if (!bundle.ok) throw new Error("CASE C bundle failed");
@@ -325,11 +331,21 @@ function runPreEntryTpExactEqualityCases(): void {
         });
         const tpTriggerPx = Number((attach.attachAlgoOrds[0] as { tpTriggerPx: string }).tpTriggerPx);
 
+        assert.equal(bundle.rawCanonicalTp1Price, rawTp, "CASE C canonical raw TP unchanged");
+        assert.equal(bundle.tpSource, "authority_tp_price", "CASE C explicit execMeta TP preserved");
+        assert.equal(bundle.tickSzSource, "snapshot.tickSz", "CASE C tickSz source unchanged");
         assert.notEqual(rawTp, gateNorm, "CASE C raw TP must require normalization");
         assert.equal(gateNorm, submitNorm);
         assert.equal(protection.tpPrice, gateNorm);
         assert.equal(tpTriggerPx, gateNorm);
-        pass("CASE_C_FRACTIONAL_TICK_NORMALIZATION", { rawTp, gateNorm, submitNorm, tpTriggerPx });
+        pass("CASE_C_FRACTIONAL_TICK_NORMALIZATION", {
+            rawTp,
+            gateNorm,
+            submitNorm,
+            tpTriggerPx,
+            tpSource: bundle.tpSource,
+            tickSzSource: bundle.tickSzSource
+        });
     }
 
     // CASE D — tick metadata unavailable => fail-closed

@@ -6744,6 +6744,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                                 : typeof (v2State as { instrumentTickSz?: number }).instrumentTickSz === "number"
                                   ? (v2State as { instrumentTickSz?: number }).instrumentTickSz
                                   : null;
+                        const slippageBps =
+                            typeof (authoritativeInput.config as any)?.paperSlippageEstimateBps === "number"
+                                ? (authoritativeInput.config as any).paperSlippageEstimateBps
+                                : typeof (input.config as any)?.paperSlippageEstimateBps === "number"
+                                  ? (input.config as any).paperSlippageEstimateBps
+                                  : 8;
                         const tpBundle = resolveV2PreEntryExecutableTpBundle({
                             side: sideForTp,
                             regime: String(judgment.regime),
@@ -6800,16 +6806,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             preserveCanonicalStructuralStop:
                                 judgment.subtype === "FAST_TREND_SHIFT" ||
                                 execMetaRec.fast_trend_shift === true,
+                            promotionReason,
+                            symbol: String(input.symbol),
+                            paperSlippageEstimateBps: slippageBps,
                             instrumentTickSz,
                             snapshotTickSz
                         });
-
-                        const slippageBps =
-                            typeof (authoritativeInput.config as any)?.paperSlippageEstimateBps === "number"
-                                ? (authoritativeInput.config as any).paperSlippageEstimateBps
-                                : typeof (input.config as any)?.paperSlippageEstimateBps === "number"
-                                  ? (input.config as any).paperSlippageEstimateBps
-                                  : 8;
 
                         if (!tpBundle.ok) {
                             min_order_check_passed = false;

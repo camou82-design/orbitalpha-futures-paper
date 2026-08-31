@@ -18,6 +18,9 @@ export function resolvePreEntryPolicySlPrice(input: Readonly<{
 import {
     computeAdaptiveRangePreEntryProtection,
     shouldApplyAdaptiveRangePreEntryProtection,
+    RANGE_MIN_PROFIT_ATR_MULT,
+    RANGE_MIN_PROFIT_ENTRY_PCT,
+    RANGE_ADAPTIVE_TP_ATR_CAP_MULT,
     type AdaptiveRangeProtectionDiagnostics
 } from "./adaptive-range-pre-entry-protection";
 import { normalizePxToTickSz } from "./entry-order-type";
@@ -25,6 +28,7 @@ import {
     resolveInstrumentTickSzAuthority,
     type InstrumentTickSzAuthorityInput
 } from "./instrument-tick-authority";
+import { evaluateTpProfitabilityAuthority } from "./tp-profitability-authority";
 
 export type V2PreEntryTpSource =
     | "authority_tp_price"
@@ -59,6 +63,7 @@ export type ResolveV2PreEntryTp1AuthorityInput = Readonly<{
     confirmedBreakout?: boolean;
     strongContinuation?: boolean;
     adaptiveContextPresent?: boolean;
+    promotionReason?: string | null;
 }>;
 
 export type ResolveV2PreEntryTp1AuthorityResult = Readonly<
@@ -101,7 +106,213 @@ function mapAdaptiveTpSource(source: string): V2PreEntryTpSource {
     if (source === "adaptive_range_atr_cap" || source === "adaptive_range_box_target" || source === "adaptive_range_min_profit") {
         return source;
     }
+    if (source === "adaptive_range_box_mid" || source === "adaptive_range_atr_min_profit_floor") {
+        return source === "adaptive_range_box_mid" ? "adaptive_range_box_target" : "adaptive_range_min_profit";
+    }
     return "adaptive_range_atr_cap";
+}
+
+function isFinitePositive(v: unknown): v is number {
+    return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
+function isValidTpAgainstStructuralSl(
+    side: "long" | "short",
+    entry: number,
+    tp: number,
+    structuralSl: number
+): boolean {
+    if (!isFinitePositive(structuralSl)) return true;
+    if (side === "long") return structuralSl < entry && entry < tp;
+    return tp < entry && entry < structuralSl;
+}
+
+/** Shock-reaction / FTS promoted RANGE entries — escalate through allowed TP authorities before blocking. */
+export function isShockOrFtsPromotedTpEscalationContext(input: Readonly<{
+    marketSubtype?: string | null;
+    promotionReason?: string | null;
+}>): boolean {
+    const subtype = String(input.marketSubtype ?? "").trim();
+    if (subtype === "FAST_TREND_SHIFT") return true;
+    if (subtype === "WHIPSAW_SOFT_WATCH") return true;
+    if (subtype.startsWith("SHOCK_REACTION")) return true;
+    const promotion = String(input.promotionReason ?? "");
+    return promotion.includes("SHOCK_REACTION");
+}
+
+export type PromotedRangeTp1Candidate = Readonly<{
+    price: number;
+    source: V2PreEntryTpSource;
+}>;
+
+/**
+ * Allowed structural / ATR / box TP1 authorities for shock/FTS RANGE setups (preference order).
+ * Does not invent targets beyond range-executor + adaptive-range semantics.
+ */
+export function enumeratePromotedRangeTp1Candidates(input: Readonly<{
+    side: "long" | "short";
+    entryPrice: number;
+    rawStructuralSl: number;
+    atr: number;
+    boxHigh: number;
+    boxLow: number;
+    boxMid?: number | null;
+    primaryTp?: number | null;
+}>): PromotedRangeTp1Candidate[] {
+    const side = input.side;
+    const entry = input.entryPrice;
+    const atr = input.atr;
+    const boxHigh = input.boxHigh;
+    const boxLow = input.boxLow;
+    if (!(entry > 0) || !(boxHigh > boxLow) || !isFinitePositive(atr)) return [];
+
+    const boxMid = isFinitePositive(input.boxMid) ? input.boxMid : (boxHigh + boxLow) / 2;
+    const minProfitDistance = Math.max(atr * RANGE_MIN_PROFIT_ATR_MULT, entry * RANGE_MIN_PROFIT_ENTRY_PCT);
+    const maxTpDistance = atr * RANGE_ADAPTIVE_TP_ATR_CAP_MULT;
+    const structuralSl = input.rawStructuralSl;
+
+    const rawCandidates: PromotedRangeTp1Candidate[] = [];
+
+    if (
+        input.primaryTp != null &&
+        isFinitePositive(input.primaryTp) &&
+        isValidDirectionTp(side, entry, input.primaryTp)
+    ) {
+        rawCandidates.push({ price: input.primaryTp, source: "authority_tp_price" });
+    }
+
+    const boxDist = side === "long" ? Math.max(boxMid - entry, 0) : Math.max(entry - boxMid, 0);
+    const structuralDist = Math.max(boxDist, minProfitDistance);
+    const structuralTp = side === "long" ? entry + structuralDist : entry - structuralDist;
+    rawCandidates.push({ price: structuralTp, source: "adaptive_range_box_target" });
+
+    const atrCapTp = side === "long" ? entry + maxTpDistance : entry - maxTpDistance;
+    rawCandidates.push({ price: atrCapTp, source: "adaptive_range_atr_cap" });
+
+    const boxEdgeTp = side === "long" ? boxHigh : boxLow;
+    if (isValidDirectionTp(side, entry, boxEdgeTp)) {
+        rawCandidates.push({ price: boxEdgeTp, source: "adaptive_range_box_target" });
+    }
+
+    const engineMirror = engineMirrorTpPrice(entry, side, "RANGE");
+    if (engineMirror != null && isValidDirectionTp(side, entry, engineMirror)) {
+        rawCandidates.push({ price: engineMirror, source: "engine_calculated" });
+    }
+
+    const seen = new Set<string>();
+    const ordered: PromotedRangeTp1Candidate[] = [];
+    for (const candidate of rawCandidates) {
+        if (!isValidDirectionTp(side, entry, candidate.price)) continue;
+        if (!isValidTpAgainstStructuralSl(side, entry, candidate.price, structuralSl)) continue;
+        const key = candidate.price.toFixed(8);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        ordered.push(candidate);
+    }
+    return ordered;
+}
+
+function resolveShockFtsPromotedExecutableTpBundle(
+    input: V2PreEntryExecutableTpBundleInput,
+    tickAuthority: { tickSz: number; source: "instrument_cache.tickSz" | "snapshot.tickSz" }
+): V2PreEntryExecutableTpBundleResult {
+    const side = input.side;
+    const entryPrice = input.entryPrice;
+    const atr =
+        input.atr != null && Number.isFinite(input.atr) && input.atr > 0 ? input.atr : null;
+    const boxHigh =
+        input.rangeBoxHighAtEntry ??
+        (input.boxHigh != null && Number.isFinite(input.boxHigh) ? input.boxHigh : null);
+    const boxLow =
+        input.rangeBoxLowAtEntry ??
+        (input.boxLow != null && Number.isFinite(input.boxLow) ? input.boxLow : null);
+
+    if (atr == null || boxHigh == null || boxLow == null) {
+        return {
+            ok: false,
+            blockReason: "range_tp_missing",
+            adaptiveDiagnostics: null
+        };
+    }
+
+    const primaryAuthority = resolveV2PreEntryTp1Authority(input);
+    const primaryTp =
+        primaryAuthority.ok
+            ? primaryAuthority.rawTp1Price
+            : readExplicitAuthorityTp(input);
+
+    const candidates = enumeratePromotedRangeTp1Candidates({
+        side,
+        entryPrice,
+        rawStructuralSl: input.rawStructuralSl,
+        atr,
+        boxHigh,
+        boxLow,
+        boxMid: input.rangeBoxMidAtEntry ?? input.boxMid ?? null,
+        primaryTp
+    });
+
+    if (candidates.length === 0) {
+        return {
+            ok: false,
+            blockReason: "range_tp_missing",
+            adaptiveDiagnostics: primaryAuthority.ok ? primaryAuthority.adaptiveDiagnostics : null
+        };
+    }
+
+    const feeRate = input.feeRate ?? null;
+    const slippageBps =
+        typeof (input as { paperSlippageEstimateBps?: number }).paperSlippageEstimateBps === "number"
+            ? (input as { paperSlippageEstimateBps?: number }).paperSlippageEstimateBps
+            : undefined;
+
+    for (const candidate of candidates) {
+        const executableTp1Price = normalizePxToTickSz(candidate.price, tickAuthority.tickSz);
+        if (!(executableTp1Price > 0)) continue;
+
+        const profitability = evaluateTpProfitabilityAuthority({
+            symbol: String((input as { symbol?: string }).symbol ?? ""),
+            side,
+            regime: String(input.regime),
+            entryPrice,
+            canonicalTp1Price: candidate.price,
+            canonicalTp1Source: candidate.source,
+            feeRate,
+            paperSlippageEstimateBps: slippageBps,
+            tickSz: tickAuthority.tickSz
+        });
+
+        if (!profitability.entryAllowed) continue;
+
+        const canonicalTp1Source =
+            candidate.source === "authority_tp_price"
+                ? input.execMetaTakeProfitPlanTp1 != null
+                    ? "execMeta.takeProfitPlan.tp1"
+                    : input.execMetaTakeProfit1Px != null
+                      ? "execMeta.takeProfit1Px"
+                      : input.authorityTakeProfit1Px != null
+                        ? "authority.takeProfit1Px"
+                        : "decision.takeProfit"
+                : candidate.source;
+
+        return {
+            ok: true,
+            rawCanonicalTp1Price: candidate.price,
+            executableTp1Price: profitability.executableTp1Price ?? executableTp1Price,
+            tpTickSize: tickAuthority.tickSz,
+            tickSzSource: tickAuthority.source,
+            canonicalTp1Source,
+            tpSource: candidate.source,
+            adaptiveApplied: candidate.source.startsWith("adaptive_range"),
+            adaptiveDiagnostics: primaryAuthority.ok ? primaryAuthority.adaptiveDiagnostics : null
+        };
+    }
+
+    return {
+        ok: false,
+        blockReason: "V2_TP1_NET_EDGE_INSUFFICIENT",
+        adaptiveDiagnostics: primaryAuthority.ok ? primaryAuthority.adaptiveDiagnostics : null
+    };
 }
 
 /**
@@ -226,6 +437,8 @@ export function resolveV2PreEntryTp1Authority(
 export type V2PreEntryExecutableTpBundleInput = ResolveV2PreEntryTp1AuthorityInput &
     InstrumentTickSzAuthorityInput & {
         entryReferencePrice?: number;
+        symbol?: string;
+        paperSlippageEstimateBps?: number | null;
     };
 
 export type V2PreEntryExecutableTpBundleResult = Readonly<
@@ -251,20 +464,27 @@ export type V2PreEntryExecutableTpBundleResult = Readonly<
 export function resolveV2PreEntryExecutableTpBundle(
     input: V2PreEntryExecutableTpBundleInput
 ): V2PreEntryExecutableTpBundleResult {
-    const tpAuthority = resolveV2PreEntryTp1Authority(input);
-    if (!tpAuthority.ok) {
-        return {
-            ok: false,
-            blockReason: tpAuthority.blockReason,
-            adaptiveDiagnostics: tpAuthority.adaptiveDiagnostics
-        };
-    }
-
     const tickAuthority = resolveInstrumentTickSzAuthority(input);
     if (!tickAuthority.ok) {
         return {
             ok: false,
             blockReason: tickAuthority.blockReason,
+            adaptiveDiagnostics: null
+        };
+    }
+
+    if (
+        isShockOrFtsPromotedTpEscalationContext(input) &&
+        regimeForSl(input.regime) === "RANGE"
+    ) {
+        return resolveShockFtsPromotedExecutableTpBundle(input, tickAuthority);
+    }
+
+    const tpAuthority = resolveV2PreEntryTp1Authority(input);
+    if (!tpAuthority.ok) {
+        return {
+            ok: false,
+            blockReason: tpAuthority.blockReason,
             adaptiveDiagnostics: tpAuthority.adaptiveDiagnostics
         };
     }
