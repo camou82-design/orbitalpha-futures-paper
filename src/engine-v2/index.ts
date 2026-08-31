@@ -253,6 +253,7 @@ import {
     evaluateUpperBreakoutLongConfirmed,
     type RangeBoundaryContinuationContext
 } from "./range-boundary-continuation";
+import { evaluateFastTrendShiftUpperLongZoneConfirmed } from "./market-judgment/fast-trend-shift-upper-long-authority";
 
 const V2_PROOF_KEY_TTL_MS = 60 * 60 * 1000;
 const V2_PROOF_KEY_MAX_SIZE = 5000;
@@ -3768,9 +3769,38 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const continuationPromotionProtected =
             promotionApplied === true &&
             promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
+        const ftsUpperLongStructuralForConflict = evaluateFastTrendShiftUpperLongZoneConfirmed({
+            fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
+            zone,
+            trendOk: trendOk === true,
+            qualityScore,
+            htfEntryPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+            htfRequiresStrongerConfirmation: judgment.htf_requires_stronger_confirmation === true,
+            counterTrendRisk: judgment.counter_trend_risk === true,
+            lateChaseBlocked: (execMeta as Record<string, unknown>).late_chase_blocked === true,
+            hardBlockPresent,
+            whipsawShockRecheckActive,
+            riskLongAllow,
+            allowNewLong,
+            hasSameSidePosition: v2State.currentPositions.some(
+                (p) => p.symbol === input.symbol && String(p.side).toLowerCase() === "long"
+            ),
+            hasOppositeSidePosition: v2State.currentPositions.some(
+                (p) => p.symbol === input.symbol && String(p.side).toLowerCase() === "short"
+            ),
+            paperExecutionReady,
+            signedExecutionReady,
+            boxMid:
+                typeof authoritativeInput.snapshot.boxHigh === "number" &&
+                typeof authoritativeInput.snapshot.boxLow === "number"
+                    ? (Number(authoritativeInput.snapshot.boxHigh) + Number(authoritativeInput.snapshot.boxLow)) / 2
+                    : null,
+            lastPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0)
+        }).confirmed;
         if (
             !conflictResolvedUpperShort &&
             !conflictResolvedTrendLong &&
+            !ftsUpperLongStructuralForConflict &&
             trendSideCandidate === "long" &&
             !continuationPromotionProtected
         ) {
@@ -4280,17 +4310,48 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         retestRequired: execMetaRecord.retest_required === true
     };
     const nativeUpperBreakoutContinuationEval = evaluateUpperBreakoutLongConfirmed(nativeUpperBreakoutEvalCtx);
+    const fastTrendShiftDiagForUpper = judgment.diagnostics?.fastTrendShift ?? null;
+    const boxMidForFtsUpper =
+        typeof authoritativeInput.snapshot.boxHigh === "number" &&
+        typeof authoritativeInput.snapshot.boxLow === "number"
+            ? (Number(authoritativeInput.snapshot.boxHigh) + Number(authoritativeInput.snapshot.boxLow)) / 2
+            : null;
+    const nativeFastTrendShiftUpperLongEval = evaluateFastTrendShiftUpperLongZoneConfirmed({
+        fastTrendShift: fastTrendShiftDiagForUpper,
+        zone,
+        trendOk: trendOk === true,
+        qualityScore,
+        htfEntryPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+        htfRequiresStrongerConfirmation: judgment.htf_requires_stronger_confirmation === true,
+        counterTrendRisk: judgment.counter_trend_risk === true,
+        lateChaseBlocked: execMetaRecord.late_chase_blocked === true,
+        hardBlockPresent,
+        whipsawShockRecheckActive,
+        riskLongAllow,
+        allowNewLong,
+        hasSameSidePosition: hasSameSidePositionForNativeUpper,
+        hasOppositeSidePosition: hasOppositeSidePositionForNativeUpper,
+        paperExecutionReady,
+        signedExecutionReady,
+        boxMid: boxMidForFtsUpper,
+        lastPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0)
+    });
     const nativeExecutorUpperBreakoutConfirmed =
         nativeExecutorEnterAuthority === true &&
         nativeExecutorFastProbeCoverage === true &&
         v2SideBeforePromotion === "long" &&
         isRangeRouting &&
         zone === "upper" &&
-        nativeUpperBreakoutContinuationEval.confirmed === true;
+        (nativeUpperBreakoutContinuationEval.confirmed === true ||
+            nativeFastTrendShiftUpperLongEval.confirmed === true);
     const nativeExecutorUpperBreakoutConfirmationSource =
         nativeExecutorUpperBreakoutConfirmed
-            ? "evaluateUpperBreakoutLongConfirmed"
-            : nativeUpperBreakoutContinuationEval.holdReason ?? null;
+            ? nativeFastTrendShiftUpperLongEval.confirmed
+                ? "evaluateFastTrendShiftUpperLongZoneConfirmed"
+                : "evaluateUpperBreakoutLongConfirmed"
+            : nativeFastTrendShiftUpperLongEval.holdReason ??
+              nativeUpperBreakoutContinuationEval.holdReason ??
+              null;
     const rangeUpperLongMismatchBeforeExemption =
         isRangeRouting &&
         !rangeZoneVetoExempt &&
@@ -4360,6 +4421,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         native_fast_probe_coverage: nativeExecutorFastProbeCoverage,
         native_executor_upper_breakout_confirmed: nativeExecutorUpperBreakoutConfirmed,
         native_executor_upper_breakout_confirmation_source: nativeExecutorUpperBreakoutConfirmationSource,
+        native_fast_trend_shift_upper_long_confirmed: nativeFastTrendShiftUpperLongEval.confirmed,
+        native_fast_trend_shift_upper_long_hold_reason: nativeFastTrendShiftUpperLongEval.holdReason,
         range_upper_long_mismatch_before_exemption: rangeUpperLongMismatchBeforeExemption,
         range_upper_long_mismatch_after_exemption: rangeUpperLongMismatch,
         range_mid_conservative_block: rangeMidConservativeBlock,
@@ -5059,7 +5122,56 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 mismatchReason = "SIDE_ZONE_MISMATCH_LOWER_SHORT";
             }
         } else if (sideFinal === "long" && zone === "upper") {
-            const longException = breakoutRetestConfirmation || boxBreakSideFinal === "upper" || isShockReactionUp || shock === "UP" || (isTrendQualifiedFinalPromotion && sideFinal === trendSideCandidate) || (isStairStepPromotion && sideFinal === "long") || (isTrendContinuationRevalidatedPromotion && sideFinal === "long") || (isPolarityReversalMicroProbePromotion && sideFinal === "long") || (isConflictResolvedTrendLongPromotion && sideFinal === "long");
+            const isFastTrendShiftUpperLong =
+                judgment.subtype === "FAST_TREND_SHIFT" &&
+                judgment.diagnostics?.fastTrendShift?.direction === "long";
+            let fastTrendShiftUpperLongConfirmed = false;
+            if (isFastTrendShiftUpperLong) {
+                const execMetaTier55Upper = execMeta as Record<string, unknown>;
+                const authSnapTier55Upper = authoritativeInput.snapshot as unknown as Record<string, unknown>;
+                const inputSnapTier55Upper = input.snapshot as unknown as Record<string, unknown>;
+                const hasSameSidePosTier55Upper = v2State.currentPositions.some(
+                    (p) => p.symbol === input.symbol && String(p.side).toLowerCase() === "long"
+                );
+                const hasOppositeSidePosTier55Upper = v2State.currentPositions.some(
+                    (p) => p.symbol === input.symbol && String(p.side).toLowerCase() === "short"
+                );
+                const tier55BoxMidUpper =
+                    typeof authSnapTier55Upper.boxHigh === "number" && typeof authSnapTier55Upper.boxLow === "number"
+                        ? (Number(authSnapTier55Upper.boxHigh) + Number(authSnapTier55Upper.boxLow)) / 2
+                        : null;
+                fastTrendShiftUpperLongConfirmed = evaluateFastTrendShiftUpperLongZoneConfirmed({
+                    fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
+                    zone,
+                    trendOk: trendOk === true,
+                    qualityScore,
+                    htfEntryPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+                    htfRequiresStrongerConfirmation: judgment.htf_requires_stronger_confirmation === true,
+                    counterTrendRisk: judgment.counter_trend_risk === true,
+                    lateChaseBlocked: execMetaTier55Upper.late_chase_blocked === true,
+                    hardBlockPresent,
+                    whipsawShockRecheckActive,
+                    riskLongAllow,
+                    allowNewLong,
+                    hasSameSidePosition: hasSameSidePosTier55Upper,
+                    hasOppositeSidePosition: hasOppositeSidePosTier55Upper,
+                    paperExecutionReady,
+                    signedExecutionReady,
+                    boxMid: tier55BoxMidUpper,
+                    lastPrice: Number(authSnapTier55Upper.lastPrice ?? inputSnapTier55Upper.lastPrice ?? 0)
+                }).confirmed;
+            }
+            const longException =
+                breakoutRetestConfirmation ||
+                boxBreakSideFinal === "upper" ||
+                isShockReactionUp ||
+                shock === "UP" ||
+                (isTrendQualifiedFinalPromotion && sideFinal === trendSideCandidate) ||
+                (isStairStepPromotion && sideFinal === "long") ||
+                (isTrendContinuationRevalidatedPromotion && sideFinal === "long") ||
+                (isPolarityReversalMicroProbePromotion && sideFinal === "long") ||
+                (isConflictResolvedTrendLongPromotion && sideFinal === "long") ||
+                (isFastTrendShiftUpperLong && fastTrendShiftUpperLongConfirmed);
             const htfStrongBearish = htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT";
 
             if (!longException || (htfStrongBearish && !isPolarityReversalMicroProbePromotion && !isConflictResolvedTrendLongPromotion)) {
