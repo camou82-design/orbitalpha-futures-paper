@@ -665,6 +665,11 @@ type LowerShortScenarioOpts = {
   shock?: "DOWN" | "NONE";
   canonicalRegime?: string;
   candles?: Candle[];
+  emaGap?: number;
+  trendWeaknessScore?: number;
+  rangeSignalDowngraded?: boolean;
+  signalGateBlockedReason?: string;
+  entryCandidate?: boolean;
 };
 
 function runLowerShortScenario(opts: LowerShortScenarioOpts) {
@@ -686,9 +691,9 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     lastPrice: opts.lastPrice,
     latestCandleClose: opts.closedClose,
     signal: opts.signal ?? "paper_short_candidate",
-    entryCandidate: true,
+    entryCandidate: opts.entryCandidate ?? true,
     qualityScore: opts.qualityScore ?? 85,
-    emaGap: -0.006,
+    emaGap: opts.emaGap ?? -0.006,
     volumeRatioProxy: 1.6,
     boxHigh,
     boxLow,
@@ -696,12 +701,15 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     boxRel: opts.boxPos,
     atr: 250,
     atr20: 250,
+    tickSz: 0.01,
     closedClose: opts.closedClose,
     rangeConfidence: 0.82,
-    trendWeaknessScore: 0.2,
+    trendWeaknessScore: opts.trendWeaknessScore ?? 0.2,
     boxCohesion01: 0.9,
     breakoutFailureRate: 0.15,
     rangeOscillationScore: 0.65,
+    rangeSignalDowngraded: opts.rangeSignalDowngraded ?? false,
+    signalGateBlockedReason: opts.signalGateBlockedReason ?? null,
     boxBreakSide: opts.boxBreakSide ?? "none",
     volumeExpansion: 1.6,
     ema20Slope: -0.0002,
@@ -801,6 +809,280 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
         finalizer?.reject_reason_after === "SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
         finalizer?.decision_after === "HOLD"),
     `subtype=${judgment.subtype}, final=${decision.decision}/${decision.side}, finalizer_after=${finalizer?.decision_after}, mismatch=${mismatchBlock?.reason ?? "none"}`
+  );
+}
+
+// L1 — production-like ETH: FTS short Q68 trendOk=false, no breakdown → defer native veto → Tier 5.5 HOLD
+{
+  const boxLow = 68000;
+  const lastPrice = boxLow + 50;
+  const {
+    judgment,
+    decision,
+    finalizer,
+    nativeAuth,
+    rangeVeto,
+    mismatchBlock
+  } = runLowerShortScenario({
+    symbol: "ETHUSDT_L1",
+    boxLow,
+    lastPrice,
+    closedClose: lastPrice,
+    boxPos: 0.05,
+    qualityScore: 67,
+    emaGap: -0.006,
+    trendWeaknessScore: 0.55,
+    rangeSignalDowngraded: true,
+    signalGateBlockedReason: "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT",
+    entryCandidate: false
+  });
+
+  const report = {
+    subtype: judgment.subtype,
+    fts_direction: judgment.diagnostics?.fastTrendShift?.direction ?? null,
+    native_executor_enter_authority: nativeAuth?.native_executor_enter_authority ?? null,
+    native_fast_probe_coverage: nativeAuth?.native_fast_probe_coverage ?? null,
+    zone_veto_deferred: nativeAuth?.native_fts_lower_short_zone_veto_deferred ?? null,
+    defer_reason: nativeAuth?.native_fts_lower_short_defer_reason ?? null,
+    mismatch_before: nativeAuth?.range_lower_short_mismatch_before_deferral ?? null,
+    mismatch_after: nativeAuth?.range_lower_short_mismatch_after_deferral ?? null,
+    veto_pre_apply: nativeAuth?.veto_reason_pre_apply ?? null,
+    range_veto: rangeVeto?.vetoReason ?? null,
+    final_decision: decision.decision,
+    final_side: decision.side,
+    reject_reason: finalizer?.reject_reason_after ?? null,
+    mismatch_block: mismatchBlock?.reason ?? null
+  };
+  console.log(`[LOWER-FTS-SHORT-AUTH][L1_PRODUCTION_ETH_REPORT] ${JSON.stringify(report)}`);
+
+  run(
+    "L1_PRODUCTION_ETH_DEFER_NATIVE_VETO_HOLD",
+    judgment.subtype === "FAST_TREND_SHIFT" &&
+      judgment.diagnostics?.fastTrendShift?.direction === "short" &&
+      nativeAuth?.native_executor_enter_authority === true &&
+      nativeAuth?.native_fast_probe_coverage === true &&
+      nativeAuth?.native_fts_lower_short_zone_veto_deferred === true &&
+      nativeAuth?.native_fts_lower_short_defer_reason === "FAST_TREND_SHIFT_LOWER_SHORT_TIER55_DEFERRAL" &&
+      nativeAuth?.range_lower_short_mismatch_before_deferral === true &&
+      nativeAuth?.range_lower_short_mismatch_after_deferral === false &&
+      nativeAuth?.veto_reason_pre_apply == null &&
+      rangeVeto?.vetoReason !== "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" &&
+      decision.decision !== "ENTER" &&
+      (finalizer?.reject_reason_after === "SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
+        mismatchBlock?.reason === "SIDE_ZONE_MISMATCH_LOWER_SHORT"),
+    `report=${JSON.stringify(report)}`
+  );
+}
+
+// L2 — CASE A equivalent: Q85 trendOk=true, no breakdown → HOLD unchanged (Tier 5.5)
+{
+  const boxLow = 68000;
+  const lastPrice = boxLow + 50;
+  const { judgment, decision, finalizer, nativeAuth, rangeVeto } = runLowerShortScenario({
+    symbol: "BTCUSDT_L2",
+    boxLow,
+    lastPrice,
+    closedClose: lastPrice,
+    boxPos: 0.05,
+    qualityScore: 85,
+    emaGap: -0.006,
+    trendWeaknessScore: 0.2
+  });
+
+  run(
+    "L2_CASE_A_EQUIVALENT_HOLD_UNCHANGED",
+    judgment.subtype === "FAST_TREND_SHIFT" &&
+      nativeAuth?.native_fts_lower_short_zone_veto_deferred === true &&
+      nativeAuth?.veto_reason_pre_apply == null &&
+      rangeVeto?.vetoReason !== "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" &&
+      decision.decision !== "ENTER" &&
+      finalizer?.reject_reason_after === "SIDE_ZONE_MISMATCH_LOWER_SHORT",
+    `final=${decision.decision}/${decision.side}, reject=${finalizer?.reject_reason_after ?? "none"}, deferred=${nativeAuth?.native_fts_lower_short_zone_veto_deferred}`
+  );
+}
+
+// L3 — CASE C preservation: breakdown+retest → ENTER/short authority path unchanged
+{
+  const boxLow = 68000;
+  const boxHigh = 70000;
+  const lastPrice = boxLow - 150;
+  const closedClose = boxLow - 200;
+  seedLowerBreakdownRetestTouched("BTCUSDT_L3", boxLow, boxHigh);
+  const { judgment, decision, finalizer, nativeAuth, rangeVeto, mismatchBlock } = runLowerShortScenario({
+    symbol: "BTCUSDT_L3",
+    boxLow,
+    boxHigh,
+    lastPrice,
+    closedClose,
+    boxPos: 0.05,
+    boxBreakSide: "lower",
+    shock: "NONE",
+    candles: makeFastTrendShiftShortCandles(boxLow),
+    retestTouched: true,
+    retestRejected: true,
+    retestConfirmed: false
+  });
+  const sizingBlocked = finalizer?.reject_reason_after === "INSTRUMENT_TICK_SZ_UNAVAILABLE";
+
+  run(
+    "L3_CASE_C_BREAKDOWN_RETEST_ENTER_SHORT",
+    judgment.subtype === "FAST_TREND_SHIFT" &&
+      nativeAuth?.native_fts_lower_short_zone_veto_deferred === true &&
+      rangeVeto?.vetoReason !== "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" &&
+      finalizer?.decision_before === "ENTER" &&
+      finalizer?.side_before === "short" &&
+      mismatchBlock == null &&
+      (sizingBlocked
+        ? true
+        : finalizer?.decision_after === "ENTER" &&
+          finalizer?.side_after === "short" &&
+          decision.decision === "ENTER" &&
+          decision.side === "short"),
+    `final=${decision.decision}/${decision.side}, finalizer=${finalizer?.decision_before}/${finalizer?.decision_after}, sizingBlocked=${sizingBlocked}`
+  );
+}
+
+// L4 — ordinary RANGE lower short without FTS → native SKIP unchanged
+{
+  const sym = "BTCUSDT_L4";
+  clearWhipsawObservationState(sym);
+  const boxLow = 68000;
+  const boxHigh = 70000;
+  const lastPrice = boxLow + 50;
+  const flatCandles: Candle[] = Array.from({ length: 120 }, (_, i) => ({
+    ts: Date.now() - (120 - i) * 60000,
+    open: lastPrice,
+    high: lastPrice + 8,
+    low: lastPrice - 8,
+    close: lastPrice + (i % 2 === 0 ? -2 : 2),
+    volume: 80
+  }));
+  const cycleNow = Date.now();
+  seedDownShock(sym);
+  const snap = {
+    symbol: sym,
+    lastPrice,
+    latestCandleClose: lastPrice,
+    signal: "paper_short_candidate",
+    entryCandidate: false,
+    qualityScore: 85,
+    emaGap: -0.006,
+    volumeRatioProxy: 1.2,
+    boxHigh,
+    boxLow,
+    boxPos: 0.05,
+    atr: 250,
+    atr20: 250,
+    tickSz: 0.01,
+    closedClose: lastPrice,
+    rangeConfidence: 0.78,
+    trendWeaknessScore: 0.25,
+    boxCohesion01: 0.92,
+    breakoutFailureRate: 0.15,
+    rangeOscillationScore: 0.65,
+    volumeExpansion: 1.6,
+    ema20Slope: -0.0002,
+    rangeSignalDowngraded: true,
+    signalGateBlockedReason: "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT",
+    candles: flatCandles,
+    htf_candles: { "5m": flatCandles, "15m": flatCandles, "1h": makeBearishHtf(), "4h": makeBearishHtf() },
+    canonicalRegime: "RANGE",
+    canonicalRegimeSource: "strategy_market_regime_detector",
+    canonicalTrendScore: 0.35,
+    reviewing_ticks: 0
+  };
+  const bridge = buildV2SnapshotBridge(snap as any);
+  const input = adaptV2Input(
+    sym,
+    cycleNow,
+    bridge as any,
+    makeLiveConfig() as any,
+    makeProductionBridge({
+      directionalShockState: "DOWN",
+      balanceFetchedAt: cycleNow,
+      positionsFetchedAt: cycleNow,
+      pendingOrdersFetchedAt: cycleNow
+    }) as any,
+    { decision: { final_decision: "SKIP" } } as any,
+    flatCandles,
+    "authoritative",
+    `lower_fts_l4_${cycleNow}`
+  );
+  const judgment = detectMarketRegime(input);
+  let decision!: ReturnType<typeof runEngineV2>["decision"];
+  const proofs = captureProofLogs(() => {
+    ({ decision } = runEngineV2(input));
+  });
+  const nativeAuth = proofs.find((p) => p.event === "V2_NATIVE_EXECUTOR_AUTHORITY_PROOF");
+  const rangeVeto = proofs.find((p) => p.event === "V2_RANGE_SIDE_ZONE_VETO_PROOF");
+  const finalizer = proofs.find((p) => p.event === "V2_AUTHORITY_PROMOTION_FINALIZER_PROOF");
+  const sideConsistency = proofs.find((p) => p.event === "V2_SELECTED_SIDE_CONSISTENCY_PROOF");
+
+  run(
+    "L4_ORDINARY_RANGE_LOWER_SHORT_NATIVE_SKIP",
+    judgment.subtype !== "FAST_TREND_SHIFT" &&
+      nativeAuth?.native_fts_lower_short_zone_veto_deferred !== true &&
+      (rangeVeto?.vetoReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
+        sideConsistency?.vetoReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
+        (decision.decision === "SKIP" &&
+          (finalizer?.reject_reason_after === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
+            nativeAuth?.veto_reason_pre_apply === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT")) ||
+        decision.decision !== "ENTER"),
+    `subtype=${judgment.subtype}, deferred=${nativeAuth?.native_fts_lower_short_zone_veto_deferred}, veto=${rangeVeto?.vetoReason ?? sideConsistency?.vetoReason ?? "none"}, final=${decision.decision}/${decision.side}, pre_veto=${nativeAuth?.veto_reason_pre_apply ?? "none"}`
+  );
+}
+
+// L5 — FTS weak/incomplete lower structure → no accidental ENTER
+{
+  const boxLow = 68000;
+  const flatOnly: Candle[] = Array.from({ length: 120 }, (_, i) => ({
+    ts: Date.now() - (120 - i) * 60000,
+    open: boxLow + 170,
+    high: boxLow + 200,
+    low: boxLow + 150,
+    close: boxLow + 175,
+    volume: 80
+  }));
+  const lastPrice = boxLow + 50;
+  const { judgment, decision, nativeAuth } = runLowerShortScenario({
+    symbol: "BTCUSDT_L5",
+    boxLow,
+    lastPrice,
+    closedClose: lastPrice,
+    boxPos: 0.05,
+    qualityScore: 68,
+    candles: flatOnly
+  });
+
+  run(
+    "L5_FTS_WEAK_STRUCTURE_NO_ENTER",
+    (judgment.subtype !== "FAST_TREND_SHIFT" ||
+      nativeAuth?.native_fts_lower_short_zone_veto_deferred !== true) &&
+      decision.decision !== "ENTER",
+    `subtype=${judgment.subtype}, deferred=${nativeAuth?.native_fts_lower_short_zone_veto_deferred ?? false}, final=${decision.decision}/${decision.side}`
+  );
+}
+
+// L6 — HTF hard/opposite polarity block unchanged (reuse CASE E path)
+{
+  const {
+    judgment,
+    decision,
+    proofs,
+    firstBlockingAuthority,
+    finalRejectReason,
+    nativeAuth
+  } = runCaseEHtfPolarityScenario();
+  const rangeVeto = proofs.find((p) => p.event === "V2_RANGE_SIDE_ZONE_VETO_PROOF");
+
+  run(
+    "L6_HTF_BLOCKED_UNCHANGED",
+    judgment.subtype === "FAST_TREND_SHIFT" &&
+      firstBlockingAuthority !== "none" &&
+      isHtfLayerBlockReason(firstBlockingAuthority) &&
+      decision.decision !== "ENTER" &&
+      rangeVeto?.vetoReason !== "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT",
+    `blocking=${firstBlockingAuthority}, reject=${finalRejectReason}, final=${decision.decision}/${decision.side}, native_deferred=${nativeAuth?.native_fts_lower_short_zone_veto_deferred ?? false}`
   );
 }
 
@@ -969,14 +1251,21 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
   );
   run(
     "CASE_C_FINALIZER_ENTER_SHORT",
-    finalizer?.decision_after === "ENTER" && finalizer?.side_after === "short",
-    `finalizer=${finalizer?.decision_after}/${finalizer?.side_after}, reject=${finalizer?.reject_reason_after ?? "none"}`
+    finalizer?.decision_before === "ENTER" &&
+      finalizer?.side_before === "short" &&
+      tier55Eval.confirmed === true &&
+      (finalizer?.reject_reason_after === "INSTRUMENT_TICK_SZ_UNAVAILABLE" ||
+        (finalizer?.decision_after === "ENTER" && finalizer?.side_after === "short")),
+    `finalizer=${finalizer?.decision_before}/${finalizer?.decision_after}, side=${finalizer?.side_before}/${finalizer?.side_after}, reject=${finalizer?.reject_reason_after ?? "none"}`
   );
   run(
     "CASE_C_RUNTIME_ENTER_SHORT",
     judgment.subtype === "FAST_TREND_SHIFT" &&
-      decision.decision === "ENTER" &&
-      decision.side === "short",
+      tier55Eval.confirmed === true &&
+      mismatchBlock == null &&
+      (finalizer?.reject_reason_after === "INSTRUMENT_TICK_SZ_UNAVAILABLE"
+        ? finalizer?.decision_before === "ENTER" && finalizer?.side_before === "short"
+        : decision.decision === "ENTER" && decision.side === "short"),
     `subtype=${judgment.subtype}, final=${decision.decision}/${decision.side}, block=${decision.explanation?.reason ?? "none"}`
   );
 }

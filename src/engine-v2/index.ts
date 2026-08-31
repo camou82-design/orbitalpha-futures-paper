@@ -4243,7 +4243,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         isStairStepPromotion ||
         isTrendContinuationRevalidatedPromotion ||
         isTrendQualifiedFinalPromotion;
-    const rangeLowerShortMismatch = isRangeRouting && !rangeZoneVetoExempt && !isTrendAuthorityCandidate && sideCandidateBeforeVeto === "short" && (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
     const execMetaRecord = execMeta as Record<string, unknown>;
     const nativeExecutorFastProbeCoverage =
         nativeExecutorEnterAuthority &&
@@ -4252,6 +4251,21 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             judgment.subtype === "EARLY_SHORT_PROBE" ||
             execMetaRecord.fast_trend_shift === true ||
             execMetaRecord.early_probe === true);
+    const rangeLowerShortMismatchBeforeExemption =
+        isRangeRouting &&
+        !rangeZoneVetoExempt &&
+        !isTrendAuthorityCandidate &&
+        sideCandidateBeforeVeto === "short" &&
+        (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
+    const nativeFtsLowerShortDeferZoneVeto =
+        nativeExecutorEnterAuthority === true &&
+        nativeExecutorFastProbeCoverage === true &&
+        judgment.subtype === "FAST_TREND_SHIFT" &&
+        v2SideBeforePromotion === "short" &&
+        zone === "lower" &&
+        isRangeRouting;
+    const rangeLowerShortMismatch =
+        rangeLowerShortMismatchBeforeExemption && !nativeFtsLowerShortDeferZoneVeto;
     const judgmentMetaForNativeUpper = (judgment.metadata ?? {}) as Record<string, unknown>;
     const continuationStateForNativeUpper = rangeContinuationStateMap.get(String(input.symbol));
     const hasSameSidePositionForNativeUpper = v2State.currentPositions.some(
@@ -4423,6 +4437,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         native_executor_upper_breakout_confirmation_source: nativeExecutorUpperBreakoutConfirmationSource,
         native_fast_trend_shift_upper_long_confirmed: nativeFastTrendShiftUpperLongEval.confirmed,
         native_fast_trend_shift_upper_long_hold_reason: nativeFastTrendShiftUpperLongEval.holdReason,
+        native_fts_lower_short_zone_veto_deferred: nativeFtsLowerShortDeferZoneVeto,
+        native_fts_lower_short_defer_reason: nativeFtsLowerShortDeferZoneVeto
+            ? "FAST_TREND_SHIFT_LOWER_SHORT_TIER55_DEFERRAL"
+            : null,
+        range_lower_short_mismatch_before_deferral: rangeLowerShortMismatchBeforeExemption,
+        range_lower_short_mismatch_after_deferral: rangeLowerShortMismatch,
         range_upper_long_mismatch_before_exemption: rangeUpperLongMismatchBeforeExemption,
         range_upper_long_mismatch_after_exemption: rangeUpperLongMismatch,
         range_mid_conservative_block: rangeMidConservativeBlock,
