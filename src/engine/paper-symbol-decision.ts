@@ -250,6 +250,8 @@ export type SymbolSnapshotLike = Readonly<{
   canonicalRangeConfidence?: number;
   canonicalTrendWeaknessScore?: number;
   canonicalRegimeAmbiguous?: boolean;
+  /** OKX instrument tickSz from instrument cache (same authority as order submit). */
+  tickSz?: number;
 }>;
 
 export function paperTradeBlockDecompositionPayload(

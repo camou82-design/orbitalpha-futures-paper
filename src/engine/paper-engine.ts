@@ -412,10 +412,11 @@ import {
   buildPreEntryProtectionPlanProof
 } from "../engine-v2/execution/pre-entry-protection-plan";
 import {
-  computeAdaptiveRangePreEntryProtection,
-  shouldApplyAdaptiveRangePreEntryProtection,
-  type AdaptiveRangeProtectionDiagnostics
-} from "../engine-v2/execution/adaptive-range-pre-entry-protection";
+  resolveV2PreEntryTp1Authority,
+  canonicalTpSourceToCommittedSource
+} from "../engine-v2/execution/pre-entry-tp-provenance";
+import type { AdaptiveRangeProtectionDiagnostics } from "../engine-v2/execution/adaptive-range-pre-entry-protection";
+import { resolveInstrumentTickSzAuthority } from "../engine-v2/execution/instrument-tick-authority";
 import {
   buildV2NewEntryAttachAlgoOrds,
   isV2RangePartialPlanContext,
@@ -1624,173 +1625,81 @@ export function buildV2PreEntryRiskPlanCommitted(
 
   let finalTpPrice: number | null = null;
   let finalTpSource: V2CommittedTpSource = "none";
-  let policyTpPrice: number | null = null;
-  let profitManagementMode: "FIXED_TP" | "PARTIAL_TRAILING" | "NONE" = "NONE";
   let adaptiveDiagnostics: AdaptiveRangeProtectionDiagnostics | null = null;
 
-  if (regime === "RANGE") {
-    profitManagementMode = "FIXED_TP";
-    const authTp =
-      typeof decision.takeProfit === "number" && Number.isFinite(decision.takeProfit) && decision.takeProfit !== 0
-        ? decision.takeProfit
-        : typeof authority.takeProfit1Px === "number" &&
-            Number.isFinite(authority.takeProfit1Px) &&
-            authority.takeProfit1Px !== 0
-          ? authority.takeProfit1Px
-          : null;
+  const tpAuthority = resolveV2PreEntryTp1Authority({
+    side,
+    regime,
+    entryPrice: referenceEntryPx,
+    rawStructuralSl: rawSp.price,
+    rawPolicySlPrice,
+    decisionTakeProfit: typeof decision.takeProfit === "number" ? decision.takeProfit : null,
+    authorityTakeProfit1Px: typeof authority.takeProfit1Px === "number" ? authority.takeProfit1Px : null,
+    marketSubtype: adaptiveContext?.marketSubtype ?? authority.marketSubtype ?? null,
+    routingEngine: adaptiveContext?.routingEngine ?? null,
+    rangeBoxHighAtEntry: authority.rangeBoxHighAtEntry ?? null,
+    rangeBoxLowAtEntry: authority.rangeBoxLowAtEntry ?? null,
+    rangeBoxMidAtEntry: authority.rangeBoxMidAtEntry ?? null,
+    atr: adaptiveContext?.atr ?? null,
+    boxHigh: adaptiveContext?.boxHigh ?? null,
+    boxLow: adaptiveContext?.boxLow ?? null,
+    boxMid: adaptiveContext?.boxMid ?? null,
+    feeRate: adaptiveContext?.feeRate ?? null,
+    preserveCanonicalStructuralStop: adaptiveContext?.preserveCanonicalStructuralStop === true,
+    confirmedBreakout: adaptiveContext?.confirmedBreakout === true,
+    strongContinuation: adaptiveContext?.strongContinuation === true,
+    adaptiveContextPresent: adaptiveContext != null
+  });
 
-    if (authTp != null) {
-      const isAuthTpValidDirection =
-        side === "long" ? authTp > referenceEntryPx : authTp < referenceEntryPx;
-      if (isAuthTpValidDirection) {
-        finalTpPrice = authTp;
-        finalTpSource = "authority_tp_price";
+  if (!tpAuthority.ok) {
+    return { ok: false, reason: tpAuthority.blockReason, adaptiveDiagnostics: tpAuthority.adaptiveDiagnostics };
+  }
+
+  finalTpPrice = tpAuthority.rawTp1Price;
+  finalTpSource = canonicalTpSourceToCommittedSource(tpAuthority.tpSource) as V2CommittedTpSource;
+  adaptiveDiagnostics = tpAuthority.adaptiveDiagnostics;
+
+  if (regime === "RANGE" && tpAuthority.adaptiveApplied && tpAuthority.adaptiveSlPrice != null) {
+    if (policySl != null) {
+      if (side === "long" && tpAuthority.adaptiveSlPrice > policySl) {
+        finalStopPrice = policySl;
+        finalStopSource = "policy_clamped";
+      } else if (side === "short" && tpAuthority.adaptiveSlPrice < policySl) {
+        finalStopPrice = policySl;
+        finalStopSource = "policy_clamped";
       } else {
-        logger.warn("V2_EXIT_PLAN_AUTHORITY_TP_REJECTED", {
-          symbol,
-          side,
-          rejectedTpPrice: authTp,
-          reason: "range_tp_wrong_direction"
-        });
+        finalStopPrice = tpAuthority.adaptiveSlPrice;
+        finalStopSource = (tpAuthority.adaptiveSlSource ?? finalStopSource) as V2CommittedStopSource;
       }
+    } else {
+      finalStopPrice = tpAuthority.adaptiveSlPrice;
+      finalStopSource = (tpAuthority.adaptiveSlSource ?? finalStopSource) as V2CommittedStopSource;
     }
-
-    if (finalTpPrice == null) {
-      policyTpPrice = engineMirrorTpPrice(referenceEntryPx, side, regime);
-      if (policyTpPrice != null) {
-        const isPolicyTpValidDirection =
-          side === "long" ? policyTpPrice > referenceEntryPx : policyTpPrice < referenceEntryPx;
-        if (isPolicyTpValidDirection) {
-          finalTpPrice = policyTpPrice;
-          finalTpSource = "engine_calculated";
-        }
-      }
-    }
-
-    if (finalTpPrice == null) {
-      return { ok: false, reason: "range_tp_missing", adaptiveDiagnostics: null };
-    }
-
-    const rawPolicyTpPrice = finalTpPrice;
-    const adaptiveEligible =
-      adaptiveContext != null &&
-      shouldApplyAdaptiveRangePreEntryProtection({
-        regime,
-        routingEngine: adaptiveContext.routingEngine ?? null,
-        marketSubtype: adaptiveContext.marketSubtype ?? authority.marketSubtype ?? null,
-        confirmedBreakout: adaptiveContext.confirmedBreakout === true,
-        strongContinuation: adaptiveContext.strongContinuation === true
-      });
-    const adaptiveAtr =
-      adaptiveContext?.atr != null && Number.isFinite(adaptiveContext.atr) && adaptiveContext.atr > 0
-        ? adaptiveContext.atr
-        : null;
-    const adaptiveBoxHigh =
-      authority.rangeBoxHighAtEntry ??
-      (adaptiveContext?.boxHigh != null && Number.isFinite(adaptiveContext.boxHigh)
-        ? adaptiveContext.boxHigh
-        : null);
-    const adaptiveBoxLow =
-      authority.rangeBoxLowAtEntry ??
-      (adaptiveContext?.boxLow != null && Number.isFinite(adaptiveContext.boxLow)
-        ? adaptiveContext.boxLow
-        : null);
-
-    if (adaptiveEligible && adaptiveAtr != null && adaptiveBoxHigh != null && adaptiveBoxLow != null) {
-      const adaptive = computeAdaptiveRangePreEntryProtection({
-        side,
-        entryPx: referenceEntryPx,
-        rawStructuralSl: rawSp.price,
-        rawPolicySl: rawPolicySlPrice,
-        rawPolicyTp: rawPolicyTpPrice,
-        atr: adaptiveAtr,
-        boxHigh: adaptiveBoxHigh,
-        boxLow: adaptiveBoxLow,
-        boxMid: authority.rangeBoxMidAtEntry ?? adaptiveContext?.boxMid ?? null,
-        feeRate: adaptiveContext?.feeRate,
-        preserveCanonicalStructuralStop: adaptiveContext?.preserveCanonicalStructuralStop === true
-      });
-      adaptiveDiagnostics = adaptive.diagnostics;
-      if (!adaptive.ok) {
-        return {
-          ok: false,
-          reason: adaptive.blockReason,
-          adaptiveDiagnostics: adaptive.diagnostics
-        };
-      }
-      if (policySl != null) {
-        if (side === "long" && adaptive.slPrice > policySl) {
-          finalStopPrice = policySl;
-          finalStopSource = "policy_clamped";
-        } else if (side === "short" && adaptive.slPrice < policySl) {
-          finalStopPrice = policySl;
-          finalStopSource = "policy_clamped";
-        } else {
-          finalStopPrice = adaptive.slPrice;
-          finalStopSource = adaptive.slSource as V2CommittedStopSource;
-        }
-      } else {
-        finalStopPrice = adaptive.slPrice;
-        finalStopSource = adaptive.slSource as V2CommittedStopSource;
-      }
-      finalTpPrice = adaptive.tpPrice;
-      finalTpSource = adaptive.tpSource as V2CommittedTpSource;
-      clampApplied = finalStopSource === "policy_clamped";
-      adaptiveDiagnostics = {
-        ...adaptive.diagnostics,
-        final_committed_tp_price: adaptive.tpPrice,
-        final_committed_sl_price: adaptive.slPrice
-      };
-      logger.info("V2_ADAPTIVE_RANGE_PRE_ENTRY_PROTECTION_PROOF", {
-        symbol,
-        side,
-        entryPrice: referenceEntryPx,
-        ...adaptiveDiagnostics
-      });
-    }
+    clampApplied = finalStopSource === "policy_clamped";
+    logger.info("V2_ADAPTIVE_RANGE_PRE_ENTRY_PROTECTION_PROOF", {
+      symbol,
+      side,
+      entryPrice: referenceEntryPx,
+      ...(adaptiveDiagnostics ?? {})
+    });
   } else if (regime === "TREND") {
-    profitManagementMode = "PARTIAL_TRAILING";
-    const authTp =
-      typeof decision.takeProfit === "number" && Number.isFinite(decision.takeProfit) && decision.takeProfit !== 0
-        ? decision.takeProfit
-        : typeof authority.takeProfit1Px === "number" &&
-            Number.isFinite(authority.takeProfit1Px) &&
-            authority.takeProfit1Px !== 0
-          ? authority.takeProfit1Px
-          : null;
-
-    if (authTp != null) {
-      const isAuthTpValidDirection =
-        side === "long" ? authTp > referenceEntryPx : authTp < referenceEntryPx;
-      if (isAuthTpValidDirection) {
-        finalTpPrice = authTp;
-        finalTpSource = "authority_tp_price";
-      } else {
-        logger.warn("V2_EXIT_PLAN_AUTHORITY_TP_REJECTED", {
-          symbol,
-          side,
-          rejectedTpPrice: authTp,
-          reason: "trend_tp_wrong_direction"
-        });
-      }
-    }
-
-    // V2 TREND does NOT manufacture generic fixed-percentage full-position exchange TP.
-    // Dynamic lifecycle exit authority (weakness/exhaustion/pullback partial TP) is sovereign.
     logger.info("V2_TREND_TP_AUTHORITY_PROOF", {
       symbol,
       side,
       regime,
       reference_entry_px: referenceEntryPx,
-      authority_tp_px: authTp,
+      authority_tp_px: finalTpPrice,
       engine_mirror_tp_px: null,
       final_tp_px: finalTpPrice,
       full_position_tp_required: false,
-      profit_management_mode: profitManagementMode,
+      profit_management_mode: "PARTIAL_TRAILING",
       tp_authority_source: finalTpSource,
       reason: "V2_TREND_DYNAMIC_EXIT_SOVEREIGNTY"
     });
   }
+
+  const profitManagementMode =
+    regime === "RANGE" ? "FIXED_TP" : regime === "TREND" ? "PARTIAL_TRAILING" : "NONE";
 
   if (side === "long" && finalStopPrice >= referenceEntryPx) return { ok: false, reason: "invalid_stop_direction_long", adaptiveDiagnostics };
   if (side === "short" && finalStopPrice <= referenceEntryPx) return { ok: false, reason: "invalid_stop_direction_short", adaptiveDiagnostics };
@@ -1825,6 +1734,8 @@ export function buildV2PreEntryRiskPlanCommitted(
   if (regime === "RANGE" && (riskRewardRatio == null || riskRewardRatio <= 0)) {
     return { ok: false, reason: "range_invalid_rr", adaptiveDiagnostics };
   }
+
+  const policyTpPrice = engineMirrorTpPrice(referenceEntryPx, side, regime);
 
   logger.info("V2_EXIT_PLAN_AUTHORITY_PROOF", {
     symbol,
@@ -7141,7 +7052,20 @@ export class PaperEngine {
         fetchedAt,
         runCycleId: String(this.runCycleId),
         evaluationMode: "authoritative",
-        snapshot: buildV2SnapshotBridge(snapForDecisionWithReviewing ?? snapForDecision!),
+        snapshot: (() => {
+          const snapBase = snapForDecisionWithReviewing ?? snapForDecision!;
+          const instIdForV2 = toOkxSwapInstId(sym as MarketSymbol);
+          const instCachedForV2 = this.instrumentCache.get(instIdForV2) as { tickSz?: number } | undefined;
+          const cacheTickSz =
+            instCachedForV2?.tickSz != null && Number.isFinite(Number(instCachedForV2.tickSz))
+              ? Number(instCachedForV2.tickSz)
+              : undefined;
+          const snapWithTick =
+            cacheTickSz != null
+              ? ({ ...snapBase, tickSz: cacheTickSz } as SymbolSnapshotLike)
+              : snapBase;
+          return buildV2SnapshotBridge(snapWithTick);
+        })(),
         legacy: buildV2LegacyBridge(res),
         config: buildV2ConfigBridge(this.config),
         state: (() => {
@@ -22050,10 +21974,17 @@ export class PaperEngine {
           const instCachedAny = this.instrumentCache.get(instIdForEntry) as
             | (OkxSwapInstrumentSizing & { tickSz?: number })
             | undefined;
-          let tickSz =
-            instCachedAny?.tickSz != null && Number.isFinite(Number(instCachedAny.tickSz))
-              ? Number(instCachedAny.tickSz)
-              : 0.1;
+          const tickAuthority = resolveInstrumentTickSzAuthority({
+            instrumentTickSz:
+              instCachedAny?.tickSz != null && Number.isFinite(Number(instCachedAny.tickSz))
+                ? Number(instCachedAny.tickSz)
+                : null
+          });
+          let tickSz = tickAuthority.ok ? tickAuthority.tickSz : 0;
+          if (!tickAuthority.ok) {
+            orderSubmitAllowed = false;
+            orderTypeBlockReason = tickAuthority.blockReason;
+          }
 
           if (executionStyle === "MOMENTUM_MARKETABLE_IOC") {
             const tickerTry = await this.okxPublic.tryGetTicker(first.symbol);
@@ -25509,7 +25440,13 @@ export function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapsho
     canonicalTrendScore: snap.canonicalTrendScore,
     canonicalRangeConfidence: snap.canonicalRangeConfidence ?? (snap.rangeConfidence != null ? snap.rangeConfidence : undefined),
     canonicalTrendWeaknessScore: snap.canonicalTrendWeaknessScore ?? (snap.trendWeaknessScore != null ? snap.trendWeaknessScore : undefined),
-    canonicalRegimeAmbiguous: snap.canonicalRegimeAmbiguous
+    canonicalRegimeAmbiguous: snap.canonicalRegimeAmbiguous,
+    tickSz:
+        typeof (snap as { tickSz?: unknown }).tickSz === "number" &&
+        Number.isFinite((snap as { tickSz?: number }).tickSz!) &&
+        (snap as { tickSz?: number }).tickSz! > 0
+            ? (snap as { tickSz: number }).tickSz
+            : undefined
   };
 }
 

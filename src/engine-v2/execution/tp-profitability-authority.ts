@@ -106,8 +106,15 @@ export function evaluateTpProfitabilityAuthority(
             ? "custom_override"
             : "MINIMUM_TP1_NET_PROFIT_PCT";
 
-    // Cost Authority Fail-Closed Check
-    if (!isFeeValid || !isSlippageValid || !(entryPrice > 0) || rawCanonicalTp1Price == null || executableTp1Price == null) {
+    // Cost Authority Fail-Closed Check (tickSz required for executable TP normalization parity)
+    if (
+        !isFeeValid ||
+        !isSlippageValid ||
+        !(entryPrice > 0) ||
+        rawCanonicalTp1Price == null ||
+        executableTp1Price == null ||
+        tickSz == null
+    ) {
         return {
             event: "V2_TP_PROFITABILITY_AUTHORITY_PROOF",
             symbol,
