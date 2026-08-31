@@ -2023,6 +2023,7 @@ export class PaperEngine {
   private runCycleId = 0;
   private readonly externalMarketContextService: ExternalMarketContextService;
   private lastExternalMarketContextMonitor: Record<string, unknown> | null = null;
+  private lastExternalMarketContextMonitorAssignedAt: number | null = null;
   private paperExecutionReady = false;
   private paperExecutionReadyChangedAt: number | null = null;
   private signedExecutionReady = false;
@@ -5981,6 +5982,66 @@ export class PaperEngine {
     });
   }
 
+  /** Read-only monitor payload for engine-state / ops dashboard (no trading impact). */
+  private captureExternalMarketContextMonitorPayload(now: number): void {
+    const externalMarketContextConfig = mapExternalMarketContextConfigFromEngine(this.config);
+    if (this.config.externalMarketContextFetchEnabled) {
+      const serviceState = this.externalMarketContextService.getState(now);
+      const preview = evaluateExternalMarketContext({
+        side: "none",
+        now,
+        config: externalMarketContextConfig,
+        snapshot: serviceState.snapshot
+      });
+      this.lastExternalMarketContextMonitor = buildExternalMarketContextMonitorPayload(
+        serviceState,
+        preview,
+        {
+          enabled: externalMarketContextConfig.enabled,
+          shadowMode: externalMarketContextConfig.shadowMode,
+          fetchEnabled: this.config.externalMarketContextFetchEnabled
+        },
+        now
+      );
+    } else {
+      this.lastExternalMarketContextMonitor = {
+        ts: now,
+        external_market_context_enabled: externalMarketContextConfig.enabled,
+        external_market_context_shadow_mode: externalMarketContextConfig.shadowMode,
+        external_market_context_fetch_enabled: false,
+        trading_impact:
+          externalMarketContextConfig.enabled && !externalMarketContextConfig.shadowMode ? "unknown" : "none"
+      };
+    }
+    this.lastExternalMarketContextMonitorAssignedAt = now;
+  }
+
+  private logExternalMarketContextMonitorPassthroughProof(engineStateWriteTs: number): void {
+    const payload = this.lastExternalMarketContextMonitor;
+    this.logger.info("EXTERNAL_MARKET_CONTEXT_MONITOR_PASSTHROUGH_PROOF", {
+      payload_present: payload != null,
+      payload_score:
+        payload && typeof payload.external_context_score === "number" ? payload.external_context_score : null,
+      payload_reliability:
+        payload && typeof payload.external_signal_reliability === "number"
+          ? payload.external_signal_reliability
+          : null,
+      assignment_ts: this.lastExternalMarketContextMonitorAssignedAt,
+      engine_state_write_ts: engineStateWriteTs,
+      engine_state_external_context_present: payload != null
+    });
+  }
+
+  private async persistExternalMarketContextEngineStatePatch(now: number): Promise<void> {
+    this.captureExternalMarketContextMonitorPayload(now);
+    const writeTs = Date.now();
+    await this.store.patchEngineStateFields({
+      external_market_context: this.lastExternalMarketContextMonitor,
+      external_market_context_updated_at: writeTs
+    });
+    this.logExternalMarketContextMonitorPassthroughProof(writeTs);
+  }
+
   private maxCandleTsFromSnapshots(snapshots: ReadonlyArray<SymbolSnapshot>): number | null {
     let maxTs: number | null = null;
     for (const s of snapshots) {
@@ -6314,8 +6375,9 @@ export class PaperEngine {
     pre_tick_setup_ms = Date.now() - tPre0;
 
     const externalMarketSnapshot = this.externalMarketContextService.touch(tickNow);
-    const externalMarketContextConfig = mapExternalMarketContextConfigFromEngine(this.config);
+    this.captureExternalMarketContextMonitorPayload(tickNow);
     if (this.config.externalMarketContextFetchEnabled) {
+      const externalMarketContextConfig = mapExternalMarketContextConfigFromEngine(this.config);
       const preview = evaluateExternalMarketContext({
         side: "none",
         now: tickNow,
@@ -6323,26 +6385,10 @@ export class PaperEngine {
         snapshot: externalMarketSnapshot
       });
       const serviceState = this.externalMarketContextService.getState(tickNow);
-      const shadowProof = buildExternalMarketContextShadowProofLog(serviceState, preview, tickNow);
-      this.lastExternalMarketContextMonitor = buildExternalMarketContextMonitorPayload(
-        serviceState,
-        preview,
-        {
-          enabled: externalMarketContextConfig.enabled,
-          shadowMode: externalMarketContextConfig.shadowMode,
-          fetchEnabled: this.config.externalMarketContextFetchEnabled
-        },
-        tickNow
+      this.logger.info(
+        "EXTERNAL_MARKET_CONTEXT_SHADOW_PROOF",
+        buildExternalMarketContextShadowProofLog(serviceState, preview, tickNow)
       );
-      this.logger.info("EXTERNAL_MARKET_CONTEXT_SHADOW_PROOF", shadowProof);
-    } else {
-      this.lastExternalMarketContextMonitor = {
-        ts: tickNow,
-        external_market_context_enabled: externalMarketContextConfig.enabled,
-        external_market_context_shadow_mode: externalMarketContextConfig.shadowMode,
-        external_market_context_fetch_enabled: false,
-        trading_impact: externalMarketContextConfig.enabled && !externalMarketContextConfig.shadowMode ? "unknown" : "none"
-      };
     }
 
     // --- 1. Ledger Integrity: High-Fidelity Position Normalization Promotion ---
@@ -7879,6 +7925,8 @@ export class PaperEngine {
         const statusBlockedReasonFinal = statusRelaxBypass ? null : statusBlockedReasonOriginal;
 
         const tRep0 = Date.now();
+        this.captureExternalMarketContextMonitorPayload(stateNow);
+        const engineStateWriteTs = Date.now();
         await this.store.writeJson("reports/engine-state.json", {
           generatedAt: fetchedAt,
           market_mode_selector: this.lastMarketMode,
@@ -8002,6 +8050,7 @@ export class PaperEngine {
           ...balanceDisplay
         });
         report_write_ms = Date.now() - tRep0;
+        this.logExternalMarketContextMonitorPassthroughProof(engineStateWriteTs);
         this.logger.info("LIVE_LEVERAGE_USAGE_PROOF", {
           ts: fetchedAt,
           ...balanceDisplay,
@@ -8017,6 +8066,12 @@ export class PaperEngine {
         });
       } catch (e) {
         this.logger.error("engine_state_write_failed", { error: String(e) });
+      }
+    } else {
+      try {
+        await this.persistExternalMarketContextEngineStatePatch(Date.now());
+      } catch (e) {
+        this.logger.error("engine_state_external_market_context_patch_failed", { error: String(e) });
       }
     }
 

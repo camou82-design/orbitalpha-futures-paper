@@ -149,6 +149,23 @@ export class JsonStore {
     return fullPath;
   }
 
+  /** Merge selected fields into existing engine-state without disturbing trading logic. */
+  async patchEngineStateFields(fields: Record<string, unknown>): Promise<string> {
+    const rel = "reports/engine-state.json";
+    const fullPath = path.resolve(this.baseDir, rel);
+    let existing: Record<string, unknown> = {};
+    try {
+      const raw = await fs.readFile(fullPath, "utf8");
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        existing = parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* first write or corrupt file — start fresh shell */
+    }
+    return this.writeJson(rel, { ...existing, ...fields });
+  }
+
   /** Append one JSON Lines row (`\n`-terminated). Creates parent dirs and file if missing. */
   async appendJsonlLine(relativePath: string, data: unknown): Promise<string> {
     const fullPath = path.resolve(this.baseDir, relativePath);
