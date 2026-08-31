@@ -213,6 +213,8 @@ export interface LegacySnapshotAdapter {
     canonicalRangeConfidence?: number;
     canonicalTrendWeaknessScore?: number;
     canonicalRegimeAmbiguous?: boolean;
+    /** OKX instrument tickSz propagated from instrument cache at engine boundary. */
+    tickSz?: number;
 }
 
 export interface LegacyConfigAdapter {
@@ -446,6 +448,8 @@ export interface EngineV2SnapshotAdapter {
     canonicalRangeConfidence?: number;
     canonicalTrendWeaknessScore?: number;
     canonicalRegimeAmbiguous?: boolean;
+    /** OKX instrument tickSz propagated from instrument cache at engine boundary. */
+    tickSz?: number;
 }
 
 export interface EngineV2ConfigAdapter {

@@ -24,6 +24,8 @@ import { resolveInstrumentTickSzAuthority } from "../engine-v2/execution/instrum
 import { evaluatePreEntryProtectionPlan } from "../engine-v2/execution/pre-entry-protection-plan";
 import { buildV2NewEntryAttachAlgoOrds } from "../engine-v2/execution/entry-protection-attach";
 import { normalizePxToTickSz } from "../engine-v2/execution/entry-order-type";
+import { adaptV2Input } from "../engine-v2/index";
+import { buildV2SnapshotBridge } from "./paper-engine";
 
 function pass(label: string, detail?: Record<string, unknown>): void {
     const extra = detail ? ` — ${JSON.stringify(detail)}` : "";
@@ -98,6 +100,70 @@ function adaptiveContext(scenario: FtsScenario, overrides: Partial<V2PreEntryRis
     };
 }
 
+function buildBridgeAdaptedSnapshotTick(scenario: FtsScenario): number {
+    const bridge = buildV2SnapshotBridge({
+        lastPrice: scenario.entry,
+        latestCandleClose: scenario.entry,
+        signal: scenario.side === "long" ? "paper_long_candidate" : "paper_short_candidate",
+        entryCandidate: true,
+        qualityScore: 72,
+        ema20: scenario.entry,
+        emaGap: scenario.side === "long" ? 0.006 : -0.006,
+        boxHigh: scenario.boxHigh,
+        boxLow: scenario.boxLow,
+        boxPos: 0.55,
+        atr: scenario.atr,
+        atr20: scenario.atr,
+        tickSz: scenario.tickSz,
+        rangeConfidence: 0.78,
+        trendWeaknessScore: 0.22,
+        boxCohesion01: 0.9,
+        breakoutFailureRate: 0.12,
+        rangeOscillationScore: 0.62,
+        swingHighSlope: 0,
+        swingLowSlope: 0,
+        rangeCenterSlope: 0,
+        boxHighSlope: 0,
+        boxLowSlope: 0,
+        ema20Slope: 0,
+        ema60Slope: 0,
+        atrExpansion: 1,
+        volumeExpansion: 1,
+        reviewing_ticks: 0,
+        canonicalRegime: "RANGE"
+    } as Parameters<typeof buildV2SnapshotBridge>[0]);
+    const v2Input = adaptV2Input(
+        scenario.symbol,
+        Date.now(),
+        bridge as any,
+        {
+            baseSizeUsd: 100,
+            paperMaxOpenPositions: 3,
+            paperReentryCooldownMs: 0,
+            okxLiveMaxOrderNotionalUsdt: 500,
+            paperTakerFeeRate: 0.0005
+        } as any,
+        {
+            currentPositions: [],
+            globalRiskScore: 0,
+            lossStreaks: {},
+            directionalShockState: "NONE",
+            longAllow: true,
+            shortAllow: true,
+            executionReadiness: true,
+            freshTickBarrierActive: false,
+            freshTickCompletedCycles: 1,
+            freshTickRequiredCycles: 1
+        } as any,
+        { decision: { final_decision: "ENTER" }, regime: "RANGE", side: scenario.side, isBlocked: false } as any,
+        [],
+        "authoritative",
+        `pre_entry_tp_bridge_${scenario.symbol}`
+    );
+    assert.equal(v2Input.snapshot.tickSz, scenario.tickSz, `${scenario.symbol} bridge/adapt tick propagation`);
+    return v2Input.snapshot.tickSz!;
+}
+
 function assertExactTpChain(label: string, scenario: FtsScenario, adaptiveOverrides?: Partial<V2PreEntryRiskPlanAdaptiveContext>): void {
     const authority = makeFtsAuthority(scenario);
     const adaptiveCtx = adaptiveContext(scenario, adaptiveOverrides);
@@ -107,6 +173,7 @@ function assertExactTpChain(label: string, scenario: FtsScenario, adaptiveOverri
         entryPrice: scenario.entry,
         rawStructuralSl: scenario.rawStructuralSl
     });
+    const bridgeTickSz = buildBridgeAdaptedSnapshotTick(scenario);
 
     const bundle = resolveV2PreEntryExecutableTpBundle({
         side: scenario.side,
@@ -122,8 +189,7 @@ function assertExactTpChain(label: string, scenario: FtsScenario, adaptiveOverri
         boxMid: adaptiveCtx.boxMid ?? null,
         feeRate: adaptiveCtx.feeRate ?? null,
         preserveCanonicalStructuralStop: true,
-        instrumentTickSz: scenario.tickSz,
-        snapshotTickSz: scenario.tickSz
+        snapshotTickSz: bridgeTickSz
     });
     assert.equal(bundle.ok, true, `${label} bundle must resolve`);
 
@@ -215,6 +281,7 @@ function runPreEntryTpExactEqualityCases(): void {
         const entry = 2480.005;
         const tickSz = 0.01;
         const rawTp = 2523.337; // not tick-aligned
+        const bridgeTickSz = buildBridgeAdaptedSnapshotTick({ ...ETH_FTS, entry, tickSz });
         const bundle = resolveV2PreEntryExecutableTpBundle({
             side: "long",
             regime: "RANGE",
@@ -232,7 +299,7 @@ function runPreEntryTpExactEqualityCases(): void {
             feeRate: 0.0005,
             preserveCanonicalStructuralStop: true,
             adaptiveContextPresent: false,
-            instrumentTickSz: tickSz
+            snapshotTickSz: bridgeTickSz
         });
         assert.equal(bundle.ok, true);
         if (!bundle.ok) throw new Error("CASE C bundle failed");
@@ -313,6 +380,7 @@ function runPreEntryTpExactEqualityCases(): void {
 
     // CASE E — adaptive input change; gate and downstream share resolveV2PreEntryTp1Authority
     {
+        const bridgeTickSz = buildBridgeAdaptedSnapshotTick(ETH_FTS);
         const baseInput = {
             side: "long" as const,
             regime: "RANGE",
@@ -331,7 +399,7 @@ function runPreEntryTpExactEqualityCases(): void {
             boxMid: ETH_FTS.boxMid,
             feeRate: 0.0005,
             preserveCanonicalStructuralStop: true,
-            instrumentTickSz: ETH_FTS.tickSz
+            snapshotTickSz: bridgeTickSz
         };
 
         const atrVariants = [8, 10, 14];

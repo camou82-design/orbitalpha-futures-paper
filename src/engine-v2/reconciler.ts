@@ -458,7 +458,8 @@ export function resolveSymbolDecisionEnvelope(
         canonicalTrendScore: snapshot.canonicalTrendScore,
         canonicalRangeConfidence: snapshot.canonicalRangeConfidence,
         canonicalTrendWeaknessScore: snapshot.canonicalTrendWeaknessScore,
-        canonicalRegimeAmbiguous: snapshot.canonicalRegimeAmbiguous
+        canonicalRegimeAmbiguous: snapshot.canonicalRegimeAmbiguous,
+        tickSz: snapshot.tickSz
     };
 
     // 2. Config Mapping

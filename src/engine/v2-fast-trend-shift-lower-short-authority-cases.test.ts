@@ -411,6 +411,7 @@ function makeTrendRangeSplitInput(opts: {
     boxRel: 0.02,
     atr: 250,
     atr20: 250,
+    tickSz: 0.1,
     closedClose: base,
     rangeConfidence: 0.78,
     trendWeaknessScore: 0.25,
@@ -670,6 +671,7 @@ type LowerShortScenarioOpts = {
   rangeSignalDowngraded?: boolean;
   signalGateBlockedReason?: string;
   entryCandidate?: boolean;
+  atr?: number;
 };
 
 function runLowerShortScenario(opts: LowerShortScenarioOpts) {
@@ -699,8 +701,8 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     boxLow,
     boxPos: opts.boxPos,
     boxRel: opts.boxPos,
-    atr: 250,
-    atr20: 250,
+    atr: opts.atr ?? 250,
+    atr20: opts.atr ?? 250,
     tickSz: 0.01,
     closedClose: opts.closedClose,
     rangeConfidence: 0.82,
@@ -917,6 +919,9 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     boxPos: 0.05,
     boxBreakSide: "lower",
     shock: "NONE",
+    // Deep lower breakdown: entry sits below boxMid so adaptive TP uses ATR min-profit floor.
+    // atr=600 yields 0.35×600=210pt (~0.31%) natural TP edge above 0.3% profitability gate.
+    atr: 600,
     candles: makeFastTrendShiftShortCandles(boxLow),
     retestTouched: true,
     retestRejected: true,
@@ -1160,6 +1165,7 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     boxPos: 0.05,
     boxBreakSide: "lower",
     shock: "NONE",
+    atr: 600,
     candles: makeFastTrendShiftShortCandles(boxLow),
     retestTouched: true,
     retestRejected: true,

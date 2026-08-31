@@ -8795,7 +8795,10 @@ export function adaptV2Input(
             canonicalTrendScore: snapshot.canonicalTrendScore,
             canonicalRangeConfidence: snapshot.canonicalRangeConfidence,
             canonicalTrendWeaknessScore: snapshot.canonicalTrendWeaknessScore,
-            canonicalRegimeAmbiguous: snapshot.canonicalRegimeAmbiguous
+            canonicalRegimeAmbiguous: snapshot.canonicalRegimeAmbiguous,
+            ...(typeof snapshot.tickSz === "number" && Number.isFinite(snapshot.tickSz) && snapshot.tickSz > 0
+                ? { tickSz: snapshot.tickSz }
+                : {})
         },
         config: {
             paperMaxOpenPositions: config.paperMaxOpenPositions,
