@@ -14,6 +14,7 @@ export {
     applyExternalContextToConfidenceScore,
     buildExternalMarketContextProofLog,
     buildExternalMarketContextShadowProofLog,
+    buildExternalMarketContextMonitorPayload,
     buildSignalBreakdown,
     combineDirectionalAndEventRiskMultipliers,
     computeEventRiskMultiplier,

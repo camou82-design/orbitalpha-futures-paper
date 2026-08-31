@@ -1018,6 +1018,253 @@
     `;
   }
 
+  function pickExternalMarketContext(bundle) {
+    const es = bundle && bundle.engineState;
+    if (!es || typeof es !== "object") return null;
+    const ctx = es.external_market_context ?? es.externalMarketContext ?? null;
+    return ctx && typeof ctx === "object" ? ctx : null;
+  }
+
+  function formatExternalScore(n) {
+    if (typeof n !== "number" || !Number.isFinite(n)) return "—";
+    const sign = n >= 0 ? "+" : "";
+    return sign + n.toFixed(2);
+  }
+
+  function formatExternalMultiplier(n) {
+    if (typeof n !== "number" || !Number.isFinite(n)) return "—";
+    return n.toFixed(2) + "x";
+  }
+
+  function formatExternalReliabilityPct(n) {
+    if (typeof n !== "number" || !Number.isFinite(n)) return "—";
+    const pct = n <= 1 ? n * 100 : n;
+    return Math.round(pct) + "%";
+  }
+
+  function mapExternalDirection(score, reliability, weight) {
+    const insufficient =
+      reliability === 0 || (typeof weight === "number" && Number.isFinite(weight) && weight < 0.35);
+    if (insufficient) {
+      return { label: "외부 데이터 부족 / 중립", tone: "neutral", key: "insufficient", insufficient: true };
+    }
+    if (typeof score !== "number" || !Number.isFinite(score)) {
+      return { label: "—", tone: "neutral", key: "unknown", insufficient: false };
+    }
+    if (score >= 0.5) return { label: "롱 강한 우호", tone: "bull", key: "long_strong", insufficient: false };
+    if (score >= 0.15) return { label: "롱 우호", tone: "bull", key: "long", insufficient: false };
+    if (score > -0.15) return { label: "중립", tone: "neutral", key: "neutral", insufficient: false };
+    if (score > -0.5) return { label: "숏 우호", tone: "bear", key: "short", insufficient: false };
+    return { label: "숏 강한 우호", tone: "bear", key: "short_strong", insufficient: false };
+  }
+
+  function formatMarketDirectionArrow(dir) {
+    if (dir === "up") return "↑";
+    if (dir === "down") return "↓";
+    return "→";
+  }
+
+  function externalSourceUnavailable(ctx, key) {
+    const list = ctx && ctx.unavailable_sources;
+    if (!Array.isArray(list)) return false;
+    return list.some((s) => String(s).toLowerCase() === String(key).toLowerCase());
+  }
+
+  function formatExternalMomentumSource(ctx, key, signal) {
+    if (externalSourceUnavailable(ctx, key)) {
+      return `<span class="emc-source-val emc-source-val--dim">사용불가</span>`;
+    }
+    const disp =
+      ctx && ctx.source_display && typeof ctx.source_display === "object" ? ctx.source_display[key] : null;
+    if (disp && typeof disp === "object") {
+      const mkt = formatMarketDirectionArrow(disp.market_direction);
+      const btc =
+        typeof disp.btc_impact === "number" && Number.isFinite(disp.btc_impact)
+          ? formatExternalScore(disp.btc_impact)
+          : "—";
+      return `<span class="emc-source-val">시장 ${esc(mkt)} / BTC 영향 ${esc(btc)}</span>`;
+    }
+    if (typeof signal !== "number" || !Number.isFinite(signal)) {
+      return `<span class="emc-source-val emc-source-val--dim">—</span>`;
+    }
+    const invert = key === "dxy" || key === "us10y";
+    const mkt = formatMarketDirectionArrow(signal > 0.05 ? "up" : signal < -0.05 ? "down" : "flat");
+    const btcVal = invert ? -signal : signal;
+    return `<span class="emc-source-val">시장 ${esc(mkt)} / BTC 영향 ${esc(formatExternalScore(btcVal))}</span>`;
+  }
+
+  function formatEconomicEventStatus(ctx) {
+    const raw = ctx && ctx.economic_event_source_status;
+    if (raw === "live") return "정상";
+    if (raw === "cached") return "캐시";
+    if (externalSourceUnavailable(ctx, "economicEvent") || externalSourceUnavailable(ctx, "economic_event")) {
+      return "사용불가";
+    }
+    return "사용불가";
+  }
+
+  function formatNewsSourceStatus(ctx) {
+    if (externalSourceUnavailable(ctx, "news")) return "사용불가";
+    const err = ctx && ctx.last_fetch_errors && typeof ctx.last_fetch_errors === "object" ? ctx.last_fetch_errors.news : null;
+    if (typeof err === "string" && err.trim()) return "사용불가";
+    return "정상";
+  }
+
+  function externalMarketStatusBadges(ctx) {
+    const enabled = ctx && ctx.external_market_context_enabled === true;
+    const shadow = ctx && ctx.external_market_context_shadow_mode !== false;
+    const fetchOn = ctx && ctx.external_market_context_fetch_enabled === true;
+    const applied = ctx && ctx.external_context_applied === true;
+    const impactNone = !ctx || ctx.trading_impact === "none" || ctx.trading_impact === "unknown";
+
+    const badges = [];
+    if (!fetchOn) {
+      badges.push('<span class="emc-badge emc-badge--off">데이터 수집 비활성</span>');
+    }
+    if (fetchOn && (!enabled || shadow)) {
+      badges.push('<span class="emc-badge emc-badge--shadow">관찰 전용</span>');
+    }
+    if (fetchOn && enabled && !shadow) {
+      badges.push('<span class="emc-badge emc-badge--live">실거래 반영 가능</span>');
+    }
+    if (!applied || impactNone || shadow || !enabled) {
+      badges.push('<span class="emc-badge">실거래 영향 없음</span>');
+    } else {
+      badges.push('<span class="emc-badge emc-badge--live">실거래 사이징 반영 중</span>');
+    }
+    return badges.join("");
+  }
+
+  function buildExternalMarketSummary(ctx, dir) {
+    if (!ctx || ctx.external_market_context_fetch_enabled !== true) {
+      return "외부시장 데이터 수집이 비활성 상태입니다. 엔진 설정(EXTERNAL_MARKET_CONTEXT_FETCH_ENABLED) 확인이 필요합니다.";
+    }
+    if (dir.insufficient) {
+      return "외부 데이터가 부족해 방향 판단을 중립으로 처리하고 있습니다.";
+    }
+    const shadowSuffix =
+      ctx.external_market_context_shadow_mode !== false ||
+      ctx.external_market_context_enabled !== true ||
+      ctx.trading_impact === "none" ||
+      ctx.external_context_applied !== true
+        ? " 아직 관찰 전용이라 실제 주문에는 반영되지 않습니다."
+        : "";
+
+    switch (dir.key) {
+      case "long":
+        return `현재 외부시장 환경은 롱 포지션에 다소 우호적입니다.${shadowSuffix}`;
+      case "long_strong":
+        return `현재 외부시장 환경은 롱 포지션에 강하게 우호적입니다.${shadowSuffix}`;
+      case "short":
+        return `현재 외부시장 환경은 숏 포지션에 다소 우호적입니다.${shadowSuffix}`;
+      case "short_strong":
+        return `현재 외부시장 환경은 숏 포지션에 강하게 우호적입니다.${shadowSuffix}`;
+      case "neutral":
+        return "현재 외부시장 환경은 롱·숏 어느 한쪽에도 뚜렷하게 우호적이지 않습니다.";
+      default:
+        return "현재 외부시장 환경을 표시할 수 없습니다.";
+    }
+  }
+
+  function formatExternalFetchErrors(ctx) {
+    const err = ctx && ctx.last_fetch_errors;
+    if (!err || typeof err !== "object") return "";
+    const parts = Object.keys(err)
+      .filter((k) => typeof err[k] === "string" && err[k].trim())
+      .map((k) => `${k}: ${err[k]}`);
+    return parts.length > 0 ? parts.join(" · ") : "";
+  }
+
+  function renderExternalMarketContext(bundle) {
+    const box = $("external-market-context-card");
+    if (!box) return;
+    const ctx = pickExternalMarketContext(bundle);
+    if (!ctx) {
+      box.innerHTML =
+        '<div class="emc-card"><p class="emc-summary muted">외부시장 맥락 데이터 없음 · 엔진이 한 틱 이상 실행된 후 engineState.external_market_context 에 표시됩니다.</p></div>';
+      return;
+    }
+
+    const score = ctx.external_context_score;
+    const reliability = ctx.external_signal_reliability;
+    const weight = ctx.available_signal_weight;
+    const dir = mapExternalDirection(score, reliability, weight);
+    const dirClass =
+      dir.tone === "bull" ? "emc-direction--bull" : dir.tone === "bear" ? "emc-direction--bear" : "emc-direction--neutral";
+
+    const longMult =
+      typeof ctx.reliability_adjusted_long_preview_multiplier === "number" &&
+      Number.isFinite(ctx.reliability_adjusted_long_preview_multiplier) &&
+      reliability !== 0
+        ? ctx.reliability_adjusted_long_preview_multiplier
+        : ctx.long_preview_multiplier;
+    const shortMult =
+      typeof ctx.reliability_adjusted_short_preview_multiplier === "number" &&
+      Number.isFinite(ctx.reliability_adjusted_short_preview_multiplier) &&
+      reliability !== 0
+        ? ctx.reliability_adjusted_short_preview_multiplier
+        : ctx.short_preview_multiplier;
+
+    const updatedAt = typeof ctx.ts === "number" && Number.isFinite(ctx.ts) ? formatKst(ctx.ts) : "—";
+    const ageMs = typeof ctx.snapshot_age_ms === "number" && Number.isFinite(ctx.snapshot_age_ms) ? ctx.snapshot_age_ms : null;
+
+    box.innerHTML = `
+      <div class="emc-card">
+        <div class="emc-top">
+          <div class="emc-metric">
+            <span class="emc-metric-k">외부시장 판단</span>
+            <span class="emc-metric-v emc-direction ${dirClass}">${esc(dir.label)}</span>
+          </div>
+          <div class="emc-metric">
+            <span class="emc-metric-k">외부 점수</span>
+            <span class="emc-metric-v tabular-nums">${esc(formatExternalScore(score))}</span>
+          </div>
+          <div class="emc-metric">
+            <span class="emc-metric-k">신뢰도</span>
+            <span class="emc-metric-v tabular-nums">${esc(formatExternalReliabilityPct(reliability))}</span>
+          </div>
+          <div class="emc-metric">
+            <span class="emc-metric-k">롱 예상 배율</span>
+            <span class="emc-metric-v tabular-nums">${esc(formatExternalMultiplier(longMult))}</span>
+          </div>
+          <div class="emc-metric">
+            <span class="emc-metric-k">숏 예상 배율</span>
+            <span class="emc-metric-v tabular-nums">${esc(formatExternalMultiplier(shortMult))}</span>
+          </div>
+        </div>
+        <div class="emc-badges">${externalMarketStatusBadges(ctx)}</div>
+        <p class="emc-summary">${esc(buildExternalMarketSummary(ctx, dir))}</p>
+        <div class="emc-sources">
+          <div class="emc-source-row emc-source-row--stack">
+            <span class="emc-source-label">나스닥(NQ)</span>
+            ${formatExternalMomentumSource(ctx, "nq", ctx.nq_signal)}
+          </div>
+          <div class="emc-source-row emc-source-row--stack">
+            <span class="emc-source-label">S&amp;P500(ES)</span>
+            ${formatExternalMomentumSource(ctx, "es", ctx.es_signal)}
+          </div>
+          <div class="emc-source-row emc-source-row--stack">
+            <span class="emc-source-label">달러지수(DXY)</span>
+            ${formatExternalMomentumSource(ctx, "dxy", ctx.dxy_signal)}
+          </div>
+          <div class="emc-source-row emc-source-row--stack">
+            <span class="emc-source-label">미국 10년물 금리</span>
+            ${formatExternalMomentumSource(ctx, "us10y", ctx.us10y_signal)}
+          </div>
+          <div class="emc-source-row">
+            <span class="emc-source-label">경제 이벤트</span>
+            <span class="emc-source-val">${esc(formatEconomicEventStatus(ctx))}</span>
+          </div>
+          <div class="emc-source-row">
+            <span class="emc-source-label">크립토 뉴스</span>
+            <span class="emc-source-val">${esc(formatNewsSourceStatus(ctx))}</span>
+          </div>
+        </div>
+        <p class="emc-meta">갱신 ${esc(updatedAt)}${ageMs != null ? ` · 스냅샷 ${Math.round(ageMs / 1000)}초 전` : ""} · 가용 가중치 ${esc(typeof weight === "number" && Number.isFinite(weight) ? weight.toFixed(2) : "—")} · raw 롱 ${esc(formatExternalMultiplier(ctx.raw_long_preview_multiplier))} / raw 숏 ${esc(formatExternalMultiplier(ctx.raw_short_preview_multiplier))} · adj 롱 ${esc(formatExternalMultiplier(ctx.reliability_adjusted_long_preview_multiplier))} / adj 숏 ${esc(formatExternalMultiplier(ctx.reliability_adjusted_short_preview_multiplier))}${ctx.economic_event_fetch_error ? ` · 경제 이벤트 오류 ${esc(String(ctx.economic_event_fetch_error))}` : ""}${formatExternalFetchErrors(ctx) ? ` · fetch ${esc(formatExternalFetchErrors(ctx))}` : ""}</p>
+      </div>
+    `;
+  }
+
   function renderOperatorContext(bundle) {
     const el = $("operator-context-body");
     if (!el) return;
@@ -2207,6 +2454,7 @@
       renderHero(bundle);
       renderOkxHero(bundle);
       renderTradeControlCard();
+      renderExternalMarketContext(bundle);
       renderOperatorContext(bundle);
       renderSymbols(bundle);
       renderPerf(bundle);

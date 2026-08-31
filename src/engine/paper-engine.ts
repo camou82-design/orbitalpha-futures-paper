@@ -138,6 +138,7 @@ import {
   ExternalMarketContextService,
   evaluateExternalMarketContext,
   buildExternalMarketContextShadowProofLog,
+  buildExternalMarketContextMonitorPayload,
   mapExternalMarketContextConfigFromEngine,
   mapExternalMarketFetchConfigFromEngine
 } from "../engine-v2/external-market-context";
@@ -2021,6 +2022,7 @@ export class PaperEngine {
   private lastSignedRestFailAt: number | null = null;
   private runCycleId = 0;
   private readonly externalMarketContextService: ExternalMarketContextService;
+  private lastExternalMarketContextMonitor: Record<string, unknown> | null = null;
   private paperExecutionReady = false;
   private paperExecutionReadyChangedAt: number | null = null;
   private signedExecutionReady = false;
@@ -6312,21 +6314,35 @@ export class PaperEngine {
     pre_tick_setup_ms = Date.now() - tPre0;
 
     const externalMarketSnapshot = this.externalMarketContextService.touch(tickNow);
+    const externalMarketContextConfig = mapExternalMarketContextConfigFromEngine(this.config);
     if (this.config.externalMarketContextFetchEnabled) {
       const preview = evaluateExternalMarketContext({
         side: "none",
         now: tickNow,
-        config: mapExternalMarketContextConfigFromEngine(this.config),
+        config: externalMarketContextConfig,
         snapshot: externalMarketSnapshot
       });
-      this.logger.info(
-        "EXTERNAL_MARKET_CONTEXT_SHADOW_PROOF",
-        buildExternalMarketContextShadowProofLog(
-          this.externalMarketContextService.getState(tickNow),
-          preview,
-          tickNow
-        )
+      const serviceState = this.externalMarketContextService.getState(tickNow);
+      const shadowProof = buildExternalMarketContextShadowProofLog(serviceState, preview, tickNow);
+      this.lastExternalMarketContextMonitor = buildExternalMarketContextMonitorPayload(
+        serviceState,
+        preview,
+        {
+          enabled: externalMarketContextConfig.enabled,
+          shadowMode: externalMarketContextConfig.shadowMode,
+          fetchEnabled: this.config.externalMarketContextFetchEnabled
+        },
+        tickNow
       );
+      this.logger.info("EXTERNAL_MARKET_CONTEXT_SHADOW_PROOF", shadowProof);
+    } else {
+      this.lastExternalMarketContextMonitor = {
+        ts: tickNow,
+        external_market_context_enabled: externalMarketContextConfig.enabled,
+        external_market_context_shadow_mode: externalMarketContextConfig.shadowMode,
+        external_market_context_fetch_enabled: false,
+        trading_impact: externalMarketContextConfig.enabled && !externalMarketContextConfig.shadowMode ? "unknown" : "none"
+      };
     }
 
     // --- 1. Ledger Integrity: High-Fidelity Position Normalization Promotion ---
@@ -7982,6 +7998,7 @@ export class PaperEngine {
             this.instrumentCache
           ),
           position_ops_surface: this.lastPositionOpsSurface,
+          external_market_context: this.lastExternalMarketContextMonitor,
           ...balanceDisplay
         });
         report_write_ms = Date.now() - tRep0;

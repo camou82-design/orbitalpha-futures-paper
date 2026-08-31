@@ -540,3 +540,74 @@ export function buildExternalMarketContextShadowProofLog(
         trading_impact: "none"
     };
 }
+
+type MomentumSourceMonitorKey = "nq" | "es" | "dxy" | "us10y";
+
+function marketDirectionFromSignal(signal: number): "up" | "down" | "flat" {
+    if (signal > 0.05) return "up";
+    if (signal < -0.05) return "down";
+    return "flat";
+}
+
+function btcImpactForMomentumSource(key: MomentumSourceMonitorKey, signal: number): number {
+    return key === "dxy" || key === "us10y" ? -signal : signal;
+}
+
+function buildMomentumSourceDisplay(
+    key: MomentumSourceMonitorKey,
+    signal: number,
+    unavailable: boolean
+): Record<string, unknown> | null {
+    if (unavailable) return null;
+    return {
+        market_direction: marketDirectionFromSignal(signal),
+        market_signal: signal,
+        btc_impact: btcImpactForMomentumSource(key, signal)
+    };
+}
+
+/** Read-only monitor/dashboard payload — mirrors shadow proof + per-source signals. */
+export function buildExternalMarketContextMonitorPayload(
+    serviceState: {
+        snapshot: ExternalMarketSnapshot | null;
+        lastFetchElapsedMs: number | null;
+        lastFetchErrors: Record<string, string | undefined>;
+        fetchInFlight: boolean;
+        economicEventSourceStatus?: string | null;
+        economicEventCacheAgeMs?: number | null;
+        economicEventNextFetchAt?: number | null;
+        economicEventFetchError?: string | null;
+    },
+    preview: ExternalMarketContextResult,
+    config: Readonly<{
+        enabled: boolean;
+        shadowMode: boolean;
+        fetchEnabled: boolean;
+    }>,
+    now: number
+): Record<string, unknown> {
+    const unavailable = new Set(
+        (serviceState.snapshot?.unavailableSources ?? preview.signals.unavailableSources ?? []).map((s) =>
+            String(s).toLowerCase()
+        )
+    );
+    const isUnavailable = (key: string) => unavailable.has(key.toLowerCase());
+
+    return {
+        ...buildExternalMarketContextShadowProofLog(serviceState, preview, now),
+        nq_signal: preview.signals.nqSignal,
+        es_signal: preview.signals.esSignal,
+        dxy_signal: preview.signals.dxySignal,
+        us10y_signal: preview.signals.us10ySignal,
+        news_signal: preview.signals.newsSignal,
+        source_display: {
+            nq: buildMomentumSourceDisplay("nq", preview.signals.nqSignal, isUnavailable("nq")),
+            es: buildMomentumSourceDisplay("es", preview.signals.esSignal, isUnavailable("es")),
+            dxy: buildMomentumSourceDisplay("dxy", preview.signals.dxySignal, isUnavailable("dxy")),
+            us10y: buildMomentumSourceDisplay("us10y", preview.signals.us10ySignal, isUnavailable("us10y"))
+        },
+        external_market_context_enabled: config.enabled,
+        external_market_context_shadow_mode: config.shadowMode,
+        external_market_context_fetch_enabled: config.fetchEnabled
+    };
+}
