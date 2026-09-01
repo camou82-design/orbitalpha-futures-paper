@@ -414,7 +414,8 @@ import {
 import {
   resolveV2PreEntryTp1Authority,
   canonicalTpSourceToCommittedSource,
-  evaluatePreEntryTpParity
+  evaluatePreEntryTpParity,
+  isShockOrFtsPromotedTpEscalationContext
 } from "../engine-v2/execution/pre-entry-tp-provenance";
 import type { AdaptiveRangeProtectionDiagnostics } from "../engine-v2/execution/adaptive-range-pre-entry-protection";
 import { resolveInstrumentTickSzAuthority } from "../engine-v2/execution/instrument-tick-authority";
@@ -22104,19 +22105,35 @@ export class PaperEngine {
           const submitTakeProfitPrice =
             preEntryPlan.tpPrice != null ? preEntryPlan.tpPrice : initialTpForRecord;
 
-          // Parity Guard: profitability-approved TP === committed risk plan TP === preEntryPlan TP === submitTakeProfitPrice
+          // Dedicated Profitability Reference:
+          // In approval-expected / escalation contexts, parity MUST directly reference dedicated authority fields
+          // (authority.profitabilityRawCanonicalTp1Price / authority.profitabilityExecutableTp1Price).
+          // Generic authority.takeProfit1Px / takeProfitPlan are downstream transport values, not profitability authority references.
+          const isEscalationContext = isShockOrFtsPromotedTpEscalationContext({
+            marketSubtype: effectiveMarketSubtype ?? null
+          });
+          const approvalExpected = authority.profitabilityTpApproved === true || isEscalationContext;
+
           const profitabilityTpRaw =
-            typeof (authority.takeProfitPlan as any)?.tp1 === "number"
-              ? (authority.takeProfitPlan as any).tp1
-              : typeof authority.takeProfit1Px === "number"
-                ? authority.takeProfit1Px
-                : null;
+            typeof authority.profitabilityRawCanonicalTp1Price === "number"
+              ? authority.profitabilityRawCanonicalTp1Price
+              : approvalExpected
+                ? null
+                : typeof (authority.takeProfitPlan as any)?.tp1 === "number"
+                  ? (authority.takeProfitPlan as any).tp1
+                  : typeof authority.takeProfit1Px === "number"
+                    ? authority.takeProfit1Px
+                    : null;
           const profitabilityTpExec =
-            typeof authority.takeProfit1Px === "number"
-              ? authority.takeProfit1Px
-              : profitabilityTpRaw != null && tickSz > 0
-                ? normalizePxToTickSz(profitabilityTpRaw, tickSz)
-                : profitabilityTpRaw;
+            typeof authority.profitabilityExecutableTp1Price === "number"
+              ? authority.profitabilityExecutableTp1Price
+              : approvalExpected
+                ? null
+                : typeof authority.takeProfit1Px === "number"
+                  ? authority.takeProfit1Px
+                  : profitabilityTpRaw != null && tickSz > 0
+                    ? normalizePxToTickSz(profitabilityTpRaw, tickSz)
+                    : profitabilityTpRaw;
           const committedTpRaw = v2CommittedRiskPlan.initial_tp_price ?? null;
           const committedTpExec = preEntryPlan.tpPrice ?? null;
           const attachedTp = submitTakeProfitPrice ?? null;

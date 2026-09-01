@@ -12,6 +12,9 @@
  * F. Ordinary RANGE unaffected (approval not required -> PASS)
  * G. TREND unaffected (approval not required -> PASS)
  * H. BTC FTS long symmetric PASS
+ * I. Dedicated authority vs generic transport divergence -> BLOCK (V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE)
+ * J. FTS escalation + profitabilityTpApproved marker lost + provenance none -> BLOCK (V2_TP_PROFITABILITY_PROVENANCE_INVALID)
+ * K. Approval expected + committedTpSource="none" -> BLOCK (V2_TP_PROFITABILITY_PROVENANCE_INVALID)
  */
 
 import assert from "node:assert/strict";
@@ -194,7 +197,7 @@ console.log("=== RUNNING FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS ===");
     assert.ok(attachedTpRaw != null, "AttachAlgoOrds TP trigger must be present");
     const attachedTp = Number(attachedTpRaw);
 
-    // 6. Production Parity Helper Call
+    // 6. Production Parity Helper Call (Using dedicated authority fields)
     const parityProof = evaluatePreEntryTpParity({
         symbol,
         side,
@@ -244,8 +247,8 @@ console.log("=== RUNNING FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS ===");
         profitabilityTpApproved: true,
         profitabilityCanonicalTpSource: "adaptive_range_box_target",
         profitabilityTpSource: "adaptive_range_box_target",
-        profitabilityTpRaw: null, // Authority missing!
-        profitabilityTpExecutable: null, // Authority missing!
+        profitabilityTpRaw: null, // Dedicated authority missing!
+        profitabilityTpExecutable: null, // Dedicated authority missing!
         committedTpRaw: 2454,
         committedTpExecutable: 2454,
         committedTpSource: "authority_tp_price",
@@ -561,4 +564,108 @@ console.log("=== RUNNING FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS ===");
     });
 }
 
-console.log("=== ALL 8 FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS PASSED ===");
+// -----------------------------------------------------------------------------
+// TEST I: Dedicated Authority vs Generic Transport Divergence -> Fail-Closed BLOCK
+// (Ensures parity references dedicated profitability authority, NOT generic takeProfit1Px)
+// -----------------------------------------------------------------------------
+{
+    const parityProof = evaluatePreEntryTpParity({
+        symbol: "ETHUSDT",
+        side: "short",
+        regime: "RANGE",
+        marketSubtype: "FAST_TREND_SHIFT",
+        tickSz: 0.01,
+        profitabilityTpApproved: true,
+        profitabilityCanonicalTpSource: "adaptive_range_box_target",
+        profitabilityTpSource: "adaptive_range_box_target",
+        // Dedicated profitability authority is 2454
+        profitabilityTpRaw: 2454,
+        profitabilityTpExecutable: 2454,
+        // Downstream committed/transport erroneously rolled back to 2458.77
+        committedTpRaw: 2458.77,
+        committedTpExecutable: 2458.77,
+        committedTpSource: "adaptive_range_atr_cap",
+        attachedTp: 2458.77
+    });
+
+    assert.equal(parityProof.entry_allowed, false, "Must block when dedicated authority diverges from committed TP");
+    assert.equal(
+        parityProof.block_reason,
+        "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE",
+        "Must fail-closed with V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE"
+    );
+
+    pass("TEST_I_DEDICATED_AUTHORITY_VS_GENERIC_TRANSPORT_DIVERGENCE_BLOCKS", {
+        profitability_tp_executable: parityProof.profitability_tp_executable,
+        committed_tp_executable: parityProof.committed_tp_executable,
+        block_reason: parityProof.block_reason
+    });
+}
+
+// -----------------------------------------------------------------------------
+// TEST J: FTS Escalation + profitabilityTpApproved Marker Lost + Provenance None -> Fail-Closed BLOCK
+// -----------------------------------------------------------------------------
+{
+    const parityProof = evaluatePreEntryTpParity({
+        symbol: "ETHUSDT",
+        side: "short",
+        regime: "RANGE",
+        marketSubtype: "FAST_TREND_SHIFT",
+        tickSz: 0.01,
+        profitabilityTpApproved: false, // Marker lost during propagation!
+        profitabilityCanonicalTpSource: "none", // Provenance lost!
+        profitabilityTpSource: "none",
+        profitabilityTpRaw: 2454,
+        profitabilityTpExecutable: 2454,
+        committedTpRaw: 2454,
+        committedTpExecutable: 2454,
+        committedTpSource: "authority_tp_price",
+        attachedTp: 2454
+    });
+
+    assert.equal(parityProof.entry_allowed, false, "Must block in escalation context when provenance is none");
+    assert.equal(
+        parityProof.block_reason,
+        "V2_TP_PROFITABILITY_PROVENANCE_INVALID",
+        "Must fail-closed with V2_TP_PROFITABILITY_PROVENANCE_INVALID"
+    );
+
+    pass("TEST_J_FTS_ESCALATION_MARKER_LOST_PROVENANCE_NONE_BLOCKS", {
+        block_reason: parityProof.block_reason
+    });
+}
+
+// -----------------------------------------------------------------------------
+// TEST K: Approval Expected + committedTpSource="none" -> Fail-Closed BLOCK
+// -----------------------------------------------------------------------------
+{
+    const parityProof = evaluatePreEntryTpParity({
+        symbol: "ETHUSDT",
+        side: "short",
+        regime: "RANGE",
+        marketSubtype: "FAST_TREND_SHIFT",
+        tickSz: 0.01,
+        profitabilityTpApproved: true,
+        profitabilityCanonicalTpSource: "adaptive_range_box_target",
+        profitabilityTpSource: "adaptive_range_box_target",
+        profitabilityTpRaw: 2454,
+        profitabilityTpExecutable: 2454,
+        committedTpRaw: 2454,
+        committedTpExecutable: 2454,
+        committedTpSource: "none", // Committed TP source is none/unknown!
+        attachedTp: 2454
+    });
+
+    assert.equal(parityProof.entry_allowed, false, "Must block when committedTpSource is none");
+    assert.equal(
+        parityProof.block_reason,
+        "V2_TP_PROFITABILITY_PROVENANCE_INVALID",
+        "Must fail-closed with V2_TP_PROFITABILITY_PROVENANCE_INVALID"
+    );
+
+    pass("TEST_K_APPROVAL_EXPECTED_COMMITTED_SOURCE_NONE_BLOCKS", {
+        block_reason: parityProof.block_reason
+    });
+}
+
+console.log("=== ALL 11 FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS PASSED ===");

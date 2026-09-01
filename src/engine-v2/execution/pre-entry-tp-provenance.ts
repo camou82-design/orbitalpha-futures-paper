@@ -737,8 +737,8 @@ export function evaluatePreEntryTpParity(
         }
     }
 
-    // 2. Provenance validity check in approved context
-    if (entryAllowed && input.profitabilityTpApproved === true) {
+    // 2. Provenance validity check in approval expected context
+    if (entryAllowed && approvalExpected) {
         if (
             profCanonSource === "none" ||
             profCanonSource === "" ||
@@ -768,7 +768,7 @@ export function evaluatePreEntryTpParity(
         }
     }
 
-    // 4. Source match (audit / verification)
+    // 4. Source match (audit / verification & fail-closed enforcement)
     const validTransportSources = new Set([
         "authority_tp_price",
         "decision.takeProfit",
@@ -784,7 +784,12 @@ export function evaluatePreEntryTpParity(
 
     const sourceMatch =
         !approvalExpected ||
-        (committedTpSource !== "none" && validTransportSources.has(committedTpSource));
+        (committedTpSource !== "none" && committedTpSource !== "" && validTransportSources.has(committedTpSource));
+
+    if (entryAllowed && approvalExpected && !sourceMatch) {
+        entryAllowed = false;
+        blockReason = "V2_TP_PROFITABILITY_PROVENANCE_INVALID";
+    }
 
     return {
         event: "V2_TP_PROFITABILITY_COMMIT_PARITY_PROOF",
