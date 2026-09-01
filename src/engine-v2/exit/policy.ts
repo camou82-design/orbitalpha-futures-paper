@@ -118,6 +118,53 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         (side === "long" && dss === "DOWN") ||
         (side === "short" && dss === "UP");
 
+    // ── RANGE THESIS CONTEXT FOR PNL GATE ────────────────────────────────────
+    // Derived purely from existing judgment/state — no new external inputs.
+    // Symbol-agnostic: ETH and BTC resolve the same way.
+
+    // thesisValid: RANGE regime active, no structural invalidation, no shock against.
+    // Requires an actual held position with a valid structural basis.
+    const rangeThesisValidForGate =
+        hasPosition &&
+        (side === "long" || side === "short") &&
+        args.judgment.regime_final === "RANGE" &&
+        !(pos?.structureBreached === true) &&
+        !args.invalidationBreachConfirmed &&
+        !shockAgainst &&
+        !hasAdverseDirectionalAuthority;
+
+    // htfAligned: derive from htf_entry_policy in judgment.
+    // ALLOW_ALL → aligned. BLOCK → misaligned. LONG_ONLY / SHORT_ONLY → check side.
+    // null/undefined → unknown (gate treats null as "not explicitly blocked").
+    function resolveHtfAlignedForGate(
+        htfPolicy: string | null | undefined,
+        posSide: "long" | "short" | "none"
+    ): boolean | null {
+        if (posSide === "none" || htfPolicy == null) return null;
+        const p = String(htfPolicy).toUpperCase();
+        if (p === "ALLOW_ALL") return true;
+        if (p === "BLOCK") return false;
+        if (p === "LONG_ONLY" || p === "LONG_ONLY_OR_NONE") return posSide === "long";
+        if (p === "SHORT_ONLY" || p === "SHORT_ONLY_OR_NONE") return posSide === "short";
+        return null; // unknown → gate does not restrict
+    }
+    const htfAlignedForGate = resolveHtfAlignedForGate(
+        (args.judgment as any).htf_entry_policy ?? null,
+        side
+    );
+
+    // confirmedOppositeFts: FTS subtype is active AND there is confirmed adverse directional authority.
+    const confirmedOppositeFtsForGate =
+        args.judgment.subtype === "FAST_TREND_SHIFT" && hasAdverseDirectionalAuthority;
+
+    // addOnZoneActive: forwarded from v2State if available (set by entry authority lifecycle).
+    // Null / undefined → gate treats as inactive (no add-on protection).
+    const addOnZoneActiveForGate =
+        typeof (args.v2State as any).addOnAuthorityActive === "boolean"
+            ? (args.v2State as any).addOnAuthorityActive === true
+            : null;
+    // ─────────────────────────────────────────────────────────────────────────
+
     let thresholdActionCandidate: "FULL_EXIT" | "REDUCE" | "NONE" = "NONE";
     const PNL_EPS = 1e-6;
     if (pnlStopProtectPct <= -0.02 + PNL_EPS) {
@@ -161,7 +208,12 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         invalidationBreachConfirmed: false,
         shockAgainst: false,
         hasAdverseDirectionalAuthority: false,
-        thresholdActionCandidate
+        thresholdActionCandidate,
+        // Thesis context for symbol-agnostic structural hold protection
+        thesisValid: rangeThesisValidForGate,
+        htfAligned: htfAlignedForGate,
+        confirmedOppositeFts: confirmedOppositeFtsForGate,
+        addOnZoneActive: addOnZoneActiveForGate
     });
 
     const adverseMoveMeasured = entryPrice > 0 && markPrice > 0;

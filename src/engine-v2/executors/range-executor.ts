@@ -1231,28 +1231,31 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
 
     // --- EXIT PLAN GENERATION (Mandatory for RANGE) ---
     const entryPx = Number(sn.lastPrice ?? 0);
-    const minProfitDistance = Math.max(atr * 0.35, entryPx * 0.001);
-    const minStopDistance = Math.max(atr * 0.5, entryPx * 0.0015);
-
     const feeRate = Number(input.config?.paperTakerFeeRate ?? 0.0005);
     const feeBreakEvenPct = computeSoftExitFeeBreakEvenPct({
         positionNotionalUsd: 1000,
         feeRate,
         slippageBufferPct: DEFAULT_SOFT_EXIT_SLIPPAGE_BUFFER_PCT
     });
+    const feeEconomicMinDist = entryPx > 0 ? entryPx * (feeBreakEvenPct + 0.0002) : 0;
+    const maxTp1Dist = entryPx > 0 ? entryPx * 0.0025 : 0;
+    const minProfitDistance = Math.max(atr * 0.35, entryPx * 0.001, feeEconomicMinDist);
+    const minStopDistance = Math.max(atr * 0.5, entryPx * 0.0015);
     let tp1 = 0;
     let tp2 = 0;
     let inv = 0;
 
     if (side === "long") {
         inv = Math.min(boxLow - minStopDistance, entryPx - minStopDistance);
-        const rawTp1Dist = Math.max(boxMid - entryPx, minProfitDistance);
+        let rawTp1Dist = Math.max(boxMid - entryPx, minProfitDistance);
+        if (maxTp1Dist > 0 && rawTp1Dist > maxTp1Dist) rawTp1Dist = maxTp1Dist;
         tp1 = entryPx + rawTp1Dist;
         tp2 = Math.max(boxHigh, tp1 + minProfitDistance);
         if (tp2 <= tp1) tp2 = tp1 + minProfitDistance;
     } else if (side === "short") {
         inv = Math.max(boxHigh + minStopDistance, entryPx + minStopDistance);
-        const rawTp1Dist = Math.max(entryPx - boxMid, minProfitDistance);
+        let rawTp1Dist = Math.max(entryPx - boxMid, minProfitDistance);
+        if (maxTp1Dist > 0 && rawTp1Dist > maxTp1Dist) rawTp1Dist = maxTp1Dist;
         tp1 = entryPx - rawTp1Dist;
         tp2 = Math.min(boxLow, tp1 - minProfitDistance);
         if (tp2 >= tp1) tp2 = tp1 - minProfitDistance;
@@ -1270,6 +1273,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         invalidTpReason = "zero_or_negative_levels";
     } else if (boxHeightPct < 0.0008) {
         invalidTpReason = "narrow_box";
+    } else if (maxTp1Dist > 0 && feeEconomicMinDist > maxTp1Dist) {
+        invalidTpReason = "fee_slippage_cost_exceeds_max_tp1";
     } else if (!validationOk) {
         invalidTpReason = side === "long" ? "long_validation_failed" : "short_validation_failed";
     } else {
