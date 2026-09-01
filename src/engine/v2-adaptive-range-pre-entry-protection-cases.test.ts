@@ -61,7 +61,7 @@ function makeRangeAuthority(input: {
     invalidationPx: input.invalidationPx,
     stopPrice: input.invalidationPx,
     takeProfit1Px: input.takeProfit1Px,
-    marketSubtype: input.marketSubtype ?? "FAST_TREND_SHIFT",
+    marketSubtype: input.marketSubtype ?? "RANGE_UPPER_REACTION",
     rangeBoxHighAtEntry: ETH_PRODUCTION.boxHigh,
     rangeBoxLowAtEntry: ETH_PRODUCTION.boxLow,
     rangeBoxMidAtEntry: ETH_PRODUCTION.boxMid
@@ -74,7 +74,7 @@ function adaptiveContext(overrides: Partial<V2PreEntryRiskPlanAdaptiveContext> =
     boxHigh: ETH_PRODUCTION.boxHigh,
     boxLow: ETH_PRODUCTION.boxLow,
     boxMid: ETH_PRODUCTION.boxMid,
-    marketSubtype: "FAST_TREND_SHIFT",
+    marketSubtype: "RANGE_UPPER_REACTION",
     routingEngine: "RANGE",
     feeRate: 0.0005,
     ...overrides

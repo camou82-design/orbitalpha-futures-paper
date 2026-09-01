@@ -413,7 +413,8 @@ import {
 } from "../engine-v2/execution/pre-entry-protection-plan";
 import {
   resolveV2PreEntryTp1Authority,
-  canonicalTpSourceToCommittedSource
+  canonicalTpSourceToCommittedSource,
+  evaluatePreEntryTpParity
 } from "../engine-v2/execution/pre-entry-tp-provenance";
 import type { AdaptiveRangeProtectionDiagnostics } from "../engine-v2/execution/adaptive-range-pre-entry-protection";
 import { resolveInstrumentTickSzAuthority } from "../engine-v2/execution/instrument-tick-authority";
@@ -1650,7 +1651,8 @@ export function buildV2PreEntryRiskPlanCommitted(
     confirmedBreakout: adaptiveContext?.confirmedBreakout === true,
     strongContinuation: adaptiveContext?.strongContinuation === true,
     adaptiveContextPresent: adaptiveContext != null,
-    symbol
+    symbol,
+    profitabilityTpApproved: authority.profitabilityTpApproved === true
   });
 
   if (!tpAuthority.ok) {
@@ -22119,44 +22121,35 @@ export class PaperEngine {
           const committedTpExec = preEntryPlan.tpPrice ?? null;
           const attachedTp = submitTakeProfitPrice ?? null;
 
-          const priceMatch =
-            profitabilityTpExec == null ||
-            (committedTpExec === profitabilityTpExec && (attachedTp == null || attachedTp === profitabilityTpExec));
-          const sourceMatch =
-            !authority.takeProfit1Px ||
-            String(v2CommittedRiskPlan.take_profit_source) === "authority_tp_price" ||
-            String(v2CommittedRiskPlan.take_profit_source) === "adaptive_range_box_target" ||
-            String(v2CommittedRiskPlan.take_profit_source) === "adaptive_range_atr_cap" ||
-            String(v2CommittedRiskPlan.take_profit_source) === "engine_calculated";
-
-          const parityAllowed = priceMatch;
-          const parityBlockReason = !priceMatch ? "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE" : null;
-
-          this.logger.info("V2_TP_PROFITABILITY_COMMIT_PARITY_PROOF", {
+          const parityProof = evaluatePreEntryTpParity({
             symbol: sym,
             side: authority.side,
+            regime: String(authority.regime ?? "RANGE"),
             marketSubtype: effectiveMarketSubtype ?? null,
-            profitability_tp_raw: profitabilityTpRaw,
-            profitability_tp_executable: profitabilityTpExec,
-            profitability_tp_source: v2CommittedRiskPlan.take_profit_source ?? "none",
-            committed_tp_raw: committedTpRaw,
-            committed_tp_executable: committedTpExec,
-            attached_tp: attachedTp,
-            price_match: priceMatch,
-            source_match: sourceMatch,
-            entry_allowed: parityAllowed,
-            block_reason: parityBlockReason
+            tickSz,
+            profitabilityTpApproved: authority.profitabilityTpApproved ?? null,
+            profitabilityCanonicalTpSource: authority.profitabilityCanonicalTpSource ?? null,
+            profitabilityTpSource: authority.profitabilityTpSource ?? null,
+            profitabilityTpRaw,
+            profitabilityTpExecutable: profitabilityTpExec,
+            committedTpRaw,
+            committedTpExecutable: committedTpExec,
+            committedTpSource: v2CommittedRiskPlan.take_profit_source ?? "none",
+            attachedTp
           });
 
-          if (!parityAllowed) {
-            this.logger.error("V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE", {
+          this.logger.info("V2_TP_PROFITABILITY_COMMIT_PARITY_PROOF", parityProof);
+
+          if (!parityProof.entry_allowed) {
+            const blockEvent = parityProof.block_reason ?? "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
+            this.logger.error(blockEvent, {
               symbol: sym,
               side: authority.side,
               marketSubtype: effectiveMarketSubtype ?? null,
               profitability_tp_executable: profitabilityTpExec,
               committed_tp_executable: committedTpExec,
               attached_tp: attachedTp,
-              block_reason: parityBlockReason
+              block_reason: blockEvent
             });
             continue;
           }

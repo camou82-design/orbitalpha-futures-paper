@@ -1346,6 +1346,11 @@ export type EntryExecutionAuthority = Readonly<{
     partialExitRatio?: number;
     invalidationPx: number | null;
     stopPrice: number | null;
+    profitabilityTpApproved?: boolean;
+    profitabilityCanonicalTpSource?: string | null;
+    profitabilityTpSource?: string | null;
+    profitabilityExecutableTp1Price?: number | null;
+    profitabilityRawCanonicalTp1Price?: number | null;
 }>;
 
 /** Internal Pipeline Result */

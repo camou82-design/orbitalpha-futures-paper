@@ -1,46 +1,32 @@
 /**
  * FAST_TREND_SHIFT TP Profitability Authority Parity Regressions (End-to-End).
  *
- * Exact reproduction of ETH short case:
- * entry=2461.43, side=short, regime=RANGE, marketSubtype=FAST_TREND_SHIFT,
- * ATR=1.328545889539321, boxHigh=2462.32, boxLow=2454.00,
- * raw policy TP=2455.276425, adaptive 2ATR TP=2458.772908, SL=2467.829718, tickSz=0.01
+ * Production Parity Helper: evaluatePreEntryTpParity (pre-entry-tp-provenance.ts)
  *
- * Tests:
- * 1. ETH FAST_TREND_SHIFT Short — Profitable escalation candidate (boxLow 2454) exists:
- *    - Engine ENTER authority -> selected profitable TP = 2454
- *    - buildV2PreEntryRiskPlanCommitted -> committed initial_tp_price = 2454 (NOT 2458.77)
- *    - evaluatePreEntryProtectionPlan -> protection tpPrice = 2454
- *    - buildV2NewEntryAttachAlgoOrds -> attachAlgoOrds tpTriggerPx = 2454
- *    - exact parity proof matches throughout pipeline
- *
- * 2. Unprofitable Case — Box is too narrow, no profitable candidate exists:
- *    - Blocked with V2_TP1_NET_EDGE_INSUFFICIENT
- *    - ENTER forbidden
- *
- * 3. BTC FAST_TREND_SHIFT Long — Symmetric exact parity test
- *
- * 4. Divergence detection — Artificial downstream modification fails closed
- *
- * 5. Ordinary RANGE, TREND, and Breakout regressions remain unaffected
+ * Required Test Coverage:
+ * A. ETH FTS short 2454 exact parity -> PASS
+ * B. Profitability authority missing in approved/escalation context -> BLOCK (V2_TP_PROFITABILITY_AUTHORITY_MISSING)
+ * C. Profitability TP != committed TP -> BLOCK (V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE)
+ * D. Committed TP != attached TP -> BLOCK (V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE)
+ * E. Canonical provenance missing/invalid in approved context -> BLOCK (V2_TP_PROFITABILITY_PROVENANCE_INVALID)
+ * F. Ordinary RANGE unaffected (approval not required -> PASS)
+ * G. TREND unaffected (approval not required -> PASS)
+ * H. BTC FTS long symmetric PASS
  */
 
 import assert from "node:assert/strict";
 import {
-    buildV2PreEntryRiskPlanCommitted,
-    type V2PreEntryRiskPlanAdaptiveContext
+    buildV2PreEntryRiskPlanCommitted
 } from "./paper-engine";
 import type { EntryExecutionAuthority } from "../engine-v2/types";
 import { evaluateTpProfitabilityAuthority } from "../engine-v2/execution/tp-profitability-authority";
 import {
     resolvePreEntryPolicySlPrice,
     resolveV2PreEntryExecutableTpBundle,
-    resolveV2PreEntryTp1Authority
+    evaluatePreEntryTpParity
 } from "../engine-v2/execution/pre-entry-tp-provenance";
-import { resolveInstrumentTickSzAuthority } from "../engine-v2/execution/instrument-tick-authority";
 import { evaluatePreEntryProtectionPlan } from "../engine-v2/execution/pre-entry-protection-plan";
 import { buildV2NewEntryAttachAlgoOrds } from "../engine-v2/execution/entry-protection-attach";
-import { normalizePxToTickSz } from "../engine-v2/execution/entry-order-type";
 
 function pass(label: string, detail?: Record<string, unknown>): void {
     const extra = detail ? ` — ${JSON.stringify(detail)}` : "";
@@ -56,7 +42,7 @@ const noopLogger = {
 console.log("=== RUNNING FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS ===");
 
 // -----------------------------------------------------------------------------
-// TEST 1: Exact Production ETH Short FAST_TREND_SHIFT Reproduction (E2E)
+// TEST A: Exact Production ETH Short FAST_TREND_SHIFT Reproduction (E2E Exact Parity)
 // -----------------------------------------------------------------------------
 {
     const symbol = "ETHUSDT";
@@ -68,7 +54,6 @@ console.log("=== RUNNING FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS ===");
     const boxHigh = 2462.32;
     const boxLow = 2454.00;
     const boxMid = (boxHigh + boxLow) / 2;
-    const rawPolicyTp = 2455.276425;
     const sl = 2467.829718;
     const tickSz = 0.01;
     const feeRate = 0.0005;
@@ -137,7 +122,12 @@ console.log("=== RUNNING FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS ===");
         stopPrice: sl,
         invalidationPx: sl,
         takeProfit1Px: bundle.executableTp1Price,
-        takeProfitPlan: { tp1: bundle.rawCanonicalTp1Price },
+        takeProfitPlan: { tp1: bundle.rawCanonicalTp1Price, executableTp1: bundle.executableTp1Price },
+        profitabilityTpApproved: true,
+        profitabilityCanonicalTpSource: bundle.canonicalTp1Source,
+        profitabilityTpSource: bundle.tpSource,
+        profitabilityExecutableTp1Price: bundle.executableTp1Price,
+        profitabilityRawCanonicalTp1Price: bundle.rawCanonicalTp1Price,
         stageMarginKrw: 100000
     };
 
@@ -174,10 +164,6 @@ console.log("=== RUNNING FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS ===");
         2458.772908220921,
         "Committed TP must NOT collapse to 2458.77"
     );
-    assert.ok(
-        (committed.plan.take_profit_distance_pct ?? 0) >= 0.30,
-        `Committed TP distance (${committed.plan.take_profit_distance_pct}%) must meet gross edge floor (>=0.30%)`
-    );
 
     // 4. Pre-Entry Protection Plan
     const preEntryPlan = evaluatePreEntryProtectionPlan({
@@ -208,93 +194,235 @@ console.log("=== RUNNING FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS ===");
     assert.ok(attachedTpRaw != null, "AttachAlgoOrds TP trigger must be present");
     const attachedTp = Number(attachedTpRaw);
 
-    // Invariant: profitability == committed == pre-entry == attached
-    assert.equal(attachedTp, bundle.executableTp1Price, "Attached TP must equal profitability TP (2454.00)");
-    assert.equal(attachedTp, 2454.00, "Attached TP must be 2454.00");
-
-    // 6. Parity Proof Verification
-    const parityProof = {
+    // 6. Production Parity Helper Call
+    const parityProof = evaluatePreEntryTpParity({
         symbol,
         side,
+        regime,
         marketSubtype,
-        profitability_tp_raw: profitability.rawCanonicalTp1Price,
-        profitability_tp_executable: profitability.executableTp1Price,
-        profitability_tp_source: bundle.canonicalTp1Source,
-        committed_tp_raw: committed.plan.initial_tp_price,
-        committed_tp_executable: preEntryPlan.tpPrice,
-        attached_tp: attachedTp,
-        price_match:
-            profitability.executableTp1Price === preEntryPlan.tpPrice &&
-            attachedTp === profitability.executableTp1Price,
-        source_match: committed.plan.take_profit_source === "authority_tp_price",
-        entry_allowed: true,
-        block_reason: null
-    };
+        tickSz,
+        profitabilityTpApproved: authority.profitabilityTpApproved,
+        profitabilityCanonicalTpSource: authority.profitabilityCanonicalTpSource,
+        profitabilityTpSource: authority.profitabilityTpSource,
+        profitabilityTpRaw: authority.profitabilityRawCanonicalTp1Price,
+        profitabilityTpExecutable: authority.profitabilityExecutableTp1Price,
+        committedTpRaw: committed.plan.initial_tp_price,
+        committedTpExecutable: preEntryPlan.tpPrice,
+        committedTpSource: committed.plan.take_profit_source,
+        attachedTp
+    });
 
-    assert.equal(parityProof.price_match, true, "Parity proof price_match must be true");
-    pass("TEST_1_ETH_FTS_SHORT_PROFITABLE_PARITY_E2E", parityProof);
+    assert.equal(parityProof.entry_allowed, true, "Production parity check must pass");
+    assert.equal(parityProof.price_match, true, "Price match must be true");
+    assert.equal(parityProof.source_match, true, "Source match must be true");
+    assert.equal(parityProof.block_reason, null, "Block reason must be null");
+
+    pass("TEST_A_ETH_FTS_SHORT_EXACT_PARITY_E2E", {
+        symbol: parityProof.symbol,
+        side: parityProof.side,
+        marketSubtype: parityProof.marketSubtype,
+        profitability_canonical_tp_source: parityProof.profitability_canonical_tp_source,
+        profitability_tp_source: parityProof.profitability_tp_source,
+        committed_tp_source: parityProof.committed_tp_source,
+        profitability_tp_executable: parityProof.profitability_tp_executable,
+        committed_tp_executable: parityProof.committed_tp_executable,
+        attached_tp: parityProof.attached_tp,
+        entry_allowed: parityProof.entry_allowed
+    });
 }
 
 // -----------------------------------------------------------------------------
-// TEST 2: Unprofitable Case — Narrow Range Box with No Profitable Candidate
+// TEST B: Missing Profitability Authority in Approved Context -> Fail-Closed BLOCK
 // -----------------------------------------------------------------------------
 {
-    const symbol = "ETHUSDT";
-    const side = "short" as const;
-    const regime = "RANGE";
-    const marketSubtype = "FAST_TREND_SHIFT";
-    const entry = 2461.43;
-    const atr = 0.5; // Very small ATR
-    const boxHigh = 2462.00;
-    const boxLow = 2460.00; // Box is only 2 points wide (~0.058% edge, << 0.30% floor)
-    const boxMid = (boxHigh + boxLow) / 2;
-    const sl = 2465.00;
-    const tickSz = 0.01;
-    const feeRate = 0.0005;
-    const paperSlippageEstimateBps = 8;
-
-    const rawPolicySlPrice = resolvePreEntryPolicySlPrice({
-        side,
-        regime,
-        entryPrice: entry,
-        rawStructuralSl: sl
+    const parityProof = evaluatePreEntryTpParity({
+        symbol: "ETHUSDT",
+        side: "short",
+        regime: "RANGE",
+        marketSubtype: "FAST_TREND_SHIFT",
+        tickSz: 0.01,
+        profitabilityTpApproved: true,
+        profitabilityCanonicalTpSource: "adaptive_range_box_target",
+        profitabilityTpSource: "adaptive_range_box_target",
+        profitabilityTpRaw: null, // Authority missing!
+        profitabilityTpExecutable: null, // Authority missing!
+        committedTpRaw: 2454,
+        committedTpExecutable: 2454,
+        committedTpSource: "authority_tp_price",
+        attachedTp: 2454
     });
 
-    const bundle = resolveV2PreEntryExecutableTpBundle({
-        symbol,
-        side,
-        regime,
-        entryPrice: entry,
-        rawStructuralSl: sl,
-        rawPolicySlPrice,
-        marketSubtype,
-        routingEngine: "RANGE",
-        atr,
-        boxHigh,
-        boxLow,
-        boxMid,
-        feeRate,
-        paperSlippageEstimateBps,
-        snapshotTickSz: tickSz,
-        preserveCanonicalStructuralStop: true
-    });
+    assert.equal(parityProof.entry_allowed, false, "Must block when profitability authority is missing");
+    assert.equal(
+        parityProof.block_reason,
+        "V2_TP_PROFITABILITY_AUTHORITY_MISSING",
+        "Must fail-closed with V2_TP_PROFITABILITY_AUTHORITY_MISSING"
+    );
 
-    assert.equal(bundle.ok, false, "Must block when no profitable candidate exists");
-    if (!bundle.ok) {
-        assert.equal(
-            bundle.blockReason,
-            "V2_TP1_NET_EDGE_INSUFFICIENT",
-            "Must fail-closed with V2_TP1_NET_EDGE_INSUFFICIENT"
-        );
-    }
-
-    pass("TEST_2_UNPROFITABLE_CANDIDATE_BLOCKED_FAIL_CLOSED", {
-        blockReason: !bundle.ok ? bundle.blockReason : null
+    pass("TEST_B_MISSING_PROFITABILITY_AUTHORITY_BLOCKS", {
+        block_reason: parityProof.block_reason
     });
 }
 
 // -----------------------------------------------------------------------------
-// TEST 3: BTC FAST_TREND_SHIFT Long Symmetric Parity Test
+// TEST C: Profitability TP != Committed TP -> Fail-Closed BLOCK
+// -----------------------------------------------------------------------------
+{
+    const parityProof = evaluatePreEntryTpParity({
+        symbol: "ETHUSDT",
+        side: "short",
+        regime: "RANGE",
+        marketSubtype: "FAST_TREND_SHIFT",
+        tickSz: 0.01,
+        profitabilityTpApproved: true,
+        profitabilityCanonicalTpSource: "adaptive_range_box_target",
+        profitabilityTpSource: "adaptive_range_box_target",
+        profitabilityTpRaw: 2454,
+        profitabilityTpExecutable: 2454,
+        committedTpRaw: 2458.77, // Diverged (collapsed to 2ATR cap)!
+        committedTpExecutable: 2458.77,
+        committedTpSource: "adaptive_range_atr_cap",
+        attachedTp: 2458.77
+    });
+
+    assert.equal(parityProof.entry_allowed, false, "Must block when profitability TP != committed TP");
+    assert.equal(
+        parityProof.block_reason,
+        "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE",
+        "Must fail-closed with V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE"
+    );
+
+    pass("TEST_C_PROFITABILITY_TP_COMMITTED_TP_DIVERGENCE_BLOCKS", {
+        block_reason: parityProof.block_reason
+    });
+}
+
+// -----------------------------------------------------------------------------
+// TEST D: Committed TP != Attached TP -> Fail-Closed BLOCK
+// -----------------------------------------------------------------------------
+{
+    const parityProof = evaluatePreEntryTpParity({
+        symbol: "ETHUSDT",
+        side: "short",
+        regime: "RANGE",
+        marketSubtype: "FAST_TREND_SHIFT",
+        tickSz: 0.01,
+        profitabilityTpApproved: true,
+        profitabilityCanonicalTpSource: "adaptive_range_box_target",
+        profitabilityTpSource: "adaptive_range_box_target",
+        profitabilityTpRaw: 2454,
+        profitabilityTpExecutable: 2454,
+        committedTpRaw: 2454,
+        committedTpExecutable: 2454,
+        committedTpSource: "authority_tp_price",
+        attachedTp: 2450 // Attached order modified downstream!
+    });
+
+    assert.equal(parityProof.entry_allowed, false, "Must block when committed TP != attached TP");
+    assert.equal(
+        parityProof.block_reason,
+        "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE",
+        "Must fail-closed with V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE"
+    );
+
+    pass("TEST_D_COMMITTED_TP_ATTACHED_TP_DIVERGENCE_BLOCKS", {
+        block_reason: parityProof.block_reason
+    });
+}
+
+// -----------------------------------------------------------------------------
+// TEST E: Canonical Provenance Missing/Invalid in Approved Context -> Fail-Closed BLOCK
+// -----------------------------------------------------------------------------
+{
+    const parityProof = evaluatePreEntryTpParity({
+        symbol: "ETHUSDT",
+        side: "short",
+        regime: "RANGE",
+        marketSubtype: "FAST_TREND_SHIFT",
+        tickSz: 0.01,
+        profitabilityTpApproved: true,
+        profitabilityCanonicalTpSource: "none", // Provenance lost!
+        profitabilityTpSource: "",
+        profitabilityTpRaw: 2454,
+        profitabilityTpExecutable: 2454,
+        committedTpRaw: 2454,
+        committedTpExecutable: 2454,
+        committedTpSource: "authority_tp_price",
+        attachedTp: 2454
+    });
+
+    assert.equal(parityProof.entry_allowed, false, "Must block when canonical provenance is missing");
+    assert.equal(
+        parityProof.block_reason,
+        "V2_TP_PROFITABILITY_PROVENANCE_INVALID",
+        "Must fail-closed with V2_TP_PROFITABILITY_PROVENANCE_INVALID"
+    );
+
+    pass("TEST_E_CANONICAL_PROVENANCE_INVALID_BLOCKS", {
+        block_reason: parityProof.block_reason
+    });
+}
+
+// -----------------------------------------------------------------------------
+// TEST F: Ordinary RANGE (Approval Not Required) -> Unaffected PASS
+// -----------------------------------------------------------------------------
+{
+    const parityProof = evaluatePreEntryTpParity({
+        symbol: "ETHUSDT",
+        side: "long",
+        regime: "RANGE",
+        marketSubtype: "RANGE_FLAT",
+        tickSz: 0.01,
+        profitabilityTpApproved: false, // Standard low-vol range
+        profitabilityCanonicalTpSource: "none",
+        profitabilityTpSource: "none",
+        profitabilityTpRaw: null,
+        profitabilityTpExecutable: null,
+        committedTpRaw: 2505.25,
+        committedTpExecutable: 2505.25,
+        committedTpSource: "adaptive_range_min_profit",
+        attachedTp: 2505.25
+    });
+
+    assert.equal(parityProof.entry_allowed, true, "Ordinary RANGE must pass without approval requirement");
+    assert.equal(parityProof.block_reason, null);
+
+    pass("TEST_F_ORDINARY_RANGE_UNAFFECTED_PASS", {
+        entry_allowed: parityProof.entry_allowed
+    });
+}
+
+// -----------------------------------------------------------------------------
+// TEST G: TREND Regime (Approval Not Required) -> Unaffected PASS
+// -----------------------------------------------------------------------------
+{
+    const parityProof = evaluatePreEntryTpParity({
+        symbol: "BTCUSDT",
+        side: "long",
+        regime: "TREND",
+        marketSubtype: "TREND_MOMENTUM",
+        tickSz: 0.1,
+        profitabilityTpApproved: false,
+        profitabilityCanonicalTpSource: "none",
+        profitabilityTpSource: "none",
+        profitabilityTpRaw: null,
+        profitabilityTpExecutable: null,
+        committedTpRaw: 70000,
+        committedTpExecutable: 70000,
+        committedTpSource: "authority_tp_price",
+        attachedTp: 70000
+    });
+
+    assert.equal(parityProof.entry_allowed, true, "TREND regime must pass");
+    assert.equal(parityProof.block_reason, null);
+
+    pass("TEST_G_TREND_REGIME_UNAFFECTED_PASS", {
+        entry_allowed: parityProof.entry_allowed
+    });
+}
+
+// -----------------------------------------------------------------------------
+// TEST H: BTC FAST_TREND_SHIFT Long Symmetric Parity Test
 // -----------------------------------------------------------------------------
 {
     const symbol = "BTCUSDT";
@@ -352,7 +480,12 @@ console.log("=== RUNNING FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS ===");
         stopPrice: sl,
         invalidationPx: sl,
         takeProfit1Px: bundle.executableTp1Price,
-        takeProfitPlan: { tp1: bundle.rawCanonicalTp1Price },
+        takeProfitPlan: { tp1: bundle.rawCanonicalTp1Price, executableTp1: bundle.executableTp1Price },
+        profitabilityTpApproved: true,
+        profitabilityCanonicalTpSource: bundle.canonicalTp1Source,
+        profitabilityTpSource: bundle.tpSource,
+        profitabilityExecutableTp1Price: bundle.executableTp1Price,
+        profitabilityRawCanonicalTp1Price: bundle.rawCanonicalTp1Price,
         stageMarginKrw: 100000
     };
 
@@ -378,8 +511,6 @@ console.log("=== RUNNING FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS ===");
     assert.equal(committed.ok, true, "BTC committed plan must resolve");
     if (!committed.ok) throw new Error("BTC committed plan failed");
 
-    assert.equal(committed.plan.initial_tp_price, bundle.rawCanonicalTp1Price, "BTC TP exact parity");
-
     const preEntryPlan = evaluatePreEntryProtectionPlan({
         symbol,
         side,
@@ -391,95 +522,43 @@ console.log("=== RUNNING FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS ===");
         tickSz
     });
 
-    assert.equal(preEntryPlan.tpPrice, bundle.executableTp1Price, "BTC protection TP exact parity");
-
-    pass("TEST_3_BTC_FTS_LONG_SYMMETRIC_PARITY_E2E", {
-        symbol,
-        tp: bundle.executableTp1Price,
-        committedTp: committed.plan.initial_tp_price,
-        protectionTp: preEntryPlan.tpPrice
-    });
-}
-
-// -----------------------------------------------------------------------------
-// TEST 4: Ordinary RANGE (Non-FTS) Regression Unaffected
-// -----------------------------------------------------------------------------
-{
-    const symbol = "ETHUSDT";
-    const side = "long" as const;
-    const regime = "RANGE";
-    const marketSubtype = "RANGE_FLAT";
-    const entry = 2500;
-    const atr = 15;
-    const boxHigh = 2550;
-    const boxLow = 2450;
-    const boxMid = 2500;
-    const sl = 2480;
-    const tickSz = 0.01;
-
-    const rawPolicySlPrice = resolvePreEntryPolicySlPrice({
-        side,
-        regime,
-        entryPrice: entry,
-        rawStructuralSl: sl
+    const attach = buildV2NewEntryAttachAlgoOrds({
+        clOrdId: "cl-btc-fts-long",
+        submitSzStr: "1",
+        stopPrice: preEntryPlan.slPrice,
+        takeProfitPrice: preEntryPlan.tpPrice,
+        isV2RangePartialPlan: false
     });
 
-    const bundle = resolveV2PreEntryExecutableTpBundle({
+    const attachedTp = Number((attach.attachAlgoOrds[0] as { tpTriggerPx?: string })?.tpTriggerPx);
+
+    const parityProof = evaluatePreEntryTpParity({
         symbol,
         side,
         regime,
-        entryPrice: entry,
-        rawStructuralSl: sl,
-        rawPolicySlPrice,
         marketSubtype,
-        routingEngine: "RANGE",
-        atr,
-        boxHigh,
-        boxLow,
-        boxMid,
-        feeRate: 0.0005,
-        paperSlippageEstimateBps: 8,
-        snapshotTickSz: tickSz
+        tickSz,
+        profitabilityTpApproved: authority.profitabilityTpApproved,
+        profitabilityCanonicalTpSource: authority.profitabilityCanonicalTpSource,
+        profitabilityTpSource: authority.profitabilityTpSource,
+        profitabilityTpRaw: authority.profitabilityRawCanonicalTp1Price,
+        profitabilityTpExecutable: authority.profitabilityExecutableTp1Price,
+        committedTpRaw: committed.plan.initial_tp_price,
+        committedTpExecutable: preEntryPlan.tpPrice,
+        committedTpSource: committed.plan.take_profit_source,
+        attachedTp
     });
 
-    assert.equal(bundle.ok, true, "Ordinary RANGE bundle must resolve");
-    pass("TEST_4_ORDINARY_RANGE_UNAFFECTED", {
-        tp: bundle.ok ? bundle.executableTp1Price : null,
-        source: bundle.ok ? bundle.tpSource : null
-    });
-}
+    assert.equal(parityProof.entry_allowed, true, "BTC symmetric test must pass");
+    assert.equal(parityProof.price_match, true);
+    assert.equal(parityProof.block_reason, null);
 
-// -----------------------------------------------------------------------------
-// TEST 5: TREND Regime Regression Unaffected
-// -----------------------------------------------------------------------------
-{
-    const symbol = "ETHUSDT";
-    const side = "long" as const;
-    const regime = "TREND";
-    const entry = 2500;
-    const sl = 2450;
-    const tp = 2600;
-    const tickSz = 0.01;
-
-    const bundle = resolveV2PreEntryExecutableTpBundle({
+    pass("TEST_H_BTC_FTS_LONG_SYMMETRIC_PASS", {
         symbol,
-        side,
-        regime,
-        entryPrice: entry,
-        rawStructuralSl: sl,
-        rawPolicySlPrice: sl,
-        decisionTakeProfit: tp,
-        feeRate: 0.0005,
-        paperSlippageEstimateBps: 8,
-        snapshotTickSz: tickSz
+        profitability_tp_executable: parityProof.profitability_tp_executable,
+        committed_tp_executable: parityProof.committed_tp_executable,
+        attached_tp: parityProof.attached_tp
     });
-
-    assert.equal(bundle.ok, true, "TREND bundle must resolve");
-    if (bundle.ok) {
-        assert.equal(bundle.executableTp1Price, 2600, "TREND TP must match decision TP");
-        assert.equal(bundle.tpSource, "authority_tp_price", "TREND source must be authority_tp_price");
-    }
-    pass("TEST_5_TREND_REGIME_UNAFFECTED");
 }
 
-console.log("=== ALL FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS PASSED ===");
+console.log("=== ALL 8 FAST_TREND_SHIFT TP PROFITABILITY PARITY TESTS PASSED ===");

@@ -55,6 +55,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         let finalTakeProfit1Px = args.takeProfit1Px;
         let finalTakeProfit2Px = args.takeProfit2Px;
         let finalPartialExitRatio = args.partialExitRatio;
+        let finalProfitabilityTpApproved = args.profitabilityTpApproved;
+        let finalProfitabilityCanonicalTpSource = args.profitabilityCanonicalTpSource;
+        let finalProfitabilityTpSource = args.profitabilityTpSource;
+        let finalProfitabilityExecutableTp1Price = args.profitabilityExecutableTp1Price;
+        let finalProfitabilityRawCanonicalTp1Price = args.profitabilityRawCanonicalTp1Price;
 
         if (finalDecision !== "ENTER") {
             finalSide = "none";
@@ -66,6 +71,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             finalTakeProfit1Px = undefined;
             finalTakeProfit2Px = undefined;
             finalPartialExitRatio = undefined;
+            finalProfitabilityTpApproved = undefined;
+            finalProfitabilityCanonicalTpSource = undefined;
+            finalProfitabilityTpSource = undefined;
+            finalProfitabilityExecutableTp1Price = undefined;
+            finalProfitabilityRawCanonicalTp1Price = undefined;
         }
 
         let finalPrimaryMissingCondition = args.primaryMissingCondition;
@@ -139,6 +149,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             takeProfit2Px: finalTakeProfit2Px,
             partialExitRatio: finalPartialExitRatio,
             invalidationPx: finalInvalidationPx,
+            profitabilityTpApproved: finalProfitabilityTpApproved,
+            profitabilityCanonicalTpSource: finalProfitabilityCanonicalTpSource,
+            profitabilityTpSource: finalProfitabilityTpSource,
+            profitabilityExecutableTp1Price: finalProfitabilityExecutableTp1Price,
+            profitabilityRawCanonicalTp1Price: finalProfitabilityRawCanonicalTp1Price,
             aligned_signal: args.alignedSignal,
             selected_side_after_veto: args.selectedSideAfterVeto,
             promotion_applied: args.promotionApplied,

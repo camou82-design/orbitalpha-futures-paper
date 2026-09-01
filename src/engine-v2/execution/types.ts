@@ -67,6 +67,11 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     takeProfit2Px?: number;
     partialExitRatio?: number;
     invalidationPx?: number;
+    profitabilityTpApproved?: boolean | null;
+    profitabilityCanonicalTpSource?: string | null;
+    profitabilityTpSource?: string | null;
+    profitabilityExecutableTp1Price?: number | null;
+    profitabilityRawCanonicalTp1Price?: number | null;
 
     // --- Diagnostic Audit Fields (V2 Hardening) ---
     aligned_signal?: string | null;
@@ -149,6 +154,11 @@ export type BuildExecutionEnvelopeArgs = Readonly<{
     takeProfit2Px?: number;
     partialExitRatio?: number;
     invalidationPx?: number;
+    profitabilityTpApproved?: boolean | null;
+    profitabilityCanonicalTpSource?: string | null;
+    profitabilityTpSource?: string | null;
+    profitabilityExecutableTp1Price?: number | null;
+    profitabilityRawCanonicalTp1Price?: number | null;
 
     // --- Diagnostic Audit Fields (V2 Hardening) ---
     alignedSignal?: string | null;

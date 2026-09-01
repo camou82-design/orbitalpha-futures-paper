@@ -233,7 +233,12 @@ export function deriveExecutionAuthority(
         takeProfitPlan: useV2 ? selector.v2_result.metadata?.takeProfitPlan : undefined,
         takeProfit1Px: useV2 && typeof selector.v2_result.metadata?.takeProfit1Px === "number" ? selector.v2_result.metadata.takeProfit1Px : undefined,
         takeProfit2Px: useV2 && typeof selector.v2_result.metadata?.takeProfit2Px === "number" ? selector.v2_result.metadata.takeProfit2Px : undefined,
-        partialExitRatio: useV2 && typeof selector.v2_result.metadata?.partialExitRatio === "number" ? selector.v2_result.metadata.partialExitRatio : undefined
+        partialExitRatio: useV2 && typeof selector.v2_result.metadata?.partialExitRatio === "number" ? selector.v2_result.metadata.partialExitRatio : undefined,
+        profitabilityTpApproved: useV2 ? selector.v2_result.metadata?.profitabilityTpApproved : undefined,
+        profitabilityCanonicalTpSource: useV2 ? selector.v2_result.metadata?.canonicalTp1Source : undefined,
+        profitabilityTpSource: useV2 ? selector.v2_result.metadata?.tpSource : undefined,
+        profitabilityExecutableTp1Price: useV2 && typeof selector.v2_result.metadata?.executableTp1Price === "number" ? selector.v2_result.metadata.executableTp1Price : undefined,
+        profitabilityRawCanonicalTp1Price: useV2 && typeof selector.v2_result.metadata?.rawCanonicalTp1Price === "number" ? selector.v2_result.metadata.rawCanonicalTp1Price : undefined
     };
 }
 
@@ -294,7 +299,12 @@ export function deriveExecutionAuthorityFromEnvelope(
         takeProfitPlan: envelope.takeProfitPlan,
         takeProfit1Px: envelope.takeProfit1Px,
         takeProfit2Px: envelope.takeProfit2Px,
-        partialExitRatio: envelope.partialExitRatio
+        partialExitRatio: envelope.partialExitRatio,
+        profitabilityTpApproved: envelope.profitabilityTpApproved ?? undefined,
+        profitabilityCanonicalTpSource: envelope.profitabilityCanonicalTpSource ?? undefined,
+        profitabilityTpSource: envelope.profitabilityTpSource ?? undefined,
+        profitabilityExecutableTp1Price: envelope.profitabilityExecutableTp1Price ?? undefined,
+        profitabilityRawCanonicalTp1Price: envelope.profitabilityRawCanonicalTp1Price ?? undefined
     };
 }
 
@@ -639,6 +649,11 @@ export function resolveSymbolDecisionEnvelope(
         invalidationPx: typeof v2Res.internal.lifecycleAuthority?.invalidationPx === "number" 
             ? v2Res.internal.lifecycleAuthority.invalidationPx 
             : (typeof execMeta.invalidationPx === "number" ? execMeta.invalidationPx : undefined),
+        profitabilityTpApproved: execMeta.profitabilityTpApproved ?? null,
+        profitabilityCanonicalTpSource: execMeta.canonicalTp1Source ?? null,
+        profitabilityTpSource: execMeta.tpSource ?? null,
+        profitabilityExecutableTp1Price: typeof execMeta.executableTp1Price === "number" ? execMeta.executableTp1Price : null,
+        profitabilityRawCanonicalTp1Price: typeof execMeta.rawCanonicalTp1Price === "number" ? execMeta.rawCanonicalTp1Price : null,
         alignedSignal: execMeta.alignedSignal ?? null,
         selectedSideAfterVeto: execMeta.selectedSideAfterVeto ?? null,
         promotionApplied: execMeta.promotionApplied ?? null,

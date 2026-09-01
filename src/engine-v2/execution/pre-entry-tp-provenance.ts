@@ -68,6 +68,7 @@ export type ResolveV2PreEntryTp1AuthorityInput = Readonly<{
     paperSlippageEstimateBps?: number | null;
     snapshotTickSz?: number | null;
     instrumentTickSz?: number | null;
+    profitabilityTpApproved?: boolean | null;
 }>;
 
 export type ResolveV2PreEntryTp1AuthorityResult = Readonly<
@@ -423,26 +424,48 @@ export function resolveV2PreEntryTp1Authority(
         //    preserve it rather than collapsing inward to adaptive 2ATR cap.
         // 2. Otherwise evaluate candidates against profitability authority to pick first profitable canonical target.
         if (isEscalationContext) {
-            if (authTp != null && isValidDirectionTp(side, entryPrice, authTp)) {
-                finalTpPrice = authTp;
-                finalTpSource = "authority_tp_price";
-                return {
-                    ok: true,
-                    rawTp1Price: finalTpPrice,
-                    tpSource: finalTpSource,
-                    adaptiveApplied: true,
-                    adaptiveDiagnostics: {
-                        ...adaptive.diagnostics,
-                        final_committed_tp_price: finalTpPrice,
-                        final_committed_sl_price: adaptive.slPrice
-                    },
-                    adaptiveSlPrice: adaptive.slPrice,
-                    adaptiveSlSource: adaptive.slSource
-                };
-            }
-
             const tickSzAuth = resolveInstrumentTickSzAuthority(input as InstrumentTickSzAuthorityInput);
             const tickSz = tickSzAuth.ok ? tickSzAuth.tickSz : 0.01;
+
+            if (authTp != null && isValidDirectionTp(side, entryPrice, authTp)) {
+                let authTpProfitable = input.profitabilityTpApproved === true;
+                if (!authTpProfitable) {
+                    const prof = evaluateTpProfitabilityAuthority({
+                        symbol: String((input as { symbol?: string }).symbol ?? ""),
+                        side,
+                        regime: "RANGE",
+                        entryPrice,
+                        canonicalTp1Price: authTp,
+                        canonicalTp1Source: "authority_tp_price",
+                        feeRate: input.feeRate ?? 0.0005,
+                        paperSlippageEstimateBps:
+                            typeof (input as { paperSlippageEstimateBps?: number }).paperSlippageEstimateBps === "number"
+                                ? (input as { paperSlippageEstimateBps?: number }).paperSlippageEstimateBps
+                                : undefined,
+                        tickSz
+                    });
+                    authTpProfitable = prof.entryAllowed;
+                }
+
+                if (authTpProfitable) {
+                    finalTpPrice = authTp;
+                    finalTpSource = "authority_tp_price";
+                    return {
+                        ok: true,
+                        rawTp1Price: finalTpPrice,
+                        tpSource: finalTpSource,
+                        adaptiveApplied: true,
+                        adaptiveDiagnostics: {
+                            ...adaptive.diagnostics,
+                            final_committed_tp_price: finalTpPrice,
+                            final_committed_sl_price: adaptive.slPrice
+                        },
+                        adaptiveSlPrice: adaptive.slPrice,
+                        adaptiveSlSource: adaptive.slSource
+                    };
+                }
+            }
+
             const candidates = enumeratePromotedRangeTp1Candidates({
                 side,
                 entryPrice,
@@ -644,3 +667,142 @@ export function canonicalTpSourceToCommittedSource(source: V2PreEntryTpSource): 
     if (source.startsWith("adaptive_range")) return source;
     return source;
 }
+
+export type EvaluatePreEntryTpParityInput = Readonly<{
+    symbol: string;
+    side: "long" | "short";
+    regime: string;
+    marketSubtype?: string | null;
+    tickSz: number;
+    profitabilityTpApproved?: boolean | null;
+    profitabilityCanonicalTpSource?: string | null;
+    profitabilityTpSource?: string | null;
+    profitabilityTpRaw?: number | null;
+    profitabilityTpExecutable?: number | null;
+    committedTpRaw?: number | null;
+    committedTpExecutable?: number | null;
+    committedTpSource?: string | null;
+    attachedTp?: number | null;
+}>;
+
+export type EvaluatePreEntryTpParityResult = Readonly<{
+    event: "V2_TP_PROFITABILITY_COMMIT_PARITY_PROOF";
+    symbol: string;
+    side: "long" | "short";
+    marketSubtype: string | null;
+    profitability_canonical_tp_source: string;
+    profitability_tp_source: string;
+    committed_tp_source: string;
+    profitability_tp_raw: number | null;
+    profitability_tp_executable: number | null;
+    committed_tp_raw: number | null;
+    committed_tp_executable: number | null;
+    attached_tp: number | null;
+    price_match: boolean;
+    source_match: boolean;
+    entry_allowed: boolean;
+    block_reason:
+        | "V2_TP_PROFITABILITY_AUTHORITY_MISSING"
+        | "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE"
+        | "V2_TP_PROFITABILITY_PROVENANCE_INVALID"
+        | null;
+}>;
+
+export function evaluatePreEntryTpParity(
+    input: EvaluatePreEntryTpParityInput
+): EvaluatePreEntryTpParityResult {
+    const isEscalation = isShockOrFtsPromotedTpEscalationContext({
+        marketSubtype: input.marketSubtype
+    });
+    const approvalExpected = input.profitabilityTpApproved === true || isEscalation;
+
+    const profCanonSource = input.profitabilityCanonicalTpSource ?? "none";
+    const profTpSource = input.profitabilityTpSource ?? "none";
+    const committedTpSource = input.committedTpSource ?? "none";
+
+    let entryAllowed = true;
+    let blockReason: EvaluatePreEntryTpParityResult["block_reason"] = null;
+
+    // 1. Missing profitability authority check (fail-closed for approved / escalation context)
+    if (approvalExpected) {
+        if (
+            input.profitabilityTpExecutable == null ||
+            input.profitabilityTpRaw == null ||
+            input.committedTpExecutable == null ||
+            input.committedTpRaw == null ||
+            input.attachedTp == null
+        ) {
+            entryAllowed = false;
+            blockReason = "V2_TP_PROFITABILITY_AUTHORITY_MISSING";
+        }
+    }
+
+    // 2. Provenance validity check in approved context
+    if (entryAllowed && input.profitabilityTpApproved === true) {
+        if (
+            profCanonSource === "none" ||
+            profCanonSource === "" ||
+            profTpSource === "none" ||
+            profTpSource === ""
+        ) {
+            entryAllowed = false;
+            blockReason = "V2_TP_PROFITABILITY_PROVENANCE_INVALID";
+        }
+    }
+
+    // 3. Exact price parity check
+    let priceMatch = true;
+    if (input.profitabilityTpExecutable != null) {
+        priceMatch =
+            input.committedTpExecutable === input.profitabilityTpExecutable &&
+            (input.attachedTp == null || input.attachedTp === input.profitabilityTpExecutable);
+        if (!priceMatch && entryAllowed) {
+            entryAllowed = false;
+            blockReason = "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
+        }
+    } else if (input.committedTpExecutable != null && input.attachedTp != null) {
+        priceMatch = input.committedTpExecutable === input.attachedTp;
+        if (!priceMatch && entryAllowed) {
+            entryAllowed = false;
+            blockReason = "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
+        }
+    }
+
+    // 4. Source match (audit / verification)
+    const validTransportSources = new Set([
+        "authority_tp_price",
+        "decision.takeProfit",
+        "execMeta.takeProfitPlan.tp1",
+        "execMeta.takeProfit1Px",
+        "authority.takeProfit1Px",
+        "adaptive_range_box_target",
+        "adaptive_range_atr_cap",
+        "adaptive_range_min_profit",
+        "engine_calculated",
+        "policy_clamped"
+    ]);
+
+    const sourceMatch =
+        !approvalExpected ||
+        (committedTpSource !== "none" && validTransportSources.has(committedTpSource));
+
+    return {
+        event: "V2_TP_PROFITABILITY_COMMIT_PARITY_PROOF",
+        symbol: input.symbol,
+        side: input.side,
+        marketSubtype: input.marketSubtype ?? null,
+        profitability_canonical_tp_source: profCanonSource,
+        profitability_tp_source: profTpSource,
+        committed_tp_source: committedTpSource,
+        profitability_tp_raw: input.profitabilityTpRaw ?? null,
+        profitability_tp_executable: input.profitabilityTpExecutable ?? null,
+        committed_tp_raw: input.committedTpRaw ?? null,
+        committed_tp_executable: input.committedTpExecutable ?? null,
+        attached_tp: input.attachedTp ?? null,
+        price_match: priceMatch,
+        source_match: sourceMatch,
+        entry_allowed: entryAllowed,
+        block_reason: blockReason
+    };
+}
+
