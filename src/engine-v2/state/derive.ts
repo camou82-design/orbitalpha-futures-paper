@@ -223,6 +223,8 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
             rawShockMovePct: number;
             requiredShockMovePct: number;
             shockEmergencyBypass: boolean;
+            longAllow: boolean;
+            shortAllow: boolean;
         } => {
             const raw = (input.state.directionalShockState ?? "NONE") as "UP" | "DOWN" | "NONE" | "UNKNOWN";
 
@@ -401,19 +403,60 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
                 ts: nowMs
             }));
 
+            const stabilizedShock = st.activeDirection;
+            const hardCrashBlocked = crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK";
+            const hardPumpBlocked = pumpState === "PUMP_EXIT" || pumpState === "PUMP_LOCK";
+            const dailyLossBlocked = input.state.dailyLossGuardTriggered === true;
+            const serverControlBlocked =
+                input.state.serverTradeEnabled === false ||
+                input.state.closeOnlyMode === true ||
+                input.state.killSwitch === true ||
+                (input.state as any)?.killSwitchActive === true ||
+                (input.state as any)?.reconcileSafeMode === true ||
+                (input.state as any)?.reconcileSafeModeActive === true ||
+                input.state.riskMode === "HALT";
+
+            let derivedLongAllow = true;
+            let derivedShortAllow = true;
+
+            if (serverControlBlocked || dailyLossBlocked) {
+                derivedLongAllow = false;
+                derivedShortAllow = false;
+            } else {
+                if (hardCrashBlocked) {
+                    derivedLongAllow = false;
+                }
+                if (hardPumpBlocked) {
+                    derivedShortAllow = false;
+                }
+
+                if (stabilizedShock === "UP") {
+                    derivedShortAllow = false;
+                } else if (stabilizedShock === "DOWN") {
+                    derivedLongAllow = false;
+                } else {
+                    if (input.state.longAllow === false) {
+                        derivedLongAllow = false;
+                    }
+                    if (input.state.shortAllow === false) {
+                        derivedShortAllow = false;
+                    }
+                }
+            }
+
             return {
                 directionalShockState: st.activeDirection,
                 rawDirectionalShockState: raw,
                 stabilizedDirectionalShockState: st.activeDirection,
                 rawShockMovePct: st.rawMovePct,
                 requiredShockMovePct: st.requiredMovePct,
-                shockEmergencyBypass: st.emergencyBypass
+                shockEmergencyBypass: st.emergencyBypass,
+                longAllow: derivedLongAllow,
+                shortAllow: derivedShortAllow
             };
         })(),
         crashState,
         pumpState,
-        longAllow: input.state.longAllow !== false,
-        shortAllow: input.state.shortAllow !== false,
         accountEquityKrw: Number.isFinite(input.state.accountEquityKrw) ? Number(input.state.accountEquityKrw) : 500_000,
         maxUsableMarginKrw: Number.isFinite(input.state.maxUsableMarginKrw) ? Number(input.state.maxUsableMarginKrw) : 420_000,
         exposureNotionalCapKrw: Number.isFinite(input.state.exposureNotionalCapKrw) ? Number(input.state.exposureNotionalCapKrw) : 2_000_000,

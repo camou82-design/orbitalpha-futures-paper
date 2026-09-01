@@ -162,8 +162,11 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
   const routingPaused = marketMode.routing.newEntryPolicy === "paused";
   const baseGateBlocked = routingPaused || openPositionCount >= maxSlots || riskMode === "HALT";
 
-  const allowNewLongBeforeAlignment = risk.longAllow && !routingPaused && openPositionCount < maxSlots && riskMode !== "HALT";
-  const allowNewShortBeforeAlignment = risk.shortAllow && !routingPaused && openPositionCount < maxSlots && riskMode !== "HALT";
+  const hardCrashBlocked = risk.crashState === "CRASH_EXIT" || risk.crashState === "CRASH_LOCK";
+  const hardPumpBlocked = risk.pumpState === "PUMP_EXIT" || risk.pumpState === "PUMP_LOCK";
+
+  const allowNewLongBeforeAlignment = !hardCrashBlocked && !routingPaused && openPositionCount < maxSlots && riskMode !== "HALT";
+  const allowNewShortBeforeAlignment = !hardPumpBlocked && !routingPaused && openPositionCount < maxSlots && riskMode !== "HALT";
   let allowNewLong = allowNewLongBeforeAlignment;
   let allowNewShort = allowNewShortBeforeAlignment;
   let alignedDirectionAllowApplied = false;
@@ -176,12 +179,13 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
       alignmentBlockProtectedReason =
         routingPaused ? "ROUTING_PAUSED" : openPositionCount >= maxSlots ? "MAX_SLOTS_REACHED" : "RISK_MODE_HALT";
     } else {
-      // Directional UP: preserve aligned long path, keep short blocked.
-      if (!allowNewLong && risk.longAllow) {
+      if (!allowNewLong && !hardCrashBlocked) {
         allowNewLong = true;
         alignedDirectionAllowApplied = true;
       }
-      allowNewShort = false;
+      if (hardPumpBlocked) {
+        allowNewShort = false;
+      }
     }
   } else if (risk.directionalShockState === "DOWN") {
     alignedDirection = "short";
@@ -189,12 +193,13 @@ export function evaluateRiskExposure(input: RiskExposureInput): RiskExposureOutp
       alignmentBlockProtectedReason =
         routingPaused ? "ROUTING_PAUSED" : openPositionCount >= maxSlots ? "MAX_SLOTS_REACHED" : "RISK_MODE_HALT";
     } else {
-      // Directional DOWN: preserve aligned short path, keep long blocked.
-      if (!allowNewShort && risk.shortAllow) {
+      if (!allowNewShort && !hardPumpBlocked) {
         allowNewShort = true;
         alignedDirectionAllowApplied = true;
       }
-      allowNewLong = false;
+      if (hardCrashBlocked) {
+        allowNewLong = false;
+      }
     }
   }
   const allowNewEntry = allowNewLong || allowNewShort;
