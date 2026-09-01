@@ -417,6 +417,7 @@ import {
 } from "../engine-v2/execution/pre-entry-tp-provenance";
 import type { AdaptiveRangeProtectionDiagnostics } from "../engine-v2/execution/adaptive-range-pre-entry-protection";
 import { resolveInstrumentTickSzAuthority } from "../engine-v2/execution/instrument-tick-authority";
+import { normalizePxToTickSz } from "../engine-v2/execution/entry-order-type";
 import {
   buildV2NewEntryAttachAlgoOrds,
   isV2RangePartialPlanContext,
@@ -1648,7 +1649,8 @@ export function buildV2PreEntryRiskPlanCommitted(
     preserveCanonicalStructuralStop: adaptiveContext?.preserveCanonicalStructuralStop === true,
     confirmedBreakout: adaptiveContext?.confirmedBreakout === true,
     strongContinuation: adaptiveContext?.strongContinuation === true,
-    adaptiveContextPresent: adaptiveContext != null
+    adaptiveContextPresent: adaptiveContext != null,
+    symbol
   });
 
   if (!tpAuthority.ok) {
@@ -22099,6 +22101,65 @@ export class PaperEngine {
           const submitStopPrice = preEntryPlan.slPrice ?? stopPrice;
           const submitTakeProfitPrice =
             preEntryPlan.tpPrice != null ? preEntryPlan.tpPrice : initialTpForRecord;
+
+          // Parity Guard: profitability-approved TP === committed risk plan TP === preEntryPlan TP === submitTakeProfitPrice
+          const profitabilityTpRaw =
+            typeof (authority.takeProfitPlan as any)?.tp1 === "number"
+              ? (authority.takeProfitPlan as any).tp1
+              : typeof authority.takeProfit1Px === "number"
+                ? authority.takeProfit1Px
+                : null;
+          const profitabilityTpExec =
+            typeof authority.takeProfit1Px === "number"
+              ? authority.takeProfit1Px
+              : profitabilityTpRaw != null && tickSz > 0
+                ? normalizePxToTickSz(profitabilityTpRaw, tickSz)
+                : profitabilityTpRaw;
+          const committedTpRaw = v2CommittedRiskPlan.initial_tp_price ?? null;
+          const committedTpExec = preEntryPlan.tpPrice ?? null;
+          const attachedTp = submitTakeProfitPrice ?? null;
+
+          const priceMatch =
+            profitabilityTpExec == null ||
+            (committedTpExec === profitabilityTpExec && (attachedTp == null || attachedTp === profitabilityTpExec));
+          const sourceMatch =
+            !authority.takeProfit1Px ||
+            String(v2CommittedRiskPlan.take_profit_source) === "authority_tp_price" ||
+            String(v2CommittedRiskPlan.take_profit_source) === "adaptive_range_box_target" ||
+            String(v2CommittedRiskPlan.take_profit_source) === "adaptive_range_atr_cap" ||
+            String(v2CommittedRiskPlan.take_profit_source) === "engine_calculated";
+
+          const parityAllowed = priceMatch;
+          const parityBlockReason = !priceMatch ? "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE" : null;
+
+          this.logger.info("V2_TP_PROFITABILITY_COMMIT_PARITY_PROOF", {
+            symbol: sym,
+            side: authority.side,
+            marketSubtype: effectiveMarketSubtype ?? null,
+            profitability_tp_raw: profitabilityTpRaw,
+            profitability_tp_executable: profitabilityTpExec,
+            profitability_tp_source: v2CommittedRiskPlan.take_profit_source ?? "none",
+            committed_tp_raw: committedTpRaw,
+            committed_tp_executable: committedTpExec,
+            attached_tp: attachedTp,
+            price_match: priceMatch,
+            source_match: sourceMatch,
+            entry_allowed: parityAllowed,
+            block_reason: parityBlockReason
+          });
+
+          if (!parityAllowed) {
+            this.logger.error("V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE", {
+              symbol: sym,
+              side: authority.side,
+              marketSubtype: effectiveMarketSubtype ?? null,
+              profitability_tp_executable: profitabilityTpExec,
+              committed_tp_executable: committedTpExec,
+              attached_tp: attachedTp,
+              block_reason: parityBlockReason
+            });
+            continue;
+          }
 
           // Atomic Execution Key Claim immediately prior to OKX signed submit
           const v2EntryKey = `v2entry:${sym}:${intentSide}:${executionSnapshot.runCycleId}`;

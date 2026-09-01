@@ -185,7 +185,8 @@ function buildPartialAttachProof(input: {
   const authority = makeRangeAuthority({
     side: "short",
     invalidationPx: ETH_PRODUCTION.rawStructuralSl,
-    takeProfit1Px: ETH_PRODUCTION.legacyPolicyTp
+    takeProfit1Px: ETH_PRODUCTION.legacyPolicyTp,
+    marketSubtype: "RANGE_UPPER_REACTION"
   });
   const rp = buildV2PreEntryRiskPlanCommitted(
     authority,
@@ -194,7 +195,7 @@ function buildPartialAttachProof(input: {
     ETH_PRODUCTION.entry,
     noopLogger,
     "ETHUSDT",
-    adaptiveContext()
+    adaptiveContext({ marketSubtype: "RANGE_UPPER_REACTION" })
   );
   assert.equal(rp.ok, true);
   if (!rp.ok) throw new Error("expected ok plan");

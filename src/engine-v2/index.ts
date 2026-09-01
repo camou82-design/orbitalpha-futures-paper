@@ -6866,6 +6866,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             ) {
                                 min_order_check_passed = false;
                                 min_order_block_reason = "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
+                            } else {
+                                (execMeta as any).takeProfit1Px = tpBundle.executableTp1Price;
+                                (execMeta as any).takeProfitPlan = {
+                                    ...(typeof (execMeta as any).takeProfitPlan === "object" && (execMeta as any).takeProfitPlan != null ? (execMeta as any).takeProfitPlan : {}),
+                                    tp1: tpBundle.rawCanonicalTp1Price,
+                                    executableTp1: tpBundle.executableTp1Price
+                                };
+                                (execMeta as any).canonicalTp1Source = tpBundle.canonicalTp1Source;
+                                (execMeta as any).tpSource = tpBundle.tpSource;
+                                (execMeta as any).executableTp1Price = tpBundle.executableTp1Price;
+                                (execMeta as any).rawCanonicalTp1Price = tpBundle.rawCanonicalTp1Price;
+                                (execMeta as any).profitabilityTpApproved = true;
                             }
                         }
                     }

@@ -64,6 +64,10 @@ export type ResolveV2PreEntryTp1AuthorityInput = Readonly<{
     strongContinuation?: boolean;
     adaptiveContextPresent?: boolean;
     promotionReason?: string | null;
+    symbol?: string | null;
+    paperSlippageEstimateBps?: number | null;
+    snapshotTickSz?: number | null;
+    instrumentTickSz?: number | null;
 }>;
 
 export type ResolveV2PreEntryTp1AuthorityResult = Readonly<
@@ -304,7 +308,12 @@ function resolveShockFtsPromotedExecutableTpBundle(
             canonicalTp1Source,
             tpSource: candidate.source,
             adaptiveApplied: candidate.source.startsWith("adaptive_range"),
-            adaptiveDiagnostics: primaryAuthority.ok ? primaryAuthority.adaptiveDiagnostics : null
+            adaptiveDiagnostics: primaryAuthority.ok && primaryAuthority.adaptiveDiagnostics
+                ? {
+                      ...primaryAuthority.adaptiveDiagnostics,
+                      final_committed_tp_price: candidate.price
+                  }
+                : null
         };
     }
 
@@ -406,6 +415,90 @@ export function resolveV2PreEntryTp1Authority(
                 adaptiveDiagnostics: adaptive.diagnostics
             };
         }
+
+        const isEscalationContext = isShockOrFtsPromotedTpEscalationContext(input);
+
+        // In shock / FTS promoted escalation context:
+        // 1. If explicit profitability-approved authority TP was provided (e.g. from upstream bundle),
+        //    preserve it rather than collapsing inward to adaptive 2ATR cap.
+        // 2. Otherwise evaluate candidates against profitability authority to pick first profitable canonical target.
+        if (isEscalationContext) {
+            if (authTp != null && isValidDirectionTp(side, entryPrice, authTp)) {
+                finalTpPrice = authTp;
+                finalTpSource = "authority_tp_price";
+                return {
+                    ok: true,
+                    rawTp1Price: finalTpPrice,
+                    tpSource: finalTpSource,
+                    adaptiveApplied: true,
+                    adaptiveDiagnostics: {
+                        ...adaptive.diagnostics,
+                        final_committed_tp_price: finalTpPrice,
+                        final_committed_sl_price: adaptive.slPrice
+                    },
+                    adaptiveSlPrice: adaptive.slPrice,
+                    adaptiveSlSource: adaptive.slSource
+                };
+            }
+
+            const tickSzAuth = resolveInstrumentTickSzAuthority(input as InstrumentTickSzAuthorityInput);
+            const tickSz = tickSzAuth.ok ? tickSzAuth.tickSz : 0.01;
+            const candidates = enumeratePromotedRangeTp1Candidates({
+                side,
+                entryPrice,
+                rawStructuralSl: input.rawStructuralSl,
+                atr: adaptiveAtr,
+                boxHigh: adaptiveBoxHigh,
+                boxLow: adaptiveBoxLow,
+                boxMid: input.rangeBoxMidAtEntry ?? input.boxMid ?? null,
+                primaryTp: adaptive.tpPrice
+            });
+
+            for (const candidate of candidates) {
+                const execPrice = normalizePxToTickSz(candidate.price, tickSz);
+                if (!(execPrice > 0)) continue;
+
+                const prof = evaluateTpProfitabilityAuthority({
+                    symbol: String((input as { symbol?: string }).symbol ?? ""),
+                    side,
+                    regime: "RANGE",
+                    entryPrice,
+                    canonicalTp1Price: candidate.price,
+                    canonicalTp1Source: candidate.source,
+                    feeRate: input.feeRate ?? 0.0005,
+                    paperSlippageEstimateBps:
+                        typeof (input as { paperSlippageEstimateBps?: number }).paperSlippageEstimateBps === "number"
+                            ? (input as { paperSlippageEstimateBps?: number }).paperSlippageEstimateBps
+                            : undefined,
+                    tickSz
+                });
+
+                if (prof.entryAllowed) {
+                    finalTpPrice = candidate.price;
+                    finalTpSource = candidate.source;
+                    return {
+                        ok: true,
+                        rawTp1Price: finalTpPrice,
+                        tpSource: finalTpSource,
+                        adaptiveApplied: candidate.source.startsWith("adaptive_range"),
+                        adaptiveDiagnostics: {
+                            ...adaptive.diagnostics,
+                            final_committed_tp_price: finalTpPrice,
+                            final_committed_sl_price: adaptive.slPrice
+                        },
+                        adaptiveSlPrice: adaptive.slPrice,
+                        adaptiveSlSource: adaptive.slSource
+                    };
+                }
+            }
+
+            return {
+                ok: false,
+                blockReason: "V2_TP1_NET_EDGE_INSUFFICIENT",
+                adaptiveDiagnostics: adaptive.diagnostics
+            };
+        }
+
         finalTpPrice = adaptive.tpPrice;
         finalTpSource = mapAdaptiveTpSource(adaptive.tpSource);
         return {
