@@ -454,6 +454,7 @@ import {
   type RangeProfitTrailState,
   type RangeReopenSoftMetrics
 } from "./range-engine";
+import { resolveV2AuthoritativeFastPathEntryNotionalUsdt } from "./v2-legacy-riske-cap-authority";
 import {
   evaluateTrendEngineForSymbol,
   planTrendSwitch,
@@ -21709,7 +21710,7 @@ export class PaperEngine {
         // V2 risk-authoritative notional from engine-v2 is the sizing authority.
         // Do not re-apply legacy/emergency static caps on the bridge handoff.
         const v2OrderNotionalUsdt = authorityNotionalUsdt;
-        let v2EntrySizeUsd = v2OrderNotionalUsdt;
+        let v2EntrySizeUsd = resolveV2AuthoritativeFastPathEntryNotionalUsdt(v2OrderNotionalUsdt);
         const symS = String(first.symbol);
         const mPreV2 = marginsForSymbol(next, symS);
         if (!mPreV2.authoritative) {
@@ -21728,22 +21729,16 @@ export class PaperEngine {
         if (riskE) {
           const cap = authority.side === "long" ? riskE.maxLongExposure : riskE.maxShortExposure;
           const currentUsd = authority.side === "long" ? mPreV2.longUsd : mPreV2.shortUsd;
-          if (currentUsd + v2EntrySizeUsd > cap) {
-            v2EntrySizeUsd = Math.max(0, cap - currentUsd);
-            if (v2EntrySizeUsd < MIN_POSITION_SIZE_USD) {
-              const skip_reason = "V2_EXECUTION_EXPOSURE_CAP_BLOCKED";
-              this.logger.warn("V2_EXECUTION_EXPOSURE_CAP_BLOCKED", { symbol: sym, cap, currentUsd, intended: entrySizeUsd });
-              this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
-                symbol: sym,
-                run_cycle_id: executionSnapshot.runCycleId,
-                decision_id: (authority as any).decision_id ?? null,
-                order_path_allowed: false,
-                skip_reason,
-                ...buildAuthorityEventMeta(authority)
-              });
-              continue;
-            }
-          }
+          this.logger.info("V2_LEGACY_RISKE_CAP_DIAGNOSTIC_PROOF", {
+            symbol: sym,
+            side: authority.side,
+            v2_authority_notional_usdt: v2EntrySizeUsd,
+            legacy_max_leg_exposure_usdt: cap,
+            legacy_current_leg_exposure_usdt: currentUsd,
+            legacy_cap_remaining_usdt: Math.max(0, cap - currentUsd),
+            legacy_clamp_would_apply: currentUsd + v2EntrySizeUsd > cap,
+            v2_legacy_riske_clamp_applied: false
+          });
         }
 
         // 5. Execution Handoff
