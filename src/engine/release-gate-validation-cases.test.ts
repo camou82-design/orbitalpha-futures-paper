@@ -233,7 +233,8 @@ function audit(label: string, detail: Record<string, unknown>): void {
   });
   assert.equal(sizing.sizingPassed, true);
   assert.ok(sizing.finalOrderNotionalUsdt > 40);
-  assert.equal(sizing.effectiveLiveCapUsdt, 500);
+  assert.equal(sizing.effectiveLiveCapUsdt, null);
+  assert.equal(sizing.emergencyCapApplied, false);
 }
 
 console.log("[RELEASE-GATE] ALL VALIDATION PROOFS COMPLETED");

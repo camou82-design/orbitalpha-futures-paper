@@ -327,7 +327,7 @@ function runCases(): void {
         assertClose(r.finalOrderNotionalUsdt, 90, 0.01, "CASE N emergency cap");
     }
 
-    // CASE O — V2 emergency failsafe 500 binds even when equity-adaptive sizing would exceed it
+    // CASE O — non-V2 emergency cap still binds when equity-adaptive sizing would exceed it
     {
         const uncapped = entrySizing({ equity: 600, entryPrice: 100_000, stopPrice: 99_500 });
         if (!(uncapped.finalOrderNotionalUsdt > 500)) {
@@ -356,9 +356,33 @@ function runCases(): void {
                 `CASE O emergency cap: finalOrderNotionalUsdt must be <= 500, got ${capped.finalOrderNotionalUsdt}`
             );
         }
-        assertClose(capped.finalOrderNotionalUsdt, 500, 0.01, "CASE O emergency cap at 500");
+        assertClose(capped.finalOrderNotionalUsdt, 500, 0.01, "CASE O non-V2 emergency cap at 500");
         assertTrue(capped.emergencyCapUsdt === 500, "CASE O emergencyCapUsdt recorded");
-        assertTrue(capped.effectiveLiveCapUsdt === 500, "CASE O effectiveLiveCapUsdt recorded");
+        assertTrue(capped.effectiveLiveCapUsdt === 500, "CASE O effectiveLiveCapUsdt recorded for non-V2");
+    }
+
+    // CASE O2 — V2 failsafe emergency cap binds when explicitly active
+    {
+        const capped = evaluateEquityAdaptiveSizing({
+            symbol: "BTCUSDT",
+            side: "long",
+            orderKind: "ENTRY",
+            accountEquityUsdt: 600,
+            availableBalanceUsdt: 600,
+            entryReferencePrice: 100_000,
+            effectiveStopPrice: 99_500,
+            appliedLeverage: 10,
+            entryQualityGrade: "A",
+            existingSymbolNotionalUsdt: 0,
+            existingAccountNotionalUsdt: 0,
+            emergencyAbsoluteCapUsdt: 500,
+            v2AuthorityEntry: true,
+            emergencyFailsafeActive: true,
+            roundTripFeeRate: 0,
+            lastPrice: 100_000
+        });
+        assertClose(capped.finalOrderNotionalUsdt, 500, 0.01, "CASE O2 V2 failsafe emergency cap at 500");
+        assertTrue(capped.emergencyCapApplied === true, "CASE O2 emergencyCapApplied");
     }
 
     // CASE P — ETH 2503.37 / 10x regression: Full canonical sizing 100 USDT -> 25% probe = 25 USDT

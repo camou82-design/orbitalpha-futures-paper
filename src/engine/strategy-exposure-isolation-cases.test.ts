@@ -319,14 +319,37 @@ export function runStrategyExposureIsolationTests(): void {
   }
 
   // =========================================================================
-  // CASE H: emergency 500 cap maintained
+  // CASE H: emergency failsafe binds only when explicitly active
   // =========================================================================
   {
     const sizingResult = evaluateEquityAdaptiveSizing({
       symbol: "ETHUSDT",
       side: "long",
       orderKind: "ENTRY",
-      accountEquityUsdt: 10000, // Very high equity
+      accountEquityUsdt: 10000,
+      availableBalanceUsdt: 8000,
+      entryReferencePrice: 2500,
+      effectiveStopPrice: 2490,
+      appliedLeverage: 10,
+      entryQualityGrade: "A",
+      existingSymbolNotionalUsdt: 0,
+      existingAccountNotionalUsdt: 0,
+      emergencyAbsoluteCapUsdt: 500,
+      marginReserveRatio: 0.2,
+      lastPrice: 2500,
+      v2AuthorityEntry: true,
+      emergencyFailsafeActive: true
+    });
+
+    assertTrue(sizingResult.sizingPassed, "CASE H: Sizing passed under failsafe");
+    assertTrue(sizingResult.finalOrderNotionalUsdt <= 500, "CASE H: Failsafe order notional capped at emergency 500");
+    assertEq(sizingResult.emergencyCapApplied, true, "CASE H: emergencyCapApplied true under failsafe");
+
+    const normalV2 = evaluateEquityAdaptiveSizing({
+      symbol: "ETHUSDT",
+      side: "long",
+      orderKind: "ENTRY",
+      accountEquityUsdt: 10000,
       availableBalanceUsdt: 8000,
       entryReferencePrice: 2500,
       effectiveStopPrice: 2490,
@@ -339,15 +362,12 @@ export function runStrategyExposureIsolationTests(): void {
       lastPrice: 2500,
       v2AuthorityEntry: true
     });
-
-    assertTrue(sizingResult.sizingPassed, "CASE H: Sizing passed");
-    assertTrue(sizingResult.finalOrderNotionalUsdt <= 500, "CASE H: Order notional capped at emergency 500");
-    assertEq(sizingResult.effectiveLiveCapUsdt, 500, "CASE H: Effective live cap is 500");
+    assertTrue(normalV2.finalOrderNotionalUsdt > 500, "CASE H: Normal V2 not capped at emergency 500");
 
     console.info(JSON.stringify({
-      case: "CASE_H_EMERGENCY_500_CAP_MAINTAINED_PASS",
-      finalNotional: sizingResult.finalOrderNotionalUsdt,
-      effectiveLiveCap: sizingResult.effectiveLiveCapUsdt
+      case: "CASE_H_EMERGENCY_FAILSAFE_ONLY_PASS",
+      failsafeFinalNotional: sizingResult.finalOrderNotionalUsdt,
+      normalFinalNotional: normalV2.finalOrderNotionalUsdt
     }));
   }
 

@@ -235,15 +235,17 @@ function isHtfCounterTrendRangeBlocked(input: Readonly<{
 
   assert.equal(after.sizingPassed, true);
   assert.ok(after.finalOrderNotionalUsdt > beforeNorm.actualNotional + 1, "AFTER exceeds BEFORE legacy-truncated size");
-  assert.equal(after.effectiveLiveCapUsdt, emergency);
-  assert.equal(after.ultimateSafetyCapUsdt, emergency);
+  assert.equal(after.effectiveLiveCapUsdt, null);
+  assert.equal(after.ultimateSafetyCapUsdt, null);
+  assert.equal(after.emergencyCapUsdt, emergency);
 
   const submit = resolveLiveSubmitStaticSafetyCap({
     authoritySource: "v2",
     okxLiveStaticNotionalCapEnabled: true,
     staticSafetyCapUsdt: null,
     intendedNotionalUsdt: after.finalOrderNotionalUsdt,
-    emergencyUltimateCapUsdt: emergency
+    emergencyUltimateCapUsdt: emergency,
+    emergencyFailsafeActive: false
   });
   assert.equal(submit.skipStaticCapForV2Authority, true);
   assert.equal(submit.finalSubmittedNotionalUsdt, after.finalOrderNotionalUsdt);

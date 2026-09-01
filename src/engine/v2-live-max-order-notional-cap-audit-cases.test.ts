@@ -187,12 +187,13 @@ assertCapResolution("CASE_B4_LEGACY100_EMERGENCY40", { legacy: 100, emergency: 4
     instrumentSizing: BTC_SIZING
   });
 
-  assert.equal(equity.effectiveLiveCapUsdt, EMERGENCY_MAX);
   assert.equal(equity.emergencyCapUsdt, EMERGENCY_MAX);
   assert.equal(equity.legacyStaticCapUsdt, LEGACY_MAX);
+  assert.equal(equity.effectiveLiveCapUsdt, null);
   assert.ok(equity.riskBasedNotionalUsdt > 300);
   assert.ok(equity.finalOrderNotionalUsdt > LEGACY_MAX);
-  assert.ok(equity.finalOrderNotionalUsdt <= EMERGENCY_MAX + 1e-9);
+  assert.equal(equity.emergencyCapApplied, false);
+  assert.ok(equity.finalOrderNotionalUsdt > equity.riskBasedNotionalUsdt * 0.9 || equity.limitingAuthority !== "emergency_failsafe_cap");
 
   const norm = normalizeOkxSwapContractsFromNotional({
     desiredNotionalUsdt: equity.finalOrderNotionalUsdt,
@@ -204,6 +205,7 @@ assertCapResolution("CASE_B4_LEGACY100_EMERGENCY40", { legacy: 100, emergency: 4
   pass("CASE_C_V2_EQUITY_PATH_NOT_LEGACY40", {
     risk_based_notional_usdt: equity.riskBasedNotionalUsdt,
     effective_live_cap_usdt: equity.effectiveLiveCapUsdt,
+    emergency_cap_usdt: equity.emergencyCapUsdt,
     final_order_notional_usdt: equity.finalOrderNotionalUsdt,
     normalized_notional_usdt: norm.actualNotional
   });
@@ -236,15 +238,10 @@ assertCapResolution("CASE_B4_LEGACY100_EMERGENCY40", { legacy: 100, emergency: 4
   });
 }
 
-// CASE D — V2 fast path uses emergency ultimate cap, not legacy 40
+// CASE D — V2 fast path respects engine authority without legacy/emergency static re-cap
 {
-  const cap = resolveUltimateSafetyCapForOrderSizing({
-    v2AuthorityEntry: true,
-    legacyStaticCapUsdt: LEGACY_MAX,
-    emergencyCapUsdt: EMERGENCY_MAX
-  });
-  const authorityNotionalUsdt = 356.16;
-  const v2EntrySizeUsd = Math.min(authorityNotionalUsdt, cap.effectiveLiveCapUsdt!);
+  const authorityNotionalUsdt = 1_940;
+  const v2EntrySizeUsd = authorityNotionalUsdt;
   assert.equal(v2EntrySizeUsd, authorityNotionalUsdt);
   pass("CASE_D_V2_FAST_PATH", { authority_notional_usdt: authorityNotionalUsdt, v2_entry_size_usd: v2EntrySizeUsd });
 }
@@ -256,7 +253,8 @@ assertCapResolution("CASE_B4_LEGACY100_EMERGENCY40", { legacy: 100, emergency: 4
     okxLiveStaticNotionalCapEnabled: true,
     staticSafetyCapUsdt: LEGACY_MAX,
     intendedNotionalUsdt: 356.16,
-    emergencyUltimateCapUsdt: EMERGENCY_MAX
+    emergencyUltimateCapUsdt: EMERGENCY_MAX,
+    emergencyFailsafeActive: false
   });
   assert.equal(submit.skipStaticCapForV2Authority, true);
   assert.equal(submit.finalSubmittedNotionalUsdt, 356.16);
@@ -353,9 +351,9 @@ assertCapResolution("CASE_B4_LEGACY100_EMERGENCY40", { legacy: 100, emergency: 4
   const equityProof = proofs.find((p) => p.event === "V2_EQUITY_ADAPTIVE_SIZING_PROOF");
   const liveSizeProof = proofs.find((p) => p.event === "LIVE_ORDER_SIZE_PROOF");
 
-  assert.equal(Number(sizingProof?.effective_live_cap_usdt), EMERGENCY_MAX);
   assert.equal(Number(sizingProof?.legacy_static_cap_usdt), LEGACY_MAX);
   assert.equal(Number(sizingProof?.emergency_cap_usdt), EMERGENCY_MAX);
+  assert.equal(sizingProof?.effective_live_cap_usdt ?? null, null);
 
   if (runtimeIsLiveSigned && decision!.decision === "ENTER") {
     const finalNotional = Number(
@@ -365,8 +363,7 @@ assertCapResolution("CASE_B4_LEGACY100_EMERGENCY40", { legacy: 100, emergency: 4
       0
     );
     assert.ok(finalNotional > LEGACY_MAX, `V2 pipeline final notional must exceed legacy 40, got ${finalNotional}`);
-    assert.ok(finalNotional <= EMERGENCY_MAX + 1e-9, `V2 pipeline final notional must be <= emergency cap, got ${finalNotional}`);
-    assert.equal(Number(equityProof?.effective_live_cap_usdt), EMERGENCY_MAX);
+    assert.equal(equityProof?.emergency_cap_applied, false);
   }
 
   pass("CASE_G_PRODUCTION_PIPELINE", {

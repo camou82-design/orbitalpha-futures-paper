@@ -50,8 +50,13 @@ export type EvaluateEquityAdaptiveSizingInput = Readonly<{
      * Applied after probe + HTF multipliers. Must be > 0; never blocks entry by itself.
      */
     externalSizeMultiplier?: number;
-    /** V2 risk-authoritative entries skip legacy 40 USDT; emergency cap remains ultimate ceiling. */
+    /** V2 risk-authoritative entries skip legacy 40 USDT and daily emergency ceiling. */
     v2AuthorityEntry?: boolean;
+    /**
+     * When true, OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT binds sizing/submit (failsafe only).
+     * Normal V2 risk-authoritative entries must leave this false.
+     */
+    emergencyFailsafeActive?: boolean;
     /**
      * ENTRY probe size multiplier. Applied after equity/symbol/account/emergency caps,
      * before HTF multiplier and OKX lot normalization.
@@ -101,11 +106,22 @@ export type EquityAdaptiveSizingResult = Readonly<{
     emergencyCapUsdt: number | null;
     /** Raw OKX_LIVE_MAX_ORDER_NOTIONAL_USDT when set. */
     legacyStaticCapUsdt: number | null;
-    /** min(emergency, legacy) binding cap for live signed orders. */
+    /** min(emergency, legacy) binding cap for non-V2 live paths; null for normal V2 authority. */
     effectiveLiveCapUsdt: number | null;
-    /** Cap applied inside evaluateEquityAdaptiveSizing pre-lot min(). */
+    /** Cap applied inside evaluateEquityAdaptiveSizing pre-lot min(); null for normal V2 authority. */
     ultimateSafetyCapUsdt: number | null;
     legacyCapSource: string | null;
+    /** usableAvailableBalanceUsdt × appliedLeverage — margin-derived notional ceiling. */
+    availableBalanceCapUsdt: number;
+    /** Pre-probe notional after equity/symbol/account/failsafe caps (before probe multiplier). */
+    preProbeNotionalUsdt: number;
+    /** Which authority bound pre-probe notional. */
+    limitingAuthority: string;
+    /** Final sizing authority label after probe/HTF/lot normalization. */
+    finalSizingAuthority: string;
+    /** True only when emergency failsafe cap actually bound sizing. */
+    emergencyCapApplied: boolean;
+    emergencyCapReason: string | null;
     htfSizeMultiplierApplied: number;
     externalSizeMultiplierApplied: number;
     /** Always false — legacy absolute probe cap (baseSizeUsd×multiplier) never used in V2 ENTRY. */
@@ -158,29 +174,48 @@ export function resolveEffectiveLiveOrderNotionalCap(input: Readonly<{
 }
 
 /**
- * V2 risk-authoritative sizing uses emergency absolute ceiling only.
- * Legacy OKX_LIVE_MAX_ORDER_NOTIONAL_USDT (e.g. 40) applies to non-V2 / legacy submit paths.
+ * V2 risk-authoritative sizing does not use emergency/legacy static caps as daily ceiling.
+ * Legacy OKX_LIVE_MAX_ORDER_NOTIONAL_USDT applies to non-V2 submit paths.
+ * Emergency cap binds only when emergencyFailsafeActive is explicitly true.
  */
 export function resolveUltimateSafetyCapForOrderSizing(input: Readonly<{
     v2AuthorityEntry?: boolean;
+    emergencyFailsafeActive?: boolean;
     emergencyCapUsdt?: number | null;
     legacyStaticCapUsdt?: number | null;
 }>): LiveOrderNotionalCapResolution {
     const emergencyCapUsdt = positiveCapUsdt(input.emergencyCapUsdt);
     const legacyStaticCapUsdt = positiveCapUsdt(input.legacyStaticCapUsdt);
     if (input.v2AuthorityEntry === true) {
+        const bindingCap =
+            input.emergencyFailsafeActive === true ? emergencyCapUsdt : null;
         return {
-            cap: emergencyCapUsdt,
+            cap: bindingCap,
             emergencyCapUsdt,
             legacyStaticCapUsdt,
-            effectiveLiveCapUsdt: emergencyCapUsdt,
+            effectiveLiveCapUsdt: bindingCap,
             legacyCapSource:
-                emergencyCapUsdt != null
-                    ? "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT"
+                bindingCap != null && emergencyCapUsdt != null
+                    ? "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE"
                     : null
         };
     }
     return resolveEffectiveLiveOrderNotionalCap({ emergencyCapUsdt, legacyStaticCapUsdt });
+}
+
+function resolveBindingLimitingAuthority(
+    candidates: ReadonlyArray<{ key: string; value: number }>
+): string {
+    let minValue = Number.POSITIVE_INFINITY;
+    let limitingAuthority = "unknown";
+    for (const candidate of candidates) {
+        if (!(candidate.value >= 0) || !Number.isFinite(candidate.value)) continue;
+        if (candidate.value < minValue - 1e-9) {
+            minValue = candidate.value;
+            limitingAuthority = candidate.key;
+        }
+    }
+    return limitingAuthority;
 }
 
 export function qualityMultiplierFromGrade(grade: string | null | undefined): number | null {
@@ -260,12 +295,20 @@ export function evaluateEquityAdaptiveSizing(
     const maxAdverseAddonUsdt = equity * MAX_ADVERSE_ADDON_EQUITY_MULTIPLE;
     const marginReserveRatio = input.marginReserveRatio ?? MARGIN_RESERVE_RATIO_DEFAULT;
     const usableAvailableBalanceUsdt = input.availableBalanceUsdt * (1 - marginReserveRatio);
+    const availableBalanceCapUsdt =
+        usableAvailableBalanceUsdt * Math.max(1, input.appliedLeverage);
     const emergency = resolveUltimateSafetyCapForOrderSizing({
         v2AuthorityEntry: input.v2AuthorityEntry === true,
+        emergencyFailsafeActive: input.emergencyFailsafeActive === true,
         emergencyCapUsdt: input.emergencyAbsoluteCapUsdt,
         legacyStaticCapUsdt: input.legacyStaticCapUsdt
     });
     const ultimateSafetyCapUsdt = emergency.effectiveLiveCapUsdt;
+    const emergencyCapApplied = ultimateSafetyCapUsdt != null;
+    const emergencyCapReason =
+        emergencyCapApplied && input.emergencyFailsafeActive === true
+            ? emergency.legacyCapSource ?? "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE"
+            : null;
 
     const baseFail = (
         partial: Partial<EquityAdaptiveSizingResult> & { blockReason: string }
@@ -300,6 +343,12 @@ export function evaluateEquityAdaptiveSizing(
         effectiveLiveCapUsdt: emergency.effectiveLiveCapUsdt,
         legacyCapSource: emergency.legacyCapSource,
         ultimateSafetyCapUsdt,
+        availableBalanceCapUsdt,
+        preProbeNotionalUsdt: 0,
+        limitingAuthority: partial.limitingAuthority ?? "blocked",
+        finalSizingAuthority: partial.finalSizingAuthority ?? "blocked",
+        emergencyCapApplied,
+        emergencyCapReason,
         htfSizeMultiplierApplied: 1,
         externalSizeMultiplierApplied: 1,
         legacyAbsoluteProbeCapApplied: false,
@@ -335,34 +384,55 @@ export function evaluateEquityAdaptiveSizing(
     const remainingAccountCapacity = Math.max(0, accountCapUsdt - input.existingAccountNotionalUsdt);
 
     let preLotNotionalUsdt: number;
+    let limitingAuthority = "unknown";
     if (input.orderKind === "ENTRY") {
-        preLotNotionalUsdt = Math.min(
-            riskBasedNotionalUsdt,
-            equityInitialCapUsdt,
-            remainingSymbolCapacity,
-            remainingAccountCapacity,
-            input.policyRequestedNotionalUsdt ?? Number.POSITIVE_INFINITY,
-            ultimateSafetyCapUsdt ?? Number.POSITIVE_INFINITY
-        );
+        const policyRequested =
+            input.policyRequestedNotionalUsdt ?? Number.POSITIVE_INFINITY;
+        const entryCandidates = [
+            { key: "risk_based_notional", value: riskBasedNotionalUsdt },
+            { key: "equity_initial_cap", value: equityInitialCapUsdt },
+            { key: "symbol_capacity", value: remainingSymbolCapacity },
+            { key: "account_capacity", value: remainingAccountCapacity },
+            ...(Number.isFinite(policyRequested)
+                ? [{ key: "policy_requested", value: policyRequested }]
+                : []),
+            ...(ultimateSafetyCapUsdt != null
+                ? [{ key: "emergency_failsafe_cap", value: ultimateSafetyCapUsdt }]
+                : [])
+        ];
+        preLotNotionalUsdt = Math.min(...entryCandidates.map((c) => c.value));
+        limitingAuthority = resolveBindingLimitingAuthority(entryCandidates);
     } else if (input.orderKind === "ADVERSE_ADDON") {
         const policyRequested = Math.max(0, input.policyRequestedNotionalUsdt ?? 0);
-        preLotNotionalUsdt = Math.min(
-            policyRequested,
-            maxAdverseAddonUsdt,
-            remainingSymbolCapacity,
-            remainingAccountCapacity,
-            input.adverseRiskBudgetAllowedNotional ?? Number.POSITIVE_INFINITY,
-            ultimateSafetyCapUsdt ?? Number.POSITIVE_INFINITY
-        );
+        const addonCandidates = [
+            { key: "policy_requested", value: policyRequested },
+            { key: "max_adverse_addon", value: maxAdverseAddonUsdt },
+            { key: "symbol_capacity", value: remainingSymbolCapacity },
+            { key: "account_capacity", value: remainingAccountCapacity },
+            {
+                key: "adverse_risk_budget",
+                value: input.adverseRiskBudgetAllowedNotional ?? Number.POSITIVE_INFINITY
+            },
+            ...(ultimateSafetyCapUsdt != null
+                ? [{ key: "emergency_failsafe_cap", value: ultimateSafetyCapUsdt }]
+                : [])
+        ];
+        preLotNotionalUsdt = Math.min(...addonCandidates.map((c) => c.value));
+        limitingAuthority = resolveBindingLimitingAuthority(addonCandidates);
     } else {
         const policyRequested = Math.max(0, input.policyRequestedNotionalUsdt ?? 0);
-        preLotNotionalUsdt = Math.min(
-            policyRequested,
-            remainingSymbolCapacity,
-            remainingAccountCapacity,
-            ultimateSafetyCapUsdt ?? Number.POSITIVE_INFINITY
-        );
+        const pyramidCandidates = [
+            { key: "policy_requested", value: policyRequested },
+            { key: "symbol_capacity", value: remainingSymbolCapacity },
+            { key: "account_capacity", value: remainingAccountCapacity },
+            ...(ultimateSafetyCapUsdt != null
+                ? [{ key: "emergency_failsafe_cap", value: ultimateSafetyCapUsdt }]
+                : [])
+        ];
+        preLotNotionalUsdt = Math.min(...pyramidCandidates.map((c) => c.value));
+        limitingAuthority = resolveBindingLimitingAuthority(pyramidCandidates);
     }
+    const preProbeNotionalUsdt = preLotNotionalUsdt;
 
     if (!(preLotNotionalUsdt > 0)) {
         return baseFail({
@@ -555,6 +625,18 @@ export function evaluateEquityAdaptiveSizing(
     const finalOrderNotionalUsdt = normalizedNotionalUsdt ?? preLotNotionalUsdt;
     const finalRequiredMarginUsdt = finalOrderNotionalUsdt / Math.max(1, input.appliedLeverage);
     const marginCapacityPassed = finalRequiredMarginUsdt <= usableAvailableBalanceUsdt + 1e-9;
+    let finalSizingAuthority = limitingAuthority;
+    if (!marginCapacityPassed) {
+        finalSizingAuthority = "available_balance_capacity";
+    } else if (normalizedNotionalUsdt != null && Math.abs(normalizedNotionalUsdt - preLotNotionalUsdt) > 1e-6) {
+        finalSizingAuthority = "lot_normalization";
+    } else if (externalSizeMultiplierApplied !== 1) {
+        finalSizingAuthority = "external_size_multiplier";
+    } else if (htfSizeMultiplierApplied < 1) {
+        finalSizingAuthority = "htf_size_multiplier";
+    } else if (probeMultiplierApplied < 1) {
+        finalSizingAuthority = "probe_multiplier";
+    }
 
     if (!marginCapacityPassed) {
         return baseFail({
@@ -567,17 +649,22 @@ export function evaluateEquityAdaptiveSizing(
             netRiskBudgetUsdt,
             riskBasedNotionalUsdt,
             preLotNotionalUsdt,
+            preProbeNotionalUsdt,
             cappedFullEntryNotionalUsdt,
             probeMultiplierApplied,
             probeSizingSource,
             probeAdjustedPreLotNotionalUsdt,
+            limitingAuthority,
+            finalSizingAuthority,
             finalOrderNotionalUsdt,
             finalRequiredMarginUsdt,
             normalizedContracts,
             normalizedNotionalUsdt,
             actualRiskAtStopUsdt,
             actualRiskPct,
-            marginCapacityPassed: false
+            marginCapacityPassed: false,
+            htfSizeMultiplierApplied,
+            externalSizeMultiplierApplied
         });
     }
 
@@ -613,6 +700,12 @@ export function evaluateEquityAdaptiveSizing(
         effectiveLiveCapUsdt: emergency.effectiveLiveCapUsdt,
         ultimateSafetyCapUsdt,
         legacyCapSource: emergency.legacyCapSource,
+        availableBalanceCapUsdt,
+        preProbeNotionalUsdt,
+        limitingAuthority,
+        finalSizingAuthority,
+        emergencyCapApplied,
+        emergencyCapReason,
         htfSizeMultiplierApplied,
         externalSizeMultiplierApplied,
         legacyAbsoluteProbeCapApplied: false,

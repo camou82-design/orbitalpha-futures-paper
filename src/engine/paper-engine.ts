@@ -12577,6 +12577,8 @@ export class PaperEngine {
     requestedAddonNotionalUsdtCap?: number;
     /** V2 RANGE partial plan: attach SL-only at entry (TP delegated to lifecycle). */
     isV2RangePartialPlan?: boolean;
+    /** Failsafe-only: when true, emergency max notional may bind submit sizing. */
+    emergencyFailsafeActive?: boolean;
   }): Promise<{
     ok: boolean;
     ordId: string | null;
@@ -12889,9 +12891,9 @@ export class PaperEngine {
       const okx_available_balance_usdt = this.okxAvailableBalanceUsdt;
 
       // 3. Dynamic Capping (Execution Reality)
-      let static_safety_cap =
+      let static_safety_cap: number | null =
         input.authoritySource === "v2"
-          ? liveCapResolution.emergencyCapUsdt
+          ? null
           : liveCapResolution.effectiveLiveCapUsdt;
 
       // 3.5 Leverage Sync for V2
@@ -12947,7 +12949,8 @@ export class PaperEngine {
         staticSafetyCapUsdt:
           input.authoritySource === "v2" ? null : liveCapResolution.effectiveLiveCapUsdt,
         intendedNotionalUsdt: final_submitted_notional_usdt,
-        emergencyUltimateCapUsdt: liveCapResolution.emergencyCapUsdt
+        emergencyUltimateCapUsdt: liveCapResolution.emergencyCapUsdt,
+        emergencyFailsafeActive: input.emergencyFailsafeActive === true
       });
       final_submitted_notional_usdt = staticCapResolution.finalSubmittedNotionalUsdt;
       if (staticCapResolution.finalSizeSource === "static_safety_cap") {
@@ -12971,6 +12974,9 @@ export class PaperEngine {
         static_safety_cap,
         static_cap_enabled: this.config.okxLiveStaticNotionalCapEnabled,
         static_cap_skipped_for_v2_authority: skipStaticCapForV2Authority,
+        emergency_cap_applied: staticCapResolution.emergencyCapApplied,
+        emergency_cap_reason: staticCapResolution.emergencyCapReason,
+        v2_authority_entry: input.authoritySource === "v2",
         ref_price: refPrice
       };
 
@@ -21694,12 +21700,10 @@ export class PaperEngine {
           emergencyCapUsdt: this.config.okxLiveEmergencyMaxOrderNotionalUsdt,
           legacyStaticCapUsdt: this.config.okxLiveMaxOrderNotionalUsdt
         });
-        const effectiveLiveCapUsdt = liveCapResolution.effectiveLiveCapUsdt;
 
-        const v2OrderNotionalUsdt =
-          effectiveLiveCapUsdt != null
-            ? Math.min(authorityNotionalUsdt, effectiveLiveCapUsdt)
-            : authorityNotionalUsdt;
+        // V2 risk-authoritative notional from engine-v2 is the sizing authority.
+        // Do not re-apply legacy/emergency static caps on the bridge handoff.
+        const v2OrderNotionalUsdt = authorityNotionalUsdt;
         let v2EntrySizeUsd = v2OrderNotionalUsdt;
         const symS = String(first.symbol);
         const mPreV2 = marginsForSymbol(next, symS);
@@ -25678,14 +25682,20 @@ export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
   staticSafetyCapUsdt: number | null;
   intendedNotionalUsdt: number;
   emergencyUltimateCapUsdt?: number | null;
+  /** When true, emergency cap may bind submit notional (failsafe only). */
+  emergencyFailsafeActive?: boolean;
 }>): Readonly<{
   finalSubmittedNotionalUsdt: number;
   finalSizeSource: "v2_risk" | "static_safety_cap" | "emergency_ultimate_cap";
   skipStaticCapForV2Authority: boolean;
+  emergencyCapApplied: boolean;
+  emergencyCapReason: string | null;
 }> {
   const skipStaticCapForV2Authority = input.authoritySource === "v2";
   let finalSubmittedNotionalUsdt = input.intendedNotionalUsdt;
   let finalSizeSource: "v2_risk" | "static_safety_cap" | "emergency_ultimate_cap" = "v2_risk";
+  let emergencyCapApplied = false;
+  let emergencyCapReason: string | null = null;
   if (
     !skipStaticCapForV2Authority &&
     input.okxLiveStaticNotionalCapEnabled &&
@@ -25698,15 +25708,23 @@ export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
   }
   const emergencyUltimate = input.emergencyUltimateCapUsdt;
   if (
-    skipStaticCapForV2Authority &&
+    input.emergencyFailsafeActive === true &&
     emergencyUltimate != null &&
     emergencyUltimate > 0 &&
     finalSubmittedNotionalUsdt > emergencyUltimate
   ) {
     finalSubmittedNotionalUsdt = emergencyUltimate;
     finalSizeSource = "emergency_ultimate_cap";
+    emergencyCapApplied = true;
+    emergencyCapReason = "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE";
   }
-  return { finalSubmittedNotionalUsdt, finalSizeSource, skipStaticCapForV2Authority };
+  return {
+    finalSubmittedNotionalUsdt,
+    finalSizeSource,
+    skipStaticCapForV2Authority,
+    emergencyCapApplied,
+    emergencyCapReason
+  };
 }
 
 export function computeOkxFilledNotionalUsdt(

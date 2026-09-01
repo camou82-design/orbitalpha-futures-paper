@@ -65,14 +65,16 @@ function runCases(): void {
       instrumentSizing: { lotSz: 0.01, minSz: 0.01, ctVal: 0.1, ctValCcy: "ETH" }
     });
     assertTrue(v2Sized.sizingPassed, "v2 grade-A sizing passes");
-    assertTrue(v2Sized.effectiveLiveCapUsdt === 500, "v2 ultimate cap is emergency only");
+    assertTrue(v2Sized.effectiveLiveCapUsdt === null, "v2 has no daily static ceiling");
+    assertTrue(v2Sized.emergencyCapUsdt === 500, "v2 emergency cap recorded for failsafe only");
     assertTrue(v2Sized.finalOrderNotionalUsdt > 40, "v2 final notional exceeds legacy 40");
     const v2Submit = resolveLiveSubmitStaticSafetyCap({
       authoritySource: "v2",
       okxLiveStaticNotionalCapEnabled: true,
       staticSafetyCapUsdt: null,
       intendedNotionalUsdt: v2Sized.finalOrderNotionalUsdt,
-      emergencyUltimateCapUsdt: 500
+      emergencyUltimateCapUsdt: 500,
+      emergencyFailsafeActive: false
     });
     assertTrue(v2Submit.skipStaticCapForV2Authority, "v2 authority skips legacy static cap");
     assertTrue(v2Submit.finalSubmittedNotionalUsdt === v2Sized.finalOrderNotionalUsdt, "v2 submit preserves risk sizing");
