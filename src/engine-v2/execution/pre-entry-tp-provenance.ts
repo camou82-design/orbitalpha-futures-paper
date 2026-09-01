@@ -348,6 +348,18 @@ export function resolveV2PreEntryTp1Authority(
                 adaptiveSlSource: null
             };
         }
+        const mirrorTp = engineMirrorTpPrice(entryPrice, side, "TREND");
+        if (mirrorTp != null && isValidDirectionTp(side, entryPrice, mirrorTp)) {
+            return {
+                ok: true,
+                rawTp1Price: mirrorTp,
+                tpSource: "engine_calculated",
+                adaptiveApplied: false,
+                adaptiveDiagnostics: null,
+                adaptiveSlPrice: null,
+                adaptiveSlSource: null
+            };
+        }
         return { ok: false, blockReason: "V2_TREND_TP_PRICE_UNAVAILABLE", adaptiveDiagnostics: null };
     }
 
