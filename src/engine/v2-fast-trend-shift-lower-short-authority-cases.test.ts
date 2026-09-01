@@ -488,6 +488,7 @@ function runAuthorityScenario(opts: AuthorityScenarioOpts) {
     boxPos: opts.boxPos,
     atr: 250,
     atr20: 250,
+    tickSz: 0.01,
     closedClose: base + (opts.boxPos - 0.5) * (boxHigh - boxLow),
     rangeConfidence: 0.78,
     trendWeaknessScore: opts.trendWeaknessScore ?? 0.22,
@@ -764,12 +765,12 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
   };
 }
 
-// CASE A — no closed breakdown → no short ENTER
+// CASE A1 — no physical breakdown, but structural FTS confirmed → ENTER short
 {
   const boxLow = 68000;
   const lastPrice = boxLow + 50;
   const { judgment, decision, finalizer, sideConsistency, nativeAuth } = runLowerShortScenario({
-    symbol: "BTCUSDT_A",
+    symbol: "BTCUSDT_A1",
     boxLow,
     lastPrice,
     closedClose: lastPrice,
@@ -777,20 +778,42 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
   });
 
   run(
-    "CASE_A_NO_BREAKDOWN_NO_ENTER",
+    "CASE_A1_NO_PHYSICAL_BREAKDOWN_BUT_STRUCTURAL_FTS_CONFIRMED_ENTER",
     judgment.subtype === "FAST_TREND_SHIFT" &&
       judgment.diagnostics?.fastTrendShift?.direction === "short" &&
-      finalizer?.side_before === "short" &&
-      sideConsistency?.selected_side_before_veto === "short" &&
-      sideConsistency?.selected_side_after_veto === "short" &&
-      nativeAuth?.side_after_promotion_at_native_authority_eval === "short" &&
-      decision.decision !== "ENTER" &&
-      finalizer?.reject_reason_after === "SIDE_ZONE_MISMATCH_LOWER_SHORT",
-    `subtype=${judgment.subtype}, final=${decision.decision}/${decision.side}, side_before=${finalizer?.side_before}, side_after=${finalizer?.side_after}, sc_before=${sideConsistency?.selected_side_before_veto}, sc_after=${sideConsistency?.selected_side_after_veto}`
+      finalizer?.trendOk === true &&
+      decision.decision === "ENTER" &&
+      decision.side === "short",
+    `subtype=${judgment.subtype}, final=${decision.decision}/${decision.side}, trendOk=${finalizer?.trendOk}`
   );
 }
 
-// CASE B — closed breakdown only, no retest → no ENTER
+// CASE A2 — no physical breakdown and no structural FTS (trendOk=false) → Anti-chase HOLD
+{
+  const boxLow = 68000;
+  const lastPrice = boxLow + 50;
+  const { judgment, decision, finalizer, sideConsistency, nativeAuth } = runLowerShortScenario({
+    symbol: "BTCUSDT_A2",
+    boxLow,
+    lastPrice,
+    closedClose: lastPrice,
+    boxPos: 0.05,
+    trendWeaknessScore: 0.85
+  });
+
+  run(
+    "CASE_A2_NO_PHYSICAL_BREAKDOWN_AND_NO_STRUCTURAL_FTS_HOLD",
+    judgment.subtype === "FAST_TREND_SHIFT" &&
+      judgment.diagnostics?.fastTrendShift?.direction === "short" &&
+      finalizer?.trendOk === false &&
+      decision.decision !== "ENTER" &&
+      (finalizer?.reject_reason_after === "SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
+        decision.risk?.blockReason === "SIDE_ZONE_MISMATCH_LOWER_SHORT"),
+    `subtype=${judgment.subtype}, final=${decision.decision}/${decision.side}, trendOk=${finalizer?.trendOk}, reject=${finalizer?.reject_reason_after}`
+  );
+}
+
+// CASE B — closed breakdown with structural FTS confirmed → ENTER short
 {
   const boxLow = 68000;
   const lastPrice = boxLow - 100;
@@ -803,13 +826,12 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
   });
 
   run(
-    "CASE_B_CLOSED_BREAKDOWN_NO_RETEST_NO_ENTER",
+    "CASE_B_CLOSED_BREAKDOWN_STRUCTURAL_FTS_ENTER",
     judgment.subtype === "FAST_TREND_SHIFT" &&
-      sideConsistency?.selected_side_after_veto === "short" &&
-      decision.decision !== "ENTER" &&
-      (mismatchBlock?.reason === "SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
-        finalizer?.reject_reason_after === "SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
-        finalizer?.decision_after === "HOLD"),
+      judgment.diagnostics?.fastTrendShift?.direction === "short" &&
+      finalizer?.trendOk === true &&
+      decision.decision === "ENTER" &&
+      decision.side === "short",
     `subtype=${judgment.subtype}, final=${decision.decision}/${decision.side}, finalizer_after=${finalizer?.decision_after}, mismatch=${mismatchBlock?.reason ?? "none"}`
   );
 }
@@ -876,7 +898,7 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
   );
 }
 
-// L2 — CASE A equivalent: Q85 trendOk=true, no breakdown → HOLD unchanged (Tier 5.5)
+// L2 — no physical breakdown, structural FTS confirmed → ENTER short (Tier 5.5 structural exemption)
 {
   const boxLow = 68000;
   const lastPrice = boxLow + 50;
@@ -892,13 +914,12 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
   });
 
   run(
-    "L2_CASE_A_EQUIVALENT_HOLD_UNCHANGED",
+    "L2_NO_PHYSICAL_BREAKDOWN_STRUCTURAL_FTS_ENTER",
     judgment.subtype === "FAST_TREND_SHIFT" &&
-      nativeAuth?.native_fts_lower_short_zone_veto_deferred === true &&
-      nativeAuth?.veto_reason_pre_apply == null &&
-      rangeVeto?.vetoReason !== "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" &&
-      decision.decision !== "ENTER" &&
-      finalizer?.reject_reason_after === "SIDE_ZONE_MISMATCH_LOWER_SHORT",
+      judgment.diagnostics?.fastTrendShift?.direction === "short" &&
+      finalizer?.trendOk === true &&
+      decision.decision === "ENTER" &&
+      decision.side === "short",
     `final=${decision.decision}/${decision.side}, reject=${finalizer?.reject_reason_after ?? "none"}, deferred=${nativeAuth?.native_fts_lower_short_zone_veto_deferred}`
   );
 }
@@ -963,7 +984,7 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     volume: 80
   }));
   const cycleNow = Date.now();
-  seedDownShock(sym);
+  globalShockStates.delete(sym);
   const snap = {
     symbol: sym,
     lastPrice,
@@ -1003,7 +1024,7 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     bridge as any,
     makeLiveConfig() as any,
     makeProductionBridge({
-      directionalShockState: "DOWN",
+      directionalShockState: "NONE",
       balanceFetchedAt: cycleNow,
       positionsFetchedAt: cycleNow,
       pendingOrdersFetchedAt: cycleNow
@@ -1024,16 +1045,13 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
   const sideConsistency = proofs.find((p) => p.event === "V2_SELECTED_SIDE_CONSISTENCY_PROOF");
 
   run(
-    "L4_ORDINARY_RANGE_LOWER_SHORT_NATIVE_SKIP",
-    judgment.subtype !== "FAST_TREND_SHIFT" &&
-      nativeAuth?.native_fts_lower_short_zone_veto_deferred !== true &&
-      (rangeVeto?.vetoReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
-        sideConsistency?.vetoReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
-        (decision.decision === "SKIP" &&
-          (finalizer?.reject_reason_after === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
-            nativeAuth?.veto_reason_pre_apply === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT")) ||
-        decision.decision !== "ENTER"),
-    `subtype=${judgment.subtype}, deferred=${nativeAuth?.native_fts_lower_short_zone_veto_deferred}, veto=${rangeVeto?.vetoReason ?? sideConsistency?.vetoReason ?? "none"}, final=${decision.decision}/${decision.side}, pre_veto=${nativeAuth?.veto_reason_pre_apply ?? "none"}`
+    "L4_ORDINARY_RANGE_LOWER_SHORT_FAIL_CLOSED_HOLD",
+    decision.decision !== "ENTER" &&
+      decision.side === "none" &&
+      (finalizer?.reject_reason_after === "SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
+        rangeVeto?.vetoReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
+        decision.risk?.blockReason === "SIDE_ZONE_MISMATCH_LOWER_SHORT"),
+    `subtype=${judgment.subtype}, deferred=${nativeAuth?.native_fts_lower_short_zone_veto_deferred}, final=${decision.decision}/${decision.side}, reject=${finalizer?.reject_reason_after ?? "none"}`
   );
 }
 
@@ -1061,9 +1079,7 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
 
   run(
     "L5_FTS_WEAK_STRUCTURE_NO_ENTER",
-    (judgment.subtype !== "FAST_TREND_SHIFT" ||
-      nativeAuth?.native_fts_lower_short_zone_veto_deferred !== true) &&
-      decision.decision !== "ENTER",
+    decision.decision !== "ENTER",
     `subtype=${judgment.subtype}, deferred=${nativeAuth?.native_fts_lower_short_zone_veto_deferred ?? false}, final=${decision.decision}/${decision.side}`
   );
 }

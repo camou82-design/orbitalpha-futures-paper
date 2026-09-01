@@ -1,6 +1,7 @@
 import { EngineV2Input, EngineV2Side, ExecutorOutput, MarketJudgmentOutput } from "../types";
 import { classifyRangeZone } from "../../models/types";
 import { computeSoftExitFeeBreakEvenPct, DEFAULT_SOFT_EXIT_SLIPPAGE_BUFFER_PCT } from "../exit/soft-exit-fee-gate";
+import { computeMinimumProfitableTpPct, DEFAULT_PAPER_SLIPPAGE_ESTIMATE_BPS } from "../execution/tp-profitability-authority";
 import {
     getClosedCandlesForStructuralStop,
     resolveFastTrendShiftStructuralStop
@@ -1232,14 +1233,15 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     // --- EXIT PLAN GENERATION (Mandatory for RANGE) ---
     const entryPx = Number(sn.lastPrice ?? 0);
     const feeRate = Number(input.config?.paperTakerFeeRate ?? 0.0005);
-    const feeBreakEvenPct = computeSoftExitFeeBreakEvenPct({
-        positionNotionalUsd: 1000,
+    const slippageBps = Number((input.config as any)?.paperSlippageEstimateBps ?? DEFAULT_PAPER_SLIPPAGE_ESTIMATE_BPS);
+    const minimumProfitableTpPct = computeMinimumProfitableTpPct({
         feeRate,
-        slippageBufferPct: DEFAULT_SOFT_EXIT_SLIPPAGE_BUFFER_PCT
+        paperSlippageEstimateBps: slippageBps
     });
-    const feeEconomicMinDist = entryPx > 0 ? entryPx * (feeBreakEvenPct + 0.0002) : 0;
-    const maxTp1Dist = entryPx > 0 ? entryPx * 0.0025 : 0;
-    const minProfitDistance = Math.max(atr * 0.35, entryPx * 0.001, feeEconomicMinDist);
+    const profitabilityMinDist = entryPx > 0 ? entryPx * minimumProfitableTpPct : 0;
+    const legacyMaxTp1Dist = entryPx > 0 ? entryPx * 0.0025 : 0;
+    const effectiveMaxTp1Dist = Math.max(legacyMaxTp1Dist, profitabilityMinDist);
+    const minProfitDistance = Math.max(atr * 0.35, entryPx * 0.001, profitabilityMinDist);
     const minStopDistance = Math.max(atr * 0.5, entryPx * 0.0015);
     let tp1 = 0;
     let tp2 = 0;
@@ -1248,14 +1250,14 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     if (side === "long") {
         inv = Math.min(boxLow - minStopDistance, entryPx - minStopDistance);
         let rawTp1Dist = Math.max(boxMid - entryPx, minProfitDistance);
-        if (maxTp1Dist > 0 && rawTp1Dist > maxTp1Dist) rawTp1Dist = maxTp1Dist;
+        if (effectiveMaxTp1Dist > 0 && rawTp1Dist > effectiveMaxTp1Dist) rawTp1Dist = effectiveMaxTp1Dist;
         tp1 = entryPx + rawTp1Dist;
         tp2 = Math.max(boxHigh, tp1 + minProfitDistance);
         if (tp2 <= tp1) tp2 = tp1 + minProfitDistance;
     } else if (side === "short") {
         inv = Math.max(boxHigh + minStopDistance, entryPx + minStopDistance);
         let rawTp1Dist = Math.max(entryPx - boxMid, minProfitDistance);
-        if (maxTp1Dist > 0 && rawTp1Dist > maxTp1Dist) rawTp1Dist = maxTp1Dist;
+        if (effectiveMaxTp1Dist > 0 && rawTp1Dist > effectiveMaxTp1Dist) rawTp1Dist = effectiveMaxTp1Dist;
         tp1 = entryPx - rawTp1Dist;
         tp2 = Math.min(boxLow, tp1 - minProfitDistance);
         if (tp2 >= tp1) tp2 = tp1 - minProfitDistance;
@@ -1273,7 +1275,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         invalidTpReason = "zero_or_negative_levels";
     } else if (boxHeightPct < 0.0008) {
         invalidTpReason = "narrow_box";
-    } else if (maxTp1Dist > 0 && feeEconomicMinDist > maxTp1Dist) {
+    } else if (effectiveMaxTp1Dist > 0 && profitabilityMinDist > effectiveMaxTp1Dist) {
         invalidTpReason = "fee_slippage_cost_exceeds_max_tp1";
     } else if (!validationOk) {
         invalidTpReason = side === "long" ? "long_validation_failed" : "short_validation_failed";

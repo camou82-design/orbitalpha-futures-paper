@@ -59,6 +59,26 @@ export type TpProfitabilityAuthorityResult = Readonly<{
     blockReason: "V2_TP1_NET_EDGE_INSUFFICIENT" | "V2_TP_PROFITABILITY_COST_AUTHORITY_INVALID" | null;
 }>;
 
+export function computeMinimumProfitableTpPct(opts?: {
+    feeRate?: number | null;
+    paperSlippageEstimateBps?: number | null;
+    minimumNetProfitPct?: number | null;
+}): number {
+    const feeRate = (typeof opts?.feeRate === "number" && Number.isFinite(opts.feeRate) && opts.feeRate > 0)
+        ? opts.feeRate
+        : 0.0005;
+    const slippageBps = (typeof opts?.paperSlippageEstimateBps === "number" && Number.isFinite(opts.paperSlippageEstimateBps) && opts.paperSlippageEstimateBps >= 0)
+        ? opts.paperSlippageEstimateBps
+        : DEFAULT_PAPER_SLIPPAGE_ESTIMATE_BPS;
+    const minNetProfit = (typeof opts?.minimumNetProfitPct === "number" && Number.isFinite(opts.minimumNetProfitPct) && opts.minimumNetProfitPct >= 0)
+        ? opts.minimumNetProfitPct
+        : MINIMUM_TP1_NET_PROFIT_PCT;
+
+    const roundTripFeePct = feeRate * 2;
+    const slippageCostPct = slippageBps / 10000;
+    return roundTripFeePct + slippageCostPct + minNetProfit;
+}
+
 export function evaluateTpProfitabilityAuthority(
     input: EvaluateTpProfitabilityAuthorityInput
 ): TpProfitabilityAuthorityResult {
@@ -148,7 +168,11 @@ export function evaluateTpProfitabilityAuthority(
     const estimatedRoundTripCostPct = estimatedEntryFeePct + estimatedExitFeePct;
     const slippageCostPct = paperSlippageEstimateBps / 10000;
 
-    const minimumProfitableTpPct = estimatedRoundTripCostPct + slippageCostPct + minimumNetProfitPct;
+    const minimumProfitableTpPct = computeMinimumProfitableTpPct({
+        feeRate,
+        paperSlippageEstimateBps,
+        minimumNetProfitPct
+    });
 
     // Distances
     const structuralTp1DistancePctRaw = Math.abs(rawCanonicalTp1Price - entryPrice) / entryPrice;

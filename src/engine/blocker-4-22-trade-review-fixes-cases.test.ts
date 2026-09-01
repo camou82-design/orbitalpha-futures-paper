@@ -6,6 +6,7 @@ import { deriveTradeLifecycleAuthority } from "../engine-v2/lifecycle/trade-life
 import { buildV2ExecutionAuthorityEnvelope } from "../engine-v2/execution/envelope";
 import { deriveExecutionAuthorityFromEnvelope } from "../engine-v2/reconciler";
 import { computeSoftExitFeeBreakEvenPct, DEFAULT_SOFT_EXIT_SLIPPAGE_BUFFER_PCT } from "../engine-v2/exit/soft-exit-fee-gate";
+import { computeMinimumProfitableTpPct } from "../engine-v2/execution/tp-profitability-authority";
 import type { EngineV2Input, MarketJudgmentOutput } from "../engine-v2/types";
 
 let passCount = 0;
@@ -710,14 +711,18 @@ async function runTests() {
         });
     }
 
-    // TEST L: TP1 maximum does not exceed 0.25% (0.0025)
+    // TEST L: TP1 maximum does not exceed effective max cap and respects profitability floor
     {
         const entry = 2500;
+        const feeRate = 0.0005;
+        const minimumProfitableTpPct = computeMinimumProfitableTpPct({ feeRate });
+        const effectiveMaxTp1Pct = Math.max(0.0025, minimumProfitableTpPct);
+
         const inputFar = createRangeInput({
             side: "long",
             entryPx: entry,
             boxLow: 2400,
-            boxHigh: 2700, // very wide box -> raw mid is at 2550 (+2.0%), clamped to 0.25%
+            boxHigh: 2700, // very wide box -> raw mid is at 2550 (+2.0%), clamped to effectiveMaxTp1Pct
             boxPos: 0.1,
             atr: 50
         });
@@ -726,11 +731,13 @@ async function runTests() {
         const tp1 = outFar.metadata.takeProfit1Px as number;
         const actualDistPct = (tp1 - entry) / entry;
 
-        const ok = actualDistPct <= 0.0025 + 1e-8 && tp1 <= entry * 1.0025 + 1e-6;
-        report("TEST L — TP1 maximum does not exceed 0.25%", ok, {
+        const ok = actualDistPct >= minimumProfitableTpPct - 1e-8 && actualDistPct <= effectiveMaxTp1Pct + 1e-8 && tp1 <= entry * (1 + effectiveMaxTp1Pct) + 1e-6;
+        report("TEST L — TP1 maximum respects effective max cap and profitability floor", ok, {
             tp1,
             actualDistPct,
-            maxAllowedPrice: entry * 1.0025
+            minimumProfitableTpPct,
+            effectiveMaxTp1Pct,
+            maxAllowedPrice: entry * (1 + effectiveMaxTp1Pct)
         });
     }
 
@@ -771,23 +778,50 @@ async function runTests() {
         });
     }
 
-    // TEST N: Fail-closed block when cost/break-even >= 0.25%
+    // TEST N: High cost adaptively satisfies profitability and structurally impossible plan triggers fail-closed block
     {
-        // High fee rate scenario: feeRate = 0.0010 (0.10%), BE = 0.20% + 0.08% = 0.28% > 0.25%
+        // Part 1: High fee scenario adaptively expands TP1 to meet higher profitability requirement
+        const entry = 2500;
+        const highFeeRate = 0.0010; // 0.10% fee -> required min edge = 2*0.10% + 0.08% + 0.12% = 0.40% (0.0040)
+        const expectedHighMinPct = computeMinimumProfitableTpPct({ feeRate: highFeeRate });
         const inputHighCost = createRangeInput({
             side: "long",
-            entryPx: 2500,
-            feeRate: 0.0010 // 0.10% -> 2*0.10% + 0.08% + 0.02% = 0.30% > 0.25%
+            entryPx: entry,
+            boxLow: 2400,
+            boxHigh: 2700,
+            boxPos: 0.1,
+            atr: 10,
+            feeRate: highFeeRate
         });
 
         const outHighCost = executeRangeRegime(inputHighCost, createMockRangeJudgment({ rangePhase: "LOWER" }));
-        const ok = outHighCost.signal === "NONE" &&
-                   outHighCost.reason.includes("Invalid TP plan") &&
-                   outHighCost.reason.includes("fee_slippage_cost_exceeds_max_tp1");
+        const tp1High = outHighCost.metadata.takeProfit1Px as number;
+        const actualHighDistPct = (tp1High - entry) / entry;
+        const highCostAdaptedOk = outHighCost.signal === "LONG_CANDIDATE" &&
+                                  actualHighDistPct >= expectedHighMinPct - 1e-8;
 
-        report("TEST N — High cost scenario (cost > 0.25%) triggers fail-closed block", ok, {
-            signal: outHighCost.signal,
-            reason: outHighCost.reason
+        // Part 2: Structurally impossible plan (narrow box where boxHeightPct < 0.0008) triggers fail-closed block
+        const inputNarrowBox = createRangeInput({
+            side: "long",
+            entryPx: entry,
+            boxLow: 2499.5,
+            boxHigh: 2500.5, // narrow box height 1.0 / 2500 = 0.0004 < 0.0008
+            boxPos: 0.1,
+            atr: 10,
+            feeRate: highFeeRate
+        });
+        const outNarrowBox = executeRangeRegime(inputNarrowBox, createMockRangeJudgment({ rangePhase: "LOWER" }));
+        const narrowFailClosedOk = outNarrowBox.signal === "NONE" &&
+                                   outNarrowBox.reason.includes("Invalid TP plan") &&
+                                   outNarrowBox.reason.includes("narrow_box");
+
+        const ok = highCostAdaptedOk && narrowFailClosedOk;
+        report("TEST N — High cost adaptively satisfies profitability and structurally impossible plan triggers fail-closed block", ok, {
+            highCostAdaptedOk,
+            actualHighDistPct,
+            expectedHighMinPct,
+            narrowFailClosedOk,
+            narrowReason: outNarrowBox.reason
         });
     }
 
