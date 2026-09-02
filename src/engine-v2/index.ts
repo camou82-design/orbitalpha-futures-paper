@@ -7015,7 +7015,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             symbol: String(input.symbol),
                             paperSlippageEstimateBps: slippageBps,
                             instrumentTickSz,
-                            snapshotTickSz
+                            snapshotTickSz,
+                            htf_candles: authoritativeInput.snapshot?.htf_candles ?? input.snapshot?.htf_candles ?? (authoritativeInput as any).htf_candles ?? (input as any).htf_candles,
+                            candles: authoritativeInput.snapshot?.candles ?? input.snapshot?.candles
                         });
 
                         if (!tpBundle.ok) {

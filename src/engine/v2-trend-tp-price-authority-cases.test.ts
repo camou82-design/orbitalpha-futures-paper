@@ -37,7 +37,7 @@ assert.equal(takeProfitPctForRegime("TREND"), 0.0105, "TREND TP policy = 1.05%")
     assert.equal(result.ok, true);
     if (!result.ok) throw new Error("expected ok");
     assert.ok(Math.abs(result.rawTp1Price - 101_050) < 1e-9);
-    assert.equal(result.tpSource, "engine_calculated");
+    assert.equal(result.tpSource, "engine_calculated_fallback");
     assert.equal(result.adaptiveApplied, false);
 
     pass("CASE_A_TREND_LONG_MIRROR_TP", {
@@ -63,7 +63,7 @@ assert.equal(takeProfitPctForRegime("TREND"), 0.0105, "TREND TP policy = 1.05%")
     assert.equal(result.ok, true);
     if (!result.ok) throw new Error("expected ok");
     assert.ok(Math.abs(result.rawTp1Price - 98_950) < 1e-9);
-    assert.equal(result.tpSource, "engine_calculated");
+    assert.equal(result.tpSource, "engine_calculated_fallback");
     assert.equal(result.adaptiveApplied, false);
 
     pass("CASE_B_TREND_SHORT_MIRROR_TP", {
@@ -130,7 +130,7 @@ assert.equal(takeProfitPctForRegime("TREND"), 0.0105, "TREND TP policy = 1.05%")
     });
     assert.equal(wrongDirectionExplicit.ok, true);
     if (!wrongDirectionExplicit.ok) throw new Error("expected mirror fallback");
-    assert.equal(wrongDirectionExplicit.tpSource, "engine_calculated");
+    assert.equal(wrongDirectionExplicit.tpSource, "engine_calculated_fallback");
     assert.ok(Math.abs(wrongDirectionExplicit.rawTp1Price - 98_950) < 1e-9);
 
     pass("CASE_D_FAIL_CLOSED_ONLY_WHEN_NO_VALID_TP", {
@@ -174,7 +174,7 @@ assert.equal(takeProfitPctForRegime("TREND"), 0.0105, "TREND TP policy = 1.05%")
     assert.equal(bundle.ok, true);
     if (!bundle.ok) throw new Error("expected executable TP bundle");
     assert.ok(bundle.executableTp1Price > 0);
-    assert.equal(bundle.tpSource, "engine_calculated");
+    assert.equal(bundle.tpSource, "engine_calculated_fallback");
 
     pass("CASE_E_BTC_TREND_SHOCK_REACTION_DOWN_PROMOTED_SHORT", {
         entry: btcEntry,

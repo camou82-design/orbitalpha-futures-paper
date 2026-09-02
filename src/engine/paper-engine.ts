@@ -1538,7 +1538,11 @@ export type V2CommittedTpSource =
   | "none"
   | "adaptive_range_box_mid"
   | "adaptive_range_atr_cap"
-  | "adaptive_range_atr_min_profit_floor";
+  | "adaptive_range_atr_min_profit_floor"
+  | "hybrid_atr_structure"
+  | "atr_only_fallback"
+  | "structure_only_fallback"
+  | "engine_calculated_fallback";
 
 export type V2PreEntryRiskPlanAdaptiveContext = Readonly<{
   atr?: number | null;

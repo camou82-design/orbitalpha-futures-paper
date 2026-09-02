@@ -29,6 +29,7 @@ import {
     type InstrumentTickSzAuthorityInput
 } from "./instrument-tick-authority";
 import { evaluateTpProfitabilityAuthority } from "./tp-profitability-authority";
+import { computeTrendDynamicTp } from "./trend-dynamic-tp-authority";
 
 export type V2PreEntryTpSource =
     | "authority_tp_price"
@@ -37,6 +38,10 @@ export type V2PreEntryTpSource =
     | "adaptive_range_atr_cap"
     | "adaptive_range_box_target"
     | "adaptive_range_min_profit"
+    | "hybrid_atr_structure"
+    | "atr_only_fallback"
+    | "structure_only_fallback"
+    | "engine_calculated_fallback"
     | "none";
 
 export type ResolveV2PreEntryTp1AuthorityInput = Readonly<{
@@ -69,6 +74,14 @@ export type ResolveV2PreEntryTp1AuthorityInput = Readonly<{
     snapshotTickSz?: number | null;
     instrumentTickSz?: number | null;
     profitabilityTpApproved?: boolean | null;
+    atr1m?: number | null;
+    atr5m?: number | null;
+    atr15m?: number | null;
+    candles1m?: ReadonlyArray<import("../../models/types").Candle> | null;
+    candles5m?: ReadonlyArray<import("../../models/types").Candle> | null;
+    candles15m?: ReadonlyArray<import("../../models/types").Candle> | null;
+    htf_candles?: Record<string, import("../../models/types").Candle[]> | null;
+    candles?: ReadonlyArray<import("../../models/types").Candle> | null;
 }>;
 
 export type ResolveV2PreEntryTp1AuthorityResult = Readonly<
@@ -348,19 +361,50 @@ export function resolveV2PreEntryTp1Authority(
                 adaptiveSlSource: null
             };
         }
-        const mirrorTp = engineMirrorTpPrice(entryPrice, side, "TREND");
-        if (mirrorTp != null && isValidDirectionTp(side, entryPrice, mirrorTp)) {
+
+        const dynamicTp = computeTrendDynamicTp({
+            side,
+            entryPrice,
+            rawStructuralSl: input.rawStructuralSl,
+            atr1m: input.atr1m ?? input.atr,
+            atr5m: input.atr5m,
+            atr15m: input.atr15m,
+            candles1m: input.candles1m ?? input.candles,
+            candles5m: input.candles5m ?? input.htf_candles?.["5m"],
+            candles15m: input.candles15m ?? input.htf_candles?.["15m"],
+            boxHigh: input.boxHigh,
+            boxLow: input.boxLow,
+            rangeBoxHighAtEntry: input.rangeBoxHighAtEntry,
+            rangeBoxLowAtEntry: input.rangeBoxLowAtEntry,
+            feeRate: input.feeRate,
+            paperSlippageEstimateBps: input.paperSlippageEstimateBps
+        });
+
+        if (dynamicTp.ok && dynamicTp.rawTp1Price > 0 && isValidDirectionTp(side, entryPrice, dynamicTp.rawTp1Price)) {
             return {
                 ok: true,
-                rawTp1Price: mirrorTp,
-                tpSource: "engine_calculated",
+                rawTp1Price: dynamicTp.rawTp1Price,
+                tpSource: dynamicTp.tpSource,
                 adaptiveApplied: false,
                 adaptiveDiagnostics: null,
                 adaptiveSlPrice: null,
                 adaptiveSlSource: null
             };
         }
-        return { ok: false, blockReason: "V2_TREND_TP_PRICE_UNAVAILABLE", adaptiveDiagnostics: null };
+
+        const mirrorTp = engineMirrorTpPrice(entryPrice, side, "TREND");
+        if (mirrorTp != null && isValidDirectionTp(side, entryPrice, mirrorTp)) {
+            return {
+                ok: true,
+                rawTp1Price: mirrorTp,
+                tpSource: "engine_calculated_fallback",
+                adaptiveApplied: false,
+                adaptiveDiagnostics: null,
+                adaptiveSlPrice: null,
+                adaptiveSlSource: null
+            };
+        }
+        return { ok: false, blockReason: dynamicTp.blockReason ?? "V2_TREND_TP_PRICE_UNAVAILABLE", adaptiveDiagnostics: null };
     }
 
     if (regime !== "RANGE") {
