@@ -59,6 +59,10 @@ export type PaperDashboardTradeControl = Readonly<{
   updatedAt: number;
   reason: string | null;
   source: string;
+  selectedLeverageBySymbol?: Readonly<{
+    BTCUSDT?: 10 | 25 | 50 | 100;
+    ETHUSDT?: 10 | 25 | 50 | 100;
+  }>;
 }>;
 
 export type OkxLiveBalance = Readonly<{

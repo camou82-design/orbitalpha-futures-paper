@@ -110,6 +110,12 @@ import { executorForExitEventPayload } from "../strategy/executors/executor-norm
 import { aiApproveEntry, aiInputFromDecision, type AiApprovalInput, type AiApprovalOutput } from "../ai/entry-approval";
 import { deriveLastLossReentryState, type LastLossReentryState } from "../engine-v2/state/loss-reentry-gate";
 import {
+  evaluateLeverageSelectionAuthority,
+  buildLeverageSelectionAuthorityProof,
+  normalizeExecutionLeverage,
+  type AllowedExecutionLeverage
+} from "../engine-v2/execution/leverage-selection-authority";
+import {
   aggregateRejectReasonCountsTick,
   computeFunnelTick,
   DECISION_FUNNEL_RING_MAX,
@@ -1043,6 +1049,10 @@ type ServerTradeControlState = Readonly<{
   updated_at: number;
   reason: string | null;
   instructions?: OperatorInstruction[];
+  selected_leverage_by_symbol?: Readonly<{
+    BTCUSDT?: 10 | 25 | 50 | 100;
+    ETHUSDT?: 10 | 25 | 50 | 100;
+  }>;
 }>;
 
 function toSymbolDiagnostic(symbol: MarketSymbol, endpoint: string, d: OkxPublicDiagnostics): SymbolDiagnostic {
@@ -2082,7 +2092,18 @@ export class PaperEngine {
             ? camel.updatedAt
             : (typeof parsed.updated_at === "number" && Number.isFinite(parsed.updated_at) ? parsed.updated_at : nowTs),
         reason: typeof camel.reason === "string" ? camel.reason : (typeof parsed.reason === "string" ? parsed.reason : null),
-        instructions: Array.isArray(parsed.instructions) ? parsed.instructions : undefined
+        instructions: Array.isArray(parsed.instructions) ? parsed.instructions : undefined,
+        selected_leverage_by_symbol: (() => {
+          const rawLev = (parsed as any).selectedLeverageBySymbol ?? (parsed as any).selected_leverage_by_symbol ?? {};
+          const validLev = (val: unknown): 10 | 25 | 50 | 100 => {
+            const n = Number(val);
+            return n === 10 || n === 25 || n === 50 || n === 100 ? (n as 10 | 25 | 50 | 100) : 10;
+          };
+          return {
+            BTCUSDT: validLev(rawLev.BTCUSDT),
+            ETHUSDT: validLev(rawLev.ETHUSDT)
+          };
+        })()
       };
     } catch {
       this.serverTradeControlState = {
@@ -2091,7 +2112,11 @@ export class PaperEngine {
         kill_switch_active: false,
         authority_source: "server_state",
         updated_at: nowTs,
-        reason: "default_off_until_operator_enable"
+        reason: "default_off_until_operator_enable",
+        selected_leverage_by_symbol: {
+          BTCUSDT: 10,
+          ETHUSDT: 10
+        }
       };
       await fs.mkdir(path.dirname(p), { recursive: true });
       await fs.writeFile(
@@ -2102,7 +2127,8 @@ export class PaperEngine {
           killSwitch: this.serverTradeControlState.kill_switch_active,
           updatedAt: this.serverTradeControlState.updated_at,
           updatedBy: "engine_bootstrap",
-          reason: this.serverTradeControlState.reason
+          reason: this.serverTradeControlState.reason,
+          selectedLeverageBySymbol: this.serverTradeControlState.selected_leverage_by_symbol
         }, null, 2),
         "utf8"
       );
@@ -12906,34 +12932,98 @@ export class PaperEngine {
           ? null
           : liveCapResolution.effectiveLiveCapUsdt;
 
-      // 3.5 Leverage Sync for V2
-      if (input.authoritySource === "v2" && input.appliedLeverage != null && okx_confirmed_leverage != null && okx_confirmed_leverage !== input.appliedLeverage) {
+      // 3.5 Leverage Authority Resolution (PHASE LEVERAGE-CONTROL-1)
+      const selectedExecLev = normalizeExecutionLeverage(
+        (input as any).executionLeverage ??
+        this.serverTradeControlState?.selected_leverage_by_symbol?.[input.symbol as "BTCUSDT" | "ETHUSDT"],
+        10
+      );
+
+      const hasOpenPosition =
+        this.lastOpenPositionsForTakeover.some(p => p.symbol === input.symbol && (p.sizeUsd ?? 0) !== 0) ||
+        Boolean(Array.isArray(this.lastLivePositionsPayload) && this.lastLivePositionsPayload.some(r => r.instId === instId && Number(r.pos ?? (r as any).contracts ?? 0) !== 0));
+
+      const levAuthorityRes = evaluateLeverageSelectionAuthority({
+        symbol: input.symbol,
+        selectedLeverage: selectedExecLev,
+        confirmedOkxLeverage: okx_confirmed_leverage,
+        finalOrderNotionalUsdt: v2_intended_notional_usdt ?? 0,
+        positionOpen: hasOpenPosition,
+        sizingLeverage: input.appliedLeverage ?? 10
+      });
+
+      if (!levAuthorityRes.validationPassed) {
+        const reject_reason = levAuthorityRes.blockReason ?? "INVALID_EXECUTION_LEVERAGE_REJECTED";
+        this.logger.error("V2_LEVERAGE_SELECTION_AUTHORITY_PROOF", buildLeverageSelectionAuthorityProof(levAuthorityRes));
+        return {
+          ok: false, ordId: null, fillPx: null, fillSize: 0,
+          errorCode: reject_reason,
+          errorMessage: "Invalid execution leverage requested",
+          ackCode: "rejected", orderState: null, fillConfirmed: false,
+          clOrdId: input.clOrdId
+        };
+      }
+
+      // If position is NOT open (flat state) and exchange sync is required:
+      if (!hasOpenPosition && levAuthorityRes.leverageSyncRequired) {
         this.logger.info("V2_LEVERAGE_SYNC_ATTEMPT", {
           symbol: input.symbol,
-          intended_leverage: input.appliedLeverage,
+          intended_leverage: selectedExecLev,
           current_okx_leverage: okx_confirmed_leverage
         });
+
         const setLevRes = await this.okxDemo.setLeverage({
           instId,
-          lever: String(input.appliedLeverage),
+          lever: String(selectedExecLev),
           mgnMode: orderTdMode,
           ...(okxPosMode === "long_short_mode" ? { posSide: input.posSide } : {})
         });
-        if (setLevRes.ok) {
-          this.logger.info("V2_LEVERAGE_SYNC_PROOF", {
-            symbol: input.symbol,
-            synced_leverage: input.appliedLeverage,
-            prev_leverage: okx_confirmed_leverage
-          });
-          okx_confirmed_leverage = input.appliedLeverage;
-        } else {
+
+        // Rule 4: Re-query and strictly verify requested === confirmed
+        const recheckOkxLeverage = await this.okxDemo.getLeverage(instId, orderTdMode);
+        const reconfirmedLeverage = recheckOkxLeverage.ok
+          ? Number(recheckOkxLeverage.value?.[0]?.lever ?? 0)
+          : null;
+
+        if (!setLevRes.ok || reconfirmedLeverage !== selectedExecLev) {
+          const syncFailedRes = {
+            ...levAuthorityRes,
+            confirmedOkxLeverage: reconfirmedLeverage,
+            validationPassed: false,
+            blockReason: "LEVERAGE_CONFIRMATION_FAILED"
+          };
+          this.logger.error("V2_LEVERAGE_SELECTION_AUTHORITY_PROOF", buildLeverageSelectionAuthorityProof(syncFailedRes));
           this.logger.error("V2_LEVERAGE_SYNC_FAIL", {
             symbol: input.symbol,
+            intended_leverage: selectedExecLev,
+            reconfirmed_leverage: reconfirmedLeverage,
             error: (setLevRes as any).error,
             diagnostics: setLevRes.diagnostics
           });
+          return {
+            ok: false, ordId: null, fillPx: null, fillSize: 0,
+            errorCode: "LEVERAGE_CONFIRMATION_FAILED",
+            errorMessage: "Requested leverage could not be confirmed on OKX; automated downgrade blocked",
+            ackCode: "rejected", orderState: null, fillConfirmed: false,
+            clOrdId: input.clOrdId
+          };
         }
+
+        okx_confirmed_leverage = selectedExecLev;
+        this.logger.info("V2_LEVERAGE_SYNC_PROOF", {
+          symbol: input.symbol,
+          synced_leverage: selectedExecLev,
+          prev_leverage: levAuthorityRes.confirmedOkxLeverage
+        });
       }
+
+      // Log success authority proof
+      this.logger.info("V2_LEVERAGE_SELECTION_AUTHORITY_PROOF", buildLeverageSelectionAuthorityProof({
+        ...levAuthorityRes,
+        confirmedOkxLeverage: okx_confirmed_leverage,
+        finalOrderNotionalUsdt: v2_intended_notional_usdt ?? 0,
+        requiredMarginUsdt: (v2_intended_notional_usdt ?? 0) / (okx_confirmed_leverage ?? selectedExecLev)
+      }));
 
       const okx_dynamic_notional_cap_usdt = 
         okx_available_balance_usdt != null && okx_confirmed_leverage != null

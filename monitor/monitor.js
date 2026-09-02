@@ -2434,6 +2434,90 @@
     });
   }
 
+  function renderLeverageControlCard(bundle) {
+    const wrap = $("leverage-control-card");
+    if (!wrap) return;
+
+    const c = currentTradeControl || {};
+    const levBySym = c.selectedLeverageBySymbol || { BTCUSDT: 10, ETHUSDT: 10 };
+    const symbols = ["BTCUSDT", "ETHUSDT"];
+
+    const okxB = bundle && bundle.okxBalance;
+    const equity = okxB && typeof okxB.total_equity_usdt === "number" ? okxB.total_equity_usdt : 800;
+    const estNotional = Math.round(equity * 2);
+
+    let html = "";
+    for (const sym of symbols) {
+      const selected = levBySym[sym] || 10;
+      const okxPos = okxExchangePositionForSymbol(bundle, sym);
+      const openPos = openForSymbol(bundle, sym);
+      const isPosOpen = Boolean(openPos || (okxPos && Number(okxPos.contracts || okxPos.size || 0) !== 0));
+
+      const confirmed = okxPos && typeof okxPos.leverage === "number" ? okxPos.leverage : 10;
+      const estMargin = (estNotional / selected).toFixed(2);
+
+      html += `
+        <article class="leverage-card" id="leverage-card-${esc(sym)}">
+          <div class="leverage-card-header">
+            <div class="leverage-card-title">${esc(sym)}</div>
+            <span class="leverage-scope-badge">NEXT NEW ENTRY</span>
+          </div>
+          <div class="leverage-btn-group">
+            <button type="button" class="leverage-btn ${selected === 10 ? "active" : ""}" data-sym="${esc(sym)}" data-lev="10">10x</button>
+            <button type="button" class="leverage-btn ${selected === 25 ? "active" : ""}" data-sym="${esc(sym)}" data-lev="25">25x</button>
+            <button type="button" class="leverage-btn ${selected === 50 ? "active" : ""}" data-sym="${esc(sym)}" data-lev="50">50x</button>
+            <button type="button" class="leverage-btn ${selected === 100 ? "active" : ""}" data-sym="${esc(sym)}" data-lev="100">100x</button>
+          </div>
+          <div class="leverage-info-grid">
+            <div class="leverage-info-item">
+              <span class="leverage-info-label">Selected leverage:</span>
+              <span class="leverage-info-val">${esc(selected)}x</span>
+            </div>
+            <div class="leverage-info-item">
+              <span class="leverage-info-label">Confirmed OKX:</span>
+              <span class="leverage-info-val">${esc(confirmed)}x ${isPosOpen ? "(보유 중)" : "(flat)"}</span>
+            </div>
+            <div class="leverage-info-item">
+              <span class="leverage-info-label">Order notional:</span>
+              <span class="leverage-info-val">~${esc(estNotional.toLocaleString())} USDT (2X)</span>
+            </div>
+            <div class="leverage-info-item">
+              <span class="leverage-info-label">Req margin:</span>
+              <span class="leverage-info-val">~${esc(estMargin)} USDT</span>
+            </div>
+          </div>
+        </article>
+      `;
+    }
+    wrap.innerHTML = html;
+
+    wrap.querySelectorAll(".leverage-btn").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const sym = btn.getAttribute("data-sym");
+        const lev = Number(btn.getAttribute("data-lev"));
+        if (!sym || !lev || ![10, 25, 50, 100].includes(lev)) return;
+
+        try {
+          const nextLevBySym = {
+            ...(currentTradeControl && currentTradeControl.selectedLeverageBySymbol ? currentTradeControl.selectedLeverageBySymbol : { BTCUSDT: 10, ETHUSDT: 10 }),
+            [sym]: lev
+          };
+          await updateTradeControl({
+            selectedLeverageBySymbol: nextLevBySym,
+            updatedBy: "monitor_ui",
+            reason: `operator_set_${sym}_leverage_${lev}x`
+          });
+          currentTradeControl = await fetchTradeControl();
+          renderLeverageControlCard(bundle);
+        } catch (err) {
+          const errEl = $("msg-error");
+          show(errEl, true);
+          errEl.textContent = err instanceof Error ? err.message : String(err);
+        }
+      });
+    });
+  }
+
   async function load() {
     const errEl = $("msg-error");
     const loadEl = $("msg-loading");
@@ -2454,6 +2538,7 @@
       renderHero(bundle);
       renderOkxHero(bundle);
       renderTradeControlCard();
+      renderLeverageControlCard(bundle);
       renderExternalMarketContext(bundle);
       renderOperatorContext(bundle);
       renderSymbols(bundle);

@@ -118,9 +118,26 @@ export class JsonStore {
           : typeof parsed.authority_source === "string"
             ? parsed.authority_source
             : defaults.source;
-      return { serverTradeEnabled, closeOnlyMode, killSwitch, updatedAt, reason, source };
+      const rawLev = parsed.selectedLeverageBySymbol && typeof parsed.selectedLeverageBySymbol === "object"
+        ? (parsed.selectedLeverageBySymbol as Record<string, unknown>)
+        : {};
+      const validLev = (val: unknown): 10 | 25 | 50 | 100 => {
+        const n = Number(val);
+        return n === 10 || n === 25 || n === 50 || n === 100 ? (n as 10 | 25 | 50 | 100) : 10;
+      };
+      const selectedLeverageBySymbol = {
+        BTCUSDT: validLev(rawLev.BTCUSDT),
+        ETHUSDT: validLev(rawLev.ETHUSDT)
+      };
+      return { serverTradeEnabled, closeOnlyMode, killSwitch, updatedAt, reason, source, selectedLeverageBySymbol };
     } catch {
-      return defaults;
+      return {
+        ...defaults,
+        selectedLeverageBySymbol: {
+          BTCUSDT: 10,
+          ETHUSDT: 10
+        }
+      };
     }
   }
 

@@ -20,7 +20,7 @@ const HEALTH_ROUTE_TIMEOUT_MS = Number(process.env.FUTURES_PAPER_HEALTH_ROUTE_TI
 /** Log / response header (always POSIX-style for grep across OS). */
 const PUBLIC_BUNDLE_REL = "data/reports/public-futures-paper-bundle.json";
 
-type DataBundle = Readonly<Record<string, unknown>>;
+type AllowedExecutionLeverage = 10 | 25 | 50 | 100;
 type TradeControlState = Readonly<{
   serverTradeEnabled: boolean;
   closeOnlyMode: boolean;
@@ -28,6 +28,10 @@ type TradeControlState = Readonly<{
   updatedAt: number;
   updatedBy: string;
   reason: string | null;
+  selectedLeverageBySymbol?: Readonly<{
+    BTCUSDT?: AllowedExecutionLeverage;
+    ETHUSDT?: AllowedExecutionLeverage;
+  }>;
 }>;
 
 interface CacheContext {
@@ -193,7 +197,11 @@ function defaultTradeControlState(nowTs = Date.now()): TradeControlState {
     killSwitch: false,
     updatedAt: nowTs,
     updatedBy: "bootstrap_default",
-    reason: "default_off_until_operator_enable"
+    reason: "default_off_until_operator_enable",
+    selectedLeverageBySymbol: {
+      BTCUSDT: 10,
+      ETHUSDT: 10
+    }
   };
 }
 
@@ -204,13 +212,24 @@ function controlFilePath(projectRoot: string): string {
 function normalizeTradeControl(raw: unknown): TradeControlState {
   const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const def = defaultTradeControlState();
+  const rawLev = o.selectedLeverageBySymbol && typeof o.selectedLeverageBySymbol === "object"
+    ? (o.selectedLeverageBySymbol as Record<string, unknown>)
+    : {};
+  const validLev = (val: unknown): AllowedExecutionLeverage => {
+    const n = Number(val);
+    return n === 10 || n === 25 || n === 50 || n === 100 ? (n as AllowedExecutionLeverage) : 10;
+  };
   return {
     serverTradeEnabled: typeof o.serverTradeEnabled === "boolean" ? o.serverTradeEnabled : def.serverTradeEnabled,
     closeOnlyMode: typeof o.closeOnlyMode === "boolean" ? o.closeOnlyMode : def.closeOnlyMode,
     killSwitch: typeof o.killSwitch === "boolean" ? o.killSwitch : def.killSwitch,
     updatedAt: typeof o.updatedAt === "number" && Number.isFinite(o.updatedAt) ? o.updatedAt : def.updatedAt,
     updatedBy: typeof o.updatedBy === "string" && o.updatedBy.trim() ? o.updatedBy.trim().slice(0, 120) : def.updatedBy,
-    reason: typeof o.reason === "string" ? o.reason.slice(0, 240) : null
+    reason: typeof o.reason === "string" ? o.reason.slice(0, 240) : null,
+    selectedLeverageBySymbol: {
+      BTCUSDT: validLev(rawLev.BTCUSDT),
+      ETHUSDT: validLev(rawLev.ETHUSDT)
+    }
   };
 }
 
@@ -429,16 +448,33 @@ app.post("/api/futures-paper/control", async (req: Request, res: Response) => {
     res.status(400).json({ error: "invalid_body" });
     return;
   }
-  const keys = ["serverTradeEnabled", "closeOnlyMode", "killSwitch"] as const;
+  const keys = ["serverTradeEnabled", "closeOnlyMode", "killSwitch", "selectedLeverageBySymbol"] as const;
   const hasControlField = keys.some((k) => k in body);
   if (!hasControlField) {
     res.status(400).json({ error: "missing_control_fields" });
     return;
   }
-  for (const k of keys) {
+  for (const k of ["serverTradeEnabled", "closeOnlyMode", "killSwitch"] as const) {
     if (k in body && typeof body[k] !== "boolean") {
       res.status(400).json({ error: `invalid_${k}` });
       return;
+    }
+  }
+  if ("selectedLeverageBySymbol" in body) {
+    const levObj = body.selectedLeverageBySymbol;
+    if (!levObj || typeof levObj !== "object" || Array.isArray(levObj)) {
+      res.status(400).json({ error: "invalid_selectedLeverageBySymbol" });
+      return;
+    }
+    const allowed = [10, 25, 50, 100];
+    for (const [sym, lev] of Object.entries(levObj as Record<string, unknown>)) {
+      if (lev !== undefined && lev !== null && !allowed.includes(Number(lev))) {
+        res.status(400).json({
+          error: `invalid_leverage_${sym}`,
+          message: `Leverage must be one of [10, 25, 50, 100]`
+        });
+        return;
+      }
     }
   }
   if ("updatedBy" in body && typeof body.updatedBy !== "string") {
@@ -450,6 +486,16 @@ app.post("/api/futures-paper/control", async (req: Request, res: Response) => {
     return;
   }
   const current = await readTradeControlState(root);
+  const currentLev = current.state.selectedLeverageBySymbol ?? { BTCUSDT: 10, ETHUSDT: 10 };
+  const incomingLev = body.selectedLeverageBySymbol as Record<string, unknown> | undefined;
+  const validLev = (val: unknown, fallback: AllowedExecutionLeverage): AllowedExecutionLeverage => {
+    const n = Number(val);
+    return n === 10 || n === 25 || n === 50 || n === 100 ? (n as AllowedExecutionLeverage) : fallback;
+  };
+  const nextLev = {
+    BTCUSDT: incomingLev && "BTCUSDT" in incomingLev ? validLev(incomingLev.BTCUSDT, currentLev.BTCUSDT ?? 10) : currentLev.BTCUSDT ?? 10,
+    ETHUSDT: incomingLev && "ETHUSDT" in incomingLev ? validLev(incomingLev.ETHUSDT, currentLev.ETHUSDT ?? 10) : currentLev.ETHUSDT ?? 10
+  };
   const next: TradeControlState = {
     serverTradeEnabled: "serverTradeEnabled" in body ? Boolean(body.serverTradeEnabled) : current.state.serverTradeEnabled,
     closeOnlyMode: "closeOnlyMode" in body ? Boolean(body.closeOnlyMode) : current.state.closeOnlyMode,
@@ -462,7 +508,8 @@ app.post("/api/futures-paper/control", async (req: Request, res: Response) => {
     reason:
       typeof body.reason === "string"
         ? body.reason.slice(0, 240)
-        : current.state.reason
+        : current.state.reason,
+    selectedLeverageBySymbol: nextLev
   };
   const filePath = await writeTradeControlState(root, next);
   console.info(JSON.stringify({

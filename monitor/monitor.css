@@ -1266,3 +1266,101 @@ details[open] .details-summary::before {
   font-size: 0.72rem;
   color: var(--dim);
 }
+
+/* Live Leverage Control Grid */
+.leverage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
+  margin-top: 0.5rem;
+}
+
+.leverage-card {
+  background: var(--card-bg, #1e293b);
+  border: 1px solid var(--border, #334155);
+  border-radius: 12px;
+  padding: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.leverage-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  padding-bottom: 0.5rem;
+}
+
+.leverage-card-title {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text, #f8fafc);
+}
+
+.leverage-btn-group {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.5rem;
+}
+
+.leverage-btn {
+  padding: 0.5rem 0.25rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid var(--border, #334155);
+  background: var(--bg-card-secondary, #0f172a);
+  color: var(--muted, #94a3b8);
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+  text-align: center;
+}
+
+.leverage-btn:hover {
+  border-color: #38bdf8;
+  color: #f8fafc;
+}
+
+.leverage-btn.active {
+  background: #0284c7;
+  border-color: #38bdf8;
+  color: #ffffff;
+  font-weight: 700;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.35);
+}
+
+.leverage-info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem 0.75rem;
+  font-size: 0.78rem;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 0.65rem;
+  border-radius: 8px;
+}
+
+.leverage-info-item {
+  display: flex;
+  justify-content: space-between;
+}
+
+.leverage-info-label {
+  color: var(--muted, #94a3b8);
+}
+
+.leverage-info-val {
+  font-weight: 600;
+  color: var(--text, #f8fafc);
+}
+
+.leverage-scope-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
