@@ -39,8 +39,8 @@ function runCases(): void {
   assertTrue(!indexTs.includes("\n            max_order_notional_usdt: maxOrderNotionalUsdt,"), "legacy max_order_notional renamed in proofs");
 
   assertTrue(RISK_PER_TRADE_PCT === 0.01, "risk pct constant");
-  assertTrue(MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE === 2.0, "initial cap constant");
-  assertTrue(MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE === 2.5, "symbol cap constant");
+  assertTrue(MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE === 2.3, "initial cap constant");
+  assertTrue(MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE === 2.75, "symbol cap constant");
   assertTrue(MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE === 3.0, "account cap constant");
 
   // CASE W — V2 authority entry is NOT truncated by legacy 40 USDT cap

@@ -96,13 +96,13 @@ function evaluateLegacyPolicySizing(input: {
 }
 
 function runCases(): void {
-    // CASE A — A-grade risk budget at equity 68; initial cap now binds at equity×2.0
+    // CASE A — A-grade risk budget at equity 68; initial cap now binds at equity×2.3
     {
         const r = entrySizing({ equity: 68, entryPrice: 100_000, stopPrice: 99_500 });
         assertClose(r.riskPct, 0.010, 0.0001, "CASE A riskPct");
         assertClose(r.riskBudgetUsdt, 0.68, 0.01, "CASE A riskBudget");
         assertClose(r.riskBasedNotionalUsdt, 136, 1, "CASE A riskBased");
-        assertClose(r.equityInitialCapUsdt, 136, 0.01, "CASE A initial cap");
+        assertClose(r.equityInitialCapUsdt, 156.4, 0.01, "CASE A initial cap");
         assertClose(r.finalOrderNotionalUsdt, 136, 1, "CASE A final");
     }
 
@@ -119,14 +119,14 @@ function runCases(): void {
         assertClose(r.finalOrderNotionalUsdt, 68, 1, "CASE C final");
     }
 
-    // CASE D — tight stop raises risk-based notional; initial cap binds
+    // CASE D — tight stop raises risk-based notional; initial cap binds at 2.3x (156.4)
     {
         const r = entrySizing({ equity: 68, entryPrice: 100_000, stopPrice: 99_800 });
         assertClose(r.riskBasedNotionalUsdt, 340, 2, "CASE D riskBased");
-        assertClose(r.finalOrderNotionalUsdt, 136, 1, "CASE D final");
+        assertClose(r.finalOrderNotionalUsdt, 156.4, 1, "CASE D final");
     }
 
-    // CASE E — existing symbol exposure reduces remaining symbol capacity
+    // CASE E — existing symbol exposure reduces remaining symbol capacity (2.75x = 187; 187 - 50 = 137 > 136 riskBased)
     {
         const r = entrySizing({
             equity: 68,
@@ -135,8 +135,8 @@ function runCases(): void {
             existingSymbol: 50,
             existingAccount: 50
         });
-        assertClose(r.symbolCapUsdt, 170, 0.01, "CASE E symbol cap");
-        assertClose(r.finalOrderNotionalUsdt, 120, 1, "CASE E final");
+        assertClose(r.symbolCapUsdt, 187, 0.01, "CASE E symbol cap");
+        assertClose(r.finalOrderNotionalUsdt, 136, 1, "CASE E final");
     }
 
     // CASE F — existing account exposure reduces remaining account capacity
@@ -270,8 +270,8 @@ function runCases(): void {
 
         assertClose(r.riskPct, 0.008, 0.0001, "CASE M B-grade riskPct");
         assertClose(r.riskBudgetUsdt, 0.544, 0.01, "CASE M riskBudget");
-        assertClose(r.equityInitialCapUsdt, 136, 0.01, "CASE M equityInitialCap");
-        assertClose(r.symbolCapUsdt, 170, 0.01, "CASE M symbolCap");
+        assertClose(r.equityInitialCapUsdt, 156.4, 0.01, "CASE M equityInitialCap");
+        assertClose(r.symbolCapUsdt, 187, 0.01, "CASE M symbolCap");
         assertClose(r.accountCapUsdt, 204, 0.01, "CASE M accountCap");
         assertClose(r.stopDistancePct, Math.abs(entryPrice - stopPrice) / entryPrice, 0.000001, "CASE M stopDistancePct");
         assertClose(r.riskBasedNotionalUsdt, 128.728, 0.5, "CASE M riskBasedNotional");
@@ -589,9 +589,9 @@ function runCases(): void {
             entryProbeSizeMultiplier: null,
             entryProbeSizingSource: "NONE"
         });
-        assertClose(rFull.cappedFullEntryNotionalUsdt, 410, 1, "CASE U full cappedFullEntryNotional");
-        assertClose(rFull.normalizedContracts ?? 0, 1.63, 0.01, "CASE U full normalizedContracts = 1.63 (floor 1.6377)");
-        assertClose(rFull.finalOrderNotionalUsdt, 1.63 * 0.1 * ethPrice, 0.01, "CASE U full finalOrderNotional = contracts * ctVal * price");
+        assertClose(rFull.cappedFullEntryNotionalUsdt, 471.5, 1, "CASE U full cappedFullEntryNotional");
+        assertClose(rFull.normalizedContracts ?? 0, 1.88, 0.01, "CASE U full normalizedContracts = 1.88");
+        assertClose(rFull.finalOrderNotionalUsdt, 1.88 * 0.1 * ethPrice, 0.01, "CASE U full finalOrderNotional = contracts * ctVal * price");
         assertTrue(rFull.probeMultiplierApplied === 1, "CASE U full probeMultiplierApplied = 1");
         assertTrue(rFull.probeSizingSource === "NONE", "CASE U full probeSizingSource = NONE");
 
@@ -607,16 +607,15 @@ function runCases(): void {
             entryProbeSizeMultiplier: 0.25,
             entryProbeSizingSource: "CONTINUATION_MICRO_PROBE"
         });
-        assertClose(rProbe25.cappedFullEntryNotionalUsdt, 410, 1, "CASE U 25% cappedFullEntryNotional");
+        assertClose(rProbe25.cappedFullEntryNotionalUsdt, 471.5, 1, "CASE U 25% cappedFullEntryNotional");
         assertClose(rProbe25.probeMultiplierApplied, 0.25, 0.001, "CASE U 25% probeMultiplierApplied");
-        assertClose(rProbe25.probeAdjustedPreLotNotionalUsdt, 102.5, 0.5, "CASE U 25% preLotNotional = 102.5 USDT");
-        // 102.5 / (2503.37 * 0.1) = 0.409448... -> floor with lotSz 0.01 -> 0.40 contracts
-        assertClose(rProbe25.normalizedContracts ?? 0, 0.40, 0.001, "CASE U 25% normalizedContracts = 0.40 (not 4.09!)");
-        assertClose(rProbe25.finalOrderNotionalUsdt, 0.40 * 0.1 * ethPrice, 0.01, "CASE U 25% finalOrderNotional = 0.40 * 0.1 * 2503.37 = 100.1348 USDT");
+        assertClose(rProbe25.probeAdjustedPreLotNotionalUsdt, 117.875, 0.5, "CASE U 25% preLotNotional = 117.875 USDT");
+        assertClose(rProbe25.normalizedContracts ?? 0, 0.47, 0.001, "CASE U 25% normalizedContracts = 0.47");
+        assertClose(rProbe25.finalOrderNotionalUsdt, 0.47 * 0.1 * ethPrice, 0.01, "CASE U 25% finalOrderNotional = 0.47 * 0.1 * 2503.37");
         assertClose(rProbe25.finalRequiredMarginUsdt, rProbe25.finalOrderNotionalUsdt / 10, 0.01, "CASE U 25% margin = notional / 10x");
         assertTrue(rProbe25.probeSizingSource === "CONTINUATION_MICRO_PROBE", "CASE U 25% probeSizingSource");
         assertTrue(rProbe25.legacyAbsoluteProbeCapApplied === false, "CASE U 25% legacyAbsoluteProbeCapApplied === false");
-        assertTrue(rProbe25.finalOrderNotionalUsdt > 90 && rProbe25.finalOrderNotionalUsdt < 105, "CASE U 25% strictly within 90~105 USDT");
+        assertTrue(rProbe25.finalOrderNotionalUsdt > 110 && rProbe25.finalOrderNotionalUsdt < 125, "CASE U 25% strictly within 110~125 USDT");
 
         // 20% Polarity Reversal Micro-Probe
         const rProbe20 = entrySizing({
@@ -631,10 +630,9 @@ function runCases(): void {
             entryProbeSizingSource: "V2_POLARITY_REVERSAL_MICRO_PROBE"
         });
         assertClose(rProbe20.probeMultiplierApplied, 0.20, 0.001, "CASE U 20% probeMultiplierApplied");
-        assertClose(rProbe20.probeAdjustedPreLotNotionalUsdt, 82.0, 0.5, "CASE U 20% preLotNotional = 82.0 USDT");
-        // 82.0 / (2503.37 * 0.1) = 0.327558... -> floor with lotSz 0.01 -> 0.32 contracts
-        assertClose(rProbe20.normalizedContracts ?? 0, 0.32, 0.001, "CASE U 20% normalizedContracts = 0.32");
-        assertClose(rProbe20.finalOrderNotionalUsdt, 0.32 * 0.1 * ethPrice, 0.01, "CASE U 20% finalOrderNotional = 0.32 * 0.1 * 2503.37 = 80.1078 USDT");
+        assertClose(rProbe20.probeAdjustedPreLotNotionalUsdt, 94.3, 0.5, "CASE U 20% preLotNotional = 94.3 USDT");
+        assertClose(rProbe20.normalizedContracts ?? 0, 0.37, 0.001, "CASE U 20% normalizedContracts = 0.37");
+        assertClose(rProbe20.finalOrderNotionalUsdt, 0.37 * 0.1 * ethPrice, 0.01, "CASE U 20% finalOrderNotional = 0.37 * 0.1 * 2503.37");
         assertTrue(rProbe20.probeSizingSource === "V2_POLARITY_REVERSAL_MICRO_PROBE", "CASE U 20% probeSizingSource");
 
         console.info(JSON.stringify({
