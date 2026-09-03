@@ -74,6 +74,15 @@ export type ResolveV2PreEntryTp1AuthorityInput = Readonly<{
     snapshotTickSz?: number | null;
     instrumentTickSz?: number | null;
     profitabilityTpApproved?: boolean | null;
+    canonicalTp2Price?: number | null;
+    isExplicitMicroProbe?: boolean | null;
+    probeMultiplier?: number | null;
+    boxPos?: number | null;
+    htfBiases?: any;
+    hasHardBlock?: boolean | null;
+    htfVetoPassed?: boolean | null;
+    rangeTrendConflictPassed?: boolean | null;
+    chaseGatePassed?: boolean | null;
     atr1m?: number | null;
     atr5m?: number | null;
     atr15m?: number | null;
@@ -295,9 +304,18 @@ function resolveShockFtsPromotedExecutableTpBundle(
             entryPrice,
             canonicalTp1Price: candidate.price,
             canonicalTp1Source: candidate.source,
+            canonicalTp2Price: input.canonicalTp2Price,
             feeRate,
             paperSlippageEstimateBps: slippageBps,
-            tickSz: tickAuthority.tickSz
+            tickSz: tickAuthority.tickSz,
+            isExplicitMicroProbe: input.isExplicitMicroProbe,
+            probeMultiplier: input.probeMultiplier,
+            boxPos: input.boxPos,
+            htfBiases: input.htfBiases,
+            hasHardBlock: input.hasHardBlock,
+            htfVetoPassed: input.htfVetoPassed,
+            rangeTrendConflictPassed: input.rangeTrendConflictPassed,
+            chaseGatePassed: input.chaseGatePassed
         });
 
         if (!profitability.entryAllowed) continue;

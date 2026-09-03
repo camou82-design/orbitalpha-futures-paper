@@ -7059,6 +7059,25 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                                 : typeof (input.config as any)?.paperSlippageEstimateBps === "number"
                                   ? (input.config as any).paperSlippageEstimateBps
                                   : 8;
+                        const isExplicitMicroProbe =
+                            isMicroProbe === true ||
+                            promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE" ||
+                            promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE" ||
+                            (promotionReason === "CONTINUATION_MICRO_PROBE" && microProbeSizeCap === 0.25);
+
+                        const currentBoxPos =
+                            typeof authoritativeInput.snapshot?.boxPos === "number"
+                                ? authoritativeInput.snapshot.boxPos
+                                : typeof input.snapshot?.boxPos === "number"
+                                  ? input.snapshot.boxPos
+                                  : null;
+
+                        const htfBiasesMap = {
+                            htf_1h_bias: (judgment.diagnostics as any)?.htf_1h_bias ?? (judgment as any).htf_1h_bias ?? (v2State as any).htf_1h_bias ?? null,
+                            htf_4h_bias: (judgment.diagnostics as any)?.htf_4h_bias ?? (judgment as any).htf_4h_bias ?? (v2State as any).htf_4h_bias ?? null,
+                            htf_1d_bias: (judgment.diagnostics as any)?.htf_1d_bias ?? (judgment as any).htf_1d_bias ?? (v2State as any).htf_1d_bias ?? null
+                        };
+
                         const tpBundle = resolveV2PreEntryExecutableTpBundle({
                             side: sideForTp,
                             regime: String(judgment.regime),
@@ -7120,6 +7139,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             paperSlippageEstimateBps: slippageBps,
                             instrumentTickSz,
                             snapshotTickSz,
+                            isExplicitMicroProbe,
+                            probeMultiplier: entryProbeSizeMultiplier,
+                            boxPos: currentBoxPos,
+                            htfBiases: htfBiasesMap,
+                            hasHardBlock: hardBlockPresent === true,
+                            htfVetoPassed: judgment.htf_entry_policy === "ALLOW" || judgment.htf_entry_policy === "PROBE_ONLY",
+                            rangeTrendConflictPassed: (judgment as any).side_veto_detail !== "RANGE_TREND_SIDE_CONFLICT",
+                            chaseGatePassed: (currentBoxPos == null || currentBoxPos <= 0.65),
                             htf_candles: authoritativeInput.snapshot?.htf_candles ?? input.snapshot?.htf_candles ?? (authoritativeInput as any).htf_candles ?? (input as any).htf_candles,
                             candles: authoritativeInput.snapshot?.candles ?? input.snapshot?.candles
                         });
@@ -7128,6 +7155,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             min_order_check_passed = false;
                             min_order_block_reason = tpBundle.blockReason ?? "V2_TP_PROFITABILITY_COST_AUTHORITY_INVALID";
                         } else {
+                            const canonicalTp2PriceCandidate =
+                                typeof execMetaRec?.takeProfitPlan?.tp2 === "number"
+                                    ? execMetaRec.takeProfitPlan.tp2
+                                    : typeof execMetaRaw?.takeProfitPlan?.tp2 === "number"
+                                      ? execMetaRaw.takeProfitPlan.tp2
+                                      : typeof execMetaRec?.takeProfit2Px === "number"
+                                        ? execMetaRec.takeProfit2Px
+                                        : typeof execMetaRaw?.takeProfit2Px === "number"
+                                          ? execMetaRaw.takeProfit2Px
+                                          : (tpBundle.rawCanonicalTp1Price != null && lastPx > 0
+                                              ? (sideForTp === "long" ? lastPx + (tpBundle.rawCanonicalTp1Price - lastPx) * 1.8 : lastPx - (lastPx - tpBundle.rawCanonicalTp1Price) * 1.8)
+                                              : null);
+
                             const tpProfitabilityResult = evaluateTpProfitabilityAuthority({
                                 symbol: String(input.symbol),
                                 side: sideForTp,
@@ -7135,9 +7175,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                                 entryPrice: lastPx,
                                 canonicalTp1Price: tpBundle.rawCanonicalTp1Price,
                                 canonicalTp1Source: tpBundle.canonicalTp1Source,
+                                canonicalTp2Price: canonicalTp2PriceCandidate,
                                 feeRate: Number(authoritativeInput.config.paperTakerFeeRate ?? input.config.paperTakerFeeRate ?? 0.0005),
                                 paperSlippageEstimateBps: slippageBps,
-                                tickSz: tpBundle.tpTickSize
+                                tickSz: tpBundle.tpTickSize,
+                                isExplicitMicroProbe,
+                                probeMultiplier: entryProbeSizeMultiplier,
+                                boxPos: currentBoxPos,
+                                htfBiases: htfBiasesMap,
+                                hasHardBlock: hardBlockPresent === true,
+                                htfVetoPassed: judgment.htf_entry_policy === "ALLOW" || judgment.htf_entry_policy === "PROBE_ONLY",
+                                rangeTrendConflictPassed: (judgment as any).side_veto_detail !== "RANGE_TREND_SIDE_CONFLICT",
+                                chaseGatePassed: (currentBoxPos == null || currentBoxPos <= 0.65)
                             });
 
                             if (input.evaluationMode !== "diagnostic") {
