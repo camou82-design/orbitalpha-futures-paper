@@ -4,6 +4,15 @@ import type { V2StateAuthority } from "./types";
 
 const DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT = 100;
 
+export interface EarlyDecayReclaimInfo {
+    ts: number;
+    cycleKey: any;
+    direction: "bullish" | "bearish";
+    boxPos: number;
+    previousShock: "UP" | "DOWN";
+    consumed: boolean;
+}
+
 interface ShockState {
     activeDirection: "UP" | "DOWN" | "NONE" | "UNKNOWN";
     rawDirection: "UP" | "DOWN" | "NONE" | "UNKNOWN";
@@ -17,9 +26,25 @@ interface ShockState {
     requiredMovePct: number;
     emergencyBypass: boolean;
     lastProcessedCycle: number | string;
+    lastEarlyDecayReclaim?: EarlyDecayReclaimInfo | null;
 }
 
 export const globalShockStates = new Map<string, ShockState>();
+
+export function getLastEarlyDecayReclaim(symbol: string): EarlyDecayReclaimInfo | null {
+    const sym = String(symbol);
+    const st = globalShockStates.get(sym);
+    if (!st || !st.lastEarlyDecayReclaim) return null;
+    return st.lastEarlyDecayReclaim;
+}
+
+export function consumeLastEarlyDecayReclaim(symbol: string): void {
+    const sym = String(symbol);
+    const st = globalShockStates.get(sym);
+    if (st && st.lastEarlyDecayReclaim) {
+        st.lastEarlyDecayReclaim.consumed = true;
+    }
+}
 
 export function clearGlobalShockStates(symbol?: string): void {
     if (symbol) {
@@ -307,14 +332,15 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
             // Get symbol-specific state store or initialize
             const sym = String(symbol);
             if (!globalShockStates.has(sym)) {
+                const initialActive = (raw === "UP" || raw === "DOWN") ? raw : "NONE";
                 globalShockStates.set(sym, {
-                    activeDirection: "NONE",
-                    rawDirection: "NONE",
+                    activeDirection: initialActive,
+                    rawDirection: initialActive,
                     candidateDirection: "NONE",
                     candidateCount: 0,
                     neutralCount: 0,
                     candidateStartedAt: null,
-                    activatedAt: null,
+                    activatedAt: initialActive !== "NONE" ? Date.now() : null,
                     lastChangedAt: Date.now(),
                     rawMovePct: 0,
                     requiredMovePct: 0,
@@ -403,6 +429,14 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
                     st.candidateStartedAt = null;
                     st.activatedAt = null;
                     st.lastChangedAt = nowMs;
+                    st.lastEarlyDecayReclaim = {
+                        ts: nowMs,
+                        cycleKey,
+                        direction: prevActive === "DOWN" ? "bullish" : "bearish",
+                        boxPos: Number(input.snapshot?.boxPos ?? 0),
+                        previousShock: prevActive as "UP" | "DOWN",
+                        consumed: false
+                    };
                     stateChanged = true;
 
                     console.info(JSON.stringify({
@@ -431,6 +465,7 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
                     if (st.activeDirection !== st.rawDirection) {
                         st.activeDirection = st.rawDirection;
                         st.activatedAt = nowMs;
+                        st.lastEarlyDecayReclaim = null;
                     }
                     st.candidateDirection = "NONE";
                     st.candidateCount = 0;

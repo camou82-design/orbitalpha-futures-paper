@@ -289,7 +289,7 @@ import { executeTrendRegime, calculateAuthoritativeTrendStructuralStop } from ".
 import { executeTransitionRegime } from "./executors/transition-executor";
 import { calculateRiskSizing } from "./risk-sizing/policy";
 import { generateExplanation } from "./explain/diagnostic";
-import { deriveV2StateAuthority } from "./state/derive";
+import { deriveV2StateAuthority, getLastEarlyDecayReclaim, consumeLastEarlyDecayReclaim } from "./state/derive";
 import { evaluateV2AddOnPolicy } from "./addon/policy";
 import { buildV2AddonEligibilityProof } from "./addon/eligibility-proof";
 import { evaluateV2ExitPolicy } from "./exit/policy";
@@ -3720,7 +3720,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // --- V2_RANGE_TREND_CONFLICT_RESOLUTION_PROOF ---
     // Tier 4.8: Conflict Resolution (Range vs Trend)
     const localConflict =
-        activeEngineRouting === "RANGE" &&
+        (activeEngineRouting === "RANGE" || activeEngineRouting === "TRANSITION" || activeEngineRouting === "TREND") &&
         rangeSideCandidate !== "none" && trendSideCandidate !== "none" &&
         rangeSideCandidate !== trendSideCandidate;
 
@@ -3735,6 +3735,97 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let conflictResolvedTrendLong = false;
     let conflictResolutionAction = "none";
     let conflictResolutionReason = "no_conflict_or_conditions_unmet";
+
+    // Tier 4.8.1: Structural Reclaim Range-Trend Conflict Micro Probe (0.25x Explicit Micro Probe)
+    if (localConflict) {
+        const lastEarlyDecay = getLastEarlyDecayReclaim(String(input.symbol));
+        const nowMsForReclaim = input.now || Date.now();
+        const currentBoxPos = Number(boxPos ?? 0.5);
+
+        const rawShock = (v2State.rawDirectionalShockState ?? input.state.directionalShockState ?? "NONE") as string;
+        const isBullishReclaimCandidate =
+            lastEarlyDecay != null &&
+            !lastEarlyDecay.consumed &&
+            lastEarlyDecay.direction === "bullish" &&
+            lastEarlyDecay.boxPos <= 0.65 &&
+            (nowMsForReclaim - lastEarlyDecay.ts) <= 60000 &&
+            shock === "NONE" &&
+            rawShock === "NONE" &&
+            trendSideCandidate === "long" &&
+            currentBoxPos <= 0.65;
+
+        const isBearishReclaimCandidate =
+            lastEarlyDecay != null &&
+            !lastEarlyDecay.consumed &&
+            lastEarlyDecay.direction === "bearish" &&
+            lastEarlyDecay.boxPos >= 0.35 &&
+            (nowMsForReclaim - lastEarlyDecay.ts) <= 60000 &&
+            shock === "NONE" &&
+            rawShock === "NONE" &&
+            trendSideCandidate === "short" &&
+            currentBoxPos >= 0.35;
+
+        const isReclaimProbeCandidate =
+            (isBullishReclaimCandidate || isBearishReclaimCandidate) &&
+            localConflict &&
+            qualityScore >= 64 &&
+            (entryQualityGrade === "S" || entryQualityGrade === "A" || entryQualityGrade === "B") &&
+            judgment.htf_entry_policy !== "HOLD" &&
+            judgment.htf_entry_policy !== "REJECT" &&
+            !whipsawShockRecheckActive &&
+            hardBlockPresent === false &&
+            hardControlClear === true &&
+            paperExecutionReady === true &&
+            signedExecutionReady === true;
+
+        if (isReclaimProbeCandidate && (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "REJECT" || !promotionApplied)) {
+            const sideToPromote = isBullishReclaimCandidate ? "long" : "short";
+            const hasSameSidePos = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() === sideToPromote);
+            const hasOppositeSidePos = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() !== sideToPromote);
+            const sideAllowed = sideToPromote === "long" ? (riskLongAllow && allowNewLong) : (riskShortAllow && allowNewShort);
+
+            if (!hasSameSidePos && !hasOppositeSidePos && sideAllowed) {
+                const trendStops = calculateAuthoritativeTrendStructuralStop(authoritativeInput.snapshot, sideToPromote);
+                const candidateStop = trendStops?.stopPrice ?? trendStops?.invalidationPx ?? null;
+                const entryPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+                const isValidStop = typeof candidateStop === "number" && Number.isFinite(candidateStop) && candidateStop > 0 &&
+                    (sideToPromote === "long" ? candidateStop < entryPrice : candidateStop > entryPrice);
+
+                let calculatedStop = isValidStop ? candidateStop : (sideToPromote === "long" ? entryPrice * 0.995 : entryPrice * 1.005);
+
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = sideToPromote;
+                promotionApplied = true;
+                promotionReason = "V2_RANGE_TREND_RECLAIM_MICRO_PROBE";
+                v2RejectReasonAfterPromotion = null;
+                v2CalculatedInvalidationPx = calculatedStop;
+                execution.stopPrice = calculatedStop;
+                execution.invalidationPx = calculatedStop;
+
+                execMeta.entryReason = "V2_RANGE_TREND_RECLAIM_MICRO_PROBE";
+                execMeta.entry_reason = "V2_RANGE_TREND_RECLAIM_MICRO_PROBE";
+                execMeta.range_trend_reclaim_micro_probe = true;
+
+                consumeLastEarlyDecayReclaim(String(input.symbol));
+
+                console.info(JSON.stringify({
+                    event: "V2_RANGE_TREND_RECLAIM_MICRO_PROBE_PROOF",
+                    symbol: String(input.symbol),
+                    side: sideToPromote,
+                    entryPrice,
+                    stopPrice: calculatedStop,
+                    boxPos: currentBoxPos,
+                    reclaimBoxPos: lastEarlyDecay!.boxPos,
+                    reclaimAgeMs: nowMsForReclaim - lastEarlyDecay!.ts,
+                    qualityScore,
+                    entryQualityGrade,
+                    htfPolicy: judgment.htf_entry_policy,
+                    probeMultiplier: 0.25,
+                    reason: "V2_RANGE_TREND_RECLAIM_MICRO_PROBE"
+                }));
+            }
+        }
+    }
 
     if (localConflict && zone === "upper") {
         // upper zone short
@@ -3824,7 +3915,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         // 단순 upper/mid chase long 금지. Confirmed RANGE boundary continuation must not be undone.
         const continuationPromotionProtected =
             promotionApplied === true &&
-            promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
+            (promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION" ||
+             promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE");
         const ftsUpperLongStructuralForConflict = evaluateFastTrendShiftUpperLongZoneConfirmed({
             fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
             zone,
@@ -3974,7 +4066,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         // 단순 lower/mid chase short 금지. Confirmed RANGE boundary continuation must not be undone.
         const continuationPromotionProtected =
             promotionApplied === true &&
-            promotionReason === "V2_LOWER_SHORT_PROBE_PROMOTION";
+            (promotionReason === "V2_LOWER_SHORT_PROBE_PROMOTION" ||
+             promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE");
         const ftsLowerShortStructuralForConflict = evaluateFastTrendShiftLowerShortZoneConfirmed({
             fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
             zone,
@@ -4442,11 +4535,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const isTrendContinuationRevalidatedPromotion = promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
     const isConflictResolvedTrendLongPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
     const isConflictResolvedTrendShortPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_SHORT";
+    const isRangeTrendReclaimProbePromotion = promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE";
     const isTrendQualifiedFinalPromotion =
         promotionReason === "V2_TREND_QUALIFIED_FINAL_PROMOTION" ||
         (isTrendAuthorityCandidate && promotionApplied === true);
     const rangeZoneVetoExempt =
         isMicroProbePromotion ||
+        isRangeTrendReclaimProbePromotion ||
         isStairStepPromotion ||
         isTrendContinuationRevalidatedPromotion ||
         isTrendQualifiedFinalPromotion;
@@ -4987,6 +5082,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         sideVetoDetail = "SHOCK_REACTION_PROMOTION_BYPASS_RANGE_SIDE_VETO";
     } else if (isBypassRangeUpperShort) {
         sideVetoDetail = "RANGE_UPPER_SHORT_HTF_ALIGNED_BYPASS";
+    } else if (promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE") {
+        sideVetoDetail = "RANGE_TREND_RECLAIM_PROBE_APPLIED";
     } else if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
         sideVetoDetail = "WHIPSAW_SHOCK_RECHECK_ACTIVE";
     } else if (v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP") {
@@ -5286,6 +5383,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const isTrendContinuationRevalidatedPromotion = promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
         const isPolarityReversalMicroProbePromotion = promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE";
         const isConflictResolvedTrendLongPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
+        const isRangeTrendReclaimProbePromotion = promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE";
         if (sideFinal === "short" && zone === "lower") {
             const isFastTrendShiftLowerShort =
                 judgment.subtype === "FAST_TREND_SHIFT" &&
@@ -5403,11 +5501,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     (isStairStepPromotion && sideFinal === "short") ||
                     (isTrendContinuationRevalidatedPromotion && sideFinal === "short") ||
                     (isPolarityReversalMicroProbePromotion && sideFinal === "short") ||
-                    (isConflictResolvedTrendShortPromotion && sideFinal === "short")
+                    (isConflictResolvedTrendShortPromotion && sideFinal === "short") ||
+                    (isRangeTrendReclaimProbePromotion && sideFinal === "short")
                 );
             const htfStrongBullish = htfHardBlockReason === "STRONG_BULLISH_HTF_ALIGNMENT";
 
-            if (!shortException || (htfStrongBullish && !isPolarityReversalMicroProbePromotion && !isConflictResolvedTrendShortPromotion)) {
+            if (!shortException || (htfStrongBullish && !isPolarityReversalMicroProbePromotion && !isConflictResolvedTrendShortPromotion && !isRangeTrendReclaimProbePromotion)) {
                 mismatchReason = "SIDE_ZONE_MISMATCH_LOWER_SHORT";
             }
         } else if (sideFinal === "long" && zone === "upper") {
@@ -5460,10 +5559,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 (isTrendContinuationRevalidatedPromotion && sideFinal === "long") ||
                 (isPolarityReversalMicroProbePromotion && sideFinal === "long") ||
                 (isConflictResolvedTrendLongPromotion && sideFinal === "long") ||
+                (isRangeTrendReclaimProbePromotion && sideFinal === "long") ||
                 (isFastTrendShiftUpperLong && fastTrendShiftUpperLongConfirmed);
             const htfStrongBearish = htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT";
 
-            if (!longException || (htfStrongBearish && !isPolarityReversalMicroProbePromotion && !isConflictResolvedTrendLongPromotion)) {
+            if (!longException || (htfStrongBearish && !isPolarityReversalMicroProbePromotion && !isConflictResolvedTrendLongPromotion && !isRangeTrendReclaimProbePromotion)) {
                 mismatchReason = "SIDE_ZONE_MISMATCH_UPPER_LONG";
             }
         }
@@ -6115,7 +6215,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Live order size authority: fixed 10x leverage + strict env notional cap.
     const stageMarginKrwBefore = riskSizing.stageMarginKrw;
     let stageMarginKrwAfter = stageMarginKrwBefore;
-    if (isDeadlockProbe || promotionReason === "CONTINUATION_MICRO_PROBE" || promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION" || promotionReason === "V2_TREND_CONTINUATION_REVALIDATED" || promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE" || promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG" || promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" || execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST") {
+    if (isDeadlockProbe || promotionReason === "CONTINUATION_MICRO_PROBE" || promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION" || promotionReason === "V2_TREND_CONTINUATION_REVALIDATED" || promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE" || promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG" || promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE" || promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" || execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST") {
         let baseMargin = riskSizing.baseStageMarginKrw;
         if (promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE") {
             baseMargin = stageMarginKrwBefore > 0 ? stageMarginKrwBefore : riskSizing.baseStageMarginKrw;
@@ -6345,6 +6445,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         promotionReason === "V2_LOWER_LONG_REACTION_PROBE_PROMOTION" ||
         promotionReason === "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION" ||
         promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG" ||
+        promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE" ||
         promotionReason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" ||
         execution.reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST";
 
@@ -6739,6 +6840,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     if (promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE") {
                         entryProbeSizeMultiplier = 0.20;
                         probeSizingSource = "V2_POLARITY_REVERSAL_MICRO_PROBE";
+                    } else if (promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE") {
+                        entryProbeSizeMultiplier = 0.25;
+                        probeSizingSource = "V2_RANGE_TREND_RECLAIM_MICRO_PROBE";
                     } else if (promotionReason === "CONTINUATION_MICRO_PROBE" && microProbeSizeCap != null) {
                         entryProbeSizeMultiplier = microProbeSizeCap;
                         probeSizingSource = "CONTINUATION_MICRO_PROBE";
