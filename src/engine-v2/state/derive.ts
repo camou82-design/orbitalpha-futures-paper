@@ -1,4 +1,5 @@
 import type { EngineV2Input, EngineV2Position, EngineV2Side } from "../types";
+import type { Candle } from "../../models/types";
 import type { V2StateAuthority } from "./types";
 
 const DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT = 100;
@@ -26,6 +27,81 @@ export function clearGlobalShockStates(symbol?: string): void {
     } else {
         globalShockStates.clear();
     }
+}
+
+export function evaluateStructuralReclaimEarlyDecay(args: {
+    activeDirection: "UP" | "DOWN" | "NONE" | "UNKNOWN";
+    candles: ReadonlyArray<Candle>;
+    snapshot: any;
+}): { eligible: boolean; reason: string; closed1mCount: number; structuralReclaimed: boolean } {
+    const { activeDirection, candles, snapshot } = args;
+    if (activeDirection === "NONE" || activeDirection === "UNKNOWN" || !Array.isArray(candles) || candles.length < 2) {
+        return { eligible: false, reason: "NO_ACTIVE_SHOCK_OR_INSUFFICIENT_CANDLES", closed1mCount: 0, structuralReclaimed: false };
+    }
+
+    const c1 = candles[candles.length - 2];
+    const c2 = candles[candles.length - 1];
+    if (!c1 || !c2 || !Number.isFinite(c1.close) || !Number.isFinite(c2.close)) {
+        return { eligible: false, reason: "INVALID_CANDLE_DATA", closed1mCount: 0, structuralReclaimed: false };
+    }
+
+    const lastPrice = Number(snapshot?.lastPrice ?? c2.close);
+    const boxLow = Number(snapshot?.boxLow ?? 0);
+    const boxHigh = Number(snapshot?.boxHigh ?? 0);
+    const ema20 = Number(snapshot?.ema20 ?? 0);
+    const ema60 = Number(snapshot?.ema60 ?? 0);
+
+    if (activeDirection === "DOWN") {
+        // Bullish Reversal from DOWN shock:
+        // 1. Two consecutive closed 1m candles showing bullish progression
+        const c1Bullish = c1.close >= c1.open || c1.close > (candles[candles.length - 3]?.close ?? c1.open);
+        const c2Bullish = c2.close >= c2.open && c2.close >= c1.close;
+        const twoClosed1mConfirm = c1Bullish && c2Bullish;
+        const closedCount = twoClosed1mConfirm ? 2 : (c2Bullish ? 1 : 0);
+
+        if (!twoClosed1mConfirm) {
+            return { eligible: false, reason: "TWO_CLOSED_1M_BULLISH_NOT_CONFIRMED", closed1mCount: closedCount, structuralReclaimed: false };
+        }
+
+        // 2. Authoritative Bullish Structural Reclaim:
+        // Reclaimed back inside/above boxLow, OR reclaimed above EMA20 / EMA60, OR broke above prior candle high with box support
+        const boxLowReclaimed = boxLow > 0 && lastPrice >= boxLow;
+        const emaReclaimed = ema20 > 0 && lastPrice >= ema20;
+        const higherHighReclaimed = c2.close > c1.high && (boxLowReclaimed || emaReclaimed || (ema60 > 0 && lastPrice >= ema60));
+        const structuralReclaimed = boxLowReclaimed || emaReclaimed || higherHighReclaimed;
+
+        if (!structuralReclaimed) {
+            return { eligible: false, reason: "BULLISH_STRUCTURAL_RECLAIM_NOT_CONFIRMED", closed1mCount: closedCount, structuralReclaimed: false };
+        }
+
+        return { eligible: true, reason: "BULLISH_STRUCTURAL_RECLAIM_EARLY_DECAY", closed1mCount: closedCount, structuralReclaimed: true };
+    } else if (activeDirection === "UP") {
+        // Bearish Reversal from UP shock:
+        // 1. Two consecutive closed 1m candles showing bearish progression
+        const c1Bearish = c1.close <= c1.open || c1.close < (candles[candles.length - 3]?.close ?? c1.open);
+        const c2Bearish = c2.close <= c2.open && c2.close <= c1.close;
+        const twoClosed1mConfirm = c1Bearish && c2Bearish;
+        const closedCount = twoClosed1mConfirm ? 2 : (c2Bearish ? 1 : 0);
+
+        if (!twoClosed1mConfirm) {
+            return { eligible: false, reason: "TWO_CLOSED_1M_BEARISH_NOT_CONFIRMED", closed1mCount: closedCount, structuralReclaimed: false };
+        }
+
+        // 2. Authoritative Bearish Structural Reclaim:
+        // Reclaimed back inside/below boxHigh, OR fell below EMA20 / EMA60, OR broke below prior candle low with box resistance
+        const boxHighReclaimed = boxHigh > 0 && lastPrice <= boxHigh;
+        const emaReclaimed = ema20 > 0 && lastPrice <= ema20;
+        const lowerLowReclaimed = c2.close < c1.low && (boxHighReclaimed || emaReclaimed || (ema60 > 0 && lastPrice <= ema60));
+        const structuralReclaimed = boxHighReclaimed || emaReclaimed || lowerLowReclaimed;
+
+        if (!structuralReclaimed) {
+            return { eligible: false, reason: "BEARISH_STRUCTURAL_RECLAIM_NOT_CONFIRMED", closed1mCount: closedCount, structuralReclaimed: false };
+        }
+
+        return { eligible: true, reason: "BEARISH_STRUCTURAL_RECLAIM_EARLY_DECAY", closed1mCount: closedCount, structuralReclaimed: true };
+    }
+
+    return { eligible: false, reason: "UNKNOWN", closed1mCount: 0, structuralReclaimed: false };
 }
 
 export function inferIntentSide(input: EngineV2Input): EngineV2Side {
@@ -311,10 +387,41 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
             let activationBlockReason = "";
             let stateChanged = false;
 
+            // Structural Reclaim Early Decay: If an active shock exists, check if 2 opposite closed 1m candles + structural reclaim have confirmed
+            if (st.activeDirection === "UP" || st.activeDirection === "DOWN") {
+                const earlyDecay = evaluateStructuralReclaimEarlyDecay({
+                    activeDirection: st.activeDirection,
+                    candles,
+                    snapshot: input.snapshot
+                });
+
+                if (earlyDecay.eligible) {
+                    st.activeDirection = "NONE";
+                    st.candidateDirection = "NONE";
+                    st.candidateCount = 0;
+                    st.neutralCount = 0;
+                    st.candidateStartedAt = null;
+                    st.activatedAt = null;
+                    st.lastChangedAt = nowMs;
+                    stateChanged = true;
+
+                    console.info(JSON.stringify({
+                        event: "V2_SHOCK_STRUCTURAL_RECLAIM_EARLY_DECAY_PROOF",
+                        symbol: sym,
+                        previous_shock: prevActive,
+                        early_decay_applied: true,
+                        early_decay_reason: earlyDecay.reason,
+                        closed_1m_count: earlyDecay.closed1mCount,
+                        structural_reclaimed: earlyDecay.structuralReclaimed,
+                        ts: nowMs
+                    }));
+                }
+            }
+
             if (st.rawDirection !== "NONE") {
                 // If there's an active shock and raw direction has flipped to the opposite
-                const isOpposite = (prevActive === "UP" && st.rawDirection === "DOWN") ||
-                                   (prevActive === "DOWN" && st.rawDirection === "UP");
+                const isOpposite = (st.activeDirection === "UP" && st.rawDirection === "DOWN") ||
+                                   (st.activeDirection === "DOWN" && st.rawDirection === "UP");
 
                 if (isOpposite && !st.emergencyBypass) {
                     // Prevent direct flip without emergency bypass -> treat it as normal candidate flow from NONE
