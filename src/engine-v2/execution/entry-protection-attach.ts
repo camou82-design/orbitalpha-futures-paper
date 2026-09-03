@@ -48,8 +48,10 @@ export function buildV2NewEntryAttachAlgoOrds(input: Readonly<{
 }>): Readonly<{
     attachAlgoOrds: ReadonlyArray<Record<string, unknown>>;
     entryFullPositionTpAttached: boolean;
+    entryRangeTp2BackstopAttached?: boolean;
     attachOrdType: "oco" | "conditional";
     lifecyclePartialTpAuthority: boolean;
+    exchangeTpSource?: "trend_full_tp" | "range_tp2_backstop" | "none";
 }> {
     const slTriggerPx =
         input.stopPrice != null && Number.isFinite(input.stopPrice) && input.stopPrice > 0
@@ -58,15 +60,24 @@ export function buildV2NewEntryAttachAlgoOrds(input: Readonly<{
     const hasTpPrice =
         input.takeProfitPrice != null && Number.isFinite(input.takeProfitPrice) && input.takeProfitPrice > 0;
     const entryFullPositionTpAttached = hasTpPrice && !input.isV2RangePartialPlan;
-    const attachOrdType: "oco" | "conditional" = entryFullPositionTpAttached ? "oco" : "conditional";
-    const tpTriggerPx = entryFullPositionTpAttached ? String(input.takeProfitPrice) : undefined;
+    const entryRangeTp2BackstopAttached = hasTpPrice && input.isV2RangePartialPlan;
+    const shouldAttachOco = entryFullPositionTpAttached || entryRangeTp2BackstopAttached;
+    const attachOrdType: "oco" | "conditional" = shouldAttachOco ? "oco" : "conditional";
+    const tpTriggerPx = shouldAttachOco && hasTpPrice ? String(input.takeProfitPrice) : undefined;
+    const exchangeTpSource = entryFullPositionTpAttached
+        ? ("trend_full_tp" as const)
+        : entryRangeTp2BackstopAttached
+          ? ("range_tp2_backstop" as const)
+          : ("none" as const);
 
     if (!slTriggerPx) {
         return {
             attachAlgoOrds: [],
             entryFullPositionTpAttached: false,
+            entryRangeTp2BackstopAttached: false,
             attachOrdType: "conditional",
-            lifecyclePartialTpAuthority: input.isV2RangePartialPlan
+            lifecyclePartialTpAuthority: input.isV2RangePartialPlan,
+            exchangeTpSource: "none"
         };
     }
 
@@ -78,7 +89,7 @@ export function buildV2NewEntryAttachAlgoOrds(input: Readonly<{
             slTriggerPx,
             slOrdPx: "-1",
             slTriggerPxType: "last",
-            ...(attachOrdType === "oco"
+            ...(attachOrdType === "oco" && tpTriggerPx != null
                 ? { tpTriggerPx, tpOrdPx: "-1", tpTriggerPxType: "last" }
                 : {}),
             reduceOnly: true
@@ -88,7 +99,9 @@ export function buildV2NewEntryAttachAlgoOrds(input: Readonly<{
     return {
         attachAlgoOrds,
         entryFullPositionTpAttached,
+        entryRangeTp2BackstopAttached,
         attachOrdType,
-        lifecyclePartialTpAuthority: input.isV2RangePartialPlan
+        lifecyclePartialTpAuthority: input.isV2RangePartialPlan,
+        exchangeTpSource
     };
 }

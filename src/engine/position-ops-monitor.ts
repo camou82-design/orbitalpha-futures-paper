@@ -12,7 +12,7 @@ import {
   isLedgerOnlyStaleKey,
   isOkxOnlyKey
 } from "../lib/position-reconcile-classification";
-import { protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
+import { protectiveStopPricesMatch, protectiveContractSizesMatch } from "../engine-v2/execution/protective-match";
 import { resolveLedgerCanonicalProtectiveTruth } from "../engine-v2/execution/protective-order-state";
 import { resolveOpsWatchTpRequired } from "../engine-v2/execution/protective-tp-authority";
 
@@ -695,11 +695,22 @@ export function findProtectiveHintsForInst(
       reqStop != null && slPx != null && tickSz > 0
         ? protectiveStopPricesMatch(reqStop, slPx, tickSz)
         : slPx != null;
+
+    const isCloseFraction =
+      o.closeFraction === "1" || String(o.closeFraction ?? "") === "1";
+    const algoSz = Number(o.sz);
+    const sizeMatch =
+      isCloseFraction ||
+      options?.requiredContracts == null ||
+      options.requiredContracts <= 0 ||
+      protectiveContractSizesMatch(options.requiredContracts, algoSz);
+
     if (
       reduceOnly &&
       closeSideOk &&
       slPx != null &&
       priceMatch &&
+      sizeMatch &&
       (classified.purpose === "protective-stop" ||
         classified.purpose === "bot-managed-protection" ||
         classified.purpose === "protective-purpose" ||
@@ -721,8 +732,7 @@ export function findProtectiveHintsForInst(
       ? protectiveStopPricesMatch(reqStop, foundSlPrice, tickSz)
       : foundSl;
   protectionSatisfied =
-    (canonicalProtectiveSlFound && (!tpRequired || foundTp)) ||
-    (slPriceMatch && (!tpRequired || foundTp));
+    canonicalProtectiveSlFound && (!tpRequired || foundTp);
 
   if (options?.ledger && !protectionSatisfied) {
     const ledgerCanonical = resolveLedgerCanonicalProtectiveTruth({
@@ -845,8 +855,18 @@ export function buildPositionOpsSurface(input: Readonly<{
         ledger.partialExitRatio > 0 &&
         ledger.partialExitRatio < 1;
 
+      const rangeTp2Px =
+        typeof ledger?.takeProfit2Px === "number" && Number.isFinite(ledger.takeProfit2Px) && ledger.takeProfit2Px > 0
+          ? ledger.takeProfit2Px
+          : typeof (ledger?.takeProfitPlan as any)?.tp2 === "number" && Number.isFinite((ledger?.takeProfitPlan as any).tp2) && (ledger?.takeProfitPlan as any).tp2 > 0
+            ? (ledger?.takeProfitPlan as any).tp2
+            : null;
+
+      const effectiveLedgerTp = isV2RangePartialPlan ? rangeTp2Px : ledgerTp;
+      const hasRangeTp2Backstop = isV2RangePartialPlan && rangeTp2Px != null && rangeTp2Px > 0;
+
       const rawTpRequired =
-        (ledgerTp != null && ledgerTp > 0) || (tpPx != null && tpPx > 0 && Number.isFinite(tpPx));
+        (effectiveLedgerTp != null && effectiveLedgerTp > 0) || (tpPx != null && tpPx > 0 && Number.isFinite(tpPx));
       const isV2ManagedTrend =
         ledger?.isV2Authority === true &&
         ledger?.lifecycleState === "BOT_V2_MANAGED" &&
@@ -854,7 +874,8 @@ export function buildPositionOpsSurface(input: Readonly<{
       const tpRequired = resolveOpsWatchTpRequired({
         isV2RangePartialPlan,
         isV2ManagedTrend,
-        rawTpRequired
+        rawTpRequired,
+        hasRangeTp2Backstop
       });
 
       const instSizing = instMap?.get(hit.instId) as { tickSz?: number } | undefined;

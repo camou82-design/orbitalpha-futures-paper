@@ -370,8 +370,10 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
                 }
             } else {
                 addOnAllowed = rangeEdge && !rangeMid;
-                partialAction = (input.unrealizedPnlPct ?? 0) >= 0.003 && rangeEdge ? "protect_profit" : "prepare";
-                exitAction = rangeMid && (input.unrealizedPnlPct ?? 0) >= 0.002 ? "watch" : "none";
+                partialAction = partialAction !== "none" ? partialAction : ((input.unrealizedPnlPct ?? 0) >= 0.003 && rangeEdge ? "protect_profit" : "prepare");
+                if (exitAction !== "exit") {
+                    exitAction = rangeMid && (input.unrealizedPnlPct ?? 0) >= 0.002 ? "watch" : "none";
+                }
                 proofReasons.push(rangeEdge ? "RANGE_EDGE_MANAGEMENT" : "RANGE_MID_CONSERVATIVE_MANAGEMENT");
             }
         } else if (input.regime === "TREND") {

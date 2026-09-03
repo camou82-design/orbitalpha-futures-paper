@@ -397,7 +397,10 @@ import {
   evaluateOpsWatchProtectiveScanVerdict,
   reevaluateOpsWatchProtectiveScanVerdictAfterEnsure
 } from "../engine-v2/execution/protective-order-state";
-import { shouldAttachFullPositionProtectiveTp as shouldAttachFullPositionProtectiveTpCore } from "../engine-v2/execution/protective-tp-authority";
+import {
+  shouldAttachFullPositionProtectiveTp as shouldAttachFullPositionProtectiveTpCore,
+  resolveProtectiveTpPlan
+} from "../engine-v2/execution/protective-tp-authority";
 import {
   evaluateTerminalReentryBarrier,
   buildTerminalReentryBarrierProof
@@ -3655,31 +3658,11 @@ export class PaperEngine {
         this.syncOpenLedgerFromRemoteAuthority(open, remote);
         open.reconcileState = "MATCHED";
         open.lastCheckedAt = nowTs;
-        
-        // Terminate all bot authority and activate manual takeover
-        const takeoverRec = createManualTakeoverRecord({
-          symbol: open.symbol,
-          side: open.side,
-          reason: "MANUAL_PARTIAL_CLOSE",
-          positionCycleId: open.positionCycleId,
-          nowMs: nowTs
-        });
-        this.manualTakeoverBySymbol.set(buildManualTakeoverKey(open.symbol, open.side), takeoverRec);
-        this.manualTakeoverBySymbol.set(String(open.symbol).toUpperCase(), takeoverRec);
-        applyManualTakeoverToPositionRecord(open, takeoverRec);
-        void this.persistManualTakeoverDoc();
-        void this.cancelEngineOwnedOrdersOnTakeover(open.symbol, open.side);
-
-        this.logger.warn("V2_MANUAL_TAKEOVER_ACTIVATED_PROOF", {
-          symbol: open.symbol,
-          side: open.side,
-          reason: "MANUAL_PARTIAL_CLOSE",
-          classification: delta.classification,
-          before_contracts: beforeContracts,
-          after_contracts: remote.contracts,
-          manual_takeover_active: true,
-          action: "BOT_AUTHORITY_TERMINATED_OBSERVE_ONLY"
-        });
+        // Keep bot lifecycle owner active (do NOT activate manual takeover for pure same-side reduction)
+        open.manualTakeoverActive = false;
+        if (open.lifecycleState === "OPERATOR_MANAGED") {
+          open.lifecycleState = "BOT_V2_MANAGED";
+        }
 
         this.logger.info(
           "V2_MANUAL_REDUCE_REBASE_PROOF",
@@ -3688,9 +3671,17 @@ export class PaperEngine {
             actual_contracts: remote.contracts,
             delta_contracts: delta.deltaContracts,
             bot_fill_evidence_found: false,
-            manual_latch_created: true,
-            management_owner: "OPERATOR"
+            manual_latch_created: false,
+            management_owner: open.lifecycleState ?? "BOT_V2_MANAGED",
+            manual_takeover_active: false,
+            v2_ladder_active: true,
+            exit_calculation_allowed: true
           })
+        );
+        void this.ensureProtectiveStopOrder(
+          open,
+          `SAFE_PROTECTIVE_SIZE_RECONCILE:${open.symbol}:${open.side}:${nowTs}`,
+          remote.avgPx
         );
         this.logPositionUnitInvariant(open);
         return { ledgerModified: true, mismatchType: "MATCHED", blocked: false, sizeDeltaClassification };
@@ -5029,7 +5020,13 @@ export class PaperEngine {
           }
         }
 
-        if (ownership.manualLatchShouldBeActive || open.manualOwnershipLatch === true) {
+        const isSameSideReduceOnly =
+          (open.isV2Authority === true || open.lifecycleState === "BOT_V2_MANAGED") &&
+          remotePos != null &&
+          remotePos.contracts > 0 &&
+          (open.okxContracts ?? 0) >= remotePos.contracts;
+
+        if (!isSameSideReduceOnly && (ownership.manualLatchShouldBeActive || open.manualOwnershipLatch === true)) {
           const takeoverRec = createManualTakeoverRecord({
             symbol: open.symbol,
             side: open.side,
@@ -11375,10 +11372,15 @@ export class PaperEngine {
     const syncSnap = buildLedgerOkxPositionSyncSnapshot(paperOpensForSync, this.lastLivePositionsPayload, this.instrumentCache);
     const isTrueExternalManual = syncSnap.ignored_external_manual_keys.includes(symSideKey);
 
+    const isProtectiveSizeReconcileExplicit =
+      flowId.startsWith("SAFE_PROTECTIVE_SIZE_RECONCILE") ||
+      flowId.includes("protective_size_reconcile");
+
     if (
-      open.manualTakeoverActive === true ||
-      isOperatorManagedOpenPosition(open) ||
-      this.isManualTakeoverActive(open.symbol, open.side)
+      (open.manualTakeoverActive === true ||
+        isOperatorManagedOpenPosition(open) ||
+        this.isManualTakeoverActive(open.symbol, open.side)) &&
+      !isProtectiveSizeReconcileExplicit
     ) {
       this.logger.info("V2_PROTECTIVE_STOP_SKIP_MANUAL_TAKEOVER_PROOF", {
         symbol: open.symbol,
@@ -11517,18 +11519,27 @@ export class PaperEngine {
       partialExitRatio: open.partialExitRatio
     });
 
-    const rawWantsTp = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0;
-    const tpEvaluation = shouldAttachFullPositionProtectiveTp({
+    const tpPlanResolution = resolveProtectiveTpPlan({
       isV2Authority: open.isV2Authority === true,
       regime,
       isV2RangePartialPlan,
-      rawWantsTp,
-      takeProfitRequired: Boolean((open as any).takeProfitRequired)
+      rawWantsTp: true,
+      takeProfitRequired: Boolean((open as any).takeProfitRequired),
+      targetPrice1: open.targetPrice1,
+      takeProfit1Px: open.takeProfit1Px,
+      takeProfit2Px: open.takeProfit2Px,
+      takeProfitPlan: open.takeProfitPlan
     });
-    const fullPositionTpRequired = tpEvaluation.fullPositionTpRequired;
+
+    if (tpPlanResolution.exchangeTpRequired && tpPlanResolution.exchangeTpPrice != null && tpPlanResolution.exchangeTpPrice > 0) {
+      activeTpPrice = tpPlanResolution.exchangeTpPrice;
+    }
+
+    const rawWantsTp = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0;
+    const fullPositionTpRequired = tpPlanResolution.fullPositionTpRequired;
     const wantsTp = rawWantsTp && fullPositionTpRequired;
     const slRequired = true;
-    const tpRequired = fullPositionTpRequired;
+    const tpRequired = wantsTp;
 
     if (tpRequired && (!activeTpPrice || !Number.isFinite(activeTpPrice))) {
       this.logger.error("PROTECTIVE_ORDER_TP_REQUIRED_BUT_MISSING_PROOF", {
@@ -11553,6 +11564,8 @@ export class PaperEngine {
         partialExitRatio: open.partialExitRatio,
         exchangeSlProtectionRequired: true,
         exchangeTpProtectionDelegatedToV2Ladder: true,
+        exchange_tp_source: tpPlanResolution.exchangeTpSource,
+        exchange_tp_price: tpPlanResolution.exchangeTpPrice,
         flowId
       });
     }
@@ -22143,12 +22156,20 @@ export class PaperEngine {
             takeProfit1Px: authority.takeProfit1Px ?? initialTpForRecord ?? null,
             partialExitRatio: authority.partialExitRatio
           });
+          const rangeTp2Candidate =
+            authority.takeProfit2Px != null && Number.isFinite(authority.takeProfit2Px) && authority.takeProfit2Px > 0
+              ? authority.takeProfit2Px
+              : typeof authority.takeProfitPlan?.tp2 === "number" && Number.isFinite(authority.takeProfitPlan.tp2) && authority.takeProfitPlan.tp2 > 0
+                ? authority.takeProfitPlan.tp2
+                : null;
+          const targetTpForPreEntry = isV2RangePartialPlan && rangeTp2Candidate != null ? rangeTp2Candidate : (initialTpForRecord ?? null);
+
           const preEntryPlan = evaluatePreEntryProtectionPlan({
             symbol: sym,
             side: authority.side as "long" | "short",
             entryReferencePrice: entryRefPx,
             slPrice: stopPrice,
-            tpPrice: initialTpForRecord ?? null,
+            tpPrice: targetTpForPreEntry,
             isV2Authority: true,
             regime: entryRegime,
             isV2RangePartialPlan,
@@ -22177,7 +22198,9 @@ export class PaperEngine {
               final_committed_tp_price: preEntryPlan.tpPrice,
               range_partial_plan: isV2RangePartialPlan,
               entry_full_position_tp_attached: !isV2RangePartialPlan && preEntryPlan.tpPrice != null,
+              entry_range_tp2_backstop_attached: isV2RangePartialPlan && preEntryPlan.tpPrice != null,
               lifecycle_partial_tp_authority: isV2RangePartialPlan,
+              exchange_tp_source: isV2RangePartialPlan ? "range_tp2_backstop" : "trend_full_tp",
               ...(v2AdaptiveRangeDiagnostics ?? {})
             })
           );

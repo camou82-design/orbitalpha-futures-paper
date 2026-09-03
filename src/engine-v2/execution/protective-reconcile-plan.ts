@@ -304,14 +304,15 @@ export function planProtectiveOrderReconcile(
         }
     }
 
-    const needSubmitSl = !canonicalSl || legacyOcoMigrationNeeded;
-    const needSubmitTp = ctx.wantsTp && !canonicalTp;
-    const slOnlyTpMissing = canonicalSl != null && ctx.wantsTp && !canonicalTp;
+    const positionActive = ctx.contractsToProtect > 0;
+    const needSubmitSl = positionActive && (!canonicalSl || legacyOcoMigrationNeeded);
+    const needSubmitTp = positionActive && ctx.wantsTp && !canonicalTp;
+    const slOnlyTpMissing = positionActive && canonicalSl != null && ctx.wantsTp && !canonicalTp;
     const isPartialTp =
         ctx.tpContractsToProtect != null &&
         ctx.tpContractsToProtect > 0 &&
         ctx.tpContractsToProtect !== ctx.contractsToProtect;
-    const submitOco = !isPartialTp && (((needSubmitSl && needSubmitTp && ctx.wantsTp) || slOnlyTpMissing));
+    const submitOco = positionActive && !isPartialTp && (((needSubmitSl && needSubmitTp && ctx.wantsTp) || slOnlyTpMissing));
 
     const slOnlyOcoRebuild = !isPartialTp && slOnlyTpMissing;
 
