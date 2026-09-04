@@ -189,15 +189,9 @@ export function ensurePromotedEntryRiskPlan(
     let closestInvalidDistPct: number | null = null;
 
     if (!audit_passed) {
-        const authorityStopSources = new Set([
-            "existing_valid",
-            "continuation_watch_boundary_buffer",
-            "v2CalculatedInvalidationPx"
-        ]);
         let hasFiniteDirectionValidStop = false;
         for (const c of candidateStops) {
             if (
-                authorityStopSources.has(c.source) &&
                 c.directionValid &&
                 c.price != null &&
                 Number.isFinite(c.price)

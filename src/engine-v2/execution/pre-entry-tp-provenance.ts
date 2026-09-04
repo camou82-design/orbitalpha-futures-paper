@@ -748,6 +748,10 @@ export type EvaluatePreEntryTpParityInput = Readonly<{
     regime: string;
     marketSubtype?: string | null;
     tickSz: number;
+    entryReferencePrice?: number | null;
+    isV2RangePartialPlan?: boolean | null;
+    canonicalTp2Price?: number | null;
+    canonicalTp2Executable?: number | null;
     profitabilityTpApproved?: boolean | null;
     profitabilityCanonicalTpSource?: string | null;
     profitabilityTpSource?: string | null;
@@ -780,6 +784,15 @@ export type EvaluatePreEntryTpParityResult = Readonly<{
         | "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE"
         | "V2_TP_PROFITABILITY_PROVENANCE_INVALID"
         | null;
+    tp_parity_semantic?: "RANGE_PARTIAL_TP1_LIFECYCLE_TP2_BACKSTOP" | "FULL_POSITION_TP";
+    profitability_tp1_executable?: number | null;
+    lifecycle_tp1_executable?: number | null;
+    attached_tp_executable?: number | null;
+    canonical_tp2_backstop_executable?: number | null;
+    tp1_parity_passed?: boolean;
+    tp2_backstop_parity_passed?: boolean;
+    directional_alignment_passed?: boolean;
+    semantic_parity_passed?: boolean;
 }>;
 
 export function evaluatePreEntryTpParity(
@@ -789,6 +802,8 @@ export function evaluatePreEntryTpParity(
         marketSubtype: input.marketSubtype
     });
     const approvalExpected = input.profitabilityTpApproved === true || isEscalation;
+    const isRangePartial = input.isV2RangePartialPlan === true;
+    const tickSz = input.tickSz > 0 ? input.tickSz : 0.01;
 
     const profCanonSource = input.profitabilityCanonicalTpSource ?? "none";
     const profTpSource = input.profitabilityTpSource ?? "none";
@@ -824,22 +839,105 @@ export function evaluatePreEntryTpParity(
         }
     }
 
-    // 3. Exact price parity check
-    let priceMatch = true;
-    if (input.profitabilityTpExecutable != null) {
-        priceMatch =
-            input.committedTpExecutable === input.profitabilityTpExecutable &&
-            (input.attachedTp == null || input.attachedTp === input.profitabilityTpExecutable);
-        if (!priceMatch && entryAllowed) {
+    // 3. Price Parity Check
+    let tp_parity_semantic: "RANGE_PARTIAL_TP1_LIFECYCLE_TP2_BACKSTOP" | "FULL_POSITION_TP" = "FULL_POSITION_TP";
+    let profitability_tp1_executable: number | null = input.profitabilityTpExecutable ?? null;
+    let lifecycle_tp1_executable: number | null = null;
+    let attached_tp_executable: number | null = input.attachedTp ?? null;
+    let canonical_tp2_backstop_executable: number | null = null;
+    let tp1_parity_passed = true;
+    let tp2_backstop_parity_passed = true;
+    let directional_alignment_passed = true;
+    let semantic_parity_passed = true;
+    let price_match = false;
+
+    if (isRangePartial) {
+        tp_parity_semantic = "RANGE_PARTIAL_TP1_LIFECYCLE_TP2_BACKSTOP";
+        lifecycle_tp1_executable =
+            input.committedTpRaw != null
+                ? normalizePxToTickSz(input.committedTpRaw, tickSz)
+                : null;
+
+        canonical_tp2_backstop_executable =
+            typeof input.canonicalTp2Executable === "number"
+                ? input.canonicalTp2Executable
+                : typeof input.canonicalTp2Price === "number"
+                  ? normalizePxToTickSz(input.canonicalTp2Price, tickSz)
+                  : input.committedTpExecutable ?? null;
+
+        // Check TP1 parity: profitability TP1 must match lifecycle/committed TP1
+        if (
+            profitability_tp1_executable != null &&
+            lifecycle_tp1_executable != null
+        ) {
+            tp1_parity_passed = profitability_tp1_executable === lifecycle_tp1_executable;
+        } else if (approvalExpected) {
+            tp1_parity_passed = false;
+        }
+
+        // Check TP2 backstop parity: attached exchange TP must match canonical TP2 backstop
+        if (
+            attached_tp_executable != null &&
+            canonical_tp2_backstop_executable != null
+        ) {
+            tp2_backstop_parity_passed = attached_tp_executable === canonical_tp2_backstop_executable;
+        } else if (approvalExpected) {
+            tp2_backstop_parity_passed = false;
+        }
+
+        // Directional ordering check: LONG: entry < TP1 < TP2, SHORT: TP2 < TP1 < entry
+        const entryRef = input.entryReferencePrice;
+        if (
+            entryRef != null &&
+            profitability_tp1_executable != null &&
+            canonical_tp2_backstop_executable != null
+        ) {
+            if (input.side === "long") {
+                directional_alignment_passed =
+                    entryRef < profitability_tp1_executable &&
+                    profitability_tp1_executable < canonical_tp2_backstop_executable;
+            } else {
+                directional_alignment_passed =
+                    canonical_tp2_backstop_executable < profitability_tp1_executable &&
+                    profitability_tp1_executable < entryRef;
+            }
+        }
+
+        // Literal equality between profitability TP1 and attached TP2 (historically false in partial plan)
+        price_match =
+            profitability_tp1_executable != null &&
+            attached_tp_executable != null &&
+            profitability_tp1_executable === attached_tp_executable;
+
+        semantic_parity_passed = tp1_parity_passed && tp2_backstop_parity_passed && directional_alignment_passed;
+        if (!semantic_parity_passed && entryAllowed) {
             entryAllowed = false;
             blockReason = "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
         }
-    } else if (input.committedTpExecutable != null && input.attachedTp != null) {
-        priceMatch = input.committedTpExecutable === input.attachedTp;
-        if (!priceMatch && entryAllowed) {
-            entryAllowed = false;
-            blockReason = "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
+    } else {
+        tp_parity_semantic = "FULL_POSITION_TP";
+        lifecycle_tp1_executable = profitability_tp1_executable;
+        canonical_tp2_backstop_executable = null;
+        directional_alignment_passed = true;
+
+        if (input.profitabilityTpExecutable != null) {
+            price_match =
+                input.committedTpExecutable === input.profitabilityTpExecutable &&
+                (input.attachedTp == null || input.attachedTp === input.profitabilityTpExecutable);
+            if (!price_match && entryAllowed) {
+                entryAllowed = false;
+                blockReason = "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
+            }
+        } else if (input.committedTpExecutable != null && input.attachedTp != null) {
+            price_match = input.committedTpExecutable === input.attachedTp;
+            if (!price_match && entryAllowed) {
+                entryAllowed = false;
+                blockReason = "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
+            }
         }
+        tp1_parity_passed = price_match;
+        tp2_backstop_parity_passed = true;
+        semantic_parity_passed = price_match;
     }
 
     // 4. Source match (audit / verification & fail-closed enforcement)
@@ -853,7 +951,8 @@ export function evaluatePreEntryTpParity(
         "adaptive_range_atr_cap",
         "adaptive_range_min_profit",
         "engine_calculated",
-        "policy_clamped"
+        "policy_clamped",
+        "range_tp2_backstop"
     ]);
 
     const sourceMatch =
@@ -878,10 +977,19 @@ export function evaluatePreEntryTpParity(
         committed_tp_raw: input.committedTpRaw ?? null,
         committed_tp_executable: input.committedTpExecutable ?? null,
         attached_tp: input.attachedTp ?? null,
-        price_match: priceMatch,
+        price_match,
         source_match: sourceMatch,
         entry_allowed: entryAllowed,
-        block_reason: blockReason
+        block_reason: blockReason,
+        tp_parity_semantic,
+        profitability_tp1_executable,
+        lifecycle_tp1_executable,
+        attached_tp_executable,
+        canonical_tp2_backstop_executable,
+        tp1_parity_passed,
+        tp2_backstop_parity_passed,
+        directional_alignment_passed,
+        semantic_parity_passed
     };
 }
 
