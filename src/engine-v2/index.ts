@@ -9393,4 +9393,5 @@ export function adaptV2Input(
 }
 
 export { clearGlobalShockStates } from "./state/derive";
+export { evaluateEthStructuralConfirmationSelectiveFilter } from "./market-judgment/eth-selective-probe-gate";
 

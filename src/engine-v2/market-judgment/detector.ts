@@ -16,6 +16,7 @@ import {
     getClosedCandlesForStructuralStop,
     resolveFastTrendShiftStructuralStop
 } from "../risk-sizing/fast-trend-shift-structural-stop";
+import { evaluateEthStructuralConfirmationSelectiveFilter } from "./eth-selective-probe-gate";
 function classifyShockPhase(input: EngineV2Input): MarketJudgmentOutput["shockPhase"] {
     const shock = input.state.directionalShockState ?? "NONE";
     const crashState = String(input.state.crashState ?? "").toUpperCase();
@@ -563,6 +564,24 @@ function evaluateEarlyLongProbe(args: {
         return { allowed: false, reason: "", block_reason: "FAST_SHIFT_LONG_INACTIVE", hits: [], metrics: {} };
     }
 
+    const ethFilter = evaluateEthStructuralConfirmationSelectiveFilter({
+        symbol: input.symbol,
+        side: "long",
+        probeSemantic: "EARLY_LONG_PROBE",
+        htfH1Bias: htfBias?.h1,
+        htfH4Bias: htfBias?.h4,
+        shockPhase,
+        directionalShockState: state.directionalShockState,
+        emaGap: input.snapshot?.emaGap,
+        trendWeaknessScore: input.snapshot?.trendWeaknessScore,
+        reclaimConfirmed: fastShift.box_mid_reclaimed === true,
+        retestConfirmed: false,
+        reversalConfirmed: fastShift.higher_low_detected === true || fastShift.higher_high_detected === true
+    });
+    if (ethFilter.blocked) {
+        return { allowed: false, reason: "", block_reason: ethFilter.blockReason ?? "ETH_UNCONFIRMED_COUNTER_TREND_PROBE_BLOCKED", hits: [], metrics: {} };
+    }
+
     return {
         allowed: true,
         reason: fastShift.reason,
@@ -616,6 +635,24 @@ function evaluateEarlyShortProbe(args: {
 
     if (!fastShift.active || fastShift.direction !== "short") {
         return { allowed: false, reason: "", block_reason: "FAST_SHIFT_SHORT_INACTIVE", hits: [], metrics: {} };
+    }
+
+    const ethFilter = evaluateEthStructuralConfirmationSelectiveFilter({
+        symbol: input.symbol,
+        side: "short",
+        probeSemantic: "EARLY_SHORT_PROBE",
+        htfH1Bias: htfBias?.h1,
+        htfH4Bias: htfBias?.h4,
+        shockPhase,
+        directionalShockState: state.directionalShockState,
+        emaGap: sn.emaGap,
+        trendWeaknessScore: sn.trendWeaknessScore,
+        reclaimConfirmed: fastShift.box_mid_lost === true,
+        retestConfirmed: false,
+        reversalConfirmed: fastShift.lower_high_detected === true || fastShift.lower_low_detected === true
+    });
+    if (ethFilter.blocked) {
+        return { allowed: false, reason: "", block_reason: ethFilter.blockReason ?? "ETH_UNCONFIRMED_COUNTER_TREND_PROBE_BLOCKED", hits: [], metrics: {} };
     }
 
     return {
@@ -1651,9 +1688,52 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     // Fast Trend Shift override (Priority over probe)
     if (fastShift.active && finalSubtype !== "WHIPSAW_SHOCK_RECHECK") {
         if (regime_final === "RANGE" || (regime_final as string) === "TRANSITION") {
-             finalSubtype = "FAST_TREND_SHIFT";
-             finalSubtypeReason = `FAST_SHIFT_${fastShift.direction.toUpperCase()}: ${fastShift.reason}`;
-             expectedNextAction = "SMALL_SIZE_PROBE_ALLOWED";
+            // ETH structural confirmation selective filter — standalone FTS path.
+            // EarlyLong/EarlyShort also apply this gate internally, but they are skipped when
+            // finalSubtype === "FAST_TREND_SHIFT", so this is the authoritative gate for the
+            // standalone FTS override. No double-counting: each path calls the gate exactly once.
+            const ftsSide = fastShift.direction === "long" ? "long" : "short";
+            const ftsEthFilter = evaluateEthStructuralConfirmationSelectiveFilter({
+                symbol: input.symbol,
+                side: ftsSide,
+                probeSemantic: "FAST_TREND_SHIFT_PROBE",
+                htfH1Bias: htfBias?.h1,
+                htfH4Bias: htfBias?.h4,
+                shockPhase,
+                directionalShockState: input.state.directionalShockState,
+                emaGap: input.snapshot?.emaGap,
+                trendWeaknessScore: input.snapshot?.trendWeaknessScore,
+                reclaimConfirmed: fastShift.box_mid_reclaimed === true || fastShift.box_mid_lost === true,
+                retestConfirmed: false,
+                reversalConfirmed: (
+                    fastShift.higher_low_detected === true ||
+                    fastShift.higher_high_detected === true ||
+                    fastShift.lower_high_detected === true ||
+                    fastShift.lower_low_detected === true
+                )
+            });
+            console.info(JSON.stringify({
+                event: "V2_FTS_STANDALONE_ETH_FILTER_PROOF",
+                symbol: input.symbol,
+                probe_semantic: "FAST_TREND_SHIFT_PROBE",
+                entry_path: "FTS_STANDALONE_OVERRIDE",
+                side: ftsSide,
+                countertrend_against_macro: ftsEthFilter.countertrendAgainstMacro,
+                structural_confirmation_count: ftsEthFilter.structuralConfirmationCount,
+                risk_clause_passed: ftsEthFilter.riskClausePassed,
+                filter_allowed: !ftsEthFilter.blocked,
+                filter_reason: ftsEthFilter.blockReason ?? "PASS",
+                fts_standalone_path: true
+            }));
+            if (ftsEthFilter.blocked) {
+                // Gate blocks FTS standalone promotion — subtype remains as-is (no FAST_TREND_SHIFT)
+                finalSubtypeReason = `FTS_ETH_FILTER_BLOCKED: ${ftsEthFilter.blockReason ?? "ETH_UNCONFIRMED_COUNTER_TREND_PROBE_BLOCKED"}`;
+                expectedNextAction = "WAIT_FOR_STRUCTURAL_CONFIRMATION";
+            } else {
+                finalSubtype = "FAST_TREND_SHIFT";
+                finalSubtypeReason = `FAST_SHIFT_${fastShift.direction.toUpperCase()}: ${fastShift.reason}`;
+                expectedNextAction = "SMALL_SIZE_PROBE_ALLOWED";
+            }
         }
     }
 
