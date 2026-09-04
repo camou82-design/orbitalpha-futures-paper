@@ -13,6 +13,7 @@ import {
 } from "./types";
 import { deriveTrendSideCandidate } from "./trend-side-candidate";
 import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
+import { evaluateBtcShortMacroBullGate, evaluateEthShortLocationRrGate } from "./market-judgment/short-authority-gates";
 import { evaluateSameSideLossReentryGate } from "./state/loss-reentry-gate";
 import { applyV2ExitAuthorityInvariants, isExplicitTerminalExitReason } from "./exit/exit-authority-invariant";
 import { resolveFinalExitAuthority, buildFinalExitAuthorityProof } from "./exit/final-exit-authority";
@@ -8744,6 +8745,114 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    // --- V2 SHORT PROTECTION GATES (BTC Macro Bull Gate & ETH Location/RR Gate) ---
+    if (decision.decision === "ENTER" && decision.side === "short") {
+        const symbolStr = String(input.symbol ?? "").toUpperCase();
+        const entryPrice = Number(input.snapshot?.lastPrice ?? input.snapshot?.latestCandleClose ?? 0);
+
+        // 1. BTCUSDT SHORT — Macro Bull Countertrend Gate
+        if (symbolStr === "BTCUSDT") {
+            const htf1h = (judgment.htf_bias?.h1 && judgment.htf_bias.h1 !== "DATA_NOT_READY")
+                ? judgment.htf_bias.h1
+                : ((input.snapshot as any)?.htf_bias?.h1 ?? judgment.htf_bias?.h1);
+            const htf4h = (judgment.htf_bias?.h4 && judgment.htf_bias.h4 !== "DATA_NOT_READY")
+                ? judgment.htf_bias.h4
+                : ((input.snapshot as any)?.htf_bias?.h4 ?? judgment.htf_bias?.h4);
+            const btcGateRes = evaluateBtcShortMacroBullGate({
+                symbol: "BTCUSDT",
+                candidateSide: "short",
+                htf1hBias: htf1h,
+                htf4hBias: htf4h,
+                directionalShockState: v2State.directionalShockState
+            });
+            if (btcGateRes.blocked) {
+                decision.decision = "SKIP";
+                decision.side = "none";
+                decision.signal = "NONE";
+                decision.risk.isBlocked = true;
+                decision.risk.blockReason = btcGateRes.reason ?? "BTC_SHORT_MACRO_BULL_COUNTERTREND_BLOCKED";
+                decision.risk.stageMarginKrw = 0;
+                decision.risk.exposureNotionalKrw = 0;
+                decision.risk.finalOrderNotionalUsdt = 0;
+                if (decision.metadata) {
+                    decision.metadata.v2DecisionFinal = "SKIP";
+                    decision.metadata.v2SideFinal = "none";
+                    decision.metadata.expectedMissingCondition = btcGateRes.reason ?? "BTC_SHORT_MACRO_BULL_COUNTERTREND_BLOCKED";
+                    decision.metadata.expectedNextAction = "WAIT_FOR_MACRO_TREND_OR_SHOCK_REALIGNMENT";
+                }
+            }
+        }
+
+        // 2. ETHUSDT SHORT — Location / RR Gate
+        if (symbolStr === "ETHUSDT" && decision.decision === "ENTER") {
+            const curBoxPos = typeof boxPos === "number" && Number.isFinite(boxPos)
+                ? boxPos
+                : (typeof decision.metadata?.boxPos === "number" ? decision.metadata.boxPos : null);
+            // Canonical Structural Stop (Zero synthetic fallback):
+            let stopPx: number | null = null;
+            let stopSource: string | null = null;
+            if (typeof decision.lifecycleAuthority?.newStopPrice === "number" && Number.isFinite(decision.lifecycleAuthority.newStopPrice) && decision.lifecycleAuthority.newStopPrice > 0) {
+                stopPx = decision.lifecycleAuthority.newStopPrice;
+                stopSource = "lifecycleAuthority.newStopPrice";
+            } else if (typeof decision.committedRiskPlan?.stopPrice === "number" && Number.isFinite(decision.committedRiskPlan.stopPrice) && decision.committedRiskPlan.stopPrice > 0) {
+                stopPx = decision.committedRiskPlan.stopPrice;
+                stopSource = "committedRiskPlan.stopPrice";
+            } else if (typeof decision.risk?.stopPrice === "number" && Number.isFinite(decision.risk.stopPrice) && decision.risk.stopPrice > 0) {
+                stopPx = decision.risk.stopPrice;
+                stopSource = "risk.stopPrice";
+            }
+
+            // Canonical Continuation / TP Target (Zero synthetic fallback):
+            let targetPx: number | null = null;
+            let targetSource: string | null = null;
+            if (typeof decision.metadata?.takeProfit1Px === "number" && Number.isFinite(decision.metadata.takeProfit1Px) && decision.metadata.takeProfit1Px > 0) {
+                targetPx = decision.metadata.takeProfit1Px;
+                targetSource = "metadata.takeProfit1Px";
+            } else if (typeof decision.metadata?.executableTp1Price === "number" && Number.isFinite(decision.metadata.executableTp1Price) && decision.metadata.executableTp1Price > 0) {
+                targetPx = decision.metadata.executableTp1Price;
+                targetSource = "metadata.executableTp1Price";
+            } else if (typeof decision.metadata?.rawCanonicalTp1Price === "number" && Number.isFinite(decision.metadata.rawCanonicalTp1Price) && decision.metadata.rawCanonicalTp1Price > 0) {
+                targetPx = decision.metadata.rawCanonicalTp1Price;
+                targetSource = "metadata.rawCanonicalTp1Price";
+            } else if (typeof (decision.committedRiskPlan as any)?.takeProfitPrice === "number" && Number.isFinite((decision.committedRiskPlan as any).takeProfitPrice) && (decision.committedRiskPlan as any).takeProfitPrice > 0) {
+                targetPx = (decision.committedRiskPlan as any).takeProfitPrice;
+                targetSource = "committedRiskPlan.takeProfitPrice";
+            }
+
+            const ethGateRes = evaluateEthShortLocationRrGate({
+                symbol: "ETHUSDT",
+                candidateSide: "short",
+                entryPrice,
+                boxPos: curBoxPos,
+                structuralStopPrice: stopPx,
+                structuralStopSource: stopSource,
+                continuationTargetPrice: targetPx,
+                continuationTargetSource: targetSource,
+                candles: input.candles ?? input.snapshot?.candles ?? null,
+                ema20: input.snapshot?.ema20 ?? null,
+                retestConfirmed: (input.snapshot as any)?.retestSeen !== undefined
+                    ? Boolean((input.snapshot as any).retestSeen)
+                    : undefined
+            });
+            if (ethGateRes.blocked) {
+                decision.decision = "SKIP";
+                decision.side = "none";
+                decision.signal = "NONE";
+                decision.risk.isBlocked = true;
+                decision.risk.blockReason = ethGateRes.reason ?? "ETH_SHORT_LOCATION_BLOCKED";
+                decision.risk.stageMarginKrw = 0;
+                decision.risk.exposureNotionalKrw = 0;
+                decision.risk.finalOrderNotionalUsdt = 0;
+                if (decision.metadata) {
+                    decision.metadata.v2DecisionFinal = "SKIP";
+                    decision.metadata.v2SideFinal = "none";
+                    decision.metadata.expectedMissingCondition = ethGateRes.reason ?? "ETH_SHORT_LOCATION_BLOCKED";
+                    decision.metadata.expectedNextAction = "WAIT_FOR_RETEST_OR_FAVORABLE_LOCATION";
+                }
+            }
+        }
+    }
+
     // --- V2_STOP_PLAN_PROPAGATION_PROOF ---
     let stopPriceValidFinal = true;
     const stopPriceFinal = decision.lifecycleAuthority?.newStopPrice ?? null;
@@ -9394,4 +9503,5 @@ export function adaptV2Input(
 
 export { clearGlobalShockStates } from "./state/derive";
 export { evaluateEthStructuralConfirmationSelectiveFilter } from "./market-judgment/eth-selective-probe-gate";
+export { evaluateBtcShortMacroBullGate, evaluateEthShortLocationRrGate } from "./market-judgment/short-authority-gates";
 
