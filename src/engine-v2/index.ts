@@ -1396,7 +1396,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
     
     // --- V2 PROFIT PROTECTION STATE PROOF ---
-    if (exitPolicy.reason.startsWith("PROFIT_PROTECTION_") && 
+    if ((exitPolicy.reason.startsWith("PROFIT_PROTECTION_") || exitPolicy.tier1TrailingActive === true) &&
         shouldEmitV2Proof("V2_PROFIT_PROTECTION_STATE_PROOF", String(input.symbol), exitPolicy.reason, true)) {
         console.info(JSON.stringify({
             event: "V2_PROFIT_PROTECTION_STATE_PROOF",
@@ -1405,6 +1405,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             pnlPct: exitPolicy.pnlPct,
             peakPnlPct: exitPolicy.peakUnrealizedPnlPct,
             profit_protection_active: exitPolicy.profitProtectionActive,
+            tier1_trailing_active: exitPolicy.tier1TrailingActive ?? false,
+            tier1_activation_threshold: exitPolicy.tier1ActivationThreshold ?? 0.0150,
+            peak_pnl_pct: exitPolicy.peakUnrealizedPnlPct,
+            current_pnl_pct: exitPolicy.pnlPct,
+            giveback_from_peak_pct_point: exitPolicy.givebackFromPeakPctPoint ?? 0,
+            tier1_giveback_threshold: exitPolicy.tier1GivebackThreshold ?? 0.0050,
+            htf_profit_protection_vetoed: false,
             action: exitPolicy.action,
             reason: exitPolicy.reason,
             reduceRatio: exitPolicy.reduceRatio,

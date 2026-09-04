@@ -64,7 +64,11 @@ export function computeSoftExitFeeBreakEvenPct(input: Readonly<{
 }
 
 export function isProfitProtectionFeeGateBypass(reason: V2ExitReason): boolean {
-    return reason === "PROFIT_PROTECTION_BREAKEVEN_EXIT" || reason === "PROFIT_PROTECTION_TRAILING_STOP";
+    return (
+        reason === "PROFIT_PROTECTION_BREAKEVEN_EXIT" ||
+        reason === "PROFIT_PROTECTION_TRAILING_STOP" ||
+        reason === "PROFIT_PROTECTION_TIER1_TRAILING_EXIT"
+    );
 }
 
 export function isSoftExitFeeGateEligible(reason: V2ExitReason): boolean {

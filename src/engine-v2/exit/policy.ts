@@ -485,23 +485,38 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
 
     // --- V2 PROFIT PROTECTION PIPELINE ---
     const peakPnl = Number(pos?.peakUnrealizedPnlPct ?? pnlPct);
+    const TIER1_ACTIVATION_PEAK_PNL = 0.0150;
+    const TIER1_MAX_GIVEBACK_PNL_PCT_POINT = 0.0050;
+    const isTier1SymbolEligible = String(args.symbol).toUpperCase() === "BTCUSDT" || String(args.symbol).toUpperCase() === "BTC-USDT-SWAP";
+    const isTier1SideEligible = side === "long";
+    const givebackFromPeak = peakPnl - pnlPct;
+    const TIER1_EPS = 1e-6;
+    const tier1TrailingActive = isTier1SymbolEligible && isTier1SideEligible && peakPnl >= (TIER1_ACTIVATION_PEAK_PNL - TIER1_EPS);
 
-    if (hasPosition && (action === "HOLD" || action === "WATCH")) {
+    if (hasPosition && action !== "FULL_EXIT") {
         let profitAction: V2ExitAction = action;
         let profitReason: V2ExitReason = reason;
         let profitReduce = reduceRatio;
 
-        if (peakPnl >= 0.015 && pnlPct < 0.002) {
+        if (peakPnl >= 0.015 - TIER1_EPS && pnlPct < 0.002) {
             profitAction = "FULL_EXIT";
             profitReason = "PROFIT_PROTECTION_BREAKEVEN_EXIT";
             profitReduce = 1;
             evidence += "|v2_breakeven_trigger";
-        } else if (peakPnl >= 0.025 && !pos?.tp1Triggered) {
+        } else if (
+            tier1TrailingActive &&
+            givebackFromPeak >= (TIER1_MAX_GIVEBACK_PNL_PCT_POINT - TIER1_EPS)
+        ) {
+            profitAction = "FULL_EXIT";
+            profitReason = "PROFIT_PROTECTION_TIER1_TRAILING_EXIT";
+            profitReduce = 1;
+            evidence += `|v2_tier1_trailing_exit:peak=${peakPnl.toFixed(4)}:giveback=${givebackFromPeak.toFixed(4)}`;
+        } else if (peakPnl >= 0.025 - TIER1_EPS && !pos?.tp1Triggered) {
             profitAction = "PARTIAL_TAKE_PROFIT";
             profitReason = "PROFIT_PROTECTION_PARTIAL_TP";
             profitReduce = 0.4;
             evidence += "|v2_partial_tp_trigger";
-        } else if (peakPnl >= 0.03 && (peakPnl - pnlPct) >= 0.015) {
+        } else if (peakPnl >= 0.03 - TIER1_EPS && (peakPnl - pnlPct) >= (0.015 - TIER1_EPS)) {
             profitAction = "FULL_EXIT";
             profitReason = "PROFIT_PROTECTION_TRAILING_STOP";
             profitReduce = 1;
@@ -509,35 +524,42 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         }
 
         if (profitAction !== action || profitReason !== reason) {
-            const profitHysteresis = evaluateOppositePositionHysteresis({
-                symbol: args.symbol,
-                positionSide: side,
-                trendSideCandidate: args.trendSideCandidate ?? "none",
-                rangeSideCandidate: args.rangeSideCandidate ?? "none",
-                judgment: args.judgment,
-                pnlPct,
-                peakPnl,
-                emaGap,
-                trendWeaknessScore: tw,
-                boxBreakSide,
-                boxPos,
-                proposedAction: profitAction,
-                proposedReason: profitReason,
-                proposedReduceRatio: profitReduce,
-                reversalConfirmed: args.reversalConfirmed,
-                sameCycleExitConsumed: args.sameCycleExitConsumed,
-                invalidationBreachConfirmed: hardInvalidationConfirmed,
-                structuralBreakConfirmed: args.structuralBreakConfirmed,
-                boxBreakConfirmed: args.boxBreakConfirmed
-            });
-            action = profitHysteresis.action;
-            reason = profitHysteresis.reason;
-            reduceRatio = profitHysteresis.reduceRatio;
-            oppositeHysteresisState = profitHysteresis.hysteresisState;
-            oppositeHysteresisBlockReason = profitHysteresis.blockReason;
-            thesisValid = profitHysteresis.thesisValid;
-            if (profitHysteresis.hysteresisState !== "NONE") {
-                evidence += `|profit_hysteresis:${profitHysteresis.hysteresisState}`;
+            if (profitReason === "PROFIT_PROTECTION_TIER1_TRAILING_EXIT") {
+                action = profitAction;
+                reason = profitReason;
+                reduceRatio = profitReduce;
+                evidence += "|tier1_trailing_exit_unvetoed";
+            } else {
+                const profitHysteresis = evaluateOppositePositionHysteresis({
+                    symbol: args.symbol,
+                    positionSide: side,
+                    trendSideCandidate: args.trendSideCandidate ?? "none",
+                    rangeSideCandidate: args.rangeSideCandidate ?? "none",
+                    judgment: args.judgment,
+                    pnlPct,
+                    peakPnl,
+                    emaGap,
+                    trendWeaknessScore: tw,
+                    boxBreakSide,
+                    boxPos,
+                    proposedAction: profitAction,
+                    proposedReason: profitReason,
+                    proposedReduceRatio: profitReduce,
+                    reversalConfirmed: args.reversalConfirmed,
+                    sameCycleExitConsumed: args.sameCycleExitConsumed,
+                    invalidationBreachConfirmed: hardInvalidationConfirmed,
+                    structuralBreakConfirmed: args.structuralBreakConfirmed,
+                    boxBreakConfirmed: args.boxBreakConfirmed
+                });
+                action = profitHysteresis.action;
+                reason = profitHysteresis.reason;
+                reduceRatio = profitHysteresis.reduceRatio;
+                oppositeHysteresisState = profitHysteresis.hysteresisState;
+                oppositeHysteresisBlockReason = profitHysteresis.blockReason;
+                thesisValid = profitHysteresis.thesisValid;
+                if (profitHysteresis.hysteresisState !== "NONE") {
+                    evidence += `|profit_hysteresis:${profitHysteresis.hysteresisState}`;
+                }
             }
         }
     }
@@ -575,6 +597,11 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         hasPosition,
         peakUnrealizedPnlPct: peakPnl,
         profitProtectionActive: reason.startsWith("PROFIT_PROTECTION_") || oppositeHysteresisState === "PROFIT_PROTECT_HOLD",
+        tier1TrailingActive,
+        tier1ActivationThreshold: TIER1_ACTIVATION_PEAK_PNL,
+        tier1GivebackThreshold: TIER1_MAX_GIVEBACK_PNL_PCT_POINT,
+        givebackFromPeakPctPoint: givebackFromPeak,
+        htfProfitProtectionVetoed: false,
         oppositeHysteresisState,
         oppositeHysteresisBlockReason,
         thesisValid,

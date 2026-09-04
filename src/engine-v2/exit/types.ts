@@ -23,6 +23,7 @@ export type V2ExitReason =
     | "PROFIT_PROTECTION_BREAKEVEN_EXIT"
     | "PROFIT_PROTECTION_PARTIAL_TP"
     | "PROFIT_PROTECTION_TRAILING_STOP"
+    | "PROFIT_PROTECTION_TIER1_TRAILING_EXIT"
     | "V2_EXIT_INVALIDATION"
     | "CANDIDATE_LOST_SOFT_EXIT"
     | "WEAK_QUALITY_REGIME_SOFT_EXIT"
@@ -61,6 +62,11 @@ export type V2ExitPolicyResult = Readonly<{
     hasPosition: boolean;
     peakUnrealizedPnlPct: number;
     profitProtectionActive: boolean;
+    tier1TrailingActive?: boolean;
+    tier1ActivationThreshold?: number;
+    tier1GivebackThreshold?: number;
+    givebackFromPeakPctPoint?: number;
+    htfProfitProtectionVetoed?: boolean;
     oppositeHysteresisState?: string;
     oppositeHysteresisBlockReason?: string | null;
     thesisValid?: boolean;
