@@ -250,11 +250,11 @@ function resolveShockFtsPromotedExecutableTpBundle(
     const atr =
         input.atr != null && Number.isFinite(input.atr) && input.atr > 0 ? input.atr : null;
     const boxHigh =
-        input.rangeBoxHighAtEntry ??
-        (input.boxHigh != null && Number.isFinite(input.boxHigh) ? input.boxHigh : null);
+        (typeof input.rangeBoxHighAtEntry === "number" && input.rangeBoxHighAtEntry > 0 ? input.rangeBoxHighAtEntry : null) ??
+        (input.boxHigh != null && Number.isFinite(input.boxHigh) && input.boxHigh > 0 ? input.boxHigh : null);
     const boxLow =
-        input.rangeBoxLowAtEntry ??
-        (input.boxLow != null && Number.isFinite(input.boxLow) ? input.boxLow : null);
+        (typeof input.rangeBoxLowAtEntry === "number" && input.rangeBoxLowAtEntry > 0 ? input.rangeBoxLowAtEntry : null) ??
+        (input.boxLow != null && Number.isFinite(input.boxLow) && input.boxLow > 0 ? input.boxLow : null);
 
     if (atr == null || boxHigh == null || boxLow == null) {
         return {
@@ -498,11 +498,11 @@ export function resolveV2PreEntryTp1Authority(
     const adaptiveAtr =
         input.atr != null && Number.isFinite(input.atr) && input.atr > 0 ? input.atr : null;
     const adaptiveBoxHigh =
-        input.rangeBoxHighAtEntry ??
-        (input.boxHigh != null && Number.isFinite(input.boxHigh) ? input.boxHigh : null);
+        (typeof input.rangeBoxHighAtEntry === "number" && input.rangeBoxHighAtEntry > 0 ? input.rangeBoxHighAtEntry : null) ??
+        (input.boxHigh != null && Number.isFinite(input.boxHigh) && input.boxHigh > 0 ? input.boxHigh : null);
     const adaptiveBoxLow =
-        input.rangeBoxLowAtEntry ??
-        (input.boxLow != null && Number.isFinite(input.boxLow) ? input.boxLow : null);
+        (typeof input.rangeBoxLowAtEntry === "number" && input.rangeBoxLowAtEntry > 0 ? input.rangeBoxLowAtEntry : null) ??
+        (input.boxLow != null && Number.isFinite(input.boxLow) && input.boxLow > 0 ? input.boxLow : null);
 
     if (adaptiveEligible && adaptiveAtr != null && adaptiveBoxHigh != null && adaptiveBoxLow != null) {
         const adaptive = computeAdaptiveRangePreEntryProtection({

@@ -21012,6 +21012,85 @@ export class PaperEngine {
         }
       }
 
+      // -------------------------------------------------------------------
+      // V2 AUTHORITY HARMONIZATION: LEGACY AI NULL-COST DUPLICATE BYPASS
+      // -------------------------------------------------------------------
+      const v2DecisionMeta = ((envelope.selector?.v2_result as any)?.metadata ?? {}) as Record<string, any>;
+      const v2ExecEnv = envelope.v2_execution_envelope;
+
+      const ethFeasibilityEvaluated =
+        v2DecisionMeta.ethRangeFeasibilityEvaluated === true ||
+        v2ExecEnv?.ethRangeFeasibilityEvaluated === true;
+
+      const ethFeasibilityPassed =
+        v2DecisionMeta.ethRangeFeasibilityPassed === true ||
+        v2ExecEnv?.ethRangeFeasibilityPassed === true;
+
+      const authorityOwner =
+        v2ExecEnv?.authorityOwner ??
+        (authority.source === "v2" ? "V2" : "V1");
+
+      const isV2Owner = authorityOwner === "V2" || authority.source === "v2";
+      const isEth = sym.toUpperCase() === "ETHUSDT";
+      const isRangeRegime =
+        authorityRegimeUpper === "RANGE" ||
+        String((envelope.selector?.v2_result as any)?.regime ?? "").toUpperCase() === "RANGE";
+
+      const legacyAiActionBefore = aiOutput ? aiOutput.action : "ENTER";
+      const isNullCostReason =
+        aiOutput != null &&
+        (aiOutput.reason === "비용/기대움직임 불명확" ||
+          (aiIn != null && (
+            aiIn.expected_move == null ||
+            aiIn.total_cost == null ||
+            !Number.isFinite(aiIn.expected_move) ||
+            !Number.isFinite(aiIn.total_cost)
+          )));
+
+      const otherAiSafetyVetoPresent =
+        aiOutput != null &&
+        aiOutput.action === "NO_ENTRY" &&
+        (!isNullCostReason || aiIn?.risk_state === "BLOCKED");
+
+      const nullCostDuplicateDetected =
+        aiOutput != null &&
+        aiOutput.action === "NO_ENTRY" &&
+        isNullCostReason &&
+        !otherAiSafetyVetoPresent;
+
+      let bypassApplied = false;
+      let finalAiAction: string = aiOutput?.action ?? (authority.side === "long" ? "ENTER_LONG" : "ENTER_SHORT");
+
+      if (
+        nullCostDuplicateDetected &&
+        isV2Owner &&
+        isEth &&
+        isRangeRegime &&
+        ethFeasibilityEvaluated === true &&
+        ethFeasibilityPassed === true
+      ) {
+        bypassApplied = true;
+        aiExecutionApproved = true;
+        finalAiAction = authority.side === "long" ? "ENTER_LONG" : "ENTER_SHORT";
+      }
+
+      if (isEth && isV2Owner && isRangeRegime && (nullCostDuplicateDetected || ethFeasibilityEvaluated)) {
+        this.logger.info("V2_LEGACY_AI_NULL_COST_DUPLICATE_BYPASS_PROOF", {
+          symbol: sym,
+          authority_owner: authorityOwner,
+          regime: authorityRegimeUpper || "RANGE",
+          feasibility_evaluated: ethFeasibilityEvaluated,
+          feasibility_passed: ethFeasibilityPassed,
+          expected_move: aiIn?.expected_move ?? null,
+          total_cost: aiIn?.total_cost ?? null,
+          legacy_ai_action_before: legacyAiActionBefore,
+          null_cost_duplicate_detected: nullCostDuplicateDetected,
+          bypass_applied: bypassApplied,
+          final_ai_action: finalAiAction,
+          other_ai_safety_veto_present: otherAiSafetyVetoPresent
+        });
+      }
+
       const policyPaused = !this.lastRiskExposure?.allowNewEntry || this.lastMarketMode?.routing.newEntryPolicy === "paused";
       const isNewEntry = existingIdx < 0;
 

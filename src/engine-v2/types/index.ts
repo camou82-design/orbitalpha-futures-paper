@@ -1351,6 +1351,14 @@ export type EntryExecutionAuthority = Readonly<{
     profitabilityTpSource?: string | null;
     profitabilityExecutableTp1Price?: number | null;
     profitabilityRawCanonicalTp1Price?: number | null;
+    ethRangeFeasibilityEvaluated?: boolean;
+    ethRangeFeasibilityPassed?: boolean;
+    ethRangeEstimatedRoundTripCostBps?: number;
+    ethRangeRequiredProfitSpaceBps?: number;
+    ethRangeDirectionalProfitSpaceBps?: number;
+    ethRangeBoxWidthBps?: number;
+    ethRangeCostSource?: string;
+    ethRangeFeasibilityBlockReason?: string | null;
 }>;
 
 /** Internal Pipeline Result */

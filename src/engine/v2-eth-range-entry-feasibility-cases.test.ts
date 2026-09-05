@@ -126,7 +126,7 @@ describe("V2 ETH RANGE Entry Feasibility Gate Test Suite", () => {
 
         assert.equal(res.entryAllowed, false);
         assert.equal(res.blocked, true);
-        assert.equal(res.blockReason, "ETH_RANGE_ENTRY_INSUFFICIENT_PROFIT_SPACE");
+        assert.equal(res.blockReason, "ETH_RANGE_ENTRY_INSUFFICIENT_DIRECTIONAL_PROFIT_SPACE");
         assert.equal(res.directional_space_valid, true);
         assert.equal(res.box_width_sufficient, true);
         assert.equal(res.profitability_passed, false);
@@ -305,6 +305,6 @@ describe("V2 ETH RANGE Entry Feasibility Gate Test Suite", () => {
         });
         assert.equal(blockGate.entryAllowed, false);
         assert.equal(blockGate.blocked, true);
-        assert.equal(blockGate.blockReason, "ETH_RANGE_ENTRY_INSUFFICIENT_PROFIT_SPACE");
+        assert.equal(blockGate.blockReason, "ETH_RANGE_ENTRY_INSUFFICIENT_DIRECTIONAL_PROFIT_SPACE");
     });
 });

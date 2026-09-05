@@ -73,6 +73,16 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     profitabilityExecutableTp1Price?: number | null;
     profitabilityRawCanonicalTp1Price?: number | null;
 
+    // --- ETH RANGE Feasibility Provenance (V2 Authority) ---
+    ethRangeFeasibilityEvaluated?: boolean | null;
+    ethRangeFeasibilityPassed?: boolean | null;
+    ethRangeEstimatedRoundTripCostBps?: number | null;
+    ethRangeRequiredProfitSpaceBps?: number | null;
+    ethRangeDirectionalProfitSpaceBps?: number | null;
+    ethRangeBoxWidthBps?: number | null;
+    ethRangeCostSource?: string | null;
+    ethRangeFeasibilityBlockReason?: string | null;
+
     // --- Diagnostic Audit Fields (V2 Hardening) ---
     aligned_signal?: string | null;
     selected_side_after_veto?: string | null;

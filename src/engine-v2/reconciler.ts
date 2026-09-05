@@ -238,7 +238,15 @@ export function deriveExecutionAuthority(
         profitabilityCanonicalTpSource: useV2 ? selector.v2_result.metadata?.canonicalTp1Source : undefined,
         profitabilityTpSource: useV2 ? selector.v2_result.metadata?.tpSource : undefined,
         profitabilityExecutableTp1Price: useV2 && typeof selector.v2_result.metadata?.executableTp1Price === "number" ? selector.v2_result.metadata.executableTp1Price : undefined,
-        profitabilityRawCanonicalTp1Price: useV2 && typeof selector.v2_result.metadata?.rawCanonicalTp1Price === "number" ? selector.v2_result.metadata.rawCanonicalTp1Price : undefined
+        profitabilityRawCanonicalTp1Price: useV2 && typeof selector.v2_result.metadata?.rawCanonicalTp1Price === "number" ? selector.v2_result.metadata.rawCanonicalTp1Price : undefined,
+        ethRangeFeasibilityEvaluated: useV2 ? selector.v2_result.metadata?.ethRangeFeasibilityEvaluated === true : undefined,
+        ethRangeFeasibilityPassed: useV2 ? selector.v2_result.metadata?.ethRangeFeasibilityPassed === true : undefined,
+        ethRangeEstimatedRoundTripCostBps: useV2 && typeof selector.v2_result.metadata?.ethRangeEstimatedRoundTripCostBps === "number" ? selector.v2_result.metadata.ethRangeEstimatedRoundTripCostBps : undefined,
+        ethRangeRequiredProfitSpaceBps: useV2 && typeof selector.v2_result.metadata?.ethRangeRequiredProfitSpaceBps === "number" ? selector.v2_result.metadata.ethRangeRequiredProfitSpaceBps : undefined,
+        ethRangeDirectionalProfitSpaceBps: useV2 && typeof selector.v2_result.metadata?.ethRangeDirectionalProfitSpaceBps === "number" ? selector.v2_result.metadata.ethRangeDirectionalProfitSpaceBps : undefined,
+        ethRangeBoxWidthBps: useV2 && typeof selector.v2_result.metadata?.ethRangeBoxWidthBps === "number" ? selector.v2_result.metadata.ethRangeBoxWidthBps : undefined,
+        ethRangeCostSource: useV2 && typeof selector.v2_result.metadata?.ethRangeCostSource === "string" ? selector.v2_result.metadata.ethRangeCostSource : undefined,
+        ethRangeFeasibilityBlockReason: useV2 && typeof selector.v2_result.metadata?.ethRangeFeasibilityBlockReason === "string" ? selector.v2_result.metadata.ethRangeFeasibilityBlockReason : undefined
     };
 }
 
