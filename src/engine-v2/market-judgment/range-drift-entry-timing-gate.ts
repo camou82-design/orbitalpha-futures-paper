@@ -90,7 +90,10 @@ export function detectDriftStructuralReaction(args: {
     reactionConfirmed: boolean;
 } {
     const { candles, side, boxHigh, boxLow, entryPrice } = args;
-    if (!candles || candles.length < 2) {
+    // Canonical Engine Contract: the last element is the in-flight forming candle.
+    // Isolate strictly closed candles by excluding the last in-flight forming candle.
+    // Minimum 2 closed candles required (+ 1 in-flight forming candle = 3 total).
+    if (!candles || candles.length < 3) {
         return {
             reclaimConfirmed: false,
             rejectionConfirmed: false,
@@ -99,9 +102,10 @@ export function detectDriftStructuralReaction(args: {
         };
     }
 
-    const cLast = candles[candles.length - 1];
-    const cPrev = candles[candles.length - 2];
-    const recent = candles.slice(-5);
+    const closedCandles = candles.slice(0, -1);
+    const cLast = closedCandles[closedCandles.length - 1];
+    const cPrev = closedCandles[closedCandles.length - 2];
+    const recent = closedCandles.slice(-5);
 
     const cLastClose = Number(cLast.close ?? cLast[4] ?? entryPrice);
     const cLastOpen = Number(cLast.open ?? cLast[1] ?? cLastClose);
@@ -118,15 +122,15 @@ export function detectDriftStructuralReaction(args: {
         // 1. Lower rejection: test of lower boundary with upward bounce / lower wick
         const touchLower = recent.some((c: any) => {
             const l = Number(c.low ?? c[3] ?? 0);
-            return l <= boxLow * 1.002;
+            return l > 0 && boxLow > 0 && l <= boxLow * 1.002;
         });
-        const bounceLower = cLastClose > boxLow * 1.0003;
+        const bounceLower = boxLow > 0 && cLastClose > boxLow * 1.0003;
         const lowerWick = (cLastClose - cLastLow) > (cLastHigh - cLastClose);
         const rejectionConfirmed = touchLower && (bounceLower || lowerWick);
 
         // 2. Reclaim: prior candle closed below boxLow, now closed back above boxLow,
         // or closed above prior candle high
-        const reclaimConfirmed = (cPrevClose < boxLow && cLastClose >= boxLow) || (cLastClose > cPrevHigh);
+        const reclaimConfirmed = (boxLow > 0 && cPrevClose < boxLow && cLastClose >= boxLow) || (cLastClose > cPrevHigh);
 
         // 3. Higher low / reversal
         const reversalConfirmed = (cLastLow > cPrevLow && cLastClose >= cLastOpen);
@@ -143,15 +147,15 @@ export function detectDriftStructuralReaction(args: {
         // 1. Upper rejection: test of upper boundary with downward rejection / upper wick
         const touchUpper = recent.some((c: any) => {
             const h = Number(c.high ?? c[2] ?? 0);
-            return h >= boxHigh * 0.998;
+            return h > 0 && boxHigh > 0 && h >= boxHigh * 0.998;
         });
-        const bounceUpper = cLastClose < boxHigh * 0.9997;
+        const bounceUpper = boxHigh > 0 && cLastClose < boxHigh * 0.9997;
         const upperWick = (cLastHigh - cLastClose) > (cLastClose - cLastLow);
         const rejectionConfirmed = touchUpper && (bounceUpper || upperWick);
 
         // 2. Reclaim: prior candle closed above boxHigh, now closed back below boxHigh,
         // or closed below prior candle low
-        const reclaimConfirmed = (cPrevClose > boxHigh && cLastClose <= boxHigh) || (cLastClose < cPrevLow);
+        const reclaimConfirmed = (boxHigh > 0 && cPrevClose > boxHigh && cLastClose <= boxHigh) || (cLastClose < cPrevLow);
 
         // 3. Lower high / reversal
         const reversalConfirmed = (cLastHigh < cPrevHigh && cLastClose <= cLastOpen);
@@ -272,6 +276,7 @@ export function evaluateRangeDriftEntryTimingGate(
 
     // 2. Invariant: Initial Entry only (Add-on strictly bypassed)
     if (input.isAddon === true) {
+        rangeDriftHysteresisMap.delete(symbol);
         return makeResult(false, null, "NONE", false, true, true, false, false, false);
     }
 
@@ -283,11 +288,13 @@ export function evaluateRangeDriftEntryTimingGate(
         input.manualTakeoverActive === true ||
         input.manualOwnershipLatch === true
     ) {
+        rangeDriftHysteresisMap.delete(symbol);
         return makeResult(false, null, "NONE", false, true, true, false, false, false);
     }
 
     // 4. Invariant: canonicalRegime === "RANGE" only
     if (canonicalRegime !== "RANGE") {
+        rangeDriftHysteresisMap.delete(symbol);
         return makeResult(false, null, "NONE", false, true, true, false, false, false);
     }
 
@@ -299,6 +306,7 @@ export function evaluateRangeDriftEntryTimingGate(
         subtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" ||
         subtype === "BREAKDOWN_RETEST_FAILED"
     ) {
+        rangeDriftHysteresisMap.delete(symbol);
         return makeResult(false, null, "NONE", false, true, true, false, false, false);
     }
 
@@ -310,13 +318,16 @@ export function evaluateRangeDriftEntryTimingGate(
     const rawDriftDirection: RangeDriftDirection = downDriftRaw ? "DOWN" : (upDriftRaw ? "UP" : "NONE");
 
     if (rawDriftDirection === "NONE") {
+        rangeDriftHysteresisMap.delete(symbol);
         return makeResult(false, null, "NONE", false, true, true, false, false, false);
     }
 
     // 7. Hysteresis Evaluation (stabilization against single-tick flicker)
     let driftConfirmed = true;
-    if (input.consecutiveEvaluations != null && input.candleAdvanceCount != null) {
-        driftConfirmed = input.consecutiveEvaluations >= 2 && input.candleAdvanceCount >= 1;
+    if (input.consecutiveEvaluations != null || input.candleAdvanceCount != null) {
+        const consec = input.consecutiveEvaluations ?? 1;
+        const candleAdv = input.candleAdvanceCount ?? 0;
+        driftConfirmed = consec >= 2 && candleAdv >= 1;
     } else {
         // In-memory state tracking for live ticks
         const currentCandleTs = input.candles && input.candles.length > 0
