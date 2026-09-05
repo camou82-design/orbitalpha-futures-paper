@@ -10632,7 +10632,36 @@ export class PaperEngine {
       }
     }
 
-    const inventory = mergeProtectiveInventoryRows(pendingRows, attachRows, lookupRows);
+    // [CANONICAL TP INVENTORY UNIFICATION] Also collect normal reduceOnly limit orders from pending
+    const normalRoRows: ProtectiveAlgoRow[] = [];
+    const cachedPending = (this as any).cachedOpsPending as any[] | undefined;
+    if (Array.isArray(cachedPending)) {
+      for (const ord of cachedPending) {
+        if (String(ord.instId ?? "") !== input.instId) continue;
+        const isRo = ord.reduceOnly === "true" || ord.reduceOnly === true;
+        if (isRo) {
+          const rawPx = ord.px ?? ord.price;
+          const pxNum = typeof rawPx === "number" ? rawPx : typeof rawPx === "string" ? Number(rawPx) : NaN;
+          normalRoRows.push({
+            instId: ord.instId,
+            ordId: ord.ordId,
+            algoId: ord.ordId,
+            clOrdId: ord.clOrdId,
+            side: ord.side,
+            posSide: ord.posSide,
+            tdMode: ord.tdMode,
+            ordType: ord.ordType ?? "limit",
+            sz: ord.sz,
+            tpTriggerPx: Number.isFinite(pxNum) && pxNum > 0 ? String(pxNum) : undefined,
+            px: Number.isFinite(pxNum) && pxNum > 0 ? pxNum : undefined,
+            reduceOnly: true,
+            _protectiveInventorySource: "normal_reduce_only_order"
+          } as ProtectiveAlgoRow);
+        }
+      }
+    }
+
+    const inventory = mergeProtectiveInventoryRows(pendingRows, attachRows, lookupRows, normalRoRows);
     this.logger.info("PROTECTIVE_INVENTORY_MERGE_PROOF", {
       symbol: input.open.symbol,
       side: input.open.side,
@@ -10640,6 +10669,7 @@ export class PaperEngine {
       pending_count: pendingRows.length,
       attach_candidate_count: attachRows.length,
       authoritative_lookup_count: lookupRows.length,
+      normal_reduce_only_count: normalRoRows.length,
       merged_inventory_count: inventory.length,
       cl_ord_candidates: clOrdCandidates
     });
@@ -11519,6 +11549,7 @@ export class PaperEngine {
       partialExitRatio: open.partialExitRatio
     });
 
+    const isTp1FilledForReconcile = (open.partialExitStage ?? 0) >= 1 || (open as any).tp1Triggered === true;
     const tpPlanResolution = resolveProtectiveTpPlan({
       isV2Authority: open.isV2Authority === true,
       regime,
@@ -11528,7 +11559,9 @@ export class PaperEngine {
       targetPrice1: open.targetPrice1,
       takeProfit1Px: open.takeProfit1Px,
       takeProfit2Px: open.takeProfit2Px,
-      takeProfitPlan: open.takeProfitPlan
+      takeProfitPlan: open.takeProfitPlan,
+      tp1Filled: isTp1FilledForReconcile,
+      partialExitStage: open.partialExitStage
     });
 
     if (tpPlanResolution.exchangeTpRequired && tpPlanResolution.exchangeTpPrice != null && tpPlanResolution.exchangeTpPrice > 0) {
@@ -11537,7 +11570,7 @@ export class PaperEngine {
 
     const rawWantsTp = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0;
     const fullPositionTpRequired = tpPlanResolution.fullPositionTpRequired;
-    const wantsTp = rawWantsTp && fullPositionTpRequired;
+    const wantsTp = rawWantsTp && (fullPositionTpRequired || tpPlanResolution.exchangeTpRequired);
     const slRequired = true;
     const tpRequired = wantsTp;
 

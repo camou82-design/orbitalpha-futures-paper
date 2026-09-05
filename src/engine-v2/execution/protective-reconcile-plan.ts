@@ -41,11 +41,11 @@ export type ProtectiveReconcilePlan = Readonly<{
 }>;
 
 function algoIdOf(algo: ProtectiveAlgoRow): string {
-    return String(algo.algoId ?? "");
+    return String(algo.algoId ?? algo.ordId ?? "");
 }
 
 function extractPx(algo: ProtectiveAlgoRow, key: "slTriggerPx" | "tpTriggerPx"): number | null {
-    const val = algo[key];
+    const val = algo[key] ?? (key === "tpTriggerPx" ? (algo as any).tpPx ?? (algo as any).px : undefined);
     const n = typeof val === "number" ? val : typeof val === "string" ? Number(val) : NaN;
     return Number.isFinite(n) && n > 0 ? n : null;
 }
@@ -123,9 +123,14 @@ export function evaluateProtectiveAlgoMatch(
     if (!posSideOk(algo, ctx.positionSide)) return zero;
     if (String(algo.side ?? "") !== ctx.expectedSide) return zero;
 
+    const algoClOrdId = String(algo.algoClOrdId ?? "");
+    const engineOwned = isEngineOwnedAlgo(algoClOrdId, ctx.openedAt36);
+    const attachAlgo = isAttachAlgoClOrdId(algoClOrdId);
+    const isBotOwned = engineOwned || attachAlgo;
+
     const tdMode = String(algo.tdMode ?? "").toLowerCase();
     if (tdMode !== ctx.tdModeUsed) {
-        return { ...zero, stale: routingMatch(algo, ctx) || true };
+        return { ...zero, stale: isBotOwned };
     }
 
     const isCloseFraction =
@@ -161,15 +166,13 @@ export function evaluateProtectiveAlgoMatch(
     const algoId = String(algo.algoId ?? "").trim();
     const hasExchangeIdentity = algoId.length > 0;
 
-    const algoClOrdId = String(algo.algoClOrdId ?? "");
-    const engineOwned = isEngineOwnedAlgo(algoClOrdId, ctx.openedAt36);
-    const attachAlgo = isAttachAlgoClOrdId(algoClOrdId);
-
-    const isBotOwnedCandidate = engineOwned || attachAlgo;
+    const isBotOwnedCandidate = isBotOwned;
     const hasSlTrigger = extractPx(algo, "slTriggerPx") != null || isOco;
     const hasTpTrigger = extractPx(algo, "tpTriggerPx") != null;
     const isStandaloneTp = hasTpTrigger && !hasSlTrigger;
-    const staleEligible = !isStandaloneTp || isBotOwnedCandidate;
+    // Positive bot ownership is a strict precondition for destructive stale cancellation.
+    // Manual/operator orders are never stale or cancelled by engine.
+    const staleEligible = isBotOwnedCandidate;
     const isMatchingSize = isStandaloneTp ? tpSizeMatch : slSizeMatch;
     const stale = hasExchangeIdentity && staleEligible && routingMatch(algo, ctx) && !isMatchingSize;
 

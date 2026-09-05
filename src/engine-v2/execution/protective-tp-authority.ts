@@ -1,12 +1,14 @@
 import type { MarketRegime } from "../../strategy/market-regime-detector";
 
-export type ProtectiveTpMode = "TREND_FULL_TP" | "RANGE_TP2_BACKSTOP" | "NONE";
+export type ProtectiveTpMode = "TREND_FULL_TP" | "RANGE_TP1_PARTIAL" | "RANGE_TP2_POST_FILL" | "RANGE_TP2_BACKSTOP" | "NONE";
+export type CanonicalTpPhase = "TP1_PENDING" | "TP2_PENDING" | "FULL_TP_PENDING" | "NONE";
 
 export interface ProtectiveTpPlanResolution {
     mode: ProtectiveTpMode;
+    phase?: CanonicalTpPhase;
     exchangeTpRequired: boolean;
     exchangeTpPrice: number | null;
-    exchangeTpSource: "trend_full_tp" | "range_tp2_backstop" | "none";
+    exchangeTpSource: "trend_full_tp" | "range_tp1_partial" | "range_tp2" | "range_tp2_backstop" | "none";
     fullPositionTpRequired: boolean;
     reason: string;
 }
@@ -14,7 +16,9 @@ export interface ProtectiveTpPlanResolution {
 /**
  * Resolves the explicit protective TP mode and exchange target price.
  * - TREND: TP1 is full position TP (TREND_FULL_TP).
- * - RANGE (with partial plan): TP2 is exchange backstop (RANGE_TP2_BACKSTOP), while TP1 is managed by V2 dynamic ladder.
+ * - RANGE (with partial plan):
+ *     - Initial (phase TP1_PENDING): TP1 is canonical partial TP.
+ *     - Post-fill (phase TP2_PENDING): TP2 is canonical remaining TP.
  * - NONE: when no valid TP price is available.
  */
 export function resolveProtectiveTpPlan(input: Readonly<{
@@ -27,6 +31,8 @@ export function resolveProtectiveTpPlan(input: Readonly<{
     takeProfit1Px?: number | null;
     takeProfit2Px?: number | null;
     takeProfitPlan?: { tp1?: number | null; tp2?: number | null } | null;
+    tp1Filled?: boolean;
+    partialExitStage?: number | null;
 }>): ProtectiveTpPlanResolution {
     const tp1Candidate =
         input.takeProfit1Px ??
@@ -42,23 +48,51 @@ export function resolveProtectiveTpPlan(input: Readonly<{
     const validTp2 = typeof tp2Candidate === "number" && Number.isFinite(tp2Candidate) && tp2Candidate > 0 ? tp2Candidate : null;
 
     if (input.isV2RangePartialPlan) {
-        if (validTp2 != null) {
+        const isTp1Filled = input.tp1Filled === true || (input.partialExitStage != null && input.partialExitStage >= 1);
+        if (isTp1Filled) {
+            if (validTp2 != null) {
+                return {
+                    mode: "RANGE_TP2_POST_FILL",
+                    phase: "TP2_PENDING",
+                    exchangeTpRequired: true,
+                    exchangeTpPrice: validTp2,
+                    exchangeTpSource: "range_tp2",
+                    fullPositionTpRequired: true,
+                    reason: "V2_RANGE_TP2_POST_FILL_ENABLED"
+                };
+            }
             return {
-                mode: "RANGE_TP2_BACKSTOP",
-                exchangeTpRequired: true,
-                exchangeTpPrice: validTp2,
-                exchangeTpSource: "range_tp2_backstop",
-                fullPositionTpRequired: true,
-                reason: "V2_RANGE_TP2_BACKSTOP_ENABLED"
+                mode: "NONE",
+                phase: "NONE",
+                exchangeTpRequired: false,
+                exchangeTpPrice: null,
+                exchangeTpSource: "none",
+                fullPositionTpRequired: false,
+                reason: "V2_RANGE_TP2_PRICE_UNAVAILABLE"
             };
         }
+
+        // Initial phase: TP1 is canonical partial TP
+        if (validTp1 != null) {
+            return {
+                mode: "RANGE_TP1_PARTIAL",
+                phase: "TP1_PENDING",
+                exchangeTpRequired: true,
+                exchangeTpPrice: validTp1,
+                exchangeTpSource: "range_tp1_partial",
+                fullPositionTpRequired: false,
+                reason: "V2_RANGE_TP1_PARTIAL_ENABLED"
+            };
+        }
+
         return {
             mode: "NONE",
+            phase: "NONE",
             exchangeTpRequired: false,
             exchangeTpPrice: null,
             exchangeTpSource: "none",
             fullPositionTpRequired: false,
-            reason: "V2_RANGE_TP2_PRICE_UNAVAILABLE"
+            reason: "V2_RANGE_TP1_PRICE_UNAVAILABLE"
         };
     }
 

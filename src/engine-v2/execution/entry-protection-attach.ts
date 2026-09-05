@@ -59,16 +59,17 @@ export function buildV2NewEntryAttachAlgoOrds(input: Readonly<{
             : undefined;
     const hasTpPrice =
         input.takeProfitPrice != null && Number.isFinite(input.takeProfitPrice) && input.takeProfitPrice > 0;
+    // [CANONICAL TP SINGLE-WRITER] RANGE partial plan MUST NOT attach TP at entry.
+    // OKX attach OCO cannot represent different sizes for TP (50% partial) and SL (100% full).
+    // Entry attaches SL-only conditional protection. Canonical reconciler submits TP1 post-fill.
     const entryFullPositionTpAttached = hasTpPrice && !input.isV2RangePartialPlan;
-    const entryRangeTp2BackstopAttached = hasTpPrice && input.isV2RangePartialPlan;
-    const shouldAttachOco = entryFullPositionTpAttached || entryRangeTp2BackstopAttached;
+    const entryRangeTp2BackstopAttached = false;
+    const shouldAttachOco = entryFullPositionTpAttached;
     const attachOrdType: "oco" | "conditional" = shouldAttachOco ? "oco" : "conditional";
     const tpTriggerPx = shouldAttachOco && hasTpPrice ? String(input.takeProfitPrice) : undefined;
     const exchangeTpSource = entryFullPositionTpAttached
         ? ("trend_full_tp" as const)
-        : entryRangeTp2BackstopAttached
-          ? ("range_tp2_backstop" as const)
-          : ("none" as const);
+        : ("none" as const);
 
     if (!slTriggerPx) {
         return {

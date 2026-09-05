@@ -234,6 +234,31 @@ export function classifyOkxOpenOrderPurpose(
     }
   }
 
+  // [CANONICAL TP/SL CLASSIFICATION] Position side + closing side + price relation
+  const rawPx = ord.tpTriggerPx ?? ord.slTriggerPx ?? ord.triggerPx ?? ord.stopPx ?? ord.trigPx ?? ord.px;
+  const ordPx = typeof rawPx === "number" ? rawPx : typeof rawPx === "string" ? Number(rawPx) : NaN;
+  const ordSide = String(ord.side ?? "").trim().toLowerCase();
+  const entryPx = ledgerPos ? (Number((ledgerPos as any).avgPx) || Number(ledgerPos.entryPrice) || 0) : 0;
+  const posSide = ledgerPos ? String(ledgerPos.side ?? "").trim().toLowerCase() : "";
+
+  if (isReduceOnly && Number.isFinite(ordPx) && ordPx > 0 && entryPx > 0 && posSide) {
+    if (posSide === "short" && ordSide === "buy") {
+      if (ordPx < entryPx) {
+        return botManagedBase("protective-take-profit", "reduce_only_protective_shape");
+      }
+      if (ordPx > entryPx) {
+        return botManagedBase("protective-stop", "reduce_only_protective_shape");
+      }
+    } else if (posSide === "long" && ordSide === "sell") {
+      if (ordPx > entryPx) {
+        return botManagedBase("protective-take-profit", "reduce_only_protective_shape");
+      }
+      if (ordPx < entryPx) {
+        return botManagedBase("protective-stop", "reduce_only_protective_shape");
+      }
+    }
+  }
+
   if (isReduceOnly && orderLooksReduceOnlyProtective(ord)) {
     const tpPx = ord.tpTriggerPx;
     const hasTp = tpPx != null && String(tpPx).length > 0 && Number(tpPx) > 0;
