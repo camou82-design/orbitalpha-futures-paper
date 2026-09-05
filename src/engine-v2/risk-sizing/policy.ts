@@ -54,7 +54,17 @@ export function calculateRiskSizing(
     const isTrend = judgment.regime === "TREND";
     const shockActive = state.directionalShockState !== "NONE";
     const hasDirectionalSide = executor.side === "long" || executor.side === "short";
-    const sideAllowed = executor.side === "long" ? state.longAllow : executor.side === "short" ? state.shortAllow : true;
+    const isBtcMrBypass =
+        String(input.symbol).toUpperCase() === "BTCUSDT" &&
+        judgment.regime === "RANGE" &&
+        (executor.reason === "BTC_RANGE_MR_STALE_DOWN_SHOCK_LOCAL_BYPASS" ||
+         executor.reason === "BTC_RANGE_MR_STALE_UP_SHOCK_LOCAL_BYPASS" ||
+         (executor.metadata as any)?.btcRangeMrBypass === true);
+    const sideAllowed = executor.side === "long"
+        ? (state.longAllow || (isBtcMrBypass && executor.side === "long"))
+        : executor.side === "short"
+            ? (state.shortAllow || (isBtcMrBypass && executor.side === "short"))
+            : true;
     const trendLossStreak = Math.max(0, Number(state.lossStreaks?.TREND ?? 0));
     const symbolFlowLossStreak = trendLossStreak;
     const sameSymbolSide = state.currentPositions.filter((p) => p && p.symbol === input.symbol && String(p.side).toLowerCase() === String(executor.side ?? "").toLowerCase());

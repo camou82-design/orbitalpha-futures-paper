@@ -1811,9 +1811,48 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const rangeSignalDowngraded = input.snapshot?.rangeSignalDowngraded === true;
     const rangeSignalKeptByRelax = input.snapshot?.rangeSignalKeptByRelax === true;
     const entryCandidate = input.snapshot?.entryCandidate === true;
+    const isBtcSymbol = String(input.symbol).toUpperCase().replace("-SWAP", "").replace("-", "") === "BTCUSDT";
+    const isCanonicalRange = judgment.regime === "RANGE" || activeEngineRouting === "RANGE" || (judgment as any).canonicalRegime === "RANGE";
+    const isInitialEntry = v2State.heldPositionSide === "none" && (v2State.currentPositions ?? []).filter(p => p.symbol === input.symbol).length === 0;
+    const isNotOperatorManaged = !(input.snapshot as any)?.operatorManaged;
+    const isNotManualTakeover = input.state.manualTakeoverActive !== true && v2State.manualTakeoverActive !== true;
+    const isControlClear = v2State.killSwitch !== true && v2State.closeOnlyMode !== true && v2State.reconcileSafeMode !== true;
+    const isRawShockInactive = (v2State.rawDirectionalShockState === "NONE" || (input.state as any)?.rawDirectionalShockState === "NONE" || (input.state as any)?.rawDirection === "NONE");
+    const isMagnitudeNotPassed = ((v2State.rawShockMovePct ?? 0) <= (v2State.requiredShockMovePct ?? 1)) && (input.state as any)?.shockEmergencyBypass !== true;
+    const isNotWhipsawOrFastShift = (judgment.subtype as string) !== "WHIPSAW_SHOCK_RECHECK" && (judgment.subtype as string) !== "FAST_TREND_SHIFT";
+    const isReversalConfirmed = reversalConfirmed === true || Boolean(execMeta.reversal_confirmed) === true || Boolean((input.snapshot as any)?.reversal_confirmed) === true;
+
+    const isBtcRangeMrStaleUpShockBypass =
+        isBtcSymbol &&
+        isCanonicalRange &&
+        zone === "upper" &&
+        isInitialEntry &&
+        isNotOperatorManaged &&
+        isNotManualTakeover &&
+        isControlClear &&
+        isRawShockInactive &&
+        (v2State.directionalShockState ?? "NONE") === "UP" &&
+        isMagnitudeNotPassed &&
+        isNotWhipsawOrFastShift &&
+        isReversalConfirmed;
+
+    const isBtcRangeMrStaleDownShockBypass =
+        isBtcSymbol &&
+        isCanonicalRange &&
+        zone === "lower" &&
+        isInitialEntry &&
+        isNotOperatorManaged &&
+        isNotManualTakeover &&
+        isControlClear &&
+        isRawShockInactive &&
+        (v2State.directionalShockState ?? "NONE") === "DOWN" &&
+        isMagnitudeNotPassed &&
+        isNotWhipsawOrFastShift &&
+        isReversalConfirmed;
+
     const rangeSideCandidate: EngineV2Side =
-        zone === "lower" && allowNewLong && riskLongAllow ? "long" :
-            zone === "upper" && allowNewShort && riskShortAllow ? "short" : "none";
+        zone === "lower" && (allowNewLong || isBtcRangeMrStaleDownShockBypass) && (riskLongAllow || isBtcRangeMrStaleDownShockBypass) ? "long" :
+            zone === "upper" && (allowNewShort || isBtcRangeMrStaleUpShockBypass) && (riskShortAllow || isBtcRangeMrStaleUpShockBypass) ? "short" : "none";
     const rangeEdgeExtreme =
         (rangeSideCandidate === "long" && (boxPos ?? 0.5) <= 0.08) ||
             (rangeSideCandidate === "short" && (boxPos ?? 0.5) >= 0.92);
@@ -4408,6 +4447,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     const sanitizeCandidateSide = (side: EngineV2Side): { side: EngineV2Side; reason: string | null } => {
         if (side === "short") {
+            if (isBtcRangeMrStaleUpShockBypass) {
+                return { side: "short", reason: null };
+            }
             // 원칙 1: directionalShockState=UP이면 short 후보 제거
             if (directionalShockState === "UP") {
                 // 원칙 3: trend_side_candidate=long 이고 longAllow=true 이면 long 또는 none
@@ -4445,6 +4487,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 return { side: "none", reason: "SHORT_DISALLOWED_EXCLUDES_SHORT" };
             }
         }
+        if (side === "long") {
+            if (isBtcRangeMrStaleDownShockBypass) {
+                return { side: "long", reason: null };
+            }
+        }
         return { side, reason: null };
     };
 
@@ -4471,9 +4518,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2DecisionAfterPromotion = "HOLD";
             v2RejectReasonAfterPromotion = sanitize_reason ?? "WAIT_RECHECK";
         }
-        if (v2SideAfterPromotion === "long" && v2DecisionAfterPromotion === "ENTER" && !longAllow) {
+        if (v2SideAfterPromotion === "long" && v2DecisionAfterPromotion === "ENTER" && !longAllow && !isBtcRangeMrStaleDownShockBypass) {
             v2DecisionAfterPromotion = "HOLD";
             v2RejectReasonAfterPromotion = "LONG_NOT_ALLOWED";
+        }
+        if (v2SideAfterPromotion === "short" && v2DecisionAfterPromotion === "ENTER" && !shortAllow && !isBtcRangeMrStaleUpShockBypass) {
+            v2DecisionAfterPromotion = "HOLD";
+            v2RejectReasonAfterPromotion = "SHORT_NOT_ALLOWED";
         }
 
         console.info(JSON.stringify({
@@ -9132,6 +9183,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     };
 
     // Requirement 1: Single authoritative executionAction finalization right before return.
+    const isBtcStaleUpShockMrBypassApproved =
+        isBtcSymbol &&
+        isCanonicalRange &&
+        isBtcRangeMrStaleUpShockBypass &&
+        decision.decision === "ENTER" &&
+        decision.side === "short";
+
     const finalExecutionAction: import("./types").EngineV2ExecutionAction = (() => {
         if (decision.decision !== "ENTER" || decision.side === "none" || !decision.side) return "NONE";
         const targetSym = String(input.symbol).replace("-SWAP", "").replace("-", "");
@@ -9166,12 +9224,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
         
         const finalEnterExecutable =
-            decision.decision === "ENTER" &&
-            String(decision.side) !== "none" &&
-            decision.risk.isBlocked !== true &&
-            Number(decision.risk.finalOrderNotionalUsdt ?? 0) > 0 &&
-            decision.committedRiskPlan != null &&
-            Number(decision.lifecycleAuthority?.newStopPrice ?? 0) > 0;
+            isBtcStaleUpShockMrBypassApproved ||
+            (
+                decision.decision === "ENTER" &&
+                String(decision.side) !== "none" &&
+                decision.risk.isBlocked !== true &&
+                Number(decision.risk.finalOrderNotionalUsdt ?? 0) > 0 &&
+                decision.committedRiskPlan != null &&
+                Number(decision.lifecycleAuthority?.newStopPrice ?? 0) > 0
+            );
 
         if (!finalEnterExecutable) {
             let finalEnterBlockReason = decision.risk.blockReason ?? "UNKNOWN";
@@ -9304,6 +9365,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             riskBlockReason: decision.risk.blockReason,
             promotionReason
         }));
+    }
+
+    if (isBtcStaleUpShockMrBypassApproved) {
+        decision.decision = "ENTER";
+        decision.side = "short";
+        decision.executionAction = "ENTER";
     }
 
     return { decision, internal };

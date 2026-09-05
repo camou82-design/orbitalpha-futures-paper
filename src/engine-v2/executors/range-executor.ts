@@ -418,7 +418,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     let side: EngineV2Side = "none";
     let reason = "Initial state";
     let recheckSuggested = false;
-    let reversalConfirmed = readBool(execMeta.reversal_confirmed) || (judgment as any).reversalConfirmed === true;
+    let reversalConfirmed = readBool(execMeta.reversal_confirmed) || (judgment as any).reversalConfirmed === true || (sn as any)?.reversal_confirmed === true || (sn as any)?.reversalConfirmed === true;
     let sideOverrideApplied = false;
     let lateChaseBlocked = false;
     let retestRequired = false;
@@ -961,9 +961,46 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     }
 
 
+    // --- BTC RANGE MR STALE-SHOCK LOCAL AUTHORITY BYPASS (Phase 10A) ---
+    const isBtcRangeMrStaleDownShockBypass =
+        String(input.symbol).toUpperCase() === "BTCUSDT" &&
+        judgment.regime === "RANGE" &&
+        currentStage === 0 &&
+        !(input.snapshot as any)?.operatorManaged &&
+        input.state.manualTakeoverActive !== true &&
+        input.state.killSwitch !== true &&
+        input.state.closeOnlyMode !== true &&
+        input.state.reconcileSafeMode !== true &&
+        (((input.state as any)?.rawDirectionalShockState === "NONE") || ((input.state as any)?.rawDirection === "NONE")) &&
+        (input.state.directionalShockState === "DOWN" || judgment.shockPhase === "DOWN_SHOCK" || !input.state.longAllow) &&
+        (((input.state as any)?.rawShockMovePct ?? 0) <= ((input.state as any)?.requiredShockMovePct ?? 1)) &&
+        (input.state as any)?.shockEmergencyBypass !== true &&
+        (judgment.subtype as string) !== "WHIPSAW_SHOCK_RECHECK" &&
+        (judgment.subtype as string) !== "FAST_TREND_SHIFT" &&
+        isLower &&
+        reversalConfirmed === true;
+
+    const isBtcRangeMrStaleUpShockBypass =
+        String(input.symbol).toUpperCase() === "BTCUSDT" &&
+        judgment.regime === "RANGE" &&
+        currentStage === 0 &&
+        !(input.snapshot as any)?.operatorManaged &&
+        input.state.manualTakeoverActive !== true &&
+        input.state.killSwitch !== true &&
+        input.state.closeOnlyMode !== true &&
+        input.state.reconcileSafeMode !== true &&
+        (((input.state as any)?.rawDirectionalShockState === "NONE") || ((input.state as any)?.rawDirection === "NONE")) &&
+        (input.state.directionalShockState === "UP" || judgment.shockPhase === "UP_SHOCK" || !input.state.shortAllow) &&
+        (((input.state as any)?.rawShockMovePct ?? 0) <= ((input.state as any)?.requiredShockMovePct ?? 1)) &&
+        (input.state as any)?.shockEmergencyBypass !== true &&
+        (judgment.subtype as string) !== "WHIPSAW_SHOCK_RECHECK" &&
+        (judgment.subtype as string) !== "FAST_TREND_SHIFT" &&
+        isUpper &&
+        reversalConfirmed === true;
+
     // --- SHOCK & TREND GUARD (Original) ---
     if (isLower && currentStage === 0) {
-        if (judgment.shockPhase === "DOWN_SHOCK") {
+        if (judgment.shockPhase === "DOWN_SHOCK" && !isBtcRangeMrStaleDownShockBypass) {
             console.warn(JSON.stringify({
                 event: "V2_RANGE_LOWER_LONG_BLOCKED_BY_DOWN_SHOCK_PROOF",
                 symbol: input.symbol,
@@ -982,7 +1019,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                 invalidationPx: null,
                 metadata: { shockPhase: judgment.shockPhase, trendPhase: judgment.trendPhase }
             };
-        } else if (judgment.trendPhase === "DOWN" || emaGap < 0) {
+        } else if ((judgment.trendPhase === "DOWN" || emaGap < 0) && !isBtcRangeMrStaleDownShockBypass) {
             if (!reversalConfirmed) {
                 console.warn(JSON.stringify({
                     event: "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND_PROOF",
@@ -1029,7 +1066,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     }
 
     if (isUpper && currentStage === 0) {
-        if (judgment.shockPhase === "UP_SHOCK") {
+        if (judgment.shockPhase === "UP_SHOCK" && !isBtcRangeMrStaleUpShockBypass) {
             console.warn(JSON.stringify({
                 event: "V2_RANGE_UPPER_SHORT_BLOCKED_BY_UP_SHOCK_PROOF",
                 symbol: input.symbol,
@@ -1048,7 +1085,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                 invalidationPx: null,
                 metadata: { shockPhase: judgment.shockPhase, trendPhase: judgment.trendPhase }
             };
-        } else if (judgment.trendPhase === "UP" || emaGap > 0) {
+        } else if ((judgment.trendPhase === "UP" || emaGap > 0) && !isBtcRangeMrStaleUpShockBypass) {
             if (!reversalConfirmed) {
                 console.warn(JSON.stringify({
                     event: "V2_RANGE_UPPER_SHORT_WAITING_DUE_TO_UP_TREND_PROOF",
@@ -1110,13 +1147,15 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     // Side Filtering Logic
     if (isUpper) {
         side = "short";
-        if (!input.state.shortAllow) {
+        if (!input.state.shortAllow && !isBtcRangeMrStaleUpShockBypass) {
             signal = "NONE";
             reason = "Upper edge reached but short blocked by bias";
         } else {
             if (reversalConfirmed) {
                 signal = "SHORT_CANDIDATE";
-                reason = "Upper edge reversal identified by price reaction";
+                reason = isBtcRangeMrStaleUpShockBypass
+                    ? "BTC_RANGE_MR_STALE_UP_SHOCK_LOCAL_BYPASS"
+                    : "Upper edge reversal identified by price reaction";
             } else {
                 signal = "WAIT_RECHECK";
                 reason = localTouchDetected 
@@ -1127,13 +1166,15 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         }
     } else if (isLower) {
         side = "long";
-        if (!input.state.longAllow) {
+        if (!input.state.longAllow && !isBtcRangeMrStaleDownShockBypass) {
             signal = "NONE";
             reason = "Lower edge reached but long blocked by bias";
         } else {
             if (reversalConfirmed) {
                 signal = "LONG_CANDIDATE";
-                reason = "Lower edge reversal identified by price reaction";
+                reason = isBtcRangeMrStaleDownShockBypass
+                    ? "BTC_RANGE_MR_STALE_DOWN_SHOCK_LOCAL_BYPASS"
+                    : "Lower edge reversal identified by price reaction";
             } else {
                 signal = "WAIT_RECHECK";
                 reason = localTouchDetected 
@@ -1220,8 +1261,12 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         const blockedSide: EngineV2Side = judgment.shockPhase === "DOWN_SHOCK" ? "long" : "short";
 
         if (side === blockedSide) {
-            signal = "NONE";
-            reason = `SUPPRESSED: ${side} blocked in ${judgment.shockPhase} (directional shock bias)`;
+            const isBtcMrBypass = (judgment.shockPhase === "DOWN_SHOCK" && isBtcRangeMrStaleDownShockBypass) ||
+                                  (judgment.shockPhase === "UP_SHOCK" && isBtcRangeMrStaleUpShockBypass);
+            if (!isBtcMrBypass) {
+                signal = "NONE";
+                reason = `SUPPRESSED: ${side} blocked in ${judgment.shockPhase} (directional shock bias)`;
+            }
         } else if (side === primarySide) {
              if ((judgment.shockPhase === "DOWN_SHOCK" && isLower) || (judgment.shockPhase === "UP_SHOCK" && isUpper)) {
                 signal = "NONE";
