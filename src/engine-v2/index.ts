@@ -49,6 +49,7 @@ import {
     tryInheritFastTrendShiftStructuralStopFromDiag
 } from "./risk-sizing/fast-trend-shift-structural-stop";
 import { evaluateTpProfitabilityAuthority } from "./execution/tp-profitability-authority";
+import { evaluateEthRangeEntryFeasibilityGate } from "./execution/eth-range-entry-feasibility-gate";
 import {
     resolvePreEntryPolicySlPrice,
     resolveV2PreEntryExecutableTpBundle
@@ -7080,32 +7081,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             htf_1d_bias: (judgment.diagnostics as any)?.htf_1d_bias ?? (judgment as any).htf_1d_bias ?? (v2State as any).htf_1d_bias ?? null
                         };
 
-                        const tpBundle = resolveV2PreEntryExecutableTpBundle({
+                        // 1. ETH RANGE Pre-entry Feasibility Gate (Authority preceding Dynamic TP & order placement)
+                        const rangeFeasibility = evaluateEthRangeEntryFeasibilityGate({
+                            symbol: String(input.symbol),
                             side: sideForTp,
                             regime: String(judgment.regime),
-                            entryPrice: lastPx,
-                            rawStructuralSl,
-                            rawPolicySlPrice,
-                            execMetaTakeProfitPlanTp1:
-                                typeof execMetaRec?.takeProfitPlan?.tp1 === "number"
-                                    ? execMetaRec.takeProfitPlan.tp1
-                                    : typeof execMetaRaw?.takeProfitPlan?.tp1 === "number"
-                                      ? execMetaRaw.takeProfitPlan.tp1
-                                      : null,
-                            execMetaTakeProfit1Px:
-                                typeof execMetaRec?.takeProfit1Px === "number"
-                                    ? execMetaRec.takeProfit1Px
-                                    : typeof execMetaRaw?.takeProfit1Px === "number"
-                                      ? execMetaRaw.takeProfit1Px
-                                      : null,
                             marketSubtype: judgment.subtype ?? null,
-                            routingEngine: activeEngineRouting ?? null,
-                            atr:
-                                typeof authoritativeInput.snapshot?.atr === "number"
-                                    ? authoritativeInput.snapshot.atr
-                                    : typeof input.snapshot?.atr === "number"
-                                      ? input.snapshot.atr
-                                      : null,
+                            entryPrice: lastPx,
                             boxHigh:
                                 typeof authoritativeInput.snapshot?.boxHigh === "number"
                                     ? authoritativeInput.snapshot.boxHigh
@@ -7132,55 +7114,86 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                                                   : input.snapshot?.boxLow;
                                           return typeof hi === "number" && typeof lo === "number" ? (hi + lo) / 2 : null;
                                       })(),
+                            atr:
+                                typeof authoritativeInput.snapshot?.atr === "number"
+                                    ? authoritativeInput.snapshot.atr
+                                    : typeof input.snapshot?.atr === "number"
+                                      ? input.snapshot.atr
+                                      : null,
                             feeRate: Number(authoritativeInput.config.paperTakerFeeRate ?? input.config.paperTakerFeeRate ?? 0.0005),
-                            preserveCanonicalStructuralStop:
-                                judgment.subtype === "FAST_TREND_SHIFT" ||
-                                execMetaRec.fast_trend_shift === true,
-                            promotionReason,
-                            symbol: String(input.symbol),
                             paperSlippageEstimateBps: slippageBps,
-                            instrumentTickSz,
-                            snapshotTickSz,
-                            isExplicitMicroProbe,
-                            probeMultiplier: entryProbeSizeMultiplier,
-                            boxPos: currentBoxPos,
-                            htfBiases: htfBiasesMap,
-                            hasHardBlock: hardBlockPresent === true,
-                            htfVetoPassed: judgment.htf_entry_policy === "ALLOW" || judgment.htf_entry_policy === "PROBE_ONLY",
-                            rangeTrendConflictPassed: (judgment as any).side_veto_detail !== "RANGE_TREND_SIDE_CONFLICT",
-                            chaseGatePassed: (currentBoxPos == null || currentBoxPos <= 0.65),
-                            htf_candles: authoritativeInput.snapshot?.htf_candles ?? input.snapshot?.htf_candles ?? (authoritativeInput as any).htf_candles ?? (input as any).htf_candles,
-                            candles: authoritativeInput.snapshot?.candles ?? input.snapshot?.candles
+                            tickSz: instrumentTickSz ?? snapshotTickSz ?? 0.01,
+                            isAddon: isAddOn,
+                            lifecycleState: (v2State as any)?.lifecycleState ?? null,
+                            manualTakeoverActive: (v2State as any)?.manualTakeoverActive ?? false,
+                            manualOwnershipLatch: (v2State as any)?.manualOwnershipLatch ?? false
                         });
 
-                        if (!tpBundle.ok) {
+                        if (rangeFeasibility.blocked) {
                             min_order_check_passed = false;
-                            min_order_block_reason = tpBundle.blockReason ?? "V2_TP_PROFITABILITY_COST_AUTHORITY_INVALID";
+                            min_order_block_reason = rangeFeasibility.blockReason ?? "ETH_RANGE_ENTRY_INSUFFICIENT_PROFIT_SPACE";
                         } else {
-                            const canonicalTp2PriceCandidate =
-                                typeof execMetaRec?.takeProfitPlan?.tp2 === "number"
-                                    ? execMetaRec.takeProfitPlan.tp2
-                                    : typeof execMetaRaw?.takeProfitPlan?.tp2 === "number"
-                                      ? execMetaRaw.takeProfitPlan.tp2
-                                      : typeof execMetaRec?.takeProfit2Px === "number"
-                                        ? execMetaRec.takeProfit2Px
-                                        : typeof execMetaRaw?.takeProfit2Px === "number"
-                                          ? execMetaRaw.takeProfit2Px
-                                          : (tpBundle.rawCanonicalTp1Price != null && lastPx > 0
-                                              ? (sideForTp === "long" ? lastPx + (tpBundle.rawCanonicalTp1Price - lastPx) * 1.8 : lastPx - (lastPx - tpBundle.rawCanonicalTp1Price) * 1.8)
-                                              : null);
-
-                            const tpProfitabilityResult = evaluateTpProfitabilityAuthority({
-                                symbol: String(input.symbol),
+                            const tpBundle = resolveV2PreEntryExecutableTpBundle({
                                 side: sideForTp,
                                 regime: String(judgment.regime),
                                 entryPrice: lastPx,
-                                canonicalTp1Price: tpBundle.rawCanonicalTp1Price,
-                                canonicalTp1Source: tpBundle.canonicalTp1Source,
-                                canonicalTp2Price: canonicalTp2PriceCandidate,
+                                rawStructuralSl,
+                                rawPolicySlPrice,
+                                execMetaTakeProfitPlanTp1:
+                                    typeof execMetaRec?.takeProfitPlan?.tp1 === "number"
+                                        ? execMetaRec.takeProfitPlan.tp1
+                                        : typeof execMetaRaw?.takeProfitPlan?.tp1 === "number"
+                                          ? execMetaRaw.takeProfitPlan.tp1
+                                          : null,
+                                execMetaTakeProfit1Px:
+                                    typeof execMetaRec?.takeProfit1Px === "number"
+                                        ? execMetaRec.takeProfit1Px
+                                        : typeof execMetaRaw?.takeProfit1Px === "number"
+                                          ? execMetaRaw.takeProfit1Px
+                                          : null,
+                                marketSubtype: judgment.subtype ?? null,
+                                routingEngine: activeEngineRouting ?? null,
+                                atr:
+                                    typeof authoritativeInput.snapshot?.atr === "number"
+                                        ? authoritativeInput.snapshot.atr
+                                        : typeof input.snapshot?.atr === "number"
+                                          ? input.snapshot.atr
+                                          : null,
+                                boxHigh:
+                                    typeof authoritativeInput.snapshot?.boxHigh === "number"
+                                        ? authoritativeInput.snapshot.boxHigh
+                                        : typeof input.snapshot?.boxHigh === "number"
+                                          ? input.snapshot.boxHigh
+                                          : null,
+                                boxLow:
+                                    typeof authoritativeInput.snapshot?.boxLow === "number"
+                                        ? authoritativeInput.snapshot.boxLow
+                                        : typeof input.snapshot?.boxLow === "number"
+                                          ? input.snapshot.boxLow
+                                          : null,
+                                boxMid:
+                                    typeof execMetaRec?.rangeBoxMidAtEntry === "number"
+                                        ? execMetaRec.rangeBoxMidAtEntry
+                                        : (() => {
+                                              const hi =
+                                                  typeof authoritativeInput.snapshot?.boxHigh === "number"
+                                                      ? authoritativeInput.snapshot.boxHigh
+                                                      : input.snapshot?.boxHigh;
+                                              const lo =
+                                                  typeof authoritativeInput.snapshot?.boxLow === "number"
+                                                      ? authoritativeInput.snapshot.boxLow
+                                                      : input.snapshot?.boxLow;
+                                              return typeof hi === "number" && typeof lo === "number" ? (hi + lo) / 2 : null;
+                                          })(),
                                 feeRate: Number(authoritativeInput.config.paperTakerFeeRate ?? input.config.paperTakerFeeRate ?? 0.0005),
+                                preserveCanonicalStructuralStop:
+                                    judgment.subtype === "FAST_TREND_SHIFT" ||
+                                    execMetaRec.fast_trend_shift === true,
+                                promotionReason,
+                                symbol: String(input.symbol),
                                 paperSlippageEstimateBps: slippageBps,
-                                tickSz: tpBundle.tpTickSize,
+                                instrumentTickSz,
+                                snapshotTickSz,
                                 isExplicitMicroProbe,
                                 probeMultiplier: entryProbeSizeMultiplier,
                                 boxPos: currentBoxPos,
@@ -7188,34 +7201,75 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                                 hasHardBlock: hardBlockPresent === true,
                                 htfVetoPassed: judgment.htf_entry_policy === "ALLOW" || judgment.htf_entry_policy === "PROBE_ONLY",
                                 rangeTrendConflictPassed: (judgment as any).side_veto_detail !== "RANGE_TREND_SIDE_CONFLICT",
-                                chaseGatePassed: (currentBoxPos == null || currentBoxPos <= 0.65)
+                                chaseGatePassed: (currentBoxPos == null || currentBoxPos <= 0.65),
+                                htf_candles: authoritativeInput.snapshot?.htf_candles ?? input.snapshot?.htf_candles ?? (authoritativeInput as any).htf_candles ?? (input as any).htf_candles,
+                                candles: authoritativeInput.snapshot?.candles ?? input.snapshot?.candles
                             });
 
-                            if (input.evaluationMode !== "diagnostic") {
-                                console.info(JSON.stringify(tpProfitabilityResult));
-                            }
-
-                            if (!tpProfitabilityResult.entryAllowed) {
+                            if (!tpBundle.ok) {
                                 min_order_check_passed = false;
-                                min_order_block_reason = tpProfitabilityResult.blockReason ?? "V2_TP1_NET_EDGE_INSUFFICIENT";
-                            } else if (
-                                tpProfitabilityResult.executableTp1Price !== tpBundle.executableTp1Price ||
-                                tpProfitabilityResult.rawCanonicalTp1Price !== tpBundle.rawCanonicalTp1Price
-                            ) {
-                                min_order_check_passed = false;
-                                min_order_block_reason = "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
+                                min_order_block_reason = tpBundle.blockReason ?? "V2_TP_PROFITABILITY_COST_AUTHORITY_INVALID";
                             } else {
-                                (execMeta as any).takeProfit1Px = tpBundle.executableTp1Price;
-                                (execMeta as any).takeProfitPlan = {
-                                    ...(typeof (execMeta as any).takeProfitPlan === "object" && (execMeta as any).takeProfitPlan != null ? (execMeta as any).takeProfitPlan : {}),
-                                    tp1: tpBundle.rawCanonicalTp1Price,
-                                    executableTp1: tpBundle.executableTp1Price
-                                };
-                                (execMeta as any).canonicalTp1Source = tpBundle.canonicalTp1Source;
-                                (execMeta as any).tpSource = tpBundle.tpSource;
-                                (execMeta as any).executableTp1Price = tpBundle.executableTp1Price;
-                                (execMeta as any).rawCanonicalTp1Price = tpBundle.rawCanonicalTp1Price;
-                                (execMeta as any).profitabilityTpApproved = true;
+                                const canonicalTp2PriceCandidate =
+                                    typeof execMetaRec?.takeProfitPlan?.tp2 === "number"
+                                        ? execMetaRec.takeProfitPlan.tp2
+                                        : typeof execMetaRaw?.takeProfitPlan?.tp2 === "number"
+                                          ? execMetaRaw.takeProfitPlan.tp2
+                                          : typeof execMetaRec?.takeProfit2Px === "number"
+                                            ? execMetaRec.takeProfit2Px
+                                            : typeof execMetaRaw?.takeProfit2Px === "number"
+                                              ? execMetaRaw.takeProfit2Px
+                                              : (tpBundle.rawCanonicalTp1Price != null && lastPx > 0
+                                                  ? (sideForTp === "long" ? lastPx + (tpBundle.rawCanonicalTp1Price - lastPx) * 1.8 : lastPx - (lastPx - tpBundle.rawCanonicalTp1Price) * 1.8)
+                                                  : null);
+
+                                const tpProfitabilityResult = evaluateTpProfitabilityAuthority({
+                                    symbol: String(input.symbol),
+                                    side: sideForTp,
+                                    regime: String(judgment.regime),
+                                    entryPrice: lastPx,
+                                    canonicalTp1Price: tpBundle.rawCanonicalTp1Price,
+                                    canonicalTp1Source: tpBundle.canonicalTp1Source,
+                                    canonicalTp2Price: canonicalTp2PriceCandidate,
+                                    feeRate: Number(authoritativeInput.config.paperTakerFeeRate ?? input.config.paperTakerFeeRate ?? 0.0005),
+                                    paperSlippageEstimateBps: slippageBps,
+                                    tickSz: tpBundle.tpTickSize,
+                                    isExplicitMicroProbe,
+                                    probeMultiplier: entryProbeSizeMultiplier,
+                                    boxPos: currentBoxPos,
+                                    htfBiases: htfBiasesMap,
+                                    hasHardBlock: hardBlockPresent === true,
+                                    htfVetoPassed: judgment.htf_entry_policy === "ALLOW" || judgment.htf_entry_policy === "PROBE_ONLY",
+                                    rangeTrendConflictPassed: (judgment as any).side_veto_detail !== "RANGE_TREND_SIDE_CONFLICT",
+                                    chaseGatePassed: (currentBoxPos == null || currentBoxPos <= 0.65)
+                                });
+
+                                if (input.evaluationMode !== "diagnostic") {
+                                    console.info(JSON.stringify(tpProfitabilityResult));
+                                }
+
+                                if (!tpProfitabilityResult.entryAllowed) {
+                                    min_order_check_passed = false;
+                                    min_order_block_reason = tpProfitabilityResult.blockReason ?? "V2_TP1_NET_EDGE_INSUFFICIENT";
+                                } else if (
+                                    tpProfitabilityResult.executableTp1Price !== tpBundle.executableTp1Price ||
+                                    tpProfitabilityResult.rawCanonicalTp1Price !== tpBundle.rawCanonicalTp1Price
+                                ) {
+                                    min_order_check_passed = false;
+                                    min_order_block_reason = "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
+                                } else {
+                                    (execMeta as any).takeProfit1Px = tpBundle.executableTp1Price;
+                                    (execMeta as any).takeProfitPlan = {
+                                        ...(typeof (execMeta as any).takeProfitPlan === "object" && (execMeta as any).takeProfitPlan != null ? (execMeta as any).takeProfitPlan : {}),
+                                        tp1: tpBundle.rawCanonicalTp1Price,
+                                        executableTp1: tpBundle.executableTp1Price
+                                    };
+                                    (execMeta as any).canonicalTp1Source = tpBundle.canonicalTp1Source;
+                                    (execMeta as any).tpSource = tpBundle.tpSource;
+                                    (execMeta as any).executableTp1Price = tpBundle.executableTp1Price;
+                                    (execMeta as any).rawCanonicalTp1Price = tpBundle.rawCanonicalTp1Price;
+                                    (execMeta as any).profitabilityTpApproved = true;
+                                }
                             }
                         }
                     }

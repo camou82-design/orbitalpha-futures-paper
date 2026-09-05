@@ -30,9 +30,11 @@ import {
 } from "./instrument-tick-authority";
 import { evaluateTpProfitabilityAuthority } from "./tp-profitability-authority";
 import { computeTrendDynamicTp } from "./trend-dynamic-tp-authority";
+import { evaluateEthRangeDynamicTpAuthority } from "./eth-range-dynamic-tp-authority";
 
 export type V2PreEntryTpSource =
     | "authority_tp_price"
+    | "eth_range_dynamic_tp"
     | "engine_calculated"
     | "engine_mirror_tp_price"
     | "adaptive_range_atr_cap"
@@ -448,6 +450,39 @@ export function resolveV2PreEntryTp1Authority(
 
     if (finalTpPrice == null) {
         return { ok: false, blockReason: "range_tp_missing", adaptiveDiagnostics: null };
+    }
+
+    const sym = String(input.symbol ?? "").toUpperCase();
+    if (sym === "ETHUSDT") {
+        const ethDynamic = evaluateEthRangeDynamicTpAuthority({
+            symbol: "ETHUSDT",
+            side,
+            entryPrice,
+            regime: "RANGE",
+            marketSubtype: input.marketSubtype ?? null,
+            boxHigh: input.rangeBoxHighAtEntry ?? input.boxHigh ?? null,
+            boxLow: input.rangeBoxLowAtEntry ?? input.boxLow ?? null,
+            boxMid: input.rangeBoxMidAtEntry ?? input.boxMid ?? null,
+            atr: input.atr ?? null,
+            previousCanonicalTp: finalTpPrice,
+            feeRate: input.feeRate ?? undefined,
+            paperSlippageEstimateBps: input.paperSlippageEstimateBps ?? undefined,
+            tickSz: input.snapshotTickSz ?? input.instrumentTickSz ?? undefined
+        });
+
+        if (ethDynamic.dynamicTpApplied && ethDynamic.finalTp > 0 && isValidDirectionTp(side, entryPrice, ethDynamic.finalTp)) {
+            finalTpPrice = ethDynamic.finalTp;
+            finalTpSource = "eth_range_dynamic_tp";
+            return {
+                ok: true,
+                rawTp1Price: finalTpPrice,
+                tpSource: finalTpSource,
+                adaptiveApplied: false,
+                adaptiveDiagnostics: null,
+                adaptiveSlPrice: null,
+                adaptiveSlSource: null
+            };
+        }
     }
 
     const rawPolicyTpPrice = finalTpPrice;
@@ -943,6 +978,7 @@ export function evaluatePreEntryTpParity(
     // 4. Source match (audit / verification & fail-closed enforcement)
     const validTransportSources = new Set([
         "authority_tp_price",
+        "eth_range_dynamic_tp",
         "decision.takeProfit",
         "execMeta.takeProfitPlan.tp1",
         "execMeta.takeProfit1Px",

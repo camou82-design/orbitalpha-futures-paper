@@ -11,6 +11,7 @@ import {
     evaluateProbeProtectionRealign,
     evaluateProbeTimeStop,
 } from "../exit/probe-tp-policy";
+import { evaluateEthRangeDynamicTpAuthority } from "../execution/eth-range-dynamic-tp-authority";
 
 function resolveCooldownType(input: V2TradeLifecycleAuthorityInput): V2CooldownType {
     const reason = String(input.cooldownState.reason ?? "").toLowerCase();
@@ -204,6 +205,43 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
             // [HARDENED] RANGE TP Plan Execution
             const tpPlan = input.takeProfitPlan;
             if (tpPlan && input.position != null) {
+                const isOperatorManaged =
+                    lifecycleAuthorityOwner === "legacy" ||
+                    (input.position as any)?.lifecycleState === "OPERATOR_MANAGED" ||
+                    (input.position as any)?.lifecycleState === "EXTERNAL_MANUAL_POSITION" ||
+                    (input as any)?.manualTakeoverActive === true ||
+                    (input.position as any)?.manualTakeoverActive === true ||
+                    (input.position as any)?.manualOwnershipLatch === true ||
+                    (input as any)?.userManuallyModifiedTp === true ||
+                    (input.position as any)?.userManuallyModifiedTp === true;
+
+                let effectiveTp1 = tpPlan.tp1;
+                if (input.symbol === "ETHUSDT" && input.regime === "RANGE" && !isOperatorManaged) {
+                    const boxHigh = input.rawMetricsSummary.boxHigh ?? null;
+                    const boxLow = input.rawMetricsSummary.boxLow ?? null;
+                    const atr = input.atr ?? null;
+                    const dynEval = evaluateEthRangeDynamicTpAuthority({
+                        symbol: "ETHUSDT",
+                        side: input.side as "long" | "short",
+                        entryPrice: input.position.entryPrice,
+                        currentPrice: input.markPrice ?? input.position.entryPrice,
+                        regime: "RANGE",
+                        marketSubtype: input.rawMetricsSummary.subtype ?? null,
+                        boxHigh,
+                        boxLow,
+                        boxMid: (boxHigh != null && boxLow != null) ? (boxHigh + boxLow) / 2 : null,
+                        atr,
+                        previousCanonicalTp: tpPlan.tp1,
+                        lifecycleState: (input.position as any)?.lifecycleState ?? null,
+                        manualTakeoverActive: isOperatorManaged
+                    });
+
+                    if (dynEval.dynamicTpApplied && dynEval.finalTp > 0) {
+                        effectiveTp1 = dynEval.finalTp;
+                        tp1PxResult = dynEval.finalTp;
+                    }
+                }
+
                 const lastPx = input.markPrice || 0;
                 if (input.side === "long") {
                     // TP2 check first (Full close priority)
@@ -223,9 +261,9 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
                     }
                     
                     // TP1 check (only if TP2 not triggered in this tick)
-                    if (!tp2TriggeredResult && lastPx >= tpPlan.tp1 && !input.tp1Triggered) {
+                    if (!tp2TriggeredResult && lastPx >= effectiveTp1 && !input.tp1Triggered) {
                         tp1TriggeredResult = true;
-                        tp1PxResult = tpPlan.tp1;
+                        tp1PxResult = effectiveTp1;
                         partialAction = "reduce";
                         partialReason = "V2_RANGE_TAKE_PROFIT_1_REDUCE";
                         reduceRatio = 0.5;
@@ -235,15 +273,15 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
                             symbol: input.symbol,
                             side: input.side,
                             markPrice: lastPx,
-                            targetPrice: tpPlan.tp1
+                            targetPrice: effectiveTp1
                         }));
-                    } else if (tp2TriggeredResult && lastPx >= tpPlan.tp1 && !input.tp1Triggered) {
+                    } else if (tp2TriggeredResult && lastPx >= effectiveTp1 && !input.tp1Triggered) {
                         console.info(JSON.stringify({
                             event: "V2_RANGE_TP2_SUPPRESS_TP1_SAME_TICK_PROOF",
                             symbol: input.symbol,
                             side: input.side,
                             markPrice: lastPx,
-                            tp1: tpPlan.tp1,
+                            tp1: effectiveTp1,
                             tp2: tpPlan.tp2
                         }));
                     }
@@ -265,9 +303,9 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
                     }
                     
                     // TP1 check
-                    if (!tp2TriggeredResult && lastPx <= tpPlan.tp1 && !input.tp1Triggered) {
+                    if (!tp2TriggeredResult && lastPx <= effectiveTp1 && !input.tp1Triggered) {
                         tp1TriggeredResult = true;
-                        tp1PxResult = tpPlan.tp1;
+                        tp1PxResult = effectiveTp1;
                         partialAction = "reduce";
                         partialReason = "V2_RANGE_TAKE_PROFIT_1_REDUCE";
                         reduceRatio = 0.5;
@@ -277,15 +315,15 @@ export function deriveTradeLifecycleAuthority(input: V2TradeLifecycleAuthorityIn
                             symbol: input.symbol,
                             side: input.side,
                             markPrice: lastPx,
-                            targetPrice: tpPlan.tp1
+                            targetPrice: effectiveTp1
                         }));
-                    } else if (tp2TriggeredResult && lastPx <= tpPlan.tp1 && !input.tp1Triggered) {
+                    } else if (tp2TriggeredResult && lastPx <= effectiveTp1 && !input.tp1Triggered) {
                         console.info(JSON.stringify({
                             event: "V2_RANGE_TP2_SUPPRESS_TP1_SAME_TICK_PROOF",
                             symbol: input.symbol,
                             side: input.side,
                             markPrice: lastPx,
-                            tp1: tpPlan.tp1,
+                            tp1: effectiveTp1,
                             tp2: tpPlan.tp2
                         }));
                     }
