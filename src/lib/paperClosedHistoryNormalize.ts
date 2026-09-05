@@ -102,6 +102,122 @@ function resolveCloseReasonText(val: unknown): string | null {
   return t;
 }
 
+/**
+ * STEP 2: Canonical Display Source Label Resolver
+ * BOT => "자동"
+ * MANUAL / exchange-created => "수동"
+ * ADOPTED_EXTERNAL => "외부포지션 인계"
+ * OPERATOR_MANAGED => "수동관리"
+ * HYBRID:
+ * 자동 진입 + 수동 청산 => "자동→수동"
+ * 수동 진입 + 봇 청산 => "수동→자동"
+ * 판별 불가하나 OKX 실제 체결 증거 존재 => "거래소 체결"
+ * UNKNOWN으로 숨기지 않는다.
+ */
+export function resolveDisplayTradeSourceLabel(row: unknown): string {
+  if (!row || typeof row !== "object") return "거래소 체결";
+  const o = row as Record<string, unknown>;
+
+  const str = (v: unknown): string => (typeof v === "string" ? v.trim().toUpperCase() : "");
+
+  const authority = str(o.authority ?? o.authoritySourceAtEntry);
+  const source = str(o.source ?? o.tradeSource);
+  const strategy = str(o.strategy ?? o.executorAtEntry);
+  const closeSource = str(o.closeSource);
+  const closeReason = str(o.closeReason ?? o.exitReason);
+  const entrySource = str(o.entrySource);
+
+  // 1. ADOPTED_EXTERNAL
+  const isAdopted =
+    authority.includes("ADOPTED") ||
+    source.includes("ADOPTED") ||
+    strategy.includes("ADOPTED") ||
+    o.isAdopted === true ||
+    Boolean(o.adoptedFrom);
+
+  // 2. OPERATOR_MANAGED
+  const isOperatorManaged =
+    authority.includes("OPERATOR") ||
+    source.includes("OPERATOR") ||
+    strategy.includes("OPERATOR") ||
+    closeReason.includes("OPERATOR") ||
+    closeSource.includes("OPERATOR");
+
+  // 진입 주체 판별 (Entry: Bot vs Manual/Exchange)
+  const isManualEntry =
+    source === "MANUAL" ||
+    source === "MANUAL_EXTERNAL" ||
+    entrySource === "MANUAL" ||
+    o.isManual === true ||
+    strategy.includes("MANUAL") ||
+    strategy.includes("EXTERNAL_DISCRETIONARY") ||
+    authority === "MANUAL" ||
+    authority === "OPERATOR";
+
+  const isBotEntry =
+    source === "V2" ||
+    source === "BOT" ||
+    source === "BOT_V2" ||
+    entrySource === "BOT" ||
+    strategy.includes("V2") ||
+    strategy.includes("BOT") ||
+    strategy.includes("HIGHWAY") ||
+    Boolean(o.flowId);
+
+  // 청산 주체 판별 (Exit: Bot vs Manual/Exchange)
+  const isManualExit =
+    closeSource.includes("MANUAL") ||
+    closeSource.includes("OPERATOR") ||
+    closeReason.includes("MANUAL") ||
+    closeReason.includes("USER") ||
+    closeReason.includes("OPERATOR");
+
+  const isBotExit =
+    closeSource.includes("BOT") ||
+    closeSource.includes("ENGINE") ||
+    closeSource.includes("INTERNAL") ||
+    closeReason.includes("TP") ||
+    closeReason.includes("SL") ||
+    closeReason.includes("TRAILING") ||
+    closeReason.includes("REGIME") ||
+    closeReason.includes("DYNAMIC");
+
+  // HYBRID 체크 우선
+  if (isBotEntry && isManualExit) {
+    return "자동→수동";
+  }
+  if (isManualEntry && isBotExit) {
+    return "수동→자동";
+  }
+
+  // 특수 분류
+  if (isAdopted) {
+    return "외부포지션 인계";
+  }
+  if (isOperatorManaged) {
+    return "수동관리";
+  }
+
+  // 순수 자동 / 수동
+  if (isBotEntry && !isManualEntry) {
+    return "자동";
+  }
+  if (isManualEntry) {
+    return "수동";
+  }
+
+  // fallback: closeSource나 exitReason 등에 수동 흔적이 있으면 "수동"
+  if (isManualExit) {
+    return "수동";
+  }
+  if (isBotExit) {
+    return "자동";
+  }
+
+  // 판별 불가하나 거래 증거가 있는 경우 UNKNOWN 대신:
+  return "거래소 체결";
+}
+
 /** 번들·UI용: 디스크 `history.json` 한 행을 항상 표시 가능한 형태로 보강한다. */
 export type NormalizedPaperClosedRow = Readonly<
   PaperClosedPositionRecord & {
@@ -110,6 +226,7 @@ export type NormalizedPaperClosedRow = Readonly<
     exitReason: string;
     closeSource: PaperCloseSource;
     outcomeStatus: "win" | "loss" | "flat";
+    sourceLabel: string;
   }
 >;
 
@@ -213,6 +330,8 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
     parseFinite(o.pnlUsdGross) ??
     finiteUsd(pnlNet + (parseFinite(o.feeUsd) ?? 0) + (parseFinite(o.fundingUsd) ?? 0));
 
+  const sourceLabel = resolveDisplayTradeSourceLabel(raw);
+
   const base = raw && typeof raw === "object" ? { ...(raw as object) } : {};
 
   const record: NormalizedPaperClosedRow = Object.assign(base, {
@@ -230,7 +349,8 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
     closeSource,
     realizedPnlUsd: finiteUsd(pnlNet),
     realizedPnlPct,
-    outcomeStatus
+    outcomeStatus,
+    sourceLabel
   }) as NormalizedPaperClosedRow;
 
   // Proof Log (D)
@@ -249,11 +369,15 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
     raw_realized_pnl_pct: o.realizedPnlPct ?? null,
     computed_realized_pnl_pct: computedPnlPct,
     mapped_realized_pnl_pct: realizedPnlPct,
-    mapping_fallback_used: (closePrice === 0 && (o.closePrice == null)) || exitType === "EXIT_UNKNOWN"
+    mapping_fallback_used: (closePrice === 0 && (o.closePrice == null)) || exitType === "EXIT_UNKNOWN",
+    source_label: sourceLabel
   });
 
   /** raw에 이미 있으면 유지; 없을 때만 동일 의미 필드로 보강(덮어쓰기 금지). */
   const enriched = record as Record<string, unknown>;
+  if (enriched.sourceLabel === undefined) {
+    enriched.sourceLabel = sourceLabel;
+  }
   if (enriched.strategy === undefined && typeof o.executorAtEntry === "string") {
     enriched.strategy = o.executorAtEntry;
   }
@@ -299,6 +423,7 @@ export type ClosedRowDisplayFields = Readonly<{
   closeSource: string;
   closePriceLabel: string;
   pnlPctLabel: string;
+  sourceLabel: string;
 }>;
 
 /** UI: "해당 없음" 대신 우선순위 fallback — 모두 비면 `기록 없음`. */
@@ -348,18 +473,116 @@ export function displayFieldsForClosedRow(row: unknown): ClosedRowDisplayFields 
   const pct = parseFinite(o.realizedPnlPct);
   const pnlPctLabel = pct !== null ? `${(pct * 100).toFixed(2)}%` : MISSING;
 
+  const sourceLabel =
+    typeof o.sourceLabel === "string" && o.sourceLabel.trim().length > 0
+      ? o.sourceLabel.trim()
+      : resolveDisplayTradeSourceLabel(row);
+
   return {
     exitType: exitReason, // UI에서 exitType 자리에 reason을 표시하는 경우가 많음
     exitReason,
     status,
     closeSource,
     closePriceLabel,
-    pnlPctLabel
+    pnlPctLabel,
+    sourceLabel
   };
 }
 
 
+/**
+ * PHASE 13A: Canonical Closed Trade Dedup Key Resolver
+ *
+ * CLOSED TRADE 규칙:
+ * 1. exchange position/order/lifecycle identity
+ * 2. canonical flowId / positionId / lifecycleId / positionCycleId
+ * 3. exchange entry/exit order ids
+ * 4. identity가 없을 때만 composite fallback (symbol + side + openedAt + closedAt + entry/exit px + size)
+ *
+ * ※ symbol:side 만으로 청산 거래를 dedup하는 것은 절대 금지.
+ * 서로 다른 시각(openedAt/closedAt)에 발생한 동일 종목/방향 거래는 반드시 별도 거래로 보존.
+ */
+export function canonicalClosedTradeDedupKey(row: unknown): string {
+  if (!row || typeof row !== "object") return "";
+  const o = row as Record<string, unknown>;
+
+  // 1. exchange position/order/lifecycle identity
+  const exPosId = typeof o.exchangePosId === "string" && o.exchangePosId.trim().length > 0 ? o.exchangePosId.trim() : null;
+  const exOrdId = typeof o.exchangeOrdId === "string" && o.exchangeOrdId.trim().length > 0 ? o.exchangeOrdId.trim() : null;
+  const exitOrdId = typeof o.exitOrdId === "string" && o.exitOrdId.trim().length > 0 ? o.exitOrdId.trim() : null;
+  const exClOrdId = typeof o.exchangeClOrdId === "string" && o.exchangeClOrdId.trim().length > 0 ? o.exchangeClOrdId.trim() : null;
+
+  // 2. canonical flowId / positionId / lifecycleId / positionCycleId
+  const posCycleId = typeof o.positionCycleId === "string" && o.positionCycleId.trim().length > 0 ? o.positionCycleId.trim() : null;
+  const positionId = typeof o.positionId === "string" && o.positionId.trim().length > 0 ? o.positionId.trim() : null;
+  const lifecycleId = typeof o.lifecycleId === "string" && o.lifecycleId.trim().length > 0 ? o.lifecycleId.trim() : null;
+  const flowId = typeof o.flowId === "string" && o.flowId.trim().length > 0 ? o.flowId.trim() : null;
+
+  if (posCycleId) return `cycle:${posCycleId}`;
+  if (positionId) return `pos:${positionId}`;
+  if (lifecycleId) return `life:${lifecycleId}`;
+  if (flowId) return `flow:${flowId}`;
+
+  const sym = String(o.symbol ?? "").trim().toUpperCase();
+  const side = String(o.side ?? "").trim().toLowerCase();
+
+  // 3. exchange order ids if present together with symbol:side
+  if (exPosId) return `ex_pos:${sym}:${side}:${exPosId}`;
+  if (exOrdId && exitOrdId) return `ex_ords:${sym}:${side}:${exOrdId}:${exitOrdId}`;
+  if (exClOrdId && exitOrdId) return `ex_clords:${sym}:${side}:${exClOrdId}:${exitOrdId}`;
+
+  // 4. composite fallback: symbol + side + openedAt + closedAt (+ entryPx / exitPx / size)
+  const openedAt = typeof o.openedAt === "number" && Number.isFinite(o.openedAt) && o.openedAt > 0 ? Math.round(o.openedAt) : "na";
+  const closedAt = typeof o.closedAt === "number" && Number.isFinite(o.closedAt) && o.closedAt > 0 ? Math.round(o.closedAt) : "na";
+  const entryPx = typeof o.entryPrice === "number" && Number.isFinite(o.entryPrice) && o.entryPrice > 0 ? Number(o.entryPrice).toFixed(4) : "na";
+  const exitPx =
+    typeof o.closePrice === "number" && Number.isFinite(o.closePrice) && o.closePrice > 0
+      ? Number(o.closePrice).toFixed(4)
+      : typeof o.exitPrice === "number" && Number.isFinite(o.exitPrice) && o.exitPrice > 0
+        ? Number(o.exitPrice).toFixed(4)
+        : "na";
+  const size = typeof o.sizeUsd === "number" && Number.isFinite(o.sizeUsd) && o.sizeUsd > 0 ? Math.round(o.sizeUsd) : "na";
+
+  return `composite:${sym}:${side}:${openedAt}:${closedAt}:${entryPx}:${exitPx}:${size}`;
+}
+
+export function deduplicateClosedHistoryRows(rows: NormalizedPaperClosedRow[]): NormalizedPaperClosedRow[] {
+  if (!Array.isArray(rows) || rows.length <= 1) return rows;
+
+  const dedupMap = new Map<string, NormalizedPaperClosedRow>();
+  const results: NormalizedPaperClosedRow[] = [];
+
+  for (const r of rows) {
+    const key = canonicalClosedTradeDedupKey(r);
+    // If no meaningful key could be derived, preserve as-is
+    if (!key || key.startsWith("composite::::na:na:na:na:na")) {
+      results.push(r);
+      continue;
+    }
+
+    const existing = dedupMap.get(key);
+    if (!existing) {
+      dedupMap.set(key, r);
+      results.push(r);
+    } else {
+      // Merge multiple representations of the exact same trade:
+      // Keep richer strategy metadata and more specific fields
+      const merged = { ...existing, ...r };
+      // Prefer non-empty strategy/flowId/source
+      if (!merged.strategy && existing.strategy) merged.strategy = existing.strategy;
+      if (!merged.flowId && existing.flowId) merged.flowId = existing.flowId;
+      if (existing.sourceLabel && existing.sourceLabel !== "거래소 체결") merged.sourceLabel = existing.sourceLabel;
+      dedupMap.set(key, merged as NormalizedPaperClosedRow);
+      const idx = results.indexOf(existing);
+      if (idx >= 0) results[idx] = merged as NormalizedPaperClosedRow;
+    }
+  }
+
+  return results;
+}
+
 export function normalizePositionsHistoryArray(rows: unknown[]): NormalizedPaperClosedRow[] {
   if (!Array.isArray(rows)) return [];
-  return rows.map((r) => normalizeClosedHistoryRow(r));
+  const normalized = rows.map((r) => normalizeClosedHistoryRow(r));
+  return deduplicateClosedHistoryRows(normalized);
 }

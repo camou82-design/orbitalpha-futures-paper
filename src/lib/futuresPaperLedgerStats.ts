@@ -180,14 +180,15 @@ export function buildLedgerPerformanceFromHistory(
 
   const last7dAccount = accountRows.filter((r) => inClosedRange(r, generatedAt - 7 * MS_PER_DAY));
   const last30dAccount = accountRows.filter((r) => inClosedRange(r, generatedAt - 30 * MS_PER_DAY));
+  const monthToDateAccount = accountRows.filter((r) => inClosedRange(r, monthStart));
 
   return {
     generatedAt,
-    parsedTradeCount: strategyRows.length,
-    all: aggregateRows(strategyRows),
-    last7d: aggregateRows(last7dStrategy),
-    last30d: aggregateRows(last30dStrategy),
-    monthToDate: aggregateRows(monthToDate),
+    parsedTradeCount: accountRows.length,
+    all: aggregateRows(accountRows),
+    last7d: aggregateRows(last7dAccount),
+    last30d: aggregateRows(last30dAccount),
+    monthToDate: aggregateRows(monthToDateAccount),
     strategy: {
       parsedTradeCount: strategyRows.length,
       all: aggregateRows(strategyRows),

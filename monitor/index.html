@@ -90,6 +90,19 @@
         </div>
       </details>
 
+      <section class="section section--after-secondary" aria-labelledby="closed-trades-heading">
+        <div class="section-head-with-tabs">
+          <h2 id="closed-trades-heading" class="section-title">최근 거래 내역 (전체 계좌 체결)</h2>
+          <div class="trade-filter-tabs" id="closed-trades-tabs">
+            <button type="button" class="tab-btn tab-btn--active" data-filter="all">전체</button>
+            <button type="button" class="tab-btn" data-filter="bot">자동</button>
+            <button type="button" class="tab-btn" data-filter="manual">수동/기타</button>
+          </div>
+        </div>
+        <p class="section-note muted text-xs">OKX 실계좌 전체 체결 기반 · 자동 + 수동 + 인계 lifecycle</p>
+        <div id="closed-trades-container" class="closed-trades-container"></div>
+      </section>
+
       <section class="section section--after-secondary" aria-labelledby="perf-heading">
         <h2 id="perf-heading" class="section-title">성과 요약 (종료 거래)</h2>
         <p class="section-note muted text-xs" id="perf-note"></p>

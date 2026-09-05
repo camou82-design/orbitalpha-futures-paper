@@ -155,11 +155,15 @@ const PARTIAL_EVENT_EXIT_TYPES = new Set([
 ]);
 
 function isFinalClosedRow(r: unknown): boolean {
-  return isStrategyStatsRow(r);
+  return isAccountStatsRow(r);
 }
 
 function isAccountClosedRow(r: unknown): boolean {
   return isAccountStatsRow(r);
+}
+
+function isStrategyClosedRow(r: unknown): boolean {
+  return isStrategyStatsRow(r);
 }
 
 function parseRow(
@@ -580,7 +584,7 @@ export function buildPaperWindowSummaryFromHistory(history: unknown[], generated
     const row = parseRow(r);
     if (!row) continue;
     if (isAccountClosedRow(r)) accountRows.push(row);
-    if (isFinalClosedRow(r)) strategyRows.push(row);
+    if (isStrategyClosedRow(r)) strategyRows.push(row);
   }
 
   const inClosedRange = (row: ParsedHistoryRow, fromInclusive: number): boolean =>
@@ -594,17 +598,17 @@ export function buildPaperWindowSummaryFromHistory(history: unknown[], generated
   const filterWindow = (rows: ParsedHistoryRow[], fromInclusive: number) =>
     rows.filter((r) => inClosedRange(r, fromInclusive));
 
-  const last7d = strategyRows.filter((r) => inClosedRange(r, last7dFrom));
-  const last30d = strategyRows.filter((r) => inClosedRange(r, last30dFrom));
-  const monthToDate = strategyRows.filter((r) => inClosedRange(r, monthStart));
+  const last7dAccount = accountRows.filter((r) => inClosedRange(r, last7dFrom));
+  const last30dAccount = accountRows.filter((r) => inClosedRange(r, last30dFrom));
+  const monthToDateAccount = accountRows.filter((r) => inClosedRange(r, monthStart));
 
   return {
     generatedAt,
     windows: {
-      last7d: aggregateRows(last7d),
-      last30d: aggregateRows(last30d),
-      monthToDate: aggregateRows(monthToDate),
-      all: aggregateRows(strategyRows)
+      last7d: aggregateRows(last7dAccount),
+      last30d: aggregateRows(last30dAccount),
+      monthToDate: aggregateRows(monthToDateAccount),
+      all: aggregateRows(accountRows)
     },
     strategyWindows: {
       last24h: aggregateRows(filterWindow(strategyRows, last24hFrom)),

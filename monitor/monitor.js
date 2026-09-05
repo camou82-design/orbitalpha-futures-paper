@@ -1739,6 +1739,91 @@
           ${row("OKX 동기화", `<span class="${okxSyncStatus ? (String(okxSyncStatus).toUpperCase() === 'SYNCED' || String(okxSyncStatus).toUpperCase() === 'ALIGNED' ? 'v2-ok' : 'v2-warn') : ''}">${okxSyncStatus ? esc(String(okxSyncStatus)) : '<span class="muted">—</span>'}</span>`)}
         </div>
       </div>`;
+  function resolveDisplaySourceLabel(row) {
+    if (!row || typeof row !== "object") return "거래소 체결";
+    if (typeof row.sourceLabel === "string" && row.sourceLabel.trim().length > 0) {
+      return row.sourceLabel.trim();
+    }
+    const str = (v) => (typeof v === "string" ? v.trim().toUpperCase() : "");
+
+    const authority = str(row.authority || row.authoritySourceAtEntry);
+    const source = str(row.source || row.tradeSource);
+    const strategy = str(row.strategy || row.executorAtEntry);
+    const closeSource = str(row.closeSource);
+    const closeReason = str(row.closeReason || row.exitReason);
+    const entrySource = str(row.entrySource);
+
+    const isAdopted =
+      authority.includes("ADOPTED") ||
+      source.includes("ADOPTED") ||
+      strategy.includes("ADOPTED") ||
+      row.isAdopted === true ||
+      Boolean(row.adoptedFrom);
+
+    const isOperatorManaged =
+      authority.includes("OPERATOR") ||
+      source.includes("OPERATOR") ||
+      strategy.includes("OPERATOR") ||
+      closeReason.includes("OPERATOR") ||
+      closeSource.includes("OPERATOR");
+
+    const isManualEntry =
+      source === "MANUAL" ||
+      source === "MANUAL_EXTERNAL" ||
+      entrySource === "MANUAL" ||
+      row.isManual === true ||
+      strategy.includes("MANUAL") ||
+      strategy.includes("EXTERNAL_DISCRETIONARY") ||
+      authority === "MANUAL" ||
+      authority === "OPERATOR";
+
+    const isBotEntry =
+      source === "V2" ||
+      source === "BOT" ||
+      source === "BOT_V2" ||
+      entrySource === "BOT" ||
+      strategy.includes("V2") ||
+      strategy.includes("BOT") ||
+      strategy.includes("HIGHWAY") ||
+      Boolean(row.flowId);
+
+    const isManualExit =
+      closeSource.includes("MANUAL") ||
+      closeSource.includes("OPERATOR") ||
+      closeReason.includes("MANUAL") ||
+      closeReason.includes("USER") ||
+      closeReason.includes("OPERATOR");
+
+    const isBotExit =
+      closeSource.includes("BOT") ||
+      closeSource.includes("ENGINE") ||
+      closeSource.includes("INTERNAL") ||
+      closeReason.includes("TP") ||
+      closeReason.includes("SL") ||
+      closeReason.includes("TRAILING") ||
+      closeReason.includes("REGIME") ||
+      closeReason.includes("DYNAMIC");
+
+    if (isBotEntry && isManualExit) return "자동→수동";
+    if (isManualEntry && isBotExit) return "수동→자동";
+    if (isAdopted) return "외부포지션 인계";
+    if (isOperatorManaged) return "수동관리";
+    if (isBotEntry && !isManualEntry) return "자동";
+    if (isManualEntry) return "수동";
+    if (isManualExit) return "수동";
+    if (isBotExit) return "자동";
+    return "거래소 체결";
+  }
+
+  function badgeSourceHtml(label) {
+    const l = String(label || "").trim();
+    let cls = "badge-source--exchange";
+    if (l === "자동") cls = "badge-source--auto";
+    else if (l === "수동") cls = "badge-source--manual";
+    else if (l === "외부포지션 인계") cls = "badge-source--adopted";
+    else if (l === "수동관리") cls = "badge-source--operator";
+    else if (l.includes("→")) cls = "badge-source--hybrid";
+    return `<span class="badge-source ${cls}">${esc(l || "거래소 체결")}</span>`;
   }
 
   function renderSymbols(bundle) {
@@ -1974,6 +2059,9 @@
             }
           : calculateEnhancedStatus(sym, bundle, pos, s);
 
+        const srcLabel = pos.sourceLabel || resolveDisplaySourceLabel(pos);
+        const sourceBadgeHtml = badgeSourceHtml(srcLabel);
+
         return `
         <article class="${cardClass}">
           ${isOkxFallback ? `<div class="v2-pos-fallback-banner">⚠ 레저 포지션 미확인 — OKX 스냅샷 폴백 데이터입니다. 실제 포지션 여부를 직접 확인하세요.</div>` : reconcileBanner}
@@ -2003,6 +2091,7 @@
             <span class="pos-card-titleline">
               <span class="pos-card-ticker">${esc(sym)}</span> 
               <span class="pos-card-side pos-card-side--${pos.side === "short" ? "short" : "long"}">${esc(sideK)}</span>
+              ${sourceBadgeHtml}
               ${badgeHtml}
             </span>
           </header>
@@ -2039,6 +2128,8 @@
             <summary>레버리지·파이프라인·운용 상세</summary>
             <dl class="sym-meta">
               ${noEntryAuditDetailHtml(sym, bundle)}
+              <dt>출처</dt><dd>${esc(srcLabel)}</dd>
+              <dt>관리 권한</dt><dd>${esc(String(pos.authority || "BOT_V2"))}</dd>
               <dt>레버리지</dt><dd>${esc(String(lev))}×</dd>
               <dt>진입가</dt><dd>${esc(entryDisp)}</dd>
               <dt>현재가(Mark)</dt><dd>${esc(markDisp)}</dd>
@@ -2125,7 +2216,9 @@
     const all = perfSlice(bundle, "all");
     const mtd = perfSlice(bundle, "monthToDate");
 
-    function card(title, slice) {
+    const stratAll = bundle.ledgerPerformance && bundle.ledgerPerformance.strategy ? bundle.ledgerPerformance.strategy.all : null;
+
+    function card(title, slice, stratSlice) {
       if (!slice) {
         return `<div class="perf-card"><h4>${esc(title)}</h4><p class="perf-metric">데이터 없음</p></div>`;
       }
@@ -2147,11 +2240,26 @@
       const net = typeof slice.totalPnlUsdNet === "number" ? slice.totalPnlUsdNet : null;
       const netCls = net !== null ? pnlToneClass(net) : "pnl-zero";
       const netDisplay = net !== null ? formatSignedUsd(net) : "—";
+
+      const stratNet = stratSlice && typeof stratSlice.totalPnlUsdNet === "number" ? stratSlice.totalPnlUsdNet : null;
+      const stratNetDisplay = stratNet !== null ? formatSignedUsd(stratNet) : null;
+      const stratTrades = stratSlice && typeof stratSlice.totalTrades === "number" ? stratSlice.totalTrades : null;
+
+      const tradeCountStr =
+        stratTrades !== null && stratTrades !== slice.totalTrades
+          ? `전체 ${formatCount(slice.totalTrades)} (자동 ${formatCount(stratTrades)})`
+          : `${formatCount(slice.totalTrades)}`;
+
+      const netSubStr =
+        stratNetDisplay !== null && stratNet !== net
+          ? `<span class="muted text-xs" style="margin-left:0.5rem">(자동: ${esc(stratNetDisplay)})</span>`
+          : "";
+
       return `
         <div class="perf-card">
           <h4>${esc(title)}</h4>
-          <p class="perf-metric perf-metric--lead"><span class="muted">순손익</span> <strong class="perf-pnl ${netCls} tabular-nums">${esc(netDisplay)}</strong></p>
-          <p class="perf-metric">거래 <strong>${formatCount(slice.totalTrades)}</strong> · 승률 <strong>${formatPct(slice.winRate)}</strong></p>
+          <p class="perf-metric perf-metric--lead"><span class="muted">순손익</span> <strong class="perf-pnl ${netCls} tabular-nums">${esc(netDisplay)}</strong>${netSubStr}</p>
+          <p class="perf-metric">거래 <strong>${tradeCountStr}</strong> · 승률 <strong>${formatPct(slice.winRate)}</strong></p>
           ${extra}
         </div>
       `;
@@ -2179,15 +2287,138 @@
     };
 
     $("perf-row").innerHTML =
-      card("전체 누적", all) + modeCard("RANGE 성과", rangeAll) + modeCard("TREND 성과", trendAll);
+      card("전체 누적 (계좌 전체)", all, stratAll) + modeCard("RANGE 성과", rangeAll) + modeCard("TREND 성과", trendAll);
 
     renderFeeAnalytics(bundle);
 
     const mtdEl = $("panel-mtd");
     mtdEl.innerHTML =
       '<div class="perf-card" style="border:0;padding:0;background:transparent">' +
-      card("이번 달 (참고 · 30일과 겹칠 수 있음)", mtd) +
+      card("이번 달 (참고 · 30일과 겹칠 수 있음)", mtd, null) +
       "</div>";
+  }
+
+  let closedTradesFilter = "all";
+  let lastCachedBundle = null;
+
+  function initClosedTradesTabs() {
+    const tabs = $("closed-trades-tabs");
+    if (!tabs || tabs.getAttribute("data-bound") === "true") return;
+    tabs.setAttribute("data-bound", "true");
+    tabs.addEventListener("click", (e) => {
+      const btn = e.target.closest(".tab-btn");
+      if (!btn) return;
+      const f = btn.getAttribute("data-filter");
+      if (!f) return;
+      closedTradesFilter = f;
+      tabs.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("tab-btn--active"));
+      btn.classList.add("tab-btn--active");
+      if (lastCachedBundle) {
+        renderClosedTrades(lastCachedBundle);
+      }
+    });
+  }
+
+  function renderClosedTrades(bundle) {
+    lastCachedBundle = bundle;
+    const container = $("closed-trades-container");
+    if (!container) return;
+
+    initClosedTradesTabs();
+
+    const list = Array.isArray(bundle.positionsHistory) ? bundle.positionsHistory : [];
+    if (list.length === 0) {
+      container.innerHTML = '<div style="padding:1.5rem;text-align:center;color:var(--muted);font-size:0.85rem">기록된 체결 거래가 없습니다.</div>';
+      return;
+    }
+
+    // Filter by tab
+    const filtered = list.filter((r) => {
+      if (!r) return false;
+      const lbl = resolveDisplaySourceLabel(r);
+      if (closedTradesFilter === "bot") {
+        return lbl === "자동";
+      }
+      if (closedTradesFilter === "manual") {
+        return lbl !== "자동";
+      }
+      return true;
+    });
+
+    if (filtered.length === 0) {
+      container.innerHTML = '<div style="padding:1.5rem;text-align:center;color:var(--muted);font-size:0.85rem">선택한 필터 조건의 거래가 없습니다.</div>';
+      return;
+    }
+
+    // Sort descending by closedAt
+    const sorted = [...filtered].sort((a, b) => (Number(b.closedAt) || 0) - (Number(a.closedAt) || 0));
+
+    const rowsHtml = sorted.map((row) => {
+      const sym = String(row.symbol || "—");
+      const side = String(row.side || "").toLowerCase();
+      const sideLabel = side === "short" ? "SHORT" : side === "long" ? "LONG" : "—";
+      const sideClass = side === "short" ? "pos-card-side--short" : "pos-card-side--long";
+
+      const entryPx = typeof row.entryPrice === "number" && row.entryPrice > 0 ? formatPrice(row.entryPrice) : "—";
+      const exitPx = typeof row.closePrice === "number" && row.closePrice > 0 ? formatPrice(row.closePrice) : "—";
+
+      const openedAt = typeof row.openedAt === "number" && row.openedAt > 0 ? formatKst(row.openedAt) : "—";
+      const closedAt = typeof row.closedAt === "number" && row.closedAt > 0 ? formatKst(row.closedAt) : "—";
+
+      let holdingStr = "—";
+      if (row.holdingTimeMs && Number(row.holdingTimeMs) > 0) {
+        holdingStr = formatHoldDuration(Date.now() - Number(row.holdingTimeMs));
+      } else if (row.openedAt && row.closedAt && row.closedAt >= row.openedAt) {
+        holdingStr = formatHoldDuration(Date.now() - (row.closedAt - row.openedAt));
+      }
+
+      const pnlNet = typeof row.realizedPnlUsd === "number" ? row.realizedPnlUsd : typeof row.pnlUsdNet === "number" ? row.pnlUsdNet : (typeof row.pnlUsd === "number" ? row.pnlUsd : 0);
+      const fee = typeof row.feeUsd === "number" ? row.feeUsd : 0;
+      const pnlTone = pnlToneClass(pnlNet);
+
+      const exitReason = String(row.exitReason || row.closeReasonLabel || row.closeReason || "정상 종료");
+      const sourceLabel = resolveDisplaySourceLabel(row);
+      const badge = badgeSourceHtml(sourceLabel);
+
+      return `
+        <tr>
+          <td><strong>${esc(sym)}</strong></td>
+          <td><span class="${sideClass}" style="font-weight:700">${esc(sideLabel)}</span></td>
+          <td class="tabular-nums">${esc(entryPx)}</td>
+          <td class="tabular-nums">${esc(exitPx)}</td>
+          <td class="tabular-nums muted text-xs">${esc(openedAt)}</td>
+          <td class="tabular-nums muted text-xs">${esc(closedAt)}</td>
+          <td class="tabular-nums text-xs">${esc(holdingStr)}</td>
+          <td class="tabular-nums ${pnlTone}" style="font-weight:700">${esc(formatSignedUsd(pnlNet))}</td>
+          <td class="tabular-nums muted text-xs">${esc(formatUsd(fee))}</td>
+          <td class="text-xs" style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${esc(exitReason)}">${esc(exitReason)}</td>
+          <td>${badge}</td>
+        </tr>
+      `;
+    }).join("");
+
+    container.innerHTML = `
+      <table class="closed-trades-table">
+        <thead>
+          <tr>
+            <th>종목</th>
+            <th>방향</th>
+            <th>진입가</th>
+            <th>청산가</th>
+            <th>진입시각</th>
+            <th>청산시각</th>
+            <th>보유시간</th>
+            <th>실현손익</th>
+            <th>수수료</th>
+            <th>종료사유</th>
+            <th>출처</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml}
+        </tbody>
+      </table>
+    `;
   }
 
   function renderBlockedCard(bundle) {
@@ -2542,6 +2773,7 @@
       renderExternalMarketContext(bundle);
       renderOperatorContext(bundle);
       renderSymbols(bundle);
+      renderClosedTrades(bundle);
       renderPerf(bundle);
       renderBlockedCard(bundle);
       renderDetails(bundle);

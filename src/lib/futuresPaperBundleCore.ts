@@ -3,18 +3,29 @@ import path from "node:path";
 
 import type { EngineRoutingDecision, PaperEngineRoutingKind, PaperOperationalSnapshot, PaperRegimeState, PaperSymbolDecisionRecord } from "../models/types";
 import { buildLedgerPerformanceFromHistory, type FuturesPaperLedgerPerformance } from "./futuresPaperLedgerStats";
-import { normalizePositionsHistoryArray } from "./paperClosedHistoryNormalize";
+import {
+  normalizePositionsHistoryArray,
+  normalizeClosedHistoryRow,
+  displayFieldsForClosedRow,
+  resolveDisplayTradeSourceLabel,
+  canonicalClosedTradeDedupKey,
+  deduplicateClosedHistoryRows
+} from "./paperClosedHistoryNormalize";
 
 export {
   normalizePositionsHistoryArray,
   normalizeClosedHistoryRow,
-  displayFieldsForClosedRow
+  displayFieldsForClosedRow,
+  resolveDisplayTradeSourceLabel,
+  canonicalClosedTradeDedupKey,
+  deduplicateClosedHistoryRows
 } from "./paperClosedHistoryNormalize";
 export type { NormalizedPaperClosedRow, ClosedRowDisplayFields } from "./paperClosedHistoryNormalize";
 import { readLastLines } from "./file-utils";
 import {
   classifyLedgerOpenRowsForDisplay,
-  isAuthoritativeOkxPositionSnapshotForDisplay
+  isAuthoritativeOkxPositionSnapshotForDisplay,
+  normalizePositionSide
 } from "./position-reconcile-classification";
 
 export {
@@ -271,15 +282,29 @@ export function deriveLedgerStalePositionsForDisplay(
  * read-only rows from `engineState.ledger_okx_position_sync` + `position_ops_surface`
  * (OKX-only / mismatch diagnostics — does not submit orders).
  */
+/**
+ * UI `/futures-paper` current-positions path:
+ * ACCOUNT TRUTH VIEW (PHASE 13)
+ * Ledger open positions and OKX actual positions are unified and merged (deduped).
+ * Manual / exchange-created positions are NEVER omitted.
+ */
 export function deriveCurrentPositionsForDisplay(engineState: unknown, openPositions: unknown[]): unknown[] {
   const ledgerOpen = Array.isArray(openPositions) ? openPositions.filter(isPaperLedgerPositionOpen) : [];
-  if (ledgerOpen.length > 0) {
-    const { active } = classifyLedgerOpenRowsForDisplay(engineState, ledgerOpen);
-    if (active.length > 0) return active;
-    if (isAuthoritativeOkxPositionSnapshotForDisplay(engineState)) return [];
+  const activeLedgerRows =
+    ledgerOpen.length > 0
+      ? classifyLedgerOpenRowsForDisplay(engineState, ledgerOpen).active
+      : [];
+
+  if (!engineState || typeof engineState !== "object") {
+    return activeLedgerRows.map((row) => {
+      const r = row as Record<string, unknown>;
+      return {
+        ...r,
+        sourceLabel: typeof r.sourceLabel === "string" ? r.sourceLabel : resolveDisplayTradeSourceLabel(r)
+      };
+    });
   }
 
-  if (!engineState || typeof engineState !== "object") return [];
   const es = engineState as Record<string, unknown>;
   const sync = es.ledger_okx_position_sync;
   const ops = es.position_ops_surface;
@@ -313,12 +338,59 @@ export function deriveCurrentPositionsForDisplay(engineState: unknown, openPosit
     return { entryPrice };
   }
 
-  if (previews.length > 0) {
-    return previews.map((p) => {
-      const sym = String(p.symbol ?? "");
-      const side = p.side === "short" ? "short" : "long";
-      const match = surfaceRowFor(sym, side);
-      const { entryPrice } = rowDisplayPayload(match);
+  const merged = new Map<string, Record<string, unknown>>();
+
+  // 1. First add active ledger rows
+  for (const row of activeLedgerRows) {
+    if (!row || typeof row !== "object") continue;
+    const r = { ...(row as Record<string, unknown>) };
+    const sym = String(r.symbol ?? "").trim();
+    const side = normalizePositionSide(r.side);
+    if (!sym) continue;
+    const key = `${sym}:${side}`;
+    if (!r.sourceLabel) {
+      r.sourceLabel = resolveDisplayTradeSourceLabel(r);
+    }
+    merged.set(key, r);
+  }
+
+  // 2. Merge / Append OKX actual previews (truth view)
+  for (const p of previews) {
+    const sym = String(p.symbol ?? "").trim();
+    const side = p.side === "short" ? "short" : "long";
+    if (!sym) continue;
+    const key = `${sym}:${side}`;
+    const match = surfaceRowFor(sym, side);
+    const { entryPrice: surfaceEntryPx } = rowDisplayPayload(match);
+
+    const contracts = typeof p.pos === "number" && Number.isFinite(p.pos) ? p.pos : null;
+    const notionalUsd = typeof p.notionalUsd === "number" && Number.isFinite(p.notionalUsd) ? p.notionalUsd : null;
+    const uplUsd = typeof p.upl === "number" && Number.isFinite(p.upl) ? p.upl : null;
+    const instId = typeof p.instId === "string" ? p.instId : null;
+
+    const existing = merged.get(key);
+    if (existing) {
+      // Enrich existing ledger row with actual OKX live telemetry
+      if (contracts !== null && existing.okxPositionContracts === undefined) {
+        existing.okxPositionContracts = contracts;
+      }
+      if (notionalUsd !== null && existing.sizeUsd === undefined) {
+        existing.sizeUsd = notionalUsd;
+      }
+      if (uplUsd !== null && existing.unrealizedPnl === undefined) {
+        existing.unrealizedPnl = uplUsd;
+      }
+      if (instId && !existing.instId) {
+        existing.instId = instId;
+      }
+      if (surfaceEntryPx !== null && (!existing.entryPrice || Number(existing.entryPrice) <= 0)) {
+        existing.entryPrice = surfaceEntryPx;
+      }
+      if (!existing.sourceLabel) {
+        existing.sourceLabel = resolveDisplayTradeSourceLabel(existing);
+      }
+    } else {
+      // Pure OKX actual position not present in paper ledger (e.g. MANUAL / ADOPTED / EXTERNAL)
       const ledgerSl =
         match && typeof match.ledger_stop_px === "number" && Number.isFinite(match.ledger_stop_px)
           ? match.ledger_stop_px
@@ -337,15 +409,22 @@ export function deriveCurrentPositionsForDisplay(engineState: unknown, openPosit
         Number.isFinite(match.initial_tp_px_engine_mirror)
           ? match.initial_tp_px_engine_mirror
           : null;
-      return {
+
+      const manualRow: Record<string, unknown> = {
         symbol: sym,
         side,
         status: "open",
-        entryPrice,
+        entryPrice: surfaceEntryPx,
         openedAt: tsFallback,
         displaySource: "ledger_okx_sync_preview",
-        okxPositionContracts: typeof p.pos === "number" && Number.isFinite(p.pos) ? p.pos : null,
-        instId: typeof p.instId === "string" ? p.instId : null,
+        source: "manual",
+        sourceLabel: resolveDisplayTradeSourceLabel({ source: "manual", authority: "MANUAL", ...p }),
+        authority: "MANUAL",
+        isManual: true,
+        okxPositionContracts: contracts,
+        sizeUsd: notionalUsd ?? undefined,
+        unrealizedPnl: uplUsd ?? undefined,
+        instId,
         stopPrice: ledgerSl ?? undefined,
         takeProfit: ledgerTp ?? undefined,
         policy_mirror_stop_px_fallback: ledgerSl == null && mirrorSl != null ? mirrorSl : undefined,
@@ -353,45 +432,54 @@ export function deriveCurrentPositionsForDisplay(engineState: unknown, openPosit
         reduce_only_protective_found:
           typeof match?.reduce_only_protective_found === "boolean" ? match.reduce_only_protective_found : undefined
       };
-    });
+      merged.set(key, manualRow);
+    }
   }
 
-  if (opRows.length > 0) {
-    return opRows.map((row) => {
-      const sym = String(row.symbol ?? "");
+  // 3. If previews was empty but opRows exist, enrich/append from opRows
+  if (previews.length === 0 && opRows.length > 0) {
+    for (const row of opRows) {
+      const sym = String(row.symbol ?? "").trim();
       const side = row.side === "short" ? "short" : "long";
-      const { entryPrice } = rowDisplayPayload(row);
-      const ledgerSl =
-        typeof row.ledger_stop_px === "number" && Number.isFinite(row.ledger_stop_px) ? row.ledger_stop_px : null;
-      const mirrorSl =
-        typeof row.initial_stop_px_engine_mirror === "number" && Number.isFinite(row.initial_stop_px_engine_mirror)
-          ? row.initial_stop_px_engine_mirror
-          : null;
-      const ledgerTp =
-        typeof row.ledger_tp_px === "number" && Number.isFinite(row.ledger_tp_px) ? row.ledger_tp_px : null;
-      const mirrorTp =
-        typeof row.initial_tp_px_engine_mirror === "number" && Number.isFinite(row.initial_tp_px_engine_mirror)
-          ? row.initial_tp_px_engine_mirror
-          : null;
-      return {
-        symbol: sym,
-        side,
-        status: "open",
-        entryPrice,
-        openedAt: tsFallback,
-        displaySource: "position_ops_surface",
-        inst_id: typeof row.inst_id === "string" ? row.inst_id : null,
-        stopPrice: ledgerSl ?? undefined,
-        takeProfit: ledgerTp ?? undefined,
-        policy_mirror_stop_px_fallback: ledgerSl == null && mirrorSl != null ? mirrorSl : undefined,
-        policy_mirror_tp_px_fallback: ledgerTp == null && mirrorTp != null ? mirrorTp : undefined,
-        reduce_only_protective_found:
-          typeof row.reduce_only_protective_found === "boolean" ? row.reduce_only_protective_found : undefined
-      };
-    });
+      if (!sym) continue;
+      const key = `${sym}:${side}`;
+      if (!merged.has(key)) {
+        const { entryPrice } = rowDisplayPayload(row);
+        const ledgerSl =
+          typeof row.ledger_stop_px === "number" && Number.isFinite(row.ledger_stop_px) ? row.ledger_stop_px : null;
+        const mirrorSl =
+          typeof row.initial_stop_px_engine_mirror === "number" && Number.isFinite(row.initial_stop_px_engine_mirror)
+            ? row.initial_stop_px_engine_mirror
+            : null;
+        const ledgerTp =
+          typeof row.ledger_tp_px === "number" && Number.isFinite(row.ledger_tp_px) ? row.ledger_tp_px : null;
+        const mirrorTp =
+          typeof row.initial_tp_px_engine_mirror === "number" && Number.isFinite(row.initial_tp_px_engine_mirror)
+            ? row.initial_tp_px_engine_mirror
+            : null;
+        merged.set(key, {
+          symbol: sym,
+          side,
+          status: "open",
+          entryPrice,
+          openedAt: tsFallback,
+          displaySource: "position_ops_surface",
+          source: "manual",
+          sourceLabel: resolveDisplayTradeSourceLabel({ source: "manual", authority: "MANUAL", ...row }),
+          authority: "MANUAL",
+          inst_id: typeof row.inst_id === "string" ? row.inst_id : null,
+          stopPrice: ledgerSl ?? undefined,
+          takeProfit: ledgerTp ?? undefined,
+          policy_mirror_stop_px_fallback: ledgerSl == null && mirrorSl != null ? mirrorSl : undefined,
+          policy_mirror_tp_px_fallback: ledgerTp == null && mirrorTp != null ? mirrorTp : undefined,
+          reduce_only_protective_found:
+            typeof row.reduce_only_protective_found === "boolean" ? row.reduce_only_protective_found : undefined
+        });
+      }
+    }
   }
 
-  return [];
+  return Array.from(merged.values());
 }
 
 export type FuturesPaperDataBundle = Readonly<{
