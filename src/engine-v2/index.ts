@@ -50,6 +50,7 @@ import {
 } from "./risk-sizing/fast-trend-shift-structural-stop";
 import { evaluateTpProfitabilityAuthority } from "./execution/tp-profitability-authority";
 import { evaluateEthRangeEntryFeasibilityGate } from "./execution/eth-range-entry-feasibility-gate";
+import { evaluateRangeDriftEntryTimingGate } from "./market-judgment/range-drift-entry-timing-gate";
 import {
     resolvePreEntryPolicySlPrice,
     resolveV2PreEntryExecutableTpBundle
@@ -8907,6 +8908,63 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    // --- V2 RANGE DRIFT ENTRY TIMING GATE (BTC & ETH Counter-Drift Timing) ---
+    if (decision.decision === "ENTER" && (decision.side === "long" || decision.side === "short")) {
+        const symbolStr = String(input.symbol ?? "").toUpperCase();
+        if (symbolStr === "BTCUSDT" || symbolStr === "ETHUSDT") {
+            const entryPrice = Number(input.snapshot?.lastPrice ?? input.snapshot?.latestCandleClose ?? 0);
+            const curBoxPos = typeof boxPos === "number" && Number.isFinite(boxPos)
+                ? boxPos
+                : (typeof decision.metadata?.boxPos === "number" ? decision.metadata.boxPos : null);
+
+            const driftRes = evaluateRangeDriftEntryTimingGate({
+                symbol: symbolStr,
+                candidateSide: decision.side,
+                canonicalRegime: String(judgment.regime),
+                rangePhase: String(judgment.rangePhase ?? ""),
+                rangeCenterSlope: Number(authoritativeInput.snapshot?.rangeCenterSlope ?? input.snapshot?.rangeCenterSlope ?? 0),
+                ema20Slope: Number(authoritativeInput.snapshot?.ema20Slope ?? input.snapshot?.ema20Slope ?? 0),
+                boxPos: curBoxPos,
+                boxHigh: typeof authoritativeInput.snapshot?.boxHigh === "number" ? authoritativeInput.snapshot.boxHigh : input.snapshot?.boxHigh,
+                boxLow: typeof authoritativeInput.snapshot?.boxLow === "number" ? authoritativeInput.snapshot.boxLow : input.snapshot?.boxLow,
+                entryPrice,
+                candles: input.candles ?? input.snapshot?.candles ?? null,
+                reversalConfirmed: Boolean(decision.metadata?.reversal_confirmed || (judgment as any).reversalConfirmed),
+                isAddon: isAddOn,
+                marketSubtype: judgment.subtype ?? null,
+                lifecycleState: (v2State as any)?.lifecycleState ?? null,
+                manualTakeoverActive: (v2State as any)?.manualTakeoverActive ?? false,
+                manualOwnershipLatch: (v2State as any)?.manualOwnershipLatch ?? false
+            });
+
+            if (driftRes.blockedOrWaited) {
+                decision.decision = "SKIP";
+                decision.side = "none";
+                decision.signal = "NONE";
+                decision.risk.isBlocked = true;
+                decision.risk.blockReason = driftRes.reason ?? "RANGE_DRIFT_TIMING_WAIT";
+                decision.risk.stageMarginKrw = 0;
+                decision.risk.exposureNotionalKrw = 0;
+                decision.risk.finalOrderNotionalUsdt = 0;
+                if (decision.metadata) {
+                    decision.metadata.v2DecisionFinal = "SKIP";
+                    decision.metadata.v2SideFinal = "none";
+                    decision.metadata.expectedMissingCondition = driftRes.reason ?? "RANGE_DRIFT_TIMING_WAIT";
+                    decision.metadata.expectedNextAction = driftRes.reason?.includes("LOWER_EDGE")
+                        ? "WAIT_FOR_FAVORABLE_LOWER_EDGE"
+                        : driftRes.reason?.includes("UPPER_EDGE")
+                          ? "WAIT_FOR_FAVORABLE_UPPER_EDGE"
+                          : "WAIT_FOR_STRUCTURAL_REACTION";
+                }
+                if (internal.execution) {
+                    internal.execution.signal = "NONE";
+                    internal.execution.side = "none";
+                    internal.execution.baseSizeIntent = 0;
+                }
+            }
+        }
+    }
+
     // --- V2_STOP_PLAN_PROPAGATION_PROOF ---
     let stopPriceValidFinal = true;
     const stopPriceFinal = decision.lifecycleAuthority?.newStopPrice ?? null;
@@ -9558,4 +9616,4 @@ export function adaptV2Input(
 export { clearGlobalShockStates } from "./state/derive";
 export { evaluateEthStructuralConfirmationSelectiveFilter } from "./market-judgment/eth-selective-probe-gate";
 export { evaluateBtcShortMacroBullGate, evaluateEthShortLocationRrGate } from "./market-judgment/short-authority-gates";
-
+export { evaluateRangeDriftEntryTimingGate, resetRangeDriftHysteresis } from "./market-judgment/range-drift-entry-timing-gate";
