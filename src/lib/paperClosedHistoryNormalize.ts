@@ -227,6 +227,12 @@ export type NormalizedPaperClosedRow = Readonly<
     closeSource: PaperCloseSource;
     outcomeStatus: "win" | "loss" | "flat";
     sourceLabel: string;
+    exchangeOrdId?: string;
+    exitOrdId?: string;
+    exchangeEntryOrdIds?: string[];
+    exchangeExitOrdIds?: string[];
+    exchangeFillIds?: string[];
+    lifecycleId?: string;
   }
 >;
 
@@ -508,8 +514,18 @@ export function canonicalClosedTradeDedupKey(row: unknown): string {
 
   // 1. exchange position/order/lifecycle identity
   const exPosId = typeof o.exchangePosId === "string" && o.exchangePosId.trim().length > 0 ? o.exchangePosId.trim() : null;
-  const exOrdId = typeof o.exchangeOrdId === "string" && o.exchangeOrdId.trim().length > 0 ? o.exchangeOrdId.trim() : null;
-  const exitOrdId = typeof o.exitOrdId === "string" && o.exitOrdId.trim().length > 0 ? o.exitOrdId.trim() : null;
+  const exOrdId =
+    typeof o.exchangeOrdId === "string" && o.exchangeOrdId.trim().length > 0
+      ? o.exchangeOrdId.trim()
+      : Array.isArray(o.exchangeEntryOrdIds) && o.exchangeEntryOrdIds.length > 0
+        ? String(o.exchangeEntryOrdIds[0]).trim()
+        : null;
+  const exitOrdId =
+    typeof o.exitOrdId === "string" && o.exitOrdId.trim().length > 0
+      ? o.exitOrdId.trim()
+      : Array.isArray(o.exchangeExitOrdIds) && o.exchangeExitOrdIds.length > 0
+        ? String(o.exchangeExitOrdIds[0]).trim()
+        : null;
   const exClOrdId = typeof o.exchangeClOrdId === "string" && o.exchangeClOrdId.trim().length > 0 ? o.exchangeClOrdId.trim() : null;
 
   // 2. canonical flowId / positionId / lifecycleId / positionCycleId
@@ -532,14 +548,14 @@ export function canonicalClosedTradeDedupKey(row: unknown): string {
   if (exClOrdId && exitOrdId) return `ex_clords:${sym}:${side}:${exClOrdId}:${exitOrdId}`;
 
   // 4. composite fallback: symbol + side + openedAt + closedAt (+ entryPx / exitPx / size)
-  const openedAt = typeof o.openedAt === "number" && Number.isFinite(o.openedAt) && o.openedAt > 0 ? Math.round(o.openedAt) : "na";
-  const closedAt = typeof o.closedAt === "number" && Number.isFinite(o.closedAt) && o.closedAt > 0 ? Math.round(o.closedAt) : "na";
-  const entryPx = typeof o.entryPrice === "number" && Number.isFinite(o.entryPrice) && o.entryPrice > 0 ? Number(o.entryPrice).toFixed(4) : "na";
+  const openedAt = typeof o.openedAt === "number" && Number.isFinite(o.openedAt) && o.openedAt > 0 ? Math.round(o.openedAt / 1000) : "na";
+  const closedAt = typeof o.closedAt === "number" && Number.isFinite(o.closedAt) && o.closedAt > 0 ? Math.round(o.closedAt / 1000) : "na";
+  const entryPx = typeof o.entryPrice === "number" && Number.isFinite(o.entryPrice) && o.entryPrice > 0 ? Number(o.entryPrice).toFixed(2) : "na";
   const exitPx =
     typeof o.closePrice === "number" && Number.isFinite(o.closePrice) && o.closePrice > 0
-      ? Number(o.closePrice).toFixed(4)
+      ? Number(o.closePrice).toFixed(2)
       : typeof o.exitPrice === "number" && Number.isFinite(o.exitPrice) && o.exitPrice > 0
-        ? Number(o.exitPrice).toFixed(4)
+        ? Number(o.exitPrice).toFixed(2)
         : "na";
   const size = typeof o.sizeUsd === "number" && Number.isFinite(o.sizeUsd) && o.sizeUsd > 0 ? Math.round(o.sizeUsd) : "na";
 
@@ -566,15 +582,36 @@ export function deduplicateClosedHistoryRows(rows: NormalizedPaperClosedRow[]): 
       results.push(r);
     } else {
       // Merge multiple representations of the exact same trade:
-      // Keep richer strategy metadata and more specific fields
-      const merged = { ...existing, ...r };
-      // Prefer non-empty strategy/flowId/source
-      if (!merged.strategy && existing.strategy) merged.strategy = existing.strategy;
-      if (!merged.flowId && existing.flowId) merged.flowId = existing.flowId;
-      if (existing.sourceLabel && existing.sourceLabel !== "거래소 체결") merged.sourceLabel = existing.sourceLabel;
-      dedupMap.set(key, merged as NormalizedPaperClosedRow);
+      // Preserve richer strategy metadata from bot record and actual execution truth from exchange record
+      const isRExchangeTruth = (r as any).accountTruth === true;
+      const isExistingExchangeTruth = (existing as any).accountTruth === true;
+
+      const base = isRExchangeTruth ? { ...existing, ...r } : { ...r, ...existing };
+
+      // Strategy metadata from bot record (if present)
+      const botObj = isRExchangeTruth ? existing : r;
+      if (botObj.strategyVersion) base.strategyVersion = botObj.strategyVersion;
+      if (botObj.strategy) base.strategy = botObj.strategy;
+      if (botObj.sourceSignal) base.sourceSignal = botObj.sourceSignal;
+      if (botObj.regime) base.regime = botObj.regime;
+      if (botObj.regimeAtEntry) base.regimeAtEntry = botObj.regimeAtEntry;
+      if (botObj.flowId) base.flowId = botObj.flowId;
+      if (botObj.positionCycleId) base.positionCycleId = botObj.positionCycleId;
+      if (botObj.exitReason && botObj.exitReason !== "거래소 청산") base.exitReason = botObj.exitReason;
+      if (botObj.sourceLabel && botObj.sourceLabel !== "거래소 체결") base.sourceLabel = botObj.sourceLabel;
+      if (botObj.tradeSource && botObj.tradeSource === "BOT_V2") base.tradeSource = botObj.tradeSource;
+
+      // Exchange execution numbers (if present)
+      const exObj = isRExchangeTruth ? r : isExistingExchangeTruth ? existing : null;
+      if (exObj) {
+        if (typeof exObj.feeUsd === "number") base.feeUsd = exObj.feeUsd;
+        if (typeof exObj.realizedPnlUsd === "number") base.realizedPnlUsd = exObj.realizedPnlUsd;
+        if (typeof exObj.realizedPnlPct === "number") base.realizedPnlPct = exObj.realizedPnlPct;
+      }
+
+      dedupMap.set(key, base as NormalizedPaperClosedRow);
       const idx = results.indexOf(existing);
-      if (idx >= 0) results[idx] = merged as NormalizedPaperClosedRow;
+      if (idx >= 0) results[idx] = base as NormalizedPaperClosedRow;
     }
   }
 

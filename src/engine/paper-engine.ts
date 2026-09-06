@@ -6309,6 +6309,10 @@ export class PaperEngine {
     });
   }
 
+  public getOkxAuthClient(): OkxDemoClient | null {
+    return this.okxDemo;
+  }
+
   public async runTick(): Promise<void> {
     return this.runOnce();
   }

@@ -1,6 +1,7 @@
 import { getEngineConfig, getPaperLoopIntervalMs, loadEnv } from "./config/env";
 import { createLogger } from "./logs/logger";
 import { PaperEngine } from "./engine/paper-engine";
+import { OkxAccountTruthScheduler } from "./lib/okxAccountTruthScheduler";
 
 async function main(): Promise<void> {
   loadEnv();
@@ -11,6 +12,12 @@ async function main(): Promise<void> {
   logger.info("paper_loop_started", { intervalMs, loop_delay_reason: delayReason });
 
   const engine = new PaperEngine(config, logger);
+  const accountTruthScheduler = new OkxAccountTruthScheduler({
+    dataDir: config.dataDir ?? "data",
+    client: engine.getOkxAuthClient(),
+    syncIntervalMs: 60_000,
+    logger
+  });
   let running = false;
 
   const runOnceSafe = async (phase: "initial" | "interval"): Promise<void> => {
@@ -25,6 +32,7 @@ async function main(): Promise<void> {
     running = true;
     try {
       logger.info("paper_loop_tick", { phase });
+      accountTruthScheduler.triggerIfDue();
       await engine.runOnce();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

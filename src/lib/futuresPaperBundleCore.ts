@@ -27,6 +27,7 @@ import {
   isAuthoritativeOkxPositionSnapshotForDisplay,
   normalizePositionSide
 } from "./position-reconcile-classification";
+import { readOkxAccountClosedTrades } from "../storage/account-truth-store";
 
 export {
   classifyLedgerOpenRowsForDisplay,
@@ -592,13 +593,24 @@ function pickSymbolRows(latest: unknown): FuturesPaperSymbolRow[] {
 
 async function readPositionsHistoryArray(dataDir: string): Promise<unknown[]> {
   const p = path.join(dataDir, "positions", "history.json");
+  let botHistory: unknown[] = [];
   try {
     const raw = await fs.readFile(p, "utf8");
     const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? parsed : [];
+    if (Array.isArray(parsed)) botHistory = parsed;
   } catch {
-    return [];
+    botHistory = [];
   }
+
+  let okxAccountHistory: unknown[] = [];
+  try {
+    okxAccountHistory = await readOkxAccountClosedTrades(dataDir);
+  } catch {
+    okxAccountHistory = [];
+  }
+
+  if (okxAccountHistory.length === 0) return botHistory;
+  return [...botHistory, ...okxAccountHistory];
 }
 
 async function readPositionsOpenArray(dataDir: string): Promise<unknown[]> {
@@ -716,17 +728,21 @@ export async function composePublicFuturesPaperBundleForWrite(
 ): Promise<FuturesPaperDataBundle> {
   const root = path.resolve(input.projectRoot.trim());
   const dataDir = path.join(root, "data");
-  const [engineState, latestSnapshot, latestMeta, openPositions] = await Promise.all([
+  const [engineState, latestSnapshot, latestMeta, openPositions, okxAccountTrades] = await Promise.all([
     readJsonFile(path.join(dataDir, "reports", "engine-state.json")),
     readJsonFile(path.join(dataDir, "snapshots", "latest.json")),
     readJsonFile(path.join(dataDir, "snapshots", "latest-meta.json")),
-    readPositionsOpenArray(dataDir)
+    readPositionsOpenArray(dataDir),
+    readOkxAccountClosedTrades(dataDir)
   ]);
 
   const symbolRows = pickSymbolRows(latestSnapshot);
   const eventsRecent = input.eventsParsed.slice(-20);
   const healthHistoryRecent = mapHealthHistorySlice(input.healthHistoryParsed.slice(-10));
-  const positionsHistory = normalizePositionsHistoryArray(input.positionsHistoryRaw);
+  const combinedHistoryRaw = Array.isArray(okxAccountTrades) && okxAccountTrades.length > 0
+    ? [...input.positionsHistoryRaw, ...okxAccountTrades]
+    : input.positionsHistoryRaw;
+  const positionsHistory = normalizePositionsHistoryArray(combinedHistoryRaw);
   const generatedAt = Date.now();
   const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt);
   const paperOperational = paperOperationalFromEngineState(engineState);

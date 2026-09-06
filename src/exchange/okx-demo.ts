@@ -481,6 +481,79 @@ export class OkxDemoClient {
     return { ok: true, value: merged, diagnostics };
   }
 
+  /** Read-only GET /api/v5/trade/fills-history (recent fills up to 3 months) */
+  getFillsHistory(args?: {
+    instType?: string;
+    instId?: string;
+    ordId?: string;
+    after?: string;
+    before?: string;
+    begin?: string;
+    end?: string;
+    limit?: string;
+  }): Promise<TryResult<Record<string, unknown>[]>> {
+    const q = new URLSearchParams();
+    if (args?.instType) q.set("instType", args.instType);
+    if (args?.instId) q.set("instId", args.instId);
+    if (args?.ordId) q.set("ordId", args.ordId);
+    if (args?.after) q.set("after", args.after);
+    if (args?.before) q.set("before", args.before);
+    if (args?.begin) q.set("begin", args.begin);
+    if (args?.end) q.set("end", args.end);
+    if (args?.limit) q.set("limit", args.limit);
+    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/fills-history", q, null);
+  }
+
+  /** Read-only GET /api/v5/trade/orders-history (last 7 days completed/canceled orders) */
+  getOrdersHistory(args: {
+    instType: string;
+    instId?: string;
+    ordType?: string;
+    state?: string;
+    after?: string;
+    before?: string;
+    begin?: string;
+    end?: string;
+    limit?: string;
+  }): Promise<TryResult<Record<string, unknown>[]>> {
+    const q = new URLSearchParams();
+    q.set("instType", args.instType);
+    if (args.instId) q.set("instId", args.instId);
+    if (args.ordType) q.set("ordType", args.ordType);
+    if (args.state) q.set("state", args.state);
+    if (args.after) q.set("after", args.after);
+    if (args.before) q.set("before", args.before);
+    if (args.begin) q.set("begin", args.begin);
+    if (args.end) q.set("end", args.end);
+    if (args.limit) q.set("limit", args.limit);
+    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/orders-history", q, null);
+  }
+
+  /** Read-only GET /api/v5/trade/orders-algo-history (completed/canceled algo orders) */
+  getOrdersAlgoHistory(args: {
+    instType: string;
+    instId?: string;
+    ordType?: string;
+    state?: string;
+    after?: string;
+    before?: string;
+    begin?: string;
+    end?: string;
+    limit?: string;
+  }): Promise<TryResult<Record<string, unknown>[]>> {
+    const q = new URLSearchParams();
+    q.set("instType", args.instType);
+    if (args.instId) q.set("instId", args.instId);
+    if (args.ordType) q.set("ordType", args.ordType);
+    if (args.state) q.set("state", args.state);
+    if (args.after) q.set("after", args.after);
+    if (args.before) q.set("before", args.before);
+    if (args.begin) q.set("begin", args.begin);
+    if (args.end) q.set("end", args.end);
+    if (args.limit) q.set("limit", args.limit);
+    return this.signedRequest<Record<string, unknown>>("GET", "/api/v5/trade/orders-algo-history", q, null);
+  }
+
   getAlgoOrder(args: {
     instId?: string;
     algoId?: string;
