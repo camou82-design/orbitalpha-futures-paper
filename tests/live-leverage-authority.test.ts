@@ -167,72 +167,68 @@ function pass(label: string, detail?: Record<string, unknown>): void {
     pass("H_RESTART_STATE_FALLBACK_TO_10");
 }
 
-// I. MOST IMPORTANT: finalOrderNotional identical across 10/25/50/100
-// J. requiredMargin only: N/10, N/25, N/50, N/100
+// I. Invariant: allocatedMarginUsdt must remain invariant when leverage selection changes
+// finalOrderNotionalUsdt = allocatedMarginUsdt * selectedLeverage
+// J. Replay with allocatedMarginUsdt = 248.05 for both BTCUSDT and ETHUSDT:
+// 10x  = 2,480.50 USDT
+// 25x  = 6,201.25 USDT
+// 50x  = 12,402.50 USDT
+// 100x = 24,805.00 USDT
 {
-    const baseInput = {
-        symbol: "BTCUSDT",
-        side: "short" as const,
-        orderKind: "ENTRY" as const,
-        accountEquityUsdt: 811.6033577749594,
-        availableBalanceUsdt: 532.1504047024622,
-        entryReferencePrice: 76546.4,
-        effectiveStopPrice: 77363.0,
-        lastPrice: 76546.4,
-        entryQualityGrade: "A" as const,
-        existingSymbolNotionalUsdt: 0,
-        existingAccountNotionalUsdt: 0,
-        v2AuthorityEntry: true,
-        appliedLeverage: 10 // Sizing leverage remains FIXED 10
-    };
+    const testSymbols = ["BTCUSDT", "ETHUSDT"] as const;
+    const allocatedMargin = 248.05;
 
-    const notionals: number[] = [];
-    const margins: number[] = [];
+    for (const sym of testSymbols) {
+        const expectedTable: Record<AllowedExecutionLeverage, number> = {
+            10: 2480.50,
+            25: 6201.25,
+            50: 12402.50,
+            100: 24805.00
+        };
 
-    for (const execLev of [10, 25, 50, 100] as const) {
-        // 1. Sizing computation ALWAYS uses fixed sizingLeverage (10x)
-        const sizing = evaluateEquityAdaptiveSizing(baseInput);
-        assert.equal(sizing.sizingPassed, true);
-        notionals.push(sizing.finalOrderNotionalUsdt);
+        for (const execLev of [10, 25, 50, 100] as const) {
+            const auth = evaluateLeverageSelectionAuthority({
+                symbol: sym,
+                selectedLeverage: execLev,
+                confirmedOkxLeverage: execLev,
+                finalOrderNotionalUsdt: allocatedMargin * DEFAULT_SIZING_LEVERAGE, // 2480.50 baseline at 10x
+                allocatedMarginUsdt: allocatedMargin,
+                positionOpen: false,
+                sizingLeverage: DEFAULT_SIZING_LEVERAGE
+            });
 
-        // 2. Execution authority determines required margin from finalOrderNotional / execLev
-        const auth = evaluateLeverageSelectionAuthority({
-            symbol: "BTCUSDT",
-            selectedLeverage: execLev,
-            confirmedOkxLeverage: execLev,
-            finalOrderNotionalUsdt: sizing.finalOrderNotionalUsdt,
-            positionOpen: false,
-            sizingLeverage: baseInput.appliedLeverage
-        });
+            assert.equal(auth.validationPassed, true);
+            assert.equal(auth.selectedExecutionLeverage, execLev);
+            assert.equal(auth.allocatedMarginUsdt, allocatedMargin, `${sym} allocatedMarginUsdt invariant`);
+            assert.equal(auth.requiredMarginUsdt, allocatedMargin, `${sym} requiredMarginUsdt equals allocatedMarginUsdt`);
+            assert.ok(
+                Math.abs(auth.finalOrderNotionalUsdt - expectedTable[execLev]) < 1e-4,
+                `${sym} ${execLev}x notional expected ${expectedTable[execLev]}, got ${auth.finalOrderNotionalUsdt}`
+            );
 
-        margins.push(auth.requiredMarginUsdt);
+            const proof = buildLeverageSelectionAuthorityProof(auth);
+            assert.equal(proof.event, "V2_LEVERAGE_SELECTION_AUTHORITY_PROOF");
+            assert.equal(proof.symbol, sym);
+            assert.equal(proof.allocated_margin_usdt, allocatedMargin);
+            assert.equal(proof.final_order_notional_usdt, expectedTable[execLev]);
+            assert.equal(proof.required_margin_usdt, allocatedMargin);
+        }
     }
 
-    const baselineNotional = notionals[0];
-    assert.ok(baselineNotional > 0);
-
-    // Assert bit-for-bit identical finalOrderNotional across all 4 leverage settings
-    for (let i = 1; i < notionals.length; i++) {
-        assert.equal(
-            notionals[i],
-            baselineNotional,
-            `finalOrderNotional at ${[10, 25, 50, 100][i]}x must be bit-for-bit identical to 10x`
-        );
-    }
-
-    // Assert requiredMargin strictly scales as N/10, N/25, N/50, N/100
-    const [m10, m25, m50, m100] = margins;
-    assert.ok(Math.abs(m10 - baselineNotional / 10) < 1e-9, "margin at 10x");
-    assert.ok(Math.abs(m25 - baselineNotional / 25) < 1e-9, "margin at 25x");
-    assert.ok(Math.abs(m50 - baselineNotional / 50) < 1e-9, "margin at 50x");
-    assert.ok(Math.abs(m100 - baselineNotional / 100) < 1e-9, "margin at 100x");
-
-    pass("I_J_NOTIONAL_IDENTICAL_AND_MARGIN_STRICT_RATIOS", {
-        baselineNotional,
-        margin10x: m10,
-        margin25x: m25,
-        margin50x: m50,
-        margin100x: m100
+    pass("I_J_ALLOCATED_MARGIN_INVARIANT_AND_BTC_ETH_REPLAY", {
+        allocatedMarginUsdt: allocatedMargin,
+        replayBTC: {
+            "10x": 2480.50,
+            "25x": 6201.25,
+            "50x": 12402.50,
+            "100x": 24805.00
+        },
+        replayETH: {
+            "10x": 2480.50,
+            "25x": 6201.25,
+            "50x": 12402.50,
+            "100x": 24805.00
+        }
     });
 }
 

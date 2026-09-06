@@ -27,6 +27,7 @@ export type LeverageSelectionAuthorityInput = Readonly<{
     finalOrderNotionalUsdt: number;
     positionOpen: boolean;
     sizingLeverage?: number;
+    allocatedMarginUsdt?: number;
 }>;
 
 export type LeverageSelectionAuthorityResult = Readonly<{
@@ -34,6 +35,7 @@ export type LeverageSelectionAuthorityResult = Readonly<{
     sizingLeverage: number;
     selectedExecutionLeverage: AllowedExecutionLeverage;
     confirmedOkxLeverage: number | null;
+    allocatedMarginUsdt: number;
     finalOrderNotionalUsdt: number;
     requiredMarginUsdt: number;
     positionOpen: boolean;
@@ -50,9 +52,12 @@ export function evaluateLeverageSelectionAuthority(
     const sizingLeverage = typeof input.sizingLeverage === "number" && input.sizingLeverage > 0
         ? input.sizingLeverage
         : DEFAULT_SIZING_LEVERAGE;
-    const finalOrderNotionalUsdt = typeof input.finalOrderNotionalUsdt === "number" && Number.isFinite(input.finalOrderNotionalUsdt)
+    const rawNotional = typeof input.finalOrderNotionalUsdt === "number" && Number.isFinite(input.finalOrderNotionalUsdt)
         ? Math.max(0, input.finalOrderNotionalUsdt)
         : 0;
+    const allocatedMarginUsdt = typeof input.allocatedMarginUsdt === "number" && Number.isFinite(input.allocatedMarginUsdt) && input.allocatedMarginUsdt > 0
+        ? input.allocatedMarginUsdt
+        : (sizingLeverage > 0 ? rawNotional / sizingLeverage : rawNotional / DEFAULT_SIZING_LEVERAGE);
 
     // Validate selected execution leverage
     const rawSelected = input.selectedLeverage;
@@ -60,13 +65,15 @@ export function evaluateLeverageSelectionAuthority(
     const isValid = isValidExecutionLeverage(rawSelected);
 
     if (isExplicitlyProvided && !isValid) {
+        const finalOrderNotionalUsdt = allocatedMarginUsdt * DEFAULT_EXECUTION_LEVERAGE;
         return {
             symbol,
             sizingLeverage,
             selectedExecutionLeverage: DEFAULT_EXECUTION_LEVERAGE,
             confirmedOkxLeverage: input.confirmedOkxLeverage ?? null,
+            allocatedMarginUsdt,
             finalOrderNotionalUsdt,
-            requiredMarginUsdt: finalOrderNotionalUsdt / DEFAULT_EXECUTION_LEVERAGE,
+            requiredMarginUsdt: allocatedMarginUsdt,
             positionOpen: input.positionOpen,
             appliesToNextNewEntry: true,
             leverageSyncRequired: false,
@@ -76,9 +83,8 @@ export function evaluateLeverageSelectionAuthority(
     }
 
     const selectedExecutionLeverage = normalizeExecutionLeverage(rawSelected, DEFAULT_EXECUTION_LEVERAGE);
-    const requiredMarginUsdt = selectedExecutionLeverage > 0
-        ? finalOrderNotionalUsdt / selectedExecutionLeverage
-        : finalOrderNotionalUsdt / DEFAULT_EXECUTION_LEVERAGE;
+    const finalOrderNotionalUsdt = allocatedMarginUsdt * selectedExecutionLeverage;
+    const requiredMarginUsdt = allocatedMarginUsdt;
 
     const confirmedOkxLeverage = typeof input.confirmedOkxLeverage === "number" && Number.isFinite(input.confirmedOkxLeverage) && input.confirmedOkxLeverage > 0
         ? input.confirmedOkxLeverage
@@ -91,6 +97,7 @@ export function evaluateLeverageSelectionAuthority(
             sizingLeverage,
             selectedExecutionLeverage,
             confirmedOkxLeverage,
+            allocatedMarginUsdt,
             finalOrderNotionalUsdt,
             requiredMarginUsdt,
             positionOpen: true,
@@ -109,6 +116,7 @@ export function evaluateLeverageSelectionAuthority(
         sizingLeverage,
         selectedExecutionLeverage,
         confirmedOkxLeverage,
+        allocatedMarginUsdt,
         finalOrderNotionalUsdt,
         requiredMarginUsdt,
         positionOpen: false,
@@ -125,6 +133,7 @@ export type V2LeverageSelectionAuthorityProof = Readonly<{
     sizing_leverage: number;
     selected_execution_leverage: AllowedExecutionLeverage;
     confirmed_okx_leverage: number | null;
+    allocated_margin_usdt: number;
     final_order_notional_usdt: number;
     required_margin_usdt: number;
     position_open: boolean;
@@ -142,6 +151,7 @@ export function buildLeverageSelectionAuthorityProof(
         sizing_leverage: res.sizingLeverage,
         selected_execution_leverage: res.selectedExecutionLeverage,
         confirmed_okx_leverage: res.confirmedOkxLeverage,
+        allocated_margin_usdt: res.allocatedMarginUsdt,
         final_order_notional_usdt: res.finalOrderNotionalUsdt,
         required_margin_usdt: res.requiredMarginUsdt,
         position_open: res.positionOpen,

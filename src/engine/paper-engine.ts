@@ -13501,9 +13501,7 @@ export class PaperEngine {
       // Log success authority proof
       this.logger.info("V2_LEVERAGE_SELECTION_AUTHORITY_PROOF", buildLeverageSelectionAuthorityProof({
         ...levAuthorityRes,
-        confirmedOkxLeverage: okx_confirmed_leverage,
-        finalOrderNotionalUsdt: v2_intended_notional_usdt ?? 0,
-        requiredMarginUsdt: (v2_intended_notional_usdt ?? 0) / (okx_confirmed_leverage ?? selectedExecLev)
+        confirmedOkxLeverage: okx_confirmed_leverage
       }));
 
       const okx_dynamic_notional_cap_usdt = 
@@ -13514,7 +13512,7 @@ export class PaperEngine {
       // 4. Final Sizing Logic (Strict "Min" Policy)
       // Rule: Never expand beyond what V2 intended.
       let final_size_source: "v2_risk" | "okx_dynamic_cap" | "static_safety_cap" | "min_order_block" = "v2_risk";
-      final_submitted_notional_usdt = v2_intended_notional_usdt ?? 0;
+      final_submitted_notional_usdt = levAuthorityRes.finalOrderNotionalUsdt;
 
       // Constraint: Dynamic Cap (Exchange liquidity)
       if (final_submitted_notional_usdt > okx_dynamic_notional_cap_usdt) {
@@ -13583,13 +13581,14 @@ export class PaperEngine {
       }
 
       // Guard: Leverage Mismatch (Still needed if sync failed or was skipped)
-      if (input.appliedLeverage != null && okx_confirmed_leverage !== input.appliedLeverage) {
+      const expectedOkxLeverage = levAuthorityRes.selectedExecutionLeverage ?? input.appliedLeverage;
+      if (expectedOkxLeverage != null && okx_confirmed_leverage !== expectedOkxLeverage) {
         const reject_reason = "EXCHANGE_REALITY_BLOCK";
         this.logger.warn("EXCHANGE_REALITY_BLOCK", { ...logCtxReality, reject_reason, detail: "leverage_mismatch" });
         return {
           ok: false, ordId: null, fillPx: null, 
           errorCode: "leverage_mismatch", 
-          errorMessage: `Leverage mismatch: Engine=${input.appliedLeverage}, OKX=${okx_confirmed_leverage}`, 
+          errorMessage: `Leverage mismatch: Engine=${expectedOkxLeverage}, OKX=${okx_confirmed_leverage}`,
           ackCode: "rejected", orderState: null, fillSize: 0, fillConfirmed: false,
           clOrdId: input.clOrdId
         };
