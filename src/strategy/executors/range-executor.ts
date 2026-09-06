@@ -352,14 +352,45 @@ export function rangeExecutorEvaluateEntry(input: Readonly<{
   let tp2 = 0;
   let inv = 0;
 
+  // Canonical ETH symbol match: ETHUSDT or ETH-USDT-SWAP (no substring contains)
+  const symNorm = String(input.symbol ?? "").trim().toUpperCase().replace(/-SWAP$/, "").replace(/-/g, "");
+  const isEth = symNorm === "ETHUSDT";
+
+  // ETH RANGE minimum stop distance from entry = 0.50%
+  // Semantic: finalStopDistanceFromEntry = max(structuralDistanceFromEntry, ETH_RANGE_MIN_NOISE_DISTANCE)
+  // This prevents tight SLs on low-ATR ETH noise, while preserving wider structural stops unchanged.
+  const ETH_RANGE_MIN_STOP_DIST_FROM_ENTRY = 0.005; // 0.50% of entry reference price
+
+  // Entry reference price: lastPrice if available (passed via Record<string,unknown>), else fallback boxLow/boxHigh
+  const entryRefPx =
+    typeof (input as any).lastPrice === "number" && (input as any).lastPrice > 0
+      ? (input as any).lastPrice as number
+      : null;
+
   if (dir === "long") {
     tp1 = boxMid;
     tp2 = boxHigh * 0.998;
-    inv = boxLow - Math.max(atr * 0.5, boxLow * 0.0015);
+    const structuralBuffer = Math.max(atr * 0.5, boxLow * 0.0015);
+    const structuralStop = boxLow - structuralBuffer;
+    if (isEth && entryRefPx != null) {
+      // Ensure entry -> stop total distance >= 0.50% of entry price
+      const minStopFromEntry = entryRefPx * (1 - ETH_RANGE_MIN_STOP_DIST_FROM_ENTRY);
+      inv = Math.min(structuralStop, minStopFromEntry); // further from entry = lower price for long
+    } else {
+      inv = structuralStop;
+    }
   } else {
     tp1 = boxMid;
     tp2 = boxLow * 1.002;
-    inv = boxHigh + Math.max(atr * 0.5, boxHigh * 0.0015);
+    const structuralBuffer = Math.max(atr * 0.5, boxHigh * 0.0015);
+    const structuralStop = boxHigh + structuralBuffer;
+    if (isEth && entryRefPx != null) {
+      // Ensure entry -> stop total distance >= 0.50% of entry price
+      const minStopFromEntry = entryRefPx * (1 + ETH_RANGE_MIN_STOP_DIST_FROM_ENTRY);
+      inv = Math.max(structuralStop, minStopFromEntry); // further from entry = higher price for short
+    } else {
+      inv = structuralStop;
+    }
   }
 
   const takeProfitPlan = {

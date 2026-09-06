@@ -9756,7 +9756,21 @@ export class PaperEngine {
     open.partialPendingProcessedMarginUsd =
       (open.partialPendingProcessedMarginUsd ?? 0) + deltaMarginUsd;
 
-    const stageAfter = orderFullyFilled ? stageBefore + 1 : stageBefore;
+    // TP phase advance: ONLY when this fill is a confirmed canonical TP1 order.
+    // Canonical evidence = fillReason is "v2_tp1_automated" (set exclusively at
+    // buildV2PartialPendingRecord / applyV2PartialFillConfirmed TP1 call sites)
+    // OR the position flag v2RangeTp1Triggered has already been set in this cycle.
+    //
+    // Explicitly NOT allowed to advance stage:
+    //   PNL_STOP_PROTECT, MANUAL_REDUCE, INVALIDATION_REDUCE, TRANSITION_REDUCE,
+    //   RANGE_PARTIAL_AT_OPPOSITE_EDGE (sets rangeOppositePartialTaken flag only),
+    //   generic PARTIAL, shock reduce, any TAKE_PROFIT substring match alone.
+    const isCanonicalTp1Fill =
+      fillReason === "v2_tp1_automated" ||
+      reason === "v2_tp1_automated" ||
+      open.v2RangeTp1Triggered === true;
+
+    const stageAfter = (orderFullyFilled && isCanonicalTp1Fill) ? stageBefore + 1 : stageBefore;
     this.logger.info("V2_PARTIAL_FILL_CONFIRMED_PROOF", {
       symbol: open.symbol,
       side: open.side,
