@@ -118,6 +118,9 @@ export function evaluateProtectiveAlgoMatch(
         engineOwned: false,
         attachAlgo: false
     };
+    if (algo._protectiveInventorySource === "entry_attach_candidate") {
+        return zero;
+    }
     if (String(algo.instId ?? "") !== ctx.instId) return zero;
     if (!isReduceOnly(algo)) return zero;
     if (!posSideOk(algo, ctx.positionSide)) return zero;
@@ -215,6 +218,9 @@ export function planProtectiveOrderReconcile(
     const seenAlgoIds = new Set<string>();
     const uniqueAlgos: ProtectiveAlgoRow[] = [];
     for (const algo of pendingAlgos) {
+        if (algo._protectiveInventorySource === "entry_attach_candidate") {
+            continue;
+        }
         const id = algoIdOf(algo);
         if (id.length > 0) {
             if (seenAlgoIds.has(id)) continue;
