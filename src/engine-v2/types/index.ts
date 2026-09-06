@@ -683,6 +683,9 @@ export interface V2BridgeState {
     okxPendingOrdersReady?: boolean;
     okxPendingOrdersNotionalUsdt?: number;
     okxPendingSymbolNotionalUsdt?: number;
+    okxPendingOrdersList?: ReadonlyArray<Record<string, unknown>>;
+    okxAlgoOrdersList?: ReadonlyArray<Record<string, unknown>>;
+    okxPendingOrdersListAvailable?: boolean;
     hasSymbolPendingEntry?: boolean;
     hasUnknownPendingNotional?: boolean;
     balanceFetchedAt?: number;

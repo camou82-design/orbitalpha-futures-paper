@@ -6945,6 +6945,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             // Live Signed Order Attempt: exposure authority from OKX actual (+ pending), paper diagnostic only
             const pendingOrdersNotionalUsdt = (pendingOrdersNotionalRaw ?? 0) as number;
             const pendingSymbolNotionalUsdt = (pendingSymbolNotionalRaw ?? 0) as number;
+            const pendingOrdersListRaw =
+                (v2State as any).okxPendingOrdersList ?? (input.state as any).okxPendingOrdersList;
+            const algoOrdersListRaw =
+                (v2State as any).okxAlgoOrdersList ?? (input.state as any).okxAlgoOrdersList;
+            const pendingOrdersListAvailable =
+                (v2State as any).okxPendingOrdersListAvailable === true ||
+                (input.state as any).okxPendingOrdersListAvailable === true;
 
             const exposureAuthority = resolveLiveExposureAuthority({
                 symbol: String(input.symbol),
@@ -6953,6 +6960,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 okxActualPositions: okxPositionsValid ? validPositionsList : null,
                 pendingSymbolNotionalUsdt,
                 pendingOrdersNotionalUsdt,
+                pendingOrdersListAvailable,
+                pendingOrdersList: pendingOrdersListAvailable && Array.isArray(pendingOrdersListRaw)
+                    ? pendingOrdersListRaw
+                    : null,
+                algoOrdersList: pendingOrdersListAvailable && Array.isArray(algoOrdersListRaw)
+                    ? algoOrdersListRaw
+                    : null,
                 isLiveAuthority: true
             });
 
@@ -6998,7 +7012,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             
             if (!Number.isFinite(existingSymbolNotionalUsdt) || !Number.isFinite(existingAccountNotionalUsdt)) {
                 min_order_check_passed = false;
-                min_order_block_reason = "EXPOSURE_CALCULATION_FAILED_NAN";
+                min_order_block_reason = exposureAuthority.pending_order_ownership_unavailable
+                    ? "PENDING_ORDER_OWNERSHIP_UNAVAILABLE"
+                    : "EXPOSURE_CALCULATION_FAILED_NAN";
+            } else if (exposureAuthority.pending_order_ownership_unavailable) {
+                min_order_check_passed = false;
+                min_order_block_reason = "PENDING_ORDER_OWNERSHIP_UNAVAILABLE";
             }
 
             if (min_order_check_passed && accountEquityUsdt != null && availableBalanceUsdt != null) {

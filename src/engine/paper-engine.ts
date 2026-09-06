@@ -7574,7 +7574,10 @@ export class PaperEngine {
             symbolHasBlockingPending[sym] === true,
             hasUnknownNotional,
             deriveLastLossReentryState({ history: this.cachedHistory, openPositions: opensAfterClose, symbol: sym, now: fetchedAt }),
-            externalMarketSnapshot
+            externalMarketSnapshot,
+            pendingFetchReady && cachedOpsPendingIsArray ? this.cachedOpsPending : [],
+            pendingFetchReady && cachedOpsAlgosIsArray ? this.cachedOpsAlgos : [],
+            pendingFetchReady && cachedOpsPendingIsArray && cachedOpsAlgosIsArray
           );
         })(),
         v2Mode
@@ -26326,7 +26329,10 @@ export function buildV2StateBridge(
   hasSymbolPendingEntry?: boolean,
   hasUnknownPendingNotional?: boolean,
   lastLossReentryState?: LastLossReentryState | null,
-  externalMarketSnapshot?: import("../engine-v2/external-market-context/types").ExternalMarketSnapshot | null
+  externalMarketSnapshot?: import("../engine-v2/external-market-context/types").ExternalMarketSnapshot | null,
+  okxPendingOrdersList?: ReadonlyArray<Record<string, unknown>>,
+  okxAlgoOrdersList?: ReadonlyArray<Record<string, unknown>>,
+  okxPendingOrdersListAvailable?: boolean
 ): V2BridgeState {
   let okxActualSide = "none";
   if (lastLivePositionsPayload && Array.isArray(lastLivePositionsPayload)) {
@@ -26430,6 +26436,13 @@ export function buildV2StateBridge(
     okxPendingOrdersReady: okxPendingOrdersReady ?? true,
     okxPendingOrdersNotionalUsdt: pendingOrdersNotionalUsdt,
     okxPendingSymbolNotionalUsdt: pendingSymbolNotionalUsdt,
+    okxPendingOrdersList: okxPendingOrdersListAvailable === true && Array.isArray(okxPendingOrdersList)
+      ? [...okxPendingOrdersList]
+      : undefined,
+    okxAlgoOrdersList: okxPendingOrdersListAvailable === true && Array.isArray(okxAlgoOrdersList)
+      ? [...okxAlgoOrdersList]
+      : undefined,
+    okxPendingOrdersListAvailable: okxPendingOrdersListAvailable === true,
     hasSymbolPendingEntry,
     hasUnknownPendingNotional,
     balanceFetchedAt,
