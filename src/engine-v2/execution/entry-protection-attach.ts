@@ -22,19 +22,26 @@ export function resolvePartialExitRatio(input: V2RangePartialPlanContext): numbe
     if (typeof fromPlan === "number" && Number.isFinite(fromPlan) && fromPlan > 0 && fromPlan < 1) {
         return fromPlan;
     }
+    if (input.isV2Authority === true && input.regime === "RANGE" && input.takeProfitPlan != null) {
+        return 0.5;
+    }
     return null;
 }
 
 /** Mirrors post-fill ensureProtectiveStopOrder partial-plan sovereignty predicate. */
 export function isV2RangePartialPlanContext(input: V2RangePartialPlanContext): boolean {
     const ratio = resolvePartialExitRatio(input);
+    const plan = input.takeProfitPlan as { tp1?: unknown; executableTp1?: unknown } | null | undefined;
+    const hasValidTp1 =
+        (typeof input.takeProfit1Px === "number" && Number.isFinite(input.takeProfit1Px) && input.takeProfit1Px > 0) ||
+        (typeof plan?.tp1 === "number" && Number.isFinite(plan.tp1) && plan.tp1 > 0) ||
+        (typeof plan?.executableTp1 === "number" && Number.isFinite(plan.executableTp1) && plan.executableTp1 > 0);
+
     return (
         input.isV2Authority === true &&
         input.regime === "RANGE" &&
         input.takeProfitPlan != null &&
-        typeof input.takeProfit1Px === "number" &&
-        Number.isFinite(input.takeProfit1Px) &&
-        input.takeProfit1Px > 0 &&
+        hasValidTp1 &&
         ratio != null
     );
 }
@@ -59,17 +66,16 @@ export function buildV2NewEntryAttachAlgoOrds(input: Readonly<{
             : undefined;
     const hasTpPrice =
         input.takeProfitPrice != null && Number.isFinite(input.takeProfitPrice) && input.takeProfitPrice > 0;
-    // [CANONICAL TP SINGLE-WRITER] RANGE partial plan MUST NOT attach TP at entry.
-    // OKX attach OCO cannot represent different sizes for TP (50% partial) and SL (100% full).
-    // Entry attaches SL-only conditional protection. Canonical reconciler submits TP1 post-fill.
     const entryFullPositionTpAttached = hasTpPrice && !input.isV2RangePartialPlan;
-    const entryRangeTp2BackstopAttached = false;
-    const shouldAttachOco = entryFullPositionTpAttached;
+    const entryRangeTp2BackstopAttached = hasTpPrice && input.isV2RangePartialPlan;
+    const shouldAttachOco = entryFullPositionTpAttached || entryRangeTp2BackstopAttached;
     const attachOrdType: "oco" | "conditional" = shouldAttachOco ? "oco" : "conditional";
     const tpTriggerPx = shouldAttachOco && hasTpPrice ? String(input.takeProfitPrice) : undefined;
     const exchangeTpSource = entryFullPositionTpAttached
         ? ("trend_full_tp" as const)
-        : ("none" as const);
+        : entryRangeTp2BackstopAttached
+          ? ("range_tp2_backstop" as const)
+          : ("none" as const);
 
     if (!slTriggerPx) {
         return {

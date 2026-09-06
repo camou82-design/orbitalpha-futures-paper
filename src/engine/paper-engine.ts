@@ -12091,7 +12091,13 @@ export class PaperEngine {
       partialExitRatio: open.partialExitRatio
     });
     let tpContractsToProtect: number | undefined = undefined;
-    if (partialRatio != null && partialRatio > 0 && partialRatio < 1 && (open.partialExitStage ?? 0) === 0) {
+    if (
+      partialRatio != null &&
+      partialRatio > 0 &&
+      partialRatio < 1 &&
+      (open.partialExitStage ?? 0) === 0 &&
+      tpPlanResolution.fullPositionTpRequired !== true
+    ) {
       const rawTpContracts = contractsToProtect * partialRatio;
       const inst = this.instrumentCache.get(instId);
       if (inst) {

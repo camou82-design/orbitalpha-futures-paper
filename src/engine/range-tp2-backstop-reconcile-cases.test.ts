@@ -166,6 +166,7 @@ test("TEST C: manual partial -> markPrice crosses TP2 generates TP2 trigger proo
 test("TEST D: manual partial 2.14 -> 1.07 resizes exchange TP2 + SL to 1.07ct with prices unchanged", () => {
   const existingOco = {
     algoId: "algo-oco-1",
+    algoClOrdId: "oapBTCUScycle3608s",
     instId: "BTC-USDT-SWAP",
     side: "sell",
     posSide: "long",

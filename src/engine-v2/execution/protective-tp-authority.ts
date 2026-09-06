@@ -49,30 +49,18 @@ export function resolveProtectiveTpPlan(input: Readonly<{
 
     if (input.isV2RangePartialPlan) {
         const isTp1Filled = input.tp1Filled === true || (input.partialExitStage != null && input.partialExitStage >= 1);
-        if (isTp1Filled) {
-            if (validTp2 != null) {
-                return {
-                    mode: "RANGE_TP2_POST_FILL",
-                    phase: "TP2_PENDING",
-                    exchangeTpRequired: true,
-                    exchangeTpPrice: validTp2,
-                    exchangeTpSource: "range_tp2",
-                    fullPositionTpRequired: true,
-                    reason: "V2_RANGE_TP2_POST_FILL_ENABLED"
-                };
-            }
+        if (validTp2 != null) {
             return {
-                mode: "NONE",
-                phase: "NONE",
-                exchangeTpRequired: false,
-                exchangeTpPrice: null,
-                exchangeTpSource: "none",
-                fullPositionTpRequired: false,
-                reason: "V2_RANGE_TP2_PRICE_UNAVAILABLE"
+                mode: isTp1Filled ? "RANGE_TP2_POST_FILL" : "RANGE_TP2_BACKSTOP",
+                phase: isTp1Filled ? "TP2_PENDING" : "TP1_PENDING",
+                exchangeTpRequired: true,
+                exchangeTpPrice: validTp2,
+                exchangeTpSource: "range_tp2_backstop",
+                fullPositionTpRequired: true,
+                reason: isTp1Filled ? "V2_RANGE_TP2_POST_FILL_ENABLED" : "V2_RANGE_TP2_BACKSTOP_ENABLED"
             };
         }
 
-        // Initial phase: TP1 is canonical partial TP
         if (validTp1 != null) {
             return {
                 mode: "RANGE_TP1_PARTIAL",
@@ -92,7 +80,7 @@ export function resolveProtectiveTpPlan(input: Readonly<{
             exchangeTpPrice: null,
             exchangeTpSource: "none",
             fullPositionTpRequired: false,
-            reason: "V2_RANGE_TP1_PRICE_UNAVAILABLE"
+            reason: "V2_RANGE_TP2_PRICE_UNAVAILABLE"
         };
     }
 
@@ -195,11 +183,11 @@ export function shouldAttachFullPositionProtectiveTp(input: Readonly<{
     });
 
     if (input.isV2RangePartialPlan) {
-        if (plan.mode === "RANGE_TP2_BACKSTOP") {
+        if (plan.mode === "RANGE_TP2_BACKSTOP" || plan.mode === "RANGE_TP2_POST_FILL" || plan.exchangeTpSource === "range_tp2_backstop") {
             return {
                 fullPositionTpRequired: true,
-                reason: "V2_RANGE_TP2_BACKSTOP_ENABLED",
-                protectiveTpMode: "RANGE_TP2_BACKSTOP",
+                reason: plan.reason,
+                protectiveTpMode: plan.mode,
                 exchangeTpPrice: plan.exchangeTpPrice
             };
         }

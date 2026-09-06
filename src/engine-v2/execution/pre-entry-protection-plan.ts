@@ -52,7 +52,8 @@ export function evaluatePreEntryProtectionPlan(input: Readonly<{
         regime: input.regime,
         isV2RangePartialPlan: input.isV2RangePartialPlan === true,
         rawWantsTp,
-        takeProfitRequired: input.takeProfitRequired
+        takeProfitRequired: input.takeProfitRequired,
+        takeProfit2Px: input.tpPrice
     });
     const tpRequired = tpEval.fullPositionTpRequired;
 

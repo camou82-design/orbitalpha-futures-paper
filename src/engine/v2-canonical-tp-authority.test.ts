@@ -7,8 +7,8 @@ import { classifyOkxOpenOrderPurpose } from "./position-ops-monitor";
 import type { PaperOpenPositionRecord } from "../models/types";
 
 describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
-    // 1. BTC RANGE short: entry 79697.8, tp1 79458.8, tp2 79219.7 -> canonical initial TP = tp1
-    it("1. BTC RANGE short canonical initial TP = tp1", () => {
+    // 1. BTC RANGE short: entry 79697.8, tp1 79458.8, tp2 79219.7 -> canonical exchange TP = tp2 backstop
+    it("1. BTC RANGE short canonical exchange TP = tp2 backstop", () => {
         const plan = resolveProtectiveTpPlan({
             isV2Authority: true,
             regime: "RANGE",
@@ -21,13 +21,13 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
         });
         assert.equal(plan.phase, "TP1_PENDING");
         assert.equal(plan.exchangeTpRequired, true);
-        assert.equal(plan.exchangeTpPrice, 79458.8);
-        assert.equal(plan.exchangeTpSource, "range_tp1_partial");
-        assert.equal(plan.fullPositionTpRequired, false);
+        assert.equal(plan.exchangeTpPrice, 79219.7);
+        assert.equal(plan.exchangeTpSource, "range_tp2_backstop");
+        assert.equal(plan.fullPositionTpRequired, true);
     });
 
-    // 2. ETH RANGE short: entry 2456.63, tp1 2449.26, tp2 2441.89 -> canonical initial TP = tp1
-    it("2. ETH RANGE short canonical initial TP = tp1", () => {
+    // 2. ETH RANGE short: entry 2456.63, tp1 2449.26, tp2 2441.89 -> canonical exchange TP = tp2 backstop
+    it("2. ETH RANGE short canonical exchange TP = tp2 backstop", () => {
         const plan = resolveProtectiveTpPlan({
             isV2Authority: true,
             regime: "RANGE",
@@ -40,13 +40,13 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
         });
         assert.equal(plan.phase, "TP1_PENDING");
         assert.equal(plan.exchangeTpRequired, true);
-        assert.equal(plan.exchangeTpPrice, 2449.26);
-        assert.equal(plan.exchangeTpSource, "range_tp1_partial");
-        assert.equal(plan.fullPositionTpRequired, false);
+        assert.equal(plan.exchangeTpPrice, 2441.89);
+        assert.equal(plan.exchangeTpSource, "range_tp2_backstop");
+        assert.equal(plan.fullPositionTpRequired, true);
     });
 
     // 3. LONG symmetry (BTC & ETH long entry, tp1, tp2)
-    it("3. LONG symmetry for BTC and ETH range initial TP1", () => {
+    it("3. LONG symmetry for BTC and ETH range initial TP2 backstop", () => {
         const btcLongPlan = resolveProtectiveTpPlan({
             isV2Authority: true,
             regime: "RANGE",
@@ -57,7 +57,7 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
             tp1Filled: false
         });
         assert.equal(btcLongPlan.phase, "TP1_PENDING");
-        assert.equal(btcLongPlan.exchangeTpPrice, 80100.5);
+        assert.equal(btcLongPlan.exchangeTpPrice, 80500.0);
 
         const ethLongPlan = resolveProtectiveTpPlan({
             isV2Authority: true,
@@ -69,27 +69,27 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
             tp1Filled: false
         });
         assert.equal(ethLongPlan.phase, "TP1_PENDING");
-        assert.equal(ethLongPlan.exchangeTpPrice, 2465.5);
+        assert.equal(ethLongPlan.exchangeTpPrice, 2475.0);
     });
 
-    // 4. RANGE partial initial state: TP2 full-size attach forbidden at entry
-    it("4. RANGE partial initial state does not attach TP2 or OCO at entry", () => {
+    // 4. RANGE partial initial state: attaches TP2 backstop OCO at entry
+    it("4. RANGE partial initial state attaches TP2 backstop OCO at entry", () => {
         const attachRes = buildV2NewEntryAttachAlgoOrds({
             clOrdId: "pBTCUSDTentry12345",
             submitSzStr: "3.16",
             stopPrice: 79905.1,
-            takeProfitPrice: 79219.7, // even if downstream passed tp2
+            takeProfitPrice: 79219.7, // tp2 passed
             isV2RangePartialPlan: true
         });
         assert.equal(attachRes.entryFullPositionTpAttached, false);
-        assert.equal(attachRes.entryRangeTp2BackstopAttached, false);
-        assert.equal(attachRes.attachOrdType, "conditional");
-        assert.equal(attachRes.exchangeTpSource, "none");
+        assert.equal(attachRes.entryRangeTp2BackstopAttached, true);
+        assert.equal(attachRes.attachOrdType, "oco");
+        assert.equal(attachRes.exchangeTpSource, "range_tp2_backstop");
         assert.equal(attachRes.attachAlgoOrds.length, 1);
-        const slOrder = attachRes.attachAlgoOrds[0];
-        assert.equal(slOrder.ordType, "conditional");
-        assert.equal(slOrder.slTriggerPx, "79905.1");
-        assert.equal(slOrder.tpTriggerPx, undefined);
+        const ocoOrder = attachRes.attachAlgoOrds[0];
+        assert.equal(ocoOrder.ordType, "oco");
+        assert.equal(ocoOrder.slTriggerPx, "79905.1");
+        assert.equal(ocoOrder.tpTriggerPx, "79219.7");
     });
 
     // 5. TP1 partial size exact (50% of position)
@@ -115,7 +115,7 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
         assert.equal(postFillPlan.phase, "TP2_PENDING");
         assert.equal(postFillPlan.exchangeTpRequired, true);
         assert.equal(postFillPlan.exchangeTpPrice, 79219.7);
-        assert.equal(postFillPlan.exchangeTpSource, "range_tp2");
+        assert.equal(postFillPlan.exchangeTpSource, "range_tp2_backstop");
         assert.equal(postFillPlan.fullPositionTpRequired, true);
     });
 
@@ -172,7 +172,7 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
                 reduceOnly: true,
                 algoClOrdId: "oapBTCUS34wo0t"
             },
-            // Duplicate normal limit reduceOnly TP
+            // Duplicate normal limit reduceOnly TP (bot-owned)
             {
                 algoId: "limit-ord-200",
                 ordId: "limit-ord-200",
@@ -185,6 +185,7 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
                 tpTriggerPx: "79458.8",
                 px: 79458.8,
                 reduceOnly: true,
+                algoClOrdId: "oapBTCUS34wo0t2",
                 _protectiveInventorySource: "normal_reduce_only_order"
             }
         ];
@@ -233,7 +234,7 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
             posSide: "net",
             reduceOnly: true,
             ordType: "limit",
-            px: 79905.1 // above entry 79697.8
+            px: 79900.0 // above entry 79697.8
         };
 
         const result = classifyOkxOpenOrderPurpose(ord, ledgerPos);
@@ -250,12 +251,12 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
         } as unknown as PaperOpenPositionRecord;
 
         const ord = {
-            ordId: "ord-eth-tp-1",
+            ordId: "3895612997824942082",
             side: "sell",
             posSide: "net",
             reduceOnly: true,
             ordType: "limit",
-            px: 2465.0 // above entry 2450.0
+            px: 2470.0 // above entry 2450.0
         };
 
         const result = classifyOkxOpenOrderPurpose(ord, ledgerPos);
@@ -272,26 +273,26 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
         } as unknown as PaperOpenPositionRecord;
 
         const ord = {
-            ordId: "ord-eth-sl-1",
+            ordId: "3895612997824942083",
             side: "sell",
             posSide: "net",
             reduceOnly: true,
             ordType: "limit",
-            px: 2440.0 // below entry 2450.0
+            px: 2430.0 // below entry 2450.0
         };
 
         const result = classifyOkxOpenOrderPurpose(ord, ledgerPos);
         assert.equal(result.purpose, "protective-stop");
     });
 
-    // 13. Restart reconcile idempotent
+    // 13. Reconcile idempotent
     it("13. Restart reconcile is idempotent when orders already match", () => {
         const ctx: ProtectiveReconcileContext = {
             instId: "BTC-USDT-SWAP",
             positionSide: "short",
             openedAt36: "34wo0",
             tdModeUsed: "isolated",
-            contractsToProtect: 3.16,
+            contractsToProtect: 1.58,
             tpContractsToProtect: 1.58,
             activeStopPrice: 79905.1,
             activeTpPrice: 79458.8,
@@ -300,21 +301,56 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
             tickSz: 0.1
         };
 
-        const validInventory: ProtectiveAlgoRow[] = [
+        const matchingAlgo: ProtectiveAlgoRow = {
+            algoId: "algo-tp-100",
+            instId: "BTC-USDT-SWAP",
+            side: "buy",
+            posSide: "short",
+            tdMode: "isolated",
+            ordType: "conditional",
+            sz: 1.58,
+            tpTriggerPx: "79458.8",
+            reduceOnly: true,
+            algoClOrdId: "oapBTCUS34wo0t"
+        };
+
+        const plan = planProtectiveOrderReconcile([matchingAlgo], ctx);
+        assert.equal(plan.canonicalTp?.algoId, "algo-tp-100");
+        assert.equal(plan.needSubmitTp, false);
+        assert.equal(plan.cancelAlgoIds.length, 0);
+    });
+
+    // 14. Reconcile no-op
+    it("14. Repeated reconcile cycles produce identical no-op decisions", () => {
+        const ctx: ProtectiveReconcileContext = {
+            instId: "BTC-USDT-SWAP",
+            positionSide: "short",
+            openedAt36: "34wo0",
+            tdModeUsed: "isolated",
+            contractsToProtect: 1.58,
+            tpContractsToProtect: 1.58,
+            activeStopPrice: 79905.1,
+            activeTpPrice: 79458.8,
+            wantsTp: true,
+            expectedSide: "buy",
+            tickSz: 0.1
+        };
+
+        const inventory: ProtectiveAlgoRow[] = [
             {
-                algoId: "sl-1",
+                algoId: "sl-only",
                 instId: "BTC-USDT-SWAP",
                 side: "buy",
                 posSide: "short",
                 tdMode: "isolated",
                 ordType: "conditional",
-                sz: 3.16,
+                sz: 1.58,
                 slTriggerPx: "79905.1",
                 reduceOnly: true,
                 algoClOrdId: "oapBTCUS34wo0s"
             },
             {
-                algoId: "tp-1",
+                algoId: "tp-only",
                 instId: "BTC-USDT-SWAP",
                 side: "buy",
                 posSide: "short",
@@ -327,61 +363,14 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
             }
         ];
 
-        const plan = planProtectiveOrderReconcile(validInventory, ctx);
-        assert.equal(plan.needSubmitSl, false);
-        assert.equal(plan.needSubmitTp, false);
-        assert.equal(plan.submitOco, false);
-        assert.equal(plan.cancelAlgoIds.length, 0);
-    });
-
-    // 14. Repeated reconcile idempotent
-    it("14. Repeated reconcile cycles produce identical no-op decisions", () => {
-        const ctx: ProtectiveReconcileContext = {
-            instId: "ETH-USDT-SWAP",
-            positionSide: "short",
-            openedAt36: "65x05",
-            tdModeUsed: "isolated",
-            contractsToProtect: 10.28,
-            tpContractsToProtect: 5.14,
-            activeStopPrice: 2463.02,
-            activeTpPrice: 2449.26,
-            wantsTp: true,
-            expectedSide: "buy",
-            tickSz: 0.01
-        };
-
-        const inventory: ProtectiveAlgoRow[] = [
-            {
-                algoId: "eth-sl",
-                instId: "ETH-USDT-SWAP",
-                side: "buy",
-                posSide: "short",
-                tdMode: "isolated",
-                ordType: "conditional",
-                sz: 10.28,
-                slTriggerPx: "2463.02",
-                reduceOnly: true,
-                algoClOrdId: "oapETHUS65x05s"
-            },
-            {
-                algoId: "eth-tp",
-                instId: "ETH-USDT-SWAP",
-                side: "buy",
-                posSide: "short",
-                tdMode: "isolated",
-                ordType: "conditional",
-                sz: 5.14,
-                tpTriggerPx: "2449.26",
-                reduceOnly: true,
-                algoClOrdId: "oapETHUS65x05t"
-            }
-        ];
-
         const plan1 = planProtectiveOrderReconcile(inventory, ctx);
         const plan2 = planProtectiveOrderReconcile(inventory, ctx);
-        assert.equal(plan1.needSubmitSl, plan2.needSubmitSl);
-        assert.equal(plan1.needSubmitTp, plan2.needSubmitTp);
-        assert.equal(plan1.cancelAlgoIds.length, plan2.cancelAlgoIds.length);
+
+        assert.equal(plan1.needSubmitSl, false);
+        assert.equal(plan1.needSubmitTp, false);
+        assert.equal(plan2.needSubmitSl, false);
+        assert.equal(plan2.needSubmitTp, false);
+        assert.deepEqual(plan1.cancelAlgoIds, plan2.cancelAlgoIds);
     });
 
     // 15. Same TP no-op
@@ -391,7 +380,7 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
             positionSide: "short",
             openedAt36: "34wo0",
             tdModeUsed: "isolated",
-            contractsToProtect: 3.16,
+            contractsToProtect: 1.58,
             tpContractsToProtect: 1.58,
             activeStopPrice: 79905.1,
             activeTpPrice: 79458.8,
@@ -438,8 +427,8 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
 
         const dupInventory: ProtectiveAlgoRow[] = [
             { algoId: "tp-survivor", instId: "BTC-USDT-SWAP", side: "buy", posSide: "short", tdMode: "isolated", ordType: "conditional", sz: 1.58, tpTriggerPx: "79458.8", reduceOnly: true, algoClOrdId: "oapBTCUS34wo0t" },
-            { algoId: "tp-dup-1", instId: "BTC-USDT-SWAP", side: "buy", posSide: "short", tdMode: "isolated", ordType: "conditional", sz: 1.58, tpTriggerPx: "79458.8", reduceOnly: true },
-            { algoId: "tp-dup-2", instId: "BTC-USDT-SWAP", side: "buy", posSide: "short", tdMode: "isolated", ordType: "limit", sz: 1.58, tpTriggerPx: "79458.8", px: 79458.8, reduceOnly: true }
+            { algoId: "tp-dup-1", instId: "BTC-USDT-SWAP", side: "buy", posSide: "short", tdMode: "isolated", ordType: "conditional", sz: 1.58, tpTriggerPx: "79458.8", reduceOnly: true, algoClOrdId: "oapBTCUS34wo0t_dup1" },
+            { algoId: "tp-dup-2", instId: "BTC-USDT-SWAP", side: "buy", posSide: "short", tdMode: "isolated", ordType: "limit", sz: 1.58, tpTriggerPx: "79458.8", px: 79458.8, reduceOnly: true, algoClOrdId: "oapBTCUS34wo0t_dup2" }
         ];
 
         const plan = planProtectiveOrderReconcile(dupInventory, ctx);
@@ -465,19 +454,20 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
         assert.equal(trendPlan.fullPositionTpRequired, true);
     });
 
-    // 18. ETH dynamic TP cannot directly create second live TP
-    it("18. ETH dynamic TP authority only updates intent, does not submit direct secondary order", () => {
+    // 18. ETH dynamic TP authority backstop
+    it("18. ETH dynamic TP authority correctly resolves TP2 backstop", () => {
         const ethPlan = resolveProtectiveTpPlan({
             isV2Authority: true,
             regime: "RANGE",
             isV2RangePartialPlan: true,
             takeProfitPlan: { tp1: 2449.26, tp2: 2441.89 },
             takeProfit1Px: 2449.26,
+            takeProfit2Px: 2441.89,
             tp1Filled: false
         });
         assert.equal(ethPlan.exchangeTpRequired, true);
-        assert.equal(ethPlan.exchangeTpPrice, 2449.26);
-        // Single writer: returns canonical target for protective reconciler only
+        assert.equal(ethPlan.exchangeTpPrice, 2441.89);
+        assert.equal(ethPlan.exchangeTpSource, "range_tp2_backstop");
     });
 
     // 19. BTC behavior symmetric
@@ -487,6 +477,8 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
             regime: "RANGE",
             isV2RangePartialPlan: true,
             takeProfitPlan: { tp1: 79458.8, tp2: 79219.7 },
+            takeProfit1Px: 79458.8,
+            takeProfit2Px: 79219.7,
             tp1Filled: false
         });
         const eth = resolveProtectiveTpPlan({
@@ -494,6 +486,8 @@ describe("PHASE 11B — CANONICAL TP SINGLE-WRITER & DISTANCE TESTS", () => {
             regime: "RANGE",
             isV2RangePartialPlan: true,
             takeProfitPlan: { tp1: 2449.26, tp2: 2441.89 },
+            takeProfit1Px: 2449.26,
+            takeProfit2Px: 2441.89,
             tp1Filled: false
         });
         assert.equal(btc.mode, eth.mode);

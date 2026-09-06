@@ -18,6 +18,7 @@ import {
 import { protectiveStopPricesMatch, protectiveContractSizesMatch } from "../engine-v2/execution/protective-match";
 import { resolveLedgerCanonicalProtectiveTruth } from "../engine-v2/execution/protective-order-state";
 import { resolveOpsWatchTpRequired } from "../engine-v2/execution/protective-tp-authority";
+import { isV2RangePartialPlanContext } from "../engine-v2/execution/entry-protection-attach";
 
 export type PositionOpsBanner =
   | "NO_POSITION"
@@ -907,15 +908,13 @@ export function buildPositionOpsSurface(input: Readonly<{
       const tpPx = refPx != null && refPx > 0 ? engineMirrorTpPrice(refPx, hit.side, regime) : null;
       const ledgerTp = typeof ledger?.targetPrice1 === "number" && Number.isFinite(ledger.targetPrice1) ? ledger.targetPrice1 : null;
 
-      const isV2RangePartialPlan =
-        ledger?.isV2Authority === true &&
-        ledger?.regimeAtEntry === "RANGE" &&
-        ledger?.takeProfitPlan != null &&
-        typeof ledger?.takeProfit1Px === "number" &&
-        Number.isFinite(ledger.takeProfit1Px) &&
-        typeof ledger?.partialExitRatio === "number" &&
-        ledger.partialExitRatio > 0 &&
-        ledger.partialExitRatio < 1;
+      const isV2RangePartialPlan = isV2RangePartialPlanContext({
+        isV2Authority: ledger?.isV2Authority === true,
+        regime: ledger?.regimeAtEntry,
+        takeProfitPlan: ledger?.takeProfitPlan,
+        takeProfit1Px: ledger?.takeProfit1Px,
+        partialExitRatio: ledger?.partialExitRatio
+      });
 
       const rangeTp2Px =
         typeof ledger?.takeProfit2Px === "number" && Number.isFinite(ledger.takeProfit2Px) && ledger.takeProfit2Px > 0
