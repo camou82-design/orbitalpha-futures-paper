@@ -246,7 +246,15 @@ export function deriveExecutionAuthority(
         ethRangeDirectionalProfitSpaceBps: useV2 && typeof selector.v2_result.metadata?.ethRangeDirectionalProfitSpaceBps === "number" ? selector.v2_result.metadata.ethRangeDirectionalProfitSpaceBps : undefined,
         ethRangeBoxWidthBps: useV2 && typeof selector.v2_result.metadata?.ethRangeBoxWidthBps === "number" ? selector.v2_result.metadata.ethRangeBoxWidthBps : undefined,
         ethRangeCostSource: useV2 && typeof selector.v2_result.metadata?.ethRangeCostSource === "string" ? selector.v2_result.metadata.ethRangeCostSource : undefined,
-        ethRangeFeasibilityBlockReason: useV2 && typeof selector.v2_result.metadata?.ethRangeFeasibilityBlockReason === "string" ? selector.v2_result.metadata.ethRangeFeasibilityBlockReason : undefined
+        ethRangeFeasibilityBlockReason: useV2 && typeof selector.v2_result.metadata?.ethRangeFeasibilityBlockReason === "string" ? selector.v2_result.metadata.ethRangeFeasibilityBlockReason : undefined,
+        authoritativeCandleTs:
+            useV2 && typeof selector.v2_result.metadata?.authoritativeCandleTs === "number"
+                ? selector.v2_result.metadata.authoritativeCandleTs
+                : undefined,
+        closedCandleTs:
+            useV2 && typeof selector.v2_result.metadata?.closedCandleTs === "number"
+                ? selector.v2_result.metadata.closedCandleTs
+                : undefined
     };
 }
 
@@ -312,7 +320,9 @@ export function deriveExecutionAuthorityFromEnvelope(
         profitabilityCanonicalTpSource: envelope.profitabilityCanonicalTpSource ?? undefined,
         profitabilityTpSource: envelope.profitabilityTpSource ?? undefined,
         profitabilityExecutableTp1Price: envelope.profitabilityExecutableTp1Price ?? undefined,
-        profitabilityRawCanonicalTp1Price: envelope.profitabilityRawCanonicalTp1Price ?? undefined
+        profitabilityRawCanonicalTp1Price: envelope.profitabilityRawCanonicalTp1Price ?? undefined,
+        authoritativeCandleTs: envelope.authoritativeCandleTs ?? undefined,
+        closedCandleTs: envelope.closedCandleTs ?? undefined
     };
 }
 
@@ -701,7 +711,10 @@ export function resolveSymbolDecisionEnvelope(
         stairStepDetected: execMeta.stair_step_detected ?? null,
         stairStepDirection: execMeta.stair_step_direction ?? null,
         stairStepConfidence: execMeta.stair_step_confidence ?? null,
-        stairStepBlockReason: execMeta.stair_step_block_reason ?? null
+        stairStepBlockReason: execMeta.stair_step_block_reason ?? null,
+        authoritativeCandleTs:
+            typeof execMeta.authoritativeCandleTs === "number" ? execMeta.authoritativeCandleTs : null,
+        closedCandleTs: typeof execMeta.closedCandleTs === "number" ? execMeta.closedCandleTs : null
     });
 
 

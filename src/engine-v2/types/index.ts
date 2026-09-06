@@ -1359,6 +1359,10 @@ export type EntryExecutionAuthority = Readonly<{
     ethRangeBoxWidthBps?: number;
     ethRangeCostSource?: string;
     ethRangeFeasibilityBlockReason?: string | null;
+    /** Decision-cycle forming-bar tip ts (execution identity). Set only when ENTER is confirmed. */
+    authoritativeCandleTs?: number | null;
+    /** Last closed candle ts used by structural/closed-candle gates. */
+    closedCandleTs?: number | null;
 }>;
 
 /** Internal Pipeline Result */

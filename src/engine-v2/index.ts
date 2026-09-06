@@ -56,6 +56,7 @@ import {
     resolvePreEntryPolicySlPrice,
     resolveV2PreEntryExecutableTpBundle
 } from "./execution/pre-entry-tp-provenance";
+import { resolveV2AuthoritativeCandleIdentity } from "./execution/authoritative-candle-identity";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -9091,6 +9092,20 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     decision.metadata.decision_reason = execution.reason;
     decision.metadata.market_mode = marketMode;
     decision.metadata.box_pos = typeof boxPos === "number" && Number.isFinite(boxPos) ? boxPos : undefined;
+
+    if (isValidEnter) {
+        const candleIdentity = resolveV2AuthoritativeCandleIdentity(input.snapshot?.candles ?? null);
+        decision.metadata.authoritativeCandleTs = candleIdentity.authoritativeCandleTs ?? undefined;
+        decision.metadata.closedCandleTs = candleIdentity.closedCandleTs ?? undefined;
+        console.info(JSON.stringify({
+            event: "V2_EXECUTION_IDENTITY_CANDLE_PROOF",
+            symbol: String(input.symbol),
+            authoritativeCandleTs: candleIdentity.authoritativeCandleTs,
+            closedCandleTs: candleIdentity.closedCandleTs,
+            forming_bar_source: "snapshot.candles[last]",
+            closed_candle_source: "getClosedCandlesForStructuralStop[last]"
+        }));
+    }
 
     if (!isValidEnter) {
         decision.metadata.candidate_side = decision.side;

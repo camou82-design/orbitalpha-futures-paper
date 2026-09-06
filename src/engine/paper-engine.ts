@@ -1028,6 +1028,110 @@ type EntryQualityFeatureVector = Readonly<{
   sideBias: number;
 }>;
 
+export type SubmitOutcomeClass =
+  | "DEFINITIVE_NOT_SUBMITTED"
+  | "DEFINITIVE_EXCHANGE_REJECTED"
+  | "AMBIGUOUS_SUBMIT_OUTCOME"
+  | "ACKNOWLEDGED_OR_FILLED";
+
+export type AmbiguousSubmitEntry = Readonly<{
+  symbol: MarketSymbol;
+  side: "long" | "short";
+  v2EntryKey: string;
+  clOrdId: string;
+  attemptedAt: number;
+  error: string;
+}>;
+
+export function resolveAuthoritativeCandleTs(input: {
+  authority?: { authoritativeCandleTs?: number | null; [key: string]: unknown } | null;
+}): number | null {
+  const auth = input.authority;
+  if (!auth) return null;
+  if (typeof auth.authoritativeCandleTs === "number" && Number.isFinite(auth.authoritativeCandleTs) && auth.authoritativeCandleTs > 0) {
+    return auth.authoritativeCandleTs;
+  }
+  return null;
+}
+
+export function classifySubmitOutcome(submitResult: {
+  ok: boolean;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  ordId?: string | null;
+  fillConfirmed?: boolean;
+}): SubmitOutcomeClass {
+  if (submitResult.ok) {
+    return "ACKNOWLEDGED_OR_FILLED";
+  }
+
+  const errCode = String(submitResult.errorCode ?? "").trim();
+  const errMsg = String(submitResult.errorMessage ?? "").trim().toLowerCase();
+
+  const isAmbiguous =
+    errMsg.includes("timeout") ||
+    errMsg.includes("timed out") ||
+    errMsg.includes("econnreset") ||
+    errMsg.includes("etimedout") ||
+    errMsg.includes("econnrefused") ||
+    errMsg.includes("socket hang up") ||
+    errMsg.includes("network error") ||
+    errMsg.includes("502 bad gateway") ||
+    errMsg.includes("504 gateway timeout") ||
+    errMsg.includes("503 service unavailable") ||
+    errMsg.includes("500 internal server error") ||
+    errCode === "ETIMEDOUT" ||
+    errCode === "ECONNRESET" ||
+    errCode === "TIMEOUT" ||
+    errCode === "NETWORK_ERROR";
+
+  if (isAmbiguous) {
+    return "AMBIGUOUS_SUBMIT_OUTCOME";
+  }
+
+  const preSubmitErrors = new Set([
+    "no_client",
+    "V2_MANUAL_TAKEOVER_ACTIVE_BLOCK",
+    "MANUAL_TAKEOVER_ACTIVE",
+    "MANUAL_PENDING_ORDER_AUTHORITY_UNAVAILABLE_FAIL_CLOSED",
+    "OKX_ACCOUNT_CONFIG_FETCH_FAILED",
+    "OKX_ACCOUNT_MODE_INCOMPATIBLE",
+    "ticker_error",
+    "instrument_error",
+    "ioc_cap_price_missing",
+    "price_build_fail",
+    "okx_reality_unconfirmed",
+    "leverage_mismatch",
+    "OKX_ORDER_NOTIONAL_OR_PRICE_INVALID",
+    "OKX_ORDER_SIZE_NOT_LOT_MULTIPLE",
+    "OKX_ORDER_SIZE_UNDER_MIN",
+    "duplicate_execution_key",
+    "STOP_PRICE_REQUIRED_BEFORE_ENTRY",
+    "BTCUSDT_MANAGEMENT_BLOCKED",
+    "BTCUSDT_PROTECTED_BYPASS",
+    "V2_EXECUTION_IDENTITY_UNAVAILABLE"
+  ]);
+
+  if (preSubmitErrors.has(errCode) || errMsg.includes("not initialized") || errMsg.includes("manual takeover active")) {
+    return "DEFINITIVE_NOT_SUBMITTED";
+  }
+
+  const ambiguousExchangeServerOutcome =
+    errCode === "50000" ||
+    errMsg.includes("internal server error") ||
+    errMsg.includes("server unavailable") ||
+    errMsg.includes("system busy") ||
+    errMsg.includes("service temporarily unavailable") ||
+    errMsg.includes("server is busy") ||
+    errMsg.includes("try again later");
+
+  if (ambiguousExchangeServerOutcome) {
+    return "AMBIGUOUS_SUBMIT_OUTCOME";
+  }
+
+  return "DEFINITIVE_EXCHANGE_REJECTED";
+}
+
 type EntryQualitySample = Readonly<{
   ts: number;
   symbol: string;
@@ -2168,6 +2272,133 @@ export class PaperEngine {
     return true;
   }
 
+  private ambiguousSubmits = new Map<string, AmbiguousSubmitEntry>();
+
+  public recordAmbiguousSubmit(entry: AmbiguousSubmitEntry): void {
+    this.ambiguousSubmits.set(entry.clOrdId, entry);
+  }
+
+  public hasActiveAmbiguousSubmit(symbol: MarketSymbol): boolean {
+    for (const entry of this.ambiguousSubmits.values()) {
+      if (entry.symbol === symbol) return true;
+    }
+    return false;
+  }
+
+  public getAmbiguousSubmits(): ReadonlyArray<AmbiguousSubmitEntry> {
+    return Array.from(this.ambiguousSubmits.values());
+  }
+
+  public async reconcileAmbiguousSubmits(nowTs: number): Promise<void> {
+    if (this.ambiguousSubmits.size === 0 || !this.okxDemo || !this.signedExecutionReady) return;
+
+    for (const [clOrdId, entry] of Array.from(this.ambiguousSubmits.entries())) {
+      const instId = toOkxSwapInstId(entry.symbol);
+      try {
+        const getRes = await this.okxDemo.getOrder(instId, undefined, clOrdId);
+        if (getRes.ok && Array.isArray(getRes.value) && getRes.value.length > 0) {
+          const ord = getRes.value[0];
+          const state = String(ord?.state ?? "");
+          this.logger.info("V2_AMBIGUOUS_SUBMIT_FOUND_ON_EXCHANGE_PROOF", {
+            symbol: entry.symbol,
+            clOrdId,
+            ordId: ord?.ordId,
+            state,
+            key: entry.v2EntryKey,
+            resolution: "order_confirmed_on_exchange_keep_key_consumed"
+          });
+          this.ambiguousSubmits.delete(clOrdId);
+        } else if (!getRes.ok) {
+          const errCode = (getRes as any).diagnostics?.retCode || (getRes as any).error || "";
+          const errMsg = (getRes as any).diagnostics?.retMsg || (getRes as any).error || "";
+          const isDefinitiveNotFound =
+            errCode === "51603" ||
+            errMsg.toLowerCase().includes("order does not exist") ||
+            errMsg.toLowerCase().includes("order not found") ||
+            (typeof errCode === "string" && errCode.includes("51603"));
+
+          if (isDefinitiveNotFound) {
+            const pendCheck = await this.okxDemo.getOrdersPending({ instType: "SWAP", instId });
+            const inPending = pendCheck.ok && Array.isArray(pendCheck.value) && pendCheck.value.some(p => String(p?.clOrdId) === clOrdId);
+            if (inPending) {
+              continue;
+            }
+
+            let fillConfirmed = false;
+            let historyConfirmed = false;
+            let readPathIncomplete = false;
+
+            const fillsRes = await this.okxDemo.getFillsHistory({ instType: "SWAP", instId, limit: "100" });
+            if (!fillsRes.ok) {
+              readPathIncomplete = true;
+            } else if (Array.isArray(fillsRes.value) && fillsRes.value.some(f => String(f?.clOrdId) === clOrdId)) {
+              fillConfirmed = true;
+            }
+
+            if (!fillConfirmed) {
+              const histRes = await this.okxDemo.getOrdersHistory({ instType: "SWAP", instId, limit: "100" });
+              if (!histRes.ok) {
+                readPathIncomplete = true;
+              } else if (Array.isArray(histRes.value) && histRes.value.some(o => String(o?.clOrdId) === clOrdId)) {
+                historyConfirmed = true;
+              }
+            }
+
+            if (fillConfirmed || historyConfirmed) {
+              this.logger.info("V2_AMBIGUOUS_SUBMIT_FOUND_IN_FILL_OR_HISTORY_PROOF", {
+                symbol: entry.symbol,
+                clOrdId,
+                key: entry.v2EntryKey,
+                fillConfirmed,
+                historyConfirmed,
+                resolution: "order_confirmed_via_fill_or_history_keep_key_consumed"
+              });
+              this.ambiguousSubmits.delete(clOrdId);
+              continue;
+            }
+
+            if (readPathIncomplete) {
+              this.logger.warn("V2_AMBIGUOUS_SUBMIT_RECONCILE_READ_INCOMPLETE", {
+                symbol: entry.symbol,
+                clOrdId,
+                key: entry.v2EntryKey,
+                resolution: "fill_and_history_read_incomplete_keep_key_consumed"
+              });
+              continue;
+            }
+
+            this.logger.info("V2_AMBIGUOUS_SUBMIT_CONFIRMED_ABSENT_PROOF", {
+              symbol: entry.symbol,
+              clOrdId,
+              key: entry.v2EntryKey,
+              resolution: "order_absent_confirmed_release_key_allow_retry"
+            });
+            await this.releaseExecutionKey(entry.v2EntryKey);
+            this.ambiguousSubmits.delete(clOrdId);
+          }
+        }
+      } catch (e) {
+        this.logger.warn("V2_AMBIGUOUS_SUBMIT_RECONCILE_ERROR", {
+          symbol: entry.symbol,
+          clOrdId,
+          error: String(e)
+        });
+      }
+    }
+  }
+
+  public async releaseExecutionKey(key: string): Promise<void> {
+    if (key.trim() === "") return;
+    this.executionKeysConsumed.delete(key);
+    const p = this.executionKeysPath();
+    try {
+      const consumed = Array.from(this.executionKeysConsumed).slice(-4000);
+      await fs.writeFile(p, JSON.stringify({ updated_at: Date.now(), consumed }, null, 2), "utf8");
+    } catch {
+      // ignore
+    }
+  }
+
   private currentServerTradeControlSignature(): string {
     return [
       this.serverTradeControlState.server_trade_enabled ? "1" : "0",
@@ -2329,6 +2560,8 @@ export class PaperEngine {
           this.logger.info("V2_MANUAL_PENDING_ORDER_AUTHORITY_PROOF", proof);
         }
       }
+
+      await this.reconcileAmbiguousSubmits(nowTs);
     }
   }
 
@@ -22471,8 +22704,40 @@ export class PaperEngine {
             continue;
           }
 
+          // 1. Guard against in-flight ambiguous submits
+          if (this.hasActiveAmbiguousSubmit(sym as MarketSymbol)) {
+            this.logger.warn("V2_ENTRY_BLOCKED_AMBIGUOUS_SUBMIT_PENDING", {
+              symbol: sym,
+              side: intentSide,
+              action: "retry_blocked_until_exchange_reconcile"
+            });
+            continue;
+          }
+
+          // 2. Resolve Canonical Authoritative Candle Timestamp (fail-closed, authority-only)
+          const authoritativeCandleTs = resolveAuthoritativeCandleTs({ authority });
+
+          if (authoritativeCandleTs == null || authoritativeCandleTs <= 0) {
+            const block_reason = "V2_EXECUTION_IDENTITY_UNAVAILABLE";
+            this.logger.error("V2_ENTRY_BLOCKED_EXECUTION_IDENTITY_UNAVAILABLE", {
+              symbol: sym,
+              side: intentSide,
+              reason: block_reason,
+              detail: "Authoritative candle timestamp is missing or non-positive. Fail-closed without wall-clock fallback."
+            });
+            this.logger.info("V2_POST_BRIDGE_EXECUTION_HANDOFF_PROOF", {
+              symbol: sym,
+              run_cycle_id: executionSnapshot.runCycleId,
+              decision_id: (authority as any).decision_id ?? null,
+              order_path_allowed: false,
+              skip_reason: block_reason,
+              ...buildAuthorityEventMeta(authority)
+            });
+            continue;
+          }
+
           // Atomic Execution Key Claim immediately prior to OKX signed submit
-          const v2EntryKey = `v2entry:${sym}:${intentSide}:${executionSnapshot.runCycleId}`;
+          const v2EntryKey = `v2entry:${sym}:${intentSide}:${authoritativeCandleTs}`;
           const v2KeyOk = await this.consumeExecutionKey(v2EntryKey);
           if (!v2KeyOk) {
             const skip_reason = "V2_EXECUTION_DUPLICATE_KEY_BLOCKED";
@@ -22634,8 +22899,9 @@ export class PaperEngine {
               typeof submit.baseQty === "number" && Number.isFinite(submit.baseQty) && submit.baseQty > 0
                 ? submit.baseQty
                 : v2EntrySizeUsd / Math.max(1e-12, entryPxOpen || 1);
+            const openedAtMs = Date.now();
             const record: PaperOpenPositionRecord = {
-              openedAt: Date.now(),
+              openedAt: openedAtMs,
               symbol: sym,
               side: intentSide,
               entryPrice: entryPxOpen,
@@ -22683,6 +22949,12 @@ export class PaperEngine {
               partialExitRatio: authority.partialExitRatio,
               invalidationPx: stopPrice
             };
+              symbol: sym,
+              side: intentSide,
+              openedAt: openedAtMs,
+              regimeAtEntry: slReg,
+              runCycleId: this.runCycleId
+            });
             if (isPending) {
               this.logger.info("PAPER_OPEN_BLOCKED_UNFILLED_ORDER_PROOF", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
               this.logger.info("LIMIT_ENTRY_PENDING_STATE_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
@@ -22908,7 +23180,37 @@ export class PaperEngine {
             
             await this.store.appendJsonlLine("reports/events.jsonl", buildEntryOpenedEventPayload(sym, authority, record));
           } else {
-            this.logger.error("paper_position_open_failed", { symbol: sym, error: submit.errorMessage });
+            this.logger.error("paper_position_open_failed", { symbol: sym, error: submit.errorMessage, errorCode: submit.errorCode });
+            const outcomeClass = classifySubmitOutcome(submit);
+            if (outcomeClass === "DEFINITIVE_NOT_SUBMITTED" || outcomeClass === "DEFINITIVE_EXCHANGE_REJECTED") {
+              this.logger.info("V2_EXECUTION_SUBMIT_DEFINITIVE_FAILURE_RELEASE_KEY_PROOF", {
+                symbol: sym,
+                key: v2EntryKey,
+                clOrdId,
+                outcome_class: outcomeClass,
+                error_code: submit.errorCode,
+                error_message: submit.errorMessage
+              });
+              await this.releaseExecutionKey(v2EntryKey);
+            } else if (outcomeClass === "AMBIGUOUS_SUBMIT_OUTCOME") {
+              this.logger.warn("V2_EXECUTION_SUBMIT_AMBIGUOUS_OUTCOME_PROOF", {
+                symbol: sym,
+                key: v2EntryKey,
+                clOrdId,
+                outcome_class: outcomeClass,
+                error_code: submit.errorCode,
+                error_message: submit.errorMessage,
+                action: "keep_key_consumed_and_register_ambiguous_pending_state"
+              });
+              this.recordAmbiguousSubmit({
+                symbol: sym as MarketSymbol,
+                side: intentSide,
+                v2EntryKey,
+                clOrdId,
+                attemptedAt: Date.now(),
+                error: String(submit.errorMessage || submit.errorCode || "ambiguous_submit")
+              });
+            }
           }
           continue; // End of V2 fast-path
         } else {
@@ -23612,8 +23914,9 @@ export class PaperEngine {
 
         const lifecycleState: PaperOpenPositionRecord["lifecycleState"] = isExchangeEnabled ? "OPEN" : "INITIAL";
 
+        const stage1OpenedAtMs = Date.now();
         const record: PaperOpenPositionRecord = {
-          openedAt: Date.now(),
+          openedAt: stage1OpenedAtMs,
           symbol: first.symbol,
           side: authority.side as "long" | "short",
           entryPrice: first.lastPrice,
@@ -23725,6 +24028,13 @@ export class PaperEngine {
               ? v2CommittedRiskPlan.stop_price
               : authority.invalidationPx ?? undefined
         };
+
+          symbol: record.symbol,
+          side: record.side,
+          openedAt: stage1OpenedAtMs,
+          regimeAtEntry: record.regimeAtEntry ?? entryIdentity.effectiveRegimeAtEntry,
+          runCycleId: this.runCycleId
+        });
 
         this.logger.info("POSITION_ENGINE_IDENTITY_PROOF", {
           symbol: record.symbol,

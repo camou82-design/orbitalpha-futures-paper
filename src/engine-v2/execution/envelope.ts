@@ -193,7 +193,9 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             stair_step_detected: args.stairStepDetected ?? null,
             stair_step_direction: args.stairStepDirection ?? null,
             stair_step_confidence: args.stairStepConfidence ?? null,
-            stair_step_block_reason: args.stairStepBlockReason ?? null
+            stair_step_block_reason: args.stairStepBlockReason ?? null,
+            authoritativeCandleTs: args.authoritativeCandleTs ?? null,
+            closedCandleTs: args.closedCandleTs ?? null
         };
 
     }
@@ -277,7 +279,9 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             stair_step_detected: args.stairStepDetected ?? null,
             stair_step_direction: args.stairStepDirection ?? null,
             stair_step_confidence: args.stairStepConfidence ?? null,
-            stair_step_block_reason: args.stairStepBlockReason ?? null
+            stair_step_block_reason: args.stairStepBlockReason ?? null,
+            authoritativeCandleTs: args.authoritativeCandleTs ?? null,
+            closedCandleTs: args.closedCandleTs ?? null
         };
     }
     return {
@@ -359,6 +363,8 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         stair_step_detected: args.stairStepDetected ?? null,
         stair_step_direction: args.stairStepDirection ?? null,
         stair_step_confidence: args.stairStepConfidence ?? null,
-        stair_step_block_reason: args.stairStepBlockReason ?? null
+        stair_step_block_reason: args.stairStepBlockReason ?? null,
+        authoritativeCandleTs: args.authoritativeCandleTs ?? null,
+        closedCandleTs: args.closedCandleTs ?? null
     };
 }
