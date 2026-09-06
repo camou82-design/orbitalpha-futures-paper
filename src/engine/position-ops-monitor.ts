@@ -775,13 +775,16 @@ export function findProtectiveHintsForInst(
       ledgerCanonical.authoritative &&
       ledgerCanonical.reduceOnlyProtectiveFound
     ) {
-      protectionSatisfied = true;
-      canonicalProtectiveSlFound = true;
-      if (foundSlPrice == null && ledgerCanonical.exchangeStopPx != null) {
-        foundSlPrice = ledgerCanonical.exchangeStopPx;
-      }
-      if (foundTpPrice == null && ledgerCanonical.exchangeTpPx != null) {
-        foundTpPrice = ledgerCanonical.exchangeTpPx;
+      const exchangeTpPresent = !tpRequired || (ledgerCanonical.exchangeTpPx != null && Number.isFinite(ledgerCanonical.exchangeTpPx) && ledgerCanonical.exchangeTpPx > 0);
+      if (exchangeTpPresent) {
+        protectionSatisfied = true;
+        canonicalProtectiveSlFound = true;
+        if (foundSlPrice == null && ledgerCanonical.exchangeStopPx != null) {
+          foundSlPrice = ledgerCanonical.exchangeStopPx;
+        }
+        if (foundTpPrice == null && ledgerCanonical.exchangeTpPx != null) {
+          foundTpPrice = ledgerCanonical.exchangeTpPx;
+        }
       }
     }
   }

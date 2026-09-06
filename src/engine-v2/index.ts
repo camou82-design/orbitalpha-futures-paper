@@ -8786,7 +8786,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
 
     if (isBtcProtected) {
-        const suppressedActions = ["ENTER", "ADDON", "CLOSE", "PARTIAL", "REDUCE", "REVERSE", "ORDER_SUBMIT", "HISTORY_WRITE", "LEDGER_PRUNE", "PROTECTIVE_ENSURE"];
+        // [REPAIR ALLOWED] Essential protective ensure (missing canonical TP/SL repair) is handled at engine level;
+        // general order execution, entry, addon, close, reduce, reverse remain suppressed.
+        const suppressedActions = ["ENTER", "ADDON", "CLOSE", "PARTIAL", "REDUCE", "REVERSE", "ORDER_SUBMIT", "HISTORY_WRITE", "LEDGER_PRUNE"];
 
         console.info(JSON.stringify({
             event: "POSITION_SIDE_RECONCILE_PROTECTED",

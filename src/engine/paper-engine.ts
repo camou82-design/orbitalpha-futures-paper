@@ -2756,8 +2756,11 @@ export class PaperEngine {
           record: PaperOpenPositionRecord;
         } | null> => {
           if (r.symbol === "BTCUSDT" && this.isBtcPositionManagementBlocked()) {
-            await this.logAndSuppressBtcUsdtAction("ops_watch_protect_cycle", r.side, ["PROTECTIVE_ENSURE", "REDUCE", "PARTIAL"]);
-            return null;
+            const isRepairEligible = ledgerPos ? this.isBtcMissingProtectiveRepairEligible(ledgerPos) : false;
+            if (!isRepairEligible) {
+              await this.logAndSuppressBtcUsdtAction("ops_watch_protect_cycle", r.side, ["PROTECTIVE_ENSURE", "REDUCE", "PARTIAL"]);
+              return null;
+            }
           }
           if (!ensureEligible || !ledgerPos) return null;
           const pricingLast =
@@ -3325,6 +3328,48 @@ export class PaperEngine {
 
   private isBtcPositionManagementBlocked(): boolean {
     return this.resolveBtcExecutionSuppressorState().existing_position_management_blocked;
+  }
+
+  private isBtcMissingProtectiveRepairEligible(open: PaperOpenPositionRecord): boolean {
+    if (open.symbol !== "BTCUSDT") return false;
+    let okxActualSide = "none";
+    if (this.lastLivePositionsPayload && Array.isArray(this.lastLivePositionsPayload)) {
+      for (const p of this.lastLivePositionsPayload) {
+        const hit = okxSwapRowToLedgerKey(p as Record<string, unknown>);
+        if (hit && hit.symbol === "BTCUSDT") {
+          okxActualSide = hit.side;
+          break;
+        }
+      }
+    }
+    if (okxActualSide === "none" || okxActualSide !== String(open.side).toLowerCase()) {
+      return false;
+    }
+
+    const activeStopPrice = open.stopPrice ?? (open as any).ledger_stop_px;
+    const activeTpPrice = open.targetPrice1 ?? open.takeProfit1Px ?? open.takeProfitPlan?.tp1;
+    const hasValidStop = activeStopPrice != null && Number.isFinite(activeStopPrice) && activeStopPrice > 0;
+    const hasValidTp = activeTpPrice != null && Number.isFinite(activeTpPrice) && activeTpPrice > 0;
+    if (!hasValidStop && !hasValidTp) return false;
+
+    const instId = toOkxSwapInstId("BTCUSDT");
+    const instSizing = this.instrumentCache.get(instId) as any;
+    const tickSz = instSizing?.tickSz ? Number(instSizing.tickSz) : 0.01;
+    const regime = regimeForSl(open.regimeAtEntry);
+    const tpRequired = Boolean((open as any).takeProfitRequired) || regime === "RANGE" || regime === "TREND";
+
+    const protState = evaluatePositionProtectionState({
+      instId,
+      positionSide: open.side as "long" | "short",
+      pending: this.cachedOpsPending,
+      algos: this.cachedOpsAlgos,
+      tpRequired,
+      ledger: open,
+      tickSz,
+      requiredStopPx: activeStopPrice
+    });
+
+    return !protState.reduceOnlyProtectiveFound;
   }
 
   /** @deprecated Prefer isBtcEntrySubmitBlocked / isBtcPositionManagementBlocked */
@@ -11359,8 +11404,17 @@ export class PaperEngine {
 
     if (open.symbol === "BTCUSDT") {
       if (this.isBtcPositionManagementBlocked()) {
-        await this.logAndSuppressBtcUsdtAction("ensureProtectiveStopOrder", open.side, ["order submit", "PROTECTIVE_ENSURE"]);
-        return { modified: false, success: false, record: open };
+        const isRepairEligible = this.isBtcMissingProtectiveRepairEligible(open);
+        if (!isRepairEligible) {
+          await this.logAndSuppressBtcUsdtAction("ensureProtectiveStopOrder", open.side, ["order submit", "PROTECTIVE_ENSURE"]);
+          return { modified: false, success: false, record: open };
+        }
+        this.logger.info("BTC_MISSING_PROTECTIVE_REPAIR_BYPASS_AUTHORIZED", {
+          symbol: open.symbol,
+          side: open.side,
+          flowId,
+          reason: "missing_exchange_protection_repair_permitted"
+        });
       }
     }
 

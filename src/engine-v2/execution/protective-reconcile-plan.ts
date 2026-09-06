@@ -256,7 +256,11 @@ export function planProtectiveOrderReconcile(
             duplicate = true;
         }
         if (duplicate) {
-            pushCancel(id);
+            // [CRITICAL SAFETY] Operator / manual orders are NEVER cancelled by engine!
+            // Only bot-owned / attach algo orders can be pruned as duplicates.
+            if (ev.engineOwned || ev.attachAlgo) {
+                pushCancel(id);
+            }
             continue;
         }
 

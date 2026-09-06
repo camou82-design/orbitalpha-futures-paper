@@ -329,7 +329,8 @@ export function resolveLedgerCanonicalProtectiveTruth(input: Readonly<{
         if (tpRow) {
             exchangeTpPx = extractTpPxFromOrder(tpRow);
         }
-        const tpOk = !input.tpRequired || exchangeTpPx != null || ledger.isTakeProfitRegistered === true;
+        const hasLiveExchangeTp = exchangeTpPx != null && Number.isFinite(exchangeTpPx) && exchangeTpPx > 0;
+        const tpOk = !input.tpRequired || hasLiveExchangeTp;
         return {
             authoritative: true,
             reduceOnlyProtectiveFound: tpOk,
@@ -439,14 +440,30 @@ export function evaluatePositionProtectionState(input: Readonly<{
         ) {
             canonicalProtectiveSlFound = true;
         }
+
+        const tpPx = extractTpPxFromOrder(o);
+        const hasTpTrigger = tpPx != null;
+        if (
+            reduceOnly &&
+            closeSideOk &&
+            hasTpTrigger &&
+            (classified.purpose === "protective-take-profit" ||
+                classified.purpose === "bot-managed-protection" ||
+                classified.matchedProtectiveAlgo === "tp" ||
+                String(o.ordType ?? "").toLowerCase() === "oco")
+        ) {
+            canonicalProtectiveTpFound = true;
+        }
     };
+
+    let canonicalProtectiveTpFound = false;
 
     for (const o of input.algos) consider(o);
     for (const o of input.pending) consider(o);
 
-    let reduceOnlyProtectiveFound =
-        canonicalProtectiveSlFound ||
-        (matchingProtectivePendingCount > 0 && hintsResult.protectionSatisfied);
+    const slSatisfied = canonicalProtectiveSlFound || (matchingProtectivePendingCount > 0 && hintsResult.slPrice != null);
+    const tpSatisfied = !input.tpRequired || (canonicalProtectiveTpFound || (matchingProtectivePendingCount > 0 && hintsResult.tpPrice != null));
+    let reduceOnlyProtectiveFound = slSatisfied && tpSatisfied;
     let exchangeStopPx = hintsResult.slPrice;
     let exchangeTpPx = hintsResult.tpPrice;
 
@@ -461,8 +478,8 @@ export function evaluatePositionProtectionState(input: Readonly<{
         positionSide: input.positionSide
     });
     if (ledgerCanonical.source === "exchange_confirmed" && ledgerCanonical.authoritative) {
-        reduceOnlyProtectiveFound = ledgerCanonical.reduceOnlyProtectiveFound;
         canonicalProtectiveSlFound = ledgerCanonical.canonicalProtectiveSlFound;
+        reduceOnlyProtectiveFound = ledgerCanonical.canonicalProtectiveSlFound && ledgerCanonical.reduceOnlyProtectiveFound;
         exchangeStopPx = ledgerCanonical.exchangeStopPx ?? exchangeStopPx;
         exchangeTpPx = ledgerCanonical.exchangeTpPx ?? exchangeTpPx;
     }
