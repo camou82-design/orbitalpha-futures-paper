@@ -361,6 +361,7 @@ import {
   syncManualTakeoverLifecycleEntries,
   countAuthoritativeEngineOwnedExchangeOrders,
   shouldLatchManualProtectiveOnlyIntervention,
+  shouldUnlatchFalseManualTakeover,
   hasOpenPositionForManualTakeoverSymbol,
   isAuthoritativeBotOwnedAlgoOrder,
   isAuthoritativeBotOwnedPendingOrder,
@@ -2622,8 +2623,28 @@ export class PaperEngine {
         ledgerPos.manualTakeoverActive === true ||
         ledgerPos.lifecycleState === "OPERATOR_MANAGED" ||
         this.isManualTakeoverActive(r.symbol, r.side);
-      if (
-        !isTakeover &&
+      if (isTakeover) {
+        const specificKey = buildManualTakeoverKey(r.symbol, r.side);
+        const takeoverRec = this.manualTakeoverBySymbol.get(specificKey) ??
+                            this.manualTakeoverBySymbol.get(String(r.symbol).trim().toUpperCase());
+        const opOrders = this.lastObservedOperatorOrdersBySymbol.get(String(r.symbol).trim().toUpperCase()) ?? [];
+        if (
+          shouldUnlatchFalseManualTakeover({
+            ledger: ledgerPos,
+            takeoverRecord: takeoverRec,
+            manualTakeoverReason: takeoverRec?.manualTakeoverReason,
+            hasGenuineManualOrderOrTrade: opOrders.length > 0
+          })
+        ) {
+          await this.unlatchFalseManualTakeover({
+            symbol: r.symbol,
+            side: r.side,
+            open: ledgerPos,
+            clearedBy: "false_manual_takeover_auto_recovery_pre_scan",
+            nowMs: nowTs
+          });
+        }
+      } else if (
         shouldLatchManualProtectiveOnlyIntervention({
           ledger: ledgerPos,
           reduceOnlyProtectiveFound: r.reduce_only_protective_found,
@@ -2943,7 +2964,29 @@ export class PaperEngine {
           (ledgerPos != null && isOperatorManagedOpenPosition(ledgerPos)) ||
           this.isManualTakeoverActive(r.symbol, r.side);
 
-        if (
+        if (isTakeover && ledgerPos) {
+          const specificKey = buildManualTakeoverKey(r.symbol, r.side);
+          const takeoverRec = this.manualTakeoverBySymbol.get(specificKey) ??
+                              this.manualTakeoverBySymbol.get(String(r.symbol).trim().toUpperCase());
+          const opOrders = this.lastObservedOperatorOrdersBySymbol.get(String(r.symbol).trim().toUpperCase()) ?? [];
+          if (
+            shouldUnlatchFalseManualTakeover({
+              ledger: ledgerPos,
+              takeoverRecord: takeoverRec,
+              manualTakeoverReason: takeoverRec?.manualTakeoverReason,
+              hasGenuineManualOrderOrTrade: opOrders.length > 0
+            })
+          ) {
+            await this.unlatchFalseManualTakeover({
+              symbol: r.symbol,
+              side: r.side,
+              open: ledgerPos,
+              clearedBy: "false_manual_takeover_auto_recovery_ops_watch",
+              nowMs: nowTs
+            });
+            isTakeover = false;
+          }
+        } else if (
           !isTakeover &&
           ledgerPos &&
           shouldLatchManualProtectiveOnlyIntervention({
@@ -3602,7 +3645,14 @@ export class PaperEngine {
         }
       }
     }
-    if (okxActualSide === "none" || okxActualSide !== String(open.side).toLowerCase()) {
+    if (okxActualSide === "none") {
+      const isFreshOpen = (Date.now() - (open.openedAt || 0)) < 60_000;
+      if (isFreshOpen && (open.lifecycleState === "BOT_V2_MANAGED" || open.isV2Authority === true)) {
+        return true;
+      }
+      return false;
+    }
+    if (okxActualSide !== String(open.side).toLowerCase()) {
       return false;
     }
 
@@ -11616,6 +11666,34 @@ export class PaperEngine {
     return true;
   }
 
+  public async unlatchFalseManualTakeover(input: {
+    symbol: string;
+    side: "long" | "short";
+    open: PaperOpenPositionRecord;
+    clearedBy?: string;
+    nowMs?: number;
+  }): Promise<boolean> {
+    await this.ensureManualTakeoverLoaded();
+    const symUpper = String(input.symbol).trim().toUpperCase();
+    const specificKey = buildManualTakeoverKey(symUpper, input.side);
+    this.manualTakeoverBySymbol.delete(specificKey);
+    this.manualTakeoverBySymbol.delete(symUpper);
+    input.open.manualTakeoverActive = false;
+    input.open.lifecycleState = "BOT_V2_MANAGED";
+    (input.open as any).manualTakeoverReason = undefined;
+    (input.open as any).manualTakeoverDetectedAt = undefined;
+    await this.persistManualTakeoverDoc();
+    this.logger.info("V2_FALSE_MANUAL_TAKEOVER_AUTO_UNLATCH_PROOF", {
+      symbol: symUpper,
+      side: input.side,
+      cleared_by: input.clearedBy ?? "false_manual_takeover_auto_recovery",
+      lifecycleState: "BOT_V2_MANAGED",
+      manual_takeover_active: false,
+      reason: "RECOVERED_TO_BOT_V2_MANAGED"
+    });
+    return true;
+  }
+
   public async cancelEngineOwnedOrdersOnTakeover(
     symbol: string,
     side?: "long" | "short"
@@ -12671,13 +12749,17 @@ export class PaperEngine {
           ? {
               protectiveStopAlgoId: submittedSlAlgoId,
               protectiveSlAlgoId: submittedSlAlgoId,
-              isProtectiveStopRegistered: true
+              isProtectiveStopRegistered: true,
+              protectionSubmitAttempted: true,
+              exchangeProtectionConfirmed: true,
+              confirmedExchangeProtectionEverSeen: true
             }
           : {}),
         ...(submittedTpAlgoId && wantsTp
           ? {
               protectiveTpAlgoId: submittedTpAlgoId,
-              isTakeProfitRegistered: true
+              isTakeProfitRegistered: true,
+              protectionSubmitAttempted: true
             }
           : {}),
         protectiveVisibilityGraceDeadlineMs: preVisibilityGraceDeadlineMs
@@ -12936,6 +13018,8 @@ export class PaperEngine {
       isProtectiveStopRegistered: slRegistered,
       isTakeProfitRegistered: tpRegistered,
       isProtectionFailed: !protectionSuccess,
+      exchangeProtectionConfirmed: slRegistered,
+      confirmedExchangeProtectionEverSeen: Boolean(open.confirmedExchangeProtectionEverSeen || slRegistered),
       // [BLOCKER-3-2] Persist grace deadline for restart-safety; cleared when order confirmed visible
       protectiveVisibilityGraceDeadlineMs: persistedGraceDeadlineMs
     };
@@ -24047,7 +24131,6 @@ export class PaperEngine {
               ? v2CommittedRiskPlan.stop_price
               : authority.invalidationPx ?? undefined
         };
-
 
         this.logger.info("POSITION_ENGINE_IDENTITY_PROOF", {
           symbol: record.symbol,

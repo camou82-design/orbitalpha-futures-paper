@@ -1217,6 +1217,7 @@ async function runManualTakeoverRegressionTests() {
       okxContracts: 1.0,
       isV2Authority: true,
       isProtectiveStopRegistered: true,
+      confirmedExchangeProtectionEverSeen: true,
       protectiveSlAlgoId: "sl-gone",
       protectiveVisibilityGraceDeadlineMs: 0,
       entryProtectionUntil: 0

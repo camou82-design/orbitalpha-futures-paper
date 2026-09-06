@@ -179,11 +179,80 @@ export function shouldLatchManualProtectiveOnlyIntervention(input: Readonly<{
   if (!input.scanClean) return false;
   const graceUntil = ledger.protectiveVisibilityGraceDeadlineMs ?? ledger.entryProtectionUntil ?? 0;
   if (graceUntil > input.nowMs) return false;
+
+  // POSITIVE EVIDENCE CONTRACT:
+  // MANUAL_PROTECTIVE_CHANGE requires positive evidence that an exchange protective order
+  // was previously CONFIRMED on OKX during this lifecycle and was subsequently removed externally.
+  // Initial missing protection (e.g. submit failed, suppressed, or unconfirmed) must NEVER trigger manual takeover.
+  const exchangeConfirmedEver =
+    (ledger as any).exchangeProtectionConfirmed === true ||
+    (ledger as any).protectiveStopConfirmedOnExchange === true ||
+    (ledger as any).confirmedExchangeProtectionEverSeen === true;
+
+  if (!exchangeConfirmedEver) {
+    return false;
+  }
+
   const botExpectedProtection =
     ledger.isProtectiveStopRegistered === true ||
     Boolean(ledger.protectiveSlAlgoId ?? ledger.protectiveStopAlgoId ?? ledger.protectiveTpAlgoId);
   if (!botExpectedProtection) return false;
   if (input.reduceOnlyProtectiveFound || input.matchingProtectivePendingCount > 0) return false;
+  return true;
+}
+
+/**
+ * Auto-recovery for false MANUAL_PROTECTIVE_CHANGE takeover:
+ * If a position was latched into OPERATOR_MANAGED with reason "MANUAL_PROTECTIVE_CHANGE",
+ * but exchange protection was NEVER confirmed during this lifecycle (initial submit failed or was suppressed),
+ * and there is no evidence of genuine manual entry or manual size change,
+ * safely unlatch back to BOT_V2_MANAGED so protective repair can proceed.
+ */
+export function shouldUnlatchFalseManualTakeover(input: Readonly<{
+  ledger: PaperOpenPositionRecord | null;
+  takeoverRecord?: ManualTakeoverRecord | null;
+  manualTakeoverReason?: string | null;
+  hasGenuineManualOrderOrTrade?: boolean;
+}>): boolean {
+  const ledger = input.ledger;
+  if (!ledger) return false;
+  if (ledger.status && ledger.status !== "open") return false;
+
+  const isOperatorState =
+    ledger.manualTakeoverActive === true ||
+    ledger.lifecycleState === "OPERATOR_MANAGED";
+  if (!isOperatorState) return false;
+
+  const reason =
+    input.takeoverRecord?.manualTakeoverReason ??
+    input.manualTakeoverReason ??
+    (ledger as any).manualTakeoverReason ??
+    null;
+
+  if (reason !== "MANUAL_PROTECTIVE_CHANGE") {
+    return false; // Genuine manual entry, manual size change, etc. must NEVER be auto-unlatched!
+  }
+
+  if (input.hasGenuineManualOrderOrTrade === true) {
+    return false;
+  }
+
+  const isBotOriginated =
+    (ledger as any).isV2Authority === true ||
+    ledger.lifecycleState === "BOT_V2_MANAGED" ||
+    ledger.strategyVersion === "v2" ||
+    String(ledger.strategyVersion ?? "").startsWith("v2") ||
+    ledger.sourceSignal != null ||
+    String((ledger as any).authoritySourceAtEntry ?? (ledger as any).authority ?? "").trim().toLowerCase() === "v2";
+  if (!isBotOriginated) return false;
+
+  // If exchange protection was ever confirmed, a missing order IS a valid manual change -> DO NOT unlatch!
+  const exchangeConfirmedEver =
+    (ledger as any).exchangeProtectionConfirmed === true ||
+    (ledger as any).protectiveStopConfirmedOnExchange === true ||
+    (ledger as any).confirmedExchangeProtectionEverSeen === true;
+  if (exchangeConfirmedEver) return false;
+
   return true;
 }
 

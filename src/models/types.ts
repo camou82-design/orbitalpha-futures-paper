@@ -1083,6 +1083,11 @@ export type PaperOpenPositionRecord = {
   tpRequired?: boolean;
   slProtectionSatisfied?: boolean;
   tpProtectionSatisfied?: boolean;
+  /** Granular Protection Truth States */
+  protectionPlanned?: boolean;
+  protectionSubmitAttempted?: boolean;
+  exchangeProtectionConfirmed?: boolean;
+  confirmedExchangeProtectionEverSeen?: boolean;
   /** Whether OKX protective order registration failed and requires repair. */
   isProtectionFailed?: boolean;
   /**
