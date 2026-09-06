@@ -19,6 +19,7 @@ import { applyV2ExitAuthorityInvariants, isExplicitTerminalExitReason } from "./
 import { resolveFinalExitAuthority, buildFinalExitAuthorityProof } from "./exit/final-exit-authority";
 import { evaluateTerminalReentryBarrier, buildTerminalReentryBarrierProof, resolveTerminalBarrierContext } from "./lifecycle/terminal-reentry-barrier";
 import { emitLiveExposureAuthorityProof, resolveLiveExposureAuthority } from "./live-account/exposure-authority";
+import { resolveAccountOpenRiskAuthority } from "./risk-sizing/account-open-risk";
 import {
     evaluateEquityAdaptiveSizing,
     evaluateEquitySizingAuthority,
@@ -6908,6 +6909,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     // FULL V2 ENTRY: entryProbeSizeMultiplier = null, probeSizingSource = "NONE" (no reduction)
                 }
 
+                const accountOpenRisk = resolveAccountOpenRiskAuthority({
+                    equityUsdt: accountEquityUsdt,
+                    okxActualPositions: okxPositionsValid ? validPositionsList : null,
+                    paperPositions: currentPositions,
+                    algoOrders:
+                        (v2State as any).cachedOpsAlgos ??
+                        (v2State as any).algoOrders ??
+                        (input.state as any).cachedOpsAlgos ??
+                        (input.state as any).algoOrders ??
+                        null
+                });
+
                 const sizingResult = evaluateEquityAdaptiveSizing({
                     symbol: String(input.symbol),
                     side: sideCand === "short" ? "short" : "long",
@@ -6935,7 +6948,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             : undefined,
                     v2AuthorityEntry: true,
                     entryProbeSizeMultiplier,
-                    entryProbeSizingSource: probeSizingSource
+                    entryProbeSizingSource: probeSizingSource,
+                    existingAccountOpenRiskUsdt: accountOpenRisk.totalOpenRiskUsdt,
+                    isMicroProbe: isMicroProbe || probeSizingSource !== "NONE"
                 });
 
                 equityAdaptiveSizingAuthority = sizingResult;
