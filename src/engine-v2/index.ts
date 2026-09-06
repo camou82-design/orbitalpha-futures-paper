@@ -57,6 +57,7 @@ import {
     resolveV2PreEntryExecutableTpBundle
 } from "./execution/pre-entry-tp-provenance";
 import { resolveV2AuthoritativeCandleIdentity } from "./execution/authoritative-candle-identity";
+import { applyEthRangeMinimumStopDistance } from "./execution/eth-range-minimum-stop-authority";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -6815,11 +6816,21 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                   ? "ADVERSE_ADDON"
                   : "PYRAMIDING_ADDON";
 
-            const effectiveStopPrice = stopOk
+            const rawEffectiveStop = stopOk
                 ? stopPriceVal
                 : invalidationOk
                   ? invalidationPxVal
                   : null;
+            const effectiveStopPrice =
+                rawEffectiveStop != null && (sideCand === "long" || sideCand === "short")
+                    ? applyEthRangeMinimumStopDistance({
+                          symbol: String(input.symbol),
+                          regime: String(judgment.regime),
+                          side: sideCand,
+                          entryReferencePrice: lastPx,
+                          candidateStopPrice: rawEffectiveStop
+                      }).canonicalStopPrice
+                    : null;
 
             if (isAddOn) {
                 if (currentAddonCount >= effectiveMaxAddonCount) {
@@ -7107,6 +7118,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                                   ? stopPriceVal
                                   : 0;
                         const rawPolicySlPrice = resolvePreEntryPolicySlPrice({
+                            symbol: String(input.symbol),
                             side: sideForTp,
                             regime: String(judgment.regime),
                             entryPrice: lastPx,

@@ -1,19 +1,34 @@
 import type { MarketRegime } from "../../strategy/market-regime-detector";
 import { engineMirrorStopPrice, engineMirrorTpPrice, regimeForSl } from "../../engine/position-ops-monitor";
+import {
+    applyEthRangeMinimumStopDistance,
+    isEthUsdtRangeStopContext
+} from "./eth-range-minimum-stop-authority";
 
 /** Policy-clamped SL used by buildV2PreEntryRiskPlanCommitted and profitability gate (shared). */
 export function resolvePreEntryPolicySlPrice(input: Readonly<{
+    symbol?: string;
     side: "long" | "short";
     regime: string;
     entryPrice: number;
     rawStructuralSl: number;
 }>): number {
     const regime = regimeForSl(input.regime);
-    const policySl = engineMirrorStopPrice(input.entryPrice, input.side, regime);
-    if (policySl == null) return input.rawStructuralSl;
-    if (input.side === "long" && input.rawStructuralSl > policySl) return policySl;
-    if (input.side === "short" && input.rawStructuralSl < policySl) return policySl;
-    return input.rawStructuralSl;
+    let result = input.rawStructuralSl;
+    if (!isEthUsdtRangeStopContext(input.symbol ?? "", regime)) {
+        const policySl = engineMirrorStopPrice(input.entryPrice, input.side, regime);
+        if (policySl != null) {
+            if (input.side === "long" && result > policySl) result = policySl;
+            if (input.side === "short" && result < policySl) result = policySl;
+        }
+    }
+    return applyEthRangeMinimumStopDistance({
+        symbol: input.symbol ?? "",
+        regime,
+        side: input.side,
+        entryReferencePrice: input.entryPrice,
+        candidateStopPrice: result
+    }).canonicalStopPrice;
 }
 import {
     computeAdaptiveRangePreEntryProtection,
@@ -506,6 +521,7 @@ export function resolveV2PreEntryTp1Authority(
 
     if (adaptiveEligible && adaptiveAtr != null && adaptiveBoxHigh != null && adaptiveBoxLow != null) {
         const adaptive = computeAdaptiveRangePreEntryProtection({
+            symbol: String(input.symbol ?? ""),
             side,
             entryPx: entryPrice,
             rawStructuralSl: input.rawStructuralSl,

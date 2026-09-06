@@ -72,7 +72,7 @@ import {
   isPositiveExternalManualLifecycleRow,
   buildOkxActualKeySetFromSync
 } from "../lib/position-reconcile-classification";
-import { buildPositionOpsSurface, engineMirrorStopPrice, engineMirrorTpPrice, regimeForSl, classifyOkxOpenOrderPurpose, countBlockingOkxOpenOrders, evaluateV2ReducePendingGuard, resolvePendingOrdersExposure } from "./position-ops-monitor";
+import { buildPositionOpsSurface, engineMirrorStopPrice, engineMirrorTpPrice, regimeForSl, resolveProtectiveStopPrice, classifyOkxOpenOrderPurpose, countBlockingOkxOpenOrders, evaluateV2ReducePendingGuard, resolvePendingOrdersExposure } from "./position-ops-monitor";
 import type { PositionOpsSurface } from "./position-ops-monitor";
 import { trendFilterOneMinuteCloses } from "../strategy/trend-filter";
 import { evaluatePaperEntryV1 } from "../strategy/entry-signal";
@@ -426,6 +426,10 @@ import {
   evaluatePreEntryTpParity,
   isShockOrFtsPromotedTpEscalationContext
 } from "../engine-v2/execution/pre-entry-tp-provenance";
+import {
+  applyEthRangeMinimumStopDistance,
+  isEthUsdtRangeStopContext
+} from "../engine-v2/execution/eth-range-minimum-stop-authority";
 import type { AdaptiveRangeProtectionDiagnostics } from "../engine-v2/execution/adaptive-range-pre-entry-protection";
 import { resolveInstrumentTickSzAuthority } from "../engine-v2/execution/instrument-tick-authority";
 import { normalizePxToTickSz } from "../engine-v2/execution/entry-order-type";
@@ -1646,6 +1650,7 @@ export type V2CommittedStopSource =
   | "new_stop_price"
   | "decision_stop_loss"
   | "policy_clamped"
+  | "eth_range_min_stop_floor"
   | "adaptive_range_structural_invalidation"
   | "adaptive_range_atr_structural_buffer";
 
@@ -1724,13 +1729,24 @@ export function buildV2PreEntryRiskPlanCommitted(
   
   const regime = regimeForSl(authority.regime);
   const policySl = engineMirrorStopPrice(referenceEntryPx, side, regime);
-  
-  let finalStopPrice = rawSp.price;
-  let finalStopSource: V2CommittedStopSource = rawSp.source;
-  let clampApplied = false;
-  let rawPolicySlPrice = rawSp.price;
+  const ethRangeContext = isEthUsdtRangeStopContext(symbol, regime);
 
-  if (policySl != null) {
+  const ethCanonicalRaw = applyEthRangeMinimumStopDistance({
+    symbol,
+    regime,
+    side,
+    entryReferencePrice: referenceEntryPx,
+    candidateStopPrice: rawSp.price
+  });
+
+  let finalStopPrice = ethCanonicalRaw.canonicalStopPrice;
+  let finalStopSource: V2CommittedStopSource = ethCanonicalRaw.floorApplied
+    ? "eth_range_min_stop_floor"
+    : rawSp.source;
+  let clampApplied = ethCanonicalRaw.floorApplied;
+  let rawPolicySlPrice = ethCanonicalRaw.canonicalStopPrice;
+
+  if (!ethRangeContext && policySl != null) {
     if (side === "long") {
       if (rawSp.price > policySl) {
         rawPolicySlPrice = policySl;
@@ -1742,9 +1758,9 @@ export function buildV2PreEntryRiskPlanCommitted(
         clampApplied = true;
       }
     }
+    finalStopPrice = rawPolicySlPrice;
+    if (clampApplied) finalStopSource = "policy_clamped";
   }
-  finalStopPrice = rawPolicySlPrice;
-  if (clampApplied) finalStopSource = "policy_clamped";
 
   const rawStopDistancePct = (Math.abs(referenceEntryPx - rawSp.price) / referenceEntryPx) * 100;
 
@@ -1787,20 +1803,31 @@ export function buildV2PreEntryRiskPlanCommitted(
   adaptiveDiagnostics = tpAuthority.adaptiveDiagnostics;
 
   if (regime === "RANGE" && tpAuthority.adaptiveApplied && tpAuthority.adaptiveSlPrice != null) {
-    if (policySl != null) {
-      if (side === "long" && tpAuthority.adaptiveSlPrice > policySl) {
+    const adaptiveEth = applyEthRangeMinimumStopDistance({
+      symbol,
+      regime,
+      side,
+      entryReferencePrice: referenceEntryPx,
+      candidateStopPrice: tpAuthority.adaptiveSlPrice
+    });
+    let adaptiveCandidate = adaptiveEth.canonicalStopPrice;
+
+    if (!ethRangeContext && policySl != null) {
+      if (side === "long" && adaptiveCandidate > policySl) {
         finalStopPrice = policySl;
         finalStopSource = "policy_clamped";
-      } else if (side === "short" && tpAuthority.adaptiveSlPrice < policySl) {
+      } else if (side === "short" && adaptiveCandidate < policySl) {
         finalStopPrice = policySl;
         finalStopSource = "policy_clamped";
       } else {
-        finalStopPrice = tpAuthority.adaptiveSlPrice;
+        finalStopPrice = adaptiveCandidate;
         finalStopSource = (tpAuthority.adaptiveSlSource ?? finalStopSource) as V2CommittedStopSource;
       }
     } else {
-      finalStopPrice = tpAuthority.adaptiveSlPrice;
-      finalStopSource = (tpAuthority.adaptiveSlSource ?? finalStopSource) as V2CommittedStopSource;
+      finalStopPrice = adaptiveCandidate;
+      finalStopSource = adaptiveEth.floorApplied
+        ? "eth_range_min_stop_floor"
+        : ((tpAuthority.adaptiveSlSource ?? finalStopSource) as V2CommittedStopSource);
     }
     clampApplied = finalStopSource === "policy_clamped";
     logger.info("V2_ADAPTIVE_RANGE_PRE_ENTRY_PROTECTION_PROOF", {
@@ -4741,7 +4768,7 @@ export class PaperEngine {
 
             // stopPrice recalculation
             const slReg = regimeForSl(open.regimeAtEntry);
-            const newStop = engineMirrorStopPrice(remotePos.avgPx, open.side, slReg);
+            const newStop = resolveProtectiveStopPrice(open.symbol, remotePos.avgPx, open.side, slReg, open.stopPrice);
             if (newStop != null && Number.isFinite(newStop)) {
               open.stopPrice = newStop;
             }
@@ -5090,7 +5117,7 @@ export class PaperEngine {
               // stopPrice correction based on actual avgPx after recovery
               if (remotePos && remotePos.avgPx > 0) {
                 const slReg = regimeForSl(open.regimeAtEntry);
-                const newStop = engineMirrorStopPrice(remotePos.avgPx, open.side, slReg);
+                const newStop = resolveProtectiveStopPrice(open.symbol, remotePos.avgPx, open.side, slReg, open.stopPrice);
                 if (newStop != null && Number.isFinite(newStop)) {
                   open.stopPrice = newStop;
                 }
@@ -5133,7 +5160,7 @@ export class PaperEngine {
 
                 // stopPrice correction based on actual avgPx after recovery
                 const slReg = regimeForSl(open.regimeAtEntry);
-                const newStop = engineMirrorStopPrice(remotePos.avgPx, open.side, slReg);
+                const newStop = resolveProtectiveStopPrice(open.symbol, remotePos.avgPx, open.side, slReg, open.stopPrice);
                 if (newStop != null && Number.isFinite(newStop)) {
                   open.stopPrice = newStop;
                 }
@@ -11807,11 +11834,9 @@ export class PaperEngine {
     const refPx = Number(actualPos.avgPx) || open.avgPx || open.entryPrice;
 
     if (!activeStopPrice || !Number.isFinite(activeStopPrice)) {
-      if (open.isV2Authority !== true) {
-        const mirroredSl = engineMirrorStopPrice(refPx, open.side, regime);
-        if (mirroredSl != null && Number.isFinite(mirroredSl)) {
-          activeStopPrice = mirroredSl;
-        }
+      const mirroredSl = resolveProtectiveStopPrice(open.symbol, refPx, open.side, regime, open.stopPrice);
+      if (mirroredSl != null && Number.isFinite(mirroredSl)) {
+        activeStopPrice = mirroredSl;
       }
     }
     if (!activeTpPrice || !Number.isFinite(activeTpPrice)) {
@@ -14880,7 +14905,7 @@ export class PaperEngine {
       if (open.status === "open" && (open.stopPrice === undefined || open.stopPrice === null || !Number.isFinite(open.stopPrice))) {
         const ep = open.entryPrice;
         const slReg = regimeForSl(open.regimeAtEntry);
-        const newStop = ep > 0 ? engineMirrorStopPrice(ep, open.side, slReg) : null;
+        const newStop = ep > 0 ? resolveProtectiveStopPrice(open.symbol, ep, open.side, slReg, open.stopPrice) : null;
         if (newStop != null && Number.isFinite(newStop)) {
           const oldStop = open.stopPrice;
           open = {
@@ -22949,12 +22974,6 @@ export class PaperEngine {
               partialExitRatio: authority.partialExitRatio,
               invalidationPx: stopPrice
             };
-              symbol: sym,
-              side: intentSide,
-              openedAt: openedAtMs,
-              regimeAtEntry: slReg,
-              runCycleId: this.runCycleId
-            });
             if (isPending) {
               this.logger.info("PAPER_OPEN_BLOCKED_UNFILLED_ORDER_PROOF", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
               this.logger.info("LIMIT_ENTRY_PENDING_STATE_PROOF", { symbol: sym, side: intentSide, ord_id: submit.ordId });
@@ -24029,12 +24048,6 @@ export class PaperEngine {
               : authority.invalidationPx ?? undefined
         };
 
-          symbol: record.symbol,
-          side: record.side,
-          openedAt: stage1OpenedAtMs,
-          regimeAtEntry: record.regimeAtEntry ?? entryIdentity.effectiveRegimeAtEntry,
-          runCycleId: this.runCycleId
-        });
 
         this.logger.info("POSITION_ENGINE_IDENTITY_PROOF", {
           symbol: record.symbol,
@@ -25353,7 +25366,7 @@ export class PaperEngine {
     const regime = regimeForSl(record.regimeAtEntry);
     
     if (record.stopPrice == null || !Number.isFinite(record.stopPrice)) {
-      const mirrored = engineMirrorStopPrice(record.entryPrice, record.side, regime);
+      const mirrored = resolveProtectiveStopPrice(record.symbol, record.entryPrice, record.side, regime, record.stopPrice);
       if (mirrored != null && Number.isFinite(mirrored)) {
         record.stopPrice = mirrored;
         modified = true;

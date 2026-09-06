@@ -1,4 +1,8 @@
 import type { MarketRegime } from "../../strategy/market-regime-detector";
+import {
+    applyEthRangeMinimumStopDistance,
+    isEthUsdtRangeStopContext
+} from "./eth-range-minimum-stop-authority";
 
 /** Mirrors range-executor exit-plan distance ratios (range-executor.ts). */
 export const RANGE_MIN_STOP_ATR_MULT = 0.5;
@@ -89,6 +93,7 @@ export function shouldApplyAdaptiveRangePreEntryProtection(input: Readonly<{
 }
 
 export function computeAdaptiveRangePreEntryProtection(input: Readonly<{
+    symbol?: string;
     side: "long" | "short";
     entryPx: number;
     rawStructuralSl: number;
@@ -225,8 +230,11 @@ export function computeAdaptiveRangePreEntryProtection(input: Readonly<{
                 : Math.max(adaptiveSl, structuralSl);
     }
 
-    // Downstream non-inward-tightening invariant against canonical policy SL
-    if (isFinitePositive(input.rawPolicySl)) {
+    // Downstream non-inward-tightening invariant against canonical policy SL (BTC RANGE only)
+    if (
+        isFinitePositive(input.rawPolicySl) &&
+        !(input.symbol && isEthUsdtRangeStopContext(input.symbol, "RANGE"))
+    ) {
         if (input.side === "long" && adaptiveSl > input.rawPolicySl) {
             adaptiveSl = input.rawPolicySl;
             slSource = "policy_clamped";
@@ -234,6 +242,18 @@ export function computeAdaptiveRangePreEntryProtection(input: Readonly<{
             adaptiveSl = input.rawPolicySl;
             slSource = "policy_clamped";
         }
+    }
+
+    const ethCanonical = applyEthRangeMinimumStopDistance({
+        symbol: input.symbol ?? "",
+        regime: "RANGE",
+        side: input.side,
+        entryReferencePrice: input.entryPx,
+        candidateStopPrice: adaptiveSl
+    });
+    adaptiveSl = ethCanonical.canonicalStopPrice;
+    if (ethCanonical.floorApplied) {
+        slSource = "eth_range_min_stop_floor";
     }
 
     const pctWidenCandidate =

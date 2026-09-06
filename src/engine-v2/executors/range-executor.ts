@@ -6,6 +6,22 @@ import {
     getClosedCandlesForStructuralStop,
     resolveFastTrendShiftStructuralStop
 } from "../risk-sizing/fast-trend-shift-structural-stop";
+import { applyEthRangeMinimumStopDistance } from "../execution/eth-range-minimum-stop-authority";
+
+function canonicalizeV2RangeStopPrice(
+    symbol: string,
+    side: "long" | "short",
+    entryPx: number,
+    candidateStopPrice: number
+): number {
+    return applyEthRangeMinimumStopDistance({
+        symbol: String(symbol),
+        regime: "RANGE",
+        side,
+        entryReferencePrice: entryPx,
+        candidateStopPrice
+    }).canonicalStopPrice;
+}
 
 export type RangeContinuationPhase = "IDLE" | "DEADLOCK_COUNTING" | "CONTINUATION_WATCH" | "RETEST_TOUCHED" | "RETEST_CONFIRMED" | "EXPIRED";
 
@@ -232,6 +248,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             };
         }
         const baseSizeIntent = judgment.diagnostics?.fastTrendShift?.baseSizeIntent ?? 0.32;
+        const stopPrice = canonicalizeV2RangeStopPrice(String(input.symbol), "long", lastPrice, resolved.stopPrice);
         return {
             signal: "LONG_CANDIDATE",
             side: "long",
@@ -239,8 +256,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             baseSizeIntent,
             recheckSuggested: true,
             isAddOnEligible: false,
-            stopPrice: resolved.stopPrice,
-            invalidationPx: resolved.stopPrice,
+            stopPrice,
+            invalidationPx: stopPrice,
             metadata: {
                 early_probe: true,
                 fast_trend_shift: true,
@@ -295,6 +312,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             };
         }
         const baseSizeIntent = judgment.diagnostics?.fastTrendShift?.baseSizeIntent ?? 0.32;
+        const stopPrice = canonicalizeV2RangeStopPrice(String(input.symbol), "short", lastPrice, resolved.stopPrice);
         return {
             signal: "SHORT_CANDIDATE",
             side: "short",
@@ -302,8 +320,8 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             baseSizeIntent,
             recheckSuggested: true,
             isAddOnEligible: false,
-            stopPrice: resolved.stopPrice,
-            invalidationPx: resolved.stopPrice,
+            stopPrice,
+            invalidationPx: stopPrice,
             metadata: {
                 early_probe: true,
                 fast_trend_shift: true,
@@ -334,7 +352,12 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         
         const stopBasisMid = boxMid * 0.998; 
         const stopBasisAtr = lastPrice - (atr * 2.0);
-        const stopPrice = Math.min(swingLow, stopBasisMid, stopBasisAtr);
+        const stopPrice = canonicalizeV2RangeStopPrice(
+            String(input.symbol),
+            "long",
+            lastPrice,
+            Math.min(swingLow, stopBasisMid, stopBasisAtr)
+        );
 
         const baseSizeIntent = judgment.diagnostics?.fastTrendShift?.baseSizeIntent ?? 0.32;
 
@@ -371,7 +394,12 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         
         const stopBasisMid = boxMid * 1.002; 
         const stopBasisAtr = lastPrice + (atr * 2.0);
-        const stopPrice = Math.max(swingHigh, stopBasisMid, stopBasisAtr);
+        const stopPrice = canonicalizeV2RangeStopPrice(
+            String(input.symbol),
+            "short",
+            lastPrice,
+            Math.max(swingHigh, stopBasisMid, stopBasisAtr)
+        );
 
         const baseSizeIntent = judgment.diagnostics?.fastTrendShift?.baseSizeIntent ?? 0.32;
 
@@ -837,7 +865,12 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     rangeContinuationStateMap.set(input.symbol, cState);
                 }
                 
-                const stopPrice = watchBoundary * 1.002;
+                const stopPrice = canonicalizeV2RangeStopPrice(
+                    String(input.symbol),
+                    "short",
+                    lastPrice,
+                    watchBoundary * 1.002
+                );
                 return {
                     signal: "SHORT_CANDIDATE",
                     side: "short",
@@ -913,7 +946,12 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
                     rangeContinuationStateMap.set(input.symbol, cState);
                 }
                 
-                const stopPrice = watchBoundary * 0.998;
+                const stopPrice = canonicalizeV2RangeStopPrice(
+                    String(input.symbol),
+                    "long",
+                    lastPrice,
+                    watchBoundary * 0.998
+                );
                 return {
                     signal: "LONG_CANDIDATE",
                     side: "long",
@@ -1294,6 +1332,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
 
     if (side === "long") {
         inv = Math.min(boxLow - minStopDistance, entryPx - minStopDistance);
+        inv = canonicalizeV2RangeStopPrice(String(input.symbol), "long", entryPx, inv);
         let rawTp1Dist = Math.max(boxMid - entryPx, minProfitDistance);
         if (effectiveMaxTp1Dist > 0 && rawTp1Dist > effectiveMaxTp1Dist) rawTp1Dist = effectiveMaxTp1Dist;
         tp1 = entryPx + rawTp1Dist;
@@ -1301,6 +1340,7 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         if (tp2 <= tp1) tp2 = tp1 + minProfitDistance;
     } else if (side === "short") {
         inv = Math.max(boxHigh + minStopDistance, entryPx + minStopDistance);
+        inv = canonicalizeV2RangeStopPrice(String(input.symbol), "short", entryPx, inv);
         let rawTp1Dist = Math.max(entryPx - boxMid, minProfitDistance);
         if (effectiveMaxTp1Dist > 0 && rawTp1Dist > effectiveMaxTp1Dist) rawTp1Dist = effectiveMaxTp1Dist;
         tp1 = entryPx - rawTp1Dist;

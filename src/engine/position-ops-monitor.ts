@@ -1,5 +1,8 @@
 import type { MarketRegime } from "../strategy/market-regime-detector";
 import { stopLossPctForRegime, takeProfitPctForRegime } from "../strategy/regime-exit";
+import {
+    resolveEthRangeAwareProtectiveStopPrice
+} from "../engine-v2/execution/eth-range-minimum-stop-authority";
 import type { PaperOpenPositionRecord } from "../models/types";
 import {
   buildLedgerOkxPositionSyncSnapshot,
@@ -79,6 +82,25 @@ export function engineMirrorStopPrice(entryPx: number, side: "long" | "short", r
   if (!(entryPx > 0)) return null;
   const slPct = stopLossPctForRegime(regime);
   return side === "long" ? entryPx * (1 + slPct) : entryPx * (1 - slPct);
+}
+
+/** Protective stop for repair/rebase/ops-watch: ETH RANGE uses 0.50% floor; BTC unchanged. */
+export function resolveProtectiveStopPrice(
+  symbol: string,
+  entryPx: number,
+  side: "long" | "short",
+  regime: MarketRegime,
+  ledgerStopPx?: number | null
+): number | null {
+  if (!(entryPx > 0)) return null;
+  return resolveEthRangeAwareProtectiveStopPrice({
+    symbol,
+    regime,
+    side,
+    entryReferencePrice: entryPx,
+    ledgerStopPrice: ledgerStopPx ?? null,
+    mirrorStopPrice: engineMirrorStopPrice(entryPx, side, regime)
+  });
 }
 
 export function engineMirrorTpPrice(entryPx: number, side: "long" | "short", regime: MarketRegime): number | null {
@@ -868,9 +890,9 @@ export function buildPositionOpsSurface(input: Readonly<{
       const refSrc: PositionOpsRow["reference_source"] = ledger ? "paper_ledger" : avgPx != null ? "okx_avgPx" : "none";
       const regime = regimeForSl(ledger?.regimeAtEntry);
       const slNet = stopLossPctForRegime(regime);
-      const stopPx = refPx != null && refPx > 0 ? engineMirrorStopPrice(refPx, hit.side, regime) : null;
-      const tpPx = refPx != null && refPx > 0 ? engineMirrorTpPrice(refPx, hit.side, regime) : null;
       const ledgerStop = typeof ledger?.stopPrice === "number" && Number.isFinite(ledger.stopPrice) ? ledger.stopPrice : null;
+      const stopPx = refPx != null && refPx > 0 ? resolveProtectiveStopPrice(String(hit.symbol), refPx, hit.side, regime, ledgerStop) : null;
+      const tpPx = refPx != null && refPx > 0 ? engineMirrorTpPrice(refPx, hit.side, regime) : null;
       const ledgerTp = typeof ledger?.targetPrice1 === "number" && Number.isFinite(ledger.targetPrice1) ? ledger.targetPrice1 : null;
 
       const isV2RangePartialPlan =
