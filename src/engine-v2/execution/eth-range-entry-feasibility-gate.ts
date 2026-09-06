@@ -46,6 +46,7 @@ export interface EthRangeEntryFeasibilityInput {
     side: "long" | "short";
     regime: string;
     marketSubtype?: string | null;
+    promotionReason?: string | null;
     entryPrice: number;
     boxHigh?: number | null;
     boxLow?: number | null;
@@ -290,7 +291,9 @@ export function evaluateEthRangeEntryFeasibilityGate(
     if (
         SHOCK_OR_EMERGENCY_SUBTYPES.has(subtypeStr) ||
         subtypeStr.startsWith("SHOCK_REACTION") ||
-        subtypeStr.includes("FAST_TREND_SHIFT")
+        subtypeStr.includes("FAST_TREND_SHIFT") ||
+        String(input.promotionReason ?? "").includes("breakout_continuation") ||
+        String(input.promotionReason ?? "").includes("breakdown_continuation")
     ) {
         return makeBypassResult();
     }

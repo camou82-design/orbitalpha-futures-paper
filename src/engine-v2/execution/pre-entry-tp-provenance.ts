@@ -238,9 +238,22 @@ export function enumeratePromotedRangeTp1Candidates(input: Readonly<{
         rawCandidates.push({ price: boxEdgeTp, source: "adaptive_range_box_target" });
     }
 
+    const boxHeight = boxHigh - boxLow;
+    if (boxHeight > 0) {
+        const boxExpansionTp = side === "long" ? entry + boxHeight : entry - boxHeight;
+        if (isValidDirectionTp(side, entry, boxExpansionTp)) {
+            rawCandidates.push({ price: boxExpansionTp, source: "adaptive_range_box_target" });
+        }
+    }
+
     const engineMirror = engineMirrorTpPrice(entry, side, "RANGE");
     if (engineMirror != null && isValidDirectionTp(side, entry, engineMirror)) {
         rawCandidates.push({ price: engineMirror, source: "engine_calculated" });
+    }
+
+    const trendEngineMirror = engineMirrorTpPrice(entry, side, "TREND");
+    if (trendEngineMirror != null && isValidDirectionTp(side, entry, trendEngineMirror)) {
+        rawCandidates.push({ price: trendEngineMirror, source: "engine_calculated" });
     }
 
     const seen = new Set<string>();

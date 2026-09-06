@@ -2031,31 +2031,67 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
               ? input.snapshot.latestCandleClose
               : null;
 
-    const boundaryBrokenByLastPriceLower =
-        currentBoxLow != null && currentLastPrice != null && currentLastPrice < currentBoxLow;
+    const currentAtr =
+        typeof authoritativeInput.snapshot?.atr === "number"
+            ? authoritativeInput.snapshot.atr
+            : typeof input.snapshot?.atr === "number"
+              ? input.snapshot.atr
+              : 0;
+    const currentTickSz =
+        typeof authoritativeInput.snapshot?.tickSz === "number"
+            ? authoritativeInput.snapshot.tickSz
+            : typeof input.snapshot?.tickSz === "number"
+              ? input.snapshot.tickSz
+              : 0.10;
+    const currentBoxWidth =
+        currentBoxHigh != null && currentBoxLow != null && currentBoxHigh > currentBoxLow
+            ? (currentBoxHigh - currentBoxLow)
+            : 0;
+
+    const minPenetrationLower = Math.max(
+        currentBoxWidth > 0 ? currentBoxWidth * 0.08 : 0,
+        currentAtr > 0 ? currentAtr * 0.20 : 0,
+        5 * (currentTickSz > 0 ? currentTickSz : 0.01),
+        currentBoxLow != null ? currentBoxLow * 0.0005 : 0
+    );
+    const minPenetrationUpper = Math.max(
+        currentBoxWidth > 0 ? currentBoxWidth * 0.08 : 0,
+        currentAtr > 0 ? currentAtr * 0.20 : 0,
+        5 * (currentTickSz > 0 ? currentTickSz : 0.01),
+        currentBoxHigh != null ? currentBoxHigh * 0.0005 : 0
+    );
+
     const boundaryBrokenByCloseLower =
         currentBoxLow != null && currentClosedClose != null && currentClosedClose < currentBoxLow;
+    const strongLiveBreakLower =
+        currentBoxLow != null && currentLastPrice != null && (currentBoxLow - currentLastPrice) >= minPenetrationLower;
     const breakdownConfirmedBySubtype =
         judgment.subtype === "BREAKDOWN_RETEST_FAILED" ||
-        (execMeta as any)?.breakdownConfirmed === true;
+        (execMeta as any)?.breakdownConfirmed === true ||
+        (execMeta as any)?.retestConfirmed === true ||
+        authoritativeInput.snapshot?.retestConfirmed === true ||
+        input.snapshot?.retestConfirmed === true;
     const actualLowerBreakEvidence =
-        boundaryBrokenByLastPriceLower ||
         boundaryBrokenByCloseLower ||
-        (boxBreakSide === "lower" && (currentLastPrice == null || currentBoxLow == null || currentLastPrice <= currentBoxLow || currentClosedClose == null || currentClosedClose <= currentBoxLow)) ||
+        strongLiveBreakLower ||
+        (boxBreakSide === "lower" && (boundaryBrokenByCloseLower || strongLiveBreakLower)) ||
         breakdownConfirmedBySubtype;
 
-    const boundaryBrokenByLastPriceUpper =
-        currentBoxHigh != null && currentLastPrice != null && currentLastPrice > currentBoxHigh;
     const boundaryBrokenByCloseUpper =
         currentBoxHigh != null && currentClosedClose != null && currentClosedClose > currentBoxHigh;
+    const strongLiveBreakUpper =
+        currentBoxHigh != null && currentLastPrice != null && (currentLastPrice - currentBoxHigh) >= minPenetrationUpper;
     const breakoutConfirmedBySubtype =
         judgment.subtype === "BREAKOUT_RETEST_CONFIRMED" ||
         (judgment.subtype as string) === "BREAKOUT_RETEST_FAILED" ||
-        (execMeta as any)?.breakoutConfirmed === true;
+        (execMeta as any)?.breakoutConfirmed === true ||
+        (execMeta as any)?.retestConfirmed === true ||
+        authoritativeInput.snapshot?.retestConfirmed === true ||
+        input.snapshot?.retestConfirmed === true;
     const actualUpperBreakEvidence =
-        boundaryBrokenByLastPriceUpper ||
         boundaryBrokenByCloseUpper ||
-        (boxBreakSide === "upper" && (currentLastPrice == null || currentBoxHigh == null || currentLastPrice >= currentBoxHigh || currentClosedClose == null || currentClosedClose >= currentBoxHigh)) ||
+        strongLiveBreakUpper ||
+        (boxBreakSide === "upper" && (boundaryBrokenByCloseUpper || strongLiveBreakUpper)) ||
         breakoutConfirmedBySubtype;
 
     const downUpperFailureShort =
@@ -4874,6 +4910,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (sideCandidateBeforeVeto === "short" || v2SideAfterPromotion === "short") &&
         hardBlockPresent === false;
 
+    const isBypassRangeUpperLong =
+        vetoReason != null &&
+        shock === "UP" &&
+        (shockReactionAllowedPrimarySide === "long" || riskLongAllow === true || allowNewLong === true) &&
+        shockReactionPromotionType === "upper_breakout_continuation_long" &&
+        promotionApplied === true &&
+        finalDecisionBeforeVeto === "ENTER" &&
+        (sideCandidateBeforeVeto === "long" || v2SideAfterPromotion === "long") &&
+        hardBlockPresent === false;
+
     const isBypassRangeUpperShort =
         vetoReason != null &&
         shock === "DOWN" &&
@@ -5004,6 +5050,62 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 reason: ftsInherited != null
                     ? "shock_reaction_fts_structural_stop_inherited"
                     : "shock_reaction_continuation_short_stop_plan"
+            }));
+        } else if (isBypassRangeUpperLong) {
+            v2DecisionAfterPromotion = finalDecisionBeforeVeto; // "ENTER"
+            v2SideAfterPromotion = "long";
+            v2RejectReasonAfterPromotion = null;
+
+            const entryPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+            const atrVal = Number(authoritativeInput.snapshot.atr ?? 0);
+            const boxHighVal = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+            const boxLowVal = Number(authoritativeInput.snapshot.boxLow ?? 0);
+            const boxMidVal = boxHighVal > 0 && boxLowVal > 0 ? (boxHighVal + boxLowVal) / 2 : 0;
+
+            const candles = authoritativeInput.snapshot.candles;
+            let swingLowVal = 0;
+            if (Array.isArray(candles) && candles.length > 0) {
+                const recentLows = candles.slice(-20).map(c => Number(c.low ?? (c as any).l ?? 0));
+                swingLowVal = Math.min(...recentLows);
+            }
+
+            const minStopDist = Math.max(atrVal * 0.5, entryPrice * 0.005);
+            const atrStopCandidate = entryPrice - Math.max(atrVal * 1.5, entryPrice * 0.005);
+
+            const candidates = [
+                swingLowVal,
+                boxLowVal,
+                boxMidVal,
+                atrStopCandidate
+            ].filter(v => Number.isFinite(v) && v > 0 && v <= entryPrice - minStopDist);
+
+            let calculatedStopPrice = candidates.length > 0 ? Math.max(...candidates) : (entryPrice - minStopDist);
+            if (!Number.isFinite(calculatedStopPrice) || calculatedStopPrice >= entryPrice) {
+                calculatedStopPrice = entryPrice - minStopDist;
+            }
+
+            execution.stopPrice = calculatedStopPrice;
+            execution.invalidationPx = calculatedStopPrice;
+            v2CalculatedInvalidationPx = calculatedStopPrice;
+
+            console.info(JSON.stringify({
+                event: "V2_SHOCK_REACTION_LONG_BYPASS_PROOF",
+                symbol: String(input.symbol),
+                rangeZone: zone,
+                selected_side_before_veto: sideCandidateBeforeVeto,
+                selected_side_after_veto: v2SideAfterPromotion,
+                range_side_candidate: rangeSideCandidate,
+                trend_side_candidate: trendSideCandidate,
+                side_zone_valid: sideZoneValid,
+                quality_score: qualityScore,
+                entry_quality_grade: entryQualityGrade,
+                htf_entry_policy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+                directional_shock_state: shock,
+                finalDecisionBeforeVeto,
+                finalDecisionAfterVeto: v2DecisionAfterPromotion,
+                stopPrice: calculatedStopPrice,
+                stop_basis: "fallback_swing_box_atr",
+                bypass_reason: "SHOCK_REACTION_UPPER_BREAKOUT_LONG_BYPASS"
             }));
         } else if (isBypassRangeUpperShort) {
             v2DecisionAfterPromotion = finalDecisionBeforeVeto; // "ENTER"
@@ -7333,7 +7435,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                                 hasHardBlock: hardBlockPresent === true,
                                 htfVetoPassed: judgment.htf_entry_policy === "ALLOW" || judgment.htf_entry_policy === "PROBE_ONLY",
                                 rangeTrendConflictPassed: (judgment as any).side_veto_detail !== "RANGE_TREND_SIDE_CONFLICT",
-                                chaseGatePassed: (currentBoxPos == null || currentBoxPos <= 0.65),
+                                chaseGatePassed: (currentBoxPos == null || currentBoxPos <= 0.65 || String(promotionReason ?? "").includes("breakout_continuation") || String(promotionReason ?? "").includes("breakdown_continuation")),
                                 htf_candles: authoritativeInput.snapshot?.htf_candles ?? input.snapshot?.htf_candles ?? (authoritativeInput as any).htf_candles ?? (input as any).htf_candles,
                                 candles: authoritativeInput.snapshot?.candles ?? input.snapshot?.candles
                             });
@@ -7373,7 +7475,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                                     hasHardBlock: hardBlockPresent === true,
                                     htfVetoPassed: judgment.htf_entry_policy === "ALLOW" || judgment.htf_entry_policy === "PROBE_ONLY",
                                     rangeTrendConflictPassed: (judgment as any).side_veto_detail !== "RANGE_TREND_SIDE_CONFLICT",
-                                    chaseGatePassed: (currentBoxPos == null || currentBoxPos <= 0.65)
+                                    chaseGatePassed: (currentBoxPos == null || currentBoxPos <= 0.65 || String(promotionReason ?? "").includes("breakout_continuation") || String(promotionReason ?? "").includes("breakdown_continuation"))
                                 });
 
                                 if (input.evaluationMode !== "diagnostic") {
@@ -9459,6 +9561,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             executionAction: decision.executionAction,
             riskBlocked: decision.risk.isBlocked,
             riskBlockReason: decision.risk.blockReason,
+            final_enter_block_reason: decision.metadata?.final_enter_block_reason,
+            finalOrderNotionalUsdt: decision.risk.finalOrderNotionalUsdt,
+            hasCommittedPlan: decision.committedRiskPlan != null,
+            newStopPrice: decision.lifecycleAuthority?.newStopPrice,
             promotionReason
         }));
     }

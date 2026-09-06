@@ -4,6 +4,7 @@ import {
     getClosedCandlesForStructuralStop,
     resolveFastTrendShiftStructuralStop
 } from "../risk-sizing/fast-trend-shift-structural-stop";
+import { applyEthRangeMinimumStopDistance } from "../execution/eth-range-minimum-stop-authority";
 
 // Transition Failure Layer Constants
 const FAILURE_LOOKBACK_BARS = 12;
@@ -871,6 +872,16 @@ export function executeTransitionRegime(input: EngineV2Input, judgment?: MarketJ
         const baseInv = boxHigh > 0 ? boxHigh : entryPx + atr * 1.5;
         stopPrice = Math.max(baseInv + atr * 0.2, entryPx + atr * 1.0);
         invalidationPx = Math.max(baseInv + atr * 0.5, entryPx + atr * 1.5);
+    }
+
+    if (stopPrice != null && Number.isFinite(stopPrice) && (side === "long" || side === "short")) {
+        stopPrice = applyEthRangeMinimumStopDistance({
+            symbol: String(input.symbol),
+            regime: "RANGE",
+            side,
+            entryReferencePrice: entryPx,
+            candidateStopPrice: stopPrice
+        }).canonicalStopPrice;
     }
 
     if (reason === "WHIPSAW_SOFT_WATCH_DOWN_MID_SHORT_RETEST" && (stopPrice == null || isNaN(stopPrice))) {

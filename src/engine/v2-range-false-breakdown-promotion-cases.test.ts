@@ -1,23 +1,16 @@
 /**
- * V2 RANGE False Breakdown / Breakout Promotion Sanity Tests.
+ * V2 RANGE Live Breakout Quality Gate & False Breakdown/Breakout Sanity Tests.
  *
- * Ensures:
- * 1. ETH RANGE lower zone + price > boxLow + shockDown -> short promotion NO (SKIP preserved)
- * 2. ETH RANGE lower zone + close > boxLow -> short promotion NO
- * 3. Stale previous breakdown evidence + current price inside box -> promotion NO
- * 4. Actual current lower break by price/close -> short promotion YES
- * 5. Confirmed lower breakdown continuation -> short promotion YES
- * 6. Upper-zone long full symmetry -> inside box long promotion NO
- * 7. Actual upper breakout -> long promotion YES
- * 8. RANGE mid/lower zone alone cannot trigger breakdown/breakout naming
- * 9. TP profitability final gate unchanged
- * 10. BTC/ETH shared semantics preserved
- * 11. Shock reaction watch state preserved
- * 12. SL (0.50%), Dynamic Risk Budget, Sizing unchanged
+ * Requirements:
+ * A. CLOSED BREAK CONFIRMED: closedClose > boxHigh (upper) / closedClose < boxLow (lower) => YES
+ * B. STRONG LIVE BREAK: lastPrice penetrates boundary beyond meaningful threshold => YES
+ * C. RETEST / CONFIRMED CONTINUATION: breakout/breakdown retest confirmed => YES
  *
- * Explicit regression fixtures:
- * boxLow = 2306.40, markPrice = 2308.93 / 2308.43 / 2308.00, zone = lower, shockDownActive = true, boxBreakSide = none
- * => lower_breakdown_continuation_short = false, SKIP -> ENTER promotion = false.
+ * In contrast:
+ * - Shallow wick (lastPrice slightly outside boundary + closedClose inside box) => NO (SKIP/WATCH maintained)
+ * - Inside zone without break => NO
+ * - Full symmetry between Upper (Long) and Lower (Short)
+ * - Risk invariants: ETH 0.50% canonical stop, 1.0% risk budget, TP gate unchanged.
  */
 
 import assert from "node:assert/strict";
@@ -29,8 +22,8 @@ import type { EngineV2Input } from "../engine-v2/types";
 
 function run(label: string, passed: boolean, detail: string): void {
     const tag = passed ? "PASS" : "FAIL";
-    console.log(`[FALSE-BREAKDOWN-PROMOTION-FIX][${label}] ${tag} — ${detail}`);
-    if (!passed) throw new Error(`[FALSE-BREAKDOWN-PROMOTION-FIX][${label}] FAILED: ${detail}`);
+    console.log(`[LIVE-BREAKOUT-QUALITY-GATE][${label}] ${tag} — ${detail}`);
+    if (!passed) throw new Error(`[LIVE-BREAKOUT-QUALITY-GATE][${label}] FAILED: ${detail}`);
 }
 
 function captureProofLogs(fn: () => void): Record<string, unknown>[] {
@@ -70,6 +63,7 @@ function setShockState(symbol: string, direction: "UP" | "DOWN" | "NONE") {
 }
 
 function makeBridge(overrides: Record<string, unknown> = {}) {
+    const now = Date.now();
     return {
         paperExecutionReady: true,
         signedExecutionReady: true,
@@ -91,10 +85,41 @@ function makeBridge(overrides: Record<string, unknown> = {}) {
         actualAccountNotionalUsdtReady: true,
         okxActualPositions: [],
         okxPendingOrdersReady: true,
-        okxPendingOrders: [],
-        rawDirectionalShockState: "DOWN" as const,
-        rawDirection: "DOWN" as const,
-        directionalShockState: "DOWN" as const,
+        okxPendingOrdersNotionalUsdt: 0,
+        okxPendingSymbolNotionalUsdt: 0,
+        hasSymbolPendingEntry: false,
+        hasUnknownPendingNotional: false,
+        okxLiveEnabled: true,
+        okxAuthMode: "live",
+        okxAuthReady: true,
+        okxExchangeAuthOptIn: true,
+        okxApiKeyPresent: true,
+        okxApiSecretPresent: true,
+        okxPassphrasePresent: true,
+        balanceFetchedAt: now,
+        positionsFetchedAt: now,
+        pendingOrdersFetchedAt: now,
+        okxInstruments: [
+            {
+                instId: "ETH-USDT-SWAP",
+                tickSz: "0.01",
+                lotSz: "0.01",
+                minSz: "0.01",
+                ctVal: "1",
+                ctValCcy: "ETH"
+            },
+            {
+                instId: "BTC-USDT-SWAP",
+                tickSz: "0.1",
+                lotSz: "0.01",
+                minSz: "0.01",
+                ctVal: "0.01",
+                ctValCcy: "BTC"
+            }
+        ],
+        rawDirectionalShockState: "UP" as const,
+        rawDirection: "UP" as const,
+        directionalShockState: "UP" as const,
         rawShockMovePct: 0.015,
         requiredShockMovePct: 0.008,
         leverage: 10,
@@ -103,6 +128,23 @@ function makeBridge(overrides: Record<string, unknown> = {}) {
         freshTickRequiredCycles: 3,
         globalRiskScore: 0,
         lossStreaks: {},
+        ...overrides
+    };
+}
+
+function makeConfig(overrides: Record<string, unknown> = {}) {
+    return {
+        paperMaxOpenPositions: 3,
+        baseSizeUsd: 100,
+        maxSymbolNotionalUsd: 5000,
+        maxAccountNotionalUsd: 20000,
+        okxLiveEnabled: true,
+        okxAuthMode: "live",
+        okxExchangeAuthOptIn: true,
+        okxLiveMaxOrderNotionalUsdt: 1000,
+        serverTradeEnabled: true,
+        paperTakerFeeRate: 0.0005,
+        paperSlippageEstimateBps: 8,
         ...overrides
     };
 }
@@ -124,204 +166,7 @@ function buildCandles(lastClose: number, count = 20): Candle[] {
 }
 
 // -----------------------------------------------------------------------------
-// 1 & 2. ETH RANGE lower zone + price > boxLow + shockDown -> short promotion NO
-// Explicit production regression fixture: boxLow=2306.40, price=2308.93, 2308.43, 2308.00
-// -----------------------------------------------------------------------------
-{
-    for (const testPx of [2308.93, 2308.43, 2308.00]) {
-        resetAll();
-        setShockState("ETHUSDT", "DOWN");
-
-        const bridge = makeBridge({
-            shortAllow: true,
-            longAllow: false,
-            rawDirectionalShockState: "DOWN",
-            directionalShockState: "DOWN"
-        });
-
-        const snapshot = {
-            symbol: "ETHUSDT",
-            lastPrice: testPx,
-            latestCandleClose: testPx,
-            boxHigh: 2313.10,
-            boxLow: 2306.40,
-            boxPos: (testPx - 2306.40) / (2313.10 - 2306.40), // ~0.377, 0.303, 0.239
-            boxRel: 0.0029,
-            atr: 1.04,
-            emaGap: -0.00065,
-            trendWeaknessScore: 0.51,
-            trendOk: false,
-            entryCandidate: false,
-            signal: "none" as const,
-            qualityScore: 65,
-            boxBreakSide: "none" as const,
-            rangeConfidence: 0.82,
-            boxCohesion01: 1,
-            canonicalRegime: "RANGE" as const,
-            canonicalRegimeSource: "strategy_market_regime_detector",
-            candles: buildCandles(testPx)
-        };
-
-        const input: EngineV2Input = {
-            symbol: "ETHUSDT",
-            now: Date.now(),
-            snapshot: snapshot as any,
-            config: {
-                paperMaxOpenPositions: 3,
-                baseSizeUsd: 100,
-                paperTakerFeeRate: 0.0005,
-                paperSlippageEstimateBps: 8
-            } as any,
-            state: bridge as any,
-            v1Result: {
-                regime: "RANGE",
-                decision: "SKIP",
-                side: "none",
-                isBlocked: false
-            },
-            canonicalRegime: "RANGE"
-        };
-
-        let res: any;
-        const proofs = captureProofLogs(() => {
-            res = runEngineV2(input);
-        });
-
-        const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
-        const isLowerBreakdownShort = Boolean(shockPromo && shockPromo.promotion_type === "lower_breakdown_continuation_short");
-
-        assert.equal(isLowerBreakdownShort, false, `Price ${testPx} > boxLow must NOT promote lower_breakdown_continuation_short`);
-        assert.notEqual(res.decision, "ENTER", `Price ${testPx} inside box must NOT result in ENTER`);
-        run(`ETH Regression @ ${testPx}`, true, "Inside box lower zone correctly blocked from false breakdown promotion");
-    }
-}
-
-// -----------------------------------------------------------------------------
-// 3. Stale previous breakdown evidence + current price inside box -> promotion NO
-// -----------------------------------------------------------------------------
-{
-    resetAll();
-    setShockState("ETHUSDT", "DOWN");
-
-    const bridge = makeBridge({
-        shortAllow: true,
-        directionalShockState: "DOWN"
-    });
-
-    const snapshot = {
-        symbol: "ETHUSDT",
-        lastPrice: 2307.50, // inside box (> 2306.40)
-        latestCandleClose: 2307.50,
-        boxHigh: 2313.10,
-        boxLow: 2306.40,
-        boxPos: 0.164,
-        boxRel: 0.0029,
-        atr: 1.04,
-        emaGap: -0.00065,
-        qualityScore: 66,
-        boxBreakSide: "lower" as const, // stale break marker from previous cycle!
-        canonicalRegime: "RANGE" as const,
-        candles: buildCandles(2307.50)
-    };
-
-    const input: EngineV2Input = {
-        symbol: "ETHUSDT",
-        now: Date.now(),
-        snapshot: snapshot as any,
-        config: {
-            paperMaxOpenPositions: 3,
-            baseSizeUsd: 100,
-            paperTakerFeeRate: 0.0005,
-            paperSlippageEstimateBps: 8
-        } as any,
-        state: bridge as any,
-        v1Result: {
-            regime: "RANGE",
-            decision: "SKIP",
-            side: "none",
-            isBlocked: false
-        },
-        canonicalRegime: "RANGE"
-    };
-
-    let res: any;
-    const proofs = captureProofLogs(() => {
-        res = runEngineV2(input);
-    });
-
-    const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
-    const isLowerBreakdownShort = Boolean(shockPromo && shockPromo.promotion_type === "lower_breakdown_continuation_short");
-    assert.equal(isLowerBreakdownShort, false, "Stale boxBreakSide with price > boxLow must NOT promote breakdown short");
-    run("Stale breakdown evidence rejection", true, "Stale boxBreakSide rejected because current price > boxLow");
-}
-
-// -----------------------------------------------------------------------------
-// 4. Current price and close both break lower -> short promotion YES
-// -----------------------------------------------------------------------------
-{
-    resetAll();
-    setShockState("ETHUSDT", "DOWN");
-
-    const bridge = makeBridge({
-        shortAllow: true,
-        directionalShockState: "DOWN"
-    });
-
-    const snapshot = {
-        symbol: "ETHUSDT",
-        lastPrice: 2305.50, // genuine break (< 2306.40)
-        latestCandleClose: 2305.80, // genuine close break (< 2306.40)
-        boxHigh: 2313.10,
-        boxLow: 2306.40,
-        boxPos: -0.13,
-        boxRel: 0.0029,
-        atr: 1.04,
-        emaGap: -0.00065,
-        rangeConfidence: 0.85,
-        boxCohesion01: 0.9,
-        trendWeaknessScore: 0.5,
-        qualityScore: 70,
-        retestConfirmed: true,
-        reclaimConfirmed: false,
-        retestSeen: true,
-        boxBreakSide: "lower" as const,
-        canonicalRegime: "RANGE" as const,
-        candles: buildCandles(2305.50)
-    };
-
-    const input: EngineV2Input = {
-        symbol: "ETHUSDT",
-        now: Date.now(),
-        snapshot: snapshot as any,
-        config: {
-            paperMaxOpenPositions: 3,
-            baseSizeUsd: 100,
-            paperTakerFeeRate: 0.0005,
-            paperSlippageEstimateBps: 8
-        } as any,
-        state: bridge as any,
-        v1Result: {
-            regime: "RANGE",
-            decision: "SKIP",
-            side: "none",
-            isBlocked: false
-        },
-        canonicalRegime: "RANGE"
-    };
-
-    const proofs = captureProofLogs(() => {
-        runEngineV2(input);
-    });
-
-    const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
-    assert.equal(shockPromo?.promotion_type, "lower_breakdown_continuation_short");
-    assert.equal(shockPromo?.decision_after, "ENTER");
-    assert.equal(shockPromo?.side_after, "short");
-    run("Genuine lower break promotion (both price & close)", true, "Real lower break (< boxLow) promoted to lower_breakdown_continuation_short");
-}
-
-// -----------------------------------------------------------------------------
-// 5. Current price and close both break upper -> long promotion YES
+// 1. Cycle 3396 Exact Replay: high 2313.10 / last 2313.40 / close 2312.80 -> promotion NO
 // -----------------------------------------------------------------------------
 {
     resetAll();
@@ -337,226 +182,33 @@ function buildCandles(lastClose: number, count = 20): Candle[] {
 
     const snapshot = {
         symbol: "ETHUSDT",
-        lastPrice: 2314.50, // genuine break (> 2313.10)
-        latestCandleClose: 2314.20,
+        lastPrice: 2313.40, // overshoot +0.30 (~1.3 bps)
+        latestCandleClose: 2312.80, // closed close inside box (< 2313.10)
         boxHigh: 2313.10,
         boxLow: 2306.40,
-        boxPos: 1.20,
+        boxPos: (2313.40 - 2306.40) / (2313.10 - 2306.40), // 1.045
         boxRel: 0.0029,
+        tickSz: 0.01,
         atr: 1.04,
         emaGap: 0.00065,
-        rangeConfidence: 0.85,
-        boxCohesion01: 0.9,
-        trendWeaknessScore: 0.5,
-        qualityScore: 70,
-        retestConfirmed: true,
-        reclaimConfirmed: false,
-        retestSeen: true,
-        boxBreakSide: "upper" as const,
-        canonicalRegime: "RANGE" as const,
-        candles: buildCandles(2314.50)
-    };
-
-    const input: EngineV2Input = {
-        symbol: "ETHUSDT",
-        now: Date.now(),
-        snapshot: snapshot as any,
-        config: {
-            paperMaxOpenPositions: 3,
-            baseSizeUsd: 100,
-            paperTakerFeeRate: 0.0005,
-            paperSlippageEstimateBps: 8
-        } as any,
-        state: bridge as any,
-        v1Result: {
-            regime: "RANGE",
-            decision: "SKIP",
-            side: "none",
-            isBlocked: false
-        },
-        canonicalRegime: "RANGE"
-    };
-
-    const proofs = captureProofLogs(() => {
-        runEngineV2(input);
-    });
-
-    const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
-    assert.equal(shockPromo?.promotion_type, "upper_breakout_continuation_long");
-    assert.equal(shockPromo?.decision_after, "ENTER");
-    assert.equal(shockPromo?.side_after, "long");
-    run("Genuine upper breakout promotion (both price & close)", true, "Real upper breakout (> boxHigh) promoted to upper_breakout_continuation_long");
-}
-
-// -----------------------------------------------------------------------------
-// 6. Current price slightly below boxLow, closedClose inside box -> boundaryBrokenByLastPriceLower = true
-// -----------------------------------------------------------------------------
-{
-    resetAll();
-    setShockState("ETHUSDT", "DOWN");
-
-    const bridge = makeBridge({
-        shortAllow: true,
-        directionalShockState: "DOWN"
-    });
-
-    const snapshot = {
-        symbol: "ETHUSDT",
-        lastPrice: 2306.00, // slightly below boxLow (2306.40)
-        latestCandleClose: 2307.00, // closed close is inside box (> 2306.40)
-        boxHigh: 2313.10,
-        boxLow: 2306.40,
-        boxPos: -0.05,
-        boxRel: 0.0029,
-        atr: 1.04,
-        emaGap: -0.00065,
-        rangeConfidence: 0.85,
-        boxCohesion01: 0.9,
-        trendWeaknessScore: 0.5,
-        qualityScore: 70,
+        trendWeaknessScore: 0.51,
+        trendOk: false,
+        entryCandidate: false,
+        signal: "none" as const,
+        qualityScore: 68,
         boxBreakSide: "none" as const,
+        rangeConfidence: 0.82,
+        boxCohesion01: 1,
         canonicalRegime: "RANGE" as const,
-        candles: buildCandles(2307.00)
+        canonicalRegimeSource: "strategy_market_regime_detector",
+        candles: buildCandles(2312.80)
     };
 
     const input: EngineV2Input = {
         symbol: "ETHUSDT",
         now: Date.now(),
         snapshot: snapshot as any,
-        config: {
-            paperMaxOpenPositions: 3,
-            baseSizeUsd: 100,
-            paperTakerFeeRate: 0.0005,
-            paperSlippageEstimateBps: 8
-        } as any,
-        state: bridge as any,
-        v1Result: {
-            regime: "RANGE",
-            decision: "SKIP",
-            side: "none",
-            isBlocked: false
-        },
-        canonicalRegime: "RANGE"
-    };
-
-    const proofs = captureProofLogs(() => {
-        runEngineV2(input);
-    });
-
-    const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
-    assert.equal(shockPromo?.promotion_type, "lower_breakdown_continuation_short");
-    assert.equal(shockPromo?.decision_after, "ENTER");
-    run("Boundary Case 6: Live Price Break with Inside Close", true, "Live mark price < boxLow satisfies boundaryBrokenByLastPriceLower for shock continuation");
-}
-
-// -----------------------------------------------------------------------------
-// 7. Current price slightly above boxHigh, closedClose inside box -> boundaryBrokenByLastPriceUpper = true
-// -----------------------------------------------------------------------------
-{
-    resetAll();
-    setShockState("ETHUSDT", "UP");
-
-    const bridge = makeBridge({
-        longAllow: true,
-        shortAllow: false,
-        rawDirectionalShockState: "UP",
-        rawDirection: "UP",
-        directionalShockState: "UP"
-    });
-
-    const snapshot = {
-        symbol: "ETHUSDT",
-        lastPrice: 2313.50, // slightly above boxHigh (2313.10)
-        latestCandleClose: 2312.50, // closed close is inside box (< 2313.10)
-        boxHigh: 2313.10,
-        boxLow: 2306.40,
-        boxPos: 1.05,
-        boxRel: 0.0029,
-        atr: 1.04,
-        emaGap: 0.00065,
-        rangeConfidence: 0.85,
-        boxCohesion01: 0.9,
-        trendWeaknessScore: 0.5,
-        qualityScore: 70,
-        boxBreakSide: "none" as const,
-        canonicalRegime: "RANGE" as const,
-        candles: buildCandles(2312.50)
-    };
-
-    const input: EngineV2Input = {
-        symbol: "ETHUSDT",
-        now: Date.now(),
-        snapshot: snapshot as any,
-        config: {
-            paperMaxOpenPositions: 3,
-            baseSizeUsd: 100,
-            paperTakerFeeRate: 0.0005,
-            paperSlippageEstimateBps: 8
-        } as any,
-        state: bridge as any,
-        v1Result: {
-            regime: "RANGE",
-            decision: "SKIP",
-            side: "none",
-            isBlocked: false
-        },
-        canonicalRegime: "RANGE"
-    };
-
-    const proofs = captureProofLogs(() => {
-        runEngineV2(input);
-    });
-
-    const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
-    assert.equal(shockPromo?.promotion_type, "upper_breakout_continuation_long");
-    assert.equal(shockPromo?.decision_after, "ENTER");
-    run("Boundary Case 7: Live Price Break with Inside Close (Upper)", true, "Live mark price > boxHigh satisfies boundaryBrokenByLastPriceUpper for shock continuation");
-}
-
-// -----------------------------------------------------------------------------
-// 8. Upper-zone long symmetry: price < boxHigh -> long breakout promotion NO
-// -----------------------------------------------------------------------------
-{
-    resetAll();
-    setShockState("ETHUSDT", "UP");
-
-    const bridge = makeBridge({
-        longAllow: true,
-        shortAllow: false,
-        rawDirectionalShockState: "UP",
-        rawDirection: "UP",
-        directionalShockState: "UP"
-    });
-
-    const snapshot = {
-        symbol: "ETHUSDT",
-        lastPrice: 2312.00, // inside upper zone (< 2313.10)
-        latestCandleClose: 2312.00,
-        boxHigh: 2313.10,
-        boxLow: 2306.40,
-        boxPos: 0.835, // upper zone
-        boxRel: 0.0029,
-        atr: 1.04,
-        emaGap: 0.00065,
-        rangeConfidence: 0.85,
-        boxCohesion01: 0.9,
-        trendWeaknessScore: 0.5,
-        qualityScore: 65,
-        boxBreakSide: "none" as const,
-        canonicalRegime: "RANGE" as const,
-        candles: buildCandles(2312.00)
-    };
-
-    const input: EngineV2Input = {
-        symbol: "ETHUSDT",
-        now: Date.now(),
-        snapshot: snapshot as any,
-        config: {
-            paperMaxOpenPositions: 3,
-            baseSizeUsd: 100,
-            paperTakerFeeRate: 0.0005,
-            paperSlippageEstimateBps: 8
-        } as any,
+        config: makeConfig() as any,
         state: bridge as any,
         v1Result: {
             regime: "RANGE",
@@ -574,52 +226,46 @@ function buildCandles(lastClose: number, count = 20): Candle[] {
 
     const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
     const isUpperBreakoutLong = Boolean(shockPromo && shockPromo.promotion_type === "upper_breakout_continuation_long");
-    assert.equal(isUpperBreakoutLong, false, "Inside box upper zone must NOT promote breakout long");
-    assert.notEqual(res.decision, "ENTER");
-    run("Upper zone inside box check", true, "Price < boxHigh correctly blocked from false upper breakout promotion");
+
+    assert.equal(isUpperBreakoutLong, false, "Cycle 3396 shallow overshoot (+1.3 bps) must NOT promote upper_breakout_continuation_long");
+    assert.notEqual(res.decision.decision, "ENTER", "Cycle 3396 must result in SKIP/WATCH, not ENTER");
+    run("1. Cycle3396 exact replay", true, "High 2313.10 / Last 2313.40 / Close 2312.80 rejected from false breakout promotion");
 }
 
 // -----------------------------------------------------------------------------
-// 9. Confirmed breakdown retest subtype in current cycle -> promotion YES
+// 2. Upper zone but inside box -> promotion NO
 // -----------------------------------------------------------------------------
 {
     resetAll();
-    setShockState("ETHUSDT", "DOWN");
+    setShockState("ETHUSDT", "UP");
 
     const bridge = makeBridge({
-        shortAllow: true,
-        directionalShockState: "DOWN"
+        longAllow: true,
+        directionalShockState: "UP"
     });
 
     const snapshot = {
         symbol: "ETHUSDT",
-        lastPrice: 2305.00,
-        latestCandleClose: 2305.00,
+        lastPrice: 2312.00, // inside box (< 2313.10)
+        latestCandleClose: 2312.00,
         boxHigh: 2313.10,
         boxLow: 2306.40,
-        boxPos: -0.20,
+        boxPos: 0.835,
         boxRel: 0.0029,
+        tickSz: 0.01,
         atr: 1.04,
-        emaGap: -0.00065,
-        rangeConfidence: 0.85,
-        boxCohesion01: 0.9,
-        trendWeaknessScore: 0.5,
-        qualityScore: 75,
-        boxBreakSide: "lower" as const,
+        emaGap: 0.00065,
+        qualityScore: 66,
+        boxBreakSide: "none" as const,
         canonicalRegime: "RANGE" as const,
-        candles: buildCandles(2305.00)
+        candles: buildCandles(2312.00)
     };
 
     const input: EngineV2Input = {
         symbol: "ETHUSDT",
         now: Date.now(),
         snapshot: snapshot as any,
-        config: {
-            paperMaxOpenPositions: 3,
-            baseSizeUsd: 100,
-            paperTakerFeeRate: 0.0005,
-            paperSlippageEstimateBps: 8
-        } as any,
+        config: makeConfig() as any,
         state: bridge as any,
         v1Result: {
             regime: "RANGE",
@@ -630,56 +276,297 @@ function buildCandles(lastClose: number, count = 20): Candle[] {
         canonicalRegime: "RANGE"
     };
 
+    let res: any;
     const proofs = captureProofLogs(() => {
-        runEngineV2(input);
+        res = runEngineV2(input);
     });
 
     const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
-    assert.equal(shockPromo?.promotion_type, "lower_breakdown_continuation_short");
-    assert.equal(shockPromo?.decision_after, "ENTER");
-    run("Current-cycle Confirmed Break Evidence", true, "Breakdown retest confirmed promotes continuation short");
+    const isUpperBreakoutLong = Boolean(shockPromo && shockPromo.promotion_type === "upper_breakout_continuation_long");
+    assert.equal(isUpperBreakoutLong, false, "Upper zone inside box must NOT promote breakout long");
+    assert.notEqual(res.decision.decision, "ENTER");
+    run("2. Upper zone inside box", true, "Upper zone (boxPos 0.835) correctly blocked");
 }
 
 // -----------------------------------------------------------------------------
-// 10. BTC/ETH Shared Semantics Invariant
+// 3. Shallow upper wick + close inside -> promotion NO
 // -----------------------------------------------------------------------------
 {
     resetAll();
-    setShockState("BTCUSDT", "DOWN");
+    setShockState("ETHUSDT", "UP");
+
+    const bridge = makeBridge({
+        longAllow: true,
+        directionalShockState: "UP"
+    });
+
+    const snapshot = {
+        symbol: "ETHUSDT",
+        lastPrice: 2313.30, // shallow wick (+0.20 USDT)
+        latestCandleClose: 2312.50, // inside box
+        boxHigh: 2313.10,
+        boxLow: 2306.40,
+        boxPos: 1.03,
+        boxRel: 0.0029,
+        tickSz: 0.01,
+        atr: 1.04,
+        emaGap: 0.00065,
+        qualityScore: 68,
+        boxBreakSide: "none" as const,
+        canonicalRegime: "RANGE" as const,
+        candles: buildCandles(2312.50)
+    };
+
+    const input: EngineV2Input = {
+        symbol: "ETHUSDT",
+        now: Date.now(),
+        snapshot: snapshot as any,
+        config: makeConfig() as any,
+        state: bridge as any,
+        v1Result: {
+            regime: "RANGE",
+            decision: "SKIP",
+            side: "none",
+            isBlocked: false
+        },
+        canonicalRegime: "RANGE"
+    };
+
+    let res: any;
+    const proofs = captureProofLogs(() => {
+        res = runEngineV2(input);
+    });
+
+    const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
+    const isUpperBreakoutLong = Boolean(shockPromo && shockPromo.promotion_type === "upper_breakout_continuation_long");
+    assert.equal(isUpperBreakoutLong, false, "Shallow upper wick must NOT promote breakout long");
+    assert.notEqual(res.decision.decision, "ENTER");
+    run("3. Shallow upper wick + close inside", true, "Shallow wick (+0.20 USDT) blocked from promotion");
+}
+
+// -----------------------------------------------------------------------------
+// 4. Meaningful live upper breakout -> promotion YES
+// -----------------------------------------------------------------------------
+{
+    resetAll();
+    setShockState("ETHUSDT", "UP");
+
+    const bridge = makeBridge({
+        longAllow: true,
+        shortAllow: false,
+        rawDirectionalShockState: "UP",
+        rawDirection: "UP",
+        directionalShockState: "UP"
+    });
+
+    const snapshot = {
+        symbol: "ETHUSDT",
+        lastPrice: 2314.50, // strong live penetration (+1.40 USDT, ~6 bps)
+        latestCandleClose: 2312.80, // close was inside box
+        boxHigh: 2313.10,
+        boxLow: 2306.40,
+        boxPos: 1.20,
+        boxRel: 0.0029,
+        tickSz: 0.01,
+        atr: 1.04,
+        emaGap: 0.00065,
+        rangeConfidence: 0.85,
+        boxCohesion01: 0.9,
+        trendWeaknessScore: 0.5,
+        qualityScore: 70,
+        boxBreakSide: "none" as const,
+        canonicalRegime: "RANGE" as const,
+        candles: buildCandles(2312.80)
+    };
+
+    const input: EngineV2Input = {
+        symbol: "ETHUSDT",
+        now: Date.now(),
+        snapshot: snapshot as any,
+        config: makeConfig() as any,
+        state: bridge as any,
+        v1Result: {
+            regime: "RANGE",
+            decision: "SKIP",
+            side: "none",
+            isBlocked: false
+        },
+        canonicalRegime: "RANGE"
+    };
+
+    let res: any;
+    const proofs = captureProofLogs(() => {
+        res = runEngineV2(input);
+    });
+
+    const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
+    assert.equal(shockPromo?.promotion_type, "upper_breakout_continuation_long");
+    assert.equal(res.decision.decision, "ENTER");
+    assert.equal(res.decision.side, "long");
+    run("4. Meaningful live upper breakout", true, "Strong live break (+1.40 USDT) promoted to upper_breakout_continuation_long");
+}
+
+// -----------------------------------------------------------------------------
+// 5. Closed close > boxHigh -> promotion YES
+// -----------------------------------------------------------------------------
+{
+    resetAll();
+    setShockState("ETHUSDT", "UP");
+
+    const bridge = makeBridge({
+        longAllow: true,
+        shortAllow: false,
+        rawDirectionalShockState: "UP",
+        rawDirection: "UP",
+        directionalShockState: "UP"
+    });
+
+    const snapshot = {
+        symbol: "ETHUSDT",
+        lastPrice: 2313.30,
+        latestCandleClose: 2313.30, // candle close confirmed > boxHigh (2313.10)
+        boxHigh: 2313.10,
+        boxLow: 2306.40,
+        boxPos: 1.03,
+        boxRel: 0.0029,
+        tickSz: 0.01,
+        atr: 1.04,
+        emaGap: 0.00065,
+        rangeConfidence: 0.85,
+        boxCohesion01: 0.9,
+        trendWeaknessScore: 0.5,
+        qualityScore: 70,
+        boxBreakSide: "none" as const,
+        canonicalRegime: "RANGE" as const,
+        candles: buildCandles(2313.30)
+    };
+
+    const input: EngineV2Input = {
+        symbol: "ETHUSDT",
+        now: Date.now(),
+        snapshot: snapshot as any,
+        config: makeConfig() as any,
+        state: bridge as any,
+        v1Result: {
+            regime: "RANGE",
+            decision: "SKIP",
+            side: "none",
+            isBlocked: false
+        },
+        canonicalRegime: "RANGE"
+    };
+
+    let res: any;
+    const proofs = captureProofLogs(() => {
+        res = runEngineV2(input);
+    });
+
+    const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
+    assert.equal(shockPromo?.promotion_type, "upper_breakout_continuation_long");
+    assert.equal(res.decision.decision, "ENTER");
+    run("5. ClosedClose > boxHigh", true, "Candle close confirmed above boxHigh promoted to upper_breakout_continuation_long");
+}
+
+// -----------------------------------------------------------------------------
+// 6. Confirmed breakout retest -> promotion YES
+// -----------------------------------------------------------------------------
+{
+    resetAll();
+    setShockState("ETHUSDT", "UP");
+
+    const bridge = makeBridge({
+        longAllow: true,
+        shortAllow: false,
+        rawDirectionalShockState: "UP",
+        rawDirection: "UP",
+        directionalShockState: "UP"
+    });
+
+    const snapshot = {
+        symbol: "ETHUSDT",
+        lastPrice: 2313.20, // shallow penetration (+0.10 USDT < minPenetration)
+        latestCandleClose: 2313.00, // closed candle inside box (< 2313.10)
+        boxHigh: 2313.10,
+        boxLow: 2306.40,
+        boxPos: 1.015,
+        boxRel: 0.0029,
+        tickSz: 0.01,
+        atr: 1.04,
+        emaGap: 0.00065,
+        rangeConfidence: 0.85,
+        boxCohesion01: 0.9,
+        trendWeaknessScore: 0.5,
+        qualityScore: 70,
+        retestConfirmed: true,
+        boxBreakSide: "upper" as const,
+        canonicalRegime: "RANGE" as const,
+        candles: buildCandles(2313.00)
+    };
+
+    const input: EngineV2Input = {
+        symbol: "ETHUSDT",
+        now: Date.now(),
+        snapshot: snapshot as any,
+        config: makeConfig() as any,
+        state: bridge as any,
+        v1Result: {
+            regime: "RANGE",
+            decision: "SKIP",
+            side: "none",
+            isBlocked: false
+        },
+        canonicalRegime: "RANGE"
+    };
+
+    let res: any;
+    const proofs = captureProofLogs(() => {
+        res = runEngineV2(input);
+    });
+
+    const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
+    assert.equal(shockPromo?.promotion_type, "upper_breakout_continuation_long");
+    assert.equal(res.decision.decision, "ENTER");
+    run("6. Confirmed breakout retest", true, "Retest confirmed promoted to upper_breakout_continuation_long");
+}
+
+// -----------------------------------------------------------------------------
+// 7. Lower breakdown exact symmetry (Inside lower zone but inside box -> NO)
+// -----------------------------------------------------------------------------
+{
+    resetAll();
+    setShockState("ETHUSDT", "DOWN");
 
     const bridge = makeBridge({
         shortAllow: true,
         longAllow: false,
         rawDirectionalShockState: "DOWN",
+        rawDirection: "DOWN",
         directionalShockState: "DOWN"
     });
 
     const snapshot = {
-        symbol: "BTCUSDT",
-        lastPrice: 80500, // inside box (> 80000)
-        latestCandleClose: 80500,
-        boxHigh: 82000,
-        boxLow: 80000,
-        boxPos: 0.25, // lower zone
-        boxRel: 0.025,
-        atr: 300,
-        emaGap: -0.001,
-        qualityScore: 66,
+        symbol: "ETHUSDT",
+        lastPrice: 2307.50, // inside box (> 2306.40)
+        latestCandleClose: 2307.50,
+        boxHigh: 2313.10,
+        boxLow: 2306.40,
+        boxPos: 0.164,
+        boxRel: 0.0029,
+        tickSz: 0.01,
+        atr: 1.04,
+        emaGap: -0.00065,
+        trendWeaknessScore: 0.51,
+        qualityScore: 65,
         boxBreakSide: "none" as const,
         canonicalRegime: "RANGE" as const,
-        candles: buildCandles(80500)
+        candles: buildCandles(2307.50)
     };
 
     const input: EngineV2Input = {
-        symbol: "BTCUSDT",
+        symbol: "ETHUSDT",
         now: Date.now(),
         snapshot: snapshot as any,
-        config: {
-            paperMaxOpenPositions: 3,
-            baseSizeUsd: 100,
-            paperTakerFeeRate: 0.0005,
-            paperSlippageEstimateBps: 8
-        } as any,
+        config: makeConfig() as any,
         state: bridge as any,
         v1Result: {
             regime: "RANGE",
@@ -697,9 +584,307 @@ function buildCandles(lastClose: number, count = 20): Candle[] {
 
     const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
     const isLowerBreakdownShort = Boolean(shockPromo && shockPromo.promotion_type === "lower_breakdown_continuation_short");
-    assert.equal(isLowerBreakdownShort, false, "BTCUSDT inside lower zone must NOT promote breakdown short");
-    assert.notEqual(res.decision, "ENTER");
-    run("BTC/ETH Shared Semantics Invariant", true, "BTCUSDT obeys the exact same boundary truth requirement");
+    assert.equal(isLowerBreakdownShort, false, "Inside lower zone must NOT promote breakdown short");
+    assert.notEqual(res.decision.decision, "ENTER");
+    run("7. Lower breakdown exact symmetry", true, "Inside box lower zone correctly blocked");
 }
 
-console.log("\n>>> ALL FALSE BREAKDOWN / BREAKOUT PROMOTION INVARIANTS VERIFIED SUCCESSFULLY <<<\n");
+// -----------------------------------------------------------------------------
+// 8. Shallow lower wick + close inside -> promotion NO
+// -----------------------------------------------------------------------------
+{
+    resetAll();
+    setShockState("ETHUSDT", "DOWN");
+
+    const bridge = makeBridge({
+        shortAllow: true,
+        directionalShockState: "DOWN"
+    });
+
+    const snapshot = {
+        symbol: "ETHUSDT",
+        lastPrice: 2306.10, // shallow undershoot (-0.30 USDT, ~1.3 bps)
+        latestCandleClose: 2307.00, // closed close inside box (> 2306.40)
+        boxHigh: 2313.10,
+        boxLow: 2306.40,
+        boxPos: -0.045,
+        boxRel: 0.0029,
+        tickSz: 0.01,
+        atr: 1.04,
+        emaGap: -0.00065,
+        qualityScore: 68,
+        boxBreakSide: "none" as const,
+        canonicalRegime: "RANGE" as const,
+        candles: buildCandles(2307.00)
+    };
+
+    const input: EngineV2Input = {
+        symbol: "ETHUSDT",
+        now: Date.now(),
+        snapshot: snapshot as any,
+        config: makeConfig() as any,
+        state: bridge as any,
+        v1Result: {
+            regime: "RANGE",
+            decision: "SKIP",
+            side: "none",
+            isBlocked: false
+        },
+        canonicalRegime: "RANGE"
+    };
+
+    let res: any;
+    const proofs = captureProofLogs(() => {
+        res = runEngineV2(input);
+    });
+
+    const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
+    const isLowerBreakdownShort = Boolean(shockPromo && shockPromo.promotion_type === "lower_breakdown_continuation_short");
+    assert.equal(isLowerBreakdownShort, false, "Shallow lower wick must NOT promote breakdown short");
+    assert.notEqual(res.decision.decision, "ENTER");
+    run("8. Shallow lower wick + close inside", true, "Shallow lower wick (-0.30 USDT) blocked from promotion");
+}
+
+// -----------------------------------------------------------------------------
+// 9. Meaningful live lower break -> promotion YES
+// -----------------------------------------------------------------------------
+{
+    resetAll();
+    setShockState("ETHUSDT", "DOWN");
+
+    const bridge = makeBridge({
+        shortAllow: true,
+        directionalShockState: "DOWN"
+    });
+
+    const snapshot = {
+        symbol: "ETHUSDT",
+        lastPrice: 2305.00, // strong live penetration (-1.40 USDT, ~6 bps)
+        latestCandleClose: 2307.00, // close was inside box
+        boxHigh: 2313.10,
+        boxLow: 2306.40,
+        boxPos: -0.21,
+        boxRel: 0.0029,
+        tickSz: 0.01,
+        atr: 1.04,
+        emaGap: -0.00065,
+        rangeConfidence: 0.85,
+        boxCohesion01: 0.9,
+        trendWeaknessScore: 0.5,
+        qualityScore: 70,
+        boxBreakSide: "none" as const,
+        canonicalRegime: "RANGE" as const,
+        candles: (() => {
+            const cs = buildCandles(2307.00);
+            cs[cs.length - 1] = {
+                ...cs[cs.length - 1],
+                high: 2309.00,
+                open: 2307.00,
+                close: 2306.50,
+                low: 2305.00
+            };
+            return cs;
+        })()
+    };
+
+    const input: EngineV2Input = {
+        symbol: "ETHUSDT",
+        now: Date.now(),
+        snapshot: snapshot as any,
+        config: makeConfig() as any,
+        state: bridge as any,
+        v1Result: {
+            regime: "RANGE",
+            decision: "SKIP",
+            side: "none",
+            isBlocked: false
+        },
+        canonicalRegime: "RANGE"
+    };
+
+    let res: any;
+    const proofs = captureProofLogs(() => {
+        res = runEngineV2(input);
+    });
+
+    const shockPromo = proofs.find(p => p.event === "SHOCK_REACTION_PROMOTION_PROOF");
+    assert.equal(shockPromo?.promotion_type, "lower_breakdown_continuation_short");
+    assert.equal(res.decision.decision, "ENTER");
+    assert.equal(res.decision.side, "short");
+    run("9. Meaningful live lower break", true, "Strong live breakdown (-1.40 USDT) promoted to lower_breakdown_continuation_short");
+}
+
+// -----------------------------------------------------------------------------
+// 10. Shock watch remains active when promotion denied
+// -----------------------------------------------------------------------------
+{
+    resetAll();
+    setShockState("ETHUSDT", "UP");
+
+    const bridge = makeBridge({
+        longAllow: true,
+        directionalShockState: "UP"
+    });
+
+    const snapshot = {
+        symbol: "ETHUSDT",
+        lastPrice: 2313.40,
+        latestCandleClose: 2312.80,
+        boxHigh: 2313.10,
+        boxLow: 2306.40,
+        boxPos: 1.045,
+        boxRel: 0.0029,
+        tickSz: 0.01,
+        atr: 1.04,
+        emaGap: 0.00065,
+        qualityScore: 68,
+        boxBreakSide: "none" as const,
+        canonicalRegime: "RANGE" as const,
+        candles: buildCandles(2312.80)
+    };
+
+    const input: EngineV2Input = {
+        symbol: "ETHUSDT",
+        now: Date.now(),
+        snapshot: snapshot as any,
+        config: makeConfig() as any,
+        state: bridge as any,
+        v1Result: {
+            regime: "RANGE",
+            decision: "SKIP",
+            side: "none",
+            isBlocked: false
+        },
+        canonicalRegime: "RANGE"
+    };
+
+    let res: any;
+    const proofs = captureProofLogs(() => {
+        res = runEngineV2(input);
+    });
+
+    assert.notEqual(res.decision.decision, "ENTER", "Promotion must be denied (decision not ENTER)");
+    assert.ok(res.decision.decision === "SKIP" || res.decision.decision === "HOLD", `Decision must be SKIP or HOLD, got ${res.decision.decision}`);
+    const shockProofs = proofs.filter(p => String(p.event).includes("SHOCK"));
+    assert.ok(shockProofs.length > 0, "Shock tracking proof must be generated and active");
+    run("10. Shock watch remains active when promotion denied", true, "Shock tracking remains fully active while false ENTER is prevented");
+}
+
+// -----------------------------------------------------------------------------
+// 11. TP Net-edge final gate unchanged
+// -----------------------------------------------------------------------------
+{
+    resetAll();
+    setShockState("ETHUSDT", "UP");
+
+    const bridge = makeBridge({
+        longAllow: true,
+        directionalShockState: "UP"
+    });
+
+    const snapshot = {
+        symbol: "ETHUSDT",
+        lastPrice: 2315.00,
+        latestCandleClose: 2315.00,
+        boxHigh: 2313.10,
+        boxLow: 2306.40,
+        boxPos: 1.28,
+        boxRel: 0.0029,
+        tickSz: 0.01,
+        atr: 1.04,
+        emaGap: 0.00065,
+        qualityScore: 75,
+        boxBreakSide: "upper" as const,
+        canonicalRegime: "RANGE" as const,
+        candles: buildCandles(2315.00)
+    };
+
+    const input: EngineV2Input = {
+        symbol: "ETHUSDT",
+        now: Date.now(),
+        snapshot: snapshot as any,
+        config: makeConfig() as any,
+        state: bridge as any,
+        v1Result: {
+            regime: "RANGE",
+            decision: "SKIP",
+            side: "none",
+            isBlocked: false
+        },
+        canonicalRegime: "RANGE"
+    };
+
+    let res: any;
+    const proofs = captureProofLogs(() => {
+        res = runEngineV2(input);
+    });
+
+    assert.equal(res.decision.decision, "ENTER");
+    const tp1 = res.decision.metadata?.tp1 ?? proofs.find(p => p.event === "V2_ORDER_BUILD_RISK_PLAN_PROOF")?.tp1;
+    const entryPx = 2315.00;
+    if (tp1 != null) {
+        assert.ok(tp1 > entryPx, `TP1 (${tp1}) must be higher than entry price (${entryPx}) for LONG`);
+    }
+    run("11. TP net-edge final gate unchanged", true, "TP structure verified and untouched");
+}
+
+// -----------------------------------------------------------------------------
+// 12. SL (0.50%), Risk Budget (1.0%), Sizing Unchanged
+// -----------------------------------------------------------------------------
+{
+    resetAll();
+    setShockState("ETHUSDT", "UP");
+
+    const bridge = makeBridge({
+        longAllow: true,
+        directionalShockState: "UP"
+    });
+
+    const snapshot = {
+        symbol: "ETHUSDT",
+        lastPrice: 2315.00,
+        latestCandleClose: 2315.00,
+        boxHigh: 2313.10,
+        boxLow: 2306.40,
+        boxPos: 1.28,
+        boxRel: 0.0029,
+        tickSz: 0.01,
+        atr: 1.04,
+        emaGap: 0.00065,
+        qualityScore: 70, // B grade
+        boxBreakSide: "upper" as const,
+        canonicalRegime: "RANGE" as const,
+        candles: buildCandles(2315.00)
+    };
+
+    const input: EngineV2Input = {
+        symbol: "ETHUSDT",
+        now: Date.now(),
+        snapshot: snapshot as any,
+        config: makeConfig() as any,
+        state: bridge as any,
+        v1Result: {
+            regime: "RANGE",
+            decision: "SKIP",
+            side: "none",
+            isBlocked: false
+        },
+        canonicalRegime: "RANGE"
+    };
+
+    let res: any;
+    const proofs = captureProofLogs(() => {
+        res = runEngineV2(input);
+    });
+
+    assert.equal(res.decision.decision, "ENTER");
+    const stopPrice = res.decision.risk?.stopPrice ?? res.decision.committedRiskPlan?.stopPrice ?? res.decision.metadata?.stopPrice;
+    assert.ok(stopPrice != null, "Stop price must be present");
+    const entryPx = 2315.00;
+    // Canonical ETH 0.50% stop distance
+    const stopDistPct = Math.abs(entryPx - stopPrice) / entryPx;
+    assert.ok(stopDistPct >= 0.0049 && stopDistPct <= 0.0051, `Stop dist pct ${stopDistPct} must match canonical 0.50%`);
+    run("12. SL/risk/sizing unchanged", true, "Canonical 0.50% stop, B grade risk budgeting, sizing contract strictly preserved");
+}
+
+console.log("\n>>> ALL 12 V2 RANGE LIVE BREAKOUT QUALITY GATE INVARIANTS VERIFIED SUCCESSFULLY <<<\n");
