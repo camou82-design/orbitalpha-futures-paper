@@ -458,7 +458,7 @@ export class OkxDemoClient {
     instType: string;
     instId?: string;
   }): Promise<TryResult<Record<string, unknown>[]>> {
-    const ordTypes = ["conditional", "oco"] as const;
+    const ordTypes = ["conditional", "oco", "trigger", "move_order_stop"] as const;
     const merged: Record<string, unknown>[] = [];
     const seen = new Set<string>();
     let diagnostics: OkxPublicDiagnostics = {

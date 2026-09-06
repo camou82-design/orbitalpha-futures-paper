@@ -2554,7 +2554,7 @@ export class PaperEngine {
 
       const [pendRes, algoRes] = await Promise.all([
         this.okxDemo.getOrdersPending({ instType: "SWAP" }),
-        this.okxDemo.getOrdersAlgoPending({ instType: "SWAP" })
+        this.okxDemo.getOrdersAlgoPendingAll({ instType: "SWAP" })
       ]);
 
       if (pendRes.ok) this.cachedOpsPending = pendRes.value ?? [];
@@ -2670,6 +2670,12 @@ export class PaperEngine {
           reduce_only_protective_found: r.reduce_only_protective_found,
           ordering: "before_runEngineV2_and_tryPaperPositionClose"
         });
+      } else if (r.reduce_only_protective_found && ledgerPos) {
+        if (!ledgerPos.exchangeProtectionConfirmed || !ledgerPos.confirmedExchangeProtectionEverSeen) {
+          ledgerPos.exchangeProtectionConfirmed = true;
+          ledgerPos.confirmedExchangeProtectionEverSeen = true;
+          await this.positions.saveOpenAll(paperOpens);
+        }
       }
     }
     return latched;
@@ -3014,6 +3020,12 @@ export class PaperEngine {
             reduce_only_protective_found: r.reduce_only_protective_found,
             ordering: "ops_watch_post_v2_reinforcement"
           });
+        } else if (!isTakeover && r.reduce_only_protective_found && ledgerPos) {
+          if (!ledgerPos.exchangeProtectionConfirmed || !ledgerPos.confirmedExchangeProtectionEverSeen) {
+            ledgerPos.exchangeProtectionConfirmed = true;
+            ledgerPos.confirmedExchangeProtectionEverSeen = true;
+            await this.positions.saveOpenAll(paperOpens);
+          }
         }
 
         if (isTakeover) {

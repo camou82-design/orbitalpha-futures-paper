@@ -247,7 +247,12 @@ function validateCurrentExchangeSlRow(input: Readonly<{
     const { row, instId, positionSide, requiredStopPx, tickSz } = input;
     if (instId && !instIdMatchesRow(instId, String(row.instId ?? ""))) return false;
     if (positionSide && !orderMatchesPositionSide(row, positionSide)) return false;
-    const reduceOnly = row.reduceOnly === "true" || row.reduceOnly === true;
+    const reduceOnly =
+        row.reduceOnly === "true" ||
+        row.reduceOnly === true ||
+        row.closeFraction === "1" ||
+        String(row.closeFraction) === "1" ||
+        orderLooksReduceOnlyProtective(row);
     if (!reduceOnly) return false;
     const closeSideOk =
         positionSide === "long"
@@ -407,10 +412,16 @@ export function evaluatePositionProtectionState(input: Readonly<{
         if (!instIdMatchesRow(input.instId, String(o.instId ?? ""))) return;
         if (!orderMatchesPositionSide(o, input.positionSide)) return;
         const classified = classifyOkxOpenOrderPurpose(o, input.ledger ?? null);
-        const reduceOnly = o.reduceOnly === "true" || o.reduceOnly === true;
+        const isEffectiveReduceOnly =
+            o.reduceOnly === "true" ||
+            o.reduceOnly === true ||
+            o.closeFraction === "1" ||
+            String(o.closeFraction) === "1" ||
+            classified.isBotManagedProtection === true ||
+            orderLooksReduceOnlyProtective(o);
         const isCanonical =
             classified.isBotManagedProtection === true ||
-            (reduceOnly && orderLooksReduceOnlyProtective(o));
+            (isEffectiveReduceOnly && orderLooksReduceOnlyProtective(o));
         if (!isCanonical) return;
 
         matchingProtectivePendingCount += 1;
@@ -429,7 +440,7 @@ export function evaluatePositionProtectionState(input: Readonly<{
                 : hasSlTrigger;
 
         if (
-            reduceOnly &&
+            isEffectiveReduceOnly &&
             closeSideOk &&
             hasSlTrigger &&
             priceMatch &&
@@ -444,7 +455,7 @@ export function evaluatePositionProtectionState(input: Readonly<{
         const tpPx = extractTpPxFromOrder(o);
         const hasTpTrigger = tpPx != null;
         if (
-            reduceOnly &&
+            isEffectiveReduceOnly &&
             closeSideOk &&
             hasTpTrigger &&
             (classified.purpose === "protective-take-profit" ||

@@ -123,25 +123,26 @@ function stringifyHints(o: Record<string, unknown>): string {
 
 export function orderLooksReduceOnlyProtective(o: Record<string, unknown>): boolean {
   const ro = o.reduceOnly;
-  const roOk = ro === true || String(ro).toLowerCase() === "true";
-  if (!roOk) return false;
+  const roOk = ro === true || String(ro).toLowerCase() === "true" || o.closeFraction === "1" || String(o.closeFraction) === "1";
   const typ = String(o.ordType ?? o.orderType ?? "").toLowerCase();
-  if (
+  const isAlgoType =
     typ.includes("conditional") ||
     typ === "trigger" ||
     typ === "stop" ||
     typ.includes("oco") ||
-    typ.includes("move_order_stop")
-  ) {
-    return true;
-  }
-  if (
+    typ.includes("move_order_stop");
+  const hasTrigger =
     o.slTriggerPx != null ||
     o.tpTriggerPx != null ||
     o.triggerPx != null ||
     o.stopPx != null ||
-    o.trigPx != null
-  ) {
+    o.trigPx != null;
+
+  if (roOk) {
+    if (isAlgoType || hasTrigger) return true;
+    return true;
+  }
+  if (isAlgoType && hasTrigger) {
     return true;
   }
   return false;
@@ -174,7 +175,7 @@ export type OkxOpenOrderPurposeClassifyResult = Readonly<{
 const TERMINAL_OKX_ORDER_STATES = new Set(["filled", "canceled", "cancelled", "rejected", "expired"]);
 
 function orderReduceOnly(o: Record<string, unknown>): boolean {
-  return o.reduceOnly === true || String(o.reduceOnly).toLowerCase() === "true";
+  return o.reduceOnly === true || String(o.reduceOnly).toLowerCase() === "true" || o.closeFraction === "1" || String(o.closeFraction) === "1";
 }
 
 function orderAlgoId(o: Record<string, unknown>): string {
@@ -224,12 +225,25 @@ export function classifyOkxOpenOrderPurpose(
   ord: Record<string, unknown>,
   ledgerPos?: PaperOpenPositionRecord | null
 ): OkxOpenOrderPurposeClassifyResult {
-  const isReduceOnly = orderReduceOnly(ord);
+  const isExplicitReduceOnly = orderReduceOnly(ord);
   const clOrdId = ord.clOrdId != null ? String(ord.clOrdId) : "";
   const algoClOrdId = ord.algoClOrdId != null ? String(ord.algoClOrdId) : "";
   const hasEngineClOrdId = clOrdId.length > 0;
   const hasEngineAlgoClOrdId = algoClOrdId.startsWith("oap");
   const algoId = orderAlgoId(ord);
+
+  const ordSide = String(ord.side ?? "").trim().toLowerCase();
+  const posSideFromOrder = String(ord.posSide ?? "").trim().toLowerCase();
+  const posSide = ledgerPos ? String(ledgerPos.side ?? "").trim().toLowerCase() : (posSideFromOrder === "long" || posSideFromOrder === "short" ? posSideFromOrder : "");
+
+  const isClosingSide =
+    posSide === "long" ? ordSide === "sell" :
+    posSide === "short" ? ordSide === "buy" :
+    false;
+
+  const isReduceOnly =
+    isExplicitReduceOnly ||
+    (isClosingSide && (hasEngineAlgoClOrdId || (algoId.length > 0 && (ord.slTriggerPx != null || ord.tpTriggerPx != null || ord.triggerPx != null || ord.closeFraction === "1"))));
 
   const botManagedBase = (
     purpose: OkxOpenOrderPurpose,
@@ -259,11 +273,9 @@ export function classifyOkxOpenOrderPurpose(
   // [CANONICAL TP/SL CLASSIFICATION] Position side + closing side + price relation
   const rawPx = ord.tpTriggerPx ?? ord.slTriggerPx ?? ord.triggerPx ?? ord.stopPx ?? ord.trigPx ?? ord.px;
   const ordPx = typeof rawPx === "number" ? rawPx : typeof rawPx === "string" ? Number(rawPx) : NaN;
-  const ordSide = String(ord.side ?? "").trim().toLowerCase();
   const entryPx = ledgerPos ? (Number((ledgerPos as any).avgPx) || Number(ledgerPos.entryPrice) || 0) : 0;
-  const posSide = ledgerPos ? String(ledgerPos.side ?? "").trim().toLowerCase() : "";
 
-  if (isReduceOnly && Number.isFinite(ordPx) && ordPx > 0 && entryPx > 0 && posSide) {
+  if (isClosingSide && Number.isFinite(ordPx) && ordPx > 0 && entryPx > 0 && posSide) {
     if (posSide === "short" && ordSide === "buy") {
       if (ordPx < entryPx) {
         return botManagedBase("protective-take-profit", "reduce_only_protective_shape");
@@ -281,7 +293,7 @@ export function classifyOkxOpenOrderPurpose(
     }
   }
 
-  if (isReduceOnly && orderLooksReduceOnlyProtective(ord)) {
+  if (isClosingSide && orderLooksReduceOnlyProtective(ord)) {
     const tpPx = ord.tpTriggerPx;
     const hasTp = tpPx != null && String(tpPx).length > 0 && Number(tpPx) > 0;
     const slPx = ord.slTriggerPx ?? ord.triggerPx ?? ord.stopPx ?? ord.trigPx;
@@ -708,10 +720,10 @@ export function findProtectiveHintsForInst(
     if (!instIdMatchesRow(instId, String(o.instId ?? ""))) return;
     if (!orderMatchesPositionSide(o, positionSide)) return;
     const classified = classifyOkxOpenOrderPurpose(o, options?.ledger ?? null);
-    const reduceOnly = o.reduceOnly === "true" || o.reduceOnly === true;
+    const isEffectiveReduceOnly = o.reduceOnly === "true" || o.reduceOnly === true || o.closeFraction === "1" || String(o.closeFraction) === "1" || classified.isBotManagedProtection === true;
     const isCanonical =
       classified.isBotManagedProtection === true ||
-      (reduceOnly && orderLooksReduceOnlyProtective(o));
+      (isEffectiveReduceOnly && orderLooksReduceOnlyProtective(o));
     if (!isCanonical) return;
 
     // Authoritative unique algo deduplication (P0-C)
@@ -753,7 +765,7 @@ export function findProtectiveHintsForInst(
       protectiveContractSizesMatch(options.requiredContracts, algoSz);
 
     if (
-      reduceOnly &&
+      isEffectiveReduceOnly &&
       closeSideOk &&
       slPx != null &&
       priceMatch &&
