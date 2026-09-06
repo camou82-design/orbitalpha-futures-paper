@@ -2006,6 +2006,58 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     const edgeUpper = (boxPos ?? 0.5) >= 0.92 || zone === "upper";
     const edgeLower = (boxPos ?? 0.5) <= 0.08 || zone === "lower";
+    const currentBoxLow =
+        typeof authoritativeInput.snapshot?.boxLow === "number"
+            ? authoritativeInput.snapshot.boxLow
+            : typeof input.snapshot?.boxLow === "number"
+              ? input.snapshot.boxLow
+              : null;
+    const currentBoxHigh =
+        typeof authoritativeInput.snapshot?.boxHigh === "number"
+            ? authoritativeInput.snapshot.boxHigh
+            : typeof input.snapshot?.boxHigh === "number"
+              ? input.snapshot.boxHigh
+              : null;
+    const currentLastPrice =
+        typeof authoritativeInput.snapshot?.lastPrice === "number"
+            ? authoritativeInput.snapshot.lastPrice
+            : typeof input.snapshot?.lastPrice === "number"
+              ? input.snapshot.lastPrice
+              : null;
+    const currentClosedClose =
+        typeof authoritativeInput.snapshot?.latestCandleClose === "number"
+            ? authoritativeInput.snapshot.latestCandleClose
+            : typeof input.snapshot?.latestCandleClose === "number"
+              ? input.snapshot.latestCandleClose
+              : null;
+
+    const boundaryBrokenByLastPriceLower =
+        currentBoxLow != null && currentLastPrice != null && currentLastPrice < currentBoxLow;
+    const boundaryBrokenByCloseLower =
+        currentBoxLow != null && currentClosedClose != null && currentClosedClose < currentBoxLow;
+    const breakdownConfirmedBySubtype =
+        judgment.subtype === "BREAKDOWN_RETEST_FAILED" ||
+        (execMeta as any)?.breakdownConfirmed === true;
+    const actualLowerBreakEvidence =
+        boundaryBrokenByLastPriceLower ||
+        boundaryBrokenByCloseLower ||
+        (boxBreakSide === "lower" && (currentLastPrice == null || currentBoxLow == null || currentLastPrice <= currentBoxLow || currentClosedClose == null || currentClosedClose <= currentBoxLow)) ||
+        breakdownConfirmedBySubtype;
+
+    const boundaryBrokenByLastPriceUpper =
+        currentBoxHigh != null && currentLastPrice != null && currentLastPrice > currentBoxHigh;
+    const boundaryBrokenByCloseUpper =
+        currentBoxHigh != null && currentClosedClose != null && currentClosedClose > currentBoxHigh;
+    const breakoutConfirmedBySubtype =
+        judgment.subtype === "BREAKOUT_RETEST_CONFIRMED" ||
+        (judgment.subtype as string) === "BREAKOUT_RETEST_FAILED" ||
+        (execMeta as any)?.breakoutConfirmed === true;
+    const actualUpperBreakEvidence =
+        boundaryBrokenByLastPriceUpper ||
+        boundaryBrokenByCloseUpper ||
+        (boxBreakSide === "upper" && (currentLastPrice == null || currentBoxHigh == null || currentLastPrice >= currentBoxHigh || currentClosedClose == null || currentClosedClose >= currentBoxHigh)) ||
+        breakoutConfirmedBySubtype;
+
     const downUpperFailureShort =
         shockDownActive &&
         rangeContextActive &&
@@ -2014,7 +2066,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const downLowerBreakdownContinuationShort =
         shockDownActive &&
         rangeContextActive &&
-        (zone === "lower" || boxBreakSide === "lower") &&
+        actualLowerBreakEvidence &&
         emaGap < 0 &&
         trendSideCandidate === "short";
     const downLowerReversalConfirmedLong =
@@ -2031,7 +2083,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const upUpperBreakoutContinuationLong =
         shockUpActive &&
         rangeContextActive &&
-        (zone === "upper" || boxBreakSide === "upper") &&
+        actualUpperBreakEvidence &&
         emaGap > 0 &&
         trendSideCandidate === "long";
     const upUpperReversalConfirmedShort =
@@ -3698,11 +3750,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         if (promotionApplied) {
             if (shockReactionPromotionType == null && shock === "DOWN") {
                 if (v2SideAfterPromotion === "short" && zone === "upper") shockReactionPromotionType = "upper_failure_short";
-                else if (v2SideAfterPromotion === "short" && zone === "lower") shockReactionPromotionType = "lower_breakdown_continuation_short";
+                else if (v2SideAfterPromotion === "short" && (zone === "lower" || boxBreakSide === "lower") && actualLowerBreakEvidence) shockReactionPromotionType = "lower_breakdown_continuation_short";
                 else if (v2SideAfterPromotion === "long" && zone === "lower" && reversalConfirmed) shockReactionPromotionType = "lower_reversal_confirmed_long";
             } else if (shockReactionPromotionType == null && shock === "UP") {
                 if (v2SideAfterPromotion === "long" && zone === "lower") shockReactionPromotionType = "lower_support_long";
-                else if (v2SideAfterPromotion === "long" && zone === "upper") shockReactionPromotionType = "upper_breakout_continuation_long";
+                else if (v2SideAfterPromotion === "long" && (zone === "upper" || boxBreakSide === "upper") && actualUpperBreakEvidence) shockReactionPromotionType = "upper_breakout_continuation_long";
                 else if (v2SideAfterPromotion === "short" && zone === "upper" && reversalConfirmed) shockReactionPromotionType = "upper_reversal_confirmed_short";
             }
             if (shockReactionPromotionType != null) {
