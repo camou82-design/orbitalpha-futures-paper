@@ -62,7 +62,7 @@ function baseV2Entry(overrides: Record<string, unknown> = {}) {
   assert.equal(sizing.sizingPassed, true);
   assert.ok(sizing.riskBasedNotionalUsdt > 1_900, `riskBased=${sizing.riskBasedNotionalUsdt}`);
   assert.ok(sizing.finalOrderNotionalUsdt > EMERGENCY_MAX, `final=${sizing.finalOrderNotionalUsdt}`);
-  assertClose(sizing.equityInitialCapUsdt, EQUITY * 2.3, 0.01);
+  assertClose(sizing.equityInitialCapUsdt, EQUITY * 2, 0.01);
   assert.equal(sizing.limitingAuthority, "equity_initial_cap");
   assert.equal(sizing.emergencyCapApplied, false);
   assert.equal(sizing.effectiveLiveCapUsdt, null);

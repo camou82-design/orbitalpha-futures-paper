@@ -2,6 +2,8 @@ import type { EngineV2Input, EngineV2Position, EngineV2Side } from "../types";
 import type { Candle } from "../../models/types";
 import type { V2StateAuthority } from "./types";
 
+const DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT = 100;
+
 export interface EarlyDecayReclaimInfo {
     ts: number;
     cycleKey: any;
@@ -308,8 +310,13 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
         okxApiSecretPresent: input.state.okxApiSecretPresent === true,
         okxPassphrasePresent: input.state.okxPassphrasePresent === true,
         okxSimulatedTradingHeaderEnabled: input.state.okxSimulatedTradingHeaderEnabled === true,
-        // Legacy OKX_LIVE_MAX_ORDER_NOTIONAL_USDT is not propagated into V2 authority state.
-        liveMaxOrderNotionalUsdt: null,
+        liveMaxOrderNotionalUsdt: ((): number => {
+            const raw = input.state.liveMaxOrderNotionalUsdt;
+            if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
+            const configFallback = input.config.okxLiveMaxOrderNotionalUsdt;
+            if (typeof configFallback === "number" && Number.isFinite(configFallback) && configFallback > 0) return configFallback;
+            return DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT;
+        })(),
         ...((): {
             directionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
             rawDirectionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";

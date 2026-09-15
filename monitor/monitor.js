@@ -1739,8 +1739,6 @@
           ${row("OKX 동기화", `<span class="${okxSyncStatus ? (String(okxSyncStatus).toUpperCase() === 'SYNCED' || String(okxSyncStatus).toUpperCase() === 'ALIGNED' ? 'v2-ok' : 'v2-warn') : ''}">${okxSyncStatus ? esc(String(okxSyncStatus)) : '<span class="muted">—</span>'}</span>`)}
         </div>
       </div>`;
-  }
-
   function resolveDisplaySourceLabel(row) {
     if (!row || typeof row !== "object") return "거래소 체결";
     if (typeof row.sourceLabel === "string" && row.sourceLabel.trim().length > 0) {
@@ -2352,10 +2350,8 @@
       return;
     }
 
-    // Sort descending by closedAt and select top 5 recent trades
-    const sorted = [...filtered]
-      .sort((a, b) => (Number(b.closedAt) || 0) - (Number(a.closedAt) || 0))
-      .slice(0, 5);
+    // Sort descending by closedAt
+    const sorted = [...filtered].sort((a, b) => (Number(b.closedAt) || 0) - (Number(a.closedAt) || 0));
 
     const rowsHtml = sorted.map((row) => {
       const sym = String(row.symbol || "—");
