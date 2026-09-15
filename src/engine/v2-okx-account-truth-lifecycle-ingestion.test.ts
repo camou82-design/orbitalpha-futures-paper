@@ -957,5 +957,147 @@ test("PHASE 13D: OKX Account Truth Lifecycle Ingestion & Dedup Forensic Suite", 
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
+
+  // 27. [A] BOT entry + MANUAL exit normalize 결과 sourceLabel === "자동→수동"
+  await t.test("27. [A] BOT entry + MANUAL exit normalize 결과 sourceLabel === '자동→수동'", () => {
+    const rawBotManual = {
+      symbol: "BTCUSDT",
+      side: "long",
+      openedAt: 1788500000000,
+      closedAt: 1788501000000,
+      entryPrice: 80000,
+      closePrice: 80500,
+      entrySource: "BOT",
+      exitSource: "MANUAL",
+      exitType: "EXIT_MANUAL",
+      exitReason: "수동 청산 (봇 진입)",
+      isBotEntry: true,
+      isManualExit: true
+    };
+
+    const normalized = normalizeClosedHistoryRow(rawBotManual);
+    assert.equal(normalized.sourceLabel, "자동→수동");
+  });
+
+  // 28. [B] MANUAL entry + BOT exit normalize 결과 sourceLabel === "수동→자동"
+  await t.test("28. [B] MANUAL entry + BOT exit normalize 결과 sourceLabel === '수동→자동'", () => {
+    const rawManualBot = {
+      symbol: "ETHUSDT",
+      side: "short",
+      openedAt: 1788500000000,
+      closedAt: 1788501000000,
+      entryPrice: 2500,
+      closePrice: 2450,
+      entrySource: "MANUAL",
+      exitSource: "BOT",
+      exitType: "EXIT_EXCHANGE_ALGO",
+      exitReason: "보호 주문 체결 (TP/SL)",
+      isManualEntry: true,
+      isBotExit: true
+    };
+
+    const normalized = normalizeClosedHistoryRow(rawManualBot);
+    assert.equal(normalized.sourceLabel, "수동→자동");
+  });
+
+  // 29. [C] pnl 필드 없이 entry/close price만 있는 BTC long의 computed PnL%가 0으로 사라지지 않음
+  await t.test("29. [C] pnl 필드 없이 entry/close price만 있는 BTC long의 computed PnL%가 0으로 사라지지 않음", () => {
+    const rawNoPnlFields = {
+      symbol: "BTCUSDT",
+      side: "long",
+      entryPrice: 80000,
+      closePrice: 80800, // +1.0%
+      sizeUsd: 800,
+      leverage: 1
+    };
+
+    const normalized = normalizeClosedHistoryRow(rawNoPnlFields);
+    assert.equal(normalized.realizedPnlPct, 0.01);
+  });
+
+  // 30. [D] explicit pnlNet=0인 실제 본전 거래는 0 유지
+  await t.test("30. [D] explicit pnlNet=0인 실제 본전 거래는 0 유지", () => {
+    const rawBreakEven = {
+      symbol: "BTCUSDT",
+      side: "long",
+      entryPrice: 80000,
+      closePrice: 80000,
+      pnlNet: 0,
+      fee: 0.5,
+      sizeUsd: 800
+    };
+
+    const normalized = normalizeClosedHistoryRow(rawBreakEven);
+    assert.equal(normalized.pnlUsdNet, 0);
+    assert.equal(normalized.pnlUsd, 0);
+    assert.equal(normalized.realizedPnlUsd, 0);
+    assert.equal(normalized.realizedPnlPct, 0);
+    assert.equal(normalized.feeUsd, 0.5);
+  });
+
+  // 31. 유효한 기존 sourceLabel은 내부 entry/exit 증거가 모순되어도 그대로 보존
+  await t.test("31. 유효한 기존 sourceLabel은 내부 entry/exit 증거가 모순되어도 그대로 보존", () => {
+    const rawWithAuthoritativeLabel = {
+      symbol: "BTCUSDT",
+      side: "long",
+      sourceLabel: "외부포지션 인계",
+      entrySource: "BOT",
+      exitSource: "BOT",
+      isBotEntry: true,
+      isBotExit: true
+    };
+
+    const normalized = normalizeClosedHistoryRow(rawWithAuthoritativeLabel);
+    assert.equal(normalized.sourceLabel, "외부포지션 인계");
+  });
+
+  // 32. 순수 BOT normalize → 자동
+  await t.test("32. 순수 BOT normalize → 자동", () => {
+    const rawPureBot = {
+      symbol: "BTCUSDT",
+      side: "long",
+      entrySource: "BOT",
+      exitSource: "BOT",
+      isBotEntry: true,
+      isBotExit: true,
+      flowId: "pBTCUSDTbmt001",
+      exitType: "EXIT_V2_AUTHORITY"
+    };
+
+    const normalized = normalizeClosedHistoryRow(rawPureBot);
+    assert.equal(normalized.sourceLabel, "자동");
+  });
+
+  // 33. 순수 MANUAL normalize → 수동
+  await t.test("33. 순수 MANUAL normalize → 수동", () => {
+    const rawPureManual = {
+      symbol: "ETHUSDT",
+      side: "short",
+      entrySource: "MANUAL",
+      exitSource: "MANUAL",
+      isManualEntry: true,
+      isManualExit: true,
+      exitType: "EXIT_MANUAL"
+    };
+
+    const normalized = normalizeClosedHistoryRow(rawPureManual);
+    assert.equal(normalized.sourceLabel, "수동");
+  });
+
+  // 34. entrySource=MANUAL, exitSource 없음, exitType=EXIT_EXCHANGE_ALGO → 수동→자동
+  await t.test("34. entrySource=MANUAL, exitSource 없음, exitType=EXIT_EXCHANGE_ALGO → 수동→자동", () => {
+    const rawManualAlgo = {
+      symbol: "ETHUSDT",
+      side: "long",
+      entrySource: "MANUAL",
+      isManualEntry: true,
+      exitType: "EXIT_EXCHANGE_ALGO"
+    };
+
+    const normalized = normalizeClosedHistoryRow(rawManualAlgo);
+    assert.equal(normalized.sourceLabel, "수동→자동");
+  });
 });
+
+
 

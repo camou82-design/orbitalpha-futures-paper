@@ -114,11 +114,28 @@ function resolveCloseReasonText(val: unknown): string | null {
  * 판별 불가하나 OKX 실제 체결 증거 존재 => "거래소 체결"
  * UNKNOWN으로 숨기지 않는다.
  */
+const VALID_SOURCE_LABELS = new Set([
+  "자동",
+  "수동",
+  "자동→수동",
+  "수동→자동",
+  "외부포지션 인계",
+  "수동관리",
+  "거래소 체결"
+]);
+
 export function resolveDisplayTradeSourceLabel(row: unknown): string {
   if (!row || typeof row !== "object") return "거래소 체결";
   const o = row as Record<string, unknown>;
 
-  const str = (v: unknown): string => (typeof v === "string" ? v.trim().toUpperCase() : "");
+  const rawSourceLabel =
+    typeof o.sourceLabel === "string" ? o.sourceLabel.trim() : "";
+  if (VALID_SOURCE_LABELS.has(rawSourceLabel)) {
+    return rawSourceLabel;
+  }
+
+  const str = (v: unknown): string =>
+    typeof v === "string" ? v.trim().toUpperCase() : "";
 
   const authority = str(o.authority ?? o.authoritySourceAtEntry);
   const source = str(o.source ?? o.tradeSource);
@@ -126,28 +143,31 @@ export function resolveDisplayTradeSourceLabel(row: unknown): string {
   const closeSource = str(o.closeSource);
   const closeReason = str(o.closeReason ?? o.exitReason);
   const entrySource = str(o.entrySource);
+  const exitSource = str(o.exitSource);
+  const exitType = str(o.exitType);
 
   // 1. ADOPTED_EXTERNAL
   const isAdopted =
+    o.isAdoptedExternal === true ||
+    o.isAdopted === true ||
     authority.includes("ADOPTED") ||
     source.includes("ADOPTED") ||
     strategy.includes("ADOPTED") ||
-    o.isAdopted === true ||
     Boolean(o.adoptedFrom);
 
   // 2. OPERATOR_MANAGED
   const isOperatorManaged =
+    o.isOperatorManaged === true ||
     authority.includes("OPERATOR") ||
     source.includes("OPERATOR") ||
-    strategy.includes("OPERATOR") ||
-    closeReason.includes("OPERATOR") ||
-    closeSource.includes("OPERATOR");
+    strategy.includes("OPERATOR");
 
   // 진입 주체 판별 (Entry: Bot vs Manual/Exchange)
   const isManualEntry =
+    o.isManualEntry === true ||
+    entrySource === "MANUAL" ||
     source === "MANUAL" ||
     source === "MANUAL_EXTERNAL" ||
-    entrySource === "MANUAL" ||
     o.isManual === true ||
     strategy.includes("MANUAL") ||
     strategy.includes("EXTERNAL_DISCRETIONARY") ||
@@ -155,10 +175,11 @@ export function resolveDisplayTradeSourceLabel(row: unknown): string {
     authority === "OPERATOR";
 
   const isBotEntry =
+    o.isBotEntry === true ||
+    entrySource === "BOT" ||
     source === "V2" ||
     source === "BOT" ||
     source === "BOT_V2" ||
-    entrySource === "BOT" ||
     strategy.includes("V2") ||
     strategy.includes("BOT") ||
     strategy.includes("HIGHWAY") ||
@@ -166,6 +187,10 @@ export function resolveDisplayTradeSourceLabel(row: unknown): string {
 
   // 청산 주체 판별 (Exit: Bot vs Manual/Exchange)
   const isManualExit =
+    o.isManualExit === true ||
+    exitSource === "MANUAL" ||
+    exitSource === "OPERATOR" ||
+    exitType === "EXIT_MANUAL" ||
     closeSource.includes("MANUAL") ||
     closeSource.includes("OPERATOR") ||
     closeReason.includes("MANUAL") ||
@@ -173,6 +198,16 @@ export function resolveDisplayTradeSourceLabel(row: unknown): string {
     closeReason.includes("OPERATOR");
 
   const isBotExit =
+    o.isBotExit === true ||
+    exitSource === "BOT" ||
+    exitSource === "ENGINE" ||
+    exitSource === "EXCHANGE_ALGO" ||
+    exitType === "EXIT_V2_AUTHORITY" ||
+    exitType === "EXIT_EXCHANGE_ALGO" ||
+    exitType.includes("TP") ||
+    exitType.includes("SL") ||
+    exitType.includes("TRAILING") ||
+    exitType.includes("REGIME") ||
     closeSource.includes("BOT") ||
     closeSource.includes("ENGINE") ||
     closeSource.includes("INTERNAL") ||
@@ -206,7 +241,7 @@ export function resolveDisplayTradeSourceLabel(row: unknown): string {
     return "수동";
   }
 
-  // fallback: closeSource나 exitReason 등에 수동 흔적이 있으면 "수동"
+  // fallback
   if (isManualExit) {
     return "수동";
   }
@@ -240,13 +275,18 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
   const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
 
   const feeUsd = parseFinite(o.feeUsd) ?? parseFinite(o.fee) ?? 0;
-  const pnlNet =
+
+  // Explicit PnL fields detection
+  const explicitPnlNet =
     parseFinite(o.pnlUsdNet) ??
     parseFinite(o.pnlUsd) ??
     parseFinite(o.realizedPnlUsd) ??
     parseFinite(o.pnlNet) ??
-    parseFinite(o.realizedPnl) ??
-    0;
+    parseFinite(o.realizedPnl);
+
+  const hasExplicitPnl = explicitPnlNet !== null;
+  const pnlNet = explicitPnlNet ?? 0;
+
   const sizeUsd = finiteUsd(parseFinite(o.sizeUsd) ?? 0);
   const closedAt = parseFinite(o.closedAt) ?? 0;
   const entryPrice = parseFinite(o.entryPrice);
@@ -275,9 +315,14 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
     const move = side === "long" ? (closePrice - entryPrice) / entryPrice : (entryPrice - closePrice) / entryPrice;
     computedPnlPct = move * leverage;
   }
+
+  const explicitPnlPct = parseFinite(o.realizedPnlPct);
+
   const realizedPnlPct =
-    parseFinite(o.realizedPnlPct) ??
-    (sizeUsd > 0 && Number.isFinite(pnlNet) ? finiteUsd(pnlNet / sizeUsd) : (computedPnlPct ?? 0));
+    explicitPnlPct ??
+    (hasExplicitPnl && sizeUsd > 0
+      ? finiteUsd(pnlNet / sizeUsd)
+      : (computedPnlPct ?? 0));
 
   const rowEps = 1e-9;
   const isPartialCr = crNorm === "partial_exit_1" || crNorm === "partial_exit_2";
