@@ -28,7 +28,12 @@ export function toCanonicalSymbol(instId: string): string {
 export function isBotClOrdId(clOrdId?: string): boolean {
   if (!clOrdId || typeof clOrdId !== "string") return false;
   const c = clOrdId.trim();
-  return c.startsWith("pBTCUSDT") || c.startsWith("pETHUSDT") || c.startsWith("pBTC-USDT") || c.startsWith("pETH-USDT");
+  return (
+    /^p[A-Z0-9_-]+/i.test(c) ||
+    /^slpos[A-Z0-9_-]+/i.test(c) ||
+    /^tppos[A-Z0-9_-]+/i.test(c) ||
+    /^v2[A-Z0-9_-]+/i.test(c)
+  );
 }
 
 export function isAlgoTriggerClOrdId(clOrdId?: string): boolean {

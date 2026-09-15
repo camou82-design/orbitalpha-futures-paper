@@ -10,17 +10,39 @@ import {
 } from "../lib/okxLifecycleReconstruction";
 import {
   canonicalClosedTradeDedupKey,
-  normalizePositionsHistoryArray
+  normalizePositionsHistoryArray,
+  normalizeClosedHistoryRow
 } from "../lib/paperClosedHistoryNormalize";
 import {
   saveOkxAccountClosedTrades,
   readOkxAccountClosedTrades,
   saveOkxAccountTruthCursor,
   readOkxAccountTruthCursor,
+  readOkxRawFills,
   type OkxAccountClosedTradeRecord
 } from "../storage/account-truth-store";
+import {
+  syncOkxAccountTruthTrades,
+  backfillOkxAccountTruthTrades
+} from "../lib/okxAccountTruthIngest";
+import type { OkxDemoClient } from "../exchange/okx-demo";
 import { isStrategyStatsRow, isAccountStatsRow } from "../engine-v2/lifecycle/completed-trade";
 import { buildPaperWindowSummaryFromHistory } from "../storage/paper-summary";
+
+function createMockClient(fillsBatches: OkxFillsHistoryItem[][]): OkxDemoClient {
+  let callIndex = 0;
+  return {
+    getFillsHistory: async () => {
+      const fills = fillsBatches[callIndex] ?? [];
+      callIndex++;
+      return {
+        ok: true,
+        value: fills,
+        diagnostics: { httpStatus: 200, requestUrl: "/api/v5/trade/fills-history" }
+      };
+    }
+  } as unknown as OkxDemoClient;
+}
 
 test("PHASE 13D: OKX Account Truth Lifecycle Ingestion & Dedup Forensic Suite", async (t) => {
   // 1. manual long open -> manual full close = 1 lifecycle
@@ -598,43 +620,342 @@ test("PHASE 13D: OKX Account Truth Lifecycle Ingestion & Dedup Forensic Suite", 
     }
   });
 
-  // 18. 7-day backfill + incremental ingest duplicate 없음
-  await t.test("18. 7-day backfill + incremental ingest duplicate 없음", async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "okx-truth-test-"));
+  // 19. Account Truth row pnlNet/fee dashboard normalization value preservation
+  await t.test("19. Account Truth row pnlNet/fee dashboard normalization value preservation", () => {
+    const truthRow: OkxAccountClosedTradeRecord = {
+      symbol: "ETHUSDT",
+      side: "short",
+      openedAt: 1788500000000,
+      closedAt: 1788501000000,
+      entryPrice: 2500,
+      closePrice: 2480,
+      entryQty: 5.0,
+      closedQty: 5.0,
+      sizeUsd: 1250,
+      realizedPnl: 10.0,
+      realizedPnlPct: 0.008,
+      fee: 1.5,
+      pnlNet: 8.5,
+      holdingMs: 1000000,
+      source: "BOT_V2",
+      entrySource: "BOT",
+      exitSource: "BOT",
+      sourceLabel: "자동",
+      exitReason: "보호 주문 체결 (TP/SL)",
+      exitType: "EXIT_EXCHANGE_ALGO",
+      exchangeEntryOrdIds: ["ord_in_1"],
+      exchangeExitOrdIds: ["ord_out_1"],
+      exchangeFillIds: ["f1", "f2"],
+      lifecycleId: "okx_life:ETHUSDT:short:1788500000000:1788501000000",
+      isManualEntry: false,
+      isManualExit: false,
+      isBotEntry: true,
+      isBotExit: true,
+      isAdoptedExternal: false,
+      isOperatorManaged: false,
+      isChildExecution: false,
+      isPositionCycleFinal: true,
+      accountTruth: true,
+      tradeSource: "BOT_V2"
+    };
+
+    const normalized = normalizeClosedHistoryRow(truthRow);
+    assert.equal(normalized.pnlUsdNet, 8.5);
+    assert.equal(normalized.pnlUsd, 8.5);
+    assert.equal(normalized.realizedPnlUsd, 8.5);
+    assert.equal(normalized.feeUsd, 1.5);
+    assert.equal(normalized.pnlUsdGross, 10.0);
+    assert.equal(normalized.sourceLabel, "자동");
+  });
+
+  // 20. 10분 이상 보유 거래가 서로 다른 sync batch에 분할 인입되어도 1건으로 정상 복원
+  await t.test("20. 10분 이상 보유 거래가 서로 다른 sync batch에 분할 인입되어도 1건으로 정상 복원", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "okx-batch-test-20-"));
     try {
-      // Step 1: Initial 7-day backfill (trades at t=100..200 and t=300..400)
-      const fillsBatch1: OkxFillsHistoryItem[] = [
-        { instId: "BTC-USDT-SWAP", side: "buy", fillPx: "80000", fillSz: "1.0", fillTime: 100, ordId: "b1", clOrdId: "" },
-        { instId: "BTC-USDT-SWAP", side: "sell", fillPx: "80500", fillSz: "1.0", fillTime: 200, ordId: "s1", clOrdId: "" },
-        { instId: "ETH-USDT-SWAP", side: "buy", fillPx: "2500", fillSz: "5.0", fillTime: 300, ordId: "e1", clOrdId: "" },
-        { instId: "ETH-USDT-SWAP", side: "sell", fillPx: "2550", fillSz: "5.0", fillTime: 400, ordId: "e2", clOrdId: "" }
+      // Batch 1 (T=100,000): Entry fill only (Position is open)
+      const batch1: OkxFillsHistoryItem[] = [
+        {
+          instId: "BTC-USDT-SWAP",
+          side: "buy",
+          fillPx: "80000",
+          fillSz: "1.0",
+          fillTime: 100_000,
+          ordId: "ord_batch_in",
+          tradeId: "t_batch_1",
+          clOrdId: "pBTCUSDTbmt101"
+        }
       ];
 
-      const initialLifecycles = reconstructLifecyclesFromFills(fillsBatch1);
-      await saveOkxAccountClosedTrades(tmpDir, initialLifecycles);
-      await saveOkxAccountTruthCursor(tmpDir, { lastFillTime: 400, syncedAt: Date.now() });
-
-      // Step 2: Incremental ingest with overlapping fill at t=400 plus new fill at t=500..600
-      const fillsBatch2: OkxFillsHistoryItem[] = [
-        { instId: "ETH-USDT-SWAP", side: "sell", fillPx: "2550", fillSz: "5.0", fillTime: 400, ordId: "e2", clOrdId: "" },
-        { instId: "BTC-USDT-SWAP", side: "buy", fillPx: "81000", fillSz: "1.0", fillTime: 500, ordId: "b3", clOrdId: "" },
-        { instId: "BTC-USDT-SWAP", side: "sell", fillPx: "81500", fillSz: "1.0", fillTime: 600, ordId: "s3", clOrdId: "" }
+      // Batch 2 (T=800,000, >11분 후): Exit fill only
+      const batch2: OkxFillsHistoryItem[] = [
+        {
+          instId: "BTC-USDT-SWAP",
+          side: "sell",
+          fillPx: "81000",
+          fillSz: "1.0",
+          fillPnl: "10.0",
+          fee: "0.5",
+          fillTime: 800_000,
+          ordId: "ord_batch_out",
+          tradeId: "t_batch_2",
+          clOrdId: "pBTCUSDTsmt101"
+        }
       ];
 
-      const existing = await readOkxAccountClosedTrades(tmpDir);
-      const incrementalLifecycles = reconstructLifecyclesFromFills(fillsBatch2);
+      const client = createMockClient([batch1, batch2]);
 
-      const tradeMap = new Map<string, OkxAccountClosedTradeRecord>();
-      for (const t of existing) tradeMap.set(t.lifecycleId, t);
-      for (const t of incrementalLifecycles) tradeMap.set(t.lifecycleId, t);
+      // Sync 1
+      const res1 = await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      assert.equal(res1.ok, true);
+      assert.equal(res1.rawFillsFetched, 1);
+      assert.equal(res1.totalRawFillsCount, 1);
+      assert.equal(res1.totalSavedTrades, 0); // Position still open
 
-      const merged = Array.from(tradeMap.values());
-      await saveOkxAccountClosedTrades(tmpDir, merged);
+      // Sync 2 (11 min later)
+      const res2 = await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      assert.equal(res2.ok, true);
+      assert.equal(res2.rawFillsFetched, 1);
+      assert.equal(res2.totalRawFillsCount, 2); // 2 fills deduplicated and accumulated
+      assert.equal(res2.totalSavedTrades, 1); // Exactly 1 closed trade reconstructed!
 
-      const finalSaved = await readOkxAccountClosedTrades(tmpDir);
-      assert.equal(finalSaved.length, 3); // exactly 3 lifecycles, no duplicates
+      const saved = await readOkxAccountClosedTrades(tmpDir);
+      assert.equal(saved.length, 1);
+      assert.equal(saved[0].symbol, "BTCUSDT");
+      assert.equal(saved[0].entryPrice, 80000);
+      assert.equal(saved[0].closePrice, 81000);
+      assert.equal(saved[0].holdingMs, 700_000);
+      assert.equal(saved[0].sourceLabel, "자동");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // 21. 수동 거래가 서로 다른 sync batch에 걸쳐도 수동 라벨로 정상 복원
+  await t.test("21. 수동 거래가 서로 다른 sync batch에 걸쳐도 수동 라벨로 정상 복원", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "okx-batch-test-21-"));
+    try {
+      const batch1: OkxFillsHistoryItem[] = [
+        {
+          instId: "ETH-USDT-SWAP",
+          side: "sell",
+          fillPx: "2500",
+          fillSz: "5.0",
+          fillTime: 100_000,
+          ordId: "m_ord_in",
+          tradeId: "m_t_1",
+          clOrdId: ""
+        }
+      ];
+
+      const batch2: OkxFillsHistoryItem[] = [
+        {
+          instId: "ETH-USDT-SWAP",
+          side: "buy",
+          fillPx: "2450",
+          fillSz: "5.0",
+          fillPnl: "25.0",
+          fee: "1.0",
+          fillTime: 900_000,
+          ordId: "m_ord_out",
+          tradeId: "m_t_2",
+          clOrdId: ""
+        }
+      ];
+
+      const client = createMockClient([batch1, batch2]);
+
+      await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      const res2 = await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      assert.equal(res2.totalSavedTrades, 1);
+
+      const saved = await readOkxAccountClosedTrades(tmpDir);
+      assert.equal(saved.length, 1);
+      assert.equal(saved[0].symbol, "ETHUSDT");
+      assert.equal(saved[0].side, "short");
+      assert.equal(saved[0].sourceLabel, "수동");
+      assert.equal(saved[0].isManualEntry, true);
+      assert.equal(saved[0].isManualExit, true);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // 22. 하이브리드 거래 (BOT->MANUAL, MANUAL->BOT) 배치 분할 인입 검증
+  await t.test("22. 하이브리드 거래 (BOT->MANUAL, MANUAL->BOT) 배치 분할 인입 검증", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "okx-batch-test-22-"));
+    try {
+      // Trade A: Bot entry -> Manual exit
+      // Trade B: Manual entry -> Bot TP exit
+      const batch1: OkxFillsHistoryItem[] = [
+        { instId: "BTC-USDT-SWAP", side: "buy", fillPx: "80000", fillSz: "1.0", fillTime: 100_000, ordId: "b_in_1", tradeId: "t_a1", clOrdId: "pBTCUSDTbmt201" },
+        { instId: "ETH-USDT-SWAP", side: "buy", fillPx: "2500", fillSz: "4.0", fillTime: 150_000, ordId: "m_in_1", tradeId: "t_b1", clOrdId: "" }
+      ];
+
+      const batch2: OkxFillsHistoryItem[] = [
+        { instId: "BTC-USDT-SWAP", side: "sell", fillPx: "80500", fillSz: "1.0", fillTime: 700_000, ordId: "m_out_1", tradeId: "t_a2", clOrdId: "" },
+        { instId: "ETH-USDT-SWAP", side: "sell", fillPx: "2550", fillSz: "4.0", fillTime: 750_000, ordId: "b_out_1", tradeId: "t_b2", clOrdId: "pETHUSDTsmt201" }
+      ];
+
+      const client = createMockClient([batch1, batch2]);
+
+      await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      const res2 = await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      assert.equal(res2.totalSavedTrades, 2);
+
+      const saved = await readOkxAccountClosedTrades(tmpDir);
+      const btc = saved.find((s) => s.symbol === "BTCUSDT");
+      const eth = saved.find((s) => s.symbol === "ETHUSDT");
+
+      assert.ok(btc);
+      assert.ok(eth);
+      assert.equal(btc.sourceLabel, "자동→수동");
+      assert.equal(btc.tradeSource, "ADOPTED_EXTERNAL");
+      assert.equal(eth.sourceLabel, "수동→자동");
+      assert.equal(eth.tradeSource, "BOT_V2");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // 23. Partial reduce 분할 인입 시 동일 lifecycle에 누적되어 1건으로 최종 확정
+  await t.test("23. Partial reduce 분할 인입 시 동일 lifecycle에 누적되어 1건으로 최종 확정", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "okx-batch-test-23-"));
+    try {
+      // Batch 1: Open 10
+      const batch1: OkxFillsHistoryItem[] = [
+        { instId: "ETH-USDT-SWAP", side: "buy", fillPx: "2500", fillSz: "10.0", fillTime: 100_000, ordId: "o_in", tradeId: "t_p1", clOrdId: "pETHUSDTbmt301" }
+      ];
+      // Batch 2: Partial Reduce 4
+      const batch2: OkxFillsHistoryItem[] = [
+        { instId: "ETH-USDT-SWAP", side: "sell", fillPx: "2520", fillSz: "4.0", fillPnl: "8.0", fee: "0.4", fillTime: 400_000, ordId: "o_red", tradeId: "t_p2", clOrdId: "pETHUSDTsmt301_p1" }
+      ];
+      // Batch 3: Final Close 6
+      const batch3: OkxFillsHistoryItem[] = [
+        { instId: "ETH-USDT-SWAP", side: "sell", fillPx: "2550", fillSz: "6.0", fillPnl: "30.0", fee: "0.6", fillTime: 800_000, ordId: "o_fin", tradeId: "t_p3", clOrdId: "pETHUSDTsmt301_p2" }
+      ];
+
+      const client = createMockClient([batch1, batch2, batch3]);
+
+      const res1 = await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      assert.equal(res1.totalSavedTrades, 0);
+
+      const res2 = await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      assert.equal(res2.totalSavedTrades, 0); // Position still partially open (remaining 6)
+
+      const res3 = await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      assert.equal(res3.totalSavedTrades, 1); // Exactly 1 closed trade on full close!
+
+      const saved = await readOkxAccountClosedTrades(tmpDir);
+      assert.equal(saved.length, 1);
+      assert.equal(saved[0].entryQty, 10.0);
+      assert.equal(saved[0].closedQty, 10.0);
+      assert.equal(saved[0].closePrice, 2538); // (2520*4 + 2550*6)/10 = 2538
+      assert.equal(saved[0].realizedPnl, 38.0);
+      assert.equal(saved[0].fee, 1.0);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // 24. 동일 심볼 full close 후 재진입이 배치 경계를 넘어도 2건으로 분리 보존
+  await t.test("24. 동일 심볼 full close 후 재진입이 배치 경계를 넘어도 2건으로 분리 보존", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "okx-batch-test-24-"));
+    try {
+      // Batch 1: Trade 1 complete
+      const batch1: OkxFillsHistoryItem[] = [
+        { instId: "BTC-USDT-SWAP", side: "buy", fillPx: "80000", fillSz: "1.0", fillTime: 100_000, ordId: "b1_in", tradeId: "t1_1", clOrdId: "pBTCUSDTbmt401" },
+        { instId: "BTC-USDT-SWAP", side: "sell", fillPx: "80500", fillSz: "1.0", fillTime: 200_000, ordId: "b1_out", tradeId: "t1_2", clOrdId: "pBTCUSDTsmt401" }
+      ];
+      // Batch 2: Trade 2 Entry (Open)
+      const batch2: OkxFillsHistoryItem[] = [
+        { instId: "BTC-USDT-SWAP", side: "buy", fillPx: "81000", fillSz: "1.0", fillTime: 500_000, ordId: "b2_in", tradeId: "t2_1", clOrdId: "pBTCUSDTbmt402" }
+      ];
+      // Batch 3: Trade 2 Exit (Close)
+      const batch3: OkxFillsHistoryItem[] = [
+        { instId: "BTC-USDT-SWAP", side: "sell", fillPx: "81500", fillSz: "1.0", fillTime: 800_000, ordId: "b2_out", tradeId: "t2_2", clOrdId: "pBTCUSDTsmt402" }
+      ];
+
+      const client = createMockClient([batch1, batch2, batch3]);
+
+      await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      const res3 = await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+
+      assert.equal(res3.totalSavedTrades, 2);
+      const saved = await readOkxAccountClosedTrades(tmpDir);
+      assert.equal(saved.length, 2);
+      assert.notEqual(saved[0].openedAt, saved[1].openedAt);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // 25. BTC/ETH interleaved 체결이 여러 배치에 걸쳐도 상호 오염 없이 독립 복원
+  await t.test("25. BTC/ETH interleaved 체결이 여러 배치에 걸쳐도 상호 오염 없이 독립 복원", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "okx-batch-test-25-"));
+    try {
+      const batch1: OkxFillsHistoryItem[] = [
+        { instId: "BTC-USDT-SWAP", side: "buy", fillPx: "80000", fillSz: "1.0", fillTime: 100_000, ordId: "btc_in", tradeId: "t_btc1", clOrdId: "" },
+        { instId: "ETH-USDT-SWAP", side: "sell", fillPx: "2500", fillSz: "5.0", fillTime: 120_000, ordId: "eth_in", tradeId: "t_eth1", clOrdId: "" }
+      ];
+      const batch2: OkxFillsHistoryItem[] = [
+        { instId: "BTC-USDT-SWAP", side: "sell", fillPx: "81000", fillSz: "1.0", fillTime: 600_000, ordId: "btc_out", tradeId: "t_btc2", clOrdId: "" },
+        { instId: "ETH-USDT-SWAP", side: "buy", fillPx: "2450", fillSz: "5.0", fillTime: 620_000, ordId: "eth_out", tradeId: "t_eth2", clOrdId: "" }
+      ];
+
+      const client = createMockClient([batch1, batch2]);
+
+      await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      const res2 = await syncOkxAccountTruthTrades({ dataDir: tmpDir, client });
+      assert.equal(res2.totalSavedTrades, 2);
+
+      const saved = await readOkxAccountClosedTrades(tmpDir);
+      const btc = saved.find((s) => s.symbol === "BTCUSDT");
+      const eth = saved.find((s) => s.symbol === "ETHUSDT");
+      assert.ok(btc && eth);
+      assert.equal(btc.entryQty, 1.0);
+      assert.equal(eth.entryQty, 5.0);
+      assert.equal(btc.side, "long");
+      assert.equal(eth.side, "short");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // 26. One-time Historical Backfill 경로로 과거 누락 거래 100% 복구 및 proof 대조
+  await t.test("26. One-time Historical Backfill 경로로 과거 누락 거래 100% 복구 및 proof 대조", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "okx-batch-test-26-"));
+    try {
+      const historicalFills: OkxFillsHistoryItem[] = [
+        { instId: "BTC-USDT-SWAP", side: "buy", fillPx: "79000", fillSz: "2.0", fillTime: 10_000, ordId: "h_b1", tradeId: "h_t1", clOrdId: "" },
+        { instId: "BTC-USDT-SWAP", side: "sell", fillPx: "80000", fillSz: "2.0", fillTime: 20_000, ordId: "h_s1", tradeId: "h_t2", clOrdId: "" },
+        { instId: "ETH-USDT-SWAP", side: "buy", fillPx: "2400", fillSz: "10.0", fillTime: 30_000, ordId: "h_e1", tradeId: "h_t3", clOrdId: "" },
+        { instId: "ETH-USDT-SWAP", side: "sell", fillPx: "2450", fillSz: "10.0", fillTime: 40_000, ordId: "h_e2", tradeId: "h_t4", clOrdId: "" }
+      ];
+
+      const client = createMockClient([historicalFills]);
+
+      const backfillRes = await backfillOkxAccountTruthTrades({
+        dataDir: tmpDir,
+        client,
+        bootstrapDays: 30,
+        maxPages: 50
+      });
+
+      assert.equal(backfillRes.ok, true);
+      assert.equal(backfillRes.totalRawFillsCount, 4);
+      assert.equal(backfillRes.totalLifecyclesCount, 2);
+      assert.equal(backfillRes.totalSavedTrades, 2);
+      assert.equal(backfillRes.dashboardPositionsCount, 2);
+
+      const rawFillsOnDisk = await readOkxRawFills(tmpDir);
+      assert.equal(rawFillsOnDisk.length, 4);
+
+      const tradesOnDisk = await readOkxAccountClosedTrades(tmpDir);
+      assert.equal(tradesOnDisk.length, 2);
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
 });
+

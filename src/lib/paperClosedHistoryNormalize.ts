@@ -239,7 +239,14 @@ export type NormalizedPaperClosedRow = Readonly<
 export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRow {
   const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
 
-  const pnlNet = parseFinite(o.pnlUsdNet) ?? parseFinite(o.pnlUsd) ?? parseFinite(o.realizedPnlUsd) ?? 0;
+  const feeUsd = parseFinite(o.feeUsd) ?? parseFinite(o.fee) ?? 0;
+  const pnlNet =
+    parseFinite(o.pnlUsdNet) ??
+    parseFinite(o.pnlUsd) ??
+    parseFinite(o.realizedPnlUsd) ??
+    parseFinite(o.pnlNet) ??
+    parseFinite(o.realizedPnl) ??
+    0;
   const sizeUsd = finiteUsd(parseFinite(o.sizeUsd) ?? 0);
   const closedAt = parseFinite(o.closedAt) ?? 0;
   const entryPrice = parseFinite(o.entryPrice);
@@ -334,7 +341,7 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
 
   const pnlGross =
     parseFinite(o.pnlUsdGross) ??
-    finiteUsd(pnlNet + (parseFinite(o.feeUsd) ?? 0) + (parseFinite(o.fundingUsd) ?? 0));
+    finiteUsd(pnlNet + feeUsd + (parseFinite(o.fundingUsd) ?? 0));
 
   const sourceLabel = resolveDisplayTradeSourceLabel(raw);
 
@@ -347,6 +354,7 @@ export function normalizeClosedHistoryRow(raw: unknown): NormalizedPaperClosedRo
     pnlUsd: finiteUsd(pnlNet),
     pnlUsdNet: finiteUsd(pnlNet),
     pnlUsdGross: pnlGross,
+    feeUsd: finiteUsd(feeUsd),
     sizeUsd,
     closeReason: closeReasonForRecord,
     exitType,
@@ -604,9 +612,19 @@ export function deduplicateClosedHistoryRows(rows: NormalizedPaperClosedRow[]): 
       // Exchange execution numbers (if present)
       const exObj = isRExchangeTruth ? r : isExistingExchangeTruth ? existing : null;
       if (exObj) {
-        if (typeof exObj.feeUsd === "number") base.feeUsd = exObj.feeUsd;
-        if (typeof exObj.realizedPnlUsd === "number") base.realizedPnlUsd = exObj.realizedPnlUsd;
-        if (typeof exObj.realizedPnlPct === "number") base.realizedPnlPct = exObj.realizedPnlPct;
+        const exFee = parseFinite(exObj.feeUsd) ?? parseFinite((exObj as any).fee);
+        if (exFee !== null) base.feeUsd = exFee;
+        const exPnl =
+          parseFinite(exObj.realizedPnlUsd) ??
+          parseFinite((exObj as any).pnlNet) ??
+          parseFinite((exObj as any).realizedPnl);
+        if (exPnl !== null) {
+          base.realizedPnlUsd = exPnl;
+          base.pnlUsdNet = exPnl;
+          base.pnlUsd = exPnl;
+        }
+        const exPnlPct = parseFinite(exObj.realizedPnlPct);
+        if (exPnlPct !== null) base.realizedPnlPct = exPnlPct;
       }
 
       dedupMap.set(key, base as NormalizedPaperClosedRow);
