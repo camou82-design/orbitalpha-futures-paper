@@ -19,6 +19,7 @@ import { protectiveStopPricesMatch, protectiveContractSizesMatch } from "../engi
 import { resolveLedgerCanonicalProtectiveTruth } from "../engine-v2/execution/protective-order-state";
 import { resolveOpsWatchTpRequired } from "../engine-v2/execution/protective-tp-authority";
 import { isV2RangePartialPlanContext } from "../engine-v2/execution/entry-protection-attach";
+import { isAuthoritativeBotOwnedAlgoOrder } from "../engine-v2/position/manual-takeover-authority";
 
 export type PositionOpsBanner =
   | "NO_POSITION"
@@ -305,7 +306,13 @@ export function classifyOkxOpenOrderPurpose(
     return botManagedBase("protective-stop", "reduce_only_protective_shape");
   }
 
-  if (isReduceOnly && hasEngineAlgoClOrdId) {
+  const isBotOwnedAlgo = isAuthoritativeBotOwnedAlgoOrder(ord, ledgerPos ? [ledgerPos] : null);
+  const isOco = ord.ordType === "oco" || ord.algoType === "oco" || (ord.slTriggerPx != null && ord.tpTriggerPx != null);
+
+  if (isReduceOnly && (hasEngineAlgoClOrdId || isBotOwnedAlgo || isOco)) {
+    if (isOco) {
+      return botManagedBase("bot-managed-protection", "oco" as any);
+    }
     return botManagedBase("bot-managed-protection", "algo_clord");
   }
 

@@ -321,11 +321,20 @@ export function planProtectiveOrderReconcile(
     const needSubmitSl = positionActive && (!canonicalSl || legacyOcoMigrationNeeded);
     const needSubmitTp = positionActive && ctx.wantsTp && !canonicalTp;
     const slOnlyTpMissing = positionActive && canonicalSl != null && ctx.wantsTp && !canonicalTp;
+    const tpOnlySlMissingOco =
+        positionActive &&
+        !canonicalSl &&
+        ctx.wantsTp &&
+        canonicalTp != null &&
+        String(canonicalTp.ordType ?? "").toLowerCase() === "oco";
     const isPartialTp =
         ctx.tpContractsToProtect != null &&
         ctx.tpContractsToProtect > 0 &&
         ctx.tpContractsToProtect !== ctx.contractsToProtect;
-    const submitOco = positionActive && !isPartialTp && (((needSubmitSl && needSubmitTp && ctx.wantsTp) || slOnlyTpMissing));
+    const submitOco =
+        positionActive &&
+        !isPartialTp &&
+        ((needSubmitSl && needSubmitTp && ctx.wantsTp) || slOnlyTpMissing || tpOnlySlMissingOco);
 
     const slOnlyOcoRebuild = !isPartialTp && slOnlyTpMissing;
 

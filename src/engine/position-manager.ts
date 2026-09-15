@@ -2,6 +2,7 @@ import type { PaperClosedPositionRecord, PaperOpenPositionRecord } from "../mode
 import type { PaperHealthReport } from "../storage/paper-health";
 import type { JsonStore } from "../storage/json-store";
 import type { OkxLiveBalance } from "../storage/paper-dashboard";
+import { recordEthRangeEntryQualityOutcome } from "../engine-v2/audit/eth-range-entry-quality-outcome-linker";
 
 type PositionSideLower = "long" | "short";
 
@@ -88,6 +89,7 @@ export class PositionManager {
 
   async appendClosed(record: PaperClosedPositionRecord): Promise<void> {
     await this.store.appendPositionsHistory(record);
+    recordEthRangeEntryQualityOutcome(record);
   }
 
   async deleteOpen(): Promise<void> {

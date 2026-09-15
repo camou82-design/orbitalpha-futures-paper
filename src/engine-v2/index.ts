@@ -834,8 +834,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             input_config_val: input.config.okxLiveMaxOrderNotionalUsdt,
             resolved_val: v2State.liveMaxOrderNotionalUsdt,
             is_fallback_applied: v2State.liveMaxOrderNotionalUsdt !== input.state.liveMaxOrderNotionalUsdt,
-            fallback_source: v2State.liveMaxOrderNotionalUsdt === input.config.okxLiveMaxOrderNotionalUsdt ? "config" :
-                             v2State.liveMaxOrderNotionalUsdt === 100 ? "default_100" : "none",
+            fallback_source: (v2State.liveMaxOrderNotionalUsdt != null && v2State.liveMaxOrderNotionalUsdt === input.config.okxLiveMaxOrderNotionalUsdt) ? "config" : "none",
             ts: Date.now()
         }));
     }
@@ -8042,7 +8041,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             accountEquityUsd: v2State.accountEquityKrw / 1400,
             currentSymbolNotionalUsd: v2State.symbolLedgerExposureNotionalKrw / 1400,
             currentGlobalNotionalUsd: v2State.ledgerExposureNotionalKrw / 1400,
-            liveMaxOrderNotionalUsdt: v2State.liveMaxOrderNotionalUsdt,
+            liveMaxOrderNotionalUsdt: v2State.liveMaxOrderNotionalUsdt ?? undefined,
             finalAddonNotionalUsdt: finalAddonNotionalUsdt,
             peakUnrealizedPnlPct: lifecyclePosition_latest?.peakUnrealizedPnlPct,
             peakUnrealizedPnlUsd: lifecyclePosition_latest?.peakUnrealizedPnlUsd,

@@ -10988,18 +10988,7 @@ export class PaperEngine {
     const lookupRows: ProtectiveAlgoRow[] = [];
     for (const clOrdId of clOrdCandidates) {
       if (pendingClSet.has(clOrdId)) continue;
-      // [BLOCKER-3-2] LEGACY ID REMOTE LOOKUP BLOCK:
-      // Only send alphanumeric-only ids to OKX. Legacy sl_/tp_ forms (with underscore)
-      // are valid LOCAL candidates for dedup, but MUST NOT be sent to OKX API
-      // because OKX rejects non-alphanumeric algoClOrdId values.
       if (!isValidOkxAlgoClOrdId(clOrdId)) {
-        this.logger.info("PROTECTIVE_ALGO_CLORDID_LOOKUP_SKIP_INVALID_PROOF", {
-          symbol: input.open.symbol,
-          side: input.open.side,
-          flowId: input.flowId,
-          clOrdId,
-          reason: "non_alphanumeric_clordid_blocked_from_okx_remote_lookup"
-        });
         continue;
       }
       const lookupTry = await this.okxDemo!.getAlgoOrder({ instId: input.instId, algoClOrdId: clOrdId });
@@ -11380,7 +11369,7 @@ export class PaperEngine {
       slTriggerPx: String(input.activeStopPrice),
       slOrdPx: "-1",
       slTriggerPxType: "last",
-      algoClOrdId: `${input.slAlgoClOrdId}_restore`
+      algoClOrdId: `${input.slAlgoClOrdId}rst`.slice(0, 32)
     });
     const restoreOk = restoreRes.ok;
     proof = mergeRebuildTransactionProof(proof, { restoreSucceeded: restoreOk });
@@ -15939,6 +15928,7 @@ export class PaperEngine {
         if (validUpdate) {
           const prevStop = posTrail.stopPrice;
           posTrail.stopPrice = v2NewStop;
+          open.stopPrice = v2NewStop;
           crashPositionsModified = true;
           this.logger.info("V2_TREND_STOP_RAISE_PROOF", {
             symbol: sk,
@@ -15956,6 +15946,29 @@ export class PaperEngine {
             reason: "lifecycle_authority_propagation",
             flowId
           });
+
+          // Live exchange protective order update (Safe Replace Atomic Swap)
+          const isOperatorManaged =
+            this.symbolExternalManualBlocked.has(symSideKey) ||
+            open.lifecycleState === "EXTERNAL_MANUAL_POSITION" ||
+            open.lifecycleState === "OPERATOR_MANAGED" ||
+            open.lifecycleState === "CLOSE_ONLY_MANAGED" ||
+            (open as any).isOperatorManaged === true;
+
+          if (this.okxDemo && !isOperatorManaged && !this.isManualTakeoverActive(open.symbol, open.side)) {
+            const ensureRes = await this.ensureProtectiveStopOrder(open, `trailing_stop_update:${flowId}`);
+            if (ensureRes && ensureRes.success) {
+              open = ensureRes.record;
+              posTrail = { ...posTrail, ...ensureRes.record };
+            } else {
+              this.logger.warn("V2_TRAILING_STOP_EXCHANGE_UPDATE_FAILED_FAILSAFE", {
+                symbol: sk,
+                side: posTrail.side,
+                requestedStop: v2NewStop,
+                flowId
+              });
+            }
+          }
         } else if (Math.abs((oldStop ?? 0) - v2NewStop) > 1e-8) {
           this.logger.warn("V2_STOP_UPDATE_REJECTED_UNFAVORABLE", {
             symbol: sk,

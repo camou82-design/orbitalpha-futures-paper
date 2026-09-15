@@ -351,7 +351,7 @@ assertCapResolution("CASE_B4_LEGACY100_EMERGENCY40", { legacy: 100, emergency: 4
   const equityProof = proofs.find((p) => p.event === "V2_EQUITY_ADAPTIVE_SIZING_PROOF");
   const liveSizeProof = proofs.find((p) => p.event === "LIVE_ORDER_SIZE_PROOF");
 
-  assert.equal(Number(sizingProof?.legacy_static_cap_usdt), LEGACY_MAX);
+  assert.equal(sizingProof?.legacy_static_cap_usdt ?? null, null);
   assert.equal(Number(sizingProof?.emergency_cap_usdt), EMERGENCY_MAX);
   assert.equal(sizingProof?.effective_live_cap_usdt ?? null, null);
 
