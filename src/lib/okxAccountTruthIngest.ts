@@ -7,10 +7,12 @@ import {
   readOkxRawFills,
   saveOkxRawFills,
   mergeAndDedupRawFills,
-  type OkxAccountClosedTradeRecord,
-  type OkxFillsHistoryItem
+  type OkxAccountClosedTradeRecord
 } from "../storage/account-truth-store";
-import { reconstructLifecyclesFromFills } from "./okxLifecycleReconstruction";
+import {
+  reconstructLifecyclesFromFills,
+  type OkxFillsHistoryItem
+} from "./okxLifecycleReconstruction";
 import {
   canonicalClosedTradeDedupKey,
   normalizePositionsHistoryArray
@@ -71,14 +73,29 @@ export async function syncOkxAccountTruthTrades(
     const newFetchedFills: OkxFillsHistoryItem[] = [];
     let afterCursor: string | undefined = undefined;
     let isTruncated = false;
+    const seenCursors = new Set<string>();
 
     for (let page = 0; page < maxPages; page++) {
-      const fillsRes = await client.getFillsHistory({
+      if (page > 0) {
+        await new Promise((r) => setTimeout(r, 400));
+      }
+
+      let fillsRes = await client.getFillsHistory({
         instType: "SWAP",
         begin: String(beginTime),
         limit: "100",
         ...(afterCursor ? { after: afterCursor } : {})
       });
+
+      if (!fillsRes.ok && typeof fillsRes.error === "string" && fillsRes.error.includes("429")) {
+        await new Promise((r) => setTimeout(r, 1500));
+        fillsRes = await client.getFillsHistory({
+          instType: "SWAP",
+          begin: String(beginTime),
+          limit: "100",
+          ...(afterCursor ? { after: afterCursor } : {})
+        });
+      }
 
       if (!fillsRes.ok) {
         const reconstructed = reconstructLifecyclesFromFills(existingRawFills);
@@ -102,7 +119,60 @@ export async function syncOkxAccountTruthTrades(
 
       newFetchedFills.push(...list);
 
-      // OKX pagination: after is older records
+      const firstItem = list[0];
+      const lastItem = list[list.length - 1];
+      const firstBillId = String(firstItem.billId ?? "").trim();
+      const lastBillId = String(lastItem.billId ?? "").trim();
+      const firstFillTime = Number(firstItem.fillTime) || 0;
+      const lastFillTime = Number(lastItem.fillTime) || 0;
+
+      let nextAfterCursor: string | undefined = undefined;
+      let shouldHalt = false;
+
+      if (list.length >= 100) {
+        const candidateCursor = String(lastItem.billId ?? "").trim();
+        if (!candidateCursor) {
+          isTruncated = true;
+          shouldHalt = true;
+          console.warn("OKX_ACCOUNT_TRUTH_BILL_ID_MISSING_PROOF", {
+            event: "OKX_ACCOUNT_TRUTH_BILL_ID_MISSING_PROOF",
+            page: page + 1,
+            returned_count: list.length,
+            last_trade_id: lastItem.tradeId ?? null,
+            last_ord_id: lastItem.ordId ?? null,
+            action: "safe_pagination_halt"
+          });
+        } else if (seenCursors.has(candidateCursor) || afterCursor === candidateCursor) {
+          isTruncated = true;
+          shouldHalt = true;
+          console.warn("OKX_ACCOUNT_TRUTH_PAGINATION_DUPLICATE_CURSOR_PROOF", {
+            event: "OKX_ACCOUNT_TRUTH_PAGINATION_DUPLICATE_CURSOR_PROOF",
+            page: page + 1,
+            duplicate_cursor: candidateCursor,
+            action: "halt_infinite_loop"
+          });
+        } else {
+          nextAfterCursor = candidateCursor;
+          seenCursors.add(candidateCursor);
+        }
+      }
+
+      console.log("OKX_ACCOUNT_TRUTH_PAGE_FETCH_PROOF", {
+        event: "OKX_ACCOUNT_TRUTH_PAGE_FETCH_PROOF",
+        page: page + 1,
+        returned_count: list.length,
+        first_bill_id: firstBillId || null,
+        last_bill_id: lastBillId || null,
+        first_fill_time: firstFillTime,
+        last_fill_time: lastFillTime,
+        next_after_cursor: nextAfterCursor ?? null
+      });
+
+      if (shouldHalt) {
+        break;
+      }
+
+      // OKX pagination: after is older records. If list < 100, we reached the end.
       if (list.length < 100) {
         break;
       }
@@ -113,12 +183,11 @@ export async function syncOkxAccountTruthTrades(
           event: "OKX_ACCOUNT_TRUTH_PAGINATION_TRUNCATED_PROOF",
           max_pages: maxPages,
           fetched_so_far: newFetchedFills.length,
-          last_cursor: afterCursor
+          last_cursor: nextAfterCursor
         });
       }
 
-      const lastItem = list[list.length - 1];
-      afterCursor = lastItem.tradeId || lastItem.ordId;
+      afterCursor = nextAfterCursor;
     }
 
     // Merge newly fetched fills into the persistent raw fill store with stable deduplication
@@ -161,6 +230,22 @@ export async function syncOkxAccountTruthTrades(
     // Compute normalized dashboard positions history count for parity cross-check
     const normalizedDashboardTrades = normalizePositionsHistoryArray(mergedTrades);
     const dashboardPositionsCount = normalizedDashboardTrades.length;
+
+    const oldestFillTime =
+      allMergedRawFills.length > 0
+        ? Math.min(...allMergedRawFills.map((f) => Number(f.fillTime) || Number.MAX_SAFE_INTEGER))
+        : 0;
+    const reachedBeginWindow = oldestFillTime > 0 && oldestFillTime <= beginTime;
+
+    console.log("OKX_ACCOUNT_TRUTH_BACKFILL_RANGE_PROOF", {
+      event: "OKX_ACCOUNT_TRUTH_BACKFILL_RANGE_PROOF",
+      requested_begin_time: beginTime,
+      oldest_fill_time: oldestFillTime,
+      newest_fill_time: maxFillTime,
+      total_raw_fills: allMergedRawFills.length,
+      reached_begin_window: reachedBeginWindow,
+      is_truncated: isTruncated
+    });
 
     console.log("OKX_ACCOUNT_TRUTH_INGEST_PROOF", {
       event: "OKX_ACCOUNT_TRUTH_INGEST_PROOF",

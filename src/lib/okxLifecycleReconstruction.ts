@@ -14,6 +14,7 @@ export interface OkxFillsHistoryItem {
   ordId?: string;
   clOrdId?: string;
   execType?: string;
+  billId?: string;
 }
 
 export function toCanonicalSymbol(instId: string): string {
@@ -46,6 +47,8 @@ interface PositionLeg {
   fill: OkxFillsHistoryItem;
   qty: number;
 }
+
+const QTY_EPS = 1e-9;
 
 /**
  * Pure lifecycle reconstruction from raw OKX fills.
@@ -114,13 +117,18 @@ export function reconstructLifecyclesFromFills(
         totalFee += feeVal;
       }
 
-      // Realized PnL: sum fillPnl from close legs if available
+      // Realized PnL: sum fillPnl from close legs if available.
+      // Note: fillPnl === 0 is valid authoritative realized PnL and must not be treated as missing.
       let realizedPnl = 0;
       let hasExplicitPnl = false;
+      let closeLegsExplicitPnlSum = 0;
       for (const l of closeLegs) {
-        if (l.fill.fillPnl != null && l.fill.fillPnl !== "") {
-          realizedPnl += Number(l.fill.fillPnl) || 0;
-          hasExplicitPnl = true;
+        if (l.fill.fillPnl !== undefined && l.fill.fillPnl !== null && String(l.fill.fillPnl).trim() !== "") {
+          const parsed = Number(l.fill.fillPnl);
+          if (!Number.isNaN(parsed)) {
+            closeLegsExplicitPnlSum += parsed;
+            hasExplicitPnl = true;
+          }
         }
       }
 
@@ -129,9 +137,15 @@ export function reconstructLifecyclesFromFills(
       const ctMult = symbol.startsWith("BTC") ? 0.01 : symbol.startsWith("ETH") ? 0.1 : 1.0;
       const sizeUsd = entryPrice * totalCloseQty * ctMult;
 
-      if (!hasExplicitPnl && entryPrice > 0) {
-        const priceDiff = isLong ? closePrice - entryPrice : entryPrice - closePrice;
-        realizedPnl = priceDiff * totalCloseQty * ctMult;
+      const priceDerivedGrossPnl =
+        entryPrice > 0
+          ? (isLong ? closePrice - entryPrice : entryPrice - closePrice) * totalCloseQty * ctMult
+          : 0;
+
+      if (hasExplicitPnl) {
+        realizedPnl = closeLegsExplicitPnlSum;
+      } else if (entryPrice > 0) {
+        realizedPnl = priceDerivedGrossPnl;
       }
 
       const pnlNet = realizedPnl - totalFee;
@@ -149,6 +163,12 @@ export function reconstructLifecyclesFromFills(
       );
       const exchangeExitOrdIds = Array.from(
         new Set(closeLegs.map((l) => String(l.fill.ordId ?? "").trim()).filter((id) => id.length > 0))
+      );
+      const exchangeEntryFillIds = Array.from(
+        new Set(openLegs.map((l) => String(l.fill.tradeId ?? "").trim()).filter((id) => id.length > 0))
+      );
+      const exchangeExitFillIds = Array.from(
+        new Set(closeLegs.map((l) => String(l.fill.tradeId ?? "").trim()).filter((id) => id.length > 0))
       );
       const exchangeFillIds = Array.from(
         new Set(
@@ -190,6 +210,39 @@ export function reconstructLifecyclesFromFills(
 
       const positionCycleId = `${symbol}:${side}:${openedAt}`;
       const lifecycleId = `okx_life:${symbol}:${side}:${openedAt}:${closedAt}`;
+
+      // Diagnostic divergence proof: does not overwrite explicit fillPnl, only warns on significant discrepancy
+      if (hasExplicitPnl && entryPrice > 0 && closePrice > 0) {
+        const pnlDiff = Math.abs(realizedPnl - priceDerivedGrossPnl);
+        const isSignOpposite =
+          Math.abs(realizedPnl) > 0.05 &&
+          Math.abs(priceDerivedGrossPnl) > 0.05 &&
+          Math.sign(realizedPnl) !== Math.sign(priceDerivedGrossPnl);
+        const isMagnitudeDivergent =
+          pnlDiff > Math.max(1.0, Math.abs(priceDerivedGrossPnl) * 0.3) &&
+          Math.abs(realizedPnl) > 0.1;
+
+        if (isSignOpposite || isMagnitudeDivergent) {
+          console.warn("OKX_ACCOUNT_TRUTH_PNL_DIVERGENCE_PROOF", {
+            event: "OKX_ACCOUNT_TRUTH_PNL_DIVERGENCE_PROOF",
+            symbol,
+            side,
+            lifecycleId,
+            entryPrice,
+            closePrice,
+            totalEntryQty,
+            totalCloseQty,
+            explicitFillPnl: realizedPnl,
+            priceDerivedGrossPnl,
+            totalFee,
+            pnlNet,
+            openTradeIds: exchangeEntryFillIds,
+            closeTradeIds: exchangeExitFillIds,
+            openOrdIds: exchangeEntryOrdIds,
+            closeOrdIds: exchangeExitOrdIds
+          });
+        }
+      }
 
       completedTrades.push({
         symbol,
@@ -241,11 +294,11 @@ export function reconstructLifecyclesFromFills(
 
     for (const fill of sorted) {
       const fillQty = Number(fill.fillSz) || 0;
-      if (fillQty <= 0) continue;
+      if (fillQty <= QTY_EPS) continue;
 
       const fillSigned = fill.side === "buy" ? fillQty : -fillQty;
 
-      if (currentQty === 0) {
+      if (Math.abs(currentQty) <= QTY_EPS) {
         // Case 1: Flat -> Open new lifecycle
         currentQty = fillSigned;
         openLegs = [{ fill, qty: fillQty }];
@@ -258,13 +311,13 @@ export function reconstructLifecyclesFromFills(
         // Case 3: Reducing / Closing
         const currentAbs = Math.abs(currentQty);
 
-        if (currentAbs > fillQty) {
+        if (currentAbs > fillQty + QTY_EPS) {
           // Subcase 3A: Partial reduction (remaining > 0)
           closeLegs.push({ fill, qty: fillQty });
           currentQty += fillSigned;
-        } else if (currentAbs === fillQty) {
-          // Subcase 3B: Exact full close
-          closeLegs.push({ fill, qty: fillQty });
+        } else if (Math.abs(currentAbs - fillQty) <= QTY_EPS) {
+          // Subcase 3B: Effective full close
+          closeLegs.push({ fill, qty: currentAbs });
           currentQty = 0;
           emitClosedLifecycle();
         } else {
@@ -281,6 +334,10 @@ export function reconstructLifecyclesFromFills(
           openLegs = [{ fill, qty: overflowQty }];
           closeLegs = [];
         }
+      }
+
+      if (Math.abs(currentQty) <= QTY_EPS) {
+        currentQty = 0;
       }
     }
   }

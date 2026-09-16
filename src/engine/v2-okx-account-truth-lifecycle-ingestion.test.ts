@@ -1097,6 +1097,286 @@ test("PHASE 13D: OKX Account Truth Lifecycle Ingestion & Dedup Forensic Suite", 
     const normalized = normalizeClosedHistoryRow(rawManualAlgo);
     assert.equal(normalized.sourceLabel, "수동→자동");
   });
+
+  // 35. Pagination 100건 초과: billId를 cursor로 2페이지 연계 조회 및 100건 초과 수집 검증
+  await t.test("35. Pagination 100건 초과: billId를 cursor로 2페이지 연계 조회 및 100건 초과 수집 검증", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "okx-pag-test-"));
+    try {
+      const page1: OkxFillsHistoryItem[] = [];
+      for (let i = 0; i < 100; i++) {
+        page1.push({
+          instId: "BTC-USDT-SWAP",
+          side: "buy",
+          fillPx: "80000",
+          fillSz: "0.1",
+          fillTime: 1788500000000 + i * 1000,
+          tradeId: `t_p1_${i}`,
+          ordId: `o_p1_${i}`,
+          billId: `bill_p1_${i}`
+        });
+      }
+      const page2: OkxFillsHistoryItem[] = [];
+      for (let i = 0; i < 50; i++) {
+        page2.push({
+          instId: "BTC-USDT-SWAP",
+          side: "sell",
+          fillPx: "81000",
+          fillSz: "0.1",
+          fillTime: 1788500000000 + 100000 + i * 1000,
+          tradeId: `t_p2_${i}`,
+          ordId: `o_p2_${i}`,
+          billId: `bill_p2_${i}`
+        });
+      }
+
+      let capturedAfter: string | undefined = undefined;
+      let requestCount = 0;
+      const mockClient: OkxDemoClient = {
+        getFillsHistory: async (params?: Record<string, string>) => {
+          requestCount++;
+          if (requestCount === 1) {
+            return { ok: true, value: page1, diagnostics: { httpStatus: 200, requestUrl: "" } };
+          }
+          if (requestCount === 2) {
+            capturedAfter = params?.after;
+            return { ok: true, value: page2, diagnostics: { httpStatus: 200, requestUrl: "" } };
+          }
+          return { ok: true, value: [], diagnostics: { httpStatus: 200, requestUrl: "" } };
+        }
+      } as unknown as OkxDemoClient;
+
+      const res = await syncOkxAccountTruthTrades({
+        dataDir: tempDir,
+        client: mockClient,
+        bootstrapDays: 7,
+        maxPages: 5
+      });
+
+      assert.equal(res.ok, true);
+      assert.equal(res.rawFillsFetched, 150);
+      assert.equal(res.totalRawFillsCount, 150);
+      assert.equal(capturedAfter, "bill_p1_99");
+      assert.equal(res.isTruncated, false);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // 36. billId 없는 페이지: tradeId fallback 금지 및 안전 중단 / truncated 확인
+  await t.test("36. billId 없는 페이지: tradeId fallback 금지 및 안전 중단 / truncated 확인", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "okx-nobill-test-"));
+    try {
+      const page1: OkxFillsHistoryItem[] = [];
+      for (let i = 0; i < 100; i++) {
+        page1.push({
+          instId: "BTC-USDT-SWAP",
+          side: "buy",
+          fillPx: "80000",
+          fillSz: "0.1",
+          fillTime: 1788500000000 + i * 1000,
+          tradeId: `t_nobill_${i}`,
+          ordId: `o_nobill_${i}`
+          // billId intentionally omitted
+        });
+      }
+
+      let requestCount = 0;
+      const mockClient: OkxDemoClient = {
+        getFillsHistory: async () => {
+          requestCount++;
+          return { ok: true, value: page1, diagnostics: { httpStatus: 200, requestUrl: "" } };
+        }
+      } as unknown as OkxDemoClient;
+
+      const res = await syncOkxAccountTruthTrades({
+        dataDir: tempDir,
+        client: mockClient,
+        bootstrapDays: 7,
+        maxPages: 5
+      });
+
+      assert.equal(res.ok, true);
+      assert.equal(requestCount, 1); // halted after page 1
+      assert.equal(res.rawFillsFetched, 100);
+      assert.equal(res.isTruncated, true);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // 37. 동일 billId 반복: 무한 루프 방지 및 안전 중단 / truncated 확인
+  await t.test("37. 동일 billId 반복: 무한 루프 방지 및 안전 중단 / truncated 확인", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "okx-dupbill-test-"));
+    try {
+      const page1: OkxFillsHistoryItem[] = [];
+      for (let i = 0; i < 100; i++) {
+        page1.push({
+          instId: "BTC-USDT-SWAP",
+          side: "buy",
+          fillPx: "80000",
+          fillSz: "0.1",
+          fillTime: 1788500000000 + i * 1000,
+          tradeId: `t_dup1_${i}`,
+          billId: `same_bill_cursor`
+        });
+      }
+      const page2: OkxFillsHistoryItem[] = [];
+      for (let i = 0; i < 100; i++) {
+        page2.push({
+          instId: "BTC-USDT-SWAP",
+          side: "buy",
+          fillPx: "80000",
+          fillSz: "0.1",
+          fillTime: 1788500000000 + 100000 + i * 1000,
+          tradeId: `t_dup2_${i}`,
+          billId: `same_bill_cursor`
+        });
+      }
+
+      let requestCount = 0;
+      const mockClient: OkxDemoClient = {
+        getFillsHistory: async () => {
+          requestCount++;
+          if (requestCount === 1) {
+            return { ok: true, value: page1, diagnostics: { httpStatus: 200, requestUrl: "" } };
+          }
+          return { ok: true, value: page2, diagnostics: { httpStatus: 200, requestUrl: "" } };
+        }
+      } as unknown as OkxDemoClient;
+
+      const res = await syncOkxAccountTruthTrades({
+        dataDir: tempDir,
+        client: mockClient,
+        bootstrapDays: 7,
+        maxPages: 5
+      });
+
+      assert.equal(res.ok, true);
+      assert.equal(requestCount, 2); // halted on duplicate cursor detection
+      assert.equal(res.isTruncated, true);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  // 38. Decimal partial/full close 수량 비교 & 2개 독립 lifecycle 분리 및 fillPnl 정확 귀속 검증
+  await t.test("38. Decimal partial/full close 수량 비교 & 2개 독립 lifecycle 분리 및 fillPnl 정확 귀속 검증", () => {
+    const fills: OkxFillsHistoryItem[] = [
+      // Lifecycle 1: Short 11.37 -> Buy 4.54 -> Buy 6.83 -> Flat (0)
+      {
+        instId: "SOL-USDT-SWAP",
+        side: "sell",
+        fillPx: "150.0",
+        fillSz: "11.37",
+        fillTime: 1788500010000,
+        tradeId: "s1",
+        ordId: "ord_s1",
+        fee: "0.05"
+      },
+      {
+        instId: "SOL-USDT-SWAP",
+        side: "buy",
+        fillPx: "145.0",
+        fillSz: "4.54",
+        fillPnl: "1.46642",
+        fillTime: 1788500020000,
+        tradeId: "b1",
+        ordId: "ord_b1",
+        fee: "0.02"
+      },
+      {
+        instId: "SOL-USDT-SWAP",
+        side: "buy",
+        fillPx: "140.0",
+        fillSz: "6.83",
+        fillPnl: "9.56883",
+        fillTime: 1788500030000,
+        tradeId: "b2",
+        ordId: "ord_b2",
+        fee: "0.03"
+      },
+      // Lifecycle 2: Short 11.47 -> Buy 11.47 -> Flat
+      {
+        instId: "SOL-USDT-SWAP",
+        side: "sell",
+        fillPx: "152.0",
+        fillSz: "11.47",
+        fillTime: 1788500040000,
+        tradeId: "s2",
+        ordId: "ord_s2",
+        fee: "0.05"
+      },
+      {
+        instId: "SOL-USDT-SWAP",
+        side: "buy",
+        fillPx: "151.0",
+        fillSz: "11.47",
+        fillPnl: "0.16058",
+        fillTime: 1788500050000,
+        tradeId: "b3",
+        ordId: "ord_b3",
+        fee: "0.05"
+      }
+    ];
+
+    const lifecycles = reconstructLifecyclesFromFills(fills);
+    // sorted descending by closedAt: lifecycle 2 first, then lifecycle 1
+    assert.equal(lifecycles.length, 2);
+
+    const life2 = lifecycles.find((l) => l.openedAt === 1788500040000)!;
+    const life1 = lifecycles.find((l) => l.openedAt === 1788500010000)!;
+
+    assert.ok(life1, "Lifecycle 1 must exist");
+    assert.ok(life2, "Lifecycle 2 must exist");
+
+    // Lifecycle 1 checks
+    assert.equal(life1.symbol, "SOLUSDT");
+    assert.equal(life1.side, "short");
+    assert.equal(life1.entryQty, 11.37);
+    assert.equal(life1.closedQty, 11.37);
+    assert.equal(Math.abs(life1.realizedPnl - (1.46642 + 9.56883)) < 1e-9, true);
+    assert.equal(life1.closedAt, 1788500030000);
+
+    // Lifecycle 2 checks
+    assert.equal(life2.symbol, "SOLUSDT");
+    assert.equal(life2.side, "short");
+    assert.equal(life2.entryQty, 11.47);
+    assert.equal(life2.closedQty, 11.47);
+    assert.equal(Math.abs(life2.realizedPnl - 0.16058) < 1e-9, true);
+    assert.equal(life2.closedAt, 1788500050000);
+  });
+
+  // 39. Explicit fillPnl=0 본전 청산 유지 및 가격 공식 임의 덮어쓰기 방지
+  await t.test("39. Explicit fillPnl=0 본전 청산 유지 및 가격 공식 임의 덮어쓰기 방지", () => {
+    const fills: OkxFillsHistoryItem[] = [
+      {
+        instId: "BTC-USDT-SWAP",
+        side: "buy",
+        fillPx: "80000",
+        fillSz: "1.0",
+        fillTime: 1788500000000,
+        tradeId: "t_be_1",
+        ordId: "o_be_1"
+      },
+      {
+        instId: "BTC-USDT-SWAP",
+        side: "sell",
+        fillPx: "80500", // price is higher, but fillPnl is explicitly 0 (break-even / contract fee settlement)
+        fillSz: "1.0",
+        fillPnl: "0",
+        fee: "0.2",
+        fillTime: 1788500060000,
+        tradeId: "t_be_2",
+        ordId: "o_be_2"
+      }
+    ];
+
+    const lifecycles = reconstructLifecyclesFromFills(fills);
+    assert.equal(lifecycles.length, 1);
+    assert.equal(lifecycles[0].realizedPnl, 0);
+    assert.equal(lifecycles[0].fee, 0.2);
+    assert.equal(lifecycles[0].pnlNet, -0.2);
+  });
 });
 
 
