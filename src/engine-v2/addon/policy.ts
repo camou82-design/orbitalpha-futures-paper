@@ -603,6 +603,13 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
         event: "V2_ADDON_STOP_AUTHORITY_PROOF",
         symbol: String(args.symbol),
         side,
+        // Active Stop (OKX 실제 보호 주문)
+        activeStopPrice: stopAuthority.activeStopPrice,
+        activeStopSource: stopAuthority.activeStopSource,
+        // Reference Stop (ledger/runtime 기록값 — locked profit authority 아님)
+        referenceStopPrice: stopAuthority.referenceStopPrice,
+        referenceStopSource: stopAuthority.referenceStopSource,
+        // Backward-compat
         resolvedStopPrice: stopAuthority.resolvedStopPrice,
         stopAuthoritySource: stopAuthority.stopAuthoritySource,
         entryPrice: stopAuthority.entryPrice,

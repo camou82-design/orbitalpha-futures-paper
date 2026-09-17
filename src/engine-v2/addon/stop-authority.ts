@@ -1,3 +1,14 @@
+/**
+ * V2 Add-on Stop Authority
+ *
+ * Active Stop  = OKX에 실제 등록된 보호 주문(Algo SL 또는 Position-level OKX stop field).
+ *               사용자가 SL을 수동 삭제하면 activeStopPrice = null 이 됨.
+ * Reference Stop = Ledger/런타임 기록값. Active SL이 없을 때 참고용으로만 사용.
+ *                  절대로 locked profit 계산의 authority가 될 수 없음.
+ *
+ * 수동 SL 삭제 ≠ 포지션 ownership 이전. BOT_V2가 포지션을 계속 소유함.
+ */
+
 export type V2AddonStopAuthoritySource =
     | "okx_algo_order"
     | "okx_position_stop"
@@ -9,12 +20,40 @@ export type V2AddonStopAuthoritySource =
     | "none";
 
 export type V2AddonStopAuthorityResult = Readonly<{
+    /** OKX에 실제 등록된 보호 SL 가격. 없으면 null. */
+    activeStopPrice: number | null;
+    /** activeStop의 source. 없으면 "none" */
+    activeStopSource: Extract<V2AddonStopAuthoritySource, "okx_algo_order" | "okx_position_stop" | "none">;
+
+    /** Ledger/runtime 기록의 참고 스탑 가격. Active SL과 무관하게 항상 채워짐 (있을 경우). */
+    referenceStopPrice: number | null;
+    /** referenceStop의 source. */
+    referenceStopSource: V2AddonStopAuthoritySource;
+
+    /**
+     * @deprecated Use activeStopPrice for locked-profit logic.
+     * Kept for backward compatibility: equals activeStopPrice if active exists, else referenceStopPrice.
+     */
     resolvedStopPrice: number | null;
+    /** @deprecated Use activeStopSource / referenceStopSource */
     stopAuthoritySource: V2AddonStopAuthoritySource;
+
     entryPrice: number;
+
+    /**
+     * true iff activeStopPrice exists AND strictly beyond entryPrice in profit direction.
+     * NEVER true based on referenceStopPrice alone.
+     */
     isStopLockingProfit: boolean;
+
+    /**
+     * true iff an OKX protective stop order is actually registered.
+     * false when user manually deleted SL – even if referenceStopPrice is set.
+     */
     isProtectiveStopRegistered: boolean;
 }>;
+
+// ────────────────────────────────────────────────────────────────────────────────
 
 function toPositiveFiniteNumber(val: unknown): number | null {
     if (typeof val === "number" && Number.isFinite(val) && val > 0) return val;
@@ -31,6 +70,8 @@ function normalizeSym(s: unknown): string {
     return str;
 }
 
+// ────────────────────────────────────────────────────────────────────────────────
+
 export function resolveV2AddonStopAuthority(input: {
     symbol: string;
     side: "long" | "short" | string | null | undefined;
@@ -42,7 +83,12 @@ export function resolveV2AddonStopAuthority(input: {
     const sideLower = String(input.side ?? "").toLowerCase();
     const entryPrice = toPositiveFiniteNumber(input.position?.entryPrice) ?? 0;
 
-    // 1. Highest Priority: Active OKX Protective Algo Order (SL)
+    // ── PART A: ACTIVE STOP (OKX Protective SL) ─────────────────────────────
+
+    let activeStopPrice: number | null = null;
+    let activeStopSource: V2AddonStopAuthorityResult["activeStopSource"] = "none";
+
+    // A1. OKX Algo Order (highest authority)
     if (Array.isArray(input.algoOrders) && input.algoOrders.length > 0) {
         for (const algo of input.algoOrders) {
             if (!algo) continue;
@@ -52,11 +98,6 @@ export function resolveV2AddonStopAuthority(input: {
 
             const posSide = String(algo.posSide ?? "").toLowerCase();
             const orderSide = String(algo.side ?? "").toLowerCase();
-            const isReduceOnly =
-                algo.reduceOnly === true ||
-                String(algo.reduceOnly).toLowerCase() === "true" ||
-                algo.closeFraction === "1" ||
-                String(algo.closeFraction) === "1";
 
             const sideMatches =
                 (posSide.length > 0 && posSide === sideLower) ||
@@ -74,43 +115,32 @@ export function resolveV2AddonStopAuthority(input: {
                 toPositiveFiniteNumber(algo.sl);
 
             if (slPx !== null) {
-                const isStopLockingProfit =
-                    entryPrice > 0 &&
-                    (sideLower === "long" ? slPx > entryPrice : slPx < entryPrice);
-                return {
-                    resolvedStopPrice: slPx,
-                    stopAuthoritySource: "okx_algo_order",
-                    entryPrice,
-                    isStopLockingProfit,
-                    isProtectiveStopRegistered: true
-                };
+                activeStopPrice = slPx;
+                activeStopSource = "okx_algo_order";
+                break;
             }
         }
     }
 
-    // 2. Position-level OKX stop field (if populated by live position feed)
-    const posOkxStop =
-        toPositiveFiniteNumber(input.position?.okx_stop_px) ??
-        toPositiveFiniteNumber(input.position?.okxStopPrice) ??
-        toPositiveFiniteNumber(input.position?.okxSlTriggerPx);
+    // A2. Position-level OKX stop field (if populated by live position feed)
+    if (activeStopPrice === null) {
+        const posOkxStop =
+            toPositiveFiniteNumber(input.position?.okx_stop_px) ??
+            toPositiveFiniteNumber(input.position?.okxStopPrice) ??
+            toPositiveFiniteNumber(input.position?.okxSlTriggerPx);
 
-    if (posOkxStop !== null) {
-        const isStopLockingProfit =
-            entryPrice > 0 &&
-            (sideLower === "long" ? posOkxStop > entryPrice : posOkxStop < entryPrice);
-        return {
-            resolvedStopPrice: posOkxStop,
-            stopAuthoritySource: "okx_position_stop",
-            entryPrice,
-            isStopLockingProfit,
-            isProtectiveStopRegistered: true
-        };
+        if (posOkxStop !== null) {
+            activeStopPrice = posOkxStop;
+            activeStopSource = "okx_position_stop";
+        }
     }
 
-    // 3. Ledger stop fields in strict order:
-    // ledger_stop_px -> stopPrice -> slPrice -> breakevenStopPrice
-    let resolvedStopPrice: number | null = null;
-    let stopAuthoritySource: V2AddonStopAuthoritySource = "none";
+    const isProtectiveStopRegistered = activeStopPrice !== null;
+
+    // ── PART B: REFERENCE STOP (Ledger / Runtime record) ────────────────────
+
+    let referenceStopPrice: number | null = null;
+    let referenceStopSource: V2AddonStopAuthoritySource = "none";
 
     const ledgerStopPx = toPositiveFiniteNumber(input.position?.ledger_stop_px);
     const stopPrice = toPositiveFiniteNumber(input.position?.stopPrice);
@@ -119,38 +149,42 @@ export function resolveV2AddonStopAuthority(input: {
     const explicitStop = toPositiveFiniteNumber(input.explicitStopPrice);
 
     if (ledgerStopPx !== null) {
-        resolvedStopPrice = ledgerStopPx;
-        stopAuthoritySource = "ledger_stop_px";
+        referenceStopPrice = ledgerStopPx;
+        referenceStopSource = "ledger_stop_px";
     } else if (stopPrice !== null) {
-        resolvedStopPrice = stopPrice;
-        stopAuthoritySource = "ledger_stop_price";
+        referenceStopPrice = stopPrice;
+        referenceStopSource = "ledger_stop_price";
     } else if (slPrice !== null) {
-        resolvedStopPrice = slPrice;
-        stopAuthoritySource = "ledger_sl_price";
+        referenceStopPrice = slPrice;
+        referenceStopSource = "ledger_sl_price";
     } else if (breakevenStopPrice !== null) {
-        resolvedStopPrice = breakevenStopPrice;
-        stopAuthoritySource = "ledger_breakeven_stop_price";
+        referenceStopPrice = breakevenStopPrice;
+        referenceStopSource = "ledger_breakeven_stop_price";
     } else if (explicitStop !== null) {
-        resolvedStopPrice = explicitStop;
-        stopAuthoritySource = "args_current_stop_price";
+        referenceStopPrice = explicitStop;
+        referenceStopSource = "args_current_stop_price";
     }
 
-    const isProtectiveStopRegistered =
-        input.position?.isProtectiveStopRegistered !== undefined
-            ? input.position.isProtectiveStopRegistered === true
-            : (input.position?.breakevenStopConfirmed === true && resolvedStopPrice !== null);
+    // ── PART C: LOCKED PROFIT — Active Stop 기준만 ───────────────────────────
 
-    // Locked profit requires:
-    // 1) A valid resolved stop
-    // 2) Protective stop is actively registered
-    // 3) Stop strictly beyond entry in profit direction
+    // isStopLockingProfit은 반드시 activeStopPrice 기준.
+    // referenceStopPrice가 entry보다 유리하더라도, 실제 OKX SL이 없으면 false.
     const isStopLockingProfit =
-        resolvedStopPrice !== null &&
+        activeStopPrice !== null &&
         entryPrice > 0 &&
-        isProtectiveStopRegistered &&
-        (sideLower === "long" ? resolvedStopPrice > entryPrice : resolvedStopPrice < entryPrice);
+        (sideLower === "long" ? activeStopPrice > entryPrice : activeStopPrice < entryPrice);
+
+    // ── PART D: BACKWARD COMPAT resolvedStopPrice ───────────────────────────
+
+    // resolvedStopPrice: active가 있으면 active, 없으면 reference (참고용 노출)
+    const resolvedStopPrice = activeStopPrice ?? referenceStopPrice;
+    const stopAuthoritySource = activeStopSource !== "none" ? activeStopSource : referenceStopSource;
 
     return {
+        activeStopPrice,
+        activeStopSource,
+        referenceStopPrice,
+        referenceStopSource,
         resolvedStopPrice,
         stopAuthoritySource,
         entryPrice,
