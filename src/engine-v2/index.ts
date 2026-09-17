@@ -291,6 +291,7 @@ import { calculateRiskSizing } from "./risk-sizing/policy";
 import { generateExplanation } from "./explain/diagnostic";
 import { deriveV2StateAuthority, getLastEarlyDecayReclaim, consumeLastEarlyDecayReclaim } from "./state/derive";
 import { evaluateV2AddOnPolicy } from "./addon/policy";
+import { resolveV2AddonStopAuthority } from "./addon/stop-authority";
 import { buildV2AddonEligibilityProof } from "./addon/eligibility-proof";
 import { evaluateV2ExitPolicy } from "./exit/policy";
 import {
@@ -1119,6 +1120,26 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (v2State as { liveMaxAddonNotionalUsdt?: number }).liveMaxAddonNotionalUsdt ??
         20;
 
+    const stopAuthority = resolveV2AddonStopAuthority({
+        symbol: String(input.symbol),
+        side: resolvedAddonSide,
+        position: preAddOnPosition,
+        algoOrders: (v2State as any).okxAlgoOrdersList ?? (input.state as any).okxAlgoOrdersList,
+        explicitStopPrice: undefined
+    });
+
+    console.info(JSON.stringify({
+        event: "V2_ADDON_STOP_AUTHORITY_PROOF",
+        symbol: String(input.symbol),
+        side: resolvedAddonSide,
+        resolvedStopPrice: stopAuthority.resolvedStopPrice,
+        stopAuthoritySource: stopAuthority.stopAuthoritySource,
+        entryPrice: stopAuthority.entryPrice,
+        isStopLockingProfit: stopAuthority.isStopLockingProfit,
+        isProtectiveStopRegistered: stopAuthority.isProtectiveStopRegistered,
+        ts: Date.now()
+    }));
+
     const addOnPolicy = evaluateV2AddOnPolicy({
         symbol: String(input.symbol),
         side: resolvedAddonSide,
@@ -1145,7 +1166,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         accountEquityUsd,
         currentSymbolNotionalUsd,
         currentGlobalNotionalUsd,
-        currentStopPrice: preAddOnPosition?.ledger_stop_px ?? undefined,
+        currentStopPrice: stopAuthority.resolvedStopPrice ?? undefined,
         maxAddonNotionalUsdt: liveMaxAddonNotionalUsdt
     });
 

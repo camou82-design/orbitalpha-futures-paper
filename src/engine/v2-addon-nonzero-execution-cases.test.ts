@@ -1,4 +1,5 @@
 import { evaluateV2AddOnPolicy } from "../engine-v2/addon/policy";
+import { resolveV2AddonStopAuthority } from "../engine-v2/addon/stop-authority";
 import { calculateRiskSizing } from "../engine-v2/risk-sizing/policy";
 import { emitV2TradeLifecycleProof } from "../engine-v2/lifecycle/proof";
 import { runEngineV2 } from "../engine-v2/index";
@@ -885,6 +886,88 @@ export function runV2AddonNonzeroExecutionTests(): boolean {
       Math.abs(balAuthority.paper_position_estimated_notional_usdt - 3245) < 1.0 &&
       Math.abs(balAuthority.paper_position_estimated_used_margin_usdt - 324.5) < 1.0,
       `estimated_notional=${balAuthority.paper_position_estimated_notional_usdt}, estimated_margin=${balAuthority.paper_position_estimated_used_margin_usdt}`
+    ) && ok;
+
+    // 6.5: Live BTC row stopPrice fallback:
+    // entryPrice = 76754.5, stopPrice = 76555.3, ledger_stop_px = undefined, isProtectiveStopRegistered = false
+    const liveBtcStopAuth = resolveV2AddonStopAuthority({
+      symbol: "BTCUSDT",
+      side: "long",
+      position: {
+        symbol: "BTCUSDT",
+        side: "long",
+        entryPrice: 76754.5,
+        stopPrice: 76555.3,
+        ledger_stop_px: undefined,
+        isProtectiveStopRegistered: false,
+        breakevenStopConfirmed: true // historical flag
+      }
+    });
+
+    ok = run(
+      "Live BTC row stopPrice fallback resolves stopPrice=76555.3, source=ledger_stop_price, isStopLockingProfit=false",
+      liveBtcStopAuth.resolvedStopPrice === 76555.3 &&
+      liveBtcStopAuth.stopAuthoritySource === "ledger_stop_price" &&
+      liveBtcStopAuth.entryPrice === 76754.5 &&
+      liveBtcStopAuth.isProtectiveStopRegistered === false &&
+      liveBtcStopAuth.isStopLockingProfit === false,
+      `auth=${JSON.stringify(liveBtcStopAuth)}`
+    ) && ok;
+
+    // 6.6: Stop priority ladder: okx_algo_order > okx_position_stop > ledger_stop_px > stopPrice > slPrice > breakevenStopPrice
+    const ladderStopAuth = resolveV2AddonStopAuthority({
+      symbol: "BTCUSDT",
+      side: "long",
+      position: {
+        symbol: "BTCUSDT",
+        side: "long",
+        entryPrice: 76754.5,
+        ledger_stop_px: 77000,
+        stopPrice: 76800,
+        slPrice: 76700,
+        breakevenStopPrice: 76600,
+        isProtectiveStopRegistered: true
+      },
+      algoOrders: [
+        {
+          instId: "BTC-USDT-SWAP",
+          posSide: "long",
+          side: "sell",
+          reduceOnly: true,
+          slTriggerPx: "77500"
+        }
+      ]
+    });
+
+    ok = run(
+      "Stop priority ladder selects active okx_algo_order (77500) over ledger fields",
+      ladderStopAuth.resolvedStopPrice === 77500 &&
+      ladderStopAuth.stopAuthoritySource === "okx_algo_order" &&
+      ladderStopAuth.isProtectiveStopRegistered === true &&
+      ladderStopAuth.isStopLockingProfit === true,
+      `ladder=${JSON.stringify(ladderStopAuth)}`
+    ) && ok;
+
+    // 6.7: If isProtectiveStopRegistered=false, even when stopPrice > entryPrice and breakevenStopConfirmed=true, isStopLockingProfit=false
+    const unregStopAuth = resolveV2AddonStopAuthority({
+      symbol: "BTCUSDT",
+      side: "long",
+      position: {
+        symbol: "BTCUSDT",
+        side: "long",
+        entryPrice: 76000,
+        stopPrice: 77000, // higher than entry, but unregistered!
+        isProtectiveStopRegistered: false,
+        breakevenStopConfirmed: true
+      }
+    });
+
+    ok = run(
+      "Unregistered protective stop (isProtectiveStopRegistered=false) enforces isStopLockingProfit=false",
+      unregStopAuth.resolvedStopPrice === 77000 &&
+      unregStopAuth.isProtectiveStopRegistered === false &&
+      unregStopAuth.isStopLockingProfit === false,
+      `unreg=${JSON.stringify(unregStopAuth)}`
     ) && ok;
   }
 
