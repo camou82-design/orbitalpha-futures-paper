@@ -9,7 +9,7 @@ function withAddonMode<T extends V2AddOnPolicyResult>(result: T, addonMode: V2Ad
     return { ...result, addonMode: addonMode ?? "NONE" };
 }
 
-export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnPolicyResult {
+function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPolicyResult {
     const { side, v2State, judgment, snapshot } = args;
     const qualityScore = Math.max(0, Number(snapshot.qualityScore ?? 0));
     const reviewingTicks = Math.max(0, Number(snapshot.reviewing_ticks ?? 0));
@@ -200,7 +200,20 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             evidence: "shock_or_lockish_state"
         };
     }
-    if (judgment.regime_final === "TRANSITION" || judgment.transitionPhase !== "NONE") {
+
+    const isRangeToTrendException =
+        (judgment.regime_final === "RANGE" || judgment.regime_final === "TREND") &&
+        judgment.transitionPhase === "RANGE_TO_TREND" &&
+        hasSameSidePosition &&
+        !hasOppositeSidePosition &&
+        pnlPct > 0 &&
+        !shockLockish;
+
+    const isTransitionBlocked =
+        judgment.regime_final === "TRANSITION" ||
+        (judgment.transitionPhase !== "NONE" && !isRangeToTrendException);
+
+    if (isTransitionBlocked) {
         return {
             action: "ADDON_FORBIDDEN",
             allowed: false,
@@ -806,4 +819,58 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
         breakevenStopPrice,
         evidence: "same_side_position_watch_recheck"
     };
+}
+
+export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnPolicyResult {
+    const result = evaluateV2AddOnPolicyCore(args);
+    const { side, judgment, snapshot, v2State } = args;
+    if (judgment.transitionPhase === "RANGE_TO_TREND") {
+        const sameSidePosition =
+            side === "long"
+                ? v2State.longPosition
+                : side === "short"
+                    ? v2State.shortPosition
+                    : null;
+        const oppositeSidePosition =
+            side === "long"
+                ? v2State.shortPosition
+                : side === "short"
+                    ? v2State.longPosition
+                    : null;
+        const hasSameSidePosition = sameSidePosition != null;
+        const hasOppositeSidePosition = oppositeSidePosition != null;
+        const pnlPct = Number(sameSidePosition?.pnlPct ?? 0);
+        const shockLockish =
+            judgment.shockPhase === "DOWN_SHOCK" ||
+            judgment.shockPhase === "UP_SHOCK" ||
+            v2State.crashState.includes("CRASH_LOCK") ||
+            v2State.pumpState.includes("PUMP_LOCK");
+        const currentStage = sameSidePosition ? Math.max(1, Number(sameSidePosition.entryStage ?? 1)) : 0;
+        const qualityScore = Math.max(0, Number(snapshot.qualityScore ?? 0));
+
+        const continuationAllowedToEvaluate =
+            (judgment.regime_final === "RANGE" || judgment.regime_final === "TREND") &&
+            judgment.transitionPhase === "RANGE_TO_TREND" &&
+            hasSameSidePosition &&
+            !hasOppositeSidePosition &&
+            pnlPct > 0 &&
+            !shockLockish;
+
+        console.info(JSON.stringify({
+            event: "RANGE_TO_TREND_CONTINUATION_ADDON_EVALUATED",
+            symbol: String(args.symbol),
+            side,
+            pnlPct,
+            qualityScore,
+            transitionPhase: judgment.transitionPhase,
+            shockPhase: judgment.shockPhase,
+            currentStage,
+            continuationAllowedToEvaluate,
+            addonAction: result.action,
+            addonReason: result.reason,
+            action: result.action,
+            reason: result.reason
+        }));
+    }
+    return result;
 }

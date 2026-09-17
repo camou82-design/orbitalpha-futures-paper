@@ -370,6 +370,317 @@ export function runV2AddonNonzeroExecutionTests(): boolean {
     ) && ok;
   }
 
+  console.log("\n=== 5. RANGE_TO_TREND BLANKET VETO EXCEPTION & HARD BLOCKS ===");
+  {
+    // 5.1: RANGE + RANGE_TO_TREND + same-side profitable + no shock -> Bypasses TRANSITION_ADDON_FORBIDDEN
+    let proofLogged = false;
+    let loggedProofData: any = null;
+    const originalConsoleInfo = console.info;
+    console.info = (msg: any) => {
+      try {
+        const parsed = JSON.parse(msg);
+        if (parsed.event === "RANGE_TO_TREND_CONTINUATION_ADDON_EVALUATED") {
+          proofLogged = true;
+          loggedProofData = parsed;
+        }
+      } catch {}
+    };
+
+    let policyRangeToTrend: any;
+    try {
+      policyRangeToTrend = evaluateV2AddOnPolicy({
+        symbol: "BTCUSDT",
+        side: "long",
+        v2State: baseV2State({
+          hasLongPosition: true,
+          hasSameSidePosition: true,
+          currentStage: 1,
+          longPosition: {
+            symbol: "BTCUSDT",
+            side: "long",
+            entryPrice: 94000,
+            sizeUsd: 200,
+            entryStage: 1,
+            pnlPct: 0.01867, // profitable ~1.87%
+            breakevenStopRequired: true,
+            breakevenStopConfirmed: true,
+            breakevenStopPrice: 95500
+          }
+        }),
+        judgment: {
+          regime: "RANGE",
+          regime_final: "RANGE",
+          subtype: "NONE",
+          shockPhase: "NONE",
+          rangePhase: "LOWER",
+          trendPhase: "NONE",
+          transitionPhase: "RANGE_TO_TREND"
+        } as any,
+        execution: { signal: "LONG_CANDIDATE", side: "long" } as any,
+        snapshot: {
+          qualityScore: 82,
+          reviewing_ticks: 2,
+          boxPos: 0.15,
+          emaGap: 0.005,
+          trendWeaknessScore: 0.25,
+          rangeConfidence: 0.75,
+          lastPrice: 95800,
+          atr: 400
+        },
+        accountEquityUsd: 1000,
+        currentSymbolNotionalUsd: 200,
+        currentGlobalNotionalUsd: 200
+      });
+    } finally {
+      console.info = originalConsoleInfo;
+    }
+
+    ok = run(
+      "RANGE + RANGE_TO_TREND + profitable does NOT blanket-veto to TRANSITION_ADDON_FORBIDDEN",
+      policyRangeToTrend.reason !== "TRANSITION_ADDON_FORBIDDEN" && policyRangeToTrend.allowed === true,
+      `action=${policyRangeToTrend.action}, reason=${policyRangeToTrend.reason}`
+    ) && ok;
+
+    ok = run(
+      "RANGE_TO_TREND_CONTINUATION_ADDON_EVALUATED proof is emitted with continuationAllowedToEvaluate=true",
+      proofLogged &&
+        loggedProofData?.continuationAllowedToEvaluate === true &&
+        loggedProofData?.symbol === "BTCUSDT" &&
+        loggedProofData?.transitionPhase === "RANGE_TO_TREND",
+      `proofLogged=${proofLogged}, data=${JSON.stringify(loggedProofData)}`
+    ) && ok;
+
+    // 5.2: TREND + RANGE_TO_TREND + same-side profitable -> Evaluates TREND pyramiding
+    const policyTrendToTrend = evaluateV2AddOnPolicy({
+      symbol: "BTCUSDT",
+      side: "long",
+      v2State: baseV2State({
+        hasLongPosition: true,
+        hasSameSidePosition: true,
+        currentStage: 1,
+        longPosition: {
+          symbol: "BTCUSDT",
+          side: "long",
+          entryPrice: 94000,
+          sizeUsd: 300,
+          entryStage: 1,
+          pnlPct: 0.02,
+          breakevenStopRequired: true,
+          breakevenStopConfirmed: true,
+          breakevenStopPrice: 95500
+        }
+      }),
+      judgment: {
+        regime: "TREND",
+        regime_final: "TREND",
+        subtype: "NONE",
+        shockPhase: "NONE",
+        rangePhase: "NONE",
+        trendPhase: "UP",
+        transitionPhase: "RANGE_TO_TREND",
+        htf_entry_policy: "BOTH",
+        counter_trend_risk: false
+      } as any,
+      execution: { signal: "LONG_CANDIDATE", side: "long" } as any,
+      snapshot: {
+        qualityScore: 88,
+        reviewing_ticks: 3,
+        boxPos: 0.8,
+        emaGap: 0.006,
+        trendWeaknessScore: 0.2,
+        rangeConfidence: 0.5,
+        lastPrice: 96000,
+        atr: 400
+      },
+      accountEquityUsd: 1000,
+      currentSymbolNotionalUsd: 300,
+      currentGlobalNotionalUsd: 300
+    });
+
+    ok = run(
+      "TREND + RANGE_TO_TREND + profitable evaluates to TREND_PYRAMID_PROFIT_FUNDED_ALLOWED",
+      policyTrendToTrend.allowed === true && policyTrendToTrend.reason === "TREND_PYRAMID_PROFIT_FUNDED_ALLOWED",
+      `action=${policyTrendToTrend.action}, reason=${policyTrendToTrend.reason}`
+    ) && ok;
+
+    // 5.3: TREND_TO_RANGE -> Hard Blocked
+    const policyTrendToRange = evaluateV2AddOnPolicy({
+      symbol: "BTCUSDT",
+      side: "long",
+      v2State: baseV2State({
+        hasLongPosition: true,
+        hasSameSidePosition: true,
+        currentStage: 1,
+        longPosition: {
+          symbol: "BTCUSDT",
+          side: "long",
+          entryPrice: 94000,
+          sizeUsd: 200,
+          pnlPct: 0.015
+        }
+      }),
+      judgment: {
+        regime_final: "RANGE",
+        subtype: "NONE",
+        shockPhase: "NONE",
+        rangePhase: "LOWER",
+        trendPhase: "NONE",
+        transitionPhase: "TREND_TO_RANGE"
+      } as any,
+      execution: { signal: "LONG_CANDIDATE", side: "long" } as any,
+      snapshot: { qualityScore: 80, lastPrice: 95000, atr: 400 } as any,
+      accountEquityUsd: 1000
+    });
+
+    ok = run(
+      "TREND_TO_RANGE is HARD BLOCKED by TRANSITION_ADDON_FORBIDDEN",
+      policyTrendToRange.allowed === false && policyTrendToRange.reason === "TRANSITION_ADDON_FORBIDDEN",
+      `action=${policyTrendToRange.action}, reason=${policyTrendToRange.reason}`
+    ) && ok;
+
+    // 5.4: SHOCK_RETEST_UNCONFIRMED -> Hard Blocked
+    const policyShockRetest = evaluateV2AddOnPolicy({
+      symbol: "BTCUSDT",
+      side: "long",
+      v2State: baseV2State({
+        hasLongPosition: true,
+        hasSameSidePosition: true,
+        currentStage: 1,
+        longPosition: {
+          symbol: "BTCUSDT",
+          side: "long",
+          entryPrice: 94000,
+          sizeUsd: 200,
+          pnlPct: 0.015
+        }
+      }),
+      judgment: {
+        regime_final: "RANGE",
+        subtype: "NONE",
+        shockPhase: "NONE",
+        rangePhase: "LOWER",
+        trendPhase: "NONE",
+        transitionPhase: "SHOCK_RETEST_UNCONFIRMED"
+      } as any,
+      execution: { signal: "LONG_CANDIDATE", side: "long" } as any,
+      snapshot: { qualityScore: 80, lastPrice: 95000, atr: 400 } as any,
+      accountEquityUsd: 1000
+    });
+
+    ok = run(
+      "SHOCK_RETEST_UNCONFIRMED is HARD BLOCKED by TRANSITION_ADDON_FORBIDDEN",
+      policyShockRetest.allowed === false && policyShockRetest.reason === "TRANSITION_ADDON_FORBIDDEN",
+      `action=${policyShockRetest.action}, reason=${policyShockRetest.reason}`
+    ) && ok;
+
+    // 5.5: UP_SHOCK / DOWN_SHOCK -> Hard Blocked by SHOCK_ADDON_FORBIDDEN
+    const policyShock = evaluateV2AddOnPolicy({
+      symbol: "BTCUSDT",
+      side: "long",
+      v2State: baseV2State({
+        hasLongPosition: true,
+        hasSameSidePosition: true,
+        currentStage: 1,
+        longPosition: {
+          symbol: "BTCUSDT",
+          side: "long",
+          entryPrice: 94000,
+          sizeUsd: 200,
+          pnlPct: 0.015
+        }
+      }),
+      judgment: {
+        regime_final: "RANGE",
+        subtype: "NONE",
+        shockPhase: "UP_SHOCK",
+        rangePhase: "LOWER",
+        trendPhase: "NONE",
+        transitionPhase: "RANGE_TO_TREND"
+      } as any,
+      execution: { signal: "LONG_CANDIDATE", side: "long" } as any,
+      snapshot: { qualityScore: 80, lastPrice: 95000, atr: 400 } as any,
+      accountEquityUsd: 1000
+    });
+
+    ok = run(
+      "UP_SHOCK / DOWN_SHOCK is HARD BLOCKED by SHOCK_ADDON_FORBIDDEN",
+      policyShock.allowed === false && policyShock.reason === "SHOCK_ADDON_FORBIDDEN",
+      `action=${policyShock.action}, reason=${policyShock.reason}`
+    ) && ok;
+
+    // 5.6: Opposite position exists -> Hard Blocked by OPPOSITE_POSITION_EXISTS_FORBIDDEN
+    const policyOpposite = evaluateV2AddOnPolicy({
+      symbol: "BTCUSDT",
+      side: "long",
+      v2State: baseV2State({
+        hasLongPosition: false,
+        hasShortPosition: true,
+        hasSameSidePosition: false,
+        hasOppositeSidePosition: true,
+        currentStage: 1,
+        shortPosition: {
+          symbol: "BTCUSDT",
+          side: "short",
+          entryPrice: 96000,
+          sizeUsd: 200,
+          pnlPct: 0.015
+        }
+      }),
+      judgment: {
+        regime_final: "RANGE",
+        subtype: "NONE",
+        shockPhase: "NONE",
+        rangePhase: "LOWER",
+        trendPhase: "NONE",
+        transitionPhase: "RANGE_TO_TREND"
+      } as any,
+      execution: { signal: "LONG_CANDIDATE", side: "long" } as any,
+      snapshot: { qualityScore: 80, lastPrice: 95000, atr: 400 } as any,
+      accountEquityUsd: 1000
+    });
+
+    ok = run(
+      "Opposite-side position is HARD BLOCKED by OPPOSITE_POSITION_EXISTS_FORBIDDEN",
+      policyOpposite.allowed === false && policyOpposite.reason === "OPPOSITE_POSITION_EXISTS_FORBIDDEN",
+      `action=${policyOpposite.action}, reason=${policyOpposite.reason}`
+    ) && ok;
+
+    // 5.7: Actual regime_final === TRANSITION -> Hard Blocked by TRANSITION_ADDON_FORBIDDEN
+    const policyRegimeTransition = evaluateV2AddOnPolicy({
+      symbol: "BTCUSDT",
+      side: "long",
+      v2State: baseV2State({
+        hasLongPosition: true,
+        hasSameSidePosition: true,
+        currentStage: 1,
+        longPosition: {
+          symbol: "BTCUSDT",
+          side: "long",
+          entryPrice: 94000,
+          sizeUsd: 200,
+          pnlPct: 0.015
+        }
+      }),
+      judgment: {
+        regime_final: "TRANSITION",
+        subtype: "NONE",
+        shockPhase: "NONE",
+        rangePhase: "NONE",
+        trendPhase: "NONE",
+        transitionPhase: "RANGE_TO_TREND"
+      } as any,
+      execution: { signal: "LONG_CANDIDATE", side: "long" } as any,
+      snapshot: { qualityScore: 80, lastPrice: 95000, atr: 400 } as any,
+      accountEquityUsd: 1000
+    });
+
+    ok = run(
+      "Actual regime_final === TRANSITION is HARD BLOCKED by TRANSITION_ADDON_FORBIDDEN",
+      policyRegimeTransition.allowed === false && policyRegimeTransition.reason === "TRANSITION_ADDON_FORBIDDEN",
+      `action=${policyRegimeTransition.action}, reason=${policyRegimeTransition.reason}`
+    ) && ok;
+  }
+
   return ok;
 }
 
