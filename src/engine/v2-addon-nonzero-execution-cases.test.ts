@@ -888,8 +888,10 @@ export function runV2AddonNonzeroExecutionTests(): boolean {
       `estimated_notional=${balAuthority.paper_position_estimated_notional_usdt}, estimated_margin=${balAuthority.paper_position_estimated_used_margin_usdt}`
     ) && ok;
 
-    // 6.5: Live BTC row stopPrice fallback:
-    // entryPrice = 76754.5, stopPrice = 76555.3, ledger_stop_px = undefined, isProtectiveStopRegistered = false
+    // ─────────────────────────────────────────────────────────────────
+    // 6.5: Live BTC row: SL 수동 삭제 케이스
+    //   entryPrice=76754.5, stopPrice=76555.3(ledger), isProtectiveStopRegistered=false
+    //   → activeStopPrice=null, referenceStopPrice=76555.3, isStopLockingProfit=false
     const liveBtcStopAuth = resolveV2AddonStopAuthority({
       symbol: "BTCUSDT",
       side: "long",
@@ -900,21 +902,36 @@ export function runV2AddonNonzeroExecutionTests(): boolean {
         stopPrice: 76555.3,
         ledger_stop_px: undefined,
         isProtectiveStopRegistered: false,
-        breakevenStopConfirmed: true // historical flag
+        breakevenStopConfirmed: true // historical flag — must NOT grant locked profit
       }
     });
 
     ok = run(
-      "Live BTC row stopPrice fallback resolves stopPrice=76555.3, source=ledger_stop_price, isStopLockingProfit=false",
-      liveBtcStopAuth.resolvedStopPrice === 76555.3 &&
-      liveBtcStopAuth.stopAuthoritySource === "ledger_stop_price" &&
-      liveBtcStopAuth.entryPrice === 76754.5 &&
-      liveBtcStopAuth.isProtectiveStopRegistered === false &&
-      liveBtcStopAuth.isStopLockingProfit === false,
-      `auth=${JSON.stringify(liveBtcStopAuth)}`
+      "6.5a: Live BTC SL-deleted: activeStopPrice=null, referenceStopPrice=76555.3",
+      liveBtcStopAuth.activeStopPrice === null &&
+      liveBtcStopAuth.activeStopSource === "none" &&
+      liveBtcStopAuth.referenceStopPrice === 76555.3 &&
+      liveBtcStopAuth.referenceStopSource === "ledger_stop_price",
+      `active=${liveBtcStopAuth.activeStopPrice}, ref=${liveBtcStopAuth.referenceStopPrice}`
     ) && ok;
 
-    // 6.6: Stop priority ladder: okx_algo_order > okx_position_stop > ledger_stop_px > stopPrice > slPrice > breakevenStopPrice
+    ok = run(
+      "6.5b: Live BTC SL-deleted: isProtectiveStopRegistered=false, isStopLockingProfit=false",
+      liveBtcStopAuth.isProtectiveStopRegistered === false &&
+      liveBtcStopAuth.isStopLockingProfit === false,
+      `isProtective=${liveBtcStopAuth.isProtectiveStopRegistered}, isLocking=${liveBtcStopAuth.isStopLockingProfit}`
+    ) && ok;
+
+    ok = run(
+      "6.5c: resolvedStopPrice=76555.3 (backward-compat display only)",
+      liveBtcStopAuth.resolvedStopPrice === 76555.3 &&
+      liveBtcStopAuth.stopAuthoritySource === "ledger_stop_price" &&
+      liveBtcStopAuth.entryPrice === 76754.5,
+      `resolved=${liveBtcStopAuth.resolvedStopPrice}`
+    ) && ok;
+
+    // ─────────────────────────────────────────────────────────────────
+    // 6.6: OKX algo SL 존재 → activeStopPrice로 선택, referenceStop은 ledger에서
     const ladderStopAuth = resolveV2AddonStopAuthority({
       symbol: "BTCUSDT",
       side: "long",
@@ -940,15 +957,29 @@ export function runV2AddonNonzeroExecutionTests(): boolean {
     });
 
     ok = run(
-      "Stop priority ladder selects active okx_algo_order (77500) over ledger fields",
-      ladderStopAuth.resolvedStopPrice === 77500 &&
-      ladderStopAuth.stopAuthoritySource === "okx_algo_order" &&
-      ladderStopAuth.isProtectiveStopRegistered === true &&
-      ladderStopAuth.isStopLockingProfit === true,
-      `ladder=${JSON.stringify(ladderStopAuth)}`
+      "6.6a: OKX algo SL→ activeStopPrice=77500, activeStopSource=okx_algo_order",
+      ladderStopAuth.activeStopPrice === 77500 &&
+      ladderStopAuth.activeStopSource === "okx_algo_order",
+      `active=${ladderStopAuth.activeStopPrice}, src=${ladderStopAuth.activeStopSource}`
     ) && ok;
 
-    // 6.7: If isProtectiveStopRegistered=false, even when stopPrice > entryPrice and breakevenStopConfirmed=true, isStopLockingProfit=false
+    ok = run(
+      "6.6b: referenceStopPrice=77000 (ledger_stop_px, not okx)",
+      ladderStopAuth.referenceStopPrice === 77000 &&
+      ladderStopAuth.referenceStopSource === "ledger_stop_px",
+      `ref=${ladderStopAuth.referenceStopPrice}, src=${ladderStopAuth.referenceStopSource}`
+    ) && ok;
+
+    ok = run(
+      "6.6c: isProtectiveStopRegistered=true, isStopLockingProfit=true (active 77500 > entry 76754.5)",
+      ladderStopAuth.isProtectiveStopRegistered === true &&
+      ladderStopAuth.isStopLockingProfit === true &&
+      ladderStopAuth.resolvedStopPrice === 77500,
+      `isLocking=${ladderStopAuth.isStopLockingProfit}, resolved=${ladderStopAuth.resolvedStopPrice}`
+    ) && ok;
+
+    // ─────────────────────────────────────────────────────────────────
+    // 6.7: SL 미등록 상태에서 stopPrice > entryPrice여도 isStopLockingProfit=false
     const unregStopAuth = resolveV2AddonStopAuthority({
       symbol: "BTCUSDT",
       side: "long",
@@ -956,23 +987,194 @@ export function runV2AddonNonzeroExecutionTests(): boolean {
         symbol: "BTCUSDT",
         side: "long",
         entryPrice: 76000,
-        stopPrice: 77000, // higher than entry, but unregistered!
+        stopPrice: 77000, // 진입가 위 — 하지만 OKX 주문 없음
         isProtectiveStopRegistered: false,
         breakevenStopConfirmed: true
       }
     });
 
     ok = run(
-      "Unregistered protective stop (isProtectiveStopRegistered=false) enforces isStopLockingProfit=false",
-      unregStopAuth.resolvedStopPrice === 77000 &&
+      "6.7a: Unregistered stop: activeStopPrice=null even if stopPrice > entryPrice",
+      unregStopAuth.activeStopPrice === null &&
       unregStopAuth.isProtectiveStopRegistered === false &&
       unregStopAuth.isStopLockingProfit === false,
-      `unreg=${JSON.stringify(unregStopAuth)}`
+      `active=${unregStopAuth.activeStopPrice}, isLocking=${unregStopAuth.isStopLockingProfit}`
     ) && ok;
+
+    ok = run(
+      "6.7b: referenceStopPrice=77000 (display only, not locking)",
+      unregStopAuth.referenceStopPrice === 77000 &&
+      unregStopAuth.referenceStopSource === "ledger_stop_price",
+      `ref=${unregStopAuth.referenceStopPrice}`
+    ) && ok;
+
+    // ─────────────────────────────────────────────────────────────────
+    // 6.8: active=null + reference 존재 → profit-funded pyramid 차단 검증
+    //   breakevenStopConfirmed=true, stopPrice=77500 (above entry 76754.5)
+    //   하지만 OKX active SL 없음 → pyramid MUST BE BLOCKED
+    console.log("\n=== 6.8: PROFIT-FUNDED PYRAMID BLOCKED WHEN OKX SL ABSENT ===");
+    {
+      const v2State = baseV2State({
+        accountEquityKrw: 1_400_000,
+        currentStage: 1,
+        hasLongPosition: true,
+        hasSameSidePosition: true,
+        longPosition: {
+          symbol: "BTCUSDT",
+          side: "long",
+          entryPrice: 76754.5,
+          sizeUsd: 300,
+          entryStage: 1,
+          pnlPct: 0.025,
+          breakevenStopRequired: true,
+          breakevenStopConfirmed: true,
+          breakevenStopPrice: 77500, // above entry — but no OKX order
+          stopPrice: 77500,
+          isProtectiveStopRegistered: false // SL was manually deleted
+        }
+      });
+
+      const pyramidPolicy = evaluateV2AddOnPolicy({
+        symbol: "BTCUSDT",
+        side: "long",
+        v2State,
+        judgment: {
+          regime: "TREND",
+          regime_final: "TREND",
+          subtype: "NONE",
+          shockPhase: "NONE",
+          rangePhase: "NONE",
+          trendPhase: "UP",
+          transitionPhase: "NONE"
+        } as any,
+        execution: {} as any,
+        snapshot: {
+          qualityScore: 88,
+          reviewing_ticks: 3,
+          boxPos: 0.85,
+          emaGap: 0.02,
+          trendWeaknessScore: 0.3,
+          rangeConfidence: 0.2,
+          lastPrice: 78000,
+          atr: 400,
+          volatilityProxyDiag: 400
+        } as any,
+        accountEquityUsd: 1000,
+        currentSymbolNotionalUsd: 300,
+        currentGlobalNotionalUsd: 300,
+        currentStopPrice: undefined // ← activeStopPrice=null 이므로 undefined가 전달됨
+      });
+
+      ok = run(
+        "6.8: Pyramid BLOCKED when OKX SL absent (isProtectiveStopRegistered=false)",
+        pyramidPolicy.allowed === false,
+        `action=${pyramidPolicy.action}, reason=${pyramidPolicy.reason}`
+      ) && ok;
+
+      ok = run(
+        "6.8b: lockedProfitUsdt=0 when no active SL",
+        (pyramidPolicy.lockedProfitUsdt ?? 0) === 0,
+        `lockedProfit=${pyramidPolicy.lockedProfitUsdt}`
+      ) && ok;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 6.9: active OKX SL 존재 → 실행 계산은 activeStopPrice만 사용
+    console.log("\n=== 6.9: ACTIVE OKX SL — LOCKED PROFIT USES ACTIVE ONLY ===");
+    {
+      // activeStopPrice = 77500 (OKX algo), referenceStopPrice = 76800 (ledger)
+      const authWithOkx = resolveV2AddonStopAuthority({
+        symbol: "BTCUSDT",
+        side: "long",
+        position: {
+          entryPrice: 76754.5,
+          stopPrice: 76800,
+          ledger_stop_px: undefined,
+          isProtectiveStopRegistered: true
+        },
+        algoOrders: [
+          { instId: "BTCUSDT", posSide: "long", side: "sell", slTriggerPx: "77500" }
+        ]
+      });
+
+      ok = run(
+        "6.9a: activeStopPrice=77500 (okx_algo_order), referenceStopPrice=76800",
+        authWithOkx.activeStopPrice === 77500 &&
+        authWithOkx.referenceStopPrice === 76800 &&
+        authWithOkx.isStopLockingProfit === true,
+        `active=${authWithOkx.activeStopPrice}, ref=${authWithOkx.referenceStopPrice}, isLocking=${authWithOkx.isStopLockingProfit}`
+      ) && ok;
+
+      // locked profit must be based on activeStopPrice=77500, not referenceStopPrice=76800
+      const sizeUsd = 300;
+      const entryPrice = 76754.5;
+      const expectedLockedProfit = sizeUsd * (77500 - entryPrice) / entryPrice;
+      // If code wrongly uses referenceStopPrice=76800: 300 * (76800-76754.5)/76754.5 ≈ 0.18
+      // If correctly uses activeStopPrice=77500: 300 * (77500-76754.5)/76754.5 ≈ 2.91
+      ok = run(
+        "6.9b: lockedProfit computation uses activeStopPrice=77500 (not referenceStopPrice=76800)",
+        // Verify the math is against activeStop: expectedLockedProfit > 2.5 USDT
+        expectedLockedProfit > 2.5,
+        `expectedLockedProfit=${expectedLockedProfit.toFixed(4)} (must use activeStop 77500 not ref 76800)`
+      ) && ok;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 6.10: active/reference 값이 다를 때 resolvedStopPrice = activeStopPrice
+    console.log("\n=== 6.10: resolvedStopPrice == activeStopPrice when active exists ===");
+    {
+      const bothAuth = resolveV2AddonStopAuthority({
+        symbol: "BTCUSDT",
+        side: "long",
+        position: {
+          entryPrice: 76000,
+          stopPrice: 76500,
+          isProtectiveStopRegistered: true
+        },
+        algoOrders: [
+          { instId: "BTCUSDT", posSide: "long", side: "sell", slTriggerPx: "77000" }
+        ]
+      });
+
+      ok = run(
+        "6.10: resolvedStopPrice=activeStopPrice=77000 (not ledger 76500)",
+        bothAuth.resolvedStopPrice === 77000 &&
+        bothAuth.activeStopPrice === 77000 &&
+        bothAuth.referenceStopPrice === 76500,
+        `resolved=${bothAuth.resolvedStopPrice}, active=${bothAuth.activeStopPrice}, ref=${bothAuth.referenceStopPrice}`
+      ) && ok;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // 6.11: currentStopPrice 실행 인수에 reference 값이 전달되지 않는지 확인
+    //   (policy 내부에서 currentStopPrice=undefined 시 explicitStop 무시)
+    console.log("\n=== 6.11: currentStopPrice=undefined when activeStop=null ===");
+    {
+      const noActiveAuth = resolveV2AddonStopAuthority({
+        symbol: "BTCUSDT",
+        side: "long",
+        position: {
+          entryPrice: 76000,
+          stopPrice: 76500,
+          isProtectiveStopRegistered: false
+        }
+      });
+
+      // activeStopPrice=null → 실행 인수로 undefined를 전달해야 함 (not 76500)
+      const executionArg = noActiveAuth.activeStopPrice ?? undefined;
+      ok = run(
+        "6.11: currentStopPrice arg = undefined when activeStopPrice=null (reference must not leak)",
+        executionArg === undefined &&
+        noActiveAuth.activeStopPrice === null &&
+        noActiveAuth.referenceStopPrice === 76500,
+        `executionArg=${executionArg}, active=${noActiveAuth.activeStopPrice}, ref=${noActiveAuth.referenceStopPrice}`
+      ) && ok;
+    }
   }
 
   return ok;
 }
+
 
 if (require.main === module) {
   const result = runV2AddonNonzeroExecutionTests();

@@ -1132,6 +1132,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         event: "V2_ADDON_STOP_AUTHORITY_PROOF",
         symbol: String(input.symbol),
         side: resolvedAddonSide,
+        // Active Stop (OKX 실제 보호 주문 — 실행 authority)
+        activeStopPrice: stopAuthority.activeStopPrice,
+        activeStopSource: stopAuthority.activeStopSource,
+        // Reference Stop (ledger/runtime 기록값 — 표시/진단 전용)
+        referenceStopPrice: stopAuthority.referenceStopPrice,
+        referenceStopSource: stopAuthority.referenceStopSource,
+        // Backward-compat (= active ?? reference)
         resolvedStopPrice: stopAuthority.resolvedStopPrice,
         stopAuthoritySource: stopAuthority.stopAuthoritySource,
         entryPrice: stopAuthority.entryPrice,
@@ -1166,7 +1173,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         accountEquityUsd,
         currentSymbolNotionalUsd,
         currentGlobalNotionalUsd,
-        currentStopPrice: stopAuthority.resolvedStopPrice ?? undefined,
+        // currentStopPrice: ONLY activeStopPrice is passed as execution stop authority.
+        // referenceStopPrice / resolvedStopPrice must NOT be passed here — they are display-only.
+        currentStopPrice: stopAuthority.activeStopPrice ?? undefined,
         maxAddonNotionalUsdt: liveMaxAddonNotionalUsdt
     });
 

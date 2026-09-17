@@ -618,18 +618,21 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
         ts: Date.now()
     }));
 
-    // 2. lockedProfitUsd: Profit guaranteed only if actual protective stop is strictly locking profit beyond entry and registered
+    // 2. lockedProfitUsd: ONLY activeStopPrice qualifies as locked-profit authority.
+    //    referenceStopPrice / resolvedStopPrice are NEVER used here — they are display-only.
     let lockedProfitUsdt = 0;
     let addonBlockedReason = "";
 
-    if (stopAuthority.isStopLockingProfit && stopAuthority.resolvedStopPrice !== null) {
+    if (stopAuthority.isStopLockingProfit && stopAuthority.activeStopPrice !== null) {
+        // isStopLockingProfit is already gated on activeStopPrice in stop-authority.ts,
+        // but we double-check activeStopPrice here to be explicit.
         if (side === "long") {
-            lockedProfitUsdt = sizeUsd * (stopAuthority.resolvedStopPrice - entryPrice) / entryPrice;
+            lockedProfitUsdt = sizeUsd * (stopAuthority.activeStopPrice - entryPrice) / entryPrice;
         } else {
-            lockedProfitUsdt = sizeUsd * (entryPrice - stopAuthority.resolvedStopPrice) / entryPrice;
+            lockedProfitUsdt = sizeUsd * (entryPrice - stopAuthority.activeStopPrice) / entryPrice;
         }
     } else if (breakevenStopConfirmed) {
-        // Historical breakevenStopConfirmed was true, but current actual stop is not registered or not locking profit!
+        // Historical breakevenStopConfirmed was true, but OKX active stop is gone or not locking profit.
         lockedProfitUsdt = 0;
         addonBlockedReason = !stopAuthority.isProtectiveStopRegistered
             ? "PROTECTIVE_STOP_NOT_REGISTERED"
@@ -659,9 +662,17 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
         addonMaxNotionalUsdt = Math.max(0, globalMaxNotional - currentGlobalNotionalUsd);
     }
 
+    // effectiveExistingStopPrice: ONLY activeStopPrice is used here.
+    //   If there is no OKX active SL, we CANNOT assume the existing position is protected.
+    //   We use newStopPrice as worst-case (the add-on's stop) — this ensures risk is not underestimated
+    //   due to a stale/reference ledger value masquerading as a real protective stop.
     const effectiveExistingStopPrice = side === "long"
-        ? (stopAuthority.resolvedStopPrice !== null && stopAuthority.resolvedStopPrice > 0 ? Math.max(stopAuthority.resolvedStopPrice, newStopPrice) : newStopPrice)
-        : (stopAuthority.resolvedStopPrice !== null && stopAuthority.resolvedStopPrice > 0 ? Math.min(stopAuthority.resolvedStopPrice, newStopPrice) : newStopPrice);
+        ? (stopAuthority.activeStopPrice !== null && stopAuthority.activeStopPrice > 0
+            ? Math.max(stopAuthority.activeStopPrice, newStopPrice)
+            : newStopPrice)  // no active SL → worst-case: assume newStop applies to existing pos
+        : (stopAuthority.activeStopPrice !== null && stopAuthority.activeStopPrice > 0
+            ? Math.min(stopAuthority.activeStopPrice, newStopPrice)
+            : newStopPrice); // no active SL → worst-case
 
     const existingPosPnlAtStop = (side === "long" && entryPrice > 0)
         ? sizeUsd * (effectiveExistingStopPrice - entryPrice) / entryPrice 
