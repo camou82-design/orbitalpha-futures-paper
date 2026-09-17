@@ -989,12 +989,130 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         liveAccountEquityUsdt > 0
             ? liveAccountEquityUsdt
             : (v2State.accountEquityKrw ?? 0) * USD_PER_KRW;
-    const currentSymbolNotionalUsd = (v2State.symbolLedgerExposureNotionalKrw ?? 0) * USD_PER_KRW;
-    const currentGlobalNotionalUsd = (v2State.ledgerExposureNotionalKrw ?? 0) * USD_PER_KRW;
 
-    const preAddOnPosition = v2State.currentPositions.find(
-        p => p.symbol === input.symbol && String(p.side).toLowerCase() === execution.side
-    );
+    // --- 1. Add-on side authority ---
+    const hasLong = v2State.hasLongPosition || (v2State.longPosition != null);
+    const hasShort = v2State.hasShortPosition || (v2State.shortPosition != null);
+
+    let resolvedAddonSide: EngineV2Side = "none";
+    let addonSideSource: string = "execution_fallback";
+
+    if (hasLong && !hasShort) {
+        resolvedAddonSide = "long";
+        addonSideSource = "held_position_long";
+    } else if (hasShort && !hasLong) {
+        resolvedAddonSide = "short";
+        addonSideSource = "held_position_short";
+    } else if (hasLong && hasShort) {
+        resolvedAddonSide = "none";
+        addonSideSource = "ambiguous_both_sides_safe_block";
+    } else {
+        resolvedAddonSide = execution.side;
+        addonSideSource = "execution_fallback";
+    }
+
+    const preAddOnPosition =
+        resolvedAddonSide === "long"
+            ? (v2State.longPosition ?? v2State.currentPositions.find(p => p.symbol === input.symbol && String(p.side).toLowerCase() === "long") ?? null)
+            : resolvedAddonSide === "short"
+                ? (v2State.shortPosition ?? v2State.currentPositions.find(p => p.symbol === input.symbol && String(p.side).toLowerCase() === "short") ?? null)
+                : null;
+
+    const resolvedAddonStage =
+        resolvedAddonSide === "long"
+            ? (v2State.longStage > 0 ? v2State.longStage : (preAddOnPosition ? Math.max(1, Number(preAddOnPosition.entryStage ?? 1)) : 1))
+            : resolvedAddonSide === "short"
+                ? (v2State.shortStage > 0 ? v2State.shortStage : (preAddOnPosition ? Math.max(1, Number(preAddOnPosition.entryStage ?? 1)) : 1))
+                : 0;
+
+    const resolvedHasSameSidePosition =
+        resolvedAddonSide === "long"
+            ? hasLong
+            : resolvedAddonSide === "short"
+                ? hasShort
+                : false;
+
+    console.info(JSON.stringify({
+        event: "V2_ADDON_SIDE_AUTHORITY_PROOF",
+        symbol: String(input.symbol),
+        executionSide: execution.side,
+        heldPositionSide: v2State.heldPositionSide,
+        resolvedAddonSide,
+        source: addonSideSource,
+        currentStage: resolvedAddonStage,
+        hasSameSidePosition: resolvedHasSameSidePosition,
+        ts: Date.now()
+    }));
+
+    // --- 2. LIVE exposure authority ---
+    const addonOkxActualPositionsRaw = v2State.okxActualPositions ?? (input.state as any).okxActualPositions;
+    const addonOkxActualPositionsReady =
+        (v2State.okxActualPositionsReady === true || (input.state as any).okxActualPositionsReady === true) &&
+        Array.isArray(addonOkxActualPositionsRaw);
+
+    let liveActualSymbolNotionalUsd: number | null = null;
+    let liveActualGlobalNotionalUsd: number | null = null;
+
+    if (addonOkxActualPositionsReady && addonOkxActualPositionsRaw) {
+        let symSum = 0;
+        let globSum = 0;
+        for (const p of addonOkxActualPositionsRaw) {
+            if (!p) continue;
+            const n = typeof p.notionalUsd === "number" && Number.isFinite(p.notionalUsd) && p.notionalUsd > 0
+                ? p.notionalUsd
+                : typeof p.sizeUsd === "number" && Number.isFinite(p.sizeUsd) && p.sizeUsd > 0
+                    ? p.sizeUsd
+                    : typeof (p as any).notional === "number" && Number.isFinite((p as any).notional) && (p as any).notional > 0
+                        ? (p as any).notional
+                        : 0;
+            globSum += n;
+            if (p.symbol === input.symbol) {
+                symSum += n;
+            }
+        }
+        liveActualSymbolNotionalUsd = symSum;
+        liveActualGlobalNotionalUsd = globSum;
+    }
+
+    const ledgerSymbolNotionalUsd = (v2State.symbolLedgerExposureNotionalKrw ?? 0) * USD_PER_KRW;
+    const ledgerGlobalNotionalUsd = (v2State.ledgerExposureNotionalKrw ?? 0) * USD_PER_KRW;
+
+    let selectedSymbolNotionalUsd = ledgerSymbolNotionalUsd;
+    let selectedGlobalNotionalUsd = ledgerGlobalNotionalUsd;
+    let exposureAuthoritySource = "ledger_fallback";
+
+    if (liveActualSymbolNotionalUsd !== null && liveActualGlobalNotionalUsd !== null) {
+        selectedSymbolNotionalUsd = liveActualSymbolNotionalUsd;
+        selectedGlobalNotionalUsd = liveActualGlobalNotionalUsd;
+        exposureAuthoritySource = "okx_actual";
+    }
+
+    const symbolExposureCapUsd = accountEquityUsd * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE;
+    const globalExposureCapUsd = accountEquityUsd * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE;
+
+    const addonRemainingSymbolRoom = Math.max(0, symbolExposureCapUsd - selectedSymbolNotionalUsd);
+    const addonRemainingGlobalRoom = Math.max(0, globalExposureCapUsd - selectedGlobalNotionalUsd);
+
+    console.info(JSON.stringify({
+        event: "V2_ADDON_EXPOSURE_AUTHORITY_PROOF",
+        symbol: String(input.symbol),
+        liveActualSymbolNotionalUsd,
+        liveActualGlobalNotionalUsd,
+        ledgerSymbolNotionalUsd,
+        ledgerGlobalNotionalUsd,
+        selectedSymbolNotionalUsd,
+        selectedGlobalNotionalUsd,
+        authoritySource: exposureAuthoritySource,
+        remainingSymbolRoom: addonRemainingSymbolRoom,
+        remainingGlobalRoom: addonRemainingGlobalRoom,
+        symbolExposureCapUsd,
+        globalExposureCapUsd,
+        accountEquityUsd,
+        ts: Date.now()
+    }));
+
+    const currentSymbolNotionalUsd = selectedSymbolNotionalUsd;
+    const currentGlobalNotionalUsd = selectedGlobalNotionalUsd;
 
     const liveMaxAddonNotionalUsdt =
         input.config.okxLiveMaxAddonNotionalUsdt ??
@@ -1003,7 +1121,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     const addOnPolicy = evaluateV2AddOnPolicy({
         symbol: String(input.symbol),
-        side: execution.side,
+        side: resolvedAddonSide,
         v2State,
         judgment,
         execution,

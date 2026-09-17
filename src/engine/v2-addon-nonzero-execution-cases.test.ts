@@ -1,6 +1,8 @@
 import { evaluateV2AddOnPolicy } from "../engine-v2/addon/policy";
 import { calculateRiskSizing } from "../engine-v2/risk-sizing/policy";
 import { emitV2TradeLifecycleProof } from "../engine-v2/lifecycle/proof";
+import { runEngineV2 } from "../engine-v2/index";
+import { deriveLiveBalanceAuthority } from "../engine-v2/live-account/balance-authority";
 import {
   MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,
   MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE,
@@ -678,6 +680,211 @@ export function runV2AddonNonzeroExecutionTests(): boolean {
       "Actual regime_final === TRANSITION is HARD BLOCKED by TRANSITION_ADDON_FORBIDDEN",
       policyRegimeTransition.allowed === false && policyRegimeTransition.reason === "TRANSITION_ADDON_FORBIDDEN",
       `action=${policyRegimeTransition.action}, reason=${policyRegimeTransition.reason}`
+    ) && ok;
+  }
+
+  console.log("\n=== 6. V2 ADD-ON 3RD REVISION: HELD-POSITION / LIVE EXPOSURE AUTHORITY PROOFS ===");
+  {
+    // 6.1: Add-on side authority: existing BTC long + execution.side="none" -> resolvedAddonSide="long", stage=1, sameSide=true
+    const accountEquityUsd = 1410;
+    const accountEquityKrw = 1410 * 1400;
+    const currentPrice = 96000;
+    const atr = 500;
+    const entryPrice = 94000;
+    const sizeUsd = 3240;
+
+    const btcCandles = [
+      { ts: Date.now() - 120000, o: 94000, h: 95000, l: 93800, c: 94500, v: 10 },
+      { ts: Date.now() - 60000, o: 94500, h: 96200, l: 94400, c: 96000, v: 15 }
+    ];
+
+    const engineInputWithHeldLong = {
+      symbol: "BTCUSDT" as const,
+      candles: btcCandles,
+      config: {
+        baseSizeUsd: 140000,
+        okxLiveMaxAddonNotionalUsdt: 50
+      },
+      snapshot: {
+        lastPrice: currentPrice,
+        latestCandleClose: currentPrice,
+        qualityScore: 85,
+        reviewing_ticks: 3,
+        boxPos: 0.7,
+        emaGap: 0.005,
+        trendWeaknessScore: 0.3,
+        rangeConfidence: 0.3,
+        atr,
+        signal: "HOLD" // execution.side will be "none"
+      },
+      state: {
+        accountEquityKrw,
+        accountEquityUsdt: accountEquityUsd,
+        maxUsableMarginKrw: accountEquityKrw,
+        symbolExposureNotionalCapKrw: accountEquityKrw * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,
+        exposureNotionalCapKrw: accountEquityKrw * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE,
+        currentStage: 1,
+        heldPositionSide: "long",
+        hasLongPosition: true,
+        hasShortPosition: false,
+        hasSameSidePosition: true,
+        directionalShockState: "NONE",
+        longAllow: true,
+        shortAllow: false,
+        okxActualPositionsReady: true,
+        okxActualPositions: [
+          { symbol: "BTCUSDT", side: "long", notionalUsd: 3240, sizeUsd: 3240 }
+        ],
+        currentPositions: [
+          {
+            symbol: "BTCUSDT",
+            side: "long",
+            entryPrice,
+            sizeUsd,
+            notionalUsd: sizeUsd,
+            entryStage: 1,
+            pnlPct: (currentPrice - entryPrice) / entryPrice,
+            breakevenStopRequired: true,
+            breakevenStopConfirmed: true,
+            breakevenStopPrice: 94500,
+            ledger_stop_px: 94500
+          }
+        ]
+      }
+    };
+
+    const capturedLogs: string[] = [];
+    const origInfo = console.info;
+    console.info = (...args: any[]) => {
+      capturedLogs.push(args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" "));
+      origInfo(...args);
+    };
+
+    let engineRes: any;
+    try {
+      engineRes = runEngineV2(engineInputWithHeldLong as any);
+    } finally {
+      console.info = origInfo;
+    }
+
+    const sideAuthorityProofLog = capturedLogs.find(l => l.includes("V2_ADDON_SIDE_AUTHORITY_PROOF"));
+    const sideProof = sideAuthorityProofLog ? JSON.parse(sideAuthorityProofLog) : null;
+
+    ok = run(
+      "V2_ADDON_SIDE_AUTHORITY_PROOF emitted and resolves heldPositionSide long when execution.side=none",
+      sideProof != null &&
+      sideProof.executionSide === "none" &&
+      sideProof.heldPositionSide === "long" &&
+      sideProof.resolvedAddonSide === "long" &&
+      sideProof.source === "held_position_long" &&
+      sideProof.currentStage === 1 &&
+      sideProof.hasSameSidePosition === true,
+      `proof=${JSON.stringify(sideProof)}`
+    ) && ok;
+
+    // 6.2: LIVE exposure authority: OKX actual 3240 USDT against cap 3877.5 -> remaining room ~637.5 USDT (~640 USDT)
+    const exposureAuthorityProofLog = capturedLogs.find(l => l.includes("V2_ADDON_EXPOSURE_AUTHORITY_PROOF"));
+    const expProof = exposureAuthorityProofLog ? JSON.parse(exposureAuthorityProofLog) : null;
+
+    const symbolCap = accountEquityUsd * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE; // 1410 * 2.75 = 3877.5
+    const expectedRemaining = symbolCap - 3240; // 637.5
+
+    ok = run(
+      "V2_ADDON_EXPOSURE_AUTHORITY_PROOF computes remainingSymbolRoom from OKX actual notional (~637.5 USDT, not 3878+ USDT)",
+      expProof != null &&
+      expProof.authoritySource === "okx_actual" &&
+      expProof.selectedSymbolNotionalUsd === 3240 &&
+      expProof.liveActualSymbolNotionalUsd === 3240 &&
+      Math.abs(expProof.remainingSymbolRoom - expectedRemaining) < 1.0,
+      `remainingSymbolRoom=${expProof?.remainingSymbolRoom}, expected=${expectedRemaining}, selected=${expProof?.selectedSymbolNotionalUsd}`
+    ) && ok;
+
+    // 6.3: Respect Manual SL / Actual protective stop:
+    // If manual SL is widened below breakeven (e.g. entry=94000, currentStopPrice=92000), profit-funded pyramid is blocked with lockedProfitUsdt=0
+    const policyWithWidenedStop = evaluateV2AddOnPolicy({
+      symbol: "BTCUSDT",
+      side: "long",
+      v2State: baseV2State({
+        hasLongPosition: true,
+        hasSameSidePosition: true,
+        currentStage: 1,
+        longPosition: {
+          symbol: "BTCUSDT",
+          side: "long",
+          entryPrice: 94000,
+          sizeUsd: 3240,
+          pnlPct: 0.02,
+          breakevenStopRequired: true,
+          breakevenStopConfirmed: true, // historically true
+          breakevenStopPrice: 94500,
+          ledger_stop_px: 92000 // but current manual SL is widened below entry (92000 < 94000)
+        }
+      }),
+      judgment: {
+        regime: "TREND",
+        regime_final: "TREND",
+        subtype: "NONE",
+        shockPhase: "NONE",
+        rangePhase: "NONE",
+        trendPhase: "UP",
+        transitionPhase: "NONE"
+      } as any,
+      execution: { signal: "LONG_CANDIDATE", side: "long" } as any,
+      snapshot: {
+        qualityScore: 85,
+        reviewing_ticks: 3,
+        boxPos: 0.7,
+        emaGap: 0.005,
+        trendWeaknessScore: 0.3,
+        rangeConfidence: 0.3,
+        lastPrice: 96000,
+        atr: 500
+      },
+      accountEquityUsd: 1410,
+      currentSymbolNotionalUsd: 3240,
+      currentGlobalNotionalUsd: 3240,
+      currentStopPrice: 92000 // Widened stop passed explicitly
+    });
+
+    ok = run(
+      "Manual SL widened below breakeven produces lockedProfitUsdt=0 and forbids false locked-profit add-on",
+      policyWithWidenedStop.allowed === false &&
+      (policyWithWidenedStop.lockedProfitUsdt ?? 0) === 0 &&
+      policyWithWidenedStop.reason === "PROFIT_BUFFER_INSUFFICIENT",
+      `allowed=${policyWithWidenedStop.allowed}, lockedProfitUsdt=${policyWithWidenedStop.lockedProfitUsdt}, reason=${policyWithWidenedStop.reason}`
+    ) && ok;
+
+    // 6.4: 10x diagnostic bug fix: verify computePaperEstimatedUsage preserves notional = sizeUsd (not multiplied by leverage)
+    const balAuthority = deriveLiveBalanceAuthority({
+      okxAuthMode: "live",
+      balancePayload: {
+        totalEq: "1410",
+        availEq: "1000",
+        details: [{ ccy: "USDT", eq: "1410", cashBal: "1000", availEq: "1000" }]
+      },
+      balanceFetchError: null,
+      okxPositionsPayload: [
+        { instId: "BTC-USDT-SWAP", pos: "0.0337", posSide: "long", notionalUsd: "3240", lever: "10", margin: "324" }
+      ],
+      positions: [
+        {
+          symbol: "BTCUSDT",
+          side: "long",
+          sizeUsd: 3245,
+          leverage: 10,
+          isV2Authority: true,
+          notionalUsd: 3245,
+          authoritySourceAtEntry: "v2",
+          strategyVersion: "v2"
+        }
+      ]
+    });
+
+    ok = run(
+      "10x diagnostic bug fixed: paper_position_estimated_notional_usdt is ~3245 USDT (not 32450)",
+      Math.abs(balAuthority.paper_position_estimated_notional_usdt - 3245) < 1.0 &&
+      Math.abs(balAuthority.paper_position_estimated_used_margin_usdt - 324.5) < 1.0,
+      `estimated_notional=${balAuthority.paper_position_estimated_notional_usdt}, estimated_margin=${balAuthority.paper_position_estimated_used_margin_usdt}`
     ) && ok;
   }
 

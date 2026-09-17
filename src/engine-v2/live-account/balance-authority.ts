@@ -15,6 +15,9 @@ export type LiveBalanceAuthorityInput = Readonly<{
     authoritySourceAtEntry?: string;
     authority?: string;
     exchangeClOrdId?: string;
+    notionalUsd?: number;
+    lifecycleState?: string;
+    strategyVersion?: string;
   }>;
 }>;
 
@@ -197,8 +200,18 @@ function computePaperEstimatedUsage(
     const lev = Number.isFinite(p.leverage) && p.leverage > 0 ? p.leverage : 1;
     
     const notionalAuth = resolveOpenNotionalAuthority(p as any);
-    const notional = notionalAuth.authoritative ? (notionalAuth.valueUsd ?? NaN) : NaN;
-    const margin = resolveOpenMarginUsd(p as any);
+    let notional = notionalAuth.authoritative ? (notionalAuth.valueUsd ?? NaN) : NaN;
+    let margin = resolveOpenMarginUsd(p as any);
+
+    if (notionalAuth.authoritative && notionalAuth.unit === "LEGACY_MARGIN") {
+      if (!Number.isFinite(margin) || margin <= 0) {
+        margin = Number.isFinite(notional) ? notional / lev : 0;
+      }
+    } else if (Number.isFinite(notional) && notional > 0) {
+      if (!Number.isFinite(margin) || margin <= 0 || margin > notional) {
+        margin = notional / lev;
+      }
+    }
 
     return {
       symbol: String(p.symbol),
@@ -209,8 +222,8 @@ function computePaperEstimatedUsage(
       source: "paper_estimated"
     };
   });
-  const used_margin = lines.reduce((acc, x) => acc + x.estimated_margin_usdt, 0);
-  const notional = lines.reduce((acc, x) => acc + x.notional_usdt, 0);
+  const used_margin = lines.reduce((acc, x) => acc + (Number.isFinite(x.estimated_margin_usdt) ? x.estimated_margin_usdt : 0), 0);
+  const notional = lines.reduce((acc, x) => acc + (Number.isFinite(x.notional_usdt) ? x.notional_usdt : 0), 0);
   const leverage =
     walletBalanceUsdt != null && walletBalanceUsdt > 0
       ? notional / walletBalanceUsdt

@@ -6237,7 +6237,14 @@ export class PaperEngine {
         symbol: String(p.symbol),
         side: String(p.side),
         sizeUsd: Number.isFinite(p.sizeUsd) ? p.sizeUsd : 0,
-        leverage: Number.isFinite(p.leverage) ? p.leverage : 1
+        leverage: Number.isFinite(p.leverage) ? p.leverage : 1,
+        isV2Authority: p.isV2Authority,
+        authoritySourceAtEntry: p.authoritySourceAtEntry,
+        authority: p.authority,
+        exchangeClOrdId: p.exchangeClOrdId,
+        notionalUsd: p.notionalUsd,
+        lifecycleState: p.lifecycleState,
+        strategyVersion: p.strategyVersion
       }))
     });
     return {

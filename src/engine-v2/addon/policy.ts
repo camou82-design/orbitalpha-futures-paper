@@ -587,31 +587,33 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
     const sizeUsd = sameSidePosition?.sizeUsd ?? 0;
     const entryPrice = sameSidePosition?.entryPrice ?? 0;
     
-    // 1. Breakeven Stop Check (Already initialized at top)
-    const currentBreakevenStopPrice = breakevenStopPrice ?? 0;
+    // 1. Breakeven / Actual Protective Stop Check
     const isBreakevenStopConfirmed = breakevenStopConfirmed;
     const isBreakevenStopRequired = breakevenStopRequired;
-    const confirmedStopPrice = Number(sameSidePosition?.breakevenStopPrice ?? 0);
+    const actualStopPrice =
+        typeof args.currentStopPrice === "number" && Number.isFinite(args.currentStopPrice) && args.currentStopPrice > 0
+            ? args.currentStopPrice
+            : Number(sameSidePosition?.ledger_stop_px ?? sameSidePosition?.breakevenStopPrice ?? 0);
 
-    // 2. lockedProfitUsd: Profit guaranteed only if breakeven stop is confirmed and valid
+    // 2. lockedProfitUsd: Profit guaranteed only if actual protective stop is strictly locking profit beyond entry
     let lockedProfitUsdt = 0;
     let addonBlockedReason = "";
 
-    if (breakevenStopConfirmed && confirmedStopPrice > 0) {
-        const currentBreakevenStopPrice = breakevenStopPrice ?? 0;
-        const isStopValid = side === "long" 
-            ? confirmedStopPrice >= currentBreakevenStopPrice
-            : confirmedStopPrice <= currentBreakevenStopPrice;
+    const isStopLockingProfit =
+        actualStopPrice > 0 &&
+        entryPrice > 0 &&
+        (side === "long" ? actualStopPrice > entryPrice : actualStopPrice < entryPrice);
 
-        if (isStopValid) {
-            if (side === "long") {
-                lockedProfitUsdt = sizeUsd * (confirmedStopPrice - entryPrice) / entryPrice;
-            } else {
-                lockedProfitUsdt = sizeUsd * (entryPrice - confirmedStopPrice) / entryPrice;
-            }
+    if (isStopLockingProfit) {
+        if (side === "long") {
+            lockedProfitUsdt = sizeUsd * (actualStopPrice - entryPrice) / entryPrice;
         } else {
-            addonBlockedReason = "CONFIRMED_STOP_NOT_AT_BREAKEVEN";
+            lockedProfitUsdt = sizeUsd * (entryPrice - actualStopPrice) / entryPrice;
         }
+    } else if (breakevenStopConfirmed) {
+        // Historical breakevenStopConfirmed was true, but current actual stop is at or below breakeven / widened!
+        lockedProfitUsdt = 0;
+        addonBlockedReason = "ACTUAL_STOP_NOT_LOCKING_PROFIT";
     } else if (breakevenStopRequired) {
         addonBlockedReason = "BREAKEVEN_STOP_NOT_CONFIRMED";
     }
@@ -638,8 +640,8 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
     }
 
     const effectiveExistingStopPrice = side === "long"
-        ? (confirmedStopPrice > 0 ? Math.max(confirmedStopPrice, newStopPrice) : newStopPrice)
-        : (confirmedStopPrice > 0 ? Math.min(confirmedStopPrice, newStopPrice) : newStopPrice);
+        ? (actualStopPrice > 0 ? Math.max(actualStopPrice, newStopPrice) : newStopPrice)
+        : (actualStopPrice > 0 ? Math.min(actualStopPrice, newStopPrice) : newStopPrice);
 
     const existingPosPnlAtStop = (side === "long" && entryPrice > 0)
         ? sizeUsd * (effectiveExistingStopPrice - entryPrice) / entryPrice 
@@ -656,6 +658,7 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
     // 4. Final Decision Gate
     const pyramidAllowed = 
         breakevenStopConfirmed &&
+        isStopLockingProfit &&
         availableRiskBudgetUsdt > 0 && 
         qualityScore >= 80 && 
         trendWeaknessScore < 0.55 && 
