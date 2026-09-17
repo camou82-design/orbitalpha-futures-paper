@@ -1173,10 +1173,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // --- Unified finalAddonNotionalUsdt Calculation (Pyramid Sizing Source of Truth) ---
     const symbolMaxNotionalUsdt = liveAccountEquityUsdt > 0
         ? liveAccountEquityUsdt * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE
-        : accountEquityUsd * 0.8;
+        : accountEquityUsd * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE;
     const globalMaxNotionalUsdt = liveAccountEquityUsdt > 0
         ? liveAccountEquityUsdt * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE
-        : accountEquityUsd * 1.5;
+        : accountEquityUsd * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE;
     const remainingSymbolRoom = Math.max(0, symbolMaxNotionalUsdt - currentSymbolNotionalUsd);
     const remainingGlobalRoom = Math.max(0, globalMaxNotionalUsdt - currentGlobalNotionalUsd);
     const maxAdverseAddonUsdt = liveAccountEquityUsdt > 0
@@ -1186,13 +1186,26 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const addonPolicyNotionalCap =
         addOnPolicy.addonMode === "CONFIRMED_ADVERSE_ADDON"
             ? (addOnPolicy.requestedAddonNotionalUsdt ?? addOnPolicy.addonMaxNotionalUsdt ?? maxAdverseAddonUsdt)
-            : (addOnPolicy.addonMaxNotionalUsdt ?? 0);
+            : (addOnPolicy.requestedAddonNotionalUsdt ?? addOnPolicy.addonMaxNotionalUsdt ?? 0);
 
     const finalAddonNotionalUsdt = Math.min(
         addonPolicyNotionalCap,
         remainingSymbolRoom,
         remainingGlobalRoom
     );
+
+    if (addOnPolicy.allowed && finalAddonNotionalUsdt <= 0) {
+        console.warn(JSON.stringify({
+            event: "ADDON_ALLOWED_WITH_ZERO_NOTIONAL",
+            symbol: String(input.symbol),
+            reason: addOnPolicy.reason,
+            addonPolicyMax: addOnPolicy.addonMaxNotionalUsdt,
+            requestedAddonNotionalUsdt: addOnPolicy.requestedAddonNotionalUsdt,
+            remainingSymbolRoom,
+            remainingGlobalRoom,
+            finalAddonNotionalUsdt
+        }));
+    }
 
     console.info(JSON.stringify({
         event: "V2_TREND_FINAL_ADDON_NOTIONAL_PROOF",
@@ -7037,7 +7050,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         ? ((v2State as any).requestedAddonNotionalUsdt ??
                             addOnPolicy?.requestedAddonNotionalUsdt ??
                             0)
-                        : ((v2State as any).finalAddonNotionalUsdt ?? finalAddonNotionalUsdt ?? 0))
+                        : ((v2State as any).finalAddonNotionalUsdt ?? finalAddonNotionalUsdt ?? addOnPolicy?.requestedAddonNotionalUsdt ?? addOnPolicy?.addonMaxNotionalUsdt ?? 0))
                     : null;
                 const adverseRiskBudgetAllowedNotional = isAdverseAddon
                     ? (addOnPolicy?.requestedAddonNotionalUsdt ??

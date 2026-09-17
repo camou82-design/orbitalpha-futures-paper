@@ -88,6 +88,9 @@ function buildConsistencyReasons(
     if (addOnPolicy?.allowed === true && addOnPolicy.isAddOn !== true) {
         reasons.push("ADDON_ALLOWED_WITHOUT_EXISTING_POSITION");
     }
+    if (addOnPolicy?.allowed === true && ((addOnPolicy.requestedAddonNotionalUsdt ?? addOnPolicy.addonMaxNotionalUsdt ?? 0) <= 0)) {
+        reasons.push("ADDON_ALLOWED_WITH_ZERO_NOTIONAL");
+    }
     if (exitPolicy && exitPolicy.hasPosition === false && exitPolicy.action !== "HOLD") {
         reasons.push("EXIT_ACTION_WITHOUT_POSITION");
     }

@@ -366,8 +366,8 @@ export function runAddonModeCaseTests(): boolean {
         htf_entry_policy: "BOTH",
         counter_trend_risk: false
       } as any,
-      currentSymbolNotionalUsd: 1120,
-      currentGlobalNotionalUsd: 1120,
+      currentSymbolNotionalUsd: 1400,
+      currentGlobalNotionalUsd: 1400,
       accountEquityUsd: 1400
     });
     ok =

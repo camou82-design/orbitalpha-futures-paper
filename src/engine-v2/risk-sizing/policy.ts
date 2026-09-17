@@ -67,13 +67,14 @@ export function calculateRiskSizing(
             : true;
     const trendLossStreak = Math.max(0, Number(state.lossStreaks?.TREND ?? 0));
     const symbolFlowLossStreak = trendLossStreak;
-    const sameSymbolSide = state.currentPositions.filter((p) => p && p.symbol === input.symbol && String(p.side).toLowerCase() === String(executor.side ?? "").toLowerCase());
-    const sameSymbolPos = sameSymbolSide[0] ?? state.currentPositions.find((p) => p && p.symbol === input.symbol) ?? null;
+    const currentPositions = state.currentPositions ?? [];
+    const sameSymbolSide = currentPositions.filter((p) => p && p.symbol === input.symbol && String(p.side).toLowerCase() === String(executor.side ?? "").toLowerCase());
+    const sameSymbolPos = sameSymbolSide[0] ?? currentPositions.find((p) => p && p.symbol === input.symbol) ?? null;
     const currentStage = sameSymbolPos ? Math.max(1, sameSymbolPos.entryStage ?? 1) : 0;
     const isAddOn = sameSymbolPos != null;
     const addOnPolicyAllowed = state.addOnPolicyAllowed;
     const addOnPolicyReason = state.addOnPolicyReason;
-    const currentMarginUsed = state.currentPositions.reduce((acc, p) => acc + resolveOpenMarginUsd(p as any), 0);
+    const currentMarginUsed = currentPositions.reduce((acc, p) => acc + resolveOpenMarginUsd(p as any), 0);
 
     // BLOCKER 4-6: OKX Actual Notional authority helper.
     // For each paper ledger position, look up a matching OKX actual position
@@ -276,11 +277,20 @@ export function calculateRiskSizing(
     let appliedLeverage = FIXED_LEVERAGE_10X;
     let stageMarginKrw = Math.max(0, baseStageMarginKrw * sizeMultiplier);
     if (judgment.regime === "RANGE") {
-        const rangeStageBaseKrw = currentStage <= 0 ? 140_000 : currentStage === 1 ? 80_000 : 40_000;
-        if (isRangeProbeInitialSizing) {
-            stageMarginKrw = Math.max(0, rangeStageBaseKrw * sizeMultiplier);
+        if (isAddOn && addOnPolicyAllowed) {
+            const finalAddonNotionalUsdt = state.finalAddonNotionalUsdt ?? 0;
+            stageMarginKrw = (finalAddonNotionalUsdt / appliedLeverage) * 1400;
+            if (stageMarginKrw < 1000) {
+                isBlocked = true;
+                blockReason = "RANGE_REATTACK_SIZE_TOO_SMALL";
+            }
         } else {
-            stageMarginKrw = rangeStageBaseKrw;
+            const rangeStageBaseKrw = currentStage <= 0 ? 140_000 : currentStage === 1 ? 80_000 : 40_000;
+            if (isRangeProbeInitialSizing) {
+                stageMarginKrw = Math.max(0, rangeStageBaseKrw * sizeMultiplier);
+            } else {
+                stageMarginKrw = rangeStageBaseKrw;
+            }
         }
     } else if (shockActive) {
         stageMarginKrw = currentStage <= 0 ? 108_000 : 0;

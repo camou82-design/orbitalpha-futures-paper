@@ -1,5 +1,9 @@
 import type { EvaluateV2AddOnPolicyArgs, V2AddOnPolicyResult } from "./types";
 import { evaluateConfirmedAdverseAddOn } from "./adverse-addon";
+import {
+    MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,
+    MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE
+} from "../risk-sizing/equity-adaptive-sizing";
 
 function withAddonMode<T extends V2AddOnPolicyResult>(result: T, addonMode: V2AddOnPolicyResult["addonMode"]): T {
     return { ...result, addonMode: addonMode ?? "NONE" };
@@ -363,6 +367,66 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             };
         }
         if (canReattack) {
+            const accountEquityUsd = args.accountEquityUsd || (v2State.accountEquityKrw || 1400000) / 1400;
+            const symbolMaxNotional = accountEquityUsd * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE;
+            const globalMaxNotional = accountEquityUsd * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE;
+
+            const currentSymbolNotionalUsd = args.currentSymbolNotionalUsd || (sameSidePosition?.sizeUsd ?? 0);
+            const currentGlobalNotionalUsd = args.currentGlobalNotionalUsd || currentSymbolNotionalUsd;
+
+            const remainingSymbolCap = Math.max(0, symbolMaxNotional - currentSymbolNotionalUsd);
+            const remainingAccountCap = Math.max(0, globalMaxNotional - currentGlobalNotionalUsd);
+
+            const currentPrice = Number(snapshot.lastPrice ?? 0);
+            const atr = Number(snapshot.atr || snapshot.volatilityProxyDiag || (currentPrice > 0 ? currentPrice * 0.005 : 0));
+            const stopDistance = atr > 0 ? atr * 2.2 : (currentPrice > 0 ? currentPrice * 0.022 : 0);
+            const stopDistancePct = currentPrice > 0 && stopDistance > 0 ? Math.max(0.005, stopDistance / currentPrice) : 0.022;
+
+            // Target risk budget for RANGE reattack: 1.0% of equity
+            const targetRiskBudgetUsdt = accountEquityUsd * 0.010;
+            const riskBasedNotional = targetRiskBudgetUsdt / stopDistancePct;
+
+            const addonMaxNotionalUsdt = Math.max(0, Math.min(
+                riskBasedNotional,
+                remainingSymbolCap,
+                remainingAccountCap
+            ));
+
+            if (addonMaxNotionalUsdt <= 0 || remainingSymbolCap <= 0 || remainingAccountCap <= 0) {
+                return withAddonMode({
+                    action: "ADDON_WATCH",
+                    allowed: false,
+                    reason: "SAME_SIDE_POSITION_WATCH_RECHECK",
+                    addOnEligible: false,
+                    isInitial,
+                    isAddOn,
+                    side,
+                    currentStage,
+                    hasSameSidePosition,
+                    hasOppositeSidePosition,
+                    marketRegime: judgment.regime_final,
+                    marketSubtype: judgment.subtype,
+                    shockPhase: judgment.shockPhase,
+                    rangePhase: judgment.rangePhase,
+                    trendPhase: judgment.trendPhase,
+                    transitionPhase: judgment.transitionPhase,
+                    qualityScore,
+                    reviewingTicks,
+                    pnlPct,
+                    boxPos,
+                    emaGap,
+                    trendWeaknessScore,
+                    rangeConfidence,
+                    breakevenStopRequired,
+                    breakevenStopConfirmed,
+                    breakevenStopPrice,
+                    addonMaxNotionalUsdt: 0,
+                    requestedAddonNotionalUsdt: 0,
+                    addonBlockedReason: remainingSymbolCap <= 0 ? "MAX_SYMBOL_CAP" : remainingAccountCap <= 0 ? "MAX_ACCOUNT_CAP" : "RISK_BUDGET_EXCEEDED",
+                    evidence: "range_edge_reattack_cap_exceeded"
+                }, "PYRAMIDING");
+            }
+
             return withAddonMode({
                 action: "ADDON_ALLOWED",
                 allowed: true,
@@ -390,6 +454,8 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
                 breakevenStopRequired,
                 breakevenStopConfirmed,
                 breakevenStopPrice,
+                addonMaxNotionalUsdt,
+                requestedAddonNotionalUsdt: addonMaxNotionalUsdt,
                 thesisValid: true,
                 sameSideConfirmation: breakevenStopConfirmed,
                 priceDistancePassed: true,
@@ -496,12 +562,11 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             };
         }
 
-        // --- TREND Profit-Funded Pyramid Implementation (Refined) ---
-    // --- TREND Profit-Funded Pyramid Implementation (Refined with Locked Profit Verification) ---
+        // --- TREND Profit-Funded Pyramid Implementation (Refined with Locked Profit Verification) ---
     const accountEquityUsd = args.accountEquityUsd || (v2State.accountEquityKrw || 1400000) / 1400;
     const minimumProtectedProfitUsd = Math.max(0.5, accountEquityUsd * 0.0015);
-    const symbolMaxNotional = accountEquityUsd * 0.8;
-    const globalMaxNotional = accountEquityUsd * 1.5;
+    const symbolMaxNotional = accountEquityUsd * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE;
+    const globalMaxNotional = accountEquityUsd * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE;
 
     const currentSymbolNotionalUsd = args.currentSymbolNotionalUsd || (sameSidePosition?.sizeUsd ?? 0);
     const currentGlobalNotionalUsd = args.currentGlobalNotionalUsd || currentSymbolNotionalUsd;
@@ -559,10 +624,14 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
         addonMaxNotionalUsdt = Math.max(0, globalMaxNotional - currentGlobalNotionalUsd);
     }
 
+    const effectiveExistingStopPrice = side === "long"
+        ? (confirmedStopPrice > 0 ? Math.max(confirmedStopPrice, newStopPrice) : newStopPrice)
+        : (confirmedStopPrice > 0 ? Math.min(confirmedStopPrice, newStopPrice) : newStopPrice);
+
     const existingPosPnlAtStop = (side === "long" && entryPrice > 0)
-        ? sizeUsd * (newStopPrice - entryPrice) / entryPrice 
+        ? sizeUsd * (effectiveExistingStopPrice - entryPrice) / entryPrice 
         : (side === "short" && entryPrice > 0)
-            ? sizeUsd * (entryPrice - newStopPrice) / entryPrice
+            ? sizeUsd * (entryPrice - effectiveExistingStopPrice) / entryPrice
             : -sizeUsd;
 
     const newPosPnlAtStop = side === "long"
@@ -643,6 +712,7 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
             lockedProfitUsdt,
             availableRiskBudgetUsdt,
             addonMaxNotionalUsdt,
+            requestedAddonNotionalUsdt: addonMaxNotionalUsdt,
             breakevenStopRequired,
             breakevenStopConfirmed,
             breakevenStopPrice,
