@@ -1739,6 +1739,8 @@
           ${row("OKX 동기화", `<span class="${okxSyncStatus ? (String(okxSyncStatus).toUpperCase() === 'SYNCED' || String(okxSyncStatus).toUpperCase() === 'ALIGNED' ? 'v2-ok' : 'v2-warn') : ''}">${okxSyncStatus ? esc(String(okxSyncStatus)) : '<span class="muted">—</span>'}</span>`)}
         </div>
       </div>`;
+  }
+
   function resolveDisplaySourceLabel(row) {
     if (!row || typeof row !== "object") return "수동";
     if (typeof row.sourceLabel === "string" && row.sourceLabel.trim().length > 0) {
