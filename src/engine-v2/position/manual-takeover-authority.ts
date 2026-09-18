@@ -62,6 +62,7 @@ export function hasOpenPositionForManualTakeoverSymbol(
   return openPositions.some((p) => {
     if (String(p.symbol ?? "").trim().toUpperCase() !== symKey) return false;
     if (p.status && p.status !== "open") return false;
+    if (p.lifecycleState === "MANUAL_SIZE_AUGMENTED") return false;
     if (!hasPositiveOpenSize(p)) return false;
     if (side) return String(p.side).toLowerCase() === side;
     return true;
@@ -69,6 +70,9 @@ export function hasOpenPositionForManualTakeoverSymbol(
 }
 
 export function isOperatorManagedOpenPosition(open: ManualTakeoverOpenPositionRef): boolean {
+  if (open.lifecycleState === "MANUAL_SIZE_AUGMENTED") {
+    return false;
+  }
   return (
     open.manualTakeoverActive === true ||
     open.lifecycleState === "OPERATOR_MANAGED" ||
@@ -385,6 +389,17 @@ export function resolvePositionMutationAuthority(input: Readonly<{
   open: ManualTakeoverOpenPositionRef & Pick<PaperOpenPositionRecord, "symbol" | "side">;
   manualTakeoverActiveExternal?: boolean;
 }>): PositionMutationAuthority {
+  if (input.open.lifecycleState === "MANUAL_SIZE_AUGMENTED") {
+    return {
+      effectiveAuthorityOwner: "BOT",
+      manualTakeoverActive: false,
+      startupAuthorityResolved: true,
+      positionMutationAllowed: true,
+      protectiveReconcileAllowed: true,
+      exitCalculationAllowed: true,
+      blockReason: null
+    };
+  }
   const manualActive =
     input.open.manualTakeoverActive === true ||
     input.manualTakeoverActiveExternal === true ||

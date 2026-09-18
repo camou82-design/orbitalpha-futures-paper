@@ -2962,6 +2962,106 @@ export class PaperEngine {
         }
 
         const ledgerPos = paperOpens.find((p) => p.symbol === r.symbol && p.side === r.side);
+
+        // --- SAME-SIDE MANUAL AUGMENT MIGRATION & RECLASSIFICATION (OpsWatch) ---
+        if (
+          ledgerPos &&
+          liveExposure &&
+          (ledgerPos.lifecycleState === "OPERATOR_MANAGED" ||
+            ledgerPos.manualTakeoverActive === true ||
+            ledgerPos.manualOwnershipLatch === true ||
+            ledgerPos.lifecycleState === "MANUAL_SIZE_AUGMENTED")
+        ) {
+          const actualContracts = Math.abs(r.okx_pos_signed);
+          const remotePosRow = (Array.isArray(this.lastLivePositionsPayload) ? this.lastLivePositionsPayload : []).find((row: any) => {
+            const hit = okxSwapRowToLedgerKey(row as Record<string, unknown>);
+            return hit && hit.symbol === r.symbol && hit.side === r.side;
+          });
+          const actualAvgPx = r.okx_avg_px ?? (remotePosRow ? Number((remotePosRow as any).avgPx) : null);
+          const actualNotional = (remotePosRow ? Number((remotePosRow as any).notionalUsd) : null) ?? ((actualAvgPx && actualContracts) ? actualAvgPx * actualContracts : null);
+
+          const reclass = evaluateManualAugmentReclassification({
+            ledger: ledgerPos,
+            okxActualPositionExists: true,
+            okxActualContracts: actualContracts,
+            okxActualAvgPx: actualAvgPx ?? ledgerPos.actualAvgPx ?? ledgerPos.entryPrice,
+            okxActualNotional: actualNotional ?? ledgerPos.actualNotionalUsd ?? ledgerPos.sizeUsd,
+            okxSide: r.side
+          });
+
+          if (reclass.shouldReclassify) {
+            const prevLifecycle = ledgerPos.lifecycleState;
+            ledgerPos.lifecycleState = "MANUAL_SIZE_AUGMENTED";
+            ledgerPos.manualTakeoverActive = false;
+            ledgerPos.manualOwnershipLatch = false;
+            ledgerPos.manualAugmentActive = true;
+            ledgerPos.actualAvgPx = actualAvgPx ?? ledgerPos.actualAvgPx ?? ledgerPos.entryPrice;
+            ledgerPos.actualContracts = actualContracts;
+            ledgerPos.actualNotionalUsd = actualNotional ?? ledgerPos.actualNotionalUsd ?? ledgerPos.sizeUsd;
+            ledgerPos.originalEntryPrice = ledgerPos.originalEntryPrice ?? ledgerPos.entryPrice;
+            ledgerPos.originalSizeUsd = ledgerPos.originalSizeUsd ?? ledgerPos.sizeUsd;
+            ledgerPos.reconcileState = "MATCHED";
+
+            const takeoverKey = buildManualTakeoverKey(ledgerPos.symbol, ledgerPos.side);
+            const generalKey = String(ledgerPos.symbol).toUpperCase();
+            this.manualTakeoverBySymbol.delete(takeoverKey);
+            this.manualTakeoverBySymbol.delete(generalKey);
+            void this.persistManualTakeoverDoc();
+            await this.positions.saveOpenAll(paperOpens);
+
+            this.logger.info("V2_MANUAL_AUGMENT_MIGRATION_PROOF", {
+              symbol: ledgerPos.symbol,
+              side: ledgerPos.side,
+              previous_lifecycle: prevLifecycle,
+              restored_lifecycle: "MANUAL_SIZE_AUGMENTED",
+              manual_takeover_released: true,
+              actual_contracts: actualContracts,
+              actual_avg_px: actualAvgPx,
+              ledger_contracts: ledgerPos.okxContracts,
+              ledger_entry_price: ledgerPos.originalEntryPrice ?? ledgerPos.entryPrice
+            });
+
+            this.logger.info(
+              "V2_MANUAL_AUGMENT_AUTHORITY_PROOF",
+              buildManualAugmentAuthorityProof({
+                symbol: ledgerPos.symbol,
+                side: ledgerPos.side,
+                ledgerQty: ledgerPos.okxContracts ?? 0,
+                ledgerAvgPx: ledgerPos.originalEntryPrice ?? ledgerPos.entryPrice,
+                ledgerNotional: ledgerPos.originalSizeUsd ?? ledgerPos.sizeUsd,
+                okxActualQty: actualContracts,
+                okxActualAvgPx: actualAvgPx ?? ledgerPos.actualAvgPx ?? ledgerPos.entryPrice,
+                okxActualNotional: actualNotional ?? ledgerPos.actualNotionalUsd ?? ledgerPos.sizeUsd,
+                interventionType: "SAME_SIDE_MANUAL_AUGMENT",
+                lifecycleState: "MANUAL_SIZE_AUGMENTED",
+                positionManagementAllowed: true,
+                autoAddonAllowed: false,
+                protectionReconcileAllowed: true
+              })
+            );
+
+            this.logger.info(
+              "V2_POSITION_MANAGEMENT_PRICE_AUTHORITY_PROOF",
+              buildPositionManagementPriceAuthorityProof({
+                symbol: ledgerPos.symbol,
+                pnlEntryPriceSource: "okx_actual_avg_px",
+                managementAvgPx: actualAvgPx ?? ledgerPos.actualAvgPx ?? ledgerPos.entryPrice,
+                ledgerEntryPrice: ledgerPos.originalEntryPrice ?? ledgerPos.entryPrice,
+                actualAvgPx: actualAvgPx ?? ledgerPos.actualAvgPx ?? ledgerPos.entryPrice
+              })
+            );
+
+            const coverage = computeProtectiveQtyCoverage({
+              symbol: ledgerPos.symbol,
+              instId: r.inst_id ?? toOkxSwapInstId(ledgerPos.symbol),
+              positionSide: ledgerPos.side as "long" | "short",
+              actualQty: actualContracts,
+              pendingAlgos: this.cachedOpsAlgos ?? []
+            });
+            this.logger.info("V2_PROTECTIVE_QTY_COVERAGE_PROOF", coverage.proof);
+          }
+        }
+
         let opsWatchGrace = evaluateOpsWatchProtectiveScanVerdict({
           nowMs: nowTs,
           ledger: ledgerPos ?? null,

@@ -182,6 +182,116 @@ export function buildSymbolPositionAuthorityProof(
     };
 }
 
+/**
+ * Checks whether a position record has genuine BOT-origin provenance.
+ * Recovers BOT origin even when newer v2 authority flags were lost/stripped during legacy takeover latching.
+ */
+export function isBotOriginPositionEvidence(
+    ledger: {
+        symbol?: string;
+        side?: string;
+        okxContracts?: number | null;
+        isV2Authority?: boolean;
+        lifecycleState?: string;
+        manualTakeoverActive?: boolean;
+        manualOwnershipLatch?: boolean;
+        manualTakeoverReason?: string | null;
+        originalEntryPrice?: number;
+        sourceSignal?: string | null;
+        authoritySourceAtEntry?: string | null;
+        authority?: string | null;
+        adoptedEngine?: string | null;
+        exchangeClOrdId?: string | null;
+        strategyVersion?: string | null;
+        entryStage?: number | null;
+        positionCycleId?: string | null;
+        flowId?: string | null;
+        protectiveSlAlgoId?: string | null;
+        protectiveStopAlgoId?: string | null;
+        rangeBoxHighAtEntry?: number | null;
+        rangeBoxLowAtEntry?: number | null;
+        rangeBoxQuality?: number | null;
+        v2RangeTp1Triggered?: boolean | null;
+        lastBotExecutionReason?: string | null;
+        lastBotExecutionAt?: number | null;
+    },
+    hasBotOrderEvidence?: boolean
+): boolean {
+    if (hasBotOrderEvidence === true) return true;
+    if (ledger.isV2Authority === true) return true;
+    if (
+        ledger.lifecycleState === "BOT_V2_MANAGED" ||
+        ledger.lifecycleState === "MANUAL_SIZE_AUGMENTED" ||
+        ledger.lifecycleState === "PARTIAL_ACTIVE" ||
+        ledger.lifecycleState === "ADDON_ACTIVE"
+    ) {
+        return true;
+    }
+
+    // 1. Explicit source/authority tags
+    const authSrc = String(ledger.authoritySourceAtEntry ?? ledger.authority ?? ledger.adoptedEngine ?? "").trim().toLowerCase();
+    if (authSrc === "v2" || authSrc === "paper-v2") return true;
+
+    // 2. Strategy version
+    const strat = String(ledger.strategyVersion ?? "").trim().toLowerCase();
+    if (strat.includes("v2") || strat.includes("paper") || strat.includes("highway")) return true;
+
+    // 3. Entry stage
+    if (typeof ledger.entryStage === "number" && ledger.entryStage >= 1) return true;
+
+    // 4. Saved original entry price from earlier v2 migration
+    if (typeof ledger.originalEntryPrice === "number" && ledger.originalEntryPrice > 0) return true;
+
+    // 5. V2 Range / Box state at entry
+    if (
+        ledger.rangeBoxHighAtEntry != null ||
+        ledger.rangeBoxLowAtEntry != null ||
+        ledger.rangeBoxQuality != null ||
+        ledger.v2RangeTp1Triggered === true
+    ) {
+        return true;
+    }
+
+    // 6. Bot execution timestamps / reasons
+    if (ledger.lastBotExecutionReason != null || ledger.lastBotExecutionAt != null) return true;
+
+    // 7. Client order ID evidence
+    const clOrdId = String(ledger.exchangeClOrdId ?? "");
+    if (clOrdId.startsWith("p") || clOrdId.startsWith("oap") || clOrdId.startsWith("sl") || clOrdId.startsWith("tp")) {
+        return true;
+    }
+
+    // 8. Bot protective stop algo IDs
+    const stopAlgo = String(ledger.protectiveSlAlgoId ?? ledger.protectiveStopAlgoId ?? "");
+    if (stopAlgo.startsWith("oap") || stopAlgo.startsWith("sl") || stopAlgo.startsWith("tp")) {
+        return true;
+    }
+
+    // 9. Position Cycle ID / Flow ID
+    const cycleId = String(ledger.positionCycleId ?? ledger.flowId ?? "");
+    if (cycleId && !cycleId.includes("manual_adopt") && !cycleId.includes("operator_adopt")) {
+        if (cycleId.startsWith("BTC") || cycleId.startsWith("ETH") || cycleId.startsWith("p") || cycleId.startsWith("v2") || cycleId.includes(":")) {
+            return true;
+        }
+    }
+
+    // 10. Source signal (exclude explicit operator adoptions)
+    const sig = String(ledger.sourceSignal ?? "").trim().toLowerCase();
+    if (sig && sig !== "okx_reconcile_adopted" && sig !== "operator_adopted" && sig !== "manual_intervention_detected" && sig !== "manual_add") {
+        return true;
+    }
+
+    // 11. Takeover reason was MANUAL_ADD / MANUAL_SIZE_CHANGE on pre-existing record
+    const takeoverReason = String(ledger.manualTakeoverReason ?? "").trim().toUpperCase();
+    if (takeoverReason === "MANUAL_ADD" || takeoverReason === "MANUAL_SIZE_CHANGE" || takeoverReason === "CONFIRMED_MANUAL_SIZE_CHANGE") {
+        if (sig !== "operator_adopted" && sig !== "okx_reconcile_adopted" && ledger.lifecycleState !== "EXTERNAL_MANUAL_POSITION") {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 export function evaluateManualAugmentReclassification(input: Readonly<{
     ledger: {
         symbol?: string;
@@ -191,17 +301,32 @@ export function evaluateManualAugmentReclassification(input: Readonly<{
         lifecycleState?: string;
         manualTakeoverActive?: boolean;
         manualOwnershipLatch?: boolean;
+        manualTakeoverReason?: string | null;
         originalEntryPrice?: number;
         sourceSignal?: string | null;
         authoritySourceAtEntry?: string | null;
         authority?: string | null;
+        adoptedEngine?: string | null;
         exchangeClOrdId?: string | null;
+        strategyVersion?: string | null;
+        entryStage?: number | null;
+        positionCycleId?: string | null;
+        flowId?: string | null;
+        protectiveSlAlgoId?: string | null;
+        protectiveStopAlgoId?: string | null;
+        rangeBoxHighAtEntry?: number | null;
+        rangeBoxLowAtEntry?: number | null;
+        rangeBoxQuality?: number | null;
+        v2RangeTp1Triggered?: boolean | null;
+        lastBotExecutionReason?: string | null;
+        lastBotExecutionAt?: number | null;
     };
     okxActualPositionExists: boolean;
     okxActualContracts: number;
     okxActualAvgPx: number;
     okxActualNotional: number;
     okxSide?: string | null;
+    hasBotOrderEvidence?: boolean;
 }>): Readonly<{
     shouldReclassify: boolean;
     reason: string | null;
@@ -211,17 +336,19 @@ export function evaluateManualAugmentReclassification(input: Readonly<{
         return { shouldReclassify: false, reason: null };
     }
 
-    const isBotOriginated =
-        ledger.isV2Authority === true ||
-        ledger.lifecycleState === "BOT_V2_MANAGED" ||
-        ledger.lifecycleState === "MANUAL_SIZE_AUGMENTED" ||
-        ledger.originalEntryPrice != null ||
-        ledger.sourceSignal != null ||
-        String(ledger.authoritySourceAtEntry ?? ledger.authority ?? "").trim().toLowerCase() === "v2" ||
-        String(ledger.exchangeClOrdId ?? "").startsWith("p");
+    // Exclude explicit manual adoptions from scratch
+    const sig = String(ledger.sourceSignal ?? "").trim().toLowerCase();
+    if (
+        (sig === "operator_adopted" || sig === "okx_reconcile_adopted") &&
+        input.hasBotOrderEvidence !== true &&
+        ledger.isV2Authority !== true
+    ) {
+        return { shouldReclassify: false, reason: "MANUAL_ADOPTED_ORIGIN" };
+    }
 
+    const isBotOriginated = isBotOriginPositionEvidence(ledger, input.hasBotOrderEvidence);
     if (!isBotOriginated) {
-        return { shouldReclassify: false, reason: null };
+        return { shouldReclassify: false, reason: "NOT_BOT_ORIGINATED" };
     }
 
     const ledgerSide = String(ledger.side ?? "").toLowerCase();
@@ -238,7 +365,10 @@ export function evaluateManualAugmentReclassification(input: Readonly<{
         ledger.manualTakeoverActive === true ||
         ledger.manualOwnershipLatch === true;
 
-    if ((isSizeIncreased || ledger.lifecycleState === "MANUAL_SIZE_AUGMENTED") && isCurrentlyOperatorManaged) {
+    if (
+        (isSizeIncreased || ledger.lifecycleState === "MANUAL_SIZE_AUGMENTED") &&
+        (isCurrentlyOperatorManaged || ledger.lifecycleState === "MANUAL_SIZE_AUGMENTED")
+    ) {
         return {
             shouldReclassify: true,
             reason: "SAME_SIDE_MANUAL_AUGMENT_RECLASSIFICATION"

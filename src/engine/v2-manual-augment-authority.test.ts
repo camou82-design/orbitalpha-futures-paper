@@ -371,4 +371,97 @@ test("V2 MANUAL SAME-SIDE AUGMENT AUTHORITY SUITE", async (t) => {
         assert.equal(symProof.heldPositionSide, "none");
         assert.equal(symProof.isContaminated, false);
     });
+
+    await t.test("7. legacy record without v2 authority flags (BOT 4.16 long -> legacy OPERATOR_MANAGED -> manual augment 11.08) recovers bot origin and migrates idempotently", () => {
+        // Legacy record as it actually exists on disk after OPERATOR_MANAGED latching stripped newer fields:
+        // isV2Authority, originalEntryPrice, authoritySourceAtEntry, sourceSignal are missing/undefined.
+        const legacyLatchedPos = {
+            symbol: "BTCUSDT",
+            side: "long" as const,
+            entryPrice: 78279.9,
+            sizeUsd: 3248,
+            entryStage: 1,
+            openedAt: 1788500000000,
+            status: "open",
+            lifecycleState: "OPERATOR_MANAGED",
+            manualTakeoverActive: true,
+            manualOwnershipLatch: true,
+            manualTakeoverReason: "OPERATOR_MANUAL_INTERVENTION",
+            okxContracts: 4.16,
+            notionalUsd: 3248,
+            leverage: 10,
+            strategyVersion: "paper-v2",
+            positionCycleId: "BTCUSDT:long:1788500000000",
+            protectiveSlAlgoId: "oap_BTCUSDT_open36_sl"
+        } as PaperOpenPositionRecord;
+
+        // First pass: evaluate reclassification
+        const reclass = evaluateManualAugmentReclassification({
+            ledger: legacyLatchedPos,
+            okxActualPositionExists: true,
+            okxActualContracts: 11.08,
+            okxActualAvgPx: 78125.60,
+            okxActualNotional: 8635,
+            okxSide: "long"
+        });
+
+        assert.equal(reclass.shouldReclassify, true);
+        assert.equal(reclass.reason, "SAME_SIDE_MANUAL_AUGMENT_RECLASSIFICATION");
+
+        // Apply migration
+        legacyLatchedPos.lifecycleState = "MANUAL_SIZE_AUGMENTED";
+        legacyLatchedPos.manualTakeoverActive = false;
+        legacyLatchedPos.manualOwnershipLatch = false;
+        legacyLatchedPos.manualAugmentActive = true;
+        legacyLatchedPos.actualAvgPx = 78125.60;
+        legacyLatchedPos.actualContracts = 11.08;
+        legacyLatchedPos.actualNotionalUsd = 8635;
+        legacyLatchedPos.originalEntryPrice = legacyLatchedPos.originalEntryPrice ?? legacyLatchedPos.entryPrice;
+
+        assert.equal(legacyLatchedPos.lifecycleState, "MANUAL_SIZE_AUGMENTED");
+        assert.equal(legacyLatchedPos.manualTakeoverActive, false);
+        assert.equal(legacyLatchedPos.originalEntryPrice, 78279.9);
+
+        // Idempotent migration on subsequent cycle
+        const secondPass = evaluateManualAugmentReclassification({
+            ledger: legacyLatchedPos,
+            okxActualPositionExists: true,
+            okxActualContracts: 11.08,
+            okxActualAvgPx: 78125.60,
+            okxActualNotional: 8635,
+            okxSide: "long"
+        });
+
+        assert.equal(secondPass.shouldReclassify, true);
+    });
+
+    await t.test("8. genuine manual initial entry (operator_adopted) is never migrated to BOT management", () => {
+        const manualInitialPos = {
+            symbol: "BTCUSDT",
+            side: "long" as const,
+            entryPrice: 78000,
+            sizeUsd: 5000,
+            openedAt: 1788500000000,
+            status: "open",
+            lifecycleState: "OPERATOR_MANAGED",
+            manualTakeoverActive: true,
+            manualOwnershipLatch: true,
+            sourceSignal: "operator_adopted",
+            positionCycleId: "manual_adopt_1788500000000",
+            okxContracts: 5.0,
+            notionalUsd: 5000
+        } as PaperOpenPositionRecord;
+
+        const reclass = evaluateManualAugmentReclassification({
+            ledger: manualInitialPos,
+            okxActualPositionExists: true,
+            okxActualContracts: 10.0, // Same-side manual add on manual position
+            okxActualAvgPx: 78100,
+            okxActualNotional: 10000,
+            okxSide: "long"
+        });
+
+        assert.equal(reclass.shouldReclassify, false);
+        assert.equal(reclass.reason, "MANUAL_ADOPTED_ORIGIN");
+    });
 });
