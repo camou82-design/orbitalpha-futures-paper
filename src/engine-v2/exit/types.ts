@@ -29,6 +29,7 @@ export type V2ExitReason =
     | "WEAK_QUALITY_REGIME_SOFT_EXIT"
     | "GENERAL_SOFT_FULL_EXIT"
     | "SOFT_EXIT_FEE_HOLD_RECHECK"
+    | "SOFT_EXIT_HYSTERESIS_WATCH"
     | "NO_EXIT_SIGNAL";
 
 export type V2ExitUrgency = "LOW" | "MID" | "HIGH" | "CRITICAL";
@@ -95,4 +96,6 @@ export type EvaluateV2ExitPolicyArgs = Readonly<{
     boxBreakConfirmed?: boolean;
     /** Mark price for PNL_STOP_PROTECT price-move × leverage authority only. */
     markPrice?: number | null;
+    bypassHysteresis?: boolean;
+    now?: number;
 }>;

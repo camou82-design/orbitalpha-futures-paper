@@ -58,6 +58,8 @@ import {
 } from "./execution/pre-entry-tp-provenance";
 import { resolveV2AuthoritativeCandleIdentity } from "./execution/authoritative-candle-identity";
 import { applyEthRangeMinimumStopDistance } from "./execution/eth-range-minimum-stop-authority";
+import { evaluateHighwayCoreEntryGate } from "./highway-core/highway-entry-gate";
+import { isSoftExitCooldownActive } from "./exit/soft-exit-hysteresis";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -6048,6 +6050,36 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotionReason = null;
             expectedMissingCondition = lossGateResult.reason;
             expectedNextAction = "WAIT_FOR_MEANINGFUL_DISPLACEMENT_OR_FRESH_SETUP";
+        }
+    }
+
+    // Tier 5.6: Final Common Highway Core Entry Gate
+    if (v2DecisionAfterPromotion === "ENTER" && (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")) {
+        const hasExistingPos = v2State.currentPositions.some(p => p.symbol === input.symbol) || v2State.hasSameSidePosition === true;
+        const softCooldownActive = isSoftExitCooldownActive(String(input.symbol), input.now);
+
+        const highwayGate = evaluateHighwayCoreEntryGate({
+            symbol: String(input.symbol),
+            side: v2SideAfterPromotion,
+            regime: judgment.regime_final || judgment.regime,
+            subtype: judgment.subtype,
+            snapshot: authoritativeInput.snapshot,
+            execution,
+            committedRiskPlan: null,
+            config: authoritativeInput.config,
+            hasExistingPosition: hasExistingPos,
+            softExitCooldownActive: softCooldownActive,
+            directionalShockState: v2State.directionalShockState ?? "NONE"
+        });
+
+        if (!highwayGate.allowed) {
+            v2DecisionAfterPromotion = highwayGate.finalDecision;
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = highwayGate.rejectReason;
+            promotionApplied = false;
+            promotionReason = null;
+            expectedMissingCondition = highwayGate.rejectReason;
+            expectedNextAction = "WAIT_FOR_HIGHWAY_CORE_EDGE_AND_RR";
         }
     }
 

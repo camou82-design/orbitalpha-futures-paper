@@ -7,6 +7,7 @@ import {
 import {
     evaluatePnlStopMeaningfulMoveGate
 } from "./pnl-stop-gate";
+import { applySoftExitHysteresis } from "./soft-exit-hysteresis";
 
 /**
  * BLOCKER 4-20: ordinary BTC/ETH micro-noise must not mutate a live position.
@@ -561,6 +562,22 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
                     evidence += `|profit_hysteresis:${profitHysteresis.hysteresisState}`;
                 }
             }
+        }
+    }
+
+    if (args.bypassHysteresis !== true && hasPosition) {
+        const hResult = applySoftExitHysteresis({
+            symbol: args.symbol,
+            action,
+            reason,
+            evidence,
+            now: args.now ?? (args.v2State as any)?.now ?? Date.now()
+        });
+        action = hResult.action as V2ExitAction;
+        reason = hResult.reason as V2ExitReason;
+        evidence = hResult.evidence;
+        if (hResult.hysteresisApplied) {
+            reduceRatio = 0;
         }
     }
 
