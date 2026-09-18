@@ -930,7 +930,11 @@ export type PaperOpenPositionRecord = {
     | "UNTRACKED_AUTO_ORIGIN"
     | "OKX_UNTRACKED_FILL"
     | "OPERATOR_MANAGED"
+    | "MANUAL_SIZE_AUGMENTED"
     | "FAILED";
+  originalEntryPrice?: number;
+  originalSizeUsd?: number;
+  manualAugmentActive?: boolean;
   exchangeOrdId?: string;
   exchangeClOrdId?: string;
   exchangeFilledSize?: number;

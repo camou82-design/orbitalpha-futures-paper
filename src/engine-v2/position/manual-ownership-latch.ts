@@ -414,13 +414,15 @@ export function evaluateManualOwnershipLatchTrigger(input: Readonly<{
             ) {
                 return { shouldLatch: false, source: null, strength: null, reason: "BOT_ATTRIBUTED_TRANSIENT_MISMATCH" };
             }
+            // Same-side manual augment on a bot position is NOT an external manual takeover.
+            // It is managed as MANUAL_SIZE_AUGMENTED while retaining automatic exit management.
             return {
-                shouldLatch: true,
-                source: "CONFIRMED_MANUAL_SIZE_CHANGE",
-                strength: "STRONG",
-                reason: "paper_okx_contract_mismatch",
+                shouldLatch: false,
+                source: "SAME_SIDE_MANUAL_AUGMENT",
+                strength: "WEAK",
+                reason: "same_side_manual_size_augment",
                 evidenceOrigin: "INDEPENDENT_CONFIRMED_SIZE_CHANGE",
-                evidenceIndependent: true
+                evidenceIndependent: false
             };
         }
     }

@@ -231,6 +231,11 @@ import {
   type ProtectiveReconcileContext
 } from "../engine-v2/execution/protective-reconcile-plan";
 import {
+  buildManualAugmentAuthorityProof,
+  buildPositionManagementPriceAuthorityProof,
+  computeProtectiveQtyCoverage
+} from "../engine-v2/position/manual-augment-authority";
+import {
   buildEntryAttachProtectiveCandidates,
   buildOkxAlgoClOrdId,
   buildProtectiveClOrdIdCandidates,
@@ -4059,61 +4064,75 @@ export class PaperEngine {
         const beforeContracts = open.okxContracts ?? 0;
         const beforeAvgPx = open.entryPrice;
 
-        // 1. Authoritative sync of contracts, avgPx, notional, leverage
+        // 1. Preserve original ledger entryPrice and sizeUsd for attribution / bot history
+        if (open.originalEntryPrice == null && beforeAvgPx > 0) {
+          open.originalEntryPrice = beforeAvgPx;
+        }
+        if (open.originalSizeUsd == null && (open.sizeUsd ?? 0) > 0) {
+          open.originalSizeUsd = open.sizeUsd;
+        }
+
+        // 2. Authoritative sync of actual position metrics from OKX remote authority
         this.syncOpenLedgerFromRemoteAuthority(open, remote);
+        open.lifecycleState = "MANUAL_SIZE_AUGMENTED";
+        open.manualTakeoverActive = false;
+        open.manualOwnershipLatch = false;
+        open.manualAugmentActive = true;
+        open.actualAvgPx = remote.avgPx;
+        open.actualContracts = remote.contracts;
+        open.actualNotionalUsd = remote.notionalUsd;
         open.reconcileState = "MATCHED";
         open.lastCheckedAt = nowTs;
 
-        // 2. Terminate all bot authority and activate manual takeover
-        const takeoverRec = createManualTakeoverRecord({
-          symbol: open.symbol,
-          side: open.side,
-          reason: "MANUAL_ADD",
-          positionCycleId: open.positionCycleId,
-          nowMs: nowTs
-        });
-        this.manualTakeoverBySymbol.set(buildManualTakeoverKey(open.symbol, open.side), takeoverRec);
-        this.manualTakeoverBySymbol.set(String(open.symbol).toUpperCase(), takeoverRec);
-        applyManualTakeoverToPositionRecord(open, takeoverRec);
-        void this.persistManualTakeoverDoc();
-        void this.cancelEngineOwnedOrdersOnTakeover(open.symbol, open.side);
-
-        this.logger.warn("V2_MANUAL_TAKEOVER_ACTIVATED_PROOF", {
-          symbol: open.symbol,
-          side: open.side,
-          reason: "MANUAL_ADD",
-          classification: delta.classification,
-          before_contracts: beforeContracts,
-          after_contracts: remote.contracts,
-          before_avg_px: beforeAvgPx,
-          after_avg_px: remote.avgPx,
-          manual_takeover_active: true,
-          action: "BOT_AUTHORITY_TERMINATED_OBSERVE_ONLY"
-        });
-
+        // 3. Emit V2_MANUAL_AUGMENT_AUTHORITY_PROOF
         this.logger.info(
-          "V2_MANUAL_INCREASE_REBASE_PROOF",
-          buildV2ManualIncreaseRebaseProof({
+          "V2_MANUAL_AUGMENT_AUTHORITY_PROOF",
+          buildManualAugmentAuthorityProof({
             symbol: open.symbol,
             side: open.side,
-            rebase_status: "MANUAL_TAKEOVER_ACTIVE",
-            rebase_reason: "manual_intervention_terminated_bot_authority",
-            rebase_stop_source: "manual_operator_managed",
-            rebase_tp_source: "manual_operator_managed",
-            protective_revision: open.protectiveRevision,
-            structure_breached: false,
-            before_contracts: beforeContracts,
-            after_contracts: remote.contracts,
-            before_avg_px: beforeAvgPx,
-            after_avg_px: remote.avgPx,
-            old_stop: open.stopPrice ?? null,
-            rebased_stop: null,
-            old_tp: open.targetPrice1 ?? null,
-            rebased_tp: null,
-            old_protective_contracts: beforeContracts,
-            new_protective_contracts: remote.contracts
+            ledgerQty: beforeContracts,
+            ledgerAvgPx: beforeAvgPx,
+            ledgerNotional: open.originalSizeUsd ?? (beforeContracts * beforeAvgPx),
+            okxActualQty: remote.contracts,
+            okxActualAvgPx: remote.avgPx,
+            okxActualNotional: remote.notionalUsd,
+            interventionType: "SAME_SIDE_MANUAL_AUGMENT",
+            lifecycleState: "MANUAL_SIZE_AUGMENTED",
+            positionManagementAllowed: true,
+            autoAddonAllowed: false,
+            protectionReconcileAllowed: true
           })
         );
+
+        // 4. Emit V2_POSITION_MANAGEMENT_PRICE_AUTHORITY_PROOF
+        this.logger.info(
+          "V2_POSITION_MANAGEMENT_PRICE_AUTHORITY_PROOF",
+          buildPositionManagementPriceAuthorityProof({
+            symbol: open.symbol,
+            pnlEntryPriceSource: "okx_actual_avg_px",
+            managementAvgPx: remote.avgPx,
+            ledgerEntryPrice: open.originalEntryPrice ?? beforeAvgPx,
+            actualAvgPx: remote.avgPx
+          })
+        );
+
+        // 5. Reconcile protective orders based on actual contracts (without modifying manual orders)
+        void this.ensureProtectiveStopOrder(
+          open,
+          `SAFE_PROTECTIVE_SIZE_RECONCILE:${open.symbol}:${open.side}:${nowTs}`,
+          remote.avgPx
+        );
+
+        // 6. Emit V2_PROTECTIVE_QTY_COVERAGE_PROOF
+        const coverage = computeProtectiveQtyCoverage({
+          symbol: open.symbol,
+          instId: remote.instId ?? toOkxSwapInstId(open.symbol),
+          positionSide: open.side as "long" | "short",
+          actualQty: remote.contracts,
+          pendingAlgos: this.cachedOpsAlgos ?? []
+        });
+        this.logger.info("V2_PROTECTIVE_QTY_COVERAGE_PROOF", coverage.proof);
+
         this.logPositionUnitInvariant(open);
         return { ledgerModified: true, mismatchType: "MATCHED", blocked: false, sizeDeltaClassification };
       }
@@ -5387,13 +5406,13 @@ export class PaperEngine {
           }
         }
 
-        const isSameSideReduceOnly =
-          (open.isV2Authority === true || open.lifecycleState === "BOT_V2_MANAGED") &&
+        const isSameSide =
+          (open.isV2Authority === true || open.lifecycleState === "BOT_V2_MANAGED" || open.lifecycleState === "MANUAL_SIZE_AUGMENTED") &&
           remotePos != null &&
           remotePos.contracts > 0 &&
-          (open.okxContracts ?? 0) >= remotePos.contracts;
+          (remotePos.posSide.toLowerCase() === String(open.side).toLowerCase() || remotePos.posSide.toLowerCase() === "net");
 
-        if (!isSameSideReduceOnly && (ownership.manualLatchShouldBeActive || open.manualOwnershipLatch === true)) {
+        if (!isSameSide && (ownership.manualLatchShouldBeActive || open.manualOwnershipLatch === true)) {
           const takeoverRec = createManualTakeoverRecord({
             symbol: open.symbol,
             side: open.side,
@@ -9807,7 +9826,7 @@ export class PaperEngine {
   private async reconcileProtectiveAfterSizeMutation(
     open: PaperOpenPositionRecord,
     remote: OkxRemotePositionAuthority,
-    classification: "BOT_REDUCE_RECONCILE" | "MANUAL_REDUCE_REBASE",
+    classification: "BOT_REDUCE_RECONCILE" | "MANUAL_REDUCE_REBASE" | "MANUAL_INCREASE",
     nowTs: number
   ): Promise<{ ledgerModified: boolean; record: PaperOpenPositionRecord }> {
     const instId = remote.instId ?? toOkxSwapInstId(open.symbol);
@@ -9837,6 +9856,15 @@ export class PaperEngine {
         uses_actual_contract_authority: reensure.usesActualContractAuthority
       })
     );
+
+    const coverage = computeProtectiveQtyCoverage({
+      symbol: open.symbol,
+      instId,
+      positionSide: open.side as "long" | "short",
+      actualQty: remote.contracts,
+      pendingAlgos: this.cachedOpsAlgos ?? []
+    });
+    this.logger.info("V2_PROTECTIVE_QTY_COVERAGE_PROOF", coverage.proof);
 
     if (!reensure.reensureNeeded) {
       return { ledgerModified: false, record: open };
@@ -26414,7 +26442,14 @@ export function buildV2StateBridge(
           protectiveSlAlgoId: p.protectiveSlAlgoId,
           lastReduceReason: p.lastReduceReason,
           rangeOppositePartialTaken: p.rangeOppositePartialTaken === true,
-          protectivePartialReduceCount: p.protectivePartialReduceCount
+          protectivePartialReduceCount: p.protectivePartialReduceCount,
+          okxActualAvgPx: p.actualAvgPx ?? p.avgPx,
+          okxActualContracts: p.actualContracts ?? p.okxContracts,
+          okxActualNotional: p.actualNotionalUsd ?? p.notionalUsd,
+          ledgerEntryPrice: p.originalEntryPrice ?? p.entryPrice,
+          managementAvgPx: p.actualAvgPx ?? p.entryPrice,
+          lifecycleState: p.lifecycleState,
+          manualAugmentActive: p.manualAugmentActive === true || p.lifecycleState === "MANUAL_SIZE_AUGMENTED"
         };
       })
       .filter((x): x is V2BridgePosition => x !== null),

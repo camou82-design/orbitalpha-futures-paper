@@ -94,7 +94,34 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
     const rc = Number(s.rangeConfidence ?? 0);
     const qs = Number(s.qualityScore ?? 0);
     const hasPosition = pos != null;
-    const entryPrice = Number(pos?.entryPrice ?? 0);
+    const managementAvgPx = typeof pos?.managementAvgPx === "number" && Number.isFinite(pos.managementAvgPx) && pos.managementAvgPx > 0
+        ? pos.managementAvgPx
+        : typeof (pos as any)?.okxActualAvgPx === "number" && Number.isFinite((pos as any).okxActualAvgPx) && (pos as any).okxActualAvgPx > 0
+          ? (pos as any).okxActualAvgPx
+          : Number(pos?.entryPrice ?? 0);
+    const ledgerEntryPrice = typeof (pos as any)?.ledgerEntryPrice === "number" && Number.isFinite((pos as any).ledgerEntryPrice) && (pos as any).ledgerEntryPrice > 0
+        ? (pos as any).ledgerEntryPrice
+        : Number(pos?.entryPrice ?? 0);
+    const actualAvgPx = typeof (pos as any)?.okxActualAvgPx === "number" && Number.isFinite((pos as any).okxActualAvgPx) && (pos as any).okxActualAvgPx > 0
+        ? (pos as any).okxActualAvgPx
+        : managementAvgPx;
+    const pnlEntryPriceSource: "okx_actual_avg_px" | "ledger_entry_px" =
+        (managementAvgPx !== ledgerEntryPrice && (pos as any)?.okxActualAvgPx != null)
+            ? "okx_actual_avg_px"
+            : "ledger_entry_px";
+
+    if (hasPosition) {
+        console.info(JSON.stringify({
+            event: "V2_POSITION_MANAGEMENT_PRICE_AUTHORITY_PROOF",
+            symbol: String(args.v2State.symbol),
+            pnlEntryPriceSource,
+            managementAvgPx: Number(managementAvgPx.toFixed(2)),
+            ledgerEntryPrice: Number(ledgerEntryPrice.toFixed(2)),
+            actualAvgPx: Number(actualAvgPx.toFixed(2))
+        }));
+    }
+
+    const entryPrice = managementAvgPx;
     const markPrice = Number(args.markPrice ?? 0);
 
     const pnlStopProtectJudgment =

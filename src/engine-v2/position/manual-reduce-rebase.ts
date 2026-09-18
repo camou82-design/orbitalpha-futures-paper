@@ -22,7 +22,7 @@ export function isEligibleForManualIncreaseAdoption(open: PaperOpenPositionRecor
     if (open.isV2Authority === true) return true;
     const authSrc = String(open.authoritySourceAtEntry ?? open.authority ?? "").trim().toLowerCase();
     if (authSrc === "v2") return true;
-    if (open.lifecycleState === "BOT_V2_MANAGED") return true;
+    if (open.lifecycleState === "BOT_V2_MANAGED" || open.lifecycleState === "MANUAL_SIZE_AUGMENTED") return true;
 
     return false;
 }

@@ -68,7 +68,10 @@ function isBotV2LedgerEvidence(ledger: PaperOpenPositionRecord | null): boolean 
     if (ledger.isV2Authority === true) return true;
     const authSrc = String(ledger.authoritySourceAtEntry ?? ledger.authority ?? "").trim().toLowerCase();
     if (authSrc === "v2") return true;
-    if (ledger.lifecycleState === "BOT_V2_MANAGED") return true;
+    if (
+        ledger.lifecycleState === "BOT_V2_MANAGED" ||
+        ledger.lifecycleState === "MANUAL_SIZE_AUGMENTED"
+    ) return true;
     if (
         ledger.lifecycleState === "OPEN" ||
         ledger.lifecycleState === "ADDON_ACTIVE" ||
@@ -177,23 +180,22 @@ export function isBotAttributedTransientMismatch(
     return false;
 }
 
-export function detectManualInterventionEvidence(
-    input: Pick<
-        PositionOwnershipResolveInput,
-        | "ledgerPaperContracts"
-        | "okxActualContracts"
-        | "ledgerEntryPrice"
-        | "okxAvgPx"
-        | "symbolExternalManualBlocked"
-        | "manualOwnershipLatchActive"
-    > & {
-        ledger?: PaperOpenPositionRecord | null;
-        nowMs?: number;
-        explicitExternalManualEvidence?: boolean;
+export function detectManualInterventionEvidence(input: {
+    ledgerPaperContracts?: number | null;
+    okxActualContracts: number;
+    ledgerEntryPrice?: number | null;
+    okxAvgPx?: number | null;
+    explicitExternalManualEvidence?: boolean;
+    symbolExternalManualBlocked?: boolean;
+    manualOwnershipLatchActive?: boolean;
+    ledger?: PaperOpenPositionRecord | null;
+    nowMs?: number;
+}): { detected: boolean; reason: string | null } {
+    if (input.manualOwnershipLatchActive === true) {
+        return { detected: true, reason: "manual_ownership_latch_active" };
     }
-): { detected: boolean; reason: string | null } {
+
     if (
-        input.manualOwnershipLatchActive === true &&
         input.ledger != null &&
         isStrongManualLatchSource(
             input.ledger.manualOwnershipLatchSource ?? input.ledger.manualOwnershipLatchReason
@@ -402,7 +404,8 @@ export function resolvePositionOwnership(
             ? "BOT_V2_MANAGED"
             : lifecycleBefore === "ADDON_ACTIVE" ||
                 lifecycleBefore === "PARTIAL_ACTIVE" ||
-                lifecycleBefore === "BOT_V2_MANAGED"
+                lifecycleBefore === "BOT_V2_MANAGED" ||
+                lifecycleBefore === "MANUAL_SIZE_AUGMENTED"
               ? lifecycleBefore
               : "BOT_V2_MANAGED";
         return {

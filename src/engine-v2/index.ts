@@ -10063,7 +10063,14 @@ export function adaptV2Input(
                     protectiveVisibilityGraceDeadlineMs: p.protectiveVisibilityGraceDeadlineMs,
                     lastReduceReason: p.lastReduceReason,
                     rangeOppositePartialTaken: p.rangeOppositePartialTaken === true,
-                    protectivePartialReduceCount: p.protectivePartialReduceCount
+                    protectivePartialReduceCount: p.protectivePartialReduceCount,
+                    okxActualAvgPx: p.okxActualAvgPx,
+                    okxActualContracts: p.okxActualContracts,
+                    okxActualNotional: p.okxActualNotional,
+                    ledgerEntryPrice: p.ledgerEntryPrice,
+                    managementAvgPx: p.managementAvgPx,
+                    lifecycleState: p.lifecycleState,
+                    manualAugmentActive: p.manualAugmentActive
                 };
             }),
             globalRiskScore: state.globalRiskScore,

@@ -149,6 +149,13 @@ export interface EngineV2Position {
     rangeOppositePartialTaken?: boolean;
     /** Protective partial reduce count excluding TP ladder (ledger → execution/policy). */
     protectivePartialReduceCount?: number;
+    okxActualAvgPx?: number;
+    okxActualContracts?: number;
+    okxActualNotional?: number;
+    ledgerEntryPrice?: number;
+    managementAvgPx?: number;
+    lifecycleState?: string;
+    manualAugmentActive?: boolean;
 }
 
 /** 
@@ -275,6 +282,13 @@ export interface LegacyPositionAdapter {
     lastReduceReason?: string;
     rangeOppositePartialTaken?: boolean;
     protectivePartialReduceCount?: number;
+    okxActualAvgPx?: number;
+    okxActualContracts?: number;
+    okxActualNotional?: number;
+    ledgerEntryPrice?: number;
+    managementAvgPx?: number;
+    lifecycleState?: string;
+    manualAugmentActive?: boolean;
 }
 
 export interface LegacyResultAdapter {
@@ -642,6 +656,13 @@ export interface V2BridgePosition {
     lastReduceReason?: string;
     rangeOppositePartialTaken?: boolean;
     protectivePartialReduceCount?: number;
+    okxActualAvgPx?: number;
+    okxActualContracts?: number;
+    okxActualNotional?: number;
+    ledgerEntryPrice?: number;
+    managementAvgPx?: number;
+    lifecycleState?: string;
+    manualAugmentActive?: boolean;
 }
 
 export interface V2BridgeState {
