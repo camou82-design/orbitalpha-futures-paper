@@ -74,6 +74,7 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         execution?.stopPrice ??
         execution?.invalidationPx ??
         (execution?.metadata as any)?.plannedStopPrice ??
+        (execution?.metadata as any)?.stopPrice ??
         0
     );
 
@@ -85,6 +86,8 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         (execution as any)?.takeProfitPrice ??
         (execution?.metadata as any)?.takeProfitPrice ??
         (execution?.metadata as any)?.plannedTp1Price ??
+        (execution as any)?.takeProfit1Px ??
+        (execution as any)?.targetPrice1 ??
         0
     );
 
@@ -95,16 +98,24 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
     let tp1DistancePct = 0;
     let isPlanDirectionValid = false;
 
-    if (hasValidStop && hasValidTp1 && lastPrice > 0) {
-        if (side === "long") {
-            isPlanDirectionValid = plannedStopPrice < lastPrice && plannedTp1Price > lastPrice;
+    if (hasValidStop && lastPrice > 0) {
+        if (side === "long" && plannedStopPrice < lastPrice) {
             stopDistancePct = (lastPrice - plannedStopPrice) / lastPrice;
-            tp1DistancePct = (plannedTp1Price - lastPrice) / lastPrice;
-        } else if (side === "short") {
-            isPlanDirectionValid = plannedStopPrice > lastPrice && plannedTp1Price < lastPrice;
+        } else if (side === "short" && plannedStopPrice > lastPrice) {
             stopDistancePct = (plannedStopPrice - lastPrice) / lastPrice;
+        }
+    }
+
+    if (hasValidTp1 && lastPrice > 0) {
+        if (side === "long" && plannedTp1Price > lastPrice) {
+            tp1DistancePct = (plannedTp1Price - lastPrice) / lastPrice;
+        } else if (side === "short" && plannedTp1Price < lastPrice) {
             tp1DistancePct = (lastPrice - plannedTp1Price) / lastPrice;
         }
+    }
+
+    if (stopDistancePct > 0 && tp1DistancePct > 0) {
+        isPlanDirectionValid = true;
     }
 
     // 3. Conservative reachable Expected Move based on actual planned TP1 (no artificial floor)

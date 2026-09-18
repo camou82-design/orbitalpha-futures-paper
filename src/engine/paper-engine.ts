@@ -8141,7 +8141,14 @@ export class PaperEngine {
         const sideNoneFinal = v2Env?.selected_side_after_veto === "none";
 
         if (envelope.runtime_authority_decision !== "ENTER" || v2?.side === "none" || !v2?.side) {
-          if (v2Env?.marketSubtype === "WHIPSAW_SHOCK_RECHECK") {
+          if (
+            v2Risk?.blockReason === "STOP_DISTANCE_TOO_WIDE" ||
+            refinedMissingCondition === "STOP_DISTANCE_TOO_WIDE" ||
+            (v2Env as any)?.risk_block_reason === "STOP_DISTANCE_TOO_WIDE" ||
+            v2Env?.expected_missing_condition === "STOP_DISTANCE_TOO_WIDE"
+          ) {
+            refinedNextAction = "WAIT_PULLBACK_FOR_RISK_PLAN";
+          } else if (v2Env?.marketSubtype === "WHIPSAW_SHOCK_RECHECK") {
             refinedNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
           } else if (v2Env?.marketSubtype === "SHOCK_REACTION_UP" && v2Env?.trend_side_candidate === "long" && v2?.decision === "HOLD") {
             refinedNextAction = "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION";
@@ -8159,6 +8166,7 @@ export class PaperEngine {
 
         // Audit/log only: align expected_next_action with concrete missing / veto tokens (operational readability).
         const noEntryAuditNextByVetoOrMissing: Record<string, string> = {
+          STOP_DISTANCE_TOO_WIDE: "WAIT_PULLBACK_FOR_RISK_PLAN",
           WHIPSAW_SHOCK_RECHECK_ACTIVE: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
           WHIPSAW_RECHECK_NOT_CONFIRMED: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
           SHOCK_UP_RECLAIM_NOT_CONFIRMED: "WAIT_FOR_RETEST_OR_RECLAIM_CONFIRMATION",
@@ -8201,6 +8209,14 @@ export class PaperEngine {
           null;
         if (nextFromAuditKey != null) {
           refinedNextAction = nextFromAuditKey;
+        }
+        if (
+          v2Risk?.blockReason === "STOP_DISTANCE_TOO_WIDE" ||
+          refinedMissingCondition === "STOP_DISTANCE_TOO_WIDE" ||
+          (v2Env as any)?.risk_block_reason === "STOP_DISTANCE_TOO_WIDE" ||
+          v2Env?.expected_missing_condition === "STOP_DISTANCE_TOO_WIDE"
+        ) {
+          refinedNextAction = "WAIT_PULLBACK_FOR_RISK_PLAN";
         }
         if (
           (envelope.runtime_authority_decision !== "ENTER" || v2?.side === "none" || !v2?.side) &&

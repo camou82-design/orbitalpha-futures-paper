@@ -6954,7 +6954,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             blockReason = riskAuditReason;
             stageMarginKrwAfter = 0;
             expectedMissingCondition = riskAuditReason;
-            expectedNextAction = "FIX_EXECUTOR_RISK_PLAN";
+            expectedNextAction =
+                riskAuditReason === "STOP_DISTANCE_TOO_WIDE"
+                    ? "WAIT_PULLBACK_FOR_RISK_PLAN"
+                    : "FIX_EXECUTOR_RISK_PLAN";
         } else {
              console.info(JSON.stringify({
                 event: "V2_ENTRY_PLAN_RISK_PROOF",
@@ -8859,7 +8862,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Requirement 3 & 4: align expected_next_action
     if (!isContinuationMicroProbeEnter) {
-        if (primaryMissingCondition === "SIGNED_EXECUTION_NOT_READY") {
+        if (
+            primaryMissingCondition === "STOP_DISTANCE_TOO_WIDE" ||
+            blockReason === "STOP_DISTANCE_TOO_WIDE" ||
+            expectedMissingCondition === "STOP_DISTANCE_TOO_WIDE"
+        ) {
+            dashboardNextAction = "WAIT_PULLBACK_FOR_RISK_PLAN";
+            expectedNextAction = "WAIT_PULLBACK_FOR_RISK_PLAN";
+        } else if (primaryMissingCondition === "SIGNED_EXECUTION_NOT_READY") {
             dashboardNextAction = "WAIT_FOR_SIGNED_EXECUTION_READY";
         } else if (primaryMissingCondition && (primaryMissingCondition.includes("POLARITY_MISMATCH") || primaryMissingCondition.includes("HTF_BIAS_MISMATCH"))) {
             dashboardNextAction = "WAIT_FOR_HTF_POLARITY_ALIGNMENT";
