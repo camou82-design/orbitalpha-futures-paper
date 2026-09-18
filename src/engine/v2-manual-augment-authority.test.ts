@@ -435,25 +435,27 @@ test("V2 MANUAL SAME-SIDE AUGMENT AUTHORITY SUITE", async (t) => {
         assert.equal(secondPass.shouldReclassify, true);
     });
 
-    await t.test("8. genuine manual initial entry (operator_adopted) is never migrated to BOT management", () => {
-        const manualInitialPos = {
+    await t.test("8. genuine manual initial position with lost sourceSignal/adoption markers having only entryStage=1 and flowId='BTCUSDT:long:...' is REJECTED (no strong bot evidence)", () => {
+        const manualUnmarkedPos = {
             symbol: "BTCUSDT",
             side: "long" as const,
             entryPrice: 78000,
             sizeUsd: 5000,
+            entryStage: 1, // supporting only
+            flowId: "BTCUSDT:long:1788500000000", // supporting only
+            positionCycleId: "BTCUSDT:long:1788500000000", // supporting only
             openedAt: 1788500000000,
             status: "open",
             lifecycleState: "OPERATOR_MANAGED",
             manualTakeoverActive: true,
             manualOwnershipLatch: true,
-            sourceSignal: "operator_adopted",
-            positionCycleId: "manual_adopt_1788500000000",
             okxContracts: 5.0,
             notionalUsd: 5000
-        } as PaperOpenPositionRecord;
+            // No isV2Authority, no strategyVersion, no bot clOrdId, no bot algoId, no V2 range box, no bot execution
+        } as unknown as PaperOpenPositionRecord;
 
         const reclass = evaluateManualAugmentReclassification({
-            ledger: manualInitialPos,
+            ledger: manualUnmarkedPos,
             okxActualPositionExists: true,
             okxActualContracts: 10.0, // Same-side manual add on manual position
             okxActualAvgPx: 78100,
@@ -462,6 +464,72 @@ test("V2 MANUAL SAME-SIDE AUGMENT AUTHORITY SUITE", async (t) => {
         });
 
         assert.equal(reclass.shouldReclassify, false);
-        assert.equal(reclass.reason, "MANUAL_ADOPTED_ORIGIN");
+        assert.equal(reclass.reason, "NOT_BOT_ORIGINATED");
+    });
+
+    await t.test("9. bot initial position without V2 flag but with bot protective algo id (4.16 -> 11.08 same-side augment) is ALLOWED", () => {
+        const botAlgoIdPos = {
+            symbol: "BTCUSDT",
+            side: "long" as const,
+            entryPrice: 78279.9,
+            sizeUsd: 3248,
+            openedAt: 1788500000000,
+            status: "open",
+            lifecycleState: "OPERATOR_MANAGED",
+            manualTakeoverActive: true,
+            manualOwnershipLatch: true,
+            okxContracts: 4.16,
+            notionalUsd: 3248,
+            protectiveSlAlgoId: "oap_BTCUSDT_open36_sl" // Strong bot evidence!
+            // No isV2Authority, no strategyVersion, no sourceSignal
+        } as unknown as PaperOpenPositionRecord;
+
+        const reclass = evaluateManualAugmentReclassification({
+            ledger: botAlgoIdPos,
+            okxActualPositionExists: true,
+            okxActualContracts: 11.08,
+            okxActualAvgPx: 78125.60,
+            okxActualNotional: 8635,
+            okxSide: "long"
+        });
+
+        assert.equal(reclass.shouldReclassify, true);
+        assert.equal(reclass.reason, "SAME_SIDE_MANUAL_AUGMENT_RECLASSIFICATION");
+    });
+
+    await t.test("10. exact current live BTC fixture (4.16 long @ 78279.9 -> manual 11.08 @ 78125.60) migrates cleanly to MANUAL_SIZE_AUGMENTED", () => {
+        const liveBtcFixture = {
+            symbol: "BTCUSDT",
+            side: "long" as const,
+            entryPrice: 78279.9,
+            sizeUsd: 3248,
+            entryStage: 1,
+            openedAt: 1788500000000,
+            status: "open",
+            lifecycleState: "OPERATOR_MANAGED",
+            manualTakeoverActive: true,
+            manualOwnershipLatch: true,
+            manualTakeoverReason: "OPERATOR_MANUAL_INTERVENTION",
+            okxContracts: 4.16,
+            notionalUsd: 3248,
+            leverage: 10,
+            strategyVersion: "paper-v2",
+            positionCycleId: "BTCUSDT:long:1788500000000",
+            protectiveSlAlgoId: "oap_BTCUSDT_open36_sl",
+            stopPrice: 77500,
+            targetPrice1: 79500
+        } as unknown as PaperOpenPositionRecord;
+
+        const reclass = evaluateManualAugmentReclassification({
+            ledger: liveBtcFixture,
+            okxActualPositionExists: true,
+            okxActualContracts: 11.08,
+            okxActualAvgPx: 78125.59981949459,
+            okxActualNotional: 8636,
+            okxSide: "long"
+        });
+
+        assert.equal(reclass.shouldReclassify, true);
+        assert.equal(reclass.reason, "SAME_SIDE_MANUAL_AUGMENT_RECLASSIFICATION");
     });
 });

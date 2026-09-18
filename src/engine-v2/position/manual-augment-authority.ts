@@ -184,7 +184,8 @@ export function buildSymbolPositionAuthorityProof(
 
 /**
  * Checks whether a position record has genuine BOT-origin provenance.
- * Recovers BOT origin even when newer v2 authority flags were lost/stripped during legacy takeover latching.
+ * Requires at least ONE strong bot evidence.
+ * Supporting fields (entryStage, flowId/positionCycleId structure) alone are NOT sufficient.
  */
 export function isBotOriginPositionEvidence(
     ledger: {
@@ -197,17 +198,20 @@ export function isBotOriginPositionEvidence(
         manualOwnershipLatch?: boolean;
         manualTakeoverReason?: string | null;
         originalEntryPrice?: number;
+        originalSizeUsd?: number;
         sourceSignal?: string | null;
         authoritySourceAtEntry?: string | null;
         authority?: string | null;
         adoptedEngine?: string | null;
         exchangeClOrdId?: string | null;
+        entryClOrdId?: string | null;
         strategyVersion?: string | null;
         entryStage?: number | null;
         positionCycleId?: string | null;
         flowId?: string | null;
         protectiveSlAlgoId?: string | null;
         protectiveStopAlgoId?: string | null;
+        protectiveTpAlgoId?: string | null;
         rangeBoxHighAtEntry?: number | null;
         rangeBoxLowAtEntry?: number | null;
         rangeBoxQuality?: number | null;
@@ -217,7 +221,27 @@ export function isBotOriginPositionEvidence(
     },
     hasBotOrderEvidence?: boolean
 ): boolean {
+    // 0. Hard exclusions: explicit manual adoption or external manual position without overriding bot evidence
+    const sig = String(ledger.sourceSignal ?? "").trim().toLowerCase();
+    if (
+        (sig === "operator_adopted" || sig === "okx_reconcile_adopted") &&
+        hasBotOrderEvidence !== true &&
+        ledger.isV2Authority !== true
+    ) {
+        return false;
+    }
+    if (
+        ledger.lifecycleState === "EXTERNAL_MANUAL_POSITION" &&
+        hasBotOrderEvidence !== true &&
+        ledger.isV2Authority !== true
+    ) {
+        return false;
+    }
+
+    // 1. Account / Order History Strong Evidence
     if (hasBotOrderEvidence === true) return true;
+
+    // 2. Strong Authority / Lifecycle State Evidence
     if (ledger.isV2Authority === true) return true;
     if (
         ledger.lifecycleState === "BOT_V2_MANAGED" ||
@@ -228,21 +252,51 @@ export function isBotOriginPositionEvidence(
         return true;
     }
 
-    // 1. Explicit source/authority tags
-    const authSrc = String(ledger.authoritySourceAtEntry ?? ledger.authority ?? ledger.adoptedEngine ?? "").trim().toLowerCase();
-    if (authSrc === "v2" || authSrc === "paper-v2") return true;
+    // 3. Explicit V2 / paper / highway authority / strategy provenance
+    const authSrc = String(
+        ledger.authoritySourceAtEntry ?? ledger.authority ?? ledger.adoptedEngine ?? ""
+    )
+        .trim()
+        .toLowerCase();
+    if (authSrc === "v2" || authSrc === "paper-v2" || authSrc.includes("highway")) return true;
 
-    // 2. Strategy version
     const strat = String(ledger.strategyVersion ?? "").trim().toLowerCase();
     if (strat.includes("v2") || strat.includes("paper") || strat.includes("highway")) return true;
 
-    // 3. Entry stage
-    if (typeof ledger.entryStage === "number" && ledger.entryStage >= 1) return true;
+    // 4. Actual Bot Client Order ID
+    const clOrdId = String(ledger.exchangeClOrdId ?? ledger.entryClOrdId ?? "").trim().toLowerCase();
+    if (
+        clOrdId.startsWith("p_") ||
+        clOrdId.startsWith("oap_") ||
+        clOrdId.startsWith("sl_") ||
+        clOrdId.startsWith("tp_") ||
+        clOrdId.startsWith("v2_") ||
+        clOrdId.startsWith("highway_") ||
+        clOrdId.startsWith("pbtc") ||
+        clOrdId.startsWith("peth") ||
+        /^p\d+/.test(clOrdId) ||
+        /^oap\d+/.test(clOrdId)
+    ) {
+        return true;
+    }
 
-    // 4. Saved original entry price from earlier v2 migration
-    if (typeof ledger.originalEntryPrice === "number" && ledger.originalEntryPrice > 0) return true;
+    // 5. Bot-Owned Protective Algo ID
+    const stopAlgo = String(
+        ledger.protectiveSlAlgoId ?? ledger.protectiveStopAlgoId ?? ledger.protectiveTpAlgoId ?? ""
+    )
+        .trim()
+        .toLowerCase();
+    if (
+        stopAlgo.startsWith("oap_") ||
+        stopAlgo.startsWith("sl_") ||
+        stopAlgo.startsWith("tp_") ||
+        stopAlgo.startsWith("v2_") ||
+        stopAlgo.startsWith("oap")
+    ) {
+        return true;
+    }
 
-    // 5. V2 Range / Box state at entry
+    // 6. Saved V2 Entry Structure / Range Metadata
     if (
         ledger.rangeBoxHighAtEntry != null ||
         ledger.rangeBoxLowAtEntry != null ||
@@ -252,43 +306,27 @@ export function isBotOriginPositionEvidence(
         return true;
     }
 
-    // 6. Bot execution timestamps / reasons
-    if (ledger.lastBotExecutionReason != null || ledger.lastBotExecutionAt != null) return true;
-
-    // 7. Client order ID evidence
-    const clOrdId = String(ledger.exchangeClOrdId ?? "");
-    if (clOrdId.startsWith("p") || clOrdId.startsWith("oap") || clOrdId.startsWith("sl") || clOrdId.startsWith("tp")) {
+    // 7. Bot Execution Evidence
+    if (
+        ledger.lastBotExecutionReason != null ||
+        (typeof ledger.lastBotExecutionAt === "number" && ledger.lastBotExecutionAt > 0)
+    ) {
         return true;
     }
 
-    // 8. Bot protective stop algo IDs
-    const stopAlgo = String(ledger.protectiveSlAlgoId ?? ledger.protectiveStopAlgoId ?? "");
-    if (stopAlgo.startsWith("oap") || stopAlgo.startsWith("sl") || stopAlgo.startsWith("tp")) {
+    // 8. Explicit Bot Source Signal
+    if (
+        sig.startsWith("v2_") ||
+        sig.startsWith("highway_") ||
+        sig.startsWith("range_") ||
+        sig.startsWith("trend_") ||
+        sig.startsWith("bot_") ||
+        sig.startsWith("paper_")
+    ) {
         return true;
     }
 
-    // 9. Position Cycle ID / Flow ID
-    const cycleId = String(ledger.positionCycleId ?? ledger.flowId ?? "");
-    if (cycleId && !cycleId.includes("manual_adopt") && !cycleId.includes("operator_adopt")) {
-        if (cycleId.startsWith("BTC") || cycleId.startsWith("ETH") || cycleId.startsWith("p") || cycleId.startsWith("v2") || cycleId.includes(":")) {
-            return true;
-        }
-    }
-
-    // 10. Source signal (exclude explicit operator adoptions)
-    const sig = String(ledger.sourceSignal ?? "").trim().toLowerCase();
-    if (sig && sig !== "okx_reconcile_adopted" && sig !== "operator_adopted" && sig !== "manual_intervention_detected" && sig !== "manual_add") {
-        return true;
-    }
-
-    // 11. Takeover reason was MANUAL_ADD / MANUAL_SIZE_CHANGE on pre-existing record
-    const takeoverReason = String(ledger.manualTakeoverReason ?? "").trim().toUpperCase();
-    if (takeoverReason === "MANUAL_ADD" || takeoverReason === "MANUAL_SIZE_CHANGE" || takeoverReason === "CONFIRMED_MANUAL_SIZE_CHANGE") {
-        if (sig !== "operator_adopted" && sig !== "okx_reconcile_adopted" && ledger.lifecycleState !== "EXTERNAL_MANUAL_POSITION") {
-            return true;
-        }
-    }
-
+    // Note: entryStage alone or positionCycleId/flowId containing ":" alone are NOT strong evidence and will return false.
     return false;
 }
 
