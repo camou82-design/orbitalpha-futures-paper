@@ -265,3 +265,191 @@ test("HIGHWAY EXIT: Closed 5m Candle Hysteresis & TP1 Exemption", async (t) => {
         assert.ok(hardStop.evidence.includes("hard_exit_immediate_no_hysteresis"));
     });
 });
+
+test("HIGHWAY CORE: 2차 안전 보완 패치 검증 테스트", async (t) => {
+    await t.test("pre-gate 시 committedRiskPlan 미생성 → 정상 candidate가 영구 reject latch 되지 않음", () => {
+        // In Tier 5.6 pre-gate, committedRiskPlan is null because plan is not formed yet.
+        // With isPreCheck: true, it should validate regime/location/shock/cooldown but NOT reject for missing plan.
+        const preGateResult = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "long",
+            regime: "RANGE",
+            isPreCheck: true,
+            snapshot: {
+                lastPrice: 3000,
+                atr: 30,
+                boxPos: 0.20,
+                boxHigh: 3060,
+                boxLow: 2980
+            },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "range_lower_long",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: false,
+                stopPrice: null,
+                invalidationPx: null,
+                metadata: {}
+            },
+            committedRiskPlan: null
+        });
+
+        assert.equal(preGateResult.allowed, true);
+        assert.equal(preGateResult.finalDecision, "ENTER");
+        assert.equal(preGateResult.rejectReason, null);
+    });
+
+    await t.test("final gate에서 committed TP1/SL 존재 → 정상 ENTER 가능", () => {
+        // At final execution gate (isPreCheck: false), committedRiskPlan exists with valid TP1 and SL
+        const finalGateResult = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "long",
+            regime: "RANGE",
+            isPreCheck: false,
+            snapshot: {
+                lastPrice: 3000,
+                atr: 30,
+                atr20: 30,
+                boxPos: 0.18,
+                boxHigh: 3060,
+                boxLow: 2980
+            },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "range_lower_long",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: false,
+                stopPrice: 2970,
+                invalidationPx: 2970,
+                metadata: {
+                    tp1Price: 3045
+                }
+            },
+            committedRiskPlan: {
+                symbol: "ETHUSDT",
+                side: "long",
+                action: "ENTER",
+                finalOrderNotionalUsdt: 100,
+                appliedLeverage: 10,
+                stopPrice: 2970, // 1%
+                invalidationPx: 2970,
+                ts: Date.now()
+            },
+            config: {
+                paperTakerFeeRate: 0.0005,
+                estimatedSlippagePct: 0.0003,
+                highwayMinCostMultiplier: 2.0,
+                highwayMinRewardRisk: 1.2
+            }
+        });
+
+        assert.equal(finalGateResult.allowed, true);
+        assert.equal(finalGateResult.finalDecision, "ENTER");
+        assert.equal(finalGateResult.rejectReason, null);
+        assert.ok(finalGateResult.rewardRisk >= 1.2);
+    });
+
+    await t.test("final gate에서 TP1/SL 없음 → HIGHWAY_PLAN_MISSING", () => {
+        // At final execution gate (isPreCheck: false), missing plan fails closed
+        const finalGateMissingPlan = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "long",
+            regime: "RANGE",
+            isPreCheck: false,
+            snapshot: {
+                lastPrice: 3000,
+                atr: 30,
+                boxPos: 0.20
+            },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "range_lower_long",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: false,
+                stopPrice: null,
+                invalidationPx: null,
+                metadata: {}
+            },
+            committedRiskPlan: null
+        });
+
+        assert.equal(finalGateMissingPlan.allowed, false);
+        assert.equal(finalGateMissingPlan.finalDecision, "SKIP");
+        assert.equal(finalGateMissingPlan.rejectReason, "HIGHWAY_PLAN_MISSING");
+    });
+
+    await t.test("closed candle timestamp 없음 + 10분 경과 → confirmation count 증가하지 않음", () => {
+        clearSoftExitState("BTCUSDT");
+
+        // 1st tick with no closed candle ts
+        const res1 = applySoftExitHysteresis({
+            symbol: "BTCUSDT",
+            action: "REDUCE",
+            reason: "TREND_WEAKNESS_REDUCE_30PCT",
+            evidence: "trend_weakness",
+            now: 1788500000000,
+            latestClosedCandleTs: null
+        });
+
+        assert.equal(res1.hysteresisApplied, true);
+        assert.equal(res1.action, "HOLD");
+        assert.equal(res1.reason, "SOFT_EXIT_WAITING_CLOSED_CANDLE_AUTHORITY");
+        assert.equal(res1.confirmationCount, 0);
+
+        // 10 minutes later (600,000 ms), still no authoritative closed candle ts
+        const res2 = applySoftExitHysteresis({
+            symbol: "BTCUSDT",
+            action: "REDUCE",
+            reason: "TREND_WEAKNESS_REDUCE_30PCT",
+            evidence: "trend_weakness",
+            now: 1788500000000 + 600000,
+            latestClosedCandleTs: null
+        });
+
+        assert.equal(res2.hysteresisApplied, true);
+        assert.equal(res2.action, "HOLD");
+        assert.equal(res2.reason, "SOFT_EXIT_WAITING_CLOSED_CANDLE_AUTHORITY");
+        assert.equal(res2.confirmationCount, 0); // Count did not increase
+    });
+
+    await t.test("실제 다음 closed 5m candle timestamp 도착 → count 증가", () => {
+        clearSoftExitState("BTCUSDT");
+
+        const candle1 = 1788500000000;
+        const res1 = applySoftExitHysteresis({
+            symbol: "BTCUSDT",
+            action: "REDUCE",
+            reason: "TREND_WEAKNESS_REDUCE_30PCT",
+            evidence: "trend_weakness",
+            now: candle1 + 15000,
+            latestClosedCandleTs: candle1
+        });
+
+        assert.equal(res1.confirmationCount, 1);
+        assert.equal(res1.action, "HOLD");
+        assert.equal(res1.reason, "SOFT_EXIT_HYSTERESIS_WATCH");
+
+        // Now next closed 5m candle arrives
+        const candle2 = candle1 + 300000;
+        const res2 = applySoftExitHysteresis({
+            symbol: "BTCUSDT",
+            action: "REDUCE",
+            reason: "TREND_WEAKNESS_REDUCE_30PCT",
+            evidence: "trend_weakness",
+            now: candle2 + 15000,
+            latestClosedCandleTs: candle2
+        });
+
+        assert.equal(res2.confirmationCount, 2);
+        assert.equal(res2.hysteresisApplied, false);
+        assert.equal(res2.action, "REDUCE");
+        assert.equal(res2.reason, "TREND_WEAKNESS_REDUCE_30PCT");
+    });
+});
+

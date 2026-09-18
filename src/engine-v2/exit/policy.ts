@@ -566,9 +566,9 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
     }
 
     if (args.bypassHysteresis !== true && hasPosition) {
-        const latestCandleTs = (args.v2State as any)?.latestClosedCandleTs ??
-            (args.snapshot as any)?.latestCandleTs ??
-            (args.now ? Math.floor(args.now / 300_000) * 300_000 : null);
+        const latestCandleTs = args.latestClosedCandleTs ??
+            (args.v2State as any)?.latestClosedCandleTs ??
+            null;
 
         const hResult = applySoftExitHysteresis({
             symbol: args.symbol,

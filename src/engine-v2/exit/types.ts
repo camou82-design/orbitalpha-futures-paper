@@ -30,6 +30,7 @@ export type V2ExitReason =
     | "GENERAL_SOFT_FULL_EXIT"
     | "SOFT_EXIT_FEE_HOLD_RECHECK"
     | "SOFT_EXIT_HYSTERESIS_WATCH"
+    | "SOFT_EXIT_WAITING_CLOSED_CANDLE_AUTHORITY"
     | "NO_EXIT_SIGNAL";
 
 export type V2ExitUrgency = "LOW" | "MID" | "HIGH" | "CRITICAL";
@@ -98,4 +99,5 @@ export type EvaluateV2ExitPolicyArgs = Readonly<{
     markPrice?: number | null;
     bypassHysteresis?: boolean;
     now?: number;
+    latestClosedCandleTs?: number | null;
 }>;

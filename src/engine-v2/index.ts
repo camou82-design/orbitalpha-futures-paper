@@ -6067,6 +6067,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             snapshot: authoritativeInput.snapshot,
             execution,
             committedRiskPlan: null,
+            isPreCheck: true,
             config: authoritativeInput.config,
             hasExistingPosition: hasExistingPos,
             softExitCooldownActive: softCooldownActive,

@@ -12,6 +12,7 @@ export interface HighwayEntryGateInput {
     hasExistingPosition?: boolean;
     softExitCooldownActive?: boolean;
     directionalShockState?: string | null;
+    isPreCheck?: boolean;
 }
 
 export interface HighwayEntryGateResult {
@@ -43,7 +44,8 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         config = {},
         hasExistingPosition = false,
         softExitCooldownActive = false,
-        directionalShockState = "NONE"
+        directionalShockState = "NONE",
+        isPreCheck = false
     } = input;
 
     const lastPrice = Number(snapshot?.lastPrice ?? 0);
@@ -86,7 +88,6 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         0
     );
 
-    // Fail-closed if actual planned TP1 or committed stop is missing or unachievable
     const hasValidStop = Number.isFinite(plannedStopPrice) && plannedStopPrice > 0;
     const hasValidTp1 = Number.isFinite(plannedTp1Price) && plannedTp1Price > 0;
 
@@ -116,7 +117,6 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         }
     }
 
-    // expectedMove must NOT exceed actual planned TP1 distance, nor artificial minimum floors
     const candidateExpectedMove = structureRoom !== null
         ? Math.min(tp1DistancePct, structureRoom)
         : tp1DistancePct;
@@ -133,7 +133,7 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
     let finalDecision: "ENTER" | "SKIP" | "HOLD" = "ENTER";
     let rejectReason: string | null = null;
 
-    // Step 0: Directional validity & Cooldown & Plan presence
+    // Step 0: Directional validity & Cooldown check
     if (side !== "long" && side !== "short") {
         allowed = false;
         finalDecision = "HOLD";
@@ -142,7 +142,8 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         allowed = false;
         finalDecision = "HOLD";
         rejectReason = "SOFT_EXIT_COOLDOWN_ACTIVE";
-    } else if (!hasValidStop || !hasValidTp1 || !isPlanDirectionValid) {
+    } else if (!isPreCheck && (!hasValidStop || !hasValidTp1 || !isPlanDirectionValid)) {
+        // At final execution gate, missing planned TP1 or committed stop is a hard fail-closed
         allowed = false;
         finalDecision = "SKIP";
         rejectReason = "HIGHWAY_PLAN_MISSING";
@@ -206,8 +207,8 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         }
     }
 
-    // Step 3 & 4: Expected Move & Transaction Cost Edge
-    if (allowed) {
+    // Step 3 & 4: Expected Move & Transaction Cost Edge (evaluated if plan exists or at final gate)
+    if (allowed && (hasValidStop && hasValidTp1 && isPlanDirectionValid)) {
         if (expectedMovePct < minRequiredMovePct) {
             allowed = false;
             finalDecision = "SKIP";
@@ -216,7 +217,7 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
     }
 
     // Step 5: Reward / Risk (RR)
-    if (allowed) {
+    if (allowed && (hasValidStop && hasValidTp1 && isPlanDirectionValid)) {
         if (rewardRisk < minRewardRisk) {
             allowed = false;
             finalDecision = "SKIP";
@@ -230,6 +231,7 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         side,
         regime,
         boxPos,
+        isPreCheck,
         expectedMovePct: Number(expectedMovePct.toFixed(6)),
         estimatedCostPct: Number(estimatedCostPct.toFixed(6)),
         netEdgePct: Number(netEdgePct.toFixed(6)),

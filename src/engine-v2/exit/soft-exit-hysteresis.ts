@@ -94,10 +94,6 @@ export function applySoftExitHysteresis(args: ApplySoftExitHysteresisArgs): Appl
     } = args;
 
     const symKey = String(symbol || "").toUpperCase();
-    // Resolve candle timestamp (5-minute bucket if missing)
-    const effectiveCandleTs = typeof latestClosedCandleTs === "number" && latestClosedCandleTs > 0
-        ? latestClosedCandleTs
-        : Math.floor(now / 300_000) * 300_000;
 
     // 1. Hard Exit -> Immediate execution, clear soft exit state
     if (isHardExitReason(reason, evidence)) {
@@ -122,11 +118,31 @@ export function applySoftExitHysteresis(args: ApplySoftExitHysteresisArgs): Appl
         };
     }
 
-    // 3. Soft Exit Candidate (Weakness/Conflict/Defensive Reduction) -> Require confirmation across distinct 5m closed candles
+    // 3. Soft Exit Candidate (Weakness/Conflict/Defensive Reduction)
     if (isSoftExitReason(reason, action, pnlPct)) {
         const existing = symbolSoftExitCandidateMap.get(symKey);
+
+        // Strict Requirement: MUST have authoritative closed-candle timestamp
+        const hasAuthoritativeClosedCandleTs =
+            typeof latestClosedCandleTs === "number" &&
+            Number.isFinite(latestClosedCandleTs) &&
+            latestClosedCandleTs > 0;
+
+        if (!hasAuthoritativeClosedCandleTs) {
+            // Closed candle timestamp missing: do NOT increment count, maintain existing count and HOLD
+            return {
+                action: "HOLD",
+                reason: "SOFT_EXIT_WAITING_CLOSED_CANDLE_AUTHORITY",
+                evidence: `${evidence}|soft_exit_waiting_closed_candle_authority`,
+                hysteresisApplied: true,
+                confirmationCount: existing ? existing.confirmationCount : 0
+            };
+        }
+
+        const effectiveCandleTs = latestClosedCandleTs;
+
         if (!existing || existing.candidateReason !== reason) {
-            // First detection in this 5m candle
+            // First detection in this authoritative 5m closed candle
             symbolSoftExitCandidateMap.set(symKey, {
                 candidateReason: reason,
                 lastConfirmedCandleTs: effectiveCandleTs,
@@ -143,7 +159,7 @@ export function applySoftExitHysteresis(args: ApplySoftExitHysteresisArgs): Appl
         } else {
             // Repeated detection: check if candle timestamp is distinct
             if (effectiveCandleTs === existing.lastConfirmedCandleTs) {
-                // Same 5m candle repeated tick (e.g. 15s engine loop) -> keep count unchanged
+                // Same 5m candle repeated tick -> do NOT increment count
                 return {
                     action: "HOLD",
                     reason: "SOFT_EXIT_HYSTERESIS_WATCH",
@@ -152,7 +168,7 @@ export function applySoftExitHysteresis(args: ApplySoftExitHysteresisArgs): Appl
                     confirmationCount: existing.confirmationCount
                 };
             } else if (effectiveCandleTs > existing.lastConfirmedCandleTs) {
-                // Next closed 5m candle confirmed!
+                // Next distinct closed 5m candle confirmed!
                 const newCount = existing.confirmationCount + 1;
                 if (newCount < requiredConfirmations) {
                     symbolSoftExitCandidateMap.set(symKey, {
