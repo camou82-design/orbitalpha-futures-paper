@@ -51,62 +51,89 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
     const boxHigh = Number(snapshot?.boxHigh ?? 0);
     const boxLow = Number(snapshot?.boxLow ?? 0);
     const atrVal = Number(snapshot?.atr20 ?? snapshot?.atr ?? 0);
-    const atrPct = lastPrice > 0 && atrVal > 0 ? atrVal / lastPrice : 0.008; // default 0.8% ATR if missing
+    const atrPct = lastPrice > 0 && atrVal > 0 ? atrVal / lastPrice : 0.008;
 
-    // 1. Transaction Cost Estimation (Dynamic, no fixed dollar amounts)
-    const takerFeeRate = Number(config?.paperTakerFeeRate ?? config?.takerFeeRate ?? 0.0005);
-    const roundTripFeePct = takerFeeRate * 2; // e.g., 0.10%
-    const estimatedSlippagePct = Number(config?.estimatedSlippagePct ?? 0.0003); // e.g., 0.03%
-    const estimatedCostPct = roundTripFeePct + estimatedSlippagePct; // e.g., 0.13%
-    const minCostMultiplier = Number(config?.highwayMinCostMultiplier ?? 2.0); // 2.0 ~ 2.5x
+    // 1. Transaction Cost Estimation (OKX execution fee authority / config)
+    const takerFeeRate = Number(
+        config?.okxTakerFeeRate ??
+        config?.paperTakerFeeRate ??
+        config?.takerFeeRate ??
+        0.0005
+    );
+    const roundTripFeePct = takerFeeRate * 2;
+    const estimatedSlippagePct = Number(config?.estimatedSlippagePct ?? 0.0003);
+    const estimatedCostPct = roundTripFeePct + estimatedSlippagePct;
+    const minCostMultiplier = Number(config?.highwayMinCostMultiplier ?? 2.0);
     const minRequiredMovePct = estimatedCostPct * minCostMultiplier;
 
-    // 2. Dynamic Expected Move (Dynamic ATR/Volatility based)
-    let expectedMovePct = Math.max(0.003, atrPct * 1.5);
-    if (regime === "RANGE" && boxHigh > 0 && boxLow > 0 && lastPrice > 0) {
-        if (side === "long") {
-            const distToBoxHigh = Math.max(0, (boxHigh - lastPrice) / lastPrice);
-            expectedMovePct = Math.min(Math.max(distToBoxHigh, 0.5 * atrPct), 3.0 * atrPct);
-        } else if (side === "short") {
-            const distToBoxLow = Math.max(0, (lastPrice - boxLow) / lastPrice);
-            expectedMovePct = Math.min(Math.max(distToBoxLow, 0.5 * atrPct), 3.0 * atrPct);
-        }
-    } else if (regime === "TREND" || subtype === "FAST_TREND_SHIFT") {
-        expectedMovePct = Math.max(0.004, atrPct * 1.5);
-    }
-    const netEdgePct = expectedMovePct - estimatedCostPct;
-
-    // 3. Planned TP1 / Stop Loss distances & Reward/Risk
-    const stopPrice = Number(
+    // 2. Authoritative Planned TP1 / Stop Loss Resolution (No synthetic plan fallback)
+    const plannedStopPrice = Number(
+        committedRiskPlan?.stopPrice ??
         execution?.stopPrice ??
         execution?.invalidationPx ??
-        committedRiskPlan?.stopPrice ??
-        (side === "long" ? lastPrice * (1 - Math.max(0.005, atrPct)) : lastPrice * (1 + Math.max(0.005, atrPct)))
+        (execution?.metadata as any)?.plannedStopPrice ??
+        0
     );
 
-    const tp1Price = Number(
+    const plannedTp1Price = Number(
+        (committedRiskPlan as any)?.plannedTp1Price ??
+        (committedRiskPlan as any)?.tp1Price ??
         (execution as any)?.tp1Price ??
         (execution?.metadata as any)?.tp1Price ??
-        (committedRiskPlan as any)?.tp1Price ??
-        (side === "long" ? lastPrice * (1 + expectedMovePct) : lastPrice * (1 - expectedMovePct))
+        (execution as any)?.takeProfitPrice ??
+        (execution?.metadata as any)?.takeProfitPrice ??
+        (execution?.metadata as any)?.plannedTp1Price ??
+        0
     );
 
-    const stopDistancePct = lastPrice > 0 && stopPrice > 0
-        ? Math.abs(lastPrice - stopPrice) / lastPrice
-        : Math.max(0.004, atrPct);
-    const tp1DistancePct = lastPrice > 0 && tp1Price > 0
-        ? Math.abs(tp1Price - lastPrice) / lastPrice
-        : expectedMovePct;
+    // Fail-closed if actual planned TP1 or committed stop is missing or unachievable
+    const hasValidStop = Number.isFinite(plannedStopPrice) && plannedStopPrice > 0;
+    const hasValidTp1 = Number.isFinite(plannedTp1Price) && plannedTp1Price > 0;
 
+    let stopDistancePct = 0;
+    let tp1DistancePct = 0;
+    let isPlanDirectionValid = false;
+
+    if (hasValidStop && hasValidTp1 && lastPrice > 0) {
+        if (side === "long") {
+            isPlanDirectionValid = plannedStopPrice < lastPrice && plannedTp1Price > lastPrice;
+            stopDistancePct = (lastPrice - plannedStopPrice) / lastPrice;
+            tp1DistancePct = (plannedTp1Price - lastPrice) / lastPrice;
+        } else if (side === "short") {
+            isPlanDirectionValid = plannedStopPrice > lastPrice && plannedTp1Price < lastPrice;
+            stopDistancePct = (plannedStopPrice - lastPrice) / lastPrice;
+            tp1DistancePct = (lastPrice - plannedTp1Price) / lastPrice;
+        }
+    }
+
+    // 3. Conservative reachable Expected Move based on actual planned TP1 (no artificial floor)
+    let structureRoom: number | null = null;
+    if (regime === "RANGE" && boxHigh > 0 && boxLow > 0 && lastPrice > 0) {
+        if (side === "long") {
+            structureRoom = Math.max(0, (boxHigh - lastPrice) / lastPrice);
+        } else if (side === "short") {
+            structureRoom = Math.max(0, (lastPrice - boxLow) / lastPrice);
+        }
+    }
+
+    // expectedMove must NOT exceed actual planned TP1 distance, nor artificial minimum floors
+    const candidateExpectedMove = structureRoom !== null
+        ? Math.min(tp1DistancePct, structureRoom)
+        : tp1DistancePct;
+    const expectedMovePct = tp1DistancePct > 0
+        ? Math.min(candidateExpectedMove, atrPct * 2.0)
+        : 0;
+
+    const netEdgePct = expectedMovePct - estimatedCostPct;
     const rewardRisk = stopDistancePct > 0 ? (tp1DistancePct / stopDistancePct) : 0;
-    const minRewardRisk = Number(config?.highwayMinRewardRisk ?? 1.2); // configurable 1.2 ~ 1.3
+    const minRewardRisk = Number(config?.highwayMinRewardRisk ?? 1.2);
 
     // ── HIGHWAY CORE DECISION PIPELINE (STRICT ORDER) ──────────────────────
     let allowed = true;
     let finalDecision: "ENTER" | "SKIP" | "HOLD" = "ENTER";
     let rejectReason: string | null = null;
 
-    // Step 0: Directional validity & Cooldown check
+    // Step 0: Directional validity & Cooldown & Plan presence
     if (side !== "long" && side !== "short") {
         allowed = false;
         finalDecision = "HOLD";
@@ -115,6 +142,10 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         allowed = false;
         finalDecision = "HOLD";
         rejectReason = "SOFT_EXIT_COOLDOWN_ACTIVE";
+    } else if (!hasValidStop || !hasValidTp1 || !isPlanDirectionValid) {
+        allowed = false;
+        finalDecision = "SKIP";
+        rejectReason = "HIGHWAY_PLAN_MISSING";
     }
 
     // Step 1: 시장장세 (Market Regime)
@@ -161,7 +192,7 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
                 meta.reclaimConfirmed === true ||
                 meta.pullbackConfirmed === true ||
                 meta.continuationPhase === "RETEST_TOUCHED";
-            
+
             const tw = Number(snapshot?.trendWeaknessScore ?? 0);
             if (side === "long" && boxPos !== null && boxPos > 0.90 && tw > 0.60 && !hasStructureEvidence) {
                 allowed = false;

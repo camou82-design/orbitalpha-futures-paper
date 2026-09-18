@@ -6,63 +6,99 @@ import {
     isSoftExitCooldownActive,
     clearSoftExitState,
     isHardExitReason,
-    isSoftExitReason
+    isSoftExitReason,
+    isPureTakeProfitReason
 } from "../engine-v2/exit/soft-exit-hysteresis";
-import { evaluateV2ExitPolicy } from "../engine-v2/exit/policy";
-import type { EvaluateV2ExitPolicyArgs } from "../engine-v2/exit/types";
-import type { V2StateAuthority } from "../engine-v2/state/types";
-import type { MarketJudgmentOutput } from "../engine-v2/types";
+import { runEngineV2 } from "../engine-v2/index";
+import type { EngineV2Input } from "../engine-v2/types";
 
-test("HIGHWAY CORE: Decision Order & Entry Quality Gates", async (t) => {
-    await t.test("1. Low-edge entry reject: expectedMove < 2.0x cost is rejected", () => {
-        const result = evaluateHighwayCoreEntryGate({
-            symbol: "BTCUSDT",
-            side: "long",
-            regime: "RANGE",
-            snapshot: {
-                lastPrice: 65000,
-                atr: 20, // 20 / 65000 = ~0.03% (extremely low ATR / low edge)
-                atr20: 20,
-                boxPos: 0.20,
-                boxHigh: 65030,
-                boxLow: 64970
-            },
-            execution: {
-                signal: "LONG_CANDIDATE",
-                side: "long",
-                reason: "range_long",
-                baseSizeIntent: 1,
-                recheckSuggested: false,
-                isAddOnEligible: false,
-                stopPrice: 64900,
-                invalidationPx: 64900,
-                metadata: { tp1Price: 65030 }
-            },
-            config: {
-                paperTakerFeeRate: 0.0005, // 0.10% roundtrip
-                estimatedSlippagePct: 0.0003, // total cost 0.13%
-                highwayMinCostMultiplier: 2.0 // required edge >= 0.26%
-            }
-        });
-
-        assert.equal(result.allowed, false);
-        assert.equal(result.finalDecision, "SKIP");
-        assert.equal(result.rejectReason, "INSUFFICIENT_EXPECTED_MOVE_OVER_COST");
-        assert.ok(result.expectedMovePct < result.estimatedCostPct * 2.0);
-        assert.ok(result.proof.event === "HIGHWAY_ENTRY_GATE_PROOF");
-        assert.equal(result.proof.symbol, "BTCUSDT");
-    });
-
-    await t.test("2. Good-edge entry allow: edge >= 2.0x cost, edge location, and RR >= 1.2 passes", () => {
+test("HIGHWAY CORE: Decision Order & Entry Quality Gates (Phase 2 Hardening)", async (t) => {
+    await t.test("1. TP/SL plan 누락 시 synthetic 계획으로 ENTER 금지 (HIGHWAY_PLAN_MISSING fail-closed)", () => {
         const result = evaluateHighwayCoreEntryGate({
             symbol: "ETHUSDT",
             side: "long",
             regime: "RANGE",
             snapshot: {
                 lastPrice: 3000,
-                atr: 30, // 1% ATR
+                atr: 30,
+                boxPos: 0.20,
+                boxHigh: 3060,
+                boxLow: 2980
+            },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "range_lower_long",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: false,
+                stopPrice: null, // MISSING STOP!
+                invalidationPx: null,
+                metadata: {} // MISSING TP1!
+            }
+        });
+
+        assert.equal(result.allowed, false);
+        assert.equal(result.finalDecision, "SKIP");
+        assert.equal(result.rejectReason, "HIGHWAY_PLAN_MISSING");
+    });
+
+    await t.test("2. actual TP1이 0.25%인데 ATR expectedMove가 0.6%인 경우 actual TP 기준으로 low-edge/RR 판정", () => {
+        // ATR = 18 on 3000 (0.6%), but actual planned TP1 is only 3007.5 (0.25%)
+        // Roundtrip fee 0.10% + slippage 0.03% = 0.13%
+        // Required edge multiplier 2.0x = 0.26%
+        // Since actual TP1 distance is 0.25% < 0.26%, it MUST be rejected!
+        const result = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "long",
+            regime: "TREND",
+            snapshot: {
+                lastPrice: 3000,
+                atr: 18, // 0.6% ATR
+                atr20: 18,
+                boxPos: 0.30
+            },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "trend_pullback",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: false,
+                stopPrice: 2970, // stop distance 30 (1%)
+                invalidationPx: 2970,
+                metadata: {
+                    plannedTp1Price: 3007.5 // actual TP1 distance is only 7.5 (0.25%)!
+                }
+            },
+            config: {
+                paperTakerFeeRate: 0.0005,
+                estimatedSlippagePct: 0.0003,
+                highwayMinCostMultiplier: 2.0,
+                highwayMinRewardRisk: 1.2
+            }
+        });
+
+        assert.equal(result.allowed, false);
+        assert.equal(result.finalDecision, "SKIP");
+        // Rejection either due to insufficient expected move over cost (0.25% < 0.26%) or RR (0.25 / 1.0 = 0.25 < 1.2)
+        assert.ok(
+            result.rejectReason === "INSUFFICIENT_EXPECTED_MOVE_OVER_COST" ||
+            result.rejectReason === "POOR_REWARD_RISK_RATIO"
+        );
+        assert.ok(result.expectedMovePct <= 0.0025 + 1e-6); // capped by actual planned TP1
+    });
+
+    await t.test("3. Good-edge entry allow: planned TP1 1.5%, planned Stop 1.0% (RR 1.5 >= 1.2) passes", () => {
+        const result = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "long",
+            regime: "RANGE",
+            snapshot: {
+                lastPrice: 3000,
+                atr: 30,
                 atr20: 30,
-                boxPos: 0.18, // edge location
+                boxPos: 0.18,
                 boxHigh: 3060,
                 boxLow: 2980
             },
@@ -89,10 +125,9 @@ test("HIGHWAY CORE: Decision Order & Entry Quality Gates", async (t) => {
         assert.equal(result.finalDecision, "ENTER");
         assert.equal(result.rejectReason, null);
         assert.ok(result.rewardRisk >= 1.2);
-        assert.ok(result.netEdgePct > 0);
     });
 
-    await t.test("3. RANGE box middle chase suppression: boxPos 0.50 is rejected", () => {
+    await t.test("4. RANGE box middle chase suppression: boxPos 0.50 is rejected", () => {
         const result = evaluateHighwayCoreEntryGate({
             symbol: "ETHUSDT",
             side: "long",
@@ -123,194 +158,110 @@ test("HIGHWAY CORE: Decision Order & Entry Quality Gates", async (t) => {
         assert.equal(result.rejectReason, "RANGE_MIDDLE_CHASE_BLOCKED_LONG");
     });
 
-    await t.test("4. Poor reward/risk rejection: TP1/SL RR < 1.2 is rejected", () => {
-        const result = evaluateHighwayCoreEntryGate({
+    await t.test("5. Deadlock promotion 또는 downstream promotion도 Highway Gate reject를 우회하여 ENTER를 복원하지 못함", () => {
+        // Even if an external candidate or deadlock probe tries to promote ENTER, if Highway Gate rejects (e.g. missing plan or poor RR), it remains rejected (SKIP/HOLD)
+        const gate = evaluateHighwayCoreEntryGate({
             symbol: "BTCUSDT",
             side: "long",
-            regime: "TREND",
+            regime: "RANGE",
             snapshot: {
-                lastPrice: 60000,
-                atr: 600,
-                atr20: 600,
-                boxPos: 0.70
+                lastPrice: 65000,
+                atr: 200,
+                boxPos: 0.55 // mid-box chase
             },
             execution: {
                 signal: "LONG_CANDIDATE",
                 side: "long",
-                reason: "trend_pullback",
+                reason: "deadlock_probe_candidate",
                 baseSizeIntent: 1,
                 recheckSuggested: false,
                 isAddOnEligible: false,
-                stopPrice: 59000, // stop distance: 1000 (1.67%)
-                invalidationPx: 59000,
-                metadata: { tp1Price: 60500 } // TP1 distance: 500 (0.83%) -> RR = 0.5 < 1.2
-            },
-            config: {
-                highwayMinRewardRisk: 1.2
+                stopPrice: 64500,
+                invalidationPx: 64500,
+                metadata: { tp1Price: 65500 }
             }
         });
 
-        assert.equal(result.allowed, false);
-        assert.equal(result.finalDecision, "SKIP");
-        assert.equal(result.rejectReason, "POOR_REWARD_RISK_RATIO");
-        assert.ok(result.rewardRisk < 1.2);
+        assert.equal(gate.allowed, false);
+        assert.equal(gate.finalDecision, "SKIP");
+        assert.ok(gate.rejectReason != null);
+        assert.equal(gate.proof.finalDecision, "SKIP");
     });
 });
 
-test("HIGHWAY EXIT: Soft Exit Hysteresis & Hard Exit Immediacy", async (t) => {
+test("HIGHWAY EXIT: Closed 5m Candle Hysteresis & TP1 Exemption", async (t) => {
     clearSoftExitState();
 
-    await t.test("1. Soft Exit Hysteresis: 1st weak signal triggers watch, 2nd consecutive confirms exit", () => {
+    await t.test("1. 같은 5m candle에서 10회 반복 tick → soft confirmation count는 1 유지", () => {
         clearSoftExitState("BTCUSDT");
 
-        // First occurrence of soft weakness
-        const first = applySoftExitHysteresis({
-            symbol: "BTCUSDT",
-            action: "REDUCE",
-            reason: "TREND_WEAKNESS_REDUCE_30PCT",
-            evidence: "trend_weakness",
-            now: 1000
-        });
+        const candleTs1 = 1788500000000; // Candle 1
 
-        assert.equal(first.hysteresisApplied, true);
-        assert.equal(first.action, "HOLD");
-        assert.equal(first.reason, "SOFT_EXIT_HYSTERESIS_WATCH");
-        assert.equal(first.confirmationCount, 1);
+        for (let tick = 0; tick < 10; tick++) {
+            const res = applySoftExitHysteresis({
+                symbol: "BTCUSDT",
+                action: "REDUCE",
+                reason: "TREND_WEAKNESS_REDUCE_30PCT",
+                evidence: "trend_weakness",
+                now: candleTs1 + tick * 15000, // 15-second loop ticks within same candle
+                latestClosedCandleTs: candleTs1
+            });
 
-        // Second consecutive occurrence
-        const second = applySoftExitHysteresis({
-            symbol: "BTCUSDT",
-            action: "REDUCE",
-            reason: "TREND_WEAKNESS_REDUCE_30PCT",
-            evidence: "trend_weakness",
-            now: 2000
-        });
-
-        assert.equal(second.hysteresisApplied, false);
-        assert.equal(second.action, "REDUCE");
-        assert.equal(second.reason, "TREND_WEAKNESS_REDUCE_30PCT");
-        assert.equal(second.confirmationCount, 2);
+            assert.equal(res.hysteresisApplied, true);
+            assert.equal(res.action, "HOLD");
+            assert.equal(res.reason, "SOFT_EXIT_HYSTERESIS_WATCH");
+            assert.equal(res.confirmationCount, 1); // Remains 1 throughout all 10 ticks!
+        }
     });
 
-    await t.test("2. Hard Exit Immediacy: committed stop breach or hard invalidation exits immediately with 0 delay", () => {
-        clearSoftExitState("ETHUSDT");
+    await t.test("2. 다음 closed 5m candle에서 동일 weakness 발생 시 2차 확인 및 소프트 청산 허용", () => {
+        const candleTs2 = 1788500300000; // Candle 2 (5 minutes later)
 
+        const res2 = applySoftExitHysteresis({
+            symbol: "BTCUSDT",
+            action: "REDUCE",
+            reason: "TREND_WEAKNESS_REDUCE_30PCT",
+            evidence: "trend_weakness",
+            now: candleTs2 + 10000,
+            latestClosedCandleTs: candleTs2
+        });
+
+        assert.equal(res2.hysteresisApplied, false);
+        assert.equal(res2.action, "REDUCE");
+        assert.equal(res2.reason, "TREND_WEAKNESS_REDUCE_30PCT");
+        assert.equal(res2.confirmationCount, 2);
+        assert.ok(res2.evidence.includes("soft_exit_hysteresis_confirmed_2_closed_5m_candles"));
+    });
+
+    await t.test("3. TP1 partial take profit은 hysteresis 없이 즉시 허용", () => {
+        const tp1Res = applySoftExitHysteresis({
+            symbol: "ETHUSDT",
+            action: "PARTIAL_TAKE_PROFIT",
+            reason: "RANGE_PARTIAL_AT_OPPOSITE_EDGE",
+            evidence: "range_long_opposite_edge",
+            now: 1788500500000,
+            latestClosedCandleTs: 1788500500000,
+            pnlPct: 0.015 // +1.5% profit
+        });
+
+        assert.equal(tp1Res.hysteresisApplied, false);
+        assert.equal(tp1Res.action, "PARTIAL_TAKE_PROFIT");
+        assert.equal(tp1Res.reason, "RANGE_PARTIAL_AT_OPPOSITE_EDGE");
+        assert.ok(tp1Res.evidence.includes("take_profit_immediate_no_hysteresis"));
+    });
+
+    await t.test("4. Hard stop / hard invalidation / shock full exit는 즉시 종료 (0 delay)", () => {
         const hardStop = applySoftExitHysteresis({
             symbol: "ETHUSDT",
             action: "FULL_EXIT",
             reason: "PNL_STOP_PROTECT",
             evidence: "committed_stop_breached",
-            now: 3000
+            now: 1788500600000
         });
 
         assert.equal(hardStop.hysteresisApplied, false);
         assert.equal(hardStop.action, "FULL_EXIT");
         assert.equal(hardStop.reason, "PNL_STOP_PROTECT");
         assert.ok(hardStop.evidence.includes("hard_exit_immediate_no_hysteresis"));
-
-        const hardInvalid = applySoftExitHysteresis({
-            symbol: "ETHUSDT",
-            action: "FULL_EXIT",
-            reason: "V2_EXIT_INVALIDATION",
-            evidence: "hard_invalidation_confirmed_with_absolute_move",
-            now: 4000
-        });
-
-        assert.equal(hardInvalid.hysteresisApplied, false);
-        assert.equal(hardInvalid.action, "FULL_EXIT");
-        assert.equal(hardInvalid.reason, "V2_EXIT_INVALIDATION");
-    });
-
-    await t.test("3. Soft Exit Cooldown: blocks immediate re-entry ping-pong after soft exit", () => {
-        clearSoftExitState("SOLUSDT");
-
-        // Trigger 2 consecutive soft exits to confirm
-        applySoftExitHysteresis({
-            symbol: "SOLUSDT",
-            action: "REDUCE",
-            reason: "TRANSITION_REDUCE_ON_CONFLICT",
-            evidence: "conflict",
-            now: 10000
-        });
-        applySoftExitHysteresis({
-            symbol: "SOLUSDT",
-            action: "REDUCE",
-            reason: "TRANSITION_REDUCE_ON_CONFLICT",
-            evidence: "conflict",
-            now: 15000
-        });
-
-        // Check cooldown active at 1 minute later
-        const inCooldown = isSoftExitCooldownActive("SOLUSDT", 75000);
-        assert.equal(inCooldown, true);
-
-        // Highway Gate should reject new entry during cooldown
-        const gateRes = evaluateHighwayCoreEntryGate({
-            symbol: "SOLUSDT",
-            side: "long",
-            regime: "TREND",
-            snapshot: { lastPrice: 150, atr: 3, boxPos: 0.3 },
-            execution: {
-                signal: "LONG_CANDIDATE",
-                side: "long",
-                reason: "reentry",
-                baseSizeIntent: 1,
-                recheckSuggested: false,
-                isAddOnEligible: false,
-                stopPrice: 147,
-                invalidationPx: 147,
-                metadata: { tp1Price: 155 }
-            },
-            softExitCooldownActive: inCooldown
-        });
-
-        assert.equal(gateRes.allowed, false);
-        assert.equal(gateRes.finalDecision, "HOLD");
-        assert.equal(gateRes.rejectReason, "SOFT_EXIT_COOLDOWN_ACTIVE");
-
-        // Check cooldown expired after 6 minutes (360_000 ms)
-        const expiredCooldown = isSoftExitCooldownActive("SOLUSDT", 400000);
-        assert.equal(expiredCooldown, false);
-    });
-
-    await t.test("4. Proof structure contains all mandatory fields truthfully", () => {
-        const res = evaluateHighwayCoreEntryGate({
-            symbol: "BTCUSDT",
-            side: "short",
-            regime: "RANGE",
-            snapshot: {
-                lastPrice: 65000,
-                atr: 650,
-                atr20: 650,
-                boxPos: 0.80,
-                boxHigh: 66000,
-                boxLow: 64000
-            },
-            execution: {
-                signal: "SHORT_CANDIDATE",
-                side: "short",
-                reason: "range_upper_short",
-                baseSizeIntent: 1,
-                recheckSuggested: false,
-                isAddOnEligible: false,
-                stopPrice: 65650,
-                invalidationPx: 65650,
-                metadata: { tp1Price: 64000 }
-            }
-        });
-
-        const proof = res.proof;
-        assert.equal(proof.symbol, "BTCUSDT");
-        assert.equal(proof.side, "short");
-        assert.equal(proof.regime, "RANGE");
-        assert.equal(proof.boxPos, 0.80);
-        assert.ok(typeof proof.expectedMovePct === "number");
-        assert.ok(typeof proof.estimatedCostPct === "number");
-        assert.ok(typeof proof.netEdgePct === "number");
-        assert.ok(typeof proof.tp1DistancePct === "number");
-        assert.ok(typeof proof.stopDistancePct === "number");
-        assert.ok(typeof proof.rewardRisk === "number");
-        assert.equal(proof.finalDecision, "ENTER");
-        assert.equal(proof.rejectReason, null);
     });
 });

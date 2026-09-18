@@ -1,6 +1,7 @@
 export interface SoftExitHysteresisState {
     candidateReason: string;
-    count: number;
+    lastConfirmedCandleTs: number;
+    confirmationCount: number;
     firstDetectedAt: number;
 }
 
@@ -30,20 +31,34 @@ export function isHardExitReason(reason: string, evidence?: string): boolean {
     );
 }
 
-export function isSoftExitReason(reason: string, action?: string): boolean {
+export function isPureTakeProfitReason(reason: string, action?: string, pnlPct?: number): boolean {
     const r = String(reason || "").toUpperCase();
     const act = String(action || "").toUpperCase();
     if (isHardExitReason(reason)) return false;
+
+    // Normal take profit / TP1 partial execution is immediate (no hysteresis)
+    return (
+        r.includes("TP1") ||
+        r.includes("TAKE_PROFIT_1") ||
+        r.includes("PROFIT_PROTECTION_PARTIAL_TP") ||
+        (act === "PARTIAL_TAKE_PROFIT" && (pnlPct == null || pnlPct > 0) && !r.includes("WEAKNESS") && !r.includes("CONFLICT"))
+    );
+}
+
+export function isSoftExitReason(reason: string, action?: string, pnlPct?: number): boolean {
+    const r = String(reason || "").toUpperCase();
+    const act = String(action || "").toUpperCase();
+    if (isHardExitReason(reason)) return false;
+    if (isPureTakeProfitReason(reason, action, pnlPct)) return false;
+
     return (
         act === "REDUCE" ||
-        act === "PARTIAL_TAKE_PROFIT" ||
         r.includes("WEAKNESS") ||
         r.includes("CONFLICT") ||
         r.includes("PROTECTIVE_REDUCE") ||
-        r.includes("PARTIAL_AT_OPPOSITE_EDGE") ||
-        r.includes("PULLBACK") ||
         r.includes("TRANSITION_REDUCE") ||
-        r.includes("SHOCK_PROTECTIVE_REDUCE")
+        r.includes("SHOCK_PROTECTIVE_REDUCE") ||
+        r.includes("SOFT_EXIT")
     );
 }
 
@@ -53,6 +68,8 @@ export interface ApplySoftExitHysteresisArgs {
     reason: string;
     evidence: string;
     now?: number;
+    latestClosedCandleTs?: number | null;
+    pnlPct?: number;
     requiredConfirmations?: number;
 }
 
@@ -71,10 +88,16 @@ export function applySoftExitHysteresis(args: ApplySoftExitHysteresisArgs): Appl
         reason,
         evidence,
         now = Date.now(),
+        latestClosedCandleTs = null,
+        pnlPct = 0,
         requiredConfirmations = 2
     } = args;
 
     const symKey = String(symbol || "").toUpperCase();
+    // Resolve candle timestamp (5-minute bucket if missing)
+    const effectiveCandleTs = typeof latestClosedCandleTs === "number" && latestClosedCandleTs > 0
+        ? latestClosedCandleTs
+        : Math.floor(now / 300_000) * 300_000;
 
     // 1. Hard Exit -> Immediate execution, clear soft exit state
     if (isHardExitReason(reason, evidence)) {
@@ -88,58 +111,83 @@ export function applySoftExitHysteresis(args: ApplySoftExitHysteresisArgs): Appl
         };
     }
 
-    // 2. Soft Exit Candidate -> Require hysteresis confirmation (2 consecutive)
-    if (isSoftExitReason(reason, action) && (action === "REDUCE" || action === "PARTIAL_TAKE_PROFIT" || action === "FULL_EXIT")) {
+    // 2. Pure Take Profit / TP1 -> Immediate execution, no hysteresis delay
+    if (isPureTakeProfitReason(reason, action, pnlPct)) {
+        return {
+            action,
+            reason,
+            evidence: `${evidence}|take_profit_immediate_no_hysteresis`,
+            hysteresisApplied: false,
+            confirmationCount: 0
+        };
+    }
+
+    // 3. Soft Exit Candidate (Weakness/Conflict/Defensive Reduction) -> Require confirmation across distinct 5m closed candles
+    if (isSoftExitReason(reason, action, pnlPct)) {
         const existing = symbolSoftExitCandidateMap.get(symKey);
         if (!existing || existing.candidateReason !== reason) {
-            // First detection
+            // First detection in this 5m candle
             symbolSoftExitCandidateMap.set(symKey, {
                 candidateReason: reason,
-                count: 1,
+                lastConfirmedCandleTs: effectiveCandleTs,
+                confirmationCount: 1,
                 firstDetectedAt: now
             });
             return {
                 action: "HOLD",
                 reason: "SOFT_EXIT_HYSTERESIS_WATCH",
-                evidence: `${evidence}|soft_exit_hysteresis_pending_confirmation_1_of_${requiredConfirmations}`,
+                evidence: `${evidence}|soft_exit_hysteresis_pending_candle_1_of_${requiredConfirmations}`,
                 hysteresisApplied: true,
                 confirmationCount: 1
             };
         } else {
-            // Consecutive confirmation
-            const newCount = existing.count + 1;
-            if (newCount < requiredConfirmations) {
-                symbolSoftExitCandidateMap.set(symKey, {
-                    ...existing,
-                    count: newCount
-                });
+            // Repeated detection: check if candle timestamp is distinct
+            if (effectiveCandleTs === existing.lastConfirmedCandleTs) {
+                // Same 5m candle repeated tick (e.g. 15s engine loop) -> keep count unchanged
                 return {
                     action: "HOLD",
                     reason: "SOFT_EXIT_HYSTERESIS_WATCH",
-                    evidence: `${evidence}|soft_exit_hysteresis_pending_confirmation_${newCount}_of_${requiredConfirmations}`,
+                    evidence: `${evidence}|soft_exit_hysteresis_same_candle_recheck_count_${existing.confirmationCount}`,
                     hysteresisApplied: true,
-                    confirmationCount: newCount
+                    confirmationCount: existing.confirmationCount
                 };
-            } else {
-                // Confirmed! Allow soft exit and register cooldown
-                symbolSoftExitCandidateMap.delete(symKey);
-                symbolSoftExitCooldownMap.set(symKey, {
-                    exitedAt: now,
-                    side: "none",
-                    reason
-                });
-                return {
-                    action,
-                    reason,
-                    evidence: `${evidence}|soft_exit_hysteresis_confirmed_${newCount}_cycles`,
-                    hysteresisApplied: false,
-                    confirmationCount: newCount
-                };
+            } else if (effectiveCandleTs > existing.lastConfirmedCandleTs) {
+                // Next closed 5m candle confirmed!
+                const newCount = existing.confirmationCount + 1;
+                if (newCount < requiredConfirmations) {
+                    symbolSoftExitCandidateMap.set(symKey, {
+                        ...existing,
+                        lastConfirmedCandleTs: effectiveCandleTs,
+                        confirmationCount: newCount
+                    });
+                    return {
+                        action: "HOLD",
+                        reason: "SOFT_EXIT_HYSTERESIS_WATCH",
+                        evidence: `${evidence}|soft_exit_hysteresis_pending_candle_${newCount}_of_${requiredConfirmations}`,
+                        hysteresisApplied: true,
+                        confirmationCount: newCount
+                    };
+                } else {
+                    // Confirmed across required distinct closed 5m candles! Allow soft exit and start cooldown
+                    symbolSoftExitCandidateMap.delete(symKey);
+                    symbolSoftExitCooldownMap.set(symKey, {
+                        exitedAt: now,
+                        side: "none",
+                        reason
+                    });
+                    return {
+                        action,
+                        reason,
+                        evidence: `${evidence}|soft_exit_hysteresis_confirmed_${newCount}_closed_5m_candles`,
+                        hysteresisApplied: false,
+                        confirmationCount: newCount
+                    };
+                }
             }
         }
     }
 
-    // 3. No soft/hard exit condition active -> reset candidate state
+    // 4. Normal hold or clear state -> reset candidate state
     if (action === "HOLD" || action === "WATCH" || reason === "NO_EXIT_SIGNAL" || reason === "NO_POSITION_HOLD") {
         symbolSoftExitCandidateMap.delete(symKey);
     }

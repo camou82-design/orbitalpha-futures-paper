@@ -913,6 +913,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let expectedMissingCondition: string | null = null;
     let expectedNextAction: string | null = null;
     let execution: ExecutorOutput;
+    let highwayGateRejected = false;
     
     // CONTINUATION_MICRO_PROBE scope variables
     let microProbeFixedBoundary: number | null = null;
@@ -6073,6 +6074,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         });
 
         if (!highwayGate.allowed) {
+            highwayGateRejected = true;
             v2DecisionAfterPromotion = highwayGate.finalDecision;
             v2SideAfterPromotion = "none";
             v2RejectReasonAfterPromotion = highwayGate.rejectReason;
@@ -6555,6 +6557,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 } else if (symbolExposureCap > 0 && (currentSymbolNotionalKrw + orderNotionalKrw > symbolExposureCap)) {
                     blockProbe = true;
                     blockedReason = "EXPOSURE_CAP_EXCEEDED";
+                } else if (highwayGateRejected) {
+                    blockProbe = true;
+                    blockedReason = "HIGHWAY_ENTRY_GATE_REJECTED";
                 }
             }
 
@@ -9631,6 +9636,38 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 decision.risk.blockReason = "ADDON_POLICY_DENIED";
                 return "NONE";
             }
+        }
+
+        // Requirement 1: Final Authoritative Highway Core Entry Gate before execution
+        const finalHighwayGate = evaluateHighwayCoreEntryGate({
+            symbol: String(input.symbol),
+            side: decision.side,
+            regime: judgment.regime_final || judgment.regime,
+            subtype: judgment.subtype,
+            snapshot: authoritativeInput.snapshot,
+            execution,
+            committedRiskPlan: decision.committedRiskPlan ?? null,
+            config: authoritativeInput.config,
+            hasExistingPosition: false,
+            softExitCooldownActive: isSoftExitCooldownActive(String(input.symbol), input.now),
+            directionalShockState: v2State.directionalShockState ?? "NONE"
+        });
+
+        if (!finalHighwayGate.allowed || highwayGateRejected) {
+            const resolvedDecision = finalHighwayGate.finalDecision !== "ENTER" ? finalHighwayGate.finalDecision : "SKIP";
+            decision.decision = resolvedDecision;
+            decision.side = "none";
+            const blockReas = finalHighwayGate.rejectReason ?? "HIGHWAY_GATE_REJECTED";
+            if (decision.metadata) {
+                decision.metadata.final_enter_executable = false;
+                decision.metadata.final_enter_block_reason = blockReas;
+                decision.metadata.highway_gate_rejected = true;
+            }
+            if (decision.risk) {
+                decision.risk.isBlocked = true;
+                decision.risk.blockReason = blockReas;
+            }
+            return "NONE";
         }
         
         const finalEnterExecutable =
