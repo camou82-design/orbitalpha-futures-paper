@@ -114,24 +114,27 @@ function resolveCloseReasonText(val: unknown): string | null {
  * 판별 불가하나 OKX 실제 체결 증거 존재 => "거래소 체결"
  * UNKNOWN으로 숨기지 않는다.
  */
-const VALID_SOURCE_LABELS = new Set([
+const VALID_CANONICAL_SOURCE_LABELS = new Set([
   "자동",
   "수동",
   "자동→수동",
-  "수동→자동",
-  "외부포지션 인계",
-  "수동관리",
-  "거래소 체결"
+  "수동→자동"
 ]);
 
 export function resolveDisplayTradeSourceLabel(row: unknown): string {
-  if (!row || typeof row !== "object") return "거래소 체결";
+  if (!row || typeof row !== "object") return "수동";
   const o = row as Record<string, unknown>;
 
   const rawSourceLabel =
     typeof o.sourceLabel === "string" ? o.sourceLabel.trim() : "";
-  if (VALID_SOURCE_LABELS.has(rawSourceLabel)) {
+  if (VALID_CANONICAL_SOURCE_LABELS.has(rawSourceLabel)) {
     return rawSourceLabel;
+  }
+  if (rawSourceLabel === "외부포지션 인계") {
+    return "수동→자동";
+  }
+  if (rawSourceLabel === "수동관리") {
+    return "수동";
   }
 
   const str = (v: unknown): string =>
@@ -146,7 +149,7 @@ export function resolveDisplayTradeSourceLabel(row: unknown): string {
   const exitSource = str(o.exitSource);
   const exitType = str(o.exitType);
 
-  // 1. ADOPTED_EXTERNAL
+  // 1. ADOPTED_EXTERNAL (manual entry adopted by bot, or vice-versa)
   const isAdopted =
     o.isAdoptedExternal === true ||
     o.isAdopted === true ||
@@ -195,7 +198,8 @@ export function resolveDisplayTradeSourceLabel(row: unknown): string {
     closeSource.includes("OPERATOR") ||
     closeReason.includes("MANUAL") ||
     closeReason.includes("USER") ||
-    closeReason.includes("OPERATOR");
+    closeReason.includes("OPERATOR") ||
+    closeReason === "수동 청산";
 
   const isBotExit =
     o.isBotExit === true ||
@@ -215,9 +219,13 @@ export function resolveDisplayTradeSourceLabel(row: unknown): string {
     closeReason.includes("SL") ||
     closeReason.includes("TRAILING") ||
     closeReason.includes("REGIME") ||
-    closeReason.includes("DYNAMIC");
+    closeReason.includes("DYNAMIC") ||
+    closeReason.includes("take_profit") ||
+    closeReason.includes("stop_loss") ||
+    closeReason.includes("candidate_lost") ||
+    closeReason.includes("time_based");
 
-  // HYBRID 체크 우선
+  // 1. HYBRID cases (Highest Priority)
   if (isBotEntry && isManualExit) {
     return "자동→수동";
   }
@@ -225,32 +233,37 @@ export function resolveDisplayTradeSourceLabel(row: unknown): string {
     return "수동→자동";
   }
 
-  // 특수 분류
+  // 2. Special adoption / operator cases
   if (isAdopted) {
-    return "외부포지션 인계";
+    return isManualExit ? "자동→수동" : "수동→자동";
   }
   if (isOperatorManaged) {
-    return "수동관리";
+    return isBotEntry ? "자동→수동" : "수동";
   }
 
-  // 순수 자동 / 수동
-  if (isBotEntry && !isManualEntry) {
+  // 3. Pure cases
+  if (isBotEntry && !isManualEntry && !isManualExit) {
     return "자동";
   }
-  if (isManualEntry) {
+  if (isManualEntry && !isBotEntry && !isBotExit) {
     return "수동";
   }
 
-  // fallback
+  // 4. Fallbacks
+  if (isBotExit && !isManualEntry) {
+    return "자동";
+  }
+  if (isManualExit && isBotEntry) {
+    return "자동→수동";
+  }
   if (isManualExit) {
     return "수동";
   }
-  if (isBotExit) {
+  if (isBotEntry) {
     return "자동";
   }
 
-  // 판별 불가하나 거래 증거가 있는 경우 UNKNOWN 대신:
-  return "거래소 체결";
+  return "수동";
 }
 
 /** 번들·UI용: 디스크 `history.json` 한 행을 항상 표시 가능한 형태로 보강한다. */
@@ -565,7 +578,21 @@ export function canonicalClosedTradeDedupKey(row: unknown): string {
   if (!row || typeof row !== "object") return "";
   const o = row as Record<string, unknown>;
 
-  // 1. exchange position/order/lifecycle identity
+  // 1. positionCycleId / flowId / lifecycleId / positionId
+  const posCycleId = typeof o.positionCycleId === "string" && o.positionCycleId.trim().length > 0 ? o.positionCycleId.trim() : null;
+  const flowId = typeof o.flowId === "string" && o.flowId.trim().length > 0 ? o.flowId.trim() : null;
+  const lifecycleId = typeof o.lifecycleId === "string" && o.lifecycleId.trim().length > 0 ? o.lifecycleId.trim() : null;
+  const positionId = typeof o.positionId === "string" && o.positionId.trim().length > 0 ? o.positionId.trim() : null;
+
+  if (posCycleId) return `cycle:${posCycleId}`;
+  if (flowId) return `flow:${flowId}`;
+  if (lifecycleId) return `life:${lifecycleId}`;
+  if (positionId) return `pos:${positionId}`;
+
+  const sym = String(o.symbol ?? "").trim().toUpperCase();
+  const side = String(o.side ?? "").trim().toLowerCase();
+
+  // 4. exchange order ids if present together with symbol:side
   const exPosId = typeof o.exchangePosId === "string" && o.exchangePosId.trim().length > 0 ? o.exchangePosId.trim() : null;
   const exOrdId =
     typeof o.exchangeOrdId === "string" && o.exchangeOrdId.trim().length > 0
@@ -581,26 +608,11 @@ export function canonicalClosedTradeDedupKey(row: unknown): string {
         : null;
   const exClOrdId = typeof o.exchangeClOrdId === "string" && o.exchangeClOrdId.trim().length > 0 ? o.exchangeClOrdId.trim() : null;
 
-  // 2. canonical flowId / positionId / lifecycleId / positionCycleId
-  const posCycleId = typeof o.positionCycleId === "string" && o.positionCycleId.trim().length > 0 ? o.positionCycleId.trim() : null;
-  const positionId = typeof o.positionId === "string" && o.positionId.trim().length > 0 ? o.positionId.trim() : null;
-  const lifecycleId = typeof o.lifecycleId === "string" && o.lifecycleId.trim().length > 0 ? o.lifecycleId.trim() : null;
-  const flowId = typeof o.flowId === "string" && o.flowId.trim().length > 0 ? o.flowId.trim() : null;
-
-  if (posCycleId) return `cycle:${posCycleId}`;
-  if (positionId) return `pos:${positionId}`;
-  if (lifecycleId) return `life:${lifecycleId}`;
-  if (flowId) return `flow:${flowId}`;
-
-  const sym = String(o.symbol ?? "").trim().toUpperCase();
-  const side = String(o.side ?? "").trim().toLowerCase();
-
-  // 3. exchange order ids if present together with symbol:side
   if (exPosId) return `ex_pos:${sym}:${side}:${exPosId}`;
   if (exOrdId && exitOrdId) return `ex_ords:${sym}:${side}:${exOrdId}:${exitOrdId}`;
   if (exClOrdId && exitOrdId) return `ex_clords:${sym}:${side}:${exClOrdId}:${exitOrdId}`;
 
-  // 4. composite fallback: symbol + side + openedAt + closedAt (+ entryPx / exitPx / size)
+  // 5. composite fallback: symbol + side + openedAt + closedAt (+ entryPx / exitPx / size)
   const openedAt = typeof o.openedAt === "number" && Number.isFinite(o.openedAt) && o.openedAt > 0 ? Math.round(o.openedAt / 1000) : "na";
   const closedAt = typeof o.closedAt === "number" && Number.isFinite(o.closedAt) && o.closedAt > 0 ? Math.round(o.closedAt / 1000) : "na";
   const entryPx = typeof o.entryPrice === "number" && Number.isFinite(o.entryPrice) && o.entryPrice > 0 ? Number(o.entryPrice).toFixed(2) : "na";
@@ -618,24 +630,106 @@ export function canonicalClosedTradeDedupKey(row: unknown): string {
 export function deduplicateClosedHistoryRows(rows: NormalizedPaperClosedRow[]): NormalizedPaperClosedRow[] {
   if (!Array.isArray(rows) || rows.length <= 1) return rows;
 
-  const dedupMap = new Map<string, NormalizedPaperClosedRow>();
   const results: NormalizedPaperClosedRow[] = [];
 
   for (const r of rows) {
     const key = canonicalClosedTradeDedupKey(r);
-    // If no meaningful key could be derived, preserve as-is
-    if (!key || key.startsWith("composite::::na:na:na:na:na")) {
-      results.push(r);
-      continue;
+    const sym = String(r.symbol ?? "").trim().toUpperCase();
+    const side = String(r.side ?? "").trim().toLowerCase();
+    const openedAt = typeof r.openedAt === "number" && Number.isFinite(r.openedAt) ? r.openedAt : 0;
+    const closedAt = typeof r.closedAt === "number" && Number.isFinite(r.closedAt) ? r.closedAt : 0;
+
+    let matchIdx = -1;
+
+    for (let i = 0; i < results.length; i++) {
+      const existing = results[i];
+      const existingKey = canonicalClosedTradeDedupKey(existing);
+
+      // 1. Exact key match (if non-empty and non-trivial fallback)
+      if (key && existingKey && key === existingKey && !key.startsWith("composite::::na:na:na:na:na")) {
+        matchIdx = i;
+        break;
+      }
+
+      // 2. Shared flowId match
+      if (r.flowId && existing.flowId && r.flowId === existing.flowId) {
+        matchIdx = i;
+        break;
+      }
+
+      // 3. Shared positionCycleId match
+      if (r.positionCycleId && existing.positionCycleId && r.positionCycleId === existing.positionCycleId) {
+        matchIdx = i;
+        break;
+      }
+
+      // 4. Shared exchange order IDs
+      const rEntryOrds = Array.isArray(r.exchangeEntryOrdIds) ? r.exchangeEntryOrdIds : [];
+      const exEntryOrds = Array.isArray(existing.exchangeEntryOrdIds) ? existing.exchangeEntryOrdIds : [];
+      if (rEntryOrds.length > 0 && exEntryOrds.length > 0 && rEntryOrds.some((id) => exEntryOrds.includes(id))) {
+        matchIdx = i;
+        break;
+      }
+
+      // 5. Tolerance match: same symbol, same side, within 2s of openedAt and closedAt,
+      // provided they don't have conflicting explicit identities
+      const rExOrd =
+        typeof r.exchangeOrdId === "string" && r.exchangeOrdId.trim().length > 0
+          ? r.exchangeOrdId.trim()
+          : Array.isArray(r.exchangeEntryOrdIds) && r.exchangeEntryOrdIds.length > 0
+            ? String(r.exchangeEntryOrdIds[0]).trim()
+            : null;
+      const exExOrd =
+        typeof existing.exchangeOrdId === "string" && existing.exchangeOrdId.trim().length > 0
+          ? existing.exchangeOrdId.trim()
+          : Array.isArray(existing.exchangeEntryOrdIds) && existing.exchangeEntryOrdIds.length > 0
+            ? String(existing.exchangeEntryOrdIds[0]).trim()
+            : null;
+
+      const rExitOrd =
+        typeof r.exitOrdId === "string" && r.exitOrdId.trim().length > 0
+          ? r.exitOrdId.trim()
+          : Array.isArray(r.exchangeExitOrdIds) && r.exchangeExitOrdIds.length > 0
+            ? String(r.exchangeExitOrdIds[0]).trim()
+            : null;
+      const exExitOrd =
+        typeof existing.exitOrdId === "string" && existing.exitOrdId.trim().length > 0
+          ? existing.exitOrdId.trim()
+          : Array.isArray(existing.exchangeExitOrdIds) && existing.exchangeExitOrdIds.length > 0
+            ? String(existing.exchangeExitOrdIds[0]).trim()
+            : null;
+
+      const hasConflictingIdentities =
+        (rExOrd && exExOrd && rExOrd !== exExOrd) ||
+        (rExitOrd && exExitOrd && rExitOrd !== exExitOrd) ||
+        (r.flowId && existing.flowId && r.flowId !== existing.flowId) ||
+        (r.positionCycleId && existing.positionCycleId && r.positionCycleId !== existing.positionCycleId);
+
+      const exSym = String(existing.symbol ?? "").trim().toUpperCase();
+      const exSide = String(existing.side ?? "").trim().toLowerCase();
+      const exOpenedAt = typeof existing.openedAt === "number" && Number.isFinite(existing.openedAt) ? existing.openedAt : 0;
+      const exClosedAt = typeof existing.closedAt === "number" && Number.isFinite(existing.closedAt) ? existing.closedAt : 0;
+
+      if (
+        !hasConflictingIdentities &&
+        sym &&
+        sym === exSym &&
+        side &&
+        side === exSide &&
+        openedAt > 0 &&
+        exOpenedAt > 0 &&
+        closedAt > 0 &&
+        exClosedAt > 0 &&
+        Math.abs(openedAt - exOpenedAt) <= 2000 &&
+        Math.abs(closedAt - exClosedAt) <= 2000
+      ) {
+        matchIdx = i;
+        break;
+      }
     }
 
-    const existing = dedupMap.get(key);
-    if (!existing) {
-      dedupMap.set(key, r);
-      results.push(r);
-    } else {
-      // Merge multiple representations of the exact same trade:
-      // Preserve richer strategy metadata from bot record and actual execution truth from exchange record
+    if (matchIdx >= 0) {
+      const existing = results[matchIdx];
       const isRExchangeTruth = (r as any).accountTruth === true;
       const isExistingExchangeTruth = (existing as any).accountTruth === true;
 
@@ -643,42 +737,63 @@ export function deduplicateClosedHistoryRows(rows: NormalizedPaperClosedRow[]): 
 
       // Strategy metadata from bot record (if present)
       const botObj = isRExchangeTruth ? existing : r;
-      if (botObj.strategyVersion) base.strategyVersion = botObj.strategyVersion;
-      if (botObj.strategy) base.strategy = botObj.strategy;
-      if (botObj.sourceSignal) base.sourceSignal = botObj.sourceSignal;
-      if (botObj.regime) base.regime = botObj.regime;
-      if (botObj.regimeAtEntry) base.regimeAtEntry = botObj.regimeAtEntry;
-      if (botObj.flowId) base.flowId = botObj.flowId;
-      if (botObj.positionCycleId) base.positionCycleId = botObj.positionCycleId;
-      if (botObj.exitReason && botObj.exitReason !== "거래소 청산") base.exitReason = botObj.exitReason;
-      if (botObj.sourceLabel && botObj.sourceLabel !== "거래소 체결") base.sourceLabel = botObj.sourceLabel;
-      if (botObj.tradeSource && botObj.tradeSource === "BOT_V2") base.tradeSource = botObj.tradeSource;
+      if (botObj.strategyVersion) (base as any).strategyVersion = botObj.strategyVersion;
+      if (botObj.strategy) (base as any).strategy = botObj.strategy;
+      if (botObj.sourceSignal) (base as any).sourceSignal = botObj.sourceSignal;
+      if (botObj.regime) (base as any).regime = botObj.regime;
+      if (botObj.regimeAtEntry) (base as any).regimeAtEntry = botObj.regimeAtEntry;
+      if (botObj.flowId) (base as any).flowId = botObj.flowId;
+      if (botObj.positionCycleId) (base as any).positionCycleId = botObj.positionCycleId;
+      if (botObj.exitReason && botObj.exitReason !== "거래소 청산" && botObj.exitReason !== "수동 청산") {
+        (base as any).exitReason = botObj.exitReason;
+      }
+      if (botObj.closeReason && botObj.closeReason !== "regime_exit") (base as any).closeReason = botObj.closeReason;
+      if (botObj.exitType && botObj.exitType !== "EXIT_UNKNOWN") (base as any).exitType = botObj.exitType;
+      if (botObj.tradeSource && botObj.tradeSource === "BOT_V2") (base as any).tradeSource = botObj.tradeSource;
 
       // Exchange execution numbers (if present)
       const exObj = isRExchangeTruth ? r : isExistingExchangeTruth ? existing : null;
       if (exObj) {
         const exFee = parseFinite(exObj.feeUsd) ?? parseFinite((exObj as any).fee);
-        if (exFee !== null) base.feeUsd = exFee;
+        if (exFee !== null) (base as any).feeUsd = exFee;
         const exPnl =
           parseFinite(exObj.realizedPnlUsd) ??
+          parseFinite(exObj.pnlUsdNet) ??
           parseFinite((exObj as any).pnlNet) ??
           parseFinite((exObj as any).realizedPnl);
         if (exPnl !== null) {
-          base.realizedPnlUsd = exPnl;
-          base.pnlUsdNet = exPnl;
-          base.pnlUsd = exPnl;
+          (base as any).realizedPnlUsd = exPnl;
+          (base as any).pnlUsdNet = exPnl;
+          (base as any).pnlUsd = exPnl;
         }
+        const exPnlGross = parseFinite(exObj.pnlUsdGross) ?? parseFinite((exObj as any).realizedPnl);
+        if (exPnlGross !== null) (base as any).pnlUsdGross = exPnlGross;
         const exPnlPct = parseFinite(exObj.realizedPnlPct);
-        if (exPnlPct !== null) base.realizedPnlPct = exPnlPct;
+        if (exPnlPct !== null) (base as any).realizedPnlPct = exPnlPct;
+        if (exObj.entryPrice && exObj.entryPrice > 0) (base as any).entryPrice = exObj.entryPrice;
+        if (exObj.closePrice && exObj.closePrice > 0) (base as any).closePrice = exObj.closePrice;
+        if (exObj.sizeUsd && exObj.sizeUsd > 0) (base as any).sizeUsd = exObj.sizeUsd;
+        if (exObj.openedAt && exObj.openedAt > 0) (base as any).openedAt = exObj.openedAt;
+        if (exObj.closedAt && exObj.closedAt > 0) (base as any).closedAt = exObj.closedAt;
       }
 
-      dedupMap.set(key, base as NormalizedPaperClosedRow);
-      const idx = results.indexOf(existing);
-      if (idx >= 0) results[idx] = base as NormalizedPaperClosedRow;
+      // Partial exit / child execution consolidation
+      if ((existing as any).isChildExecution === true || (r as any).isChildExecution === true) {
+        (base as any).isChildExecution = false;
+        (base as any).isPositionCycleFinal = true;
+      }
+
+      // Canonical sourceLabel
+      (base as any).sourceLabel = resolveDisplayTradeSourceLabel(base);
+
+      results[matchIdx] = base as NormalizedPaperClosedRow;
+    } else {
+      results.push(r);
     }
   }
 
-  return results;
+  // Always sort descending by closedAt
+  return results.sort((a, b) => (Number(b.closedAt) || 0) - (Number(a.closedAt) || 0));
 }
 
 export function normalizePositionsHistoryArray(rows: unknown[]): NormalizedPaperClosedRow[] {

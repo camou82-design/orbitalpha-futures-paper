@@ -1740,9 +1740,13 @@
         </div>
       </div>`;
   function resolveDisplaySourceLabel(row) {
-    if (!row || typeof row !== "object") return "거래소 체결";
+    if (!row || typeof row !== "object") return "수동";
     if (typeof row.sourceLabel === "string" && row.sourceLabel.trim().length > 0) {
-      return row.sourceLabel.trim();
+      const s = row.sourceLabel.trim();
+      if (s === "외부포지션 인계") return "수동→자동";
+      if (s === "수동관리") return "수동";
+      if (s === "거래소 체결") return "수동";
+      return s;
     }
     const str = (v) => (typeof v === "string" ? v.trim().toUpperCase() : "");
 
@@ -1758,6 +1762,7 @@
       source.includes("ADOPTED") ||
       strategy.includes("ADOPTED") ||
       row.isAdopted === true ||
+      row.isAdoptedExternal === true ||
       Boolean(row.adoptedFrom);
 
     const isOperatorManaged =
@@ -1765,9 +1770,11 @@
       source.includes("OPERATOR") ||
       strategy.includes("OPERATOR") ||
       closeReason.includes("OPERATOR") ||
-      closeSource.includes("OPERATOR");
+      closeSource.includes("OPERATOR") ||
+      row.isOperatorManaged === true;
 
     const isManualEntry =
+      row.isManualEntry === true ||
       source === "MANUAL" ||
       source === "MANUAL_EXTERNAL" ||
       entrySource === "MANUAL" ||
@@ -1778,6 +1785,7 @@
       authority === "OPERATOR";
 
     const isBotEntry =
+      row.isBotEntry === true ||
       source === "V2" ||
       source === "BOT" ||
       source === "BOT_V2" ||
@@ -1785,16 +1793,21 @@
       strategy.includes("V2") ||
       strategy.includes("BOT") ||
       strategy.includes("HIGHWAY") ||
+      strategy.includes("RANGE") ||
+      strategy.includes("TREND") ||
       Boolean(row.flowId);
 
     const isManualExit =
+      row.isManualExit === true ||
       closeSource.includes("MANUAL") ||
       closeSource.includes("OPERATOR") ||
       closeReason.includes("MANUAL") ||
       closeReason.includes("USER") ||
-      closeReason.includes("OPERATOR");
+      closeReason.includes("OPERATOR") ||
+      closeReason === "수동 청산";
 
     const isBotExit =
+      row.isBotExit === true ||
       closeSource.includes("BOT") ||
       closeSource.includes("ENGINE") ||
       closeSource.includes("INTERNAL") ||
@@ -1802,28 +1815,32 @@
       closeReason.includes("SL") ||
       closeReason.includes("TRAILING") ||
       closeReason.includes("REGIME") ||
-      closeReason.includes("DYNAMIC");
+      closeReason.includes("DYNAMIC") ||
+      closeReason.includes("take_profit") ||
+      closeReason.includes("stop_loss") ||
+      closeReason.includes("candidate_lost") ||
+      closeReason.includes("time_based");
 
     if (isBotEntry && isManualExit) return "자동→수동";
     if (isManualEntry && isBotExit) return "수동→자동";
-    if (isAdopted) return "외부포지션 인계";
-    if (isOperatorManaged) return "수동관리";
-    if (isBotEntry && !isManualEntry) return "자동";
-    if (isManualEntry) return "수동";
+    if (isAdopted) return isManualExit ? "자동→수동" : "수동→자동";
+    if (isOperatorManaged) return isBotEntry ? "자동→수동" : "수동";
+    if (isBotEntry && !isManualEntry && !isManualExit) return "자동";
+    if (isManualEntry && !isBotEntry && !isBotExit) return "수동";
+    if (isBotExit && !isManualEntry) return "자동";
+    if (isManualExit && isBotEntry) return "자동→수동";
     if (isManualExit) return "수동";
-    if (isBotExit) return "자동";
-    return "거래소 체결";
+    if (isBotEntry) return "자동";
+    return "수동";
   }
 
   function badgeSourceHtml(label) {
     const l = String(label || "").trim();
-    let cls = "badge-source--exchange";
+    let cls = "badge-source--manual";
     if (l === "자동") cls = "badge-source--auto";
     else if (l === "수동") cls = "badge-source--manual";
-    else if (l === "외부포지션 인계") cls = "badge-source--adopted";
-    else if (l === "수동관리") cls = "badge-source--operator";
     else if (l.includes("→")) cls = "badge-source--hybrid";
-    return `<span class="badge-source ${cls}">${esc(l || "거래소 체결")}</span>`;
+    return `<span class="badge-source ${cls}">${esc(l || "수동")}</span>`;
   }
 
   function renderSymbols(bundle) {

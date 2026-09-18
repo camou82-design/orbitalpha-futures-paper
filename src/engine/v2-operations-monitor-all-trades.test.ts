@@ -47,39 +47,40 @@ test("PHASE 13: Operations Monitor All Trades — 14 Mandatory Tests", async (t)
     assert.equal(norm.sourceLabel, "수동");
   });
 
-  // 3. ADOPTED_EXTERNAL 표시
-  await t.test("3. ADOPTED_EXTERNAL trade is labeled as '외부포지션 인계'", () => {
+  // 3. ADOPTED_EXTERNAL (수동진입→봇관리/청산) 표시
+  await t.test("3. ADOPTED_EXTERNAL trade is unified to '수동→자동'", () => {
     const adoptedRow = {
       symbol: "ETHUSDT",
       side: "long",
       source: "ADOPTED_EXTERNAL",
       authority: "ADOPTED_EXTERNAL",
       adoptedFrom: "okx_manual",
-      closeSource: "UNKNOWN",
-      closeReason: "manual_external_close"
+      closeSource: "BOT_STRATEGY",
+      closeReason: "take_profit"
     };
     const label = resolveDisplayTradeSourceLabel(adoptedRow);
-    assert.equal(label, "외부포지션 인계");
+    assert.equal(label, "수동→자동");
 
     const norm = normalizeClosedHistoryRow(adoptedRow);
-    assert.equal(norm.sourceLabel, "외부포지션 인계");
+    assert.equal(norm.sourceLabel, "수동→자동");
   });
 
-  // 4. OPERATOR_MANAGED 표시
-  await t.test("4. OPERATOR_MANAGED trade is labeled as '수동관리'", () => {
+  // 4. OPERATOR_MANAGED (봇진입→수동개입/청산) 표시
+  await t.test("4. OPERATOR_MANAGED takeover is unified to '자동→수동'", () => {
     const opRow = {
       symbol: "ETHUSDT",
       side: "short",
       source: "OPERATOR_MANAGED",
       authority: "OPERATOR_MANAGED",
+      flowId: "flow-takeover-1",
       closeSource: "OPERATOR",
       closeReason: "operator_takeover_close"
     };
     const label = resolveDisplayTradeSourceLabel(opRow);
-    assert.equal(label, "수동관리");
+    assert.equal(label, "자동→수동");
 
     const norm = normalizeClosedHistoryRow(opRow);
-    assert.equal(norm.sourceLabel, "수동관리");
+    assert.equal(norm.sourceLabel, "자동→수동");
   });
 
   // 5. 자동진입→수동청산 표시

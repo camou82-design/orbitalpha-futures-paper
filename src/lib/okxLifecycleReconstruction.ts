@@ -186,9 +186,9 @@ export function reconstructLifecyclesFromFills(
       const isManualEntry = !isBotEntry;
       const isManualExit = !isBotExit;
 
-      let sourceLabel = "거래소 체결";
+      let sourceLabel = "수동";
       let tradeSource = "OKX_ACCOUNT_TRUTH";
-      let exitReason = "거래소 청산";
+      let exitReason = "수동 청산";
 
       if (isBotEntry && isBotExit) {
         sourceLabel = "자동";

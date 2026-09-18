@@ -1040,7 +1040,7 @@ test("PHASE 13D: OKX Account Truth Lifecycle Ingestion & Dedup Forensic Suite", 
     const rawWithAuthoritativeLabel = {
       symbol: "BTCUSDT",
       side: "long",
-      sourceLabel: "외부포지션 인계",
+      sourceLabel: "수동→자동",
       entrySource: "BOT",
       exitSource: "BOT",
       isBotEntry: true,
@@ -1048,7 +1048,7 @@ test("PHASE 13D: OKX Account Truth Lifecycle Ingestion & Dedup Forensic Suite", 
     };
 
     const normalized = normalizeClosedHistoryRow(rawWithAuthoritativeLabel);
-    assert.equal(normalized.sourceLabel, "외부포지션 인계");
+    assert.equal(normalized.sourceLabel, "수동→자동");
   });
 
   // 32. 순수 BOT normalize → 자동

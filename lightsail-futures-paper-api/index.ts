@@ -5,7 +5,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import express, { Request, Response } from "express";
-import { deriveCurrentPositionsForDisplay } from "../src/lib/futuresPaperBundleCore.ts";
+import { deriveCurrentPositionsForDisplay, type FuturesPaperDataBundle as DataBundle } from "../src/lib/futuresPaperBundleCore.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const monitorDir = path.join(__dirname, "..", "monitor");
@@ -114,9 +114,9 @@ async function attachNoEntryAudit(projectRoot: string, bundle: DataBundle): Prom
     const bySym = ne.bySymbol;
     return {
       ...bundle,
-      noEntryAudit: ne,
+      noEntryAudit: ne as any,
       noEntryAuditBySymbol:
-        bySym && typeof bySym === "object" && !Array.isArray(bySym) ? (bySym as Record<string, unknown>) : null
+        bySym && typeof bySym === "object" && !Array.isArray(bySym) ? (bySym as any) : null
     };
   } catch {
     return bundle;

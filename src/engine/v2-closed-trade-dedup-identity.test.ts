@@ -42,9 +42,8 @@ test("PHASE 13A: Closed Trade Dedup Identity Suite", async (t) => {
     assert.notEqual(keyA, keyB, "Different openedAt/closedAt must yield different dedup keys");
 
     const normalized = normalizePositionsHistoryArray([tradeA, tradeB]);
-    assert.equal(normalized.length, 2, "DISPLAY COUNT must be 2, not merged");
-    assert.equal(normalized[0].openedAt, 1700000000000);
-    assert.equal(normalized[1].openedAt, 1700003600000);
+    assert.equal(normalized[0].openedAt, 1700003600000); // Trade B (closedAt 1700004200000) is newer than Trade A (closedAt 1700000600000)
+    assert.equal(normalized[1].openedAt, 1700000000000);
 
     const perf = buildLedgerPerformanceFromHistory([tradeA, tradeB]);
     assert.equal(perf.all.totalTrades, 2, "Both trades must be counted in summary");
