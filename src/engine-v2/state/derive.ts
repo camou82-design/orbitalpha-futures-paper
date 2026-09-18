@@ -1,6 +1,7 @@
 import type { EngineV2Input, EngineV2Position, EngineV2Side } from "../types";
 import type { Candle } from "../../models/types";
 import type { V2StateAuthority } from "./types";
+import { buildSymbolPositionAuthorityProof } from "../position/manual-augment-authority";
 
 const DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT = 100;
 
@@ -166,16 +167,40 @@ export function inferIntentSide(input: EngineV2Input): EngineV2Side {
     return side;
 }
 
-/** Held/open-position management side: OKX actual first, then sole ledger open side. */
+/** Held/open-position management side: symbol-local OKX actual first, then sole symbol-local ledger open side. */
 export function resolveHeldPositionSide(
     input: EngineV2Input,
     longPosition: EngineV2Position | null,
     shortPosition: EngineV2Position | null
 ): EngineV2Side {
-    const okx = String(input.state.okxActualSide ?? "").toLowerCase();
-    if (okx === "long") return "long";
-    if (okx === "short") return "short";
+    // 1. If explicit OKX actual positions list is available, search strictly for THIS symbol
+    const okxPositions = Array.isArray((input.state as any)?.okxActualPositions)
+        ? (input.state as any).okxActualPositions
+        : [];
+    if (okxPositions.length > 0) {
+        const matchingOkxPos = okxPositions.find((p: any) => p && p.symbol === input.symbol);
+        if (matchingOkxPos) {
+            const side = String(matchingOkxPos.side ?? matchingOkxPos.posSide ?? "").toLowerCase();
+            if (side === "long" || side === "short") return side as EngineV2Side;
+        } else {
+            // OKX positions list is explicitly present and this symbol has 0 OKX positions!
+            // Do NOT inherit global okxActualSide!
+            if (longPosition && !shortPosition) return "long";
+            if (shortPosition && !longPosition) return "short";
+            if (longPosition && shortPosition) return toSideLower(longPosition);
+            return "none";
+        }
+    }
 
+    // 2. If state symbol matches input symbol, okxActualSide is authoritative for this symbol
+    const stateSymbol = (input.state as any)?.symbol;
+    if (stateSymbol === input.symbol || (!stateSymbol && (longPosition != null || shortPosition != null))) {
+        const okx = String(input.state.okxActualSide ?? "").toLowerCase();
+        if (okx === "long") return "long";
+        if (okx === "short") return "short";
+    }
+
+    // 3. Ledger symbol-local positions
     if (longPosition && !shortPosition) return "long";
     if (shortPosition && !longPosition) return "short";
     if (longPosition && shortPosition) {
@@ -248,6 +273,16 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
     const shortStage = shortPosition ? Math.max(1, Number(shortPosition.entryStage ?? 1)) : 0;
     const heldPositionSide = resolveHeldPositionSide(input, longPosition, shortPosition);
     const managementSide = heldPositionSide;
+    const isContaminated = symbolPositions.length === 0 && (input.state as any)?.okxActualPositions?.length > 0 && heldPositionSide !== "none";
+
+    console.info(JSON.stringify(buildSymbolPositionAuthorityProof({
+        symbol: String(input.symbol),
+        symbolPositionsCount: symbolPositions.length,
+        heldPositionSide,
+        managementSide,
+        isContaminated
+    })));
+
     const heldPositionState = resolvePositionStateForSide(
         { longPosition, shortPosition, longStage, shortStage } as V2StateAuthority,
         heldPositionSide

@@ -160,3 +160,90 @@ export function computeProtectiveQtyCoverage(
         proof
     };
 }
+
+export interface SymbolPositionAuthorityProofInput {
+    symbol: string;
+    symbolPositionsCount: number;
+    heldPositionSide: string | null;
+    managementSide: string | null;
+    isContaminated: boolean;
+}
+
+export function buildSymbolPositionAuthorityProof(
+    input: SymbolPositionAuthorityProofInput
+): Record<string, unknown> {
+    return {
+        event: "V2_SYMBOL_POSITION_AUTHORITY_PROOF",
+        symbol: input.symbol,
+        symbolPositionsCount: input.symbolPositionsCount,
+        heldPositionSide: input.heldPositionSide,
+        managementSide: input.managementSide,
+        isContaminated: input.isContaminated
+    };
+}
+
+export function evaluateManualAugmentReclassification(input: Readonly<{
+    ledger: {
+        symbol?: string;
+        side?: string;
+        okxContracts?: number | null;
+        isV2Authority?: boolean;
+        lifecycleState?: string;
+        manualTakeoverActive?: boolean;
+        manualOwnershipLatch?: boolean;
+        originalEntryPrice?: number;
+        sourceSignal?: string | null;
+        authoritySourceAtEntry?: string | null;
+        authority?: string | null;
+        exchangeClOrdId?: string | null;
+    };
+    okxActualPositionExists: boolean;
+    okxActualContracts: number;
+    okxActualAvgPx: number;
+    okxActualNotional: number;
+    okxSide?: string | null;
+}>): Readonly<{
+    shouldReclassify: boolean;
+    reason: string | null;
+}> {
+    const ledger = input.ledger;
+    if (!input.okxActualPositionExists || input.okxActualContracts <= 0) {
+        return { shouldReclassify: false, reason: null };
+    }
+
+    const isBotOriginated =
+        ledger.isV2Authority === true ||
+        ledger.lifecycleState === "BOT_V2_MANAGED" ||
+        ledger.lifecycleState === "MANUAL_SIZE_AUGMENTED" ||
+        ledger.originalEntryPrice != null ||
+        ledger.sourceSignal != null ||
+        String(ledger.authoritySourceAtEntry ?? ledger.authority ?? "").trim().toLowerCase() === "v2" ||
+        String(ledger.exchangeClOrdId ?? "").startsWith("p");
+
+    if (!isBotOriginated) {
+        return { shouldReclassify: false, reason: null };
+    }
+
+    const ledgerSide = String(ledger.side ?? "").toLowerCase();
+    const okxSide = String(input.okxSide ?? ledgerSide).toLowerCase();
+    const isSameSide = okxSide === ledgerSide || okxSide === "net";
+    if (!isSameSide) {
+        return { shouldReclassify: false, reason: "OPPOSITE_SIDE_NOT_ELIGIBLE" };
+    }
+
+    const paperContracts = ledger.okxContracts ?? 0;
+    const isSizeIncreased = input.okxActualContracts > paperContracts;
+    const isCurrentlyOperatorManaged =
+        ledger.lifecycleState === "OPERATOR_MANAGED" ||
+        ledger.manualTakeoverActive === true ||
+        ledger.manualOwnershipLatch === true;
+
+    if ((isSizeIncreased || ledger.lifecycleState === "MANUAL_SIZE_AUGMENTED") && isCurrentlyOperatorManaged) {
+        return {
+            shouldReclassify: true,
+            reason: "SAME_SIDE_MANUAL_AUGMENT_RECLASSIFICATION"
+        };
+    }
+
+    return { shouldReclassify: false, reason: null };
+}

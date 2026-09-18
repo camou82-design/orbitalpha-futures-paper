@@ -230,11 +230,7 @@ import {
   type ProtectiveAlgoRow,
   type ProtectiveReconcileContext
 } from "../engine-v2/execution/protective-reconcile-plan";
-import {
-  buildManualAugmentAuthorityProof,
-  buildPositionManagementPriceAuthorityProof,
-  computeProtectiveQtyCoverage
-} from "../engine-v2/position/manual-augment-authority";
+
 import {
   buildEntryAttachProtectiveCandidates,
   buildOkxAlgoClOrdId,
@@ -382,6 +378,12 @@ import {
   type ManualTakeoverStoreDoc,
   type ManualTakeoverReason
 } from "../engine-v2/position/manual-takeover-authority";
+import {
+  buildManualAugmentAuthorityProof,
+  buildPositionManagementPriceAuthorityProof,
+  computeProtectiveQtyCoverage,
+  evaluateManualAugmentReclassification
+} from "../engine-v2/position/manual-augment-authority";
 import {
   evaluateReduceProtectiveReensure,
   buildV2ReduceProtectiveReensureProof
@@ -4611,6 +4613,99 @@ export class PaperEngine {
         }
       }
 
+      // --- SAME-SIDE MANUAL AUGMENT MIGRATION & RECLASSIFICATION ---
+      if (
+        remotePos &&
+        remotePos.contracts > 0 &&
+        (open.lifecycleState === "OPERATOR_MANAGED" ||
+          open.manualTakeoverActive === true ||
+          open.manualOwnershipLatch === true ||
+          open.lifecycleState === "MANUAL_SIZE_AUGMENTED")
+      ) {
+        const reclass = evaluateManualAugmentReclassification({
+          ledger: open,
+          okxActualPositionExists: true,
+          okxActualContracts: remotePos.contracts,
+          okxActualAvgPx: remotePos.avgPx,
+          okxActualNotional: remotePos.notionalUsd,
+          okxSide: remotePos.posSide
+        });
+
+        if (reclass.shouldReclassify) {
+          const prevLifecycle = open.lifecycleState;
+          open.lifecycleState = "MANUAL_SIZE_AUGMENTED";
+          open.manualTakeoverActive = false;
+          open.manualOwnershipLatch = false;
+          open.manualAugmentActive = true;
+          open.actualAvgPx = remotePos.avgPx;
+          open.actualContracts = remotePos.contracts;
+          open.actualNotionalUsd = remotePos.notionalUsd;
+          open.originalEntryPrice = open.originalEntryPrice ?? open.entryPrice;
+          open.originalSizeUsd = open.originalSizeUsd ?? open.sizeUsd;
+          open.reconcileState = "MATCHED";
+
+          // Clear runtime takeover records for this symbol from memory map
+          const takeoverKey = buildManualTakeoverKey(open.symbol, open.side);
+          const generalKey = String(open.symbol).toUpperCase();
+          this.manualTakeoverBySymbol.delete(takeoverKey);
+          this.manualTakeoverBySymbol.delete(generalKey);
+          void this.persistManualTakeoverDoc();
+
+          this.logger.info("V2_MANUAL_AUGMENT_MIGRATION_PROOF", {
+            symbol: open.symbol,
+            side: open.side,
+            previous_lifecycle: prevLifecycle,
+            restored_lifecycle: "MANUAL_SIZE_AUGMENTED",
+            manual_takeover_released: true,
+            actual_contracts: remotePos.contracts,
+            actual_avg_px: remotePos.avgPx,
+            ledger_contracts: open.okxContracts,
+            ledger_entry_price: open.originalEntryPrice ?? open.entryPrice
+          });
+
+          this.logger.info(
+            "V2_MANUAL_AUGMENT_AUTHORITY_PROOF",
+            buildManualAugmentAuthorityProof({
+              symbol: open.symbol,
+              side: open.side,
+              ledgerQty: open.okxContracts ?? 0,
+              ledgerAvgPx: open.originalEntryPrice ?? open.entryPrice,
+              ledgerNotional: open.originalSizeUsd ?? open.sizeUsd,
+              okxActualQty: remotePos.contracts,
+              okxActualAvgPx: remotePos.avgPx,
+              okxActualNotional: remotePos.notionalUsd,
+              interventionType: "SAME_SIDE_MANUAL_AUGMENT",
+              lifecycleState: "MANUAL_SIZE_AUGMENTED",
+              positionManagementAllowed: true,
+              autoAddonAllowed: false,
+              protectionReconcileAllowed: true
+            })
+          );
+
+          this.logger.info(
+            "V2_POSITION_MANAGEMENT_PRICE_AUTHORITY_PROOF",
+            buildPositionManagementPriceAuthorityProof({
+              symbol: open.symbol,
+              pnlEntryPriceSource: "okx_actual_avg_px",
+              managementAvgPx: remotePos.avgPx,
+              ledgerEntryPrice: open.originalEntryPrice ?? open.entryPrice,
+              actualAvgPx: remotePos.avgPx
+            })
+          );
+
+          const coverage = computeProtectiveQtyCoverage({
+            symbol: open.symbol,
+            instId: remotePos.instId ?? toOkxSwapInstId(open.symbol),
+            positionSide: open.side as "long" | "short",
+            actualQty: remotePos.contracts,
+            pendingAlgos: this.cachedOpsAlgos ?? []
+          });
+          this.logger.info("V2_PROTECTIVE_QTY_COVERAGE_PROOF", coverage.proof);
+
+          ledgerModified = true;
+        }
+      }
+
       const symbolSyncStatus = reconcileSyncSnap.mismatched_keys.includes(key)
         ? reconcileSyncSnap.sync_status
         : "ALIGNED";
@@ -5259,6 +5354,7 @@ export class PaperEngine {
       if (
         open.lifecycleState === "OPEN" ||
         open.lifecycleState === "BOT_V2_MANAGED" ||
+        open.lifecycleState === "MANUAL_SIZE_AUGMENTED" ||
         open.lifecycleState === "PARTIAL_ACTIVE" ||
         open.lifecycleState === "CLOSE_ONLY_MANAGED" ||
         open.lifecycleState === "EXTERNAL_MANUAL_MANAGED"
@@ -26419,8 +26515,14 @@ export function buildV2StateBridge(
         return {
           symbol: p.symbol,
           side: side,
-          entryPrice: p.entryPrice,
-          sizeUsd: p.sizeUsd,
+          entryPrice:
+            p.lifecycleState === "MANUAL_SIZE_AUGMENTED" && typeof p.actualAvgPx === "number" && p.actualAvgPx > 0
+              ? p.actualAvgPx
+              : p.entryPrice,
+          sizeUsd:
+            p.lifecycleState === "MANUAL_SIZE_AUGMENTED" && typeof p.actualNotionalUsd === "number" && p.actualNotionalUsd > 0
+              ? p.actualNotionalUsd
+              : p.sizeUsd,
           pnlPct: p.unrealizedPnlPct,
           leverage: typeof p.leverage === "number" && Number.isFinite(p.leverage) && p.leverage > 0 ? p.leverage : undefined,
           entryStage: p.entryStage ?? 1,

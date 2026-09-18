@@ -630,10 +630,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const posAny = heldPos as any;
     const stateAny = authoritativeInput.state as any;
     const isManualTakeover =
-        posAny?.manualTakeoverActive === true ||
+        posAny?.lifecycleState !== "MANUAL_SIZE_AUGMENTED" &&
+        (posAny?.manualTakeoverActive === true ||
         posAny?.lifecycleState === "OPERATOR_MANAGED" ||
         stateAny?.manualTakeoverActive === true ||
-        stateAny?.hasOperatorPendingOrders === true;
+        stateAny?.hasOperatorPendingOrders === true);
 
     if (isManualTakeover) {
         const isPendingOrderSource = stateAny?.hasOperatorPendingOrders === true && !heldPos;

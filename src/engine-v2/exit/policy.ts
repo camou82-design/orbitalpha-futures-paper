@@ -53,7 +53,7 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
     const stage = pos ? Math.max(1, Number(pos.entryStage ?? 1)) : 0;
 
     const posAny = pos as any;
-    if (posAny && (posAny.manualTakeoverActive === true || posAny.lifecycleState === "OPERATOR_MANAGED" || posAny.manualOwnershipLatch === true)) {
+    if (posAny && posAny.lifecycleState !== "MANUAL_SIZE_AUGMENTED" && (posAny.manualTakeoverActive === true || posAny.lifecycleState === "OPERATOR_MANAGED" || posAny.manualOwnershipLatch === true)) {
         return {
             action: "HOLD",
             shouldExit: false,

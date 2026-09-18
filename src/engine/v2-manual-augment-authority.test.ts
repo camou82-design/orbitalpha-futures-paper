@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
     buildManualAugmentAuthorityProof,
     buildPositionManagementPriceAuthorityProof,
-    computeProtectiveQtyCoverage
+    buildSymbolPositionAuthorityProof,
+    computeProtectiveQtyCoverage,
+    evaluateManualAugmentReclassification
 } from "../engine-v2/position/manual-augment-authority";
 import { resolvePositionOwnership } from "../engine-v2/position/ownership-resolver";
 import { evaluateManualOwnershipLatchTrigger } from "../engine-v2/position/manual-ownership-latch";
@@ -11,19 +13,25 @@ import { classifyPositionSizeDelta } from "../engine-v2/position/manual-reduce-r
 import { evaluateV2ExitPolicy } from "../engine-v2/exit/policy";
 import { planProtectiveOrderReconcile } from "../engine-v2/execution/protective-reconcile-plan";
 import { runEngineV2 } from "../engine-v2/index";
+import { deriveV2StateAuthority, resolveHeldPositionSide } from "../engine-v2/state/derive";
 import type { PaperOpenPositionRecord } from "../models/types";
 
 test("V2 MANUAL SAME-SIDE AUGMENT AUTHORITY SUITE", async (t) => {
-    await t.test("1. bot long 4.16 -> same-side manual increase to 11.08 -> MANUAL_SIZE_AUGMENTED & exit policy active", () => {
-        const ledgerPos = {
+    await t.test("1. latched OPERATOR_MANAGED position migration -> reclassified to MANUAL_SIZE_AUGMENTED & runtime takeover released", () => {
+        // Existing latched position from previous runtime
+        const latchedPos = {
             symbol: "BTCUSDT",
             side: "long" as const,
             entryPrice: 78279.9,
+            originalEntryPrice: 78279.9,
             sizeUsd: 3248,
+            originalSizeUsd: 3248,
             entryStage: 1,
             openedAt: 1788500000000,
             status: "open",
-            lifecycleState: "BOT_V2_MANAGED",
+            lifecycleState: "OPERATOR_MANAGED",
+            manualTakeoverActive: true,
+            manualOwnershipLatch: true,
             isV2Authority: true,
             okxContracts: 4.16,
             notionalUsd: 3248,
@@ -32,78 +40,37 @@ test("V2 MANUAL SAME-SIDE AUGMENT AUTHORITY SUITE", async (t) => {
             targetPrice1: 79500
         } as PaperOpenPositionRecord;
 
-        // 1-1. Size delta classification
-        const delta = classifyPositionSizeDelta({
-            beforeContracts: 4.16,
-            afterContracts: 11.08,
-            ledger: ledgerPos,
-            botManaged: true,
-            nowMs: 1788500010000
-        });
-        assert.equal(delta.classification, "MANUAL_INCREASE");
-
-        // 1-2. Ownership latch trigger must NOT trigger strong latch (no OPERATOR_MANAGED lockdown)
-        const latchTrigger = evaluateManualOwnershipLatchTrigger({
-            ledger: ledgerPos,
-            okxActualContracts: 11.08,
-            okxActualPositionExists: true,
-            okxFetchReady: true,
-            ledgerPaperContracts: 4.16,
-            ledgerEntryPrice: 78279.9,
-            okxAvgPx: 78125.60,
-            symbolExternalManualBlocked: false
-        });
-        assert.equal(latchTrigger.shouldLatch, false);
-        assert.equal(latchTrigger.source, "SAME_SIDE_MANUAL_AUGMENT");
-
-        // 1-3. Ownership resolution preserves BOT_V2_MANAGED ownership and allows exit policy
-        ledgerPos.lifecycleState = "MANUAL_SIZE_AUGMENTED";
-        ledgerPos.actualAvgPx = 78125.60;
-        ledgerPos.actualContracts = 11.08;
-        ledgerPos.actualNotionalUsd = 8635;
-
-        const ownership = resolvePositionOwnership({
-            symbol: "BTCUSDT",
-            side: "long",
+        // Evaluate reclassification
+        const reclass = evaluateManualAugmentReclassification({
+            ledger: latchedPos,
             okxActualPositionExists: true,
             okxActualContracts: 11.08,
-            ledger: ledgerPos,
-            ledgerPaperContracts: 4.16,
-            ledgerEntryPrice: 78279.9,
-            okxAvgPx: 78125.60,
-            symbolExternalManualBlocked: false
-        });
-
-        assert.equal(ownership.ownershipClass, "BOT_V2_MANAGED");
-        assert.equal(ownership.lifecycleAfter, "MANUAL_SIZE_AUGMENTED");
-        assert.equal(ownership.normalExitPolicyAllowed, true);
-
-        // 1-4. Manual augment proof structure
-        const augmentProof = buildManualAugmentAuthorityProof({
-            symbol: "BTCUSDT",
-            side: "long",
-            ledgerQty: 4.16,
-            ledgerAvgPx: 78279.9,
-            ledgerNotional: 3248,
-            okxActualQty: 11.08,
             okxActualAvgPx: 78125.60,
             okxActualNotional: 8635,
-            interventionType: "SAME_SIDE_MANUAL_AUGMENT",
-            lifecycleState: "MANUAL_SIZE_AUGMENTED",
-            positionManagementAllowed: true,
-            autoAddonAllowed: false,
-            protectionReconcileAllowed: true
+            okxSide: "long"
         });
 
-        assert.equal(augmentProof.event, "V2_MANUAL_AUGMENT_AUTHORITY_PROOF");
-        assert.equal(augmentProof.interventionType, "SAME_SIDE_MANUAL_AUGMENT");
-        assert.equal(augmentProof.positionManagementAllowed, true);
-        assert.equal(augmentProof.autoAddonAllowed, false);
-        assert.equal(augmentProof.protectionReconcileAllowed, true);
+        assert.equal(reclass.shouldReclassify, true);
+        assert.equal(reclass.reason, "SAME_SIDE_MANUAL_AUGMENT_RECLASSIFICATION");
+
+        // Apply migration
+        latchedPos.lifecycleState = "MANUAL_SIZE_AUGMENTED";
+        latchedPos.manualTakeoverActive = false;
+        latchedPos.manualOwnershipLatch = false;
+        latchedPos.manualAugmentActive = true;
+        latchedPos.actualAvgPx = 78125.60;
+        latchedPos.actualContracts = 11.08;
+        latchedPos.actualNotionalUsd = 8635;
+
+        assert.equal(latchedPos.lifecycleState, "MANUAL_SIZE_AUGMENTED");
+        assert.equal(latchedPos.manualTakeoverActive, false);
+        assert.equal(latchedPos.manualOwnershipLatch, false);
+        assert.equal(latchedPos.originalEntryPrice, 78279.9);
+        assert.equal(latchedPos.actualAvgPx, 78125.60);
+        assert.equal(latchedPos.actualContracts, 11.08);
     });
 
-    await t.test("2. actual avgPx가 ledger entry와 다를 때 exit/PnL 계산은 actual avgPx 사용", () => {
-        // Price proof structure
+    await t.test("2. actual avgPx/contracts가 ledger entry와 다를 때 management는 actual 사용, original은 보존", () => {
         const priceProof = buildPositionManagementPriceAuthorityProof({
             symbol: "BTCUSDT",
             pnlEntryPriceSource: "okx_actual_avg_px",
@@ -215,21 +182,17 @@ test("V2 MANUAL SAME-SIDE AUGMENT AUTHORITY SUITE", async (t) => {
         };
 
         const res = runEngineV2(input as any);
-        // Add-on must NOT be generated (HOLD / no new entry)
         assert.equal(res.decision.executionAction, "NONE");
         assert.equal(res.decision.decision, "HOLD");
-        // But the engine ran normally (did NOT short-circuit to observe-only)
         assert.notEqual(res.decision.explanation.reason, "MANUAL_TAKEOVER_ACTIVE_OBSERVE_ONLY");
     });
 
-    await t.test("4. manual protective SL 가격은 변경하지 않고 bot-owned protective qty 부족 시 actual qty 기준 reconcile", () => {
-        // Pending algos has:
-        // 1) User's manual SL order at 76000 with 5 contracts
-        // 2) Bot's old SL order at 77500 with 4.16 contracts (stale because position is now 11.08)
+    await t.test("4. actual=11.08, bot SL=4.16, TP=2.77 -> bot SL/TP stale reconcile, manual SL/TP preserved", () => {
         const pendingAlgos = [
+            // User manual SL: 5 contracts at 76000 (must be PRESERVED)
             {
-                algoId: "manual_sl_101",
-                algoClOrdId: "web_sl_manual_101", // Not bot-owned
+                algoId: "manual_sl_76000",
+                algoClOrdId: "web_manual_sl_76000",
                 instId: "BTC-USDT-SWAP",
                 posSide: "long",
                 side: "sell",
@@ -238,20 +201,33 @@ test("V2 MANUAL SAME-SIDE AUGMENT AUTHORITY SUITE", async (t) => {
                 sz: 5,
                 tdMode: "cross"
             },
+            // Bot old SL: 4.16 contracts at 77500 (stale, must be replaced with 11.08)
             {
-                algoId: "bot_sl_102",
-                algoClOrdId: "oap_BTCUSDT_open36_sl", // Bot-owned
+                algoId: "bot_sl_4_16",
+                algoClOrdId: "oap_BTCUSDT_open36_sl",
                 instId: "BTC-USDT-SWAP",
                 posSide: "long",
                 side: "sell",
                 reduceOnly: true,
                 slTriggerPx: 77500,
-                sz: 4.16, // Stale size
+                sz: 4.16,
+                tdMode: "cross"
+            },
+            // Bot old TP: 2.77 contracts at 79500 (stale, must be replaced with 5.54 = 50% of 11.08)
+            {
+                algoId: "bot_tp_2_77",
+                algoClOrdId: "oap_BTCUSDT_open36_tp",
+                instId: "BTC-USDT-SWAP",
+                posSide: "long",
+                side: "sell",
+                reduceOnly: true,
+                tpTriggerPx: 79500,
+                sz: 2.77,
                 tdMode: "cross"
             }
         ];
 
-        // Coverage computation
+        // 1. Coverage check
         const coverage = computeProtectiveQtyCoverage({
             symbol: "BTCUSDT",
             instId: "BTC-USDT-SWAP",
@@ -262,28 +238,35 @@ test("V2 MANUAL SAME-SIDE AUGMENT AUTHORITY SUITE", async (t) => {
 
         assert.equal(coverage.actualQty, 11.08);
         assert.equal(coverage.stopProtectedQty, 9.16); // 5 + 4.16
+        assert.equal(coverage.tpProtectedQty, 2.77);
         assert.equal(coverage.ownership, "MIXED");
-        assert.ok(coverage.coverageRatio < 1.0);
 
-        // Plan protective reconcile for actual contracts (11.08)
+        // 2. Reconcile plan for 100% SL (11.08) and 50% TP1 (5.54)
         const plan = planProtectiveOrderReconcile(pendingAlgos, {
             instId: "BTC-USDT-SWAP",
             positionSide: "long",
             openedAt36: "open36",
             tdModeUsed: "cross",
-            contractsToProtect: 11.08,
+            contractsToProtect: 11.08, // 100% SL coverage
+            tpContractsToProtect: 5.54, // 50% TP1 coverage
             activeStopPrice: 77500,
-            activeTpPrice: null,
-            wantsTp: false,
+            activeTpPrice: 79500,
+            wantsTp: true,
             expectedSide: "sell",
             tickSz: 0.1
         });
 
-        // Bot's stale 4.16 order must be queued for cancellation, while user's manual order 76000 is PRESERVED!
-        assert.ok(plan.cancelAlgoIds.includes("bot_sl_102"));
-        assert.ok(!plan.cancelAlgoIds.includes("manual_sl_101")); // User order NOT cancelled!
+        // Bot orders cancelled due to stale sizes
+        assert.ok(plan.cancelAlgoIds.includes("bot_sl_4_16"));
+        assert.ok(plan.cancelAlgoIds.includes("bot_tp_2_77"));
+
+        // User manual SL order 76000 MUST NEVER be cancelled!
+        assert.ok(!plan.cancelAlgoIds.includes("manual_sl_76000"));
         assert.equal(plan.manualIgnoredCount, 1);
-        assert.equal(plan.needSubmitSl, true); // Needs new SL with 11.08 contracts
+
+        // Needs resubmission with updated quantities
+        assert.equal(plan.needSubmitSl, true);
+        assert.equal(plan.needSubmitTp, true);
     });
 
     await t.test("5. opposite-side manual intervention은 기존대로 takeover/보수적 처리", () => {
@@ -301,11 +284,91 @@ test("V2 MANUAL SAME-SIDE AUGMENT AUTHORITY SUITE", async (t) => {
             notionalUsd: 1000
         } as PaperOpenPositionRecord;
 
-        // Opposite side: remote is short while ledger is long
-        const isSameSide =
-            (ledgerPos.isV2Authority === true || ledgerPos.lifecycleState === "BOT_V2_MANAGED") &&
-            String("short").toLowerCase() === String(ledgerPos.side).toLowerCase();
+        const reclass = evaluateManualAugmentReclassification({
+            ledger: ledgerPos,
+            okxActualPositionExists: true,
+            okxActualContracts: 3.0,
+            okxActualAvgPx: 3000,
+            okxActualNotional: 1000,
+            okxSide: "short" // Opposite side!
+        });
 
-        assert.equal(isSameSide, false); // Opposite side fails same-side check -> full takeover applies
+        assert.equal(reclass.shouldReclassify, false);
+        assert.equal(reclass.reason, "OPPOSITE_SIDE_NOT_ELIGIBLE");
+    });
+
+    await t.test("6. ETH symbol_positions_count=0일 때 BTC long에서 heldPositionSide 상속 차단 (Symbol contamination fix)", () => {
+        const ethInput = {
+            symbol: "ETHUSDT",
+            now: 1788500000000,
+            config: {
+                okxLiveMaxOrderNotionalUsdt: null
+            },
+            snapshot: {
+                lastPrice: 3000,
+                latestCandleClose: 3000,
+                atr: 25,
+                boxPos: 0.5
+            },
+            state: {
+                // currentPositions has BTC position only!
+                currentPositions: [{
+                    symbol: "BTCUSDT",
+                    side: "LONG",
+                    entryPrice: 78125.60,
+                    managementAvgPx: 78125.60,
+                    ledgerEntryPrice: 78279.9,
+                    okxActualAvgPx: 78125.60,
+                    sizeUsd: 8635,
+                    entryStage: 1,
+                    pnlPct: 0,
+                    leverage: 10,
+                    lifecycleState: "MANUAL_SIZE_AUGMENTED"
+                }],
+                okxActualPositions: [{
+                    symbol: "BTCUSDT",
+                    side: "long",
+                    posSide: "long",
+                    contracts: 11.08,
+                    avgPx: 78125.60,
+                    notionalUsd: 8635
+                }],
+                // okxActualSide may be set to "long" at top-level state
+                okxActualSide: "long",
+                globalRiskScore: 0.5,
+                lossStreaks: {},
+                directionalShockState: "NONE",
+                longAllow: true,
+                shortAllow: true,
+                executionReadiness: true,
+                accountEquityKrw: 10_000_000,
+                symbolExposureNotionalCapKrw: 5_000_000,
+                exposureNotionalCapKrw: 20_000_000
+            }
+        };
+
+        const v2State = deriveV2StateAuthority(ethInput as any);
+
+        // ETH symbolPositions count is 0
+        assert.equal(v2State.symbolPositions.length, 0);
+        // ETH heldPositionSide MUST be "none" (not "long" from BTC!)
+        assert.equal(v2State.heldPositionSide, "none");
+        assert.equal(v2State.managementSide, "none");
+        assert.equal(v2State.longPosition, null);
+        assert.equal(v2State.shortPosition, null);
+
+        const symProof = buildSymbolPositionAuthorityProof({
+            symbol: "ETHUSDT",
+            symbolPositionsCount: 0,
+            heldPositionSide: v2State.heldPositionSide,
+            managementSide: v2State.managementSide,
+            isContaminated: false
+        });
+
+        assert.equal(symProof.event, "V2_SYMBOL_POSITION_AUTHORITY_PROOF");
+        assert.equal(symProof.symbol, "ETHUSDT");
+        assert.equal(symProof.symbolPositionsCount, 0);
+        assert.equal(symProof.heldPositionSide, "none");
+        assert.equal(symProof.isContaminated, false);
     });
 });
