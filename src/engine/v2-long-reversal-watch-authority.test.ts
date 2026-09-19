@@ -871,4 +871,80 @@ test("V2 LONG REVERSAL WATCH AUTHORITY SUITE", async (t) => {
 
         assert.strictEqual(result.breakdown_failed, true);
     });
+
+    await t.test("J-1: 확정봉 high만 peak 위로 wick 돌파, close는 peak 아래 → peak_break_confirmed=false, probe_allowed=false, exception_eligible=false", () => {
+        const baseCandles = createCandles([
+            66000, 65800, 65900, 65700, 65800, 65600, 65700, 65500, 65600, 65400,
+            65500, 65300, 65400, 65200, 65300
+        ]);
+        const candlesWithWickOnlyPeakBreak = [
+            ...baseCandles,
+            // 15: breakdown below 65000
+            { open: 65300, high: 65400, low: 64000, close: 64500, volume: 100, ts: 1788410000000 + 15 * 60000, time: 1788410000000 + 15 * 60000 },
+            // 16: initial rebound
+            { open: 64500, high: 65800, low: 64400, close: 65500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
+            // 17: peak (high: 66200)
+            { open: 65500, high: 66200, low: 65400, close: 65900, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
+            // 18: higher low (low: 64800 > 64000)
+            { open: 65900, high: 66000, low: 64800, close: 65200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
+            // 19: CLOSED candle with high 66500 (> peak 66200), but CLOSE is 66000 (< peak 66200) -> wick only!
+            { open: 65200, high: 66500, low: 65100, close: 66000, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 },
+            // 20: forming candle
+            { open: 66000, high: 66100, low: 65900, close: 66000, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 }
+        ];
+
+        const result = evaluateLongReversalWatch({
+            symbol: "BTCUSDT",
+            lastPrice: 66000,
+            boxLow: 65000,
+            candles: candlesWithWickOnlyPeakBreak as any,
+            canonicalRegime: "RANGE",
+            zone: "lower"
+        });
+
+        assert.strictEqual(result.breakdown_failed, true);
+        assert.strictEqual(result.higher_low_confirmed, true);
+        assert.strictEqual(result.peak_break_confirmed, false);
+        assert.strictEqual(result.probe_allowed, false);
+        assert.strictEqual(result.exception_eligible, false);
+    });
+
+    await t.test("J-2: 다음 확정봉 close가 peak 위에서 확정 → peak_break_confirmed=true", () => {
+        const baseCandles = createCandles([
+            66000, 65800, 65900, 65700, 65800, 65600, 65700, 65500, 65600, 65400,
+            65500, 65300, 65400, 65200, 65300
+        ]);
+        const candlesWithClosePeakBreak = [
+            ...baseCandles,
+            // 15: breakdown below 65000
+            { open: 65300, high: 65400, low: 64000, close: 64500, volume: 100, ts: 1788410000000 + 15 * 60000, time: 1788410000000 + 15 * 60000 },
+            // 16: initial rebound
+            { open: 64500, high: 65800, low: 64400, close: 65500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
+            // 17: peak (high: 66200)
+            { open: 65500, high: 66200, low: 65400, close: 65900, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
+            // 18: higher low (low: 64800 > 64000)
+            { open: 65900, high: 66000, low: 64800, close: 65200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
+            // 19: wick-only candle (close 66000)
+            { open: 65200, high: 66500, low: 65100, close: 66000, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 },
+            // 20: NOW CLOSED candle with CLOSE 66700 (> peak 66500/66200) -> confirmed close break!
+            { open: 66000, high: 66800, low: 65900, close: 66700, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 },
+            // 21: new forming candle
+            { open: 66700, high: 66800, low: 66600, close: 66700, volume: 100, ts: 1788410000000 + 21 * 60000, time: 1788410000000 + 21 * 60000 }
+        ];
+
+        const result = evaluateLongReversalWatch({
+            symbol: "BTCUSDT",
+            lastPrice: 66700,
+            boxLow: 65000,
+            candles: candlesWithClosePeakBreak as any,
+            canonicalRegime: "RANGE",
+            zone: "lower"
+        });
+
+        assert.strictEqual(result.breakdown_failed, true);
+        assert.strictEqual(result.higher_low_confirmed, true);
+        assert.strictEqual(result.peak_break_confirmed, true);
+        assert.strictEqual(result.probe_allowed, true);
+        assert.strictEqual(result.exception_eligible, true);
+    });
 });

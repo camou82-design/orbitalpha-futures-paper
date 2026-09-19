@@ -826,6 +826,82 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
 
         assert.strictEqual(result.breakout_failed, true);
     });
+
+    await t.test("J-1: 확정봉 low만 trough 아래로 wick 이탈, close는 trough 위 → trough_break_confirmed=false, probe_allowed=false, exception_eligible=false", () => {
+        const baseCandles = createCandles([
+            67000, 67200, 67100, 67300, 67200, 67400, 67300, 67500, 67400, 67600,
+            67500, 67700, 67600, 67800, 67700
+        ]);
+        const candlesWithWickOnlyTroughBreak = [
+            ...baseCandles,
+            // 15: breakout above 70000
+            { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 15 * 60000, time: 1788410000000 + 15 * 60000 },
+            // 16: initial pullback / trough (low: 69000)
+            { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
+            // 17: lower high (high: 70800 < 72000)
+            { open: 69200, high: 70800, low: 69100, close: 70400, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
+            // 18: lower high confirmation/bounce (high: 70600)
+            { open: 70400, high: 70600, low: 69800, close: 70000, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
+            // 19: CLOSED candle with low 68800 (< trough 69000), but CLOSE is 69500 (> trough 69000) -> wick only!
+            { open: 70000, high: 70100, low: 68800, close: 69500, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 },
+            // 20: forming candle
+            { open: 69500, high: 69600, low: 69400, close: 69500, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 }
+        ];
+
+        const result = evaluateShortReversalWatch({
+            symbol: "BTCUSDT",
+            lastPrice: 69500,
+            boxHigh: 70000,
+            candles: candlesWithWickOnlyTroughBreak as any,
+            canonicalRegime: "RANGE",
+            zone: "upper"
+        });
+
+        assert.strictEqual(result.breakout_failed, true);
+        assert.strictEqual(result.lower_high_confirmed, true);
+        assert.strictEqual(result.trough_break_confirmed, false);
+        assert.strictEqual(result.probe_allowed, false);
+        assert.strictEqual(result.exception_eligible, false);
+    });
+
+    await t.test("J-2: 다음 확정봉 close가 trough 아래에서 확정 → trough_break_confirmed=true", () => {
+        const baseCandles = createCandles([
+            67000, 67200, 67100, 67300, 67200, 67400, 67300, 67500, 67400, 67600,
+            67500, 67700, 67600, 67800, 67700
+        ]);
+        const candlesWithCloseTroughBreak = [
+            ...baseCandles,
+            // 15: breakout above 70000
+            { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 15 * 60000, time: 1788410000000 + 15 * 60000 },
+            // 16: initial pullback / trough (low: 69000)
+            { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
+            // 17: lower high (high: 70800 < 72000)
+            { open: 69200, high: 70800, low: 69100, close: 70400, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
+            // 18: lower high confirmation/bounce (high: 70600)
+            { open: 70400, high: 70600, low: 69800, close: 70000, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
+            // 19: wick-only candle (close 69500)
+            { open: 70000, high: 70100, low: 68800, close: 69500, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 },
+            // 20: NOW CLOSED candle with CLOSE 68500 (< trough 69000) -> confirmed close break!
+            { open: 69500, high: 69600, low: 68400, close: 68500, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 },
+            // 21: new forming candle
+            { open: 68500, high: 68600, low: 68400, close: 68500, volume: 100, ts: 1788410000000 + 21 * 60000, time: 1788410000000 + 21 * 60000 }
+        ];
+
+        const result = evaluateShortReversalWatch({
+            symbol: "BTCUSDT",
+            lastPrice: 68500,
+            boxHigh: 70000,
+            candles: candlesWithCloseTroughBreak as any,
+            canonicalRegime: "RANGE",
+            zone: "upper"
+        });
+
+        assert.strictEqual(result.breakout_failed, true);
+        assert.strictEqual(result.lower_high_confirmed, true);
+        assert.strictEqual(result.trough_break_confirmed, true);
+        assert.strictEqual(result.probe_allowed, true);
+        assert.strictEqual(result.exception_eligible, true);
+    });
 });
 
 

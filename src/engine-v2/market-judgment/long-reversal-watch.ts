@@ -202,8 +202,7 @@ export function evaluateLongReversalWatch(
             if (higher_low_confirmed && intermediatePeakPrice > 0 && secondaryTroughIdx >= 0) {
                 for (let i = secondaryTroughIdx; i < lookback.length; i++) {
                     const c = Number(lookback[i].close ?? 0);
-                    const h = Number(lookback[i].high ?? 0);
-                    if (c > intermediatePeakPrice || h > intermediatePeakPrice) {
+                    if (c > intermediatePeakPrice) {
                         micro_structure_break = true;
                         break;
                     }

@@ -179,8 +179,7 @@ export function evaluateShortReversalWatch(
             if (lower_high_confirmed && Number.isFinite(intermediateLow) && secondaryPeakIdx >= 0) {
                 for (let i = secondaryPeakIdx; i < lookback.length; i++) {
                     const c = Number(lookback[i].close ?? 0);
-                    const l = Number(lookback[i].low ?? 0);
-                    if (c < intermediateLow || l < intermediateLow) {
+                    if (c < intermediateLow) {
                         micro_structure_break = true;
                         break;
                     }
