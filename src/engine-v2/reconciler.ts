@@ -758,18 +758,28 @@ export function resolveSymbolDecisionEnvelope(
                 };
             }
         } else if (htfPolicy === "SHORT_ONLY_OR_NONE" && executionEnvelope.side === "long") {
-            executionEnvelope = {
-                ...executionEnvelope,
-                decision: "REJECT",
-                side: "none",
-                stageMarginKrw: 0,
-                hardBlockPresent: true,
-                hardBlockReason: "HTF_SHOCK_SHORT_ONLY_BLOCK",
-                authorityReason: "shock_reaction_direction_block",
-                primary_missing_condition: "HTF_SHOCK_SHORT_ONLY_BLOCK",
-                raw_missing_condition: "HTF_SHOCK_SHORT_ONLY_BLOCK",
-                expected_next_action: "WAIT_FOR_HTF_POLARITY_ALIGNMENT"
-            };
+            const isLongReversalAllowed =
+                (v2Res.decision?.metadata as any)?.long_reversal_watch_promoted === true ||
+                (v2Res.decision?.metadata as any)?.entryReason === "V2_LONG_REVERSAL_WATCH_PROBE" ||
+                (v2Res.decision?.metadata as any)?.entryReason === "V2_LONG_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
+                (executionEnvelope as any)?.long_reversal_watch_promoted === true ||
+                (executionEnvelope as any)?.entryReason === "V2_LONG_REVERSAL_WATCH_PROBE" ||
+                (executionEnvelope as any)?.entryReason === "V2_LONG_REVERSAL_HTF_UPGRADED_AUTHORITY";
+
+            if (!isLongReversalAllowed) {
+                executionEnvelope = {
+                    ...executionEnvelope,
+                    decision: "REJECT",
+                    side: "none",
+                    stageMarginKrw: 0,
+                    hardBlockPresent: true,
+                    hardBlockReason: "HTF_SHOCK_SHORT_ONLY_BLOCK",
+                    authorityReason: "shock_reaction_direction_block",
+                    primary_missing_condition: "HTF_SHOCK_SHORT_ONLY_BLOCK",
+                    raw_missing_condition: "HTF_SHOCK_SHORT_ONLY_BLOCK",
+                    expected_next_action: "WAIT_FOR_HTF_POLARITY_ALIGNMENT"
+                };
+            }
         }
     }
 

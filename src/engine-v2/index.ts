@@ -61,6 +61,7 @@ import { applyEthRangeMinimumStopDistance } from "./execution/eth-range-minimum-
 import { evaluateHighwayCoreEntryGate } from "./highway-core/highway-entry-gate";
 import { isSoftExitCooldownActive } from "./exit/soft-exit-hysteresis";
 import { evaluateShortReversalWatch } from "./market-judgment/short-reversal-watch";
+import { evaluateLongReversalWatch } from "./market-judgment/long-reversal-watch";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -4675,7 +4676,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
 
     // -------------------------------------------------------------------------
-    // Tier 4.96: SHORT REVERSAL WATCH EVALUATION & PROMOTION (Controlled Countertrend Probe / HTF Upgrade)
+    // Tier 4.96: REVERSAL WATCH EVALUATION & PROMOTION (Controlled Countertrend Probe / HTF Upgrade)
     // -------------------------------------------------------------------------
     const shortRevWatch = evaluateShortReversalWatch({
         symbol: String(input.symbol),
@@ -4699,8 +4700,32 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         zone: zone
     });
 
+    const longRevWatch = evaluateLongReversalWatch({
+        symbol: String(input.symbol),
+        htfPolicy: judgment.htf_entry_policy,
+        originalHtfPolicy: judgment.htf_entry_policy,
+        directionalShockState: v2State.directionalShockState,
+        shockPhase: judgment.shockPhase ?? (v2State as any).shockPhase,
+        lastPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0),
+        boxHigh: Number(authoritativeInput.snapshot.boxHigh ?? 0),
+        boxLow: Number(authoritativeInput.snapshot.boxLow ?? 0),
+        breakoutLevel: Number((authoritativeInput.snapshot as any).breakoutLevel ?? 0),
+        candles: authoritativeInput.snapshot.candles ?? (input.snapshot as any)?.candles ?? (input as any).candles ?? [],
+        htf: (input.snapshot as any)?.htf_candles ?? (input as any)?.htf,
+        htf1hBias: (judgment as any)?.htf_1h_bias ?? judgment.htf_bias,
+        htf15mBias: (judgment as any)?.htf_15m_bias ?? judgment.htf_bias,
+        macroPolarity: judgment.macroPolarity,
+        trendWeaknessScore: authoritativeInput.snapshot.trendWeaknessScore,
+        canonicalRegime: authoritativeInput.snapshot.canonicalRegime ?? judgment.regime_final ?? "RANGE",
+        regime: judgment.regime ?? "RANGE",
+        subtype: judgment.subtype ?? "",
+        zone: zone
+    });
+
     let shortReversalWatchPromoted = false;
     let shortReversalWatchPromotionReason: string | null = null;
+    let longReversalWatchPromoted = false;
+    let longReversalWatchPromotionReason: string | null = null;
 
     const hasShortPosForReversal = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() === "short");
     const hasLongPosForReversal = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() === "long");
@@ -4709,10 +4734,21 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         shortRevWatch.probe_allowed === true &&
         shortRevWatch.exception_eligible === true;
 
+    const longReversalExceptionAllowed =
+        longRevWatch.probe_allowed === true &&
+        longRevWatch.exception_eligible === true;
+
     const isShortReversalEligible =
         shortReversalExceptionAllowed &&
         v2DecisionBeforePromotion !== "REJECT" &&
         v2State.directionalShockState !== "DOWN" &&
+        !hasShortPosForReversal &&
+        !hasLongPosForReversal;
+
+    const isLongReversalEligible =
+        longReversalExceptionAllowed &&
+        v2DecisionBeforePromotion !== "REJECT" &&
+        v2State.directionalShockState !== "UP" &&
         !hasShortPosForReversal &&
         !hasLongPosForReversal;
 
@@ -4767,6 +4803,57 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 promotion_reason: promotionReason
             }));
         }
+    } else if (isLongReversalEligible && !shortReversalWatchPromoted) {
+        const entryPx = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+        const stopPx = longRevWatch.stopPrice ?? (entryPx * 0.99);
+        const invPx = longRevWatch.invalidationPrice ?? stopPx;
+
+        if (entryPx > 0 && stopPx < entryPx) {
+            v2DecisionAfterPromotion = "ENTER";
+            v2SideAfterPromotion = "long";
+            v2RejectReasonAfterPromotion = null;
+            promotionApplied = true;
+            longReversalWatchPromoted = true;
+            if (longRevWatch.htf_upgrade_ready && longRevWatch.exception_eligible) {
+                promotionReason = "V2_LONG_REVERSAL_HTF_UPGRADED_AUTHORITY";
+                longReversalWatchPromotionReason = "LONG_REVERSAL_HTF_UPGRADE_CONFIRMED";
+                execMeta.entryReason = "V2_LONG_REVERSAL_HTF_UPGRADED_AUTHORITY";
+            } else {
+                promotionReason = "V2_LONG_REVERSAL_WATCH_PROBE";
+                longReversalWatchPromotionReason = "LONG_REVERSAL_WATCH_PROBE_ALLOWED";
+                execMeta.entryReason = "V2_LONG_REVERSAL_WATCH_PROBE";
+                execMeta.isCountertrendProbe = true;
+            }
+            const boxHighVal = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+            const stopDist = Math.max(entryPx - stopPx, entryPx * 0.005);
+            const plannedTp1 = boxHighVal > 0 && boxHighVal > entryPx ? boxHighVal : (entryPx + stopDist * 1.5);
+            (execution as any).tp1Price = plannedTp1;
+            (execution as any).plannedTp1Price = plannedTp1;
+            (execution as any).takeProfit1Px = plannedTp1;
+            execMeta.plannedTp1Price = plannedTp1;
+            execMeta.takeProfit1Px = plannedTp1;
+            (execMeta as any).takeProfitPlan = { tp1: plannedTp1, tp2: boxHighVal > 0 && boxHighVal > plannedTp1 ? boxHighVal : plannedTp1 * 1.01 };
+
+            v2CalculatedInvalidationPx = invPx;
+            execution.stopPrice = stopPx;
+            execution.invalidationPx = invPx;
+            promotionBlockReason = null;
+            promotionMinConditionPassed = true;
+            execMeta.long_reversal_watch_promoted = true;
+
+            console.info(JSON.stringify({
+                event: "V2_LONG_REVERSAL_WATCH_PROMOTION_PROOF",
+                symbol: String(input.symbol),
+                side: "long",
+                entryPx,
+                stopPx,
+                invPx,
+                plannedTp1,
+                htf_upgrade_ready: longRevWatch.htf_upgrade_ready,
+                decision: "ENTER",
+                promotion_reason: promotionReason
+            }));
+        }
     }
 
     // Tier 5+: Side Consistency Enforcer (Authoritative)
@@ -4774,6 +4861,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     const selectedSideFinalRaw: EngineV2Side =
         shortReversalWatchPromoted ? "short" :
+        longReversalWatchPromoted ? "long" :
         activeEngineRouting === "RANGE" ? rangeSideCandidate :
         activeEngineRouting === "TREND" ? trendSideCandidate :
         v2SideAfterPromotion;
@@ -4796,6 +4884,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         trendSideCandidate === "long" && 
         longAllow === true && 
         trendOk === true && 
+        qualityScore >= 70;
+
+    // 숏 진입 확인 여부 검증 (충분히 강한지)
+    const isShortQualified =
+        trendSideCandidate === "short" &&
+        shortAllow === true &&
+        trendOk === true &&
         qualityScore >= 70;
 
     const sanitizeCandidateSide = (side: EngineV2Side): { side: EngineV2Side; reason: string | null } => {
@@ -4865,6 +4960,63 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             if (isBtcRangeMrStaleDownShockBypass) {
                 return { side: "long", reason: null };
             }
+            // 원칙 1: directionalShockState=DOWN이면 long 후보 제거 (LONG_REVERSAL_WATCH probe 허용 시 예외)
+            if (directionalShockState === "DOWN") {
+                if (longReversalExceptionAllowed) {
+                    if (longRevWatch.htf_upgrade_ready && longRevWatch.exception_eligible) {
+                        return { side: "long", reason: "LONG_REVERSAL_HTF_UPGRADE_ALLOWED" };
+                    } else {
+                        return { side: "long", reason: "LONG_REVERSAL_WATCH_PROBE_ALLOWED" };
+                    }
+                }
+                // 원칙 3: trend_side_candidate=short 이고 shortAllow=true 이면 short 또는 none
+                if (trendSideCandidate === "short" && shortAllow) {
+                    if (isShortQualified) {
+                        return { side: "short", reason: "SHOCK_DOWN_SAN_SHORT_QUALIFIED" };
+                    } else {
+                        return { side: "none", reason: "SHOCK_DOWN_TREND_CONFIRMATION_WEAK" };
+                    }
+                }
+                return { side: "none", reason: "SHOCK_DOWN_EXCLUDES_LONG" };
+            }
+
+            // 원칙 2: htf_entry_policy=SHORT_ONLY_OR_NONE이면 long selected side를 none 또는 short 후보로 재해석 (LONG_REVERSAL_WATCH probe 허용 시 예외)
+            if (htf_entry_policy === "SHORT_ONLY_OR_NONE") {
+                if (longReversalExceptionAllowed) {
+                    if (longRevWatch.htf_upgrade_ready && longRevWatch.exception_eligible) {
+                        return { side: "long", reason: "LONG_REVERSAL_HTF_UPGRADE_ALLOWED" };
+                    } else {
+                        return { side: "long", reason: "LONG_REVERSAL_WATCH_PROBE_ALLOWED" };
+                    }
+                }
+                if (trendSideCandidate === "short" && shortAllow) {
+                    if (isShortQualified) {
+                        return { side: "short", reason: "SHORT_ONLY_POLICY_SAN_SHORT_QUALIFIED" };
+                    } else {
+                        return { side: "none", reason: "WAIT_FOR_TREND_CONFIRMATION" };
+                    }
+                }
+                return { side: "none", reason: "SHORT_ONLY_POLICY_EXCLUDES_LONG" };
+            }
+
+            // risk longAllow=false 이면 당연히 long 배제 (LONG_REVERSAL_WATCH probe 허용 시 예외)
+            if (!longAllow) {
+                if (longReversalExceptionAllowed) {
+                    if (longRevWatch.htf_upgrade_ready && longRevWatch.exception_eligible) {
+                        return { side: "long", reason: "LONG_REVERSAL_HTF_UPGRADE_ALLOWED" };
+                    } else {
+                        return { side: "long", reason: "LONG_REVERSAL_WATCH_PROBE_ALLOWED" };
+                    }
+                }
+                if (trendSideCandidate === "short" && shortAllow) {
+                    if (isShortQualified) {
+                        return { side: "short", reason: "LONG_DISALLOWED_SAN_SHORT_QUALIFIED" };
+                    } else {
+                        return { side: "none", reason: "WAIT_FOR_TREND_CONFIRMATION" };
+                    }
+                }
+                return { side: "none", reason: "LONG_DISALLOWED_EXCLUDES_LONG" };
+            }
         }
         return { side, reason: null };
     };
@@ -4892,7 +5044,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2DecisionAfterPromotion = "HOLD";
             v2RejectReasonAfterPromotion = sanitize_reason ?? "WAIT_RECHECK";
         }
-        if (v2SideAfterPromotion === "long" && v2DecisionAfterPromotion === "ENTER" && !longAllow && !isBtcRangeMrStaleDownShockBypass) {
+        if (v2SideAfterPromotion === "long" && v2DecisionAfterPromotion === "ENTER" && !longAllow && !isBtcRangeMrStaleDownShockBypass && !longReversalExceptionAllowed) {
             v2DecisionAfterPromotion = "HOLD";
             v2RejectReasonAfterPromotion = "LONG_NOT_ALLOWED";
         }
@@ -5771,8 +5923,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     shortReversalExceptionAllowed) &&
                 candidateSide === "short";
 
-            if (isShortReversalWatchException) {
-                // Preserved for confirmed short reversal watch exception under bullish macro
+            const isLongReversalWatchException =
+                (longReversalWatchPromoted === true ||
+                    promotionReason === "V2_LONG_REVERSAL_WATCH_PROBE" ||
+                    promotionReason === "V2_LONG_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
+                    longReversalExceptionAllowed) &&
+                candidateSide === "long";
+
+            if (isShortReversalWatchException || isLongReversalWatchException) {
+                // Preserved for confirmed reversal watch exception under opposing macro
             } else {
                 const detectorPolarityProbePreserved =
                     judgment.polarityProbeEligible === true &&
@@ -5837,6 +5996,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             sideFinal === "long" &&
             zone === "lower" &&
             (reversalConfirmed === true ||
+                longReversalWatchPromoted === true ||
+                promotionReason === "V2_LONG_REVERSAL_WATCH_PROBE" ||
+                promotionReason === "V2_LONG_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
+                longReversalExceptionAllowed ||
                 judgment.metadata?.reclaimConfirmed === true ||
                 judgment.metadata?.reclaim_confirmed === true ||
                 judgment.metadata?.box_lower_breakdown_hold === false ||
@@ -5880,6 +6043,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const isRange = canonicalRegimeVal === "RANGE" || judgment.regime === "RANGE";
         const macroPol = String(judgment.macroPolarity ?? "NEUTRAL").toUpperCase();
         const isUpper = (zone as string) === "upper" || (zone as string) === "upper-extreme";
+        const isLower = (zone as string) === "lower" || (zone as string) === "lower-extreme";
 
         let longBlockedReason: string | null = null;
         let shortBlockedReason: string | null = null;
@@ -5898,11 +6062,27 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
 
-        const deadlockDetected = isRange && isUpper && macroPol === "BULLISH" && (longBlockedReason != null || v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP");
-        const exceptionAttempted = shortReversalExceptionAllowed;
-        const deadlockResolved = v2DecisionAfterPromotion === "ENTER" && v2SideAfterPromotion === "short";
+        if (isLower && macroPol === "BEARISH") {
+            if (v2RejectReasonAfterPromotion === "CHASE_SHORT_DISALLOWED_LOWER" || conflictResolutionReason === "chase_short_disallowed_in_lower_zone") {
+                shortBlockedReason = "CHASE_SHORT_DISALLOWED_LOWER";
+            } else if (trendSideCandidate === "short" && v2DecisionAfterPromotion !== "ENTER") {
+                shortBlockedReason = v2RejectReasonAfterPromotion ?? "SHORT_RETEST_NOT_CONFIRMED";
+            } else if (!isShortQualified) {
+                shortBlockedReason = "SHORT_QUALITY_OR_ZONE_RESTRICTED";
+            }
 
-        if (isRange && isUpper && macroPol === "BULLISH") {
+            if (!longReversalExceptionAllowed) {
+                longBlockedReason = longRevWatch.rejection_reason ?? longRevWatch.probe_block_reason ?? (judgment.polarityMismatch ? "POLARITY_MISMATCH_BEARISH_MACRO_LIMITS_LONG_SHOCK" : "LONG_STRUCTURE_NOT_CONFIRMED");
+            }
+        }
+
+        const deadlockDetected = (isRange && isUpper && macroPol === "BULLISH" && (longBlockedReason != null || v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP")) ||
+            (isRange && isLower && macroPol === "BEARISH" && (shortBlockedReason != null || v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP"));
+        const exceptionAttempted = (isUpper && shortReversalExceptionAllowed) || (isLower && longReversalExceptionAllowed);
+        const deadlockResolved = (isUpper && v2DecisionAfterPromotion === "ENTER" && v2SideAfterPromotion === "short") ||
+            (isLower && v2DecisionAfterPromotion === "ENTER" && v2SideAfterPromotion === "long");
+
+        if (isRange && ((isUpper && macroPol === "BULLISH") || (isLower && macroPol === "BEARISH"))) {
             console.info(JSON.stringify({
                 event: "V2_RANGE_DIRECTIONAL_DEADLOCK_PROOF",
                 symbol: String(input.symbol),

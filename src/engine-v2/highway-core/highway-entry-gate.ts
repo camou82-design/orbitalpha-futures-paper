@@ -168,7 +168,11 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
             rejectReason = "REGIME_UNFAVORABLE";
         } else if (directionalShockState === "DOWN" && side === "long") {
             const hasReclaim = (execution?.metadata as any)?.reclaimConfirmed === true;
-            if (!hasReclaim) {
+            const isLongReversalWatch =
+                (execution?.metadata as any)?.long_reversal_watch_promoted === true ||
+                (execution?.metadata as any)?.entryReason === "V2_LONG_REVERSAL_WATCH_PROBE" ||
+                (execution?.metadata as any)?.entryReason === "V2_LONG_REVERSAL_HTF_UPGRADED_AUTHORITY";
+            if (!hasReclaim && !isLongReversalWatch) {
                 allowed = false;
                 finalDecision = "HOLD";
                 rejectReason = "OPPOSING_DOWN_SHOCK_ACTIVE";

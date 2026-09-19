@@ -247,6 +247,7 @@ export function evaluateShortReversalWatch(
         subtype === "WHIPSAW_SOFT_WATCH" ||
         subtype === "FAKE_BREAKOUT" ||
         subtype === "WHIPSAW_SHOCK_RECHECK" ||
+        subtype.startsWith("RANGE") ||
         subtype === "" ||
         subtype === "UNKNOWN";
 
