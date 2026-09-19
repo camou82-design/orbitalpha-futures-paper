@@ -494,7 +494,7 @@ export interface V2CommittedRiskPlan {
     symbol: string;
     side: "long" | "short";
     action: EngineV2ExecutionAction;
-    finalOrderNotionalUsdt: number;
+    finalOrderNotionalUsdt?: number;
     appliedLeverage: number;
     stopPrice: number;
     invalidationPx: number;

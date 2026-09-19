@@ -285,7 +285,7 @@ export function calculateRiskSizing(
                 blockReason = "RANGE_REATTACK_SIZE_TOO_SMALL";
             }
         } else {
-            const rangeStageBaseKrw = currentStage <= 0 ? 140_000 : currentStage === 1 ? 80_000 : 40_000;
+            const rangeStageBaseKrw = config.baseSizeUsd === 0 ? 0 : (currentStage <= 0 ? 140_000 : currentStage === 1 ? 80_000 : 40_000);
             if (isRangeProbeInitialSizing) {
                 stageMarginKrw = Math.max(0, rangeStageBaseKrw * sizeMultiplier);
             } else {
@@ -293,7 +293,7 @@ export function calculateRiskSizing(
             }
         }
     } else if (shockActive) {
-        stageMarginKrw = currentStage <= 0 ? 108_000 : 0;
+        stageMarginKrw = config.baseSizeUsd === 0 ? 0 : (currentStage <= 0 ? 108_000 : 0);
         if (currentStage > 0) {
             isBlocked = true;
             blockReason = blockReason ?? "SHOCK_ADDON_FORBIDDEN";

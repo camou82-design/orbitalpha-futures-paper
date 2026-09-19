@@ -735,18 +735,28 @@ export function resolveSymbolDecisionEnvelope(
                 expected_next_action: "WAIT_FOR_HTF_POLARITY_ALIGNMENT"
             };
         } else if (htfPolicy === "LONG_ONLY_OR_NONE" && executionEnvelope.side === "short") {
-            executionEnvelope = {
-                ...executionEnvelope,
-                decision: "REJECT",
-                side: "none",
-                stageMarginKrw: 0,
-                hardBlockPresent: true,
-                hardBlockReason: "HTF_SHOCK_LONG_ONLY_BLOCK",
-                authorityReason: "shock_reaction_direction_block",
-                primary_missing_condition: "HTF_SHOCK_LONG_ONLY_BLOCK",
-                raw_missing_condition: "HTF_SHOCK_LONG_ONLY_BLOCK",
-                expected_next_action: "WAIT_FOR_HTF_POLARITY_ALIGNMENT"
-            };
+            const isShortReversalAllowed =
+                (v2Res.decision?.metadata as any)?.short_reversal_watch_promoted === true ||
+                (v2Res.decision?.metadata as any)?.entryReason === "V2_SHORT_REVERSAL_WATCH_PROBE" ||
+                (v2Res.decision?.metadata as any)?.entryReason === "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
+                (executionEnvelope as any)?.short_reversal_watch_promoted === true ||
+                (executionEnvelope as any)?.entryReason === "V2_SHORT_REVERSAL_WATCH_PROBE" ||
+                (executionEnvelope as any)?.entryReason === "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY";
+
+            if (!isShortReversalAllowed) {
+                executionEnvelope = {
+                    ...executionEnvelope,
+                    decision: "REJECT",
+                    side: "none",
+                    stageMarginKrw: 0,
+                    hardBlockPresent: true,
+                    hardBlockReason: "HTF_SHOCK_LONG_ONLY_BLOCK",
+                    authorityReason: "shock_reaction_direction_block",
+                    primary_missing_condition: "HTF_SHOCK_LONG_ONLY_BLOCK",
+                    raw_missing_condition: "HTF_SHOCK_LONG_ONLY_BLOCK",
+                    expected_next_action: "WAIT_FOR_HTF_POLARITY_ALIGNMENT"
+                };
+            }
         } else if (htfPolicy === "SHORT_ONLY_OR_NONE" && executionEnvelope.side === "long") {
             executionEnvelope = {
                 ...executionEnvelope,

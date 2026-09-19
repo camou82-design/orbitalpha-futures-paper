@@ -60,6 +60,7 @@ import { resolveV2AuthoritativeCandleIdentity } from "./execution/authoritative-
 import { applyEthRangeMinimumStopDistance } from "./execution/eth-range-minimum-stop-authority";
 import { evaluateHighwayCoreEntryGate } from "./highway-core/highway-entry-gate";
 import { isSoftExitCooldownActive } from "./exit/soft-exit-hysteresis";
+import { evaluateShortReversalWatch } from "./market-judgment/short-reversal-watch";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -4673,10 +4674,103 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Tier 4.96: SHORT REVERSAL WATCH EVALUATION & PROMOTION (Controlled Countertrend Probe / HTF Upgrade)
+    // -------------------------------------------------------------------------
+    const shortRevWatch = evaluateShortReversalWatch({
+        symbol: String(input.symbol),
+        htfPolicy: judgment.htf_entry_policy,
+        originalHtfPolicy: judgment.htf_entry_policy,
+        directionalShockState: v2State.directionalShockState,
+        shockPhase: judgment.shockPhase ?? (v2State as any).shockPhase,
+        lastPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0),
+        boxHigh: Number(authoritativeInput.snapshot.boxHigh ?? 0),
+        boxLow: Number(authoritativeInput.snapshot.boxLow ?? 0),
+        breakoutLevel: Number((authoritativeInput.snapshot as any).breakoutLevel ?? 0),
+        candles: authoritativeInput.snapshot.candles ?? (input.snapshot as any)?.candles ?? (input as any).candles ?? [],
+        htf: (input.snapshot as any)?.htf_candles ?? (input as any)?.htf,
+        htf1hBias: (judgment as any)?.htf_1h_bias ?? judgment.htf_bias,
+        htf15mBias: (judgment as any)?.htf_15m_bias ?? judgment.htf_bias,
+        macroPolarity: judgment.macroPolarity,
+        trendWeaknessScore: authoritativeInput.snapshot.trendWeaknessScore,
+        canonicalRegime: judgment.regime_final ?? authoritativeInput.snapshot.canonicalRegime ?? "RANGE",
+        regime: judgment.regime ?? "RANGE",
+        subtype: judgment.subtype ?? "",
+        zone: zone
+    });
+
+    let shortReversalWatchPromoted = false;
+    let shortReversalWatchPromotionReason: string | null = null;
+
+    const hasShortPosForReversal = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() === "short");
+    const hasLongPosForReversal = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() === "long");
+
+    const isShortReversalEligible =
+        shortRevWatch.probe_allowed === true &&
+        (shortRevWatch.exception_eligible === true || judgment.htf_entry_policy !== "SHORT_ONLY_OR_NONE") &&
+        v2DecisionBeforePromotion !== "REJECT" &&
+        v2State.directionalShockState !== "DOWN" &&
+        !hasShortPosForReversal &&
+        !hasLongPosForReversal;
+
+    if (isShortReversalEligible) {
+        const entryPx = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+        const stopPx = shortRevWatch.stopPrice ?? (entryPx * 1.01);
+        const invPx = shortRevWatch.invalidationPrice ?? stopPx;
+
+        if (entryPx > 0 && stopPx > entryPx) {
+            v2DecisionAfterPromotion = "ENTER";
+            v2SideAfterPromotion = "short";
+            v2RejectReasonAfterPromotion = null;
+            promotionApplied = true;
+            shortReversalWatchPromoted = true;
+            if (shortRevWatch.htf_upgrade_ready) {
+                promotionReason = "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY";
+                shortReversalWatchPromotionReason = "SHORT_REVERSAL_HTF_UPGRADE_CONFIRMED";
+                execMeta.entryReason = "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY";
+            } else {
+                promotionReason = "V2_SHORT_REVERSAL_WATCH_PROBE";
+                shortReversalWatchPromotionReason = "SHORT_REVERSAL_WATCH_PROBE_ALLOWED";
+                execMeta.entryReason = "V2_SHORT_REVERSAL_WATCH_PROBE";
+                execMeta.isCountertrendProbe = true;
+            }
+            const boxLowVal = Number(authoritativeInput.snapshot.boxLow ?? 0);
+            const stopDist = Math.max(stopPx - entryPx, entryPx * 0.005);
+            const plannedTp1 = boxLowVal > 0 && boxLowVal < entryPx ? boxLowVal : (entryPx - stopDist * 1.5);
+            (execution as any).tp1Price = plannedTp1;
+            (execution as any).plannedTp1Price = plannedTp1;
+            (execution as any).takeProfit1Px = plannedTp1;
+            execMeta.plannedTp1Price = plannedTp1;
+            execMeta.takeProfit1Px = plannedTp1;
+            (execMeta as any).takeProfitPlan = { tp1: plannedTp1, tp2: boxLowVal > 0 && boxLowVal < plannedTp1 ? boxLowVal : plannedTp1 * 0.99 };
+
+            v2CalculatedInvalidationPx = invPx;
+            execution.stopPrice = stopPx;
+            execution.invalidationPx = invPx;
+            promotionBlockReason = null;
+            promotionMinConditionPassed = true;
+            execMeta.short_reversal_watch_promoted = true;
+
+            console.info(JSON.stringify({
+                event: "V2_SHORT_REVERSAL_WATCH_PROMOTION_PROOF",
+                symbol: String(input.symbol),
+                side: "short",
+                entryPx,
+                stopPx,
+                invPx,
+                plannedTp1,
+                htf_upgrade_ready: shortRevWatch.htf_upgrade_ready,
+                decision: "ENTER",
+                promotion_reason: promotionReason
+            }));
+        }
+    }
+
     // Tier 5+: Side Consistency Enforcer (Authoritative)
     const sideCandidateBeforeVetoEnforced = v2SideAfterPromotion;
 
     const selectedSideFinalRaw: EngineV2Side =
+        shortReversalWatchPromoted ? "short" :
         activeEngineRouting === "RANGE" ? rangeSideCandidate :
         activeEngineRouting === "TREND" ? trendSideCandidate :
         v2SideAfterPromotion;
@@ -4706,8 +4800,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             if (isBtcRangeMrStaleUpShockBypass) {
                 return { side: "short", reason: null };
             }
-            // 원칙 1: directionalShockState=UP이면 short 후보 제거
+            // 원칙 1: directionalShockState=UP이면 short 후보 제거 (SHORT_REVERSAL_WATCH probe 허용 시 예외)
             if (directionalShockState === "UP") {
+                if (shortRevWatch.probe_allowed) {
+                    if (shortRevWatch.htf_upgrade_ready) {
+                        return { side: "short", reason: "SHORT_REVERSAL_HTF_UPGRADE_ALLOWED" };
+                    } else {
+                        return { side: "short", reason: "SHORT_REVERSAL_WATCH_PROBE_ALLOWED" };
+                    }
+                }
                 // 원칙 3: trend_side_candidate=long 이고 longAllow=true 이면 long 또는 none
                 if (trendSideCandidate === "long" && longAllow) {
                     if (isLongQualified) {
@@ -4719,8 +4820,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 return { side: "none", reason: "SHOCK_UP_EXCLUDES_SHORT" };
             }
 
-            // 원칙 2: htf_entry_policy=LONG_ONLY_OR_NONE이면 short selected side를 none 또는 long 후보로 재해석
+            // 원칙 2: htf_entry_policy=LONG_ONLY_OR_NONE이면 short selected side를 none 또는 long 후보로 재해석 (SHORT_REVERSAL_WATCH probe 허용 시 예외)
             if (htf_entry_policy === "LONG_ONLY_OR_NONE") {
+                if (shortRevWatch.probe_allowed) {
+                    if (shortRevWatch.htf_upgrade_ready) {
+                        return { side: "short", reason: "SHORT_REVERSAL_HTF_UPGRADE_ALLOWED" };
+                    } else {
+                        return { side: "short", reason: "SHORT_REVERSAL_WATCH_PROBE_ALLOWED" };
+                    }
+                }
                 if (trendSideCandidate === "long" && longAllow) {
                     if (isLongQualified) {
                         return { side: "long", reason: "LONG_ONLY_POLICY_SAN_LONG_QUALIFIED" };
@@ -4731,8 +4839,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 return { side: "none", reason: "LONG_ONLY_POLICY_EXCLUDES_SHORT" };
             }
 
-            // risk shortAllow=false 이면 당연히 short 배제
+            // risk shortAllow=false 이면 당연히 short 배제 (SHORT_REVERSAL_WATCH probe 허용 시 예외)
             if (!shortAllow) {
+                if (shortRevWatch.probe_allowed) {
+                    if (shortRevWatch.htf_upgrade_ready) {
+                        return { side: "short", reason: "SHORT_REVERSAL_HTF_UPGRADE_ALLOWED" };
+                    } else {
+                        return { side: "short", reason: "SHORT_REVERSAL_WATCH_PROBE_ALLOWED" };
+                    }
+                }
                 if (trendSideCandidate === "long" && longAllow) {
                     if (isLongQualified) {
                         return { side: "long", reason: "SHORT_DISALLOWED_SAN_LONG_QUALIFIED" };
@@ -4778,7 +4893,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2DecisionAfterPromotion = "HOLD";
             v2RejectReasonAfterPromotion = "LONG_NOT_ALLOWED";
         }
-        if (v2SideAfterPromotion === "short" && v2DecisionAfterPromotion === "ENTER" && !shortAllow && !isBtcRangeMrStaleUpShockBypass) {
+        if (v2SideAfterPromotion === "short" && v2DecisionAfterPromotion === "ENTER" && !shortAllow && !isBtcRangeMrStaleUpShockBypass && !shortRevWatch.probe_allowed) {
             v2DecisionAfterPromotion = "HOLD";
             v2RejectReasonAfterPromotion = "SHORT_NOT_ALLOWED";
         }
@@ -5064,6 +5179,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         veto_mutation_stage: "pre_veto_apply"
     }));
 
+    const isBypassRangeShortReversal =
+        vetoReason != null &&
+        shortReversalWatchPromoted === true &&
+        promotionApplied === true &&
+        (v2SideAfterPromotion === "short" || sideCandidateBeforeVeto === "short") &&
+        finalDecisionBeforeVeto === "ENTER";
+
     const isBypassRangeVeto =
         vetoReason != null &&
         shock === "DOWN" &&
@@ -5107,7 +5229,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         hardBlockPresent === false;
 
     if (vetoReason != null) {
-        if (isBypassRangeVeto) {
+        if (isBypassRangeShortReversal) {
+            v2DecisionAfterPromotion = finalDecisionBeforeVeto; // "ENTER"
+            v2SideAfterPromotion = "short";
+            v2RejectReasonAfterPromotion = null;
+        } else if (isBypassRangeVeto) {
             v2DecisionAfterPromotion = finalDecisionBeforeVeto; // "ENTER"
             v2SideAfterPromotion = "short";
             v2RejectReasonAfterPromotion = null;
@@ -5455,7 +5581,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         rangeSideCandidate !== trendSideCandidate;
 
     let sideVetoDetail: string | null = null;
-    if (isBypassRangeVeto) {
+    if (isBypassRangeShortReversal) {
+        sideVetoDetail = "SHORT_REVERSAL_WATCH_PROMOTION_BYPASS_RANGE_SIDE_VETO";
+    } else if (isBypassRangeVeto) {
         sideVetoDetail = "SHOCK_REACTION_PROMOTION_BYPASS_RANGE_SIDE_VETO";
     } else if (isBypassRangeUpperShort) {
         sideVetoDetail = "RANGE_UPPER_SHORT_HTF_ALIGNED_BYPASS";
@@ -5633,30 +5761,41 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 promotion_reason: promotionReason
             }));
         } else if (v2DecisionAfterPromotion === "ENTER" || promotionApplied) {
-            const detectorPolarityProbePreserved =
-                judgment.polarityProbeEligible === true &&
-                judgment.htf_entry_policy === "PROBE_ONLY" &&
-                macroPol === "BULLISH" &&
-                candidateSide === "short" &&
-                !whipsawShockRecheckActive &&
-                judgment.subtype !== "WHIPSAW_SHOCK_RECHECK";
-            if (!detectorPolarityProbePreserved) {
-                if (macroPol === "BULLISH" && candidateSide === "short") {
-                    v2DecisionAfterPromotion = "HOLD";
-                    v2SideAfterPromotion = "none";
-                    v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
-                    promotionApplied = false;
-                    promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
-                    expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
-                    expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
-                } else if (macroPol === "BEARISH" && candidateSide === "long") {
-                    v2DecisionAfterPromotion = "HOLD";
-                    v2SideAfterPromotion = "none";
-                    v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
-                    promotionApplied = false;
-                    promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
-                    expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
-                    expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+            const isShortReversalWatchException =
+                (shortReversalWatchPromoted === true ||
+                    promotionReason === "V2_SHORT_REVERSAL_WATCH_PROBE" ||
+                    promotionReason === "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
+                    shortRevWatch.probe_allowed === true) &&
+                candidateSide === "short";
+
+            if (isShortReversalWatchException) {
+                // Preserved for confirmed short reversal watch exception under bullish macro
+            } else {
+                const detectorPolarityProbePreserved =
+                    judgment.polarityProbeEligible === true &&
+                    judgment.htf_entry_policy === "PROBE_ONLY" &&
+                    macroPol === "BULLISH" &&
+                    candidateSide === "short" &&
+                    !whipsawShockRecheckActive &&
+                    judgment.subtype !== "WHIPSAW_SHOCK_RECHECK";
+                if (!detectorPolarityProbePreserved) {
+                    if (macroPol === "BULLISH" && candidateSide === "short") {
+                        v2DecisionAfterPromotion = "HOLD";
+                        v2SideAfterPromotion = "none";
+                        v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
+                        promotionApplied = false;
+                        promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
+                        expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
+                        expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+                    } else if (macroPol === "BEARISH" && candidateSide === "long") {
+                        v2DecisionAfterPromotion = "HOLD";
+                        v2SideAfterPromotion = "none";
+                        v2RejectReasonAfterPromotion = "HTF_POLICY_POLARITY_MISMATCH";
+                        promotionApplied = false;
+                        promotionBlockReason = "HTF_POLICY_POLARITY_MISMATCH";
+                        expectedMissingCondition = "HTF_POLICY_POLARITY_MISMATCH";
+                        expectedNextAction = "WAIT_FOR_MACRO_ALIGNMENT_OR_STABILIZATION";
+                    }
                 }
             }
         }
@@ -5681,6 +5820,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             sideFinal === "short" &&
             zone === "upper" &&
             (reversalConfirmed === true ||
+                shortReversalWatchPromoted === true ||
+                promotionReason === "V2_SHORT_REVERSAL_WATCH_PROBE" ||
+                promotionReason === "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
+                shortRevWatch.probe_allowed === true ||
                 judgment.subtype === "BREAKDOWN_RETEST_FAILED" ||
                 judgment.metadata?.retestRejected === true ||
                 judgment.metadata?.box_upper_breakout_hold === false ||
@@ -5725,6 +5868,52 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotionBlockReason = "HTF_COUNTER_TREND_RANGE_NO_REVERSAL";
             expectedMissingCondition = "HTF_COUNTER_TREND_RANGE_NO_REVERSAL";
             expectedNextAction = "WAIT_FOR_CONFIRMED_REVERSAL_OR_FAILED_BREAKOUT";
+        }
+    }
+
+    // Deadlock Proof Logging (V2_RANGE_DIRECTIONAL_DEADLOCK_PROOF)
+    {
+        const canonicalRegimeVal = String(judgment.regime_final ?? authoritativeInput.snapshot.canonicalRegime ?? "RANGE").toUpperCase();
+        const isRange = canonicalRegimeVal === "RANGE" || judgment.regime === "RANGE";
+        const macroPol = String(judgment.macroPolarity ?? "NEUTRAL").toUpperCase();
+        const isUpper = (zone as string) === "upper" || (zone as string) === "upper-extreme";
+
+        let longBlockedReason: string | null = null;
+        let shortBlockedReason: string | null = null;
+
+        if (isUpper && macroPol === "BULLISH") {
+            if (v2RejectReasonAfterPromotion === "CHASE_LONG_DISALLOWED_UPPER" || conflictResolutionReason === "chase_long_disallowed_in_upper_zone") {
+                longBlockedReason = "CHASE_LONG_DISALLOWED_UPPER";
+            } else if (trendSideCandidate === "long" && v2DecisionAfterPromotion !== "ENTER") {
+                longBlockedReason = v2RejectReasonAfterPromotion ?? "LONG_RETEST_NOT_CONFIRMED";
+            } else if (!isLongQualified) {
+                longBlockedReason = "LONG_QUALITY_OR_ZONE_RESTRICTED";
+            }
+
+            if (!shortRevWatch.probe_allowed) {
+                shortBlockedReason = shortRevWatch.rejection_reason ?? shortRevWatch.probe_block_reason ?? (judgment.polarityMismatch ? "POLARITY_MISMATCH_BULLISH_MACRO_LIMITS_SHORT_SHOCK" : "SHORT_STRUCTURE_NOT_CONFIRMED");
+            }
+        }
+
+        const deadlockDetected = isRange && isUpper && macroPol === "BULLISH" && (longBlockedReason != null || v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP");
+        const exceptionAttempted = shortRevWatch.probe_allowed === true;
+        const deadlockResolved = v2DecisionAfterPromotion === "ENTER" && v2SideAfterPromotion === "short";
+
+        if (isRange && isUpper && macroPol === "BULLISH") {
+            console.info(JSON.stringify({
+                event: "V2_RANGE_DIRECTIONAL_DEADLOCK_PROOF",
+                symbol: String(input.symbol),
+                regime: canonicalRegimeVal,
+                subtype: String(judgment.subtype ?? "NONE"),
+                zone,
+                macro_polarity: macroPol,
+                original_htf_policy: String(judgment.htf_entry_policy ?? "NONE"),
+                long_blocked_reason: longBlockedReason,
+                short_blocked_reason: shortBlockedReason,
+                deadlock_detected: deadlockDetected,
+                exception_attempted: exceptionAttempted,
+                deadlock_resolved: deadlockResolved
+            }));
         }
     }
 
@@ -5879,11 +6068,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     (isTrendContinuationRevalidatedPromotion && sideFinal === "short") ||
                     (isPolarityReversalMicroProbePromotion && sideFinal === "short") ||
                     (isConflictResolvedTrendShortPromotion && sideFinal === "short") ||
-                    (isRangeTrendReclaimProbePromotion && sideFinal === "short")
+                    (isRangeTrendReclaimProbePromotion && sideFinal === "short") ||
+                    (shortReversalWatchPromoted && sideFinal === "short") ||
+                    (promotionReason === "V2_SHORT_REVERSAL_WATCH_PROBE" && sideFinal === "short") ||
+                    (promotionReason === "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY" && sideFinal === "short")
                 );
             const htfStrongBullish = htfHardBlockReason === "STRONG_BULLISH_HTF_ALIGNMENT";
 
-            if (!shortException || (htfStrongBullish && !isPolarityReversalMicroProbePromotion && !isConflictResolvedTrendShortPromotion && !isRangeTrendReclaimProbePromotion)) {
+            const isShortReversalException =
+                shortReversalWatchPromoted ||
+                promotionReason === "V2_SHORT_REVERSAL_WATCH_PROBE" ||
+                promotionReason === "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY";
+
+            if (!shortException || (htfStrongBullish && !isPolarityReversalMicroProbePromotion && !isConflictResolvedTrendShortPromotion && !isRangeTrendReclaimProbePromotion && !isShortReversalException)) {
                 mismatchReason = "SIDE_ZONE_MISMATCH_LOWER_SHORT";
             }
         } else if (sideFinal === "long" && zone === "upper") {
@@ -6283,7 +6480,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             else if ((() => {
                 let baseMargin = riskSizing.baseStageMarginKrw;
                 if (!baseMargin || baseMargin <= 0) {
-                    baseMargin = input.config.baseSizeUsd ? input.config.baseSizeUsd * 1400 : 140000;
+                    baseMargin = typeof input.config?.baseSizeUsd === "number" ? input.config.baseSizeUsd * 1400 : 140000;
                 } else if (baseMargin < 1000) {
                     baseMargin = baseMargin * 1400;
                 }
@@ -6528,7 +6725,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             if (!blockProbe) {
                 let baseMargin = riskSizing.baseStageMarginKrw;
                 if (!baseMargin || baseMargin <= 0) {
-                    baseMargin = input.config.baseSizeUsd ? input.config.baseSizeUsd * 1400 : 140000;
+                    baseMargin = typeof input.config?.baseSizeUsd === "number" ? input.config.baseSizeUsd * 1400 : 140000;
                 } else if (baseMargin < 1000) {
                     baseMargin = baseMargin * 1400;
                 }
@@ -6633,7 +6830,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             baseMargin = stageMarginKrwBefore > 0 ? stageMarginKrwBefore : riskSizing.baseStageMarginKrw;
         }
         if (!baseMargin || baseMargin <= 0) {
-            baseMargin = input.config.baseSizeUsd ? input.config.baseSizeUsd * 1400 : 140000;
+            baseMargin = typeof input.config?.baseSizeUsd === "number" ? input.config.baseSizeUsd * 1400 : 140000;
         } else if (baseMargin < 1000) {
             baseMargin = baseMargin * 1400;
         }
@@ -8940,13 +9137,17 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     const authorityCreatedAt = input.now;
 
+    const isPlanSizingValid = isLiveSignedOrderAttempt
+        ? finalOrderNotionalUsdt > 0
+        : (stageMarginKrwAfter > 0 || Number(riskSizing.stageMarginKrw ?? 0) > 0 || Number(riskSizing.exposureNotionalKrw ?? 0) > 0);
+
     const v2CommittedPlan: V2CommittedRiskPlan | undefined =
-        (finalDecision === "ENTER" && (executionAction === "ENTER" || executionAction === "ADDON") && !hardBlockPresent && !riskSizing.isBlocked && finalOrderNotionalUsdt > 0)
+        (finalDecision === "ENTER" && (executionAction === "ENTER" || executionAction === "ADDON") && !hardBlockPresent && !riskSizing.isBlocked && isPlanSizingValid)
             ? {
                 symbol: input.symbol,
                 side: (normalizedV2Side === "short" ? "short" : "long") as "long" | "short",
                 action: executionAction,
-                finalOrderNotionalUsdt,
+                finalOrderNotionalUsdt: isLiveSignedOrderAttempt ? finalOrderNotionalUsdt : undefined,
                 appliedLeverage: riskSizing.appliedLeverage,
                 stopPrice: Number(v2StopPrice),
                 invalidationPx: Number(v2InvalidationPx),
@@ -9682,23 +9883,25 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             return "NONE";
         }
         
+        const isSizingValid = isLiveSignedOrderAttempt
+            ? Number(decision.risk.finalOrderNotionalUsdt ?? 0) > 0
+            : (Number(decision.risk.stageMarginKrw ?? 0) > 0 || Number(decision.risk.exposureNotionalKrw ?? 0) > 0);
+
         const finalEnterExecutable =
-            isBtcStaleUpShockMrBypassApproved ||
-            (
-                decision.decision === "ENTER" &&
-                String(decision.side) !== "none" &&
-                decision.risk.isBlocked !== true &&
-                Number(decision.risk.finalOrderNotionalUsdt ?? 0) > 0 &&
-                decision.committedRiskPlan != null &&
-                Number(decision.lifecycleAuthority?.newStopPrice ?? 0) > 0
-            );
+            decision.decision === "ENTER" &&
+            String(decision.side) !== "none" &&
+            decision.risk.isBlocked !== true &&
+            isSizingValid &&
+            decision.committedRiskPlan != null &&
+            Number(decision.lifecycleAuthority?.newStopPrice ?? 0) > 0;
 
         if (!finalEnterExecutable) {
             let finalEnterBlockReason = decision.risk.blockReason ?? "UNKNOWN";
             if (!decision.risk.blockReason) {
                 if (String(decision.side) === "none") finalEnterBlockReason = "SIDE_MISSING";
                 else if (decision.risk.isBlocked === true) finalEnterBlockReason = "RISK_BLOCKED";
-                else if (!(Number(decision.risk.finalOrderNotionalUsdt ?? 0) > 0)) finalEnterBlockReason = "ORDER_NOTIONAL_ZERO";
+                else if (isLiveSignedOrderAttempt && !(Number(decision.risk.finalOrderNotionalUsdt ?? 0) > 0)) finalEnterBlockReason = "ORDER_NOTIONAL_ZERO";
+                else if (!isLiveSignedOrderAttempt && !(Number(decision.risk.stageMarginKrw ?? 0) > 0 || Number(decision.risk.exposureNotionalKrw ?? 0) > 0)) finalEnterBlockReason = "PAPER_STAGE_MARGIN_ZERO";
                 else if (decision.committedRiskPlan == null) finalEnterBlockReason = "COMMITTED_RISK_PLAN_MISSING";
                 else if (!(Number(decision.lifecycleAuthority?.newStopPrice ?? 0) > 0)) finalEnterBlockReason = "STOP_PRICE_INVALID";
             }
@@ -9828,12 +10031,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             newStopPrice: decision.lifecycleAuthority?.newStopPrice,
             promotionReason
         }));
-    }
-
-    if (isBtcStaleUpShockMrBypassApproved) {
-        decision.decision = "ENTER";
-        decision.side = "short";
-        decision.executionAction = "ENTER";
     }
 
     return { decision, internal };
