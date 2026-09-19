@@ -1,3 +1,5 @@
+import { getClosedCandlesForStructuralStop } from "../risk-sizing/fast-trend-shift-structural-stop";
+
 export interface ShortReversalWatchInput {
     symbol: string;
     htfPolicy?: string | null;
@@ -44,7 +46,8 @@ export function evaluateShortReversalWatch(
     const symbol = String(input.symbol ?? "").toUpperCase();
     const lastPrice = Number(input.lastPrice ?? 0);
     const boxHigh = Number(input.boxHigh ?? input.breakoutLevel ?? 0);
-    const candles = input.candles || [];
+    const rawCandles = input.candles || [];
+    const closedCandles = getClosedCandlesForStructuralStop(rawCandles);
     const directionalShockState = String(input.directionalShockState ?? "NONE").toUpperCase();
     const shockPhase = String(input.shockPhase ?? "NONE").toUpperCase();
     const originalHtfPolicy = String(input.originalHtfPolicy ?? input.htfPolicy ?? "").toUpperCase();
@@ -103,41 +106,41 @@ export function evaluateShortReversalWatch(
         };
     }
 
-    // 1. Breakout failed: Price pierced above boxHigh / breakoutLevel and re-entered below
+    // 1. Breakout failed: Price pierced above boxHigh / breakoutLevel on closed candles and re-entered below
     let breakout_failed = false;
     let maxRecentHigh = 0;
     let maxHighIdx = -1;
 
-    const lookback = candles.slice(-25);
+    const lookback = closedCandles.slice(-25);
     if (boxHigh > 0 && lastPrice > 0 && lookback.length >= 3) {
         for (let i = 0; i < lookback.length; i++) {
-            const h = Number(lookback[i].high ?? lookback[i].h ?? 0);
+            const h = Number(lookback[i].high ?? 0);
             if (h > maxRecentHigh) {
                 maxRecentHigh = h;
                 maxHighIdx = i;
             }
         }
-        const piercedAbove = maxRecentHigh >= boxHigh * 0.999;
-        const reenteredBelow = lastPrice < boxHigh;
+        // Strict boxHigh touch or pierce (at least maxRecentHigh >= boxHigh)
+        const piercedAbove = maxRecentHigh >= boxHigh;
+        const lastClosedPrice = Number(lookback[lookback.length - 1].close ?? 0);
+        const reenteredBelow = lastClosedPrice < boxHigh || lastPrice < boxHigh;
         breakout_failed = piercedAbove && reenteredBelow;
     }
 
-    // 2. Lower-high confirmed (Strict multi-candle structure, NOT a single candle drop)
+    // 2. Lower-high confirmed (Strict multi-candle structure on closed candles, NOT a single candle drop)
     let lower_high_confirmed = false;
     let micro_structure_break = false;
     let intermediateLow = Infinity;
     let lowerHighPrice = 0;
 
-    if (breakout_failed && lookback.length >= 5 && maxHighIdx >= 0) {
+    if (breakout_failed && lookback.length >= 4 && maxHighIdx >= 0) {
         // Look for peaks after maxHighIdx
-        // Peak 1 is maxRecentHigh at maxHighIdx.
-        // We need an intermediate trough (pullback low) followed by a secondary peak (lower high)
         let foundTrough = false;
         let troughIdx = -1;
         let troughLow = Infinity;
 
         for (let i = maxHighIdx + 1; i < lookback.length - 1; i++) {
-            const low = Number(lookback[i].low ?? lookback[i].l ?? 0);
+            const low = Number(lookback[i].low ?? 0);
             if (low > 0 && low < troughLow) {
                 troughLow = low;
                 troughIdx = i;
@@ -151,7 +154,7 @@ export function evaluateShortReversalWatch(
             let secondaryPeakIdx = -1;
 
             for (let i = troughIdx + 1; i < lookback.length; i++) {
-                const h = Number(lookback[i].high ?? lookback[i].h ?? 0);
+                const h = Number(lookback[i].high ?? 0);
                 if (h > secondaryPeakHigh) {
                     secondaryPeakHigh = h;
                     secondaryPeakIdx = i;
@@ -161,20 +164,26 @@ export function evaluateShortReversalWatch(
             // Lower high requires:
             // 1. secondary peak is below primary peak (maxRecentHigh)
             // 2. secondary peak had a noticeable bounce above the trough (at least 0.1% bounce)
-            // 3. at least 1 closed confirmation candle after or rejecting from secondary peak
+            // 3. closed confirmation candle rejecting from secondary peak
             const bounceValid = secondaryPeakHigh > troughLow * 1.001;
             const isLower = secondaryPeakHigh < maxRecentHigh * 0.9995;
-            const hasConfirmationCandle = secondaryPeakIdx < lookback.length - 1 || lastPrice < secondaryPeakHigh;
+            const lastClosedClose = Number(lookback[lookback.length - 1].close ?? 0);
+            const hasConfirmationCandle = secondaryPeakIdx < lookback.length - 1 || lastClosedClose < secondaryPeakHigh;
 
             if (isLower && bounceValid && hasConfirmationCandle) {
                 lower_high_confirmed = true;
                 lowerHighPrice = secondaryPeakHigh;
             }
 
-            // 3. Micro structure break / intermediate trough low break confirmed
-            if (lower_high_confirmed && Number.isFinite(intermediateLow)) {
-                if (lastPrice < intermediateLow) {
-                    micro_structure_break = true;
+            // 3. Micro structure break / intermediate trough low break confirmed ON CLOSED CANDLES
+            if (lower_high_confirmed && Number.isFinite(intermediateLow) && secondaryPeakIdx >= 0) {
+                for (let i = secondaryPeakIdx; i < lookback.length; i++) {
+                    const c = Number(lookback[i].close ?? 0);
+                    const l = Number(lookback[i].low ?? 0);
+                    if (c < intermediateLow || l < intermediateLow) {
+                        micro_structure_break = true;
+                        break;
+                    }
                 }
             }
         }
@@ -231,7 +240,7 @@ export function evaluateShortReversalWatch(
     // - breakout failure confirmed
     // - multi-candle lower-high confirmed
     // - intermediate trough low break confirmed
-    const isRangeRegime = canonicalRegime === "RANGE" || regime === "RANGE";
+    const isRangeRegime = canonicalRegime ? canonicalRegime === "RANGE" : regime === "RANGE";
     const isUpperZone = normalizedZone === "upper" || normalizedZone === "upper-extreme" || normalizedZone === "upper_extreme";
     const isTargetSubtype =
         subtype === "RANGE_FAKE_BREAKOUT" ||

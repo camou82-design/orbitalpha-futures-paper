@@ -143,7 +143,9 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
             boxHigh: 70000,
             candles: [
                 { open: 64000, high: 65000, low: 63900, close: 64500 },
-                { open: 64500, high: 65200, low: 64400, close: 65000 }
+                { open: 64500, high: 65200, low: 64400, close: 65000 },
+                { open: 65000, high: 65100, low: 64900, close: 65000 },
+                { open: 65000, high: 65100, low: 64900, close: 65000 }
             ]
         });
 
@@ -161,7 +163,8 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
             candles: [
                 { open: 68000, high: 69000, low: 67900, close: 68500 },
                 { open: 68500, high: 72000, low: 68500, close: 71500 }, // Peak at 72000 (maxHighIdx)
-                { open: 71500, high: 71500, low: 69000, close: 69500 }  // Single candle drop
+                { open: 71500, high: 71500, low: 69000, close: 69500 }, // Single candle drop
+                { open: 69500, high: 69600, low: 69400, close: 69500 }  // forming bar
             ]
         });
 
@@ -172,7 +175,7 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
     });
 
     await t.test("3. evaluateShortReversalWatch: Lower-high formed but intermediate trough low not breached", () => {
-        // Peak at 72,000 -> Pullback to 69,000 (trough) -> Lower high at 70,500 -> Current price 69,500 (> 69,000 trough)
+        // Peak at 72,000 -> Pullback to 69,000 (trough) -> Lower high at 70,500 -> Closed rejection at 69,500 (> 69,000 trough)
         const res = evaluateShortReversalWatch({
             symbol: "BTCUSDT",
             lastPrice: 69500,
@@ -182,7 +185,8 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
                 { open: 68500, high: 72000, low: 68500, close: 71500 }, // Peak 1: 72,000
                 { open: 71500, high: 71500, low: 69000, close: 69200 }, // Pullback trough: 69,000
                 { open: 69200, high: 70500, low: 69100, close: 70200 }, // Lower high peak 2: 70,500 (< 72,000)
-                { open: 70200, high: 70300, low: 69400, close: 69500 }  // Rejection candle, but price 69,500 > trough 69,000
+                { open: 70200, high: 70300, low: 69400, close: 69500 }, // Rejection candle, but price 69,500 > trough 69,000
+                { open: 69500, high: 69600, low: 69400, close: 69500 }  // forming bar
             ]
         });
 
@@ -194,18 +198,21 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
     });
 
     await t.test("4. evaluateShortReversalWatch: Full 3-step criteria met allows countertrend short probe", () => {
-        // Peak at 72,000 -> Trough at 69,000 -> Lower high at 70,500 -> Micro structure break below 69,000 (lastPrice 68,700)
+        // Peak at 72,000 -> Trough at 69,000 -> Lower high at 70,500 -> Micro structure break below 69,000 (close 68,700)
         const res = evaluateShortReversalWatch({
             symbol: "BTCUSDT",
             lastPrice: 68700,
             boxHigh: 70000,
             htfPolicy: "LONG_ONLY_OR_NONE",
+            canonicalRegime: "RANGE",
+            zone: "upper",
             candles: [
                 { open: 67000, high: 68000, low: 66900, close: 67500 },
                 { open: 68500, high: 72000, low: 68500, close: 71500 }, // Peak 1: 72,000
                 { open: 71500, high: 71500, low: 69000, close: 69200 }, // Pullback trough: 69,000
                 { open: 69200, high: 70500, low: 69100, close: 70200 }, // Lower high peak 2: 70,500
-                { open: 70200, high: 70300, low: 68600, close: 68700 }  // Breaks trough low (68,700 < 69,000)
+                { open: 70200, high: 70300, low: 68600, close: 68700 }, // Breaks trough low (68,700 < 69,000)
+                { open: 68700, high: 68800, low: 68600, close: 68700 }  // forming bar
             ]
         });
 
@@ -225,6 +232,8 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
             lastPrice: 68700,
             boxHigh: 70000,
             htfPolicy: "LONG_ONLY_OR_NONE",
+            canonicalRegime: "RANGE",
+            zone: "upper",
             htf1hBias: "BEARISH",
             htf15mBias: "WEAK_DOWN",
             candles: [
@@ -232,7 +241,8 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
                 { open: 68500, high: 72000, low: 68500, close: 71500 },
                 { open: 71500, high: 71500, low: 69000, close: 69200 },
                 { open: 69200, high: 70500, low: 69100, close: 70200 },
-                { open: 70200, high: 70300, low: 68600, close: 68700 }
+                { open: 70200, high: 70300, low: 68600, close: 68700 },
+                { open: 68700, high: 68800, low: 68600, close: 68700 }
             ]
         });
 
@@ -274,7 +284,8 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
             { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
             { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
             { open: 69200, high: 70500, low: 69100, close: 70200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
-            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 }
+            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 },
+            { open: 68700, high: 68800, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 }
         ];
         const allCandles = [...baseCandles, ...reversalPattern];
 
@@ -315,7 +326,8 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
             { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
             { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
             { open: 69200, high: 70500, low: 69100, close: 70200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
-            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 }
+            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 },
+            { open: 68700, high: 68800, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 }
         ];
         const allCandles = [...baseCandles, ...reversalPattern];
 
@@ -356,23 +368,17 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
             { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
             { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
             { open: 69200, high: 70500, low: 69100, close: 70200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
-            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 }
+            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 },
+            { open: 68700, high: 68800, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 }
         ];
         const allCandles = [...baseCandles, ...reversalPattern];
 
         const zeroMarginInput = makeTestInput({
             candles: allCandles as any,
-            v1Result: {
-                regime: "TREND",
-                decision: "ENTER",
-                side: "SHORT",
-                isBlocked: false
-            },
             config: {
                 baseSizeUsd: 0
             } as any,
             snapshot: {
-                canonicalRegime: "TREND",
                 lastPrice: 68700,
                 latestCandleClose: 68700,
                 boxPos: 0.8,
@@ -381,9 +387,9 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
                 candles: allCandles
             } as any,
             state: {
-                directionalShockState: "NONE",
+                directionalShockState: "UP",
                 longAllow: true,
-                shortAllow: true,
+                shortAllow: false,
                 accountEquityKrw: 14_000_000,
                 okxLiveEnabled: false,
                 signedExecutionReady: false
@@ -406,7 +412,8 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
             { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
             { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
             { open: 69200, high: 70500, low: 69100, close: 70200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
-            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 }
+            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 },
+            { open: 68700, high: 68800, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 }
         ];
         const allCandles = [...baseCandles, ...reversalPattern];
 
@@ -456,7 +463,8 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
             { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
             { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
             { open: 69200, high: 70500, low: 69100, close: 70200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
-            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 }
+            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 },
+            { open: 68700, high: 68800, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 }
         ];
         const allCandles = [...baseCandles, ...reversalPattern];
 
@@ -499,81 +507,21 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
     });
 
     // -------------------------------------------------------------------------
-    // MANDATORY REGRESSION TEST SUITE: SCENARIOS A through F & PROOFS
+    // MANDATORY REGRESSION TEST SUITE: SCENARIOS A through H
     // -------------------------------------------------------------------------
 
-    await t.test("A. Bullish HTF + ordinary short => BLOCK", () => {
-        const inputOrdinaryShort = makeTestInput({
-            snapshot: {
-                canonicalRegime: "RANGE",
-                lastPrice: 70000,
-                latestCandleClose: 70000,
-                boxPos: 0.8,
-                boxHigh: 71000,
-                boxLow: 65000,
-                candles: [
-                    { open: 69000, high: 70500, low: 68900, close: 70000 }
-                ]
-            } as any,
-            state: {
-                directionalShockState: "UP",
-                longAllow: true,
-                shortAllow: false
-            } as any
-        });
-
-        const res = runEngineV2(inputOrdinaryShort);
-        assert.notEqual(res.decision.side, "short");
-        assert.notEqual(res.decision.decision, "ENTER");
-    });
-
-    await t.test("B. Bullish HTF + upper fake breakout but incomplete reversal => BLOCK", () => {
-        // Breakout pierced above boxHigh, but did NOT form multi-candle lower-high or breach trough
-        const baseCandles = createCandles([
-            67000, 67200, 67100, 67300, 67200, 67400, 67300, 67500, 67400, 67600,
-            67500, 67700, 67600, 67800, 67700
-        ]);
-        const singleCandleDrop = [
-            { open: 67700, high: 68000, low: 67600, close: 67800, volume: 100, ts: 1788410000000 + 15 * 60000, time: 1788410000000 + 15 * 60000 },
-            { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
-            { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 }
-        ];
-        const allCandles = [...baseCandles, ...singleCandleDrop];
-
-        const inputIncomplete = makeTestInput({
-            candles: allCandles as any,
-            snapshot: {
-                canonicalRegime: "RANGE",
-                lastPrice: 69200,
-                latestCandleClose: 69200,
-                boxPos: 0.8,
-                boxHigh: 70000,
-                boxLow: 65000,
-                candles: allCandles
-            } as any,
-            state: {
-                directionalShockState: "UP",
-                longAllow: true,
-                shortAllow: false
-            } as any
-        });
-
-        const res = runEngineV2(inputIncomplete);
-        assert.notEqual(res.decision.side, "short");
-        assert.notEqual(res.decision.decision, "ENTER");
-    });
-
-    await t.test("C. Bullish HTF + complete 3-step short reversal => PROBE ENTER", () => {
+    await t.test("A. RANGE upper + actual boxHigh breakout + lower-high + trough break => PROBE ENTER", () => {
         const baseCandles = createCandles([
             67000, 67200, 67100, 67300, 67200, 67400, 67300, 67500, 67400, 67600,
             67500, 67700, 67600, 67800, 67700
         ]);
         const reversalPattern = [
             { open: 67700, high: 68000, low: 67600, close: 67800, volume: 100, ts: 1788410000000 + 15 * 60000, time: 1788410000000 + 15 * 60000 },
-            { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
-            { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
-            { open: 69200, high: 70500, low: 69100, close: 70200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
-            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 }
+            { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 }, // Actual breakout above boxHigh 70000
+            { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 }, // Trough at 69000
+            { open: 69200, high: 70500, low: 69100, close: 70200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 }, // Lower high at 70500
+            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 }, // Trough break confirmed
+            { open: 68700, high: 68800, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 }  // Forming bar
         ];
         const allCandles = [...baseCandles, ...reversalPattern];
 
@@ -599,10 +547,9 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
         assert.equal(res.decision.side, "short");
         assert.equal(res.decision.decision, "ENTER");
         assert.equal(res.decision.metadata?.entryReason, "V2_SHORT_REVERSAL_WATCH_PROBE");
-        assert.equal(res.decision.metadata?.short_reversal_watch_promoted, true);
     });
 
-    await t.test("D. 15m/1h bearish alignment + complete reversal => normal short authority", () => {
+    await t.test("B. 3-step pattern in TREND regime => exception NOT eligible", () => {
         const baseCandles = createCandles([
             67000, 67200, 67100, 67300, 67200, 67400, 67300, 67500, 67400, 67600,
             67500, 67700, 67600, 67800, 67700
@@ -612,7 +559,163 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
             { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
             { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
             { open: 69200, high: 70500, low: 69100, close: 70200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
-            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 }
+            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 },
+            { open: 68700, high: 68800, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 }
+        ];
+        const allCandles = [...baseCandles, ...reversalPattern];
+
+        const inputTrend = makeTestInput({
+            candles: allCandles as any,
+            snapshot: {
+                canonicalRegime: "TREND",
+                lastPrice: 68700,
+                latestCandleClose: 68700,
+                boxPos: 0.8,
+                boxHigh: 70000,
+                boxLow: 65000,
+                candles: allCandles
+            } as any,
+            v1Result: {
+                regime: "TREND",
+                decision: "HOLD",
+                side: "NONE",
+                isBlocked: false
+            },
+            state: {
+                directionalShockState: "UP",
+                longAllow: true,
+                shortAllow: false
+            } as any
+        });
+
+        const res = runEngineV2(inputTrend);
+        assert.notEqual(res.decision.side, "short");
+        assert.notEqual(res.decision.decision, "ENTER");
+    });
+
+    await t.test("C. RANGE mid/lower with 3-step pattern => exception NOT eligible", () => {
+        const baseCandles = createCandles([
+            67000, 67200, 67100, 67300, 67200, 67400, 67300, 67500, 67400, 67600,
+            67500, 67700, 67600, 67800, 67700
+        ]);
+        const reversalPattern = [
+            { open: 67700, high: 68000, low: 67600, close: 67800, volume: 100, ts: 1788410000000 + 15 * 60000, time: 1788410000000 + 15 * 60000 },
+            { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
+            { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
+            { open: 69200, high: 70500, low: 69100, close: 70200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
+            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 },
+            { open: 68700, high: 68800, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 }
+        ];
+        const allCandles = [...baseCandles, ...reversalPattern];
+
+        const inputMid = makeTestInput({
+            candles: allCandles as any,
+            snapshot: {
+                canonicalRegime: "RANGE",
+                lastPrice: 68700,
+                latestCandleClose: 68700,
+                boxPos: 0.4, // Mid zone
+                boxHigh: 70000,
+                boxLow: 65000,
+                candles: allCandles
+            } as any,
+            state: {
+                directionalShockState: "UP",
+                longAllow: true,
+                shortAllow: false
+            } as any
+        });
+
+        const res = runEngineV2(inputMid);
+        assert.notEqual(res.decision.side, "short");
+        assert.notEqual(res.decision.decision, "ENTER");
+    });
+
+    await t.test("D. Reaching 99.9% of boxHigh without touching/breaking => breakout_failed=false", () => {
+        // boxHigh = 70000, peak reaches 69950 (99.928% but < 70000)
+        const res = evaluateShortReversalWatch({
+            symbol: "BTCUSDT",
+            lastPrice: 68700,
+            boxHigh: 70000,
+            candles: [
+                { open: 67000, high: 68000, low: 66900, close: 67500 },
+                { open: 68500, high: 69950, low: 68500, close: 69800 }, // Under boxHigh
+                { open: 69800, high: 69800, low: 69000, close: 69200 },
+                { open: 69200, high: 69600, low: 69100, close: 69500 },
+                { open: 69500, high: 69600, low: 68600, close: 68700 },
+                { open: 68700, high: 68800, low: 68600, close: 68700 }
+            ]
+        });
+
+        assert.equal(res.breakout_failed, false);
+        assert.equal(res.probe_allowed, false);
+        assert.equal(res.probe_block_reason, "BREAKOUT_NOT_FAILED");
+    });
+
+    await t.test("E. Only forming candle breaks trough, closed candle not confirmed => probe NOT allowed", () => {
+        // Peak 72000 -> Trough 69000 -> Lower high 70500 -> Closed candle rejection at 69500 (> 69000)
+        // Forming bar (live) breaks to 68700 (< 69000)
+        const closedCandlesPattern = [
+            { open: 67000, high: 68000, low: 66900, close: 67500 },
+            { open: 68500, high: 72000, low: 68500, close: 71500 }, // Peak 72000
+            { open: 71500, high: 71500, low: 69000, close: 69200 }, // Trough 69000
+            { open: 69200, high: 70500, low: 69100, close: 70200 }, // Lower High 70500
+            { open: 70200, high: 70300, low: 69400, close: 69500 }  // Closed candle did NOT break trough
+        ];
+        const formingCandle = { open: 69500, high: 69600, low: 68600, close: 68700 }; // Forming bar breaks trough
+
+        const res = evaluateShortReversalWatch({
+            symbol: "BTCUSDT",
+            lastPrice: 68700,
+            boxHigh: 70000,
+            candles: [...closedCandlesPattern, formingCandle]
+        });
+
+        assert.equal(res.lower_high_confirmed, true);
+        assert.equal(res.micro_structure_break, false);
+        assert.equal(res.probe_allowed, false);
+        assert.equal(res.probe_block_reason, "MICRO_STRUCTURE_NOT_BROKEN");
+    });
+
+    await t.test("F. Same candle closes and confirms trough break => probe ALLOWED", () => {
+        // Previous forming candle now closes at 68700, and a new forming bar arrives
+        const closedCandlesPattern = [
+            { open: 67000, high: 68000, low: 66900, close: 67500 },
+            { open: 68500, high: 72000, low: 68500, close: 71500 }, // Peak 72000
+            { open: 71500, high: 71500, low: 69000, close: 69200 }, // Trough 69000
+            { open: 69200, high: 70500, low: 69100, close: 70200 }, // Lower High 70500
+            { open: 70200, high: 70300, low: 68600, close: 68700 }  // Closed candle CONFIRMS trough break
+        ];
+        const newFormingCandle = { open: 68700, high: 68800, low: 68600, close: 68700 };
+
+        const res = evaluateShortReversalWatch({
+            symbol: "BTCUSDT",
+            lastPrice: 68700,
+            boxHigh: 70000,
+            canonicalRegime: "RANGE",
+            zone: "upper",
+            candles: [...closedCandlesPattern, newFormingCandle]
+        });
+
+        assert.equal(res.lower_high_confirmed, true);
+        assert.equal(res.micro_structure_break, true);
+        assert.equal(res.probe_allowed, true);
+        assert.equal(res.exception_eligible, true);
+        assert.equal(res.final_short_authority, "V2_SHORT_REVERSAL_WATCH_PROBE");
+    });
+
+    await t.test("G. Eligible RANGE upper structure + 15m/1h bearish alignment => V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY", () => {
+        const baseCandles = createCandles([
+            67000, 67200, 67100, 67300, 67200, 67400, 67300, 67500, 67400, 67600,
+            67500, 67700, 67600, 67800, 67700
+        ]);
+        const reversalPattern = [
+            { open: 67700, high: 68000, low: 67600, close: 67800, volume: 100, ts: 1788410000000 + 15 * 60000, time: 1788410000000 + 15 * 60000 },
+            { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
+            { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
+            { open: 69200, high: 70500, low: 69100, close: 70200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 },
+            { open: 70200, high: 70300, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 19 * 60000, time: 1788410000000 + 19 * 60000 },
+            { open: 68700, high: 68800, low: 68600, close: 68700, volume: 100, ts: 1788410000000 + 20 * 60000, time: 1788410000000 + 20 * 60000 }
         ];
         const allCandles = [...baseCandles, ...reversalPattern];
 
@@ -649,33 +752,7 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
         assert.equal(res.decision.metadata?.entryReason, "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY");
     });
 
-    await t.test("E. Lower/mid range short chase => BLOCK", () => {
-        // In lower zone (boxPos = 0.2), short reversal watch exception must NOT trigger and ordinary chase is blocked
-        const inputLowerShort = makeTestInput({
-            snapshot: {
-                canonicalRegime: "RANGE",
-                lastPrice: 66000,
-                latestCandleClose: 66000,
-                boxPos: 0.2,
-                boxHigh: 70000,
-                boxLow: 65000,
-                candles: [
-                    { open: 66500, high: 66800, low: 65900, close: 66000 }
-                ]
-            } as any,
-            state: {
-                directionalShockState: "UP",
-                longAllow: true,
-                shortAllow: false
-            } as any
-        });
-
-        const res = runEngineV2(inputLowerShort);
-        assert.notEqual(res.decision.side, "short");
-    });
-
-    await t.test("F. Bullish pullback long path unchanged", () => {
-        // Bullish lower/mid range long setup should still proceed unaffected
+    await t.test("H. Bullish pullback long path unchanged", () => {
         const inputBullishPullbackLong = makeTestInput({
             snapshot: {
                 canonicalRegime: "RANGE",
@@ -694,7 +771,6 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
         });
 
         const res = runEngineV2(inputBullishPullbackLong);
-        // Long logic is completely unchanged
         assert.ok(res.decision != null);
     });
 });

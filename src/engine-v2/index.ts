@@ -4693,7 +4693,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         htf15mBias: (judgment as any)?.htf_15m_bias ?? judgment.htf_bias,
         macroPolarity: judgment.macroPolarity,
         trendWeaknessScore: authoritativeInput.snapshot.trendWeaknessScore,
-        canonicalRegime: judgment.regime_final ?? authoritativeInput.snapshot.canonicalRegime ?? "RANGE",
+        canonicalRegime: authoritativeInput.snapshot.canonicalRegime ?? judgment.regime_final ?? "RANGE",
         regime: judgment.regime ?? "RANGE",
         subtype: judgment.subtype ?? "",
         zone: zone
@@ -4705,9 +4705,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const hasShortPosForReversal = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() === "short");
     const hasLongPosForReversal = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() === "long");
 
-    const isShortReversalEligible =
+    const shortReversalExceptionAllowed =
         shortRevWatch.probe_allowed === true &&
-        (shortRevWatch.exception_eligible === true || judgment.htf_entry_policy !== "SHORT_ONLY_OR_NONE") &&
+        shortRevWatch.exception_eligible === true;
+
+    const isShortReversalEligible =
+        shortReversalExceptionAllowed &&
         v2DecisionBeforePromotion !== "REJECT" &&
         v2State.directionalShockState !== "DOWN" &&
         !hasShortPosForReversal &&
@@ -4724,7 +4727,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2RejectReasonAfterPromotion = null;
             promotionApplied = true;
             shortReversalWatchPromoted = true;
-            if (shortRevWatch.htf_upgrade_ready) {
+            if (shortRevWatch.htf_upgrade_ready && shortRevWatch.exception_eligible) {
                 promotionReason = "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY";
                 shortReversalWatchPromotionReason = "SHORT_REVERSAL_HTF_UPGRADE_CONFIRMED";
                 execMeta.entryReason = "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY";
@@ -4802,8 +4805,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
             // 원칙 1: directionalShockState=UP이면 short 후보 제거 (SHORT_REVERSAL_WATCH probe 허용 시 예외)
             if (directionalShockState === "UP") {
-                if (shortRevWatch.probe_allowed) {
-                    if (shortRevWatch.htf_upgrade_ready) {
+                if (shortReversalExceptionAllowed) {
+                    if (shortRevWatch.htf_upgrade_ready && shortRevWatch.exception_eligible) {
                         return { side: "short", reason: "SHORT_REVERSAL_HTF_UPGRADE_ALLOWED" };
                     } else {
                         return { side: "short", reason: "SHORT_REVERSAL_WATCH_PROBE_ALLOWED" };
@@ -4822,8 +4825,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
             // 원칙 2: htf_entry_policy=LONG_ONLY_OR_NONE이면 short selected side를 none 또는 long 후보로 재해석 (SHORT_REVERSAL_WATCH probe 허용 시 예외)
             if (htf_entry_policy === "LONG_ONLY_OR_NONE") {
-                if (shortRevWatch.probe_allowed) {
-                    if (shortRevWatch.htf_upgrade_ready) {
+                if (shortReversalExceptionAllowed) {
+                    if (shortRevWatch.htf_upgrade_ready && shortRevWatch.exception_eligible) {
                         return { side: "short", reason: "SHORT_REVERSAL_HTF_UPGRADE_ALLOWED" };
                     } else {
                         return { side: "short", reason: "SHORT_REVERSAL_WATCH_PROBE_ALLOWED" };
@@ -4841,8 +4844,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
             // risk shortAllow=false 이면 당연히 short 배제 (SHORT_REVERSAL_WATCH probe 허용 시 예외)
             if (!shortAllow) {
-                if (shortRevWatch.probe_allowed) {
-                    if (shortRevWatch.htf_upgrade_ready) {
+                if (shortReversalExceptionAllowed) {
+                    if (shortRevWatch.htf_upgrade_ready && shortRevWatch.exception_eligible) {
                         return { side: "short", reason: "SHORT_REVERSAL_HTF_UPGRADE_ALLOWED" };
                     } else {
                         return { side: "short", reason: "SHORT_REVERSAL_WATCH_PROBE_ALLOWED" };
@@ -4893,7 +4896,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2DecisionAfterPromotion = "HOLD";
             v2RejectReasonAfterPromotion = "LONG_NOT_ALLOWED";
         }
-        if (v2SideAfterPromotion === "short" && v2DecisionAfterPromotion === "ENTER" && !shortAllow && !isBtcRangeMrStaleUpShockBypass && !shortRevWatch.probe_allowed) {
+        if (v2SideAfterPromotion === "short" && v2DecisionAfterPromotion === "ENTER" && !shortAllow && !isBtcRangeMrStaleUpShockBypass && !shortReversalExceptionAllowed) {
             v2DecisionAfterPromotion = "HOLD";
             v2RejectReasonAfterPromotion = "SHORT_NOT_ALLOWED";
         }
@@ -5765,7 +5768,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 (shortReversalWatchPromoted === true ||
                     promotionReason === "V2_SHORT_REVERSAL_WATCH_PROBE" ||
                     promotionReason === "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
-                    shortRevWatch.probe_allowed === true) &&
+                    shortReversalExceptionAllowed) &&
                 candidateSide === "short";
 
             if (isShortReversalWatchException) {
@@ -5823,7 +5826,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 shortReversalWatchPromoted === true ||
                 promotionReason === "V2_SHORT_REVERSAL_WATCH_PROBE" ||
                 promotionReason === "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
-                shortRevWatch.probe_allowed === true ||
+                shortReversalExceptionAllowed ||
                 judgment.subtype === "BREAKDOWN_RETEST_FAILED" ||
                 judgment.metadata?.retestRejected === true ||
                 judgment.metadata?.box_upper_breakout_hold === false ||
@@ -5890,13 +5893,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 longBlockedReason = "LONG_QUALITY_OR_ZONE_RESTRICTED";
             }
 
-            if (!shortRevWatch.probe_allowed) {
+            if (!shortReversalExceptionAllowed) {
                 shortBlockedReason = shortRevWatch.rejection_reason ?? shortRevWatch.probe_block_reason ?? (judgment.polarityMismatch ? "POLARITY_MISMATCH_BULLISH_MACRO_LIMITS_SHORT_SHOCK" : "SHORT_STRUCTURE_NOT_CONFIRMED");
             }
         }
 
         const deadlockDetected = isRange && isUpper && macroPol === "BULLISH" && (longBlockedReason != null || v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP");
-        const exceptionAttempted = shortRevWatch.probe_allowed === true;
+        const exceptionAttempted = shortReversalExceptionAllowed;
         const deadlockResolved = v2DecisionAfterPromotion === "ENTER" && v2SideAfterPromotion === "short";
 
         if (isRange && isUpper && macroPol === "BULLISH") {
