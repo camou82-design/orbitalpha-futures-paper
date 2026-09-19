@@ -123,7 +123,7 @@ export function evaluateShortReversalWatch(
         // Strict boxHigh touch or pierce (at least maxRecentHigh >= boxHigh)
         const piercedAbove = maxRecentHigh >= boxHigh;
         const lastClosedPrice = Number(lookback[lookback.length - 1].close ?? 0);
-        const reenteredBelow = lastClosedPrice < boxHigh || lastPrice < boxHigh;
+        const reenteredBelow = lastClosedPrice < boxHigh;
         breakout_failed = piercedAbove && reenteredBelow;
     }
 

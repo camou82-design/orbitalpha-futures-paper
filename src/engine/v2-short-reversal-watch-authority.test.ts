@@ -773,6 +773,59 @@ test("V2 SHORT REVERSAL WATCH AUTHORITY SUITE", async (t) => {
         const res = runEngineV2(inputBullishPullbackLong);
         assert.ok(res.decision != null);
     });
+
+    await t.test("I-1. Price pierced above boxHigh, but last closed candle close is still above boxHigh, forming candle drops below => breakout_failed=false", () => {
+        const baseCandles = createCandles([
+            67000, 67200, 67100, 67300, 67200, 67400, 67300, 67500, 67400, 67600,
+            67500, 67700, 67600, 67800, 67700
+        ]);
+        const candlesWithBreakoutStillAbove = [
+            ...baseCandles,
+            // Candle 16: pierced above 70000 boxHigh, closed at 71500 (ABOVE boxHigh)
+            { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
+            // Live forming candle only: drops below 70000 to 69200
+            { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 }
+        ];
+
+        const result = evaluateShortReversalWatch({
+            symbol: "BTCUSDT",
+            lastPrice: 69200,
+            boxHigh: 70000,
+            candles: candlesWithBreakoutStillAbove as any,
+            canonicalRegime: "RANGE",
+            zone: "upper"
+        });
+
+        assert.strictEqual(result.breakout_failed, false);
+        assert.strictEqual(result.probe_allowed, false);
+    });
+
+    await t.test("I-2. Same candle closes below boxHigh, becomes closed candle + new forming candle => breakout_failed=true", () => {
+        const baseCandles = createCandles([
+            67000, 67200, 67100, 67300, 67200, 67400, 67300, 67500, 67400, 67600,
+            67500, 67700, 67600, 67800, 67700
+        ]);
+        const candlesWithReentryClosed = [
+            ...baseCandles,
+            // Candle 16: pierced above 70000 boxHigh, closed at 71500
+            { open: 67800, high: 72000, low: 67800, close: 71500, volume: 100, ts: 1788410000000 + 16 * 60000, time: 1788410000000 + 16 * 60000 },
+            // Candle 17: NOW CLOSED below boxHigh at 69200
+            { open: 71500, high: 71500, low: 69000, close: 69200, volume: 100, ts: 1788410000000 + 17 * 60000, time: 1788410000000 + 17 * 60000 },
+            // New forming candle
+            { open: 69200, high: 69300, low: 69100, close: 69200, volume: 100, ts: 1788410000000 + 18 * 60000, time: 1788410000000 + 18 * 60000 }
+        ];
+
+        const result = evaluateShortReversalWatch({
+            symbol: "BTCUSDT",
+            lastPrice: 69200,
+            boxHigh: 70000,
+            candles: candlesWithReentryClosed as any,
+            canonicalRegime: "RANGE",
+            zone: "upper"
+        });
+
+        assert.strictEqual(result.breakout_failed, true);
+    });
 });
 
 
