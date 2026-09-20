@@ -4753,13 +4753,29 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const hasShortPosForReversal = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() === "short");
     const hasLongPosForReversal = v2State.currentPositions.some(p => p && p.symbol === input.symbol && String(p.side).toLowerCase() === "long");
 
+    const exposureCapVal = Number(v2State.exposureNotionalCapKrw ?? (input.state as any)?.exposureNotionalCapKrw ?? 0);
+    const currentExposureNotionalVal = Math.max(Number(v2State.ledgerExposureNotionalKrw ?? 0), Number((input.state as any)?.ledgerExposureNotionalKrw ?? 0));
+    const symbolExposureCapVal = Number(v2State.symbolExposureNotionalCapKrw ?? (input.state as any)?.symbolExposureNotionalCapKrw ?? 0);
+    const currentSymbolExposureNotionalVal = Math.max(Number(v2State.symbolLedgerExposureNotionalKrw ?? 0), Number((input.state as any)?.symbolLedgerExposureNotionalKrw ?? 0));
+    const exposureCapExceeded =
+        (exposureCapVal > 0 && currentExposureNotionalVal >= exposureCapVal) ||
+        (symbolExposureCapVal > 0 && currentSymbolExposureNotionalVal >= symbolExposureCapVal);
+
     const shortReversalExceptionAllowed =
         shortRevWatch.probe_allowed === true &&
-        shortRevWatch.exception_eligible === true;
+        shortRevWatch.exception_eligible === true &&
+        hardControlClear === true &&
+        !hardBlockPresent &&
+        !exposureCapExceeded &&
+        qualityScore >= 60;
 
     const longReversalExceptionAllowed =
         longRevWatch.probe_allowed === true &&
-        longRevWatch.exception_eligible === true;
+        longRevWatch.exception_eligible === true &&
+        hardControlClear === true &&
+        !hardBlockPresent &&
+        !exposureCapExceeded &&
+        qualityScore >= 60;
 
     const isShortReversalEligible =
         shortReversalExceptionAllowed &&
@@ -4925,69 +4941,42 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const isLowerZone = (zone as string) === "lower" || (zone as string) === "lower-extreme";
     const isUpperZone = (zone as string) === "upper" || (zone as string) === "upper-extreme";
 
-    const exposureCapVal = Number(v2State.exposureNotionalCapKrw ?? 0);
-    const currentExposureNotionalVal = Number(v2State.ledgerExposureNotionalKrw ?? 0);
-    const symbolExposureCapVal = Number(v2State.symbolExposureNotionalCapKrw ?? 0);
-    const currentSymbolExposureNotionalVal = Number(v2State.symbolLedgerExposureNotionalKrw ?? 0);
-    const exposureCapExceeded =
-        (exposureCapVal > 0 && currentExposureNotionalVal >= exposureCapVal) ||
-        (symbolExposureCapVal > 0 && currentSymbolExposureNotionalVal >= symbolExposureCapVal);
-
-    const canonicalRegimeVal = authoritativeInput.snapshot.canonicalRegime ?? judgment.regime_final ?? "RANGE";
-    const isRangeRegimeForProbe =
-        activeEngineRouting === "RANGE" ||
-        judgment.regime === "RANGE" ||
-        judgment.regime_final === "RANGE" ||
-        canonicalRegimeVal === "RANGE";
-
-    const isTrendRegimeForProbe =
-        activeEngineRouting === "TREND" ||
-        judgment.regime === "TREND" ||
-        judgment.regime_final === "TREND" ||
-        canonicalRegimeVal === "TREND";
+    const canonicalRegimeVal = String(authoritativeInput.snapshot.canonicalRegime ?? judgment.regime_final ?? "RANGE").toUpperCase();
+    const isRangeCanonical = canonicalRegimeVal === "RANGE";
+    const isTrendCanonical = canonicalRegimeVal === "TREND";
 
     const shortStructureConfirmed = (() => {
-        if (isRangeRegimeForProbe) {
+        if (isRangeCanonical) {
+            // RANGE: 반드시 full 3-step closed-candle reversal watch exception eligible 구조만 인정
             return (
-                isUpperZone && (
-                    reversalConfirmed === true ||
-                    isShortQualified ||
-                    judgment.subtype === "BREAKDOWN_RETEST_FAILED" ||
-                    judgment.metadata?.retestRejected === true ||
-                    judgment.metadata?.upper_failure_short === true ||
-                    judgment.metadata?.box_upper_breakout_hold === false ||
-                    shockReactionPromotionType === "upper_failure_short" ||
-                    shockReactionPromotionType === "upper_reversal_confirmed_short" ||
-                    shortRevWatch.breakout_failed === true ||
-                    (typeof (execMeta as Record<string, unknown>).breakdownRetestFailure === "boolean" && (execMeta as Record<string, unknown>).breakdownRetestFailure === true)
-                )
+                isUpperZone &&
+                (shortRevWatch.exception_eligible === true ||
+                    (shortRevWatch.breakout_failed === true &&
+                        shortRevWatch.lower_high_confirmed === true &&
+                        shortRevWatch.trough_break_confirmed === true))
             );
         }
-        if (isTrendRegimeForProbe) {
+        if (isTrendCanonical) {
             return isShortQualified || (trendOk === true && qualityScore >= 70);
         }
-        return isShortQualified || reversalConfirmed === true;
+        return false;
     })();
 
     const longStructureConfirmed = (() => {
-        if (isRangeRegimeForProbe) {
+        if (isRangeCanonical) {
+            // RANGE: 반드시 full 3-step closed-candle reversal watch exception eligible 구조만 인정
             return (
-                isLowerZone && (
-                    reversalConfirmed === true ||
-                    isLongQualified ||
-                    judgment.metadata?.reclaimConfirmed === true ||
-                    judgment.metadata?.reclaim_confirmed === true ||
-                    judgment.metadata?.box_lower_breakdown_hold === false ||
-                    judgment.metadata?.lower_reversal_confirmed === true ||
-                    shockReactionPromotionType === "lower_reversal_confirmed_long" ||
-                    longRevWatch.breakdown_failed === true
-                )
+                isLowerZone &&
+                (longRevWatch.exception_eligible === true ||
+                    (longRevWatch.breakdown_failed === true &&
+                        longRevWatch.higher_low_confirmed === true &&
+                        longRevWatch.peak_break_confirmed === true))
             );
         }
-        if (isTrendRegimeForProbe) {
+        if (isTrendCanonical) {
             return isLongQualified || (trendOk === true && qualityScore >= 70);
         }
-        return isLongQualified || reversalConfirmed === true;
+        return false;
     })();
 
     const probeOnlyShortExceptionAllowed: boolean = (() => {
