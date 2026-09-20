@@ -143,7 +143,7 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         ? Math.min(tp1DistancePct, structureRoom)
         : tp1DistancePct;
     const expectedMovePct = tp1DistancePct > 0
-        ? Math.min(candidateExpectedMove, atrPct * 2.0)
+        ? candidateExpectedMove
         : 0;
 
     const netEdgePct = expectedMovePct - estimatedCostPct;
@@ -268,6 +268,7 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         tp1DistancePct: Number(tp1DistancePct.toFixed(6)),
         stopDistancePct: Number(stopDistancePct.toFixed(6)),
         rewardRisk: Number(rewardRisk.toFixed(3)),
+        atrPct: Number(atrPct.toFixed(6)),
         finalDecision,
         rejectReason
     };

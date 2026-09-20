@@ -653,3 +653,294 @@ test("HIGHWAY CORE: metadata.takeProfit1Px Range Executor Runtime Deadlock Regre
     });
 });
 
+test("HIGHWAY CORE: Expected Move Canonical Authority & Low-Volatility ATR Hard Cap Removal Suite (LONG/SHORT Symmetric)", async (t) => {
+    const baseConfig = {
+        paperTakerFeeRate: 0.0005,
+        estimatedSlippagePct: 0.0003,
+        highwayMinCostMultiplier: 2.0, // minRequiredMovePct = (0.0010 + 0.0003) * 2.0 = 0.0026 (0.26%)
+        highwayMinRewardRisk: 1.2
+    };
+
+    await t.test("1. LONG: Low-volatility regime (ATR 0.03%) - candidateExpectedMove (1.2%) serves as canonical authority without ATR*2 (0.06%) deadlock", () => {
+        // lastPrice = 3000, atr = 1.0 (atrPct = 0.033%), planned TP1 = 3036 (1.2%), planned Stop = 2976 (0.8%)
+        // If ATR*2 cap existed, expectedMove would be capped at ~0.067% < 0.26% cost hurdle -> deadlock!
+        // With ATR*2 cap removed, candidateExpectedMove (1.2%) > 0.26% hurdle and RR = 1.5 >= 1.2 -> ALLOWED
+        const result = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "long",
+            regime: "TREND",
+            snapshot: {
+                lastPrice: 3000,
+                atr: 1.0, // extremely low volatility
+                atr20: 1.0,
+                boxPos: 0.30
+            },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "trend_pullback",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 2976, // 0.8% stop
+                invalidationPx: 2976,
+                metadata: {
+                    plannedTp1Price: 3036 // 1.2% TP1
+                }
+            },
+            config: baseConfig,
+            isPreCheck: false
+        });
+
+        assert.equal(result.allowed, true);
+        assert.equal(result.finalDecision, "ENTER");
+        assert.equal(result.rejectReason, null);
+        assert.ok(Math.abs(result.expectedMovePct - 0.012) < 1e-6);
+        assert.ok(Math.abs(result.tp1DistancePct - 0.012) < 1e-6);
+        assert.ok(Math.abs(result.stopDistancePct - 0.008) < 1e-6);
+        assert.ok(result.rewardRisk >= 1.2);
+        assert.equal(typeof (result.proof as any).atrPct, "number");
+        assert.ok((result.proof as any).atrPct > 0);
+    });
+
+    await t.test("2. SHORT: Low-volatility regime (ATR 0.03%) - candidateExpectedMove (1.2%) serves as canonical authority without ATR*2 (0.06%) deadlock", () => {
+        // lastPrice = 3000, atr = 1.0 (atrPct = 0.033%), planned TP1 = 2964 (1.2%), planned Stop = 3024 (0.8%)
+        const result = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "short",
+            regime: "TREND",
+            snapshot: {
+                lastPrice: 3000,
+                atr: 1.0, // extremely low volatility
+                atr20: 1.0,
+                boxPos: 0.70
+            },
+            execution: {
+                signal: "SHORT_CANDIDATE",
+                side: "short",
+                reason: "trend_pullback_short",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 3024, // 0.8% stop
+                invalidationPx: 3024,
+                metadata: {
+                    plannedTp1Price: 2964 // 1.2% TP1
+                }
+            },
+            config: baseConfig,
+            isPreCheck: false
+        });
+
+        assert.equal(result.allowed, true);
+        assert.equal(result.finalDecision, "ENTER");
+        assert.equal(result.rejectReason, null);
+        assert.ok(Math.abs(result.expectedMovePct - 0.012) < 1e-6);
+        assert.ok(Math.abs(result.tp1DistancePct - 0.012) < 1e-6);
+        assert.ok(Math.abs(result.stopDistancePct - 0.008) < 1e-6);
+        assert.ok(result.rewardRisk >= 1.2);
+        assert.equal(typeof (result.proof as any).atrPct, "number");
+        assert.ok((result.proof as any).atrPct > 0);
+    });
+
+    await t.test("3. LONG RANGE: structureRoom hard bound is preserved when structureRoom < tp1DistancePct", () => {
+        // lastPrice = 3000, boxHigh = 3024 (structureRoom = 0.8%), planned TP1 = 3045 (1.5%), planned Stop = 2970 (1.0%)
+        // candidateExpectedMove = min(1.5%, 0.8%) = 0.8%
+        // Cost hurdle = 0.26% -> 0.8% > 0.26% passes cost hurdle
+        const result = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "long",
+            regime: "RANGE",
+            snapshot: {
+                lastPrice: 3000,
+                atr: 1.0,
+                atr20: 1.0,
+                boxPos: 0.20,
+                boxHigh: 3024, // 0.8% room
+                boxLow: 2970
+            },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "range_lower_long",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 2970, // 1.0% stop
+                invalidationPx: 2970,
+                metadata: {
+                    plannedTp1Price: 3045 // 1.5% TP1
+                }
+            },
+            config: baseConfig,
+            isPreCheck: false
+        });
+
+        assert.equal(result.allowed, true);
+        assert.equal(result.finalDecision, "ENTER");
+        assert.ok(Math.abs(result.expectedMovePct - 0.008) < 1e-6); // strictly bound to structureRoom 0.8%
+        assert.ok(Math.abs(result.tp1DistancePct - 0.015) < 1e-6);
+    });
+
+    await t.test("4. SHORT RANGE: structureRoom hard bound is preserved when structureRoom < tp1DistancePct", () => {
+        // lastPrice = 3000, boxLow = 2976 (structureRoom = 0.8%), planned TP1 = 2955 (1.5%), planned Stop = 3030 (1.0%)
+        // candidateExpectedMove = min(1.5%, 0.8%) = 0.8%
+        const result = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "short",
+            regime: "RANGE",
+            snapshot: {
+                lastPrice: 3000,
+                atr: 1.0,
+                atr20: 1.0,
+                boxPos: 0.80,
+                boxHigh: 3030,
+                boxLow: 2976 // 0.8% room to bottom
+            },
+            execution: {
+                signal: "SHORT_CANDIDATE",
+                side: "short",
+                reason: "range_upper_short",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 3030, // 1.0% stop
+                invalidationPx: 3030,
+                metadata: {
+                    plannedTp1Price: 2955 // 1.5% TP1
+                }
+            },
+            config: baseConfig,
+            isPreCheck: false
+        });
+
+        assert.equal(result.allowed, true);
+        assert.equal(result.finalDecision, "ENTER");
+        assert.ok(Math.abs(result.expectedMovePct - 0.008) < 1e-6); // strictly bound to structureRoom 0.8%
+        assert.ok(Math.abs(result.tp1DistancePct - 0.015) < 1e-6);
+    });
+
+    await t.test("5. LONG: Hard safety preserved - expectedMovePct < minRequiredMovePct rejects with INSUFFICIENT_EXPECTED_MOVE_OVER_COST", () => {
+        // planned TP1 = 3004.5 (0.15% < 0.26% minRequiredMovePct)
+        const result = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "long",
+            regime: "TREND",
+            snapshot: {
+                lastPrice: 3000,
+                atr: 20,
+                atr20: 20,
+                boxPos: 0.30
+            },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "trend_pullback",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 2997, // 0.1% stop (RR = 1.5 >= 1.2, but move < 0.26% cost)
+                invalidationPx: 2997,
+                metadata: {
+                    plannedTp1Price: 3004.5 // 0.15% TP1
+                }
+            },
+            config: baseConfig,
+            isPreCheck: false
+        });
+
+        assert.equal(result.allowed, false);
+        assert.equal(result.finalDecision, "SKIP");
+        assert.equal(result.rejectReason, "INSUFFICIENT_EXPECTED_MOVE_OVER_COST");
+    });
+
+    await t.test("6. SHORT: Hard safety preserved - expectedMovePct < minRequiredMovePct rejects with INSUFFICIENT_EXPECTED_MOVE_OVER_COST", () => {
+        // planned TP1 = 2995.5 (0.15% < 0.26% minRequiredMovePct)
+        const result = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "short",
+            regime: "TREND",
+            snapshot: {
+                lastPrice: 3000,
+                atr: 20,
+                atr20: 20,
+                boxPos: 0.70
+            },
+            execution: {
+                signal: "SHORT_CANDIDATE",
+                side: "short",
+                reason: "trend_pullback_short",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 3003, // 0.1% stop
+                invalidationPx: 3003,
+                metadata: {
+                    plannedTp1Price: 2995.5 // 0.15% TP1
+                }
+            },
+            config: baseConfig,
+            isPreCheck: false
+        });
+
+        assert.equal(result.allowed, false);
+        assert.equal(result.finalDecision, "SKIP");
+        assert.equal(result.rejectReason, "INSUFFICIENT_EXPECTED_MOVE_OVER_COST");
+    });
+
+    await t.test("7. LONG/SHORT: Hard safety preserved - RR < 1.2 rejects with POOR_REWARD_RISK_RATIO", () => {
+        const poorLong = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "long",
+            regime: "TREND",
+            snapshot: { lastPrice: 3000, atr: 20, boxPos: 0.30 },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "trend_pullback",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 2940, // 2.0% stop
+                invalidationPx: 2940,
+                metadata: {
+                    plannedTp1Price: 3030 // 1.0% TP1 -> RR = 0.5 < 1.2
+                }
+            },
+            config: baseConfig,
+            isPreCheck: false
+        });
+
+        assert.equal(poorLong.allowed, false);
+        assert.equal(poorLong.finalDecision, "SKIP");
+        assert.equal(poorLong.rejectReason, "POOR_REWARD_RISK_RATIO");
+
+        const poorShort = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "short",
+            regime: "TREND",
+            snapshot: { lastPrice: 3000, atr: 20, boxPos: 0.70 },
+            execution: {
+                signal: "SHORT_CANDIDATE",
+                side: "short",
+                reason: "trend_pullback_short",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 3060, // 2.0% stop
+                invalidationPx: 3060,
+                metadata: {
+                    plannedTp1Price: 2970 // 1.0% TP1 -> RR = 0.5 < 1.2
+                }
+            },
+            config: baseConfig,
+            isPreCheck: false
+        });
+
+        assert.equal(poorShort.allowed, false);
+        assert.equal(poorShort.finalDecision, "SKIP");
+        assert.equal(poorShort.rejectReason, "POOR_REWARD_RISK_RATIO");
+    });
+});
+
+
