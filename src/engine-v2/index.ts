@@ -202,6 +202,7 @@ export function ensurePromotedEntryRiskPlan(
         let hasFiniteDirectionValidStop = false;
         for (const c of candidateStops) {
             if (
+                c.source !== "fallback_1.2pct" &&
                 c.directionValid &&
                 c.price != null &&
                 Number.isFinite(c.price)
@@ -243,18 +244,21 @@ export function ensurePromotedEntryRiskPlan(
         selectedStopSource !== "existing_valid" &&
         selectedStopSource !== FTS_STRUCTURAL_STOP_BASIS;
 
+    if (!execution.metadata) {
+        execution.metadata = {};
+    }
+
     if (needsPatch) {
-        execution.metadata = {
-            ...execution.metadata,
+        Object.assign(execution.metadata, {
             promotedRiskPlanInjected: true,
             promotedRiskPlanSource: selectedStopSource ?? "none",
             promotedRiskPlanReason: promotionReason
-        };
+        });
     } else if (isFtsCanonicalStructuralStop && ftsCanonicalAuthority != null) {
-        execution.metadata = {
-            ...execution.metadata,
-            ...buildFtsStructuralStopExecMetadata(ftsCanonicalAuthority)
-        };
+        Object.assign(
+            execution.metadata,
+            buildFtsStructuralStopExecMetadata(ftsCanonicalAuthority)
+        );
     }
 
     console.info(JSON.stringify({
@@ -1925,7 +1929,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const riskLongAllow = v2State.longAllow;
     const riskShortAllow = v2State.shortAllow;
     const trendSideCandidate: EngineV2Side = deriveTrendSideCandidate(shock, emaGap);
-    const execMeta = execution.metadata ?? {};
+    if (!execution.metadata) {
+        execution.metadata = {};
+    }
+    const execMeta = execution.metadata;
     const readNullableNumber = (...values: unknown[]): number | null => {
         for (const v of values) {
             if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -5426,11 +5433,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             if (ftsInherited != null) {
                 calculatedStopPrice = ftsInherited.stopPrice;
                 stopBasisLabel = FTS_STRUCTURAL_STOP_BASIS;
-                execution.metadata = {
-                    ...execution.metadata,
-                    ...buildFtsStructuralStopExecMetadata(ftsInherited),
-                    shock_reaction_stop_inheritance: "fast_trend_shift_structural"
-                };
+                if (!execution.metadata) {
+                    execution.metadata = {};
+                }
+                Object.assign(
+                    execution.metadata,
+                    buildFtsStructuralStopExecMetadata(ftsInherited),
+                    {
+                        shock_reaction_stop_inheritance: "fast_trend_shift_structural"
+                    }
+                );
             } else {
                 const candles = authoritativeInput.snapshot.candles;
                 let swingHighVal = 0;
@@ -7256,12 +7268,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2DecisionAfterPromotion = "HOLD";
         v2SideAfterPromotion = "none";
         v2RejectReasonAfterPromotion = "SAME_CYCLE_REVERSE_BLOCKED";
-        execution = {
-            ...execution,
-            signal: "WAIT_RECHECK" as const,
-            side: "none" as const,
-            reason: "SAME_CYCLE_REVERSE_BLOCKED"
-        };
+        execution.signal = "WAIT_RECHECK" as const;
+        execution.side = "none" as const;
+        execution.reason = "SAME_CYCLE_REVERSE_BLOCKED";
     }
 
     if (finalDecision === "ENTER") {
@@ -8105,6 +8114,17 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                                     (execMeta as any).executableTp1Price = tpBundle.executableTp1Price;
                                     (execMeta as any).rawCanonicalTp1Price = tpBundle.rawCanonicalTp1Price;
                                     (execMeta as any).profitabilityTpApproved = true;
+
+                                    console.info(JSON.stringify({
+                                        event: "V2_TP_AUTHORITY_METADATA_COMMIT_PROOF",
+                                        symbol: String(input.symbol),
+                                        side: sideForTp,
+                                        takeProfit1Px: (execMeta as any).takeProfit1Px,
+                                        executableTp1Price: (execMeta as any).executableTp1Price,
+                                        takeProfitPlanTp1: (execMeta as any).takeProfitPlan?.tp1,
+                                        profitabilityTpApproved: (execMeta as any).profitabilityTpApproved,
+                                        canonical_metadata_identity_verified: execution.metadata === execMeta
+                                    }));
                                 }
                             }
                         }
@@ -10035,6 +10055,18 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
 
         // Requirement 1: Final Authoritative Highway Core Entry Gate before execution
+        console.info(JSON.stringify({
+            event: "FINAL_HIGHWAY_GATE_PROOF",
+            execution_metadata_same_identity: execution.metadata === execMeta,
+            execution_metadata_takeProfit1Px: (execution.metadata as any)?.takeProfit1Px ?? null,
+            execution_metadata_executableTp1Price: (execution.metadata as any)?.executableTp1Price ?? null,
+            execution_metadata_takeProfitPlanTp1: (execution.metadata as any)?.takeProfitPlan?.tp1 ?? null,
+            decision_metadata_takeProfit1Px: (decision.metadata as any)?.takeProfit1Px ?? null,
+            committed_plan_present: decision.committedRiskPlan != null,
+            side: decision.side,
+            lastPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0)
+        }));
+
         const finalHighwayGate = evaluateHighwayCoreEntryGate({
             symbol: String(input.symbol),
             side: decision.side,

@@ -12,6 +12,7 @@ import { isV2StopPriceBreached } from "../engine-v2/exit/stop-price-authority";
 import {
     evaluateEquityAdaptiveSizing,
     RISK_PER_TRADE_PCT,
+    FULL_ENTRY_TARGET_RISK_SA_PCT,
     resolveEffectiveLiveOrderNotionalCap
 } from "../engine-v2/risk-sizing/equity-adaptive-sizing";
 import {
@@ -409,7 +410,7 @@ function ftsJudgment(direction: "long" | "short", resolved: ReturnType<typeof re
 
 // CASE E — risk invariance: wider stop => smaller notional, similar risk budget
 {
-    const tightStop = ENTRY * 1.005;
+    const tightStop = ENTRY * 1.008;
     const wideStop = ENTRY * 1.015;
     const sizingBase = {
         symbol: "BTCUSDT",
@@ -422,9 +423,10 @@ function ftsJudgment(direction: "long" | "short", resolved: ReturnType<typeof re
         entryQualityGrade: "A" as const,
         existingSymbolNotionalUsdt: 0,
         existingAccountNotionalUsdt: 0,
-        policyRequestedNotionalUsdt: 500,
+        policyRequestedNotionalUsdt: null,
         roundTripFeeRate: 0,
-        lastPrice: ENTRY
+        lastPrice: ENTRY,
+        v2AuthorityEntry: true
     };
     const tight = evaluateEquityAdaptiveSizing({
         ...sizingBase,
@@ -437,8 +439,8 @@ function ftsJudgment(direction: "long" | "short", resolved: ReturnType<typeof re
     assert.equal(tight.sizingPassed, true);
     assert.equal(wide.sizingPassed, true);
     assert.ok(wide.riskBasedNotionalUsdt < tight.riskBasedNotionalUsdt);
-    assert.equal(tight.riskPct, RISK_PER_TRADE_PCT);
-    assert.equal(wide.riskPct, RISK_PER_TRADE_PCT);
+    assert.equal(tight.riskPct, FULL_ENTRY_TARGET_RISK_SA_PCT);
+    assert.equal(wide.riskPct, FULL_ENTRY_TARGET_RISK_SA_PCT);
     assert.equal(tight.riskBudgetUsdt, wide.riskBudgetUsdt);
     const tightLoss = tight.actualRiskAtStopUsdt ?? tight.riskBudgetUsdt;
     const wideLoss = wide.actualRiskAtStopUsdt ?? wide.riskBudgetUsdt;
