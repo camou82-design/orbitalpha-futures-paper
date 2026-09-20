@@ -3609,7 +3609,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 (rangeSideCandidate === "long" || trendSideCandidate === "long") &&
                 zone === "lower" &&
                 sideZoneValid === true &&
-                (judgment.htf_entry_policy === "LONG_ONLY_OR_NONE" || judgment.htf_entry_policy === "ALLOW") &&
+                (judgment.htf_entry_policy === "LONG_ONLY_OR_NONE" || judgment.htf_entry_policy === "ALLOW" || judgment.htf_entry_policy === "PROBE_ONLY") &&
                 (judgment.macro_source === "actual_candles" || judgment.macro_source === "partial_actual_candles") &&
                 qualityScore >= 60 &&
                 (v2DecisionAfterPromotion === "SKIP" ||
@@ -3660,8 +3660,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
                     type LowerLongGate = string | null;
                     let lowerLongGate: LowerLongGate = null;
+                    const isProbeAllowedForLowerLong = htfPol === "PROBE_ONLY" && hardControlClear && allowNewLong && !hardBlockPresent;
                     if (chaseBlockedLower) lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_CHASE_BLOCKED";
-                    else if (!(riskLongAllow && allowNewLong)) {
+                    else if (!(riskLongAllow && allowNewLong) && !isProbeAllowedForLowerLong) {
                         lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_LONG_NOT_ALLOWED";
                     } else if (!paperExecutionReady || !signedExecutionReady) {
                         lowerLongGate = "LOWER_LONG_REACTION_PROBE_BLOCKED_EXECUTION_READINESS";
@@ -3705,6 +3706,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         promotionBlockReason = null;
                         promotionMinConditionPassed = true;
                         v2CalculatedInvalidationPx = stopPxL;
+
+                        if (isProbeAllowedForLowerLong && !riskLongAllow) {
+                            execMeta.probe_only_bridge_activated = true;
+                            execMeta.isCountertrendProbe = true;
+                            execMeta.htf_size_multiplier = Math.min(Number(execMeta.htf_size_multiplier ?? 0.5), 0.5);
+                            execMeta.probe_size_cap_forced = true;
+                        }
 
                         console.info(
                             JSON.stringify({
@@ -3784,10 +3792,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     }
                 }
 
+                const isProbeAllowedForUpperShort = htfPol === "PROBE_ONLY" && hardControlClear && allowNewShort && !hardBlockPresent;
                 if (htfBlocked) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_HTF_LONG_ONLY";
                 else if (chaseBlocked && !breakdownRetestFailure) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_CHASE_NOT_RETESTED";
                 else if (qualityScore < 60) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_QUALITY_BELOW_60";
-                else if (!(riskShortAllow && allowNewShort)) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_SHORT_NOT_ALLOWED";
+                else if (!(riskShortAllow && allowNewShort) && !isProbeAllowedForUpperShort) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_SHORT_NOT_ALLOWED";
                 else if (!paperExecutionReady || !signedExecutionReady) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_EXECUTION_NOT_READY";
                 else if (hasSameSidePosition || hasOppositeSidePosition) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_OPEN_POSITION_CONFLICT";
                 else if (hardBlockPresent) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_HARD_BLOCK_PRESENT";
@@ -3819,6 +3828,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     promotionBlockReason = null;
                     promotionMinConditionPassed = true;
                     v2CalculatedInvalidationPx = stopPxS;
+
+                    if (isProbeAllowedForUpperShort && !riskShortAllow) {
+                        execMeta.probe_only_bridge_activated = true;
+                        execMeta.isCountertrendProbe = true;
+                        execMeta.htf_size_multiplier = Math.min(Number(execMeta.htf_size_multiplier ?? 0.5), 0.5);
+                        execMeta.probe_size_cap_forced = true;
+                    }
 
                     console.info(JSON.stringify({
                         event: "V2_TREND_PROMOTION_TO_ENTER_PROOF",
@@ -4882,7 +4898,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let sanitizeTriggered = false;
 
     const directionalShockState = v2State.directionalShockState ?? "NONE";
-    const htf_entry_policy = judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT";
+    const htf_entry_policy = judgment.htf_entry_policy ?? (authoritativeInput.snapshot as any)?.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT";
     const longAllow = v2State.longAllow;
     const shortAllow = v2State.shortAllow;
 
@@ -4900,12 +4916,122 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         trendOk === true &&
         qualityScore >= 70;
 
+    // ── HTF PROBE_ONLY Authoritative Bridge Exception Booleans ──────────────────
+    const isProbeOnlyPolicyForBridge =
+        judgment.htf_entry_policy === "PROBE_ONLY" ||
+        htf_entry_policy === "PROBE_ONLY" ||
+        (authoritativeInput.snapshot as any)?.htf_entry_policy === "PROBE_ONLY";
+
+    const isLowerZone = (zone as string) === "lower" || (zone as string) === "lower-extreme";
+    const isUpperZone = (zone as string) === "upper" || (zone as string) === "upper-extreme";
+
+    const exposureCapVal = Number(v2State.exposureNotionalCapKrw ?? 0);
+    const currentExposureNotionalVal = Number(v2State.ledgerExposureNotionalKrw ?? 0);
+    const symbolExposureCapVal = Number(v2State.symbolExposureNotionalCapKrw ?? 0);
+    const currentSymbolExposureNotionalVal = Number(v2State.symbolLedgerExposureNotionalKrw ?? 0);
+    const exposureCapExceeded =
+        (exposureCapVal > 0 && currentExposureNotionalVal >= exposureCapVal) ||
+        (symbolExposureCapVal > 0 && currentSymbolExposureNotionalVal >= symbolExposureCapVal);
+
+    const canonicalRegimeVal = authoritativeInput.snapshot.canonicalRegime ?? judgment.regime_final ?? "RANGE";
+    const isRangeRegimeForProbe =
+        activeEngineRouting === "RANGE" ||
+        judgment.regime === "RANGE" ||
+        judgment.regime_final === "RANGE" ||
+        canonicalRegimeVal === "RANGE";
+
+    const isTrendRegimeForProbe =
+        activeEngineRouting === "TREND" ||
+        judgment.regime === "TREND" ||
+        judgment.regime_final === "TREND" ||
+        canonicalRegimeVal === "TREND";
+
+    const shortStructureConfirmed = (() => {
+        if (isRangeRegimeForProbe) {
+            return (
+                isUpperZone && (
+                    reversalConfirmed === true ||
+                    isShortQualified ||
+                    judgment.subtype === "BREAKDOWN_RETEST_FAILED" ||
+                    judgment.metadata?.retestRejected === true ||
+                    judgment.metadata?.upper_failure_short === true ||
+                    judgment.metadata?.box_upper_breakout_hold === false ||
+                    shockReactionPromotionType === "upper_failure_short" ||
+                    shockReactionPromotionType === "upper_reversal_confirmed_short" ||
+                    shortRevWatch.breakout_failed === true ||
+                    (typeof (execMeta as Record<string, unknown>).breakdownRetestFailure === "boolean" && (execMeta as Record<string, unknown>).breakdownRetestFailure === true)
+                )
+            );
+        }
+        if (isTrendRegimeForProbe) {
+            return isShortQualified || (trendOk === true && qualityScore >= 70);
+        }
+        return isShortQualified || reversalConfirmed === true;
+    })();
+
+    const longStructureConfirmed = (() => {
+        if (isRangeRegimeForProbe) {
+            return (
+                isLowerZone && (
+                    reversalConfirmed === true ||
+                    isLongQualified ||
+                    judgment.metadata?.reclaimConfirmed === true ||
+                    judgment.metadata?.reclaim_confirmed === true ||
+                    judgment.metadata?.box_lower_breakdown_hold === false ||
+                    judgment.metadata?.lower_reversal_confirmed === true ||
+                    shockReactionPromotionType === "lower_reversal_confirmed_long" ||
+                    longRevWatch.breakdown_failed === true
+                )
+            );
+        }
+        if (isTrendRegimeForProbe) {
+            return isLongQualified || (trendOk === true && qualityScore >= 70);
+        }
+        return isLongQualified || reversalConfirmed === true;
+    })();
+
+    const probeOnlyShortExceptionAllowed: boolean = (() => {
+        if (!isProbeOnlyPolicyForBridge) return false;
+        if (!hardControlClear) return false;
+        if (hardBlockPresent) return false;
+        if (exposureCapExceeded) return false;
+        if (directionalShockState === "DOWN") return false;
+        if (hasShortPosForReversal || hasLongPosForReversal) return false;
+        if (isLowerZone) return false;
+        if (qualityScore < 60) return false;
+        const shortCandidateValid =
+            trendSideCandidate === "short" ||
+            rangeSideCandidate === "short" ||
+            selected_side_before_sanitize === "short";
+        if (!shortCandidateValid) return false;
+        if (!shortStructureConfirmed) return false;
+        return true;
+    })();
+
+    const probeOnlyLongExceptionAllowed: boolean = (() => {
+        if (!isProbeOnlyPolicyForBridge) return false;
+        if (!hardControlClear) return false;
+        if (hardBlockPresent) return false;
+        if (exposureCapExceeded) return false;
+        if (directionalShockState === "UP") return false;
+        if (hasShortPosForReversal || hasLongPosForReversal) return false;
+        if (isUpperZone) return false;
+        if (qualityScore < 60) return false;
+        const longCandidateValid =
+            trendSideCandidate === "long" ||
+            rangeSideCandidate === "long" ||
+            selected_side_before_sanitize === "long";
+        if (!longCandidateValid) return false;
+        if (!longStructureConfirmed) return false;
+        return true;
+    })();
+
     const sanitizeCandidateSide = (side: EngineV2Side): { side: EngineV2Side; reason: string | null } => {
         if (side === "short") {
             if (isBtcRangeMrStaleUpShockBypass) {
                 return { side: "short", reason: null };
             }
-            // 원칙 1: directionalShockState=UP이면 short 후보 제거 (SHORT_REVERSAL_WATCH probe 허용 시 예외)
+            // 원칙 1: directionalShockState=UP이면 short 후보 제거 (SHORT_REVERSAL_WATCH / PROBE_ONLY bridge 허용 시 예외)
             if (directionalShockState === "UP") {
                 if (shortReversalExceptionAllowed) {
                     if (shortRevWatch.htf_upgrade_ready && shortRevWatch.exception_eligible) {
@@ -4913,6 +5039,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     } else {
                         return { side: "short", reason: "SHORT_REVERSAL_WATCH_PROBE_ALLOWED" };
                     }
+                }
+                if (probeOnlyShortExceptionAllowed) {
+                    return { side: "short", reason: "PROBE_ONLY_SHORT_EXCEPTION_ALLOWED" };
                 }
                 // 원칙 3: trend_side_candidate=long 이고 longAllow=true 이면 long 또는 none
                 if (trendSideCandidate === "long" && longAllow) {
@@ -4944,7 +5073,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 return { side: "none", reason: "LONG_ONLY_POLICY_EXCLUDES_SHORT" };
             }
 
-            // risk shortAllow=false 이면 당연히 short 배제 (SHORT_REVERSAL_WATCH probe 허용 시 예외)
+            // risk shortAllow=false 이면 당연히 short 배제 (SHORT_REVERSAL_WATCH / PROBE_ONLY bridge 허용 시 예외)
             if (!shortAllow) {
                 if (shortReversalExceptionAllowed) {
                     if (shortRevWatch.htf_upgrade_ready && shortRevWatch.exception_eligible) {
@@ -4952,6 +5081,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     } else {
                         return { side: "short", reason: "SHORT_REVERSAL_WATCH_PROBE_ALLOWED" };
                     }
+                }
+                if (probeOnlyShortExceptionAllowed) {
+                    return { side: "short", reason: "PROBE_ONLY_SHORT_EXCEPTION_ALLOWED" };
                 }
                 if (trendSideCandidate === "long" && longAllow) {
                     if (isLongQualified) {
@@ -4967,7 +5099,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             if (isBtcRangeMrStaleDownShockBypass) {
                 return { side: "long", reason: null };
             }
-            // 원칙 1: directionalShockState=DOWN이면 long 후보 제거 (LONG_REVERSAL_WATCH probe 허용 시 예외)
+            // 원칙 1: directionalShockState=DOWN이면 long 후보 제거 (LONG_REVERSAL_WATCH / PROBE_ONLY bridge 허용 시 예외)
             if (directionalShockState === "DOWN") {
                 if (longReversalExceptionAllowed) {
                     if (longRevWatch.htf_upgrade_ready && longRevWatch.exception_eligible) {
@@ -4975,6 +5107,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     } else {
                         return { side: "long", reason: "LONG_REVERSAL_WATCH_PROBE_ALLOWED" };
                     }
+                }
+                if (probeOnlyLongExceptionAllowed) {
+                    return { side: "long", reason: "PROBE_ONLY_LONG_EXCEPTION_ALLOWED" };
                 }
                 // 원칙 3: trend_side_candidate=short 이고 shortAllow=true 이면 short 또는 none
                 if (trendSideCandidate === "short" && shortAllow) {
@@ -5006,7 +5141,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 return { side: "none", reason: "SHORT_ONLY_POLICY_EXCLUDES_LONG" };
             }
 
-            // risk longAllow=false 이면 당연히 long 배제 (LONG_REVERSAL_WATCH probe 허용 시 예외)
+            // risk longAllow=false 이면 당연히 long 배제 (LONG_REVERSAL_WATCH / PROBE_ONLY bridge 허용 시 예외)
             if (!longAllow) {
                 if (longReversalExceptionAllowed) {
                     if (longRevWatch.htf_upgrade_ready && longRevWatch.exception_eligible) {
@@ -5014,6 +5149,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     } else {
                         return { side: "long", reason: "LONG_REVERSAL_WATCH_PROBE_ALLOWED" };
                     }
+                }
+                if (probeOnlyLongExceptionAllowed) {
+                    return { side: "long", reason: "PROBE_ONLY_LONG_EXCEPTION_ALLOWED" };
                 }
                 if (trendSideCandidate === "short" && shortAllow) {
                     if (isShortQualified) {
@@ -5051,11 +5189,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2DecisionAfterPromotion = "HOLD";
             v2RejectReasonAfterPromotion = sanitize_reason ?? "WAIT_RECHECK";
         }
-        if (v2SideAfterPromotion === "long" && v2DecisionAfterPromotion === "ENTER" && !longAllow && !isBtcRangeMrStaleDownShockBypass && !longReversalExceptionAllowed) {
+        if (v2SideAfterPromotion === "long" && v2DecisionAfterPromotion === "ENTER" && !longAllow && !isBtcRangeMrStaleDownShockBypass && !longReversalExceptionAllowed && !probeOnlyLongExceptionAllowed) {
             v2DecisionAfterPromotion = "HOLD";
             v2RejectReasonAfterPromotion = "LONG_NOT_ALLOWED";
         }
-        if (v2SideAfterPromotion === "short" && v2DecisionAfterPromotion === "ENTER" && !shortAllow && !isBtcRangeMrStaleUpShockBypass && !shortReversalExceptionAllowed) {
+        if (v2SideAfterPromotion === "short" && v2DecisionAfterPromotion === "ENTER" && !shortAllow && !isBtcRangeMrStaleUpShockBypass && !shortReversalExceptionAllowed && !probeOnlyShortExceptionAllowed) {
             v2DecisionAfterPromotion = "HOLD";
             v2RejectReasonAfterPromotion = "SHORT_NOT_ALLOWED";
         }
@@ -5076,6 +5214,60 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
 
     const selectedSideFinal: EngineV2Side = selected_side_final_after_sanitize;
+
+    // ── PROBE_ONLY bridge 진입 확정 시 사이즈 cap 강제 ────────────────────────────
+    // bridge exception을 통해 통과된 경우 소액 probe cap (최대 0.5x) 보장
+    const isProbeOnlyBridgeActivated =
+        (selectedSideFinal === "short" && probeOnlyShortExceptionAllowed && !shortAllow) ||
+        (selectedSideFinal === "long" && probeOnlyLongExceptionAllowed && !longAllow);
+
+    if (isProbeOnlyBridgeActivated && v2DecisionAfterPromotion === "ENTER") {
+        execMeta.probe_only_bridge_activated = true;
+        execMeta.isCountertrendProbe = true;
+        execMeta.htf_size_multiplier = Math.min(Number(execMeta.htf_size_multiplier ?? 0.5), 0.5);
+        execMeta.probe_size_cap_forced = true;
+    }
+
+    // ── V2_PROBE_ONLY_AUTHORITY_BRIDGE_PROOF 구조화 증거 로깅 ────────────────────────────
+    const candidate_side_for_proof = selectedSideFinal !== "none" ? selectedSideFinal : (trendSideCandidate !== "none" ? trendSideCandidate : rangeSideCandidate);
+    const structural_confirmation_for_proof = candidate_side_for_proof === "short" ? shortStructureConfirmed : candidate_side_for_proof === "long" ? longStructureConfirmed : false;
+    const bypassed_gate_for_proof =
+        (selectedSideFinal === "short" && probeOnlyShortExceptionAllowed && !shortAllow) ? "SHORT_NOT_ALLOWED" :
+        (selectedSideFinal === "long" && probeOnlyLongExceptionAllowed && !longAllow) ? "LONG_NOT_ALLOWED" :
+        null;
+    const block_reason_for_proof =
+        !isProbeOnlyPolicyForBridge ? "POLICY_NOT_PROBE_ONLY" :
+        !hardControlClear ? "HARD_CONTROL_NOT_CLEAR" :
+        hardBlockPresent ? (hardBlockReason ?? "HARD_BLOCK_PRESENT") :
+        exposureCapExceeded ? "EXPOSURE_CAP_EXCEEDED" :
+        (candidate_side_for_proof === "short" && directionalShockState === "DOWN") ? "DIRECTIONAL_SHOCK_DOWN" :
+        (candidate_side_for_proof === "long" && directionalShockState === "UP") ? "DIRECTIONAL_SHOCK_UP" :
+        (hasShortPosForReversal || hasLongPosForReversal) ? "OPEN_POSITION_CONFLICT" :
+        (candidate_side_for_proof === "short" && isLowerZone) ? "LOWER_SHORT_CHASE_DISALLOWED" :
+        (candidate_side_for_proof === "long" && isUpperZone) ? "UPPER_LONG_CHASE_DISALLOWED" :
+        qualityScore < 60 ? "QUALITY_BELOW_60" :
+        !structural_confirmation_for_proof ? "STRUCTURAL_CONFIRMATION_MISSING" :
+        null;
+
+    if (isProbeOnlyPolicyForBridge || probeOnlyShortExceptionAllowed || probeOnlyLongExceptionAllowed) {
+        console.info(JSON.stringify({
+            event: "V2_PROBE_ONLY_AUTHORITY_BRIDGE_PROOF",
+            symbol: String(input.symbol),
+            candidate_side: candidate_side_for_proof,
+            structural_confirmation: structural_confirmation_for_proof,
+            quality_score: qualityScore,
+            zone,
+            longAllow,
+            shortAllow,
+            probeOnlyLongExceptionAllowed,
+            probeOnlyShortExceptionAllowed,
+            size_multiplier: isProbeOnlyBridgeActivated ? (execMeta.htf_size_multiplier ?? 0.5) : (judgment.htf_size_multiplier ?? 1.0),
+            bypassed_gate: bypassed_gate_for_proof,
+            decision_before: v2DecisionBeforePromotion,
+            decision_after: v2DecisionAfterPromotion,
+            block_reason: (probeOnlyShortExceptionAllowed || probeOnlyLongExceptionAllowed) ? null : block_reason_for_proof
+        }));
+    }
 
     const promotionAppliedAtNativeAuthorityEval = promotionApplied;
     const nativeExecutorDecisionSource = v2DecisionBeforePromotion;
@@ -5932,14 +6124,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 (shortReversalWatchPromoted === true ||
                     promotionReason === "V2_SHORT_REVERSAL_WATCH_PROBE" ||
                     promotionReason === "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
-                    shortReversalExceptionAllowed) &&
+                    shortReversalExceptionAllowed ||
+                    probeOnlyShortExceptionAllowed) &&
                 candidateSide === "short";
 
             const isLongReversalWatchException =
                 (longReversalWatchPromoted === true ||
                     promotionReason === "V2_LONG_REVERSAL_WATCH_PROBE" ||
                     promotionReason === "V2_LONG_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
-                    longReversalExceptionAllowed) &&
+                    longReversalExceptionAllowed ||
+                    probeOnlyLongExceptionAllowed) &&
                 candidateSide === "long";
 
             if (isShortReversalWatchException || isLongReversalWatchException) {
@@ -6069,7 +6263,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 longBlockedReason = "LONG_QUALITY_OR_ZONE_RESTRICTED";
             }
 
-            if (!shortReversalExceptionAllowed) {
+            if (!shortReversalExceptionAllowed && !probeOnlyShortExceptionAllowed) {
                 shortBlockedReason = shortRevWatch.rejection_reason ?? shortRevWatch.probe_block_reason ?? (judgment.polarityMismatch ? "POLARITY_MISMATCH_BULLISH_MACRO_LIMITS_SHORT_SHOCK" : "SHORT_STRUCTURE_NOT_CONFIRMED");
             }
         }
@@ -6083,14 +6277,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 shortBlockedReason = "SHORT_QUALITY_OR_ZONE_RESTRICTED";
             }
 
-            if (!longReversalExceptionAllowed) {
+            if (!longReversalExceptionAllowed && !probeOnlyLongExceptionAllowed) {
                 longBlockedReason = longRevWatch.rejection_reason ?? longRevWatch.probe_block_reason ?? (judgment.polarityMismatch ? "POLARITY_MISMATCH_BEARISH_MACRO_LIMITS_LONG_SHOCK" : "LONG_STRUCTURE_NOT_CONFIRMED");
             }
         }
 
         const deadlockDetected = (isRange && isUpper && macroPol === "BULLISH" && (longBlockedReason != null || v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP")) ||
             (isRange && isLower && macroPol === "BEARISH" && (shortBlockedReason != null || v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP"));
-        const exceptionAttempted = (isUpper && shortReversalExceptionAllowed) || (isLower && longReversalExceptionAllowed);
+        const exceptionAttempted = (isUpper && (shortReversalExceptionAllowed || probeOnlyShortExceptionAllowed)) || (isLower && (longReversalExceptionAllowed || probeOnlyLongExceptionAllowed));
         const deadlockResolved = (isUpper && v2DecisionAfterPromotion === "ENTER" && v2SideAfterPromotion === "short") ||
             (isLower && v2DecisionAfterPromotion === "ENTER" && v2SideAfterPromotion === "long");
 
