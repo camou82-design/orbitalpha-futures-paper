@@ -453,3 +453,203 @@ test("HIGHWAY CORE: 2차 안전 보완 패치 검증 테스트", async (t) => {
     });
 });
 
+test("HIGHWAY CORE: metadata.takeProfit1Px Range Executor Runtime Deadlock Regression Suite", async (t) => {
+    await t.test("1. LONG RANGE executor: execution.metadata.takeProfit1Px만 존재 + valid stop → Highway final gate 정상 ENTER", () => {
+        const result = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "long",
+            regime: "RANGE",
+            snapshot: {
+                lastPrice: 3000,
+                atr: 30,
+                atr20: 30,
+                boxPos: 0.20,
+                boxHigh: 3080,
+                boxLow: 2980
+            },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "range_lower_long",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 2970, // stop distance 30 (1%)
+                invalidationPx: 2970,
+                metadata: {
+                    takeProfit1Px: 3045, // TP1 distance 45 (1.5% > 0.26% cost, RR 1.5 >= 1.2)
+                    rangeBoxHighAtEntry: 3080,
+                    rangeBoxLowAtEntry: 2980
+                }
+            },
+            committedRiskPlan: null,
+            isPreCheck: false
+        });
+
+        assert.equal(result.allowed, true);
+        assert.equal(result.finalDecision, "ENTER");
+        assert.equal(result.rejectReason, null);
+        assert.ok(result.tp1DistancePct > 0.014 && result.tp1DistancePct < 0.016);
+        assert.ok(result.stopDistancePct > 0.009 && result.stopDistancePct < 0.011);
+        assert.ok(result.rewardRisk >= 1.2);
+    });
+
+    await t.test("2. SHORT RANGE executor: execution.metadata.takeProfit1Px만 존재 + valid stop → Highway final gate 정상 ENTER", () => {
+        const result = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "short",
+            regime: "RANGE",
+            snapshot: {
+                lastPrice: 3000,
+                atr: 30,
+                atr20: 30,
+                boxPos: 0.80,
+                boxHigh: 3020,
+                boxLow: 2920
+            },
+            execution: {
+                signal: "SHORT_CANDIDATE",
+                side: "short",
+                reason: "range_upper_short",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 3030, // stop distance 30 (1%)
+                invalidationPx: 3030,
+                metadata: {
+                    takeProfit1Px: 2955, // TP1 distance 45 (1.5% > 0.26% cost, RR 1.5 >= 1.2, short TP < entry)
+                    rangeBoxHighAtEntry: 3020,
+                    rangeBoxLowAtEntry: 2920
+                }
+            },
+            committedRiskPlan: null,
+            isPreCheck: false
+        });
+
+        assert.equal(result.allowed, true);
+        assert.equal(result.finalDecision, "ENTER");
+        assert.equal(result.rejectReason, null);
+        assert.ok(result.tp1DistancePct > 0.014 && result.tp1DistancePct < 0.016);
+        assert.ok(result.stopDistancePct > 0.009 && result.stopDistancePct < 0.011);
+        assert.ok(result.rewardRisk >= 1.2);
+    });
+
+    await t.test("3. Production runtime 재현: original_decision=ENTER, valid stop, metadata.takeProfit1Px → HIGHWAY_PLAN_MISSING 탈출", () => {
+        const result = evaluateHighwayCoreEntryGate({
+            symbol: "BTCUSDT",
+            side: "long",
+            regime: "RANGE",
+            snapshot: {
+                lastPrice: 65000,
+                atr: 650,
+                atr20: 650,
+                boxPos: 0.25,
+                boxHigh: 66500,
+                boxLow: 64500
+            },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "range_lower_bounce",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 64350, // 1% stop
+                invalidationPx: 64350,
+                metadata: {
+                    takeProfit1Px: 65975, // 1.5% TP1
+                    executableTp1Price: 65975,
+                    takeProfitPlan: {
+                        executableTp1: 65975,
+                        tp1: 65975
+                    }
+                } as any
+            },
+            committedRiskPlan: null,
+            isPreCheck: false
+        });
+
+        assert.equal(result.allowed, true);
+        assert.equal(result.finalDecision, "ENTER");
+        assert.equal(result.rejectReason, null);
+    });
+
+    await t.test("4. Fail-closed: Wrong-direction TP는 반드시 HIGHWAY_PLAN_MISSING 유지", () => {
+        // LONG with TP < entry
+        const wrongLong = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "long",
+            regime: "RANGE",
+            snapshot: { lastPrice: 3000, atr: 30, boxPos: 0.20 },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "range_lower_long",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 2970,
+                invalidationPx: 2970,
+                metadata: {
+                    takeProfit1Px: 2950 // INVALID: LONG TP below entry!
+                }
+            },
+            isPreCheck: false
+        });
+        assert.equal(wrongLong.allowed, false);
+        assert.equal(wrongLong.finalDecision, "SKIP");
+        assert.equal(wrongLong.rejectReason, "HIGHWAY_PLAN_MISSING");
+
+        // SHORT with TP > entry
+        const wrongShort = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "short",
+            regime: "RANGE",
+            snapshot: { lastPrice: 3000, atr: 30, boxPos: 0.80 },
+            execution: {
+                signal: "SHORT_CANDIDATE",
+                side: "short",
+                reason: "range_upper_short",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 3030,
+                invalidationPx: 3030,
+                metadata: {
+                    takeProfit1Px: 3050 // INVALID: SHORT TP above entry!
+                }
+            },
+            isPreCheck: false
+        });
+        assert.equal(wrongShort.allowed, false);
+        assert.equal(wrongShort.finalDecision, "SKIP");
+        assert.equal(wrongShort.rejectReason, "HIGHWAY_PLAN_MISSING");
+    });
+
+    await t.test("5. Fail-closed: Missing / 0 / null TP는 반드시 HIGHWAY_PLAN_MISSING 유지", () => {
+        const zeroTp = evaluateHighwayCoreEntryGate({
+            symbol: "ETHUSDT",
+            side: "long",
+            regime: "RANGE",
+            snapshot: { lastPrice: 3000, atr: 30, boxPos: 0.20 },
+            execution: {
+                signal: "LONG_CANDIDATE",
+                side: "long",
+                reason: "range_lower_long",
+                baseSizeIntent: 1,
+                recheckSuggested: false,
+                isAddOnEligible: true,
+                stopPrice: 2970,
+                invalidationPx: 2970,
+                metadata: {
+                    takeProfit1Px: 0
+                }
+            },
+            isPreCheck: false
+        });
+        assert.equal(zeroTp.allowed, false);
+        assert.equal(zeroTp.finalDecision, "SKIP");
+        assert.equal(zeroTp.rejectReason, "HIGHWAY_PLAN_MISSING");
+    });
+});
+

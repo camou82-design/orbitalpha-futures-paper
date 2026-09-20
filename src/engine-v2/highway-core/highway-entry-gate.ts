@@ -81,13 +81,24 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
     const plannedTp1Price = Number(
         (committedRiskPlan as any)?.plannedTp1Price ??
         (committedRiskPlan as any)?.tp1Price ??
+        (committedRiskPlan as any)?.executableTp1Price ??
+        (committedRiskPlan as any)?.takeProfit1Px ??
+        (execution as any)?.plannedTp1Price ??
+        (execution?.metadata as any)?.plannedTp1Price ??
         (execution as any)?.tp1Price ??
         (execution?.metadata as any)?.tp1Price ??
         (execution as any)?.takeProfitPrice ??
         (execution?.metadata as any)?.takeProfitPrice ??
-        (execution?.metadata as any)?.plannedTp1Price ??
         (execution as any)?.takeProfit1Px ??
+        (execution?.metadata as any)?.takeProfit1Px ??
+        (execution as any)?.executableTp1Price ??
+        (execution?.metadata as any)?.executableTp1Price ??
+        (execution as any)?.takeProfitPlan?.executableTp1 ??
+        (execution?.metadata as any)?.takeProfitPlan?.executableTp1 ??
+        (execution as any)?.takeProfitPlan?.tp1 ??
+        (execution?.metadata as any)?.takeProfitPlan?.tp1 ??
         (execution as any)?.targetPrice1 ??
+        (execution?.metadata as any)?.targetPrice1 ??
         0
     );
 
