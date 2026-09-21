@@ -5423,9 +5423,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         lastPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0)
     });
     const nativeExecutorUpperBreakoutConfirmed =
-        nativeExecutorEnterAuthority === true &&
-        nativeExecutorFastProbeCoverage === true &&
-        v2SideBeforePromotion === "long" &&
+        ((nativeExecutorEnterAuthority === true &&
+            nativeExecutorFastProbeCoverage === true &&
+            v2SideBeforePromotion === "long") ||
+            (sideCandidateBeforeVeto === "long" &&
+                nativeFastTrendShiftUpperLongEval.confirmed === true)) &&
         isRangeRouting &&
         zone === "upper" &&
         (nativeUpperBreakoutContinuationEval.confirmed === true ||
@@ -5446,7 +5448,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         sideCandidateBeforeVeto === "long" &&
         (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
     const rangeUpperLongMismatch =
-        rangeUpperLongMismatchBeforeExemption && !nativeExecutorUpperBreakoutConfirmed;
+        rangeUpperLongMismatchBeforeExemption &&
+        !nativeExecutorUpperBreakoutConfirmed &&
+        !(nativeFastTrendShiftUpperLongEval.confirmed === true);
     // PROBE_ONLY + polarityProbeEligible exemption: an executor ENTER under HTF PROBE_ONLY
     // with confirmed polarity probe eligibility must not be blocked by a range signal downgrade.
     // The HTF probe authority already accounts for the reduced sizing (htf_size_multiplier).
@@ -5458,9 +5462,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         rangeSignalDowngraded &&
         !rangeSignalKeptByRelax &&
         !probeOnlyPolarityEligibleEnter &&
-        !nativeExecutorEnterAuthority;
+        !nativeExecutorEnterAuthority &&
+        !(nativeFastTrendShiftUpperLongEval.confirmed === true);
     const entryCandidateHardBlock =
-        !entryCandidate && !promotionApplied && !nativeExecutorEnterAuthority;
+        !entryCandidate &&
+        !promotionApplied &&
+        !nativeExecutorEnterAuthority &&
+        !(nativeFastTrendShiftUpperLongEval.confirmed === true);
     const trendPromotionHardBlock = activeEngineRouting === "TREND" && trendOk !== true && sideCandidateBeforeVeto !== "none";
     const rangeMidConservativeBlock =
         rangeContextActive &&
