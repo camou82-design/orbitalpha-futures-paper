@@ -51,6 +51,11 @@ import {
 } from "./risk-sizing/fast-trend-shift-structural-stop";
 import { evaluateTpProfitabilityAuthority } from "./execution/tp-profitability-authority";
 import { evaluateEthRangeEntryFeasibilityGate } from "./execution/eth-range-entry-feasibility-gate";
+import {
+    evaluateEthRangeEntryQualityGate,
+    EthRangeEntryQualityResult,
+    emitQualityProof
+} from "./execution/eth-range-entry-quality-gate";
 import { evaluateRangeDriftEntryTimingGate } from "./market-judgment/range-drift-entry-timing-gate";
 import {
     resolvePreEntryPolicySlPrice,
@@ -6638,6 +6643,63 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    // Tier 5.55: ETH Dedicated RANGE Entry Quality Gate
+    let ethRangeQualityResult: EthRangeEntryQualityResult | null = null;
+    const isEthSymbolForQuality = String(input.symbol).toUpperCase().replace("-SWAP", "").replace("-", "") === "ETHUSDT";
+    const isCanonicalRangeForQuality = judgment.regime === "RANGE" || activeEngineRouting === "RANGE" || isCanonicalRange;
+    const isNotFtsForQuality = judgment.subtype !== "FAST_TREND_SHIFT" && !String(promotionReason ?? "").includes("FAST_TREND_SHIFT");
+
+    if (
+        isEthSymbolForQuality &&
+        isInitialEntry &&
+        addOnPolicy.isAddOn !== true &&
+        isNotOperatorManaged &&
+        isNotManualTakeover &&
+        isCanonicalRangeForQuality &&
+        isNotFtsForQuality &&
+        v2DecisionAfterPromotion === "ENTER" &&
+        (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")
+    ) {
+        const isManualTakeover = !isNotManualTakeover;
+        const isAdoptedExternal = (v2State as any)?.isAdoptedExternal === true || (v2State as any)?.externalManualPosition === true || false;
+        ethRangeQualityResult = evaluateEthRangeEntryQualityGate({
+            symbol: String(input.symbol),
+            side: v2SideAfterPromotion,
+            regime: judgment.regime_final || judgment.regime,
+            subtype: judgment.subtype,
+            routingEngine: activeEngineRouting ?? null,
+            isInitialEntry,
+            isAddon: false,
+            boxPos,
+            zone,
+            rangeSideCandidate,
+            trendSideCandidate,
+            selectedSideAfterVeto: selectedSideFinal ?? v2SideAfterPromotion,
+            reversalConfirmed: isReversalConfirmed,
+            sideZoneValid,
+            rangeEdgeExtreme,
+            qualityScore,
+            entryQualityGrade,
+            htfEntryPolicy: judgment.htf_entry_policy ?? null,
+            directionalShockState: v2State.directionalShockState ?? "NONE",
+            isOperatorManaged: !isNotOperatorManaged,
+            isManualTakeover,
+            isAdoptedExternal,
+            promotionReason,
+            now: input.now
+        });
+
+        if (!ethRangeQualityResult.allowed) {
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = ethRangeQualityResult.blockReason;
+            promotionApplied = false;
+            promotionReason = null;
+            expectedMissingCondition = ethRangeQualityResult.blockReason;
+            expectedNextAction = "WAIT_FOR_ETH_RANGE_QUALITY_ENTRY";
+        }
+    }
+
     // Tier 5.6: Final Common Highway Core Entry Gate
     if (v2DecisionAfterPromotion === "ENTER" && (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")) {
         const hasExistingPos = v2State.currentPositions.some(p => p.symbol === input.symbol) || v2State.hasSameSidePosition === true;
@@ -7861,7 +7923,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 let entryProbeSizeMultiplier: number | null = null;
                 let probeSizingSource = "NONE";
                 if (!isAddOn) {
-                    if (promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE") {
+                    if (ethRangeQualityResult?.isProbe === true) {
+                        entryProbeSizeMultiplier = ethRangeQualityResult.probeMultiplier;
+                        probeSizingSource = ethRangeQualityResult.classification;
+                    } else if (promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE") {
                         entryProbeSizeMultiplier = 0.20;
                         probeSizingSource = "V2_POLARITY_REVERSAL_MICRO_PROBE";
                     } else if (promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE") {
@@ -7918,7 +7983,17 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     entryProbeSizeMultiplier,
                     entryProbeSizingSource: probeSizingSource,
                     existingAccountOpenRiskUsdt: accountOpenRisk.totalOpenRiskUsdt,
-                    isMicroProbe: isMicroProbe || probeSizingSource !== "NONE"
+                    // ETH RANGE probe sources must NOT be treated as isMicroProbe:
+                    // - isMicro=true causes equity-adaptive-sizing to bypass probe multiplier (override to 1).
+                    // - ETH range probe multiplier (0.50) must be applied normally via entryProbeSizeMultiplier.
+                    isMicroProbe: ethRangeQualityResult?.isProbe === true
+                        ? false
+                        : (isMicroProbe || (
+                            probeSizingSource !== "NONE" &&
+                            probeSizingSource !== "ETH_RANGE_LOCATION_PROBE" &&
+                            probeSizingSource !== "ETH_RANGE_UNCONFIRMED_PROBE" &&
+                            probeSizingSource !== "ETH_RANGE_COUNTERTREND_EXTREME_PROBE"
+                        ))
                 });
 
                 equityAdaptiveSizingAuthority = sizingResult;
@@ -10246,6 +10321,49 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
 
         // Requirement 1: Final Authoritative Highway Core Entry Gate before execution
+        if (ethRangeQualityResult != null) {
+            // Sizing audit fields:
+            // baseOrderNotionalBeforeEthProbe = cappedFullEntryNotionalUsdt (pre-probe, after all equity/cap constraints)
+            // submittedOrderNotional = decision.risk.finalOrderNotionalUsdt (probe applied + lot normalized)
+            // liveMaxOrderNotionalUsdt = config value, for audit visibility
+            const _baseBeforeProbe = equityAdaptiveSizingAuthority?.cappedFullEntryNotionalUsdt ?? equityAdaptiveSizingAuthority?.preProbeNotionalUsdt ?? equityAdaptiveSizingAuthority?.finalOrderNotionalUsdt ?? null;
+            const _submitted = decision.risk?.finalOrderNotionalUsdt ?? equityAdaptiveSizingAuthority?.finalOrderNotionalUsdt ?? null;
+            const _liveMaxCap = (input.config as any)?.okxLiveMaxOrderNotionalUsdt ?? null;
+            emitQualityProof(
+                {
+                    symbol: String(input.symbol),
+                    side: decision.side === "short" ? "short" : "long",
+                    regime: judgment.regime_final || judgment.regime,
+                    subtype: judgment.subtype,
+                    routingEngine: activeEngineRouting ?? null,
+                    isInitialEntry,
+                    isAddon: isAddOn,
+                    boxPos,
+                    zone,
+                    rangeSideCandidate,
+                    trendSideCandidate,
+                    selectedSideAfterVeto: selectedSideFinal ?? decision.side,
+                    reversalConfirmed: isReversalConfirmed,
+                    sideZoneValid,
+                    rangeEdgeExtreme,
+                    qualityScore,
+                    entryQualityGrade,
+                    htfEntryPolicy: judgment.htf_entry_policy ?? null,
+                    directionalShockState: v2State.directionalShockState ?? "NONE",
+                    isOperatorManaged: !isNotOperatorManaged,
+                    isManualTakeover: !isNotManualTakeover,
+                    isAdoptedExternal: (v2State as any)?.isAdoptedExternal === true || (v2State as any)?.externalManualPosition === true || false,
+                    promotionReason,
+                    baseOrderNotionalBeforeEthProbe: _baseBeforeProbe,
+                    liveBaselineOrderNotional: _baseBeforeProbe,
+                    submittedOrderNotional: _submitted,
+                    liveMaxOrderNotionalUsdt: _liveMaxCap,
+                    now: input.now
+                },
+                ethRangeQualityResult
+            );
+        }
+
         console.info(JSON.stringify({
             event: "FINAL_HIGHWAY_GATE_PROOF",
             execution_metadata_same_identity: execution.metadata === execMeta,
