@@ -158,8 +158,8 @@ describe("V2 ETH RANGE Dedicated Entry Quality Gate Test Suite", () => {
         assert.equal(res.blockReason, null);
     });
 
-    // 7. ETH short boxPos=0.85, reversal=true, trendSide=long → BLOCK (countertrend not extreme)
-    it("CASE 7: ETH short boxPos=0.85 + reversal=true + trendSide=long → BLOCK (ETH_RANGE_COUNTERTREND_NOT_EXTREME_CONFIRMED)", () => {
+    // 7. ETH short boxPos=0.85, reversal=true, trendSide=long, quality=82 -> EDGE PROBE (0.25x)
+    it("CASE 7: ETH short boxPos=0.85 + reversal=true + trendSide=long + quality=82 → EDGE PROBE (ETH_RANGE_COUNTERTREND_EDGE_PROBE, 0.25x)", () => {
         const res = evaluateEthRangeEntryQualityGate({
             ...baseInput,
             side: "short",
@@ -167,15 +167,19 @@ describe("V2 ETH RANGE Dedicated Entry Quality Gate Test Suite", () => {
             rangeSideCandidate: "short",
             boxPos: 0.85,
             reversalConfirmed: true,
+            sideZoneValid: true,
+            qualityScore: 82,
+            directionalShockState: "NONE",
             trendSideCandidate: "long"
         });
 
         assert.equal(res.evaluated, true);
-        assert.equal(res.allowed, false);
-        assert.equal(res.classification, "ETH_RANGE_BLOCK");
-        assert.equal(res.blockReason, "ETH_RANGE_COUNTERTREND_NOT_EXTREME_CONFIRMED");
-        assert.equal(res.probeMultiplier, 0.0);
-        assert.equal(res.isProbe, false);
+        assert.equal(res.allowed, true);
+        assert.equal(res.classification, "ETH_RANGE_COUNTERTREND_EDGE_PROBE");
+        assert.equal(res.probeMultiplier, 0.25);
+        assert.equal(res.isProbe, true);
+        assert.equal(res.isDirectionConflict, true);
+        assert.equal(res.blockReason, null);
     });
 
     // 8. ETH short boxPos=0.94, reversal=true, trendSide=long → COUNTERTREND EXTREME PROBE (0.50x)
@@ -198,34 +202,158 @@ describe("V2 ETH RANGE Dedicated Entry Quality Gate Test Suite", () => {
         assert.equal(res.blockReason, null);
     });
 
-    // 9. ETH long countertrend symmetry cases
-    it("CASE 9: ETH long countertrend symmetry (boxPos=0.15 blocked, boxPos=0.06 extreme probe)", () => {
-        const resBlocked = evaluateEthRangeEntryQualityGate({
+    // 9. Requirements 5.A ~ 5.H Test Suite
+    it("CASE 9.A: ETH long boxPos=0.13 + reversal=true + sideZoneValid=true + quality=76 + shock=NONE → COUNTERTREND_EDGE_PROBE (0.25x)", () => {
+        const res = evaluateEthRangeEntryQualityGate({
             ...baseInput,
             side: "long",
-            boxPos: 0.15,
+            boxPos: 0.13,
             reversalConfirmed: true,
+            sideZoneValid: true,
+            qualityScore: 76,
+            htfEntryPolicy: "ALLOW",
+            directionalShockState: "NONE",
             trendSideCandidate: "short"
         });
 
-        assert.equal(resBlocked.evaluated, true);
-        assert.equal(resBlocked.allowed, false);
-        assert.equal(resBlocked.classification, "ETH_RANGE_BLOCK");
-        assert.equal(resBlocked.blockReason, "ETH_RANGE_COUNTERTREND_NOT_EXTREME_CONFIRMED");
+        assert.equal(res.evaluated, true);
+        assert.equal(res.allowed, true);
+        assert.equal(res.classification, "ETH_RANGE_COUNTERTREND_EDGE_PROBE");
+        assert.equal(res.probeMultiplier, 0.25);
+        assert.equal(res.isProbe, true);
+        assert.equal(res.isDirectionConflict, true);
+    });
 
-        const resExtreme = evaluateEthRangeEntryQualityGate({
+    it("CASE 9.B: ETH long boxPos=0.23 + reversal=true + quality=76 + trendSide=short → BLOCK (boxPos > 0.20)", () => {
+        const res = evaluateEthRangeEntryQualityGate({
             ...baseInput,
             side: "long",
-            boxPos: 0.06,
+            boxPos: 0.23,
             reversalConfirmed: true,
+            sideZoneValid: true,
+            qualityScore: 76,
+            htfEntryPolicy: "ALLOW",
+            directionalShockState: "NONE",
             trendSideCandidate: "short"
         });
 
-        assert.equal(resExtreme.evaluated, true);
-        assert.equal(resExtreme.allowed, true);
-        assert.equal(resExtreme.classification, "ETH_RANGE_COUNTERTREND_EXTREME_PROBE");
-        assert.equal(resExtreme.probeMultiplier, 0.50);
-        assert.equal(resExtreme.isProbe, true);
+        assert.equal(res.evaluated, true);
+        assert.equal(res.allowed, false);
+        assert.equal(res.classification, "ETH_RANGE_BLOCK");
+        assert.equal(res.blockReason, "ETH_RANGE_COUNTERTREND_NOT_EXTREME_CONFIRMED");
+        assert.equal(res.probeMultiplier, 0.0);
+    });
+
+    it("CASE 9.C: ETH long boxPos=0.13 + quality=69 + reversal=true + trendSide=short → BLOCK (quality < 70)", () => {
+        const res = evaluateEthRangeEntryQualityGate({
+            ...baseInput,
+            side: "long",
+            boxPos: 0.13,
+            reversalConfirmed: true,
+            sideZoneValid: true,
+            qualityScore: 69,
+            htfEntryPolicy: "ALLOW",
+            directionalShockState: "NONE",
+            trendSideCandidate: "short"
+        });
+
+        assert.equal(res.evaluated, true);
+        assert.equal(res.allowed, false);
+        assert.equal(res.classification, "ETH_RANGE_BLOCK");
+        assert.equal(res.blockReason, "ETH_RANGE_COUNTERTREND_NOT_EXTREME_CONFIRMED");
+    });
+
+    it("CASE 9.D: ETH long boxPos=0.13 + reversal=false + trendSide=short → BLOCK (reversal=false)", () => {
+        const res = evaluateEthRangeEntryQualityGate({
+            ...baseInput,
+            side: "long",
+            boxPos: 0.13,
+            reversalConfirmed: false,
+            sideZoneValid: true,
+            qualityScore: 76,
+            htfEntryPolicy: "ALLOW",
+            directionalShockState: "NONE",
+            trendSideCandidate: "short"
+        });
+
+        assert.equal(res.evaluated, true);
+        assert.equal(res.allowed, false);
+        assert.equal(res.classification, "ETH_RANGE_BLOCK");
+        assert.equal(res.blockReason, "ETH_RANGE_COUNTERTREND_NOT_EXTREME_CONFIRMED");
+    });
+
+    it("CASE 9.E: ETH long boxPos=0.13 + opposing DOWN shock + trendSide=short → BLOCK", () => {
+        const res = evaluateEthRangeEntryQualityGate({
+            ...baseInput,
+            side: "long",
+            boxPos: 0.13,
+            reversalConfirmed: true,
+            sideZoneValid: true,
+            qualityScore: 76,
+            htfEntryPolicy: "ALLOW",
+            directionalShockState: "DOWN",
+            trendSideCandidate: "short"
+        });
+
+        assert.equal(res.evaluated, true);
+        assert.equal(res.allowed, false);
+        assert.equal(res.classification, "ETH_RANGE_BLOCK");
+        assert.equal(res.blockReason, "ETH_RANGE_COUNTERTREND_NOT_EXTREME_CONFIRMED");
+    });
+
+    it("CASE 9.F: ETH short boxPos=0.87 + quality=72 + reversal=true + trendSide=long + shock=NONE → EDGE PROBE (0.25x)", () => {
+        const res = evaluateEthRangeEntryQualityGate({
+            ...baseInput,
+            side: "short",
+            zone: "upper",
+            rangeSideCandidate: "short",
+            boxPos: 0.87,
+            reversalConfirmed: true,
+            sideZoneValid: true,
+            qualityScore: 72,
+            directionalShockState: "NONE",
+            trendSideCandidate: "long"
+        });
+
+        assert.equal(res.evaluated, true);
+        assert.equal(res.allowed, true);
+        assert.equal(res.classification, "ETH_RANGE_COUNTERTREND_EDGE_PROBE");
+        assert.equal(res.probeMultiplier, 0.25);
+        assert.equal(res.isProbe, true);
+    });
+
+    it("CASE 9.G: ETH short boxPos=0.94 + reversal=true + trendSide=long → EXTREME PROBE (0.50x) preserved", () => {
+        const res = evaluateEthRangeEntryQualityGate({
+            ...baseInput,
+            side: "short",
+            zone: "upper",
+            rangeSideCandidate: "short",
+            boxPos: 0.94,
+            reversalConfirmed: true,
+            sideZoneValid: true,
+            qualityScore: 76,
+            trendSideCandidate: "long"
+        });
+
+        assert.equal(res.evaluated, true);
+        assert.equal(res.allowed, true);
+        assert.equal(res.classification, "ETH_RANGE_COUNTERTREND_EXTREME_PROBE");
+        assert.equal(res.probeMultiplier, 0.50);
+    });
+
+    it("CASE 9.H: selectedSideAfterVeto=none → ETH quality gate NOT evaluated (evaluated=false)", () => {
+        const res = evaluateEthRangeEntryQualityGate({
+            ...baseInput,
+            side: "long",
+            selectedSideAfterVeto: "none",
+            boxPos: 0.13,
+            reversalConfirmed: true
+        });
+
+        assert.equal(res.evaluated, false);
+        assert.equal(res.allowed, true);
+        assert.equal(res.classification, "ETH_RANGE_FULL");
+        assert.equal(res.probeMultiplier, 1.0);
     });
 
     // 10. BTC long/short RANGE is 100% bypassed with 0 change

@@ -6648,6 +6648,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const isEthSymbolForQuality = String(input.symbol).toUpperCase().replace("-SWAP", "").replace("-", "") === "ETHUSDT";
     const isCanonicalRangeForQuality = judgment.regime === "RANGE" || activeEngineRouting === "RANGE" || isCanonicalRange;
     const isNotFtsForQuality = judgment.subtype !== "FAST_TREND_SHIFT" && !String(promotionReason ?? "").includes("FAST_TREND_SHIFT");
+    const hasAuthoritativeFinalSide = (selectedSideFinal === "long" || selectedSideFinal === "short");
 
     if (
         isEthSymbolForQuality &&
@@ -6657,8 +6658,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         isNotManualTakeover &&
         isCanonicalRangeForQuality &&
         isNotFtsForQuality &&
+        hasAuthoritativeFinalSide &&
         v2DecisionAfterPromotion === "ENTER" &&
-        (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")
+        (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short") &&
+        v2SideAfterPromotion === selectedSideFinal
     ) {
         const isManualTakeover = !isNotManualTakeover;
         const isAdoptedExternal = (v2State as any)?.isAdoptedExternal === true || (v2State as any)?.externalManualPosition === true || false;
@@ -6674,7 +6677,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             zone,
             rangeSideCandidate,
             trendSideCandidate,
-            selectedSideAfterVeto: selectedSideFinal ?? v2SideAfterPromotion,
+            selectedSideAfterVeto: selectedSideFinal,
             reversalConfirmed: isReversalConfirmed,
             sideZoneValid,
             rangeEdgeExtreme,
@@ -6698,6 +6701,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             expectedMissingCondition = ethRangeQualityResult.blockReason;
             expectedNextAction = "WAIT_FOR_ETH_RANGE_QUALITY_ENTRY";
         }
+    } else if (
+        isEthSymbolForQuality &&
+        isCanonicalRangeForQuality &&
+        isNotFtsForQuality &&
+        selectedSideFinal === "none" &&
+        v2DecisionAfterPromotion === "ENTER"
+    ) {
+        // Defensive cleanup: if canonical final side is 'none', prevent any stale ENTER resurrection
+        v2DecisionAfterPromotion = "HOLD";
+        v2SideAfterPromotion = "none";
+        v2RejectReasonAfterPromotion = v2RejectReasonAfterPromotion ?? "SIDE_SELECTION_NONE";
+        promotionApplied = false;
+        promotionReason = null;
     }
 
     // Tier 5.6: Final Common Highway Core Entry Gate
@@ -7985,14 +8001,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     existingAccountOpenRiskUsdt: accountOpenRisk.totalOpenRiskUsdt,
                     // ETH RANGE probe sources must NOT be treated as isMicroProbe:
                     // - isMicro=true causes equity-adaptive-sizing to bypass probe multiplier (override to 1).
-                    // - ETH range probe multiplier (0.50) must be applied normally via entryProbeSizeMultiplier.
+                    // - ETH range probe multiplier (0.50 / 0.25) must be applied normally via entryProbeSizeMultiplier.
                     isMicroProbe: ethRangeQualityResult?.isProbe === true
                         ? false
                         : (isMicroProbe || (
                             probeSizingSource !== "NONE" &&
                             probeSizingSource !== "ETH_RANGE_LOCATION_PROBE" &&
                             probeSizingSource !== "ETH_RANGE_UNCONFIRMED_PROBE" &&
-                            probeSizingSource !== "ETH_RANGE_COUNTERTREND_EXTREME_PROBE"
+                            probeSizingSource !== "ETH_RANGE_COUNTERTREND_EXTREME_PROBE" &&
+                            probeSizingSource !== "ETH_RANGE_COUNTERTREND_EDGE_PROBE"
                         ))
                 });
 

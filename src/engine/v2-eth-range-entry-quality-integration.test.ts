@@ -408,9 +408,10 @@ describe("ETH Dedicated RANGE Quality Gate E2E Integration Suite", () => {
         assert.equal(decisionResult.decision.executionAction, "ENTER");
     });
 
-    // Countertrend extreme probe regression
-    it("Countertrend: extreme (boxPos=0.05) -> PROBE, non-extreme (boxPos=0.15) -> BLOCK", () => {
-        const inputBlocked = buildInput("ETHUSDT", 2330, 0.15, {
+    // Countertrend extreme & edge probe regression
+    it("Countertrend: extreme (boxPos=0.05) -> 0.50x PROBE, edge (boxPos=0.13) -> 0.25x PROBE, non-edge (boxPos=0.25) -> BLOCK", () => {
+        // 1. Blocked case (boxPos=0.25 > 0.20)
+        const inputBlocked = buildInput("ETHUSDT", 2330, 0.25, {
             side: "long",
             signal: "paper_long_candidate",
             emaGap: -0.0006,
@@ -432,6 +433,39 @@ describe("ETH Dedicated RANGE Quality Gate E2E Integration Suite", () => {
         assert.notEqual(resBlocked.decision.decision, "ENTER");
         assert.equal(resBlocked.decision.executionAction, "NONE");
 
+        // 2. Edge Probe case (boxPos=0.13 <= 0.20, reversal=true, trend=short) -> 0.25x
+        const inputEdge = buildInput("ETHUSDT", 2320, 0.13, {
+            side: "long",
+            signal: "paper_long_candidate",
+            emaGap: -0.0006,
+            trendSideCandidate: "short",
+            rangeSideCandidate: "long",
+            reversalConfirmed: true
+        });
+
+        let resEdge: any;
+        const proofsEdge = captureProofLogs(() => {
+            resEdge = runEngineV2(inputEdge);
+        });
+
+        const qualityProofEdge = findQualityProof(proofsEdge);
+        assert.ok(qualityProofEdge, "proof must be emitted for edge countertrend probe");
+        assert.equal(qualityProofEdge.classification, "ETH_RANGE_COUNTERTREND_EDGE_PROBE");
+        assert.equal(qualityProofEdge.probe_multiplier, 0.25);
+        assert.equal(qualityProofEdge.final_allowed, true);
+        assert.equal(resEdge.decision.decision, "ENTER");
+        assert.equal(resEdge.decision.side, "long");
+        assert.equal(resEdge.decision.executionAction, "ENTER");
+
+        const baseEdge = Number(qualityProofEdge.base_order_notional_before_eth_probe);
+        const submittedEdge = Number(qualityProofEdge.submitted_order_notional);
+        if (baseEdge > 0 && submittedEdge > 0) {
+            const ratioEdge = submittedEdge / baseEdge;
+            assert.ok(ratioEdge >= 0.20 && ratioEdge <= 0.30,
+                `COUNTERTREND_EDGE_PROBE submitted/base ratio must be ~0.25, got ${ratioEdge.toFixed(4)}`);
+        }
+
+        // 3. Extreme Probe case (boxPos=0.05 <= 0.08, reversal=true, trend=short) -> 0.50x
         const inputExtreme = buildInput("ETHUSDT", 2310, 0.05, {
             side: "long",
             signal: "paper_long_candidate",

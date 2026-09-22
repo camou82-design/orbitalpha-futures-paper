@@ -20,6 +20,7 @@ export type EthRangeQualityClassification =
     | "ETH_RANGE_LOCATION_PROBE"
     | "ETH_RANGE_UNCONFIRMED_PROBE"
     | "ETH_RANGE_COUNTERTREND_EXTREME_PROBE"
+    | "ETH_RANGE_COUNTERTREND_EDGE_PROBE"
     | "ETH_RANGE_BLOCK";
 
 export interface EthRangeEntryQualityInput {
@@ -66,7 +67,7 @@ export interface EthRangeEntryQualityResult {
     evaluated: boolean;
     allowed: boolean;
     classification: EthRangeQualityClassification;
-    probeMultiplier: number; // 1.0 for FULL, 0.50 for PROBE, 0.0 for BLOCK
+    probeMultiplier: number; // 1.0 for FULL, 0.50 for PROBE, 0.25 for EDGE PROBE, 0.0 for BLOCK
     blockReason: string | null;
     isProbe: boolean;
     isDirectionConflict: boolean;
@@ -86,6 +87,26 @@ export function evaluateEthRangeEntryQualityGate(
 
     // 1. Symbol and Scope Bypass: Only ETHUSDT initial RANGE entries are evaluated.
     if (!isEth) {
+        return {
+            evaluated: false,
+            allowed: true,
+            classification: "ETH_RANGE_FULL",
+            probeMultiplier: 1.0,
+            blockReason: null,
+            isProbe: false,
+            isDirectionConflict: false,
+            ethLocationPass: true,
+            ethReversalPass: true
+        };
+    }
+
+    // 1.1 Scope & Stale side guard: If side is not long/short, or authoritative selectedSideAfterVeto is 'none', do not evaluate gate.
+    const side = input.side;
+    const selectedSideAfterVeto = String(input.selectedSideAfterVeto ?? side).toLowerCase();
+    if (
+        (side !== "long" && side !== "short") ||
+        selectedSideAfterVeto === "none"
+    ) {
         return {
             evaluated: false,
             allowed: true,
@@ -140,7 +161,6 @@ export function evaluateEthRangeEntryQualityGate(
         };
     }
 
-    const side = input.side;
     const boxPos = input.boxPos;
     const reversalConfirmed = input.reversalConfirmed === true;
     const trendCand = String(input.trendSideCandidate ?? "none").toLowerCase();
@@ -170,9 +190,32 @@ export function evaluateEthRangeEntryQualityGate(
 
     // Case 1: Direction Conflict (Countertrend: RANGE side opposes TREND candidate)
     if (isDirectionConflict) {
+        // Priority 1: EXTREME Countertrend (0.50x)
         const isExtremeCountertrend =
             (isLong && boxPos <= 0.08 && reversalConfirmed) ||
             (isShort && boxPos >= 0.92 && reversalConfirmed);
+
+        // Priority 2: EDGE Countertrend (0.25x)
+        const isEdgeLocation = (isLong && boxPos <= 0.20) || (isShort && boxPos >= 0.80);
+        const sideZoneValid = input.sideZoneValid === true;
+        const qualityScore = typeof input.qualityScore === "number" ? input.qualityScore : 0;
+        const isQualityScorePass = qualityScore >= 70;
+        const shockState = String(input.directionalShockState ?? "NONE").toUpperCase();
+        const isOpposingShock =
+            (isLong && (shockState === "DOWN" || shockState.includes("DOWN"))) ||
+            (isShort && (shockState === "UP" || shockState.includes("UP")));
+        const htfPolicy = String(input.htfEntryPolicy ?? "").toUpperCase();
+        const isHtfOpposingExplicit =
+            (isLong && htfPolicy === "SHORT_ONLY_OR_NONE") ||
+            (isShort && htfPolicy === "LONG_ONLY_OR_NONE");
+
+        const isEdgeCountertrend =
+            isEdgeLocation &&
+            reversalConfirmed &&
+            sideZoneValid &&
+            isQualityScorePass &&
+            !isOpposingShock &&
+            !isHtfOpposingExplicit;
 
         if (isExtremeCountertrend) {
             const res: EthRangeEntryQualityResult = {
@@ -180,6 +223,20 @@ export function evaluateEthRangeEntryQualityGate(
                 allowed: true,
                 classification: "ETH_RANGE_COUNTERTREND_EXTREME_PROBE",
                 probeMultiplier: 0.50,
+                blockReason: null,
+                isProbe: true,
+                isDirectionConflict: true,
+                ethLocationPass: true,
+                ethReversalPass: true
+            };
+            emitQualityProof(input, res);
+            return res;
+        } else if (isEdgeCountertrend) {
+            const res: EthRangeEntryQualityResult = {
+                evaluated: true,
+                allowed: true,
+                classification: "ETH_RANGE_COUNTERTREND_EDGE_PROBE",
+                probeMultiplier: 0.25,
                 blockReason: null,
                 isProbe: true,
                 isDirectionConflict: true,
@@ -197,7 +254,7 @@ export function evaluateEthRangeEntryQualityGate(
                 blockReason: "ETH_RANGE_COUNTERTREND_NOT_EXTREME_CONFIRMED",
                 isProbe: false,
                 isDirectionConflict: true,
-                ethLocationPass: (isLong && boxPos <= 0.08) || (isShort && boxPos >= 0.92),
+                ethLocationPass: (isLong && boxPos <= 0.08) || (isShort && boxPos >= 0.92) || isEdgeLocation,
                 ethReversalPass: reversalConfirmed
             };
             emitQualityProof(input, res);
