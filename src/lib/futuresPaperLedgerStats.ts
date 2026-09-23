@@ -10,6 +10,15 @@ import {
 } from "../engine-v2/lifecycle/completed-trade";
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
+export function startOfKstDayMs(now: number): number {
+  const kstDate = new Date(now + KST_OFFSET_MS);
+  const y = kstDate.getUTCFullYear();
+  const m = kstDate.getUTCMonth();
+  const d = kstDate.getUTCDate();
+  return Date.UTC(y, m, d, 0, 0, 0, 0) - KST_OFFSET_MS;
+}
 
 function utcMonthStartMs(now: number): number {
   const d = new Date(now);
@@ -70,18 +79,24 @@ export type FuturesPaperLedgerPerformance = Readonly<{
   generatedAt: number;
   parsedTradeCount: number;
   all: FuturesPaperLedgerWindowStats;
+  today: FuturesPaperLedgerWindowStats;
+  todayKst?: FuturesPaperLedgerWindowStats;
   last7d: FuturesPaperLedgerWindowStats;
   last30d: FuturesPaperLedgerWindowStats;
   monthToDate: FuturesPaperLedgerWindowStats;
   strategy: Readonly<{
     parsedTradeCount: number;
     all: FuturesPaperLedgerWindowStats;
+    today: FuturesPaperLedgerWindowStats;
+    todayKst?: FuturesPaperLedgerWindowStats;
     last7d: FuturesPaperLedgerWindowStats;
     last30d: FuturesPaperLedgerWindowStats;
   }>;
   account: Readonly<{
     parsedTradeCount: number;
     all: FuturesPaperLedgerWindowStats;
+    today: FuturesPaperLedgerWindowStats;
+    todayKst?: FuturesPaperLedgerWindowStats;
     last7d: FuturesPaperLedgerWindowStats;
     last30d: FuturesPaperLedgerWindowStats;
   }>;
@@ -173,6 +188,10 @@ export function buildLedgerPerformanceFromHistory(
   const inClosedRange = (row: ParsedHistoryRow, fromInclusive: number): boolean =>
     row.closedAt !== undefined && row.closedAt >= fromInclusive && row.closedAt <= generatedAt;
 
+  const kstTodayStart = startOfKstDayMs(generatedAt);
+  const todayStrategy = strategyRows.filter((r) => inClosedRange(r, kstTodayStart));
+  const todayAccount = accountRows.filter((r) => inClosedRange(r, kstTodayStart));
+
   const last7dStrategy = strategyRows.filter((r) => inClosedRange(r, generatedAt - 7 * MS_PER_DAY));
   const last30dStrategy = strategyRows.filter((r) => inClosedRange(r, generatedAt - 30 * MS_PER_DAY));
   const monthStart = utcMonthStartMs(generatedAt);
@@ -182,22 +201,31 @@ export function buildLedgerPerformanceFromHistory(
   const last30dAccount = accountRows.filter((r) => inClosedRange(r, generatedAt - 30 * MS_PER_DAY));
   const monthToDateAccount = accountRows.filter((r) => inClosedRange(r, monthStart));
 
+  const todayAccountStats = aggregateRows(todayAccount);
+  const todayStrategyStats = aggregateRows(todayStrategy);
+
   return {
     generatedAt,
     parsedTradeCount: accountRows.length,
     all: aggregateRows(accountRows),
+    today: todayAccountStats,
+    todayKst: todayAccountStats,
     last7d: aggregateRows(last7dAccount),
     last30d: aggregateRows(last30dAccount),
     monthToDate: aggregateRows(monthToDateAccount),
     strategy: {
       parsedTradeCount: strategyRows.length,
       all: aggregateRows(strategyRows),
+      today: todayStrategyStats,
+      todayKst: todayStrategyStats,
       last7d: aggregateRows(last7dStrategy),
       last30d: aggregateRows(last30dStrategy)
     },
     account: {
       parsedTradeCount: accountRows.length,
       all: aggregateRows(accountRows),
+      today: todayAccountStats,
+      todayKst: todayAccountStats,
       last7d: aggregateRows(last7dAccount),
       last30d: aggregateRows(last30dAccount)
     }

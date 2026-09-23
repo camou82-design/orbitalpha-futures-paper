@@ -125,8 +125,10 @@ export function isStrategyStatsRow(r: unknown): boolean {
     if (!isPositionCycleFinalRow(r)) return false;
     const o = r as Record<string, unknown>;
     const src = o.tradeSource;
+    if (src === "MANUAL_EXTERNAL" || src === "ADOPTED_EXTERNAL" || src === "OPERATOR_MANAGED") return false;
+    if (o.isManualEntry === true || o.isManualExit === true) return false;
+    if (o.sourceLabel === "수동" || o.sourceLabel === "자동→수동" || o.sourceLabel === "수동→자동") return false;
     if (src === "BOT_V2") return true;
-    if (src === "MANUAL_EXTERNAL" || src === "ADOPTED_EXTERNAL") return false;
     return o.isV2Authority === true || String(o.authority ?? "").toLowerCase() === "v2";
 }
 

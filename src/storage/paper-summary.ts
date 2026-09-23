@@ -99,6 +99,7 @@ export type PaperDailySummaryReport = Readonly<{
   generatedAt: number;
   bucketType: "daily";
   days: Record<string, PaperDayBucket>;
+  daysKst?: Record<string, PaperDayBucket>;
 }>;
 
 /** Rolling / MTD / full-history windows for `summary-window.json`. */
@@ -344,7 +345,9 @@ function aggregateObservation(
   };
 }
 
-function utcDayKeyFromMs(ms: number): string {
+export const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
+
+export function utcDayKeyFromMs(ms: number): string {
   const d = new Date(ms);
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
@@ -352,12 +355,28 @@ function utcDayKeyFromMs(ms: number): string {
   return `${y}-${m}-${day}`;
 }
 
-function utcMonthStartMs(now: number): number {
+export function kstDayKeyFromMs(ms: number): string {
+  const d = new Date(ms + KST_OFFSET_MS);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+export function startOfKstDayMs(now: number): number {
+  const kstDate = new Date(now + KST_OFFSET_MS);
+  const y = kstDate.getUTCFullYear();
+  const m = kstDate.getUTCMonth();
+  const d = kstDate.getUTCDate();
+  return Date.UTC(y, m, d, 0, 0, 0, 0) - KST_OFFSET_MS;
+}
+
+export function utcMonthStartMs(now: number): number {
   const d = new Date(now);
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1, 0, 0, 0, 0);
 }
 
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
+export const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 function aggregateRows(rows: ParsedHistoryRow[]): PaperSummaryStats {
   const totalTrades = rows.length;
@@ -535,42 +554,57 @@ export function buildPaperDailySummaryFromHistory(history: unknown[], generatedA
   }
 
   const byDay = new Map<string, ParsedHistoryRow[]>();
+  const byDayKst = new Map<string, ParsedHistoryRow[]>();
   for (const row of rows) {
     if (row.closedAt === undefined) continue;
     const key = utcDayKeyFromMs(row.closedAt);
+    const kstKey = kstDayKeyFromMs(row.closedAt);
+
     const list = byDay.get(key);
     if (list) list.push(row);
     else byDay.set(key, [row]);
+
+    const kstList = byDayKst.get(kstKey);
+    if (kstList) kstList.push(row);
+    else byDayKst.set(kstKey, [row]);
   }
+
+  const createEmptyObs = (): PaperObservationMetrics => ({
+    range: pickModeSlice(aggregateRows([])),
+    trend: pickTrendSlice(aggregateRows([])),
+    exitMix: emptyExitMix(),
+    entryBlockMix: emptyEntryBlockMix(),
+    aiApproval: {
+      executor_allowed_count: 0,
+      ai_approved_count: 0,
+      ai_blocked_count: 0,
+      ai_approval_rate: null,
+      blocked_reason_counts: {}
+    },
+    aiBlockQuality: {
+      ai_block_good_count: 0,
+      ai_block_missed_count: 0,
+      ai_block_neutral_count: 0,
+      ai_block_quality_rate: null,
+      criteria: null
+    }
+  });
 
   const days: Record<string, PaperDayBucket> = {};
   const sortedKeys = [...byDay.keys()].sort();
   for (const key of sortedKeys) {
     const dayRows = byDay.get(key)!;
-    const emptyObs: PaperObservationMetrics = {
-      range: pickModeSlice(aggregateRows([])),
-      trend: pickTrendSlice(aggregateRows([])),
-      exitMix: emptyExitMix(),
-      entryBlockMix: emptyEntryBlockMix(),
-      aiApproval: {
-        executor_allowed_count: 0,
-        ai_approved_count: 0,
-        ai_blocked_count: 0,
-        ai_approval_rate: null,
-        blocked_reason_counts: {}
-      },
-      aiBlockQuality: {
-        ai_block_good_count: 0,
-        ai_block_missed_count: 0,
-        ai_block_neutral_count: 0,
-        ai_block_quality_rate: null,
-        criteria: null
-      }
-    };
-    days[key] = { date: key, ...aggregateRows(dayRows), observation: emptyObs };
+    days[key] = { date: key, ...aggregateRows(dayRows), observation: createEmptyObs() };
   }
 
-  return { generatedAt, bucketType: "daily", days };
+  const daysKst: Record<string, PaperDayBucket> = {};
+  const sortedKstKeys = [...byDayKst.keys()].sort();
+  for (const key of sortedKstKeys) {
+    const dayRows = byDayKst.get(key)!;
+    daysKst[key] = { date: key, ...aggregateRows(dayRows), observation: createEmptyObs() };
+  }
+
+  return { generatedAt, bucketType: "daily", days, daysKst };
 }
 
 /**

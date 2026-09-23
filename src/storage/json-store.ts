@@ -21,6 +21,8 @@ import {
   attachObservationToReports,
   buildPaperWindowSummaryFromHistory
 } from "./paper-summary";
+import { readOkxAccountClosedTrades } from "./account-truth-store";
+import { normalizePositionsHistoryArray } from "../lib/paperClosedHistoryNormalize";
 
 export const RUNS_INDEX_MAX_ITEMS = 50;
 
@@ -444,7 +446,12 @@ export class JsonStore {
     publicBundlePath: string;
     health: PaperHealthReport;
   }> {
-    const history = await this.readPositionsHistory();
+    const botHistory = await this.readPositionsHistory();
+    const okxTrades = await readOkxAccountClosedTrades(this.baseDir);
+    const combinedHistory = Array.isArray(okxTrades) && okxTrades.length > 0
+      ? [...botHistory, ...okxTrades]
+      : botHistory;
+    const history = normalizePositionsHistoryArray(combinedHistory);
     const generatedAt = Date.now();
     const events = await this.readEventsJsonlFile();
     const aiBlockEval = await this.readAiBlockEvalJson();

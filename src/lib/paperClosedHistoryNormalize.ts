@@ -671,6 +671,22 @@ export function deduplicateClosedHistoryRows(rows: NormalizedPaperClosedRow[]): 
         break;
       }
 
+      // 4A. Shared exchange fill IDs (tradeId)
+      const rFills = Array.isArray(r.exchangeFillIds) ? r.exchangeFillIds : [];
+      const exFills = Array.isArray(existing.exchangeFillIds) ? existing.exchangeFillIds : [];
+      if (rFills.length > 0 && exFills.length > 0 && rFills.some((id) => exFills.includes(id))) {
+        matchIdx = i;
+        break;
+      }
+
+      // 4B. Shared exchange exit order IDs
+      const rExitOrds = Array.isArray(r.exchangeExitOrdIds) ? r.exchangeExitOrdIds : [];
+      const exExitOrds = Array.isArray(existing.exchangeExitOrdIds) ? existing.exchangeExitOrdIds : [];
+      if (rExitOrds.length > 0 && exExitOrds.length > 0 && rExitOrds.some((id) => exExitOrds.includes(id))) {
+        matchIdx = i;
+        break;
+      }
+
       // 5. Tolerance match: same symbol, same side, within 2s of openedAt and closedAt,
       // provided they don't have conflicting explicit identities
       const rExOrd =

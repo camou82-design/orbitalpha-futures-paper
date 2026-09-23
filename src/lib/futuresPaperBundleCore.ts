@@ -813,15 +813,19 @@ async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): P
       readJsonFile(path.join(snaps, "latest-meta.json"))
     ]);
 
-  const [symbolRows, healthHistoryRecent, positionsHistoryRaw, openPositions, eventsRecent] = await Promise.all([
+  const [symbolRows, healthHistoryRecent, positionsHistoryRaw, openPositions, eventsRecent, okxAccountTrades] = await Promise.all([
     Promise.resolve(pickSymbolRows(latestSnapshot)),
     readHealthHistoryTail(dataDir, 10),
     readPositionsHistoryArray(dataDir),
     readPositionsOpenArray(dataDir),
-    readEventsTail(dataDir, 20)
+    readEventsTail(dataDir, 20),
+    readOkxAccountClosedTrades(dataDir)
   ]);
 
-  const positionsHistory = normalizePositionsHistoryArray(positionsHistoryRaw);
+  const combinedHistoryRaw = Array.isArray(okxAccountTrades) && okxAccountTrades.length > 0
+    ? [...positionsHistoryRaw, ...okxAccountTrades]
+    : positionsHistoryRaw;
+  const positionsHistory = normalizePositionsHistoryArray(combinedHistoryRaw);
   const generatedAt = Date.now();
   const ledgerPerformance = buildLedgerPerformanceFromHistory(positionsHistory as unknown[], generatedAt);
   const paperOperational = paperOperationalFromEngineState(engineState);
