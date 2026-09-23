@@ -4900,6 +4900,116 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    // ── Tier 5.0-ETH-PROMOTION-BRIDGE: ETH RANGE Dedicated Entry Quality Promotion Bridge ──
+    const isEthSymbolForBridge = String(input.symbol).toUpperCase().replace("-SWAP", "").replace("-", "") === "ETHUSDT";
+    const isCanonicalRangeForBridge = judgment.regime === "RANGE" || activeEngineRouting === "RANGE" || isCanonicalRange || judgment.regime_final === "RANGE";
+    const isNotFtsForBridge = judgment.subtype !== "FAST_TREND_SHIFT" && !String(promotionReason ?? "").includes("FAST_TREND_SHIFT");
+    const isInitialEntryForBridge = isInitialEntry === true && addOnPolicy.isAddOn !== true;
+    const isCleanManualForBridge = isNotOperatorManaged && isNotManualTakeover && (v2State as any)?.isAdoptedExternal !== true && (v2State as any)?.externalManualPosition !== true;
+    const hasValidRangeSideCandidate = rangeSideCandidate === "long" || rangeSideCandidate === "short";
+    const isHoldOrSkipBeforeBridge = v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP";
+
+    if (
+        isEthSymbolForBridge &&
+        isInitialEntryForBridge &&
+        isCleanManualForBridge &&
+        isCanonicalRangeForBridge &&
+        isNotFtsForBridge &&
+        hasValidRangeSideCandidate &&
+        isHoldOrSkipBeforeBridge
+    ) {
+        const decisionBeforeBridge = v2DecisionAfterPromotion;
+        const candidateSideForBridge = rangeSideCandidate as "long" | "short";
+
+        let bridgeBlockReason: string | null = null;
+        if (hardBlockPresent) {
+            bridgeBlockReason = "HARD_BLOCK_PRESENT";
+        } else if (promotionBlockReason != null) {
+            bridgeBlockReason = promotionBlockReason;
+        } else if (!hardControlClear) {
+            bridgeBlockReason = "HARD_CONTROL_NOT_CLEAR";
+        } else if (!sideZoneValid) {
+            bridgeBlockReason = "SIDE_ZONE_INVALID";
+        } else if (qualityScore < 70) {
+            bridgeBlockReason = "QUALITY_SCORE_BELOW_70";
+        }
+
+        let bridgeQualityResult: EthRangeEntryQualityResult | null = null;
+        let promotionAllowed = false;
+
+        if (bridgeBlockReason == null) {
+            bridgeQualityResult = evaluateEthRangeEntryQualityGate({
+                symbol: String(input.symbol),
+                side: candidateSideForBridge,
+                regime: judgment.regime_final || judgment.regime,
+                subtype: judgment.subtype,
+                routingEngine: activeEngineRouting ?? null,
+                isInitialEntry,
+                isAddon: false,
+                boxPos,
+                zone,
+                rangeSideCandidate,
+                trendSideCandidate,
+                selectedSideAfterVeto: candidateSideForBridge,
+                reversalConfirmed: isReversalConfirmed,
+                sideZoneValid,
+                rangeEdgeExtreme,
+                qualityScore,
+                entryQualityGrade,
+                htfEntryPolicy: judgment.htf_entry_policy ?? null,
+                directionalShockState: v2State.directionalShockState ?? "NONE",
+                isOperatorManaged: !isNotOperatorManaged,
+                isManualTakeover: !isNotManualTakeover,
+                isAdoptedExternal: (v2State as any)?.isAdoptedExternal === true || (v2State as any)?.externalManualPosition === true || false,
+                promotionReason,
+                emitProof: false,
+                now: input.now
+            });
+
+            const isAllowedClassification =
+                bridgeQualityResult.classification === "ETH_RANGE_FULL" ||
+                bridgeQualityResult.classification === "ETH_RANGE_LOCATION_PROBE" ||
+                bridgeQualityResult.classification === "ETH_RANGE_COUNTERTREND_EDGE_PROBE" ||
+                bridgeQualityResult.classification === "ETH_RANGE_COUNTERTREND_EXTREME_PROBE";
+
+            if (bridgeQualityResult.allowed && isAllowedClassification) {
+                promotionAllowed = true;
+                v2DecisionAfterPromotion = "ENTER";
+                v2SideAfterPromotion = candidateSideForBridge;
+                v2RejectReasonAfterPromotion = null;
+                promotionApplied = true;
+                promotionReason = `ETH_RANGE_QUALITY_PROMOTION_BRIDGE_${bridgeQualityResult.classification}`;
+                promotionMinConditionPassed = true;
+            } else if (bridgeQualityResult.classification === "ETH_RANGE_UNCONFIRMED_PROBE") {
+                bridgeBlockReason = "ETH_RANGE_UNCONFIRMED_PROBE_NOT_ALLOWED";
+            } else {
+                bridgeBlockReason = bridgeQualityResult.blockReason ?? "ETH_RANGE_QUALITY_BLOCKED";
+            }
+        }
+
+        console.info(JSON.stringify({
+            event: "ETH_RANGE_QUALITY_PROMOTION_BRIDGE_PROOF",
+            symbol: String(input.symbol).toUpperCase().replace("-SWAP", "").replace("-", ""),
+            decision_before: decisionBeforeBridge,
+            decision_after: v2DecisionAfterPromotion,
+            range_side_candidate: rangeSideCandidate,
+            trend_side_candidate: trendSideCandidate,
+            boxPos,
+            zone,
+            reversal_confirmed: isReversalConfirmed,
+            side_zone_valid: sideZoneValid === true,
+            quality_score: qualityScore,
+            htf_entry_policy: judgment.htf_entry_policy ?? null,
+            directional_shock_state: v2State.directionalShockState ?? "NONE",
+            quality_classification: bridgeQualityResult?.classification ?? null,
+            probe_multiplier: bridgeQualityResult?.probeMultiplier ?? 0,
+            promotion_allowed: promotionAllowed,
+            promotion_reason: promotionReason,
+            promotion_block_reason: promotionAllowed ? null : bridgeBlockReason,
+            hard_block_present: hardBlockPresent
+        }));
+    }
+
     // Tier 5+: Side Consistency Enforcer (Authoritative)
     const sideCandidateBeforeVetoEnforced = v2SideAfterPromotion;
 
