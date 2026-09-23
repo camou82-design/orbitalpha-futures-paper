@@ -67,6 +67,11 @@ import { evaluateHighwayCoreEntryGate } from "./highway-core/highway-entry-gate"
 import { isSoftExitCooldownActive } from "./exit/soft-exit-hysteresis";
 import { evaluateShortReversalWatch } from "./market-judgment/short-reversal-watch";
 import { evaluateLongReversalWatch } from "./market-judgment/long-reversal-watch";
+import {
+    evaluateEthFtsLowerShortStaleRelease,
+    isStaleFtsLowerShortRejectEligibleForFreshRangeReevaluation,
+    resetEthFtsLowerShortStaleState
+} from "./market-judgment/eth-fts-lower-short-stale-release";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -2119,6 +2124,45 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             : (v2RejectReasonAfterPromotion != null && hardBlockReasons.has(v2RejectReasonAfterPromotion)
                 ? v2RejectReasonAfterPromotion
                 : null);
+
+    const ftsDiag = judgment.diagnostics?.fastTrendShift ?? (input.snapshot as any)?.fastTrendShift ?? null;
+    const isFtsActive = judgment.subtype === "FAST_TREND_SHIFT" || ftsDiag?.active === true;
+    const ftsSubtype = isFtsActive ? "FAST_TREND_SHIFT" : judgment.subtype;
+    const ftsDirection = ftsDiag?.direction ?? (execMeta as any)?.fast_trend_shift_direction ?? null;
+
+    const ethFtsLowerShortStaleEval = evaluateEthFtsLowerShortStaleRelease({
+        symbol: String(input.symbol),
+        isInitialEntry,
+        isOperatorManaged: !isNotOperatorManaged,
+        isManualTakeover: !isNotManualTakeover,
+        isAdoptedExternal: (v2State as any)?.isAdoptedExternal === true || (v2State as any)?.externalManualPosition === true || false,
+        subtype: ftsSubtype,
+        ftsDirection,
+        trendSideCandidate,
+        zone,
+        boxPos,
+        reversalConfirmed: isReversalConfirmed,
+        actualLowerBreakEvidence: judgment.metadata?.box_lower_breakdown_hold === true || judgment.metadata?.lower_breakdown_hold === true || judgment.diagnostics?.fastTrendShift?.box_lower_breakdown_hold === true || (authoritativeInput.snapshot as any)?.box_lower_breakdown_hold === true || (input.snapshot as any)?.box_lower_breakdown_hold === true || judgment.metadata?.closed_candle_breakdown === true,
+        closedBreakConfirmed: judgment.metadata?.closed_candle_breakdown === true || (judgment.diagnostics?.fastTrendShift as any)?.closed_candle_breakdown === true || (authoritativeInput.snapshot as any)?.closed_candle_breakdown === true || (input.snapshot as any)?.closed_candle_breakdown === true,
+        retestConfirmed: (authoritativeInput.snapshot as any)?.retestConfirmed === true || (input.snapshot as any)?.retestConfirmed === true || judgment.metadata?.retestConfirmed === true || (execMeta as any)?.retestConfirmed === true,
+        directionalShockState: v2State.directionalShockState ?? "NONE",
+        hardBlockPresent,
+        htf1hBias: (judgment as any)?.htf_1h_bias ?? (judgment.diagnostics as any)?.htf_1h_bias ?? (authoritativeInput.snapshot as any)?.htf_1h_bias ?? (v2State as any)?.htf_1h_bias ?? (typeof judgment.htf_bias === "string" ? judgment.htf_bias : (judgment.htf_bias as any)?.h1 ?? (judgment.htf_bias as any)?.["1h"] ?? null),
+        htf4hBias: (judgment as any)?.htf_4h_bias ?? (judgment.diagnostics as any)?.htf_4h_bias ?? (authoritativeInput.snapshot as any)?.htf_4h_bias ?? (v2State as any)?.htf_4h_bias ?? (judgment.htf_bias as any)?.h4 ?? (judgment.htf_bias as any)?.["4h"] ?? null,
+        htf1dBias: (judgment as any)?.htf_1d_bias ?? (judgment.diagnostics as any)?.htf_1d_bias ?? (authoritativeInput.snapshot as any)?.htf_1d_bias ?? (v2State as any)?.htf_1d_bias ?? (judgment.htf_bias as any)?.d1 ?? (judgment.htf_bias as any)?.["1d"] ?? null,
+        htfEntryPolicy: judgment.htf_entry_policy ?? (authoritativeInput.snapshot as any)?.htf_entry_policy ?? null,
+        now: input.now ?? Date.now(),
+        consecutiveCyclesOverride: (input.snapshot as any)?.ethFtsLowerShortStaleCyclesOverride ?? (input.state as any)?.ethFtsLowerShortStaleCyclesOverride ?? null
+    });
+    const ethFtsLowerShortStaleActive = ethFtsLowerShortStaleEval.staleReleaseActive;
+    if (ethFtsLowerShortStaleActive) {
+        if (v2DecisionAfterPromotion === "ENTER" && (v2SideAfterPromotion === "short" || trendSideCandidate === "short" || v2SideBeforePromotion === "short")) {
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+        }
+    }
+
     const entryQualityDiag = (riskSizing.diagnostics ?? {}) as Record<string, unknown>;
     const profitDistance = typeof entryQualityDiag.entry_quality_distance_profit === "number"
         ? entryQualityDiag.entry_quality_distance_profit
@@ -3506,6 +3550,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             } else if (
                 !promotionApplied &&
                 trendSideCandidate === "short" &&
+                !ethFtsLowerShortStaleActive &&
                 (zone === "lower" || String(boxBreakSide).toLowerCase() === "lower") &&
                 qualityScore >= 70 &&
                 (v2DecisionAfterPromotion === "SKIP" ||
@@ -4048,10 +4093,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // --- V2_RANGE_TREND_CONFLICT_RESOLUTION_PROOF ---
     // Tier 4.8: Conflict Resolution (Range vs Trend)
+    const effectiveTrendSideCandidateForConflict = ethFtsLowerShortStaleActive ? "none" : trendSideCandidate;
     const localConflict =
         (activeEngineRouting === "RANGE" || activeEngineRouting === "TRANSITION" || activeEngineRouting === "TREND") &&
-        rangeSideCandidate !== "none" && trendSideCandidate !== "none" &&
-        rangeSideCandidate !== trendSideCandidate;
+        rangeSideCandidate !== "none" && effectiveTrendSideCandidateForConflict !== "none" &&
+        rangeSideCandidate !== effectiveTrendSideCandidateForConflict;
 
     const candlesForStairStep = input.candles ?? input.snapshot.candles;
     const stairStepResult = detectStairStepStructure({
@@ -4902,12 +4948,36 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // ── Tier 5.0-ETH-PROMOTION-BRIDGE: ETH RANGE Dedicated Entry Quality Promotion Bridge ──
     const isEthSymbolForBridge = String(input.symbol).toUpperCase().replace("-SWAP", "").replace("-", "") === "ETHUSDT";
-    const isCanonicalRangeForBridge = judgment.regime === "RANGE" || activeEngineRouting === "RANGE" || isCanonicalRange || judgment.regime_final === "RANGE";
-    const isNotFtsForBridge = judgment.subtype !== "FAST_TREND_SHIFT" && !String(promotionReason ?? "").includes("FAST_TREND_SHIFT");
+    const isCanonicalRangeForBridge = judgment.regime === "RANGE" || activeEngineRouting === "RANGE" || isCanonicalRange || judgment.regime_final === "RANGE" || ethFtsLowerShortStaleActive;
+    const isNotFtsForBridge = (judgment.subtype !== "FAST_TREND_SHIFT" || ethFtsLowerShortStaleActive) && !String(promotionReason ?? "").includes("FAST_TREND_SHIFT");
     const isInitialEntryForBridge = isInitialEntry === true && addOnPolicy.isAddOn !== true;
     const isCleanManualForBridge = isNotOperatorManaged && isNotManualTakeover && (v2State as any)?.isAdoptedExternal !== true && (v2State as any)?.externalManualPosition !== true;
     const hasValidRangeSideCandidate = rangeSideCandidate === "long" || rangeSideCandidate === "short";
-    const isHoldOrSkipBeforeBridge = v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP";
+    
+    const isStaleRejectEligible = isStaleFtsLowerShortRejectEligibleForFreshRangeReevaluation({
+        ethFtsLowerShortStaleActive,
+        v2DecisionAfterPromotion,
+        v2RejectReasonAfterPromotion,
+        v2SideBeforePromotion,
+        v2SideAfterPromotion,
+        trendSideCandidate,
+        ftsDirection: judgment.diagnostics?.fastTrendShift?.direction ?? (execMeta as any)?.fast_trend_shift_direction ?? (input.snapshot as any)?.fastTrendShift?.direction ?? null,
+        zone,
+        hardBlockPresent,
+        hardControlClear,
+        isCleanManual: isCleanManualForBridge,
+        hasBreakdownEvidence: judgment.metadata?.box_lower_breakdown_hold === true || judgment.metadata?.lower_breakdown_hold === true || judgment.diagnostics?.fastTrendShift?.box_lower_breakdown_hold === true || (authoritativeInput.snapshot as any)?.box_lower_breakdown_hold === true || (input.snapshot as any)?.box_lower_breakdown_hold === true || judgment.metadata?.closed_candle_breakdown === true || (input.snapshot as any)?.retestConfirmed === true,
+        directionalShockState: v2State.directionalShockState ?? "NONE"
+    });
+
+    const isHoldOrSkipBeforeBridge = v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || isStaleRejectEligible;
+
+    let staleOriginRejectReason: string | null = null;
+    let staleOriginRejectSide: EngineV2Side = "none";
+    if (isStaleRejectEligible) {
+        staleOriginRejectReason = v2RejectReasonAfterPromotion;
+        staleOriginRejectSide = v2SideBeforePromotion !== "none" ? v2SideBeforePromotion : (trendSideCandidate !== "none" ? trendSideCandidate : "short");
+    }
 
     if (
         isEthSymbolForBridge &&
@@ -4924,7 +4994,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         let bridgeBlockReason: string | null = null;
         if (hardBlockPresent) {
             bridgeBlockReason = "HARD_BLOCK_PRESENT";
-        } else if (promotionBlockReason != null) {
+        } else if (ethFtsLowerShortStaleActive && !isReversalConfirmed) {
+            bridgeBlockReason = "ETH_STALE_FTS_REVERSAL_REQUIRED";
+        } else if (promotionBlockReason != null && !ethFtsLowerShortStaleActive) {
             bridgeBlockReason = promotionBlockReason;
         } else if (!hardControlClear) {
             bridgeBlockReason = "HARD_CONTROL_NOT_CLEAR";
@@ -4941,15 +5013,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             bridgeQualityResult = evaluateEthRangeEntryQualityGate({
                 symbol: String(input.symbol),
                 side: candidateSideForBridge,
-                regime: judgment.regime_final || judgment.regime,
-                subtype: judgment.subtype,
-                routingEngine: activeEngineRouting ?? null,
+                regime: ethFtsLowerShortStaleActive ? "RANGE" : (judgment.regime_final || judgment.regime),
+                subtype: ethFtsLowerShortStaleActive ? "CANONICAL_RANGE" : judgment.subtype,
+                routingEngine: ethFtsLowerShortStaleActive ? "RANGE" : (activeEngineRouting ?? null),
                 isInitialEntry,
                 isAddon: false,
                 boxPos,
                 zone,
                 rangeSideCandidate,
-                trendSideCandidate,
+                trendSideCandidate: ethFtsLowerShortStaleActive ? "none" : trendSideCandidate,
                 selectedSideAfterVeto: candidateSideForBridge,
                 reversalConfirmed: isReversalConfirmed,
                 sideZoneValid,
@@ -4972,7 +5044,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 bridgeQualityResult.classification === "ETH_RANGE_COUNTERTREND_EDGE_PROBE" ||
                 bridgeQualityResult.classification === "ETH_RANGE_COUNTERTREND_EXTREME_PROBE";
 
-            if (bridgeQualityResult.allowed && isAllowedClassification) {
+            if (bridgeQualityResult.evaluated && bridgeQualityResult.allowed && isAllowedClassification) {
                 promotionAllowed = true;
                 v2DecisionAfterPromotion = "ENTER";
                 v2SideAfterPromotion = candidateSideForBridge;
@@ -4980,6 +5052,56 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 promotionApplied = true;
                 promotionReason = `ETH_RANGE_QUALITY_PROMOTION_BRIDGE_${bridgeQualityResult.classification}`;
                 promotionMinConditionPassed = true;
+
+                // Fresh structural stop & TP computation for fresh candidate side (e.g. long):
+                const entryPx = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+                const boxLowVal = Number(authoritativeInput.snapshot.boxLow ?? 0);
+                const boxHighVal = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+                const atrVal = Number(authoritativeInput.snapshot.atr ?? 0);
+                const minStopDist = Math.max(atrVal * 0.5, entryPx * 0.0015);
+                const candles = authoritativeInput.snapshot.candles ?? [];
+                
+                if (candidateSideForBridge === "long") {
+                    const freshStopPrice = boxLowVal > 0 && boxLowVal < entryPx
+                        ? Math.min(boxLowVal - minStopDist, entryPx - minStopDist)
+                        : entryPx - Math.max(atrVal * 1.5, entryPx * 0.005);
+                    execution.stopPrice = freshStopPrice;
+                    execution.invalidationPx = freshStopPrice;
+                    v2CalculatedInvalidationPx = freshStopPrice;
+
+                    const boxMidVal = boxHighVal > 0 && boxLowVal > 0 ? (boxHighVal + boxLowVal) / 2 : entryPx * 1.01;
+                    const minProfit = Math.max(atrVal * 0.35, entryPx * 0.001);
+                    let tp1 = Math.max(boxMidVal, entryPx + minProfit);
+                    if (tp1 <= entryPx) tp1 = entryPx + minProfit;
+                    let tp2 = Math.max(boxHighVal, tp1 + minProfit);
+                    if (tp2 <= tp1) tp2 = tp1 + minProfit;
+                    (execution as any).tp1Price = tp1;
+                    (execution as any).plannedTp1Price = tp1;
+                    (execution as any).takeProfit1Px = tp1;
+                    execMeta.plannedTp1Price = tp1;
+                    execMeta.takeProfit1Px = tp1;
+                    (execMeta as any).takeProfitPlan = { tp1, tp2 };
+                } else {
+                    const freshStopPrice = boxHighVal > 0 && boxHighVal > entryPx
+                        ? Math.max(boxHighVal + minStopDist, entryPx + minStopDist)
+                        : entryPx + Math.max(atrVal * 1.5, entryPx * 0.005);
+                    execution.stopPrice = freshStopPrice;
+                    execution.invalidationPx = freshStopPrice;
+                    v2CalculatedInvalidationPx = freshStopPrice;
+
+                    const boxMidVal = boxHighVal > 0 && boxLowVal > 0 ? (boxHighVal + boxLowVal) / 2 : entryPx * 0.99;
+                    const minProfit = Math.max(atrVal * 0.35, entryPx * 0.001);
+                    let tp1 = Math.min(boxMidVal, entryPx - minProfit);
+                    if (tp1 >= entryPx) tp1 = entryPx - minProfit;
+                    let tp2 = Math.min(boxLowVal, tp1 - minProfit);
+                    if (tp2 >= tp1) tp2 = tp1 - minProfit;
+                    (execution as any).tp1Price = tp1;
+                    (execution as any).plannedTp1Price = tp1;
+                    (execution as any).takeProfit1Px = tp1;
+                    execMeta.plannedTp1Price = tp1;
+                    execMeta.takeProfit1Px = tp1;
+                    (execMeta as any).takeProfitPlan = { tp1, tp2 };
+                }
             } else if (bridgeQualityResult.classification === "ETH_RANGE_UNCONFIRMED_PROBE") {
                 bridgeBlockReason = "ETH_RANGE_UNCONFIRMED_PROBE_NOT_ALLOWED";
             } else {
@@ -4992,6 +5114,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             symbol: String(input.symbol).toUpperCase().replace("-SWAP", "").replace("-", ""),
             decision_before: decisionBeforeBridge,
             decision_after: v2DecisionAfterPromotion,
+            stale_origin_reject: isStaleRejectEligible,
+            stale_origin_reject_reason: staleOriginRejectReason,
+            stale_origin_reject_side: staleOriginRejectSide,
+            fresh_candidate_side: candidateSideForBridge,
+            old_risk_reason_cleared_for_fresh_candidate: isStaleRejectEligible && promotionAllowed,
+            fresh_stop_price: execution.stopPrice ?? null,
+            fresh_invalidation_price: execution.invalidationPx ?? null,
+            highway_reached: promotionAllowed && v2DecisionAfterPromotion === "ENTER",
             range_side_candidate: rangeSideCandidate,
             trend_side_candidate: trendSideCandidate,
             boxPos,
@@ -5010,14 +5140,43 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }));
     }
 
+    if (ethFtsLowerShortStaleActive && !promotionApplied) {
+        if (v2DecisionAfterPromotion === "ENTER") {
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = v2RejectReasonAfterPromotion ?? "WAIT_RECHECK";
+        }
+    }
+
     // Tier 5+: Side Consistency Enforcer (Authoritative)
     const sideCandidateBeforeVetoEnforced = v2SideAfterPromotion;
 
     const selectedSideFinalRaw: EngineV2Side =
         shortReversalWatchPromoted ? "short" :
         longReversalWatchPromoted ? "long" :
-        activeEngineRouting === "RANGE" ? rangeSideCandidate :
-        activeEngineRouting === "TREND" ? trendSideCandidate :
+        (
+            ethFtsLowerShortStaleActive &&
+            promotionApplied &&
+            (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")
+        )
+        ? v2SideAfterPromotion
+        :
+        (
+            ethFtsLowerShortStaleActive &&
+            activeEngineRouting === "TREND"
+        )
+        ? (
+            rangeSideCandidate !== "none"
+                ? rangeSideCandidate
+                : "none"
+        )
+        :
+        activeEngineRouting === "RANGE"
+        ? rangeSideCandidate
+        :
+        activeEngineRouting === "TREND"
+        ? trendSideCandidate
+        :
         v2SideAfterPromotion;
 
     // --- V2 Side Selection Sanitization (V2_SIDE_SELECTION_SANITIZE_PROOF) ---
@@ -5333,7 +5492,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
 
     // ── V2_PROBE_ONLY_AUTHORITY_BRIDGE_PROOF 구조화 증거 로깅 ────────────────────────────
-    const candidate_side_for_proof = selectedSideFinal !== "none" ? selectedSideFinal : (trendSideCandidate !== "none" ? trendSideCandidate : rangeSideCandidate);
+    const effectiveTrendSideCandidateForProof = ethFtsLowerShortStaleActive ? "none" : trendSideCandidate;
+    const candidate_side_for_proof = selectedSideFinal !== "none" ? selectedSideFinal : (effectiveTrendSideCandidateForProof !== "none" ? effectiveTrendSideCandidateForProof : rangeSideCandidate);
     const structural_confirmation_for_proof = candidate_side_for_proof === "short" ? shortStructureConfirmed : candidate_side_for_proof === "long" ? longStructureConfirmed : false;
     const bypassed_gate_for_proof =
         (selectedSideFinal === "short" && probeOnlyShortExceptionAllowed && !shortAllow) ? "SHORT_NOT_ALLOWED" :
@@ -5387,6 +5547,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     const execMetaRecordForReconcile = execMeta as Record<string, unknown>;
     const nativeExecutorFastTrendShiftLowerShortPreserve =
+        !ethFtsLowerShortStaleActive &&
         nativeExecutorEnterAuthority &&
         v2SideBeforePromotion === "short" &&
         activeEngineRouting === "RANGE" &&
@@ -5445,6 +5606,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         sideCandidateBeforeVeto === "short" &&
         (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
     const nativeFtsLowerShortDeferZoneVeto =
+        !ethFtsLowerShortStaleActive &&
         nativeExecutorEnterAuthority === true &&
         nativeExecutorFastProbeCoverage === true &&
         judgment.subtype === "FAST_TREND_SHIFT" &&
@@ -6047,9 +6209,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Side Veto Detail Calculation (Diagnostic)
     const rangeTrendConflict =
-        rangeSideCandidate && trendSideCandidate &&
-        rangeSideCandidate !== "none" && trendSideCandidate !== "none" &&
-        rangeSideCandidate !== trendSideCandidate;
+        rangeSideCandidate && effectiveTrendSideCandidateForConflict &&
+        rangeSideCandidate !== "none" && effectiveTrendSideCandidateForConflict !== "none" &&
+        rangeSideCandidate !== effectiveTrendSideCandidateForConflict;
 
     let sideVetoDetail: string | null = null;
     if (isBypassRangeShortReversal) {
@@ -6453,6 +6615,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const isRangeTrendReclaimProbePromotion = promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE";
         if (sideFinal === "short" && zone === "lower") {
             const isFastTrendShiftLowerShort =
+                !ethFtsLowerShortStaleActive &&
                 judgment.subtype === "FAST_TREND_SHIFT" &&
                 judgment.diagnostics?.fastTrendShift?.direction === "short";
             let fastTrendShiftLowerBreakdownConfirmed = false;
@@ -6756,8 +6919,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     // Tier 5.55: ETH Dedicated RANGE Entry Quality Gate
     let ethRangeQualityResult: EthRangeEntryQualityResult | null = null;
     const isEthSymbolForQuality = String(input.symbol).toUpperCase().replace("-SWAP", "").replace("-", "") === "ETHUSDT";
-    const isCanonicalRangeForQuality = judgment.regime === "RANGE" || activeEngineRouting === "RANGE" || isCanonicalRange;
-    const isNotFtsForQuality = judgment.subtype !== "FAST_TREND_SHIFT" && !String(promotionReason ?? "").includes("FAST_TREND_SHIFT");
+    const isCanonicalRangeForQuality = judgment.regime === "RANGE" || activeEngineRouting === "RANGE" || isCanonicalRange || ethFtsLowerShortStaleActive;
+    const isNotFtsForQuality = (judgment.subtype !== "FAST_TREND_SHIFT" || ethFtsLowerShortStaleActive) && !String(promotionReason ?? "").includes("FAST_TREND_SHIFT");
     const hasAuthoritativeFinalSide = (selectedSideFinal === "long" || selectedSideFinal === "short");
 
     if (
@@ -6778,15 +6941,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         ethRangeQualityResult = evaluateEthRangeEntryQualityGate({
             symbol: String(input.symbol),
             side: v2SideAfterPromotion,
-            regime: judgment.regime_final || judgment.regime,
-            subtype: judgment.subtype,
-            routingEngine: activeEngineRouting ?? null,
+            regime: ethFtsLowerShortStaleActive ? "RANGE" : (judgment.regime_final || judgment.regime),
+            subtype: ethFtsLowerShortStaleActive ? "CANONICAL_RANGE" : judgment.subtype,
+            routingEngine: ethFtsLowerShortStaleActive ? "RANGE" : (activeEngineRouting ?? null),
             isInitialEntry,
             isAddon: false,
             boxPos,
             zone,
             rangeSideCandidate,
-            trendSideCandidate,
+            trendSideCandidate: ethFtsLowerShortStaleActive ? "none" : trendSideCandidate,
             selectedSideAfterVeto: selectedSideFinal,
             reversalConfirmed: isReversalConfirmed,
             sideZoneValid,
@@ -6834,8 +6997,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const highwayGate = evaluateHighwayCoreEntryGate({
             symbol: String(input.symbol),
             side: v2SideAfterPromotion,
-            regime: judgment.regime_final || judgment.regime,
-            subtype: judgment.subtype,
+            regime: ethFtsLowerShortStaleActive ? "RANGE" : (judgment.regime_final || judgment.regime),
+            subtype: ethFtsLowerShortStaleActive ? "CANONICAL_RANGE" : judgment.subtype,
             snapshot: authoritativeInput.snapshot,
             execution,
             committedRiskPlan: null,
@@ -10506,8 +10669,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const finalHighwayGate = evaluateHighwayCoreEntryGate({
             symbol: String(input.symbol),
             side: decision.side,
-            regime: judgment.regime_final || judgment.regime,
-            subtype: judgment.subtype,
+            regime: ethFtsLowerShortStaleActive ? "RANGE" : (judgment.regime_final || judgment.regime),
+            subtype: ethFtsLowerShortStaleActive ? "CANONICAL_RANGE" : judgment.subtype,
             snapshot: authoritativeInput.snapshot,
             execution,
             committedRiskPlan: decision.committedRiskPlan ?? null,
@@ -11002,3 +11165,4 @@ export { clearGlobalShockStates } from "./state/derive";
 export { evaluateEthStructuralConfirmationSelectiveFilter } from "./market-judgment/eth-selective-probe-gate";
 export { evaluateBtcShortMacroBullGate, evaluateEthShortLocationRrGate } from "./market-judgment/short-authority-gates";
 export { evaluateRangeDriftEntryTimingGate, resetRangeDriftHysteresis } from "./market-judgment/range-drift-entry-timing-gate";
+export { evaluateEthFtsLowerShortStaleRelease, resetEthFtsLowerShortStaleState } from "./market-judgment/eth-fts-lower-short-stale-release";
