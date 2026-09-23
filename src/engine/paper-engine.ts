@@ -13756,13 +13756,12 @@ export class PaperEngine {
         final_size_source = "okx_dynamic_cap";
       }
 
-      // Constraint: Static Cap (Optional safety override)
-      // V2 equity-adaptive sizing already applied emergency/legacy caps in evaluateEquityAdaptiveSizing.
+      // Constraint: Static Cap (Hard safety ceiling)
+      // V2 and legacy orders both enforce OKX_LIVE_MAX_ORDER_NOTIONAL_USDT hard ceiling at submit.
       const staticCapResolution = resolveLiveSubmitStaticSafetyCap({
         authoritySource: input.authoritySource,
         okxLiveStaticNotionalCapEnabled: this.config.okxLiveStaticNotionalCapEnabled,
-        staticSafetyCapUsdt:
-          input.authoritySource === "v2" ? null : liveCapResolution.effectiveLiveCapUsdt,
+        staticSafetyCapUsdt: liveCapResolution.effectiveLiveCapUsdt,
         intendedNotionalUsdt: final_submitted_notional_usdt,
         emergencyUltimateCapUsdt: liveCapResolution.emergencyCapUsdt,
         emergencyFailsafeActive: input.emergencyFailsafeActive === true
@@ -26771,13 +26770,12 @@ export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
   emergencyCapApplied: boolean;
   emergencyCapReason: string | null;
 }> {
-  const skipStaticCapForV2Authority = input.authoritySource === "v2";
+  const skipStaticCapForV2Authority = false;
   let finalSubmittedNotionalUsdt = input.intendedNotionalUsdt;
   let finalSizeSource: "v2_risk" | "static_safety_cap" | "emergency_ultimate_cap" = "v2_risk";
   let emergencyCapApplied = false;
   let emergencyCapReason: string | null = null;
   if (
-    !skipStaticCapForV2Authority &&
     input.okxLiveStaticNotionalCapEnabled &&
     input.staticSafetyCapUsdt != null &&
     input.staticSafetyCapUsdt > 0 &&

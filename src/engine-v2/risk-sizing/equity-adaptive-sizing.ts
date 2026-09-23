@@ -211,9 +211,8 @@ export function resolveEffectiveLiveOrderNotionalCap(input: Readonly<{
 }
 
 /**
- * V2 risk-authoritative sizing does not use emergency/legacy static caps as daily ceiling.
- * Legacy OKX_LIVE_MAX_ORDER_NOTIONAL_USDT applies to non-V2 submit paths.
- * Emergency cap binds only when emergencyFailsafeActive is explicitly true.
+ * V2 and legacy order sizing both enforce OKX_LIVE_MAX_ORDER_NOTIONAL_USDT (legacyStaticCapUsdt) as hard ceiling.
+ * Emergency cap binds when emergencyFailsafeActive is explicitly true (and takes priority if smaller).
  */
 export function resolveUltimateSafetyCapForOrderSizing(input: Readonly<{
     v2AuthorityEntry?: boolean;
@@ -223,21 +222,33 @@ export function resolveUltimateSafetyCapForOrderSizing(input: Readonly<{
 }>): LiveOrderNotionalCapResolution {
     const emergencyCapUsdt = positiveCapUsdt(input.emergencyCapUsdt);
     const legacyStaticCapUsdt = positiveCapUsdt(input.legacyStaticCapUsdt);
-    if (input.v2AuthorityEntry === true) {
-        const bindingCap =
-            input.emergencyFailsafeActive === true ? emergencyCapUsdt : null;
-        return {
-            cap: bindingCap,
-            emergencyCapUsdt,
-            legacyStaticCapUsdt,
-            effectiveLiveCapUsdt: bindingCap,
-            legacyCapSource:
-                bindingCap != null && emergencyCapUsdt != null
-                    ? "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE"
-                    : null
-        };
+    const activeEmergencyCap = input.emergencyFailsafeActive === true ? emergencyCapUsdt : null;
+
+    let effectiveLiveCapUsdt: number | null = null;
+    let legacyCapSource: string | null = null;
+
+    if (activeEmergencyCap != null && legacyStaticCapUsdt != null) {
+        effectiveLiveCapUsdt = Math.min(activeEmergencyCap, legacyStaticCapUsdt);
+        if (effectiveLiveCapUsdt === activeEmergencyCap) {
+            legacyCapSource = "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE";
+        } else {
+            legacyCapSource = "OKX_LIVE_MAX_ORDER_NOTIONAL_USDT_LEGACY_FAILSAFE";
+        }
+    } else if (activeEmergencyCap != null) {
+        effectiveLiveCapUsdt = activeEmergencyCap;
+        legacyCapSource = "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE";
+    } else if (legacyStaticCapUsdt != null) {
+        effectiveLiveCapUsdt = legacyStaticCapUsdt;
+        legacyCapSource = "OKX_LIVE_MAX_ORDER_NOTIONAL_USDT_LEGACY_FAILSAFE";
     }
-    return resolveEffectiveLiveOrderNotionalCap({ emergencyCapUsdt, legacyStaticCapUsdt });
+
+    return {
+        cap: effectiveLiveCapUsdt,
+        emergencyCapUsdt,
+        legacyStaticCapUsdt,
+        effectiveLiveCapUsdt,
+        legacyCapSource
+    };
 }
 
 function resolveBindingLimitingAuthority(

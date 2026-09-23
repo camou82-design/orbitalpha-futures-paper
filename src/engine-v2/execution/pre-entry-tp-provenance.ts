@@ -848,7 +848,7 @@ export type EvaluatePreEntryTpParityResult = Readonly<{
         | "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE"
         | "V2_TP_PROFITABILITY_PROVENANCE_INVALID"
         | null;
-    tp_parity_semantic?: "RANGE_PARTIAL_TP1_LIFECYCLE_TP2_BACKSTOP" | "FULL_POSITION_TP";
+    tp_parity_semantic?: "RANGE_PARTIAL_TP1_LIFECYCLE_TP2_BACKSTOP" | "COLLAPSED_SINGLE_TP" | "FULL_POSITION_TP";
     profitability_tp1_executable?: number | null;
     lifecycle_tp1_executable?: number | null;
     attached_tp_executable?: number | null;
@@ -904,7 +904,7 @@ export function evaluatePreEntryTpParity(
     }
 
     // 3. Price Parity Check
-    let tp_parity_semantic: "RANGE_PARTIAL_TP1_LIFECYCLE_TP2_BACKSTOP" | "FULL_POSITION_TP" = "FULL_POSITION_TP";
+    let tp_parity_semantic: "RANGE_PARTIAL_TP1_LIFECYCLE_TP2_BACKSTOP" | "COLLAPSED_SINGLE_TP" | "FULL_POSITION_TP" = "FULL_POSITION_TP";
     let profitability_tp1_executable: number | null = input.profitabilityTpExecutable ?? null;
     let lifecycle_tp1_executable: number | null = null;
     let attached_tp_executable: number | null = input.attachedTp ?? null;
@@ -916,7 +916,6 @@ export function evaluatePreEntryTpParity(
     let price_match = false;
 
     if (isRangePartial) {
-        tp_parity_semantic = "RANGE_PARTIAL_TP1_LIFECYCLE_TP2_BACKSTOP";
         lifecycle_tp1_executable =
             input.committedTpRaw != null
                 ? normalizePxToTickSz(input.committedTpRaw, tickSz)
@@ -929,54 +928,114 @@ export function evaluatePreEntryTpParity(
                   ? normalizePxToTickSz(input.canonicalTp2Price, tickSz)
                   : input.committedTpExecutable ?? null;
 
-        // Check TP1 parity: profitability TP1 must match lifecycle/committed TP1
-        if (
+        const isCollapsedSingleTp =
             profitability_tp1_executable != null &&
-            lifecycle_tp1_executable != null
-        ) {
-            tp1_parity_passed = profitability_tp1_executable === lifecycle_tp1_executable;
-        } else if (approvalExpected) {
-            tp1_parity_passed = false;
-        }
+            canonical_tp2_backstop_executable != null &&
+            profitability_tp1_executable === canonical_tp2_backstop_executable;
 
-        // Check TP2 backstop parity: attached exchange TP must match canonical TP2 backstop
-        if (
-            attached_tp_executable != null &&
-            canonical_tp2_backstop_executable != null
-        ) {
-            tp2_backstop_parity_passed = attached_tp_executable === canonical_tp2_backstop_executable;
-        } else if (approvalExpected) {
-            tp2_backstop_parity_passed = false;
-        }
-
-        // Directional ordering check: LONG: entry < TP1 < TP2, SHORT: TP2 < TP1 < entry
         const entryRef = input.entryReferencePrice;
-        if (
-            entryRef != null &&
-            profitability_tp1_executable != null &&
-            canonical_tp2_backstop_executable != null
-        ) {
-            if (input.side === "long") {
-                directional_alignment_passed =
-                    entryRef < profitability_tp1_executable &&
-                    profitability_tp1_executable < canonical_tp2_backstop_executable;
-            } else {
-                directional_alignment_passed =
-                    canonical_tp2_backstop_executable < profitability_tp1_executable &&
-                    profitability_tp1_executable < entryRef;
+
+        if (isCollapsedSingleTp) {
+            tp_parity_semantic = "COLLAPSED_SINGLE_TP";
+
+            // Check TP1 parity: profitability TP1 must match lifecycle/committed TP1
+            if (
+                profitability_tp1_executable != null &&
+                lifecycle_tp1_executable != null
+            ) {
+                tp1_parity_passed = profitability_tp1_executable === lifecycle_tp1_executable;
+            } else if (approvalExpected) {
+                tp1_parity_passed = false;
             }
-        }
 
-        // Literal equality between profitability TP1 and attached TP2 (historically false in partial plan)
-        price_match =
-            profitability_tp1_executable != null &&
-            attached_tp_executable != null &&
-            profitability_tp1_executable === attached_tp_executable;
+            // Check TP2 backstop parity: attached exchange TP must match canonical TP2 backstop
+            if (
+                attached_tp_executable != null &&
+                canonical_tp2_backstop_executable != null
+            ) {
+                tp2_backstop_parity_passed = attached_tp_executable === canonical_tp2_backstop_executable;
+            } else if (approvalExpected) {
+                tp2_backstop_parity_passed = false;
+            }
 
-        semantic_parity_passed = tp1_parity_passed && tp2_backstop_parity_passed && directional_alignment_passed;
-        if (!semantic_parity_passed && entryAllowed) {
-            entryAllowed = false;
-            blockReason = "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
+            // Parity across all 4 elements (profitability TP1, committed TP1, attached TP, collapsed TP2)
+            const allCollapsedMatch =
+                tp1_parity_passed &&
+                tp2_backstop_parity_passed &&
+                attached_tp_executable === profitability_tp1_executable;
+
+            // Directional alignment check:
+            // SHORT: TP1 == TP2 && TP1 < Entry
+            // LONG:  TP1 == TP2 && TP1 > Entry
+            if (entryRef != null && profitability_tp1_executable != null) {
+                if (input.side === "long") {
+                    directional_alignment_passed = profitability_tp1_executable > entryRef;
+                } else {
+                    directional_alignment_passed = profitability_tp1_executable < entryRef;
+                }
+            } else {
+                directional_alignment_passed = false;
+            }
+
+            price_match = allCollapsedMatch;
+            semantic_parity_passed = allCollapsedMatch && directional_alignment_passed;
+            if (!semantic_parity_passed && entryAllowed) {
+                entryAllowed = false;
+                blockReason = "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
+            }
+        } else {
+            tp_parity_semantic = "RANGE_PARTIAL_TP1_LIFECYCLE_TP2_BACKSTOP";
+
+            // Check TP1 parity: profitability TP1 must match lifecycle/committed TP1
+            if (
+                profitability_tp1_executable != null &&
+                lifecycle_tp1_executable != null
+            ) {
+                tp1_parity_passed = profitability_tp1_executable === lifecycle_tp1_executable;
+            } else if (approvalExpected) {
+                tp1_parity_passed = false;
+            }
+
+            // Check TP2 backstop parity: attached exchange TP must match canonical TP2 backstop
+            if (
+                attached_tp_executable != null &&
+                canonical_tp2_backstop_executable != null
+            ) {
+                tp2_backstop_parity_passed = attached_tp_executable === canonical_tp2_backstop_executable;
+            } else if (approvalExpected) {
+                tp2_backstop_parity_passed = false;
+            }
+
+            // Directional ordering check: LONG: entry < TP1 < TP2, SHORT: TP2 < TP1 < entry
+            if (
+                entryRef != null &&
+                profitability_tp1_executable != null &&
+                canonical_tp2_backstop_executable != null
+            ) {
+                if (input.side === "long") {
+                    directional_alignment_passed =
+                        entryRef < profitability_tp1_executable &&
+                        profitability_tp1_executable < canonical_tp2_backstop_executable;
+                } else {
+                    directional_alignment_passed =
+                        canonical_tp2_backstop_executable < profitability_tp1_executable &&
+                        profitability_tp1_executable < entryRef;
+                }
+            } else {
+                directional_alignment_passed = false;
+            }
+
+            // Literal equality between profitability TP1 and attached TP2 (historically false in partial plan)
+            price_match =
+                profitability_tp1_executable != null &&
+                attached_tp_executable != null &&
+                profitability_tp1_executable === attached_tp_executable;
+
+            semantic_parity_passed = tp1_parity_passed && tp2_backstop_parity_passed && directional_alignment_passed;
+            if (!semantic_parity_passed && entryAllowed) {
+                entryAllowed = false;
+                blockReason = "V2_TP_PROFITABILITY_AUTHORITY_DIVERGENCE";
+            }
         }
     } else {
         tp_parity_semantic = "FULL_POSITION_TP";
