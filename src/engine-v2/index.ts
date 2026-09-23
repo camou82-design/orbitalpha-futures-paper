@@ -646,10 +646,22 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const heldPos = v2State.longPosition ?? v2State.shortPosition;
     const posAny = heldPos as any;
     const stateAny = authoritativeInput.state as any;
+    // Check for independent external manual evidence even when lifecycleState is MANUAL_SIZE_AUGMENTED.
+    // This covers BTC positions with manualTakeoverReason/sourceSignal/sourceRunPath evidence
+    // that were previously classified as MANUAL_SIZE_AUGMENTED but must remain OPERATOR-owned.
+    const _posHasExternalManualEvidence =
+        posAny != null && (
+            posAny.manualTakeoverReason === "EXTERNAL_MANUAL_POSITION" ||
+            posAny.manualOwnershipLatchReason === "EXTERNAL_MANUAL_POSITION" ||
+            posAny.sourceSignal === "manual_intervention_fill" ||
+            posAny.sourceRunPath === "manual_adoption"
+        );
     const isManualTakeover =
-        posAny?.lifecycleState !== "MANUAL_SIZE_AUGMENTED" &&
+        (_posHasExternalManualEvidence ||
+            posAny?.lifecycleState !== "MANUAL_SIZE_AUGMENTED") &&
         (posAny?.manualTakeoverActive === true ||
         posAny?.lifecycleState === "OPERATOR_MANAGED" ||
+        _posHasExternalManualEvidence ||
         stateAny?.manualTakeoverActive === true ||
         stateAny?.hasOperatorPendingOrders === true);
 

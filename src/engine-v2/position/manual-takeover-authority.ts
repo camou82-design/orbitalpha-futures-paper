@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { PaperOpenPositionRecord } from "../../models/types";
+import { isIndependentExternalManualLifecycle } from "./manual-ownership-latch";
 
 export type ManualTakeoverReason =
   | "MANUAL_SIZE_CHANGE"
@@ -389,6 +390,19 @@ export function resolvePositionMutationAuthority(input: Readonly<{
   open: ManualTakeoverOpenPositionRef & Pick<PaperOpenPositionRecord, "symbol" | "side">;
   manualTakeoverActiveExternal?: boolean;
 }>): PositionMutationAuthority {
+  // External-manual-adopted positions retain OPERATOR authority even when
+  // lifecycleState has been set to MANUAL_SIZE_AUGMENTED by a prior run.
+  if (isIndependentExternalManualLifecycle(input.open as unknown as PaperOpenPositionRecord)) {
+    return {
+      effectiveAuthorityOwner: "OPERATOR",
+      manualTakeoverActive: true,
+      startupAuthorityResolved: true,
+      positionMutationAllowed: false,
+      protectiveReconcileAllowed: false,
+      exitCalculationAllowed: false,
+      blockReason: "EXTERNAL_MANUAL_POSITION_INDEPENDENT_EVIDENCE"
+    };
+  }
   if (input.open.lifecycleState === "MANUAL_SIZE_AUGMENTED") {
     return {
       effectiveAuthorityOwner: "BOT",

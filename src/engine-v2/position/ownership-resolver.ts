@@ -65,6 +65,9 @@ export type PositionOwnershipResolveResult = Readonly<{
 
 function isBotV2LedgerEvidence(ledger: PaperOpenPositionRecord | null): boolean {
     if (ledger == null) return false;
+    // External-manual-adopted positions must never be reclassified as bot evidence,
+    // even if their lifecycleState is MANUAL_SIZE_AUGMENTED.
+    if (isIndependentExternalManualLifecycle(ledger)) return false;
     if (ledger.isV2Authority === true) return true;
     const authSrc = String(ledger.authoritySourceAtEntry ?? ledger.authority ?? "").trim().toLowerCase();
     if (authSrc === "v2") return true;
@@ -271,10 +274,11 @@ export function resolvePositionOwnership(
     const lifecycleBefore = input.ledger?.lifecycleState ?? null;
     const persistedV2OwnerFound = isBotV2LedgerEvidence(input.ledger);
     const botOrderEvidenceFound =
-        persistedV2OwnerFound ||
-        (input.ledger != null &&
-            typeof input.ledger.exchangeClOrdId === "string" &&
-            input.ledger.exchangeClOrdId.startsWith("p"));
+        !isIndependentExternalManualLifecycle(input.ledger) &&
+        (persistedV2OwnerFound ||
+            (input.ledger != null &&
+                typeof input.ledger.exchangeClOrdId === "string" &&
+                input.ledger.exchangeClOrdId.startsWith("p")));
     const poisonedRecovery =
         input.ledger != null
             ? evaluatePoisonedStrongManualLatchRecovery({

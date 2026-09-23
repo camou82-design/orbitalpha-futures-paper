@@ -12,7 +12,8 @@ export const STRONG_MANUAL_LATCH_SOURCES = new Set([
     "EXPLICIT_EXTERNAL_FILL",
     "CONFIRMED_MANUAL_SIZE_CHANGE",
     "EXPLICIT_MANUAL_LIFECYCLE",
-    "external_manual_lifecycle_evidence"
+    "external_manual_lifecycle_evidence",
+    "EXTERNAL_MANUAL_POSITION"
 ]);
 
 export const FORBIDDEN_LATCH_SYNC_STATUSES = new Set([
@@ -50,12 +51,32 @@ export const INDEPENDENT_MANUAL_EVIDENCE_ORIGINS = new Set([
     "INDEPENDENT_USER_MANUAL_FLAG"
 ]);
 
-/** True external/manual lifecycle origins — not derived from latch feedback. */
+/** True external/manual lifecycle origins — not derived from latch feedback.
+ * Also covers MANUAL_SIZE_AUGMENTED rows that were originally adopted from
+ * external manual positions (sourceSignal / sourceRunPath / manualTakeoverReason evidence). */
 export function isIndependentExternalManualLifecycle(
     ledger: PaperOpenPositionRecord | null | undefined
 ): boolean {
-    const ls = ledger?.lifecycleState;
-    return ls === "EXTERNAL_MANUAL_POSITION" || ls === "OPERATOR_MANAGED";
+    if (ledger == null) return false;
+    const ls = ledger.lifecycleState;
+    if (ls === "EXTERNAL_MANUAL_POSITION" || ls === "OPERATOR_MANAGED") return true;
+
+    // MANUAL_SIZE_AUGMENTED can be an external-manual-adopted position.
+    // Detect by stored evidence fields (independent of current latch state).
+    const takeoverReason = String(
+        (ledger as any).manualTakeoverReason ??
+        ledger.manualOwnershipLatchReason ??
+        ""
+    ).trim();
+    if (takeoverReason === "EXTERNAL_MANUAL_POSITION") return true;
+
+    const sig = String((ledger as any).sourceSignal ?? "").trim();
+    if (sig === "manual_intervention_fill") return true;
+
+    const runPath = String((ledger as any).sourceRunPath ?? "").trim();
+    if (runPath === "manual_adoption") return true;
+
+    return false;
 }
 
 function hasBotOrderAttribution(ledger: PaperOpenPositionRecord | null | undefined): boolean {
@@ -101,9 +122,10 @@ export function hasIndependentManualLifecycleEvidence(
 ): boolean {
     if (ledger == null) return false;
     if (ledger.manualLifecycleEvidenceIndependent === true) return true;
-    if (ledger.manualLifecycleEvidenceIndependent === false) return false;
-
+    // Stored adoption/intervention fields outrank a stale independent=false flag
+    // (e.g. after MANUAL_SIZE_AUGMENTED on a formerly external-manual position).
     if (isIndependentExternalManualLifecycle(ledger)) return true;
+    if (ledger.manualLifecycleEvidenceIndependent === false) return false;
 
     const source = String(
         ledger.manualOwnershipLatchSource ?? ledger.manualOwnershipLatchReason ?? ""

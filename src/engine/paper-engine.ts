@@ -5548,8 +5548,9 @@ export class PaperEngine {
           ledgerPaperContracts: open.okxContracts ?? null,
           syncStatus: symbolSyncStatus,
           explicitManualEvidence:
-            open.manualOwnershipLatch === true &&
-            hasIndependentManualLifecycleEvidence(open)
+            (open.manualOwnershipLatch === true &&
+              hasIndependentManualLifecycleEvidence(open)) ||
+            isIndependentExternalManualLifecycle(open)
         });
         if (latchRecovery.shouldClear) {
           const previousSource =
@@ -5608,11 +5609,29 @@ export class PaperEngine {
           remotePos.contracts > 0 &&
           (remotePos.posSide.toLowerCase() === String(open.side).toLowerCase() || remotePos.posSide.toLowerCase() === "net");
 
-        if (!isSameSide && (ownership.manualLatchShouldBeActive || open.manualOwnershipLatch === true)) {
+        const storedExternalManual = isIndependentExternalManualLifecycle(open);
+        const needsManualTakeoverRehydration =
+          storedExternalManual &&
+          !open.manualTakeoverActive &&
+          !this.isManualTakeoverActive(open.symbol, open.side) &&
+          (ownership.ownershipClass === "EXTERNAL_MANUAL_MANAGED" ||
+            ownership.externalManualEvidence === true ||
+            ownership.manualLatchShouldBeActive ||
+            open.manualOwnershipLatch === true);
+        if (
+          needsManualTakeoverRehydration ||
+          (!isSameSide && (ownership.manualLatchShouldBeActive || open.manualOwnershipLatch === true))
+        ) {
+          const storedReason = String(
+            open.manualTakeoverReason ?? open.manualOwnershipLatchReason ?? ""
+          ).trim();
           const takeoverRec = createManualTakeoverRecord({
             symbol: open.symbol,
             side: open.side,
-            reason: "MANUAL_INTERVENTION_DETECTED",
+            reason:
+              storedReason === "EXTERNAL_MANUAL_POSITION"
+                ? "EXTERNAL_MANUAL_POSITION"
+                : "MANUAL_INTERVENTION_DETECTED",
             positionCycleId: open.positionCycleId,
             nowMs: nowTs
           });
@@ -11763,6 +11782,39 @@ export class PaperEngine {
       for (const proof of auth.proofs) {
         this.logger.info("V2_MANUAL_PENDING_ORDER_AUTHORITY_PROOF", proof);
       }
+    }
+
+    let takeoverRehydrated = false;
+    for (const open of opens) {
+      const side = open.side as "long" | "short";
+      if (
+        isIndependentExternalManualLifecycle(open) &&
+        open.manualTakeoverActive !== true &&
+        !this.isManualTakeoverActive(open.symbol, side)
+      ) {
+        const storedReason = String(
+          open.manualTakeoverReason ?? open.manualOwnershipLatchReason ?? ""
+        ).trim();
+        const takeoverRec = createManualTakeoverRecord({
+          symbol: open.symbol,
+          side,
+          reason:
+            storedReason === "EXTERNAL_MANUAL_POSITION"
+              ? "EXTERNAL_MANUAL_POSITION"
+              : "MANUAL_INTERVENTION_DETECTED",
+          positionCycleId: open.positionCycleId,
+          nowMs: nowTs
+        });
+        this.manualTakeoverBySymbol.set(buildManualTakeoverKey(open.symbol, side), takeoverRec);
+        this.manualTakeoverBySymbol.set(String(open.symbol).toUpperCase(), takeoverRec);
+        applyManualTakeoverToPositionRecord(open, takeoverRec);
+        takeoverRehydrated = true;
+      }
+    }
+    if (takeoverRehydrated) {
+      await this.positions.saveOpenAll(opens);
+      void this.persistManualTakeoverDoc();
+      this.bundleDirty = true;
     }
 
     for (const open of opens) {
