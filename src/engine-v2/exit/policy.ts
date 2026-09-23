@@ -1,4 +1,6 @@
 import type { EvaluateV2ExitPolicyArgs, V2ExitPolicyResult, V2ExitUrgency, V2ExitAction, V2ExitReason } from "./types";
+import type { PaperOpenPositionRecord } from "../../models/types";
+import { isIndependentExternalManualLifecycle } from "../position/manual-ownership-latch";
 import { computePnlStopProtectJudgmentPct, isV2StopPriceBreached } from "./stop-price-authority";
 import {
     evaluateOppositePositionHysteresis,
@@ -53,7 +55,14 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
     const stage = pos ? Math.max(1, Number(pos.entryStage ?? 1)) : 0;
 
     const posAny = pos as any;
-    if (posAny && posAny.lifecycleState !== "MANUAL_SIZE_AUGMENTED" && (posAny.manualTakeoverActive === true || posAny.lifecycleState === "OPERATOR_MANAGED" || posAny.manualOwnershipLatch === true)) {
+    const externalManualObserveOnly =
+        pos != null &&
+        (isIndependentExternalManualLifecycle(pos as unknown as PaperOpenPositionRecord) ||
+            (posAny.lifecycleState !== "MANUAL_SIZE_AUGMENTED" &&
+                (posAny.manualTakeoverActive === true ||
+                    posAny.lifecycleState === "OPERATOR_MANAGED" ||
+                    posAny.manualOwnershipLatch === true)));
+    if (externalManualObserveOnly) {
         return {
             action: "HOLD",
             shouldExit: false,
