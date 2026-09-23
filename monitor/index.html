@@ -90,16 +90,29 @@
         </div>
       </details>
 
+      <section class="section section--after-secondary" aria-labelledby="today-fills-heading">
+        <div class="section-head-with-tabs">
+          <h2 id="today-fills-heading" class="section-title">오늘 체결 내역 (OKX 실체결 원장)</h2>
+          <div class="trade-filter-tabs" id="today-fills-tabs">
+            <button type="button" class="tab-btn tab-btn--active" data-filter="all">전체</button>
+            <button type="button" class="tab-btn" data-filter="bot">자동</button>
+            <button type="button" class="tab-btn" data-filter="manual">수동/기타</button>
+          </div>
+        </div>
+        <p class="section-note muted text-xs">OKX 실체결 원장(raw fills) 기반 · KST 오늘 체결 · 진입 / 추가진입 / 부분청산 / 청산완료 전수 표출</p>
+        <div id="today-fills-container" class="closed-trades-container"></div>
+      </section>
+
       <section class="section section--after-secondary" aria-labelledby="closed-trades-heading">
         <div class="section-head-with-tabs">
-          <h2 id="closed-trades-heading" class="section-title">최근 거래 내역 (전체 계좌 체결)</h2>
+          <h2 id="closed-trades-heading" class="section-title">완료 거래 내역 (Flat 종료 라이프사이클)</h2>
           <div class="trade-filter-tabs" id="closed-trades-tabs">
             <button type="button" class="tab-btn tab-btn--active" data-filter="all">전체</button>
             <button type="button" class="tab-btn" data-filter="bot">자동</button>
             <button type="button" class="tab-btn" data-filter="manual">수동/기타</button>
           </div>
         </div>
-        <p class="section-note muted text-xs">OKX 실계좌 전체 체결 기반 · 자동 + 수동 + 인계 lifecycle</p>
+        <p class="section-note muted text-xs">OKX 실계좌 완전히 Flat된 종료 거래 기준 · 승률/손익 집계 대상 (미완결 부분체결 제외)</p>
         <div id="closed-trades-container" class="closed-trades-container"></div>
       </section>
 

@@ -2317,6 +2317,138 @@
       "</div>";
   }
 
+  let todayFillsFilter = "all";
+
+  function initTodayFillsTabs() {
+    const tabs = $("today-fills-tabs");
+    if (!tabs || tabs.getAttribute("data-bound") === "true") return;
+    tabs.setAttribute("data-bound", "true");
+    tabs.addEventListener("click", (e) => {
+      const btn = e.target.closest(".tab-btn");
+      if (!btn) return;
+      const f = btn.getAttribute("data-filter");
+      if (!f) return;
+      todayFillsFilter = f;
+      tabs.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("tab-btn--active"));
+      btn.classList.add("tab-btn--active");
+      if (lastCachedBundle) {
+        renderTodayRawFills(lastCachedBundle);
+      }
+    });
+  }
+
+  function startOfKstDayMs(nowMs) {
+    const kstOffset = 9 * 3600 * 1000;
+    const kstDate = new Date(nowMs + kstOffset);
+    const kstMidnightUtc = Date.UTC(kstDate.getUTCFullYear(), kstDate.getUTCMonth(), kstDate.getUTCDate(), 0, 0, 0, 0);
+    return kstMidnightUtc - kstOffset;
+  }
+
+  function renderTodayRawFills(bundle) {
+    const container = $("today-fills-container");
+    if (!container) return;
+
+    initTodayFillsTabs();
+
+    const list = (() => {
+      if (Array.isArray(bundle.todayRawFills)) {
+        return bundle.todayRawFills;
+      }
+      if (Array.isArray(bundle.rawFills) && bundle.rawFills.length > 0) {
+        const nowMs =
+          typeof bundle.generatedAt === "number" && Number.isFinite(bundle.generatedAt)
+            ? bundle.generatedAt
+            : Date.now();
+        const kstStart = startOfKstDayMs(nowMs);
+        const kstEnd = kstStart + 24 * 3600 * 1000;
+        return bundle.rawFills.filter((f) => {
+          const t = Number(f && f.fillTime) || 0;
+          return t >= kstStart && t < kstEnd;
+        });
+      }
+      return [];
+    })();
+
+    if (list.length === 0) {
+      container.innerHTML = '<div style="padding:1.5rem;text-align:center;color:var(--muted);font-size:0.85rem">오늘 KST 기준 체결 내역이 없습니다.</div>';
+      return;
+    }
+
+    const filtered = list.filter((f) => {
+      if (!f) return false;
+      const src = f.sourceLabel || (f.clOrdId ? "자동" : "수동");
+      if (todayFillsFilter === "bot") return src === "자동";
+      if (todayFillsFilter === "manual") return src !== "자동";
+      return true;
+    });
+
+    if (filtered.length === 0) {
+      container.innerHTML = '<div style="padding:1.5rem;text-align:center;color:var(--muted);font-size:0.85rem">선택한 필터 조건의 체결이 없습니다.</div>';
+      return;
+    }
+
+    const rowsHtml = filtered.map((fill) => {
+      const sym = String(fill.symbol || fill.instId || "—").replace("-USDT-SWAP", "USDT");
+      const side = String(fill.side || "").toLowerCase();
+      const isBuy = side === "buy";
+      const sideLabel = isBuy ? "매수 (BUY)" : "매도 (SELL)";
+      const sideClass = isBuy ? "pos-card-side--long" : "pos-card-side--short";
+
+      const fillTimeStr = fill.fillTimeKst || (fill.fillTime ? formatKst(fill.fillTime) : "—");
+      const fillSz = typeof fill.fillSz === "number" || typeof fill.fillSz === "string" ? String(fill.fillSz) : "—";
+      const fillPx = typeof fill.fillPx === "number" ? formatPrice(fill.fillPx) : (fill.fillPx ? String(fill.fillPx) : "—");
+      const tradeId = String(fill.tradeId || fill.ordId || "—");
+
+      const sourceLabel = fill.sourceLabel || "수동";
+      const badge = badgeSourceHtml(sourceLabel);
+
+      const fillTypeLabel = fill.fillTypeLabel || "체결";
+      const typeTone =
+        fillTypeLabel === "진입"
+          ? "color:var(--cyan-dim)"
+          : fillTypeLabel === "추가진입"
+            ? "color:var(--cyan-dim)"
+            : fillTypeLabel === "부분청산"
+              ? "color:var(--amber-dim)"
+              : fillTypeLabel === "청산완료"
+                ? "color:var(--pnl-up)"
+                : "color:var(--muted)";
+
+      return `
+        <tr>
+          <td class="tabular-nums muted text-xs">${esc(fillTimeStr)}</td>
+          <td><strong>${esc(sym)}</strong></td>
+          <td><span class="${sideClass}" style="font-weight:700">${esc(sideLabel)}</span></td>
+          <td class="tabular-nums" style="font-weight:600">${esc(fillSz)}</td>
+          <td class="tabular-nums">${esc(fillPx)}</td>
+          <td>${badge}</td>
+          <td><span style="display:inline-block;padding:0.15rem 0.45rem;border-radius:4px;font-size:0.75rem;font-weight:700;background:rgba(255,255,255,0.05);${typeTone}">${esc(fillTypeLabel)}</span></td>
+          <td class="tabular-nums muted text-xs">${esc(tradeId)}</td>
+        </tr>
+      `;
+    }).join("");
+
+    container.innerHTML = `
+      <table class="closed-trades-table">
+        <thead>
+          <tr>
+            <th>체결시각 (KST)</th>
+            <th>종목</th>
+            <th>구분</th>
+            <th>체결수량</th>
+            <th>체결가</th>
+            <th>출처</th>
+            <th>체결유형</th>
+            <th>체결번호 (Trade ID)</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml}
+        </tbody>
+      </table>
+    `;
+  }
+
   let closedTradesFilter = "all";
   let lastCachedBundle = null;
 
@@ -2792,6 +2924,7 @@
       renderExternalMarketContext(bundle);
       renderOperatorContext(bundle);
       renderSymbols(bundle);
+      renderTodayRawFills(bundle);
       renderClosedTrades(bundle);
       renderPerf(bundle);
       renderBlockedCard(bundle);

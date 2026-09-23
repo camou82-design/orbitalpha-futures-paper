@@ -817,3 +817,178 @@ export function normalizePositionsHistoryArray(rows: unknown[]): NormalizedPaper
   const normalized = rows.map((r) => normalizeClosedHistoryRow(r));
   return deduplicateClosedHistoryRows(normalized);
 }
+
+export interface NormalizedOkxRawFill {
+  tradeId: string;
+  ordId: string;
+  clOrdId?: string;
+  instId: string;
+  symbol: string;
+  side: "buy" | "sell" | string;
+  posSide?: string;
+  fillSz: number;
+  fillPx: number;
+  fillTime: number;
+  fillTimeKst: string;
+  fillPnl?: number;
+  fee?: number;
+  feeCcy?: string;
+  execType?: string;
+  sourceLabel: "자동" | "수동";
+  fillTypeLabel: "진입" | "추가진입" | "부분청산" | "청산완료";
+  fillRole: "ENTRY" | "ADDON" | "PARTIAL_EXIT" | "FULL_EXIT";
+}
+
+function formatKstTime(ts: number): string {
+  if (!ts || !Number.isFinite(ts)) return "";
+  const d = new Date(ts + 9 * 3600 * 1000);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const min = String(d.getUTCMinutes()).padStart(2, "0");
+  const ss = String(d.getUTCSeconds()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss} KST`;
+}
+
+export function normalizeOkxRawFills(fills: readonly any[]): NormalizedOkxRawFill[] {
+  if (!Array.isArray(fills) || fills.length === 0) return [];
+
+  // Deduplicate by tradeId or composite fill key
+  const dedupMap = new Map<string, any>();
+  for (const f of fills) {
+    if (!f) continue;
+    const tradeId = String(f.tradeId ?? "").trim();
+    const key = tradeId.length > 0
+      ? `tid:${tradeId}`
+      : `cmp:${f.instId}:${f.ordId}:${f.fillTime}:${f.side}:${f.fillSz}:${f.fillPx}`;
+    if (!dedupMap.has(key)) {
+      dedupMap.set(key, f);
+    }
+  }
+
+  // Group by symbol to track currentQty sequence for role classification
+  const bySymbol = new Map<string, any[]>();
+  for (const f of dedupMap.values()) {
+    const instId = String(f.instId ?? "").trim().toUpperCase();
+    const sym = instId.endsWith("-SWAP") ? instId.slice(0, -5).replace("-", "") : instId.replace("-", "");
+    if (!bySymbol.has(sym)) bySymbol.set(sym, []);
+    bySymbol.get(sym)!.push(f);
+  }
+
+  const output: NormalizedOkxRawFill[] = [];
+  const QTY_EPS = 1e-9;
+
+  for (const [symbol, symFills] of bySymbol.entries()) {
+    // Sort chronologically ascending
+    const sorted = [...symFills].sort((a, b) => {
+      const ta = Number(a.fillTime) || 0;
+      const tb = Number(b.fillTime) || 0;
+      if (ta !== tb) return ta - tb;
+      return String(a.tradeId || a.ordId || "").localeCompare(String(b.tradeId || b.ordId || ""));
+    });
+
+    let currentQty = 0;
+
+    for (const fill of sorted) {
+      const fillSz = Number(fill.fillSz) || 0;
+      const fillPx = Number(fill.fillPx) || 0;
+      const fillTime = Number(fill.fillTime) || 0;
+      const side = String(fill.side ?? "").trim().toLowerCase();
+      const clOrdId = typeof fill.clOrdId === "string" ? fill.clOrdId.trim() : undefined;
+      const ordId = String(fill.ordId ?? "").trim();
+      const tradeId = String(fill.tradeId ?? "").trim();
+      const instId = String(fill.instId ?? `${symbol}-USDT-SWAP`);
+      const posSide = typeof fill.posSide === "string" ? fill.posSide.trim() : undefined;
+      const fee = fill.fee !== undefined ? Number(fill.fee) : undefined;
+      const feeCcy = typeof fill.feeCcy === "string" ? fill.feeCcy : undefined;
+      const fillPnl = fill.fillPnl !== undefined && String(fill.fillPnl).trim() !== "" ? Number(fill.fillPnl) : undefined;
+      const execType = typeof fill.execType === "string" ? fill.execType : undefined;
+
+      // Detect auto (BOT_V2 / algo) vs manual
+      const isBot =
+        Boolean(clOrdId) &&
+        (/^p[A-Z0-9_-]+/i.test(clOrdId!) ||
+          /^slpos[A-Z0-9_-]+/i.test(clOrdId!) ||
+          /^tppos[A-Z0-9_-]+/i.test(clOrdId!) ||
+          /^v2[A-Z0-9_-]+/i.test(clOrdId!) ||
+          /^O\d{10,}/.test(clOrdId!));
+      const sourceLabel: "자동" | "수동" = isBot ? "자동" : "수동";
+
+      let fillTypeLabel: "진입" | "추가진입" | "부분청산" | "청산완료" = "진입";
+      let fillRole: "ENTRY" | "ADDON" | "PARTIAL_EXIT" | "FULL_EXIT" = "ENTRY";
+
+      const fillSigned = side === "buy" ? fillSz : -fillSz;
+
+      if (Math.abs(currentQty) <= QTY_EPS) {
+        // Position was flat -> this is new entry
+        fillTypeLabel = "진입";
+        fillRole = "ENTRY";
+        currentQty = fillSigned;
+      } else if (Math.sign(currentQty) === Math.sign(fillSigned)) {
+        // Adding in same direction -> addon
+        fillTypeLabel = "추가진입";
+        fillRole = "ADDON";
+        currentQty += fillSigned;
+      } else {
+        // Opposite direction -> reducing
+        const currentAbs = Math.abs(currentQty);
+        if (currentAbs > fillSz + QTY_EPS) {
+          // Partial reduction (e.g. TP1)
+          fillTypeLabel = "부분청산";
+          fillRole = "PARTIAL_EXIT";
+          currentQty += fillSigned;
+        } else if (Math.abs(currentAbs - fillSz) <= QTY_EPS) {
+          // Full close
+          fillTypeLabel = "청산완료";
+          fillRole = "FULL_EXIT";
+          currentQty = 0;
+        } else {
+          // Flip / Reversal
+          fillTypeLabel = "청산완료";
+          fillRole = "FULL_EXIT";
+          currentQty = side === "buy" ? fillSz - currentAbs : -(fillSz - currentAbs);
+        }
+      }
+
+      output.push({
+        tradeId,
+        ordId,
+        clOrdId,
+        instId,
+        symbol,
+        side,
+        posSide,
+        fillSz,
+        fillPx,
+        fillTime,
+        fillTimeKst: formatKstTime(fillTime),
+        fillPnl,
+        fee,
+        feeCcy,
+        execType,
+        sourceLabel,
+        fillTypeLabel,
+        fillRole
+      });
+    }
+  }
+
+  // Sort descending by fillTime for UI display
+  return output.sort((a, b) => b.fillTime - a.fillTime);
+}
+
+export function filterTodayKstRawFills(
+  fills: readonly NormalizedOkxRawFill[],
+  referenceNowMs: number = Date.now()
+): NormalizedOkxRawFill[] {
+  // Start of KST Day: referenceNowMs + 9h, truncate to UTC midnight, then subtract 9h
+  const kstOffset = 9 * 3600 * 1000;
+  const kstDate = new Date(referenceNowMs + kstOffset);
+  const kstMidnightUtc = Date.UTC(kstDate.getUTCFullYear(), kstDate.getUTCMonth(), kstDate.getUTCDate(), 0, 0, 0, 0);
+  const kstStartMs = kstMidnightUtc - kstOffset;
+  const kstEndMs = kstStartMs + 24 * 3600 * 1000;
+
+  return fills.filter((f) => f.fillTime >= kstStartMs && f.fillTime < kstEndMs);
+}
+

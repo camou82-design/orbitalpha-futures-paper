@@ -9,7 +9,10 @@ import {
   displayFieldsForClosedRow,
   resolveDisplayTradeSourceLabel,
   canonicalClosedTradeDedupKey,
-  deduplicateClosedHistoryRows
+  deduplicateClosedHistoryRows,
+  normalizeOkxRawFills,
+  filterTodayKstRawFills,
+  type NormalizedOkxRawFill
 } from "./paperClosedHistoryNormalize";
 
 export {
@@ -18,16 +21,18 @@ export {
   displayFieldsForClosedRow,
   resolveDisplayTradeSourceLabel,
   canonicalClosedTradeDedupKey,
-  deduplicateClosedHistoryRows
+  deduplicateClosedHistoryRows,
+  normalizeOkxRawFills,
+  filterTodayKstRawFills
 } from "./paperClosedHistoryNormalize";
-export type { NormalizedPaperClosedRow, ClosedRowDisplayFields } from "./paperClosedHistoryNormalize";
+export type { NormalizedPaperClosedRow, ClosedRowDisplayFields, NormalizedOkxRawFill } from "./paperClosedHistoryNormalize";
 import { readLastLines } from "./file-utils";
 import {
   classifyLedgerOpenRowsForDisplay,
   isAuthoritativeOkxPositionSnapshotForDisplay,
   normalizePositionSide
 } from "./position-reconcile-classification";
-import { readOkxAccountClosedTrades } from "../storage/account-truth-store";
+import { readOkxAccountClosedTrades, readOkxRawFills } from "../storage/account-truth-store";
 
 export {
   classifyLedgerOpenRowsForDisplay,
@@ -507,6 +512,10 @@ export type FuturesPaperDataBundle = Readonly<{
   /** Paper ledger rows kept for reconcile when OKX authoritative snapshot is empty */
   ledgerStalePositions: unknown[];
   positionsHistory: unknown[];
+  /** OKX authoritative deduplicated raw fills (all) */
+  rawFills?: NormalizedOkxRawFill[];
+  /** OKX authoritative raw fills executed today in KST */
+  todayRawFills?: NormalizedOkxRawFill[];
   eventsRecent: unknown[];
   generatedAt: number;
   /** Latest `V2_NO_ENTRY_REASON_AUDIT_PROOF` snapshot file (`data/runtime/latest-no-entry-audit.json`). */
@@ -728,12 +737,13 @@ export async function composePublicFuturesPaperBundleForWrite(
 ): Promise<FuturesPaperDataBundle> {
   const root = path.resolve(input.projectRoot.trim());
   const dataDir = path.join(root, "data");
-  const [engineState, latestSnapshot, latestMeta, openPositions, okxAccountTrades] = await Promise.all([
+  const [engineState, latestSnapshot, latestMeta, openPositions, okxAccountTrades, okxRawFills] = await Promise.all([
     readJsonFile(path.join(dataDir, "reports", "engine-state.json")),
     readJsonFile(path.join(dataDir, "snapshots", "latest.json")),
     readJsonFile(path.join(dataDir, "snapshots", "latest-meta.json")),
     readPositionsOpenArray(dataDir),
-    readOkxAccountClosedTrades(dataDir)
+    readOkxAccountClosedTrades(dataDir),
+    readOkxRawFills(dataDir)
   ]);
 
   const symbolRows = pickSymbolRows(latestSnapshot);
@@ -750,6 +760,9 @@ export async function composePublicFuturesPaperBundleForWrite(
   const ledgerStalePositions = deriveLedgerStalePositionsForDisplay(engineState, openPositions);
   const noEntryAuditDoc = await readNoEntryAuditFromDataDir(dataDir);
   const { noEntryAudit, noEntryAuditBySymbol } = bundleNoEntryAuditFields(noEntryAuditDoc);
+
+  const rawFills = normalizeOkxRawFills(okxRawFills);
+  const todayRawFills = filterTodayKstRawFills(rawFills, generatedAt);
 
   return {
     configured: true,
@@ -772,6 +785,8 @@ export async function composePublicFuturesPaperBundleForWrite(
     currentPositions,
     ledgerStalePositions,
     positionsHistory,
+    rawFills,
+    todayRawFills,
     eventsRecent,
     generatedAt,
     noEntryAudit,
@@ -813,13 +828,14 @@ async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): P
       readJsonFile(path.join(snaps, "latest-meta.json"))
     ]);
 
-  const [symbolRows, healthHistoryRecent, positionsHistoryRaw, openPositions, eventsRecent, okxAccountTrades] = await Promise.all([
+  const [symbolRows, healthHistoryRecent, positionsHistoryRaw, openPositions, eventsRecent, okxAccountTrades, okxRawFills] = await Promise.all([
     Promise.resolve(pickSymbolRows(latestSnapshot)),
     readHealthHistoryTail(dataDir, 10),
     readPositionsHistoryArray(dataDir),
     readPositionsOpenArray(dataDir),
     readEventsTail(dataDir, 20),
-    readOkxAccountClosedTrades(dataDir)
+    readOkxAccountClosedTrades(dataDir),
+    readOkxRawFills(dataDir)
   ]);
 
   const combinedHistoryRaw = Array.isArray(okxAccountTrades) && okxAccountTrades.length > 0
@@ -833,6 +849,9 @@ async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): P
   const ledgerStalePositions = deriveLedgerStalePositionsForDisplay(engineState, openPositions);
   const noEntryAuditDoc = await readNoEntryAuditFromDataDir(dataDir);
   const { noEntryAudit, noEntryAuditBySymbol } = bundleNoEntryAuditFields(noEntryAuditDoc);
+
+  const rawFills = normalizeOkxRawFills(okxRawFills);
+  const todayRawFills = filterTodayKstRawFills(rawFills, generatedAt);
 
   return {
     configured: true,
@@ -855,6 +874,8 @@ async function assembleFuturesPaperBundleFromDiskSources(projectRoot: string): P
     currentPositions,
     ledgerStalePositions,
     positionsHistory,
+    rawFills,
+    todayRawFills,
     eventsRecent,
     generatedAt,
     noEntryAudit,
