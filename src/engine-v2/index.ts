@@ -72,6 +72,7 @@ import {
     isStaleFtsLowerShortRejectEligibleForFreshRangeReevaluation,
     resetEthFtsLowerShortStaleState
 } from "./market-judgment/eth-fts-lower-short-stale-release";
+import { evaluateEthDirectionalAuthorityMismatch } from "./market-judgment/eth-directional-authority-reconciler";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -2160,6 +2161,47 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2DecisionAfterPromotion = "HOLD";
             v2SideAfterPromotion = "none";
             v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+        }
+    }
+
+    const ethDirectionalMismatchEval = evaluateEthDirectionalAuthorityMismatch({
+        symbol: String(input.symbol),
+        isInitialEntry: isInitialEntry === true && addOnPolicy.isAddOn !== true,
+        hasPosition: v2State.hasLongPosition === true || v2State.hasShortPosition === true || (Array.isArray(v2State.currentPositions) && v2State.currentPositions.length > 0),
+        currentPositionsCount: v2State.currentPositions.length,
+        isOperatorManaged: !isNotOperatorManaged,
+        isManualTakeover: !isNotManualTakeover,
+        isAdoptedExternal: (v2State as any)?.isAdoptedExternal === true || (v2State as any)?.externalManualPosition === true || false,
+        hardControlClear,
+        hardBlockPresent,
+        trendSideCandidate,
+        rangeSideCandidate,
+        riskLongAllow,
+        riskShortAllow,
+        allowNewLong,
+        allowNewShort,
+        v2DecisionBeforePromotion,
+        v2SideBeforePromotion,
+        v2RejectReasonBeforePromotion,
+        v2DecisionAfterPromotion,
+        v2SideAfterPromotion,
+        v2RejectReasonAfterPromotion
+    });
+
+    if (ethDirectionalMismatchEval.reconciled) {
+        v2DecisionAfterPromotion = ethDirectionalMismatchEval.reconciledDecision as "ENTER" | "HOLD" | "SKIP" | "REJECT" | "DISABLED";
+        v2SideAfterPromotion = ethDirectionalMismatchEval.reconciledSide;
+        v2RejectReasonAfterPromotion = ethDirectionalMismatchEval.reconciledRejectReason;
+        if (execution.side !== ethDirectionalMismatchEval.reconciledSide) {
+            execution.side = ethDirectionalMismatchEval.reconciledSide;
+            if (execution.signal === "LONG_CANDIDATE" && ethDirectionalMismatchEval.reconciledSide === "short") {
+                execution.signal = "SHORT_CANDIDATE";
+            } else if (execution.signal === "SHORT_CANDIDATE" && ethDirectionalMismatchEval.reconciledSide === "long") {
+                execution.signal = "LONG_CANDIDATE";
+            }
+        }
+        if (ethDirectionalMismatchEval.proof) {
+            console.info(JSON.stringify(ethDirectionalMismatchEval.proof));
         }
     }
 
