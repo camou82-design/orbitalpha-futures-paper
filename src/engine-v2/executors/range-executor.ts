@@ -7,6 +7,7 @@ import {
     resolveFastTrendShiftStructuralStop
 } from "../risk-sizing/fast-trend-shift-structural-stop";
 import { applyEthRangeMinimumStopDistance } from "../execution/eth-range-minimum-stop-authority";
+import { evaluateRangePostShockGuard } from "../market-judgment/range-post-shock-guard";
 
 function canonicalizeV2RangeStopPrice(
     symbol: string,
@@ -1189,7 +1190,30 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             signal = "NONE";
             reason = "Upper edge reached but short blocked by bias";
         } else {
-            if (reversalConfirmed) {
+            const postShockGuard = evaluateRangePostShockGuard({
+                symbol: input.symbol,
+                side: "short",
+                shockPhase: judgment.shockPhase,
+                directionalShockState: input.state.directionalShockState,
+                rawDirectionalShockState: (input.state as any)?.rawDirectionalShockState,
+                lastPrice,
+                boxHigh,
+                boxLow,
+                boxMid,
+                boxPos: currentBoxPos,
+                atr,
+                candles: recentCandles,
+                boxCohesion01,
+                rangeConfidence,
+                evaluationMode: input.evaluationMode,
+                reversalConfirmed
+            });
+
+            if (postShockGuard.blocked) {
+                signal = "WAIT_RECHECK";
+                reason = postShockGuard.reason ?? "V2_RANGE_POST_DOWN_SHOCK_SHORT_WAIT_STABILIZATION";
+                recheckSuggested = true;
+            } else if (reversalConfirmed) {
                 signal = "SHORT_CANDIDATE";
                 reason = isBtcRangeMrStaleUpShockBypass
                     ? "BTC_RANGE_MR_STALE_UP_SHOCK_LOCAL_BYPASS"
@@ -1208,7 +1232,30 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
             signal = "NONE";
             reason = "Lower edge reached but long blocked by bias";
         } else {
-            if (reversalConfirmed) {
+            const postShockGuard = evaluateRangePostShockGuard({
+                symbol: input.symbol,
+                side: "long",
+                shockPhase: judgment.shockPhase,
+                directionalShockState: input.state.directionalShockState,
+                rawDirectionalShockState: (input.state as any)?.rawDirectionalShockState,
+                lastPrice,
+                boxHigh,
+                boxLow,
+                boxMid,
+                boxPos: currentBoxPos,
+                atr,
+                candles: recentCandles,
+                boxCohesion01,
+                rangeConfidence,
+                evaluationMode: input.evaluationMode,
+                reversalConfirmed
+            });
+
+            if (postShockGuard.blocked) {
+                signal = "WAIT_RECHECK";
+                reason = postShockGuard.reason ?? "V2_RANGE_POST_UP_SHOCK_LONG_WAIT_STABILIZATION";
+                recheckSuggested = true;
+            } else if (reversalConfirmed) {
                 signal = "LONG_CANDIDATE";
                 reason = isBtcRangeMrStaleDownShockBypass
                     ? "BTC_RANGE_MR_STALE_DOWN_SHOCK_LOCAL_BYPASS"
