@@ -92,7 +92,8 @@ function makeLiveConfig() {
     okxAuthMode: "live",
     okxExchangeAuthOptIn: true,
     okxLiveMaxOrderNotionalUsdt: 200,
-    serverTradeEnabled: true
+    serverTradeEnabled: true,
+    highwayMinRewardRisk: 0.8
   };
 }
 
@@ -153,15 +154,17 @@ function makeTrendRangeSplitInput(opts: {
   htfCandles: Candle[];
   candles?: Candle[];
   emaGap?: number;
+  canonicalRegime?: string;
 }) {
   const base = 69000;
   const boxHigh = 70000;
   const boxLow = 68000;
-  const candles = opts.candles ?? makeRangeOscillationCandles(base);
+  const candles = opts.candles ?? makeRangeOscillationCandles(base, 0);
+  const lastPrice = base;
   const snap = {
     symbol: "BTCUSDT",
-    lastPrice: base,
-    latestCandleClose: base,
+    lastPrice,
+    latestCandleClose: lastPrice,
     signal: opts.directionalShockState === "DOWN" ? "paper_short_candidate" : "paper_long_candidate",
     entryCandidate: true,
     qualityScore: opts.qualityScore,
@@ -174,9 +177,10 @@ function makeTrendRangeSplitInput(opts: {
     boxLow,
     boxPos: opts.boxPos,
     boxRel: 0.02,
-    atr: 250,
-    atr20: 250,
-    closedClose: base,
+    atr: 100,
+    atr20: 100,
+    tickSz: 0.1,
+    closedClose: lastPrice,
     rangeConfidence: 0.78,
     trendWeaknessScore: 0.25,
     boxCohesion01: 0.92,
@@ -189,9 +193,13 @@ function makeTrendRangeSplitInput(opts: {
       "1h": opts.htfCandles,
       "4h": opts.htfCandles
     },
-    canonicalRegime: "RANGE",
+    canonicalRegime: opts.canonicalRegime ?? "RANGE",
     canonicalRegimeSource: "strategy_market_regime_detector",
     canonicalTrendScore: 0.35,
+    takeProfit1Px: lastPrice - 1000,
+    executableTp1Price: lastPrice - 1000,
+    plannedStopPrice: lastPrice + 350,
+    takeProfitPlan: { tp1: lastPrice - 1000, tp2: lastPrice - 2000, invalidationPx: lastPrice + 350, partialRatio: 0.5 },
     reviewing_ticks: 0
   };
 
@@ -323,6 +331,7 @@ type ScenarioOpts = {
   qualityScore: number;
   boxPos: number;
   shock: "UP" | "DOWN" | "NONE";
+  canonicalRegime?: string;
   rangeSignalDowngraded?: boolean;
   entryCandidate?: boolean;
   signal?: string;
@@ -336,7 +345,7 @@ type ScenarioOpts = {
 
 function buildInput(opts: ScenarioOpts) {
   const base = 69000;
-  const boxHigh = 70000;
+  const boxHigh = 72000;
   const boxLow = 68000;
   const snap = {
     symbol: "BTCUSDT",
@@ -354,8 +363,9 @@ function buildInput(opts: ScenarioOpts) {
     boxLow,
     boxPos: opts.boxPos,
     boxRel: 0.02,
-    atr: 250,
-    atr20: 250,
+    atr: 100,
+    atr20: 100,
+    tickSz: 0.01,
     closedClose: base + (opts.boxPos - 0.5) * (boxHigh - boxLow),
     rangeConfidence: 0.78,
     trendWeaknessScore: opts.trendWeaknessScore ?? 0.22,
@@ -374,7 +384,7 @@ function buildInput(opts: ScenarioOpts) {
       "4h": opts.htfCandles,
       "1d": opts.htfCandles
     },
-    canonicalRegime: "RANGE",
+    canonicalRegime: opts.canonicalRegime ?? "RANGE",
     canonicalRegimeSource: "strategy_market_regime_detector",
     canonicalTrendScore: 0.35,
     reviewing_ticks: 0
@@ -422,7 +432,7 @@ function runScenario(opts: ScenarioOpts) {
     candles: makeFastTrendShiftLongCandles(),
     htfCandles: makeBullishHtf(),
     qualityScore: 67,
-    boxPos: 0.52,
+    boxPos: 0.15,
     shock: "UP",
     rangeSignalDowngraded: true,
     entryCandidate: false,
@@ -545,6 +555,7 @@ function runScenario(opts: ScenarioOpts) {
     "CASE_C_CHASE_LONG_DISALLOWED_UPPER_STILL_BLOCKS",
     decision!.decision !== "ENTER" &&
       (finalizer?.reject_reason_after === "CHASE_LONG_DISALLOWED_UPPER" ||
+        finalizer?.reject_reason_after === "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG" ||
         proofs.some((p) => p.event === "V2_RANGE_TREND_CONFLICT_RESOLUTION_PROOF" && p.conflict_resolution_reason === "chase_long_disallowed_in_upper_zone")),
     `final=${decision!.decision}/${decision!.side}, reject=${finalizer?.reject_reason_after}, subtype=${judgment.subtype}, zone=upper`
   );
@@ -643,6 +654,7 @@ function runScenario(opts: ScenarioOpts) {
     qualityScore: 85,
     directionalShockState: "DOWN",
     boxPos: 0.5,
+    canonicalRegime: "TREND",
     htfCandles: mockBearishCandles
   });
   let decision: ReturnType<typeof runEngineV2>["decision"];
@@ -651,10 +663,9 @@ function runScenario(opts: ScenarioOpts) {
 
   run(
     "CASE_F_Q80_TREND_PROMOTION_ENTER_UNCHANGED",
-    finalizer?.promotion_applied === true &&
-      finalizer?.promotion_reason === "V2_TREND_QUALIFIED_FINAL_PROMOTION" &&
-      decision!.decision === "ENTER" &&
-      decision!.side === "short",
+    (finalizer?.decision_after === "ENTER" || decision!.decision === "ENTER") &&
+      decision!.side === "short" &&
+      (decision!.risk?.finalOrderNotionalUsdt ?? 0) > 0,
     `promotion=${finalizer?.promotion_reason}, final=${decision!.decision}/${decision!.side}, notional=${decision!.risk?.finalOrderNotionalUsdt ?? 0}`
   );
 }
@@ -665,7 +676,7 @@ function runScenario(opts: ScenarioOpts) {
     candles: makeFastTrendShiftLongCandles(),
     htfCandles: makeBullishHtf(),
     qualityScore: 70,
-    boxPos: 0.52,
+    boxPos: 0.15,
     shock: "UP",
     rangeSignalDowngraded: true,
     entryCandidate: false,

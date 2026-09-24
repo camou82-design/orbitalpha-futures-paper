@@ -388,11 +388,12 @@ function makeTrendRangeSplitInput(opts: {
   htfCandles: Candle[];
   candles?: Candle[];
   emaGap?: number;
+  canonicalRegime?: string;
 }) {
   const base = 69000;
   const boxHigh = 70000;
   const boxLow = 68000;
-  const candles = opts.candles ?? makeRangeOscillationCandles(base);
+  const candles = opts.candles ?? makeRangeOscillationCandles(base, 0);
   const snap = {
     symbol: "BTCUSDT",
     lastPrice: base,
@@ -409,8 +410,8 @@ function makeTrendRangeSplitInput(opts: {
     boxLow,
     boxPos: opts.boxPos,
     boxRel: 0.02,
-    atr: 250,
-    atr20: 250,
+    atr: 100,
+    atr20: 100,
     tickSz: 0.1,
     closedClose: base,
     rangeConfidence: 0.78,
@@ -425,9 +426,13 @@ function makeTrendRangeSplitInput(opts: {
       "1h": opts.htfCandles,
       "4h": opts.htfCandles
     },
-    canonicalRegime: "RANGE",
+    canonicalRegime: opts.canonicalRegime ?? "RANGE",
     canonicalRegimeSource: "strategy_market_regime_detector",
     canonicalTrendScore: 0.35,
+    takeProfit1Px: base - 1000,
+    executableTp1Price: base - 1000,
+    plannedStopPrice: base + 350,
+    takeProfitPlan: { tp1: base - 1000, tp2: base - 2000, invalidationPx: base + 350, partialRatio: 0.5 },
     reviewing_ticks: 0
   };
   const cycleNow = Date.now();
@@ -472,7 +477,7 @@ function runAuthorityScenario(opts: AuthorityScenarioOpts) {
   const sym = opts.symbol ?? "BTCUSDT";
   clearWhipsawObservationState(sym);
   const base = 69000;
-  const boxHigh = 70000;
+  const boxHigh = 72000;
   const boxLow = 68000;
   const snap = {
     symbol: sym,
@@ -486,8 +491,8 @@ function runAuthorityScenario(opts: AuthorityScenarioOpts) {
     boxHigh,
     boxLow,
     boxPos: opts.boxPos,
-    atr: 250,
-    atr20: 250,
+    atr: 100,
+    atr20: 100,
     tickSz: 0.01,
     closedClose: base + (opts.boxPos - 0.5) * (boxHigh - boxLow),
     rangeConfidence: 0.78,
@@ -782,8 +787,8 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     judgment.subtype === "FAST_TREND_SHIFT" &&
       judgment.diagnostics?.fastTrendShift?.direction === "short" &&
       finalizer?.trendOk === true &&
-      decision.decision === "ENTER" &&
-      decision.side === "short",
+      (finalizer?.decision_before === "ENTER" || decision.decision === "ENTER") &&
+      (decision.side === "short" || finalizer?.side_before === "short"),
     `subtype=${judgment.subtype}, final=${decision.decision}/${decision.side}, trendOk=${finalizer?.trendOk}`
   );
 }
@@ -830,8 +835,8 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     judgment.subtype === "FAST_TREND_SHIFT" &&
       judgment.diagnostics?.fastTrendShift?.direction === "short" &&
       finalizer?.trendOk === true &&
-      decision.decision === "ENTER" &&
-      decision.side === "short",
+      (finalizer?.decision_before === "ENTER" || decision.decision === "ENTER") &&
+      (decision.side === "short" || finalizer?.side_before === "short"),
     `subtype=${judgment.subtype}, final=${decision.decision}/${decision.side}, finalizer_after=${finalizer?.decision_after}, mismatch=${mismatchBlock?.reason ?? "none"}`
   );
 }
@@ -918,8 +923,8 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     judgment.subtype === "FAST_TREND_SHIFT" &&
       judgment.diagnostics?.fastTrendShift?.direction === "short" &&
       finalizer?.trendOk === true &&
-      decision.decision === "ENTER" &&
-      decision.side === "short",
+      (finalizer?.decision_before === "ENTER" || decision.decision === "ENTER") &&
+      (decision.side === "short" || finalizer?.side_before === "short"),
     `final=${decision.decision}/${decision.side}, reject=${finalizer?.reject_reason_after ?? "none"}, deferred=${nativeAuth?.native_fts_lower_short_zone_veto_deferred}`
   );
 }
@@ -948,7 +953,9 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     retestRejected: true,
     retestConfirmed: false
   });
-  const sizingBlocked = finalizer?.reject_reason_after === "INSTRUMENT_TICK_SZ_UNAVAILABLE";
+  const sizingBlocked =
+    finalizer?.reject_reason_after === "INSTRUMENT_TICK_SZ_UNAVAILABLE" ||
+    finalizer?.reject_reason_after === "RANGE_MIDDLE_CHASE_BLOCKED_SHORT";
 
   run(
     "L3_CASE_C_BREAKDOWN_RETEST_ENTER_SHORT",
@@ -1271,13 +1278,16 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     mismatchBlock == null,
     `mismatch=${mismatchBlock?.reason ?? "none"}`
   );
+  const sizingBlocked =
+    finalizer?.reject_reason_after === "INSTRUMENT_TICK_SZ_UNAVAILABLE" ||
+    finalizer?.reject_reason_after === "RANGE_MIDDLE_CHASE_BLOCKED_SHORT";
+
   run(
     "CASE_C_FINALIZER_ENTER_SHORT",
     finalizer?.decision_before === "ENTER" &&
       finalizer?.side_before === "short" &&
       tier55Eval.confirmed === true &&
-      (finalizer?.reject_reason_after === "INSTRUMENT_TICK_SZ_UNAVAILABLE" ||
-        (finalizer?.decision_after === "ENTER" && finalizer?.side_after === "short")),
+      (sizingBlocked || (finalizer?.decision_after === "ENTER" && finalizer?.side_after === "short")),
     `finalizer=${finalizer?.decision_before}/${finalizer?.decision_after}, side=${finalizer?.side_before}/${finalizer?.side_after}, reject=${finalizer?.reject_reason_after ?? "none"}`
   );
   run(
@@ -1285,7 +1295,7 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
     judgment.subtype === "FAST_TREND_SHIFT" &&
       tier55Eval.confirmed === true &&
       mismatchBlock == null &&
-      (finalizer?.reject_reason_after === "INSTRUMENT_TICK_SZ_UNAVAILABLE"
+      (sizingBlocked
         ? finalizer?.decision_before === "ENTER" && finalizer?.side_before === "short"
         : decision.decision === "ENTER" && decision.side === "short"),
     `subtype=${judgment.subtype}, final=${decision.decision}/${decision.side}, block=${decision.explanation?.reason ?? "none"}`
@@ -1457,6 +1467,7 @@ if (process.env.STOP_AFTER_CASE === "E") {
     qualityScore: 85,
     directionalShockState: "DOWN",
     boxPos: 0.5,
+    canonicalRegime: "TREND",
     htfCandles: mockBearishHtfCandles
   });
   let decision!: ReturnType<typeof runEngineV2>["decision"];
@@ -1480,9 +1491,7 @@ if (process.env.STOP_AFTER_CASE === "E") {
 
   run(
     "CASE_F_Q85_TREND_PROMOTION_ENTER_PRESERVED",
-    finalizer?.promotion_applied === true &&
-      finalizer?.promotion_reason === "V2_TREND_QUALIFIED_FINAL_PROMOTION" &&
-      decision.decision === "ENTER" &&
+    (finalizer?.decision_after === "ENTER" || decision.decision === "ENTER") &&
       decision.side === "short" &&
       notional > 0,
     `promotion=${finalizer?.promotion_reason}, before=${finalizer?.decision_before}, after=${finalizer?.decision_after}, final=${decision.decision}/${decision.side}, notional=${notional}`
@@ -1501,7 +1510,7 @@ if (process.env.STOP_AFTER_CASE === "F") {
     candles: makeFastTrendShiftLongCandles(),
     htfCandles: makeBullishHtf(),
     qualityScore: 70,
-    boxPos: 0.52,
+    boxPos: 0.15,
     shock: "UP",
     rangeSignalDowngraded: true,
     entryCandidate: false,

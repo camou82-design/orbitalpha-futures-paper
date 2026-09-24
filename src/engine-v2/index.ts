@@ -5790,9 +5790,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         v2DecisionBeforePromotion === "ENTER" &&
         judgment.htf_entry_policy === "PROBE_ONLY" &&
         judgment.polarityProbeEligible === true;
+    const promotionSideFlipped =
+        promotionApplied &&
+        (
+            (v2SideBeforePromotion === "short" && v2SideAfterPromotion === "long") ||
+            (v2SideBeforePromotion === "long" && v2SideAfterPromotion === "short")
+        );
     const rangeDowngradedHardBlock =
         rangeSignalDowngraded &&
         !rangeSignalKeptByRelax &&
+        !promotionSideFlipped &&
         !probeOnlyPolarityEligibleEnter &&
         !nativeExecutorEnterAuthority &&
         !(nativeFastTrendShiftUpperLongEval.confirmed === true);
