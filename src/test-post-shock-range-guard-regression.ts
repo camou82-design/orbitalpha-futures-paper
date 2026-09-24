@@ -1,19 +1,92 @@
 import assert from "node:assert";
 import { executeRangeRegime } from "./engine-v2/executors/range-executor";
 import { executeTrendRegime } from "./engine-v2/executors/trend-executor";
-import { evaluateRangePostShockGuard } from "./engine-v2/market-judgment/range-post-shock-guard";
-import { EngineV2Input, MarketJudgmentOutput } from "./engine-v2/types";
+import { EngineV2Input, MarketJudgmentOutput, EngineV2ConfigAdapter, EngineV2SnapshotAdapter, EngineV2Regime, EngineV2MarketSubtype } from "./engine-v2/types";
+import { Candle } from "./models/types";
 
 console.log("=== RUNNING POST-SHOCK RANGE CHASE GUARD REGRESSION TESTS ===");
 
-function createCandle(ts: number, open: number, high: number, low: number, close: number, vol = 100) {
+function createCandle(ts: number, open: number, high: number, low: number, close: number, vol = 100): Candle {
     return { ts, open, high, low, close, volume: vol };
+}
+
+const defaultConfig: EngineV2ConfigAdapter = {
+    paperMaxOpenPositions: 3,
+    paperReentryCooldownMs: 0,
+    baseSizeUsd: 40,
+    okxLiveMaxOrderNotionalUsdt: 40
+};
+
+function createMockSnapshot(overrides: Partial<EngineV2SnapshotAdapter> & { lastPrice: number }): EngineV2SnapshotAdapter {
+    const { lastPrice, ...rest } = overrides;
+    return {
+        lastPrice,
+        latestCandleClose: rest.latestCandleClose ?? lastPrice,
+        boxHigh: rest.boxHigh !== undefined ? rest.boxHigh : lastPrice * 1.003,
+        boxLow: rest.boxLow !== undefined ? rest.boxLow : lastPrice * 0.997,
+        boxPos: rest.boxPos !== undefined ? rest.boxPos : 0.5,
+        rangeConfidence: rest.rangeConfidence !== undefined ? rest.rangeConfidence : 0.8,
+        ema20: rest.ema20 !== undefined ? rest.ema20 : lastPrice,
+        emaGap: rest.emaGap !== undefined ? rest.emaGap : 0,
+        volatilityProxy: rest.volatilityProxy !== undefined ? rest.volatilityProxy : 0.005,
+        boxCohesion01: rest.boxCohesion01 !== undefined ? rest.boxCohesion01 : 0.5,
+        breakoutFailureRate: rest.breakoutFailureRate !== undefined ? rest.breakoutFailureRate : 0,
+        trendWeaknessScore: rest.trendWeaknessScore !== undefined ? rest.trendWeaknessScore : 0,
+        rangeOscillationScore: rest.rangeOscillationScore !== undefined ? rest.rangeOscillationScore : 0,
+        reviewing_ticks: rest.reviewing_ticks !== undefined ? rest.reviewing_ticks : 0,
+        regimeExitRisk: rest.regimeExitRisk !== undefined ? rest.regimeExitRisk : 0,
+        boxBreakSide: rest.boxBreakSide ?? "none",
+        signal: rest.signal ?? "NONE",
+        qualityScore: rest.qualityScore !== undefined ? rest.qualityScore : 75,
+        data_ready: rest.data_ready ?? true,
+        dump_protection_hit: rest.dump_protection_hit ?? false,
+        volatility_guard_hit: rest.volatility_guard_hit ?? false,
+        entryCandidate: rest.entryCandidate ?? false,
+        atr: rest.atr !== undefined ? rest.atr : lastPrice * 0.01,
+        candles: rest.candles,
+        retestConfirmed: rest.retestConfirmed,
+        retestTouched: rest.retestTouched,
+        retestRejected: rest.retestRejected,
+        ...rest
+    };
+}
+
+function createMockJudgment(overrides: Partial<MarketJudgmentOutput> & {
+    regime: EngineV2Regime;
+    subtype: EngineV2MarketSubtype;
+}): MarketJudgmentOutput {
+    const { regime, subtype, ...rest } = overrides;
+    return {
+        regime,
+        regime_final: rest.regime_final ?? regime,
+        subtype,
+        subtypeReason: rest.subtypeReason ?? "test",
+        shockPhase: rest.shockPhase ?? "NONE",
+        rangePhase: rest.rangePhase ?? "NONE",
+        trendPhase: rest.trendPhase ?? "NONE",
+        transitionPhase: rest.transitionPhase ?? "NONE",
+        judgmentVersion: "v2_market_judgment_subtype_v1",
+        no_trade_reason: rest.no_trade_reason ?? null,
+        data_ready: rest.data_ready ?? true,
+        dump_protection_hit: rest.dump_protection_hit ?? false,
+        volatility_guard_hit: rest.volatility_guard_hit ?? false,
+        reason: rest.reason ?? "test",
+        metrics: rest.metrics ?? {
+            rangeScore: 80,
+            trendScore: 20,
+            boxCohesionCollapse: false,
+            mixedBreakoutState: false,
+            emaExpansionWeak: false
+        },
+        metadata: rest.metadata ?? {},
+        ...rest
+    };
 }
 
 // 1. Fixture: 2026-09-24 BTC 11:31 KST (02:31 UTC) Short Entry Case
 // History: Drop from 84,500 to 83,800 (drop of ~700 USD, 0.83%), then bounce to 84,134 (boxPos ~0.75, isUpper)
 function createBtc0231Fixture(): { input: EngineV2Input; judgment: MarketJudgmentOutput } {
-    const candles: any[] = [];
+    const candles: Candle[] = [];
     const baseTs = 1790215000000;
     
     // Candles 0 to 5: High prices around 84,500
@@ -34,8 +107,15 @@ function createBtc0231Fixture(): { input: EngineV2Input; judgment: MarketJudgmen
         symbol: "BTCUSDT",
         evaluationMode: "authoritative",
         run_cycle_id: "test-btc-0231",
-        snapshot: {
-            symbol: "BTCUSDT",
+        now: baseTs + 11 * 60000,
+        config: defaultConfig,
+        v1Result: {
+            regime: "RANGE",
+            decision: "SKIP",
+            side: "none",
+            isBlocked: false
+        },
+        snapshot: createMockSnapshot({
             lastPrice: 84134.6,
             boxHigh: 84200,
             boxLow: 83800,
@@ -43,30 +123,37 @@ function createBtc0231Fixture(): { input: EngineV2Input; judgment: MarketJudgmen
             boxCohesion01: 0.30, // Unstable box
             rangeConfidence: 0.70,
             atr: 150,
-            candles,
-            reversal_confirmed: true
-        } as any,
+            candles
+        }),
         state: {
             directionalShockState: "DOWN",
-            rawDirectionalShockState: "DOWN",
             longAllow: true,
             shortAllow: true,
-            currentPositions: []
-        } as any
+            currentPositions: [],
+            lossStreaks: {},
+            globalRiskScore: 0,
+            executionReadiness: true,
+            freshTickBarrierActive: false,
+            freshTickCompletedCycles: 3,
+            freshTickRequiredCycles: 3
+        }
     };
 
-    const judgment: MarketJudgmentOutput = {
+    const judgment = createMockJudgment({
         regime: "RANGE",
-        trendPhase: "FLAT",
+        regime_final: "RANGE",
+        trendPhase: "NONE",
+        rangePhase: "UPPER",
         shockPhase: "DOWN_SHOCK",
-        subtype: "NONE",
+        transitionPhase: "NONE",
+        subtype: "RANGE_UPPER_REACTION",
         subtypeReason: "Range High Rejection Short",
-        activeEngine: "RANGE_EXECUTOR",
-        reversalConfirmed: true,
+        data_ready: true,
+        dump_protection_hit: false,
         metadata: {
             reversal_confirmed: true
         }
-    };
+    });
 
     return { input, judgment };
 }
@@ -74,7 +161,7 @@ function createBtc0231Fixture(): { input: EngineV2Input; judgment: MarketJudgmen
 // 2. Fixture: 2026-09-24 ETH 11:32 KST (02:32 UTC) Short Entry Case
 // History: Drop from 2,720 to 2,672 (drop of ~48 USD, 1.76%), then bounce to 2,678.73 (boxPos ~0.793, isUpper)
 function createEth0232Fixture(): { input: EngineV2Input; judgment: MarketJudgmentOutput } {
-    const candles: any[] = [];
+    const candles: Candle[] = [];
     const baseTs = 1790215000000;
 
     // Candles 0 to 5: High prices around 2,720
@@ -95,8 +182,15 @@ function createEth0232Fixture(): { input: EngineV2Input; judgment: MarketJudgmen
         symbol: "ETHUSDT",
         evaluationMode: "authoritative",
         run_cycle_id: "test-eth-0232",
-        snapshot: {
-            symbol: "ETHUSDT",
+        now: baseTs + 11 * 60000,
+        config: defaultConfig,
+        v1Result: {
+            regime: "RANGE",
+            decision: "SKIP",
+            side: "none",
+            isBlocked: false
+        },
+        snapshot: createMockSnapshot({
             lastPrice: 2678.73,
             boxHigh: 2682,
             boxLow: 2670,
@@ -104,37 +198,44 @@ function createEth0232Fixture(): { input: EngineV2Input; judgment: MarketJudgmen
             boxCohesion01: 0.28,
             rangeConfidence: 0.72,
             atr: 8.5,
-            candles,
-            reversal_confirmed: true
-        } as any,
+            candles
+        }),
         state: {
             directionalShockState: "DOWN",
-            rawDirectionalShockState: "DOWN",
             longAllow: true,
             shortAllow: true,
-            currentPositions: []
-        } as any
+            currentPositions: [],
+            lossStreaks: {},
+            globalRiskScore: 0,
+            executionReadiness: true,
+            freshTickBarrierActive: false,
+            freshTickCompletedCycles: 3,
+            freshTickRequiredCycles: 3
+        }
     };
 
-    const judgment: MarketJudgmentOutput = {
+    const judgment = createMockJudgment({
         regime: "RANGE",
-        trendPhase: "FLAT",
+        regime_final: "RANGE",
+        trendPhase: "NONE",
+        rangePhase: "UPPER",
         shockPhase: "DOWN_SHOCK",
-        subtype: "NONE",
+        transitionPhase: "NONE",
+        subtype: "RANGE_UPPER_REACTION",
         subtypeReason: "Range Upper Edge Reversal",
-        activeEngine: "RANGE_EXECUTOR",
-        reversalConfirmed: true,
+        data_ready: true,
+        dump_protection_hit: false,
         metadata: {
             reversal_confirmed: true
         }
-    };
+    });
 
     return { input, judgment };
 }
 
 // 3. Fixture: Stabilized RANGE Short Entry (Allowed after shock has decayed, box formed & retested)
 function createStabilizedRangeFixture(): { input: EngineV2Input; judgment: MarketJudgmentOutput } {
-    const candles: any[] = [];
+    const candles: Candle[] = [];
     const baseTs = 1790215000000;
 
     // Past shock was 20 candles ago
@@ -153,8 +254,15 @@ function createStabilizedRangeFixture(): { input: EngineV2Input; judgment: Marke
         symbol: "ETHUSDT",
         evaluationMode: "authoritative",
         run_cycle_id: "test-eth-stabilized",
-        snapshot: {
-            symbol: "ETHUSDT",
+        now: baseTs + 13 * 60000,
+        config: defaultConfig,
+        v1Result: {
+            regime: "RANGE",
+            decision: "SKIP",
+            side: "none",
+            isBlocked: false
+        },
+        snapshot: createMockSnapshot({
             lastPrice: 2680,
             boxHigh: 2685,
             boxLow: 2670,
@@ -162,30 +270,37 @@ function createStabilizedRangeFixture(): { input: EngineV2Input; judgment: Marke
             boxCohesion01: 0.65, // Well stabilized
             rangeConfidence: 0.80,
             atr: 6.0,
-            candles,
-            reversal_confirmed: true
-        } as any,
+            candles
+        }),
         state: {
             directionalShockState: "NONE", // Shock decayed
-            rawDirectionalShockState: "NONE",
             longAllow: true,
             shortAllow: true,
-            currentPositions: []
-        } as any
+            currentPositions: [],
+            lossStreaks: {},
+            globalRiskScore: 0,
+            executionReadiness: true,
+            freshTickBarrierActive: false,
+            freshTickCompletedCycles: 3,
+            freshTickRequiredCycles: 3
+        }
     };
 
-    const judgment: MarketJudgmentOutput = {
+    const judgment = createMockJudgment({
         regime: "RANGE",
-        trendPhase: "FLAT",
+        regime_final: "RANGE",
+        trendPhase: "NONE",
+        rangePhase: "UPPER",
         shockPhase: "NONE",
-        subtype: "NONE",
+        transitionPhase: "NONE",
+        subtype: "RANGE_UPPER_REACTION",
         subtypeReason: "Upper edge reversal identified by price reaction",
-        activeEngine: "RANGE_EXECUTOR",
-        reversalConfirmed: true,
+        data_ready: true,
+        dump_protection_hit: false,
         metadata: {
             reversal_confirmed: true
         }
-    };
+    });
 
     return { input, judgment };
 }
@@ -196,8 +311,15 @@ function createTrendFixture(): { input: EngineV2Input; judgment: MarketJudgmentO
         symbol: "BTCUSDT",
         evaluationMode: "authoritative",
         run_cycle_id: "test-trend-01",
-        snapshot: {
-            symbol: "BTCUSDT",
+        now: 1790215000000,
+        config: defaultConfig,
+        v1Result: {
+            regime: "TREND",
+            decision: "ENTER",
+            side: "short",
+            isBlocked: false
+        },
+        snapshot: createMockSnapshot({
             lastPrice: 84000,
             boxHigh: 84500,
             boxLow: 83500,
@@ -205,25 +327,34 @@ function createTrendFixture(): { input: EngineV2Input; judgment: MarketJudgmentO
             emaGap: -0.005,
             atr: 120,
             candles: []
-        } as any,
+        }),
         state: {
             directionalShockState: "DOWN",
             longAllow: false,
             shortAllow: true,
-            currentPositions: []
-        } as any
+            currentPositions: [],
+            lossStreaks: {},
+            globalRiskScore: 0,
+            executionReadiness: true,
+            freshTickBarrierActive: false,
+            freshTickCompletedCycles: 3,
+            freshTickRequiredCycles: 3
+        }
     };
 
-    const judgment: MarketJudgmentOutput = {
+    const judgment = createMockJudgment({
         regime: "TREND",
+        regime_final: "TREND",
         trendPhase: "DOWN",
+        rangePhase: "NONE",
         shockPhase: "DOWN_SHOCK",
-        subtype: "NONE",
+        transitionPhase: "NONE",
+        subtype: "TREND_DOWN_CONTINUATION",
         subtypeReason: "Down trend continuation",
-        activeEngine: "TREND_EXECUTOR",
-        reversalConfirmed: false,
+        data_ready: true,
+        dump_protection_hit: false,
         metadata: {}
-    };
+    });
 
     return { input, judgment };
 }
