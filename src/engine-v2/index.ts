@@ -8313,6 +8313,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     adverseRiskBudgetAllowedNotional,
                     emergencyAbsoluteCapUsdt,
                     legacyStaticCapUsdt: maxOrderNotionalUsdt,
+                    v2HardSafetyCapUsdt: (input.config as any)?.okxLiveV2MaxOrderNotionalUsdt ?? (input.config as any)?.okx_live_v2_max_order_notional_usdt ?? 500,
                     marginReserveRatio,
                     roundTripFeeRate: 0,
                     lastPrice: lastPx,
@@ -8343,6 +8344,22 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 equityAdaptiveSizingAuthority = sizingResult;
 
                 if (input.evaluationMode !== "diagnostic") {
+                    const rawRiskNotional = sizingResult.riskBasedNotionalUsdt.toFixed(2);
+                    const accountCap = sizingResult.accountCapUsdt.toFixed(2);
+                    const symbolCap = sizingResult.symbolCapUsdt.toFixed(2);
+                    const availableMarginCap = sizingResult.availableBalanceCapUsdt.toFixed(2);
+                    const probeCapMultiplier = `${sizingResult.probeMultiplierApplied.toFixed(2)} (${sizingResult.probeSizingSource})`;
+                    const v2HardCap = sizingResult.v2HardCapUsdt != null ? sizingResult.v2HardCapUsdt.toFixed(2) : "NONE";
+                    const emergencyCap = sizingResult.emergencyCapUsdt != null ? sizingResult.emergencyCapUsdt.toFixed(2) : "NONE";
+                    const canonicalIntended = sizingResult.canonicalIntendedNotionalUsdt.toFixed(2);
+                    const roundedContracts = sizingResult.normalizedContracts != null ? sizingResult.normalizedContracts.toString() : "null";
+                    const finalSubmitted = sizingResult.normalizedNotionalUsdt != null ? sizingResult.normalizedNotionalUsdt.toFixed(2) : (sizingResult.finalOrderNotionalUsdt > 0 ? sizingResult.finalOrderNotionalUsdt.toFixed(2) : "0.00");
+                    const ratio = sizingResult.collapseRatio != null ? sizingResult.collapseRatio.toFixed(4) : "1.0000";
+                    const decision = sizingResult.sizingPassed ? "PASSED" : (sizingResult.blockReason ?? "BLOCKED");
+
+                    const pipelineLog = `[V2_SIZING_PIPELINE_PROOF] symbol=${input.symbol} rawRiskNotional=${rawRiskNotional} → accountCap=${accountCap} → symbolCap=${symbolCap} → availableMarginCap=${availableMarginCap} → probeCap/multiplier=${probeCapMultiplier} → v2HardCap=${v2HardCap} → emergencyCap=${emergencyCap} → canonicalIntendedNotional=${canonicalIntended} → roundedContracts=${roundedContracts} → finalSubmittedNotional=${finalSubmitted} → final/intended ratio=${ratio} → decision=${decision}`;
+                    console.info(pipelineLog);
+
                     console.info(JSON.stringify(buildRiskBasedNotionalProof({
                         symbol: String(input.symbol),
                         equity_usdt: accountEquityUsdt,
@@ -8382,12 +8399,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         available_balance_cap_usdt: sizingResult.availableBalanceCapUsdt,
                         available_margin_cap_usdt: sizingResult.usableAvailableBalanceUsdt * appliedLeverage,
                         legacy_static_cap_usdt: sizingResult.legacyStaticCapUsdt,
+                        v2_hard_cap_usdt: sizingResult.v2HardCapUsdt,
                         emergency_cap_usdt: sizingResult.emergencyCapUsdt,
                         effective_live_cap_usdt: sizingResult.effectiveLiveCapUsdt,
                         ultimate_safety_cap_usdt: sizingResult.ultimateSafetyCapUsdt,
                         legacy_cap_source: sizingResult.legacyCapSource,
                         pre_probe_notional_usdt: sizingResult.preProbeNotionalUsdt,
                         pre_lot_notional_usdt: sizingResult.preLotNotionalUsdt,
+                        canonical_intended_notional_usdt: sizingResult.canonicalIntendedNotionalUsdt,
                         probe_multiplier_applied: sizingResult.probeMultiplierApplied,
                         htf_size_multiplier_applied: sizingResult.htfSizeMultiplierApplied,
                         normalized_contracts: sizingResult.normalizedContracts,
@@ -8396,6 +8415,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         actual_risk_pct: sizingResult.actualRiskPct,
                         final_order_notional_usdt: sizingResult.finalOrderNotionalUsdt,
                         final_required_margin_usdt: sizingResult.finalRequiredMarginUsdt,
+                        collapse_ratio: sizingResult.collapseRatio,
+                        sizing_collapse_detected: sizingResult.sizingCollapseDetected,
                         limiting_authority: sizingResult.limitingAuthority,
                         final_sizing_authority: sizingResult.finalSizingAuthority,
                         emergency_cap_applied: sizingResult.emergencyCapApplied,

@@ -13799,7 +13799,7 @@ export class PaperEngine {
 
       // 4. Final Sizing Logic (Strict "Min" Policy)
       // Rule: Never expand beyond what V2 intended.
-      let final_size_source: "v2_risk" | "okx_dynamic_cap" | "static_safety_cap" | "min_order_block" = "v2_risk";
+      let final_size_source: "v2_risk" | "okx_dynamic_cap" | "static_safety_cap" | "min_order_block" | "v2_hard_safety_cap" | "emergency_ultimate_cap" = "v2_risk";
       final_submitted_notional_usdt = levAuthorityRes.finalOrderNotionalUsdt;
 
       // Constraint: Dynamic Cap (Exchange liquidity)
@@ -13809,11 +13809,13 @@ export class PaperEngine {
       }
 
       // Constraint: Static Cap (Hard safety ceiling)
-      // V2 and legacy orders both enforce OKX_LIVE_MAX_ORDER_NOTIONAL_USDT hard ceiling at submit.
+      // V2 bypasses legacy 40 USDT cap and uses OKX_LIVE_V2_MAX_ORDER_NOTIONAL_USDT (default 500).
+      // Non-V2 / legacy orders enforce OKX_LIVE_MAX_ORDER_NOTIONAL_USDT (legacy 40 USDT).
       const staticCapResolution = resolveLiveSubmitStaticSafetyCap({
         authoritySource: input.authoritySource,
         okxLiveStaticNotionalCapEnabled: this.config.okxLiveStaticNotionalCapEnabled,
         staticSafetyCapUsdt: liveCapResolution.effectiveLiveCapUsdt,
+        v2HardSafetyCapUsdt: this.config.okxLiveV2MaxOrderNotionalUsdt ?? 500,
         intendedNotionalUsdt: final_submitted_notional_usdt,
         emergencyUltimateCapUsdt: liveCapResolution.emergencyCapUsdt,
         emergencyFailsafeActive: input.emergencyFailsafeActive === true
@@ -13821,6 +13823,10 @@ export class PaperEngine {
       final_submitted_notional_usdt = staticCapResolution.finalSubmittedNotionalUsdt;
       if (staticCapResolution.finalSizeSource === "static_safety_cap") {
         final_size_source = "static_safety_cap";
+      } else if (staticCapResolution.finalSizeSource === "v2_hard_safety_cap") {
+        final_size_source = "v2_hard_safety_cap";
+      } else if (staticCapResolution.finalSizeSource === "emergency_ultimate_cap") {
+        final_size_source = "emergency_ultimate_cap";
       }
       const skipStaticCapForV2Authority = staticCapResolution.skipStaticCapForV2Authority;
 
@@ -26811,31 +26817,43 @@ export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
   authoritySource?: string | null;
   okxLiveStaticNotionalCapEnabled: boolean;
   staticSafetyCapUsdt: number | null;
+  v2HardSafetyCapUsdt?: number | null;
   intendedNotionalUsdt: number;
   emergencyUltimateCapUsdt?: number | null;
   /** When true, emergency cap may bind submit notional (failsafe only). */
   emergencyFailsafeActive?: boolean;
 }>): Readonly<{
   finalSubmittedNotionalUsdt: number;
-  finalSizeSource: "v2_risk" | "static_safety_cap" | "emergency_ultimate_cap";
+  finalSizeSource: "v2_risk" | "static_safety_cap" | "emergency_ultimate_cap" | "v2_hard_safety_cap";
   skipStaticCapForV2Authority: boolean;
   emergencyCapApplied: boolean;
   emergencyCapReason: string | null;
 }> {
-  const skipStaticCapForV2Authority = false;
+  const isV2 = input.authoritySource === "v2";
+  const skipStaticCapForV2Authority = isV2;
   let finalSubmittedNotionalUsdt = input.intendedNotionalUsdt;
-  let finalSizeSource: "v2_risk" | "static_safety_cap" | "emergency_ultimate_cap" = "v2_risk";
+  let finalSizeSource: "v2_risk" | "static_safety_cap" | "emergency_ultimate_cap" | "v2_hard_safety_cap" = "v2_risk";
   let emergencyCapApplied = false;
   let emergencyCapReason: string | null = null;
-  if (
-    input.okxLiveStaticNotionalCapEnabled &&
-    input.staticSafetyCapUsdt != null &&
-    input.staticSafetyCapUsdt > 0 &&
-    finalSubmittedNotionalUsdt > input.staticSafetyCapUsdt
-  ) {
-    finalSubmittedNotionalUsdt = input.staticSafetyCapUsdt;
-    finalSizeSource = "static_safety_cap";
+
+  if (isV2) {
+    const v2HardCap = input.v2HardSafetyCapUsdt != null && input.v2HardSafetyCapUsdt > 0 ? input.v2HardSafetyCapUsdt : 500;
+    if (v2HardCap > 0 && finalSubmittedNotionalUsdt > v2HardCap) {
+      finalSubmittedNotionalUsdt = v2HardCap;
+      finalSizeSource = "v2_hard_safety_cap";
+    }
+  } else {
+    if (
+      input.okxLiveStaticNotionalCapEnabled &&
+      input.staticSafetyCapUsdt != null &&
+      input.staticSafetyCapUsdt > 0 &&
+      finalSubmittedNotionalUsdt > input.staticSafetyCapUsdt
+    ) {
+      finalSubmittedNotionalUsdt = input.staticSafetyCapUsdt;
+      finalSizeSource = "static_safety_cap";
+    }
   }
+
   const emergencyUltimate = input.emergencyUltimateCapUsdt;
   if (
     input.emergencyFailsafeActive === true &&
@@ -26848,6 +26866,7 @@ export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
     emergencyCapApplied = true;
     emergencyCapReason = "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE";
   }
+
   return {
     finalSubmittedNotionalUsdt,
     finalSizeSource,

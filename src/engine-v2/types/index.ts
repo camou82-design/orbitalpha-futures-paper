@@ -234,6 +234,7 @@ export interface LegacyConfigAdapter {
     okxLiveMaxAccountNotionalUsdt?: number | null;
     okxLiveMaxAddonCount?: number | null;
     okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
+    okxLiveV2MaxOrderNotionalUsdt?: number | null;
     okxLiveMarginReserveRatio?: number;
     paperTakerFeeRate?: number;
     externalMarketContextEnabled?: boolean;
@@ -476,6 +477,7 @@ export interface EngineV2ConfigAdapter {
     okxLiveMaxAccountNotionalUsdt?: number | null;
     okxLiveMaxAddonCount?: number | null;
     okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
+    okxLiveV2MaxOrderNotionalUsdt?: number | null;
     okxLiveMarginReserveRatio?: number;
     paperTakerFeeRate?: number;
     externalMarketContextEnabled?: boolean;

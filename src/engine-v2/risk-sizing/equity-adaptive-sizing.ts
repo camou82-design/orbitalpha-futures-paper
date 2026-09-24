@@ -15,7 +15,8 @@ export {
     UNKNOWN_OPEN_POSITION_RISK_RESERVE_PCT,
     FULL_ENTRY_TARGET_RISK_SA_PCT,
     FULL_ENTRY_TARGET_RISK_B_PCT,
-    MICRO_PROBE_TARGET_RISK_PCT
+    MICRO_PROBE_TARGET_RISK_PCT,
+    normalizeOkxSwapContractsFromNotional
 };
 
 export const RISK_PER_TRADE_PCT = 0.010;
@@ -56,6 +57,7 @@ export type EvaluateEquityAdaptiveSizingInput = Readonly<{
     adverseRiskBudgetAllowedNotional?: number | null;
     emergencyAbsoluteCapUsdt?: number | null;
     legacyStaticCapUsdt?: number | null;
+    v2HardSafetyCapUsdt?: number | null;
     marginReserveRatio?: number;
     roundTripFeeRate?: number;
     lastPrice: number;
@@ -117,6 +119,7 @@ export type EquityAdaptiveSizingResult = Readonly<{
     /** preLotNotionalUsdt after probe multiplier but before HTF multiplier. */
     probeAdjustedPreLotNotionalUsdt: number;
     preLotNotionalUsdt: number;
+    canonicalIntendedNotionalUsdt: number;
     finalOrderNotionalUsdt: number;
     finalRequiredMarginUsdt: number;
     normalizedContracts: number | null;
@@ -129,6 +132,8 @@ export type EquityAdaptiveSizingResult = Readonly<{
     emergencyCapUsdt: number | null;
     /** Raw OKX_LIVE_MAX_ORDER_NOTIONAL_USDT when set. */
     legacyStaticCapUsdt: number | null;
+    /** V2 hard safety cap (default 500 USDT). */
+    v2HardCapUsdt: number | null;
     /** min(emergency, legacy) binding cap for non-V2 live paths; null for normal V2 authority. */
     effectiveLiveCapUsdt: number | null;
     /** Cap applied inside evaluateEquityAdaptiveSizing pre-lot min(); null for normal V2 authority. */
@@ -164,6 +169,10 @@ export type EquityAdaptiveSizingResult = Readonly<{
     accountOpenRiskAllowedNotionalUsdt: number;
     /** Whether this order was sized as a micro-probe (0.50% target risk). */
     isMicroProbe: boolean;
+    /** Final submitted notional / canonical intended notional ratio. */
+    collapseRatio: number;
+    /** Sizing collapse guard triggered flag. */
+    sizingCollapseDetected: boolean;
 }>;
 
 export type LiveOrderNotionalCapResolution = Readonly<{
@@ -211,7 +220,8 @@ export function resolveEffectiveLiveOrderNotionalCap(input: Readonly<{
 }
 
 /**
- * V2 and legacy order sizing both enforce OKX_LIVE_MAX_ORDER_NOTIONAL_USDT (legacyStaticCapUsdt) as hard ceiling.
+ * V2 entries use OKX_LIVE_V2_MAX_ORDER_NOTIONAL_USDT (v2HardSafetyCapUsdt, default 500) as hard ceiling.
+ * Legacy entries enforce OKX_LIVE_MAX_ORDER_NOTIONAL_USDT (legacyStaticCapUsdt) as hard ceiling.
  * Emergency cap binds when emergencyFailsafeActive is explicitly true (and takes priority if smaller).
  */
 export function resolveUltimateSafetyCapForOrderSizing(input: Readonly<{
@@ -219,27 +229,42 @@ export function resolveUltimateSafetyCapForOrderSizing(input: Readonly<{
     emergencyFailsafeActive?: boolean;
     emergencyCapUsdt?: number | null;
     legacyStaticCapUsdt?: number | null;
-}>): LiveOrderNotionalCapResolution {
+    v2HardSafetyCapUsdt?: number | null;
+}>): LiveOrderNotionalCapResolution & { v2HardSafetyCapUsdt: number | null } {
     const emergencyCapUsdt = positiveCapUsdt(input.emergencyCapUsdt);
     const legacyStaticCapUsdt = positiveCapUsdt(input.legacyStaticCapUsdt);
+    const v2HardSafetyCapUsdt = positiveCapUsdt(input.v2HardSafetyCapUsdt) ?? 500;
     const activeEmergencyCap = input.emergencyFailsafeActive === true ? emergencyCapUsdt : null;
 
     let effectiveLiveCapUsdt: number | null = null;
     let legacyCapSource: string | null = null;
 
-    if (activeEmergencyCap != null && legacyStaticCapUsdt != null) {
-        effectiveLiveCapUsdt = Math.min(activeEmergencyCap, legacyStaticCapUsdt);
-        if (effectiveLiveCapUsdt === activeEmergencyCap) {
+    if (input.v2AuthorityEntry === true) {
+        // V2 Authority Entry: Legacy 40 USDT cap is bypassed.
+        // It uses v2HardSafetyCapUsdt (default 500), or activeEmergencyCap if emergency failsafe is active.
+        if (activeEmergencyCap != null) {
+            effectiveLiveCapUsdt = Math.min(activeEmergencyCap, v2HardSafetyCapUsdt);
             legacyCapSource = "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE";
         } else {
+            effectiveLiveCapUsdt = v2HardSafetyCapUsdt;
+            legacyCapSource = "OKX_LIVE_V2_MAX_ORDER_NOTIONAL_USDT_HARD_SAFETY_CAP";
+        }
+    } else {
+        // Non-V2 / Legacy Entry: OKX_LIVE_MAX_ORDER_NOTIONAL_USDT (legacy 40 USDT) applies.
+        if (activeEmergencyCap != null && legacyStaticCapUsdt != null) {
+            effectiveLiveCapUsdt = Math.min(activeEmergencyCap, legacyStaticCapUsdt);
+            if (effectiveLiveCapUsdt === activeEmergencyCap) {
+                legacyCapSource = "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE";
+            } else {
+                legacyCapSource = "OKX_LIVE_MAX_ORDER_NOTIONAL_USDT_LEGACY_FAILSAFE";
+            }
+        } else if (activeEmergencyCap != null) {
+            effectiveLiveCapUsdt = activeEmergencyCap;
+            legacyCapSource = "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE";
+        } else if (legacyStaticCapUsdt != null) {
+            effectiveLiveCapUsdt = legacyStaticCapUsdt;
             legacyCapSource = "OKX_LIVE_MAX_ORDER_NOTIONAL_USDT_LEGACY_FAILSAFE";
         }
-    } else if (activeEmergencyCap != null) {
-        effectiveLiveCapUsdt = activeEmergencyCap;
-        legacyCapSource = "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE";
-    } else if (legacyStaticCapUsdt != null) {
-        effectiveLiveCapUsdt = legacyStaticCapUsdt;
-        legacyCapSource = "OKX_LIVE_MAX_ORDER_NOTIONAL_USDT_LEGACY_FAILSAFE";
     }
 
     return {
@@ -247,7 +272,8 @@ export function resolveUltimateSafetyCapForOrderSizing(input: Readonly<{
         emergencyCapUsdt,
         legacyStaticCapUsdt,
         effectiveLiveCapUsdt,
-        legacyCapSource
+        legacyCapSource,
+        v2HardSafetyCapUsdt
     };
 }
 
@@ -448,9 +474,13 @@ export function evaluateEquityAdaptiveSizing(
         legacyStaticCapUsdt: emergency.legacyStaticCapUsdt,
         effectiveLiveCapUsdt: emergency.effectiveLiveCapUsdt,
         legacyCapSource: emergency.legacyCapSource,
-        ultimateSafetyCapUsdt,
+        ultimateSafetyCapUsdt: ultimateSafetyCapUsdt ?? null,
         availableBalanceCapUsdt,
         preProbeNotionalUsdt: 0,
+        canonicalIntendedNotionalUsdt: 0,
+        collapseRatio: 1.0,
+        sizingCollapseDetected: false,
+        v2HardCapUsdt: emergency.v2HardSafetyCapUsdt,
         limitingAuthority: partial.limitingAuthority ?? "blocked",
         finalSizingAuthority: partial.finalSizingAuthority ?? "blocked",
         emergencyCapApplied,
@@ -530,11 +560,12 @@ export function evaluateEquityAdaptiveSizing(
             { key: "equity_initial_cap", value: equityInitialCapUsdt },
             { key: "symbol_capacity", value: remainingSymbolCapacity },
             { key: "account_capacity", value: remainingAccountCapacity },
+            { key: "available_balance_cap", value: availableBalanceCapUsdt },
             ...(Number.isFinite(policyRequested)
                 ? [{ key: "policy_requested", value: policyRequested }]
                 : []),
             ...(ultimateSafetyCapUsdt != null
-                ? [{ key: "emergency_failsafe_cap", value: ultimateSafetyCapUsdt }]
+                ? [{ key: input.v2AuthorityEntry ? "v2_hard_safety_cap" : "legacy_static_cap", value: ultimateSafetyCapUsdt }]
                 : [])
         ];
         preLotNotionalUsdt = Math.min(...entryCandidates.map((c) => c.value));
@@ -552,7 +583,7 @@ export function evaluateEquityAdaptiveSizing(
                 value: input.adverseRiskBudgetAllowedNotional ?? Number.POSITIVE_INFINITY
             },
             ...(ultimateSafetyCapUsdt != null
-                ? [{ key: "emergency_failsafe_cap", value: ultimateSafetyCapUsdt }]
+                ? [{ key: input.v2AuthorityEntry ? "v2_hard_safety_cap" : "legacy_static_cap", value: ultimateSafetyCapUsdt }]
                 : [])
         ];
         preLotNotionalUsdt = Math.min(...addonCandidates.map((c) => c.value));
@@ -565,7 +596,7 @@ export function evaluateEquityAdaptiveSizing(
             { key: "symbol_capacity", value: remainingSymbolCapacity },
             { key: "account_capacity", value: remainingAccountCapacity },
             ...(ultimateSafetyCapUsdt != null
-                ? [{ key: "emergency_failsafe_cap", value: ultimateSafetyCapUsdt }]
+                ? [{ key: input.v2AuthorityEntry ? "v2_hard_safety_cap" : "legacy_static_cap", value: ultimateSafetyCapUsdt }]
                 : [])
         ];
         preLotNotionalUsdt = Math.min(...pyramidCandidates.map((c) => c.value));
@@ -591,6 +622,7 @@ export function evaluateEquityAdaptiveSizing(
             netRiskBudgetUsdt,
             riskBasedNotionalUsdt,
             preLotNotionalUsdt: 0,
+            canonicalIntendedNotionalUsdt: 0,
             cappedFullEntryNotionalUsdt: 0,
             probeMultiplierApplied: 1,
             probeSizingSource: "none",
@@ -606,7 +638,7 @@ export function evaluateEquityAdaptiveSizing(
         });
     }
 
-    // --- Probe multiplier (ENTRY only) ---
+    // --- Probe multiplier layer (ENTRY only) ---
     // Applied after equity/symbol/account/emergency caps, before HTF multiplier and lot normalization.
     // null / undefined → 1 (no-op). >= 1 → 1 (no-op).
     // 0 < x < 1 → reduce by fraction.
@@ -630,6 +662,7 @@ export function evaluateEquityAdaptiveSizing(
                 netRiskBudgetUsdt,
                 riskBasedNotionalUsdt,
                 preLotNotionalUsdt: 0,
+                canonicalIntendedNotionalUsdt: 0,
                 cappedFullEntryNotionalUsdt,
                 probeMultiplierApplied: 0,
                 probeSizingSource: input.entryProbeSizingSource ?? "INVALID_ZERO_OR_NEGATIVE",
@@ -674,6 +707,7 @@ export function evaluateEquityAdaptiveSizing(
             netRiskBudgetUsdt,
             riskBasedNotionalUsdt,
             preLotNotionalUsdt: 0,
+            canonicalIntendedNotionalUsdt: 0,
             cappedFullEntryNotionalUsdt,
             probeMultiplierApplied,
             probeSizingSource,
@@ -722,6 +756,7 @@ export function evaluateEquityAdaptiveSizing(
             netRiskBudgetUsdt,
             riskBasedNotionalUsdt,
             preLotNotionalUsdt: 0,
+            canonicalIntendedNotionalUsdt: 0,
             cappedFullEntryNotionalUsdt,
             probeMultiplierApplied,
             probeSizingSource,
@@ -730,14 +765,17 @@ export function evaluateEquityAdaptiveSizing(
         });
     }
 
+    const canonicalIntendedNotionalUsdt = preLotNotionalUsdt;
     let normalizedContracts: number | null = null;
-    let normalizedNotionalUsdt: number | null = preLotNotionalUsdt;
+    let normalizedNotionalUsdt: number | null = canonicalIntendedNotionalUsdt;
     let actualRiskAtStopUsdt: number | null = null;
     let actualRiskPct: number | null = null;
+    let collapseRatio = 1.0;
+    let sizingCollapseDetected = false;
 
     if (input.instrumentSizing != null && input.lastPrice > 0) {
         const norm = normalizeOkxSwapContractsFromNotional({
-            desiredNotionalUsdt: preLotNotionalUsdt,
+            desiredNotionalUsdt: canonicalIntendedNotionalUsdt,
             lastPrice: input.lastPrice,
             sizing: input.instrumentSizing
         });
@@ -751,17 +789,57 @@ export function evaluateEquityAdaptiveSizing(
                 estimatedRoundTripFeeUsdt,
                 netRiskBudgetUsdt,
                 riskBasedNotionalUsdt,
-                preLotNotionalUsdt,
+                preLotNotionalUsdt: canonicalIntendedNotionalUsdt,
+                canonicalIntendedNotionalUsdt,
                 cappedFullEntryNotionalUsdt,
                 probeMultiplierApplied,
                 probeSizingSource,
                 probeAdjustedPreLotNotionalUsdt,
                 normalizedContracts: norm.normalized_contracts,
-                normalizedNotionalUsdt: norm.actualNotional
+                normalizedNotionalUsdt: norm.actualNotional,
+                collapseRatio: 0,
+                sizingCollapseDetected: false,
+                v2HardCapUsdt: emergency.v2HardSafetyCapUsdt
             });
         }
         normalizedContracts = norm.normalized_contracts;
         normalizedNotionalUsdt = norm.actualNotional;
+
+        // --- Sizing Collapse Guard ---
+        // Denominator is canonicalIntendedNotionalUsdt (after all legitimate caps and probe multipliers).
+        // If finalSubmittedNotional is severely truncated (< 60% of canonical intended) AND notional deficit exceeds 1 lot,
+        // it means an unexpected rogue cap or precision breakdown chopped the order.
+        const oneLotNotionalUsdt = input.instrumentSizing.lotSz * input.instrumentSizing.ctVal * input.lastPrice;
+        collapseRatio = canonicalIntendedNotionalUsdt > 0 ? (normalizedNotionalUsdt / canonicalIntendedNotionalUsdt) : 1;
+        if (
+            canonicalIntendedNotionalUsdt >= oneLotNotionalUsdt &&
+            collapseRatio < 0.60 &&
+            (canonicalIntendedNotionalUsdt - normalizedNotionalUsdt) > oneLotNotionalUsdt * 1.05
+        ) {
+            sizingCollapseDetected = true;
+            return baseFail({
+                blockReason: "SIZING_COLLAPSE_DETECTED",
+                riskPct,
+                qualityMultiplier: qualityMultiplier ?? 1,
+                riskBudgetUsdt,
+                stopDistancePct,
+                estimatedRoundTripFeeUsdt,
+                netRiskBudgetUsdt,
+                riskBasedNotionalUsdt,
+                preLotNotionalUsdt: canonicalIntendedNotionalUsdt,
+                canonicalIntendedNotionalUsdt,
+                cappedFullEntryNotionalUsdt,
+                probeMultiplierApplied,
+                probeSizingSource,
+                probeAdjustedPreLotNotionalUsdt,
+                normalizedContracts,
+                normalizedNotionalUsdt,
+                collapseRatio,
+                sizingCollapseDetected: true,
+                v2HardCapUsdt: emergency.v2HardSafetyCapUsdt
+            });
+        }
+
         const normalizedRoundTripFeeUsdt = normalizedNotionalUsdt * roundTripFeeRate;
         actualRiskAtStopUsdt =
             normalizedNotionalUsdt * stopDistancePct + normalizedRoundTripFeeUsdt;
@@ -779,7 +857,8 @@ export function evaluateEquityAdaptiveSizing(
                 estimatedRoundTripFeeUsdt,
                 netRiskBudgetUsdt,
                 riskBasedNotionalUsdt,
-                preLotNotionalUsdt,
+                preLotNotionalUsdt: canonicalIntendedNotionalUsdt,
+                canonicalIntendedNotionalUsdt,
                 cappedFullEntryNotionalUsdt,
                 probeMultiplierApplied,
                 probeSizingSource,
@@ -787,18 +866,21 @@ export function evaluateEquityAdaptiveSizing(
                 normalizedContracts,
                 normalizedNotionalUsdt,
                 actualRiskAtStopUsdt,
-                actualRiskPct
+                actualRiskPct,
+                collapseRatio,
+                sizingCollapseDetected: false,
+                v2HardCapUsdt: emergency.v2HardSafetyCapUsdt
             });
         }
     }
 
-    const finalOrderNotionalUsdt = normalizedNotionalUsdt ?? preLotNotionalUsdt;
+    const finalOrderNotionalUsdt = normalizedNotionalUsdt ?? canonicalIntendedNotionalUsdt;
     const finalRequiredMarginUsdt = finalOrderNotionalUsdt / Math.max(1, input.appliedLeverage);
     const marginCapacityPassed = finalRequiredMarginUsdt <= usableAvailableBalanceUsdt + 1e-9;
     let finalSizingAuthority = limitingAuthority;
     if (!marginCapacityPassed) {
         finalSizingAuthority = "available_balance_capacity";
-    } else if (normalizedNotionalUsdt != null && Math.abs(normalizedNotionalUsdt - preLotNotionalUsdt) > 1e-6) {
+    } else if (normalizedNotionalUsdt != null && Math.abs(normalizedNotionalUsdt - canonicalIntendedNotionalUsdt) > 1e-6) {
         finalSizingAuthority = "lot_normalization";
     } else if (externalSizeMultiplierApplied !== 1) {
         finalSizingAuthority = "external_size_multiplier";
@@ -818,23 +900,23 @@ export function evaluateEquityAdaptiveSizing(
             estimatedRoundTripFeeUsdt,
             netRiskBudgetUsdt,
             riskBasedNotionalUsdt,
-            preLotNotionalUsdt,
-            preProbeNotionalUsdt,
+            preLotNotionalUsdt: canonicalIntendedNotionalUsdt,
+            canonicalIntendedNotionalUsdt,
             cappedFullEntryNotionalUsdt,
             probeMultiplierApplied,
             probeSizingSource,
             probeAdjustedPreLotNotionalUsdt,
-            limitingAuthority,
-            finalSizingAuthority,
-            finalOrderNotionalUsdt,
-            finalRequiredMarginUsdt,
             normalizedContracts,
             normalizedNotionalUsdt,
             actualRiskAtStopUsdt,
             actualRiskPct,
-            marginCapacityPassed: false,
-            htfSizeMultiplierApplied,
-            externalSizeMultiplierApplied
+            finalOrderNotionalUsdt,
+            finalRequiredMarginUsdt,
+            limitingAuthority,
+            finalSizingAuthority,
+            collapseRatio,
+            sizingCollapseDetected: false,
+            v2HardCapUsdt: emergency.v2HardSafetyCapUsdt
         });
     }
 
@@ -861,7 +943,8 @@ export function evaluateEquityAdaptiveSizing(
         probeMultiplierApplied,
         probeSizingSource,
         probeAdjustedPreLotNotionalUsdt,
-        preLotNotionalUsdt,
+        preLotNotionalUsdt: canonicalIntendedNotionalUsdt,
+        canonicalIntendedNotionalUsdt,
         finalOrderNotionalUsdt,
         finalRequiredMarginUsdt,
         normalizedContracts,
@@ -872,6 +955,7 @@ export function evaluateEquityAdaptiveSizing(
         marginCapacityPassed: true,
         emergencyCapUsdt: emergency.emergencyCapUsdt,
         legacyStaticCapUsdt: emergency.legacyStaticCapUsdt,
+        v2HardCapUsdt: emergency.v2HardSafetyCapUsdt,
         effectiveLiveCapUsdt: emergency.effectiveLiveCapUsdt,
         ultimateSafetyCapUsdt,
         legacyCapSource: emergency.legacyCapSource,
@@ -891,6 +975,8 @@ export function evaluateEquityAdaptiveSizing(
         remainingAccountRiskUsdt,
         accountRiskCapUsdt,
         accountOpenRiskAllowedNotionalUsdt,
-        isMicroProbe: isMicro
+        isMicroProbe: isMicro,
+        collapseRatio,
+        sizingCollapseDetected: false
     };
 }
