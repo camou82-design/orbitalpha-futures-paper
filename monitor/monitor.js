@@ -2344,51 +2344,19 @@
     return kstMidnightUtc - kstOffset;
   }
 
-  function renderTodayRawFills(bundle) {
-    const container = $("today-fills-container");
-    if (!container) return;
+  function isBtcSymbol(sym) {
+    return String(sym || "").toUpperCase().includes("BTC");
+  }
 
-    initTodayFillsTabs();
+  function isEthSymbol(sym) {
+    return String(sym || "").toUpperCase().includes("ETH");
+  }
 
-    const list = (() => {
-      if (Array.isArray(bundle.todayRawFills)) {
-        return bundle.todayRawFills;
-      }
-      if (Array.isArray(bundle.rawFills) && bundle.rawFills.length > 0) {
-        const nowMs =
-          typeof bundle.generatedAt === "number" && Number.isFinite(bundle.generatedAt)
-            ? bundle.generatedAt
-            : Date.now();
-        const kstStart = startOfKstDayMs(nowMs);
-        const kstEnd = kstStart + 24 * 3600 * 1000;
-        return bundle.rawFills.filter((f) => {
-          const t = Number(f && f.fillTime) || 0;
-          return t >= kstStart && t < kstEnd;
-        });
-      }
-      return [];
-    })();
-
-    if (list.length === 0) {
-      container.innerHTML = '<div style="padding:1.5rem;text-align:center;color:var(--muted);font-size:0.85rem">오늘 KST 기준 체결 내역이 없습니다.</div>';
-      return;
+  function renderFillsTableRows(fills) {
+    if (!fills || fills.length === 0) {
+      return '<div class="split-trade-empty">최근 거래 없음</div>';
     }
-
-    const filtered = list.filter((f) => {
-      if (!f) return false;
-      const src = f.sourceLabel || (f.clOrdId ? "자동" : "수동");
-      if (todayFillsFilter === "bot") return src === "자동";
-      if (todayFillsFilter === "manual") return src !== "자동";
-      return true;
-    });
-
-    if (filtered.length === 0) {
-      container.innerHTML = '<div style="padding:1.5rem;text-align:center;color:var(--muted);font-size:0.85rem">선택한 필터 조건의 체결이 없습니다.</div>';
-      return;
-    }
-
-    const rowsHtml = filtered.map((fill) => {
-      const sym = String(fill.symbol || fill.instId || "—").replace("-USDT-SWAP", "USDT");
+    const rows = fills.map((fill) => {
       const side = String(fill.side || "").toLowerCase();
       const isBuy = side === "buy";
       const sideLabel = isBuy ? "매수 (BUY)" : "매도 (SELL)";
@@ -2414,13 +2382,24 @@
                 ? "color:var(--pnl-up)"
                 : "color:var(--muted)";
 
+      const fillPnlStr =
+        typeof fill.fillPnl === "number"
+          ? `<span class="${pnlToneClass(fill.fillPnl)}" style="font-weight:700">${esc(formatSignedUsd(fill.fillPnl))}</span>`
+          : '<span class="muted text-xs">—</span>';
+
+      const feeStr =
+        typeof fill.fee === "number"
+          ? `<span class="tabular-nums muted text-xs">${esc(formatUsd(fill.fee))}</span>`
+          : '<span class="muted text-xs">—</span>';
+
       return `
         <tr>
           <td class="tabular-nums muted text-xs">${esc(fillTimeStr)}</td>
-          <td><strong>${esc(sym)}</strong></td>
           <td><span class="${sideClass}" style="font-weight:700">${esc(sideLabel)}</span></td>
           <td class="tabular-nums" style="font-weight:600">${esc(fillSz)}</td>
           <td class="tabular-nums">${esc(fillPx)}</td>
+          <td class="tabular-nums">${fillPnlStr}</td>
+          <td class="tabular-nums">${feeStr}</td>
           <td>${badge}</td>
           <td><span style="display:inline-block;padding:0.15rem 0.45rem;border-radius:4px;font-size:0.75rem;font-weight:700;background:rgba(255,255,255,0.05);${typeTone}">${esc(fillTypeLabel)}</span></td>
           <td class="tabular-nums muted text-xs">${esc(tradeId)}</td>
@@ -2428,24 +2407,96 @@
       `;
     }).join("");
 
-    container.innerHTML = `
+    return `
       <table class="closed-trades-table">
         <thead>
           <tr>
             <th>체결시각 (KST)</th>
-            <th>종목</th>
             <th>구분</th>
             <th>체결수량</th>
             <th>체결가</th>
+            <th>손익</th>
+            <th>수수료</th>
             <th>출처</th>
             <th>체결유형</th>
             <th>체결번호 (Trade ID)</th>
           </tr>
         </thead>
         <tbody>
-          ${rowsHtml}
+          ${rows}
         </tbody>
       </table>
+    `;
+  }
+
+  function renderTodayRawFills(bundle) {
+    const container = $("today-fills-container");
+    if (!container) return;
+
+    initTodayFillsTabs();
+
+    const list = (() => {
+      if (Array.isArray(bundle.todayRawFills)) {
+        return bundle.todayRawFills;
+      }
+      if (Array.isArray(bundle.rawFills) && bundle.rawFills.length > 0) {
+        const nowMs =
+          typeof bundle.generatedAt === "number" && Number.isFinite(bundle.generatedAt)
+            ? bundle.generatedAt
+            : Date.now();
+        const kstStart = startOfKstDayMs(nowMs);
+        const kstEnd = kstStart + 24 * 3600 * 1000;
+        return bundle.rawFills.filter((f) => {
+          const t = Number(f && f.fillTime) || 0;
+          return t >= kstStart && t < kstEnd;
+        });
+      }
+      return [];
+    })();
+
+    const filtered = list.filter((f) => {
+      if (!f) return false;
+      const src = f.sourceLabel || (f.clOrdId ? "자동" : "수동");
+      if (todayFillsFilter === "bot") return src === "자동";
+      if (todayFillsFilter === "manual") return src !== "자동";
+      return true;
+    });
+
+    const btcFills = filtered
+      .filter((f) => isBtcSymbol(f.symbol || f.instId))
+      .sort((a, b) => (Number(b.fillTime) || 0) - (Number(a.fillTime) || 0))
+      .slice(0, 5);
+
+    const ethFills = filtered
+      .filter((f) => isEthSymbol(f.symbol || f.instId))
+      .sort((a, b) => (Number(b.fillTime) || 0) - (Number(a.fillTime) || 0))
+      .slice(0, 5);
+
+    container.innerHTML = `
+      <div class="split-trades-grid">
+        <div class="split-trade-card">
+          <div class="split-trade-card-header">
+            <div class="split-trade-card-title">
+              <span class="sym-name">BTCUSDT</span>
+              <span class="split-trade-count muted text-xs">(${btcFills.length}건)</span>
+            </div>
+          </div>
+          <div class="split-trade-card-body">
+            ${renderFillsTableRows(btcFills)}
+          </div>
+        </div>
+        <div class="split-trade-card">
+          <div class="split-trade-card-header">
+            <div class="split-trade-card-title">
+              <span class="sym-name">ETHUSDT</span>
+              <span class="split-trade-count muted text-xs">(${ethFills.length}건)</span>
+            </div>
+          </div>
+          <div class="split-trade-card-body">
+            ${renderFillsTableRows(ethFills)}
+          </div>
+        </div>
+      </div>
     `;
   }
 
@@ -2470,42 +2521,12 @@
     });
   }
 
-  function renderClosedTrades(bundle) {
-    lastCachedBundle = bundle;
-    const container = $("closed-trades-container");
-    if (!container) return;
-
-    initClosedTradesTabs();
-
-    const list = Array.isArray(bundle.positionsHistory) ? bundle.positionsHistory : [];
-    if (list.length === 0) {
-      container.innerHTML = '<div style="padding:1.5rem;text-align:center;color:var(--muted);font-size:0.85rem">기록된 체결 거래가 없습니다.</div>';
-      return;
+  function renderClosedTradesTableRows(trades) {
+    if (!trades || trades.length === 0) {
+      return '<div class="split-trade-empty">최근 거래 없음</div>';
     }
 
-    // Filter by tab
-    const filtered = list.filter((r) => {
-      if (!r) return false;
-      const lbl = resolveDisplaySourceLabel(r);
-      if (closedTradesFilter === "bot") {
-        return lbl === "자동";
-      }
-      if (closedTradesFilter === "manual") {
-        return lbl !== "자동";
-      }
-      return true;
-    });
-
-    if (filtered.length === 0) {
-      container.innerHTML = '<div style="padding:1.5rem;text-align:center;color:var(--muted);font-size:0.85rem">선택한 필터 조건의 거래가 없습니다.</div>';
-      return;
-    }
-
-    // Sort descending by closedAt
-    const sorted = [...filtered].sort((a, b) => (Number(b.closedAt) || 0) - (Number(a.closedAt) || 0));
-
-    const rowsHtml = sorted.map((row) => {
-      const sym = String(row.symbol || "—");
+    const rows = trades.map((row) => {
       const side = String(row.side || "").toLowerCase();
       const sideLabel = side === "short" ? "SHORT" : side === "long" ? "LONG" : "—";
       const sideClass = side === "short" ? "pos-card-side--short" : "pos-card-side--long";
@@ -2533,7 +2554,6 @@
 
       return `
         <tr>
-          <td><strong>${esc(sym)}</strong></td>
           <td><span class="${sideClass}" style="font-weight:700">${esc(sideLabel)}</span></td>
           <td class="tabular-nums">${esc(entryPx)}</td>
           <td class="tabular-nums">${esc(exitPx)}</td>
@@ -2542,17 +2562,16 @@
           <td class="tabular-nums text-xs">${esc(holdingStr)}</td>
           <td class="tabular-nums ${pnlTone}" style="font-weight:700">${esc(formatSignedUsd(pnlNet))}</td>
           <td class="tabular-nums muted text-xs">${esc(formatUsd(fee))}</td>
-          <td class="text-xs" style="max-width:180px;overflow:hidden;text-overflow:ellipsis" title="${esc(exitReason)}">${esc(exitReason)}</td>
+          <td class="text-xs" style="max-width:140px;overflow:hidden;text-overflow:ellipsis" title="${esc(exitReason)}">${esc(exitReason)}</td>
           <td>${badge}</td>
         </tr>
       `;
     }).join("");
 
-    container.innerHTML = `
+    return `
       <table class="closed-trades-table">
         <thead>
           <tr>
-            <th>종목</th>
             <th>방향</th>
             <th>진입가</th>
             <th>청산가</th>
@@ -2566,9 +2585,70 @@
           </tr>
         </thead>
         <tbody>
-          ${rowsHtml}
+          ${rows}
         </tbody>
       </table>
+    `;
+  }
+
+  function renderClosedTrades(bundle) {
+    lastCachedBundle = bundle;
+    const container = $("closed-trades-container");
+    if (!container) return;
+
+    initClosedTradesTabs();
+
+    const list = Array.isArray(bundle.positionsHistory) ? bundle.positionsHistory : [];
+
+    // Filter by tab
+    const filtered = list.filter((r) => {
+      if (!r) return false;
+      const lbl = resolveDisplaySourceLabel(r);
+      if (closedTradesFilter === "bot") {
+        return lbl === "자동";
+      }
+      if (closedTradesFilter === "manual") {
+        return lbl !== "자동";
+      }
+      return true;
+    });
+
+    // IMPORTANT: Filter by symbol FIRST, then sort and slice(0, 5) independently
+    const btcTrades = filtered
+      .filter((r) => isBtcSymbol(r.symbol))
+      .sort((a, b) => (Number(b.closedAt) || 0) - (Number(a.closedAt) || 0))
+      .slice(0, 5);
+
+    const ethTrades = filtered
+      .filter((r) => isEthSymbol(r.symbol))
+      .sort((a, b) => (Number(b.closedAt) || 0) - (Number(a.closedAt) || 0))
+      .slice(0, 5);
+
+    container.innerHTML = `
+      <div class="split-trades-grid">
+        <div class="split-trade-card">
+          <div class="split-trade-card-header">
+            <div class="split-trade-card-title">
+              <span class="sym-name">BTCUSDT</span>
+              <span class="split-trade-count muted text-xs">(${btcTrades.length}건)</span>
+            </div>
+          </div>
+          <div class="split-trade-card-body">
+            ${renderClosedTradesTableRows(btcTrades)}
+          </div>
+        </div>
+        <div class="split-trade-card">
+          <div class="split-trade-card-header">
+            <div class="split-trade-card-title">
+              <span class="sym-name">ETHUSDT</span>
+              <span class="split-trade-count muted text-xs">(${ethTrades.length}건)</span>
+            </div>
+          </div>
+          <div class="split-trade-card-body">
+            ${renderClosedTradesTableRows(ethTrades)}
+          </div>
+        </div>
+      </div>
     `;
   }
 

@@ -1406,17 +1406,75 @@ details[open] .details-summary::before {
 }
 
 .closed-trades-container {
-  overflow-x: auto;
   margin-top: 0.6rem;
+}
+
+.split-trades-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.85rem;
+}
+
+@media (min-width: 900px) {
+  .split-trades-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.split-trade-card {
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: rgba(9, 9, 11, 0.5);
+  background: rgba(18, 18, 22, 0.75);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.split-trade-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.55rem 0.85rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--border);
+}
+
+.split-trade-card-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.split-trade-card-title .sym-name {
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.split-trade-count {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.split-trade-card-body {
+  overflow-x: auto;
+  min-width: 0;
+  flex: 1;
+}
+
+.split-trade-empty {
+  padding: 1.5rem 1rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.82rem;
 }
 
 .closed-trades-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   text-align: left;
 }
 
@@ -1424,13 +1482,13 @@ details[open] .details-summary::before {
   background: rgba(255, 255, 255, 0.03);
   color: var(--dim);
   font-weight: 600;
-  padding: 0.65rem 0.85rem;
+  padding: 0.5rem 0.65rem;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
 
 .closed-trades-table td {
-  padding: 0.65rem 0.85rem;
+  padding: 0.5rem 0.65rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   color: var(--text);
   white-space: nowrap;
