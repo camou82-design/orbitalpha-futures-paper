@@ -254,6 +254,20 @@ export function deriveExecutionAuthority(
         closedCandleTs:
             useV2 && typeof selector.v2_result.metadata?.closedCandleTs === "number"
                 ? selector.v2_result.metadata.closedCandleTs
+                : undefined,
+        entrySemantic:
+            useV2 && typeof selector.v2_result.metadata?.entrySemantic === "string"
+                ? selector.v2_result.metadata.entrySemantic
+                : undefined,
+        postShockProbeEpisodeId:
+            useV2 && typeof selector.v2_result.metadata?.postShockProbeEpisodeId === "string"
+                ? selector.v2_result.metadata.postShockProbeEpisodeId
+                : undefined,
+        postShockProbePromotionState:
+            useV2 &&
+            (selector.v2_result.metadata?.postShockProbePromotionState === "PROBE_ONLY" ||
+                selector.v2_result.metadata?.postShockProbePromotionState === "STANDARD_PROMOTED")
+                ? selector.v2_result.metadata.postShockProbePromotionState
                 : undefined
     };
 }

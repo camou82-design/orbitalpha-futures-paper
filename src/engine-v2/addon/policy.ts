@@ -2,6 +2,10 @@ import type { EvaluateV2AddOnPolicyArgs, V2AddOnPolicyResult } from "./types";
 import { evaluateConfirmedAdverseAddOn } from "./adverse-addon";
 import { resolveV2AddonStopAuthority } from "./stop-authority";
 import {
+    evaluatePostShockProbeStandardPromotionRelease
+} from "../market-judgment/post-shock-probe-promotion-gate";
+import { V2_POST_SHOCK_COUNTER_PROBE_SEMANTIC } from "../market-judgment/post-shock-probe-episode-authority";
+import {
     MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,
     MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE
 } from "../risk-sizing/equity-adaptive-sizing";
@@ -42,8 +46,8 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
     const shockLockish =
         judgment.shockPhase === "DOWN_SHOCK" ||
         judgment.shockPhase === "UP_SHOCK" ||
-        v2State.crashState.includes("CRASH_LOCK") ||
-        v2State.pumpState.includes("PUMP_LOCK");
+        (typeof v2State.crashState === "string" && v2State.crashState.includes("CRASH_LOCK")) ||
+        (typeof v2State.pumpState === "string" && v2State.pumpState.includes("PUMP_LOCK"));
 
     if (side !== "long" && side !== "short") {
         return {
@@ -75,6 +79,98 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
             breakevenStopPrice,
             evidence: "side_none_forbidden"
         };
+    }
+    if (sameSidePosition?.entrySemantic === V2_POST_SHOCK_COUNTER_PROBE_SEMANTIC) {
+        if (sameSidePosition?.postShockProbePromotionState === "STANDARD_PROMOTED") {
+            return {
+                action: "ADDON_FORBIDDEN",
+                allowed: false,
+                reason: "POST_SHOCK_PROBE_STANDARD_PROMOTION_ALREADY_CONSUMED",
+                addOnEligible: false,
+                isInitial,
+                isAddOn,
+                side,
+                currentStage,
+                hasSameSidePosition,
+                hasOppositeSidePosition,
+                marketRegime: judgment.regime_final,
+                marketSubtype: judgment.subtype,
+                shockPhase: judgment.shockPhase,
+                rangePhase: judgment.rangePhase,
+                trendPhase: judgment.trendPhase,
+                transitionPhase: judgment.transitionPhase,
+                qualityScore,
+                reviewingTicks,
+                pnlPct,
+                boxPos,
+                emaGap,
+                trendWeaknessScore,
+                rangeConfidence,
+                postShockProbePromotionState: "STANDARD_PROMOTED",
+                breakevenStopRequired,
+                breakevenStopConfirmed,
+                breakevenStopPrice,
+                evidence: "post_shock_probe_standard_promotion_already_consumed"
+            };
+        }
+        if (sameSidePosition?.postShockProbePromotionState === "PROBE_ONLY") {
+            const stopPx =
+                typeof sameSidePosition.ledger_stop_px === "number" && sameSidePosition.ledger_stop_px > 0
+                    ? sameSidePosition.ledger_stop_px
+                    : typeof snapshot.lastPrice === "number" && snapshot.lastPrice > 0
+                        ? snapshot.lastPrice * (side === "long" ? 0.99 : 1.01)
+                        : 0;
+            const lastPx = Number(snapshot.lastPrice ?? 0);
+            const tp1 =
+                typeof sameSidePosition.takeProfitPlan?.tp1 === "number" && sameSidePosition.takeProfitPlan.tp1 > 0
+                    ? sameSidePosition.takeProfitPlan.tp1
+                    : stopPx > 0 && lastPx > 0
+                        ? side === "long"
+                            ? lastPx * 1.01
+                            : lastPx * 0.99
+                        : 0;
+            const promotionRelease = evaluatePostShockProbeStandardPromotionRelease({
+                symbol: String(args.symbol),
+                side,
+                regime: judgment.regime_final ?? judgment.regime,
+                snapshot,
+                directionalShockState: v2State.directionalShockState ?? judgment.shockPhase,
+                stopPrice: stopPx,
+                takeProfit1Px: tp1
+            });
+            if (!promotionRelease.eligible) {
+                return {
+                    action: "ADDON_FORBIDDEN",
+                    allowed: false,
+                    reason: "POST_SHOCK_PROBE_ONLY_STANDARD_GATE_PENDING",
+                    addOnEligible: false,
+                    isInitial,
+                    isAddOn,
+                    side,
+                    currentStage,
+                    hasSameSidePosition,
+                    hasOppositeSidePosition,
+                    marketRegime: judgment.regime_final,
+                    marketSubtype: judgment.subtype,
+                    shockPhase: judgment.shockPhase,
+                    rangePhase: judgment.rangePhase,
+                    trendPhase: judgment.trendPhase,
+                    transitionPhase: judgment.transitionPhase,
+                    qualityScore,
+                    reviewingTicks,
+                    pnlPct,
+                    boxPos,
+                    emaGap,
+                    trendWeaknessScore,
+                    rangeConfidence,
+                    postShockProbePromotionState: "PROBE_ONLY",
+                    breakevenStopRequired,
+                    breakevenStopConfirmed,
+                    breakevenStopPrice,
+                    evidence: promotionRelease.reason
+                };
+            }
+        }
     }
     if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
         return {
@@ -856,8 +952,24 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
 }
 
 export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnPolicyResult {
-    const result = evaluateV2AddOnPolicyCore(args);
+    let result = evaluateV2AddOnPolicyCore(args);
     const { side, judgment, snapshot, v2State } = args;
+    const sameSidePosition =
+        side === "long"
+            ? v2State.longPosition
+            : side === "short"
+                ? v2State.shortPosition
+                : null;
+    if (
+        sameSidePosition?.entrySemantic === V2_POST_SHOCK_COUNTER_PROBE_SEMANTIC &&
+        sameSidePosition?.postShockProbePromotionState === "PROBE_ONLY" &&
+        result.allowed
+    ) {
+        result = {
+            ...result,
+            postShockProbePromotionState: "STANDARD_PROMOTED"
+        };
+    }
     if (judgment.transitionPhase === "RANGE_TO_TREND") {
         const sameSidePosition =
             side === "long"
@@ -877,8 +989,8 @@ export function evaluateV2AddOnPolicy(args: EvaluateV2AddOnPolicyArgs): V2AddOnP
         const shockLockish =
             judgment.shockPhase === "DOWN_SHOCK" ||
             judgment.shockPhase === "UP_SHOCK" ||
-            v2State.crashState.includes("CRASH_LOCK") ||
-            v2State.pumpState.includes("PUMP_LOCK");
+            (typeof v2State.crashState === "string" && v2State.crashState.includes("CRASH_LOCK")) ||
+            (typeof v2State.pumpState === "string" && v2State.pumpState.includes("PUMP_LOCK"));
         const currentStage = sameSidePosition ? Math.max(1, Number(sameSidePosition.entryStage ?? 1)) : 0;
         const qualityScore = Math.max(0, Number(snapshot.qualityScore ?? 0));
 

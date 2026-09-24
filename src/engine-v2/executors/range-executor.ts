@@ -8,6 +8,18 @@ import {
 } from "../risk-sizing/fast-trend-shift-structural-stop";
 import { applyEthRangeMinimumStopDistance } from "../execution/eth-range-minimum-stop-authority";
 import { evaluateRangePostShockGuard } from "../market-judgment/range-post-shock-guard";
+import { resolveHighwayDirectionalAuthority } from "../highway-core/highway-directional-authority";
+import {
+    gatherPostShockProbeConsumedEpisodeIds,
+    isPostShockProbeEpisodeConsumed,
+    V2_POST_SHOCK_COUNTER_PROBE_SEMANTIC
+} from "../market-judgment/post-shock-probe-episode-authority";
+
+function resolvePostShockProbeConsumedEpisodeIds(input: EngineV2Input): string[] {
+    const fromState = (input.state as { postShockProbeConsumedEpisodeIds?: string[] }).postShockProbeConsumedEpisodeIds;
+    if (Array.isArray(fromState) && fromState.length > 0) return [...fromState];
+    return gatherPostShockProbeConsumedEpisodeIds(input.state.currentPositions ?? []);
+}
 
 function canonicalizeV2RangeStopPrice(
     symbol: string,
@@ -1037,9 +1049,94 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         isUpper &&
         reversalConfirmed === true;
 
-    // --- SHOCK & TREND GUARD (Original) ---
+    const highwayAuth = resolveHighwayDirectionalAuthority({
+        snapshot: sn,
+        candles: recentCandles,
+        symbol: input.symbol,
+        lastPrice
+    });
+
+    // --- SHOCK & TREND GUARD (Original + Highway Consensus Authority) ---
     if (isLower && currentStage === 0) {
-        if (judgment.shockPhase === "DOWN_SHOCK" && !isBtcRangeMrStaleDownShockBypass) {
+        if (highwayAuth.strongDown && !isBtcRangeMrStaleDownShockBypass) {
+            console.warn(JSON.stringify({
+                event: "V2_RANGE_LOWER_LONG_BLOCKED_BY_STRONG_HIGHWAY_DOWN_PROOF",
+                symbol: input.symbol,
+                shockPhase: judgment.shockPhase,
+                trendPhase: judgment.trendPhase,
+                emaGap,
+                highwayState: highwayAuth.state
+            }));
+            return {
+                signal: "NONE",
+                side: "none",
+                reason: "V2_RANGE_LOWER_LONG_BLOCKED_BY_STRONG_HIGHWAY_DOWN",
+                baseSizeIntent: 0,
+                recheckSuggested: true,
+                isAddOnEligible: false,
+                stopPrice: null,
+                invalidationPx: null,
+                metadata: { strongHighwayDown: true, shockPhase: judgment.shockPhase, trendPhase: judgment.trendPhase }
+            };
+        } else if (judgment.shockPhase === "DOWN_SHOCK" && !isBtcRangeMrStaleDownShockBypass) {
+            const postShockGuard = evaluateRangePostShockGuard({
+                symbol: input.symbol,
+                side: "long",
+                shockPhase: judgment.shockPhase,
+                directionalShockState: input.state.directionalShockState,
+                rawDirectionalShockState: (input.state as any)?.rawDirectionalShockState,
+                lastPrice,
+                boxHigh: sn.boxHigh ?? 0,
+                boxLow: sn.boxLow ?? 0,
+                boxMid: (Number(sn.boxHigh ?? 0) + Number(sn.boxLow ?? 0)) / 2,
+                boxPos: currentBoxPos,
+                atr,
+                candles: recentCandles,
+                boxCohesion01,
+                rangeConfidence,
+                evaluationMode: input.evaluationMode,
+                reversalConfirmed
+            });
+
+            if (postShockGuard.earlyReversalProbeEligible) {
+                const episodeId = postShockGuard.postShockProbeEpisodeId ?? "";
+                const consumedIds = resolvePostShockProbeConsumedEpisodeIds(input);
+                if (
+                    episodeId &&
+                    !isPostShockProbeEpisodeConsumed({
+                        symbol: input.symbol,
+                        side: "long",
+                        episodeId,
+                        consumedEpisodeIds: consumedIds
+                    })
+                ) {
+                    const calculatedStop =
+                        postShockGuard.recommendedStopPrice ?? lastPrice * 0.9975;
+                    const canonicalStop = canonicalizeV2RangeStopPrice(input.symbol, "long", lastPrice, calculatedStop);
+                    return {
+                        signal: "LONG_CANDIDATE",
+                        side: "long",
+                        reason: postShockGuard.reason ?? "V2_RANGE_POST_DOWN_SHOCK_LONG_EARLY_PROBE",
+                        baseSizeIntent: 0.25,
+                        recheckSuggested: true,
+                        isAddOnEligible: false,
+                        stopPrice: canonicalStop,
+                        invalidationPx: canonicalStop,
+                        metadata: {
+                            isProbe: true,
+                            probeMultiplier: 0.25,
+                            probeSizingSource: "V2_POST_SHOCK_COUNTER_PROBE",
+                            entrySemantic: V2_POST_SHOCK_COUNTER_PROBE_SEMANTIC,
+                            postShockProbeEpisodeId: episodeId,
+                            postShockProbePromotionState: "PROBE_ONLY",
+                            shockExtremumTs: postShockGuard.shockExtremumTs ?? null,
+                            reclaimConfirmed: postShockGuard.details.reclaimConfirmed,
+                            reversalConfirmed: postShockGuard.details.reversalConfirmed
+                        }
+                    };
+                }
+            }
+
             console.warn(JSON.stringify({
                 event: "V2_RANGE_LOWER_LONG_BLOCKED_BY_DOWN_SHOCK_PROOF",
                 symbol: input.symbol,
@@ -1105,7 +1202,85 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
     }
 
     if (isUpper && currentStage === 0) {
-        if (judgment.shockPhase === "UP_SHOCK" && !isBtcRangeMrStaleUpShockBypass) {
+        if (highwayAuth.strongUp && !isBtcRangeMrStaleUpShockBypass) {
+            console.warn(JSON.stringify({
+                event: "V2_RANGE_UPPER_SHORT_BLOCKED_BY_STRONG_HIGHWAY_UP_PROOF",
+                symbol: input.symbol,
+                shockPhase: judgment.shockPhase,
+                trendPhase: judgment.trendPhase,
+                emaGap,
+                highwayState: highwayAuth.state
+            }));
+            return {
+                signal: "NONE",
+                side: "none",
+                reason: "V2_RANGE_UPPER_SHORT_BLOCKED_BY_STRONG_HIGHWAY_UP",
+                baseSizeIntent: 0,
+                recheckSuggested: true,
+                isAddOnEligible: false,
+                stopPrice: null,
+                invalidationPx: null,
+                metadata: { strongHighwayUp: true, shockPhase: judgment.shockPhase, trendPhase: judgment.trendPhase }
+            };
+        } else if (judgment.shockPhase === "UP_SHOCK" && !isBtcRangeMrStaleUpShockBypass) {
+            const postShockGuard = evaluateRangePostShockGuard({
+                symbol: input.symbol,
+                side: "short",
+                shockPhase: judgment.shockPhase,
+                directionalShockState: input.state.directionalShockState,
+                rawDirectionalShockState: (input.state as any)?.rawDirectionalShockState,
+                lastPrice,
+                boxHigh: sn.boxHigh ?? 0,
+                boxLow: sn.boxLow ?? 0,
+                boxMid: (Number(sn.boxHigh ?? 0) + Number(sn.boxLow ?? 0)) / 2,
+                boxPos: currentBoxPos,
+                atr,
+                candles: recentCandles,
+                boxCohesion01,
+                rangeConfidence,
+                evaluationMode: input.evaluationMode,
+                reversalConfirmed
+            });
+
+            if (postShockGuard.earlyReversalProbeEligible) {
+                const episodeId = postShockGuard.postShockProbeEpisodeId ?? "";
+                const consumedIds = resolvePostShockProbeConsumedEpisodeIds(input);
+                if (
+                    episodeId &&
+                    !isPostShockProbeEpisodeConsumed({
+                        symbol: input.symbol,
+                        side: "short",
+                        episodeId,
+                        consumedEpisodeIds: consumedIds
+                    })
+                ) {
+                    const calculatedStop =
+                        postShockGuard.recommendedStopPrice ?? lastPrice * 1.0025;
+                    const canonicalStop = canonicalizeV2RangeStopPrice(input.symbol, "short", lastPrice, calculatedStop);
+                    return {
+                        signal: "SHORT_CANDIDATE",
+                        side: "short",
+                        reason: postShockGuard.reason ?? "V2_RANGE_POST_UP_SHOCK_SHORT_EARLY_PROBE",
+                        baseSizeIntent: 0.25,
+                        recheckSuggested: true,
+                        isAddOnEligible: false,
+                        stopPrice: canonicalStop,
+                        invalidationPx: canonicalStop,
+                        metadata: {
+                            isProbe: true,
+                            probeMultiplier: 0.25,
+                            probeSizingSource: "V2_POST_SHOCK_COUNTER_PROBE",
+                            entrySemantic: V2_POST_SHOCK_COUNTER_PROBE_SEMANTIC,
+                            postShockProbeEpisodeId: episodeId,
+                            postShockProbePromotionState: "PROBE_ONLY",
+                            shockExtremumTs: postShockGuard.shockExtremumTs ?? null,
+                            reclaimConfirmed: postShockGuard.details.reclaimConfirmed,
+                            reversalConfirmed: postShockGuard.details.reversalConfirmed
+                        }
+                    };
+                }
+            }
+
             console.warn(JSON.stringify({
                 event: "V2_RANGE_UPPER_SHORT_BLOCKED_BY_UP_SHOCK_PROOF",
                 symbol: input.symbol,

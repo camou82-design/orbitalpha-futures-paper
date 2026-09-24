@@ -27,6 +27,8 @@ export type V2AddOnReason =
     | "SIDE_MISMATCH_FORBIDDEN"
     | "SIDE_NONE_FORBIDDEN"
     | "WHIPSAW_SHOCK_RECHECK_ADDON_FORBIDDEN"
+    | "POST_SHOCK_PROBE_ONLY_STANDARD_GATE_PENDING"
+    | "POST_SHOCK_PROBE_STANDARD_PROMOTION_ALREADY_CONSUMED"
     | "BREAKEVEN_STOP_UPDATE_REQUIRED"
     | "BREAKEVEN_STOP_NOT_CONFIRMED";
 
@@ -56,6 +58,7 @@ export type V2AddOnPolicyResult = Readonly<{
     emaGap: number;
     trendWeaknessScore: number;
     rangeConfidence: number;
+    postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
     lockedProfitUsdt?: number;
     availableRiskBudgetUsdt?: number;
     addonMaxNotionalUsdt?: number;

@@ -109,6 +109,7 @@ import type { AnyEntryDecision } from "../strategy/executors/types";
 import { executorForExitEventPayload } from "../strategy/executors/executor-normalize";
 import { aiApproveEntry, aiInputFromDecision, type AiApprovalInput, type AiApprovalOutput } from "../ai/entry-approval";
 import { deriveLastLossReentryState, type LastLossReentryState } from "../engine-v2/state/loss-reentry-gate";
+import { gatherPostShockProbeConsumedEpisodeIds } from "../engine-v2/market-judgment/post-shock-probe-episode-authority";
 import {
   evaluateLeverageSelectionAuthority,
   buildLeverageSelectionAuthorityProof,
@@ -7818,7 +7819,8 @@ export class PaperEngine {
             externalMarketSnapshot,
             pendingFetchReady && cachedOpsPendingIsArray ? this.cachedOpsPending : [],
             pendingFetchReady && cachedOpsAlgosIsArray ? this.cachedOpsAlgos : [],
-            pendingFetchReady && cachedOpsPendingIsArray && cachedOpsAlgosIsArray
+            pendingFetchReady && cachedOpsPendingIsArray && cachedOpsAlgosIsArray,
+            this.cachedHistory
           );
         })(),
         v2Mode
@@ -23393,7 +23395,21 @@ export class PaperEngine {
               takeProfit1Px: authority.takeProfit1Px,
               takeProfit2Px: authority.takeProfit2Px,
               partialExitRatio: authority.partialExitRatio,
-              invalidationPx: stopPrice
+              invalidationPx: stopPrice,
+              ...((): Partial<PaperOpenPositionRecord> => {
+                const md = envelope.selector?.v2_result?.metadata as Record<string, unknown> | undefined;
+                if (md?.entrySemantic !== "V2_POST_SHOCK_COUNTER_PROBE") return {};
+                return {
+                  entrySemantic: "V2_POST_SHOCK_COUNTER_PROBE",
+                  postShockProbeEpisodeId:
+                    typeof md.postShockProbeEpisodeId === "string" ? md.postShockProbeEpisodeId : undefined,
+                  postShockProbePromotionState:
+                    md.postShockProbePromotionState === "PROBE_ONLY" ||
+                    md.postShockProbePromotionState === "STANDARD_PROMOTED"
+                      ? md.postShockProbePromotionState
+                      : "PROBE_ONLY"
+                };
+              })()
             };
             if (isPending) {
               this.logger.info("PAPER_OPEN_BLOCKED_UNFILLED_ORDER_PROOF", { open_trace_id: openTraceId, symbol: sym, side: intentSide, fast_path: true });
@@ -26019,7 +26035,17 @@ export class PaperEngine {
       takeProfit1Px: tp1Px,
       takeProfit2Px: tp2Px,
       targetPrice1: tp1Px,
-      partialExitRatio: typeof v2Decision.metadata?.partialExitRatio === "number" ? v2Decision.metadata.partialExitRatio : undefined
+      partialExitRatio: typeof v2Decision.metadata?.partialExitRatio === "number" ? v2Decision.metadata.partialExitRatio : undefined,
+      entrySemantic: typeof v2Decision.metadata?.entrySemantic === "string" ? v2Decision.metadata.entrySemantic : undefined,
+      postShockProbeEpisodeId:
+        typeof v2Decision.metadata?.postShockProbeEpisodeId === "string"
+          ? v2Decision.metadata.postShockProbeEpisodeId
+          : undefined,
+      postShockProbePromotionState:
+        v2Decision.metadata?.postShockProbePromotionState === "PROBE_ONLY" ||
+        v2Decision.metadata?.postShockProbePromotionState === "STANDARD_PROMOTED"
+          ? v2Decision.metadata.postShockProbePromotionState
+          : undefined
     };
 
     // Unfilled or 0 filled notional -> record pending order via upsert
@@ -26648,7 +26674,8 @@ export function buildV2StateBridge(
   externalMarketSnapshot?: import("../engine-v2/external-market-context/types").ExternalMarketSnapshot | null,
   okxPendingOrdersList?: ReadonlyArray<Record<string, unknown>>,
   okxAlgoOrdersList?: ReadonlyArray<Record<string, unknown>>,
-  okxPendingOrdersListAvailable?: boolean
+  okxPendingOrdersListAvailable?: boolean,
+  closedHistoryForPostShockProbe?: ReadonlyArray<PaperClosedPositionRecord>
 ): V2BridgeState {
   let okxActualSide = "none";
   if (lastLivePositionsPayload && Array.isArray(lastLivePositionsPayload)) {
@@ -26724,10 +26751,17 @@ export function buildV2StateBridge(
           ledgerEntryPrice: p.originalEntryPrice ?? p.entryPrice,
           managementAvgPx: p.actualAvgPx ?? p.entryPrice,
           lifecycleState: p.lifecycleState,
-          manualAugmentActive: p.manualAugmentActive === true || p.lifecycleState === "MANUAL_SIZE_AUGMENTED"
+          manualAugmentActive: p.manualAugmentActive === true || p.lifecycleState === "MANUAL_SIZE_AUGMENTED",
+          entrySemantic: p.entrySemantic,
+          postShockProbeEpisodeId: p.postShockProbeEpisodeId,
+          postShockProbePromotionState: p.postShockProbePromotionState
         };
       })
       .filter((x): x is V2BridgePosition => x !== null),
+    postShockProbeConsumedEpisodeIds: gatherPostShockProbeConsumedEpisodeIds(
+      opensAfterClose,
+      closedHistoryForPostShockProbe ?? []
+    ),
     globalRiskScore: 0.5,
     lossStreaks: lastRisk?.recentLossStreakByMode ?? {},
     directionalShockState: (lastRisk?.directionalShockState ?? "UNKNOWN") as "UP" | "DOWN" | "NONE" | "UNKNOWN",

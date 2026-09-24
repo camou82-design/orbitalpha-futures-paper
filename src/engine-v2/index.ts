@@ -1410,6 +1410,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             availableRiskBudgetUsdt: addOnPolicy.availableRiskBudgetUsdt,
             addonMaxNotionalUsdt: addOnPolicy.addonMaxNotionalUsdt,
             finalAddonNotionalUsdt: finalAddonNotionalUsdt,
+            ...(addOnPolicy.postShockProbePromotionState ? { postShockProbePromotionState: addOnPolicy.postShockProbePromotionState } : {}),
             ...( {
                 addOnPolicyMode: addOnPolicy.addonMode ?? "NONE",
                 requestedAddonNotionalUsdt: addOnPolicy.requestedAddonNotionalUsdt
@@ -8266,7 +8267,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 let entryProbeSizeMultiplier: number | null = null;
                 let probeSizingSource = "NONE";
                 if (!isAddOn) {
-                    if (ethRangeQualityResult?.isProbe === true) {
+                    const execProbeMeta = (execution?.metadata ?? {}) as Record<string, unknown>;
+                    if (
+                        execProbeMeta.probeSizingSource === "V2_POST_SHOCK_COUNTER_PROBE" &&
+                        typeof execProbeMeta.probeMultiplier === "number" &&
+                        execProbeMeta.probeMultiplier > 0 &&
+                        execProbeMeta.probeMultiplier < 1
+                    ) {
+                        entryProbeSizeMultiplier = execProbeMeta.probeMultiplier;
+                        probeSizingSource = "V2_POST_SHOCK_COUNTER_PROBE";
+                    } else if (ethRangeQualityResult?.isProbe === true) {
                         entryProbeSizeMultiplier = ethRangeQualityResult.probeMultiplier;
                         probeSizingSource = ethRangeQualityResult.classification;
                     } else if (promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE") {
@@ -11167,9 +11177,13 @@ export function adaptV2Input(
                     ledgerEntryPrice: p.ledgerEntryPrice,
                     managementAvgPx: p.managementAvgPx,
                     lifecycleState: p.lifecycleState,
-                    manualAugmentActive: p.manualAugmentActive
+                    manualAugmentActive: p.manualAugmentActive,
+                    entrySemantic: p.entrySemantic,
+                    postShockProbeEpisodeId: p.postShockProbeEpisodeId,
+                    postShockProbePromotionState: p.postShockProbePromotionState
                 };
             }),
+            postShockProbeConsumedEpisodeIds: (state as { postShockProbeConsumedEpisodeIds?: string[] }).postShockProbeConsumedEpisodeIds ?? [],
             globalRiskScore: state.globalRiskScore,
             lossStreaks: state.lossStreaks,
             directionalShockState: state.directionalShockState,

@@ -959,6 +959,9 @@ export type PaperOpenPositionRecord = {
 
   /** V2 probe 진입 사유 (EARLY_REVERSAL_SHORT_PROBE 등) - exit/partial 단계에서 읽음. */
   v2EntryReason?: string;
+  entrySemantic?: string;
+  postShockProbeEpisodeId?: string;
+  postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
   /** Probe TP1 주문 제출 완료 여부 (요청 ≠ 체결 분리). */
   probeTP1Submitted?: boolean;
   /** Probe TP1 체결 완료 여부. */

@@ -1,4 +1,5 @@
 import { EngineV2Side, LegacyConfigAdapter, ExecutorOutput, V2CommittedRiskPlan } from "../types";
+import { resolveHighwayDirectionalAuthority } from "./highway-directional-authority";
 
 export interface HighwayEntryGateInput {
     symbol: string;
@@ -171,33 +172,52 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         rejectReason = "HIGHWAY_PLAN_MISSING";
     }
 
-    // Step 1: 시장장세 (Market Regime)
+    // Step 1: 시장장세 (Market Regime & Highway Directional Consensus)
     if (allowed) {
         if (regime === "NO_TRADE" || regime === "UNKNOWN" || regime === "CHOP") {
             allowed = false;
             finalDecision = "HOLD";
             rejectReason = "REGIME_UNFAVORABLE";
-        } else if (directionalShockState === "DOWN" && side === "long") {
-            const hasReclaim = (execution?.metadata as any)?.reclaimConfirmed === true;
-            const isLongReversalWatch =
-                (execution?.metadata as any)?.long_reversal_watch_promoted === true ||
-                (execution?.metadata as any)?.entryReason === "V2_LONG_REVERSAL_WATCH_PROBE" ||
-                (execution?.metadata as any)?.entryReason === "V2_LONG_REVERSAL_HTF_UPGRADED_AUTHORITY";
-            if (!hasReclaim && !isLongReversalWatch) {
+        } else {
+            const highwayAuth = resolveHighwayDirectionalAuthority({
+                snapshot,
+                candles: snapshot?.candles,
+                symbol,
+                lastPrice
+            });
+
+            if (side === "short" && highwayAuth.strongUp) {
                 allowed = false;
-                finalDecision = "HOLD";
-                rejectReason = "OPPOSING_DOWN_SHOCK_ACTIVE";
-            }
-        } else if (directionalShockState === "UP" && side === "short") {
-            const hasReclaim = (execution?.metadata as any)?.reclaimConfirmed === true;
-            const isShortReversalWatch =
-                (execution?.metadata as any)?.short_reversal_watch_promoted === true ||
-                (execution?.metadata as any)?.entryReason === "V2_SHORT_REVERSAL_WATCH_PROBE" ||
-                (execution?.metadata as any)?.entryReason === "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY";
-            if (!hasReclaim && !isShortReversalWatch) {
+                finalDecision = "SKIP";
+                rejectReason = "OPPOSING_STRONG_HIGHWAY_UP_ACTIVE";
+            } else if (side === "long" && highwayAuth.strongDown) {
                 allowed = false;
-                finalDecision = "HOLD";
-                rejectReason = "OPPOSING_UP_SHOCK_ACTIVE";
+                finalDecision = "SKIP";
+                rejectReason = "OPPOSING_STRONG_HIGHWAY_DOWN_ACTIVE";
+            } else if (directionalShockState === "DOWN" && side === "long") {
+                const hasReclaim = (execution?.metadata as any)?.reclaimConfirmed === true;
+                const isLongReversalWatch =
+                    (execution?.metadata as any)?.long_reversal_watch_promoted === true ||
+                    (execution?.metadata as any)?.entryReason === "V2_LONG_REVERSAL_WATCH_PROBE" ||
+                    (execution?.metadata as any)?.entryReason === "V2_LONG_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
+                    (execution?.metadata as any)?.isProbe === true;
+                if (!hasReclaim && !isLongReversalWatch) {
+                    allowed = false;
+                    finalDecision = "HOLD";
+                    rejectReason = "OPPOSING_DOWN_SHOCK_ACTIVE";
+                }
+            } else if (directionalShockState === "UP" && side === "short") {
+                const hasReclaim = (execution?.metadata as any)?.reclaimConfirmed === true;
+                const isShortReversalWatch =
+                    (execution?.metadata as any)?.short_reversal_watch_promoted === true ||
+                    (execution?.metadata as any)?.entryReason === "V2_SHORT_REVERSAL_WATCH_PROBE" ||
+                    (execution?.metadata as any)?.entryReason === "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
+                    (execution?.metadata as any)?.isProbe === true;
+                if (!hasReclaim && !isShortReversalWatch) {
+                    allowed = false;
+                    finalDecision = "HOLD";
+                    rejectReason = "OPPOSING_UP_SHOCK_ACTIVE";
+                }
             }
         }
     }

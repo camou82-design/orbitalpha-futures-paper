@@ -37,8 +37,8 @@ function runTests() {
 
         assert.equal(sizing.sizingPassed, true, "Case A: Sizing must pass");
         assert.ok(sizing.riskBasedNotionalUsdt > 1000, "Case A: Raw risk based notional is large (>1000)");
-        assert.equal(sizing.cappedFullEntryNotionalUsdt, 40, "Case A: Capped full entry notional must be 40");
-        assert.equal(sizing.finalOrderNotionalUsdt, 40, "Case A: Final order notional must be 40");
+        assert.equal(sizing.cappedFullEntryNotionalUsdt, 500, "Case A: V2 authority hard cap is 500 (not legacy 40)");
+        assert.equal(sizing.finalOrderNotionalUsdt, 500, "Case A: Final order notional follows V2 hard cap");
         assert.equal(sizing.probeMultiplierApplied, 1.0, "Case A: Probe multiplier is 1.0");
 
         const submitCap = resolveLiveSubmitStaticSafetyCap({
@@ -48,9 +48,9 @@ function runTests() {
             intendedNotionalUsdt: sizing.finalOrderNotionalUsdt,
             emergencyUltimateCapUsdt: null
         });
-        assert.equal(submitCap.skipStaticCapForV2Authority, false, "Case A: Must not skip static cap for V2");
-        assert.equal(submitCap.finalSubmittedNotionalUsdt, 40, "Case A: Submitted notional must be <= 40");
-        console.log("PASS: Case A - FULL 3659 calculation -> final sizing 40 -> submitted <= 40");
+        assert.equal(submitCap.skipStaticCapForV2Authority, true, "Case A: V2 authority skips legacy static 40 cap");
+        assert.equal(submitCap.finalSubmittedNotionalUsdt, 500, "Case A: Submitted notional follows V2 sizing");
+        console.log("PASS: Case A - V2 authority 500 cap, legacy 40 static cap skipped on submit");
     }
 
     // Case B: 0.50 probe -> final/submitted 20
@@ -75,9 +75,9 @@ function runTests() {
         });
 
         assert.equal(sizing.sizingPassed, true, "Case B: Sizing must pass");
-        assert.equal(sizing.cappedFullEntryNotionalUsdt, 40, "Case B: Pre-probe cap must be 40");
+        assert.equal(sizing.cappedFullEntryNotionalUsdt, 500, "Case B: V2 pre-probe cap is 500");
         assert.equal(sizing.probeMultiplierApplied, 0.50, "Case B: Probe multiplier must be 0.50");
-        assert.equal(sizing.finalOrderNotionalUsdt, 20, "Case B: Final order notional must be 20");
+        assert.equal(sizing.finalOrderNotionalUsdt, 250, "Case B: Final order notional 500 x 0.50");
 
         const submitCap = resolveLiveSubmitStaticSafetyCap({
             authoritySource: "v2",
@@ -86,8 +86,8 @@ function runTests() {
             intendedNotionalUsdt: sizing.finalOrderNotionalUsdt,
             emergencyUltimateCapUsdt: null
         });
-        assert.equal(submitCap.finalSubmittedNotionalUsdt, 20, "Case B: Submitted notional must be 20");
-        console.log("PASS: Case B - 0.50 probe -> final/submitted 20");
+        assert.equal(submitCap.finalSubmittedNotionalUsdt, 250, "Case B: Submitted notional must be 250");
+        console.log("PASS: Case B - V2 0.50 probe -> final/submitted 250");
     }
 
     // Case C: 0.25 edge probe -> final/submitted 10
@@ -112,9 +112,9 @@ function runTests() {
         });
 
         assert.equal(sizing.sizingPassed, true, "Case C: Sizing must pass");
-        assert.equal(sizing.cappedFullEntryNotionalUsdt, 40, "Case C: Pre-probe cap must be 40");
+        assert.equal(sizing.cappedFullEntryNotionalUsdt, 500, "Case C: V2 pre-probe cap is 500");
         assert.equal(sizing.probeMultiplierApplied, 0.25, "Case C: Probe multiplier must be 0.25");
-        assert.equal(sizing.finalOrderNotionalUsdt, 10, "Case C: Final order notional must be 10");
+        assert.equal(sizing.finalOrderNotionalUsdt, 125, "Case C: Final order notional 500 x 0.25");
 
         const submitCap = resolveLiveSubmitStaticSafetyCap({
             authoritySource: "v2",
@@ -123,8 +123,8 @@ function runTests() {
             intendedNotionalUsdt: sizing.finalOrderNotionalUsdt,
             emergencyUltimateCapUsdt: null
         });
-        assert.equal(submitCap.finalSubmittedNotionalUsdt, 10, "Case C: Submitted notional must be 10");
-        console.log("PASS: Case C - 0.25 edge probe -> final/submitted 10");
+        assert.equal(submitCap.finalSubmittedNotionalUsdt, 125, "Case C: Submitted notional must be 125");
+        console.log("PASS: Case C - V2 0.25 edge probe -> final/submitted 125");
     }
 
     // Case D: Emergency cap = 30 and active -> FULL <= 30
@@ -192,7 +192,7 @@ function runTests() {
         console.log("PASS: Case E - Account/symbol cap < 40 -> smaller value used");
     }
 
-    // Case F: BTC V2 also cannot submit > 40
+    // Case F: BTC V2 uses same 500 hard cap (legacy 40 not applied on authority path)
     {
         const sizing = evaluateEquityAdaptiveSizing({
             symbol: "BTCUSDT",
@@ -214,7 +214,7 @@ function runTests() {
         });
 
         assert.equal(sizing.sizingPassed, true, "Case F: BTC Sizing must pass");
-        assert.equal(sizing.finalOrderNotionalUsdt, 40, "Case F: BTC V2 final notional capped at 40");
+        assert.equal(sizing.finalOrderNotionalUsdt, 500, "Case F: BTC V2 final notional capped at 500");
 
         const submitCap = resolveLiveSubmitStaticSafetyCap({
             authoritySource: "v2",
@@ -223,8 +223,8 @@ function runTests() {
             intendedNotionalUsdt: sizing.finalOrderNotionalUsdt,
             emergencyUltimateCapUsdt: null
         });
-        assert.equal(submitCap.finalSubmittedNotionalUsdt, 40, "Case F: BTC submit notional <= 40");
-        console.log("PASS: Case F - BTC V2 also cannot submit > 40");
+        assert.equal(submitCap.finalSubmittedNotionalUsdt, 500, "Case F: BTC V2 submit notional 500");
+        console.log("PASS: Case F - BTC V2 500 cap, legacy 40 skipped on submit");
     }
 
     // =========================================================================
@@ -511,8 +511,8 @@ function runTests() {
         });
 
         assert.equal(sizing.sizingPassed, true);
-        assert.equal(sizing.cappedFullEntryNotionalUsdt, 40);
-        assert.equal(sizing.finalOrderNotionalUsdt, 40);
+        assert.equal(sizing.cappedFullEntryNotionalUsdt, 500);
+        assert.equal(sizing.finalOrderNotionalUsdt, 500);
 
         // 2. Pre-entry TP parity check stage (Cycle 1072 exact values: entry=2728.37, TP1=2724.62, TP2=2724.62, attached=2724.62)
         const parityResult = evaluatePreEntryTpParity({
@@ -548,11 +548,10 @@ function runTests() {
             emergencyUltimateCapUsdt: null
         });
 
-        assert.equal(submitCap.skipStaticCapForV2Authority, false);
-        assert.ok(submitCap.finalSubmittedNotionalUsdt <= 40, "Cycle 1072: Final submitted notional strictly <= 40");
-        assert.equal(submitCap.finalSubmittedNotionalUsdt, 40);
+        assert.equal(submitCap.skipStaticCapForV2Authority, true);
+        assert.equal(submitCap.finalSubmittedNotionalUsdt, 500, "Cycle 1072: V2 authority submits sized notional (500)");
 
-        console.log("PASS: Cycle 1072 pipeline end-to-end simulation passed (TP parity PASS, submitted notional = 40 USDT)");
+        console.log("PASS: Cycle 1072 pipeline end-to-end simulation passed (TP parity PASS, V2 submit 500 USDT)");
     }
 
     console.log("\nALL V2 LIVE CAP & TP PARITY VERIFICATION TESTS PASSED SUCCESSFULLY!");

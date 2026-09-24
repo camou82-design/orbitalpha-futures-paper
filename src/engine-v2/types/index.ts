@@ -122,6 +122,9 @@ export interface EngineV2Position {
     addonCount?: number;
     /** V2 진입 사유 - probe TP/exit 단계에서 진입 유형 판별에 사용. */
     v2EntryReason?: string;
+    entrySemantic?: string;
+    postShockProbeEpisodeId?: string;
+    postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
     /** Probe TP1 주문 제출 완료 여부 (요청 ≠ 체결 분리). */
     probeTP1Submitted?: boolean;
     /** Probe TP1 체결 완료 여부. */
@@ -290,6 +293,9 @@ export interface LegacyPositionAdapter {
     managementAvgPx?: number;
     lifecycleState?: string;
     manualAugmentActive?: boolean;
+    entrySemantic?: string;
+    postShockProbeEpisodeId?: string;
+    postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
 }
 
 export interface LegacyResultAdapter {
@@ -393,6 +399,7 @@ export interface EngineV2Input {
         requestedAddonNotionalUsdt?: number;
         okxActualSide?: string;
         lastLossReentryState?: LastLossReentryState | null;
+        postShockProbeConsumedEpisodeIds?: string[];
         /** Optional external market snapshot — fail-open when absent. */
         externalMarketSnapshot?: import("../external-market-context/types").ExternalMarketSnapshot | null;
     };
@@ -665,10 +672,15 @@ export interface V2BridgePosition {
     managementAvgPx?: number;
     lifecycleState?: string;
     manualAugmentActive?: boolean;
+    entrySemantic?: string;
+    postShockProbeEpisodeId?: string;
+    postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
 }
 
 export interface V2BridgeState {
     currentPositions: V2BridgePosition[];
+    /** Ledger-derived post-shock probe episodes already consumed (PM2 rehydrate). */
+    postShockProbeConsumedEpisodeIds?: string[];
     globalRiskScore: number;
     lossStreaks: Record<string, number>;
     directionalShockState: "UP" | "DOWN" | "NONE" | "UNKNOWN";
@@ -1389,6 +1401,9 @@ export type EntryExecutionAuthority = Readonly<{
     authoritativeCandleTs?: number | null;
     /** Last closed candle ts used by structural/closed-candle gates. */
     closedCandleTs?: number | null;
+    entrySemantic?: string;
+    postShockProbeEpisodeId?: string;
+    postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
 }>;
 
 /** Internal Pipeline Result */
