@@ -3709,11 +3709,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         })
                     );
                 }
-            } else if (
+            }
+            if (
                 !promotionApplied &&
                 (rangeSideCandidate === "long" || trendSideCandidate === "long") &&
                 zone === "lower" &&
-                sideZoneValid === true &&
+                ((rangeSideCandidate === "long" && zone === "lower") || sideZoneValid === true) &&
                 (judgment.htf_entry_policy === "LONG_ONLY_OR_NONE" || judgment.htf_entry_policy === "ALLOW" || judgment.htf_entry_policy === "PROBE_ONLY") &&
                 (judgment.macro_source === "actual_candles" || judgment.macro_source === "partial_actual_candles") &&
                 qualityScore >= 60 &&
@@ -6284,6 +6285,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         sideVetoDetail = "RANGE_UPPER_SHORT_HTF_ALIGNED_BYPASS";
     } else if (promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE") {
         sideVetoDetail = "RANGE_TREND_RECLAIM_PROBE_APPLIED";
+    } else if (promotionReason === "V2_LOWER_LONG_REACTION_PROBE_PROMOTION") {
+        sideVetoDetail = "LOWER_LONG_REACTION_PROBE_PROMOTION_APPLIED";
     } else if (judgment.subtype === "WHIPSAW_SHOCK_RECHECK") {
         sideVetoDetail = "WHIPSAW_SHOCK_RECHECK_ACTIVE";
     } else if (v2SideAfterPromotion === "none" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP") {
@@ -9829,7 +9832,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 6: Unify diagnostic suppression reasons for audit-ready transparency
     let whipsawBlocking = judgment.subtype === "WHIPSAW_SHOCK_RECHECK";
-    if (!promotionBlockReason && finalDecision !== "ENTER" && !hardBlockPresent && (trendSideCandidate !== "none" || activeEngineRouting === "TREND" || marketMode === "TREND")) {
+    if (!promotionBlockReason && !v2RejectReasonAfterPromotion && finalDecision !== "ENTER" && !hardBlockPresent && (trendSideCandidate !== "none" || activeEngineRouting === "TREND" || marketMode === "TREND")) {
         if (!trendOk) {
             if (trendWeaknessScore >= 0.5) {
                 promotionBlockReason = "TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH";
