@@ -2015,6 +2015,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const trendWeaknessFromMeta = readNullableNumber(execMeta.trendWeaknessScore, input.snapshot?.trendWeaknessScore);
     const relaxedRangeEntry = readNullableBoolean(execMeta.relaxedRangeEntry) === true;
     const reversalConfirmed = readNullableBoolean(execMeta.reversal_confirmed) === true;
+    const overshootReclaimConfirmed = readNullableBoolean(execMeta.overshoot_reclaim_confirmed) === true;
+    const reversalAuthorityConfirmed =
+        reversalConfirmed ||
+        overshootReclaimConfirmed ||
+        readNullableBoolean(execMeta.reversal_authority_confirmed) === true;
     const sideZoneValidMeta = readNullableBoolean(execMeta.sideZoneValid);
     const sideZoneValid =
         sideZoneValidMeta != null
@@ -3466,6 +3471,48 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
         if (trendPromotionBlockApplies) {
             const metaRec = execMeta as Record<string, unknown>;
+            // ── RETEST GUARD: isProvenNonRangeExecutionProvenance ─────────────────────────
+            // BREAKOUT/BREAKDOWN_RETEST_NOT_CONFIRMED is a RANGE boundary continuation guard.
+            // It must hard-veto RANGE lineage only. Canonical Highway/Trend/FTS lineages
+            // that hold ENTER authority are exempt.
+            //
+            // LAYER 1 – Proven Execution Lineage (used here):
+            //   • execution.reason canonical keyword provenance
+            //     (trend / continuation / breakout / breakdown / fast_shift)
+            //   • execMeta.trend_continuation
+            //   • execMeta.fast_trend_shift
+            //
+            // LAYER 2 – Market/Classification Hints (EXCLUDED here, per 2026-09-25 audit):
+            //   • activeEngineRouting label (standalone)
+            //   • judgment.subtype (TREND*, FAST_TREND_SHIFT, EARLY_PROBE)
+            //   • isTrendAuthorityCandidate
+            //
+            // Keywords REMOVED vs prior draft: highway, momentum, fast_trend
+            //   (not present in canonical isNonRangeExecutionLineage exec.reason set)
+            //
+            // Does NOT modify isNonRangeExecutionLineage (Range Guard — unchanged).
+            const execReasonRaw = typeof execution.reason === "string" ? execution.reason.toLowerCase() : "";
+            const isProvenNonRangeExecutionProvenance =
+                // Native ENTER authority (equivalent to nativeExecutorEnterAuthority at this pre-promotion point)
+                v2DecisionBeforePromotion === "ENTER" &&
+                v2SideBeforePromotion !== "none" &&
+                (
+                    // execution.reason canonical provenance only — matches isNonRangeExecutionLineage reason branch
+                    execReasonRaw.includes("trend") ||
+                    execReasonRaw.includes("continuation") ||
+                    execReasonRaw.includes("breakout") ||
+                    execReasonRaw.includes("breakdown") ||
+                    execReasonRaw.includes("fast_shift") ||
+                    // execMeta flags: set by executor, reliable provenance
+                    metaRec.trend_continuation === true ||
+                    metaRec.fast_trend_shift === true
+                );
+            // EXCLUDED (Layer 2 — no bypass authority):
+            //   RANGE lineage + exec.reason contains "highway"  → no bypass (highway removed)
+            //   RANGE lineage + exec.reason contains "momentum" → no bypass (momentum removed)
+            //   RANGE lineage + subtype FAST_TREND_SHIFT alone  → no bypass (subtype ≠ Layer 1)
+            //   RANGE lineage + subtype TREND_* alone           → no bypass (subtype ≠ Layer 1)
+            //   routing=TREND label alone                       → no bypass (routing ≠ Layer 1)
             const upperLongProbeEligible =
                 trendSideCandidate === "long" &&
                 zone === "upper" &&
@@ -3543,7 +3590,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 type UpperLongGate = string | null;
                 let upperLongGate: UpperLongGate = null;
                 if (chaseBlockedFlag) upperLongGate = "TREND_PROMOTION_BLOCKED_CHASE_BLOCKED";
-                else if (retestRequiredFlag) upperLongGate = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
+                // RETEST guard: skipped for proven non-RANGE execution provenance (Layer 1 only)
+                else if (retestRequiredFlag && !isProvenNonRangeExecutionProvenance) upperLongGate = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
                 else if (supportRecheckFlag) upperLongGate = "TREND_PROMOTION_BLOCKED_SUPPORT_RECHECK_REQUIRED";
                 else if (!(riskLongAllow && allowNewLong)) upperLongGate = "TREND_PROMOTION_BLOCKED_LONG_NOT_ALLOWED";
                 else if (!paperExecutionReady) upperLongGate = "TREND_PROMOTION_BLOCKED_PAPER_EXECUTION_NOT_READY";
@@ -3752,8 +3800,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     v2DecisionAfterPromotion === "HOLD" ||
                     v2DecisionAfterPromotion === "REJECT")
             ) {
-                if (judgment.trendPhase === "DOWN" && !reversalConfirmed) {
-                    // reversalConfirmed === false인 WAITING_DUE_TO_DOWN_TREND인 상태는 롱 진입 시도가 아니므로 제외하고 hold/skip 처리 유지
+                if (judgment.trendPhase === "DOWN" && !reversalAuthorityConfirmed) {
+                    // reversalAuthorityConfirmed === false인 WAITING_DUE_TO_DOWN_TREND인 상태는 롱 진입 시도가 아니므로 제외하고 hold/skip 처리 유지
                     v2DecisionAfterPromotion = "HOLD";
                     v2SideAfterPromotion = "none";
                     v2RejectReasonAfterPromotion = "V2_RANGE_LOWER_LONG_WAITING_DUE_TO_DOWN_TREND";
@@ -3884,112 +3932,120 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 (zone === "upper" || (judgment.subtype === "BREAKDOWN_RETEST_FAILED" && zone === "mid")) &&
                 (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "REJECT")
             ) {
-                const htfPol = judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT";
-                const chaseBlocked = (execMeta as Record<string, unknown>).late_chase_blocked === true;
-                const breakdownRetestFailure = judgment.subtype === "BREAKDOWN_RETEST_FAILED" || (judgment.metadata?.retestConfirmed === true);
-
-                const boxHighS = Number(authoritativeInput.snapshot.boxHigh ?? 0);
-                const boxLowS = Number(authoritativeInput.snapshot.boxLow ?? 0);
-                const boxMidS = (boxHighS + boxLowS) / 2;
-                const atrS = Number(authoritativeInput.snapshot.atr ?? 0);
-                const entryPxS = Number(authoritativeInput.snapshot.lastPrice ?? 0);
-                const minProfitS = Math.max(atrS * 0.35, entryPxS * 0.001);
-                const minStopS = Math.max(atrS * 0.5, entryPxS * 0.0015);
-
-                let stopPxS = Math.max(boxHighS + minStopS, entryPxS + minStopS);
-                let tp1S = Math.min(boxMidS, entryPxS - minProfitS);
-                if (tp1S >= entryPxS) tp1S = entryPxS - minProfitS;
-                let tp2S = Math.min(boxLowS, tp1S - minProfitS);
-                if (tp2S >= tp1S) tp2S = tp1S - minProfitS;
-
-                const boxHeightS = boxHighS - boxLowS;
-                const boxHeightPctS = boxLowS > 0 ? boxHeightS / boxLowS : 0;
-
-                const shortOrderOkS = tp2S < tp1S && tp1S < entryPxS && entryPxS < stopPxS;
-                const planInvalidS =
-                    !Number.isFinite(entryPxS) || entryPxS <= 0 ||
-                    !Number.isFinite(tp1S) || !Number.isFinite(tp2S) || !Number.isFinite(stopPxS) ||
-                    tp1S <= 0 || tp2S <= 0 || stopPxS <= 0 ||
-                    boxHeightPctS < 0.0008 ||
-                    !shortOrderOkS;
-
-                let gate: string | null = null;
-
-                const htfLongOnly = htfPol === "LONG_ONLY_OR_NONE";
-                const htfHold = htfPol === "HOLD";
-                const isShockReactionDown = judgment.subtype === "SHOCK_REACTION_DOWN";
-
-                let htfBlocked = htfLongOnly;
-                if (htfHold) {
-                    if (isShockReactionDown && breakdownRetestFailure) {
-                        htfBlocked = false;
-                    } else {
-                        htfBlocked = true;
-                    }
-                }
-
-                const isProbeAllowedForUpperShort = htfPol === "PROBE_ONLY" && hardControlClear && allowNewShort && !hardBlockPresent;
-                if (htfBlocked) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_HTF_LONG_ONLY";
-                else if (chaseBlocked && !breakdownRetestFailure) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_CHASE_NOT_RETESTED";
-                else if (qualityScore < 60) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_QUALITY_BELOW_60";
-                else if (!(riskShortAllow && allowNewShort) && !isProbeAllowedForUpperShort) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_SHORT_NOT_ALLOWED";
-                else if (!paperExecutionReady || !signedExecutionReady) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_EXECUTION_NOT_READY";
-                else if (hasSameSidePosition || hasOppositeSidePosition) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_OPEN_POSITION_CONFLICT";
-                else if (hardBlockPresent) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_HARD_BLOCK_PRESENT";
-                else if (!(stopPxS > 0 && stopPxS > entryPxS)) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_STOP_PRICE_MISSING";
-                else if (planInvalidS) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_TP_SL_PLAN_INVALID";
-                else if (!(zone === "upper" || (breakdownRetestFailure && zone === "mid"))) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_ZONE_NOT_VALID";
-
-                if (gate != null) {
-                    promotionBlockReason = gate;
-                    expectedMissingCondition = gate;
-                    expectedNextAction = "WAIT_FOR_UPPER_SHORT_REACTION_PROBE_GATE";
-                    console.info(JSON.stringify({
-                        event: "V2_UPPER_SHORT_REACTION_PROBE_GATE_SKIP_PROOF",
-                        symbol: String(input.symbol),
-                        gate_reason: gate,
-                        zone,
-                        qualityScore,
-                        market_subtype: judgment.subtype,
-                        htf_entry_policy: htfPol,
-                        chase_blocked: chaseBlocked,
-                        breakdown_retest_failure: breakdownRetestFailure
-                    }));
+                if (judgment.trendPhase === "UP" && !reversalAuthorityConfirmed) {
+                    v2DecisionAfterPromotion = "HOLD";
+                    v2SideAfterPromotion = "none";
+                    v2RejectReasonAfterPromotion = "V2_RANGE_UPPER_SHORT_WAITING_DUE_TO_UP_TREND";
+                    expectedMissingCondition = "V2_RANGE_UPPER_SHORT_WAITING_DUE_TO_UP_TREND";
+                    expectedNextAction = "WAIT_FOR_RETEST_OR_REJECT_CONFIRMATION";
                 } else {
-                    v2DecisionAfterPromotion = "ENTER";
-                    v2SideAfterPromotion = "short";
-                    v2RejectReasonAfterPromotion = null;
-                    promotionApplied = true;
-                    promotionReason = "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION";
-                    promotionBlockReason = null;
-                    promotionMinConditionPassed = true;
-                    v2CalculatedInvalidationPx = stopPxS;
+                    const htfPol = judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT";
+                    const chaseBlocked = (execMeta as Record<string, unknown>).late_chase_blocked === true;
+                    const breakdownRetestFailure = judgment.subtype === "BREAKDOWN_RETEST_FAILED" || (judgment.metadata?.retestConfirmed === true);
 
-                    if (isProbeAllowedForUpperShort && !riskShortAllow) {
-                        execMeta.probe_only_bridge_activated = true;
-                        execMeta.isCountertrendProbe = true;
-                        execMeta.htf_size_multiplier = Math.min(Number(execMeta.htf_size_multiplier ?? 0.5), 0.5);
-                        execMeta.probe_size_cap_forced = true;
+                    const boxHighS = Number(authoritativeInput.snapshot.boxHigh ?? 0);
+                    const boxLowS = Number(authoritativeInput.snapshot.boxLow ?? 0);
+                    const boxMidS = (boxHighS + boxLowS) / 2;
+                    const atrS = Number(authoritativeInput.snapshot.atr ?? 0);
+                    const entryPxS = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+                    const minProfitS = Math.max(atrS * 0.35, entryPxS * 0.001);
+                    const minStopS = Math.max(atrS * 0.5, entryPxS * 0.0015);
+
+                    let stopPxS = Math.max(boxHighS + minStopS, entryPxS + minStopS);
+                    let tp1S = Math.min(boxMidS, entryPxS - minProfitS);
+                    if (tp1S >= entryPxS) tp1S = entryPxS - minProfitS;
+                    let tp2S = Math.min(boxLowS, tp1S - minProfitS);
+                    if (tp2S >= tp1S) tp2S = tp1S - minProfitS;
+
+                    const boxHeightS = boxHighS - boxLowS;
+                    const boxHeightPctS = boxLowS > 0 ? boxHeightS / boxLowS : 0;
+
+                    const shortOrderOkS = tp2S < tp1S && tp1S < entryPxS && entryPxS < stopPxS;
+                    const planInvalidS =
+                        !Number.isFinite(entryPxS) || entryPxS <= 0 ||
+                        !Number.isFinite(tp1S) || !Number.isFinite(tp2S) || !Number.isFinite(stopPxS) ||
+                        tp1S <= 0 || tp2S <= 0 || stopPxS <= 0 ||
+                        boxHeightPctS < 0.0008 ||
+                        !shortOrderOkS;
+
+                    let gate: string | null = null;
+
+                    const htfLongOnly = htfPol === "LONG_ONLY_OR_NONE";
+                    const htfHold = htfPol === "HOLD";
+                    const isShockReactionDown = judgment.subtype === "SHOCK_REACTION_DOWN";
+
+                    let htfBlocked = htfLongOnly;
+                    if (htfHold) {
+                        if (isShockReactionDown && breakdownRetestFailure) {
+                            htfBlocked = false;
+                        } else {
+                            htfBlocked = true;
+                        }
                     }
 
-                    console.info(JSON.stringify({
-                        event: "V2_TREND_PROMOTION_TO_ENTER_PROOF",
-                        symbol: String(input.symbol),
-                        promotion_reason: "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION",
-                        side: "short",
-                        entryPx: entryPxS,
-                        stopPrice: stopPxS,
-                        tp1: tp1S,
-                        tp2: tp2S,
-                        qualityScore,
-                        zone,
-                        market_subtype: judgment.subtype,
-                        htf_entry_policy: htfPol,
-                        macro_source: judgment.macro_source ?? "unknown",
-                        retest_required: (execMeta as any).retest_required ?? false,
-                        breakdown_retest_failure: breakdownRetestFailure,
-                        micro_probe_cap_forced: true
-                    }));
+                    const isProbeAllowedForUpperShort = htfPol === "PROBE_ONLY" && hardControlClear && allowNewShort && !hardBlockPresent;
+                    if (htfBlocked) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_HTF_LONG_ONLY";
+                    else if (chaseBlocked && !breakdownRetestFailure) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_CHASE_NOT_RETESTED";
+                    else if (qualityScore < 60) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_QUALITY_BELOW_60";
+                    else if (!(riskShortAllow && allowNewShort) && !isProbeAllowedForUpperShort) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_SHORT_NOT_ALLOWED";
+                    else if (!paperExecutionReady || !signedExecutionReady) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_EXECUTION_NOT_READY";
+                    else if (hasSameSidePosition || hasOppositeSidePosition) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_OPEN_POSITION_CONFLICT";
+                    else if (hardBlockPresent) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_HARD_BLOCK_PRESENT";
+                    else if (!(stopPxS > 0 && stopPxS > entryPxS)) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_STOP_PRICE_MISSING";
+                    else if (planInvalidS) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_TP_SL_PLAN_INVALID";
+                    else if (!(zone === "upper" || (breakdownRetestFailure && zone === "mid"))) gate = "UPPER_SHORT_REACTION_PROBE_BLOCKED_ZONE_NOT_VALID";
+
+                    if (gate != null) {
+                        promotionBlockReason = gate;
+                        expectedMissingCondition = gate;
+                        expectedNextAction = "WAIT_FOR_UPPER_SHORT_REACTION_PROBE_GATE";
+                        console.info(JSON.stringify({
+                            event: "V2_UPPER_SHORT_REACTION_PROBE_GATE_SKIP_PROOF",
+                            symbol: String(input.symbol),
+                            gate_reason: gate,
+                            zone,
+                            qualityScore,
+                            market_subtype: judgment.subtype,
+                            htf_entry_policy: htfPol,
+                            chase_blocked: chaseBlocked,
+                            breakdown_retest_failure: breakdownRetestFailure
+                        }));
+                    } else {
+                        v2DecisionAfterPromotion = "ENTER";
+                        v2SideAfterPromotion = "short";
+                        v2RejectReasonAfterPromotion = null;
+                        promotionApplied = true;
+                        promotionReason = "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION";
+                        promotionBlockReason = null;
+                        promotionMinConditionPassed = true;
+                        v2CalculatedInvalidationPx = stopPxS;
+
+                        if (isProbeAllowedForUpperShort && !riskShortAllow) {
+                            execMeta.probe_only_bridge_activated = true;
+                            execMeta.isCountertrendProbe = true;
+                            execMeta.htf_size_multiplier = Math.min(Number(execMeta.htf_size_multiplier ?? 0.5), 0.5);
+                            execMeta.probe_size_cap_forced = true;
+                        }
+
+                        console.info(JSON.stringify({
+                            event: "V2_TREND_PROMOTION_TO_ENTER_PROOF",
+                            symbol: String(input.symbol),
+                            promotion_reason: "V2_UPPER_SHORT_REACTION_PROBE_PROMOTION",
+                            side: "short",
+                            entryPx: entryPxS,
+                            stopPrice: stopPxS,
+                            tp1: tp1S,
+                            tp2: tp2S,
+                            qualityScore,
+                            zone,
+                            market_subtype: judgment.subtype,
+                            htf_entry_policy: htfPol,
+                            macro_source: judgment.macro_source ?? "unknown",
+                            retest_required: (execMeta as any).retest_required ?? false,
+                            breakdown_retest_failure: breakdownRetestFailure,
+                            micro_probe_cap_forced: true
+                        }));
+                    }
                 }
             } else {
                 const isBypassRangeUpperShort =
@@ -4027,7 +4083,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     expectedMissingCondition = promotionBlockReason;
                     // EXECUTOR-ENTER PRESERVATION GUARD: do not demote an already-valid executor ENTER
                     // via recheck-only fallback gates. Only demote if executor itself did not produce ENTER.
-                    if (v2DecisionBeforePromotion !== "ENTER") {
+                    // RETEST PROVENANCE-SCOPE: also exempt proven non-RANGE execution provenance (Layer 1).
+                    if (v2DecisionBeforePromotion !== "ENTER" && !isProvenNonRangeExecutionProvenance) {
                         v2DecisionAfterPromotion = "HOLD";
                         v2RejectReasonAfterPromotion = "WAIT_RECHECK";
                     }
@@ -4048,7 +4105,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         expectedMissingCondition = promotionBlockReason;
                         // EXECUTOR-ENTER PRESERVATION GUARD: do not demote an already-valid executor ENTER
                         // via recheck-only fallback gates. Only demote if executor itself did not produce ENTER.
-                        if (v2DecisionBeforePromotion !== "ENTER") {
+                        // RETEST PROVENANCE-SCOPE: also exempt proven non-RANGE execution provenance (Layer 1).
+                        if (v2DecisionBeforePromotion !== "ENTER" && !isProvenNonRangeExecutionProvenance) {
                             v2DecisionAfterPromotion = "HOLD";
                             v2RejectReasonAfterPromotion = "WAIT_RECHECK";
                         }
@@ -4057,7 +4115,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     !(
                         v2DecisionBeforePromotion === "ENTER" &&
                         v2SideBeforePromotion !== "none"
-                    )
+                    ) &&
+                    // RETEST PROVENANCE-SCOPE: do not apply RANGE retest block to proven
+                    // non-RANGE execution provenance (Layer 1: exec.reason + execMeta flags).
+                    !isProvenNonRangeExecutionProvenance
                 ) {
                     if (marketMode === "RANGE" && (boxBreakSide === "none" || boxBreakSide === "UNKNOWN")) {
                         promotionBlockReason = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
