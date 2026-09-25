@@ -7910,6 +7910,43 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         execution.reason = "SAME_CYCLE_REVERSE_BLOCKED";
     }
 
+    const isEthSymbolForExecution = String(input.symbol).toUpperCase().replace("-SWAP", "").replace("-", "") === "ETHUSDT";
+    const isEthInitialEntry = isInitialEntry === true && addOnPolicy.isAddOn !== true;
+
+    if (isEthSymbolForExecution && isEthInitialEntry && (finalDecision === "ENTER" || v2DecisionAfterPromotion === "ENTER")) {
+        const isFtsActive =
+            judgment.subtype === "FAST_TREND_SHIFT" ||
+            String(promotionReason ?? "").includes("FAST_TREND_SHIFT") ||
+            (execMeta as any)?.fast_trend_shift === true ||
+            (judgment.diagnostics?.fastTrendShift?.active === true && judgment.diagnostics?.fastTrendShift?.direction === v2SideAfterPromotion);
+
+        const isTrendPullbackActive =
+            judgment.subtype === "TREND_PULLBACK" &&
+            judgment.subtypeReason === "trend_pullback";
+
+        if (isFtsActive) {
+            finalDecision = "HOLD";
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = "ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED";
+            execution.signal = "WAIT_RECHECK" as const;
+            execution.side = "none" as const;
+            execution.reason = "ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED";
+            expectedMissingCondition = "ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED";
+            expectedNextAction = "OBSERVE_FORWARD_SHADOW_PROOF_ONLY";
+        } else if (isTrendPullbackActive) {
+            finalDecision = "HOLD";
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = "ETH_TREND_PULLBACK_LIVE_ENTRY_DISABLED";
+            execution.signal = "WAIT_RECHECK" as const;
+            execution.side = "none" as const;
+            execution.reason = "ETH_TREND_PULLBACK_LIVE_ENTRY_DISABLED";
+            expectedMissingCondition = "ETH_TREND_PULLBACK_LIVE_ENTRY_DISABLED";
+            expectedNextAction = "WAIT_FOR_TREND_CONTINUATION_OR_BREAKOUT";
+        }
+    }
+
     if (finalDecision === "ENTER") {
         const lastPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
         const sideFinal = v2SideAfterPromotion;
